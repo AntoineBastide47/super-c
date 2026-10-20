@@ -10,6 +10,7 @@ on:
   workflow_dispatch
 permissions:
   contents: read
+  actions: read # the test-durations artifact (.github/actions/test-durations)
 concurrency:
   group: debug-${{ github.ref }}
   cancel-in-progress: true
@@ -105,10 +106,13 @@ jobs:
             SC_LEAK_CHECK=fatal timeout 180 "./super-c${BINEXT:-}" test --sanitizers --test-no-fork --filter=idle_descriptors_do_not_delay ${cstd:+"$cstd"} || echo "### probe $i exit $?"
           done
 
+      - uses: ./.github/actions/test-durations
+
       - name: Run the test suite (leak-gated, bounded)
         run: |
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          SC_LEAK_CHECK=fatal timeout 1200 "./super-c${BINEXT:-}" test --sanitizers --test-shard=${{ matrix.test_shard }} ${cstd:+"$cstd"}
+          dur=tests/durations/windows.tsv; [ -f "$dur" ] || dur=tests/durations.tsv # shard balance (test-durations.yml)
+          SC_LEAK_CHECK=fatal timeout 1200 "./super-c${BINEXT:-}" test --sanitizers --test-shard=${{ matrix.test_shard }} --test-durations="$dur" ${cstd:+"$cstd"}
 
       - uses: ./.github/actions/cache-save
         with:
@@ -179,6 +183,8 @@ jobs:
       - name: Make the compiler executable
         run: chmod +x ./super-c
 
+      - uses: ./.github/actions/test-durations
+
       - name: Run the test suite (verbose, watchdog)
         run: |
           set -u
@@ -208,7 +214,8 @@ jobs:
             done
           ) &
           wd=$!
-          SC_LEAK_CHECK=fatal timeout 1500 ./super-c test --sanitizers --test-shard=${{ matrix.test_shard }}
+          dur=tests/durations/linux.tsv; [ -f "$dur" ] || dur=tests/durations.tsv # shard balance (test-durations.yml)
+          SC_LEAK_CHECK=fatal timeout 1500 ./super-c test --sanitizers --test-shard=${{ matrix.test_shard }} --test-durations="$dur"
           rc=$?
           kill "$wd" 2>/dev/null || true
           exit "$rc"
@@ -295,10 +302,13 @@ jobs:
         with:
           name: compiler-wasm
 
+      - uses: ./.github/actions/test-durations
+
       - name: Run the test suite against the wasm compiler
         run: |
           chmod +x ./super-c
-          SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --sanitizers --test-shard=${{ matrix.test_shard }}
+          dur=tests/durations/wasm.tsv; [ -f "$dur" ] || dur=tests/durations.tsv # shard balance (test-durations.yml)
+          SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --sanitizers --test-shard=${{ matrix.test_shard }} --test-durations="$dur"
 
       - uses: ./.github/actions/cache-save
         with:

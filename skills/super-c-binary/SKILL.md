@@ -116,6 +116,7 @@ super-c test --quiet                   # the standard form: discover tests/**/*.
 super-c test --quiet --filter=parse  # substring match on test name; builds only the matching files
 super-c test --quiet --test-shard=1/4  # one-based CI sharding, balanced by tests/durations.tsv
 super-c test --quiet --test-record-durations  # refresh tests/durations.tsv from this run
+super-c test --test-shard=1/2 --test-durations=tests/durations/<lane>.tsv --test-record-durations=s1.tsv  # CI lane: its weights, this shard's times alone
 super-c test --quiet --test-jobs=8     # bound the fork pool (default: one per core)
 super-c test --quiet --test-timeout=120 # fail a test that runs past 120 s (default 90, 0: none)
 super-c test --test-no-fork            # in-process (for debuggers; should_panic skipped)
@@ -234,7 +235,7 @@ program that makes it, so a function such as std's `panic` takes the tag (`cs_ch
 super-c lsp                  # stdio JSON-RPC language server
 ```
 
-Advertised capabilities (`src/lsp/server.spc:capabilities_json`): push diagnostics,
+Advertised capabilities (`src/lsp/server.spc:capabilities_with`): push diagnostics,
 hover, go-to-definition, type definition, implementation, references, document
 highlight, rename (with prepare), document formatting, code actions (quick fixes),
 completion, signature help, document and workspace symbols, folding ranges, selection
@@ -246,12 +247,42 @@ parameters. Signature help (also on `<`) covers a type argument list (`Mul<`, `f
 text so a list still being typed is found (`type_args_help`). Completion offers the generic
 parameters of every declaration around the cursor; where no parsed item spans the cursor (a header
 that does not parse yet), it completes from a probe that splices `__lsp_c`, `__lsp_c;` or `__lsp_c>`. The VS Code extension is in
-`editors/vscode/`. Between analysis rounds the server keeps only the open documents' function
-bodies (and the bodies the constant engine demanded); a closed module's bodies parse back on
-demand (`syntax-ownership.md` in the compiler-internals skill). The server handles one message
+`editors/vscode/`. Between analysis
+rounds the server keeps only the open documents' function bodies, the bodies the constant engine
+demanded and the bodies of modules that owe a borrow check; a closed module's bodies parse back
+on demand (`syntax-ownership.md` in the compiler-internals skill). The workspace sweep analyzes every file with the import roots `super-c lint` gives it
+(`Server::roots_of`), and so does the root of an open document outside every package
+(`Server::file_roots`): a directory with its own `build.toml` is a nested project, with its own
+roots, manifest settings and out-dir. The server handles one message
 at a time over a reader on its descriptor: a `didChange` folds every `didChange` already
 waiting into its round, so a superseded buffer is never analyzed; every `publishDiagnostics`
 for an open document carries the `version` it analyzed.
+
+An analysis round reports what `super-c build` reports up to the borrow check: parse, resolve
+and type errors, the feature errors, the always-panics check (an error, with or without lints),
+the deferred static_asserts and constants, the lints and the package-wide unused-item lint (only
+for a package without an analysis error), with the profile names, the constant engine budgets
+(`const-eval-steps`, `const-eval-memory`) and the CPU level and features (`target-cpu`,
+`target-features`, at the `debug` profile, as `super-c build` takes them) of the nearest
+`build.toml`; without one, the target's baseline features (`lsp_build_settings`).
+It publishes, then the borrow round (`Server::borrowck_round`) runs the borrow checks the round
+owes, module by module, with the `@tail_recurse` errors (it elaborates and converts only a
+tagged function's bodies), and publishes again when records changed. The round lowers with the
+build's cancellation checks only a module with a `@tail_recurse` function (one of its reasons is
+a check after the self call, `it can accept a task cancellation`): every analysis of a module
+records its reachability scan (`Package.reach_scans`, `Package::co_scan`, kept while its bodies
+are released), and after an analysis round that changed a scan, the scans are solved
+(`Package::reach_solve`) when such a module exists; when the answer changed, every such module
+owes its borrow check again, so an edit of the module that launches a task reaches the error. A
+round that finishes
+runs the unbounded-recursion check over the function summaries each module's last borrow
+check recorded (`Package.recur`), so a cycle through modules is reported and cleared as
+either module changes. A `didChange` that arrives
+during the round stops it at the next item, and nothing it found is published before the
+edit's analysis round; a request stops it after the check in progress (a request waits for one
+module's check at most), and the next round resumes, so every round that no edit stops finishes
+a check. A module whose own analysis failed owes no borrow check; a module whose import closure
+has an error waits for it.
 
 To measure server memory, drive a scripted session (`initialize`, `didOpen`, a loop of
 `didChange`) and sample `ps -o rss= -p <pid>`; `SC_LSP_STATS` shows what each round retains.

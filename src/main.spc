@@ -145,6 +145,11 @@ fn parse_test_flag(arg: str, topts: &mut TestOpts, bad: &mut bool) bool {
         }
     } else if arg == "--test-record-durations" {
         topts.record = true;
+    } else if arg.starts_with("--test-record-durations=") && arg.len() > 24 {
+        topts.record = true;
+        topts.record_to = (&arg[24]) as *const char;
+    } else if arg.starts_with("--test-durations=") && arg.len() > 17 {
+        topts.durations = (&arg[17]) as *const char;
     } else if arg == "--test-no-fork" {
         topts.no_fork = true;
     } else if arg == "--quiet" {
@@ -1057,6 +1062,7 @@ fn main(argv: Vector<str>) i32 {
         timeout: -1,
         durations: null,
         record: false,
+        record_to: null,
     };
     let mut co = CommonOpts {
         ce_steps: 0,
@@ -1350,7 +1356,7 @@ fn main(argv: Vector<str>) i32 {
             }
         },
     };
-    if !topts.enabled && (topts.jobs != 0 || topts.no_fork || topts.filter != null || topts.shards != 0) {
+    if !topts.enabled && (topts.jobs != 0 || topts.no_fork || topts.filter != null || topts.shards != 0 || topts.durations != null || topts.record) {
         co.bad = true;
     }
     // `build <dir>` and `release <dir>`: the project of that directory, as from inside it; a relative -o
@@ -1438,10 +1444,12 @@ OPTIONS:
     --test                 script: collect @test functions, build, and run
     --filter=S             test, bench: run only tests or benchmarks whose name contains S (the
                            test and bench subcommands also build only the files that hold them)
-    --test-shard=K/N       run shard K of N (one-based, stable round-robin)
+    --test-shard=K/N       run shard K of N (one-based, balanced by the durations file)
     --test-jobs=N          bound the test process pool (default: one per core)
     --test-timeout=S       fail a test that runs longer than S seconds (default 90, 0: none)
-    --test-record-durations  test: merge each test's time into tests/durations.tsv (balances --test-shard)
+    --test-record-durations[=F]  test: merge each test's time into F, else into the durations file
+    --test-durations=F     test: the durations file that balances --test-shard and that
+                           --test-record-durations writes (default: tests/durations.tsv)
     --test-no-fork         run tests in-process (for a debugger)
     --quiet                test: print only the failures and the tally
 )".ptr() as *const char,

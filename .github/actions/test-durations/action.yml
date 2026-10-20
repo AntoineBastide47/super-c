@@ -1,0 +1,33 @@
+name: Test durations
+description: >
+  The repository's single `test-durations` artifact (the per-lane test times the `Test durations` workflow
+  measures, one `<lane>.tsv` each) into tests/durations, where a test shard's `--test-durations` reads its
+  lane's file. Without the artifact (never measured, or expired) nothing is downloaded and the shards
+  balance by tests/durations.tsv. The job needs `actions: read`.
+runs:
+  using: composite
+  steps:
+    - name: Find the test durations artifact
+      id: find
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -eu
+        run=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=test-durations&per_page=100" \
+          --jq '[.artifacts[] | select(.expired | not)][0].workflow_run.id // empty')
+        echo "run=$run" >> "$GITHUB_OUTPUT"
+        if [ -z "$run" ]; then
+          echo "no test-durations artifact: the shards balance by tests/durations.tsv"
+        else
+          echo "test durations of run $run"
+        fi
+
+    - name: Download the test durations
+      if: steps.find.outputs.run != ''
+      uses: actions/download-artifact@v8
+      with:
+        name: test-durations
+        path: tests/durations
+        run-id: ${{ steps.find.outputs.run }}
+        github-token: ${{ github.token }}

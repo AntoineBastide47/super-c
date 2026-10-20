@@ -2,22 +2,37 @@
 // and typecheck every module, and harvest every diagnostic as a (module, span, severity, message)
 // record instead of printing it. Mirrors driver::emit's lint_package recipe with a PER-MODULE gate:
 // a module typechecks once its own import closure resolves, so one broken module cannot suppress
-// another module's semantic diagnostics.
+// another module's semantic diagnostics. The borrow check runs after the analysis, as its own round
+// (`borrowck_pending`): the server publishes the analysis first, and a new edit abandons the round.
 import driver_shim as shim;
 import module::loader as loader;
 import ast::ast as *;
 import ast::parser as par;
 import lexer::lexer as lex;
-import lexer::token as ltok;
 import resolver::resolver as resolver;
 import hir::lower as hirl;
 import typechecker::typechecker as tc;
+import borrowck::facts as bfx;
+import borrowck::flow_ir as bfi;
+import ir::lower as irl;
+import ir::recursion as recur;
 import ir::interp as iri;
+import ir::cpu_features as cf;
 import utils::errors as diag;
 import driver::emit as emit;
+import driver::tuc as tuc;
 import driver::util as dutil;
 import graph::items as gitems;
+import build_system::manifest as bman;
+import build_system::build as bsys;
+import stdio;
 import stdlib;
+
+/// The pass that produced a record (`DiagRec.phase`): each phase replaces its own records.
+pub const PH_ANALYSIS: u8 = 0; // parse, resolve, typecheck, feature checks, always-panics, deferred constants
+pub const PH_BORROW: u8 = 1; // the borrow check (`borrowck_pending`)
+pub const PH_UNUSED: u8 = 2; // the package-wide unused-item lint (`lsp_unused_items`)
+pub const PH_RECUR: u8 = 3; // the package-wide unbounded-recursion check (`recur_check`)
 
 /// One harvested diagnostic: the cross-pass record the server publishes and codeAction later reads
 /// (the fix fields carry the machine-applicable quick fix, if any).
@@ -26,6 +41,7 @@ pub struct DiagRec {
     pub start: u32, // byte span into the module's source
     pub len: u32,
     pub severity: u8, // LSP DiagnosticSeverity: 1 = error, 2 = warning
+    pub phase: u8, // PH_*
     pub msg: String,
     // machine-applicable fix: -1 = none, else a LintFix kind (0 delete [fix_start, fix_end),
     // 1 insert '_', 2 insert 'const ', 4 replace [fix_start, fix_end) with `fix_text`) surfaced as
@@ -66,10 +82,11 @@ fn rec_msg(e: &diag::Errors, d: &diag::Diagnostic) String {
     return out;
 }
 
-// Append every error/warning record in `e` as a DiagRec against module `m` (the records carry their
-// spans and note chains directly; nothing is parsed back out of rendered text). Fixes attach to
-// warnings only (`Errors::fix` and `fix_replace` index `warns`); the first fix of a warning wins.
-fn drain_errors(e: &diag::Errors, m: u32, diags: &mut Vector<DiagRec>) {
+// Append every error/warning record in `e` as a DiagRec of pass `phase` against module `m` (the
+// records carry their spans and note chains directly; nothing is parsed back out of rendered text).
+// Fixes attach to warnings only (`Errors::fix` and `fix_replace` index `warns`); the first fix of a
+// warning wins.
+fn drain_errors(e: &diag::Errors, m: u32, phase: u8, diags: &mut Vector<DiagRec>) {
     let mut wfix = Vector::<u32>::new();
     wfix.reserve(e.warns.len());
     for _ in 0..e.warns.len() {
@@ -108,6 +125,7 @@ fn drain_errors(e: &diag::Errors, m: u32, diags: &mut Vector<DiagRec>) {
                     start: d.start,
                     len: d.len,
                     severity: severity,
+                    phase: phase,
                     msg: rec_msg(e, d),
                     fix_kind: fk,
                     fix_start: fs,
@@ -127,13 +145,13 @@ fn harvest_parse_errors(p: &loader::Package, i: usize, diags: &mut Vector<DiagRe
     let mut lx = lex::Lexer::new(&mut vsrc, m.file.as_str());
     lx.scan_tokens();
     if lx.has_errors() {
-        drain_errors(&lx.errors, i as u32, diags);
+        drain_errors(&lx.errors, i as u32, PH_ANALYSIS, diags);
         return;
     }
     let toks = lx.take_tokens();
     let mut ps = par::Parser::new(toks, vsrc.as_str(), m.file.as_str());
     ps.build_ast();
-    drain_errors(&ps.errors, i as u32, diags);
+    drain_errors(&ps.errors, i as u32, PH_ANALYSIS, diags);
 }
 
 /// Canonicalize `path` via realpath; a file not on disk yet keeps the given form.
@@ -144,6 +162,83 @@ pub fn canon_path(path: str) String {
         return String::from_str(str::from_cbuf(rb.as_slice()));
     }
     return pb;
+}
+
+// The build settings the analysis reads, as the build of the project at `dir` reads them
+// (`lsp_build_settings`).
+struct BuildSettings {
+    pub arch: i32,
+    pub features: cf::CpuFeatureSet,
+    pub profiles: Vector<String>,
+    pub ce_steps: u32,
+    pub ce_mem: u64,
+}
+
+// The nearest `build.toml` at or above `dir` (the manifest discovery of a manifest command) gives
+// the profile names a PROFILE comparison may name (`Package.profiles`), the constant engine budgets
+// (`Package.ce_steps`, `ce_mem`) and the CPU level and features, at the analysis's profile (`debug`,
+// the profile of a package that names none), as `super-c build` takes them; without one (or one
+// that does not load), the built-in profiles, the engine defaults and the target's baseline, as a
+// script build takes them. The instruction set is the target's (`target_arch`).
+fn lsp_build_settings(dir: str, target: i32) BuildSettings {
+    let arch = target_arch(target);
+    let mut d = String::from_str(dir);
+    // A path has fewer components than this; each step drops one.
+    for _ in 0..256 {
+        let mut mp = String::from_str(d.as_str());
+        mp.push_str("/build.toml");
+        let f = stdio::fopen(mp.as_str(), "rb");
+        if f != null {
+            unsafe stdio::fclose(f);
+            if let Some(m) = bman::load(mp.as_str(), false) {
+                let mut mm = m;
+                mm.arch = arch;
+                mm.target = target;
+                return BuildSettings {
+                    arch: arch,
+                    features: bsys::features_for(&mm, "debug", ""),
+                    profiles: bsys::profile_names(&mm),
+                    ce_steps: mm.ce_steps,
+                    ce_mem: mm.ce_mem,
+                };
+            }
+            break;
+        }
+        let up = String::from_str(loader::dirname_of(d.as_str()));
+        if up.len() == 0 || up.len() >= d.len() {
+            break;
+        }
+        d = up;
+    }
+    let bi = bman::builtins_only();
+    return BuildSettings {
+        arch: arch,
+        features: cf::close(cf::baseline(target, arch)),
+        profiles: bsys::profile_names(&bi),
+    };
+}
+
+// Load with the instruction set and CPU features of `bs`, set before the load as the driver sets
+// them (`loader::set_load_target`).
+fn lsp_load_target(bs: &BuildSettings) {
+    loader::set_load_target(bs.arch, bs.features);
+}
+
+// The rest of `bs` on the loaded package `p`.
+fn lsp_apply_settings(p: &mut loader::Package, mut bs: BuildSettings) {
+    p.profiles = replace(&mut bs.profiles, Vector::<String>::new());
+    p.ce_steps = bs.ce_steps;
+    p.ce_mem = bs.ce_mem;
+}
+
+// A constant engine with the budgets of the build the analysis stands for. A round's engine
+// records no dynamic item edges: the package index it would record into is rebuilt every round.
+fn lsp_engine(p: &mut loader::Package) iri::Interp {
+    let steps = p.ce_steps;
+    let mem = p.ce_mem;
+    let mut e = iri::interp_master(p as *mut loader::Package, steps, mem);
+    e.dyn_rec = false;
+    return e;
 }
 
 // Lints run for non-prelude modules (like `super-c build`), for the package's root file when it IS a
@@ -182,12 +277,14 @@ fn lsp_resolve_module(p: &mut loader::Package, i: usize, lint: bool, diags: &mut
     r.lint = lint;
     r.resolve();
     let had = r.has_errors();
-    drain_errors(&r.errors, i as u32, diags);
+    drain_errors(&r.errors, i as u32, PH_ANALYSIS, diags);
     hirl::lower_module(p, i);
     return !had;
 }
 
-// Typecheck module `i` and drain its diagnostics into `diags` instead of logging them.
+// Typecheck module `i` and drain its diagnostics into `diags` instead of logging them. The
+// result-attributability verdicts of its functions are recorded while its bodies are live: the
+// borrow check of a caller reads them after the module released its bodies.
 fn lsp_typecheck_module(p: &mut loader::Package, i: usize, lint: bool, diags: &mut Vector<DiagRec>) bool {
     let pkg = p as *mut loader::Package;
     let m = &mut p.modules[i];
@@ -196,9 +293,27 @@ fn lsp_typecheck_module(p: &mut loader::Package, i: usize, lint: bool, diags: &m
     let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
     t.lint = lint;
     t.check();
+    t.bc_record_ret_attr();
     let had = t.has_errors();
-    drain_errors(&t.errors, i as u32, diags);
+    drain_errors(&t.errors, i as u32, PH_ANALYSIS, diags);
     return !had;
+}
+
+// Record module `i`'s post-typecheck item edges (`Package.item_edges`) from its resolution tables,
+// keyed by declaration nodes.
+fn record_item_edges(p: &mut loader::Package, i: usize, sps: &Vector<gitems::Spans>) {
+    let mut ev = Vector::<u64>::new();
+    gitems::module_edges(p, i, sps, &mut ev);
+    let mut v = Vector::<loader::RefEdge>::with_capacity(ev.len());
+    for k in 0..ev.len() {
+        let o = p.idx.items.at((ev[k] >> 32) as usize);
+        let t = p.idx.items.at((ev[k] & 0xFFFFFFFFu64) as usize);
+        v.push(loader::RefEdge { key: t.module as u64 << 32 | t.node as u64, owner: o.node });
+    }
+    while p.item_edges.len() <= i {
+        p.item_edges.push(Vector::<loader::RefEdge>::new());
+    }
+    p.item_edges.set(i, v);
 }
 
 /// Load + resolve + typecheck (NO codegen), harvesting all diagnostics into `diags`. Takes ownership of
@@ -217,7 +332,17 @@ pub fn compile(
     diags: &mut Vector<DiagRec>,
 ) loader::Package {
     let t0 = unsafe shim::sc_ticks_ms();
+    let bs = lsp_build_settings(
+        if lint_dir.len() != 0 {
+            lint_dir;
+        } else {
+            root_dir;
+        },
+        target,
+    );
+    lsp_load_target(&bs);
     let mut p = loader::package_load_overlaid(root_file, root_dir, alt_dir, std_dir, false, target, ov_files, ov_texts);
+    lsp_apply_settings(&mut p, bs);
     let st = run_pipeline(&mut p, target, root_file, lint_dir, diags);
     stats_line(&p, "compile", t0, &st);
     return p;
@@ -238,6 +363,8 @@ pub fn compile_batch(
     diags: &mut Vector<DiagRec>,
 ) loader::Package {
     let t0 = unsafe shim::sc_ticks_ms();
+    let bs = lsp_build_settings(root_dir, target);
+    lsp_load_target(&bs);
     let mut p = loader::package_load_prelude(root_dir, alt_dir, std_dir, target, ov_files, ov_texts);
     let mut mids = Vector::<i32>::new();
     for k in 0..files.len() {
@@ -265,6 +392,7 @@ pub fn compile_batch(
         }
     }
     p.lint_set = set;
+    lsp_apply_settings(&mut p, bs);
     let st = run_pipeline(&mut p, target, "", "", diags);
     stats_line(&p, "batch", t0, &st);
     return p;
@@ -275,18 +403,20 @@ pub fn compile_batch(
 // re-parses (fresh node ids), so it AND every module whose import closure contains it re-resolve and
 // re-typecheck; everything else keeps its analysis and diagnostics verbatim (per-module type pools
 // reference other modules only by decl node id, so an analysis is stale exactly when a closure member
-// reparsed). Body granularity: an edit strictly inside one plain fn body reparses only that body into
-// the SAME arena (every old node id survives, importers stay valid), and only that module re-analyzes.
-// Anything outside the incremental domain returns false and the caller falls back to a full compile.
+// reparsed). Item granularity: a reparse that keeps the module-arena shape keeps every declaration
+// id, so only the importers that name a touched item re-analyze; an edit strictly inside one plain
+// fn body reaches only the compile-time readers of that body. The changed module always parses
+// whole, so every round leaves the state a fresh analysis of the same buffers leaves. Anything
+// outside the incremental domain returns false and the caller falls back to a full compile.
 // Body ownership: a module without an editor buffer keeps only its module arena between rounds
 // (`release_closed`); a round parses a released module's bodies back when its document opens,
 // when it must re-analyze, or when the constant engine demands a body of it (`typecheck_set`).
 
 /// Outcome counters for one incremental round: the exit-gate observables (what re-ran and why).
 pub struct RecompileStats {
-    pub reparsed: u32, // changed modules (fully reparsed or body-spliced)
+    pub reparsed: u32, // changed modules (each reparses whole)
     pub analyzed: u32, // modules re-resolved + re-typechecked (the affected closure)
-    pub body_only: u32, // changed modules that took the body-splice path (node ids stable)
+    pub body_only: u32, // changed modules whose edit changed one plain fn body alone (declaration ids stable)
     pub bodies_back: u32, // modules whose released body syntax the round parsed back
     pub passes: u32, // extra typecheck passes after the engine demanded a released body
     pub kept: u32, // importers of a reparsed module whose analysis stood (no touched reference)
@@ -627,7 +757,8 @@ const fn plain_fn(p: &loader::Package, m: usize, k: u32) bool {
 }
 
 // Item-level invalidation over the recorded references. The items an edit touched start
-// `ST_FULL`. A full item reaches every item naming it: a plain function naming it from its
+// `ST_FULL` (`seeds`), a plain function whose body alone the edit changed `ST_BODY` (`bseeds`).
+// A full item reaches every item naming it: a plain function naming it from its
 // body becomes `ST_BODY` (its calls mean something else now, its signature stands); anything
 // else (a signature or type spelling it, a constant, a `const fn`, an enum, an interface, a
 // struct) becomes full. A body-state item reaches only the readers of its body: the
@@ -635,7 +766,12 @@ const fn plain_fn(p: &loader::Package, m: usize, k: u32) bool {
 // releasable body (a generic or `const fn` body), which become full or body in turn; a plain
 // function calling it stands. Every module holding a reached item is marked in `aff`. A
 // state only rises, so the walk is bounded by twice the item count.
-fn propagate_touched(p: &loader::Package, seeds: &Vector<Vector<u32>>, aff: &mut Vector<bool>) {
+fn propagate_touched(
+    p: &loader::Package,
+    seeds: &Vector<Vector<u32>>,
+    bseeds: &Vector<Vector<u32>>,
+    aff: &mut Vector<bool>,
+) {
     let n = p.modules.len();
     let mut state = Vector::<u8>::new();
     state.resize_default(p.idx.items.len());
@@ -652,6 +788,14 @@ fn propagate_touched(p: &loader::Package, seeds: &Vector<Vector<u32>>, aff: &mut
                 state.set(k as usize, ST_FULL);
                 push_slot_range(p, m, k, &mut pend[m]);
                 pend[m].push(ST_FULL);
+            }
+        }
+        for q in 0..bseeds.at(m).len() {
+            let k = bseeds.at(m)[q];
+            if state[k as usize] == ST_NONE {
+                state.set(k as usize, ST_BODY);
+                push_slot_range(p, m, k, &mut pend[m]);
+                pend[m].push(ST_BODY);
             }
         }
         if pend[m].len() != 0 {
@@ -744,65 +888,29 @@ fn overlay_slots(p: &loader::Package, ov_files: &Vector<str>) Vector<i64> {
     return out;
 }
 
-// Shift span `sp` by `delta` when it starts at or after `from`.
-const fn shift_span(sp: &mut ltok::Span, from: u32, delta: i64) {
-    if sp.start >= from {
-        sp.start = (sp.start as i64 + delta) as u32;
-        sp.end = (sp.end as i64 + delta) as u32;
-    }
-}
-
-// Shift every source offset >= `from` by `delta` across the OLD prefix of the arena (the freshly
-// appended splice nodes already carry new-source offsets) plus the old attr/meta span tables.
-fn shift_spans(
-    a: &mut Ast,
-    old_nodes: usize,
-    old_body: usize,
-    old_attrs: usize,
-    old_metas: usize,
-    from: u32,
-    delta: i64,
-) {
-    for k in 0..old_nodes + old_body {
-        let n = if k < old_nodes {
-            a.at(k as NodeId);
-        } else {
-            a.at((k - old_nodes) as NodeId | NODE_BODY);
-        };
-        if n.span.start >= from {
-            n.span.start = (n.span.start as i64 + delta) as u32;
-        }
-        if n.span.end >= from {
-            n.span.end = (n.span.end as i64 + delta) as u32;
-        }
-        // Literal/name payload spans ride the same source: shift the union arms that carry one.
-        if n.kind == NodeKind::NODE_IDENTIFIER || n.kind == NodeKind::NODE_LIFETIME {
-            shift_span(&mut n.as_data.name.text, from, delta);
-        } else if n.kind == NodeKind::NODE_LITERAL {
-            shift_span(&mut n.as_data.literal.raw, from, delta);
-        } else if n.kind == NodeKind::NODE_WHILE {
-            shift_span(&mut n.as_data.while_stmt.label, from, delta);
-        } else if n.kind == NodeKind::NODE_FOR || n.kind == NodeKind::NODE_INLINE_FOR || n.kind == NodeKind::NODE_PARALLEL_FOR {
-            shift_span(&mut n.as_data.for_stmt.label, from, delta);
-        } else if n.kind == NodeKind::NODE_BREAK || n.kind == NodeKind::NODE_CONTINUE {
-            shift_span(&mut n.as_data.flow.label, from, delta);
-        }
-    }
-    for i in 0..old_attrs {
-        let at = &mut a.attrs[i];
-        shift_span(&mut at.str_span, from, delta);
-    }
-    for i in 0..old_metas {
-        let mt = &mut a.metas[i];
-        shift_span(&mut mt.key, from, delta);
-        shift_span(&mut mt.vspan, from, delta);
-    }
+// A fresh, platform-filtered parse of module `i`'s analyzed source: the module arena its last
+// analysis started from (the analysis appends desugars to it).
+fn pristine_parse(p: &mut loader::Package, i: usize, target: i32) Ast {
+    let file = p.modules[i].file.clone();
+    let mut src = p.modules[i].source.clone();
+    let mut lx = lex::Lexer::new(&mut src, file.as_str());
+    lx.scan_tokens();
+    assert(!lx.has_errors(), "an analyzed module lexes again");
+    let mut ps = par::Parser::new(lx.take_tokens(), src.as_str(), file.as_str());
+    ps.build_ast();
+    assert(!ps.has_errors(), "an analyzed module parses again");
+    let mut na = ps.take_ast();
+    na.module = i as ModuleId;
+    let own = replace(&mut p.modules[i].ast, na);
+    p.platform_filter_module(i, target);
+    return replace(&mut p.modules[i].ast, own);
 }
 
 // The one plain function whose body block strictly encloses the byte window [ws, we) of the OLD
-// source, or NODE_NONE. Excluded (return NODE_NONE): `const fn` (bodies are cross-module semantics
-// through CTFE) and interface default methods (bodies re-check per foreign conformer).
-fn splice_candidate(a: &Ast, ws: u32, we: u32) NodeId {
+// source, or NODE_NONE: an edit there changes what only that body means. Excluded (return
+// NODE_NONE): `const fn` (bodies are cross-module semantics through CTFE) and interface default
+// methods (bodies re-check per foreign conformer).
+fn body_candidate(a: &Ast, ws: u32, we: u32) NodeId {
     let items = a.at_const(a.root).as_data.program.items;
     for i in 0..items.len {
         let it = unsafe a.list(items)[i as usize];
@@ -858,6 +966,11 @@ pub fn recompile(
     }
     // The overlay slot per module, looked up once per round (a file identity compare per document).
     let ovk = overlay_slots(p, ov_files);
+    // The result-attributability verdicts the last analyses recorded: the rebuilt item index
+    // starts unrecorded, and a released module cannot scan its bodies again.
+    let mut ra_keys = Vector::<u64>::new();
+    let mut ra_vals = Vector::<i32>::new();
+    save_ret_attr(p, &mut ra_keys, &mut ra_vals);
     // Documents opened since their module's bodies were released: the bodies come back (ids
     // stable, so importers keep their analyses) and the module re-analyzes.
     let mut opened = Vector::<usize>::new();
@@ -880,19 +993,27 @@ pub fn recompile(
         release_closed(p, &ovk);
         return true;
     }
+    // Per changed module: the edit lay strictly inside one plain function's body and the reparse
+    // kept the module-arena shape (`body_fn` names that function), or the reparse kept the shape
+    // (`shaped`, with the edit window in the new source's bytes).
     let mut body_sliced = Vector::<bool>::new();
-    // A full reparse that kept the module-arena shape (`same_shape`), with its edit window in
-    // the new source's bytes.
+    let mut body_fn = Vector::<NodeId>::new();
     let mut shaped = Vector::<bool>::new();
     let mut win_s = Vector::<u32>::new();
     let mut win_e = Vector::<u32>::new();
     for _ in 0..changed.len() {
         body_sliced.push(false);
+        body_fn.push(NODE_NONE);
         shaped.push(false);
         win_s.push(0);
         win_e.push(0);
     }
-    // 2) Guards + reparse each changed module.
+    // 2) Guards + reparse each changed module. The module always parses whole: its arenas are then
+    // a fresh parse's, so the analysis that follows leaves the state a fresh analysis leaves. Fresh
+    // ids: the import surface must be unchanged or the loader's closure caches (and every
+    // importer's decl references) would be wrong, and an importer keeps its analysis only when the
+    // module-arena shape is the one its references name (`same_shape` against a fresh parse of the
+    // old source: the analysis appends desugars to the module arena).
     for c in 0..changed.len() {
         let i = changed[c];
         if p.modules[i].prelude || !p.modules[i].has_ast {
@@ -901,20 +1022,13 @@ pub fn recompile(
         }
         let k = ovk[i] as usize;
         let file = p.modules[i].file.clone();
-        let mut ns = String::from_str(ov_texts[k]);
-        let mut lx = lex::Lexer::new(&mut ns, file.as_str());
-        lx.scan_tokens();
-        if lx.has_errors() {
-            return false;
-        }
-        let toks = lx.take_tokens();
-        // Body-splice probe: common prefix/suffix window strictly inside one plain fn body.
+        // The edit window: the bytes between the common prefix and suffix, in the old source.
         let mut ws: u32 = 0;
         let mut we: u32 = 0;
         let mut delta: i64 = 0;
         {
             let os = p.modules[i].source.as_str();
-            let nv = ns.as_str();
+            let nv = ov_texts[k];
             let mut p0: usize = 0;
             let maxp = if os.len() < nv.len() {
                 os.len();
@@ -932,42 +1046,37 @@ pub fn recompile(
             we = (os.len() - s0) as u32;
             delta = nv.len() as i64 - os.len() as i64;
         }
-        let cand = splice_candidate(&p.modules[i].ast, ws, we);
-        let mut spliced = false;
-        if cand != NODE_NONE {
-            spliced = try_body_splice(p, i, cand, toks, ns, file.as_str(), we, delta);
+        let cand = body_candidate(&p.modules[i].ast, ws, we);
+        let mut ns9 = String::from_str(ov_texts[k]);
+        let mut lx9 = lex::Lexer::new(&mut ns9, file.as_str());
+        lx9.scan_tokens();
+        if lx9.has_errors() {
+            return false;
         }
-        if spliced {
-            body_sliced.set(c, true);
-            st.body_only += 1;
-        } else {
-            // Full module reparse (fresh lex: the splice attempt consumed the first stream). Fresh
-            // ids, so the import surface must be unchanged or the loader's closure caches (and every
-            // importer's decl references) would be wrong.
-            let mut ns9 = String::from_str(ov_texts[k]);
-            let mut lx9 = lex::Lexer::new(&mut ns9, file.as_str());
-            lx9.scan_tokens();
-            if lx9.has_errors() {
-                return false;
-            }
-            let mut ps = par::Parser::new(lx9.take_tokens(), ns9.as_str(), file.as_str());
-            ps.build_ast();
-            if ps.has_errors() {
-                return false;
-            }
-            let na = ps.take_ast();
-            let mut osur = String::new();
-            let mut nsur = String::new();
-            import_surface(&p.modules[i].ast, p.modules[i].source.as_str(), &mut osur);
-            import_surface(&na, ns9.as_str(), &mut nsur);
-            if osur.as_str() != nsur.as_str() {
-                return false;
-            }
-            let old = replace(&mut p.modules[i].ast, na);
-            p.modules[i].ast.module = i as ModuleId;
-            p.modules[i].source = ns9;
-            p.platform_filter_module(i, target);
-            if same_shape(&old, &p.modules[i].ast) {
+        let mut ps = par::Parser::new(lx9.take_tokens(), ns9.as_str(), file.as_str());
+        ps.build_ast();
+        if ps.has_errors() {
+            return false;
+        }
+        let na = ps.take_ast();
+        let mut osur = String::new();
+        let mut nsur = String::new();
+        import_surface(&p.modules[i].ast, p.modules[i].source.as_str(), &mut osur);
+        import_surface(&na, ns9.as_str(), &mut nsur);
+        if osur.as_str() != nsur.as_str() {
+            return false;
+        }
+        let oldp = pristine_parse(p, i, target);
+        let _ = replace(&mut p.modules[i].ast, na);
+        p.modules[i].ast.module = i as ModuleId;
+        p.modules[i].source = ns9;
+        p.platform_filter_module(i, target);
+        if same_shape(&oldp, &p.modules[i].ast) {
+            if cand != NODE_NONE {
+                body_sliced.set(c, true);
+                body_fn.set(c, cand);
+                st.body_only += 1;
+            } else {
                 shaped.set(c, true);
                 win_s.set(c, ws);
                 win_e.set(c, (we as i64 + delta) as u32);
@@ -980,9 +1089,25 @@ pub fn recompile(
     // import-closure caches survive: the guard above proved the edges identical.
     p.build_index();
     gitems::open(p);
+    // A full reparse that changed the module-arena shape gave its declarations fresh ids: its old
+    // verdicts name other declarations. Its analysis records them again.
+    let mut fresh_ids = Vector::<bool>::new();
+    fresh_ids.resize_default(n);
+    for c in 0..changed.len() {
+        if !body_sliced[c] && !shaped[c] {
+            fresh_ids.set(changed[c], true);
+        }
+    }
+    for k in 0..ra_keys.len() {
+        let m = (ra_keys[k] >> 32) as usize;
+        if !fresh_ids[m] {
+            p.set_item_ret_attr(m as ModuleId, (ra_keys[k] & 0xFFFFFFFFu64) as NodeId, ra_vals[k] != 0);
+        }
+    }
     // 4) the affected closure: the changed modules, plus the modules that reach one through
-    // imports and whose analysis it stales. A body-spliced module's interface (decl ids,
-    // signatures, const bodies) is untouched: none. A same-shape reparse keeps every id: the
+    // imports and whose analysis it stales. A body-only edit leaves the module's interface (decl
+    // ids, signatures, const bodies): only the compile-time readers of the body re-analyze
+    // (`propagate_touched` from a body-state seed). A same-shape reparse keeps every id: the
     // items the edit touched invalidate the items that name them, transitively
     // (`propagate_touched`), and a reacher whose last analysis reported an error (an unresolved
     // name the edit may define) re-analyzes; an edit of an extend's own bytes, or a reparse with
@@ -1003,8 +1128,10 @@ pub fn recompile(
         aff.set(opened[k], true);
     }
     let mut seeds = Vector::<Vector<u32>>::new();
+    let mut bseeds = Vector::<Vector<u32>>::new();
     for _ in 0..n {
         seeds.push(Vector::<u32>::new());
+        bseeds.push(Vector::<u32>::new());
     }
     let mut wide = Vector::<bool>::new(); // changed modules every reacher re-analyzes for
     for c in 0..changed.len() {
@@ -1012,6 +1139,16 @@ pub fn recompile(
         let mut w = !body_sliced[c] && !shaped[c];
         if shaped[c] && touched_items(p, changed[c], win_s[c], win_e[c], &mut seeds[changed[c]]) {
             w = true;
+        }
+        if body_sliced[c] {
+            // Only the function's body changed meaning: it reaches the compile-time readers of
+            // that body alone.
+            let k = slot_of(p, changed[c], body_fn[c]);
+            if k != SLOT_NONE && slot_node(p, k) == body_fn[c] {
+                bseeds[changed[c]].push(k);
+            } else {
+                w = true;
+            }
         }
         wide.push(w);
     }
@@ -1039,7 +1176,7 @@ pub fn recompile(
             aff.set(m, true);
         }
     }
-    propagate_touched(p, &seeds, &mut aff);
+    propagate_touched(p, &seeds, &bseeds, &mut aff);
     for m in 0..n {
         if kept[m] && !aff[m] {
             st.kept += 1;
@@ -1074,10 +1211,52 @@ pub fn recompile(
         }
     }
     typecheck_set(p, &mut aff, true, true, root_file, lint_dir, &mut nd, st);
+    rescan_reach(p, &aff);
+    // Every module the passes analyzed owes its borrow check again.
+    while p.bc_pending.len() < n {
+        p.bc_pending.push(false);
+    }
+    for m in 0..n {
+        if aff[m] && p.modules[m].has_ast && lsp_lint_wanted(p, m, root_file, lint_dir) {
+            p.bc_pending.set(m, true);
+        }
+    }
+    // A body edit leaves every signature, but it can change a function's result attributability,
+    // which the borrow check of each caller reads: a module that names such a function from
+    // outside the affected set owes its borrow check too (its analysis stands).
+    let mut rebc = Vector::<bool>::new();
+    rebc.resize_default(n);
+    for k in 0..ra_keys.len() {
+        let x = (ra_keys[k] >> 32) as usize;
+        let node = (ra_keys[k] & 0xFFFFFFFFu64) as NodeId;
+        if fresh_ids[x] || p.item_ret_attr(x as ModuleId, node) == ra_vals[k] {
+            continue;
+        }
+        for q in 0..n {
+            if aff[q] || rebc[q] || !p.modules[q].has_ast || !lsp_lint_wanted(p, q, root_file, lint_dir) || !refers(
+                p,
+                q,
+                x as u32,
+                node,
+                node,
+            ) {
+                continue;
+            }
+            if p.modules[q].ast.b.released {
+                ensure_bodies(p, q);
+                st.bodies_back += 1;
+            }
+            rebc.set(q, true);
+            p.bc_pending.set(q, true);
+        }
+    }
+    reach_settle(p, root_file, lint_dir, st);
     // 6) merge: keep unaffected modules' records, replace the affected ones' (the set now holds
     // every module the passes analyzed).
     let affr = &aff;
     diags.retain(|d: &DiagRec| d.module as usize < n && !affr[d.module as usize]);
+    let rebr = &rebc;
+    diags.retain(|d: &DiagRec| !rebr[d.module as usize] || d.phase != PH_BORROW);
     diags.reserve(nd.len());
     nd.reverse();
     loop {
@@ -1090,72 +1269,16 @@ pub fn recompile(
             },
         };
     }
+    lsp_unused_items(p, root_file, lint_dir, diags);
     release_closed(p, &ovk);
     stats_line(p, "round", t0, st);
     return true;
 }
 
-// Parse the new body region into the module's EXISTING arena (token stream over the new source) and
-// patch the surrounding state: fn body pointer, span shifts past the edit, replaced source. False =
-// the body did not parse cleanly or did not consume exactly the edited region (brace structure
-// changed); the arena is untouched enough for the caller to fall back to a full reparse of the
-// module (node additions past the old length are orphans no analysis references yet).
-fn try_body_splice(
-    p: &mut loader::Package,
-    i: usize,
-    fnid: NodeId,
-    toks: Vector<ltok::Token>,
-    ns: String,
-    file: str,
-    we_old: u32,
-    delta: i64,
-) bool {
-    // A module with build-constant sites reparses whole: the early prune rewrote nodes in place.
-    if p.modules[i].ast.bc_sites.len() != 0 {
-        return false;
-    }
-    let bodyid = p.modules[i].ast.at_const(fnid).as_data.function.body;
-    let bspan = p.modules[i].ast.at_const(bodyid).span;
-    // The body's '{' sits in the UNchanged prefix, so its offset is the same in both sources.
-    let mut at: i64 = -1;
-    for t in 0..toks.len() {
-        if toks.at(t).start() == bspan.start {
-            at = t as i64;
-            break;
-        }
-        if toks.at(t).start() > bspan.start {
-            break;
-        }
-    }
-    if at < 0 {
-        return false;
-    }
-    let old_nodes = p.modules[i].ast.nodes.len();
-    let old_body = p.modules[i].ast.b.nodes.len();
-    let old_attrs = p.modules[i].ast.attrs.len();
-    let old_metas = p.modules[i].ast.metas.len();
-    let ns2 = ns;
-    let mut ps = par::Parser::new(toks, ns2.as_str(), file);
-    let _ = replace(&mut ps.ast, replace(&mut p.modules[i].ast, Ast::new(0)));
-    let nb = ps.reparse_fn_body(at as usize, fnid);
-    let bad = ps.has_errors() || nb == NODE_NONE;
-    let want_end = (bspan.end as i64 + delta) as u32;
-    let arena_back = ps.take_ast();
-    let _ = replace(&mut p.modules[i].ast, arena_back);
-    if bad || p.modules[i].ast.at_const(nb).span.end != want_end || p.modules[i].ast.bc_sites.len() != 0 {
-        // Orphaned appends only; the caller full-reparses this module.
-        return false;
-    }
-    let a = &mut p.modules[i].ast;
-    shift_spans(a, old_nodes, old_body, old_attrs, old_metas, we_old, delta);
-    a.at(fnid).as_data.function.body = nb;
-    p.modules[i].source = ns2;
-    return true;
-}
-
 // The shared codegen-free pipeline over a loaded package: harvest parse failures, platform-filter,
-// resolve + typecheck every module (lints gated per module), then the always-panics phase, then
-// release the bodies of every module without an editor buffer.
+// resolve + typecheck every module (lints gated per module), then the always-panics phase, the
+// deferred constants and the unused-item lint, then release the bodies of every module without an
+// editor buffer that owes no borrow check.
 fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: str, diags: &mut Vector<DiagRec>) RecompileStats {
     let mut st = RecompileStats {};
     for i in 0..p.modules.len() {
@@ -1197,6 +1320,23 @@ fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: 
         }
     }
     typecheck_set(p, &mut set, all_ok, true, root_file, lint_dir, diags, &mut st);
+    rescan_reach(p, &set);
+    // Every analyzed module whose diagnostics this root reports owes its borrow check, and the
+    // recursion check reports the modules whose diagnostics this root reports.
+    p.bc_pending = Vector::<bool>::new();
+    p.bc_pending.resize_default(n);
+    p.recur.reported = Vector::<bool>::with_capacity(n);
+    p.recur.mods = Vector::<recur::Sums>::with_capacity(n);
+    for i in 0..n {
+        let wanted = p.modules[i].has_ast && lsp_lint_wanted(p, i, root_file, lint_dir);
+        if set[i] && wanted {
+            p.bc_pending.set(i, true);
+        }
+        p.recur.reported.push(wanted);
+        p.recur.mods.push(recur::Sums::new());
+    }
+    reach_settle(p, root_file, lint_dir, &mut st);
+    lsp_unused_items(p, root_file, lint_dir, diags);
     // The views end before the release claims the package: a vector of borrows counts as used when
     // it is destroyed.
     let mut ovk = Vector::<i64>::new();
@@ -1212,8 +1352,10 @@ fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: 
 }
 
 // Typecheck the members of `set` (each after the members of its import closure, so a fold finds
-// its callee typed) and, when `panics` is set, run the always-panics phase over them; the
-// records go to `nd`. The constant engine refuses a body it cannot read and records the module
+// its callee typed) and, when `panics` is set, run the always-panics phase and the deferred
+// static_asserts and constants over them; the records go to `nd`. `lint` gates the lints alone:
+// the feature errors and the always-panics check are errors and run without it. The constant
+// engine refuses a body it cannot read and records the module
 // (`Interp.body_missing`): a released module is parsed back and held, and the next pass analyzes
 // it with every member whose analysis met a refusal (their records replaced). A refusal of a
 // member typed later in the same pass (an import cycle, a sibling checked later) stays a refusal,
@@ -1232,13 +1374,16 @@ fn typecheck_set(
     let n = p.modules.len();
     let pkg = p as *mut loader::Package;
     let mut order = dep_order(p, set);
+    // The declaration spans the item-edge record reads; no pass adds or moves an item.
+    let sps = gitems::spans_all(p);
+    let lint_prelude = unused_prelude(p, root_file, lint_dir);
     for pass in 0..n + 1 {
         // Fresh readiness for the pass: the engine interprets a member's bodies only once this
         // pass has checked them (a parsed-back arena has no types before that).
         for k in 0..order.len() {
             p.reset_module_states(order[k]);
         }
-        let mut cirv = iri::interp_new(pkg);
+        let mut cirv = lsp_engine(p);
         p.cir = &mut cirv;
         let mut again = Vector::<bool>::new();
         again.resize_default(n);
@@ -1259,21 +1404,26 @@ fn typecheck_set(
             let miss0 = cirv.body_miss_n;
             tc_bad.set(i, !lsp_typecheck_module(p, i, lw, nd));
             record_refs(p, i);
+            if !p.modules[i].prelude || lint_prelude {
+                record_item_edges(p, i, &sps);
+            }
             if cirv.body_miss_n != miss0 {
                 again.set(i, true);
             }
         }
         // Driver-parity: the uses of functions that need CPU features, decided once every module is
-        // typed, and the `unsafe` only such a use needed.
+        // typed, and (a lint) the `unsafe` only such a use needed.
         for k in 0..order.len() {
             let i = order[k];
-            if lint && !tc_bad[i] && lsp_lint_wanted(p, i, root_file, lint_dir) {
+            if !tc_bad[i] && lsp_lint_wanted(p, i, root_file, lint_dir) {
                 let mut errs = diag::Errors::new();
                 emit::feature_errors(p, i, &mut errs);
-                emit::feature_lints(p, i, &mut errs);
+                if lint {
+                    emit::feature_lints(p, i, &mut errs);
+                }
                 if errs.errors.len() != 0 || errs.warns.len() != 0 {
                     errs.finalize(p.modules[i].source.as_str(), p.modules[i].file.as_str());
-                    drain_errors(&errs, i as u32, nd);
+                    drain_errors(&errs, i as u32, PH_ANALYSIS, nd);
                 }
             }
         }
@@ -1283,16 +1433,39 @@ fn typecheck_set(
             cirv.all_typed = true;
             for k in 0..order.len() {
                 let i = order[k];
-                if lint && !tc_bad[i] && lsp_lint_wanted(p, i, root_file, lint_dir) {
+                if !tc_bad[i] && lsp_lint_wanted(p, i, root_file, lint_dir) {
                     let miss0 = cirv.body_miss_n;
                     let mut errs = diag::Errors::new();
                     emit::check_always_panics_module(p, i, &mut errs);
                     if errs.errors.len() != 0 {
                         errs.finalize(p.modules[i].source.as_str(), p.modules[i].file.as_str());
-                        drain_errors(&errs, i as u32, nd);
+                        drain_errors(&errs, i as u32, PH_ANALYSIS, nd);
                     }
                     if cirv.body_miss_n != miss0 {
                         again.set(i, true);
+                    }
+                }
+            }
+            // The static_asserts and constants the members deferred (undecidable in module
+            // order) evaluate now that every module is typed. A refusal reruns every module
+            // that deferred one: the flush does not say whose evaluation met it.
+            let mut deferred = Vector::<bool>::new();
+            deferred.resize_default(n);
+            for k in 0..cirv.pending.len() {
+                deferred.set((cirv.pending[k] >> 32) as usize, true);
+            }
+            for k in 0..cirv.pending_consts.len() {
+                deferred.set((cirv.pending_consts[k] >> 32) as usize, true);
+            }
+            let miss0 = cirv.body_miss_n;
+            let mut fx = FlushCtx { p: pkg, nd: nd };
+            let fxp = ((&mut fx) as *mut FlushCtx) as *mut void;
+            cirv.flush_asserts(lsp_flush_assert, fxp);
+            cirv.flush_consts(lsp_flush_const, fxp);
+            if cirv.body_miss_n != miss0 {
+                for m in 0..n {
+                    if deferred[m] {
+                        again.set(m, true);
                     }
                 }
             }
@@ -1322,18 +1495,63 @@ fn drop_records(nd: &mut Vector<DiagRec>, i: usize) {
     nd.retain(|d: &DiagRec| d.module as usize != i);
 }
 
-// The members of `set`, each after the members of its import closure (a cycle keeps index order).
+// Drop module `i`'s records of pass `phase`; true when there was one.
+fn drop_phase(nd: &mut Vector<DiagRec>, i: usize, phase: u8) bool {
+    let before = nd.len();
+    nd.retain(|d: &DiagRec| d.module as usize != i || d.phase != phase);
+    return nd.len() != before;
+}
+
+// The engine's flush callbacks (`Interp::flush_asserts`, `flush_consts`) record the driver's
+// messages (`emit::flush_assert_text`, `flush_const_text`) at the failing node.
+struct FlushCtx {
+    pub p: *const loader::Package,
+    pub nd: *mut Vector<DiagRec>,
+}
+
+fn lsp_flush_assert(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char) {
+    flush_rec(ctx, m, cond, emit::flush_assert_text(msg));
+}
+
+fn lsp_flush_const(ctx: *mut void, m: ModuleId, decl: NodeId, msg: *const char) {
+    flush_rec(ctx, m, decl, emit::flush_const_text(msg));
+}
+
+fn flush_rec(ctx: *mut void, m: ModuleId, id: NodeId, msg: String) {
+    let fx = unsafe &*(ctx as *const FlushCtx);
+    let mm = unsafe &(*fx.p).modules[m as usize];
+    let mut errs = diag::Errors::new();
+    errs.emit_span(mm.ast.at_const(id).span, msg);
+    errs.finalize(mm.source.as_str(), mm.file.as_str());
+    drain_errors(&errs, m, PH_ANALYSIS, unsafe &mut *fx.nd);
+}
+
+// The members of `set` as the driver's typecheck orders them: the prelude modules first (`tc_order`:
+// every other module reads the prelude as typed), each after the members of its import closure (a
+// cycle keeps index order), and the modules without items last (the driver checks their top-level
+// nodes once every item is typed; no module reads them).
 fn dep_order(p: &mut loader::Package, set: &Vector<bool>) Vector<usize> {
     let n = p.modules.len();
     let mut seen = Vector::<bool>::new();
     seen.resize_default(n);
     let mut out = Vector::<usize>::new();
+    for pass in 0..2 {
+        for i in 0..n {
+            if set[i] && !seen[i] && p.modules[i].prelude == (pass == 0) && has_items(p, i) {
+                dep_visit(p, set, &mut seen, &mut out, i);
+            }
+        }
+    }
     for i in 0..n {
         if set[i] && !seen[i] {
-            dep_visit(p, set, &mut seen, &mut out, i);
+            out.push(i);
         }
     }
     return out;
+}
+
+const fn has_items(p: &loader::Package, i: usize) bool {
+    return p.idx.mod_items[i] != p.idx.mod_items[i + 1];
 }
 
 fn dep_visit(p: &mut loader::Package, set: &Vector<bool>, seen: &mut Vector<bool>, out: &mut Vector<usize>, i: usize) {
@@ -1345,7 +1563,7 @@ fn dep_visit(p: &mut loader::Package, set: &Vector<bool>, seen: &mut Vector<bool
             break;
         }
         let c = clo[j] as usize;
-        if set[c] && !seen[c] {
+        if set[c] && !seen[c] && has_items(p, c) {
             dep_visit(p, set, seen, out, c);
         }
     }
@@ -1380,11 +1598,12 @@ fn hold_bodies(p: &mut loader::Package, m: usize) {
 }
 
 // Free the body syntax of every module without an editor buffer (`ovk[i] < 0`) that the engine
-// has not demanded (`Package.body_hold`): the positional features read only open documents'
-// bodies, and the cross-file features parse a closed module's back on demand (`ensure_bodies`).
+// has not demanded (`Package.body_hold`) and that owes no borrow check (`Package.bc_pending`):
+// the positional features read only open documents' bodies, and the cross-file features parse a
+// closed module's back on demand (`ensure_bodies`).
 fn release_closed(p: &mut loader::Package, ovk: &Vector<i64>) {
     for i in 0..p.modules.len() {
-        let held = i < p.body_hold.len() && p.body_hold[i];
+        let held = i < p.body_hold.len() && p.body_hold[i] || i < p.bc_pending.len() && p.bc_pending[i];
         if ovk[i] < 0 && p.modules[i].has_ast && !p.modules[i].ast.b.released && !held {
             p.modules[i].ast.release_bodies();
         }
@@ -1408,6 +1627,428 @@ pub fn ensure_bodies(p: &mut loader::Package, i: usize) {
         set.set(i, true);
         typecheck_set(p, &mut set, false, false, "", "", &mut nd, &mut st);
     }
+}
+
+// The recorded result-attributability verdicts (`ItemSched.ret_attr`, 0 or 1) as
+// (`module << 32 | node`, verdict) pairs.
+fn save_ret_attr(p: &loader::Package, keys: &mut Vector<u64>, vals: &mut Vector<i32>) {
+    if !p.sched.built {
+        return;
+    }
+    for it in 0..p.idx.items.len() {
+        let meta = p.idx.items.at(it);
+        let v = p.item_ret_attr(meta.module, meta.node);
+        if v == 0 || v == 1 {
+            keys.push(meta.module as u64 << 32 | meta.node as u64);
+            vals.push(v);
+        }
+    }
+}
+
+// The package-wide unused-item lint (`emit::lint_unused_items`) over the recorded item edges: its
+// records (`PH_UNUSED`) are replaced every round, since an edit in one module can leave an item of
+// another unused. As in the driver, a package with an analysis error gets no verdict: an
+// unresolved reference would make its target look unused. The reported set is the root's
+// (`lsp_lint_wanted`); a prelude module in it (an open std file, a workspace's own std) lints the
+// way `super-c lint` lints std, through the batch mask.
+fn lsp_unused_items(p: &mut loader::Package, root_file: str, lint_dir: str, diags: &mut Vector<DiagRec>) {
+    diags.retain(|d: &DiagRec| d.phase != PH_UNUSED);
+    let n = p.modules.len();
+    for k in 0..diags.len() {
+        if diags.at(k).severity == 1 && diags.at(k).phase == PH_ANALYSIS {
+            return;
+        }
+    }
+    let prelude = unused_prelude(p, root_file, lint_dir);
+    for m in 0..n {
+        if p.modules[m].has_ast && (!p.modules[m].prelude || prelude) && (p.modules[m].ast.types.len() == 0 || m >= p.item_edges.len()) {
+            return;
+        }
+    }
+    build_final_edges(p);
+    let mut wanted = Vector::<bool>::with_capacity(n);
+    for m in 0..n {
+        wanted.push(lsp_lint_wanted(p, m, root_file, lint_dir));
+    }
+    let mut sink = Vector::<diag::Errors>::with_capacity(n);
+    for _ in 0..n {
+        sink.push(diag::Errors::new());
+    }
+    let sp = (&mut sink) as *mut Vector<diag::Errors>;
+    if p.lint_set.len() != 0 || !prelude {
+        emit::lint_unused_items(p, -1, sp);
+    } else {
+        let own = replace(&mut p.lint_set, wanted);
+        emit::lint_unused_items(p, -1, sp);
+        p.lint_set = own;
+    }
+    for m in 0..n {
+        if sink[m].has_warnings() {
+            sink.index_mut(m).finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
+            drain_errors(sink.at(m), m as u32, PH_UNUSED, diags);
+        }
+    }
+}
+
+// True when the root's unused-item lint reports a prelude module (an open std file, a workspace's
+// own std): the prelude modules then take part in its reachability graph, and their item edges
+// are recorded too.
+fn unused_prelude(p: &mut loader::Package, root_file: str, lint_dir: str) bool {
+    for m in 0..p.modules.len() {
+        if p.modules[m].prelude && lsp_lint_wanted(p, m, root_file, lint_dir) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The item index's post-typecheck edges (`gitems::build_final`) from every module's recorded
+// item edges, mapped onto the current item ids.
+fn build_final_edges(p: &mut loader::Package) {
+    let mut ev = Vector::<u64>::new();
+    for m in 0..p.modules.len().min(p.item_edges.len()) {
+        let es = p.item_edges.at(m);
+        for k in 0..es.len() {
+            let e = es.at(k);
+            let o = p.item_of(m as ModuleId, e.owner);
+            let t = p.item_of((e.key >> 32) as ModuleId, (e.key & 0xFFFFFFFFu64) as NodeId);
+            assert(o != loader::ITEM_NONE && t != loader::ITEM_NONE, "a recorded item edge names two items");
+            ev.push(o as u64 << 32 | t as u64);
+        }
+    }
+    gitems::build_final(p, &ev);
+}
+
+/// The outcome of one borrow round (`borrowck_pending`).
+pub struct BcRound {
+    pub canceled: bool, // `stop` ended the round; the checks it did not finish stay owed
+    pub changed: bool, // some module's borrow records changed
+    pub checked: bool, // some module's check finished
+}
+
+// True when module `m` can be borrow checked: it and every module of its import closure are typed
+// and reported no analysis error (`err`), as the driver borrow checks only a package that typed.
+fn bc_ready(p: &mut loader::Package, m: usize, err: &Vector<bool>) bool {
+    if err[m] {
+        return false;
+    }
+    let clo = unsafe &*p.module_closure(m as ModuleId);
+    for j in 0..clo.len() {
+        let c = clo[j] as usize;
+        if err[c] || p.modules[c].has_ast && p.modules[c].ast.types.len() == 0 {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The borrow check of module `m`, item by item, with its body syntax kept. `stop(sctx, false)` is
+// polled before each item: None when it asked to stop (the partial records are dropped).
+fn bc_module(
+    p: &mut loader::Package,
+    m: usize,
+    ow: &mut bfx::Owner,
+    ctx: &mut bfi::BorrowCtx,
+    stop: fn(*mut void, bool) bool,
+    sctx: *mut void,
+) Option<diag::Errors> {
+    let pkg = p as *mut loader::Package;
+    let mut items = Vector::<NodeId>::new();
+    {
+        let a = &p.modules[m].ast;
+        let pl = a.at_const(a.root).as_data.program.items;
+        for i in 0..pl.len {
+            items.push(unsafe a.list(pl)[i as usize]);
+        }
+    }
+    let mm = &mut p.modules[m];
+    let src = mm.source.as_str().ptr() as *const char;
+    let len = mm.source.len();
+    let file = mm.file.clone();
+    let mut t = tc::TypeChecker::new(&mut mm.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+    let mut bodies = Vector::<irl::Lowerer>::new();
+    for k in 0..items.len() {
+        if stop(sctx, false) {
+            return Option::<diag::Errors>::None;
+        }
+        t.bc_item(items[k], ow, ctx, &mut bodies);
+    }
+    t.errors.finalize(unsafe str::from_raw(src as *const u8, len), file.as_str());
+    return Option::<diag::Errors>::Some(replace(&mut t.errors, diag::Errors::new()));
+}
+
+// Parse back and analyze again every released module the engine refused a body of; true when one
+// came back (it stays held, as a demand during the analysis holds it).
+fn parse_back_demanded(p: &mut loader::Package, cirv: &iri::Interp) bool {
+    let mut back = false;
+    for m in 0..cirv.body_missing.len() {
+        if cirv.body_missing[m] && m < p.modules.len() && p.modules[m].has_ast && p.modules[m].ast.b.released {
+            ensure_bodies(p, m);
+            hold_bodies(p, m);
+            back = true;
+        }
+    }
+    return back;
+}
+
+/// Run the borrow checks the analyses owe (`Package.bc_pending`), in module order, keeping every
+/// body syntax arena (the positional features read the open documents' bodies). A module whose
+/// own analysis reported an error owes nothing until it is analyzed again; any other runs once its
+/// import closure typed without an error (`bc_ready`) and waits until then; its records (`PH_BORROW`)
+/// replace its previous ones in `diags`, its function summaries (`Package.recur`) replace its
+/// previous ones, and a closed module (`ov_files` names the open documents) releases its bodies
+/// after its check. A round that is not stopped ends with the recursion check (`recur_check`) when a
+/// summary changed since it last ran. `stop(sctx, between)` ends the round when true, polled
+/// with `between` false before every item (the module in progress keeps its pending mark and its
+/// previous records) and with `between` true before every module after the round's first finished
+/// check: a stop there waits for the module in progress, and every round that no item poll stops
+/// finishes at least one check, so the owed checks end within their count of rounds. The
+/// lowering adds no cancellation edges (`Package.cancel_state` stays uncomputed): such an edge
+/// is an early return after a call, and the borrow check reports nothing on one; a module with a
+/// `@tail_recurse` function is the exception (`reach_for`).
+pub fn borrowck_pending(
+    p: &mut loader::Package,
+    diags: &mut Vector<DiagRec>,
+    ov_files: &Vector<str>,
+    stop: fn(*mut void, bool) bool,
+    sctx: *mut void,
+) BcRound {
+    let mut out = BcRound { canceled: false, changed: false, checked: false };
+    let n = p.modules.len();
+    let mut any = p.recur.stale;
+    for m in 0..p.bc_pending.len().min(n) {
+        any = any || p.bc_pending[m];
+    }
+    if !any {
+        return out;
+    }
+    let err = analysis_errors(p, diags);
+    let ovk = overlay_slots(p, ov_files);
+    let pkg = p as *mut loader::Package;
+    let mut ow = bfx::Owner::new(pkg);
+    let mut ctx = bfi::BorrowCtx::new();
+    // The summaries of the module in progress; the reported mask stays as it is during the round.
+    let mut sz = recur::Summarizer::new(&p.recur.reported);
+    ctx.recur = &mut sz;
+    for m in 0..p.bc_pending.len().min(n) {
+        if !p.bc_pending[m] {
+            continue;
+        }
+        if out.checked && stop(sctx, true) {
+            out.canceled = true;
+            reach_off(p);
+            return out;
+        }
+        if err[m] {
+            // The module's own analysis failed: no borrow check is owed until it is analyzed
+            // again, which owes a new one.
+            let _ = drop_phase(diags, m, PH_BORROW);
+            p.bc_pending.set(m, false);
+            p.recur.mods.set(m, recur::Sums::new());
+            p.recur.stale = true;
+            if ovk[m] < 0 && !(m < p.body_hold.len() && p.body_hold[m]) && !p.modules[m].ast.b.released {
+                p.modules[m].ast.release_bodies();
+            }
+            continue;
+        }
+        if !bc_ready(p, m, &err) {
+            continue;
+        }
+        reach_for(p, m);
+        // An engine demand for a released body parses it back and checks the module again; each
+        // retry brings back at least one module.
+        let mut res = Option::<diag::Errors>::None;
+        for _ in 0..n + 1 {
+            let mut cirv = lsp_engine(p);
+            cirv.all_typed = true;
+            p.cir = &mut cirv;
+            let _ = sz.take();
+            let r = bc_module(p, m, &mut ow, &mut ctx, stop, sctx);
+            p.cir = null;
+            if r.is_none() {
+                out.canceled = true;
+                reach_off(p);
+                return out;
+            }
+            if !parse_back_demanded(p, &cirv) {
+                res = r;
+                break;
+            }
+        }
+        assert(res.is_some(), "a borrow check ends once no released body is demanded");
+        let errs = res.unwrap();
+        let had = drop_phase(diags, m, PH_BORROW);
+        out.changed = out.changed || had || errs.has_errors() || errs.has_warnings();
+        drain_errors(&errs, m as u32, PH_BORROW, diags);
+        p.bc_pending.set(m, false);
+        p.recur.mods.set(m, sz.take());
+        p.recur.stale = true;
+        out.checked = true;
+        let held = m < p.body_hold.len() && p.body_hold[m];
+        if ovk[m] < 0 && !held && !p.modules[m].ast.b.released {
+            p.modules[m].ast.release_bodies();
+        }
+    }
+    reach_off(p);
+    if p.recur.stale {
+        out.changed = recur_check(p, diags) || out.changed;
+    }
+    return out;
+}
+
+// Does module `m` declare a `@tail_recurse` function while the coroutine runtime is loaded? Its borrow
+// check lowers with the build's cancellation checks (`reach_for`): a check after a self call is one of
+// its errors (`it can accept a task cancellation`), and no other record depends on the checks.
+fn reach_reads(p: &loader::Package, m: usize) bool {
+    let a = &p.modules.at(m).ast;
+    for k in 0..a.attrs.len() {
+        if a.attrs.at(k).kind == AttrKind::ATTR_TAIL_RECURSE as u8 {
+            return p.find("std::parallel::runtime") >= 0;
+        }
+    }
+    return false;
+}
+
+// Lower module `m` with the reachability the last solve left (`reach_settle`) when it reads it,
+// else without.
+fn reach_for(p: &mut loader::Package, m: usize) {
+    if !reach_reads(p, m) {
+        reach_off(p);
+        return;
+    }
+    assert(!p.reach_stale, "every analysis round settles the reachability a borrow check reads");
+    p.co_state = 1;
+    p.cancel_state = 1;
+}
+
+// After an analysis round changed a reachability scan, while a module the root borrow checks reads
+// the reachability (`reach_reads`): solve it over the retained scans, and when the answer changed
+// (`tuc::reach_fold`) every such module owes its borrow check again, with its bodies live.
+fn reach_settle(p: &mut loader::Package, root_file: str, lint_dir: str, st: &mut RecompileStats) {
+    if !p.reach_stale {
+        return;
+    }
+    let n = p.modules.len();
+    let mut readers = Vector::<usize>::new();
+    for m in 0..n {
+        if p.modules[m].has_ast && reach_reads(p, m) && lsp_lint_wanted(p, m, root_file, lint_dir) {
+            readers.push(m);
+        }
+    }
+    if readers.len() == 0 {
+        return; // solved once a reader appears: its own analysis marks the scans changed
+    }
+    let scans = replace(&mut p.reach_scans, Vector::<loader::ReachScan>::new());
+    p.reach_solve(&scans);
+    p.reach_scans = scans;
+    p.reach_stale = false;
+    let key = tuc::reach_fold(0, p);
+    reach_off(p);
+    if key == p.reach_key {
+        return;
+    }
+    p.reach_key = key;
+    while p.bc_pending.len() < n {
+        p.bc_pending.push(false);
+    }
+    for i in 0..readers.len() {
+        let m = readers[i];
+        if p.bc_pending[m] {
+            continue;
+        }
+        if p.modules[m].ast.b.released {
+            ensure_bodies(p, m);
+            st.bodies_back += 1;
+        }
+        p.bc_pending.set(m, true);
+    }
+}
+
+// Lower without the reachability: no cancellation check, a preemption tick in every loop (an
+// analysis outside the borrow round sees what the build's type check sees).
+fn reach_off(p: &mut loader::Package) {
+    p.co_state = 0;
+    p.cancel_state = 0;
+}
+
+// The reachability scans (`Package::co_scan`) of the modules `set` marks, analyzed now with their
+// bodies live; every other module keeps its scan.
+fn rescan_reach(p: &mut loader::Package, set: &Vector<bool>) {
+    let n = p.modules.len();
+    while p.reach_scans.len() < n {
+        p.reach_scans.push(loader::ReachScan::new());
+    }
+    let cx = p.reach_ctx();
+    if !cx.rt {
+        return;
+    }
+    for m in 0..n {
+        if set[m] {
+            let sc = p.co_scan(m, &cx);
+            p.reach_scans.set(m, sc);
+            p.reach_stale = true;
+        }
+    }
+}
+
+// The unbounded-recursion check (`ir::recursion`) over the summaries of every reported module that
+// owes no borrow check (a module that owes one has a stale summary or none): its records
+// (`PH_RECUR`) replace the previous ones. True when there were records before or after.
+fn recur_check(p: &mut loader::Package, diags: &mut Vector<DiagRec>) bool {
+    let n = p.modules.len();
+    let mut on = Vector::<bool>::with_capacity(n);
+    for m in 0..n {
+        on.push(p.recur.reported[m] && !(m < p.bc_pending.len() && p.bc_pending[m]));
+    }
+    let reps = recur::check(p, &p.recur.mods, &on);
+    p.recur.stale = false;
+    let before = diags.len();
+    diags.retain(|d: &DiagRec| d.phase != PH_RECUR);
+    let had = diags.len() != before;
+    for i in 0..reps.len() {
+        drain_errors(&reps.at(i).errs, reps.at(i).module, PH_RECUR, diags);
+    }
+    return had || reps.len() != 0;
+}
+
+/// True when the borrow round has a runnable check left: a borrow check, or the recursion check.
+pub fn borrowck_runnable(p: &mut loader::Package, diags: &Vector<DiagRec>) bool {
+    if p.recur.stale {
+        return true;
+    }
+    let err = analysis_errors(p, diags);
+    for m in 0..p.bc_pending.len().min(p.modules.len()) {
+        if p.bc_pending[m] && (err[m] || bc_ready(p, m, &err)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Per module: its analysis reported an error.
+fn analysis_errors(p: &loader::Package, diags: &Vector<DiagRec>) Vector<bool> {
+    let n = p.modules.len();
+    let mut err = Vector::<bool>::new();
+    err.resize_default(n);
+    for k in 0..diags.len() {
+        let d = diags.at(k);
+        if d.severity == 1 && d.phase == PH_ANALYSIS && d.module as usize < n {
+            err.set(d.module as usize, true);
+        }
+    }
+    return err;
+}
+
+// The instruction set the driver builds for `target` without `--arch`: wasm32 for wasm, aarch64 for
+// iOS and Android, else the host's.
+fn target_arch(target: i32) i32 {
+    if target == 3 {
+        return 2;
+    }
+    if target == 4 || target == 5 {
+        return 1;
+    }
+    return unsafe shim::sc_host_arch();
 }
 
 // SC_LSP_STATS=1: one line per analysis round on stderr: the module counts by body ownership,

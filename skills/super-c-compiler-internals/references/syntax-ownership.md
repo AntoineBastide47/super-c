@@ -55,8 +55,7 @@ The parser routes through `Ast.sink_body`: `parse_function` turns it on for a re
 body (the `pinned` argument, the `pin_scope` of an interface or generic extend, and the
 function's own generics decide) and restores it after the block and its named-return
 bindings. A later stage that appends nodes sets the sink to the arena of the body it
-extends: the HIR lowering per marker, the checker per function body (`check_item`), the
-LSP's `reparse_fn_body` from the old body's arena. Two body constructs parse into the module
+extends: the HIR lowering per marker and the checker per function body (`check_item`). Two body constructs parse into the module
 arena because a later reader needs them after the release: a local `const` (its value may
 enter a type) and the target of `dyn` (a `dyn fn` signature node is the identity of its type,
 which emission spells, see `Parser::parse_dyn_target`).
@@ -151,10 +150,17 @@ order of hoisted closure bodies; the two-generation fixpoint holds.
 The server keeps one package per root for its whole life, and only the open documents' bodies
 serve a positional feature. After every analysis round (`lsp::analysis::compile`,
 `compile_batch`, `recompile`) `release_closed` frees the body arena of every module without an
-editor buffer, except the modules the constant engine has demanded (below). `Ast::release_bodies`
+editor buffer, except the modules the constant engine has demanded (below) and the modules that
+owe a borrow check (`Package.bc_pending`: the borrow round, `borrowck_pending`, lowers their
+bodies and releases a closed module's after its check). `Ast::release_bodies`
 also drops the seeds aimed at body nodes, so a later `init_resolutions` never writes past a
 fresh arena. The module arena, its type table and every fact table stay, so declarations,
-signatures, hover text and the retained diagnostics need nothing back.
+signatures, hover text and the retained diagnostics need nothing back. The unbounded-recursion
+check reads no bodies either: each module's borrow round records a summary of every function it
+checks (`Package.recur`, `ir::recursion::Sums`: ends, calls of reported functions and branches),
+and the round that finishes checks the summaries of every module that owes no borrow check.
+The coroutine and cancellation reachability reads none either: each analysis of a module records
+its scan (`Package.reach_scans`, `Package::co_scan`), and `reach_solve` runs over the scans.
 
 A released module's bodies come back through `reparse_bodies`: the module's source parses
 again and that parse's body arena replaces the empty one. The parser is a function of the
@@ -165,18 +171,23 @@ lowering is idempotent over the module arena; the checker's `init_types` resets 
 tables). The round parses back:
 
 - the module of a document that opened (`opened`: re-analyzed alone, importers keep their
-  analyses since the ids are stable), before the body-splice probe reads its body spans;
+  analyses since the ids are stable);
 - every closed member of the affected set (below), before its re-resolve;
 - every module the engine demanded during the passes (`typecheck_set`).
 
-The affected set of a round that fully reparsed a module is item-level. `Package.def_refs`
+A changed module always parses whole, so its arenas are a fresh parse's and every round leaves
+the state a fresh analysis of the same buffers leaves (`incr_state_equals_fresh_over_edit_series`
+in `tests/lsp_incr_test.spc`). The affected set of the round is item-level. `Package.def_refs`
 records, per module after each analysis of it (`record_refs`), one edge per (item, declaration
 of another item) pair its resolution tables name, keyed by the named declaration
 (`module << 32 | node`) with the naming item's declaration node and a flag for a naming node
 in the body arena; a node past every item's ranges (a desugar appended later) records a
 module-wide owner. The record stands while the module's bodies are released. When the reparse
-kept the module arena's shape (`same_shape`: the node count, the kind at every id and the
-child lists), every id names the same declaration, so the items the edit window touched
+kept the module arena's shape (`same_shape` against a fresh parse of the old source,
+`pristine_parse`, since the analysis appends desugars to the module arena: the node count, the
+kind at every id and the child lists), every id names the same declaration. An edit window
+strictly inside one plain function's body (`body_candidate`) seeds that function alone in the
+body state (`RecompileStats.body_only`); otherwise the items the edit window touched
 (`touched_items`: an item owns the bytes from the end of the item before it to its own end, an
 extend the bytes before its first member and after its last) seed a walk over the records
 (`propagate_touched`): a touched item is full (everything naming it is stale); a full item
@@ -188,7 +199,10 @@ it outside a releasable body. Every module holding a reached item re-analyzes; t
 their analyses (`RecompileStats.kept`). Two edits fall back to the import closure: an edit of
 an extend's own bytes (the conformance it declares reaches modules that never name it) and a
 reparse that changed the shape (fresh ids); a reacher whose last analysis reported an error
-re-analyzes too (the edit may define the name it lacked).
+re-analyzes too (the edit may define the name it lacked). The result-attributability verdicts
+(`ItemSched.ret_attr`, recorded at each module's type check while its bodies are live) survive
+the item index rebuild of the round; a verdict the edit changed makes the borrow check of every
+module that names the function owed again, with its analysis kept.
 
 The constant engine reads foreign bodies for folds and `const fn` scans (`Interp::body_of`,
 `fx_scan_fn`). `Interp::body_avail` refuses a body-arena node whose arena is released or not

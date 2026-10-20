@@ -15,6 +15,8 @@ import module::loader as loader;
 import ast::ast as *;
 import tests::cli_harness as cli;
 import driver_shim as shim;
+import typechecker::typechecker as tc;
+import ir::recursion as recur;
 
 const A0: str = M"(import b;
 import d;
@@ -89,7 +91,7 @@ fn ws_of(a: str, b: str, c: str, d: str) Ws {
 }
 
 // One `an::recompile` round over the test's owned overlays (the server passes borrowed views of its
-// documents the same way).
+// documents the same way), then the borrow round the server runs after it.
 fn recompile_ov(
     ws: &Ws,
     p: &mut loader::Package,
@@ -104,7 +106,25 @@ fn recompile_ov(
         fv.push(ovf.at(i).as_str());
         tv.push(ovt.at(i).as_str());
     }
-    return an::recompile(p, unsafe shim::sc_host_platform(), ws.root.as_str(), "", &fv, &tv, diags, st);
+    let ok = an::recompile(p, unsafe shim::sc_host_platform(), ws.root.as_str(), "", &fv, &tv, diags, st);
+    if ok {
+        settle(p, ovf, diags);
+    }
+    return ok;
+}
+
+fn never_stop(_ctx: *mut void, _between: bool) bool {
+    return false;
+}
+
+// The server's borrow round after an analysis, run to its end.
+fn settle(p: &mut loader::Package, ovf: &Vector<String>, diags: &mut Vector<an::DiagRec>) {
+    let mut fv = Vector::<str>::new();
+    for i in 0..ovf.len() {
+        fv.push(ovf.at(i).as_str());
+    }
+    let r = an::borrowck_pending(p, diags, &fv, never_stop, null);
+    assert(!r.canceled, "a round that is never asked to stop finishes");
 }
 
 // One incremental round and the diagnostic oracle only (the workspaces below need no `bee`).
@@ -152,7 +172,19 @@ fn fresh(ws: &Ws, ovf: &Vector<String>, ovt: &Vector<String>, diags: &mut Vector
         f2.push(ovf.at(i).clone());
         t2.push(ovt.at(i).clone());
     }
-    return an::compile(ws.root.as_str(), ws.dir.as_str(), "", "std", unsafe shim::sc_host_platform(), f2, t2, "", diags);
+    let mut p = an::compile(
+        ws.root.as_str(),
+        ws.dir.as_str(),
+        "",
+        "std",
+        unsafe shim::sc_host_platform(),
+        f2,
+        t2,
+        "",
+        diags,
+    );
+    settle(&mut p, ovf, diags);
+    return p;
 }
 
 // Multiset equality over the semantic identity of each record.
@@ -1025,8 +1057,736 @@ fn main() i32 {
     ovt2.push(String::from_str(a2));
     let mut st2 = an::RecompileStats {};
     let ok2 = recompile_ov(&ws, &mut p, &ovf, &ovt2, &mut diags, &mut st2);
-    assert(ok2 && st2.passes == 0 && st2.bodies_back == 0, "a held module serves the next round directly");
+    assert(ok2, "the next round succeeds");
+    assert(st2.passes == 0, "a held module serves the next round directly: no pass");
+    assert(st2.bodies_back == 0, "a held module serves the next round directly: no body comes back");
     let mut rd2 = Vector::<an::DiagRec>::new();
     let _rp2 = fresh(&ws, &ovf, &ovt2, &mut rd2);
     assert(diags_equal(&diags, &rd2), "steady state matches fresh");
+}
+
+// Module `m`'s analysis as node-id independent text, one line per node in sorted order: its kind,
+// its span, the declaration it resolves to (module path, declaration span) and its type. The body
+// arena takes part when `bodies` is set.
+fn state_lines(p: &loader::Package, m: usize, bodies: bool) Vector<String> {
+    let a = &p.modules.at(m).ast;
+    let src = p.modules.at(m).source.as_str();
+    let mut out = Vector::<String>::new();
+    let nn = if bodies {
+        a.nnodes();
+    } else {
+        a.nodes.len();
+    };
+    for k in 0..nn {
+        let id = a.nth_id(k);
+        let n = a.at_const(id);
+        let mut line = format("{} {}..{}", n.kind as u32, n.span.start, n.span.end);
+        let d = a.resolution_def(id);
+        if d.node != NODE_NONE {
+            let ta = unsafe &*p.module_ast_const(d.module);
+            line.format_into(" -> {}@{}", p.modules.at(d.module as usize).path.as_str(), ta.at_const(d.node).span.start);
+        }
+        let t = a.type_of(id);
+        if t != TYPE_NONE {
+            let ts = tc::type_str_of(p, a, src, t);
+            line.push_str(" : ");
+            line.push_string(&ts);
+        }
+        out.push(line);
+    }
+    out.sort();
+    return out;
+}
+
+// True when the incremental package `p` holds the analysis a fresh one (`q`) holds: per module (by
+// file), the same source, the same arena sizes, and the same per-node resolutions and types. Body
+// ownership is a retention policy, not analysis: a round holds a body the constant engine
+// demanded, so the body arenas compare where both are live. The first difference prints.
+fn state_equal(p: &loader::Package, q: &loader::Package) bool {
+    if p.modules.len() != q.modules.len() {
+        eprintln("state_equal: {} modules vs {}", p.modules.len(), q.modules.len());
+        return false;
+    }
+    for i in 0..p.modules.len() {
+        let mi = p.modules.at(i);
+        let mut j = q.modules.len();
+        for k in 0..q.modules.len() {
+            if q.modules.at(k).file.as_str() == mi.file.as_str() {
+                j = k;
+            }
+        }
+        if j == q.modules.len() {
+            eprintln("state_equal: {} is not in the fresh package", mi.file.as_str());
+            return false;
+        }
+        let mj = q.modules.at(j);
+        if mi.source.as_str() != mj.source.as_str() {
+            eprintln("state_equal: {}: the sources differ", mi.file.as_str());
+            return false;
+        }
+        let bodies = !mi.ast.b.released && !mj.ast.b.released;
+        if mi.ast.nodes.len() != mj.ast.nodes.len() || bodies && mi.ast.b.nodes.len() != mj.ast.b.nodes.len() {
+            eprintln(
+                "state_equal: {}: arenas {}+{} vs {}+{}",
+                mi.file.as_str(),
+                mi.ast.nodes.len(),
+                mi.ast.b.nodes.len(),
+                mj.ast.nodes.len(),
+                mj.ast.b.nodes.len(),
+            );
+            return false;
+        }
+        let a = state_lines(p, i, bodies);
+        let b = state_lines(q, j, bodies);
+        for k in 0..a.len() {
+            if a.at(k).as_str() != b.at(k).as_str() {
+                eprintln("state_equal: {}: `{}` vs `{}`", mi.file.as_str(), a.at(k).as_str(), b.at(k).as_str());
+                return false;
+            }
+        }
+        if p.recur.reported[i] != q.recur.reported[j] {
+            eprintln(
+                "state_equal: {}: reported by the recursion check {} vs {}",
+                mi.file.as_str(),
+                p.recur.reported[i],
+                q.recur.reported[j],
+            );
+            return false;
+        }
+        let sa = summary_lines(p, i);
+        let sb = summary_lines(q, j);
+        if sa.len() != sb.len() {
+            eprintln("state_equal: {}: {} function summaries vs {}", mi.file.as_str(), sa.len(), sb.len());
+            return false;
+        }
+        for k in 0..sa.len() {
+            if sa.at(k).as_str() != sb.at(k).as_str() {
+                eprintln(
+                    "state_equal: {}: summary `{}` vs `{}`",
+                    mi.file.as_str(),
+                    sa.at(k).as_str(),
+                    sb.at(k).as_str(),
+                );
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// Module `m`'s recursion summaries (`Package.recur`) as node-id independent text, one sorted line per
+// function: its declaration's span start, its entry, and per point its kind, span, callee (module
+// path, declaration span) and successors.
+fn summary_lines(p: &loader::Package, m: usize) Vector<String> {
+    let s = p.recur.mods.at(m);
+    let a = &p.modules.at(m).ast;
+    let mut out = Vector::<String>::new();
+    for fi in 0..s.fns.len() {
+        let fs = *s.fns.at(fi);
+        let mut line = format("fn@{} entry {}", a.at_const(fs.node).span.start, fs.entry);
+        for x in 0..fs.count {
+            let pt = *s.points.at((fs.first + x) as usize);
+            line.format_into(" | {} {}..{}", pt.kind, pt.span.start, pt.span.end);
+            if pt.kind == recur::PK_CALL {
+                let ta = unsafe &*p.module_ast_const(pt.callee.module);
+                line.format_into(
+                    " -> {}@{}",
+                    p.modules.at(pt.callee.module as usize).path.as_str(),
+                    ta.at_const(pt.callee.node).span.start,
+                );
+            }
+            for k in 0..pt.succ_len {
+                line.format_into(" {}", s.succ[(pt.succ_start + k) as usize]);
+            }
+        }
+        out.push(line);
+    }
+    out.sort();
+    return out;
+}
+
+// One incremental round, then the full oracle: the records (every pass: analysis, borrow check,
+// unused-item lint, recursion), the whole analyzed state and the reachability its scans solve to
+// equal a fresh analysis of the same buffers.
+fn round_state(
+    ws: &Ws,
+    p: &mut loader::Package,
+    diags: &mut Vector<an::DiagRec>,
+    ovf: &Vector<String>,
+    ovt: &Vector<String>,
+    label: str,
+) {
+    let mut st = an::RecompileStats {};
+    assert(recompile_ov(ws, p, ovf, ovt, diags, &mut st), label);
+    let mut rd = Vector::<an::DiagRec>::new();
+    let mut rp = fresh(ws, ovf, ovt, &mut rd);
+    assert(diags_equal(diags, &rd), label);
+    assert(state_equal(p, &rp), label);
+    assert(reach_equal(p, &mut rp), label);
+}
+
+// True when the coroutine and cancellation reachability solved over `p`'s retained scans equals the
+// one solved over a fresh analysis's (`q`): per module (by module path), the same coroutine spans, instance
+// spans and cancellation marks, and the same package-wide bits. The states return to unsolved.
+fn reach_equal(p: &mut loader::Package, q: &mut loader::Package) bool {
+    let ps = replace(&mut p.reach_scans, Vector::<loader::ReachScan>::new());
+    p.reach_solve(&ps);
+    p.reach_scans = ps;
+    let qs = replace(&mut q.reach_scans, Vector::<loader::ReachScan>::new());
+    q.reach_solve(&qs);
+    q.reach_scans = qs;
+    let mut same = p.cancel_used == q.cancel_used && p.cancel_fnv == q.cancel_fnv && p.co_inst.len() == q.co_inst.len();
+    for i in 0..p.modules.len() {
+        let mut j = q.modules.len();
+        for k in 0..q.modules.len() {
+            if q.modules.at(k).path.as_str() == p.modules.at(i).path.as_str() {
+                j = k;
+            }
+        }
+        if j == q.modules.len() {
+            same = false;
+            continue;
+        }
+        same = same && p.co_spans.at(i).eq(q.co_spans.at(j)) && p.cancel_marks.at(i).len() == q.cancel_marks.at(j).len();
+        if i < p.co_inst.len() && j < q.co_inst.len() {
+            same = same && p.co_inst.at(i).eq(q.co_inst.at(j));
+        }
+        let mut it = p.cancel_marks.at(i).iter();
+        loop {
+            switch it.next() {
+                Some(e) => {
+                    same = same && q.cancel_marks.at(j).contains(e);
+                },
+                _ => {
+                    break;
+                },
+            };
+        }
+    }
+    if !same {
+        eprintln("reach_equal: the solved reachability differs from a fresh analysis's");
+    }
+    p.co_state = 0;
+    p.cancel_state = 0;
+    q.co_state = 0;
+    q.cancel_state = 0;
+    return same;
+}
+
+// The text of `base` with the first `from` replaced by `to`.
+fn edited(base: str, from: str, to: str) String {
+    let at = base.find(from);
+    assert(at >= 0, "the edited text holds the replaced text");
+    let mut s = String::from_str(base.slice(0, at as usize));
+    s.push_str(to);
+    s.push_str(base.slice(at as usize + from.len(), base.len()));
+    return s;
+}
+
+// A series of edits of every kind the incremental path takes (a body splice, a signature edit and
+// its revert, a `const fn` body, a borrow error and its fix, a reopen of a closed document), each
+// followed by the full state oracle: incremental analysis and a fresh one hold the same state.
+@test
+fn incr_state_equals_fresh_over_edit_series() {
+    let ws = ws_new();
+    let mut ovf = Vector::<String>::new();
+    let mut ovt = Vector::<String>::new();
+    ov(&ws, "d.spc", D0, &mut ovf, &mut ovt);
+    ov(&ws, "b.spc", B0, &mut ovf, &mut ovt);
+    let mut diags = Vector::<an::DiagRec>::new();
+    let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
+    let mut rd0 = Vector::<an::DiagRec>::new();
+    let rp0 = fresh(&ws, &ovf, &ovt, &mut rd0);
+    assert(state_equal(&p, &rp0), "two fresh analyses hold the same state");
+    ovt.set(0, edited(D0, "let w = v + 1;", "let w = v + 2 + 100;"));
+    round_state(&ws, &mut p, &mut diags, &ovf, &ovt, "body splice");
+    ovt.set(
+        1,
+        edited(
+            B0,
+            "pub fn bee() i32 {\n    return c::cee() + 1;",
+            "pub fn bee(extra: i32) i32 {\n    return c::cee() + extra;",
+        ),
+    );
+    round_state(&ws, &mut p, &mut diags, &ovf, &ovt, "signature edit");
+    assert(errors_in(&p, &diags, "/a.spc") != 0, "the caller reports against the new signature");
+    ovt.set(1, String::from_str(B0));
+    round_state(&ws, &mut p, &mut diags, &ovf, &ovt, "signature revert");
+    let c1 = edited(C0, "return 2;", "return 5;");
+    ov(&ws, "c.spc", c1.as_str(), &mut ovf, &mut ovt);
+    round_state(&ws, &mut p, &mut diags, &ovf, &ovt, "const fn body");
+    ovt.set(
+        0,
+        edited(D0, "let w = v + 1;\n    return w;", "let mut w = v + 1;\n    let r = &w;\n    w += 1;\n    return *r;"),
+    );
+    round_state(&ws, &mut p, &mut diags, &ovf, &ovt, "borrow error");
+    assert(borrow_errors(&diags) == 1, "the borrow check reports the assignment under the borrow");
+    ovt.set(0, String::from_str(D0));
+    round_state(&ws, &mut p, &mut diags, &ovf, &ovt, "borrow fix");
+    assert(borrow_errors(&diags) == 0, "the fix clears the borrow record");
+    // Close d.spc (its bodies release), then open it again.
+    let _ = ovf.remove(0);
+    let _ = ovt.remove(0);
+    round_state(&ws, &mut p, &mut diags, &ovf, &ovt, "close");
+    ov(&ws, "d.spc", D0, &mut ovf, &mut ovt);
+    round_state(&ws, &mut p, &mut diags, &ovf, &ovt, "reopen");
+}
+
+// A plain function's body is read by the constant engine through a `const fn` of another module: a
+// body edit there changes an array length two modules away, so the folding module re-analyzes.
+@test
+fn incr_plain_body_reaches_const_fn_folder() {
+    let proj = cli::proj_new();
+    proj.mkfile("a.spc", E_A);
+    proj.mkfile("c.spc", E_C);
+    proj.mkfile("d.spc", E_D);
+    let dir = String::from_str(proj.dir());
+    let mut root = String::from_str(dir.as_str());
+    root.push_str("/a.spc");
+    let ws = Ws { proj: proj, root: root, dir: dir };
+    let mut ovf = Vector::<String>::new();
+    let mut ovt = Vector::<String>::new();
+    ov(&ws, "d.spc", E_D, &mut ovf, &mut ovt);
+    let mut diags = Vector::<an::DiagRec>::new();
+    let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
+    assert(errors_in(&p, &diags, "/a.spc") == 0, "three elements fill the folded length");
+    ovt.set(0, edited(E_D, "return 3;", "return 4;"));
+    round_state(&ws, &mut p, &mut diags, &ovf, &ovt, "plain body read by a const fn");
+    assert(errors_in(&p, &diags, "/a.spc") != 0, "the folded length no longer matches the elements");
+}
+
+// The constant engine evaluates with the budgets of the root's build: a constant within the
+// default step budget but past build.toml's `const-eval-steps` is reported, as the build reports it.
+const CE_SRC: str = M"(const fn sum(n: i64) i64 {
+    let mut s: i64 = 0;
+    let mut i: i64 = 0;
+    while i < n {
+        s += i;
+        i += 1;
+    }
+    return s;
+}
+
+const N: i64 = sum(20000);
+
+fn main() i32 {
+    return (N - 199990000) as i32;
+}
+)";
+
+// The analysis records of `a.spc` under build.toml text `manifest`.
+fn budget_records(manifest: str, diags: &mut Vector<an::DiagRec>) {
+    let proj = cli::proj_new();
+    proj.mkfile("build.toml", manifest);
+    proj.mkfile("a.spc", CE_SRC);
+    let dir = String::from_str(proj.dir());
+    let mut root = String::from_str(dir.as_str());
+    root.push_str("/a.spc");
+    let ws = Ws { proj: proj, root: root, dir: dir };
+    let ovf = Vector::<String>::new();
+    let ovt = Vector::<String>::new();
+    let _p = fresh(&ws, &ovf, &ovt, diags);
+}
+
+@test
+fn const_eval_budget_follows_manifest() {
+    let mut dflt = Vector::<an::DiagRec>::new();
+    budget_records("bin = \"app\"\nroot = \"a.spc\"\n", &mut dflt);
+    assert(dflt.len() == 0, "the default budget evaluates the constant");
+    let mut small = Vector::<an::DiagRec>::new();
+    budget_records("bin = \"app\"\nroot = \"a.spc\"\nconst-eval-steps = 1000\n", &mut small);
+    let mut hit = false;
+    for i in 0..small.len() {
+        if small.at(i).severity == 1 && small.at(i).msg.as_str().contains("const-eval step budget exceeded") {
+            hit = true;
+        }
+    }
+    assert(hit, "the manifest's budget is exceeded, as the build reports");
+}
+
+// Unbounded-recursion records.
+fn recur_errors(diags: &Vector<an::DiagRec>) usize {
+    let mut n: usize = 0;
+    for i in 0..diags.len() {
+        if diags.at(i).phase == an::PH_RECUR && diags.at(i).severity == 1 {
+            n += 1;
+        }
+    }
+    return n;
+}
+
+// A recursion cycle through two modules is reported in both, and a body edit of one that gives the
+// cycle a way out clears both records (the other module's analysis and borrow check stand), as a
+// fresh analysis of the same buffers does; the revert reports them again.
+@test
+fn incr_cross_module_recursion_follows_edits() {
+    let c0: str = M"(import b;
+
+pub fn pong(n: i32) i32 {
+    if n > 3 {
+        return b::ping(n);
+    }
+    return b::ping(n - 1);
+}
+)";
+    let ws = ws_of(
+        M"(import b;
+import d;
+
+fn main() i32 {
+    return b::ping(1) + d::dee();
+}
+)",
+        M"(import c;
+
+pub fn ping(n: i32) i32 {
+    return c::pong(n + 1);
+}
+)",
+        c0,
+        M"(pub fn dee() i32 {
+    return 0;
+}
+)",
+    );
+    let mut ovf = Vector::<String>::new();
+    let mut ovt = Vector::<String>::new();
+    ov(&ws, "c.spc", c0, &mut ovf, &mut ovt);
+    let mut diags = Vector::<an::DiagRec>::new();
+    let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
+    assert(recur_errors(&diags) == 2, "both members of the cycle are reported");
+    assert(errors_in(&p, &diags, "/b.spc") == 1, "one record in b");
+    assert(errors_in(&p, &diags, "/c.spc") == 1, "one record in c");
+    ovt.set(0, edited(c0, "        return b::ping(n);", "        return n;"));
+    round_state(&ws, &mut p, &mut diags, &ovf, &ovt, "cycle broken");
+    assert(recur_errors(&diags) == 0, "the edit clears both records");
+    ovt.set(0, String::from_str(c0));
+    round_state(&ws, &mut p, &mut diags, &ovf, &ovt, "cycle restored");
+    assert(recur_errors(&diags) == 2, "the revert reports both again");
+}
+
+// The `@tail_recurse` error a cancellation check after the self call gives follows the reachability
+// another module decides: b's function is task-reachable only through a's `launch`, so a body edit of
+// a that calls it directly clears b's error (b's analysis stands, its borrow check runs again), and
+// the revert reports it again, as fresh analyses of the same buffers do.
+@test
+fn incr_cancellation_reach_follows_another_module() {
+    let a0: str = M"(import b;
+import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+
+fn main() i32 {
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let w = wg.clone();
+    launch || {
+        let _ = b::spin(3);
+        w.done();
+    };
+    let _ = rt::request_cancel(rt::current_key(), rt::CR_USER);
+    wg.wait();
+    rt::shutdown();
+    return 0;
+}
+)";
+    let ws = ws_of(
+        a0,
+        M"(import std::parallel::time as time;
+
+@tail_recurse
+pub fn spin(n: i64) i64 {
+    if n == 0 {
+        return 0;
+    }
+    time::sleep(time::Duration::from_nanos(1));
+    return spin(n - 1);
+}
+)",
+        C0,
+        D0,
+    );
+    let mut ovf = Vector::<String>::new();
+    let mut ovt = Vector::<String>::new();
+    ov(&ws, "a.spc", a0, &mut ovf, &mut ovt);
+    let mut diags = Vector::<an::DiagRec>::new();
+    let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
+    // The runtime's deferred static_asserts read layouts its own check recorded: they fold, and no
+    // analysis error holds the borrow checks of its importers back.
+    assert(errors_in(&p, &diags, "/parallel/runtime.spc") == 0, "the runtime analyzes without an error");
+    assert(cancel_errors(&diags) == 1, "the launched self call keeps a cancellation check after it");
+    assert(errors_in(&p, &diags, "/b.spc") == 1, "the error is b's");
+    ovt.set(
+        0,
+        edited(
+            a0,
+            "launch || {\n        let _ = b::spin(3);\n        w.done();\n    };",
+            "let _ = b::spin(3);\n    w.done();",
+        ),
+    );
+    round_state(&ws, &mut p, &mut diags, &ovf, &ovt, "launch removed");
+    assert(cancel_errors(&diags) == 0, "no task runs the function: the error clears");
+    ovt.set(0, String::from_str(a0));
+    round_state(&ws, &mut p, &mut diags, &ovf, &ovt, "launch restored");
+    assert(cancel_errors(&diags) == 1, "the revert reports it again");
+}
+
+fn cancel_errors(diags: &Vector<an::DiagRec>) usize {
+    let mut n: usize = 0;
+    for i in 0..diags.len() {
+        if diags.at(i).phase == an::PH_BORROW && diags.at(i).msg.as_str().contains("it can accept a task cancellation") {
+            n += 1;
+        }
+    }
+    return n;
+}
+
+// Borrow-check records.
+fn borrow_errors(diags: &Vector<an::DiagRec>) usize {
+    let mut n: usize = 0;
+    for i in 0..diags.len() {
+        if diags.at(i).phase == an::PH_BORROW && diags.at(i).severity == 1 {
+            n += 1;
+        }
+    }
+    return n;
+}
+
+fn always_stop(_ctx: *mut void, _between: bool) bool {
+    return true;
+}
+
+// A request always waits: the stop the server answers between two checks.
+fn stop_between(_ctx: *mut void, between: bool) bool {
+    return between;
+}
+
+// A round stopped at every module boundary still finishes one check per round, so the owed checks
+// end within their count of rounds however many requests arrive.
+@test
+fn borrow_round_progresses_under_requests() {
+    let ws = ws_new();
+    let mut diags = Vector::<an::DiagRec>::new();
+    let mut p = an::compile(
+        ws.root.as_str(),
+        ws.dir.as_str(),
+        "",
+        "std",
+        unsafe shim::sc_host_platform(),
+        Vector::<String>::new(),
+        Vector::<String>::new(),
+        "",
+        &mut diags,
+    );
+    let mut owed: usize = 0;
+    for m in 0..p.bc_pending.len() {
+        if p.bc_pending[m] {
+            owed += 1;
+        }
+    }
+    assert(owed == 4, "the four workspace modules owe their checks");
+    let fv = Vector::<str>::new();
+    let mut rounds: usize = 0;
+    for _ in 0..owed + 1 {
+        let r = an::borrowck_pending(&mut p, &mut diags, &fv, stop_between, null);
+        rounds += 1;
+        if !r.canceled {
+            break;
+        }
+        assert(r.checked, "every stopped round finished a check first");
+    }
+    assert(rounds == owed, "one check per round, and the last round ends unstopped");
+    for m in 0..p.bc_pending.len() {
+        assert(!p.bc_pending[m], "nothing is owed");
+    }
+}
+
+// The borrow round runs after the analysis and keeps the bodies it still owes: a round asked to
+// stop leaves the check owed and the records as they were; the next round finishes it, and the
+// closed module releases its bodies then.
+@test
+fn borrow_round_stops_and_resumes() {
+    let d1 = edited(
+        D0,
+        "let w = v + 1;\n    return w;",
+        "let mut w = v + 1;\n    let r = &w;\n    w += 1;\n    return *r;",
+    );
+    let ws = ws_of(A0, B0, C0, d1.as_str());
+    let mut diags = Vector::<an::DiagRec>::new();
+    let mut p = an::compile(
+        ws.root.as_str(),
+        ws.dir.as_str(),
+        "",
+        "std",
+        unsafe shim::sc_host_platform(),
+        Vector::<String>::new(),
+        Vector::<String>::new(),
+        "",
+        &mut diags,
+    );
+    let dm = mod_of(&p, "/d.spc");
+    assert(borrow_errors(&diags) == 0, "the analysis alone reports no borrow record");
+    assert(dm < p.bc_pending.len(), "the module has a borrow-check record");
+    assert(p.bc_pending[dm], "the analysis owes the borrow check");
+    assert(!p.modules.at(dm).ast.b.released, "a module that owes its borrow check keeps its bodies");
+    let fv = Vector::<str>::new();
+    let r = an::borrowck_pending(&mut p, &mut diags, &fv, always_stop, null);
+    assert(r.canceled, "a stop ends the round");
+    assert(!r.changed, "before the first item");
+    assert(p.bc_pending[dm], "the check stays owed");
+    assert(borrow_errors(&diags) == 0, "no borrow record yet");
+    let r2 = an::borrowck_pending(&mut p, &mut diags, &fv, never_stop, null);
+    assert(!r2.canceled, "the next round finishes");
+    assert(r2.changed, "the next round changes the records");
+    assert(borrow_errors(&diags) == 1, "the borrow record lands");
+    assert(!p.bc_pending[dm], "nothing is owed after the round");
+    assert(p.modules.at(dm).ast.b.released, "the closed module releases its bodies after its check");
+}
+
+// A body edit that changes a function's result attributability (a returned parameter becomes a
+// returned local) owes the borrow check of a caller whose analysis stands.
+@test
+fn borrow_round_follows_result_attributability() {
+    let ws = ws_of(
+        M"(import b;
+import d;
+
+fn main() i32 {
+    return b::bee() + d::dee();
+}
+)",
+        M"(import c;
+
+pub fn bee() i32 {
+    let x = 1;
+    let y = 2;
+    return *c::pick(&x, &y);
+}
+)",
+        M"(pub fn pick<'a>(x: &'a i32, y: &'a i32) &'a i32 {
+    let _ = y;
+    return x;
+}
+)",
+        M"(pub fn dee() i32 {
+    return 0;
+}
+)",
+    );
+    let mut ovf = Vector::<String>::new();
+    let mut ovt = Vector::<String>::new();
+    let c0 = M"(pub fn pick<'a>(x: &'a i32, y: &'a i32) &'a i32 {
+    let _ = y;
+    return x;
+}
+)";
+    ov(&ws, "c.spc", c0, &mut ovf, &mut ovt);
+    let mut diags = Vector::<an::DiagRec>::new();
+    let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
+    let bm = mod_of(&p, "/b.spc");
+    let cm = mod_of(&p, "/c.spc");
+    let pick = probe_decl(&p, cm, "pick");
+    assert(p.item_ret_attr(cm as ModuleId, pick) == 1, "a returned parameter attributes the result");
+    ovt.set(0, edited(c0, "    return x;", "    let t = x;\n    return t;"));
+    let mut fv = Vector::<str>::new();
+    let mut tv = Vector::<str>::new();
+    fv.push(ovf.at(0).as_str());
+    tv.push(ovt.at(0).as_str());
+    let mut st = an::RecompileStats {};
+    assert(
+        an::recompile(&mut p, unsafe shim::sc_host_platform(), ws.root.as_str(), "", &fv, &tv, &mut diags, &mut st),
+        "body edit round",
+    );
+    assert(st.body_only == 1, "the edit is body-only");
+    assert(st.analyzed == 1, "the body edit re-analyzes its own module alone");
+    assert(p.item_ret_attr(cm as ModuleId, pick) == 0, "a returned local does not attribute the result");
+    assert(p.bc_pending[bm], "the caller owes its borrow check again");
+    assert(!p.modules.at(bm).ast.b.released, "and its bodies are live for it");
+    settle(&mut p, &ovf, &mut diags);
+    let mut rd = Vector::<an::DiagRec>::new();
+    let rp = fresh(&ws, &ovf, &ovt, &mut rd);
+    assert(diags_equal(&diags, &rd), "the records match a fresh analysis");
+    assert(state_equal(&p, &rp), "the state matches a fresh analysis");
+}
+
+// The unused-item lint is package-wide and follows every edit: a removed call leaves the private
+// callee unused, the restored call clears the warning.
+@test
+fn unused_item_lint_follows_edits() {
+    let d0: str = M"(pub fn dee(v: i32) i32 {
+    return helper(v);
+}
+
+fn helper(v: i32) i32 {
+    return v + 1;
+}
+)";
+    let ws = ws_of(A0, B0, C0, d0);
+    let mut ovf = Vector::<String>::new();
+    let mut ovt = Vector::<String>::new();
+    ov(&ws, "d.spc", d0, &mut ovf, &mut ovt);
+    let mut diags = Vector::<an::DiagRec>::new();
+    let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
+    assert(unused_warnings(&diags) == 0, "the helper is used");
+    ovt.set(0, edited(d0, "return helper(v);", "return v;"));
+    round_state(&ws, &mut p, &mut diags, &ovf, &ovt, "call removed");
+    assert(unused_warnings(&diags) == 1, "the helper is unused");
+    ovt.set(0, String::from_str(d0));
+    round_state(&ws, &mut p, &mut diags, &ovf, &ovt, "call restored");
+    assert(unused_warnings(&diags) == 0, "the warning clears");
+}
+
+fn unused_warnings(diags: &Vector<an::DiagRec>) usize {
+    let mut n: usize = 0;
+    for i in 0..diags.len() {
+        if diags.at(i).phase == an::PH_UNUSED {
+            n += 1;
+        }
+    }
+    return n;
+}
+
+// A static_assert the analysis cannot decide in module order (an import cycle types the asserting
+// module before the `const fn` it calls) evaluates once every module is typed, and its failure is
+// reported as the driver reports it.
+@test
+fn deferred_static_assert_reports() {
+    let proj = cli::proj_new();
+    proj.mkfile(
+        "a.spc",
+        M"(import b;
+
+pub const fn k() i32 {
+    return 2;
+}
+
+fn main() i32 {
+    return b::bee();
+}
+)",
+    );
+    proj.mkfile("b.spc", M"(import a;
+
+static_assert(a::k() == 3);
+
+pub fn bee() i32 {
+    return 0;
+}
+)");
+    let dir = String::from_str(proj.dir());
+    let mut root = String::from_str(dir.as_str());
+    root.push_str("/a.spc");
+    let ws = Ws { proj: proj, root: root, dir: dir };
+    let ovf = Vector::<String>::new();
+    let ovt = Vector::<String>::new();
+    let mut diags = Vector::<an::DiagRec>::new();
+    let p = fresh(&ws, &ovf, &ovt, &mut diags);
+    let bm = mod_of(&p, "/b.spc");
+    let mut hit = false;
+    for i in 0..diags.len() {
+        let d = diags.at(i);
+        if d.module as usize == bm && d.severity == 1 && d.msg.as_str() == "static assertion failed" {
+            hit = true;
+        }
+    }
+    assert(hit, "the deferred assertion fails");
 }

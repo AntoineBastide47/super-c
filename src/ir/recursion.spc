@@ -79,6 +79,11 @@ extend Sums {
     pub fn new() Sums {
         return Sums { fns: Vector::<FnSum>::new(), points: Vector::<Point>::new(), succ: Vector::<u32>::new() };
     }
+
+    /// Heap bytes held (capacity).
+    pub const fn retained_bytes(self: &Self) usize {
+        return self.fns.capacity() * sizeof(FnSum) + self.points.capacity() * sizeof(Point) + self.succ.capacity() * 4;
+    }
 }
 
 /// The language server's recursion state of a package: per module, the summaries of its last borrow
@@ -87,6 +92,17 @@ pub struct Summaries {
     pub reported: Vector<bool>, // per module: the server borrow checks it, so the check reports it
     pub mods: Vector<Sums>, // per module; empty before its first borrow round
     pub stale: bool,
+}
+
+extend Summaries {
+    /// Heap bytes held (capacity).
+    pub const fn retained_bytes(self: &Self) usize {
+        let mut b = self.reported.capacity() + self.mods.capacity() * sizeof(Sums);
+        for m in 0..self.mods.len() {
+            b += self.mods.at(m).retained_bytes();
+        }
+        return b;
+    }
 }
 
 /// Summarizes bodies into one `Sums`, with scratch kept across bodies.

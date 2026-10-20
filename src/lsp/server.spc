@@ -3,8 +3,9 @@
 // import-closure reach); every open/close/config change and any edit outside that domain falls back
 // to the full codegen-free recompile. SC_LSP_NO_INCR=1 forces the full path everywhere (parity mode);
 // SC_LSP_BUDGET_MB bounds retained packages (closed-file roots evict first, open docs pin theirs).
-// The process chdir()s to the workspace root at initialize, so manifest discovery, import rooting and
-// the src/ alt-root convention behave exactly like CLI runs from the project root.
+// After every message that left borrow checks owed, the borrow round runs (`borrowck_round`) and
+// publishes again; an edit that arrives meanwhile abandons it. Every path stays absolute: the
+// process keeps the working directory the client started it in.
 import stdio;
 import stdlib;
 import driver_shim as shim;
@@ -73,7 +74,12 @@ pub struct Server {
     pub initialized: bool, // initialize accepted exactly once
     pub revision: u64, // bumps on every workspace input transaction (open/change/close/disk/config)
     pub canceled: Vector<String>, // dumped ids of $/cancelRequest notifications not yet consumed
-    pub pending: Option<String>, // a message read ahead of the loop while folding rapid edits
+    // Messages read ahead of the loop (while folding rapid edits or polling during the borrow
+    // round), in arrival order, at most QUEUE_MAX, with each message's kind (Q_*).
+    pub queue: Vector<String>,
+    pub queue_kind: Vector<u8>,
+    pub input_end: bool, // a read ahead met the end of the input (or a framing error): the loop ends
+    pub bc_unpublished: bool, // a stopped borrow round changed records no publish carried yet
     // Negotiated client capabilities, read once at initialize.
     pub cap_hier_symbols: bool, // hierarchical documentSymbol trees
     pub cap_doc_changes: bool, // versioned documentChanges workspace edits
@@ -92,10 +98,13 @@ pub struct Server {
     pub tok_next: u64, // monotonically increasing semantic-token resultId source
 }
 
-/// One .spc file a directory walk found: its path as walked (under the folder) and its canonical form.
+/// One .spc file a directory walk found: its path as walked (under the folder), its canonical form,
+/// and the import roots `super-c lint` of the workspace analyzes it with (`Server::walk_dir`).
 pub struct SweptFile {
     pub path: String,
     pub canon: String,
+    pub root_dir: String,
+    pub alt_dir: String,
 }
 
 /// A workspace folder's .spc files from its last directory walk, sorted by `path` (byte order).
@@ -107,6 +116,67 @@ pub struct SweptDir {
 // Directory levels a workspace walk descends below its folder. Links are never followed, so only
 // a real directory cycle (a bind mount) could recurse further.
 const SWEEP_MAX_DEPTH: u32 = 64;
+
+// Messages the server reads ahead of the loop (`Server.queue`), and the didChange notifications
+// one analysis round folds.
+const QUEUE_MAX: usize = 256;
+const FOLD_MAX: usize = 65536;
+
+// The kind of a queued message (`Server.queue_kind`): a didChange notification (it folds into an
+// analysis round and stops the borrow round at once), a request (it stops the borrow round between
+// modules), or anything else (it waits for the round).
+const Q_OTHER: u8 = 0;
+const Q_EDIT: u8 = 1;
+const Q_REQUEST: u8 = 2;
+
+fn msg_kind(msg: str) u8 {
+    return switch json::parse(msg) {
+        Ok(v) => if v.value_str("jsonrpc") != "2.0" || !v.contains_key("method") {
+            Q_OTHER;
+        } else if v.contains_key("id") {
+            Q_REQUEST;
+        } else if v.value_str("method") == "textDocument/didChange" {
+            Q_EDIT;
+        } else {
+            Q_OTHER;
+        },
+        Err(_) => Q_OTHER,
+    };
+}
+
+// The borrow round's stop poll (`analysis::borrowck_pending`): the messages that arrived since the
+// round began are read into the queue. A queued didChange stops the round at the next item, so a
+// superseded buffer's borrow records are never published; a queued request stops it at the next
+// module (`between`), so the request waits for one module's check at most.
+struct BcStop {
+    pub rd: *mut transport::Reader,
+    pub queue: *mut Vector<String>,
+    pub kind: *mut Vector<u8>,
+    pub end: *mut bool,
+}
+
+fn bc_stop(ctx: *mut void, between: bool) bool {
+    let s = unsafe &mut *(ctx as *mut BcStop);
+    let q = unsafe &mut *s.queue;
+    let kd = unsafe &mut *s.kind;
+    let end = unsafe &mut *s.end;
+    while q.len() < QUEUE_MAX && !*end && unsafe (*s.rd).pending() {
+        let mo = transport::read_message(unsafe &mut *s.rd);
+        if mo.is_none() {
+            *end = true;
+            break;
+        }
+        let msg = mo.unwrap();
+        kd.push(msg_kind(msg.as_str()));
+        q.push(msg);
+    }
+    for k in 0..kd.len() {
+        if kd[k] == Q_EDIT || between && kd[k] == Q_REQUEST {
+            return true;
+        }
+    }
+    return false;
+}
 
 // JSON-RPC plumbing.
 
@@ -380,19 +450,18 @@ const fn valid_id(id: &json::JSON) bool {
 /// The blocking stdio server loop; returns the process exit code: 0 for a clean shutdown-then-exit,
 /// 1 on EOF (client vanished) or an `exit` without a prior `shutdown`.
 pub fn run(std_dir: str, target: i32) i32 {
-    let mut sv = Server {
-        std_dir: String::from_str(std_dir),
-        target: target,
-        pending: Option::<String>::None,
-        max_results: 5000,
-    };
+    let mut sv = Server { std_dir: String::from_str(std_dir), target: target, max_results: 5000 };
     let fin = stdio::stdin();
     let fout = stdio::stdout();
     let mut rd = transport::Reader::new(fin);
     loop {
-        let msgo = switch replace(&mut sv.pending, Option::<String>::None) {
-            Some(s) => Option::<String>::Some(s),
-            None => transport::read_message(&mut rd),
+        let msgo = if sv.queue.len() != 0 {
+            let _ = sv.queue_kind.remove(0);
+            sv.queue.remove(0);
+        } else if sv.input_end {
+            Option::<String>::None;
+        } else {
+            transport::read_message(&mut rd);
         };
         if msgo.is_none() {
             // EOF: the client vanished without exit.
@@ -599,6 +668,9 @@ pub fn run(std_dir: str, target: i32) i32 {
             send_error(fout, req.at_key("id"), -32601, "method not found");
         }
         // Remaining unknown notifications ($/setTrace, ...) are ignored.
+        if sv.initialized && !sv.shutdown_seen {
+            sv.borrowck_round(fout, &mut rd);
+        }
     }
 }
 
@@ -623,12 +695,12 @@ extend Server {
         return -1;
     }
 
-    // The workspace-batch root (the only root with sweep=true; its origin is "").
+    // A workspace-batch root (sweep=true: one per folder and import roots; its origin is "").
     const fn is_batch(self: &Self, r: usize) bool {
         return self.roots.at(r).sweep;
     }
 
-    // First BUILT root containing `path` (manifest root first; the workspace batch LAST, so an open
+    // First BUILT root containing `path` (manifest root first; the workspace batches LAST, so an open
     // doc's per-file root, built from the live overlay, wins over the batch's disk-built copy),
     // -1 if none. A budget-evicted root (files kept for diag republishing, package dropped) owns
     // nothing: its module table is empty, so feature queries must not land on it.
@@ -653,7 +725,7 @@ extend Server {
     }
 
     // Every open doc must belong to some root; docs outside every built package get a per-file root
-    // (the `super-c lint <file>` recipe: file dir as root, src/ as the alt root when it exists).
+    // (the import roots the workspace walk gives the file, `file_roots`).
     // Batch ownership does not count: its copy is disk-built, so an open doc needs its own root.
     // `rescan` walks the workspace folders again; otherwise the batch reuses the last walk.
     fn ensure_roots(self: &mut Self, rescan: bool) {
@@ -678,12 +750,14 @@ extend Server {
             if have {
                 continue;
             }
-            let alt = self.folder_alt_of(path);
+            let mut rd = String::new();
+            let mut ad = String::new();
+            self.file_roots(path, &mut rd, &mut ad);
             self.roots.push(
                 Root {
                     root_file: String::from_str(path),
-                    root_dir: String::from_str(loader::dirname_of(path)),
-                    alt_dir: alt,
+                    root_dir: rd,
+                    alt_dir: ad,
                     origin: String::from_str(path),
                     pkg: loader::Package::new(),
                 },
@@ -703,24 +777,67 @@ extend Server {
         return "";
     }
 
-    // The `src/` alt root of the folder owning `path` when that directory exists, else "".
-    fn folder_alt_of(self: &Self, path: str) String {
+    // The import roots of `path` (`roots_of`, as the workspace walk gives them): its project is the
+    // nearest directory between the file and its workspace folder that holds a build.toml (a
+    // nested project builds with its own roots), else the folder. A file outside every folder
+    // resolves its imports beside itself.
+    fn file_roots(self: &Self, path: str, rd: &mut String, ad: &mut String) {
+        let dir = loader::dirname_of(path);
+        *rd = String::from_str(dir);
+        *ad = String::new();
         let fo = self.folder_of(path);
-        if fo.len() != 0 {
-            let alt = Server::abs_under(fo, "src");
-            if dutil::is_dir(alt.as_str()) {
-                return alt;
-            }
+        if fo.len() == 0 {
+            return;
         }
-        return String::new();
+        let mut proj = String::from_str(dir);
+        let mut sub = String::from_str(dir);
+        // Each step drops one path component and stops at the folder; `sub` is the directory the
+        // step left, so at the end the top directory under the project that holds the file.
+        for _ in 0..SWEEP_MAX_DEPTH + 1 {
+            if proj.len() <= fo.len() || Server::has_manifest_file(proj.as_str()) {
+                break;
+            }
+            sub = proj;
+            proj = String::from_str(loader::dirname_of(sub.as_str()));
+        }
+        let src = Server::abs_under(proj.as_str(), "src");
+        let alt = if dutil::is_dir(src.as_str()) {
+            src.as_str();
+        } else {
+            "";
+        };
+        Server::roots_of(path, dir, proj.as_str(), alt, sub.as_str(), self.std_dir.as_str(), rd, ad);
+    }
+
+    // The import roots (`rd`, `ad`) the workspace lint gives file `path` in directory `dir` of the
+    // project at `proj` (`lint_project` in the driver's main): in a project with a `src/` (`alt`),
+    // the project and its `src/` when the file's imports resolve there, else the file's own
+    // directory (a standalone program); in a project without one, the project for a file at its
+    // top and the top directory `sub` under it that holds any other.
+    fn roots_of(path: str, dir: str, proj: str, alt: str, sub: str, std_dir: str, rd: &mut String, ad: &mut String) {
+        *rd = String::from_str(proj);
+        *ad = String::from_str(alt);
+        if alt.len() != 0 && !loader::imports_resolve(path, proj, alt, std_dir) {
+            *rd = String::from_str(dir);
+            *ad = String::new();
+        } else if alt.len() == 0 && dir != proj {
+            *rd = String::from_str(sub);
+        }
+    }
+
+    // Directory `dir` holds a build.toml file.
+    fn has_manifest_file(dir: str) bool {
+        let mut man = Server::abs_under(dir, "build.toml");
+        return unsafe shim::sc_stat_isdir(man.cstr()) == 0;
     }
 
     // The workspace sweep: every .spc under the build.toml folder that no other package owns joins
-    // THE batch root, one shared package (the `super-c lint` recipe) instead of a resident package
-    // per file. Hidden entries and the manifest out-dir are skipped. The batch rebuilds only when its
-    // member set changes (a file appears/vanishes, a doc opens into a per-file root or closes back);
-    // otherwise its cached diagnostics republish. `rescan` repeats the directory walks; a document
-    // edit cannot change the files on disk, so its rounds filter the last walk again.
+    // the batch root of its import roots, one shared package per roots (the `super-c lint` recipe)
+    // instead of a resident package per file. Hidden entries and the manifest out-dirs are skipped. A
+    // batch rebuilds only when its member set changes (a file appears/vanishes, a doc opens into a
+    // per-file root or closes back); otherwise its cached diagnostics republish. `rescan` repeats the
+    // directory walks; a document edit cannot change the files on disk, so its rounds filter the
+    // last walk again.
     fn ensure_sweep_roots(self: &mut Self, rescan: bool) {
         if rescan {
             self.swept.clear();
@@ -748,24 +865,21 @@ extend Server {
         }
         let osk = String::from_str(self.out_skip_of(folder));
         let mut files = Vector::<SweptFile>::new();
-        Server::walk_dir(folder, 0, osk.as_str(), &mut files);
+        Server::walk_project(folder, 0, osk.as_str(), self.std_dir.as_str(), &mut files);
         files.sort_by(|x: &SweptFile, y: &SweptFile| x.path.cmp(&y.path));
         self.swept.push(SweptDir { folder: String::from_str(folder), files: files });
         return self.swept.len() - 1;
     }
 
-    // One batch root per workspace folder: every unowned .spc under it joins the folder's batch.
+    // One batch root per workspace folder and import roots: every unowned .spc under the folder
+    // joins the batch of the roots its walk gave it. A batch whose roots no file has any more
+    // empties: it builds nothing, and the next round drops it (`drop_orphan_roots`).
     fn ensure_folder_sweep(self: &mut Self, folder: str) {
-        let mut alt = String::new();
-        {
-            let a = Server::abs_under(folder, "src");
-            if dutil::is_dir(a.as_str()) {
-                alt = a;
-            }
-        }
-        // The walked files no other package owns, in walk order (sorted).
+        // The walked files no other package owns, in walk order (sorted), per import roots: `gfile`
+        // names a file of each group.
         let si = self.swept_index(folder);
-        let mut cand = Vector::<String>::new();
+        let mut gfile = Vector::<usize>::new();
+        let mut cand = Vector::<Vector<String>>::new();
         for k in 0..self.swept.at(si).files.len() {
             let sf = self.swept.at(si).files.at(k);
             let own = self.owning_root(sf.canon.as_str());
@@ -775,44 +889,69 @@ extend Server {
                     have = true;
                 }
             }
-            if !have {
-                cand.push(sf.path.clone());
+            if have {
+                continue;
             }
+            let mut g = gfile.len();
+            for j in 0..gfile.len() {
+                let gf = self.swept.at(si).files.at(gfile[j]);
+                if gf.root_dir.as_str() == sf.root_dir.as_str() && gf.alt_dir.as_str() == sf.alt_dir.as_str() {
+                    g = j;
+                }
+            }
+            if g == gfile.len() {
+                gfile.push(k);
+                cand.push(Vector::<String>::new());
+            }
+            cand.index_mut(g).push(sf.path.clone());
         }
-        let mut b: i64 = -1;
+        let mut found = Vector::<bool>::new();
+        found.resize_default(gfile.len());
         for r in 0..self.roots.len() {
-            if self.is_batch(r) && self.roots.at(r).ws.as_str() == folder {
-                b = r as i64;
+            if !self.is_batch(r) || self.roots.at(r).ws.as_str() != folder {
+                continue;
+            }
+            let mut g = gfile.len();
+            for j in 0..gfile.len() {
+                let gf = self.swept.at(si).files.at(gfile[j]);
+                if gf.root_dir.as_str() == self.roots.at(r).root_dir.as_str() && gf.alt_dir.as_str() == self.roots.at(r).alt_dir.as_str() {
+                    g = j;
+                }
+            }
+            let mut want = Vector::<String>::new();
+            if g < gfile.len() {
+                found.set(g, true);
+                want = replace(cand.index_mut(g), Vector::<String>::new());
+            }
+            let mut same = self.roots.at(r).members.len() == want.len();
+            if same {
+                for i in 0..want.len() {
+                    if self.roots.at(r).members.at(i).as_str() != want.at(i).as_str() {
+                        same = false;
+                    }
+                }
+            }
+            if !same {
+                self.roots[r].members = want;
+                self.roots[r].built = false;
             }
         }
-        if b < 0 {
-            if cand.len() == 0 {
-                return;
+        for g in 0..gfile.len() {
+            if found[g] {
+                continue;
             }
+            let rd = self.swept.at(si).files.at(gfile[g]).root_dir.clone();
+            let ad = self.swept.at(si).files.at(gfile[g]).alt_dir.clone();
             self.roots.push(
                 Root {
                     ws: String::from_str(folder),
-                    root_dir: String::from_str(folder),
-                    alt_dir: alt,
+                    root_dir: rd,
+                    alt_dir: ad,
                     sweep: true,
-                    members: cand,
+                    members: replace(cand.index_mut(g), Vector::<String>::new()),
                     pkg: loader::Package::new(),
                 },
             );
-            return;
-        }
-        let bi = b as usize;
-        let mut same = self.roots.at(bi).members.len() == cand.len();
-        if same {
-            for i in 0..cand.len() {
-                if self.roots.at(bi).members.at(i).as_str() != cand.at(i).as_str() {
-                    same = false;
-                }
-            }
-        }
-        if !same {
-            self.roots[bi].members = cand;
-            self.roots[bi].built = false;
         }
     }
 
@@ -839,10 +978,36 @@ extend Server {
         self.out_skips.push(String::from_str(out_dir));
     }
 
-    // Append every .spc file under `dir` (`depth` levels below its folder) to `out`. Links to
-    // directories are never followed (a link can point back up the tree); a link to a .spc file
-    // counts as that file. Hidden entries and, in the folder itself, the out-dir `osk` are skipped.
-    fn walk_dir(dir: str, depth: u32, osk: str, out: &mut Vector<SweptFile>) {
+    // Append every .spc file of the project at `proj` (`depth` levels below its workspace folder: the
+    // folder itself, or a directory with its own build.toml) to `out`, with its out-dir `osk`
+    // skipped.
+    fn walk_project(proj: str, depth: u32, osk: str, std_dir: str, out: &mut Vector<SweptFile>) {
+        let src = Server::abs_under(proj, "src");
+        let alt = if dutil::is_dir(src.as_str()) {
+            src;
+        } else {
+            String::new();
+        };
+        Server::walk_dir(proj, proj, alt.as_str(), "", depth, osk, std_dir, out);
+    }
+
+    // Append every .spc file under `dir` (`depth` levels below its workspace folder) of the project
+    // at `proj` to `out`, with the import roots the workspace lint gives it (`roots_of`; `alt` is the
+    // project's `src/` or "", `sub` the top directory under the project that holds `dir`). A
+    // directory with its own build.toml is a nested project: its own roots, its own out-dir
+    // skipped. Links to directories are never followed (a link can point back up the tree); a link
+    // to a .spc file counts as that file. Hidden entries and, in the project itself, the out-dir
+    // `osk` are skipped.
+    fn walk_dir(
+        dir: str,
+        proj: str,
+        alt: str,
+        sub: str,
+        depth: u32,
+        osk: str,
+        std_dir: str,
+        out: &mut Vector<SweptFile>,
+    ) {
         if depth > SWEEP_MAX_DEPTH {
             return;
         }
@@ -864,19 +1029,36 @@ extend Server {
             names.push(unsafe String::from_cstr(nm));
         }
         unsafe shim::sc_closedir(dh);
+        let top = dir == proj;
         for i in 0..names.len() {
-            if depth == 0 && osk.len() != 0 && names.at(i).as_str() == osk {
+            if top && osk.len() != 0 && names.at(i).as_str() == osk {
                 continue;
             }
             let mut p = String::from_str(dir);
             p.push_byte(b'/');
             p.push_string(names.at(i));
             let kind = unsafe shim::sc_lstat_isdir(p.cstr());
-            if kind == 1 {
-                Server::walk_dir(p.as_str(), depth + 1, "", out);
+            if kind == 1 && Server::has_manifest_file(p.as_str()) {
+                // The out-dir of a manifest that does not load is the default one.
+                let mut nosk = String::from_str("build");
+                let mp = Server::abs_under(p.as_str(), "build.toml");
+                if let Some(m) = bman::load(mp.as_str(), false) {
+                    nosk = m.out_dir.clone();
+                }
+                Server::walk_project(p.as_str(), depth + 1, nosk.as_str(), std_dir, out);
+            } else if kind == 1 {
+                let ns = if top {
+                    p.as_str();
+                } else {
+                    sub;
+                };
+                Server::walk_dir(p.as_str(), proj, alt, ns, depth + 1, "", std_dir, out);
             } else if kind == 0 && p.as_str().ends_with(".spc") && unsafe shim::sc_stat_isdir(p.cstr()) == 0 {
                 let cp = analysis::canon_path(p.as_str());
-                out.push(SweptFile { path: p, canon: cp });
+                let mut rd = String::new();
+                let mut ad = String::new();
+                Server::roots_of(p.as_str(), dir, proj, alt, sub, std_dir, &mut rd, &mut ad);
+                out.push(SweptFile { path: p, canon: cp, root_dir: rd, alt_dir: ad });
             }
         }
     }
@@ -890,11 +1072,12 @@ extend Server {
         return false;
     }
 
-    // Drop per-file roots whose doc closed (their diagnostics clear via the published-set diff).
+    // Drop per-file roots whose doc closed and batch roots without a member (their diagnostics
+    // clear via the published-set diff).
     fn drop_orphan_roots(self: &mut Self) {
         let mut r: usize = 0;
         while r < self.roots.len() {
-            let mut keep = self.roots.at(r).origin.len() == 0;
+            let mut keep = self.roots.at(r).origin.len() == 0 && !(self.roots.at(r).sweep && self.roots.at(r).members.len() == 0);
             if !keep {
                 for i in 0..self.docs.len() {
                     if self.docs.at(i).path.as_str() == self.roots.at(r).origin.as_str() {
@@ -960,6 +1143,14 @@ extend Server {
         let ad = self.roots.at(r).alt_dir.clone();
         // Drop the previous build BEFORE compiling: holding both packages doubled the peak.
         self.roots[r].pkg = loader::Package::new();
+        if self.is_batch(r) && self.roots.at(r).members.len() == 0 {
+            // A batch that lost its last member analyzes nothing; the next round drops it.
+            self.roots[r].files = Vector::<String>::new();
+            self.roots[r].diags = diags;
+            self.roots[r].pos = Vector::<u32>::new();
+            self.roots[r].built = true;
+            return;
+        }
         // A manifest root lints every workspace file it owns (incl. an in-repo std/); other roots
         // lint only their own root file, so each file's lint warnings come from exactly one root.
         let ld = if self.roots.at(r).origin.len() == 0 && !self.roots.at(r).sweep {
@@ -1173,8 +1364,15 @@ extend Server {
                 self.build_root(r, &mut ps, incr);
             }
         }
-        self.publish_manifest_diags(&mut ps);
-        // Publish.
+        self.publish_set(f, &mut ps);
+        self.enforce_budget();
+    }
+
+    // Publish the roots' records gathered in `ps` and every open manifest's: every URI with
+    // diagnostics gets its list, every URI published last time but clean now an empty list.
+    fn publish_set(self: &mut Self, f: *mut stdio::FILE, ps: &mut PubSet) {
+        self.bc_unpublished = false;
+        self.publish_manifest_diags(ps);
         for i in 0..ps.uris.len() {
             let mut params = json::JSON::object();
             params.emplace("uri", json::JSON::str(ps.uris.at(i).as_str()));
@@ -1196,7 +1394,78 @@ extend Server {
             }
         }
         self.published = now;
-        self.enforce_budget();
+    }
+
+    // Publish every built root's records (the open manifests' too), as an analysis round does.
+    fn republish(self: &mut Self, f: *mut stdio::FILE) {
+        let mut ps = PubSet { uris: Vector::<String>::new(), arrs: Vector::<json::JSON>::new() };
+        for r in 0..self.roots.len() {
+            if self.roots.at(r).built {
+                self.publish_root_diags(r, &mut ps, "");
+            }
+        }
+        self.publish_set(f, &mut ps);
+    }
+
+    // The borrow round: every built root runs the borrow checks its analyses owe, then the roots'
+    // records publish again when any changed. A didChange that arrives meanwhile stops the round
+    // before it publishes (`bc_stop`); the next analysis round publishes what stands, and the
+    // round after it runs the rest. A request that arrives meanwhile stops the round between two
+    // checks once one finished; the loop serves it and the next round resumes, so a request waits
+    // for one module's check at most, and every round that no edit stops finishes a check.
+    fn borrowck_round(self: &mut Self, f: *mut stdio::FILE, rd: &mut transport::Reader) {
+        let mut stop = BcStop { rd: rd, queue: &mut self.queue, kind: &mut self.queue_kind, end: &mut self.input_end };
+        let sp = ((&mut stop) as *mut BcStop) as *mut void;
+        let mut todo = false;
+        for r in 0..self.roots.len() {
+            if !todo && self.roots.at(r).built && self.roots.at(r).pkg.modules.len() != 0 {
+                let diags = replace(&mut self.roots[r].diags, Vector::<analysis::DiagRec>::new());
+                todo = analysis::borrowck_runnable(&mut self.roots[r].pkg, &diags);
+                self.roots[r].diags = diags;
+            }
+        }
+        if !todo {
+            // A stopped round's records publish once no edit waits (its analysis publishes them).
+            if self.bc_unpublished && !bc_stop(sp, false) {
+                self.republish(f);
+            }
+            return;
+        }
+        let mut changed = false;
+        let mut checked = false;
+        for r in 0..self.roots.len() {
+            if !self.roots.at(r).built || self.roots.at(r).pkg.modules.len() == 0 {
+                continue;
+            }
+            // A root that finished a check counts as the round's progress: a waiting request is
+            // served before the next root's first check.
+            if checked && bc_stop(sp, true) {
+                self.bc_unpublished = self.bc_unpublished || changed;
+                return;
+            }
+            let mut diags = replace(&mut self.roots[r].diags, Vector::<analysis::DiagRec>::new());
+            let mut res = analysis::BcRound {};
+            {
+                let mut ovf = Vector::<str>::new();
+                for i in 0..self.docs.len() {
+                    ovf.push(self.docs.at(i).path.as_str());
+                }
+                res = analysis::borrowck_pending(&mut self.roots[r].pkg, &mut diags, &ovf, bc_stop, sp);
+            }
+            self.roots[r].diags = diags;
+            changed = changed || res.changed;
+            checked = checked || res.checked;
+            if res.canceled {
+                // The checks that finished stand; the round that finishes publishes them, or the
+                // analysis round of the edit that stopped this one.
+                self.bc_unpublished = self.bc_unpublished || changed;
+                return;
+            }
+        }
+        self.bc_unpublished = self.bc_unpublished || changed;
+        if self.bc_unpublished && !bc_stop(sp, false) {
+            self.republish(f);
+        }
     }
 
     // Retention budget (SC_LSP_BUDGET_MB; unset = unlimited): when the retained packages exceed it,
@@ -1496,29 +1765,39 @@ extend Server {
         if !self.apply_did_change(req) {
             return;
         }
-        while rd.pending() {
-            let msgo = transport::read_message(rd);
-            if msgo.is_none() {
-                break;
+        // The queued messages come first: they arrived before anything still unread.
+        for _ in 0..FOLD_MAX {
+            let mut msg = String::new();
+            if self.queue.len() != 0 {
+                if self.queue_kind[0] != Q_EDIT {
+                    break;
+                }
+                let _ = self.queue_kind.remove(0);
+                msg = self.queue.remove(0).unwrap();
+            } else {
+                if self.input_end || !rd.pending() {
+                    break;
+                }
+                let msgo = transport::read_message(rd);
+                if msgo.is_none() {
+                    self.input_end = true;
+                    break;
+                }
+                msg = msgo.unwrap();
+                let kd = msg_kind(msg.as_str());
+                if kd != Q_EDIT {
+                    self.queue.push(msg);
+                    self.queue_kind.push(kd);
+                    break;
+                }
             }
-            let msg = msgo.unwrap();
-            let mut folded = false;
             switch json::parse(msg.as_str()) {
                 Ok(v) => {
-                    if v.value_str("jsonrpc") == "2.0" && v.value_str("method") == "textDocument/didChange" && !v.contains_key(
-                        "id",
-                    ) {
-                        self.revision += 1;
-                        self.apply_did_change(&v);
-                        folded = true;
-                    }
+                    self.revision += 1;
+                    let _ = self.apply_did_change(&v);
                 },
                 Err(_) => {},
             };
-            if !folded {
-                self.pending = Option::<String>::Some(msg);
-                break;
-            }
         }
         // An edit changes no file on disk: the sweep reuses its last directory walk.
         self.rebuild_all(f, true, false);
@@ -2341,13 +2620,15 @@ extend Server {
             }
             // Root parameters: the owning root when the doc has one, the per-file recipe otherwise.
             let mut rf = String::from_str(path);
-            let mut rd = String::from_str(loader::dirname_of(path));
-            let mut ad = self.folder_alt_of(path);
+            let mut rd = String::new();
+            let mut ad = String::new();
             let r = self.owning_root(path);
             if r >= 0 {
                 rf = self.roots.at(r as usize).root_file.clone();
                 rd = self.roots.at(r as usize).root_dir.clone();
                 ad = self.roots.at(r as usize).alt_dir.clone();
+            } else {
+                self.file_roots(path, &mut rd, &mut ad);
             }
             let mut diags = Vector::<analysis::DiagRec>::new();
             let pkg = analysis::compile(
@@ -2971,8 +3252,20 @@ extend Server {
 
     // Reload the manifest owning `manifest_path` (folder = its directory). An unparseable manifest
     // keeps the previous project model: the last valid model serves until the file parses again.
+    // The manifest of a nested project (a directory below a workspace folder) sets the build
+    // settings of the batches under it: they analyze again, and the walk that follows regroups its
+    // files.
     fn reload_manifest_for(self: &mut Self, manifest_path: str) {
         let folder = String::from_str(loader::dirname_of(manifest_path));
+        if !self.folders.contains(&folder) && self.folder_of(manifest_path).len() != 0 {
+            for r in 0..self.roots.len() {
+                let rd = self.roots.at(r).root_dir.as_str();
+                if self.is_batch(r) && rd.starts_with(folder.as_str()) && (rd.len() == folder.len() || rd[folder.len()] == b'/') {
+                    self.roots[r].built = false;
+                }
+            }
+            return;
+        }
         let mp = Server::abs_under(folder.as_str(), "build.toml");
         let mano = bman::load(mp.as_str(), false);
         if mano.is_none() {

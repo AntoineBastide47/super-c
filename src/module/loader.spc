@@ -17,6 +17,7 @@ import std::parallel::runtime as prt;
 import graph::items as gitems;
 import ir::layout as lay;
 import ir::cpu_features as cf;
+import ir::recursion as recur;
 import utils::persist as *;
 
 /// The C `SEEK_END` whence value used to size a file before reading it.
@@ -326,6 +327,29 @@ pub struct Package {
     /// reference scan read about a module whose bodies are released. Indexed by module; shorter
     /// than the module table means "unrecorded".
     pub def_refs: Vector<Vector<RefEdge>>,
+    /// LSP: per module, the post-typecheck item edges of its last analysis
+    /// (`graph::items::module_edges`), keyed by declaration nodes so they survive a rebuild of the
+    /// item index: `key` names the target item (`module << 32 | node`), `owner` the declaration
+    /// node of the module's item that names it. The unused-item lint reads them while the module's
+    /// bodies are released. Indexed by module; shorter than the module table means "unrecorded".
+    pub item_edges: Vector<Vector<RefEdge>>,
+    /// LSP: per module, the borrow check an analysis still owes it (the module was analyzed again
+    /// and its borrow records are not current). Its body syntax stays live until the check ran.
+    pub bc_pending: Vector<bool>,
+    /// LSP: the unbounded-recursion summaries of the borrow-checked modules, per module from its last
+    /// borrow round (`ir::recursion::Summaries`).
+    pub recur: recur::Summaries,
+    /// LSP: per module, its reachability scan from its last analysis (`co_scan`; empty when the
+    /// coroutine runtime is not loaded or the module was not typed), and whether one changed since
+    /// the last `reach_solve` over them.
+    pub reach_scans: Vector<ReachScan>,
+    pub reach_stale: bool,
+    /// LSP: the reachability the last solve over `reach_scans` gave (`driver::tuc::reach_fold`).
+    pub reach_key: u64,
+    /// LSP: the constant engine budgets of the build the analysis stands for (build.toml's
+    /// `const-eval-steps` and `const-eval-memory`); 0 = the engine default.
+    pub ce_steps: u32,
+    pub ce_mem: u64,
     /// What the checked prelude stage left for the second one (`driver::emit::check_prelude`).
     pub carry: PreludeCarry,
 }
@@ -1005,6 +1029,11 @@ extend ReachScan {
             c_tgt: Vector::<u64>::new(),
             c_used: false,
         };
+    }
+
+    /// Heap bytes held (capacity).
+    pub const fn retained_bytes(self: &Self) usize {
+        return (self.d_span.capacity() + self.d_need.capacity() + self.r_tgt.capacity() + self.s_bad.capacity() + self.seeds.capacity() + self.esc.capacity() + self.c_row.capacity() + self.c_span.capacity() + self.c_tgt.capacity()) * 8 + (self.d_node.capacity() + self.d_parent.capacity() + self.r_decl.capacity() + self.r_site.capacity() + self.s_prop.capacity()) * 4 + self.prop.capacity() * 2 + self.d_clo.capacity() + self.r_chk.capacity() + self.s_par.capacity();
     }
 
     // The innermost declaration whose span covers `sp`, or CO_NONE (a site outside every
@@ -4322,7 +4351,13 @@ extend Package {
         for i in 0..self.def_refs.len() {
             b += self.def_refs.at(i).capacity() * 16;
         }
-        return b;
+        for i in 0..self.item_edges.len() {
+            b += self.item_edges.at(i).capacity() * 16;
+        }
+        for i in 0..self.reach_scans.len() {
+            b += self.reach_scans.at(i).retained_bytes();
+        }
+        return b + self.recur.retained_bytes();
     }
 
     /// The index record of declaration node `node` in module `m`, or ITEM_NONE when the node is

@@ -193,6 +193,7 @@ super-c test --quiet                   # the standard form: only the failures an
 super-c test --quiet --filter=parse    # substring match on test name
 super-c test --quiet --test-shard=1/4  # one-based CI sharding, balanced by tests/durations.tsv
 super-c test --quiet --test-record-durations  # refresh tests/durations.tsv from this run
+super-c test --test-shard=1/2 --test-durations=tests/durations/<lane>.tsv --test-record-durations=s1.tsv  # CI lane: its weights, this shard's times alone
 super-c test --quiet --test-jobs=8     # bound the fork pool (default: one per CPU)
 super-c test --quiet --test-timeout=120 # fail a test that runs past 120 s (default 90, 0: none)
 super-c test --test-no-fork            # in-process (for debuggers; shows passing output)
@@ -279,6 +280,18 @@ keeps its old one, and a name the suite no longer has is dropped. A filtered run
 files with a match, so it keeps every line it has no test for (a removed test's line stays until an
 unfiltered run). Refresh it after adding or removing slow tests (`--filter` for the new ones); a stale
 file only makes the split less even.
+
+`--test-durations=F` names the weights file instead (and the file a plain `--test-record-durations`
+writes); `--test-record-durations=F` merges the run's times into F instead, so a shard recording into
+a fresh F lists only the tests it ran. CI runners are several times slower than a laptop, and not
+uniformly, so each CI lane splits by its own file, `tests/durations/<lane>.tsv` (`macos`, `linux`,
+`windows`, `wasm`). The files are not committed: they are the repository's one `test-durations`
+artifact, which every Release and Debug shard downloads first (`.github/actions/test-durations`; a
+lane without one uses `tests/durations.tsv`). The `Test durations` workflow
+(`.github/workflows/test-durations.yml`, run on demand) runs the Release workflow's shards with
+recording on, merges each lane's shards (a lane it could not measure keeps its old file), replaces
+the artifact, deletes every other durations artifact, and summarizes the measured and planned shard
+times.
 
 ## Leak Detection
 

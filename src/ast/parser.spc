@@ -1044,32 +1044,6 @@ extend Parser {
         return __decl;
     }
 
-    /// Re-parse ONE function body in place (the LSP's incremental body path): the parser holds the
-    /// module's EXISTING arena and a token stream over the module's NEW source; `at` indexes the
-    /// body's '{' token. Appends the new block's nodes (every old node id stays valid), rebuilding
-    /// the named-return context from the fn's own (id-stable) returns list, and returns the block id
-    /// (NODE_NONE + a recorded error on a malformed body). The caller re-points the fn's body.
-    pub fn reparse_fn_body(self: &mut Self, at: usize, fnid: NodeId) NodeId {
-        self.current = at;
-        let returns = self.ast.at_const(fnid).as_data.function.returns;
-        let outer_nrets = replace(&mut self.nrets, Vector::<NodeId>::new());
-        let _ = self.install_named_returns(returns);
-        let mut body = NODE_NONE;
-        let outer_sink = self.ast.sink_body;
-        self.ast.sink_body = Ast::in_body(self.ast.at_const(fnid).as_data.function.body);
-        if self.check(TokenType::LeftBrace) {
-            body = self.parse_block();
-        } else {
-            self.error_here("expected function body");
-        }
-        if self.nrets.len() != 0 && body != NODE_NONE {
-            self.bind_named_returns(body);
-        }
-        self.ast.sink_body = outer_sink;
-        self.nrets = outer_nrets;
-        return body;
-    }
-
     // Count the named entries of `returns`; when all are named, make them the named-return context
     // (`nrets`) of the body about to be parsed.
     fn install_named_returns(self: &mut Self, returns: NodeList) u32 {

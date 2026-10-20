@@ -25,6 +25,7 @@ fn manifest_test_runs_the_tests_directory() {
 // with the least recorded time (a: 10 s alone; d, b, c: 8 + 1 + 1 s). --test-record-durations merges the
 // run's times into the file: every test of the suite listed, a name the suite no longer has dropped. A
 // filtered run builds only the files with a match, so it keeps the lines of the other files.
+// --test-durations names another weights file and --test-record-durations=F another output.
 @test
 fn manifest_test_shards_by_duration() {
     let p = cli::proj_new();
@@ -69,6 +70,25 @@ fn manifest_test_shards_by_duration() {
         "every test is listed",
     );
     assert(!f.as_str().contains("tests::t::gone"), "a name the suite lost is dropped");
+    // A CI lane's own file weighs the shards (b: 20 s alone), and a shard records only the tests it ran
+    // into a file of its own; the suite's file stays as it was.
+    p.mkfile(
+        "lane.tsv",
+        "20.00\ttests::t::b\n1.00\ttests::t::a\n1.00\ttests::t::c\n1.00\ttests::t::d\n1.00\ttests::u::e\n",
+    );
+    let l = cli::superc_env_in(
+        root,
+        E,
+        "1",
+        "test --quiet --test-shard=1/2 --test-durations=lane.tsv --test-record-durations=shard1.tsv",
+    );
+    assert(l.ok(), "a lane shard runs");
+    let mut sp = String::from_str(root);
+    sp.push_str("/shard1.tsv");
+    let sf = cli::read_text(sp.as_str());
+    assert(sf.as_str().contains("\ttests::t::b\n"), "the shard records its test");
+    assert(!sf.as_str().contains("tests::t::a") && !sf.as_str().contains("tests::u::e"), "and no other");
+    assert(cli::read_text(fp.as_str()).as_str() == f.as_str(), "the suite's file is unchanged");
 }
 
 // A library whose public function nothing in it calls, beside a private function nothing calls.

@@ -3916,11 +3916,13 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
     if brc != 0 {
         return brc;
     }
-    // The suite's recorded durations balance the shards (`<test dir>/durations.tsv`, written by
-    // --test-record-durations).
+    // The suite's recorded durations balance the shards: `--test-durations`, else
+    // `<test dir>/durations.tsv` (written by --test-record-durations).
     let mut durp = loader::join2(tdir.as_str(), "durations.tsv");
     let mut o = unsafe *topts;
-    o.durations = durp.cstr();
+    if o.durations == null {
+        o.durations = durp.cstr();
+    }
     return test_run_runner(&o, tbin.as_str());
 }
 

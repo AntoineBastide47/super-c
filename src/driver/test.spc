@@ -29,8 +29,9 @@ pub struct TestOpts {
     pub shard: i32,
     pub shards: i32,
     pub timeout: i32, // seconds a test may run before it fails as timed out; 0: none; -1: DEFAULT_TEST_TIMEOUT
-    pub durations: *const char, // the suite's duration file (`super-c test`: <test dir>/durations.tsv); null: none
-    pub record: bool, // --test-record-durations: merge this run's durations into `durations`
+    pub durations: *const char, // the duration file: --test-durations, else (`super-c test`) <test dir>/durations.tsv; null: none
+    pub record: bool, // --test-record-durations: merge this run's durations into `record_to`, else `durations`
+    pub record_to: *const char, // --test-record-durations=F: F; null: `durations`
 }
 
 /// The seconds a test may run when neither `--test-timeout` nor its `@test(timeout = N)` says otherwise.
@@ -1885,18 +1886,22 @@ pub fn test_run_runner(topts: *const TestOpts, bin: str) i32 {
     unsafe stdio::snprintf(&mut tb[0], 64, "--timeout=%d".ptr() as *const char, tsec);
     run.push(String::from_str(str::from_cbuf(tb.as_slice())));
     let dur = unsafe (*topts).durations;
-    if dur != null {
-        // The shards balance by the recorded durations when the file exists; a recording run writes it.
-        if unsafe shim::sc_mtime(dur) != 0 {
-            let mut w = String::from_str("--weights=");
-            w.push_str(unsafe str::from_cstr(dur));
-            run.push(w);
-        }
-        if unsafe (*topts).record {
-            let mut r = String::from_str("--record=");
-            r.push_str(unsafe str::from_cstr(dur));
-            run.push(r);
-        }
+    // The shards balance by the recorded durations when the file exists.
+    if dur != null && unsafe shim::sc_mtime(dur) != 0 {
+        let mut w = String::from_str("--weights=");
+        w.push_str(unsafe str::from_cstr(dur));
+        run.push(w);
+    }
+    // A recording run merges its times into its own file when given one, else into the durations file.
+    let rec = if unsafe (*topts).record_to != null {
+        unsafe (*topts).record_to;
+    } else {
+        dur;
+    };
+    if unsafe (*topts).record && rec != null {
+        let mut r = String::from_str("--record=");
+        r.push_str(unsafe str::from_cstr(rec));
+        run.push(r);
     }
     if unsafe (*topts).shards > 0 {
         let mut sb = Buf64 {};

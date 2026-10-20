@@ -186,7 +186,14 @@ engine under the engine lock for every evaluation it requests (`Interp::set_read
 and its checker's `Reach`; `ev`, `ev_static`, `fn_recheck_as`) and clears it after; every stage
 after the type check evaluates as no item (everything visible). The language server opens
 the index without the component graph, and there the readiness state decides, as its
-module-order passes require.
+module-order passes require. Its passes check in the driver's order (`dep_order` in
+`src/lsp/analysis.spc`): the prelude modules first, each module after its import closure, the
+modules without items last; and its module entry (`TypeChecker::check`) checks a module's
+non-item nodes after its items with the module's last item as the reader (`check_orphans`),
+as the driver does. A non-item node checked as no item, before the prelude or the module's own
+items, let the engine lower a body the readiness state does not show as checked, and the
+engine keeps such a lowering for its lifetime: the deferred flush then reported a
+`static_assert` the build accepts.
 
 The rule replaced module-order visibility (a lower-indexed module fully checked, a
 higher-indexed one unchecked, workers waiting for a module's completion): the waits could

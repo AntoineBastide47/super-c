@@ -1638,3 +1638,309 @@ fn lsp_generic_headers() {
         "the extend's parameters",
     );
 }
+
+// The borrow check: a round of its own after the analysis round, published again when it
+// changes the records; a didChange that arrives meanwhile abandons it.
+
+const BORROW_BAD: str = "fn main() i32 {\n    let mut w = 1;\n    let r = &w;\n    w += 1;\n    return *r;\n}\n";
+const BORROW_MSG: str = "cannot assign to this value while it is borrowed";
+
+fn push_did_change_full(ses: &mut String, root: str, rel: str, version: i64, text: str) {
+    let mut b = String::new();
+    b.format_into(
+        "{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{{\"textDocument\":{{\"uri\":\"file://{}/{}\",\"version\":{}}},\"contentChanges\":[{{\"text\":",
+        root,
+        rel,
+        version,
+    );
+    json::dump_escaped(text, &mut b);
+    b.push_str("}]}}");
+    frame(ses, &b);
+}
+
+@test
+fn lsp_borrow_check_publishes_after_analysis() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", BORROW_BAD);
+    let root = p.dir();
+    let mut ses = String::new();
+    push_init(&mut ses, root);
+    push_open(&mut ses, root, "src/main.spc", BORROW_BAD);
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+    assert_eq(lsp_run(root), 0);
+    let out = read_out(root);
+    let o = out.as_str();
+    assert_eq(count(o, BORROW_MSG), 1 as usize);
+    let pubd = response_of(o, BORROW_MSG);
+    assert(pubd.contains("textDocument/publishDiagnostics"), "the record is published");
+    assert(pubd.contains("\"version\":1"), "published for the analyzed version");
+}
+
+@test
+fn lsp_edit_cancels_borrow_check() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", BORROW_BAD);
+    let root = p.dir();
+    // Version 2 moves the same error down one line: a record published for version 1 would sit on
+    // line 3, version 2's sits on line 4.
+    let mut v2 = String::from_str("// moved\n");
+    v2.push_str(BORROW_BAD);
+    let mut ses = String::new();
+    push_init(&mut ses, root);
+    push_open(&mut ses, root, "src/main.spc", BORROW_BAD);
+    push_did_change_full(&mut ses, root, "src/main.spc", 2, v2.as_str());
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+    assert_eq(lsp_run(root), 0);
+    let out = read_out(root);
+    let o = out.as_str();
+    assert_eq(count(o, BORROW_MSG), 1 as usize);
+    let pubd = response_of(o, BORROW_MSG);
+    assert(pubd.contains("\"version\":2"), "only the current version's record publishes");
+    assert(pubd.contains("\"start\":{\"line\":4"), "at the current version's line");
+}
+
+// A request that arrives during the borrow round is answered before the round finishes: the round
+// stops after the check in progress, the request is served, and the next round runs the rest and
+// publishes every module's records.
+@test
+fn lsp_request_served_during_borrow_round() {
+    let util = "pub fn bad() i32 {\n    let mut w = 1;\n    let r = &w;\n    w += 1;\n    return *r;\n}\n";
+    let main = "import util;\n\nfn main() i32 {\n    let mut w = 1;\n    let r = &w;\n    w += 1;\n    return *r + util::bad();\n}\n";
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", main);
+    p.mkfile("src/util.spc", util);
+    let root = p.dir();
+    let mut ses = String::new();
+    push_init(&mut ses, root);
+    push_open(&mut ses, root, "src/main.spc", main);
+    push_req_at(&mut ses, root, "src/main.spc", 2, "textDocument/hover", 6, 21);
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+    assert_eq(lsp_run(root), 0);
+    let out = read_out(root);
+    let o = out.as_str();
+    let hover = o.find("\"id\":2,\"result\"");
+    let first = o.find(BORROW_MSG);
+    assert(hover >= 0, "the hover is answered");
+    assert(first >= 0, "the records publish");
+    assert(hover < first, "the hover is answered before the round publishes");
+    let tail = o.slice(hover as usize, o.len());
+    assert(tail.contains("/src/main.spc"), "the root's records publish after it");
+    assert(tail.contains("/src/util.spc"), "the imported module's records publish after it");
+    assert_eq(count(o, BORROW_MSG), 2 as usize);
+}
+
+// The errors of the checks that read the borrow round's bodies (`@tail_recurse`, also its cancellation
+// reason, and unbounded recursion) publish with its records, and an edit that fixes the function
+// clears them.
+
+const TAIL_BAD: str = "@tail_recurse\nfn f(n: i64) i64 {\n    if n == 0 {\n        return 0;\n    }\n    return 1 + f(n - 1);\n}\n\nfn main() i32 {\n    return f(3) as i32;\n}\n";
+const TAIL_FIXED: str = "@tail_recurse\nfn f(n: i64, acc: i64) i64 {\n    if n == 0 {\n        return acc;\n    }\n    return f(n - 1, acc + 1);\n}\n\nfn main() i32 {\n    return f(3, 0) as i32;\n}\n";
+const TAIL_MSG: str = "'@tail_recurse': this call of the function to itself cannot become a jump: it is not in tail position";
+const RECUR_BAD: str = "fn forever(n: u64) u64 {\n    return forever(n + 1);\n}\n\nfn main() i32 {\n    return forever(1) as i32;\n}\n";
+const RECUR_FIXED: str = "fn forever(n: u64) u64 {\n    if n > 9 {\n        return n;\n    }\n    return forever(n + 1);\n}\n\nfn main() i32 {\n    return forever(1) as i32;\n}\n";
+const RECUR_MSG: str = "function 'forever' cannot return without calling itself";
+// A launched self call that can accept a task cancellation keeps the check after it: the borrow round
+// lowers a module with a `@tail_recurse` function with the build's cancellation checks.
+const TAIL_CANCEL_BAD: str = "import std::parallel::runtime as rt;\nimport std::parallel::sync as sync;\nimport std::parallel::time as time;\n\n@tail_recurse\nfn spin(n: i64) i64 {\n    if n == 0 {\n        return 0;\n    }\n    time::sleep(time::Duration::from_nanos(1));\n    return spin(n - 1);\n}\n\nfn main() i32 {\n    let wg = sync::WaitGroup::new();\n    wg.add(1);\n    let w = wg.clone();\n    launch || {\n        let _ = spin(3);\n        w.done();\n    };\n    let _ = rt::request_cancel(rt::current_key(), rt::CR_USER);\n    wg.wait();\n    rt::shutdown();\n    return 0;\n}\n";
+const TAIL_CANCEL_FIXED: str = "import std::parallel::runtime as rt;\nimport std::parallel::sync as sync;\nimport std::parallel::time as time;\n\nfn spin(n: i64) i64 {\n    if n == 0 {\n        return 0;\n    }\n    time::sleep(time::Duration::from_nanos(1));\n    return spin(n - 1);\n}\n\nfn main() i32 {\n    let wg = sync::WaitGroup::new();\n    wg.add(1);\n    let w = wg.clone();\n    launch || {\n        let _ = spin(3);\n        w.done();\n    };\n    let _ = rt::request_cancel(rt::current_key(), rt::CR_USER);\n    wg.wait();\n    rt::shutdown();\n    return 0;\n}\n";
+const TAIL_CANCEL_MSG: str = "cannot become a jump: it can accept a task cancellation";
+
+// Open `bad`, then change it to `fixed`: the borrow round of version 1 publishes `msg`, and version 2
+// publishes no record. The notifications between the two messages wait for the round: it reads at
+// most 256 messages ahead (`QUEUE_MAX` in src/lsp/server.spc), so the edit arrives after it ended.
+fn expect_published_then_cleared(bad: str, fixed: str, msg: str) {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", bad);
+    let root = p.dir();
+    let mut ses = String::new();
+    push_init(&mut ses, root);
+    push_open(&mut ses, root, "src/main.spc", bad);
+    let idle = String::from_str("{\"jsonrpc\":\"2.0\",\"method\":\"$/setTrace\",\"params\":{\"value\":\"off\"}}");
+    for _ in 0..300 {
+        frame(&mut ses, &idle);
+    }
+    push_did_change_full(&mut ses, root, "src/main.spc", 2, fixed);
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+    assert_eq(lsp_run(root), 0);
+    let out = read_out(root);
+    let o = out.as_str();
+    assert_eq(count(o, msg), 1 as usize);
+    let pubd = response_of(o, msg);
+    assert(pubd.contains("textDocument/publishDiagnostics"), "the record is published");
+    assert(pubd.contains("\"version\":1"), "published for the analyzed version");
+    let after = o.slice(o.find(msg) as usize, o.len());
+    let cleared = response_of(after, "\"version\":2");
+    assert(cleared.contains("textDocument/publishDiagnostics"), "the edit publishes");
+    assert(cleared.contains("\"diagnostics\":[]"), "the edit clears the record");
+}
+
+@test
+fn lsp_tail_recurse_error_publishes_and_clears() {
+    expect_published_then_cleared(TAIL_BAD, TAIL_FIXED, TAIL_MSG);
+}
+
+@test
+fn lsp_unbounded_recursion_publishes_and_clears() {
+    expect_published_then_cleared(RECUR_BAD, RECUR_FIXED, RECUR_MSG);
+}
+
+@test
+fn lsp_tail_recurse_cancellation_publishes_and_clears() {
+    expect_published_then_cleared(TAIL_CANCEL_BAD, TAIL_CANCEL_FIXED, TAIL_CANCEL_MSG);
+}
+
+// A top-level static_assert that compares an element of a constant array of `str` (the prelude's
+// `str` conformance answers the `==`), in a module the root imports and in a module without items:
+// the server evaluates what the build evaluates, after the module's items and the prelude, and
+// reports nothing, as the build does.
+const SA_FACTS: str = "pub const N: usize = 3;\npub const NAMES: [str<'static>; N] = [\"a\", \"mono\", \"c\"];\nconst MONO: usize = 1;\nstatic_assert(NAMES[MONO] == \"mono\", \"MONO names the mono entry\");\n\npub fn f() i32 {\n    return 0;\n}\n";
+const SA_ONLY: str = "import facts;\n\nstatic_assert(facts::NAMES[2] == \"c\", \"the last entry is c\");\n";
+const SA_MAIN: str = "import facts;\nimport only;\n\nfn main() i32 {\n    return facts::f();\n}\n";
+
+@test
+fn lsp_static_assert_matches_build() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", SA_MAIN);
+    p.mkfile("src/facts.spc", SA_FACTS);
+    p.mkfile("src/only.spc", SA_ONLY);
+    let b = p.compile("src/main.spc");
+    if !b.ok() {
+        b.show();
+    }
+    assert(b.ok(), "the build accepts the asserts");
+    let root = p.dir();
+    let mut ses = String::new();
+    push_init(&mut ses, root);
+    push_initialized(&mut ses);
+    push_open(&mut ses, root, "src/main.spc", SA_MAIN);
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+    assert_eq(lsp_run(root), 0);
+    let out = read_out(root);
+    let o = out.as_str();
+    assert(!o.contains("static assertion"), "no static_assert record");
+    assert(!o.contains("\"severity\":1"), "no error");
+}
+
+// A nested project (a directory with its own build.toml) analyzes with its own roots, as `super-c
+// build tools/gen` and `super-c lint` from its directory resolve them: its top-level files import
+// each other from its directory and a file of its subdirectory `lib`, at any depth, from `lib`; an
+// open document of it gets the same roots. No false error; the real error of `bad.spc` still
+// reports.
+const NEST_DEEP: str = "import helper;\n\npub fn deep() i32 {\n    return helper::one();\n}\n";
+
+@test
+fn lsp_nested_project_uses_its_roots() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", MAIN_OK);
+    p.mkfile("tools/gen/build.toml", "bin = \"gen\"\nroot = \"gen.spc\"\n");
+    p.mkfile(
+        "tools/gen/gen.spc",
+        "import util;\n\nfn main() i32 {\n    let r = util::Ref { v: 2 };\n    return r.v - 2;\n}\n",
+    );
+    p.mkfile("tools/gen/util.spc", "pub struct Ref {\n    pub v: i32,\n}\n");
+    p.mkfile("tools/gen/lib/more.spc", "import helper;\n\npub fn more() i32 {\n    return helper::one();\n}\n");
+    p.mkfile("tools/gen/lib/helper.spc", "pub fn one() i32 {\n    return 1;\n}\n");
+    p.mkfile("tools/gen/bad.spc", STRAY_ERR);
+    p.mkfile("tools/gen/lib/x/deep.spc", NEST_DEEP);
+    let mut rb = Array::<char, 4096>::new();
+    let mut pd = String::from_str(p.dir());
+    assert(unsafe shim::sc_realpath(pd.cstr(), &mut rb[0]) != null, "the project root resolves");
+    let root = str::from_cbuf(rb.as_slice());
+    let mut ses = String::new();
+    push_init(&mut ses, root);
+    push_initialized(&mut ses);
+    push_open(&mut ses, root, "tools/gen/lib/x/deep.spc", NEST_DEEP);
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+    assert_eq(lsp_run(root), 0);
+    let out = read_out(root);
+    let o = out.as_str();
+    assert(o.contains("tools/gen/bad.spc\",\"diagnostics\":[{"), "the nested project is analyzed");
+    let files = [
+        "tools/gen/gen.spc\"",
+        "tools/gen/util.spc\"",
+        "tools/gen/lib/more.spc\"",
+        "tools/gen/lib/helper.spc\"",
+        "tools/gen/lib/x/deep.spc\"",
+    ];
+    for f in files {
+        assert(!response_of(o, f).contains("\"severity\":1"), "no false error in the nested project");
+    }
+}
+
+// The analysis takes the CPU level and features of the manifest, as `super-c build` and `super-c
+// lint` do: with them the call of a function that needs a feature is safe (each instruction set
+// takes its own entry and skips the other's), without them it is the build's error.
+const FEAT_MAN: str = "bin = \"app\"\nroot = \"src/main.spc\"\ntarget-cpu = \"x86-64-v3\"\ntarget-features = [\"+i8mm\"]\n";
+const FEAT_SRC: str = "import std::cpu;\n\n@arch(aarch64)\n@target_feature([cpu::Feature::I8mm])\nfn fast() i32 {\n    return 1;\n}\n\n@arch(x86_64)\n@target_feature([cpu::Feature::Avx2])\nfn fast() i32 {\n    return 1;\n}\n\nfn main() i32 {\n    return fast() - 1;\n}\n";
+
+// The output of a session that opens `src/main.spc` (FEAT_SRC) of project `p` under manifest `man`.
+fn feature_session(p: &cli::Proj, man: str) String {
+    p.mkfile("build.toml", man);
+    p.mkfile("src/main.spc", FEAT_SRC);
+    let root = p.dir();
+    let mut ses = String::new();
+    push_init(&mut ses, root);
+    push_initialized(&mut ses);
+    push_open(&mut ses, root, "src/main.spc", FEAT_SRC);
+    push_shutdown_exit(&mut ses, 9);
+    p.mkfile("session.bin", ses.as_str());
+    assert_eq(lsp_run(root), 0);
+    return read_out(root);
+}
+
+@test
+fn lsp_applies_the_manifest_cpu_features() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    let with = feature_session(&p, FEAT_MAN);
+    assert(!with.as_str().contains("\"severity\":1"), "the manifest's features make the call safe");
+    let lint = cli::superc_env_in(p.dir(), "SC_NO_EMIT_CACHE", "1", "lint");
+    assert(lint.ok(), "as `super-c lint` finds");
+    let without = feature_session(&p, "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    assert(without.as_str().contains("needs `+"), "without them the call is the build's error");
+}
+
+// A header type's field (a `struct` of an `extern "C"` block) answers hover with its doc and type, and
+// definition with its declaration in the extern block.
+const HEADER_SRC: str = "extern \"C\" \"time.h\" {\n    struct tm {\n        /// Seconds after the minute.\n        pub tm_sec: i32,\n        pub tm_min: i32,\n    }\n}\n\nfn main() i32 {\n    let t = tm { tm_sec: 1 };\n    return t.tm_sec - 1;\n}\n";
+
+@test
+fn lsp_header_type_field() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", HEADER_SRC);
+    let root = p.dir();
+
+    let mut ses = String::new();
+    push_init(&mut ses, root);
+    push_open(&mut ses, root, "src/main.spc", HEADER_SRC);
+    push_req_at(&mut ses, root, "src/main.spc", 10, "textDocument/hover", 10, 15);
+    push_req_at(&mut ses, root, "src/main.spc", 11, "textDocument/definition", 10, 15);
+    push_shutdown_exit(&mut ses, 12);
+    p.mkfile("session.bin", ses.as_str());
+
+    assert_eq(lsp_run(root), 0);
+    let out = read_out(root);
+    let o = out.as_str();
+    let h10 = o.find("\"id\":10,");
+    assert(h10 >= 0, "the hover is answered");
+    assert(one_response(o, h10).contains("Seconds after the minute."), "hover doc");
+    assert(one_response(o, h10).contains("i32"), "hover type");
+    let d11 = o.find("\"id\":11,");
+    assert(d11 >= 0, "the definition is answered");
+    assert(one_response(o, d11).contains("\"range\":{\"start\":{\"line\":3,\"character\":12}"), "definition");
+}

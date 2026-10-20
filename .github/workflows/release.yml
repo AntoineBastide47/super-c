@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: write            # needed to create the tag + release
+  actions: read              # the test-durations artifact (.github/actions/test-durations)
 
 concurrency:
   group: release-${{ github.event.inputs.tag }}
@@ -190,13 +191,16 @@ jobs:
       # bootstrap. Leak-gated: every process in the run exits nonzero if it leaks or double-frees. `test`
       # rebuilds the project first and so relinks `super-c` while `super-c` is the process running: see
       # sc_rename for why that is allowed even on Windows.
+      - uses: ./.github/actions/test-durations
+
       - name: Run the test suite
         run: |
           set -eu
           bin="super-c${BINEXT:-}"
           chmod +x "./$bin"
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          SC_LEAK_CHECK=fatal "./$bin" test --sanitizers --quiet --test-shard=${{ matrix.test_shard }} ${cstd:+"$cstd"}
+          dur=tests/durations/${{ matrix.target }}.tsv; [ -f "$dur" ] || dur=tests/durations.tsv # shard balance (test-durations.yml)
+          SC_LEAK_CHECK=fatal "./$bin" test --sanitizers --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur" ${cstd:+"$cstd"}
 
       - uses: ./.github/actions/cache-save
         with:
@@ -582,10 +586,13 @@ jobs:
         with:
           name: compiler-wasm
 
+      - uses: ./.github/actions/test-durations
+
       - name: Run the test suite against the wasm compiler
         run: |
           chmod +x ./super-c
-          SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --sanitizers --quiet --test-shard=${{ matrix.test_shard }}
+          dur=tests/durations/wasm.tsv; [ -f "$dur" ] || dur=tests/durations.tsv # shard balance (test-durations.yml)
+          SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --sanitizers --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur"
 
       - uses: ./.github/actions/cache-save
         with:
