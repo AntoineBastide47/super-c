@@ -6953,7 +6953,8 @@ fn external_c_sources() {
 // goes to `__sc_ext.h` after the definition it needs. By-value `S` parameters and returns stay (a
 // declaration may name an incomplete type), and so does a pointer to an array of `S`, which names
 // the array's wrapper struct. The C side calls the `@c.export` functions back; the tree compiles
-// -Wall -Wextra -Werror.
+// -Wall -Wextra -Werror. A result pointer to an array of `S` converts at the call (`(void *)`), and a
+// local named like that extern, declared before the call, takes another C name.
 @test
 fn extern_prototypes_see_complete_types() {
     let p = cli::proj_new();
@@ -6970,6 +6971,8 @@ int32_t sc_val(S s) { return sc_twice(s).b + s.a; }
 S sc_mk(int32_t a) { S s = { a, a + 1 }; return s; }
 S sc_bval(S s) { S r = { s.b, s.a }; return r; }
 int32_t sc_bptr(const S (*p)[2]) { return (*p)[1].b * 100; }
+static const S sc_pair[2] = { { 7, 8 }, { 9, 10 } };
+const S (*sc_rows(void))[2] { return &sc_pair; }
 )",
     );
     p.mkfile(
@@ -6989,6 +6992,20 @@ extern "C" {
     fn sc_bval(s: S) S;
     @blocking
     fn sc_bptr(p: *const [S; 2]) i32;
+    fn sc_rows() *const [S; 2];
+}
+
+fn rows(k: i32) i32 {
+    let mut t: i32 = 0;
+    {
+        let mut sc_rows: i32 = k;
+        if k > 2 {
+            sc_rows = k * 2;
+        }
+        t += sc_rows;
+    }
+    let p = unsafe sc_rows();
+    return t + unsafe (*p)[1].a;
 }
 
 @c.export("sc_twice")
@@ -7013,6 +7030,9 @@ fn main() i32 {
     }
     if unsafe sc_mk(5).b != 6 || unsafe sc_bval(v[1]).a != 4 || unsafe sc_bptr(&v) != 400 {
         return 2;
+    }
+    if rows(v[0].a) != 10 {
+        return 3;
     }
     // The block wrappers ran on the pool: release it and the runtime.
     let _ = blocking::try_shutdown(5000000000);

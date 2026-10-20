@@ -36,7 +36,7 @@ pub struct BceStats {
     pub ranges_removed: u32,
     pub coalesced: u32,
     pub folded: u32,
-    pub sig_kept: u32, // calls crossed without discarding collection facts (signature transparency)
+    pub sig_kept: u32, // calls the walk crossed without discarding collection facts (signature transparency)
     pub reasons: [u32; 6],
 }
 
@@ -175,9 +175,6 @@ pub struct Bce {
     pub la_off: Vector<i64>,
     pub ll_dest: Vector<u32>,
     pub ll_pl: Vector<u32>,
-    // Per place: the view a direct read of its prelude `len` field measures (`len_prefixes`), or
-    // IR_NONE.
-    pub lenpre: Vector<u32>,
 }
 
 // The successor a two-way branch on a bool takes when the bool is `v`, or IR_NONE for another shape
@@ -222,10 +219,10 @@ extend Bce {
         let d = dis.as_str();
         return Bce {
             fx: fx::Facts::new(d.contains("sig")),
-            lenof: Vector::<LenBind>::new(),
-            cmpof: Vector::<CmpBind>::new(),
-            remof: Vector::<RemBind>::new(),
-            alof: Vector::<AlBind>::new(),
+            lenof: Vector::<LenBind>::with_capacity(fx::TABLE_MIN),
+            cmpof: Vector::<CmpBind>::with_capacity(fx::TABLE_MIN),
+            remof: Vector::<RemBind>::with_capacity(fx::TABLE_MIN),
+            alof: Vector::<AlBind>::with_capacity(fx::TABLE_MIN),
             chunks: Vector::<ChunkBind>::new(),
             lreads: Vector::<LRead>::new(),
             iwant: false,
@@ -235,23 +232,22 @@ extend Bce {
             cur_blk: 0,
             cur_sid: 0,
             facts: Vector::<Fact>::new(),
-            in_facts: Vector::<Fact>::new(),
-            in_start: Vector::<u32>::new(),
-            in_len: Vector::<u32>::new(),
-            in_set: Vector::<bool>::new(),
+            in_facts: Vector::<Fact>::with_capacity(fx::TABLE_MIN),
+            in_start: Vector::<u32>::with_capacity(fx::TABLE_MIN),
+            in_len: Vector::<u32>::with_capacity(fx::TABLE_MIN),
+            in_set: Vector::<bool>::with_capacity(fx::TABLE_MIN),
             total_facts: 0,
             limited: false,
             off: stdlib::env_is("SC_BCE", "0"),
             no_fold: d.contains("fold"),
             no_sig: d.contains("sig"),
             no_int: d.contains("int"),
-            cwritten: Vector::<u32>::new(),
+            cwritten: Vector::<u32>::with_capacity(fx::TABLE_MIN),
             cstamp: 0,
             la_dest: Vector::<u32>::new(),
             la_off: Vector::<i64>::new(),
             ll_dest: Vector::<u32>::new(),
             ll_pl: Vector::<u32>::new(),
-            lenpre: Vector::<u32>::new(),
         };
     }
 
@@ -297,40 +293,6 @@ extend Bce {
         return 0 - 1;
     }
 
-    /// For each place of `b` that reads the prelude `len` field of a view in place (not through the
-    /// `[r, deref, .len]` reference read `oper_len_lp` resolves), a new place naming that view
-    /// (`lenpre`): its length identity then matches the view's `len` checks. A spliced callee's
-    /// `len()` reads its receiver's field so when the receiver is the caller's place.
-    fn len_prefixes(self: &mut Self, b: &mut ir::CoreBody) {
-        let n = b.places.len();
-        self.lenpre.clear();
-        self.lenpre.resize_default(n);
-        for i in 0..n {
-            self.lenpre.set(i, ir::IR_NONE);
-            let p = *b.places.at(i);
-            if p.proj_len == 0 {
-                continue;
-            }
-            let last = *b.projections.at((p.proj_start + p.proj_len - 1) as usize);
-            if last.kind != ir::PJ_FIELD || last.data == ir::PJ_UNION_FIELD {
-                continue;
-            }
-            if p.proj_len == 2 && b.projections.at(p.proj_start as usize).kind == ir::PJ_DEREF {
-                continue;
-            }
-            let vt = if p.proj_len == 1 {
-                b.locals.at(p.base as usize).ty;
-            } else {
-                b.projections.at((p.proj_start + p.proj_len - 2) as usize).ty;
-            };
-            if !self.fx.is_prelude_field(b, vt, last.sub, "len") {
-                continue;
-            }
-            self.lenpre.set(i, b.places.len() as u32);
-            b.places.push(ir::Place { base: p.base, proj_start: p.proj_start, proj_len: p.proj_len - 1, ty: vt });
-        }
-    }
-
     /// The len-place identity carried by a resolved local, when its binding is still current.
     const fn len_place_of(self: &Self, l: u32) LenBind {
         let lb = *self.lenof.at(l as usize);
@@ -355,33 +317,36 @@ extend Bce {
     }
 
     /// A length-place identity for a comparison operand: a still-current length local (behind
-    /// copies), or a direct `[r, deref, .len]` read of a prelude view whose base resolves through
-    /// a current reference binding -- stamped with the CURRENT generations, because the read
-    /// happens here.
-    fn oper_len_lp(self: &mut Self, b: &ir::CoreBody, opid: u32) LenBind {
+    /// copies), a read of a prelude view's `len` field in place, or a direct `[r, deref, .len]` read
+    /// of a prelude view whose base resolves through a current reference binding -- stamped with
+    /// the CURRENT generations, because the read happens here.
+    fn oper_len_lp(self: &mut Self, b: &mut ir::CoreBody, opid: u32) LenBind {
         let op = *b.operands.at(opid as usize);
         if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
             return lenbind_none();
         }
-        let l = self.fx.whole_local(b, op.data);
-        if l != ir::IR_NONE {
-            return self.len_place_of(self.fx.copy_root(l));
-        }
-        if op.data as usize < self.lenpre.len() && self.lenpre[op.data as usize] != ir::IR_NONE {
-            // A `len` field read in place of a view (an inlined `len()` reads its receiver's field).
-            return self.len_capture(b, self.lenpre[op.data as usize], 0);
-        }
         let p = *b.places.at(op.data as usize);
-        if p.proj_len != 2 {
+        if p.proj_len == 0 {
+            return self.len_place_of(self.fx.copy_root(p.base));
+        }
+        let last = *b.projections.at((p.proj_start + p.proj_len - 1) as usize);
+        if last.kind != ir::PJ_FIELD || last.data == ir::PJ_UNION_FIELD {
             return lenbind_none();
         }
-        let pj0 = *b.projections.at(p.proj_start as usize);
-        let pj1 = *b.projections.at((p.proj_start + 1) as usize);
-        if pj0.kind != ir::PJ_DEREF || pj1.kind != ir::PJ_FIELD || pj1.data == ir::PJ_UNION_FIELD {
+        let vt = if p.proj_len == 1 {
+            b.locals.at(p.base as usize).ty;
+        } else {
+            b.projections.at((p.proj_start + p.proj_len - 2) as usize).ty;
+        };
+        if !self.fx.is_prelude_field(b, vt, last.sub, "len") {
             return lenbind_none();
         }
-        if !self.fx.is_prelude_field(b, pj0.ty, pj1.sub, "len") {
-            return lenbind_none();
+        if p.proj_len != 2 || b.projections.at(p.proj_start as usize).kind != ir::PJ_DEREF {
+            // A `len` field read in place of a view (a spliced callee's `len()` reads its receiver's
+            // field so when the receiver is the caller's place): a new place names the view, so its
+            // length identity matches the view's `len` checks.
+            b.places.push(ir::Place { base: p.base, proj_start: p.proj_start, proj_len: p.proj_len - 1, ty: vt });
+            return self.len_capture(b, b.places.len() as u32 - 1, 0);
         }
         let rl = self.fx.copy_root(p.base);
         let rb = *self.fx.refof.at(rl as usize);
@@ -475,6 +440,18 @@ extend Bce {
             return false;
         }
         return false;
+    }
+
+    /// Can block `blk` fold: a branch of the fold shape with a pure panic successor?
+    fn fold_site(self: &Self, b: &ir::CoreBody, blk: u32) bool {
+        let t = &b.blocks.at(blk as usize).term;
+        if t.kind != ir::TM_SWITCH || t.sw_len != 1 || t.a == ir::IR_NONE || b.switch_pool[t.sw_start as usize] >> 32 != 1 {
+            return false;
+        }
+        return self.doomed_panic(b, (b.switch_pool[t.sw_start as usize] & 0xFFFFFFFFu64) as u32) || self.doomed_panic(
+            b,
+            t.t0,
+        );
     }
 
     // ---- fact recording ------------------------------------------------------------------------
@@ -1715,7 +1692,6 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
     if !any {
         return "";
     }
-    z.len_prefixes(b);
     z.begin_body(b, pkg);
     // the integer facts serve only the checks, solved on demand: a body with no check allocates no
     // solver state
@@ -1724,7 +1700,14 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
     z.ialign = false;
     z.clens.clear();
     let mut err: str<'static> = "";
-    for bi in 0..z.fx.rpo.len() {
+    // Only a check or a fold candidate gets a result, and facts flow only forward: the walk ends
+    // with the last block in reverse postorder that holds one. The SC_CORE_IR re-proof walks every
+    // block, its folded sites included.
+    let mut end = z.fx.rpo.len();
+    while !check_only && end > 0 && end - 1 != z.fx.clast as usize && !z.fold_site(b, z.fx.rpo[end - 1]) {
+        end -= 1;
+    }
+    for bi in 0..end {
         let blk = z.fx.rpo[bi] as usize;
         z.facts.clear();
         if z.in_set[blk] {

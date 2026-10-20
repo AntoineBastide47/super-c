@@ -1480,10 +1480,11 @@ extend TuBufs {
         return t;
     }
 
-    /// Module `m`'s TU buffer alone: a seed shard renders into no other TU.
-    pub fn one(m: usize) TuBufs {
+    /// Module `m`'s TU buffer `buf` alone: a seed shard renders into no other TU.
+    pub fn one(m: usize, buf: String) TuBufs {
         let mut t = TuBufs::new(0);
         t.lo = m;
+        t.bufs.set(0, buf);
         return t;
     }
 
@@ -2455,7 +2456,7 @@ fn cemit_take_body(
         None => (-2) as i64,
     };
     if ki >= 0 {
-        *lw_out = irl::Lowerer::take_kept(p, g.kept.index_mut(ki as usize));
+        *lw_out = irl::Lowerer::take_kept(p, g.kept.index_mut(ki as usize).deref_mut());
         let _ = g.kept_ix.remove(&key);
         pr.count(prb::C_TAKEN, 1);
         pr.stop(prb::P_ACQUIRE, am);
@@ -2492,7 +2493,7 @@ fn cemit_tuc_replay(p: &mut loader::Package, cem: &mut cbe::CEmit, m: usize, t: 
         return 1;
     }
     let mut idc = Map::<u64, u64>::new();
-    let nev = rd.r32() as usize; // the event count follows the type table
+    let nev = rd.r32() as usize;
     let mut ev = mbe::RecEv::blank(0);
     for _i in 0..nev {
         if !rd.read_ev(&mut ev) || !tuc::ev_patch(p, &tab, &mut idc, &mut ev) {
@@ -3846,7 +3847,6 @@ fn cemit_seed_master(
     testing: bool,
     verbose: bool,
     tuc: &mut tuc::Tuc,
-    pay: &mut String,
     acc: &mut SeedAcc,
 ) {
     // Symbols the module spells about ITSELF are not cross-TU uses.
@@ -3886,7 +3886,7 @@ fn cemit_seed_master(
     }
     if rec {
         cem.mg.rec_on = false;
-        rec_close(p, cem, &mk, m, acc.ch.bufs.at(m).as_str(), tuc, pay);
+        rec_close(p, cem, &mk, m, acc.ch.bufs.at(m).as_str(), tuc);
         cem.mg.rec.truncate(mk.seg);
     }
 }
@@ -3904,15 +3904,7 @@ struct RecMark {
 // Close module `m`'s section: journal the trailing deltas past `mk` (their accumulators are consumed
 // whole at assembly, so only their internal order matters), then serialize the events from
 // `mk.seg` on, with chunk texts from `text`, as the module's section.
-fn rec_close(
-    p: &loader::Package,
-    cem: &mut cbe::CEmit,
-    mk: &RecMark,
-    m: usize,
-    text: str,
-    tuc: &mut tuc::Tuc,
-    pay: &mut String,
-) {
+fn rec_close(p: &loader::Package, cem: &mut cbe::CEmit, mk: &RecMark, m: usize, text: str, tuc: &mut tuc::Tuc) {
     rec_aux(cem, mk.aux, mk.hedge);
     if cem.env_fwd.len() > mk.efwd {
         let mut ev9 = mbe::RecEv::blank(mbe::RK_EFWD);
@@ -3925,9 +3917,7 @@ fn rec_close(
         cem.mg.rec.push(ev9);
     }
     rec_edges(cem, m, p.modules.len(), mk.tn);
-    pay.truncate(0);
-    tuc::ser_evs(p, pay, &cem.mg.rec, mk.seg, text);
-    tuc.sec_add(m, pay);
+    tuc.sec_rec(p, m, &cem.mg.rec, mk.seg, text);
 }
 
 // Journal the `aux` entries from row `a0` on (one event each: owner, key, text) and the header
@@ -4396,19 +4386,19 @@ pub fn cemit_package(
     let mut cl_cache = Map::<u64, u64>::new();
     let mut clws = Vector::<irl::Lowerer>::new();
     let mut acc = SeedAcc::new(TuBufs::new(p.modules.len()));
-    // Pre-size every buffer from the corpus: a module's C runs about a byte per source byte, the
-    // instance TU about a quarter of the whole, prototypes a byte per AST node. Growth past an
-    // estimate stays geometric.
+    // Pre-size every buffer from the corpus: a module's C runs about 1.7 bytes per source byte (two
+    // leave most modules one allocation), the instance TU under a quarter of the whole, prototypes a
+    // byte per AST node. Growth past an estimate stays geometric.
+    let mut src_total: usize = 0;
     {
         let mut est_nodes: usize = 0;
-        let mut src_total: usize = 0;
         for m in 0..p.modules.len() {
             if p.modules[m].has_ast {
                 est_nodes += p.modules[m].ast.nnodes();
-                if live == null || !p.modules[m].prelude || unsafe live[m] {
-                    acc.ch.bufs.index_mut(m).reserve(p.modules[m].source.len());
-                    src_total += p.modules[m].source.len();
-                }
+            }
+            if module_emits(p, live, m) {
+                acc.ch.bufs.index_mut(m).reserve(2 * p.modules[m].source.len());
+                src_total += p.modules[m].source.len();
             }
         }
         acc.ch.bufs.index_mut(p.modules.len()).reserve(src_total / 4);
@@ -4428,8 +4418,9 @@ pub fn cemit_package(
         } else {
             p.gen_root.as_str();
         },
+        // A section carries its module's C text, as large as the module's TU buffer.
+        2 * src_total,
     );
-    let mut tuc_pay = String::new();
     let par9 = p.jobs != 1 && p.modules.len() > 1;
     if par9 {
         // Parallel seed frontier: one task per module with a private emitter shard; gated
@@ -4443,7 +4434,13 @@ pub fn cemit_package(
         let mut shards = Vector::<SeedShard>::new();
         for m in 0..p.modules.len() {
             let used = module_emits(p, live, m) && !(tuc.on && tuc.hit[m]);
-            let mut sh = SeedShard::new(p, TuBufs::one(m), used, &em.env_defined, &ext_keys, m as i64);
+            // A shard renders into the buffer reserved for its module above; a hit module keeps it.
+            let buf = if used {
+                replace(acc.ch.bufs.index_mut(m), String::new());
+            } else {
+                String::new();
+            };
+            let mut sh = SeedShard::new(p, TuBufs::one(m, buf), used, &em.env_defined, &ext_keys, m as i64);
             sh.cem.mg.share_short(&mut em.mg);
             sh.cem.mg.rec_on = used && tuc.on;
             shards.push(sh);
@@ -4497,8 +4494,7 @@ pub fn cemit_package(
             let eligible9 = module_emits(p, live, m);
             if !eligible9 {
                 if tuc.on {
-                    tuc_pay.truncate(0);
-                    tuc.sec_add(m, &tuc_pay);
+                    tuc.sec_void(m);
                 }
                 continue;
             }
@@ -4517,7 +4513,6 @@ pub fn cemit_package(
                     testing,
                     verbose,
                     &mut tuc,
-                    &mut tuc_pay,
                     &mut acc,
                 );
                 continue;
@@ -4530,7 +4525,7 @@ pub fn cemit_package(
                 // The shard's journal becomes the module's section: trailing deltas are the whole
                 // shard-local accumulators, chunk texts materialize from the shard's bodies buffer.
                 let zero = RecMark { seg: 0, aux: 0, efwd: 0, eh: 0, hedge: 0, tn: 0 };
-                rec_close(p, &mut o.cem, &zero, m, o.acc.ch.bufs.at(0).as_str(), &mut tuc, &mut tuc_pay);
+                rec_close(p, &mut o.cem, &zero, m, o.acc.ch.bufs.at(0).as_str(), &mut tuc);
             }
             acc.absorb_seed(&mut o.acc, m);
             cem.pr.merge(&o.cem.pr);
@@ -4542,8 +4537,7 @@ pub fn cemit_package(
             if !module_emits(p, live, m) {
                 // No seeds (missing AST / unreachable prelude): an empty section keeps the image indexed.
                 if tuc.on {
-                    tuc_pay.truncate(0);
-                    tuc.sec_add(m, &tuc_pay);
+                    tuc.sec_void(m);
                 }
                 continue;
             }
@@ -4558,7 +4552,6 @@ pub fn cemit_package(
                 testing,
                 verbose,
                 &mut tuc,
-                &mut tuc_pay,
                 &mut acc,
             );
         }

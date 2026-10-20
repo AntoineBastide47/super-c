@@ -2956,11 +2956,12 @@ fn engine_build_i(
         }
     }
     // The link record: per-binary and profile-agnostic (out-dir root), since profiles share bin paths
-    // and a debug binary left behind by a release link must read as out of date.
+    // and a debug binary left behind by a release link must read as out of date. Its name flattens the
+    // binary's path, separators and a Windows drive colon included, into one file name.
     let mut fpname = String::from_str("__link-");
     for i in 0..bin.len() {
         fpname.push_byte(
-            if bin[i] == b'/' {
+            if bin[i] == b'/' || bin[i] == b'\\' || bin[i] == b':' {
                 b'_';
             } else {
                 bin[i];

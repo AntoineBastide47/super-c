@@ -46,6 +46,7 @@ import lexer::token as tok;
 import module::loader as loader;
 import ir::layout as lay;
 import ir::core as ir;
+import ir::facts as fx;
 import ir::lower as irl;
 import ir::cpu_features as cf;
 import stdlib;
@@ -179,6 +180,22 @@ struct Origin {
     pub key: u64, // callee identity key
 }
 
+/// The elements splices add to each pool of a caller (`expect_growth`).
+struct Growth {
+    pub locals: usize,
+    pub blocks: usize,
+    pub statements: usize,
+    pub places: usize,
+    pub projections: usize,
+    pub operands: usize,
+    pub rvalues: usize,
+    pub constants: usize,
+    pub oper_pool: usize,
+    pub dest_pool: usize,
+    pub switch_pool: usize,
+    pub targ_pool: usize,
+}
+
 pub struct InlineStats {
     pub considered: u32,
     pub inlined: u32,
@@ -216,11 +233,15 @@ pub struct InlineCtx {
     pub stats_on: bool,
     pub store: *const InlineStore,
     /// Type-translation cache: one entry per distinct (callee slot, caller module, binds) call
-    /// shape. Filling a map walks the whole callee type table through `xty`; the same shape
-    /// repeats at every call site of a callee, so the walk runs once per shape instead.
-    pub xm_ix: Map<u64, u64>, // shape hash -> xms index
-    pub xm_key: Vector<Vector<u64>>, // exact shape per entry: slot, cm, then (pm<<32|pnode, at) pairs
-    pub xms: Vector<Map<u64, u64>>,
+    /// shape. Filling a table walks the whole callee type table through `xty`; the same shape
+    /// repeats at every call site of a callee, so the walk runs once per shape instead. The
+    /// entries fill two shared pools in order: entry `e` starts at `xm_ko[e]` in `xm_keys` and at
+    /// `xm_to[e]` in `xm_tys`, and ends where entry `e + 1` starts (the last at the pool's end).
+    pub xm_ix: Map<u64, u64>, // shape hash -> entry index
+    pub xm_keys: Vector<u64>, // exact shape per entry: slot, cm, then (pm<<32|pnode, at) pairs
+    pub xm_ko: Vector<u32>,
+    pub xm_tys: Vector<u64>, // translation table per entry (`ty_table`)
+    pub xm_to: Vector<u32>,
     /// Per entry: where the callee's parameter facts under that translation start in `xm_pfs`
     /// (`param_facts`, one byte per parameter), and whether it writes no memory (0 not computed, 1
     /// no, 2 yes).
@@ -235,7 +256,9 @@ pub struct InlineCtx {
     pub sc_blk_origin: Vector<u32>,
     pub sc_origins: Vector<Origin>,
     pub sc_binds: Vector<GBind>,
-    pub sc_tymap: Map<u64, u64>,
+    pub sc_tymap: Map<u64, u64>, // the callee types translated so far: callee type -> caller type
+    pub sc_pairs: Vector<u64>, // the same, as `ty_table` input
+    pub sc_tys: Vector<u64>, // the table of a shape the cache cannot index (a hash collision)
     pub sc_wire: Vector<u8>,
     pub sc_probe: Vector<TypeId>,
     pub sc_shape: Vector<u64>,
@@ -519,13 +542,10 @@ fn is_header_extern_fn(pkg: *const loader::Package, d: DefId) bool {
 }
 
 extend InlineCtx {
-    /// Bytes the translation maps hold (SC_TYPE_STATS): each map's slots at its load, plus the shape keys.
+    /// Bytes the translation tables hold (SC_TYPE_STATS): the tables, the shape keys and their index.
     pub fn xm_bytes(self: &Self) u64 {
-        let mut b: u64 = 0;
-        for i in 0..self.xms.len() {
-            b += (self.xms.at(i).len() * 17 * 2 + self.xm_key.at(i).len() * 8 + 5) as u64;
-        }
-        return b + (self.xm_ix.len() * 17 * 2 + self.xm_pfs.len()) as u64;
+        let b = (self.xm_tys.len() + self.xm_keys.len()) * 8 + self.xm_ko.len() * 13;
+        return (b + self.xm_ix.len() * 17 * 2 + self.xm_pfs.len()) as u64;
     }
 
     pub fn new(store: *const InlineStore) InlineCtx {
@@ -536,8 +556,10 @@ extend InlineCtx {
             stats_on: stdlib::getenv("SC_INLINE_STATS") != null,
             store: store,
             xm_ix: Map::<u64, u64>::new(),
-            xm_key: Vector::<Vector<u64>>::new(),
-            xms: Vector::<Map<u64, u64>>::new(),
+            xm_keys: Vector::<u64>::new(),
+            xm_ko: Vector::<u32>::new(),
+            xm_tys: Vector::<u64>::new(),
+            xm_to: Vector::<u32>::new(),
             xm_pfo: Vector::<u32>::new(),
             xm_wf: Vector::<u8>::new(),
             xm_pfs: Vector::<u8>::new(),
@@ -547,6 +569,8 @@ extend InlineCtx {
             sc_origins: Vector::<Origin>::new(),
             sc_binds: Vector::<GBind>::new(),
             sc_tymap: Map::<u64, u64>::new(),
+            sc_pairs: Vector::<u64>::new(),
+            sc_tys: Vector::<u64>::new(),
             sc_wire: Vector::<u8>::new(),
             sc_probe: Vector::<TypeId>::new(),
             sc_shape: Vector::<u64>::new(),
@@ -1366,7 +1390,8 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
     let mut added: usize = 0;
     let mut binds = replace(&mut cx.sc_binds, Vector::<GBind>::new());
     let mut tymap = replace(&mut cx.sc_tymap, Map::<u64, u64>::new());
-    tymap.clear();
+    let mut pairs = replace(&mut cx.sc_pairs, Vector::<u64>::new());
+    let mut tys = replace(&mut cx.sc_tys, Vector::<u64>::new());
     let mut wire = replace(&mut cx.sc_wire, Vector::<u8>::new());
     let mut probe = replace(&mut cx.sc_probe, Vector::<TypeId>::new());
     let mut shape = replace(&mut cx.sc_shape, Vector::<u64>::new());
@@ -1388,6 +1413,7 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
     // A closure's captures live in its environment, which the closure value owns.
     let cl = unsafe (&*(*pkg).module_ast_const(lw.body.owner.module)).closure_fact(lw.body.owner.node) != null;
     let budget = MAX_ADDED_STMTS * pick(vec_caller, VEC_SCALE, 1usize);
+    let mut reserved = false;
     let mut bi: usize = 0;
     while bi < lw.body.blocks.len() {
         let t = lw.body.blocks.at(bi).term;
@@ -1525,8 +1551,7 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
         }
         // ---- translate every callee type up front; any failure rejects the site ----------------
         // The translation depends only on (callee slot, caller module, binds): repeated call
-        // shapes reuse the finished map instead of re-walking the callee type table.
-        tymap.clear();
+        // shapes reuse the finished table instead of re-walking the callee type table.
         let mut tok9 = true;
         shape.truncate(0);
         shape.push(slot);
@@ -1543,7 +1568,9 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
         let mut collide = false;
         switch cx.xm_ix.get(&h9) {
             Some(v) => {
-                if cx.xm_key.at((*v) as usize).eq(&shape) {
+                let e = (*v) as usize;
+                let ks = cx.xm_ko[e] as usize;
+                if same_words(cx.xm_keys[ks..pool_end(&cx.xm_ko, cx.xm_keys.len(), e)], &shape) {
                     cix = (*v) as i64;
                     if unsafe TS_ON {
                         ts_add(TS_XTY_HIT, 1);
@@ -1556,6 +1583,8 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
         };
         if cix < 0 {
             body_types(k, &mut probe);
+            tymap.clear();
+            pairs.truncate(0);
             for i in 0..probe.len() {
                 let kt = probe[i];
                 let kk: u64 = kt;
@@ -1568,26 +1597,33 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
                     break;
                 }
                 tymap.insert(kk, nt);
+                pairs.push(kk << 32 | nt as u64);
             }
             if tok9 && !collide {
-                cix = cx.xms.len() as i64;
-                cx.xm_key.push(shape.clone());
-                cx.xms.push(replace(&mut tymap, Map::<u64, u64>::new()));
+                cix = cx.xm_ko.len() as i64;
+                cx.xm_ko.push(cx.xm_keys.len() as u32);
+                for i in 0..shape.len() {
+                    cx.xm_keys.push(shape[i]);
+                }
+                cx.xm_to.push(cx.xm_tys.len() as u32);
+                ty_table(&pairs, &mut cx.xm_tys);
                 cx.xm_pfo.push(0);
                 cx.xm_wf.push(0);
                 cx.xm_ix.insert(h9, cix as u64);
+            } else if tok9 {
+                tys.truncate(0);
+                ty_table(&pairs, &mut tys);
             }
         }
         if !tok9 {
             st.reasons[IJ_GENERIC as usize] = st.reasons[IJ_GENERIC as usize] + 1;
             continue;
         }
-        let tyx: *const Map<u64, u64> = if cix >= 0 {
-            cx.xms.at(cix as usize);
+        let tyr = if cix >= 0 {
+            cx.xm_tys[cx.xm_to[cix as usize] as usize..pool_end(&cx.xm_to, cx.xm_tys.len(), cix as usize)];
         } else {
-            &tymap;
+            tys[0..tys.len()];
         };
-        let tyr = unsafe &*tyx;
         // ---- call-boundary shapes: exact match, or the one implicit autoref/deref adjustment ---
         // (the C call emitter applies autoref, Box hops, and array-to-slice wraps; only the
         // adjustments the splice reproduces in IR are accepted, anything else rejects the site)
@@ -1707,6 +1743,12 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
         if expo_on {
             expose_term(unsafe &*pkg, &lw.body, cma, &t, &mut expo, false);
         }
+        if !reserved {
+            // A kept caller's pools hold no slack (`compact_from`): grow each once for the run's
+            // splices instead of at each one.
+            reserved = true;
+            expect_growth(cx, &lw.body, bi - 1, &live, owner_key, budget).reserve_in(&mut lw.body);
+        }
         splice(lw, ki, &t, bi - 1, tyr, &binds, &alias, &wire, &mut blk_origin, &mut origins, &expo, &mut pf, wfree, cl);
         if expo_on && multi {
             // The splice moved member reads of the call's temporary onto the return slots.
@@ -1733,6 +1775,8 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
     cx.sc_origins = origins;
     cx.sc_binds = binds;
     cx.sc_tymap = tymap;
+    cx.sc_pairs = pairs;
+    cx.sc_tys = tys;
     cx.sc_wire = wire;
     cx.sc_probe = probe;
     cx.sc_shape = shape;
@@ -1747,9 +1791,47 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
     cx.sc_pf = pf;
 }
 
+/// What the splices of a run are expected to add to caller `b`: from block `from` on, each live
+/// call of a kept callee other than `owner` adds that callee, its prelude and its join, and so does
+/// each kept callee it calls other than itself and `owner`, until the statement `budget` is spent.
+fn expect_growth(cx: &InlineCtx, b: &ir::CoreBody, from: usize, live: &Vector<bool>, owner: u64, budget: usize) Growth {
+    let mut g = Growth {};
+    let kept = unsafe &(&*cx.store).kept;
+    for i in from..b.blocks.len() {
+        let t = &b.blocks.at(i).term;
+        if t.kind != ir::TM_CALL || t.callee.node == NODE_NONE || !live[i] || callee_key(t.callee) == owner {
+            continue;
+        }
+        let slot = cx.callee_slot(t.callee);
+        if slot >= REJ_BASE {
+            continue;
+        }
+        let k = &kept.at(slot as usize).body;
+        let key = callee_key(t.callee);
+        g.add(k);
+        for j in 0..k.blocks.len() {
+            let kt = &k.blocks.at(j).term;
+            if kt.kind == ir::TM_CALL && kt.callee.node != NODE_NONE {
+                let kk = callee_key(kt.callee);
+                let ks = cx.callee_slot(kt.callee);
+                if kk != key && kk != owner && ks < REJ_BASE {
+                    g.add(&kept.at(ks as usize).body);
+                }
+            }
+        }
+        if g.statements >= budget {
+            break;
+        }
+    }
+    return g;
+}
+
 /// Every type `k` names, into `out`: the ones a splice or `ground_body` translates.
 fn body_types(k: &ir::CoreBody, out: &mut Vector<TypeId>) {
     out.truncate(0);
+    out.reserve(
+        k.locals.len() + k.places.len() + k.projections.len() + k.operands.len() + k.constants.len() + k.targ_pool.len() + 2 * (k.blocks.len() + k.rvalues.len()),
+    );
     for i in 0..k.locals.len() {
         out.push(k.locals.at(i).ty);
     }
@@ -1795,6 +1877,7 @@ pub fn ground_body(lw: &mut irl::Lowerer, binds: &Vector<GBind>) bool {
     let mut tys = Vector::<TypeId>::new();
     body_types(&lw.body, &mut tys);
     let mut map = Map::<u64, u64>::new();
+    let mut pairs = Vector::<u64>::new();
     for i in 0..tys.len() {
         let t = tys[i];
         if t == TYPE_NONE || map.contains_key(&(t as u64)) {
@@ -1805,36 +1888,40 @@ pub fn ground_body(lw: &mut irl::Lowerer, binds: &Vector<GBind>) bool {
             return false;
         }
         map.insert(t, g);
+        pairs.push(t as u64 << 32 | g as u64);
     }
+    let mut tab = Vector::<u64>::new();
+    ty_table(&pairs, &mut tab);
+    let tr = tab[0..tab.len()];
     let b = &mut lw.body;
     for i in 0..b.locals.len() {
-        b.locals.index_mut(i).ty = mty(&map, b.locals.at(i).ty);
+        b.locals.index_mut(i).ty = mty(tr, b.locals.at(i).ty);
     }
     for i in 0..b.places.len() {
-        b.places.index_mut(i).ty = mty(&map, b.places.at(i).ty);
+        b.places.index_mut(i).ty = mty(tr, b.places.at(i).ty);
     }
     for i in 0..b.projections.len() {
-        b.projections.index_mut(i).ty = mty(&map, b.projections.at(i).ty);
+        b.projections.index_mut(i).ty = mty(tr, b.projections.at(i).ty);
     }
     for i in 0..b.operands.len() {
-        b.operands.index_mut(i).ty = mty(&map, b.operands.at(i).ty);
+        b.operands.index_mut(i).ty = mty(tr, b.operands.at(i).ty);
     }
     for i in 0..b.constants.len() {
-        b.constants.index_mut(i).ty = mty(&map, b.constants.at(i).ty);
+        b.constants.index_mut(i).ty = mty(tr, b.constants.at(i).ty);
     }
     for i in 0..b.targ_pool.len() {
-        b.targ_pool.set(i, mty(&map, b.targ_pool[i]));
+        b.targ_pool.set(i, mty(tr, b.targ_pool[i]));
     }
     for i in 0..b.blocks.len() {
         let tm = &mut b.blocks.index_mut(i).term;
-        tm.iface = mty(&map, tm.iface);
-        tm.recv = mty(&map, tm.recv);
+        tm.iface = mty(tr, tm.iface);
+        tm.recv = mty(tr, tm.recv);
     }
     for i in 0..b.rvalues.len() {
         let rv = b.rvalues.index_mut(i);
-        rv.target = mty(&map, rv.target);
+        rv.target = mty(tr, rv.target);
         if takes_type(rv) {
-            rv.b = mty(&map, rv.b);
+            rv.b = mty(tr, rv.b);
         }
     }
     // A const-generic parameter read is its value, and a switch on one takes its one edge, as in a
@@ -1879,15 +1966,76 @@ const fn eff_pty(b: &ir::CoreBody, plid: ir::PlaceId) TypeId {
     return b.projections.at((pl.proj_start + pl.proj_len - 1) as usize).ty;
 }
 
-fn mty(tymap: &Map<u64, u64>, t: TypeId) TypeId {
+/// Where entry `e` of a pool its entries fill in order ends: where entry `e + 1` starts (`starts`),
+/// or at the pool's length `n` for the last.
+fn pool_end(starts: &Vector<u32>, n: usize, e: usize) usize {
+    if e + 1 < starts.len() {
+        return starts[e + 1] as usize;
+    }
+    return n;
+}
+
+/// Whether `a` holds the words of `b`.
+fn same_words(a: []u64, b: &Vector<u64>) bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The slot of type `t` in a translation table of `n` slots (a power of two).
+const fn ty_slot(t: TypeId, n: usize) usize {
+    return ((t as u64).wrapping_mul(0x9E3779B97F4A7C15u64) >> 32) as usize & n - 1;
+}
+
+/// Append the translation table of `pairs` (`callee type << 32 | caller type` words, each callee type
+/// once) to `out`: open addressing with linear probing over a power-of-two slot count at least twice
+/// the pairs, 0 a free slot (`TYPE_NONE` is 0 and never translates). One table per call shape fills a
+/// shared pool, so a new shape costs no allocation of its own.
+fn ty_table(pairs: &Vector<u64>, out: &mut Vector<u64>) {
+    let mut n: usize = 2;
+    while n < 2 * pairs.len() {
+        n *= 2;
+    }
+    let s = out.len();
+    out.resize_default(s + n);
+    for i in 0..pairs.len() {
+        // At most half the slots are taken: the probe meets a free one.
+        let mut j = ty_slot((pairs[i] >> 32) as TypeId, n);
+        for _ in 0..n {
+            if out[s + j] == 0 {
+                break;
+            }
+            j = j + 1 & n - 1;
+        }
+        out.set(s + j, pairs[i]);
+    }
+}
+
+/// Type `t` of a callee in the caller, through translation table `tymap` (`ty_table`); TYPE_NONE
+/// stays TYPE_NONE, and so does a type the table lacks.
+fn mty(tymap: []u64, t: TypeId) TypeId {
     if t == TYPE_NONE {
         return t;
     }
-    let v = switch tymap.get(&(t as u64)) {
-        Some(x) => (*x) as TypeId,
-        None => TYPE_NONE,
-    };
-    return v;
+    let n = tymap.len();
+    let mut j = ty_slot(t, n);
+    for _ in 0..n {
+        let w = tymap[j];
+        if w == 0 {
+            break;
+        }
+        if (w >> 32) as TypeId == t {
+            return w as TypeId;
+        }
+        j = j + 1 & n - 1;
+    }
+    return TYPE_NONE;
 }
 
 // ---- argument substitution ------------------------------------------------------------------
@@ -2305,7 +2453,7 @@ fn pf_uses(k: &ir::CoreBody, rv: &ir::Rvalue, pf: &mut Vector<u8>) {
 /// The `PF_*` facts of each parameter of callee `k` (into `pf`; types translated by `tymap` into
 /// those of caller module `a`), and whether `k` writes no memory a caller place can name: no call,
 /// no drop, no store through a dereference, an index or into a static, no effect operation.
-fn param_facts(p: &loader::Package, k: &ir::CoreBody, a: &Ast, tymap: &Map<u64, u64>, pf: &mut Vector<u8>) bool {
+fn param_facts(p: &loader::Package, k: &ir::CoreBody, a: &Ast, tymap: []u64, pf: &mut Vector<u8>) bool {
     pf.truncate(0);
     pf.resize_default(k.args as usize);
     let mut wfree = true;
@@ -2402,7 +2550,7 @@ fn splice(
     ki: &CalleeInfo,
     t: &ir::Terminator,
     call_blk: usize,
-    tymap: &Map<u64, u64>,
+    tymap: []u64,
     binds: &Vector<GBind>,
     alias: &Vector<u32>,
     wire: &Vector<u8>,
@@ -2852,5 +3000,133 @@ fn splice(
         if b.operands.at(o as usize).kind == ir::OP_CONST {
             b.blocks.index_mut(i as usize).term.a = o;
         }
+    }
+    // So does a switch on the tag of an enum value whose variant the splice sees: one a variant
+    // aggregate of the callee built, or of the caller as the argument (`known_variant`). The other
+    // arms would read payload bytes the value never set.
+    for i in b0..b0 + nkb {
+        let tm = lw.body.blocks.at(i as usize).term;
+        if tm.kind != ir::TM_SWITCH {
+            continue;
+        }
+        let op = *lw.body.operands.at(tm.a as usize);
+        if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
+            continue;
+        }
+        let rv = temp_source(&lw.body, op.data, s0 as usize, l0, b0 as usize);
+        if rv.kind != ir::RV_DISCRIMINANT {
+            continue;
+        }
+        let vd = known_variant(&lw.body, rv.a, s0 as usize, l0, b0 as usize, call_blk);
+        if vd.node == NODE_NONE {
+            continue;
+        }
+        let mut ord: i64 = 0;
+        let en = unsafe (&*pkg9).variant_enum(vd, &mut ord);
+        let tag = lw.tag_of_decl(vd.module, en, ord);
+        lw.body.constants.push(
+            ir::Constant { kind: ir::CK_INT, ty: op.ty, val: tag, raw: sp, item: DefId { module: 0, node: NODE_NONE } },
+        );
+        // The operand reads that tag wherever it is read: it becomes the constant, and nothing reads
+        // the discriminant's temp any more.
+        let c = lw.body.constants.len() as u32 - 1;
+        let o = lw.body.operands.index_mut(tm.a as usize);
+        o.kind = ir::OP_CONST;
+        o.data = c;
+    }
+}
+
+// The variant enum place `pl0` of `b` holds when copies of whole locals lead to a variant aggregate:
+// each copy the one write of a spliced local (`temp_source` over statements `s0..`, locals `l0..`,
+// blocks `bl0..`), or the caller local's value as call block `cb` leaves it (`block_source`). Its
+// node is NODE_NONE otherwise.
+fn known_variant(b: &ir::CoreBody, pl0: u32, s0: usize, l0: u32, bl0: usize, cb: usize) DefId {
+    let none = DefId { module: 0, node: NODE_NONE };
+    let mut pl = pl0;
+    // Each hop crosses one copy: a parameter's scrutinee copies its argument through two.
+    for _ in 0..4 {
+        if b.places.at(pl as usize).proj_len != 0 {
+            return none;
+        }
+        let rv = if b.places.at(pl as usize).base >= l0 {
+            temp_source(b, pl, s0, l0, bl0);
+        } else {
+            block_source(b, pl, cb);
+        };
+        if rv.kind == ir::RV_AGGREGATE && rv.c == ir::AGG_VARIANT {
+            return rv.item;
+        }
+        if rv.kind != ir::RV_USE {
+            return none;
+        }
+        let op = *b.operands.at(rv.a as usize);
+        if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
+            return none;
+        }
+        pl = op.data;
+    }
+    return none;
+}
+
+// The rvalue whole-local place `pl` of `b` holds at the end of block `cb`: its last assignment in the
+// block, when no later statement there can write it (through a pointer, or after taking its
+// address); else an rvalue of kind RV_CLOSURE. A call ends a block, so none runs in between.
+fn block_source(b: &ir::CoreBody, pl: u32, cb: usize) ir::Rvalue {
+    let none = ir::rv(ir::RV_CLOSURE, 0, 0, 0, TYPE_NONE);
+    let x = b.places.at(pl as usize).base;
+    let blk = *b.blocks.at(cb);
+    let mut i = blk.stmt_len;
+    while i > 0 {
+        i -= 1;
+        let st = *b.statements.at((blk.stmt_start + i) as usize);
+        if st.kind != ir::ST_ASSIGN {
+            continue;
+        }
+        let rv = *b.rvalues.at(st.rvalue as usize);
+        if b.places.at(st.place as usize).base == x {
+            return pick(b.places.at(st.place as usize).proj_len == 0, rv, none);
+        }
+        let taken = (rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR) && b.places.at(rv.a as usize).base == x;
+        if taken || b.place_has_deref(st.place) || fx::stmt_effect(b, &st).kind != fx::EF_WRITE {
+            return none;
+        }
+    }
+    return none;
+}
+
+extend Growth {
+    /// Count one splice of callee `k`: its pools, and the prelude and join it brings.
+    fn add(self: &mut Self, k: &ir::CoreBody) {
+        let io = (k.args + k.returns) as usize;
+        self.locals += k.locals.len();
+        self.blocks += k.blocks.len() + 2;
+        self.statements += k.statements.len() + io;
+        self.places += k.places.len() + io;
+        self.projections += k.projections.len();
+        self.operands += k.operands.len() + k.returns as usize;
+        self.rvalues += k.rvalues.len() + io;
+        self.constants += k.constants.len();
+        self.oper_pool += k.oper_pool.len();
+        self.dest_pool += k.dest_pool.len();
+        self.switch_pool += k.switch_pool.len();
+        self.targ_pool += k.targ_pool.len();
+    }
+
+    /// Room for the growth in every pool of `b`, plus a quarter for what the estimate leaves out (deeper
+    /// splices, argument paths read in place): on the self-build fewer allocations and bytes than
+    /// none or a half.
+    fn reserve_in(self: &Self, b: &mut ir::CoreBody) {
+        b.locals.reserve_exact(self.locals + self.locals / 4);
+        b.blocks.reserve_exact(self.blocks + self.blocks / 4);
+        b.statements.reserve_exact(self.statements + self.statements / 4);
+        b.places.reserve_exact(self.places + self.places / 4);
+        b.projections.reserve_exact(self.projections + self.projections / 4);
+        b.operands.reserve_exact(self.operands + self.operands / 4);
+        b.rvalues.reserve_exact(self.rvalues + self.rvalues / 4);
+        b.constants.reserve_exact(self.constants + self.constants / 4);
+        b.oper_pool.reserve_exact(self.oper_pool + self.oper_pool / 4);
+        b.dest_pool.reserve_exact(self.dest_pool + self.dest_pool / 4);
+        b.switch_pool.reserve_exact(self.switch_pool + self.switch_pool / 4);
+        b.targ_pool.reserve_exact(self.targ_pool + self.targ_pool / 4);
     }
 }

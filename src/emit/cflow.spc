@@ -32,19 +32,15 @@ pub struct CFlow {
     pub reducible: bool, // every retreating edge is a back edge
     // Scratch storage for build_into and its passes, kept across functions so a pooled CFlow
     // rebuilds without allocating (every vector clears and refills in place).
-    s_tdone: Vector<bool>,
-    s_onpath: Vector<bool>,
-    s_tpath: Vector<u32>,
+    s_sstart: Vector<u32>, // [n+1] CSR offsets into s_succ
+    s_succ: Vector<u32>, // threaded successors of every block, grouped by block, in edge order
     s_state: Vector<u8>,
     s_stack: Vector<u32>,
     s_kidx: Vector<u32>,
     s_post: Vector<u32>,
-    s_fill: Vector<u32>,
-    s_cnt: Vector<u32>,
     s_cstart: Vector<u32>,
     s_clist: Vector<u32>,
     s_rrpo: Vector<u32>,
-    s_sinks: Vector<u32>,
     s_inloop: Vector<bool>,
     s_members: Vector<u32>,
     s_work: Vector<u32>,
@@ -121,6 +117,15 @@ fn raw_succ(b: &ir::CoreBody, x: u32, k: u32) u32 {
     return t.t0;
 }
 
+// Refill `v` with `len` NONE entries in one allocation.
+fn fill_none(v: &mut Vector<u32>, len: u32) {
+    v.clear();
+    v.resize_default(len as usize);
+    for i in 0..len as usize {
+        v[i] = NONE;
+    }
+}
+
 extend CFlow {
     /// Threaded k-th successor of x.
     pub fn succ(self: &Self, b: &ir::CoreBody, x: u32, k: u32) u32 {
@@ -149,19 +154,15 @@ extend CFlow {
             loop_parent: Vector::<u32>::new(),
             follow: Vector::<u32>::new(),
             reducible: true,
-            s_tdone: Vector::<bool>::new(),
-            s_onpath: Vector::<bool>::new(),
-            s_tpath: Vector::<u32>::new(),
+            s_sstart: Vector::<u32>::new(),
+            s_succ: Vector::<u32>::new(),
             s_state: Vector::<u8>::new(),
             s_stack: Vector::<u32>::new(),
             s_kidx: Vector::<u32>::new(),
             s_post: Vector::<u32>::new(),
-            s_fill: Vector::<u32>::new(),
-            s_cnt: Vector::<u32>::new(),
             s_cstart: Vector::<u32>::new(),
             s_clist: Vector::<u32>::new(),
             s_rrpo: Vector::<u32>::new(),
-            s_sinks: Vector::<u32>::new(),
             s_inloop: Vector::<bool>::new(),
             s_members: Vector::<u32>::new(),
             s_work: Vector::<u32>::new(),
@@ -175,73 +176,60 @@ extend CFlow {
         self.n = n;
         self.entry = 0;
         self.reducible = true;
-        self.thread.clear();
-        self.reach.clear();
-        self.rpo.clear();
         self.order.clear();
-        self.preds.clear();
         self.pred_start.clear();
         self.pred_list.clear();
-        self.idom.clear();
-        self.tin.clear();
-        self.tout.clear();
         self.ipdom.clear();
+        // Threading sets every thread entry.
+        self.thread.clear();
+        self.thread.resize_default(n as usize);
+        self.reach.clear();
+        self.reach.resize_default(n as usize);
+        self.preds.clear();
+        self.preds.resize_default(n as usize);
         self.is_header.clear();
-        self.loop_follow.clear();
-        self.loop_of.clear();
-        self.loop_parent.clear();
-        self.follow.clear();
-        for _i in 0..n {
-            self.thread.push(0);
-            self.reach.push(false);
-            self.rpo.push(NONE);
-            self.preds.push(0);
-            self.idom.push(NONE);
-
-            self.tin.push(NONE);
-
-            self.tout.push(NONE);
-            self.is_header.push(false);
-            self.loop_follow.push(NONE);
-            self.loop_of.push(NONE);
-            self.loop_parent.push(NONE);
-            self.follow.push(NONE);
-        }
+        self.is_header.resize_default(n as usize);
+        fill_none(&mut self.rpo, n);
+        fill_none(&mut self.idom, n);
+        fill_none(&mut self.tin, n);
+        fill_none(&mut self.tout, n);
+        fill_none(&mut self.loop_follow, n);
+        fill_none(&mut self.loop_of, n);
+        fill_none(&mut self.loop_parent, n);
+        fill_none(&mut self.follow, n);
         if n == 0 {
             return;
         }
         // Thread trivial-forward (empty goto) chains, with path compression so each block is
         // resolved once: a whole chain collapses to its end in O(chain), amortized O(1) per block.
-        self.s_tdone.clear();
-        self.s_onpath.clear();
-        self.s_tdone.resize_default(n as usize);
-        self.s_onpath.resize_default(n as usize);
-        self.s_tpath.clear();
+        // s_state: 0 unresolved, 1 on the current path (s_stack), 2 resolved.
+        self.s_state.clear();
+        self.s_state.resize_default(n as usize);
+        self.s_stack.clear();
         for x in 0..n {
-            if *self.s_tdone.at(x as usize) {
+            if *self.s_state.at(x as usize) == 2 {
                 continue;
             }
-            self.s_tpath.truncate(0);
+            self.s_stack.truncate(0);
             let mut c = x;
-            while trivial(b, c) && !*self.s_tdone.at(c as usize) && !*self.s_onpath.at(c as usize) {
-                self.s_onpath.set(c as usize, true);
-                self.s_tpath.push(c);
+            while trivial(b, c) && *self.s_state.at(c as usize) == 0 {
+                self.s_state.set(c as usize, 1);
+                self.s_stack.push(c);
                 c = b.blocks.at(c as usize).term.t0;
             }
-            let target = if *self.s_tdone.at(c as usize) {
+            let target = if *self.s_state.at(c as usize) == 2 {
                 *self.thread.at(c as usize);
             } else {
                 c;
             };
-            for i in 0..self.s_tpath.len() {
-                let p = *self.s_tpath.at(i);
+            for i in 0..self.s_stack.len() {
+                let p = *self.s_stack.at(i);
                 self.thread.set(p as usize, target);
-                self.s_tdone.set(p as usize, true);
-                self.s_onpath.set(p as usize, false);
+                self.s_state.set(p as usize, 2);
             }
             // A non-trivial start is its own target and is not on the path.
             self.thread.set(x as usize, target);
-            self.s_tdone.set(x as usize, true);
+            self.s_state.set(x as usize, 2);
         }
         self.entry = *self.thread.at(b.entry as usize);
 
@@ -289,21 +277,19 @@ extend CFlow {
                         self.tout.set(x as usize, (2 * m - i) as u32);
                     }
                     let mut acc = 0u32;
+                    self.pred_start.reserve((n + 1) as usize);
                     for x in 0..n {
                         self.pred_start.push(acc);
                         acc += *self.preds.at(x as usize);
                     }
                     self.pred_start.push(acc);
-                    for _i in 0..acc {
-                        self.pred_list.push(NONE);
-                    }
+                    // Every chain block after the first fills its one slot.
+                    self.pred_list.resize_default(acc as usize);
                     for i in 1..m {
                         let x = *self.order.at(i);
                         self.pred_list.set((*self.pred_start.at(x as usize)) as usize, *self.order.at(i - 1));
                     }
-                    for _i in 0..n + 1 {
-                        self.ipdom.push(NONE);
-                    }
+                    fill_none(&mut self.ipdom, n + 1);
                     for i in 0..m {
                         let x = *self.order.at(i);
                         let nx = if i + 1 < m {
@@ -326,29 +312,44 @@ extend CFlow {
             }
         }
 
+        // Threaded successors of every block, decoded from the terminators once (CSR).
+        self.s_sstart.clear();
+        self.s_sstart.reserve((n + 1) as usize);
+        self.s_succ.clear();
+        self.s_succ.reserve(n as usize);
+        for x in 0..n {
+            self.s_sstart.push(self.s_succ.len() as u32);
+            for k in 0..n_succ(b, x) {
+                self.s_succ.push(self.succ(b, x, k));
+            }
+        }
+        self.s_sstart.push(self.s_succ.len() as u32);
+
         // Reverse-postorder DFS from entry over threaded edges (iterative; children in edge order).
-        // 0 unseen, 1 on-stack, 2 done.
+        // 0 unseen, 1 on-stack, 2 done. Each reachable edge is crossed once, so it also counts
+        // the predecessors.
         self.s_state.clear();
         self.s_state.resize_default(n as usize);
         self.s_stack.clear();
-        // Next child index per stack frame.
+        // Next successor index (into s_succ) per stack frame.
         self.s_kidx.clear();
         self.s_post.clear();
         self.s_stack.push(self.entry);
-        self.s_kidx.push(0);
+        self.s_kidx.push(*self.s_sstart.at(self.entry as usize));
         self.s_state.set(self.entry as usize, 1);
         self.reach.set(self.entry as usize, true);
         while self.s_stack.len() != 0 {
             let top = *self.s_stack.at(self.s_stack.len() - 1);
             let ki = *self.s_kidx.at(self.s_kidx.len() - 1);
-            if ki < n_succ(b, top) {
+            if ki < *self.s_sstart.at((top + 1) as usize) {
                 self.s_kidx.set(self.s_kidx.len() - 1, ki + 1);
-                let s = self.succ(b, top, ki);
+                let s = *self.s_succ.at(ki as usize);
+                self.preds.set(s as usize, *self.preds.at(s as usize) + 1);
                 if *self.s_state.at(s as usize) == 0 {
                     self.s_state.set(s as usize, 1);
                     self.reach.set(s as usize, true);
                     self.s_stack.push(s);
-                    self.s_kidx.push(0);
+                    self.s_kidx.push(*self.s_sstart.at(s as usize));
                 }
             } else {
                 self.s_state.set(top as usize, 2);
@@ -359,121 +360,113 @@ extend CFlow {
         }
         // order = reverse of postorder; rpo = position in order.
         let m = self.s_post.len();
+        self.order.reserve(m);
         for i in 0..m {
             let blk = *self.s_post.at(m - 1 - i);
             self.order.push(blk);
             self.rpo.set(blk as usize, i as u32);
         }
 
-        // Predecessor lists (CSR) over reachable threaded edges.
-        for x in 0..n {
-            if !*self.reach.at(x as usize) {
-                continue;
-            }
-            for k in 0..n_succ(b, x) {
-                let s = self.succ(b, x, k);
-                self.preds.set(s as usize, *self.preds.at(s as usize) + 1);
-            }
-        }
+        // Predecessor lists (CSR) over reachable threaded edges. pred_start first holds each
+        // block's end offset; filling backwards (sources and edges in reverse) leaves its start and
+        // keeps each list in source order.
+        self.pred_start.resize_default((n + 1) as usize);
         let mut acc = 0u32;
         for x in 0..n {
-            self.pred_start.push(acc);
             acc += *self.preds.at(x as usize);
+            self.pred_start.set(x as usize, acc);
         }
-        self.pred_start.push(acc);
-        for _i in 0..acc {
-            self.pred_list.push(NONE);
-        }
-        self.s_fill.clear();
-        for x in 0..n {
-            self.s_fill.push(*self.pred_start.at(x as usize));
-        }
-        for x in 0..n {
+        self.pred_start.set(n as usize, acc);
+        self.pred_list.resize_default(acc as usize);
+        for xi in 0..n {
+            let x = n - 1 - xi;
             if !*self.reach.at(x as usize) {
                 continue;
             }
-            for k in 0..n_succ(b, x) {
-                let s = self.succ(b, x, k);
-                let at = *self.s_fill.at(s as usize);
+            let ss = *self.s_sstart.at(x as usize);
+            let se = *self.s_sstart.at((x + 1) as usize);
+            for ki in 0..se - ss {
+                let s = *self.s_succ.at((se - 1 - ki) as usize);
+                let at = *self.pred_start.at(s as usize) - 1;
                 self.pred_list.set(at as usize, x);
-                self.s_fill.set(s as usize, at + 1);
+                self.pred_start.set(s as usize, at);
             }
         }
 
-        self.compute_idom();
-        self.compute_domtree();
-        self.compute_pdom(b);
         // Reducibility: a retreating edge (target not later in RPO) that its target does not
         // dominate makes the CFG irreducible; structured emission then defers to the goto layout.
+        // One dominator round over the RPO sees only forward predecessors: its tree is exact for a
+        // reducible CFG and holds every true dominance otherwise, so the test reads that tree.
+        // Only an irreducible CFG iterates to the fixed point and rebuilds the tree.
+        self.idom.set(self.entry as usize, self.entry);
+        let _ = self.idom_round();
+        self.compute_domtree();
         for x in 0..n {
             if !*self.reach.at(x as usize) {
                 continue;
             }
-            for k in 0..n_succ(b, x) {
-                let s = self.succ(b, x, k);
+            for k in *self.s_sstart.at(x as usize)..*self.s_sstart.at((x + 1) as usize) {
+                let s = *self.s_succ.at(k as usize);
                 if *self.rpo.at(s as usize) <= *self.rpo.at(x as usize) && !self.dominates(s, x) {
                     self.reducible = false;
                 }
             }
         }
-        self.compute_loops(b);
+        if !self.reducible {
+            // Cooper-Harvey-Kennedy settles within loop connectedness + 2 rounds, at most n + 2.
+            let mut r: u32 = 0;
+            while self.idom_round() {
+                r += 1;
+                assert(r <= n + 2);
+            }
+            self.compute_domtree();
+        }
+        self.compute_pdom();
+        self.compute_loops();
         self.compute_follows(b);
     }
 
-    // Cooper-Harvey-Kennedy immediate dominators over the reachable RPO.
-    fn compute_idom(self: &mut Self) {
-        self.idom.set(self.entry as usize, self.entry);
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for i in 1..self.order.len() {
-                let x = *self.order.at(i);
-                let ps = *self.pred_start.at(x as usize);
-                let pe = *self.pred_start.at((x + 1) as usize);
-                let mut nd = NONE;
-                for pi in ps..pe {
-                    let p = *self.pred_list.at(pi as usize);
-                    if *self.idom.at(p as usize) == NONE {
-                        continue;
-                    }
-                    if nd == NONE {
-                        nd = p;
-                    } else {
-                        nd = self.intersect(p, nd);
-                    }
+    // One Cooper-Harvey-Kennedy round of immediate dominators over the reachable RPO; true when an
+    // entry changed.
+    fn idom_round(self: &mut Self) bool {
+        let mut changed = false;
+        for i in 1..self.order.len() {
+            let x = *self.order.at(i);
+            let ps = *self.pred_start.at(x as usize);
+            let pe = *self.pred_start.at((x + 1) as usize);
+            let mut nd = NONE;
+            for pi in ps..pe {
+                let p = *self.pred_list.at(pi as usize);
+                if *self.idom.at(p as usize) == NONE {
+                    continue;
                 }
-                if nd != NONE && *self.idom.at(x as usize) != nd {
-                    self.idom.set(x as usize, nd);
-                    changed = true;
+                if nd == NONE {
+                    nd = p;
+                } else {
+                    nd = self.intersect(p, nd);
                 }
             }
+            if nd != NONE && *self.idom.at(x as usize) != nd {
+                self.idom.set(x as usize, nd);
+                changed = true;
+            }
         }
+        return changed;
     }
 
     // Immediate post-dominators: dominators of the reverse graph (edges reversed, a virtual exit
     // block `n` linking every sink). ipdom[x] is where all forward paths out of x reconverge; the
     // structured emitter uses it as the exact branch follow.
-    fn compute_pdom(self: &mut Self, b: &ir::CoreBody) {
-        let e = self.n; // virtual exit
-        self.s_rrpo.clear();
-        for _i in 0..self.n + 1 {
-            self.ipdom.push(NONE);
-            self.s_rrpo.push(NONE);
-        }
-        if self.n == 0 {
-            return;
-        }
-        // Sinks (reachable blocks with no forward successor) are the exit's reverse-graph successors,
-        // built once so the DFS indexes rather than rescanning all blocks per sink.
-        self.s_sinks.clear();
-        for v in 0..self.n {
-            if *self.reach.at(v as usize) && n_succ(b, v) == 0 {
-                self.s_sinks.push(v);
-            }
-        }
-        // reverse-graph DFS from the exit: exit -> sinks, then block -> its forward predecessors
+    fn compute_pdom(self: &mut Self) {
+        let n = self.n;
+        let e = n; // virtual exit
+        fill_none(&mut self.ipdom, n + 1);
+        fill_none(&mut self.s_rrpo, n + 1);
+        // Reverse-graph DFS from the exit: exit -> sinks (reachable blocks with no successor) in
+        // block order, then block -> its forward predecessors. The exit's frame index is the next
+        // block to scan for a sink, any other frame's the next pred_list entry.
         self.s_state.clear();
-        self.s_state.resize_default((self.n + 1) as usize);
+        self.s_state.resize_default((n + 1) as usize);
         self.s_stack.clear();
         self.s_kidx.clear();
         self.s_post.clear();
@@ -482,25 +475,27 @@ extend CFlow {
         self.s_state.set(e as usize, 1);
         while self.s_stack.len() != 0 {
             let top = *self.s_stack.at(self.s_stack.len() - 1);
-            let ki = *self.s_kidx.at(self.s_kidx.len() - 1);
+            let mut ki = *self.s_kidx.at(self.s_kidx.len() - 1);
             let mut nx = NONE;
             if top == e {
-                if ki as usize < self.s_sinks.len() {
-                    nx = *self.s_sinks.at(ki as usize);
+                while ki < n && nx == NONE {
+                    if *self.reach.at(ki as usize) && *self.s_sstart.at(ki as usize) == *self.s_sstart.at(
+                        (ki + 1) as usize,
+                    ) {
+                        nx = ki;
+                    }
+                    ki += 1;
                 }
-            } else {
-                let ps = *self.pred_start.at(top as usize);
-                let pe = *self.pred_start.at((top + 1) as usize);
-                if ps + ki < pe {
-                    nx = *self.pred_list.at((ps + ki) as usize);
-                }
+            } else if ki < *self.pred_start.at((top + 1) as usize) {
+                nx = *self.pred_list.at(ki as usize);
+                ki += 1;
             }
             if nx != NONE {
-                self.s_kidx.set(self.s_kidx.len() - 1, ki + 1);
+                self.s_kidx.set(self.s_kidx.len() - 1, ki);
                 if *self.s_state.at(nx as usize) == 0 {
                     self.s_state.set(nx as usize, 1);
                     self.s_stack.push(nx);
-                    self.s_kidx.push(0);
+                    self.s_kidx.push(*self.pred_start.at(nx as usize));
                 }
             } else {
                 self.s_state.set(top as usize, 2);
@@ -513,40 +508,76 @@ extend CFlow {
         for i in 0..m {
             self.s_rrpo.set((*self.s_post.at(m - 1 - i)) as usize, i as u32);
         }
-        // Cooper-Harvey-Kennedy on the reverse graph; reverse-preds of x = its forward successors,
-        // plus the exit when x is a sink.
+        // As for the dominators: one round over the reverse RPO, iterated to the fixed point only
+        // when a retreating reverse edge's target does not post-dominate its source.
         self.ipdom.set(e as usize, e);
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for i in 0..m {
-                let x = *self.s_post.at(m - 1 - i);
-                if x == e {
+        let _ = self.pdom_round();
+        if !self.pdom_settled() {
+            let mut r: usize = 0;
+            while self.pdom_round() {
+                r += 1;
+                assert(r <= m + 2);
+            }
+        }
+    }
+
+    // One Cooper-Harvey-Kennedy round on the reverse graph (the exit is last in postorder, so it is
+    // skipped); reverse-preds of x = its forward successors, plus the exit when x is a sink. True
+    // when an entry changed.
+    fn pdom_round(self: &mut Self) bool {
+        let e = self.n;
+        let m = self.s_post.len();
+        let mut changed = false;
+        for i in 1..m {
+            let x = *self.s_post.at(m - 1 - i);
+            let ss = *self.s_sstart.at(x as usize);
+            let se = *self.s_sstart.at((x + 1) as usize);
+            let mut nd = NONE;
+            if ss == se {
+                // Sink: its only reverse-pred is the exit.
+                nd = e;
+            }
+            for k in ss..se {
+                let s = *self.s_succ.at(k as usize);
+                if *self.s_rrpo.at(s as usize) == NONE || *self.ipdom.at(s as usize) == NONE {
                     continue;
                 }
-                let mut nd = NONE;
-                let ns = n_succ(b, x);
-                if ns == 0 {
-                    // Sink: its only reverse-pred is the exit.
-                    nd = e;
+                if nd == NONE {
+                    nd = s;
+                } else {
+                    nd = self.pintersect(s, nd);
                 }
-                for k in 0..ns {
-                    let s = self.succ(b, x, k);
-                    if *self.s_rrpo.at(s as usize) == NONE || *self.ipdom.at(s as usize) == NONE {
-                        continue;
-                    }
-                    if nd == NONE {
-                        nd = s;
-                    } else {
-                        nd = self.pintersect(s, nd);
-                    }
+            }
+            if nd != NONE && *self.ipdom.at(x as usize) != nd {
+                self.ipdom.set(x as usize, nd);
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    // True when every retreating reverse edge (forward edge x -> s with s not after x in the reverse
+    // RPO) has x post-dominating s in the current tree: the round already reached the fixed point.
+    fn pdom_settled(self: &Self) bool {
+        let m = self.s_post.len();
+        for i in 1..m {
+            let x = *self.s_post.at(m - 1 - i);
+            let xr = *self.s_rrpo.at(x as usize);
+            for k in *self.s_sstart.at(x as usize)..*self.s_sstart.at((x + 1) as usize) {
+                let s = *self.s_succ.at(k as usize);
+                if *self.s_rrpo.at(s as usize) == NONE || *self.s_rrpo.at(s as usize) < xr {
+                    continue;
                 }
-                if nd != NONE && *self.ipdom.at(x as usize) != nd {
-                    self.ipdom.set(x as usize, nd);
-                    changed = true;
+                let mut p = s;
+                while *self.s_rrpo.at(p as usize) > xr {
+                    p = *self.ipdom.at(p as usize);
+                }
+                if p != x {
+                    return false;
                 }
             }
         }
+        return true;
     }
 
     fn pintersect(self: &Self, a0: u32, b0: u32) u32 {
@@ -581,36 +612,29 @@ extend CFlow {
     // whose immediate dominator is this one), stamping entry/exit times so dominance is an O(1)
     // interval test instead of an idom-chain walk per query.
     fn compute_domtree(self: &mut Self) {
-        // Children CSR from idom.
-        self.s_cnt.clear();
-        self.s_cnt.resize_default(self.n as usize);
-        for i in 1..self.order.len() {
-            let x = *self.order.at(i);
-            self.s_cnt.set(
-                (*self.idom.at(x as usize)) as usize,
-                *self.s_cnt.at((*self.idom.at(x as usize)) as usize) + 1,
-            );
-        }
+        // Children CSR from idom. s_cstart first counts each block's children, then holds its end
+        // offset; filling backwards (children in reverse RPO) leaves its start and keeps them in RPO.
+        let m = self.order.len();
         self.s_cstart.clear();
+        self.s_cstart.resize_default((self.n + 1) as usize);
+        for i in 1..m {
+            let p = (*self.idom.at((*self.order.at(i)) as usize)) as usize;
+            self.s_cstart.set(p, *self.s_cstart.at(p) + 1);
+        }
         let mut acc = 0u32;
         for x in 0..self.n {
-            self.s_cstart.push(acc);
-            acc += *self.s_cnt.at(x as usize);
+            acc += *self.s_cstart.at(x as usize);
+            self.s_cstart.set(x as usize, acc);
         }
-        self.s_cstart.push(acc);
+        self.s_cstart.set(self.n as usize, acc);
         self.s_clist.clear();
-        for _i in 0..acc {
-            self.s_clist.push(NONE);
-        }
-        self.s_fill.clear();
-        for x in 0..self.n {
-            self.s_fill.push(*self.s_cstart.at(x as usize));
-        }
-        for i in 1..self.order.len() {
-            let x = *self.order.at(i);
+        self.s_clist.resize_default(acc as usize);
+        for i in 1..m {
+            let x = *self.order.at(m - i);
             let p = (*self.idom.at(x as usize)) as usize;
-            self.s_clist.set((*self.s_fill.at(p)) as usize, x);
-            self.s_fill.set(p, *self.s_fill.at(p) + 1);
+            let at = *self.s_cstart.at(p) - 1;
+            self.s_clist.set(at as usize, x);
+            self.s_cstart.set(p, at);
         }
         self.s_stack.clear();
         self.s_kidx.clear();
@@ -651,7 +675,7 @@ extend CFlow {
     // Loop headers (back-edge targets) and, per header, the break target: an edge leaving the
     // natural loop. All per-header work touches only the loop's own nodes (collected in `members`),
     // so the total cost is the sum of loop sizes, not headers x blocks.
-    fn compute_loops(self: &mut Self, b: &ir::CoreBody) {
+    fn compute_loops(self: &mut Self) {
         self.s_inloop.clear();
         self.s_inloop.resize_default(self.n as usize);
         self.s_members.clear();
@@ -713,8 +737,8 @@ extend CFlow {
                 if !*self.reach.at(x as usize) {
                     continue;
                 }
-                for e in 0..n_succ(b, x) {
-                    let s = self.succ(b, x, e);
+                for k in *self.s_sstart.at(x as usize)..*self.s_sstart.at((x + 1) as usize) {
+                    let s = *self.s_succ.at(k as usize);
                     if !*self.s_inloop.at(s as usize) {
                         if brk == NONE || *self.rpo.at(s as usize) < *self.rpo.at(brk as usize) {
                             brk = s;

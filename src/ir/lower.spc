@@ -194,6 +194,11 @@ pub struct Lowerer {
     // still UNINITIALIZED on a cancel edge inside the initializer (a dead there is a drop-use that
     // poisons loan liveness across loop back edges), so every ladder skips them.
     pending_lets: Vector<ir::LocalId>,
+    // The locals whose one definition the lowering knows, each with its rvalue: an immutable `let`
+    // (`built_def`), a match scrutinee's temp, a fresh aggregate temp, an immutable pattern binding.
+    // `place_variant` reads the variant of an enum value through them. The keys this body added.
+    known: Map<ir::LocalId, ir::RvalueId>,
+    known_keys: Vector<ir::LocalId>,
     // Per-body cache of the check-eligibility test (cancel pass ran, sugar items present, owner on
     // a coroutine stack, not the runtime module): 0 uncomputed, 1 off, 2 on.
     chk_on: u8,
@@ -390,6 +395,8 @@ extend Lowerer {
             chk_narrow: false,
             chk_mask: 0,
             pending_lets: Vector::<ir::LocalId>::new(),
+            known: Map::<ir::LocalId, ir::RvalueId>::new(),
+            known_keys: Vector::<ir::LocalId>::new(),
             chk_on: 0,
             chk_caw_m: 0,
             chk_caw_n: NODE_NONE,
@@ -497,6 +504,7 @@ extend Lowerer {
         );
         self.chk_mask = 0;
         self.pending_lets.truncate(0);
+        self.forget_known(0);
         self.chk_on = 0;
         self.sp_ladder_b = 0xFFFFFFFFu32;
         self.sp_ladder_locals.truncate(0);
@@ -653,6 +661,9 @@ extend Lowerer {
     fn rv_temp(self: &mut Self, rv: ir::Rvalue, sp: tok::Span) ir::PlaceId {
         let pl = self.place_of_local(self.temp(rv.target, sp));
         self.assign(pl, rv, sp);
+        if rv.kind == ir::RV_AGGREGATE && rv.c != ir::AGG_ARRAY {
+            self.note_known(self.body.places.at(pl as usize).base, self.body.rvalues.len() as u32 - 1);
+        }
         return pl;
     }
 
@@ -1327,12 +1338,25 @@ extend Lowerer {
             }
             // The pattern's names bind after the value: nothing is pending while it evaluates.
             let cb = self.chk_open(ld.value, false);
+            let s0 = self.body.statements.len() as u32;
+            let b0 = self.body.blocks.len() as u32;
+            let blk0 = self.cur;
             let vpl = self.value_temp(ld.value, true, sp);
             self.chk_close(cb);
             if vpl == ir::IR_NONE {
                 return;
             }
+            let km = self.known_keys.len();
+            // The value's temp keeps its one value: the bindings read its members (`place_variant`).
+            let rid = self.built_def(vpl, s0, b0, blk0);
+            if rid != ir::IR_NONE {
+                self.note_known(self.body.places.at(vpl as usize).base, rid);
+            }
             self.pattern_bind(ld.name, vpl);
+            if ld.is_mutable {
+                // `let mut (a, b) = ..`: the bindings take other values later.
+                self.forget_known(km);
+            }
             let tk: u8 = if nk == NodeKind::NODE_PATTERN_TUPLE {
                 ir::TP_LET_TUPLE;
             } else {
@@ -1355,11 +1379,20 @@ extend Lowerer {
             self.pending_lets.push(l);
             let cb = self.chk_open(ld.value, true);
             let pl = self.place_of_local(l);
+            let s0 = self.body.statements.len() as u32;
+            let b0 = self.body.blocks.len() as u32;
+            let blk0 = self.cur;
             let ok = self.lower_into(ld.value, pl, true, sp);
             self.chk_close(cb);
             let _ = self.pending_lets.pop();
             if !ok {
                 return;
+            }
+            if !ld.is_mutable {
+                let rid = self.built_def(pl, s0, b0, blk0);
+                if rid != ir::IR_NONE {
+                    self.note_known(l, rid);
+                }
             }
         }
         self.tp(ir::TP_LET, 0, id);
@@ -1991,7 +2024,7 @@ extend Lowerer {
 
     // The C tag value of variant `idx` within enum declaration `dn` of module `dm`: its explicit
     // discriminant, else the previous variant's plus one.
-    fn tag_of_decl(self: &mut Self, dm: ModuleId, dn: NodeId, idx: i64) i64 {
+    pub fn tag_of_decl(self: &mut Self, dm: ModuleId, dn: NodeId, idx: i64) i64 {
         let da = unsafe &*(&*self.pkg).module_ast_const(dm);
         let ms = da.at_const(dn).as_data.aggregate.members;
         let mut cur: i64 = 0 - 1;
@@ -3630,6 +3663,167 @@ extend Lowerer {
             self.mark_user_move(op);
         }
         return self.spill(op, sp);
+    }
+
+    // The one rvalue that defines whole-local place `pl` after the lowering that wrote statements
+    // `s0..` and opened blocks `b0..` from open block `blk0`: its one write there, when that is in the
+    // open block (every path of the lowering ends through it). IR_NONE otherwise.
+    fn built_def(self: &Self, pl: ir::PlaceId, s0: u32, b0: u32, blk0: ir::BlockId) ir::RvalueId {
+        let b = &self.body;
+        let x = b.places.at(pl as usize).base;
+        if b.places.at(pl as usize).proj_len != 0 {
+            return ir::IR_NONE;
+        }
+        let mut n: u32 = 0;
+        let mut rid = ir::IR_NONE;
+        for i in s0..b.statements.len() as u32 {
+            let st = *b.statements.at(i as usize);
+            if st.kind == ir::ST_ASSIGN && b.places.at(st.place as usize).base == x {
+                n += 1;
+                if i >= self.run_start && b.places.at(st.place as usize).proj_len == 0 {
+                    rid = st.rvalue;
+                }
+            }
+        }
+        // A call the lowering sealed may write it as its destination: block `blk0` is visited first.
+        for i in b0..b.blocks.len() as u32 + 1 {
+            let t = b.blocks.at(pick(i == b0, blk0, i - 1) as usize).term;
+            for j in 0..pick(t.kind == ir::TM_CALL, t.dests_len, 0) {
+                let d = b.dest_pool[(t.dests_start + j) as usize];
+                if d != ir::IR_NONE && b.places.at(d as usize).base == x {
+                    return ir::IR_NONE;
+                }
+            }
+        }
+        return pick(n == 1, rid, ir::IR_NONE);
+    }
+
+    // Record that rvalue `rid` is the one definition of local `l` (`known`).
+    fn note_known(self: &mut Self, l: ir::LocalId, rid: ir::RvalueId) {
+        self.known.insert(l, rid);
+        self.known_keys.push(l);
+    }
+
+    // Forget the definitions recorded since `known_keys` held `mark` keys.
+    fn forget_known(self: &mut Self, mark: usize) {
+        for i in mark..self.known_keys.len() {
+            self.known.remove(&self.known_keys[i]);
+        }
+        self.known_keys.truncate(mark);
+    }
+
+    // The variant of the enum value place `pl` reads, when the lowering saw it built: through the
+    // locals whose one definition it knows (`known`), their copies, and the struct, tuple and payload
+    // members of their aggregates. NODE_NONE otherwise.
+    fn place_variant(self: &Self, pl: ir::PlaceId) DefId {
+        let none = DefId { module: 0, node: NODE_NONE };
+        let b = &self.body;
+        // The projections still to apply (`path[at..n]`); a longer path is unknown.
+        let mut path = Array::<u32, 8> {};
+        let mut n: usize = 0;
+        let mut at: usize = 0;
+        let mut x = ir::IR_NONE;
+        let mut next = pl;
+        // Each round reads one place or crosses one aggregate member.
+        for _ in 0..16 {
+            if next != ir::IR_NONE {
+                // Place `next`'s projections go before the rest of the path.
+                let q = *b.places.at(next as usize);
+                let m = q.proj_len as usize;
+                if m + n - at > 8 {
+                    return none;
+                }
+                let mut tmp = Array::<u32, 8> {};
+                for i in 0..m {
+                    tmp[i] = q.proj_start + i as u32;
+                }
+                for i in at..n {
+                    tmp[m + i - at] = path[i];
+                }
+                path = tmp;
+                n = m + n - at;
+                at = 0;
+                x = q.base;
+                next = ir::IR_NONE;
+            }
+            let rid = switch self.known.get(&x) {
+                Some(v) => *v,
+                None => ir::IR_NONE,
+            };
+            if rid == ir::IR_NONE {
+                return none;
+            }
+            let rv = *b.rvalues.at(rid as usize);
+            if rv.kind == ir::RV_USE {
+                let op = *b.operands.at(rv.a as usize);
+                if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
+                    return none;
+                }
+                next = op.data;
+                continue;
+            }
+            if rv.kind != ir::RV_AGGREGATE {
+                return none;
+            }
+            if at == n {
+                return pick(rv.c == ir::AGG_VARIANT, rv.item, none);
+            }
+            let mut pj = *b.projections.at(path[at] as usize);
+            if pj.kind == ir::PJ_DOWNCAST {
+                if rv.c != ir::AGG_VARIANT || rv.item.node != pj.sub || at + 1 == n {
+                    return none;
+                }
+                at += 1;
+                pj = *b.projections.at(path[at] as usize);
+            } else if rv.c != ir::AGG_STRUCT && rv.c != ir::AGG_TUPLE {
+                return none;
+            }
+            if pj.kind != ir::PJ_FIELD || pj.data == ir::PJ_UNION_FIELD {
+                return none;
+            }
+            // A tuple literal names no declaration: its type's does (`Tuple2`).
+            let k = if pj.data != ir::IR_NONE {
+                pj.data as i64;
+            } else {
+                self.member_pos(pick(rv.item.node != NODE_NONE, rv.item, self.nominal_of(rv.target)), pj.sub);
+            };
+            if k < 0 || k >= rv.b as i64 {
+                return none;
+            }
+            let o = b.oper_pool[(rv.a + k as u32) as usize];
+            if o == ir::IR_NONE {
+                return none;
+            }
+            let mo = *b.operands.at(o as usize);
+            if mo.kind != ir::OP_COPY && mo.kind != ir::OP_MOVE {
+                return none;
+            }
+            at += 1;
+            next = mo.data;
+        }
+        return none;
+    }
+
+    // The position of member `sub` in struct or variant declaration `d`, or -1.
+    fn member_pos(self: &Self, d: DefId, sub: NodeId) i64 {
+        if d.node == NODE_NONE || sub == NODE_NONE {
+            return -1;
+        }
+        let da = unsafe &*(&*self.pkg).module_ast_const(d.module);
+        let nd = da.at_const(d.node);
+        let ms = if nd.kind == NodeKind::NODE_VARIANT {
+            nd.as_data.variant.payload;
+        } else if nd.kind == NodeKind::NODE_STRUCT {
+            nd.as_data.aggregate.members;
+        } else {
+            return -1;
+        };
+        for j in 0..ms.len {
+            if unsafe da.list(ms)[j as usize] == sub {
+                return j;
+            }
+        }
+        return -1;
     }
 
     // Whether the checker recorded no conversion on node `id` that `apply_adjust` applies: its
@@ -7603,12 +7797,21 @@ extend Lowerer {
         // The scrutinee evaluates once into a temp the tests read. A local of a type that owns
         // nothing is tested in place when no guard runs between the tests: only the arm bodies,
         // which run after every test, can write it.
+        let s0 = self.body.statements.len() as u32;
+        let b0 = self.body.blocks.len() as u32;
+        let blk0 = self.cur;
         let mut vpl = self.scrutinee_local(d.value);
         if by_value || guarded || vpl == ir::IR_NONE {
             vpl = self.value_temp(d.value, user, sp);
         }
         if vpl == ir::IR_NONE {
             return false;
+        }
+        // The scrutinee's temp keeps its one value through the tests: they read its variant when the
+        // lowering sees it (`place_variant`).
+        let rid = self.built_def(vpl, s0, b0, blk0);
+        if rid != ir::IR_NONE {
+            self.note_known(self.body.places.at(vpl as usize).base, rid);
         }
         // A by-value scrutinee's temporary owns the value. Every arm scope ends its storage, so drop
         // elaboration frees there what the arm's bindings did not move out.
@@ -7759,9 +7962,16 @@ extend Lowerer {
         // the C tag carries the variant's discriminant, not its ordinal
         let mut tag: i64 = 0;
         let ut = self.tag_ty(vd.module, en, ord, &mut tag);
-        let dp = self.rv_temp(ir::rv(ir::RV_DISCRIMINANT, v, 0, 0, ut), sp);
-        let ord_op = self.kop(ir::CK_INT, ut, tag, sp);
-        let cond = self.eq_test(dp, ord_op, sp);
+        let kv = self.place_variant(v);
+        let cond = if kv.node != NODE_NONE {
+            // The value's variant is known (see `emit_tree`): the test is a constant.
+            let hit = kv.module == vd.module && kv.node == vd.node;
+            self.kop(ir::CK_BOOL, Ast::builtin(BuiltinType::BT_BOOL), pick(hit, 1i64, 0i64), sp);
+        } else {
+            let dp = self.rv_temp(ir::rv(ir::RV_DISCRIMINANT, v, 0, 0, ut), sp);
+            let ord_op = self.kop(ir::CK_INT, ut, tag, sp);
+            self.eq_test(dp, ord_op, sp);
+        };
         *payload = self.place_project(
             v,
             ir::Projection { kind: ir::PJ_DOWNCAST, data: ord as u32, sub: vd.node, ty: vty },
@@ -8184,8 +8394,23 @@ extend Lowerer {
                         BuiltinType::BT_U32;
                     },
                 );
-                let dp = self.rv_temp(ir::rv(ir::RV_DISCRIMINANT, pl, 0, 0, ut), sp);
-                sw_op = self.copy_op(dp);
+                let kv = self.place_variant(pl);
+                if kv.node != NODE_NONE {
+                    // The value's variant is known: the switch reads its tag, and the C layout takes
+                    // its arm alone (`CFlow`). The other arms would read payload bytes the value never
+                    // set.
+                    let mut ord: i64 = 0;
+                    let _ = unsafe (&*self.pkg).variant_enum(kv, &mut ord);
+                    let tv: u64 = if td9 != NODE_NONE {
+                        tags[ord as usize];
+                    } else {
+                        ord as u64 & 0xFFFFFFFF;
+                    };
+                    sw_op = self.kop(ir::CK_INT, ut, pick(signed, (tv as u32) as i32, tv as i64), sp);
+                } else {
+                    let dp = self.rv_temp(ir::rv(ir::RV_DISCRIMINANT, pl, 0, 0, ut), sp);
+                    sw_op = self.copy_op(dp);
+                }
             } else {
                 sw_op = self.copy_op(pl);
             }
@@ -8555,6 +8780,8 @@ extend Lowerer {
         let op = self.copy_op(v);
         let rv = self.rv_use(op, ty);
         self.assign(pl, rv, sp);
+        // A binding is immutable (`lower_let` forgets a `let mut` pattern's).
+        self.note_known(l, self.body.rvalues.len() as u32 - 1);
     }
 
     // The number of reference layers on `t`.

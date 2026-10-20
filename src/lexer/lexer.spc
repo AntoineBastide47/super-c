@@ -1518,8 +1518,7 @@ extend Lexer {
 
     /// Moves the token vector out; the lexer is left holding an empty one.
     pub fn take_tokens(self: &mut Self) Vector<Token> {
-        let out = replace(&mut self.tokens, Vector::<Token>::new());
-        return out;
+        return replace(&mut self.tokens, Vector::<Token>::new());
     }
 
     /// True once any scan error is recorded.

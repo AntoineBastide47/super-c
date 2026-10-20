@@ -11,6 +11,7 @@ import fmt::builder as fbld;
 import driver_shim as shim;
 import driver::rt_c as rtc;
 import ir::cpu_features as cf;
+import atomic;
 
 /// The 64-bit FNV-1a offset basis: the state of an empty hash (std `str::hash` starts from it).
 pub const FNV_BASIS: u64 = 0xcbf29ce484222325u64;
@@ -24,20 +25,53 @@ pub const fn fnv_cont(h: u64, s: str) u64 {
     return x;
 }
 
-/// The identity of the running compiler: a content hash of its executable (`file_id`). The C a compiler
-/// emits is a function of the compiler, so the emit stamp and the per-TU cache key on this, not on the
-/// file's path or mtime: a reinstall, a copy or an extracted archive can keep both while the content
-/// changes. 0 when the executable cannot be read (the caller then keeps no cache).
+// The memoized `compiler_id`, 0 until a call reads the executable. The bytes behind the running process
+// stay its identity even if the file is replaced later. Relaxed atomics: concurrent first calls store
+// the same value.
+static mut G_CID: u64 = 0;
+
+/// The identity of the running compiler: a content hash of its executable (`file_id`), read once per
+/// process. The C a compiler emits is a function of the compiler, so the emit stamp and the per-TU cache
+/// key on this, not on the file's path or mtime: a reinstall, a copy or an extracted archive can keep
+/// both while the content changes. 0 when the executable cannot be read (the caller then keeps no cache).
 pub fn compiler_id() u64 {
+    let c = unsafe atomic::load_u64(&G_CID, 0);
+    if c != 0 {
+        return c;
+    }
     let mut exe = PathBuf {};
     if unsafe shim::sc_exe_path(&mut exe[0], 4096) != 0 {
         return 0;
     }
-    return file_id(str::from_cbuf(exe.as_slice()));
+    let h = file_id(str::from_cbuf(exe.as_slice()));
+    unsafe atomic::store_u64(&mut G_CID, h, 0);
+    return h;
 }
 
-/// A content hash of the file at `path`; 0 when it cannot be read or is empty. Four independent lanes
-/// over 8-byte words keep the multiply chains parallel: about 1 ms per 10 MB.
+// The start state of the four hash lanes of `file_id` and `str_id`.
+const LANES0: [u64; 4] = [FNV_BASIS, 0x9e3779b97f4a7c15u64, 0xBF58476D1CE4E5B9u64, 0x94D049BB133111EBu64];
+
+// Fold one 32-byte group into the four lanes, one 8-byte word each: the four multiply chains are
+// independent and run in parallel, about 1 ms per 10 MB.
+const fn lanes_mix(l: &mut [u64; 4], w0: u64, w1: u64, w2: u64, w3: u64) {
+    l[0] = (l[0] ^ w0).wrapping_mul(0x100000001b3u64);
+    l[1] = (l[1] ^ w1).wrapping_mul(0x100000001b3u64);
+    l[2] = (l[2] ^ w2).wrapping_mul(0x100000001b3u64);
+    l[3] = (l[3] ^ w3).wrapping_mul(0x100000001b3u64);
+    l[0] = l[0] ^ l[0] >> 29;
+    l[1] = l[1] ^ l[1] >> 29;
+    l[2] = l[2] ^ l[2] >> 29;
+    l[3] = l[3] ^ l[3] >> 29;
+}
+
+// The hash of lanes `l` over `tot` bytes; never 0.
+const fn lanes_end(l: &[u64; 4], tot: u64) u64 {
+    let h = skey_mix(skey_mix(skey_mix(skey_mix(skey_mix(FNV_BASIS, l[0]), l[1]), l[2]), l[3]), tot);
+    // 0 means "no identity"; a real hash never takes it.
+    return h | (h == 0) as u64;
+}
+
+/// A content hash of the file at `path`; 0 when it cannot be read or is empty.
 pub fn file_id(path: str) u64 {
     let f = stdio::fopen(path, "rb");
     if f == null {
@@ -46,10 +80,7 @@ pub fn file_id(path: str) u64 {
     // Words, so the loads below are aligned.
     let mut buf = Array::<u64, 8192>::new();
     let bp = (&mut buf[0]) as *mut u64;
-    let mut l0 = FNV_BASIS;
-    let mut l1: u64 = 0x9e3779b97f4a7c15u64;
-    let mut l2: u64 = 0xBF58476D1CE4E5B9u64;
-    let mut l3: u64 = 0x94D049BB133111EBu64;
+    let mut l = LANES0;
     let mut tot: u64 = 0;
     loop {
         let n = unsafe stdio::fread(bp, 1, 65536, f);
@@ -64,14 +95,7 @@ pub fn file_id(path: str) u64 {
         }
         let mut i: usize = 0;
         while i < e / 8 {
-            l0 = (l0 ^ buf[i]).wrapping_mul(0x100000001b3u64);
-            l1 = (l1 ^ buf[i + 1]).wrapping_mul(0x100000001b3u64);
-            l2 = (l2 ^ buf[i + 2]).wrapping_mul(0x100000001b3u64);
-            l3 = (l3 ^ buf[i + 3]).wrapping_mul(0x100000001b3u64);
-            l0 = l0 ^ l0 >> 29;
-            l1 = l1 ^ l1 >> 29;
-            l2 = l2 ^ l2 >> 29;
-            l3 = l3 ^ l3 >> 29;
+            lanes_mix(&mut l, buf[i], buf[i + 1], buf[i + 2], buf[i + 3]);
             i += 4;
         }
     }
@@ -80,9 +104,27 @@ pub fn file_id(path: str) u64 {
     if bad || tot == 0 {
         return 0;
     }
-    let h = skey_mix(skey_mix(skey_mix(skey_mix(skey_mix(FNV_BASIS, l0), l1), l2), l3), tot);
-    // 0 means "no identity"; a real hash never takes it.
-    return h | (h == 0) as u64;
+    return lanes_end(&l, tot);
+}
+
+/// A content hash of `s` in the scheme of `file_id`, about 1 ms per 10 MB; never 0.
+pub fn str_id(s: str) u64 {
+    let mut l = LANES0;
+    let mut w = Array::<u64, 4>::new();
+    let n = s.len();
+    let mut i: usize = 0;
+    while i + 32 <= n {
+        unsafe cstring::memcpy((&mut w[0]) as *mut u64, s.ptr() + i, 32);
+        lanes_mix(&mut l, w[0], w[1], w[2], w[3]);
+        i += 32;
+    }
+    if i < n {
+        // The tail, zero-padded to a whole group.
+        w = Array::<u64, 4>::new();
+        unsafe cstring::memcpy((&mut w[0]) as *mut u64, s.ptr() + i, n - i);
+        lanes_mix(&mut l, w[0], w[1], w[2], w[3]);
+    }
+    return lanes_end(&l, n as u64);
 }
 
 /// A 4096-byte path scratch buffer; `PathBuf {}` partial init zero-fills the array.

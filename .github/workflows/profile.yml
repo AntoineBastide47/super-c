@@ -11,6 +11,8 @@
 # job summary ranks each lane's hottest functions over all its captures, counting only the compiler's
 # own threads (samply_top.py --process), not the C compiler and linker it starts. The profiles with
 # their symbol sidecars and the tables are uploaded per platform: `samply load <profile>` opens one.
+# The Windows artifact also holds the two images, whose symbols samply cannot read (samply_top.py
+# --binary=<image> ranks with them).
 name: Profile
 on:
   workflow_dispatch:
@@ -60,7 +62,7 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: ${{ matrix.target }}
-          cache: ccache-${{ matrix.target }}-profile
+          cache: objcache-${{ matrix.target }}-profile # restored only: every lane runs with its caches off
           sha: ${{ github.sha }}
 
       - uses: ./.github/actions/bootstrap
@@ -128,34 +130,71 @@ jobs:
           run prof/build-jall.txt env $COLD SC_BUILD_STATS=prof/build-jall.jsonl SC_CEMIT_STATS=1 \
             "build/profile/super-c-bench$x" build --out-dir="$out" -o "$out/super-c$x" ${cstd:+"$cstd"}
 
-      # The sampled binary is samply's root process: `env` runs samply itself, so no wrapper sits between.
-      # The benchmark runs `--in-process`: samply on macOS follows an exec, not a fork.
+      # The sampled binary is samply's root process (the build lane's environment is exported, so no
+      # wrapper sits between). The benchmark runs `--in-process`: samply follows an exec, not a fork. On macOS samply attaches to
+      # the running process (as root) instead of launching it: a launched process passes samply's preload
+      # library to every child through DYLD_INSERT_LIBRARIES, and the runners run with SIP off, so the
+      # arm64e children (xcrun, Apple's clang and ld) refuse the library (it has no arm64e slice) and every
+      # C compile of the build fails.
       - name: Sample the lanes
         run: |
           set -eu
           x=${BINEXT:-}
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
           out=build/profile/out
-          rec="samply record --save-only --unstable-presymbolicate --rate 1000"
+          opts="--save-only --unstable-presymbolicate --rate 1000"
+          capture() { # profile file, then the command
+            prof=$1; shift
+            if [ "$RUNNER_OS" = macOS ]; then
+              "$@" >prof/last.txt 2>&1 &
+              pid=$!
+              sudo "$(command -v samply)" record $opts -o "$prof" -p "$pid" &
+              rec=$!
+              wait "$pid"
+              st=$?
+              # Attached, samply records until Ctrl-C, not until the process ends: send it, then give
+              # it at most 10 minutes to save the profile.
+              sudo kill -INT "$rec"
+              ( sleep 600; sudo kill -KILL "$rec" 2>/dev/null ) &
+              dog=$!
+              wait "$rec" || st=1
+              kill "$dog" 2>/dev/null || true
+              return $st
+            else
+              samply record $opts -o "$prof" "$@" >prof/last.txt 2>&1
+            fi
+          }
           i=0
           while [ "$i" -lt "${RUNS:-5}" ]; do
             i=$((i + 1))
             echo "capture $i/${RUNS:-5}"
-            $rec -o "prof/transpile-$i.profile.json.gz" "build/bench-bin$x" --in-process --filter=self_transpile >prof/last.txt 2>&1 ||
+            capture "prof/transpile-$i.profile.json.gz" "build/bench-bin$x" --in-process --filter=self_transpile ||
               { cat prof/last.txt; echo "transpile capture $i failed"; exit 1; }
             rm -rf "$out"
-            env $COLD $rec -o "prof/build-$i.profile.json.gz" \
-              "build/profile/super-c-bench$x" build --out-dir="$out" -o "$out/super-c$x" ${cstd:+"$cstd"} >prof/last.txt 2>&1 ||
+            ( export $COLD
+              capture "prof/build-$i.profile.json.gz" \
+                "build/profile/super-c-bench$x" build --out-dir="$out" -o "$out/super-c$x" ${cstd:+"$cstd"} ) ||
               { cat prof/last.txt; echo "build capture $i failed"; exit 1; }
           done
+          if [ "$RUNNER_OS" = macOS ]; then sudo chown -R "$(id -u):$(id -g)" prof; fi
 
       - name: Rank the hot functions
         run: |
           set -eu
+          x=${BINEXT:-}
           py=$(command -v python3 || command -v python)
           top=skills/super-c-compiler-optimization/scripts/samply_top.py
-          "$py" "$top" --process=bench-bin prof/transpile-*.profile.json.gz >prof/transpile-top.txt
-          "$py" "$top" --process=super-c-bench prof/build-*.profile.json.gz >prof/build-top.txt
+          # MinGW images carry DWARF and no PDB, so samply symbolizes none of their frames: the ranking
+          # reads their COFF symbol tables, and the images join the artifact for offline ranking.
+          tsym=""
+          bsym=""
+          if [ "$RUNNER_OS" = Windows ]; then
+            tsym="--binary=build/bench-bin$x"
+            bsym="--binary=build/profile/super-c-bench$x"
+            cp "build/bench-bin$x" "build/profile/super-c-bench$x" prof/
+          fi
+          "$py" "$top" --process=bench-bin $tsym prof/transpile-*.profile.json.gz >prof/transpile-top.txt
+          "$py" "$top" --process=super-c-bench $bsym prof/build-*.profile.json.gz >prof/build-top.txt
           block() { # title, file, open|closed
             printf '<details%s><summary>%s</summary>\n\n```\n' "$([ "$3" = open ] && echo ' open')" "$1"
             cat "$2"
@@ -177,8 +216,3 @@ jobs:
           path: prof
           if-no-files-found: error
           retention-days: 14
-
-      - uses: ./.github/actions/ccache-save
-        with:
-          cache: ccache-${{ matrix.target }}-profile
-          sha: ${{ github.sha }}

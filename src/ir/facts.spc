@@ -279,6 +279,11 @@ pub struct RefBind {
 /// `[r, deref, .len]` read routed through. Two synthetic identities match on equal ids only.
 pub const SYNTH_PL: u32 = 0x80000000u32;
 
+/// The starting capacity of the per-local, per-block and per-statement tables (`Facts`, `bce::Bce`):
+/// a large body's size (the self-build averages about 100 locals and 110 blocks per checked body, its
+/// largest 2,100), so the bodies that follow grow each table about twice instead of eight times.
+pub const TABLE_MIN: usize = 1024;
+
 // Fixed bounds: the exposed scalars a heap write kills, the escaped roots, pending mutable borrows,
 // the loop-header scan work, the integer facts a block-entry state keeps, the entry-state pool and
 // the solver's block visits.
@@ -704,6 +709,7 @@ pub struct Facts {
     pub ecand: Vector<u32>,
     pub gcand: Vector<u32>,
     pub grem: bool,
+    pub clast: u32, // the reverse postorder index of the last block with a check, IR_NONE without one
     // locals that may hold a borrow of a deref-free place (a local's own storage)
     pub holds: Vector<bool>,
     // locals a slice views: their storage is a view's element buffer
@@ -753,59 +759,60 @@ extend Facts {
         return Facts {
             pkg: null,
             pw: 64,
-            rpo: Vector::<u32>::new(),
-            rpo_of: Vector::<u32>::new(),
-            npred: Vector::<u32>::new(),
-            fwd: Vector::<u32>::new(),
-            pstart: Vector::<u32>::new(),
-            plist: Vector::<u32>::new(),
-            idom: Vector::<u32>::new(),
-            seen: Vector::<u8>::new(),
-            succs: Vector::<u32>::new(),
+            rpo: Vector::<u32>::with_capacity(TABLE_MIN),
+            rpo_of: Vector::<u32>::with_capacity(TABLE_MIN),
+            npred: Vector::<u32>::with_capacity(TABLE_MIN),
+            fwd: Vector::<u32>::with_capacity(TABLE_MIN),
+            pstart: Vector::<u32>::with_capacity(TABLE_MIN),
+            plist: Vector::<u32>::with_capacity(TABLE_MIN),
+            idom: Vector::<u32>::with_capacity(TABLE_MIN),
+            seen: Vector::<u8>::with_capacity(TABLE_MIN),
+            succs: Vector::<u32>::with_capacity(TABLE_MIN),
             backs: Vector::<u64>::new(),
-            sstart: Vector::<u32>::new(),
+            sstart: Vector::<u32>::with_capacity(TABLE_MIN),
             stack: Vector::<u64>::new(),
-            lver: Vector::<u32>::new(),
+            lver: Vector::<u32>::with_capacity(TABLE_MIN),
             vclock: 0,
             vfloor: 0,
-            basegen: Vector::<u32>::new(),
+            basegen: Vector::<u32>::with_capacity(TABLE_MIN),
             heapgen: 0,
             bufgen: 0,
-            pgen: Vector::<u32>::new(),
+            pgen: Vector::<u32>::with_capacity(TABLE_MIN),
             pkills: Vector::<PKill>::new(),
-            copyof: Vector::<CopyBind>::new(),
-            lenval: Vector::<CopyBind>::new(),
+            copyof: Vector::<CopyBind>::with_capacity(TABLE_MIN),
+            lenval: Vector::<CopyBind>::with_capacity(TABLE_MIN),
             views: false,
-            affof: Vector::<AffBind>::new(),
-            refof: Vector::<RefBind>::new(),
-            wlog: Vector::<u32>::new(),
-            wold: Vector::<u32>::new(),
-            clk_end: Vector::<u32>::new(),
-            bst: Vector::<u32>::new(),
+            affof: Vector::<AffBind>::with_capacity(TABLE_MIN),
+            refof: Vector::<RefBind>::with_capacity(TABLE_MIN),
+            wlog: Vector::<u32>::with_capacity(TABLE_MIN),
+            wold: Vector::<u32>::with_capacity(TABLE_MIN),
+            clk_end: Vector::<u32>::with_capacity(TABLE_MIN),
+            bst: Vector::<u32>::with_capacity(TABLE_MIN),
             bstamp: 0,
-            lmark: Vector::<u32>::new(),
+            lmark: Vector::<u32>::with_capacity(TABLE_MIN),
             lstamp: 0,
-            lblocks: Vector::<u32>::new(),
-            lops: Vector::<LOp>::new(),
-            lsum_s: Vector::<u32>::new(),
-            lsum_n: Vector::<u32>::new(),
-            lsum_f: Vector::<u8>::new(),
+            lblocks: Vector::<u32>::with_capacity(TABLE_MIN),
+            lops: Vector::<LOp>::with_capacity(TABLE_MIN),
+            lsum_s: Vector::<u32>::with_capacity(TABLE_MIN),
+            lsum_n: Vector::<u32>::with_capacity(TABLE_MIN),
+            lsum_f: Vector::<u8>::with_capacity(TABLE_MIN),
             lfl: 0,
             scan_left: 0,
-            def1: Vector::<u32>::new(),
-            ndef: Vector::<u8>::new(),
-            exposed: Vector::<bool>::new(),
+            def1: Vector::<u32>::with_capacity(TABLE_MIN),
+            ndef: Vector::<u8>::with_capacity(TABLE_MIN),
+            exposed: Vector::<bool>::with_capacity(TABLE_MIN),
             explist: Vector::<u32>::new(),
             expover: false,
-            esc_use: Vector::<bool>::new(),
+            esc_use: Vector::<bool>::with_capacity(TABLE_MIN),
             ecand: Vector::<u32>::new(),
             gcand: Vector::<u32>::new(),
+            clast: ir::IR_NONE,
             grem: false,
-            holds: Vector::<bool>::new(),
-            bufexp: Vector::<bool>::new(),
+            holds: Vector::<bool>::with_capacity(TABLE_MIN),
+            bufexp: Vector::<bool>::with_capacity(TABLE_MIN),
             off_sig: off_sig,
             escall: false,
-            escroot: Vector::<bool>::new(),
+            escroot: Vector::<bool>::with_capacity(TABLE_MIN),
             esclist: Vector::<u32>::new(),
             statics: Vector::<u32>::new(),
             iw: Vector::<u8>::new(),
@@ -1087,7 +1094,6 @@ extend Facts {
     fn scan_defs(self: &mut Self, b: &ir::CoreBody) {
         let nl = b.locals.len();
         self.def1.clear();
-        self.def1.resize_default(nl);
         self.ndef.clear();
         self.ndef.resize_default(nl);
         self.exposed.clear();
@@ -1102,6 +1108,7 @@ extend Facts {
         self.explist.clear();
         self.expover = false;
         for i in 0..nl {
+            self.def1.push(ir::IR_NONE);
             let ld = b.locals.at(i);
             if ld.storage == ir::LS_STATIC_REF && self.item_mutable(ld.item) {
                 self.statics.push(i as u32);
@@ -1111,6 +1118,7 @@ extend Facts {
         self.stack.clear(); // copy edges: dest << 32 | src
         self.ecand.clear();
         self.gcand.clear();
+        self.clast = ir::IR_NONE;
         self.grem = false;
         for bi in 0..self.rpo.len() {
             let bb = *b.blocks.at(self.rpo[bi] as usize);
@@ -1128,10 +1136,13 @@ extend Facts {
                 };
                 if d != ir::IR_NONE {
                     let n = self.ndef[d as usize];
-                    if n < 2 {
-                        self.ndef.set(d as usize, n + 1);
+                    if n == 0 {
+                        self.ndef.set(d as usize, 1);
+                        self.def1.set(d as usize, sid);
+                    } else if n == 1 {
+                        self.ndef.set(d as usize, 2);
+                        self.def1.set(d as usize, ir::IR_NONE); // a second definition
                     }
-                    self.def1.set(d as usize, sid);
                 }
                 let rv = *b.rvalues.at(s.rvalue as usize);
                 if rv.kind == ir::RV_ADDR || rv.kind == ir::RV_REF && rv.b == 1 || rv.kind == ir::RV_CAST && da.type_at(
@@ -1140,6 +1151,7 @@ extend Facts {
                     self.ecand.push(sid);
                 } else if rv.kind == ir::RV_INTRINSIC && ir::is_check(rv.c) {
                     self.gcand.push(sid);
+                    self.clast = bi as u32;
                 } else if rv.kind == ir::RV_BINARY {
                     let op = norm_op(rv.c);
                     if op >= tt::TokenType::EqualEqual as u8 && op <= tt::TokenType::GreaterThanEqual as u8 && (self.const_ge2(
@@ -1205,13 +1217,9 @@ extend Facts {
                     let p = *b.places.at(b.dest_pool[(t.dests_start + i) as usize] as usize);
                     if p.proj_len == 0 {
                         self.ndef.set(p.base as usize, 2);
+                        self.def1.set(p.base as usize, ir::IR_NONE);
                     }
                 }
-            }
-        }
-        for i in 0..nl {
-            if self.ndef[i] != 1 {
-                self.def1.set(i, ir::IR_NONE);
             }
         }
         // a copy that escapes carries its source along; a copy of a borrow holds it

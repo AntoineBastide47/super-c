@@ -20,7 +20,7 @@ on:
 
 permissions:
   contents: write            # needed to create the tag + release
-  actions: read              # the test-durations artifact (.github/actions/test-durations)
+  actions: write             # the test-durations artifact: read by the shards, replaced by `durations`
 
 concurrency:
   group: release-${{ github.event.inputs.tag }}
@@ -200,7 +200,17 @@ jobs:
           chmod +x "./$bin"
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
           dur=tests/durations/${{ matrix.target }}.tsv; [ -f "$dur" ] || dur=tests/durations.tsv # shard balance (test-durations.yml)
-          SC_LEAK_CHECK=fatal "./$bin" test --sanitizers --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur" ${cstd:+"$cstd"}
+          SC_LEAK_CHECK=fatal "./$bin" test --sanitizers --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur" \
+            --test-record-durations="durations-${{ matrix.target }}-${{ matrix.cache_shard }}.tsv" ${cstd:+"$cstd"}
+
+      # The times this shard measured, for the `durations` job (kept even when the suite fails).
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: durations-shard-${{ matrix.target }}-${{ matrix.cache_shard }}
+          path: durations-${{ matrix.target }}-${{ matrix.cache_shard }}.tsv
+          if-no-files-found: ignore
+          retention-days: 1
 
       - uses: ./.github/actions/cache-save
         with:
@@ -592,12 +602,37 @@ jobs:
         run: |
           chmod +x ./super-c
           dur=tests/durations/wasm.tsv; [ -f "$dur" ] || dur=tests/durations.tsv # shard balance (test-durations.yml)
-          SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --sanitizers --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur"
+          SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --sanitizers --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur" \
+            --test-record-durations="durations-wasm-${{ matrix.cache_shard }}.tsv"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: durations-shard-wasm-${{ matrix.cache_shard }}
+          path: durations-wasm-${{ matrix.cache_shard }}.tsv
+          if-no-files-found: ignore
+          retention-days: 1
 
       - uses: ./.github/actions/cache-save
         with:
           cache: objcache-wasm-${{ matrix.cache_shard }}
           sha: ${{ needs.resolve.outputs.sha }}
+
+  # The test times every shard above recorded replace the repository's `test-durations` artifact, which
+  # the next run's shards split by (.github/actions/test-durations), even when a shard failed.
+  durations:
+    needs: [resolve, test, wasm-test]
+    if: always() && github.actor == github.repository_owner
+    name: test durations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: ./.github/actions/test-durations-save
+        with:
+          shards: macos=2 linux=2 windows=3 wasm=2
 
   # The wasm compiler ships only after both shards and its checks passed with it.
   wasm-package:

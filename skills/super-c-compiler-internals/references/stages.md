@@ -267,7 +267,8 @@ siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
 
 ## 10. TU Emission (`cemit_package`, `src/emit/`)
 
-- `ensure_sigs`, then `InstGraph` (`src/graph/instances.spc`) seeded with the `irl::Keep`
+- `ensure_sigs` (which also groups the conformances by interface, `PkgIndex.confs`, for
+  `conf_holds`), then `InstGraph` (`src/graph/instances.spc`) seeded with the `irl::Keep`
   cache; `collect()` discovers every concrete instantiation by walking the kept Core IR
   bodies from concrete roots (every concrete body of every module that emits; dead
   prelude modules seed nothing), expanding generics under substitution frames

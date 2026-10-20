@@ -230,7 +230,19 @@ fn alias_extend(b: &mut h::ExitBatch) {
     );
 }
 
+// Matches on enum values whose variant the compiler sees: an immutable `let` of a variant, a variant
+// scrutinee (with a guard), an inlined callee's argument, a destructuring `let`, and a struct field,
+// tuple member or payload of a value it saw built.
+const KNOWN_VARIANT: str = "enum S { Dot, Circle(i32), Rect { w: i32, h: i32 }, }\nstruct P { pub s: S, }\nfn area(s: S) i32 { return switch s { Dot => 0, Circle(r) => r, Rect { w: w, h: h } => w * h, }; }\nfn f() i32 {\n  let s = S::Circle(3);\n  let a = switch s { Dot => 0, Circle(r) => r, Rect { w: w, h: h } => w * h, };\n  let b = switch S::Circle(4) { Rect { w: w, h: h } if w > 1 => w * h, Circle(r) => r, _ => 0, };\n  let p = P { s: S::Circle(6) };\n  let c = switch p.s { Rect { w: w, h: h } => w * h, _ => 7, };\n  let t = (S::Dot, S::Circle(8));\n  let d = switch t.1 { Circle(r) => r, _ => 0, };\n  let o = Option::<S>::Some(S::Circle(9));\n  let e = switch o { Some(x) => switch x { Circle(r) => r, _ => 0, }, None => 0, };\n  let g = switch o { Some(Circle(r)) => r, _ => 0, };\n  let (u, v) = (S::Dot, S::Circle(10));\n  let k = switch v { Circle(r) => r, _ => 0, } + switch u { Dot => 1, _ => 0, };\n  return a + b + c + d + e + g + k + area(S::Circle(5));\n}\nfn main() i32 { return f() - 56; }\n";
+
+// Values whose variant a write through `&mut` changes before the match (a call, an inlined call, a
+// reference, a field, a payload binding, a `let mut` pattern, a loop): each match takes the arm of
+// the value it reads, not of the variant the value was built with.
+const KNOWN_REWRITE: str = "enum S { Dot, Circle(i32), Rect { w: i32, h: i32 }, }\nstruct P { pub s: S, }\nfn area(s: S) i32 { return switch s { Dot => 1, Circle(r) => r, Rect { w: w, h: h } => w * h, }; }\nfn flip(s: &mut S) { *s = S::Rect { w: 2, h: 3 }; }\n@c.noinline\nfn flip_call(s: &mut S) { *s = S::Dot; }\nfn main() i32 {\n  let mut a = S::Circle(1);\n  flip(&mut a);\n  let ka = switch a { Circle(r) => r, Rect { w: w, h: h } => w * h, Dot => 0, };\n  let mut b = S::Circle(1);\n  flip_call(&mut b);\n  let kb = switch b { Circle(r) => r, Dot => 10, _ => 0, };\n  let mut c = S::Circle(1);\n  let r = &mut c;\n  *r = S::Rect { w: 4, h: 5 };\n  let kc = area(c);\n  let mut p = P { s: S::Circle(1) };\n  flip(&mut p.s);\n  let kp = switch p.s { Circle(r) => r, Rect { w: w, h: h } => w + h, Dot => 0, };\n  let mut q = P { s: S::Circle(1) };\n  let qs = &mut q.s;\n  *qs = S::Dot;\n  let kq = switch q.s { Circle(r) => r, Dot => 7, _ => 0, };\n  let mut o = Option::<S>::Some(S::Circle(1));\n  switch &mut o { Some(x) => { *x = S::Rect { w: 1, h: 9 }; }, None => {}, };\n  let ko = switch o { Some(Circle(r)) => r, Some(Rect { w: w, h: h }) => w * h, _ => 0, };\n  let mut (m, n) = (S::Circle(1), 2);\n  flip(&mut m);\n  let km = switch m { Circle(r) => r, _ => 11, } + n;\n  let mut t = S::Circle(1);\n  let mut kt = 0;\n  for i in 0..3 {\n    kt += switch t { Circle(r) => r, Dot => 100, Rect { w: w, h: h } => w * h * 1000, };\n    if i == 0 { t = S::Dot; } else { flip(&mut t); }\n  }\n  let ok = ka == 6 && kb == 10 && kc == 20 && kp == 5 && kq == 7 && ko == 9 && km == 13 && kt == 6101;\n  return if ok { 0; } else { 1; };\n}\n";
+
 fn enums(b: &mut h::ExitBatch) {
+    b.add("each known variant takes its arm", KNOWN_VARIANT, 0);
+    b.add("a value rewritten through &mut takes its new arm", KNOWN_REWRITE, 0);
     b.add(
         "plain and tagged enums: construction, matching, explicit discriminants",
         "enum Color { Red, Green, Blue, }\nenum Shape { Dot, Circle(i32), }\nenum Code { Ok = 0, Bad = 404, }\nfn col(c: Color) i32 { return switch c { Red => 1, Green => 2, Blue => 3, }; }\nfn area(s: Shape) i32 { return switch s { Dot => 0, Circle(r) => r * r, }; }\nfn main() i32 {\n  let ok = col(Color::Green) == 2 && area(Shape::Circle(3)) == 9 && area(Shape::Dot) == 0 && Code::Bad as i32 == 404 && Code::Ok as i32 == 0;\n  return if ok { 0; } else { 1; };\n}\n",
@@ -288,6 +300,18 @@ fn const_generic_callee_inlines() {
     bad.push_str("fn main() i32 {\n    let a = fill::<1>(2);\n    return a[0];\n}\n");
     let r = h::diff_build(bad.as_str(), []);
     assert(!r.built && r.diag.as_str().contains("two lanes"), "the static_assert of the inlined instance runs");
+}
+
+// A match on a value whose variant the compiler sees takes that arm alone: the other arms would read
+// payload bytes the value never set, which GCC 16 reports as maybe uninitialized under -Wall.
+@test
+fn known_variant_takes_its_arm() {
+    let c = h::compile_c_user(KNOWN_VARIANT);
+    assert(c.ok(), "the program compiles");
+    let body = h::c_fn(unsafe str::from_cstr(c.code), "int32_t f(");
+    assert(!body.contains("payload.Rect"), "no dead arm reads the other variant's payload");
+    assert(!body.contains("switch (") && !body.contains("if ("), "no test of a known tag is left");
+    assert(!body.contains("int32_t w"), "the dead guarded arm's bindings declare nothing");
 }
 
 fn slices_and_arrays(b: &mut h::ExitBatch) {

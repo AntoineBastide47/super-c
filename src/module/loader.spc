@@ -607,6 +607,11 @@ pub struct PkgIndex {
     pub variants: Map<u64, u64>,
     pub exts: Vector<NodeId>, // top-level extend items, module order then item order
     pub mod_exts: Vector<u32>, // modules+1 offsets into `exts`
+    /// The conformances by interface (see ensure_sigs): module << 32 | extend node of every extend in
+    /// `exts` whose interface path resolves, grouped by interface, each group in `exts` order.
+    /// `conf_of` maps skey_mix(0, interface module << 32 | node) to its group, start << 32 | end.
+    pub confs: Vector<u64>,
+    pub conf_of: Map<u64, u64>,
 }
 
 extend SymTab {
@@ -5086,65 +5091,79 @@ extend Package {
             return true;
         }
         let want = unsafe (*da).intern_dyn(iface.module, iface.node, wa, wn as u8, TypeQualifier::TYPE_QUAL_NONE as u8);
+        // The extends conforming to `iface` in package order: the index once the package metadata
+        // is built (`ensure_sigs`), else a scan.
+        let mut scan = Vector::<u64>::new();
+        let mut lo: usize = 0;
+        let mut hi: usize = 0;
+        if self.idx.sigs_built {
+            switch self.idx.conf_of.get(&skey_mix(0, iface.module as u64 << 32 | iface.node as u64)) {
+                Some(v) => {
+                    lo = (*v >> 32) as usize;
+                    hi = (*v & 0xFFFFFFFFu64) as usize;
+                },
+                None => {},
+            };
+        } else {
+            for m in 0..self.modules.len() {
+                for k in self.idx.mod_exts[m] as usize..self.idx.mod_exts[m + 1] as usize {
+                    let row = m as u64 << 32 | self.idx.exts[k] as u64;
+                    let d = self.ext_iface(row);
+                    if d.module == iface.module && d.node == iface.node {
+                        scan.push(row);
+                    }
+                }
+            }
+            hi = scan.len();
+        }
+        let rows = if self.idx.sigs_built {
+            &self.idx.confs;
+        } else {
+            &scan;
+        };
         for pass in 0..2 {
-            for xm in 0..self.modules.len() {
-                if !self.modules.at(xm).has_ast {
+            for x in lo..hi {
+                let em = (rows[x] >> 32) as ModuleId;
+                let ext = rows[x] as NodeId;
+                let ea = self.module_ast_const(em);
+                let ed = unsafe (*ea).at_const(ext).as_data.extend_def;
+                if ed.generics.len > 8 {
                     continue;
                 }
-                let em = xm as ModuleId;
-                let ea = self.module_ast_const(em);
-                let items = unsafe (*ea).at_const((*ea).root).as_data.program.items;
-                for i in 0..items.len {
-                    let ext = unsafe (*ea).list(items)[i as usize];
-                    if unsafe (*ea).at_const(ext).kind != NodeKind::NODE_EXTEND {
-                        continue;
-                    }
-                    let ed = unsafe (*ea).at_const(ext).as_data.extend_def;
-                    if ed.interface_type == NODE_NONE || ed.generics.len > 8 {
-                        continue;
-                    }
-                    let ir = unsafe (*ea).resolution_def(ed.interface_type);
-                    if ir.module != iface.module || ir.node != iface.node {
-                        continue;
-                    }
-                    let bp = ext_blanket(unsafe &*ea, unsafe (*ea).type_of(ed.target_type), unsafe &*ea, em, ext);
-                    if bp >= 0 != (pass == 1) {
-                        continue;
-                    }
-                    let tg = unsafe (*ea).resolution_def(ed.target_type);
-                    let dt = unsafe (*ea).type_of(ed.interface_type);
-                    if bp < 0 && (tg.module != it.module || tg.node != it.decl) || dt == TYPE_NONE {
-                        continue;
-                    }
-                    let mut lp: [DefId; 8] = [[0] = DefId { module: 0, node: NODE_NONE }];
-                    let mut la: [TypeId; 8] = [[0] = TYPE_NONE];
-                    let mut ln: u32 = 0;
-                    if bp >= 0 {
-                        ln = ed.generics.len;
-                        for g in 0..ln {
-                            unsafe lp[g as usize] = DefId {
-                                module: em,
-                                node: unsafe (*ea).list(ed.generics)[g as usize],
-                            };
-                        }
-                        unsafe la[bp as usize] = t;
-                    } else if !self.ext_solve(em, ext, dm, &it, &mut lp[0], &mut la[0], &mut ln) {
-                        continue;
-                    }
-                    let mut open = false;
+                let bp = ext_blanket(unsafe &*ea, unsafe (*ea).type_of(ed.target_type), unsafe &*ea, em, ext);
+                if bp >= 0 != (pass == 1) {
+                    continue;
+                }
+                let tg = unsafe (*ea).resolution_def(ed.target_type);
+                let dt = unsafe (*ea).type_of(ed.interface_type);
+                if bp < 0 && (tg.module != it.module || tg.node != it.decl) || dt == TYPE_NONE {
+                    continue;
+                }
+                let mut lp: [DefId; 8] = [[0] = DefId { module: 0, node: NODE_NONE }];
+                let mut la: [TypeId; 8] = [[0] = TYPE_NONE];
+                let mut ln: u32 = 0;
+                if bp >= 0 {
+                    ln = ed.generics.len;
                     for g in 0..ln {
-                        open = open || unsafe la[g as usize] == TYPE_NONE;
+                        unsafe lp[g as usize] = DefId { module: em, node: unsafe (*ea).list(ed.generics)[g as usize] };
                     }
-                    if open && !self.lunify(em, dt, dm, want, ed.generics, &mut la[0], 0) {
-                        continue;
-                    }
-                    let mut g = TYPE_NONE;
-                    if !self.ground_local(em, dt, dm, &lp[0], &la[0], ln, &mut g, depth + 1) || g != want {
-                        continue;
-                    }
-                    if self.ext_bounds_concrete(em, ext, &lp[0], &la[0], ln, dm, depth + 1) {
-                        return true;
-                    }
+                    unsafe la[bp as usize] = t;
+                } else if !self.ext_solve(em, ext, dm, &it, &mut lp[0], &mut la[0], &mut ln) {
+                    continue;
+                }
+                let mut open = false;
+                for g in 0..ln {
+                    open = open || unsafe la[g as usize] == TYPE_NONE;
+                }
+                if open && !self.lunify(em, dt, dm, want, ed.generics, &mut la[0], 0) {
+                    continue;
+                }
+                let mut g = TYPE_NONE;
+                if !self.ground_local(em, dt, dm, &lp[0], &la[0], ln, &mut g, depth + 1) || g != want {
+                    continue;
+                }
+                if self.ext_bounds_concrete(em, ext, &lp[0], &la[0], ln, dm, depth + 1) {
+                    return true;
                 }
             }
         }
@@ -5796,6 +5815,8 @@ extend Package {
         idx.sigs.clear();
         idx.sig_types.clear();
         idx.sig_of = Map::<u64, u32>::new();
+        idx.confs.clear();
+        idx.conf_of = Map::<u64, u64>::new();
         idx.sigs_built = false;
         self.idx = idx;
         for si in 0..SI_COUNT_N {
@@ -5817,9 +5838,10 @@ extend Package {
     }
 
     /// Fill the function-signature metadata from the owners' typed facts: one ItemSig per indexed
-    /// fn/method, its param and return TypeIds copied out of the owner's per-node type table. Runs
-    /// once, after the whole package is type-checked (the driver calls it before instance planning);
-    /// an index rebuild (a module appended later) clears the table, and the next call refills it.
+    /// fn/method, its param and return TypeIds copied out of the owner's per-node type table, then
+    /// the conformances by interface (`PkgIndex.confs`). Runs once, after the whole package is
+    /// type-checked (the driver calls it before instance planning); an index rebuild (a module
+    /// appended later) clears the tables, and the next call refills them.
     pub fn ensure_sigs(self: &mut Self) {
         self.ensure_index();
         if self.idx.sigs_built {
@@ -5855,6 +5877,55 @@ extend Package {
                 },
             );
         }
+        let mut rows = Vector::<u64>::with_capacity(self.idx.exts.len());
+        let mut keys = Vector::<u64>::with_capacity(self.idx.exts.len());
+        for m in 0..self.modules.len() {
+            for k in self.idx.mod_exts[m] as usize..self.idx.mod_exts[m + 1] as usize {
+                let row = m as u64 << 32 | self.idx.exts[k] as u64;
+                let d = self.ext_iface(row);
+                if d.node != NODE_NONE {
+                    rows.push(row);
+                    keys.push(skey_mix(0, d.module as u64 << 32 | d.node as u64));
+                }
+            }
+        }
+        // Chain the rows per interface back to front, then lay each chain out at its first row.
+        let mut head = Map::<u64, u32>::new();
+        let mut next = Vector::<u32>::new();
+        next.resize_default(rows.len());
+        let mut x = rows.len();
+        while x > 0 {
+            x -= 1;
+            next[x] = (switch head.get(&keys[x]) {
+                Some(v) => *v,
+                None => CO_NONE,
+            });
+            head.insert(keys[x], x as u32);
+        }
+        self.idx.confs.reserve(rows.len());
+        for x in 0..rows.len() {
+            if *head.get(&keys[x]).unwrap() != x as u32 {
+                continue;
+            }
+            let lo = self.idx.confs.len() as u64;
+            let mut r = x as u32;
+            while r != CO_NONE {
+                self.idx.confs.push(rows[r as usize]);
+                r = next[r as usize];
+            }
+            self.idx.conf_of.insert(keys[x], lo << 32 | self.idx.confs.len() as u64);
+        }
+    }
+
+    // The interface the extend of `row` (module << 32 | extend node) conforms its target to, node
+    // NONE for a plain extend.
+    fn ext_iface(self: &Self, row: u64) DefId {
+        let a = self.module_ast_const((row >> 32) as ModuleId);
+        let ip = unsafe (*a).at_const(row as NodeId).as_data.extend_def.interface_type;
+        if ip == NODE_NONE {
+            return DefId { module: 0, node: NODE_NONE };
+        }
+        return unsafe (*a).resolution_def(ip);
     }
 
     /// The signature metadata for fn decl (m, node), or null when none is recorded.

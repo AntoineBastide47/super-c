@@ -99,16 +99,18 @@ struct Subst {
 
 // Per kept body: the walk-relevant items, extracted once. A body's locals and rvalues repeat the
 // same interned TypeIds heavily, and generic bodies re-walk once per instantiation frame: the
-// framed walks iterate this ~10x smaller list instead of the whole body.
+// framed walks iterate this ~10x smaller list instead of the whole body. The lists lie one after
+// the other in `InstGraph.wpool`: each field is the start of its list, which ends where the next
+// field's list starts.
 struct WalkCache {
     pub built: bool,
-    pub tys: Vector<TypeId>, // unique local/rvalue types, first-occurrence order
-    pub consts: Vector<u32>, // CK_ITEM constant ids carrying bound targs
-    pub calls: Vector<u32>, // block ids whose terminator is a resolved TM_CALL
-    pub meths: Vector<bool>, // per call: a call with a receiver of a generic extend's method
-    pub meas: Vector<u32>, // statement ids assigning a `sizeof`/`alignof`
-    pub dyns: Vector<u32>, // rvalue ids of `dyn` erasures (`RV_DYN`)
-    pub casts: Vector<u32>, // statement ids of `as` casts whose type names a generic parameter
+    pub tys: u32, // unique local/rvalue types, first-occurrence order
+    pub consts: u32, // CK_ITEM constant ids carrying bound targs
+    pub meas: u32, // statement ids assigning a `sizeof`/`alignof`
+    pub calls: u32, // per resolved TM_CALL: block id << 1, | 1 for a receiver of a generic extend's method
+    pub dyns: u32, // rvalue ids of `dyn` erasures (`RV_DYN`)
+    pub casts: u32, // statement ids of `as` casts whose type names a generic parameter
+    pub end: u32,
 }
 
 /// An array length an instance folds outside 0..=4294967295: a compile error the driver reports,
@@ -163,7 +165,8 @@ pub struct InstGraph {
     /// One lowering per declaration, shared by every frame that walks it (lowering ignores the
     /// frame; only walking applies it). The emitter takes these bodies instead of re-lowering.
     /// `kept_ix` maps (module << 32 | node) to a `kept` index; 0xFFFFFFFFFFFFFFFF = lowering failed.
-    pub kept: Vector<irl::KeptBody>,
+    /// Boxed: a walk reads its body while the nested seeds it starts grow the vector.
+    pub kept: Vector<Box<irl::KeptBody>>,
     pub kept_ix: Map<u64, u64>,
     // The argument keys of the record being interned: every add() reads this buffer, so the hot
     // walk never allocates a per-record key vector.
@@ -172,6 +175,7 @@ pub struct InstGraph {
     /// only an exact-size compact copy lands in `kept`: no growth chains, no retained slack.
     low: irl::Lowerer,
     wcache: Vector<WalkCache>, // parallel to `kept`
+    wpool: Vector<u32>, // the lists of every `wcache` entry
     wt_seen: Map<u64, u64>, // scratch: TypeIds already in the cache being built
     /// Borrowck's finished lowerings (null = none): `body_idx` moves an entry into `kept` on first
     /// demand instead of lowering the body a second time.
@@ -252,11 +256,12 @@ extend InstGraph {
             pair_cur: Map::<u64, u64>::new(),
             dwalked: Set::<u64>::new(),
             nest: Map::<u64, u64>::new(),
-            kept: Vector::<irl::KeptBody>::new(),
+            kept: Vector::<Box<irl::KeptBody>>::new(),
             kept_ix: Map::<u64, u64>::new(),
             argbuf: Vector::<ArgKey>::new(),
             low: irl::Lowerer::new(pkg, 0, NODE_NONE),
             wcache: Vector::<WalkCache>::new(),
+            wpool: Vector::<u32>::new(),
             wt_seen: Map::<u64, u64>::new(),
             bodies: 0,
             rounds: 0,
@@ -1017,7 +1022,7 @@ extend InstGraph {
             f.inst = r.def;
             let org = self.origin[self.cur_rec as usize];
             if (org & ORG_BODY) != 0 {
-                let b = &self.kept.at((org & 0xFFFFFFFFu64) as usize).body;
+                let b = &self.kept.at((org & 0xFFFFFFFFu64) as usize).get().body;
                 f.site_module = b.module;
                 f.site = self.demand_site(b, &r);
             } else if (org & ORG_MEMBER) != 0 {
@@ -2912,65 +2917,62 @@ extend InstGraph {
             kb = irl::KeptBody::copy(&self.low.body, &self.low.closures);
         }
         let slot = self.kept.len() as i64;
-        self.kept.push(kb);
-        self.wcache.push(
-            WalkCache {
-                built: false,
-                tys: Vector::<TypeId>::new(),
-                consts: Vector::<u32>::new(),
-                calls: Vector::<u32>::new(),
-                meas: Vector::<u32>::new(),
-            },
-        );
+        self.kept.push(Box::new(kb));
+        self.wcache.push(WalkCache { built: false });
         self.kept_ix.insert(key, slot as u64);
         return slot;
     }
 
     // Walk kept body `ki` under `frame` through its walk cache (built on first use).
     fn walk_kept(self: &mut Self, ki: i64, a: &Ast, frame: &Vector<Subst>) {
-        let bp = self.kept.at(ki as usize) as *const irl::KeptBody;
+        let bp = self.kept.at(ki as usize).get() as *const irl::KeptBody;
         if !self.wcache.at(ki as usize).built {
             self.wt_seen.clear();
             let b = unsafe &(*bp).body;
+            let mut w = WalkCache { built: true, tys: self.wpool.len() as u32 };
             for i in 0..b.locals.len() {
                 let t = b.locals.at(i).ty;
                 if t != TYPE_NONE && !self.wt_seen.contains_key(&(t as u64)) {
                     self.wt_seen.insert(t, 1);
-                    self.wcache[ki as usize].tys.push(t);
+                    self.wpool.push(t);
                 }
             }
             for i in 0..b.rvalues.len() {
                 let t = b.rvalues.at(i).target;
                 if t != TYPE_NONE && !self.wt_seen.contains_key(&(t as u64)) {
                     self.wt_seen.insert(t, 1);
-                    self.wcache[ki as usize].tys.push(t);
+                    self.wpool.push(t);
                 }
             }
+            w.consts = self.wpool.len() as u32;
             for i in 0..b.constants.len() {
                 let c = b.constants.at(i);
                 if c.kind == ir::CK_ITEM && c.targ_len() != 0 {
-                    self.wcache[ki as usize].consts.push(i as u32);
+                    self.wpool.push(i as u32);
                 }
             }
+            w.meas = self.wpool.len() as u32;
             for i in 0..b.statements.len() {
                 let st = b.statements.at(i);
                 if st.kind == ir::ST_ASSIGN && measured(b.rvalues.at(st.rvalue as usize)) != TYPE_NONE {
-                    self.wcache[ki as usize].meas.push(i as u32);
+                    self.wpool.push(i as u32);
                 }
             }
+            w.calls = self.wpool.len() as u32;
             for i in 0..b.blocks.len() {
                 let t = b.blocks.at(i).term;
                 if t.kind == ir::TM_CALL && t.callee.node != NODE_NONE {
-                    self.wcache[ki as usize].calls.push(i as u32);
                     let meth = (t.args_len != 0 || t.recv != TYPE_NONE) && self.enclosing_row(t.callee) != IG_NONE;
-                    self.wcache[ki as usize].meths.push(meth);
+                    self.wpool.push(i as u32 << 1 | meth as u32);
                 }
             }
+            w.dyns = self.wpool.len() as u32;
             for i in 0..b.rvalues.len() {
                 if b.rvalues.at(i).kind == ir::RV_DYN {
-                    self.wcache[ki as usize].dyns.push(i as u32);
+                    self.wpool.push(i as u32);
                 }
             }
+            w.casts = self.wpool.len() as u32;
             for i in 0..b.statements.len() {
                 let st = b.statements.at(i);
                 if st.kind != ir::ST_ASSIGN {
@@ -2980,44 +2982,50 @@ extend InstGraph {
                 if rv.kind == ir::RV_CAST && rv.b == ir::CAST_NUMERIC && (!a.type_at(rv.target).concrete || !a.type_at(
                     b.operands.at(rv.a as usize).ty,
                 ).concrete) {
-                    self.wcache[ki as usize].casts.push(i as u32);
+                    self.wpool.push(i as u32);
                 }
             }
-            self.wcache[ki as usize].built = true;
+            w.end = self.wpool.len() as u32;
+            self.wcache.set(ki as usize, w);
         }
         self.bodies += 1;
         let b = unsafe &(*bp).body;
-        let wp = self.wcache.at(ki as usize) as *const WalkCache;
+        // A copy: the walk below may build other bodies' caches, which grows `wcache` and `wpool`.
+        let w = *self.wcache.at(ki as usize);
         let org0 = self.cur_org;
         self.cur_org = ORG_BODY | ki as u64;
-        for i in 0..(unsafe &*wp).tys.len() {
-            self.note_type(a, *(unsafe &*wp).tys.at(i), frame, 0);
+        for i in w.tys..w.consts {
+            let t = self.wpool[i as usize];
+            self.note_type(a, t, frame, 0);
         }
         if self.fault_hit {
             let sp = self.fault_span(b, a, frame);
             self.take_type_fault(a.module, sp);
         }
-        for i in 0..(unsafe &*wp).meas.len() {
-            self.check_measured(b, *(unsafe &*wp).meas.at(i), a, frame);
+        for i in w.meas..w.calls {
+            let si = self.wpool[i as usize];
+            self.check_measured(b, si, a, frame);
         }
-        for i in 0..(unsafe &*wp).casts.len() {
-            self.check_cast(b, *(unsafe &*wp).casts.at(i), a, frame);
+        for i in w.casts..w.end {
+            let si = self.wpool[i as usize];
+            self.check_cast(b, si, a, frame);
         }
-        for i in 0..(unsafe &*wp).consts.len() {
-            let c = *b.constants.at((*(unsafe &*wp).consts.at(i)) as usize);
+        for i in w.consts..w.meas {
+            let c = *b.constants.at(self.wpool[i as usize] as usize);
             self.note_call(a, c.item, b, c.targ_start(), c.targ_len(), frame, c.raw);
         }
-        for i in 0..(unsafe &*wp).calls.len() {
-            let t = b.blocks.at((*(unsafe &*wp).calls.at(i)) as usize).term;
+        for i in w.calls..w.dyns {
+            let e = self.wpool[i as usize];
+            let t = b.blocks.at((e >> 1) as usize).term;
             if !self.note_iface_call(a, &t, b, frame) && t.targs_len != 0 && !self.recv_binds(&t) {
                 self.note_call(a, t.callee, b, t.targs_start, t.targs_len, frame, t.span);
             }
-            if *(unsafe &*wp).meths.at(i) {
+            if (e & 1) != 0 {
                 self.note_method_of(a, &t, b, frame);
             }
         }
-        for i in 0..(unsafe &*wp).dyns.len() {
-            let rv = *b.rvalues.at((*(unsafe &*wp).dyns.at(i)) as usize);
+        for i in w.dyns..w.casts {
+            let rv = *b.rvalues.at(self.wpool[i as usize] as usize);
             self.note_dyn(a, &rv, b, frame);
         }
         self.cur_org = org0;
@@ -3032,7 +3040,7 @@ extend InstGraph {
         // gone). Bounded by the closure nodes of the body. Raw borrow: walk_body never touches
         // `kept`, but body_idx can grow it, so the nested ids are copied out first.
         let mut work = Vector::<NodeId>::new();
-        let bp0 = self.kept.at(bi as usize) as *const irl::KeptBody;
+        let bp0 = self.kept.at(bi as usize).get() as *const irl::KeptBody;
         for c in 0..(unsafe &*bp0).closures.len() {
             work.push((unsafe &*bp0).closures[c]);
         }
@@ -3044,7 +3052,7 @@ extend InstGraph {
                 continue;
             }
             self.walk_kept(ci, a, frame);
-            let bp = self.kept.at(ci as usize) as *const irl::KeptBody;
+            let bp = self.kept.at(ci as usize).get() as *const irl::KeptBody;
             for c2 in 0..(unsafe &*bp).closures.len() {
                 work.push((unsafe &*bp).closures[c2]);
             }

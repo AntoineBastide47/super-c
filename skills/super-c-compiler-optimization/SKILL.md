@@ -413,7 +413,7 @@ analysis allocations <= 20k, retained scratch <= `BC_SCRATCH_BUDGET` after any b
 the borrow probe's `drops` region (the elaboration of every kept body) <= 10 ms and
 <= 2k allocations, the emission `drops` region (bounds-check elimination plus the
 elaboration of the bodies emission lowers itself, with the `ir/facts.spc` effect and version
-service) <= 36 ms and <= 600 allocations serial (35 ms and 570 measured), and
+service) <= 36 ms and <= 600 allocations serial (measured 2026-10: 32-34 ms and 575), and
 `SC_BC_VALIDATE=1` builds (serial and every core) clean. The parallel path adds slot pooling, so its allocation count sits
 near the serial one plus one stack per worker.
 
@@ -424,7 +424,7 @@ bodies walked, rounds, a budget stop) are the instance discovery numbers; the
 `relower-refl`/`relower-zst` regions and the re-lowering census are the specialization
 numbers ([instance-specialization.md](../super-c-compiler-internals/references/instance-specialization.md)).
 Budget on the reference sources, serial release: `graph` <= 34 ms and <= 50k
-allocations, 3 rounds, no budget stop (measured 2026-10: 31-33 ms, 36k allocations, 63k
+allocations, 3 rounds, no budget stop (measured 2026-10: 32 ms, 27k allocations, 32k
 records. The older 20 ms budget predates the corpus growth and exact const-generic folding,
 which keeps 6 more width-doubling levels of the speculative `UInt`/`IntBits` chain alive,
 until a limb array leaves the array length range; the same sources take 27-28 ms with the

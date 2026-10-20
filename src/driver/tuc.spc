@@ -20,7 +20,7 @@ import driver::util as *;
 import stdlib;
 
 const TUC_MAGIC: u32 = 0x53435455; // "UTCS" little-endian spells SCTU on disk
-const TUC_VER: u32 = 11;
+const TUC_VER: u32 = 12;
 
 const fn fnv_mix(h: u64, v: u64) u64 {
     let mut x = h;
@@ -52,6 +52,14 @@ fn w128(o: &mut String, v: i128) {
     w64(o, v.limb(1));
 }
 
+// Overwrite the u32 at `at` (a slot `w32` reserved).
+fn p32(o: &mut String, at: usize, v: u32) {
+    o.set_byte(at, (v & 0xFF) as u8);
+    o.set_byte(at + 1, (v >> 8 & 0xFF) as u8);
+    o.set_byte(at + 2, (v >> 16 & 0xFF) as u8);
+    o.set_byte(at + 3, (v >> 24 & 0xFF) as u8);
+}
+
 fn wstr(o: &mut String, s: str) {
     w32(o, s.len() as u32);
     o.push_str(s);
@@ -77,6 +85,10 @@ pub struct Tuc {
     pub slen: Vector<u64>,
     pub out: String, // next cache image, assembled section by section in module order
     pub path: String,
+    // Scratch of the live section `sec_rec` writes, reused across sections.
+    pub tt: TtRec,
+    pub xs: Vector<u32>,
+    pub sat: Vector<u32>,
 }
 
 fn header_hash(p: &loader::Package, target: i32) u64 {
@@ -224,7 +236,7 @@ fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) 
     let mut srch = Vector::<u64>::new();
     let mut pre = Vector::<u32>::new();
     for i in 0..n {
-        srch.push(fnv_cont(FNV_BASIS, p.modules[i].source.as_str()));
+        srch.push(str_id(p.modules[i].source.as_str()));
         if p.modules[i].prelude {
             pre.push(i as u32);
         }
@@ -285,9 +297,9 @@ fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) 
 }
 
 /// Open the cache for this build: compute every live module's key, load the previous image from
-/// `gen_root`, and mark the modules whose sections still match. Off when SC_NO_TU_CACHE is set, which
-/// also removes an existing image.
-pub fn tuc_setup(p: &loader::Package, live: *const bool, target: i32, gen_root: str) Tuc {
+/// `gen_root`, mark the modules whose sections still match, and reserve `est` bytes for the next image.
+/// Off when SC_NO_TU_CACHE is set, which also removes an existing image.
+pub fn tuc_setup(p: &loader::Package, live: *const bool, target: i32, gen_root: str, est: usize) Tuc {
     let mut t = Tuc {
         on: false,
         hdr: 0,
@@ -298,6 +310,9 @@ pub fn tuc_setup(p: &loader::Package, live: *const bool, target: i32, gen_root: 
         slen: Vector::<u64>::new(),
         out: String::new(),
         path: String::new(),
+        tt: tt_new(),
+        xs: Vector::<u32>::new(),
+        sat: Vector::<u32>::new(),
     };
     let n = p.modules.len();
     t.hit.resize_default(n);
@@ -323,6 +338,7 @@ pub fn tuc_setup(p: &loader::Package, live: *const bool, target: i32, gen_root: 
     t.path.push_str("/.tu_cache");
     t.on = true;
     // The next image starts now; sections append in module order as the seed loop runs.
+    t.out.reserve(est);
     w32(&mut t.out, TUC_MAGIC);
     w32(&mut t.out, TUC_VER);
     w64(&mut t.out, t.hdr);
@@ -360,7 +376,8 @@ pub fn tuc_setup(p: &loader::Package, live: *const bool, target: i32, gen_root: 
     return t;
 }
 
-// Payload layout: ntab u32 | type-table entries | nev u32 | events.
+// Payload layout: evb u32 | nev u32 | events (evb bytes) | ntab u32 | type-table entries. The events
+// stream straight into the image and fill the table as they go, so the table follows them.
 // Events carry table INDICES where they carried TypeIds (0xFFFFFFFF = TYPE_NONE); the table entry
 // is a structural description whose children are earlier entries, re-interned at replay into the
 // pool the consuming field names. Node ids and declaring modules are stable under the key (the
@@ -695,7 +712,7 @@ pub fn ev_patch(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<u64, u
     return true;
 }
 
-// `xs` and `sat` are scratch reused across the events of one section.
+// `xs` and `sat` are scratch reused across events.
 fn ser_ev_tr(
     p: &loader::Package,
     r: &mut TtRec,
@@ -730,37 +747,6 @@ fn ser_ev_tr(
     for i in 0..xs.len() {
         w32(o, xs[i]);
     }
-}
-
-/// Serialize `evs[from..]` as one section payload: the structural type table first, then the
-/// events with every TypeId slot rewritten to a table index.
-pub fn ser_evs(p: &loader::Package, o: &mut String, evs: &Vector<mbe::RecEv>, from: usize, bodies: str) {
-    let mut r = tt_new();
-    let mut eb = String::new();
-    let mut xs = Vector::<u32>::new();
-    let mut sat = Vector::<u32>::new();
-    for i in from..evs.len() {
-        let ev = evs.at(i);
-        if ev.kind == mbe::RK_CHUNK && ev.s1.len() == 0 {
-            // Chunk text lives in the bodies buffer at record time (a/b are its bounds).
-            eb.push_byte(ev.kind);
-            w32(&mut eb, 0);
-            w32(&mut eb, 0);
-            w32(&mut eb, 0);
-            w32(&mut eb, 0);
-            w64(&mut eb, 0);
-            wstr(&mut eb, bodies.slice(ev.a as usize, ev.b as usize));
-            wstr(&mut eb, "");
-            w32(&mut eb, 0);
-            w32(&mut eb, 0);
-        } else {
-            ser_ev_tr(p, &mut r, &mut eb, ev, &mut xs, &mut sat);
-        }
-    }
-    w32(o, r.count);
-    o.push_string(&r.tab);
-    w32(o, (evs.len() - from) as u32);
-    o.push_string(&eb);
 }
 
 extend Rd {
@@ -807,10 +793,17 @@ extend Rd {
         self.at += n;
     }
 
-    /// Read the section's type table into `out`; false when the image is truncated or malformed. The
-    /// writer puts children first, so every child ref names an earlier entry: a self or forward ref
-    /// (a cycle for `tt_id`) is malformed.
+    /// Read the section's type table into `out`, then leave the cursor on the event count and end it at
+    /// the last event; false when the image is truncated or malformed. The writer puts children first,
+    /// so every child ref names an earlier entry: a self or forward ref (a cycle for `tt_id`) is
+    /// malformed.
     pub fn read_table(self: &mut Self, out: &mut Vector<TtEnt>) bool {
+        let evb = self.r32() as usize;
+        let ev = self.at;
+        if !self.ok || evb as u64 + 4 > (self.end - ev) as u64 {
+            return false;
+        }
+        self.at = ev + 4 + evb;
         let ntab = self.r32() as usize;
         for i in 0..ntab {
             let mut e = TtEnt {
@@ -909,7 +902,12 @@ extend Rd {
             }
             out.push(e);
         }
-        return self.ok;
+        if !self.ok || self.at != self.end {
+            return false;
+        }
+        self.at = ev;
+        self.end = ev + 4 + evb;
+        return true;
     }
 
     /// Read one journaled event into `ev` (its vectors are reused); false when the image is truncated.
@@ -954,11 +952,42 @@ extend Tuc {
         };
     }
 
-    /// Append one finished live-module section (key + length + payload) to the next image.
-    pub fn sec_add(self: &mut Self, m: usize, payload: &String) {
+    /// Append module `m`'s live section to the next image: the events `evs[from..]`, chunk texts read
+    /// from `bodies` (see `RK_CHUNK`), with every TypeId slot rewritten to an index of the section's
+    /// structural type table.
+    pub fn sec_rec(self: &mut Self, p: &loader::Package, m: usize, evs: &Vector<mbe::RecEv>, from: usize, bodies: str) {
         w64(&mut self.out, self.keys[m]);
-        w32(&mut self.out, payload.len() as u32);
-        self.out.push_string(payload);
+        let at = self.out.len();
+        w32(&mut self.out, 0); // section length
+        w32(&mut self.out, 0); // evb
+        w32(&mut self.out, (evs.len() - from) as u32);
+        self.tt.memo.clear();
+        self.tt.tab.truncate(0);
+        self.tt.count = 0;
+        for i in from..evs.len() {
+            let ev = evs.at(i);
+            if ev.kind == mbe::RK_CHUNK && ev.s1.len() == 0 {
+                // Chunk text lives in the bodies buffer at record time (a/b are its bounds).
+                let o = &mut self.out;
+                o.push_byte(ev.kind);
+                w32(o, 0);
+                w32(o, 0);
+                w32(o, 0);
+                w32(o, 0);
+                w64(o, 0);
+                wstr(o, bodies.slice(ev.a as usize, ev.b as usize));
+                wstr(o, "");
+                w32(o, 0);
+                w32(o, 0);
+            } else {
+                ser_ev_tr(p, &mut self.tt, &mut self.out, ev, &mut self.xs, &mut self.sat);
+            }
+        }
+        let evb = self.out.len() - at - 12;
+        w32(&mut self.out, self.tt.count);
+        self.out.push_string(&self.tt.tab);
+        p32(&mut self.out, at, (self.out.len() - at - 4) as u32);
+        p32(&mut self.out, at + 4, evb as u32);
     }
 
     /// Carry a hit module's previous section into the next image byte for byte.
@@ -968,7 +997,7 @@ extend Tuc {
         self.out.push_str(self.raw.as_str().slice(self.soff[m] as usize, (self.soff[m] + self.slen[m]) as usize));
     }
 
-    /// A module that produced no cacheable section (replay precondition failed after a hit): an empty
+    /// A module with no cacheable section (it emits nothing, or its replay failed after a hit): an empty
     /// payload never matches on load, so the next build re-emits it live.
     pub fn sec_void(self: &mut Self, m: usize) {
         w64(&mut self.out, self.keys[m] ^ 0x5555555555555555u64);

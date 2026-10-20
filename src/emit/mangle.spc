@@ -478,13 +478,20 @@ pub struct Mangler {
     pin_idx: Map<u64, u64>, // (module << 32 | owner) -> attribute index
     ovl_memo: Map<u64, u64>, // overload_count keyed by (cur, tmod, tdecl, name) hash
     // method_by_name misses keyed by (receiver decl or builtin, name) hash: callers probe for methods
-    // that often do not exist (`free`, `eq`, `cmp`), and a miss scans every module's items.
+    // that often do not exist (`free`, `eq`, `cmp`), and a miss reads every extend of the receiver.
     miss_memo: Set<u64>,
     // `conform_ext` answers for extends that apply to every instance: (decl, interface) key ->
     // module << 32 | extend node.
     conf_memo: Map<u64, u64>,
     // free_method answers keyed by declaration: every drop asks, and an answer scans the items.
     free_memo: Map<u64, u64>,
+    // The package's extends by target declaration (`ext_target`), built on the first `find_method`:
+    // `ext_rows` holds module << 32 | extend node in module order, then item order, `ext_head` maps
+    // a target to its first row and `ext_next` chains each row to the next one of its target.
+    ext_built: bool,
+    ext_rows: Vector<u64>,
+    ext_head: Map<u64, u32>,
+    ext_next: Vector<u32>,
     last_edge: u64, // the spelling edge recorded last: spellings cluster, so most repeat it
     /// While on, spellings record no edge: the caller reads the text but the output never
     /// spells it (identifier reservation).
@@ -505,6 +512,10 @@ pub struct Mangler {
     zmemo: Map<u64, u64>,
     zenv: Vector<lay::LayoutEnv>, // layout_at scratch: one frame per visible binding
     lib_names: Set<str<'static>>, // C_LIB_NAMES, indexed
+    // Direct-mapped cache of `ident` escape verdicts, one module << 48 | span start << 16 | length
+    // << 1 | escaped per slot: a name spells about 6 times, mostly close together, and the keyword
+    // and macro tests cost more than the probe.
+    esc_seen: Vector<u64>,
 }
 
 // RecEv kinds; the payload schema per kind is fixed by its recording site.
@@ -531,6 +542,10 @@ pub const RK_HEDGE: u8 = 19; // a = owner module, h = definition key of the embe
 pub const RK_TNEED: u8 = 20; // xs = type-need keys of this module's row as (low, high) word pairs (driver-recorded)
 pub const RK_WRAP: u8 = 21; // h = wrapper name hash, s1 = element C name, s2 = wrapper definition
 pub const RK_PACK: u8 = 22; // h = result pack name hash, s1 = its C name, s2 = its definition
+// The slot count of `Mangler.esc_seen` (`>> 52` of a 64-bit hash picks one).
+const ESC_SLOTS: usize = 4096;
+// The end of an `ext_next` chain.
+const EXT_END: u32 = 0xFFFFFFFFu32;
 /// `mark_ctx` of owner module `o`'s instance shard: `CTX_INST | o`.
 pub const CTX_INST: i64 = 0x10000;
 
@@ -691,6 +706,10 @@ extend Mangler {
             miss_memo: Set::<u64>::new(),
             conf_memo: Map::<u64, u64>::new(),
             free_memo: Map::<u64, u64>::new(),
+            ext_built: false,
+            ext_rows: Vector::<u64>::new(),
+            ext_head: Map::<u64, u32>::new(),
+            ext_next: Vector::<u32>::new(),
             last_edge: 0xFFFFFFFFFFFFFFFFu64,
             no_edges: false,
             rec_on: false,
@@ -700,6 +719,7 @@ extend Mangler {
             zmemo: Map::<u64, u64>::new(),
             zenv: Vector::<lay::LayoutEnv>::new(),
             lib_names: lib_names,
+            esc_seen: Vector::<u64>::new(),
         };
     }
 
@@ -1679,7 +1699,23 @@ extend Mangler {
         let src = self.p().modules.at(m as usize).source.as_str();
         let txt = src.slice(s.start as usize, s.end as usize);
         out.push_str(txt);
-        if escaped_stem(txt, |w: str| c_keyword(w) || c_std_macro(w)) {
+        if txt.len() >= 0x8000 {
+            if escaped_stem(txt, |w: str| c_keyword(w) || c_std_macro(w)) {
+                out.push_str("_");
+            }
+            return;
+        }
+        if self.esc_seen.len() == 0 {
+            self.esc_seen.resize_default(ESC_SLOTS);
+        }
+        let k = m as u64 << 48 | s.start as u64 << 16 | txt.len() as u64 << 1;
+        let slot = ((m as u64 << 32 | s.start as u64).wrapping_mul(0x9E3779B97F4A7C15u64) >> 52) as usize;
+        let mut v = self.esc_seen[slot];
+        if (v & 0xFFFFFFFFFFFFFFFEu64) != k {
+            v = k | escaped_stem(txt, |w: str| c_keyword(w) || c_std_macro(w)) as u64;
+            self.esc_seen.set(slot, v);
+        }
+        if (v & 1) != 0 {
             out.push_str("_");
         }
     }
@@ -2688,37 +2724,16 @@ extend Mangler {
         if dd == NODE_NONE {
             // Builtin receivers: their extends usually live in the prelude, but any module
             // may extend a builtin (std::parallel's AtomicOps conformances do).
-            let bt = y.as_data.builtin as i32;
-            for pm2 in 0..self.p().modules.len() {
-                if !self.p().modules.at(pm2).has_ast {
-                    continue;
-                }
-                let pa = self.p().module_ast_const(pm2 as ModuleId);
-                let pits = unsafe (*pa).at_const((*pa).root).as_data.program.items;
-                let psrc = self.p().modules.at(pm2).source.as_str();
-                for i2 in 0..pits.len {
-                    let iid2 = unsafe (*pa).list(pits)[i2 as usize];
-                    let it2 = unsafe (*pa).at_const(iid2);
-                    if it2.kind != NodeKind::NODE_EXTEND || it2.as_data.extend_def.target_type == NODE_NONE {
-                        continue;
-                    }
-                    let tg2 = self.ext_target(pm2 as ModuleId, iid2);
-                    if tg2.node == NODE_NONE || self.p().builtin_of_decl(tg2.module, tg2.node) != bt {
-                        continue;
-                    }
-                    let ms2 = it2.as_data.extend_def.items;
-                    for j2 in 0..ms2.len {
-                        let mid2 = unsafe (*pa).list(ms2)[j2 as usize];
-                        let mn2 = unsafe (*pa).at_const(mid2);
-                        if mn2.kind != NodeKind::NODE_FUNCTION {
-                            continue;
-                        }
-                        let s3 = unsafe (*pa).at_const(mn2.as_data.function.name).as_data.name.text;
-                        if psrc.slice(s3.start as usize, s3.end as usize) == mname {
-                            *tg = tg2;
-                            return DefId { module: pm2 as ModuleId, node: mid2 };
-                        }
-                    }
+            let bt = DefId { module: self.p().core_module, node: self.p().builtin_decl(y.as_data.builtin) };
+            let mut r = self.ext_first(bt);
+            while r != EXT_END {
+                let row = *self.ext_rows.at(r as usize);
+                r = *self.ext_next.at(r as usize);
+                let em2 = (row >> 32) as ModuleId;
+                let mid2 = self.ext_method(em2, row as NodeId, mname);
+                if mid2 != NODE_NONE {
+                    *tg = bt;
+                    return DefId { module: em2, node: mid2 };
                 }
             }
             self.miss_memo.insert(miss_key);
@@ -2728,58 +2743,90 @@ extend Mangler {
         // decl's own module first (the overwhelmingly common case), then the rest. An extend whose
         // target this instance does not match is skipped, and then a miss is not memoized.
         let mut skipped = false;
-        let mut xm: i64 = 0 - 1;
-        while xm < self.p().modules.len() as i64 {
-            let em2 = if xm < 0 {
-                dm;
-            } else {
-                xm as ModuleId;
-            };
-            xm += 1;
-            if xm > 0 && em2 == dm {
-                // Already scanned first.
-                continue;
-            }
-            if !self.p().modules.at(em2 as usize).has_ast {
-                continue;
-            }
-            let da = self.p().module_ast_const(em2);
-            let items = unsafe (*da).at_const((*da).root).as_data.program.items;
-            let dsrc = self.p().modules.at(em2 as usize).source.as_str();
-            for i in 0..items.len {
-                let iid = unsafe (*da).list(items)[i as usize];
-                let itn = unsafe (*da).at_const(iid);
-                if itn.kind != NodeKind::NODE_EXTEND || itn.as_data.extend_def.target_type == NODE_NONE {
+        let d = DefId { module: dm, node: dd };
+        for pass in 0..2 {
+            let mut r = self.ext_first(d);
+            while r != EXT_END {
+                let row = *self.ext_rows.at(r as usize);
+                r = *self.ext_next.at(r as usize);
+                let em2 = (row >> 32) as ModuleId;
+                if em2 == dm != (pass == 0) {
                     continue;
                 }
-                let tgi = self.ext_target(em2, iid);
-                if tgi.module != dm || tgi.node != dd {
+                let mid = self.ext_method(em2, row as NodeId, mname);
+                if mid == NODE_NONE {
                     continue;
                 }
-                let ms = itn.as_data.extend_def.items;
-                for j in 0..ms.len {
-                    let mid = unsafe (*da).list(ms)[j as usize];
-                    let mn = unsafe (*da).at_const(mid);
-                    if mn.kind != NodeKind::NODE_FUNCTION {
-                        continue;
-                    }
-                    let s2 = unsafe (*da).at_const(mn.as_data.function.name).as_data.name.text;
-                    if dsrc.slice(s2.start as usize, s2.end as usize) != mname {
-                        continue;
-                    }
-                    if it.decl != NODE_NONE && !self.ext_applies_inst(em2, iid, rm, &it) {
-                        skipped = true;
-                        continue;
-                    }
-                    *tg = DefId { module: dm, node: dd };
-                    return DefId { module: em2, node: mid };
+                if it.decl != NODE_NONE && !self.ext_applies_inst(em2, row as NodeId, rm, &it) {
+                    skipped = true;
+                    continue;
                 }
+                *tg = d;
+                return DefId { module: em2, node: mid };
             }
         }
         if !skipped {
             self.miss_memo.insert(miss_key);
         }
         return none;
+    }
+
+    // The first `ext_rows` row whose extend targets `d` (EXT_END = none); `ext_next` chains the
+    // rest. Builds the rows from the package's extend list on the first call.
+    fn ext_first(self: &mut Self, d: DefId) u32 {
+        if !self.ext_built {
+            self.ext_built = true;
+            let idx = &self.p().idx;
+            let mut keys = Vector::<u64>::with_capacity(idx.exts.len());
+            self.ext_rows.reserve(idx.exts.len());
+            for m in 0..self.p().modules.len() {
+                for k in (*idx.mod_exts.at(m)) as usize..(*idx.mod_exts.at(m + 1)) as usize {
+                    let e = *idx.exts.at(k);
+                    let t = self.ext_target(m as ModuleId, e);
+                    if t.node != NODE_NONE {
+                        self.ext_rows.push(m as u64 << 32 | e as u64);
+                        keys.push(skey_mix(0, t.module as u64 << 32 | t.node as u64));
+                    }
+                }
+            }
+            // Chain the rows per target back to front, so each chain lists its rows in module order,
+            // then item order.
+            self.ext_next.resize_default(self.ext_rows.len());
+            let mut x = self.ext_rows.len();
+            while x > 0 {
+                x -= 1;
+                let key = *keys.at(x);
+                let next = switch self.ext_head.get(&key) {
+                    Some(v) => *v,
+                    None => EXT_END,
+                };
+                self.ext_next.set(x, next);
+                self.ext_head.insert(key, x as u32);
+            }
+        }
+        return switch self.ext_head.get(&skey_mix(0, d.module as u64 << 32 | d.node as u64)) {
+            Some(v) => *v,
+            None => EXT_END,
+        };
+    }
+
+    // The function named `mname` in extend `ext` of module `em`, or NODE_NONE.
+    fn ext_method(self: &Self, em: ModuleId, ext: NodeId, mname: str) NodeId {
+        let da = self.p().module_ast_const(em);
+        let src = self.p().modules.at(em as usize).source.as_str();
+        let ms = unsafe (*da).at_const(ext).as_data.extend_def.items;
+        for j in 0..ms.len {
+            let mid = unsafe (*da).list(ms)[j as usize];
+            let mn = unsafe (*da).at_const(mid);
+            if mn.kind != NodeKind::NODE_FUNCTION {
+                continue;
+            }
+            let sp = unsafe (*da).at_const(mn.as_data.function.name).as_data.name.text;
+            if src.slice(sp.start as usize, sp.end as usize) == mname {
+                return mid;
+            }
+        }
+        return NODE_NONE;
     }
 
     /// The extend conforming resolved aggregate `(rm, rt)` to interface `iface` that applies to it,

@@ -98,6 +98,23 @@ extend<T, A: Allocator> Vector<T, A> {
         if new_cap < needed {
             new_cap = needed;
         }
+        self.grow_to(new_cap);
+    }
+
+    /// Like `reserve`, but grow to exactly `len + additional` elements (no doubling slack).
+    pub const fn reserve_exact(self: &mut Vector<T, A>, additional: usize) {
+        if sizeof(T) == 0 || additional <= self.cap - self.len {
+            self.reserve(additional);
+            return;
+        }
+        if additional > ~(0 as usize) / sizeof(T) - self.len {
+            panic("Vector: capacity overflow");
+        }
+        self.grow_to(self.len + additional);
+    }
+
+    // Reallocate to `new_cap` elements, at least the length (nonzero-sized `T`).
+    const fn grow_to(self: &mut Vector<T, A>, new_cap: usize) {
         let p = (unsafe self.alloc.realloc(self.ptr, self.cap * sizeof(T), new_cap * sizeof(T), alignof(T))) as *mut T;
         self.ptr = p;
         self.cap = new_cap;

@@ -287,11 +287,12 @@ a fresh F lists only the tests it ran. CI runners are several times slower than 
 uniformly, so each CI lane splits by its own file, `tests/durations/<lane>.tsv` (`macos`, `linux`,
 `windows`, `wasm`). The files are not committed: they are the repository's one `test-durations`
 artifact, which every Release and Debug shard downloads first (`.github/actions/test-durations`; a
-lane without one uses `tests/durations.tsv`). The `Test durations` workflow
-(`.github/workflows/test-durations.yml`, run on demand) runs the Release workflow's shards with
-recording on, merges each lane's shards (a lane it could not measure keeps its old file), replaces
-the artifact, deletes every other durations artifact, and summarizes the measured and planned shard
-times.
+lane without one uses `tests/durations.tsv`). Every Release run refreshes it: each shard records
+the times of the tests it ran (`--test-record-durations=<file>`), and the `durations` job
+(`.github/actions/test-durations-save`) merges each lane's shards (a lane no shard measured keeps
+its old file), replaces the artifact, deletes every other durations artifact, and summarizes the
+measured and planned shard times. The `Test durations` workflow
+(`.github/workflows/test-durations.yml`) runs the same shards and job on demand, without a release.
 
 ## Leak Detection
 

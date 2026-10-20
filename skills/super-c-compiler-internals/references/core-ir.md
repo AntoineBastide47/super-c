@@ -290,7 +290,8 @@ panic-guard folding).
 - **Escapes.** The escape set (raw addresses, mutable borrows stored or used past derefs, copies
   and calls, references cast to raw pointers) comes from one scan of the body before the walk,
   resolved through single definitions; an unresolved one disables call transparency for the body.
-  BCE walks each body once.
+  BCE walks each body once, in reverse postorder up to the last block with a check or a
+  fold candidate: no fact flows backward, so the blocks after it change no result.
 - **Integer facts.** Per tracked integer local: an interval in exact sign-magnitude arithmetic
   at the target width (a possible wrap gives the type's range), a stride and phase (the value is
   `phase + k * stride`), known-zero and known-one bits. Transfer functions cover `+ - * / %`,

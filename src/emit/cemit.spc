@@ -197,6 +197,17 @@ pub struct CEmit {
     sx_used: Vector<bool>,
     /// `sx_addr[l]`: the body takes the address of local `l` or of a part of it (`&`, a raw address).
     sx_addr: Vector<bool>,
+    /// `sx_rw[l]`: a block `CFlow` reaches writes, views or drops coalesce root `l`
+    /// (`mark_reached_writes`).
+    sx_rw: Vector<bool>,
+    /// `sx_drop[bi]`: block `bi` ends in a drop that emits code (not `drop_emits_nothing`). Set by
+    /// `count_all`.
+    sx_drop: Vector<bool>,
+    /// `sx_uses[l]`, `sx_bare[l]`, `sx_deref[l]`: the operands that read local `l`: all of them, those
+    /// that read it whole, and those that read `*l` alone. Set by `count_all`.
+    sx_uses: Vector<u32>,
+    sx_bare: Vector<u32>,
+    sx_deref: Vector<u32>,
     /// `sx_rtrap[r]`: whether rvalue `r`'s own operation can panic (`rv_traps`): 0 not yet asked, 1
     /// no, 2 yes. Sized by `compute_inline`.
     sx_rtrap: Vector<u8>,
@@ -243,7 +254,8 @@ pub struct CEmit {
     // callees; the mangle walk must not repeat per call site.
     // The memo maps the callee key to a slot: `sym_pool[sym_off[slot] .. +sym_len[slot]]` is the
     // symbol, `sym_hash[slot]` its reserved-identifier hash (setup_locals reserves it without a
-    // second spelling).
+    // second spelling). Bit 63 of a generic call's slot marks a spelling whose demand is pending
+    // (see callee_sym_i).
     sym_memo: Map<u64, u64>,
     sym_memo_ctx: i64,
     sym_pool: String,
@@ -270,14 +282,11 @@ pub struct CEmit {
     // mixed (module, TypeId).
     destr_memo: Map<u64, u64>,
     // The current body's write index (`wx_build`), built on first demand; `setup_locals` drops it.
-    // Per local: operand reads (`wx_use`), ST_ASSIGN writes by base in statement order
-    // (`wx_wst[wx_woff[l]..wx_woff[l + 1]]`, statement indexes) and one-destination calls into it in
-    // block order (`wx_cblk[wx_coff[l]..wx_coff[l + 1]]`, block indexes); per statement its block
-    // (`wx_sblk`, ir::IR_NONE when no block holds it); per local whether a reference or address of
-    // it is taken (`wx_addr`).
+    // Per local: ST_ASSIGN writes by base in statement order (`wx_wst[wx_woff[l]..wx_woff[l + 1]]`,
+    // statement indexes) and one-destination calls into it in block order
+    // (`wx_cblk[wx_coff[l]..wx_coff[l + 1]]`, block indexes); per statement its block (`wx_sblk`,
+    // ir::IR_NONE when no block holds it).
     wx_on: bool,
-    wx_addr: Vector<bool>,
-    wx_use: Vector<u32>,
     wx_woff: Vector<u32>,
     wx_wst: Vector<u32>,
     wx_coff: Vector<u32>,
@@ -459,7 +468,12 @@ extend CEmit {
             sx_nm_off: Vector::<u32>::new(),
             sx_nm_len: Vector::<u32>::new(),
             sx_used: Vector::<bool>::new(),
+            sx_rw: Vector::<bool>::new(),
             sx_addr: Vector::<bool>::new(),
+            sx_drop: Vector::<bool>::new(),
+            sx_uses: Vector::<u32>::new(),
+            sx_bare: Vector::<u32>::new(),
+            sx_deref: Vector::<u32>::new(),
             sx_gload: Vector::<u32>::new(),
             sx_inline: Vector::<u32>::new(),
             sx_rtrap: Vector::<u8>::new(),
@@ -491,8 +505,6 @@ extend CEmit {
             decl_txt: Vector::<String>::new(),
             destr_memo: Map::<u64, u64>::new(),
             wx_on: false,
-            wx_addr: Vector::<bool>::new(),
-            wx_use: Vector::<u32>::new(),
             wx_woff: Vector::<u32>::new(),
             wx_wst: Vector::<u32>::new(),
             wx_coff: Vector::<u32>::new(),
@@ -2023,26 +2035,39 @@ extend CEmit {
     }
 
     // One pass over the body for every per-local counter: reference/definition counts (never
-    // under-counting a use, so a coalesce guarded by `refs[src] == 1` is safe), use counts, read
-    // counts (a taken address counts; over-counting only keeps more locals live), and the
-    // hard-write flag (a whole-local write whose value must land: a call destination or a
-    // side-effecting rvalue). A local with no reads and no hard write is dead.
+    // under-counting a use, so a coalesce guarded by `refs[src] == 1` is safe), the operand counts
+    // (`sx_uses`, `sx_bare`, `sx_deref`), read counts (a taken address counts; over-counting only
+    // keeps more locals live), the hard-write flag (a whole-local write whose value must land: a call
+    // destination or a side-effecting rvalue), and the drops that emit code (`sx_drop`). A local with
+    // no reads and no hard write is dead.
     fn count_all(
         self: &mut Self,
         b: &ir::CoreBody,
         refs: &mut Vector<u32>,
         defs: &mut Vector<u32>,
-        uses: &mut Vector<u32>,
         reads: &mut Vector<u32>,
         hardw: &mut Vector<bool>,
     ) {
+        let n = b.locals.len();
+        self.sx_uses.clear();
+        self.sx_bare.clear();
+        self.sx_deref.clear();
+        self.sx_uses.resize_default(n);
+        self.sx_bare.resize_default(n);
+        self.sx_deref.resize_default(n);
         for o in 0..b.operands.len() {
             let op = *b.operands.at(o);
             if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
-                self.count_place(b, op.data, false, refs, defs);
-                let base = b.places.at(op.data as usize).base as usize;
-                uses.set(base, *uses.at(base) + 1);
-                reads.set(base, *reads.at(base) + 1);
+                let pl = *b.places.at(op.data as usize);
+                let base = pl.base as usize;
+                refs.set(base, refs[base] + 1);
+                self.sx_uses.set(base, self.sx_uses[base] + 1);
+                reads.set(base, reads[base] + 1);
+                if pl.proj_len == 0 {
+                    self.sx_bare.set(base, self.sx_bare[base] + 1);
+                } else if pl.proj_len == 1 && b.projections.at(pl.proj_start as usize).kind == ir::PJ_DEREF {
+                    self.sx_deref.set(base, self.sx_deref[base] + 1);
+                }
             }
         }
         for si in 0..b.statements.len() {
@@ -2063,9 +2088,12 @@ extend CEmit {
                 }
             }
         }
+        self.sx_drop.clear();
         for bi in 0..b.blocks.len() {
             let t = b.blocks.at(bi).term;
-            if t.kind == ir::TM_DROP && !self.drop_emits_nothing(b, &t) {
+            let drop = t.kind == ir::TM_DROP && !self.drop_emits_nothing(b, &t);
+            self.sx_drop.push(drop);
+            if drop {
                 self.count_place(b, t.a, false, refs, defs);
                 reads.set(
                     b.places.at(t.a as usize).base as usize,
@@ -2144,8 +2172,50 @@ extend CEmit {
         return aem == cem && aet == cet;
     }
 
+    // Whether types `a` and `c` spell one C type: the same type, or pointers or references to one type
+    // with one mutability (`&mut T` and `*mut T` are both `T *`, `&T` and `*const T` both `const T *`).
+    fn same_c_type(self: &Self, b: &ir::CoreBody, a: TypeId, c: TypeId) bool {
+        if a == TYPE_NONE || c == TYPE_NONE {
+            return false;
+        }
+        let mut am = b.module;
+        let mut at = a;
+        self.rty(b, a, &mut am, &mut at);
+        let mut cm = b.module;
+        let mut ct = c;
+        self.rty(b, c, &mut cm, &mut ct);
+        if am == cm && at == ct {
+            return true;
+        }
+        let ay = *unsafe (*self.p().module_ast_const(am)).type_at(at);
+        let cy = *unsafe (*self.p().module_ast_const(cm)).type_at(ct);
+        let aptr = ay.kind == TypeKind::TYPE_POINTER || ay.kind == TypeKind::TYPE_REFERENCE;
+        let cptr = cy.kind == TypeKind::TYPE_POINTER || cy.kind == TypeKind::TYPE_REFERENCE;
+        let mutq = TypeQualifier::TYPE_QUAL_MUT as u8;
+        if !aptr || !cptr || ay.qualifier == mutq != (cy.qualifier == mutq) {
+            return false;
+        }
+        let mut aem = am;
+        let mut aet = ay.as_data.elem;
+        let _ = self.mg.resolve(am, ay.as_data.elem, &mut aem, &mut aet);
+        let mut cem = cm;
+        let mut cet = cy.as_data.elem;
+        let _ = self.mg.resolve(cm, cy.as_data.elem, &mut cem, &mut cet);
+        return aem == cem && aet == cet;
+    }
+
+    // Whether `rv` is a cast that changes nothing in C (`same_c_type`): it spells as its operand and
+    // copies it.
+    fn same_c_cast(self: &Self, b: &ir::CoreBody, rv: &ir::Rvalue) bool {
+        return rv.kind == ir::RV_CAST && rv.b == ir::CAST_NUMERIC && b.operands.at(rv.a as usize).kind != ir::OP_CONST && self.same_c_type(
+            b,
+            b.operands.at(rv.a as usize).ty,
+            rv.target,
+        );
+    }
+
     fn coal_type_compatible(self: &Self, b: &ir::CoreBody, dst: TypeId, src: TypeId, slocal: u32) bool {
-        if self.same_local_type(b, dst, src) {
+        if self.same_local_type(b, dst, src) || self.same_c_type(b, dst, src) {
             return true;
         }
         let mut dm = b.module;
@@ -2217,17 +2287,15 @@ extend CEmit {
         }
         let mut refs = self.uget();
         let mut defs = self.uget();
-        let mut uses = self.uget();
         let mut coal_root = self.bget();
         let mut reads = self.uget();
         let mut hardw = self.bget();
         refs.resize_default(n);
         defs.resize_default(n);
-        uses.resize_default(n);
         coal_root.resize_default(n);
         reads.resize_default(n);
         hardw.resize_default(n);
-        self.count_all(b, &mut refs, &mut defs, &mut uses, &mut reads, &mut hardw);
+        self.count_all(b, &mut refs, &mut defs, &mut reads, &mut hardw);
         // First statement of each statement's block, built on the first mutable binding copy.
         let mut stmt_block = Vector::<u32>::new();
         for si in 0..b.statements.len() {
@@ -2240,11 +2308,12 @@ extend CEmit {
                 continue;
             }
             let dstore = b.locals.at(pl.base as usize).storage;
-            if dstore != ir::LS_USER && dstore != ir::LS_TEMP {
+            // A spliced callee's parameter or binding (LS_INL) merges like a temporary.
+            if dstore != ir::LS_USER && dstore != ir::LS_TEMP && dstore != ir::LS_INL {
                 continue;
             }
             let rv = *b.rvalues.at(s.rvalue as usize);
-            if rv.kind != ir::RV_USE {
+            if rv.kind != ir::RV_USE && !self.same_c_cast(b, &rv) {
                 continue;
             }
             let op = *b.operands.at(rv.a as usize);
@@ -2279,7 +2348,7 @@ extend CEmit {
             }
             let inline_pattern_dest = dstore == ir::LS_USER && b.locals.at(pl.base as usize).dkind == ir::LK_PATTERN && *defs.at(
                 pl.base as usize,
-            ) == 1 && *uses.at(pl.base as usize) == 1;
+            ) == 1 && *self.sx_uses.at(pl.base as usize) == 1;
             // A closure capture is an argument too, but it spells `__env->name`, not a plain local;
             // aliasing a local onto it would lose that env indirection.
             if self.cap_on && ss == ir::LS_ARG && sp.base >= self.cap_base {
@@ -2287,7 +2356,7 @@ extend CEmit {
             }
             // A vector result that the next statement copies into a local assigned again (a loop's
             // accumulator) writes that local itself: no temporary, no copy.
-            if tempish && dstore == ir::LS_USER && *defs.at(sp.base as usize) == 1 && *uses.at(sp.base as usize) == 1 && self.vec_forward(
+            if tempish && dstore == ir::LS_USER && *defs.at(sp.base as usize) == 1 && *self.sx_uses.at(sp.base as usize) == 1 && self.vec_forward(
                 b,
                 si,
                 sp.base,
@@ -2304,13 +2373,13 @@ extend CEmit {
                 continue;
             }
             // A temporary is counted once at its definition and once at this sole read.
-            if tempish && (*defs.at(sp.base as usize) != 1 || *uses.at(sp.base as usize) != 1) {
+            if tempish && (*defs.at(sp.base as usize) != 1 || *self.sx_uses.at(sp.base as usize) != 1) {
                 continue;
             }
-            if user_source && (*defs.at(sp.base as usize) != 1 || *uses.at(sp.base as usize) != 1) {
+            if user_source && (*defs.at(sp.base as usize) != 1 || *self.sx_uses.at(sp.base as usize) != 1) {
                 continue;
             }
-            if binding_source && (*defs.at(sp.base as usize) != 1 || *uses.at(sp.base as usize) != 1 || *refs.at(
+            if binding_source && (*defs.at(sp.base as usize) != 1 || *self.sx_uses.at(sp.base as usize) != 1 || *refs.at(
                 sp.base as usize,
             ) != 2) {
                 continue;
@@ -2491,7 +2560,6 @@ extend CEmit {
         self.compute_inline(b, &coal_root);
         self.uput(refs);
         self.uput(defs);
-        self.uput(uses);
         self.uput(reads);
         self.bput(coal_root);
         self.bput(hardw);
@@ -2523,7 +2591,7 @@ extend CEmit {
             return false;
         }
         let rv = *b.rvalues.at(s.rvalue as usize);
-        if rv.kind != ir::RV_USE {
+        if rv.kind != ir::RV_USE && rv.kind != ir::RV_CAST {
             return false;
         }
         let op = *b.operands.at(rv.a as usize);
@@ -2531,10 +2599,10 @@ extend CEmit {
             return false;
         }
         let sp = *b.places.at(op.data as usize);
-        if sp.proj_len != 0 {
+        if sp.proj_len != 0 || *self.sx_coal.at(pl.base as usize) != *self.sx_coal.at(sp.base as usize) {
             return false;
         }
-        return *self.sx_coal.at(pl.base as usize) == *self.sx_coal.at(sp.base as usize);
+        return rv.kind == ir::RV_USE || self.same_c_cast(b, &rv);
     }
 
     // A store to a dead local (never read, no declaration): its pure rvalue has no side effect, so
@@ -2710,6 +2778,153 @@ extend CEmit {
         return rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_LIKELY;
     }
 
+    // A pointer local whose one definition is the address of a place that stays where it is, and
+    // whose every use dereferences it (`*p`, `p->f`): each use spells that place itself
+    // (`emit_place_lim`), and the local is neither declared nor stored (`sx_inline`). The place stays
+    // where it is when its path indexes by no operand and dereferences at most its base, a local never
+    // written whole. One pass over the statements, the operands and the terminators.
+    fn fold_addresses(self: &mut Self, b: &ir::CoreBody) {
+        let n = b.locals.len();
+        let mut writes = self.uget(); // whole-local writes, per coalesced root
+        let mut defrv = self.uget(); // the root's last whole definition (its one when writes == 1)
+        let mut defl = self.uget(); // the local that definition names (the root or one merged into it)
+        let mut bad = self.bget(); // a projected use that is no leading dereference
+        let mut bare = self.uget(); // whole-local reads
+        let mut merged = self.uget(); // of those, the reads of the copies merged away (they emit nothing)
+        writes.resize_default(n);
+        bad.resize_default(n);
+        bare.resize_default(n);
+        merged.resize_default(n);
+        for _l in 0..n {
+            defrv.push(ir::IR_NONE);
+            defl.push(ir::IR_NONE);
+        }
+        for si in 0..b.statements.len() {
+            let st = *b.statements.at(si);
+            if st.kind == ir::ST_STORAGE_LIVE || st.kind == ir::ST_STORAGE_DEAD {
+                continue;
+            }
+            if st.kind != ir::ST_ASSIGN {
+                if st.place != ir::IR_NONE {
+                    self.addr_use(b, st.place, &mut bad);
+                }
+                continue;
+            }
+            if self.is_coalesced_store(b, &st) {
+                // Its whole-local read is no read: the copy emits nothing.
+                let src = b.operands.at(b.rvalues.at(st.rvalue as usize).a as usize).data;
+                let r = (*self.sx_coal.at(b.places.at(src as usize).base as usize)) as usize;
+                merged.set(r, merged[r] + 1);
+                continue;
+            }
+            let pl = *b.places.at(st.place as usize);
+            if pl.proj_len == 0 {
+                let r = (*self.sx_coal.at(pl.base as usize)) as usize;
+                writes.set(r, writes[r] + 1);
+                defrv.set(r, st.rvalue);
+                defl.set(r, pl.base);
+            } else {
+                self.addr_use(b, st.place, &mut bad);
+            }
+            let rv = *b.rvalues.at(st.rvalue as usize);
+            if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT || rv.kind == ir::RV_SLICE {
+                self.addr_use(b, rv.a, &mut bad);
+            }
+        }
+        for o in 0..b.operands.len() {
+            let op = *b.operands.at(o);
+            if (op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE) && b.places.at(op.data as usize).proj_len == 0 {
+                let r = (*self.sx_coal.at(b.places.at(op.data as usize).base as usize)) as usize;
+                bare.set(r, bare[r] + 1);
+            } else if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+                self.addr_use(b, op.data, &mut bad);
+            }
+        }
+        for bi in 0..b.blocks.len() {
+            let t = b.blocks.at(bi).term;
+            if t.kind == ir::TM_DROP {
+                self.addr_use(b, t.a, &mut bad);
+            } else if t.kind == ir::TM_CALL {
+                for d in 0..t.dests_len {
+                    let dp = b.dest_pool[(t.dests_start + d) as usize];
+                    let r = (*self.sx_coal.at(b.places.at(dp as usize).base as usize)) as usize;
+                    if b.places.at(dp as usize).proj_len == 0 {
+                        writes.set(r, writes[r] + 2); // a call's result: no address definition
+                    } else {
+                        self.addr_use(b, dp, &mut bad);
+                    }
+                }
+            }
+        }
+        for l in 0..n {
+            let st = b.locals.at(l).storage;
+            if *self.sx_coal.at(l) != l as u32 || l < b.returns as usize || bad[l] || bare[l] != merged[l] || writes[l] != 1 {
+                continue;
+            }
+            if st != ir::LS_TEMP && st != ir::LS_INL && !(st == ir::LS_USER && !b.locals.at(l).is_mutable) {
+                continue;
+            }
+            if self.cap_on && l as u32 >= self.cap_base && l as u32 < b.returns + b.args {
+                continue;
+            }
+            let rv = *b.rvalues.at(defrv[l] as usize);
+            if rv.kind != ir::RV_REF && rv.kind != ir::RV_ADDR {
+                continue;
+            }
+            // An address that needs a cast (a mutable one of a `const` path, another pointee type, an
+            // array's wrapper) changes how its dereference reads: it stays.
+            if self.ref_cast_needed(b, rv.target, rv.a) {
+                continue;
+            }
+            let ap = *b.places.at(rv.a as usize);
+            let ab = (*self.sx_coal.at(ap.base as usize)) as usize;
+            let mut stays = ab != l && *self.sx_inline.at(ab) == ir::IR_NONE;
+            for i in 0..ap.proj_len {
+                let pj = *b.projections.at((ap.proj_start + i) as usize);
+                if pj.kind == ir::PJ_INDEX_OP || pj.kind == ir::PJ_DEREF && (i != 0 || writes[ab] != 0) {
+                    stays = false;
+                }
+            }
+            if stays {
+                self.sx_inline.set(l, defrv[l]);
+                self.sx_inline.set(defl[l] as usize, defrv[l]);
+            }
+        }
+        self.uput(writes);
+        self.uput(defrv);
+        self.uput(defl);
+        self.uput(bare);
+        self.uput(merged);
+        self.bput(bad);
+    }
+
+    // `fold_addresses`: a use of place `p` disqualifies its root unless it dereferences it first.
+    fn addr_use(self: &Self, b: &ir::CoreBody, p: u32, bad: &mut Vector<bool>) {
+        let pl = *b.places.at(p as usize);
+        if pl.proj_len == 0 || b.projections.at(pl.proj_start as usize).kind != ir::PJ_DEREF {
+            bad.set((*self.sx_coal.at(pl.base as usize)) as usize, true);
+        }
+    }
+
+    // The place whose address local `base` folds (`fold_addresses`), or IR_NONE.
+    fn folded_address(self: &Self, b: &ir::CoreBody, base: u32) ir::PlaceId {
+        let r = *self.sx_coal.at(base as usize);
+        let d = *self.sx_inline.at(r as usize);
+        if d == ir::IR_NONE {
+            return ir::IR_NONE;
+        }
+        let rv = *b.rvalues.at(d as usize);
+        if rv.kind != ir::RV_REF && rv.kind != ir::RV_ADDR {
+            return ir::IR_NONE;
+        }
+        return rv.a;
+    }
+
+    // `sizeof(T)` or `_Alignof(T)`: a constant expression with no operand and no effect.
+    const fn is_size_query(rv: &ir::Rvalue) bool {
+        return rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF);
+    }
+
     // Whether operand `opid` reads local `l` through no projection (a whole-local copy/move).
     const fn op_is_bare_local(self: &Self, b: &ir::CoreBody, opid: u32, l: u32) bool {
         if opid == ir::IR_NONE || opid as usize >= b.operands.len() {
@@ -2818,8 +3033,17 @@ extend CEmit {
         return false;
     }
 
-    // Whether operand `opid` is a bare whole-local read of a mem-tainted local.
-    const fn op_taints(self: &Self, b: &ir::CoreBody, opid: u32, taint: &Vector<bool>) bool {
+    // Whether operand `opid` is a bare whole-local read of a mem-tainted local. An untainted local
+    // after the reader `l` gets `fwd[x] = pass` (`rvalue_reads_tainted`).
+    const fn op_taints(
+        self: &Self,
+        b: &ir::CoreBody,
+        opid: u32,
+        taint: &Vector<bool>,
+        l: u32,
+        fwd: &mut Vector<u32>,
+        pass: u32,
+    ) bool {
         if opid == ir::IR_NONE || opid as usize >= b.operands.len() {
             return false;
         }
@@ -2828,25 +3052,44 @@ extend CEmit {
             return false;
         }
         let pl = *b.places.at(op.data as usize);
-        return pl.proj_len == 0 && taint[pl.base as usize];
+        if pl.proj_len != 0 {
+            return false;
+        }
+        if taint[pl.base as usize] {
+            return true;
+        }
+        if pl.base > l {
+            fwd.set(pl.base as usize, pass);
+        }
+        return false;
     }
 
-    // Whether an inlinable-kind rvalue reads a mem-tainted local through a bare operand (the one
-    // link shape whose fold relays the operand's spelled expression).
-    fn rvalue_reads_tainted(self: &Self, b: &ir::CoreBody, rid: u32, taint: &Vector<bool>) bool {
+    // Whether an inlinable-kind rvalue (the definition of local `l`) reads a mem-tainted local through
+    // a bare operand (the one link shape whose fold relays the operand's spelled expression). Each
+    // untainted operand local after `l` gets `fwd[x] = pass`: when this pass taints it later, the next
+    // pass checks `l` again.
+    fn rvalue_reads_tainted(
+        self: &Self,
+        b: &ir::CoreBody,
+        rid: u32,
+        taint: &Vector<bool>,
+        l: u32,
+        fwd: &mut Vector<u32>,
+        pass: u32,
+    ) bool {
         let rv = *b.rvalues.at(rid as usize);
         if rv.kind == ir::RV_USE || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST {
-            return self.op_taints(b, rv.a, taint);
+            return self.op_taints(b, rv.a, taint, l, fwd, pass);
         }
         if rv.kind == ir::RV_BINARY {
-            return self.op_taints(b, rv.a, taint) || self.op_taints(b, rv.b, taint);
+            return self.op_taints(b, rv.a, taint, l, fwd, pass) || self.op_taints(b, rv.b, taint, l, fwd, pass);
         }
         if CEmit::is_likely(&rv) {
-            return self.op_taints(b, b.oper_pool[rv.a as usize], taint);
+            return self.op_taints(b, b.oper_pool[rv.a as usize], taint, l, fwd, pass);
         }
         if rv.kind == ir::RV_AGGREGATE {
             for i in 0..rv.b {
-                if self.op_taints(b, b.oper_pool[(rv.a + i) as usize], taint) {
+                if self.op_taints(b, b.oper_pool[(rv.a + i) as usize], taint, l, fwd, pass) {
                     return true;
                 }
             }
@@ -2876,7 +3119,8 @@ extend CEmit {
         if s.kind != ir::ST_ASSIGN {
             return false;
         }
-        if b.rvalues.at(s.rvalue as usize).kind == ir::RV_INTRINSIC || b.rvalues.at(s.rvalue as usize).kind == ir::RV_SIMD {
+        let srv = *b.rvalues.at(s.rvalue as usize);
+        if srv.kind == ir::RV_INTRINSIC && !CEmit::is_size_query(&srv) || srv.kind == ir::RV_SIMD {
             // Asm/new/safepoint and a vector store carry an effect, a vector load reads memory.
             return false;
         }
@@ -2975,8 +3219,10 @@ extend CEmit {
     // multi-return carrier in no fixed order, so two folded definitions that can panic (`rv_traps`,
     // through their own folded operands) never meet in one: the reader keeps only its last such
     // operand folded, and each earlier one panics at its definition, in source order. A definition
-    // precedes its reads in its block, so one pass in statement order sees each operand first.
-    fn one_panic_per_reader(self: &mut Self, b: &ir::CoreBody, def_idx: &Vector<u32>) {
+    // precedes its reads in its block, so one pass in statement order sees each operand first. Only a
+    // statement two definitions fold into can change: `rd` counts the folds into each (see
+    // `compute_inline`), and `all` checks every statement, as a vector fold is not counted there.
+    fn one_panic_per_reader(self: &mut Self, b: &ir::CoreBody, def_idx: &Vector<u32>, rd: &Vector<u32>, all: bool) {
         let n = b.locals.len();
         // Per local: whether its folded spelling can panic, 0 not yet asked, 1 no, 2 yes.
         let mut tr = self.uget();
@@ -2985,10 +3231,10 @@ extend CEmit {
         for bi in 0..b.blocks.len() {
             let blk = *b.blocks.at(bi);
             for si in 0..blk.stmt_len {
-                let s = *b.statements.at((blk.stmt_start + si) as usize);
-                if s.kind == ir::ST_ASSIGN {
+                let rs = (blk.stmt_start + si) as usize;
+                if (all || (rd[rs] & ~RD_NEW) >= 2) && b.statements.at(rs).kind == ir::ST_ASSIGN {
                     locs.truncate(0);
-                    CEmit::rvalue_fold_locs(b, s.rvalue, &mut locs);
+                    CEmit::rvalue_fold_locs(b, b.statements.at(rs).rvalue, &mut locs);
                     self.keep_last_panic(b, &locs, &mut tr, def_idx);
                 }
             }
@@ -3207,11 +3453,19 @@ extend CEmit {
     }
 
     // Whether call `t` reads local `l` once where a folded definition spells as written: an argument
-    // after the receiver (a receiver may take an implicit `&` or spell twice through a `dyn`
-    // table), or the index of an argument's place after the receiver. A destination is no such
-    // position: C evaluates it unordered with the call.
+    // that is no receiver (a receiver may take an implicit `&` or spell twice through a `dyn`
+    // table), or the index of such an argument's place. Only a direct call of a function whose first
+    // parameter is not `self` has no receiver. A destination is no such position: C evaluates it
+    // unordered with the call.
     fn call_new_read(self: &Self, b: &ir::CoreBody, t: &ir::Terminator, l: u32) bool {
-        for i in 1..t.args_len {
+        let first: u32 = if t.callee.node != NODE_NONE && unsafe (*self.p().module_ast_const(t.callee.module)).at_const(
+            t.callee.node,
+        ).kind == NodeKind::NODE_FUNCTION && !self.self_first(t.callee) {
+            0;
+        } else {
+            1;
+        };
+        for i in first..t.args_len {
             let o = b.oper_pool[(t.args_start + i) as usize];
             if self.op_is_bare_local(b, o, l) || self.op_indexes_by(b, o, l) {
                 return true;
@@ -3234,13 +3488,11 @@ extend CEmit {
         for _l in 0..n {
             self.sx_inline.push(ir::IR_NONE);
         }
-        let mut bare_read = self.uget();
         let mut ndef = self.uget();
         let mut blocked = self.bget();
         let mut def_rv = self.uget();
         let mut def_blk = self.uget();
         let mut def_idx = self.uget();
-        bare_read.resize_default(n);
         ndef.resize_default(n);
         blocked.resize_default(n);
         def_idx.resize_default(n);
@@ -3248,17 +3500,13 @@ extend CEmit {
             def_rv.push(ir::IR_NONE);
             def_blk.push(ir::IR_NONE);
         }
-        for o in 0..b.operands.len() {
-            let op = *b.operands.at(o);
-            if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
-                let pl = *b.places.at(op.data as usize);
-                if pl.proj_len == 0 {
-                    bare_read.set(pl.base as usize, *bare_read.at(pl.base as usize) + 1);
-                } else {
-                    blocked.set(pl.base as usize, true);
-                }
-            }
+        // A local read in part never folds.
+        for l in 0..n {
+            blocked.set(l, self.sx_uses[l] != self.sx_bare[l]);
         }
+        // Whether a statement stores a vector rvalue or a vector-array cast: else `vec_literals` and
+        // `vec_fusion` find nothing.
+        let mut vecs = false;
         for bi in 0..b.blocks.len() {
             let blk = *b.blocks.at(bi);
             for si in 0..blk.stmt_len {
@@ -3266,6 +3514,9 @@ extend CEmit {
                 if s.kind == ir::ST_ASSIGN {
                     let pl = *b.places.at(s.place as usize);
                     let rv = *b.rvalues.at(s.rvalue as usize);
+                    // A vector-array cast is a `memcpy` statement (`emit_vec_cast_store`), no expression.
+                    let vcast = rv.kind == ir::RV_CAST && rv.b == ir::CAST_SIMD_ARRAY;
+                    vecs = vecs || vcast;
                     if pl.proj_len == 0 {
                         // A non-array struct/tuple/variant literal folds too (spelled as one compound
                         // literal at its read); array-bearing aggregates keep their element-wise store.
@@ -3273,9 +3524,12 @@ extend CEmit {
                             b,
                             &rv,
                         );
-                        // A vector-array cast is a `memcpy` statement (`emit_vec_cast_store`), no expression.
-                        let vcast = rv.kind == ir::RV_CAST && rv.b == ir::CAST_SIMD_ARRAY;
-                        if CEmit::inlinable_def_kind(rv.kind) && !vcast && !self.vec_rv(b, &rv) || agg_ok || CEmit::is_likely(
+                        let vrv = rv.kind == ir::RV_SIMD || CEmit::inlinable_def_kind(rv.kind) && !vcast && self.vec_rv(
+                            b,
+                            &rv,
+                        );
+                        vecs = vecs || vrv;
+                        if CEmit::inlinable_def_kind(rv.kind) && !vcast && !vrv || agg_ok || CEmit::is_likely(&rv) || CEmit::is_size_query(
                             &rv,
                         ) {
                             ndef.set(pl.base as usize, *ndef.at(pl.base as usize) + 1);
@@ -3294,7 +3548,7 @@ extend CEmit {
                 }
             }
             let t = blk.term;
-            if t.kind == ir::TM_DROP && !self.drop_emits_nothing(b, &t) {
+            if *self.sx_drop.at(bi) {
                 blocked.set(b.places.at(t.a as usize).base as usize, true);
                 if t.args_len == 1 {
                     blocked.set(t.args_start as usize, true);
@@ -3312,26 +3566,37 @@ extend CEmit {
         // memory read once substitution bottoms out, and use that as the local's reads_mem below.
         // Over-approximates (assumes every eligible link folds): only blocks a fold, never admits.
         let mut mem_taint = self.bget();
+        let mut any = false;
         for l in 0..n {
             let single = !*blocked.at(l) && *ndef.at(l) == 1 && *def_rv.at(l) != ir::IR_NONE;
-            mem_taint.push(single && self.rvalue_reads_mem(b, *def_rv.at(l)));
+            let t = single && self.rvalue_reads_mem(b, *def_rv.at(l));
+            any = any || t;
+            mem_taint.push(t);
         }
         {
-            let mut pass = 0;
-            let mut changed = true;
+            // A pass taints more only when the one before tainted a local that an untainted local
+            // before it reads (`fwd`); without one, the fixpoint holds and the pass is skipped.
+            let mut fwd = self.uget();
+            fwd.resize_default(n);
+            let mut pass: u32 = 0;
+            let mut changed = any;
             while changed && pass < 8 {
                 changed = false;
                 pass += 1;
+                let mut again = false;
                 for l in 0..n {
                     if *mem_taint.at(l) || *blocked.at(l) || *ndef.at(l) != 1 || *def_rv.at(l) == ir::IR_NONE {
                         continue;
                     }
-                    if self.rvalue_reads_tainted(b, *def_rv.at(l), &mem_taint) {
+                    if self.rvalue_reads_tainted(b, *def_rv.at(l), &mem_taint, l as u32, &mut fwd, pass) {
                         mem_taint.set(l, true);
                         changed = true;
+                        again = again || fwd[l] == pass;
                     }
                 }
+                changed = changed && (again || pass == 8);
             }
+            self.uput(fwd);
             if changed {
                 // Deeper chains than the pass bound: give up precision, keep soundness.
                 for l in 0..n {
@@ -3347,6 +3612,8 @@ extend CEmit {
         // reader takes one fold only: two folded expressions that may trap never race.
         let mut rd = self.uget();
         rd.resize_default(b.statements.len() + b.blocks.len());
+        // Whether two definitions fold into one statement (`one_panic_per_reader`).
+        let mut multi = false;
         // Per local: the candidate whose folded spelling reads it (`fold_reads`, stamp = candidate + 1).
         let mut rset = self.uget();
         rset.resize_default(n);
@@ -3363,7 +3630,7 @@ extend CEmit {
             if *coal_root.at(l) {
                 continue;
             }
-            if *blocked.at(l) || *ndef.at(l) != 1 || *bare_read.at(l) != 1 {
+            if *blocked.at(l) || *ndef.at(l) != 1 || self.sx_bare[l] != 1 {
                 continue;
             }
             // a closure capture spells `__env->name`, never a plain local; never fold it. Captures
@@ -3407,6 +3674,7 @@ extend CEmit {
                         b.locals.at(l).ty,
                     ) < 0) && (rd[rs] & RD_NEW) == 0 {
                         self.sx_inline.set(l, drv);
+                        multi = multi || rd[rs] != 0;
                         rd.set(rs, rd[rs] + 1);
                     }
                     // The sole read; stop whether or not it was a foldable position.
@@ -3449,16 +3717,32 @@ extend CEmit {
                 self.sx_inline.set(l, drv);
             }
             let rt = b.statements.len() + bd as usize;
-            if !inlined && ok && scalar && blk.term.kind == ir::TM_CALL && rd[rt] == 0 && self.call_new_read(
-                b,
-                &blk.term,
-                l as u32,
-            ) {
-                self.sx_inline.set(l, drv);
-                rd.set(rt, RD_NEW | 1);
+            if !inlined && ok && scalar && blk.term.kind == ir::TM_CALL && self.call_new_read(b, &blk.term, l as u32) {
+                // A folded argument that cannot panic is safe in any argument order: only the ones
+                // that can are limited to one per call. The chain is walked for a second fold only.
+                if !rs_on && rd[rt] != 0 {
+                    rall = !self.fold_reads(
+                        b,
+                        drv,
+                        l as u32,
+                        &ndef,
+                        &blocked,
+                        &def_rv,
+                        &mut rset,
+                        l as u32 + 1,
+                        &mut traps,
+                    );
+                    rs_on = true;
+                }
+                let calm = CEmit::is_size_query(b.rvalues.at(drv as usize)) || rs_on && !rall && !traps;
+                if calm || rd[rt] == 0 {
+                    self.sx_inline.set(l, drv);
+                    if !calm {
+                        rd.set(rt, RD_NEW | 1);
+                    }
+                }
             }
         }
-        self.uput(rd);
         // Multi-return slots (locals 0..returns) are read only by the synthesized carrier
         // `(name_ret){ ._0 = _0, .. }`, never as an operand, so the loop above skips them. A slot with
         // one pure definition and no operand reads folds into that carrier field, provided its
@@ -3467,7 +3751,7 @@ extend CEmit {
         if b.returns > 1 {
             for l in 0..b.returns as usize {
                 // An array slot is copied into its carrier member, never spelled as an initializer.
-                if *blocked.at(l) || *ndef.at(l) != 1 || *bare_read.at(l) != 0 || self.arr_n(b, b.locals.at(l).ty) >= 0 {
+                if *blocked.at(l) || *ndef.at(l) != 1 || self.sx_bare[l] != 0 || self.arr_n(b, b.locals.at(l).ty) >= 0 {
                     continue;
                 }
                 let bd = *def_blk.at(l);
@@ -3522,12 +3806,18 @@ extend CEmit {
                 self.sx_inline.set(x.base as usize, ir::IR_NONE);
             }
         }
-        // A vector made from an array literal or repeat that only the next statement's cast reads: the
-        // cast spells the vector's compound literal (`emit_vec_cast_store`), no array.
-        self.vec_literals(b);
-        // A load or lane-wise operation that only the next lane loop reads: that loop computes its lanes.
-        self.vec_fusion(b);
-        self.one_panic_per_reader(b, &def_idx);
+        if vecs {
+            // A vector made from an array literal or repeat that only the next statement's cast reads:
+            // the cast spells the vector's compound literal (`emit_vec_cast_store`), no array.
+            self.vec_literals(b);
+            // A load or lane-wise operation that only the next lane loop reads: that loop computes its
+            // lanes.
+            self.vec_fusion(b);
+        }
+        if multi || vecs || b.returns > 1 {
+            self.one_panic_per_reader(b, &def_idx, &rd, vecs);
+        }
+        self.uput(rd);
         // A fold chain spells nested inside its final read: one renderer level and one C bracket
         // level per link. Every link past INLINE_CHAIN_MAX stays a declared temporary and starts a
         // new chain, so an expression of any length renders within RENDER_NEST_MAX. A definition
@@ -3552,7 +3842,18 @@ extend CEmit {
             }
         }
         self.uput(chain);
-        self.uput(bare_read);
+        // `fold_addresses` only where an address definition's local is read through a projection.
+        let mut addr_cand = false;
+        for l in 0..n {
+            let d = *def_rv.at(l);
+            if *ndef.at(l) == 1 && d != ir::IR_NONE && *blocked.at((*self.sx_coal.at(l)) as usize) {
+                let k = b.rvalues.at(d as usize).kind;
+                addr_cand = addr_cand || k == ir::RV_REF || k == ir::RV_ADDR;
+            }
+        }
+        if addr_cand {
+            self.fold_addresses(b);
+        }
         self.uput(ndef);
         self.uput(def_rv);
         self.uput(def_blk);
@@ -3570,15 +3871,6 @@ extend CEmit {
             return;
         }
         let n = b.locals.len();
-        let mut reads = self.uget();
-        reads.resize_default(n);
-        for i in 0..b.operands.len() {
-            let x = *b.operands.at(i);
-            if x.kind != ir::OP_CONST {
-                let k = b.places.at(x.data as usize).base as usize;
-                reads.set(k, reads[k] + 1);
-            }
-        }
         let mut defs = self.uget();
         defs.resize_default(n);
         for i in 0..b.statements.len() {
@@ -3616,7 +3908,7 @@ extend CEmit {
                 // A result coalesced into the local it is copied to (`let m = a < b;`): that local.
                 let p = *self.sx_coal.at(p0 as usize);
                 let st = b.locals.at(p as usize).storage;
-                if reads[p as usize] != 1 || defs[p as usize] != 1 || p != p0 && (reads[p0 as usize] != 1 || defs[p0 as usize] != 1) || st != ir::LS_TEMP && st != ir::LS_USER || *self.sx_addr.at(
+                if self.sx_uses[p as usize] != 1 || defs[p as usize] != 1 || p != p0 && (self.sx_uses[p0 as usize] != 1 || defs[p0 as usize] != 1) || st != ir::LS_TEMP && st != ir::LS_USER || *self.sx_addr.at(
                     p as usize,
                 ) || *self.sx_inline.at(p as usize) != ir::IR_NONE || !cmp && !self.lane_value(b, &rv, true) {
                     continue;
@@ -3700,7 +3992,6 @@ extend CEmit {
         }
         self.uput(at);
         self.uput(defs);
-        self.uput(reads);
     }
 
     // For each gather (`simd.gather`, `simd.gather_unchecked`), the slice load that defined its index
@@ -4001,15 +4292,6 @@ extend CEmit {
     // Mark (`sx_inline`) each temporary array that a repeat or array literal defines and that only
     // the next statement in its block reads, a cast to a vector of its lanes.
     fn vec_literals(self: &mut Self, b: &ir::CoreBody) {
-        let mut reads = self.uget();
-        reads.resize_default(b.locals.len());
-        for i in 0..b.operands.len() {
-            let x = *b.operands.at(i);
-            if x.kind != ir::OP_CONST {
-                let k = b.places.at(x.data as usize).base as usize;
-                reads.set(k, reads[k] + 1);
-            }
-        }
         for bi in 0..b.blocks.len() {
             let blk = *b.blocks.at(bi);
             for k in 1..blk.stmt_len {
@@ -4028,14 +4310,13 @@ extend CEmit {
                 let lit = dv.kind == ir::RV_REPEAT && b.operands.at(dv.b as usize).kind == ir::OP_CONST || dv.kind == ir::RV_AGGREGATE && dv.c == ir::AGG_ARRAY;
                 if lit && x.kind != ir::OP_CONST && b.places.at(x.data as usize).proj_len == 0 && b.places.at(
                     x.data as usize,
-                ).base == a && reads[a as usize] == 1 && b.locals.at(a as usize).storage == ir::LS_TEMP && *self.sx_coal.at(
+                ).base == a && self.sx_uses[a as usize] == 1 && b.locals.at(a as usize).storage == ir::LS_TEMP && *self.sx_coal.at(
                     a as usize,
                 ) == a && self.rty_y(b, rv.target).kind == TypeKind::TYPE_SIMD {
                     self.sx_inline.set(a as usize, d.rvalue);
                 }
             }
         }
-        self.uput(reads);
     }
 
     // The longest fold chain among rvalue `rid`'s whole-local operands (`chain` is 0 for a local
@@ -4097,34 +4378,23 @@ extend CEmit {
         return d;
     }
 
-    // Build the current body's write index (see `wx_on`) unless it is built: two counting passes
-    // and one fill pass over the operands, statements and blocks.
+    // Build the current body's write index (see `wx_on`) unless it is built: a counting pass and a
+    // fill pass over the statements and blocks.
     fn wx_build(self: &mut Self, b: &ir::CoreBody) {
         if self.wx_on {
             return;
         }
         self.wx_on = true;
         let n = b.locals.len();
-        self.wx_use.clear();
         self.wx_woff.clear();
         self.wx_coff.clear();
         self.wx_wst.clear();
         self.wx_cblk.clear();
         self.wx_sblk.clear();
-        self.wx_addr.clear();
-        self.wx_addr.resize_default(n);
-        self.wx_use.resize_default(n);
         self.wx_woff.resize_default(n);
         self.wx_coff.resize_default(n);
         self.wx_woff.push(0);
         self.wx_coff.push(0);
-        for o in 0..b.operands.len() {
-            let op = *b.operands.at(o);
-            if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
-                let base = b.places.at(op.data as usize).base as usize;
-                self.wx_use.set(base, self.wx_use[base] + 1);
-            }
-        }
         // Counts at [base + 1], then prefix sums: [l] is local l's first slot.
         for si in 0..b.statements.len() {
             let s = *b.statements.at(si);
@@ -4132,10 +4402,6 @@ extend CEmit {
             if s.kind == ir::ST_ASSIGN && s.place != ir::IR_NONE {
                 let base = b.places.at(s.place as usize).base as usize + 1;
                 self.wx_woff.set(base, self.wx_woff[base] + 1);
-                let rv = *b.rvalues.at(s.rvalue as usize);
-                if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR {
-                    self.wx_addr.set(b.places.at(rv.a as usize).base as usize, true);
-                }
             }
         }
         for bi in 0..b.blocks.len() {
@@ -4213,10 +4479,10 @@ extend CEmit {
             if rp.proj_len != 0 || bound < b.returns as usize || *self.sx_inline.at(bound) != ir::IR_NONE {
                 continue;
             }
-            self.wx_build(b);
-            if self.wx_use[bound] != 1 {
+            if self.sx_uses[bound] != 1 {
                 continue;
             }
+            self.wx_build(b);
             // The bound's one whole write held by a block must be a length.
             let mut def = ir::IR_NONE;
             let mut def_block = cfl::NONE;
@@ -4374,7 +4640,7 @@ extend CEmit {
         }
         // Explicit safe-access checks emit as a single call (or the bare operand when PROVEN):
         // fusing the declaration keeps one C statement without reordering anything.
-        if k == ir::RV_INTRINSIC && ir::is_check(rv.c) {
+        if k == ir::RV_INTRINSIC && (ir::is_check(rv.c) || rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF) {
             return true;
         }
         if k == ir::RV_CLOSURE {
@@ -4519,12 +4785,9 @@ extend CEmit {
                 self.dom_check_place(b, cf, t.a, bi, &init_blk, &mut bad);
             }
         }
-        for o in 0..b.operands.len() {
-            let op = *b.operands.at(o);
-            if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
-                let rb = *self.sx_coal.at(b.places.at(op.data as usize).base as usize);
-                nread.set(rb as usize, *nread.at(rb as usize) + 1);
-            }
+        for l in 0..n {
+            let rb = (*self.sx_coal.at(l)) as usize;
+            nread.set(rb, nread[rb] + self.sx_uses[l]);
         }
         // A guarded drop reads its move flag, a local carried on args_start, not an operand.
         for bi in 0..b.blocks.len() {
@@ -4536,7 +4799,7 @@ extend CEmit {
         }
         for l in 0..n {
             let st = b.locals.at(l).storage;
-            if st != ir::LS_USER && st != ir::LS_TEMP {
+            if st != ir::LS_USER && st != ir::LS_TEMP && st != ir::LS_INL {
                 continue;
             }
             if *self.sx_coal.at(l) != l as u32 || l < b.returns as usize {
@@ -4614,29 +4877,16 @@ extend CEmit {
         self.sx_call_fwd.resize_default(n);
         self.sx_cs_off.resize_default(n);
         self.sx_cs_len.resize_default(n);
-        let mut bare = self.uget();
-        let mut deref = self.uget();
         let mut bad = self.bget();
         let mut ncall = self.uget();
         // Locals a pointer may reach: a borrow, a slice, a call argument or a drop takes their storage.
         let mut esc = self.bget();
-        bare.resize_default(n);
-        deref.resize_default(n);
         bad.resize_default(n);
         ncall.resize_default(n);
         esc.resize_default(n);
-        for o in 0..b.operands.len() {
-            let op = *b.operands.at(o);
-            if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
-                let pl = *b.places.at(op.data as usize);
-                if pl.proj_len == 0 {
-                    bare.set(pl.base as usize, *bare.at(pl.base as usize) + 1);
-                } else if pl.proj_len == 1 && b.projections.at(pl.proj_start as usize).kind == ir::PJ_DEREF {
-                    deref.set(pl.base as usize, *deref.at(pl.base as usize) + 1);
-                } else {
-                    bad.set(pl.base as usize, true);
-                }
-            }
+        // A local read in part other than `*l` (`sx_bare`, `sx_deref`).
+        for l in 0..n {
+            bad.set(l, self.sx_uses[l] != self.sx_bare[l] + self.sx_deref[l]);
         }
         for si in 0..b.statements.len() {
             let s = *b.statements.at(si);
@@ -4681,7 +4931,7 @@ extend CEmit {
                     esc.set(b.places.at(b.operands.at(t.a as usize).data as usize).base as usize, true);
                 }
             }
-            if t.kind == ir::TM_DROP && !self.drop_emits_nothing(b, &t) {
+            if *self.sx_drop.at(bi) {
                 bad.set(b.places.at(t.a as usize).base as usize, true);
             } else if t.kind == ir::TM_CALL {
                 for d in 0..t.dests_len {
@@ -4711,7 +4961,7 @@ extend CEmit {
             let cont = cf.succ(b, bi as u32, 0);
             let cblk = *b.blocks.at(cont as usize);
             let assert_use = self.assert_call_use(b, &cblk, root);
-            let uses = *bare.at(root as usize) + *deref.at(root as usize);
+            let uses = self.sx_bare[root as usize] + self.sx_deref[root as usize];
             if *ncall.at(r as usize) != 1 || *bad.at(r as usize) || *bad.at(root as usize) || uses != 1 && !(assert_use && uses == 2) {
                 continue;
             }
@@ -4774,9 +5024,7 @@ extend CEmit {
                 self.sx_call_fwd.set(root as usize, true);
             }
         }
-        self.agg_call_fwd(b, cf, &bare, &deref, &bad, &ncall, &esc);
-        self.uput(bare);
-        self.uput(deref);
+        self.agg_call_fwd(b, cf, &bad, &ncall, &esc);
         self.uput(ncall);
         self.bput(bad);
         self.bput(esc);
@@ -4792,8 +5040,6 @@ extend CEmit {
         self: &mut Self,
         b: &ir::CoreBody,
         cf: &cfl::CFlow,
-        bare: &Vector<u32>,
-        deref: &Vector<u32>,
         bad: &Vector<bool>,
         ncall: &Vector<u32>,
         esc: &Vector<bool>,
@@ -4860,7 +5106,7 @@ extend CEmit {
             let mut k = chain.len();
             while k > 0 {
                 k -= 1;
-                let at = self.agg_call_elem(b, chain[k], &rv, bare, deref, bad, ncall);
+                let at = self.agg_call_elem(b, chain[k], &rv, bad, ncall);
                 if at >= next_elem || !elementwise && first != chain.len() {
                     break;
                 }
@@ -4902,8 +5148,6 @@ extend CEmit {
         b: &ir::CoreBody,
         bi: u32,
         rv: &ir::Rvalue,
-        bare: &Vector<u32>,
-        deref: &Vector<u32>,
         bad: &Vector<bool>,
         ncall: &Vector<u32>,
     ) u32 {
@@ -4916,7 +5160,7 @@ extend CEmit {
         let root = *self.sx_coal.at(r as usize);
         if dp.proj_len != 0 || r < b.returns || *self.sx_call_fwd.at(root as usize) || *ncall.at(r as usize) != 1 || *bad.at(
             r as usize,
-        ) || *bad.at(root as usize) || *bare.at(root as usize) != 1 || *deref.at(root as usize) != 0 {
+        ) || *bad.at(root as usize) || self.sx_bare[root as usize] != 1 || self.sx_deref[root as usize] != 0 {
             return rv.b;
         }
         if self.erased(b, b.locals.at(root as usize).ty) || self.arr_n(b, b.locals.at(root as usize).ty) > 0 {
@@ -5072,6 +5316,7 @@ extend CEmit {
         // A gather whose indexes a slice load gave on its straight path: its lanes read the slice.
         self.gather_loads(b, cf);
         let ret_dead = !self.ret_slot_live(b, cf);
+        let dead_only = self.mark_reached_writes(b, cf);
         // The instances of inlined calls whose per-instantiation static_asserts still run: their
         // symbols demand them, as the calls did.
         for i in 0..b.demands.len() {
@@ -5106,6 +5351,10 @@ extend CEmit {
             }
             if *self.sx_coal.at(l) != l as u32 {
                 // Coalesced into another local; shares its declaration.
+                continue;
+            }
+            if dead_only && l >= b.returns as usize && st != ir::LS_STATIC_REF && !self.sx_rw[l] && !self.sx_addr[l] {
+                // Only blocks the C never reaches write it: no reached code reads it either.
                 continue;
             }
             if l >= b.returns as usize && !*self.sx_used.at(l) {
@@ -5422,7 +5671,7 @@ extend CEmit {
                 o.push_str(": ;\n");
             }
             let blk = *b.blocks.at(x as usize);
-            if !self.emit_block_content(o, b, &blk) {
+            if !self.emit_block_content(o, b, x) {
                 ok = false;
                 break;
             }
@@ -5631,6 +5880,53 @@ extend CEmit {
         return idx;
     }
 
+    // Mark in `sx_rw` the coalesce roots the blocks `cf` reaches write (an assignment, a call's
+    // destination), view (a slice of an array) or drop (a drop of a maybe-initialized local reads its
+    // flag first), when some block it does not reach holds statements (the arms of a switch on a
+    // constant): true then. A body with inline assembly answers false: its outputs write operands.
+    fn mark_reached_writes(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow) bool {
+        let mut dead = false;
+        for bi in 0..b.blocks.len() {
+            dead = dead || !cf.reach[bi] && b.blocks.at(bi).stmt_len != 0;
+        }
+        if !dead {
+            return false;
+        }
+        self.sx_rw.clear();
+        self.sx_rw.resize_default(b.locals.len());
+        for bi in 0..b.blocks.len() {
+            if !cf.reach[bi] {
+                continue;
+            }
+            let blk = *b.blocks.at(bi);
+            for si in 0..blk.stmt_len {
+                let s = *b.statements.at((blk.stmt_start + si) as usize);
+                if s.kind != ir::ST_ASSIGN {
+                    continue;
+                }
+                let rv = *b.rvalues.at(s.rvalue as usize);
+                if rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_ASM {
+                    return false;
+                }
+                self.sx_rw.set(self.sx_coal[b.places.at(s.place as usize).base as usize] as usize, true);
+                if rv.kind == ir::RV_SLICE {
+                    self.sx_rw.set(self.sx_coal[b.places.at(rv.a as usize).base as usize] as usize, true);
+                }
+            }
+            let t = blk.term;
+            if t.kind == ir::TM_DROP {
+                self.sx_rw.set(self.sx_coal[b.places.at(t.a as usize).base as usize] as usize, true);
+            }
+            for d in 0..pick(t.kind == ir::TM_CALL, t.dests_len, 0) {
+                let dp = b.dest_pool[(t.dests_start + d) as usize];
+                if dp != ir::IR_NONE {
+                    self.sx_rw.set(self.sx_coal[b.places.at(dp as usize).base as usize] as usize, true);
+                }
+            }
+        }
+        return true;
+    }
+
     // Whether the single return slot `_0` is still referenced after return-slot forwarding. When
     // every return forwards its value directly, the slot's declaration is dead and must be dropped
     // (it would otherwise trip -Werror=unused-variable). Conservative: any read, any non-forwarded
@@ -5673,7 +5969,8 @@ extend CEmit {
 
     // Emit a block's statements and terminator effect, applying return-slot forwarding. Shared by the
     // structured driver and the goto layout so both spell the same body.
-    fn emit_block_content(self: &mut Self, o: &mut String, b: &ir::CoreBody, blk: &ir::BasicBlock) bool {
+    fn emit_block_content(self: &mut Self, o: &mut String, b: &ir::CoreBody, bi: u32) bool {
+        let blk = b.blocks.at(bi as usize);
         let skip = self.ret_fwd_idx(b, blk);
         for si in 0..blk.stmt_len {
             if si == skip {
@@ -5692,7 +5989,7 @@ extend CEmit {
             o.push_str(";\n");
             return true;
         }
-        return self.emit_term_effect(o, b, &blk.term);
+        return self.emit_term_effect(o, b, bi);
     }
 
     // Reconstruct structured C over a reducible, simple-loop CFG: straight-line runs, `if`/`else`,
@@ -5940,7 +6237,7 @@ extend CEmit {
             }
             let blk = *b.blocks.at(node as usize);
             if !dry {
-                if !self.emit_block_content(o, b, &blk) {
+                if !self.emit_block_content(o, b, node) {
                     return false;
                 }
             }
@@ -6329,10 +6626,10 @@ extend CEmit {
         if self.int_builtin(b, b.operands.at(crv.b as usize).ty) != self.int_builtin(b, b.locals.at(index).ty) {
             return false;
         }
-        self.wx_build(b);
-        if self.wx_addr[index] {
+        if self.sx_addr[index] {
             return false;
         }
+        self.wx_build(b);
         for k in self.wx_woff[index]..self.wx_woff[index + 1] {
             let si = self.wx_wst[k as usize];
             if si != step && CEmit::in_loop(cf, self.wx_sblk[si as usize], h) {
@@ -6468,7 +6765,7 @@ extend CEmit {
         if self.do_loop_latch(b, cf, h, &mut latch) {
             self.sx_emitted.set(latch as usize, true);
             self.w(o, dry, "  do {\n");
-            if !dry && !self.emit_block_content(o, b, &blk) {
+            if !dry && !self.emit_block_content(o, b, h) {
                 return false;
             }
             if !self.emit_region(o, b, cf, cf.succ(b, h, 0), latch, lf, latch, dry) {
@@ -6561,7 +6858,7 @@ extend CEmit {
         }
         self.w(o, dry, "  while (1) {\n");
         // A loop header never ends in a return, so the block content has no return to forward.
-        if !dry && !self.emit_block_content(o, b, &blk) {
+        if !dry && !self.emit_block_content(o, b, h) {
             return false;
         }
         if t.kind == ir::TM_SWITCH && t.sw_len == 1 {
@@ -10744,20 +11041,36 @@ extend CEmit {
     // rvalue then spells without the `&`.
     fn emit_place_lim(self: &mut Self, b: &ir::CoreBody, pid: ir::PlaceId, lim: u32, dst: &mut String) bool {
         let pl = *b.places.at(pid as usize);
+        // A folded address local (`fold_addresses`): its dereference is the place it addresses.
+        let fa = self.folded_address(b, pl.base);
         if lim == 0 {
+            if fa != ir::IR_NONE {
+                // The address itself (`&*p`'s `p`).
+                dst.push_str("(");
+                let oka = self.emit_rvalue(b, *self.sx_inline.at((*self.sx_coal.at(pl.base as usize)) as usize), dst);
+                dst.push_str(")");
+                return oka;
+            }
             // No projections, no wraps: the base spells straight into the destination.
             return self.emit_place_base(b, pl.base, dst);
         }
         // Wraps (`(*..)`, `(&..)`) insert their opener at `mk`: the place text so far is the tail
         // of the destination, short enough to shift.
         let mk = dst.len();
-        if !self.emit_place_base(b, pl.base, dst) {
+        let mut i0: u32 = 0;
+        let mut pre = b.locals.at(pl.base as usize).ty;
+        if fa != ir::IR_NONE {
+            if !self.emit_place(b, fa, dst) {
+                return false;
+            }
+            i0 = 1;
+            pre = b.projections.at(pl.proj_start as usize).ty;
+        } else if !self.emit_place_base(b, pl.base, dst) {
             return false;
         }
-        let mut pre = b.locals.at(pl.base as usize).ty;
         let mut ok = true;
         let mut pend_arrow = false; // a deferred deref whose member access folds it into `->`
-        for i in 0..lim {
+        for i in i0..lim {
             if !ok {
                 break;
             }
@@ -14604,10 +14917,6 @@ extend CEmit {
         let mut dest_ty = TYPE_NONE;
         if with_dest && t.dests_len == 1 {
             dest_ty = b.places.at(b.dest_pool[t.dests_start as usize] as usize).ty;
-            if self.extern_fn(t.callee) && self.wrap_ptr(b, dest_ty) {
-                // C declares the result a pointer to the array itself: convert the value.
-                dst.push_str("(void *)");
-            }
         }
         return self.callee_sym(b, t.callee, t.targs_start, t.targs_len, recv_ty, dest_ty, t.iface, t.recv, dst);
     }
@@ -14642,25 +14951,28 @@ extend CEmit {
         );
     }
 
-    // Intern `sym` under `mk` for the current mark_ctx (see sym_memo_ctx_check).
-    fn sym_memo_put(self: &mut Self, mk: u64, sym: &String) {
-        self.sym_memo.insert(mk, self.sym_off.len() as u64);
+    // Intern `sym` under `mk` for the current mark_ctx (see sym_memo_ctx_check), its demand pending
+    // when `pend`.
+    fn sym_memo_put(self: &mut Self, mk: u64, sym: &String, pend: bool) {
+        self.sym_memo.insert(mk, self.sym_off.len() as u64 | pend as u64 << 63);
         self.sym_off.push(self.sym_pool.len() as u32);
         self.sym_len.push(sym.len() as u32);
         self.sym_hash.push(sym.as_str().hash());
         self.sym_pool.push_string(sym);
     }
 
-    // The memoized spelling under `mk`, appended to `dst`; false when none is interned.
-    fn sym_memo_get(self: &Self, mk: u64, dst: &mut String) bool {
+    // The memoized spelling under `mk`, appended to `dst`: 0 when none is interned, 1 when it is,
+    // 2 when its demand is pending.
+    fn sym_memo_get(self: &Self, mk: u64, dst: &mut String) u8 {
         return switch self.sym_memo.get(&mk) {
             Some(s) => {
-                let off = self.sym_off[(*s) as usize] as usize;
-                let ln = self.sym_len[(*s) as usize] as usize;
+                let slot = (*s & 0x7FFFFFFFFFFFFFFFu64) as usize;
+                let off = self.sym_off[slot] as usize;
+                let ln = self.sym_len[slot] as usize;
                 dst.push_str(self.sym_pool.as_str().slice(off, off + ln));
-                true;
+                1u8 + (*s >> 63) as u8;
             },
-            None => false,
+            None => 0u8,
         };
     }
 
@@ -14900,23 +15212,26 @@ extend CEmit {
             // only on the declaration (and mark_ctx, for the cross-TU edge), so memoize.
             self.sym_memo_ctx_check();
             let mk = self.sym_mk(skey_mix(0, callee.module as u64 << 32 | callee.node as u64));
-            if self.sym_memo_get(mk, dst) {
+            if self.sym_memo_get(mk, dst) != 0 {
                 return true;
             }
             let tgt0 = self.mg.method_target(callee.module, callee.node);
             if !self.mg.fn_sym(callee.module, callee.node, tgt0, sym) {
                 return self.fail("callee-sym");
             }
-            self.sym_memo_put(mk, sym);
+            self.sym_memo_put(mk, sym, false);
             dst.push_string(sym);
             return true;
         }
         // A generic call's symbol is a pure function of the callee, the receiver instance, the
         // bound targs and the active env: the same fingerprint the demand dedup keys on, minus
         // the spelling itself, interns it (a first spelling records its demand and cross-TU
-        // edges; the journal mode replays every attempt, so it spells each time).
+        // edges; the journal mode replays every attempt, so it spells each time). A spelling
+        // without demand collection (the setup_locals probe) interns it pending: the first
+        // collecting call reuses the text and records the demand.
         let mut mk1: u64 = 0;
-        let memo9 = !self.mg.rec_on && self.collect_demand;
+        let memo9 = !self.mg.rec_on;
+        let mut pend = false;
         // A feature clone of the instance (`clone_set`): its own symbol, set and closure suffix.
         let cfs = self.clone_set(callee);
         let mut csfx9 = String::new();
@@ -14936,43 +15251,52 @@ extend CEmit {
             );
             self.sym_memo_ctx_check();
             mk1 = self.sym_mk(skey_mix(1, dk0));
-            if self.sym_memo_get(mk1, dst) {
+            let g = self.sym_memo_get(mk1, sym);
+            pend = g == 2;
+            if g == 1 || pend && !self.collect_demand {
+                dst.push_string(sym);
                 return true;
             }
         }
-        if is_minst {
-            if !self.mg.inst_name(rpm, &rit, sym) {
-                ok = self.fail("callee-inst");
+        if !pend {
+            if is_minst {
+                if !self.mg.inst_name(rpm, &rit, sym) {
+                    ok = self.fail("callee-inst");
+                }
+                // The instance body's prototype lives in the method's declaring module.
+                self.mg.mark_used(callee.module);
+                if ok && !self.mg.inst_method(callee, sym) {
+                    ok = self.fail("callee-inst");
+                }
+            } else if keyed {
+                if !self.mg.keyed_sym(callee.module, callee.node, sym) {
+                    ok = self.fail("callee-sym");
+                }
+            } else {
+                let tgt = self.mg.method_target(callee.module, callee.node);
+                if !self.mg.fn_sym(callee.module, callee.node, tgt, sym) {
+                    ok = self.fail("callee-sym");
+                }
             }
-            // The instance body's prototype lives in the method's declaring module.
-            self.mg.mark_used(callee.module);
-            if ok && !self.mg.inst_method(callee, sym) {
-                ok = self.fail("callee-inst");
+            if !recv_targs {
+                for k in 0..targs_len {
+                    if !ok {
+                        break;
+                    }
+                    sym.push_str("__");
+                    if !self.mg.type_m(b.module, b.targ_pool[(targs_start + k) as usize], sym) {
+                        ok = self.fail("callee-targ");
+                    }
+                }
             }
-        } else if keyed {
-            if !self.mg.keyed_sym(callee.module, callee.node, sym) {
-                ok = self.fail("callee-sym");
+            sym.push_string(&csfx9);
+            if ok && memo9 {
+                self.sym_memo_put(mk1, sym, !self.collect_demand);
             }
         } else {
-            let tgt = self.mg.method_target(callee.module, callee.node);
-            if !self.mg.fn_sym(callee.module, callee.node, tgt, sym) {
-                ok = self.fail("callee-sym");
-            }
-        }
-        if !recv_targs {
-            for k in 0..targs_len {
-                if !ok {
-                    break;
-                }
-                sym.push_str("__");
-                if !self.mg.type_m(b.module, b.targ_pool[(targs_start + k) as usize], sym) {
-                    ok = self.fail("callee-targ");
-                }
-            }
-        }
-        sym.push_string(&csfx9);
-        if ok && memo9 {
-            self.sym_memo_put(mk1, sym);
+            // The probe's spelling: its slot no longer pends.
+            let e = *self.sym_memo.get(&mk1).unwrap();
+            self.sym_memo.insert(mk1, e & 0x7FFFFFFFFFFFFFFFu64);
         }
         if ok && self.collect_demand && (is_minst || targs_len != 0) {
             let ca = self.p().module_ast_const(callee.module);
@@ -15109,6 +15433,30 @@ extend CEmit {
         return ok;
     }
 
+    // Whether place `place` is a C lvalue no `const` qualifies: a local's own storage (no static), or
+    // its one leading dereference of a `&mut T` or `*mut T` local. Any other path is not known here.
+    fn place_writable_c(self: &Self, b: &ir::CoreBody, place: ir::PlaceId) bool {
+        let pl = *b.places.at(place as usize);
+        let d = b.locals.at(pl.base as usize);
+        if d.storage == ir::LS_STATIC_REF {
+            return false;
+        }
+        let mut derefs: u32 = 0;
+        for i in 0..pl.proj_len {
+            if b.projections.at((pl.proj_start + i) as usize).kind == ir::PJ_DEREF {
+                if i != 0 {
+                    return false;
+                }
+                derefs += 1;
+            }
+        }
+        if derefs == 0 {
+            return true;
+        }
+        let y = self.rty_y(b, d.ty);
+        return (y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_POINTER) && y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8;
+    }
+
     fn ref_cast_needed(self: &mut Self, b: &ir::CoreBody, target: TypeId, place: ir::PlaceId) bool {
         if target == TYPE_NONE {
             return false;
@@ -15120,7 +15468,9 @@ extend CEmit {
         if ty.kind != TypeKind::TYPE_REFERENCE && ty.kind != TypeKind::TYPE_POINTER {
             return true;
         }
-        if ty.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+        // A mutable address of a place C may spell `const` (one reached through `&T`, an interior
+        // `UnsafeCell` borrow) is cast.
+        if ty.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 && !self.place_writable_c(b, place) {
             return true;
         }
         let mut em = tm;
@@ -15202,7 +15552,7 @@ extend CEmit {
             // value converted through `__sc_wrap` (`void *`): the elements are only ever accessed
             // as elements, through the member `e`, and no cast applies to the address itself.
             let wrap = !cancels && self.mg.ptr_wraps(b.module, rpl.ty);
-            if rv.kind == ir::RV_ADDR || self.ref_cast_needed(b, rv.target, rv.a) {
+            if self.ref_cast_needed(b, rv.target, rv.a) {
                 dst.push_str("(");
                 if !self.ty_c(b.module, rv.target, "", dst) {
                     return false;
@@ -15254,6 +15604,9 @@ extend CEmit {
             if rv.b != ir::CAST_NUMERIC && rv.b != ir::CAST_MASK_BITS && rv.b != ir::CAST_UNCHECKED {
                 // A vector and its array convert by `memcpy` at their store (`emit_vec_cast_store`).
                 return self.fail("cast");
+            }
+            if self.same_c_cast(b, &rv) {
+                return self.emit_operand(b, rv.a, dst);
             }
             // A float converts to an integer saturating (`__sc_f2i_*`); C leaves an out-of-range value
             // undefined, which `to_int_unchecked` (CAST_UNCHECKED, a plain C cast) requires its caller to
@@ -16994,14 +17347,15 @@ extend CEmit {
     // The side effect of a terminator (a drop's free, a call's statement, an assert's check, a
     // return's value, an unreachable abort) with NO control transfer: the structured driver owns
     // every goto, break, continue, and fall-through. GOTO and SWITCH carry no effect here.
-    fn emit_term_effect(self: &mut Self, o: &mut String, b: &ir::CoreBody, t: &ir::Terminator) bool {
+    fn emit_term_effect(self: &mut Self, o: &mut String, b: &ir::CoreBody, bi: u32) bool {
+        let t = &b.blocks.at(bi as usize).term;
         if t.kind == ir::TM_GOTO {
             return true;
         }
         if t.kind == ir::TM_DROP {
             // Scalar drops are pure control flow; a dyn value frees through its vtable; other
             // destructible values need the declaration plan's free glue and stay unfrozen.
-            if self.drop_emits_nothing(b, t) {
+            if !*self.sx_drop.at(bi as usize) {
                 return true;
             }
             let pl = *b.places.at(t.a as usize);
@@ -17457,6 +17811,13 @@ extend CEmit {
                 } else if ok && self.counted_call(b, t) {
                     sink.push_str("(uint32_t)"); // the comparison wrote the count
                 } else if ok {
+                    if t.dests_len == 1 && self.extern_fn(t.callee) && self.wrap_ptr(
+                        b,
+                        b.places.at(b.dest_pool[t.dests_start as usize] as usize).ty,
+                    ) {
+                        // C declares the result a pointer to the array itself: convert the value.
+                        sink.push_str("(void *)");
+                    }
                     ok = self.term_callee_sym(b, t, true, sink);
                     sym_end = sink.len();
                     split = ok && self.split_callee(t.callee);

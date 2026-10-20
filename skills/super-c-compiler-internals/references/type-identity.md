@@ -133,7 +133,7 @@ type), because a function
 type's parameters are contravariant and no region flow can stand for them. It is 0 for the
 default classes (no lifetime written, elided results from the only input), so a type that names
 no lifetime keeps its record and its id. `Hash`/`Eq`, `PubKey` (`w[10]`), the TU cache table
-(`TUC_VER` 11) and the item index's `ty_hash` include it; `tc_lts_subst` rebuilds it when
+(`TUC_VER` 12) and the item index's `ty_hash` include it; `tc_lts_subst` rebuilds it when
 substitution brings positions (`fn(T)` with `T = &i32`: one group per position of `T`), and
 gives `LTS_WIDE` past the last class (`LC_TOO_MANY`). Classes that do not pack (past `LTS_MAX`
 positions or `LP_GROUPS` groups of a kind) are `LTS_EXT | count << 8`, and the record holds them

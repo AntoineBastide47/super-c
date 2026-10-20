@@ -1,0 +1,55 @@
+name: Save test durations
+description: >
+  The last job of a run whose test shards recorded their times (`--test-record-durations=<file>`, uploaded
+  as `durations-shard-<lane>-<k>` artifacts holding `durations-<lane>-<k>.tsv`): merges each lane's shards
+  into `<lane>.tsv` (a lane no shard measured keeps its current file), uploads them as the repository's
+  one `test-durations` artifact that .github/actions/test-durations downloads, deletes every other
+  durations artifact (this run's shard parts, the earlier `test-durations`), and summarizes each lane's
+  measured and planned shard times. The job checks out the repository first and needs `actions: write`.
+inputs:
+  shards:
+    description: "each lane's shard count, as `<lane>=<count>` words"
+    required: true
+runs:
+  using: composite
+  steps:
+    # The current times, for a lane this run did not measure.
+    - uses: ./.github/actions/test-durations
+
+    - uses: actions/download-artifact@v8
+      with:
+        pattern: durations-shard-*
+        merge-multiple: true
+        path: shards
+
+    - name: Merge each lane's shards and plan its split
+      shell: bash
+      env:
+        SHARDS: ${{ inputs.shards }}
+      run: python3 "$GITHUB_ACTION_PATH/merge.py"
+
+    - uses: actions/upload-artifact@v7
+      id: upload
+      with:
+        name: test-durations
+        path: out/*.tsv
+        if-no-files-found: error
+        retention-days: 90
+
+    # One durations artifact remains: the one just uploaded.
+    - name: Delete the other durations artifacts
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        KEEP: ${{ steps.upload.outputs.artifact-id }}
+      run: |
+        set -eu
+        api="repos/$GITHUB_REPOSITORY/actions"
+        gh api --paginate "$api/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+          --jq '.artifacts[] | select(.name | startswith("durations-shard-")) | .id' > ids
+        gh api --paginate "$api/artifacts?name=test-durations&per_page=100" \
+          --jq ".artifacts[] | select(.id != $KEEP) | .id" >> ids
+        while read -r id; do
+          gh api -X DELETE "$api/artifacts/$id"
+          echo "deleted artifact $id"
+        done < ids

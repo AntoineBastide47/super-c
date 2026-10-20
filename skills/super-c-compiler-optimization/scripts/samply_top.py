@@ -4,7 +4,7 @@
 Usage:
     samply record --save-only --unstable-presymbolicate -o run1.profile.json.gz <cmd>
     ... repeat for run2..runN ...
-    python3 samply_top.py [--process=NAME] run*.profile.json.gz
+    python3 samply_top.py [--process=NAME] [--binary=PATH ...] run*.profile.json.gz
 
 Each profile needs its `<name>.syms.json` sidecar (written by --unstable-presymbolicate)
 next to it; without the sidecar, native frames print as hex addresses. Functions are
@@ -12,6 +12,11 @@ ranked by how many runs they appear in, then by total samples, so a one-run fluk
 below a hotspot that shows up everywhere. samply also records the child processes of the
 command (the C compiler and linker of a build); `--process=NAME` counts only the threads of
 processes whose name starts with NAME.
+
+A Windows image built by MinGW GCC carries DWARF and no PDB, so samply finds no symbols for it
+(its breakpadId is all zeros). `--binary=PATH` names such a PE image: frames of the library with
+PATH's file name that the sidecar cannot resolve take the nearest preceding text symbol of PATH's
+COFF symbol table, read with `nm` (`$NM` overrides the tool).
 
 Exits non-zero when no samples were read: an empty aggregation is a broken capture, not
 a quiet program.
@@ -21,6 +26,8 @@ import bisect
 import collections
 import gzip
 import json
+import os
+import subprocess
 import sys
 
 TOP_N = 30
@@ -62,7 +69,36 @@ def resolve(strings, libsyms, breakpad_id: str, addr: int):
     return strings[sym]
 
 
-def profile_counts(path: str, process: str) -> collections.Counter:
+def pe_image_base(path: str) -> int:
+    # PE: the `PE\0\0` signature at e_lfanew, then the optional header, whose ImageBase is 8 bytes at
+    # offset 24 (PE32+) or 4 bytes at offset 28 (PE32).
+    with open(path, "rb") as f:
+        head = f.read(4096)
+    off = int.from_bytes(head[0x3C:0x40], "little")
+    if head[:2] != b"MZ" or head[off:off + 4] != b"PE\0\0":
+        raise SystemExit(f"error: {path} is not a PE image")
+    opt = off + 24
+    if int.from_bytes(head[opt:opt + 2], "little") == 0x20B:
+        return int.from_bytes(head[opt + 24:opt + 32], "little")
+    return int.from_bytes(head[opt + 28:opt + 32], "little")
+
+
+def binary_syms(path: str):
+    # The image's text symbols by RVA (profile addresses are relative to the image base).
+    base = pe_image_base(path)
+    out = subprocess.run(
+        [os.environ.get("NM", "nm"), "--defined-only", "-n", path], capture_output=True, text=True, check=True
+    ).stdout
+    tab = []
+    for line in out.splitlines():
+        part = line.split(None, 2)
+        if len(part) == 3 and part[1] in ("T", "t"):
+            tab.append((int(part[0], 16) - base, part[2]))
+    tab.sort()
+    return [r for r, _ in tab], [n for _, n in tab]
+
+
+def profile_counts(path: str, process: str, binsyms) -> collections.Counter:
     with gzip.open(path) as f:
         prof = json.load(f)
     strings, libsyms = load_sidecar(path)
@@ -80,10 +116,17 @@ def profile_counts(path: str, process: str) -> collections.Counter:
             addr, func = ft["address"][frame], ft["func"][frame]
             res = fn["resource"][func]
             name = tstr[fn["name"][func]]
-            if libsyms is not None and res >= 0 and addr is not None and addr >= 0:
+            if res >= 0 and addr is not None and addr >= 0:
                 lib_idx = rt["lib"][res]
                 if lib_idx is not None and lib_idx >= 0:
-                    sym = resolve(strings, libsyms, plibs[lib_idx]["breakpadId"], addr)
+                    sym = None
+                    if libsyms is not None:
+                        sym = resolve(strings, libsyms, plibs[lib_idx]["breakpadId"], addr)
+                    ent = binsyms.get(plibs[lib_idx]["name"])
+                    if sym is None and ent is not None:
+                        i = bisect.bisect_right(ent[0], addr) - 1
+                        if i >= 0:
+                            sym = ent[1][i]
                     if sym is not None:
                         name = sym
             counts[name] += 1
@@ -93,12 +136,21 @@ def profile_counts(path: str, process: str) -> collections.Counter:
 def main() -> int:
     paths = sys.argv[1:]
     process = ""
-    if paths and paths[0].startswith("--process="):
-        process = paths.pop(0)[len("--process="):]
+    binsyms = {}
+    while paths and paths[0].startswith("--"):
+        arg = paths.pop(0)
+        if arg.startswith("--process="):
+            process = arg[len("--process="):]
+        elif arg.startswith("--binary="):
+            exe = arg[len("--binary="):]
+            binsyms[os.path.basename(exe)] = binary_syms(exe)
+        else:
+            print(__doc__, file=sys.stderr)
+            return 2
     if not paths:
         print(__doc__, file=sys.stderr)
         return 2
-    per_run = [profile_counts(p, process) for p in paths]
+    per_run = [profile_counts(p, process, binsyms) for p in paths]
     total_samples = sum(sum(c.values()) for c in per_run)
     if total_samples == 0:
         print("error: zero samples across all profiles - capture is broken", file=sys.stderr)
