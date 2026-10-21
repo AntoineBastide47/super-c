@@ -3,7 +3,7 @@
 # the shard with the least time so far).
 #
 # Each lane runs exactly as the Release workflow tests it: the same runner, compiler build, shard count,
-# per-shard object cache and flags, with the shards split by the lane's current times (the
+# platform object cache (restored only) and flags, with the shards split by the lane's current times (the
 # `test-durations` artifact, .github/actions/test-durations; tests/durations.tsv until a lane has
 # them). Each shard records only the tests it ran (`--test-record-durations=<file>`) and passes them on
 # as an artifact of this run; the last job merges each lane's shards into its file, uploads them as the
@@ -45,7 +45,6 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: ${{ matrix.target }}
-          cache: objcache-${{ matrix.target }}-build
           sha: ${{ github.sha }}
 
       - uses: ./.github/actions/bootstrap
@@ -78,7 +77,6 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: wasm
-          cache: objcache-wasm-build
           sha: ${{ github.sha }}
 
       - uses: ./.github/actions/bootstrap
@@ -129,7 +127,6 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: ${{ matrix.target }}
-          cache: objcache-${{ matrix.target }}-${{ matrix.cache_shard }}
           sha: ${{ github.sha }}
 
       - uses: actions/download-artifact@v8

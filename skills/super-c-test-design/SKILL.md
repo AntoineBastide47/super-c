@@ -69,8 +69,9 @@ Rules for the costly rungs:
 
 ## Caches
 
-- The suite shares one cache base (`SC_CACHE_DIR`, set by `super-c test` to `<out-dir>/test/cache`,
-  deleted when the run ends). A new project of a name another test already built (`app`) compiles
+- The suite shares one cache base (`SC_CACHE_DIR`, set by `super-c test` to `SC_TEST_CACHE_DIR`, else
+  to `<out-dir>/test/cache`, deleted when the run ends). Give a fixture project a fixed name: a kept
+  base holds one root per project name. A new project of a name another test already built (`app`) compiles
   only its own units; script builds share `.scripts`.
 - A small program compiles as one unit (`__sc_unity.c`). A test that checks per-unit objects,
   staleness or the code of a call across units sets `SC_UNITY_MAX=0` (`cli::set_env`), and a test of

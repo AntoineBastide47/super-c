@@ -37,11 +37,13 @@ fn new_rejects_an_existing_directory() {
 @test
 fn init_scaffolds_in_place() {
     let p = cli::proj_new();
-    let root = p.dir();
-    let r = cli::superc_env_in(root, E, "1", "init");
+    // A directory of a fixed name: the project takes it, and with it its cache root.
+    p.mkfile("initapp/.keep", "");
+    let root = format("{}/initapp", p.dir());
+    let r = cli::superc_env_in(root.as_str(), E, "1", "init");
     assert(r.ok(), "init scaffolds the current directory");
     // The scaffolded project runs from its own root.
-    let run = cli::superc_env_in(root, E, "1", "run");
+    let run = cli::superc_env_in(root.as_str(), E, "1", "run");
     assert(run.ok(), "the initialized project runs");
     assert(run.out_has("Hello from"), "greeting printed");
 }

@@ -1,22 +1,29 @@
 name: Toolchain
 description: >
-  The C toolchain and object cache of one CI job: the global object cache (`~/.super-c/cache`) restored
-  under `cache`, the platform's C compiler (the preinstalled cc on Linux and macOS, mingw-w64 gcc on
-  Windows), for `target: wasm` the wasi-sdk and wasmtime, and with `llvm-mingw: true` on Windows the
-  llvm-mingw clang (`LLVM_MINGW`, its bin directory). Every cache is only restored here; a run on
-  main saves the installation caches after installing and the job's object cache in its last step
-  (`./.github/actions/cache-save`), so no other branch adds to the repository's cache and evicts main's
-  entries.
+  The C toolchain and object cache of one CI job: the platform's cache base (`~/.super-c/cache`: each
+  project's cache root, the script builds' `.scripts` and the tests' `.tests`, `SC_TEST_CACHE_DIR`), the
+  newest `objcache-<target>-<sha>`, with the job's own delta (`objdelta-<target>-<role>-<sha>`) over it
+  when it has a `role`; the platform's C compiler (the preinstalled cc on Linux and macOS, mingw-w64
+  gcc on Windows), for `target: wasm` the wasi-sdk and wasmtime, and with `llvm-mingw: true` on Windows
+  the llvm-mingw clang (`LLVM_MINGW`, its bin directory). Only a release run on main saves (`save:
+  true`): the installation caches here after installing, the object cache in the job's last step
+  (`./.github/actions/cache-save`), so no other workflow or branch adds to the repository's cache and
+  evicts the release's entries.
 inputs:
   target:
     description: "linux, macos, windows or wasm"
     required: true
-  cache:
-    description: "object cache key prefix of this job, e.g. objcache-linux-1 (the commit is appended)"
-    required: true
   sha:
     description: "the commit under test, the last part of the object cache key"
     required: true
+  role:
+    description: "a job outside the platform cache (gate, profiles, counts, checks): its own delta is restored too"
+    required: false
+    default: ""
+  save:
+    description: "true in the release workflow: the job saves the installation caches and its cache delta on main"
+    required: false
+    default: "false"
   cstd:
     description: "the C standard flags of the Windows leg (mingw hides POSIX prototypes under -std=c11)"
     required: false
@@ -28,17 +35,48 @@ inputs:
 runs:
   using: composite
   steps:
-    # Each job keeps its own object cache so parallel jobs can save all their compiled units; a job
-    # without a cache of its own starts from its platform's newest one.
+    # One cache per platform, which the release's `caches` job merges from its jobs' deltas.
     - name: Restore object cache
       uses: actions/cache/restore@v6
       with:
         path: ~/.super-c/cache
-        key: ${{ inputs.cache }}-${{ inputs.sha }}
-        restore-keys: |
-          ${{ inputs.cache }}-
-          objcache-${{ inputs.target }}-
-          objcache-linux-
+        key: objcache-${{ inputs.target }}-${{ inputs.sha }}
+        restore-keys: objcache-${{ inputs.target }}-
+
+    # What the job's cache delta is measured against (.github/actions/cache-save/delta.py): the platform
+    # cache, before the job's own delta goes over it.
+    - name: Snapshot the object cache
+      if: inputs.save == 'true' && github.ref == 'refs/heads/main'
+      shell: bash
+      run: |
+        py=$(command -v python3 || command -v python)
+        "$py" -I "$GITHUB_ACTION_PATH/../cache-save/delta.py" snapshot "$RUNNER_TEMP/sc-cache.lst"
+
+    - name: Restore the job's cache delta
+      id: delta
+      if: inputs.role != ''
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ runner.temp }}/sc-cache-delta.tar
+        key: objdelta-${{ inputs.target }}-${{ inputs.role }}-${{ inputs.sha }}
+        restore-keys: objdelta-${{ inputs.target }}-${{ inputs.role }}-
+
+    # Its files over the platform cache; the files it lists as deleted stay, the platform cache rules them.
+    - name: Apply the job's cache delta
+      if: inputs.role != '' && steps.delta.outputs.cache-matched-key != ''
+      shell: bash
+      run: |
+        py=$(command -v python3 || command -v python)
+        "$py" -I "$GITHUB_ACTION_PATH/../cache-save/delta.py" apply "$RUNNER_TEMP/sc-cache-delta.tar" --keep
+
+    # `super-c test` gives the compilers its tests start this cache base, inside the restored and saved
+    # cache, so the fixtures' objects carry over between runs (unset, a run deletes its own at its end).
+    - name: Keep the test cache
+      shell: bash
+      run: |
+        h=$HOME
+        if [ "$RUNNER_OS" = Windows ]; then h=$(cygpath -m "$HOME"); fi
+        echo "SC_TEST_CACHE_DIR=$h/.super-c/cache/.tests" >> "$GITHUB_ENV"
 
     - name: Restore Homebrew downloads (macOS)
       id: brew
@@ -61,8 +99,8 @@ runs:
           echo "CC=clang" >> "$GITHUB_ENV"
         fi
 
-    - name: Save Homebrew downloads (macOS, main)
-      if: runner.os == 'macOS' && github.ref == 'refs/heads/main' && steps.brew.outputs.cache-hit != 'true'
+    - name: Save Homebrew downloads (macOS, release on main)
+      if: runner.os == 'macOS' && inputs.save == 'true' && github.ref == 'refs/heads/main' && steps.brew.outputs.cache-hit != 'true'
       uses: actions/cache/save@v6
       with:
         path: |
@@ -121,8 +159,8 @@ runs:
         echo "BINEXT=.exe" >> "$GITHUB_ENV"
         echo "SC_CSTD=$CSTD" >> "$GITHUB_ENV"
 
-    - name: Save mingw-w64 install (Windows, main)
-      if: runner.os == 'Windows' && github.ref == 'refs/heads/main' && steps.mingw.outputs.cache-hit != 'true'
+    - name: Save mingw-w64 install (Windows, release on main)
+      if: runner.os == 'Windows' && inputs.save == 'true' && github.ref == 'refs/heads/main' && steps.mingw.outputs.cache-hit != 'true'
       uses: actions/cache/save@v6
       with:
         path: |
@@ -156,8 +194,8 @@ runs:
         fi
         echo "LLVM_MINGW=$(cygpath -m "$HOME/llvm-mingw/bin")" >> "$GITHUB_ENV"
 
-    - name: Save llvm-mingw (Windows, main)
-      if: runner.os == 'Windows' && inputs.llvm-mingw == 'true' && github.ref == 'refs/heads/main' && steps.llvm-mingw.outputs.cache-hit != 'true'
+    - name: Save llvm-mingw (Windows, release on main)
+      if: runner.os == 'Windows' && inputs.llvm-mingw == 'true' && inputs.save == 'true' && github.ref == 'refs/heads/main' && steps.llvm-mingw.outputs.cache-hit != 'true'
       uses: actions/cache/save@v6
       with:
         path: ~/llvm-mingw
@@ -196,8 +234,8 @@ runs:
         echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
         echo "WASI_SDK_PATH=$HOME/wasi-sdk" >> "$GITHUB_ENV"
 
-    - name: Save wasi toolchain (main)
-      if: inputs.target == 'wasm' && github.ref == 'refs/heads/main' && steps.wasi.outputs.cache-hit != 'true'
+    - name: Save wasi toolchain (release on main)
+      if: inputs.target == 'wasm' && inputs.save == 'true' && github.ref == 'refs/heads/main' && steps.wasi.outputs.cache-hit != 'true'
       uses: actions/cache/save@v6
       with:
         path: |

@@ -4,7 +4,7 @@
 # the job log), a verbose Linux run with a stuck-program watchdog, plus the release workflow's wasm leg
 # without its self-host fixpoint (the release workflow keeps it).
 # Each platform builds its compiler once (`*-compile`) and runs its test shards in parallel on it (three
-# on Windows, the slowest runner, two elsewhere). Only a run on main saves caches (`cache-save`).
+# on Windows, the slowest runner, two elsewhere). It restores the release workflow's caches and saves none.
 name: Debug
 on:
   workflow_dispatch
@@ -27,7 +27,6 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: windows
-          cache: objcache-windows-build
           sha: ${{ github.sha }}
           cstd: -std=gnu11 -D_POSIX_C_SOURCE=200809L -g1
 
@@ -50,11 +49,6 @@ jobs:
           path: super-c.exe
           if-no-files-found: error
           retention-days: 1
-
-      - uses: ./.github/actions/cache-save
-        with:
-          cache: objcache-windows-build
-          sha: ${{ github.sha }}
 
   windows:
     needs: windows-compile
@@ -79,7 +73,6 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: windows
-          cache: objcache-windows-${{ matrix.cache_shard }}
           sha: ${{ github.sha }}
           cstd: -std=gnu11 -D_POSIX_C_SOURCE=200809L -g1
 
@@ -114,11 +107,6 @@ jobs:
           dur=tests/durations/windows.tsv; [ -f "$dur" ] || dur=tests/durations.tsv # shard balance (test-durations.yml)
           SC_LEAK_CHECK=fatal timeout 1200 "./super-c${BINEXT:-}" test --sanitizers --test-shard=${{ matrix.test_shard }} --test-durations="$dur" ${cstd:+"$cstd"}
 
-      - uses: ./.github/actions/cache-save
-        with:
-          cache: objcache-windows-${{ matrix.cache_shard }}
-          sha: ${{ github.sha }}
-
   linux-compile:
     name: linux compile
     runs-on: ubuntu-latest
@@ -128,7 +116,6 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: linux
-          cache: objcache-linux-build
           sha: ${{ github.sha }}
 
       - uses: ./.github/actions/bootstrap
@@ -144,11 +131,6 @@ jobs:
           path: super-c
           if-no-files-found: error
           retention-days: 1
-
-      - uses: ./.github/actions/cache-save
-        with:
-          cache: objcache-linux-build
-          sha: ${{ github.sha }}
 
   # Linux, verbose, with a watchdog: a compiled test program alive for over a minute is named (its
   # project's main.spc and every thread's kernel wait channel) and killed so the run finishes.
@@ -173,7 +155,6 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: linux
-          cache: objcache-linux-${{ matrix.cache_shard }}
           sha: ${{ github.sha }}
 
       - uses: actions/download-artifact@v8
@@ -220,11 +201,6 @@ jobs:
           kill "$wd" 2>/dev/null || true
           exit "$rc"
 
-      - uses: ./.github/actions/cache-save
-        with:
-          cache: objcache-linux-${{ matrix.cache_shard }}
-          sha: ${{ github.sha }}
-
   wasm-compile:
     name: wasm compile
     runs-on: ubuntu-latest
@@ -234,7 +210,6 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: wasm
-          cache: objcache-wasm-build
           sha: ${{ github.sha }}
 
       - uses: ./.github/actions/bootstrap
@@ -272,11 +247,6 @@ jobs:
           path: super-c-wasm32-wasip1.tar.gz
           if-no-files-found: error
 
-      - uses: ./.github/actions/cache-save
-        with:
-          cache: objcache-wasm-build
-          sha: ${{ github.sha }}
-
   wasm:
     needs: wasm-compile
     name: wasm (tests ${{ matrix.test_shard }})
@@ -295,7 +265,6 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: wasm
-          cache: objcache-wasm-${{ matrix.cache_shard }}
           sha: ${{ github.sha }}
 
       - uses: actions/download-artifact@v8
@@ -309,8 +278,3 @@ jobs:
           chmod +x ./super-c
           dur=tests/durations/wasm.tsv; [ -f "$dur" ] || dur=tests/durations.tsv # shard balance (test-durations.yml)
           SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --sanitizers --test-shard=${{ matrix.test_shard }} --test-durations="$dur"
-
-      - uses: ./.github/actions/cache-save
-        with:
-          cache: objcache-wasm-${{ matrix.cache_shard }}
-          sha: ${{ github.sha }}

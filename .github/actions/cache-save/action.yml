@@ -1,21 +1,50 @@
 name: Save object cache
 description: >
-  The last step of a CI job that keeps an object cache: saves the job's global object cache
-  (`~/.super-c/cache`) under the key the toolchain action restored (`<cache>-<sha>`), on main only. A run
-  on another branch saves nothing, so it cannot evict main's entries from the repository's cache.
+  The last step of a release job that keeps its object cache, on main only: the files the job added to or
+  changed in the cache base (`~/.super-c/cache`) since the toolchain action restored its platform's
+  cache, and the list of the files it deleted (`delta.py`, against the toolchain action's snapshot). A
+  job of the platform cache (`part`: compile, the test shards, package) uploads them as the
+  `objcache-part-<target>-<part>` artifact, which the release's `caches` job merges into the platform's
+  one cache, `objcache-<target>-<sha>`; another job (`role`) saves them as its own cache,
+  `objdelta-<target>-<role>-<sha>`, which the toolchain action restores over the platform cache. The
+  job's toolchain action has `save: true`.
 inputs:
-  cache:
-    description: "the object cache key prefix the job passed to the toolchain action"
+  target:
+    description: "linux, macos, windows or wasm"
     required: true
   sha:
-    description: "the commit under test, the last part of the object cache key"
+    description: "the commit under test, the last part of the cache key"
     required: true
+  part:
+    description: "a job of the platform cache: its part name, in merge order (1-build, 2-test-<k>, 3-release)"
+    required: false
+    default: ""
+  role:
+    description: "a job outside the platform cache: its role, as given to the toolchain action"
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
-    - name: Save object cache (main)
+    - name: Pack the cache delta (main)
       if: github.ref == 'refs/heads/main'
+      shell: bash
+      run: |
+        py=$(command -v python3 || command -v python)
+        "$py" -I "$GITHUB_ACTION_PATH/delta.py" pack "$RUNNER_TEMP/sc-cache.lst" "$RUNNER_TEMP/sc-cache-delta.tar"
+
+    - name: Upload the cache delta (main)
+      if: github.ref == 'refs/heads/main' && inputs.part != ''
+      uses: actions/upload-artifact@v7
+      with:
+        name: objcache-part-${{ inputs.target }}-${{ inputs.part }}
+        path: ${{ runner.temp }}/sc-cache-delta.tar
+        if-no-files-found: error
+        retention-days: 1
+
+    - name: Save the cache delta (main)
+      if: github.ref == 'refs/heads/main' && inputs.role != ''
       uses: actions/cache/save@v6
       with:
-        path: ~/.super-c/cache
-        key: ${{ inputs.cache }}-${{ inputs.sha }}
+        path: ${{ runner.temp }}/sc-cache-delta.tar
+        key: objdelta-${{ inputs.target }}-${{ inputs.role }}-${{ inputs.sha }}

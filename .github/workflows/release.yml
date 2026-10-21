@@ -67,8 +67,13 @@ jobs:
   #             +--> gate profiles -------------+                                   |
   #             +--> counts --> transpile counts --> counts approval (when held) ---+
   #
-  # Only a run on main saves caches (the toolchain action restores, `cache-save` saves last), so no
-  # other branch evicts main's entries from the repository's cache.
+  # Caches: only this workflow on main saves (the toolchain action restores, `cache-save` saves last), so
+  # no other workflow or branch evicts these entries from the repository's cache. Each platform keeps one
+  # object cache, `objcache-<target>-<sha>`, which `caches` merges at the end of the run from the deltas
+  # its compile, test and package jobs upload; gate, gate profiles, counts and the wasm checks keep only
+  # their own deltas (`objdelta-<target>-<role>-<sha>`). The installation caches (Homebrew, mingw-w64,
+  # llvm-mingw, wasi) are restored every run, so the least recently used entries GitHub evicts past its
+  # limit are the superseded caches of older commits.
   #
   # Jobs share no files: `compile` uploads the compiler it built, and every later job downloads it (an
   # artifact keeps no file modes, hence the chmod).
@@ -101,7 +106,7 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: ${{ matrix.target }}
-          cache: objcache-${{ matrix.target }}-build
+          save: true
           sha: ${{ needs.resolve.outputs.sha }}
 
       - name: Clean release outputs
@@ -132,7 +137,8 @@ jobs:
 
       - uses: ./.github/actions/cache-save
         with:
-          cache: objcache-${{ matrix.target }}-build
+          target: ${{ matrix.target }}
+          part: 1-build
           sha: ${{ needs.resolve.outputs.sha }}
 
   test:
@@ -183,7 +189,7 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: ${{ matrix.target }}
-          cache: objcache-${{ matrix.target }}-${{ matrix.cache_shard }}
+          save: true
           sha: ${{ needs.resolve.outputs.sha }}
 
       - uses: actions/download-artifact@v8
@@ -217,13 +223,14 @@ jobs:
 
       - uses: ./.github/actions/cache-save
         with:
-          cache: objcache-${{ matrix.target }}-${{ matrix.cache_shard }}
+          target: ${{ matrix.target }}
+          part: 2-test-${{ matrix.cache_shard }}
           sha: ${{ needs.resolve.outputs.sha }}
 
   # The x86-64 levels beside the shards: every vector test at each level, each entry model run checking
-  # the entries the baseline run does not reach, and at x86-64-v4 both preferred widths where the
-  # runner has AVX-512. The shard cache serves the compiler's rebuild; a level's -march keys its own
-  # compiles apart, so the job saves no cache.
+  # the entries the baseline run does not reach. No job runs x86-64-v4: a hosted runner's CPU is not
+  # selectable, so AVX-512 is not certain. The platform cache serves the compiler's rebuild; a level's
+  # -march keys its own compiles apart, so the job saves no cache.
   levels:
     needs: [resolve, compile]
     if: github.actor == github.repository_owner
@@ -238,9 +245,6 @@ jobs:
           - os: ubuntu-latest
             target: linux
             level: x86-64-v3
-          - os: ubuntu-latest
-            target: linux
-            level: x86-64-v4
           - os: windows-latest
             target: windows
             level: x86-64-v2
@@ -259,7 +263,6 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: ${{ matrix.target }}
-          cache: objcache-${{ matrix.target }}-1
           sha: ${{ needs.resolve.outputs.sha }}
 
       - uses: actions/download-artifact@v8
@@ -274,15 +277,7 @@ jobs:
           bin="super-c${BINEXT:-}"
           chmod +x "./$bin"
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          if [ "$SC_SIMD_FEATURES" != x86-64-v4 ]; then
-            SC_LEAK_CHECK=fatal "./$bin" test --sanitizers --quiet --test-timeout=900 --filter=simd_ ${cstd:+"$cstd"}
-          elif grep -qw avx512bw /proc/cpuinfo; then
-            for w in 256 512; do
-              SC_SIMD_WIDTH=$w SC_LEAK_CHECK=fatal "./$bin" test --sanitizers --quiet --test-timeout=900 --filter=simd_ ${cstd:+"$cstd"}
-            done
-          else
-            echo "x86-64-v4: not run, the runner has no AVX-512"
-          fi
+          SC_LEAK_CHECK=fatal "./$bin" test --sanitizers --quiet --test-timeout=900 --filter=simd_ ${cstd:+"$cstd"}
 
   # The correctness gate beside the shards: it needs only the compiler, not their results.
   gate:
@@ -311,7 +306,8 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: ${{ matrix.target }}
-          cache: objcache-${{ matrix.target }}-gate
+          role: gate
+          save: true
           sha: ${{ needs.resolve.outputs.sha }}
 
       - uses: actions/download-artifact@v8
@@ -328,7 +324,8 @@ jobs:
 
       - uses: ./.github/actions/cache-save
         with:
-          cache: objcache-${{ matrix.target }}-gate
+          target: ${{ matrix.target }}
+          role: gate
           sha: ${{ needs.resolve.outputs.sha }}
 
   # Every built-in profile but test builds the compiler (ci/gate.sh's last step), beside the gate: the
@@ -360,7 +357,8 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: ${{ matrix.target }}
-          cache: objcache-${{ matrix.target }}-profiles
+          role: profiles
+          save: true
           sha: ${{ needs.resolve.outputs.sha }}
 
       - uses: actions/download-artifact@v8
@@ -374,7 +372,8 @@ jobs:
 
       - uses: ./.github/actions/cache-save
         with:
-          cache: objcache-${{ matrix.target }}-profiles
+          target: ${{ matrix.target }}
+          role: profiles
           sha: ${{ needs.resolve.outputs.sha }}
 
   # The transpile work count beside the shards (.github/actions/transpile-counts): this commit's compiler
@@ -406,7 +405,8 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: ${{ matrix.target }}
-          cache: objcache-${{ matrix.target }}-counts
+          role: counts
+          save: true
           sha: ${{ needs.resolve.outputs.sha }}
           llvm-mingw: ${{ matrix.target == 'windows' }}
 
@@ -428,7 +428,8 @@ jobs:
 
       - uses: ./.github/actions/cache-save
         with:
-          cache: objcache-${{ matrix.target }}-counts
+          target: ${{ matrix.target }}
+          role: counts
           sha: ${{ needs.resolve.outputs.sha }}
 
   # Every platform's table in one summary; the counts replace the repository's one `transpile-counts`
@@ -492,7 +493,7 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: ${{ matrix.target }}
-          cache: objcache-${{ matrix.target }}-release
+          save: true
           sha: ${{ needs.resolve.outputs.sha }}
 
       - uses: actions/download-artifact@v8
@@ -547,7 +548,8 @@ jobs:
 
       - uses: ./.github/actions/cache-save
         with:
-          cache: objcache-${{ matrix.target }}-release
+          target: ${{ matrix.target }}
+          part: 3-release
           sha: ${{ needs.resolve.outputs.sha }}
 
   # --- wasm ------------------------------------------------------------------------------------------
@@ -569,7 +571,7 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: wasm
-          cache: objcache-wasm-build
+          save: true
           sha: ${{ needs.resolve.outputs.sha }}
 
       - uses: ./.github/actions/bootstrap
@@ -594,7 +596,8 @@ jobs:
 
       - uses: ./.github/actions/cache-save
         with:
-          cache: objcache-wasm-build
+          target: wasm
+          part: 1-build
           sha: ${{ needs.resolve.outputs.sha }}
 
   # The wasm compiler's own checks, beside its test shards: they need only the two compilers.
@@ -611,7 +614,8 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: wasm
-          cache: objcache-wasm-checks
+          role: checks
+          save: true
           sha: ${{ needs.resolve.outputs.sha }}
 
       - uses: actions/download-artifact@v8
@@ -656,7 +660,8 @@ jobs:
 
       - uses: ./.github/actions/cache-save
         with:
-          cache: objcache-wasm-checks
+          target: wasm
+          role: checks
           sha: ${{ needs.resolve.outputs.sha }}
 
   wasm-test:
@@ -680,7 +685,7 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: wasm
-          cache: objcache-wasm-${{ matrix.cache_shard }}
+          save: true
           sha: ${{ needs.resolve.outputs.sha }}
 
       - uses: actions/download-artifact@v8
@@ -706,7 +711,8 @@ jobs:
 
       - uses: ./.github/actions/cache-save
         with:
-          cache: objcache-wasm-${{ matrix.cache_shard }}
+          target: wasm
+          part: 2-test-${{ matrix.cache_shard }}
           sha: ${{ needs.resolve.outputs.sha }}
 
   # The test times every shard above recorded replace the repository's `test-durations` artifact, which
@@ -724,6 +730,72 @@ jobs:
       - uses: ./.github/actions/test-durations-save
         with:
           shards: macos=2 linux=2 windows=3 wasm=2
+
+  # Each platform's one object cache: its newest cache, then each delta its compile, test and package
+  # jobs uploaded (.github/actions/cache-save), in part order: their added and changed files over it,
+  # and the files they deleted gone. A cache restores only on the OS that saved it, hence each
+  # platform's runner. Main only, and also when a job failed: the deltas of the jobs that passed count.
+  caches:
+    needs: [resolve, compile, test, package, wasm-compile, wasm-test]
+    if: >-
+      always() && github.actor == github.repository_owner && github.ref == 'refs/heads/main' &&
+      needs.resolve.result == 'success'
+    name: caches (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: macos
+          - os: ubuntu-latest
+            target: linux
+          - os: windows-latest
+            target: windows
+          - os: ubuntu-latest
+            target: wasm
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          sparse-checkout: .github/actions/cache-save
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: objcache-part-${{ matrix.target }}-*
+          path: parts
+
+      - name: Find the deltas
+        id: parts
+        run: |
+          if ls parts/*/sc-cache-delta.tar >/dev/null 2>&1; then echo "any=true" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Restore the platform cache
+        if: steps.parts.outputs.any == 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.super-c/cache
+          key: objcache-${{ matrix.target }}-${{ needs.resolve.outputs.sha }}
+          restore-keys: objcache-${{ matrix.target }}-
+
+      - name: Merge the deltas
+        if: steps.parts.outputs.any == 'true'
+        run: |
+          set -eu
+          py=$(command -v python3 || command -v python)
+          for d in $(ls -d parts/*/ | sort); do
+            "$py" -I .github/actions/cache-save/delta.py apply "${d}sc-cache-delta.tar"
+          done
+
+      - name: Save the platform cache
+        if: steps.parts.outputs.any == 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.super-c/cache
+          key: objcache-${{ matrix.target }}-${{ needs.resolve.outputs.sha }}
 
   # The wasm compiler ships only after both shards and its checks passed with it.
   wasm-package:

@@ -38,7 +38,6 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: ${{ matrix.target }}
-          cache: objcache-${{ matrix.target }}-build
           sha: ${{ github.sha }}
 
       - uses: ./.github/actions/bootstrap
@@ -77,8 +76,3 @@ jobs:
           name: simd-baseline-${{ matrix.target }}
           path: bench/simd_baseline/*.tsv
           if-no-files-found: error
-
-      - uses: ./.github/actions/cache-save
-        with:
-          cache: objcache-${{ matrix.target }}-build
-          sha: ${{ github.sha }}

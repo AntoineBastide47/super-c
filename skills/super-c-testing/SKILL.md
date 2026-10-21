@@ -219,9 +219,11 @@ tests of those files. Override the runner's flags with a
 and exits 2 on any other argument. A runner started without an inherited `SC_JOBSERVER` makes its own
 of `--jobs` slots, as `super-c test` does, so its tests and the compilers they start share one budget. Every compiler the CLI harnesses
 (`tests/cli_harness.spc`, `tests/harness.spc`) run shares one cache base: `super-c test` exports
-`<out-dir>/test/cache` as `SC_CACHE_DIR`, so a unit an earlier build of the run compiled is not
-compiled again, and deletes it when the run ends (and at its start, what an interrupted run left);
-the runner itself builds in the project's own cache root. A test that checks cache behavior sets its
+`SC_TEST_CACHE_DIR` (kept across runs; CI sets `~/.super-c/cache/.tests`, inside the cache it saves),
+else `<out-dir>/test/cache`, as `SC_CACHE_DIR`, so a unit an earlier build compiled is not compiled
+again; the second it deletes when the run ends (and at its start, what an interrupted run left). The
+runner itself builds in the project's own cache root. A fixture project takes a fixed name (`app`,
+`initapp`), so a kept base holds one root per name, not one per run. A test that checks cache behavior sets its
 own `SC_CACHE_DIR` under its scratch directory, and so does every test that runs `clean --full`,
 which removes the project's cache root.
 
@@ -248,10 +250,15 @@ test and the runner build with ASan and UBSan there (no-op on Windows), while a 
 without them for speed. In the release workflow (macOS, Linux and Windows in one matrix)
 the correctness gate (`ci/gate.sh --core`), its profile builds (`gate-profiles`,
 `ci/gate.sh --profiles`) and the x86-64 levels run beside the shards, and the release binary is
-built after all of them pass. Only a run on main saves caches: the toolchain action restores every
-cache, saves its installation caches on main, and each job's last step (`.github/actions/cache-save`)
-saves its global object cache (`~/.super-c/cache`) on main, so a probe branch cannot evict main's
-entries. The toolchain and bootstrap steps live in `.github/actions/`. An
+built after all of them pass. Only the release workflow on main saves caches (the toolchain action's
+`save: true`), so no other workflow or branch evicts its entries. Each platform keeps one object
+cache, `objcache-<target>-<sha>` (the cache base `~/.super-c/cache`, the tests' `.tests` included):
+the compile, test and package jobs upload the files they added or changed and the list of those they
+deleted (`.github/actions/cache-save/delta.py`), and the `caches` job merges them over the platform's
+newest cache at the end of the run. Gate, gate profiles, counts and the wasm checks save only their
+own delta (`objdelta-<target>-<role>-<sha>`), which the toolchain action restores over the platform
+cache. The installation caches are restored every run, so GitHub's eviction past its limit takes the
+superseded caches of older commits first. The toolchain and bootstrap steps live in `.github/actions/`. An
 emit-only probe does not help there: emission without `--test` drops `@test` bodies, so
 instrument the test file and rebuild the suite.
 

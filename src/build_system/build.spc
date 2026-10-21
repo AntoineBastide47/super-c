@@ -4290,16 +4290,26 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
     if o.durations == null {
         o.durations = durp.cstr();
     }
-    // Every compiler a test runs shares one cache base, `<out-dir>/test/cache`, so a unit an earlier
-    // build of the run compiled is not compiled again; the run deletes it at its end, and at its start
-    // what an interrupted run left. Absolute: tests change directory.
-    let tcache = loader::join2(tdir_out.as_str(), "cache");
-    rm_rf(tcache.as_str());
+    // Every compiler a test runs shares one cache base, so a unit an earlier build compiled is not
+    // compiled again: `SC_TEST_CACHE_DIR`, kept across runs (CI saves it), else `<out-dir>/test/cache`,
+    // which the run deletes at its end, and at its start what an interrupted run left. Absolute: tests
+    // change directory.
+    let kept = stdlib::get_env("SC_TEST_CACHE_DIR").unwrap_or(String::new());
+    let tcache = if kept.len() != 0 {
+        kept.clone();
+    } else {
+        loader::join2(tdir_out.as_str(), "cache");
+    };
+    if kept.len() == 0 {
+        rm_rf(tcache.as_str());
+    }
     mkdir_p(tcache.as_str());
     let mut ac = real_path(tcache.as_str());
     unsafe shim::sc_setenv("SC_CACHE_DIR".ptr() as *const char, ac.cstr());
     let trc = test_run_runner(&o, tbin.as_str());
-    rm_rf(tcache.as_str());
+    if kept.len() == 0 {
+        rm_rf(tcache.as_str());
+    }
     return trc;
 }
 
