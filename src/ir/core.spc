@@ -580,11 +580,15 @@ pub const SI_BINARY: u32 = 1; // RV_BINARY, c = the operator token
 pub const SI_UNARY: u32 = 2; // RV_UNARY, b = the operator token
 pub const SI_CAST: u32 = 3; // RV_CAST, c = the cast kind
 pub const SI_SIMD: u32 = 4; // RV_SIMD, c = the code
+pub const SI_HINT: u32 = 5; // RV_INTRINSIC, c = IN_LIKELY or IN_UNLIKELY
 
 /// The lowering of `@intrinsic("<name>")`: SI_* << 8 | c, or 0 for an unknown name.
 pub fn simd_intrinsic(name: str) u32 {
     if name == "float.to_int_unchecked" {
         return SI_CAST << 8 | CAST_UNCHECKED as u32;
+    }
+    if name == "hint.likely" || name == "hint.unlikely" {
+        return SI_HINT << 8 | pick(name == "hint.likely", IN_LIKELY, IN_UNLIKELY) as u32;
     }
     if !name.starts_with("simd.") {
         return 0;
@@ -804,11 +808,13 @@ pub const IN_SAFEPOINT_C: u8 = 20;
 /// to it here, so the chunk's backedges run without a tick. Where no tick prints, `lim` is `end`.
 pub const IN_CHUNK: u8 = 21;
 /// IN_LIKELY(cond): returns the bool `cond` unchanged; the C emitter tells the C compiler that it
-/// is usually true (the success test of `?`, whose failure path returns early).
+/// is usually true (the success test of `?`, whose failure path returns early, and `likely`).
 pub const IN_LIKELY: u8 = 22;
 /// IN_BOUNDS_GROUP with a BCE proof that the panic edge is unreachable (a vector access's group
 /// check in a strided loop): the C emitter prints only the index; the interpreter still checks.
 pub const IN_BOUNDS_GROUP_PROVEN: u8 = 23;
+/// IN_UNLIKELY(cond): IN_LIKELY's twin for a condition that is usually false (`unlikely`).
+pub const IN_UNLIKELY: u8 = 24;
 
 /// True for the six safe-access check intrinsics.
 pub const fn is_check(c: u8) bool {

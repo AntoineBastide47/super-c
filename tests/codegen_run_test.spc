@@ -277,6 +277,20 @@ fn control_flow(b: &mut h::ExitBatch) {
         "fn main() i32 { let mut n: i32 = 0; do { n = n + 7; } while false; unsafe exit(n); }\n",
         7,
     );
+    // A loop over a `static mut` steps it in the body: a `for` header cannot spell the static.
+    exit_case(
+        b,
+        "while over a static",
+        "static mut N: i32 = 0;\nfn more() bool { return true; }\nfn drain() { while unsafe N > 1 { if !more() { return; } unsafe N -= 1; } unsafe N = 0; }\nfn main() i32 { unsafe N = 5; drain(); unsafe exit(unsafe N + 3); }\n",
+        3,
+    );
+    // An exit from a range loop inside `loop` reads the index after the C loops close.
+    exit_case(
+        b,
+        "range index read past an infinite loop",
+        "fn find(xs: []i32, n: i32) i32 { let mut k: i32 = 0; loop { k += 1; if k > 100 { return -1; } for i in 0..n { if k == xs[i as usize] { return i; } } } }\nfn main() i32 { unsafe exit(find([9, 4, 7], 3)); }\n",
+        1,
+    );
 }
 
 fn float_constants_exact(b: &mut h::ExitBatch) {
@@ -2733,6 +2747,68 @@ fn main() i32 { let b = i64::m(); return (A + B + b) as i32; }
     );
 }
 
+// An omitted field of a C object type with a layout and of a union zero-fills, in a static, a
+// thread-local, a nested literal, a local and a `zeroed` static: C's static initialization.
+fn omitted_c_object_and_union_fields_zero_fill(b: &mut h::ExitBatch) {
+    b.add(
+        "zero C object",
+        M"(extern "C" "pthread.h" {
+    @layout(sizeof(usize), sizeof(usize))
+    type pthread_t;
+}
+union U { pub a: u64, pub b: f64 }
+struct P { pub t: pthread_t, pub u: U, pub ready: i32 }
+struct Q { pub p: P, pub n: i32 }
+static mut G: P = P { ready: 2 };
+static mut B: Q = Q { n: 1 };
+@thread_local
+static mut T: P = P { ready: 3 };
+static mut Z: pthread_t = unsafe zeroed::<pthread_t>();
+const R: i32 = P { ready: 5 }.ready;
+fn main() i32 {
+    let l = P { ready: 4 };
+    let w = (unsafe &Z) as *const usize;
+    let s = unsafe (G.ready + B.n + B.p.ready + T.ready + G.u.a as i32 + B.p.u.a as i32 + *w as i32);
+    return s + l.ready + l.u.a as i32 + R - 15;
+}
+)",
+        0,
+    );
+}
+
+// The address of a zero-length array field is its offset inside the value, as a flexible array
+// member's: not the zero-size sentinel.
+fn zero_length_field_address_is_its_offset(b: &mut h::ExitBatch) {
+    b.add(
+        "&s.tail",
+        M"(struct H { pub n: u32, pub tail: [u8; 0] }
+fn main() i32 {
+    let mut buf: [u32; 4] = [0u32; 4];
+    let h = &mut buf[0] as *mut u32 as *mut H;
+    let q = (unsafe &(*h).tail) as *const u8;
+    return (q as usize - h as usize) as i32 - 4;
+}
+)",
+        0,
+    );
+}
+
+// A tuple binding of an `unsafe` multi-value call, also in parentheses: the binding reads through the
+// `unsafe` to the call's results, and an owned result moves into its binding without a leak.
+fn multi_value_unsafe_call_binds(b: &mut h::ExitBatch) {
+    b.add(
+        "let (a, b) = unsafe f();",
+        M"(unsafe fn two(x: i32) (String, i32) { let mut s = String::new(); s.push_str("ab"); return s, x + 1; }
+fn main() i32 {
+    let (s, n) = unsafe two(3);
+    let (t, m) = (unsafe two(5));
+    return (s.len() + t.len()) as i32 + n + m - 14;
+}
+)",
+        0,
+    );
+}
+
 // `return pair();` forwards a multi-value call's results as the return list: owned results move
 // through without a leak, in a generic function and in a constant evaluation.
 @test
@@ -4887,5 +4963,8 @@ fn exit_cases_08() {
     dyn_drop_double_deref_and_assoc_arguments(&mut b);
     box_deref_mut_places(&mut b);
     va_arg_reads_promoted_types(&mut b);
+    omitted_c_object_and_union_fields_zero_fill(&mut b);
+    zero_length_field_address_is_its_offset(&mut b);
+    multi_value_unsafe_call_binds(&mut b);
     b.run();
 }

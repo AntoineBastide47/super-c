@@ -960,6 +960,6 @@ pub struct SimdEntry {
     pub fs: CpuFeatureSet,
     pub module: u16,
     pub node: u32,
-    /// The entry calls a `@c.lane_access` binding: a build under a memory checker never plans it.
+    /// The entry calls a `@lane_access` binding: a build under a memory checker never plans it.
     pub lanes: bool,
 }

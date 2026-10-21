@@ -309,7 +309,7 @@ struct AttrDoc {
     pub doc: str<'static>,
 }
 
-const ATTR_DOCS: [AttrDoc; 34] = [
+const ATTR_DOCS: [AttrDoc; 37] = [
     AttrDoc {
         name: "emit_macro",
         sig: "@emit_macro",
@@ -357,6 +357,11 @@ const ATTR_DOCS: [AttrDoc; 34] = [
         sig: "@arch(A)",
         doc: "Keeps the item only for the instruction sets `A` names: `x86_64`, `aarch64`, `wasm32`.",
     },
+    AttrDoc {
+        name: "when",
+        sig: "@when(C)",
+        doc: "Keeps the item only where build condition `C` holds: `TEST`, `THREAD_SANITIZER`, `ADDRESS_SANITIZER`, `LOCKDEP`, `OVERFLOW_CHECKS` with `!`, `&&`, `||`.",
+    },
     AttrDoc { name: "fmt.skip", sig: "@fmt.skip", doc: "The formatter keeps the item as written." },
     AttrDoc {
         name: "unsafe",
@@ -383,49 +388,59 @@ const ATTR_DOCS: [AttrDoc; 34] = [
         sig: "@tail_recurse",
         doc: "Every call of the function to itself must be a tail call that becomes a jump; one that cannot is an error.",
     },
-    AttrDoc { name: "c.inline", sig: "@c.inline", doc: "Asks the C compiler to inline the function." },
-    AttrDoc { name: "c.always_inline", sig: "@c.always_inline", doc: "Forces the C compiler to inline the function." },
-    AttrDoc { name: "c.noinline", sig: "@c.noinline", doc: "Prevents the C compiler from inlining the function." },
-    AttrDoc { name: "c.cold", sig: "@c.cold", doc: "Tells the C compiler that calls to the function are rare." },
-    AttrDoc { name: "c.noreturn", sig: "@c.noreturn", doc: "The function never returns." },
-    AttrDoc { name: "c.packed", sig: "@c.packed", doc: "Removes the padding between the fields of the struct." },
-    AttrDoc { name: "c.used", sig: "@c.used", doc: "Prevents dead-code elimination of the item." },
-    AttrDoc { name: "c.unused", sig: "@c.unused", doc: "Suppresses unused warnings for the item." },
     AttrDoc {
-        name: "c.align",
-        sig: "@c.align(N)",
+        name: "thread_local",
+        sig: "@thread_local",
+        doc: "Gives the `static mut` one object per OS thread, each starting from the initializer.",
+    },
+    AttrDoc { name: "inline", sig: "@inline", doc: "Asks the compiler to inline the function." },
+    AttrDoc { name: "always_inline", sig: "@always_inline", doc: "Forces the compiler to inline the function." },
+    AttrDoc { name: "noinline", sig: "@noinline", doc: "Prevents the compiler from inlining the function." },
+    AttrDoc { name: "cold", sig: "@cold", doc: "Tells the compiler that calls to the function are rare." },
+    AttrDoc { name: "noreturn", sig: "@noreturn", doc: "The function never returns." },
+    AttrDoc { name: "packed", sig: "@packed", doc: "Removes the padding between the fields of the struct." },
+    AttrDoc { name: "used", sig: "@used", doc: "Prevents dead-code elimination of the item." },
+    AttrDoc { name: "unused", sig: "@unused", doc: "Suppresses unused warnings for the item." },
+    AttrDoc {
+        name: "align",
+        sig: "@align(N)",
         doc: "Sets the alignment: a power of two from 1 to 2^28. `N` is a constant expression of type `u32`.",
     },
-    AttrDoc { name: "c.export", sig: "@c.export(\"sym\")", doc: "Gives the item exactly this C symbol name." },
-    AttrDoc { name: "c.import", sig: "@c.import(\"sym\")", doc: "Binds the item to exactly this C symbol name." },
+    AttrDoc { name: "export", sig: "@export(\"sym\")", doc: "Gives the item exactly this C symbol name." },
+    AttrDoc { name: "import", sig: "@import(\"sym\")", doc: "Binds the item to exactly this C symbol name." },
     AttrDoc {
         name: "c.source",
         sig: "@c.source(\"file.c\")",
         doc: "The C file that implements the extern block, relative to this file.",
     },
     AttrDoc {
-        name: "c.link",
-        sig: "@c.link(\"lib\")",
+        name: "link",
+        sig: "@link(\"lib\")",
         doc: "Links the extern block's library: `-l<lib>`, or the value as written when it starts with `-`.",
     },
     AttrDoc {
-        name: "c.value",
-        sig: "@c.value(size, align)",
+        name: "value",
+        sig: "@value(size, align)",
         doc: "The opaque extern type is a C register type of this size and alignment.",
     },
     AttrDoc {
-        name: "c.reads",
-        sig: "@c.reads(p, bytes)",
+        name: "layout",
+        sig: "@layout(size, align)",
+        doc: "The opaque extern type is a C value of this size and alignment, which the compiler checks against the header.",
+    },
+    AttrDoc {
+        name: "reads",
+        sig: "@reads(p, bytes)",
         doc: "The extern function reads only `bytes` bytes through pointer parameter `p`.",
     },
     AttrDoc {
-        name: "c.writes",
-        sig: "@c.writes(p, bytes)",
+        name: "writes",
+        sig: "@writes(p, bytes)",
         doc: "The extern function writes only `bytes` bytes through pointer parameter `p`.",
     },
     AttrDoc {
-        name: "c.lane_access",
-        sig: "@c.lane_access",
+        name: "lane_access",
+        sig: "@lane_access",
         doc: "The extern function accesses memory lane by lane, at addresses that depend on the lane.",
     },
 ];
@@ -634,7 +649,11 @@ pub fn attribute_hover(src: str, off: u32) Option<String> {
     while e < src.len() && (ltext::ident_byte(src[e]) || src[e] == b'.') {
         e += 1;
     }
-    let name = src.slice(s, e);
+    let mut name = src.slice(s, e);
+    // `@c.inline` is the older spelling of `@inline`; only `@c.source` keeps the prefix.
+    if name.len() > 2 && name.starts_with("c.") && name != "c.source" {
+        name = name.slice(2, name.len());
+    }
     let docs: []AttrDoc = ATTR_DOCS;
     for i in 0..docs.len() {
         let d = docs.at(i);

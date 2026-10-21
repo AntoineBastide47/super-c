@@ -293,7 +293,7 @@ const fn mt_closer(b: u8) u8 {
 }
 
 // 1 = float suffix (f32/f64), 0 = integer suffix, -1 = not a numeric suffix.
-@c.always_inline
+@always_inline
 const fn num_suffix_kind(p: *const u8, n: usize) i32 {
     if n == 3 && (memeq(p, "f32") || memeq(p, "f64")) {
         return 1;
@@ -385,19 +385,19 @@ extend Lexer {
         return true;
     }
 
-    @c.cold
+    @cold
     fn error(self: &mut Self, message: str) {
         self.errors.emit(self.start as u32, (self.current - self.start) as u32, String::from_str(message));
     }
 
-    @c.cold
+    @cold
     fn error_at(self: &mut Self, at: usize, len: usize, message: str) {
         self.errors.emit(at as u32, len as u32, String::from_str(message));
     }
 
     // Decodes one UTF-8 scalar starting at `current` (first byte `b`). Any malformed sequence sets
     // *size to 0 and returns 0 UNDIAGNOSED; the caller owns the error report.
-    @c.cold
+    @cold
     fn decode_at_b(self: &Self, b: u8, current: usize, size: &mut usize) u32 {
         let mut minimum: u32 = 0x10000;
         let mut width: usize = 4;
@@ -435,7 +435,7 @@ extend Lexer {
         return cp;
     }
 
-    @c.always_inline
+    @always_inline
     fn identifier(self: &mut Self) {
         let mut i = self.current;
         loop {
@@ -503,7 +503,7 @@ extend Lexer {
     // The index past the UTF-8 sequence at `i`, or `i + 1` after a diagnostic when it is malformed.
     // It returns the index instead of advancing a `&mut` one: the address would keep the caller's
     // scan index in memory.
-    @c.cold
+    @cold
     fn skip_utf8(self: &mut Self, i: usize) usize {
         let mut size: usize = 0;
         self.decode_at_b(self.at(i), i, &mut size);
@@ -670,7 +670,7 @@ extend Lexer {
         return UINT32_MAX;
     }
 
-    @c.always_inline
+    @always_inline
     fn string_lit(self: &mut Self, kind: TokenType) {
         let mut i = self.current;
         loop {
@@ -1213,7 +1213,7 @@ extend Lexer {
     }
 
     // An opening bracket; inside a matchertext literal it may open an interpolation hole.
-    @c.always_inline
+    @always_inline
     fn open_bracket(self: &mut Self, kind: TokenType) {
         if self.mt.len() != 0 {
             self.mt_hole_open();
@@ -1222,14 +1222,14 @@ extend Lexer {
     }
 
     // A closing bracket, unless it closes a matchertext interpolation hole.
-    @c.always_inline
+    @always_inline
     fn close_bracket(self: &mut Self, kind: TokenType) {
         if self.mt.len() == 0 || !self.mt_hole_close() {
             self.add_token(kind);
         }
     }
 
-    @c.always_inline
+    @always_inline
     fn scan_token(self: &mut Self) {
         let c = self.at(self.current);
         if c < 0x80u8 {

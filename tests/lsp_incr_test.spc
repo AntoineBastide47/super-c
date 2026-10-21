@@ -1790,3 +1790,23 @@ pub fn bee() i32 {
     }
     assert(hit, "the deferred assertion fails");
 }
+
+// The declarations of an extern block are items checked before the module's later items, as the
+// driver's schedule checks them: a constant or a static of another module reads the size of a header
+// struct and of an opaque type with a `@layout` at compile time.
+@test
+fn incr_extern_type_sizes_fold() {
+    let a0: str = "import b;\nfn main() i32 {\n    return unsafe b::A[0] as i32 + unsafe b::B[0] as i32;\n}\n";
+    let b0: str = "extern \"C\" \"pthread.h\" {\n    @layout(8, 8)\n    pub type K;\n}\nextern \"C\" \"stdlib.h\" {\n    @import(\"div_t\")\n    pub struct D { pub quot: i32, pub rem: i32 }\n}\npub const N: usize = sizeof(K) / 8;\npub static mut A: [u64; N] = [0u64; N];\npub static mut B: [u64; sizeof(D) / 8] = [0u64; sizeof(D) / 8];\n";
+    let ws = ws_of(a0, b0, C0, D0);
+    let mut ovf = Vector::<String>::new();
+    let mut ovt = Vector::<String>::new();
+    ov(&ws, "a.spc", a0, &mut ovf, &mut ovt);
+    let mut diags = Vector::<an::DiagRec>::new();
+    let p = fresh(&ws, &ovf, &ovt, &mut diags);
+    for i in 0..diags.len() {
+        eprintln("{}", diags.at(i).msg.as_str());
+    }
+    assert(errors_in(&p, &diags, "/b.spc") == 0, "the sizes fold");
+    assert(diags.len() == 0, "no diagnostic");
+}

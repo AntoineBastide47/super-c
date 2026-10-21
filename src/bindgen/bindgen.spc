@@ -12,10 +12,11 @@
 // origin is the requested header are emitted.
 //
 // Scope: functions, the typedefs needed to spell their signatures, enums (tagged ones as `enum`, anonymous
-// enumerators and object-like macros as constants), fielded structs/unions where every member is modelable
-// (the emitted C checks each field against the header on every target; bitfields and anonymous members
-// fall back to opaque), `extern` globals (const-qualified as `const`, writable as `static mut`), and opaque
-// `pub type` for everything reached only through a pointer. Function-LIKE macros cannot appear at all: the
+// enumerators and object-like macros as constants; an integer one inside the extern block, where the C
+// compile checks its value), structs/unions with every member, from which Super-C computes the layout
+// (the emitted C checks it against the header on every target; bitfields, anonymous members and a member
+// of an opaque type by value fall back to opaque), `extern` globals (const-qualified as `const`, writable
+// as `static mut`), and opaque `pub type` for everything else a declaration names. Function-LIKE macros cannot appear at all: the
 // preprocessor has already expanded them away by the time anything here runs.
 
 import stdio;
@@ -409,11 +410,36 @@ fn safe_name(s: str, out: &mut String) {
     }
 }
 
+// Whether constant `cd` is an integer, which an extern block can hold and the C compile checks.
+fn int_const(cd: &ConstDef) bool {
+    return switch cd.ty.as_str() {
+        "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => true,
+        _ => false,
+    };
+}
+
+// The type a field of rendered type `ty` holds by value: the element of an array, or "" for a
+// pointer or a function pointer.
+fn by_value_base(ty: str) str {
+    let mut t = ty;
+    while t.len() != 0 && t.byte_at(0) == b'[' {
+        t = t.slice(1, t.len());
+    }
+    let semi = t.find(";");
+    if semi >= 0 {
+        t = t.slice(0, semi as usize);
+    }
+    if t.len() == 0 || t.byte_at(0) == b'*' || t.starts_with("fn(") {
+        return "";
+    }
+    return t;
+}
+
 // A symbol whose name is a keyword binds under its escaped spelling (`safe_name`); the import
 // pins the C symbol to the original name.
 fn pin_keyword(s: str, out: &mut String) {
     if keyword(s) {
-        out.format_into("    @c.import(\"{}\")\n", s);
+        out.format_into("    @import(\"{}\")\n", s);
     }
 }
 
@@ -1174,6 +1200,7 @@ fn run_one(
                 let mut lx = Lexer::new(text.as_str());
                 lx.parse_unit(&mut c, hdr.as_str(), froms, mdump.as_str());
                 c.collect_consts(hdr.as_str(), mdump.as_str());
+                c.demote_opaque_holders();
                 let mut out = String::new();
                 c.emit(spelling.as_str(), link, &mut out);
                 rc = write_out(out.as_str(), out_path, c.fns.len(), c.skipped);
@@ -2371,28 +2398,124 @@ extend Collected {
         }
     }
 
+    // A record that holds an opaque type by value (directly or as an array element) has no layout
+    // Super-C can compute, so it stays opaque too, and so does every record that holds it. Each pass
+    // but the last demotes at least one record, so the record count bounds the passes. Then a
+    // function that takes or returns an opaque type by value is skipped, and so is a global of one:
+    // Super-C holds no value of a type without a layout.
+    fn demote_opaque_holders(self: &mut Self) {
+        self.demote_records();
+        let mut i = self.fns.len();
+        while i > 0 {
+            i -= 1;
+            let mut bad = self.opaque_value(self.fns[i].ret.as_str());
+            for j in 0..self.fns[i].params.len() {
+                bad = bad || self.opaque_value(self.fns[i].params[j].ty.as_str());
+            }
+            if bad {
+                let _ = self.fns.remove(i);
+                self.skipped += 1;
+            }
+        }
+        i = self.globals.len();
+        while i > 0 {
+            i -= 1;
+            if self.opaque_value(self.globals[i].ty.as_str()) {
+                let _ = self.globals.remove(i);
+            }
+        }
+    }
+
+    // Whether rendered type `ty` holds an opaque type by value.
+    fn opaque_value(self: &Self, ty: str) bool {
+        let base = by_value_base(ty);
+        return base.len() != 0 && self.opaque_named(base);
+    }
+
+    fn demote_records(self: &mut Self) {
+        for _ in 0..self.records.len() + 1 {
+            let mut changed = false;
+            for i in 0..self.records.len() {
+                let r = self.records.at(i);
+                if !r.mine || !r.ok {
+                    continue;
+                }
+                let mut holds = false;
+                for j in 0..r.fields.len() {
+                    if self.opaque_value(r.fields[j].ty.as_str()) {
+                        holds = true;
+                        break;
+                    }
+                }
+                if holds {
+                    self.records.index_mut(i).ok = false;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return;
+            }
+        }
+        assert(false, "each pass but the last demotes a record");
+    }
+
+    // Whether `name` is a type the module binds as opaque: a tag it declares but emits neither as a
+    // record nor as an enum.
+    fn opaque_named(self: &Self, name: str) bool {
+        if self.record_emitted(name) || self.enum_emitted(name) {
+            return false;
+        }
+        for i in 0..self.opaques.len() {
+            if self.opaques[i].as_str() == name {
+                return true;
+            }
+        }
+        return false;
+    }
+
     fn emit(self: &Self, spelling: str, link: str, out: &mut String) {
         out.format_into("// Generated by `super-c bindgen {}`; edit the generator's input, not this file.\n", spelling);
         out.push_str(
-            "// Raw C bindings: every call requires `unsafe`. Structs reached only through a pointer are opaque\n",
+            "// Raw C bindings: every call requires `unsafe`. A struct this module cannot lay out is an opaque\n",
         );
-        out.push_str("// types -- their layout is C's business, not this module's.\n\n");
-        // The constants are ordinary top-level items and come first; `@c.link` has to sit on the extern block
-        // itself, so it is emitted last, immediately above it.
+        out.push_str("// type: use it through a pointer.\n\n");
+        // A float or string constant is an ordinary top-level item and comes first; an integer one goes
+        // into the extern block, whose C compile checks its value against the header. `@link` has to sit
+        // on the extern block itself, so it is emitted last, immediately above it.
+        let mut loose = false;
         for i in 0..self.consts.len() {
             let cd = self.consts.at(i);
+            if int_const(cd) {
+                continue;
+            }
             out.push_str("pub const ");
             safe_name(cd.name.as_str(), out);
             out.format_into(": {} = {};\n", cd.ty.as_str(), cd.value.as_str());
+            loose = true;
         }
-        if self.consts.len() != 0 {
+        if loose {
             out.push_byte(b'\n');
         }
         if link.len() != 0 {
-            out.format_into("@c.link(\"{}\")\n", link);
+            out.format_into("@link(\"{}\")\n", link);
         }
         out.format_into("extern \"C\" \"{}\" {{\n", spelling);
         let mut first = true;
+        for i in 0..self.consts.len() {
+            let cd = self.consts.at(i);
+            if !int_const(cd) {
+                continue;
+            }
+            pin_keyword(cd.name.as_str(), out);
+            out.push_str("    pub const ");
+            safe_name(cd.name.as_str(), out);
+            out.format_into(": {} = {};\n", cd.ty.as_str(), cd.value.as_str());
+            first = false;
+        }
+        if !first {
+            out.push_byte(b'\n');
+            first = true;
+        }
         for i in 0..self.opaques.len() {
             let nm = self.opaques[i].as_str();
             if !self.opaque_used(nm) || self.record_emitted(nm) || self.enum_emitted(nm) {
@@ -2401,7 +2524,7 @@ extend Collected {
             // A tag C never typedef'd is `struct x` there, not `x`.
             let ai = self.alias_of(nm);
             if !(ai >= 0 && self.aliases.at(ai as usize).opaque) {
-                out.format_into("    @c.import(\"struct {}\")\n", nm);
+                out.format_into("    @import(\"struct {}\")\n", nm);
             }
             out.format_into("    pub type {};\n", nm);
             first = false;
@@ -2416,7 +2539,7 @@ extend Collected {
             }
             // An enum spells as its tag (`enum x`); one with no tag as the typedef that names it.
             if e.tagless {
-                out.format_into("    @c.import(\"{}\")\n", e.tag.as_str());
+                out.format_into("    @import(\"{}\")\n", e.tag.as_str());
             }
             out.format_into("    pub enum {} {{\n", e.tag.as_str());
             for j in 0..e.vals.len() {
@@ -2440,14 +2563,14 @@ extend Collected {
                 "struct";
             };
             if r.tagless {
-                out.format_into("    @c.import(\"{}\")\n", r.tag.as_str());
+                out.format_into("    @import(\"{}\")\n", r.tag.as_str());
             }
             out.format_into("    pub {} {} {{\n", kw, r.tag.as_str());
             for j in 0..r.fields.len() {
                 // A member named by a keyword binds under its escaped name, pinned to the C member.
                 let fname = r.fields[j].name.as_str();
                 if keyword(fname) {
-                    out.format_into("        @c.import(\"{}\")\n", fname);
+                    out.format_into("        @import(\"{}\")\n", fname);
                 }
                 out.push_str("        pub ");
                 safe_name(fname, out);

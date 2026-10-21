@@ -25,14 +25,14 @@ import utils::errors as diag;
 const BC_MOVED_CAP: u32 = 1024;
 const BC_TABLE_CAP: u32 = 256;
 
-@c.always_inline
+@always_inline
 const fn rep_bm(st: &mut bfi::RepSt) u32 {
     return st.bms.pop().unwrap_or(0);
 }
 
 // Depth-slot flow push: slots are refilled row-wise (no whole-FlowState copies). Out of line so the
 // two FlowState temporaries of the first push at a depth stay out of bc_replay's frame.
-@c.noinline
+@noinline
 fn rep_flow_push(t: &mut tc::TypeChecker, st: &mut bfi::RepSt) {
     let d = st.fdepth;
     if st.pre.len() <= d {
@@ -405,7 +405,7 @@ extend tc::TypeChecker {
     /// Report that the function under check needs more than `cap` entries in one fixed flow table
     /// (`what` names its entries): past the cap the analysis would lose facts. Reported once per
     /// function, at its name.
-    @c.cold
+    @cold
     fn bc_flow_limit(self: &mut Self, what: str, cap: u32) {
         let a = self.cur_ast();
         let sp = self.name_span(unsafe (*a).at_const(self.icx.current_fn).as_data.function.name);

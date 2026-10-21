@@ -47,7 +47,16 @@ fn uri_path_roundtrip() {
 fn attribute_hover_positions() {
     let src = "@c.align(LINE)\n@intrinsic(\"simd.eq\")\n@nope\nfn test() {}\n";
     let h = feat::attribute_hover(src, 0).unwrap();
-    assert(h.as_str().starts_with("```super-c\n@c.align(N)\n```\n\n"));
+    // `@c.align` is the older spelling of `@align`: its hover documents `@align`.
+    assert(h.as_str().starts_with("```super-c\n@align(N)\n```\n\n"), "the older spelling documents '@align'");
+    assert(
+        feat::attribute_hover("@align(4)\nstruct S {}\n", 1).unwrap().as_str().starts_with("```super-c\n@align(N)\n```"),
+        "the one-part spelling documents '@align'",
+    );
+    assert(
+        feat::attribute_hover("@c.source(\"x.c\")\n", 1).unwrap().as_str().starts_with("```super-c\n@c.source("),
+        "'@c.source' keeps its prefix",
+    );
     assert(feat::attribute_hover(src, 3).is_some());
     assert(feat::attribute_hover(src, 8).is_some());
     assert(feat::attribute_hover(src, 10).is_none());

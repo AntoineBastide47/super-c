@@ -377,9 +377,13 @@ pub struct TypeChecker<'a> {
     /// state, closures, returns, and unsafe state live here, isolated from the module-wide caches.
     pub icx: inf::InferenceContext,
     pub package: *mut loader::Package,
-    /// Some module of the package declares a register type (`@c.value`): the inferred types that
+    /// Some module of the package declares a register type (`@value`): the inferred types that
     /// would store one are checked (`tc_no_held_reg`).
     pub has_reg: bool,
+    // The type node under resolution is the target of a pointer or a reference, or a type alias's
+    // definition: an opaque C type with no layout is valid there (`tc_opaque_value`). The next
+    // `resolve_type_at` reads and clears it.
+    pub opq_target: bool,
     pub alias_depth: u32,
     // The local constant initializer being checked (start << 32 | end, 0 = none): a variable bound
     // outside it has no compile-time value.
@@ -1570,7 +1574,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// Module `m`'s live Ast.
-    @c.always_inline
+    @always_inline
     pub const fn mod_ast(self: &Self, m: ModuleId) *mut Ast {
         if m != self.cur_module() {
             // Asts live in place in the module table, so the slot IS the live tree.
@@ -2009,7 +2013,7 @@ extend<'a> TypeChecker<'a> {
 
     // A constant trap at operation `id`; in a constant initializer the message names the item, as a
     // trap through a call does at the item's name (tc_mandatory_const).
-    @c.cold
+    @cold
     fn tc_ct_report(self: &mut Self, id: NodeId, why: str, generic: bool) {
         self.ct_n += 1;
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
@@ -2098,7 +2102,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// Whether statement `id` never completes normally: a `return`, `break` or `continue`, an
-    /// expression of type `!` (a call of a `!` or `@c.noreturn` function), a `loop` no `break`
+    /// expression of type `!` (a call of a `!` or `@noreturn` function), a `loop` no `break`
     /// leaves, a block or `unsafe` block holding such a statement, an `if` whose two branches both
     /// do, or a `switch` whose every arm does (a switch is exhaustive). The statement after one is
     /// unreachable.
@@ -2256,7 +2260,7 @@ extend<'a> TypeChecker<'a> {
         }
     }
 
-    @c.cold
+    @cold
     fn err_unsafe(self: &mut Self, sp: tok::Span, what: str) {
         self.errors.emit_span(sp, format("{} requires an 'unsafe' block", what));
         self.errors.note(format("{}", "wrap the operation in 'unsafe { ... }' or prefix the expression with 'unsafe'"));
@@ -2578,7 +2582,7 @@ extend<'a> TypeChecker<'a> {
         return false;
     }
 
-    @c.cold
+    @cold
     fn err_no_field(self: &mut Self, name: tok::Span, ty: TypeId) {
         if ty == TYPE_ERROR {
             return;
@@ -2593,7 +2597,7 @@ extend<'a> TypeChecker<'a> {
         }
     }
 
-    @c.cold
+    @cold
     fn tc_note_header_fields(self: &mut Self) {
         self.errors.note(
             format(
@@ -3316,7 +3320,7 @@ extend<'a> TypeChecker<'a> {
         }
     }
 
-    @c.cold
+    @cold
     fn err_lit_range(self: &mut Self, node: NodeId, ty: TypeId) {
         let tn = self.type_str(ty);
         let sp = unsafe (*self.cur_ast()).at_const(node).span;
@@ -3324,7 +3328,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     // A negation `node` of unsigned type `ty`: no unsigned value has one.
-    @c.cold
+    @cold
     fn err_neg_unsigned(self: &mut Self, node: NodeId, ty: TypeId) {
         let tn = self.type_str(ty);
         let sp = unsafe (*self.cur_ast()).at_const(node).span;
@@ -3868,18 +3872,18 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// `tid` rendered for a diagnostic.
-    @c.cold
+    @cold
     fn type_str(self: &Self, tid: TypeId) String {
         return type_str_of(self.package, self.cur_ast(), self.source, tid);
     }
 
-    @c.cold
+    @cold
     fn err_mismatch(self: &mut Self, node: NodeId, expected: TypeId) {
         self.err_mismatch_ann(node, expected, 0, NODE_NONE);
     }
 
     // `err_mismatch` with the type node `ann` of module `am` that wrote `expected` (NODE_NONE: none).
-    @c.cold
+    @cold
     fn err_mismatch_ann(self: &mut Self, node: NodeId, expected: TypeId, am: ModuleId, ann: NodeId) {
         if expected == TYPE_ERROR || unsafe (*self.cur_ast()).type_of(node) == TYPE_ERROR {
             return; // reported where the type was rejected
@@ -4781,7 +4785,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     // Function `d`, named as a value at `node`, relates lifetimes no function type can show.
-    @c.cold
+    @cold
     fn err_fn_value_lts(self: &mut Self, node: NodeId, d: DefId) {
         let nm = unsafe (*self.mod_ast(d.module)).at_const(
             unsafe (*self.mod_ast(d.module)).at_const(d.node).as_data.function.name,
@@ -4797,7 +4801,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     // Where a function type can show lifetimes, after an error that it cannot.
-    @c.cold
+    @cold
     pub fn note_lt_limits(self: &mut Self) {
         self.errors.note(
             format(
@@ -9202,7 +9206,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     // Report the const-evidence conflicts the active session recorded, once, at the call span.
-    @c.cold
+    @cold
     fn tc_report_const_conflicts(self: &mut Self, sp: tok::Span) {
         for ci in self.icx.sv.sess.cconflicts as usize..self.icx.sv.cconflicts.len() {
             let cf = *self.icx.sv.cconflicts.at(ci);
@@ -9230,7 +9234,7 @@ extend<'a> TypeChecker<'a> {
         self.icx.sv.cconflicts.truncate(self.icx.sv.sess.cconflicts as usize);
     }
 
-    @c.cold
+    @cold
     fn tc_report_type_conflicts(self: &mut Self, sp: tok::Span) {
         for ci in self.icx.sv.sess.type_conflicts as usize..self.icx.sv.type_conflicts.len() {
             let cf = *self.icx.sv.type_conflicts.at(ci);
@@ -10427,7 +10431,7 @@ extend<'a> TypeChecker<'a> {
     // A path names associated constant `nm` of a generic type without arguments that choose one of
     // its `n` candidates `cs` (the constants of disjoint extends each define one): reported at `at`
     // with a note at each candidate.
-    @c.cold
+    @cold
     fn err_assoc_const_args(self: &mut Self, at: tok::Span, nm: str, cs: &Defs8, n: usize) {
         self.errors.emit_span(
             at,
@@ -10867,7 +10871,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     // A vector or mask has no stable C ABI (vector calling conventions differ by platform, compiler,
-    // feature set and width): an `extern "C"` or `@c.export` signature passes its storage instead.
+    // feature set and width): an `extern "C"` or `@export` signature passes its storage instead.
     fn tc_vec_abi(self: &mut Self, params: NodeList, rets: NodeList) {
         let a = self.cur_ast();
         for i in 0..params.len + rets.len {
@@ -11560,6 +11564,8 @@ extend<'a> TypeChecker<'a> {
     // The type node `id` spells; `lit`: the node is a struct literal's target, whose path may name
     // an enum's variant after the enum (`tc_type_tail`).
     fn resolve_type_at(self: &mut Self, id: NodeId, lit: bool) TypeId {
+        let behind = self.opq_target;
+        self.opq_target = false;
         if id == NODE_NONE {
             return TYPE_NONE;
         }
@@ -11719,6 +11725,7 @@ extend<'a> TypeChecker<'a> {
                     k = TypeKind::TYPE_POINTER;
                     q = ptr_qual(q);
                 }
+                self.opq_target = true;
                 let et = self.resolve_type(it.ty);
                 self.tc_no_reg(it.ty, et);
                 result = unsafe (*self.cur_ast()).intern_type(
@@ -11754,8 +11761,43 @@ extend<'a> TypeChecker<'a> {
             },
             _ => {},
         };
+        if !behind && nk == NodeKind::NODE_TYPE_PATH {
+            self.tc_opaque_value(id, result);
+        }
         unsafe (*self.cur_ast()).set_type(id, result);
         return result;
+    }
+
+    // An opaque C type with no layout (`type T;` without `@layout` or `@value`) at type node `id`,
+    // which spells a value of it unless it is an `extend`'s target: an error. Its size is the C
+    // compiler's alone, so it lives behind a pointer.
+    fn tc_opaque_value(self: &mut Self, id: NodeId, t: TypeId) {
+        if t == TYPE_ERROR || t == TYPE_NONE {
+            return;
+        }
+        let y = *self.type_at(t);
+        if y.kind != TypeKind::TYPE_OPAQUE {
+            return;
+        }
+        if self.tc_attr(y.module, y.as_data.decl, AttrKind::ATTR_C_VALUE) != null || self.tc_attr(
+            y.module,
+            y.as_data.decl,
+            AttrKind::ATTR_LAYOUT,
+        ) != null {
+            return;
+        }
+        let m = self.cur_module();
+        for i in 0..self.ext_count(m) {
+            if unsafe (*self.cur_ast()).at_const(self.ext_at(m, i)).as_data.extend_def.target_type == id {
+                return;
+            }
+        }
+        let tb = self.type_str(t);
+        self.errors.emit_span(
+            unsafe (*self.cur_ast()).at_const(id).span,
+            format("'{}' is an opaque C type with no layout: a value of it needs one", tb.as_str()),
+        );
+        self.errors.note(format("use it through a pointer, or state its C layout with '@layout(size, align)'"));
     }
 
     // The function-pointer type `fn(..) ..` node `id` of module `m` spells: a signature, so every
@@ -13271,7 +13313,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     // Candidates `first` and `second` of `tc_pick_conf_method` fit a use of `name` on `recv` equally.
-    @c.cold
+    @cold
     fn err_tied_cands(
         self: &mut Self,
         recv: TypeId,
@@ -13986,7 +14028,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     // Two candidates with equal best scores: an ambiguity error, never a source-order pick.
-    @c.cold
+    @cold
     fn err_ambiguous_candidates(self: &mut Self, name: tok::Span, lit: str, a1: DefId, a2: DefId) {
         let nm = if lit.len() != 0 {
             lit;
@@ -14000,7 +14042,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     // A note `what` followed by the source site of declaration `d` (file:line:col and its line).
-    @c.cold
+    @cold
     fn note_decl_site(self: &mut Self, what: str, d: DefId) {
         let sp = self.tc_decl_site(d);
         let site = diag::render_site(
@@ -14036,7 +14078,7 @@ extend<'a> TypeChecker<'a> {
 
     // Notes at the candidates a use of `self_ty` through interface `iface` could not choose among:
     // a type parameter's declaration (its bounds), else each conformance of the type to `iface`.
-    @c.cold
+    @cold
     fn note_conformances(self: &mut Self, self_ty: TypeId, iface: DefId) {
         let y = *self.type_at(self_ty);
         if y.kind == TypeKind::TYPE_GENERIC {
@@ -14070,7 +14112,7 @@ extend<'a> TypeChecker<'a> {
 
     // The candidates exceed the fixed cap: dropped candidates could have scored better, so the
     // call must be disambiguated by hand.
-    @c.cold
+    @cold
     fn err_candidate_budget(self: &mut Self, name: tok::Span, lit: str) {
         let nm = if lit.len() != 0 {
             lit;
@@ -16376,7 +16418,7 @@ extend<'a> TypeChecker<'a> {
         }
     }
 
-    // Does place expression `e` lie in a field of a `@c.packed` struct whose type needs an alignment
+    // Does place expression `e` lie in a field of a `@packed` struct whose type needs an alignment
     // above 1? A reference to it could be misaligned.
     fn tc_packed_misaligned(self: &mut Self, e0: NodeId, depth: i32) bool {
         if e0 == NODE_NONE || depth > 16 {
@@ -16439,7 +16481,7 @@ extend<'a> TypeChecker<'a> {
         return true;
     }
 
-    // A field of a `@c.packed` struct whose type needs a `free` and an alignment above 1: its drop
+    // A field of a `@packed` struct whose type needs a `free` and an alignment above 1: its drop
     // would take a misaligned `&mut`.
     fn tc_packed_field(self: &mut Self, tyn: NodeId, ft: TypeId) {
         if ft == TYPE_NONE || !self.tc_type_is_free(ft) {
@@ -16455,14 +16497,14 @@ extend<'a> TypeChecker<'a> {
         }
         self.errors.emit_span(
             unsafe (*self.cur_ast()).at_const(tyn).span,
-            format("a field of a '@c.packed' struct cannot need a 'free': its drop would take a misaligned reference"),
+            format("a field of a '@packed' struct cannot need a 'free': its drop would take a misaligned reference"),
         );
     }
 
     fn err_packed_ref(self: &mut Self, sp: tok::Span) {
         self.errors.emit_span(
             sp,
-            format("cannot borrow a field of a '@c.packed' struct: the reference may be misaligned"),
+            format("cannot borrow a field of a '@packed' struct: the reference may be misaligned"),
         );
         self.errors.note(format("copy the field into a local first"));
     }
@@ -17435,7 +17477,7 @@ extend<'a> TypeChecker<'a> {
     // Attach the ` as T` deletion fix for the unnecessary-cast lints. Grouping parens are dropped
     // without re-spanning (`(x) as T` records x's span without the parens), so the deletion starts
     // after any closing parens between the expression end and the `as` keyword.
-    @c.cold
+    @cold
     fn tc_cast_drop_fix(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
         let csp = unsafe (*a).at_const(id).span;
@@ -17459,7 +17501,7 @@ extend<'a> TypeChecker<'a> {
     // the language accepts implicitly, this flags, by construction. Casts with no expected type stay
     // exempt (an unannotated `let x = E as P` uses the cast to pick the binding's type), as do pinned
     // (suffixed) literals via the probe itself. Fires once per cast node.
-    @c.cold
+    @cold
     fn tc_lint_redundant_coalesce(self: &mut Self, expected: TypeId, node: NodeId) {
         let a = self.cur_ast();
         // Peel `move`/`unsafe` wrappers: `unsafe (E as P)` is as redundant as the bare cast.
@@ -18306,6 +18348,16 @@ extend<'a> TypeChecker<'a> {
         }
         if self.tc_needs_unsafe() {
             self.err_unsafe(unsafe (*self.cur_ast()).at_const(id).span, "accessing a 'static mut'");
+        }
+        // A thread-local has one object per thread, so no static data can hold its value or address.
+        if self.ct_item != NODE_NONE && self.ct_cd == self.icx.closure_depth && unsafe (*self.mod_ast(d.module)).attr_of(
+            d.node,
+            AttrKind::ATTR_THREAD_LOCAL,
+        ) != null {
+            self.errors.emit_span(
+                unsafe (*self.cur_ast()).at_const(id).span,
+                format("a thread-local has one object per thread: a constant or 'static mut' initializer cannot use it"),
+            );
         }
     }
     // A call of an `unsafe fn`, or of an extern "C" function without `@unsafe(safe)`, needs `unsafe`, and a
@@ -23383,7 +23435,7 @@ extend TypeChecker {
 
     // An unresolved generic argument after defaults is a call-site error, not a
     // downstream emission failure.
-    @c.cold
+    @cold
     fn err_unresolved_generic(self: &mut Self, sp: tok::Span, gmod: ModuleId, gid: NodeId) {
         let ga2 = self.mod_ast(gmod);
         let nsp = unsafe (*ga2).at_const(unsafe (*ga2).at_const(gid).as_data.generic_param.name).as_data.name.text;
@@ -23751,10 +23803,18 @@ extend TypeChecker {
                     return TYPE_NONE;
                 }
                 if self.type_at(tt).kind == TypeKind::TYPE_OPAQUE {
-                    self.errors.emit_span(
-                        sp2,
-                        format("type_info cannot describe an opaque type (its layout is unknown)"),
-                    );
+                    // One without a layout is reported at its type argument (`tc_opaque_value`).
+                    let y = *self.type_at(tt);
+                    if self.tc_attr(y.module, y.as_data.decl, AttrKind::ATTR_C_VALUE) != null || self.tc_attr(
+                        y.module,
+                        y.as_data.decl,
+                        AttrKind::ATTR_LAYOUT,
+                    ) != null {
+                        self.errors.emit_span(
+                            sp2,
+                            format("type_info cannot describe an opaque type: its members are C's"),
+                        );
+                    }
                     return TYPE_NONE;
                 }
                 let th = unsafe (*self.package).prelude_lookup("TypeInfo", true);
@@ -25651,7 +25711,7 @@ extend TypeChecker {
 
     // "type 'T' does not satisfy <what>: 'T' conforms to this interface only with other arguments", with
     // a note at the conformance or bound (`tc_other_args_at`) at `sp` of module `m`.
-    @c.cold
+    @cold
     // A bound `what` that failed on an associated type binding (`bind_miss`), reported at `at`.
     fn err_bind_miss(self: &mut Self, at: tok::Span, ty: TypeId, what: String) {
         let tn = self.type_str(ty);
@@ -25811,7 +25871,7 @@ extend TypeChecker {
 
     // A member reached through a raw pointer: no auto-dereference, so a field or a method whose
     // `self` is not the raw pointer type itself is an error naming the explicit `(*p).m` form.
-    @c.cold
+    @cold
     fn tc_raw_member(self: &mut Self, id: NodeId, obj_node: NodeId, obj: TypeId) {
         let a = self.cur_ast();
         let mn = unsafe (*a).at_const(id).as_data.member.member;
@@ -26343,7 +26403,7 @@ extend TypeChecker {
     }
 
     // A turbofish after field `mem`, which is no generic function.
-    @c.cold
+    @cold
     fn err_field_targs(self: &mut Self, mem: NodeId, tas: NodeList) {
         let a = self.cur_ast();
         let fsp = self.name_span(mem);
@@ -27040,6 +27100,14 @@ extend TypeChecker {
         }
         if k == TypeKind::TYPE_ARRAY {
             return self.tc_zero_ok(y.as_data.arr.elem, depth + 1);
+        }
+        if k == TypeKind::TYPE_OPAQUE {
+            // A C object with a known layout: zero bytes are C's static initialization of it.
+            return self.tc_attr(y.module, y.as_data.decl, AttrKind::ATTR_C_VALUE) != null || self.tc_attr(
+                y.module,
+                y.as_data.decl,
+                AttrKind::ATTR_LAYOUT,
+            ) != null;
         }
         if k != TypeKind::TYPE_STRUCT && k != TypeKind::TYPE_INSTANCE && k != TypeKind::TYPE_ENUM {
             return false;
@@ -29578,7 +29646,12 @@ extend TypeChecker {
         let declared = pick(tyn != NODE_NONE, self.resolve_type(tyn), TYPE_NONE);
         self.icx.mret_call = NODE_NONE;
         let vt = self.check_expr_w(value, declared);
-        let stashed = value != NODE_NONE && self.icx.mret_call == value;
+        // `unsafe f()` is the call's value: the binding reads through the `unsafe`.
+        let mut core = value;
+        while core != NODE_NONE && unsafe (*a).at_const(core).kind == NodeKind::NODE_UNARY && unsafe (*a).at_const(core).as_data.unary.op == TokenType::Unsafe {
+            core = unsafe (*a).at_const(core).as_data.unary.operand;
+        }
+        let stashed = core != NODE_NONE && self.icx.mret_call == core;
         if vt == TYPE_ERROR && !stashed {
             for i in 0..names.len {
                 unsafe (*self.cur_ast()).set_type(unsafe (*self.cur_ast()).list(names)[i as usize], TYPE_ERROR);
@@ -29617,8 +29690,8 @@ extend TypeChecker {
         }
         let mut returns = NodeList { start: 0, len: 0 };
         let mut ok = false;
-        if value != NODE_NONE && unsafe (*a).at_const(value).kind == NodeKind::NODE_CALL {
-            let calleeId = unsafe (*a).at_const(value).as_data.call.callee;
+        if core != NODE_NONE && unsafe (*a).at_const(core).kind == NodeKind::NODE_CALL {
+            let calleeId = unsafe (*a).at_const(core).as_data.call.callee;
             let callee = unsafe (*a).type_of(calleeId);
             if callee != TYPE_NONE {
                 let ct = *self.type_at(callee);
@@ -29949,7 +30022,7 @@ extend TypeChecker {
                 self.errors.emit_span(
                     sp,
                     format(
-                        "parameter '{}' of '@c.{}' must be a {} pointer",
+                        "parameter '{}' of '@{}' must be a {} pointer",
                         diag::span_str(self.source, sp.start, sp.end),
                         pick(writes, "writes", "reads"),
                         pick(writes, "'*mut'", "raw"),
@@ -30046,7 +30119,7 @@ extend TypeChecker {
         return true;
     }
 
-    // Whether expression `e` names a parameter of function `owner` (a `@c.reads` byte count over them).
+    // Whether expression `e` names a parameter of function `owner` (a `@reads` byte count over them).
     // Whether byte count `e` uses only literals, constants, arithmetic and `usize` parameters other
     // than the annotated pointer `ptr`.
     fn tc_bytes_ok(self: &mut Self, e: NodeId, ptr: NodeId, depth: u32) bool {
@@ -30140,15 +30213,20 @@ extend TypeChecker {
             self.errors.emit_span(sp, c_align_error(*v));
             return false;
         }
-        if kind == AttrKind::ATTR_C_VALUE && (*v == 0 || !c_align_ok(w[0]) || *v % w[0] != 0) {
+        if (kind == AttrKind::ATTR_C_VALUE || kind == AttrKind::ATTR_LAYOUT) && (*v == 0 || !c_align_ok(w[0]) || *v % w[0] != 0) {
             self.errors.emit_span(
                 sp,
                 format(
-                    "'@c.value' needs a nonzero size that is a multiple of the alignment, a power of two; found ({}, {})",
+                    "'@{}' needs a nonzero size that is a multiple of the alignment, a power of two; found ({}, {})",
+                    pick(kind == AttrKind::ATTR_LAYOUT, "layout", "value"),
                     *v,
                     w[0],
                 ),
             );
+            return false;
+        }
+        if kind == AttrKind::ATTR_LAYOUT && self.tc_attr(self.cur_module(), owner, AttrKind::ATTR_C_VALUE) != null {
+            self.errors.emit_span(sp, format("a register type ('@value') states its layout: it takes no '@layout'"));
             return false;
         }
         if (kind == AttrKind::ATTR_C_READS || kind == AttrKind::ATTR_C_WRITES) && self.tc_attr(
@@ -30156,7 +30234,7 @@ extend TypeChecker {
             owner,
             AttrKind::ATTR_C_LANE_ACCESS,
         ) != null {
-            self.errors.emit_span(sp, format("'@c.lane_access' states no range: it takes no '@c.reads' or '@c.writes'"));
+            self.errors.emit_span(sp, format("'@lane_access' states no range: it takes no '@reads' or '@writes'"));
             return false;
         }
         if kind != AttrKind::ATTR_TARGET_FEATURE && kind != AttrKind::ATTR_SIMD_IMPL {
@@ -30217,14 +30295,14 @@ extend TypeChecker {
         return kind == AttrKind::ATTR_TARGET_FEATURE || self.tc_simd_shape(owner, (*v) as u32, v);
     }
 
-    // Whether `t` is a register type: an opaque extern type with `@c.value`.
+    // Whether `t` is a register type: an opaque extern type with `@value`.
     fn tc_reg_type(self: &Self, t: TypeId) bool {
         let y = *self.type_at(t);
         return y.kind == TypeKind::TYPE_OPAQUE && self.tc_attr(y.module, y.as_data.decl, AttrKind::ATTR_C_VALUE) != null;
     }
 
     // Whether `t` is a header struct or union (a `struct` or `union` of an `extern "C"` block): its C
-    // header owns the layout, and the declaration lists only some of its fields.
+    // header defines it, and the declaration lists every member.
     fn tc_header_type(self: &Self, t: TypeId) bool {
         if t == TYPE_NONE || t == TYPE_ERROR {
             return false;
@@ -30253,8 +30331,9 @@ extend TypeChecker {
         return unsafe (*self.mod_ast(y.module)).at_const(y.as_data.decl).as_data.aggregate.is_extern;
     }
 
-    // Whether header-struct field type `t0` has a C equivalent the emitted layout checks can name: a
+    // Whether header-struct field type `t0` has a C equivalent the emitted checks can name: a
     // scalar, a raw pointer, a plain `fn` pointer, a type of an extern block, or an array of these.
+    // An opaque type without a layout is reported where it is written (`tc_opaque_value`).
     fn tc_c_field_type(self: &Self, t0: TypeId) bool {
         let mut t = t0;
         for _ in 0..64 {
@@ -30272,7 +30351,10 @@ extend TypeChecker {
             if y.kind == TypeKind::TYPE_BUILTIN {
                 return y.as_data.builtin != BuiltinType::BT_VOID && y.as_data.builtin != BuiltinType::BT_VALIST;
             }
-            if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_OPAQUE {
+            if y.kind == TypeKind::TYPE_POINTER {
+                return true;
+            }
+            if y.kind == TypeKind::TYPE_OPAQUE {
                 return true;
             }
             if y.kind == TypeKind::TYPE_FUNCTION {
@@ -30795,8 +30877,8 @@ extend TypeChecker {
     }
 
     // The loop statement kinds live in their own frames so check_stmt, which recurses once per
-    // nested statement, keeps a small frame. @c.noinline keeps LTO from folding them back.
-    @c.noinline
+    // nested statement, keeps a small frame. @noinline keeps LTO from folding them back.
+    @noinline
     fn tc_check_while(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
         self.loop_depth = self.loop_depth + 1;
@@ -30866,7 +30948,7 @@ extend TypeChecker {
         }
     }
 
-    @c.noinline
+    @noinline
     fn tc_check_for(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
         self.loop_depth = self.loop_depth + 1;
@@ -32118,6 +32200,7 @@ extend TypeChecker {
                 self.check_const_decl(id, declared);
             },
             NODE_TYPE_ALIAS => {
+                self.opq_target = true;
                 let _ = self.resolve_type(unsafe (*a).at_const(id).as_data.type_alias.ty);
             },
             NODE_EXTERN_BLOCK => {
@@ -32137,6 +32220,14 @@ extend TypeChecker {
         let cd = unsafe (*self.cur_ast()).at_const(id).as_data.const_def;
         self.tc_check_link_section(id, false);
         self.tc_no_reg(cd.ty, declared);
+        if cd.c_macro && declared != TYPE_ERROR && !self.is_int(declared) && !self.is_bool(declared) {
+            self.errors.emit_span(
+                unsafe (*self.cur_ast()).at_const(cd.ty).span,
+                format(
+                    "a constant of an 'extern \"C\"' block with a value is an integer or a 'bool': the C compile checks it",
+                ),
+            );
+        }
         let dtk = self.type_at(declared).kind;
         // An owning (Free) type IS representable: its object graph, heap blocks included,
         // materializes into static storage with relocations, exactly as a malloc'd graph does.
@@ -32236,7 +32327,7 @@ extend TypeChecker {
     // is_assignable marks every binding whose mutability answered a requirement; a `mut`
     // binding that is referenced but never marked can drop the keyword. Unreferenced bindings are
     // the unused-variable lint's business (and cover @platform-dropped items, which never resolve).
-    @c.cold
+    @cold
     // Duplicates are harmless: tc_lint_unneeded_mut folds the list into a per-node table.
     fn tc_mark_mut_used(self: &mut Self, decl: NodeId) {
         if self.lint {
@@ -32245,7 +32336,7 @@ extend TypeChecker {
     }
 
     // Delete [from, to) when it holds no grouping parens (`*(&x)` would leave text unbalanced).
-    @c.cold
+    @cold
     fn tc_lint_pair_fix(self: &mut Self, from: u32, to: u32) {
         let mut j = from;
         while j < to {
@@ -32344,7 +32435,7 @@ extend TypeChecker {
     }
 
     // Attach the `mut ` deletion fix: the keyword sits right before the name, across whitespace.
-    @c.cold
+    @cold
     fn tc_lint_mut_fix(self: &mut Self, nsp: tok::Span) {
         let mut i = nsp.start as usize;
         while i > 0 && (self.source[i - 1] == b' ' || self.source[i - 1] == b'\t' || self.source[i - 1] == b'\n' || self.source[i - 1] == b'\r') {
@@ -32462,6 +32553,20 @@ extend TypeChecker {
             let rec = unsafe (*self.package).item_of(m, it9);
             if rec != loader::ITEM_NONE {
                 self.check_one(it9, unsafe (*self.package).sched.top_lo[rec as usize]);
+            } else if unsafe (*self.cur_ast()).at_const(it9).kind == NodeKind::NODE_EXTERN_BLOCK {
+                // The block's declarations are items of their own, which the driver's schedule
+                // checks before their users: a later item reads their member types and layouts.
+                let inner = unsafe (*self.cur_ast()).at_const(it9).as_data.extern_block.items;
+                let ie = self.in_extern;
+                self.in_extern = true;
+                for j in 0..inner.len {
+                    let mid = unsafe (*self.cur_ast()).list(inner)[j as usize];
+                    let mrec = unsafe (*self.package).item_of(m, mid);
+                    if mrec != loader::ITEM_NONE {
+                        self.check_one(mid, unsafe (*self.package).sched.top_lo[mrec as usize]);
+                    }
+                }
+                self.in_extern = ie;
             }
             outs.push(replace(&mut self.errors, diag::Errors::new()));
         }
@@ -32469,9 +32574,8 @@ extend TypeChecker {
         let mut oi: usize = 0;
         for i in 0..items.len {
             let it9 = unsafe (*self.cur_ast()).list(items)[i as usize];
-            if unsafe (*self.package).item_of(m, it9) != loader::ITEM_NONE {
-                self.errors.append(outs.index_mut(i as usize));
-            } else if oi < self.orphan_errs.len() {
+            self.errors.append(outs.index_mut(i as usize));
+            if unsafe (*self.package).item_of(m, it9) == loader::ITEM_NONE && oi < self.orphan_errs.len() {
                 self.errors.append(self.orphan_errs.index_mut(oi));
                 oi += 1;
             }

@@ -20,7 +20,7 @@ CONTRACT_DELAY_SEEDS="1 2 3"
 # the -fno-builtin list of each transcendental libm call, which the build engine passes to every compile:
 # the language's char is unsigned, floats never fuse, a libm call runs as written; LIBM_AS_WRITTEN in
 # src/build_system/build.spc).
-CONTRACT_CSTD="-std=c11 -D_POSIX_C_SOURCE=200809L"
+CONTRACT_CSTD="-std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700"
 CONTRACT_LIBM_CFLAGS=""
 for f in sin cos tan asin acos atan atan2 sinh cosh tanh asinh acosh atanh exp exp2 expm1 log log2 log10 log1p pow cbrt hypot; do
     CONTRACT_LIBM_CFLAGS="$CONTRACT_LIBM_CFLAGS -fno-builtin-$f -fno-builtin-${f}f"

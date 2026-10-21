@@ -6,7 +6,7 @@
 // server keeps the summaries of each module's last borrow round and checks them when the round ends.
 //
 // A path of a body ENDS at a return, an `assert` (it may trap), an `unreachable` terminator, a call of a
-// `@c.noreturn` function or a call of an extern C function (it may exit or abort; the verified memory
+// `@noreturn` function or a call of an extern C function (it may exit or abort; the verified memory
 // and atomic intrinsics return). Every other call returns. The call graph has the direct calls between
 // the reported modules' functions and methods only: a call through a function value, a `dyn` value or a
 // bound reaches no member. A member of a strongly connected component of that graph ENDS when a path
@@ -388,7 +388,7 @@ const fn def_key(module: ModuleId, node: NodeId) u64 {
     return skey_mix(0, module as u64 << 32 | node as u64);
 }
 
-// The callee of `t` may end the caller's path: a `@c.noreturn` function, or an extern C function other
+// The callee of `t` may end the caller's path: a `@noreturn` function, or an extern C function other
 // than a verified intrinsic.
 fn call_ends(p: &loader::Package, t: &ir::Terminator) bool {
     let d = t.callee;

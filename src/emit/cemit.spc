@@ -74,7 +74,7 @@ pub struct CEmit {
     pub glue_envs: Vector<GlueEnv>,
     // The current body returns a fixed array by value (in its carrier, `mret`).
     arr_ret: bool,
-    /// Set by the caller before `emit_fn` for a `@c.noreturn` item: the signature (and so its
+    /// Set by the caller before `emit_fn` for a `@noreturn` item: the signature (and so its
     /// prototype) gets the `_Noreturn` specifier; without it -Werror flags the paths behind a
     /// panic as reading uninitialized locals. Cleared on every emission.
     pub noret: bool,
@@ -1106,6 +1106,17 @@ extend CEmit {
             dst.push_str(")");
             return okx;
         }
+        if self.extern_fn(callee) && self.void_ptr_param(callee, i) && self.typed_ptr(
+            b,
+            b.operands.at(opid as usize).ty,
+        ) {
+            // The pointer converts to the declared `void *`, which the C call must spell: the
+            // header may declare another pointee (Winsock's `char *` option values).
+            dst.push_str("(void *)(");
+            let okv = self.emit_operand(b, opid, dst);
+            dst.push_str(")");
+            return okv;
+        }
         let mut want_ref = false;
         let mut want_val = false; // the param takes the VALUE: reference args deref
         let mut param_box = false; // the param's own pointee IS a Box or a generic: no deref hop
@@ -1561,9 +1572,12 @@ extend CEmit {
         // A `[]mut T` parameter passes as a `restrict` pointer and a length to `<name>__r`; `<name>`
         // keeps the struct ABI for every caller that does not split (see `split_abi`).
         let split = self.split_abi(b);
-        let mut fname = String::from_str(name);
+        let mut fname = String::new();
         if split {
+            fname.push_str(name);
             fname.push_str("__r");
+        } else {
+            self.decl_name(b, name, &mut fname);
         }
         let mut ret_void = false;
         let hstart = self.out.len();
@@ -1782,7 +1796,7 @@ extend CEmit {
         for i in 0..b.asms.len() {
             let t = b.asms.at(i).template;
             self.out.push_str("  __asm__ volatile (");
-            self.out.push_str(src.slice(t.start as usize, t.end as usize));
+            push_c_asm_str(src.slice(t.start as usize, t.end as usize), &mut self.out);
             self.out.push_str(");\n");
         }
         self.out.push_str(
@@ -1909,7 +1923,7 @@ extend CEmit {
 
     // Ahead of the split definition whose finished declarator is `out[hhead..]` (its attributes start
     // at `hstart`), write the prototype of `fname` and the struct-ABI entry `name`, which every other
-    // caller reaches (function values, vtables, `@c.export`, unsplit calls): `<decl of name>(<the
+    // caller reaches (function values, vtables, `@export`, unsplit calls): `<decl of name>(<the
     // struct parameters>) { return fname(a.ptr, a.len, ..); }`, both on the chunk's first line, which
     // `proto_of` turns into the chunk's prototype line. The entry takes no attributes: a prototype
     // must not carry them.
@@ -1952,7 +1966,7 @@ extend CEmit {
             i1 += 1;
         }
         pre.push_str(hdr.as_str().slice(0, i0));
-        pre.push_str(name);
+        self.decl_name(b, name, &mut pre);
         pre.push_str("(");
         let mut args = self.sget();
         let mut np: u32 = 0;
@@ -2003,6 +2017,20 @@ extend CEmit {
         self.sput(hdr);
         self.sput(pre);
         return true;
+    }
+
+    // The declarator name of body `b`'s C symbol `name` into `o`. An `@export` symbol is parenthesized:
+    // it may be a function-like macro of an included header (`super_rt.h` wraps `malloc` for the leak
+    // tracker), which must not expand in the definition or its prototype.
+    fn decl_name(self: &Self, b: &ir::CoreBody, name: str, o: &mut String) {
+        let pinned = unsafe (*self.p().module_ast_const(b.owner.module)).attr_of(b.owner.node, AttrKind::ATTR_EXPORT) != null;
+        if pinned {
+            o.push_str("(");
+        }
+        o.push_str(name);
+        if pinned {
+            o.push_str(")");
+        }
     }
 
     // A name that would collide with the `_N` temp spelling: `_` followed by only digits.
@@ -2792,10 +2820,11 @@ extend CEmit {
         return k == ir::RV_USE || k == ir::RV_UNARY || k == ir::RV_BINARY || k == ir::RV_CAST || k == ir::RV_REF || k == ir::RV_ADDR || k == ir::RV_LEN || k == ir::RV_DISCRIMINANT;
     }
 
-    // `IN_LIKELY(x)`: pure, one operand, spelled as one call expression. It must fold into the
-    // branch that tests it: clang drops a `__builtin_expect` whose result passes through a variable.
+    // `IN_LIKELY(x)` and `IN_UNLIKELY(x)`: pure, one operand, spelled as one call expression. They must
+    // fold into the branch that tests them: clang drops a `__builtin_expect` whose result passes
+    // through a variable.
     const fn is_likely(rv: &ir::Rvalue) bool {
-        return rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_LIKELY;
+        return rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_LIKELY || rv.c == ir::IN_UNLIKELY);
     }
 
     // A pointer local whose one definition is the address of a place that stays where it is, and
@@ -4695,6 +4724,32 @@ extend CEmit {
     // is read where the local is not: the block must also dominate the local's storage ends, so
     // the declaration's C scope holds every point where the borrow may be read. Two near-linear
     // passes: first write and borrows per local, then a write-domination sweep.
+    // Whether a block spelled after an enclosing loop may read the range-loop index that block `init`
+    // initializes: the follow of an enclosing loop is spelled after that loop, out of the scope of a
+    // declaration inside it, and a follow only the range loop reaches is an exit from its body that may
+    // read the index (`loop { for i in 0..n { if f(i) { return i; } } }`).
+    fn index_read_past_outer_loop(b: &ir::CoreBody, cf: &cfl::CFlow, init: u32) bool {
+        let t = b.blocks.at(init as usize).term;
+        let mut h = init;
+        let mut outer = *cf.loop_of.at(init as usize);
+        if t.kind == ir::TM_GOTO && *cf.is_header.at((*cf.thread.at(t.t0 as usize)) as usize) {
+            h = *cf.thread.at(t.t0 as usize);
+            outer = *cf.loop_parent.at(h as usize);
+        }
+        // Bounded: each step moves to an enclosing loop.
+        for _ in 0..cf.n {
+            if outer == cfl::NONE {
+                return false;
+            }
+            let f = *cf.loop_follow.at(outer as usize);
+            if f != cfl::NONE && cf.dominates(h, f) {
+                return true;
+            }
+            outer = *cf.loop_parent.at(outer as usize);
+        }
+        return true;
+    }
+
     fn compute_fusion(self: &mut Self, b: &ir::CoreBody, cf: &cfl::CFlow) {
         let n = b.locals.len();
         self.sx_fuse.clear();
@@ -4832,7 +4887,7 @@ extend CEmit {
             // lexical scope across a loop exit. A range-loop index is scoped to that loop and may
             // declare at its initializer even when the loop is nested.
             if *cf.loop_of.at((*init_blk.at(l)) as usize) != cfl::NONE {
-                if b.locals.at(l).dkind != ir::LK_FOR {
+                if b.locals.at(l).dkind != ir::LK_FOR || CEmit::index_read_past_outer_loop(b, cf, *init_blk.at(l)) {
                     continue;
                 }
             }
@@ -6648,6 +6703,10 @@ extend CEmit {
             return false;
         }
         let index = lp.base;
+        // A static's place spells its item symbol, which `lspell` cannot: its step stays in the body.
+        if b.locals.at(index as usize).storage == ir::LS_STATIC_REF {
+            return false;
+        }
         let mut found = false;
         for pi in *cf.pred_start.at(h as usize)..*cf.pred_start.at((h + 1) as usize) {
             let bi = *cf.pred_list.at(pi as usize);
@@ -7934,7 +7993,7 @@ extend CEmit {
         if d.template.end <= d.template.start {
             o.push_str("\"\"");
         } else {
-            o.push_str(src.slice(d.template.start as usize, d.template.end as usize));
+            push_c_asm_str(src.slice(d.template.start as usize, d.template.end as usize), o);
         }
         let want = d.nout != 0 || d.nin != 0 || d.nclob != 0;
         let mut ok = true;
@@ -7948,7 +8007,7 @@ extend CEmit {
                     o.push_str(", ");
                 }
                 let cs = *b.asm_spans.at((d.cons + i) as usize);
-                o.push_str(src.slice(cs.start as usize, cs.end as usize));
+                push_c_asm_str(src.slice(cs.start as usize, cs.end as usize), o);
                 o.push_str("(");
                 let opid = b.oper_pool[(rv.a + i) as usize];
                 let op = *b.operands.at(opid as usize);
@@ -7970,7 +8029,7 @@ extend CEmit {
                     o.push_str(", ");
                 }
                 let cs = *b.asm_spans.at((d.cons + d.nout + i) as usize);
-                o.push_str(src.slice(cs.start as usize, cs.end as usize));
+                push_c_asm_str(src.slice(cs.start as usize, cs.end as usize), o);
                 o.push_str("(");
                 let opid = b.oper_pool[(rv.a + d.nout + i) as usize];
                 ok = self.emit_operand(b, opid, o);
@@ -7984,7 +8043,7 @@ extend CEmit {
                     o.push_str(", ");
                 }
                 let cs = *b.asm_spans.at((d.cons + d.nout + d.nin + k) as usize);
-                o.push_str(src.slice(cs.start as usize, cs.end as usize));
+                push_c_asm_str(src.slice(cs.start as usize, cs.end as usize), o);
             }
         }
         o.push_str(");\n");
@@ -11096,6 +11155,29 @@ extend CEmit {
                         self.stat_seen.insert(h);
                         let idn = unsafe (*self.p().module_ast_const(item.module)).at_const(item.node);
                         let hdr_owned = idn.kind == NodeKind::NODE_CONST && idn.as_data.const_def.is_extern;
+                        if hdr_owned && self.is_tls(item) {
+                            let mut symb = self.sget();
+                            symb.push_str(dst.as_str().slice(d0, dst.len()));
+                            let mut sd = String::new();
+                            if !self.tls_accessor(b.module, b.locals.at(base as usize).ty, symb.as_str(), &mut sd) {
+                                self.sput(symb);
+                                return self.fail("tls-accessor");
+                            }
+                            // Its accessor is the item's one declaration: the header declares the
+                            // object, and the definition pass skips a header-owned item.
+                            self.stat_decls.push_string(&sd);
+                            self.stat_end.push(self.stat_decls.len() as u32);
+                            self.stat_items.push(
+                                StatRef {
+                                    em: b.module,
+                                    def: item,
+                                    sym: symb.clone(),
+                                    ty: b.locals.at(base as usize).ty,
+                                    args: Vector::<mbe::MSub>::new(),
+                                },
+                            );
+                            self.sput(symb);
+                        }
                         if !hdr_owned {
                             // Extern-block statics skip the stub: the backing header declares them
                             // (with qualifiers a re-declaration here could contradict).
@@ -11105,6 +11187,15 @@ extend CEmit {
                             self.stat_specs(item, b.module, b.locals.at(base as usize).ty, &mut sd);
                             if self.ty_c(b.module, b.locals.at(base as usize).ty, symb.as_str(), &mut sd) {
                                 sd.push_str(";\n");
+                                if self.is_tls(item) && !self.tls_accessor(
+                                    b.module,
+                                    b.locals.at(base as usize).ty,
+                                    symb.as_str(),
+                                    &mut sd,
+                                ) {
+                                    self.sput(symb);
+                                    return self.fail("tls-accessor");
+                                }
                                 self.stat_decls.push_string(&sd);
                                 self.stat_end.push(self.stat_decls.len() as u32);
                                 self.stat_items.push(
@@ -11125,6 +11216,11 @@ extend CEmit {
                         }
                     }
                 }
+            }
+            if !folded && self.is_tls(item) {
+                // A thread-local is reached through its accessor (`tls_accessor`).
+                dst.insert_str(d0, "(*");
+                dst.push_str("__tls())");
             }
         } else if self.cap_on && base >= self.cap_base && base as usize < self.cap_base as usize + self.cap_off.len() {
             let k = base - self.cap_base;
@@ -11732,6 +11828,10 @@ extend CEmit {
             if c.targ_len() != 0 && unsafe (*self.p().module_ast_const(c.item.module)).at_const(c.item.node).kind == NodeKind::NODE_CONST {
                 return self.assoc_const_ref(b, &c, dst);
             }
+            if self.collect_demand {
+                // An extern function named as a value needs its declaration as a call does.
+                self.collect_extern_proto(c.item);
+            }
             return self.callee_sym(
                 b,
                 c.item,
@@ -12204,13 +12304,30 @@ extend CEmit {
         }
         self.stat_seen.insert(h);
         let idn = unsafe (*self.p().module_ast_const(item.module)).at_const(item.node);
-        if !(idn.kind == NodeKind::NODE_CONST && idn.as_data.const_def.is_extern) {
+        let hdr_owned = idn.kind == NodeKind::NODE_CONST && idn.as_data.const_def.is_extern;
+        if hdr_owned && self.is_tls(item) {
+            // Its accessor is the item's one declaration: the header declares the object, and the
+            // definition pass skips a header-owned item.
+            let mut sd = String::new();
+            if !self.tls_accessor(em, ty, sym, &mut sd) {
+                return false;
+            }
+            self.stat_decls.push_string(&sd);
+            self.stat_end.push(self.stat_decls.len() as u32);
+            self.stat_items.push(
+                StatRef { em: em, def: item, sym: String::from_str(sym), ty: ty, args: mbe::subs_copy(args) },
+            );
+        }
+        if !hdr_owned {
             let mut sd = String::from_str("extern ");
             self.stat_specs(item, em, ty, &mut sd);
             if !self.ty_c(em, ty, sym, &mut sd) {
                 return false;
             }
             sd.push_str(";\n");
+            if self.is_tls(item) && !self.tls_accessor(em, ty, sym, &mut sd) {
+                return false;
+            }
             self.stat_decls.push_string(&sd);
             self.stat_end.push(self.stat_decls.len() as u32);
             self.stat_items.push(
@@ -12225,18 +12342,46 @@ extend CEmit {
         return true;
     }
 
+    /// Whether static `item` is `@thread_local`.
+    fn is_tls(self: &Self, item: DefId) bool {
+        return item.node != NODE_NONE && unsafe (*self.p().module_ast_const(item.module)).attr_of(
+            item.node,
+            AttrKind::ATTR_THREAD_LOCAL,
+        ) != null;
+    }
+
+    // The accessor of thread-local `sym` (type `ty` of pool `em`) into `out`: every use spells
+    // `(*sym__tls())`. A coroutine resumes on any worker thread, and a C compiler may keep a
+    // thread-local's address across a call, so each access computes the address again in a call
+    // that is not inlined; the empty `asm` keeps the call from being folded with an earlier one. Each
+    // unit defines its own copy, under a guard for a unity build that holds several units.
+    fn tls_accessor(self: &mut Self, em: ModuleId, ty: TypeId, sym: str, out: &mut String) bool {
+        out.format_into("#ifndef {}__tls_d\n#define {}__tls_d\nstatic __attribute__((noinline, unused)) ", sym, sym);
+        let mut d = String::from_str("(*");
+        d.push_str(sym);
+        d.push_str("__tls(void))");
+        if !self.ty_c(em, ty, d.as_str(), out) {
+            return false;
+        }
+        out.format_into(" {\n  __asm__ volatile(\"\" ::: \"memory\");\n  return &{};\n}\n#endif\n", sym);
+        return true;
+    }
+
     /// The declaration specifiers of static `item` (its C object of type `ty`, pool `em`) before its
-    /// type into `out`: `_Alignas(N) ` for `@c.align(N)` above the type's own alignment (C rejects a
-    /// weaker specifier), then `const ` for a read-only constant (`stat_ro`). The definition and every
-    /// declaration spell the same specifiers.
+    /// type into `out`: `_Thread_local ` for `@thread_local`, then `_Alignas(N) ` for `@align(N)` above
+    /// the type's own alignment (C rejects a weaker specifier), then `const ` for a read-only constant
+    /// (`stat_ro`). The definition and every declaration spell the same specifiers.
     pub fn stat_specs(self: &mut Self, item: DefId, em: ModuleId, ty: TypeId, out: &mut String) {
         let a = self.p().module_ast_const(item.module);
+        if unsafe (*a).attr_of(item.node, AttrKind::ATTR_THREAD_LOCAL) != null {
+            out.push_str("_Thread_local ");
+        }
         let at = unsafe (*a).attr_of(item.node, AttrKind::ATTR_ALIGN);
         if at != null {
             let mut v = (unsafe (*at).arg) as u64;
             if unsafe (*at).expr {
                 let av = unsafe (*a).attr_value(item.node, AttrKind::ATTR_ALIGN);
-                assert(av.ok, "the checker folds every '@c.align' argument of an emitted static");
+                assert(av.ok, "the checker folds every '@align' argument of an emitted static");
                 v = av.v;
             }
             let l = self.mg.layout_sub(em, ty);
@@ -15070,6 +15215,51 @@ extend CEmit {
         return self.wrap_ptr_in(rm, rt);
     }
 
+    // Whether parameter `i` of function `d` is declared a pointer to `void`.
+    fn void_ptr_param(self: &Self, d: DefId, i: u32) bool {
+        let fa = self.p().module_ast_const(d.module);
+        let ps = unsafe (*fa).at_const(d.node).as_data.function.params;
+        if i >= ps.len {
+            return false;
+        }
+        let pn = unsafe (*fa).at_const(unsafe (*fa).list(ps)[i as usize]);
+        if pn.kind != NodeKind::NODE_PARAMETER || pn.as_data.parameter.ty == NODE_NONE {
+            return false;
+        }
+        let pty = unsafe (*fa).type_of(pn.as_data.parameter.ty);
+        if pty == TYPE_NONE {
+            return false;
+        }
+        let y = *unsafe (*fa).type_at(pty);
+        if y.kind != TypeKind::TYPE_POINTER {
+            return false;
+        }
+        let e = *unsafe (*fa).type_at(y.as_data.elem);
+        return e.kind == TypeKind::TYPE_BUILTIN && e.as_data.builtin == BuiltinType::BT_VOID;
+    }
+
+    // Whether `(b.module, t)` is a pointer or reference to something other than `void`.
+    fn typed_ptr(self: &Self, b: &ir::CoreBody, t: TypeId) bool {
+        if t == TYPE_NONE {
+            return false;
+        }
+        let mut rm = b.module;
+        let mut rt = t;
+        self.rty(b, t, &mut rm, &mut rt);
+        let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
+        if y.kind != TypeKind::TYPE_POINTER && y.kind != TypeKind::TYPE_REFERENCE {
+            return false;
+        }
+        let mut em = rm;
+        let mut et = y.as_data.elem;
+        if !self.mg.resolve(rm, y.as_data.elem, &mut em, &mut et) {
+            em = rm;
+            et = y.as_data.elem;
+        }
+        let e = *unsafe (*self.p().module_ast_const(em)).type_at(et);
+        return !(e.kind == TypeKind::TYPE_BUILTIN && e.as_data.builtin == BuiltinType::BT_VOID);
+    }
+
     // `wrap_ptr` of resolved `(m, t)`.
     fn wrap_ptr_in(self: &mut Self, m: ModuleId, t: TypeId) bool {
         if t == TYPE_NONE {
@@ -15672,6 +15862,40 @@ extend CEmit {
                     let mut rm9 = b.module;
                     let mut rt9 = pty9;
                     self.rty(b, pty9, &mut rm9, &mut rt9);
+                    let y9 = *unsafe (*self.p().module_ast_const(rm9)).type_at(rt9);
+                    let void9 = y9.kind == TypeKind::TYPE_BUILTIN && y9.as_data.builtin == BuiltinType::BT_VOID;
+                    // A zero-sized FIELD of a sized struct (a flexible array member) sits at its
+                    // offset inside that struct: the address is the struct's plus the offset. A
+                    // `void` field has no place in it.
+                    let lastj = rpl9.proj_start as usize + rpl9.proj_len as usize;
+                    if !void9 && rpl9.proj_len != 0 && b.projections.at(lastj - 1).kind == ir::PJ_FIELD {
+                        let ownt = if rpl9.proj_len > 1 {
+                            b.projections.at(lastj - 2).ty;
+                        } else {
+                            b.locals.at(rpl9.base as usize).ty;
+                        };
+                        let mut om = b.module;
+                        let mut ot = ownt;
+                        self.rty(b, ownt, &mut om, &mut ot);
+                        // Only a struct field: a tuple element and an enum payload keep the sentinel.
+                        let oa = self.p().module_ast_const(om);
+                        let oy = *unsafe (*oa).type_at(ot);
+                        let mut ostruct = oy.kind == TypeKind::TYPE_STRUCT;
+                        if oy.kind == TypeKind::TYPE_INSTANCE {
+                            let oi = *unsafe (*oa).instance(oy.as_data.inst);
+                            ostruct = unsafe (*self.p().module_ast_const(oi.module)).at_const(oi.decl).kind == NodeKind::NODE_STRUCT;
+                        }
+                        if ostruct && !self.erased(b, ownt) {
+                            let off = self.mg.lay.field_offset(om, ot, b.projections.at(lastj - 1).sub);
+                            if off < 0 {
+                                return self.fail("zst-field-offset");
+                            }
+                            dst.push_str("((void *)((char *)&");
+                            let ok = self.emit_place_lim(b, rv.a, rpl9.proj_len - 1, dst);
+                            dst.format_into(" + {}))", off);
+                            return ok;
+                        }
+                    }
                     return self.zst_sentinel_ref(rm9, rt9, dst);
                 }
             }
@@ -16269,10 +16493,10 @@ extend CEmit {
                 // Only the validated exclusive end remains.
                 return self.emit_operand(b, b.oper_pool[(rv.a + 1) as usize], dst);
             }
-            if k == ir::IN_LIKELY as u32 {
+            if k == ir::IN_LIKELY as u32 || k == ir::IN_UNLIKELY as u32 {
                 dst.push_str("__builtin_expect(");
                 let ok = self.emit_operand(b, b.oper_pool[rv.a as usize], dst);
-                dst.push_str(", 1)");
+                dst.push_str(mbe::if_s(k == ir::IN_LIKELY as u32, ", 1)", ", 0)"));
                 return ok;
             }
             if k == ir::IN_CHUNK as u32 {
@@ -16761,33 +16985,37 @@ extend CEmit {
         return self.fail("agg-kind");
     }
 
-    // A shim extern's prototype, typed from THIS call site (extern signatures carry no recorded
-    // types; call-site operand/dest types resolve under the active env). First caller wins;
-    // variadic tails past the declared params are cut at `...`.
-    fn collect_extern_proto(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator) {
-        if t.callee.node == NODE_NONE {
+    // The prototype of an extern function of a block without a header (a runtime primitive, or a C
+    // function whose header the build cannot include), typed from its declaration: an extern
+    // function is never generic, so
+    // its parameter and result annotations carry their types in the callee's module. A call-site
+    // operand can hold a value before its conversion to the parameter type. Variadic tails past the
+    // declared params are cut at `...`.
+    fn collect_extern_proto(self: &mut Self, callee: DefId) {
+        if callee.node == NODE_NONE {
             return;
         }
-        let ca = self.p().module_ast_const(t.callee.module);
-        let fd = unsafe (*ca).at_const(t.callee.node);
+        let ca = self.p().module_ast_const(callee.module);
+        let fd = unsafe (*ca).at_const(callee.node);
         if fd.kind != NodeKind::NODE_FUNCTION {
             return;
         }
         if !fd.as_data.function.is_extern() {
             return;
         }
-        if self.ext_backed.contains(&skey_mix(0, t.callee.module as u64 << 32 | t.callee.node as u64)) {
+        if self.ext_backed.contains(&skey_mix(0, callee.module as u64 << 32 | callee.node as u64)) {
             // The extern block's header ships the real prototype.
             return;
         }
         let mut sym = String::new();
-        {
-            self.mg.ident(t.callee.module, unsafe (*ca).at_const(fd.as_data.function.name).as_data.name.text, &mut sym);
-            let s0k = sym.as_str();
-            let keep = s0k.len() > 3 && s0k.slice(0, 3) == "sc_";
-            if !keep {
-                return;
-            }
+        if !self.mg.fn_sym(callee.module, callee.node, DefId { module: 0, node: NODE_NONE }, &mut sym) || self.mg.c_lib_declared(
+            sym.as_str(),
+        ) && !sym.as_str().ends_with("_np") || sym.as_str().starts_with("__sc_") {
+            // A header the emitted C includes declares it: a C library name, or an entry point of
+            // `super_rt.h` (`__sc_panic_str`). Another reserved name (glibc's `__libc_malloc`) has
+            // no header and takes the prototype, and so does a non-portable `_np` call, which the
+            // build's strict POSIX level hides.
+            return;
         }
         let h = sym.as_str().hash();
         let fresh = !self.extern_seen.contains(&h);
@@ -16797,38 +17025,35 @@ extend CEmit {
         if fresh {
             self.extern_seen.insert(h);
         }
+        let cm = callee.module;
         let mut pr = String::from_str("extern ");
-        let mut rty = TYPE_NONE;
-        if t.dests_len == 1 {
-            rty = b.places.at(b.dest_pool[t.dests_start as usize] as usize).ty;
-        }
-        let mut pok = self.ty_c(b.module, rty, "", &mut pr);
+        let rets = fd.as_data.function.returns;
+        let rty = if rets.len == 0 {
+            Ast::builtin(BuiltinType::BT_VOID);
+        } else {
+            unsafe (*ca).type_of(unsafe (*ca).list(rets)[0]);
+        };
+        let mut pok = rets.len <= 1 && rty != TYPE_NONE && self.ty_c(cm, rty, "", &mut pr);
         let rdecl = pr.len() + 1;
         if pok {
             pr.push_str(" ");
             pr.push_string(&sym);
             pr.push_str("(");
             let np = fd.as_data.function.params.len;
-            let mut i: u32 = 0;
-            while i < t.args_len && i < np {
+            for i in 0..np {
                 if i != 0 {
                     pr.push_str(", ");
                 }
-                let aty = b.operands.at(b.oper_pool[(t.args_start + i) as usize] as usize).ty;
-                if self.is_unit(b, aty) {
-                    // An untyped/null arg gives no parameter type: leave it implicit.
+                let pid = unsafe (*ca).list(fd.as_data.function.params)[i as usize];
+                let pty = unsafe (*ca).type_of(unsafe (*ca).at_const(pid).as_data.parameter.ty);
+                if pty == TYPE_NONE {
                     pok = false;
                     break;
                 }
-                let k5 = self.rty_y(b, aty).kind;
-                if k5 == TypeKind::TYPE_POINTER || k5 == TypeKind::TYPE_REFERENCE {
-                    // Parameter-compatible with every pointer arg.
-                    pr.push_str("const void *");
-                } else if !self.ty_c(b.module, aty, "", &mut pr) {
+                if !self.ty_c(cm, pty, "", &mut pr) {
                     pok = false;
                     break;
                 }
-                i += 1;
             }
             if fd.as_data.function.is_variadic() {
                 pr.push_str(", ...");
@@ -16837,7 +17062,7 @@ extend CEmit {
                 pr.push_str("void");
             }
             pr.push_str(")");
-            pok = pok && self.fn_decl(b.module, rty, 7, rdecl, &mut pr);
+            pok = pok && self.fn_decl(cm, rty, 7, rdecl, &mut pr);
             pr.push_str(";\n");
         }
         if pok {
@@ -17799,7 +18024,7 @@ extend CEmit {
                 return false;
             }
             if self.collect_demand && dyn_recv == ir::IR_NONE {
-                self.collect_extern_proto(b, t);
+                self.collect_extern_proto(t.callee);
             }
             // a forwarded destination: this call spells `f(..)` at its single read instead of storing
             // to a temporary, so it emits nothing here and builds the expression into sx_call_str.
@@ -17923,9 +18148,12 @@ extend CEmit {
                         }
                     }
                     if ok && !env_first && !dyn_val {
+                        let c0 = sink.len();
                         ok = self.emit_operand(b, t.a, sink);
+                        guard_rt_macro(sink, c0);
                     }
                 } else if ok && dyn_recv != ir::IR_NONE {
+                    let c0 = sink.len();
                     ok = self.emit_dyn_recv(b, dyn_recv, dyn_stars, sink);
                     sink.push_str(".vt->");
                     let ca0 = self.p().module_ast_const(t.callee.module);
@@ -17938,6 +18166,7 @@ extend CEmit {
                         sink.push_str("__free");
                     } else {
                         self.mg.ident(t.callee.module, mname, sink);
+                        guard_rt_macro(sink, c0);
                     }
                 } else if ok && self.counted_call(b, t) {
                     sink.push_str("(uint32_t)"); // the comparison wrote the count
@@ -18315,6 +18544,22 @@ fn push_fmt_escaped(txt: str, dst: &mut String) {
 
 /// Raw bytes into a C string literal: printable ASCII stays, specials get named escapes, the rest
 /// three-digit octal (fixed width, so a following digit can never extend the escape).
+/// String literal `raw` of an `asm` template, constraint or clobber (its source text: a quoted literal
+/// or a matchertext literal) as a C string literal.
+pub fn push_c_asm_str(raw: str, dst: &mut String) {
+    let tk = if raw.len() != 0 && raw.byte_at(0) == b'M' {
+        tt::TokenType::MatchertextLiteral;
+    } else {
+        tt::TokenType::StringLiteral;
+    };
+    let mut tmp = String::new();
+    let mut bytes = String::new();
+    str_const_bytes(raw, tk as i64, &mut tmp, &mut bytes);
+    dst.push_str("\"");
+    push_c_escaped(bytes.as_str(), dst);
+    dst.push_str("\"");
+}
+
 pub fn push_c_escaped(txt: str, dst: &mut String) {
     for i in 0..txt.len() {
         push_c_escaped_byte(txt.byte_at(i), dst);
@@ -19085,4 +19330,22 @@ const fn lane_bytes(bt: BuiltinType) u64 {
         BT_I32 | BT_U32 | BT_F32 => 4,
         _ => 8,
     };
+}
+
+// Parenthesize the callee spelled at `sink[c0..]` when it ends in a member or local named like one of
+// super_rt.h's allocator macros (`p->free`): `p->free(x)` would expand the leak tracker's `free(__p)`.
+fn guard_rt_macro(sink: &mut String, c0: usize) {
+    let s = sink.as_str();
+    let mut k = s.len();
+    while k > c0 {
+        let c = s.byte_at(k - 1);
+        if c != b'_' && (c < b'0' || c > b'9') && (c < b'a' || c > b'z') && (c < b'A' || c > b'Z') {
+            break;
+        }
+        k -= 1;
+    }
+    if mbe::rt_macro(s.slice(k, s.len())) {
+        sink.insert_str(c0, "(");
+        sink.push_str(")");
+    }
 }

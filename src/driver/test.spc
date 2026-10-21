@@ -563,7 +563,7 @@ static void sc_runner_abort(int sig) {
 #define sc_chdir _chdir
 #define sc_setenv(n, v) _putenv_s(n, v)
 #define sc_unsetenv(n) _putenv_s(n, "")
-/* The process-tree jobserver the compiler made (driver_shim.c): each slot is one byte of a slot file,
+/* The process-tree jobserver the compiler made (src/driver_shim.spc): each slot is one byte of a slot file,
    held by a LockFileEx byte lock, which the system drops when the holder ends. */
 static HANDLE sc_runner_js = INVALID_HANDLE_VALUE;
 static int sc_runner_js_slots = -1;
@@ -588,7 +588,7 @@ static int sc_runner_jobserver_lock(int i, int lock) {
   return GetLastError() == ERROR_LOCK_VIOLATION ? 0 : -1;
 }
 /* A runner started without an inherited jobserver makes its own of `capacity` slots, one implicit, as
-   the compiler does (driver_shim.c): the tests and every process they start share one budget. 1 when a
+   the compiler does (src/driver_shim.spc): the tests and every process they start share one budget. 1 when a
    jobserver is active. */
 static int sc_runner_jobserver_init(int capacity) {
   if (sc_runner_jobserver_active()) return 1;
@@ -632,7 +632,7 @@ extern char **environ;
 #define sc_chdir chdir
 #define sc_setenv(n, v) setenv(n, v, 1)
 #define sc_unsetenv(n) unsetenv(n)
-/* The process-tree jobserver the compiler made (driver_shim.c): each slot is one byte of the unlinked
+/* The process-tree jobserver the compiler made (src/driver_shim.spc): each slot is one byte of the unlinked
    slot file whose descriptor every process inherits, held by an fcntl record lock, which the system
    drops when the holder ends and a forked child does not inherit. */
 static int sc_runner_js = -1;
@@ -663,7 +663,7 @@ static int sc_runner_jobserver_lock(int i, int lock) {
   }
 }
 /* A runner started without an inherited jobserver makes its own of `capacity` slots, one implicit, as
-   the compiler does (driver_shim.c): the tests and every process they start share one budget. 1 when a
+   the compiler does (src/driver_shim.spc): the tests and every process they start share one budget. 1 when a
    jobserver is active. */
 static int sc_runner_jobserver_init(int capacity) {
   if (sc_runner_jobserver_active()) return 1;
@@ -1688,7 +1688,7 @@ pub fn write_test_main(p: &mut loader::Package, plan: &TestPlan, fresh: &mut boo
     return Option::<String>::Some(path);
 }
 
-/// Append the `@c.link` flags of the `__ldflags` file `path` (one flag string per line, split on
+/// Append the `@link` flags of the `__ldflags` file `path` (one flag string per line, split on
 /// whitespace) to `args`; a missing file adds nothing.
 pub fn push_ldflags(args: &mut Vector<String>, path: str) {
     let lf = loader::read_file(path);
@@ -1741,7 +1741,7 @@ pub fn test_build_and_run(
         "test build";
     };
     let mut basev = String::from_str(
-        "-std=c11 -D_POSIX_C_SOURCE=200809L -funsigned-char -ffp-contract=off -Werror=incompatible-pointer-types",
+        "-std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -funsigned-char -ffp-contract=off -Werror=incompatible-pointer-types",
     );
     basev.push_str(bsys::LIBM_AS_WRITTEN);
     let base = basev.as_str();

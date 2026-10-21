@@ -250,7 +250,7 @@ pub const fn watermark(a: &Ast) FactsWatermark {
 /// freed at its last reader must match the snapshot up to its release and its released length
 /// since, and must be released at its point: the body facts with the body arena, `method_refs` and
 /// `seeds` once `after_checks`.
-@c.cold
+@cold
 pub fn watermark_check(a: &Ast, w: &FactsWatermark, mid: u32, after_checks: bool) u32 {
     let now = watermark(a);
     let live_body = a.b.nodes.len() != 0;
@@ -289,7 +289,7 @@ pub fn watermark_check(a: &Ast, w: &FactsWatermark, mid: u32, after_checks: bool
 }
 
 // Report table `k` of module `mid` going from length `was` to `cur` (`when` qualifies it), as 1.
-@c.cold
+@cold
 fn wm_diff(mid: u32, k: usize, was: usize, cur: usize, when: str) u32 {
     if was == cur {
         return 0;
@@ -304,7 +304,7 @@ fn wm_diff(mid: u32, k: usize, was: usize, cur: usize, when: str) u32 {
     return 1;
 }
 
-@c.cold
+@cold
 fn wm_report(mid: u32, what: str) {
     let mut s = String::from_str("facts-check: module ");
     s.push_u64(mid);

@@ -78,7 +78,7 @@ fn closure_bounds_reject_feature_functions() {
     b.add(
         "an export",
         "@arch(x86_64)\n@target_feature([cpu::Feature::Avx2])\n@c.export(\"k\")\npub fn k() {}\nfn main() i32 {\n    return 0;\n}\n",
-        "a '@c.export' function cannot need CPU features",
+        "a '@export' function cannot need CPU features",
     );
     p.expect_batch(b);
     let ok = x86(

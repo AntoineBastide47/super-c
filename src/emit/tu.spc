@@ -46,7 +46,7 @@ pub struct TuEmit {
     state: Map<u64, u64>,
     fwds: Map<u64, u64>, // forward-typedef'd names (deps discovered mid-DFS need one too)
     // Per module, the layout attributes by owner, indexed on the module's first query:
-    // (module << 32 | owner) -> the `@c.align` value << 1 | packed.
+    // (module << 32 | owner) -> the `@align` value << 1 | packed.
     lay_built: Vector<bool>,
     lay_attrs: Map<u64, u64>,
     // Cleared chunk bodies for reuse: `agg_chunk` renders its dependencies first, one body per level.
@@ -296,8 +296,8 @@ extend TuEmit {
         return true;
     }
 
-    // The layout attributes of declaration `decl` in module `m`: the `@c.align` value
-    // (0 when none) << 1 | whether it is `@c.packed`.
+    // The layout attributes of declaration `decl` in module `m`: the `@align` value
+    // (0 when none) << 1 | whether it is `@packed`.
     fn layout_attrs(self: &mut Self, m: ModuleId, decl: NodeId) u64 {
         if self.lay_built.len() == 0 {
             self.lay_built.resize_default(self.p().modules.len());

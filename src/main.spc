@@ -54,6 +54,7 @@ fn run_file(
     let bi = bman::builtins_only();
     p.simd_dispatch = String::from_str(bsys::dispatch_for(&bi, profile, simd_dispatch));
     p.mem_check = bsys::mem_checker(cflags);
+    p.build_cfg = bsys::build_cfg(cflags);
     p.test_build = unsafe (*topts).enabled;
     p.profile = String::from_str(profile);
     p.profiles = bsys::profile_names(&bi);
@@ -1469,7 +1470,10 @@ OPTIONS:
     };
     // Waiting test parents transfer their slots to nested compilers. One process-tree slot per core keeps
     // independent tests parallel while nested compilers run serially instead of competing for the same cores.
-    unsafe shim::sc_jobserver_init(jobs_wanted as i32);
+    // WASI has no processes, so no jobserver.
+    if PLATFORM != Platform::Wasm {
+        unsafe shim::sc_jobserver_init(jobs_wanted as i32);
+    }
     let jobs = (unsafe shim::sc_jobserver_claim(jobs_wanted as i32)) as u32;
     // Fmt/lint take any number of paths; with none, the project discovers itself.
     let mut paths = Vector::<String>::new();

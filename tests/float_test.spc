@@ -163,7 +163,7 @@ fn field_value(raw: u64, e: usize, f: usize) f64 {
 }
 
 // A format no wider than f32 in either field converts exactly, every encoding of it: to_f32 and
-// to_f64 give its value, NaNs a NaN.
+// to_f64 give its value, NaNs the canonical quiet NaN with the sign kept.
 @test
 fn narrow_formats_widen_exactly() {
     for raw in 0u64..65536 {
@@ -173,6 +173,10 @@ fn narrow_formats_widen_exactly() {
         let w = field_value(raw, 8, 7);
         let g = bf16::from_raw(UInt::<16>::from_u64(raw));
         assert(same64(g.to_f64(), w) && same32(g.to_f32(), w as f32));
+        if h.is_nan() {
+            assert_eq(f32_bits(h.to_f32()), (raw >> 15) as u32 << 31 | 0x7FC00000);
+            assert_eq(f64_bits(h.to_f64()), raw >> 15 << 63 | 0x7FF8000000000000);
+        }
     }
     for raw in 0u64..256 {
         let v = field_value(raw, 5, 2);

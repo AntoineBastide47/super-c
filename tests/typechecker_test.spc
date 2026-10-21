@@ -6287,7 +6287,12 @@ fn const_fn_and_reflection_rejections() {
     h::expect_err_msg(
         "type_info of an opaque type",
         "extern \"C\" { type Opaque; }\nfn main() i32 { let s = type_info::<Opaque>().size; return 0; }\n",
-        "type_info cannot describe an opaque type",
+        "'Opaque' is an opaque C type with no layout: a value of it needs one",
+    );
+    h::expect_err_msg(
+        "type_info of an opaque type with a layout",
+        "extern \"C\" \"stdio.h\" {\n    @layout(8, 8)\n    type Opaque;\n}\nfn main() i32 { let s = type_info::<Opaque>().size; return 0; }\n",
+        "type_info cannot describe an opaque type: its members are C's",
     );
 }
 
@@ -8150,12 +8155,12 @@ fn packed_struct_fields() {
     h::expect_err_msg(
         "a reference to a misaligned packed field",
         "@c.packed\nstruct P { pub tag: u8, pub v: i64 }\nfn main() i32 {\n    let p = P { tag: 1, v: 42 };\n    let r = &p.v;\n    return (*r - 42) as i32;\n}\n",
-        "cannot borrow a field of a '@c.packed' struct",
+        "cannot borrow a field of a '@packed' struct",
     );
     h::expect_err_msg(
         "a packed field needing a free",
         "@c.packed\nstruct P { pub tag: u8, pub s: String }\nfn main() i32 { return 0; }\n",
-        "a field of a '@c.packed' struct cannot need a 'free'",
+        "a field of a '@packed' struct cannot need a 'free'",
     );
     h::expect_exit(
         "packed fields read by value and byte fields by reference",

@@ -510,9 +510,7 @@ extend Lowerer {
         self.chk_base = 0;
         self.chk_lbase = 0;
         self.chk_lbases.truncate(0);
-        self.chk_narrow = unsafe (&*self.pkg).modules.at(self.module as usize).path.as_str().starts_with(
-            "std::parallel",
-        );
+        self.chk_narrow = loader::runtime_path(unsafe (&*self.pkg).modules.at(self.module as usize).path.as_str());
         self.chk_mask = 0;
         self.pending_lets.truncate(0);
         self.forget_known(0);
@@ -555,7 +553,7 @@ extend Lowerer {
         }
     }
 
-    @c.always_inline
+    @always_inline
     fn tp(self: &mut Self, k: u8, aux: u32, node: NodeId) {
         if self.tape_mute == 0 {
             self.tape.push(k as u64 << 56 | aux as u64 << 32 | node as u64);
@@ -596,7 +594,7 @@ extend Lowerer {
     // checker's free-move rules fire only on these, never on pattern/spill plumbing reads. Whether
     // the read MOVES is the type's business (Gen derives it from ownership), so both operand kinds
     // qualify here.
-    @c.always_inline
+    @always_inline
     fn mark_user_move(self: &mut Self, op: ir::OperandId) {
         if op == ir::IR_NONE {
             return;
@@ -5999,6 +5997,9 @@ extend Lowerer {
         }
         let c = k as u8;
         let kind = k >> 8;
+        if kind == ir::SI_HINT {
+            return self.copy_op(self.rv_temp(ir::rv(ir::RV_INTRINSIC, self.pool_ops(ops), 1, c, ty), sp));
+        }
         let shift = c == tt::TokenType::LeftShift as u8 || c == tt::TokenType::RightShift as u8;
         // A mask operator's operands are masks.
         let vec = self.f.ty(ty).kind == TypeKind::TYPE_SIMD;

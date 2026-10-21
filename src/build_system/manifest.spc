@@ -635,7 +635,7 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
     norm_conv_dir(&mut m.test_dir, "test-dir", &mut errs);
     norm_conv_dir(&mut m.bench_dir, "bench-dir", &mut errs);
     if m.cstd.len() == 0 {
-        m.cstd.push_str("-std=c11 -D_POSIX_C_SOURCE=200809L");
+        m.cstd.push_str("-std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700");
     }
     if m.default_profile.len() == 0 {
         m.default_profile.push_str("debug");
@@ -799,7 +799,7 @@ extend Manifest {
         }
         // ThreadSanitizer. Its own profile and NEVER part of `release`: TSan costs 5-15x runtime and several
         // times the memory, and it needs its runtime linked in. No LTO: it defeats the instrumentation the
-        // tool relies on. This is also what turns on the coroutine fiber annotations in `ffi/sc_rt.c`, without
+        // tool relies on. This is also what turns on the coroutine fiber annotations in `ffi/sc_runtime.spc`, without
         // which every coroutine that migrates between workers reports as a race against itself.
         //
         // `-fno-inline` is not tidiness, it is what makes a report TRUE. At plain -O1 this reports one race per

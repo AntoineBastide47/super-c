@@ -148,6 +148,12 @@ const fn lower_at(s: str, k: usize) bool {
     return k < s.len() && s.byte_at(k) >= b'a' && s.byte_at(k) <= b'z';
 }
 
+/// True when `s` is one of the function-like macros super_rt.h's leak tracker wraps the C allocator
+/// with: a call through a member or local of that name must not spell the name right before `(`.
+pub const fn rt_macro(s: str) bool {
+    return s == "malloc" || s == "calloc" || s == "realloc" || s == "free";
+}
+
 /// True when `s` is a macro of the standard headers every generated TU includes (super_rt.h pulls in
 /// all of them), or falls in a macro family the C standard reserves for those headers: an emitted
 /// identifier with that spelling would expand. Function-like macros count too (the <tgmath.h> math
@@ -472,7 +478,7 @@ pub struct Mangler {
     // per CALL SITE, so membership must be a lookup, not a rescan of the module's item list.
     own_built: Vector<bool>,
     own_idx: Map<u64, u64>, // (module << 32 | fnode) -> (extend << 32 | interface)
-    // Per module, owner -> its first `@c.export`/`@c.import` attribute index, built on first query for
+    // Per module, owner -> its first `@export`/`@import` attribute index, built on first query for
     // the same reason: `sym_override` runs per symbol spelling.
     pin_built: Vector<bool>,
     pin_idx: Map<u64, u64>, // (module << 32 | owner) -> attribute index
@@ -1646,10 +1652,10 @@ extend Mangler {
         }
     }
 
-    /// Append module `m`'s symbol prefix (empty for a single-module build) and record the cross-TU
-    /// use edge when a mark context is active: a type edge inside a C type spelling, none inside
-    /// a symbol segment, else a symbol edge.
-    pub fn modpfx(self: &mut Self, m: ModuleId, out: &mut String) {
+    // A cross-TU symbol spelling of module `m`: record the (spelling TU -> owner module) edge so the
+    // writer can prune TUs no KEPT TU references (65534 = the shared instance TU) and give the TU the
+    // owner's type or prototype header.
+    fn spell_edge(self: &mut Self, m: ModuleId) {
         let ty = self.type_depth != 0;
         let enc = if ty {
             m | 0x8000;
@@ -1658,9 +1664,6 @@ extend Mangler {
         };
         let rec = !self.no_edges && (ty || self.seg_depth == 0);
         if m as i64 != self.mark_ctx && rec {
-            // A cross-TU symbol spelling: record the (spelling TU -> owner module) edge so the
-            // writer can prune TUs no KEPT TU references (65534 = the shared instance TU) and
-            // give the TU the owner's type or prototype header.
             let src = if self.mark_ctx < 0 {
                 65534u64;
             } else {
@@ -1672,6 +1675,13 @@ extend Mangler {
                 self.um_set(src, m, ty);
             }
         }
+    }
+
+    /// Append module `m`'s symbol prefix (empty for a single-module build) and record the cross-TU
+    /// use edge when a mark context is active: a type edge inside a C type spelling, none inside
+    /// a symbol segment, else a symbol edge.
+    pub fn modpfx(self: &mut Self, m: ModuleId, out: &mut String) {
+        self.spell_edge(m);
         if !self.mangle || self.p().modules.at(m as usize).prelude {
             return;
         }
@@ -1720,7 +1730,7 @@ extend Mangler {
         }
     }
 
-    /// The C member field `fid` of module `m` names: the `@c.import` pin of a header type's field
+    /// The C member field `fid` of module `m` names: the `@import` pin of a header type's field
     /// (`Ast.has_member_pins`), else the field's name as `ident` spells it.
     pub fn field_ident(self: &mut Self, m: ModuleId, fid: NodeId, out: &mut String) {
         let a = self.p().module_ast_const(m);
@@ -1755,6 +1765,11 @@ extend Mangler {
 
     // Suffix one `_` to the unprefixed file-scope symbol `out[st..]` when a header the emitted C
     // includes declares that name: the symbol would redeclare it.
+    /// Whether a header the emitted C always includes declares `name` (`C_LIB_NAMES`, `c_lib_family`).
+    pub fn c_lib_declared(self: &Self, name: str) bool {
+        return c_lib_family(name) || self.lib_names.contains(&name);
+    }
+
     fn lib_escape(self: &Self, out: &mut String, st: usize) {
         let sym = out.as_str().slice(st, out.len());
         if escaped_stem(sym, |w: str| c_lib_family(w) || self.lib_names.contains(&w)) {
@@ -1989,7 +2004,7 @@ extend Mangler {
             return true;
         }
         if y.kind == TypeKind::TYPE_OPAQUE {
-            // Each opaque type by its name: two register types (`@c.value`) differ in every symbol.
+            // Each opaque type by its name: two register types (`@value`) differ in every symbol.
             let da = self.p().module_ast_const(y.module);
             out.push_str("o");
             self.ident(
@@ -2156,7 +2171,7 @@ extend Mangler {
         return true;
     }
 
-    /// A `@c.export`/`@c.import` symbol pin: the attribute string verbatim. False when `owner`
+    /// A `@export`/`@import` symbol pin: the attribute string verbatim. False when `owner`
     /// carries neither.
     pub fn sym_override(self: &mut Self, m: ModuleId, owner: NodeId, out: &mut String) bool {
         if self.pin_built.len() == 0 {
@@ -2302,6 +2317,11 @@ extend Mangler {
     /// (`target.node == NODE_NONE` = free function): pin | `[modpfx][Target__]name[suffix]`.
     pub fn fn_sym(self: &mut Self, fm: ModuleId, fnode: NodeId, target: DefId, out: &mut String) bool {
         if self.sym_override(fm, fnode, out) {
+            // An `@export` function is still its module's: the spelling unit needs that module's
+            // prototype header, as for a prefixed symbol.
+            if !unsafe (*self.p().module_ast_const(fm)).at_const(fnode).as_data.function.is_extern() {
+                self.spell_edge(fm);
+            }
             return true;
         }
         let a = self.p().module_ast_const(fm);
@@ -2558,10 +2578,12 @@ extend Mangler {
     /// The C symbol of const/static item `cnode` (module `m`): top-level items spell their qualified
     /// name, associated consts `<m prefix><Target>__<NAME>`; module `m` defines both.
     pub fn const_sym(self: &mut Self, m: ModuleId, cnode: NodeId, out: &mut String) bool {
-        if self.sym_override(m, cnode, out) {
+        let a = self.p().module_ast_const(m);
+        // An extern block constant's `@import` names the C macro its check reads, not its symbol.
+        let own = unsafe (*a).at_const(cnode).kind == NodeKind::NODE_CONST && unsafe (*a).at_const(cnode).as_data.const_def.c_macro;
+        if !own && self.sym_override(m, cnode, out) {
             return true;
         }
-        let a = self.p().module_ast_const(m);
         if unsafe (*a).at_const(cnode).kind == NodeKind::NODE_CONST && unsafe (*a).at_const(cnode).as_data.const_def.is_extern {
             // An extern-block static binds the C symbol the header declares.
             self.c_ident(
@@ -2574,8 +2596,10 @@ extend Mangler {
         let tgt = self.method_target(m, cnode);
         if tgt.node == NODE_NONE {
             self.qualified(m, unsafe (*a).at_const(cnode).as_data.const_def.name, out);
-            if unsafe (*a).at_const(cnode).as_data.const_def.is_local {
-                // Another body may declare a constant of the same name.
+            let cd = unsafe (*a).at_const(cnode).as_data.const_def;
+            if cd.is_local || cd.c_macro {
+                // Another body may declare a constant of the same name; an extern block's constant
+                // has the header's name, which C defines.
                 out.push_str("__l");
                 out.push_u64(cnode);
             }
@@ -3135,7 +3159,7 @@ extend Mangler {
             let dn = unsafe (*self.p().module_ast_const(y.module)).at_const(y.as_data.decl);
             if dn.as_data.aggregate.is_extern {
                 // A header struct, union or enum is its C tag (`struct stat`, `enum color`);
-                // `@c.import("pthread_attr_t")` pins a typedef name.
+                // `@import("pthread_attr_t")` pins a typedef name.
                 if !self.sym_override(y.module, y.as_data.decl, out) {
                     if y.kind == TypeKind::TYPE_ENUM {
                         out.push_str("enum ");
@@ -3239,7 +3263,7 @@ extend Mangler {
             return true;
         }
         if y.kind == TypeKind::TYPE_OPAQUE {
-            // An opaque handle is spelled as C spells it: the `@c.import` pin when present (headers
+            // An opaque handle is spelled as C spells it: the `@import` pin when present (headers
             // that only declare the TAG need `struct x` written out), else the source name.
             if !self.sym_override(y.module, y.as_data.decl, out) {
                 let dn = unsafe (*self.p().module_ast_const(y.module)).at_const(y.as_data.decl);

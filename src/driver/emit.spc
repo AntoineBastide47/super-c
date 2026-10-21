@@ -253,6 +253,21 @@ struct LiveTask {
 // Tasks only read the frozen package and the filled type rows, and write disjoint rows.
 unsafe extend LiveTask as Send {}
 
+/// Whether module `m` holds a module-level `asm` the platform filter kept.
+fn module_has_asm(p: &loader::Package, m: usize) bool {
+    if !p.modules[m].has_ast || p.modules[m].backend {
+        return false;
+    }
+    let a = unsafe &*p.module_ast_const(m as ModuleId);
+    let its = a.at_const(a.root).as_data.program.items;
+    for i in 0..its.len {
+        if a.at_const(unsafe a.list(its)[i as usize]).kind == NodeKind::NODE_ASM {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn compute_emit_live(p: &loader::Package) Vector<bool> {
     let n = p.modules.len();
     let sz = if n != 0 {
@@ -1038,7 +1053,7 @@ fn assert_no_error_type(p: &loader::Package) {
     }
 }
 
-@c.cold
+@cold
 fn error_type_abort(p: &loader::Package, m: usize, n: NodeId) {
     let sp = p.modules[m].ast.at_const(n).span;
     eprint("internal error: {}: offset {}: TYPE_ERROR without a diagnostic\n", p.modules[m].file.as_str(), sp.start);
@@ -1150,7 +1165,7 @@ pub fn build_simd_table(p: &mut loader::Package, n: usize) String {
 // Each call or value use of a function that needs CPU features (`@target_feature`, `@simd_impl`) is
 // valid where the caller's effective features (`Package::fn_set`) hold them, else only inside `unsafe`
 // (`feature_use`); a function the program's environment calls (`main`, `@test`, `@bench`) needs them in
-// the build, and a `@c.export` function cannot need any. Read after every module is typed, when every
+// the build, and a `@export` function cannot need any. Read after every module is typed, when every
 // attribute holds its value.
 pub fn check_feature_calls(p: &mut loader::Package, n: usize) {
     p.fn_union = p.features;
@@ -1200,7 +1215,7 @@ pub fn feature_errors(p: &loader::Package, i: usize, errs: &mut diag::Errors) {
         if a.attr_of(f, AttrKind::ATTR_EXPORT) != null {
             errs.emit_span(
                 nsp,
-                format("a '@c.export' function cannot need CPU features: C code calls it without a check"),
+                format("a '@export' function cannot need CPU features: C code calls it without a check"),
             );
         } else if outer && !cf::contains(p.features, need) {
             feature_err(p, errs, nsp, i as ModuleId, f, need, p.features, 2, "; it is called from outside the program");
@@ -1219,7 +1234,7 @@ pub fn feature_errors(p: &loader::Package, i: usize, errs: &mut diag::Errors) {
 
 // How use `fc` of module `m` stands: 0 its caller's effective features hold the callee's; 1 it needs
 // `unsafe` (the program checks the features at run time); 2 it is an error even there: features are
-// per build on wasm32, and an extern binding or an `@c.always_inline` function inlines into its C
+// per build on wasm32, and an extern binding or an `@always_inline` function inlines into its C
 // caller, which then lacks them.
 fn feature_use(p: &loader::Package, m: usize, fc: &FeatureCall) u8 {
     // On wasm32 too a function's own features cover its calls: it is emitted only where the build
@@ -2243,8 +2258,7 @@ fn inst_recs(p: &loader::Package) InstRecs {
 // checked against the layout service, so the C compiler proves the model on every target. An
 // emitted aggregate's check goes to its definition header (`lay`, indexed like `ds`), so a unit
 // checks what it includes and a new type changes no unit; an extern enum's goes to `out`, the
-// module's first shard. A header struct or union has no model to check (its header owns the
-// layout): `header_type_checks` checks its fields.
+// module's first shard. `header_type_checks` checks a header struct or union with its fields.
 fn cemit_layout_asserts(
     p: &mut loader::Package,
     cem: &mut cbe::CEmit,
@@ -2268,8 +2282,7 @@ fn cemit_layout_asserts(
                 let inner = a.at_const(nid).as_data.extern_block.items;
                 for j in 0..inner.len {
                     let iid = unsafe a.list(inner)[j as usize];
-                    let ik = a.at_const(iid).kind;
-                    if ik == NodeKind::NODE_STRUCT || ik == NodeKind::NODE_ENUM {
+                    if a.at_const(iid).kind == NodeKind::NODE_ENUM {
                         decls.push(iid);
                         exts.push(iid);
                     }
@@ -5306,7 +5319,7 @@ pub fn cemit_package(
     {
         let mut cd_ok: u64 = 0;
         let mut cd_skip: u64 = 0;
-        // A constant or `static mut` that is `@c.used`, `@c.export`ed or in a named section is defined
+        // A constant or `static mut` that is `@used`, `@export`ed or in a named section is defined
         // also when no code names it: C code, the linker or a section walk finds it by its symbol or
         // its section.
         for m in 0..p.modules.len() {
@@ -5336,7 +5349,7 @@ pub fn cemit_package(
             let csym = cem.stat_items.at(si).sym.clone();
             let cda = unsafe &*p.module_ast_const(cdef.module);
             let cdn = cda.at_const(cdef.node);
-            // The C attribute that starts its definition: `used` for `@c.used` or a section, which
+            // The C attribute that starts its definition: `used` for `@used` or a section, which
             // `@unsafe(link_section = "s")` names (as for a function).
             let mut csec = String::new();
             let cua = cda.attr_of(cdef.node, AttrKind::ATTR_UNSAFE);
@@ -5375,7 +5388,7 @@ pub fn cemit_package(
                 continue;
             }
             let cty = cem.stat_items.at(si).ty;
-            // `@c.align` of a static and `const` of a read-only one: the specifiers its declarations
+            // `@align` of a static and `const` of a read-only one: the specifiers its declarations
             // spell too.
             let mut al9 = String::new();
             cem.stat_specs(cdef, em2, cty, &mut al9);
@@ -5422,8 +5435,9 @@ pub fn cemit_package(
                 p.ok = false;
                 continue;
             }
-            if v.kind == iri::IV_PTR && v.i != 0 {
-                // A pointer serializes as the one slot of a cell of the constant's type.
+            if v.kind == iri::IV_PTR && v.i != 0 || v.kind == iri::IV_FN || cdit.c_zero(v) {
+                // A pointer, a function value or a zero C object serializes as the one slot of a cell
+                // of the constant's type.
                 v = cdit.cell_of(v, em2, cty);
             }
             // Array-of-string consts render from their literal initializer directly.
@@ -6442,6 +6456,29 @@ fn push_c_i64(out: &mut String, v: i64, usig: bool) {
     }
 }
 
+// Whether statics entry `gi` is all zero bits: every slot a zero scalar (+0.0 for a float), a null
+// pointer or an all-zero aggregate. An enum is never: its tag constant need not be 0.
+fn st_all_zero(cev: &iri::Interp, gi: u32) bool {
+    let g = cev.static_at(gi);
+    if unsafe (*g).shape == iri::SS_ENUM {
+        return false;
+    }
+    for k in 0..unsafe (*g).slots.len() {
+        let sl = *unsafe (*g).slots.at(k);
+        let zero = if sl.kind == iri::SK_INT || sl.kind == iri::SK_BOOL || sl.kind == iri::SK_FLOAT {
+            sl.i == 0;
+        } else if sl.kind == iri::SK_AGG {
+            st_all_zero(cev, sl.child());
+        } else {
+            sl.kind == iri::SK_ZERO || sl.kind == iri::SK_NULL;
+        };
+        if !zero {
+            return false;
+        }
+    }
+    return true;
+}
+
 // The braced initializer of statics entry `gi`.
 fn st_init(p: &loader::Package, cem: &mut cbe::CEmit, cev: &iri::Interp, name: str, gi: u32, out: &mut String) bool {
     let g = cev.static_at(gi);
@@ -6451,14 +6488,7 @@ fn st_init(p: &loader::Package, cem: &mut cbe::CEmit, cev: &iri::Interp, name: s
         return st_slot(p, cem, cev, name, gi, 0, out);
     }
     if shape == iri::SS_ARRAY || shape == iri::SS_HEAP {
-        let mut allzero = true;
-        for k in 0..nslots {
-            if unsafe (*g).slots.at(k as usize).kind != iri::SK_ZERO {
-                allzero = false;
-                break;
-            }
-        }
-        if allzero {
+        if st_all_zero(cev, gi) {
             out.push_str("{0}");
             return true;
         }
@@ -6940,10 +6970,30 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut Stri
                 line.push_str(mbe::if_s(local, "\"\n", ">\n"));
                 gline.push_string(&line);
             }
-            // Each register type's layout (`@c.value`) is the header's: the C compiler checks it. The
+            // Each register type's layout (`@value`) is the header's: the C compiler checks it. The
             // alignment is a lower bound: GCC aligns `__m256` to 16 bytes without AVX, to 32 with it.
+            // A C value's layout (`@layout`) is exact.
             for j in 0..eb.items.len {
                 let tid = unsafe a.list(eb.items)[j as usize];
+                if a.attr_of(tid, AttrKind::ATTR_LAYOUT) != null {
+                    let lv = a.attr_value(tid, AttrKind::ATTR_LAYOUT);
+                    assert(lv.ok, "the checker folds every '@layout'");
+                    let tn = a.at_const(a.at_const(tid).as_data.type_alias.name).as_data.name.text;
+                    let mut nm = String::new();
+                    extern_c_name(p, m as ModuleId, tid, &mut nm);
+                    let chk = format(
+                        "_Static_assert(sizeof({}) == {}u && _Alignof({}) == {}u, \"super-c: '{}' must have {} bytes aligned to {} in C\");\n",
+                        nm.as_str(),
+                        lv.v,
+                        nm.as_str(),
+                        lv.w[0],
+                        src.slice(tn.start as usize, tn.end as usize),
+                        lv.v,
+                        lv.w[0],
+                    );
+                    hchk.push_string(&chk);
+                    continue;
+                }
                 if a.attr_of(tid, AttrKind::ATTR_C_VALUE) == null {
                     continue;
                 }
@@ -6952,7 +7002,7 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut Stri
                     let tn = a.at_const(a.at_const(tid).as_data.type_alias.name).as_data.name.text;
                     let nm = src.slice(tn.start as usize, tn.end as usize);
                     let chk = format(
-                        "_Static_assert(sizeof({}) == {} && _Alignof({}) >= {}, \"@c.value of {}\");\n",
+                        "_Static_assert(sizeof({}) == {} && _Alignof({}) >= {}, \"@value of {}\");\n",
                         nm,
                         av.v,
                         nm,
@@ -6992,7 +7042,7 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut Stri
 }
 
 // The C spelling of extern type `decl` of module `m`, as `Mangler::ctype` writes it: the
-// `@c.import` pin, else the name, after `struct `, `union ` or `enum ` for a header type.
+// `@import` pin, else the name, after `struct `, `union ` or `enum ` for a header type.
 fn extern_c_name(p: &loader::Package, m: ModuleId, decl: NodeId, out: &mut String) {
     let a = &p.modules[m as usize].ast;
     let src = p.modules[m as usize].source.as_str();
@@ -7033,8 +7083,14 @@ fn header_field_check(p: &loader::Package, m: ModuleId, t0: TypeId, e0: str, con
         let y = *a.type_at(t);
         if y.kind == TypeKind::TYPE_ARRAY && !y.arr_sym() {
             let n = y.as_data.arr.len as u64;
-            cond.format_into("sizeof({}) == {} * sizeof(({})[0]) && ", e.as_str(), n, e.as_str());
-            desc.format_into("an array of {} elements, each ", n);
+            // A length of 0 declares C's flexible array member (`char d_name[];`), whose type is
+            // incomplete: `sizeof` rejects it, so only its element is checked.
+            if n == 0 {
+                desc.push_str("a flexible array, each element ");
+            } else {
+                cond.format_into("sizeof({}) == {} * sizeof(({})[0]) && ", e.as_str(), n, e.as_str());
+                desc.format_into("an array of {} elements, each ", n);
+            }
             e = format("({})[0]", e.as_str());
             t = y.as_data.arr.elem;
             continue;
@@ -7124,18 +7180,67 @@ fn header_field_check(p: &loader::Package, m: ModuleId, t0: TypeId, e0: str, con
     assert(false, "a header type's field nests arrays at most 64 levels deep");
 }
 
+// The check of constant `cid` of an extern block of module `m` (`c_macro`): its C name, the `@import`
+// pin or its own, has the constant's value in C.
+fn header_const_check(p: &loader::Package, m: ModuleId, cid: NodeId, out: &mut String) {
+    let a = &p.modules[m as usize].ast;
+    let src = p.modules[m as usize].source.as_str();
+    let ns = a.at_const(a.at_const(cid).as_data.const_def.name).as_data.name.text;
+    let name = src.slice(ns.start as usize, ns.end as usize);
+    let pin = a.attr_of(cid, AttrKind::ATTR_IMPORT);
+    let cname = if pin != null {
+        src.slice((unsafe (*pin).str_span.start) as usize, (unsafe (*pin).str_span.end) as usize);
+    } else {
+        name;
+    };
+    let v = unsafe (*(p.cir as *mut iri::Interp)).eval_const_in(m, cid);
+    assert(v.kind == iri::IV_INT || v.kind == iri::IV_BOOL, "the checker folds every constant of an extern block");
+    let mut lit = String::new();
+    if v.kind == iri::IV_BOOL {
+        lit.push_i64(v.i);
+    } else if v.i < 0 && !bt_is_unsigned(unsafe (*p.module_ast_const(v.tm)).type_at(v.ty).as_data.builtin) {
+        // `-9223372036854775808LL` negates a literal too wide for `long long`.
+        if v.i as u64 == 0x8000000000000000u64 {
+            lit.push_str("(-9223372036854775807LL - 1)");
+        } else {
+            lit.format_into("({}LL)", v.i);
+        }
+    } else {
+        lit.format_into("{}ULL", v.i as u64);
+    }
+    let mut shown = String::new();
+    if v.kind != iri::IV_BOOL && lit.as_str().ends_with("ULL") {
+        shown.push_u64(v.i as u64);
+    } else {
+        shown.push_i64(v.i);
+    }
+    out.format_into(
+        "_Static_assert(({}) == {}, \"super-c: constant '{}' must be {} in C\");\n",
+        cname,
+        lit.as_str(),
+        name,
+        shown.as_str(),
+    );
+}
+
 // The layout checks of the header types (`struct`, `union`, `enum`) of extern block `items` of module
-// `m`. The type is complete: a wrong spelling (a typedef'd type declared without its `@c.import`)
-// stops here, at its first use in the unit. Each declared field matches its C member
-// (`header_field_check`), spelled as every access spells it; a struct's field follows the one
-// declared before it without overlap, a union's sits at offset 0. A wrong declaration fails the C
-// compile with a message that names it, in every unit, once: the checks go into the forward header.
+// `m`. The type is complete: a wrong spelling (a typedef'd type declared without its `@import`)
+// stops here, at its first use in the unit. The declaration lists every member, so the layout
+// Super-C computes from it is the header's: the size, the alignment and each field's offset must
+// match, and each declared field matches its C member (`header_field_check`), spelled as every
+// access spells it. A wrong declaration fails the C compile with a message that names it, in every
+// unit, once: the checks go into the forward header.
 fn header_type_checks(p: &loader::Package, m: ModuleId, items: NodeList, out: &mut String) {
     let a = &p.modules[m as usize].ast;
     let src = p.modules[m as usize].source.as_str();
+    let mut svc = lay::Svc::new(p);
     for j in 0..items.len {
         let sid = unsafe a.list(items)[j as usize];
         let sk = a.at_const(sid).kind;
+        if sk == NodeKind::NODE_CONST && a.at_const(sid).as_data.const_def.c_macro {
+            header_const_check(p, m, sid, out);
+            continue;
+        }
         if sk != NodeKind::NODE_STRUCT && sk != NodeKind::NODE_ENUM {
             continue;
         }
@@ -7152,8 +7257,18 @@ fn header_type_checks(p: &loader::Package, m: ModuleId, items: NodeList, out: &m
         if sk == NodeKind::NODE_ENUM {
             continue; // its constants are the header's own names
         }
-        let mut prev = String::new();
-        let mut prev_name = "";
+        let l = svc.decl_layout(m, sid);
+        assert(l.ok, "the checker lays out every header struct and union");
+        out.format_into(
+            "_Static_assert(sizeof({}) == {}u && _Alignof({}) == {}u, \"super-c: '{}' must have {} bytes aligned to {} in C: declare every member of the header's type, in its order\");\n",
+            ct.as_str(),
+            l.size,
+            ct.as_str(),
+            l.align,
+            sname,
+            l.size,
+            l.align,
+        );
         for k in 0..agg.members.len {
             let fid = unsafe a.list(agg.members)[k as usize];
             if a.at_const(fid).kind != NodeKind::NODE_FIELD {
@@ -7183,31 +7298,17 @@ fn header_type_checks(p: &loader::Package, m: ModuleId, items: NodeList, out: &m
                 fname,
                 desc.as_str(),
             );
-            if agg.is_union {
-                out.format_into(
-                    "_Static_assert(offsetof({}, {}) == 0, \"super-c: field '{}.{}' must be a member of the C union\");\n",
-                    ct.as_str(),
-                    cf.as_str(),
-                    sname,
-                    fname,
-                );
-            } else if prev.len() != 0 {
-                out.format_into(
-                    "_Static_assert(offsetof({}, {}) + sizeof((({} *)0)->{}) <= offsetof({}, {}), \"super-c: field '{}.{}' must follow '{}.{}' in C without overlap: list the fields in the header's order\");\n",
-                    ct.as_str(),
-                    prev.as_str(),
-                    ct.as_str(),
-                    prev.as_str(),
-                    ct.as_str(),
-                    cf.as_str(),
-                    sname,
-                    fname,
-                    sname,
-                    prev_name,
-                );
-            }
-            prev = cf;
-            prev_name = fname;
+            let off = svc.decl_field_offset(m, sid, fid);
+            assert(off >= 0, "a laid-out header struct has every field's offset");
+            out.format_into(
+                "_Static_assert(offsetof({}, {}) == {}u, \"super-c: field '{}.{}' must sit at byte {} in C: declare every member of the header's type, in its order\");\n",
+                ct.as_str(),
+                cf.as_str(),
+                off,
+                sname,
+                fname,
+                off,
+            );
         }
     }
 }
@@ -7766,7 +7867,7 @@ fn cemit_assemble(
         let mut deps = Vector::<u32>::new();
         split_protos(cem.extern_protos.as_str(), &mut fd, &mut incd, &mut deps, &mut protos, &mut ext);
         if cem.blk_protos.len() != 0 {
-            // The pool's C-callable entry point (std::parallel::blocking, symbol pinned @c.export).
+            // The pool's C-callable entry point (std::parallel::blocking, symbol pinned @export).
             protos.push_str("void __sc_blocking_run(void (*__r)(void *), void *__e);\n");
         }
         split_protos(cem.blk_protos.as_str(), &mut fd, &mut incd, &mut deps, &mut protos, &mut ext);
@@ -7933,7 +8034,7 @@ fn cemit_assemble(
             } else {
                 o.tu_chunks.at(t);
             };
-            if cks.len() == 0 && !has_wrap && (!is_inst || ih[t].len() == 0) {
+            if cks.len() == 0 && !has_wrap && (!is_inst || ih[t].len() == 0) && (is_inst || !module_has_asm(p, t)) {
                 continue;
             }
             let path = p.modules[t].path.as_str();
@@ -8008,6 +8109,17 @@ fn cemit_assemble(
                 let its9 = a9.at_const(a9.root).as_data.program.items;
                 for i9 in 0..its9.len {
                     let nid9 = unsafe a9.list(its9)[i9 as usize];
+                    if a9.at_const(nid9).kind == NodeKind::NODE_ASM {
+                        // A module-level `asm` is file-scope basic assembly in its module's unit.
+                        let tsp9 = a9.at_const(a9.at_const(nid9).as_data.asm_stmt.template).as_data.literal.raw;
+                        head0.push_str("__asm__(");
+                        cbe::push_c_asm_str(
+                            p.modules[t].source.as_str().slice(tsp9.start as usize, tsp9.end as usize),
+                            head0,
+                        );
+                        head0.push_str(");\n");
+                        continue;
+                    }
                     if a9.at_const(nid9).kind != NodeKind::NODE_STATIC_ASSERT {
                         continue;
                     }
@@ -8656,11 +8768,20 @@ extend XDecls {
         let mut a: usize = 0;
         let mut b: usize = 0;
         while b < text.len() {
-            while b < text.len() && text.byte_at(b) != 10 {
-                b += 1;
+            // A guarded block (a thread-local's accessor, `CEmit::tls_accessor`) is one declaration
+            // through its `#endif` line, whatever its other lines end with.
+            let blk = b == a && text.slice(a, text.len()).starts_with("#ifndef ");
+            if blk {
+                let k = text.slice(a, text.len()).find("\n#endif\n");
+                assert(k >= 0, "a guarded declaration block ends with its '#endif' line");
+                b = a + k as usize + 7;
+            } else {
+                while b < text.len() && text.byte_at(b) != 10 {
+                    b += 1;
+                }
             }
             let end = pick(b < text.len(), b + 1, b);
-            if b > a && text.byte_at(b - 1) != b';' && end < text.len() {
+            if !blk && b > a && text.byte_at(b - 1) != b';' && end < text.len() {
                 b = end;
                 continue;
             }
@@ -8884,9 +9005,9 @@ fn xd_rows(
 }
 
 // The name declaration `dl` (one C declaration of a prototype header) declares: a typedef's last
-// identifier; a function's, the first identifier a `(` follows but an attribute's; a pointer
-// object's, the one after `(*`; another object's (`extern`), the last identifier before `[`, `=` or
-// `;` outside parentheses.
+// identifier; a function's, the first identifier a `(` follows but an attribute's, or a parenthesized
+// `(name)(` one; a pointer object's, the one after `(*`; another object's (`extern`), the last
+// identifier before `[`, `=` or `;` outside parentheses.
 fn decl_name(dl: str) str {
     let n = dl.len();
     let mut i: usize = 0;
@@ -8920,6 +9041,16 @@ fn decl_name(dl: str) str {
             }
             if j > s && j < n && dl.byte_at(j) == b')' {
                 return dl.slice(s, j);
+            }
+        }
+        if c == b'(' && !obj {
+            // An `@export` function's parenthesized declarator name (`CEmit::decl_name`): `(name)(`.
+            let mut j = i + 1;
+            while j < n && c_ident_byte(dl.byte_at(j)) {
+                j += 1;
+            }
+            if j > i + 1 && j + 1 < n && dl.byte_at(j) == b')' && dl.byte_at(j + 1) == b'(' {
+                return dl.slice(i + 1, j);
             }
         }
         if !c_ident_byte(c) {
@@ -10307,7 +10438,7 @@ fn sort_refusals(rs: &mut Vector<cbe::Refusal>) {
 // entries are top-level items + extend members (disjoint spans) + extend headers, whose edges reach
 // interfaces only, so `extend Foo` alone is not a use of Foo. An item is live iff a root reaches it through the
 // resolution graph, so dead cycles and dead-only callers are caught. Roots = everything exempt from
-// reporting: `pub` (spc export layer), @c.export/@c.used/@emit_macro/extern (C export layer), @test*,
+// reporting: `pub` (spc export layer), @export/@used/@emit_macro/extern (C export layer), @test*,
 // main, bodyless fns, `extend X as Iface` conformance members, and every module outside the reported set
 // (per-file `lint` invocations treat other modules as live; the full-build lint reports every module
 // outside the std and ffi trees, so cross-module dead cycles are caught there).
@@ -10919,16 +11050,16 @@ fn lint_const_suggest(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector
 // --lint: unused imports. An import is removable when neither its target module nor anything in the
 // target's transitive closure defines a symbol this file resolves to (own-module hits are excluded:
 // legal import cycles would otherwise self-justify). Modules whose closure carries link-time side
-// effects (@c.source/@c.link) or extends a foreign type (methods/conformances reachable without a
+// effects (@c.source/@link) or extends a foreign type (methods/conformances reachable without a
 // resolution edge) are exempt.
-// A module with @platform- or @arch-gated items is exempt from cross-item unused lints (imports,
+// A module with @platform-, @arch- or @when-gated items is exempt from cross-item unused lints (imports,
 // members): the dropped items' uses are invisible under the current target, so a per-target verdict
 // would contradict another target's. Code the early prune removed exempts only the names its text
 // spells.
 fn module_platform_gated(a: *const Ast) bool {
     for i in 0..unsafe (*a).attrs.len() {
         let k = unsafe (*a).attrs.at(i).kind;
-        if k == AttrKind::ATTR_PLATFORM as u8 || k == AttrKind::ATTR_ARCH as u8 {
+        if k == AttrKind::ATTR_PLATFORM as u8 || k == AttrKind::ATTR_ARCH as u8 || k == AttrKind::ATTR_WHEN as u8 {
             return true;
         }
     }
@@ -12011,7 +12142,7 @@ pub fn run_package(
         // Self-contained: carries its own includes.
         sink_notify(sink, &mut co.pr, keep.at(1).as_str(), "", 1, (rt9 & 2) != 0);
     }
-    // `@c.source` wrapper TUs land in keep[]; `@c.link` flags feed build/__ldflags for the link line.
+    // `@c.source` wrapper TUs land in keep[]; `@link` flags feed build/__ldflags for the link line.
     let pre_ext = keep.len();
     let mut ext_new = Vector::<bool>::new();
     ext_c_collect(p, &mut keep, &mut ext_new, &mut err, target);
@@ -12121,6 +12252,12 @@ pub fn run_package(
     // The edges come grouped by source in ascending order (modules, then 65534 as row n): row s
     // is `co.edges[eoff[s]..eoff[s + 1]]`. A module enters the stack once, when it is kept.
     let mut keep_mod = live;
+    // A module-level `asm` defines symbols that only C names: its unit stays whenever it loads.
+    for m9 in 0..n {
+        if module_has_asm(p, m9) {
+            keep_mod.set(m9, true);
+        }
+    }
     let mut eoff = Vector::<u32>::new();
     eoff.resize_default(n + 2);
     for e9 in 0..co.edges.len() {

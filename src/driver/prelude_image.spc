@@ -32,6 +32,7 @@ pub fn key(p: &loader::Package, std_dir: str, target: i32, steps: u32, mem: u64)
     h = skey_mix(h, p.simd_width);
     h = mix_str(h, p.simd_dispatch.as_str());
     h = skey_mix(h, p.mem_check as u64);
+    h = skey_mix(h, p.build_cfg);
     h = skey_mix(h, p.test_build as u64);
     h = skey_mix(h, p.bootstrap as u64);
     h = mix_str(h, p.profile.as_str());

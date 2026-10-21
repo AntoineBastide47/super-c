@@ -151,9 +151,9 @@ pub fn cc_name() *const char {
 /// The C standard the harness compiles with (c11, or gnu11 on Windows).
 pub fn cstd() *const char {
     if on_windows() {
-        return "-std=gnu11 -D_POSIX_C_SOURCE=200809L".ptr() as *const char;
+        return "-std=gnu11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700".ptr() as *const char;
     }
-    return "-std=c11 -D_POSIX_C_SOURCE=200809L".ptr() as *const char;
+    return "-std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700".ptr() as *const char;
 }
 
 // The same, as a `--cstd=` flag for a nested `super-c build`: EMPTY on POSIX, where the manifest default
@@ -162,7 +162,7 @@ pub fn cstd() *const char {
 /// `cstd()` as a `-std=` flag.
 pub fn cstd_flag() *const char {
     if on_windows() {
-        return "\"--cstd=-std=gnu11 -D_POSIX_C_SOURCE=200809L\"".ptr() as *const char;
+        return "\"--cstd=-std=gnu11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700\"".ptr() as *const char;
     }
     return "".ptr() as *const char;
 }

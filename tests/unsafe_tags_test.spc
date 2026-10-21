@@ -99,6 +99,53 @@ fn link_section_places_symbols() {
     }
 }
 
+// A `static mut` that holds a function is static data: in the init-array section of the platform it
+// runs before `main`. The function is `@export` in another module, so each unit that spells its
+// symbol includes that module's prototypes.
+const INIT_MAIN: str = M"(import boot;
+
+@platform(macos | ios)
+@unsafe(link_section = "__DATA,__mod_init_func,mod_init_funcs")
+static mut HOOK: fn() = boot::start;
+@platform(linux | android)
+@unsafe(link_section = ".init_array")
+static mut HOOK: fn() = boot::start;
+@platform(windows)
+@unsafe(link_section = ".CRT$XCU")
+static mut HOOK: fn() = boot::start;
+
+fn main() i32 {
+    return boot::count() - 1;
+}
+)";
+
+const INIT_BOOT: str = M"(static mut N: i32 = 0;
+
+@export("sc_boot_start")
+pub fn start() {
+    unsafe N += 1;
+}
+
+@export("sc_boot_count")
+pub fn count() i32 {
+    return unsafe N;
+}
+)";
+
+@test
+fn an_init_array_entry_runs_before_main() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("boot.spc", INIT_BOOT);
+    p.mkfile("main.spc", INIT_MAIN);
+    assert(p.compile("main.spc").ok(), "the program compiles");
+    assert(p.gen_has("main__inst.c", "HOOK)(void) = sc_boot_start;"), "the static holds the function");
+    assert(p.cc_build("").ok(), "the emitted C compiles and links");
+    assert_eq(p.run_bin(), 0);
+}
+
 // A section name is checked against the object format of the target, not the host.
 @test
 fn link_section_rejects() {

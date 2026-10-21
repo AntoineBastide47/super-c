@@ -1340,7 +1340,7 @@ extend Interp {
         return unsafe cstring::memcmp(self.src_of(m).ptr() + s.start as usize, lit.ptr(), n) == 0;
     }
 
-    @c.cold
+    @cold
     fn it_trap(self: &mut Self, kind: u8, msg: str<'static>) {
         if self.trap.len() == 0 {
             self.trap = msg;
@@ -1384,7 +1384,7 @@ extend Interp {
     }
 
     // `it_trap` with a text built at the trap (`trap_texts`).
-    @c.cold
+    @cold
     fn it_trap_text(self: &mut Self, kind: u8, text: String) {
         if self.trap.len() != 0 {
             self.failed = true;
@@ -1406,7 +1406,7 @@ extend Interp {
     }
 
     // The trap of an access to dead storage `d` (`DEAD_FREED`, `DEAD_RETURNED`).
-    @c.cold
+    @cold
     fn dead_trap(self: &mut Self, d: u8) bool {
         if d == DEAD_RETURNED {
             self.it_trap(IT_TRAP_UB_USE_AFTER_FREE, "use after return");
@@ -1414,20 +1414,6 @@ extend Interp {
             self.it_trap(IT_TRAP_UB_USE_AFTER_FREE, "use after free");
         }
         return false;
-    }
-
-    // The trap of a compile-time layout query that reaches header struct `l.hn` (`Layout.hn`): its C
-    // header owns the layout, which only the C compiler knows.
-    @c.cold
-    fn header_trap(self: &mut Self, l: lay::Layout, what: str) {
-        let a = unsafe &*self.p().module_ast_const(l.hm);
-        let ns = a.at_const(a.at_const(l.hn).as_data.aggregate.name).as_data.name.text;
-        let text = format(
-            "the {} of '{}' is its C header's: it has no compile-time value",
-            what,
-            self.src_of(l.hm).slice(ns.start as usize, ns.end as usize),
-        );
-        self.it_trap_text(IT_TRAP_UNSUPPORTED, text);
     }
 
     const fn bail(self: &mut Self) IVal {
@@ -2768,6 +2754,11 @@ extend Interp {
         if y.kind == TypeKind::TYPE_MASK {
             return iv_int(m, t, 0);
         }
+        if y.kind == TypeKind::TYPE_OPAQUE {
+            // A C object (the checker admits only one with a layout): no member to read, zero bytes
+            // to store (`SK_ZERO`).
+            return IVal { kind: IV_UNIT, tm: m, ty: t, i: 0, f: 0.0 };
+        }
         if y.kind == TypeKind::TYPE_ARRAY || y.kind == TypeKind::TYPE_SIMD {
             let n = self.arr_count(m, &y, 0, NODE_NONE, 0, null, null);
             if n <= 0 {
@@ -2797,9 +2788,11 @@ extend Interp {
                 has_inst = true;
             }
             let da = unsafe &*self.p().module_ast_const(dm);
-            if da.at_const(dn).kind != NodeKind::NODE_STRUCT || da.at_const(dn).as_data.aggregate.is_union {
+            if da.at_const(dn).kind != NodeKind::NODE_STRUCT {
                 return none();
             }
+            // A union's zero is its first member's, as C's static initialization.
+            let is_union = da.at_const(dn).as_data.aggregate.is_union;
             if self.user_free(dm, dn) {
                 return none();
             }
@@ -2830,7 +2823,7 @@ extend Interp {
                 }
             }
             let mut si: usize = 0;
-            for i in 0..nf {
+            for i in 0..pick(is_union && nf != 0, 1, nf) {
                 let fv = self.zero_field(dm, dn, zn, &zam[0], &zat[0], i);
                 self.failed = false;
                 if fv.kind == IV_NONE {
@@ -2838,6 +2831,9 @@ extend Interp {
                 }
                 unsafe (*self.obj_ptr(id)).slots.set(si, fv);
                 si += 1;
+            }
+            if is_union && nf != 0 {
+                unsafe (*self.obj_ptr(id)).uactive = 0;
             }
             return IVal { kind: IV_OBJ, tm: m, ty: t, i: id, f: 0.0 };
         }
@@ -4011,7 +4007,7 @@ extend Interp {
     }
 
     // Intercepted extern calls: the C heap, the trap runtime, std's Int<N> overflow and 128-bit probe, the
-    // std/bits.h bit counts, and libm.
+    // the runtime's bit counts, and libm.
     fn intercept(
         self: &mut Self,
         b: &ir::CoreBody,
@@ -4125,11 +4121,11 @@ extend Interp {
             self.it_trap(IT_TRAP_UB_DIV_ZERO, "division by zero");
             return false;
         } else if self.span_is(fm, nm, "sc_has_i128") || self.span_is(fm, nm, "sc_has_f128") {
-            // std/int128.h, std/float128.h: the limb code gives the native path's results, so compile
+            // The runtime's 128-bit primitives: the limb code gives the native path's results, so compile
             // time runs it.
             out = iv_int(b.module, rt, 0);
         } else if self.wrap_name(fm, nm) {
-            // std/bits.h wrapping arithmetic: C's unsigned operators modulo 2^64.
+            // The runtime's wrapping arithmetic: C's unsigned operators modulo 2^64.
             if nargs != 2 || args.at(0).kind != IV_INT || args.at(1).kind != IV_INT {
                 return self.fail();
             }
@@ -4158,7 +4154,7 @@ extend Interp {
                 out = iv_int(b.module, rt, r);
             }
         } else if self.bits_name(fm, nm) {
-            // std/bits.h: the host runs the same helpers, so the result matches the emitted C.
+            // The runtime's bit counts: the host runs the same helpers, so the result matches the emitted C.
             if nargs != 1 || args.at(0).kind != IV_INT {
                 return self.fail();
             }
@@ -6271,7 +6267,7 @@ extend Interp {
                 // no tick budget at compile time: one chunk runs to the loop's end
                 return self.operand(b, env, b.oper_pool[(rv.a + 1) as usize]);
             }
-            if rv.c == ir::IN_LIKELY {
+            if rv.c == ir::IN_LIKELY || rv.c == ir::IN_UNLIKELY {
                 return self.operand(b, env, b.oper_pool[rv.a as usize]);
             }
             if rv.c == ir::IN_BOUNDS || rv.c == ir::IN_BOUNDS_PROVEN {
@@ -6340,10 +6336,6 @@ extend Interp {
                 }
                 let l = self.lsvc.layout(lm, lt);
                 if !l.ok {
-                    if l.hn != NODE_NONE {
-                        self.header_trap(l, pick(rv.c == ir::IN_SIZEOF, "size", "alignment"));
-                        return none();
-                    }
                     return self.bail();
                 }
                 let mut v = l.size;
@@ -9021,7 +9013,12 @@ extend Interp {
         return unsafe (self.statics.as_ptr() + i as usize);
     }
 
-    @c.cold
+    /// Whether `v` is the zero of a C object (an opaque type with a layout, `zero_of`).
+    pub const fn c_zero(self: &Self, v: IVal) bool {
+        return v.kind == IV_UNIT && v.ty != TYPE_NONE && (unsafe &*self.p().module_ast_const(v.tm)).type_at(v.ty).kind == TypeKind::TYPE_OPAQUE;
+    }
+
+    @cold
     fn cap_fail(self: &mut Self, base: u32, kind: u8, msg: str<'static>) StaticRes {
         self.statics.truncate(base as usize);
         self.it_trap(kind, msg);
@@ -9414,7 +9411,8 @@ extend Interp {
                     sk.ty = sv.ty;
                     sk.i = f64_bits(sv.f) as i64;
                 } else if sv.kind == IV_NONE || sv.kind == IV_UNIT {
-                    if shape == SS_STRUCT || shape == SS_CELL {
+                    // A zero C object stays `SK_ZERO`.
+                    if (shape == SS_STRUCT || shape == SS_CELL) && !self.c_zero(sv) {
                         return self.cap_unsup(base);
                     }
                 } else if sv.kind == IV_PTR {
@@ -9575,7 +9573,7 @@ extend Interp {
 
     // Deep mode never records a reason: its NO is any-path (the site may be conditional), so it
     // must not surface as a def-site 'const fn' diagnostic.
-    @c.cold
+    @cold
     fn fx_disq(self: &mut Self, m: ModuleId, owner: NodeId, site: NodeId, why: str<'static>, deep: bool) u8 {
         let key = m as u64 << 32 | owner as u64;
         if !deep && !self.fx_no.contains_key(&key) {
@@ -9959,7 +9957,7 @@ extend Interp {
         return FX_MAYBE; // if/match/closures and anything unmodeled: conditional or unknown
     }
 
-    // One of the std/bits.h bit counts.
+    // One of the runtime's bit counts.
     const fn bits_name(self: &Self, fm: ModuleId, nm: tok::Span) bool {
         return self.span_is(fm, nm, "sc_ctz64") || self.span_is(fm, nm, "sc_clz64") || self.span_is(
             fm,
@@ -9968,7 +9966,7 @@ extend Interp {
         );
     }
 
-    // The wrapping-arithmetic names of std/bits.h (`sc_w*64`, `sc_mulo_*64`).
+    // The runtime's wrapping-arithmetic names (`sc_w*64`, `sc_mulo_*64`).
     const fn wrap_name(self: &Self, fm: ModuleId, nm: tok::Span) bool {
         for n in [
             "sc_wadd64",
@@ -10963,8 +10961,9 @@ extend Interp {
             } else {
                 self.failed = false;
             }
-        } else if v.kind == IV_PTR && pv_obj(v) != 0 && !self.failed {
-            // a pointer is static data when its target is: capture it as the slot of a cell
+        } else if v.kind == IV_PTR && pv_obj(v) != 0 && !self.failed || self.c_zero(v) {
+            // a pointer is static data when its target is, a zero C object is: capture it as the slot
+            // of a cell
             v = self.cell_of(v, v.tm, v.ty);
         }
         if v.kind != IV_OBJ {
@@ -11452,9 +11451,6 @@ extend Interp {
         if tag != 0 {
             let lay0 = self.lsvc.layout(tm, tt);
             if !lay0.ok {
-                if lay0.hn != NODE_NONE {
-                    self.header_trap(lay0, "layout");
-                }
                 return none();
             }
             size = lay0.size;

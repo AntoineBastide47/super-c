@@ -29,11 +29,6 @@ pub struct Layout {
     pub unbound: bool,
     /// A failure because the size exceeds the target's `isize::MAX`: no object can be that large.
     pub big: bool,
-    /// A failure because the type holds a header struct or union by value (`extern "C"` block
-    /// `struct`/`union`): its C header owns the layout. `hn` is that declaration in module `hm`,
-    /// NODE_NONE otherwise.
-    pub hm: ModuleId,
-    pub hn: NodeId,
 }
 
 /// One substitution frame for generic-parameter layout: parameter decls of `pmod` bound to argument
@@ -57,8 +52,6 @@ struct LayoutAcc {
     pub is_union: bool,
     pub unbound: bool, // set by acc_field on a failing field (see Layout.unbound)
     pub big: bool, // set by acc_field on a field too large, or a sum past u64 (see Layout.big)
-    pub hm: ModuleId, // set by acc_field on a field holding a header type (see Layout.hn)
-    pub hn: NodeId,
 }
 
 /// A payload-carrying enum's C shape: `{ tag; union payload; }`, with a one-byte tag when
@@ -66,8 +59,6 @@ struct LayoutAcc {
 pub struct EnumLayout {
     pub unbound: bool, // see Layout.unbound
     pub ok: bool,
-    pub hm: ModuleId, // see Layout.hn
-    pub hn: NodeId,
     pub payload_off: u64, // tag sits at 0
     pub size: u64,
     pub align: u64,
@@ -359,12 +350,20 @@ extend Svc {
             return Layout { ok: true, size: w, align: w };
         }
         if y.kind == TypeKind::TYPE_OPAQUE {
-            // A register type states its layout (`@c.value(size, align)`); any other opaque type has
-            // none the compiler knows.
-            if !self.has_ast(y.module) || self.attr(y.module, y.as_data.decl, AttrKind::ATTR_C_VALUE) == null {
+            // A register type (`@value(size, align)`) and a C value (`@layout(size, align)`) state
+            // their layout; any other opaque type has none the compiler knows.
+            if !self.has_ast(y.module) {
                 return Layout { ok: false };
             }
-            let av = self.a(y.module).attr_value(y.as_data.decl, AttrKind::ATTR_C_VALUE);
+            let k = if self.attr(y.module, y.as_data.decl, AttrKind::ATTR_C_VALUE) != null {
+                AttrKind::ATTR_C_VALUE;
+            } else {
+                AttrKind::ATTR_LAYOUT;
+            };
+            if self.attr(y.module, y.as_data.decl, k) == null {
+                return Layout { ok: false };
+            }
+            let av = self.a(y.module).attr_value(y.as_data.decl, k);
             if !av.ok {
                 self.pending += 1;
                 return Layout { ok: false };
@@ -374,7 +373,7 @@ extend Svc {
         if y.kind == TypeKind::TYPE_ARRAY {
             let el = self.layout_of(m, y.as_data.arr.elem, env, depth + 1);
             if !el.ok {
-                return Layout { ok: false, unbound: el.unbound, big: el.big, hm: el.hm, hn: el.hn };
+                return Layout { ok: false, unbound: el.unbound, big: el.big };
             }
             if el.size == 0 {
                 // A zero-sized element gives size 0 for every length (and keeps the element
@@ -489,8 +488,6 @@ extend Svc {
         if !fl.ok {
             unsafe (*acc).unbound = fl.unbound;
             unsafe (*acc).big = fl.big;
-            unsafe (*acc).hm = fl.hm;
-            unsafe (*acc).hn = fl.hn;
             return false;
         }
         let mut fa = fl.align;
@@ -545,14 +542,10 @@ extend Svc {
         }
         if dkind == NodeKind::NODE_ENUM {
             let e = self.enum_shape(dm, dn, env, depth);
-            return Layout { ok: e.ok, size: e.size, align: e.align, unbound: e.unbound, hm: e.hm, hn: e.hn };
+            return Layout { ok: e.ok, size: e.size, align: e.align, unbound: e.unbound };
         }
         if dkind != NodeKind::NODE_STRUCT {
             return Layout { ok: false };
-        }
-        if ast.at_const(dn).as_data.aggregate.is_extern {
-            // The header defines the struct; the declaration lists only some of its fields.
-            return Layout { ok: false, hm: dm, hn: dn };
         }
         let is_union = ast.at_const(dn).as_data.aggregate.is_union;
         let is_tuple = ast.at_const(dn).as_data.aggregate.is_tuple;
@@ -566,7 +559,7 @@ extend Svc {
                 continue;
             }
             if !self.acc_field(&mut acc, dm, fid, env, depth) {
-                return Layout { ok: false, unbound: acc.unbound, big: acc.big, hm: acc.hm, hn: acc.hn };
+                return Layout { ok: false, unbound: acc.unbound, big: acc.big };
             }
         }
         let al = self.attr(dm, dn, AttrKind::ATTR_ALIGN);
@@ -610,7 +603,7 @@ extend Svc {
             for k in 0..pl.len {
                 let pid = unsafe ast.list(pl)[k as usize];
                 if !self.acc_field(&mut vs, dm, pid, env, depth) {
-                    return EnumLayout { ok: false, unbound: vs.unbound, hm: vs.hm, hn: vs.hn };
+                    return EnumLayout { ok: false, unbound: vs.unbound };
                 }
             }
             vs.size = round_up(vs.size, vs.align);
@@ -654,10 +647,26 @@ extend Svc {
         } else {
             return -1;
         }
+        return self.offset_in(dm, dn, env, fdecl);
+    }
+
+    /// The layout of the struct or union `dn` of module `dm`, which has no generic parameters.
+    pub fn decl_layout(self: &mut Self, dm: ModuleId, dn: NodeId) Layout {
+        return self.aggregate_layout(dm, dn, null, 0);
+    }
+
+    /// The byte offset of field `fdecl` of the struct or union `dn` of module `dm`, which has no
+    /// generic parameters; -1 when it has no layout.
+    pub fn decl_field_offset(self: &mut Self, dm: ModuleId, dn: NodeId, fdecl: NodeId) i64 {
+        return self.offset_in(dm, dn, null, fdecl);
+    }
+
+    // The byte offset of field `fdecl` of declaration `(dm, dn)` under `env`, or -1.
+    fn offset_in(self: &mut Self, dm: ModuleId, dn: NodeId, env: *const LayoutEnv, fdecl: NodeId) i64 {
         let ap = self.p().module_ast_const(dm);
         let ast = unsafe &*ap;
-        if ast.at_const(dn).kind != NodeKind::NODE_STRUCT || ast.at_const(dn).as_data.aggregate.is_extern {
-            return -1; // a header struct's offsets are its header's
+        if ast.at_const(dn).kind != NodeKind::NODE_STRUCT {
+            return -1;
         }
         if ast.at_const(dn).as_data.aggregate.is_union {
             // every union member sits at offset 0

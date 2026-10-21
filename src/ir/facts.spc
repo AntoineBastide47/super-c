@@ -180,8 +180,8 @@ pub fn term_effect(pkg: *const loader::Package, b: &ir::CoreBody, t: &ir::Termin
     return e;
 }
 
-/// The memory access a call states through its callee's annotation (`@c.reads`, `@c.writes`,
-/// `@c.lane_access` on a foreign function or an `@intrinsic` binding).
+/// The memory access a call states through its callee's annotation (`@reads`, `@writes`,
+/// `@lane_access` on a foreign function or an `@intrinsic` binding).
 pub const MA_NONE: u8 = 0; // no annotation
 pub const MA_READ: u8 = 1; // reads `bytes` bytes through argument `arg`, nothing else
 pub const MA_WRITE: u8 = 2; // writes `bytes` bytes through argument `arg`, and may read through it

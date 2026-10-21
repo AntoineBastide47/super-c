@@ -355,7 +355,7 @@ pub fn apply_event(
 
 // The state change of an event of kind `k` (EV_ASSIGN, EV_DEAD, or a move) on `path`, whose subtree
 // is `sub`. Inlined into the hot replay so each caller keeps its own straight-line row updates.
-@c.always_inline
+@always_inline
 fn transfer(
     forest: &mp::MoveForest,
     k: u8,

@@ -729,6 +729,30 @@ fn attributes() {
     }
 }
 
+// Each C-facing attribute has a one-part spelling that records the same kind as its `@c.` spelling;
+// `@c.source` has none.
+@test
+fn one_part_c_attributes() {
+    let src = "@packed\n@align(8)\nstruct H { x: u32, }\n@inline\n@always_inline\n@noinline\n@cold\n@noreturn\n@used\n@unused\n@export(\"sym\")\nfn f() {}\n@link(\"m\")\nextern \"C\" {\n    @import(\"abs\")\n    fn a(x: i32) i32;\n    @reads(p, n)\n    @writes(q, n)\n    fn g(p: *const u8, q: *mut u8, n: usize);\n    @lane_access\n    fn l(p: *const u8);\n    @value(16, 16)\n    pub type R;\n}\n";
+    let old = "@c.packed\n@c.align(8)\nstruct H { x: u32, }\n@c.inline\n@c.always_inline\n@c.noinline\n@c.cold\n@c.noreturn\n@c.used\n@c.unused\n@c.export(\"sym\")\nfn f() {}\n@c.link(\"m\")\nextern \"C\" {\n    @c.import(\"abs\")\n    fn a(x: i32) i32;\n    @c.reads(p, n)\n    @c.writes(q, n)\n    fn g(p: *const u8, q: *mut u8, n: usize);\n    @c.lane_access\n    fn l(p: *const u8);\n    @c.value(16, 16)\n    pub type R;\n}\n";
+    let a = h::parse_ast(src);
+    let b = h::parse_ast(old);
+    assert(a.errors == 0, "the one-part spellings parse");
+    assert(b.errors == 0, "the `@c.` spellings parse");
+    assert(a.ast.attrs.len() != 0, "the attributes are recorded");
+    assert(a.ast.attrs.len() == b.ast.attrs.len(), "the spellings record as many attributes");
+    for i in 0..a.ast.attrs.len() {
+        let x = *a.ast.attrs.at(i);
+        let y = *b.ast.attrs.at(i);
+        assert(x.kind == y.kind, "the spellings record one kind");
+        assert(x.arg == y.arg, "the spellings record one argument");
+        assert(x.expr == y.expr, "the spellings record one argument form");
+    }
+    assert(h::parse_has_error("@source(\"x.c\")\nextern \"C\" {}\n"), "'@c.source' has no one-part spelling");
+    assert(h::parse_has_error("@inline(3)\nfn m() {}\n"), "a flag attribute given an argument is rejected");
+    assert(h::parse_has_error("@export\nfn m() {}\n"), "'@export' without its symbol is rejected");
+}
+
 // `@test` takes a list of `should_panic` and `timeout = N` in any order, each at most once, N at least 1:
 // the record holds the should_panic bit and the timeout above it.
 @test
@@ -821,22 +845,22 @@ fn attribute_constant_expression_errors() {
     h::expect_err_msg(
         "evaluated alignment not a power of two",
         "const W: u32 = 24;\n@c.align(W)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
-        "'@c.align' needs a power of two from 1 to 4096, found 24",
+        "'@align' needs a power of two from 1 to 4096, found 24",
     );
     h::expect_err_msg(
         "literal alignment not a power of two",
         "@c.align(3)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
-        "'@c.align' needs a power of two from 1 to 4096, found 3",
+        "'@align' needs a power of two from 1 to 4096, found 3",
     );
     h::expect_err_msg(
         "zero alignment",
         "@c.align(0)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
-        "'@c.align' needs a power of two from 1 to 4096, found 0",
+        "'@align' needs a power of two from 1 to 4096, found 0",
     );
     h::expect_err_msg(
         "alignment past the limit",
         "@c.align(8192)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
-        "'@c.align' needs a power of two from 1 to 4096, found 8192",
+        "'@align' needs a power of two from 1 to 4096, found 8192",
     );
     // The layout reads the value: a declaration checked earlier folds `sizeof` of the aligned one.
     h::expect_ok(
@@ -845,13 +869,12 @@ fn attribute_constant_expression_errors() {
     );
 }
 
-// `@c.align` applies where it changes a layout or a C object: a struct or a union and a `static mut`
-// defined in Super-C. `@c.packed` applies to a struct or a union. A header struct's layout is its C
-// header's, so neither applies in an `extern "C"` block. On any other owner each is an error, never
-// ignored.
+// `@c.align` applies where it changes a layout or a C object: a struct or a union (a header type
+// too, whose layout Super-C computes) and a `static mut` defined in Super-C. `@c.packed` applies to a
+// struct or a union. On any other owner each is an error, never ignored.
 @test
 fn layout_attribute_owners() {
-    let msg = "'@c.align' may only be applied to a struct, a union or a 'static mut' outside an 'extern \"C\"' block";
+    let msg = "'@align' may only be applied to a struct, a union, or a 'static mut' outside an 'extern \"C\"' block";
     h::expect_err_msg(
         "align on a function",
         "@c.align(16)\nfn f() i32 { return 1; }\nfn main() i32 { return f(); }\n",
@@ -868,12 +891,11 @@ fn layout_attribute_owners() {
     h::expect_err_msg(
         "packed on a function",
         "@c.packed\nfn g() i32 { return 2; }\nfn main() i32 { return g(); }\n",
-        "'@c.packed' may only be applied to a struct or a union",
+        "'@packed' may only be applied to a struct or a union",
     );
-    h::expect_err_msg(
-        "align on a header struct",
-        "extern \"C\" \"time.h\" {\n    @c.align(16)\n    struct tm { pub tm_sec: i32 }\n}\nfn main() i32 { return 0; }\n",
-        msg,
+    h::expect_ok(
+        "align and packed on header structs",
+        "extern \"C\" \"lib.h\" {\n    @c.align(16)\n    struct a16 { pub v: i32 }\n    @c.packed\n    struct pk { pub t: u8, pub v: i32 }\n}\nstatic_assert(alignof(a16) == 16 && sizeof(pk) == 5);\nfn main() i32 { return 0; }\n",
     );
     h::expect_ok(
         "align on a union and a static",
@@ -1322,9 +1344,9 @@ fn diagnostics_by_message() {
     h::expect_err_msg("top-level item", "5\nfn main() i32 { return 0; }\n", "expected top-level item");
     h::expect_err_msg("bare let", "fn main() i32 { let x; return 0; }\n", "expected type annotation or initializer");
     h::expect_err_msg(
-        "extern const initializer",
+        "extern const value without a header",
         "extern \"C\" { const X: i32 = 1; }\nfn main() i32 { return 0; }\n",
-        "extern const declarations cannot have an initializer",
+        "a constant with a value of an 'extern \"C\"' block is checked against its C header: the block needs that header",
     );
     h::expect_err_msg(
         "lifetime order",

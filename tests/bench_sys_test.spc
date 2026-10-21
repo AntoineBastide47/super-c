@@ -105,7 +105,7 @@ fn cycles_cover_every_thread() {
     if scope == 0 {
         // Unavailable is a legal answer (containers, no PMU): the reports say so instead of showing zero.
         // TODO: the hosted macOS runner is a virtual machine whose cycle counter never advances, so the
-        // shim's availability probe (bench_sys.c, `sc_bs_cycles_scope`) reports it unavailable and this
+        // shim's availability probe (bench_sys.spc, `sc_bs_cycles_scope`) reports it unavailable and this
         // test returns here. Once CI runs on a hardware macOS runner, drop the probe and this early return
         // so the coverage assertions below run on every macOS build.
         return;

@@ -96,11 +96,14 @@ pub enum AttrKind {
     ATTR_INTRINSIC, // `@intrinsic("name")` (std only): a bodiless function the compiler implements
     ATTR_TARGET_FEATURE, // `@target_feature([cpu::Feature; K])`: callable only where the build has them
     ATTR_SIMD_IMPL, // `@simd_impl(simd::Op, [cpu::Feature; K])` (std only): a hardware vector operation
-    ATTR_C_VALUE, // `@c.value(size, align)` on an extern opaque type: a register value of that layout
-    ATTR_C_READS, // `@c.reads(param, bytes)` on an extern function: it reads that range through `param`
-    ATTR_C_WRITES, // `@c.writes(param, bytes)`: it writes that range through `param`
-    ATTR_C_LANE_ACCESS, // `@c.lane_access`: it touches memory in active lanes at lane-dependent addresses
+    ATTR_C_VALUE, // `@value(size, align)` on an extern opaque type: a register value of that layout
+    ATTR_C_READS, // `@reads(param, bytes)` on an extern function: it reads that range through `param`
+    ATTR_C_WRITES, // `@writes(param, bytes)`: it writes that range through `param`
+    ATTR_C_LANE_ACCESS, // `@lane_access`: it touches memory in active lanes at lane-dependent addresses
     ATTR_TAIL_RECURSE, // `@tail_recurse`: every call of the function to itself converts to a jump (`ir::tailcall`)
+    ATTR_THREAD_LOCAL, // `@thread_local` on a `static mut`: one object per OS thread
+    ATTR_LAYOUT, // `@layout(size, align)` on an extern opaque type: a C value of that layout
+    ATTR_WHEN, // `@when(c)`: the item exists only where build condition `c` holds; `arg` is its truth table
 }
 
 /// `@unsafe` claims (`Attr.arg` bits): `safe` makes an extern function callable without `unsafe`;
@@ -169,13 +172,47 @@ pub struct WhereBound {
 /// The build-setting constants the compiler defines in every package, by index (`BC_*`). The names
 /// are reserved: no item or binding may take one, so a bare use always means the constant, and the
 /// platform filter decides a condition over them before name resolution.
-const BC_NAMES: [str<'static>; 6] = ["PLATFORM", "ARCH", "TEST", "POINTER_WIDTH", "ENDIAN", "PROFILE"];
+const BC_NAMES: [str<'static>; 10] = [
+    "PLATFORM",
+    "ARCH",
+    "TEST",
+    "POINTER_WIDTH",
+    "ENDIAN",
+    "PROFILE",
+    "THREAD_SANITIZER",
+    "ADDRESS_SANITIZER",
+    "LOCKDEP",
+    "OVERFLOW_CHECKS",
+];
 pub const BC_PLATFORM: i32 = 0;
 pub const BC_ARCH: i32 = 1;
 pub const BC_TEST: i32 = 2;
 pub const BC_POINTER_WIDTH: i32 = 3;
 pub const BC_ENDIAN: i32 = 4;
 pub const BC_PROFILE: i32 = 5;
+/// The `bool` constants of the C compile's configuration, from the profile's flags (`build_cfg`):
+/// ThreadSanitizer, AddressSanitizer, lock-order tracking (`-DSC_LOCKDEP`), and integer overflow
+/// checks (false where the profile wraps). Bit `k - BC_THREAD_SANITIZER` of `Package.build_cfg`.
+pub const BC_THREAD_SANITIZER: i32 = 6;
+pub const BC_ADDRESS_SANITIZER: i32 = 7;
+pub const BC_LOCKDEP: i32 = 8;
+pub const BC_OVERFLOW_CHECKS: i32 = 9;
+
+/// Whether build constant `k` is a `bool`: TEST, or one of the configuration constants.
+pub const fn bc_is_bool(k: i32) bool {
+    return k == BC_TEST || k >= BC_THREAD_SANITIZER;
+}
+
+/// The variable of boolean build constant `k` (`bc_is_bool`) in a `@when` truth table: bit
+/// `when_var(k)` of the table's index is the constant's value. TEST is 0, the configuration constants
+/// follow in `BC_*` order.
+pub const fn when_var(k: i32) u32 {
+    return if k == BC_TEST {
+        0u32;
+    } else {
+        (k - BC_THREAD_SANITIZER + 1) as u32;
+    };
+}
 
 /// The variants of std's `Platform`, `Arch` and `Endian`, in declaration order: the index of a
 /// `Platform` or `Arch` variant is its bit in the `@platform` or `@arch` mask.
@@ -277,23 +314,25 @@ pub const AA_PARAM: u32 = 5;
 pub const AA_BYTES: u32 = 6;
 
 /// The attribute kinds whose arguments are constant expressions, and the argument kinds of each, the
-/// first in the low four bits. The resolver resolves `@c.reads` and `@c.writes` among the function's
+/// first in the low four bits. The resolver resolves `@reads` and `@writes` among the function's
 /// parameters, the others in the declaration's scope.
-pub const ATTR_EXPR_KINDS: [AttrKind; 6] = [
+pub const ATTR_EXPR_KINDS: [AttrKind; 7] = [
     AttrKind::ATTR_ALIGN,
     AttrKind::ATTR_TARGET_FEATURE,
     AttrKind::ATTR_SIMD_IMPL,
     AttrKind::ATTR_C_VALUE,
     AttrKind::ATTR_C_READS,
     AttrKind::ATTR_C_WRITES,
+    AttrKind::ATTR_LAYOUT,
 ];
-const ATTR_EXPR_ARGS: [u32; 6] = [
+const ATTR_EXPR_ARGS: [u32; 7] = [
     AA_U32,
     AA_FEATURES,
     AA_OP | AA_FEATURES << 4,
     AA_USIZE | AA_USIZE << 4,
     AA_PARAM | AA_BYTES << 4,
     AA_PARAM | AA_BYTES << 4,
+    AA_USIZE | AA_USIZE << 4,
 ];
 
 /// The argument kinds of attribute `kind` (`AA_*`, four bits each, the first lowest); 0 when its
@@ -323,27 +362,27 @@ pub const fn attr_in_params(kind: u8) bool {
     return (attr_expr_args(kind) & 15) == AA_PARAM;
 }
 
-/// The largest `@c.align` value: the smallest page size of the targets. A larger one is reduced in a
+/// The largest `@align` value: the smallest page size of the targets. A larger one is reduced in a
 /// static's section (Mach-O caps it at 16 KiB), and a frame realigned to it can step past a task
 /// stack's guard page.
 pub const C_ALIGN_MAX: u64 = 4096;
 
-/// Whether `v` is a valid `@c.align` value: a power of two, at most `C_ALIGN_MAX`.
+/// Whether `v` is a valid `@align` value: a power of two, at most `C_ALIGN_MAX`.
 pub const fn c_align_ok(v: u64) bool {
     return v != 0 && (v & v - 1) == 0 && v <= C_ALIGN_MAX;
 }
 
-/// The error for an invalid `@c.align` value `v`, literal or evaluated.
+/// The error for an invalid `@align` value `v`, literal or evaluated.
 pub fn c_align_error(v: u64) String {
-    return format("'@c.align' needs a power of two from 1 to {}, found {}", C_ALIGN_MAX, v);
+    return format("'@align' needs a power of two from 1 to {}, found {}", C_ALIGN_MAX, v);
 }
 
 /// The value of the constant-expression attribute `attrs[attr]`. The parser adds the record; the
-/// owner's type check evaluates the arguments and sets `ok`. `v` is the `@c.align` value, the
-/// `@simd_impl` operation (a `simd::Op` discriminant), the `@c.value` size, or the `@c.reads` and
-/// `@c.writes` parameter index; `w` the feature set of `@target_feature` and `@simd_impl` (bit `i`
-/// is `cpu::Feature` discriminant `i`), `w[0]` the `@c.value` alignment, and for `@c.reads` and
-/// `@c.writes` `w[0]` the byte count, or `w[1] = 1` when the count is an expression over parameters.
+/// owner's type check evaluates the arguments and sets `ok`. `v` is the `@align` value, the
+/// `@simd_impl` operation (a `simd::Op` discriminant), the `@value` size, or the `@reads` and
+/// `@writes` parameter index; `w` the feature set of `@target_feature` and `@simd_impl` (bit `i`
+/// is `cpu::Feature` discriminant `i`), `w[0]` the `@value` alignment, and for `@reads` and
+/// `@writes` `w[0]` the byte count, or `w[1] = 1` when the count is an expression over parameters.
 pub struct AttrVal {
     pub attr: u32,
     pub ok: bool,
@@ -505,7 +544,7 @@ pub const FN_CONST: u8 = 8; // `const fn`: must evaluate at compile time when it
 pub const FN_UNSAFE: u8 = 16; // `unsafe fn`: calls require an unsafe context (like extern "C" fns)
 pub const FN_INTRINSIC: u8 = 32; // `@intrinsic("name")`: a call lowers to the operation it names; the body is an empty block in its place
 pub const FN_FEATURES: u8 = 64; // `@target_feature` or `@simd_impl`: a call needs the build to have the features
-pub const FN_LANE_ACCESS: u8 = 128; // `@c.lane_access`: memory in active lanes at lane-dependent addresses
+pub const FN_LANE_ACCESS: u8 = 128; // `@lane_access`: memory in active lanes at lane-dependent addresses
 
 extend FunctionData {
     pub const fn is_public(self: &Self) bool {
@@ -604,6 +643,9 @@ pub struct ConstData {
     pub is_extern: bool,
     pub is_static_mut: bool,
     pub is_local: bool, // declared in a body: another body may reuse the name
+    // A constant of an `extern "C"` block with a value: a Super-C constant, and the C compile checks
+    // that the C name (a macro or an enumerator of the header) has that value.
+    pub c_macro: bool,
 }
 pub struct ExternBlockData {
     pub abi: NodeId,
@@ -2452,7 +2494,7 @@ extend<T: Copy> SplitVec<T> {
     // Base entries inline. The frozen push fills the base to the split before it spills, so
     // `i < blen` implies `i < split`. `at_slow` is cold so that clang does not lay out the frozen
     // branch as the fall-through.
-    @c.always_inline
+    @always_inline
     pub const fn at(self: &Self, i: usize) &T {
         if self.split == SV_UNFROZEN {
             if i < self.base.len() {
@@ -2464,8 +2506,8 @@ extend<T: Copy> SplitVec<T> {
         return self.at_slow(i);
     }
 
-    // The overflow chunks and the bounds failure. `@c.cold` implies `noinline`.
-    @c.cold
+    // The overflow chunks and the bounds failure. `@cold` implies `noinline`.
+    @cold
     const fn at_slow(self: &Self, i: usize) &T {
         if self.split == SV_UNFROZEN {
             return self.base.at(i);
@@ -2494,7 +2536,7 @@ extend<T: Copy> SplitVec<T> {
         }
     }
 
-    @c.always_inline
+    @always_inline
     pub fn push(self: &mut Self, v: T) {
         if self.split == SV_UNFROZEN {
             self.base.push(v);
@@ -2674,7 +2716,7 @@ fn ix_ready<T: Copy + Hash>(ix: &mut Vector<u32>, used: &mut u32, pool: &ChunkPo
 
 // The slot of `v` in index `ix` over `pool` (`*hit`), or the empty slot where it belongs. Under
 // TS_ON, counts a hit at `stat` and each extra probe step at `stat + 1`. Requires a ready index.
-@c.always_inline
+@always_inline
 fn ix_slot<T: Copy + Hash + Eq>(ix: &Vector<u32>, pool: &ChunkPool<T>, v: &T, hit: &mut bool, stat: usize) usize {
     let ts = unsafe TS_ON;
     let mask = ix.len() - 1;
@@ -3177,11 +3219,11 @@ pub struct Ast {
     pub feature_rows: Vector<FeatureRow>,
     /// The `unsafe` markers whose only reason is such a call.
     pub unsafe_lints: Vector<UnsafeLint>,
-    /// The functions that call a `@c.lane_access` binding.
+    /// The functions that call a `@lane_access` binding.
     pub lane_callers: Vector<NodeId>,
-    /// The module declares a register type (`@c.value`).
+    /// The module declares a register type (`@value`).
     pub has_c_value: bool,
-    /// A field of the module pins its C member name (`@c.import` on a header type's field).
+    /// A field of the module pins its C member name (`@import` on a header type's field).
     pub has_member_pins: bool,
     // Per call node: the (fmod<<40 | fdecl<<8 | skip) the borrow-check pass replays from typechecking.
     pub call_info: Map<u32, u64>,
@@ -3366,22 +3408,22 @@ extend Ast {
     }
 
     /// True when `id` names the body arena.
-    @c.always_inline
+    @always_inline
     pub const fn in_body(id: NodeId) bool {
         return (id & NODE_BODY) != 0;
     }
 
     /// Node count over both arenas; `nth_id` enumerates them (module arena first).
-    @c.always_inline
+    @always_inline
     pub const fn nnodes(self: &Self) usize {
         return self.nodes.len() + self.b.nodes.len();
     }
-    @c.always_inline
+    @always_inline
     pub const fn nth_id(self: &Self, k: usize) NodeId {
         return Ast::nth_id_n(self.nodes.len(), k);
     }
     /// `nth_id` over a hoisted module-arena count `nb` (a hot scan keeps it in a register).
-    @c.always_inline
+    @always_inline
     pub const fn nth_id_n(nb: usize, k: usize) NodeId {
         if k < nb {
             return k as NodeId;
@@ -3389,7 +3431,7 @@ extend Ast {
         return (k - nb) as NodeId | NODE_BODY;
     }
     /// The dense index of `id` in the `nth_id` order, for a scan's per-node scratch table.
-    @c.always_inline
+    @always_inline
     pub const fn dense(self: &Self, id: NodeId) usize {
         if (id & NODE_BODY) != 0 {
             return self.nodes.len() + (id & NODE_BODY_MASK) as usize;
@@ -3424,7 +3466,7 @@ extend Ast {
     }
 
     /// True when `id` names a node of this module (either arena).
-    @c.always_inline
+    @always_inline
     pub const fn valid(self: &Self, id: NodeId) bool {
         if (id & NODE_BODY) != 0 {
             return (id & NODE_BODY_MASK) as usize < self.b.nodes.len();
@@ -3565,7 +3607,7 @@ extend Ast {
 
     /// Moves the scratch entries pushed since `mark` into `children` and returns their NodeList.
     /// Nested lists work because an inner list commits (draining its scratch tail) first.
-    @c.always_inline
+    @always_inline
     pub fn commit(self: &mut Self, mark: u32) NodeList {
         let need = self.scratch.len() - mark as usize;
         let list = if self.sink_body {
@@ -4773,7 +4815,7 @@ extend Ast {
 
     // Each accessor selects the arena, then runs one indexed access: the select is a conditional
     // move, and the access inlines once.
-    @c.always_inline
+    @always_inline
     pub const fn at(self: &mut Self, id: NodeId) &mut Node {
         let sv = if (id & NODE_BODY) != 0 {
             &mut self.b.nodes;
@@ -4782,7 +4824,7 @@ extend Ast {
         };
         return sv.index_mut((id & NODE_BODY_MASK) as usize);
     }
-    @c.always_inline
+    @always_inline
     pub const fn at_const(self: &Self, id: NodeId) &Node {
         let sv = if (id & NODE_BODY) != 0 {
             &self.b.nodes;
@@ -4791,7 +4833,7 @@ extend Ast {
         };
         return sv.at((id & NODE_BODY_MASK) as usize);
     }
-    @c.always_inline
+    @always_inline
     pub const fn list(self: &Self, list: NodeList) *const NodeId {
         let sv = if (list.start & NODE_BODY) != 0 {
             &self.b.children;
@@ -4828,7 +4870,7 @@ extend Ast {
     pub const fn resolution(self: &Self, ref_id: NodeId) NodeId {
         return self.resolution_def(ref_id).node;
     }
-    @c.always_inline
+    @always_inline
     pub const fn resolution_def(self: &Self, ref_id: NodeId) DefId {
         // synthesized nodes (post-resolve desugars) have no slot: unresolved, not an abort
         let sv = if (ref_id & NODE_BODY) != 0 {
@@ -4842,7 +4884,7 @@ extend Ast {
         }
         return *sv.at(k);
     }
-    @c.always_inline
+    @always_inline
     pub const fn set_resolution_def(self: &mut Self, ref_id: NodeId, decl: DefId) {
         let sv = if (ref_id & NODE_BODY) != 0 {
             &mut self.b.resolutions;
@@ -5183,7 +5225,7 @@ extend Ast {
     pub const fn builtin(b: BuiltinType) TypeId {
         return b as TypeId + 1;
     }
-    @c.always_inline
+    @always_inline
     pub const fn set_type(self: &mut Self, n: NodeId, t: TypeId) {
         let tv = if (n & NODE_BODY) != 0 {
             &mut self.b.types;
@@ -5192,7 +5234,7 @@ extend Ast {
         };
         tv.set((n & NODE_BODY_MASK) as usize, t);
     }
-    @c.always_inline
+    @always_inline
     pub const fn type_of(self: &Self, n: NodeId) TypeId {
         // nodes synthesized after init_types (typecheck-time desugars) have no slot yet; the
         // constant engine reads through partially-typed modules and must see "untyped", not a
@@ -5283,7 +5325,7 @@ pub struct SyntaxStats {
 }
 
 // The per-node index slot of `node` in the module (`v`) or body (`vb`) table, 0 when unrecorded.
-@c.always_inline
+@always_inline
 const fn slot_of(v: &Vector<u32>, vb: &Vector<u32>, node: NodeId) u32 {
     let tv = if (node & NODE_BODY) != 0 {
         vb;

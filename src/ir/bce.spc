@@ -392,7 +392,7 @@ extend Bce {
         return false;
     }
 
-    /// `@c.noreturn` on the callee decl: the call is a trap terminator.
+    /// `@noreturn` on the callee decl: the call is a trap terminator.
     fn callee_noreturn(self: &Self, d: DefId) bool {
         let pk = unsafe &*self.fx.pkg;
         if d.node == NODE_NONE || d.module as usize >= pk.modules.len() || !pk.modules.at(d.module as usize).has_ast {
@@ -402,7 +402,7 @@ extend Bce {
     }
 
     /// The panic-guard shape: from `blk0`, through at most four effect-free goto hops, every path
-    /// ends in a trap (an unreachable terminator or a direct `@c.noreturn` call). Statements on
+    /// ends in a trap (an unreachable terminator or a direct `@noreturn` call). Statements on
     /// the way may only be storage markers or pure whole-local RV_USE/RV_REF assigns.
     fn doomed_panic(self: &Self, b: &ir::CoreBody, blk0: u32) bool {
         let mut cur = blk0;
@@ -1679,7 +1679,7 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
     }
     let mut any = checks;
     if !any {
-        // a fold candidate exists only where a panic sits: a direct @c.noreturn call terminator
+        // a fold candidate exists only where a panic sits: a direct @noreturn call terminator
         // (checked here so check-free bodies still skip the walk outright)
         for i in 0..nb {
             let t = &b.blocks.at(i).term;

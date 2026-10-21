@@ -186,10 +186,10 @@ fn lsp_completion_attributes() {
     assert_eq(lsp_run(root), 0);
     let out = read_out(root);
     let o = out.as_str();
-    // The parser's whole inventory is served: c-namespace, tests, derive, platform, formatter.
-    assert(o.contains("{\"label\":\"c.cold\""));
-    assert(o.contains("{\"label\":\"c.always_inline\""));
-    assert(o.contains("{\"label\":\"c.export\""));
+    // The parser's whole inventory is served: C-facing attributes, tests, derive, platform, formatter.
+    assert(o.contains("{\"label\":\"cold\""));
+    assert(o.contains("{\"label\":\"always_inline\""));
+    assert(o.contains("{\"label\":\"export\""));
     assert(o.contains("{\"label\":\"test\""));
     assert(o.contains("{\"label\":\"test_init\""));
     assert(o.contains("{\"label\":\"derive\""));
@@ -608,7 +608,7 @@ fn attribute_inventory_is_complete() {
     let mut names = Vector::<String>::new();
     par::known_attributes(&mut names);
     assert(names.len() >= 24);
-    let want = "c.cold c.always_inline c.export c.import c.align test test_init test_free derive reflect platform arch fmt.skip emit_macro bench blocking no_const c.source c.link";
+    let want = "cold always_inline export import align test test_init test_free derive reflect platform arch fmt.skip emit_macro bench blocking no_const c.source link";
     let mut it = want.split(" ");
     loop {
         let w = it.next();

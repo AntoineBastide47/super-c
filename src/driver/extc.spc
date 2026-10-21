@@ -1,6 +1,6 @@
-// External C sources/libs: `@c.source`/`@c.link` attrs + implicit backing-header `.c` siblings. Each resolved
+// External C sources/libs: `@c.source`/`@link` attrs + implicit backing-header `.c` siblings. Each resolved
 // source becomes a wrapper TU `build/__ext<N>_<stem>.c` on the emit keep-list (one absolute #include; the file
-// stays in place so its own relative includes keep resolving), deduped by resolved path. `@c.link` values become
+// stays in place so its own relative includes keep resolving), deduped by resolved path. `@link` values become
 // `-l<v>` (verbatim when starting with '-'), written with the runtime's own libm on POSIX to `build/__ldflags`
 // for the final link line.
 import stdio;
@@ -70,7 +70,7 @@ fn ext_c_wrap(
     // The wrapper sits at the tree's root.
     let inc = include_name(unsafe str::from_cstr(rsl), loader::real_path_of(root).as_str());
     let text = format(
-        "/* external C source pulled into the build -- generated, do not edit */\n#define SC_RT_LK_STATS 4\n#include \"{}\"\n",
+        "/* external C source pulled into the build -- generated, do not edit */\n#define SC_RT_LK_STATS 5\n#include \"{}\"\n",
         inc.as_str(),
     );
     let rc = publish_file(&mut path, text.as_str());
@@ -83,7 +83,7 @@ fn ext_c_wrap(
     fresh.push(rc == 1);
 }
 
-/// Scan every module for @c.source/@c.link and implicit backing-header `.c` siblings: wrapper TUs are
+/// Scan every module for @c.source/@link and implicit backing-header `.c` siblings: wrapper TUs are
 /// written under gen_root and pushed onto `keep`, and whether this build rewrote each onto `fresh`; link
 /// flags go to build/__ldflags (removed when none). Sets `*err` on an unresolvable source or a write
 /// failure; already-set values are never cleared.
@@ -99,7 +99,7 @@ pub fn ext_c_collect(
     // Libm, on every POSIX link line: the prelude's float methods (`f64::fma` and friends) are emitted into
     // every program whether or not it calls them, and glibc keeps those out of libc, so the link fails
     // without it, which macOS hides because libSystem has them. It is seeded here rather than as a
-    // `@c.link` on the prelude's extern block because that block DECLARES the functions for every target,
+    // `@link` on the prelude's extern block because that block DECLARES the functions for every target,
     // Windows included: gating it to carry the flag would take the declarations away from Windows, whose
     // CRT provides the functions and has no libm to name.
     if target != 0 {
@@ -116,7 +116,7 @@ pub fn ext_c_collect(
         let src = p.modules[m].source.as_str().ptr() as *const char;
         let ap = p.module_ast_const(m as ModuleId);
         // Live top-level items, after `platform_filter` compacted `program.items`: a `@platform`-gated-out
-        // `@c.source`/`@c.link` leaves its attr in the table, so skip attrs whose owning item is gone (else
+        // `@c.source`/`@link` leaves its attr in the table, so skip attrs whose owning item is gone (else
         // every OS would pull in every other OS's runtime C and `-l` flags).
         let rootn = unsafe (*ap).root;
         let live = unsafe (*ap).at_const(rootn).as_data.program.items;
@@ -200,9 +200,10 @@ pub fn ext_c_collect(
             }
             let hv = unsafe (src + (hs.start + 1));
             let mut rel = PathBuf {};
-            let mut habs = PathBuf {};
             ext_rel(file, hv, hl, &mut rel[0]);
-            if unsafe shim::sc_realpath(&rel[0], &mut habs[0]) == null {
+            // One stat, not a realpath: most headers are the system's and absent here, and a failed
+            // realpath costs about ten times a failed stat.
+            if unsafe shim::sc_stat_isdir(&rel[0]) == -1 {
                 continue;
             }
             let dot = unsafe cstring::strrchr(&rel[0], '.');

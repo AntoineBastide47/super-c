@@ -336,12 +336,12 @@ fn register_types_have_a_layout_and_no_storage() {
     h::expect_err_msg(
         "an alignment that does not divide the size",
         "extern \"C\" {\n    @c.value(24, 16)\n    pub type reg_t;\n}\nfn main() i32 {\n    return 0;\n}\n",
-        "'@c.value' needs a nonzero size that is a multiple of the alignment",
+        "'@value' needs a nonzero size that is a multiple of the alignment",
     );
     h::expect_err_msg(
         "outside an extern block",
         "@c.value(16, 16)\ntype reg_t = i32;\nfn main() i32 {\n    return 0;\n}\n",
-        "'@c.value' may only be applied to an opaque type ('type T;') in an 'extern \"C\"' block",
+        "'@value' may only be applied to an opaque type ('type T;') in an 'extern \"C\"' block",
     );
 }
 
@@ -351,8 +351,8 @@ fn register_types_have_a_layout_and_no_storage() {
 fn memory_annotations_are_checked() {
     let cases: [[str; 2]; 5] = [
         ["    @c.reads(q, 16)\n    fn f(p: *const void);\n", "cannot find value 'q'"],
-        ["    @c.reads(n, 16)\n    fn f(n: usize);\n", "parameter 'n' of '@c.reads' must be a raw pointer"],
-        ["    @c.writes(p, 16)\n    fn f(p: *const void);\n", "parameter 'p' of '@c.writes' must be a '*mut' pointer"],
+        ["    @c.reads(n, 16)\n    fn f(n: usize);\n", "parameter 'n' of '@reads' must be a raw pointer"],
+        ["    @c.writes(p, 16)\n    fn f(p: *const void);\n", "parameter 'p' of '@writes' must be a '*mut' pointer"],
         [
             "    @c.reads(p, n)\n    fn f(p: *const void, n: i32);\n",
             "the byte count is a 'usize' constant or an expression over the function's other 'usize' parameters",
@@ -383,7 +383,7 @@ fn memory_annotations_are_checked() {
     );
     let c = h::compile("@c.reads(p, 16)\nfn f(p: *const void) {}\nfn main() i32 {\n    return 0;\n}\n", h::STAGE_PARSE);
     assert(
-        c.msg_has("'@c.reads' may only be applied to a function in an 'extern \"C\"' block or an '@intrinsic' function"),
+        c.msg_has("'@reads' may only be applied to a function in an 'extern \"C\"' block or an '@intrinsic' function"),
         "outside an extern block",
     );
     // The annotations have no code effect: the C of a program that calls the function is the same
@@ -526,7 +526,7 @@ fn outside_callers_and_implied_features() {
         "main",
     );
     assert(
-        r.out_has("a '@c.export' function cannot need CPU features: C code calls it without a check"),
+        r.out_has("a '@export' function cannot need CPU features: C code calls it without a check"),
         "an exported function",
     );
     let r2 = p.compile_flags("--target=wasm --target-feature=+simd128", "main.spc");
@@ -612,7 +612,7 @@ fn memory_annotation_counts() {
     h::expect_err_msg(
         "a range with lane access",
         "extern \"C\" {\n    @c.lane_access\n    @c.reads(p, 4)\n    fn f(p: *const void);\n}\nfn main() i32 {\n    return 0;\n}\n",
-        "'@c.lane_access' states no range: it takes no '@c.reads' or '@c.writes'",
+        "'@lane_access' states no range: it takes no '@reads' or '@writes'",
     );
 }
 

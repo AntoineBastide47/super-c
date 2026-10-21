@@ -17,15 +17,15 @@
 // most MAX_DEPTH splices deep and MAX_ADDED_STMTS statements per caller (VEC_SCALE times more in a
 // caller that holds a vector), without asm, closures, variadic intrinsics, reflection, asserts, wide
 // literals, statics of a generic scope, or `from` coercions, and without attributes beyond the
-// inline hints, the build gates and `@target_feature` (@c.noinline and @c.noreturn therefore
+// inline hints, the build gates and `@target_feature` (@noinline and @noreturn therefore
 // reject). The splice translates every type, type argument,
 // receiver and interface of the callee into the caller's types, so an inner call spells and demands
 // in the caller's unit as the caller's own call: a function with a body, an interface method, a
-// function value, a header-declared extern function or a runtime atomic; not another extern function
-// (its prototype is its module's) nor an associated function of a generic extend that names its
+// function value, a non-variadic extern function (every unit sees its declaration) or a runtime
+// atomic; not an associated function of a generic extend that names its
 // receiver by no type of the call (`env_receiver`: the instance env names it). A callee that reads a
 // module's constant or static, or whose inner call names another function than a concrete public
-// one or a header-declared extern one, inlines into a caller that holds a vector only
+// one or a non-variadic extern one, inlines into a caller that holds a vector only
 // (`CalleeInfo.vec_only`, `holds_vector`): vector code gains the most, and elsewhere the C compiler's
 // own inlining serves without the larger C. A generic callee whose
 // body defers a static_assert per instantiation records the call in the caller's `demands`, so the
@@ -514,31 +514,17 @@ fn is_concrete_pub_fn(pkg: *const loader::Package, d: DefId) bool {
     return ext == NODE_NONE || a.at_const(ext).as_data.extend_def.generics.len == 0;
 }
 
-/// A non-variadic function of an `extern "C" "<header>"` block. Every TU includes that header
-/// (through `__sc_fwd.h`), so a call to it spells the same in any TU.
-fn is_header_extern_fn(pkg: *const loader::Package, d: DefId) bool {
+/// A non-variadic extern function. Every TU sees its declaration: the header of its block, a header
+/// the runtime includes, or the prototype the emitter writes into `__sc_fwd.h`
+/// (`CEmit::collect_extern_proto`), so a call to it spells the same in any TU.
+fn is_global_extern_fn(pkg: *const loader::Package, d: DefId) bool {
     let p = unsafe &*pkg;
     if d.node == NODE_NONE || d.module as usize >= p.modules.len() || !p.modules.at(d.module as usize).has_ast {
         return false;
     }
     let a = unsafe &*p.module_ast_const(d.module);
     let n = a.at_const(d.node);
-    if n.kind != NodeKind::NODE_FUNCTION || !n.as_data.function.is_extern() || n.as_data.function.is_variadic() {
-        return false;
-    }
-    let items = a.at_const(a.root).as_data.program.items;
-    for i in 0..items.len {
-        let b = a.at_const(unsafe a.list(items)[i as usize]);
-        if b.kind == NodeKind::NODE_EXTERN_BLOCK && b.as_data.extern_block.header != NODE_NONE {
-            let fs = b.as_data.extern_block.items;
-            for j in 0..fs.len {
-                if unsafe a.list(fs)[j as usize] == d.node {
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
+    return n.kind == NodeKind::NODE_FUNCTION && n.as_data.function.is_extern() && !n.as_data.function.is_variadic();
 }
 
 extend InlineCtx {
@@ -1124,7 +1110,7 @@ fn vet_decl(pkg: *const loader::Package, d: DefId, ext: &mut NodeId, demand: &mu
         }
         // The build filter and the feature checks have read the gates and features: no code of theirs.
         let kd = a.attrs.at(k).kind;
-        let benign = kd == AttrKind::ATTR_INLINE as u8 || kd == AttrKind::ATTR_ALWAYS_INLINE as u8 || kd == AttrKind::ATTR_USED as u8 || kd == AttrKind::ATTR_UNUSED as u8 || kd == AttrKind::ATTR_FMT_SKIP as u8 || kd == AttrKind::ATTR_NO_CONST as u8 || kd == AttrKind::ATTR_PLATFORM as u8 || kd == AttrKind::ATTR_ARCH as u8 || kd == AttrKind::ATTR_TARGET_FEATURE as u8 || kd == AttrKind::ATTR_TAIL_RECURSE as u8;
+        let benign = kd == AttrKind::ATTR_INLINE as u8 || kd == AttrKind::ATTR_ALWAYS_INLINE as u8 || kd == AttrKind::ATTR_USED as u8 || kd == AttrKind::ATTR_UNUSED as u8 || kd == AttrKind::ATTR_FMT_SKIP as u8 || kd == AttrKind::ATTR_NO_CONST as u8 || kd == AttrKind::ATTR_PLATFORM as u8 || kd == AttrKind::ATTR_ARCH as u8 || kd == AttrKind::ATTR_WHEN as u8 || kd == AttrKind::ATTR_TARGET_FEATURE as u8 || kd == AttrKind::ATTR_TAIL_RECURSE as u8;
         if !benign {
             return REJ_BASE | IJ_NOT_FN as u64;
         }
@@ -1262,7 +1248,7 @@ extend InlineStore {
         let f = a.at_const(d.node).as_data.function;
         let shape = REJ_BASE | IJ_SHAPE as u64;
         // A callee that reads a module's constant or static, or makes an inner call another function
-        // than a concrete public one or a header-declared extern one names, inlines into vector code
+        // than a concrete public one or a non-variadic extern one names, inlines into vector code
         // only: there each call spills the live vector registers, and kernel helpers read their
         // tables; elsewhere the C compiler's own inlining serves, without the larger C.
         let mut vec_only = false;
@@ -1282,17 +1268,17 @@ extend InlineStore {
             // Inner calls splice into a FOREIGN TU: a function with a body or an interface method
             // (`is_spelled_fn`; the splice translates its type arguments, receiver and interface
             // into the caller's types, so the emitter spells and demands it there as the caller's
-            // own call), a call through a function value, a header-declared extern function or a
-            // runtime atomic (a verified intrinsic call, `static inline` in every TU's runtime
-            // header). Another extern function's prototype is its own module's.
+            // own call), a call through a function value, a non-variadic extern function (its
+            // declaration is global, `is_global_extern_fn`) or a runtime atomic (a verified
+            // intrinsic call, `static inline` in every TU's runtime header).
             vec_only = vec_only || tk.kind == ir::TM_CALL && tk.intr < ir::CI_ATOMIC_LOAD && (tk.targs_len != 0 || tk.callee.node == NODE_NONE || !is_concrete_pub_fn(
                 pkg,
                 tk.callee,
-            ) && !is_header_extern_fn(pkg, tk.callee));
+            ) && !is_global_extern_fn(pkg, tk.callee));
             if tk.kind == ir::TM_CALL && tk.intr < ir::CI_ATOMIC_LOAD && tk.callee.node != NODE_NONE && !is_spelled_fn(
                 pkg,
                 tk.callee,
-            ) && !is_header_extern_fn(pkg, tk.callee) {
+            ) && !is_global_extern_fn(pkg, tk.callee) {
                 return shape;
             }
             // An associated function of a generic extend whose call names its receiver by no type
@@ -2413,7 +2399,7 @@ fn addr_kept(pk: &loader::Package, b: &ir::CoreBody, a: &Ast, p: ir::PlaceId, cn
 
 // The intrinsics that write no memory.
 const fn pure_intrinsic(c: u8) bool {
-    return c == ir::IN_SIZEOF || c == ir::IN_ALIGNOF || c == ir::IN_TYPE_INFO || c == ir::IN_ZEROED || c == ir::IN_DANGLING || c == ir::IN_DYN_TID || c == ir::IN_DYN_DATA || c == ir::IN_LIKELY || ir::is_check(
+    return c == ir::IN_SIZEOF || c == ir::IN_ALIGNOF || c == ir::IN_TYPE_INFO || c == ir::IN_ZEROED || c == ir::IN_DANGLING || c == ir::IN_DYN_TID || c == ir::IN_DYN_DATA || c == ir::IN_LIKELY || c == ir::IN_UNLIKELY || ir::is_check(
         c,
     );
 }

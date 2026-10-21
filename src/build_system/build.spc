@@ -2436,6 +2436,39 @@ pub fn mem_checker(fl: str) bool {
     return false;
 }
 
+/// The C compile's configuration in compile flags `fl`, as the build constants read it
+/// (`Package.build_cfg`): bit 0 ThreadSanitizer, bit 1 AddressSanitizer, bit 2 lock-order tracking
+/// (`-DSC_LOCKDEP`), bit 3 wrapping arithmetic (`-DSC_ARITH_WRAP`).
+pub fn build_cfg(fl: str) u32 {
+    let mut cfg: u32 = 0;
+    let mut rest = fl;
+    loop {
+        let at = rest.find("-fsanitize=");
+        if at < 0 {
+            break;
+        }
+        rest = rest.slice(at as usize + 11, rest.len());
+        let mut e: usize = 0;
+        while e < rest.len() && rest.byte_at(e) != b' ' {
+            e += 1;
+        }
+        let v = rest.slice(0, e);
+        if v.contains("thread") {
+            cfg = cfg | 1;
+        }
+        if v.contains("address") {
+            cfg = cfg | 2;
+        }
+    }
+    if fl.contains("-DSC_LOCKDEP") {
+        cfg = cfg | 4;
+    }
+    if fl.contains("-DSC_ARITH_WRAP") {
+        cfg = cfg | 8;
+    }
+    return cfg;
+}
+
 /// The CPU features of a build of `m` under profile `prof_name`: the instruction set's baseline, then
 /// the build's `target-cpu` level, then the profile's `target-features` (else the build's), then the command line's list `cli`, closed
 /// under `implies`. The lists passed `check_features`.
@@ -2500,6 +2533,7 @@ fn emit_closure(
             m.sdk,
         );
         p.mem_check = mem_checker(fl.as_str());
+        p.build_cfg = build_cfg(fl.as_str());
     }
     p.test_build = topts != null && unsafe (*topts).enabled;
     p.profile = String::from_str(prof_name);
@@ -3346,7 +3380,7 @@ fn engine_build_i(
                 for i in 0..stream.lto_ld.len() {
                     largs.push(stream.lto_ld.at(i).clone());
                 }
-                // @c.link flags recorded by the emitter.
+                // @link flags recorded by the emitter.
                 let lfp = loader::join2(gen.as_str(), "__ldflags");
                 push_ldflags(&mut largs, lfp.as_str());
                 let mut ll = String::new();

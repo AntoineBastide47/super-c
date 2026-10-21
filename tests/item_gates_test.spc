@@ -1,6 +1,8 @@
 // What an attribute on an item asks of the build is applied, not dropped: a `static mut` or constant that
-// is `@c.used` or `@c.export`ed is defined whether code names it or not, and a `@platform` or `@arch` gate on
-// a member of an extend or an extern block removes the member where it fails, as it removes an item.
+// is `@c.used` or `@c.export`ed is defined whether code names it or not, a `@platform`, `@arch` or `@when`
+// gate on an item or a member of an extend or an extern block removes it where it fails, and a C name the
+// runtime header defines as a function-like macro (the leak tracker's `malloc`, `calloc`, `realloc` and
+// `free`) neither expands in an export's definition nor in a call through a member or a local.
 import tests::harness as h;
 import tests::cli_harness as cli;
 
@@ -87,10 +89,98 @@ fn a_member_gated_out_is_absent() {
     );
 }
 
+// Each build keeps the one item of a complementary pair its settings allow, whatever they are, and a
+// condition that never holds removes its item.
+fn build_condition_gates(b: &mut h::ExitBatch) {
+    b.add(
+        "@when keeps the items whose build condition holds",
+        M"(@when(TEST && !TEST)
+fn never() i32 {
+    return 9;
+}
+@when(!THREAD_SANITIZER && !ADDRESS_SANITIZER || THREAD_SANITIZER || ADDRESS_SANITIZER)
+fn always() i32 {
+    return 0;
+}
+@when(LOCKDEP)
+fn mode() i32 {
+    return 0;
+}
+@when(!LOCKDEP)
+fn mode() i32 {
+    return 0;
+}
+struct S {}
+extend S {
+    @when(!(TEST || THREAD_SANITIZER))
+    fn m() i32 {
+        return 0;
+    }
+    @when(TEST || THREAD_SANITIZER)
+    fn m() i32 {
+        return 0;
+    }
+}
+fn main() i32 {
+    return always() + mode() + S::m();
+}
+)",
+        0,
+    );
+}
+
+// Calls through a member and a local named like the leak tracker's macros reach the function they hold.
+fn runtime_macro_names(b: &mut h::ExitBatch) {
+    b.add(
+        "calls through members and locals named malloc, free and realloc",
+        M"(struct Hooks {
+    pub free: fn(i32) i32,
+    pub malloc: fn(i32) i32,
+}
+fn twice(x: i32) i32 {
+    return x * 2;
+}
+fn main() i32 {
+    let h = Hooks { free: twice, malloc: twice };
+    let realloc = twice;
+    return (h.free)(1) + (h.malloc)(2) + realloc(3) - 12;
+}
+)",
+        0,
+    );
+}
+
+@test
+fn a_failing_build_condition_removes_the_item() {
+    h::expect_err_msg(
+        "an item whose condition never holds is absent",
+        "@when(TEST && !TEST)\nfn never() i32 {\n    return 1;\n}\nfn main() i32 {\n    return never();\n}\n",
+        "never",
+    );
+    let msg = "'@when' takes a condition over TEST, THREAD_SANITIZER, ADDRESS_SANITIZER, LOCKDEP and OVERFLOW_CHECKS";
+    h::expect_err_msg("an unknown name", "@when(FAST)\nfn f() {}\nfn main() i32 { return 0; }\n", msg);
+    h::expect_err_msg("a constant that is not a bool", "@when(PLATFORM)\nfn f() {}\nfn main() i32 { return 0; }\n", msg);
+    h::expect_err_msg("a missing operand", "@when(TEST &&)\nfn f() {}\nfn main() i32 { return 0; }\n", msg);
+    h::expect_err_msg("a missing operator", "@when((TEST) LOCKDEP)\nfn f() {}\nfn main() i32 { return 0; }\n", msg);
+    h::expect_err_msg("no condition", "@when()\nfn f() {}\nfn main() i32 { return 0; }\n", msg);
+}
+
+// An export named like a runtime macro is parenthesized where it is declared and defined, and an extern
+// function without a header whose reserved name `super_rt.h` does not declare gets its prototype.
+@test
+fn macro_named_symbols_stay_symbols() {
+    let ex = "@c.export(\"free\")\nfn release(p: *mut void) {}\nfn main() i32 { return 0; }\n";
+    h::expect_c("an export named free", ex, "void (free)(void *p)");
+    let rs = "extern \"C\" {\n    fn __probe_size(n: usize) usize;\n}\nfn main() i32 { return unsafe __probe_size(0) as i32; }\n";
+    h::expect_c("a reserved extern name has a prototype", rs, "extern size_t __probe_size(size_t);");
+}
+
 // The exit-code cases of the provider functions above, one program per group (`h::ExitBatch`).
 @test
 fn exit_cases_00() {
     let mut b = h::ExitBatch::new();
     member_gates_filter_members(&mut b);
+    build_condition_gates(&mut b);
+    runtime_macro_names(&mut b);
     b.run();
 }

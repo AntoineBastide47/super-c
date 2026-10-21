@@ -157,13 +157,13 @@ extend Parser {
     }
 
     /// Add a node with the given kind, span and payload.
-    @c.always_inline
+    @always_inline
     fn mk(self: &mut Self, kind: NodeKind, span: Span, data: NodeAs) NodeId {
         return self.ast.add(Node { kind: kind, span: span, as_data: data });
     }
 
     /// Add a node whose span runs from `start` to the end of the previous token.
-    @c.always_inline
+    @always_inline
     fn fin(self: &mut Self, kind: NodeKind, start: u32, data: NodeAs) NodeId {
         return self.mk(kind, Span::new(start, self.previous_end()), data);
     }
@@ -176,7 +176,7 @@ extend Parser {
     }
 
     // Report `message` at the current token, skip that token, and return NODE_NONE.
-    @c.cold
+    @cold
     fn error_skip(self: &mut Self, message: str) NodeId {
         self.error_here(message);
         if !self.at_end() {
@@ -185,13 +185,13 @@ extend Parser {
         return NODE_NONE;
     }
 
-    @c.cold
+    @cold
     pub fn error_here(self: &mut Self, message: str) {
         let t = self.raw_peek();
         self.errors.emit_span(t.span(), String::from_str(message));
     }
 
-    @c.cold
+    @cold
     fn expect_fail(self: &mut Self, display: str) bool {
         let t = self.raw_peek();
         self.errors.emit_span(t.span(), format("expected {}", display));
@@ -217,7 +217,7 @@ extend Parser {
         return kind == TokenType::Identifier || kind == TokenType::Underscore || kind == TokenType::Static || kind == TokenType::StaticAssert || kind == TokenType::VaStart || kind == TokenType::VaArg || kind == TokenType::VaEnd;
     }
 
-    @c.always_inline
+    @always_inline
     pub fn identifier(self: &mut Self) NodeId {
         if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::SelfUpper) {
             return self.error_skip("expected identifier");
@@ -251,7 +251,7 @@ extend Parser {
         return self.ast.commit(mark);
     }
 
-    @c.always_inline
+    @always_inline
     pub fn callable_name(self: &mut Self) NodeId {
         if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::SelfUpper) {
             return self.error_skip("expected identifier");
@@ -1096,7 +1096,7 @@ extend Parser {
             Span::new(start, self.node_span(ty).end),
             NodeAs { field: FieldData { name: name, ty: ty, is_public: is_public } },
         );
-        // `@c.import("select")` on a header type's field names its C member, which a Super-C keyword
+        // `@import("select")` on a header type's field names its C member, which a Super-C keyword
         // cannot spell.
         let pin = self.in_extern && fattrs.len() == 1 && fattrs[0].kind == AttrKind::ATTR_IMPORT as u8;
         if pin {
@@ -1106,7 +1106,7 @@ extend Parser {
             self.errors.emit_span(
                 sp0,
                 format(
-                    "only '@reflect' applies to a field declaration, and '@c.import' to a field of an 'extern \"C\"' struct or union",
+                    "only '@reflect' applies to a field declaration, and '@import' to a field of an 'extern \"C\"' struct or union",
                 ),
             );
         }
@@ -1524,7 +1524,14 @@ extend Parser {
         let sp = self.node_span(decl);
         self.errors.emit_span(
             sp,
-            format("{} of an 'extern \"C\"' block is its C header's type: the block needs that header", what),
+            if self.ast.at_const(decl).kind == NodeKind::NODE_CONST || self.ast.at_const(decl).kind == NodeKind::NODE_TYPE_ALIAS {
+                format(
+                    "{} of an 'extern \"C\"' block is checked against its C header: the block needs that header",
+                    what,
+                );
+            } else {
+                format("{} of an 'extern \"C\"' block is its C header's type: the block needs that header", what);
+            },
         );
         self.errors.note(format("write 'extern \"C\" \"<header>.h\" {{ .. }}' with the header that defines it"));
     }
@@ -1583,7 +1590,7 @@ extend Parser {
                 self.ast.push(f);
             } else if self.check(TokenType::Enum) {
                 // Same contract as an extern struct: C declares the enum (`enum color`, or the
-                // `@c.import` pin), this only names its constants.
+                // `@import` pin), this only names its constants.
                 let ed = self.parse_enum();
                 if ed != NODE_NONE {
                     self.ast.at(ed).as_data.aggregate.is_public = is_public;
@@ -1595,7 +1602,7 @@ extend Parser {
             } else if self.check(TokenType::Struct) || self.check(TokenType::Union) {
                 // The HEADER defines this type and owns its layout; the members name some of its fields.
                 // Codegen emits no definition and spells it the way C does (`struct tm`, or the
-                // `@c.import` pin), which makes the binding's type the type the bound functions take.
+                // `@import` pin), which makes the binding's type the type the bound functions take.
                 let is_union = self.check(TokenType::Union);
                 let sd = self.parse_struct(); // one shape; `union` only sets the flag below
                 if sd != NODE_NONE {
@@ -1616,8 +1623,11 @@ extend Parser {
             } else if self.check(TokenType::Type) {
                 let ta = self.parse_type_alias(true);
                 self.ast.at(ta).as_data.type_alias.is_public = is_public;
-                // Attached, not dropped: `@c.import` on an opaque handle is what pins its C spelling.
+                // Attached, not dropped: `@import` on an opaque handle is what pins its C spelling.
                 self.add_attrs_to(&mut attrs, ta);
+                if self.ast.attr_of(ta, AttrKind::ATTR_LAYOUT) != null {
+                    self.need_header(header, ta, "an opaque type with a '@layout'");
+                }
                 self.ast.push(ta);
             } else if self.check(TokenType::Const) || self.check(TokenType::Static) {
                 // `static mut` is a writable C global: it DECLARES what the header defines, so it
@@ -1634,16 +1644,17 @@ extend Parser {
                 let cname = self.identifier();
                 self.expect(TokenType::Colon, "':'");
                 let ctype = self.parse_type();
-                if self.check(TokenType::Equal) {
-                    self.error_here(
-                        if is_static {
-                            "an extern static takes no initializer: the C side defines it";
-                        } else {
-                            "extern const declarations cannot have an initializer";
-                        },
-                    );
+                // A constant with a value is a Super-C constant the C compile checks against the
+                // header's name (`c_macro`); without one it is the C name, read at run time.
+                let mut cvalue = NODE_NONE;
+                if self.match(TokenType::Equal) {
+                    if is_static {
+                        self.error_here("an extern static takes no initializer: the C side defines it");
+                    }
+                    cvalue = self.parse_expression();
                 }
                 self.expect(TokenType::Semicolon, "';'");
+                let has_value = cvalue != NODE_NONE && !is_static;
                 let cnode = self.fin(
                     NodeKind::NODE_CONST,
                     cstart,
@@ -1651,13 +1662,18 @@ extend Parser {
                         const_def: ConstData {
                             name: cname,
                             ty: ctype,
+                            value: pick(has_value, cvalue, NODE_NONE),
                             is_public: is_public,
-                            is_extern: true,
+                            is_extern: !has_value,
                             is_static_mut: is_static,
+                            c_macro: has_value,
                         },
                     },
                 );
                 self.add_attrs_to(&mut attrs, cnode);
+                if has_value {
+                    self.need_header(header, cnode, "a constant with a value");
+                }
                 self.ast.push(cnode);
             } else {
                 self.error_here(
@@ -1688,6 +1704,20 @@ extend Parser {
             // Attached, not dropped: a `static_assert` about a LAYOUT is exactly the item that has to be
             // gated per target, and silently discarding `@platform`/`@arch` here fired the assert on the
             // targets it was written to exclude.
+            self.add_attrs_to(&mut attrs, id);
+            return id;
+        }
+        if self.check(TokenType::Asm) {
+            // A module-level `asm` is basic assembly: its template alone, emitted at file scope.
+            self.reject_derive_here();
+            let id = self.parse_asm();
+            let d = self.ast.at_const(id).as_data.asm_stmt;
+            if d.outputs.len != 0 || d.inputs.len != 0 || d.clobbers.len != 0 {
+                self.errors.emit_span(
+                    self.node_span(id),
+                    format("a module-level 'asm' takes only its template: no operands or clobbers"),
+                );
+            }
             self.add_attrs_to(&mut attrs, id);
             return id;
         }
@@ -1874,7 +1904,7 @@ extend Parser {
             );
             for a in 0..attrs.len() {
                 let at = *attrs.at(a);
-                if at.kind == AttrKind::ATTR_PLATFORM as u8 || at.kind == AttrKind::ATTR_ARCH as u8 {
+                if at.kind == AttrKind::ATTR_PLATFORM as u8 || at.kind == AttrKind::ATTR_ARCH as u8 || at.kind == AttrKind::ATTR_WHEN as u8 {
                     self.ast.add_attr(Attr { owner: ext, kind: at.kind, arg: at.arg, str_span: at.str_span });
                 }
             }
@@ -1998,7 +2028,7 @@ extend Parser {
     fn bc_cond(self: &mut Self, id: NodeId, report: bool) bool {
         let n = *self.ast.at_const(id);
         if n.kind == NodeKind::NODE_IDENTIFIER {
-            return self.bc_const(id) == BC_TEST;
+            return bc_is_bool(self.bc_const(id));
         }
         if n.kind == NodeKind::NODE_UNARY {
             return n.as_data.unary.op == TokenType::Bang && self.bc_cond(n.as_data.unary.operand, report);
@@ -2020,12 +2050,12 @@ extend Parser {
     fn bc_cmp(self: &mut Self, c: NodeId, v: NodeId, report: bool) bool {
         let k = self.bc_const(c);
         let vn = *self.ast.at_const(v);
-        if k == BC_TEST || k == BC_POINTER_WIDTH {
+        if bc_is_bool(k) || k == BC_POINTER_WIDTH {
             if vn.kind != NodeKind::NODE_LITERAL {
                 return false;
             }
             let t = vn.as_data.literal.token_type;
-            if k == BC_TEST {
+            if bc_is_bool(k) {
                 return t == TokenType::True || t == TokenType::False;
             }
             return t == TokenType::IntegerLiteral && bc_decimal(self.source, vn.as_data.literal.raw) >= 0;
@@ -2291,7 +2321,7 @@ extend Parser {
 
     // Qualified path `path` before a variant payload (`E::A(..)`). Patterns name a variant without its
     // enum, so this reports the qualifier and returns the last segment, which the pattern continues with.
-    @c.cold
+    @cold
     fn pattern_path_tail(self: &mut Self, path: NodeId) NodeId {
         let start = self.node_span(path).start;
         let last = self.ast.at_const(path).as_data.member.member;
@@ -2749,7 +2779,7 @@ extend Parser {
         return result;
     }
 
-    @c.always_inline
+    @always_inline
     fn add_binary(self: &mut Self, left: NodeId, op: TokenType, right: NodeId) NodeId {
         return self.mk(
             NodeKind::NODE_BINARY,
@@ -3602,7 +3632,9 @@ extend Parser {
     fn parse_attribute_syntax(self: &mut Self) AttrSyntax {
         self.advance();
         let empty = Token::new(TokenType::Eof, self.previous_end(), 0);
-        if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::Unsafe) {
+        if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::Unsafe) && !self.check(
+            TokenType::Import,
+        ) {
             self.error_here("expected an attribute path after '@'");
             return AttrSyntax { namespace: empty, name: empty, arg_start: self.current, arg_end: self.current };
         }
@@ -3629,6 +3661,10 @@ extend Parser {
                 AttrKind::ATTR_TARGET_FEATURE as i32;
             } else if parts == 1 && self.text_is(namespace, "simd_impl") {
                 AttrKind::ATTR_SIMD_IMPL as i32;
+            } else if parts == 1 && self.text_is(namespace, "layout") {
+                AttrKind::ATTR_LAYOUT as i32;
+            } else if parts == 1 && !self.text_is(namespace, "source") {
+                self.attr_kind_of(namespace, &mut ws, &mut wi);
             } else {
                 -1;
             };
@@ -3667,7 +3703,7 @@ extend Parser {
 
     // The arguments of an attribute that takes constant expressions, parsed into the module arena
     // (they are checked with their owner): one expression, or a NODE_TUPLE of several spanning the
-    // text between the parentheses; for `@c.align` (`lit`) NODE_NONE for a lone integer literal (the
+    // text between the parentheses; for `@align` (`lit`) NODE_NONE for a lone integer literal (the
     // literal form, read from its token). Stops before the closing ')'.
     fn parse_attr_expr(self: &mut Self, lit: bool) NodeId {
         let outer_sink = self.ast.sink_body;
@@ -3902,6 +3938,107 @@ extend Parser {
         out.arg = mask;
     }
 
+    // `@when(c)`: `c` over the boolean build constants (`bc_is_bool`) with `!`, `&&`, `||` and
+    // parentheses, kept as its truth table in `out.arg`: bit `k` is the value of `c` when bit
+    // `when_var(K)` of `k` is the value of constant `K`. The build filter reads the bit of its settings.
+    fn parse_when_attr(self: &mut Self, syntax: &AttrSyntax, out: &mut Attr) {
+        let count = Parser::attr_arg_count(syntax);
+        let mut i: usize = 0;
+        let mut table: u32 = 0;
+        if count != 0 && self.when_or(syntax, &mut i, &mut table, 0) && i == count {
+            out.arg = table;
+            return;
+        }
+        let t = if i < count {
+            self.attr_arg(syntax, i);
+        } else {
+            syntax.name;
+        };
+        self.errors.emit_span(
+            t.span(),
+            format(
+                "'@when' takes a condition over TEST, THREAD_SANITIZER, ADDRESS_SANITIZER, LOCKDEP and OVERFLOW_CHECKS with '!', '&&', '||' and parentheses",
+            ),
+        );
+    }
+
+    // `a || b || ..` of `@when` arguments from token `*i`: its truth table into `*t`; false on a
+    // syntax error, with `*i` at the token.
+    fn when_or(self: &Self, syntax: &AttrSyntax, i: &mut usize, t: &mut u32, depth: u32) bool {
+        if !self.when_and(syntax, i, t, depth) {
+            return false;
+        }
+        while *i < Parser::attr_arg_count(syntax) && self.attr_arg(syntax, *i).kind() == TokenType::PipePipe {
+            *i += 1;
+            let mut r: u32 = 0;
+            if !self.when_and(syntax, i, &mut r, depth) {
+                return false;
+            }
+            *t = *t | r;
+        }
+        return true;
+    }
+
+    // `a && b && ..` of `@when` arguments, as `when_or`.
+    fn when_and(self: &Self, syntax: &AttrSyntax, i: &mut usize, t: &mut u32, depth: u32) bool {
+        if !self.when_unary(syntax, i, t, depth) {
+            return false;
+        }
+        while *i < Parser::attr_arg_count(syntax) && self.attr_arg(syntax, *i).kind() == TokenType::AmpersandAmpersand {
+            *i += 1;
+            let mut r: u32 = 0;
+            if !self.when_unary(syntax, i, &mut r, depth) {
+                return false;
+            }
+            *t = *t & r;
+        }
+        return true;
+    }
+
+    // A constant, `!x` or `(c)` of `@when` arguments, as `when_or`. Nesting stops at 32 levels.
+    fn when_unary(self: &Self, syntax: &AttrSyntax, i: &mut usize, t: &mut u32, depth: u32) bool {
+        if *i >= Parser::attr_arg_count(syntax) || depth >= 32 {
+            return false;
+        }
+        let tk = self.attr_arg(syntax, *i);
+        if tk.kind() == TokenType::Bang {
+            *i += 1;
+            if !self.when_unary(syntax, i, t, depth + 1) {
+                return false;
+            }
+            *t = ~*t;
+            return true;
+        }
+        if tk.kind() == TokenType::LeftParen {
+            *i += 1;
+            if !self.when_or(syntax, i, t, depth + 1) {
+                return false;
+            }
+            if *i >= Parser::attr_arg_count(syntax) || self.attr_arg(syntax, *i).kind() != TokenType::RightParen {
+                return false;
+            }
+            *i += 1;
+            return true;
+        }
+        if tk.kind() != TokenType::Identifier {
+            return false;
+        }
+        let k = bc_index(diag::span_str(self.source, tk.start(), tk.end()));
+        if !bc_is_bool(k) {
+            return false;
+        }
+        // The constant is true at the indices whose bit `when_var(k)` is set.
+        let j = when_var(k);
+        *t = 0;
+        for x in 0..32u32 {
+            if (x >> j & 1u32) != 0 {
+                *t = *t | 1u32 << x;
+            }
+        }
+        *i += 1;
+        return true;
+    }
+
     // `asm("template" : outs : ins : clobbers);` -- GCC extended assembly, passed through verbatim.
     // Every section is optional from the left, exactly as in C. Operands are `"constraint"(expr)` and are
     // stored as flat constraint/expression pairs; clobbers are bare string literals.
@@ -3992,6 +4129,8 @@ extend Parser {
             AttrKind::ATTR_NO_CONST as i32;
         } else if self.text_is(ns, "tail_recurse") {
             AttrKind::ATTR_TAIL_RECURSE as i32;
+        } else if self.text_is(ns, "thread_local") {
+            AttrKind::ATTR_THREAD_LOCAL as i32;
         } else {
             -1;
         };
@@ -4253,6 +4392,11 @@ extend Parser {
             self.parse_axis_attr(&syntax, out, true);
             return true;
         }
+        if syntax.parts == 1 && self.text_is(ns, "when") {
+            *out = Attr { kind: AttrKind::ATTR_WHEN as u8, str_span: Span::empty() };
+            self.parse_when_attr(&syntax, out);
+            return true;
+        }
         if self.text_is(ns, "fmt") {
             if syntax.parts == 2 && self.text_is(syntax.name, "skip") {
                 *out = Attr { kind: AttrKind::ATTR_FMT_SKIP as u8, str_span: Span::empty() };
@@ -4272,7 +4416,20 @@ extend Parser {
             *out = Attr { kind: k as u8, str_span: Span::empty() };
             return self.expr_args(&syntax, out);
         }
-        if !self.text_is(ns, "c") {
+        if syntax.parts == 1 && self.text_is(ns, "layout") {
+            *out = Attr { kind: AttrKind::ATTR_LAYOUT as u8, str_span: Span::empty() };
+            return self.expr_args(&syntax, out);
+        }
+        let mut wants_str = false;
+        let mut wants_int = false;
+        // A C-facing attribute is `@inline`; `@c.inline` is its older spelling. `@c.source` has no
+        // one-part spelling.
+        let top = syntax.parts == 1 && !self.text_is(ns, "source") && self.attr_kind_of(
+            ns,
+            &mut wants_str,
+            &mut wants_int,
+        ) >= 0;
+        if !top && !self.text_is(ns, "c") {
             if !self.bootstrap_tags {
                 self.errors.emit_span(
                     ns.span(),
@@ -4284,7 +4441,7 @@ extend Parser {
             }
             return false;
         }
-        if syntax.parts != 2 {
+        if !top && syntax.parts != 2 {
             self.errors.emit_span(
                 syntax.name.span(),
                 String::from_str(
@@ -4297,8 +4454,7 @@ extend Parser {
             );
             return false;
         }
-        let mut wants_str = false;
-        let mut wants_int = false;
+        // `syntax.name` is the namespace token itself for a one-part attribute.
         let kind = self.attr_kind_of(syntax.name, &mut wants_str, &mut wants_int);
         if kind < 0 {
             if !self.bootstrap_tags {
@@ -4331,8 +4487,8 @@ extend Parser {
                 self.errors.emit_span(
                     syntax.name.span(),
                     format(
-                        "attribute '@c.{}' requires an argument",
-                        diag::span_str(self.source, syntax.name.start(), syntax.name.end()),
+                        "attribute '@{}' requires an argument",
+                        diag::span_str(self.source, ns.start(), syntax.name.end()),
                     ),
                 );
             } else if argc != 1 || wants_int && self.attr_arg(&syntax, 0).kind() != TokenType::IntegerLiteral || wants_str && self.attr_arg(
@@ -4369,10 +4525,7 @@ extend Parser {
         } else if syntax.has_args {
             self.errors.emit_span(
                 syntax.name.span(),
-                format(
-                    "attribute '@c.{}' takes no arguments",
-                    diag::span_str(self.source, syntax.name.start(), syntax.name.end()),
-                ),
+                format("attribute '@{}' takes no arguments", diag::span_str(self.source, ns.start(), syntax.name.end())),
             );
         }
         return true;
@@ -4526,6 +4679,22 @@ extend Parser {
                     "",
                     "may only be applied to a function with a body",
                 );
+            } else if attr.kind == AttrKind::ATTR_THREAD_LOCAL as u8 {
+                pick(
+                    owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_CONST && self.ast.at_const(
+                        owner,
+                    ).as_data.const_def.is_static_mut,
+                    "",
+                    "may only be applied to a 'static mut'",
+                );
+            } else if attr.kind == AttrKind::ATTR_LAYOUT as u8 {
+                pick(
+                    self.in_extern && owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_TYPE_ALIAS && self.ast.at_const(
+                        owner,
+                    ).as_data.type_alias.ty == NODE_NONE,
+                    "",
+                    "may only be applied to an opaque type ('type T;') in an 'extern \"C\"' block",
+                );
             } else if attr.kind == AttrKind::ATTR_C_VALUE as u8 {
                 self.ast.has_c_value = true;
                 pick(
@@ -4543,8 +4712,8 @@ extend Parser {
                 );
             } else if attr.kind == AttrKind::ATTR_ALIGN as u8 {
                 // The layout of a struct and the C object of a static read it; on any other owner it
-                // would change nothing. A header struct's layout is its C header's.
-                let ok = owner != NODE_NONE && (self.ast.at_const(owner).kind == NodeKind::NODE_STRUCT && !self.in_extern || self.ast.at_const(
+                // would change nothing. An extern static's object is its C header's.
+                let ok = owner != NODE_NONE && (self.ast.at_const(owner).kind == NodeKind::NODE_STRUCT || self.ast.at_const(
                     owner,
                 ).kind == NodeKind::NODE_CONST && self.ast.at_const(owner).as_data.const_def.is_static_mut && !self.ast.at_const(
                     owner,
@@ -4552,13 +4721,13 @@ extend Parser {
                 pick(
                     ok,
                     "",
-                    "may only be applied to a struct, a union or a 'static mut' outside an 'extern \"C\"' block",
+                    "may only be applied to a struct, a union, or a 'static mut' outside an 'extern \"C\"' block",
                 );
             } else if attr.kind == AttrKind::ATTR_PACKED as u8 {
                 pick(
-                    owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_STRUCT && !self.in_extern,
+                    owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_STRUCT,
                     "",
-                    "may only be applied to a struct or a union outside an 'extern \"C\"' block",
+                    "may only be applied to a struct or a union",
                 );
             } else {
                 "";
@@ -4728,7 +4897,7 @@ extend Parser {
             ).kind != NodeKind::NODE_EXTERN_BLOCK) {
                 self.errors.emit_span(
                     sp,
-                    format("'@c.source' / '@c.link' may only be applied to an 'extern \"C\"' block"),
+                    format("'@c.source' / '@link' may only be applied to an 'extern \"C\"' block"),
                 );
             }
             if attr.kind == AttrKind::ATTR_NO_CONST as u8 && (owner == NODE_NONE || self.ast.at_const(owner).kind != NodeKind::NODE_STRUCT && self.ast.at_const(
@@ -4844,10 +5013,20 @@ pub fn known_attributes(out: &mut Vector<String>) {
     }
     let t: []str = C_ATTR_NAMES;
     for i in 0..t.len() {
-        let mut n = String::from_str("c.");
-        n.push_str(t[i]);
+        let mut n = String::new();
+        c_attr_spelling(i, &mut n);
         out.push(n);
     }
+}
+
+// The spelling after '@' of `C_ATTR_NAMES[i]`: the bare name, except `c.source`, which has no
+// one-part spelling.
+fn c_attr_spelling(i: usize, out: &mut String) {
+    if i == C_ATTR_SOURCE {
+        out.push_str("c.");
+    }
+    let t: []str = C_ATTR_NAMES;
+    out.push_str(t[i]);
 }
 
 // The spelling of attribute `kind` after '@', for the expression-argument and placement kinds.
@@ -4864,17 +5043,24 @@ fn known_attr_name(kind: u8, out: &mut String) {
         out.push_str("tail_recurse");
         return;
     }
+    if kind == AttrKind::ATTR_THREAD_LOCAL as u8 {
+        out.push_str("thread_local");
+        return;
+    }
+    if kind == AttrKind::ATTR_LAYOUT as u8 {
+        out.push_str("layout");
+        return;
+    }
     let t: []str = C_ATTR_NAMES;
     for i in 0..t.len() {
         if (unsafe C_ATTR_KINDS[i]) as u8 == kind {
-            out.push_str("c.");
-            out.push_str(t[i]);
+            c_attr_spelling(i, out);
         }
     }
 }
 
-// The attributes outside the `c.` namespace, as `known_attributes` gives them.
-const ATTR_NAMES: [str<'static>; 21] = [
+// The attributes that are not C-facing, as `known_attributes` gives them.
+const ATTR_NAMES: [str<'static>; 24] = [
     "emit_macro",
     "bench",
     "test",
@@ -4896,9 +5082,12 @@ const ATTR_NAMES: [str<'static>; 21] = [
     "target_feature",
     "simd_impl",
     "tail_recurse",
+    "thread_local",
+    "layout",
+    "when",
 ];
 
-// The `@c.*` attributes (names after `c.`) and their kinds. The first eight take no argument,
+// The C-facing attributes (`@inline`, or the older `@inline`) and their kinds. The first eight take no argument,
 // `align` takes an integer or a constant expression, `export` to `link` take a string, `value`,
 // `reads` and `writes` take constant expressions (`attr_expr_args`), and `lane_access` none.
 const C_ATTR_NAMES: [str<'static>; 17] = [
@@ -4921,6 +5110,7 @@ const C_ATTR_NAMES: [str<'static>; 17] = [
     "lane_access",
 ];
 const C_ATTR_ALIGN: usize = 8;
+const C_ATTR_SOURCE: usize = 11;
 const C_ATTR_STR_END: usize = 13;
 
 // Duplicate-check kinds beyond AttrKind (every kind stays below 64, the width of the seen mask):

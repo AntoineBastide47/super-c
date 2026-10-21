@@ -307,12 +307,14 @@ fn index_edges_cover_reference_kinds() {
     }
 }
 
-// The workspace through the driver's order: resolve every module, build the index (its precheck
-// ranges hold the resolver's references), type-check, then finalize (the final ranges add what the
-// checker resolved).
+// The workspace through the driver's order: filter by platform, resolve every module, build the index
+// (its precheck ranges hold the resolver's references), type-check, then finalize (the final ranges
+// add what the checker resolved).
 fn driver_order(ws: &Ws) loader::Package {
-    let mut p = loader::package_load(ws.root.as_str(), "std", false, unsafe shim::sc_host_platform());
+    let host = unsafe shim::sc_host_platform();
+    let mut p = loader::package_load(ws.root.as_str(), "std", false, host);
     assert(p.ok, "the workspace loads");
+    p.platform_filter(host);
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_new(pkg);
     p.cir = &mut cirv;

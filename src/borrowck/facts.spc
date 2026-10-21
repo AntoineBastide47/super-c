@@ -315,7 +315,7 @@ pub struct Owner {
 }
 
 // Read/grow a `[mid][ty]` cache byte; -1 means uncomputed. Type ids are dense per module.
-@c.always_inline
+@always_inline
 const fn cache_get(arr: &mut Vector<Vector<u64>>, mid: ModuleId, ty: TypeId) i32 {
     if arr.len() <= mid as usize {
         return -1;
@@ -323,7 +323,7 @@ const fn cache_get(arr: &mut Vector<Vector<u64>>, mid: ModuleId, ty: TypeId) i32
     return memo2_get(arr.at(mid as usize), ty_dense(ty));
 }
 
-@c.always_inline
+@always_inline
 fn cache_set(arr: &mut Vector<Vector<u64>>, mid: ModuleId, ty: TypeId, r: bool) {
     while arr.len() <= mid as usize {
         arr.push(Vector::<u64>::new());
@@ -1019,7 +1019,7 @@ extend Gen {
         return self.f.origin_loans[o as usize];
     }
 
-    @c.always_inline
+    @always_inline
     fn access(self: &mut Self, place: ir::PlaceId, local: u32, kind: u8, point: u32, sp: tok::Span) {
         if self.loans {
             self.f.accesses.push(
@@ -1773,7 +1773,7 @@ extend Gen {
     }
 
     // A value read of a place: liveness, init/move event, and the matching access.
-    @c.always_inline
+    @always_inline
     fn op_read(self: &mut Self, opid: ir::OperandId, point: u32, sp: tok::Span) {
         let op = *self.body().operands.at(opid as usize);
         if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
@@ -3897,7 +3897,7 @@ extend Gen {
     // while it holds only assigns (which strictly improve state) and uses of root-leaf paths
     // (whose error checks reduce to that path's own entry bits): the reporting pass can then
     // clear it against the entry rows in O(words) instead of replaying.
-    @c.always_inline
+    @always_inline
     fn push_ev(self: &mut Self, kind: u8, path: u32, point: u32, sp: tok::Span) {
         self.f.events.push(ev(kind, path, point, sp));
         if kind == EV_ASSIGN || kind == EV_DEAD || kind == EV_MOVE {

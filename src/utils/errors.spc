@@ -109,7 +109,7 @@ extend Errors {
     }
 
     /// Record a non-fatal warning at [at, at+len). Takes ownership of `msg`; drops it past ERRORS_MAX.
-    @c.cold
+    @cold
     pub fn warn(self: &mut Self, at: u32, len: u32, msg: String) {
         if self.warns.len() >= ERRORS_MAX {
             return;
@@ -118,7 +118,7 @@ extend Errors {
     }
 
     /// `warn` over the source span `sp`.
-    @c.cold
+    @cold
     pub fn warn_span(self: &mut Self, sp: tok::Span, msg: String) {
         self.warn(sp.start, sp.end - sp.start, msg);
     }
@@ -127,7 +127,7 @@ extend Errors {
     /// order: note chains, fixes and their payloads keep their links through rebased indexes.
     /// `o` is left empty. What a module's
     /// per-item outputs concatenate through, in item order, before `finalize`.
-    @c.cold
+    @cold
     pub fn append(self: &mut Self, o: &mut Errors) {
         let nb = self.note_pool.len() as u32;
         let wb = self.warns.len() as u32;
@@ -160,7 +160,7 @@ extend Errors {
 
     /// Attach a machine-applicable fix to the warning being emitted (fix() always follows its warn();
     /// past the ERRORS_MAX cap the index degrades to the last kept warning).
-    @c.cold
+    @cold
     pub fn fix(self: &mut Self, start: u32, end: u32, kind: u8) {
         self.fixes.push(LintFix { start: start, end: end, kind: kind, warn: self.last_warn(), text: 0xFFFFFFFF });
     }
@@ -174,7 +174,7 @@ extend Errors {
     /// inserts `text` in its place. A single fix expresses an edit that no delete/insert pair can (e.g.
     /// unwrapping `(*e)` to `e`, where the kept text sits between the two deletions). Takes ownership of
     /// `text` (fix() always follows its warn(); past the cap the index degrades to the last kept warning).
-    @c.cold
+    @cold
     pub fn fix_replace(self: &mut Self, start: u32, end: u32, text: String) {
         let t = self.fix_texts.len() as u32;
         self.fix_texts.push(text);
@@ -183,7 +183,7 @@ extend Errors {
 
     /// Record a diagnostic (an already-formatted message, built with `format(...)`) at the source span
     /// [at, at+len). Takes ownership of `msg` (freed here if the message cap is hit).
-    @c.cold
+    @cold
     pub fn emit(self: &mut Self, at: u32, len: u32, msg: String) {
         if self.errors.len() >= ERRORS_MAX {
             return;
@@ -192,13 +192,13 @@ extend Errors {
     }
 
     /// `emit` over the source span `sp`.
-    @c.cold
+    @cold
     pub fn emit_span(self: &mut Self, sp: tok::Span, msg: String) {
         self.emit(sp.start, sp.end - sp.start, msg);
     }
 
     /// `emit_span` of the first line of `msg`; the text after its line feed, if any, is a note.
-    @c.cold
+    @cold
     pub fn emit_span_note(self: &mut Self, sp: tok::Span, msg: String) {
         let cut = msg.as_str().find_byte(b'\n');
         if cut < 0 {
@@ -214,7 +214,7 @@ extend Errors {
     /// function's diagnostics start at; the record is inserted at the first position in [from, len)
     /// whose span starts after `at`, so it lands where a reader expects it instead of after every other
     /// diagnostic in the function. Diagnostics already recorded keep their relative order. Returns the index it landed at, for `note_at`.
-    @c.cold
+    @cold
     pub fn emit_ordered(self: &mut Self, from: usize, at: u32, len: u32, msg: String) usize {
         if self.errors.len() >= ERRORS_MAX {
             return ERRORS_MAX;
@@ -233,7 +233,7 @@ extend Errors {
     }
 
     // Append `msg` to error `index`'s note chain (shared pool; insertion order preserved).
-    @c.cold
+    @cold
     fn attach_note(self: &mut Self, index: usize, msg: String) {
         if index >= self.errors.len() {
             return;
@@ -250,7 +250,7 @@ extend Errors {
     }
 
     /// Attach a note line to the most recent diagnostic. Takes ownership of `msg`.
-    @c.cold
+    @cold
     pub fn note(self: &mut Self, msg: String) {
         let n = self.errors.len();
         if n == 0 {
@@ -261,14 +261,14 @@ extend Errors {
 
     /// Attach a note to a SPECIFIC diagnostic (the index `emit_ordered` returned); `note` always
     /// targets the last one, which is wrong once a diagnostic has been inserted out of order.
-    @c.cold
+    @cold
     pub fn note_at(self: &mut Self, index: usize, msg: String) {
         self.attach_note(index, msg);
     }
 
     // Structural equality for dedup: span, message bytes, and the note chains. Severity is
     // implied (dedup runs within one record vector).
-    @c.cold
+    @cold
     fn same_diag(self: &Self, a: &Diagnostic, b: &Diagnostic) bool {
         if a.start != b.start || a.len != b.len || !a.msg.equals(&b.msg) {
             return false;
@@ -288,7 +288,7 @@ extend Errors {
     /// Dedup identical records (order-preserving; the same error can be emitted from more than one
     /// pass), then render every survivor into a caret-annotated terminal block against `source`/`file`.
     /// The records themselves are never rewritten. Call once, before `log`.
-    @c.cold
+    @cold
     pub fn finalize(self: &mut Self, source: str, file: str) {
         if self.errors.len() == 0 && self.warns.len() == 0 {
             return;
@@ -332,7 +332,7 @@ extend Errors {
 
     /// Print the finalized blocks to stderr, warnings before errors. Falls back to the raw messages
     /// when `finalize` has not run.
-    @c.cold
+    @cold
     pub fn log(self: &Self) {
         if self.rendered_warns.len() == self.warns.len() && self.rendered_errors.len() == self.errors.len() {
             for i in 0..self.rendered_warns.len() {
@@ -353,7 +353,7 @@ extend Errors {
 }
 
 // The start offset of every line of `source`: after `\n`, `\r\n`, or a lone `\r`.
-@c.cold
+@cold
 fn line_starts_of(source: str) Vector<u32> {
     let len = source.len();
     let mut line_starts = Vector::<u32>::new();
@@ -396,7 +396,7 @@ fn line_index(line_starts: &Vector<u32>, off: u32) usize {
 }
 
 /// The 1-based line of byte `off` of `source`, with the line ends of `line_starts_of`.
-@c.cold
+@cold
 pub fn line_of(source: str, off: u32) u32 {
     let ls = line_starts_of(source);
     return line_index(&ls, off) as u32 + 1;
@@ -404,7 +404,7 @@ pub fn line_of(source: str, off: u32) u32 {
 
 // The `--> file:line:col` location, the offending source line (windowed to 120 cols), and the
 // caret run under the span: the block every rendered diagnostic shares.
-@c.cold
+@cold
 fn push_loc_block(out: &mut String, source: str, line_starts: &Vector<u32>, mut off: u32, span: u32, file: str) {
     let src_len = source.len();
     if off as usize > src_len {
@@ -483,7 +483,7 @@ fn push_loc_block(out: &mut String, source: str, line_starts: &Vector<u32>, mut 
 
 // Render one record into a pretty source-annotated block: the message, the location block, and the
 // note chain ("\n  = note: <text>" per note, continuation lines unprefixed).
-@c.cold
+@cold
 fn render(d: &Diagnostic, source: str, line_starts: &Vector<u32>, file: str, pool: &Vector<Note>, kind: str) String {
     let mut out = String::new();
     out.push_str(kind);
@@ -502,7 +502,7 @@ fn render(d: &Diagnostic, source: str, line_starts: &Vector<u32>, file: str, poo
 
 /// A bare location block for a SECONDARY site, rendered into a note where the primary rendering
 /// pass cannot reach another file's source. Builds its own line index (cold path).
-@c.cold
+@cold
 pub fn render_site(source: str, file: str, off: u32, span: u32) String {
     let line_starts = line_starts_of(source);
     let mut out = String::new();

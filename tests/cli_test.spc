@@ -431,7 +431,7 @@ fn mut_views_split_into_restrict_pointers() {
         "the entry keeps the struct ABI",
     );
     assert(
-        p.gen_has("main.c", "void sc_scale(SliceMut__f32 __sc_a0, float __sc_a1) {"),
+        p.gen_has("main.c", "void (sc_scale)(SliceMut__f32 __sc_a0, float __sc_a1) {"),
         "an export keeps the struct ABI",
     );
     assert(p.gen_has("main.c", "rec__r(d.ptr, d.len, "), "a direct call passes the pointer and the length");
@@ -3136,6 +3136,8 @@ fn main() i32 {
     );
     assert(!p.gen_has("main.c", "__sc_cancel_tick"), "no cancellation tick without a cancellation requester");
     assert(p.gen_has("main.c", "int32_t __sc_spc = "), "the function-local preemption tick is declared");
+    // The substrate's spin, park and signal-handler loops hold locks a preemption must not cross.
+    assert(!p.gen_has("sc_runtime.c", "__sc_spc"), "the runtime substrate never ticks");
     let cc = p.cc_build("");
     assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
@@ -5257,12 +5259,11 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
-    assert(r.ok());
-    // -DSC_LOCKDEP is what compiles the hooks in at all: they sit on a lock fast path of one CAS, so an
-    // ungated call to check an env flag tripled `mutex_uncontended`. The `race` profile defines it.
-    let cc = p.cc_build("-DSC_LOCKDEP");
-    assert(cc.ok());
+    // -DSC_LOCKDEP in the build's C flags (the build constant LOCKDEP) is what compiles the hooks in at
+    // all: they sit on a lock fast path of one CAS, so an ungated call to check an env flag tripled
+    // `mutex_uncontended`. The `race` profile defines it.
+    p.mkfile("build.toml", "bin = \"bin\"\nroot = \"main.spc\"\ncflags = [\"-DSC_LOCKDEP\"]\n");
+    assert(cli::superc_in(p.dir(), "build -o bin").ok(), "the build with -DSC_LOCKDEP");
     // Compiled in but not switched on: an inversion costs nothing and says nothing.
     let quiet = p.run_bin();
     assert_eq(quiet, 0);
@@ -8271,7 +8272,7 @@ fn bindgen_generates_records_enums_and_consts() {
     let p = cli::proj_new();
     p.mkfile(
         "lib.h",
-        "#ifndef LIB_H\n#define LIB_H\n#include <stddef.h>\n#define LIB_VERSION 7\n#define LIB_NAME \"lib\"\n#define LIB_SCALE 0.5\n#define LIB_EXPR (LIB_VERSION + 1)\nenum lib_mode { LIB_FAST, LIB_SLOW = 10, LIB_LAST };\nenum { LIB_FLAG_A = 1, LIB_FLAG_B = 2 };\ntypedef struct lib_pt { int x; int y; } lib_pt;\nstruct lib_cfg { const char *name; size_t len; lib_pt origin; char tag[8]; enum lib_mode mode; };\nstruct lib_bits { unsigned a : 3; };\nint lib_sum(const struct lib_cfg *c);\nlib_pt lib_origin(const struct lib_cfg *c);\nint lib_mode_of(enum lib_mode m);\n#endif\n",
+        "#ifndef LIB_H\n#define LIB_H\n#include <stddef.h>\n#define LIB_VERSION 7\n#define LIB_NAME \"lib\"\n#define LIB_SCALE 0.5\n#define LIB_EXPR (LIB_VERSION + 1)\nenum lib_mode { LIB_FAST, LIB_SLOW = 10, LIB_LAST };\nenum { LIB_FLAG_A = 1, LIB_FLAG_B = 2 };\ntypedef struct lib_pt { int x; int y; } lib_pt;\nstruct lib_cfg { const char *name; size_t len; lib_pt origin; char tag[8]; enum lib_mode mode; };\nstruct lib_bits { unsigned a : 3; };\nstruct lib_wrap { struct lib_bits b; int n; };\nint lib_wrap_n(const struct lib_wrap *w);\nint lib_wrap_by_value(struct lib_wrap w);\nint lib_sum(const struct lib_cfg *c);\nlib_pt lib_origin(const struct lib_cfg *c);\nint lib_mode_of(enum lib_mode m);\n#endif\n",
     );
     p.mkfile(
         "lib.c",
@@ -8291,9 +8292,10 @@ fn bindgen_generates_records_enums_and_consts() {
         },
         None => {},
     };
-    assert(spc.as_str().contains("pub const LIB_VERSION: i32 = 7;"));
-    assert(spc.as_str().contains("pub const LIB_NAME: str<'static> = \"lib\";"));
-    assert(spc.as_str().contains("pub const LIB_SCALE: f64 = 0.5;"));
+    // An integer constant sits in the extern block, whose C compile checks it; the others do not.
+    assert(spc.as_str().contains("    pub const LIB_VERSION: i32 = 7;"));
+    assert(spc.as_str().contains("\npub const LIB_NAME: str<'static> = \"lib\";"));
+    assert(spc.as_str().contains("\npub const LIB_SCALE: f64 = 0.5;"));
     // An anonymous enum is a const block.
     assert(spc.as_str().contains("pub const LIB_FLAG_B: i32 = 2;"));
     // Folded from LIB_VERSION + 1.
@@ -8301,17 +8303,21 @@ fn bindgen_generates_records_enums_and_consts() {
     assert(spc.as_str().contains("LIB_SLOW = 10"));
     // A tag C never typedef'd spells as its tag, with no pin.
     assert(spc.as_str().contains("    pub enum lib_mode {"));
-    assert(!spc.as_str().contains("@c.import(\"enum lib_mode\")"));
+    assert(!spc.as_str().contains("@import(\"enum lib_mode\")"));
     // C's auto-increment continues from the explicit value.
     assert(spc.as_str().contains("LIB_LAST = 11"));
     // A record spells as its tag: no pin, whether C typedef'd it (`lib_pt`) or not (`lib_cfg`).
     assert(spc.as_str().contains("    pub struct lib_cfg {"));
-    assert(!spc.as_str().contains("@c.import(\"struct lib_cfg\")"));
-    assert(!spc.as_str().contains("@c.import(\"lib_pt\")"));
+    assert(!spc.as_str().contains("@import(\"struct lib_cfg\")"));
+    assert(!spc.as_str().contains("@import(\"lib_pt\")"));
     // An array field keeps its extent.
     assert(spc.as_str().contains("pub tag: [char; 8]"));
-    // A bitfield has no field-list form.
+    // A bitfield has no field-list form, and a record that holds one by value has no layout either.
     assert(!spc.as_str().contains("lib_bits"));
+    assert(spc.as_str().contains("    pub type lib_wrap;"));
+    assert(!spc.as_str().contains("pub struct lib_wrap"));
+    // A function that takes it by value is skipped: Super-C holds no value of a type without a layout.
+    assert(!spc.as_str().contains("lib_wrap_by_value"));
 
     p.mkfile(
         "main.spc",
@@ -8461,9 +8467,9 @@ fn bindgen_expressions_anonymous_types_and_globals() {
     // Function-like macros have no const form.
     assert(!spc.as_str().contains("LIB_CALL"));
     // Named by its typedef, having no tag: the pin is the typedef name.
-    assert(spc.as_str().contains("@c.import(\"lib_pt\")\n    pub struct lib_pt"));
-    assert(spc.as_str().contains("@c.import(\"lib_val\")\n    pub union lib_val"));
-    assert(spc.as_str().contains("@c.import(\"lib_mode\")\n    pub enum lib_mode"));
+    assert(spc.as_str().contains("@import(\"lib_pt\")\n    pub struct lib_pt"));
+    assert(spc.as_str().contains("@import(\"lib_val\")\n    pub union lib_val"));
+    assert(spc.as_str().contains("@import(\"lib_mode\")\n    pub enum lib_mode"));
     // An enumerator written as an expression.
     assert(spc.as_str().contains("LIB_B = 8"));
     // And C's auto-increment continues from it.
@@ -8820,10 +8826,10 @@ fn bindgen_escapes_keyword_names() {
     gp.format_into("{}/lib.spc", root);
     let spc = loader::read_file(gp.as_str()).unwrap();
     // A record member is the C member it pins: the escaped field reads `select` through C.
-    assert(spc.as_str().contains("@c.import(\"select\")\n        pub select_: i32,"));
-    assert(spc.as_str().contains("@c.import(\"select\")\n    pub fn select_(a: i32, b: i32) i32;"));
-    assert(spc.as_str().contains("@c.import(\"launch\")\n    pub static mut launch_: i32;"));
-    assert(spc.as_str().contains("@c.import(\"move\")\n    pub const move_: i32;"));
+    assert(spc.as_str().contains("@import(\"select\")\n        pub select_: i32,"));
+    assert(spc.as_str().contains("@import(\"select\")\n    pub fn select_(a: i32, b: i32) i32;"));
+    assert(spc.as_str().contains("@import(\"launch\")\n    pub static mut launch_: i32;"));
+    assert(spc.as_str().contains("@import(\"move\")\n    pub const move_: i32;"));
     p.mkfile(
         "main.spc",
         "import lib;\n\nfn main() i32 {\n    let mut q = lib::pair { select_: 4, n: 1 };\n    q.select_ = q.select_ + unsafe lib::pair_n(&mut q);\n    let a = unsafe lib::select_(2, 3);\n    return a + unsafe lib::launch_ + lib::move_ + q.select_ - 21;\n}\n",
@@ -11060,6 +11066,61 @@ fn build_constant_profile_selects_the_branch() {
     assert(!rc.as_str().contains("7001") && !rc.as_str().contains("7110") && !rc.as_str().contains("7150"));
     // The debug tree is untouched by the release build.
     assert(p.gen_has("main.c", "7001"));
+}
+
+const BC_CONFIG: str = M"(fn main() i32 {
+    let mut n = 0;
+    if THREAD_SANITIZER {
+        n += 8101;
+    }
+    if ADDRESS_SANITIZER {
+        n += 8202;
+    }
+    if LOCKDEP {
+        n += 8303;
+    }
+    if !OVERFLOW_CHECKS {
+        n += 8404;
+    }
+    return n % 7;
+}
+)";
+
+// THREAD_SANITIZER, ADDRESS_SANITIZER, LOCKDEP and OVERFLOW_CHECKS follow the C compile's flags: the
+// `race` profile's ThreadSanitizer and `-DSC_LOCKDEP` (Windows drops the sanitizer), `--sanitizers`,
+// and the wrapping `release` profile. Each build emits only its branches.
+@test
+fn build_constants_follow_the_c_flags() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("main.spc", BC_CONFIG);
+    let root = p.dir();
+    let cases: [](str, str, str) = [
+        ("", "debug", ""),
+        ("--profile=race", "race", "8101 8303"),
+        ("--sanitizers", "debug", "8202"),
+        ("--profile=release", "release", "8404"),
+    ];
+    let all: []str = ["8101", "8202", "8303", "8404"];
+    for i in 0..cases.len() {
+        let (flags, prof, want) = cases[i];
+        if cli::on_windows() && flags.len() != 0 && prof != "release" {
+            continue;
+        }
+        let mut args = String::new();
+        args.format_into("build {} --no-lint \"{}/main.spc\" -o \"{}/bin\"", flags, root, root);
+        let label = format("the build with flags '{}'", flags);
+        assert(p.run_raw(args.as_str()).ok(), label.as_str());
+        let mut gen = String::from_str(root);
+        gen.format_into("/build/{}/raw/main.c", prof);
+        let c = cli::read_text(gen.as_str());
+        for k in 0..all.len() {
+            let branch = format("flags '{}' emit the branch {} exactly when they set its constant", flags, all[k]);
+            assert(c.as_str().contains(all[k]) == want.contains(all[k]), branch.as_str());
+        }
+    }
 }
 
 // The run-time arithmetic rules (types.md "Arithmetic Semantics"), with the constant evaluator's answers

@@ -239,6 +239,13 @@ _Noreturn __attribute__((cold)) void __sc_zst_ptrdiff(void);
    happens-after that write and no synchronization is needed here. */
 extern void (*__sc_pre_hook)(void);
 void __sc_set_preempt_hook(void (*__f)(void));
+/* The stack-overflow report (super_rt.c) that ffi/sc_runtime.spc arms each thread with: the thread's stack
+   bounds when known, the signal stack to release at its end (or null), the task stack size the message
+   quotes, and on Windows the report of an exhausted coroutine stack. */
+void *__sc_stack_arm(uintptr_t __lo, uintptr_t __hi);
+void __sc_stack_disarm(void *__alt);
+void __sc_stack_task_size(size_t __b);
+void __sc_stack_overflow(void);
 /* Cold half of the function-local safepoint tick (`__sc_spc` in emitted bodies): runs the hook
    check and hands back the reset value, so the hot path is one register decrement + branch. */
 static inline __attribute__((unused)) int32_t __sc_preempt_check(void) {
@@ -257,9 +264,10 @@ static inline __attribute__((unused)) uint64_t __sc_chunk_end(int32_t *__spc, ui
 }
 /* Cancellation half of a combined safepoint (emitted only on its cold path): asks the runtime
    whether the current task has an unmasked pending cancellation, ACCEPTING it on yes -- the
-   emitted branch then enters the frame's cancellation ladder. The hook lives in sc_rt.c and is
-   inert until the scheduler installs it. */
+   emitted branch then enters the frame's cancellation ladder. Inert (null) until the scheduler installs
+   it, before it starts any worker. */
 extern int32_t (*__sc_cancel_hook)(void);
+void __sc_set_cancel_hook(int32_t (*__f)(void));
 static inline __attribute__((unused)) int32_t __sc_cancel_tick(void) {
   return __sc_cancel_hook ? __sc_cancel_hook() : 0;
 }
@@ -277,7 +285,7 @@ void *sc_lk_malloc(size_t __n);
 void *sc_lk_calloc(size_t __n, size_t __m);
 void *sc_lk_realloc(void *__p, size_t __n);
 void sc_lk_free(void *__p);
-/* Over-aligned blocks (std/alloc.h): `__align` is a power of two, at least sizeof(void *). */
+/* Over-aligned blocks (std's Global allocator): `__align` is a power of two, at least sizeof(void *). */
 void *sc_lk_aligned_alloc(size_t __n, size_t __align);
 void sc_lk_aligned_free(void *__p);
 void sc_lk_fork_child_reset(void);
@@ -293,6 +301,198 @@ void sc_lk_bt_resume(void);
 #define free(__p) sc_lk_free(__p)
 /* std/alloc.h routes its over-aligned blocks through sc_lk_aligned_* when this is defined. */
 #define SC_LK_ALIGNED 1
+#endif
+/* The bit counts, wrapping arithmetic and 128-bit fast paths std binds without a header: the C
+   backend's primitives. Each block keeps the include guard of the std header it replaces (bits.h,
+   int128.h, float128.h), so a std that still includes those headers compiles against this runtime. */
+#ifndef SC_BITS_H
+#define SC_BITS_H
+/* Bit counts for the built-in integer methods in core.spc (`trailing_zeros`, `leading_zeros`,
+   `count_ones`). The GCC/Clang builtins lower to the target's instruction (x86 tzcnt/lzcnt/popcnt or a
+   short sequence, aarch64 rbit+clz/cnt, wasm i64.ctz/i64.clz/i64.popcnt). The builtins are undefined
+   for a zero input, so the zero case is explicit: 64 bits. The IR interpreter models these three names
+   for compile-time evaluation. */
+static inline uint32_t sc_ctz64(uint64_t sc_x) { return sc_x ? (uint32_t)__builtin_ctzll(sc_x) : 64u; }
+static inline uint32_t sc_clz64(uint64_t sc_x) { return sc_x ? (uint32_t)__builtin_clzll(sc_x) : 64u; }
+static inline uint32_t sc_popcount64(uint64_t sc_x) { return (uint32_t)__builtin_popcountll(sc_x); }
+/* The 64 bits of `sc_x` in reverse order (vector `reverse_bits`): swap halves, then bytes, then bits. */
+static inline uint64_t sc_bitrev64(uint64_t sc_x) {
+  sc_x = __builtin_bswap64(sc_x);
+  sc_x = (sc_x & 0x0F0F0F0F0F0F0F0FULL) << 4 | (sc_x >> 4 & 0x0F0F0F0F0F0F0F0FULL);
+  sc_x = (sc_x & 0x3333333333333333ULL) << 2 | (sc_x >> 2 & 0x3333333333333333ULL);
+  return (sc_x & 0x5555555555555555ULL) << 1 | (sc_x >> 1 & 0x5555555555555555ULL);
+}
+/* Wrapping arithmetic for the built-in integer methods in core.spc (`wrapping_*`, `overflowing_*`,
+   `checked_*`, `saturating_*`): C's unsigned operators, modulo 2^64 in every profile; a narrower method
+   truncates the result. A shift count is below 64. `sc_mulo_*` tell whether the full product overflows 64
+   bits. The IR interpreter models these names for compile-time evaluation. */
+static inline uint64_t sc_wadd64(uint64_t sc_a, uint64_t sc_b) { return sc_a + sc_b; }
+static inline uint64_t sc_wsub64(uint64_t sc_a, uint64_t sc_b) { return sc_a - sc_b; }
+static inline uint64_t sc_wmul64(uint64_t sc_a, uint64_t sc_b) { return sc_a * sc_b; }
+static inline uint64_t sc_wshl64(uint64_t sc_a, uint32_t sc_n) { return sc_a << sc_n; }
+static inline uint64_t sc_wshr64(uint64_t sc_a, uint32_t sc_n) { return sc_a >> sc_n; }
+static inline int64_t sc_wsar64(int64_t sc_a, uint32_t sc_n) { return sc_a >> sc_n; }
+static inline bool sc_mulo_u64(uint64_t sc_a, uint64_t sc_b) { uint64_t sc_r; return __builtin_mul_overflow(sc_a, sc_b, &sc_r); }
+static inline bool sc_mulo_i64(int64_t sc_a, int64_t sc_b) { int64_t sc_r; return __builtin_mul_overflow(sc_a, sc_b, &sc_r); }
+#endif
+#ifndef SC_INT128_H
+#define SC_INT128_H
+/* Native 128-bit fast path for std's UInt<128>/Int<128> (see int.spc). Where the C compiler building
+   the emitted code has a 128-bit integer type, sc_has_i128() folds to 1 and these replace the limb
+   loops; where it does not, it folds to 0, the limb code stands, and the stubs are never reached.
+   Limbs pass as explicit 64-bit halves, least significant first, so byte order never enters into it. */
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wpedantic" /* gcc: ISO C does not support __int128 */
+#endif
+#if defined(__SIZEOF_INT128__)
+static inline int sc_has_i128(void) { return 1; }
+static inline void sc_i128_add(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_rl, uint64_t *sc_rh, uint64_t *sc_c) {
+  unsigned __int128 sc_a = (unsigned __int128)sc_ah << 64 | sc_al;
+  unsigned __int128 sc_s = sc_a + ((unsigned __int128)sc_bh << 64 | sc_bl);
+  *sc_rl = (uint64_t)sc_s; *sc_rh = (uint64_t)(sc_s >> 64); *sc_c = sc_s < sc_a;
+}
+static inline void sc_i128_sub(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_rl, uint64_t *sc_rh, uint64_t *sc_b) {
+  unsigned __int128 sc_a = (unsigned __int128)sc_ah << 64 | sc_al;
+  unsigned __int128 sc_y = (unsigned __int128)sc_bh << 64 | sc_bl;
+  unsigned __int128 sc_d = sc_a - sc_y;
+  *sc_rl = (uint64_t)sc_d; *sc_rh = (uint64_t)(sc_d >> 64); *sc_b = sc_a < sc_y;
+}
+static inline void sc_i128_mul(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_rl, uint64_t *sc_rh, uint64_t *sc_hl, uint64_t *sc_hh) {
+  /* The full 256-bit product from four 64x64 partials. sc_m1 cannot overflow (at most 2^128 - 2^64 - 1);
+     sc_m2 can, and its carry sits 128 bits up, inside sc_hi's headroom. */
+  unsigned __int128 sc_p0 = (unsigned __int128)sc_al * sc_bl;
+  unsigned __int128 sc_m1 = (unsigned __int128)sc_al * sc_bh + (uint64_t)(sc_p0 >> 64);
+  unsigned __int128 sc_m2 = sc_m1 + (unsigned __int128)sc_ah * sc_bl;
+  unsigned __int128 sc_hi = (unsigned __int128)sc_ah * sc_bh + (uint64_t)(sc_m2 >> 64) + ((unsigned __int128)(sc_m2 < sc_m1) << 64);
+  *sc_rl = (uint64_t)sc_p0; *sc_rh = (uint64_t)sc_m2;
+  *sc_hl = (uint64_t)sc_hi; *sc_hh = (uint64_t)(sc_hi >> 64);
+}
+static inline void sc_i128_divmod(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_ql, uint64_t *sc_qh, uint64_t *sc_rl, uint64_t *sc_rh) {
+  unsigned __int128 sc_a = (unsigned __int128)sc_ah << 64 | sc_al;
+  unsigned __int128 sc_b = (unsigned __int128)sc_bh << 64 | sc_bl;
+  unsigned __int128 sc_q = sc_a / sc_b, sc_r = sc_a % sc_b;
+  *sc_ql = (uint64_t)sc_q; *sc_qh = (uint64_t)(sc_q >> 64);
+  *sc_rl = (uint64_t)sc_r; *sc_rh = (uint64_t)(sc_r >> 64);
+}
+/* The full 64x64 product: the low half returned, the high half stored. */
+static inline uint64_t sc_mul64(uint64_t sc_a, uint64_t sc_b, uint64_t *sc_hi) {
+  unsigned __int128 sc_p = (unsigned __int128)sc_a * sc_b;
+  *sc_hi = (uint64_t)(sc_p >> 64);
+  return (uint64_t)sc_p;
+}
+/* (sc_u1 : sc_u0) / sc_v for sc_u1 < sc_v: the quotient fits one limb. */
+static inline uint64_t sc_div128by64(uint64_t sc_u1, uint64_t sc_u0, uint64_t sc_v, uint64_t *sc_r) {
+  unsigned __int128 sc_u = (unsigned __int128)sc_u1 << 64 | sc_u0;
+  *sc_r = (uint64_t)(sc_u % sc_v);
+  return (uint64_t)(sc_u / sc_v);
+}
+#else
+static inline int sc_has_i128(void) { return 0; }
+static inline uint64_t sc_mul64(uint64_t sc_a, uint64_t sc_b, uint64_t *sc_hi) {
+  (void)sc_a; (void)sc_b; (void)sc_hi; abort();
+}
+static inline uint64_t sc_div128by64(uint64_t sc_u1, uint64_t sc_u0, uint64_t sc_v, uint64_t *sc_r) {
+  (void)sc_u1; (void)sc_u0; (void)sc_v; (void)sc_r; abort();
+}
+static inline void sc_i128_add(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_rl, uint64_t *sc_rh, uint64_t *sc_c) {
+  (void)sc_al; (void)sc_ah; (void)sc_bl; (void)sc_bh; (void)sc_rl; (void)sc_rh; (void)sc_c; abort();
+}
+static inline void sc_i128_sub(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_rl, uint64_t *sc_rh, uint64_t *sc_b) {
+  (void)sc_al; (void)sc_ah; (void)sc_bl; (void)sc_bh; (void)sc_rl; (void)sc_rh; (void)sc_b; abort();
+}
+static inline void sc_i128_mul(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_rl, uint64_t *sc_rh, uint64_t *sc_hl, uint64_t *sc_hh) {
+  (void)sc_al; (void)sc_ah; (void)sc_bl; (void)sc_bh; (void)sc_rl; (void)sc_rh; (void)sc_hl; (void)sc_hh; abort();
+}
+static inline void sc_i128_divmod(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_ql, uint64_t *sc_qh, uint64_t *sc_rl, uint64_t *sc_rh) {
+  (void)sc_al; (void)sc_ah; (void)sc_bl; (void)sc_bh; (void)sc_ql; (void)sc_qh; (void)sc_rl; (void)sc_rh; abort();
+}
+#endif
+/* Overflow in std's Int<N> and UInt<N> operators: the built-in trap (`__sc_panic` from super_rt.h), or a
+   return when the build wraps (-DSC_ARITH_WRAP), and the operator then keeps its wrapped value. A zero
+   divisor and MIN / -1 trap in every profile, as the built-in `/` and `%` do. The IR interpreter models
+   these three names for compile-time evaluation. */
+static inline void sc_int_overflow(const uint8_t *sc_m) {
+#ifdef SC_ARITH_WRAP
+  (void)sc_m;
+#else
+  __sc_panic((const char *)sc_m);
+#endif
+}
+static inline void sc_int_div_zero(const uint8_t *sc_m) { __sc_panic((const char *)sc_m); }
+static inline void sc_int_div_overflow(const uint8_t *sc_m) { __sc_panic((const char *)sc_m); }
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+#endif
+#ifndef SC_FLOAT128_H
+#define SC_FLOAT128_H
+/* Native binary128 fast path for std's f128 (`Float<15, 112>`, see float.spc). Where the C compiler
+   building the emitted code has an IEEE binary128 type (`__float128`, or a `long double` with a
+   113-bit significand), sc_has_f128() folds to 1 and these replace the limb code for add, multiply
+   and divide: correctly rounded, so the same bits (NaN aside, which float.spc canonicalizes). The
+   operations are the compiler's runtime (libgcc's `__addtf3` and the like, or hardware). Where it has
+   none, sc_has_f128() folds to 0, the limb code stands, and the stubs are never reached. Values pass
+   as explicit 64-bit halves of the encoding, least significant first. */
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wpedantic" /* gcc: ISO C does not support __float128 */
+#endif
+#if defined(__SIZEOF_FLOAT128__)
+#define SC_F128_NATIVE 1
+typedef __float128 sc_f128;
+#elif defined(__LDBL_MANT_DIG__) && __LDBL_MANT_DIG__ == 113
+#define SC_F128_NATIVE 1
+typedef long double sc_f128;
+#endif
+#ifdef SC_F128_NATIVE
+static inline int sc_has_f128(void) { return 1; }
+static inline sc_f128 sc_f128_of(uint64_t sc_lo, uint64_t sc_hi) {
+  uint64_t sc_w[2];
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  sc_w[0] = sc_hi; sc_w[1] = sc_lo;
+#else
+  sc_w[0] = sc_lo; sc_w[1] = sc_hi;
+#endif
+  sc_f128 sc_v;
+  memcpy(&sc_v, sc_w, sizeof sc_v);
+  return sc_v;
+}
+static inline void sc_f128_out(sc_f128 sc_v, uint64_t *sc_lo, uint64_t *sc_hi) {
+  uint64_t sc_w[2];
+  memcpy(sc_w, &sc_v, sizeof sc_w);
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  *sc_lo = sc_w[1]; *sc_hi = sc_w[0];
+#else
+  *sc_lo = sc_w[0]; *sc_hi = sc_w[1];
+#endif
+}
+static inline void sc_f128_add(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_rl, uint64_t *sc_rh) {
+  sc_f128_out(sc_f128_of(sc_al, sc_ah) + sc_f128_of(sc_bl, sc_bh), sc_rl, sc_rh);
+}
+static inline void sc_f128_mul(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_rl, uint64_t *sc_rh) {
+  sc_f128_out(sc_f128_of(sc_al, sc_ah) * sc_f128_of(sc_bl, sc_bh), sc_rl, sc_rh);
+}
+static inline void sc_f128_div(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_rl, uint64_t *sc_rh) {
+  sc_f128_out(sc_f128_of(sc_al, sc_ah) / sc_f128_of(sc_bl, sc_bh), sc_rl, sc_rh);
+}
+#else
+static inline int sc_has_f128(void) { return 0; }
+static inline void sc_f128_add(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_rl, uint64_t *sc_rh) {
+  (void)sc_al; (void)sc_ah; (void)sc_bl; (void)sc_bh; (void)sc_rl; (void)sc_rh; abort();
+}
+static inline void sc_f128_mul(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_rl, uint64_t *sc_rh) {
+  (void)sc_al; (void)sc_ah; (void)sc_bl; (void)sc_bh; (void)sc_rl; (void)sc_rh; abort();
+}
+static inline void sc_f128_div(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t sc_bh, uint64_t *sc_rl, uint64_t *sc_rh) {
+  (void)sc_al; (void)sc_ah; (void)sc_bl; (void)sc_bh; (void)sc_rl; (void)sc_rh; abort();
+}
+#endif
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 #endif
 )".ptr() as *const char;
 }
@@ -352,7 +552,7 @@ __attribute__((constructor)) static void __sc_binary_stdio(void) {
 #if defined(SC_RT_ASAN)
 const char *__asan_default_options(void) { return "detect_stack_use_after_return=0:handle_sigill=1"; }
 #endif
-/* Declared in ffi/sc_rt.h: ASan's redzones make frames larger, and the coroutine runtime sizes its default
+/* Bound by ffi/sc_runtime.spc: ASan's redzones make frames larger, and the coroutine runtime sizes its default
    task stack by this. */
 int sc_rt_asan(void) {
 #if defined(SC_RT_ASAN)
@@ -399,7 +599,7 @@ _Noreturn __attribute__((cold)) void __sc_zst_ptrdiff(void) {
 /* Stack overflow report. A stack that runs into its guard faults, and without a handler the process dies
    on a bare SIGSEGV or SIGBUS. This prints which stack ran out and exits with 134, the status of the abort
    a panic ends in (the test runner reads both as a panic). The main thread is armed before main; std's
-   runtime arms every thread it starts (`__sc_stack_arm`, ffi/sc_rt.c). On POSIX an armed thread runs the
+   runtime arms every thread it starts (`__sc_stack_arm`, ffi/sc_runtime.spc). On POSIX an armed thread runs the
    handler on a signal stack of its own, since the faulting stack has no room left, and the base of that
    signal stack records the bounds of the thread's own stack. The handler finds the record through
    sigaltstack, so it reads no thread-local storage before it knows the thread is armed. A fault is an
@@ -474,7 +674,7 @@ static void __sc_stk_report(int __task) {
   /* Not ExitProcess: its DLL detach and CRT teardown would run on the exhausted stack. */
   TerminateProcess(GetCurrentProcess(), 134);
 }
-/* A coroutine stack ran out (ffi/sc_rt.c grows and guards those itself). */
+/* A coroutine stack ran out (ffi/sc_runtime.spc grows and guards those itself). */
 void __sc_stack_overflow(void) { __sc_stk_report(1); }
 /* `__ep` is the EXCEPTION_POINTERS; its first member points at the EXCEPTION_RECORD, whose first member
    is the code. */
@@ -748,6 +948,9 @@ __attribute__((constructor)) static void __sc_stk_boot(void) {
 void (*__sc_pre_hook)(void) = 0;
 /* Installed by a scheduler before it starts any worker, so every safepoint's read happens-after it. */
 void __sc_set_preempt_hook(void (*__f)(void)) { __sc_pre_hook = __f; }
+/* Combined-safepoint cancellation hook (see super_rt.h), installed the same way. */
+int32_t (*__sc_cancel_hook)(void) = 0;
+void __sc_set_cancel_hook(int32_t (*__f)(void)) { __sc_cancel_hook = __f; }
 
 /* Reflection registry (see super_rt.h): the registry TU's root table, recorded by its constructor
    before main. */

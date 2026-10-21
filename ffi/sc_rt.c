@@ -150,8 +150,11 @@ static struct {
 } __attribute__((aligned(64))) sc_rt_mlot[SC_RT_MLOT];
 
 /* ---- combined-safepoint cancellation hook (see sc_rt.h) --------------------------------------------- */
+/* Level 5 of SC_RT_LK_STATS (below) moved these into the generated super_rt.c. */
+#if !defined(SC_RT_LK_STATS) || SC_RT_LK_STATS < 5
 int32_t (*__sc_cancel_hook)(void) = 0;
 void __sc_set_cancel_hook(int32_t (*f)(void)) { __sc_cancel_hook = f; }
+#endif
 
 /* ---- allocation statistics fallbacks ------------------------------------------------------------------
    The leak tracker in the generated super_rt.c owns the allocation table and defines these for real. A

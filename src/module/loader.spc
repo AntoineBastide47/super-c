@@ -163,6 +163,9 @@ pub struct Package {
     /// The build runs under a memory checker (an address, memory or thread sanitizer in its C flags):
     /// the planner keeps the checked lane loop of every masked or gather access.
     pub mem_check: bool,
+    /// The C compile's configuration (`bsys::build_cfg`): bit `k - BC_THREAD_SANITIZER` holds build
+    /// constant `k`, except that the OVERFLOW_CHECKS bit is set where the profile wraps.
+    pub build_cfg: u32,
     /// The settings the build-constant module spells and the early prune decides by: a `--test`
     /// build (TEST), the profile name (PROFILE; empty is `debug`), and the profile names a PROFILE
     /// comparison may name (empty: unchecked). The driver sets them before the platform filter.
@@ -623,7 +626,7 @@ pub struct PkgIndex {
 
 extend SymTab {
     /// The SymbolId already interned for `name`, or SYM_NONE. Byte-exact.
-    @c.always_inline
+    @always_inline
     pub fn find(self: &Self, name: str) SymbolId {
         return switch self.index.get(&name.hash()) {
             Some(h) => {
@@ -1897,6 +1900,13 @@ const fn bc_name_byte(c: u8) bool {
     return c == b'_' || c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9';
 }
 
+/// Whether module `path` is part of the coroutine runtime: std::parallel and its platform substrate
+/// `sc_runtime`. Their loops never tick and their calls carry no cancellation edge of a task: they hold
+/// spinlocks, OS locks and signal handlers that a preemption or an unwind must not cross.
+pub const fn runtime_path(path: str) bool {
+    return path.starts_with("std::parallel") || path == "sc_runtime";
+}
+
 /// The final path component of `path` (a view into it): "dir/std/string.spc" -> "string.spc".
 pub const fn basename_of(path: str) str {
     let mut k = path.len();
@@ -2348,6 +2358,7 @@ extend Package {
         q.simd_width = self.simd_width;
         q.simd_dispatch = self.simd_dispatch.clone();
         q.mem_check = self.mem_check;
+        q.build_cfg = self.build_cfg;
         q.test_build = self.test_build;
         q.profile = self.profile.clone();
         for i in 0..self.profiles.len() {
@@ -2470,7 +2481,7 @@ extend Package {
     }
 
     /// Add the build-constant module `__std::build`, the prelude's last module: this compilation's
-    /// settings as constants, spelled from `target`, `arch`, `test_build` and `profile`. ARCH and
+    /// settings as constants, spelled from `target`, `arch`, `features`, `test_build` and `profile`. ARCH and
     /// POINTER_WIDTH are absent when the instruction set is unknown.
     fn add_build_module(self: &mut Self, target: i32) {
         if self.build_module >= 0 || self.std_root.len() == 0 {
@@ -2500,6 +2511,21 @@ extend Package {
             src.push_byte(prof[i]);
         }
         src.push_str("\";\n");
+        let cfg: []str = [
+            "/// The C compile has ThreadSanitizer (`-fsanitize=thread`).\npub const THREAD_SANITIZER: bool = ",
+            "/// The C compile has AddressSanitizer (`-fsanitize=address`).\npub const ADDRESS_SANITIZER: bool = ",
+            "/// The runtime tracks lock order (`-DSC_LOCKDEP`).\npub const LOCKDEP: bool = ",
+            "/// Integer overflow traps; false where the profile wraps it.\npub const OVERFLOW_CHECKS: bool = ",
+        ];
+        for i in 0..cfg.len() {
+            src.push_str(cfg[i]);
+            src.push_str(pick(self.bc_value(BC_THREAD_SANITIZER + i as i32) != 0, "true;\n", "false;\n"));
+        }
+        src.format_into(
+            "/// The CPU features the build enables: the platform's baseline, `target-features`, `--target-feature`\n/// and what they imply. Bit `i` of word `i / 64` is the `cpu::Feature` variant of discriminant `i`.\npub const TARGET_FEATURES: [u64; 2] = [{}, {}];\n",
+            self.features.w[0],
+            self.features.w[1],
+        );
         if self.arch >= 0 {
             src.push_str("/// The target instruction set (`--arch`).\npub const ARCH: Arch = Arch::");
             src.push_str(bc_variants(BC_ARCH)[self.arch as usize]);
@@ -2577,6 +2603,11 @@ extend Package {
         if k == BC_TEST {
             return self.test_build as i64;
         }
+        if k >= BC_THREAD_SANITIZER {
+            // The overflow bit records a wrapping profile, so a package with no configuration checks.
+            let bit = (self.build_cfg >> (k - BC_THREAD_SANITIZER) as u32 & 1u32) as i64;
+            return pick(k == BC_OVERFLOW_CHECKS, 1 - bit, bit);
+        }
         if k == BC_POINTER_WIDTH {
             return if self.arch < 0 {
                 -1;
@@ -2591,6 +2622,16 @@ extend Package {
         } else {
             -1;
         };
+    }
+
+    /// The index of this compilation's settings in a `@when` truth table: bit `when_var(k)` is the
+    /// value of boolean build constant `k`.
+    pub const fn when_index(self: &Self) u32 {
+        let mut w = self.bc_value(BC_TEST) as u32;
+        for k in BC_THREAD_SANITIZER..BC_OVERFLOW_CHECKS + 1 {
+            w = w | self.bc_value(k) as u32 << when_var(k);
+        }
+        return w;
     }
 
     /// The early prune of module `mi` (idempotent): every build-constant site the settings decide
@@ -2676,8 +2717,9 @@ extend Package {
     fn bc_eval(self: &Self, mi: usize, id: NodeId) i32 {
         let n = *self.modules[mi].ast.at_const(id);
         if n.kind == NodeKind::NODE_IDENTIFIER {
-            return if self.bc_const(mi, id) == BC_TEST {
-                self.bc_value(BC_TEST) as i32;
+            let k = self.bc_const(mi, id);
+            return if bc_is_bool(k) {
+                self.bc_value(k) as i32;
             } else {
                 -1;
             };
@@ -2733,7 +2775,7 @@ extend Package {
         let a = &self.modules[mi].ast;
         let src = self.modules[mi].source.as_str();
         let xn = a.at_const(x);
-        if k == BC_TEST || k == BC_POINTER_WIDTH {
+        if bc_is_bool(k) || k == BC_POINTER_WIDTH {
             if xn.kind != NodeKind::NODE_LITERAL {
                 return -1;
             }
@@ -2812,6 +2854,7 @@ extend Package {
             self.prune_build_sites(mi);
         }
         let arch = self.arch; // the instruction-set axis rides on the package, so no caller has to thread it
+        let when = self.when_index();
         let m = &mut self.modules[mi];
         let root = m.ast.root;
         if m.ast.at_const(root).kind != NodeKind::NODE_PROGRAM {
@@ -2827,6 +2870,9 @@ extend Package {
             // `@arch` gates the same way on the instruction set. An unknown host arch (-1)
             // keeps every gated item: dropping them all would silently empty the program.
             if at.kind == AttrKind::ATTR_ARCH as u8 && arch >= 0 && (at.arg >> arch as u32 & 1u32) == 0 {
+                dropped.push(at.owner);
+            }
+            if at.kind == AttrKind::ATTR_WHEN as u8 && (at.arg >> when & 1u32) == 0 {
                 dropped.push(at.owner);
             }
         }
@@ -3376,7 +3422,7 @@ extend Package {
         let a = unsafe &*self.module_ast_const(m as ModuleId);
         let src = self.modules.at(m).source.as_str();
         let pth = self.modules.at(m).path.as_str();
-        let spar = pth.starts_with("std::parallel");
+        let spar = runtime_path(pth);
         let in_std = pth.starts_with("std::") || pth.starts_with("__std::");
         let cancel = cx.acc.node != NODE_NONE;
         let nb9 = a.nodes.len();
@@ -3851,7 +3897,7 @@ extend Package {
         for m in 0..nm {
             let pth = self.modules.at(m).path.as_str();
             let mut sm: u8 = 0;
-            if pth.starts_with("std::parallel") {
+            if runtime_path(pth) {
                 sm = 2;
             } else if pth.starts_with("std::") || pth.starts_with("__std::") {
                 sm = 1;
@@ -4930,7 +4976,8 @@ extend Package {
                 let id = unsafe ids[i as usize];
                 let pl = a.attr_of(id, AttrKind::ATTR_PLATFORM);
                 let ar = a.attr_of(id, AttrKind::ATTR_ARCH);
-                let gated_out = pl != null && (unsafe (*pl).arg >> target as u32 & 1u32) == 0 || ar != null && self.arch >= 0 && (unsafe (*ar).arg >> self.arch as u32 & 1u32) == 0;
+                let wh = a.attr_of(id, AttrKind::ATTR_WHEN);
+                let gated_out = pl != null && (unsafe (*pl).arg >> target as u32 & 1u32) == 0 || ar != null && self.arch >= 0 && (unsafe (*ar).arg >> self.arch as u32 & 1u32) == 0 || wh != null && (unsafe (*wh).arg >> self.when_index() & 1u32) == 0;
                 if gated_out {
                     continue;
                 }
@@ -6377,7 +6424,7 @@ extend Package {
     /// Find a *public* top-level declaration named `name` in module `mid`: a type when `want_type`,
     /// otherwise a value. Returns the decl's NodeId within module `mid`'s Ast, or NODE_NONE. O(1):
     /// a byte-exact symbol probe plus one name-map probe into the package declaration index.
-    @c.always_inline
+    @always_inline
     pub fn lookup(self: &Self, mid: ModuleId, name: str, want_type: bool) NodeId {
         if !self.modules[mid as usize].has_ast {
             return NODE_NONE;
@@ -6393,7 +6440,7 @@ extend Package {
 
     /// `lookup` by the name's interned symbol `s`, for a caller that probes many modules with one
     /// name. The index must cover `mid` (`ensure_index`); a module without an Ast has no entry.
-    @c.always_inline
+    @always_inline
     pub fn lookup_sym(self: &Self, mid: ModuleId, s: SymbolId, want_type: bool) NodeId {
         let key = s as u64 * 4u64 + if want_type {
             2u64;
