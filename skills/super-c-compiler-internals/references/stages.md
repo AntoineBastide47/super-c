@@ -36,7 +36,9 @@ gives (`par_replay`); the prelude's files parse in one wave and take their ids i
   ENDIAN with decided arms) and the unknown variants they name (`Ast.bc_errs`, reported
   by the resolver).
 - Prelude: the std files, then the build-constant module `__std::build`, generated from
-  the package's settings (`--target`, `arch`, `test_build`, `profile`; `add_build_module`).
+  the package's settings (`--target`, `arch`, `test_build`, `profile`, and `build_cfg`: the
+  sanitizer, lockdep and wrapping bits `build_system::build::build_cfg` reads from the C flags;
+  `add_build_module`). `build_cfg` is part of the prelude image key and of every unit's cache key.
 - The two build drivers (`run_file`, `emit_closure`) load in two stages. `prelude_stage`
   (`src/driver/emit.spc`) loads the prelude alone into a package with the same settings
   (`Package::settings_copy`, `load_prelude_stage`; imports looked up under the std root only),
@@ -60,7 +62,8 @@ gives (`par_replay`); the prelude's files parse in one wave and take their ids i
 
 ## 2. Platform Filter (`platform_filter`)
 
-`@platform` / `@arch` gating: items are compacted out of each AST by target mask before
+`@platform` / `@arch` / `@when` gating: items are compacted out of each AST by target mask (and,
+for `@when`, by the truth table of its build condition) before
 resolution (`Package::platform_filter` in `src/module/loader.spc`; the driver, the LSP and
 `package_from_source` all apply it). An item carries at most one of each (the parser rejects a repeated attribute); an item with both needs both to hold. `--target=` / `--arch=` and `--bootstrap-tags` feed the mask.
 
@@ -203,7 +206,7 @@ modular return-lifetime check) run alongside.
   bodies (`check_kept`), a superset of the summaries' calls. The language server
   runs the same `recur::check` over the summaries its borrow round records per module
   (`Package.recur`). A path ends at a return, an `assert`, an `unreachable` terminator, or a
-  call of a `@c.noreturn` or extern C function (a verified intrinsic returns); every other
+  call of a `@noreturn` or extern C function (a verified intrinsic returns); every other
   call returns. The call graph has the direct calls between the reported functions and
   methods only (no fn-value, `dyn` or bound call). Tarjan gives the strongly connected
   components; one worklist walk per component parks a call of a member not yet known to end
@@ -239,11 +242,10 @@ negation (checked through `__builtin_*_overflow`, or wrapping under `-DSC_ARITH_
 unsigned result truncates), signed and narrow unsigned `<<`, narrow unsigned `~`, `/ % << >>`
 whose right operand is not a constant that rules out the trap, and `__sc_f2i_<type>` for the
 saturating float-to-integer cast; a float `%` emits `fmod`/`fmodf`. The checker rejects unsigned
-negation, so no unsigned `__sc_neg_*` exists. std's `Int<N>` and `UInt<N>` operators call `sc_int_overflow` (std's `int128.h`, not the
-generated runtime, so a released compiler building this std has it) on overflow: it
+negation, so no unsigned `__sc_neg_*` exists. std's `Int<N>` and `UInt<N>` operators call the runtime's `sc_int_overflow` on overflow: it
 traps, or returns under `-DSC_ARITH_WRAP` and the operator keeps the wrapped value; the IR
 interpreter intercepts it as the built-in "arithmetic overflow" trap, and `sc_has_i128` and
-`sc_has_f128` (the probes of std's `int128.h` and `float128.h`) as 0, so 128-bit integers and the 64x64
+`sc_has_f128` (the runtime's 128-bit probes) as 0, so 128-bit integers and the 64x64
 products and 2-by-1 divisions of the wide integers evaluate through the limb code at compile time,
 and so do the `Float<E, F>` formats. The interpreter reads a union through the member last written,
 or through another scalar member of its width (`f64_bits`: the bits retyped, `Interp::repun`); any
@@ -258,7 +260,7 @@ a frame overwrites stay charged until the frame returns, so a long loop in one f
 float's text) can still meet the budget. A pointer into a returned call's storage
 that outlives the call keeps the object as a dead header: reading through it traps "use after
 return". The
-interpreter also models std's `bits.h` helpers (`sc_ctz64`, `sc_clz64`, `sc_popcount64`, the
+interpreter also models the runtime's bit helpers (`sc_ctz64`, `sc_clz64`, `sc_popcount64`, the
 wrapping `sc_w*64` and `sc_mulo_*64`), evaluates an f32 libm function as the f32 function the
 program links (`libm1f`, `libm2f`: `acosf` for an f32 `acos`, never the f64 result narrowed), so a
 constant equals the run-time call bit for bit where the compiler and the program use one libm, and folds the cancellation probe
@@ -268,7 +270,7 @@ only when it cannot overflow (`CEmit::step_bounded`): the header tests `i < e` (
 with `e` of `i`'s type, and nothing else in the loop writes `i` or takes its address; every other
 step keeps its checked helper and renders as `while`. `@c.source` files and backing-header `.c`
 siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
-`@c.link` flags land in `__ldflags`.
+`@link` flags land in `__ldflags`.
 
 ## 9. Emission Planning
 

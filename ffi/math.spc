@@ -1,9 +1,9 @@
 // FFI bindings for <math.h>. Thin: C's math functions are already direct numeric operations, so these are
 // raw `pub` bindings. Import with `import math;` and call e.g. `math::sqrt(2.0)`.
-// Carries `@c.link("m")` (links libm). Every function is `@unsafe(safe)` except `lgamma`/`lgammaf`,
+// Carries `@link("m")` (links libm). Every function is `@unsafe(safe)` except `lgamma`/`lgammaf`,
 // which write the global `signgam` (a data race between threads).
 
-@c.link("m")
+@link("m")
 extern "C" {
     // Powers, roots, exponentials, logarithms.
     /// Square root; NaN for a negative argument.

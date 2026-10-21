@@ -84,7 +84,7 @@ extend<T, A: Allocator> Vector<T, A> {
 
     // The growth path of `reserve`, out of line so the check above stays small enough to inline into
     // every `push`.
-    @c.noinline
+    @noinline
     const fn grow_for(self: &mut Vector<T, A>, additional: usize) {
         // The most elements whose byte size fits a usize.
         let max_cap = ~(0 as usize) / sizeof(T);

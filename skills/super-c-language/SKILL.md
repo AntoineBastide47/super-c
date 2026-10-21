@@ -54,7 +54,8 @@ let (div, mod) = divmod(p);     // destructuring
 An annotation on a destructuring binding types its names: `let (x, y): (i32, i32) = (a, b);`
 widens `i16` values as `let t: (i32, i32) = (a, b);` does. A multi-value call does not convert
 its results: its annotation must name their types ("the annotation of a multi-value call's
-bindings must name its result types").
+bindings must name its result types"). `let (a, b) = unsafe f();` binds the results of an
+`unsafe` multi-value call.
 
 An immutable binding forbids reassignment, `&mut self` method calls, and `&mut` borrows.
 The rule reaches through a user `Deref`: `*b` is an assignable place when `b`'s type defines
@@ -88,7 +89,7 @@ returns the call's results in their order (`let (a, b) = f(..); return a, b;`).
 
 A function or closure with results cannot reach the end of its body ("function 'f' can reach the
 end of its body without returning a value"): every path ends in a `return`, a call of a `!` or
-`@c.noreturn` function, a `loop` no `break` leaves, or an `if`, `switch`, block or `unsafe` block
+`@noreturn` function, a `loop` no `break` leaves, or an `if`, `switch`, block or `unsafe` block
 whose every way out is one of these. A `while` or a `for` can run no iteration, so it does not end
 a path.
 
@@ -119,11 +120,14 @@ generics section of [types.md](references/types.md)).
 
 A struct literal names each field once ("field 'x' is initialized twice"). A field it omits is
 zero-filled, so it must be visible at the literal and its type valid as zero bytes: scalars, raw
-pointers, vectors, arrays and structs of such, an enum without payloads or written discriminants,
-and the prelude views and containers (`str`, `String`, `Vector`, `Array`, `Map`, `Set`, `Slice`,
+pointers, vectors, arrays, unions and structs of such, an enum without payloads or written
+discriminants, an extern opaque type with a layout (`@layout`, `@value`: C's static
+initialization), and the prelude views and containers (`str`, `String`, `Vector`, `Array`, `Map`, `Set`, `Slice`,
 `SliceMut`). Else it is "missing field 'f': an omitted field is zero-filled, and zero is not a valid
 value of its type here" (a `&T`, `Box`, `fn` field, ...). A union literal sets one member.
-`unsafe zeroed::<T>()` is the all-zero value of any type.
+`unsafe zeroed::<T>()` is the all-zero value of any type. The address of a zero-sized field
+(`&s.tail` of a `[T; 0]` field) is its offset inside `s`; the address of any other zero-sized value
+is a shared sentinel.
 
 An item name may not contain `__` after its leading underscores or start with `__sc`, and a type
 name may not start with `ptr_`, `ptrm_`, `slice_`, `dyn_`, `dynm_`, `dynb_`, `arr<N>`, `fn<N>`,
@@ -544,9 +548,10 @@ static_assert(sizeof(Header) == 8, "Header must stay 8 bytes");
   whose signature names one, or that fails on every path (it constructs one), is an error at
   its declaration ("function 'f' is declared 'const fn' but ..."). A `const fn` that fails only
   on some paths (a branch, a loop, recursion) is accepted.
-- A header type (a `struct` or `union` of an `extern "C"` block) has no compile-time size,
-  alignment or `type_info`: "the size of 'stat' is its C header's: it has no compile-time value".
-  Its values evaluate field by field.
+- A header type (a `struct` or `union` of an `extern "C"` block) lists every member, so its size,
+  alignment, offsets and `type_info` are compile-time values like a Super-C struct's; the C compile
+  checks them against the header (`super-c-ffi`). A constant of an extern block with a value folds
+  like any constant.
 - A `const fn` cannot call an extern function or a variadic one ("... but calls a variadic
   function"). `assert`, `assert_eq` and `assert_ne` are variadic (`std/test.spc`), so a function
   that checks an invariant with `assert` is a plain `fn`.
@@ -584,6 +589,14 @@ complement. An item with both `@platform` and `@arch` compiles only where both h
 that fails removes the item or member before name resolution.
 `--target=` and `--arch=` select the target.
 
+`@when(C)` gates an item, a member or an import on the boolean build constants the same way:
+`C` names `TEST`, `THREAD_SANITIZER`, `ADDRESS_SANITIZER`, `LOCKDEP` and `OVERFLOW_CHECKS` with
+`!`, `&&`, `||` and parentheses (`@when(!THREAD_SANITIZER && !ADDRESS_SANITIZER)`); any other
+name or form is "'@when' takes a condition over TEST, THREAD_SANITIZER, ...". It combines with
+`@platform` and `@arch`: the item exists only where every gate holds. Use it where a definition
+must not exist at all in some builds (std/testing/bench_sys.spc defines the C `malloc` family
+only outside sanitizer builds); inside a body, `if THREAD_SANITIZER { .. }` is enough.
+
 The prelude defines the build settings as constants usable in any expression:
 
 | Constant | Type | Value |
@@ -594,16 +607,20 @@ The prelude defines the build settings as constants usable in any expression:
 | `POINTER_WIDTH` | `u32` | 64; 32 on `wasm32` |
 | `ENDIAN` | `Endian` (`Little`, `Big`) | `Little` on every supported target |
 | `PROFILE` | `str<'static>` | the build profile name (`debug` when none is named) |
+| `THREAD_SANITIZER` | `bool` | the build's C flags hold `-fsanitize=thread` (the `race` profile) |
+| `ADDRESS_SANITIZER` | `bool` | the build's C flags hold `-fsanitize=address` (`--sanitizers`) |
+| `LOCKDEP` | `bool` | the build's C flags define `SC_LOCKDEP` (lock-order checking) |
+| `OVERFLOW_CHECKS` | `bool` | false when the build's C flags define `SC_ARITH_WRAP` (integer overflow wraps) |
 
 The compiler generates their module (`__std::build`) from its flags; std declares only
-the enums (`std/target.spc`). The six names are reserved: an item or binding with one of
+the enums (`std/target.spc`). The ten names are reserved: an item or binding with one of
 them is an error, and so is a type, item, binding or generic parameter named `Platform`,
 `Arch` or `Endian` outside `std/target.spc` (the filter reads `Platform::X` as std's
 variant before name resolution). ARCH and POINTER_WIDTH are absent when the host
 instruction set is unknown and no `--arch` names one.
 
-The platform filter decides a condition over PLATFORM, ARCH, TEST, POINTER_WIDTH and
-ENDIAN alone before name resolution: bare `TEST`, `!`, `&&`, `||`, parentheses, and `==`
+The platform filter decides a condition over PLATFORM, ARCH, POINTER_WIDTH, ENDIAN and the
+bool constants alone before name resolution: a bare bool constant (`TEST`, `LOCKDEP`), `!`, `&&`, `||`, parentheses, and `==`
 or `!=` against `Platform::X` / `Arch::X` / `Endian::X`, `true` / `false`, or a decimal
 integer. Such an `if` / `else if` / `else` chain (statement or value) becomes its taken
 block (with its own scope), and a `switch PLATFORM { Windows => .., _ => .. }` (or over
@@ -650,12 +667,12 @@ extern "C" "native.h" {     // discovers native.c beside the .spc file
 An opaque `type X;` renders as its bare C name, so it must name a type some included
 header actually defines (`FILE` works because stdio.h is auto-included; an invented name
 fails in the C compile). A `struct`, `union` or `enum` in the block is a header type: the C type
-(`struct stat`, `enum color`, or a typedef name through `@c.import`), with the fields the declaration lists
+(`struct stat`, `enum color`, or a typedef name through `@import`), with the fields the declaration lists
 and the header's layout, which the C compiler checks field by field; the block must name that
 header. It has no compile-time size and no drop glue (see `super-c-ffi`, Header Types). No type
 of an extern block implements `Free`: wrap it in a struct that does. `@c.source("impl.c")` names an implementation
 elsewhere.
-`@c.link("m")` declares a library. Variadics work in both directions (`...`, `va_list`,
+`@link("m")` declares a library. Variadics work in both directions (`...`, `va_list`,
 `va_start`, `va_arg`, `va_end`); `va_arg` needs `unsafe` (see `super-c-ffi`).
 
 ## Testing
@@ -689,39 +706,42 @@ source text, values, and file:line on failure.
 
 | Attribute | Effect |
 |-----------|--------|
-| `@c.inline` | Suggest inlining |
-| `@c.always_inline` | Force inlining |
-| `@c.noinline` | Prevent inlining |
-| `@c.cold` | Mark rarely called: C `cold`, which implies `noinline`; the C compiler lays out the branches that call it as unlikely |
-| `@c.noreturn` | Mark non-returning |
-| `@c.align(N)` | Set alignment of a struct, a union or a `static mut` outside an `extern "C"` block (an error on any other item): a power of two from 1 to 4096 (a page: a larger one is misaligned on some hosts and could move a task's frame past its guard page); `N` is an integer literal or a constant expression of type `u32`. An emitted struct or union definition takes `__attribute__((aligned(N)))`; a static whose `N` is above its type's own alignment takes `_Alignas(N)` on its definition and every declaration (C rejects a weaker specifier) |
-| `@c.packed` | Pack a struct or a union outside an `extern "C"` block (an error on any other item). A reference or autoref to a field whose alignment exceeds 1 is "cannot borrow a field of a '@c.packed' struct" (copy it into a local first), and such a field cannot need a `free` |
-| `@c.export("sym")` | Pin exact C symbol; a constant or `static mut` is defined also when no code names it |
-| `@c.import("sym")` | Import exact C symbol; on an extern type, its C spelling; on a header type's field, its C member |
-| `@c.used` | Prevent dead-code elimination; a constant or `static mut` is defined also when no code names it, with C `used` |
-| `@c.unused` | Suppress unused warnings |
+| `@inline` | Suggest inlining |
+| `@always_inline` | Force inlining |
+| `@noinline` | Prevent inlining |
+| `@cold` | Mark rarely called: C `cold`, which implies `noinline`; the C compiler lays out the branches that call it as unlikely |
+| `@noreturn` | Mark non-returning |
+| `@align(N)` | Set alignment of a struct or a union (a header type of an `extern "C"` block too), or of a `static mut` outside an `extern "C"` block (an error on any other item): a power of two from 1 to 4096 (a page: a larger one is misaligned on some hosts and could move a task's frame past its guard page); `N` is an integer literal or a constant expression of type `u32`. An emitted struct or union definition takes `__attribute__((aligned(N)))`; a static whose `N` is above its type's own alignment takes `_Alignas(N)` on its definition and every declaration (C rejects a weaker specifier) |
+| `@packed` | Pack a struct or a union, a header type of an `extern "C"` block too (an error on any other item). A reference or autoref to a field whose alignment exceeds 1 is "cannot borrow a field of a '@packed' struct" (copy it into a local first), and such a field cannot need a `free` |
+| `@export("sym")` | Pin exact C symbol; a constant or `static mut` is defined also when no code names it |
+| `@import("sym")` | Import exact C symbol; on an extern type, its C spelling; on a header type's field, its C member |
+| `@used` | Prevent dead-code elimination; a constant or `static mut` is defined also when no code names it, with C `used` |
+| `@unused` | Suppress unused warnings |
 | `@emit_macro` | Export generic as reusable C macro |
 | `@fmt.skip` | Exempt from formatter |
 | `@platform(P)` | Platform gate |
 | `@arch(A)` | Instruction-set gate: `x86_64`, `aarch64`, `wasm32` (see Build Constants and Platform Gating) |
+| `@when(C)` | Build-condition gate over `TEST`, `THREAD_SANITIZER`, `ADDRESS_SANITIZER`, `LOCKDEP`, `OVERFLOW_CHECKS` (see Build Constants and Platform Gating) |
 | `@target_feature([cpu::Feature::X, ..])` | The function needs CPU features (a list, or a level such as `cpu::X86_64_V3`): safe to call where the build or the caller holds them, else inside `unsafe` after a run-time check (an error on wasm32); its vector code uses them (references/simd.md) |
 | `@simd_impl(simd::Op::X, [cpu::Feature::Y, ..])` | `std` only: a backend entry of vector operation `X` (references/simd.md) |
-| `@c.value(size, align)` | An opaque `extern "C"` type is a C register type of that layout (see `super-c-ffi`) |
-| `@c.reads(p, bytes)` / `@c.writes(p, bytes)` / `@c.lane_access` | The memory an extern function reads or writes through pointer parameter `p` (see `super-c-ffi`) |
+| `@value(size, align)` | An opaque `extern "C"` type is a C register type of that layout (see `super-c-ffi`) |
+| `@layout(size, align)` | An opaque `extern "C"` type is a C value of that exact layout, checked in C (see `super-c-ffi`) |
+| `@thread_local` | A `static mut` (an extern one too) has one object per OS thread. Every access calls a non-inlined accessor, so a coroutine that moves to another thread reads that thread's object. A constant or a `static mut` initializer cannot read one ("a thread-local has one object per thread: ...") |
+| `@reads(p, bytes)` / `@writes(p, bytes)` / `@lane_access` | The memory an extern function reads or writes through pointer parameter `p` (see `super-c-ffi`) |
 | `@test` / `@test_init` / `@test_free` | Test harness; `@test(should_panic, timeout = N)` takes either argument or both |
 | `@blocking` | Run extern on blocking pool |
 | `@tail_recurse` | Every call of the function to itself must become a jump (see Functions); a function with a body only |
 | `@no_const` | Struct, union or enum whose values never exist at compile time; a function that is never a `const fn` (an error on one; `lint --const` skips it) |
-| `@intrinsic("<name>")` | `std` only: a function without a body whose call is the operation the name gives: a vector operation `simd.<name>` (references/simd.md), or `float.to_int_unchecked` (references/operations.md) |
+| `@intrinsic("<name>")` | `std` only: a function without a body whose call is the operation the name gives: a vector operation `simd.<name>` (references/simd.md), `float.to_int_unchecked` (references/operations.md), or the branch hints `hint.likely` and `hint.unlikely` (Branch Hints below) |
 | `@unsafe(safe, const)` | Unverified claims on an extern function, any order, at least one: `safe` = callable without `unsafe`, `const` = its body models it at compile time (see `super-c-ffi`) |
 | `@unsafe(link_section = "s")` | Place a function with a body or a `static mut` in object-file section `s`; a `static mut` in a section is defined also when no code names it (Unsafe Placement below) |
 | `@unsafe(naked)` | The function's `asm` statements are its whole machine code: no prologue or epilogue (Unsafe Placement below) |
 
-A constant-expression attribute argument (`@c.align(LINE * 2)`) is an ordinary expression: names
-resolve at module scope (in the `extend` scope for a member; `@c.reads`/`@c.writes` also see the
+A constant-expression attribute argument (`@align(LINE * 2)`) is an ordinary expression: names
+resolve at module scope (in the `extend` scope for a member; `@reads`/`@writes` also see the
 function's parameters), the argument checks against the type the attribute declares and folds at
 compile time like a `const` initializer. An attribute with several arguments checks each against
-its own type and arity ("attribute '@c.reads' takes 2 arguments"). A misspelled name, a
+its own type and arity ("attribute '@reads' takes 2 arguments"). A misspelled name, a
 type mismatch or an argument that does not fold is an error at the argument. The formatter prints
 the argument as an expression, and the language server completes, hovers, renames and finds names
 inside it. A lone integer literal keeps the literal form and emits the same C.
@@ -731,9 +751,30 @@ runtime handles (`Atomic`, `Arc`, locks, channels, threads, sockets, the schedul
 helpers (`Duration`, `IoError`) stay untagged.
 
 An attribute appears at most once on one declaration (item, method, field, variant, extern
-item), whatever its arguments: a second `@c.align`, `@platform`, `@derive`, `@reflect`,
-`@c.link`, or any other is the parse error `duplicate attribute '@NAME'`. Put several values in
+item), whatever its arguments: a second `@align`, `@platform`, `@derive`, `@reflect`,
+`@link`, or any other is the parse error `duplicate attribute '@NAME'`. Put several values in
 one occurrence (`@derive(Format, Hash)`, `@reflect(a, b = 1)`, `@platform(linux | macos)`).
+
+### Branch Hints
+
+`likely(c)` and `unlikely(c)` (prelude, `std/core.spc`) return `c`, also in a constant. The `if`
+or loop condition that tests the call tells the C compiler which way the branch usually goes:
+`if (__builtin_expect(c, 1))` or `(c, 0)`. Wrap the WHOLE condition: a hint on one operand of
+`||` or `&&` stays inside the lowered short circuit and the final branch has none.
+
+```superc
+for x in xs {
+    if unlikely(x < lo || x == lo && x.is_sign_negative()) {
+        lo = x;
+    }
+}
+```
+
+Use a hint where the branch is predictable and its taken side is rare: an error or slow path, a
+new minimum in a scan. There it also stops the C compiler from turning the branch into selects,
+which chain each iteration to the previous one: Apple clang does this to the loop above without
+the hint (3.06 ns per element on an M5 Pro, 0.55 with it). A wrong hint costs the mispredicted
+side; leave unpredictable branches unhinted.
 
 ### Unsafe Placement
 
@@ -753,10 +794,19 @@ keeps link-time optimization from inlining or dropping the symbol, and its secti
   or clobbers (basic assembly, at least one), which need no `unsafe` block; the assembly reads the
   parameters where the C calling convention puts them and returns itself. Every parameter and the
   result is an integer, float, `bool`, `char` or raw pointer (one result at most, or `!`). Not generic,
-  not in a generic extend, not a `const fn`, not `@c.inline` or `@c.always_inline`. A call needs no
+  not in a generic extend, not a `const fn`, not `@inline` or `@always_inline`. A call needs no
   `unsafe`. wasm32 is an error. The C compiler must have naked functions: the C file stops with
   `#error` unless it is Clang, or GCC 8 or later on x86-64 (GCC has no naked functions on aarch64).
   The unused-parameter lint skips a naked function.
+
+### Module-Level Assembly
+
+`asm("...");` at module level is file-scope basic assembly: the template alone, a string or a
+matchertext literal (`asm(M"(...)");`), in the module's unit ("a module-level 'asm' takes only its
+template: no operands or clobbers"). Gate it with `@platform` and `@arch`. It defines symbols that
+only an `extern "C"` declaration names, so a module that holds one is always emitted, also when no
+Super-C item of it is used. Spell each symbol as the target's object format does (a leading `_`
+on Apple targets).
 
 ## Concurrency
 

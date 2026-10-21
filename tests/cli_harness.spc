@@ -524,6 +524,33 @@ extend Proj {
         return found;
     }
 
+    /// True when the generated file of an `extern "C" "<header>"` header (`__sc_t/__scx<k>.h`: the
+    /// header's include and the checks of its blocks) contains `needle`.
+    pub fn xhdr_has(self: &Proj, needle: str) bool {
+        // The files are numbered from 0 without a gap.
+        for k in 0usize..10000 {
+            let mut rel = String::from_str("__sc_t/__scx");
+            let mut w: usize = 1000;
+            while w > 1 && k < w {
+                rel.push_str("0");
+                w /= 10;
+            }
+            rel.push_u64(k as u64);
+            rel.push_str(".h");
+            let mut path = self.raw_path(rel.as_str());
+            let buf = slurp(path.cstr());
+            if buf == null {
+                return false;
+            }
+            let found = contains_str(buf, needle);
+            unsafe stdlib::free(buf);
+            if found {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// True when the definition of C function `name` in generated file `rel` (under build/debug/raw)
     /// contains `needle`.
     pub fn gen_fn_has(self: &Proj, rel: str, name: str, needle: str) bool {

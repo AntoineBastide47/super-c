@@ -11,7 +11,7 @@
 | `f32` `f64` | 4/8 | IEEE-754 floats |
 | `c32` `c64` | 8/16 | C `_Complex` floats |
 | `void` | 0 | Unit type |
-| `never` | 0 | Bottom type (`@c.noreturn` calls): converts to any type; an operator operand of it takes the other operand's type; no method applies to it |
+| `never` | 0 | Bottom type (`@noreturn` calls): converts to any type; an operator operand of it takes the other operand's type; no method applies to it |
 
 Every integer and float type has the associated constants `MIN` and `MAX` (Rust's values; a
 float's are its most negative and largest finite values; `isize`/`usize` follow the target's
@@ -99,10 +99,10 @@ the explicit `wrapping_*`, `checked_*`, `overflowing_*` and `saturating_*` metho
 ## Struct Layout
 
 Standard C layout (not auto-rounded to power-of-2). Fields ordered as declared. Use
-`@c.packed` for wire formats. Use `@c.align(N)` for cache-line alignment. Verify sizes
+`@packed` for wire formats. Use `@align(N)` for cache-line alignment. Verify sizes
 with `static_assert(sizeof(T) == N, "...")`. A `struct` or `union` of an `extern "C"` block
-is a header type: its C header owns the layout, so only the C compiler knows its size (see
-`super-c-ffi`, Header Types).
+is a header type: it lists every member of the C type, Super-C computes its layout by the same
+rules, and the C compile checks it against the header (see `super-c-ffi`, Header Types).
 
 No type may exceed the target's `isize::MAX` bytes ("the type '..' is too large for the target"),
 nor an array `u32::MAX` elements ("array length N exceeds the maximum of 4294967295").
@@ -128,7 +128,7 @@ reaches a live `&mut` referent through another path (a raw pointer, a second ref
 while the call runs is undefined behavior. A by-value `[]mut T` parameter is exclusive the same
 way: function `f` is defined as `f__r`, which takes it as `T *restrict` and a `size_t` length,
 and every direct call passes `s.ptr, s.len`. `f` itself keeps the struct ABI (`SliceMut__T`) and
-calls `f__r`: function values, vtables, `@c.export` and a call whose view argument is a call
+calls `f__r`: function values, vtables, `@export` and a call whose view argument is a call
 result reach `f`. `&T` and `[]T` parameters take no `restrict`: unsafe code may write their
 referent through a const-cast `&Self` or another raw pointer (the compiler writes `Ast` through
 `module_ast_const(m) as *mut Ast`), and a measured `restrict` on them gained nothing. `&&T` and `&&x` are two references (`& &T`,

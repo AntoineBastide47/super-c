@@ -1095,7 +1095,7 @@ import std::cpu;
 extern "C" "immintrin.h" {''']
     for b, sz in ((128, 16), (256, 32), (512, 64)):
         for sfx, what in (('i', 'integer lanes'), ('', 'f32 lanes'), ('d', 'f64 lanes')):
-            out.append(f'    /// A {b}-bit register of {what}.\n    @arch(x86_64)\n    @c.value({sz}, 16)\n    pub type __m{b}{sfx};')
+            out.append(f'    /// A {b}-bit register of {what}.\n    @arch(x86_64)\n    @value({sz}, 16)\n    pub type __m{b}{sfx};')
         if b < 512:
             out.append(f'    /// The {b} bits a register load or store addresses, at any alignment.\n    @arch(x86_64)\n    pub type __m{b}i_u;')
     for u in used:
@@ -1116,7 +1116,7 @@ extern "C" "immintrin.h" {''']
             if u not in IMM:
                 attrs.append('@unsafe(safe)')
         elif any(s in u for s in ('maskload', 'maskstore', 'mask_loadu', 'mask_storeu', 'gather', 'scatter', 'compressstoreu', 'expandloadu')):
-            attrs.append('@c.lane_access')
+            attrs.append('@lane_access')
         elif 'loadl' in u or 'storel' in u:
             attrs.append(f'@c.{"reads" if "load" in u else "writes"}(p, 8)')
         elif 'load' in u or 'store' in u:

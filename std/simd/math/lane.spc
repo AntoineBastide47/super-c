@@ -292,7 +292,7 @@ pub fn scale<T: Lane, const N: usize>(y: Simd<T, N>, k: Simd<T, N>) Simd<T, N> {
     let kc = T::kc();
     // k outside [emin, emax] = [1 - emax, emax]: one comparison, |k - 1/2| > emax - 1/2.
     let far = (k - T::c(0.5)).abs().greater_than(Simd::<T, N>::splat(kc.emax) - T::c(0.5));
-    if far.any() {
+    if unlikely(far.any()) {
         let kk = at_most(
             at_least(k, Simd::<T, N>::splat(kc.emin) * T::c(2.0)),
             Simd::<T, N>::splat(kc.emax) * T::c(2.0),
@@ -318,7 +318,7 @@ pub fn exp_fin<T: Lane, const N: usize>(x: Simd<T, N>, hi: T, lo: T, under: f64,
     let kc = T::kc();
     let r = y * T::pow2i(k);
     let out = k.greater_than(Simd::splat(kc.emax)) | k.less_than(Simd::splat(kc.emin));
-    if out.any() {
+    if unlikely(out.any()) {
         return choose(out, exp_range(x, hi, lo, under, scale(y, k)), r);
     }
     return r;
@@ -485,7 +485,7 @@ pub fn pow_finish<T: Lane, const N: usize>(
     let plain = x.greater_than(sp(0.0)) & x.less_than(inf()) & y.abs().less_than(inf()) & y.not_equal(sp(0.0)) & x.not_equal(
         sp(1.0),
     );
-    if plain.all() {
+    if likely(plain.all()) {
         return m;
     }
     return pow_special(x, y, yint, yodd, m);
@@ -527,7 +527,7 @@ pub fn sub_pio2<T: Lane, const N: usize>(x: Simd<T, N>, j: Simd<T, N>) Simd<T, N
 pub fn rem_pio2<T: Lane, const N: usize>(x: Simd<T, N>) (Simd<T, N>, Simd<T, N>, Simd<T, N>) {
     let kc = T::kc();
     let big = x.abs().greater_equal(Simd::splat(kc.cw_max));
-    if big.any() {
+    if unlikely(big.any()) {
         // Its own path, so that nothing of the common one lives across the bit reduction's call. The
         // lanes it does not serve get cw_max: its table reads stay in range (`rem_pio2_big`).
         let (q, rh, rl) = rem_pio2_cw(x, choose(big, sp::<T, N>(0.0), (x * kc.two_over_pi).round_even()));
@@ -687,7 +687,7 @@ const fn i2f<const N: usize>(i: Simd<i64, N>) Simd<f64, N> {
 // exact (|r| < 2^-7, `coeffs_f64.spc`). Any other x gives values the callers replace.
 fn log_cell<const N: usize>(x: Simd<f64, N>) (Simd<f64, N>, Simd<f64, N>, Simd<f64, N>, Simd<f64, N>, Simd<f64, N>) {
     let sub = x.less_than(Simd::splat(0x1p-1022)) & x.greater_than(Simd::splat(0.0));
-    let (xs, ds) = if sub.any() {
+    let (xs, ds) = if unlikely(sub.any()) {
         (choose(sub, x * 0x1p54, x), choose(sub, Simd::<f64, N>::splat(-54.0), Simd::splat(0.0)));
     } else {
         (x, Simd::<f64, N>::splat(0.0));

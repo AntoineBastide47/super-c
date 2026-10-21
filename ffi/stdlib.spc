@@ -4,6 +4,17 @@
 // requires `unsafe` except `abort`; the safe wrappers do not. `abs`/`llabs` carry their compile-time
 // models (`@unsafe(const)`).
 
+/// C's `long`: 32 bits on Windows (LLP64), pointer-sized on the other targets (64 bits, 32 on wasm32).
+@platform(windows)
+pub type c_long = i32;
+@platform(!windows)
+pub type c_long = isize;
+/// C's `unsigned long`.
+@platform(windows)
+pub type c_ulong = u32;
+@platform(!windows)
+pub type c_ulong = usize;
+
 extern "C" {
     /// Allocation. Sizes in bytes; all may return null on failure.
     pub fn malloc(size: usize) *mut void;
@@ -20,24 +31,26 @@ extern "C" {
     @unsafe(safe)
     pub fn abort() void;
     /// End the process with `code` at once: no atexit handlers, no stream flush. Safe in a signal handler.
-    @c.import("_Exit")
+    @import("_Exit")
     pub fn exit_now(code: i32) void;
     /// Register a handler to run at normal exit; 0 on success.
     pub fn atexit(handler: fn() void) i32;
-    @c.import("getenv")
+    @import("getenv")
     fn c_getenv(name: *const char) *const char;
 
     /// Numeric parsing. `ato*` return 0 on a bad parse; `strto*` report where parsing stopped via endptr.
     pub fn atoi(s: *const char) i32;
     /// Parse a leading decimal integer, 0 when none; no overflow detection.
-    pub fn atol(s: *const char) i64;
+    pub fn atol(s: *const char) c_long;
+    /// Parse a leading decimal integer as a C `long long`, 0 when none; no overflow detection.
+    pub fn atoll(s: *const char) i64;
     /// Parse a leading floating-point number, 0 when none.
     pub fn atof(s: *const char) f64;
     /// Parse an integer in `base` (0 = auto); `*endptr` receives the first unparsed byte; saturates and
     /// sets errno on overflow.
-    pub fn strtol(s: *const char, endptr: *mut void, base: i32) i64;
+    pub fn strtol(s: *const char, endptr: *mut void, base: i32) c_long;
     /// Unsigned strtol.
-    pub fn strtoul(s: *const char, endptr: *mut void, base: i32) u64;
+    pub fn strtoul(s: *const char, endptr: *mut void, base: i32) c_ulong;
     /// Parse a floating-point number; `*endptr` receives the first unparsed byte.
     pub fn strtod(s: *const char, endptr: *mut void) f64;
 
@@ -82,7 +95,7 @@ extern "C" {
 // missing rather than the whole module.
 @platform(!ios)
 extern "C" {
-    @c.import("system")
+    @import("system")
     fn c_system(command: *const char) i32;
 }
 
@@ -121,7 +134,7 @@ pub fn system(command: str) i32 {
 
 /// Parse a base-10 integer, ignoring leading whitespace and trailing junk (0 on a non-numeric string).
 pub fn parse_int(s: &mut String) i64 {
-    return unsafe atol(s.cstr());
+    return unsafe atoll(s.cstr());
 }
 
 /// Parse a floating-point value (0.0 on a non-numeric string).

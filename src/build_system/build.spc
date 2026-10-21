@@ -601,9 +601,9 @@ fn file_eq(a: str, want: str) bool {
 // Is the object older than its source or any recorded dependency? The object's time is the mtime of its
 // `.cmd` record (`cmdpath`), which the tree's compile or cache restore writes once the object is in
 // place: the object itself is a name of a cache entry, whose mtime another tree's use refreshes.
-// Mtimes have second granularity, so a file the emission rewrote in this build counts as newer whatever
-// its mtime says: an edit landing in the same second its previous object was compiled would otherwise
-// keep a stale object.
+// Times compare in nanoseconds (100 ns steps on Windows): an edit of a header landing in the same second
+// its unit's object was compiled is newer. A file system that keeps whole seconds rounds both times
+// alike, so a file the emission rewrote in this build counts as newer whatever its mtime says.
 fn obj_stale(
     cpath: &mut String,
     opath: &mut String,
@@ -613,7 +613,7 @@ fn obj_stale(
     gen: str,
     mtimes: &mut Map<String, i64>,
 ) bool {
-    let omt = unsafe shim::sc_mtime(cmdpath.cstr());
+    let omt = unsafe shim::sc_mtime_ns(cmdpath.cstr());
     if omt == 0 || unsafe shim::sc_mtime(opath.cstr()) == 0 {
         return true;
     }
@@ -672,7 +672,7 @@ fn obj_stale(
             let mt = switch mtimes.get(&dep_path) {
                 Some(v) => *v,
                 None => {
-                    let v9 = unsafe shim::sc_mtime(dep_path.cstr());
+                    let v9 = unsafe shim::sc_mtime_ns(dep_path.cstr());
                     mtimes.insert(dep_path.clone(), v9);
                     v9;
                 },

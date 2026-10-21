@@ -42,8 +42,43 @@ extern "C" {
     type FILE;
     fn fputc(c: i32, f: *mut FILE) i32;
     fn fwrite(p: *const void, size: usize, n: usize, f: *mut FILE) usize;
-    fn __sc_stdout() *mut FILE;
-    fn __sc_stderr() *mut FILE;
+}
+
+// The standard output streams: `stdout` and `stderr` are macros over a per-target C object.
+@platform(macos | ios)
+extern "C" "stdio.h" {
+    @import("__stdoutp")
+    static mut c_stdout: *mut FILE;
+    @import("__stderrp")
+    static mut c_stderr: *mut FILE;
+}
+@platform(linux | android | wasm)
+extern "C" "stdio.h" {
+    @import("stdout")
+    static mut c_stdout: *mut FILE;
+    @import("stderr")
+    static mut c_stderr: *mut FILE;
+}
+@platform(windows)
+extern "C" "stdio.h" {
+    fn __acrt_iob_func(i: u32) *mut FILE;
+}
+
+@platform(!windows)
+fn std_out() *mut FILE {
+    return unsafe c_stdout;
+}
+@platform(!windows)
+fn std_err() *mut FILE {
+    return unsafe c_stderr;
+}
+@platform(windows)
+fn std_out() *mut FILE {
+    return unsafe __acrt_iob_func(1);
+}
+@platform(windows)
+fn std_err() *mut FILE {
+    return unsafe __acrt_iob_func(2);
 }
 
 // Heap representation. `cap`'s top bit is the "is large" discriminant; its real value is the rest.
@@ -202,7 +237,7 @@ extend<A: Allocator> String<A> {
 
     // The growth path of `reserve`, out of line so the check above stays small enough to inline into
     // every append.
-    @c.noinline
+    @noinline
     fn grow_for(self: &mut String<A>, additional: usize) {
         let needed = self.checked_needed(additional);
         // A capacity stays below LARGE_BIT, so doubling it cannot wrap.
@@ -349,7 +384,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// Append the bytes of a `str` (e.g. a string literal).
-    @c.always_inline
+    @always_inline
     pub fn push_str(self: &mut String<A>, text: str) {
         self.push_raw(text.ptr(), text.len());
     }
@@ -994,7 +1029,7 @@ extend<A: Allocator> String<A> {
 
     /// Write the UTF-8 bytes to stdout (no trailing newline).
     pub fn print(self: &String<A>) {
-        unsafe fwrite(self.as_ptr(), 1, self.len(), unsafe __sc_stdout());
+        unsafe fwrite(self.as_ptr(), 1, self.len(), std_out());
     }
 
     /// Write the bytes plus a newline to stdout.
@@ -1005,13 +1040,13 @@ extend<A: Allocator> String<A> {
 
     /// Write the UTF-8 bytes to stderr (no trailing newline): the `eprint`/`eprintln` builtins' writer.
     pub fn eprint(self: &String<A>) {
-        unsafe fwrite(self.as_ptr(), 1, self.len(), unsafe __sc_stderr());
+        unsafe fwrite(self.as_ptr(), 1, self.len(), std_err());
     }
 
     /// Write the bytes plus a newline to stderr.
     pub fn eprintln(self: &String<A>) {
         self.eprint();
-        unsafe fputc(10, unsafe __sc_stderr());
+        unsafe fputc(10, std_err());
     }
 }
 

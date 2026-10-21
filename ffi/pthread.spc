@@ -1,20 +1,23 @@
 // FFI bindings for the pthread thread calls. Import with `import pthread;`.
 // Mutexes, condition variables and read/write locks are not bound: an initialized one must not be copied,
-// and a header type (`@c.import("pthread_mutex_t") struct pthread_mutex_t {}`) is a `Copy` value. Use
+// and a header type (`@import("pthread_mutex_t") struct pthread_mutex_t {}`) is a `Copy` value. Use
 // `std::parallel::sync` (Mutex, Condvar, RwLock) instead.
-// Carries `@c.link("pthread")` off Android. Every call site except `pthread_self` requires `unsafe`.
+// Carries `@link("pthread")` off Android. Every call site except `pthread_self` requires `unsafe`.
 
 // The `-l` rides on its own gated block rather than on the declarations, which every target needs: bionic
 // keeps the pthread entry points in libc itself and ships no libpthread at all, so the NDK's linker fails
 // on `-lpthread` instead of ignoring it the way macOS and glibc do.
 @platform(!android)
-@c.link("pthread")
+@link("pthread")
 extern "C" {}
 
-extern "C" {
-    /// A thread handle.
+extern "C" "pthread.h" {
+    /// A thread handle: an integer or a pointer, pointer-sized on every target.
+    @layout(sizeof(usize), sizeof(usize))
     pub type pthread_t;
+}
 
+extern "C" {
     /// The calling thread's handle.
     @unsafe(safe)
     pub fn pthread_self() pthread_t;

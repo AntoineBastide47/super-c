@@ -3138,6 +3138,10 @@ fn main() i32 {
     assert(p.gen_has("main.c", "int32_t __sc_spc = "), "the function-local preemption tick is declared");
     // The substrate's spin, park and signal-handler loops hold locks a preemption must not cross.
     assert(!p.gen_has("sc_runtime.c", "__sc_spc"), "the runtime substrate never ticks");
+    if !cli::on_wasm() {
+        // The context switch names its trampoline as a value: the extern still gets its declaration.
+        assert(p.gen_has("__sc_fwd.h", "extern void sc_ctx_entry(void);"), "a header-less extern named as a value");
+    }
     let cc = p.cc_build("");
     assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
@@ -4931,11 +4935,12 @@ fn small_units_compile_in_packs() {
 }
 
 // A program of separate units compiles `__sc_fwd.h` once, precompiled (`obj/__sc_fwd.h.gch`), and
-// every unit loads it. A header it includes changes in place, its size kept (clang then checks no
-// mtime, and gcc's dependency list of a unit names no header of the precompiled one): the header and
-// the units compile again, and the program sees the new text.
+// every unit loads it. A project header an extern block binds reaches only the units that name its
+// items, not the precompiled header. It changes in place, its size kept, within the second its unit
+// compiled: the unit compiles again (the times compare in nanoseconds), and the program sees the new
+// text.
 @test
-fn precompiled_header_follows_its_includes() {
+fn edited_header_recompiles_its_units() {
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
@@ -6865,8 +6870,8 @@ fn main() i32 {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("__sc_fwd.h", "#include <unistd.h>"), "the unistd block pulls in its header");
-    assert(p.gen_has("__sc_fwd.h", "#include <dirent.h>"), "the filesystem blocks pull in theirs");
+    assert(p.xhdr_has("#include <unistd.h>"), "the unistd block pulls in its header");
+    assert(p.xhdr_has("#include <dirent.h>"), "the filesystem blocks pull in theirs");
     let cc = p.cc_build("");
     assert(cc.ok());
     // The program makes its probe directory in its working directory: the scratch project, never the
@@ -7107,9 +7112,9 @@ fn external_c_sources() {
 
 // Shim prototypes (`sc_` externs) and block-wrapper prototypes live in the forward header, which
 // includes no definition header: one whose array declarator has an aggregate element (`[S; 2]`)
-// goes to `__sc_ext.h` after the definition it needs. By-value `S` parameters and returns stay (a
-// declaration may name an incomplete type), and so does a pointer to an array of `S`, which names
-// the array's wrapper struct. The C side calls the `@c.export` functions back; the tree compiles
+// is a declaration of the unit that calls it, after the definition it needs. By-value `S`
+// parameters and returns stay (a declaration may name an incomplete type), and so does a pointer to
+// an array of `S`, which names the array's wrapper struct. The C side calls the `@c.export` functions back; the tree compiles
 // -Wall -Wextra -Werror. A result pointer to an array of `S` converts at the call (`(void *)`), and a
 // local named like that extern, declared before the call, takes another C name.
 @test
@@ -7200,7 +7205,8 @@ fn main() i32 {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_has("__sc_ext.h", "sc_arrx("), "an array-of-aggregate shim prototype leaves the forward header");
+    assert(!p.gen_has("__sc_fwd.h", "sc_arrx("), "an array-of-aggregate shim prototype leaves the forward header");
+    assert(p.gen_has("main.c", "int32_t sc_arrx("), "the unit that calls it declares it");
     assert(
         p.gen_has("__sc_fwd.h", "__sc_blk_main__sc_bptr(const main__S__a2 *a0)"),
         "a block wrapper taking a pointer to an array of S stays",

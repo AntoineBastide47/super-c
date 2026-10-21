@@ -1,11 +1,11 @@
 // FFI bindings for dynamic loading APIs (<dlfcn.h>). Import with `import dlfcn;`.
-// Carries `@c.link("dl")` (links libdl); every call site requires `unsafe`.
+// Carries `@link("dl")` (links libdl); every call site requires `unsafe`.
 //
 // The constants are `extern` (no initializer): each binds to the real `<dlfcn.h>` macro, so the platform's
 // own values are used rather than hardcoded numbers. They are runtime flag values (e.g.
 // `dlopen(p, RTLD_NOW | RTLD_GLOBAL)`), not Super-C constant expressions.
 
-@c.link("dl")
+@link("dl")
 extern "C" "dlfcn.h" {
     /// Load a shared library; null on failure (see dlerror). `path` is NUL-terminated.
     pub fn dlopen(path: *const char, flags: i32) *mut void;

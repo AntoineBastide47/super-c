@@ -382,7 +382,7 @@ fn neon_memory_bindings_state_their_range() {
         let t = line.trim();
         if t.starts_with("pub fn vld") || t.starts_with("pub fn vst") {
             n += 1;
-            let want = pick(t.starts_with("pub fn vld"), "@c.reads(ptr, ", "@c.writes(ptr, ");
+            let want = pick(t.starts_with("pub fn vld"), "@reads(ptr, ", "@writes(ptr, ");
             if !prev.as_str().starts_with(want) {
                 eprintln("{}: {}", t, prev.as_str());
             }

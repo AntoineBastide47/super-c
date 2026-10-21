@@ -33,7 +33,7 @@ cache header hash (`driver::tuc`), so a changed set or table never replays a cac
 
 ## Attributes
 
-`@target_feature`, `@simd_impl`, `@c.value`, `@c.reads`, `@c.writes` take constant-expression
+`@target_feature`, `@simd_impl`, `@value`, `@reads`, `@writes` take constant-expression
 arguments: `ATTR_EXPR_KINDS` and `ATTR_EXPR_ARGS` (`ast.spc`) give each argument's kind (`AA_*`:
 `u32`, `usize`, a `cpu::Feature` list, a `simd::Op`, a parameter, a byte count). The parser builds
 a tuple node for several arguments and checks the arity; the resolver resolves the parameter-scoped
@@ -46,11 +46,11 @@ removes a gated item; `TypePool.simd_op` and `TypePool.cpu_feature` name the two
 
 The type checker records each call or value use of a function that needs features
 (`Ast.feature_calls`: span, callee, caller, the enclosing `unsafe` marker, `in_unsafe`) and each
-caller of a `@c.lane_access` function (`Ast.lane_callers`); an `unsafe` marker whose only reason is
+caller of a `@lane_access` function (`Ast.lane_callers`); an `unsafe` marker whose only reason is
 such a use goes to `Ast.unsafe_lints` instead of the checker's own lint. `check_feature_calls`
 (`driver/emit.spc`, package-wide, after the type check) classifies each use (`feature_use`: 0 the
 caller's effective set holds the callee's, 1 it needs `unsafe`, 2 an error even there: wasm32, an
-extern binding, an `@c.always_inline` callee), reports the uses not covered, the `@c.export`
+extern binding, an `@always_inline` callee), reports the uses not covered, the `@export`
 functions with features and the outside-called ones (`main`, tests, benches) the build cannot
 call, and sets `fn_union`; `lint_feature_unsafe` reports a deferred marker no use of class 1 or 2
 needs (a build's lints and `lint`), with the `(cpu::Feature, f)` tuple rows of feature functions
@@ -74,7 +74,8 @@ keyed by the spelling context too: the first render in a TU records the type's d
 Run-time copies (`--simd-dispatch`): the load computes `Package.simd_levels` (`simd_levels_compute`:
 the levels of `simd_dispatch` over the build's features, closed, by size; x86_64 only; `build::dispatch_for` turns an unset level list into `off` at opt-level 0
 or 1 and for a script without a profile) and, for a
-program with vectors, loads the detector binding `sc_cpu` so `ffi/sc_cpu.c` links.
+program with vectors, loads the detector module `sc_cpu` (`ffi/sc_cpu.spc`), whose `@export("sc_cpu_words")`
+the prologues call.
 `CEmit::dispatch_prologue` opens every function `vec_body` keeps that states no features and emits
 under the build's set with `if (__sc_simd_lvl() >= k) return <name>__fs<hex>(<its parameters>);`,
 the highest level first (the `__r` split body forwards to the copy's `__r`), and demands each copy
@@ -102,7 +103,7 @@ the index lanes' for a run-time index, `N` the lanes). `build_simd_table` collec
 the build's instruction set into `Package.simd_table` with each entry's feature set closed, sorted
 by `simd_plan::entry_cmp` (key, then feature count, the largest first, then declaration),
 reports two entries with one key and feature set, and marks an entry `lanes` when it calls a
-`@c.lane_access` binding. `ir::op_variant` names
+`@lane_access` binding. `ir::op_variant` names
 each operation's `simd::Op` variant.
 
 ## Planner
@@ -255,8 +256,8 @@ The work for an accepted architecture `A`, in order:
 
 1. Its rows in `CPU_FEATURES` (name, implies, C flag, per-OS baseline) and the matching
    `cpu::Feature` variants in the same order (`tests/target_feature_test.spc` asserts both).
-2. A binding module `ffi/<header>.spc` with `@arch(A)`: the register types as `@c.value` types,
-   `@target_feature` on each intrinsic, and `@c.reads`/`@c.writes` with the exact byte count on
+2. A binding module `ffi/<header>.spc` with `@arch(A)`: the register types as `@value` types,
+   `@target_feature` on each intrinsic, and `@reads`/`@writes` with the exact byte count on
    every intrinsic that reads or writes memory through a pointer.
 3. `std/simd/backend/<A>.spc` with `@simd_impl` entries: lane arithmetic, the lane-form
    comparisons, `ChooseLanes`, contiguous `Load` and `Store` and the integer reductions first, then
@@ -264,7 +265,7 @@ The work for an accepted architecture `A`, in order:
    loop until it has a verified entry; an entry needs no compiler change. Each entry states each
    semantic gap of its instructions (NaN rule, zero sign, shift count range, float to integer
    conversion, saturation) and the sequence that restores the language rule.
-4. Detection in `ffi/sc_cpu.c` for each OS of `A` through the OS capability interface
+4. Detection in `ffi/sc_cpu.spc` for each OS of `A` through the OS capability interface
    (`getauxval` on Linux), every error read as "absent", callable before `main` with no allocation
    and no lock, every feature reachable through `sc_cpu_has`, the 16-byte compare-exchange feature
    among them when it is optional.
@@ -284,8 +285,8 @@ fixed `VLEN` (`zvl128b`, `zvl256b`, RVV intrinsics), POWER VSX (`<altivec.h>`), 
 and s390x z/Vector are not compiler targets, so each needs the architecture first. SVE and SVE2 are
 detected only: a scalable register has a run-time length, which no `Simd<T, N>` (a compile-time
 size) describes, so no fixed-width backend uses them. SME (`sme`, `sme2`, `sme-f64f64`) has no
-backend entries either: its outer products are matrix operations, which C kernels of std call
-(`ffi/sc_sme.c` for `std::simd::matrix`, super-c-language `references/simd.md`), each entering
+backend entries either: its outer products are matrix operations, which module-level assembly kernels of std run
+(`ffi/sc_sme.spc` for `std::simd::matrix`, super-c-language `references/simd.md`), each entering
 streaming mode itself.
 
 ## Tests
@@ -305,7 +306,7 @@ streaming mode itself.
   `ffi/immintrin.spc`, and on an x86_64 host byte-identical C without vectors, instruction checks
   per level (no `ymm`/`zmm` in a baseline function) and `std::simd::x86` against scalar models.
 - `tests/multiversion_test.spc`: the `@target_feature` use rules and lint, closure bounds,
-  `@c.export`, the target attributes and the inliner, function-address casts, `detect::dispatch`
+  `@export`, the target attributes and the inliner, function-address casts, `detect::dispatch`
   (order, fallback by `SC_CPU_OFF`, one detection, the race and LTO builds) and the x86 detection
   decision on fixed registers.
 - `tests/simd_aarch64_test.spc`: byte-identical C without vectors across the optional features,

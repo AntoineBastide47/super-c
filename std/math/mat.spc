@@ -587,7 +587,7 @@ extend<T: Scalar, const C: usize, const R: usize> T as Div<Mat<T, C, R>> {
 // by element and loaded by column, which stalls (`interpolate` and `recompose` took 2.5 times longer).
 extend<T: Scalar, const C: usize, const R: usize, const K: usize> Mat<T, C, R> as Mul<Mat<T, K, C>> {
     type Output = Mat<T, K, R>;
-    @c.always_inline
+    @always_inline
     pub fn mul(self: &Mat<T, C, R>, b: &Mat<T, K, C>) Mat<T, K, R> {
         let mut m = Mat::<T, K, R>::zero();
         for k in 0..K {

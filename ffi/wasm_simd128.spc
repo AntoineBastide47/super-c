@@ -7,7 +7,7 @@ import std::cpu;
 extern "C" "wasm_simd128.h" {
     /// A 128-bit SIMD register.
     @arch(wasm32)
-    @c.value(16, 16)
+    @value(16, 16)
     pub type v128_t;
 
     @arch(wasm32)
@@ -880,23 +880,23 @@ extern "C" "wasm_simd128.h" {
     pub fn wasm_v128_bitselect(a: v128_t, b: v128_t, mask: v128_t) v128_t;
     @arch(wasm32)
     @target_feature([cpu::Feature::Simd128])
-    @c.reads(mem, 16)
+    @reads(mem, 16)
     pub fn wasm_v128_load(mem: *const void) v128_t;
     @arch(wasm32)
     @target_feature([cpu::Feature::Simd128])
-    @c.reads(mem, 2)
+    @reads(mem, 2)
     pub fn wasm_v128_load16_lane(mem: *const void, vec: v128_t, i: i32) v128_t;
     @arch(wasm32)
     @target_feature([cpu::Feature::Simd128])
-    @c.reads(mem, 4)
+    @reads(mem, 4)
     pub fn wasm_v128_load32_lane(mem: *const void, vec: v128_t, i: i32) v128_t;
     @arch(wasm32)
     @target_feature([cpu::Feature::Simd128])
-    @c.reads(mem, 8)
+    @reads(mem, 8)
     pub fn wasm_v128_load64_lane(mem: *const void, vec: v128_t, i: i32) v128_t;
     @arch(wasm32)
     @target_feature([cpu::Feature::Simd128])
-    @c.reads(mem, 1)
+    @reads(mem, 1)
     pub fn wasm_v128_load8_lane(mem: *const void, vec: v128_t, i: i32) v128_t;
     @arch(wasm32)
     @target_feature([cpu::Feature::Simd128])
@@ -908,23 +908,23 @@ extern "C" "wasm_simd128.h" {
     pub fn wasm_v128_or(a: v128_t, b: v128_t) v128_t;
     @arch(wasm32)
     @target_feature([cpu::Feature::Simd128])
-    @c.writes(mem, 16)
+    @writes(mem, 16)
     pub fn wasm_v128_store(mem: *mut void, a: v128_t);
     @arch(wasm32)
     @target_feature([cpu::Feature::Simd128])
-    @c.writes(mem, 2)
+    @writes(mem, 2)
     pub fn wasm_v128_store16_lane(mem: *mut void, vec: v128_t, i: i32);
     @arch(wasm32)
     @target_feature([cpu::Feature::Simd128])
-    @c.writes(mem, 4)
+    @writes(mem, 4)
     pub fn wasm_v128_store32_lane(mem: *mut void, vec: v128_t, i: i32);
     @arch(wasm32)
     @target_feature([cpu::Feature::Simd128])
-    @c.writes(mem, 8)
+    @writes(mem, 8)
     pub fn wasm_v128_store64_lane(mem: *mut void, vec: v128_t, i: i32);
     @arch(wasm32)
     @target_feature([cpu::Feature::Simd128])
-    @c.writes(mem, 1)
+    @writes(mem, 1)
     pub fn wasm_v128_store8_lane(mem: *mut void, vec: v128_t, i: i32);
     @arch(wasm32)
     @target_feature([cpu::Feature::Simd128])

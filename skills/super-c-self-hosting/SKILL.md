@@ -134,15 +134,15 @@ step 4, tests embed the new syntax only inside string literals.
 
 ## Runtime Helpers Called by std
 
-A C helper that std calls goes in a header beside std (for example `std/int128.h`), never in
-the compiler-embedded `super_rt.h` (`src/driver/rt_c.spc`): the release binary emits its own
-older runtime header, so a helper added there is missing when the release builds the tree.
-The exception is an entry point of `super_rt.c` that `ffi/sc_rt.c` calls: it raises the runtime
-API level the wrapper TU defines (`SC_RT_LK_STATS` in `src/driver/extc.spc`, now 4), and
-`sc_rt.c` defines a stand-in under `#if SC_RT_LK_STATS < <level>`, so a tree the release builds
-links the stand-in (super-c-ffi, backing sources). The stack-overflow entry points
-(`__sc_stack_arm`, `__sc_stack_disarm`, `__sc_stack_task_size`, `__sc_stack_overflow`) follow it;
-a stage-1 compiler built by the release therefore reports no stack overflow.
+No hand-written C sits beside std or ffi. A backend primitive std calls (the bit counts, the
+128-bit fast paths, `sc_int_overflow`, the leak tracker's aligned blocks) lives in the generated
+runtime (`super_rt.h`, `src/driver/rt_c.spc`), and std binds it with a header-less `extern "C"`
+block. The release binary emits its own older runtime header, so the two land in order: the
+runtime primitive in one commit, std's use of it only after a release that carries it (the same
+cadence as new syntax).
+The substrate `ffi/sc_runtime.spc` calls entry points of `super_rt.c` (`__sc_stack_arm` and the
+other stack-overflow hooks, `__sc_set_cancel_hook`) under the same rule: a new entry point lands in
+the runtime first, and the substrate's use of it after a release that carries it.
 
 ## Recovery from a Broken Compiler
 
@@ -158,7 +158,7 @@ not help. Download the release binary as `check.sh` does
 A Windows-only failure often comes from mingw emulating POSIX:
 
 - `stat().st_ino` is 0, so file identity uses `GetFileInformationByHandle`
-  (`sc_same_file` in `src/driver_shim.c`).
+  (`sc_same_file` in `src/driver_shim.spc`).
 - Files and stdio open in text mode: write with `"wb"` and use binary stdio, else CRLF
   breaks `\`-continued macros and LSP framing.
 - `_dup2` returns 0 on success. `_spawnv` joins arguments with spaces and quotes nothing.
@@ -170,7 +170,7 @@ A Windows-only failure often comes from mingw emulating POSIX:
 - No `fork`: the test parent runs the global `@test_init`/`@test_free` pair once and each
   child rebuilds a private env.
 
-Stack traces: `sc_trace_install()` (`src/driver_shim.c`, called from `src/main.spc`) prints,
+Stack traces: `sc_trace_install()` (`src/driver_shim.spc`, called from `src/main.spc`) prints,
 on `SIGABRT`, the PE base (`trace: base %p`) and each return address as `trace: +0x<off>`.
 It is in the compiler source, so gen-1 carries it. Symbolize against the same binary:
 `x86_64-w64-mingw32-addr2line -f -e super-c.exe <0x140000000 + off>`.

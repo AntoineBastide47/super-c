@@ -684,16 +684,16 @@ pub fn log_line(line: str) {
 // --- the optimisation barrier ---------------------------------------------------------------------------
 
 /// Consume `v`: the computation that produced it cannot be deleted or folded past this call, whatever the
-/// optimiser proves about it. A volatile store in the platform glue.
+/// optimiser proves about it. A store behind a compiler memory barrier in the platform glue.
 pub fn black_box(v: u64) {
     unsafe sys::sc_bs_sink(v);
 }
 
 /// `rounds` iterations of a dependent multiply-add chain: arithmetic a task can be given so it is not pure
-/// scheduling. The chain starts from the barrier's last value (a volatile load), so the result is unknown
-/// at compile time however constant `rounds` is; the caller feeds the result to `black_box`. The multiplier
-/// is that value too: with a constant one, LLVM 22 folds eight steps into one multiply-add by the eighth
-/// power. Unsigned, so it wraps at width where the signed form would trap.
+/// scheduling. The chain starts from the barrier's last value (a load behind a compiler memory barrier), so
+/// the result is unknown at compile time however constant `rounds` is; the caller feeds the result to
+/// `black_box`. The multiplier is that value too: with a constant one, LLVM 22 folds eight steps into one
+/// multiply-add by the eighth power. Unsigned, so it wraps at width where the signed form would trap.
 pub fn burn(rounds: i64) u64 {
     let k: u64 = unsafe sys::sc_bs_sunk() | 1;
     let mut acc = k;

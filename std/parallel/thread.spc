@@ -1,7 +1,7 @@
 // OS threads. `spawn` moves an owning closure onto the heap and runs it on a fresh OS thread; the returned
 // `JoinHandle<T>` hands back the closure's value from `join`. Import with `import std::parallel::thread;`.
 //
-// The thread itself comes from the platform substrate (`ffi/sc_rt.c`): pthreads on POSIX, `_beginthreadex`
+// The thread itself comes from the platform substrate (`ffi/sc_runtime.spc`): pthreads on POSIX, `_beginthreadex`
 // on Windows, one opaque handle either way: nothing here names a `pthread_t`.
 //
 // The closure must OWN everything it touches (an owning `fn move` closure): a detached thread outlives the

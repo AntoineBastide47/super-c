@@ -14856,8 +14856,9 @@ extend CEmit {
     fn blk_wrapper_defs(self: &mut Self, d: DefId, key: u64) bool {
         let a = self.p().module_ast_const(d.module);
         let f = unsafe (*a).at_const(d.node).as_data.function;
+        // The C symbol the wrapper calls: the `@import` pin, a scoped header's alias.
         let mut nm = String::new();
-        self.mg.c_ident(d.module, unsafe (*a).at_const(f.name).as_data.name.text, &mut nm);
+        let _ = self.mg.fn_sym(d.module, d.node, DefId { module: 0, node: NODE_NONE }, &mut nm);
         let mut wn = String::new(); // the wrapper's name after `__sc_blk_`
         self.blk_stem(d, &mut wn);
         let mut rt = TYPE_NONE;

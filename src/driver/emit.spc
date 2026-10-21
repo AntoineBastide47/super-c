@@ -1705,14 +1705,11 @@ extend SeedAcc {
 }
 
 /// One assembled new-backend emission. TU texts carry NO include lines; the writer prepends the
-/// layout-relative includes of the two shared headers. `skips` MUST be zero for the output to be
+/// layout-relative include of the forward header. `skips` MUST be zero for the output to be
 /// complete (every count is an emission the backend refused).
 pub struct CemitOut {
     /// The forward header (runtime and extern-block includes, declarations shared by every TU).
     pub fwd_h: String,
-    /// The prototypes the forward header cannot hold, with the definition headers they need;
-    /// empty when there are none. Every unit includes it after the forward header.
-    pub ext_h: String,
     /// The definition headers (text, file stem under `__sc_t/`, owner module) and, per module,
     /// its prototype header (empty when it has none).
     pub defs_h: Vector<String>,
@@ -1735,6 +1732,10 @@ pub struct CemitOut {
     /// carries the owner's data definitions).
     pub inst_c: String,
     pub inst_incs: Vector<String>,
+    /// Per module: its TU, or its instance unit, includes a scoped extern header, directly or through
+    /// a definition header (`cemit_extern_includes`): the unit compiles alone (`pack_plan`).
+    pub tu_x: Vector<bool>,
+    pub inst_x: Vector<bool>,
     pub inst_chunks: Vector<Vector<u32>>,
     pub inst_heads: Vector<Vector<String>>,
     /// The registry TU (ZST sentinels, reflection registry) and its sorted root symbols.
@@ -1763,7 +1764,6 @@ extend CemitOut {
     pub fn new(n: usize) CemitOut {
         let mut o = CemitOut {
             fwd_h: String::new(),
-            ext_h: String::new(),
             defs_h: Vector::<String>::new(),
             defs_stem: Vector::<String>::new(),
             defs_own: Vector::<ModuleId>::new(),
@@ -1778,6 +1778,8 @@ extend CemitOut {
             ck_shard: Vector::<u8>::new(),
             inst_c: String::new(),
             inst_incs: Vector::<String>::new(),
+            tu_x: Vector::<bool>::new(),
+            inst_x: Vector::<bool>::new(),
             inst_chunks: Vector::<Vector<u32>>::new(),
             inst_heads: Vector::<Vector<String>>::new(),
             registry_c: String::new(),
@@ -1800,6 +1802,8 @@ extend CemitOut {
         o.tu_heads.resize_default(n);
         o.tu_tail.resize_default(n);
         o.inst_incs.resize_default(n);
+        o.tu_x.resize_default(n);
+        o.inst_x.resize_default(n);
         o.inst_chunks.resize_default(n);
         o.inst_heads.resize_default(n);
         return o;
@@ -4388,6 +4392,8 @@ pub fn cemit_package(
     let ts9 = unsafe shim::sc_ticks_ms();
     p.ensure_sigs();
     let gm9 = prd.start();
+    // The inliner and the emitter read which extern items have a scoped header.
+    p.scope_extern_items();
     // The inline candidates come from the kept lowerings, before the graph takes them.
     let mut inls = inl::InlineStore::new();
     let ti9 = unsafe shim::sc_ticks_ms();
@@ -4516,7 +4522,8 @@ pub fn cemit_package(
     // so call sites never synthesize conflicting protos).
     let mut ext_incs = String::new();
     let mut gated_incs = String::new();
-    cemit_extern_includes(p, &mut ext_incs, &mut gated_incs, &mut cem.ext_backed);
+    let mut xhdrs = Vector::<XHdr>::new();
+    cemit_extern_includes(p, &mut ext_incs, &mut gated_incs, &mut cem.ext_backed, &mut xhdrs);
     // Every emitter shard starts from the same header-backed fn set.
     let mut ext_keys = Vector::<u64>::new();
     for k in cem.ext_backed.iter() {
@@ -5350,7 +5357,8 @@ pub fn cemit_package(
             let cda = unsafe &*p.module_ast_const(cdef.module);
             let cdn = cda.at_const(cdef.node);
             // The C attribute that starts its definition: `used` for `@used` or a section, which
-            // `@unsafe(link_section = "s")` names (as for a function).
+            // `@unsafe(link_section = "s")` names (as for a function), and for a section entry no
+            // sanitizer padding (`SC_SECTION_DATA`).
             let mut csec = String::new();
             let cua = cda.attr_of(cdef.node, AttrKind::ATTR_UNSAFE);
             let sec = cua != null && (unsafe (*cua).arg & UNSAFE_LINK_SECTION) != 0;
@@ -5365,6 +5373,9 @@ pub fn cemit_package(
                     csec.push_str("\")");
                 }
                 csec.push_str(")) ");
+                if sec {
+                    csec.push_str("SC_SECTION_DATA ");
+                }
             }
             if cdn.kind == NodeKind::NODE_CONST && cdn.as_data.const_def.is_extern {
                 // The backing C header owns the definition; the extern stub suffices.
@@ -5779,6 +5790,7 @@ pub fn cemit_package(
         &mut acc,
         &ext_incs,
         &gated_incs,
+        &xhdrs,
         &si_names,
         &si_defs,
         &mut si_packs,
@@ -6149,7 +6161,8 @@ fn st_ctype(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, gi: u
     let dn = unsafe (*g).dn;
     let da = unsafe &*p.module_ast_const(dm);
     if da.at_const(dn).as_data.aggregate.is_extern {
-        // C's own type, spelled as `Mangler::ctype` spells it; no definition header.
+        // C's own type, spelled as `Mangler::ctype` spells it (a scoped header's by alias); no
+        // definition header.
         extern_c_name(p, dm, dn, out);
         if decl.len() != 0 {
             out.push_str(" ");
@@ -6479,6 +6492,14 @@ fn st_all_zero(cev: &iri::Interp, gi: u32) bool {
     return true;
 }
 
+// Whether slot `k` of statics entry `gi` is all zero bits: an initializer leaves it out, as C zero-fills
+// a member or element it does not name. A nested `{0}` for an aggregate whose first member is an
+// aggregate (glibc's `pthread_mutex_t`) is an error under gcc's -Wmissing-braces.
+fn st_slot_zero(cev: &iri::Interp, gi: u32, k: u32) bool {
+    let sl = *unsafe (*cev.static_at(gi)).slots.at(k as usize);
+    return sl.kind == iri::SK_ZERO || sl.kind == iri::SK_AGG && st_all_zero(cev, sl.child());
+}
+
 // The braced initializer of statics entry `gi`.
 fn st_init(p: &loader::Package, cem: &mut cbe::CEmit, cev: &iri::Interp, name: str, gi: u32, out: &mut String) bool {
     let g = cev.static_at(gi);
@@ -6497,9 +6518,21 @@ fn st_init(p: &loader::Package, cem: &mut cbe::CEmit, cev: &iri::Interp, name: s
         // A vector's lanes are the array inside its struct.
         let vec = unsafe (*g).vt != TYPE_NONE;
         out.push_str(mbe::if_s(vec, "{ { ", "{ "));
+        // An all-zero aggregate element is left out; the next element names its index.
+        let mut ne: u32 = 0;
+        let mut gap = false;
         for k in 0..nslots {
-            if k != 0 {
+            if !escalar && st_slot_zero(cev, gi, k) {
+                gap = true;
+                continue;
+            }
+            if ne != 0 {
                 out.push_str(", ");
+            }
+            ne += 1;
+            if gap {
+                out.format_into("[{}] = ", k);
+                gap = false;
             }
             if unsafe (*g).slots.at(k as usize).kind == iri::SK_ZERO && escalar {
                 out.push_str("0");
@@ -6527,7 +6560,7 @@ fn st_init(p: &loader::Package, cem: &mut cbe::CEmit, cev: &iri::Interp, name: s
         // A zero-sized payload member has no C storage: it takes no initializer.
         let mut pay = Vector::<u32>::new();
         for k in 1..nslots {
-            if unsafe (*g).slots.at(k as usize).kind != iri::SK_ZERO && !st_zst(
+            if !st_slot_zero(cev, gi, k) && !st_zst(
                 p,
                 &mut cem.mg,
                 g,
@@ -6571,6 +6604,10 @@ fn st_init(p: &loader::Package, cem: &mut cbe::CEmit, cev: &iri::Interp, name: s
         return true;
     }
     let uact = unsafe (*g).uactive;
+    if uact >= 0 && st_slot_zero(cev, gi, uact as u32) {
+        out.push_str("{0}");
+        return true;
+    }
     if uact >= 0 {
         out.push_str("{ ");
         st_field(p, &mut cem.mg, unsafe (*g).dm, unsafe (*g).dn, uact as u32, out);
@@ -6584,8 +6621,8 @@ fn st_init(p: &loader::Package, cem: &mut cbe::CEmit, cev: &iri::Interp, name: s
     out.push_str("{ ");
     let mut ne9: u32 = 0;
     for k in 0..nslots {
-        if st_field_zst(p, &mut cem.mg, g, k) {
-            // Zero-sized field: no C member to initialize.
+        if st_field_zst(p, &mut cem.mg, g, k) || st_slot_zero(cev, gi, k) {
+            // A zero-sized field has no C member to initialize; an all-zero one is C's default.
             continue;
         }
         if ne9 != 0 {
@@ -6599,7 +6636,7 @@ fn st_init(p: &loader::Package, cem: &mut cbe::CEmit, cev: &iri::Interp, name: s
         }
     }
     if ne9 == 0 {
-        // All fields erased inside a still-material carrier.
+        // Every field erased or all zero.
         out.push_str("0");
     }
     out.push_str(" }");
@@ -6889,21 +6926,47 @@ fn imported_beyond_backends(p: &loader::Package, m: ModuleId) bool {
     return false;
 }
 
-// `extern "C" "<header>"` blocks across the package: emit each unique include (module-relative
-// realpath when it resolves, else the local/system spelling heuristic) and record every fn the
-// header prototypes (call-site protos would conflict with the real declarations). A block whose
-// functions all need CPU features joins `gated` instead (the entries' definition headers include
-// it), and `out` only when a module beyond the backend files imports it: a program that uses no
-// vector operation keeps its forward header.
-fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut String, backed: &mut Set<u64>) {
+// One scoped header of `extern "C" "<header>"` blocks (`cemit_extern_includes`): its include line
+// seen from `__sc_t/`, the alias definitions of its blocks' items (`mbe::x_alias`), their tokens, the
+// checks of its blocks' types and constants, and the headers it needs before it (`pre`).
+struct XHdr {
+    pub line: String,
+    pub defs: String,
+    pub names: Vector<String>,
+    pub checks: String,
+    pub pre: Vector<u32>,
+}
+
+// `extern "C" "<header>"` blocks across the package: each unique header (module-relative realpath
+// when it resolves, else the local/system spelling heuristic) into `hdrs`, and every fn the header
+// prototypes into `backed` (call-site protos would conflict with the real declarations). A scoped
+// header (`Package::extern_header_scoped`) reaches only the files that use one of its items
+// (`cemit_assemble`), which the emitter spells by alias (`mbe::x_alias`): its macros would rename any
+// other file's identifiers (`near` and `far` of <windows.h>). A header may need the headers of its
+// module's earlier blocks (`<psapi.h>` after `<windows.h>`): it includes those that come before it
+// in `hdrs`, which keeps every module's block order where the modules agree (a file includes
+// `<ws2tcpip.h>` before the `<windows.h>` another module declares first, as Winsock requires).
+// A header `super_rt.h` includes reaches every file already: it and its checks join `out`.
+// A block whose functions all need CPU features joins `gated` instead (the entries' definition
+// headers include it), and `out` only when a module beyond the backend files imports it: a program
+// that uses no vector operation keeps its forward header.
+fn cemit_extern_includes(
+    p: &loader::Package,
+    out: &mut String,
+    gated: &mut String,
+    backed: &mut Set<u64>,
+    hdrs: &mut Vector<XHdr>,
+) {
     let mut seen = Vector::<String>::new();
-    // The header types' layout checks, after every include: a field may name a type another header
-    // defines.
+    // The checks of the headers in `out`, after every include: a field may name a type another
+    // header defines.
     let mut checks = String::new();
     // The forward header sits at the tree's root, the definition headers in `__sc_t/`.
     let gen_real = loader::real_path_of(p.gen_root.as_str());
     let mut t_real = gen_real.clone();
     t_real.push_str("/__sc_t");
+    let mut toks = Set::<u64>::new(); // the alias tokens defined so far: the first header owns one
+    let mut mod_x = Vector::<u32>::new(); // the scoped headers of the module's blocks so far
     for m in 0..p.modules.len() {
         if !p.modules[m].has_ast {
             continue;
@@ -6911,6 +6974,7 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut Stri
         let a = unsafe &*p.module_ast_const(m as ModuleId);
         let src = p.modules[m].source.as_str();
         let its = a.at_const(a.root).as_data.program.items;
+        mod_x.clear();
         for i in 0..its.len {
             let nid = unsafe a.list(its)[i as usize];
             if a.at_const(nid).kind != NodeKind::NODE_EXTERN_BLOCK {
@@ -6923,6 +6987,7 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut Stri
             let gated_block = extern_block_gated(p, m as ModuleId, eb.items, false);
             let mut hchk = String::new();
             header_type_checks(p, m as ModuleId, eb.items, &mut hchk);
+            let mut vchk = String::new();
             for j in 0..eb.items.len {
                 let fnid = unsafe a.list(eb.items)[j as usize];
                 if a.at_const(fnid).kind == NodeKind::NODE_FUNCTION {
@@ -6980,7 +7045,7 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut Stri
                     assert(lv.ok, "the checker folds every '@layout'");
                     let tn = a.at_const(a.at_const(tid).as_data.type_alias.name).as_data.name.text;
                     let mut nm = String::new();
-                    extern_c_name(p, m as ModuleId, tid, &mut nm);
+                    extern_c_raw(p, m as ModuleId, tid, &mut nm);
                     let chk = format(
                         "_Static_assert(sizeof({}) == {}u && _Alignof({}) == {}u, \"super-c: '{}' must have {} bytes aligned to {} in C\");\n",
                         nm.as_str(),
@@ -7009,16 +7074,60 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut Stri
                         av.w[0],
                         nm,
                     );
-                    line.push_string(&chk);
-                    gline.push_string(&chk);
+                    vchk.push_string(&chk);
                 }
             }
-            if gated_block {
-                line.push_string(&hchk);
-                gline.push_string(&hchk);
-            } else {
+            if !gated_block && !p.extern_header_scoped(m as ModuleId, nid) {
+                checks.push_string(&vchk);
                 checks.push_string(&hchk);
+                let mut dup = false;
+                for k in 0..seen.len() {
+                    dup = dup || seen.at(k).as_str() == line.as_str();
+                }
+                if !dup {
+                    out.push_string(&line);
+                    seen.push(line);
+                }
+                continue;
             }
+            if !gated_block {
+                let mut x = hdrs.len();
+                for k in 0..hdrs.len() {
+                    if hdrs[k].line.as_str() == gline.as_str() {
+                        x = k;
+                        break;
+                    }
+                }
+                if x == hdrs.len() {
+                    hdrs.push(
+                        XHdr {
+                            line: gline,
+                            defs: String::new(),
+                            names: Vector::<String>::new(),
+                            checks: String::new(),
+                            pre: Vector::<u32>::new(),
+                        },
+                    );
+                }
+                let h = hdrs.index_mut(x);
+                // First-seen indices; the order below keeps the earlier ones.
+                for k in 0..mod_x.len() {
+                    if mod_x[k] as usize != x && !h.pre.contains(&mod_x[k]) {
+                        h.pre.push(mod_x[k]);
+                    }
+                }
+                if !mod_x.contains(&(x as u32)) {
+                    mod_x.push(x as u32);
+                }
+                h.checks.push_string(&vchk);
+                h.checks.push_string(&hchk);
+                extern_block_aliases(p, m as ModuleId, eb.items, &mut toks, &mut h.names, &mut h.defs);
+                continue;
+            }
+            line.push_string(&vchk);
+            gline.push_string(&vchk);
+            line.push_string(&hchk);
+            gline.push_string(&hchk);
             let mut dup = false;
             for k in 0..seen.len() {
                 if seen.at(k).as_str() == line.as_str() {
@@ -7026,24 +7135,160 @@ fn cemit_extern_includes(p: &loader::Package, out: &mut String, gated: &mut Stri
                     break;
                 }
             }
-            if dup {} else if gated_block {
+            if !dup {
                 gated.push_string(&gline);
                 if imported_beyond_backends(p, m as ModuleId) {
                     out.push_string(&line);
                 }
                 seen.push(line);
-            } else {
-                out.push_string(&line);
-                seen.push(line);
             }
         }
     }
     out.push_string(&checks);
+    // Each step places the first seen header whose `pre` are all placed, or on a cycle (two
+    // modules order two headers apart) the first seen header left.
+    let nh = hdrs.len();
+    let mut rank = Vector::<u32>::new(); // first-seen index -> place, `nh` while unplaced
+    let mut at = Vector::<u32>::new(); // place -> first-seen index
+    for _i in 0..nh {
+        rank.push(nh as u32);
+    }
+    for _t in 0..nh {
+        let mut c = nh;
+        let mut f = nh;
+        for i in 0..nh {
+            if rank[i] as usize != nh {
+                continue;
+            }
+            f = pick(f == nh, i, f);
+            let mut ready = true;
+            for k in 0..hdrs[i].pre.len() {
+                ready = ready && rank[hdrs[i].pre[k] as usize] as usize != nh;
+            }
+            if ready {
+                c = i;
+                break;
+            }
+        }
+        c = pick(c == nh, f, c);
+        rank.set(c, at.len() as u32);
+        at.push(c as u32);
+    }
+    // Move each header to its place (`slot`: first-seen index -> current position, `cur` the
+    // inverse), then keep the `pre` placed before it, as places.
+    let mut slot = Vector::<u32>::new();
+    let mut cur = Vector::<u32>::new();
+    for i in 0..nh {
+        slot.push(i as u32);
+        cur.push(i as u32);
+    }
+    for t in 0..nh {
+        let o = at[t];
+        let s = slot[o as usize];
+        hdrs.swap(t, s as usize);
+        let ot = cur[t];
+        cur.set(s as usize, ot);
+        slot.set(ot as usize, s);
+        cur.set(t, o);
+        slot.set(o as usize, t as u32);
+    }
+    for t in 0..nh {
+        let h = hdrs.index_mut(t);
+        let mut j: usize = 0;
+        for k in 0..h.pre.len() {
+            let r = rank[h.pre[k] as usize];
+            if r as usize < t {
+                h.pre.set(j, r);
+                j += 1;
+            }
+        }
+        h.pre.truncate(j);
+    }
 }
 
-// The C spelling of extern type `decl` of module `m`, as `Mangler::ctype` writes it: the
-// `@import` pin, else the name, after `struct `, `union ` or `enum ` for a header type.
+// The alias tokens (`mbe::x_token`) of the items of extern block `items` of module `m` that C spells
+// by name into `names`, and their definitions (`#define <token> <C name>`) into `defs`: its
+// functions, statics and types as the emitter spells them, and its enumerators. A token another
+// header defines already (`toks`) stays that header's.
+fn extern_block_aliases(
+    p: &loader::Package,
+    m: ModuleId,
+    items: NodeList,
+    toks: &mut Set<u64>,
+    names: &mut Vector<String>,
+    defs: &mut String,
+) {
+    let a = &p.modules[m as usize].ast;
+    let src = p.modules[m as usize].source.as_str();
+    let mut c = String::new();
+    for j in 0..items.len {
+        let id = unsafe a.list(items)[j as usize];
+        let k = a.at_const(id).kind;
+        c.clear();
+        if k == NodeKind::NODE_FUNCTION || k == NodeKind::NODE_CONST && a.at_const(id).as_data.const_def.is_extern && !a.at_const(
+            id,
+        ).as_data.const_def.c_macro {
+            // `Mangler::fn_sym` and `Mangler::const_sym`: the pin, else the name.
+            let mut pin = a.attr_of(id, AttrKind::ATTR_IMPORT);
+            if pin == null {
+                pin = a.attr_of(id, AttrKind::ATTR_EXPORT);
+            }
+            if pin != null {
+                c.push_str(src.slice((unsafe (*pin).str_span.start) as usize, (unsafe (*pin).str_span.end) as usize));
+            } else {
+                let nm = if k == NodeKind::NODE_FUNCTION {
+                    a.at_const(id).as_data.function.name;
+                } else {
+                    a.at_const(id).as_data.const_def.name;
+                };
+                let ns = a.at_const(nm).as_data.name.text;
+                let txt = src.slice(ns.start as usize, ns.end as usize);
+                c.push_str(txt);
+                if mbe::c_keyword(txt) {
+                    c.push_str("_");
+                }
+            }
+        } else if k == NodeKind::NODE_STRUCT || k == NodeKind::NODE_ENUM || k == NodeKind::NODE_TYPE_ALIAS {
+            extern_c_raw(p, m, id, &mut c);
+        } else {
+            continue;
+        }
+        x_define(c.as_str(), toks, names, defs);
+        if k == NodeKind::NODE_ENUM {
+            // `Mangler::enum_tag`: the variant's own name.
+            let ms = a.at_const(id).as_data.aggregate.members;
+            for v in 0..ms.len {
+                let vid = unsafe a.list(ms)[v as usize];
+                let vs = a.at_const(a.at_const(vid).as_data.variant.name).as_data.name.text;
+                x_define(src.slice(vs.start as usize, vs.end as usize), toks, names, defs);
+            }
+        }
+    }
+}
+
+// Define the alias of C name `c` (`extern_block_aliases`) unless a header defines it already.
+fn x_define(c: str, toks: &mut Set<u64>, names: &mut Vector<String>, defs: &mut String) {
+    let mut t = String::new();
+    mbe::x_token(c, &mut t);
+    let h = t.as_str().hash();
+    if !toks.contains(&h) {
+        toks.insert(h);
+        defs.format_into("#define {} {}\n", t.as_str(), c);
+        names.push(t);
+    }
+}
+
+// The C spelling of extern type `decl` of module `m`, as `Mangler::ctype` writes it: the alias of a
+// scoped header's type (`mbe::x_alias`), else `extern_c_raw`.
 fn extern_c_name(p: &loader::Package, m: ModuleId, decl: NodeId, out: &mut String) {
+    let st = out.len();
+    extern_c_raw(p, m, decl, out);
+    mbe::x_alias(p, DefId { module: m, node: decl }, out, st);
+}
+
+// The C name of extern type `decl` of module `m`: the `@import` pin, else the name, after `struct `,
+// `union ` or `enum ` for a header type.
+fn extern_c_raw(p: &loader::Package, m: ModuleId, decl: NodeId, out: &mut String) {
     let a = &p.modules[m as usize].ast;
     let src = p.modules[m as usize].source.as_str();
     let at = a.attr_of(decl, AttrKind::ATTR_IMPORT);
@@ -7105,10 +7350,14 @@ fn header_field_check(p: &loader::Package, m: ModuleId, t0: TypeId, e0: str, con
             return;
         }
         if y.kind == TypeKind::TYPE_OPAQUE || y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            // The condition names another header's type by alias, so the file includes that header;
+            // the message by its C name.
             let mut nm = String::new();
             extern_c_name(p, y.module, y.as_data.decl, &mut nm);
             cond.format_into("_Generic({}, {}: 1, default: 0)", e.as_str(), nm.as_str());
-            desc.format_into("a '{}'", nm.as_str());
+            desc.push_str("a '");
+            extern_c_raw(p, y.module, y.as_data.decl, desc);
+            desc.push_str("'");
             return;
         }
         assert(y.kind == TypeKind::TYPE_BUILTIN, "the checker admits only C field types in a header type");
@@ -7248,7 +7497,7 @@ fn header_type_checks(p: &loader::Package, m: ModuleId, items: NodeList, out: &m
         let ns = a.at_const(agg.name).as_data.name.text;
         let sname = src.slice(ns.start as usize, ns.end as usize);
         let mut ct = String::new();
-        extern_c_name(p, m, sid, &mut ct);
+        extern_c_raw(p, m, sid, &mut ct);
         out.format_into(
             "_Static_assert(sizeof({}) != 0, \"super-c: '{}' must be a complete C type\");\n",
             ct.as_str(),
@@ -7571,6 +7820,7 @@ fn cemit_assemble(
     acc: &mut SeedAcc,
     ext_incs: &String,
     gated_incs: &String,
+    xhdrs: &Vector<XHdr>,
     si_names: &Vector<String>,
     si_defs: &Vector<String>,
     si_packs: &mut Vector<mbe::WrapReq>,
@@ -7637,6 +7887,26 @@ fn cemit_assemble(
     // take it by value).
     let mut ds = DefSet::new();
     let mut fd = FwdDecls::new();
+    // The scoped extern headers (`cemit_extern_includes`) first: definition header `i` holds the
+    // headers it needs before it, header `i`'s include, its aliases and its checks, and a file
+    // includes it when its text spells one of the aliases.
+    let nx = xhdrs.len() as u32;
+    for i in 0..xhdrs.len() {
+        let mut nm = String::from_str("__scx");
+        let mut w: usize = 1000;
+        while w > 1 && i < w {
+            nm.push_str("0");
+            w /= 10;
+        }
+        nm.push_u64(i as u64);
+        let mut body = xhdrs[i].defs.clone();
+        body.push_string(&xhdrs[i].checks);
+        let d = ds.add(nm.as_str(), body.as_str(), p.core_module);
+        assert(d == i as u32, "the extern headers are the first definition headers");
+        for k in 0..xhdrs[i].names.len() {
+            fd.add_header(xhdrs[i].names[k].as_str(), d);
+        }
+    }
     // Array wrapper structs (`Mangler::ptr_wraps`): each is defined in the definition header of
     // its innermost element, after the element, and its typedef line leads that header's body
     // (the element's own members may point at it). Ordered by element, then name: the order the
@@ -7854,39 +8124,29 @@ fn cemit_assemble(
     // Every unit declares the cross-TU declarations its text spells (`XDecls`), and includes no
     // prototype header.
     let mut xd = XDecls::new();
+    for i in 0..xhdrs.len() {
+        for k in 0..xhdrs[i].names.len() {
+            xd.add_header(xhdrs[i].names[k].as_str(), i as u32);
+        }
+    }
     for m in 0..n {
         xd.add_all(ph[m].as_str(), &fd);
     }
     {
         // The forward header: fixed runtime text, extern headers, then the copies its other
-        // declarations spell. A prototype with an array declarator of an aggregate needs that
-        // type complete, and the forward header includes no definition header: such prototypes
-        // go to the extern header, which includes the definitions after the forward header.
+        // declarations spell. The forward header includes no definition header: a prototype that
+        // needs one (an array declarator of an aggregate, which C needs complete, or the alias of a
+        // scoped extern header's type) is a declaration of the units that call it (`split_protos`).
         let mut protos = String::new();
-        let mut ext = String::new();
+        let mut xp = String::new();
         let mut deps = Vector::<u32>::new();
-        split_protos(cem.extern_protos.as_str(), &mut fd, &mut incd, &mut deps, &mut protos, &mut ext);
+        split_protos(cem.extern_protos.as_str(), &mut fd, &mut incd, &mut deps, &mut protos, &mut xp);
         if cem.blk_protos.len() != 0 {
             // The pool's C-callable entry point (std::parallel::blocking, symbol pinned @export).
             protos.push_str("void __sc_blocking_run(void (*__r)(void *), void *__e);\n");
         }
-        split_protos(cem.blk_protos.as_str(), &mut fd, &mut incd, &mut deps, &mut protos, &mut ext);
-        if ext.len() != 0 {
-            let mut t = String::from_str("#ifndef SC_CEMIT_EXT_H\n#define SC_CEMIT_EXT_H\n#include \"__sc_fwd.h\"\n");
-            deps.clear();
-            fd.scan_def(ext.as_str(), NO_HOME, 0, &mut incd, &mut deps);
-            ds.sort_by_stem(&mut deps);
-            for k in 0..deps.len() {
-                def_inc(0, ds.stem[deps[k] as usize].as_str(), &mut t);
-            }
-            fd.flush_unseen(NO_HOME, &incd, &mut t);
-            for k in 0..deps.len() {
-                incd.set(deps[k] as usize, 0);
-            }
-            t.push_string(&ext);
-            t.push_str("#endif\n");
-            o.ext_h = t;
-        }
+        split_protos(cem.blk_protos.as_str(), &mut fd, &mut incd, &mut deps, &mut protos, &mut xp);
+        xd.add_all(xp.as_str(), &fd);
         let mut rest = String::new();
         rest.reserve(
             cem.dyn_defs.len() + macros_out.len() + fwd_aux.len() + protos.len() + cem.dyn_decls.len() + cem.sent_decls.len(),
@@ -7901,6 +8161,18 @@ fn cemit_assemble(
             "#ifndef SC_CEMIT_FWD_H\n#define SC_CEMIT_FWD_H\n#include \"super_rt.h\"\n#include <math.h>\n#include <pthread.h>\ntypedef struct { const uint8_t *ptr; size_t len; } SCslice;\nstatic inline void *__sc_wrap(const void *p) { return (void *)p; }\n#pragma GCC diagnostic ignored \"-Wunused-but-set-variable\"\n#pragma GCC diagnostic ignored \"-Wunused-variable\"\n#pragma GCC diagnostic ignored \"-Wunused-function\"\n#pragma GCC diagnostic ignored \"-Wunused-parameter\"\n#pragma GCC diagnostic ignored \"-Wunused-label\"\n",
         );
         fh.push_string(ext_incs);
+        // A scoped extern header a declaration or a check here names (a dyn table of a header type):
+        // every file sees it.
+        deps.clear();
+        fd.scan_def(ext_incs.as_str(), NO_HOME, 0, &mut incd, &mut deps);
+        fd.scan_def(rest.as_str(), NO_HOME, 0, &mut incd, &mut deps);
+        ds.sort_by_stem(&mut deps);
+        for k in 0..deps.len() {
+            if deps[k] < nx {
+                def_inc(0, ds.stem[deps[k] as usize].as_str(), &mut fh);
+            }
+            incd.set(deps[k] as usize, 0);
+        }
         simd_level_fn(p, &mut fh);
         fd.copy(rest.as_str(), NO_HOME, &incd, &mut fh);
         fh.push_string(&rest);
@@ -8002,6 +8274,11 @@ fn cemit_assemble(
     let tnr = TnRows::new(&cem.mg, 2 * n + 1);
     let mut pend = Vector::<u32>::new();
     let mut dv = Vector::<u32>::new();
+    // Per module: the definition headers its TU and its instance unit include (`tu_x`, `inst_x`).
+    let mut tu_dv = Vector::<Vector<u32>>::new();
+    tu_dv.resize_default(n);
+    let mut inst_dv = Vector::<Vector<u32>>::new();
+    inst_dv.resize_default(n);
     // The declarations each module TU (row t) and instance unit (row n + t) spells: its chunks, the
     // instance data heads and the C `main` wrapper. The other head text (static prototypes, the
     // asserts) names no declaration but its own `_ret` typedefs, which the definitions name too.
@@ -8089,7 +8366,6 @@ fn cemit_assemble(
                     &mut incd,
                     &xd,
                     rsel.at(n + t),
-                    o.ext_h.len() != 0,
                     src9,
                     d,
                     &tnr,
@@ -8098,6 +8374,7 @@ fn cemit_assemble(
                     &mut def_used,
                 );
                 o.inst_incs.set(t, inc);
+                inst_dv.set(t, dv.clone());
                 o.inst_heads.set(t, heads);
                 continue;
             }
@@ -8151,7 +8428,6 @@ fn cemit_assemble(
                 &mut incd,
                 &xd,
                 rsel.at(t),
-                o.ext_h.len() != 0,
                 src9,
                 d,
                 &tnr,
@@ -8160,6 +8436,7 @@ fn cemit_assemble(
                 &mut def_used,
             );
             o.tu_incs.set(t, inc);
+            tu_dv.set(t, dv.clone());
             o.tu_heads.set(t, heads);
             o.tu_tail.set(t, tail);
         }
@@ -8168,6 +8445,9 @@ fn cemit_assemble(
     // value (the by-value graph is acyclic, so no header needs its own include), its typedef
     // line, copies of the other declarations it spells, the body, its layout checks.
     let mut deps = Vector::<u32>::new();
+    // Per definition header: the definition headers it includes (`x_reach`).
+    let mut ddeps = Vector::<Vector<u32>>::new();
+    ddeps.resize_default(nd);
     // The used entries' vector structs: lazy packs a used entry spells by value, then the 16-byte
     // chunk pack a used wide one names (`Mangler::vec_def`), which names no pack.
     let ne = nd - si0;
@@ -8201,6 +8481,16 @@ fn cemit_assemble(
         let body = ds.body.at(d);
         deps.clear();
         fd.scan_def(body, d as u32, pick(d >= si0, 2u32, 1u32), &mut incd, &mut deps);
+        ddeps.set(d, deps.clone());
+        if d as u32 < nx {
+            for k in 0..xhdrs[d].pre.len() {
+                let x = xhdrs[d].pre[k];
+                if incd[x as usize] == 0 {
+                    incd.set(x as usize, 1);
+                    deps.push(x);
+                }
+            }
+        }
         ds.sort_by_stem(&mut deps);
         let mut t = String::new();
         t.reserve(body.len() + 64 * deps.len() + 128);
@@ -8211,6 +8501,10 @@ fn cemit_assemble(
             t.push_str("#include \"");
             t.push_string(&ds.stem[x]);
             t.push_str(".h\"\n");
+        }
+        // A scoped header after the headers it needs.
+        if d as u32 < nx {
+            t.push_string(&xhdrs[d].line);
         }
         if tf[d] != 0 {
             t.push_str(fd.seg.at((tf[d] - 1) as usize));
@@ -8225,6 +8519,19 @@ fn cemit_assemble(
         o.defs_h.push(t);
         o.defs_own.push(ds.body.own[d]);
     }
+    let xr = x_reach(nx, &ddeps);
+    for t in 0..n {
+        o.tu_x.set(t, x_any(&xr, &tu_dv[t]));
+        o.inst_x.set(t, x_any(&xr, &inst_dv[t]));
+    }
+    // The registry TU includes every scoped extern header that has checks, so they run once also
+    // where no unit uses the header's items (a constant that folds to its value).
+    let mut xall = String::new();
+    for d in 0..nx {
+        if xhdrs[d as usize].checks.len() != 0 {
+            def_inc(0, ds.stem[d as usize].as_str(), &mut xall);
+        }
+    }
     o.defs_stem = replace(&mut ds.stem, Vector::<String>::new());
     for t in 0..n {
         o.tus.set(t, replace(acc.ch.bufs.index_mut(t), String::new()));
@@ -8232,7 +8539,7 @@ fn cemit_assemble(
     o.inst_c = replace(acc.ch.bufs.index_mut(n), String::new());
     // The registry TU: ZST sentinels and the reflection registry (sorted roots, one pointer
     // table, one registration entry point; lookups never depend on constructor order).
-    if cem.sent_defs.len() != 0 || reg_names.len() != 0 {
+    if cem.sent_defs.len() != 0 || reg_names.len() != 0 || xall.len() != 0 {
         let mut rg = String::new();
         rg.push_string(&cem.sent_defs);
         if reg_names.len() != 0 {
@@ -8271,6 +8578,7 @@ fn cemit_assemble(
             );
         }
         let mut rc = String::from_str("#include \"__sc_fwd.h\"\n");
+        rc.push_string(&xall);
         fd.copy(rg.as_str(), NO_HOME, &incd, &mut rc);
         rc.push_string(&rg);
         o.registry_c = rc;
@@ -8295,6 +8603,7 @@ const ANY_HOME: u32 = 0xFFFFFFFE;
 struct FwdDecls {
     pub seg: Segs, // declaration texts
     pub home: Vector<u32>, // per declaration: its definition header, NO_HOME or ANY_HOME
+    pub always: Vector<bool>, // per declaration: an alias of a scoped extern header, whose file every use includes
     keys: Map<u64, u32>, // name FNV -> declaration index
     filt: Vector<u64>, // 65536-bit filter over the name FNVs: most identifiers stop here
     stamp: Vector<u32>, // per declaration: the serial of the last header that took it
@@ -8309,6 +8618,7 @@ extend FwdDecls {
         return FwdDecls {
             seg: Segs::new(),
             home: Vector::<u32>::new(),
+            always: Vector::<bool>::new(),
             keys: Map::<u64, u32>::new(),
             filt: filt,
             stamp: Vector::<u32>::new(),
@@ -8329,6 +8639,25 @@ extend FwdDecls {
         self.seg.txt.push_str(text);
         self.seg.close(0);
         self.home.push(home);
+        self.always.push(false);
+        self.stamp.push(0);
+        return true;
+    }
+
+    /// Record alias token `name` of the scoped extern header of definition header `home`
+    /// (`mbe::x_alias`): a file that spells it includes that header (`scan`). False when `name`
+    /// already has a declaration.
+    fn add_header(self: &mut Self, name: str, home: u32) bool {
+        let h = nkey(name.hash());
+        if self.keys.contains_key(&h) {
+            return false;
+        }
+        self.keys.insert(h, self.seg.end.len() as u32);
+        let w = (h & 0xFFFF) as usize / 64;
+        self.filt.set(w, self.filt[w] | 1u64 << (h & 63));
+        self.seg.push_empty(0);
+        self.home.push(home);
+        self.always.push(true);
         self.stamp.push(0);
         return true;
     }
@@ -8381,8 +8710,8 @@ extend FwdDecls {
     /// there: the element type of every array declarator (`T x[2]`, `T (*p)[2]`, also in a
     /// function-pointer parameter) and a declared name followed by a declarator name rather than
     /// `*` or `(` within `by_val` levels of parentheses: none, 1 for a definition body (outside
-    /// parentheses), 2 for a function definition (its parameters too). `flush_unseen` then writes
-    /// the copies the file still needs.
+    /// parentheses), 2 for a function definition (its parameters too); and the scoped extern header
+    /// of every alias (`add_header`). `flush_unseen` then writes the copies the file still needs.
     fn scan_def(self: &mut Self, text: str, own: u32, by_val: u32, inc: &mut Vector<u8>, deps: &mut Vector<u32>) {
         self.begin();
         self.scan(text, own, by_val, inc, deps);
@@ -8426,7 +8755,10 @@ extend FwdDecls {
                 while j < n && text.byte_at(j) == b' ' {
                     j += 1;
                 }
-                if depth < by_val && j < n && c_ident_byte(text.byte_at(j)) || arr_declarator(text, j) {
+                if self.always[k as usize] || depth < by_val && j < n && c_ident_byte(text.byte_at(j)) || arr_declarator(
+                    text,
+                    j,
+                ) {
                     inc.set(home as usize, 1);
                     deps.push(home);
                 }
@@ -8673,7 +9005,6 @@ fn unit_incs(
     incd: &mut Vector<u8>,
     xd: &XDecls,
     sel: &Vector<u32>,
-    ext: bool,
     src: u64,
     d: u32,
     rows: &TnRows,
@@ -8683,9 +9014,6 @@ fn unit_incs(
 ) String {
     let mut inc = String::new();
     inc_line(d, "__sc_fwd", ".h", &mut inc);
-    if ext {
-        inc_line(d, "__sc_ext", ".h", &mut inc);
-    }
     // The row holds repeats: `incd` and the declaration stamps drop them without a sort.
     pend.clear();
     dv.clear();
@@ -8699,7 +9027,7 @@ fn unit_incs(
                 continue;
             }
             let home = fd.home[dk as usize];
-            if (key & 1) == 0 || home >= ANY_HOME {
+            if (key & 1) == 0 && !fd.always[dk as usize] || home >= ANY_HOME {
                 pend.push(dk);
             } else if incd[home as usize] == 0 {
                 incd.set(home as usize, 1);
@@ -8713,6 +9041,16 @@ fn unit_incs(
     let mut tdefs = String::new();
     let mut decls = String::new();
     for k in 0..sel.len() {
+        let xh = xd.hdr[sel[k] as usize];
+        if xh != NO_HOME {
+            // An alias of a scoped extern header: the unit includes the header's definition header.
+            if incd[xh as usize] == 0 {
+                incd.set(xh as usize, 1);
+                used.set(xh as usize, 1);
+                dv.push(xh);
+            }
+            continue;
+        }
         let dt = xd.seg.at(sel[k] as usize);
         if xd.tdef[sel[k] as usize] {
             tdefs.push_str(dt);
@@ -8750,6 +9088,7 @@ fn unit_incs(
 struct XDecls {
     pub seg: Segs, // declaration texts, in prototype-header order
     pub tdef: Vector<bool>, // per declaration: a `_ret` typedef
+    pub hdr: Vector<u32>, // per declaration: the definition header of a scoped extern header's alias, else NO_HOME
     keys: Map<u64, u32>, // name FNV -> declaration
     filt: Vector<u64>, // 65536-bit filter over the name FNVs: most identifiers stop here
 }
@@ -8758,7 +9097,28 @@ extend XDecls {
     fn new() XDecls {
         let mut filt = Vector::<u64>::new();
         filt.resize_default(1024);
-        return XDecls { seg: Segs::new(), tdef: Vector::<bool>::new(), keys: Map::<u64, u32>::new(), filt: filt };
+        return XDecls {
+            seg: Segs::new(),
+            tdef: Vector::<bool>::new(),
+            hdr: Vector::<u32>::new(),
+            keys: Map::<u64, u32>::new(),
+            filt: filt,
+        };
+    }
+
+    // Record alias token `name` of the scoped extern header of definition header `d`: a unit that
+    // spells it includes that header. A name recorded already keeps its entry.
+    fn add_header(self: &mut Self, name: str, d: u32) {
+        let h = nkey(name.hash());
+        if self.keys.contains_key(&h) {
+            return;
+        }
+        self.keys.insert(h, self.seg.end.len() as u32);
+        let w = (h & 0xFFFF) as usize / 64;
+        self.filt.set(w, self.filt[w] | 1u64 << (h & 63));
+        self.seg.push_empty(0);
+        self.tdef.push(false);
+        self.hdr.push(d);
     }
 
     // Record each declaration of prototype header body `text` (one per line; a line that does not end
@@ -8794,6 +9154,7 @@ extend XDecls {
                 self.seg.txt.push_str(dl);
                 self.seg.close(0);
                 self.tdef.push(dl.starts_with("typedef "));
+                self.hdr.push(NO_HOME);
             }
             a = end;
             b = end;
@@ -9118,15 +9479,16 @@ extend TnRows {
     }
 }
 
-// Append each prototype line of `text` to `ext` when an array declarator in it needs a definition
-// header (`FwdDecls::scan_def`), else to `fwd`.
+// Append each prototype line of `text` to `unit` when it needs a definition header
+// (`FwdDecls::scan_def`: an array declarator's element, a scoped extern header's alias), else to
+// `fwd`. A unit that calls one declares it (`XDecls`) after the headers it needs (`unit_incs`).
 fn split_protos(
     text: str,
     fd: &mut FwdDecls,
     incd: &mut Vector<u8>,
     deps: &mut Vector<u32>,
     fwd: &mut String,
-    ext: &mut String,
+    unit: &mut String,
 ) {
     let mut a: usize = 0;
     while a < text.len() {
@@ -9143,7 +9505,15 @@ fn split_protos(
         if deps.len() == 0 {
             fwd.push_str(line);
         } else {
-            ext.push_str(line);
+            // A unit declaration (`XDecls`) keys a function by its name: `decl_name` reads an
+            // `extern` line as an object's, and C needs no `extern` on a prototype.
+            unit.push_str(
+                if line.starts_with("extern ") {
+                    line.slice(7, line.len());
+                } else {
+                    line;
+                },
+            );
         }
         a = b + 1;
     }
@@ -9269,6 +9639,12 @@ extend Segs {
             self.own.push(own);
             self.end.push(self.txt.len() as u32);
         }
+    }
+
+    // An empty segment, which `close` would not record.
+    fn push_empty(self: &mut Self, own: ModuleId) {
+        self.own.push(own);
+        self.end.push(self.txt.len() as u32);
     }
 
     const fn at(self: &Self, i: usize) str {
@@ -9451,7 +9827,8 @@ const PCH_UNITS: usize = 4;
 // of about SHARD_TARGET bytes: a header those units share is parsed once per pack. The count is a
 // shard count of all such bytes (`shard_policy`, from `prev`, the previous build's), and a unit's pack
 // is the hash of its file stem modulo the count: an edit, or a unit that crosses the limit, changes
-// its own pack only. Fewer than two such units, or `alone` (SC_UNITY_MAX=0): every unit compiles alone.
+// its own pack only. A unit that includes a scoped extern header (`tu_x`, `inst_x`) compiles alone. Fewer than two
+// such units, or `alone` (SC_UNITY_MAX=0): every unit compiles alone.
 fn pack_plan(
     p: &loader::Package,
     co: &CemitOut,
@@ -9472,18 +9849,20 @@ fn pack_plan(
     if !unity && alone {
         return 0;
     }
+    // The registry includes the scoped extern headers but is the last unit its pack includes: no member
+    // after it sees the headers' macros.
     let small_reg = co.registry_c.len() != 0 && pack_small(unity, 1, co.registry_c.len() as u64);
     let mut bytes: u64 = pick(small_reg, co.registry_c.len() as u64, 0);
     let mut units: usize = small_reg as usize;
     for k in 0..lm.len() {
         let t = lm[k] as usize;
-        let s9 = pack_small(unity, co.tu_heads.at(t).len(), tsz[t]);
+        let s9 = pack_small(unity, co.tu_heads.at(t).len(), tsz[t]) && !co.tu_x[t];
         bytes += pick(s9, tsz[t], 0);
         units += s9 as usize;
     }
     for k in 0..iq.len() {
         let q = iq[k] as usize;
-        let s9 = pack_small(unity, co.inst_heads.at(q).len(), isz[q]);
+        let s9 = pack_small(unity, co.inst_heads.at(q).len(), isz[q]) && !co.inst_x[q];
         bytes += pick(s9, isz[q], 0);
         units += s9 as usize;
     }
@@ -9497,13 +9876,13 @@ fn pack_plan(
     };
     for k in 0..lm.len() {
         let t = lm[k] as usize;
-        if pack_small(unity, co.tu_heads.at(t).len(), tsz[t]) {
+        if pack_small(unity, co.tu_heads.at(t).len(), tsz[t]) && !co.tu_x[t] {
             tu_pk.set(t, (p.modules[t].path.as_str().hash() % np as u64) as u32 + 1);
         }
     }
     for k in 0..iq.len() {
         let q = iq[k] as usize;
-        if pack_small(unity, co.inst_heads.at(q).len(), isz[q]) {
+        if pack_small(unity, co.inst_heads.at(q).len(), isz[q]) && !co.inst_x[q] {
             in_pk.set(q, (format("{}__inst", p.modules[q].path.as_str()).as_str().hash() % np as u64) as u32 + 1);
         }
     }
@@ -9511,6 +9890,41 @@ fn pack_plan(
         *reg_pk = ("__sc_registry".hash() % np as u64) as u32 + 1;
     }
     return np;
+}
+
+// Per definition header (`ddeps` its includes): whether it includes a scoped extern header (the
+// first `nx`), directly or through another. The includes are acyclic, so each pass settles at least
+// the headers one include deeper: at most one pass per header, and one more to see no change.
+fn x_reach(nx: u32, ddeps: &Vector<Vector<u32>>) Vector<bool> {
+    let nd = ddeps.len();
+    let mut r = Vector::<bool>::new();
+    r.resize_default(nd);
+    for d in 0..nx as usize {
+        r.set(d, true);
+    }
+    for _pass in 0..nd + 1 {
+        let mut changed = false;
+        for d in 0..nd {
+            if !r[d] && x_any(&r, &ddeps[d]) {
+                r.set(d, true);
+                changed = true;
+            }
+        }
+        if !changed {
+            return r;
+        }
+    }
+    panic("the definition headers include each other in a cycle");
+}
+
+// Whether one of definition headers `ds` reaches a scoped extern header (`x_reach`).
+fn x_any(r: &Vector<bool>, ds: &Vector<u32>) bool {
+    for k in 0..ds.len() {
+        if r[ds[k] as usize] {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Whether a unit of `nsh` shards and `bytes` bytes of C joins a pack (`pack_plan`).
@@ -12406,12 +12820,6 @@ pub fn run_package(
         hts.push(co.fwd_h.as_str().ptr() as usize);
         hls.push(co.fwd_h.len());
         hos.push(0xFFFF);
-        if co.ext_h.len() != 0 {
-            hps.push(build_out_path(root, "__sc_ext", ".h"));
-            hts.push(co.ext_h.as_str().ptr() as usize);
-            hls.push(co.ext_h.len());
-            hos.push(0xFFFF);
-        }
         for d in 0..co.defs_h.len() {
             if co.defs_h.at(d).len() == 0 {
                 continue; // an entry's definition no unit calls

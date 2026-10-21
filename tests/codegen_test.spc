@@ -401,6 +401,29 @@ fn main() i32 {
     h::expect_exit("aligned statics", src, 0);
 }
 
+// An all-zero member or element of a static is left out of its initializer, which C zero-fills: a nested
+// `{0}` for an aggregate whose first member is an aggregate is an error under gcc's -Wmissing-braces. The
+// element after a left-out one names its index.
+const ZERO_MEMBERS: str = M"(struct In { pub arr: [i32; 2], pub n: i32 }
+struct Out { pub i: In, pub r: i32 }
+union U { pub i: In, pub r: i32 }
+static mut G: Out = Out { i: In { arr: [0, 0], n: 0 }, r: 1 };
+static mut H: [In; 3] = [In { arr: [0, 0], n: 0 }, In { arr: [0, 0], n: 2 }, In { arr: [0, 0], n: 3 }];
+static mut Z: U = U { i: In { arr: [0, 0], n: 0 } };
+fn main() i32 {
+    return unsafe (G.r + H[0].n + H[1].n + H[2].n + G.i.n + G.i.arr[1] + Z.i.n) - 6;
+}
+)";
+
+@test
+fn static_initializers_leave_out_zero_members() {
+    let c = h::compile_c(ZERO_MEMBERS);
+    assert(c.ok(), "the program compiles");
+    assert(c.code_has("Out G = { .r = 1 };"), "an all-zero field");
+    assert(c.code_has("In H[3] = { [1] = { .n = 2 }, { .n = 3 } };"), "an all-zero element");
+    assert(c.code_has("U Z = {0};"), "an all-zero union");
+}
+
 @test
 fn attributes() {
     h::expect_c("noreturn", "@c.noreturn\nfn die() {}\nfn main() i32 { return 0; }\n", "_Noreturn");
@@ -483,11 +506,20 @@ fn lifetimes_are_erased() {
     h::expect_c_absent("the lifetime never appears in the mangled name", MIX, "Pair__a");
 }
 
-// Prelude `likely`/`unlikely`: value-semantic identity hints, const-evaluable; the inliner removes
-// the calls, so the emitted C carries no hint (std/core.spc).
+// Prelude `likely`/`unlikely`: they return their condition (also in a constant), and the branch that
+// tests one carries the hint to the C compiler (std/core.spc).
+const HINTS: str<'static> = "fn pick(n: i32) i32 { if unlikely(n < 0) { return -1; } if likely(n < 100) { return 1; } return 2; }\nfn main() i32 { if pick(-5) != -1 || pick(7) != 1 || pick(500) != 2 { return 1; } const F: bool = likely(true); if !F { return 1; } return 0; }\n";
+
 fn branch_hints(b: &mut h::ExitBatch) {
-    let SRC: str = "fn pick(n: i32) i32 { if unlikely(n < 0) { return -1; } if likely(n < 100) { return 1; } return 2; }\nfn main() i32 { if pick(-5) != -1 || pick(7) != 1 || pick(500) != 2 { return 1; } const F: bool = likely(true); if !F { return 1; } return 0; }\n";
-    b.add("branch hints keep value semantics", SRC, 0);
+    b.add("branch hints keep value semantics", HINTS, 0);
+}
+
+@test
+fn branch_hints_reach_the_branch() {
+    let c = h::compile_c(HINTS);
+    assert(c.ok(), "the hinted program compiles");
+    assert(c.code_has("if (__builtin_expect((n < 0LL), 0))"), "unlikely tests its branch as usually false");
+    assert(c.code_has("if (__builtin_expect((n < 100LL), 1))"), "likely tests its branch as usually true");
 }
 
 // An integer match lowers to a native C `switch` (each value of a range piece one case label), so the

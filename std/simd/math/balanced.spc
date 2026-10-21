@@ -238,7 +238,7 @@ pub fn hypot<T: Lane, const N: usize>(x: Simd<T, N>, y: Simd<T, N>) Simd<T, N> {
 fn reduce_pio2<T: Lane, const N: usize>(x: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     let kc = T::kc();
     let big = x.abs().greater_equal(Simd::splat(kc.cw_max));
-    if big.any() {
+    if unlikely(big.any()) {
         // Its own path, as `rem_pio2`'s.
         let k = choose(big, sp::<T, N>(0.0), (x * kc.two_over_pi).round_even());
         let fin = x.is_finite();

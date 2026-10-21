@@ -1,7 +1,7 @@
 // The concurrency stack, end to end, in one program: what CI runs on every platform to prove the runtime
 // works there and not only that it compiles. It is deliberately free of anything POSIX-only (no reactor, no
 // sockets), because its whole job is to be the same test on Linux, macOS and Windows: the three legs of
-// `ffi/sc_rt.c` are OS threads, locks and context switches, and every one of them is exercised below.
+// `ffi/sc_runtime.spc` are OS threads, locks and context switches, and every one of them is exercised below.
 //
 // Build and run it with the compiler under test:
 //     super-c build ci/parallel_smoke.spc -o smoke && ./smoke

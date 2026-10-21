@@ -105,8 +105,8 @@ fn immintrin_memory_bindings_state_their_range() {
             } else {
                 16;
             };
-            let want = format("@c.{}(p, {})", pick(l.contains("load"), "reads", "writes"), bytes);
-            let ok = pick(lanes, prev.as_str().contains("@c.lane_access"), prev.as_str().contains(want.as_str()));
+            let want = format("@{}(p, {})", pick(l.contains("load"), "reads", "writes"), bytes);
+            let ok = pick(lanes, prev.as_str().contains("@lane_access"), prev.as_str().contains(want.as_str()));
             if !ok {
                 eprintln("no memory annotation: {}", l);
             }

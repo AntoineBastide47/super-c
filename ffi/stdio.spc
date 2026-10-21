@@ -6,12 +6,14 @@
 // helper functions. Calling the raw bindings requires `unsafe` except `getchar`/`putchar`; the `File`
 // methods and the wrapper functions do not.
 
+import stdlib;
+
 extern "C" {
     /// A C stream.
     pub type FILE;
 
     // Open / close / flush.
-    @c.import("fopen")
+    @import("fopen")
     fn c_fopen(path: *const char, mode: *const char) *mut FILE;
     /// Reopen `stream` on `path`; the stream, or null (the stream is closed) on failure.
     pub fn freopen(path: *const char, mode: *const char, stream: *mut FILE) *mut FILE;
@@ -45,9 +47,9 @@ extern "C" {
     pub fn perror(prefix: *const char) void;
 
     /// Positioning and status.
-    pub fn fseek(stream: *mut FILE, offset: i64, whence: i32) i32;
+    pub fn fseek(stream: *mut FILE, offset: stdlib::c_long, whence: i32) i32;
     /// Current position in bytes, or -1.
-    pub fn ftell(stream: *mut FILE) i64;
+    pub fn ftell(stream: *mut FILE) stdlib::c_long;
     /// Seek to the start and clear the error flag.
     pub fn rewind(stream: *mut FILE) void;
     /// Nonzero once a read hit end of file.
@@ -74,13 +76,31 @@ extern "C" {
     pub fn scanf(fmt: *const char, ...) i32;
     /// Formatted read from `stream`; the number of conversions assigned, or EOF.
     pub fn fscanf(stream: *mut FILE, fmt: *const char, ...) i32;
+}
 
-    /// Runtime helpers for C's standard stream macros/globals.
-    pub fn __sc_stdin() *mut FILE;
-    /// The C stdout stream (a shim: `stdout` is a macro in C).
-    pub fn __sc_stdout() *mut FILE;
-    /// The C stderr stream.
-    pub fn __sc_stderr() *mut FILE;
+// The standard streams: `stdin`, `stdout` and `stderr` are macros over a per-target C object.
+@platform(macos | ios)
+extern "C" "stdio.h" {
+    @import("__stdinp")
+    static mut c_stdin: *mut FILE;
+    @import("__stdoutp")
+    static mut c_stdout: *mut FILE;
+    @import("__stderrp")
+    static mut c_stderr: *mut FILE;
+}
+@platform(linux | android | wasm)
+extern "C" "stdio.h" {
+    @import("stdin")
+    static mut c_stdin: *mut FILE;
+    @import("stdout")
+    static mut c_stdout: *mut FILE;
+    @import("stderr")
+    static mut c_stderr: *mut FILE;
+}
+@platform(windows)
+extern "C" "stdio.h" {
+    /// The UCRT's standard stream `i`: 0 stdin, 1 stdout, 2 stderr.
+    fn __acrt_iob_func(i: u32) *mut FILE;
 }
 
 /// `fseek` origins.
@@ -155,14 +175,32 @@ pub fn fopen(path: str, mode: str) *mut FILE {
 }
 
 /// The C stdin stream.
+@platform(!windows)
 pub fn stdin() *mut FILE {
-    return unsafe __sc_stdin();
+    return unsafe c_stdin;
 }
 /// The C stdout stream.
+@platform(!windows)
 pub fn stdout() *mut FILE {
-    return unsafe __sc_stdout();
+    return unsafe c_stdout;
 }
 /// The C stderr stream.
+@platform(!windows)
 pub fn stderr() *mut FILE {
-    return unsafe __sc_stderr();
+    return unsafe c_stderr;
+}
+/// The C stdin stream.
+@platform(windows)
+pub fn stdin() *mut FILE {
+    return unsafe __acrt_iob_func(0);
+}
+/// The C stdout stream.
+@platform(windows)
+pub fn stdout() *mut FILE {
+    return unsafe __acrt_iob_func(1);
+}
+/// The C stderr stream.
+@platform(windows)
+pub fn stderr() *mut FILE {
+    return unsafe __acrt_iob_func(2);
 }

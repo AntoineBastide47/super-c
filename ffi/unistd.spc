@@ -5,11 +5,45 @@
 // one of the standard headers the runtime prologue carries, so without this the declarations are missing
 // and every call compiles as an implicit declaration (an error under C99 and later).
 
+@platform(!windows)
 extern "C" "unistd.h" {
     /// read(2): bytes read, 0 at EOF, -1 and errno.
     pub fn read(fd: i32, buf: *mut void, count: usize) isize;
     /// write(2): bytes written (may be short), -1 and errno.
     pub fn write(fd: i32, buf: *const void, count: usize) isize;
+    /// Working directory into `buf`; `buf`, or null when `size` is too small.
+    pub fn getcwd(buf: *mut char, size: usize) *mut char;
+}
+
+// The Windows C runtime counts in `int` and `unsigned int`: a larger request reads or writes less, as
+// a short transfer may.
+@platform(windows)
+extern "C" "unistd.h" {
+    @import("read")
+    fn c_read(fd: i32, buf: *mut void, count: u32) i32;
+    @import("write")
+    fn c_write(fd: i32, buf: *const void, count: u32) i32;
+    @import("getcwd")
+    fn c_getcwd(buf: *mut char, size: i32) *mut char;
+}
+
+/// read(2): bytes read, 0 at EOF, -1 and errno.
+@platform(windows)
+pub unsafe fn read(fd: i32, buf: *mut void, count: usize) isize {
+    return (unsafe c_read(fd, buf, count.min(0x7FFFFFFF) as u32)) as isize;
+}
+/// write(2): bytes written (may be short), -1 and errno.
+@platform(windows)
+pub unsafe fn write(fd: i32, buf: *const void, count: usize) isize {
+    return (unsafe c_write(fd, buf, count.min(0x7FFFFFFF) as u32)) as isize;
+}
+/// Working directory into `buf`; `buf`, or null when `size` is too small.
+@platform(windows)
+pub unsafe fn getcwd(buf: *mut char, size: usize) *mut char {
+    return unsafe c_getcwd(buf, size.min(0x7FFFFFFF) as i32);
+}
+
+extern "C" "unistd.h" {
     /// close(2); 0 or -1 and errno.
     pub fn close(fd: i32) i32;
     /// Flush this file's writes all the way to the device and wait for it. The blocking syscall that
@@ -35,8 +69,6 @@ extern "C" "unistd.h" {
 
     /// Change the working directory; 0 or -1.
     pub fn chdir(path: *const char) i32;
-    /// Working directory into `buf`; `buf`, or null when `size` is too small.
-    pub fn getcwd(buf: *mut char, size: usize) *mut char;
     /// Sleep whole seconds; the seconds left if interrupted.
     @unsafe(safe)
     pub fn sleep(seconds: u32) u32;

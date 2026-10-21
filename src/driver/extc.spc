@@ -70,7 +70,7 @@ fn ext_c_wrap(
     // The wrapper sits at the tree's root.
     let inc = include_name(unsafe str::from_cstr(rsl), loader::real_path_of(root).as_str());
     let text = format(
-        "/* external C source pulled into the build -- generated, do not edit */\n#define SC_RT_LK_STATS 5\n#include \"{}\"\n",
+        "/* external C source pulled into the build -- generated, do not edit */\n#include \"{}\"\n",
         inc.as_str(),
     );
     let rc = publish_file(&mut path, text.as_str());

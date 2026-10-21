@@ -2,6 +2,15 @@
 // shares (super_rt.h) and the leak-tracker implementation TU (super_rt.c). Emission-agnostic:
 // the driver writes them verbatim next to whatever backend produced the code.
 
+/// Whether `super_rt.h` includes header `h` (spelled as an `extern "C"` block names it), so every
+/// generated file sees it already.
+pub fn rt_has_header(h: str) bool {
+    let mut line = String::from_str("#include <");
+    line.push_str(h);
+    line.push_str(">\n");
+    return unsafe str::from_cstr(super_rt_includes()).contains(line.as_str());
+}
+
 /// The full C standard library include block the generated runtime pulls in, emitted verbatim into
 /// the shared super_rt.h together with the atomic shims, the
 /// panic/bounds helpers, and the leak-tracker macros that interpose malloc/realloc/free call sites.
@@ -125,6 +134,14 @@ _Noreturn void __sc_trap_order(void);
 #else
 #define SC_TGT_A64(c, g) g
 #endif
+/* A static in a named section (`@unsafe(link_section)`) is the section's entry: clang's AddressSanitizer
+   would pad it with a redzone, which in an init array is an entry with no target, a link error. GCC does
+   not instrument such a static and rejects the attribute on a variable. */
+#ifdef __clang__
+#define SC_SECTION_DATA __attribute__((no_sanitize("address")))
+#else
+#define SC_SECTION_DATA
+#endif
 #define SC_AT(T,S) \
 static inline T __sc_atomic_load_##S(const T*p,int mo){return __atomic_load_n(p,SC_MO_LD(mo));} \
 static inline void __sc_atomic_store_##S(T*p,T v,int mo){__atomic_store_n(p,v,SC_MO_ST(mo));} \
@@ -150,10 +167,6 @@ static inline void __sc_atomic_fence(int mo){__atomic_thread_fence(SC_MO_RMW(mo)
 #undef SC_MO_CAS
 #pragma GCC diagnostic pop
 #endif
-static inline __attribute__((unused)) FILE* __sc_stdin(void){return stdin;}
-static inline __attribute__((unused)) FILE* __sc_stdout(void){return stdout;}
-static inline __attribute__((unused)) FILE* __sc_stderr(void){return stderr;}
-static inline __attribute__((unused)) int* __sc_errno_location(void){return &errno;}
 /* Task attribution: a coroutine runtime stores the running task's id here, so a panic names the task it
    happened in rather than just the process. Zero on a plain thread. */
 extern _Thread_local uint64_t __sc_task_id;
@@ -299,14 +312,9 @@ void sc_lk_bt_resume(void);
 #define calloc(__n, __m) sc_lk_calloc(__n, __m)
 #define realloc(__p, __n) sc_lk_realloc(__p, __n)
 #define free(__p) sc_lk_free(__p)
-/* std/alloc.h routes its over-aligned blocks through sc_lk_aligned_* when this is defined. */
-#define SC_LK_ALIGNED 1
 #endif
 /* The bit counts, wrapping arithmetic and 128-bit fast paths std binds without a header: the C
-   backend's primitives. Each block keeps the include guard of the std header it replaces (bits.h,
-   int128.h, float128.h), so a std that still includes those headers compiles against this runtime. */
-#ifndef SC_BITS_H
-#define SC_BITS_H
+   backend's primitives. */
 /* Bit counts for the built-in integer methods in core.spc (`trailing_zeros`, `leading_zeros`,
    `count_ones`). The GCC/Clang builtins lower to the target's instruction (x86 tzcnt/lzcnt/popcnt or a
    short sequence, aarch64 rbit+clz/cnt, wasm i64.ctz/i64.clz/i64.popcnt). The builtins are undefined
@@ -334,9 +342,6 @@ static inline uint64_t sc_wshr64(uint64_t sc_a, uint32_t sc_n) { return sc_a >> 
 static inline int64_t sc_wsar64(int64_t sc_a, uint32_t sc_n) { return sc_a >> sc_n; }
 static inline bool sc_mulo_u64(uint64_t sc_a, uint64_t sc_b) { uint64_t sc_r; return __builtin_mul_overflow(sc_a, sc_b, &sc_r); }
 static inline bool sc_mulo_i64(int64_t sc_a, int64_t sc_b) { int64_t sc_r; return __builtin_mul_overflow(sc_a, sc_b, &sc_r); }
-#endif
-#ifndef SC_INT128_H
-#define SC_INT128_H
 /* Native 128-bit fast path for std's UInt<128>/Int<128> (see int.spc). Where the C compiler building
    the emitted code has a 128-bit integer type, sc_has_i128() folds to 1 and these replace the limb
    loops; where it does not, it folds to 0, the limb code stands, and the stubs are never reached.
@@ -425,9 +430,6 @@ static inline void sc_int_div_overflow(const uint8_t *sc_m) { __sc_panic((const 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
 #endif
-#endif
-#ifndef SC_FLOAT128_H
-#define SC_FLOAT128_H
 /* Native binary128 fast path for std's f128 (`Float<15, 112>`, see float.spc). Where the C compiler
    building the emitted code has an IEEE binary128 type (`__float128`, or a `long double` with a
    113-bit significand), sc_has_f128() folds to 1 and these replace the limb code for add, multiply
@@ -492,7 +494,6 @@ static inline void sc_f128_div(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, u
 #endif
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic pop
-#endif
 #endif
 )".ptr() as *const char;
 }

@@ -544,7 +544,7 @@ extern "C" "native.h" {      // native.c next to it is compiled into the build
 ```
 
 * `@c.source("impl.c")` names a C file stored somewhere else.
-* `@c.link("m")` links a library (a value that starts with `-` is passed as is).
+* `@link("m")` links a library (a value that starts with `-` is passed as is).
 * Link flags are collected in `build/<profile>/raw/__ldflags`, one per line, and applied automatically.
 * The bundled `math`, `pthread` and `dlfcn` modules already declare their libraries, so importing
   them is enough.
@@ -572,24 +572,25 @@ fn format(buf: *mut char, n: usize, fmt: *const char, ...) i32 {
 
 ### Attributes
 
-`@c.*` attributes go before an item (and before `pub`). They become C keywords or GNU
-`__attribute__`s:
+C-facing attributes go before an item (and before `pub`). They become C keywords or GNU
+`__attribute__`s. The older `@c.` spelling (`@c.noreturn`) is still accepted; only `@c.source` keeps
+the prefix:
 
 ```superc
-@c.noreturn
+@noreturn
 fn panic() { /* ... */ }
 
-@c.packed
+@packed
 struct Header { pub magic: u32, pub version: u16 }
 
-@c.align(64)
+@align(64)
 struct CacheLine { pub data: [u8; 64] }
 
-@c.export("superc_init")     // use exactly this C symbol name
+@export("superc_init")     // use exactly this C symbol name
 pub fn init() i32 { return 0; }
 ```
 
-Supported: `inline`, `always_inline`, `noinline`, `noreturn`, `align(N)`, `packed`, `export("sym")`,
+Supported: `inline`, `always_inline`, `noinline`, `cold`, `noreturn`, `align(N)`, `packed`, `export("sym")`,
 `import("sym")`, `used`, `unused`. `export` and `import` fix a function's C name.
 `@emit_macro` on a generic struct or enum also writes it as a C macro, for use from plain C.
 

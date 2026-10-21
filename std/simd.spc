@@ -8,7 +8,7 @@
 
 /// `N` lanes of `T`: `N` is a power of two from 2 to 64, and the vector is at most 512 bits wide. A
 /// vector is `Copy`. It aligns to `max(alignof(T), min(sizeof(T) * N, 16))` and has no C ABI: an
-/// `extern "C"` or `@c.export` signature passes `[T; N]` instead.
+/// `extern "C"` or `@export` signature passes `[T; N]` instead.
 pub struct Simd<T: SimdElement, const N: usize> {
     lanes: [T; N],
 }

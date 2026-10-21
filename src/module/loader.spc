@@ -20,6 +20,7 @@ import ir::cpu_features as cf;
 import ir::recursion as recur;
 import utils::persist as *;
 import driver::util as dutil;
+import driver::rt_c as rtc;
 
 /// Number of nominal builtin types; sizes Package.builtin_decls. Pinned to BuiltinType::BT_COUNT.
 pub const BT_COUNT_N: usize = BuiltinType::BT_COUNT as usize;
@@ -247,6 +248,9 @@ pub struct Package {
     /// The emission's inline-candidate store (`ir::inline::InlineStore`), set for the emission's
     /// lifetime by `cemit_package`; null outside it.
     pub inl_store: *const void,
+    /// The items of the extern blocks whose header is scoped, as `module << 32 | node`
+    /// (`scope_extern_items`); empty outside an emission.
+    pub xscoped: Set<u64>,
     /// Compiler-stage parallelism: worker count for the parallel frontiers (0/1 = serial). Set by
     /// the driver from --jobs before run_package; the parallel cc window reads its own copy.
     pub jobs: u32,
@@ -2280,6 +2284,63 @@ extend Package {
                 cls.push(LC_FREE);
             }
         }
+    }
+
+    /// Whether the header of extern block `nid` of module `m` reaches only the C files that use its
+    /// items (`driver::emit::cemit_extern_includes`): a header `super_rt.h` does not include, of a
+    /// block with a function that needs no CPU feature. Its macros would rename the identifiers of
+    /// other files, so the inliner splices no use of its items into another module (`ir::inline`).
+    pub fn extern_header_scoped(self: &Self, m: ModuleId, nid: NodeId) bool {
+        let a = &self.modules[m as usize].ast;
+        let eb = a.at_const(nid).as_data.extern_block;
+        if eb.header == NODE_NONE {
+            return false;
+        }
+        // A block whose functions all need CPU features is included where its functions are.
+        let mut fns = false;
+        let mut plain = false;
+        for j in 0..eb.items.len {
+            let f = unsafe a.list(eb.items)[j as usize];
+            if a.at_const(f).kind == NodeKind::NODE_FUNCTION {
+                fns = true;
+                plain = plain || cf::is_empty(self.fn_features(m, f));
+            }
+        }
+        if fns && !plain {
+            return false;
+        }
+        let hs = a.at_const(eb.header).span;
+        let src = self.modules[m as usize].source.as_str();
+        return !rtc::rt_has_header(src.slice((hs.start + 1) as usize, (hs.end - 1) as usize));
+    }
+
+    /// Fill `xscoped` with the items of every extern block whose header is scoped
+    /// (`extern_header_scoped`). The emission calls it before the inliner and the emitter read it.
+    pub fn scope_extern_items(self: &mut Self) {
+        let mut set = Set::<u64>::new();
+        for m in 0..self.modules.len() {
+            if !self.modules[m].has_ast {
+                continue;
+            }
+            let a = &self.modules[m].ast;
+            let its = a.at_const(a.root).as_data.program.items;
+            for i in 0..its.len {
+                let b = unsafe a.list(its)[i as usize];
+                if a.at_const(b).kind != NodeKind::NODE_EXTERN_BLOCK || !self.extern_header_scoped(m as ModuleId, b) {
+                    continue;
+                }
+                let items = a.at_const(b).as_data.extern_block.items;
+                for j in 0..items.len {
+                    set.insert(m as u64 << 32 | (unsafe a.list(items)[j as usize]) as u64);
+                }
+            }
+        }
+        self.xscoped = set;
+    }
+
+    /// Whether item `d` is declared in an extern block whose header is scoped (`xscoped`).
+    pub fn extern_item_scoped(self: &Self, d: DefId) bool {
+        return self.xscoped.contains(&(d.module as u64 << 32 | d.node as u64));
     }
 
     /// The CPU features function `f` of module `m` states (`@target_feature`, `@simd_impl`); empty for

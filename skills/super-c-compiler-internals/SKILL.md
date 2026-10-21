@@ -26,7 +26,7 @@ prelude_stage             -- the std prelude alone: load, filter, resolve, typec
 load_user                 -- the root's module closure after the prelude (Package.root_module);
   |                          its files read and parse while the prelude checks (--jobs)
   |
-platform_filter           -- @platform/@arch gating: compact items by target mask; then
+platform_filter           -- @platform/@arch/@when gating: compact items by target mask; then
   |                          index_append indexes the new modules
   |
 resolve + HIR, per module -- resolver::resolve, then hir::lower_module immediately after
@@ -241,17 +241,19 @@ instead of reading past the new length.
 jobs. A type larger than the target's `isize::MAX` sets `Layout.big`. The service reads a member's
 type from its record (`Ast::member_ty`: a field's own slot, which the declaration's check writes),
 and a member the check has not recorded yet answers not-ok and caches nothing (`Svc.pending`), as
-`@c.align` does below: a static_assert evaluated before that check is deferred and folds later.
+`@align` does below: a static_assert evaluated before that check is deferred and folds later.
 
-**Header types:** a `struct` or `union` of an `extern "C"` block has its C header's layout. The
-service answers not-ok for it and for everything that holds it by value, with `Layout.hm`/`hn`
-naming the declaration (`field_offset` is -1), so no consumer folds a size: ZST elision treats it
-as material, the emitter spells `sizeof(struct stat)`, and the evaluator's size, alignment and
-`type_info` queries trap with a text that names it (`Interp::header_trap`); values still evaluate
-slot by slot. The type spells as its tag or its `@c.import` pin (`Mangler::ctype`,
-`driver::emit::extern_c_name`), a field as its `@c.import` pin when the module has one
-(`Ast.has_member_pins`, `Mangler::field_ident`), and `driver::emit::header_type_checks` writes
-the field checks into the forward header after every include (`cemit_extern_includes`). An extern
+**Header types:** a `struct` or `union` of an `extern "C"` block lists every member of its C
+type, so the service lays it out like any struct (`@packed` and `@align` included), and an
+opaque type with `@layout(size, align)` like a register type. The type spells as its tag or its
+`@import` pin (`Mangler::ctype`, `driver::emit::extern_c_name`), a field as its `@import` pin
+when the module has one (`Ast.has_member_pins`, `Mangler::field_ident`), and
+`driver::emit::header_type_checks` writes into the forward header, after every include
+(`cemit_extern_includes`): the size and alignment from `Svc::decl_layout`, each field's offset
+from `Svc::decl_field_offset`, the field kinds, the `@layout` checks, and the value check of each
+constant with a value (`ConstData.c_macro`, `header_const_check`). Such a constant is an ordinary
+constant to every pass; its C symbol takes the `__l<node>` suffix (`Mangler::const_sym`) so it
+never meets the header's macro. An extern
 `enum` spells as its tag (`enum color`) or pin the same way and gets the completeness check; its
 layout stays the 4-byte C enum the service models. The parser rejects a header type (`struct`,
 `union` or `enum`) in a block without a header (`Parser::need_header`); the checker restricts field types to C types
@@ -662,7 +664,7 @@ argument, receiver and interface, so an inner call to a generic, private or inte
 spells and demands in the caller's unit; an associated function of a generic extend whose call
 names its receiver by no type stays out (`env_receiver`), and a module's constants and statics
 splice as the caller's own static references. A callee that needs either (an inner call another
-than a concrete public or header-declared extern function, or a static reference) inlines only
+than a concrete public or non-variadic extern function, or a static reference) inlines only
 into a caller that holds a vector (`CalleeInfo.vec_only`, `inl::holds_vector`): the compiler's own
 emitted C keeps its size, and vector kernels inline their helpers. A generic callee with a per-instantiation
 `static_assert` (`Ast.assert_fns`) splices too, and the caller's `CoreBody.demands` keeps the call, whose symbol the
@@ -767,7 +769,7 @@ attribute argument (`Attr.expr`: the attribute table `ATTR_EXPR_KINDS` / `attr_e
 `src/ast/ast.spc` names the attributes and each argument's type) is checked and folded by its
 owner's `check_item` (`tc_attr_exprs`); a failure, a refusal included, is an error at the
 argument, and the value goes to `Ast.attr_vals` (`Ast::attr_value`). The layout service reads
-`@c.align` from there: before the owner's check it answers not-ok and caches nothing
+`@align` from there: before the owner's check it answers not-ok and caches nothing
 (`Svc.pending`). An explicit enum discriminant must fold there too; `Interp::discr` is the one discriminant rule the
 lowering, the emitted C enum, constant evaluation, static data and `type_info` share, for
 payload enums as for bare ones. The checker rejects a duplicate value or one outside the
@@ -969,7 +971,7 @@ their target's profile directory (`<out-dir>/<profile>/raw`). Module paths map t
   __sc_manifest            # paths, content hashes, header dependencies, owners, shard counts
   __sc_shards              # the shard counts this build used; the next build starts from them
   __ext0_impl.c            # @c.source wrapper TUs (__ext<N>_<stem>.c)
-  __ldflags                # one @c.link flag per line
+  __ldflags                # one @link flag per line
   __test_main.c            # fork-per-test runner (--test only)
 ```
 

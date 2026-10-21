@@ -254,7 +254,7 @@ fn sum_by_value(values: []i32) i32 {
     return total;
 }
 
-@c.inline
+@inline
 const fn attributed(value: i32) i32 {
     return value;
 }

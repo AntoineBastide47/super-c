@@ -114,7 +114,7 @@ process SIGURG, one at a time. Every Super-C program answers from its compiler-e
 (`backtrace`; threads found with `task_threads` on macOS and `/proc/self/task` on Linux), the
 thread blocked in a syscall included; std's reactor then adds its state when the process started
 it (state, queued commands, and per descriptor the read and write waiters, stale bits and last
-event). A library chains its own dump the same way with `sc_rt_diag_chain` (`ffi/sc_rt.h`). A
+event). A library chains its own dump the same way with `sc_rt_diag_chain` (`ffi/sc_runtime.spc`). A
 process that is not a Super-C program (`cc`, `ld`, a shell) ignores SIGURG, its default action. On
 Linux the runner adds the kernel's view of every process: each thread's state and wait channel.
 Windows terminates the child with no dump.
@@ -305,8 +305,8 @@ SC_LEAK_CHECK=fatal ./app       # report + exit 23 on leaks (CI gate)
 ```
 
 The tracker interposes `malloc`/`calloc`/`realloc`/`free` at the emitted-C level, and
-tracks over-aligned blocks from `std/alloc.h` through `sc_lk_aligned_alloc` /
-`sc_lk_aligned_free`. It:
+tracks the over-aligned blocks of std's `Global` allocator, which calls `sc_lk_aligned_alloc` /
+`sc_lk_aligned_free` itself. It:
 - Reports every allocation that survives to exit
 - Detects **double frees** with both allocation and free stacks (freed blocks stay allocated
   in a bounded history, so an address in it is always a real double free, never a reused block)
@@ -454,7 +454,7 @@ through the compiler's own C library).
   PARITY_C<k>` and `fn parity_r<k>`, selected by `prog <k>`; `prog -1` runs them all in order, each
   after a line `= k`, and the helper runs that once, then alone each case after a trap or a crash (or
   every case when the sanitizer reports). Write inputs as `opq::<T>(v)`: the
-  constant calls the identity `const fn opq`; the run-time copy calls `opr`, a `@c.noinline`
+  constant calls the identity `const fn opq`; the run-time copy calls `opr`, a `@noinline`
   identity that writes a static, so the compiler cannot fold it (a call of a plain or `const fn`
   identity with constant arguments is folded, and a certain trap becomes the compile error "this
   statement is undefined behavior when executed"). A trapping constant is a compile error; the
@@ -615,7 +615,7 @@ tools/simd_math/build/release-bin-simd-math-bench/simd-math-bench [--only=NAME]
 
 `tests/simd_math_test.spc` runs in the normal suite: the special values of every function, class
 and lane type at compile time against run time (`const_runtime_parity`, Annex F domain edges and
-pow's special pairs included; each function through a `@c.noinline` wrapper, so its kernel is in the
+pow's special pairs included; each function through a `@noinline` wrapper, so its kernel is in the
 C once), a hash of 10^5 results per function and kind (the planned build
 against `SC_SIMD_SCALAR=1`; for every function, two-argument ones, `powi` and `sincos` included, each
 lane of a call at the other lane count against the call on that lane's inputs alone; and a fixed

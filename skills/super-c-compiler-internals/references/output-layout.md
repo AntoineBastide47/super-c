@@ -30,15 +30,15 @@ and every tree comparison compares within one profile.
 
 | File | Content | Included by |
 |------|---------|-------------|
-| `__sc_fwd.h` | runtime includes, the headers of `extern "C" "<header>"` blocks, dyn fat types, `@emit_macro` templates, assert helpers, the `__sc_wrap` address conversion, extern and block-wrapper prototypes, dyn table and ZST sentinel declarations, plus copies of the type declarations those spell; no other type declaration | every generated file |
-| `__sc_ext.h` | only when needed: the extern and block-wrapper prototypes with an array declarator of an aggregate (C needs the element complete, and the forward header includes no definition header), after the includes of those definition headers and copies of the declarations they spell | every unit, after `__sc_fwd.h` |
+| `__sc_fwd.h` | runtime includes, the headers of `extern "C" "<header>"` blocks that `super_rt.h` includes too, dyn fat types, `@emit_macro` templates, assert helpers, the `__sc_wrap` address conversion, extern and block-wrapper prototypes that need no definition header (one that does, by an array declarator of an aggregate or a scoped header's alias, is a declaration of the units that call it: `split_protos`), dyn table and ZST sentinel declarations, plus copies of the type declarations those spell; no other type declaration | every generated file |
+| `__sc_t/__scx<k>.h` | one per scoped `extern "C" "<header>"` header (`XHdr`, numbered in an order that keeps every module's block order, first declared first among the ready headers, and on a cycle the first declared left): the `__scx` files of the scoped headers a module's earlier blocks name (`pre`: `<psapi.h>` needs `<windows.h>`, `<windows.h>` needs `<ws2tcpip.h>`; only lower numbers, so no cycle), the header's include, one `#define __sc_x_<name> <name>` per item C spells by name (`extern_block_aliases`), then the checks of its blocks' types and constants | the units, definition headers and prototype headers whose text spells one of its aliases; the registry unit when it has checks |
 | `__sc_t/<stem>.h` | one definition header per emitted type (struct, union, payload enum, payload-less enum, generic instance, closure environment, result carrier): the includes of the definition headers of the types its body embeds by value, the type's `typedef` line, copies of the other declarations the body spells, the definition, then the type's layout checks (`_Static_assert` of size and alignment) | units that need the type complete (also as the result carrier of a `_ret` typedef or the element of an array declarator they declare); definition headers that embed it by value or as an array element; prototype headers whose `_ret` typedefs name it or whose array declarators have it as element |
 | `<mod>.h` | the definition headers of the result carriers its `_ret` typedefs name and those of the element types of its array declarators (parameters, constants), copies of the type declarations its prototypes spell, `_ret` typedefs, cross-TU prototypes, constant and descriptor declarations the module owns | C code that calls the module (the module's interface); no generated file (a unit declares what it uses) |
 | `<mod>.c`, `<mod>__p<k>.c` | the includes (forward header, the definition headers the module's text and its declarations need), copies of the typedef lines of the types it and its declarations name only through pointers, the cross-TU declarations (of every prototype header) its text spells, `_ret` typedefs first (`XDecls`, below), then the module's bodies, sharded by `stable_item_hash(symbol) mod count`; the count comes from the rendered size (`shard_policy`: one shard per 256 KiB of C; a count read from the previous `__sc_shards` is kept while every shard stays within half and one and a half times that), or from `[shards]` in build.toml; a static closure follows the body before it | |
 | `<mod>__inst.c`, `<mod>__inst__p<k>.c` | generic instances of the module's generics, glue of its types, its constants and descriptors, dyn tables of its receivers (same policy per owner; `[instance-shards]` overrides); includes as for a module TU, from the instance context's rows | |
 | `__sc_shards` | `super-c-shards<TAB>1`, then `module<TAB>tus<TAB>insts` for every module with more than one shard of either kind: the counts this build used, which the next build reads as its starting point; `packs<TAB>n`, the pack count, read the same way; `pch<TAB>1` when the units compile through the precompiled header of `__sc_fwd.h` (from `PCH_UNITS`, four, units that include it: each shard that compiles alone, each pack), which a build that plans the tree without its emission reads | the next build |
 | `__sc_registry.c` | ZST sentinels; the reflection registry: the `@reflect` roots sorted by symbol (each root is an external `const` with hidden visibility except on Windows, defined in its owner's instance shard), one pointer table, one constructor passing that sorted table to `__sc_reflect_register` once (the runtime keeps its address and count: no capacity limit, lookup never depends on constructor order) | |
-| `__sc_unity.c` | only for a small program (module, instance and registry units under `UNITY_MAX`, 2 MiB of C, and more than one of them): one `#include` per such unit, in write order. The build compiles it alone and none of its members: one compiler process, the shared headers parsed once (about 4 times less compile CPU on a test program). The runtime (`super_rt.c`), the `__ext*` wrappers and a test runner compile on their own | the build (the only C unit of its members) |
+| `__sc_unity.c` | only for a small program (module, instance and registry units under `UNITY_MAX`, 2 MiB of C, and more than one of them): one `#include` per such unit, in write order. The build compiles it alone and none of its members: one compiler process, the shared headers parsed once (about 4 times less compile CPU on a test program). The runtime (`super_rt.c`), the `__ext*` wrappers, a test runner and a unit that includes a `__scx` file, also through a definition header (`tu_x`, `inst_x`: the header's macros would reach the members after it), compile on their own | the build (the only C unit of its members) |
 | `__sc_pack<k>.c` | only for a larger program with at least two units of one shard and less than `PACK_UNIT` (64 KiB) of C: one `#include` per such unit whose file stem hashes to pack `k` modulo the pack count, in write order, written after every unit (`pack_plan`). The count is `shard_policy` of those units' bytes from the previous `packs` line of `__sc_shards`; every pack below the count is written, an empty one too. The build compiles each pack and none of its members | the build (the only C unit of its members) |
 | `__sc_manifest` | one record per output (kind `u` for `__sc_unity.c` and the packs): kind, path, 64-bit content hash, owner module, shard index, generated headers included; the effective shard counts (`shards` lines, whether chosen or overridden); the C command inputs; the registry roots | tooling |
 
@@ -114,16 +114,56 @@ the header of the type it collides with.
 - Layout checks live in the definition header of the checked type, so a unit checks the
   types it includes and a new type changes no unit; an extern enum keeps its check in its
   module's first shard. Every defined instance of a module's generic aggregate is checked, whichever
-  module's records name it (`inst_recs`). A header struct or union has no layout check: its field checks
-  follow the extern-block includes in `__sc_fwd.h`, so every unit runs them once. The checks are rendered with
-  `no_edges` set: they record no use edge and no type need for the module's unit.
-- The headers of `extern "C" "<header>"` blocks are global (`__sc_fwd.h`): every TU can
-  call a header-declared extern function, so the Core IR inliner splices a callee that
-  calls one (the `std/bits.h` bit counts behind `u64::trailing_zeros`) into any TU; the
-  runtime atomics (`ffi/atomic.spc`, verified intrinsic calls) are `static inline` in every
+  module's records name it (`inst_recs`). A header struct or union has its layout and field checks in
+  its header's `__scx` file (in `__sc_fwd.h` for a header `super_rt.h` includes), by its C name, so
+  every unit that includes the header runs them once, and the registry unit includes every `__scx`
+  file with checks, so they run also where no unit uses the header (a constant that folds to its
+  value). A field of another header's type names that type by alias, so the file includes its
+  header. The checks are rendered with `no_edges` set: they record no use edge and no type need for
+  the module's unit.
+- A scoped header (`Package::extern_header_scoped`: a header of `extern "C" "<header>"` blocks
+  that `super_rt.h` does not include, of a block with a function that needs no CPU feature) reaches
+  only the files that use one of its items. Its macros would otherwise rename the identifiers of
+  every file (`<windows.h>` defines `near`, `far`, `small`, `interface` and hundreds more). The
+  emitter spells every such item by alias (`mbe::x_alias`, from `Package::xscoped`, which
+  `scope_extern_items` fills before the inliner runs): a function, a static, a type and an
+  enumerator as `__sc_x_` and its C name, a space as `_` (`__sc_x_struct_stat`, apart from function
+  `__sc_x_stat`). No other C name spells an alias, so the name scans are exact:
+  `FwdDecls::add_header` makes a definition or prototype header include the `__scx` file (`scan`),
+  and `XDecls::add_header` a unit (`unit_incs`); a local or a field named like a header function
+  brings no header. The alias survives the emission cache with the text. A header-less prototype
+  that names an alias is a unit declaration (`split_protos`), without its `extern`, which
+  `decl_name` reads as an object's. A unit that includes a `__scx` file, directly or through a
+  definition header (`x_reach`), compiles outside the packs (`tu_x`, `inst_x`). A declaration of
+  `__sc_fwd.h` that names an alias (a trait-object table whose method names a header type, an
+  `@emit_macro` template) makes the forward header include the `__scx` file: every file then sees
+  that header. A header `super_rt.h` includes stays in `__sc_fwd.h`, by C
+  name: every file has it already. The inliner splices no callee that calls an item of a scoped
+  header, or holds a value of its type or reads its static (`is_global_extern_fn`, `ty_scoped`):
+  the splice would bring the header, and its macros, into the caller's unit. A unit that uses a
+  scoped header itself sees its macros: a local named `near` there fails the C compile. Every TU
+  can call any other header-declared extern function (and a header-less one through its
+  prototype, below), so the Core IR inliner splices a callee that calls one into any TU; the runtime's bit counts (behind `u64::trailing_zeros`) and atomics (`ffi/atomic.spc`, verified intrinsic calls) are `static inline` in every
   TU's `super_rt.h`, so a callee that calls one splices too (`detect::dispatch`'s acquire
   load). A splice accepts an argument whose C value is the parameter's: a reference into a
   pointer parameter, a function into a function-pointer parameter.
+- An extern function of a block without a header gets a prototype in `__sc_fwd.h`
+  (`CEmit::collect_extern_proto`), typed from its declaration (the parameter and result
+  annotations' recorded types in the callee's module), unless an always-included header declares
+  it (`Mangler::c_lib_declared`: `C_LIB_NAMES` and `c_lib_family`) or its name starts with `__sc_`
+  (the entry points of `super_rt.h`). It matches the runtime's own definition (`static inline
+  uint64_t sc_mul64(uint64_t, uint64_t, uint64_t *)`) and binds a function whose header the
+  build's feature macros cannot include (macOS `sysctlbyname`).
+- A `@thread_local` static's definition and declarations take `_Thread_local`
+  (`CEmit::stat_specs`). Every access spells `(*sym__tls())`, a per-unit `static noinline`
+  accessor under a `sym__tls_d` guard (`CEmit::tls_accessor`) that the static's demand writes
+  with its declaration (`stat_demand`, and the place demand in `emit_place_base`); a
+  header-owned one records a `StatRef` too, so `stat_decls` and `stat_items` stay aligned.
+  `XDecls::add_all` takes the guarded block through its `#endif` as one declaration of
+  `sym__tls`, and a unit that spells the accessor gets the static's declaration with it.
+- A module-level `asm` item emits `__asm__("<template>");` in the module's first unit
+  (`push_c_asm_str` re-escapes a matchertext template); `module_has_asm` keeps such a module
+  emitted (`keep_mod`) and gives it a unit.
 - Results C cannot return as they are (several results, one fixed array) return in a
   carrier struct shared by every function and function value with that result list
   (`Mangler::ret_pack`: `__sc_ret<n>__<types>`, `__sc_reta__<array>`), defined in its own
@@ -167,7 +207,8 @@ the header of the type it collides with.
   context. A shard declares the cross-TU declarations its text spells, from one identifier
   scan of the text of its module TU or instance unit (`XDecls`, `xd_rows`: the rows on up to
   eight workers, the largest first; 29 ms of CPU for the compiler's 16 MB of C, about 5 ms of
-  wall time) against the declared names of every prototype header (`decl_name`); C parses
+  wall time) against the declared names of every prototype header (`decl_name`, which reads an `@export`
+  function's parenthesized `(name)(` declarator); C parses
   every declaration it includes: whole prototype headers cost the compiler's build about 10%
   of its clang compile and 4% of its gcc one. Its definition headers come from the type-need row
   (above), and the edges only keep a module's TU alive for the transitive TU pruning. Symbols spelled without a

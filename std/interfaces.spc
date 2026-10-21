@@ -233,10 +233,11 @@ pub interface Allocator: Copy {
     unsafe fn dealloc(self: &mut Self, ptr: *mut void, size: usize, align: usize) void;
 }
 
-// Over-aligned blocks: the platform call is chosen in the header, where the C compiler knows the target.
-extern "C" "alloc.h" {
-    fn sc_alloc_aligned(size: usize, align: usize) *mut void;
-    fn sc_free_aligned(ptr: *mut void) void;
+// Over-aligned blocks: the runtime's leak tracker allocates them with the target's call (`aligned_alloc`,
+// or `_aligned_malloc` on Windows), records them, and releases them with the matching call.
+extern "C" {
+    fn sc_lk_aligned_alloc(size: usize, align: usize) *mut void;
+    fn sc_lk_aligned_free(ptr: *mut void) void;
 }
 
 // The alignment every `malloc` result has on the supported targets: 16 bytes on 64-bit ones. On wasm32 it
@@ -245,7 +246,7 @@ const MALLOC_ALIGN: usize = 2 * sizeof(usize);
 
 /// The default allocator: the C heap, aborting on out-of-memory. A zero-sized tag: it stores nothing, so
 /// `Box<T>` is `{ ptr }` with no space overhead. An `align` up to what `malloc` guarantees takes
-/// `malloc`/`realloc`/`free`; a larger one takes the platform's aligned allocation (`posix_memalign`, or
+/// `malloc`/`realloc`/`free`; a larger one takes the platform's aligned allocation (`aligned_alloc`, or
 /// `_aligned_malloc` on Windows), and the same `align` must be passed back to `realloc` and `dealloc`.
 /// The bookkeeping `size`s matter only for moving an over-aligned block.
 pub struct Global {}
@@ -257,7 +258,7 @@ extend Global as Copy {}
 extend Global as Allocator {
     pub unsafe const fn alloc(self: &mut Global, size: usize, align: usize) *mut void {
         let p = if align > MALLOC_ALIGN {
-            unsafe sc_alloc_aligned(size, align);
+            unsafe sc_lk_aligned_alloc(size, align);
         } else {
             unsafe malloc(size);
         };
@@ -277,7 +278,7 @@ extend Global as Allocator {
                     new_size;
                 };
                 unsafe memcpy(p, ptr, n);
-                unsafe sc_free_aligned(ptr);
+                unsafe sc_lk_aligned_free(ptr);
             }
             return p;
         }
@@ -289,7 +290,7 @@ extend Global as Allocator {
     }
     pub unsafe const fn dealloc(self: &mut Global, ptr: *mut void, size: usize, align: usize) {
         if align > MALLOC_ALIGN {
-            unsafe sc_free_aligned(ptr);
+            unsafe sc_lk_aligned_free(ptr);
             return;
         }
         unsafe free(ptr);

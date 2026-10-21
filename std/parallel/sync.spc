@@ -180,7 +180,7 @@ struct LotNode {
     pub next: *mut LotNode,
 }
 
-// The Super-C view of one static bucket (a 64-byte slot in sc_rt.c): a spinlock over a FIFO of nodes.
+// The Super-C view of one static bucket (a 64-byte slot of ffi/sc_runtime.spc): a spinlock over a FIFO of nodes.
 //
 // The queue needs no admission limit of its own because it cannot grow past the runtime's own capacity:
 // a node lives in the frame of the coroutine or thread that is blocked on it, so a waiter contributes at

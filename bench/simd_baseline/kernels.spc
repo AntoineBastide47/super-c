@@ -261,19 +261,19 @@ fn level() str<'static> {
 
 static mut D: detect::Dispatch = detect::Dispatch::new();
 
-@c.noinline
+@noinline
 const fn plus1(x: u64) u64 {
     return x + 1;
 }
 
-@c.noinline
+@noinline
 const fn plus2(x: u64) u64 {
     return x + 2;
 }
 
 // `detect::dispatch` over a two-entry table: the first feature is never present on this machine's
 // instruction set, so the choice reads both entries.
-@c.noinline
+@noinline
 fn chosen(d: *mut detect::Dispatch) fn(u64) u64 {
     let off = if ARCH == Arch::X86_64 {
         cpu::Feature::Neon;

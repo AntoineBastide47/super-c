@@ -130,7 +130,7 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
 
     /// Insert or overwrite `key` -> `value`. On overwrite the existing key is kept; the duplicate key and the
     /// replaced value are freed (no-ops for non-Free types). Takes ownership of `key` and `value`.
-    @c.always_inline
+    @always_inline
     pub const fn insert(self: &mut Map<K, V, A>, key: K, value: V) {
         if self.cap == 0 || (self.len + 1) * 4 >= self.cap * 3 {
             // Grow past a 0.75 load factor.
@@ -150,7 +150,7 @@ extend<K: Hash + Eq, V, A: Allocator> Map<K, V, A> {
     }
 
     /// A borrow of the value for `key`, or `None`. Borrowing (`&V`) keeps the Map the sole owner.
-    @c.always_inline
+    @always_inline
     pub const fn get(self: &Map<K, V, A>, key: &K) Option<&V> {
         if self.cap == 0 {
             return Option::<&V>::None;

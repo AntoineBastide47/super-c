@@ -1,4 +1,4 @@
-// The CPU features of the machine the program runs on, detected once (ffi/sc_cpu.c): CPUID and XGETBV on
+// The CPU features of the machine the program runs on, detected once (ffi/sc_cpu.spc): CPUID and XGETBV on
 // x86_64, `sysctlbyname` on macOS and iOS (aarch64, and x86_64's AVX-512 state), `getauxval` on Linux
 // and Android, `IsProcessorFeaturePresent` on Windows aarch64, none on wasm32 (an engine rejects a
 // module whose features it lacks). `dispatch` chooses a function once by them. A feature the build enables is present
@@ -23,9 +23,8 @@ pub fn detected() cpu::CpuFeatures {
     return cpu::CpuFeatures { bits: w };
 }
 
-/// The features the build's C flags enable, as the C compiler reports them (its `__ARM_FEATURE_*`
-/// macros): the platform's baseline, `target-features`, `--target-feature`, what they imply, and what
-/// the flag's architecture level brings. Every machine that runs the program has them.
+/// The features the build enables (`TARGET_FEATURES`): the platform's baseline, `target-features`,
+/// `--target-feature`, and what they imply. Every machine that runs the program has them.
 pub fn static_features() cpu::CpuFeatures {
     let mut w: [u64; 2] = [0, 0];
     unsafe sc_cpu::sc_cpu_static_words(&mut w[0]);
@@ -83,7 +82,7 @@ pub unsafe fn dispatch<F: FnPtr, const K: usize>(d: *mut Dispatch, table: [(cpu:
 /// The first call of `dispatch` on `d` over the `k` rows of its table at `rows`, each a feature and a
 /// function pointer laid out as `(cpu::Feature, usize)`: the chosen address, published. The address is
 /// copied out as bytes (a function pointer is no `usize` object). Call `dispatch` instead.
-@c.noinline
+@noinline
 pub unsafe fn dispatch_first(d: *mut Dispatch, rows: *const cpu::Feature, k: usize, fallback: usize) usize {
     let fs = features();
     let stride = sizeof((cpu::Feature, usize));

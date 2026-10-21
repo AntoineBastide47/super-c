@@ -1,4 +1,4 @@
-// Matrix products over row-major slices: on the SME tiles where the CPU has them (ffi/sc_sme.c, one outer
+// Matrix products over row-major slices: on the SME tiles where the CPU has them (ffi/sc_sme.spc, one outer
 // product per tile per step of the inner dimension), over `Simd` lanes elsewhere (on x86_64, the build's
 // run-time copies of the lanes kernels: `--simd-dispatch`). Every kernel gives the
 // same bits: element (i, j) is the fused multiply-add chain over p in order from +0.0, NaN payloads
@@ -143,7 +143,7 @@ fn mul_bf16_on(c: []mut f32, a: []bf16, b: []bf16, m: usize, k: usize, n: usize)
     mul_widened::<8, 7>(c, a, b, m, k, n);
 }
 
-// The SME kernel, or the lanes when the C file has no kernels or its scratch cannot be allocated.
+// The SME kernel, or the lanes when the target has no kernels or their scratch cannot be allocated.
 @arch(aarch64)
 @target_feature([cpu::Feature::Sme2])
 fn mul_f32_sme(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
@@ -168,8 +168,8 @@ fn mul_i8_sme(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
     }
 }
 
-// The C side widens the encodings itself: a 16-bit `Float` holds its encoding in the low 16 bits of one
-// u64 (`IntBits`), which the C kernel reads.
+// The kernel module widens the encodings itself: a 16-bit `Float` holds its encoding in the low 16 bits
+// of one u64 (`IntBits`), which it reads.
 @arch(aarch64)
 @target_feature([cpu::Feature::Sme2])
 fn mul_f16_sme(c: []mut f32, a: []f16, b: []f16, m: usize, k: usize, n: usize) {

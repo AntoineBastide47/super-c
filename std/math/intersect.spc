@@ -99,7 +99,7 @@ pub fn intersect_line_triangle<T: Float>(orig: Vec<T, 3>, dir: Vec<T, 3>, v0: Ve
 /// (distance, hit) from `start` along the unit `dir` to the first crossing of the sphere of squared
 /// radius `radius_squared` ahead of `start` (the far one from inside). The distance is
 /// computed whenever the line meets the sphere, also on a miss behind `start`.
-@c.always_inline
+@always_inline
 pub fn intersect_ray_sphere<T: Float, const N: usize>(
     start: Vec<T, N>,
     dir: Vec<T, N>,

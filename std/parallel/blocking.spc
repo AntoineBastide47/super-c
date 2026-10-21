@@ -966,7 +966,7 @@ pub unsafe fn run_raw(j: *mut Job) {
 /// Run `run(env)` on the blocking pool and park the caller until it returns. What a `@blocking` extern
 /// function's generated wrapper hands its work to: hence the pinned C symbol, which is the name codegen
 /// emits. Masked: foreign code whose result lands through `env` can never be abandoned.
-@c.export("__sc_blocking_run")
+@export("__sc_blocking_run")
 pub unsafe fn run_blocking(run: fn(*mut void) void, env: *mut void) {
     if on_pool_thread() {
         run(env);

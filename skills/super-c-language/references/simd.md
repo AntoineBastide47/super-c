@@ -47,7 +47,7 @@ has them, so caller and callee agree on the ABI), of the type
 16-byte chunks also names them in a union with `l`.
 
 A vector or mask is `Copy`, `Send` and `Sync`. Neither has a C ABI: an `extern "C"` or
-`@c.export` signature that names one is an error; pass `[T; N]` (`from_array`/`to_array`) or
+`@export` signature that names one is an error; pass `[T; N]` (`from_array`/`to_array`) or
 `u64` (`from_bits`/`to_bits`).
 
 ## Vector operations
@@ -396,15 +396,16 @@ slice's length is not its matrix's element count"). The portable kernel runs `Si
 row of `b` (16 f32, 8 f64 or 16 i8 lanes, `fma`; a lane `fma` without a vector entry is one `fmaf`
 per lane: x86_64 below FMA, wasm32); on x86_64 the run-time copies (`--simd-dispatch`) run it with
 256-bit vectors and FMA where the CPU has them, whatever the build's level; on
-aarch64, `detect::dispatch` selects the SME kernels of `ffi/sc_sme.c` where the CPU has
-`sme2` (f32, f16, bf16, i8) or `sme-f64f64` (f64) and the C compiler is GCC 14, Clang 22, Apple Clang
-17 or later. The f16 and bf16 kernels widen both matrices to f32 in C (a 16-bit `Float` holds its
+aarch64, `detect::dispatch` selects the SME kernels of `ffi/sc_sme.spc` where the CPU has
+`sme2` (f32, f16, bf16, i8) or `sme-f64f64` (f64), on macOS, iOS, Linux and Android (`sc_sme_built()`); the kernels are
+module-level `asm` (Clang or GCC with binutils 2.40 or later, for the `sme2` mnemonics). The f16 and bf16 kernels widen both
+matrices to f32 first (a 16-bit `Float` holds its
 encoding in the low 16 bits of one u64), then run the f32 kernel: the widening FMOPA and BFMOPA round
 each pair of products once (BFMOPA with FPCR.EBF set; with it clear, Arm's non-IEEE BFloat16 rules), so
 they cannot give the f32 chain's bits, and on an M5 Pro they run no faster than the f32 FMOPA (2142,
 2187 and 1693 GFLOP/s, four tiles). An i8 product is exact modulo 2^32 in any order; its kernel packs `a` and `b` in groups of four (SMOPA sums four products per
 element) before it enters streaming mode. Each kernel enters streaming
-mode itself (`__arm_locally_streaming`, `__arm_new("za")`): `a` is packed into column-major panels
+mode itself (SMSTART, after it commits a caller's dormant ZA state as `__arm_tpidr2_save` does): `a` is packed into column-major panels
 through a ZA tile, each block of `b`'s columns into a contiguous panel, and each block of `c` takes one
 outer product (FMOPA, a fused add from the zeroed tile: the chain above) per tile per p. f32 blocks are
 1 VL x 4 VL on the four 32-bit tiles (MpGEMM's shape, arXiv 2512.21473) with SME2 four-vector loads;
@@ -427,9 +428,9 @@ the features to code:
 
 | Attribute | Where | Meaning |
 |-----------|-------|---------|
-| `@target_feature([cpu::Feature::X, ..])` or `@target_feature(cpu::X86_64_V3)` | a function whose `@arch` gate (or its extend's) holds every feature's instruction set (checked at the parse for a list of `cpu::Feature` values, so on every target alike); not a method of a conformance, which a bound or `dyn` calls unnamed | the function needs the features, and its effective set is the build's and its own, closed under `implies` (on wasm32 the build's alone: features are per build there). A call or a function value of it is safe where the caller's effective set holds them; else, on x86_64 and aarch64, it needs `unsafe` after a run-time check (`std::cpu::detect::has`; "`f` needs `+avx2,..`: use it in a function whose `@target_feature` enables it, or inside `unsafe` after a run-time check"), and on wasm32, or for an extern binding or a `@c.always_inline` function (inlined into a C caller that lacks them), it is an error ("`f` needs `+relaxed-simd` (`--target-feature=+relaxed-simd`)"). It is no value of a closure bound `F: fn(..)` ("pass a function pointer `fn(..)` instead"); `main`, `@test` and `@bench` functions need the features in the build ("..; it is called from outside the program"), and a `@c.export` function cannot have any. Its C definition carries the C target attribute of the features beyond the build's, the release inliner never inlines it into a caller whose set lacks them, and the planner serves its vector code from its own set. When its set holds vector entries the build's does not, its calls of functions with vector code and no features of their own run copies of them compiled with its set, and so do those copies' calls: a kernel written once runs at each level a `@target_feature` wrapper names (`fn k_v3(..) { k(..) }` under `cpu::X86_64_V3` runs a copy of `k` built for it). On x86_64 the build makes such copies of every function with vector code by itself, chosen at run time (`--simd-dispatch`, below). A function without vector code, a closure, an interface call and a function value keep their one copy. A function the build cannot call emits nothing; the compile-time evaluator has no value for it ("`f` has no compile-time value"). An `unsafe` whose only reason is such a use is unnecessary where the caller's set holds the features (a lint) |
+| `@target_feature([cpu::Feature::X, ..])` or `@target_feature(cpu::X86_64_V3)` | a function whose `@arch` gate (or its extend's) holds every feature's instruction set (checked at the parse for a list of `cpu::Feature` values, so on every target alike); not a method of a conformance, which a bound or `dyn` calls unnamed | the function needs the features, and its effective set is the build's and its own, closed under `implies` (on wasm32 the build's alone: features are per build there). A call or a function value of it is safe where the caller's effective set holds them; else, on x86_64 and aarch64, it needs `unsafe` after a run-time check (`std::cpu::detect::has`; "`f` needs `+avx2,..`: use it in a function whose `@target_feature` enables it, or inside `unsafe` after a run-time check"), and on wasm32, or for an extern binding or a `@always_inline` function (inlined into a C caller that lacks them), it is an error ("`f` needs `+relaxed-simd` (`--target-feature=+relaxed-simd`)"). It is no value of a closure bound `F: fn(..)` ("pass a function pointer `fn(..)` instead"); `main`, `@test` and `@bench` functions need the features in the build ("..; it is called from outside the program"), and a `@export` function cannot have any. Its C definition carries the C target attribute of the features beyond the build's, the release inliner never inlines it into a caller whose set lacks them, and the planner serves its vector code from its own set. When its set holds vector entries the build's does not, its calls of functions with vector code and no features of their own run copies of them compiled with its set, and so do those copies' calls: a kernel written once runs at each level a `@target_feature` wrapper names (`fn k_v3(..) { k(..) }` under `cpu::X86_64_V3` runs a copy of `k` built for it). On x86_64 the build makes such copies of every function with vector code by itself, chosen at run time (`--simd-dispatch`, below). A function without vector code, a closure, an interface call and a function value keep their one copy. A function the build cannot call emits nothing; the compile-time evaluator has no value for it ("`f` has no compile-time value"). An `unsafe` whose only reason is such a use is unnecessary where the caller's set holds the features (a lint) |
 | `@simd_impl(simd::Op::X, [cpu::Feature::Y, ..])` | a function of `std` (else "'@simd_impl' is reserved for the standard library") | a backend entry: an implementation of operation `X` for the lane type and count of its signature, under the features. Never `RelaxedSimd` |
-| `@c.value(size, align)` | an opaque type (`type T;`) of an `extern "C"` block | a C register type (`v128_t`) with that layout, which a `_Static_assert` beside the header include checks: `Copy`, `sizeof`/`alignof` read it; a local, a parameter or a result only, never a field, variant payload, element, static, pointer or reference target, capture or generic argument, written or inferred (`[x, x]`, `(x, 1)`, `&x`, `\|\| x`, `id(x)`): "`v128_t` is a register type; store it through `Simd<T, N>`" |
+| `@value(size, align)` | an opaque type (`type T;`) of an `extern "C"` block | a C register type (`v128_t`) with that layout, which a `_Static_assert` beside the header include checks: `Copy`, `sizeof`/`alignof` read it; a local, a parameter or a result only, never a field, variant payload, element, static, pointer or reference target, capture or generic argument, written or inferred (`[x, x]`, `(x, 1)`, `&x`, `\|\| x`, `id(x)`): "`v128_t` is a register type; store it through `Simd<T, N>`" |
 
 A misspelled variant is an error at the argument ("no variant, method, or constant 'Neonn'"),
 a value of another enum a type error. `std::cpu::Feature` follows the compiler's feature table
@@ -478,7 +479,7 @@ loop on boundary inputs, in the wasm conformance lane and on an aarch64 or x86_6
 `SC_SIMD_FEATURES` it requires the entries the run's features reach and the baseline does not).
 
 The aarch64 file, the second worked example, has one register type per lane type and width
-(`int8x16_t` .. `float64x2_t`, `@c.value(16, 16)`; `int8x8_t` .. `float32x2_t`, `@c.value(8,
+(`int8x16_t` .. `float64x2_t`, `@value(16, 16)`; `int8x8_t` .. `float32x2_t`, `@value(8,
 8)`), so its helpers are one pair per type: `q_s8` loads a 128-bit vector with `vld1q_s8`, `v_s8`
 stores a register back with `vst1q_s8`, and `d_s8`/`w_s8` do the same for a 64-bit vector
 (`Simd<i8, 8>`) with `vld1_s8`/`vst1_s8`. A 64-bit vector has the lane-wise entries in `d` form
@@ -508,7 +509,7 @@ result), the choice by mask bits (`Choose`), masked memory, `Compress` (a `compr
 widened to 64 bits: a `u32` index from 2^31 is no negative offset), on 128 to 512 bits with
 AVX512VL. Its helpers move a vector through unaligned loads and stores (`_mm_loadu_si128` ..
 `_mm512_storeu_si512`); a GCC register type without its feature may have a lower alignment, so
-the layout check of `@c.value` is a lower bound there. `scripts/x86gen/gen.py` generates it and `ffi/immintrin.spc` from GCC's
+the layout check of `@value` is a lower bound there. `scripts/x86gen/gen.py` generates it and `ffi/immintrin.spc` from GCC's
 prototypes (`protos.py`): change the generator, not the files, and run both scripts and `fmt` (the
 command is in the script's header). An intrinsic with an
 immediate operand is an unsafe binding (the operand must be a constant); `std::simd::x86` takes
@@ -534,17 +535,17 @@ and a cast to `u64`) reduces its lane masks with `AnyLanes` or `AllLanes`; other
 its lanes into the mask with `LanesToMask`. A choice of a stored mask unpacks it with
 `MaskToLanes`. A split reads every operand before it writes a chunk, so a pointer may alias a
 vector operand or the result. Entries render as `static inline` C functions, always inlined. A
-build under a memory checker never plans an entry that calls a `@c.lane_access` binding.
+build under a memory checker never plans an entry that calls a `@lane_access` binding.
 
 ### CPU detection
 
 `std::cpu::CpuFeatures { bits: [u64; 2] }` is a set of features (bit `i`: the variant of
 discriminant `i`) with `has(f)` and `contains(other)`. `std::cpu::detect` (a separate module, so
 a program that does not ask links no detector) reads the machine: `features()`, `has(f)`,
-`static_features()`, the set the C compiler enables for the build (its `__ARM_FEATURE_*`
-macros: the build's features and what the flag's architecture brings), which `features()`
+`static_features()`, the set the build enables (the build constant `TARGET_FEATURES`: the
+platform's baseline, the build's features and what they imply), which `features()`
 always contains, and `detected()`, a new OS query without the build's set. Detection runs
-once, before `main` (a C constructor) or at the first query, allocates nothing and takes no
+once, before `main` (an init-array entry) or at the first query, allocates nothing and takes no
 lock: `sysctlbyname` of `hw.optional.arm.FEAT_*` on macOS and iOS, `getauxval(AT_HWCAP)` and
 `AT_HWCAP2` on Linux and Android, `IsProcessorFeaturePresent` on Windows; a failing query means
 absent. On x86_64 it reads CPUID: AVX and its successors only with OSXSAVE and the XCR0 SSE and

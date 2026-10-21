@@ -47,10 +47,10 @@ pub struct Float<const E: usize, const F: usize, const FAMILY: FloatFamily = IEE
 }
 
 // The native binary128 fast path. Whether the C compiler building the emitted code has an IEEE
-// binary128 type is knowable only there: `sc_has_f128()` (float128.h, shipped next to this file) folds
+// binary128 type is knowable only there: `sc_has_f128()` (a primitive of the C backend's runtime) folds
 // to a constant, so a `native()` branch keeps exactly one side. Compile time runs the limb code (the
 // interpreter answers 0): correctly rounded both ways, the same bits.
-extern "C" "float128.h" {
+extern "C" {
     fn sc_has_f128() i32;
     fn sc_f128_add(al: u64, ah: u64, bl: u64, bh: u64, rl: *mut u64, rh: *mut u64) void;
     fn sc_f128_mul(al: u64, ah: u64, bl: u64, bh: u64, rl: *mut u64, rh: *mut u64) void;
@@ -437,7 +437,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
             sig.set_limb(i, fr.limb(i));
             i = i + 1;
         }
-        if eb == 0 {
+        if unlikely(eb == 0) {
             // Subnormal: value = frac * 2^(emin - F). Normalize so the MSB sits at F, adjusting exp.
             let mut e = Float::<E, F, FAMILY>::emin();
             let sh = F + 1 - sig.bit_length();
@@ -459,13 +459,13 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     fn round_pack(negative: bool, exp0: i64, sig0: UInt<{F + 8}>) Float<E, F, FAMILY> {
         let mut exp = exp0;
         let mut sig3 = sig0;
-        if sig3.is_zero() {
+        if unlikely(sig3.is_zero()) {
             if negative {
                 return Float::<E, F, FAMILY>::neg_zero();
             }
             return Float::<E, F, FAMILY>::zero();
         }
-        if exp < Float::<E, F, FAMILY>::emin() {
+        if unlikely(exp < Float::<E, F, FAMILY>::emin()) {
             // Below the normal range: shift right until the exponent reaches emin, jamming what falls
             // off into the sticky bit, then round at the subnormal precision.
             let mut sh = (Float::<E, F, FAMILY>::emin() - exp) as usize;
@@ -489,11 +489,11 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
             let one = UInt::<{F + 8}>::one();
             keep = keep.wrapping_add(&one);
         }
-        if keep.bit(F + 1) {
+        if unlikely(keep.bit(F + 1)) {
             keep = keep.shr(1);
             exp = exp + 1;
         }
-        if exp > Float::<E, F, FAMILY>::emax() {
+        if unlikely(exp > Float::<E, F, FAMILY>::emax()) {
             return Float::<E, F, FAMILY>::overflow_result(negative);
         }
         if FAMILY == FloatFamily::FF_FINITE_ONLY && exp == Float::<E, F, FAMILY>::emax() {
@@ -527,7 +527,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         if sh == 0 {
             return *v;
         }
-        if sh >= F + 8 {
+        if unlikely(sh >= F + 8) {
             if v.is_zero() {
                 return UInt::<{F + 8}>::zero();
             }
@@ -635,11 +635,11 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     /// self * b + c with ONE rounding: the product is exact, the addend aligns on a shared grid wide
     /// enough to hold both, and round_pack rounds the exact sum once.
     pub fn fma(self: &Float<E, F, FAMILY>, b: &Float<E, F, FAMILY>, c: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
-        if self.is_nan() || b.is_nan() || c.is_nan() {
+        if unlikely(self.is_nan() || b.is_nan() || c.is_nan()) {
             return Float::<E, F, FAMILY>::nan();
         }
         let ps = self.sign() != b.sign();
-        if self.is_infinite() || b.is_infinite() {
+        if unlikely(self.is_infinite() || b.is_infinite()) {
             if self.is_zero() || b.is_zero() {
                 // 0 * inf.
                 return Float::<E, F, FAMILY>::nan();
@@ -650,10 +650,10 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
             }
             return Float::<E, F, FAMILY>::infinity(ps);
         }
-        if c.is_infinite() {
+        if unlikely(c.is_infinite()) {
             return *c;
         }
-        if self.is_zero() || b.is_zero() {
+        if unlikely(self.is_zero() || b.is_zero()) {
             // An exactly zero product: the sum is c, except zero + zero, which follows the sign rule.
             if c.is_zero() {
                 if ps && c.sign() {
@@ -678,7 +678,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         // The product, placed F+8 bits up the grid so the addend has room below; its scale exponent.
         let prod = wa.wrapping_mul(&wb).shl(F + 8);
         let ep = ea + eb - 2 * F as i64 - (F as i64 + 8);
-        if c.is_zero() {
+        if unlikely(c.is_zero()) {
             let bl0 = prod.bit_length();
             let red0 = Float::<E, F, FAMILY>::grid_to_sig3(&prod, bl0);
             return Float::<E, F, FAMILY>::round_pack(ps, ep + bl0 as i64 - 1, red0);
@@ -1145,7 +1145,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     /// The nearest f64.
     pub fn to_f64(self: &Float<E, F, FAMILY>) f64 {
         if Float::<E, F, FAMILY>::widens(11, 52) {
-            return f64_from_bits(self.widen_bits(11, 52));
+            return f64_from_bits(self.widen_f64_bits());
         }
         return f64_from_bits(self.to_scalar_bits(11, 52));
     }
@@ -1153,7 +1153,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     /// The nearest f32.
     pub fn to_f32(self: &Float<E, F, FAMILY>) f32 {
         if Float::<E, F, FAMILY>::widens(8, 23) {
-            return f32_from_bits(self.widen_bits(8, 23) as u32);
+            return f32_from_bits(self.widen_f32_bits());
         }
         return f32_from_bits(self.to_scalar_bits(8, 23) as u32);
     }
@@ -1164,32 +1164,33 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         return FAMILY == FloatFamily::FF_IEEE && E <= de && F <= df;
     }
 
-    // The encoding in that built-in format when `widens(de, df)`: the fields move, NaNs become the
-    // canonical quiet NaN as in `to_scalar_bits`. A subnormal becomes a normal number when E < de,
-    // since the destination's bias then exceeds the source's by more than F (de is 8 or 11).
-    fn widen_bits(self: &Float<E, F, FAMILY>, de: usize, df: usize) u64 {
+    // The encoding in f64 (f32 below) when `widens(11, 52)` (`widens(8, 23)`); NaNs become the
+    // canonical quiet NaN as in `to_scalar_bits`. Branch-free in the target's own width, so a converting
+    // loop vectorizes: the magnitude fields placed in the target's position read as the value times
+    // 2^(bias - target bias), and the power-of-two scale back is exact for normals and subnormals
+    // alike. Exact only without flush-to-zero, which Super-C never turns on.
+    fn widen_f64_bits(self: &Float<E, F, FAMILY>) u64 {
         let r = self.bits.to_u64();
-        let sbit = r >> (E + F) as u64 << (de + df) as u64;
-        let emax = Float::<E, F, FAMILY>::exp_field_max();
-        let ef = r >> F as u64 & emax;
-        let fr = r & (1u64 << F as u64) - 1;
-        let emax_dst = (1u64 << de as u64) - 1;
-        if ef == emax {
-            if fr != 0 {
-                return sbit | emax_dst << df as u64 | 1u64 << (df - 1) as u64;
-            }
-            return sbit | emax_dst << df as u64;
+        let mag = r & (1u64 << (E + F) as u64) - 1;
+        let inf = Float::<E, F, FAMILY>::exp_field_max() << F as u64;
+        let mut v = 0x7FF0000000000000u64 | (mag != inf) as u64 << 51;
+        if mag < inf {
+            let scale = f64_from_bits((2046 - Float::<E, F, FAMILY>::bias()) as u64 << 52);
+            v = f64_bits(f64_from_bits(mag << (52 - F) as u64) * scale);
         }
-        let rebias = (1i64 << (de - 1) as i64) - 1 - Float::<E, F, FAMILY>::bias();
-        if ef != 0 {
-            return sbit | (ef as i64 + rebias) as u64 << df as u64 | fr << (df - F) as u64;
+        return r >> (E + F) as u64 << 63 | v;
+    }
+
+    fn widen_f32_bits(self: &Float<E, F, FAMILY>) u32 {
+        let r = self.bits.to_u64() as u32;
+        let mag = r & (1u32 << (E + F) as u32) - 1;
+        let inf = (Float::<E, F, FAMILY>::exp_field_max() << F as u64) as u32;
+        let mut v = 0x7F800000u32 | (mag != inf) as u32 << 22;
+        if mag < inf {
+            let scale = f32_from_bits((254 - Float::<E, F, FAMILY>::bias()) as u32 << 23);
+            v = f32_bits(f32_from_bits(mag << (23 - F) as u32) * scale);
         }
-        if fr == 0 || E == de {
-            return sbit | fr << (df - F) as u64;
-        }
-        let top = 63 - fr.leading_zeros();
-        let eb = 1 - F as i64 + top as i64 + rebias;
-        return sbit | eb as u64 << df as u64 | (fr ^ 1u64 << top as u64) << (df - top) as u64;
+        return r >> (E + F) as u32 << 31 | v;
     }
 
     // Round THIS value into a built-in format's fields, packed as its raw bits in a u64. The target
@@ -1695,30 +1696,30 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         if Float::<E, F, FAMILY>::native() {
             return self.native_op(other, 0);
         }
-        if self.is_nan() || other.is_nan() {
+        if unlikely(self.is_nan() || other.is_nan()) {
             return Float::<E, F, FAMILY>::nan();
         }
-        if self.is_infinite() {
+        if unlikely(self.is_infinite()) {
             if other.is_infinite() && self.sign() != other.sign() {
                 // Inf + -inf has no value.
                 return Float::<E, F, FAMILY>::nan();
             }
             return *self;
         }
-        if other.is_infinite() {
+        if unlikely(other.is_infinite()) {
             return *other;
         }
-        if self.is_zero() && other.is_zero() {
+        if unlikely(self.is_zero() && other.is_zero()) {
             // +0 unless both are -0: the IEEE sign rule for exact zero sums under round-to-nearest.
             if self.sign() && other.sign() {
                 return Float::<E, F, FAMILY>::neg_zero();
             }
             return Float::<E, F, FAMILY>::zero();
         }
-        if self.is_zero() {
+        if unlikely(self.is_zero()) {
             return *other;
         }
-        if other.is_zero() {
+        if unlikely(other.is_zero()) {
             return *self;
         }
         let mut ea: i64 = 0;
@@ -1748,7 +1749,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
             return Float::<E, F, FAMILY>::round_pack(na, ea, sum);
         }
         let diff = sa.wrapping_sub(&sb);
-        if diff.is_zero() {
+        if unlikely(diff.is_zero()) {
             // Exact cancellation: +0 under round-to-nearest.
             return Float::<E, F, FAMILY>::zero();
         }
@@ -1784,17 +1785,17 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
             return self.native_op(other, 1);
         }
         let neg = self.sign() != other.sign();
-        if self.is_nan() || other.is_nan() {
+        if unlikely(self.is_nan() || other.is_nan()) {
             return Float::<E, F, FAMILY>::nan();
         }
-        if self.is_infinite() || other.is_infinite() {
+        if unlikely(self.is_infinite() || other.is_infinite()) {
             if self.is_zero() || other.is_zero() {
                 // 0 * inf has no value.
                 return Float::<E, F, FAMILY>::nan();
             }
             return Float::<E, F, FAMILY>::infinity(neg);
         }
-        if self.is_zero() || other.is_zero() {
+        if unlikely(self.is_zero() || other.is_zero()) {
             if neg {
                 return Float::<E, F, FAMILY>::neg_zero();
             }

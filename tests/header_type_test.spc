@@ -75,8 +75,9 @@ const TM: str = M"(extern "C" "time.h" {
 // `div_t`: the same members on every target.
 const DIV: str = "extern \"C\" \"stdlib.h\" {\n    @import(\"div_t\")\n    struct div_t { pub quot: i32, pub rem: i32 }\n    fn div(n: i32, d: i32) div_t;\n}\n";
 
-// The emitted C: the header's own type by its tag or typedef, member access by name, the header's
-// include, the size and alignment of the type, and each field's offset, size and signedness.
+// The emitted C: the header's own type by its tag or typedef (by alias in a unit, for a header
+// `super_rt.h` does not include), member access by name, the header's include, the size and alignment
+// of the type, and each field's offset, size and signedness.
 @test
 fn header_type_emits_layout_checks() {
     let mut src = String::from_str(DIV);
@@ -86,7 +87,10 @@ fn header_type_emits_layout_checks() {
     let c = h::compile_c(src.as_str());
     assert(c.ok(), "the program compiles");
     assert(c.code_has("#include <stdlib.h>"), "the header is included");
-    assert(c.code_has("struct rec r = (struct rec){ .a = 3"), "a literal names the header's type by its tag");
+    assert(
+        c.code_has("__sc_x_struct_rec r = (__sc_x_struct_rec){ .a = 3"),
+        "a literal names the header's type by its alias",
+    );
     assert(c.code_has("r.b = 4"), "a field is the C member by name");
     assert(c.code_has("div_t d = div("), "a typedef'd type is its typedef name");
     assert(
@@ -172,7 +176,7 @@ fn header_type_check_per_field_kind() {
     );
     assert(
         c.code_has(
-            "_Generic(((struct rec *)0)->t, struct tm: 1, default: 0), \"super-c: field 'rec.t' must be a 'struct tm' in C\"",
+            "_Generic(((struct rec *)0)->t, __sc_x_struct_tm: 1, default: 0), \"super-c: field 'rec.t' must be a 'struct tm' in C\"",
         ),
         "a header struct field",
     );
@@ -182,7 +186,7 @@ fn header_type_check_per_field_kind() {
         ),
         "an opaque type's layout",
     );
-    assert(c.code_has("_Generic(((struct rec *)0)->b, blob: 1, default: 0)"), "an opaque field");
+    assert(c.code_has("_Generic(((struct rec *)0)->b, __sc_x_blob: 1, default: 0)"), "an opaque field");
     assert(
         c.code_has(
             "_Static_assert(offsetof(union u, i) == 0u, \"super-c: field 'u.i' must sit at byte 0 in C: declare every member of the header's type, in its order\");",
@@ -492,23 +496,20 @@ fn header_enum_tag_and_typedef() {
     }
     assert(r.ok(), "the program compiles");
     assert(
-        p.gen_has(
-            "__sc_fwd.h",
-            "_Static_assert(sizeof(enum color) != 0, \"super-c: 'color' must be a complete C type\");",
-        ),
+        p.xhdr_has("_Static_assert(sizeof(enum color) != 0, \"super-c: 'color' must be a complete C type\");"),
         "an enum is its C tag",
     );
-    assert(p.gen_has("__sc_fwd.h", "_Static_assert(sizeof(size_kind) != 0,"), "a typedef'd enum is its typedef");
+    assert(p.xhdr_has("_Static_assert(sizeof(size_kind) != 0,"), "a typedef'd enum is its typedef");
     assert(
-        p.gen_has("__sc_fwd.h", "_Generic(((struct pen *)0)->c, enum color: 1, default: 0)"),
+        p.xhdr_has("_Generic(((struct pen *)0)->c, __sc_x_enum_color: 1, default: 0)"),
         "an enum member is checked by its tag",
     );
     assert(
-        p.gen_has("__sc_fwd.h", "_Generic(((struct pen *)0)->k, size_kind: 1, default: 0)"),
+        p.xhdr_has("_Generic(((struct pen *)0)->k, __sc_x_size_kind: 1, default: 0)"),
         "a typedef'd enum member is checked by its typedef",
     );
     assert(
-        p.gen_has("__sc_fwd.h", "_Static_assert(sizeof(struct pen) == 12u && _Alignof(struct pen) == 4u,"),
+        p.xhdr_has("_Static_assert(sizeof(struct pen) == 12u && _Alignof(struct pen) == 4u,"),
         "a struct of enums has the C layout",
     );
     let cc = p.cc_build("");
@@ -685,7 +686,7 @@ fn header_type_reads_stat_of_a_file() {
         eprintln("{}", r.text());
     }
     assert(r.ok(), "the program compiles");
-    assert(p.gen_has("__sc_fwd.h", "_Static_assert(sizeof(struct stat) == "), "the platform's layout is checked");
+    assert(p.xhdr_has("_Static_assert(sizeof(struct stat) == "), "the platform's layout is checked");
     let cc = p.cc_build("");
     if !cc.ok() {
         eprintln("{}", cc.text());
@@ -717,12 +718,12 @@ fn header_type_local_header_round_trip() {
         eprintln("{}", r.text());
     }
     assert(r.ok(), "the program compiles");
-    assert(p.gen_has("__sc_fwd.h", "_Generic(((lib_u *)0)->f, float: 1, default: 0)"), "a typedef'd union");
+    assert(p.xhdr_has("_Generic(((lib_u *)0)->f, float: 1, default: 0)"), "a typedef'd union");
     assert(
-        p.gen_has("__sc_fwd.h", "_Generic(((struct lib_rec *)0)->anon, lib_anon: 1, default: 0)"),
+        p.xhdr_has("_Generic(((struct lib_rec *)0)->anon, __sc_x_lib_anon: 1, default: 0)"),
         "a typedef'd anonymous struct member",
     );
-    assert(p.gen_has("__sc_fwd.h", "_Static_assert(sizeof(lib_blob) == 32u && _Alignof(lib_blob) == 8u,"), "a layout");
+    assert(p.xhdr_has("_Static_assert(sizeof(lib_blob) == 32u && _Alignof(lib_blob) == 8u,"), "a layout");
     let cc = p.cc_build("");
     if !cc.ok() {
         eprintln("{}", cc.text());
@@ -761,4 +762,75 @@ fn extern_void_pointer_argument_spells_the_conversion() {
     assert(c.ok(), "the program compiles");
     assert(c.code_has("memset((void *)(&x)"), "a typed pointer converts to void *");
     assert(c.code_has("memset(v, 0LL, 4ULL)"), "a void pointer passes as it is");
+}
+
+// A header's macros reach only the units that use one of its items: `<windows.h>` defines `near` and
+// `far` empty, which would break every other unit's identifiers of those names. The binding unit spells
+// the header's function by its alias; a parameter of the same name elsewhere brings no header. The
+// binding unit compiles outside the unity build, whose later members would see the macros too.
+@test
+fn header_macros_stay_in_the_units_that_use_the_header() {
+    let p = cli::proj_new();
+    p.mkfile("lib.h", "#ifndef LIB_H\n#define LIB_H\n#define near\n#define far\nint twice(int x);\n#endif\n");
+    p.mkfile("lib.c", "#include \"lib.h\"\nint twice(int x) { return 2 * x; }\n");
+    p.mkfile(
+        "bind.spc",
+        "extern \"C\" \"lib.h\" {\n    fn twice(x: i32) i32;\n}\n\npub fn doubled(x: i32) i32 {\n    return unsafe twice(x);\n}\n",
+    );
+    p.mkfile("other.spc", "pub fn gap(near: i32, far: i32, twice: i32) i32 {\n    return far - near + twice;\n}\n");
+    p.mkfile(
+        "main.spc",
+        "import bind;\nimport other;\n\nfn span(near: i32, far: i32) i32 {\n    return far - near;\n}\n\nfn main() i32 {\n    return span(1, bind::doubled(2)) + other::gap(1, 1, 0) - 3;\n}\n",
+    );
+    let r = p.compile("main.spc");
+    if !r.ok() {
+        eprintln("{}", r.text());
+    }
+    assert(r.ok(), "the program compiles");
+    assert(p.xhdr_has("lib.h\""), "the header has its own generated file");
+    assert(!p.gen_has("__sc_fwd.h", "lib.h"), "the forward header does not include it");
+    assert(p.gen_has("bind.c", "__sc_x_twice(x)"), "the binding unit calls the function by its alias");
+    assert(p.gen_has("bind.c", "__sc_t/__scx"), "the binding unit includes the header");
+    assert(!p.gen_has("other.c", "__sc_t/__scx"), "a parameter named like the function brings no header");
+    assert(!p.gen_has("main.c", "__sc_t/__scx"), "the other unit includes no header");
+    // The build's own C compile: the units of a small program compile as one, but the binding's.
+    p.mkfile("build.toml", "bin = \"bin\"\nroot = \"main.spc\"\n");
+    let b = cli::superc_in(p.dir(), "build -o bin");
+    if !b.ok() {
+        eprintln("{}", b.text());
+    }
+    assert(b.ok(), "the build compiles and links");
+    assert(p.gen_has("__sc_unity.c", "main.c"), "the other units are in the unity build");
+    assert(!p.gen_has("__sc_unity.c", "bind.c"), "the binding unit compiles alone");
+    assert_eq(p.run_bin(), 0);
+}
+
+// A module's header order holds in every file, also when an earlier module declares the later
+// header first: `<ws2tcpip.h>` must come before `<windows.h>`, which `a.h` and `b.h` model.
+@test
+fn header_order_of_a_module_holds_across_modules() {
+    let p = cli::proj_new();
+    p.mkfile("a.h", "#ifndef A_H\n#define A_H\n#ifdef B_H\n#error a.h after b.h\n#endif\nint a_one(void);\n#endif\n");
+    p.mkfile("b.h", "#ifndef B_H\n#define B_H\nint b_two(void);\nint b_three(void);\n#endif\n");
+    p.mkfile("a.c", "#include \"a.h\"\nint a_one(void) { return 1; }\n");
+    p.mkfile("b.c", "#include \"b.h\"\nint b_two(void) { return 2; }\nint b_three(void) { return 3; }\n");
+    p.mkfile(
+        "early.spc",
+        "extern \"C\" \"b.h\" {\n    fn b_two() i32;\n}\n\npub fn two() i32 {\n    return unsafe b_two();\n}\n",
+    );
+    p.mkfile(
+        "net.spc",
+        "extern \"C\" \"a.h\" {\n    fn a_one() i32;\n}\n\nextern \"C\" \"b.h\" {\n    fn b_three() i32;\n}\n\npub fn both() i32 {\n    return unsafe a_one() + unsafe b_three();\n}\n",
+    );
+    p.mkfile(
+        "main.spc",
+        "import early;\nimport net;\n\nfn main() i32 {\n    return early::two() + net::both() - 6;\n}\n",
+    );
+    p.mkfile("build.toml", "bin = \"bin\"\nroot = \"main.spc\"\n");
+    let b = cli::superc_in(p.dir(), "build -o bin");
+    if !b.ok() {
+        eprintln("{}", b.text());
+    }
+    assert(b.ok(), "the build compiles and links");
+    assert_eq(p.run_bin(), 0);
 }

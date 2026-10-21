@@ -59,7 +59,7 @@ materially extends** what the skill documents.
 | `super-c-compiler-optimization` | Profiling protocol, optimization phases, bench gate, fixpoint | The benchmarking protocol, optimization patterns, or fixpoint contract changes |
 | `super-c-compiler-internals` | Pipeline stages, Core IR, HIR, identity model, freeze contract | A pass is added/removed/reordered, Core IR representation changes, identity model changes |
 | `super-c-testing` | @test lifecycle, fixtures, assert builtins, leak tracker, harness | Test attribute behavior, fixture mechanics, or harness architecture changes |
-| `super-c-ffi` | extern blocks, @c.source/@c.link, str/NUL, bindgen | FFI mechanism, attribute behavior, or string interop changes |
+| `super-c-ffi` | extern blocks, @c.source/@link, str/NUL, bindgen | FFI mechanism, attribute behavior, or string interop changes |
 | `super-c-self-hosting` | Fixpoint contract, bootstrap, porting patterns | The bootstrap workflow, fixpoint protocol, or a new porting-bug pattern is discovered |
 | `super-c-concurrency` | launch, scheduler, Send/Sync, channels, data parallelism | A concurrency primitive is added/changed, scheduler behavior changes |
 | `super-c-documentation` | Comment rules, doc tiers, delete-test, banned filler | The documentation policy changes |

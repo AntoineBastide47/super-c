@@ -2751,6 +2751,20 @@ fn main() i32 { let b = i64::m(); return (A + B + b) as i32; }
 // thread-local, a nested literal, a local and a `zeroed` static: C's static initialization.
 fn omitted_c_object_and_union_fields_zero_fill(b: &mut h::ExitBatch) {
     b.add(
+        "all-zero members and elements of statics",
+        M"(struct In { pub arr: [i32; 2], pub n: i32 }
+struct Out { pub i: In, pub r: i32 }
+union U { pub i: In, pub r: i32 }
+static mut G: Out = Out { i: In { arr: [0, 0], n: 0 }, r: 1 };
+static mut H: [In; 3] = [In { arr: [0, 0], n: 0 }, In { arr: [0, 0], n: 2 }, In { arr: [0, 0], n: 3 }];
+static mut Z: U = U { i: In { arr: [0, 0], n: 0 } };
+fn main() i32 {
+    return unsafe (G.r + H[0].n + H[1].n + H[2].n + G.i.n + G.i.arr[1] + Z.i.n) - 6;
+}
+)",
+        0,
+    );
+    b.add(
         "zero C object",
         M"(extern "C" "pthread.h" {
     @layout(sizeof(usize), sizeof(usize))

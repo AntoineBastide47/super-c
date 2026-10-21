@@ -119,7 +119,7 @@ fn lines_normalized<T: Float, const N: usize>(m: Mat<T, N, N>, epsilon: T) bool 
 
 // Always inlined, so that `is_orthogonal`'s row pass reuses the column pass's products, as GLM's single
 // body does: two out-of-line calls cost about 25% more.
-@c.always_inline
+@always_inline
 fn columns_orthonormal<T: Float, const N: usize>(m: Mat<T, N, N>, epsilon: T) bool {
     for i in 0..N {
         let ci = unsafe m.c[i];

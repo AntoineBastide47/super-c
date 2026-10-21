@@ -524,6 +524,34 @@ pub struct Mangler {
     esc_seen: Vector<u64>,
 }
 
+/// Spell item `d`'s C name, `out[st..]`, as its alias when its extern block's header is scoped
+/// (`Package::extern_item_scoped`): `x_token` of the name. The header's generated file defines the
+/// alias as the name (`driver::emit::cemit_extern_includes`), and since no other C name spells the
+/// token, exactly the files that use one of the header's items include that file.
+pub fn x_alias(p: &loader::Package, d: DefId, out: &mut String, st: usize) {
+    if !p.extern_item_scoped(d) {
+        return;
+    }
+    let nm = String::from_str(out.as_str().slice(st, out.len()));
+    out.truncate(st);
+    x_token(nm.as_str(), out);
+}
+
+/// The alias token of C spelling `name` of an extern item (`x_alias`): `__sc_x_` and the spelling,
+/// a space as `_` (`struct stat` is `__sc_x_struct_stat`, apart from function `stat`).
+pub fn x_token(name: str, out: &mut String) {
+    out.push_str("__sc_x_");
+    for i in 0..name.len() {
+        out.push_byte(
+            if name[i] == b' ' {
+                b'_';
+            } else {
+                name[i];
+            },
+        );
+    }
+}
+
 // RecEv kinds; the payload schema per kind is fixed by its recording site.
 /// Journaled event kinds (RecEv.kind); the trailing phrases say which fields each kind uses.
 pub const RK_CHUNK: u8 = 1; // s1 = TU chunk text (driver-recorded, replay re-derives the proto)
@@ -2316,11 +2344,14 @@ extend Mangler {
     /// The C symbol of function `fnode` (module `fm`) with resolved extend target `target`
     /// (`target.node == NODE_NONE` = free function): pin | `[modpfx][Target__]name[suffix]`.
     pub fn fn_sym(self: &mut Self, fm: ModuleId, fnode: NodeId, target: DefId, out: &mut String) bool {
+        let st = out.len();
         if self.sym_override(fm, fnode, out) {
             // An `@export` function is still its module's: the spelling unit needs that module's
             // prototype header, as for a prefixed symbol.
             if !unsafe (*self.p().module_ast_const(fm)).at_const(fnode).as_data.function.is_extern() {
                 self.spell_edge(fm);
+            } else {
+                x_alias(self.p(), DefId { module: fm, node: fnode }, out, st);
             }
             return true;
         }
@@ -2329,13 +2360,13 @@ extend Mangler {
         if unsafe (*a).at_const(fnode).as_data.function.is_extern() {
             // An extern function IS its C symbol: never prefixed, never suffixed.
             self.c_ident(fm, fname, out);
+            x_alias(self.p(), DefId { module: fm, node: fnode }, out, st);
             return true;
         }
         let src = self.p().modules.at(fm as usize).source.as_str();
         let ftxt = src.slice(fname.start as usize, fname.end as usize);
         // Only the program entry is the C `main` the driver renames; any other `main` is ordinary.
         let is_main = target.node == NODE_NONE && ftxt == "main" && self.p().is_entry(fm, fnode);
-        let st = out.len();
         if !is_main {
             self.modpfx(fm, out);
         }
@@ -2581,16 +2612,22 @@ extend Mangler {
         let a = self.p().module_ast_const(m);
         // An extern block constant's `@import` names the C macro its check reads, not its symbol.
         let own = unsafe (*a).at_const(cnode).kind == NodeKind::NODE_CONST && unsafe (*a).at_const(cnode).as_data.const_def.c_macro;
+        let ext = unsafe (*a).at_const(cnode).kind == NodeKind::NODE_CONST && unsafe (*a).at_const(cnode).as_data.const_def.is_extern;
+        let st = out.len();
         if !own && self.sym_override(m, cnode, out) {
+            if ext {
+                x_alias(self.p(), DefId { module: m, node: cnode }, out, st);
+            }
             return true;
         }
-        if unsafe (*a).at_const(cnode).kind == NodeKind::NODE_CONST && unsafe (*a).at_const(cnode).as_data.const_def.is_extern {
+        if ext {
             // An extern-block static binds the C symbol the header declares.
             self.c_ident(
                 m,
                 unsafe (*a).at_const(unsafe (*a).at_const(cnode).as_data.const_def.name).as_data.name.text,
                 out,
             );
+            x_alias(self.p(), DefId { module: m, node: cnode }, out, st);
             return true;
         }
         let tgt = self.method_target(m, cnode);
@@ -3091,7 +3128,9 @@ extend Mangler {
         let src = self.p().modules.at(m as usize).source.as_str();
         let vs = unsafe (*a).at_const(unsafe (*a).at_const(variant).as_data.variant.name).as_data.name.text;
         if unsafe (*a).at_const(decl).as_data.aggregate.is_extern {
+            let st = out.len();
             out.push_str(src.slice(vs.start as usize, vs.end as usize));
+            x_alias(self.p(), DefId { module: m, node: decl }, out, st);
             return;
         }
         if self.tn_on && unsafe (*a).at_const(decl).as_data.aggregate.generics.len == 0 {
@@ -3160,6 +3199,7 @@ extend Mangler {
             if dn.as_data.aggregate.is_extern {
                 // A header struct, union or enum is its C tag (`struct stat`, `enum color`);
                 // `@import("pthread_attr_t")` pins a typedef name.
+                let st = out.len();
                 if !self.sym_override(y.module, y.as_data.decl, out) {
                     if y.kind == TypeKind::TYPE_ENUM {
                         out.push_str("enum ");
@@ -3172,6 +3212,7 @@ extend Mangler {
                         out,
                     );
                 }
+                x_alias(self.p(), DefId { module: y.module, node: y.as_data.decl }, out, st);
             } else {
                 let st = out.len();
                 self.qualified(y.module, dn.as_data.aggregate.name, out);
@@ -3265,6 +3306,7 @@ extend Mangler {
         if y.kind == TypeKind::TYPE_OPAQUE {
             // An opaque handle is spelled as C spells it: the `@import` pin when present (headers
             // that only declare the TAG need `struct x` written out), else the source name.
+            let st = out.len();
             if !self.sym_override(y.module, y.as_data.decl, out) {
                 let dn = unsafe (*self.p().module_ast_const(y.module)).at_const(y.as_data.decl);
                 self.c_ident(
@@ -3273,6 +3315,7 @@ extend Mangler {
                     out,
                 );
             }
+            x_alias(self.p(), DefId { module: y.module, node: y.as_data.decl }, out, st);
             self.join_decl("", decl, out);
             return true;
         }

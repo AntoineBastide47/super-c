@@ -13,7 +13,7 @@
 // the listener to be readable, `read`/`write` for the connection. From a plain thread the same calls block
 // that thread, so the API reads the same either way.
 //
-// Sockets are non-blocking underneath and the `sockaddr` handling lives in C (`ffi/sc_io.c`), so nothing
+// Sockets are non-blocking underneath and the `sockaddr` handling lives in `ffi/sc_io.spc`, so nothing
 // here encodes a platform layout. Addresses resolve to IPv4 or IPv6, whichever the name gives.
 //
 // Anything that can fail returns `Result<T, IoError>`, so `?` propagates it and the caller can say WHICH

@@ -474,7 +474,8 @@ fn emit_from(p: &mut loader::Package, from: usize, user_only: bool, code: &mut S
     }
     if !user_only {
         code.push_string(&o.fwd_h);
-        code.push_string(&o.ext_h);
+        // The unit's includes and its declarations of the prototypes that need a definition header.
+        code.push_string(o.tu_incs.at(uidx));
         for d in 0..o.defs_h.len() {
             code.push_string(o.defs_h.at(d));
         }

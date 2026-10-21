@@ -87,7 +87,7 @@ large error-handling block in the middle of a hot loop evicts the hot code from 
 instruction cache.
 
 Pattern: check a flag or error code in the hot loop, defer the formatting to after the
-loop exits (or to a `@c.noinline` helper).
+loop exits (or to a `@noinline` helper).
 
 ## Body Sharing for Generic Instances
 
@@ -209,10 +209,10 @@ Frontend and typecheck:
 - Substituted-signature memo, CTFE success memo, prepared-signature replay: 0 to 0.6% of
   the profile, or flat cycles and +3.1 Kalloc.
 - A prelude `str` type cache: no change; the probes are not hot.
-- A second round of `@c.always_inline` on small hot functions: at most 1 Mcyc per phase
+- A second round of `@always_inline` on small hot functions: at most 1 Mcyc per phase
   for +165 KB of text under clang LTO, which already inlines them. gcc LTO (Linux, Windows)
-  does not: an inline `SplitVec::at` fast path with a `@c.cold` slow path, plus
-  `@c.always_inline` on `Map::get` and `str::eq`, cut the serial self-transpile's load to
+  does not: an inline `SplitVec::at` fast path with a `@cold` slow path, plus
+  `@always_inline` on `Map::get` and `str::eq`, cut the serial self-transpile's load to
   plan phases by 49 ms (-6%) and its instructions by 4% under gcc-15 LTO, and is neutral under
   clang. Check a new inlining lever with both compilers.
 - Parser micro-optimizations (double `raw_peek`, duplicate range checks, token re-reads):

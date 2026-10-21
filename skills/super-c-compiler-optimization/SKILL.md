@@ -290,7 +290,7 @@ What to look for:
 - **Unnecessary sign/zero extensions**: type mismatches between 32-bit and 64-bit values
   causing extension instructions on every use
 - **Unaligned accesses**: struct fields crossing cache lines (fix with field reordering
-  or `@c.align`)
+  or `@align`)
 - **Spill-heavy functions**: too many live variables forcing register spills to the stack
   (split the function, reduce live variable count)
 
@@ -347,7 +347,7 @@ Rules for a valid A/B:
   compiled in against one without them gave 300 to 800% false regressions.
 - A change is a regression only when the median moves more than its own three-run spread
   (about 5%).
-- On macOS the cycle counts come from `proc_pid_rusage` (`std/testing/bench_sys.c`) and
+- On macOS the cycle counts come from `proc_pid_rusage` (`std/testing/bench_sys.spc`) and
   include kernel time of every thread.
 - For clean C-compile timings, set `SC_NO_CACHE=1 SC_NO_EMIT_CACHE=1 SC_NO_TU_CACHE=1`;
   otherwise a cache makes the "clean" build fast.

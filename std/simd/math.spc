@@ -395,7 +395,7 @@ pub fn atan2<T: Lane, const N: usize>(y: Simd<T, N>, x: Simd<T, N>) Simd<T, N> {
     let far = sd.greater_than(Simd::splat(kc.hyp_hi)) | sd.less_than(Simd::splat(kc.hyp_lo));
     let mut ns = sn;
     let mut ds = sd;
-    if far.any() {
+    if unlikely(far.any()) {
         let (_, e0) = frexp_any(choose(sd.equal(sp(0.0)), sp(1.0), sd));
         let e = choose(far, e0, sp(0.0));
         ns = scale(sn, -e);
@@ -405,7 +405,7 @@ pub fn atan2<T: Lane, const N: usize>(y: Simd<T, N>, x: Simd<T, N>) Simd<T, N> {
     let small = ns.less_than(ds * kc.tiny);
     let mut h0 = ah;
     let mut l0 = al;
-    if small.any() {
+    if unlikely(small.any()) {
         h0 = choose(small, sn / sd, ah);
         l0 = choose(small, sp(0.0), al);
     }

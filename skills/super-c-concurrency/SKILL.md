@@ -42,8 +42,10 @@ marker. The runtime module is loaded conditionally: programs without `launch` pa
 Each task is a stackful coroutine on its own guard-paged stack (256 KiB via
 `mmap`+`mprotect` / `VirtualAlloc`; `runtime::set_stack_size` changes it before the pool starts,
 `runtime::stack_size` reads it). A program built with AddressSanitizer (`--sanitizers`) gets four
-times the default, since its frames carry redzones (`sc_rt_asan`). Context switching uses `ucontext` (POSIX) or fibers
-(Windows).
+times the default, since its frames carry redzones (`sc_rt_asan`). Context switching is hand-written assembly: module-level `asm` items of
+`ffi/sc_runtime.spc` per object format (Mach-O, ELF and COFF) on x86-64 and aarch64, which save the
+callee-saved registers, the FP control state and, on Windows, the TEB stack fields. Windows on
+arm64 runs each context on an OS fiber instead (`FiberCtx`, a heap context).
 
 Blocking **parks** the coroutine (saves context, returns worker to scheduler) instead of
 blocking the OS thread. A worker and its coroutine share an OS thread (the switch only
@@ -57,7 +59,8 @@ body can run user code, so a reachable std body ticks only then: always when it 
 value or a `dyn` method (or a std body that does), and, when it runs user code only through
 bound dispatch, only in the instances binding a type whose methods can be user code
 (`Map<u64, u64>` probes never tick; `Map<UserKey, V>` probes and `iter::for_each` over a user
-iterator do). Loops in `std::parallel` never tick.
+iterator do). Loops in `std::parallel` and in the substrate `ffi/sc_runtime.spc` never tick
+(`Package::runtime_path`): a tick inside a spinlock, a parked wait or a signal handler is a fault.
 
 The tick is a function-local countdown (`__sc_spc`, budget 2048): every iteration takes one,
 and the iteration that takes the last one calls the hook and resets it. A counted loop is an
@@ -248,7 +251,7 @@ can always reach it, plus a fixed bucket table. Windows parks through `WaitOnAdd
 and retains nothing. Wait records themselves live in the parking frame and are not
 retained; `sc_rt_parked()` counts them, so a test can wait until its plain threads are
 asleep (zero on Windows, which keeps no records; pool workers sleep elsewhere). The bucket
-table (`sc_rt_lot_bucket` in `ffi/sc_rt.c`) is a fixed power of two, each bucket aligned.
+table (`sc_rt_lot_bucket` in `ffi/sc_runtime.spc`) is a fixed power of two, each bucket aligned.
 Bucket count did not matter (one bucket against sixteen for sixteen locks measured the
 same), and padding each mutex to a line is the wrong trade: `Mutex<i64>` is 16 bytes.
 

@@ -6,83 +6,83 @@ import std::cpu;
 extern "C" "arm_neon.h" {
     /// A 128-bit register of 8 16-bit lanes.
     @arch(aarch64)
-    @c.value(16, 16)
+    @value(16, 16)
     pub type int16x8_t;
     /// A 128-bit register of 16 8-bit lanes.
     @arch(aarch64)
-    @c.value(16, 16)
+    @value(16, 16)
     pub type int8x16_t;
     /// A 64-bit register of 8 8-bit lanes.
     @arch(aarch64)
-    @c.value(8, 8)
+    @value(8, 8)
     pub type int8x8_t;
     /// A 128-bit register of 8 16-bit lanes.
     @arch(aarch64)
-    @c.value(16, 16)
+    @value(16, 16)
     pub type uint16x8_t;
     /// A 128-bit register of 16 8-bit lanes.
     @arch(aarch64)
-    @c.value(16, 16)
+    @value(16, 16)
     pub type uint8x16_t;
     /// A 64-bit register of 8 8-bit lanes.
     @arch(aarch64)
-    @c.value(8, 8)
+    @value(8, 8)
     pub type uint8x8_t;
     /// A 64-bit register of 2 32-bit lanes.
     @arch(aarch64)
-    @c.value(8, 8)
+    @value(8, 8)
     pub type float32x2_t;
     /// A 128-bit register of 4 32-bit lanes.
     @arch(aarch64)
-    @c.value(16, 16)
+    @value(16, 16)
     pub type float32x4_t;
     /// A 128-bit register of 2 64-bit lanes.
     @arch(aarch64)
-    @c.value(16, 16)
+    @value(16, 16)
     pub type float64x2_t;
     /// A 64-bit register of 4 16-bit lanes.
     @arch(aarch64)
-    @c.value(8, 8)
+    @value(8, 8)
     pub type int16x4_t;
     /// A 64-bit register of 2 32-bit lanes.
     @arch(aarch64)
-    @c.value(8, 8)
+    @value(8, 8)
     pub type int32x2_t;
     /// A 128-bit register of 4 32-bit lanes.
     @arch(aarch64)
-    @c.value(16, 16)
+    @value(16, 16)
     pub type int32x4_t;
     /// A 128-bit register of 2 64-bit lanes.
     @arch(aarch64)
-    @c.value(16, 16)
+    @value(16, 16)
     pub type int64x2_t;
     /// A 64-bit register of 4 16-bit lanes.
     @arch(aarch64)
-    @c.value(8, 8)
+    @value(8, 8)
     pub type uint16x4_t;
     /// A 64-bit register of 2 32-bit lanes.
     @arch(aarch64)
-    @c.value(8, 8)
+    @value(8, 8)
     pub type uint32x2_t;
     /// A 128-bit register of 4 32-bit lanes.
     @arch(aarch64)
-    @c.value(16, 16)
+    @value(16, 16)
     pub type uint32x4_t;
     /// A 128-bit register of 2 64-bit lanes.
     @arch(aarch64)
-    @c.value(16, 16)
+    @value(16, 16)
     pub type uint64x2_t;
     /// Two 128-bit registers of 16 lanes, in order.
     @arch(aarch64)
-    @c.value(32, 16)
+    @value(32, 16)
     pub type uint8x16x2_t;
     /// Three 128-bit registers of 16 lanes, in order.
     @arch(aarch64)
-    @c.value(48, 16)
+    @value(48, 16)
     pub type uint8x16x3_t;
     /// Four 128-bit registers of 16 lanes, in order.
     @arch(aarch64)
-    @c.value(64, 16)
+    @value(64, 16)
     pub type uint8x16x4_t;
 
     @arch(aarch64)
@@ -1056,151 +1056,151 @@ extern "C" "arm_neon.h" {
     pub fn vgetq_lane_u16(v: uint16x8_t, lane: i32) u16;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 8)
+    @reads(ptr, 8)
     pub fn vld1_f32(ptr: *const f32) float32x2_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 4)
+    @reads(ptr, 4)
     pub fn vld1_lane_f32(ptr: *const f32, src: float32x2_t, lane: i32) float32x2_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 2)
+    @reads(ptr, 2)
     pub fn vld1_lane_s16(ptr: *const i16, src: int16x4_t, lane: i32) int16x4_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 4)
+    @reads(ptr, 4)
     pub fn vld1_lane_s32(ptr: *const i32, src: int32x2_t, lane: i32) int32x2_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 1)
+    @reads(ptr, 1)
     pub fn vld1_lane_s8(ptr: *const i8, src: int8x8_t, lane: i32) int8x8_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 2)
+    @reads(ptr, 2)
     pub fn vld1_lane_u16(ptr: *const u16, src: uint16x4_t, lane: i32) uint16x4_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 4)
+    @reads(ptr, 4)
     pub fn vld1_lane_u32(ptr: *const u32, src: uint32x2_t, lane: i32) uint32x2_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 1)
+    @reads(ptr, 1)
     pub fn vld1_lane_u8(ptr: *const u8, src: uint8x8_t, lane: i32) uint8x8_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 8)
+    @reads(ptr, 8)
     pub fn vld1_s16(ptr: *const i16) int16x4_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 8)
+    @reads(ptr, 8)
     pub fn vld1_s32(ptr: *const i32) int32x2_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 8)
+    @reads(ptr, 8)
     pub fn vld1_s8(ptr: *const i8) int8x8_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 8)
+    @reads(ptr, 8)
     pub fn vld1_u16(ptr: *const u16) uint16x4_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 8)
+    @reads(ptr, 8)
     pub fn vld1_u32(ptr: *const u32) uint32x2_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 8)
+    @reads(ptr, 8)
     pub fn vld1_u8(ptr: *const u8) uint8x8_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 16)
+    @reads(ptr, 16)
     pub fn vld1q_f32(ptr: *const f32) float32x4_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 16)
+    @reads(ptr, 16)
     pub fn vld1q_f64(ptr: *const f64) float64x2_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 4)
+    @reads(ptr, 4)
     pub fn vld1q_lane_f32(ptr: *const f32, src: float32x4_t, lane: i32) float32x4_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 8)
+    @reads(ptr, 8)
     pub fn vld1q_lane_f64(ptr: *const f64, src: float64x2_t, lane: i32) float64x2_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 2)
+    @reads(ptr, 2)
     pub fn vld1q_lane_s16(ptr: *const i16, src: int16x8_t, lane: i32) int16x8_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 4)
+    @reads(ptr, 4)
     pub fn vld1q_lane_s32(ptr: *const i32, src: int32x4_t, lane: i32) int32x4_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 8)
+    @reads(ptr, 8)
     pub fn vld1q_lane_s64(ptr: *const i64, src: int64x2_t, lane: i32) int64x2_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 1)
+    @reads(ptr, 1)
     pub fn vld1q_lane_s8(ptr: *const i8, src: int8x16_t, lane: i32) int8x16_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 2)
+    @reads(ptr, 2)
     pub fn vld1q_lane_u16(ptr: *const u16, src: uint16x8_t, lane: i32) uint16x8_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 4)
+    @reads(ptr, 4)
     pub fn vld1q_lane_u32(ptr: *const u32, src: uint32x4_t, lane: i32) uint32x4_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 8)
+    @reads(ptr, 8)
     pub fn vld1q_lane_u64(ptr: *const u64, src: uint64x2_t, lane: i32) uint64x2_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 1)
+    @reads(ptr, 1)
     pub fn vld1q_lane_u8(ptr: *const u8, src: uint8x16_t, lane: i32) uint8x16_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 16)
+    @reads(ptr, 16)
     pub fn vld1q_s16(ptr: *const i16) int16x8_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 16)
+    @reads(ptr, 16)
     pub fn vld1q_s32(ptr: *const i32) int32x4_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 16)
+    @reads(ptr, 16)
     pub fn vld1q_s64(ptr: *const i64) int64x2_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 16)
+    @reads(ptr, 16)
     pub fn vld1q_s8(ptr: *const i8) int8x16_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 16)
+    @reads(ptr, 16)
     pub fn vld1q_u16(ptr: *const u16) uint16x8_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 16)
+    @reads(ptr, 16)
     pub fn vld1q_u32(ptr: *const u32) uint32x4_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 16)
+    @reads(ptr, 16)
     pub fn vld1q_u64(ptr: *const u64) uint64x2_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 16)
+    @reads(ptr, 16)
     pub fn vld1q_u8(ptr: *const u8) uint8x16_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 32)
+    @reads(ptr, 32)
     pub fn vld1q_u8_x2(ptr: *const u8) uint8x16x2_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 48)
+    @reads(ptr, 48)
     pub fn vld1q_u8_x3(ptr: *const u8) uint8x16x3_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.reads(ptr, 64)
+    @reads(ptr, 64)
     pub fn vld1q_u8_x4(ptr: *const u8) uint8x16x4_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
@@ -2380,139 +2380,139 @@ extern "C" "arm_neon.h" {
     pub fn vsqrtq_f64(a: float64x2_t) float64x2_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 8)
+    @writes(ptr, 8)
     pub fn vst1_f32(ptr: *mut f32, val: float32x2_t);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 4)
+    @writes(ptr, 4)
     pub fn vst1_lane_f32(ptr: *mut f32, val: float32x2_t, lane: i32);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 2)
+    @writes(ptr, 2)
     pub fn vst1_lane_s16(ptr: *mut i16, val: int16x4_t, lane: i32);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 4)
+    @writes(ptr, 4)
     pub fn vst1_lane_s32(ptr: *mut i32, val: int32x2_t, lane: i32);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 1)
+    @writes(ptr, 1)
     pub fn vst1_lane_s8(ptr: *mut i8, val: int8x8_t, lane: i32);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 2)
+    @writes(ptr, 2)
     pub fn vst1_lane_u16(ptr: *mut u16, val: uint16x4_t, lane: i32);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 4)
+    @writes(ptr, 4)
     pub fn vst1_lane_u32(ptr: *mut u32, val: uint32x2_t, lane: i32);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 1)
+    @writes(ptr, 1)
     pub fn vst1_lane_u8(ptr: *mut u8, val: uint8x8_t, lane: i32);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 8)
+    @writes(ptr, 8)
     pub fn vst1_s16(ptr: *mut i16, val: int16x4_t);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 8)
+    @writes(ptr, 8)
     pub fn vst1_s32(ptr: *mut i32, val: int32x2_t);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 8)
+    @writes(ptr, 8)
     pub fn vst1_s8(ptr: *mut i8, val: int8x8_t);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 8)
+    @writes(ptr, 8)
     pub fn vst1_u16(ptr: *mut u16, val: uint16x4_t);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 8)
+    @writes(ptr, 8)
     pub fn vst1_u32(ptr: *mut u32, val: uint32x2_t);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 8)
+    @writes(ptr, 8)
     pub fn vst1_u8(ptr: *mut u8, val: uint8x8_t);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 16)
+    @writes(ptr, 16)
     pub fn vst1q_f32(ptr: *mut f32, val: float32x4_t);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 16)
+    @writes(ptr, 16)
     pub fn vst1q_f64(ptr: *mut f64, val: float64x2_t);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 4)
+    @writes(ptr, 4)
     pub fn vst1q_lane_f32(ptr: *mut f32, val: float32x4_t, lane: i32);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 8)
+    @writes(ptr, 8)
     pub fn vst1q_lane_f64(ptr: *mut f64, val: float64x2_t, lane: i32);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 2)
+    @writes(ptr, 2)
     pub fn vst1q_lane_s16(ptr: *mut i16, val: int16x8_t, lane: i32);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 4)
+    @writes(ptr, 4)
     pub fn vst1q_lane_s32(ptr: *mut i32, val: int32x4_t, lane: i32);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 8)
+    @writes(ptr, 8)
     pub fn vst1q_lane_s64(ptr: *mut i64, val: int64x2_t, lane: i32);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 1)
+    @writes(ptr, 1)
     pub fn vst1q_lane_s8(ptr: *mut i8, val: int8x16_t, lane: i32);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 2)
+    @writes(ptr, 2)
     pub fn vst1q_lane_u16(ptr: *mut u16, val: uint16x8_t, lane: i32);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 4)
+    @writes(ptr, 4)
     pub fn vst1q_lane_u32(ptr: *mut u32, val: uint32x4_t, lane: i32);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 8)
+    @writes(ptr, 8)
     pub fn vst1q_lane_u64(ptr: *mut u64, val: uint64x2_t, lane: i32);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 1)
+    @writes(ptr, 1)
     pub fn vst1q_lane_u8(ptr: *mut u8, val: uint8x16_t, lane: i32);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 16)
+    @writes(ptr, 16)
     pub fn vst1q_s16(ptr: *mut i16, val: int16x8_t);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 16)
+    @writes(ptr, 16)
     pub fn vst1q_s32(ptr: *mut i32, val: int32x4_t);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 16)
+    @writes(ptr, 16)
     pub fn vst1q_s64(ptr: *mut i64, val: int64x2_t);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 16)
+    @writes(ptr, 16)
     pub fn vst1q_s8(ptr: *mut i8, val: int8x16_t);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 16)
+    @writes(ptr, 16)
     pub fn vst1q_u16(ptr: *mut u16, val: uint16x8_t);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 16)
+    @writes(ptr, 16)
     pub fn vst1q_u32(ptr: *mut u32, val: uint32x4_t);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 16)
+    @writes(ptr, 16)
     pub fn vst1q_u64(ptr: *mut u64, val: uint64x2_t);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
-    @c.writes(ptr, 16)
+    @writes(ptr, 16)
     pub fn vst1q_u8(ptr: *mut u8, val: uint8x16_t);
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])

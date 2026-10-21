@@ -414,7 +414,7 @@ object aligned above 32 bytes 32 bytes off in its frames, and AVX-512 code fault
 Integer overflow (signed and unsigned) traps under `debug`, `test` and `race` and wraps under
 `release` and `bench` (language skill, `operations.md`). The
 emitted C is the same under every profile: it calls the arithmetic helpers of `super_rt.h`
-(std's `Int<N>` and `UInt<N>` operators call `sc_int_overflow` from std's `int128.h`), and the engine adds `-DSC_ARITH_WRAP` to every compile of a profile without overflow checks
+(std's `Int<N>` and `UInt<N>` operators call the runtime's `sc_int_overflow`), and the engine adds `-DSC_ARITH_WRAP` to every compile of a profile without overflow checks
 (`Profile::arith_wraps`: the `overflow-checks` key, else `opt-level` 2, 3, `"s"` or `"z"`;
 `push_profile_side` in `src/build_system/build.spc`). A build with no profile (`super-c build
 foo.spc`) checks. Every C compile of the generated tree, under every profile and target, also
@@ -823,7 +823,7 @@ detector's answer, read once per TU). A copy calls copies, so one check runs whe
 features enters vector code; a build at a level above the list makes none. The level list is part
 of the emit stamp. `SC_SIMD_LEVEL=<k>` (a test switch) sets the level the checks read.
 
-`std::cpu::detect` reads the features of the machine a program runs on (`ffi/sc_cpu.c`), with
+`std::cpu::detect` reads the features of the machine a program runs on (`ffi/sc_cpu.spc`), with
 the build's set included: a program can choose code at run time, never a result.
 
 ### Common flags
@@ -912,7 +912,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `SC_LEAK_CHECK` | Leak and double-free tracker (also reports a `realloc` of a freed pointer; no other use-after-free check): any non-`0` value reports at exit; a value starting `f`/`F` (e.g. `fatal`) exits 23 on findings |
 | `SC_TASK_TRACE` | Coroutine/task tracing for the life of the process |
 | `SC_SCHED_SEED` | Scheduler seed, read only when the program set none itself (deterministic replay) |
-| `SC_LOCK_ORDER` | Lock-order inversion checking (`ffi/sc_rt.c`): non-`0` reports; `f`/`F` prefix aborts |
+| `SC_LOCK_ORDER` | Lock-order inversion checking (`ffi/sc_runtime.spc`) in a build with `-DSC_LOCKDEP` (the `race` profile; the build constant `LOCKDEP`): non-`0` reports; `f`/`F` prefix aborts |
 | `SC_TEST_SUPERC` | Path of compiler under test (wasm lane) |
 
 ## Two-Stage Bootstrap
@@ -944,7 +944,7 @@ build/
     __sc_registry.c   # ZST sentinels and the reflection registry
     __sc_manifest     # output paths, content hashes, header dependencies, shard counts
     __sc_shards       # the shard counts this build used (read back by the next build)
-    __ldflags         # linker flags collected from @c.link (one per line)
+    __ldflags         # linker flags collected from @link (one per line)
     .tu_cache         # per-TU journal/replay cache
     app.h  app.c      # one .h/.c per module (.h: prototypes)
     __sc_t/           # one definition header per type (app__Point.h: typedef, definition, layout check)

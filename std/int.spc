@@ -16,13 +16,14 @@
 // all of that; unsigned limbs make every step defined and portable.
 //
 // Overflow in `+`, `-`, `*` and `pow` (and `Int`'s `abs`) follows the build profile, as in the built-in
-// integers: it traps with overflow checks and wraps without (`sc_int_overflow` in int128.h decides).
+// integers: it traps with overflow checks and wraps without (`sc_int_overflow`, a runtime primitive,
+// decides).
 // Division by zero and MIN / -1 panic either way. `wrapping_*`, `checked_*`, `overflowing_*` and
 // `saturating_*` give the other answers in every profile.
 //
 // The 128-bit width additionally routes addition, subtraction, multiplication and division through the
-// C compiler's native 128-bit integer type where one exists (the `sc_i128_*` helpers in `int128.h`,
-// shipped next to this file); targets without one, and every other width, run the limb code. Identical
+// C compiler's native 128-bit integer type where one exists (the `sc_i128_*` primitives of the C
+// backend's runtime); targets without one, and every other width, run the limb code. Identical
 // results either way: the two paths are pinned against each other in the tests.
 //
 // Both are plain values: no heap, no allocator, no `Free`. They copy like the built-in integers do.
@@ -52,11 +53,11 @@ fn mul_wide(a: u64, b: u64, hi: *mut u64) u64 {
 // The native 128-bit fast path.
 
 // Whether the C compiler building the emitted code has a native 128-bit integer type is knowable only
-// THERE, so the choice is made there: `sc_has_i128()` (int128.h, shipped next to this file) folds to a
+// THERE, so the choice is made there: `sc_has_i128()` (a primitive of the C backend's runtime) folds to a
 // constant, a `BITS == 128 && use_i128()` branch keeps exactly one side, and on targets without the
 // type the helpers below are never-reached stubs. Limbs pass as explicit 64-bit halves, least
 // significant first.
-extern "C" "int128.h" {
+extern "C" {
     fn sc_has_i128() i32;
     fn sc_i128_add(al: u64, ah: u64, bl: u64, bh: u64, rl: *mut u64, rh: *mut u64, carry: *mut u64) void;
     fn sc_i128_sub(al: u64, ah: u64, bl: u64, bh: u64, rl: *mut u64, rh: *mut u64, borrow: *mut u64) void;
@@ -86,7 +87,7 @@ fn div2by1_pre(u1: u64, u0: u64, d: u64, v: u64, r: *mut u64) u64 {
         q1 = q1.wrapping_sub(1);
         rem = rem.wrapping_add(d);
     }
-    if rem >= d {
+    if unlikely(rem >= d) {
         q1 = q1 + 1;
         rem = rem - d;
     }
@@ -156,10 +157,10 @@ const fn rev64(x: u64) u64 {
     return (v & 0x5555555555555555) << 1 | v >> 1 & 0x5555555555555555;
 }
 
-// Overflow in the `UInt` and `Int` operators (int128.h): the built-in trap with message `msg`, or a
+// Overflow in the `UInt` and `Int` operators (runtime primitives): the built-in trap with message `msg`, or a
 // return when the build wraps, and the operator then yields the wrapped value. A zero divisor and MIN / -1 trap
 // in every profile, as the built-in `/` and `%` do.
-extern "C" "int128.h" {
+extern "C" {
     fn sc_int_overflow(msg: *const u8) void;
     fn sc_int_div_zero(msg: *const u8) void;
     fn sc_int_div_overflow(msg: *const u8) void;
@@ -735,7 +736,7 @@ extend<const BITS: usize> IntBits<BITS> {
             let mut qhat: u64 = 0;
             let mut rhat: u64 = 0;
             let mut big = false; // rhat >= 2^64: the next-limb test cannot fail
-            if u2 >= vtop {
+            if unlikely(u2 >= vtop) {
                 qhat = 0xFFFFFFFFFFFFFFFF;
                 rhat = u1.wrapping_add(vtop);
                 big = rhat < u1;
@@ -746,7 +747,7 @@ extend<const BITS: usize> IntBits<BITS> {
                 let mut ph: u64 = 0;
                 let pl = mul_wide(qhat, vnext, &mut ph);
                 let u0 = unsafe un[j + n - 2];
-                if ph < rhat || ph == rhat && pl <= u0 {
+                if likely(ph < rhat || ph == rhat && pl <= u0) {
                     break;
                 }
                 qhat = qhat - 1;
@@ -772,7 +773,7 @@ extend<const BITS: usize> IntBits<BITS> {
             let d1 = t.wrapping_sub(carry);
             let d2 = d1.wrapping_sub(borrow);
             unsafe un[j + n] = d2;
-            if t < carry || d1 < borrow {
+            if unlikely(t < carry || d1 < borrow) {
                 // qhat was one too large: add the divisor back.
                 qhat = qhat - 1;
                 let mut c: u64 = 0;

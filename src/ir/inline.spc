@@ -514,18 +514,46 @@ fn is_concrete_pub_fn(pkg: *const loader::Package, d: DefId) bool {
     return ext == NODE_NONE || a.at_const(ext).as_data.extend_def.generics.len == 0;
 }
 
-/// A non-variadic extern function. Every TU sees its declaration: the header of its block, a header
-/// the runtime includes, or the prototype the emitter writes into `__sc_fwd.h`
-/// (`CEmit::collect_extern_proto`), so a call to it spells the same in any TU.
+/// A non-variadic extern function whose header is not scoped. Every TU sees its declaration: the
+/// header of its block in `__sc_fwd.h`, a header the runtime includes, or the prototype the emitter
+/// writes into `__sc_fwd.h` (`CEmit::collect_extern_proto`), so a call to it spells the same in any
+/// TU. A scoped header (`Package::extern_header_scoped`) would bring its macros into the caller's.
 fn is_global_extern_fn(pkg: *const loader::Package, d: DefId) bool {
     let p = unsafe &*pkg;
-    if d.node == NODE_NONE || d.module as usize >= p.modules.len() || !p.modules.at(d.module as usize).has_ast {
+    if d.node == NODE_NONE || d.module as usize >= p.modules.len() || !p.modules.at(d.module as usize).has_ast || p.extern_item_scoped(
+        d,
+    ) {
         return false;
     }
     let a = unsafe &*p.module_ast_const(d.module);
     let n = a.at_const(d.node);
     return n.kind == NodeKind::NODE_FUNCTION && n.as_data.function.is_extern() && !n.as_data.function.is_variadic();
 }
+
+// Whether type `t` of module `m` is, or reaches through pointers, references, slices and arrays, a
+// type of an extern block whose header is scoped (`Package::extern_item_scoped`).
+fn ty_scoped(p: &loader::Package, m: ModuleId, t: TypeId) bool {
+    let a = unsafe &*p.module_ast_const(m);
+    let mut x = t;
+    // An element chain is acyclic: it ends at a type of another kind.
+    for _d in 0..ELEM_CHAIN_MAX {
+        if x == TYPE_NONE {
+            return false;
+        }
+        let y = *a.type_at(x);
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_OPAQUE {
+            return p.extern_item_scoped(DefId { module: y.module, node: y.as_data.decl });
+        }
+        if y.kind != TypeKind::TYPE_POINTER && y.kind != TypeKind::TYPE_REFERENCE && y.kind != TypeKind::TYPE_SLICE && !y.arr_like() {
+            return false;
+        }
+        x = y.as_data.elem;
+    }
+    panic("an element chain longer than ELEM_CHAIN_MAX");
+}
+
+// The most element levels a type holds (`ty_scoped`).
+const ELEM_CHAIN_MAX: u32 = 4096;
 
 extend InlineCtx {
     /// Bytes the translation tables hold (SC_TYPE_STATS): the tables, the shape keys and their index.
@@ -1288,6 +1316,13 @@ extend InlineStore {
             }
         }
         for i in 0..body.locals.len() {
+            // A value of a scoped extern header's type, or its static, would bring the header, and its
+            // macros, into the caller's unit (`Package::extern_header_scoped`).
+            if ty_scoped(p, body.module, body.locals.at(i).ty) || body.locals.at(i).storage == ir::LS_STATIC_REF && p.extern_item_scoped(
+                body.locals.at(i).item,
+            ) {
+                return shape;
+            }
             // A const-generic parameter's value becomes a constant at the splice.
             if body.locals.at(i).storage == ir::LS_STATIC_REF && !is_param(p, body.locals.at(i).item) && !is_plain_item(
                 p,

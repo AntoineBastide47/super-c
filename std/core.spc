@@ -9,18 +9,16 @@
 // every value equal to itself (including NaN), so sorting and Map/Set keys work: note `-0.0 != 0.0`
 // under this order, unlike `==`. Complex numbers stay out: they admit no total order.
 
-/// Branch-layout hint: this condition is expected to be TRUE. The identity function (and
-/// const-evaluable): the inliner removes the call and the emitted C carries no branch hint, so the
-/// call records intent only.
-pub const fn likely(c: bool) bool {
-    return c;
-}
+/// Branch hint: this condition is expected to be TRUE. Returns `c` (const-evaluable); the branch that
+/// tests the call tells the C compiler (`__builtin_expect(c, 1)`), which then lays out the expected
+/// path first and keeps the branch instead of turning it into a select.
+@intrinsic("hint.likely")
+pub const fn likely(c: bool) bool;
 
-/// Branch-layout hint: this condition is expected to be FALSE (error paths, cold branches).
-/// See `likely` for the lowering.
-pub const fn unlikely(c: bool) bool {
-    return c;
-}
+/// Branch hint: this condition is expected to be FALSE (error paths, rare updates such as a new
+/// minimum in a scan). See `likely`; the C is `__builtin_expect(c, 0)`.
+@intrinsic("hint.unlikely")
+pub const fn unlikely(c: bool) bool;
 
 extern "C" {
     fn sqrt(x: f64) f64;
@@ -97,13 +95,13 @@ extern "C" {
     fn __sc_panic_str(msg: *const u8, len: usize) void;
 }
 
-// Bit counts and wrapping arithmetic over a u64 (bits.h, shipped next to this file): the C compiler's
+// Bit counts and wrapping arithmetic over a u64 (primitives of the C backend's runtime): the C compiler's
 // builtins with the zero input defined as 64, and C's unsigned operators, which wrap in every profile.
 // The IR interpreter models these names, so the `trailing_zeros`, `leading_zeros`, `count_ones`,
 // `wrapping_*`, `overflowing_*`, `checked_*` and `saturating_*` methods below evaluate at compile time
 // and a `const fn` may call them. The methods are plain `fn`s: the bootstrap release rejects a `const
 // fn` that calls an extern function it does not model.
-extern "C" "bits.h" {
+extern "C" {
     fn sc_ctz64(x: u64) u32;
     fn sc_clz64(x: u64) u32;
     fn sc_popcount64(x: u64) u32;
@@ -118,10 +116,10 @@ extern "C" "bits.h" {
 }
 
 /// Abort the program with a message on stderr. There is no unwinding: no cleanup runs, the process
-/// dies via abort(). A `@c.noreturn` call types as `never`, so a panicking switch/if arm unifies
+/// dies via abort(). A `@noreturn` call types as `never`, so a panicking switch/if arm unifies
 /// with value-producing siblings (`None => panic("empty")`).
-@c.noreturn
-@c.cold
+@noreturn
+@cold
 @no_const
 pub fn panic(msg: str) {
     unsafe __sc_panic_str(msg.ptr(), msg.len());

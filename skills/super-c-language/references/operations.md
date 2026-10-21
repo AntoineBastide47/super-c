@@ -60,8 +60,8 @@ target's pointer width (32 bits on wasm32), in compile-time evaluation too.
 ### Explicit overflow methods
 
 Every built-in integer has these methods. They never trap and give the same result in every
-profile. They are plain std source (`std/core.spc`) over the `sc_w*64` and `sc_mulo_*64` helpers
-of `std/bits.h` and evaluate at compile time, also inside a `const fn`.
+profile. They are plain std source (`std/core.spc`) over the runtime's `sc_w*64` and `sc_mulo_*64`
+helpers and evaluate at compile time, also inside a `const fn`.
 
 | Methods | Result |
 |---------|--------|
