@@ -12253,7 +12253,8 @@ fn resolve_stage(p: &mut loader::Package, lint: bool) {
 /// the closure of `root_file` (the module `load_user` loads next) reads and parses in tasks
 /// (`Package::spec_user`). `p` holds no module yet and `e` is its engine, which takes the prelude's
 /// deferred checks. `jobs` is the requested worker count, `steps` and `mem` the evaluation budgets of
-/// `e`. False, with the errors logged, when the prelude does not check.
+/// `e`, `cache` the build's cache root (`objcache::object_cache_dir`; empty: no image is kept). False,
+/// with the errors logged, when the prelude does not check.
 pub fn prelude_stage(
     p: &mut loader::Package,
     e: &mut iri::Interp,
@@ -12263,12 +12264,13 @@ pub fn prelude_stage(
     jobs: u32,
     steps: u32,
     mem: u64,
+    cache: str,
 ) bool {
     let key = pimg::key(p, std_dir, target, steps, mem);
-    let cid = pimg::cache_id(); // 0: no object cache, or an unreadable compiler: no image is kept
+    let cid = pimg::cache_id(cache); // 0: no object cache, or an unreadable compiler: no image is kept
     if cid != 0 {
         let mut at: usize = 0;
-        switch pimg::read(key, cid, &mut at) {
+        switch pimg::read(cache, key, cid, &mut at) {
             Some(b) => {
                 // A stored image a reader rejects leaves a partial state: load into a copy.
                 let mut t = p.settings_copy();
@@ -12315,7 +12317,7 @@ pub fn prelude_stage(
         }
         img = pimg::save(&q, &qe);
         if cid != 0 && q.lint_warnings == 0 {
-            pimg::write(key, cid, &q, std_dir, std_id, &img);
+            pimg::write(cache, key, cid, &q, std_dir, std_id, &img);
         }
     }
     let mut t = p.settings_copy();

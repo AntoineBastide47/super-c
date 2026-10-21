@@ -162,6 +162,7 @@ pub struct Manifest<'a> {
     pub jobs: u32,
     pub ce_steps: u32, // const-eval step budget; 0 = the engine default (~2M); CLI --const-eval-steps overrides
     pub ce_mem: u64, // const-eval memory budget in bytes; 0 = the engine default; CLI --const-eval-memory overrides
+    pub cache_size: u64, // `cache-size`: the bytes the project's object trees keep in the build cache (`objcache::trim_objects`)
     pub default_profile: String,
     pub profiles: Vector<Profile<'a>>,
     pub commands: Vector<Command<'a>>,
@@ -331,6 +332,35 @@ fn set_u32(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut u32) {
     *dst = it.val.i as u32;
 }
 
+/// The default `cache-size`: 2 GiB.
+pub const CACHE_SIZE_DEFAULT: u64 = 2 << 30;
+
+/// The bytes size `s` names: digits, then `B`, `KiB`, `MiB` or `GiB` (no unit: bytes); None when it is
+/// malformed or does not fit 64 bits.
+pub fn parse_size(s: str) Option<u64> {
+    let mut d: usize = 0;
+    while d < s.len() && s[d] >= b'0' && s[d] <= b'9' {
+        d += 1;
+    }
+    let n = s.slice(0, d).parse_u64();
+    let unit = s.slice(d, s.len());
+    let shift: u64 = if unit == "" || unit == "B" {
+        0;
+    } else if unit == "KiB" {
+        10;
+    } else if unit == "MiB" {
+        20;
+    } else if unit == "GiB" {
+        30;
+    } else {
+        return Option::<u64>::None;
+    };
+    if d == 0 || n.is_none() || shift != 0 && n.unwrap() >> 64 - shift != 0 {
+        return Option::<u64>::None;
+    }
+    return Option::<u64>::Some(n.unwrap() << shift);
+}
+
 fn set_bool(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut bool) {
     if it.val.kind != toml::TV_BOOL {
         errs.emit(it.at, it.key.len() as u32, format("'{}' expects true or false", it.key.as_str()));
@@ -429,6 +459,23 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
                     );
                 } else {
                     m.ce_mem = it.val.i as u64;
+                }
+            } else if key == "cache-size" {
+                let v = if it.val.kind == toml::TV_INT && it.val.i >= 0 {
+                    Option::<u64>::Some(it.val.i as u64);
+                } else if it.val.kind == toml::TV_STR {
+                    parse_size(it.val.s.as_str());
+                } else {
+                    Option::<u64>::None;
+                };
+                if v.is_none() {
+                    errs.emit(
+                        it.at,
+                        key.len() as u32,
+                        format("'cache-size' expects a byte count or a size such as \"250MiB\" or \"2GiB\""),
+                    );
+                } else {
+                    m.cache_size = v.unwrap();
                 }
             } else if key == "default-profile" {
                 set_str(it, &mut errs, &mut m.default_profile);
@@ -710,6 +757,7 @@ extend Manifest {
             jobs: 0,
             ce_steps: 0,
             ce_mem: 0,
+            cache_size: CACHE_SIZE_DEFAULT,
             default_profile: String::new(),
             profiles: Vector::<Profile>::new(),
             commands: Vector::<Command>::new(),

@@ -218,11 +218,12 @@ tests of those files. Override the runner's flags with a
 `--shard=K/N`, `--jobs=N`, `--timeout=S`, `--weights=F`, `--record=F`, `--quiet` and `--no-fork` (not the driver's `--test-*` spellings)
 and exits 2 on any other argument. A runner started without an inherited `SC_JOBSERVER` makes its own
 of `--jobs` slots, as `super-c test` does, so its tests and the compilers they start share one budget. Every compiler the CLI harnesses
-(`tests/cli_harness.spc`, `tests/harness.spc`) run shares the global object cache: `super-c
-test` exports its absolute root as `SC_CACHE_DIR`, so a unit any earlier build, test or suite
-run compiled is not compiled again. A test that checks cache behavior sets its own
-`SC_CACHE_DIR` under its scratch directory, and so does every test that runs `clean --full`,
-which removes the cache root.
+(`tests/cli_harness.spc`, `tests/harness.spc`) run shares one cache base: `super-c test` exports
+`<out-dir>/test/cache` as `SC_CACHE_DIR`, so a unit an earlier build of the run compiled is not
+compiled again, and deletes it when the run ends (and at its start, what an interrupted run left);
+the runner itself builds in the project's own cache root. A test that checks cache behavior sets its
+own `SC_CACHE_DIR` under its scratch directory, and so does every test that runs `clean --full`,
+which removes the project's cache root.
 
 ### Fork isolation
 

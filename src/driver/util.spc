@@ -39,13 +39,22 @@ pub fn compiler_id() u64 {
     if c != 0 {
         return c;
     }
-    let mut exe = PathBuf {};
-    if unsafe shim::sc_exe_path(&mut exe[0], 4096) != 0 {
+    let exe = exe_path();
+    if exe.len() == 0 {
         return 0;
     }
-    let h = file_id(str::from_cbuf(exe.as_slice()));
+    let h = file_id(exe.as_str());
     unsafe atomic::store_u64(&mut G_CID, h, 0);
     return h;
+}
+
+/// The running executable's path as the system reports it; empty when it does not resolve.
+pub fn exe_path() String {
+    let mut exe = PathBuf {};
+    if unsafe shim::sc_exe_path(&mut exe[0], 4096) != 0 {
+        return String::new();
+    }
+    return String::from_str(str::from_cbuf(exe.as_slice()));
 }
 
 // The start state of the four hash lanes of `file_id` and `str_id`.

@@ -85,8 +85,8 @@ super-c release                   # optimized build (-O3, link-time optimization
 super-c run                       # build the project, then run it
 super-c test                      # run the tests (in tests/)
 super-c bench                     # run the benchmarks (in bench/)
-super-c clean                     # remove build outputs and cache entries unused for 30 days
-super-c clean --full              # delete the build folders and the whole shared build cache
+super-c clean                     # remove idle build outputs and every unused cache entry
+super-c clean --full              # delete the build folders and the project's build cache
 ```
 
 A project is described by a `build.toml` file. At minimum it names the binary (`bin`) and its entry

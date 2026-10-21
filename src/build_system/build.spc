@@ -21,6 +21,7 @@ import module::loader as loader;
 import ir::inline as inl;
 import ir::interp as iri;
 import driver::emit as *;
+import driver::prelude_image as pimg;
 import driver::util as *;
 import build_system::manifest as mf;
 import build_system::objcache as *;
@@ -139,8 +140,9 @@ pub fn rm_rf(path: str) {
 // `<root>/o/<hash of its real path>`. A successful build writes the key set of its units as a
 // generation file `g<seq>` when the set changed, keeps the newest OBJ_GENS generations, and deletes
 // every object and dependency list no kept generation names (`obj_cache_commit`). A sweep every 30 minutes
-// removes dead namespaces and idle linker caches (`cache_sweep`), and one per project its idle build trees
-// (`project_sweep`).
+// (`sweep`, which `super-c clean` runs at once) removes dead namespaces, the unused objects beyond the
+// project's `cache-size` and the script namespace's bound, and idle linker caches (`sweep_cache`), and
+// the project's idle build trees (`sweep_project`).
 // A unit whose object records no path (no coverage or profile instrumentation, `instruments`; debug
 // information names the working directory `.`, `dmap`) also goes to the script namespace every tree
 // shares, and a miss in the tree's namespace reads it there: another tree that compiled the same text
@@ -157,7 +159,7 @@ const OBJ_GENS: usize = 4;
 const OBJ_NS_IDLE: i64 = 30 * 86400;
 /// A linker cache namespace is removed after this many seconds with no entry written or used.
 const LTO_NS_IDLE: i64 = 7 * 86400;
-/// The cache sweep (`cache_sweep`) runs at most once per this many seconds.
+/// The sweeps (`sweep`) run at most once per this many seconds.
 const SWEEP_EVERY: i64 = 30 * 60;
 
 /// The object cache namespace of the local object tree `pdir` below cache root `root`:
@@ -229,7 +231,7 @@ fn add_keys(live: &mut Set<String>, text: str) {
 
 /// Record the cache keys `keys` of a successful build in namespace `ns` and trim the namespace.
 /// A changed key set becomes the next generation; an unchanged set trims nothing and only refreshes
-/// its generation's mtime once a day (the age `cache_sweep` reads), so a no-op build reads one
+/// its generation's mtime once a day (the age `ns_dead` reads), so a no-op build reads one
 /// directory and one file. The trim keeps the newest OBJ_GENS generations and deletes each object
 /// and dependency list none of them names. Only builds of this object tree write the namespace, and
 /// every object this build installed is in `keys`. A restore that loses a race with the trim cannot
@@ -354,12 +356,21 @@ fn ns_dead(name: str, ns: str, now: i64) bool {
     return want.as_str() != name || idle >= OBJ_NS_IDLE;
 }
 
-/// The cache sweep (`sweep_cache`) of cache root `root`, at most once per SWEEP_EVERY (the stamp
-/// `<root>/o/.sweep`): after every successful engine or script build.
-pub fn cache_sweep(root: str, now: i64) {
-    let od = loader::join2(root, "o");
-    if sweep_due(od.as_str(), now) {
-        sweep_cache(root, now);
+/// The sweeps after every successful build of project `m` (null for a script build) and by `super-c
+/// clean` (`clean`): the cache sweep (`sweep_cache`) at most once per SWEEP_EVERY (the stamp
+/// `<root>/o/.sweep`), and the project sweep (`sweep_project`) as often (`<out-dir>/.sweep`). `clean`
+/// runs both now and deletes every unused object.
+pub fn sweep(m: *const mf::Manifest, now: i64, clean: bool) {
+    let croot = if m != null {
+        cache_root(project_name(unsafe &*m));
+    } else {
+        cache_root("");
+    };
+    if croot.len() != 0 && (clean || sweep_due(loader::join2(croot.as_str(), "o").as_str(), now)) {
+        sweep_cache(croot.as_str(), m, now, clean);
+    }
+    if m != null && (clean || sweep_due(unsafe (*m).out_dir.as_str(), now)) {
+        sweep_project(unsafe &*m, now);
     }
 }
 
@@ -377,12 +388,21 @@ fn sweep_due(dir: str, now: i64) bool {
     return write_file_atomic(stamp.as_str(), body.as_str());
 }
 
-/// Delete what no build reads again below cache root `root`: dead object namespaces (`ns_dead`), linker
-/// cache namespaces with no entry written or used for LTO_NS_IDLE (a toolchain upgrade leaves the old
-/// one behind), the flat `<key>.o`/`<key>.d` files that compilers before namespaces installed
-/// directly in the root and the `ccver/` records of compilers before version records were entries; trim the script namespace (`script_trim`) and compress the entries no build
-/// tree names (`pack_cache`).
-pub fn sweep_cache(root: str, now: i64) {
+/// The cache root's directory name of project `m`: its `bin`, else its `[lib]` name.
+pub fn project_name<'a>(m: &'a mf::Manifest) str<'a> {
+    if m.bin.len() != 0 {
+        return m.bin.as_str();
+    }
+    return m.lib_name.as_str();
+}
+
+/// Delete what no build reads again below cache root `root` (`cache_root`) of project `m` (null: the
+/// script builds' root): dead object namespaces (`ns_dead`), the prelude images
+/// (`prelude_image::sweep`), the unused objects beyond the limits (`trim_objects`: `m`'s `cache-size`,
+/// or the script namespace's bound in the script builds' root), or every unused object under `clean`,
+/// and linker cache namespaces with no entry written or used for LTO_NS_IDLE (a toolchain upgrade leaves
+/// the old one behind).
+fn sweep_cache(root: str, m: *const mf::Manifest, now: i64, clean: bool) {
     let od = loader::join2(root, "o");
     let nss = list_dir(od.as_str(), false).unwrap_or(Vector::<String>::new());
     for i in 0..nss.len() {
@@ -395,8 +415,12 @@ pub fn sweep_cache(root: str, now: i64) {
             rm_rf(ns.as_str());
         }
     }
-    script_trim(script_ns(root).as_str(), now);
-    pack_cache(od.as_str());
+    pimg::sweep(root, now);
+    if m != null {
+        trim_objects(od.as_str(), now, unsafe (*m).cache_size, usize::MAX, usize::MAX, clean);
+    } else {
+        trim_objects(od.as_str(), now, u64::MAX, SCRIPT_OBJ_MAX, SCRIPT_OBJ_KEEP, clean);
+    }
     let ld = loader::join2(root, "lto");
     let ltos = list_dir(ld.as_str(), false).unwrap_or(Vector::<String>::new());
     for i in 0..ltos.len() {
@@ -404,23 +428,6 @@ pub fn sweep_cache(root: str, now: i64) {
         if now - newest_mtime(lp.as_str()) >= LTO_NS_IDLE {
             rm_rf(lp.as_str());
         }
-    }
-    // Compiler version records of the layout before they joined the `script` namespace.
-    rm_rf(loader::join2(root, "ccver").as_str());
-    let flat = list_dir(root, false).unwrap_or(Vector::<String>::new());
-    for i in 0..flat.len() {
-        if key_prefixed(flat.at(i).as_str()) {
-            let mut fp = loader::join2(root, flat.at(i).as_str());
-            let _ = unsafe shim::sc_unlink(fp.cstr());
-        }
-    }
-}
-
-/// The project sweep (`sweep_project`) of manifest `m`, at most once per SWEEP_EVERY (the stamp
-/// `<out-dir>/.sweep`).
-fn project_sweep(m: &mf::Manifest, now: i64) {
-    if sweep_due(m.out_dir.as_str(), now) {
-        sweep_project(m, now);
     }
 }
 
@@ -1193,7 +1200,8 @@ struct CcStream {
     pub pending: String,
     pub marked: bool, // this build wrote `pending`
     pub ret: i32,
-    pub cache: String, // this object tree's namespace of the global object cache; empty = disabled
+    pub croot: String, // the project's cache root (`cache_root`), also with the object cache off
+    pub cache: String, // this object tree's namespace of the project's object cache; empty = disabled
     pub shared: String, // the script namespace, when the objects record no path; empty = not shared
     pub cwds: Vector<String>, // the working directory's spellings, which no shared object may contain
     pub dmap: Vector<String>, // under debug information: each of `cwds` mapped to `.`
@@ -1292,7 +1300,7 @@ extend CcStream {
         if self.cache.len() != 0 {
             mkdir_p(self.cache.as_str());
             if !instruments(&self.prefix_args) {
-                self.shared = script_ns(object_cache_dir().as_str());
+                self.shared = script_ns(self.croot.as_str());
                 mkdir_p(self.shared.as_str());
             }
         }
@@ -1375,11 +1383,10 @@ extend CcStream {
         if form == 0 || stdlib::getenv("SC_NO_LTO_CACHE") != null {
             return;
         }
-        let root = cache_root();
-        if root.len() == 0 {
+        if self.croot.len() == 0 {
             return;
         }
-        let mut dir = loader::join2(root.as_str(), "lto/");
+        let mut dir = loader::join2(self.croot.as_str(), "lto/");
         hex64(fnv_cont(fnv_cont(FNV_BASIS, key.as_str()), ld.as_str()), &mut dir);
         mkdir_p(dir.as_str());
         lto_cache_args(form, dir.as_str(), &mut self.lto_ld);
@@ -1780,7 +1787,7 @@ extend CcStream {
         self.objs.push(opath.clone());
     }
 
-    // A cache hit: the object links into place (`fetch_entry`), its portable dependency list is
+    // A cache hit: the object links into place (`link_or_copy`), its portable dependency list is
     // written beside it, and the .cmd records the fingerprint so the next build's staleness check needs
     // no cache at all. An entry
     // without its dependency list is a miss: a restored object without a .d would never see a
@@ -1790,7 +1797,7 @@ extend CcStream {
         cd.truncate(cd.len() - 2);
         cd.push_str(".d");
         let dep = loader::read_file(cd.as_str());
-        if dep.is_none() || !fetch_entry(cobj.as_str(), opath) {
+        if dep.is_none() || !link_or_copy(cobj.as_str(), opath) {
             return false;
         }
         let d = dep.unwrap();
@@ -2541,7 +2548,8 @@ fn emit_closure(
     p.bootstrap = cx.bootstrap_tags;
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_master(pkg, cx.ce_steps, cx.ce_mem);
-    if prelude_stage(&mut p, &mut cirv, cx.std_dir, root, cx.target, jobs, cx.ce_steps, cx.ce_mem) {
+    let cdir = object_cache_dir(project_name(m));
+    if prelude_stage(&mut p, &mut cirv, cx.std_dir, root, cx.target, jobs, cx.ce_steps, cx.ce_mem, cdir.as_str()) {
         p.load_user(root, cx.std_dir, cx.target);
     }
     bst::mark(bst::B_LOAD);
@@ -3080,6 +3088,7 @@ fn cc_stream(
         pending: pending,
         marked: false,
         ret: 0,
+        croot: cache_root(project_name(m)),
         cache: cache,
         shared: String::new(),
         cwds: Vector::<String>::new(),
@@ -3207,7 +3216,7 @@ fn engine_build_i(
     fppath.push_str(".cmd");
     let mut pending = fppath.clone();
     pending.push_str(".pending");
-    let cache = obj_cache_ns(object_cache_dir().as_str(), pdir.as_str());
+    let cache = obj_cache_ns(object_cache_dir(project_name(m)).as_str(), pdir.as_str());
     // No toolchain probe result shapes a build yet but the ThinLTO verdict (`lto_resolve`).
     let mut stream = cc_stream(m, prof, &pdir, cx, jobs, lto_req, 0, pending, cache);
     let mut sink = EmitSink { ctx: &mut stream, notify: stream_notify };
@@ -3467,11 +3476,7 @@ fn engine_build_i(
             if stream.cache.len() != 0 {
                 obj_cache_commit(stream.cache.as_str(), &mut stream.keys, pdir.as_str(), now);
             }
-            let croot = cache_root();
-            if croot.len() != 0 {
-                cache_sweep(croot.as_str(), now);
-            }
-            project_sweep(m, now);
+            sweep(m, now, false);
         }
     } else {
         // A failed emission or compile: reap the compiles still in flight and the probes.
@@ -4257,16 +4262,6 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
         let mut sd = real_path("std");
         unsafe shim::sc_setenv("SC_STD_DIR".ptr() as *const char, sd.cstr());
     }
-    // Every compiler a test runs shares the global object cache: a unit any earlier build, test or
-    // suite run compiled is not compiled again. Absolute: tests change directory.
-    let croot = cache_root();
-    if croot.len() != 0 {
-        mkdir_p(croot.as_str());
-        let mut ac = real_path(croot.as_str());
-        if ac.len() != 0 {
-            unsafe shim::sc_setenv("SC_CACHE_DIR".ptr() as *const char, ac.cstr());
-        }
-    }
     // The runner is built through the engine under the `test` profile, in its own <out-dir>/test tree:
     // per-TU parallel compiles, the object cache and the emit stamp turn an unchanged suite into a
     // link check instead of a serial rebuild of every unit.
@@ -4295,7 +4290,17 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
     if o.durations == null {
         o.durations = durp.cstr();
     }
-    return test_run_runner(&o, tbin.as_str());
+    // Every compiler a test runs shares one cache base, `<out-dir>/test/cache`, so a unit an earlier
+    // build of the run compiled is not compiled again; the run deletes it at its end, and at its start
+    // what an interrupted run left. Absolute: tests change directory.
+    let tcache = loader::join2(tdir_out.as_str(), "cache");
+    rm_rf(tcache.as_str());
+    mkdir_p(tcache.as_str());
+    let mut ac = real_path(tcache.as_str());
+    unsafe shim::sc_setenv("SC_CACHE_DIR".ptr() as *const char, ac.cstr());
+    let trc = test_run_runner(&o, tbin.as_str());
+    rm_rf(tcache.as_str());
+    return trc;
 }
 
 // Every .spc under the suite directory `bdir` of `super-c <cmd>` (test or bench), as
@@ -4701,17 +4706,12 @@ pub fn manifest_run(m: &mf::Manifest, name: str, profile: str, cx: &BuildCtx) i3
     return 0;
 }
 
-/// `super-c clean`: the sweeps every build runs at most once per SWEEP_EVERY, now: the global cache's
-/// (`sweep_cache`) and the project's (`sweep_project`). `full` (`--full`): remove the out-dir, every
-/// emitted tree below the root directory (`root_trees`) and the whole global cache root instead.
+/// `super-c clean`: the sweeps every build runs at most once per SWEEP_EVERY, now, deleting every unused
+/// object (`sweep`). `full` (`--full`): remove the out-dir, every emitted tree below the root directory
+/// (`root_trees`) and the project's cache root instead.
 pub fn manifest_clean(m: &mf::Manifest, full: bool) i32 {
     if !full {
-        let now = time::now();
-        let croot = cache_root();
-        if croot.len() != 0 {
-            sweep_cache(croot.as_str(), now);
-        }
-        sweep_project(m, now);
+        sweep(m, time::now(), true);
         return 0;
     }
     rm_rf(m.out_dir.as_str());
@@ -4719,7 +4719,7 @@ pub fn manifest_clean(m: &mf::Manifest, full: bool) i32 {
     for i in 0..trees.len() {
         rm_root_tree(trees.at(i).as_str());
     }
-    let croot = cache_root();
+    let croot = cache_root(project_name(m));
     if croot.len() != 0 {
         rm_rf(croot.as_str());
         println("removed {}", croot.as_str());

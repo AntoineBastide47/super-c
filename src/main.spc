@@ -18,6 +18,7 @@ import driver::test as *;
 import driver::emit as *;
 import build_system::manifest as bman;
 import build_system::build as bsys;
+import build_system::objcache as ocache;
 import lsp::server as lsp_srv;
 import bindgen::bindgen as bindgen;
 import driver::taskctl as tctl;
@@ -61,7 +62,8 @@ fn run_file(
     p.profiles = bsys::profile_names(&bi);
     p.bootstrap = bootstrap_tags;
     let mut cirv = iri::interp_master((&mut p) as *mut loader::Package, ce_steps, ce_mem);
-    if prelude_stage(&mut p, &mut cirv, std_dir, path, target, jobs, ce_steps, ce_mem) {
+    let cdir = ocache::object_cache_dir("");
+    if prelude_stage(&mut p, &mut cirv, std_dir, path, target, jobs, ce_steps, ce_mem, cdir.as_str()) {
         p.load_user(path, std_dir, target);
     }
     if stdlib::getenv("SC_CEMIT_STATS") != null {

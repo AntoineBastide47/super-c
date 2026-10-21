@@ -1494,25 +1494,33 @@ pub unsafe fn sc_link(from: *const char, to: *const char) i32 {
 }
 
 /// The number of names of the file `path` (its hard links), with its identity on its volume (POSIX
-/// inode, Win32 file index) in `id`; -1 when it cannot be read.
+/// inode, Win32 file index) in `id`, its size in `size` and its `sc_mtime` value in `mtime`; -1 when it
+/// cannot be read.
 @platform(windows)
-pub unsafe fn sc_file_links(path: *const char, id: *mut u64) i32 {
+pub unsafe fn sc_file_links(path: *const char, id: *mut u64, size: *mut i64, mtime: *mut i64) i32 {
     let mut fi = unsafe zeroed::<BY_HANDLE_FILE_INFORMATION>();
     if !unsafe file_info(path, &mut fi) {
         return -1;
     }
     unsafe *id = fi.nFileIndexHigh as u64 << 32 | fi.nFileIndexLow as u64;
+    unsafe *size = (fi.nFileSizeHigh as u64 << 32 | fi.nFileSizeLow as u64) as i64;
+    let t = fi.ftLastWriteTime.dwHighDateTime as u64 << 32 | fi.ftLastWriteTime.dwLowDateTime as u64;
+    unsafe *mtime = t.wrapping_sub(116444736000000000) as i64 / 10000000;
     return fi.nNumberOfLinks as i32;
 }
 /// The number of names of the file `path` (its hard links), with its identity on its volume (POSIX
-/// inode, Win32 file index) in `id`; -1 when it cannot be read.
+/// inode, Win32 file index) in `id`, its size in `size` and its `sc_mtime` value in `mtime`; -1 when it
+/// cannot be read.
 @platform(!windows)
-pub unsafe fn sc_file_links(path: *const char, id: *mut u64) i32 {
+pub unsafe fn sc_file_links(path: *const char, id: *mut u64, size: *mut i64, mtime: *mut i64) i32 {
     let mut st = unsafe zeroed::<stat>();
     if unsafe stat(path, &mut st) != 0 {
         return -1;
     }
+    let (s, _) = mtime_of(&st);
     unsafe *id = st.st_ino;
+    unsafe *size = st.st_size;
+    unsafe *mtime = s;
     let links: u64 = st.st_nlink;
     return links as i32;
 }

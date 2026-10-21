@@ -96,6 +96,28 @@ fn toml_error_messages() {
     toml_err("integer above i64", "jobs = 9223372036854775808\n", "integer out of range");
 }
 
+// `cache-size` takes a byte count or a size with a binary unit; the default is 2 GiB.
+@test
+fn manifest_cache_size() {
+    let (d, _) = manifest::parse_check("bin = \"a\"\nroot = \"m.spc\"\n", "", false);
+    assert_eq(d.unwrap().cache_size, 2u64 << 30);
+    let (m, _) = manifest::parse_check("bin = \"a\"\nroot = \"m.spc\"\ncache-size = \"250MiB\"\n", "", false);
+    assert_eq(m.unwrap().cache_size, 250u64 << 20);
+    let (b, _) = manifest::parse_check("bin = \"a\"\nroot = \"m.spc\"\ncache-size = 4096\n", "", false);
+    assert_eq(b.unwrap().cache_size, 4096u64);
+    assert_eq(manifest::parse_size("15GiB").unwrap(), 15u64 << 30);
+    assert_eq(manifest::parse_size("7KiB").unwrap(), 7u64 << 10);
+    assert_eq(manifest::parse_size("12B").unwrap(), 12u64);
+    assert(manifest::parse_size("2GB").is_none(), "a decimal unit");
+    assert(manifest::parse_size("GiB").is_none(), "no digits");
+    assert(manifest::parse_size("17179869184GiB").is_none(), "past 64 bits");
+    manifest_err(
+        "cache-size",
+        "bin = \"a\"\nroot = \"m.spc\"\ncache-size = \"2 GiB\"\n",
+        "'cache-size' expects a byte count or a size such as \"250MiB\" or \"2GiB\"",
+    );
+}
+
 @test
 fn manifest_validation_messages() {
     manifest_err(

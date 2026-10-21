@@ -1773,7 +1773,7 @@ pub fn test_build_and_run(
     }
     let mut args = Vector::<String>::new();
     split_args(&mut args, ccs.as_str());
-    let croot = ocache::object_cache_dir();
+    let croot = ocache::object_cache_dir("");
     let mut objs = Vector::<String>::new();
     if croot.len() != 0 {
         let mut ccv = Vector::<String>::new();
@@ -1835,9 +1835,7 @@ pub fn test_build_and_run(
         eprintln("super-c: {} failed ({})", what, ccs.as_str());
         return 1;
     }
-    if croot.len() != 0 {
-        bsys::cache_sweep(croot.as_str(), time::now());
-    }
+    bsys::sweep(null, time::now(), false);
     // The `build` subcommand: the program is linked, nothing to run.
     if out_bin.len() != 0 {
         return 0;

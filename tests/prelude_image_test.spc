@@ -6,6 +6,9 @@ import driver::util as du;
 import driver::prelude_image as pimg;
 import module::loader as loader;
 import driver_shim as shim;
+import build_system::objcache as ocache;
+import time;
+import utils::persist as per;
 
 // Copy the files and directories under `src` to `dst`.
 fn copy_tree(src: str, dst: str) {
@@ -77,38 +80,98 @@ fn prelude_image_matches_a_checked_prelude_and_follows_std_edits() {
     assert(!r2.ok() && r2.out_has("the root file 'zz_bind.spc' names module 'zz_bind'"), "a root file clashes");
 }
 
+// Copy std and ffi below `root`; the std copy's path.
+fn copy_std_ffi(root: str) String {
+    let std_dir = stdlib::get_env("SC_STD_DIR").unwrap();
+    let sd = format("{}/std", root);
+    copy_tree(std_dir.as_str(), sd.as_str());
+    let fd = format("{}/ffi", root);
+    let ffi = format("{}/../ffi", std_dir.as_str());
+    copy_tree(ffi.as_str(), fd.as_str());
+    return sd;
+}
+
+// The prelude of std copy `sd` below `root`, loaded.
+fn load_prelude(root: str, sd: str) loader::Package {
+    let host = unsafe shim::sc_host_platform();
+    let q = loader::package_load_prelude(root, "", sd, host, Vector::<String>::new(), Vector::<String>::new());
+    assert(q.ok && q.modules.len() != 0, "the prelude loads");
+    return q;
+}
+
 // The image records the std text the prelude check read: a std file edited after the load (during the
 // check) makes a reader reject the image, and an unchanged tree reads it.
 @test
 fn prelude_image_records_the_std_text_it_checked() {
     let p = cli::proj_new();
     let root = p.dir();
-    let std_dir = stdlib::get_env("SC_STD_DIR").unwrap();
-    let mut sd = String::new();
-    sd.format_into("{}/std", root);
-    copy_tree(std_dir.as_str(), sd.as_str());
-    let mut fd = String::new();
-    fd.format_into("{}/ffi", root);
-    let mut ffi = String::new();
-    ffi.format_into("{}/../ffi", std_dir.as_str());
-    copy_tree(ffi.as_str(), fd.as_str());
-    let mut cache = String::new();
-    cache.format_into("{}/cache", root);
-    let _g = cli::set_env("SC_CACHE_DIR", cache.as_str());
-    let host = unsafe shim::sc_host_platform();
-    let q = loader::package_load_prelude(root, "", sd.as_str(), host, Vector::<String>::new(), Vector::<String>::new());
-    assert(q.ok && q.modules.len() != 0, "the prelude loads");
+    let sd = copy_std_ffi(root);
+    let cache = format("{}/cache", root);
+    let q = load_prelude(root, sd.as_str());
     let img = String::from_str("image");
-    pimg::write(1, 2, &q, sd.as_str(), pimg::dir_id(sd.as_str()), &img);
+    pimg::write(cache.as_str(), 1, 2, &q, sd.as_str(), pimg::dir_id(sd.as_str()), &img);
     let mut at: usize = 0;
-    assert(pimg::read(1, 2, &mut at).is_some(), "an unchanged std tree reads the image");
+    assert(pimg::read(cache.as_str(), 1, 2, &mut at).is_some(), "an unchanged std tree reads the image");
     let mut f = String::new();
     f.format_into("{}/option.spc", sd.as_str());
     let mut text = cli::read_text(f.as_str());
     text.push_str("\n");
     p.mkfile("std/option.spc", text.as_str());
-    pimg::write(1, 2, &q, sd.as_str(), pimg::dir_id(sd.as_str()), &img);
-    assert(pimg::read(1, 2, &mut at).is_none(), "a std file edited after the load rejects the image");
+    pimg::write(cache.as_str(), 1, 2, &q, sd.as_str(), pimg::dir_id(sd.as_str()), &img);
+    assert(pimg::read(cache.as_str(), 1, 2, &mut at).is_none(), "a std file edited after the load rejects the image");
+}
+
+// The files in directory `dir`.
+fn file_count(dir: str) usize {
+    return du::list_dir(dir, false).unwrap().len();
+}
+
+// `super-c clean` runs the cache sweep, which deletes the prelude images no build reads again: one of an
+// older format, one under a name no image has, one whose std files changed, and one whose compiler is no
+// longer at the path it recorded. The live images stay while used within a day, and the five most
+// recently used ones stay whatever their idle time.
+@test
+fn sweep_deletes_stale_prelude_images() {
+    let p = cli::proj_new();
+    let root = p.dir();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
+    let sd = copy_std_ffi(root);
+    let cache = format("{}/cache", root);
+    let croot = format("{}/app", cache.as_str());
+    let me = du::compiler_id();
+    let img = String::from_str("image");
+    let q = load_prelude(root, sd.as_str());
+    pimg::write(croot.as_str(), 3, me, &q, sd.as_str(), pimg::dir_id(sd.as_str()), &img);
+    let f = format("{}/option.spc", sd.as_str());
+    let mut text = cli::read_text(f.as_str());
+    text.push_str("\n");
+    p.mkfile("std/option.spc", text.as_str());
+    let q2 = load_prelude(root, sd.as_str());
+    pimg::write(croot.as_str(), 1, me, &q2, sd.as_str(), pimg::dir_id(sd.as_str()), &img);
+    pimg::write(croot.as_str(), 2, me ^ 1, &q2, sd.as_str(), pimg::dir_id(sd.as_str()), &img);
+    let mut old = per::Writer::new();
+    old.u64(2);
+    old.u64(4);
+    old.u64(me);
+    old.u64(0);
+    let mut oname = String::new();
+    ocache::hex64(4, &mut oname);
+    ocache::hex64(me, &mut oname);
+    p.mkfile(format("cache/app/prelude/{}.img", oname.as_str()).as_str(), old.buf.as_str());
+    p.mkfile("cache/app/prelude/09bf53786c101f5a.img", "an image of an older layout");
+    let dir = format("{}/prelude", croot.as_str());
+    assert(file_count(dir.as_str()) == 5, "five images");
+    assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "clean").ok(), "clean succeeds");
+    assert(file_count(dir.as_str()) == 1, "clean deletes the stale images");
+    let mut at: usize = 0;
+    assert(pimg::read(croot.as_str(), 1, me, &mut at).is_some(), "the live image stays");
+    for k in 10..16u64 {
+        pimg::write(croot.as_str(), k, me, &q2, sd.as_str(), pimg::dir_id(sd.as_str()), &img);
+    }
+    pimg::sweep(croot.as_str(), time::now());
+    assert(file_count(dir.as_str()) == 7, "the images used within a day stay");
+    pimg::sweep(croot.as_str(), time::now() + 2 * 86400);
+    assert(file_count(dir.as_str()) == 5, "the five most recently used idle images stay");
 }
 
 // A conformance in another module whose bounds the receiver does not meet gives no method, not even

@@ -58,8 +58,8 @@ super-c build app -o out-app # build the project of directory app (its build.tom
 super-c build --bin=tool -o t # link the [bin.tool] target at t (an unknown name is an error; --lib with -o is one too)
 super-c release              # optimized build (release profile; alias for --profile=release)
 super-c run                  # build + execute the manifest binary
-super-c clean                # run the global cache and project sweeps now (see the object cache below)
-super-c clean --full         # remove the out-dir, every <root dir>/build/<profile> tree and the global cache root; never a user directory
+super-c clean                # run the project's sweeps now and delete every unused object (see the object cache below)
+super-c clean --full         # remove the out-dir, every <root dir>/build/<profile> tree and the project's cache root; never a user directory
 ```
 
 The build system reads `build.toml` in the working directory. An emit stamp skips the
@@ -340,6 +340,7 @@ target-features = []         # CPU features (see CPU features below)
 target-cpu = "x86-64-v2"     # x86_64 level before the feature lists (skipped on another instruction set)
 simd-width = 256             # vector width the planner prefers on AVX-512: 256 or 512
 simd-dispatch = "x86-64-v3"  # x86_64: levels of the run-time copies of vector code, or "off"
+cache-size = "2GiB"          # bytes the project's cache root keeps: a byte count, or B/KiB/MiB/GiB (default 2GiB)
 
 [lib]                        # library target (optional; root defaults to src/lib.spc,
 type = ["static", "shared"]  # type defaults to static)
@@ -459,8 +460,8 @@ rejects `-flto=thin` at the compile step and so keeps `auto`; a linker that acce
 ThinLTO but no cache directory with a pruning policy links with `-flto=thin` and no
 cache (`"lto":"thin"`).
 
-The linker cache lives under the build cache root (`$SC_CACHE_DIR`, else
-`~/.super-c/cache`) at `lto/<namespace>`, one namespace per hash of the compiler version,
+The linker cache lives under the project's cache root (below) at `lto/<namespace>`, one
+namespace per hash of the compiler version,
 path and mtime, the target, the compile and link flags, the schema and the linker line;
 `SC_NO_LTO_CACHE=1` links
 without it. The linker owns the entries and prunes them itself (entries unused for a
@@ -469,7 +470,15 @@ most hourly); the engine creates the directory. The cache sweep (below) removes 
 namespace with no entry written or used for a week, such as the one a toolchain upgrade
 leaves behind.
 
-The object cache lives under the same root at `o/<namespace>`, one namespace per local
+The build cache base is `$SC_CACHE_DIR`, else `~/.super-c/cache`. Each project caches in its own
+root below it, `<base>/<project>` (`cache_root`: the manifest's `bin`, else its `[lib]` name, a byte
+outside `[A-Za-z0-9._-]` or a leading `.` made `_`, and `_` added to `o`, `lto`, `prelude` and
+`ccver`, the shared folders of older compilers, which still use them); script builds cache in
+`<base>/.scripts`. Projects of one name share a root (the worktrees and copies of a project), and no
+sweep reads or deletes outside the root of the build that runs it: not the base, not another
+project's root. Only `super-c clean --full` deletes a root, its project's.
+
+The object cache lives under the project's root at `o/<namespace>`, one namespace per local
 object tree (hash of the real path of the profile directory, such as `build/debug`); a
 unit's key hashes the compiler version line, the whole compile command, and the text of
 the unit and of every quoted include. The emitted tree names an extern-block header or an
@@ -477,8 +486,8 @@ external C source by a path relative to the including file when both lie below t
 directory (a project's own files, and std in a checkout or a copy of the repository), else by its
 absolute real path (an installed std). So a tree that moves with its project, such as a copy, a
 worktree or the gate's tree, keeps its keys, and under debug information (the working directory
-maps to `.`) its objects are the same bytes. The version line comes from `<cc> --version` once per compiler: an entry of the shared `script`
-namespace keeps it per compiler identity (`cc_identity` in `src/build_system/objcache.spc`: the
+maps to `.`) its objects are the same bytes. The version line comes from `<cc> --version` once per compiler: an entry of the script builds'
+`script` namespace (`.scripts`, which every project's builds read) keeps it per compiler identity (`cc_identity` in `src/build_system/objcache.spc`: the
 command, the program's path and mtime, and on macOS for an xcrun stub in `/usr/bin` the
 `DEVELOPER_DIR`, xcode-select link and `TOOLCHAINS` settings with each candidate clang's mtime),
 so a toolchain upgrade probes again and an unchanged compiler starts no probe process; the entry
@@ -495,53 +504,57 @@ falls back to the search, and Windows keeps CreateProcess's own search. One exce
 macOS target on a macOS host: a command that starts with the xcrun stub `/usr/bin/cc`, `clang` or `gcc`
 runs the compiler the stub runs, with `-isysroot` naming the SDK the stub passes (`direct_cc`): the stub
 costs about 4 ms per compile and link. `xcrun -f` and `xcrun --show-sdk-path` run at once, once per
-compiler identity and `SDKROOT`, recorded as an entry of the `script` namespace; with the object cache
+compiler identity and `SDKROOT`, recorded as an entry of the script builds' `script` namespace; with the object cache
 off, once per build (about 5 ms); for a path with a space the stub runs. Under `-g` the compile maps the
 working directory to `.` (`-fdebug-prefix-map`, outside the key), so debug information names
 sources relative to the project directory: a debugger started elsewhere needs a source map.
 Without coverage or profile instrumentation, each compiled object whose bytes do not name the
-working directory also goes to the shared `script` namespace, and a miss in the tree's
-namespace reads it there: trees that emit a unit identically (the runtime of every test
-fixture) compile it once.
+working directory also goes to the root's `script` namespace, and a miss in the tree's
+namespace reads it there: the project's trees that emit a unit identically compile it once.
 After a successful build, the engine writes the key set of all units as generation file
 `g<seq>` when the set changed, keeps the newest four generations (the current build and
 three older), and deletes each object and dependency list that no kept generation names
 and that is older than the start of the build. A version inside that window rebuilds
 with no compile; an older one compiles again. An unchanged build reads one directory
 and one file. The namespace's `owner` file records its object tree (the profile directory).
-At most once every 30 minutes (`o/.sweep`), a successful engine or script build also removes the namespaces
-whose owner object tree is gone, whose `owner` names another directory (an older compiler
-recorded the source directory), that have no `owner` and did not change for an hour (a build
-that stopped before its first commit), or that did not change for 30 days (the shared `script`
-namespace only by this rule); the idle linker caches; and the flat `<key>.o`/`<key>.d` files
-that compilers before namespaces installed in the root. It then trims the `script` namespace (below)
-and packs the entries no build
-tree names (`pack_cache`: the file's link count equals its number of entries), least recently used
-first and at most 128 MiB of objects per sweep: `<key>.z` holds the object's length, a content hash
-and the bytes compressed by `build_system::lz` (LZ77 in the LZ4 block layout, about 2x on objects;
-packing runs at about 38 MB/s in a compiler built at opt-level 0, 300 MB/s at opt-level 3). A hit on
-a packed entry decompresses it into the tree and leaves it packed; one whose layout or hash does not
-check is a miss. An entry a tree names stays a link. With the same period (`<out-dir>/.sweep`),
-it sweeps the project (`sweep_project`): every out-dir entry with nothing written for 30 days (a
-build tree, a link record, a binary) goes unless a build holds the lock of a tree in it, as do the
-emitted trees below the root directory idle as long and the per-suite cache older compilers kept in
-`<out-dir>/test/fixture-cache`. `super-c clean` runs both sweeps at once; `super-c clean --full`
-removes the out-dir, the emitted trees and the whole cache root.
+An object is unused when no build tree links it: every name of its file is a cache entry. The
+sweeps (`sweep`) run after a successful build, at most once every 30 minutes each, in the root of the
+build's project (or `.scripts`). The cache sweep (`<root>/o/.sweep`) removes the namespaces whose
+owner object tree is gone, whose `owner` names another directory (an older compiler recorded the
+source directory), that have no `owner` and did not change for an hour (a build that stopped before
+its first commit), or that did not change for 30 days (the `script` namespace only by this rule);
+the prelude images (below); and the idle linker caches. Then it trims the objects (`trim_objects`):
+in a project's root, while its files (each counted once) hold more than `cache-size` bytes, the least
+recently used unused file goes under all its names; in `.scripts`, once it holds more than 16384
+objects, the least recently used unused ones go down to 12288 (a suite run uses about 4.8k). A file
+a tree links counts but stays. Each deleted object takes its dependency list; a list whose object is
+gone goes too, as do the packed `<key>.z` entries of older compilers and temp files older than an
+hour. The project sweep (`<out-dir>/.sweep`, `sweep_project`): every out-dir entry with nothing
+written for 30 days (a build tree, a link record, a binary) goes unless a build holds the lock of a
+tree in it, as do the emitted trees below the root directory idle as long and the per-suite cache
+older compilers kept in `<out-dir>/test/fixture-cache`. `super-c clean` runs the same sweeps at once
+and deletes every unused object whatever the limits; `super-c clean --full` removes the out-dir, the
+emitted trees and the project's cache root.
 
-The checked std prelude is cached as an entry of the shared `script` namespace
-(`src/driver/prelude_image.spc`). A build first loads the std prelude alone, resolves it and type
+The checked std prelude is cached as a file of the root's `prelude/` directory,
+`<key><compiler>.img` (`src/driver/prelude_image.spc`). A build first loads the std prelude alone, resolves it and type
 checks it up to the prelude gate (`prelude_stage`), with imports looked up under the std root only,
 so the result does not depend on the project; the user's modules load after it (`load_user`). The
 entry's name hashes the std directory as given, the target, arch, CPU features, vector settings,
 memory checker, `--test`, profile and profile names, `--bootstrap-tags`, the constant-evaluation
 budgets and `SC_TYPE_COLLIDE`, then the compiler identity (`compiler_id`). The image records the
-content hash of every prelude file as the check read it and the listing of every directory the std
+real path of the compiler that wrote it, the content hash of every prelude file as the check read it and the listing of every directory the std
 imports were looked up in, as the load listed it (the std directory's from before the load), so an
 edit made during the check makes the next build check again; a build that finds both unchanged loads the image in place of parsing and checking std, and
 checks the prelude again on any difference. A build that checks the prelude writes the image (not
 when the prelude logged a warning) and loads it back, so both paths continue from the same state. The
-entry follows the namespace's rules: a read records a use (`touch_entry`), the sweep packs it and
-trims the least recently used entries with the objects, and `SC_NO_CACHE` turns it off. A project
+read records a use (its mtime), and `SC_NO_CACHE` turns the cache off. Each compiler build writes new
+images (about 7 MB each), so the cache sweep (`prelude_image::sweep`) deletes an image of another
+format or name, one whose recorded compiler path no longer holds a file of its identity, and one
+whose std files or directories changed; then those unused for 24 hours beyond the 5 most recently
+used, and temp files older than an hour. It reads only each image's header and dependencies (about
+2 KiB) and hashes each std file and compiler once per sweep. An image of a compiler that moved after
+writing it goes too; that compiler checks the prelude once more. A project
 file or a root file whose module path names a module the prelude loaded from another file is an
 error.
 
@@ -584,7 +597,7 @@ version cannot load the file; the unit includes the header first itself). Where 
 (4% of the compile CPU). Both probes run when the first such tree of a profile directory needs them.
 
 Script builds (`super-c build foo.spc -o out`, `super-c --test foo.spc`) share one
-namespace, `o/script` (each entry in the subdirectory of its key's first two hex digits,
+namespace, `<base>/.scripts/o/script` (each entry in the subdirectory of its key's first two hex digits,
 `script_entry`, so no directory holds more than about a 256th of it), keyed per unit by the compiler version line, the compile flags, the
 unit's path relative to its tree and the text of the unit and its quoted includes (the
 tree's path joins the key only under `-g`, coverage or profile instrumentation), so the
@@ -594,9 +607,8 @@ commands as the process tree's free worker slots allow, all at once, each from a
 directory whose objects then move into place; a unit whose file name another one shares, or
 every unit when a compiler or flag word names a relative path, compiles alone with `-o`.
 The version probe runs beside the compiles when the namespace is new. An install writes a
-temp file and renames it, so concurrent builds never read a torn object. The sweep (not the build that installs objects, which never lists the namespace) trims it to 12288 objects, least
-recently used first, once it holds more than 16384 (a suite run uses about 4.8k; a packed entry counts as one), each with the dependency list an engine
-build stored beside it; every trim also deletes a list whose object is gone. `SC_NO_CACHE` restores the single
+temp file and renames it, so concurrent builds never read a torn object. The sweep (not the build
+that installs objects, which never lists the namespace) bounds it (above). `SC_NO_CACHE` restores the single
 compile-and-link command.
 
 Gates set before the implementation for enabling ThinLTO by default: a body-edit relink
@@ -864,7 +876,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `SC_BUILD_STATS` | Append one JSON record per engine build to the named file (`-` = stderr): every phase of the partition in ms, the streamed C compile span apart from it, cache switches, the instance re-lowering counts by reason (`"relower"`), peak RSS at five boundaries (`src/driver/stats.spc`) |
 | `SC_BUILD_MEM` | With `SC_BUILD_STATS`: turn the runtime allocation tracker on for the build, so the record carries allocation calls, requested bytes, live bytes and per-phase survivors (slower; never for timing runs). `"mem":{"on":false` = the runtime this compiler links predates the counters (a bootstrap build) |
 | `SC_STD_DIR` | The std directory, in place of the `std/` found beside the compiler binary (`exe_std_dir` in `src/main.spc`). `super-c test` sets it for the compiler under test, which `--out-dir` may place outside the project, when the project holds `std/core.spc` and the variable is unset (`src/build_system/build.spc`) |
-| `SC_CACHE_DIR` | Override the build cache root (objects under `o/`, the linker's ThinLTO caches under `lto/`) |
+| `SC_CACHE_DIR` | Override the build cache base (each project's root below it: objects under `o/`, the linker's ThinLTO caches under `lto/`, prelude images under `prelude/`) |
 | `SC_NO_CACHE` | Disable the object cache (the linker cache keeps its root) |
 | `SC_JOBSERVER` | The process-tree jobserver the first compiler of a tree makes, or a test runner started without one (`--jobs` slots), and every process it starts joins: `<slots>,<fd>` on POSIX (the inherited descriptor of an unlinked slot file), `<slots>,<path>` on Windows (a temporary file deleted with its last handle). A process holds a slot as a byte-range lock on one byte (`fcntl` record lock, `LockFileEx`), which the system drops when the process ends by any exit, abort or kill, so a killed process never takes slots with it. One more slot is implicit to each process |
 | `SC_UNITY_MAX` | Bytes of C up to which a program compiles as one unit (`__sc_unity.c`; default 2 MiB); a larger program compiles its small units in packs (`1`: a small program does too); `0` compiles every unit alone, with no pack (tests of per-unit objects and staleness set it). The emit stamp records it |

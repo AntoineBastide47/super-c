@@ -10,6 +10,7 @@ import stdlib;
 import module::loader as loader;
 import build_system::build as bsys;
 import build_system::objcache as ocache;
+import driver::util as du;
 import build_system::probe as probe;
 import driver_shim as shim;
 import std::parallel::runtime as prt;
@@ -9016,7 +9017,7 @@ fn the_object_cache_keys_on_the_compiler_command() {
     let root = p.dir();
     let cache = format("{}/ocache", root);
     let bdir = format("{}/build", root);
-    let ns = format("{}/o/script", cache.as_str());
+    let ns = format("{}/{}/o/script", cache.as_str(), ocache::SCRIPTS_DIR);
     let mut counts = Vector::<i32>::new();
     for cc in ["--cc=cc", "\"--cc=cc -DSC_KEY=1\"", "--cc=cc"] {
         bsys::rm_rf(bdir.as_str());
@@ -9050,11 +9051,21 @@ fn dir_names(dir: str) Vector<String> {
     return out;
 }
 
-// The object cache namespace of a tree below cache root `cache` (the first one listed, not the shared
-// `script` one); empty when there is none.
+// The cache root of the project below cache base `cache` (the first one listed; the script builds'
+// root is `.`-prefixed); empty when there is none.
+fn proj_root(cache: str) String {
+    let names = dir_names(cache);
+    if names.len() == 0 {
+        return String::new();
+    }
+    return format("{}/{}", cache, names.at(0).as_str());
+}
+
+// The object cache namespace of a tree below cache base `cache` (the first one listed in the project's
+// root, not the shared `script` one); empty when there is none.
 fn cache_ns(cache: str) String {
     let mut od = String::new();
-    od.format_into("{}/o", cache);
+    od.format_into("{}/o", proj_root(cache).as_str());
     let names = dir_names(od.as_str());
     let mut out = String::new();
     for i in 0..names.len() {
@@ -9142,7 +9153,7 @@ fn object_cache_keeps_four_generations() {
         assert(cli::dir_count_suffix(ns2.as_str(), ".o") > 0, "the namespace holds objects");
     }
     let mut od = String::new();
-    od.format_into("{}/o", cache.as_str());
+    od.format_into("{}/o", proj_root(cache.as_str()).as_str());
     let names = dir_names(od.as_str());
     assert(names.len() == 2 && (names.at(0).as_str() == "script" || names.at(1).as_str() == "script"));
     let mut sns = String::new();
@@ -9198,12 +9209,14 @@ fn rewritten_header_restales_units() {
     assert(mt != 0 && mt < 1850000000, "the unit compiled again (its object is no longer dated 2030)");
 }
 
-// The cache sweep (every 30 minutes). With the sweep stamp dated back, the next successful build removes the
-// flat objects older compilers installed in the root, a namespace whose owner object tree is gone, one whose
-// owner names another directory (an older compiler recorded the source directory), one with no owner idle
-// for an hour (a build that stopped before its first commit), a namespace idle for 30 days and a linker
-// cache idle for a week; the live namespace (owned by its object tree), a fresh ownerless one, the script
-// namespace and a used linker cache stay. A fresh stamp skips the sweep.
+// The cache sweep (every 30 minutes). With the sweep stamp dated back, the next successful build removes,
+// in its project's cache root, a namespace whose owner object tree is gone, one whose owner names another
+// directory (an older compiler recorded the source directory), one with no owner idle for an hour (a
+// build that stopped before its first commit), a namespace idle for 30 days and a linker cache idle for a
+// week; the live namespace (owned by its object tree), a fresh ownerless one, the script namespace and a
+// used linker cache stay. Nothing outside the project's root changes: not the cache base, its folders of
+// older compilers, nor another project's root, even one whose trees are gone. A fresh stamp skips the
+// sweep.
 @test
 fn object_cache_sweep() {
     if cli::on_windows() || cli::on_wasm() {
@@ -9217,42 +9230,53 @@ fn object_cache_sweep() {
     cache.format_into("{}/ocache", root);
     assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok(), "the first build");
     let live = cache_ns(cache.as_str());
-    let flat = "ocache/0123456789abcdef0123456789abcdef.o";
-    p.mkfile(flat, "x");
-    p.mkfile("ocache/0123456789abcdef0123456789abcdef.d", "x");
     let mut gone = String::new();
     gone.format_into("{}/gone", root);
-    p.mkfile("ocache/o/00000000000000aa/owner", gone.as_str());
-    p.mkfile("ocache/o/00000000000000aa/g1", "");
-    p.mkfile("ocache/o/00000000000000bb/owner", root);
-    p.mkfile("ocache/o/00000000000000bb/g1", "");
-    p.mkfile("ocache/o/00000000000000ee/owner", root);
-    p.mkfile("ocache/o/00000000000000ee/g1", "");
-    p.mkfile("ocache/o/00000000000000ff/k.o", "x");
-    p.mkfile("ocache/o/00000000000000ab/k.o", "x");
-    p.mkfile("ocache/o/script/k.o", "x");
-    p.mkfile("ocache/lto/00000000000000cc/llvmcache-1", "x");
-    p.mkfile("ocache/lto/00000000000000dd/llvmcache-1", "x");
+    let outside = [
+        "ocache/0123456789abcdef0123456789abcdef.o",
+        "ocache/o/script/01/0123456789abcdef0123456789abcdef.o",
+        "ocache/prelude/0123456789abcdef.img",
+        "ocache/gone_proj/o/00000000000000aa/g1",
+    ];
+    for f in outside {
+        p.mkfile(f, "x");
+    }
+    p.mkfile("ocache/gone_proj/o/00000000000000aa/owner", gone.as_str());
+    age_tree(format("{}/gone_proj", cache.as_str()).as_str());
+    p.mkfile("ocache/app/o/00000000000000aa/owner", gone.as_str());
+    p.mkfile("ocache/app/o/00000000000000aa/g1", "");
+    p.mkfile("ocache/app/o/00000000000000bb/owner", root);
+    p.mkfile("ocache/app/o/00000000000000bb/g1", "");
+    p.mkfile("ocache/app/o/00000000000000ee/owner", root);
+    p.mkfile("ocache/app/o/00000000000000ee/g1", "");
+    p.mkfile("ocache/app/o/00000000000000ff/k.o", "x");
+    p.mkfile("ocache/app/o/00000000000000ab/k.o", "x");
+    p.mkfile("ocache/app/o/script/k.o", "x");
+    p.mkfile("ocache/app/lto/00000000000000cc/llvmcache-1", "x");
+    p.mkfile("ocache/app/lto/00000000000000dd/llvmcache-1", "x");
     let mut stopped = String::new();
-    stopped.format_into("{}/o/00000000000000ff", cache.as_str());
+    stopped.format_into("{}/app/o/00000000000000ff", cache.as_str());
     age_tree(stopped.as_str());
     let mut idle_ns = String::new();
-    idle_ns.format_into("{}/o/00000000000000bb", cache.as_str());
+    idle_ns.format_into("{}/app/o/00000000000000bb", cache.as_str());
     age_tree(idle_ns.as_str());
     let mut idle_lto = String::new();
-    idle_lto.format_into("{}/lto/00000000000000cc", cache.as_str());
+    idle_lto.format_into("{}/app/lto/00000000000000cc", cache.as_str());
     age_tree(idle_lto.as_str());
-    let mut flat_p = String::new();
-    flat_p.format_into("{}/{}", root, flat);
+    let mut dead = format("{}/app/o/00000000000000aa", cache.as_str());
     assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok(), "a build under a fresh stamp");
-    assert(unsafe shim::sc_mtime(flat_p.cstr()) != 0, "a fresh stamp skips the sweep");
+    assert(unsafe shim::sc_mtime(dead.cstr()) != 0, "a fresh stamp skips the sweep");
     let mut stamp = String::new();
-    stamp.format_into("{}/o/.sweep", cache.as_str());
+    stamp.format_into("{}/app/o/.sweep", cache.as_str());
     age_tree(stamp.as_str());
     assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok(), "a build under an old stamp");
-    assert(unsafe shim::sc_mtime(flat_p.cstr()) == 0, "the flat objects of older compilers go");
+    assert(unsafe shim::sc_mtime(dead.cstr()) == 0, "the sweep removes the dead namespace");
+    for f in outside {
+        let mut fp = format("{}/{}", root, f);
+        assert(unsafe shim::sc_mtime(fp.cstr()) != 0, "nothing outside the project's root changes");
+    }
     let mut od = String::new();
-    od.format_into("{}/o", cache.as_str());
+    od.format_into("{}/app/o", cache.as_str());
     let nss = dir_names(od.as_str());
     let live_name = live.as_str().slice(od.len() + 1, live.len());
     let mut kept = 0;
@@ -9270,7 +9294,7 @@ fn object_cache_sweep() {
     let own = loader::read_file(ownp.as_str()).unwrap_or(String::new());
     assert(own.as_str() == ocache::real_path(tree.as_str()).as_str(), "the object tree owns its namespace");
     let mut ld = String::new();
-    ld.format_into("{}/lto", cache.as_str());
+    ld.format_into("{}/app/lto", cache.as_str());
     let ltos = dir_names(ld.as_str());
     assert(ltos.len() == 1 && ltos.at(0).as_str() == "00000000000000dd", "only the used linker cache stays");
     assert(unsafe shim::sc_mtime(stamp.cstr()) > 1600000000, "the sweep renews its stamp");
@@ -9297,7 +9321,7 @@ fn object_cache_links_one_copy() {
     let mut obj = format("{}/build/debug/obj/main.o", root);
     let mut own = format("{}/{}.o", cache_ns(cache.as_str()).as_str(), key.as_str());
     let mut shared = ocache::script_entry(
-        format("{}/o/script", cache.as_str()).as_str(),
+        format("{}/o/script", proj_root(cache.as_str()).as_str()).as_str(),
         format("{}.o", key.as_str()).as_str(),
     );
     assert(unsafe shim::sc_same_file(obj.cstr(), own.cstr()) == 1, "the namespace entry is the object");
@@ -9432,7 +9456,7 @@ fn project_sweep_keeps_the_tree_of_a_root_beside_the_manifest() {
 
 // `super-c clean` runs both sweeps now, whatever their stamps: the idle out-dir entries and the dead cache
 // namespaces go, the fresh tree and the live namespace stay. `--full` removes the out-dir and the
-// whole cache root instead; `--cache` is no longer a flag.
+// project's cache root instead, not another project's; `--cache` is no longer a flag.
 @test
 fn clean_sweeps_and_full_removes() {
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
@@ -9450,10 +9474,11 @@ fn clean_sweeps_and_full_removes() {
     let old = format("{}/build/old", root);
     age_tree(old.as_str());
     let gone = format("{}/gone", root);
-    p.mkfile("ocache/o/00000000000000aa/owner", gone.as_str());
+    p.mkfile("ocache/app/o/00000000000000aa/owner", gone.as_str());
+    p.mkfile("ocache/other/o/00000000000000bb/owner", gone.as_str());
     assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "clean").ok(), "clean sweeps");
     let mut oldc = old.clone();
-    let mut dead = format("{}/o/00000000000000aa", cache.as_str());
+    let mut dead = format("{}/app/o/00000000000000aa", cache.as_str());
     let mut livec = live.clone();
     let mut own = format("{}/build/debug/obj/main.o", root);
     assert(unsafe shim::sc_mtime(oldc.cstr()) == 0, "clean removes the idle tree");
@@ -9464,9 +9489,11 @@ fn clean_sweeps_and_full_removes() {
     let r = cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "clean --full");
     assert(r.ok() && r.out_has("removed"), "clean --full names the cache it removed");
     let mut out = format("{}/build", root);
-    let mut cachec = cache.clone();
+    let mut cachec = format("{}/app", cache.as_str());
+    let mut other = format("{}/other/o/00000000000000bb", cache.as_str());
     assert(unsafe shim::sc_mtime(out.cstr()) == 0, "--full removes the out-dir");
-    assert(unsafe shim::sc_mtime(cachec.cstr()) == 0, "--full removes the cache root");
+    assert(unsafe shim::sc_mtime(cachec.cstr()) == 0, "--full removes the project's cache root");
+    assert(unsafe shim::sc_mtime(other.cstr()) != 0, "another project's cache stays");
 }
 
 // Two source trees with byte-identical sources share one object cache. Their emitted headers include the
@@ -9520,7 +9547,8 @@ fn object_cache_shares_moved_trees() {
     assert(d.as_str().find(ta.as_str()) < 0, "b's dependency list names nothing of a");
 }
 
-// Two trees with byte-identical sources share their objects through the cache's `script` namespace,
+// Two trees of one project (both named `app`) with byte-identical sources share their objects through
+// the project root's `script` namespace,
 // with and without debug information (which names the working directory `.`): the second tree
 // compiles no unit, so its own namespace stays empty, its objects do not name the first tree, and its
 // binary runs.
@@ -9543,7 +9571,7 @@ fn object_cache_shares_identical_units_across_trees() {
     let mut tb = String::new();
     tb.format_into("{}/b", root);
     let mut od = String::new();
-    od.format_into("{}/o", cache.as_str());
+    od.format_into("{}/app/o", cache.as_str());
     for prof in ["nodebug", "debug"] {
         let mut arg = String::new();
         arg.format_into("build --profile={}", prof);
@@ -9570,52 +9598,6 @@ fn object_cache_shares_identical_units_across_trees() {
         let ra = ocache::real_path(ta.as_str());
         assert(cli::read_text(obj.as_str()).as_str().find(ra.as_str()) < 0, "tree b's object does not name tree a");
     }
-}
-
-// The sweep packs the entries no build tree names. Once tree a is gone, `clean` turns its objects into
-// packed `<key>.z` entries; an identical tree b builds from them without compiling and runs; an object
-// tree b compiles itself (a new version), which its tree names, stays a link. A packed entry that does
-// not check is a miss: the unit compiles again.
-@test
-fn object_cache_packs_unnamed_entries() {
-    let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
-    let p = cli::proj_new();
-    let root = p.dir();
-    for d in ["a", "b"] {
-        p.mkfile(format("{}/build.toml", d).as_str(), "bin = \"app\"\nroot = \"src/main.spc\"\n");
-        p.mkfile(format("{}/src/main.spc", d).as_str(), "fn main() i32 {\n    println(\"shared\");\n    return 3;\n}\n");
-    }
-    let cache = format("{}/ocache", root);
-    let ta = format("{}/a", root);
-    let tb = format("{}/b", root);
-    let sd = format("{}/o/script", cache.as_str());
-    assert(cli::superc_env_in(ta.as_str(), "SC_CACHE_DIR", cache.as_str(), "build").ok(), "tree a builds");
-    let na = script_count(sd.as_str(), ".o");
-    assert(na > 0, "tree a installs its units");
-    // The first build's sweep may already have packed the prelude image (an entry no tree names).
-    let z0 = script_count(sd.as_str(), ".z");
-    bsys::rm_rf(ta.as_str());
-    assert(cli::superc_env_in(tb.as_str(), "SC_CACHE_DIR", cache.as_str(), "clean").ok(), "clean sweeps");
-    assert_eq(script_count(sd.as_str(), ".o"), 0);
-    assert_eq(script_count(sd.as_str(), ".z"), z0 + na);
-    assert_eq(cli::superc_env_in(tb.as_str(), "SC_CACHE_DIR", cache.as_str(), "run").exit, 3);
-    assert_eq(script_count(sd.as_str(), ".o"), 0);
-    p.mkfile("b/src/main.spc", "fn main() i32 {\n    println(\"own\");\n    return 4;\n}\n");
-    assert_eq(cli::superc_env_in(tb.as_str(), "SC_CACHE_DIR", cache.as_str(), "run").exit, 4);
-    assert(cli::superc_env_in(tb.as_str(), "SC_CACHE_DIR", cache.as_str(), "clean").ok(), "clean sweeps again");
-    let key = rec_key(format("{}/build/debug/obj/main.cmd", tb.as_str()).as_str());
-    let mut obj = format("{}/build/debug/obj/main.o", tb.as_str());
-    let mut entry = ocache::script_entry(sd.as_str(), format("{}.o", key.as_str()).as_str());
-    assert(unsafe shim::sc_same_file(obj.cstr(), entry.cstr()) == 1, "an entry tree b names stays a link");
-    let mut corrupted = 0;
-    let subs = dir_names(sd.as_str());
-    for i in 0..subs.len() {
-        corrupted += cli::dir_corrupt_suffix(format("{}/{}", sd.as_str(), subs.at(i).as_str()).as_str(), ".z");
-    }
-    assert(corrupted > 0, "the packed entries are corrupted");
-    p.mkfile("b/src/main.spc", "fn main() i32 {\n    println(\"shared\");\n    return 3;\n}\n");
-    assert_eq(cli::superc_env_in(tb.as_str(), "SC_CACHE_DIR", cache.as_str(), "run").exit, 3);
-    assert(script_count(sd.as_str(), ".o") > 1, "a corrupt packed entry is a miss");
 }
 
 // An object restored from the cache relinks the binary like a compiled one: the copy's mtime need not be
@@ -12251,7 +12233,7 @@ fn script_builds_share_cached_objects() {
     p.mkfile("b/main.spc", "fn main() i32 {\n    println(\"{}\", 4);\n    return 4;\n}\n");
     let root = p.dir();
     let cache = format("{}/ocache", root);
-    let ns = format("{}/o/script", cache.as_str());
+    let ns = format("{}/{}/o/script", cache.as_str(), ocache::SCRIPTS_DIR);
     let ta = format("{}/a", root);
     let tb = format("{}/b", root);
     assert(script_build(ta.as_str(), cache.as_str(), 4), "tree a builds");
@@ -12279,11 +12261,11 @@ fn script_build_sweeps_the_cache() {
     let ta = format("{}/a", root);
     assert(script_build(ta.as_str(), cache.as_str(), 1), "the first build");
     let gone = format("{}/gone", root);
-    p.mkfile("ocache/o/00000000000000aa/owner", gone.as_str());
-    let mut dead = format("{}/o/00000000000000aa", cache.as_str());
+    p.mkfile("ocache/.scripts/o/00000000000000aa/owner", gone.as_str());
+    let mut dead = format("{}/{}/o/00000000000000aa", cache.as_str(), ocache::SCRIPTS_DIR);
     assert(script_build(ta.as_str(), cache.as_str(), 1), "a build under a fresh stamp");
     assert(unsafe shim::sc_mtime(dead.cstr()) != 0, "a fresh stamp skips the sweep");
-    age_tree(format("{}/o/.sweep", cache.as_str()).as_str());
+    age_tree(format("{}/{}/o/.sweep", cache.as_str(), ocache::SCRIPTS_DIR).as_str());
     assert(script_build(ta.as_str(), cache.as_str(), 1), "a build under an old stamp");
     assert(unsafe shim::sc_mtime(dead.cstr()) == 0, "the sweep removes the dead namespace");
     assert_eq(script_run(ta.as_str()), 3);
@@ -12311,55 +12293,89 @@ fn trim_key(i: u32) String {
     return k;
 }
 
-// A trim deletes a dependency list whose object is gone (a hit reads the two together), and above its
-// object bound each least recently used object with its list, down to the kept count. The bounds are the
-// trim's parameters, so the rule is checked on nine objects rather than SCRIPT_OBJ_MAX.
-@test
-fn script_trim_deletes_dependency_lists() {
-    let p = cli::proj_new();
-    let ns = format("{}/ns", p.dir());
-    let live = trim_key(0);
-    p.mkfile(format("ns/{}.o", live.as_str()).as_str(), "o");
-    p.mkfile(format("ns/{}.d", live.as_str()).as_str(), "d");
-    p.mkfile(format("ns/{}.d", trim_key(1).as_str()).as_str(), "d");
-    ocache::script_trim_to(ns.as_str(), 0, 8, 6);
-    assert_eq(script_count(ns.as_str(), ".o"), 1);
-    assert_eq(script_count(ns.as_str(), ".d"), 1);
-    let lp = ocache::script_entry(ns.as_str(), format("{}.d", live.as_str()).as_str());
-    assert(cli::read_text(lp.as_str()).as_str() == "d", "the list of a kept object stays");
-    for i in 1..9u32 {
-        let k = trim_key(i);
-        p.mkfile(format("ns/{}.o", k.as_str()).as_str(), "o");
-        p.mkfile(format("ns/{}.d", k.as_str()).as_str(), "d");
-    }
-    ocache::script_trim_to(ns.as_str(), 0, 8, 6);
-    let no = script_count(ns.as_str(), ".o");
-    assert_eq(no, 6);
-    assert_eq(script_count(ns.as_str(), ".d"), no);
+// The script namespace of object directory `od` in a test's own tree.
+fn trim_ns(od: str) String {
+    return format("{}/{}", od, ocache::SCRIPT_NS);
 }
 
-// A packed entry (`<key>.z`) counts as an object of the script namespace: its dependency list stays,
-// and the trim keeps the bound over packed and unpacked entries alike.
-@test
-fn script_trim_counts_packed_entries() {
-    let p = cli::proj_new();
-    let ns = format("{}/ns", p.dir());
-    for i in 0..9u32 {
-        let k = trim_key(i);
-        let ext = if i % 2 == 0 {
-            "z";
-        } else {
-            "o";
-        };
-        p.mkfile(format("ns/{}.{}", k.as_str(), ext).as_str(), "x");
-        p.mkfile(format("ns/{}.d", k.as_str()).as_str(), "d");
+// Write object `<key>.o` of script namespace `ns`, with its dependency list when `engine`.
+fn trim_obj(ns: str, k: &String, engine: bool) {
+    let o = ocache::script_entry(ns, format("{}.o", k.as_str()).as_str());
+    du::mkdir_p(loader::dirname_of(o.as_str()));
+    assert(du::write_file(o.as_str(), "o"), "the object writes");
+    if engine {
+        let d = ocache::script_entry(ns, format("{}.d", k.as_str()).as_str());
+        assert(du::write_file(d.as_str(), "d"), "the list writes");
     }
-    ocache::script_trim_to(ns.as_str(), 0, 10, 6);
-    assert_eq(script_count(ns.as_str(), ".d"), 9);
-    ocache::script_trim_to(ns.as_str(), 0, 8, 6);
-    let objs = script_count(ns.as_str(), ".o") + script_count(ns.as_str(), ".z");
-    assert_eq(objs, 6);
-    assert_eq(script_count(ns.as_str(), ".d"), 6);
+}
+
+// A trim deletes a dependency list whose object is gone (a hit reads the two together) and the packed
+// entries of older compilers. Above the object bound it deletes the unused objects, least recently used
+// first, each with its list, down to the kept count; an object a build tree links counts but stays.
+// `clean` deletes every unused object. The bounds are the trim's parameters, so the rule is checked on a
+// few dozen objects rather than SCRIPT_OBJ_MAX.
+@test
+fn trim_bounds_the_script_objects() {
+    let p = cli::proj_new();
+    let od = format("{}/o", p.dir());
+    let ns = trim_ns(od.as_str());
+    let live = trim_key(0);
+    trim_obj(ns.as_str(), &live, true);
+    let stray = ocache::script_entry(ns.as_str(), format("{}.d", trim_key(1).as_str()).as_str());
+    assert(du::write_file(stray.as_str(), "d"), "the stray list writes");
+    let packed = ocache::script_entry(ns.as_str(), format("{}.z", trim_key(2).as_str()).as_str());
+    assert(du::write_file(packed.as_str(), "z"), "the packed entry writes");
+    ocache::trim_objects(od.as_str(), 0, u64::MAX, 40, 30, false);
+    assert_eq(script_count(ns.as_str(), ".o"), 1);
+    assert_eq(script_count(ns.as_str(), ".d"), 1);
+    assert_eq(script_count(ns.as_str(), ".z"), 0);
+    let tree = format("{}/tree.o", p.dir());
+    let lo = ocache::script_entry(ns.as_str(), format("{}.o", live.as_str()).as_str());
+    assert(du::link_or_copy(lo.as_str(), tree.as_str()), "the tree links the object");
+    for i in 1..45u32 {
+        let k = trim_key(i);
+        trim_obj(ns.as_str(), &k, i % 2 == 0);
+    }
+    ocache::trim_objects(od.as_str(), 0, u64::MAX, 40, 30, false);
+    assert_eq(script_count(ns.as_str(), ".o"), 30);
+    let mut lc = lo.clone();
+    assert(unsafe shim::sc_mtime(lc.cstr()) != 0, "the linked object stays");
+    ocache::trim_objects(od.as_str(), 0, u64::MAX, 40, 30, true);
+    assert_eq(script_count(ns.as_str(), ".o"), 1);
+    assert_eq(script_count(ns.as_str(), ".d"), 1);
+}
+
+// Above the byte budget, a trim deletes the unused files of the cache root, least recently used first,
+// each under all its names (a tree's namespace and the script namespace), until the files hold at most
+// the budget; a file a build tree links counts but stays.
+@test
+fn trim_keeps_the_project_budget() {
+    let p = cli::proj_new();
+    let od = format("{}/o", p.dir());
+    let ns = trim_ns(od.as_str());
+    let body = "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789";
+    for i in 0..10u32 {
+        let k = trim_key(i);
+        let a = format("{}/00000000000000aa/{}.o", od.as_str(), k.as_str());
+        let b = format("{}/00000000000000bb/{}.o", od.as_str(), trim_key(i + 100).as_str());
+        du::mkdir_p(loader::dirname_of(a.as_str()));
+        du::mkdir_p(loader::dirname_of(b.as_str()));
+        assert(du::write_file(a.as_str(), body), "the object writes");
+        assert(du::write_file(b.as_str(), body), "the other tree's object writes");
+        let shared = ocache::script_entry(ns.as_str(), format("{}.o", k.as_str()).as_str());
+        du::mkdir_p(loader::dirname_of(shared.as_str()));
+        assert(du::link_or_copy(a.as_str(), shared.as_str()), "the shared name links");
+    }
+    let tree = format("{}/tree.o", p.dir());
+    let first = format("{}/00000000000000aa/{}.o", od.as_str(), trim_key(0).as_str());
+    assert(du::link_or_copy(first.as_str(), tree.as_str()), "the tree links an object");
+    ocache::trim_objects(od.as_str(), 0, 450, usize::MAX, usize::MAX, false);
+    let na = cli::dir_count_suffix(format("{}/00000000000000aa", od.as_str()).as_str(), ".o");
+    let nb = cli::dir_count_suffix(format("{}/00000000000000bb", od.as_str()).as_str(), ".o");
+    assert_eq(na + nb, 4);
+    assert_eq(script_count(ns.as_str(), ".o"), na);
+    let mut fc = first.clone();
+    assert(unsafe shim::sc_mtime(fc.cstr()) != 0, "the linked object stays");
 }
 
 // Units with one file name in two directories (a user module `lib/string` beside the std `string`)

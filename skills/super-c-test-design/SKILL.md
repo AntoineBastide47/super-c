@@ -69,8 +69,9 @@ Rules for the costly rungs:
 
 ## Caches
 
-- The suite shares one object cache (`SC_CACHE_DIR`, set by `super-c test`). A new project
-  whose std units another test already compiled compiles only its own unit.
+- The suite shares one cache base (`SC_CACHE_DIR`, set by `super-c test` to `<out-dir>/test/cache`,
+  deleted when the run ends). A new project of a name another test already built (`app`) compiles
+  only its own units; script builds share `.scripts`.
 - A small program compiles as one unit (`__sc_unity.c`). A test that checks per-unit objects,
   staleness or the code of a call across units sets `SC_UNITY_MAX=0` (`cli::set_env`), and a test of
   packs `SC_UNITY_MAX=1`. A program needs four units that include `__sc_fwd.h` (`println` brings the
@@ -79,8 +80,8 @@ Rules for the costly rungs:
   only where the assertion is about compiles: recompile counts, staleness, cache behavior.
 - A test that checks cache behavior sets its own `SC_CACHE_DIR` under its scratch directory.
 - The compiler records its C compiler's version line in the object cache (an entry of
-  `o/script`), so a build does not start a `--version` probe.
-- The checked std prelude is cached in the object cache too (an entry of `o/script`): a build
+  `.scripts/o/script`), so a build does not start a `--version` probe.
+- The checked std prelude is cached in the cache root too (`<root>/prelude/`): a build
   checks only the program. A test that must see the prelude checked (a std edit, a std tree of its own) sets
   its own `SC_CACHE_DIR`, as `tests/prelude_image_test.spc` does; the first build in a new cache
   root checks the prelude once.
@@ -104,8 +105,9 @@ Measure the CPU time of one test file (`<mod>` is the file stem) with the runner
 
 ```sh
 ./super-c test --quiet --filter=<mod>
-SUPERC=$PWD/build/test-bin/super-c SC_STD_DIR=$PWD/std SC_CACHE_DIR=$HOME/.super-c/cache \
+SUPERC=$PWD/build/test-bin/super-c SC_STD_DIR=$PWD/std SC_CACHE_DIR=$PWD/build/test/cache \
   /usr/bin/time -p build/test/__tests --quiet --filter="tests::<mod>::"
+rm -rf build/test/cache
 ```
 
 The sum of `user` and `sys` is the file's CPU time. The whole suite's energy, by process, on

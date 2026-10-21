@@ -457,7 +457,7 @@ extend Proj {
             }
         }
         // Without a cache root the namespace is the project's own: every unit compiles.
-        let croot = ocache::cache_root();
+        let croot = ocache::cache_root("");
         let ns = if croot.len() != 0 {
             ocache::script_ns(croot.as_str());
         } else {
