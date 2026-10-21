@@ -51,8 +51,21 @@
       "patterns": [
         {
           "name": "string.quoted.other.matchertext.super-c",
-          "begin": "M(?:[\\(\\[\\{]+[\\)\\]\\}]+)?\"[\\(\\[\\{]",
-          "end": "[\\)\\]\\}]\""
+          "begin": "M(?:[\\(\\[\\{]+[\\)\\]\\}]+)?\"\\(",
+          "end": "\\)\"",
+          "patterns": [{ "include": "#matchertext-pairs" }]
+        },
+        {
+          "name": "string.quoted.other.matchertext.super-c",
+          "begin": "M(?:[\\(\\[\\{]+[\\)\\]\\}]+)?\"\\[",
+          "end": "\\]\"",
+          "patterns": [{ "include": "#matchertext-pairs" }]
+        },
+        {
+          "name": "string.quoted.other.matchertext.super-c",
+          "begin": "M(?:[\\(\\[\\{]+[\\)\\]\\}]+)?\"\\{",
+          "end": "\\}\"",
+          "patterns": [{ "include": "#matchertext-pairs" }]
         },
         {
           "name": "string.quoted.double.super-c",
@@ -65,6 +78,13 @@
             }
           ]
         }
+      ]
+    },
+    "matchertext-pairs": {
+      "patterns": [
+        { "begin": "\\(", "end": "\\)", "patterns": [{ "include": "#matchertext-pairs" }] },
+        { "begin": "\\[", "end": "\\]", "patterns": [{ "include": "#matchertext-pairs" }] },
+        { "begin": "\\{", "end": "\\}", "patterns": [{ "include": "#matchertext-pairs" }] }
       ]
     },
     "chars": {

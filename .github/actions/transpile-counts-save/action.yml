@@ -1,0 +1,71 @@
+name: Save transpile counts
+description: >
+  The last job of a run whose `counts` jobs uploaded `counts-part-<target>` artifacts
+  (.github/actions/transpile-counts): writes every platform's table (this commit against the last release
+  on the same sources) to the job summary, sets `approval` to true when a platform reached the limit
+  (verdict `over`) or has no verdict (its count failed), uploads every platform's counts as the
+  repository's one `transpile-counts` artifact (a platform whose job measured nothing keeps its last
+  counts), and deletes every other counts artifact (this run's parts, the earlier `transpile-counts`). The
+  job needs `actions: write`.
+inputs:
+  targets:
+    description: "the platforms the counts jobs measure, as words"
+    required: true
+outputs:
+  approval:
+    description: "true when the release needs an approval"
+    value: ${{ steps.verdict.outputs.approval }}
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/latest-artifact
+      with:
+        name: transpile-counts
+        path: counts/prev
+
+    - uses: actions/download-artifact@v8
+      with:
+        pattern: counts-part-*
+        merge-multiple: true
+        path: counts/new
+
+    - name: Decide on the approval
+      id: verdict
+      shell: bash
+      env:
+        TARGETS: ${{ inputs.targets }}
+      run: |
+        set -eu
+        approval=false
+        for t in $TARGETS; do
+          v=$(cat "counts/new/$t.verdict" 2>/dev/null || echo missing)
+          case "$v" in
+            over) approval=true ;;
+            missing) approval=true
+              echo "::error::$t: no transpile count (its counts job failed): the release waits for an approval"
+              printf '> [!CAUTION]\n> %s: no transpile count (its counts job failed). The release waits for an approval.\n\n' "$t" >> "$GITHUB_STEP_SUMMARY" ;;
+          esac
+        done
+        echo "approval=$approval" >> "$GITHUB_OUTPUT"
+
+    - name: Merge the platforms
+      shell: bash
+      run: |
+        set -eu
+        python3 -I "$GITHUB_ACTION_PATH/../transpile-counts/counts.py" merge counts/prev counts/new counts/out | tee -a "$GITHUB_STEP_SUMMARY"
+        cat counts/new/*.md 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+
+    - uses: actions/upload-artifact@v7
+      id: upload
+      with:
+        name: transpile-counts
+        path: counts/out
+        if-no-files-found: error
+        retention-days: 90
+
+    # One counts artifact remains: the one just uploaded.
+    - uses: ./.github/actions/keep-one-artifact
+      with:
+        name: transpile-counts
+        keep: ${{ steps.upload.outputs.artifact-id }}
+        parts: counts-part-

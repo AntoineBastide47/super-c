@@ -1,8 +1,8 @@
 // External C sources/libs: `@c.source`/`@link` attrs + implicit backing-header `.c` siblings. Each resolved
-// source becomes a wrapper TU `build/__ext<N>_<stem>.c` on the emit keep-list (one absolute #include; the file
-// stays in place so its own relative includes keep resolving), deduped by resolved path. `@link` values become
-// `-l<v>` (verbatim when starting with '-'), written with the runtime's own libm on POSIX to `build/__ldflags`
-// for the final link line.
+// source becomes a wrapper TU `build/<profile>/raw/__ext<N>_<stem>.c` on the emit keep-list (one absolute
+// #include; the file stays in place so its own relative includes keep resolving), deduped by resolved path.
+// `@link` values become `-l<v>` (verbatim when starting with '-'), written with the runtime's own libm on
+// POSIX to `build/<profile>/raw/__ldflags` for the final link line.
 import stdio;
 import string as cstring;
 import ast::ast as *;
@@ -85,7 +85,7 @@ fn ext_c_wrap(
 
 /// Scan every module for @c.source/@link and implicit backing-header `.c` siblings: wrapper TUs are
 /// written under gen_root and pushed onto `keep`, and whether this build rewrote each onto `fresh`; link
-/// flags go to build/__ldflags (removed when none). Sets `*err` on an unresolvable source or a write
+/// flags go to `<gen_root>/__ldflags` (removed when none). Sets `*err` on an unresolvable source or a write
 /// failure; already-set values are never cleared.
 pub fn ext_c_collect(
     p: &mut loader::Package,

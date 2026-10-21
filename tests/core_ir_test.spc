@@ -1065,7 +1065,8 @@ fn self_tail_calls_run_in_one_frame_in_every_profile() {
     let c = h::compile_c_user(TAIL_DEEP);
     assert(c.ok(), "the program compiles");
     let code = unsafe str::from_cstr(c.code);
-    assert(!h::c_fn(code, "int64_t count(").contains("count("), "count loops");
+    // `count` is also a prelude function's name: the user's takes the escape `_`.
+    assert(!h::c_fn(code, "int64_t count_(").contains("count_("), "count loops");
     assert(!h::c_fn(code, "void fill(").contains("fill("), "fill loops");
     assert(!h::c_fn(code, "String sw(").contains("sw("), "sw loops");
     assert(!h::c_fn(code, "void Counter__go(").contains("Counter__go("), "the method loops");

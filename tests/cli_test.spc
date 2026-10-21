@@ -2125,6 +2125,32 @@ fn leak_tracker() {
     assert(dblf.exit != 0, "fatal mode aborts on double free");
 }
 
+// A leak's site is the function that asked for the block, in every profile: the tracker's entry
+// points never inline into their caller (whose return address would name the caller's caller), and
+// `Global`'s methods inline into the container that calls them. Only macOS prints a site by name:
+// `backtrace_symbols` elsewhere prints an offset for a function the binary does not export.
+@test
+fn leak_sites_name_the_allocating_function() {
+    if PLATFORM != Platform::MacOS {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "extern \"C\" { fn malloc(n: usize) *mut void; }\n@noinline\nfn leak_site(n: usize) usize {\n    let pt = unsafe malloc(48 + n);\n    return (pt != null) as usize + n;\n}\nfn main(args: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    forget(v);\n    return (leak_site(args.len()) - 2) as i32;\n}\n",
+    );
+    let root = p.dir();
+    for prof in ["debug", "release"] {
+        let mut args = String::new();
+        args.format_into("build --profile={} \"{}/main.spc\" -o \"{}/bin\"", prof, root, root);
+        assert(p.run_raw(args.as_str()).ok(), "the program builds");
+        let lk = p.run_bin_env("SC_LEAK_CHECK=1 ");
+        assert(lk.ok(), "the program runs");
+        assert(lk.out_has(" leak_site + "), "the raw block names its function");
+        assert(lk.out_has(" Vector__i32__grow"), "the vector's block names the vector's growth");
+    }
+}
+
 // The reflection registry TU: `@reflect` roots that no body names still get their descriptor
 // aggregates defined, land in `__sc_registry.c` sorted by symbol, register through one entry
 // point, and a removed root leaves the table (runtime lookup counts the survivors).
@@ -4508,6 +4534,8 @@ fn main() i32 {
     // Tracing is off unless asked for, and then reports the scheduler's events.
     let quiet = p.run_bin_env("");
     assert(!quiet.out_has("[task "), "no trace output without SC_TASK_TRACE");
+    let zero = p.run_bin_env("SC_TASK_TRACE=0 ");
+    assert(!zero.out_has("[task "), "SC_TASK_TRACE=0 leaves tracing off");
     let traced = p.run_bin_env("SC_TASK_TRACE=1 ");
     assert(traced.out_has("spawn coroutine"), "SC_TASK_TRACE reports spawns");
     assert(traced.out_has("complete"), "SC_TASK_TRACE reports completions");
@@ -6974,6 +7002,43 @@ fn non_root_main_is_ordinary() {
     assert_eq(p.run_bin(), 0);
 }
 
+// A module's prefix never spells a prelude C symbol: module `str`, whose `len` would be the prelude's
+// `str__len`, and module `Vector::i32`, whose `push` would be `Vector__i32__push` once another `i32`
+// module keeps its full path, take one more `_` after the prefix's first segment.
+@test
+fn module_prefixes_stay_apart_from_prelude_symbols() {
+    let p = cli::proj_new();
+    p.mkfile("str.spc", "pub fn len(x: i32) i32 {\n    return x;\n}\n");
+    p.mkfile("Vector/i32.spc", "pub fn push(x: i32) i32 {\n    return x + 1;\n}\n");
+    p.mkfile("other/i32.spc", "pub fn push(x: i32) i32 {\n    return x + 2;\n}\n");
+    p.mkfile(
+        "main.spc",
+        "import str as su;\nimport Vector::i32 as vi;\nimport other::i32 as oi;\nfn main(args: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(args[0].len() as i32);\n    return su::len(v[0]) + vi::push(0) + oi::push(0) - args[0].len() as i32 - 3;\n}\n",
+    );
+    assert(p.compile("main.spc").ok(), "the program compiles");
+    assert(p.gen_has("Vector/i32.c", "Vector___i32__push("), "the full prefix takes the escape");
+    assert(p.cc_build("").ok(), "the emitted C compiles and links");
+    assert_eq(p.run_bin(), 0);
+}
+
+// A constant evaluated during the type check calls another module's operators: their by-reference
+// parameter types are provisional ids of THAT module's pool, which the lowering must read there.
+@test
+fn constant_calls_another_modules_by_reference_operators() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "y.spc",
+        "pub struct W { pub v: i64 }\nextend W {\n    pub fn add(self: &W, other: &W) W { return W { v: self.v + other.v }; }\n    pub fn mul(self: &W, other: &i64) W { return W { v: self.v * *other }; }\n}\n",
+    );
+    p.mkfile(
+        "main.spc",
+        "import y;\nconst X: i32 = -3;\nconst K: y::W = y::W { v: 1 } + y::W { v: 2 };\nconst M: y::W = y::W { v: 5 } * 3;\nconst N: y::W = y::W { v: 2 } * X;\nfn main() i32 {\n    let x: i32 = 4;\n    return (K.v + M.v + N.v + (y::W { v: 1 } * x).v) as i32;\n}\n",
+    );
+    assert(p.compile("main.spc").ok(), "the program compiles");
+    assert(p.cc_build("").ok(), "the emitted C compiles and links");
+    assert_eq(p.run_bin(), 16);
+}
+
 // A glob-imported name shadows a prelude name, as a declaration does: `dot` (a std::simd function) and
 // `String` (a prelude type) come from the imported module.
 @test
@@ -7489,6 +7554,65 @@ fn usage() {
     let r = p.run_raw("a b");
     assert_eq(r.exit, 1);
     assert(r.out_has("USAGE:"), "usage is printed");
+}
+
+// `--help` and `-h`, in any position, print the usage on stdout and succeed. The usage states what
+// `--jobs` and `--cstd` set.
+@test
+fn help_flag() {
+    let p = cli::proj_new();
+    let out = format("{}/help.out", p.dir());
+    let err = format("{}/help.err", p.dir());
+    for a in ["--help", "-h", "build --help"] {
+        let mut cmd = format("\"{}\" {}", cli::superc_path(), a);
+        let mut op = out.clone();
+        let mut ep = err.clone();
+        assert_eq(cli::run_with(cmd.cstr(), null, op.cstr(), ep.cstr(), ""), 0);
+        let text = cli::read_text(out.as_str());
+        assert(text.as_str().contains("USAGE:"), "the usage is on stdout");
+        assert(text.as_str().contains("the compiler's own threads"), "--jobs names every worker it sets");
+        assert(text.as_str().contains("-std=c11 -D_POSIX_C_SOURCE=200809L"), "--cstd names the flags it replaces");
+    }
+    // A flag the command does not take is named before the usage.
+    p.mkfile("app.spc", "fn main() i32 {\n    return 0;\n}\n");
+    for a in ["--jobs=1", "--bogus"] {
+        let mut cmd = format("\"{}\" \"{}/app.spc\" {}", cli::superc_path(), p.dir(), a);
+        let mut op = out.clone();
+        let mut ep = err.clone();
+        assert_eq(cli::run_with(cmd.cstr(), null, op.cstr(), ep.cstr(), ""), 1);
+        let text = cli::read_text(err.as_str());
+        assert(
+            text.as_str().starts_with(format("error: unexpected argument '{}'\n", a).as_str()),
+            "the argument is named",
+        );
+    }
+}
+
+// A file build has no build.toml targets: `--cstd` reaches its C compile, and `--bin` and `--lib` are
+// errors, never ignored.
+@test
+fn file_build_flags() {
+    let p = cli::proj_new();
+    p.mkfile("app.spc", "fn main() i32 {\n    return 0;\n}\n");
+    let root = p.dir();
+    let bogus = p.run_raw(format("build \"{}/app.spc\" -o \"{}/app\" --cstd=-bogus-flag", root, root).as_str());
+    assert(bogus.exit != 0, "the C compile takes the --cstd flags");
+    for f in ["--bin=x", "--lib"] {
+        let r = p.run_raw(format("build \"{}/app.spc\" -o \"{}/app\" {}", root, root, f).as_str());
+        assert_eq(r.exit, 1);
+        assert(r.out_has("need build.toml"), "a target selector without build.toml is an error");
+    }
+}
+
+// A script's `--test-record-durations` names its file: the script has no suite directory for the
+// default `durations.tsv`.
+@test
+fn script_record_durations_needs_a_file() {
+    let p = cli::proj_new();
+    p.mkfile("a.spc", "@test\nfn t() {}\n\nfn main() i32 {\n    return 0;\n}\n");
+    let r = p.compile_flags("--test --test-record-durations", "a.spc");
+    assert_eq(r.exit, 1);
+    assert(r.out_has("--test-record-durations needs a file"), "the run says what is missing");
 }
 
 // A type error: no output file is written, the diagnostic is reported, and the exit is nonzero.
@@ -9559,6 +9683,45 @@ pub fn wasm_loop(b: &mut bench::Bencher) {
     let none = cli::superc_env_in(root, "SC_NO_CACHE", "1", "bench --profile=debug --filter=zzz");
     assert_eq(none.exit, 1);
     assert(none.out_shows("bench: no benchmark name contains 'zzz'"), "a filter that selects nothing is an error");
+}
+
+// The allocation line counts the benchmark's calls alone, as a mean over the diagnostic rounds: one
+// 64-byte call in the first of three rounds is 0.33 calls and 21 B per round. The runner's own sample
+// storage and the leak tracker's tables are not counted, and a fraction of a call keeps its digits.
+@test
+fn bench_alloc_line_counts_the_benchmark_alone() {
+    if PLATFORM != Platform::MacOS && PLATFORM != Platform::Linux {
+        return; // no allocation accounting elsewhere
+    }
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    p.mkfile(
+        "bench/once.spc",
+        M"(import std::testing::bench as bench;
+extern "C" {
+    fn malloc(n: usize) *mut void;
+    fn free(p: *mut void);
+}
+@bench
+pub fn one_call(b: &mut bench::Bencher) {
+    b.set_rounds(2);
+    let mut k = 0;
+    while b.running() {
+        k += 1;
+        if k == 4 {
+            let p = unsafe malloc(64);
+            assert(p != null);
+            unsafe free(p);
+        }
+    }
+}
+)",
+    );
+    // The harness's SC_LEAK_CHECK=fatal holds: the leak tracker's own tables are not malloc calls.
+    let r = cli::superc_in(p.dir(), "bench --profile=debug");
+    assert(r.ok(), "the benchmark runs");
+    assert(r.out_shows("0.33 calls, 21 B per round"), "the mean of one call over three rounds");
 }
 
 // The generated bench runner calls each benchmark directly. The coroutine and cancellation reachability

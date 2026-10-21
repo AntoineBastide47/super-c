@@ -224,8 +224,9 @@ modular return-lifetime check) run alongside.
   diagnostics published in declaration order.
 - `cir.flush_asserts` / `flush_consts`: the deferred static_asserts and consts
   re-evaluate now that every module is fully typed; failures carry the CTFE stack. A
-  top-level `static_assert` that still does not fold is an error (asserts inside bodies may
-  depend on generics and stay deferred). Between the two, `flush_inst_asserts` evaluates the
+  `static_assert` outside a generic body (top level, or the body of a non-generic function or
+  method) that still does not fold is an error (asserts inside generic bodies depend on the
+  generics and stay deferred). Between the two, `flush_inst_asserts` evaluates the
   static_asserts of the generic-function instances the checker's concrete calls queued
   (`Interp.inst_asserts`; the per-instance asserts of the CTFE section of the skill). The
   instances that only other generic bodies reach are checked after the instance graph

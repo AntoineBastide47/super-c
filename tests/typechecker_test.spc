@@ -42,6 +42,11 @@ fn ok() {
         "fn main() i32 { let h: f64 = -3; }\n",
         "mismatched types: expected 'f64', found 'i32'",
     );
+    h::expect_err_msg(
+        "a mismatch names the alias the annotation writes",
+        "fn main() i32 { let h: f16 = 1.5; return 0; }\n",
+        "mismatched types: expected 'f16', found 'f32'",
+    );
     h::expect_ok(
         "builtin marker bound",
         "fn id<T: Clone>(x: T) T { return x; }\nfn main() i32 { return id::<i32>(0); }\n",
@@ -6414,6 +6419,11 @@ fn ownership_of_question_for_and_closure_captures() {
         "a closure bound failure names the return type",
         "fn apply<F: fn(i32)>(f: F) { f(1); }\nfn main() i32 {\n    let t: i32 = 1;\n    apply(|x: i32| t + x);\n    return 0;\n}\n",
         "type 'fn(i32) i32' does not satisfy bound 'fn(i32)'",
+    );
+    h::expect_err_msg(
+        "a fn bound failure spells the bound under the call's substitutions",
+        "fn keep<T, P: fn(&T) bool>(t: T, p: P) bool { return p(&t); }\nfn main() i32 {\n    let v = 1;\n    let _ = keep(&v, |x: &i32| *x == 1);\n    return 0;\n}\n",
+        "type 'fn(&i32) bool' does not satisfy bound 'fn(&&i32) bool'",
     );
     h::expect_err_msg(
         "a binding moved while a closure borrows it",

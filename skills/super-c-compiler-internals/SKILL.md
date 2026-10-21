@@ -15,7 +15,7 @@ allowed-tools: Bash Read
 
 ## Pipeline Overview
 
-The compiler is a multi-stage transpiler: Super-C source to readable C99/C11, then an
+The compiler is a multi-stage transpiler: Super-C source to readable C11, then an
 external `cc` compiles and links the C. Every stage operates on per-module data within a
 shared `Package`. The production pipeline is `run_package` in `src/driver/emit.spc`:
 
@@ -204,9 +204,14 @@ declaration index (`ensure_index`, built in deterministic module and source orde
 **Mangling** (`src/emit/mangle.spc`, the frozen symbol-naming authority):
 
 - Module prefixing is on only when the package holds **more than one non-prelude
-  module**; single-file programs emit plain C names.
+  module**; single-file programs emit plain C names, except a top-level name that a prelude
+  item also has (`PkgIndex.pl_names`, the shadow set), which `Mangler::ident` escapes with `_`
+  (`format` becomes `format_`).
 - A module prefixes with just its **last path segment** when no other non-prelude module
-  shares it; the full `a__b__` path otherwise.
+  shares it; the full `a__b__` path otherwise. A user module whose first prefix segment begins
+  a prelude symbol (a prelude type, interface or generic function name, or a builtin type name:
+  `PkgIndex.pl_stems`, `Mangler::prelude_stem`; bit 1 of `short_table`) takes one more `_`
+  after that segment: `str___len`, `Vector___i32__push`.
 - Prelude modules are never prefixed. The program entry (`Package::is_entry`: the root
   module's top-level `main`, `Package.root`; each listed file of a batch lint) is never prefixed,
   and the driver renames it `__sc_user_main` under the C `main` wrapper. Every other `main` (another

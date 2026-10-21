@@ -1152,6 +1152,14 @@ extend CEmit {
                         // A wide-literal arg into a SCALAR param (a `from` widening shim) fits
                         // one limb by construction.
                         if unsafe (*fap).type_at(pty).kind == TypeKind::TYPE_BUILTIN {
+                            if self.extern_fn(callee) && self.emit_int_arg(
+                                b,
+                                opid,
+                                unsafe (*fap).type_at(pty).as_data.builtin,
+                                dst,
+                            ) {
+                                return true;
+                            }
                             let op0 = *b.operands.at(opid as usize);
                             if op0.kind == ir::OP_CONST {
                                 let c0 = *b.constants.at(op0.data as usize);
@@ -12029,6 +12037,27 @@ extend CEmit {
             return "U";
         }
         return mbe::if_s(bt_is_unsigned(bt), "ULL", "LL");
+    }
+
+    // Spell integer constant `opid`, the argument of a C function parameter of builtin type `bt`, as an
+    // `int` literal, the parameter's C type, when `bt` is `i8`, `i16` or `i32`: the `long long` literal
+    // `emit_const` spells would be a wider argument (`abs(-3LL)`, which clang's -Wabsolute-value
+    // reports). False for any other operand or parameter.
+    fn emit_int_arg(self: &mut Self, b: &ir::CoreBody, opid: ir::OperandId, bt: BuiltinType, dst: &mut String) bool {
+        let op = *b.operands.at(opid as usize);
+        if op.kind != ir::OP_CONST || bt != BuiltinType::BT_I8 && bt != BuiltinType::BT_I16 && bt != BuiltinType::BT_I32 {
+            return false;
+        }
+        let c = *b.constants.at(op.data as usize);
+        if c.kind != ir::CK_INT {
+            return false;
+        }
+        if c.val == -2147483648 {
+            dst.push_str("(-2147483647 - 1)"); // `-2147483648` negates a literal too wide for `int`
+        } else {
+            dst.push_i64(c.val);
+        }
+        return true;
     }
 
     // An argument past a variadic callee's parameters. C reads it as its promoted C type, so an

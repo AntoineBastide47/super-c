@@ -554,7 +554,8 @@ static mut G_GATE: i32 = 0; // atomic
 static mut G_SEEN: i32 = 0;
 static mut G_ACTIVE: i32 = 0; // is the worker inside a release right now?
 
-/// Is task tracing on? `SC_TASK_TRACE=1` turns it on for the life of the process; the answer is read from
+/// Is task tracing on? `SC_TASK_TRACE` set to a value other than empty or `0` turns it on for the life of the
+/// process, as `SC_LEAK_CHECK` reads its value; the answer is read from
 /// the environment once and then costs a load and a compare, so a traced build and an untraced one are the
 /// same binary. `pub` because the channel traces through it too.
 pub fn tracing() bool {
@@ -564,10 +565,11 @@ pub fn tracing() bool {
     let p = &mut unsafe G_TRACE;
     let mut t = unsafe atomic::load_i32(p, 0);
     if t == 0 {
-        t = if stdlib::getenv("SC_TASK_TRACE") == null {
-            1;
-        } else {
+        let e = stdlib::getenv("SC_TASK_TRACE");
+        t = if e != null && unsafe *e != 0 as char && unsafe *e != '0' {
             2;
+        } else {
+            1;
         };
         unsafe atomic::store_i32(p, t, 0);
     }

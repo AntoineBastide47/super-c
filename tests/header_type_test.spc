@@ -761,7 +761,7 @@ fn extern_void_pointer_argument_spells_the_conversion() {
     let c = h::compile_c(src);
     assert(c.ok(), "the program compiles");
     assert(c.code_has("memset((void *)(&x)"), "a typed pointer converts to void *");
-    assert(c.code_has("memset(v, 0LL, 4ULL)"), "a void pointer passes as it is");
+    assert(c.code_has("memset(v, 0, 4ULL)"), "a void pointer passes as it is");
 }
 
 // A header's macros reach only the units that use one of its items: `<windows.h>` defines `near` and

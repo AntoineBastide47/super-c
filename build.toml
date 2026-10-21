@@ -20,3 +20,13 @@ run = ["sh ci/gate.sh"]
 [command.gen]
 env = { SC_GEN_RUNS = "200" }
 run = ["./super-c test --quiet --filter=gen_random_run"]
+
+# The release flags with clang's frontend counters: the compiler whose counter total measures the
+# transpile work in CI (.github/actions/transpile-counts). Build it with a clang `--cc`.
+[profile.counts]
+opt-level = 3
+cflags = ["-DNDEBUG", "-finline-functions", "-fomit-frame-pointer", "-fPIE", "-fprofile-instr-generate"]
+ldflags = ["-fprofile-instr-generate"]
+link-args = ["-O2"]
+strip = true
+lto = "auto"

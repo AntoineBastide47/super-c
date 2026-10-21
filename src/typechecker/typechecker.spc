@@ -3961,15 +3961,18 @@ extend<'a> TypeChecker<'a> {
         return self.type_str(t);
     }
 
-    // Type `t` as type node `tn` of module `m` writes it, on one line, when that names a lifetime
-    // and lowers to `t`; empty otherwise.
+    // Type `t` as type node `tn` of module `m` writes it, on one line, when that names a lifetime or
+    // a type alias (`f16`, not `Float<5, 10, 0>`) and lowers to `t`; empty otherwise.
     fn tc_written(self: &Self, t: TypeId, m: ModuleId, tn: NodeId) String {
-        if tn == NODE_NONE || unsafe (*self.mod_ast(m)).type_of(tn) != t {
+        let a = self.mod_ast(m);
+        if tn == NODE_NONE || unsafe (*a).type_of(tn) != t {
             return String::new();
         }
-        let sp = unsafe (*self.mod_ast(m)).at_const(tn).span;
+        let sp = unsafe (*a).at_const(tn).span;
         let w = self.mod_src(m).slice(sp.start as usize, sp.end as usize);
-        if !w.contains("'") {
+        let d = unsafe (*a).resolution_def(tn);
+        let alias = d.node != NODE_NONE && unsafe (*self.mod_ast(d.module)).at_const(d.node).kind == NodeKind::NODE_TYPE_ALIAS;
+        if !alias && !w.contains("'") {
             return String::new();
         }
         return one_line(w);
@@ -20268,12 +20271,26 @@ extend<'a> TypeChecker<'a> {
         }
         return 1;
     }
+    // An operand fits parameter `pt` as itself or, for a by-reference `&E`, as an `E` the operator
+    // method borrows. A numeric operand of another type (`g + 2` with `g: i32` against `&i64`)
+    // converts to `E` first: the borrow points at a value of the parameter's type.
     fn operand_fits_param(self: &mut Self, pt: TypeId, operand: NodeId) bool {
         if pt == TYPE_NONE || self.compatible(pt, operand) {
             return true;
         }
         let p = *self.type_at(pt);
-        return p.kind == TypeKind::TYPE_REFERENCE && self.compatible(p.as_data.elem, operand);
+        if p.kind != TypeKind::TYPE_REFERENCE || !self.compatible(p.as_data.elem, operand) {
+            return false;
+        }
+        let e = p.as_data.elem;
+        let ot = unsafe (*self.cur_ast()).type_of(operand);
+        let eb = self.bt_of(e);
+        let ob = pick(ot == TYPE_NONE, BuiltinType::BT_COUNT, self.bt_of(ot));
+        let num = |b: BuiltinType| bt_is_int(b) || b == BuiltinType::BT_F32 || b == BuiltinType::BT_F64;
+        if ot != e && num(eb) && num(ob) {
+            unsafe (*self.cur_ast()).set_coerce(operand, e, DefId { module: 0, node: NODE_NONE });
+        }
+        return true;
     }
 }
 
@@ -25270,14 +25287,15 @@ extend TypeChecker {
                         );
                         continue;
                     }
-                    self.errors.emit_span(
-                        sp,
-                        format(
-                            "type '{}' does not satisfy bound '{}'",
-                            tn.as_str(),
-                            diag::span_str(self.mod_src(fmod), bsp.start, bsp.end),
-                        ),
-                    );
+                    // A fn bound reads under the call's substitutions, as `bound_holds` checks it.
+                    let bs = if unsafe (*fa).at_const(bid).kind == NodeKind::NODE_FUNCTION_TYPE {
+                        let bt = self.lower_type_in(fmod, bid);
+                        let st = self.subst_type(self.subst_type(bt, rsubp, rsuba, nrsub), gparams, gargs, gn);
+                        self.type_str(self.tc_erase_lts(st, 0));
+                    } else {
+                        String::from_str(diag::span_str(self.mod_src(fmod), bsp.start, bsp.end));
+                    };
+                    self.errors.emit_span(sp, format("type '{}' does not satisfy bound '{}'", tn.as_str(), bs.as_str()));
                     // Notes attach to the error emitted last: name the failing field(s).
                     let bi = unsafe (*fa).resolution_def(bid);
                     self.tc_note_blanket_conf(bi);
@@ -30871,9 +30889,28 @@ extend TypeChecker {
                     format("static assertion cannot be evaluated: {}", unsafe (*ceptr).trap_detail()),
                 );
             } else {
-                unsafe (*ceptr).defer_assert(self.cur_module(), left);
+                unsafe (*ceptr).defer_assert(self.cur_module(), left, !self.tc_generic_body());
             }
         }
+    }
+
+    // Whether the body under check may name generic parameters only an instance substitutes: a
+    // generic function's, a method's of a generic extend, an interface's default method's.
+    fn tc_generic_body(self: &Self) bool {
+        let f = self.icx.current_fn;
+        if f == NODE_NONE {
+            return false;
+        }
+        let a = self.cur_ast();
+        if unsafe (*a).at_const(f).as_data.function.generics.len != 0 {
+            return true;
+        }
+        let c = unsafe (*a).container_of(f);
+        if c == NODE_NONE {
+            return false;
+        }
+        let cn = unsafe (*a).at_const(c);
+        return cn.kind == NodeKind::NODE_INTERFACE || cn.kind == NodeKind::NODE_EXTEND && cn.as_data.extend_def.generics.len != 0;
     }
 
     // The loop statement kinds live in their own frames so check_stmt, which recurses once per

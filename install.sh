@@ -44,13 +44,15 @@ tar -C "$tmp" -xzf "$tmp/pkg.tar.gz"
 dest="$HOME/.super-c"
 mkdir -p "$dest/bin"
 # the binary first, then the trees it reads (fresh copies; stale files must not linger)
+# replace, not overwrite: macOS kills a signed binary whose file changed in place
+rm -f "$dest/bin/super-c"
 cp "$tmp/$name/super-c" "$dest/bin/super-c"
 chmod +x "$dest/bin/super-c"
 rm -rf "$dest/std" "$dest/ffi"
 cp -R "$tmp/$name/std" "$tmp/$name/ffi" "$dest/"
 echo "installed $dest/bin/super-c (+ std, ffi)"
 
-# PATH: same contract as `super-c install` -- append once, to the shell's own rc file
+# PATH: append once, to the shell's own rc file
 case ":$PATH:" in
     *":$dest/bin:"*) exit 0 ;;
 esac

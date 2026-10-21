@@ -190,6 +190,7 @@ pub struct Package {
     pub gen_root: String, // where codegen writes the emitted C tree: <build dir>/raw, set by the driver
     pub c_files: u64, // the `.c` files the emission left under gen_root (`run_package`), for the emit stamp
     pub cc: String, // the C compiler the command line named for a bare build; empty = resolve as usual
+    pub cstd: String, // the base C flags the command line named for a bare build (`--cstd`); empty = the default
     pub std_root: String, // second import search root (parent of std/); empty = none
     pub alt_root: String, // optional search root between the project root and std (manifest src/ dir)
     pub ok: bool, // false if any read/parse/cycle error was reported during loading
@@ -607,6 +608,15 @@ pub struct PkgIndex {
     pub scc_of: Vector<u32>, // module -> import-graph SCC id (completion order; deterministic)
     pub sugar_items: Vector<LookupHit>, // SugarItem -> std shim fn (node == NODE_NONE when absent)
     pub pl_map: Map<u64, u64>, // sym*2 + want_type -> node << 32 | module: every public top-level prelude name, the first prelude module wins (prelude_lookup)
+    /// Every top-level prelude declaration's name, public or not: the prelude's bare C symbols.
+    pub pl_names: Set<SymbolId>,
+    /// The `pl_names` that begin longer prelude C symbols: a type's, an interface's or a generic
+    /// function's (`String__new`, `Vector__i32`, `replace__u64`). `Mangler::prelude_stem` reads them.
+    pub pl_stems: Set<SymbolId>,
+    /// With one non-prelude module, whose symbols take no module prefix: each of its top-level non-extern
+    /// names that a top-level prelude declaration also has, so would spell the prelude's C symbol. The
+    /// mangler escapes them (`Mangler::ident`). Empty with more user modules.
+    pub shadow: Set<SymbolId>,
     /// Function-item signatures as package metadata (see ensure_sigs): sig_of keys
     /// skey_mix(module << 32 | fn node) (MIXED: u64 maps hash by identity and structured keys
     /// cluster) to a `sigs` record whose types live in the `sig_types` CSR pool,
@@ -6116,7 +6126,16 @@ extend Package {
             }
             for it in idx.mod_items[m] as usize..idx.mod_items[m + 1] as usize {
                 let im = idx.items.at(it);
-                if im.owner != ITEM_NONE || !im.is_public || im.name == SYM_NONE {
+                if im.owner != ITEM_NONE || im.name == SYM_NONE {
+                    continue;
+                }
+                idx.pl_names.insert(im.name);
+                if im.is_type || im.kind == ItemKind::IK_FUNCTION as u8 && unsafe (*self.module_ast_const(m as ModuleId)).at_const(
+                    im.node,
+                ).as_data.function.generics.len != 0 {
+                    idx.pl_stems.insert(im.name);
+                }
+                if !im.is_public {
                     continue;
                 }
                 let key = im.name as u64 * 2u64 + if im.is_type {
@@ -6129,6 +6148,7 @@ extend Package {
                 }
             }
         }
+        self.index_shadows(&mut idx);
         self.idx = idx;
         // Sugar-shim table: (module path, fn name) hooks, resolved through the finished index (find
         // and glob_lookup read self.idx). glob_lookup only warms closure caches; the index tables it
@@ -6185,6 +6205,8 @@ extend Package {
         idx.confs.clear();
         idx.conf_of = Map::<u64, u64>::new();
         idx.sigs_built = false;
+        idx.shadow = Set::<SymbolId>::new();
+        self.index_shadows(&mut idx);
         self.idx = idx;
         for si in 0..SI_COUNT_N {
             let mods: []str = SI_MODULES;
@@ -6400,6 +6422,41 @@ extend Package {
             let nm = &mut idx.name_maps[mid as usize];
             if nm.get(&key).is_none() {
                 nm.insert(key, it);
+            }
+        }
+    }
+
+    // Fill `idx.shadow` (see PkgIndex) when the package holds exactly one non-prelude module.
+    fn index_shadows(self: &Self, idx: &mut PkgIndex) {
+        let n = self.modules.len();
+        let mut user = n;
+        for m in 0..n {
+            if !self.modules[m].prelude {
+                if user != n {
+                    return;
+                }
+                user = m;
+            }
+        }
+        if user == n {
+            return;
+        }
+        let ast = unsafe &*self.module_ast_const(user as ModuleId);
+        for it in idx.mod_items[user] as usize..idx.mod_items[user + 1] as usize {
+            let im = idx.items.at(it);
+            if im.owner != ITEM_NONE || im.name == SYM_NONE || !idx.pl_names.contains(&im.name) {
+                continue;
+            }
+            // An extern item IS its C symbol.
+            let d = ast.at_const(im.node);
+            let ext = switch d.kind {
+                NODE_FUNCTION => d.as_data.function.is_extern(),
+                NODE_STRUCT | NODE_ENUM => d.as_data.aggregate.is_extern,
+                NODE_CONST => d.as_data.const_def.is_extern,
+                _ => false,
+            };
+            if !ext {
+                idx.shadow.insert(im.name);
             }
         }
     }

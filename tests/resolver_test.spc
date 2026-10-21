@@ -9,6 +9,22 @@ import tests::harness as h;
 fn errors() {
     h::expect_resolve_err_msg("undefined value", "fn main() i32 { bar(); }\n", "cannot find value 'bar'");
     h::expect_resolve_err_msg("undefined type", "fn f(x: Widget) {}\n", "cannot find type 'Widget'");
+    // A path's qualifier names a type or a module; a prelude module needs its import to be named.
+    h::expect_resolve_err_msg(
+        "undefined path qualifier",
+        "fn main() i32 { return foo::bar(); }\n",
+        "cannot find type or module 'foo'",
+    );
+    h::expect_resolve_err_msg(
+        "a prelude module named without its import",
+        "fn main() i32 { let _ = iter::count(0, 1); return 0; }\n",
+        "cannot find module 'iter'",
+    );
+    h::expect_resolve_err_msg(
+        "the import a prelude module needs",
+        "fn f(x: iter::FilterIter) {}\n",
+        "'iter' is a std module: add 'import std::iter;'",
+    );
     h::expect_resolve_err_msg("duplicate item", "struct P {}\nstruct P {}\n", "duplicate definition of 'P'");
     // One definition per platform is not a duplicate: the inactive variant is filtered before resolution.
     h::expect_ok(

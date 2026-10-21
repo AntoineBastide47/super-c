@@ -381,6 +381,32 @@ the frontend, borrowck, plan, publish and build boundaries. `SC_BUILD_MEM=1` add
 allocation tracker's counts, requested and live bytes, and the survivors of each
 phase (slower: only for memory questions).
 
+### Transpile work count (CI)
+
+Hosted runners are VMs without hardware counters (Linux `perf stat` reports `<not supported>`,
+macOS prints no instructions retired, Windows lists only the `Timer` source), so CI counts work
+in the compiler itself. The Release workflow's `counts` jobs (`.github/actions/transpile-counts`)
+build two compilers with build.toml's `[profile.counts]` (the release flags plus clang's
+`-fprofile-instr-generate`; llvm-mingw's clang on Windows, whose mingw profile runtime the
+preinstalled LLVM lacks): this commit's, and the last release's from its tag by its own binary.
+Both run a cold `build --jobs=1 --cc=true --bootstrap-tags` of this commit's sources, and
+`llvm-profdata` totals the counters. The same input makes the change the compiler's alone: the
+compiler's sources grow every release, which moves a count of one compiler across releases by
+0.1 to 1%. A total repeats within 0.0001% on every runner and does not move with the
+optimization level or the CPU. It counts only the compiler's code: libc, the kernel and the C
+compile are outside it, and so is a change that makes the C it runs slower without changing
+which code runs. One worker is required: the counters are not atomic, and a multi-threaded run
+loses increments (1.2% spread). The totals differ by platform (different platform code), so
+compare a platform only with itself.
+
+A growth of 0.1% or more is a warning annotation. 1% or more, or a count that failed, is an
+error annotation and a caution box in the summary: the release is still packaged, and its
+publishing waits in the `counts approval` job for the owner's approval in the `release-approval`
+environment (its required reviewer makes the wait; a missing environment is created without one
+and does not wait). The job summary lists the modules that moved most (a module is the mangled
+prefix before the first `__`). The `transpile counts` job keeps one `transpile-counts` artifact
+with each platform's `.tsv` and `.profdata` files.
+
 ### SIMD baselines
 
 `bench/simd_baseline/` holds the reference numbers for vector code. `kernels.spc` has eleven

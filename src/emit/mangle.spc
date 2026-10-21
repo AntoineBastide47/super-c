@@ -1284,14 +1284,10 @@ extend Mangler {
         return false;
     }
 
-    // A module mangles as its last path segment alone when no other non-prelude module shares that
-    // basename; collisions keep the full form for every involved module.
-    fn short_pfx(self: &mut Self, m: ModuleId) bool {
-        return unsafe self.short_table()[m as usize] != 0;
-    }
-
-    /// The short-prefix verdict of every module, by module index; sorting the basenames settles all
-    /// of them at once.
+    /// The prefix verdicts of every module, by module index: bit 0, the module mangles as its basename
+    /// alone (no other non-prelude module shares it); bit 1, the first segment of its prefix begins a
+    /// prelude symbol (`prelude_stem`: a module `str` beside the prelude's `str__len`), so `modpfx`
+    /// follows it with one more `_`. Sorting the basenames settles all of them at once.
     pub fn short_table(self: &mut Self) *const u8 {
         if self.short_ok != null {
             return self.short_ok;
@@ -1318,7 +1314,21 @@ extend Mangler {
             for k in g..e {
                 let md = p.modules.at(kv[k].idx as usize);
                 let others = users - (!md.prelude) as usize;
-                self.short_own.set(kv[k].idx as usize, (path_base_start(md.path.as_str()) != 0 && others == 0) as u8);
+                let path = md.path.as_str();
+                let short = path_base_start(path) != 0 && others == 0;
+                let mut esc = false;
+                if !md.prelude {
+                    let c = path.find("::");
+                    let mut seg = path;
+                    if short {
+                        seg = kv[k].key;
+                    } else if c >= 0 {
+                        seg = path.slice(0, c as usize);
+                    }
+                    // A stem: `str_` takes the escape too, so it never spells the escaped `str`.
+                    esc = escaped_stem(seg, |w: str| self.prelude_stem(w));
+                }
+                self.short_own.set(kv[k].idx as usize, short as u8 | esc as u8 << 1);
             }
             g = e;
         }
@@ -1716,11 +1726,18 @@ extend Mangler {
         let path = self.p().modules.at(m as usize).path.as_str();
         let n = path.len();
         let mut i: usize = 0;
-        if self.short_pfx(m) {
+        let v = unsafe self.short_table()[m as usize];
+        if (v & 1) != 0 {
             i = path_base_start(path);
         }
+        // Bit 1: the first segment begins a prelude symbol and takes one more `_` (`short_table`).
+        let mut esc = (v & 2) != 0;
         while i < n {
             if path.byte_at(i) == b':' && i + 1 < n && path.byte_at(i + 1) == b':' {
+                if esc {
+                    out.push_str("_");
+                    esc = false;
+                }
                 out.push_str("__");
                 i += 2;
             } else {
@@ -1728,17 +1745,23 @@ extend Mangler {
                 i += 1;
             }
         }
+        if esc {
+            out.push_str("_");
+        }
         out.push_str("__");
     }
 
-    /// The identifier at `s` in module `m`'s source, suffixed with one `_` when it is a C keyword or
-    /// a standard-header macro name, or one of them followed by underscores (`escaped_stem`).
+    /// The identifier at `s` in module `m`'s source, suffixed with one `_` when it is a C keyword, a
+    /// standard-header macro name or, in a non-prelude module, a name the package index lists as
+    /// shadowing a prelude symbol (`PkgIndex.shadow`), or one of them followed by underscores
+    /// (`escaped_stem`).
     pub fn ident(self: &mut Self, m: ModuleId, s: tok::Span, out: &mut String) {
         let src = self.p().modules.at(m as usize).source.as_str();
         let txt = src.slice(s.start as usize, s.end as usize);
         out.push_str(txt);
+        let sh = self.shadows(m);
         if txt.len() >= 0x8000 {
-            if escaped_stem(txt, |w: str| c_keyword(w) || c_std_macro(w)) {
+            if escaped_stem(txt, |w: str| c_keyword(w) || c_std_macro(w) || sh && self.shadowed(w)) {
                 out.push_str("_");
             }
             return;
@@ -1750,12 +1773,36 @@ extend Mangler {
         let slot = ((m as u64 << 32 | s.start as u64).wrapping_mul(0x9E3779B97F4A7C15u64) >> 52) as usize;
         let mut v = self.esc_seen[slot];
         if (v & 0xFFFFFFFFFFFFFFFEu64) != k {
-            v = k | escaped_stem(txt, |w: str| c_keyword(w) || c_std_macro(w)) as u64;
+            v = k | escaped_stem(txt, |w: str| c_keyword(w) || c_std_macro(w) || sh && self.shadowed(w)) as u64;
             self.esc_seen.set(slot, v);
         }
         if (v & 1) != 0 {
             out.push_str("_");
         }
+    }
+
+    // Whether the identifiers of module `m` take the shadow escape: a non-prelude module of a package
+    // whose index lists shadowing names.
+    const fn shadows(self: &Self, m: ModuleId) bool {
+        return self.p().idx.shadow.len() != 0 && !self.p().modules.at(m as usize).prelude;
+    }
+
+    // Whether `w` is a non-prelude top-level name that a prelude declaration also has (`PkgIndex.shadow`).
+    fn shadowed(self: &Self, w: str) bool {
+        let s = self.p().idx.syms.find(w);
+        return s != loader::SYM_NONE && self.p().idx.shadow.contains(&s);
+    }
+
+    // Whether `w` begins prelude C symbols `w__..`: a prelude type's, interface's or generic function's
+    // name (`PkgIndex.pl_stems`: `String__new`, `replace__u64`) or a builtin type's (`i32__cmp`).
+    fn prelude_stem(self: &Self, w: str) bool {
+        for i in 0..BuiltinType::BT_COUNT as i32 {
+            if bt_name(i as BuiltinType) == w {
+                return true;
+            }
+        }
+        let s = self.p().idx.syms.find(w);
+        return s != loader::SYM_NONE && self.p().idx.pl_stems.contains(&s);
     }
 
     /// The C member field `fid` of module `m` names: the `@import` pin of a header type's field
@@ -3143,7 +3190,12 @@ extend Mangler {
         let start = out.len();
         self.modpfx(m, out);
         let es = unsafe (*a).at_const(unsafe (*a).at_const(decl).as_data.aggregate.name).as_data.name.text;
-        out.push_str(src.slice(es.start as usize, es.end as usize));
+        let en = src.slice(es.start as usize, es.end as usize);
+        out.push_str(en);
+        if self.shadows(m) && escaped_stem(en, |w: str| self.shadowed(w)) {
+            // The enum's typedef name took the shadow escape: its constants must not spell the prelude's.
+            out.push_str("_");
+        }
         out.push_str("_");
         out.push_str(src.slice(vs.start as usize, vs.end as usize));
         if escaped_stem(out.as_str().slice(start, out.len()), c_std_macro) {

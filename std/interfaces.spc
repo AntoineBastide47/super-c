@@ -255,7 +255,10 @@ pub struct Global {}
 // `Allocator`'s superinterface against written conformances only.
 extend Global as Copy {}
 
+// Each method inlines into its caller, so the leak tracker records the allocation at the container code
+// that asked for the block, in every profile.
 extend Global as Allocator {
+    @always_inline
     pub unsafe const fn alloc(self: &mut Global, size: usize, align: usize) *mut void {
         let p = if align > MALLOC_ALIGN {
             unsafe sc_lk_aligned_alloc(size, align);
@@ -267,6 +270,7 @@ extend Global as Allocator {
         }
         return p;
     }
+    @always_inline
     pub unsafe const fn realloc(self: &mut Global, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void {
         if align > MALLOC_ALIGN {
             // `realloc` keeps only malloc's alignment, so the block moves to a fresh aligned one.
@@ -288,6 +292,7 @@ extend Global as Allocator {
         }
         return p;
     }
+    @always_inline
     pub unsafe const fn dealloc(self: &mut Global, ptr: *mut void, size: usize, align: usize) {
         if align > MALLOC_ALIGN {
             unsafe sc_lk_aligned_free(ptr);

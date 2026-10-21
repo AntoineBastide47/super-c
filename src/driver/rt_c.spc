@@ -975,6 +975,8 @@ const void *const *__sc_reflect_types(size_t *__n) {
 #if defined(_WIN32)
 void *GetModuleHandleA(const char *lpModuleName);
 #endif
+/* SC_LK_SITE() is the return address of the entry point that calls it: each entry is noinline, so the
+   address is in its caller in every profile, LTO included. */
 #if defined(__wasm__)
 /* No frame walk on wasm: leaks and double frees are still counted and reported, without call sites. */
 #define SC_LK_SITE() NULL
@@ -1035,6 +1037,25 @@ typedef struct {
   volatile int lock;
 } sc_lk_shard;
 static sc_lk_shard sc_lk_shards[SC_LK_SHARDS];
+/* The tracker's own tables take zeroed pages from the system, never the malloc family: a program that
+   interposes the family to count its calls (std::testing::bench_sys) counts the program's allocations
+   alone. Windows and wasm have no such program and keep calloc. */
+static void *sc_lk_table_new(size_t __n) {
+#if defined(_WIN32) || defined(__wasm__)
+  return (calloc)(1, __n);
+#else
+  void *p = mmap(0, __n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+  return p == MAP_FAILED ? NULL : p;
+#endif
+}
+static void sc_lk_table_free(void *__p, size_t __n) {
+#if defined(_WIN32) || defined(__wasm__)
+  (void)__n;
+  (free)(__p);
+#else
+  if (__p != NULL) munmap(__p, __n);
+#endif
+}
 static int sc_lk_state; /* 0 = unprobed, 1 = off, 2 = report, 3 = fatal; atomic: any thread probes it */
 static uint32_t sc_lk_epoch; /* tag for every allocation recorded from now on (sc_lk_epoch_set) */
 static int sc_lk_get(void) { return __atomic_load_n(&sc_lk_state, __ATOMIC_RELAXED); }
@@ -1053,7 +1074,7 @@ static void sc_lk_release(sc_lk_shard *s) { __sync_lock_release(&s->lock); }
    is left to the caller). */
 static void sc_lk_shard_clear(sc_lk_shard *s) {
   for (size_t i = 0; i < s->freed_count; i++) sc_lk_release_block(&s->freed[i]);
-  (free)(s->tab);
+  sc_lk_table_free(s->tab, s->cap * sizeof(sc_lk_ent));
   s->tab = NULL;
   s->cap = 0;
   s->live = 0;
@@ -1090,14 +1111,16 @@ static void sc_lk_put(sc_lk_ent *tab, size_t cap, const sc_lk_ent *e) {
 /* Per-thread site-suppression depth for coroutine and fiber stacks. */
 static _Thread_local int sc_lk_bt_off = 0;
 static int sc_lk_grow(sc_lk_shard *s) {
-  if (s->cap > SIZE_MAX / 2) return 0;
-  size_t ncap = s->cap != 0 ? s->cap * 2 : 64;
-  sc_lk_ent *nt = (sc_lk_ent *)(calloc)(ncap, sizeof(sc_lk_ent));
+  /* A power of two: sc_lk_slot and the probes mask with cap - 1. 128 entries fill one 4 KiB page on
+     a 64-bit host. */
+  size_t ncap = s->cap != 0 ? s->cap * 2 : 128;
+  if (ncap > SIZE_MAX / sizeof(sc_lk_ent)) return 0;
+  sc_lk_ent *nt = (sc_lk_ent *)sc_lk_table_new(ncap * sizeof(sc_lk_ent));
   if (nt == NULL) return 0;
   for (size_t i = 0; i < s->cap; i++) {
     if (s->tab[i].ptr != NULL) sc_lk_put(nt, ncap, &s->tab[i]);
   }
-  (free)(s->tab);
+  sc_lk_table_free(s->tab, s->cap * sizeof(sc_lk_ent));
   s->tab = nt;
   s->cap = ncap;
   return 1;
@@ -1201,7 +1224,11 @@ static void sc_lk_report(void) {
     }
   }
   sc_lk_ent *v = NULL;
-  if (n != 0) v = (sc_lk_ent *)(malloc)(n * sizeof(sc_lk_ent));
+  size_t vbytes = 0; /* the size of `v`'s table: `n` becomes the entries copied */
+  if (n != 0 && n <= SIZE_MAX / sizeof(sc_lk_ent)) {
+    vbytes = n * sizeof(sc_lk_ent);
+    v = (sc_lk_ent *)sc_lk_table_new(vbytes);
+  }
   if (v != NULL) {
     size_t k = 0;
     for (size_t h = 0; h < SC_LK_SHARDS; h++) {
@@ -1241,7 +1268,7 @@ static void sc_lk_report(void) {
     if (shown > 64)
       fprintf(stderr, "... (%llu more leak site(s))\n", (unsigned long long)(shown - 64));
   }
-  (free)(v);
+  sc_lk_table_free(v, vbytes);
   if (dbl != 0)
     fprintf(stderr, "== super-c double frees: %llu ==\n", (unsigned long long)dbl);
   if (fatal && (n != 0 || dbl != 0)) {
@@ -1470,19 +1497,19 @@ static void sc_lk_track(void *p, size_t n, void *site, uint32_t aligned) {
     sc_lk_release(s);
   }
 }
-void *sc_lk_malloc(size_t __n) {
+__attribute__((noinline)) void *sc_lk_malloc(size_t __n) {
   void *site = SC_LK_SITE();
   void *p = (malloc)(__n);
   sc_lk_track(p, __n, site, 0);
   return p;
 }
-void *sc_lk_calloc(size_t __n, size_t __m) {
+__attribute__((noinline)) void *sc_lk_calloc(size_t __n, size_t __m) {
   void *site = SC_LK_SITE();
   void *p = (calloc)(__n, __m);
   sc_lk_track(p, __n * __m, site, 0);
   return p;
 }
-void *sc_lk_aligned_alloc(size_t __n, size_t __align) {
+__attribute__((noinline)) void *sc_lk_aligned_alloc(size_t __n, size_t __align) {
   void *site = SC_LK_SITE();
 #if defined(_WIN32)
   void *p = _aligned_malloc(__n, __align);
@@ -1493,7 +1520,7 @@ void *sc_lk_aligned_alloc(size_t __n, size_t __align) {
   sc_lk_track(p, __n, site, 1);
   return p;
 }
-void *sc_lk_realloc(void *__p, size_t __n) {
+__attribute__((noinline)) void *sc_lk_realloc(void *__p, size_t __n) {
   void *site = SC_LK_SITE();
   /* The registry key is an ADDRESS, and an address survives the realloc that invalidates the pointer
      holding it: reading `__p` again after a realloc is undefined (and GCC's -Wuse-after-free says so).
@@ -1525,7 +1552,8 @@ void *sc_lk_realloc(void *__p, size_t __n) {
         abort();
       }
       /* the history still holds the old block: hand back fresh memory with its contents */
-      void *fresh = sc_lk_malloc(__n);
+      void *fresh = (malloc)(__n);
+      sc_lk_track(fresh, __n, site, 0);
       if (fresh != NULL) memcpy(fresh, __p, snap.size < __n ? snap.size : __n);
       return fresh;
     }
@@ -1600,10 +1628,10 @@ static int sc_lk_untrack(void *__p, void *site) {
   }
   return skip;
 }
-void sc_lk_free(void *__p) {
+__attribute__((noinline)) void sc_lk_free(void *__p) {
   if (!sc_lk_untrack(__p, SC_LK_SITE())) (free)(__p);
 }
-void sc_lk_aligned_free(void *__p) {
+__attribute__((noinline)) void sc_lk_aligned_free(void *__p) {
   if (sc_lk_untrack(__p, SC_LK_SITE())) return;
 #if defined(_WIN32)
   _aligned_free(__p);

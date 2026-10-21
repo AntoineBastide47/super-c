@@ -18,6 +18,7 @@ import utils::errors as diag;
 import driver::util as *;
 import build_system::objcache as ocache;
 import build_system::build as bsys;
+import build_system::manifest as bman;
 
 /// --test run options, forwarded to the generated runner.
 pub struct TestOpts {
@@ -1740,9 +1741,13 @@ pub fn test_build_and_run(
     } else {
         "test build";
     };
-    let mut basev = String::from_str(
-        "-std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -funsigned-char -ffp-contract=off -Werror=incompatible-pointer-types",
-    );
+    // The base C flags and the fixed rules after them, as a manifest build's compile has them.
+    let mut basev = if p.cstd.len() != 0 {
+        p.cstd.clone();
+    } else {
+        String::from_str(bman::DEFAULT_CSTD);
+    };
+    basev.push_str(" -funsigned-char -ffp-contract=off -Werror=incompatible-pointer-types");
     basev.push_str(bsys::LIBM_AS_WRITTEN);
     let base = basev.as_str();
     // The cross triple comes first so the profile's flags (empty for a bare build) can override it.

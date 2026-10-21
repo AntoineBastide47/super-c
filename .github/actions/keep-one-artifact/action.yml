@@ -1,0 +1,37 @@
+name: Keep one artifact
+description: >
+  The last step of a save job: deletes this run's part artifacts (names starting with `parts`) and every
+  artifact named `name` but the one just uploaded (`keep`), so the repository holds one `name` artifact.
+  The job needs `actions: write`.
+inputs:
+  name:
+    description: "the artifact name that keeps one copy"
+    required: true
+  keep:
+    description: "the id of the copy to keep (actions/upload-artifact's artifact-id)"
+    required: true
+  parts:
+    description: "the name prefix of this run's part artifacts the save job merged"
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Delete the other ${{ inputs.name }} artifacts
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        NAME: ${{ inputs.name }}
+        KEEP: ${{ inputs.keep }}
+        PARTS: ${{ inputs.parts }}
+      run: |
+        set -eu
+        api="repos/$GITHUB_REPOSITORY/actions"
+        gh api --paginate "$api/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+          --jq ".artifacts[] | select(.name | startswith(\"$PARTS\")) | .id" > ids
+        gh api --paginate "$api/artifacts?name=$NAME&per_page=100" \
+          --jq ".artifacts[] | select(.id != $KEEP) | .id" >> ids
+        while read -r id; do
+          gh api -X DELETE "$api/artifacts/$id"
+          echo "deleted artifact $id"
+        done < ids
+        rm ids

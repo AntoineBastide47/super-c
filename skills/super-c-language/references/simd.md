@@ -194,7 +194,7 @@ Every named operation above has a free form: `simd::f(a, ..)` is `a.f(..)` (`sim
 `simd::checked_add(a, b)`, `simd::to_bits(v)`, `simd::from_bits::<f32, 4>(b)`). The conversions are
 methods only; `choose`, `iota`, `concat` and the loads and stores are free functions. A free form
 is visible unqualified too (std's `simd` is a prelude module); a module's own function of the same
-name hides it. `SimdInt::Unsigned` and `SimdFloat::Bits` are the lane interfaces' associated types.
+name hides it. The qualified `simd::f` path needs `import std::simd;`. `SimdInt::Unsigned` and `SimdFloat::Bits` are the lane interfaces' associated types.
 
 The std compositions (`widen`, `narrow*`, `bitcast`, the halves, `clamp`, `checked_*`,
 `cast_checked`, `splat`) inline at their calls: no call remains in a loop, in every profile.

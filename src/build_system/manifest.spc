@@ -28,6 +28,9 @@ pub struct Profile<'a> {
     pub has_features: bool,
 }
 
+/// The base C flags of a build whose manifest or command line names none (`cstd`, `--cstd`).
+pub const DEFAULT_CSTD: str<'static> = "-std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700";
+
 /// `opt-level` values: OPT_FLAGS adds nothing; 0 to 3 are `-O0` to `-O3`; OPT_S and OPT_Z are
 /// `-Os` and `-Oz`.
 pub const OPT_FLAGS: i32 = -1;
@@ -635,7 +638,7 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
     norm_conv_dir(&mut m.test_dir, "test-dir", &mut errs);
     norm_conv_dir(&mut m.bench_dir, "bench-dir", &mut errs);
     if m.cstd.len() == 0 {
-        m.cstd.push_str("-std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700");
+        m.cstd.push_str(DEFAULT_CSTD);
     }
     if m.default_profile.len() == 0 {
         m.default_profile.push_str("debug");

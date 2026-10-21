@@ -8,7 +8,6 @@
 //
 // Borrowed iterators (`bytes`, `chars`, `split`, `lines`) live at the bottom of this module as small
 // cursor structs implementing `Iterator`, so `for b in s.bytes() { .. }` works.
-// `is_valid_utf8` is structural only: it does not reject overlong encodings or surrogate-range scalars.
 
 extern "C" {
     fn memcmp(a: *const void, b: *const void, n: usize) i32;
@@ -187,35 +186,54 @@ extend str {
         return count;
     }
 
-    /// True if the bytes are structurally well-formed UTF-8: every leading byte announces a 1-4 byte
-    /// sequence that fits and whose tail bytes are all 0b10xxxxxx continuations. (Structural only:
-    /// it does not reject overlong encodings or surrogate-range scalars.)
+    /// True if the bytes are well-formed UTF-8 (Unicode Table 3-7): no overlong encoding, no
+    /// surrogate scalar (U+D800..U+DFFF), no scalar above U+10FFFF, and no truncated sequence.
     pub const fn is_valid_utf8(self: &str) bool {
         let mut i: usize = 0;
         while i < self.len {
             let b = unsafe self.ptr[i];
-            let mut n: usize = 0;
             if b < 0x80 {
-                n = 1;
-            } else if (b & 0xE0) == 0xC0 {
+                i += 1;
+                continue;
+            }
+            // The second byte's range carries the overlong, surrogate and U+10FFFF limits; every
+            // later byte is a plain 0x80..=0xBF continuation.
+            let mut n: usize = 0;
+            let mut lo: u8 = 0x80;
+            let mut hi: u8 = 0xBF;
+            if b >= 0xC2 && b <= 0xDF {
                 n = 2;
-            } else if (b & 0xF0) == 0xE0 {
+            } else if b >= 0xE0 && b <= 0xEF {
                 n = 3;
-            } else if (b & 0xF8) == 0xF0 {
+                if b == 0xE0 {
+                    lo = 0xA0;
+                } else if b == 0xED {
+                    hi = 0x9F;
+                }
+            } else if b >= 0xF0 && b <= 0xF4 {
                 n = 4;
+                if b == 0xF0 {
+                    lo = 0x90;
+                } else if b == 0xF4 {
+                    hi = 0x8F;
+                }
             } else {
-                // 0b10xxxxxx as a leader, or a 5+ byte form.
+                // A continuation byte as a leader, C0/C1 (always overlong), or F5..FF.
                 return false;
             }
-            if i + n > self.len {
+            if n > self.len - i {
                 return false;
             }
-            for k in 1..n {
+            let b1 = unsafe self.ptr[i + 1];
+            if b1 < lo || b1 > hi {
+                return false;
+            }
+            for k in 2..n {
                 if (unsafe self.ptr[i + k] & 0xC0) != 0x80 {
                     return false;
                 }
             }
-            i = i + n;
+            i += n;
         }
         return true;
     }

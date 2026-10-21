@@ -146,7 +146,7 @@ One extern block takes at most one `@link` and one `@c.source` (a repeated attri
 parse error). A value starting with `-` may hold several whitespace-separated flags; a second
 library or source otherwise goes on its own extern block.
 
-Link flags are written to `build/__ldflags` (one per line). Libraries declare their flag
+Link flags are written to `build/<profile>/raw/__ldflags` (one per line). Libraries declare their flag
 once where the binding lives. Importers never repeat it. Flags apply automatically to
 `--test` builds.
 

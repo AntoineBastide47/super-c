@@ -194,6 +194,19 @@ fn escaped_names_stay_distinct(b: &mut h::ExitBatch) {
 }
 
 @test
+fn prelude_names_stay_distinct() {
+    // A program of one user module spells its symbols without a module prefix, as the prelude does,
+    // so a top-level name a prelude item also has (`format`, `likely`, `Global`, `FpClass`) gains a
+    // `_`, and so does a name that ends in `_` after such a stem: the program builds and both sides
+    // keep their own symbols (std's `likely` and `Global__alloc`, the prelude `FpClass`).
+    run_exit(
+        "user items named as prelude items",
+        "@noinline\nfn format(buf: *mut char, n: usize, fmt: *const char, ...) i32 { unsafe *buf = 0 as char; return n as i32 + (unsafe *fmt == 0 as char) as i32; }\n@noinline\nfn format_(x: i32) i32 { return x + 1; }\n@noinline\nfn likely(c: i32) i32 { return c + 2; }\nstruct Global { pub a: i32 }\nextend Global { @noinline pub fn alloc(self: &Global) i32 { return self.a; } }\nenum FpClass { FP_ZERO, FP_NAN }\n@noinline\nfn pick(n: i32) FpClass { if n > 0 { return FpClass::FP_NAN; } return FpClass::FP_ZERO; }\nfn main() i32 {\n    let mut b: [char; 4] = [1 as char; 4];\n    let mut v = Vector::<i32>::new();\n    v.push(Global { a: 3 }.alloc());\n    let f = switch f16::from_f32(0.0).classify() { FP_ZERO => 16, _ => 0, };\n    let e = switch pick(1) { FP_ZERO => 0, FP_NAN => 8, };\n    println(\"{}\", v[0]);\n    return format(&mut b[0], 4, \"\\0\".ptr() as *const char, 7) + format_(1) + likely(1) + v[0] + e + f;\n}\n",
+        37,
+    );
+}
+
+@test
 fn matchertext() {
     // Plain literals decode verbatim (embedded quotes, no escape processing); interpolation
     // desugars through the sugar_fmt_* path; format() accepts a matchertext template with `{}`
@@ -2703,6 +2716,17 @@ fn instance_static_assert_calls_a_function() {
         "in the instantiation where T = G<u8>",
     );
     b.run();
+}
+
+// A static_assert in a body that names no generic parameter must fold, as one at item level must: a
+// condition over a C call is an error, never dropped.
+@test
+fn body_static_assert_must_fold() {
+    h::expect_build_err(
+        "a body static_assert over a C call",
+        "extern \"C\" { @unsafe(safe) fn abs(x: i32) i32; }\nfn main() i32 {\n    static_assert(abs(-1) == 2, \"abs\");\n    return 0;\n}\n",
+        "static assertion cannot be evaluated: the condition does not fold to a constant",
+    );
 }
 
 // A method of a generic extend with const parameters of its own binds the extend's parameters from its

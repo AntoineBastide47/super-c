@@ -186,6 +186,15 @@ fn externs() {
         "#include \"./lib.h\"",
     );
 
+    // A constant argument of a C function has the parameter's C type: an `i32` is an `int` literal,
+    // never the `long long` one that would pass `abs` a wider argument (clang's -Wabsolute-value).
+    let ab = h::compile_c(
+        "extern \"C\" { @unsafe(safe) fn abs(x: i32) i32; @unsafe(safe) fn labs(x: i64) i64; }\nfn main() i32 { return abs(-3) + labs(-4) as i32 - 7; }\n",
+    );
+    assert(ab.ok(), "a C call with constant arguments compiles");
+    assert(ab.code_has("abs(-3)"), "an i32 constant is an int literal");
+    assert(ab.code_has("labs(-4LL)"), "an i64 constant keeps its suffix");
+
     // A variadic argument is read as its promoted C type: an `i32` constant is cast to `int32_t`.
     h::expect_c(
         "variadic call passes all args",

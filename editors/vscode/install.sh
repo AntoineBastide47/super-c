@@ -16,7 +16,7 @@ repo_root=$(cd "$ext_dir/../.." && pwd)
 server="$repo_root/super-c"
 
 if [ ! -x "$server" ]; then
-    printf 'install: %s is missing -- build it first (./super-c build or make)\n' "$server" >&2
+    printf 'install: %s is missing -- build it first (./super-c build)\n' "$server" >&2
     exit 1
 fi
 

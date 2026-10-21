@@ -103,6 +103,9 @@ pub struct LabelFlow {
 }
 // Per-node lint facts (`Resolver::lint_module`), one byte per node: a resolution points at the decl, the
 // resolver declared it, it is address-taken or closure-captured (exempt from the dead-store lint).
+// The kind a path's qualifier reports when it names nothing (`x::y`: a type or a module).
+const QUALIFIER: str<'static> = "type or module";
+
 const L_USED: u8 = 1;
 const L_SEEN: u8 = 2;
 const L_EXEMPT: u8 = 4;
@@ -736,11 +739,24 @@ extend Resolver {
         ) || span_is(self.source, name, "dangling") {
             return;
         }
-        self.errors.emit_span(
-            name,
-            format("cannot find {} '{}'", kind, diag::span_str(self.source, name.start, name.end)),
-        );
+        let nt = diag::span_str(self.source, name.start, name.end);
+        if kind == QUALIFIER && self.package != null && self.prelude_module(nt) {
+            // `iter::count`: the prelude's items are in scope by name; its modules are not.
+            self.errors.emit_span(name, format("cannot find module '{}'", nt));
+            self.errors.note(format("'{}' is a std module: add 'import std::{};'", nt, nt));
+            return;
+        }
+        self.errors.emit_span(name, format("cannot find {} '{}'", kind, nt));
         self.errors.note(format("check spelling, imports, and whether the item is declared before this use"));
+    }
+
+    // Whether the std prelude holds a module named `name` (`std/<name>.spc`, loaded as `__std::<name>`).
+    fn prelude_module(self: &Self, name: str) bool {
+        let pkg = unsafe &*self.package;
+        let mut path = String::from_str("__std::");
+        path.push_str(name);
+        let m = pkg.find(path.as_str());
+        return m >= 0 && pkg.modules[m as usize].prelude;
     }
 
     // Does this name resolve in `ns`, without committing to it or reporting if it does not? The one caller
@@ -1019,7 +1035,12 @@ extend Resolver {
                         self.ast.set_resolution_def(id, cs);
                     }
                 } else {
-                    self.resolve_ref(id, first, Namespace::NS_TYPE, "type");
+                    let what = if tp.parts.len >= 2 {
+                        QUALIFIER;
+                    } else {
+                        "type";
+                    };
+                    self.resolve_ref(id, first, Namespace::NS_TYPE, what);
                 }
             }
             for i in 0..tp.args.len {
@@ -1684,7 +1705,7 @@ extend Resolver {
             self.resolve_self_name(mb.object);
         } else if mb.path && obj_kind == NodeKind::NODE_IDENTIFIER {
             // resolve_qualified_member already tried the identifier as an imported module name.
-            self.resolve_ref(mb.object, mb.object, Namespace::NS_TYPE, "type");
+            self.resolve_ref(mb.object, mb.object, Namespace::NS_TYPE, QUALIFIER);
         } else {
             // Member name needs a type; deferred to the type checker.
             self.resolve_expr(mb.object);

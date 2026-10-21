@@ -231,7 +231,16 @@ owner may still be writing it: the visibility rule is the happens-before edge. T
 use for foreign parameters, fields and returns. Foreign lowerings of one transpile of
 the compiler fell from 299,863 to 169,429, and the borrow-check phase lowers none. Only
 declaration nodes carry their type in the node slot: a type node's slot holds other
-facts and is never read as a type.
+facts and is never read as a type. A foreign record read without that path is in its
+owner's pool: read it with the owner's `type_at` and `reintern` it before this module
+uses it (a provisional id indexes the owner's pool, never the reader's). What lowering
+needs from a callee's signature the checker records on the use instead: a numeric
+operand of an operator's by-reference parameter `&E` is a coercion to `E`
+(`operand_fits_param`). A lowering for a compile-time evaluation (`Interp::lowerer`) reads a
+foreign declaration's record, and its layout service a member's, only where the evaluation's
+reader sees the owner (`Lowerer::checked_here`, `Svc.ev`, both through `Interp::visible_node`);
+otherwise the lowering fails without an error and the evaluation runs again once the owner is
+checked, as an unseen callee body (`body_of`) does.
 
 **Late modules.** `bind_types` binds the modules present when it runs; a module that an
 import loads afterwards (`super-c lint` resolves the user closure on demand) is bound in

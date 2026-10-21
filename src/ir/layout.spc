@@ -5,6 +5,7 @@
 // a recursive by-value cycle into a clean not-layoutable answer instead of a runaway.
 import ast::ast as *;
 import module::loader as loader;
+import ir::interp as iri;
 
 /// Immutable target data. Every supported target currently shares the flat C data model except for
 /// pointer width; new axes (endianness, aggregate rules) join here, not at call sites.
@@ -99,6 +100,9 @@ pub struct Svc {
     active: Vector<u64>, // aggregate instantiations under query (declaration and arguments): cycle mark
     steps: Vector<ConstStep>, // `steps_hold` scratch
     pending: u32, // answers that read a constant-expression attribute not evaluated yet: never cached
+    /// The compile-time evaluation this service answers for (null: none). A member another job may
+    /// be writing (`Interp::settled_node`) is pending.
+    pub ev: *const iri::Interp,
 }
 
 extend Svc {
@@ -146,6 +150,10 @@ extend Svc {
     fn member_layout(self: &mut Self, m: ModuleId, mid: NodeId, env: *const LayoutEnv, depth: i32) Layout {
         let ast = self.a(m);
         if !ast.valid(mid) {
+            return Layout { ok: false };
+        }
+        if self.ev != null && !unsafe (&*self.ev).settled_node(m, mid) {
+            self.pending += 1;
             return Layout { ok: false };
         }
         let t = ast.member_ty(mid);

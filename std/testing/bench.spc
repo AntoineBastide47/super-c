@@ -271,8 +271,10 @@ extend Bencher {
         let now = platform::now_ns();
         if self.done > 0 {
             if self.pause_at != 0 {
-                // A benchmark that paused and never resumed still gets a usable number.
-                self.resume();
+                // A benchmark that paused and never resumed still gets a usable number: the pause ends
+                // at `now`, so the round is never shorter than zero.
+                self.excluded = self.excluded + (now - self.pause_at);
+                self.pause_at = 0;
             }
             let dt = (now - self.t0 - self.excluded) as f64 / 1000000000.0;
             if self.phase == 0 {
@@ -290,9 +292,10 @@ extend Bencher {
                     }
                 }
             } else {
-                self.diag.push(dt);
+                // The counters first: the push may allocate, and that call is the runner's.
                 self.diag_calls = self.diag_calls + (unsafe sys::sc_bs_alloc_calls() - self.a0);
                 self.diag_bytes = self.diag_bytes + (unsafe sys::sc_bs_alloc_bytes() - self.b0);
+                self.diag.push(dt);
             }
         } else {
             self.rss_before = unsafe sys::sc_bs_rss_now();
@@ -431,7 +434,14 @@ extend Bencher {
             bytes_pr = self.diag_bytes as f64 / dn as f64;
             let sd = summarize(&mut self.diag);
             diag_ms = sd.median * 1000.0;
-            unsafe stdio::printf("%.0f calls, ".ptr() as *const char, calls_pr);
+            // Mean figures over the diagnostic rounds: a fraction of a call keeps its digits, so the
+            // calls agree with the bytes they requested (one 64 B call in 3 rounds: 0.33 calls, 21 B).
+            let cfmt = if (calls_pr as i64) as f64 == calls_pr {
+                "%.0f calls, ";
+            } else {
+                "%.2f calls, ";
+            };
+            unsafe stdio::printf(cfmt.ptr() as *const char, calls_pr);
             print_bytes(bytes_pr);
             unsafe stdio::printf(" per round".ptr() as *const char);
             if self.units > 0 {
@@ -441,12 +451,13 @@ extend Bencher {
                     self.unit_name.cstr(),
                 );
             }
-            unsafe stdio::printf(
-                "; counted in %zu extra rounds, median %.3f ms (%+.1f%%)\n".ptr() as *const char,
-                dn,
-                diag_ms,
-                (sd.median / sm.median - 1.0) * 100.0,
-            );
+            unsafe stdio::printf("; counted in %zu extra rounds, median %.3f ms".ptr() as *const char, dn, diag_ms);
+            // The accounting's cost against the throughput median, which a round under the clock's
+            // resolution measures as zero: no ratio then.
+            if sm.median > 0.0 {
+                unsafe stdio::printf(" (%+.1f%%)".ptr() as *const char, (sd.median / sm.median - 1.0) * 100.0);
+            }
+            unsafe stdio::printf("\n".ptr() as *const char);
         } else if unsafe sys::sc_bs_alloc_supported() == 0 {
             unsafe stdio::printf("unavailable on this platform\n".ptr() as *const char);
         } else {

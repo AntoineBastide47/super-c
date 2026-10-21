@@ -13,7 +13,7 @@ allowed-tools: Bash Read
 - Use `@platform` for target selection and keep generated C portable.
 - Format changed `.spc` files with `super-c fmt`.
 
-Super-C is a statically-typed systems language that compiles to readable C99/C11. It
+Super-C is a statically-typed systems language that compiles to readable C11. It
 pairs a modern frontend (RAII, borrow checking, generics, closures, compile-time
 evaluation, coroutines) with C's portability and performance model.
 
@@ -555,6 +555,8 @@ static_assert(sizeof(Header) == 8, "Header must stay 8 bytes");
 - A `const fn` cannot call an extern function or a variadic one ("... but calls a variadic
   function"). `assert`, `assert_eq` and `assert_ne` are variadic (`std/test.spc`), so a function
   that checks an invariant with `assert` is a plain `fn`.
+- A `static_assert` in a non-generic body must fold, as a top-level one must ("static
+  assertion cannot be evaluated: the condition does not fold to a constant").
 - A `static_assert` in the body of a generic function (one with its own generic parameters,
   or a method of an extend with parameters) holds per instance:
   `static_assert(T::is_signed(), "only signed types")` fails the build at

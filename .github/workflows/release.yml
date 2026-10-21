@@ -20,7 +20,7 @@ on:
 
 permissions:
   contents: write            # needed to create the tag + release
-  actions: write             # the test-durations artifact: read by the shards, replaced by `durations`
+  actions: write             # the test-durations and transpile-counts artifacts: read, then replaced
 
 concurrency:
   group: release-${{ github.event.inputs.tag }}
@@ -56,13 +56,16 @@ jobs:
 
   # The pipeline of macOS, Linux, Windows and wasm: one job builds the compiler, the test shards (three
   # on Windows, the slowest runner, two elsewhere), the x86-64 levels, the correctness gate and the
-  # gate's profile builds run in parallel on that binary, and the release binary is built only after all
-  # of them pass:
+  # gate's profile builds and the transpile work count run in parallel on that binary, and the release
+  # binary is built only after all but the count pass. A count that grew by the limit or more, or that
+  # failed, holds only the publishing: `counts approval` waits for an approval in the `release-approval`
+  # environment (required reviewer: the owner):
   #
   #   compile --+--> test 1/N .. N/N -----------+
-  #             +--> levels (Linux, Windows) ---+--> package --> release
-  #             +--> gate ----------------------+
-  #             +--> gate profiles -------------+
+  #             +--> levels (Linux, Windows) ---+--> package -----------------------+--> release
+  #             +--> gate ----------------------+                                   |
+  #             +--> gate profiles -------------+                                   |
+  #             +--> counts --> transpile counts --> counts approval (when held) ---+
   #
   # Only a run on main saves caches (the toolchain action restores, `cache-save` saves last), so no
   # other branch evicts main's entries from the repository's cache.
@@ -374,6 +377,94 @@ jobs:
           cache: objcache-${{ matrix.target }}-profiles
           sha: ${{ needs.resolve.outputs.sha }}
 
+  # The transpile work count beside the shards (.github/actions/transpile-counts): this commit's compiler
+  # against the last release's on the same sources, built by clang with counters (llvm-mingw's on
+  # Windows). A growth of 1% or more is an error annotation, and the release waits for an approval.
+  counts:
+    needs: [resolve, compile]
+    if: github.actor == github.repository_owner
+    name: counts (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: macos
+          - os: ubuntu-latest
+            target: linux
+          - os: windows-latest
+            target: windows
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: ${{ matrix.target }}
+          cache: objcache-${{ matrix.target }}-counts
+          sha: ${{ needs.resolve.outputs.sha }}
+          llvm-mingw: ${{ matrix.target == 'windows' }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-${{ matrix.target }}
+
+      # The last release's compiler, which builds its own sources for the comparison.
+      - uses: ./.github/actions/bootstrap
+        id: boot
+        with:
+          target: ${{ matrix.target }}
+
+      - uses: ./.github/actions/transpile-counts
+        with:
+          target: ${{ matrix.target }}
+          sha: ${{ needs.resolve.outputs.sha }}
+          base-tag: ${{ steps.boot.outputs.tag }}
+
+      - uses: ./.github/actions/cache-save
+        with:
+          cache: objcache-${{ matrix.target }}-counts
+          sha: ${{ needs.resolve.outputs.sha }}
+
+  # Every platform's table in one summary; the counts replace the repository's one `transpile-counts`
+  # artifact, even when a platform failed.
+  transpile-counts:
+    needs: [resolve, counts]
+    if: always() && github.actor == github.repository_owner
+    name: transpile counts
+    runs-on: ubuntu-latest
+    outputs:
+      approval: ${{ steps.save.outputs.approval }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: ./.github/actions/transpile-counts-save
+        id: save
+        with:
+          targets: macos linux windows
+
+  # The publishing waits here for the owner's approval when a count grew by the limit or more, or when the
+  # counts could not be measured or saved. The environment's required reviewer makes the wait; without
+  # that rule an environment passes at once.
+  counts-approval:
+    needs: [package, wasm-package, transpile-counts]
+    if: >-
+      always() && github.actor == github.repository_owner &&
+      needs.package.result == 'success' && needs.wasm-package.result == 'success' &&
+      (needs.transpile-counts.result != 'success' || needs.transpile-counts.outputs.approval != 'false')
+    name: counts approval
+    runs-on: ubuntu-latest
+    environment: release-approval
+    steps:
+      - run: echo "the release of a transpile count at or over the limit, or of a failed count, was approved"
+
   # The release binary, built by the compiler the suite and the gate passed with.
   package:
     needs: [resolve, compile, test, levels, gate, gate-profiles]
@@ -664,9 +755,15 @@ jobs:
           path: super-c-wasm32-wasip1.tar.gz
           if-no-files-found: error
 
+  # Publishes without a wait when the counts need no approval (`counts approval` skipped).
   release:
-    needs: [resolve, package, wasm-package]
-    if: github.actor == github.repository_owner
+    needs: [resolve, package, wasm-package, transpile-counts, counts-approval]
+    if: >-
+      always() && github.actor == github.repository_owner &&
+      needs.package.result == 'success' && needs.wasm-package.result == 'success' &&
+      (needs.counts-approval.result == 'success' ||
+       (needs.counts-approval.result == 'skipped' && needs.transpile-counts.result == 'success' &&
+        needs.transpile-counts.outputs.approval == 'false'))
     runs-on: ubuntu-latest
     steps:
       # Only the archives: the compiler artifacts the jobs above pass along are not part of a release.

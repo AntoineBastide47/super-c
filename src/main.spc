@@ -42,6 +42,7 @@ fn run_file(
     jobs: u32,
     out_dir: str,
     cc: str,
+    cstd: str,
     profile: str,
 ) i32 {
     loader::set_load_jobs(jobs);
@@ -67,8 +68,8 @@ fn run_file(
         eprintln("phase load: {} ms", unsafe shim::sc_ticks_ms() - tl0);
     }
     loader::set_load_jobs(1);
-    // `--out-dir` and `--cc` apply to a bare build exactly as to a manifest one: the emitted tree goes under
-    // the named directory, and the named compiler links the program.
+    // `--out-dir`, `--cc` and `--cstd` apply to a bare build exactly as to a manifest one: the emitted tree
+    // goes under the named directory, and the named compiler builds the program with the named base flags.
     if out_dir.len() != 0 {
         let mut g = String::from_str(out_dir);
         g.push_byte(b'/');
@@ -78,6 +79,9 @@ fn run_file(
     }
     if cc.len() != 0 {
         p.cc = String::from_str(cc);
+    }
+    if cstd.len() != 0 {
+        p.cstd = String::from_str(cstd);
     }
     // A standalone script is a binary with no test suite to count as callers: unreachable pub
     // functions are dead weight. Project trees get this from the whole-workspace lint instead,
@@ -300,7 +304,11 @@ fn lint_project(
     // there is one, then the command line's.
     let mut lf = cpu_set;
     let mut lerr = String::new();
-    let lm = bman::load("build.toml", false);
+    let lm = if has_manifest(".") {
+        bman::load("build.toml", false);
+    } else {
+        Option::<bman::Manifest>::None;
+    };
     if !lm.is_none() {
         let mut man = lm.unwrap();
         man.arch = co.arch;
@@ -853,6 +861,7 @@ struct CommonOpts {
     pub bootstrap_tags: bool, // --bootstrap-tags: accept unknown @attributes and std intrinsics (build across a new tag)
     pub lint: bool, // on by default; --no-lint disables (unused vars/params/items, casts, unsafe)
     pub bad: bool, // malformed argument list: print usage and exit 1
+    pub rejected: String, // the first argument the command does not take, named before the usage
     pub target_features: String, // --target-feature=+a,-b (repeated flags join in order)
     pub target_cpu: String, // --target-cpu=L: an x86-64 level before every feature list (the last flag wins)
     pub simd_width: u32, // --simd-width=256|512 (0: the manifest's)
@@ -860,6 +869,13 @@ struct CommonOpts {
 }
 
 extend CommonOpts {
+    fn reject(self: &mut Self, arg: str) {
+        if self.rejected.len() == 0 {
+            self.rejected.push_str(arg);
+        }
+        self.bad = true;
+    }
+
     fn common_flag(self: &mut Self, arg: str) bool {
         if arg.starts_with("--const-eval-steps=") {
             let v = tctl::parse_size(arg[19..]).unwrap_or(0);
@@ -1017,6 +1033,84 @@ fn chdir_to_manifest() {
     }
 }
 
+// The command-line usage, written to `out`.
+fn print_usage(out: *mut stdio::FILE) {
+    unsafe stdio::fputs(
+        M"(super-c — a systems language that compiles to readable C
+
+USAGE:
+    super-c <file.spc> [options]      compile a script (emit C into build/)
+    super-c <command> [options]
+
+COMMANDS:
+    build   [<dir/file>]   emit C and link a binary (uses build.toml if no file)
+    release [<dir/file>]   like build, with the release profile (-O3, link-time optimization)
+    run                    build the project and run its binary
+    test                   build and run the test suite (tests/ by convention)
+    bench                  build and run the benchmarks (bench/ by convention)
+    command <name>         run a [command.NAME] from build.toml
+    clean [--full]         sweep the global cache and build/ (--full: delete both instead)
+    fmt  [<path>...]       format source in place (or verify with --check)
+    lint [<path>...]       report lint warnings (apply fixes with --fix)
+    lsp                    run the language server over stdio
+    new <name>             scaffold a new project directory
+    init                   scaffold a project in the current directory
+    vendor <src> [name]    copy a git repository or a local folder into vendor/<name>
+    bindgen <path>...      generate extern "C" modules from C headers (a directory recurses)
+
+OPTIONS:
+    -h, --help             print this usage and exit
+    -o <path>              output binary path (build/release with a file)
+    --profile=P            build profile: debug|release|bench|test|race, or a custom one
+    --sanitizers           add AddressSanitizer and UndefinedBehaviorSanitizer to every C build
+    --out-dir=D            output directory (default: build)
+    --jobs=N               workers: the compiler's own threads, the parallel C compile jobs and the
+                           jobserver nested builds share (default: build.toml `jobs`, else one per core)
+    --cstd=F               base C flags, in place of build.toml `cstd` (default:
+                           -std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700)
+    --cc=BIN               C compiler to use (else build.toml `cc`, else $CC, else cc)
+    --bin=NAME             build/run only that binary target
+    --transpiler=CMD       build/release: run CMD (words, no shell) as the transpile step
+    --print-probes         build/release: print the C toolchain probe results for the target and profile
+    --lib                  build only the [lib] target
+    --link=NAME            bindgen: library the generated bindings link against
+    --header=SPELLING      bindgen: how the generated module spells the #include
+    -I <dir>               bindgen: header search path
+    --from=PART            bindgen: also take declarations from headers whose path contains PART
+    --cflag=F              bindgen: extra flag for the preprocessor invocation (repeatable)
+    --target=T             target: windows|macos|linux|ios|android|wasm
+    --arch=A               instruction set: x86_64|aarch64|wasm32 (default: the target's)
+    --target-feature=L     CPU features: +name enables, -name disables (wasm32: simd128, relaxed-simd)
+    --target-cpu=C         x86_64 level whose features come first: x86-64, x86-64-v2, x86-64-v3, x86-64-v4
+    --simd-width=W         vector width the planner prefers on AVX-512: 256 (default) or 512
+    --simd-dispatch=L      x86_64: run-time copies of the functions with vector code for levels L
+                           (comma-separated x86-64-v2..v4; default x86-64-v3 at opt-level 2 or more), or off
+    --const-eval-steps=N   compile-time evaluation step budget
+    --const-eval-memory=B  compile-time evaluation memory budget (B, or NK/NM/NG)
+    --no-lint              disable the on-by-default lints during a build
+    --check                fmt: report unformatted files, write nothing
+    --fix                  lint: apply machine-applicable fixes and re-lint
+    --const                lint: also flag functions that could be 'const fn'
+    --no-run               bench: build the bench binary but do not run it
+    --dir=D                vendor: project root vendored into (default: the current directory)
+    --ref=R                vendor: branch, tag or commit to pin (git sources)
+    --force                vendor: replace an existing vendor/<name>
+    --test                 script: collect @test functions, build, and run
+    --filter=S             test, bench: run only tests or benchmarks whose name contains S (the
+                           test and bench subcommands also build only the files that hold them)
+    --test-shard=K/N       run shard K of N (one-based, balanced by the durations file)
+    --test-jobs=N          bound the test process pool (default: one per core)
+    --test-timeout=S       fail a test that runs longer than S seconds (default 90, 0: none)
+    --test-record-durations[=F]  test: merge each test's time into F, else into the durations file
+    --test-durations=F     test: the durations file that balances --test-shard and that
+                           --test-record-durations writes (default: tests/durations.tsv)
+    --test-no-fork         run tests in-process (for a debugger)
+    --quiet                test: print only the failures, the tally and the slowest tests
+)".ptr() as *const char,
+        out,
+    );
+}
+
 fn main(argv: Vector<str>) i32 {
     unsafe shim::sc_trace_install();
     let argc = argv.len();
@@ -1108,12 +1202,10 @@ fn main(argv: Vector<str>) i32 {
                     co.bad = co.bad || emit_id == 0;
                 } else if arg.starts_with("--profile=") || arg.starts_with("--out-dir=") {
                     let _ = bo.build_flag(&mut co, arg);
-                } else if parse_test_flag(arg, &mut topts, &mut co.bad) {} else if arg.starts_with("--") {
-                    co.bad = true;
-                } else if file.len() == 0 {
-                    file = arg;
+                } else if parse_test_flag(arg, &mut topts, &mut co.bad) {} else if arg.starts_with("--") || file.len() != 0 {
+                    co.reject(arg);
                 } else {
-                    co.bad = true;
+                    file = arg;
                 }
                 i = i + 1;
             }
@@ -1138,12 +1230,10 @@ fn main(argv: Vector<str>) i32 {
                     transpiler = arg[13..];
                 } else if arg == "--print-probes" {
                     print_probes = true;
-                } else if arg.starts_with("--") {
-                    co.bad = true;
-                } else if file.len() == 0 {
-                    file = arg;
+                } else if arg.starts_with("--") || file.len() != 0 {
+                    co.reject(arg);
                 } else {
-                    co.bad = true;
+                    file = arg;
                 }
                 i = i + 1;
             }
@@ -1169,7 +1259,7 @@ fn main(argv: Vector<str>) i32 {
                 if arg == "--check" {
                     fmt_check = true;
                 } else if arg.starts_with("--") {
-                    co.bad = true;
+                    co.reject(arg);
                 } else if file.len() == 0 {
                     file = arg;
                 } else {
@@ -1187,7 +1277,7 @@ fn main(argv: Vector<str>) i32 {
                 } else if arg == "--const" {
                     lint_sc = true;
                 } else if arg.starts_with("--") {
-                    co.bad = true;
+                    co.reject(arg);
                 } else if file.len() == 0 {
                     file = arg;
                 } else {
@@ -1205,7 +1295,7 @@ fn main(argv: Vector<str>) i32 {
                     // The build.toml command name.
                     file = arg;
                 } else {
-                    co.bad = true;
+                    co.reject(arg);
                 }
                 i = i + 1;
             }
@@ -1220,7 +1310,7 @@ fn main(argv: Vector<str>) i32 {
                 let common = co.common_flag(arg);
                 if common || bo.build_flag(&mut co, arg) {} else {
                     // `run` takes only build flags; the binary is the manifest's `bin`.
-                    co.bad = true;
+                    co.reject(arg);
                 }
                 i = i + 1;
             }
@@ -1232,7 +1322,7 @@ fn main(argv: Vector<str>) i32 {
                 } else if argv[i] == "--full" {
                     clean_full = true;
                 } else {
-                    co.bad = true;
+                    co.reject(argv[i]);
                 }
                 i = i + 1;
             }
@@ -1244,7 +1334,7 @@ fn main(argv: Vector<str>) i32 {
                 if !parse_test_flag(arg, &mut topts, &mut co.bad) {
                     let common = co.common_flag(arg);
                     if !common && !bo.build_flag(&mut co, arg) {
-                        co.bad = true;
+                        co.reject(arg);
                     }
                 }
                 i = i + 1;
@@ -1260,7 +1350,7 @@ fn main(argv: Vector<str>) i32 {
                 } else {
                     let common = co.common_flag(arg);
                     if !common && !bo.build_flag(&mut co, arg) {
-                        co.bad = true;
+                        co.reject(arg);
                     }
                 }
                 i = i + 1;
@@ -1271,7 +1361,7 @@ fn main(argv: Vector<str>) i32 {
                 if argv[i] == "--capabilities" || argv[i] == "--version" {
                     // Handled at dispatch: print the capability/version JSON and exit.
                 } else if !co.common_flag(argv[i]) {
-                    co.bad = true;
+                    co.reject(argv[i]);
                 }
                 i = i + 1;
             }
@@ -1282,7 +1372,7 @@ fn main(argv: Vector<str>) i32 {
                     // The project name.
                     file = argv[i];
                 } else {
-                    co.bad = true;
+                    co.reject(argv[i]);
                 }
                 i = i + 1;
             }
@@ -1294,7 +1384,7 @@ fn main(argv: Vector<str>) i32 {
         MODE_INIT => {
             if i < argc {
                 // `init` scaffolds the current directory, no arguments.
-                co.bad = true;
+                co.reject(argv[i]);
             }
         },
         MODE_VENDOR => {
@@ -1312,7 +1402,7 @@ fn main(argv: Vector<str>) i32 {
                 } else if !arg.starts_with("--") && vendor_name.len() == 0 {
                     vendor_name = arg;
                 } else {
-                    co.bad = true;
+                    co.reject(arg);
                 }
                 i = i + 1;
             }
@@ -1350,7 +1440,7 @@ fn main(argv: Vector<str>) i32 {
                         extra.push(i);
                     }
                 } else {
-                    co.bad = true;
+                    co.reject(arg);
                 }
                 i = i + 1;
             }
@@ -1362,6 +1452,20 @@ fn main(argv: Vector<str>) i32 {
     };
     if !topts.enabled && (topts.jobs != 0 || topts.no_fork || topts.filter != null || topts.shards != 0 || topts.durations != null || topts.record) {
         co.bad = true;
+    }
+    // `--help` or `-h`, in any position: the usage on stdout, and success.
+    for k in 1..argc {
+        if argv[k] == "--help" || argv[k] == "-h" {
+            print_usage(stdio::stdout());
+            return 0;
+        }
+    }
+    // `super-c test` records into its suite's `durations.tsv`; a script has no suite directory to hold one.
+    if mode == Mode::MODE_DEFAULT && topts.record && topts.record_to == null && topts.durations == null {
+        eprintln(
+            "error: a script's --test-record-durations needs a file: --test-record-durations=F or --test-durations=F",
+        );
+        return 1;
     }
     // `build <dir>` and `release <dir>`: the project of that directory, as from inside it; a relative -o
     // still names a path from here.
@@ -1388,77 +1492,10 @@ fn main(argv: Vector<str>) i32 {
     // Only a script needs a path of its own: every other mode either reads build.toml, needs no
     // input at all (lsp), or discovers the project itself (fmt/lint).
     if co.bad || file.len() == 0 && mode == Mode::MODE_DEFAULT {
-        unsafe stdio::fputs(
-            M"(super-c — a systems language that compiles to readable C
-
-USAGE:
-    super-c <file.spc> [options]      compile a script (emit C into build/)
-    super-c <command> [options]
-
-COMMANDS:
-    build   [<dir/file>]   emit C and link a binary (uses build.toml if no file)
-    release [<dir/file>]   like build, with the release profile (-O3, link-time optimization)
-    run                    build the project and run its binary
-    test                   build and run the test suite (tests/ by convention)
-    bench                  build and run the benchmarks (bench/ by convention)
-    command <name>         run a [command.NAME] from build.toml
-    clean [--full]         sweep the global cache and build/ (--full: delete both instead)
-    fmt  [<path>...]       format source in place (or verify with --check)
-    lint [<path>...]       report lint warnings (apply fixes with --fix)
-    lsp                    run the language server over stdio
-    new <name>             scaffold a new project directory
-    init                   scaffold a project in the current directory
-    vendor <src> [name]    copy a git repository or a local folder into vendor/<name>
-    bindgen <path>...      generate extern "C" modules from C headers (a directory recurses)
-
-OPTIONS:
-    -o <path>              output binary path (build/release with a file)
-    --profile=P            build profile: debug|release|bench|test|race, or a custom one
-    --sanitizers           add AddressSanitizer and UndefinedBehaviorSanitizer to every C build
-    --out-dir=D            output directory (default: build)
-    --jobs=N               parallel C compile jobs (default: one per core)
-    --cstd=F               C standard passed to the C compiler
-    --cc=BIN               C compiler to use (else build.toml `cc`, else $CC, else cc)
-    --bin=NAME             build/run only that binary target
-    --transpiler=CMD       build/release: run CMD (words, no shell) as the transpile step
-    --print-probes         build/release: print the C toolchain probe results for the target and profile
-    --lib                  build only the [lib] target
-    --link=NAME            bindgen: library the generated bindings link against
-    --header=SPELLING      bindgen: how the generated module spells the #include
-    -I <dir>               bindgen: header search path
-    --from=PART            bindgen: also take declarations from headers whose path contains PART
-    --cflag=F              bindgen: extra flag for the preprocessor invocation (repeatable)
-    --target=T             target: windows|macos|linux|ios|android|wasm
-    --arch=A               instruction set: x86_64|aarch64|wasm32 (default: the target's)
-    --target-feature=L     CPU features: +name enables, -name disables (wasm32: simd128, relaxed-simd)
-    --target-cpu=C         x86_64 level whose features come first: x86-64, x86-64-v2, x86-64-v3, x86-64-v4
-    --simd-width=W         vector width the planner prefers on AVX-512: 256 (default) or 512
-    --simd-dispatch=L      x86_64: run-time copies of the functions with vector code for levels L
-                           (comma-separated x86-64-v2..v4; default x86-64-v3 at opt-level 2 or more), or off
-    --const-eval-steps=N   compile-time evaluation step budget
-    --const-eval-memory=B  compile-time evaluation memory budget (B, or NK/NM/NG)
-    --no-lint              disable the on-by-default lints during a build
-    --check                fmt: report unformatted files, write nothing
-    --fix                  lint: apply machine-applicable fixes and re-lint
-    --const        lint: also flag functions that could be 'const fn'
-    --no-run               bench: build the bench binary but do not run it
-    --dir=D                vendor: project root vendored into (default: the current directory)
-    --ref=R                vendor: branch, tag or commit to pin (git sources)
-    --force                vendor: replace an existing vendor/<name>
-    --test                 script: collect @test functions, build, and run
-    --filter=S             test, bench: run only tests or benchmarks whose name contains S (the
-                           test and bench subcommands also build only the files that hold them)
-    --test-shard=K/N       run shard K of N (one-based, balanced by the durations file)
-    --test-jobs=N          bound the test process pool (default: one per core)
-    --test-timeout=S       fail a test that runs longer than S seconds (default 90, 0: none)
-    --test-record-durations[=F]  test: merge each test's time into F, else into the durations file
-    --test-durations=F     test: the durations file that balances --test-shard and that
-                           --test-record-durations writes (default: tests/durations.tsv)
-    --test-no-fork         run tests in-process (for a debugger)
-    --quiet                test: print only the failures and the tally
-)".ptr() as *const char,
-            stdio::stderr(),
-        );
+        if co.rejected.len() != 0 {
+            eprintln("error: unexpected argument '{}'", co.rejected);
+        }
+        print_usage(stdio::stderr());
         return 1;
     }
     // resolve "0 = core count" HERE: the p.jobs != 1 frontier gates need a real number, and a
@@ -1694,6 +1731,11 @@ OPTIONS:
         eprintln("error: {}", ferr.as_str());
         return 1;
     }
+    // The target selectors and the engine's own steps act on build.toml's targets; a file has none.
+    if bo.bin_sel.len() != 0 || bo.lib_sel || transpiler.len() != 0 || print_probes {
+        eprintln("error: --bin, --lib, --transpiler and --print-probes need build.toml; '{}' builds alone", file);
+        return 1;
+    }
     let pflags = bsys::profile_flags(bo.profile, co.target, target_sdk(co.target), false, bo.sanitizers);
     let pcflags = bsys::profile_flags(bo.profile, co.target, target_sdk(co.target), true, bo.sanitizers);
     let rc = run_file(
@@ -1715,6 +1757,7 @@ OPTIONS:
         jobs,
         bo.out_dir,
         bo.cc,
+        bo.cstd,
         bo.profile,
     );
     return rc;

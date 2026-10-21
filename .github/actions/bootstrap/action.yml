@@ -8,10 +8,15 @@ inputs:
   target:
     description: "linux, macos or windows (the release archive's platform)"
     required: true
+outputs:
+  tag:
+    description: "the release tag the compiler came from"
+    value: ${{ steps.fetch.outputs.tag }}
 runs:
   using: composite
   steps:
     - name: Fetch bootstrap super-c from the latest release
+      id: fetch
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -21,12 +26,15 @@ runs:
         arch="$(uname -m)"
         name="super-c-${TARGET}-${arch}"
         boot="super-c-boot${BINEXT:-}"
+        # One tag for the download and the output, so a release published meanwhile cannot split them.
+        tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+        echo "tag=$tag" >> "$GITHUB_OUTPUT"
         if [ "$TARGET" = windows ]; then
-          gh release download --repo "$GITHUB_REPOSITORY" --pattern "${name}.zip" --dir . --clobber
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "${name}.zip" --dir . --clobber
           7z x -y "${name}.zip" >/dev/null
           if [ -f "${name}/super-c.exe" ]; then cp "${name}/super-c.exe" "$boot"; else cp "${name}.exe" "$boot"; fi
         else
-          gh release download --repo "$GITHUB_REPOSITORY" --pattern "${name}.tar.gz" --dir . --clobber
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "${name}.tar.gz" --dir . --clobber
           tar xzf "${name}.tar.gz"
           if [ -f "${name}/super-c" ]; then cp "${name}/super-c" "$boot"; else cp "${name}" "$boot"; fi
           chmod +x "$boot"

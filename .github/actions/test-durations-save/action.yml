@@ -37,19 +37,8 @@ runs:
         retention-days: 90
 
     # One durations artifact remains: the one just uploaded.
-    - name: Delete the other durations artifacts
-      shell: bash
-      env:
-        GH_TOKEN: ${{ github.token }}
-        KEEP: ${{ steps.upload.outputs.artifact-id }}
-      run: |
-        set -eu
-        api="repos/$GITHUB_REPOSITORY/actions"
-        gh api --paginate "$api/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
-          --jq '.artifacts[] | select(.name | startswith("durations-shard-")) | .id' > ids
-        gh api --paginate "$api/artifacts?name=test-durations&per_page=100" \
-          --jq ".artifacts[] | select(.id != $KEEP) | .id" >> ids
-        while read -r id; do
-          gh api -X DELETE "$api/artifacts/$id"
-          echo "deleted artifact $id"
-        done < ids
+    - uses: ./.github/actions/keep-one-artifact
+      with:
+        name: test-durations
+        keep: ${{ steps.upload.outputs.artifact-id }}
+        parts: durations-shard-

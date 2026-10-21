@@ -1031,7 +1031,7 @@ pub struct Interp {
     pub fxd: Vector<Vector<u8>>, // deep (all-paths) effect verdicts
     pub fx_no: Map<u64, FxNo<'static>>, // (m << 32 | fn) -> first disqualifying site of its last shallow scan
     pub fx_depth: u32,
-    pub pending: Vector<u64>, // deferred static_assert conditions (module << 32 | node)
+    pub pending: Vector<u64>, // deferred static_assert conditions (strict << 63 | module << 32 | node)
     pub pending_consts: Vector<u64>, // deferred const decls
     pub pending_strict: Vector<bool>, // per deferred const: a silent failure is an error too
     pub inst_asserts: Vector<InstAssert>, // per-instance static_assert evaluations concrete calls ask for
@@ -1262,7 +1262,7 @@ extend Interp {
         self.eval_reset();
         self.subst.truncate(0);
         self.sub_base = 0;
-        let mut lw = irl::Lowerer::new(self.pkg, m, cnode);
+        let mut lw = self.lowerer(m, cnode);
         let mut r = none();
         if lw.lower_const(cnode) {
             let args = Vector::<IVal>::new();
@@ -3038,7 +3038,7 @@ extend Interp {
             unsafe (*pm).ctfe_edges.push(ci.module as u64 << 32 | ci.node as u64);
             unsafe (*pm).ctfe_edges.push(m as u64 << 32 | fnode as u64);
         }
-        let mut lw = irl::Lowerer::new(self.pkg, m, fnode);
+        let mut lw = self.lowerer(m, fnode);
         for i in 0..binds.len() {
             let sb = *binds.at(i);
             lw.env.push(irl::LSub { pm: sb.pmod, pnode: sb.pnode, am: sb.am, at: sb.at });
@@ -3135,6 +3135,30 @@ extend Interp {
     pub const fn set_reader(self: &mut Self, item: loader::ItemId, r: *mut gitems::Reach) {
         self.cur_item = item;
         self.reach = r;
+        self.lsvc.ev = self;
+    }
+
+    /// Whether the checked record of node `n` of module `m` holds still for the reader: an item of
+    /// the reader's own component (its one job writes them in order), or one it sees. Another
+    /// component's item it cannot see may have another job writing it right now. Without the
+    /// component graph (the language server's serial sweep) every record holds still.
+    pub fn settled_node(self: &Self, m: ModuleId, n: NodeId) bool {
+        if self.cur_item == loader::ITEM_NONE {
+            return true;
+        }
+        let t = gitems::owner_of(self.p(), m, n);
+        let s = &self.p().sched;
+        if t == loader::ITEM_NONE || s.ncomp == 0 || s.comp[t as usize] == s.comp[self.cur_item as usize] {
+            return true;
+        }
+        return gitems::visible(self.p(), self.cur_item, t, unsafe &mut *self.reach);
+    }
+
+    // A lowering for this engine: what it reads of other items follows the reader (`read_for`).
+    fn lowerer(self: &Self, m: ModuleId, owner: NodeId) irl::Lowerer {
+        let mut lw = irl::Lowerer::new(self.pkg, m, owner);
+        lw.read_for(self);
+        return lw;
     }
 
     /// Is the checked state of node `n` of module `m` visible to the reader (`gitems::visible`
@@ -4790,7 +4814,7 @@ extend Interp {
         let iso = self.iso_enter();
         self.item_active.push(key);
         self.ndepth += 1;
-        let mut lw = irl::Lowerer::new(self.pkg, m, cnode);
+        let mut lw = self.lowerer(m, cnode);
         let mut r = none();
         if lw.lower_const(cnode) {
             let args = Vector::<IVal>::new();
@@ -4918,7 +4942,7 @@ extend Interp {
             self.it_trap(IT_TRAP_BUDGET_DEPTH, "constant evaluation nests too deeply");
             return none();
         }
-        let mut lw = irl::Lowerer::new(self.pkg, m, cnode);
+        let mut lw = self.lowerer(m, cnode);
         for i in 0..binds.len() {
             let sb = *binds.at(i);
             lw.env.push(irl::LSub { pm: sb.pmod, pnode: sb.pnode, am: sb.am, at: sb.at });
@@ -5042,7 +5066,7 @@ extend Interp {
 
     // Queue every constant `(m, cnode)` references that is neither memoized nor queued already.
     fn item_deps(self: &mut Self, m: ModuleId, cnode: NodeId, work: &mut Vector<u64>, ready: &mut Vector<bool>) {
-        let mut lw = irl::Lowerer::new(self.pkg, m, cnode);
+        let mut lw = self.lowerer(m, cnode);
         if !lw.lower_const(cnode) {
             return;
         }
@@ -10285,7 +10309,7 @@ extend Interp {
     // established evaluator's `ev` did the same); anything else is a bare expression. IV_NONE
     // when lowering fails.
     fn run_root(self: &mut Self, m: ModuleId, id: NodeId) IVal {
-        let mut lw = irl::Lowerer::new(self.pkg, m, id);
+        let mut lw = self.lowerer(m, id);
         lw.f.unchecked_view = !self.visible_node(m, id); // an item the reader cannot see is unchecked to it
         let ok = if (unsafe &*self.p().module_ast_const(m)).at_const(id).kind == NodeKind::NODE_CONST {
             lw.lower_const(id);
@@ -10550,7 +10574,7 @@ extend Interp {
         }
         let failed0 = self.failed;
         let sb0 = self.subst.len();
-        let mut lw = irl::Lowerer::new(self.pkg, m, id);
+        let mut lw = self.lowerer(m, id);
         lw.f.unchecked_view = !self.visible_node(m, id);
         for i in 0..env.len() {
             // A binding to an outer instance's parameter resolves through the chain: the value read
@@ -10650,7 +10674,7 @@ extend Interp {
         }
         let prev_base = self.sub_base;
         self.sub_base = sb0;
-        let mut lw = irl::Lowerer::new(self.pkg, m, id);
+        let mut lw = self.lowerer(m, id);
         lw.f.unchecked_view = !self.visible_node(m, id);
         for i in 0..n {
             let sb = *self.subst.at(sb0 + i as usize);
@@ -10783,15 +10807,13 @@ extend Interp {
         return 0 - 1;
     }
 
-    /// Queue a static_assert condition for flush_asserts (re-checked once every module is typed).
-    pub fn defer_assert(self: &mut Self, m: ModuleId, cond: NodeId) {
+    /// Queue a static_assert condition for flush_asserts (re-checked once every module is typed);
+    /// `strict`: a condition that still does not fold then is an error (the assert depends on no
+    /// generic parameter).
+    pub fn defer_assert(self: &mut Self, m: ModuleId, cond: NodeId, strict: bool) {
         self.eng_enter();
-        self.defer_assert_g(m, cond);
+        self.pending.push(strict as u64 << 63 | m as u64 << 32 | cond as u64);
         self.eng_leave();
-    }
-
-    fn defer_assert_g(self: &mut Self, m: ModuleId, cond: NodeId) {
-        self.pending.push(m as u64 << 32 | cond as u64);
     }
 
     /// Queue the per-instance static_asserts of instance `r` (see `InstAssert`).
@@ -10810,13 +10832,19 @@ extend Interp {
         self.eng_leave();
     }
 
+    /// The module of deferred static_assert `k` (`pending`).
+    pub const fn pending_module(self: &Self, k: usize) ModuleId {
+        return (self.pending[k] >> 32 & 0xFFFFu64) as ModuleId;
+    }
+
     /// Re-evaluate the deferred asserts: err() gets null detail for a proven-false condition, trap
-    /// detail for a definite trap, and a reason for a top-level assert that is still undecidable
-    /// (an assert in a function body may depend on unsubstituted generics and stays silent).
+    /// detail for a definite trap, and a reason for a strict assert that is still undecidable (an
+    /// assert in a generic body may depend on unsubstituted parameters and stays silent: each
+    /// instance checks it, `InstAssert`).
     pub fn flush_asserts(self: &mut Self, err: fn(*mut void, ModuleId, NodeId, *const char) void, ctx: *mut void) {
         for i in 0..self.pending.len() {
             let pk = self.pending[i];
-            let m = (pk >> 32) as ModuleId;
+            let m = self.pending_module(i);
             let cond = (pk & 0xFFFFFFFFu64) as NodeId;
             let v = self.eval(m, cond);
             if v.kind == IV_BOOL && v.i == 0 {
@@ -10824,24 +10852,11 @@ extend Interp {
             } else if v.kind == IV_NONE && self.trap.len() != 0 {
                 let _ = self.trap_detail();
                 err(ctx, m, cond, self.dbuf.cstr());
-            } else if v.kind == IV_NONE && self.assert_is_item(m, cond) {
+            } else if v.kind == IV_NONE && pk >> 63 != 0 {
                 err(ctx, m, cond, "the condition does not fold to a constant".ptr() as *const char);
             }
         }
         self.pending.clear();
-    }
-
-    // Whether `cond` is the condition of a top-level static_assert of module `m`.
-    const fn assert_is_item(self: &Self, m: ModuleId, cond: NodeId) bool {
-        let a = unsafe &*self.p().module_ast_const(m);
-        let items = a.at_const(a.root).as_data.program.items;
-        for i in 0..items.len {
-            let n = a.at_const(unsafe a.list(items)[i as usize]);
-            if n.kind == NodeKind::NODE_STATIC_ASSERT && n.as_data.binary.left == cond {
-                return true;
-            }
-        }
-        return false;
     }
 
     /// Whether expression `id` of module `m` last evaluated to an aggregate (`eval` answers IV_NONE

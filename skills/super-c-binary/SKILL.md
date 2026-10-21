@@ -13,7 +13,7 @@ allowed-tools: Bash Read
 - Check `src/build_system/` before trusting manifest or profile behavior.
 - Report undocumented flags or environment variables as stale documentation.
 
-Super-C is a self-hosting compiler that transpiles `.spc` source to readable C99/C11,
+Super-C is a self-hosting compiler that transpiles `.spc` source to readable C11,
 then invokes a gcc-style C driver (cc/clang/gcc; mingw on Windows; MSVC's cl.exe is out
 of contract) to produce a native binary. A Windows x86-64 build whose assembler takes
 `-Wa,-muse-unaligned-vector-move` (GNU as 2.38+; the `unaligned-vector-move` probe) passes it
@@ -33,7 +33,8 @@ super-c build app.spc -o app # compile + link only, name the binary (default: a.
 A bare `.spc` argument compiles the file (and its transitive imports) and emits a `build/`
 tree of `.h`/`.c` files. It links and runs nothing.
 Use `super-c build <file.spc> -o <name>` to link a named binary, then run it yourself. Single-file programs
-emit plain C names; multi-module programs mangle symbols by module path.
+emit plain C names (a name that a prelude item also has gains `_`: `format` becomes `format_`);
+multi-module programs mangle symbols by module path.
 
 The binary finds `std/` in its own directory or in one of its two parent directories
 (`exe_std_dir` in `src/main.spc`: the real executable path, else argv[0]), or where a non-empty
@@ -832,14 +833,15 @@ the build's set included: a program can choose code at run time, never a result.
 |------|--------|
 | `--profile=NAME` | Select build profile (also the value of `PROFILE`). A bare `build <file.spc>` without it applies no profile flags while `PROFILE` still reads `debug`: pass `--profile=debug` for `-O0 -g` and frame pointers |
 | `--sanitizers` | Add AddressSanitizer and UndefinedBehaviorSanitizer to every C build of the command, after the profile's flags (`super-c test --sanitizers`: the compiler under test and the runner) |
-| `--jobs=N` | Worker count for parallel stages + cc (default: one per CPU) |
+| `-h`, `--help` | Print the usage on stdout and exit 0 |
+| `--jobs=N` | Worker count for parallel stages + cc, and the jobserver slots that nested `super-c` processes share (default: build.toml `jobs`, else one per CPU) |
 | `--out-dir=DIR` | Override output directory (a bare `build file.spc` emits under `DIR/<profile>/raw`) |
 | `--cc=CMD` | Override C compiler (manifest and bare builds alike) |
-| `--cstd=STD` | Replace the manifest's base C flags string, passed verbatim (e.g. `gnu11`) |
+| `--cstd=STD` | Replace the base C flags string (build.toml `cstd`; also for a bare `build file.spc`), passed verbatim (e.g. `-std=gnu11 -D_POSIX_C_SOURCE=200809L`) |
 | `-o NAME` | Output binary name (`build`/`release`/`bindgen` only, not script mode) |
-| `--bin=NAME` | Build/run only that `[bin.NAME]` target; with `-o PATH`, link it at PATH |
-| `--transpiler=CMD` | `build`/`release` from build.toml: run CMD as the transpile step (see External transpiler above) |
-| `--print-probes` | `build`/`release` from build.toml: print the toolchain probe table for the target and profile (see Toolchain probes above) |
+| `--bin=NAME` | Build/run only that `[bin.NAME]` target; with `-o PATH`, link it at PATH. An error without build.toml |
+| `--transpiler=CMD` | `build`/`release` from build.toml: run CMD as the transpile step (see External transpiler above). An error without build.toml |
+| `--print-probes` | `build`/`release` from build.toml: print the toolchain probe table for the target and profile (see Toolchain probes above). An error without build.toml |
 | `--target=T` | Cross-compile OS: `windows`/`macos`/`linux`/`ios`/`android`/`wasm` (the value of `PLATFORM`). `wasm` builds with `$WASI_SDK_PATH`'s clang and sysroot (else `$WASI_SYSROOT`), links an 8 MiB stack placed first, and strips at link time; `windows` links with `-Wl,--stack,8388608`, so every target's main thread has the 8 MiB stack of Linux and macOS (`push_sdk_libs`) |
 | `--arch=A` | Cross-compile arch: `x86_64`/`aarch64`/`wasm32` (the value of `ARCH`) |
 | `--target-feature=L` | CPU features, a comma list of `+name`/`-name` applied after build.toml's `target-features` (see CPU features above) |
@@ -850,7 +852,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `--no-lint` | Disable lint pass |
 | `--const-eval-steps=N` | Cap compile-time evaluation steps (~2M default) |
 | `--const-eval-memory=SIZE` | Cap compile-time evaluation memory (~96 MiB default) |
-| `--lib` | Build as library instead of binary. A static library is archived with `ar`, for another platform's objects with the cross compiler's archiver (`llvm-ar` beside a clang, as in the wasi-sdk and the NDK; `<triple>-ar` beside a `<triple>-gcc`; `archiver` in `src/build_system/build.spc`) |
+| `--lib` | Build as library instead of binary (an error without build.toml). A static library is archived with `ar`, for another platform's objects with the cross compiler's archiver (`llvm-ar` beside a clang, as in the wasi-sdk and the NDK; `<triple>-ar` beside a `<triple>-gcc`; `archiver` in `src/build_system/build.spc`) |
 
 ## Environment Variables
 
@@ -910,7 +912,7 @@ the build's set included: a program can choose code at run time, never a result.
 | Variable | Effect |
 |----------|--------|
 | `SC_LEAK_CHECK` | Leak and double-free tracker (also reports a `realloc` of a freed pointer; no other use-after-free check): any non-`0` value reports at exit; a value starting `f`/`F` (e.g. `fatal`) exits 23 on findings |
-| `SC_TASK_TRACE` | Coroutine/task tracing for the life of the process |
+| `SC_TASK_TRACE` | Coroutine/task tracing for the life of the process (empty or `0`: off) |
 | `SC_SCHED_SEED` | Scheduler seed, read only when the program set none itself (deterministic replay) |
 | `SC_LOCK_ORDER` | Lock-order inversion checking (`ffi/sc_runtime.spc`) in a build with `-DSC_LOCKDEP` (the `race` profile; the build constant `LOCKDEP`): non-`0` reports; `f`/`F` prefix aborts |
 | `SC_TEST_SUPERC` | Path of compiler under test (wasm lane) |
@@ -994,7 +996,8 @@ non-prelude source (`Package::analysis_jobs`,
 serial compile and gains a few milliseconds at most, so small compiles run serially and
 hand their jobserver slots back. The parallel C compile is unaffected.
 
-Includes are relative: `cc -funsigned-char -ffp-contract=off build/debug/raw/**/*.c $(cat build/debug/raw/__ldflags)`
-builds the whole tree with no `-I` flags (verified: the tree compiles and runs with bare `clang`;
+Includes are relative: `cc -funsigned-char -ffp-contract=off $(find build/debug/raw -name '*.c' ! -name '__sc_unity.c' ! -name '__sc_pack*.c') $(cat build/debug/raw/__ldflags)`
+builds the whole tree with no `-I` flags (`__sc_unity.c` and `__sc_pack<k>.c` include other units, so a
+build compiles them or their members, never both) (verified: the tree compiles and runs with bare `clang`;
 add `-DSC_ARITH_WRAP` for wrapping integer overflow, and the `LIBM_AS_WRITTEN` flags for the
 engine's libm results).

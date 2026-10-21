@@ -127,6 +127,7 @@ const fn vd_is(d: DefId, decl: NodeId, m: ModuleId) bool {
 
 // `Lowerer.err` when lowering met a TYPE_ERROR node or generic argument.
 const ERR_TYPE_SLUG: str<'static> = "error type";
+const ERR_UNSEEN: str<'static> = "a declaration another job may be writing";
 
 /// `Lowerer.err` for a call of an `@intrinsic` this compiler does not know, which only
 /// `--bootstrap-tags` accepts: the newer compiler that knows it checks the body.
@@ -225,6 +226,9 @@ pub struct Lowerer {
     u32_pool: Vector<Vector<u32>>,
     views: ViewDecls,
     lay: lay::Svc, // layout queries of the open body (cleared per body: type ids change at publications)
+    // The compile-time evaluation this lowering runs for (null: none): a foreign declaration's
+    // record is read only where it holds still for the reader (`checked_here`).
+    ev: *const iri::Interp,
     cur: ir::BlockId,
     run_start: u32, // statements index where the open block's run began
 }
@@ -623,6 +627,24 @@ extend Lowerer {
         }
     }
 
+    /// Lower for compile-time evaluation `ev`: a declaration record another job may be writing fails
+    /// the lowering, and the evaluation runs again once the owner is checked.
+    pub fn read_for(self: &mut Self, ev: *const iri::Interp) {
+        self.ev = ev;
+        self.lay.ev = ev;
+    }
+
+    // Whether the checked record of node `n` of module `m` may be read: always outside an
+    // evaluation; inside one only when it holds still for the reader (`Interp::settled_node`).
+    // Otherwise the lowering fails.
+    fn checked_here(self: &mut Self, m: ModuleId, n: NodeId) bool {
+        if self.ev == null || unsafe (&*self.ev).settled_node(m, n) {
+            return true;
+        }
+        self.fail_at(ERR_UNSEEN, NODE_NONE);
+        return false;
+    }
+
     // ---- block builder ----------------------------------------------------------------------------
 
     fn open_block(self: &mut Self) ir::BlockId {
@@ -805,8 +827,8 @@ extend Lowerer {
 
     // Does parameter `pi` of call target `target` take an argument of type `ty` by implicit
     // borrow: a reference or pointer parameter for an operand that is neither (see `Gen::arg_kinds`)?
-    fn borrowed_arg(self: &Self, target: DefId, pi: usize, ty: TypeId) bool {
-        if self.decl_kind(target) != NodeKind::NODE_FUNCTION {
+    fn borrowed_arg(self: &mut Self, target: DefId, pi: usize, ty: TypeId) bool {
+        if self.decl_kind(target) != NodeKind::NODE_FUNCTION || !self.checked_here(target.module, target.node) {
             return false;
         }
         let fa = unsafe &*(&*self.pkg).module_ast_const(target.module);
@@ -1158,7 +1180,10 @@ extend Lowerer {
         // An array constant read as a slice has the slice type on the use node; its place keeps the
         // declared array type, and the emitter wraps the array where a slice is wanted.
         let mut lty = ty;
-        if self.decl_kind(d) == NodeKind::NODE_CONST && ty != TYPE_NONE && self.f.ty(ty).kind != TypeKind::TYPE_ARRAY {
+        if self.decl_kind(d) == NodeKind::NODE_CONST && ty != TYPE_NONE && self.f.ty(ty).kind != TypeKind::TYPE_ARRAY && self.checked_here(
+            d.module,
+            d.node,
+        ) {
             let dt = unsafe (*(&*self.pkg).module_ast_const(d.module)).type_of(d.node);
             if dt != TYPE_NONE {
                 let rt = self.reintern_ty(d.module, dt);
@@ -2148,6 +2173,9 @@ extend Lowerer {
     // The TYPE of member declaration `fid` of module `dm` (a struct field, a tuple element or a
     // variant payload entry of `owner`) under the owner's instance args, in THIS pool.
     fn proj_member_ty(self: &mut Self, owner: TypeId, dm: ModuleId, fid: NodeId) TypeId {
+        if !self.checked_here(dm, fid) {
+            return TYPE_NONE;
+        }
         let da = unsafe &*(&*self.pkg).module_ast_const(dm);
         let ftl = da.type_of(da.member_type_node(fid, true));
         if ftl == TYPE_NONE {
@@ -4974,17 +5002,11 @@ extend Lowerer {
         if rop_in != ir::IR_NONE {
             let mut rop = rop_in;
             // A by-reference parameter (`other: &i32`) borrows the right operand, as `m.add(&n)` does:
-            // the operand's place, or a temporary holding a constant (`m + 5`).
-            let mut ro = *self.body.operands.at(rop as usize);
+            // the operand's place, or a temporary holding a constant (`m + 5`). A numeric operand of
+            // another type arrives converted (`operand_fits_param`).
+            let ro = *self.body.operands.at(rop as usize);
             let by_val = ro.ty == TYPE_NONE || self.f.ty(ro.ty).kind != TypeKind::TYPE_REFERENCE;
             if by_val && self.param_is_ref(DefId { module: m, node: decl }, 1) {
-                // A numeric operand the checker widened (`g + 2` or an `i32` against `&i64`) takes the
-                // parameter's element type first: the borrow must point at a value of that type.
-                let want = self.ref_param_elem(DefId { module: m, node: decl }, 1);
-                if want != ro.ty && self.is_num_builtin(want) && self.is_num_builtin(ro.ty) {
-                    rop = self.copy_op(self.rv_temp(ir::rv(ir::RV_CAST, rop, ir::CAST_NUMERIC, 0, want), sp));
-                    ro = *self.body.operands.at(rop as usize);
-                }
                 let pl = if ro.kind == ir::OP_CONST {
                     self.spill(rop, sp);
                 } else {
@@ -5042,26 +5064,6 @@ extend Lowerer {
             return false;
         }
         return unsafe (*fa).at_const(pn.as_data.parameter.ty).kind == NodeKind::NODE_REFERENCE_TYPE;
-    }
-
-    // The element type of `f`'s by-reference parameter `i` (`&E` -> E), or TYPE_NONE.
-    const fn ref_param_elem(self: &Self, f: DefId, i: u32) TypeId {
-        let fa = unsafe (&*self.pkg).module_ast_const(f.module);
-        let pn = unsafe (*fa).list(unsafe (*fa).at_const(f.node).as_data.function.params)[i as usize];
-        let t = unsafe (*fa).type_of(pn);
-        if t == TYPE_NONE || self.f.ty(t).kind != TypeKind::TYPE_REFERENCE {
-            return TYPE_NONE;
-        }
-        return self.f.ty(t).as_data.elem;
-    }
-
-    // True for a builtin integer or float type.
-    const fn is_num_builtin(self: &Self, t: TypeId) bool {
-        if t == TYPE_NONE || self.f.ty(t).kind != TypeKind::TYPE_BUILTIN {
-            return false;
-        }
-        let b = self.f.ty(t).as_data.builtin;
-        return bt_int_width(b, false) != 0 || b == BuiltinType::BT_F32 || b == BuiltinType::BT_F64;
     }
 
     // Copy the checker's bound generic arguments for `node` into targ_pool; returns the count
@@ -7154,6 +7156,9 @@ extend Lowerer {
     // Whether constant `d`, read at a use of type `ty`, is an integer constant of another integer
     // type: a builtin limit the checker retyped as a literal.
     fn retyped_int_const(self: &mut Self, d: DefId, ty: TypeId) bool {
+        if !self.checked_here(d.module, d.node) {
+            return false;
+        }
         let dt = unsafe (*(&*self.pkg).module_ast_const(d.module)).type_of(d.node);
         if dt == TYPE_NONE || ty == TYPE_NONE {
             return false;
@@ -7306,6 +7311,10 @@ extend Lowerer {
     }
 
     fn deref_ret_ty(self: &mut Self, m: DefId, recv: TypeId) TypeId {
+        // The method's return type and its extend's target are one item's records.
+        if !self.checked_here(m.module, m.node) {
+            return TYPE_NONE;
+        }
         let fa = unsafe &*(&*self.pkg).module_ast_const(m.module);
         let fr = fa.at_const(m.node).as_data.function.returns;
         if fr.len == 0 {

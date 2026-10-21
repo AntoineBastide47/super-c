@@ -1454,7 +1454,7 @@ fn typecheck_set(
             let mut deferred = Vector::<bool>::new();
             deferred.resize_default(n);
             for k in 0..cirv.pending.len() {
-                deferred.set((cirv.pending[k] >> 32) as usize, true);
+                deferred.set(cirv.pending_module(k) as usize, true);
             }
             for k in 0..cirv.pending_consts.len() {
                 deferred.set((cirv.pending_consts[k] >> 32) as usize, true);

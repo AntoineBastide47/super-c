@@ -30,6 +30,20 @@ fn redundant_coalescing_cast_lint_and_fix() {
     assert(!fixed.as_str().contains("as *mut i32"));
 }
 
+// A lint in a directory with no build.toml (none above it either) takes the command line's target
+// settings alone: it reads no manifest, so it reports none missing.
+@test
+fn lint_without_a_manifest() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    let r = cli::superc_in(p.dir(), "lint main.spc");
+    assert(r.ok(), "the lint passes");
+    assert(!r.out_has("build.toml"), "no manifest is read");
+}
+
 // The probe-backed lint covers EVERY implicit conversion, not an enumerated subset: reference
 // weakening, literal adaptation, and null-to-pointer all flag; a cast that picks an unannotated
 // binding's type never does.

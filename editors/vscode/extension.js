@@ -7,7 +7,7 @@ const { LanguageClient } = require("vscode-languageclient/node");
 let client;
 
 // Server discovery: an explicit `superc.serverPath` wins; otherwise prefer the workspace's
-// release-profile binary (sanitizer-free: about a quarter of the ASan dev build's memory), then
+// release-profile binary (optimized, faster than the debug build), then
 // the workspace-root binary, then `super-c` on PATH.
 function findServer(config, cwd) {
   const insp = config.inspect("serverPath");

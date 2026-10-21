@@ -12556,7 +12556,8 @@ pub fn run_package(
         // Self-contained: carries its own includes.
         sink_notify(sink, &mut co.pr, keep.at(1).as_str(), "", 1, (rt9 & 2) != 0);
     }
-    // `@c.source` wrapper TUs land in keep[]; `@link` flags feed build/__ldflags for the link line.
+    // `@c.source` wrapper TUs land in keep[]; `@link` flags feed `build/<profile>/raw/__ldflags` for the
+    // link line.
     let pre_ext = keep.len();
     let mut ext_new = Vector::<bool>::new();
     ext_c_collect(p, &mut keep, &mut ext_new, &mut err, target);
