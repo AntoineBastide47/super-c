@@ -47,6 +47,7 @@ On macOS, a `cp` over a running Mach-O gets the binary killed (SIGKILL) by code 
 `rm` the target before `cp`, or re-sign it (`codesign -f -s -`). The engine installs the
 manifest binary by rename, so `super-c build` is not affected. For a symbolized crash
 trace of the debug build, run it under `lldb -b -o run -k "bt 30" -k quit -- <cmd>` (`-b`: batch mode).
+A fixed-array value parameter shows as `__sc_ap<N>` there (`super-c-compiler-internals`).
 
 ### Build system (manifest-driven)
 
@@ -408,7 +409,7 @@ character of each profile, not the verbatim flags. `--sanitizers` adds the full 
 (`SANITIZER_CFLAGS`, `SANITIZER_LDFLAGS`) after the flags of every profile of the build, a script
 build without `--profile` included; targets without the runtimes (Windows, iOS, Android, wasm) drop
 them. **Never profile a `--sanitizers` build**: sanitizer frames dominate the samples. An ASan
-program's runtime (`super_rt.c`,
+program's runtime (`std/rt/base.spc`,
 `__asan_default_options`) turns ASan's use-after-return fake stack off: GCC 13.3 to 15 put an
 object aligned above 32 bytes 32 bytes off in its frames, and AVX-512 code faults there.
 `ASAN_OPTIONS=detect_stack_use_after_return=1` turns it back on.
@@ -420,7 +421,7 @@ emitted C is the same under every profile: it calls the arithmetic helpers of `s
 (`Profile::arith_wraps`: the `overflow-checks` key, else `opt-level` 2, 3, `"s"` or `"z"`;
 `push_profile_side` in `src/build_system/build.spc`). A build with no profile (`super-c build
 foo.spc`) checks. Every C compile of the generated tree, under every profile and target, also
-gets `-funsigned-char`: the language's `char` is unsigned, and `super_rt.c` fails to compile
+gets `-funsigned-char`: the language's `char` is unsigned, and `super_rt.h` fails to compile
 without the flag. It also gets `-ffp-contract=off`, so the C compiler never fuses a float
 multiply and add (only an explicit `fma` fuses) and run-time float results equal the constant
 evaluator's on every target, and `-Werror=incompatible-pointer-types`, so clang rejects the
@@ -929,6 +930,8 @@ the build's set included: a program can choose code at run time, never a result.
 | `SC_SCHED_SEED` | Scheduler seed, read only when the program set none itself (deterministic replay) |
 | `SC_LOCK_ORDER` | Lock-order inversion checking (`ffi/sc_runtime.spc`) in a build with `-DSC_LOCKDEP` (the `race` profile; the build constant `LOCKDEP`): non-`0` reports; `f`/`F` prefix aborts |
 | `SC_TEST_SUPERC` | Path of compiler under test (wasm lane) |
+| `SC_CTARGET_CLANG` | Clang of the pinned major release that `tests/ctarget_test.spc` compares bindgen's C environment tables with |
+| `SC_CTARGET_REQUIRE` | Non-empty: a missing oracle clang fails those tests instead of passing them without checking |
 
 ## Two-Stage Bootstrap
 
@@ -953,8 +956,9 @@ every profile.
 ```
 build/
   debug/raw/
-    super_rt.h        # shared runtime (includes, arithmetic helpers, allocation interposition)
-    super_rt.c        # leak/double-free tracker (inert unless SC_LEAK_CHECK set)
+    super_rt.h        # C backend header: libc includes, arithmetic helpers, runtime prototypes
+    std/
+      rt/base.c       # the runtime: traps, leak/double-free tracker, overflow report (std/rt/base.spc)
     __sc_fwd.h        # runtime and extern-block includes, dyn/extern declarations shared by every TU
     __sc_registry.c   # ZST sentinels and the reflection registry
     __sc_manifest     # output paths, content hashes, header dependencies, shard counts

@@ -580,7 +580,7 @@ pub const SI_BINARY: u32 = 1; // RV_BINARY, c = the operator token
 pub const SI_UNARY: u32 = 2; // RV_UNARY, b = the operator token
 pub const SI_CAST: u32 = 3; // RV_CAST, c = the cast kind
 pub const SI_SIMD: u32 = 4; // RV_SIMD, c = the code
-pub const SI_HINT: u32 = 5; // RV_INTRINSIC, c = IN_LIKELY or IN_UNLIKELY
+pub const SI_HINT: u32 = 5; // RV_INTRINSIC, c = IN_LIKELY, IN_UNLIKELY or IN_RETURN_ADDRESS
 
 /// The lowering of `@intrinsic("<name>")`: SI_* << 8 | c, or 0 for an unknown name.
 pub fn simd_intrinsic(name: str) u32 {
@@ -589,6 +589,9 @@ pub fn simd_intrinsic(name: str) u32 {
     }
     if name == "hint.likely" || name == "hint.unlikely" {
         return SI_HINT << 8 | pick(name == "hint.likely", IN_LIKELY, IN_UNLIKELY) as u32;
+    }
+    if name == "frame.return_address" {
+        return SI_HINT << 8 | IN_RETURN_ADDRESS as u32;
     }
     if !name.starts_with("simd.") {
         return 0;
@@ -815,6 +818,10 @@ pub const IN_LIKELY: u8 = 22;
 pub const IN_BOUNDS_GROUP_PROVEN: u8 = 23;
 /// IN_UNLIKELY(cond): IN_LIKELY's twin for a condition that is usually false (`unlikely`).
 pub const IN_UNLIKELY: u8 = 24;
+/// IN_RETURN_ADDRESS(): the code address the running function returns to (`*const void`), null where
+/// the target has no frame walk (wasm). No compile-time value. Only a `@noinline` function names its
+/// own caller with it (`std::rt::base`'s allocation sites).
+pub const IN_RETURN_ADDRESS: u8 = 25;
 
 /// True for the six safe-access check intrinsics.
 pub const fn is_check(c: u8) bool {

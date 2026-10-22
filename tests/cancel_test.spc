@@ -1547,18 +1547,23 @@ fn source_dropped_before_its_members_complete(fx: &mut Base) {
     rt::set_worker_count(2);
     let wg = sync::WaitGroup::new();
     wg.add(1);
+    // The member stays until the handles are gone: a fixed sleep let it finish before the poll saw it.
+    let gone = sync::WaitGroup::new();
+    gone.add(1);
     {
         let (src, tok) = task::CancelSource::new();
         let w = wg.clone();
+        let g = gone.clone();
         launch || {
             defer finish(&w);
             tok.bind_current();
-            time::sleep(short());
+            g.wait();
             after_mark();
         };
         assert(wait_members(&src, 1), "registered");
         // `src` and the moved `tok` are the only handles outside the task: both go here.
     }
+    gone.done();
     assert(wg.wait_timeout(time::Duration::from_secs(5)), "the member completes on its own");
     rt::shutdown();
     assert_eq(cancelled(fx), 0);

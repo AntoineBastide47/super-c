@@ -20,7 +20,7 @@ import ir::cpu_features as cf;
 import ir::recursion as recur;
 import utils::persist as *;
 import driver::util as dutil;
-import driver::rt_c as rtc;
+import emit::rt_h as rth;
 
 /// Number of nominal builtin types; sizes Package.builtin_decls. Pinned to BuiltinType::BT_COUNT.
 pub const BT_COUNT_N: usize = BuiltinType::BT_COUNT as usize;
@@ -177,6 +177,9 @@ pub struct Package {
     /// target platform it spells.
     pub build_module: i32,
     pub build_target: i32,
+    /// The runtime every program links (`std::rt::base`, loaded with the vector backend); -1 when the
+    /// package has no std directory.
+    pub rt_module: i32,
     /// The module the package was loaded from, whose top-level `main` is the program entry; -1 when
     /// the package has none (a batch lint, whose listed files `lint_set` marks as roots instead).
     pub root: i32,
@@ -613,9 +616,9 @@ pub struct PkgIndex {
     /// The `pl_names` that begin longer prelude C symbols: a type's, an interface's or a generic
     /// function's (`String__new`, `Vector__i32`, `replace__u64`). `Mangler::prelude_stem` reads them.
     pub pl_stems: Set<SymbolId>,
-    /// With one non-prelude module, whose symbols take no module prefix: each of its top-level non-extern
-    /// names that a top-level prelude declaration also has, so would spell the prelude's C symbol. The
-    /// mangler escapes them (`Mangler::ident`). Empty with more user modules.
+    /// With one program module besides the runtime, whose symbols take no module prefix: each of its
+    /// top-level non-extern names that a top-level prelude declaration also has, so would spell the
+    /// prelude's C symbol. The mangler escapes them (`Mangler::ident`). Empty with more user modules.
     pub shadow: Set<SymbolId>,
     /// Function-item signatures as package metadata (see ensure_sigs): sig_of keys
     /// skey_mix(module << 32 | fn node) (MIXED: u64 maps hash by identity and structured keys
@@ -1914,11 +1917,12 @@ const fn bc_name_byte(c: u8) bool {
     return c == b'_' || c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9';
 }
 
-/// Whether module `path` is part of the coroutine runtime: std::parallel and its platform substrate
-/// `sc_runtime`. Their loops never tick and their calls carry no cancellation edge of a task: they hold
-/// spinlocks, OS locks and signal handlers that a preemption or an unwind must not cross.
+/// Whether module `path` is part of the runtime: std::parallel, its platform substrate `sc_runtime`, and
+/// the runtime every program links (`std::rt`). Their loops never tick and their calls carry no
+/// cancellation edge of a task: they hold spinlocks, OS locks and signal handlers that a preemption or an
+/// unwind must not cross.
 pub const fn runtime_path(path: str) bool {
-    return path.starts_with("std::parallel") || path == "sc_runtime";
+    return path.starts_with("std::parallel") || path.starts_with("std::rt::") || path == "sc_runtime";
 }
 
 /// The final path component of `path` (a view into it): "dir/std/string.spc" -> "string.spc".
@@ -2297,8 +2301,8 @@ extend Package {
     }
 
     /// Whether the header of extern block `nid` of module `m` reaches only the C files that use its
-    /// items (`driver::emit::cemit_extern_includes`): a header `super_rt.h` does not include, of a
-    /// block with a function that needs no CPU feature. Its macros would rename the identifiers of
+    /// items (`driver::emit::cemit_extern_includes`): a header `super_rt.h` does not include, or any
+    /// header of the runtime module, of a block with a function that needs no CPU feature. Its macros would rename the identifiers of
     /// other files, so the inliner splices no use of its items into another module (`ir::inline`).
     pub fn extern_header_scoped(self: &Self, m: ModuleId, nid: NodeId) bool {
         let a = &self.modules[m as usize].ast;
@@ -2319,9 +2323,14 @@ extend Package {
         if fns && !plain {
             return false;
         }
+        // The runtime's bindings serve its own unit: their header checks (POSIX types and constants) stay
+        // out of the forward header, which C code built at another feature level includes.
+        if m as i32 == self.rt_module {
+            return true;
+        }
         let hs = a.at_const(eb.header).span;
         let src = self.modules[m as usize].source.as_str();
-        return !rtc::rt_has_header(src.slice((hs.start + 1) as usize, (hs.end - 1) as usize));
+        return !rth::rt_has_header(src.slice((hs.start + 1) as usize, (hs.end - 1) as usize));
     }
 
     /// Fill `xscoped` with the items of every extern block whose header is scoped
@@ -3397,6 +3406,7 @@ extend Package {
                 unsafe G_FEATURES;
             },
             build_module: -1,
+            rt_module: -1,
             root: -1,
             tt: Box::<TypePool>::new(TypePool::new()),
             ok: true,
@@ -6426,12 +6436,13 @@ extend Package {
         }
     }
 
-    // Fill `idx.shadow` (see PkgIndex) when the package holds exactly one non-prelude module.
+    // Fill `idx.shadow` (see PkgIndex) when the package holds exactly one program module besides the
+    // runtime.
     fn index_shadows(self: &Self, idx: &mut PkgIndex) {
         let n = self.modules.len();
         let mut user = n;
         for m in 0..n {
-            if !self.modules[m].prelude {
+            if !self.modules[m].prelude && m as i32 != self.rt_module {
                 if user != n {
                     return;
                 }
@@ -7085,6 +7096,11 @@ extend Package {
     fn load_backend(self: &mut Self, std_dir: str, target: i32, user_vectors: bool) {
         if std_dir.len() == 0 {
             return;
+        }
+        // The runtime the emitted code calls (traps, allocation tracking, the stack-overflow report).
+        let mut rf = join2(std_dir, "rt/base.spc");
+        if self.rt_module < 0 && unsafe shim::sc_mtime(rf.cstr()) != 0 {
+            self.rt_module = self.load_module("std::rt::base", rf.as_str(), self.bootstrap, target);
         }
         let backends: [str<'static>; 3] = ["x86_64", "aarch64", "wasm"];
         if self.arch >= 0 && self.arch < 3 && !cf::is_empty(self.features) && (user_vectors || self.names_vectors()) {

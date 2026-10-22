@@ -14,18 +14,18 @@ import string as cstring;
 import sc_runtime;
 import std::parallel::platform as platform;
 
-// Leak-tracker backtrace suppression (super_rt.c): a coroutine stack has no clean base frame, so the tracker
+// Leak-tracker backtrace suppression (std/rt/base.spc): a coroutine stack has no clean base frame, so the tracker
 // must not unwind it. Brackets each coroutine run slice; a no-op when leak checking is off.
 extern "C" {
     fn sc_lk_bt_pause() void;
     fn sc_lk_bt_resume() void;
-    // Preemption safepoint hook (super_rt.c): codegen emits a `__sc_spc` countdown at every loop backedge of a
+    // Preemption safepoint hook (std/rt/base.spc): codegen emits a `__sc_spc` countdown at every loop backedge of a
     // program that uses `launch`, and each 2048th backedge of a function calls this hook.
     fn __sc_set_preempt_hook(f: fn() void) void;
-    // Combined-safepoint cancellation hook (super_rt.c): the cold half of a compiled combined
+    // Combined-safepoint cancellation hook (std/rt/base.spc): the cold half of a compiled combined
     // safepoint calls it; 1 means an unmasked request was accepted and the ladder must run.
     fn __sc_set_cancel_hook(f: fn() i32) void;
-    // Task attribution (super_rt.c): a panic inside a coroutine names the task it happened in.
+    // Task attribution (std/rt/base.spc): a panic inside a coroutine names the task it happened in.
     fn __sc_set_task_id(id: u64) void;
 }
 

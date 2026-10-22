@@ -208,7 +208,9 @@ fn emit_live_row(p: &loader::Package, tm: &TypeMarks, m: usize, row: *mut u64) {
             }
         }
     }
-    let nt = unsafe (*a).ntypes();
+    // The runtime names no prelude item (`std/rt/base.spc`): the one prelude type it touches is `str`, of
+    // its literals, which lower to C strings. Its type marks would emit the prelude into every program.
+    let nt = pick(m as i32 == p.rt_module, 0, unsafe (*a).ntypes());
     for ti in 0..nt {
         tm.mark(p, m as ModuleId, unsafe (*a).used_type(ti), false, row);
     }
@@ -1736,6 +1738,8 @@ pub struct CemitOut {
     /// a definition header (`cemit_extern_includes`): the unit compiles alone (`pack_plan`).
     pub tu_x: Vector<bool>,
     pub inst_x: Vector<bool>,
+    /// The registry TU includes a scoped extern header: it compiles alone too (`pack_plan`).
+    pub reg_x: bool,
     pub inst_chunks: Vector<Vector<u32>>,
     pub inst_heads: Vector<Vector<String>>,
     /// The registry TU (ZST sentinels, reflection registry) and its sorted root symbols.
@@ -1780,6 +1784,7 @@ extend CemitOut {
             inst_incs: Vector::<String>::new(),
             tu_x: Vector::<bool>::new(),
             inst_x: Vector::<bool>::new(),
+            reg_x: false,
             inst_chunks: Vector::<Vector<u32>>::new(),
             inst_heads: Vector::<Vector<String>>::new(),
             registry_c: String::new(),
@@ -6939,7 +6944,8 @@ struct XHdr {
 
 // `extern "C" "<header>"` blocks across the package: each unique header (module-relative realpath
 // when it resolves, else the local/system spelling heuristic) into `hdrs`, and every fn the header
-// prototypes into `backed` (call-site protos would conflict with the real declarations). A scoped
+// prototypes, and every static it declares, into `backed` (call-site protos would conflict with the real
+// declarations). A scoped
 // header (`Package::extern_header_scoped`) reaches only the files that use one of its items
 // (`cemit_assemble`), which the emitter spells by alias (`mbe::x_alias`): its macros would rename any
 // other file's identifiers (`near` and `far` of <windows.h>). A header may need the headers of its
@@ -6981,7 +6987,17 @@ fn cemit_extern_includes(
                 continue;
             }
             let eb = a.at_const(nid).as_data.extern_block;
-            if eb.header == NODE_NONE || extern_block_gated(p, m as ModuleId, eb.items, true) {
+            if eb.header == NODE_NONE {
+                continue;
+            }
+            // The header declares its statics: `stat_demand` declares only a header-less block's.
+            for j in 0..eb.items.len {
+                let sid = unsafe a.list(eb.items)[j as usize];
+                if a.at_const(sid).kind == NodeKind::NODE_CONST && a.at_const(sid).as_data.const_def.is_extern {
+                    backed.insert(skey_mix(0, m as u64 << 32 | sid as u64));
+                }
+            }
+            if extern_block_gated(p, m as ModuleId, eb.items, true) {
                 continue;
             }
             let gated_block = extern_block_gated(p, m as ModuleId, eb.items, false);
@@ -8524,14 +8540,16 @@ fn cemit_assemble(
         o.tu_x.set(t, x_any(&xr, &tu_dv[t]));
         o.inst_x.set(t, x_any(&xr, &inst_dv[t]));
     }
-    // The registry TU includes every scoped extern header that has checks, so they run once also
-    // where no unit uses the header's items (a constant that folds to its value).
+    // The registry TU includes every scoped extern header that has checks and that no unit includes, so
+    // they run once also where no unit uses the header's items (a constant that folds to its value).
+    let used = unit_reach(ddeps.len(), &ddeps, &tu_dv, &inst_dv);
     let mut xall = String::new();
     for d in 0..nx {
-        if xhdrs[d as usize].checks.len() != 0 {
+        if xhdrs[d as usize].checks.len() != 0 && !used[d as usize] {
             def_inc(0, ds.stem[d as usize].as_str(), &mut xall);
         }
     }
+    o.reg_x = xall.len() != 0;
     o.defs_stem = replace(&mut ds.stem, Vector::<String>::new());
     for t in 0..n {
         o.tus.set(t, replace(acc.ch.bufs.index_mut(t), String::new()));
@@ -8677,8 +8695,13 @@ extend FwdDecls {
         let n = text.len();
         let mut i: usize = 0;
         while i < n {
-            if !c_ident_byte(text.byte_at(i)) {
-                i += 1;
+            let cls = c_class(text.byte_at(i));
+            if cls != C_IDENT {
+                i = if cls == C_OPEN {
+                    c_skip(text, i);
+                } else {
+                    i + 1;
+                };
                 continue;
             }
             let mut h: u64 = 0xcbf29ce484222325;
@@ -8724,13 +8747,18 @@ extend FwdDecls {
         let mut depth: u32 = 0;
         while i < n {
             let c = text.byte_at(i);
-            if !c_ident_byte(c) {
+            let cls = c_class(c);
+            if cls != C_IDENT {
                 if c == b'(' {
                     depth += 1;
                 } else if c == b')' && depth > 0 {
                     depth -= 1;
                 }
-                i += 1;
+                i = if cls == C_OPEN {
+                    c_skip(text, i);
+                } else {
+                    i + 1;
+                };
                 continue;
             }
             let mut h: u64 = 0xcbf29ce484222325;
@@ -9167,8 +9195,13 @@ extend XDecls {
         let n = text.len();
         let mut i: usize = 0;
         while i < n {
-            if !c_ident_byte(text.byte_at(i)) {
-                i += 1;
+            let cls = c_class(text.byte_at(i));
+            if cls != C_IDENT {
+                i = if cls == C_OPEN {
+                    c_skip(text, i);
+                } else {
+                    i + 1;
+                };
                 continue;
             }
             let mut h: u64 = 0xcbf29ce484222325;
@@ -9576,16 +9609,83 @@ const fn struct_def_name(body: str) str {
     return body.slice(7, e);
 }
 
+// The class of each byte for the C text scans: C_IDENT for a byte of a C identifier (or of a number,
+// which never names a declaration), C_OPEN for a quote or a slash, which can start a literal or a
+// comment (`c_skip`), 0 for any other. One load per byte instead of a chain of compares.
+const C_IDENT: u8 = 1;
+const C_OPEN: u8 = 2;
+const C_CLASS: [u8; 256] = c_classes();
+
+const fn c_classes() [u8; 256] {
+    let mut t = [0u8; 256];
+    for i in 0..256usize {
+        let c = i as u8;
+        // `i` stays below the 256 entries.
+        if c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9' || c == b'_' {
+            unsafe {
+                t[i] = C_IDENT;
+            }
+        } else if c == b'"' || c == b'\'' || c == b'/' {
+            unsafe {
+                t[i] = C_OPEN;
+            }
+        }
+    }
+    return t;
+}
+
+// The C_CLASS entry of `c`: a byte indexes the 256 entries in bounds.
+const fn c_class(c: u8) u8 {
+    return unsafe C_CLASS[c as usize];
+}
+
 // True for a byte of a C identifier (or of a number, which never names a declaration).
 const fn c_ident_byte(c: u8) bool {
-    return c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9' || c == b'_';
+    return c_class(c) == C_IDENT;
+}
+
+// The index past the byte at `i` of C text `text`, or past the string or character literal or the comment
+// that starts there: the declaration scans read the identifiers of code only (a word of a message is no use).
+const fn c_skip(text: str, i: usize) usize {
+    let n = text.len();
+    let c = text.byte_at(i);
+    if c == b'"' || c == b'\'' {
+        let mut j = i + 1;
+        while j < n && text.byte_at(j) != c {
+            j += pick(text.byte_at(j) == b'\\', 2, 1);
+        }
+        return pick(j < n, j + 1, n);
+    }
+    if c == b'/' && i + 1 < n && text.byte_at(i + 1) == b'*' {
+        let mut j = i + 2;
+        while j + 1 < n && !(text.byte_at(j) == b'*' && text.byte_at(j + 1) == b'/') {
+            j += 1;
+        }
+        return pick(j + 1 < n, j + 2, n);
+    }
+    if c == b'/' && i + 1 < n && text.byte_at(i + 1) == b'/' {
+        let mut j = i + 2;
+        while j < n && text.byte_at(j) != b'\n' {
+            j += 1;
+        }
+        return j;
+    }
+    return i + 1;
 }
 
 // Whether the declarator at `j` of `text` (right after a type name) declares an array of that type
-// (`x[2]`, `(*p)[2]`, `[2]`, `x[1][2]`): C rejects an array declarator over an incomplete type.
+// (`x[2]`, `(*p)[2]`, `[2]`, `x[1][2]`, also after a `const`): C rejects an array declarator over an
+// incomplete type.
 const fn arr_declarator(text: str, j0: usize) bool {
     let n = text.len();
     let mut j = j0;
+    // A `const` after the type name qualifies the element (`S const x[2]`, an array parameter).
+    while j + 6 <= n && text.slice(j, j + 5) == "const" && text.byte_at(j + 5) == b' ' {
+        j += 6;
+        while j < n && text.byte_at(j) == b' ' {
+            j += 1;
+        }
+    }
     if j < n && text.byte_at(j) == b'(' {
         let mut depth: u32 = 0;
         while j < n {
@@ -9827,7 +9927,7 @@ const PCH_UNITS: usize = 4;
 // of about SHARD_TARGET bytes: a header those units share is parsed once per pack. The count is a
 // shard count of all such bytes (`shard_policy`, from `prev`, the previous build's), and a unit's pack
 // is the hash of its file stem modulo the count: an edit, or a unit that crosses the limit, changes
-// its own pack only. A unit that includes a scoped extern header (`tu_x`, `inst_x`) compiles alone. Fewer than two
+// its own pack only. A unit that includes a scoped extern header (`tu_x`, `inst_x`, `reg_x`) compiles alone. Fewer than two
 // such units, or `alone` (SC_UNITY_MAX=0): every unit compiles alone.
 fn pack_plan(
     p: &loader::Package,
@@ -9849,9 +9949,9 @@ fn pack_plan(
     if !unity && alone {
         return 0;
     }
-    // The registry includes the scoped extern headers but is the last unit its pack includes: no member
-    // after it sees the headers' macros.
-    let small_reg = co.registry_c.len() != 0 && pack_small(unity, 1, co.registry_c.len() as u64);
+    // A registry that includes a scoped extern header compiles alone: the header's declarations would
+    // meet the names of the members before it (`typedef unsigned char byte` of <windows.h>).
+    let small_reg = co.registry_c.len() != 0 && !co.reg_x && pack_small(unity, 1, co.registry_c.len() as u64);
     let mut bytes: u64 = pick(small_reg, co.registry_c.len() as u64, 0);
     let mut units: usize = small_reg as usize;
     for k in 0..lm.len() {
@@ -9915,6 +10015,38 @@ fn x_reach(nx: u32, ddeps: &Vector<Vector<u32>>) Vector<bool> {
         }
     }
     panic("the definition headers include each other in a cycle");
+}
+
+// Per definition header: whether a unit (`tu_dv`, `inst_dv`: per module, the headers its TU and its
+// instance unit include) includes it, directly or through another.
+fn unit_reach(nd: usize, ddeps: &Vector<Vector<u32>>, tu_dv: &Vector<Vector<u32>>, inst_dv: &Vector<Vector<u32>>) Vector<
+    bool
+> {
+    let mut seen = Vector::<bool>::new();
+    seen.resize_default(nd);
+    let mut stack = Vector::<u32>::new();
+    for dv in [tu_dv, inst_dv] {
+        for t in 0..dv.len() {
+            for k in 0..dv[t].len() {
+                let d = dv[t][k];
+                if !seen[d as usize] {
+                    seen.set(d as usize, true);
+                    stack.push(d);
+                }
+            }
+        }
+    }
+    // Each header enters the stack once: at most `nd` pops.
+    while let Some(d) = stack.pop() {
+        for k in 0..ddeps[d as usize].len() {
+            let x = ddeps[d as usize][k];
+            if !seen[x as usize] {
+                seen.set(x as usize, true);
+                stack.push(x);
+            }
+        }
+    }
+    return seen;
 }
 
 // Whether one of definition headers `ds` reaches a scoped extern header (`x_reach`).
@@ -12552,11 +12684,8 @@ pub fn run_package(
     let root = gr9.as_str();
     let mut keep = Vector::<String>::new();
     keep.push(build_out_path(root, "super_rt", ".h"));
-    keep.push(build_out_path(root, "super_rt", ".c"));
     if !err {
-        sink_notify(sink, &mut co.pr, keep.at(0).as_str(), "", 0, (rt9 & 1) != 0);
-        // Self-contained: carries its own includes.
-        sink_notify(sink, &mut co.pr, keep.at(1).as_str(), "", 1, (rt9 & 2) != 0);
+        sink_notify(sink, &mut co.pr, keep.at(0).as_str(), "", 0, rt9 != 0);
     }
     // `@c.source` wrapper TUs land in keep[]; `@link` flags feed `build/<profile>/raw/__ldflags` for the
     // link line.

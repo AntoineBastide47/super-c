@@ -2054,8 +2054,8 @@ fn dyn_fn_box_roundtrip() {
     assert(lk.ok());
 }
 
-// The self-hosted leak tracker: super_rt.h interposes the emitted code's malloc/realloc/free call
-// sites over super_rt.c's registry, gated at runtime by SC_LEAK_CHECK. A survivor (here a String
+// The self-hosted leak tracker: the emitter spells the program's malloc/realloc/free calls as the entries
+// of std/rt/base.spc's registry, gated at runtime by SC_LEAK_CHECK. A survivor (here a String
 // buffer abandoned through `forget`) is reported at exit with its byte count; leak-free runs and
 // disabled runs print nothing.
 @test
@@ -2067,7 +2067,7 @@ fn leak_tracker() {
     );
     let r = p.compile("main.spc");
     assert(r.ok());
-    assert(p.gen_exists("super_rt.c"), "tracker runtime is written");
+    assert(p.gen_exists("std/rt/base.c") && !p.gen_exists("super_rt.c"), "the tracker is the runtime module");
     let cc = p.cc_build("");
     assert(cc.ok());
     let lk = p.run_bin_env("SC_LEAK_CHECK=1 ");
@@ -2765,6 +2765,7 @@ fn main() i32 { let p = Pair::<i32> { a: 3, b: 4 }; unsafe exit(p.pick(true) + p
 typedef struct { int n; } CT;
 PAIR_DECLARE(CT, CT, Pair__CT)
 PAIR_DEFINE(CT, CT, Pair__CT)
+_Noreturn void __sc_panic(const char *__m) { (void)__m; abort(); }
 int main(void) { Pair__CT p = { .a = { 5 }, .b = { 9 } };
   return Pair__CT__pick(&p, 1).n == 9 ? 0 : 1; }
 )",
@@ -2773,12 +2774,10 @@ int main(void) { Pair__CT p = { .a = { 5 }, .b = { 9 } };
     unsafe stdio::snprintf(
         &mut cc2.b[0],
         2048,
-        // super_rt.c comes too: the header's panic path references the runtime's thread-local task id, and
-        // a C consumer of an emitted module links that TU exactly as a Super-C one does. (clang drops the
-        // unused reference at -O0 and gcc keeps it, so leaving it out only ever worked by luck.)
-        "%s -std=c11 -Wall -Wextra -Werror -funsigned-char -ffp-contract=off -I\"%s/build/debug/raw\" \"%s/cuser.c\" \"%s/build/debug/raw/super_rt.c\" -o \"%s/cbin%s\"".ptr() as *const char,
+        // The consumer defines the runtime trap the header's checks call, which a Super-C program takes from
+        // std/rt/base.spc.
+        "%s -std=c11 -Wall -Wextra -Werror -funsigned-char -ffp-contract=off -I\"%s/build/debug/raw\" \"%s/cuser.c\" -o \"%s/cbin%s\"".ptr() as *const char,
         cli::cc_name(),
-        p.rootp(),
         p.rootp(),
         p.rootp(),
         p.rootp(),
@@ -7186,6 +7185,11 @@ fn external_c_sources() {
 @test
 fn extern_prototypes_see_complete_types() {
     let p = cli::proj_new();
+    // A header-declared C function that takes `int a[4]` and writes through it: a `[i32; 4]` argument is a
+    // value, so the call hands it a copy (also when the function is named as a value), and an array read
+    // through `&T`, a `const` object in C, passes.
+    p.mkfile("bump.h", "int arr_bump(int a[4]);\n");
+    p.mkfile("bump.c", "#include \"bump.h\"\nint arr_bump(int a[4]) { a[0] = 100; return a[0] + a[3]; }\n");
     p.mkfile(
         "side.c",
         M"(#include <stdint.h>
@@ -7221,6 +7225,16 @@ extern "C" {
     @blocking
     fn sc_bptr(p: *const [S; 2]) i32;
     fn sc_rows() *const [S; 2];
+}
+
+extern "C" "bump.h" {
+    fn arr_bump(a: [i32; 4]) i32;
+}
+
+pub struct Row { pub l: [i32; 4] }
+
+fn bump_row(r: &Row) i32 {
+    return unsafe arr_bump(r.l);
 }
 
 fn rows(k: i32) i32 {
@@ -7262,6 +7276,13 @@ fn main() i32 {
     if rows(v[0].a) != 10 {
         return 3;
     }
+    let row = Row { l: [1, 2, 3, 4] };
+    let mut m: [i32; 4] = [5, 6, 7, 8];
+    let bump: fn([i32; 4]) i32 = unsafe arr_bump;
+    if bump_row(&row) != 104 || unsafe arr_bump(m) != 108 || bump(m) != 108 || row.l[0] != 1 || m[0] != 5 {
+        return 4;
+    }
+    m[1] = 0;
     // The block wrappers ran on the pool: release it and the runtime.
     let _ = blocking::try_shutdown(5000000000);
     rt::shutdown();
@@ -7272,7 +7293,7 @@ fn main() i32 {
     let r = p.compile("main.spc");
     assert(r.ok());
     assert(!p.gen_has("__sc_fwd.h", "sc_arrx("), "an array-of-aggregate shim prototype leaves the forward header");
-    assert(p.gen_has("main.c", "int32_t sc_arrx("), "the unit that calls it declares it");
+    assert(p.gen_has("main.c", "int32_t __sc_blk_main__sc_arrx("), "the unit that calls it declares its wrapper");
     assert(
         p.gen_has("__sc_fwd.h", "__sc_blk_main__sc_bptr(const main__S__a2 *a0)"),
         "a block wrapper taking a pointer to an array of S stays",
@@ -8342,7 +8363,7 @@ fn imported_const_sized_array() {
     assert_eq(p.run_bin(), 0);
 }
 
-// `bindgen` reads a C header through the system preprocessor and writes the `extern "C"` module for it.
+// `bindgen` reads a C header through its own preprocessor and writes the `extern "C"` module for it.
 // Checked end to end, because the only claim worth making is that the generated bindings COMPILE and CALL
 // the library: a `.c` sibling of the header is picked up by the ordinary extern-C machinery, so the test
 // links against a real implementation and reads its answer back.
@@ -8875,6 +8896,24 @@ fn extern_static_mut_binds_a_writable_global() {
     );
 }
 
+// A `static mut` of a header-less extern block (a thread-local one too) has no header to declare it: the
+// units that use it declare it, as a header-less function gets its prototype.
+@test
+fn headerless_extern_static_mut_is_declared() {
+    let p = cli::proj_new();
+    p.mkfile("def.c", "int hl_counter = 41;\n_Thread_local int hl_tls = 1;\n");
+    p.mkfile(
+        "main.spc",
+        "@c.source(\"def.c\")\nextern \"C\" {\n    static mut hl_counter: i32;\n    @thread_local\n    static mut hl_tls: i32;\n}\nfn main() i32 {\n    unsafe hl_counter = unsafe hl_counter + 1;\n    unsafe hl_tls = unsafe hl_tls + 2;\n    return unsafe hl_counter + unsafe hl_tls - 45;\n}\n",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok(), "the program compiles");
+    assert(p.gen_has("main.c", "extern int32_t hl_counter;"), "the unit declares the static");
+    let cc = p.cc_build("");
+    assert(cc.ok(), "the emitted C compiles and links");
+    assert_eq(p.run_bin(), 0);
+}
+
 // Bindgen binds globals by what C itself declares: writable ones as `static mut`, const-qualified
 // ones as `const`, and --cflag reaches the preprocessor, so a feature-gated declaration appears
 // exactly when the flag says so. The generated module is then used end to end: the .c sibling of the
@@ -8968,6 +9007,81 @@ fn bindgen_escapes_keyword_names() {
     assert(p.compile("main.spc").ok(), "the program compiles");
     assert(p.cc_build("").ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 0);
+}
+
+// `bindgen` reads headers under the C environment of `--target`, with no C compiler: the same header binds
+// `long` as 8 bytes for Linux and 4 for Windows, and the built-in `<stddef.h>` serves `size_t`. A C flag
+// the environment does not model fails.
+@test
+fn bindgen_follows_the_target() {
+    let p = cli::proj_new();
+    // The build's C environment gates the last two: its POSIX level and unsigned char, and on Windows its
+    // API level, which no toolchain default decides.
+    p.mkfile(
+        "lib.h",
+        "#include <stddef.h>\n#include <sysonly.h>\nlong lw(long x);\nsize_t sz(size_t n);\n#if _POSIX_C_SOURCE == 200809L && defined(__CHAR_UNSIGNED__)\nint build_env(int);\n#endif\n#if _WIN32_WINNT == 0x0A00\nint win10(int);\n#endif\n",
+    );
+    p.mkfile("linux/usr/include/sysonly.h", "int from_linux(int);\n");
+    p.mkfile("mingw/include/_mingw.h", "");
+    p.mkfile("mingw/include/sysonly.h", "int from_mingw(int);\n");
+    let root = p.dir();
+    let mut args = String::new();
+    args.format_into(
+        "bindgen \"{}/lib.h\" --header=lib.h --target=linux --arch=x86_64 --sysroot=\"{}/linux\" -o \"{}/l.spc\"",
+        root,
+        root,
+        root,
+    );
+    assert(p.run_raw(args.as_str()).ok(), "bindgen for linux");
+    let l = loader::read_file(format("{}/l.spc", root).as_str()).unwrap();
+    assert(l.as_str().contains("pub fn lw(x: i64) i64;"), "linux long is 8 bytes");
+    assert(l.as_str().contains("pub fn sz(n: usize) usize;"), "size_t from the built-in stddef.h");
+    assert(l.as_str().contains("pub fn build_env(") && !l.as_str().contains("win10"), "the build's linux environment");
+    args.clear();
+    args.format_into(
+        "bindgen \"{}/lib.h\" --header=lib.h --target=windows --arch=x86_64 --sysroot=\"{}/mingw\" -o \"{}/w.spc\"",
+        root,
+        root,
+        root,
+    );
+    assert(p.run_raw(args.as_str()).ok(), "bindgen for windows");
+    let w = loader::read_file(format("{}/w.spc", root).as_str()).unwrap();
+    assert(w.as_str().contains("pub fn lw(x: i32) i32;"), "windows long is 4 bytes");
+    assert(w.as_str().contains("pub fn sz(n: usize) usize;"), "size_t from the built-in stddef.h");
+    assert(
+        w.as_str().contains("pub fn build_env(") && w.as_str().contains("pub fn win10("),
+        "the build's windows environment",
+    );
+    args.clear();
+    args.format_into(
+        "bindgen \"{}/lib.h\" --target=linux --arch=x86_64 --sysroot=\"{}/linux\" --cflag=-O2 -o \"{}/x.spc\"",
+        root,
+        root,
+        root,
+    );
+    let r = p.run_raw(args.as_str());
+    assert(r.exit != 0 && r.out_shows("the C flag '-O2' is not modelled"), "an unmodelled C flag fails");
+}
+
+// bindgen run in a project's subdirectory finds its build.toml and preprocesses under its `cstd`, as
+// the build compiles: a gate on a macro only that `cstd` defines opens, and the default POSIX level is
+// gone.
+@test
+fn bindgen_reads_the_project_cstd() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\ncstd = \"-std=c11 -DPROJ_LEVEL=2\"\n");
+    p.mkfile(
+        "inc/lib.h",
+        "#if PROJ_LEVEL == 2 && !defined(_POSIX_C_SOURCE)\nint proj(int x);\n#endif\nint base(int x);\n",
+    );
+    let r = cli::superc_in(format("{}/inc", p.dir()).as_str(), "bindgen lib.h --header=lib.h -o lib.spc");
+    assert(r.ok(), "bindgen in a project subdirectory");
+    let t = loader::read_file(format("{}/inc/lib.spc", p.dir()).as_str()).unwrap();
+    assert(t.as_str().contains("pub fn base(x: i32) i32;"), "the ungated declaration");
+    assert(t.as_str().contains("pub fn proj(x: i32) i32;"), "the project's cstd replaces the default");
 }
 
 // The machine-global object cache: content-addressed on (compiler version, flags, TU text, quoted
@@ -9195,11 +9309,11 @@ fn rewritten_header_restales_units() {
     cmd.push_str(objd.as_str());
     cmd.push_str("\" -exec touch -t 203001010000 {} +");
     assert_eq(cli::run_quiet(cmd.cstr()), 0);
-    // The same program plus an extern header block: the forward header every unit includes lists
-    // its header.
+    // The same program plus an extern header block of a header no unit named before (the runtime's
+    // blocks name stdlib.h): the forward header every unit includes lists it.
     p.mkfile(
         "src/main.spc",
-        "extern \"C\" \"stdlib.h\" {\n    fn abs(x: i32) i32;\n}\n\nstruct Ver0 {\n    pub n: i32,\n}\n\nfn main() i32 {\n    let v = Ver0 { n: unsafe abs(0) };\n    println(\"{}\", v.n);\n    return 0;\n}\n",
+        "extern \"C\" \"ctype.h\" {\n    fn toupper(c: i32) i32;\n}\n\nstruct Ver0 {\n    pub n: i32,\n}\n\nfn main() i32 {\n    let v = Ver0 { n: unsafe toupper(0) };\n    println(\"{}\", v.n);\n    return 0;\n}\n",
     );
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "the second version builds");
     // A std unit: its source is unchanged, only the forward header it includes changed.
@@ -10684,7 +10798,12 @@ fn build_compile_commands_json() {
             let s = db.as_str();
             assert(s.len() > 2 && s[0] == b'[', "the database is a JSON array");
             assert(s.find("\"arguments\": [") >= 0, "every entry carries an arguments argv");
-            assert(s.find("main.c") >= 0, "the root translation unit is listed");
+            // The root module's unit compiles alone, or in the unity unit with the runtime's instance unit
+            // (Windows, where that unit includes no scoped header).
+            assert(
+                s.find("main.c") >= 0 || s.find("__sc_unity.c") >= 0,
+                "the unit that compiles the root module is listed",
+            );
             assert(s.find("\"directory\": ") >= 0, "entries carry the working directory");
         },
         None => {

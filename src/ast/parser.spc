@@ -5087,7 +5087,7 @@ const ATTR_NAMES: [str<'static>; 24] = [
     "when",
 ];
 
-// The C-facing attributes (`@inline`, or the older `@inline`) and their kinds. The first eight take no argument,
+// The C-facing attributes (`@inline`, or the older `@c.inline`) and their kinds. The first eight take no argument,
 // `align` takes an integer or a constant expression, `export` to `link` take a string, `value`,
 // `reads` and `writes` take constant expressions (`attr_expr_args`), and `lane_access` none.
 const C_ATTR_NAMES: [str<'static>; 17] = [

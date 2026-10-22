@@ -846,8 +846,7 @@ fn rewrite(b: &mut ir::CoreBody, ow: &bfx::Owner, tn: &Taint, sites: &Vector<u32
                 b.operands.push(ir::Operand { kind: ir::OP_MOVE, data: b.places.len() as u32 - 1, ty: rv.target });
                 rv = ir::rv(ir::RV_USE, b.operands.len() as u32 - 1, 0, 0, rv.target);
             }
-            // The parameter is written now: a fixed-array parameter gets its own copy, and a
-            // `&mut` one is not `restrict` (`CEmit`).
+            // The parameter is written now: a `&mut` one is not `restrict` (`CEmit`).
             b.locals.index_mut(pl as usize).is_mutable = true;
             extra.push(store(b, pl, rv, t.span));
         }

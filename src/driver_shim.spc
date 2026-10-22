@@ -840,6 +840,31 @@ pub unsafe fn sc_same_file(a: *const char, b: *const char) i32 {
     return same as i32;
 }
 
+/// The identity of the regular file `path`: true with (device, index) written to `key[0]` and `key[1]`; false for
+/// a directory or when `path` cannot be stat'd. Two paths of one physical file give one key.
+@platform(!windows)
+pub unsafe fn sc_file_key(path: *const char, key: *mut u64) bool {
+    let mut st = unsafe zeroed::<stat>();
+    if unsafe stat(path, &mut st) != 0 || is_dir_mode(st.st_mode) {
+        return false;
+    }
+    unsafe key[0] = (st.st_dev as i64) as u64;
+    unsafe key[1] = st.st_ino;
+    return true;
+}
+/// The identity of the regular file `path`: true with (device, index) written to `key[0]` and `key[1]`; false for
+/// a directory or when `path` cannot be stat'd. Two paths of one physical file give one key.
+@platform(windows)
+pub unsafe fn sc_file_key(path: *const char, key: *mut u64) bool {
+    let mut info = unsafe zeroed::<BY_HANDLE_FILE_INFORMATION>();
+    if !unsafe file_info(path, &mut info) || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 {
+        return false;
+    }
+    unsafe key[0] = info.dwVolumeSerialNumber;
+    unsafe key[1] = info.nFileIndexHigh as u64 << 32 | info.nFileIndexLow;
+    return true;
+}
+
 // The Win32 identity and link count of the file `path`, through a handle that also opens a directory.
 @platform(windows)
 unsafe fn file_info(path: *const char, out: &mut BY_HANDLE_FILE_INFORMATION) bool {

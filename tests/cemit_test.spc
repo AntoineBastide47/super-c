@@ -116,19 +116,22 @@ fn compile_run(em: &cb::CEmit, main_body: str) i32 {
     let p = cli::proj_new();
     let root = p.dir();
     let mut src = String::from_str(em.out.as_str());
+    // The runtime traps the inline helpers of super_rt.h call (std/rt/base.spc in a program).
+    src.push_str(
+        "_Noreturn void __sc_panic(const char *__m) { fputs(__m, stderr); abort(); }\n_Noreturn void __sc_panic_str(const uint8_t *__p, size_t __n) { fwrite(__p, 1, __n, stderr); abort(); }\n",
+    );
     src.push_str(main_body);
     p.mkfile("probe.c", src.as_str());
-    // The runtime the emitted code calls (arithmetic helpers, panics).
+    // The runtime header the emitted code includes (arithmetic helpers, the traps' prototypes).
     let rt = format("{}/rt", root);
-    assert(dutil::write_super_rt(rt.as_str()) >= 0, "runtime written");
+    assert(dutil::write_super_rt(rt.as_str()) >= 0, "runtime header written");
     // -pedantic-errors: the emitted output is portable C11, no GNU extensions (ZST storage is
     // elided, so even zero-sized types spell portably).
     let mut cmd = format(
-        "cc -std=c11 -pedantic-errors -Wall -Werror -funsigned-char -ffp-contract=off -I{} -o {}/probe {}/probe.c {}/super_rt.c",
+        "cc -std=c11 -pedantic-errors -Wall -Werror -funsigned-char -ffp-contract=off -I{} -o {}/probe {}/probe.c",
         rt.as_str(),
         root,
         root,
-        rt.as_str(),
     );
     assert(cli::run_quiet(cmd.cstr()) == 0, "strict C11 compile");
     let mut bin = format("{}/probe", root);

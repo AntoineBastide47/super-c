@@ -11,7 +11,7 @@ import driver_shim as shim;
 import std::parallel::platform as platform;
 import lsp::json as ljson;
 
-// Allocation statistics of the generated runtime (super_rt.c, see driver::rt_c).
+// Allocation statistics of the runtime's leak tracker (std/rt/base.spc), bound by C symbol.
 extern "C" {
     fn sc_lk_stats_enable() i32;
     fn sc_lk_epoch_set(e: u32) void;

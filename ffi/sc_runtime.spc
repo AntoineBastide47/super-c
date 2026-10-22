@@ -49,7 +49,7 @@ extern "C" "stdlib.h" {
     fn c_getenv(name: *const char) *const char;
 }
 
-// Entry points of the program's generated runtime (super_rt.c), declared by super_rt.h: the stack
+// Entry points of the program's runtime (std/rt/base.spc), bound by C symbol: the stack
 // overflow report arms a thread (its stack bounds when known; the signal stack to release at its end, or
 // null), releases that signal stack, records the task stack size the message quotes, and on Windows
 // reports an exhausted coroutine stack.
@@ -71,7 +71,7 @@ extern "C" {
     pub fn sc_rt_asan() i32;
 }
 
-// ThreadSanitizer's fiber API, declared by super_rt.h. It exists only in a `-fsanitize=thread` build: every
+// ThreadSanitizer's fiber API. It exists only in a `-fsanitize=thread` build: every
 // call sits in an `if THREAD_SANITIZER` branch, which no other build emits.
 extern "C" {
     @import("__tsan_get_current_fiber")
@@ -1065,7 +1065,7 @@ pub unsafe fn sc_rt_stack_note_size(bytes: usize) {
 }
 
 // ---- POSIX stack-overflow reporting ---------------------------------------------------------------
-// The handler is the program's own (super_rt.c, armed for the main thread before main); each thread the
+// The handler is the program's own (std/rt/base.spc, armed for the main thread before main); each thread the
 // runtime starts arms itself here. Each thread's signal stack is released when the thread exits, through
 // a thread-specific key: a pool that restarts starts new threads, and each would otherwise keep a mapping.
 @platform(macos | ios | linux | android)

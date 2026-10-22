@@ -901,23 +901,214 @@ fn closure_captures_every_binding_kind() {
     );
 }
 
-// A `[T; N]` parameter is a VALUE, but C hands the callee a pointer to the caller's array. A `mut` one
-// must therefore be copied into a local on entry, or writes in the callee reach the caller.
-@test
-fn mut_array_param_is_a_copy() {
-    h::expect_exit(
+// A `[T; N]` parameter is a VALUE: C hands the callee a pointer to the caller's array, so the C parameter is
+// `const` (an array read through `&T` is a `const` object in C) and the callee copies the array on entry,
+// whether or not it is `mut`: a write by the callee must not reach the caller, and a write to the caller's
+// array during the call must not reach the callee. Cases call a function that is not inlined, so the
+// parameter's C type is what the call must match.
+fn array_param_cases(b: &mut h::ExitBatch) {
+    b.add(
         "writing a mut array parameter leaves the caller's array alone",
         "fn f(mut a: [i32; 2]) i32 { a[0] = 9; return a[0]; }\nfn main() i32 {\n    let v: [i32; 2] = [3, 0];\n    let r = f(v);\n    return r - 9 + v[0] - 3;\n}\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "the copy is per call, not shared",
         "fn bump(mut a: [i32; 1]) i32 { a[0] = a[0] + 1; return a[0]; }\nfn main() i32 {\n    let v: [i32; 1] = [5];\n    return bump(v) + bump(v) - 12;\n}\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "a non-mut array parameter still reads the caller's elements",
         "fn sum(a: [i32; 3]) i32 { return a[0] + a[1] + a[2]; }\nfn main() i32 {\n    let v: [i32; 3] = [1, 2, 3];\n    return sum(v) - 6;\n}\n",
+        0,
+    );
+    b.add(
+        "a closure's mut array parameter leaves the caller's array alone",
+        M"(fn main() i32 {
+    let v: [i32; 2] = [3, 0];
+    let c = fn(mut a: [i32; 2]) i32 { a[0] = 9; return a[0]; };
+    return c(v) - 9 + v[0] - 3;
+}
+)",
+        0,
+    );
+    b.add(
+        "a parameter named like the entry copy of an array parameter builds",
+        M"(@noinline
+fn f(ids: [u8; 4], ids_p: u8, __sc_ap0: u8) u8 { return ids[1] + ids_p + __sc_ap0; }
+fn main() i32 { return f([1, 2, 3, 4], 3, 4) as i32 - 9; }
+)",
+        0,
+    );
+    b.add(
+        "a @blocking extern takes an array parameter",
+        M"(extern "C" {
+    @blocking
+    fn sc_blk_sum(a: [u8; 4], n: usize) u8;
+}
+@export("sc_blk_sum")
+fn impl_sum(a: [u8; 4], n: usize) u8 { return a[0] + a[3] + n as u8; }
+struct Row { pub l: [u8; 4] }
+fn g(r: &Row) u8 { return unsafe sc_blk_sum(r.l, 1); }
+fn main() i32 {
+    let r = Row { l: [1, 2, 3, 4] };
+    return g(&r) as i32 - 6;
+}
+)",
+        0,
+    );
+    b.add(
+        "a function with &mut and []mut parameters beside an array parameter reads the array as passed",
+        M"(struct Row { pub l: [u8; 4] }
+@noinline
+fn f(ids: [u8; 4], r: &mut Row, v: []mut u8) u8 {
+    r.l[0] = 9;
+    v[0] = 7;
+    return ids[0];
+}
+fn main() i32 {
+    let mut r = Row { l: [1, 2, 3, 4] };
+    let mut x: [u8; 1] = [0];
+    return f(r.l, &mut r, x) as i32 - 1 + r.l[0] as i32 - 9 + x[0] as i32 - 7;
+}
+)",
+        0,
+    );
+    b.add(
+        "nested array arguments reach a function, a function value, an extern value and a blocking extern",
+        M"(extern "C" {
+    @blocking
+    fn sc_nb(m: [[u8; 2]; 2], n: usize) u8;
+    fn sc_nx(m: [[u8; 2]; 2]) u8;
+}
+@export("sc_nb")
+fn impl_nb(m: [[u8; 2]; 2], n: usize) u8 { return m[1][1] + n as u8; }
+@export("sc_nx")
+fn impl_nx(m: [[u8; 2]; 2]) u8 { return m[1][0]; }
+struct Row { pub m: [[u8; 2]; 2] }
+@noinline
+fn f(m: [[u8; 2]; 2]) u8 { return m[0][1]; }
+fn g(r: &Row) u8 {
+    let p: fn([[u8; 2]; 2]) u8 = f;
+    let q: fn([[u8; 2]; 2]) u8 = unsafe sc_nx;
+    return f(r.m) + p(r.m) + unsafe sc_nb(r.m, 1) + unsafe sc_nx(r.m) + q(r.m);
+}
+fn main() i32 {
+    let mut a: [[u8; 2]; 2] = [[1, 2], [3, 4]];
+    a[0][0] = 1;
+    let r = Row { m: a };
+    return g(&r) as i32 - (2 + 2 + 5 + 3 + 3) + f(a) as i32 - 2;
+}
+)",
+        0,
+    );
+    b.add(
+        "a function with a []mut and an array parameter is a function value and an export",
+        M"(struct Row { pub l: [u8; 4] }
+@export("sc_arrview")
+@noinline
+fn f(ids: [u8; 4], v: []mut i32) u8 {
+    v[0] = 5;
+    return ids[2];
+}
+fn main() i32 {
+    let r = Row { l: [1, 2, 3, 4] };
+    let p: fn([u8; 4], []mut i32) u8 = f;
+    let mut x: [i32; 1] = [0];
+    return p(r.l, x) as i32 - 3 + x[0] - 5;
+}
+)",
+        0,
+    );
+    b.add(
+        "an array field read through a shared reference passes to a non-inlined callee",
+        M"(struct Row { pub l: [u8; 4] }
+@noinline
+fn f(ids: [u8; 4], n: usize) u8 {
+    let mut s: u8 = 0;
+    for i in 0..n { s = s + unsafe ids[i]; }
+    return s;
+}
+fn g(row: &Row) u8 { return f(row.l, 3); }
+fn main() i32 {
+    let r = Row { l: [1, 2, 3, 4] };
+    return g(&r) as i32 - 6;
+}
+)",
+        0,
+    );
+    b.add(
+        "a write through &mut self does not reach an array argument read from self",
+        M"(struct Row { pub l: [u8; 4] }
+extend Row {
+    @noinline
+    fn put(self: &mut Row, ids: [u8; 4]) u8 {
+        self.l[0] = 9;
+        return ids[0];
+    }
+}
+fn main() i32 {
+    let mut r = Row { l: [1, 2, 3, 4] };
+    return r.put(r.l) as i32 - 1 + r.l[0] as i32 - 9;
+}
+)",
+        0,
+    );
+    b.add(
+        "a write to a static does not reach an array argument read from it",
+        M"(static mut G: [u8; 4] = [1, 2, 3, 4];
+@noinline
+fn f(ids: [u8; 4]) u8 {
+    unsafe G[0] = 9;
+    return ids[0];
+}
+fn main() i32 {
+    return unsafe f(G) as i32 - 1 + unsafe G[0] as i32 - 9;
+}
+)",
+        0,
+    );
+    b.add(
+        "a function value and a closure take a const array argument",
+        M"(struct Row { pub l: [u8; 4] }
+@noinline
+fn f(ids: [u8; 4]) u8 { return ids[1]; }
+fn viaptr(row: &Row) u8 {
+    let p: fn([u8; 4]) u8 = f;
+    let c = |a: [u8; 4]| a[2];
+    return p(row.l) + c(row.l);
+}
+fn main() i32 {
+    let r = Row { l: [1, 2, 3, 4] };
+    return viaptr(&r) as i32 - 5;
+}
+)",
+        0,
+    );
+    b.add(
+        "a dyn fn takes a const array argument",
+        M"(struct Row { pub l: [u8; 4] }
+fn viadyn(row: &Row, d: &dyn fn([u8; 4]) u8) u8 { return d(row.l); }
+fn main() i32 {
+    let r = Row { l: [1, 2, 3, 4] };
+    let d = |a: [u8; 4]| a[3];
+    return viadyn(&r, &d) as i32 - 4;
+}
+)",
+        0,
+    );
+    b.add(
+        "nested arrays and arrays of pointers read through a shared reference pass to a non-inlined callee",
+        M"(struct Row { pub m: [[u8; 2]; 2], pub p: [*const u8; 2] }
+@noinline
+fn f(m: [[u8; 2]; 2], p: [*const u8; 2]) u8 { return m[1][1] + unsafe *p[1]; }
+fn g(row: &Row) u8 { return f(row.m, row.p); }
+fn main() i32 {
+    let x: u8 = 5;
+    let r = Row { m: [[1, 2], [3, 4]], p: [&x as *const u8, &x as *const u8] };
+    return g(&r) as i32 - 9;
+}
+)",
         0,
     );
 }
@@ -3180,8 +3371,11 @@ fn main(args: Vector<str>) i32 {
 )";
     let c = h::compile_c(src);
     assert(c.ok(), "the program compiles");
-    assert(c.code_has("__sc_assert_fail(\"assertion failed: `a >= 0.0`: %.*s\\n  at "), "the message form");
-    assert(c.code_has("__sc_assert_fail(\"assertion failed: `a <= 1.0`\\n  at "), "the plain form");
+    assert(
+        c.code_has("__sc_assert_fail(\"assertion failed: `a >= 0.0`: \", __scm.ptr, __scm.len, \"\\n  at "),
+        "the message form",
+    );
+    assert(c.code_has("__sc_assert_fail(\"assertion failed: `a <= 1.0`\", 0, 0, \"\\n  at "), "the plain form");
     assert(!c.code_has("fprintf(stderr, \"assertion failed"), "no printing code in the caller");
     let b = h::diff_build(src, []);
     assert(b.built, b.diag.as_str());
@@ -4995,6 +5189,174 @@ fn exit_cases_07() {
     b.run();
 }
 
+// An `&dyn I`, `&mut dyn I` or `Box<dyn I>` element of an aggregate literal erases against the type
+// the context writes, as a `let`, argument or field does: array and repeat literals, nested arrays, a
+// slice parameter, tuples and arrays of tuples. Tuple arguments take their elements' types from the
+// parameter. A borrowed `&dyn I` is never freed, wherever it sits; a boxed array frees its elements.
+fn dyn_erasure_in_aggregate_literals(b: &mut h::ExitBatch) {
+    const PRE: str = M"(interface Sh { fn area(self: &Self) i32; }
+struct Row { pub w: i32 }
+extend Row as Sh { fn area(self: &Self) i32 { return self.w; } }
+fn sum2(a: [&dyn Sh; 2]) i32 { return a[0].area() + a[1].area(); }
+fn take(s: []&dyn Sh) i32 { return s[0].area() + s[1].area(); }
+struct H<'a> { pub a: [&'a dyn Sh; 2] }
+struct M { pub k: i32 }
+extend M { fn take(self: &M, t: (&dyn Sh, i32)) i32 { return t.0.area() + t.1 + self.k; } }
+struct S<'a> { pub t: (&'a dyn Sh, i32), pub n: ((&'a dyn Sh, i32), i64) }
+fn g<T>(t: T) T { return t; }
+fn tk(t: (&dyn Sh, i32)) i32 { return t.0.area() + t.1; }
+fn nest(t: ((&dyn Sh, i32), i64)) i64 { return (t.0).0.area() as i64 + t.1; }
+fn ap(t: (fn(i32) i32, i32)) i32 { return (t.0)(t.1); }
+fn f(t: (i64, u8)) i64 { return t.0 + t.1 as i64; }
+)";
+    let bodies: [](str, str) = [
+        (
+            "array literal",
+            "let r = Row { w: 1 }; let r2 = Row { w: 2 }; let ds: [&dyn Sh; 2] = [&r, &r2]; return ds[0].area() + ds[1].area() - 3;"
+        ),
+        ("repeat literal", "let r = Row { w: 1 }; let ds: [&dyn Sh; 3] = [&r; 3]; return ds[2].area() - 1;"),
+        (
+            "nested array literals",
+            "let r = Row { w: 1 }; let r2 = Row { w: 2 }; let ds: [[&dyn Sh; 2]; 2] = [[&r, &r2], [&r2, &r]]; return ds[0][1].area() + ds[1][1].area() - 3;"
+        ),
+        (
+            "slice of dyn",
+            "let r = Row { w: 1 }; let r2 = Row { w: 2 }; let ds: []&dyn Sh = [&r, &r2]; return take(ds) - 3;"
+        ),
+        ("array argument", "let r = Row { w: 1 }; let r2 = Row { w: 2 }; return sum2([&r, &r2]) - 3;"),
+        ("slice argument", "let r = Row { w: 1 }; let r2 = Row { w: 2 }; return take([&r, &r2]) - 3;"),
+        (
+            "mutable dyn elements",
+            "let mut m = Row { w: 3 }; let ds: [&mut dyn Sh; 1] = [&mut m]; return ds[0].area() - 3;"
+        ),
+        (
+            "boxed dyn elements",
+            "let ds: [Box<dyn Sh>; 2] = [Box::new(Row { w: 1 }), Box::new(Row { w: 2 })]; return ds[0].area() + ds[1].area() - 3;"
+        ),
+        ("tuple literal", "let r = Row { w: 1 }; let t: (&dyn Sh, i32) = (&r, 5); return t.0.area() + t.1 - 6;"),
+        (
+            "array inside a tuple",
+            "let r = Row { w: 1 }; let r2 = Row { w: 2 }; let t: ([&dyn Sh; 2], i32) = ([&r, &r2], 1); return t.0[0].area() + t.0[1].area() - 3;"
+        ),
+        (
+            "array of tuples",
+            "let r = Row { w: 1 }; let r2 = Row { w: 2 }; let ds: [(&dyn Sh, i32); 2] = [(&r, 1), (&r2, 2)]; return ds[0].0.area() + ds[1].0.area() - 3;"
+        ),
+        (
+            "vector of borrowed dyn",
+            "let r = Row { w: 1 }; let mut v: Vector<&dyn Sh> = Vector::new(); v.push(&r); return v.at(0).area() - 1;"
+        ),
+        (
+            "borrowed dyn in an array element of a vector",
+            "let r = Row { w: 1 }; let r2 = Row { w: 2 }; let mut v: Vector<[&dyn Sh; 2]> = Vector::new(); v.push([&r, &r2]); return v.at(0)[1].area() - 2;"
+        ),
+        (
+            "borrowed dyn in a tuple element of a vector",
+            "let r = Row { w: 1 }; let mut v: Vector<(&dyn Sh, i32)> = Vector::new(); v.push((&r, 2)); return v.at(0).0.area() + v.at(0).1 - 3;"
+        ),
+        (
+            "borrowed dyn in a boxed tuple",
+            "let r = Row { w: 1 }; let t: (&dyn Sh, i32) = (&r, 2); let b: Box<(&dyn Sh, i32)> = Box::new(t); return (*b).0.area() + (*b).1 - 3;"
+        ),
+        (
+            "borrowed dyn in a struct held by a vector",
+            "let r = Row { w: 1 }; let r2 = Row { w: 2 }; let mut v: Vector<H> = Vector::new(); v.push(H { a: [&r, &r2] }); return v.at(0).a[1].area() - 2;"
+        ),
+        (
+            "borrowed dyn in a struct held by a box",
+            "let r = Row { w: 1 }; let r2 = Row { w: 2 }; let b: Box<H> = Box::new(H { a: [&r, &r2] }); return b.a[0].area() - 1;"
+        ),
+        (
+            "boxed closure capturing a borrowed dyn",
+            "let r = Row { w: 1 }; let d: &dyn Sh = &r; let f: Box<dyn fn() i32> = Box::new(move || d.area()); return f() - 1;"
+        ),
+        (
+            "boxed borrowed dyn",
+            "let r = Row { w: 1 }; let d: &dyn Sh = &r; let b: Box<&dyn Sh> = Box::new(d); let e: &dyn Sh = *b; return e.area() - 1;"
+        ),
+        (
+            "owned dyn in a box and a vector",
+            "let b: Box<dyn Sh> = Box::new(Row { w: 4 }); let mut v: Vector<Box<dyn Sh>> = Vector::new(); v.push(Box::new(Row { w: 4 })); return b.area() + v.at(0).area() - 8;"
+        ),
+        (
+            "box of an array of strings",
+            "let a = [String::from_str(\"a\"), String::from_str(\"b\")]; let b = Box::new(a); return (*b)[1].len() as i32 - 1;"
+        ),
+        (
+            "box of an array of boxed dyn",
+            "let a: [Box<dyn Sh>; 1] = [Box::new(Row { w: 1 })]; let b = Box::new(a); return (*b)[0].area() - 1;"
+        ),
+        (
+            "box of nested arrays of strings",
+            "let a = [[String::from_str(\"a\")], [String::from_str(\"b\")]]; let b = Box::new(a); return (*b)[1][0].len() as i32 - 1;"
+        ),
+        ("tuple argument", "let r = Row { w: 1 }; return tk((&r, 1)) - 2;"),
+        ("tuple method argument", "let r = Row { w: 1 }; let m = M { k: 10 }; return m.take((&r, 2)) - 13;"),
+        (
+            "tuple pushed to a vector",
+            "let r = Row { w: 1 }; let mut v: Vector<(&dyn Sh, i32)> = Vector::new(); v.push((&r, 2)); return v.at(0).1 - 2;"
+        ),
+        ("nested tuple argument", "let r = Row { w: 1 }; return nest(((&r, 2), 5)) as i32 - 6;"),
+        ("tuple with a closure argument", "return ap((|x: i32| x + 1, 2)) - 3;"),
+        ("tuple of literals widens to the parameter", "return f((1, 2)) as i32 - 3;"),
+        (
+            "tuple in a struct literal field",
+            "let r = Row { w: 1 }; let s = S { t: (&r, 2), n: ((&r, 3), 4) }; return s.t.0.area() + s.t.1 + (s.n.0).1 - 6;"
+        ),
+        (
+            "tuple through a turbofished call",
+            "let r = Row { w: 1 }; let t = g::<(&dyn Sh, i32)>((&r, 2)); return t.1 - 2;"
+        ),
+    ];
+    for i in 0..bodies.len() {
+        let mut src = String::from_str(PRE);
+        src.push_str("fn main() i32 { ");
+        src.push_str(bodies[i].1);
+        src.push_str(" }\n");
+        b.add(bodies[i].0, src.as_str(), 0);
+    }
+}
+
+// A binding never takes a spelling the generated C owns: a name with `__` (drop glue, vtables, closure
+// environments, the runtime), `_` and an uppercase letter, or a standard type name the body spells.
+fn bindings_avoid_generated_spellings(b: &mut h::ExitBatch) {
+    b.add(
+        "a local named like an array drop index",
+        "fn main() i32 { let __sc_i0 = [String::from_str(\"a\")]; return __sc_i0[0].len() as i32 - 1; }\n",
+        0,
+    );
+    b.add(
+        "parameters named like generated ones beside an array parameter",
+        "fn f(__sc_ap1: i32, __sc_sp1: i32, a: [String; 1]) i32 { return __sc_ap1 + __sc_sp1 + a[0].len() as i32 - 3; }\nfn main() i32 { return f(1, 1, [String::from_str(\"a\")]); }\n",
+        0,
+    );
+    b.add(
+        "locals named like the string type and its element type",
+        "fn n(s: str) usize { return s.len(); }\nfn main() i32 { let str = 1; let uint8_t = 2; return str + uint8_t + n(\"abc\") as i32 - 6; }\n",
+        0,
+    );
+    b.add(
+        "locals named like drop glue and a vtable",
+        "interface Sh { fn area(self: &Self) i32; }\nstruct Row { pub w: i32 }\nextend Row as Sh { fn area(self: &Self) i32 { return self.w; } }\nfn main() i32 { let String__free = 1; let Row__Sh__vtbl = 2; let s = String::from_str(\"abc\"); let r = Row { w: 1 }; let d: &dyn Sh = &r; return String__free + Row__Sh__vtbl + s.len() as i32 + d.area() - 7; }\n",
+        0,
+    );
+    b.add(
+        "a closure parameter named like the environment",
+        "fn main() i32 { let k = 2; let c = |__env: i32| __env + k; return c(1) - 3; }\n",
+        0,
+    );
+    b.add(
+        "a local named like the environment beside a capturing closure",
+        "fn main() i32 { let __env = 1; let k = 2; let c = || k + 1; return __env + c() - 4; }\n",
+        0,
+    );
+    b.add(
+        "locals named like predefined macros",
+        "fn main() i32 { let __APPLE__ = 1; let _WIN32 = 2; let __GNUC__ = 3; let __func__ = 4; return __APPLE__ + _WIN32 + __GNUC__ + __func__ - 10; }\n",
+        0,
+    );
+}
+
 @test
 fn exit_cases_08() {
     let mut b = h::ExitBatch::new();
@@ -5004,5 +5366,43 @@ fn exit_cases_08() {
     omitted_c_object_and_union_fields_zero_fill(&mut b);
     zero_length_field_address_is_its_offset(&mut b);
     multi_value_unsafe_call_binds(&mut b);
+    array_param_cases(&mut b);
+    dyn_erasure_in_aggregate_literals(&mut b);
+    bindings_avoid_generated_spellings(&mut b);
     b.run();
+}
+
+// A tuple argument fails like the same value in a `let`: a literal out of range, an arity mismatch, an
+// element of the wrong type. An array converts to a slice by view only: `as` does not spell it.
+@test
+fn tuple_arguments_and_array_casts_are_checked() {
+    const PRE: str = M"(interface Sh { fn area(self: &Self) i32; }
+struct Row { pub w: i32 }
+extend Row as Sh { fn area(self: &Self) i32 { return self.w; } }
+fn tk(t: (&dyn Sh, i32)) i32 { return t.0.area() + t.1; }
+fn f(t: (i64, u8)) i64 { return t.0 + t.1 as i64; }
+)";
+    let mut src = String::from_str(PRE);
+    src.push_str("fn main() i32 { return f((1, 300)) as i32; }\n");
+    h::expect_err_msg(
+        "a tuple literal out of range for its parameter",
+        src.as_str(),
+        "integer literal is out of range for 'u8'",
+    );
+    src = String::from_str(PRE);
+    src.push_str("fn main() i32 { let r = Row { w: 1 }; return tk((&r, 1, 2)); }\n");
+    h::expect_err_msg("a tuple of the wrong arity", src.as_str(), "mismatched types");
+    src = String::from_str(PRE);
+    src.push_str("fn main() i32 { return tk((1, 2)); }\n");
+    h::expect_err_msg("a tuple element of the wrong type", src.as_str(), "mismatched types");
+    src = String::from_str(PRE);
+    src.push_str(
+        "fn main() i32 { let r = Row { w: 1 }; let r2 = Row { w: 2 }; let a = [&r, &r2]; let s = a as []&dyn Sh; return s[0].area(); }\n",
+    );
+    h::expect_err_msg("an array cast to a slice of dyn", src.as_str(), "invalid cast from '[&Row; 2]'");
+    h::expect_err_msg(
+        "an array cast to a slice",
+        "fn main() i32 { let a = [1, 2]; let s = a as []i32; return s[1]; }\n",
+        "invalid cast from '[i32; 2]'",
+    );
 }

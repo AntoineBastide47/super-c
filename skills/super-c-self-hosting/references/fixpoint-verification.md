@@ -88,4 +88,4 @@ would hide a difference instead of checking the complete output tree.
 | Whole-tree diff from a path change | Trees emitted at different paths (see above) |
 | Different absolute include paths | Compilers selected different library roots |
 | Only `.tu_cache` differs | Per-TU caching was not disabled |
-| `super_rt.c` static assertion on `CHAR_MIN` | `-funsigned-char` is missing from the C compile |
+| `super_rt.h` static assertion on `CHAR_MIN` | `-funsigned-char` is missing from the C compile |

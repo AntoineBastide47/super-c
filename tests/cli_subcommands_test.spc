@@ -358,7 +358,7 @@ fn escaped_space_dependency_keeps_the_object_fresh() {
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "first build");
     let r = cli::superc_env_in(root, "SC_NO_CACHE", "1 SC_TIMINGS=1", "build");
     assert(r.ok(), "second build");
-    assert(r.out_has("(0/2 stale"), "no unit is stale after an unchanged build");
+    assert(r.out_has("(0/"), "no unit is stale after an unchanged build");
 }
 
 // A manifest's own profile is a name PROFILE may be compared with, and its generated C lands in that

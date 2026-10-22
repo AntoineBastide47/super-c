@@ -1159,7 +1159,8 @@ fn main() i32 {
 
 ```text
 build/debug/raw/
-  super_rt.h  super_rt.c      # runtime: C includes, checked arithmetic, traps, leak checker
+  super_rt.h                  # C includes, checked arithmetic, runtime prototypes
+  std/rt/base.c               # the runtime: traps, leak checker, stack-overflow report
   __sc_fwd.h                  # declarations that every generated file includes first
   __sc_t/<type>.h             # one header per type: its definition and a layout check
   app.c                       # one C file per module (a large module also gets app__p1.c, ...)

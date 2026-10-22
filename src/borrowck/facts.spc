@@ -5037,7 +5037,7 @@ extend Owner {
             return self.owns_f(mid, e, f0, f1, depth + 1);
         }
         if y.kind == TypeKind::TYPE_DYN {
-            return y.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8;
+            return y.dyn_owns();
         }
         if y.kind == TypeKind::TYPE_FUNCTION {
             let base = self.tys.len();

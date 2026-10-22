@@ -127,7 +127,7 @@ const fn vd_is(d: DefId, decl: NodeId, m: ModuleId) bool {
 
 // `Lowerer.err` when lowering met a TYPE_ERROR node or generic argument.
 const ERR_TYPE_SLUG: str<'static> = "error type";
-const ERR_UNSEEN: str<'static> = "a declaration another job may be writing";
+const ERR_UNSEEN: str<'static> = "a declaration the reader does not see checked";
 
 /// `Lowerer.err` for a call of an `@intrinsic` this compiler does not know, which only
 /// `--bootstrap-tags` accepts: the newer compiler that knows it checks the body.
@@ -227,8 +227,12 @@ pub struct Lowerer {
     views: ViewDecls,
     lay: lay::Svc, // layout queries of the open body (cleared per body: type ids change at publications)
     // The compile-time evaluation this lowering runs for (null: none): a foreign declaration's
-    // record is read only where it holds still for the reader (`checked_here`).
+    // record is read only where the reader sees its item checked (`checked_here`).
     ev: *const iri::Interp,
+    /// The node whose item the reader does not see, when `checked_here` failed the lowering
+    /// (`need_n` NODE_NONE otherwise): `Interp::lower_refused` records the refusal.
+    pub need_m: ModuleId,
+    pub need_n: NodeId,
     cur: ir::BlockId,
     run_start: u32, // statements index where the open block's run began
 }
@@ -430,6 +434,9 @@ extend Lowerer {
                 v_string: vd_none(),
                 v_array: vd_none(),
             },
+            ev: null,
+            need_m: 0,
+            need_n: NODE_NONE,
             cur: 0,
             run_start: 0,
         };
@@ -484,6 +491,7 @@ extend Lowerer {
         self.err = "";
         self.err_node = NODE_NONE;
         self.user_err = NODE_NONE;
+        self.need_n = NODE_NONE;
         self.list_node = NODE_NONE;
         self.proj_frames.truncate(0);
         // Remove only this body's keys: clearing the whole table would cost its capacity per body.
@@ -627,21 +635,30 @@ extend Lowerer {
         }
     }
 
-    /// Lower for compile-time evaluation `ev`: a declaration record another job may be writing fails
-    /// the lowering, and the evaluation runs again once the owner is checked.
+    /// Lower for compile-time evaluation `ev`: a declaration record of an item the reader does not see
+    /// checked fails the lowering, and the evaluation runs again once the owner is checked.
     pub fn read_for(self: &mut Self, ev: *const iri::Interp) {
         self.ev = ev;
         self.lay.ev = ev;
     }
 
-    // Whether the checked record of node `n` of module `m` may be read: always outside an
-    // evaluation; inside one only when it holds still for the reader (`Interp::settled_node`).
-    // Otherwise the lowering fails.
+    // Whether the reader sees the item that holds node `n` of module `m` checked (`Interp::visible_node`):
+    // always outside an evaluation. An item of the reader's own component that follows it is not
+    // checked yet, and another component's item may have another job writing it.
+    fn seen_here(self: &Self, m: ModuleId, n: NodeId) bool {
+        return self.ev == null || unsafe (&*self.ev).visible_node(m, n);
+    }
+
+    // Whether the checked record of node `n` of module `m` may be read (`seen_here`). Otherwise the
+    // lowering fails and names the node for `Interp::lower_refused`: the body cache has no reader in
+    // its key, so a lowering must not depend on the schedule.
     fn checked_here(self: &mut Self, m: ModuleId, n: NodeId) bool {
-        if self.ev == null || unsafe (&*self.ev).settled_node(m, n) {
+        if self.seen_here(m, n) {
             return true;
         }
         self.fail_at(ERR_UNSEEN, NODE_NONE);
+        self.need_m = m;
+        self.need_n = n;
         return false;
     }
 
@@ -1177,10 +1194,12 @@ extend Lowerer {
         if hit != ir::IR_NONE {
             return hit;
         }
+        // A constant the reader cannot see keeps the use type: the engine reads the constant's cell
+        // whatever the local's type, and the C emitter lowers with no reader.
         // An array constant read as a slice has the slice type on the use node; its place keeps the
         // declared array type, and the emitter wraps the array where a slice is wanted.
         let mut lty = ty;
-        if self.decl_kind(d) == NodeKind::NODE_CONST && ty != TYPE_NONE && self.f.ty(ty).kind != TypeKind::TYPE_ARRAY && self.checked_here(
+        if self.decl_kind(d) == NodeKind::NODE_CONST && ty != TYPE_NONE && self.f.ty(ty).kind != TypeKind::TYPE_ARRAY && self.seen_here(
             d.module,
             d.node,
         ) {
@@ -6000,7 +6019,8 @@ extend Lowerer {
         let c = k as u8;
         let kind = k >> 8;
         if kind == ir::SI_HINT {
-            return self.copy_op(self.rv_temp(ir::rv(ir::RV_INTRINSIC, self.pool_ops(ops), 1, c, ty), sp));
+            let n = ops.len() as u32;
+            return self.copy_op(self.rv_temp(ir::rv(ir::RV_INTRINSIC, self.pool_ops(ops), n, c, ty), sp));
         }
         let shift = c == tt::TokenType::LeftShift as u8 || c == tt::TokenType::RightShift as u8;
         // A mask operator's operands are masks.
@@ -7156,7 +7176,7 @@ extend Lowerer {
     // Whether constant `d`, read at a use of type `ty`, is an integer constant of another integer
     // type: a builtin limit the checker retyped as a literal.
     fn retyped_int_const(self: &mut Self, d: DefId, ty: TypeId) bool {
-        if !self.checked_here(d.module, d.node) {
+        if !self.seen_here(d.module, d.node) {
             return false;
         }
         let dt = unsafe (*(&*self.pkg).module_ast_const(d.module)).type_of(d.node);

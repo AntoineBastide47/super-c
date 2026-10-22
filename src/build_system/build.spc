@@ -1239,9 +1239,9 @@ fn tree_pch(gen: str) bool {
 }
 
 // Whether tree-relative unit `rel` starts with `#include "<..>__sc_fwd.h"`: every unit the emitter writes
-// but the runtime (`super_rt.c`), the external C wrappers (`__ext<N>_<stem>.c`) and the test runner.
+// but the external C wrappers (`__ext<N>_<stem>.c`) and the test runner.
 const fn fwd_unit(rel: str) bool {
-    return rel != "super_rt.c" && rel != "__test_main.c" && !rel.starts_with("__ext");
+    return rel != "__test_main.c" && !rel.starts_with("__ext");
 }
 
 extend CcStream {
@@ -2957,6 +2957,15 @@ pub fn root_transpile(m: &mf::Manifest, prof_name: str, cx: &BuildCtx, sink: *mu
 /// `fma`, ..) stay builtins, single instructions.
 pub const LIBM_AS_WRITTEN: str<'static> = " -fno-builtin-sin -fno-builtin-cos -fno-builtin-tan -fno-builtin-asin -fno-builtin-acos -fno-builtin-atan -fno-builtin-atan2 -fno-builtin-sinh -fno-builtin-cosh -fno-builtin-tanh -fno-builtin-asinh -fno-builtin-acosh -fno-builtin-atanh -fno-builtin-exp -fno-builtin-exp2 -fno-builtin-expm1 -fno-builtin-log -fno-builtin-log2 -fno-builtin-log10 -fno-builtin-log1p -fno-builtin-pow -fno-builtin-cbrt -fno-builtin-hypot -fno-builtin-sinf -fno-builtin-cosf -fno-builtin-tanf -fno-builtin-asinf -fno-builtin-acosf -fno-builtin-atanf -fno-builtin-atan2f -fno-builtin-sinhf -fno-builtin-coshf -fno-builtin-tanhf -fno-builtin-asinhf -fno-builtin-acoshf -fno-builtin-atanhf -fno-builtin-expf -fno-builtin-exp2f -fno-builtin-expm1f -fno-builtin-logf -fno-builtin-log2f -fno-builtin-log10f -fno-builtin-log1pf -fno-builtin-powf -fno-builtin-cbrtf -fno-builtin-hypotf";
 
+/// The base C flags of every compile of the generated tree, the build's and the test build's: the C
+/// environment (`push_c_env`), then the rules fixed on every host.
+pub fn push_c_base(cmd: &mut String, cstd: str, target: i32) {
+    push_c_env(cmd, cstd, target);
+    // gcc 14 rejects incompatible pointer arguments; clang only warns. One rule on every host.
+    cmd.push_str(" -ffp-contract=off -Werror=incompatible-pointer-types");
+    cmd.push_str(LIBM_AS_WRITTEN);
+}
+
 fn cc_stream(
     m: &mf::Manifest,
     prof: &mf::Profile,
@@ -2968,13 +2977,10 @@ fn cc_stream(
     pending: String,
     cache: String,
 ) CcStream {
-    let cc_raw = direct_cc(resolve_cc(m.cc.as_str(), m.sdk), m.target, pdir.as_str());
+    let cc_raw = direct_cc(resolve_cc(m.cc.as_str(), m.sdk, m.arch), m.target, pdir.as_str());
     let mut flags = String::new();
     flags.push_byte(b' ');
-    flags.push_string(&m.cstd);
-    // gcc 14 rejects incompatible pointer arguments; clang only warns. One rule on every host.
-    flags.push_str(" -funsigned-char -ffp-contract=off -Werror=incompatible-pointer-types");
-    flags.push_str(LIBM_AS_WRITTEN);
+    push_c_base(&mut flags, m.cstd.as_str(), m.target);
     if m.lib_shared && cx.target != 0 {
         // Shared-library objects need it; harmless for the exe targets.
         flags.push_str(" -fPIC");

@@ -721,7 +721,7 @@ static int sc_runner_jobserver_release(void) {
 #if !defined(_WIN32)
 /* Timeout diagnostics. Each test's capture file is a named file, and the test's process carries its path in
    SC_TEST_DIAG, which every process it starts inherits: the runtime of every Super-C program in the tree
-   answers SIGURG by appending its own threads' stacks there (__sc_diag_install, super_rt), and a library
+   answers SIGURG by appending its own threads' stacks there (__sc_diag_install, std/rt/base.spc), and a library
    chains its state dump in front (std's reactor). Past a test's deadline the runner asks each process
    of the test's tree in turn, adds the kernel's view of each thread on Linux, then kills the whole tree
    SC_DIAG_GRACE seconds later. SIGURG is ignored by default: cc, ld and the like are left running. */
@@ -1727,7 +1727,7 @@ pub fn test_build_and_run(
     // gated items on `--target=`, with no diagnostic.
     let sdk = target_sdk(target);
     let root = p.gen_root.as_str();
-    let ccs = ocache::direct_cc(resolve_cc(p.cc.as_str(), sdk), target, root);
+    let ccs = ocache::direct_cc(resolve_cc(p.cc.as_str(), sdk, p.arch), target, root);
     // No shell anywhere: the compile is an argv child, so paths pass through verbatim (spaces, quotes,
     // non-ASCII) while flag strings are split on whitespace. The runner is named with an explicit `.exe`
     // on Windows so running it below never depends on the spawn filling the extension in.
@@ -1742,13 +1742,16 @@ pub fn test_build_and_run(
         "test build";
     };
     // The base C flags and the fixed rules after them, as a manifest build's compile has them.
-    let mut basev = if p.cstd.len() != 0 {
-        p.cstd.clone();
-    } else {
-        String::from_str(bman::DEFAULT_CSTD);
-    };
-    basev.push_str(" -funsigned-char -ffp-contract=off -Werror=incompatible-pointer-types");
-    basev.push_str(bsys::LIBM_AS_WRITTEN);
+    let mut basev = String::new();
+    bsys::push_c_base(
+        &mut basev,
+        if p.cstd.len() != 0 {
+            p.cstd.as_str();
+        } else {
+            bman::DEFAULT_CSTD;
+        },
+        target,
+    );
     let base = basev.as_str();
     // The cross triple comes first so the profile's flags (empty for a bare build) can override it.
     let mut fl = String::new();

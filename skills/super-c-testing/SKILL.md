@@ -249,13 +249,14 @@ slowest runner, two elsewhere). Every CI suite runs `super-c test --sanitizers`:
 test and the runner build with ASan and UBSan there (no-op on Windows), while a local run stays
 without them for speed. In the release workflow (macOS, Linux and Windows in one matrix)
 the correctness gate (`ci/gate.sh --core`), its profile builds (`gate-profiles`,
-`ci/gate.sh --profiles`) and the x86-64 levels run beside the shards, and the release binary is
+`ci/gate.sh --profiles`), the x86-64 levels and the `ctarget` job (Linux: the C environment tables
+against clang 22) run beside the shards, and the release binary is
 built after all of them pass. Only the release workflow on main saves caches (the toolchain action's
 `save: true`), so no other workflow or branch evicts its entries. Each platform keeps one object
 cache, `objcache-<target>-<sha>` (the cache base `~/.super-c/cache`, the tests' `.tests` included):
 the compile, test and package jobs upload the files they added or changed and the list of those they
 deleted (`.github/actions/cache-save/delta.py`), and the `caches` job merges them over the platform's
-newest cache at the end of the run. Gate, gate profiles, counts and the wasm checks save only their
+newest cache at the end of the run. Gate, gate profiles, counts, ctarget and the wasm checks save only their
 own delta (`objdelta-<target>-<role>-<sha>`), which the toolchain action restores over the platform
 cache. The installation caches are restored every run, so GitHub's eviction past its limit takes the
 superseded caches of older commits first. The toolchain and bootstrap steps live in `.github/actions/`. An
@@ -313,9 +314,10 @@ SC_LEAK_CHECK=1 ./app           # report leaks at exit with their allocation sit
 SC_LEAK_CHECK=fatal ./app       # report + exit 23 on leaks (CI gate)
 ```
 
-The tracker interposes `malloc`/`calloc`/`realloc`/`free` at the emitted-C level, and
-tracks the over-aligned blocks of std's `Global` allocator, which calls `sc_lk_aligned_alloc` /
-`sc_lk_aligned_free` itself. It:
+The tracker is part of the runtime every program links (`std/rt/base.spc`). The emitter spells
+every extern C `malloc`/`calloc`/`realloc`/`free` call (std's, ffi's or the program's own binding) as
+the tracker's `sc_lk_*` entry (`Mangler::tracked_alloc`), and std's `Global` allocator calls
+`sc_lk_aligned_alloc` / `sc_lk_aligned_free` for over-aligned blocks. It:
 - Reports every allocation that survives to exit
 - Detects **double frees** with both allocation and free stacks (freed blocks stay allocated
   in a bounded history, so an address in it is always a real double free, never a reused block)
@@ -405,6 +407,22 @@ These are backed by `loader::package_from_source`, which applies `@platform`/`@a
 filtering for the host and loads the vector backend for a snippet that names a vector, like a
 real build, except the three differential oracles, which build
 through the compiler under test (below).
+
+`tests/ctarget_test.spc` checks bindgen's C environment tables (`src/bindgen/ctarget_data.spc`)
+against clang of the pinned major release (`ctarget_data::PINNED_VERSION`). The oracle is the first of
+`$SC_CTARGET_CLANG`, `$CC`, `clang` and `cc` with that major. Without one, the macro and `__has_*`
+tests pass without checking anything (the runner discards a passing test's output); with
+`SC_CTARGET_REQUIRE=1` they fail instead. The `ctarget` job of the release workflow installs clang 22
+and sets both variables. The built-in header tests run with any clang. `scripts/gen_ctarget.py`
+regenerates the tables and `tests/ctarget_universe.spc`. The generator and the tests ask clang with
+`--no-default-config --rtlib=platform`, so a vendor's configuration file or `CLANG_DEFAULT_RTLIB`
+does not change the answers. A Debian or Ubuntu clang is not asked about `strlcpy` and `strlcat`:
+Debian's packages remove those two library builtins (`DEBIAN_DROPS`).
+
+`tests/cpp_test.spc` checks bindgen's preprocessor (`src/bindgen/cpp.spc`) against the host C
+compiler's `cc -E` and `cc -E -dM` under the host's own search list (`-nostdinc` with `-isystem` and
+`-iframework`): tokens, origins, line numbers and the macro set must be equal, over synthetic
+sources and the system and framework headers the host has.
 
 ### Families of cases in few compiler runs
 

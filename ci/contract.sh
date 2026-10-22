@@ -32,11 +32,11 @@ CONTRACT_STRICT_CFLAGS="-Wall -Wextra -Werror -funsigned-char -ffp-contract=off$
 #   one <module>.h and <module>.c per emitted module (sharded modules add <module>__p<k>.c, a
 #   module owning generic instances <module>__inst.c, one definition header per type __sc_t/<name>.h),
 #   the shared __sc_fwd.h, the registry TU, the packs __sc_pack<k>.c of the small units, the manifest
-#   and the runtime super_rt.h/super_rt.c,
+#   and the runtime header super_rt.h,
 #   every include relative (the tree compiles with no -I flag),
 #   no #line directives, and symbols mangled by module path (lexer__Lexer__scan_tokens).
 CONTRACT_READABLE_FORBIDDEN='^#line '
-CONTRACT_READABLE_SHARED="super_rt.h super_rt.c __sc_fwd.h __sc_registry.c __sc_manifest __ldflags"
+CONTRACT_READABLE_SHARED="super_rt.h __sc_fwd.h __sc_registry.c __sc_manifest __ldflags"
 
 # ---- accepted nondeterminism ---------------------------------------------------------------------------
 # Excluded from every byte comparison: the per-TU cache header hashes the compiler that wrote it, and the

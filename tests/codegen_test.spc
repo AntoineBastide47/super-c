@@ -170,6 +170,23 @@ fn references() {
     h::expect_c_absent("*mut T is not const", REFS, "raw_m(const int32_t");
 }
 
+// A function that copies an array parameter on entry reads the caller's array through a plain pointer, so no
+// `&mut` or `[]mut` parameter of it is `restrict` (a write through one to those bytes would be undefined).
+@test
+fn array_parameter_clears_restrict() {
+    let src = "fn f(a: [u8; 4], r: &mut u8, v: []mut u8) u8 { *r = a[0]; v[0] = a[1]; return a[2]; }\nfn g(r: &mut u8, v: []mut u8) u8 { *r = 1; v[0] = 2; return *r; }\n";
+    h::expect_c(
+        "a function with no array parameter keeps restrict",
+        src,
+        "g__r(uint8_t *restrict r, uint8_t *restrict ",
+    );
+    h::expect_c(
+        "an array parameter clears restrict on a &mut parameter and a split view",
+        src,
+        "f__r(uint8_t const __sc_ap1[4], uint8_t *r, uint8_t *__sc_sp3, size_t __sc_sn3)",
+    );
+}
+
 @test
 fn externs() {
     h::expect_c_absent("extern prototype suppressed", EXTERN, "(putchar)(");

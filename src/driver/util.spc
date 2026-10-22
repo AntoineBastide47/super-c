@@ -9,8 +9,9 @@ import module::loader as loader;
 import ast::parser as par;
 import fmt::builder as fbld;
 import driver_shim as shim;
-import driver::rt_c as rtc;
+import emit::rt_h as rth;
 import ir::cpu_features as cf;
+import bindgen::ctarget_data as ctd;
 import atomic;
 
 /// The 64-bit FNV-1a offset basis: the state of an empty hash (std `str::hash` starts from it).
@@ -521,27 +522,20 @@ fn prune_dir(dir: *const char, keep: &Set<str>) {
     let _ = unsafe shim::sc_closedir(d);
 }
 
-/// The runtime header shared by every generated module (the C standard library includes plus the
-/// leak-tracker interposition), and the tracker's implementation TU the engine compiles alongside, each
-/// published with `publish_file`. -1, after a message, when either file cannot be written in full; else
-/// bit 0 set when the header was rewritten and bit 1 when the source was.
+/// The C backend's runtime header shared by every generated file (`emit::rt_h`), published with
+/// `publish_file`: -1, after a message, when it cannot be written in full; else 1 when this build rewrote
+/// it, 0 when it was current.
 pub fn write_super_rt(gen_dir: str) i32 {
     let mut path = build_out_path(gen_dir, "super_rt", ".h");
     let mut h = String::from_str("#ifndef SUPER_RT_H\n#define SUPER_RT_H\n");
-    h.push_str(unsafe str::from_cstr(rtc::super_rt_includes()));
+    h.push_str(rth::super_rt_h());
     h.push_str("#endif\n");
     let hr = publish_file(&mut path, h.as_str());
     if hr < 0 {
         unsafe stdio::perror(path.cstr());
         return -1;
     }
-    let mut cpath = build_out_path(gen_dir, "super_rt", ".c");
-    let cr = publish_file(&mut cpath, unsafe str::from_cstr(rtc::super_rt_source()));
-    if cr < 0 {
-        unsafe stdio::perror(cpath.cstr());
-        return -1;
-    }
-    return hr | cr << 1;
+    return hr;
 }
 
 // Cross toolchains
@@ -565,11 +559,12 @@ pub const fn target_sdk(target: i32) i32 {
 }
 
 /// The C compiler command: `cc` when set (the manifest's or the package's), else the cross target
-/// `sdk`'s own toolchain ($CC on the host would build a host binary), else $CC, else `cc`.
-pub fn resolve_cc(cc: str, sdk: i32) String {
+/// `sdk`'s own toolchain for instruction set `arch` ($CC on the host would build a host binary), else $CC,
+/// else `cc`.
+pub fn resolve_cc(cc: str, sdk: i32, arch: i32) String {
     let mut out = String::from_str(cc);
     if out.len() == 0 && sdk != 0 {
-        sdk_cc(sdk, &mut out);
+        sdk_cc(sdk, arch, &mut out);
     }
     if out.len() == 0 {
         let env = stdlib::get_env("CC").unwrap_or(String::new());
@@ -582,28 +577,61 @@ pub fn resolve_cc(cc: str, sdk: i32) String {
     return out;
 }
 
+/// The NDK's prebuilt LLVM directory (`toolchains/llvm/prebuilt/<host>`), which holds `bin/clang` and
+/// `sysroot`, appended to `out`; $ANDROID_NDK_HOME (or $ANDROID_NDK_ROOT) locates the NDK. False, with
+/// `out` unchanged, when neither is set.
+pub fn ndk_llvm(out: &mut String) bool {
+    let mut ndk = stdlib::get_env("ANDROID_NDK_HOME").unwrap_or(String::new());
+    if ndk.len() == 0 {
+        ndk = stdlib::get_env("ANDROID_NDK_ROOT").unwrap_or(String::new());
+    }
+    if ndk.len() == 0 {
+        return false;
+    }
+    out.push_string(&ndk);
+    out.push_str("/toolchains/llvm/prebuilt/");
+    out.push_str(ndk_host_tag());
+    return true;
+}
+
+/// The wasi sysroot appended to `out`: `share/wasi-sysroot` of the wasi-sdk $WASI_SDK_PATH names, else
+/// the bare sysroot $WASI_SYSROOT names. False, with `out` unchanged, when neither is set.
+pub fn wasi_sysroot(out: &mut String) bool {
+    let sdkp = stdlib::get_env("WASI_SDK_PATH").unwrap_or(String::new());
+    if sdkp.len() != 0 {
+        out.push_string(&sdkp);
+        out.push_str("/share/wasi-sysroot");
+        return true;
+    }
+    let sr = stdlib::get_env("WASI_SYSROOT").unwrap_or(String::new());
+    if sr.len() != 0 {
+        out.push_string(&sr);
+        return true;
+    }
+    return false;
+}
+
 /// The cross compiler for `sdk`, found through the SDK's own environment variable so no path is baked
 /// into the compiler. Empty when the toolchain is not installed; the caller then falls back and the
 /// C compiler reports what is missing.
-pub fn sdk_cc(sdk: i32, out: &mut String) {
+pub fn sdk_cc(sdk: i32, arch: i32, out: &mut String) {
     if sdk == 1 {
-        // IOS: clang from the active Xcode, selected by `xcrun` so the SDK path comes from the toolchain.
-        out.push_str("xcrun --sdk iphoneos clang");
+        // IOS: clang from the active Xcode, selected by `xcrun` so the SDK path comes from the toolchain;
+        // the x86_64 target is the simulator, whose SDK is another one.
+        out.push_str(
+            if arch == 0 {
+                "xcrun --sdk iphonesimulator clang";
+            } else {
+                "xcrun --sdk iphoneos clang";
+            },
+        );
         return;
     }
     if sdk == 2 {
-        // Android: the NDK's prebuilt clang. $ANDROID_NDK_HOME (or $ANDROID_NDK_ROOT) locates it.
-        let mut ndk = stdlib::get_env("ANDROID_NDK_HOME").unwrap_or(String::new());
-        if ndk.len() == 0 {
-            ndk = stdlib::get_env("ANDROID_NDK_ROOT").unwrap_or(String::new());
+        // Android: the NDK's prebuilt clang.
+        if ndk_llvm(out) {
+            out.push_str("/bin/clang");
         }
-        if ndk.len() == 0 {
-            return;
-        }
-        out.push_string(&ndk);
-        out.push_str("/toolchains/llvm/prebuilt/");
-        out.push_str(ndk_host_tag());
-        out.push_str("/bin/clang");
         return;
     }
     if sdk == 3 {
@@ -640,49 +668,63 @@ pub fn push_sdk_flags(cmd: &mut String, target: i32, sdk: i32, arch: i32, featur
     cf::push_c_flags(features, target, cmd);
 }
 
+/// The flags that decide what the C headers declare, as every compile of the generated tree has them and
+/// bindgen preprocesses under them: `cstd` (the dialect and the POSIX level), the unsigned `char`, and on
+/// `target` Windows one API level for every mingw toolchain. MSYS2 defaults `_WIN32_WINNT` to Windows 10,
+/// llvm-mingw to Windows 7, whose headers hide the Windows 8 functions the runtime calls
+/// (GetCurrentThreadStackLimits).
+pub fn push_c_env(cmd: &mut String, cstd: str, target: i32) {
+    cmd.push_str(cstd);
+    cmd.push_str(" -funsigned-char");
+    if target == 0 {
+        cmd.push_str(" -D_WIN32_WINNT=0x0A00");
+    }
+}
+
 fn push_triple(cmd: &mut String, sdk: i32, arch: i32) {
-    if sdk == 1 {
-        // The triple carries the deployment floor: without a version clang assumes an iOS old enough to
-        // lack thread-local storage, which the runtime's preemption tick needs.
-        cmd.push_str(" -target ");
-        if arch == 0 {
-            cmd.push_str("x86_64-apple-ios13.0-simulator");
-        } else {
-            cmd.push_str("arm64-apple-ios13.0");
-        }
+    if sdk == 0 {
         return;
     }
-    if sdk == 2 {
-        // The NDK's clang takes the API level in the triple; 24 is the oldest still widely supported.
-        cmd.push_str(" -target ");
-        if arch == 0 {
-            cmd.push_str("x86_64-linux-android24");
+    // The triples are `ctarget_data`'s, the ones bindgen's C environment models: iOS carries the
+    // deployment floor (without a version clang assumes an iOS old enough to lack thread-local storage,
+    // which the runtime's preemption tick needs), Android the API level (24 is the oldest still widely
+    // supported).
+    let target = if sdk == 1 {
+        4;
+    } else if sdk == 2 {
+        5;
+    } else {
+        3;
+    };
+    let ri = ctd::find_row(
+        target,
+        if sdk == 3 {
+            2;
+        } else if arch == 0 {
+            0;
         } else {
-            cmd.push_str("aarch64-linux-android24");
-        }
+            1;
+        },
+    );
+    let rows: []ctd::Row = ctd::ROWS;
+    let row = &rows[ri as usize];
+    if sdk != 3 {
+        cmd.push_str(" -target ");
+        cmd.push_str(row.triple);
         return;
     }
-    if sdk == 3 {
-        // A wasi sysroot supplies the libc the emitted C needs. $WASI_SDK_PATH names a full wasi-sdk
-        // (its sysroot sits under share/wasi-sysroot); $WASI_SYSROOT names a bare one. With neither,
-        // only freestanding code can build; there is no libc to include.
-        let sdkp = stdlib::get_env("WASI_SDK_PATH").unwrap_or(String::new());
-        if sdkp.len() != 0 {
-            cmd.push_str(" -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS");
-            cmd.push_str(" -target wasm32-wasip1 --sysroot=");
-            cmd.push_string(&sdkp);
-            cmd.push_str("/share/wasi-sysroot");
-            return;
-        }
-        let sr = stdlib::get_env("WASI_SYSROOT").unwrap_or(String::new());
-        if sr.len() != 0 {
-            cmd.push_str(" -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS");
-            cmd.push_str(" -target wasm32-wasip1 --sysroot=");
-            cmd.push_string(&sr);
-            return;
-        }
-        cmd.push_str(" -target wasm32 -nostdlib");
+    // A wasi sysroot supplies the libc the emitted C needs. With none, only freestanding code can
+    // build; there is no libc to include.
+    let mut sr = String::new();
+    if wasi_sysroot(&mut sr) {
+        cmd.push_str(row.flags);
+        cmd.push_str(" -target ");
+        cmd.push_str(row.triple);
+        cmd.push_str(" --sysroot=");
+        cmd.push_string(&sr);
+        return;
     }
+    cmd.push_str(" -target wasm32 -nostdlib");
 }
 
 /// Flags and libraries a target needs at LINK time only. wasi keeps signals and the process clock

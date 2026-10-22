@@ -435,6 +435,17 @@ pub fn which_path(cmd: str, out: &mut String) i64 {
     return unsafe shim::sc_mtime(cand.cstr());
 }
 
+/// The developer directory `xcode-select` chose (the target of `/var/db/xcode_select_link`); empty when
+/// none is set.
+pub fn xcode_select_dir() String {
+    let mut lb = PathBuf {};
+    let mut link = String::new();
+    if unsafe shim::sc_readlink("/var/db/xcode_select_link".ptr() as *const char, &mut lb[0], 4096) > 0 {
+        link.push_str(str::from_cbuf(lb.as_slice()));
+    }
+    return link;
+}
+
 /// The identity of compiler command `cc` that a recorded version line stands for: the command, and
 /// the path and modification time of the program it runs. On macOS a compiler in `/usr/bin` is an
 /// xcrun stub that runs a developer directory's toolchain: `DEVELOPER_DIR`, else the xcode-select
@@ -447,11 +458,7 @@ fn cc_identity(cc: str) String {
     let mut id = format("{}\t{}\t{}", cc, path.as_str(), mt);
     if unsafe shim::sc_host_platform() == 1 && path.as_str().starts_with("/usr/bin/") {
         let env = stdlib::get_env("DEVELOPER_DIR").unwrap_or(String::new());
-        let mut lb = PathBuf {};
-        let mut link = String::new();
-        if unsafe shim::sc_readlink("/var/db/xcode_select_link".ptr() as *const char, &mut lb[0], 4096) > 0 {
-            link.push_str(str::from_cbuf(lb.as_slice()));
-        }
+        let link = xcode_select_dir();
         id.format_into(
             "\t{}\t{}\t{}",
             env.as_str(),

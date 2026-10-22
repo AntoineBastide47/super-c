@@ -134,15 +134,19 @@ step 4, tests embed the new syntax only inside string literals.
 
 ## Runtime Helpers Called by std
 
-No hand-written C sits beside std or ffi. A backend primitive std calls (the bit counts, the
-128-bit fast paths, `sc_int_overflow`, the leak tracker's aligned blocks) lives in the generated
-runtime (`super_rt.h`, `src/driver/rt_c.spc`), and std binds it with a header-less `extern "C"`
-block. The release binary emits its own older runtime header, so the two land in order: the
-runtime primitive in one commit, std's use of it only after a release that carries it (the same
-cadence as new syntax).
-The substrate `ffi/sc_runtime.spc` calls entry points of `super_rt.c` (`__sc_stack_arm` and the
-other stack-overflow hooks, `__sc_set_cancel_hook`) under the same rule: a new entry point lands in
-the runtime first, and the substrate's use of it after a release that carries it.
+No hand-written C sits beside std or ffi. The runtime every program links is Super-C,
+`std/rt/base.spc` (traps, hooks, the leak tracker, the overflow report): the loader adds it to every
+package (`Package::rt_module`), and nothing imports it. std, ffi and the compiler's own modules bind
+its entry points by C symbol with a header-less `extern "C"` block (`__sc_stack_arm`,
+`__sc_set_cancel_hook`, `sc_lk_stats`), so a release that predates the module builds the same
+source against its own runtime: it never loads `std/rt/base.spc`, which may then use what only
+the new compiler knows (`@intrinsic("frame.return_address")`). An import of the module from code
+the release builds would define every runtime symbol twice. A new entry point keeps that rule: its
+callers bind it by C symbol, after a release whose runtime defines it.
+A backend primitive std calls (the bit counts, the 128-bit fast paths, `sc_int_overflow`) lives in
+the C backend's runtime header (`super_rt.h`, `src/emit/rt_h.spc`). The release binary emits its
+own older header, so the two land in order: the primitive in one commit, std's use of it only
+after a release that carries it (the same cadence as new syntax).
 
 ## Recovery from a Broken Compiler
 

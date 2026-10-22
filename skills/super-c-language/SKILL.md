@@ -447,6 +447,13 @@ conformance with exactly those arguments, whose methods its vtable calls; a supe
 methods, `B: A<i32>` included, are in the vtable under their arguments, and a dyn value upcasts to
 a superinterface). A
 `Box<T, A>` erases to `Box<dyn I>` when `A: Default`; its table frees through `A::default()`.
+The erasure applies to each element of an array, repeat or tuple literal against the element type
+its context writes (`let ds: [&dyn I; 2] = [&a, &b]`, `[]&dyn I` and `([&dyn I; 2], i32)` included).
+A tuple takes the types its context writes for its elements, also as a call argument, a method
+argument or a struct field: a literal widens (`(1, 2)` for `(i64, u8)`), a closure becomes the
+written `fn`, and a nested array or tuple erases. `&dyn I`
+and `&mut dyn I` borrow their payload and are never freed; only `Box<dyn I>` owns it. An array
+converts to a slice implicitly; `a as []T` is an error.
 
 ## Imports and Modules
 
@@ -502,7 +509,7 @@ the end of the block around the whole expression, as if the value stood in place
 expression: `f(if c { [x] } else { [y, z] })` is valid. A local declared in the arm dies with the
 arm, so its view or reference cannot be the arm's value. An `if` or `switch` argument converts
 each arm to the parameter's type, as a `let`'s annotation does.
-`[T; N]` is a distinct type and a value: assignment, a struct field, a variant payload, a tuple
+`[T; N]` is a distinct type and a value: assignment, an argument, a struct field, a variant payload, a tuple
 element, a closure capture and a return copy it. An array literal has its own length; against
 an expected `[T; n]` it must have exactly `n` elements (a designated literal may have fewer and
 zero-fills the rest), and a nested literal is checked against the element type at every level. A
@@ -734,7 +741,7 @@ source text, values, and file:line on failure.
 | `@blocking` | Run extern on blocking pool |
 | `@tail_recurse` | Every call of the function to itself must become a jump (see Functions); a function with a body only |
 | `@no_const` | Struct, union or enum whose values never exist at compile time; a function that is never a `const fn` (an error on one; `lint --const` skips it) |
-| `@intrinsic("<name>")` | `std` only: a function without a body whose call is the operation the name gives: a vector operation `simd.<name>` (references/simd.md), `float.to_int_unchecked` (references/operations.md), or the branch hints `hint.likely` and `hint.unlikely` (Branch Hints below) |
+| `@intrinsic("<name>")` | `std` only: a function without a body whose call is the operation the name gives: a vector operation `simd.<name>` (references/simd.md), `float.to_int_unchecked` (references/operations.md), the branch hints `hint.likely` and `hint.unlikely` (Branch Hints below), or `frame.return_address` (the running function's return address, null on wasm; the leak tracker's allocation sites) |
 | `@unsafe(safe, const)` | Unverified claims on an extern function, any order, at least one: `safe` = callable without `unsafe`, `const` = its body models it at compile time (see `super-c-ffi`) |
 | `@unsafe(link_section = "s")` | Place a function with a body or a `static mut` in object-file section `s`; a `static mut` in a section is defined also when no code names it (Unsafe Placement below) |
 | `@unsafe(naked)` | The function's `asm` statements are its whole machine code: no prologue or epilogue (Unsafe Placement below) |

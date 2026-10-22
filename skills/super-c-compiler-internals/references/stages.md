@@ -235,8 +235,10 @@ modular return-lifetime check) run alongside.
 
 ## 8. Runtime + External C (`write_super_rt`, `ext_c_collect`)
 
-`super_rt.h` / `super_rt.c` are written into `gen_root` (default `<root>/build/<profile>/raw`;
-manifest builds point it into their out-dir). `super_rt.h` (`src/driver/rt_c.spc`) also holds
+`super_rt.h` is written into `gen_root` (default `<root>/build/<profile>/raw`; manifest builds point
+it into their out-dir). The C emitter owns it (`src/emit/rt_h.spc`): the libc includes, the atomic
+shims, the prototypes of the runtime entry points the emitted code calls (`std/rt/base.spc` defines
+them), and
 the integer arithmetic helpers the emitter calls where a C operator lacks the language's
 meaning (`CEmit::arith_fn`): `__sc_<op>_<type>` for `+ - *` of every integer type and signed
 negation (checked through `__builtin_*_overflow`, or wrapping under `-DSC_ARITH_WRAP`; a narrow
@@ -275,7 +277,9 @@ siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
 
 ## 9. Emission Planning
 
-- `compute_emit_live`: reference scan for live modules.
+- `compute_emit_live`: reference scan for live modules. The runtime module's type marks are
+  skipped: it names no prelude item, and the `str` type of its literals (which lower to C strings)
+  would make the prelude live in every program.
 - `Package::emit_order`: dependency-first module order: if module `a` re-homes a
   concrete instance of a generic owned by `b`, `b` emits first. Kahn topo-sort with a
   lowest-id tiebreak. Each module's row (`emit_dep_row`) reads its live body syntax.
@@ -321,8 +325,8 @@ siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
   copies `sizeof` the source (`short_src` in `src/emit/cemit.spc`); every consumer sizes
   copies by the source.
 - Symbol naming through `emit/mangle.spc` (the frozen authority): prefixing only with
-  more than one non-prelude module; single-segment prefix when unique; prelude, `main`,
-  and extern symbols never prefixed.
+  more than one non-prelude module besides the runtime (whose symbols always take its prefix);
+  single-segment prefix when unique; prelude, `main`, and extern symbols never prefixed.
 
 ## 11. Write-Out (serial, in the driver)
 

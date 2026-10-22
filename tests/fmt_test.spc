@@ -421,3 +421,30 @@ fn golden_vectors() {
         "fn f(v: Simd<f32, 4>, m: Mask<4>) f32x4 {\n    let w: f32x4 = [v[0], v[1], 2.0, 3.0];\n    let n = !m & Mask::<4>::splat(true);\n    return w;\n}\n",
     );
 }
+
+@test
+fn golden_if_expression_as_range_bound() {
+    // The parentheses stay: `a..if c { x } else { y }` would read as a range ending at `if` with a body.
+    expect_fmt(
+        "fn f(a:usize,b:usize){for i in a..(if b>2{b;}else{2;}){g(i);}let x=(if b>2{b;}else{2;})..a;}",
+        "fn f(a: usize, b: usize) {\n    for i in a..(if b > 2 {\n        b;\n    } else {\n        2;\n    }) {\n        g(i);\n    }\n    let x = (if b > 2 {\n        b;\n    } else {\n        2;\n    })..a;\n}\n",
+    );
+}
+
+@test
+fn golden_range_bounds_the_parser_refuses() {
+    // `loop` and a leading `[` cannot start a range end either: the parentheses stay.
+    expect_fmt(
+        "fn f(a:usize,b:usize){let r=a..(loop{break b;});let s=a..([1,2][0]);}",
+        "fn f(a: usize, b: usize) {\n    let r = a..(loop{break b;});\n    let s = a..([1, 2][0]);\n}\n",
+    );
+}
+
+@test
+fn golden_range_bound_starting_with_an_if() {
+    // The bound is parenthesized as a whole when its first token is the `if`: a call or an operator after it.
+    expect_fmt(
+        "fn f(a:usize,b:usize){let r=a..(if b>2{b;}else{2;}).len();let s=a..(if b>2{b;}else{2;})+1;}",
+        "fn f(a: usize, b: usize) {\n    let r = a..(if b > 2 {\n        b;\n    } else {\n        2;\n    }.len());\n    let s = a..(if b > 2 {\n        b;\n    } else {\n        2;\n    } + 1);\n}\n",
+    );
+}

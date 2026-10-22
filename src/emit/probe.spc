@@ -4,7 +4,7 @@
 // the master's, which prints the table under SC_CEMIT_STATS. Off, every operation is one branch.
 import std::parallel::platform as platform;
 
-// The generated runtime's allocation counters (super_rt.c); zero until SC_BUILD_MEM turned the
+// The runtime's allocation counters (std/rt/base.spc); zero until SC_BUILD_MEM turned the
 // tracker on.
 extern "C" {
     fn sc_lk_counts(out: *mut u64) void;

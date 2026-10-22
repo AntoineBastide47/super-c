@@ -3054,7 +3054,7 @@ extend Interp {
             return -1;
         }
         if !ok {
-            self.err_refused = self.err_refused || lw.failed_on_error_type();
+            self.lower_refused(&lw);
             return -1;
         }
         if self.deferred {
@@ -3118,11 +3118,15 @@ extend Interp {
     // engine records (task engines share the package without a lock), and only while a check
     // names its item.
     fn note_dyn_edge(self: &mut Self, m: ModuleId, item9: NodeId) {
+        self.note_item_edge(self.p().item_of(m, item9));
+    }
+
+    // `note_dyn_edge` to item `callee`.
+    fn note_item_edge(self: &mut Self, callee: loader::ItemId) {
         if !self.dyn_rec || self.cur_item == loader::ITEM_NONE {
             return;
         }
         let caller = self.cur_item;
-        let callee = self.p().item_of(m, item9);
         if caller == loader::ITEM_NONE || callee == loader::ITEM_NONE || caller == callee {
             return;
         }
@@ -3138,20 +3142,17 @@ extend Interp {
         self.lsvc.ev = self;
     }
 
-    /// Whether the checked record of node `n` of module `m` holds still for the reader: an item of
-    /// the reader's own component (its one job writes them in order), or one it sees. Another
-    /// component's item it cannot see may have another job writing it right now. Without the
-    /// component graph (the language server's serial sweep) every record holds still.
-    pub fn settled_node(self: &Self, m: ModuleId, n: NodeId) bool {
-        if self.cur_item == loader::ITEM_NONE {
-            return true;
+    // Record why lowering `lw` failed: an error type, or a node whose item the reader does not see
+    // checked (`Lowerer::checked_here`): the module and the dynamic edge to that item, as a refused body.
+    fn lower_refused(self: &mut Self, lw: &irl::Lowerer) {
+        self.err_refused = self.err_refused || lw.failed_on_error_type();
+        if lw.need_n != NODE_NONE {
+            self.note_missing(lw.need_m);
+            let it = gitems::owner_of(self.p(), lw.need_m, lw.need_n);
+            if it != loader::ITEM_NONE {
+                self.note_item_edge(it);
+            }
         }
-        let t = gitems::owner_of(self.p(), m, n);
-        let s = &self.p().sched;
-        if t == loader::ITEM_NONE || s.ncomp == 0 || s.comp[t as usize] == s.comp[self.cur_item as usize] {
-            return true;
-        }
-        return gitems::visible(self.p(), self.cur_item, t, unsafe &mut *self.reach);
     }
 
     // A lowering for this engine: what it reads of other items follows the reader (`read_for`).
@@ -3163,7 +3164,7 @@ extend Interp {
 
     /// Is the checked state of node `n` of module `m` visible to the reader (`gitems::visible`
     /// over the node's owning item)? A node past every item range (an appended desugar) is.
-    fn visible_node(self: &Self, m: ModuleId, n: NodeId) bool {
+    pub fn visible_node(self: &Self, m: ModuleId, n: NodeId) bool {
         if self.cur_item == loader::ITEM_NONE {
             return true;
         }
@@ -4820,7 +4821,7 @@ extend Interp {
             let args = Vector::<IVal>::new();
             r = self.run(&lw.body, &args);
         } else {
-            self.err_refused = self.err_refused || lw.failed_on_error_type();
+            self.lower_refused(&lw);
             let _ = self.bail();
         }
         self.ndepth -= 1;
@@ -4948,7 +4949,7 @@ extend Interp {
             lw.env.push(irl::LSub { pm: sb.pmod, pnode: sb.pnode, am: sb.am, at: sb.at });
         }
         if !lw.lower_const(cnode) {
-            self.err_refused = self.err_refused || lw.failed_on_error_type();
+            self.lower_refused(&lw);
             return self.bail();
         }
         self.item_active.push(m as u64 << 32 | cnode as u64);
@@ -6293,6 +6294,10 @@ extend Interp {
             }
             if rv.c == ir::IN_LIKELY || rv.c == ir::IN_UNLIKELY {
                 return self.operand(b, env, b.oper_pool[rv.a as usize]);
+            }
+            if rv.c == ir::IN_RETURN_ADDRESS {
+                self.it_trap(IT_TRAP_UNSUPPORTED, "a return address has no compile-time value");
+                return none();
             }
             if rv.c == ir::IN_BOUNDS || rv.c == ir::IN_BOUNDS_PROVEN {
                 // PROVEN keeps the identical check here: CTFE catches a false proof as a trap
@@ -10317,7 +10322,7 @@ extend Interp {
             lw.lower_expr_root(id);
         };
         if !ok {
-            self.err_refused = self.err_refused || lw.failed_on_error_type();
+            self.lower_refused(&lw);
             return none();
         }
         let args = Vector::<IVal>::new();
@@ -10686,7 +10691,7 @@ extend Interp {
             let args = Vector::<IVal>::new();
             v = self.run(&lw.body, &args);
         } else {
-            self.err_refused = self.err_refused || lw.failed_on_error_type();
+            self.lower_refused(&lw);
         }
         self.ev_depth -= 1;
         self.sub_base = prev_base;

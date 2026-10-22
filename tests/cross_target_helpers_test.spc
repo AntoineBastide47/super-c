@@ -17,20 +17,24 @@ import tests::cli_harness as cli;
 fn sdk_cc_selects_a_toolchain_per_sdk() {
     // iOS: xcrun-selected clang.
     let mut ios = String::new();
-    util::sdk_cc(1, &mut ios);
+    util::sdk_cc(1, 1, &mut ios);
     assert(ios.as_str().contains("xcrun"), "ios uses xcrun clang");
     assert(ios.as_str().contains("iphoneos"), "ios names the iphoneos sdk");
+    // The x86_64 iOS target is the simulator and takes the simulator SDK.
+    let mut sim = String::new();
+    util::sdk_cc(1, 0, &mut sim);
+    assert(sim.as_str().contains("iphonesimulator"), "the iOS simulator names its own sdk");
     // Android: the NDK prebuilt clang, located from ANDROID_NDK_HOME (covers the host-tag path).
     let _env1 = cli::set_env("ANDROID_NDK_HOME", "/opt/ndk");
     let mut andr = String::new();
-    util::sdk_cc(2, &mut andr);
+    util::sdk_cc(2, 1, &mut andr);
     assert(andr.as_str().contains("/opt/ndk"), "android roots at the NDK home");
     assert(andr.as_str().contains("prebuilt/"), "android uses the prebuilt toolchain");
     assert(andr.as_str().contains("bin/clang"), "android ends at clang");
     // Wasm: wasi-sdk clang when WASI_SDK_PATH is set, else plain clang.
     let _env2 = cli::set_env("WASI_SDK_PATH", "/opt/wasi");
     let mut w = String::new();
-    util::sdk_cc(3, &mut w);
+    util::sdk_cc(3, 2, &mut w);
     assert(w.as_str().contains("/opt/wasi"), "wasm uses the wasi-sdk clang");
 }
 

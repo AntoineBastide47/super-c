@@ -59,7 +59,7 @@ extern "C" {
   every generated and `@c.source` TU with `-funsigned-char`, on every target, so
   `200 as char as i32` is 200 at compile time and at run time. A C file compiled apart
   from the engine and linked with the generated code needs the flag too (the generated
-  `super_rt.c` has a static assertion on it). The ABI is the same either way; only a
+  `super_rt.h` has a static assertion on it). The ABI is the same either way; only a
   `char` value above 127 reads differently on the C side without the flag.
 
 ## Header Bindings
@@ -260,9 +260,9 @@ struct tm { .. } }`). Read each member from the target's real headers (`clang -X
   macro (`errno`) gets a `_` suffix like every Super-C name: pin it the same way. An unknown field
   at a use is "no field 'f' on 'S'".
 - **Checks.** The generated header of the C header (`__sc_t/__scx<k>.h`; `__sc_fwd.h` for a header
-  `super_rt.h` includes) holds, after the include, and every unit that uses one of the header's
-  items includes it, as does the registry unit, so each check runs once even where no unit uses the
-  header: `sizeof(T) != 0`; `sizeof(T) == S && _Alignof(T) == A` with Super-C's layout
+  `super_rt.h` includes, except in the runtime module) holds, after the include, and every unit that uses one of the header's
+  items includes it, as does the registry unit when no unit does, so each check runs once even where
+  no unit uses the header: `sizeof(T) != 0`; `sizeof(T) == S && _Alignof(T) == A` with Super-C's layout
   ("super-c: 'tm' must have 56 bytes aligned to 8 in C: declare every member of the header's type,
   in its order"); per field `offsetof(T, f) == O` ("super-c: field 'div_t.rem' must sit at byte 4
   in C: ...") and the member's kind and size (signedness by `_Generic` over the standard integer
@@ -310,7 +310,9 @@ name. The header's checks (above) hold the check of the header's macro or enumer
 'extern \"C\"' block with a value is an integer or a 'bool': the C compile checks it"), and the
 block needs its header ("a constant with a value of an 'extern \"C\"' block is checked against its
 C header: the block needs that header"). A constant without a value is the C name itself, read at
-run time. An extern `static mut` takes no value.
+run time. An extern `static mut` takes no value. Its block's header declares it; one of a block
+without a header is declared by every unit that uses it (`extern T name;`), as a header-less
+function gets its prototype.
 
 ## C Integer Widths
 
@@ -487,6 +489,16 @@ function's body is `<sym>__r`, which takes the view as `T *restrict` and a lengt
 one-call entry into it. C code that calls `<sym>` must pass a view no other argument or global
 reaches while the call runs, as for a `&mut` parameter.
 
+A fixed-array value parameter of an exported function is `T const name[N]` in C and the body
+copies it on entry. A C prototype `T a[N]` has the same ABI. C code that declares the function or
+stores its address must spell the parameter `T const *` (or `T const [N]`): `T *` is a different
+parameter type (C11 6.7.6.3p15). Header-less `extern "C"` prototypes spell such a parameter
+`T const [N]`. A call of an `extern "C"` function that takes a fixed array goes to a generated
+wrapper (`__sc_blk_<module>__<name>`, the `@blocking` wrapper's name and place) that copies the
+array into a local of its own and calls the C function with the copy, because the C callee may write
+through its pointer. A use of such a function as a value (`let p: fn([i32; 4]) i32 = f;`) names the
+wrapper, so a call through the value copies too.
+
 ## Pointers to Arrays
 
 A pointer to an array whose element is a Super-C aggregate (`*const [S; 2]`) is a pointer to
@@ -577,10 +589,19 @@ functions unsafe; a safe wrapper takes the operand as a const parameter and chec
 ## bindgen
 
 ```sh
-super-c bindgen header.h -o out.spc     # --link=, --header=, -I, --from=, --cflag=, --cc=
+super-c bindgen header.h -o out.spc     # --link=, --header=, -I, --from=, --cflag=, --target=, --arch=, --sysroot=
 ```
 
-Generates `.spc` bindings from C headers (`src/bindgen/bindgen.spc`). Use it for large C
+Generates `.spc` bindings from C headers (`src/bindgen/bindgen.spc`). No C compiler runs: the
+headers go through bindgen's own C preprocessor (`src/bindgen/cpp.spc`) under the target's C
+environment (`src/bindgen/ctarget.spc`): clang's predefined macros and `__has_*` answers, its
+built-in headers, and the system and framework directories of the target's sysroot. The sysroot
+is found as the build finds it, or given by `--sysroot=`. `-I` directories come before the system
+ones. The headers see the build's C environment (`push_c_env`): the `cstd` of the nearest
+`build.toml` at or above the working directory (the default without one), `-funsigned-char` and,
+for Windows, `-D_WIN32_WINNT=0x0A00`, so the output declares what the generated C compiles
+against. `--cflag=` applies after them and takes only `-std=`, `-D`, `-U`, `-fsigned-char` and `-funsigned-char`; any other flag is an
+error. Use it for large C
 APIs where hand-writing bindings is impractical. The generated output follows the `ffi/`
 conventions. A record whose every member has a field form becomes a header type with every
 member, and a tagged enum an extern `enum`: a tagged record or enum spells as its tag, one that
@@ -592,7 +613,7 @@ is the build target's: generate it per target where the values differ.
 
 ## Atomics and Memory-Order Codes
 
-`ffi/atomic.spc` binds the `__sc_atomic_*` helpers of `super_rt.h` (`src/driver/rt_c.spc`),
+`ffi/atomic.spc` binds the `__sc_atomic_*` helpers of `super_rt.h` (`src/emit/rt_h.spc`),
 which lower to the C `__atomic_*` builtins. Each operation takes the order as an `i32` code;
 `MemoryOrder as i32` in `std/parallel/atomics.spc` gives it:
 
@@ -623,7 +644,10 @@ The build compiles C with `-std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=70
 value: POSIX 2008 with the XSI extension, which declares `realpath` on glibc and wasi-libc), plus
 `-funsigned-char -ffp-contract=off -Werror=incompatible-pointer-types` and the libm
 `-fno-builtin-<f>` set (`LIBM_AS_WRITTEN` in `src/build_system/build.spc`: `sin(x)` in a
-`@c.source` file is a libm call too, never a constant fold or a `sincos`) on every compile.
+`@c.source` file is a libm call too, never a constant fold or a `sincos`) on every compile. A
+Windows compile also gets `-D_WIN32_WINNT=0x0A00` (`push_c_env` in `src/driver/util.spc`):
+the Windows 10 API level on every mingw toolchain. MSYS2 defaults to it; llvm-mingw defaults to
+Windows 7, whose headers hide the Windows 8 functions the runtime calls.
 
 - macOS: strict `_POSIX_C_SOURCE` breaks `<sys/sysctl.h>`, `<libproc.h>` and
   `<malloc/malloc.h>`, hides `struct rusage_info_v4` and names `struct rusage`'s counters

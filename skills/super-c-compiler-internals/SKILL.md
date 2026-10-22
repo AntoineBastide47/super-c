@@ -57,7 +57,8 @@ lint + panics + flush     -- lint_unused_items, check_recursion (ir::recursion: 
   |                          (deferred static_asserts, the per-instance asserts of generic
   |                          functions, consts a check could not fold); the interpreter reads
   |                          kept bodies through a read-only Keep view here (see Core IR)
-runtime + external C      -- write super_rt.h/.c; ext_c_collect (@c.source wrappers, __ldflags)
+runtime + external C      -- write super_rt.h (the runtime itself is std/rt/base.spc, a module);
+  |                          ext_c_collect (@c.source wrappers, __ldflags)
   |
 emission planning         -- compute_emit_live (module-arena resolutions + item index edges);
   |                          Package::emit_order (Kahn over dependency rows read from syntax);
@@ -204,7 +205,8 @@ declaration index (`ensure_index`, built in deterministic module and source orde
 **Mangling** (`src/emit/mangle.spc`, the frozen symbol-naming authority):
 
 - Module prefixing is on only when the package holds **more than one non-prelude
-  module**; single-file programs emit plain C names, except a top-level name that a prelude
+  module besides the runtime** (`Package::rt_module`, `std/rt/base.spc`, whose own symbols
+  always take its prefix); single-file programs emit plain C names, except a top-level name that a prelude
   item also has (`PkgIndex.pl_names`, the shadow set), which `Mangler::ident` escapes with `_`
   (`format` becomes `format_`).
 - A module prefixes with just its **last path segment** when no other non-prelude module
@@ -619,6 +621,12 @@ a reference, a plain struct); the fold scans skip such drops too, so a scalar in
 to the same C as before. A zero-length array of an owning element (`[String; 0]`, or a struct
 whose only owning member is one) moves like its element but frees nothing: `is_destructible`
 answers false for it, so its drop and its glue emit no code over storage that does not exist.
+A `&dyn I` or `&mut dyn I` owns nothing (`Ty::dyn_owns`, which the checker's `tc_type_is_free_impl`,
+the borrow checker's `owns_raw` and the emitter's `is_destructible_raw` share). A drop of a pointer
+to an array (`Box<[T; N]>`) frees the elements in a loop over the pointee (`array_free`, through the
+wrapper struct's `.e` when `ptr_wraps`). A local never takes a spelling the generated C owns
+(`CEmit::generated_spelling`: `__` anywhere, `_` and an uppercase letter, `str`, `size_t`, `intN_t`):
+it is spelled `_<id>`.
 
 The emitter spells an integer comparison that the range of an operand's C type decides against a
 constant (`u < 0`, `i8 >= -128`, `u64 <= u64::MAX`, a const-generic bound, a folded array length,
@@ -925,7 +933,7 @@ is refused and reported as a located error (`CEmit.refused`, merged from the sha
 `report_refusals`).
 
 A by-value `[]mut T` parameter splits the definition (`split_abi`, `emit_fn_inner`): the body is
-`<sym>__r`, which takes the view as `<T> *restrict __sc_sp<l>, size_t __sc_sn<l>` and rebuilds the
+`<sym>__r`, which takes the view as `<T> *restrict __sc_sp<l>, size_t __sc_sn<l>` (without `restrict` when the function has a fixed-array value parameter) and rebuilds the
 local, and `split_entry` writes ahead of it the prototype of `<sym>__r` and the struct-ABI entry
 `<sym>` on the chunk's first line, so `proto_of` yields both prototypes on one line (the driver
 pairs prototype line k with chunk k). A direct call (`split_callee`, `split_arg`) spells
@@ -933,6 +941,14 @@ pairs prototype line k with chunk k). A direct call (`split_callee`, `split_arg`
 extern, variadic, `@blocking` or a vector-backend entry, or a view argument spells a forwarded call
 (`fwd_spelled`), which would then run twice; such a call reaches `<sym>`. Vector-backend entries
 (`CEmit.no_split`) and `@emit_macro` templates keep the struct ABI.
+
+A fixed-array value parameter is the C parameter `T const __sc_ap<l>[N]` (`param_ctype`, a pointer to
+the caller's array; `ap_name`): `arr_param_copies` copies it into the local named as the parameter
+before the body. Every spelling of the signature uses `param_ctype` (definition, prototype, function
+value, vtable slot, thunk, `split_entry`). A function with such a parameter declares no `restrict`
+on its `&mut` parameters or its split views (`has_arr` in `emit_fn_inner`): the copy reads bytes a
+`restrict` pointer of the call may write (C11 6.7.3.1). A call casts a nested array argument to
+`T const (*)[M]`. In a backtrace the parameter shows as `__sc_ap<l>`.
 
 A body renders straight into the TU buffer: `emit_body_core_cf` takes `self.out` out of
 the emitter and threads it as `o: &mut String` through every statement, control-flow
@@ -963,7 +979,9 @@ their target's profile directory (`<out-dir>/<profile>/raw`). Module paths map t
 
 ```
 <gen_root>/
-  super_rt.h super_rt.c    # shared runtime (arithmetic helpers, allocation interposition, leak tracker)
+  super_rt.h               # C backend header (src/emit/rt_h.spc): libc includes, arithmetic helpers, runtime prototypes
+  std/
+    rt/base.c              # the runtime module (traps, leak tracker, overflow report), as every module
   __sc_fwd.h               # runtime and extern-block includes, dyn/extern declarations, shared by every TU
   __sc_t/app__Point.h      # one definition header per type: its typedef, definition and layout check
   app.h  app.c             # per module: .h holds its prototypes and `_ret` typedefs, .c the TU body

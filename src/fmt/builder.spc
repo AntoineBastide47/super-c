@@ -408,6 +408,52 @@ extend Builder {
         return e;
     }
 
+    // The node that holds the first token of expression `id`: the left operand, callee, base or operand it
+    // starts with.
+    fn leftmost(self: &Self, id: NodeId) NodeId {
+        let mut cur = id;
+        loop {
+            let n = self.nd(cur);
+            let next = switch n.kind {
+                NODE_BINARY | NODE_ASSIGNMENT => n.as_data.binary.left,
+                NODE_CALL => n.as_data.call.callee,
+                NODE_INDEX => n.as_data.index.object,
+                NODE_MEMBER => n.as_data.member.object,
+                NODE_GENERIC_SPECIALIZATION => n.as_data.specialization.expression,
+                NODE_CAST => n.as_data.cast.expression,
+                NODE_RANGE => n.as_data.pattern_range.start,
+                NODE_UNARY => if n.as_data.unary.op == tt::TokenType::Question {
+                    n.as_data.unary.operand;
+                } else {
+                    NODE_NONE;
+                },
+                _ => NODE_NONE,
+            };
+            if next == NODE_NONE {
+                return cur;
+            }
+            cur = next;
+        }
+    }
+
+    // A range bound that starts with a token the parser's `starts_range_bound` refuses (`if`, `loop`, `[`) needs
+    // its parentheses: `a..if c { x } else { y }` reads as a range ending at `if` with a body.
+    fn b_range_bound(self: &mut Self, id: NodeId) d::DocId {
+        let first = self.nd(self.leftmost(id));
+        let refused = first.kind == NodeKind::NODE_IF || first.kind == NodeKind::NODE_WHILE || self.src.byte_at(
+            first.span.start as usize,
+        ) == b'[';
+        if !refused {
+            return self.b_expr_prec(id, PREC_RANGE + 1);
+        }
+        let e = self.b_expr(id);
+        let v = self.st.len();
+        self.st.push(self.p.txt("("));
+        self.st.push(e);
+        self.st.push(self.p.txt(")"));
+        return self.cat(v);
+    }
+
     // Does src[from..to) hold a comment or attribute? Decides up front whether a list must print broken.
     fn gap_has_trivia(self: &Self, from: u32, to: u32) bool {
         let mut segs = Vector::<TriviaSeg>::new();
@@ -1024,7 +1070,7 @@ extend Builder {
             NODE_RANGE => {
                 let r = n.as_data.pattern_range;
                 if r.start != NODE_NONE {
-                    self.st.push(self.b_expr_prec(r.start, PREC_RANGE + 1));
+                    self.st.push(self.b_range_bound(r.start));
                 }
                 if r.inclusive {
                     self.st.push(self.p.txt("..="));
@@ -1032,7 +1078,7 @@ extend Builder {
                     self.st.push(self.p.txt(".."));
                 }
                 if r.end != NODE_NONE {
-                    self.st.push(self.b_expr_prec(r.end, PREC_RANGE + 1));
+                    self.st.push(self.b_range_bound(r.end));
                 }
             },
             NODE_CALL => {

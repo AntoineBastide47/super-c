@@ -4417,12 +4417,12 @@ extend<'a> TypeChecker<'a> {
 
     // Does `node` need the context type pushed into it before it can be checked? A generic function
     // named as a value and a generic enum's variant without type arguments carry no complete type of
-    // their own; an array literal's element type comes from the parameter when its elements are
+    // their own; a tuple's elements take the parameter's written types; an array literal's element type comes from the parameter when its elements are
     // unsuffixed literals (or when it is empty); an `if` or `switch` value converts each arm to the
     // parameter's type, as it does a `let`'s.
     fn tc_wants_param_type(self: &mut Self, node: NodeId) bool {
         let k = unsafe (*self.cur_ast()).at_const(node).kind;
-        if k == NodeKind::NODE_ARRAY_LITERAL || k == NodeKind::NODE_IF || k == NodeKind::NODE_MATCH {
+        if k == NodeKind::NODE_ARRAY_LITERAL || k == NodeKind::NODE_TUPLE || k == NodeKind::NODE_IF || k == NodeKind::NODE_MATCH {
             return true;
         }
         return self.tc_generic_fn_named(node).node != NODE_NONE || self.tc_bare_generic_variant(node) || self.tc_bare_generic_struct_lit(
@@ -16933,7 +16933,7 @@ extend<'a> TypeChecker<'a> {
             return self.fn_owns(ty);
         }
         if y0.kind == TypeKind::TYPE_DYN {
-            return y0.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8;
+            return y0.dyn_owns();
         }
         if y0.kind == TypeKind::TYPE_GENERIC {
             return self.tc_param_owns(y0.module, y0.as_data.decl);
@@ -28447,7 +28447,11 @@ extend TypeChecker {
                 if !converted && src != TYPE_NONE && dst != TYPE_NONE && src != dst {
                     let sk = self.type_at(src).kind;
                     let dk = self.type_at(dst).kind;
-                    let aggregate = sk == TypeKind::TYPE_STRUCT || sk == TypeKind::TYPE_ENUM || sk == TypeKind::TYPE_FUNCTION || dk == TypeKind::TYPE_STRUCT || dk == TypeKind::TYPE_ENUM || dk == TypeKind::TYPE_FUNCTION || dk == TypeKind::TYPE_DYN;
+                    // An array reaches a slice by the implicit view (`let s: []T = a`, an argument), which
+                    // `as` does not spell.
+                    let mut se = TYPE_NONE;
+                    let array_view = sk == TypeKind::TYPE_ARRAY && self.slice_kind(dst, &mut se) != 0;
+                    let aggregate = array_view || sk == TypeKind::TYPE_STRUCT || sk == TypeKind::TYPE_ENUM || sk == TypeKind::TYPE_FUNCTION || dk == TypeKind::TYPE_STRUCT || dk == TypeKind::TYPE_ENUM || dk == TypeKind::TYPE_FUNCTION || dk == TypeKind::TYPE_DYN;
                     let enum_int = self.is_plain_enum(src) && self.is_int(dst) || self.is_plain_enum(dst) && self.is_int(
                         src,
                     );
@@ -28472,6 +28476,9 @@ extend TypeChecker {
                         let d = self.type_str(dst);
                         let sp = unsafe (*a).at_const(id).span;
                         self.errors.emit_span(sp, format("invalid cast from '{}' to '{}'", s.as_str(), d.as_str()));
+                        if array_view {
+                            self.errors.note(format("an array converts to a slice implicitly; drop the cast"));
+                        }
                     }
                 }
                 result = dst;
@@ -29276,6 +29283,7 @@ extend TypeChecker {
                 mis = NODE_NONE;
                 self.tc_retype_array_elems(elements, we);
                 self.tc_view_array_elems(elements, we);
+                self.tc_erase_array_elems(elements, we);
             } else if mis != NODE_NONE && we == TYPE_NONE && self.elements_fit(elements, elem) {
                 mis = NODE_NONE;
                 self.tc_retype_array_elems(elements, elem);
@@ -29352,6 +29360,23 @@ extend TypeChecker {
         }
     }
 
+    // Record the erasure of every array element adopted into dyn element type `we` (`[&a, &b]` as
+    // `[&dyn I; 2]`, `Box<T>` as `Box<dyn I>`): the element keeps its own type and lowering wraps it.
+    fn tc_erase_array_elems(self: &mut Self, elements: NodeList, we: TypeId) {
+        if self.type_at(we).kind != TypeKind::TYPE_DYN {
+            return;
+        }
+        for i in 0..elements.len {
+            let mut v = unsafe (*self.cur_ast()).list(elements)[i as usize];
+            if unsafe (*self.cur_ast()).at_const(v).kind == NodeKind::NODE_FIELD_INITIALIZER {
+                v = unsafe (*self.cur_ast()).at_const(v).as_data.field_initializer.value;
+            }
+            if unsafe (*self.cur_ast()).type_of(v) != we {
+                let _ = self.compatible(we, v);
+            }
+        }
+    }
+
     // Give every element that is itself a (non-repeat) array literal the adopted element type
     // `we`, at every depth: a nested literal is stored into its slot, so it must have the slot's
     // length (a designated inner literal zero-fills the rest of it). An unsuffixed float literal
@@ -29389,7 +29414,9 @@ extend TypeChecker {
         // A nested literal (`[[0.0; 2]; 3]` for `[[f64; 2]; 3]`) is checked against the slot type.
         let mut elem = self.tc_check_elem(vid, we);
         if we != TYPE_NONE && we != elem && elem != TYPE_NONE && self.compatible_in(we, vid, true) {
-            if self.type_at(elem).kind == TypeKind::TYPE_ARRAY || self.tc_float_lit_unpinned(vid) {
+            if self.type_at(elem).kind == TypeKind::TYPE_ARRAY || self.type_at(we).kind == TypeKind::TYPE_DYN || self.tc_float_lit_unpinned(
+                vid,
+            ) {
                 // record the slice coercion, as for element lists; a float literal takes the type
                 let _ = self.compatible(we, vid);
             }
@@ -29603,14 +29630,24 @@ extend TypeChecker {
         let mut own = TYPE_NONE; // the second element's own type, before a coercion
         for i in 0..elems.len {
             let eid = unsafe (*a).list(elems)[i as usize];
-            let et = self.check_expr(eid);
+            let et = self.tc_check_elem(
+                eid,
+                if i as i32 < wn {
+                    wargs[i as usize];
+                } else {
+                    TYPE_NONE;
+                },
+            );
             targs[i as usize] = et;
             if i == 1 {
                 own = et;
             }
             if i as i32 < wn && et != wargs[i as usize] && self.compatible(wargs[i as usize], eid) {
                 targs[i as usize] = wargs[i as usize];
-                unsafe (*self.cur_ast()).set_type(eid, wargs[i as usize]);
+                // An erased element keeps its own type: lowering wraps it from the recorded erasure.
+                if unsafe (*self.cur_ast()).dyn_use_at(eid) == null {
+                    unsafe (*self.cur_ast()).set_type(eid, wargs[i as usize]);
+                }
             }
         }
         self.lt_env.truncate(fm);

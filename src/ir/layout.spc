@@ -100,8 +100,8 @@ pub struct Svc {
     active: Vector<u64>, // aggregate instantiations under query (declaration and arguments): cycle mark
     steps: Vector<ConstStep>, // `steps_hold` scratch
     pending: u32, // answers that read a constant-expression attribute not evaluated yet: never cached
-    /// The compile-time evaluation this service answers for (null: none). A member another job may
-    /// be writing (`Interp::settled_node`) is pending.
+    /// The compile-time evaluation this service answers for (null: none). A member of an item the
+    /// reader does not see checked (`Interp::visible_node`) is pending.
     pub ev: *const iri::Interp,
 }
 
@@ -152,7 +152,7 @@ extend Svc {
         if !ast.valid(mid) {
             return Layout { ok: false };
         }
-        if self.ev != null && !unsafe (&*self.ev).settled_node(m, mid) {
+        if self.ev != null && !unsafe (&*self.ev).visible_node(m, mid) {
             self.pending += 1;
             return Layout { ok: false };
         }

@@ -2165,6 +2165,12 @@ extend Ty {
         return self.kind == TypeKind::TYPE_SIMD || self.kind == TypeKind::TYPE_MASK;
     }
 
+    /// A TYPE_DYN that owns its payload (`Box<dyn I>`): drops free it. `&dyn I` and `&mut dyn I`
+    /// borrow theirs. Every ownership predicate asks this.
+    pub const fn dyn_owns(self: &Self) bool {
+        return self.kind == TypeKind::TYPE_DYN && self.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8;
+    }
+
     /// A function-pointer type: a signature record, no declaration.
     pub const fn fn_sig(self: &Self) bool {
         return self.kind == TypeKind::TYPE_FUNCTION && (self.qualifier & FN_SIG) != 0;
@@ -4253,7 +4259,12 @@ extend Ast {
         if self.gt.p != null && (index & TYPE_PROV) == 0 {
             return unsafe (&*self.gt.p).instance(index as usize);
         }
-        return self.pool.instance((index & TYPE_PROV_MASK) as usize);
+        let k = (index & TYPE_PROV_MASK) as usize;
+        assert(
+            k < self.pool.ninst(),
+            "provisional instance id outside this module's pool (another module's, or published)",
+        );
+        return self.pool.instance(k);
     }
 
     /// Apply a publication: every provisional id this module's tables hold becomes its final id
@@ -5254,7 +5265,9 @@ extend Ast {
         if self.gt.p != null && (t & TYPE_PROV) == 0 {
             return unsafe (&*self.gt.p).at(t as usize);
         }
-        return self.pool.at((t & TYPE_PROV_MASK) as usize);
+        let k = (t & TYPE_PROV_MASK) as usize;
+        assert(k < self.pool.len(), "provisional type id outside this module's pool (another module's, or published)");
+        return self.pool.at(k);
     }
 
     /// Approximate owned bytes (vector CAPACITIES, not lengths): the LSP retention budget's

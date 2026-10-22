@@ -1,10 +1,10 @@
 // `super-c bindgen <header.h>`: turn a C library's header into a Super-C `extern "C"` module.
 //
-// The C is read through the SYSTEM PREPROCESSOR rather than parsed from source: `cc -E` resolves every
-// `#include`, `#if` and macro, so what reaches the parser here is a flat list of declarations with no
-// preprocessor left in it, and the same toolchain that will compile the emitted C decides what those
-// declarations are. `cc -E -dM` supplies the target's integer widths, so `long` maps by what this toolchain
-// says it is rather than by assumption.
+// The C is read through bindgen's own preprocessor (`bindgen::cpp`) under the C environment of the target
+// (`bindgen::ctarget`: clang's predefined macros, `__has_*` answers, system directories and built-in
+// headers), never through a C compiler. It resolves every `#include`, `#if` and macro, so what reaches the
+// parser here is a flat list of declarations with no preprocessor left in it. Its macro dump supplies the
+// target's integer widths, so `long` maps by what the target says it is rather than by assumption.
 //
 // The preprocessor also says where each declaration CAME FROM (`# <line> "<file>"` markers), which is what
 // separates the requested header's own declarations from the thousands its includes drag in. Everything is
@@ -20,11 +20,12 @@
 // preprocessor has already expanded them away by the time anything here runs.
 
 import stdio;
-import stdlib;
 import driver_shim as shim;
 import module::loader as loader;
 import driver::util as *;
 import lexer::lexer as lex;
+import bindgen::cpp as cpp;
+import bindgen::ctarget as ct;
 
 const TK_EOF: i32 = 0;
 const TK_IDENT: i32 = 1;
@@ -274,7 +275,7 @@ fn wellknown(name: str, out: &mut String) bool {
     return true;
 }
 
-// Widths this toolchain reports through `cc -E -dM`, so `long` and friends map by measurement.
+// Widths the target's predefined macros report, so `long` and friends map by measurement.
 struct Widths {
     pub short_b: i32,
     pub int_b: i32,
@@ -525,47 +526,43 @@ fn same_origin(a: str, want: str, extra: &Vector<String>) bool {
     return same;
 }
 
-fn temp_path(tag: str) String {
-    let mut p = String::from_str(unsafe str::from_cstr(shim::sc_tmpdir()));
-    p.format_into("/super-c-bindgen-{}-{}", unsafe shim::sc_getpid(), tag);
-    return p;
+// Preprocess `header` under the C environment `env`, with the `-I` directories `incs` searched before the
+// system ones: the `cc -E` text into `text` and the `cc -E -dM` dump into `dump`. False after an error, which
+// the preprocessor reports on stderr.
+fn preprocess(env: &ct::CTarget, header: str, incs: &Vector<String>, text: &mut String, dump: &mut String) bool {
+    let mut files = Vector::<cpp::VFile>::new();
+    for i in 0..env.headers.len() {
+        files.push(
+            cpp::VFile {
+                path: format("{}/{}", ct::BUILTIN_DIR, env.headers[i]),
+                text: String::from_str(ct::builtin_header(env.headers[i])),
+            },
+        );
+    }
+    let mut has = Vector::<String>::new();
+    for i in 0..env.has.len() {
+        has.push(String::from_str(env.has[i]));
+    }
+    let mut pp = cpp::Pp::new(
+        cpp::PpConfig {
+            quote_dirs: Vector::<String>::new(),
+            dirs: incs.clone(),
+            sys_dirs: env.sys_dirs.clone(),
+            frameworks: env.frameworks.clone(),
+            files: files,
+            predefs: env.predefs.clone(),
+            cmdline: String::new(),
+            has: has,
+        },
+    );
+    if !pp.preprocess(header, text) {
+        return false;
+    }
+    pp.dump_macros(dump);
+    return true;
 }
 
-// The preprocessor argv (no shell): the compiler tokens split on whitespace ($CC may be "zig cc");
-// header and include paths are single verbatim arguments, so spaces and quotes pass through.
-fn cpp_command(cc: str, header: str, incs: &Vector<String>, cflags: &Vector<String>, dump_macros: bool) Vector<String> {
-    let mut args = Vector::<String>::new();
-    let mut a: usize = 0;
-    for i in 0..cc.len() + 1 {
-        if i == cc.len() || cc[i] == b' ' || cc[i] == b'\t' {
-            if i > a {
-                args.push(String::from_str(cc.slice(a, i)));
-            }
-            a = i + 1;
-        }
-    }
-    args.push(String::from_str("-E"));
-    if dump_macros {
-        args.push(String::from_str("-dM"));
-    }
-    args.push(String::from_str("-x"));
-    args.push(String::from_str("c"));
-    for i in 0..cflags.len() {
-        args.push(cflags.at(i).clone());
-    }
-    for i in 0..incs.len() {
-        let mut inc = String::from_str("-I");
-        inc.push_string(&incs[i]);
-        args.push(inc);
-    }
-    args.push(String::from_str(header));
-    return args;
-}
-
-// One line of `text` starting at `i`, without its terminator. A `\r` is dropped with the `\n`: the
-// preprocessor's output is CRLF on Windows, and a value read as `7\r` parses as nothing at all: which
-// silently cost every macro constant there, and `__SIZEOF_LONG__` with them (Windows' `long` is 4 bytes,
-// so falling back to the 8-byte default mistyped every `long` in a signature).
+// One line of `text` starting at `i`, without its terminator.
 fn line_at<'a>(text: str<'a>, i: usize, end: &mut usize) str<'a> {
     let n = text.len();
     let mut e = i;
@@ -573,14 +570,10 @@ fn line_at<'a>(text: str<'a>, i: usize, end: &mut usize) str<'a> {
         e = e + 1;
     }
     *end = e;
-    let mut t = e;
-    if t > i && text.byte_at(t - 1) == b'\r' {
-        t = t - 1;
-    }
-    return text.slice(i, t);
+    return text.slice(i, e);
 }
 
-// `__SIZEOF_*__` is what the toolchain itself reports, so `long` maps to what it will be.
+// `__SIZEOF_*__` is what the target reports, so `long` maps to what it will be.
 fn read_widths(text: str) Widths {
     let mut w = Widths { short_b: 2, int_b: 4, long_b: 8, llong_b: 8 };
     let n = text.len();
@@ -1139,10 +1132,8 @@ fn run_one(
     spelling_in: str,
     incs: &Vector<String>,
     froms: &Vector<String>,
-    cflags: &Vector<String>,
-    cc_str: str,
+    env: &ct::CTarget,
 ) i32 {
-    let cc = String::from_str(cc_str);
     let mut hdr = String::from_str(header);
     let mut abs = PathBuf {};
     if unsafe shim::sc_realpath(hdr.cstr(), &mut abs[0]) != null {
@@ -1154,9 +1145,6 @@ fn run_one(
         spelling.push_str(header);
     }
 
-    let mut ipath = temp_path("i");
-    let mut mpath = temp_path("m");
-    let mut rc: i32 = 1;
     let mut c = Collected {
         aliases: Vector::<Alias>::new(),
         fns: Vector::<FnDecl>::new(),
@@ -1174,48 +1162,21 @@ fn run_one(
         macros: Map::<String, u64>::new(),
     };
 
+    let mut text = String::new();
     let mut mdump = String::new();
-    let mut mcmd = cpp_command(cc.as_str(), hdr.as_str(), incs, cflags, true);
-    if exec_args(&mut mcmd, mpath.cstr()) == 0 {
-        if let Some(t) = loader::read_file(mpath.as_str()) {
-            c.widths = read_widths(t.as_str());
-            c.index_macros(t.as_str());
-            mdump = t;
-        }
+    if !preprocess(env, hdr.as_str(), incs, &mut text, &mut mdump) {
+        eprintln("super-c: the preprocessor failed on '{}'", header);
+        return 1;
     }
-    let _ = unsafe shim::sc_unlink(mpath.cstr());
-
-    let mut cmd = cpp_command(cc.as_str(), hdr.as_str(), incs, cflags, false);
-    let prc = exec_args(&mut cmd, ipath.cstr());
-    if prc != 0 {
-        unsafe stdio::fprintf(
-            stdio::stderr(),
-            "super-c: the preprocessor failed on '%.*s'\n".ptr() as *const char,
-            header.len() as i32,
-            header.ptr(),
-        );
-    } else {
-        switch loader::read_file(ipath.as_str()) {
-            Some(text) => {
-                let mut lx = Lexer::new(text.as_str());
-                lx.parse_unit(&mut c, hdr.as_str(), froms, mdump.as_str());
-                c.collect_consts(hdr.as_str(), mdump.as_str());
-                c.demote_opaque_holders();
-                let mut out = String::new();
-                c.emit(spelling.as_str(), link, &mut out);
-                rc = write_out(out.as_str(), out_path, c.fns.len(), c.skipped);
-            },
-            None => {
-                unsafe stdio::fputs(
-                    "super-c: could not read the preprocessed output\n".ptr() as *const char,
-                    stdio::stderr(),
-                );
-                rc = 1;
-            },
-        };
-    }
-    let _ = unsafe shim::sc_unlink(ipath.cstr());
-    return rc;
+    c.widths = read_widths(mdump.as_str());
+    c.index_macros(mdump.as_str());
+    let mut lx = Lexer::new(text.as_str());
+    lx.parse_unit(&mut c, hdr.as_str(), froms, mdump.as_str());
+    c.collect_consts(hdr.as_str(), mdump.as_str());
+    c.demote_opaque_holders();
+    let mut out = String::new();
+    c.emit(spelling.as_str(), link, &mut out);
+    return write_out(out.as_str(), out_path, c.fns.len(), c.skipped);
 }
 
 fn write_out(text: str, out_path: str, nfns: usize, skipped: usize) i32 {
@@ -1356,7 +1317,7 @@ fn walk_headers(dir: str, rel: str, out_dir: str, jobs: &mut Vector<Job>) bool {
 
 /// `super-c bindgen <header.h|dir>... [-o out]`. A directory is walked recursively for `.h` files, so a
 /// whole library's include tree converts in one call: `-o` then names a DIRECTORY, and the tree under it
-/// mirrors the headers'. A single header with no `-o` still writes to stdout.
+/// mirrors the headers'. A single header with no `-o` still writes to stdout. `cstd` is the project's.
 pub fn run(
     paths: &Vector<String>,
     out_path: str,
@@ -1365,16 +1326,26 @@ pub fn run(
     incs: &Vector<String>,
     froms: &Vector<String>,
     cflags: &Vector<String>,
-    cc_in: str,
+    target: i32,
+    arch: i32,
+    sysroot: str,
+    cstd: str,
 ) i32 {
-    let mut cc = String::from_str(cc_in);
-    if cc.len() == 0 {
-        let e = stdlib::get_env("CC").unwrap_or(String::new());
-        if e.len() != 0 {
-            cc.push_string(&e);
-        } else {
-            cc.push_str("cc");
-        }
+    let mut env = ct::CTarget::new();
+    if !ct::c_target(target, arch, sysroot, &mut env) {
+        return 1;
+    }
+    // The build's C environment first, so the headers declare what the generated C compiles against;
+    // `--cflag=` after it, as a manifest's `cflags` follow its `cstd`.
+    let mut flags = String::new();
+    push_c_env(&mut flags, cstd, target);
+    flags.push_byte(b' ');
+    for i in 0..cflags.len() {
+        flags.push_string(&cflags[i]);
+        flags.push_byte(b' ');
+    }
+    if !ct::apply_c_flags(flags.as_str(), &mut env) {
+        return 1;
     }
     let out_is_file = out_path.ends_with(".spc");
     let out_dir = if out_is_file {
@@ -1438,16 +1409,7 @@ pub fn run(
                 let mut odp = String::from_str(od);
                 let _ = unsafe shim::sc_mkdir_p(odp.cstr());
             }
-            if run_one(
-                jobs[i].path.as_str(),
-                jobs[i].out.as_str(),
-                link,
-                jobs[i].spelling.as_str(),
-                incs,
-                froms,
-                cflags,
-                cc.as_str(),
-            ) != 0 {
+            if run_one(jobs[i].path.as_str(), jobs[i].out.as_str(), link, jobs[i].spelling.as_str(), incs, froms, &env) != 0 {
                 rc = 1;
             }
         }

@@ -148,12 +148,6 @@ const fn lower_at(s: str, k: usize) bool {
     return k < s.len() && s.byte_at(k) >= b'a' && s.byte_at(k) <= b'z';
 }
 
-/// True when `s` is one of the function-like macros super_rt.h's leak tracker wraps the C allocator
-/// with: a call through a member or local of that name must not spell the name right before `(`.
-pub const fn rt_macro(s: str) bool {
-    return s == "malloc" || s == "calloc" || s == "realloc" || s == "free";
-}
-
 /// True when `s` is a macro of the standard headers every generated TU includes (super_rt.h pulls in
 /// all of them), or falls in a macro family the C standard reserves for those headers: an emitted
 /// identifier with that spelling would expand. Function-like macros count too (the <tgmath.h> math
@@ -380,8 +374,9 @@ const fn base_idx_cmp(a: &BaseIdx, b: &BaseIdx) i32 {
 /// cross-TU use edges the writer prunes by.
 pub struct Mangler {
     pub pkg: *const loader::Package,
-    /// Prefixing is on only when the package holds more than one non-prelude module (the single-
-    /// module build emits one standalone TU with bare names).
+    /// Prefixing is on only when the package holds more than one program module, not counting the
+    /// runtime (the single-module build emits one standalone TU with bare names). The runtime's own
+    /// symbols always take its prefix (`modpfx`).
     pub mangle: bool,
     ph_global: loader::LookupHit,
     // Per-module short-prefix verdicts (1 = short), a pure function of the package's module path
@@ -452,6 +447,7 @@ pub struct Mangler {
     tn_memo: Map<u64, u64>, // (module, decl) or concrete (module, type) -> C name FNV
     tn_buf: String, // spelling scratch of the name keys
     ptr_depth: u32, // nesting of pointee spellings: a type spelled below a pointer needs no definition
+    arr_const: bool, // `param_ctype` is spelling an array: the next array declarator qualifies its elements `const`
     /// Nesting of the C type spellers: a module prefix spelled inside one names a type.
     pub type_depth: u32,
     /// Nesting of the symbol-segment spellers (`type_m`, `inst_name`, `dyn_stem`) outside a C
@@ -672,12 +668,12 @@ pub fn subs_copy(v: &Vector<MSub>) Vector<MSub> {
 
 extend Mangler {
     /// A mangler over `pkg` (which must outlive it); prefixing is on iff the package holds more than
-    /// one non-prelude module.
+    /// one program module besides the runtime.
     pub fn new(pkg: *const loader::Package) Mangler {
         let p = unsafe &*pkg;
         let mut user_mods: usize = 0;
         for i in 0..p.modules.len() {
-            if !p.modules.at(i).prelude {
+            if !p.modules.at(i).prelude && i as i32 != p.rt_module {
                 user_mods += 1;
             }
         }
@@ -722,6 +718,7 @@ extend Mangler {
             tn_memo: Map::<u64, u64>::new(),
             tn_buf: String::new(),
             ptr_depth: 0,
+            arr_const: false,
             type_depth: 0,
             seg_depth: 0,
             fp_bufs: Vector::<String>::new(),
@@ -1720,7 +1717,7 @@ extend Mangler {
     /// a symbol segment, else a symbol edge.
     pub fn modpfx(self: &mut Self, m: ModuleId, out: &mut String) {
         self.spell_edge(m);
-        if !self.mangle || self.p().modules.at(m as usize).prelude {
+        if !self.mangle && m as i32 != self.p().rt_module || self.p().modules.at(m as usize).prelude {
             return;
         }
         let path = self.p().modules.at(m as usize).path.as_str();
@@ -1781,10 +1778,10 @@ extend Mangler {
         }
     }
 
-    // Whether the identifiers of module `m` take the shadow escape: a non-prelude module of a package
-    // whose index lists shadowing names.
+    // Whether the identifiers of module `m` take the shadow escape: a program module of a package whose
+    // index lists shadowing names. Never the runtime, whose C then does not depend on the program's names.
     const fn shadows(self: &Self, m: ModuleId) bool {
-        return self.p().idx.shadow.len() != 0 && !self.p().modules.at(m as usize).prelude;
+        return self.p().idx.shadow.len() != 0 && !self.p().modules.at(m as usize).prelude && m as i32 != self.p().rt_module;
     }
 
     // Whether `w` is a non-prelude top-level name that a prelude declaration also has (`PkgIndex.shadow`).
@@ -2235,7 +2232,7 @@ extend Mangler {
             if dst.len() != st {
                 dst.push_str(", ");
             }
-            if !self.ctype(sm, pty, "", dst) {
+            if !self.param_ctype(sm, pty, "", dst) {
                 return false;
             }
         }
@@ -2397,7 +2394,7 @@ extend Mangler {
             // prototype header, as for a prefixed symbol.
             if !unsafe (*self.p().module_ast_const(fm)).at_const(fnode).as_data.function.is_extern() {
                 self.spell_edge(fm);
-            } else {
+            } else if !self.tracked_alloc(fm, out, st) {
                 x_alias(self.p(), DefId { module: fm, node: fnode }, out, st);
             }
             return true;
@@ -2407,7 +2404,9 @@ extend Mangler {
         if unsafe (*a).at_const(fnode).as_data.function.is_extern() {
             // An extern function IS its C symbol: never prefixed, never suffixed.
             self.c_ident(fm, fname, out);
-            x_alias(self.p(), DefId { module: fm, node: fnode }, out, st);
+            if !self.tracked_alloc(fm, out, st) {
+                x_alias(self.p(), DefId { module: fm, node: fnode }, out, st);
+            }
             return true;
         }
         let src = self.p().modules.at(fm as usize).source.as_str();
@@ -2457,6 +2456,21 @@ extend Mangler {
         if target.node != NODE_NONE {
             return self.iface_suffix(fm, fnode, out);
         }
+        return true;
+    }
+
+    // An extern C `malloc`, `calloc`, `realloc` or `free` (the symbol at `out[st..]`) outside the runtime
+    // spells the runtime's tracked entry `sc_lk_<name>` (std/rt/base.spc, declared by super_rt.h): every
+    // allocation the program makes through C reaches the leak tracker. True when it renamed the symbol.
+    fn tracked_alloc(self: &Self, fm: ModuleId, out: &mut String, st: usize) bool {
+        let nm = out.as_str().slice(st, out.len());
+        if fm as i32 == self.p().rt_module || nm != "malloc" && nm != "calloc" && nm != "realloc" && nm != "free" {
+            return false;
+        }
+        let name = String::from_str(nm);
+        out.truncate(st);
+        out.push_str("sc_lk_");
+        out.push_string(&name);
         return true;
     }
 
@@ -3237,6 +3251,23 @@ extend Mangler {
         return r;
     }
 
+    /// `ctype` of a parameter. A fixed-array value parameter is a pointer to the caller's array in C and
+    /// the callee never writes through it (every one copies on entry), so its elements are `const`: a
+    /// `const` array (a field read through `&T`) then passes without a cast. Every spelling of one
+    /// signature (definition, prototype, function value, vtable slot, thunk) must use this, as C
+    /// treats `T *` and `const T *` parameters as distinct function types. A call casts a nested
+    /// array argument to `T const (*)[M]` (ISO C before C23 under `-Wpedantic`).
+    pub fn param_ctype(self: &mut Self, pm: ModuleId, t: TypeId, decl: str, out: &mut String) bool {
+        let mut rm = pm;
+        let mut rt = t;
+        if self.resolve(pm, t, &mut rm, &mut rt) && unsafe (*self.p().module_ast_const(rm)).type_at(rt).kind == TypeKind::TYPE_ARRAY {
+            self.arr_const = true;
+        }
+        let ok = self.ctype(pm, t, decl, out);
+        self.arr_const = false;
+        return ok;
+    }
+
     fn ctype_i(self: &mut Self, pm: ModuleId, t: TypeId, decl: str, out: &mut String) bool {
         let a = self.p().module_ast_const(pm);
         let y = *unsafe (*a).type_at(t);
@@ -3286,12 +3317,18 @@ extend Mangler {
             return true;
         }
         if y.kind == TypeKind::TYPE_ARRAY {
+            let qual = replace(&mut self.arr_const, false);
             let n = self.arr_len(pm, &y);
             if n < 0 {
                 return false;
             }
             let mut inner = String::new();
             if n != 0 {
+                // In the declarator, `const` reaches the innermost element, also a pointer or a
+                // function pointer (`T *const p[4]`); an unnamed declarator spells `T const [4]`.
+                if qual {
+                    inner.push_str("const ");
+                }
                 inner.push_str(decl);
                 inner.push_str("[");
                 inner.push_u64(n as u64);

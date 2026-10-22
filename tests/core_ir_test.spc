@@ -1313,3 +1313,15 @@ fn a_never_value_builds_in_every_position() {
         assert(ok, forms[i]);
     }
 }
+
+// A constant whose evaluation lowers a body that calls a method of an extend checked later in the
+// same cycle must read the same call shape as the run-time code: the argument `bump(&mut x)` runs
+// before `x` is borrowed for `self`, so `m` sees 11, not 1.
+@test
+fn const_eval_keeps_call_shape_of_a_later_method() {
+    h::expect_exit(
+        "const equals run time",
+        "const X: i32 = h();\nfn h() i32 {\n    let mut x: i32 = 1;\n    return x.m(bump(&mut x));\n}\nconst G: i32 = X + 1;\nextend i32 {\n    pub fn m(self: &Self, b: i32) i32 {\n        if b == 7 {\n            return G;\n        }\n        return *self + b;\n    }\n}\nfn bump(x: &mut i32) i32 {\n    *x += 10;\n    return 0;\n}\nfn main() i32 {\n    return (X != h()) as i32;\n}\n",
+        0,
+    );
+}

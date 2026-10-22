@@ -241,18 +241,18 @@ fn lsp_engine(p: &mut loader::Package) iri::Interp {
     return e;
 }
 
-// Lints run for non-prelude modules (like `super-c build`), for the package's root file when it IS a
-// prelude module (the `super-c lint <std file>` recipe), and: when `lint_dir` is non-empty (the
-// manifest root's build passes the canonical workspace root): for every prelude module under that
-// directory, so a repo carrying its own std/ lints it like `super-c lint std`. Gating on the root
-// file rather than "any open doc" keeps each file's lint warnings owned by exactly one root.
+// Lints run for non-prelude modules other than the runtime (like `super-c build`), for the package's
+// root file when it IS a prelude module (the `super-c lint <std file>` recipe), and: when `lint_dir` is
+// non-empty (the manifest root's build passes the canonical workspace root): for every prelude module
+// under that directory, so a repo carrying its own std/ lints it like `super-c lint std`. Gating on the
+// root file rather than "any open doc" keeps each file's lint warnings owned by exactly one root.
 fn lsp_lint_wanted(p: &mut loader::Package, i: usize, root_file: str, lint_dir: str) bool {
     // Batch build: the mask names the member files; everything else (their closures, the prelude)
     // is someone else's to lint.
     if p.lint_set.len() != 0 {
         return p.lint_set[i];
     }
-    if !p.modules[i].prelude {
+    if !p.modules[i].prelude && i as i32 != p.rt_module {
         return true;
     }
     let mut rf = String::from_str(root_file);

@@ -1090,3 +1090,20 @@ fn conformances_use_their_interfaces() {
     assert(!r.out_has("unused interface 'Lane'") && !r.out_has("unused interface 'Twice'"), "conformed interfaces");
     assert(r.out_has("unused interface 'Never'") && r.out_has("unused struct 'Lonely'"), "unused items");
 }
+
+// A constant evaluation that lowers a std operator method reads that method's parameter types from the
+// method's module pool. `lint` type-checks the prelude in process, so the method's types are still
+// provisional (one pool each) and a read through the wrong pool trips the pool bounds assert of
+// `Ast::type_at`. Without that assert the pre-fix compiler passes this test by chance.
+@test
+fn const_eval_operator_reads_foreign_provisional_types() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "import std::math::scalar as *;\nconst fn twice<T: Scalar>(a: T) T { return a + a; }\nconst X: f32 = twice(1.5);\nfn main() i32 {\n    return (X != 3.0) as i32;\n}\n",
+    );
+    let mut args = String::new();
+    args.format_into("lint \"{}/main.spc\"", p.dir());
+    let r = p.run_raw(args.as_str());
+    assert(r.ok(), "lint evaluates the constant");
+}

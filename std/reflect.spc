@@ -54,7 +54,7 @@
 // `if` over them (including a `meta_str` compare against a string literal) folds at emission,
 // so the untagged copies' bodies are never emitted. A `@reflect` tag on a CONCRETE type
 // additionally EXPORTS its descriptor as the C global `sc_typeinfo_<name>` and registers it at
-// startup: an external tool reads `__sc_reflect_types` (super_rt.h) and walks the same statics the
+// startup: an external tool reads `__sc_reflect_types` (std::rt::base) and walks the same statics the
 // program uses. String values keep their RAW source bytes (escape sequences are not processed).
 //
 // All of it works under the compile-time evaluator (`const fn`, static_assert, which also runs

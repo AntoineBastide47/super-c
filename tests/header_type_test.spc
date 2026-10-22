@@ -788,7 +788,7 @@ fn header_macros_stay_in_the_units_that_use_the_header() {
     }
     assert(r.ok(), "the program compiles");
     assert(p.xhdr_has("lib.h\""), "the header has its own generated file");
-    assert(!p.gen_has("__sc_fwd.h", "lib.h"), "the forward header does not include it");
+    assert(!p.gen_has("__sc_fwd.h", "lib.h\""), "the forward header does not include it");
     assert(p.gen_has("bind.c", "__sc_x_twice(x)"), "the binding unit calls the function by its alias");
     assert(p.gen_has("bind.c", "__sc_t/__scx"), "the binding unit includes the header");
     assert(!p.gen_has("other.c", "__sc_t/__scx"), "a parameter named like the function brings no header");

@@ -1200,7 +1200,7 @@ pub fn const_trap_class<'a>(msg: str<'a>) str<'a> {
     return "";
 }
 
-/// The trap class of a run-time trap message (`rt_c.spc` arithmetic and index helpers), in the words a constant
+/// The trap class of a run-time trap message (`rt_h.spc` arithmetic and index helpers), in the words a constant
 /// reports for the same trap, or the text from `lane <i>: ` of a vector operation's trap; empty for any
 /// other trap.
 pub fn runtime_trap_class<'a>(trap: str<'a>) str<'a> {

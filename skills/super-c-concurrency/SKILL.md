@@ -59,8 +59,9 @@ body can run user code, so a reachable std body ticks only then: always when it 
 value or a `dyn` method (or a std body that does), and, when it runs user code only through
 bound dispatch, only in the instances binding a type whose methods can be user code
 (`Map<u64, u64>` probes never tick; `Map<UserKey, V>` probes and `iter::for_each` over a user
-iterator do). Loops in `std::parallel` and in the substrate `ffi/sc_runtime.spc` never tick
-(`Package::runtime_path`): a tick inside a spinlock, a parked wait or a signal handler is a fault.
+iterator do). Loops in `std::parallel`, in the substrate `ffi/sc_runtime.spc` and in the runtime
+`std::rt` never tick (`loader::runtime_path`): a tick inside a spinlock, a parked wait or a signal
+handler is a fault.
 
 The tick is a function-local countdown (`__sc_spc`, budget 2048): every iteration takes one,
 and the iteration that takes the last one calls the hook and resets it. A counted loop is an
@@ -584,7 +585,7 @@ behind one thread. A 16-thread pool measured worse (284 against 267 Mcycles).
 | Shutdown report | Account for tasks that never finished |
 | `race` profile (`--profile=race`) | ThreadSanitizer with the coroutine fiber annotations; the only build that reports a runtime race |
 
-**Stack overflow report.** The program's runtime (`super_rt.c`, `src/driver/rt_c.spc`) arms the
+**Stack overflow report.** The program's runtime (`std/rt/base.spc`) arms the
 main thread before `main`; every thread std starts (pool workers, blocking-pool threads, the
 reactor, `thread::spawn`) calls `sc_rt_stack_guard_install` first. On POSIX an armed thread has a
 signal stack whose base records its own stack's bounds; a SIGSEGV (SIGBUS on macOS) is an

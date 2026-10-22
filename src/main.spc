@@ -1007,10 +1007,17 @@ fn canon_cwd() String {
 // Cargo-style manifest discovery: when the cwd has no build.toml, walk toward the filesystem root and
 // chdir to the nearest directory that has one. A miss changes nothing: the caller reports it.
 fn chdir_to_manifest() {
+    if let Some(mut dir) = nearest_manifest() {
+        let _ = unsafe shim::sc_chdir(dir.cstr());
+    }
+}
+
+// The nearest directory at or above the cwd that holds a build.toml ("." for the cwd), or None.
+fn nearest_manifest() Option<String> {
     let probe = stdio::fopen("build.toml", "rb");
     if probe != null {
         unsafe stdio::fclose(probe);
-        return;
+        return Option::<String>::Some(String::from_str("."));
     }
     let cwd = canon_cwd();
     let mut end = cwd.len();
@@ -1023,16 +1030,16 @@ fn chdir_to_manifest() {
         }
         // Drop the trailing '/'.
         end = end - 1;
-        let mut dir = String::from_str(cwd.as_str().slice(0, end));
+        let dir = String::from_str(cwd.as_str().slice(0, end));
         let mut man = dir.clone();
         man.push_str("/build.toml");
         let f = stdio::fopen(man.as_str(), "rb");
         if f != null {
             unsafe stdio::fclose(f);
-            let _ = unsafe shim::sc_chdir(dir.cstr());
-            return;
+            return Option::<String>::Some(dir);
         }
     }
+    return Option::<String>::None;
 }
 
 // The command-line usage, written to `out`.
@@ -1079,7 +1086,8 @@ OPTIONS:
     --header=SPELLING      bindgen: how the generated module spells the #include
     -I <dir>               bindgen: header search path
     --from=PART            bindgen: also take declarations from headers whose path contains PART
-    --cflag=F              bindgen: extra flag for the preprocessor invocation (repeatable)
+    --cflag=F              bindgen: C flag for the target's C environment: -std=, -D, -U, -f[un]signed-char (repeatable)
+    --sysroot=DIR          bindgen: the target's C library tree (default: discovered as the build does)
     --target=T             target: windows|macos|linux|ios|android|wasm
     --arch=A               instruction set: x86_64|aarch64|wasm32 (default: the target's)
     --target-feature=L     CPU features: +name enables, -name disables (wasm32: simd128, relaxed-simd)
@@ -1128,7 +1136,8 @@ fn main(argv: Vector<str>) i32 {
     let mut bg_header = ""; // bindgen: --header=SPELLING, how the emitted module #includes it
     let mut bg_incs = Vector::<String>::new(); // bindgen: -I search paths
     let mut bg_from = Vector::<String>::new(); // bindgen: --from=, extra origin headers to accept
-    let mut bg_cflags = Vector::<String>::new(); // bindgen: --cflag=, passed to the preprocessor verbatim
+    let mut bg_cflags = Vector::<String>::new(); // bindgen: --cflag=, applied to the target's C environment
+    let mut bg_sysroot = ""; // bindgen: --sysroot=DIR, the target's C library tree (empty: discover it)
     let mut vendor_name = ""; // vendor: optional name override for vendor/<name>
     let mut vendor_dir = "."; // vendor: --dir=, the project root vendored into
     let mut vendor_ref = ""; // vendor: --ref=, the branch, tag or commit pinned for a git source
@@ -1432,8 +1441,10 @@ fn main(argv: Vector<str>) i32 {
                 } else if arg == "-I" && i + 1 < argc {
                     i = i + 1;
                     bg_incs.push(String::from_str(argv[i]));
-                } else if arg.starts_with("--cc=") {
-                    bo.cc = arg[5..];
+                } else if arg.starts_with("--sysroot=") {
+                    bg_sysroot = arg[10..];
+                } else if arg.starts_with("--target=") || arg.starts_with("--arch=") {
+                    let _ = co.common_flag(arg);
                 } else if !arg.starts_with("-") {
                     // Like fmt/lint: the first path lands in `file`, the rest in `extra`.
                     if file.len() == 0 {
@@ -1542,12 +1553,36 @@ fn main(argv: Vector<str>) i32 {
         return bsys::vendor_dep(vendor_dir, file, vendor_name, vendor_ref, vendor_force);
     }
     if mode == Mode::MODE_BINDGEN {
+        // The project's `cstd`, so the headers see the dialect and POSIX level its build compiles with.
+        let mut bg_cstd = String::from_str(bman::DEFAULT_CSTD);
+        if let Some(dir) = nearest_manifest() {
+            switch bman::load(format("{}/build.toml", dir.as_str()).as_str(), false) {
+                Some(m) => {
+                    bg_cstd = m.cstd.clone();
+                },
+                None => {
+                    return 1;
+                },
+            };
+        }
         let mut bg_paths = Vector::<String>::new();
         bg_paths.push(String::from_str(file));
         for k in 0..extra.len() {
             bg_paths.push(String::from_str(argv[*extra.at(k)]));
         }
-        let rc = bindgen::run(&bg_paths, out_bin, bg_link, bg_header, &bg_incs, &bg_from, &bg_cflags, bo.cc);
+        let rc = bindgen::run(
+            &bg_paths,
+            out_bin,
+            bg_link,
+            bg_header,
+            &bg_incs,
+            &bg_from,
+            &bg_cflags,
+            co.target,
+            co.arch,
+            bg_sysroot,
+            bg_cstd.as_str(),
+        );
         return rc;
     }
     if mode == Mode::MODE_INIT {

@@ -3,6 +3,9 @@ name: Release
 # Owner-only, manual-trigger release: builds the `super-c` binary for macOS, Linux and Windows and publishes
 # a GitHub Release with one archive per platform.
 #
+# resolve -> compile -> test shards, levels, gate, gate-profiles, ctarget (Linux) -> package -> release
+#            wasm-compile -> wasm-checks, wasm-test -> wasm-package ----------------^
+#
 # `commit` is what keeps a run of untagged commits from being all-or-nothing. Left empty the tag lands on the
 # head of whatever branch this was dispatched from, so a single broken commit at the tip drags every good one
 # behind it into the same release; naming an earlier commit builds, tests and tags exactly that one instead.
@@ -328,6 +331,60 @@ jobs:
           role: gate
           sha: ${{ needs.resolve.outputs.sha }}
 
+  # The C environment tables of bindgen (src/bindgen/ctarget_data.spc) equal what clang of the pinned major
+  # release answers. The test shards skip those tests (no such clang on the runner); here a missing clang
+  # fails them. A job of its own, beside the gate: it needs only the compiler `compile` built, and the
+  # clang install stays off the gate's path.
+  ctarget:
+    needs: [resolve, compile]
+    if: github.actor == github.repository_owner
+    name: C environment tables (linux)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: linux
+          role: ctarget
+          save: true
+          sha: ${{ needs.resolve.outputs.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-linux
+
+      # clang-22 from apt.llvm.org: the repository key is checked against its published fingerprint
+      # (key id AF4F7421) before apt trusts it, and only the compiler package is installed.
+      - name: Install clang 22
+        run: |
+          set -eu
+          curl -fsSL -o llvm-snapshot.gpg.key https://apt.llvm.org/llvm-snapshot.gpg.key
+          fpr=$(gpg --show-keys --with-colons llvm-snapshot.gpg.key | awk -F: '/^fpr/ { print $10; exit }')
+          [ "$fpr" = 6084F3CF814B57C1CF12EFD515CF4D18AF4F7421 ] || { echo "unexpected apt.llvm.org key $fpr" >&2; exit 1; }
+          sudo gpg --dearmor -o /usr/share/keyrings/apt-llvm.gpg llvm-snapshot.gpg.key
+          codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+          echo "deb [signed-by=/usr/share/keyrings/apt-llvm.gpg] http://apt.llvm.org/$codename/ llvm-toolchain-$codename-22 main" | sudo tee /etc/apt/sources.list.d/llvm-22.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-22
+
+      - name: Check the tables against clang 22
+        run: |
+          set -eu
+          chmod +x ./super-c
+          SC_CTARGET_CLANG=clang-22 SC_CTARGET_REQUIRE=1 SC_LEAK_CHECK=fatal ./super-c test --sanitizers --quiet --filter=ctarget
+
+      - uses: ./.github/actions/cache-save
+        with:
+          target: linux
+          role: ctarget
+          sha: ${{ needs.resolve.outputs.sha }}
+
   # Every built-in profile but test builds the compiler (ci/gate.sh's last step), beside the gate: the
   # gate's fixpoint proves the two generations emit the same C, so the compiler `compile` built builds
   # them here.
@@ -468,7 +525,7 @@ jobs:
 
   # The release binary, built by the compiler the suite and the gate passed with.
   package:
-    needs: [resolve, compile, test, levels, gate, gate-profiles]
+    needs: [resolve, compile, test, levels, gate, gate-profiles, ctarget]
     if: github.actor == github.repository_owner
     name: package (${{ matrix.target }})
     strategy:
