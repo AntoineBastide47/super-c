@@ -705,8 +705,8 @@ fails in the C compile). A `struct`, `union` or `enum` in the block is a header 
 (`struct stat`, `enum color`, or a typedef name through `@import`), with the fields the declaration lists
 and the header's layout, which the C compiler checks field by field; the block must name that
 header. It has no compile-time size and no drop glue (see `super-c-ffi`, Header Types). No type
-of an extern block implements `Free`: wrap it in a struct that does. `@c.source("impl.c")` names an implementation
-elsewhere.
+of an extern block implements `Free`: wrap it in a struct that does. A header's same-stem `.c` file
+beside the module compiles with the program; any other C comes in as a library.
 `@link("m")` declares a library. Variadics work in both directions (`...`, `va_list`,
 `va_start`, `va_arg`, `va_end`); `va_arg` needs `unsafe` (see `super-c-ffi`).
 

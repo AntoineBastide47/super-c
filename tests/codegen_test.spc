@@ -264,7 +264,7 @@ const KNOWN_VARIANT: str = "enum S { Dot, Circle(i32), Rect { w: i32, h: i32 }, 
 // Values whose variant a write through `&mut` changes before the match (a call, an inlined call, a
 // reference, a field, a payload binding, a `let mut` pattern, a loop): each match takes the arm of
 // the value it reads, not of the variant the value was built with.
-const KNOWN_REWRITE: str = "enum S { Dot, Circle(i32), Rect { w: i32, h: i32 }, }\nstruct P { pub s: S, }\nfn area(s: S) i32 { return switch s { Dot => 1, Circle(r) => r, Rect { w: w, h: h } => w * h, }; }\nfn flip(s: &mut S) { *s = S::Rect { w: 2, h: 3 }; }\n@c.noinline\nfn flip_call(s: &mut S) { *s = S::Dot; }\nfn main() i32 {\n  let mut a = S::Circle(1);\n  flip(&mut a);\n  let ka = switch a { Circle(r) => r, Rect { w: w, h: h } => w * h, Dot => 0, };\n  let mut b = S::Circle(1);\n  flip_call(&mut b);\n  let kb = switch b { Circle(r) => r, Dot => 10, _ => 0, };\n  let mut c = S::Circle(1);\n  let r = &mut c;\n  *r = S::Rect { w: 4, h: 5 };\n  let kc = area(c);\n  let mut p = P { s: S::Circle(1) };\n  flip(&mut p.s);\n  let kp = switch p.s { Circle(r) => r, Rect { w: w, h: h } => w + h, Dot => 0, };\n  let mut q = P { s: S::Circle(1) };\n  let qs = &mut q.s;\n  *qs = S::Dot;\n  let kq = switch q.s { Circle(r) => r, Dot => 7, _ => 0, };\n  let mut o = Option::<S>::Some(S::Circle(1));\n  switch &mut o { Some(x) => { *x = S::Rect { w: 1, h: 9 }; }, None => {}, };\n  let ko = switch o { Some(Circle(r)) => r, Some(Rect { w: w, h: h }) => w * h, _ => 0, };\n  let mut (m, n) = (S::Circle(1), 2);\n  flip(&mut m);\n  let km = switch m { Circle(r) => r, _ => 11, } + n;\n  let mut t = S::Circle(1);\n  let mut kt = 0;\n  for i in 0..3 {\n    kt += switch t { Circle(r) => r, Dot => 100, Rect { w: w, h: h } => w * h * 1000, };\n    if i == 0 { t = S::Dot; } else { flip(&mut t); }\n  }\n  let ok = ka == 6 && kb == 10 && kc == 20 && kp == 5 && kq == 7 && ko == 9 && km == 13 && kt == 6101;\n  return if ok { 0; } else { 1; };\n}\n";
+const KNOWN_REWRITE: str = "enum S { Dot, Circle(i32), Rect { w: i32, h: i32 }, }\nstruct P { pub s: S, }\nfn area(s: S) i32 { return switch s { Dot => 1, Circle(r) => r, Rect { w: w, h: h } => w * h, }; }\nfn flip(s: &mut S) { *s = S::Rect { w: 2, h: 3 }; }\n@noinline\nfn flip_call(s: &mut S) { *s = S::Dot; }\nfn main() i32 {\n  let mut a = S::Circle(1);\n  flip(&mut a);\n  let ka = switch a { Circle(r) => r, Rect { w: w, h: h } => w * h, Dot => 0, };\n  let mut b = S::Circle(1);\n  flip_call(&mut b);\n  let kb = switch b { Circle(r) => r, Dot => 10, _ => 0, };\n  let mut c = S::Circle(1);\n  let r = &mut c;\n  *r = S::Rect { w: 4, h: 5 };\n  let kc = area(c);\n  let mut p = P { s: S::Circle(1) };\n  flip(&mut p.s);\n  let kp = switch p.s { Circle(r) => r, Rect { w: w, h: h } => w + h, Dot => 0, };\n  let mut q = P { s: S::Circle(1) };\n  let qs = &mut q.s;\n  *qs = S::Dot;\n  let kq = switch q.s { Circle(r) => r, Dot => 7, _ => 0, };\n  let mut o = Option::<S>::Some(S::Circle(1));\n  switch &mut o { Some(x) => { *x = S::Rect { w: 1, h: 9 }; }, None => {}, };\n  let ko = switch o { Some(Circle(r)) => r, Some(Rect { w: w, h: h }) => w * h, _ => 0, };\n  let mut (m, n) = (S::Circle(1), 2);\n  flip(&mut m);\n  let km = switch m { Circle(r) => r, _ => 11, } + n;\n  let mut t = S::Circle(1);\n  let mut kt = 0;\n  for i in 0..3 {\n    kt += switch t { Circle(r) => r, Dot => 100, Rect { w: w, h: h } => w * h * 1000, };\n    if i == 0 { t = S::Dot; } else { flip(&mut t); }\n  }\n  let ok = ka == 6 && kb == 10 && kc == 20 && kp == 5 && kq == 7 && ko == 9 && km == 13 && kt == 6101;\n  return if ok { 0; } else { 1; };\n}\n";
 
 fn enums(b: &mut h::ExitBatch) {
     b.add("each known variant takes its arm", KNOWN_VARIANT, 0);
@@ -309,7 +309,7 @@ fn multi_return(b: &mut h::ExitBatch) {
     // A multi-value return destructures in order, called and inlined.
     b.add(
         "multi-return",
-        "@c.noinline\nfn dm(a: i32, b: i32) (i32, i32) { return a + b, a - b; }\nfn di(a: i32, b: i32) (i32, i32) { return a * b, a / b; }\nfn main() i32 {\n  let (x, y) = dm(3, 1);\n  let (p, q) = di(6, 2);\n  return if x == 4 && y == 2 && p == 12 && q == 3 { 0; } else { 1; };\n}\n",
+        "@noinline\nfn dm(a: i32, b: i32) (i32, i32) { return a + b, a - b; }\nfn di(a: i32, b: i32) (i32, i32) { return a * b, a / b; }\nfn main() i32 {\n  let (x, y) = dm(3, 1);\n  let (p, q) = di(6, 2);\n  return if x == 4 && y == 2 && p == 12 && q == 3 { 0; } else { 1; };\n}\n",
         0,
     );
 }
@@ -369,22 +369,22 @@ fn errors(b: &mut h::ExitBatch) {
     );
 }
 
-// `@c.align(expr)` emits the same C as the integer literal it evaluates to: the whole emitted tree
+// `@align(expr)` emits the same C as the integer literal it evaluates to: the whole emitted tree
 // of the two programs is byte-identical.
 @test
 fn align_constant_expression_matches_literal() {
     let lit = h::compile_c(
-        "const N: u32 = 32;\n@c.align(64)\nstruct L { pub x: i64 }\nfn main() i32 { let l = L { x: 0 }; return l.x as i32 + sizeof(L) as i32 - 64; }\n",
+        "const N: u32 = 32;\n@align(64)\nstruct L { pub x: i64 }\nfn main() i32 { let l = L { x: 0 }; return l.x as i32 + sizeof(L) as i32 - 64; }\n",
     );
     let ex = h::compile_c(
-        "const N: u32 = 32;\n@c.align(N * 2)\nstruct L { pub x: i64 }\nfn main() i32 { let l = L { x: 0 }; return l.x as i32 + sizeof(L) as i32 - 64; }\n",
+        "const N: u32 = 32;\n@align(N * 2)\nstruct L { pub x: i64 }\nfn main() i32 { let l = L { x: 0 }; return l.x as i32 + sizeof(L) as i32 - 64; }\n",
     );
     assert(lit.ok() && ex.ok(), "both forms compile");
     assert(lit.code_has("__attribute__((aligned(64)))"), "the literal form aligns");
     assert(unsafe str::from_cstr(lit.code) == unsafe str::from_cstr(ex.code), "the expression form emits the same C");
 }
 
-// `@c.align(N)` on a `static mut` aligns its C object: the definition and the `extern` declaration
+// `@align(N)` on a `static mut` aligns its C object: the definition and the `extern` declaration
 // spell `_Alignas(N)` in every definition path (an array literal, a repeat and a struct through the
 // static graph, a scalar, an empty struct); a value at most the type's own alignment spells nothing,
 // as C rejects a weaker specifier.
@@ -392,17 +392,17 @@ fn align_constant_expression_matches_literal() {
 fn aligned_statics() {
     let src = M"(struct P { pub a: i32, pub b: f32 }
 const W: u32 = 128;
-@c.align(64)
+@align(64)
 static mut A: [f32; 16] = [0.0; 16];
-@c.align(32)
+@align(32)
 static mut B: [i32; 3] = [1, 2, 3];
-@c.align(W)
+@align(W)
 static mut S: P = P { a: 1, b: 2.0 };
-@c.align(256)
+@align(256)
 static mut X: u8 = 7;
-@c.align(2)
+@align(2)
 static mut Y: u64 = 9;
-@c.align(64)
+@align(64)
 static mut Z: P = P {};
 fn main() i32 {
     unsafe {
@@ -452,36 +452,36 @@ fn static_initializers_leave_out_zero_members() {
 
 @test
 fn attributes() {
-    h::expect_c("noreturn", "@c.noreturn\nfn die() {}\nfn main() i32 { return 0; }\n", "_Noreturn");
+    h::expect_c("noreturn", "@noreturn\nfn die() {}\nfn main() i32 { return 0; }\n", "_Noreturn");
     h::expect_c(
         "always_inline",
-        "@c.always_inline\nfn a(x: i32) i32 { return x; }\nfn main() i32 { return a(0); }\n",
+        "@always_inline\nfn a(x: i32) i32 { return x; }\nfn main() i32 { return a(0); }\n",
         "inline __attribute__((always_inline))",
     );
     h::expect_c(
         "section + used",
-        "@platform(macos | ios)\n@unsafe(link_section = \"__TEXT,__hot\")\n@c.used\nfn a() i32 { return 0; }\n@platform(windows | linux | android)\n@unsafe(link_section = \".hot\")\n@c.used\nfn a() i32 { return 0; }\nfn main() i32 { return a(); }\n",
+        "@platform(macos | ios)\n@unsafe(link_section = \"__TEXT,__hot\")\n@used\nfn a() i32 { return 0; }\n@platform(windows | linux | android)\n@unsafe(link_section = \".hot\")\n@used\nfn a() i32 { return 0; }\nfn main() i32 { return a(); }\n",
         "__attribute__((used, section(\"",
     );
     h::expect_c(
         "packed struct",
-        "@c.packed\nstruct H { pub x: u32 }\nfn main() i32 { let h = H { x: 1 }; return h.x as i32; }\n",
+        "@packed\nstruct H { pub x: u32 }\nfn main() i32 { let h = H { x: 1 }; return h.x as i32; }\n",
         "struct __attribute__((packed)) H",
     );
     h::expect_c(
         "aligned struct",
-        "@c.align(64)\nstruct L { pub x: i64 }\nfn main() i32 { let l = L { x: 0 }; return l.x as i32; }\n",
+        "@align(64)\nstruct L { pub x: i64 }\nfn main() i32 { let l = L { x: 0 }; return l.x as i32; }\n",
         "__attribute__((aligned(64)))",
     );
 
-    let EX: str = "extern \"C\" { fn putchar(c: i32) i32; }\n@c.export(\"sc_init\")\nfn init() i32 { unsafe putchar(0); return 0; }\nfn main() i32 { return init(); }\n";
+    let EX: str = "extern \"C\" { fn putchar(c: i32) i32; }\n@export(\"sc_init\")\nfn init() i32 { unsafe putchar(0); return 0; }\nfn main() i32 { return init(); }\n";
     h::expect_c("export defines the exact symbol", EX, "int32_t (sc_init)(void)");
     h::expect_c("export rewrites the call site", EX, "return sc_init()");
     h::expect_c_absent("export elides the Super-C name", EX, " init(");
 
     h::expect_c(
         "import binds to the C symbol",
-        "extern \"C\" { @c.import(\"puts\") fn line(s: *const char) i32; }\nfn main() i32 { unsafe line(\"x\"); return 0; }\n",
+        "extern \"C\" { @import(\"puts\") fn line(s: *const char) i32; }\nfn main() i32 { unsafe line(\"x\"); return 0; }\n",
         "puts(",
     );
 }

@@ -45,7 +45,7 @@ extend B as Scale {
         return 5;
     }
 }
-@c.noinline
+@noinline
 fn times<T: Scale>(x: i32x4) i32x4 {
     return x * i32x4::splat(T::k());
 }
@@ -76,7 +76,7 @@ extend A as Scale {
 fn times<T: Scale>(x: i32x4) i32x4 {
     return x * i32x4::splat(T::k());
 }
-@c.noinline
+@noinline
 fn f(x: i32x4) i32x4 {
     return times::<A>(x) + i32x4::splat(1);
 }
@@ -105,7 +105,7 @@ fn pick<const P: K>(x: f32x4) f32x4 {
         C => x - f32x4::splat(1.0),
     };
 }
-@c.noinline
+@noinline
 fn f(x: f32x4) f32x4 {
     return pick::<K::B>(x) + f32x4::splat(1.0);
 }
@@ -146,7 +146,7 @@ extend A as Scale {
         return 3;
     }
 }
-@c.noinline
+@noinline
 fn times<T: Scale>(x: i32x4) i32x4 {
     let s: i32 = switch 0x41u8 {
         65 => 1,
@@ -169,7 +169,7 @@ fn a_switch_on_a_hex_literal_takes_its_value_arm() {
 const COUNT: str = M"(fn twice<const M: usize>() usize {
     return M * 2;
 }
-@c.noinline
+@noinline
 fn outer<const N: usize>() usize {
     return twice::<N>() + 1;
 }
@@ -189,7 +189,7 @@ fn a_callee_counted_by_the_callers_parameter_inlines_into_the_shared_body() {
 const OFFSET: str = M"(struct S {
     pub v: i32,
 }
-@c.noinline
+@noinline
 fn total(p: *const S, n: usize) i32 {
     let mut t: i32 = 0;
     for i in 0..n {
@@ -197,7 +197,7 @@ fn total(p: *const S, n: usize) i32 {
     }
     return t;
 }
-@c.noinline
+@noinline
 fn sum_tail<F: fn(&mut Vector<S>)>(fill: F) i32 {
     let mut v = Vector::<S>::new();
     fill(&mut v);
@@ -249,7 +249,7 @@ extend<const N: usize> V<N> as Gen<f32> {
         return unsafe self.e[i];
     }
 }
-@c.noinline
+@noinline
 fn sum<G: Sized>(v: G) f32 {
     let mut s: f32 = 0.0;
     for i in 0..G::len() {
@@ -257,7 +257,7 @@ fn sum<G: Sized>(v: G) f32 {
     }
     return s;
 }
-@c.noinline
+@noinline
 fn gsum<T: Copy, G: Gen<T>>(v: G, f: fn(T) f32) f32 {
     let mut s: f32 = 0.0;
     for i in 0..G::glen() {
@@ -288,7 +288,7 @@ const SCALAR: str = M"(const T: [i32; 2] = [3, 4];
 fn second() i32 {
     return T[1];
 }
-@c.noinline
+@noinline
 fn g(x: i32) i32 {
     return x + second();
 }
@@ -337,7 +337,7 @@ const BUDGET: str = M"(fn step(x: f32x4) f32x4 {
     v = v * x + f32x4::splat(28.0);
     return v;
 }
-@c.noinline
+@noinline
 fn many(x: f32x4) f32x4 {
     let mut y = x;
     y = step(y);
@@ -384,7 +384,7 @@ extend P {
         self.x = self.x + d;
     }
 }
-@c.noinline
+@noinline
 fn take(a: i32, b: i32) i32 {
     return a - b;
 }
@@ -437,12 +437,12 @@ struct W {
     pub v: i32,
 }
 extend W {
-    @c.noinline
+    @noinline
     fn stash(self: &mut W) {
         unsafe STASH = &mut self.v;
     }
 }
-@c.noinline
+@noinline
 fn poke() {
     unsafe *STASH = 99;
 }
@@ -472,7 +472,7 @@ fn set_global(a: i32) i32 {
     unsafe G = 7;
     return a;
 }
-@c.noinline
+@noinline
 fn bump_global() {
     unsafe G = unsafe G + 10;
 }
@@ -485,7 +485,7 @@ fn bump0(a: [i32; 4]) i32 {
     b[0] = 9;
     return b[0] + a[0];
 }
-@c.noinline
+@noinline
 fn opaque(v: i32) i32 {
     return v + unsafe K;
 }
@@ -566,7 +566,7 @@ fn a_fold_keeps_the_inputs_of_its_links() {
 
 // C leaves a call unordered with the other operand of an operator: a call result read beside a
 // value the call can change keeps its temporary.
-const CALL_ORDER: str = M"(@c.noinline
+const CALL_ORDER: str = M"(@noinline
 fn bump(p: &mut i32) i32 {
     *p = *p + 1;
     return 10;
@@ -595,7 +595,7 @@ const PANIC_OPERANDS: str = M"(fn main(args: Vector<str>) i32 {
 }
 )";
 
-const PANIC_SLOTS: str = M"(@c.noinline
+const PANIC_SLOTS: str = M"(@noinline
 fn pair(n: i32, z: i32) (i32, i32) {
     let a = n * 2147483647;
     return a * 2, n / z;

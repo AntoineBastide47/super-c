@@ -60,7 +60,7 @@ fn harness_c_calls_the_backend_entries() {
 
 const RELEASE: [str; 1] = ["--profile=release"];
 
-// The kernels of one program: each its own `@c.noinline` function, called from `main` on arguments built
+// The kernels of one program: each its own `@noinline` function, called from `main` on arguments built
 // from the run-time value `n`. One build and one assembly compile serve every check.
 struct Kernels {
     pub labels: Vector<String>,
@@ -86,7 +86,7 @@ extend Kernels {
     fn add(self: &mut Kernels, label: str, src: str, args: str, want: []str, avoid: []str) {
         let name = format("k{}", self.labels.len());
         self.decls.format_into(
-            "@c.noinline\n{}",
+            "@noinline\n{}",
             String::from_str(src).replace("fn k(", format("fn {}(", name.as_str()).as_str()).as_str(),
         );
         self.calls.format_into("    t = t + ({}{}) as i32;\n", name.as_str(), args.slice(1, args.len()));
@@ -405,11 +405,10 @@ fn detection_reports_the_machine() {
         "pre.c",
         "#include \"pre.h\"\nint sc_cpu_has(int feature);\nstatic int g = -1, h = -1;\n__attribute__((constructor)) static void pre(void) { g = sc_cpu_has(5); h = sc_cpu_has(24); }\nint pre_dotprod(void) { return g; }\nint pre_avx2(void) { return h; }\n",
     );
-    p.mkfile(
-        "main.spc",
-        M"(import std::cpu;
-import std::cpu::detect as detect;
-extern "C" "pre.h" {
+    assert(p.c_lib("pre", "pre.c"), "the C library builds");
+    let mut src = format("import std::cpu;\nimport std::cpu::detect as detect;\n@link(\"-L{} -lpre\")\n", p.dir());
+    src.push_str(
+        M"(extern "C" "pre.h" {
     fn pre_dotprod() i32;
     fn pre_avx2() i32;
 }
@@ -433,6 +432,7 @@ fn main() i32 {
 }
 )",
     );
+    p.mkfile("main.spc", src.as_str());
     assert_eq(build_run(&p, ""), 0);
 }
 
@@ -771,7 +771,7 @@ fn pick_u8(c: bool, v: u8) u8 {
 // temporary) still gives its `choose` the lane masks it wrote, not a never-written mask local.
 @test
 fn a_choose_through_copies_reads_lane_masks() {
-    let src = "@c.noinline\nfn canon(a: [u64; 2]) Simd<u64, 2> {\n    let x = Simd::<f64, 2>::from_bits(Simd::<u64, 2>::from_array(a));\n    let v = x.min_num(x);\n    return v.is_nan().choose(Simd::<u64, 2>::splat(1), v.to_bits());\n}\nfn main() i32 {\n    let c = canon([0xfff8000000000001, 0x3ff0000000000000]);\n    return (c[0] == 1 && c[1] == 0x3ff0000000000000) as i32;\n}\n";
+    let src = "@noinline\nfn canon(a: [u64; 2]) Simd<u64, 2> {\n    let x = Simd::<f64, 2>::from_bits(Simd::<u64, 2>::from_array(a));\n    let v = x.min_num(x);\n    return v.is_nan().choose(Simd::<u64, 2>::splat(1), v.to_bits());\n}\nfn main() i32 {\n    let c = canon([0xfff8000000000001, 0x3ff0000000000000]);\n    return (c[0] == 1 && c[1] == 0x3ff0000000000000) as i32;\n}\n";
     let c = h::compile_c_arch(src, 1);
     assert(c.ok(), "the program builds");
     if aarch64_host() {
@@ -787,7 +787,7 @@ fn a_choose_through_copies_reads_lane_masks() {
 @test
 fn a_choose_after_calls_reads_lane_masks() {
     // The comparison's masks live across the call of `big`, in a later block.
-    let src = "@c.noinline\nfn big() f32x4 {\n    return f32x4::splat(9.0);\n}\nfn pick(x: f32x4) f32x4 {\n    return choose(x.greater_than(f32x4::splat(1.0)), big(), choose(x.less_than(f32x4::splat(-1.0)), f32x4::splat(0.0), x));\n}\nfn main() i32 {\n    let r = pick(f32x4::from_array([2.0, -2.0, 0.5, -0.5]));\n    return (r.get(0) == 9.0 && r.get(1) == 0.0 && r.get(2) == 0.5 && r.get(3) == -0.5) as i32;\n}\n";
+    let src = "@noinline\nfn big() f32x4 {\n    return f32x4::splat(9.0);\n}\nfn pick(x: f32x4) f32x4 {\n    return choose(x.greater_than(f32x4::splat(1.0)), big(), choose(x.less_than(f32x4::splat(-1.0)), f32x4::splat(0.0), x));\n}\nfn main() i32 {\n    let r = pick(f32x4::from_array([2.0, -2.0, 0.5, -0.5]));\n    return (r.get(0) == 9.0 && r.get(1) == 0.0 && r.get(2) == 0.5 && r.get(3) == -0.5) as i32;\n}\n";
     let c = h::compile_c_arch(src, 1);
     assert(c.ok(), "the program builds");
     if aarch64_host() {
@@ -806,7 +806,7 @@ fn a_choose_after_calls_reads_lane_masks() {
 // inserts in each narrowing `Cast` entry of a `choose` of bytes by `f32` lanes).
 @test
 fn halves_and_concat_copy_chunks() {
-    let src = "import std::simd;\n@c.noinline\nfn mix(a: [u32; 8], b: [u8; 64]) u32 {\n    let v = Simd::<u32, 8>::from_array(a);\n    let w = Simd::<u8, 64>::from_array(b);\n    let c = simd::concat(v.high_half(), v.low_half());\n    let e = simd::concat(v, c);\n    let h = w.high_half().low_half();\n    return c[0] + c[7] + e[15] + h[0] as u32;\n}\nfn main() i32 {\n    let mut b: [u8; 64] = [0; 64];\n    let s: []mut u8 = b;\n    for i in 0..64 {\n        s[i] = i as u8;\n    }\n    return (mix([1, 2, 3, 4, 5, 6, 7, 8], b) == 45) as i32;\n}\n";
+    let src = "import std::simd;\n@noinline\nfn mix(a: [u32; 8], b: [u8; 64]) u32 {\n    let v = Simd::<u32, 8>::from_array(a);\n    let w = Simd::<u8, 64>::from_array(b);\n    let c = simd::concat(v.high_half(), v.low_half());\n    let e = simd::concat(v, c);\n    let h = w.high_half().low_half();\n    return c[0] + c[7] + e[15] + h[0] as u32;\n}\nfn main() i32 {\n    let mut b: [u8; 64] = [0; 64];\n    let s: []mut u8 = b;\n    for i in 0..64 {\n        s[i] = i as u8;\n    }\n    return (mix([1, 2, 3, 4, 5, 6, 7, 8], b) == 45) as i32;\n}\n";
     let c = h::compile_c_arch(src, 1);
     assert(c.ok(), "the program builds");
     if aarch64_host() {
@@ -823,7 +823,7 @@ fn halves_and_concat_copy_chunks() {
 // widens each lane); a write between keeps the loaded vector, whose indexes the write cannot change.
 @test
 fn a_gather_reads_its_loaded_indexes_from_the_slice() {
-    let src = "import std::simd;\n@c.noinline\nfn g(x: []f32, idx: []u32) f32x4 {\n    return unsafe simd::gather_unchecked(x, simd::load::<u32, 4>(idx, 0), Mask::<4>::splat(true), f32x4::splat(0.0));\n}\n@c.noinline\nfn c(x: []f32, idx: []u32) f32x4 {\n    return simd::gather(x, simd::load::<u32, 4>(idx, 0), Mask::<4>::splat(true), f32x4::splat(0.0));\n}\n@c.noinline\nfn w(x: []f32, idx: []mut u32) f32x4 {\n    let v = simd::load::<u32, 4>(idx, 0);\n    idx[0] = 0;\n    return unsafe simd::gather_unchecked(x, v, Mask::<4>::splat(true), f32x4::splat(0.0));\n}\nfn main() i32 {\n    let x: [f32; 4] = [10.0, 11.0, 12.0, 13.0];\n    let mut i: [u32; 4] = [3, 2, 1, 0];\n    let a = g(x, i);\n    let b = c(x, i);\n    let d = w(x, i);\n    return (a[0] == 13.0 && a[3] == 10.0 && b[1] == 12.0 && d[0] == 13.0 && i[0] == 0) as i32;\n}\n";
+    let src = "import std::simd;\n@noinline\nfn g(x: []f32, idx: []u32) f32x4 {\n    return unsafe simd::gather_unchecked(x, simd::load::<u32, 4>(idx, 0), Mask::<4>::splat(true), f32x4::splat(0.0));\n}\n@noinline\nfn c(x: []f32, idx: []u32) f32x4 {\n    return simd::gather(x, simd::load::<u32, 4>(idx, 0), Mask::<4>::splat(true), f32x4::splat(0.0));\n}\n@noinline\nfn w(x: []f32, idx: []mut u32) f32x4 {\n    let v = simd::load::<u32, 4>(idx, 0);\n    idx[0] = 0;\n    return unsafe simd::gather_unchecked(x, v, Mask::<4>::splat(true), f32x4::splat(0.0));\n}\nfn main() i32 {\n    let x: [f32; 4] = [10.0, 11.0, 12.0, 13.0];\n    let mut i: [u32; 4] = [3, 2, 1, 0];\n    let a = g(x, i);\n    let b = c(x, i);\n    let d = w(x, i);\n    return (a[0] == 13.0 && a[3] == 10.0 && b[1] == 12.0 && d[0] == 13.0 && i[0] == 0) as i32;\n}\n";
     let cc = h::compile_c_arch(src, 1);
     assert(cc.ok(), "the program builds");
     if aarch64_host() {

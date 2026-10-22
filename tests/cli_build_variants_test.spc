@@ -152,10 +152,9 @@ fn static_and_shared_library_build() {
 fn failed_c_compile_reports_status_and_keeps_the_log() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
-    p.mkfile("src/bad.h", "int bad_value(void);\n");
-    // A missing semicolon: every C compiler rejects it (a bare `return` in a non-void function is
-    // only a warning under gcc).
-    p.mkfile("src/bad.c", "#include \"bad.h\"\nint bad_value(void) { return 0 }\n");
+    // A missing semicolon in the header's function: every C compiler rejects it (a bare `return` in a
+    // non-void function is only a warning under gcc).
+    p.mkfile("src/bad.h", "static inline int bad_value(void) { return 0 }\n");
     p.mkfile(
         "src/main.spc",
         "extern \"C\" \"bad.h\" {\n    fn bad_value() i32;\n}\nfn main() i32 {\n    return unsafe bad_value();\n}\n",
@@ -167,14 +166,14 @@ fn failed_c_compile_reports_status_and_keeps_the_log() {
         r.out_shows("build: C compile failed (exit 1); output kept at "),
         "the exit status and the log path are reported",
     );
-    assert(r.out_shows("_bad.o.log"), "the log is the unit's own");
+    assert(r.out_shows(".o.log"), "the log is the unit's own");
     assert(r.out_shows("error:"), "the compiler's diagnostic is replayed");
-    p.mkfile("src/bad.c", "#include \"bad.h\"\nint bad_value(void) { return 0; }\n");
+    p.mkfile("src/bad.h", "static inline int bad_value(void) { return 0; }\n");
     let ok = cli::superc_env_in(root, E, "1", "build");
     assert(ok.ok(), "the corrected unit builds");
     let mut obj = String::from_str(root);
     obj.push_str("/build/debug/obj");
-    assert_eq(cli::dir_count_suffix(obj.as_str(), "_bad.o.log"), 0);
+    assert_eq(cli::dir_count_suffix(obj.as_str(), ".o.log"), 0);
 }
 
 // An edit that lands in the same second as the previous compile of its unit still recompiles it:
@@ -205,7 +204,7 @@ fn rewritten_unit_recompiles_under_a_later_record() {
         let p = cli::proj_new();
         p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
         p.mkfile("src/main.spc", "import lib;\n\nfn main() i32 {\n    return lib::v();\n}\n");
-        p.mkfile("src/lib.spc", "@c.noinline\npub fn v() i32 {\n    return 3;\n}\n");
+        p.mkfile("src/lib.spc", "@noinline\npub fn v() i32 {\n    return 3;\n}\n");
         p.mkfile(
             "tr.sh",
             format("\"{}\" \"$@\" || exit $?\nrm -f build/debug/.emit_rewritten\n", cli::superc_path()).as_str(),
@@ -223,7 +222,7 @@ fn rewritten_unit_recompiles_under_a_later_record() {
         assert_eq(cli::exe_env_in(app.as_str(), root, E, "1", "").exit, 3);
         let mut later = format("find \"{}/build/debug/obj\" -name \"*.cmd\" -exec touch -t 203001010000 {{}} +", root);
         assert_eq(cli::run_quiet(later.cstr()), 0);
-        p.mkfile("src/lib.spc", "@c.noinline\npub fn v() i32 {\n    return 4;\n}\n");
+        p.mkfile("src/lib.spc", "@noinline\npub fn v() i32 {\n    return 4;\n}\n");
         assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", args.as_str()).ok(), "the build after the edit");
         assert_eq(cli::exe_env_in(app.as_str(), root, E, "1", "").exit, 4);
         if lane == 1 {
@@ -244,12 +243,17 @@ fn failed_emission_keeps_the_tree() {
     assert(cli::superc_env_in(root, E, "1", "build").ok(), "the first build");
     let c = format("{}/build/debug/raw/main.c", root);
     let before = cli::read_text(c.as_str());
+    // The link flags, which the emission writes before any unit, cannot be written: a directory sits at
+    // their path.
+    let blocked = format("{}/build/debug/raw/__ldflags", root);
+    let _ = fs::unlink(blocked.as_str());
+    assert(fs::mkdir_all(blocked.as_str()).is_ok(), "the block is in place");
     p.mkfile(
         "src/main.spc",
-        "@c.source(\"missing.c\")\nextern \"C\" {\n    fn gone() i32;\n}\n\nfn main() i32 {\n    return unsafe gone();\n}\n",
+        "@link(\"m\")\nextern \"C\" {\n    fn abs(x: i32) i32;\n}\n\nfn main() i32 {\n    return unsafe abs(-3);\n}\n",
     );
     let bad = cli::superc_env_in(root, E, "1", "build");
-    assert(!bad.ok() && bad.out_has("cannot find C source"), "a missing C source fails the emission");
+    assert(!bad.ok() && bad.out_has("__ldflags"), "unwritable link flags fail the emission");
     assert(cli::read_text(c.as_str()).as_str() == before.as_str(), "the failed emission wrote no unit");
 }
 

@@ -1119,6 +1119,15 @@ extend CEmit {
         return self.emit_call_arg_i(b, callee0, i, opid, dst);
     }
 
+    // The type of operand `opid`: a copy or move without one has its place's.
+    fn operand_ty(self: &Self, b: &ir::CoreBody, opid: ir::OperandId) TypeId {
+        let op = *b.operands.at(opid as usize);
+        if op.ty == TYPE_NONE && (op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE) {
+            return b.places.at(op.data as usize).ty;
+        }
+        return op.ty;
+    }
+
     // The kind of the declared type of parameter `i` of `d`; `TYPE_NEVER` when it has none.
     fn param_decl_kind(self: &Self, d: DefId, i: u32) TypeKind {
         let pty = self.param_decl_ty(d, i);
@@ -1196,6 +1205,19 @@ extend CEmit {
                         // A wide-literal arg into a SCALAR param (a `from` widening shim) fits
                         // one limb by construction.
                         if unsafe (*fap).type_at(pty).kind == TypeKind::TYPE_BUILTIN {
+                            // Every unit includes <tgmath.h>, whose math names are type-generic: an
+                            // `f32` argument to an `f64` parameter of a function with such a C name (a
+                            // binding, or an `@export` of wasm's libm) would call the `float` function,
+                            // so the widening is spelled.
+                            if unsafe (*fap).type_at(pty).as_data.builtin == BuiltinType::BT_F64 && self.is_f32(
+                                b,
+                                self.operand_ty(b, opid),
+                            ) {
+                                dst.push_str("(double)(");
+                                let okd = self.emit_operand(b, opid, dst);
+                                dst.push_str(")");
+                                return okd;
+                            }
                             if self.extern_fn(callee) && self.emit_int_arg(
                                 b,
                                 opid,
@@ -1235,13 +1257,7 @@ extend CEmit {
         }
         if !want_ref {
             if want_val {
-                let mut aty0 = b.operands.at(opid as usize).ty;
-                if aty0 == TYPE_NONE {
-                    let op0 = *b.operands.at(opid as usize);
-                    if op0.kind == ir::OP_COPY || op0.kind == ir::OP_MOVE {
-                        aty0 = b.places.at(op0.data as usize).ty;
-                    }
-                }
+                let aty0 = self.operand_ty(b, opid);
                 let mut rm0 = b.module;
                 let mut rt0 = aty0;
                 self.rty(b, aty0, &mut rm0, &mut rt0);
@@ -11216,7 +11232,7 @@ extend CEmit {
                 return self.fail("static-sym");
             }
             if self.collect_demand && !folded {
-                let h = dst.as_str().slice(d0, dst.len()).hash();
+                let h = self.stat_key(dst.as_str().slice(d0, dst.len()).hash(), item);
                 if self.mg.is_zst(b.module, b.locals.at(base as usize).ty) {
                     // Zero-sized const/static: no stub and no definition entry queue (value reads
                     // are erased; an address binds to the sentinel before this spelling is reached).
@@ -12489,6 +12505,17 @@ extend CEmit {
         );
     }
 
+    /// The demand key of const or static `item`, `h` the hash of its C symbol. A binding and a definition can
+    /// name one C object (wasm's `errno`: ffi binds it, `std::rt::libc` defines it; `environ`, which a
+    /// program binds with no header), so a binding takes its own key: it never hides the definition.
+    fn stat_key(self: &Self, h: u64, item: DefId) u64 {
+        let idn = unsafe (*self.p().module_ast_const(item.module)).at_const(item.node);
+        if idn.kind == NodeKind::NODE_CONST && idn.as_data.const_def.is_extern {
+            return h ^ 0x9e3779b97f4a7c15;
+        }
+        return h;
+    }
+
     /// Whether static `item` is `@thread_local`.
     fn is_tls(self: &Self, item: DefId) bool {
         return item.node != NODE_NONE && unsafe (*self.p().module_ast_const(item.module)).attr_of(
@@ -12630,7 +12657,7 @@ extend CEmit {
         }
         let mut sym = self.sget();
         sym.push_str(dst.as_str().slice(d0, dst.len()));
-        let h = sym.as_str().hash();
+        let h = self.stat_key(sym.as_str().hash(), c.item);
         if self.mg.rec_on && self.mg.rec_dup_once(h ^ 8) {
             let mut ev = mbe::RecEv::blank(mbe::RK_STAT);
             ev.h = h;
@@ -12660,7 +12687,7 @@ extend CEmit {
         let mut sym = String::new();
         let _ = self.mg.const_sym(item.module, item.node, &mut sym);
         let none = Vector::<mbe::MSub>::new();
-        return self.stat_demand(sym.as_str().hash(), item.module, item, ty, sym.as_str(), &none);
+        return self.stat_demand(self.stat_key(sym.as_str().hash(), item), item.module, item, ty, sym.as_str(), &none);
     }
 
     // Demand the generic-extend impl method `method_by_name` resolved last (its `last_method_def`).

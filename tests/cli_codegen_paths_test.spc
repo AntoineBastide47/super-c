@@ -71,7 +71,7 @@ fn struct_array_const_header_includes_its_element_type() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile(
         "src/a.spc",
-        "struct S {\n    pub x: i32,\n}\nconst T: [S; 2] = [S { x: 1 }, S { x: 2 }];\n@c.noinline\npub fn get(i: usize) i32 {\n    return unsafe T[i].x;\n}\n",
+        "struct S {\n    pub x: i32,\n}\nconst T: [S; 2] = [S { x: 1 }, S { x: 2 }];\n@noinline\npub fn get(i: usize) i32 {\n    return unsafe T[i].x;\n}\n",
     );
     p.mkfile("src/main.spc", "import a;\nfn main(args: Vector<str>) i32 {\n    return a::get(args.len()) - 2;\n}\n");
     let r = cli::superc_env_in(p.dir(), "SC_NO_EMIT_CACHE", "1", "run");

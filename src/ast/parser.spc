@@ -3684,15 +3684,13 @@ extend Parser {
         if has_args && !self.check(TokenType::RightParen) {
             let mut ws = false;
             let mut wi = false;
-            let k = if parts == 2 && self.text_is(namespace, "c") {
-                self.attr_kind_of(name, &mut ws, &mut wi);
-            } else if parts == 1 && self.text_is(namespace, "target_feature") {
+            let k = if parts == 1 && self.text_is(namespace, "target_feature") {
                 AttrKind::ATTR_TARGET_FEATURE as i32;
             } else if parts == 1 && self.text_is(namespace, "simd_impl") {
                 AttrKind::ATTR_SIMD_IMPL as i32;
             } else if parts == 1 && self.text_is(namespace, "layout") {
                 AttrKind::ATTR_LAYOUT as i32;
-            } else if parts == 1 && !self.text_is(namespace, "source") {
+            } else if parts == 1 {
                 self.attr_kind_of(namespace, &mut ws, &mut wi);
             } else {
                 -1;
@@ -4451,52 +4449,18 @@ extend Parser {
         }
         let mut wants_str = false;
         let mut wants_int = false;
-        // A C-facing attribute is `@inline`; `@c.inline` is its older spelling. `@c.source` has no
-        // one-part spelling.
-        let top = syntax.parts == 1 && !self.text_is(ns, "source") && self.attr_kind_of(
-            ns,
-            &mut wants_str,
-            &mut wants_int,
-        ) >= 0;
-        if !top && !self.text_is(ns, "c") {
+        let kind = if syntax.parts == 1 {
+            self.attr_kind_of(ns, &mut wants_str, &mut wants_int);
+        } else {
+            -1;
+        };
+        if kind < 0 {
             if !self.bootstrap_tags {
                 self.errors.emit_span(
                     ns.span(),
                     format(
                         "unknown attribute '@{}'; pass --bootstrap-tags to accept unknown attributes",
-                        diag::span_str(self.source, ns.start(), ns.end()),
-                    ),
-                );
-            }
-            return false;
-        }
-        if !top && syntax.parts != 2 {
-            self.errors.emit_span(
-                syntax.name.span(),
-                String::from_str(
-                    if syntax.parts < 2 {
-                        "expected an attribute name after '@c.'";
-                    } else {
-                        "target-specific attribute namespaces (e.g. '@c.gnu.*') are not supported";
-                    },
-                ),
-            );
-            return false;
-        }
-        // `syntax.name` is the namespace token itself for a one-part attribute.
-        let kind = self.attr_kind_of(syntax.name, &mut wants_str, &mut wants_int);
-        if kind < 0 {
-            if !self.bootstrap_tags {
-                self.errors.emit_span(
-                    syntax.name.span(),
-                    format(
-                        "unknown attribute '@c.{}'; pass --bootstrap-tags to accept unknown attributes",
-                        diag::span_str(self.source, syntax.name.start(), syntax.name.end()),
-                    ),
-                );
-                self.errors.note(
-                    format(
-                        "supported '@c' attributes include export, import, noreturn, always_inline, cold, used, unused, packed, and align",
+                        diag::span_str(self.source, ns.start(), syntax.name.end()),
                     ),
                 );
             }
@@ -4921,13 +4885,8 @@ extend Parser {
                     format("'@test' / '@test_init' / '@test_free' may only be applied to a non-generic function"),
                 );
             }
-            if (attr.kind == AttrKind::ATTR_C_SOURCE as u8 || attr.kind == AttrKind::ATTR_C_LINK as u8) && (owner == NODE_NONE || self.ast.at_const(
-                owner,
-            ).kind != NodeKind::NODE_EXTERN_BLOCK) {
-                self.errors.emit_span(
-                    sp,
-                    format("'@c.source' / '@link' may only be applied to an 'extern \"C\"' block"),
-                );
+            if attr.kind == AttrKind::ATTR_C_LINK as u8 && (owner == NODE_NONE || self.ast.at_const(owner).kind != NodeKind::NODE_EXTERN_BLOCK) {
+                self.errors.emit_span(sp, format("'@link' may only be applied to an 'extern \"C\"' block"));
             }
             if attr.kind == AttrKind::ATTR_NO_CONST as u8 && (owner == NODE_NONE || self.ast.at_const(owner).kind != NodeKind::NODE_STRUCT && self.ast.at_const(
                 owner,
@@ -5042,20 +5001,8 @@ pub fn known_attributes(out: &mut Vector<String>) {
     }
     let t: []str = C_ATTR_NAMES;
     for i in 0..t.len() {
-        let mut n = String::new();
-        c_attr_spelling(i, &mut n);
-        out.push(n);
+        out.push(String::from_str(t[i]));
     }
-}
-
-// The spelling after '@' of `C_ATTR_NAMES[i]`: the bare name, except `c.source`, which has no
-// one-part spelling.
-fn c_attr_spelling(i: usize, out: &mut String) {
-    if i == C_ATTR_SOURCE {
-        out.push_str("c.");
-    }
-    let t: []str = C_ATTR_NAMES;
-    out.push_str(t[i]);
 }
 
 // The spelling of attribute `kind` after '@', for the expression-argument and placement kinds.
@@ -5083,7 +5030,7 @@ fn known_attr_name(kind: u8, out: &mut String) {
     let t: []str = C_ATTR_NAMES;
     for i in 0..t.len() {
         if (unsafe C_ATTR_KINDS[i]) as u8 == kind {
-            c_attr_spelling(i, out);
+            out.push_str(t[i]);
         }
     }
 }
@@ -5116,10 +5063,10 @@ const ATTR_NAMES: [str<'static>; 24] = [
     "when",
 ];
 
-// The C-facing attributes (`@inline`, or the older `@c.inline`) and their kinds. The first eight take no argument,
+// The C-facing attributes (`@inline`) and their kinds. The first eight take no argument,
 // `align` takes an integer or a constant expression, `export` to `link` take a string, `value`,
 // `reads` and `writes` take constant expressions (`attr_expr_args`), and `lane_access` none.
-const C_ATTR_NAMES: [str<'static>; 17] = [
+const C_ATTR_NAMES: [str<'static>; 16] = [
     "inline",
     "always_inline",
     "noinline",
@@ -5131,7 +5078,6 @@ const C_ATTR_NAMES: [str<'static>; 17] = [
     "align",
     "export",
     "import",
-    "source",
     "link",
     "value",
     "reads",
@@ -5139,15 +5085,14 @@ const C_ATTR_NAMES: [str<'static>; 17] = [
     "lane_access",
 ];
 const C_ATTR_ALIGN: usize = 8;
-const C_ATTR_SOURCE: usize = 11;
-const C_ATTR_STR_END: usize = 13;
+const C_ATTR_STR_END: usize = 12;
 
 // Duplicate-check kinds beyond AttrKind (every kind stays below 64, the width of the seen mask):
 // `@derive` and `@reflect` keep no Attr record, and an unrecognized attribute has no kind.
 const ATTR_SEEN_DERIVE: u8 = 62;
 const ATTR_SEEN_REFLECT: u8 = 63;
 const ATTR_SEEN_NONE: u8 = 255;
-const C_ATTR_KINDS: [AttrKind; 17] = [
+const C_ATTR_KINDS: [AttrKind; 16] = [
     AttrKind::ATTR_INLINE,
     AttrKind::ATTR_ALWAYS_INLINE,
     AttrKind::ATTR_NOINLINE,
@@ -5159,7 +5104,6 @@ const C_ATTR_KINDS: [AttrKind; 17] = [
     AttrKind::ATTR_ALIGN,
     AttrKind::ATTR_EXPORT,
     AttrKind::ATTR_IMPORT,
-    AttrKind::ATTR_C_SOURCE,
     AttrKind::ATTR_C_LINK,
     AttrKind::ATTR_C_VALUE,
     AttrKind::ATTR_C_READS,

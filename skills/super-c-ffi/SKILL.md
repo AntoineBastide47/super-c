@@ -1,6 +1,6 @@
 ---
 name: super-c-ffi
-description: "Covers C interop in Super-C: extern blocks, header bindings, opaque types, variadics, @c.source/@link, the ffi/ convention, str vs NUL-terminated strings, unsafe discipline at FFI boundaries, and the bindgen tool. Use when writing C bindings, integrating external libraries, or debugging FFI issues."
+description: "Covers C interop in Super-C: extern blocks, header bindings, opaque types, variadics, prebuilt C libraries and @link, the ffi/ convention, str vs NUL-terminated strings, unsafe discipline at FFI boundaries, and the bindgen tool. Use when writing C bindings, integrating external libraries, or debugging FFI issues."
 allowed-tools: Bash Read
 ---
 
@@ -10,7 +10,7 @@ allowed-tools: Bash Read
 
 - Confirm the C symbol, header, ownership, and string termination contract.
 - Keep every extern call inside an explicit `unsafe` boundary, except a call of a function whose `@unsafe(...)` lists `safe`.
-- Check whether a backing source or link flag is already declared.
+- Check whether a link flag is already declared.
 - Validate opaque types against a real included C declaration.
 
 Super-C interoperates with C through `extern "C"` blocks. Bindings map directly to C
@@ -59,7 +59,7 @@ extern "C" {
   So does naming it as a value (`let f: fn(i32) i32 = unsafe abs;`): a call through the `fn`
   pointer needs no `unsafe`.
 - `char` is C `char`, and it is unsigned (0 to 255) everywhere: the build engine compiles
-  every generated and `@c.source` TU with `-funsigned-char`, on every target, so
+  every generated TU with `-funsigned-char`, on every target, so
   `200 as char as i32` is 200 at compile time and at run time. A C file compiled apart
   from the engine and linked with the generated code needs the flag too (the generated
   `super_rt.h` has a static assertion on it). The ABI is the same either way; only a
@@ -95,19 +95,14 @@ name and one shadows the other (a module `time.spc` that binds `"time.h"` hides 
 std file must not share its stem with an `ffi/` module it imports (`std/parallel/atomics.spc`
 imports `ffi/atomic.spc`).
 
-## Backing C Sources
+## C Libraries
 
-### Auto-discovery
-
-A header binding that resolves next to the `.spc` file auto-discovers a same-stem `.c`
-sibling:
-
-```superc
-// src/native.spc
-extern "C" "native.h" {         // native.c beside native.spc is compiled automatically
-    fn native_mix(a: i32, b: i32) i32;
-}
-```
+The build compiles no C source of the program's tree: a C library comes prebuilt and reaches the
+link through `@link` (Link flags below). A `.c` file beside a backing header is no part of the build.
+`bench/simd_baseline` is the example: `kernels.sh` archives its hand-written C kernels into
+`build/simd_baseline/<arch>/libsimd_baseline.a`, and `kernels.spc` links it with
+`@link("-Lbuild/simd_baseline/<arch> -lsimd_baseline")`. A C file compiled apart from the engine and
+linked with the generated code needs `-funsigned-char` (below).
 
 `ffi/sc_cpu.spc` is the example of per-OS bindings behind one interface, with no C file: the CPU
 feature detector selects its query with `@platform` and `@arch` (`sysctlbyname` on Apple, `getauxval`
@@ -118,18 +113,8 @@ treats a failing query as "absent", and reads the build's own set from the build
 ...)`) runs it before `main`; atomics with acquire and release publish the answer, so two first
 callers store equal words with no lock. `@export` gives the generated C its `sc_cpu_words`.
 
-### Explicit source
-
-```superc
-@c.source("impl/engine.c")      // names a C file relative to this .spc file
-extern "C" "engine.h" {
-    fn engine_init() void;
-}
-```
-
-Each backing source becomes a wrapper translation unit in `build/` (`__ext<N>_<stem>.c`)
-with one absolute `#include`. Relative includes in the backing source continue to resolve
-correctly. std, ffi and the compiler hold no backing C source: they are Super-C throughout.
+std, ffi and the compiler hold no C source: they are Super-C throughout. `@c.source` is removed
+(an unknown attribute).
 
 ### Link flags
 
@@ -145,9 +130,9 @@ extern "C" {
 }
 ```
 
-One extern block takes at most one `@link` and one `@c.source` (a repeated attribute is a
-parse error). A value starting with `-` may hold several whitespace-separated flags; a second
-library or source otherwise goes on its own extern block.
+One extern block takes at most one `@link` (a repeated attribute is a parse error). A value
+starting with `-` may hold several whitespace-separated flags; a second library otherwise goes
+on its own extern block.
 
 Link flags are written to `build/<profile>/raw/__ldflags` (one per line). Libraries declare their flag
 once where the binding lives. Importers never repeat it. Flags apply automatically to
@@ -330,10 +315,20 @@ Windows). A Windows C runtime function that counts in `int` (`read`, `write`, `g
 A C macro that names an object is bound per target to what it expands to, never through a C shim:
 
 - `errno`: `__error()` (Apple), `__errno_location()` (glibc), `__errno()` (Android), `_errno()`
-  (Windows UCRT) return its address; wasi-libc declares `extern _Thread_local int errno`, bound as
-  `@import("errno") @thread_local static mut c_errno: i32;`. `ffi/errno.spc` wraps them.
-- `stdin`, `stdout`, `stderr`: `__stdinp` (Apple) or `stdin` (glibc, wasi-libc) extern statics,
-  `__acrt_iob_func(i)` on Windows. `ffi/stdio.spc` wraps them.
+  (Windows UCRT) return its address; wasi-libc's header declares `extern _Thread_local int errno`,
+  bound as `@import("errno") @thread_local static mut c_errno: i32;` and defined by wasm's C library
+  (`std::rt::libc`). `ffi/errno.spc` wraps them.
+- `stdin`, `stdout`, `stderr`: `__stdinp` (Apple) or `stdin` (glibc, wasm) extern statics,
+  `__acrt_iob_func(i)` on Windows. `ffi/stdio.spc` wraps them. On wasm the header declares them
+  `const` objects, which the Super-C C library cannot define: `super_rt.h` turns the three names into
+  calls of its `sc_stdio_stream(fd)`, so a binding reads them as on Linux.
+- `CLOCK_REALTIME`, `CLOCK_MONOTONIC`: integer constants, except on wasm, where `clockid_t` points
+  at a `const` object of the header; `super_rt.h` spells them as the WASI clock id plus one, cast to
+  `clockid_t`, which the C library's `clock_gettime` reads. A binding declares them as constants.
+
+wasm has no system C library: a wasm program links `std::rt::libc` and `std::rt::libm`, a subset of
+C99 and POSIX over WASI (super-c-binary, Wasm C library). A binding to a C function outside the subset
+fails to link on wasm.
 
 `@thread_local` on an extern `static mut` binds a C `_Thread_local` object. Every access goes
 through a non-inlined per-unit accessor (`sym__tls()`), so a coroutine that resumes on another
@@ -578,7 +573,6 @@ functions unsafe; a safe wrapper takes the operand as a const parameter and chec
 
 | Attribute | Scope | Effect |
 |-----------|-------|--------|
-| `@c.source("file.c")` | extern block | Name a backing C implementation |
 | `@link("lib")` | extern block | Declare a link flag |
 | `@export("sym")` | function | Pin exact C symbol (external linkage) |
 | `@import("sym")` | extern fn, extern type, header type field | Import with exact C symbol; the C spelling of an extern type; the C member of a field |
@@ -646,8 +640,8 @@ still folds to the one instruction at `-O1` and above.
 The build compiles C with `-std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700` (the `cstd`
 value: POSIX 2008 with the XSI extension, which declares `realpath` on glibc and wasi-libc), plus
 `-funsigned-char -ffp-contract=off -Werror=incompatible-pointer-types` and the libm
-`-fno-builtin-<f>` set (`LIBM_AS_WRITTEN` in `src/build_system/build.spc`: `sin(x)` in a
-`@c.source` file is a libm call too, never a constant fold or a `sincos`) on every compile. A
+`-fno-builtin-<f>` set (`LIBM_AS_WRITTEN` in `src/build_system/build.spc`: `sin(x)` is a libm
+call, never a constant fold or a `sincos`) on every compile. A
 Windows compile also gets `-D_WIN32_WINNT=0x0A00` (`push_c_env` in `src/driver/util.spc`):
 the Windows 10 API level on every mingw toolchain. MSYS2 defaults to it; llvm-mingw defaults to
 Windows 7, whose headers hide the Windows 8 functions the runtime calls.

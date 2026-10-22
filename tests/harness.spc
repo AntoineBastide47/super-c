@@ -1232,10 +1232,10 @@ fn parity_source(decls: str, exprs: []str, tys: []str, omit: &Vector<bool>, firs
     if s.len() != 0 && !s.ends_with("\n") {
         s.push_byte(b'\n');
     }
-    s.push_str("@c.noinline\nconst fn opq<T>(x: T) T {\n    return x;\n}\n");
+    s.push_str("@noinline\nconst fn opq<T>(x: T) T {\n    return x;\n}\n");
     // A write to a static is a side effect no constant evaluation performs: the compiler cannot see
     // through `opr`, so the run-time copy computes at run time and its traps are not compile errors.
-    s.push_str("static mut PARITY_SINK: usize = 0;\n@c.noinline\nfn opr<T>(x: T) T {\n");
+    s.push_str("static mut PARITY_SINK: usize = 0;\n@noinline\nfn opr<T>(x: T) T {\n");
     s.push_str("    unsafe PARITY_SINK += 1;\n    return x;\n}\n");
     for t in tys {
         if t == "f64" || t == "f32" {
@@ -1258,7 +1258,7 @@ fn parity_source(decls: str, exprs: []str, tys: []str, omit: &Vector<bool>, firs
     }
     for k in 0..exprs.len() {
         let rt = String::from_str(exprs[k]).replace("opq::", "opr::").replace("opq(", "opr(");
-        s.format_into("@c.noinline\nfn parity_r{}() {} {{\n    return {};\n}}\n", k, tys[k], rt.as_str());
+        s.format_into("@noinline\nfn parity_r{}() {} {{\n    return {};\n}}\n", k, tys[k], rt.as_str());
     }
     // Argument -1 runs every case in order, each after a line `= k`.
     s.format_into(
@@ -1342,7 +1342,7 @@ const fn parity_value<'a>(out: str<'a>, tag: str) str<'a> {
 /// the trap differs; empty when all agree. A constant that traps is a compile error naming the class
 /// of the trap ("arithmetic overflow"); the run time must trap with a message of that class
 /// (`runtime_trap_class`). Inputs are written `opq::<T>(v)`: the constant calls the identity
-/// `const fn opq`, the run-time copy calls `@c.noinline fn opr`, which the compiler cannot see
+/// `const fn opq`, the run-time copy calls `@noinline fn opr`, which the compiler cannot see
 /// through. The program defines `opq`, `opr` and names starting with `parity_`, `Parity` and `PARITY_`.
 pub fn const_runtime_parity(decls: str, exprs: []str, tys: []str, opts_in: []str) String {
     assert(exprs.len() == tys.len());

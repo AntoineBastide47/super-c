@@ -348,7 +348,7 @@ fn naked_rejects() {
     assert_eq(one.errors, 1);
     h::expect_err_msg(
         "not inlined",
-        "@c.always_inline\n@unsafe(naked)\nfn f() {\n    asm(\"ret\");\n}\nfn main() i32 { return 0; }\n",
+        "@always_inline\n@unsafe(naked)\nfn f() {\n    asm(\"ret\");\n}\nfn main() i32 { return 0; }\n",
         "a '@unsafe(naked)' function cannot be inlined",
     );
     let SIG: str = "a '@unsafe(naked)' function takes and returns only integers, floats, 'bool', 'char' and raw pointers";

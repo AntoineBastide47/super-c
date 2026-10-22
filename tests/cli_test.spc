@@ -383,7 +383,7 @@ fn mut_refs_restrict_and_question_success_is_likely() {
 
 // A `[]mut T` parameter is exclusive for the call like a `&mut`: `f__r` receives it as a `restrict`
 // element pointer and a length, every direct call splits the view, and `f` keeps the struct ABI for
-// function values and `@c.export`. Recursion, methods, generics and a call result argument agree.
+// function values and `@export`. Recursion, methods, generics and a call result argument agree.
 const SPLIT_VIEWS: str = M"(fn axpy(y: []mut f64, x: []f64, a: f64) {
     for i in 0..y.len() {
         y.set(i, *y.at(i) + a * *x.at(i));
@@ -415,7 +415,7 @@ fn rec(d: []mut i32, k: usize) i32 {
 fn pick(x: []mut i32) []mut i32 {
     return x;
 }
-@c.export("sc_scale")
+@export("sc_scale")
 fn scale(d: []mut f32, s: f32) {
     for i in 0..d.len() {
         d.set(i, *d.at(i) * s);
@@ -3008,9 +3008,6 @@ fn main() i32 {
     p.expect_batch(b);
 }
 
-// @platform gates @c.source/@c.link: a windows-only extern block (backing header + link flag) must not
-// contribute its wrapper TU or -l flag on a non-windows build: else every target links every OS's runtime
-// C. Regression guard for the extc gating fix.
 // usize/isize literal ranges follow the SELECTED target's pointer width, not the host's: a 64-bit
 // usize literal is legal for 64-bit targets and rejected for wasm32.
 @test
@@ -3099,12 +3096,12 @@ fn platform_gates_ext_c() {
     p.mkfile(
         "main.spc",
         M"(@platform(windows)
-@c.link("scrt_win_only_lib")
+@link("scrt_win_only_lib")
 extern "C" "scrt_no_such_header.h" {
     pub fn scrt_win_only() i32;
 }
 
-@c.link("m")
+@link("m")
 extern "C" {
     fn scrt_needs_m() f64;
 }
@@ -3118,11 +3115,11 @@ fn main() i32 {
     let r = p.compile("main.spc");
     assert(r.ok());
     // The always-on link is present; the windows-only one only when windows is what we are building for.
-    assert(p.gen_has("__ldflags", "-lm"), "ungated @c.link lands in __ldflags");
+    assert(p.gen_has("__ldflags", "-lm"), "ungated @link lands in __ldflags");
     if cli::on_windows() {
-        assert(p.gen_has("__ldflags", "scrt_win_only_lib"), "the windows @c.link is kept on windows");
+        assert(p.gen_has("__ldflags", "scrt_win_only_lib"), "the windows @link is kept on windows");
     } else {
-        assert(!p.gen_has("__ldflags", "scrt_win_only_lib"), "windows @c.link is filtered out on the host");
+        assert(!p.gen_has("__ldflags", "scrt_win_only_lib"), "windows @link is filtered out on the host");
     }
 }
 
@@ -4881,7 +4878,7 @@ fn main() i32 {
     let r = p.compile("main.spc");
     assert(r.ok());
     assert(p.gen_has("main.c", "__sc_blk_main__gate_wait("), "the call goes through the generated wrapper");
-    let cc = p.cc_build("");
+    let cc = p.cc_build_with("", "gate.c");
     assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
@@ -7130,16 +7127,16 @@ fn main() i32 {
     assert_eq(p.run_bin(), 33);
 }
 
-// External C code imports: a backing header auto-discovers its same-stem .c sibling; @c.source pulls a
-// differently-named impl; @c.link lands in build/__ldflags; removing the code prunes the wrappers + flags;
-// a missing @c.source is a hard error.
+// External C code: a backing header's same-stem `.c` file is no part of the build (C comes prebuilt,
+// through `@link`); @link lands in build/__ldflags; removing the block prunes its flag; `@c.source` is
+// an unknown attribute.
 @test
 fn external_c_sources() {
     let p = cli::proj_new();
     p.mkfile("helper.h", "int helper_add(int a, int b);\n");
     p.mkfile("helper.c", "#include \"helper.h\"\nint helper_add(int a, int b) { return a + b; }\n");
     p.mkfile("extra.h", "int extra_mul(int a, int b);\n");
-    p.mkfile("impl_extra.c", "#include \"extra.h\"\nint extra_mul(int a, int b) { return a * b; }\n");
+    p.mkfile("extra.c", "#include \"extra.h\"\nint extra_mul(int a, int b) { return a * b; }\n");
     // The block's library has to exist on this platform (mingw ships no libc.a) AND differ from what the
     // driver seeds by itself, or phase two below cannot tell the block's flag from the prelude's: libm is
     // seeded on POSIX only, libc exists on POSIX only, so the two swap roles by target.
@@ -7148,9 +7145,7 @@ fn external_c_sources() {
     } else {
         "c";
     };
-    let mut src = String::from_str(
-        "extern \"C\" \"helper.h\" {\n  fn helper_add(a: i32, b: i32) i32;\n}\n@c.source(\"impl_extra.c\")\n@c.link(\"",
-    );
+    let mut src = String::from_str("extern \"C\" \"helper.h\" {\n  fn helper_add(a: i32, b: i32) i32;\n}\n@link(\"");
     src.push_str(lib);
     src.push_str(
         "\")\nextern \"C\" \"extra.h\" {\n  fn extra_mul(a: i32, b: i32) i32;\n}\nextern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(helper_add(20, 22) + extra_mul(2, 3)); return 0; }\n",
@@ -7160,37 +7155,35 @@ fn external_c_sources() {
     flag.push_str(lib);
     let r = p.compile("main.spc");
     assert(r.ok(), "the program compiles");
-    assert(p.gen_has("__ldflags", flag.as_str()), "@c.link lands in build/__ldflags");
-    let cc = p.cc_build("");
+    assert_eq(p.gen_count("__ext"), 0);
+    assert(p.gen_has("__ldflags", flag.as_str()), "@link lands in build/__ldflags");
+    let cc = p.cc_build_with("", "helper.c extra.c");
     assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 48);
 
-    // Drop the extern blocks: the wrapper TUs go, and so does the flag they contributed. `-lm` stays;
+    // Drop the extern blocks: the flag they contributed goes. `-lm` stays;
     // the prelude's float methods are emitted into every program, so libm is on every POSIX link line.
     p.mkfile("main.spc", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(0); return 0; }\n");
     let r2 = p.compile("main.spc");
     assert(r2.ok(), "the program compiles");
-    assert_eq(p.gen_count("__ext"), 0);
     assert(!p.gen_has("__ldflags", flag.as_str()), "a dropped extern block takes its link flag with it");
     if !cli::on_windows() {
         assert(p.gen_has("__ldflags", "-lm"), "the prelude's own libm flag stays: every program emits float methods");
     }
 
-    // A missing source file is a hard error.
     p.mkfile(
         "main.spc",
-        "@c.source(\"nope.c\")\nextern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(0); return 0; }\n",
+        "@c.source(\"extra.c\")\nextern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(0); return 0; }\n",
     );
-    let miss = p.compile("main.spc");
-    assert(miss.exit != 0, "missing @c.source errors");
-    assert(miss.out_has("cannot find C source"), "and names it");
+    let gone = p.compile("main.spc");
+    assert(gone.exit != 0 && gone.out_has("unknown attribute '@c.source'"), "@c.source is an unknown attribute");
 }
 
 // Shim prototypes (`sc_` externs) and block-wrapper prototypes live in the forward header, which
 // includes no definition header: one whose array declarator has an aggregate element (`[S; 2]`)
 // is a declaration of the unit that calls it, after the definition it needs. By-value `S`
 // parameters and returns stay (a declaration may name an incomplete type), and so does a pointer to
-// an array of `S`, which names the array's wrapper struct. The C side calls the `@c.export` functions back; the tree compiles
+// an array of `S`, which names the array's wrapper struct. The C side calls the `@export` functions back; the tree compiles
 // -Wall -Wextra -Werror. A result pointer to an array of `S` converts at the call (`(void *)`), and a
 // local named like that extern, declared before the call, takes another C name.
 @test
@@ -7201,6 +7194,7 @@ fn extern_prototypes_see_complete_types() {
     // through `&T`, a `const` object in C, passes.
     p.mkfile("bump.h", "int arr_bump(int a[4]);\n");
     p.mkfile("bump.c", "#include \"bump.h\"\nint arr_bump(int a[4]) { a[0] = 100; return a[0] + a[3]; }\n");
+    p.mkfile("side.h", "");
     p.mkfile(
         "side.c",
         M"(#include <stdint.h>
@@ -7225,7 +7219,9 @@ import std::parallel::runtime as rt;
 
 pub struct S { pub a: i32, pub b: i32 }
 
-@c.source("side.c")
+// side.c, linked beside the program, brings the definitions the header-less block below declares.
+extern "C" "side.h" {}
+
 extern "C" {
     fn sc_sum2(p: *const [S; 2]) i32;
     fn sc_arrx(a: [S; 2]) i32;
@@ -7261,17 +7257,17 @@ fn rows(k: i32) i32 {
     return t + unsafe (*p)[1].a;
 }
 
-@c.export("sc_twice")
+@export("sc_twice")
 pub fn twice(s: S) S {
     return S { a: s.a * 2, b: s.b * 2 };
 }
 
-@c.export("sc_arr")
+@export("sc_arr")
 pub fn arr(a: [S; 2]) i32 {
     return a[0].a + a[1].b;
 }
 
-@c.export("sc_parr")
+@export("sc_parr")
 pub fn parr(p: *const [S; 2]) i32 {
     return unsafe (*p)[1].a;
 }
@@ -7310,7 +7306,7 @@ fn main() i32 {
         "a block wrapper taking a pointer to an array of S stays",
     );
     assert(p.gen_has("__sc_fwd.h", "sc_val("), "a by-value aggregate parameter stays in the forward header");
-    let cc = p.cc_build("");
+    let cc = p.cc_build_with("", "bump.c side.c");
     assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
@@ -8376,8 +8372,8 @@ fn imported_const_sized_array() {
 
 // `bindgen` reads a C header through its own preprocessor and writes the `extern "C"` module for it.
 // Checked end to end, because the only claim worth making is that the generated bindings COMPILE and CALL
-// the library: a `.c` sibling of the header is picked up by the ordinary extern-C machinery, so the test
-// links against a real implementation and reads its answer back.
+// the library: the test links a real implementation, compiled beside the program, and reads its answer
+// back.
 @test
 fn bindgen_generates_callable_bindings() {
     let p = cli::proj_new();
@@ -8421,7 +8417,7 @@ fn bindgen_generates_callable_bindings() {
     );
     let r = p.compile("main.spc");
     assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("");
+    let cc = p.cc_build_with("", "lib.c");
     assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 0);
 }
@@ -8488,7 +8484,7 @@ fn bindgen_generates_records_enums_and_consts() {
     );
     let r = p.compile("main.spc");
     assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("");
+    let cc = p.cc_build_with("", "lib.c");
     assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 0);
 }
@@ -8646,7 +8642,7 @@ fn bindgen_expressions_anonymous_types_and_globals() {
     );
     let r = p.compile("main.spc");
     assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("");
+    let cc = p.cc_build_with("", "lib.c");
     assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 0);
 }
@@ -8890,7 +8886,7 @@ fn extern_static_mut_binds_a_writable_global() {
     );
     let r = p.compile("main.spc");
     assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("");
+    let cc = p.cc_build_with("", "g.c");
     assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 0);
     // The write is guarded exactly like any static mut.
@@ -8912,23 +8908,25 @@ fn extern_static_mut_binds_a_writable_global() {
 @test
 fn headerless_extern_static_mut_is_declared() {
     let p = cli::proj_new();
+    // def.c, linked beside the program, defines the statics; the header declares nothing.
+    p.mkfile("def.h", "");
     p.mkfile("def.c", "int hl_counter = 41;\n_Thread_local int hl_tls = 1;\n");
     p.mkfile(
         "main.spc",
-        "@c.source(\"def.c\")\nextern \"C\" {\n    static mut hl_counter: i32;\n    @thread_local\n    static mut hl_tls: i32;\n}\nfn main() i32 {\n    unsafe hl_counter = unsafe hl_counter + 1;\n    unsafe hl_tls = unsafe hl_tls + 2;\n    return unsafe hl_counter + unsafe hl_tls - 45;\n}\n",
+        "extern \"C\" \"def.h\" {}\nextern \"C\" {\n    static mut hl_counter: i32;\n    @thread_local\n    static mut hl_tls: i32;\n}\nfn main() i32 {\n    unsafe hl_counter = unsafe hl_counter + 1;\n    unsafe hl_tls = unsafe hl_tls + 2;\n    return unsafe hl_counter + unsafe hl_tls - 45;\n}\n",
     );
     let r = p.compile("main.spc");
     assert(r.ok(), "the program compiles");
     assert(p.gen_has("main.c", "extern int32_t hl_counter;"), "the unit declares the static");
-    let cc = p.cc_build("");
+    let cc = p.cc_build_with("", "def.c");
     assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 0);
 }
 
 // Bindgen binds globals by what C itself declares: writable ones as `static mut`, const-qualified
 // ones as `const`, and --cflag reaches the preprocessor, so a feature-gated declaration appears
-// exactly when the flag says so. The generated module is then used end to end: the .c sibling of the
-// backing header supplies the definitions, and the program mutates the bound global through it.
+// exactly when the flag says so. The generated module is then used end to end: lib.c, linked beside the
+// program, supplies the definitions, and the program mutates the bound global through it.
 @test
 fn bindgen_globals_and_cflag() {
     let p = cli::proj_new();
@@ -8980,13 +8978,13 @@ fn bindgen_globals_and_cflag() {
     );
     let c = p.compile("main.spc");
     assert(c.ok());
-    let cc = p.cc_build("");
+    let cc = p.cc_build_with("", "lib.c");
     assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
 // A C name that is a Super-C keyword binds under its escaped spelling: a function or global keeps
-// its C symbol through `@c.import`, and a field or constant just gains the underscore. The module
+// its C symbol through `@import`, and a field or constant just gains the underscore. The module
 // must parse and link.
 @test
 fn bindgen_escapes_keyword_names() {
@@ -9016,7 +9014,7 @@ fn bindgen_escapes_keyword_names() {
         "import lib;\n\nfn main() i32 {\n    let mut q = lib::pair { select_: 4, n: 1 };\n    q.select_ = q.select_ + unsafe lib::pair_n(&mut q);\n    let a = unsafe lib::select_(2, 3);\n    return a + unsafe lib::launch_ + lib::move_ + q.select_ - 21;\n}\n",
     );
     assert(p.compile("main.spc").ok(), "the program compiles");
-    assert(p.cc_build("").ok(), "the emitted C compiles and links");
+    assert(p.cc_build_with("", "lib.c").ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 0);
 }
 
@@ -9471,8 +9469,7 @@ fn object_cache_entry_use_dates_no_object() {
     }
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
-    p.mkfile("src/helper.h", "#define HELPER_VAL 7\nint helper_val(void);\n");
-    p.mkfile("src/helper.c", "#include \"helper.h\"\nint helper_val(void) { return HELPER_VAL; }\n");
+    p.mkfile("src/helper.h", "#define HELPER_VAL 7\nstatic inline int helper_val(void) { return HELPER_VAL; }\n");
     p.mkfile(
         "src/main.spc",
         "extern \"C\" \"helper.h\" {\n    fn helper_val() i32;\n}\nfn main() i32 {\n    return unsafe helper_val() - 7;\n}\n",
@@ -9480,7 +9477,7 @@ fn object_cache_entry_use_dates_no_object() {
     let root = p.dir();
     let cache = format("{}/ocache", root);
     assert_eq(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "run").exit, 0);
-    p.mkfile("src/helper.h", "#define HELPER_VAL 9\nint helper_val(void);\n");
+    p.mkfile("src/helper.h", "#define HELPER_VAL 9\nstatic inline int helper_val(void) { return HELPER_VAL; }\n");
     // The edit dated after the first build (mtimes have second granularity), the shared entries later.
     let mut edit = format("touch -t 202901010000 \"{}/src/helper.h\"", root);
     assert_eq(cli::run_quiet(edit.cstr()), 0);
@@ -9618,10 +9615,7 @@ fn object_cache_shares_moved_trees() {
         p.mkfile(f.as_str(), "bin = \"app\"\nroot = \"src/main.spc\"\n");
         f.truncate(0);
         f.format_into("{}/src/helper.h", d);
-        p.mkfile(f.as_str(), "int helper_val(void);\n");
-        f.truncate(0);
-        f.format_into("{}/src/helper.c", d);
-        p.mkfile(f.as_str(), "#include \"helper.h\"\nint helper_val(void) { return 7; }\n");
+        p.mkfile(f.as_str(), "static inline int helper_val(void) { return 7; }\n");
         f.truncate(0);
         f.format_into("{}/src/main.spc", d);
         p.mkfile(
@@ -10168,7 +10162,7 @@ fn build_staleness_gates() {
     // nothing of util's types.
     p.mkfile(
         "src/util.spc",
-        "pub struct S {\n    pub a: i32,\n}\n\n@c.noinline\npub fn v(x: i32) i32 {\n    let s = S { a: x };\n    return s.a;\n}\n",
+        "pub struct S {\n    pub a: i32,\n}\n\n@noinline\npub fn v(x: i32) i32 {\n    let s = S { a: x };\n    return s.a;\n}\n",
     );
     let root = p.dir();
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
@@ -10190,7 +10184,7 @@ fn build_staleness_gates() {
     // spells no util type) nor changes its own text, so main.o stays.
     p.mkfile(
         "src/util.spc",
-        "pub struct S {\n    pub b: i32,\n}\n\n@c.noinline\npub fn v(x: i32) i32 {\n    let s = S { b: x };\n    return s.b;\n}\n",
+        "pub struct S {\n    pub b: i32,\n}\n\n@noinline\npub fn v(x: i32) i32 {\n    let s = S { b: x };\n    return s.b;\n}\n",
     );
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "layout-change build");
     assert(p13_mtime(genc.as_str()) == g1, "main.c is byte-identical, so the emission keeps its mtime");
@@ -10198,7 +10192,7 @@ fn build_staleness_gates() {
     // Add a public function: util.h changes, and main.c, which declares only what it calls, does not.
     p.mkfile(
         "src/util.spc",
-        "pub struct S {\n    pub b: i32,\n}\n\n@c.noinline\npub fn v(x: i32) i32 {\n    let s = S { b: x };\n    return s.b;\n}\n\npub fn w() i32 {\n    return 1;\n}\n",
+        "pub struct S {\n    pub b: i32,\n}\n\n@noinline\npub fn v(x: i32) i32 {\n    let s = S { b: x };\n    return s.b;\n}\n\npub fn w() i32 {\n    return 1;\n}\n",
     );
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "header-change build");
     assert(p13_mtime(genc.as_str()) == g1, "main.c is still byte-identical");
@@ -10223,11 +10217,11 @@ fn build_type_edit_stays_local() {
         "src/main.spc",
         "import util;\nimport other;\n\nfn main(argv: Vector<str>) i32 {\n    let n = argv.len() as i32 - 1;\n    return util::v(n) + other::f(n);\n}\n",
     );
-    let util0 = "pub struct S {\n    pub a: i32,\n}\n\n@c.noinline\npub fn v(x: i32) i32 {\n    let s = S { a: x };\n    return s.a;\n}\n";
+    let util0 = "pub struct S {\n    pub a: i32,\n}\n\n@noinline\npub fn v(x: i32) i32 {\n    let s = S { a: x };\n    return s.a;\n}\n";
     p.mkfile("src/util.spc", util0);
     p.mkfile(
         "src/other.spc",
-        "pub struct T {\n    pub b: i64,\n}\n\n@c.noinline\npub fn f(x: i32) i32 {\n    let t = T { b: x as i64 };\n    return t.b as i32;\n}\n",
+        "pub struct T {\n    pub b: i64,\n}\n\n@noinline\npub fn f(x: i32) i32 {\n    let t = T { b: x as i64 };\n    return t.b as i32;\n}\n",
     );
     let root = p.dir();
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
@@ -10277,9 +10271,9 @@ fn build_new_type_recompiles_no_user() {
         "src/main.spc",
         "import util;\nimport other;\n\nfn main(argv: Vector<str>) i32 {\n    let s = util::S { a: argv.len() as i32 - 1 };\n    return util::v(s) + other::f(s);\n}\n",
     );
-    let util0 = "pub struct S {\n    pub a: i32,\n}\n\n@c.noinline\npub fn v(s: S) i32 {\n    return s.a;\n}\n";
+    let util0 = "pub struct S {\n    pub a: i32,\n}\n\n@noinline\npub fn v(s: S) i32 {\n    return s.a;\n}\n";
     p.mkfile("src/util.spc", util0);
-    p.mkfile("src/other.spc", "import util;\n\n@c.noinline\npub fn f(s: util::S) i32 {\n    return s.a * 2;\n}\n");
+    p.mkfile("src/other.spc", "import util;\n\n@noinline\npub fn f(s: util::S) i32 {\n    return s.a * 2;\n}\n");
     let root = p.dir();
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
     let mut paths = Vector::<String>::new();
@@ -10327,12 +10321,12 @@ fn build_field_edit_recompiles_users() {
         "src/main.spc",
         "import util;\nimport other;\nimport third;\n\nfn main(argv: Vector<str>) i32 {\n    let s = util::S { a: argv.len() as i32 - 1, b: 2 };\n    return util::v(s) + s.b - 2 + other::f(util::T { x: 0 }) + third::g(&s);\n}\n",
     );
-    let util0 = "pub struct S {\n    pub a: i32,\n    pub b: i32,\n}\n\npub struct T {\n    pub x: i64,\n}\n\n@c.noinline\npub fn v(s: S) i32 {\n    return s.a;\n}\n";
+    let util0 = "pub struct S {\n    pub a: i32,\n    pub b: i32,\n}\n\npub struct T {\n    pub x: i64,\n}\n\n@noinline\npub fn v(s: S) i32 {\n    return s.a;\n}\n";
     p.mkfile("src/util.spc", util0);
-    p.mkfile("src/other.spc", "import util;\n\n@c.noinline\npub fn f(t: util::T) i32 {\n    return t.x as i32;\n}\n");
+    p.mkfile("src/other.spc", "import util;\n\n@noinline\npub fn f(t: util::T) i32 {\n    return t.x as i32;\n}\n");
     p.mkfile(
         "src/third.spc",
-        "import util;\n\n@c.noinline\npub fn g(s: &util::S) i32 {\n    let q = s as *const util::S;\n    return (q == null) as i32;\n}\n",
+        "import util;\n\n@noinline\npub fn g(s: &util::S) i32 {\n    let q = s as *const util::S;\n    return (q == null) as i32;\n}\n",
     );
     let root = p.dir();
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
@@ -10416,7 +10410,7 @@ fn build_symbol_segment_includes_no_type() {
     );
     let util0 = "pub struct K {\n    pub a: i64,\n}\n";
     p.mkfile("src/util.spc", util0);
-    p.mkfile("src/gen.spc", "@c.noinline\npub fn size<T>() i32 {\n    return sizeof(T) as i32;\n}\n");
+    p.mkfile("src/gen.spc", "@noinline\npub fn size<T>() i32 {\n    return sizeof(T) as i32;\n}\n");
     let root = p.dir();
     assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
     let mut genc = String::new();
@@ -10831,7 +10825,7 @@ fn diverging_function_called_from_another_module() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile(
         "src/c1.spc",
-        "extern \"C\" {\n    @c.noreturn\n    fn exit(code: i32) void;\n}\n\npub fn f() i32 {\n    unsafe exit(5);\n}\n",
+        "extern \"C\" {\n    @noreturn\n    fn exit(code: i32) void;\n}\n\npub fn f() i32 {\n    unsafe exit(5);\n}\n",
     );
     p.mkfile("src/main.spc", "import c1;\n\nfn main() i32 {\n    let v = c1::f();\n    return v;\n}\n");
     assert_eq(cli::superc_in(p.dir(), "run").exit, 5);

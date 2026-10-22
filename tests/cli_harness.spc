@@ -529,7 +529,7 @@ extend Proj {
         }
     }
 
-    // The `@c.link` flags the emit wrote to build/debug/raw/__ldflags, space separated (empty when there are
+    // The `@link` flags the emit wrote to build/debug/raw/__ldflags, space separated (empty when there are
     // none): the `cat` a shell command would run.
     fn append_ldflags(self: &Proj, out: &mut String) {
         let flags = read_text(format("{}/build/debug/raw/__ldflags", self.dir()).as_str());
@@ -550,13 +550,19 @@ extend Proj {
     }
 
     // Compile the whole emitted build/ tree (plus any `extra` flags; its `-l`, `-L` and `-Wl,` words join
-    // the link) and link <root>/bin with the @c.link __ldflags. `strict` adds -Wall -Wextra -Werror;
+    // the link) and link <root>/bin with the @link __ldflags. `strict` adds -Wall -Wextra -Werror;
     // without it this is the plain build (the analog of cli_test's `cc -std=c11`, where a tree
     // containing @test functions compiles as an ordinary program). The units compile through the object
     // cache's script namespace (`objcache::compile_units`): a unit reuses an object only when the same
     // compiler and flags compiled the same text and includes before, so every check is a compile's own.
     // The compiler's diagnostics go to the test's stderr.
     fn cc_tree(self: &Proj, extra: str, strict: bool) CliResult {
+        return self.cc_tree_with(extra, strict, "");
+    }
+
+    // `cc_tree` that also links the C files `csrcs` (paths under the root, space separated), each compiled
+    // alone with the plain flags into `<file>.o`: the prebuilt C library a program takes through `@link`.
+    fn cc_tree_with(self: &Proj, extra: str, strict: bool, csrcs: str) CliResult {
         let root = self.dir();
         let raw = format("{}/build/debug/raw", root);
         let mut ccv = Vector::<String>::new();
@@ -608,6 +614,25 @@ extend Proj {
         for i in 0..objs.len() {
             link.format_into(" \"{}\"", objs.at(i).as_str());
         }
+        let mut cs = Vector::<String>::new();
+        dutil::split_args(&mut cs, csrcs);
+        for i in 0..cs.len() {
+            let mut c = String::from_str(unsafe str::from_cstr(cc_name()));
+            c.format_into(
+                " {} -funsigned-char -c \"{}/{}\" -o \"{}/{}.o\"",
+                unsafe str::from_cstr(cstd()),
+                root,
+                cs.at(i).as_str(),
+                root,
+                cs.at(i).as_str(),
+            );
+            let mut cop = format("{}/.ccout", root);
+            let r = exec(c.cstr(), cop.cstr());
+            if r.exit != 0 {
+                return r;
+            }
+            link.format_into(" \"{}/{}.o\"", root, cs.at(i).as_str());
+        }
         self.append_ldflags(&mut link);
         link.format_into(" -o \"{}/bin{}\"", root, unsafe str::from_cstr(binext()));
         let mut op = format("{}/.ccout", root);
@@ -617,6 +642,44 @@ extend Proj {
     /// Compile every generated C file with the harness flags and link `bin`; the C compiler's result.
     pub fn cc_build(self: &Proj, extra: str) CliResult {
         return self.cc_tree(extra, true);
+    }
+
+    /// `cc_build` that also compiles the C files `csrcs` (paths under the root, space separated) and links
+    /// their objects: a C library the program binds comes prebuilt, never from the program's tree.
+    pub fn cc_build_with(self: &Proj, extra: str, csrcs: str) CliResult {
+        return self.cc_tree_with(extra, true, csrcs);
+    }
+
+    /// Compile the C files `csrcs` (paths under the root, space separated) with the plain flags and archive
+    /// them into `<root>/lib<name>.a` with `$AR` (else `ar`): the prebuilt C library a program the build
+    /// engine links names with `@link("-L<root> -l<name>")`. Whether every step succeeded.
+    pub fn c_lib(self: &Proj, name: str, csrcs: str) bool {
+        let root = self.dir();
+        let a = stdlib::getenv("AR");
+        let ar = if a != null && unsafe *a != 0 as char {
+            unsafe str::from_cstr(a);
+        } else {
+            "ar";
+        };
+        let mut arc = format("{} rcs \"{}/lib{}.a\"", ar, root, name);
+        let mut cs = Vector::<String>::new();
+        dutil::split_args(&mut cs, csrcs);
+        for i in 0..cs.len() {
+            let mut c = String::from_str(unsafe str::from_cstr(cc_name()));
+            c.format_into(
+                " {} -funsigned-char -c \"{}/{}\" -o \"{}/{}.o\"",
+                unsafe str::from_cstr(cstd()),
+                root,
+                cs.at(i).as_str(),
+                root,
+                cs.at(i).as_str(),
+            );
+            if run_quiet(c.cstr()) != 0 {
+                return false;
+            }
+            arc.format_into(" \"{}/{}.o\"", root, cs.at(i).as_str());
+        }
+        return run_quiet(arc.cstr()) == 0;
     }
 
     /// `cc_build` without the pedantic warning set.

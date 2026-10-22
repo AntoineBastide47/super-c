@@ -1234,9 +1234,9 @@ fn tree_pch(gen: str) bool {
 }
 
 // Whether tree-relative unit `rel` starts with `#include "<..>__sc_fwd.h"`: every unit the emitter writes
-// but the external C wrappers (`__ext<N>_<stem>.c`) and the test runner.
+// but the test runner.
 const fn fwd_unit(rel: str) bool {
-    return rel != "__test_main.c" && !rel.starts_with("__ext");
+    return rel != "__test_main.c";
 }
 
 extend CcStream {
@@ -1290,6 +1290,7 @@ extend CcStream {
             self.cc_tail.push_string(&uvm);
             self.ldbase.push_string(&uvm);
         }
+        push_rtlib(&mut self.probes, self.target, &mut self.ldbase);
         self.prefix_args = clone_args(&self.cc_args);
         split_args(&mut self.prefix_args, self.cc_tail.as_str());
         if self.cache.len() != 0 {
@@ -1632,7 +1633,9 @@ extend CcStream {
         if self.feat_bad {
             return;
         }
-        let large = self.pch != PCH_OFF && fwd_unit(rel);
+        // wasm's C library compiles with other flags than the precompiled header's.
+        let libc = loader::libc_unit(rel);
+        let large = self.pch != PCH_OFF && fwd_unit(rel) && !libc;
         if large && self.pch == PCH_RUN {
             self.pch_wait.push(String::from_str(rel));
             return;
@@ -1650,6 +1653,9 @@ extend CcStream {
         let mut args = clone_args(&self.prefix_args);
         if large && self.icc1 {
             push_arg(&mut args, "-fintegrated-cc1");
+        }
+        if libc {
+            push_arg(&mut args, "-fno-builtin");
         }
         let np = args.len();
         if pch {
@@ -2006,21 +2012,6 @@ fn stamp_exe_line(out: &mut String, cid: u64, lag: u64) {
     out.push_str("\n");
 }
 
-// The record of the file at `path` as it is now: its mtime, then its content id; false when it cannot
-// be read.
-fn stamp_push_input(out: &mut String, path: str) bool {
-    let mt = file_mtime(path);
-    if mt == 0 {
-        return false;
-    }
-    let h = file_id(path);
-    if h == 0 {
-        return false;
-    }
-    stamp_line(out, "in\t", mt as u64, h, path);
-    return true;
-}
-
 // One stamp record: `kind` (with its tab), then mtime, hash and path.
 fn stamp_line(out: &mut String, kind: str, mt: u64, h: u64, path: str) {
     out.push_str(kind);
@@ -2156,11 +2147,6 @@ fn stamp_write(
         // An implicit directory index is its directory's listing, which a `dir` record below covers.
         if md.file.len() != 0 && !md.implicit_index {
             stamp_line(&mut out, "in\t", md.mtime as u64, md.src_id, md.file.as_str());
-        }
-    }
-    for i in 0..p.ext_inputs.len() {
-        if !stamp_push_input(&mut out, p.ext_inputs.at(i).as_str()) {
-            return;
         }
     }
     // Every directory import resolution listed, and the prelude's: a new `.spc` file there can shadow an
@@ -2839,9 +2825,10 @@ pub fn features_accepted(
     all: cf::CpuFeatureSet,
     more: &mut String,
     late: &mut String,
+    ld: &mut String,
 ) bool {
     let feats = cf::beyond_baseline(all, target);
-    let need = feature_probes(feats) | uvm_need(target, arch) | novec_need(lto);
+    let need = feature_probes(feats) | uvm_need(target, arch) | novec_need(lto) | rtlib_need(target);
     if need == 0 {
         return true;
     }
@@ -2858,8 +2845,30 @@ pub fn features_accepted(
     let ok = features_pass(&mut probes, feats, target, cc);
     let _ = push_novec(&mut probes, lto, late);
     let _ = push_uvm(&mut probes, more);
+    push_rtlib(&mut probes, target, ld);
     probes.save();
     return ok;
+}
+
+// The compiler support library probe's bit on wasm, whose link takes no C library, else 0.
+const fn rtlib_need(target: i32) u64 {
+    return pick(target == 3, 1u64 << pr::RTLIB as u64, 0);
+}
+
+// Append a wasm link's library flags to `out`: no C library or start files (`std::rt::libc` provides the C
+// library and the entry point), then the compiler's support library when its probe found it (the result
+// joins the command fingerprint).
+fn push_rtlib(probes: &mut pr::Probes, target: i32, out: &mut String) {
+    if target != 3 {
+        return;
+    }
+    out.push_str(" -nostdlib");
+    if probes.res.at(pr::RTLIB).as_str() == "rejected" || probes.res.at(pr::RTLIB).len() == 0 {
+        return;
+    }
+    probes.mark_used(pr::RTLIB);
+    out.push_byte(b' ');
+    out.push_string(probes.res.at(pr::RTLIB));
 }
 
 // The no-prelink-vectorize probe's bit for an LTO mode that can compile as full LTO (`full`, `auto`,
@@ -3031,7 +3040,9 @@ fn cc_stream(
         ldbase.as_str(),
         cx.target,
         m.arch,
-        need | feature_probes(cf::beyond_baseline(feats, cx.target)) | uvm_need(cx.target, m.arch) | novec_need(lto_req),
+        need | feature_probes(cf::beyond_baseline(feats, cx.target)) | uvm_need(cx.target, m.arch) | novec_need(lto_req) | rtlib_need(
+            cx.target,
+        ),
     );
     // The compile argv runs from the process working directory; record it for compile_commands.json.
     let ccdb_dir = fs::realpath(".").unwrap_or(String::from_str("."));

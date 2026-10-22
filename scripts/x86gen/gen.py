@@ -1118,10 +1118,10 @@ extern "C" "immintrin.h" {''']
         elif any(s in u for s in ('maskload', 'maskstore', 'mask_loadu', 'mask_storeu', 'gather', 'scatter', 'compressstoreu', 'expandloadu')):
             attrs.append('@lane_access')
         elif 'loadl' in u or 'storel' in u:
-            attrs.append(f'@c.{"reads" if "load" in u else "writes"}(p, 8)')
+            attrs.append(f'@{"reads" if "load" in u else "writes"}(p, 8)')
         elif 'load' in u or 'store' in u:
             pre = [p for p in BYTES if u.startswith(p)][-1]
-            attrs.append(f'@c.{"reads" if "load" in u else "writes"}(p, {BYTES[pre]})')
+            attrs.append(f'@{"reads" if "load" in u else "writes"}(p, {BYTES[pre]})')
         else:
             raise Exception(u)
         r = '' if ret == 'void' else ' ' + CTYPE[ret]

@@ -151,7 +151,7 @@ const C1: str = M"(pub fn cee() i32 {
 const A3: str = M"(import b;
 import c;
 
-@c.align(b::W)
+@align(b::W)
 pub struct First {
     pub x: i32,
 }

@@ -696,7 +696,7 @@ extend Mangler {
         let p = unsafe &*pkg;
         let mut user_mods: usize = 0;
         for i in 0..p.modules.len() {
-            if !p.modules.at(i).prelude && i as i32 != p.rt_module {
+            if !p.modules.at(i).prelude && !p.is_rt(i as i32) {
                 user_mods += 1;
             }
         }
@@ -1740,7 +1740,7 @@ extend Mangler {
     /// a symbol segment, else a symbol edge.
     pub fn modpfx(self: &mut Self, m: ModuleId, out: &mut String) {
         self.spell_edge(m);
-        if !self.mangle && m as i32 != self.p().rt_module || self.p().modules.at(m as usize).prelude {
+        if !self.mangle && !self.p().is_rt(m) || self.p().modules.at(m as usize).prelude {
             return;
         }
         let path = self.p().modules.at(m as usize).path.as_str();
@@ -1804,7 +1804,7 @@ extend Mangler {
     // Whether the identifiers of module `m` take the shadow escape: a program module of a package whose
     // index lists shadowing names. Never the runtime, whose C then does not depend on the program's names.
     const fn shadows(self: &Self, m: ModuleId) bool {
-        return self.p().idx.shadow.len() != 0 && !self.p().modules.at(m as usize).prelude && m as i32 != self.p().rt_module;
+        return self.p().idx.shadow.len() != 0 && !self.p().modules.at(m as usize).prelude && !self.p().is_rt(m);
     }
 
     // Whether `w` is a non-prelude top-level name that a prelude declaration also has (`PkgIndex.shadow`).
@@ -2488,7 +2488,7 @@ extend Mangler {
     // allocation the program makes through C reaches the leak tracker. True when it renamed the symbol.
     fn tracked_alloc(self: &Self, fm: ModuleId, out: &mut String, st: usize) bool {
         let nm = out.as_str().slice(st, out.len());
-        if fm as i32 == self.p().rt_module || nm != "malloc" && nm != "calloc" && nm != "realloc" && nm != "free" {
+        if self.p().is_rt(fm) || nm != "malloc" && nm != "calloc" && nm != "realloc" && nm != "free" {
             return false;
         }
         let name = String::from_str(nm);

@@ -57,8 +57,7 @@ unless the contract itself is intentionally changed.
 
 ## Absolute Paths in the Emitted Tree
 
-`__sc_fwd.h` and the `@c.source` wrappers (`__ext<N>_<stem>.c`) embed absolute include
-paths, `__sc_manifest` records their hashes, and every std TU that spells an assertion
+`__sc_fwd.h` embeds absolute include paths, `__sc_manifest` records their hashes, and every std TU that spells an assertion
 location embeds the absolute std path (for example `__std/int__inst.c`). A bootstrap binary
 outside the temporary tree can select a different `std/` and `ffi/` even when the source
 and output paths match. Correct the library selection and repeat from clean output

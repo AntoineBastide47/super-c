@@ -58,7 +58,7 @@ lint + panics + flush     -- lint_unused_items, check_recursion (ir::recursion: 
   |                          functions, consts a check could not fold); the interpreter reads
   |                          kept bodies through a read-only Keep view here (see Core IR)
 runtime + external C      -- write super_rt.h (the runtime itself is std/rt/base.spc, a module);
-  |                          ext_c_collect (@c.source wrappers, __ldflags)
+  |                          ext_c_collect (@link flags into __ldflags)
   |
 emission planning         -- compute_emit_live (module-arena resolutions + item index edges);
   |                          Package::emit_order (Kahn over dependency rows read from syntax);
@@ -991,6 +991,7 @@ their target's profile directory (`<out-dir>/<profile>/raw`). Module paths map t
   super_rt.h               # C backend header (src/emit/rt_h.spc): libc includes, arithmetic helpers, runtime prototypes
   std/
     rt/base.c              # the runtime module (traps, leak tracker, overflow report), as every module
+    rt/libc.c  rt/libm.c   # wasm only: the C library (std/rt/libc.spc, std/rt/libm.spc), with -fno-builtin
   __sc_fwd.h               # runtime and extern-block includes, dyn/extern declarations, shared by every TU
   __sc_t/app__Point.h      # one definition header per type: its typedef, definition and layout check
   app.h  app.c             # per module: .h holds its prototypes and `_ret` typedefs, .c the TU body
@@ -1002,9 +1003,8 @@ their target's profile directory (`<out-dir>/<profile>/raw`). Module paths map t
   __sc_registry.c          # ZST sentinels and the reflection registry
   __sc_manifest            # paths, content hashes, header dependencies, owners, shard counts
   __sc_shards              # the shard counts this build used; the next build starts from them
-  __ext0_impl.c            # @c.source wrapper TUs (__ext<N>_<stem>.c)
   __ldflags                # one @link flag per line
-  __test_main.c            # fork-per-test runner (--test only)
+  __test_main.c            # the test table and the `main` that calls std/rt/test.spc (--test only)
 ```
 
 Dead modules are pruned transitively (scan-live plus everything a kept TU spells symbols

@@ -251,7 +251,7 @@ extend MathModel {
     fn program(self: &MathModel) String {
         let mut s = String::from_str(DECLS);
         s.push_str(
-            "static mut SINK: usize = 0;\n@c.noinline\nfn opr<T>(x: T) T {\n    unsafe SINK += 1;\n    return x;\n}\n",
+            "static mut SINK: usize = 0;\n@noinline\nfn opr<T>(x: T) T {\n    unsafe SINK += 1;\n    return x;\n}\n",
         );
         s.push_str(
             "fn b64(v: f64) u64 {\n    return if v != v { 1; } else { Simd::<f64, 2>::splat(v).to_bits()[0]; };\n}\n",

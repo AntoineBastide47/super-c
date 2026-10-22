@@ -99,7 +99,7 @@ width, and a signed value counts its two's complement pattern.
 | rounding | round to nearest, ties to even |
 | literal | rounds once from its decimal or hex text to its type (the context's type, `f32` without one); never through the other width |
 | contraction | none: `a * b + c` rounds twice; every C compile passes `-ffp-contract=off`; only an explicit `fma` fuses |
-| libm calls | run as written: every C compile passes `-fno-builtin-<f>` for the `f64` and `f32` names of the transcendental functions (`sin` .. `hypot`, `LIBM_AS_WRITTEN` in `src/build_system/build.spc`), so the C compiler never folds, merges (`sincos`) or rewrites (`pow(2, x)` to `exp2(x)`) them: every profile gives the same bits, and constant evaluation gives them where the compiler and the program use one libm; the exact functions (`sqrt`, `fabs`, `floor`, `fma`, ..) stay builtins |
+| libm calls | run as written: every C compile passes `-fno-builtin-<f>` for the `f64` and `f32` names of the transcendental functions (`sin` .. `hypot`, `LIBM_AS_WRITTEN` in `src/build_system/build.spc`), so the C compiler never folds, merges (`sincos`) or rewrites (`pow(2, x)` to `exp2(x)`) them: every profile gives the same bits, and constant evaluation gives them where the compiler and the program use one libm; the exact functions (`sqrt`, `fabs`, `floor`, `fma`, ..) stay builtins; an `f32` argument of an `f64` parameter is widened in the C call (`(double)(x)`), so the type-generic `<tgmath.h>` names every unit sees never select the `float` function |
 | `%` | the C `fmod` remainder: the sign of the dividend (`-7.5 % 2.0` is -1.5) |
 | NaN payload of an arithmetic result | not specified |
 | `==`, `<` operators | IEEE: NaN is unordered, `-0.0 == 0.0` |

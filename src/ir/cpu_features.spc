@@ -849,9 +849,10 @@ pub fn apply(spec: str, target: i32, arch: i32, strict: bool, s: &mut CpuFeature
     return true;
 }
 
-/// The C flags of the features of `s` for platform `target`, in table order, each after a space. The
-/// x86_64 features beyond the platform's baseline make `-march=x86-64-vN` for the largest level they
-/// hold, then `-m<feature>` for each other one. The
+/// The C flags of the features of `s` for platform `target`, in table order, each after a space. An
+/// x86_64 set names its level, never the C compiler's default (Ubuntu 26.04's GCC on the hosted runners
+/// defaults to `x86-64-v3`): `-march=x86-64-vN` for the largest level it holds, else `-march=x86-64`,
+/// then `-m<feature>` for each other feature, the platform baseline's included. The
 /// aarch64 features beyond the platform's baseline make one flag: on macOS `-mcpu=apple-m1` (a plain
 /// `-march` lowers the tuning) and each extra extension; elsewhere `-march=` the lowest architecture
 /// every feature's `level` allows (`armv8.2-a`, `armv8.1-a` or `armv8-a`), then each enabled extension
@@ -859,21 +860,22 @@ pub fn apply(spec: str, target: i32, arch: i32, strict: bool, s: &mut CpuFeature
 pub fn push_c_flags(s: CpuFeatureSet, target: i32, out: &mut String) {
     let t: []CpuFeature = CPU_FEATURES;
     let b = baseline(target, 1);
-    // x86_64: `-march=` the largest psABI level the features beyond the baseline reach, then the
-    // flag of each other feature beyond it.
-    let xb = baseline(target, 0).w[0];
+    // x86_64: `-march=` the largest psABI level the set holds (the base level for a set with the
+    // baseline), then the flag of each other feature.
     let xl: []u64 = X_LEVELS;
     let mut lv: usize = 3;
-    while lv > 0 && ((s.w[0] & xl[lv]) != xl[lv] || (xl[lv] & ~xb) == 0) {
+    while lv > 0 && (s.w[0] & xl[lv]) != xl[lv] {
         lv -= 1;
     }
     if lv > 0 {
         out.format_into(" -march=x86-64-v{}", lv + 1);
+    } else if has(s, F_SSE2) {
+        out.push_str(" -march=x86-64");
     }
     let mut extra = false;
     let mut need: u8 = 0;
     for i in 0..FEATURE_COUNT {
-        if !has(s, i) || t[i].c_flag.len() == 0 || t[i].arch == 0 && has(x(xb | xl[lv]), i) {
+        if !has(s, i) || t[i].c_flag.len() == 0 || t[i].arch == 0 && has(x(xl[lv]), i) {
             continue;
         }
         if t[i].arch != 1 {

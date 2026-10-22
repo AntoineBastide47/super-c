@@ -251,7 +251,7 @@ fn lsp_lint_wanted(p: &mut loader::Package, i: usize, root_file: str, lint_dir: 
     if p.lint_set.len() != 0 {
         return p.lint_set[i];
     }
-    if !p.modules[i].prelude && i as i32 != p.rt_module {
+    if !p.modules[i].prelude && !p.is_rt(i as i32) {
         return true;
     }
     if dutil::same_file(p.modules[i].file.as_str(), root_file) {

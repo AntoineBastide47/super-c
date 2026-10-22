@@ -214,7 +214,9 @@ generated root imports only the test files with a test whose name (`<module>::<f
 `<module>::<Type>::<fn>` for a suite method) contains S, after a parse-only scan of the
 suite, and a filter no test matches is an error. The runner then runs only the matching
 tests of those files. Override the runner's flags with a
-`[profile.test]` section in `build.toml`. Run directly, the runner takes `--filter=S`,
+`[profile.test]` section in `build.toml`. The runner is Super-C (`std/rt/test.spc`, which the loader adds
+to test builds); the generated `__test_main.c` holds only the test table and the `main` that passes it
+to `sc_test_main`. Run directly, the runner takes `--filter=S`,
 `--shard=K/N`, `--jobs=N`, `--timeout=S`, `--weights=F`, `--record=F`, `--quiet` and `--no-fork` (not the driver's `--test-*` spellings)
 and exits 2 on any other argument. A runner started without an inherited `SC_JOBSERVER` makes its own
 of `--jobs` slots, as `super-c test` does, so its tests and the compilers they start share one budget. Every compiler the CLI harnesses
@@ -341,7 +343,18 @@ The platform layer's tests (`tests/platform_*_test.spc`, helper `tests/platform_
 `std::platform` module on the host; `platform_wasi_test` builds one program with `--target=wasm`, runs it under
 wasmtime and checks every WASI `Unsupported` path, and returns early without `WASI_SDK_PATH`. Windows-only paths
 compile there and run on the Windows runner. `tests/std_packages_test.spc` builds `tools/std_packages` and runs
-it on fixture trees (an upward import, a forbidden `extern "C"` function, a cross-package cycle).
+it on fixture trees (an upward import, a forbidden `extern "C"` function, a cross-package cycle, the text of a
+matchertext literal). `tests/wasm_libc_test.spc` checks wasm's C library against the one it replaces: a program
+on `std::rt::libc` and `std::rt::libm` and the same program in C on wasi-libc (the wasi-sdk's clang) print the
+same 27,100 lines under wasmtime (the bits of every math function at 300 arguments, printf, strtod, strtol,
+qsort), and the program's name section holds no wasi-libc function; a second pair prints the same 873 lines
+(the scanf family over strings, files and stdin, setlocale with UTF-8, the time functions, signals, `sbrk`
+beside malloc, creat, setvbuf, environ, pthread_self and pthread_exit). Both return early without
+`WASI_SDK_PATH`. `every_c_symbol_a_wasm_build_binds_is_defined` needs no SDK: every C function and static
+that ffi, std and src bind for wasm (`tools/std_packages/scan.spc` reads the gates) is defined by the C
+library, the runtime or the intrinsics header, or is on its list of functions WASI has no call for. The
+local `check.sh` does not run the `SC_SIMD_LANE=wasm` lane; a change to wasm linking needs it run
+(the `wasm checks` job's commands).
 
 The wasm lane runs the same suite with `SC_TEST_SUPERC=ci/wasm-superc.sh`: the wrapper runs
 every transpile-class command (a script, `fmt`, `lint`, the transpile form an engine's
@@ -475,8 +488,8 @@ times slower. On the wasm lane each build
 passes `--transpiler=$SUPERC`, so the transpile step and its constant evaluation run in the wasm
 compiler under wasmtime; the C compile and the program stay native, except under
 `const_runtime_parity`: there the program builds `--target=wasm` (wasi-sdk) and runs under wasmtime,
-so the folded constants and their run-time twins call one C library, wasi-libc (a libm call folds
-through the compiler's own C library).
+so the folded constants and their run-time twins call one C library, `std::rt::libm` (a libm call
+folds through the compiler's own C library, which is that module in the wasm compiler).
 
 - `same_output(src, opts_a, opts_b, runs)` runs both builds once per entry of `runs` (the
   command-line arguments of one run) and returns the first difference, empty when none. The trap

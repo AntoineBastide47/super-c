@@ -726,19 +726,19 @@ fn unions() {
     }
 }
 
-// `@c.*` attributes parse into the Ast's attribute table; malformed ones are rejected.
+// Attributes parse into the Ast's attribute table; malformed ones are rejected.
 @test
 fn attributes() {
-    let c = h::parse_ast("@c.packed\nstruct H { x: u32, }\n@c.noreturn\n@c.export(\"sym\")\nfn die() {}\n");
+    let c = h::parse_ast("@packed\nstruct H { x: u32, }\n@noreturn\n@export(\"sym\")\nfn die() {}\n");
     assert(c.errors == 0, "attributes parses");
     assert(c.ast.attrs.len() == 3, "three attributes recorded");
     assert(item(&c.ast, 0).kind == NodeKind::NODE_STRUCT, "attributed struct parses");
     assert(item(&c.ast, 1).kind == NodeKind::NODE_FUNCTION, "attributed fn parses");
-    assert(h::parse_has_error("@c.frobnicate\nfn m() {}\n"), "unknown attribute rejected");
+    assert(h::parse_has_error("@frobnicate\nfn m() {}\n"), "unknown attribute rejected");
     assert(h::parse_has_error("@rust.inline\nfn m() {}\n"), "unknown namespace rejected");
-    assert(h::parse_has_error("@c.align\nstruct S { x: i32 }\n"), "align without an argument rejected");
-    assert(h::parse_has_error("@c.gnu.attribute(\"hot\")\nfn m() {}\n"), "target-specific namespace rejected");
-    assert(h::parse_has_error("@c.inline(3)\nfn m() {}\n"), "no-arg attribute given an argument rejected");
+    assert(h::parse_has_error("@align\nstruct S { x: i32 }\n"), "align without an argument rejected");
+    assert(h::parse_has_error("@gnu.attribute(\"hot\")\nfn m() {}\n"), "a namespace is no attribute");
+    assert(h::parse_has_error("@inline(3)\nfn m() {}\n"), "no-arg attribute given an argument rejected");
     {
         let recovered = h::parse_ast("@unknown(foo(bar))\nfn m() {}\n");
         assert(recovered.errors != 0, "unknown generic attribute rejected");
@@ -749,26 +749,31 @@ fn attributes() {
     }
 }
 
-// Each C-facing attribute has a one-part spelling that records the same kind as its `@c.` spelling;
-// `@c.source` has none.
+// Each C-facing attribute has a one-part spelling; the removed `@c.` spellings are unknown attributes, as
+// any other unknown name is, and so is `@source`.
 @test
 fn one_part_c_attributes() {
     let src = "@packed\n@align(8)\nstruct H { x: u32, }\n@inline\n@always_inline\n@noinline\n@cold\n@noreturn\n@used\n@unused\n@export(\"sym\")\nfn f() {}\n@link(\"m\")\nextern \"C\" {\n    @import(\"abs\")\n    fn a(x: i32) i32;\n    @reads(p, n)\n    @writes(q, n)\n    fn g(p: *const u8, q: *mut u8, n: usize);\n    @lane_access\n    fn l(p: *const u8);\n    @value(16, 16)\n    pub type R;\n}\n";
-    let old = "@c.packed\n@c.align(8)\nstruct H { x: u32, }\n@c.inline\n@c.always_inline\n@c.noinline\n@c.cold\n@c.noreturn\n@c.used\n@c.unused\n@c.export(\"sym\")\nfn f() {}\n@c.link(\"m\")\nextern \"C\" {\n    @c.import(\"abs\")\n    fn a(x: i32) i32;\n    @c.reads(p, n)\n    @c.writes(q, n)\n    fn g(p: *const u8, q: *mut u8, n: usize);\n    @c.lane_access\n    fn l(p: *const u8);\n    @c.value(16, 16)\n    pub type R;\n}\n";
     let a = h::parse_ast(src);
-    let b = h::parse_ast(old);
     assert(a.errors == 0, "the one-part spellings parse");
-    assert(b.errors == 0, "the `@c.` spellings parse");
     assert(a.ast.attrs.len() != 0, "the attributes are recorded");
-    assert(a.ast.attrs.len() == b.ast.attrs.len(), "the spellings record as many attributes");
-    for i in 0..a.ast.attrs.len() {
-        let x = *a.ast.attrs.at(i);
-        let y = *b.ast.attrs.at(i);
-        assert(x.kind == y.kind, "the spellings record one kind");
-        assert(x.arg == y.arg, "the spellings record one argument");
-        assert(x.expr == y.expr, "the spellings record one argument form");
+    let mut names = Vector::<String>::new();
+    par::known_attributes(&mut names);
+    for i in 0..names.len() {
+        let n = names[i].as_str();
+        if n.find_byte(b'.') >= 0 {
+            continue;
+        }
+        let old = format("@c.{}\nfn f() {{}}\n", n);
+        assert(h::parse_has_error(old.as_str()), "a '@c.' spelling is an unknown attribute");
     }
-    assert(h::parse_has_error("@source(\"x.c\")\nextern \"C\" {}\n"), "'@c.source' has no one-part spelling");
+    h::expect_err_msg(
+        "old spelling",
+        "@c.inline\nfn f() {}\nfn main() i32 { return 0; }\n",
+        "unknown attribute '@c.inline'",
+    );
+    assert(h::parse_has_error("@source(\"x.c\")\nextern \"C\" {}\n"), "'@source' is no attribute");
+    assert(h::parse_has_error("@c.source(\"x.c\")\nextern \"C\" {}\n"), "'@c.source' is no attribute");
     assert(h::parse_has_error("@inline(3)\nfn m() {}\n"), "a flag attribute given an argument is rejected");
     assert(h::parse_has_error("@export\nfn m() {}\n"), "'@export' without its symbol is rejected");
 }
@@ -806,12 +811,12 @@ fn test_attribute_list() {
     );
 }
 
-// `@c.align` takes a constant expression besides an integer literal: the record keeps the
+// `@align` takes a constant expression besides an integer literal: the record keeps the
 // expression's module-arena node and the text between the parentheses; a lone integer literal keeps
 // the literal form and adds no node. The record stays 20 bytes.
 @test
 fn attribute_constant_expression() {
-    let src = "const N: u32 = 8;\n@c.align(N * 2)\nstruct A { x: u8 }\n@c.align(16)\nstruct B { x: u8 }\n";
+    let src = "const N: u32 = 8;\n@align(N * 2)\nstruct A { x: u8 }\n@align(16)\nstruct B { x: u8 }\n";
     let c = h::parse_ast(src);
     assert(c.errors == 0, "constant-expression attribute parses");
     assert_eq(c.ast.attrs.len(), 2);
@@ -825,8 +830,8 @@ fn attribute_constant_expression() {
     assert_eq(c.ast.attrs[1].arg, 16);
     // A size guard: one Attr record per attribute of every module; a growth must be deliberate.
     assert_eq(sizeof(Attr), 20);
-    assert(h::parse_has_error("@c.align(8 9)\nstruct A { x: u8 }\n"), "a token after the argument rejected");
-    let lit = h::parse_ast("@c.align(8 + 8)\nstruct A { x: u8 }\n@c.align(8 as u32)\nstruct B { x: u8 }\n");
+    assert(h::parse_has_error("@align(8 9)\nstruct A { x: u8 }\n"), "a token after the argument rejected");
+    let lit = h::parse_ast("@align(8 + 8)\nstruct A { x: u8 }\n@align(8 as u32)\nstruct B { x: u8 }\n");
     assert(lit.errors == 0, "a literal-headed expression parses");
     assert(lit.ast.at_const(lit.ast.attrs[0].arg).kind == NodeKind::NODE_BINARY, "literal head, binary tail");
     assert(lit.ast.at_const(lit.ast.attrs[1].arg).kind == NodeKind::NODE_CAST, "literal head, cast tail");
@@ -839,103 +844,103 @@ fn attribute_constant_expression() {
 fn attribute_constant_expression_errors() {
     h::expect_err_msg(
         "misspelled name",
-        "const WIDTH: u32 = 8;\n@c.align(WIDHT)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "const WIDTH: u32 = 8;\n@align(WIDHT)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
         "cannot find value 'WIDHT'",
     );
     h::expect_err_msg(
         "non-constant argument",
-        "static mut G: u32 = 8;\n@c.align(unsafe G)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "static mut G: u32 = 8;\n@align(unsafe G)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
         "attribute argument cannot be evaluated at compile time",
     );
     h::expect_err_msg(
         "trapping argument",
-        "const Z: u32 = 0;\n@c.align(8 / Z)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "const Z: u32 = 0;\n@align(8 / Z)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
         "attribute argument cannot be evaluated at compile time: division by zero",
     );
     h::expect_err_msg(
         "argument of its own declaration's layout",
-        "@c.align(sizeof(S) as u32)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "@align(sizeof(S) as u32)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
         "attribute argument cannot be evaluated at compile time",
     );
     h::expect_err_msg(
         "wrong-typed argument",
-        "const W: usize = 8;\n@c.align(W)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "const W: usize = 8;\n@align(W)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
         "mismatched types: expected 'u32', found 'usize'",
     );
     h::expect_err_msg(
         "evaluated alignment not a power of two",
-        "const W: u32 = 24;\n@c.align(W)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "const W: u32 = 24;\n@align(W)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
         "'@align' needs a power of two from 1 to 4096, found 24",
     );
     h::expect_err_msg(
         "literal alignment not a power of two",
-        "@c.align(3)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "@align(3)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
         "'@align' needs a power of two from 1 to 4096, found 3",
     );
     h::expect_err_msg(
         "zero alignment",
-        "@c.align(0)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "@align(0)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
         "'@align' needs a power of two from 1 to 4096, found 0",
     );
     h::expect_err_msg(
         "alignment past the limit",
-        "@c.align(8192)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "@align(8192)\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
         "'@align' needs a power of two from 1 to 4096, found 8192",
     );
     // The layout reads the value: a declaration checked earlier folds `sizeof` of the aligned one.
     h::expect_ok(
         "layout through the evaluated value",
-        "struct T { pub a: [u8; sizeof(S)] }\n@c.align(Q)\nstruct S { pub x: i32 }\nconst Q: u32 = 16;\nstatic_assert(sizeof(T) == 16);\nstatic_assert(alignof(S) == 16);\nfn main() i32 { return 0; }\n",
+        "struct T { pub a: [u8; sizeof(S)] }\n@align(Q)\nstruct S { pub x: i32 }\nconst Q: u32 = 16;\nstatic_assert(sizeof(T) == 16);\nstatic_assert(alignof(S) == 16);\nfn main() i32 { return 0; }\n",
     );
 }
 
-// `@c.align` applies where it changes a layout or a C object: a struct or a union (a header type
-// too, whose layout Super-C computes) and a `static mut` defined in Super-C. `@c.packed` applies to a
+// `@align` applies where it changes a layout or a C object: a struct or a union (a header type
+// too, whose layout Super-C computes) and a `static mut` defined in Super-C. `@packed` applies to a
 // struct or a union. On any other owner each is an error, never ignored.
 @test
 fn layout_attribute_owners() {
     let msg = "'@align' may only be applied to a struct, a union, or a 'static mut' outside an 'extern \"C\"' block";
     h::expect_err_msg(
         "align on a function",
-        "@c.align(16)\nfn f() i32 { return 1; }\nfn main() i32 { return f(); }\n",
+        "@align(16)\nfn f() i32 { return 1; }\nfn main() i32 { return f(); }\n",
         msg,
     );
-    h::expect_err_msg("align on a const", "@c.align(16)\nconst C: i32 = 3;\nfn main() i32 { return C; }\n", msg);
-    h::expect_err_msg("align on an enum", "@c.align(16)\nenum E { A, B }\nfn main() i32 { return 0; }\n", msg);
-    h::expect_err_msg("align on a type alias", "@c.align(16)\ntype T = i32;\nfn main() i32 { return 0; }\n", msg);
+    h::expect_err_msg("align on a const", "@align(16)\nconst C: i32 = 3;\nfn main() i32 { return C; }\n", msg);
+    h::expect_err_msg("align on an enum", "@align(16)\nenum E { A, B }\nfn main() i32 { return 0; }\n", msg);
+    h::expect_err_msg("align on a type alias", "@align(16)\ntype T = i32;\nfn main() i32 { return 0; }\n", msg);
     h::expect_err_msg(
         "align on an extern static",
-        "extern \"C\" {\n    @c.align(64)\n    static mut errno_x: i32;\n}\nfn main() i32 { return 0; }\n",
+        "extern \"C\" {\n    @align(64)\n    static mut errno_x: i32;\n}\nfn main() i32 { return 0; }\n",
         msg,
     );
     h::expect_err_msg(
         "packed on a function",
-        "@c.packed\nfn g() i32 { return 2; }\nfn main() i32 { return g(); }\n",
+        "@packed\nfn g() i32 { return 2; }\nfn main() i32 { return g(); }\n",
         "'@packed' may only be applied to a struct or a union",
     );
     h::expect_ok(
         "align and packed on header structs",
-        "extern \"C\" \"lib.h\" {\n    @c.align(16)\n    struct a16 { pub v: i32 }\n    @c.packed\n    struct pk { pub t: u8, pub v: i32 }\n}\nstatic_assert(alignof(a16) == 16 && sizeof(pk) == 5);\nfn main() i32 { return 0; }\n",
+        "extern \"C\" \"lib.h\" {\n    @align(16)\n    struct a16 { pub v: i32 }\n    @packed\n    struct pk { pub t: u8, pub v: i32 }\n}\nstatic_assert(alignof(a16) == 16 && sizeof(pk) == 5);\nfn main() i32 { return 0; }\n",
     );
     h::expect_ok(
         "align on a union and a static",
-        "@c.align(16)\nunion U { a: i32, b: f32 }\n@c.align(16)\nstatic mut S: i32 = 0;\nfn main() i32 { return alignof(U) as i32 - 16; }\n",
+        "@align(16)\nunion U { a: i32, b: f32 }\n@align(16)\nstatic mut S: i32 = 0;\nfn main() i32 { return alignof(U) as i32 - 16; }\n",
     );
 }
 
-// An attribute appears at most once on one declaration, whatever its arguments: two `@c.align` gave
+// An attribute appears at most once on one declaration, whatever its arguments: two `@align` gave
 // the layout service and the C emitter different answers. Several values go in one occurrence.
 @test
 fn duplicate_attributes() {
     h::expect_err_msg(
         "duplicate align",
-        "@c.align(8)\n@c.align(32)\nstruct S { x: i32 }\nconst Z: usize = sizeof(S);\nfn main() i32 { return Z as i32; }\n",
-        "duplicate attribute '@c.align'",
+        "@align(8)\n@align(32)\nstruct S { x: i32 }\nconst Z: usize = sizeof(S);\nfn main() i32 { return Z as i32; }\n",
+        "duplicate attribute '@align'",
     );
     h::expect_err_msg(
         "duplicate packed",
-        "@c.packed @c.packed\nstruct S { x: i32 }\nfn main() i32 { return 0; }\n",
-        "duplicate attribute '@c.packed'",
+        "@packed @packed\nstruct S { x: i32 }\nfn main() i32 { return 0; }\n",
+        "duplicate attribute '@packed'",
     );
     h::expect_err_msg(
         "duplicate platform",
@@ -950,8 +955,8 @@ fn duplicate_attributes() {
     h::expect_err_msg("duplicate test", "@test\n@test(should_panic)\nfn t() {}\n", "duplicate attribute '@test'");
     h::expect_err_msg(
         "duplicate link",
-        "@c.link(\"m\")\n@c.link(\"pthread\")\nextern \"C\" { fn sqrt(x: f64) f64; }\nfn main() i32 { return 0; }\n",
-        "duplicate attribute '@c.link'",
+        "@link(\"m\")\n@link(\"pthread\")\nextern \"C\" { fn sqrt(x: f64) f64; }\nfn main() i32 { return 0; }\n",
+        "duplicate attribute '@link'",
     );
     h::expect_err_msg(
         "duplicate reflect on a field",
@@ -960,12 +965,12 @@ fn duplicate_attributes() {
     );
     h::expect_err_msg(
         "duplicate attribute on a method",
-        "struct S {}\nextend S {\n    @c.cold @c.cold\n    fn f(self: &Self) {}\n}\nfn main() i32 { return 0; }\n",
-        "duplicate attribute '@c.cold'",
+        "struct S {}\nextend S {\n    @cold @cold\n    fn f(self: &Self) {}\n}\nfn main() i32 { return 0; }\n",
+        "duplicate attribute '@cold'",
     );
     h::expect_ok(
         "each attribute once",
-        "@derive(Format, Hash)\n@reflect(a, b = 1)\n@platform(windows | macos | linux | wasm | ios | android)\n@c.align(16)\nstruct S { pub x: i32 }\n@c.cold\n@c.noinline\nfn f() {}\nfn main() i32 { f(); return sizeof(S) as i32 - 16; }\n",
+        "@derive(Format, Hash)\n@reflect(a, b = 1)\n@platform(windows | macos | linux | wasm | ios | android)\n@align(16)\nstruct S { pub x: i32 }\n@cold\n@noinline\nfn f() {}\nfn main() i32 { f(); return sizeof(S) as i32 - 16; }\n",
     );
 }
 
@@ -982,7 +987,7 @@ fn reflect_attribute() {
     assert(h::parse_has_error("@reflect()\nstruct S { x: i32, }\n"), "empty @reflect rejected");
     assert(h::parse_has_error("@reflect(k = 1.5)\nstruct S { x: i32, }\n"), "a float value rejected");
     assert(
-        h::parse_has_error("struct S {\n    @c.packed\n    x: i32,\n}\n"),
+        h::parse_has_error("struct S {\n    @packed\n    x: i32,\n}\n"),
         "non-reflect attributes rejected at field position",
     );
 }
@@ -1078,19 +1083,19 @@ fn bug_regressions() {
     // attribute after the reserve hint is kept.
     {
         let c = h::parse_ast(
-            "@c.align(016)\nstruct A { x: u8 }\n@c.align(0o10)\nstruct B { x: u8 }\n@c.align(0b1_0000)\nstruct D { x: u8 }\n",
+            "@align(016)\nstruct A { x: u8 }\n@align(0o10)\nstruct B { x: u8 }\n@align(0b1_0000)\nstruct D { x: u8 }\n",
         );
         assert(c.errors == 0, "attribute integers parse");
         assert_eq(c.ast.attrs.len(), 3);
         assert_eq(c.ast.attrs[0].arg, 16);
         assert_eq(c.ast.attrs[1].arg, 8);
         assert_eq(c.ast.attrs[2].arg, 16);
-        assert(h::parse_has_error("@c.align(0x1_0000_0000)\nstruct A { x: u8 }\n"), "u32 overflow rejected");
+        assert(h::parse_has_error("@align(0x1_0000_0000)\nstruct A { x: u8 }\n"), "u32 overflow rejected");
     }
     {
         // More attributes than the first reservation (16), each once: every one is kept.
         let c = h::parse_ast(
-            "@c.inline @c.always_inline @c.noinline @c.cold @c.noreturn @c.used @c.unused\n@c.export(\"x\") @c.import(\"y\") @unsafe(link_section = \"s\") @platform(linux) @arch(x86_64) @fmt.skip @blocking\n@test @test_init @test_free @bench\nfn f() {}\n",
+            "@inline @always_inline @noinline @cold @noreturn @used @unused\n@export(\"x\") @import(\"y\") @unsafe(link_section = \"s\") @platform(linux) @arch(x86_64) @fmt.skip @blocking\n@test @test_init @test_free @bench\nfn f() {}\n",
         );
         assert_eq(c.ast.attrs.len(), 18);
     }
@@ -1330,7 +1335,7 @@ fn diagnostics_by_message() {
     );
     h::expect_err_msg(
         "attribute after dot",
-        "@c.5\nfn f() {}\nfn main() i32 { return 0; }\n",
+        "@fmt.5\nfn f() {}\nfn main() i32 { return 0; }\n",
         "expected an attribute name after '.'",
     );
     h::expect_err_msg(
@@ -1340,7 +1345,7 @@ fn diagnostics_by_message() {
     );
     h::expect_err_msg(
         "integer attribute argument",
-        "@c.align()\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
+        "@align()\nstruct S { pub x: i32 }\nfn main() i32 { return 0; }\n",
         "expected an integer argument",
     );
     h::expect_err_msg("missing expression", "fn main() i32 { let x = ; return 0; }\n", "expected expression");

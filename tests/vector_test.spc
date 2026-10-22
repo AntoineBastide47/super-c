@@ -213,7 +213,7 @@ fn set_frees_the_replaced_element() {
 }
 
 // A value aligned above malloc's guarantee gets a block aligned for it through every growth.
-@c.align(64)
+@align(64)
 struct Wide {
     pub v: u64,
 }

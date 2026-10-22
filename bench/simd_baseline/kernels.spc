@@ -1,6 +1,7 @@
 // SIMD baselines: each kernel as a plain scalar loop, the reference that defines its result, as
 // hand-written C intrinsics, one C file per instruction set, and over std/simd.spc's portable vectors
-// (the kernels lane operations express; the others run their scalar loops). Every implementation of a
+// (the kernels lane operations express; the others run their scalar loops). The C kernels come prebuilt:
+// kernels.sh archives them into build/simd_baseline/<arch>/libsimd_baseline.a, which the build links. Every implementation of a
 // kernel gives the scalar loop's bits, any NaN counting as one value: `first_mismatch` checks that on
 // every tail length, and the benchmark and tests/simd_baseline_test.spc run it. The benchmark fails when
 // a portable kernel runs more than 15% slower than its scalar loop. On x86_64 the portable row names the
@@ -109,6 +110,7 @@ const PORTED: [usize; 11] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 const ARITH: [usize; 4] = [0, 2, 4, 10];
 
 @arch(x86_64)
+@link("-Lbuild/simd_baseline/x86_64 -lsimd_baseline")
 extern "C" "sse2.h" {
     fn sb_sse2() *const void;
 }
@@ -124,11 +126,13 @@ extern "C" "avx512.h" {
 }
 
 @arch(aarch64)
+@link("-Lbuild/simd_baseline/aarch64 -lsimd_baseline")
 extern "C" "neon.h" {
     fn sb_neon() *const void;
 }
 
 @arch(wasm32)
+@link("-Lbuild/simd_baseline/wasm32 -lsimd_baseline")
 extern "C" "simd128.h" {
     fn sb_simd128() *const void;
 }
@@ -225,8 +229,13 @@ pub fn simd_baseline(_b: &mut bench::Bencher) {
 /// The first kernel whose result differs from the scalar loop's, as "<kernel> on <instruction set> at
 /// <bytes> bytes, mode <mode>"; empty when every one agrees. The inputs: 0 to 300 bytes, every tail of
 /// every vector width and unroll, and 65600 bytes in each mode, past 255 blocks of every byte counter.
+/// Every target has a baseline C table (SSE2, Neon, SIMD128): none is a mismatch too.
 pub fn first_mismatch() String {
     let tables = implementations();
+    // The scalar loops and the portable vectors come first.
+    if tables.len() < 3 {
+        return String::from_str("no C kernel table");
+    }
     for bytes in 0usize..301 {
         let m = Input::new(bytes, bytes as u64).mismatch(&tables);
         if m.len() != 0 {
@@ -240,11 +249,6 @@ pub fn first_mismatch() String {
         }
     }
     return String::new();
-}
-
-/// The instruction sets this CPU runs besides the scalar loops and the portable vectors.
-pub fn isa_count() usize {
-    return implementations().len() - 2;
 }
 
 // The portable row's name: on x86_64 with the build's level beyond SSE2 (`portable-avx2`).

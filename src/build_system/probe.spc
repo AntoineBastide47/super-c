@@ -24,11 +24,13 @@ const MAX_FORMS: usize = 3;
 pub struct Probe {
     pub id: str<'static>,
     /// "compile" (`-c` to an object), "link" (compile and link with the build's link flags), "asm" (`-S`
-    /// to assembly text) or "lto" (the engine's ThinLTO procedure, `CcStream::lto_probe`).
+    /// to assembly text), "print" (`flags` alone, no source: the driver prints a path) or "lto" (the
+    /// engine's ThinLTO procedure, `CcStream::lto_probe`).
     pub step: str<'static>,
     /// What the result says: "accept" ("accepted" or "rejected"), "form" (the first spelling of `forms`
-    /// the compiler accepts, else "rejected"), "cas16" (`cas16_kind`, else "rejected") or "lto" ("thin
-    /// <linker cache form>" or "auto: <reason>").
+    /// the compiler accepts, else "rejected"), "cas16" (`cas16_kind`, else "rejected"), "path" (the
+    /// printed path when that file exists, else "rejected") or "lto" ("thin <linker cache form>" or "auto:
+    /// <reason>").
     pub kind: str<'static>,
     pub flags: str<'static>, // extra compiler flags, whitespace-split
     pub forms: str<'static>, // the spellings in preference order, '|'-separated, each in place of `@` in `src`
@@ -38,7 +40,7 @@ pub struct Probe {
 }
 
 // The probe table. A probe's index is its bit in a `need` mask.
-const PROBES: [Probe; 22] = [
+const PROBES: [Probe; 23] = [
     Probe {
         id: "add-overflow",
         step: "compile",
@@ -267,6 +269,18 @@ const PROBES: [Probe; 22] = [
         archs: "",
         targets: "",
     },
+    // The compiler's own support library (128-bit integer division, `long double` arithmetic): a wasm
+    // link takes no C library (`std::rt::libc` is one), so it names this archive itself.
+    Probe {
+        id: "rtlib",
+        step: "print",
+        kind: "path",
+        flags: "-print-libgcc-file-name",
+        forms: "",
+        src: "",
+        archs: "",
+        targets: "wasm",
+    },
 ];
 
 /// The probe table.
@@ -297,8 +311,11 @@ pub const NOVEC: usize = 19;
 pub const ICC1: usize = 20;
 pub const PCH_NO_TIME: usize = 21;
 
+/// The compiler support library probe's index.
+pub const RTLIB: usize = 22;
+
 /// The `need` mask of every probe.
-pub const ALL: u64 = (1u64 << 22) - 1;
+pub const ALL: u64 = (1u64 << 23) - 1;
 
 // Field `idx` of `s` split at byte `sep`; the last field runs to the end, and a missing one is empty.
 const fn nth(s: str, sep: u8, idx: usize) str {
@@ -475,13 +492,19 @@ extend Probes {
                     }
                 }
                 let stem = loader::join2(self.dir.as_str(), format("{}.{}", i, k).as_str());
+                let mut log = stem.clone();
+                log.push_str(".log");
+                let mut args = clone_args(&self.argv);
+                split_args(&mut args, pr.flags);
+                if pr.step == "print" {
+                    self.pids[i * MAX_FORMS + k] = spawn_args(&args, log.as_str());
+                    continue;
+                }
                 let mut src = stem.clone();
                 src.push_str(".c");
                 if !write_file(src.as_str(), text.as_str()) {
                     continue; // no child: this spelling counts as rejected
                 }
-                let mut args = clone_args(&self.argv);
-                split_args(&mut args, pr.flags);
                 if pr.step == "compile" {
                     push_arg(&mut args, "-c");
                 } else if pr.step == "asm" {
@@ -495,8 +518,6 @@ extend Probes {
                 if pr.step == "link" {
                     split_args(&mut args, self.ldflags.as_str());
                 }
-                let mut log = stem.clone();
-                log.push_str(".log");
                 self.pids[i * MAX_FORMS + k] = spawn_args(&args, log.as_str());
             }
         }
@@ -542,6 +563,22 @@ extend Probes {
                 r.push_str("rejected");
             } else if pr.kind == "form" {
                 r.push_str(nth(pr.forms, b'|', first as usize));
+            } else if pr.kind == "path" {
+                let stem = loader::join2(self.dir.as_str(), format("{}.0", i).as_str());
+                let mut log = stem.clone();
+                log.push_str(".log");
+                let text = loader::read_file(log.as_str());
+                let mut line = if text.is_none() {
+                    String::new();
+                } else {
+                    String::from_str(nth(text.unwrap().as_str(), b'\n', 0));
+                };
+                line.trim();
+                if line.len() != 0 && file_mtime(line.as_str()) != 0 {
+                    r.push_string(&line);
+                } else {
+                    r.push_str("rejected");
+                }
             } else if pr.kind == "cas16" {
                 let stem = loader::join2(self.dir.as_str(), format("{}.0", i).as_str());
                 let text = loader::read_file(out_path(&stem, pr.step).as_str());
@@ -635,6 +672,8 @@ fn out_path(stem: &String, step: str) String {
     out.push_str(
         if step == "asm" {
             ".s";
+        } else if step == "print" {
+            ".log";
         } else if step == "link" {
             ".out";
         } else {

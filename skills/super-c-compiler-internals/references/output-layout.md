@@ -38,13 +38,12 @@ and every tree comparison compares within one profile.
 | `<mod>__inst.c`, `<mod>__inst__p<k>.c` | generic instances of the module's generics, glue of its types, its constants and descriptors, dyn tables of its receivers (same policy per owner; `[instance-shards]` overrides); includes as for a module TU, from the instance context's rows | |
 | `__sc_shards` | `super-c-shards<TAB>1`, then `module<TAB>tus<TAB>insts` for every module with more than one shard of either kind: the counts this build used, which the next build reads as its starting point; `packs<TAB>n`, the pack count, read the same way; `pch<TAB>1` when the units compile through the precompiled header of `__sc_fwd.h` (from `PCH_UNITS`, four, units that include it: each shard that compiles alone, each pack), which a build that plans the tree without its emission reads | the next build |
 | `__sc_registry.c` | ZST sentinels; the reflection registry: the `@reflect` roots sorted by symbol (each root is an external `const` with hidden visibility except on Windows, defined in its owner's instance shard), one pointer table, one constructor passing that sorted table to `__sc_reflect_register` once (the runtime keeps its address and count: no capacity limit, lookup never depends on constructor order) | |
-| `__sc_unity.c` | only for a small program (module, instance and registry units under `UNITY_MAX`, 2 MiB of C, and more than one of them): one `#include` per such unit, in write order. The build compiles it alone and none of its members: one compiler process, the shared headers parsed once (about 4 times less compile CPU on a test program). The `__ext*` wrappers, a test runner and a unit that includes a `__scx` file, also through a definition header (`tu_x`, `inst_x`, `reg_x`: the header's macros would reach the members after it, its declarations the members before it), compile on their own | the build (the only C unit of its members) |
+| `__sc_unity.c` | only for a small program (module, instance and registry units under `UNITY_MAX`, 2 MiB of C, and more than one of them): one `#include` per such unit, in write order. The build compiles it alone and none of its members: one compiler process, the shared headers parsed once (about 4 times less compile CPU on a test program). A test runner, wasm's C library and a unit that includes a `__scx` file, also through a definition header (`tu_x`, `inst_x`, `reg_x`: the header's macros would reach the members after it, its declarations the members before it), compile on their own | the build (the only C unit of its members) |
 | `__sc_pack<k>.c` | only for a larger program with at least two units of one shard and less than `PACK_UNIT` (64 KiB) of C: one `#include` per such unit whose file stem hashes to pack `k` modulo the pack count, in write order, written after every unit (`pack_plan`). The count is `shard_policy` of those units' bytes from the previous `packs` line of `__sc_shards`; every pack below the count is written, an empty one too. The build compiles each pack and none of its members | the build (the only C unit of its members) |
 | `__sc_manifest` | one record per output (kind `u` for `__sc_unity.c` and the packs): kind, path, 64-bit content hash, owner module, shard index, generated headers included; the effective shard counts (`shards` lines, whether chosen or overridden); the C command inputs; the registry roots | tooling |
 
 Every include line is relative (`../` per module directory level); the tree compiles
-with no `-I` flag. An `extern "C" "<header>"` header and an external C source (the `__ext<k>_`
-wrappers) are named from the including file: relative when the file and the tree both lie below
+with no `-I` flag. An `extern "C" "<header>"` header is named from the including file: relative when the file and the tree both lie below
 the working directory, else by absolute real path (`include_name`, `src/driver/util.spc`), so a
 tree that moves with its project emits the same text. A unit includes definition headers in stem order, then prototype
 headers in module path order.
@@ -137,7 +136,9 @@ the header of the type it collides with.
   brings no header. The alias survives the emission cache with the text. A header-less prototype
   that names an alias is a unit declaration (`split_protos`), without its `extern`, which
   `decl_name` reads as an object's. A unit that includes a `__scx` file, directly or through a
-  definition header (`x_reach`), compiles outside the packs (`tu_x`, `inst_x`). A declaration of
+  definition header (`x_reach`), compiles outside the packs (`tu_x`, `inst_x`), and so does every
+  unit of wasm's C library (`Package::is_libc`), which compiles with `-fno-builtin` and without the
+  precompiled header (`loader::libc_unit`). A declaration of
   `__sc_fwd.h` that names an alias (a trait-object table whose method names a header type, an
   `@emit_macro` template) makes the forward header include the `__scx` file: every file then sees
   that header. A header `super_rt.h` includes stays in `__sc_fwd.h`, by C
@@ -163,7 +164,11 @@ the header of the type it collides with.
   (`CEmit::stat_specs`). Every access spells `(*sym__tls())`, a per-unit `static noinline`
   accessor under a `sym__tls_d` guard (`CEmit::tls_accessor`) that the static's demand writes
   with its declaration (`stat_demand`, and the place demand in `emit_place_base`); a
-  header-owned one records a `StatRef` too, so `stat_decls` and `stat_items` stay aligned.
+  header-owned one records a `StatRef` too, so `stat_decls` and `stat_items` stay aligned. The
+  demand key is the hash of the C symbol, salted for an extern binding (`CEmit::stat_key`): a
+  binding and a definition of one C object (wasm's `errno`, which `ffi/errno.spc` binds and
+  `std::rt::libc` defines; `environ`, which a program binds with no header) take two entries, so
+  the binding never hides the definition.
   `XDecls::add_all` takes the guarded block through its `#endif` as one declaration of
   `sym__tls`, and a unit that spells the accessor gets the static's declaration with it.
 - A module-level `asm` item emits `__asm__("<template>");` in the module's first unit

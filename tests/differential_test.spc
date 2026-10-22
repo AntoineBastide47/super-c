@@ -5,7 +5,7 @@ import tests::cli_harness as cli;
 import stdlib;
 
 // The run-time identity the oracles' programs use for inputs the compiler must not fold.
-const OPR: str = "static mut SINK: usize = 0;\n@c.noinline\nfn opr<T>(x: T) T {\n    unsafe SINK += 1;\n    return x;\n}\n";
+const OPR: str = "static mut SINK: usize = 0;\n@noinline\nfn opr<T>(x: T) T {\n    unsafe SINK += 1;\n    return x;\n}\n";
 
 @test
 fn same_output_agrees_across_profiles() {
@@ -266,7 +266,7 @@ fn asm_mnemonics_skip_labels_directives_and_registers() {
     assert_eq(h::asm_mnemonics(elf, "fg").len(), 0);
 }
 
-const MULW: str = "@c.noinline\nfn mulw(a: u64, b: u64) u64 {\n    return a.wrapping_mul(b);\n}\nfn main(args: Vector<str>) i32 {\n    return mulw(args.len() as u64, 3) as i32;\n}\n";
+const MULW: str = "@noinline\nfn mulw(a: u64, b: u64) u64 {\n    return a.wrapping_mul(b);\n}\nfn main(args: Vector<str>) i32 {\n    return mulw(args.len() as u64, 3) as i32;\n}\n";
 
 @test
 fn asm_host_function() {

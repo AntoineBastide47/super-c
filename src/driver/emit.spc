@@ -1736,7 +1736,8 @@ pub struct CemitOut {
     pub inst_c: String,
     pub inst_incs: Vector<String>,
     /// Per module: its TU, or its instance unit, includes a scoped extern header, directly or through
-    /// a definition header (`cemit_extern_includes`): the unit compiles alone (`pack_plan`).
+    /// a definition header (`cemit_extern_includes`), or belongs to wasm's C library
+    /// (`loader::libc_unit`): the unit compiles alone (`pack_plan`).
     pub tu_x: Vector<bool>,
     pub inst_x: Vector<bool>,
     /// The registry TU includes a scoped extern header: it compiles alone too (`pack_plan`).
@@ -8536,8 +8537,10 @@ fn cemit_assemble(
     }
     let xr = x_reach(nx, &ddeps);
     for t in 0..n {
-        o.tu_x.set(t, x_any(&xr, &tu_dv[t]));
-        o.inst_x.set(t, x_any(&xr, &inst_dv[t]));
+        // wasm's C library compiles with its own flags (`loader::libc_unit`).
+        let lc = p.is_libc(t as i32);
+        o.tu_x.set(t, lc || x_any(&xr, &tu_dv[t]));
+        o.inst_x.set(t, lc || x_any(&xr, &inst_dv[t]));
     }
     // The registry TU includes every scoped extern header that has checks and that no unit includes, so
     // they run once also where no unit uses the header's items (a constant that folds to its value).
@@ -10360,10 +10363,12 @@ fn manifest_publish(root: str, man: &String, keep: &mut Vector<String>) {
     }
 }
 
-// The C `main`: argv marshalled into a Vector<str> when the user main takes one.
+// The C `main`: argv marshalled into a Vector<str> when the user main takes one. It always takes the
+// arguments: on wasm the C compiler names a `main(void)` `__main_void` and the two-argument form
+// `__main_argc_argv`, and the entry point of `std::rt::libc` calls the second.
 fn cemit_main_wrapper(out: &mut String, argv: bool) {
     if !argv {
-        out.push_str("int main(void) { return __sc_user_main(); }\n");
+        out.push_str("int main(int argc, char **argv) { (void)argc; (void)argv; return __sc_user_main(); }\n");
         return;
     }
     out.push_str(
@@ -11600,7 +11605,7 @@ fn lint_const_suggest(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector
 // --lint: unused imports. An import is removable when neither its target module nor anything in the
 // target's transitive closure defines a symbol this file resolves to (own-module hits are excluded:
 // legal import cycles would otherwise self-justify). Modules whose closure carries link-time side
-// effects (@c.source/@link) or extends a foreign type (methods/conformances reachable without a
+// effects (@link) or extends a foreign type (methods/conformances reachable without a
 // resolution edge) are exempt.
 // A module with @platform-, @arch- or @when-gated items is exempt from cross-item unused lints (imports,
 // members): the dropped items' uses are invisible under the current target, so a per-target verdict
@@ -11624,7 +11629,7 @@ fn import_side_effects(p: &loader::Package, mid: ModuleId) bool {
     let a = p.module_ast_const(mid);
     for i in 0..unsafe (*a).attrs.len() {
         let k = unsafe (*a).attrs.at(i).kind;
-        if k == AttrKind::ATTR_C_SOURCE as u8 || k == AttrKind::ATTR_C_LINK as u8 {
+        if k == AttrKind::ATTR_C_LINK as u8 {
             return true;
         }
     }
@@ -12692,14 +12697,8 @@ pub fn run_package(
     if !err {
         sink_notify(sink, &mut co.pr, keep.at(0).as_str(), "", 0, rt9 != 0);
     }
-    // `@c.source` wrapper TUs land in keep[]; `@link` flags feed `build/<profile>/raw/__ldflags` for the
-    // link line.
-    let pre_ext = keep.len();
-    let mut ext_new = Vector::<bool>::new();
-    ext_c_collect(p, &mut keep, &mut ext_new, &mut err, target);
-    for i in pre_ext..keep.len() {
-        sink_notify(sink, &mut co.pr, keep.at(i).as_str(), "", 1, ext_new[i - pre_ext]);
-    }
+    // `@link` flags feed `build/<profile>/raw/__ldflags` for the link line.
+    ext_c_collect(p, &mut err, target);
     stage_ms(tstat, &mut tp0, "phase rt+ext");
     let live = compute_emit_live(p);
     stage_ms(tstat, &mut tp0, "phase live");

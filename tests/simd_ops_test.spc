@@ -134,7 +134,7 @@ fn comparison_reads_match() {
 // Masks read by several `choose`s, combined by every mask operator and copied; `big & lt` and `both`
 // are also read as bits.
 const LANE_MASKS: str = M"(import std::simd;
-@c.noinline
+@noinline
 fn mix(a: f32x8, b: f32x8) f32x8 {
     let lt = a.less_than(b);
     let big = a.greater_than(f32x8::splat(10.0));

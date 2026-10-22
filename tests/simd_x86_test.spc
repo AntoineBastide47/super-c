@@ -195,13 +195,13 @@ const fn pick<T>(c: bool, a: T, b: T) T {
     return b;
 }
 
-// Kernel `k` of `src` (one `@c.noinline` function per kernel, `fn k` renamed) lowers to assembly holding
+// Kernel `k` of `src` (one `@noinline` function per kernel, `fn k` renamed) lowers to assembly holding
 // each mnemonic of `want` and none of `avoid`; `flags` are the build's. A kernel that takes a `[]mut T`
 // has its body in `main__k__r` (the split view ABI); `main__k` only forwards to it.
 fn kernel_asm(label: str, src: str, flags: []str, want: []str, avoid: []str) {
     let d = h::asm_check(
         format(
-            "import std::simd;\nimport std::cpu;\n@c.noinline\n{}fn main(args: Vector<str>) i32 {{\n    return 0;\n}}\n",
+            "import std::simd;\nimport std::cpu;\n@noinline\n{}fn main(args: Vector<str>) i32 {{\n    return 0;\n}}\n",
             src,
         ).as_str(),
         flags,
@@ -215,7 +215,7 @@ fn kernel_asm(label: str, src: str, flags: []str, want: []str, avoid: []str) {
     assert(d.len() == 0, label);
 }
 
-// Kernels built as one program: each `fn k` of a source is renamed `k<i>`, with `@c.noinline`.
+// Kernels built as one program: each `fn k` of a source is renamed `k<i>`, with `@noinline`.
 struct Kernels {
     decls: String,
     labels: Vector<String>,
@@ -237,7 +237,7 @@ extend Kernels {
     fn add(self: &mut Kernels, label: str, src: str, want: []str, avoid: []str) {
         let name = format("k{}", self.labels.len());
         self.decls.format_into(
-            "@c.noinline\n{}",
+            "@noinline\n{}",
             String::from_str(src).replace("fn k(", format("fn {}(", name.as_str()).as_str()).as_str(),
         );
         self.labels.push(String::from_str(label));

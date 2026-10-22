@@ -429,7 +429,7 @@ gets `-funsigned-char`: the language's `char` is unsigned, and `super_rt.h` fail
 without the flag. It also gets `-ffp-contract=off`, so the C compiler never fuses a float
 multiply and add (only an explicit `fma` fuses) and run-time float results equal the constant
 evaluator's on every target, and `-Werror=incompatible-pointer-types`, so clang rejects the
-incompatible pointer arguments gcc 14 already rejects (`@c.source` files included). It also gets
+incompatible pointer arguments gcc 14 already rejects. It also gets
 `-fno-builtin-<f>` for the `f64` and `f32` names of the transcendental libm functions
 (`LIBM_AS_WRITTEN` in `src/build_system/build.spc`: `sin` to `hypot`), so the C compiler calls
 them as written instead of folding, merging or rewriting them, and their results do not depend on
@@ -582,7 +582,7 @@ alone, each pack; `pch<TAB>1` in `__sc_shards`), compiles that header once, prec
 headers, the runtime and the std C headers then cost one compile instead of one per unit (about 210 M
 compiler instructions per unit with clang). The engine starts the compile when the header lands,
 before any unit; the stub `obj/__sc_fwd.h` includes the header and compiles to `obj/__sc_fwd.h.gch`.
-Every unit but the runtime, the `__ext*` wrappers and the test runner waits for it and compiles with
+Every unit but the runtime, wasm's C library and the test runner waits for it and compiles with
 `-include obj/__sc_fwd.h`: gcc loads the `.gch` beside the stub (or reads the stub when it rejects the
 file), the clang driver turns the option into `-include-pch`. The header's `.cmd` record holds its
 command, the working directory (the file records its inputs' paths) and the content hash of the header
@@ -644,12 +644,31 @@ the compiler users run. Script mode
 (`super-c release foo.spc`) links once with no link record to relink against, so a `thin`
 profile keeps `auto` there.
 
+### Wasm C library
+
+A wasm build links no C library of the toolchain: the loader adds `std::rt::libc` and
+`std::rt::libm` (`std/rt/libc.spc`, `std/rt/libm.spc`, `Package::rt_libc`, `rt_libm`) to every
+`--target=wasm` program, and the link is `-nostdlib` plus compiler-rt's builtins (the `rtlib`
+probe), without `-lm` or the `wasi-emulated` libraries. The modules call WASI preview 1 directly and
+compute what wasi-libc computes, bit for bit (`tests/wasm_libc_test.spc` checks the math functions,
+printf, strtod, strtol, qsort, the scanf family, locales, the time functions, signals, `sbrk` and more
+against wasi-libc). The C compile still reads wasi-libc's headers
+from the sysroot. The units of the two modules compile alone (in no pack, without the precompiled
+header) and with `-fno-builtin`, as a C library compiles (`loader::libc_unit`): the C compiler must
+not turn the copy loop of `memcpy` or the `malloc` and `memset` of `calloc` into calls of those
+functions. The modules define every C function and object that std, the ffi bindings and the
+compiler bind for wasm, signals as wasi-libc's `wasi-emulated-signal` emulates them included; a test
+(`every_c_symbol_a_wasm_build_binds_is_defined`) checks it from the sources, on every host. Absent:
+long double conversions (`%Lf` fails), and `fork`, `execvp`, `pipe`, `dup`, `pthread_create` and
+the other functions WASI has no call for; a program that calls one fails to link.
+
 ### Toolchain probes
 
 The probe table (`src/build_system/probe.spc`) records what the C compiler and linker
 accept under a build's target and flags. Each probe has an id, a C snippet or a flag, a
-step (`compile` with `-c`, `link` with the build's link flags, `asm` with `-S`, or the
-engine's `lto` procedure) and a result kind: `accepted`/`rejected`, the first accepted
+step (`compile` with `-c`, `link` with the build's link flags, `asm` with `-S`, `print` with
+no source, or the engine's `lto` procedure) and a result kind: `accepted`/`rejected`, a path
+(the first line the step prints, when a file exists there), the first accepted
 spelling of a list, the form of a 16-byte compare-exchange (`inline` when the assembly
 holds `cmpxchg16b`, `casp*` or an `ldxp`/`stxp` loop; `outline call` for libgcc's
 `__aarch64_cas16_*`; `library call` for libatomic's `__atomic_compare_exchange_16`), or the
@@ -677,6 +696,7 @@ never version text.
 | `no-prelink-vectorize` | all | `-fno-vectorize -fno-slp-vectorize` accepted (clang; gcc rejects them, its LTO compile does not vectorize) |
 | `integrated-cc1` | all | `-fintegrated-cc1` accepted (clang; gcc rejects it) |
 | `pch-no-timestamp` | all | `-Xclang -fno-pch-timestamp` accepted (clang; gcc rejects it) |
+| `rtlib` | wasm32 | the path of the compiler's builtins library (`-print-libgcc-file-name`: compiler-rt's `libclang_rt.builtins-wasm32.a`) |
 
 The results of one profile directory live in one record, `<out-dir>/<profile>/.probes`:
 its first line holds the schema, a hash of the compiler path and mtime, the whole compiler
@@ -694,7 +714,8 @@ fingerprint (` | probes <id>=<result>;`). A build uses the `thin-lto` verdict un
 the flag), under full LTO (`lto = "full"` or `"auto"`, a ThinLTO request that falls back to `auto`
 included) `no-prelink-vectorize` (accepted: every compile takes the flags after the profile's `-O`
 flag, so clang vectorizes at the link, after it inlines across units: a function vectorized alone in
-its unit no longer vectorizes in the loop it is inlined into), for a tree compiled through the precompiled
+its unit no longer vectorizes in the loop it is inlined into), on wasm `rtlib` (every link takes
+`-nostdlib <path>`: wasm links its own C library, Wasm C library below), for a tree compiled through the precompiled
 header `integrated-cc1` and `pch-no-timestamp` (accepted: the flags join those commands, which the
 fingerprints hold, not ` | probes`), and the probe of each CPU feature it enables that has one (`wasm-simd128`,
 `wasm-relaxed-simd`, `aarch64-features`, `x86-features`); a rejected feature probe fails the build before any
@@ -773,10 +794,11 @@ to `movbe`, `x86-64-v4` adds `avx512f`, `avx512bw`, `avx512cd`, `avx512dq` and `
 feature list item may be a level name (x86_64 only; a build.toml list skips it on another
 instruction set), and `--target-cpu=L` or the build.toml key `target-cpu = "L"` puts a level before
 every feature list (the flag replaces the key, and the last flag wins; another name is an error, and
-so is the flag on another instruction set, which the key skips). The x86_64 features beyond the platform's baseline make the C flags
-`-march=x86-64-vN` (the highest level the set holds, when it is above the baseline) and then the
-`-m` flag of each feature beyond that level, in table order; the `x86-features` probe compiles
-`<immintrin.h>` under them.
+so is the flag on another instruction set, which the key skips). An x86_64 build always names its
+level, never the C compiler's default (Ubuntu 26.04's GCC defaults to `x86-64-v3`): the C flags are
+`-march=x86-64-vN` for the highest level the set holds, else `-march=x86-64`, and then the `-m` flag
+of each feature beyond that level, the platform baseline's included (macOS: `-msse3 -mssse3 -mcx16
+-msahf`), in table order; the `x86-features` probe compiles `<immintrin.h>` under them.
 
 The aarch64 baseline depends on the platform: macOS has every feature of Apple clang's default
 CPU (`apple-m1`, the oldest Apple silicon Mac); iOS those of its default CPU (`apple-a7`, which
@@ -859,7 +881,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `--bin=NAME` | Build/run only that `[bin.NAME]` target; with `-o PATH`, link it at PATH. An error without build.toml |
 | `--transpiler=CMD` | `build`/`release` from build.toml: run CMD as the transpile step (see External transpiler above). An error without build.toml |
 | `--print-probes` | `build`/`release` from build.toml: print the toolchain probe table for the target and profile (see Toolchain probes above). An error without build.toml |
-| `--target=T` | Cross-compile OS: `windows`/`macos`/`linux`/`ios`/`android`/`wasm` (the value of `PLATFORM`). `wasm` builds with `$WASI_SDK_PATH`'s clang and sysroot (else `$WASI_SYSROOT`), links an 8 MiB stack placed first, and strips at link time; `windows` links with `-Wl,--stack,8388608`, so every target's main thread has the 8 MiB stack of Linux and macOS (`push_sdk_libs`) |
+| `--target=T` | Cross-compile OS: `windows`/`macos`/`linux`/`ios`/`android`/`wasm` (the value of `PLATFORM`). `wasm` builds with `$WASI_SDK_PATH`'s clang and sysroot (else `$WASI_SYSROOT`; the sysroot gives the headers only), links an 8 MiB stack placed first with std's C library and no toolchain library but compiler-rt's builtins (Wasm C library below), and strips at link time; `windows` links with `-Wl,--stack,8388608`, so every target's main thread has the 8 MiB stack of Linux and macOS (`push_sdk_libs`) |
 | `--arch=A` | Cross-compile arch: `x86_64`/`aarch64`/`wasm32` (the value of `ARCH`) |
 | `--target-feature=L` | CPU features, a comma list of `+name`/`-name` applied after build.toml's `target-features` (see CPU features above) |
 | `--target-cpu=L` | x86_64 level (`x86-64`, `x86-64-v2`, `x86-64-v3`, `x86-64-v4`) applied before every feature list; replaces build.toml's `target-cpu` |

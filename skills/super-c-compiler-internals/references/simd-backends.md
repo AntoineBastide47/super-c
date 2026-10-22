@@ -14,7 +14,8 @@ the macOS and iOS aarch64 baselines, and the macOS, iOS and Android x86_64 ones,
 `beyond_baseline`, `level` (an x86-64 psABI level name, `X_LEVELS`; `apply` takes one as a list
 item), `push_c_flags(set, target)` (the aarch64 rows make one `-march`/`-mcpu` flag at the lowest
 architecture their `level` allows; the x86_64 rows `-march=x86-64-vN` for the highest level the
-set holds above the baseline, then each further row's `-m` flag; the `aarch64-features` and
+set holds, else `-march=x86-64` for a set with the baseline (never the C compiler's default), then
+each further row's `-m` flag, the baseline's included; the `aarch64-features` and
 `x86-features` probes check them under the build's flags, for the features beyond the baseline
 only) and `push_target_attr(set, build, target)` (a function's C `target` attribute: the x86 flag
 names, or `SC_TGT_A64(clang, gcc)` with clang's `+ext` list and GCC's `arch=armv8.N-a+ext`, which

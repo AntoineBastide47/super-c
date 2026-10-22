@@ -199,6 +199,13 @@ pub struct Package {
     /// The runtime every program links (`std::rt::base`, loaded with the vector backend); -1 when the
     /// package has no std directory.
     pub rt_module: i32,
+    /// The test runner a `--test` build links (`std::rt::test`, loaded with the runtime); -1 in any
+    /// other build.
+    pub rt_test: i32,
+    /// The C library of a wasm build (`std::rt::libc` and `std::rt::libm`, loaded with the runtime): wasm
+    /// has no system C library, and these call WASI directly; -1 for any other target.
+    pub rt_libc: i32,
+    pub rt_libm: i32,
     /// The module the package was loaded from, whose top-level `main` is the program entry; -1 when
     /// the package has none (a batch lint, whose listed files `lint_set` marks as roots instead).
     pub root: i32,
@@ -220,10 +227,6 @@ pub struct Package {
     pub vendors: Vector<String>,
     pub alt_root: String, // optional search root between the project root and std (manifest src/ dir)
     pub ok: bool, // false if any read/parse/cycle error was reported during loading
-    /// Resolved external C inputs (`@c.source` files and implicit backing-header `.c` siblings),
-    /// recorded by ext_c_collect: the build engine's emit stamp must dirty on their edits, since the
-    /// generated wrapper TU `#include`s each one by path (`ext_c_wrap`).
-    pub ext_inputs: Vector<String>,
     /// Builtins as nominal types: a synthetic decl per builtin is injected into the `core` prelude module so
     /// `extend i32 { .. }` resolves and dispatches like any other type. `core_seeded` gates it.
     pub core_module: ModuleId,
@@ -2215,7 +2218,37 @@ const fn ltf_vary(f: u8, v: u32) u8 {
     return f;
 }
 
+/// Whether C unit `rel` of a generated tree (`std/rt/libc.c`, `std/rt/libm__inst.c`, a shard
+/// `std/rt/libc__p1.c`) belongs to wasm's C library (`Package::is_libc`). It compiles with
+/// `-fno-builtin`, as a C library compiles: its functions implement `memset`, `calloc` and the others, so
+/// the C compiler must not turn their code into calls of those functions. A function attribute cannot
+/// say it: clang ignores `no_builtin` on a definition that a call in its unit precedes.
+pub const fn libc_unit(rel: str) bool {
+    for stem in ["std/rt/libc", "std/rt/libm"] {
+        if rel.starts_with(stem) {
+            let rest = rel.slice(stem.len(), rel.len());
+            if rest == ".c" || rest.starts_with("__") {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 extend Package {
+    /// Whether module `m` is a runtime module: the runtime every program links, a test build's runner, or
+    /// wasm's C library. None is a program module: its symbols always take their module prefix, it shadows
+    /// no name, its allocations are not tracked, and its extern headers stay out of the forward header.
+    pub const fn is_rt(self: &Self, m: i32) bool {
+        return m >= 0 && (m == self.rt_module || m == self.rt_test || self.is_libc(m));
+    }
+
+    /// Whether module `m` is wasm's C library (`std::rt::libc` or `std::rt::libm`): its units compile
+    /// alone, with `-fno-builtin` (`libc_unit`).
+    pub const fn is_libc(self: &Self, m: i32) bool {
+        return m >= 0 && (m == self.rt_libc || m == self.rt_libm);
+    }
+
     /// The number of lifetime parameters declaration `d` of module `m` declares (`a` is the
     /// reading module's tree, whose tables may not be in the module table yet).
     pub fn decl_nlt(self: &Self, a: &Ast, m: ModuleId, d: NodeId) u32 {
@@ -2412,7 +2445,7 @@ extend Package {
         }
         // The runtime's bindings serve its own unit: their header checks (POSIX types and constants) stay
         // out of the forward header, which C code built at another feature level includes.
-        if m as i32 == self.rt_module {
+        if self.is_rt(m) {
             return true;
         }
         let hs = a.at_const(eb.header).span;
@@ -3515,6 +3548,9 @@ extend Package {
             },
             build_module: -1,
             rt_module: -1,
+            rt_test: -1,
+            rt_libc: -1,
+            rt_libm: -1,
             root: -1,
             tt: Box::<TypePool>::new(TypePool::new()),
             ok: true,
@@ -6682,7 +6718,7 @@ extend Package {
         let n = self.modules.len();
         let mut user = n;
         for m in 0..n {
-            if !self.modules[m].prelude && m as i32 != self.rt_module {
+            if !self.modules[m].prelude && !self.is_rt(m as i32) {
                 if user != n {
                     return;
                 }
@@ -7384,6 +7420,20 @@ extend Package {
         let rf = join2(std_dir, "rt/base.spc");
         if self.rt_module < 0 && dutil::file_mtime(rf.as_str()) != 0 {
             self.rt_module = self.load_module("std::rt::base", rf.as_str(), self.bootstrap, target);
+        }
+        // The runner the generated `main` of a test build calls (`sc_test_main`).
+        let tf = join2(std_dir, "rt/test.spc");
+        if self.test_build && self.rt_test < 0 && dutil::file_mtime(tf.as_str()) != 0 {
+            self.rt_test = self.load_module("std::rt::test", tf.as_str(), self.bootstrap, target);
+        }
+        // wasm has no system C library: these implement the subset the program uses, over WASI.
+        if target == 3 && self.rt_libc < 0 {
+            let cf = join2(std_dir, "rt/libc.spc");
+            let mf = join2(std_dir, "rt/libm.spc");
+            if dutil::file_mtime(cf.as_str()) != 0 && dutil::file_mtime(mf.as_str()) != 0 {
+                self.rt_libc = self.load_module("std::rt::libc", cf.as_str(), self.bootstrap, target);
+                self.rt_libm = self.load_module("std::rt::libm", mf.as_str(), self.bootstrap, target);
+            }
         }
         let backends: [str<'static>; 3] = ["x86_64", "aarch64", "wasm"];
         if self.arch >= 0 && self.arch < 3 && !cf::is_empty(self.features) && (user_vectors || self.names_vectors()) {

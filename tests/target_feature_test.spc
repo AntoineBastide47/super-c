@@ -1,5 +1,5 @@
 // CPU features and the attributes over them: the feature table and its std mirror, `--target-feature`
-// and `target-features`, `@target_feature`, `@c.value` register types, the memory annotations of
+// and `target-features`, `@target_feature`, `@value` register types, the memory annotations of
 // foreign functions, and the checks of `@simd_impl` entries and the backend table.
 import ir::cpu_features as cf;
 import ir::core as ir;
@@ -132,8 +132,8 @@ fn aarch64_baselines_and_c_flags() {
 }
 
 // The x86_64 rows: the platform baselines, the psABI levels (`--target-cpu`) and their implications,
-// and the flags: `-march=` the largest level the features beyond the baseline reach, then each other
-// feature's flag.
+// and the flags: `-march=` the largest level the set holds (`x86-64` at least, so the C compiler's own
+// default never decides), then each other feature's flag.
 @test
 fn x86_levels_and_c_flags() {
     let lin = cf::baseline(2, 0);
@@ -143,13 +143,20 @@ fn x86_levels_and_c_flags() {
         ) == 7,
         "sse2; core2; core2; the Android ABI",
     );
-    let cases: [[str; 3]; 6] = [
+    let cases: [[str; 3]; 9] = [
+        ["", "2", " -march=x86-64"],
+        ["", "1", " -march=x86-64 -msse3 -mssse3 -mcx16 -msahf"],
+        ["", "5", " -march=x86-64 -msse3 -mssse3 -msse4.1 -msse4.2 -mpopcnt -mcx16"],
         ["x86-64-v3", "2", " -march=x86-64-v3"],
         ["x86-64-v2,+avx2", "2", " -march=x86-64-v2 -mavx -mavx2"],
         ["x86-64-v4,+avx512vnni", "2", " -march=x86-64-v4 -mavx512vnni"],
-        ["+avx512f", "2", " -msse3 -mssse3 -msse4.1 -msse4.2 -mpopcnt -mavx -mavx2 -mfma -mf16c -mavx512f"],
+        [
+            "+avx512f",
+            "2",
+            " -march=x86-64 -msse3 -mssse3 -msse4.1 -msse4.2 -mpopcnt -mavx -mavx2 -mfma -mf16c -mavx512f",
+        ],
         ["x86-64-v2", "1", " -march=x86-64-v2"],
-        ["+avx2", "5", " -mavx -mavx2"],
+        ["+avx2", "5", " -march=x86-64 -msse3 -mssse3 -msse4.1 -msse4.2 -mpopcnt -mcx16 -mavx -mavx2"],
     ];
     for c in cases {
         let t = (c[1].byte_at(0) - b'0') as i32;
@@ -261,10 +268,10 @@ fn target_feature_arguments_are_checked() {
         "@arch(x86_64)\n@target_feature([Feature::Sse2],)\nfn f() {}\n@arch(aarch64)\n@target_feature([Feature::Neon],)\nfn f() {}\nfn main() i32 {\n    return 0;\n}\n",
     );
     let c = h::compile(
-        "extern \"C\" {\n    @c.value((16, 16))\n    pub type reg_t;\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "extern \"C\" {\n    @value((16, 16))\n    pub type reg_t;\n}\nfn main() i32 {\n    return 0;\n}\n",
         h::STAGE_PARSE,
     );
-    assert(c.msg_has("attribute '@c.value' takes 2 arguments"), "a tuple is one argument");
+    assert(c.msg_has("attribute '@value' takes 2 arguments"), "a tuple is one argument");
     h::expect_err_msg(
         "two arguments",
         "@arch(x86_64)\n@target_feature([Feature::Sse2], 1)\nfn f() {}\nfn main() i32 {\n    return 0;\n}\n",
@@ -309,11 +316,11 @@ fn target_feature_calls_need_the_build_features() {
     assert(p.compile_flags("--target=wasm --target-feature=+relaxed-simd", "main.spc").ok(), "with the feature");
 }
 
-// `@c.value(size, align)` gives an opaque extern type a layout: it is Copy, sizeof and alignof read
+// `@value(size, align)` gives an opaque extern type a layout: it is Copy, sizeof and alignof read
 // it, and as a field, an element, a static, a pointer target or a generic argument it is an error.
 @test
 fn register_types_have_a_layout_and_no_storage() {
-    let decl = "extern \"C\" {\n    @c.value(32, 16)\n    pub type reg_t;\n    fn make() reg_t;\n}\n";
+    let decl = "extern \"C\" {\n    @value(32, 16)\n    pub type reg_t;\n    fn make() reg_t;\n}\n";
     let mut ok = String::from_str(decl);
     ok.push_str(
         "static_assert(sizeof(reg_t) == 32 && alignof(reg_t) == 16, \"layout\");\nfn pass(r: reg_t) reg_t {\n    let a = r;\n    let b = r;\n    return a;\n}\nfn main() i32 {\n    return 0;\n}\n",
@@ -335,29 +342,29 @@ fn register_types_have_a_layout_and_no_storage() {
     }
     h::expect_err_msg(
         "an alignment that does not divide the size",
-        "extern \"C\" {\n    @c.value(24, 16)\n    pub type reg_t;\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "extern \"C\" {\n    @value(24, 16)\n    pub type reg_t;\n}\nfn main() i32 {\n    return 0;\n}\n",
         "'@value' needs a nonzero size that is a multiple of the alignment",
     );
     h::expect_err_msg(
         "outside an extern block",
-        "@c.value(16, 16)\ntype reg_t = i32;\nfn main() i32 {\n    return 0;\n}\n",
+        "@value(16, 16)\ntype reg_t = i32;\nfn main() i32 {\n    return 0;\n}\n",
         "'@value' may only be applied to an opaque type ('type T;') in an 'extern \"C\"' block",
     );
 }
 
-// `@c.reads` and `@c.writes` name a raw pointer parameter (`*mut` for a write) and a byte count, a
+// `@reads` and `@writes` name a raw pointer parameter (`*mut` for a write) and a byte count, a
 // constant or an expression over the function's parameters; only in an extern block.
 @test
 fn memory_annotations_are_checked() {
     let cases: [[str; 2]; 5] = [
-        ["    @c.reads(q, 16)\n    fn f(p: *const void);\n", "cannot find value 'q'"],
-        ["    @c.reads(n, 16)\n    fn f(n: usize);\n", "parameter 'n' of '@reads' must be a raw pointer"],
-        ["    @c.writes(p, 16)\n    fn f(p: *const void);\n", "parameter 'p' of '@writes' must be a '*mut' pointer"],
+        ["    @reads(q, 16)\n    fn f(p: *const void);\n", "cannot find value 'q'"],
+        ["    @reads(n, 16)\n    fn f(n: usize);\n", "parameter 'n' of '@reads' must be a raw pointer"],
+        ["    @writes(p, 16)\n    fn f(p: *const void);\n", "parameter 'p' of '@writes' must be a '*mut' pointer"],
         [
-            "    @c.reads(p, n)\n    fn f(p: *const void, n: i32);\n",
+            "    @reads(p, n)\n    fn f(p: *const void, n: i32);\n",
             "the byte count is a 'usize' constant or an expression over the function's other 'usize' parameters",
         ],
-        ["    @c.reads(p)\n    fn f(p: *const void);\n", "attribute '@c.reads' takes 2 arguments"],
+        ["    @reads(p)\n    fn f(p: *const void);\n", "attribute '@reads' takes 2 arguments"],
     ];
     for c in cases {
         let mut s = String::from_str("extern \"C\" {\n");
@@ -373,22 +380,22 @@ fn memory_annotations_are_checked() {
     }
     h::expect_ok(
         "constant and parameter counts",
-        "extern \"C\" {\n    @c.reads(p, 16)\n    fn f(p: *const void);\n    @c.writes(d, n * 4 + 1)\n    fn g(d: *mut void, n: usize);\n    @c.lane_access\n    fn h(p: *mut void);\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "extern \"C\" {\n    @reads(p, 16)\n    fn f(p: *const void);\n    @writes(d, n * 4 + 1)\n    fn g(d: *mut void, n: usize);\n    @lane_access\n    fn h(p: *mut void);\n}\nfn main() i32 {\n    return 0;\n}\n",
     );
     // A global named like the parameter is no parameter.
     h::expect_err_msg(
         "a global",
-        "const q: usize = 1;\nextern \"C\" {\n    @c.reads(q, 16)\n    fn f(p: *const void);\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "const q: usize = 1;\nextern \"C\" {\n    @reads(q, 16)\n    fn f(p: *const void);\n}\nfn main() i32 {\n    return 0;\n}\n",
         "'q' is not a parameter of this function",
     );
-    let c = h::compile("@c.reads(p, 16)\nfn f(p: *const void) {}\nfn main() i32 {\n    return 0;\n}\n", h::STAGE_PARSE);
+    let c = h::compile("@reads(p, 16)\nfn f(p: *const void) {}\nfn main() i32 {\n    return 0;\n}\n", h::STAGE_PARSE);
     assert(
         c.msg_has("'@reads' may only be applied to a function in an 'extern \"C\"' block or an '@intrinsic' function"),
         "outside an extern block",
     );
     // The annotations have no code effect: the C of a program that calls the function is the same
     // without them.
-    let with = "extern \"C\" {\n    @c.reads(p, 4)\n    fn probe(p: *const void) i32;\n}\nfn main() i32 {\n    let x: i32 = 7;\n    return unsafe probe(&x as *const i32 as *const void);\n}\n";
+    let with = "extern \"C\" {\n    @reads(p, 4)\n    fn probe(p: *const void) i32;\n}\nfn main() i32 {\n    let x: i32 = 7;\n    return unsafe probe(&x as *const i32 as *const void);\n}\n";
     let without = "extern \"C\" {\n    fn probe(p: *const void) i32;\n}\nfn main() i32 {\n    let x: i32 = 7;\n    return unsafe probe(&x as *const i32 as *const void);\n}\n";
     let cw = h::compile_c_user(with);
     let co = h::compile_c_user(without);
@@ -509,7 +516,7 @@ fn feature_sets_rebuild_and_probe() {
     assert(!rs.ok() && rs.out_has("rejects '-msimd128'"), "a script build");
 }
 
-// A function the program's environment calls (`main`, `@c.export`, `@test`, `@bench`) needs its
+// A function the program's environment calls (`main`, `@export`, `@test`, `@bench`) needs its
 // features in the build; a function that needs features calls another that needs only what they
 // imply.
 @test
@@ -517,7 +524,7 @@ fn outside_callers_and_implied_features() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "import std::cpu;\n@arch(wasm32)\n@target_feature([cpu::Feature::Simd128])\n@c.export(\"exported\")\npub fn exported() i32 {\n    return 1;\n}\n@arch(wasm32)\n@target_feature([cpu::Feature::Simd128])\nfn main() i32 {\n    return 0;\n}\n",
+        "import std::cpu;\n@arch(wasm32)\n@target_feature([cpu::Feature::Simd128])\n@export(\"exported\")\npub fn exported() i32 {\n    return 1;\n}\n@arch(wasm32)\n@target_feature([cpu::Feature::Simd128])\nfn main() i32 {\n    return 0;\n}\n",
     );
     let r = p.compile_flags("--target=wasm", "main.spc");
     assert(!r.ok(), "the build lacks simd128");
@@ -591,13 +598,13 @@ fn simd_impl_operations_results_and_lanes() {
 }
 
 // The byte count of a memory annotation: literals, constants, arithmetic and the other `usize`
-// parameters; `@c.lane_access` states no range.
+// parameters; `@lane_access` states no range.
 @test
 fn memory_annotation_counts() {
     let cases: [str; 3] = [
-        "    @c.reads(p, k as usize)\n    fn f(p: *const void, k: i32);\n",
-        "    @c.reads(p, n + side())\n    fn f(p: *const void, n: usize);\n",
-        "    @c.writes(p, n + (p as usize))\n    fn f(p: *mut void, n: usize);\n",
+        "    @reads(p, k as usize)\n    fn f(p: *const void, k: i32);\n",
+        "    @reads(p, n + side())\n    fn f(p: *const void, n: usize);\n",
+        "    @writes(p, n + (p as usize))\n    fn f(p: *mut void, n: usize);\n",
     ];
     for c in cases {
         let mut s = String::from_str("fn side() usize {\n    return 1;\n}\nextern \"C\" {\n");
@@ -611,7 +618,7 @@ fn memory_annotation_counts() {
     }
     h::expect_err_msg(
         "a range with lane access",
-        "extern \"C\" {\n    @c.lane_access\n    @c.reads(p, 4)\n    fn f(p: *const void);\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "extern \"C\" {\n    @lane_access\n    @reads(p, 4)\n    fn f(p: *const void);\n}\nfn main() i32 {\n    return 0;\n}\n",
         "'@lane_access' states no range: it takes no '@reads' or '@writes'",
     );
 }
@@ -620,7 +627,7 @@ fn memory_annotation_counts() {
 // symbol.
 @test
 fn register_types_in_inferred_storage() {
-    let decl = "extern \"C\" {\n    @c.value(16, 16)\n    pub type reg_t;\n}\nfn id<T>(x: T) T {\n    return x;\n}\n";
+    let decl = "extern \"C\" {\n    @value(16, 16)\n    pub type reg_t;\n}\nfn id<T>(x: T) T {\n    return x;\n}\n";
     let bodies: [str; 7] = [
         "let a = [x, x];",
         "let t = (x, 1);",
@@ -641,7 +648,7 @@ fn register_types_in_inferred_storage() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "extern \"C\" \"stdint.h\" {\n    @c.value(8, 8)\n    pub type int64_t;\n}\nextern \"C\" \"math.h\" {\n    @c.value(8, 8)\n    pub type double_t;\n}\nfn two(a: int64_t) (int64_t, int64_t) {\n    return a, a;\n}\nfn twod(a: double_t) (double_t, double_t) {\n    return a, a;\n}\npub fn use_both(a: int64_t, d: double_t) {\n    let (x, _y) = two(a);\n    let (u, _v) = twod(d);\n    let _ = x;\n    let _ = u;\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "extern \"C\" \"stdint.h\" {\n    @value(8, 8)\n    pub type int64_t;\n}\nextern \"C\" \"math.h\" {\n    @value(8, 8)\n    pub type double_t;\n}\nfn two(a: int64_t) (int64_t, int64_t) {\n    return a, a;\n}\nfn twod(a: double_t) (double_t, double_t) {\n    return a, a;\n}\npub fn use_both(a: int64_t, d: double_t) {\n    let (x, _y) = two(a);\n    let (u, _v) = twod(d);\n    let _ = x;\n    let _ = u;\n}\nfn main() i32 {\n    return 0;\n}\n",
     );
     assert(p.compile("main.spc").ok(), "it compiles");
     assert(

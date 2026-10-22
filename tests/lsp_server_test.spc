@@ -45,24 +45,23 @@ fn uri_path_roundtrip() {
 // all hit; an argument, an unknown name and a name without '@' do not.
 @test
 fn attribute_hover_positions() {
-    let src = "@c.align(LINE)\n@intrinsic(\"simd.eq\")\n@nope\nfn test() {}\n";
+    let src = "@fmt.skip\n@intrinsic(\"simd.eq\")\n@nope\nfn test() {}\n";
     let h = feat::attribute_hover(src, 0).unwrap();
-    // `@c.align` is the older spelling of `@align`: its hover documents `@align`.
-    assert(h.as_str().starts_with("```super-c\n@align(N)\n```\n\n"), "the older spelling documents '@align'");
+    assert(h.as_str().starts_with("```super-c\n@fmt.skip\n```\n\n"), "the '@' documents the dotted name");
     assert(
         feat::attribute_hover("@align(4)\nstruct S {}\n", 1).unwrap().as_str().starts_with("```super-c\n@align(N)\n```"),
-        "the one-part spelling documents '@align'",
+        "'@align' documents itself",
     );
     assert(
-        feat::attribute_hover("@c.source(\"x.c\")\n", 1).unwrap().as_str().starts_with("```super-c\n@c.source("),
-        "'@c.source' keeps its prefix",
+        feat::attribute_hover("@c.align(4)\nstruct S {}\n", 1).is_none(),
+        "the removed '@c.' spelling is no attribute",
     );
-    assert(feat::attribute_hover(src, 3).is_some());
-    assert(feat::attribute_hover(src, 8).is_some());
-    assert(feat::attribute_hover(src, 10).is_none());
-    assert(feat::attribute_hover(src, 18).unwrap().as_str().contains("@intrinsic"));
-    assert(feat::attribute_hover(src, 39).is_none());
-    assert(feat::attribute_hover(src, 46).is_none());
+    assert(feat::attribute_hover(src, 5).is_some());
+    assert(feat::attribute_hover(src, 9).is_some());
+    assert(feat::attribute_hover(src, 22).is_none());
+    assert(feat::attribute_hover(src, 15).unwrap().as_str().contains("@intrinsic"));
+    assert(feat::attribute_hover(src, 34).is_none());
+    assert(feat::attribute_hover(src, 41).is_none());
 }
 
 // Every attribute the parser accepts has hover documentation.

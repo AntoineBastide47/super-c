@@ -101,7 +101,7 @@ const fn absent(m: str, f: str) bool {
 
 // `w_<name>(params)`, a wrapper of `call` into `decls`, for lanes `ty` x `n`.
 fn wrap(decls: &mut String, ty: str, n: usize, name: str, params: str, call: str) {
-    decls.format_into("@c.noinline\nfn w_{}({}) Simd<{}, {}> {{\n    return {};\n}}\n", name, params, ty, n, call);
+    decls.format_into("@noinline\nfn w_{}({}) Simd<{}, {}> {{\n    return {};\n}}\n", name, params, ty, n, call);
 }
 
 // The cases call each function through a wrapper (`w_<f>`, into `decls`): the kernel inlines once into
@@ -266,7 +266,7 @@ fn hash_call(m: str, f: str, kinds: str, t: str, n: usize, form: str, at: str) S
 // The wrapper of `m::f` at lane count `n`: the kernel inlines once into it, not into each call of the
 // hash loops, which keeps the program's C small enough to build quickly at opt-level 0.
 fn kernel(s: &mut String, m: str, f: str, kinds: str, t: str, n: usize) {
-    s.format_into("@c.noinline\nfn k_{}_{}_{}_{}(", m, f, t, n);
+    s.format_into("@noinline\nfn k_{}_{}_{}_{}(", m, f, t, n);
     let mut args = String::new();
     for b in kinds.bytes() {
         if b != b'x' {

@@ -103,8 +103,8 @@ fn invalid_vectors_and_vector_misuse_are_diagnosed() {
         ["fn f(v: f32x4) { let x = v.lanes; }", "has no fields"],
         ["struct S {}\nextend S as SimdElement {}", "only the SIMD lane types in `std` implement `SimdElement`"],
         ["extern \"C\" {\n    fn f(v: f32x4);\n}", "`Simd<f32, 4>` has no stable C ABI; pass `[f32; 4]`"],
-        ["@c.export(\"g\")\nfn g(m: mask8) {}", "`Mask<8>` has no stable C ABI; pass `u64`"],
-        ["@c.export(\"h\")\nfn h(x: i32) f32x4 {\n    return [1.0; 4];\n}", "`Simd<f32, 4>` has no stable C ABI"],
+        ["@export(\"g\")\nfn g(m: mask8) {}", "`Mask<8>` has no stable C ABI; pass `u64`"],
+        ["@export(\"h\")\nfn h(x: i32) f32x4 {\n    return [1.0; 4];\n}", "`Simd<f32, 4>` has no stable C ABI"],
         ["extern \"C\" {\n    fn f() mask4;\n}", "`Mask<4>` has no stable C ABI"],
         ["fn f(v: f32x4) bool { return v < v; }", "`Simd<f32, 4>` does not implement `Ord`; compare lanes"],
         ["fn f(v: f32x4) f32 { return v[1.5]; }", "index must be an integer"],
@@ -399,13 +399,13 @@ fn lanes_round_trips_and_masks_agree_as_constants_and_at_run_time() {
 fn lanes_keep_float_bits_through_a_round_trip() {
     h::expect_exit(
         "bit-exact lanes",
-        M"(@c.noinline
+        M"(@noinline
 fn trip32(b: u32) u32 {
     let f = f32_from_bits(b);
     let v = Simd::<f32, 4>::from_array([f, 1.0, f, 0.0]);
     return f32_bits(v.to_array()[2]);
 }
-@c.noinline
+@noinline
 fn trip64(b: u64) u64 {
     let f = f64_from_bits(b);
     let v = Simd::<f64, 2>::from_array([2.0, f]);
@@ -435,7 +435,7 @@ fn main() i32 {
 fn a_lane_index_past_the_lanes_traps() {
     let mut src = String::from_str(PARITY_DECLS);
     src.push_str(
-        M"(@c.noinline
+        M"(@noinline
 fn opr(x: usize) usize {
     return x;
 }

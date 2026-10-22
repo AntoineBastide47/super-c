@@ -19,7 +19,7 @@ import driver::util as *;
 import utils::persist as *;
 
 /// The image format; a change to any saved type's layout bumps it.
-const IMAGE_VER: u64 = 3;
+const IMAGE_VER: u64 = 4;
 
 /// The cache name of the prelude image for `p`'s settings, the constant-evaluation budgets and the
 /// type-table hash mode.
@@ -194,7 +194,6 @@ fn save_into(q: &loader::Package, e: &iri::Interp, w: &mut Writer) {
     q.simd_levels.save(w);
     q.build_module.save(w);
     q.build_target.save(w);
-    q.ext_inputs.save(w);
     q.core_module.save(w);
     q.core_seeded.save(w);
     w.bytes(((&q.builtin_decls) as *const NodeId) as *const u8, sizeof([NodeId; loader::BT_COUNT_N]));
@@ -226,7 +225,6 @@ pub fn load(p: &mut loader::Package, e: &mut iri::Interp, img: str) bool {
     p.simd_levels.load(&mut r);
     p.build_module.load(&mut r);
     p.build_target.load(&mut r);
-    p.ext_inputs.load(&mut r);
     p.core_module.load(&mut r);
     p.core_seeded.load(&mut r);
     r.bytes(((&mut p.builtin_decls) as *mut NodeId) as *mut u8, sizeof([NodeId; loader::BT_COUNT_N]));

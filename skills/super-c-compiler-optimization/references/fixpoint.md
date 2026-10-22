@@ -32,7 +32,7 @@ difference is a semantic regression unless the contract itself is intentionally 
 
 ## Absolute Paths in the Emitted Tree
 
-The include paths in `__sc_fwd.h` and the `@c.source` wrappers (`__ext<N>_<stem>.c`) are
+The include paths in `__sc_fwd.h` are
 relative when the included file and the tree lie below the working directory, and absolute
 otherwise (`include_name`); the content hash of `__sc_fwd.h` in `__sc_manifest` follows them.
 
@@ -52,7 +52,7 @@ otherwise (`include_name`); the content hash of `__sc_fwd.h` in `__sc_manifest` 
 | Different constant values | Compile-time evaluation order dependency |
 | Different line/column in emitted comments | Formatter or emitter position tracking changed |
 | Only `.tu_cache` differs | Per-TU cache on and not excluded |
-| Path-only diffs in `__sc_fwd.h`, `__ext*`, `__sc_manifest` | Builds used different `std`/`ffi` roots outside the working directory |
+| Path-only diffs in `__sc_fwd.h`, `__sc_manifest` | Builds used different `std`/`ffi` roots outside the working directory |
 
 ## Prevention
 

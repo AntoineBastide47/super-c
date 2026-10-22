@@ -22,7 +22,7 @@ fn expect_c_user_absent(label: str, src: str, needle: str) {
 }
 
 // Program `s` as a batch module: its one `fn main(argv: Vector<str>) i32` renamed `case_main`, public
-// and `@c.noinline`, so it stays a function of its own.
+// and `@noinline`, so it stays a function of its own.
 fn case_module(s: str) String {
     let head = "fn main(argv: Vector<str>) i32 {\n";
     let mut at: isize = -1;
@@ -36,7 +36,7 @@ fn case_module(s: str) String {
     }
     assert(at >= 0, "the program has `fn main(argv: Vector<str>) i32`");
     let mut m = String::from_str(s.slice(0, at as usize));
-    m.push_str("@c.noinline\npub fn case_main(argv: Vector<str>) i32 {\n");
+    m.push_str("@noinline\npub fn case_main(argv: Vector<str>) i32 {\n");
     m.push_str(s.slice(at as usize + head.len(), s.len()));
     return m;
 }
@@ -493,7 +493,7 @@ fn sig_fact_survives_readonly_call() {
     // guard fact survives and the check proves away.
     expect_c_user_absent(
         "read-only call keeps the guard fact",
-        "@c.noinline\nfn peek(v: &Vector<i32>) i32 {\n    if v.len() > 2 {\n        return *v.at(0);\n    }\n    return 0;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..8 {\n        v.push(i);\n    }\n    let mut s = 0;\n    let k = argv.len() + 3;\n    if k < v.len() {\n        s += peek(&v);\n        s += v[k];\n    }\n    return s - 4 - (argv.len() as i32 - 1);\n}\n",
+        "@noinline\nfn peek(v: &Vector<i32>) i32 {\n    if v.len() > 2 {\n        return *v.at(0);\n    }\n    return 0;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..8 {\n        v.push(i);\n    }\n    let mut s = 0;\n    let k = argv.len() + 3;\n    if k < v.len() {\n        s += peek(&v);\n        s += v[k];\n    }\n    return s - 4 - (argv.len() as i32 - 1);\n}\n",
         "__sc_bounds(",
     );
 }
@@ -502,7 +502,7 @@ fn sig_fact_survives_readonly_call() {
 fn sig_mut_call_kills() {
     // A &mut argument names the vector: its facts die at the call and the check stays.
     let c = h::compile_c_user(
-        "@c.noinline\nfn grow(v: &mut Vector<i32>) {\n    v.push(9);\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let k = argv.len() - 1;\n    if k < v.len() {\n        grow(&mut v);\n        return v[k] - 1;\n    }\n    return 1;\n}\n",
+        "@noinline\nfn grow(v: &mut Vector<i32>) {\n    v.push(9);\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let k = argv.len() - 1;\n    if k < v.len() {\n        grow(&mut v);\n        return v[k] - 1;\n    }\n    return 1;\n}\n",
     );
     assert(c.ok(), "mut-call snippet compiles");
     assert(c.code_has("__sc_bounds("), "a &mut call kills the guard fact");
@@ -513,7 +513,7 @@ fn sig_raw_arg_kills() {
     // A raw-pointer argument is unclassifiable: the call writes anything the pointer reaches. A
     // pointer to the vector itself reaches its length.
     let c = h::compile_c_user(
-        "@c.noinline\nfn taker(p: *mut Vector<i32>) i32 {\n    return unsafe (*p).len() as i32;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let q = &mut v as *mut Vector<i32>;\n    let k = argv.len() - 1;\n    if k < v.len() {\n        let t = taker(q);\n        return v[k] - t;\n    }\n    return 1;\n}\n",
+        "@noinline\nfn taker(p: *mut Vector<i32>) i32 {\n    return unsafe (*p).len() as i32;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let q = &mut v as *mut Vector<i32>;\n    let k = argv.len() - 1;\n    if k < v.len() {\n        let t = taker(q);\n        return v[k] - t;\n    }\n    return 1;\n}\n",
     );
     assert(c.ok(), "raw-arg snippet compiles");
     assert(c.code_has("__sc_bounds("), "a raw-pointer argument keeps the check");
@@ -523,7 +523,7 @@ fn sig_raw_arg_kills() {
 fn sig_static_kills() {
     // A static collection is reachable from any callee: transparency never keeps its facts.
     let c = h::compile_c_user(
-        "static mut G: str = \"abcd\";\n@c.noinline\nfn shrink() {\n    unsafe {\n        G = \"a\";\n    }\n}\nfn main(argv: Vector<str>) i32 {\n    let k = argv.len() + 1;\n    if k < unsafe G.len() {\n        shrink();\n        return unsafe G[k] as i32 - 99;\n    }\n    return 1;\n}\n",
+        "static mut G: str = \"abcd\";\n@noinline\nfn shrink() {\n    unsafe {\n        G = \"a\";\n    }\n}\nfn main(argv: Vector<str>) i32 {\n    let k = argv.len() + 1;\n    if k < unsafe G.len() {\n        shrink();\n        return unsafe G[k] as i32 - 99;\n    }\n    return 1;\n}\n",
     );
     assert(c.ok(), "static snippet compiles");
     assert(c.code_has("__sc_bounds("), "a static collection keeps its check across calls");
@@ -534,7 +534,7 @@ fn sig_escaped_ref_kills() {
     // A &mut stored into memory escapes: later calls kill the escaped root even when their own
     // arguments are harmless.
     let c = h::compile_c_user(
-        "struct Slot<'a> {\n    pub m: &'a mut Vector<i32>,\n}\n@c.noinline\nfn touch() i32 {\n    return 1;\n}\n@c.noinline\nfn use_slot(s: &Slot) i32 {\n    return s.m.len() as i32;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let k = argv.len() - 1;\n    let mut out = 0;\n    {\n        let s = Slot { m: &mut v };\n        out += use_slot(&s);\n    }\n    if k < v.len() {\n        let t = touch();\n        return v[k] + out - t - 2;\n    }\n    return 1;\n}\n",
+        "struct Slot<'a> {\n    pub m: &'a mut Vector<i32>,\n}\n@noinline\nfn touch() i32 {\n    return 1;\n}\n@noinline\nfn use_slot(s: &Slot) i32 {\n    return s.m.len() as i32;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let k = argv.len() - 1;\n    let mut out = 0;\n    {\n        let s = Slot { m: &mut v };\n        out += use_slot(&s);\n    }\n    if k < v.len() {\n        let t = touch();\n        return v[k] + out - t - 2;\n    }\n    return 1;\n}\n",
     );
     assert(c.ok(), "escaped-ref snippet compiles");
     assert(c.code_has("__sc_bounds("), "an escaped &mut keeps the check across later calls");
@@ -544,8 +544,8 @@ fn sig_escaped_ref_kills() {
 fn sig_disable_and_inline_parity() {
     // Identical behavior with transparency off and with the inliner off; the OOB path panics the
     // same way in every mode.
-    let SRC: str = "@c.noinline\nfn peek(v: &Vector<i32>) i32 {\n    if v.len() > 2 {\n        return *v.at(0);\n    }\n    return 0;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..8 {\n        v.push(i);\n    }\n    let mut s = 0;\n    let k = argv.len() + 3;\n    if k < v.len() {\n        s += peek(&v);\n        s += v[k];\n    }\n    return s - 4 - (argv.len() as i32 - 1);\n}\n";
-    let BAD: str = "@c.noinline\nfn peek(v: &Vector<i32>) i32 {\n    return v.len() as i32;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    let k = argv.len() + 4;\n    let _ = peek(&v);\n    return v[k];\n}\n";
+    let SRC: str = "@noinline\nfn peek(v: &Vector<i32>) i32 {\n    if v.len() > 2 {\n        return *v.at(0);\n    }\n    return 0;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..8 {\n        v.push(i);\n    }\n    let mut s = 0;\n    let k = argv.len() + 3;\n    if k < v.len() {\n        s += peek(&v);\n        s += v[k];\n    }\n    return s - 4 - (argv.len() as i32 - 1);\n}\n";
+    let BAD: str = "@noinline\nfn peek(v: &Vector<i32>) i32 {\n    return v.len() as i32;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    let k = argv.len() + 4;\n    let _ = peek(&v);\n    return v[k];\n}\n";
     // One build per setting: both programs share it.
     let mut on = h::ExitBatch::new();
     on.add("sig on", SRC, 0);
@@ -786,7 +786,7 @@ fn vector_access_group_checks() {
 fn safety_reassigned_view(b: &mut h::ExitBatch) {
     b.add_trap(
         "reassigned view",
-        M"(@c.noinline
+        M"(@noinline
 fn f(mut x: []u32, y: []u32) u32 {
     let a = x[0];
     x = y;
@@ -805,7 +805,7 @@ fn main(argv: Vector<str>) i32 {
     );
     b.add_trap(
         "view reassigned in a loop",
-        M"(@c.noinline
+        M"(@noinline
 fn f(mut x: []u32, y: []u32, n: usize) u32 {
     let mut s = x[0];
     for _ in 0..n {

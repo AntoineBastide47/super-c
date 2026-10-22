@@ -93,7 +93,7 @@ fn large_capture_boxed_and_destroyed_once() {
 }
 
 // A 16-byte-aligned capture cannot use the 8-aligned inline storage: it is boxed, and still exact.
-@c.align(16)
+@align(16)
 struct Aligned {
     pub v: u64,
     pub t: Tracked,

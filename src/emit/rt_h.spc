@@ -112,6 +112,22 @@ pub const fn super_rt_h() str<'static> {
 #endif
 /* The language's char is unsigned: every compile of the generated tree passes -funsigned-char. */
 _Static_assert(CHAR_MIN == 0, "super-c: compile the generated C with -funsigned-char");
+/* wasm's C library (std/rt/libc.spc) cannot define the standard streams and the clocks, which its
+   headers declare as `const` objects: the stream names reach them through its `sc_stdio_stream`, and a
+   clock is its WASI clock id plus one, which its `clock_gettime` reads. */
+#ifdef __wasi__
+FILE *sc_stdio_stream(int32_t __fd);
+#undef stdin
+#undef stdout
+#undef stderr
+#define stdin (sc_stdio_stream(0))
+#define stdout (sc_stdio_stream(1))
+#define stderr (sc_stdio_stream(2))
+#undef CLOCK_REALTIME
+#undef CLOCK_MONOTONIC
+#define CLOCK_REALTIME ((clockid_t)(uintptr_t)1)
+#define CLOCK_MONOTONIC ((clockid_t)(uintptr_t)2)
+#endif
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"

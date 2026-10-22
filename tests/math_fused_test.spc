@@ -60,7 +60,7 @@ fn exact_results_stay_exact() {
 const L: f32 = length_fused(vec3::new(0.1, 0.7, -0.3));
 const N3: vec3 = normalize_fused(vec3::new(0.1, 0.7, -0.3));
 
-@c.noinline
+@noinline
 const fn opaque(v: vec3) vec3 {
     return v;
 }

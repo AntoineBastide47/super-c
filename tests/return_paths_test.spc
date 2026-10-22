@@ -1,6 +1,6 @@
 // A function or closure with results must not reach the end of its body: the caller would read results
 // nothing wrote. A path ends without a value only through a statement that does not complete: a
-// `return`, a call of a `!` or `@c.noreturn` function, a `loop` no `break` leaves, or an `if`, `switch`
+// `return`, a call of a `!` or `@noreturn` function, a `loop` no `break` leaves, or an `if`, `switch`
 // or block whose every way out is one of these. Named results return through a bare `return`.
 import tests::harness as h;
 
@@ -10,7 +10,7 @@ fn every_path_returns(b: &mut h::ExitBatch) {
     b.add(
         "each ending of a body that cannot complete",
         M"(extern "C" {
-    @c.noreturn fn exit(code: i32) void;
+    @noreturn fn exit(code: i32) void;
 }
 fn both(x: i64) i64 {
     if x > 0 {

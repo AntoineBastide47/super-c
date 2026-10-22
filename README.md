@@ -799,7 +799,6 @@ extern "C" "native.h" {      // native.c next to it is compiled into the build
 * `@unsafe(const)` on a binding lets constants call it.
 * `@blocking` on a binding runs its calls on a separate thread pool (see Concurrency).
 * `String::cstr()`, `unsafe str::from_cstr(p)` and `str::from_cbuf(buf)` convert C strings.
-* `@c.source("impl.c")` names a C file stored somewhere else.
 * `@link("m")` links a library (a value that starts with `-` is passed as is).
 * Link flags are collected in `build/<profile>/raw/__ldflags`, one per line, and applied
   automatically.
@@ -831,8 +830,7 @@ fn format_into(buf: *mut char, n: usize, fmt: *const char, ...) i32 {
 ### Attributes
 
 C-facing attributes go before an item (and before `pub`). They become C keywords or GNU
-`__attribute__`s. The older `@c.` spelling (`@c.noreturn`) is still accepted; only `@c.source` keeps
-the prefix:
+`__attribute__`s:
 
 ```superc
 @noreturn

@@ -386,7 +386,7 @@ const L2: f32 = l2_norm(vec3::new(1.0, 2.0, 3.0));
 const L2_BETWEEN: f32 = l2_norm_between(vec3::new(1.0, 2.0, 3.0), vec3::new(-1.0, 0.5, 2.0));
 
 // The identity at run time: the call it feeds cannot fold.
-@c.noinline
+@noinline
 const fn rt<T: Copy>(x: T) T {
     return x;
 }

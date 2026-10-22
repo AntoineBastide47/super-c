@@ -183,7 +183,7 @@ fn check_module(
     }
     for f in md.items.externs.iter() {
         let name = f.name.as_str();
-        if !has(&man.ffi_functions, name) && !matches_any(&pkg.c_functions, name) {
+        if !f.data && !has(&man.ffi_functions, name) && !matches_any(&pkg.c_functions, name) {
             diags.push(
                 format(
                     "{}:{}: platform FFI outside std::platform: the extern \"C\" function '{}'",

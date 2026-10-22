@@ -77,7 +77,7 @@ fn closure_bounds_reject_feature_functions() {
     b.add("as an `unsafe` operand", by_type, "`unsafe wide` needs CPU features");
     b.add(
         "an export",
-        "@arch(x86_64)\n@target_feature([cpu::Feature::Avx2])\n@c.export(\"k\")\npub fn k() {}\nfn main() i32 {\n    return 0;\n}\n",
+        "@arch(x86_64)\n@target_feature([cpu::Feature::Avx2])\n@export(\"k\")\npub fn k() {}\nfn main() i32 {\n    return 0;\n}\n",
         "a '@export' function cannot need CPU features",
     );
     p.expect_batch(b);
@@ -140,7 +140,7 @@ fn feature_functions_compile_their_vector_callees_with_their_features() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "import std::cpu;\nimport std::simd;\n\n@c.noinline\nfn kern(c: []mut f32, a: []f32) {\n    let mut i: usize = 0;\n    while i + 8 <= a.len() {\n        simd::store(c, i, simd::load::<f32, 8>(a, i).fma(simd::load::<f32, 8>(a, i), simd::load::<f32, 8>(c, i)));\n        i += 8;\n    }\n}\n\n// 128-bit lanes: the copy declares the original's vector type.\n@c.noinline\nfn kern4(c: []mut f32, a: []f32) {\n    simd::store(c, 0, simd::load::<f32, 4>(a, 0) + simd::load::<f32, 4>(c, 0));\n}\n\n@c.noinline\nfn plain(a: i32) i32 {\n    return a * 3;\n}\n\n@arch(x86_64)\n@target_feature([cpu::Feature::Fma])\nfn fast(c: []mut f32, a: []f32, x: i32) i32 {\n    kern(c, a);\n    kern4(c, a);\n    return plain(x);\n}\n\nfn main(args: Vector<str>) i32 {\n    let a: [f32; 8] = [1.0; 8];\n    let mut c: [f32; 8] = [0.0; 8];\n    kern(c, a);\n    kern4(c, a);\n    return unsafe fast(c, a, args.len() as i32) + plain(0) - 3;\n}\n",
+        "import std::cpu;\nimport std::simd;\n\n@noinline\nfn kern(c: []mut f32, a: []f32) {\n    let mut i: usize = 0;\n    while i + 8 <= a.len() {\n        simd::store(c, i, simd::load::<f32, 8>(a, i).fma(simd::load::<f32, 8>(a, i), simd::load::<f32, 8>(c, i)));\n        i += 8;\n    }\n}\n\n// 128-bit lanes: the copy declares the original's vector type.\n@noinline\nfn kern4(c: []mut f32, a: []f32) {\n    simd::store(c, 0, simd::load::<f32, 4>(a, 0) + simd::load::<f32, 4>(c, 0));\n}\n\n@noinline\nfn plain(a: i32) i32 {\n    return a * 3;\n}\n\n@arch(x86_64)\n@target_feature([cpu::Feature::Fma])\nfn fast(c: []mut f32, a: []f32, x: i32) i32 {\n    kern(c, a);\n    kern4(c, a);\n    return plain(x);\n}\n\nfn main(args: Vector<str>) i32 {\n    let a: [f32; 8] = [1.0; 8];\n    let mut c: [f32; 8] = [0.0; 8];\n    kern(c, a);\n    kern4(c, a);\n    return unsafe fast(c, a, args.len() as i32) + plain(0) - 3;\n}\n",
     );
     let root = p.dir();
     let _ = p.run_raw(
@@ -176,7 +176,7 @@ fn vector_functions_choose_their_copy_at_run_time() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "import std::simd;\n\n@c.noinline\nfn kern(c: []mut f32, a: []f32) {\n    let mut i: usize = 0;\n    while i + 8 <= a.len() {\n        simd::store(c, i, simd::load::<f32, 8>(a, i).fma(simd::load::<f32, 8>(a, i), simd::load::<f32, 8>(c, i)));\n        i += 8;\n    }\n}\n\n@c.noinline\nfn plain(a: i32) i32 {\n    return a * 3;\n}\n\nfn main(args: Vector<str>) i32 {\n    let a: [f32; 8] = [1.0; 8];\n    let mut c: [f32; 8] = [0.0; 8];\n    kern(c, a);\n    return plain(args.len() as i32) - 3;\n}\n",
+        "import std::simd;\n\n@noinline\nfn kern(c: []mut f32, a: []f32) {\n    let mut i: usize = 0;\n    while i + 8 <= a.len() {\n        simd::store(c, i, simd::load::<f32, 8>(a, i).fma(simd::load::<f32, 8>(a, i), simd::load::<f32, 8>(c, i)));\n        i += 8;\n    }\n}\n\n@noinline\nfn plain(a: i32) i32 {\n    return a * 3;\n}\n\nfn main(args: Vector<str>) i32 {\n    let a: [f32; 8] = [1.0; 8];\n    let mut c: [f32; 8] = [0.0; 8];\n    kern(c, a);\n    return plain(args.len() as i32) - 3;\n}\n",
     );
     let root = p.dir();
     let mut texts = Vector::<String>::new();
@@ -477,7 +477,7 @@ fn dispatch_needs_no_fence() {
     if cli::on_wasm() || h::simd_lane() || a > 1 {
         return;
     }
-    let src = "import std::cpu;\nimport std::cpu::detect as detect;\nstatic mut D: detect::Dispatch = detect::Dispatch::new();\nfn one(x: i32) i32 {\n    return x + 1;\n}\n@c.noinline\nfn run(x: i32) i32 {\n    return unsafe detect::dispatch::<fn(i32) i32, 1>(&mut unsafe D, [(cpu::Feature::Simd128, one)], one)(x);\n}\nfn main(args: Vector<str>) i32 {\n    return run(args.len() as i32) - 2;\n}\n";
+    let src = "import std::cpu;\nimport std::cpu::detect as detect;\nstatic mut D: detect::Dispatch = detect::Dispatch::new();\nfn one(x: i32) i32 {\n    return x + 1;\n}\n@noinline\nfn run(x: i32) i32 {\n    return unsafe detect::dispatch::<fn(i32) i32, 1>(&mut unsafe D, [(cpu::Feature::Simd128, one)], one)(x);\n}\nfn main(args: Vector<str>) i32 {\n    return run(args.len() as i32) - 2;\n}\n";
     if a == 1 {
         h::expect_asm("aarch64", src, ["--profile=release"], "main__run", ["lda", "blr"], ["dmb"]);
     } else {

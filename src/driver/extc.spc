@@ -1,115 +1,15 @@
-// External C sources/libs: `@c.source`/`@link` attrs + implicit backing-header `.c` siblings. Each resolved
-// source becomes a wrapper TU `build/<profile>/raw/__ext<N>_<stem>.c` on the emit keep-list (one absolute
-// #include; the file stays in place so its own relative includes keep resolving), deduped by resolved path.
-// `@link` values become `-l<v>` (verbatim when starting with '-'), written with the runtime's own libm on
-// POSIX to `build/<profile>/raw/__ldflags` for the final link line.
+// External C libraries: `@link` values become `-l<v>` (verbatim when starting with '-'), written with the
+// runtime's own libm on POSIX to `build/<profile>/raw/__ldflags` for the final link line.
 import stdio;
-import string as cstring;
 import ast::ast as *;
 import std::platform::fs;
 import module::loader as loader;
 import driver::util as *;
 
-// The real path of the C string in `rel`, NUL-terminated into `out`: false when it does not resolve or
-// does not fit.
-fn real_into(rel: &PathBuf, out: &mut PathBuf) bool {
-    let r = fs::realpath(str::from_cbuf(rel.as_slice()));
-    if r.is_err() {
-        return false;
-    }
-    let real = r.unwrap();
-    if real.len() >= 4096 {
-        return false;
-    }
-    unsafe out.copy_from(real.as_ptr() as *const char, real.len());
-    out[real.len()] = 0 as char;
-    return true;
-}
-
-// "<dir of file>/<v[0..vl]>" (or "<v>") into `out` (a 4096-byte buffer).
-fn ext_rel(file: *const char, v: *const char, vl: i32, out: *mut char) {
-    let mut slash: *mut char = null;
-    if file != null {
-        slash = unsafe cstring::strrchr(file, '/');
-    }
-    if slash != null {
-        let dlen = (slash as usize - file as usize) as i32;
-        unsafe stdio::snprintf(out, 4096, "%.*s/%.*s".ptr() as *const char, dlen, file, vl, v);
-    } else {
-        unsafe stdio::snprintf(out, 4096, "%.*s".ptr() as *const char, vl, v);
-    }
-}
-
-// Wrap one RESOLVED external C source path `rsl` into a build/ TU (deduped across explicit + implicit adds),
-// published with `publish_file`: `fresh` gets whether this build rewrote it.
-fn ext_c_wrap(
-    root: str,
-    keep: &mut Vector<String>,
-    fresh: &mut Vector<bool>,
-    seen: &mut Vector<String>,
-    nsrc: &mut u32,
-    rsl: *const char,
-    err: &mut bool,
-) {
-    for k in 0..seen.len() {
-        if seen[k].as_str() == unsafe str::from_cstr(rsl) {
-            return;
-        }
-    }
-    seen.push(unsafe String::from_cstr(rsl));
-    let mut basep = (unsafe cstring::strrchr(rsl, '/')) as *const char;
-    if basep != null {
-        basep = unsafe (basep + 1);
-    } else {
-        basep = rsl;
-    }
-    let mut stem = Buf64 {};
-    let mut sl: usize = 0;
-    let mut sp = basep;
-    while unsafe *sp != 0 as char && unsafe *sp != '.' as char && sl < 63 {
-        let c = unsafe *sp;
-        let good = c >= 'a' as char && c <= 'z' as char || c >= 'A' as char && c <= 'Z' as char || c >= '0' as char && c <= '9' as char;
-        stem[sl] = if good {
-            c;
-        } else {
-            '_' as char;
-        };
-        sl = sl + 1;
-        sp = unsafe (sp + 1);
-    }
-    stem[sl] = 0 as char;
-    let mut nm = Buf128 {};
-    let idx = *nsrc;
-    *nsrc = idx + 1;
-    unsafe stdio::snprintf(&mut nm[0], 128, "__ext%u_%s".ptr() as *const char, idx, &stem[0]);
-    let mut path = build_out_path(root, str::from_cbuf(nm.as_slice()), ".c");
-    // The wrapper sits at the tree's root.
-    let inc = include_name(unsafe str::from_cstr(rsl), loader::real_path_of(root).as_str());
-    let text = format(
-        "/* external C source pulled into the build -- generated, do not edit */\n#include \"{}\"\n",
-        inc.as_str(),
-    );
-    let rc = publish_file(path.as_str(), text.as_str());
-    if rc < 0 {
-        unsafe stdio::perror(path.cstr());
-        *err = true;
-        return;
-    }
-    keep.push(path);
-    fresh.push(rc == 1);
-}
-
-/// Scan every module for @c.source/@link and implicit backing-header `.c` siblings: wrapper TUs are
-/// written under gen_root and pushed onto `keep`, and whether this build rewrote each onto `fresh`; link
-/// flags go to `<gen_root>/__ldflags` (removed when none). Sets `*err` on an unresolvable source or a write
-/// failure; already-set values are never cleared.
-pub fn ext_c_collect(
-    p: &mut loader::Package,
-    keep: &mut Vector<String>,
-    fresh: &mut Vector<bool>,
-    err: &mut bool,
-    target: i32,
-) {
+/// Scan every module for `@link` and write the flags to `<gen_root>/__ldflags` (removed when none). A C
+/// library comes prebuilt and reaches the link through `@link` only: no C source of the program's tree is
+/// compiled. Sets `*err` on a write failure; an already-set value is never cleared.
+pub fn ext_c_collect(p: &mut loader::Package, err: &mut bool, target: i32) {
     let root = p.gen_root.as_str();
     let mut ld = Vector::<String>::new();
     // Libm, on every POSIX link line: the prelude's float methods (`f64::fma` and friends) are emitted into
@@ -117,31 +17,26 @@ pub fn ext_c_collect(
     // without it, which macOS hides because libSystem has them. It is seeded here rather than as a
     // `@link` on the prelude's extern block because that block DECLARES the functions for every target,
     // Windows included: gating it to carry the flag would take the declarations away from Windows, whose
-    // CRT provides the functions and has no libm to name.
-    if target != 0 {
+    // CRT provides the functions and has no libm to name. wasm links its own C library, `std::rt::libm`.
+    if target != 0 && target != 3 {
         ld.push(String::from_str("-lm"));
     }
-    let mut seen = Vector::<String>::new();
-    let mut nsrc: u32 = 0;
     let n = p.modules.len();
     for m in 0..n {
         if !p.modules[m].has_ast {
             continue;
         }
-        let file = p.modules[m].file.cstr();
         let src = p.modules[m].source.as_str().ptr() as *const char;
         let ap = p.module_ast_const(m as ModuleId);
         // Live top-level items, after `platform_filter` compacted `program.items`: a `@platform`-gated-out
-        // `@c.source`/`@link` leaves its attr in the table, so skip attrs whose owning item is gone (else
-        // every OS would pull in every other OS's runtime C and `-l` flags).
+        // `@link` leaves its attr in the table, so skip attrs whose owning item is gone (else every OS
+        // would take every other OS's `-l` flags).
         let rootn = unsafe (*ap).root;
         let live = unsafe (*ap).at_const(rootn).as_data.program.items;
         let live_ids = unsafe (*ap).list(live);
         for ai in 0..unsafe (*ap).attrs.len() {
             let at = unsafe (*ap).attrs[ai];
-            let is_src = at.kind == AttrKind::ATTR_C_SOURCE as u8;
-            let is_link = at.kind == AttrKind::ATTR_C_LINK as u8;
-            if !is_src && !is_link || at.str_span.end <= at.str_span.start {
+            if at.kind != AttrKind::ATTR_C_LINK as u8 || at.str_span.end <= at.str_span.start {
                 continue;
             }
             if at.owner != rootn {
@@ -158,87 +53,20 @@ pub fn ext_c_collect(
             }
             let vl = (at.str_span.end - at.str_span.start) as i32;
             let v = unsafe (src + at.str_span.start);
-            if is_link {
-                let mut flag = String::new();
-                if unsafe *v != '-' as char {
-                    flag.push_str("-l");
-                }
-                flag.push_str(unsafe str::from_raw(v as *const u8, vl as usize));
-                let mut dup = false;
-                for k in 0..ld.len() {
-                    if ld[k].as_str() == flag.as_str() {
-                        dup = true;
-                        break;
-                    }
-                }
-                if !dup {
-                    ld.push(flag);
-                }
-                continue;
+            let mut flag = String::new();
+            if unsafe *v != '-' as char {
+                flag.push_str("-l");
             }
-            let mut rel = PathBuf {};
-            let mut rsl = PathBuf {};
-            ext_rel(file, v, vl, &mut rel[0]);
-            if !real_into(&rel, &mut rsl) {
-                unsafe stdio::snprintf(&mut rel[0], 4096, "%.*s".ptr() as *const char, vl, v);
-                if !real_into(&rel, &mut rsl) {
-                    unsafe stdio::fprintf(
-                        stdio::stderr(),
-                        "error: cannot find C source '%.*s'\n".ptr() as *const char,
-                        vl,
-                        v,
-                    );
-                    *err = true;
-                    continue;
+            flag.push_str(unsafe str::from_raw(v as *const u8, vl as usize));
+            let mut dup = false;
+            for k in 0..ld.len() {
+                if ld[k].as_str() == flag.as_str() {
+                    dup = true;
+                    break;
                 }
             }
-            p.ext_inputs.push(String::from_str(str::from_cbuf(rsl.as_slice())));
-            ext_c_wrap(root, keep, fresh, &mut seen, &mut nsrc, &rsl[0], err);
-        }
-        // Implicit sources: a backing header that resolves next to this module with a same-stem `.c` sibling.
-        let items = unsafe (*ap).at_const((*ap).root).as_data.program.items;
-        let ids = unsafe (*ap).list(items);
-        for i in 0..items.len {
-            let nid = unsafe ids[i as usize];
-            let nk = unsafe (*ap).at_const(nid).kind;
-            let hdr = if nk == NodeKind::NODE_EXTERN_BLOCK {
-                unsafe (*ap).at_const(nid).as_data.extern_block.header;
-            } else {
-                NODE_NONE;
-            };
-            if hdr == NODE_NONE {
-                continue;
-            }
-            let hs = unsafe (*ap).at_const(hdr).span;
-            let hl = (hs.end - hs.start) as i32 - 2;
-            if hl <= 2 {
-                continue;
-            }
-            let hv = unsafe (src + (hs.start + 1));
-            let mut rel = PathBuf {};
-            ext_rel(file, hv, hl, &mut rel[0]);
-            // One stat, not a realpath: most headers are the system's and absent here, and a failed
-            // realpath costs about ten times a failed stat.
-            if fs::stat(str::from_cbuf(rel.as_slice())).is_err() {
-                continue;
-            }
-            let dot = unsafe cstring::strrchr(&rel[0], '.');
-            if dot == null {
-                continue;
-            }
-            let dotoff = dot as usize - (&rel[0]) as usize;
-            if dotoff + 2 >= 4096 {
-                continue;
-            }
-            {
-                rel[dotoff] = '.' as char;
-                rel[dotoff + 1] = 'c' as char;
-                rel[dotoff + 2] = 0 as char;
-            }
-            let mut cabs = PathBuf {};
-            if real_into(&rel, &mut cabs) {
-                p.ext_inputs.push(String::from_str(str::from_cbuf(cabs.as_slice())));
-                ext_c_wrap(root, keep, fresh, &mut seen, &mut nsrc, &cabs[0], err);
+            if !dup {
+                ld.push(flag);
             }
         }
     }

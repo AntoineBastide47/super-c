@@ -61,10 +61,10 @@ fn golden_reflect() {
 @test
 fn golden_attribute_expression() {
     expect_fmt(
-        "const N: u32 = 8;\n@c.inline @c.align(  N*2 )\nstruct P{x:i32,}\n@fmt.skip\n@c.align(N*2)\nstruct Q{x:i32,}\n",
-        "const N: u32 = 8;\n@c.inline @c.align(N * 2)\nstruct P {\n    x: i32,\n}\n@fmt.skip\n@c.align(N*2)\nstruct Q{x:i32,}\n",
+        "const N: u32 = 8;\n@inline @align(  N*2 )\nstruct P{x:i32,}\n@fmt.skip\n@align(N*2)\nstruct Q{x:i32,}\n",
+        "const N: u32 = 8;\n@inline @align(N * 2)\nstruct P {\n    x: i32,\n}\n@fmt.skip\n@align(N*2)\nstruct Q{x:i32,}\n",
     );
-    expect_fmt("@c.align(16)\nstruct P{x:i32,}\n", "@c.align(16)\nstruct P {\n    x: i32,\n}\n");
+    expect_fmt("@align(16)\nstruct P{x:i32,}\n", "@align(16)\nstruct P {\n    x: i32,\n}\n");
     // Both spellings of a C-facing attribute print as written.
     expect_fmt(
         "@cold\n@inline\nfn f(){}\nconst N: u32 = 8;\n@align(  N*2 )\nstruct P{x:i32,}\n",

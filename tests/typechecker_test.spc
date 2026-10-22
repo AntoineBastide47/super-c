@@ -1340,7 +1340,7 @@ fn never_type() {
     h::expect_ok("return panic fits any return type", "fn f() i32 { return panic(\"boom\"); }\n");
     h::expect_ok(
         "user noreturn fn also diverges",
-        "extern \"C\" { fn abort() void; }\n@c.noreturn\nfn die() { unsafe abort(); }\nfn f(o: Option<i32>) i32 { return switch o { Some(v) => v, None => die() }; }\n",
+        "extern \"C\" { fn abort() void; }\n@noreturn\nfn die() { unsafe abort(); }\nfn f(o: Option<i32>) i32 { return switch o { Some(v) => v, None => die() }; }\n",
     );
     h::expect_err_msg(
         "non-noreturn void arm still mismatches",
@@ -8194,23 +8194,23 @@ fn array_length_limit_message() {
     );
 }
 
-// A field of a `@c.packed` struct may sit at any address: no reference to one that needs an
+// A field of a `@packed` struct may sit at any address: no reference to one that needs an
 // alignment above 1, and no field that its drop would have to reach by reference.
 @test
 fn packed_struct_fields() {
     h::expect_err_msg(
         "a reference to a misaligned packed field",
-        "@c.packed\nstruct P { pub tag: u8, pub v: i64 }\nfn main() i32 {\n    let p = P { tag: 1, v: 42 };\n    let r = &p.v;\n    return (*r - 42) as i32;\n}\n",
+        "@packed\nstruct P { pub tag: u8, pub v: i64 }\nfn main() i32 {\n    let p = P { tag: 1, v: 42 };\n    let r = &p.v;\n    return (*r - 42) as i32;\n}\n",
         "cannot borrow a field of a '@packed' struct",
     );
     h::expect_err_msg(
         "a packed field needing a free",
-        "@c.packed\nstruct P { pub tag: u8, pub s: String }\nfn main() i32 { return 0; }\n",
+        "@packed\nstruct P { pub tag: u8, pub s: String }\nfn main() i32 { return 0; }\n",
         "a field of a '@packed' struct cannot need a 'free'",
     );
     h::expect_exit(
         "packed fields read by value and byte fields by reference",
-        "@c.packed\nstruct P { pub tag: u8, pub v: i64 }\nfn main() i32 {\n    let p = P { tag: 1, v: 42 };\n    let t = &p.tag;\n    let v = p.v;\n    return (v - 41) as i32 - *t as i32;\n}\n",
+        "@packed\nstruct P { pub tag: u8, pub v: i64 }\nfn main() i32 {\n    let p = P { tag: 1, v: 42 };\n    let t = &p.tag;\n    let v = p.v;\n    return (v - 41) as i32 - *t as i32;\n}\n",
         0,
     );
 }

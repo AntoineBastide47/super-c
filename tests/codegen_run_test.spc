@@ -6,7 +6,7 @@
 import tests::harness as h;
 import tests::cli_harness as cli;
 
-const PRE: str = "extern \"C\" { @c.noreturn fn exit(code: i32) void; fn putchar(c: i32) i32; }\n";
+const PRE: str = "extern \"C\" { @noreturn fn exit(code: i32) void; fn putchar(c: i32) i32; }\n";
 
 // Splice PRE ahead of `body`, build+run the program, and assert it exits with `code`.
 fn run_exit(label: str, body: str, code: i32) {
@@ -1195,7 +1195,7 @@ fn scoped_where_copy_keeps_sibling_drops() {
 // type owns nothing emits no code for it.
 @test
 fn scalar_instance_drops_nothing() {
-    let src = "@c.noinline\nfn drop_it<T>(x: T) {}\nfn main() i32 {\n    drop_it(5i64);\n    drop_it(String::from_str(\"a heap string longer than twenty-three bytes\"));\n    return 0;\n}\n";
+    let src = "@noinline\nfn drop_it<T>(x: T) {}\nfn main() i32 {\n    drop_it(5i64);\n    drop_it(String::from_str(\"a heap string longer than twenty-three bytes\"));\n    return 0;\n}\n";
     // The owning instance frees its parameter: the run passes the harness's fatal leak gate.
     h::expect_exit("both instances run", src, 0);
     // The scalar instance's body is a bare return, whitespace aside.
@@ -1214,7 +1214,7 @@ fn leak_tracker_reports_over_aligned_blocks() {
     // Over-aligned blocks take the platform's aligned allocation, not malloc: the tracker still
     // records them, so a leaked Box and Vector of a 64-aligned type fail the fatal gate.
     let r = h::compile_and_run_env(
-        "@c.align(64)\nstruct Big { pub v: i64 }\nfn main() i32 {\n    let b = Box::<Big>::new(Big { v: 3 });\n    let mut v = Vector::<Big>::new();\n    v.push(Big { v: 4 });\n    forget(b);\n    forget(v);\n    return 0;\n}\n",
+        "@align(64)\nstruct Big { pub v: i64 }\nfn main() i32 {\n    let b = Box::<Big>::new(Big { v: 3 });\n    let mut v = Vector::<Big>::new();\n    v.push(Big { v: 4 });\n    forget(b);\n    forget(v);\n    return 0;\n}\n",
         "SC_LEAK_CHECK=fatal",
     );
     assert(r.built, "leaked over-aligned blocks build");
@@ -1855,7 +1855,7 @@ fn array_values_copy_into_aggregates(b: &mut h::ExitBatch) {
         "array payloads, elements, captures and parameters",
         M"(enum E { A([i32; 3]), B { tag: i32, v: [i32; 2] }, C }
 struct W { pub a: [i32; 3], pub n: i32 }
-@c.export("sc_arr_param")
+@export("sc_arr_param")
 fn from_param(a: [i32; 3]) i32 {
     let mut b: [i32; 3] = [0, 0, 0];
     b = a;
@@ -1969,7 +1969,7 @@ fn function_pointer_results_and_double_references(b: &mut h::ExitBatch) {
 fn two() i32 {
     return 2;
 }
-@c.export("sc_pick_fn")
+@export("sc_pick_fn")
 fn pick(b: bool) fn() i32 {
     if b {
         return one;
@@ -3141,7 +3141,7 @@ const A: i32 = tag(M::<3> { x: 0 });
 const B: i32 = tag(M::<2> { x: 0 });
 const C: i32 = gtag(M::<3> { x: 0 });
 static_assert(A == 3 && B == 2 && C == 30);
-@c.noinline
+@noinline
 fn run(m: M<3>) i32 { return tag(m) + gtag(m); }
 fn main() i32 { return A + B + C + run(M::<3> { x: 0 }) - 68; }
 )",
@@ -3255,7 +3255,7 @@ fn main() i32 { return A.e[1] as i32; }
 fn f32_to_integer_saturates_at_every_width(b: &mut h::ExitBatch) {
     b.add(
         "f32 as i8 .. u64",
-        M"(@c.noinline
+        M"(@noinline
 fn id(x: f32) f32 { return x; }
 const NAN: f32 = 0.0f32 / 0.0f32;
 static_assert(NAN as i32 == 0 && 3.0e9f32 as i32 == 2147483647 && -3.0e9f32 as i32 == -2147483648);
@@ -3283,9 +3283,9 @@ fn main() i32 {
 fn float_to_int_unchecked() {
     h::expect_exit(
         "in-range values at run time and in constants",
-        M"(@c.noinline
+        M"(@noinline
 fn id(x: f32) f32 { return x; }
-@c.noinline
+@noinline
 fn idd(x: f64) f64 { return x; }
 const C: u8 = unsafe 200.9f32.to_int_unchecked::<u8>();
 const D: i64 = unsafe (-3.7f64).to_int_unchecked::<i64>();
@@ -5357,6 +5357,16 @@ fn bindings_avoid_generated_spellings(b: &mut h::ExitBatch) {
     );
 }
 
+// <tgmath.h>, which every unit includes, makes `sin` type-generic: an `f32` argument of an `f64` C
+// parameter still calls `sin`, not `sinf`.
+fn f32_argument_widens_before_a_c_call(b: &mut h::ExitBatch) {
+    b.add(
+        "an f32 argument of a C math function",
+        "extern \"C\" \"math.h\" { fn sin(x: f64) f64; }\nfn main() i32 { let x = 1.1f32; let w = x as f64; return (unsafe sin(x) != unsafe sin(w)) as i32; }\n",
+        0,
+    );
+}
+
 @test
 fn exit_cases_08() {
     let mut b = h::ExitBatch::new();
@@ -5369,6 +5379,7 @@ fn exit_cases_08() {
     array_param_cases(&mut b);
     dyn_erasure_in_aggregate_literals(&mut b);
     bindings_avoid_generated_spellings(&mut b);
+    f32_argument_widens_before_a_c_call(&mut b);
     b.run();
 }
 

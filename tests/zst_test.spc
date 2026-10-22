@@ -89,13 +89,13 @@ fn zst_ffi_by_value_rejected() {
     );
 }
 
-// An over-aligned zero-sized field (an empty struct with a larger @c.align than its non-ZST sibling)
+// An over-aligned zero-sized field (an empty struct with a larger @align than its non-ZST sibling)
 // is elided, but its alignment still shapes the enclosing struct: the emitter plans the padding so
 // the C layout matches the semantic one. Covers the ZST over-alignment padding planner.
 fn over_aligned_zst_field_pads_the_layout(b: &mut h::ExitBatch) {
     b.add(
         "over-aligned elided field keeps the sibling's value",
-        "@c.align(16)\nstruct Marker {}\nstruct Holder { pub m: Marker, pub b: i32 }\nfn main() i32 {\n    let h = Holder { m: Marker {}, b: 9 };\n    return h.b - 9;\n}\n",
+        "@align(16)\nstruct Marker {}\nstruct Holder { pub m: Marker, pub b: i32 }\nfn main() i32 {\n    let h = Holder { m: Marker {}, b: 9 };\n    return h.b - 9;\n}\n",
         0,
     );
 }
@@ -115,7 +115,7 @@ fn zst_element_array_elides(b: &mut h::ExitBatch) {
 fn zst_nested_generic_agrees_with_concrete(b: &mut h::ExitBatch) {
     b.add(
         "generic body and concrete caller agree on Array<T, N> with T zero-sized",
-        "@derive(Default)\n@c.align(16)\nstruct M {}\nstruct Hold<T, const N: usize> { pub a: Array<T, N>, pub raw: [T; N], pub b: i32 }\nfn gsize<T, const N: usize>() usize {\n    return sizeof(Hold<T, N>) * 100 + alignof(Array<T, N>);\n}\nfn pass<T, const N: usize>(h: Hold<T, N>) Hold<T, N> {\n    return h;\n}\nfn make<T: Default, const N: usize>(raw: [T; N]) Hold<T, N> {\n    return Hold::<T, N> { a: Array::<T, N>::new(), raw: raw, b: 9 };\n}\nfn main() i32 {\n    let h = pass::<M, 2>(make::<M, 2>([M {}, M {}]));\n    if h.b != 9 { return 1; }\n    if gsize::<M, 2>() != 1616 { return 2; }\n    if sizeof(Hold<M, 2>) != 16 { return 3; }\n    return 0;\n}\n",
+        "@derive(Default)\n@align(16)\nstruct M {}\nstruct Hold<T, const N: usize> { pub a: Array<T, N>, pub raw: [T; N], pub b: i32 }\nfn gsize<T, const N: usize>() usize {\n    return sizeof(Hold<T, N>) * 100 + alignof(Array<T, N>);\n}\nfn pass<T, const N: usize>(h: Hold<T, N>) Hold<T, N> {\n    return h;\n}\nfn make<T: Default, const N: usize>(raw: [T; N]) Hold<T, N> {\n    return Hold::<T, N> { a: Array::<T, N>::new(), raw: raw, b: 9 };\n}\nfn main() i32 {\n    let h = pass::<M, 2>(make::<M, 2>([M {}, M {}]));\n    if h.b != 9 { return 1; }\n    if gsize::<M, 2>() != 1616 { return 2; }\n    if sizeof(Hold<M, 2>) != 16 { return 3; }\n    return 0;\n}\n",
         0,
     );
 }
@@ -126,7 +126,7 @@ fn zst_nested_generic_agrees_with_concrete(b: &mut h::ExitBatch) {
 @test
 fn zst_constant_references() {
     const SRC: str = M"(struct Z {}
-@c.align(8)
+@align(8)
 struct Z8 {}
 struct H<'a> { pub z: &'a Z, pub n: i32, pub zs: [Z; 2] }
 const ZC: Z = Z {};

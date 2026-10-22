@@ -172,6 +172,25 @@ fn checker_cases() {
         1,
         "std/low/ext.spc:3: platform FFI outside std::platform: the extern \"C\" function 'getpid'",
     );
+    // The text of a matchertext literal without holes counts as no item, and its lines count.
+    expect_case(
+        &p,
+        &exe,
+        "matchertext",
+        "low/raw.spc",
+        "const T: str = M\"(extern \"C\" {\n    fn getpid() i32;\n} [x])\";\nextern \"C\" {\n    fn getpid() i32;\n}\n",
+        1,
+        "std/low/raw.spc:5: platform FFI outside std::platform: the extern \"C\" function 'getpid'",
+    );
+    expect_case(
+        &p,
+        &exe,
+        "matchertext_holes",
+        "low/holes.spc",
+        "const N: i32 = 1;\nfn f() String {\n    return M{}\"(n={N})\";\n}\n",
+        1,
+        "std/low/holes.spc:3: cannot scan the file: a matchertext literal with holes, which the scan does not read",
+    );
     expect_case(
         &p,
         &exe,

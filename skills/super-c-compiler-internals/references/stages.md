@@ -271,9 +271,8 @@ constant equals the run-time call bit for bit where the compiler and the program
 concurrency skill). An integer loop step renders as `for (..; i++)` (or `i--`)
 only when it cannot overflow (`CEmit::step_bounded`): the header tests `i < e` (`i > e` for `--`)
 with `e` of `i`'s type, and nothing else in the loop writes `i` or takes its address; every other
-step keeps its checked helper and renders as `while`. `@c.source` files and backing-header `.c`
-siblings become wrapper TUs (`__ext<N>_<stem>.c`, one absolute `#include` each);
-`@link` flags land in `__ldflags`.
+step keeps its checked helper and renders as `while`. `@link` flags land in `__ldflags`; the
+build compiles no C source of the program's tree.
 
 ## 9. Emission Planning
 
@@ -354,7 +353,16 @@ read the tables frozen (append-only interning is the one sanctioned growth).
 ## 12. Test Runner (`--test` only)
 
 `write_test_main` synthesizes `__test_main.c`: extern wrapper prototypes, the test table
-(display names `module::fn` / `module::Type::method`), and the fork-per-test runner.
+(display names `module::fn` / `module::Type::method`, wrappers, `should_panic` flags, timeouts),
+the global-env hooks, and a `main` that passes them to `sc_test_main`. The runner is the module
+`std::rt::test` (`std/rt/test.spc`), which the loader adds to test builds only
+(`Package::rt_test`): a runtime module like `std::rt::base` (`Package::is_rt`), so its symbols
+keep their module prefix and the program's own mangling does not change. A `--target=wasm` build
+loads wasm's C library the same way: `std::rt::libc` and `std::rt::libm` (`Package::rt_libc`,
+`rt_libm`, `Package::is_libc`), runtime modules whose `@export` functions are the C library's
+functions. It selects the tests
+(filter, shards balanced by recorded durations), runs each in its own process (POSIX: a fork
+pool; Windows: the binary again with `--run-one`), enforces the timeouts, and reports.
 
 ## 13. C Compilation
 

@@ -70,7 +70,7 @@ fn operations_lower_to_their_instructions() {
     let ops: []str = RELEASE;
     h::expect_asm(
         "lane-wise add",
-        "@c.noinline\nfn vadd(a: f32x4, b: f32x4) f32x4 {\n    return a + b;\n}\nfn main(args: Vector<str>) i32 {\n    let v = f32x4::splat(args.len() as f32);\n    return vadd(v, v).get(0) as i32 - 2;\n}\n",
+        "@noinline\nfn vadd(a: f32x4, b: f32x4) f32x4 {\n    return a + b;\n}\nfn main(args: Vector<str>) i32 {\n    let v = f32x4::splat(args.len() as f32);\n    return vadd(v, v).get(0) as i32 - 2;\n}\n",
         ops,
         "main__vadd",
         ["f32x4.add"],
@@ -79,7 +79,7 @@ fn operations_lower_to_their_instructions() {
     // A comparison whose one use is a choice stays in lanes: no bit mask in between.
     h::expect_asm(
         "compare and choose",
-        "@c.noinline\nfn vsel(a: i8x16, b: i8x16) i8x16 {\n    let m = a.less_than(b);\n    return m.choose(a, b);\n}\nfn main(args: Vector<str>) i32 {\n    let v = i8x16::splat(args.len() as i8);\n    return vsel(v, v).get(0) as i32 - 1;\n}\n",
+        "@noinline\nfn vsel(a: i8x16, b: i8x16) i8x16 {\n    let m = a.less_than(b);\n    return m.choose(a, b);\n}\nfn main(args: Vector<str>) i32 {\n    let v = i8x16::splat(args.len() as i8);\n    return vsel(v, v).get(0) as i32 - 1;\n}\n",
         ops,
         "main__vsel",
         ["i8x16.lt_s", "v128.bitselect"],
@@ -88,7 +88,7 @@ fn operations_lower_to_their_instructions() {
     // A mask kept as a value packs the lanes with one bitmask instruction.
     h::expect_asm(
         "compare to a mask",
-        "@c.noinline\nfn veq(a: u8x16, b: u8x16) u32 {\n    return a.equal(b).count() as u32;\n}\nfn main(args: Vector<str>) i32 {\n    let v = u8x16::splat(args.len() as u8);\n    return veq(v, v) as i32 - 16;\n}\n",
+        "@noinline\nfn veq(a: u8x16, b: u8x16) u32 {\n    return a.equal(b).count() as u32;\n}\nfn main(args: Vector<str>) i32 {\n    let v = u8x16::splat(args.len() as u8);\n    return veq(v, v) as i32 - 16;\n}\n",
         ops,
         "main__veq",
         ["i8x16.eq", "i8x16.bitmask"],
@@ -97,7 +97,7 @@ fn operations_lower_to_their_instructions() {
     // A comparison tested once by `any` or `all` reduces its lane masks: no bit mask either.
     h::expect_asm(
         "any of a comparison",
-        "@c.noinline\nfn vany(a: i32x4, b: i32x4) bool {\n    return a.less_than(b).any();\n}\nfn main(args: Vector<str>) i32 {\n    let v = i32x4::splat(args.len() as i32);\n    return vany(v, v) as i32;\n}\n",
+        "@noinline\nfn vany(a: i32x4, b: i32x4) bool {\n    return a.less_than(b).any();\n}\nfn main(args: Vector<str>) i32 {\n    let v = i32x4::splat(args.len() as i32);\n    return vany(v, v) as i32;\n}\n",
         ops,
         "main__vany",
         ["i32x4.lt_s", "v128.any_true"],
@@ -105,7 +105,7 @@ fn operations_lower_to_their_instructions() {
     );
     h::expect_asm(
         "all of a comparison",
-        "@c.noinline\nfn vall(a: u8x16, b: u8x16) bool {\n    let m = a.equal(b);\n    return m.all();\n}\nfn main(args: Vector<str>) i32 {\n    let v = u8x16::splat(args.len() as u8);\n    return vall(v, v) as i32 - 1;\n}\n",
+        "@noinline\nfn vall(a: u8x16, b: u8x16) bool {\n    let m = a.equal(b);\n    return m.all();\n}\nfn main(args: Vector<str>) i32 {\n    let v = u8x16::splat(args.len() as u8);\n    return vall(v, v) as i32 - 1;\n}\n",
         ops,
         "main__vall",
         ["i8x16.eq", "i8x16.all_true"],
@@ -116,7 +116,7 @@ fn operations_lower_to_their_instructions() {
     let chk: [str; 3] = ["--profile=test", "--target=wasm", "--target-feature=+simd128"];
     h::expect_asm(
         "a checked add",
-        "@c.noinline\nfn vadd(a: i32x4, b: i32x4) i32x4 {\n    return a + b;\n}\nfn main(args: Vector<str>) i32 {\n    let v = i32x4::splat(args.len() as i32);\n    return vadd(v, v).get(0) - 2;\n}\n",
+        "@noinline\nfn vadd(a: i32x4, b: i32x4) i32x4 {\n    return a + b;\n}\nfn main(args: Vector<str>) i32 {\n    let v = i32x4::splat(args.len() as i32);\n    return vadd(v, v).get(0) - 2;\n}\n",
         chk,
         "main__vadd",
         ["i32x4.add", "i32x4.bitmask"],
@@ -124,7 +124,7 @@ fn operations_lower_to_their_instructions() {
     );
     h::expect_asm(
         "a checked shift",
-        "@c.noinline\nfn vshl(a: i32x4, n: i32) i32x4 {\n    return a << n;\n}\nfn main(args: Vector<str>) i32 {\n    let v = i32x4::splat(args.len() as i32);\n    return vshl(v, 1).get(0) - 2;\n}\n",
+        "@noinline\nfn vshl(a: i32x4, n: i32) i32x4 {\n    return a << n;\n}\nfn main(args: Vector<str>) i32 {\n    let v = i32x4::splat(args.len() as i32);\n    return vshl(v, 1).get(0) - 2;\n}\n",
         chk,
         "main__vshl",
         ["i32x4.shl"],
@@ -132,7 +132,7 @@ fn operations_lower_to_their_instructions() {
     );
     h::expect_asm(
         "a masked load",
-        "import std::simd;\n@c.noinline\nfn vlm(s: []f32, m: mask4) f32x4 {\n    return simd::load_masked(s, 0, m, f32x4::splat(0.0));\n}\nfn main(args: Vector<str>) i32 {\n    let a: [f32; 4] = [1.0, 2.0, 3.0, 4.0];\n    return vlm(a, Mask::<4>::from_bits_truncate(args.len() as u64)).get(0) as i32 - 1;\n}\n",
+        "import std::simd;\n@noinline\nfn vlm(s: []f32, m: mask4) f32x4 {\n    return simd::load_masked(s, 0, m, f32x4::splat(0.0));\n}\nfn main(args: Vector<str>) i32 {\n    let a: [f32; 4] = [1.0, 2.0, 3.0, 4.0];\n    return vlm(a, Mask::<4>::from_bits_truncate(args.len() as u64)).get(0) as i32 - 1;\n}\n",
         ops,
         "main__vlm",
         ["v128.load32_lane"],
@@ -141,7 +141,7 @@ fn operations_lower_to_their_instructions() {
     // A constant index list is one shuffle instruction per 16 result bytes, across chunks too.
     h::expect_asm(
         "constant shuffles",
-        "import std::simd;\n@c.noinline\nfn vsh(a: f32x4, b: f32x4) f32x4 {\n    return simd::shuffle(a, b, [0, 5, 2, 7]);\n}\nfn main(args: Vector<str>) i32 {\n    let v = f32x4::splat(args.len() as f32);\n    return vsh(v, v).get(0) as i32 - 1;\n}\n",
+        "import std::simd;\n@noinline\nfn vsh(a: f32x4, b: f32x4) f32x4 {\n    return simd::shuffle(a, b, [0, 5, 2, 7]);\n}\nfn main(args: Vector<str>) i32 {\n    let v = f32x4::splat(args.len() as f32);\n    return vsh(v, v).get(0) as i32 - 1;\n}\n",
         ops,
         "main__vsh",
         ["i8x16.shuffle"],
@@ -149,7 +149,7 @@ fn operations_lower_to_their_instructions() {
     );
     h::expect_asm(
         "a zip across chunks",
-        "import std::simd;\n@c.noinline\nfn vzip(a: u8x32, b: u8x32) u8x32 {\n    return simd::shuffle(a, b, [0, 32, 1, 33, 2, 34, 3, 35, 4, 36, 5, 37, 6, 38, 7, 39, 8, 40, 9, 41, 10, 42, 11, 43, 12, 44, 13, 45, 14, 46, 15, 47]);\n}\nfn main(args: Vector<str>) i32 {\n    let v = u8x32::splat(args.len() as u8);\n    return vzip(v, v).get(0) as i32 - 1;\n}\n",
+        "import std::simd;\n@noinline\nfn vzip(a: u8x32, b: u8x32) u8x32 {\n    return simd::shuffle(a, b, [0, 32, 1, 33, 2, 34, 3, 35, 4, 36, 5, 37, 6, 38, 7, 39, 8, 40, 9, 41, 10, 42, 11, 43, 12, 44, 13, 45, 14, 46, 15, 47]);\n}\nfn main(args: Vector<str>) i32 {\n    let v = u8x32::splat(args.len() as u8);\n    return vzip(v, v).get(0) as i32 - 1;\n}\n",
         ops,
         "main__vzip",
         ["i8x16.shuffle"],
@@ -157,7 +157,7 @@ fn operations_lower_to_their_instructions() {
     );
     h::expect_asm(
         "a tree reduction",
-        "@c.noinline\nfn vsum(a: Simd<f32, 16>) f32 {\n    return reduce_add_tree(a);\n}\nfn main(args: Vector<str>) i32 {\n    return vsum(Simd::<f32, 16>::splat(args.len() as f32)) as i32 - 16;\n}\n",
+        "@noinline\nfn vsum(a: Simd<f32, 16>) f32 {\n    return reduce_add_tree(a);\n}\nfn main(args: Vector<str>) i32 {\n    return vsum(Simd::<f32, 16>::splat(args.len() as f32)) as i32 - 16;\n}\n",
         ops,
         "main__vsum",
         ["f32x4.add", "f32x4.extract_lane"],

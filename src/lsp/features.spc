@@ -331,7 +331,7 @@ struct AttrDoc {
     pub doc: str<'static>,
 }
 
-const ATTR_DOCS: [AttrDoc; 37] = [
+const ATTR_DOCS: [AttrDoc; 36] = [
     AttrDoc {
         name: "emit_macro",
         sig: "@emit_macro",
@@ -430,11 +430,6 @@ const ATTR_DOCS: [AttrDoc; 37] = [
     },
     AttrDoc { name: "export", sig: "@export(\"sym\")", doc: "Gives the item exactly this C symbol name." },
     AttrDoc { name: "import", sig: "@import(\"sym\")", doc: "Binds the item to exactly this C symbol name." },
-    AttrDoc {
-        name: "c.source",
-        sig: "@c.source(\"file.c\")",
-        doc: "The C file that implements the extern block, relative to this file.",
-    },
     AttrDoc {
         name: "link",
         sig: "@link(\"lib\")",
@@ -671,11 +666,7 @@ pub fn attribute_hover(src: str, off: u32) Option<String> {
     while e < src.len() && (ltext::ident_byte(src[e]) || src[e] == b'.') {
         e += 1;
     }
-    let mut name = src.slice(s, e);
-    // `@c.inline` is the older spelling of `@inline`; only `@c.source` keeps the prefix.
-    if name.len() > 2 && name.starts_with("c.") && name != "c.source" {
-        name = name.slice(2, name.len());
-    }
+    let name = src.slice(s, e);
     let docs: []AttrDoc = ATTR_DOCS;
     for i in 0..docs.len() {
         let d = docs.at(i);

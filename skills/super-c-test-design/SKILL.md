@@ -63,7 +63,10 @@ Rules for the costly rungs:
   and a case about a root module's bare C names stay alone.
 - Rung 5: one project per test, reused across its steps. A strict whole-tree compile
   (`p.cc_build`) goes through the object cache, so a unit already compiled with the same
-  flags and text is not compiled again.
+  flags and text is not compiled again. The build compiles no C file of a project's tree: a test
+  whose program binds C code links it prebuilt, through `p.cc_build_with(flags, "x.c")` (the
+  harness compile) or `p.c_lib(name, "x.c")` and `@link("-L<root> -l<name>")` (an engine
+  build); a header whose `static inline` function holds the code needs neither.
 - Rung 6: put many cases in one program that selects a case by its argument (`prog <k>`), as
   `const_runtime_parity` does. Size a generated program by the cases it must hold.
 

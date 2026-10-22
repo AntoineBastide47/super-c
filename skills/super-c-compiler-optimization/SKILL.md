@@ -414,12 +414,16 @@ kernels as plain scalar loops (`saxpy_f32`, `dot_f32_ordered`, `dot_f32_tree`, `
 `sum_i32`, `min_max_f32`, `filter_gt_f32`, `gather_sum_f32`, `tail_load_f32`, `mix_width`,
 `abs_diff_u8`); each instruction set has the same kernels in C intrinsics (`sse2.c`, `avx2.c`,
 `avx512.c`, `neon.c`, `simd128.c`), each behind an `@arch`-gated `extern "C" "<name>.h"` block
-that returns its table (`sb.h`). The AVX2 and AVX-512 tables are null on a CPU without the
+that returns its table (`sb.h`). The C kernels come prebuilt: `sh bench/simd_baseline/kernels.sh`
+(record.sh runs it; `--target=wasm` for SIMD128) archives the target's files into
+`build/simd_baseline/<arch>/libsimd_baseline.a`, which the blocks' `@link` names; a benchmark build
+of `simd_baseline` without it fails to link. The AVX2 and AVX-512 tables are null on a CPU without the
 features. The scalar loop defines each result: every implementation gives its bits (any NaN
 counts as one value). `first_mismatch` checks that on inputs of every tail length, in modes that
 put NaNs, zeros of both signs in both orders and all-equal bytes into every lane; the
 `simd_baseline` benchmark runs it before it times anything, so the wasm run checks SIMD128,
-and `tests/simd_baseline_test.spc` runs it on the host's instruction sets. Every round
+and `tests/simd_baseline_test.spc` runs it on the host's instruction sets: it archives the host's
+kernels and builds a program over the module in a scratch project, so the suite links no kernel. Every round
 repeats one input: at 4 KiB and 64 KiB its branches fit the branch predictor, so a
 scalar loop that compiles to a data-dependent branch (`filter_gt_f32`, and `mix_width` and
 `min_max_f32` under gcc) reads faster there than at 4 MiB.

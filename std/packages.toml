@@ -173,14 +173,14 @@ platform_ffi = ["*"]
 [package.rt]
 tier = 3
 targets = { macos = "full", ios = "full", linux = "full", android = "reduced", windows = "full", wasm = "reduced" }
-limits = "Android: allocation sites are bare addresses (no frame walk before API level 33). WebAssembly: no signals, so no stack-overflow or illegal-instruction report and no test-timeout stack dump; allocation sites are bare addresses."
+limits = "Android: allocation sites are bare addresses (no frame walk before API level 33). WebAssembly: no signals, so no stack-overflow or illegal-instruction report and no test-timeout stack dump; allocation sites are bare addresses; the C library (`libc`, `libm`) is the subset of C99 and POSIX that std, the ffi bindings and the compiler call: no scanf family, locales, broken-down time, signals, `fork`, `execvp`, `pipe` or `dup`."
 capabilities = ["signals and an alternate signal stack (POSIX)", "vectored exception handling (Windows)", "page mapping for the leak tracker's tables"]
 accelerations = []
 allocator = "The leak tracker's tables are pages from the operating system; nothing comes from `Global`."
 thread_safety = "Safe from every thread; its signal handlers call only async-signal-safe functions."
 blocking = "Never blocks."
 errors = "A trap (a panic, a failed assertion, an integer overflow, a stack overflow) prints its report to stderr and aborts the process."
-platform_ffi = ["base"]
+platform_ffi = ["base", "test", "libc", "libm"]
 
 [package.time]
 tier = 3

@@ -1,7 +1,9 @@
-// A token scan of one Super-C source, exact for its `import` items and the functions of its `extern` blocks:
-// comments (nested block comments too), string, byte string and character literals and lifetimes are
-// skipped, so text inside them never counts, and an item under `@platform`, `@arch` or `@when` counts as any
-// other. A matchertext literal stops the scan with an error: the scan does not read its template.
+// A token scan of one Super-C source, exact for its `import` items and the functions and statics of its
+// `extern` blocks: comments (nested block comments too), string, byte string and character literals and
+// lifetimes are skipped, so text inside them never counts, and an item under `@platform`, `@arch` or `@when`
+// counts as any other; each extern item records whether those `@platform` and `@arch` attributes keep it in
+// a wasm32 build. A matchertext literal without holes is skipped as a string is; one with holes stops the
+// scan with an error: the scan does not read its template.
 
 /// One `import` item: its path segments joined by `::`, and its line.
 pub struct Import {
@@ -9,10 +11,14 @@ pub struct Import {
     pub line: u32,
 }
 
-/// One function of an `extern` block: its C symbol (the `@import` pin, else the declared name), and its line.
+/// One function, or with `data` one static, of an `extern` block: its C symbol (the `@import` pin, else the
+/// declared name), its line, and whether a wasm32 build keeps it: no `@platform` or `@arch` attribute of the
+/// item or of its block leaves wasm out.
 pub struct ExternFn {
     pub name: String,
     pub line: u32,
+    pub data: bool,
+    pub wasm: bool,
 }
 
 /// The items of one source. `error` is empty when the scan read the whole source; else it names the first
@@ -106,6 +112,37 @@ const fn matchertext_ahead(src: str, i: usize) bool {
         j += 1;
     }
     return at(src, j) == b'"';
+}
+
+// The index past the matchertext literal without holes whose `"` is at `i` (`M"(..)"`): its content is
+// verbatim and its matchers match, so the literal ends at the closer that matches its opener, then a `"`.
+// 0 when the source ends first. `line` counts the newlines of the content.
+fn raw_mt_end(src: str, i: usize, line: &mut u32) usize {
+    let o = at(src, i + 1);
+    if o != b'(' && o != b'[' && o != b'{' {
+        return 0;
+    }
+    let mut depth: usize = 0;
+    let mut j = i + 1;
+    while j < src.len() {
+        let c = src.byte_at(j);
+        if c == b'(' || c == b'[' || c == b'{' {
+            depth += 1;
+        } else if c == b')' || c == b']' || c == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                return if at(src, j + 1) == b'"' {
+                    j + 2;
+                } else {
+                    0;
+                };
+            }
+        } else if c == b'\n' {
+            *line += 1;
+        }
+        j += 1;
+    }
+    return 0;
 }
 
 // The index of the `"` that closes the string whose content starts at `i`; 0 when the line or the source
@@ -227,8 +264,14 @@ fn tokenize(src: str, toks: &mut Vector<Tok>, s: &mut Scan) bool {
                 if i == 0 {
                     return fail(s, line, "unterminated byte character literal");
                 }
+            } else if word == "M" && at(src, i) == b'"' {
+                let first = line;
+                i = raw_mt_end(src, i, &mut line);
+                if i == 0 {
+                    return fail(s, first, "unterminated matchertext literal");
+                }
             } else if word == "M" && matchertext_ahead(src, i) {
-                return fail(s, line, "a matchertext literal, which the scan does not read");
+                return fail(s, line, "a matchertext literal with holes, which the scan does not read");
             } else {
                 toks.push(Tok { kind: TOK_IDENT, start: start as u32, len: (i - start) as u32, line: line });
             }
@@ -261,14 +304,55 @@ const fn is_word(src: str, toks: &Vector<Tok>, k: usize, w: str) bool {
     return is_kind(toks, k, TOK_IDENT) && text(src, toks, k) == w;
 }
 
-// The imports and the extern functions, from the tokens.
+// Whether the `@platform(..)` or `@arch(..)` whose `(` is token `k` keeps wasm32: a list of names joined by
+// `|` that holds `wasm` (`wasm32` for an arch), or `!` and another name. `*end` is set past its `)`.
+fn keeps_wasm(src: str, toks: &Vector<Tok>, k: usize, arch: bool, end: &mut usize) bool {
+    let want = if arch {
+        "wasm32";
+    } else {
+        "wasm";
+    };
+    let mut j = k + 1;
+    let neg = is_punct(src, toks, j, "!");
+    if neg {
+        j += 1;
+    }
+    let mut found = false;
+    // Bounded by the tokens.
+    while j < toks.len() && !is_punct(src, toks, j, ")") {
+        if is_word(src, toks, j, want) {
+            found = true;
+        }
+        j += 1;
+    }
+    *end = j + 1;
+    return found != neg;
+}
+
+// The imports and the extern functions and statics, from the tokens.
 fn read_items(src: str, toks: &Vector<Tok>, s: &mut Scan) {
     let mut depth: usize = 0;
     let mut block: usize = 0; // the brace depth of the extern block's items; 0 outside a block
     let mut pin = String::new(); // the pending `@import` symbol of the block's next item
+    let mut wasm = true; // the `@platform` and `@arch` attributes since the last item keep wasm32
+    let mut block_wasm = true; // the same, of the extern block
     let mut k: usize = 0;
     while k < toks.len() {
         let line = toks[k].line;
+        if is_punct(src, toks, k, "@") && (is_word(src, toks, k + 1, "platform") || is_word(src, toks, k + 1, "arch")) && is_punct(
+            src,
+            toks,
+            k + 2,
+            "(",
+        ) {
+            let mut end: usize = 0;
+            wasm = keeps_wasm(src, toks, k + 2, is_word(src, toks, k + 1, "arch"), &mut end) && wasm;
+            k = end;
+            continue;
+        }
+        if is_punct(src, toks, k, "{") || is_punct(src, toks, k, "}") || is_punct(src, toks, k, ";") {
+            wasm = true;
+        }
         if is_punct(src, toks, k, "{") {
             depth += 1;
         } else if is_punct(src, toks, k, "}") {
@@ -306,6 +390,8 @@ fn read_items(src: str, toks: &Vector<Tok>, s: &mut Scan) {
             }
             depth += 1;
             block = depth;
+            block_wasm = wasm;
+            wasm = true;
             pin.clear();
             k = j + 1;
             continue;
@@ -319,15 +405,20 @@ fn read_items(src: str, toks: &Vector<Tok>, s: &mut Scan) {
                 k += 5;
                 continue;
             }
-            if is_word(src, toks, k, "fn") && is_kind(toks, k + 1, TOK_IDENT) {
+            let data = is_word(src, toks, k, "static");
+            let mut n = k + 1;
+            if data && is_word(src, toks, n, "mut") {
+                n += 1;
+            }
+            if (data || is_word(src, toks, k, "fn")) && is_kind(toks, n, TOK_IDENT) {
                 let name = if pin.is_empty() {
-                    String::from_str(text(src, toks, k + 1));
+                    String::from_str(text(src, toks, n));
                 } else {
                     pin.clone();
                 };
-                s.externs.push(ExternFn { name: name, line: line });
+                s.externs.push(ExternFn { name: name, line: line, data: data, wasm: block_wasm && wasm });
                 pin.clear();
-                k += 2;
+                k = n + 1;
                 continue;
             }
             if is_punct(src, toks, k, ";") {

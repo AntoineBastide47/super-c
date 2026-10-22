@@ -1513,9 +1513,7 @@ pub fn program(cases: &Vector<VCase>, omit: &Vector<bool>) String {
     let mut s = helpers();
     s.push_str("fn parity_abort(_sig: i32) {\n    unsafe stdlib::exit_now(134);\n}\n");
     s.push_str("const fn opq<T>(x: T) T {\n    return x;\n}\n");
-    s.push_str(
-        "static mut SINK: usize = 0;\n@c.noinline\nfn opr<T>(x: T) T {\n    unsafe SINK += 1;\n    return x;\n}\n",
-    );
+    s.push_str("static mut SINK: usize = 0;\n@noinline\nfn opr<T>(x: T) T {\n    unsafe SINK += 1;\n    return x;\n}\n");
     for k in 0..cases.len() {
         case_vec(cases.at(k), k, &mut s);
         case_ref(cases.at(k), k, &mut s);

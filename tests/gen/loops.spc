@@ -171,7 +171,7 @@ extend Stmt {
 
 extend LoopModel {
     fn program(self: &LoopModel) String {
-        let mut s = String::from_str("static mut SINK: usize = 0;\n@c.noinline\nfn opr<T>(x: T) T {\n");
+        let mut s = String::from_str("static mut SINK: usize = 0;\n@noinline\nfn opr<T>(x: T) T {\n");
         s.push_str("    unsafe SINK += 1;\n    return x;\n}\n");
         s.push_str("fn main() i32 {\n    let mut v = Vector::<i64>::new();\n");
         s.format_into("    for k in 0..opr::<usize>({}) {{\n        v.push(k as i64 * 3 + 1);\n    }}\n", self.n);

@@ -431,7 +431,7 @@ extend ScalarModel {
         let plain = self.exprs(false);
         let wrapping = self.exprs(true);
         let tys = self.types();
-        let mut s = String::from_str("static mut SINK: usize = 0;\n@c.noinline\nfn opr<T>(x: T) T {\n");
+        let mut s = String::from_str("static mut SINK: usize = 0;\n@noinline\nfn opr<T>(x: T) T {\n");
         s.push_str("    unsafe SINK += 1;\n    return x;\n}\n");
         s.push_str(
             "union F64 {\n    pub f: f64,\n    pub u: u64,\n}\nunion F32 {\n    pub f: f32,\n    pub u: u32,\n}\n",
@@ -443,7 +443,7 @@ extend ScalarModel {
         for k in 0..plain.len() {
             let p = plain.at(k).replace("opq::", "opr::");
             let w = wrapping.at(k).replace("opq::", "opr::");
-            s.format_into("@c.noinline\nfn case{}() {} {{\n    return if PROFILE == \"release\" {{\n", k, *tys.at(k));
+            s.format_into("@noinline\nfn case{}() {} {{\n    return if PROFILE == \"release\" {{\n", k, *tys.at(k));
             s.format_into("        {};\n    }} else {{\n        {};\n    }};\n}}\n", p.as_str(), w.as_str());
         }
         s.push_str("fn main(args: Vector<str>) i32 {\n    let k = args.at(1).parse_i64().unwrap();\n");

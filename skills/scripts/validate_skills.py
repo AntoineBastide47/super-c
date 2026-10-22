@@ -130,9 +130,6 @@ def check_claims(errors: list[str]) -> None:
     for attribute in sorted(documented_attributes):
         if attribute in source_attributes or attribute[1:] in source:
             continue
-        # The parser lists the `@c.*` attributes by bare name (C_ATTR_NAMES).
-        if attribute.startswith("@c.") and f'"{attribute[3:]}"' in source:
-            continue
         errors.append(f"super-c-language: documented attribute is absent from source: {attribute}")
 
     internals = (SKILLS / "super-c-compiler-internals/SKILL.md").read_text(encoding="utf-8")

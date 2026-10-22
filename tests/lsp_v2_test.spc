@@ -289,7 +289,7 @@ fn lsp_completion_derive_visibility() {
 
 // Names inside a constant-expression attribute argument: completion, hover, go-to-definition and
 // rename reach them like any expression's.
-const ALIGN_SRC: str = "const WIDTH: u32 = 64;\n\n@c.align(WIDTH)\nstruct S {\n    pub x: i32,\n}\n\nfn main() i32 {\n    return sizeof(S) as i32 - 64;\n}\n";
+const ALIGN_SRC: str = "const WIDTH: u32 = 64;\n\n@align(WIDTH)\nstruct S {\n    pub x: i32,\n}\n\nfn main() i32 {\n    return sizeof(S) as i32 - 64;\n}\n";
 
 @test
 fn lsp_attribute_expression_names() {
@@ -301,16 +301,16 @@ fn lsp_attribute_expression_names() {
     let mut ses = String::new();
     push_init(&mut ses, root);
     push_open(&mut ses, root, "src/main.spc", ALIGN_SRC);
-    // After "WI" inside @c.align(...).
-    push_completion(&mut ses, root, "src/main.spc", 2, 2, 11);
-    push_req_at(&mut ses, root, "src/main.spc", 3, "textDocument/hover", 2, 11);
-    push_req_at(&mut ses, root, "src/main.spc", 4, "textDocument/definition", 2, 11);
+    // After "WI" inside @align(...).
+    push_completion(&mut ses, root, "src/main.spc", 2, 2, 9);
+    push_req_at(&mut ses, root, "src/main.spc", 3, "textDocument/hover", 2, 9);
+    push_req_at(&mut ses, root, "src/main.spc", 4, "textDocument/definition", 2, 9);
     let mut b = String::new();
     b.push_str(
         "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"textDocument/rename\",\"params\":{\"textDocument\":{\"uri\":\"file://",
     );
     b.push_str(root);
-    b.push_str("/src/main.spc\"},\"position\":{\"line\":2,\"character\":11},\"newName\":\"BREADTH\"}}");
+    b.push_str("/src/main.spc\"},\"position\":{\"line\":2,\"character\":9},\"newName\":\"BREADTH\"}}");
     frame(&mut ses, &b);
     push_shutdown_exit(&mut ses, 9);
     p.mkfile("session.bin", ses.as_str());
@@ -319,7 +319,7 @@ fn lsp_attribute_expression_names() {
     let out = read_out(root);
     let o = out.as_str();
     assert(o.contains("{\"label\":\"WIDTH\""), "completion offers the constant");
-    assert(!o.contains("{\"label\":\"macos\""), "no platform names inside '@c.align'");
+    assert(!o.contains("{\"label\":\"macos\""), "no platform names inside '@align'");
     let hv = o.find("\"id\":3,");
     assert(hv >= 0 && o.slice(hv as usize, o.len()).starts_with("\"id\":3,\"result\":{\"contents\""), "hover answers");
     assert(o.contains("const WIDTH: u32 = 64;"), "hover shows the constant's declaration");
@@ -332,7 +332,7 @@ fn lsp_attribute_expression_names() {
     assert_eq(count(o, "\"newText\":\"BREADTH\""), 2);
     assert(
         o.contains(
-            "{\"start\":{\"line\":2,\"character\":9},\"end\":{\"line\":2,\"character\":14}},\"newText\":\"BREADTH\"",
+            "{\"start\":{\"line\":2,\"character\":7},\"end\":{\"line\":2,\"character\":12}},\"newText\":\"BREADTH\"",
         ),
         "rename edits the attribute argument",
     );
@@ -609,7 +609,7 @@ fn attribute_inventory_is_complete() {
     let mut names = Vector::<String>::new();
     par::known_attributes(&mut names);
     assert(names.len() >= 24);
-    let want = "cold always_inline export import align test test_init test_free derive reflect platform arch fmt.skip emit_macro bench blocking no_const c.source link";
+    let want = "cold always_inline export import align test test_init test_free derive reflect platform arch fmt.skip emit_macro bench blocking no_const link";
     let mut it = want.split(" ");
     loop {
         let w = it.next();
@@ -1198,7 +1198,7 @@ fn lsp_edit_burst_folds_and_tags_versions() {
     assert(r6.contains("main"));
 }
 
-const CR_DOC: str = "// Doubles\r// its input.\r@c.noinline\rfn twice(x: i32) i32 {\r    return x * 2;\r}\r\rfn main() i32 {\r    return twice(0);\r}\r";
+const CR_DOC: str = "// Doubles\r// its input.\r@noinline\rfn twice(x: i32) i32 {\r    return x * 2;\r}\r\rfn main() i32 {\r    return twice(0);\r}\r";
 
 // A file with lone `\r` line ends: hover finds the comment block above the item, attribute
 // line skipped, one documentation line per comment line.

@@ -80,7 +80,7 @@ pub enum AttrKind {
     ATTR_TEST,
     ATTR_TEST_INIT,
     ATTR_TEST_FREE,
-    ATTR_C_SOURCE,
+    ATTR_C_SOURCE, // unused: the removed `@c.source`
     ATTR_C_LINK,
     ATTR_COLD,
     ATTR_PLATFORM,

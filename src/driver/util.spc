@@ -533,7 +533,7 @@ pub fn publish_file(path: str, body: str) i32 {
 
 /// Recursively delete every .c/.h under `dir` that is NOT in the keep-list (the files this run wrote), then
 /// drop any directory left empty. The compiler overwrites build/ in place but must also remove outputs the
-/// program does not produce (a removed module/instance/@test-runner/@c.source wrapper); a stale TU would
+/// program does not produce (a removed module, instance or @test runner); a stale TU would
 /// otherwise linger and break `cc build/**/*.c`. Path comparison is exact ("<dir>/<name>", like build_out_path).
 pub fn prune_orphans(dir: str, keep: &Vector<String>) {
     let mut ks = Set::<str>::new();
@@ -779,22 +779,15 @@ fn push_triple(cmd: &mut String, sdk: i32, arch: i32) {
     cmd.push_str(" -target wasm32 -nostdlib");
 }
 
-/// Flags and libraries a target needs at LINK time only. wasi keeps signals and the process clock
-/// behind opt-in emulation libraries; the runtime's panic path installs a signal handler and `time::clock`
-/// reads the process clock (emulated by the wall clock), so the build asks for both. The main thread
-/// gets the 8 MiB stack of Linux and macOS on every target, so a program that runs on one runs on all:
-/// wasm-ld's default stack is 64 KiB (placed first, so an overflow traps rather than overwriting static
-/// data), a Windows executable reserves 1 MiB unless its header says otherwise.
+/// Flags a target needs at LINK time only. The main thread gets the 8 MiB stack of Linux and macOS on every
+/// target, so a program that runs on one runs on all: wasm-ld's default stack is 64 KiB (placed first, so an
+/// overflow traps rather than overwriting static data), a Windows executable reserves 1 MiB unless its
+/// header says otherwise. A wasm link's libraries come from the toolchain probes (`push_rtlib`).
 pub fn push_sdk_libs(cmd: &mut String, target: i32, sdk: i32) {
     if target == 0 && sdk == 0 {
         cmd.push_str(" -Wl,--stack,8388608");
     }
     if sdk == 3 {
         cmd.push_str(" -Wl,-z,stack-size=8388608 -Wl,--stack-first");
-        let sdkp = stdlib::getenv("WASI_SDK_PATH");
-        let sr = stdlib::getenv("WASI_SYSROOT");
-        if sdkp != null && unsafe *sdkp != 0 as char || sr != null && unsafe *sr != 0 as char {
-            cmd.push_str(" -lwasi-emulated-signal -lwasi-emulated-process-clocks");
-        }
     }
 }

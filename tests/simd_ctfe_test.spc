@@ -9,7 +9,7 @@ fn a_constant_trap_names_the_lowest_failing_lane() {
     let src = "const C: Simd<i32, 4> = Simd::<i32, 4>::from_array([1, i32::MAX, 3, i32::MAX]) + Simd::<i32, 4>::splat(1);\nfn main() i32 {\n    return C[0];\n}\n";
     let b = h::diff_build(src, []);
     assert(!b.built && b.diag.contains("lane 1: attempt to add with overflow"), "the lane and the message");
-    let rt = "static mut SINK: usize = 0;\n@c.noinline\nfn opr<T>(x: T) T {\n    unsafe SINK += 1;\n    return x;\n}\nfn main() i32 {\n    let v = Simd::<i32, 4>::from_array(opr([1, i32::MAX, 3, i32::MAX])) + Simd::<i32, 4>::splat(1);\n    return v[0];\n}\n";
+    let rt = "static mut SINK: usize = 0;\n@noinline\nfn opr<T>(x: T) T {\n    unsafe SINK += 1;\n    return x;\n}\nfn main() i32 {\n    let v = Simd::<i32, 4>::from_array(opr([1, i32::MAX, 3, i32::MAX])) + Simd::<i32, 4>::splat(1);\n    return v[0];\n}\n";
     let r = h::diff_build(rt, []);
     assert(r.built, "the run-time program builds");
     let run = h::diff_run(&r, "");
@@ -43,7 +43,7 @@ fn narrow_mask_operators_keep_their_lanes() {
     return (!a).to_bits() | (a & b).to_bits() << 4 | (a | b).to_bits() << 8 | (a ^ b).to_bits() << 12 | (!c).to_bits() << 16;
 }
 static_assert(mask_ops(0x5C) == 0x39D43, "mask operators");
-@c.noinline
+@noinline
 fn opr(x: u64) u64 {
     return x;
 }

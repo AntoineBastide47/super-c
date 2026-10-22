@@ -1,5 +1,5 @@
 // What an attribute on an item asks of the build is applied, not dropped: a `static mut` or constant that
-// is `@c.used` or `@c.export`ed is defined whether code names it or not, a `@platform`, `@arch` or `@when`
+// is `@used` or `@export`ed is defined whether code names it or not, a `@platform`, `@arch` or `@when`
 // gate on an item or a member of an extend or an extern block removes it where it fails, and a C name the
 // runtime header defines as a function-like macro (the leak tracker's `malloc`, `calloc`, `realloc` and
 // `free`) neither expands in an export's definition nor in a call through a member or a local.
@@ -7,17 +7,17 @@ import tests::harness as h;
 import tests::cli_harness as cli;
 
 // C code reads the exported data by its symbol: the static and the constant exist although no Super-C
-// code names them, and the `@c.used` static carries C `used`.
+// code names them, and the `@used` static carries C `used`.
 @test
 fn used_and_exported_data_is_defined() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        M"(@c.export("sc_shared")
+        M"(@export("sc_shared")
 static mut SHARED: i32 = 40;
-@c.export("sc_limit")
+@export("sc_limit")
 const LIMIT: u32 = 2;
-@c.used
+@used
 static mut KEPT: i32 = 5;
 extern "C" "reader.h" {
     fn read_shared() i32;
@@ -37,8 +37,8 @@ fn main() i32 {
     assert(p.gen_has("main__inst.c", "int32_t sc_shared = 40;"), "the exported static is defined");
     assert(p.gen_has("main__inst.c", "uint32_t sc_limit = 2;"), "the exported constant is defined");
     assert(p.gen_has("main__inst.c", "__attribute__((used)) int32_t KEPT = 5;"), "the used static is defined and kept");
-    // The emit copies `reader.c`, the C file beside the extern header, into the tree.
-    let cc = p.cc_build(format("-I\"{}\"", p.dir()).as_str());
+    // `reader.c`, the C library beside the program, compiles apart and links with the tree.
+    let cc = p.cc_build_with(format("-I\"{}\"", p.dir()).as_str(), "reader.c");
     assert(cc.ok(), "the tree and the C reader compile and link");
     assert_eq(p.run_bin(), 0);
 }
@@ -169,7 +169,7 @@ fn a_failing_build_condition_removes_the_item() {
 // function without a header whose reserved name `super_rt.h` does not declare gets its prototype.
 @test
 fn macro_named_symbols_stay_symbols() {
-    let ex = "@c.export(\"free\")\nfn release(p: *mut void) {}\nfn main() i32 { return 0; }\n";
+    let ex = "@export(\"free\")\nfn release(p: *mut void) {}\nfn main() i32 { return 0; }\n";
     h::expect_c("an export named free", ex, "void (free)(void *p)");
     let rs = "extern \"C\" {\n    fn __probe_size(n: usize) usize;\n}\nfn main() i32 { return unsafe __probe_size(0) as i32; }\n";
     h::expect_c("a reserved extern name has a prototype", rs, "extern size_t __probe_size(size_t);");

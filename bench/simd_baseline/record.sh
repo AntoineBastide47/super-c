@@ -40,6 +40,7 @@ version=$(sed -n 's/^compiler: //p' build/simd_probes.out)
 probes=$(awk -v c="${cc##*[ /]}" -v v="$version" -v t="$triple" 'NR > 2 { id = $1; sub(/^[^ ]+ +/, ""); print v "\t" t "\t" c "\t" id "\t" $0 }' build/simd_probes.out)
 replace $dir/probes.tsv "$(printf 'version\ttriple\tcompiler\tprobe\tresult')" "$(printf '%s\t%s' "$version" "$triple")" "$probes"
 
+sh $dir/kernels.sh "$@"
 "$sc" bench --no-run --filter=simd_baseline "$@"
 $run >build/simd_baseline.out
 profile=$(sed -n 's/^running benchmarks (build [^;]*; \([^ ]*\).*/\1/p' build/simd_baseline.out)

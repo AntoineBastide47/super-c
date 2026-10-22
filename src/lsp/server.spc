@@ -2840,7 +2840,7 @@ extend Server {
         } else {
             0u8;
         };
-        // An attribute path may continue with '.': "@c.al<cursor>" walks back over "c."
+        // An attribute path may continue with '.': "@fmt.sk<cursor>" walks back over "fmt."
         let mut attr_ws = ws;
         while attr_ws > 0 && (text::ident_byte(txt[attr_ws - 1]) || txt[attr_ws - 1] == b'.') {
             attr_ws -= 1;

@@ -450,7 +450,7 @@ fn comparison_operands_are_read_not_moved() {
     // by `assert_eq` stays a named temporary (the comparison takes its address).
     run_leak_checked(
         "comparison operands freed",
-        "struct P { pub x: i32 }\nextend P as Eq { pub fn eq(self: &P, o: &P) bool { return self.x == o.x; } }\n@c.noinline\nfn mp(x: i32) P { return P { x: x }; }\nfn mk() String { return String::from_str(\"0123456789012345678901234567890123456789\"); }\nfn main() i32 { assert_eq(mp(1), mp(1)); let a = mk(); let b = mk(); let e1 = a == b; let e2 = mk() == mk(); let e3 = format(\"{}0123456789012345678901234567890123456789\", 1) != mk(); assert_eq(mk(), mk()); assert(mk() == b); let c = a; return if e1 && e2 && e3 && c.len() == 40 { 0; } else { 1; }; }\n",
+        "struct P { pub x: i32 }\nextend P as Eq { pub fn eq(self: &P, o: &P) bool { return self.x == o.x; } }\n@noinline\nfn mp(x: i32) P { return P { x: x }; }\nfn mk() String { return String::from_str(\"0123456789012345678901234567890123456789\"); }\nfn main() i32 { assert_eq(mp(1), mp(1)); let a = mk(); let b = mk(); let e1 = a == b; let e2 = mk() == mk(); let e3 = format(\"{}0123456789012345678901234567890123456789\", 1) != mk(); assert_eq(mk(), mk()); assert(mk() == b); let c = a; return if e1 && e2 && e3 && c.len() == 40 { 0; } else { 1; }; }\n",
         0,
     );
 }
@@ -493,7 +493,7 @@ fn large_alignment_layout_is_stable() {
     // A cached layout answer equals the first one for an alignment of 256 or more.
     run_leak_checked(
         "large alignment layout",
-        "@c.align(512)\nstruct Big { pub x: u8 }\nconst A: usize = sizeof(Big);\nconst B: usize = sizeof(Big);\nconst C: usize = alignof(Big);\nfn main() i32 { return (A + B + C) as i32 - 1536; }\n",
+        "@align(512)\nstruct Big { pub x: u8 }\nconst A: usize = sizeof(Big);\nconst B: usize = sizeof(Big);\nconst C: usize = alignof(Big);\nfn main() i32 { return (A + B + C) as i32 - 1536; }\n",
         0,
     );
 }
@@ -806,7 +806,7 @@ fn verifier_rejects_malformed_index_lists() {
 @test
 fn memory_annotations_reach_the_effect_query() {
     let p = typed_package(
-        "extern \"C\" {\n    @c.reads(src, 16)\n    fn rd(src: *const void) i32;\n    @c.writes(dst, n * 4)\n    fn wr(n: usize, dst: *mut void);\n    @c.lane_access\n    fn ln(p: *mut void);\n    fn plain(p: *mut void);\n    @c.reads(src, 8)\n    @c.writes(dst, 8)\n    fn cp(dst: *mut void, src: *const void);\n}\nfn f(a: *mut i32) i32 {\n    let x = unsafe rd(a as *const void);\n    unsafe wr(3, a as *mut void);\n    unsafe ln(a as *mut void);\n    unsafe plain(a as *mut void);\n    unsafe cp(a as *mut void, a as *const void);\n    return x;\n}\n",
+        "extern \"C\" {\n    @reads(src, 16)\n    fn rd(src: *const void) i32;\n    @writes(dst, n * 4)\n    fn wr(n: usize, dst: *mut void);\n    @lane_access\n    fn ln(p: *mut void);\n    fn plain(p: *mut void);\n    @reads(src, 8)\n    @writes(dst, 8)\n    fn cp(dst: *mut void, src: *const void);\n}\nfn f(a: *mut i32) i32 {\n    let x = unsafe rd(a as *const void);\n    unsafe wr(3, a as *mut void);\n    unsafe ln(a as *mut void);\n    unsafe plain(a as *mut void);\n    unsafe cp(a as *mut void, a as *const void);\n    return x;\n}\n",
     );
     let node = find_fn(&p, "f");
     let u = (p.modules.len() - 1) as ModuleId;
@@ -1227,7 +1227,7 @@ extend P {
 fn g(x: i64, n: i64) i64 {
     return x + n;
 }
-@c.noreturn
+@noreturn
 fn stop() {
     panic("stop");
 }
