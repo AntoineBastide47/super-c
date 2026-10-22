@@ -20,7 +20,7 @@
 // preprocessor has already expanded them away by the time anything here runs.
 
 import stdio;
-import driver_shim as shim;
+import std::platform::fs;
 import module::loader as loader;
 import driver::util as *;
 import lexer::lexer as lex;
@@ -421,7 +421,7 @@ fn int_const(cd: &ConstDef) bool {
 
 // The type a field of rendered type `ty` holds by value: the element of an array, or "" for a
 // pointer or a function pointer.
-fn by_value_base(ty: str) str {
+const fn by_value_base(ty: str) str {
     let mut t = ty;
     while t.len() != 0 && t.byte_at(0) == b'[' {
         t = t.slice(1, t.len());
@@ -449,7 +449,7 @@ const I64_MIN: i64 = -I64_MAX - 1;
 
 // An integer written in a C enumerator or an array bound: decimal, hex or a character, with the suffixes
 // and sign C allows. -1 means "not a plain integer", which is what makes the caller fall back.
-fn int_literal(t: str) i64 {
+const fn int_literal(t: str) i64 {
     let n = t.len();
     if n == 0 {
         return -1;
@@ -494,7 +494,7 @@ fn int_literal(t: str) i64 {
 }
 
 extend EnumDef {
-    fn val_of(self: &Self, name: str) Option<i64> {
+    const fn val_of(self: &Self, name: str) Option<i64> {
         for i in 0..self.vals.len() {
             if self.vals[i].name.as_str() == name {
                 return Option::<i64>::Some(self.vals[i].value);
@@ -520,10 +520,7 @@ fn same_origin(a: str, want: str, extra: &Vector<String>) bool {
             return true;
         }
     }
-    let mut sa = String::from_str(a);
-    let mut sw = String::from_str(want);
-    let same = unsafe shim::sc_same_file(sa.cstr(), sw.cstr()) == 1;
-    return same;
+    return same_file(a, want);
 }
 
 // Preprocess `header` under the C environment `env`, with the `-I` directories `incs` searched before the
@@ -563,7 +560,7 @@ fn preprocess(env: &ct::CTarget, header: str, incs: &Vector<String>, text: &mut 
 }
 
 // One line of `text` starting at `i`, without its terminator.
-fn line_at<'a>(text: str<'a>, i: usize, end: &mut usize) str<'a> {
+const fn line_at<'a>(text: str<'a>, i: usize, end: &mut usize) str<'a> {
     let n = text.len();
     let mut e = i;
     while e < n && text.byte_at(e) != b'\n' {
@@ -574,7 +571,7 @@ fn line_at<'a>(text: str<'a>, i: usize, end: &mut usize) str<'a> {
 }
 
 // `__SIZEOF_*__` is what the target reports, so `long` maps to what it will be.
-fn read_widths(text: str) Widths {
+const fn read_widths(text: str) Widths {
     let mut w = Widths { short_b: 2, int_b: 4, long_b: 8, llong_b: 8 };
     let n = text.len();
     let mut i: usize = 0;
@@ -606,7 +603,7 @@ const fn line_defines(line: str, name: str) bool {
     return rest.starts_with(name) && rest.len() > name.len() && rest.byte_at(name.len()) == b' ';
 }
 
-fn macro_int(line: str) i32 {
+const fn macro_int(line: str) i32 {
     let n = line.len();
     let mut i = n;
     while i > 0 && line.byte_at(i - 1) != b' ' {
@@ -970,7 +967,7 @@ fn header_macro_names(src: str, out: &mut Vector<String>) {
 }
 
 // `((-1))` -> `-1`: the parentheses C needs for hygiene carry no meaning here.
-fn strip_parens(v: str) str {
+const fn strip_parens(v: str) str {
     let mut s = v;
     loop {
         if s.len() < 2 || s.byte_at(0) != b'(' || s.byte_at(s.len() - 1) != b')' {
@@ -998,7 +995,7 @@ fn strip_parens(v: str) str {
     }
 }
 
-fn is_float_text(v: str) bool {
+const fn is_float_text(v: str) bool {
     let mut dot = false;
     for i in 0..v.len() {
         let ch = v.byte_at(i);
@@ -1103,7 +1100,7 @@ fn macro_const(name: str, raw: str, c: &Collected, dump: str, out: &mut ConstDef
     return true;
 }
 
-fn type_mentions(ty: str, name: str) bool {
+const fn type_mentions(ty: str, name: str) bool {
     let n = ty.len();
     let m = name.len();
     if m == 0 || n < m {
@@ -1135,10 +1132,8 @@ fn run_one(
     env: &ct::CTarget,
 ) i32 {
     let mut hdr = String::from_str(header);
-    let mut abs = PathBuf {};
-    if unsafe shim::sc_realpath(hdr.cstr(), &mut abs[0]) != null {
-        hdr.clear();
-        hdr.push_str(str::from_cbuf(abs.as_slice()));
+    if let Ok(abs) = fs::realpath(header) {
+        hdr = abs;
     }
     let mut spelling = String::from_str(spelling_in);
     if spelling.len() == 0 {
@@ -1231,7 +1226,7 @@ fn join_path(a: str, b: str) String {
 }
 
 // The directory part of `p`, empty when there is none.
-fn dir_part(p: str) str {
+const fn dir_part(p: str) str {
     let mut k = p.len();
     while k > 0 && p.byte_at(k - 1) != b'/' {
         k = k - 1;
@@ -1242,7 +1237,7 @@ fn dir_part(p: str) str {
     return p.slice(0, k - 1);
 }
 
-fn stem_of(p: str) str {
+const fn stem_of(p: str) str {
     let base = loader::basename_of(p);
     if base.ends_with(".h") {
         return base.slice(0, base.len() - 2);
@@ -1269,9 +1264,8 @@ fn module_stem(p: str, out: &mut String) {
 // which is what the generated module uses to `#include` it: name the include root and the spellings
 // come out the way C code writes them (`curl/curl.h`).
 fn walk_headers(dir: str, rel: str, out_dir: str, jobs: &mut Vector<Job>) bool {
-    let mut d = String::from_str(dir);
-    let dh = unsafe shim::sc_opendir(d.cstr());
-    if dh == null {
+    let listed = list_dir(dir, false);
+    if listed.is_none() {
         unsafe stdio::fprintf(
             stdio::stderr(),
             "super-c: cannot read directory '%.*s'\n".ptr() as *const char,
@@ -1280,25 +1274,13 @@ fn walk_headers(dir: str, rel: str, out_dir: str, jobs: &mut Vector<Job>) bool {
         );
         return false;
     }
-    let mut names = Vector::<String>::new();
-    loop {
-        let e = unsafe shim::sc_readdir(dh);
-        if e == null {
-            break;
-        }
-        let nm = unsafe shim::sc_dirent_name(e);
-        if unsafe nm[0] == '.' as char {
-            continue;
-        }
-        names.push(unsafe String::from_cstr(nm));
-    }
-    let _ = unsafe shim::sc_closedir(dh);
+    let mut names = listed.unwrap();
     names.sort();
     let mut ok = true;
     for i in 0..names.len() {
-        let mut child = join_path(dir, names[i].as_str());
+        let child = join_path(dir, names[i].as_str());
         let crel = join_path(rel, names[i].as_str());
-        if unsafe shim::sc_stat_isdir(child.cstr()) == 1 {
+        if is_dir(child.as_str()) {
             if !walk_headers(child.as_str(), crel.as_str(), out_dir, jobs) {
                 ok = false;
             }
@@ -1357,8 +1339,7 @@ pub fn run(
     let mut rc: i32 = 0;
     for i in 0..paths.len() {
         let p = paths[i].as_str();
-        let mut pp = String::from_str(p);
-        let isdir = unsafe shim::sc_stat_isdir(pp.cstr()) == 1;
+        let isdir = is_dir(p);
         if isdir {
             if out_dir.len() == 0 {
                 unsafe stdio::fputs(
@@ -1406,8 +1387,7 @@ pub fn run(
             // Each header is its own module, so one that cannot be read or preprocessed fails alone.
             let od = dir_part(jobs[i].out.as_str());
             if od.len() != 0 {
-                let mut odp = String::from_str(od);
-                let _ = unsafe shim::sc_mkdir_p(odp.cstr());
+                let _ = fs::mkdir_all(od);
             }
             if run_one(jobs[i].path.as_str(), jobs[i].out.as_str(), link, jobs[i].spelling.as_str(), incs, froms, &env) != 0 {
                 rc = 1;
@@ -2137,7 +2117,7 @@ extend Lexer {
 }
 
 extend Collected {
-    fn alias_of(self: &Collected, name: str) i32 {
+    const fn alias_of(self: &Collected, name: str) i32 {
         for i in 0..self.aliases.len() {
             if self.aliases[i].name.as_str() == name {
                 return i as i32;
@@ -2199,7 +2179,7 @@ extend Collected {
         self.opaques.push(String::from_str(name));
     }
 
-    fn record_of(self: &Self, tag: str) i32 {
+    const fn record_of(self: &Self, tag: str) i32 {
         for i in 0..self.records.len() {
             if self.records[i].tag.as_str() == tag {
                 return i as i32;
@@ -2247,7 +2227,7 @@ extend Collected {
     // Only the opaque tags the emitted signatures, record fields and globals mention: a header pulls in
     // hundreds of struct names through its own includes, and binding all of them would bury the ones a
     // caller needs.
-    fn opaque_used(self: &Self, name: str) bool {
+    const fn opaque_used(self: &Self, name: str) bool {
         for i in 0..self.fns.len() {
             let f = self.fns.at(i);
             if type_mentions(f.ret.as_str(), name) {
@@ -2280,7 +2260,7 @@ extend Collected {
 
     // A tag emitted as a real `pub struct`/`pub union` must not ALSO be declared opaque: one name, one
     // definition.
-    fn record_emitted(self: &Self, tag: str) bool {
+    const fn record_emitted(self: &Self, tag: str) bool {
         let ri = self.record_of(tag);
         if ri < 0 {
             return false;
@@ -2289,7 +2269,7 @@ extend Collected {
         return r.mine && r.ok;
     }
 
-    fn enum_emitted(self: &Self, tag: str) bool {
+    const fn enum_emitted(self: &Self, tag: str) bool {
         for i in 0..self.enums.len() {
             if self.enums[i].tag.as_str() == tag {
                 return self.enums[i].mine && self.enums[i].ok;
@@ -2300,7 +2280,7 @@ extend Collected {
 
     // A name already spoken for. C's namespaces are separate: a macro, an enumerator and a function may all
     // be called `FOO`, but Super-C has one, so the first definition wins and the rest are left out.
-    fn name_taken(self: &Self, upto: usize, name: str) bool {
+    const fn name_taken(self: &Self, upto: usize, name: str) bool {
         for i in 0..self.fns.len() {
             if self.fns[i].name.as_str() == name {
                 return true;
@@ -2389,7 +2369,7 @@ extend Collected {
     }
 
     // Whether rendered type `ty` holds an opaque type by value.
-    fn opaque_value(self: &Self, ty: str) bool {
+    const fn opaque_value(self: &Self, ty: str) bool {
         let base = by_value_base(ty);
         return base.len() != 0 && self.opaque_named(base);
     }
@@ -2423,7 +2403,7 @@ extend Collected {
 
     // Whether `name` is a type the module binds as opaque: a tag it declares but emits neither as a
     // record nor as an enum.
-    fn opaque_named(self: &Self, name: str) bool {
+    const fn opaque_named(self: &Self, name: str) bool {
         if self.record_emitted(name) || self.enum_emitted(name) {
             return false;
         }

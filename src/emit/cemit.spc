@@ -1540,7 +1540,7 @@ extend CEmit {
 
     // The number of nested instantiations the active substitution chain holds: the binds of one
     // level share one `lim`, the chain length before that level.
-    fn inst_depth(self: &Self) u32 {
+    const fn inst_depth(self: &Self) u32 {
         let mut n: u32 = 0;
         for i in 0..self.mg.subs.len() {
             if i == 0 || self.mg.subs.at(i).lim != self.mg.subs.at(i - 1).lim {
@@ -2358,7 +2358,7 @@ extend CEmit {
 
     // The source is defined immediately before this copy, apart from storage markers. `start` is
     // the first statement of the copy's block (ir::IR_NONE when no block holds it).
-    fn adjacent_copy_source(self: &Self, b: &ir::CoreBody, copy: usize, start: u32, source: u32) bool {
+    const fn adjacent_copy_source(self: &Self, b: &ir::CoreBody, copy: usize, start: u32, source: u32) bool {
         if start == ir::IR_NONE {
             return false;
         }
@@ -2750,7 +2750,7 @@ extend CEmit {
     // Two places name the same storage: identical base and identical projection sequence. A dynamic
     // index compares by its operand id (a conservative match: distinct ids that happen to hold the
     // same value read as different, which only forgoes a rewrite).
-    fn places_equal(self: &Self, b: &ir::CoreBody, a: u32, c: u32) bool {
+    const fn places_equal(self: &Self, b: &ir::CoreBody, a: u32, c: u32) bool {
         let pa = *b.places.at(a as usize);
         let pc = *b.places.at(c as usize);
         if pa.base != pc.base || pa.proj_len != pc.proj_len {
@@ -3079,7 +3079,7 @@ extend CEmit {
 
     // Whether rvalue `rid` reads local `l` as a bare operand: the adjacency probe for the one
     // statement that immediately follows an inline candidate's definition.
-    fn rvalue_reads_local_bare(self: &Self, b: &ir::CoreBody, rid: u32, l: u32) bool {
+    const fn rvalue_reads_local_bare(self: &Self, b: &ir::CoreBody, rid: u32, l: u32) bool {
         let rv = *b.rvalues.at(rid as usize);
         if rv.kind == ir::RV_USE || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST || rv.kind == ir::RV_REPEAT || rv.kind == ir::RV_DYN {
             return self.op_is_bare_local(b, rv.a, l);
@@ -3129,7 +3129,7 @@ extend CEmit {
 
     // Whether an inlinable-kind rvalue reads memory (any projected operand or projected place-read).
     // A memory-reading definition cannot be folded across a store that might alias that memory.
-    fn rvalue_reads_mem(self: &Self, b: &ir::CoreBody, rid: u32) bool {
+    const fn rvalue_reads_mem(self: &Self, b: &ir::CoreBody, rid: u32) bool {
         let rv = *b.rvalues.at(rid as usize);
         if rv.kind == ir::RV_USE || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST {
             return self.op_is_projected(b, rv.a);
@@ -3506,7 +3506,7 @@ extend CEmit {
     }
 
     // Whether place `p` indexes by a bare read of local `l`.
-    fn place_indexes_by(self: &Self, b: &ir::CoreBody, p: u32, l: u32) bool {
+    const fn place_indexes_by(self: &Self, b: &ir::CoreBody, p: u32, l: u32) bool {
         let pl = *b.places.at(p as usize);
         for i in 0..pl.proj_len {
             let pj = *b.projections.at((pl.proj_start + i) as usize);
@@ -3517,7 +3517,7 @@ extend CEmit {
         return false;
     }
 
-    fn op_indexes_by(self: &Self, b: &ir::CoreBody, opid: u32, l: u32) bool {
+    const fn op_indexes_by(self: &Self, b: &ir::CoreBody, opid: u32, l: u32) bool {
         return opid != ir::IR_NONE && b.operands.at(opid as usize).kind != ir::OP_CONST && self.place_indexes_by(
             b,
             b.operands.at(opid as usize).data,
@@ -3544,7 +3544,7 @@ extend CEmit {
     // operand an intrinsic spells once (`spells_operand`), or the index of a place its rvalue reads.
     // A store's own place is no such position: C evaluates it unordered with its value, which may
     // be a forwarded call.
-    fn stmt_new_read(self: &Self, b: &ir::CoreBody, s: &ir::Statement, l: u32) bool {
+    const fn stmt_new_read(self: &Self, b: &ir::CoreBody, s: &ir::Statement, l: u32) bool {
         let rv = *b.rvalues.at(s.rvalue as usize);
         if rv.kind == ir::RV_INTRINSIC && ir::has_op_range(&rv) {
             for i in 0..rv.b {
@@ -4286,7 +4286,7 @@ extend CEmit {
     }
 
     // Whether rvalue `rv` reads local `l` whole or in part.
-    fn rv_reads(b: &ir::CoreBody, rv: &ir::Rvalue, l: u32) bool {
+    const fn rv_reads(b: &ir::CoreBody, rv: &ir::Rvalue, l: u32) bool {
         let (st, len) = if ir::has_op_range(rv) {
             (rv.a, rv.b);
         } else if rv.kind == ir::RV_INTRINSIC {
@@ -4442,7 +4442,7 @@ extend CEmit {
 
     // The longest fold chain among rvalue `rid`'s whole-local operands (`chain` is 0 for a local
     // that does not fold).
-    fn rvalue_chain(self: &Self, b: &ir::CoreBody, rid: u32, chain: &Vector<u32>) u32 {
+    const fn rvalue_chain(self: &Self, b: &ir::CoreBody, rid: u32, chain: &Vector<u32>) u32 {
         let rv = *b.rvalues.at(rid as usize);
         if rv.kind == ir::RV_USE || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST {
             return CEmit::op_chain(b, rv.a, chain);
@@ -4724,7 +4724,7 @@ extend CEmit {
 
     // The one predecessor of block `cur` when it reaches `cur` by a jump and nothing else does;
     // IR_NONE otherwise.
-    fn sole_goto_pred(b: &ir::CoreBody, cur: u32) u32 {
+    const fn sole_goto_pred(b: &ir::CoreBody, cur: u32) u32 {
         let mut pred = ir::IR_NONE;
         let mut ins: u32 = 0;
         for i in 0..b.blocks.len() {
@@ -4800,7 +4800,7 @@ extend CEmit {
     // initializes: the follow of an enclosing loop is spelled after that loop, out of the scope of a
     // declaration inside it, and a follow only the range loop reaches is an exit from its body that may
     // read the index (`loop { for i in 0..n { if f(i) { return i; } } }`).
-    fn index_read_past_outer_loop(b: &ir::CoreBody, cf: &cfl::CFlow, init: u32) bool {
+    const fn index_read_past_outer_loop(b: &ir::CoreBody, cf: &cfl::CFlow, init: u32) bool {
         let t = b.blocks.at(init as usize).term;
         let mut h = init;
         let mut outer = *cf.loop_of.at(init as usize);
@@ -5934,7 +5934,7 @@ extend CEmit {
     }
 
     // The live successor of a switch on a literal (succ follows only that edge); false otherwise.
-    fn const_switch_succ(self: &Self, b: &ir::CoreBody, cf: &cfl::CFlow, x: u32, out: &mut u32) bool {
+    const fn const_switch_succ(self: &Self, b: &ir::CoreBody, cf: &cfl::CFlow, x: u32, out: &mut u32) bool {
         if cfl::const_switch_edge(b, x) == cfl::NONE {
             return false;
         }
@@ -6338,7 +6338,7 @@ extend CEmit {
 
     // A labeled break may leave nested loops for the follow of an enclosing loop. This is a safe
     // forward goto; no other cross-region transfer is accepted by the structured plan.
-    fn outer_break_target(self: &Self, cf: &cfl::CFlow, current: u32, target: u32) bool {
+    const fn outer_break_target(self: &Self, cf: &cfl::CFlow, current: u32, target: u32) bool {
         if current == cfl::NONE || target == cfl::NONE || *cf.rpo.at(target as usize) <= *cf.rpo.at(current as usize) {
             return false;
         }
@@ -6879,7 +6879,7 @@ extend CEmit {
     }
 
     // Whether block `x` (ir::IR_NONE: none) lies in loop `h` or a loop nested in it.
-    fn in_loop(cf: &cfl::CFlow, x: u32, h: u32) bool {
+    const fn in_loop(cf: &cfl::CFlow, x: u32, h: u32) bool {
         if x == ir::IR_NONE {
             return false;
         }
@@ -7466,7 +7466,7 @@ extend CEmit {
 
     // The element count an open-array local is filled with (its RV_REPEAT count or array-literal
     // arity); 0 = no filler found.
-    fn filled_len(self: &Self, b: &ir::CoreBody, l: u32) u64 {
+    const fn filled_len(self: &Self, b: &ir::CoreBody, l: u32) u64 {
         for si in 0..b.statements.len() {
             let s = *b.statements.at(si);
             if s.kind != ir::ST_ASSIGN || s.place == ir::IR_NONE {
@@ -9391,7 +9391,7 @@ extend CEmit {
 
     // Whether vector statement `rv` writing `place` names a vector whose address the body takes: a raw
     // pointer of the statement may then address it (`VPlan::raw`).
-    fn vec_addr_taken(self: &Self, b: &ir::CoreBody, place: ir::PlaceId, rv: &ir::Rvalue) bool {
+    const fn vec_addr_taken(self: &Self, b: &ir::CoreBody, place: ir::PlaceId, rv: &ir::Rvalue) bool {
         if self.addressable(b, place) {
             return true;
         }
@@ -9984,7 +9984,7 @@ extend CEmit {
 
     // The local whose lane-mask temps local `l` reads (itself, or the comparison result it copies),
     // or IR_NONE when it reads none.
-    fn ml_src(self: &Self, l: u32) u32 {
+    const fn ml_src(self: &Self, l: u32) u32 {
         if self.ml_chunks.len() == 0 {
             return ir::IR_NONE;
         }
@@ -9993,7 +9993,7 @@ extend CEmit {
     }
 
     // The comparison result a chain of whole copies ends at from local `l` (`ml_alias`), or `l` itself.
-    fn ml_root(self: &Self, l: u32) u32 {
+    const fn ml_root(self: &Self, l: u32) u32 {
         let mut x = l;
         for _ in 0..self.ml_alias.len() {
             let a = self.ml_alias[x as usize];
@@ -11811,10 +11811,25 @@ extend CEmit {
         }
         let mut xs = CmpSide { lo: 0, hi: 0, uns: false, c_uns: false, c_w: 0, konst: false };
         let mut cs = xs;
-        if !self.cmp_side(b, rv.a, &mut xs) || !self.cmp_side(b, rv.b, &mut cs) || xs.konst == cs.konst {
+        if !self.cmp_side(b, rv.a, &mut xs) || !self.cmp_side(b, rv.b, &mut cs) {
             return -1;
         }
         *x = rv.a;
+        if !xs.konst && !cs.konst {
+            // One integer read on both sides (an inlined call that passes one value for two parameters):
+            // C would compare the variable with itself.
+            let ra = self.read_root(b, rv.a);
+            if ra == ir::IR_NONE || ra != self.read_root(b, rv.b) {
+                return -1;
+            }
+            return fold_result(
+                t == tt::TokenType::LessThanEqual || t == tt::TokenType::GreaterThanEqual || t == tt::TokenType::EqualEqual,
+                true,
+            );
+        }
+        if xs.konst == cs.konst {
+            return -1;
+        }
         if xs.konst {
             // `c op x` is `x op' c` with the operands swapped.
             let tmp = xs;
@@ -11849,6 +11864,29 @@ extend CEmit {
             EqualEqual => fold_result(lo == 0 && hi == 0, lo > 0 || hi < 0),
             _ => fold_result(lo > 0 || hi < 0, lo == 0 && hi == 0),
         };
+    }
+
+    // The local whose whole value operand `opid` reads, seen through inlined copies; IR_NONE for any other
+    // operand.
+    const fn read_root(self: &Self, b: &ir::CoreBody, opid: ir::OperandId) u32 {
+        let mut o = opid;
+        // Each step follows one inlined copy to an earlier definition; the locals bound the chain.
+        for _ in 0..b.locals.len() + 1 {
+            let op = *b.operands.at(o as usize);
+            if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
+                return ir::IR_NONE;
+            }
+            let pl = *b.places.at(op.data as usize);
+            if pl.proj_len != 0 {
+                return ir::IR_NONE;
+            }
+            let ri = *self.sx_inline.at(pl.base as usize);
+            if ri == ir::IR_NONE || *self.sx_call_fwd.at(pl.base as usize) || b.rvalues.at(ri as usize).kind != ir::RV_USE {
+                return pl.base;
+            }
+            o = b.rvalues.at(ri as usize).a;
+        }
+        return ir::IR_NONE;
     }
 
     // Spell comparison result `r` for operand `x`, still evaluated (it names the reads C would
@@ -15250,7 +15288,7 @@ extend CEmit {
 
     // FNV-1a fold of the active substitution env into `h`, then of receiver instance `rit` (pool
     // `rpm`) when `is_minst`: the part every demand fingerprint shares.
-    fn env_fp(self: &Self, h0: u64, rpm: ModuleId, rit: &TyInstance, is_minst: bool) u64 {
+    const fn env_fp(self: &Self, h0: u64, rpm: ModuleId, rit: &TyInstance, is_minst: bool) u64 {
         let mut h = h0;
         for k in 0..self.mg.subs.len() {
             let sb = *self.mg.subs.at(k);
@@ -15269,7 +15307,7 @@ extend CEmit {
     }
 
     // A generic call's fingerprint: `env_fp` plus the call's bound targs (pool `b.module`).
-    fn call_fp(
+    const fn call_fp(
         self: &Self,
         h0: u64,
         b: &ir::CoreBody,
@@ -17265,8 +17303,8 @@ extend CEmit {
         ) && !sym.as_str().ends_with("_np") || sym.as_str().starts_with("__sc_") {
             // A header the emitted C includes declares it: a C library name, or an entry point of the
             // runtime (`__sc_panic_str`), which `super_rt.h` or the runtime module's prototypes declare.
-            // Another reserved name (glibc's `__libc_malloc`) has
-            // no header and takes the prototype, and so does a non-portable `_np` call, which the
+            // Another reserved name (glibc's `__libc_malloc`) has no header and takes the prototype, and
+            // so do a BSD or GNU addition (`arc4random_buf`) and a non-portable `_np` call, which the
             // build's strict POSIX level hides.
             return;
         }
@@ -18948,7 +18986,7 @@ fn sc_str_decode(raw: str, dst: &mut String) {
 
 // Does float literal text `t` carry a fraction, an exponent or a binary exponent (so a C `f` suffix
 // may follow it)?
-fn float_marked(t: str) bool {
+const fn float_marked(t: str) bool {
     for i in 0..t.len() {
         let ch = t.byte_at(i);
         if ch == b'.' || ch == b'e' || ch == b'E' || ch == b'p' || ch == b'P' {
@@ -19481,7 +19519,7 @@ const fn tok_op(t: tt::TokenType) u32 {
 // each ending in a call or goto whose successor (past empty gotos) has one reachable predecessor
 // (`cf`; an inlined body leaves dead blocks whose edges are no real paths). A lane-mask temporary
 // written at `di` then holds its value at `ui` (the calls are `inf()`, `splat(..)`, ..).
-fn straight(b: &ir::CoreBody, cf: &cfl::CFlow, bd: u32, bu: u32, di: u32, ui: u32) bool {
+const fn straight(b: &ir::CoreBody, cf: &cfl::CFlow, bd: u32, bu: u32, di: u32, ui: u32) bool {
     if bd == bu {
         return di < ui;
     }
@@ -19570,7 +19608,7 @@ fn reduce_tree(o: &mut String, cn: str, x: str, chunks: u64, l: u64, i: u64) {
 // nothing. (A literal stays bound: compared with an unsigned length, GCC's `-Wtype-limits` rejects
 // `0 <= len`.)
 // Whether `s` is an integer literal (`0ULL`, `16`): digits, then letters of a suffix.
-fn int_literal(s: str) bool {
+const fn int_literal(s: str) bool {
     if s.len() == 0 || s.byte_at(0) < b'0' || s.byte_at(0) > b'9' {
         return false;
     }
@@ -19583,7 +19621,7 @@ fn int_literal(s: str) bool {
     return true;
 }
 
-fn plain_spelling(s: str) bool {
+const fn plain_spelling(s: str) bool {
     if s.len() == 0 || s.byte_at(0) >= b'0' && s.byte_at(0) <= b'9' {
         return false;
     }

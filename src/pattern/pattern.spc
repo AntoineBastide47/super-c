@@ -170,7 +170,7 @@ const fn iprev(a: i64) i64 {
 }
 
 // Sort `v[from..]` ascending in the integer order (heapsort: no allocation, O(n log n)).
-fn sort_vals(v: &mut Vector<i64>, from: usize, uns: bool) {
+const fn sort_vals(v: &mut Vector<i64>, from: usize, uns: bool) {
     let n = v.len() - from;
     let mut k = n / 2;
     while k > 0 {
@@ -186,7 +186,7 @@ fn sort_vals(v: &mut Vector<i64>, from: usize, uns: bool) {
 }
 
 // Restore the max-heap `v[from..from + n]` below position `k`.
-fn sift_down(v: &mut Vector<i64>, from: usize, k: usize, n: usize, uns: bool) {
+const fn sift_down(v: &mut Vector<i64>, from: usize, k: usize, n: usize, uns: bool) {
     let mut r = k;
     while 2 * r + 1 < n {
         let mut c = 2 * r + 1;
@@ -767,7 +767,7 @@ extend<'a> PatCx<'a> {
 
     // Whether an integer head among `seen[from..to]` holds value `a`, and in `rep` the head whose
     // interval is exactly `a..=b` (P_NONE when none is).
-    fn piece_heads(self: &Self, from: usize, to: usize, a: i64, b: i64, uns: bool, rep: &mut u32) bool {
+    const fn piece_heads(self: &Self, from: usize, to: usize, a: i64, b: i64, uns: bool, rep: &mut u32) bool {
         *rep = P_NONE;
         let mut covered = false;
         for s2 in from..to {
@@ -805,7 +805,7 @@ extend<'a> PatCx<'a> {
     }
 
     // Whether the non-wild heads `seen[from..]` are all integer constructors (at least one).
-    fn int_column(self: &Self, from: usize) bool {
+    const fn int_column(self: &Self, from: usize) bool {
         for s2 in from..self.seen.len() {
             if !is_ival(self.pats.at(self.seen[s2] as usize)) {
                 return false;

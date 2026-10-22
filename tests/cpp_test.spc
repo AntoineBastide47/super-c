@@ -204,7 +204,7 @@ fn scan_with(text: str, drop_pragmas: bool) Scan {
     return Scan { tokens: out, origins: origins, lines: lines };
 }
 
-fn skip_quoted(text: str, at: usize) usize {
+const fn skip_quoted(text: str, at: usize) usize {
     let q = text.byte_at(at);
     let mut i = at + 1;
     while i < text.len() && text.byte_at(i) != q {

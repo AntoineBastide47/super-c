@@ -13,10 +13,10 @@ struct Buf151 {
     pub b: [char; 151],
 }
 
-fn contains(hay: &String, needle: str) bool {
+const fn contains(hay: &String, needle: str) bool {
     return hay.contains(needle);
 }
-fn offset_of(src: str, needle: str) u32 {
+const fn offset_of(src: str, needle: str) u32 {
     let p = unsafe cstring::strstr(src.ptr() as *const char, needle.ptr() as *const char);
     if p == null {
         return 0;

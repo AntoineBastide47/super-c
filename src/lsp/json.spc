@@ -135,7 +135,7 @@ extend JSON {
     }
 
     /// Member for `key`; panics when missing or on a non-object (JSON::At(string)).
-    pub fn at_key(self: &Self, key: str) &JSON {
+    pub const fn at_key(self: &Self, key: str) &JSON {
         return switch self.value(key) {
             Some(v) => v,
             None => panic("JSON::at_key called with a missing key or on a non object-type"),
@@ -143,7 +143,7 @@ extend JSON {
     }
 
     /// Safe member lookup: None when absent or on a non-object (the JSON::Value analog, Option-shaped).
-    pub fn value(self: &Self, key: str) Option<&JSON> {
+    pub const fn value(self: &Self, key: str) Option<&JSON> {
         if let Obj(o) = self {
             for i in 0..o.len() {
                 if o.at(i).key.as_str() == key {
@@ -155,13 +155,13 @@ extend JSON {
     }
 
     /// True when this object has member `key` (false for non-objects).
-    pub fn contains_key(self: &Self, key: str) bool {
+    pub const fn contains_key(self: &Self, key: str) bool {
         return self.value(key).is_some();
     }
 
     /// Member as integer / string view with a default: the common LSP request-field reads. A number
     /// outside the i64 range (NaN included) also yields `dflt`.
-    pub fn value_i64(self: &Self, key: str, dflt: i64) i64 {
+    pub const fn value_i64(self: &Self, key: str, dflt: i64) i64 {
         if let Some(v) = self.value(key) {
             if let Num(n) = v {
                 if in_i64_range(*n) {
@@ -173,7 +173,7 @@ extend JSON {
     }
 
     /// Member `key` as a bool; false when absent or not a bool.
-    pub fn value_bool(self: &Self, key: str) bool {
+    pub const fn value_bool(self: &Self, key: str) bool {
         if let Some(v) = self.value(key) {
             if let Bool(b) = v {
                 return *b;
@@ -183,7 +183,7 @@ extend JSON {
     }
 
     /// Member `key` as a string view; empty when absent or not a string.
-    pub fn value_str(self: &Self, key: str) str {
+    pub const fn value_str(self: &Self, key: str) str {
         if let Some(v) = self.value(key) {
             if let Str(s) = v {
                 return s.as_str();
@@ -381,7 +381,7 @@ const fn has_zero_byte(v: u64) bool {
     return (v.wrapping_sub(SWAR_LO) & ~v & SWAR_HI) != 0;
 }
 
-fn find_string_stop(s: str, from: usize, to: usize) usize {
+const fn find_string_stop(s: str, from: usize, to: usize) usize {
     let quote_mask = SWAR_LO * 0x22;
     let slash_mask = SWAR_LO * 0x5C;
     let ctrl_mask = SWAR_LO * 0x20;

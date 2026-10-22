@@ -13,6 +13,8 @@ import build_system::objcache as ocache;
 import driver::util as du;
 import build_system::probe as probe;
 import driver_shim as shim;
+import std::platform::fs;
+import std::platform::process;
 import std::parallel::runtime as prt;
 import std::parallel::sync as psync;
 
@@ -345,6 +347,22 @@ fn hex_shift_counts_reach_the_checked_helper() {
     assert(p.cc_build("-pedantic-errors ").ok());
     let r = p.run_bin_env("");
     assert(r.exit != 0 && r.out_shows("attempt to shift right with overflow"));
+}
+
+// An inlined call that passes one integer for two parameters compares it with itself: the comparison
+// folds where it is spelled, so C never sees `x > x` (a -Wtautological-compare warning).
+@test
+fn inlined_self_comparison_folds() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
+    p.mkfile(
+        "main.spc",
+        "fn tail(s: str, end: usize) str {\n    return s.slice(end, end);\n}\nfn main() i32 {\n    return tail(\"abc\", 2).len() as i32;\n}\n",
+    );
+    let r = cli::superc_in(p.dir(), "build --profile=release");
+    assert(r.ok() && !r.out_has("tautological"));
+    let c = loader::read_file(format("{}/build/release/raw/main.c", p.dir()).as_str()).unwrap();
+    assert(!c.as_str().contains("(end > end)") && c.as_str().contains("((void)(end), false)"));
 }
 
 // A `&mut` parameter is exclusive for the call, so its C parameter is `restrict`; a `&` one is not. The
@@ -2353,8 +2371,8 @@ fn test_timeouts() {
     p.mkfile(
         "main.spc",
         M"(import std::parallel::io as io;
-import std::parallel::net as net;
-import std::parallel::time as time;
+import std::net as net;
+import std::time as time;
 @test
 fn stuck() { time::sleep(time::Duration::from_secs(60)); }
 @test(timeout = 30)
@@ -2407,7 +2425,7 @@ fn test_timeout_dumps_child_processes() {
     let root = p.dir();
     p.mkfile(
         "sleeper.spc",
-        "import stdlib;\nimport std::parallel::time as time;\nfn main() i32 {\n  if stdlib::get_env(\"SLEEPER_NOW\").is_some() {\n    return 0;\n  }\n  time::sleep(time::Duration::from_secs(60));\n  return 0;\n}\n",
+        "import stdlib;\nimport std::time as time;\nfn main() i32 {\n  if stdlib::get_env(\"SLEEPER_NOW\").is_some() {\n    return 0;\n  }\n  time::sleep(time::Duration::from_secs(60));\n  return 0;\n}\n",
     );
     let mut out = String::from_str("build -o ");
     out.push_str(root);
@@ -3122,7 +3140,7 @@ fn preemption_yields_a_spinning_task() {
 import std::parallel::sync as sync;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atom;
-import std::parallel::time as time;
+import std::time as time;
 
 fn main() i32 {
     rt::set_worker_count(1);
@@ -3371,7 +3389,7 @@ import std::parallel::sync as sync;
 import std::parallel::task as task;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atom;
-import std::parallel::time as time;
+import std::time as time;
 
 static mut G_FLAG: *const atom::Atomic<i64> = null;
 
@@ -3421,7 +3439,7 @@ import std::parallel::sync as sync;
 import std::parallel::task as task;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atom;
-import std::parallel::time as time;
+import std::time as time;
 
 static mut G_FLAG: *const atom::Atomic<i64> = null;
 
@@ -3474,7 +3492,7 @@ import std::parallel::sync as sync;
 import std::parallel::task as task;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atom;
-import std::parallel::time as time;
+import std::time as time;
 
 static mut G_FLAG: *const atom::Atomic<i64> = null;
 
@@ -3529,7 +3547,7 @@ import std::parallel::sync as sync;
 import std::parallel::task as task;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atom;
-import std::parallel::time as time;
+import std::time as time;
 
 static mut G_FLAG: *const atom::Atomic<i64> = null;
 
@@ -3594,7 +3612,7 @@ import std::parallel::sync as sync;
 import std::parallel::task as task;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atom;
-import std::parallel::time as time;
+import std::time as time;
 
 static mut G_FLAG: *const atom::Atomic<i64> = null;
 
@@ -3823,7 +3841,7 @@ import std::parallel::sync as sync;
 import std::parallel::task as task;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atom;
-import std::parallel::time as time;
+import std::time as time;
 
 static mut G_FLAG: *const atom::Atomic<i64> = null;
 
@@ -3883,7 +3901,7 @@ import std::parallel::sync as sync;
 import std::parallel::task as task;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atom;
-import std::parallel::time as time;
+import std::time as time;
 
 static mut G_FLAG: *const atom::Atomic<i64> = null;
 
@@ -3956,7 +3974,7 @@ import std::parallel::sync as sync;
 import std::parallel::task as task;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atom;
-import std::parallel::time as time;
+import std::time as time;
 
 fn flow(n: i64) i64 {
     let mut s: i64 = 0;
@@ -4178,7 +4196,7 @@ import std::parallel::blocking as blocking;
 import std::parallel::sync as sync;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atom;
-import std::parallel::time as time;
+import std::time as time;
 
 fn main() i32 {
     rt::set_worker_count(1);
@@ -4551,7 +4569,7 @@ fn reactor_udp_and_typed_errors() {
     p.mkfile(
         "main.spc",
         M"(import std::parallel::runtime as rt;
-import std::parallel::net;
+import std::net;
 import std::parallel::io;
 import std::parallel::sync;
 import std::parallel::arc;
@@ -4616,7 +4634,7 @@ fn main() i32 {
     q.mkfile(
         "main.spc",
         M"(import std::parallel::runtime as rt;
-import std::parallel::net;
+import std::net;
 import std::parallel::io;
 
 fn main() i32 {
@@ -4634,10 +4652,7 @@ fn main() i32 {
                 Unreachable => {
                     score = score + 1;
                 },
-                Reset => {},
-                AddressInUse => {},
-                Closed => {},
-                Other => {},
+                _ => {},
             };
             if e.code == 0 {
                 score = score - 10;
@@ -4656,11 +4671,7 @@ fn main() i32 {
                 AddressInUse => {
                     score = score + 1;
                 },
-                Refused => {},
-                Unreachable => {},
-                Reset => {},
-                Closed => {},
-                Other => {},
+                _ => {},
             };
         },
     };
@@ -4688,7 +4699,7 @@ fn reactor_many_connections() {
     p.mkfile(
         "main.spc",
         M"(import std::parallel::runtime as rt;
-import std::parallel::net as net;
+import std::net as net;
 import std::parallel::io as io;
 import std::parallel::sync as sync;
 import std::parallel::arc as arc;
@@ -4827,7 +4838,7 @@ import std::parallel::blocking as blocking;
 import std::parallel::sync as sync;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atom;
-import std::parallel::time as time;
+import std::time as time;
 
 extern "C" "gate.h" {
     @blocking
@@ -4929,9 +4940,9 @@ fn small_program_compiles_as_one_unit() {
         unity.contains("#include \"main.c\"") && unity.contains("#include \"util.c\""),
         "the unit includes the modules",
     );
-    let mut uo = format("{}/build/debug/obj/__sc_unity.o", root);
-    let mut mo = format("{}/build/debug/obj/main.o", root);
-    assert(unsafe shim::sc_mtime(uo.cstr()) != 0 && unsafe shim::sc_mtime(mo.cstr()) == 0, "only the unit compiles");
+    let uo = format("{}/build/debug/obj/__sc_unity.o", root);
+    let mo = format("{}/build/debug/obj/main.o", root);
+    assert(du::file_mtime(uo.as_str()) != 0 && du::file_mtime(mo.as_str()) == 0, "only the unit compiles");
 }
 
 // A program over the one-unit limit compiles its small units in packs: `__sc_pack<k>.c` includes them,
@@ -4952,9 +4963,9 @@ fn small_units_compile_in_packs() {
         "the pack includes the modules",
     );
     assert(cli::read_text(format("{}/build/debug/raw/__sc_shards", root).as_str()).contains("\npacks\t1\n"));
-    let mut po = format("{}/build/debug/obj/__sc_pack0.o", root);
-    let mut mo = format("{}/build/debug/obj/main.o", root);
-    assert(unsafe shim::sc_mtime(po.cstr()) != 0 && unsafe shim::sc_mtime(mo.cstr()) == 0, "only the pack compiles");
+    let po = format("{}/build/debug/obj/__sc_pack0.o", root);
+    let mo = format("{}/build/debug/obj/main.o", root);
+    assert(du::file_mtime(po.as_str()) != 0 && du::file_mtime(mo.as_str()) == 0, "only the pack compiles");
     p.mkfile("src/util.spc", "pub fn three() i32 {\n    return 4;\n}\n");
     // No object cache: a run before this one may hold the edited pack's object.
     let r = cli::superc_env_in(root, "SC_BUILD_STATS", "- SC_NO_CACHE=1", "build");
@@ -4980,8 +4991,8 @@ fn edited_header_recompiles_its_units() {
     );
     let root = p.dir();
     assert_eq(cli::superc_in(root, "run").exit, 41);
-    let mut gch = format("{}/build/debug/obj/__sc_fwd.h.gch", root);
-    assert(unsafe shim::sc_mtime(gch.cstr()) != 0, "the header is precompiled");
+    let gch = format("{}/build/debug/obj/__sc_fwd.h.gch", root);
+    assert(du::file_mtime(gch.as_str()) != 0, "the header is precompiled");
     assert(cli::read_text(format("{}/build/debug/obj/main.cmd", root).as_str()).contains(" -include "));
     p.mkfile("val.h", "static inline int val(void) { return 42; }\n");
     assert_eq(cli::superc_in(root, "run").exit, 42);
@@ -5462,7 +5473,7 @@ fn coroutine_sleep_and_timers() {
         "main.spc",
         M"(import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
-import std::parallel::time as time;
+import std::time as time;
 import std::parallel::platform as platform;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atom;
@@ -5527,7 +5538,7 @@ fn task_aware_locks() {
         "main.spc",
         M"(import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
-import std::parallel::time as time;
+import std::time as time;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atom;
 
@@ -5635,7 +5646,7 @@ fn channel_unbounded_and_timeouts() {
         "main.spc",
         M"(import std::parallel::runtime as rt;
 import std::parallel::channel as chan;
-import std::parallel::time as time;
+import std::time as time;
 import std::parallel::platform as platform;
 
 fn main() i32 {
@@ -5721,7 +5732,7 @@ fn timed_wait_deadline_races() {
         M"(import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
 import std::parallel::channel as chan;
-import std::parallel::time as time;
+import std::time as time;
 import std::parallel::arc as arc;
 
 fn main() i32 {
@@ -5795,7 +5806,7 @@ fn select_waits_on_several_channels() {
 import std::parallel::channel as chan;
 import std::parallel::selector as selector;
 import std::parallel::sync as sync;
-import std::parallel::time as time;
+import std::time as time;
 import std::parallel::platform as platform;
 import std::parallel::arc as arc;
 
@@ -5962,7 +5973,7 @@ fn select_arms_and_fairness() {
 import std::parallel::channel as chan;
 import std::parallel::selector as selector;
 import std::parallel::sync as sync;
-import std::parallel::time as time;
+import std::time as time;
 import std::parallel::platform as platform;
 
 fn main() i32 {
@@ -6098,7 +6109,7 @@ fn select_keyword() {
         M"(import std::parallel::runtime as rt;
 import std::parallel::channel as chan;
 import std::parallel::sync as sync;
-import std::parallel::time as time;
+import std::time as time;
 import std::parallel::arc as arc;
 
 struct Pair {
@@ -6509,7 +6520,7 @@ fn data_parallel_wakes_a_second_worker() {
 import std::parallel::data as parallel;
 import std::parallel::atomics as atom;
 import std::parallel::platform as platform;
-import std::parallel::time as time;
+import std::time as time;
 
 // Count in, then wait up to five seconds for `want` arrivals; whether they came.
 fn meet(c: &atom::Atomic<i64>, want: i64) bool {
@@ -6904,7 +6915,7 @@ fn main() i32 {
     assert(cc.ok());
     // The program makes its probe directory in its working directory: the scratch project, never the
     // repository (the runner restores the working directory after the test).
-    assert(unsafe shim::sc_chdir(p.rootp()) == 0, "into the scratch project");
+    assert(process::set_current_dir(p.dir()).is_ok(), "into the scratch project");
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
 }
@@ -7445,9 +7456,9 @@ fn module_errors() {
     b.add(
         "a private type",
         "import l1::lib;\nfn use_it(p: l1::lib::Secret) i32 { return 0; }\nfn main() i32 { return 0; }\n",
-        "no public type",
+        "no visible type",
     );
-    b.add("a private constant", "import l2::lib;\nfn main() i32 { return l2::lib::K; }\n", "no public");
+    b.add("a private constant", "import l2::lib;\nfn main() i32 { return l2::lib::K; }\n", "no visible");
     b.add("a private field", "import l3::lib;\nfn main() i32 { let p = l3::lib::mk(); return p.x; }\n", "is private");
     p.expect_batch(b);
 }
@@ -7521,9 +7532,9 @@ fn main() i32 {
 
     let mut b = cli::Batch::new(QUAL_PRE, "");
     b.one = true;
-    qual_fails(&mut b, "let w: W<m::P> = W { x: 1 };", "no public type or constant 'P' in the imported module", "9:17");
-    qual_fails(&mut b, "let w = g::<m::P>();", "no public type or constant 'P' in the imported module", "9:20");
-    qual_fails(&mut b, "let w: W<{m::P}> = W { x: 1 };", "no public item 'P' in module 'm'", "9:18");
+    qual_fails(&mut b, "let w: W<m::P> = W { x: 1 };", "no visible type or constant 'P' in the imported module", "9:17");
+    qual_fails(&mut b, "let w = g::<m::P>();", "no visible type or constant 'P' in the imported module", "9:20");
+    qual_fails(&mut b, "let w: W<{m::P}> = W { x: 1 };", "no visible item 'P' in module 'm'", "9:18");
     qual_fails(&mut b, "let w: W<m::Foo::Q> = W { x: 1 };", "no associated constant 'Q' on 'm::Foo'", "9:22");
     qual_fails(&mut b, "let w = g::<m::Foo::Z>();", "no associated constant 'Z' on 'm::Foo'", "9:25");
     qual_fails(&mut b, "let w = g::<{m::Foo::Q}>();", "no associated constant 'Q' on 'm::Foo'", "9:26");
@@ -8852,10 +8863,10 @@ fn vendor_strips_submodule_git_and_follows_the_ref() {
     };
     let mut sg = String::new();
     sg.format_into("{}/vendor/mylib/sub/.git", root);
-    assert(unsafe shim::sc_mtime(sg.cstr()) == 0, "no submodule .git survives");
+    assert(du::file_mtime(sg.as_str()) == 0, "no submodule .git survives");
     let mut tg = String::new();
     tg.format_into("{}/vendor/mylib/.git", root);
-    assert(unsafe shim::sc_mtime(tg.cstr()) == 0, "no top .git survives");
+    assert(du::file_mtime(tg.as_str()) == 0, "no top .git survives");
 }
 
 // `git -C <root>/<dir> <args>`, its exit status.
@@ -9145,24 +9156,7 @@ fn the_object_cache_keys_on_the_compiler_command() {
 
 // The entry names of `dir`, without `.`-prefixed names.
 fn dir_names(dir: str) Vector<String> {
-    let mut out = Vector::<String>::new();
-    let mut d = String::from_str(dir);
-    let dh = unsafe shim::sc_opendir(d.cstr());
-    if dh == null {
-        return out;
-    }
-    loop {
-        let e = unsafe shim::sc_readdir(dh);
-        if e == null {
-            break;
-        }
-        let nm = unsafe str::from_cstr(shim::sc_dirent_name(e));
-        if !nm.starts_with(".") {
-            out.push(String::from_str(nm));
-        }
-    }
-    unsafe shim::sc_closedir(dh);
-    return out;
+    return du::list_dir(dir, false).unwrap_or(Vector::<String>::new());
 }
 
 // The cache root of the project below cache base `cache` (the first one listed; the script builds'
@@ -9319,7 +9313,7 @@ fn rewritten_header_restales_units() {
     // A std unit: its source is unchanged, only the forward header it includes changed.
     let mut core = String::new();
     core.format_into("{}/__std/core.o", objd.as_str());
-    let mt = unsafe shim::sc_mtime(core.cstr());
+    let mt = du::file_mtime(core.as_str());
     assert(mt != 0 && mt < 1850000000, "the unit compiled again (its object is no longer dated 2030)");
 }
 
@@ -9377,17 +9371,17 @@ fn object_cache_sweep() {
     let mut idle_lto = String::new();
     idle_lto.format_into("{}/app/lto/00000000000000cc", cache.as_str());
     age_tree(idle_lto.as_str());
-    let mut dead = format("{}/app/o/00000000000000aa", cache.as_str());
+    let dead = format("{}/app/o/00000000000000aa", cache.as_str());
     assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok(), "a build under a fresh stamp");
-    assert(unsafe shim::sc_mtime(dead.cstr()) != 0, "a fresh stamp skips the sweep");
+    assert(du::file_mtime(dead.as_str()) != 0, "a fresh stamp skips the sweep");
     let mut stamp = String::new();
     stamp.format_into("{}/app/o/.sweep", cache.as_str());
     age_tree(stamp.as_str());
     assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok(), "a build under an old stamp");
-    assert(unsafe shim::sc_mtime(dead.cstr()) == 0, "the sweep removes the dead namespace");
+    assert(du::file_mtime(dead.as_str()) == 0, "the sweep removes the dead namespace");
     for f in outside {
-        let mut fp = format("{}/{}", root, f);
-        assert(unsafe shim::sc_mtime(fp.cstr()) != 0, "nothing outside the project's root changes");
+        let fp = format("{}/{}", root, f);
+        assert(du::file_mtime(fp.as_str()) != 0, "nothing outside the project's root changes");
     }
     let mut od = String::new();
     od.format_into("{}/app/o", cache.as_str());
@@ -9411,7 +9405,7 @@ fn object_cache_sweep() {
     ld.format_into("{}/app/lto", cache.as_str());
     let ltos = dir_names(ld.as_str());
     assert(ltos.len() == 1 && ltos.at(0).as_str() == "00000000000000dd", "only the used linker cache stays");
-    assert(unsafe shim::sc_mtime(stamp.cstr()) > 1600000000, "the sweep renews its stamp");
+    assert(du::file_mtime(stamp.as_str()) > 1600000000, "the sweep renews its stamp");
 }
 
 // The cache key `rec_path` (a unit's `.cmd` record) names: its third line.
@@ -9432,14 +9426,14 @@ fn object_cache_links_one_copy() {
     let cache = format("{}/ocache", root);
     assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok(), "the build");
     let key = rec_key(format("{}/build/debug/obj/main.cmd", root).as_str());
-    let mut obj = format("{}/build/debug/obj/main.o", root);
-    let mut own = format("{}/{}.o", cache_ns(cache.as_str()).as_str(), key.as_str());
-    let mut shared = ocache::script_entry(
+    let obj = format("{}/build/debug/obj/main.o", root);
+    let own = format("{}/{}.o", cache_ns(cache.as_str()).as_str(), key.as_str());
+    let shared = ocache::script_entry(
         format("{}/o/script", proj_root(cache.as_str()).as_str()).as_str(),
         format("{}.o", key.as_str()).as_str(),
     );
-    assert(unsafe shim::sc_same_file(obj.cstr(), own.cstr()) == 1, "the namespace entry is the object");
-    assert(unsafe shim::sc_same_file(obj.cstr(), shared.cstr()) == 1, "the shared entry is the object");
+    assert(du::same_file(obj.as_str(), own.as_str()), "the namespace entry is the object");
+    assert(du::same_file(obj.as_str(), shared.as_str()), "the shared entry is the object");
 }
 
 // A unit compiled again writes a new file: the cache entry its earlier object was a name of keeps its
@@ -9455,15 +9449,16 @@ fn object_cache_entry_survives_a_recompile() {
     assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok(), "the first version builds");
     let cmd = format("{}/build/debug/obj/main.cmd", root);
     let key = rec_key(cmd.as_str());
-    let mut entry = format("{}/{}.o", cache_ns(cache.as_str()).as_str(), key.as_str());
+    let entry = format("{}/{}.o", cache_ns(cache.as_str()).as_str(), key.as_str());
     let before = loader::read_file(entry.as_str()).unwrap();
     cache_version(&p, 1);
     assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok(), "the second version builds");
     assert(rec_key(cmd.as_str()).as_str() != key.as_str(), "the unit compiled again");
     let after = loader::read_file(entry.as_str()).unwrap();
     assert(after.as_str() == before.as_str(), "the first version's entry keeps its bytes");
-    let mut obj = format("{}/build/debug/obj/main.o", root);
-    assert(unsafe shim::sc_same_file(obj.cstr(), entry.cstr()) == 0, "the new object is another file");
+    let obj = format("{}/build/debug/obj/main.o", root);
+    assert(!du::same_file(obj.as_str(), entry.as_str()), "the new object is another file");
+    assert(fs::stat(obj.as_str()).is_ok() && fs::stat(entry.as_str()).is_ok(), "both files exist");
 }
 
 // An object's time is its `.cmd` record's. Another tree's use of a shared cache entry dates the entry,
@@ -9526,23 +9521,20 @@ fn project_sweep_removes_idle_outputs() {
     age_tree(old.as_str());
     age_tree(rec.as_str());
     age_tree(locked.as_str());
-    let mut lk = format("{}/bench/.lock", locked.as_str());
-    let h = unsafe shim::sc_tree_lock(lk.cstr(), 0);
-    assert(h >= 0, "the test holds the nested tree's lock");
+    let lk = format("{}/bench/.lock", locked.as_str());
+    let h = bsys::lock_file(lk.as_str(), 0);
+    assert(h.held(), "the test holds the nested tree's lock");
     assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok(), "a build under a fresh stamp");
-    let mut oldf = format("{}/obj/x.o", old.as_str());
-    assert(unsafe shim::sc_mtime(oldf.cstr()) != 0, "a fresh stamp skips the sweep");
+    let oldf = format("{}/obj/x.o", old.as_str());
+    assert(du::file_mtime(oldf.as_str()) != 0, "a fresh stamp skips the sweep");
     age_tree(format("{}/build/.sweep", root).as_str());
     assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "build").ok(), "a build under an old stamp");
-    unsafe shim::sc_tree_unlock(h);
-    let mut oldc = old.clone();
-    let mut recc = rec.clone();
-    let mut lockedc = locked.clone();
-    let mut own = format("{}/build/debug/obj/main.o", root);
-    assert(unsafe shim::sc_mtime(oldc.cstr()) == 0, "the idle tree goes");
-    assert(unsafe shim::sc_mtime(recc.cstr()) == 0, "the idle link record goes");
-    assert(unsafe shim::sc_mtime(lockedc.cstr()) != 0, "a tree whose lock a build holds stays");
-    assert(unsafe shim::sc_mtime(own.cstr()) != 0, "the build's own tree stays");
+    drop_lock(h);
+    let own = format("{}/build/debug/obj/main.o", root);
+    assert(du::file_mtime(old.as_str()) == 0, "the idle tree goes");
+    assert(du::file_mtime(rec.as_str()) == 0, "the idle link record goes");
+    assert(du::file_mtime(locked.as_str()) != 0, "a tree whose lock a build holds stays");
+    assert(du::file_mtime(own.as_str()) != 0, "the build's own tree stays");
 }
 
 // A root beside the manifest (`root = "main.spc"`) puts the default out-dir where that root's bare build
@@ -9562,10 +9554,10 @@ fn project_sweep_keeps_the_tree_of_a_root_beside_the_manifest() {
     age_tree(format("{}/build/.sweep", root).as_str());
     let r = cli::superc_env_in(root, "SC_BUILD_STATS", "-", "build");
     assert(r.ok() && r.out_has("\"skip_emit\":true"), "a build under a fresh emit stamp and an old sweep stamp");
-    let mut rt = format("{}/build/debug/raw/super_rt.h", root);
-    let mut obj = format("{}/build/debug/obj", root);
-    assert(unsafe shim::sc_mtime(rt.cstr()) != 0, "the sweep keeps the engine's tree");
-    assert(unsafe shim::sc_mtime(obj.cstr()) != 0, "and its objects");
+    let rt = format("{}/build/debug/raw/super_rt.h", root);
+    let obj = format("{}/build/debug/obj", root);
+    assert(du::file_mtime(rt.as_str()) != 0, "the sweep keeps the engine's tree");
+    assert(du::file_mtime(obj.as_str()) != 0, "and its objects");
 }
 
 // `super-c clean` runs both sweeps now, whatever their stamps: the idle out-dir entries and the dead cache
@@ -9591,23 +9583,21 @@ fn clean_sweeps_and_full_removes() {
     p.mkfile("ocache/app/o/00000000000000aa/owner", gone.as_str());
     p.mkfile("ocache/other/o/00000000000000bb/owner", gone.as_str());
     assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "clean").ok(), "clean sweeps");
-    let mut oldc = old.clone();
-    let mut dead = format("{}/app/o/00000000000000aa", cache.as_str());
-    let mut livec = live.clone();
-    let mut own = format("{}/build/debug/obj/main.o", root);
-    assert(unsafe shim::sc_mtime(oldc.cstr()) == 0, "clean removes the idle tree");
-    assert(unsafe shim::sc_mtime(dead.cstr()) == 0, "clean removes the dead namespace");
-    assert(unsafe shim::sc_mtime(livec.cstr()) != 0, "the live namespace stays");
-    assert(unsafe shim::sc_mtime(own.cstr()) != 0, "the fresh tree stays");
+    let dead = format("{}/app/o/00000000000000aa", cache.as_str());
+    let own = format("{}/build/debug/obj/main.o", root);
+    assert(du::file_mtime(old.as_str()) == 0, "clean removes the idle tree");
+    assert(du::file_mtime(dead.as_str()) == 0, "clean removes the dead namespace");
+    assert(du::file_mtime(live.as_str()) != 0, "the live namespace stays");
+    assert(du::file_mtime(own.as_str()) != 0, "the fresh tree stays");
     assert(cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "clean --cache").exit != 0, "--cache is rejected");
     let r = cli::superc_env_in(root, "SC_CACHE_DIR", cache.as_str(), "clean --full");
     assert(r.ok() && r.out_has("removed"), "clean --full names the cache it removed");
-    let mut out = format("{}/build", root);
-    let mut cachec = format("{}/app", cache.as_str());
-    let mut other = format("{}/other/o/00000000000000bb", cache.as_str());
-    assert(unsafe shim::sc_mtime(out.cstr()) == 0, "--full removes the out-dir");
-    assert(unsafe shim::sc_mtime(cachec.cstr()) == 0, "--full removes the project's cache root");
-    assert(unsafe shim::sc_mtime(other.cstr()) != 0, "another project's cache stays");
+    let out = format("{}/build", root);
+    let cachec = format("{}/app", cache.as_str());
+    let other = format("{}/other/o/00000000000000bb", cache.as_str());
+    assert(du::file_mtime(out.as_str()) == 0, "--full removes the out-dir");
+    assert(du::file_mtime(cachec.as_str()) == 0, "--full removes the project's cache root");
+    assert(du::file_mtime(other.as_str()) != 0, "another project's cache stays");
 }
 
 // Two source trees with byte-identical sources share one object cache. Their emitted headers include the
@@ -10126,11 +10116,8 @@ fn main() i32 {
 
 // Build-engine hardening gates: shell-free process spawning (paths pass through verbatim), no-change
 // builds rewriting nothing, -MMD header invalidation, flag invalidation, compile_commands.json.
-import driver_shim as p13shim;
-
 fn p13_mtime(path: str) i64 {
-    let mut p9 = String::from_str(path);
-    return unsafe p13shim::sc_mtime_ns(p9.cstr());
+    return bsys::file_mtime_ns(path);
 }
 
 // The compile/link argv reaches the C compiler without a shell, so a project living under a
@@ -10487,7 +10474,7 @@ fn build_lto_modes() {
 }
 
 // The result field of probe `id`'s line in probe record `s`; empty when the record has none.
-fn probe_result<'a>(s: str<'a>, id: str) str<'a> {
+const fn probe_result<'a>(s: str<'a>, id: str) str<'a> {
     for i in 0..s.len() {
         let line = lto_line(s, i);
         if line.len() == 0 && i != 0 {
@@ -10505,7 +10492,7 @@ fn probe_result<'a>(s: str<'a>, id: str) str<'a> {
     return s.slice(0, 0);
 }
 
-fn lto_line(s: str, idx: usize) str {
+const fn lto_line(s: str, idx: usize) str {
     let mut a: usize = 0;
     let mut k: usize = 0;
     for i in 0..s.len() {
@@ -10535,7 +10522,7 @@ fn build_lto_probe_fallback() {
     );
     let mut wrap = String::new();
     wrap.format_into("{}/cc.sh", root);
-    let _ = unsafe shim::sc_chmod_exec(wrap.cstr());
+    let _ = fs::set_permissions(wrap.as_str(), 0o755);
     let mut toml = String::new();
     toml.format_into(
         "bin = \"app\"\nroot = \"src/main.spc\"\ncc = \"{}\"\n[profile.rel]\ncflags = [\"-O1\"]\nlto = \"thin\"\n",
@@ -10610,8 +10597,7 @@ fn build_print_probes() {
     assert(lto_line(s, t.len() + 2).len() == 0, "nothing follows the table");
     let mut recp = String::new();
     recp.format_into("{}/build/debug/.probes", root);
-    let mut rp = recp.clone();
-    assert(unsafe shim::sc_unlink(rp.cstr()) == 0, "the run wrote the record");
+    assert(fs::unlink(recp.as_str()).is_ok(), "the run wrote the record");
     let r2 = cli::superc_in(root, "build --print-probes");
     assert(r2.ok() && unsafe str::from_cstr(r2.out) == s, "a fresh record gives the same table");
     let m1 = p13_mtime(recp.as_str());
@@ -10625,7 +10611,7 @@ fn build_print_probes() {
 }
 
 // Result `res` is one that a probe of `kind` with spellings `forms` can give.
-fn probe_result_fits(kind: str, forms: str, res: str) bool {
+const fn probe_result_fits(kind: str, forms: str, res: str) bool {
     if res == probe::NOT_APPLICABLE || res == "rejected" && kind != "lto" {
         return true;
     }
@@ -10772,12 +10758,12 @@ fn build_publication_failure_keeps_artifact() {
     // read-only mode).
     let mut gen = String::new();
     gen.format_into("{}/build/debug/raw/main.c", root);
-    assert(unsafe shim::sc_rm_rf(gen.cstr()) == 0 && unsafe shim::sc_mkdir_p(gen.cstr()) == 0, "the lock is in place");
+    assert(fs::remove_all(gen.as_str()).is_ok() && fs::mkdir_all(gen.as_str()).is_ok(), "the lock is in place");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 4;\n}\n");
     let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build");
     assert(!r.ok() && r.out_has("raw/main.c: "), "the publication failure fails the build and names the file");
     assert(p13_mtime(bin.as_str()) == b1, "the previous binary stays in place");
-    assert(unsafe shim::sc_rm_rf(gen.cstr()) == 0, "the lock is gone");
+    assert(fs::remove_all(gen.as_str()).is_ok(), "the lock is gone");
     assert_eq(cli::superc_env_in(root, "SC_NO_CACHE", "1", "run").exit, 4);
 }
 
@@ -11117,9 +11103,9 @@ fn rm_rf_does_not_follow_a_directory_link() {
     let mut keep = root.to_string();
     keep.push_str("/target/keep.txt");
     assert_eq(unsafe symlink(target.cstr(), link.cstr()), 0);
-    assert_eq(unsafe shim::sc_rm_rf(tree.cstr()), 0);
-    assert_eq(unsafe shim::sc_lstat_isdir(tree.cstr()), -1);
-    assert_eq(unsafe shim::sc_lstat_isdir(keep.cstr()), 0);
+    assert(fs::remove_all(tree.as_str()).is_ok());
+    assert(fs::lstat(tree.as_str()).unwrap_err().kind == IoErrorKind::NotFound);
+    assert(fs::lstat(keep.as_str()).unwrap().kind == fs::FileKind::File);
 }
 
 // A left-associative chain at the parser's limit (4096 operands) nests as deep on its left operand.
@@ -12381,12 +12367,12 @@ fn script_build_sweeps_the_cache() {
     assert(script_build(ta.as_str(), cache.as_str(), 1), "the first build");
     let gone = format("{}/gone", root);
     p.mkfile("ocache/.scripts/o/00000000000000aa/owner", gone.as_str());
-    let mut dead = format("{}/{}/o/00000000000000aa", cache.as_str(), ocache::SCRIPTS_DIR);
+    let dead = format("{}/{}/o/00000000000000aa", cache.as_str(), ocache::SCRIPTS_DIR);
     assert(script_build(ta.as_str(), cache.as_str(), 1), "a build under a fresh stamp");
-    assert(unsafe shim::sc_mtime(dead.cstr()) != 0, "a fresh stamp skips the sweep");
+    assert(du::file_mtime(dead.as_str()) != 0, "a fresh stamp skips the sweep");
     age_tree(format("{}/{}/o/.sweep", cache.as_str(), ocache::SCRIPTS_DIR).as_str());
     assert(script_build(ta.as_str(), cache.as_str(), 1), "a build under an old stamp");
-    assert(unsafe shim::sc_mtime(dead.cstr()) == 0, "the sweep removes the dead namespace");
+    assert(du::file_mtime(dead.as_str()) == 0, "the sweep removes the dead namespace");
     assert_eq(script_run(ta.as_str()), 3);
 }
 
@@ -12457,8 +12443,7 @@ fn trim_bounds_the_script_objects() {
     }
     ocache::trim_objects(od.as_str(), 0, u64::MAX, 40, 30, false);
     assert_eq(script_count(ns.as_str(), ".o"), 30);
-    let mut lc = lo.clone();
-    assert(unsafe shim::sc_mtime(lc.cstr()) != 0, "the linked object stays");
+    assert(du::file_mtime(lo.as_str()) != 0, "the linked object stays");
     ocache::trim_objects(od.as_str(), 0, u64::MAX, 40, 30, true);
     assert_eq(script_count(ns.as_str(), ".o"), 1);
     assert_eq(script_count(ns.as_str(), ".d"), 1);
@@ -12493,8 +12478,7 @@ fn trim_keeps_the_project_budget() {
     let nb = cli::dir_count_suffix(format("{}/00000000000000bb", od.as_str()).as_str(), ".o");
     assert_eq(na + nb, 4);
     assert_eq(script_count(ns.as_str(), ".o"), na);
-    let mut fc = first.clone();
-    assert(unsafe shim::sc_mtime(fc.cstr()) != 0, "the linked object stays");
+    assert(du::file_mtime(first.as_str()) != 0, "the linked object stays");
 }
 
 // Units with one file name in two directories (a user module `lib/string` beside the std `string`)
@@ -12550,11 +12534,23 @@ fn cwd_free_rejects_relative_paths() {
     assert(!ocache::cwd_free(&rel, &fl), "a relative compiler path");
 }
 
-import std::parallel::time as ptime;
+import std::time as ptime;
 
 // One process builds a tree at a time: a build whose tree another process holds says it waits,
 // waits, and finishes once the holder releases the tree. Two builds of one tree would otherwise
 // rewrite the units each other compiles and cache objects under the wrong keys.
+// Start `argv` in directory `dir` with its stdout and stderr in file `log`.
+fn spawn_logged(argv: []str, log: str, dir: str) process::Child {
+    let mut cmd = process::Command::new(argv);
+    cmd.cwd = Option::<str>::Some(dir);
+    cmd.stdout = process::Redirect::Path(log);
+    cmd.stderr = process::Redirect::Stdout;
+    return process::spawn(cmd).unwrap();
+}
+
+// Release lock `h` here: the scope's end would release it only after the asserts that follow.
+const fn drop_lock(_h: bsys::Lock) {}
+
 @test
 fn a_build_waits_for_the_holder_of_its_tree() {
     if cli::on_wasm() {
@@ -12564,18 +12560,12 @@ fn a_build_waits_for_the_holder_of_its_tree() {
     p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
     assert(p.compile("main.spc").ok());
     let root = p.dir();
-    let mut lock = format("{}/build/debug/.lock", root);
-    let h = unsafe shim::sc_tree_lock(lock.cstr(), 0);
-    assert(h >= 0, "the test takes the tree's lock");
-    let mut log = format("{}/second.log", root);
-    let mut sc = String::from_str(cli::superc_path());
-    let mut mainp = String::from_str("main.spc");
-    let mut ptrs = Vector::<usize>::new();
-    ptrs.push(sc.cstr() as usize);
-    ptrs.push(mainp.cstr() as usize);
-    ptrs.push(0);
-    let pid = unsafe shim::sc_spawn_argv_in(ptrs.as_ptr() as *const *const char, log.cstr(), p.rootp());
-    assert(pid > 0, "the second build starts");
+    let lock = format("{}/build/debug/.lock", root);
+    let h = bsys::lock_file(lock.as_str(), 0);
+    assert(h.held(), "the test takes the tree's lock");
+    let log = format("{}/second.log", root);
+    let argv: [str; 2] = [cli::superc_path(), "main.spc"];
+    let mut child = spawn_logged(argv, log.as_str(), root);
     let mut told = false;
     for _ in 0..600 {
         if cli::read_text(log.as_str()).as_str().find("waiting for another build") >= 0 {
@@ -12584,13 +12574,11 @@ fn a_build_waits_for_the_holder_of_its_tree() {
         }
         ptime::sleep(ptime::Duration::from_millis(50));
     }
-    let mut code: i32 = 0;
-    let pids: [i64; 1] = [pid];
-    let still = unsafe shim::sc_try_wait(&pids[0], 1, &mut code) < 0;
-    unsafe shim::sc_tree_unlock(h);
+    let still = child.try_wait().unwrap().is_none();
+    drop_lock(h);
     assert(told, "the second build says it waits for the tree");
     assert(still, "the second build waits while the tree is held");
-    assert(unsafe shim::sc_waitpid(pid, &mut code) == 0 && code == 0, "the second build finishes once the tree is free");
+    assert(child.wait().unwrap() == process::ExitStatus::Code(0), "the second build finishes once the tree is free");
 }
 
 // A process killed while it holds jobserver slots gives them back: the system drops its slot locks at
@@ -12612,20 +12600,12 @@ fn a_killed_build_gives_its_jobserver_slots_back() {
     p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
     let root = p.dir();
     assert(cli::superc_env_in(root, "SC_LEAK_CHECK", "fatal", "build").ok(), "the tree builds");
-    let mut lock = format("{}/build/debug/.lock", root);
-    let h = unsafe shim::sc_tree_lock(lock.cstr(), 0);
-    assert(h >= 0, "the test takes the tree's lock");
-    let mut log = format("{}/build.log", root);
-    let mut sc = String::from_str(cli::superc_path());
-    let mut build = String::from_str("build");
-    let mut jobs = String::from_str("--jobs=4");
-    let mut ptrs = Vector::<usize>::new();
-    ptrs.push(sc.cstr() as usize);
-    ptrs.push(build.cstr() as usize);
-    ptrs.push(jobs.cstr() as usize);
-    ptrs.push(0);
-    let pid = unsafe shim::sc_spawn_argv_in(ptrs.as_ptr() as *const *const char, log.cstr(), p.rootp());
-    assert(pid > 0, "the build starts");
+    let lock = format("{}/build/debug/.lock", root);
+    let h = bsys::lock_file(lock.as_str(), 0);
+    assert(h.held(), "the test takes the tree's lock");
+    let log = format("{}/build.log", root);
+    let argv: [str; 3] = [cli::superc_path(), "build", "--jobs=4"];
+    let mut child = spawn_logged(argv, log.as_str(), root);
     let mut told = false;
     for _ in 0..600 {
         if cli::read_text(log.as_str()).as_str().find("waiting for another build") >= 0 {
@@ -12637,10 +12617,9 @@ fn a_killed_build_gives_its_jobserver_slots_back() {
     assert(told, "the build waits for the tree");
     assert_eq(unsafe shim::sc_jobserver_claim(4), 1);
     unsafe shim::sc_jobserver_release_claim();
-    assert(unsafe shim::sc_kill(pid) == 0, "the build is killed");
-    let mut code: i32 = 0;
-    let _ = unsafe shim::sc_waitpid(pid, &mut code);
-    unsafe shim::sc_tree_unlock(h);
+    assert(child.kill().is_ok(), "the build is killed");
+    let _ = child.wait();
+    drop_lock(h);
     assert_eq(unsafe shim::sc_jobserver_claim(4), 4);
     unsafe shim::sc_jobserver_release_claim();
 }

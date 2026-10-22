@@ -57,7 +57,7 @@ extend BceStats {
 
 // One established or branch-derived fact. kinds: 0 = idx < len, 1 = idx <= len.
 // Fields sort by size (8, 4, then 1 byte) so the struct has no padding holes.
-struct Fact {
+pub struct Fact {
     // index key: a constant or a (local, version) value plus an affine constant offset
     pub ic: i64,
     pub ioff: i64,
@@ -84,7 +84,7 @@ const MAX_TOTAL_FACTS: usize = 16384;
 
 // Per-local length bindings, stamped with the version of the OWNER local at definition time so a
 // redefinition invalidates them without any sweep.
-struct LenBind {
+pub struct LenBind {
     pub pl: u32, // the measured place (structural identity)
     pub hg: u32,
     pub bg: u32,
@@ -97,7 +97,7 @@ struct LenBind {
 // (the operand pair swaps for > and >=). `a_lp`/`b_lp` are the sides' length-place identities
 // captured AT THE COMPARISON (a still-current length local, or a direct prelude len-field read),
 // so a later fold proof can match the side against a recorded length fact.
-struct CmpBind {
+pub struct CmpBind {
     pub a: fx::VKey,
     pub b: fx::VKey,
     pub a_lp: LenBind,
@@ -109,14 +109,14 @@ struct CmpBind {
 // `l = IN_CHUNK(i, e)` at version `my_v`: `l <= e`, so a branch fact `x < l` (or `x <= l`) also
 // holds for `e`, whose key and length place are captured here. A strip-mined loop's body learns
 // its index bound through this.
-struct ChunkBind {
+pub struct ChunkBind {
     pub e: fx::VKey,
     pub e_lp: LenBind,
     pub l: u32,
     pub my_v: u32,
 }
 // `l = x % c` (usize, c > 0) at version `my_v`: `x - l` is at most `x` and a multiple of `c`.
-struct RemBind {
+pub struct RemBind {
     pub x: fx::VKey,
     pub x_lp: LenBind,
     pub c: i64,
@@ -124,12 +124,12 @@ struct RemBind {
     pub ok: bool,
 }
 // The value of a local at version `my_v` is a multiple of `st` (0: no binding).
-struct AlBind {
+pub struct AlBind {
     pub st: u64,
     pub my_v: u32,
 }
 // Local `l` at version `v` holds the length `lb` names: its solved interval bounds that length.
-struct LRead {
+pub struct LRead {
     pub lb: LenBind,
     pub l: u32,
     pub v: u32,
@@ -264,13 +264,13 @@ extend Bce {
         ) && (x.fg == y.fg || !self.fx.resident(b, x.pl));
     }
 
-    fn vkey(self: &Self, b: &ir::CoreBody, opid: u32) fx::VKey {
+    const fn vkey(self: &Self, b: &ir::CoreBody, opid: u32) fx::VKey {
         return self.fx.vkey(b, opid);
     }
 
     /// `vkey` refusing any resolution step through a local reassigned inside the current coalescing
     /// window (its recorded binds describe its OLD value).
-    fn vkey_c(self: &Self, b: &ir::CoreBody, opid: u32) fx::VKey {
+    const fn vkey_c(self: &Self, b: &ir::CoreBody, opid: u32) fx::VKey {
         return self.fx.vkey_w(b, opid, &self.cwritten, self.cstamp, true);
     }
 
@@ -864,7 +864,7 @@ extend Bce {
 
     // The absolute offset from coalescing root `ik` of operand `opid` (whole local `x`, IR_NONE
     // when it is none): an in-window alias of `x` first, else the operand's own clean chain.
-    fn root_off(self: &mut Self, b: &ir::CoreBody, x: u32, opid: u32, ik: &fx::VKey, off: &mut i64) bool {
+    const fn root_off(self: &mut Self, b: &ir::CoreBody, x: u32, opid: u32, ik: &fx::VKey, off: &mut i64) bool {
         if x != ir::IR_NONE {
             let mut q = self.la_dest.len();
             while q > 0 {

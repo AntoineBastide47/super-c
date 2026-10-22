@@ -188,7 +188,7 @@ the `<` after a `::` tells it from the type `W<u8>`, and `fmt` keeps the spellin
 extend's constant for a concrete instance (`F<{G::<u16>::S * 2}>`); otherwise it is "cannot infer the generic
 arguments of associated constant 'K'; give explicit type arguments", with a note at each candidate. A module may qualify each of them
 (`F<m::B>`, `F<{m::B}>`, `F<m::Foo::K>`, `F<m::D::Y>`, `g::<m::B>()`, and a builtin limit through
-an alias, `F<m::U::MAX>`); only a `pub` constant is visible ("no public type or constant 'P' in the
+an alias, `F<m::U::MAX>`); only a constant the module sees resolves ("no visible type or constant 'P' in the
 imported module", "no associated constant 'Q' on 'm::Foo'"). A type for a const parameter is "expected a
 constant for const parameter 'N', found type 'u64'", a value for a type parameter is "expected a
 type for generic parameter 'T', found a constant", and a qualified path naming no constant is "no

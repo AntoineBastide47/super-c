@@ -10,7 +10,7 @@ fn parse_ok(src: str) Vector<toml::TomlItem> {
     return items.unwrap();
 }
 
-fn find(items: &Vector<toml::TomlItem>, sec: str, key: str) i64 {
+const fn find(items: &Vector<toml::TomlItem>, sec: str, key: str) i64 {
     for i in 0..items.len() {
         if items.at(i).section.as_str() == sec && items.at(i).key.as_str() == key {
             return i as i64;

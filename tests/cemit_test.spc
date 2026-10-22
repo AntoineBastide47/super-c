@@ -173,7 +173,7 @@ fn calls_and_recursion_behave() {
 }
 
 // The number of `return ` statements in the emitted TU.
-fn count_returns(s: str) usize {
+const fn count_returns(s: str) usize {
     let mut n = 0 as usize;
     let mut i = 0 as usize;
     while i + 7 <= s.len() {

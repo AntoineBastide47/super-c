@@ -843,7 +843,7 @@ pub fn mkdir_all(path: str) Result<Unit, IoError> {
 
 // The length of the parent of `p` (trailing separators and the last component cut, then the separators
 // before it); 0 when `p` has no parent to create.
-fn parent_len(p: str) usize {
+const fn parent_len(p: str) usize {
     let mut k = p.len();
     while k > 0 && path::is_separator(p.byte_at(k - 1)) {
         k -= 1;

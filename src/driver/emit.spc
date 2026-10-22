@@ -5,7 +5,8 @@
 // run_package (build/run/test) and lint_package (report-only lints + `--fix` fix collection).
 import stdio;
 import stdlib;
-import driver_shim as shim;
+import std::platform::fs;
+import std::platform::process;
 import graph::items as gitems;
 import driver::stats as bst;
 import lexer::token as tok;
@@ -616,10 +617,10 @@ fn tc_job(ctx: *mut void, j: u32) {
         // item has started, so the prelude's types publish here (no reader, no writer: the gate's
         // job alone runs). Every later checker then takes a prelude declaration's type from the owner's record (a final
         // id, the same in every module) instead of lowering its syntax again.
-        let tg0 = unsafe shim::sc_ticks_ms();
+        let tg0 = ticks_ms();
         publish_checkpoint(p, null);
         if stdlib::getenv("SC_CEMIT_STATS") != null {
-            eprint("typecheck-stage gate publication: {} ms\n", unsafe shim::sc_ticks_ms() - tg0);
+            eprint("typecheck-stage gate publication: {} ms\n", ticks_ms() - tg0);
         }
         return;
     }
@@ -906,16 +907,16 @@ fn typecheck_stage(
         lint: lint.as_ptr(),
     };
     let tstat = stdlib::getenv("SC_CEMIT_STATS") != null;
-    let tg9 = unsafe shim::sc_ticks_ms();
+    let tg9 = ticks_ms();
     let mut g = tc_jobs(p);
     if tstat {
-        eprint("typecheck-stage graph: {} ms\n", unsafe shim::sc_ticks_ms() - tg9);
+        eprint("typecheck-stage graph: {} ms\n", ticks_ms() - tg9);
     }
     let ctl = tctl::Ctl::new(tctl::budget_from_env());
-    let tj0 = unsafe shim::sc_ticks_ms();
+    let tj0 = ticks_ms();
     sch::run_jobs(&mut g, p.jobs, tc_job, &mut st, &ctl);
     if tstat {
-        eprint("typecheck-stage jobs: {} ms over {} components\n", unsafe shim::sc_ticks_ms() - tj0, g.n - 1);
+        eprint("typecheck-stage jobs: {} ms over {} components\n", ticks_ms() - tj0, g.n - 1);
     }
     if par {
         for i in 0..n {
@@ -1018,7 +1019,7 @@ fn typecheck_stage(
         p.carry.tc_edges = tedges;
     }
     if tstat {
-        eprint("typecheck-stage publish: {} ms\n", unsafe shim::sc_ticks_ms() - tj0);
+        eprint("typecheck-stage publish: {} ms\n", ticks_ms() - tj0);
     }
     if ok {
         assert_no_error_type(p);
@@ -1370,7 +1371,7 @@ fn feature_err(
 }
 
 // Turn the evaluator lock and every module's interner lock on or off around a parallel stage.
-fn set_stage_locks(p: &mut loader::Package, on: bool) {
+const fn set_stage_locks(p: &mut loader::Package, on: bool) {
     let cirp = p.cir as *mut iri::Interp;
     if cirp != null {
         unsafe (*cirp).elock_on = on;
@@ -1462,7 +1463,7 @@ fn layout_pass(p: &mut loader::Package) {
     if stdlib::getenv("SC_LAYOUT") == null {
         return;
     }
-    let t0 = unsafe shim::sc_ticks_ms();
+    let t0 = ticks_ms();
     let mut svc = lay::Svc::new(p);
     let mut typed: u64 = 0;
     let mut laid: u64 = 0;
@@ -1534,7 +1535,7 @@ fn layout_pass(p: &mut loader::Package) {
             }
         }
     }
-    let dt = unsafe shim::sc_ticks_ms() - t0;
+    let dt = ticks_ms() - t0;
     eprint(
         "layout: {} concrete types, {} laid out, {} field offsets, {} violations, {} ms\n",
         typed,
@@ -4385,7 +4386,7 @@ pub fn cemit_package(
     irkeep: *mut irl::Keep,
 ) {
     let verbose = stdlib::getenv("SC_CEMIT_STATS") != null;
-    let mut tt0 = unsafe shim::sc_ticks_ms();
+    let mut tt0 = ticks_ms();
     let mut prd = prb::Probe::new(verbose, stdlib::getenv("SC_BUILD_MEM") != null);
     publish_checkpoint(p, irkeep);
     // The evaluator's view of the keep (opened by the borrow frontier) closes before the graph
@@ -4394,14 +4395,14 @@ pub fn cemit_package(
         unsafe (*(p.cir as *mut iri::Interp)).keep_view_clear();
     }
     // The planner's signature-level propagation reads the package metadata.
-    let ts9 = unsafe shim::sc_ticks_ms();
+    let ts9 = ticks_ms();
     p.ensure_sigs();
     let gm9 = prd.start();
     // The inliner and the emitter read which extern items have a scoped header.
     p.scope_extern_items();
     // The inline candidates come from the kept lowerings, before the graph takes them.
     let mut inls = inl::InlineStore::new();
-    let ti9 = unsafe shim::sc_ticks_ms();
+    let ti9 = ticks_ms();
     if irkeep != null {
         inls.build(p, unsafe &*irkeep);
     }
@@ -4411,9 +4412,9 @@ pub fn cemit_package(
             "cemit-stage publish: {} ms, sigs: {} ms, inline-store build: {} ms\n",
             ts9 - tt0,
             ti9 - ts9,
-            unsafe shim::sc_ticks_ms() - ti9,
+            ticks_ms() - ti9,
         );
-        let t9 = unsafe shim::sc_ticks_ms();
+        let t9 = ticks_ms();
         eprint(
             "cemit-stage inline-store: {} ms, {} callees kept of {} vetted\n",
             t9 - tt0,
@@ -4438,7 +4439,7 @@ pub fn cemit_package(
         ts_add(TS_IG_BYTES, g.retained_bytes());
     }
     if verbose {
-        let t9 = unsafe shim::sc_ticks_ms();
+        let t9 = ticks_ms();
         let mut nagg: u64 = 0;
         let mut nfn: u64 = 0;
         for r in 0..g.recs.len() {
@@ -4467,7 +4468,7 @@ pub fn cemit_package(
     }
     let ian = graph_inst_asserts(p, &mut g);
     if verbose {
-        let t9 = unsafe shim::sc_ticks_ms();
+        let t9 = ticks_ms();
         eprint("cemit-stage inst-asserts: {} ms, {} instances\n", t9 - tt0, ian);
         tt0 = t9;
     }
@@ -5933,7 +5934,7 @@ fn syntax_stats_report(p: &loader::Package, label: str) {
     eprintln(
         "syntax-stats[{}]: peak rss {} MiB | modules {} node {} B | nodes {} ({} KiB) bodies {} body-nodes {} | children {} body-children {} ({} KiB) | resolutions {} KiB types {} KiB pool {} KiB tables {} KiB source {} KiB | largest {} {} KiB (module {}/{} body {}/{} nodes/capacity)",
         label,
-        unsafe shim::sc_peak_rss() / 1048576,
+        process::peak_rss().unwrap_or(0) / 1048576,
         modules,
         sizeof(Node),
         st.nodes,
@@ -6914,7 +6915,7 @@ fn extern_block_gated(p: &loader::Package, m: ModuleId, items: NodeList, lacking
 }
 
 // Whether a module other than the backend file imports module `m`.
-fn imported_beyond_backends(p: &loader::Package, m: ModuleId) bool {
+const fn imported_beyond_backends(p: &loader::Package, m: ModuleId) bool {
     let ix = &p.idx;
     for x in 0..p.modules.len() {
         let mut imp = false;
@@ -7035,10 +7036,8 @@ fn cemit_extern_includes(
                     rel.push_str("./");
                 }
                 rel.push_str(htxt);
-                let mut absb = PathBuf {};
-                let ra = unsafe shim::sc_realpath(rel.cstr(), &mut absb[0]);
-                if ra != null {
-                    let abs = str::from_cbuf(absb.as_slice());
+                if let Ok(real) = fs::realpath(rel.as_str()) {
+                    let abs = real.as_str();
                     line.format_into("#include \"{}\"\n", include_name(abs, gen_real.as_str()).as_str());
                     gline.format_into("#include \"{}\"\n", include_name(abs, t_real.as_str()).as_str());
                     done = true;
@@ -9402,7 +9401,7 @@ fn xd_rows(
 // identifier; a function's, the first identifier a `(` follows but an attribute's, or a parenthesized
 // `(name)(` one; a pointer object's, the one after `(*`; another object's (`extern`), the last
 // identifier before `[`, `=` or `;` outside parentheses.
-fn decl_name(dl: str) str {
+const fn decl_name(dl: str) str {
     let n = dl.len();
     let mut i: usize = 0;
     if dl.starts_with("typedef ") {
@@ -9584,7 +9583,7 @@ fn wrap_collect(src: &mut Vector<mbe::WrapReq>, seen: &mut Set<u64>, out: &mut V
 }
 
 // Wrapper requests by element name, then by definition (which starts with the wrapper's name).
-fn wrap_req_cmp(a: &mbe::WrapReq, b: &mbe::WrapReq) i32 {
+const fn wrap_req_cmp(a: &mbe::WrapReq, b: &mbe::WrapReq) i32 {
     let c = str_cmp(a.elem.as_str(), b.elem.as_str());
     if c != 0 {
         return c;
@@ -9875,7 +9874,7 @@ const fn item_hash(pl: str) u64 {
 // Module `m`'s shard count under the policy: its TU shards, or its instance shards (`inst`).
 // The manifest's `[shards]` / `[instance-shards]` count for module `m`, or 0 when the manifest
 // names none: the compiler then decides from the rendered size (`shard_policy`).
-fn shard_rule(p: &loader::Package, m: usize, inst: bool) u32 {
+const fn shard_rule(p: &loader::Package, m: usize, inst: bool) u32 {
     for i in 0..p.shard_rules.len() {
         if p.shard_rules.at(i).module.as_str() == p.modules[m].path.as_str() {
             return if inst {
@@ -10050,7 +10049,7 @@ fn unit_reach(nd: usize, ddeps: &Vector<Vector<u32>>, tu_dv: &Vector<Vector<u32>
 }
 
 // Whether one of definition headers `ds` reaches a scoped extern header (`x_reach`).
-fn x_any(r: &Vector<bool>, ds: &Vector<u32>) bool {
+const fn x_any(r: &Vector<bool>, ds: &Vector<u32>) bool {
     for k in 0..ds.len() {
         if r[ds[k] as usize] {
             return true;
@@ -11034,7 +11033,7 @@ const fn attr_bit(k: AttrKind) u64 {
 
 // True when `owner` carries an attribute whose kind bit is in `mask`: one scan of the attribute
 // table for several kinds.
-fn attr_any(a: *const Ast, owner: NodeId, mask: u64) bool {
+const fn attr_any(a: *const Ast, owner: NodeId, mask: u64) bool {
     for i in 0..unsafe (*a).attrs.len() {
         let at = unsafe (*a).attrs.at(i);
         if at.owner == owner && (1u64 << at.kind as u64 & mask) != 0 {
@@ -11045,7 +11044,7 @@ fn attr_any(a: *const Ast, owner: NodeId, mask: u64) bool {
 }
 
 // Innermost entry containing byte `pos`, or -1 (extend headers, imports, inter-item trivia).
-fn lint_owner(ents: &Vector<LintEnt>, pos: u32) i64 {
+const fn lint_owner(ents: &Vector<LintEnt>, pos: u32) i64 {
     let mut lo: usize = 0;
     let mut hi = ents.len();
     while lo < hi {
@@ -11151,7 +11150,7 @@ fn lint_item_candidate(a: *const Ast, iid: NodeId, in_iface_extend: bool, pub_to
     let keep = attr_bit(AttrKind::ATTR_EXPORT) | attr_bit(AttrKind::ATTR_USED);
     if it.kind == NodeKind::NODE_FUNCTION {
         let f = it.as_data.function;
-        if f.is_public() && !pub_too || f.is_extern() || f.body == NODE_NONE {
+        if vis_exported(f.vis) && !pub_too || f.is_extern() || f.body == NODE_NONE {
             return false;
         }
         return !attr_any(
@@ -11163,13 +11162,13 @@ fn lint_item_candidate(a: *const Ast, iid: NodeId, in_iface_extend: bool, pub_to
         );
     }
     if it.kind == NodeKind::NODE_STRUCT || it.kind == NodeKind::NODE_ENUM {
-        return !it.as_data.aggregate.is_public && !attr_any(a, iid, keep | attr_bit(AttrKind::ATTR_EMIT_MACRO));
+        return !vis_exported(it.as_data.aggregate.vis) && !attr_any(a, iid, keep | attr_bit(AttrKind::ATTR_EMIT_MACRO));
     }
     if it.kind == NodeKind::NODE_INTERFACE {
-        return !it.as_data.interface_def.is_public && !attr_any(a, iid, keep);
+        return !vis_exported(it.as_data.interface_def.vis) && !attr_any(a, iid, keep);
     }
     if it.kind == NodeKind::NODE_TYPE_ALIAS {
-        return !it.as_data.type_alias.is_public && !attr_any(a, iid, keep);
+        return !vis_exported(it.as_data.type_alias.vis) && !attr_any(a, iid, keep);
     }
     return false;
 }
@@ -11238,7 +11237,7 @@ fn lint_report_item(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast,
     if it.kind == NodeKind::NODE_FUNCTION && p.is_entry(m, iid) {
         return;
     }
-    if it.kind == NodeKind::NODE_FUNCTION && it.as_data.function.is_public() {
+    if it.kind == NodeKind::NODE_FUNCTION && vis_exported(it.as_data.function.vis) {
         errs.warn_span(
             nsp,
             format(
@@ -11472,7 +11471,7 @@ pub fn lint_unused_items(p: &mut loader::Package, only_mod: i32, sink: *mut Vect
 }
 
 // Is `fnode` a test-family item (@test/@test_init/@test_free)? Skipped entirely outside --test.
-fn is_test_item(a: *const Ast, fnode: NodeId) bool {
+const fn is_test_item(a: *const Ast, fnode: NodeId) bool {
     return attr_any(
         a,
         fnode,
@@ -11544,7 +11543,12 @@ fn cs_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: u
         return;
     }
     let f = unsafe (*a).at_const(fnode).as_data.function;
-    if f.is_const() || f.is_extern() || f.body == NODE_NONE {
+    // A build-constant site this build decided removed code another build runs, which may call what a
+    // constant cannot (an extern under THREAD_SANITIZER): such a function gets no suggestion.
+    if f.is_const() || f.is_extern() || f.body == NODE_NONE || unsafe (*a).bc_cut_at(
+        fnode,
+        unsafe (*a).at_const(fnode).span,
+    ) {
         return;
     }
     let src = p.modules[m].source.as_str();
@@ -11602,7 +11606,7 @@ fn lint_const_suggest(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector
 // members): the dropped items' uses are invisible under the current target, so a per-target verdict
 // would contradict another target's. Code the early prune removed exempts only the names its text
 // spells.
-fn module_platform_gated(a: *const Ast) bool {
+const fn module_platform_gated(a: *const Ast) bool {
     for i in 0..unsafe (*a).attrs.len() {
         let k = unsafe (*a).attrs.at(i).kind;
         if k == AttrKind::ATTR_PLATFORM as u8 || k == AttrKind::ATTR_ARCH as u8 || k == AttrKind::ATTR_WHEN as u8 {
@@ -11688,6 +11692,11 @@ fn lint_unused_imports(p: &mut loader::Package, only_mod: i32, fixes: *mut Vecto
         for i in 0..items.len {
             let iid = unsafe (*a).list(items)[i as usize];
             if unsafe (*a).at_const(iid).kind != NodeKind::NODE_IMPORT {
+                continue;
+            }
+            // A glob import re-exports its module's names (`m::x` reaches them): only the program's root module,
+            // which nothing imports, can hold an unused one.
+            if unsafe (*a).at_const(iid).as_data.import_decl.glob && m as i32 != p.root {
                 continue;
             }
             let path = loader::join_parts(unsafe &*a, src, unsafe (*a).at_const(iid).as_data.import_decl.path, "::");
@@ -11892,7 +11901,7 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
             if it.kind != NodeKind::NODE_STRUCT && it.kind != NodeKind::NODE_ENUM {
                 continue;
             }
-            if it.as_data.aggregate.is_public || it.as_data.aggregate.is_union {
+            if vis_exported(it.as_data.aggregate.vis) || it.as_data.aggregate.is_union {
                 continue;
             }
             let keep = attr_bit(AttrKind::ATTR_EXPORT) | attr_bit(AttrKind::ATTR_USED) | attr_bit(
@@ -11910,7 +11919,7 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
                 let mn = unsafe (*a).at_const(mid2);
                 let mut nsp = tok::Span::empty();
                 if it.kind == NodeKind::NODE_STRUCT {
-                    if mn.kind != NodeKind::NODE_FIELD || mn.as_data.field.is_public {
+                    if mn.kind != NodeKind::NODE_FIELD || vis_exported(mn.as_data.field.vis) {
                         continue;
                     }
                     nsp = unsafe (*a).at_const(mn.as_data.field.name).as_data.name.text;
@@ -12249,7 +12258,7 @@ fn sink_notify(sink: *mut EmitSink, pr: &mut prb::Probe, path: str, body: str, k
 // Publish `body` as output `path` (`publish_file`), then tell `sink` (`kind`, and whether the content
 // changed). False, after a message, when the file cannot be written; the sink then hears nothing.
 fn publish_out(sink: *mut EmitSink, pr: &mut prb::Probe, path: &mut String, body: str, kind: i32) bool {
-    let rc = publish_file(path, body);
+    let rc = publish_file(path.as_str(), body);
     if rc < 0 {
         unsafe stdio::perror(path.cstr());
         return false;
@@ -12263,10 +12272,10 @@ fn publish_out(sink: *mut EmitSink, pr: &mut prb::Probe, path: &mut String, body
 const PUB_PAR_MIN: usize = 64;
 const PUB_WORKERS: usize = 4;
 
-// One worker's share of a header batch: files `lo..hi`, each `publish_file` of C string `path[i]` with
-// the `len[i]` bytes at `text[i]`, its result into `rc[i]`.
+// One worker's share of a header batch: files `lo..hi`, each `publish_file` of path `path[i]` with the
+// `len[i]` bytes at `text[i]`, its result into `rc[i]`.
 struct PubTask {
-    pub path: *const usize,
+    pub path: *const String,
     pub text: *const usize,
     pub len: *const usize,
     pub rc: *mut i32,
@@ -12279,34 +12288,24 @@ unsafe extend PubTask as Send {}
 
 fn pub_range(t: PubTask) {
     for i in t.lo as usize..t.hi as usize {
-        let r = unsafe shim::sc_publish(t.path[i] as *const char, t.text[i] as *const u8, t.len[i]);
-        unsafe t.rc[i] = r;
+        let body = unsafe str::from_raw(t.text[i] as *const u8, t.len[i]);
+        unsafe t.rc[i] = publish_file(unsafe t.path[i].as_str(), body);
     }
 }
 
 // Publish `paths[i]` with the `lens[i]` bytes at `texts[i]` on up to PUB_WORKERS workers (one when
 // `jobs` is 1 or the batch is small), each result into `rc[i]` (`publish_file`). The files are
 // independent, so the order of the writes never shows in the tree; the caller reports them in order.
-fn publish_batch(
-    paths: &mut Vector<String>,
-    texts: &Vector<usize>,
-    lens: &Vector<usize>,
-    rc: &mut Vector<i32>,
-    jobs: u32,
-) {
+fn publish_batch(paths: &Vector<String>, texts: &Vector<usize>, lens: &Vector<usize>, rc: &mut Vector<i32>, jobs: u32) {
     let n = paths.len();
     rc.resize_default(n);
-    let mut cps = Vector::<usize>::with_capacity(n);
-    for i in 0..n {
-        cps.push(paths.index_mut(i).cstr() as usize);
-    }
     let nw = if jobs == 1 || n < PUB_PAR_MIN {
         1;
     } else {
         PUB_WORKERS.min(jobs as usize);
     };
     let t0 = PubTask {
-        path: cps.as_ptr(),
+        path: paths.as_ptr(),
         text: texts.as_ptr(),
         len: lens.as_ptr(),
         rc: rc.index_mut(0),
@@ -12346,7 +12345,7 @@ fn publish_batch(
 // Print the time since `*t0` as stage `label` when `on`, and restart the clock at now.
 fn stage_ms(on: bool, t0: &mut i64, label: str) {
     if on {
-        let t = unsafe shim::sc_ticks_ms();
+        let t = ticks_ms();
         eprint("{}: {} ms\n", label, t - *t0);
         *t0 = t;
     }
@@ -12521,7 +12520,7 @@ pub fn run_package(
         }
     }
     let tstat = stdlib::getenv("SC_CEMIT_STATS") != null;
-    let mut tp0 = unsafe shim::sc_ticks_ms();
+    let mut tp0 = ticks_ms();
     syntax_stats_report(p, "parse");
     p.platform_filter(target);
     // No module parses after the load: the token recycling buffer has no next user.
@@ -12548,10 +12547,10 @@ pub fn run_package(
         p.ok = typecheck_stage(p, &want, null, null) && p.ok;
     }
     if p.ok {
-        let td0 = unsafe shim::sc_ticks_ms();
+        let td0 = ticks_ms();
         check_package_wide(p, n);
         if tstat {
-            eprint("typecheck-stage conformances+obligations: {} ms\n", unsafe shim::sc_ticks_ms() - td0);
+            eprint("typecheck-stage conformances+obligations: {} ms\n", ticks_ms() - td0);
         }
     }
     if !p.ok {
@@ -12677,9 +12676,9 @@ pub fn run_package(
 
     default_gen_root(p);
     // A tree that did not exist before this build holds no orphan to prune afterwards.
-    let mut gr9 = String::from_str(p.gen_root.as_str());
-    let fresh_tree = unsafe shim::sc_stat_isdir(gr9.cstr()) != 1;
-    let rt9 = write_super_rt(p.gen_root.as_str());
+    let gr9 = String::from_str(p.gen_root.as_str());
+    let fresh_tree = !is_dir(gr9.as_str());
+    let rt9 = write_super_rt(gr9.as_str());
     let mut err = rt9 < 0;
     let root = gr9.as_str();
     let mut keep = Vector::<String>::new();
@@ -12862,7 +12861,7 @@ pub fn run_package(
         }
     }
     sort_big_first(&mut iq, &isz);
-    let tw0 = unsafe shim::sc_ticks_ms();
+    let tw0 = ticks_ms();
     let pub9 = co.pr.start();
     // A small program compiles as one unit (`__sc_unity.c` includes its module, instance and registry
     // units): one compiler process, the shared headers parsed once. A larger one compiles its small
@@ -12975,14 +12974,14 @@ pub fn run_package(
             hos.push(m as u32);
         }
         let mut hrc = Vector::<i32>::new();
-        publish_batch(&mut hps, &hts, &hls, &mut hrc, p.jobs);
+        publish_batch(&hps, &hts, &hls, &mut hrc, p.jobs);
         for i in 0..hps.len() {
             // The texts live in `co` until the write stage ends.
             let ht = unsafe str::from_raw(hts[i] as *const u8, hls[i]);
             let mut hp = replace(hps.index_mut(i), String::new());
             // A failure again on this thread: the message gets its own error.
             let rc = if hrc[i] < 0 {
-                publish_file(&mut hp, ht);
+                publish_file(hp.as_str(), ht);
             } else {
                 hrc[i];
             };
@@ -13118,7 +13117,7 @@ pub fn run_package(
         }
     }
     if stdlib::getenv("SC_CEMIT_STATS") != null {
-        eprint("cemit-stage write: {} ms\n", unsafe shim::sc_ticks_ms() - tw0);
+        eprint("cemit-stage write: {} ms\n", ticks_ms() - tw0);
         co.pr.stop(prb::P_PUBLISH, pub9);
         let mut rep9 = String::new();
         co.pr.report(&mut rep9);
@@ -13140,17 +13139,8 @@ pub fn run_package(
     }
     // Drop outputs of an earlier build that this program does not emit, so the tree matches the current
     // sources.
-    let mut broot = PathBuf {};
-    // Root is a str view (not nul-terminated); bound the copy with %.*s or %s runs off the buffer end.
-    let bn = unsafe stdio::snprintf(
-        &mut broot[0],
-        4096,
-        "%.*s".ptr() as *const char,
-        root.len() as i32,
-        root.ptr() as *const char,
-    );
-    if bn > 0 && bn as usize < 4096 && !fresh_tree && wtree {
-        prune_orphans(&broot[0], &keep);
+    if root.len() != 0 && !fresh_tree && wtree {
+        prune_orphans(root, &keep);
     }
     // Every file is on disk: the C compile, the link and the run below read the tree. Of the
     // output only its probe is read again (the test runner's notice).

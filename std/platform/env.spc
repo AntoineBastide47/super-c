@@ -247,7 +247,7 @@ extend<'a> VarIter<'a> {
     /// The next (name, value) pair; None after the last. The name ends at the first '=' after its first
     /// byte (a Windows drive variable such as `=C:` keeps its leading '='); an entry without '=' has an
     /// empty value.
-    pub fn next(self: &mut VarIter<'a>) Option<(str<'a>, str<'a>)> {
+    pub const fn next(self: &mut VarIter<'a>) Option<(str<'a>, str<'a>)> {
         if self.pos >= self.text.len() {
             return Option::<(str<'a>, str<'a>)>::None;
         }

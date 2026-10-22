@@ -163,6 +163,7 @@ pub struct Manifest<'a> {
     pub ce_steps: u32, // const-eval step budget; 0 = the engine default (~2M); CLI --const-eval-steps overrides
     pub ce_mem: u64, // const-eval memory budget in bytes; 0 = the engine default; CLI --const-eval-memory overrides
     pub cache_size: u64, // `cache-size`: the bytes the project's object trees keep in the build cache (`objcache::trim_objects`)
+    pub std_internals: bool, // `std_internals`: the project names std's `pub(package)` items (unstable internals)
     pub default_profile: String,
     pub profiles: Vector<Profile<'a>>,
     pub commands: Vector<Command<'a>>,
@@ -337,7 +338,7 @@ pub const CACHE_SIZE_DEFAULT: u64 = 2 << 30;
 
 /// The bytes size `s` names: digits, then `B`, `KiB`, `MiB` or `GiB` (no unit: bytes); None when it is
 /// malformed or does not fit 64 bits.
-pub fn parse_size(s: str) Option<u64> {
+pub const fn parse_size(s: str) Option<u64> {
     let mut d: usize = 0;
     while d < s.len() && s[d] >= b'0' && s[d] <= b'9' {
         d += 1;
@@ -460,6 +461,8 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
                 } else {
                     m.ce_mem = it.val.i as u64;
                 }
+            } else if key == "std_internals" {
+                set_bool(it, &mut errs, &mut m.std_internals);
             } else if key == "cache-size" {
                 let v = if it.val.kind == toml::TV_INT && it.val.i >= 0 {
                     Option::<u64>::Some(it.val.i as u64);
@@ -785,7 +788,7 @@ extend Manifest {
     }
 
     /// Index of the profile named `name`, or -1 when absent.
-    pub fn profile_index(self: &Self, name: str) i64 {
+    pub const fn profile_index(self: &Self, name: str) i64 {
         for i in 0..self.profiles.len() {
             if self.profiles.at(i).name == name {
                 return i as i64;
@@ -795,7 +798,7 @@ extend Manifest {
     }
 
     /// Index of the command named `name`, or -1 when absent.
-    pub fn command_index(self: &Self, name: str) i64 {
+    pub const fn command_index(self: &Self, name: str) i64 {
         for i in 0..self.commands.len() {
             if self.commands.at(i).name == name {
                 return i as i64;

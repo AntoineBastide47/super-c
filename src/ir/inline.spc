@@ -158,7 +158,7 @@ const SUB_CONST: u8 = 3; // the argument constant
 
 /// One cached callee: its lowered, elaborated body plus the generic-parameter decl list in targ
 /// order (extend parameters first, then the function's own).
-struct CalleeInfo {
+pub struct CalleeInfo {
     pub body: ir::CoreBody,
     pub gp: Vector<NodeId>,
     pub fg: u32, // trailing entries of `gp` that are the function's own parameters
@@ -175,7 +175,7 @@ pub struct GBind {
 }
 
 /// Splice provenance of an appended block (recursion and depth guard for nested inlining).
-struct Origin {
+pub struct Origin {
     pub parent: u32, // origin index of the block the call sat in; IR_NONE at top level
     pub key: u64, // callee identity key
 }
@@ -507,7 +507,7 @@ fn is_concrete_pub_fn(pkg: *const loader::Package, d: DefId) bool {
         return false;
     }
     let f = n.as_data.function;
-    if !f.is_public() || f.is_extern() || f.body == NODE_NONE || f.generics.len != 0 {
+    if !vis_exported(f.vis) || f.is_extern() || f.body == NODE_NONE || f.generics.len != 0 {
         return false;
     }
     let ext = extend_of(a, d.node);
@@ -738,7 +738,7 @@ fn scrutinee(p: &loader::Package, b: &ir::CoreBody, o0: u32, s0: usize, l0: u32,
 
 // The one assignment's rvalue of the local place `pl` of `b` names (`scrutinee`: a temp or a binding,
 // not a parameter, result or item), else an rvalue of kind RV_CLOSURE (no such assignment).
-fn temp_source(b: &ir::CoreBody, pl0: u32, s0: usize, l0: u32, bl0: usize) ir::Rvalue {
+const fn temp_source(b: &ir::CoreBody, pl0: u32, s0: usize, l0: u32, bl0: usize) ir::Rvalue {
     let none = ir::rv(ir::RV_CLOSURE, 0, 0, 0, TYPE_NONE);
     let pl = *b.places.at(pl0 as usize);
     let sk = b.locals.at(pl.base as usize).storage;
@@ -778,7 +778,7 @@ fn temp_source(b: &ir::CoreBody, pl0: u32, s0: usize, l0: u32, bl0: usize) ir::R
 
 // The exact value of integer or boolean constant `c` of `b`: `val`, except for a literal spelled other
 // than in plain decimal (`0x41`), whose span holds it (`Constant::int_value`).
-fn const_value(p: &loader::Package, b: &ir::CoreBody, c: &ir::Constant, v: &mut i64) bool {
+const fn const_value(p: &loader::Package, b: &ir::CoreBody, c: &ir::Constant, v: &mut i64) bool {
     *v = c.val;
     if c.kind != ir::CK_INT {
         return c.kind == ir::CK_BOOL;
@@ -794,7 +794,7 @@ fn const_value(p: &loader::Package, b: &ir::CoreBody, c: &ir::Constant, v: &mut 
 
 // Whether a switch may read scrutinee `o` of `b` in place of its temp: a constant whose `val`, the
 // value `CFlow` and `reach` match the cases against, is its value (a literal `0x41` stays a read).
-fn switch_on_const(p: &loader::Package, b: &ir::CoreBody, o: u32) bool {
+const fn switch_on_const(p: &loader::Package, b: &ir::CoreBody, o: u32) bool {
     if b.operands.at(o as usize).kind != ir::OP_CONST {
         return false;
     }
@@ -1098,7 +1098,7 @@ fn multi_alias(b: &ir::CoreBody, dpl: u32, nret: u32, alias: &mut Vector<u32>) b
 }
 
 // The local statement `i` of `b` copies a whole `alias` local into (`x = copy _t`), else IR_NONE.
-fn alias_copy(b: &ir::CoreBody, i: usize, alias: &Vector<u32>) u32 {
+const fn alias_copy(b: &ir::CoreBody, i: usize, alias: &Vector<u32>) u32 {
     let st = *b.statements.at(i);
     if st.kind != ir::ST_ASSIGN || b.places.at(st.place as usize).proj_len != 0 {
         return ir::IR_NONE;
@@ -2023,7 +2023,7 @@ const fn pool_end(starts: &Vector<u32>, n: usize, e: usize) usize {
 }
 
 /// Whether `a` holds the words of `b`.
-fn same_words(a: []u64, b: &Vector<u64>) bool {
+const fn same_words(a: []u64, b: &Vector<u64>) bool {
     if a.len() != b.len() {
         return false;
     }
@@ -2066,7 +2066,7 @@ fn ty_table(pairs: &Vector<u64>, out: &mut Vector<u64>) {
 
 /// Type `t` of a callee in the caller, through translation table `tymap` (`ty_table`); TYPE_NONE
 /// stays TYPE_NONE, and so does a type the table lacks.
-fn mty(tymap: []u64, t: TypeId) TypeId {
+const fn mty(tymap: []u64, t: TypeId) TypeId {
     if t == TYPE_NONE {
         return t;
     }
@@ -2397,7 +2397,7 @@ fn exposed(p: &loader::Package, b: &ir::CoreBody, a: &Ast, x: u32, cnt: &Vector<
 
 /// Whether call `t` of `b` hands the storage of local `x` to its callee: an autoref receiver
 /// (`wire`) whose place lies in `x`.
-fn receives(b: &ir::CoreBody, t: &ir::Terminator, wire: &Vector<u8>, x: u32) bool {
+const fn receives(b: &ir::CoreBody, t: &ir::Terminator, wire: &Vector<u8>, x: u32) bool {
     for j in 0..t.args_len {
         let op = *b.operands.at(b.oper_pool[(t.args_start + j) as usize] as usize);
         if wire[j as usize] == W_AUTOREF && op.kind != ir::OP_CONST && b.places.at(op.data as usize).base == x {

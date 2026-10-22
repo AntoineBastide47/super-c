@@ -472,7 +472,7 @@ extend tc::TypeChecker {
     }
 
     /// Drop the transient (unbound) borrows at indices >= mark; bound borrows survive, compacted down.
-    pub fn borrow_release_to(self: &mut Self, mark: u32) {
+    pub const fn borrow_release_to(self: &mut Self, mark: u32) {
         if self.nborrows <= mark {
             return;
         }
@@ -496,7 +496,7 @@ extend tc::TypeChecker {
 
     /// Tombstone every live borrow produced by expression `origin` (a reference erased into a raw
     /// pointer).
-    pub fn borrow_erase_origin(self: &mut Self, origin: NodeId) {
+    pub const fn borrow_erase_origin(self: &mut Self, origin: NodeId) {
         if origin == NODE_NONE {
             return;
         }
@@ -711,7 +711,7 @@ extend tc::TypeChecker {
     }
 
     /// Copy the move/split-init/borrow flow state into `s` (a branch checkpoint).
-    pub fn tc_flow_save(self: &Self, s: &mut FlowState) {
+    pub const fn tc_flow_save(self: &Self, s: &mut FlowState) {
         s.nmoved = self.nmoved;
         for i in 0..self.nmoved {
             unsafe s.moved[i as usize] = unsafe self.moved[i as usize];
@@ -1326,7 +1326,7 @@ extend tc::TypeChecker {
 
     /// Reflexive-transitive over declared edges ('static outlives all); the DFS caps at 32 regions
     /// and fails closed.
-    pub fn region_outlives(self: &Self, a: u32, b: u32) bool {
+    pub const fn region_outlives(self: &Self, a: u32, b: u32) bool {
         if a == REGION_NONE || b == REGION_NONE {
             return false;
         }

@@ -915,7 +915,7 @@ extend DecDigits {
 
 // Digits of `s` in `[start, s.len)` in `radix`, all consumed exactly.
 // `None` on radix outside 2..=36, empty digit run, an invalid digit, or u64 overflow.
-fn __str_digits_u64(s: &str, radix: u32, start: usize) Option<u64> {
+const fn __str_digits_u64(s: &str, radix: u32, start: usize) Option<u64> {
     if radix < 2 || radix > 36 || start >= s.len() {
         return Option::<u64>::None;
     }

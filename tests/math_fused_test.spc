@@ -109,7 +109,7 @@ fn values(r: &mut u64, n: usize) Vector<f64> {
 
 // The dot product's definition: 16 partial sums by fused multiply-add from +0.0, lane j holding
 // elements j, j + 16, .., then summed by halves.
-fn dot_def(a: []f64, b: []f64) f64 {
+const fn dot_def(a: []f64, b: []f64) f64 {
     let mut acc: [f64; 16] = [0.0; 16];
     for i in 0..a.len() {
         unsafe {
@@ -172,7 +172,7 @@ fn large_mat(r: &mut u64, rows: usize, cols: usize) LargeMat<f64> {
 }
 
 // Element (i, j) of `a * b` by its definition: the fused chain over p in order from +0.0.
-fn chain(a: &LargeMat<f64>, b: &LargeMat<f64>, i: usize, j: usize) f64 {
+const fn chain(a: &LargeMat<f64>, b: &LargeMat<f64>, i: usize, j: usize) f64 {
     let mut s: f64 = 0.0;
     for p in 0..a.cols() {
         s = a.get(i, p).mul_add(b.get(p, j), s);

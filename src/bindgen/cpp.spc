@@ -3,7 +3,7 @@
 // `cc -E` text with line markers. Bounds: include depth 200, `#if` nesting 1024, expression and argument
 // nesting 256, and 2^24 token steps per top-level expansion; every other loop is bounded by its input.
 import module::loader as loader;
-import driver_shim as shim;
+import std::platform::fs;
 
 const NONE: u32 = 0xFFFFFFFFu32;
 const INCLUDE_DEPTH_MAX: usize = 200;
@@ -593,7 +593,7 @@ extend Hides {
         };
     }
 
-    fn contains(self: &Hides, set: u32, name: u32) bool {
+    const fn contains(self: &Hides, set: u32, name: u32) bool {
         if set == 0 {
             return false;
         }
@@ -608,7 +608,7 @@ extend Hides {
         return false;
     }
 
-    fn same(self: &Hides, id: u32) bool {
+    const fn same(self: &Hides, id: u32) bool {
         let s = self.off[id as usize] as usize;
         let e = self.off[id as usize + 1] as usize;
         if e - s != self.tmp.len() {
@@ -1251,7 +1251,7 @@ extend Pp {
     }
 
     // The macro G when the whole file is `#ifndef G`, `#define G ..`, a body and the matching `#endif`.
-    fn detect_guard(self: &Pp, start: usize, end: usize) u32 {
+    const fn detect_guard(self: &Pp, start: usize, end: usize) u32 {
         if end < start + 6 {
             return NONE;
         }
@@ -1317,13 +1317,18 @@ extend Pp {
         let mut identity = key.clone();
         let mut disk = String::new();
         if vfile_index == NONE {
-            let mut cpath = key.clone();
-            let mut ids = Array::<u64, 2>::new();
-            if !unsafe shim::sc_file_key(cpath.cstr(), &mut ids[0]) {
+            // The identity of a regular file: two paths of one physical file give one key.
+            let st = fs::stat(key.as_str());
+            if st.is_err() {
                 self.by_path.insert(key, NONE);
                 return Option::<u32>::None;
             }
-            identity = format("\x01{}:{}", ids[0], ids[1]);
+            let m = st.unwrap();
+            if m.kind == fs::FileKind::Dir {
+                self.by_path.insert(key, NONE);
+                return Option::<u32>::None;
+            }
+            identity = format("\x01{}:{}", m.dev, m.ino);
         }
         if let Some(v) = self.by_ident.get(&identity) {
             let f = *v;
@@ -1633,13 +1638,13 @@ extend Pp {
     }
 
     // Move to the next directive: the rest of a skipped group holds no token that matters.
-    fn skip_group(self: &mut Pp) {
+    const fn skip_group(self: &mut Pp) {
         while self.pos < self.end && !self.at_directive() {
             self.pos += 1;
         }
     }
 
-    fn skip_group_if_skipping(self: &mut Pp) {
+    const fn skip_group_if_skipping(self: &mut Pp) {
         if self.skipping() {
             self.skip_group();
         }
@@ -1903,7 +1908,7 @@ extend Pp {
         }
     }
 
-    fn param_index(self: &Pp, params_start: usize, param_count: usize, id: u32) u32 {
+    const fn param_index(self: &Pp, params_start: usize, param_count: usize, id: u32) u32 {
         for q in 0..param_count {
             if self.macro_params[params_start + q] == id {
                 return q as u32;
@@ -2649,7 +2654,7 @@ extend Pp {
         return Option::<Tok>::Some(x);
     }
 
-    fn vaopt_close(self: &Pp, m: &Macro, i: u32, hi: u32) u32 {
+    const fn vaopt_close(self: &Pp, m: &Macro, i: u32, hi: u32) u32 {
         let mut depth: u32 = 0;
         let mut j = i + 1;
         while j < hi {
@@ -3266,7 +3271,7 @@ extend Pp {
     }
 
     // The value of an integer constant into `out`; an error message, or "".
-    fn parse_int(self: &Pp, id: u32, out: &mut Val) str<'static> {
+    const fn parse_int(self: &Pp, id: u32, out: &mut Val) str<'static> {
         let s = self.names.spell(id);
         let n = s.len();
         let mut base: u64 = 10;
@@ -3329,7 +3334,7 @@ extend Pp {
     }
 
     // The value of a character constant: an `int` for a plain one, the char type's value for a prefixed one.
-    fn parse_char(self: &Pp, id: u32, out: &mut Val) str<'static> {
+    const fn parse_char(self: &Pp, id: u32, out: &mut Val) str<'static> {
         let s = self.names.spell(id);
         let n = s.len();
         let mut i: usize = 0;

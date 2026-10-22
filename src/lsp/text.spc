@@ -26,7 +26,7 @@ pub fn line_starts(src: str) Vector<u32> {
 }
 
 /// UTF-16 code units in src[start..end] (clamped to the source).
-pub fn utf16_len(src: str, start: u32, end: u32) u32 {
+pub const fn utf16_len(src: str, start: u32, end: u32) u32 {
     let mut e = end as usize;
     if e > src.len() {
         e = src.len();
@@ -57,7 +57,7 @@ pub fn utf16_len(src: str, start: u32, end: u32) u32 {
 }
 
 /// Byte offset -> LSP position (clamped to the source end).
-pub fn offset_to_pos(src: str, ls: &Vector<u32>, off: u32) Pos {
+pub const fn offset_to_pos(src: str, ls: &Vector<u32>, off: u32) Pos {
     let mut o = off;
     if o as usize > src.len() {
         o = src.len() as u32;
@@ -78,7 +78,7 @@ pub fn offset_to_pos(src: str, ls: &Vector<u32>, off: u32) Pos {
 
 /// LSP position -> byte offset. Clamps: an out-of-range line maps to the last line start, an
 /// out-of-range character to the line end. A character landing inside a surrogate pair stops before it.
-pub fn pos_to_offset(src: str, ls: &Vector<u32>, line: u32, character: u32) u32 {
+pub const fn pos_to_offset(src: str, ls: &Vector<u32>, line: u32, character: u32) u32 {
     let mut li = line as usize;
     if li >= ls.len() {
         li = ls.len() - 1;

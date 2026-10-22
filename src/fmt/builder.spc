@@ -200,7 +200,7 @@ extend Builder {
         }
     }
 
-    fn count_gap_newlines(self: &Self, from: u32, to: u32) i32 {
+    const fn count_gap_newlines(self: &Self, from: u32, to: u32) i32 {
         let mut c: i32 = 0;
         let mut i = from as usize;
         while i < to as usize {
@@ -479,7 +479,7 @@ extend Builder {
     // skipping comments. Only trivia and a separator can sit between the last element and its closer, so no
     // nesting has to be tracked. `to` bounds the search; on failure it returns `from`, which makes the tail gap
     // empty and the list keeps its old shape.
-    fn find_close(self: &Self, from: u32, to: u32, close: u8) u32 {
+    const fn find_close(self: &Self, from: u32, to: u32, close: u8) u32 {
         let src = self.src;
         let mut i = from as usize;
         let hi = if to as usize > src.len() {
@@ -1881,7 +1881,7 @@ extend Builder {
     }
 
     // True when the item carries @fmt.skip: it is then emitted verbatim from its source span.
-    fn fmt_skipped(self: &Self, id: NodeId) bool {
+    const fn fmt_skipped(self: &Self, id: NodeId) bool {
         return self.skipped.binary_search(&id).is_ok();
     }
 
@@ -1895,8 +1895,8 @@ extend Builder {
         switch n.kind {
             NODE_FUNCTION => {
                 let f = n.as_data.function;
-                if f.is_public() {
-                    self.st.push(self.p.txt("pub "));
+                if f.vis != VIS_PRIVATE {
+                    self.st.push(self.p.txt(vis_text(f.vis)));
                 }
                 if f.is_unsafe() {
                     self.st.push(self.p.txt("unsafe "));
@@ -1961,8 +1961,8 @@ extend Builder {
             },
             NODE_STRUCT | NODE_ENUM => {
                 let a = n.as_data.aggregate;
-                if a.is_public {
-                    self.st.push(self.p.txt("pub "));
+                if a.vis != VIS_PRIVATE {
+                    self.st.push(self.p.txt(vis_text(a.vis)));
                 }
                 if n.kind == NodeKind::NODE_ENUM {
                     self.st.push(self.p.txt("enum "));
@@ -2003,8 +2003,8 @@ extend Builder {
             },
             NODE_INTERFACE => {
                 let itf = n.as_data.interface_def;
-                if itf.is_public {
-                    self.st.push(self.p.txt("pub "));
+                if itf.vis != VIS_PRIVATE {
+                    self.st.push(self.p.txt(vis_text(itf.vis)));
                 }
                 self.st.push(self.p.txt("interface "));
                 self.st.push(self.node_text(itf.name));
@@ -2034,8 +2034,8 @@ extend Builder {
             },
             NODE_TYPE_ALIAS => {
                 let t = n.as_data.type_alias;
-                if t.is_public {
-                    self.st.push(self.p.txt("pub "));
+                if t.vis != VIS_PRIVATE {
+                    self.st.push(self.p.txt(vis_text(t.vis)));
                 }
                 self.st.push(self.p.txt("type "));
                 self.st.push(self.node_text(t.name));
@@ -2048,8 +2048,8 @@ extend Builder {
             },
             NODE_CONST => {
                 let c = n.as_data.const_def;
-                if c.is_public {
-                    self.st.push(self.p.txt("pub "));
+                if c.vis != VIS_PRIVATE {
+                    self.st.push(self.p.txt(vis_text(c.vis)));
                 }
                 if c.is_static_mut {
                     self.st.push(self.p.txt("static mut "));
@@ -2117,8 +2117,8 @@ extend Builder {
     fn b_field(self: &mut Self, id: NodeId) d::DocId {
         let f = self.nd(id).as_data.field;
         let v = self.st.len();
-        if f.is_public {
-            self.st.push(self.p.txt("pub "));
+        if f.vis != VIS_PRIVATE {
+            self.st.push(self.p.txt(vis_text(f.vis)));
         }
         self.st.push(self.node_text(f.name));
         self.st.push(self.p.txt(": "));
@@ -2212,7 +2212,7 @@ extend Builder {
     // Find the `{` between `from` and `to` so leading trivia scans start after it. Scans FORWARD and
     // skips comment interiors: the first member's leading comment may itself contain a brace, and a
     // backward scan would land inside it, dropping the comment from the lead-trivia window.
-    fn item_gap_floor(self: &Self, from: u32, to: u32) u32 {
+    const fn item_gap_floor(self: &Self, from: u32, to: u32) u32 {
         let c = self.find_close(from, to, b'{');
         if c == from && (from >= to || self.src.byte_at(from as usize) != b'{') {
             return from;

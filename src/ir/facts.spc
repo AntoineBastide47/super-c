@@ -49,7 +49,7 @@ const fn effect(kind: u8, a: u32) Effect {
     return Effect { roots: [[0] = 0u32], a: a, n: 0, kind: kind, over: false };
 }
 
-fn push_root(e: &mut Effect, l: u32) {
+const fn push_root(e: &mut Effect, l: u32) {
     for i in 0..e.n {
         if unsafe e.roots[i as usize] == l {
             return;
@@ -296,14 +296,14 @@ const PKILL_MAX: usize = 256;
 
 // One loop-scan write: k 0 rekeys local `a`, 1 also its base generation, 2 writes place `p` of base
 // `a`.
-struct LOp {
+pub struct LOp {
     pub a: u32,
     pub p: u32,
     pub k: u8,
 }
 
 // A write that reached only the subtree of place `pl` (base `base`), at path generation `pg`.
-struct PKill {
+pub struct PKill {
     pub base: u32,
     pub pg: u32,
     pub pl: u32,
@@ -327,7 +327,7 @@ pub struct IFact {
     pub wid: bool,
 }
 
-struct IEnt {
+pub struct IEnt {
     pub f: IFact,
     pub l: u32,
 }
@@ -631,7 +631,7 @@ const fn ieq(a: &IFact, b: &IFact) bool {
 }
 
 // The cmp binding of an in-block comparison `t = a OP b`, valid until t, a or b is written.
-struct CmpRec {
+pub struct CmpRec {
     pub t: u32,
     pub a: u32, // operand ids
     pub b: u32,
@@ -1385,7 +1385,7 @@ extend Facts {
 
     /// Exact structural place equality (base + full projection content). PJ_INDEX_OP compares its
     /// OperandId, so distinct dynamic indexes never merge.
-    pub fn places_eq(self: &Self, b: &ir::CoreBody, p1: u32, p2: u32) bool {
+    pub const fn places_eq(self: &Self, b: &ir::CoreBody, p1: u32, p2: u32) bool {
         if p1 == p2 {
             return true;
         }
@@ -1424,7 +1424,7 @@ extend Facts {
     /// Resolve an operand to a value key, following at most six whole-local copy or affine steps.
     /// With `clean`, a step through a local marked in `cw` at `cstamp` (its binds describe an old value)
     /// is refused.
-    pub fn vkey_w(self: &Self, b: &ir::CoreBody, opid: u32, cw: &Vector<u32>, cstamp: u32, clean: bool) VKey {
+    pub const fn vkey_w(self: &Self, b: &ir::CoreBody, opid: u32, cw: &Vector<u32>, cstamp: u32, clean: bool) VKey {
         let op = *b.operands.at(opid as usize);
         if op.kind == ir::OP_CONST {
             let cn = *b.constants.at(op.data as usize);
@@ -1462,7 +1462,7 @@ extend Facts {
     }
 
     /// The base local behind up to four still-current whole-local copies.
-    pub fn copy_root(self: &Self, l0: u32) u32 {
+    pub const fn copy_root(self: &Self, l0: u32) u32 {
         let mut l = l0;
         let mut guard = 0;
         while guard < 4 {
@@ -1722,7 +1722,7 @@ extend Facts {
 
     /// Does place `pl`, captured at path generation `from`, survive every subtree write of its base
     /// up to path generation `to`?
-    pub fn path_alive(self: &Self, b: &ir::CoreBody, pl: u32, from: u32, to: u32) bool {
+    pub const fn path_alive(self: &Self, b: &ir::CoreBody, pl: u32, from: u32, to: u32) bool {
         if from == to || (pl & SYNTH_PL) != 0 {
             return true;
         }
@@ -1813,7 +1813,7 @@ extend Facts {
     // definitions: a copy continues, a borrow of a deref-free place names the place's base, a
     // borrow through a leading deref continues with the reference. A local with no single definition
     // is its own root. IR_NONE when a deref sits behind other projections.
-    fn def_root(self: &Self, b: &ir::CoreBody, l0: u32) u32 {
+    const fn def_root(self: &Self, b: &ir::CoreBody, l0: u32) u32 {
         let mut l = l0;
         let mut guard = 0;
         while guard < 8 {
@@ -2239,7 +2239,7 @@ extend Facts {
     /// The root local behind a place, through at most two current reference bindings: no deref
     /// resolves to the base local; a leading deref resolves through `refof`, and a reference with no
     /// binding (a parameter) is itself the root. False when a deref sits behind other projections.
-    pub fn root_of_place(self: &Self, b: &ir::CoreBody, pl0: u32, out: &mut u32) bool {
+    pub const fn root_of_place(self: &Self, b: &ir::CoreBody, pl0: u32, out: &mut u32) bool {
         let mut pl = pl0;
         let mut guard = 0;
         while guard < 3 {
@@ -2556,7 +2556,7 @@ extend Facts {
     /// Can an unknown write reach place `pl`: a deref, a static, or an escaped local? The storage
     /// of a local whose address never left the tracked borrows is out of an unknown callee's
     /// reach.
-    pub fn reachable(self: &Self, b: &ir::CoreBody, pl: u32) bool {
+    pub const fn reachable(self: &Self, b: &ir::CoreBody, pl: u32) bool {
         if self.escall || (pl & SYNTH_PL) != 0 || b.place_has_deref(pl) {
             return true;
         }
@@ -2666,7 +2666,7 @@ extend Facts {
 
     /// The value a length operand reads when it is the `len` of a view built by a struct literal,
     /// else none.
-    pub fn view_len(self: &Self, b: &ir::CoreBody, opid: u32) VKey {
+    pub const fn view_len(self: &Self, b: &ir::CoreBody, opid: u32) VKey {
         let k = self.vkey(b, opid);
         if !k.is_local || k.off != 0 {
             return vkey_none();
@@ -2710,7 +2710,7 @@ extend Facts {
         return (k1 == TypeKind::TYPE_POINTER || k1 == TypeKind::TYPE_REFERENCE) && (k2 == TypeKind::TYPE_POINTER || k2 == TypeKind::TYPE_REFERENCE);
     }
 
-    pub fn vkey(self: &Self, b: &ir::CoreBody, opid: u32) VKey {
+    pub const fn vkey(self: &Self, b: &ir::CoreBody, opid: u32) VKey {
         return self.vkey_w(b, opid, &self.bst, 0, false);
     }
 
@@ -2786,7 +2786,7 @@ extend Facts {
     }
 
     // A write of local `l`: its comparison bindings die.
-    fn iwrote(self: &mut Self, l: u32) {
+    const fn iwrote(self: &mut Self, l: u32) {
         let mut i: usize = 0;
         while i < self.cmps.len() {
             let c = self.cmps[i];
@@ -3134,7 +3134,7 @@ extend Facts {
     }
 
     // Is operand `opid` an integer constant of 2 or more?
-    pub fn const_ge2(self: &Self, b: &ir::CoreBody, opid: u32) bool {
+    pub const fn const_ge2(self: &Self, b: &ir::CoreBody, opid: u32) bool {
         let op = *b.operands.at(opid as usize);
         if op.kind != ir::OP_CONST {
             return false;
@@ -3686,7 +3686,7 @@ extend Facts {
 /// May writes to the subtree of place `p1` change place `p2`? The caller knows both reach the same
 /// root (the bases are that root, or copies of a reference parameter). Two field paths that
 /// diverge at different fields of a struct, or two different constant indexes, are disjoint.
-pub fn places_overlap(b: &ir::CoreBody, p1: u32, p2: u32) bool {
+pub const fn places_overlap(b: &ir::CoreBody, p1: u32, p2: u32) bool {
     let a = *b.places.at(p1 as usize);
     let c = *b.places.at(p2 as usize);
     let n = a.proj_len.min(c.proj_len);

@@ -9,6 +9,9 @@ import module::loader as loader;
 import ast::parser as par;
 import fmt::builder as fbld;
 import driver_shim as shim;
+import std::platform::clock;
+import std::platform::fs;
+import std::platform::process;
 import emit::rt_h as rth;
 import ir::cpu_features as cf;
 import bindgen::ctarget_data as ctd;
@@ -49,13 +52,56 @@ pub fn compiler_id() u64 {
     return h;
 }
 
-/// The running executable's path as the system reports it; empty when it does not resolve.
+/// The running executable's path as the system reports it ('/' separators on Windows; under WASI an
+/// absolute argv[0], `shim::sc_set_argv0`); empty when it does not resolve.
 pub fn exe_path() String {
-    let mut exe = PathBuf {};
-    if unsafe shim::sc_exe_path(&mut exe[0], 4096) != 0 {
-        return String::new();
+    if PLATFORM == Platform::Wasm {
+        return shim::argv0_path();
     }
-    return String::from_str(str::from_cbuf(exe.as_slice()));
+    return process::exe_path().unwrap_or(String::new());
+}
+
+/// Monotonic milliseconds (never wall clock).
+pub fn ticks_ms() i64 {
+    return (clock::monotonic_ns() / 1000000) as i64;
+}
+
+/// Modification time of `path` in seconds; 0 when it does not exist (the build engine's staleness
+/// sentinel).
+pub fn file_mtime(path: str) i64 {
+    if let Ok(m) = fs::stat(path) {
+        return mtime_s(m.modified_ns);
+    }
+    return 0;
+}
+
+/// Whether paths `a` and `b` name one physical file (device and file number); false when either does not
+/// exist.
+pub fn same_file(a: str, b: str) bool {
+    let ma = fs::stat(a);
+    let mb = fs::stat(b);
+    if ma.is_err() || mb.is_err() {
+        return false;
+    }
+    let other = mb.unwrap();
+    return ma.unwrap().same_file(&other);
+}
+
+/// Nanoseconds `ns` as whole seconds, rounded down as `st_mtime` is.
+pub const fn mtime_s(ns: i64) i64 {
+    let s = ns / 1000000000;
+    if ns % 1000000000 < 0 {
+        return s - 1;
+    }
+    return s;
+}
+
+/// The exit code a finished child stands for: its own, or 1 when a signal ended it.
+pub const fn exit_code(st: process::ExitStatus) i32 {
+    return switch st {
+        Code(c) => c,
+        Signal(_) => 1,
+    };
 }
 
 // The start state of the four hash lanes of `file_id` and `str_id`.
@@ -207,8 +253,10 @@ pub fn build_out_path(gen_dir: str, mod_path: str, ext: str) String {
 
 /// True when `path` names an existing directory.
 pub fn is_dir(path: str) bool {
-    let mut p = String::from_str(path);
-    return unsafe shim::sc_stat_isdir(p.cstr()) == 1;
+    if let Ok(m) = fs::stat(path) {
+        return m.kind == fs::FileKind::Dir;
+    }
+    return false;
 }
 
 /// Whitespace-split `s` into argv entries: FLAG strings keep their shell-splitting contract
@@ -227,35 +275,66 @@ pub fn split_args(out: &mut Vector<String>, s: str) {
     }
 }
 
-/// Spawn `args` and wait, output inherited (or captured when `log` is non-null): exit code, -1 on failure.
-pub fn exec_args(args: &mut Vector<String>, log: *const char) i32 {
-    return exec_at(null, args, log);
+/// Spawn `args` and wait, output inherited (or captured when `log` is not empty): the exit code, -1 when
+/// the program does not start or the wait fails. A child a signal ended returns 1 and is named on stderr
+/// with the signal.
+pub fn exec_args(args: &Vector<String>, log: str) i32 {
+    return exec_at("", args, log);
 }
 
-/// `exec_args` of program `file` (a path; null: `args[0]` searched in PATH), `args` its argv.
-pub fn exec_at(file: *const char, args: &mut Vector<String>, log: *const char) i32 {
-    let mut ptrs = Vector::<usize>::with_capacity(args.len() + 1);
-    for i in 0..args.len() {
-        ptrs.push(args[i].cstr() as usize);
+/// `exec_args` of program `file` (a path; empty: `args[0]` searched in PATH), `args` its argv.
+pub fn exec_at(file: str, args: &Vector<String>, log: str) i32 {
+    let c = spawn_at(file, args, log);
+    if c.is_none() {
+        return -1;
     }
-    ptrs.push(0);
-    return unsafe shim::sc_exec_argv(file, ptrs.as_ptr() as *const *const char, log);
-}
-
-/// Spawn `args` without a shell; `log` (may be null) captures the child's stdout+stderr. The child's pid,
-/// or -1 on spawn failure.
-pub fn spawn_args(args: &mut Vector<String>, log: *const char) i64 {
-    return spawn_at(null, args, log);
-}
-
-/// `spawn_args` of program `file` (a path; null: `args[0]` searched in PATH), `args` its argv.
-pub fn spawn_at(file: *const char, args: &mut Vector<String>, log: *const char) i64 {
-    let mut ptrs = Vector::<usize>::with_capacity(args.len() + 1);
-    for i in 0..args.len() {
-        ptrs.push(args[i].cstr() as usize);
+    let mut child = c.unwrap();
+    let st = child.wait();
+    if st.is_err() {
+        return -1;
     }
-    ptrs.push(0);
-    return unsafe shim::sc_spawn_argv(file, ptrs.as_ptr() as *const *const char, log);
+    let s = st.unwrap();
+    if let Signal(sig) = s {
+        report_signal(args.at(0).as_str(), sig);
+    }
+    return exit_code(s);
+}
+
+// Name on stderr the program `prog` that signal `sig` ended.
+@platform(macos | ios | linux | android)
+fn report_signal(prog: str, sig: i32) {
+    let name = unsafe str::from_cstr(strsignal(sig));
+    eprintln("super-c: '{}' was terminated by signal {} ({})", prog, sig, name);
+}
+@platform(windows | wasm)
+fn report_signal(_prog: str, _sig: i32) {}
+
+@platform(macos | ios | linux | android)
+extern "C" "string.h" {
+    fn strsignal(sig: i32) *mut char;
+}
+
+/// Spawn `args` without a shell; `log` (empty: inherited) captures the child's stdout and stderr,
+/// created or truncated. The child, or None when it does not start.
+pub fn spawn_args(args: &Vector<String>, log: str) Option<process::Child> {
+    return spawn_at("", args, log);
+}
+
+/// `spawn_args` of program `file` (a path; empty: `args[0]` searched in PATH), `args` its argv.
+pub fn spawn_at(file: str, args: &Vector<String>, log: str) Option<process::Child> {
+    let mut argv = Vector::<str>::with_capacity(args.len());
+    for i in 0..args.len() {
+        argv.push(args.at(i).as_str());
+    }
+    let mut cmd = process::Command::new(argv[0..argv.len()]);
+    if file.len() != 0 {
+        cmd.program = Option::<str>::Some(file);
+    }
+    if log.len() != 0 {
+        cmd.stdout = process::Redirect::Path(log);
+        cmd.stderr = process::Redirect::Stdout;
+    }
+    return process::spawn(cmd).get_ok();
 }
 
 /// A copy of argv `src`.
@@ -327,10 +406,8 @@ pub fn copy_file(srcp: str, dstp: str) bool {
 /// system refuses a link (another volume, a link count limit); `dstp` is replaced. The two names share
 /// one inode, so nothing may write either in place: a compile into `dstp` must remove it first.
 pub fn link_or_copy(srcp: str, dstp: str) bool {
-    let mut s = String::from_str(srcp);
-    let mut d = String::from_str(dstp);
-    let _ = unsafe shim::sc_unlink(d.cstr());
-    return unsafe shim::sc_link(s.cstr(), d.cstr()) == 0 || copy_file(srcp, dstp);
+    let _ = fs::unlink(dstp);
+    return fs::link(srcp, dstp).is_ok() || copy_file(srcp, dstp);
 }
 
 /// The units of emitted tree `root` that its packs include, as paths relative to `root`: they compile
@@ -368,14 +445,17 @@ pub const SHARD_MAX: u32 = 64;
 /// the gate's tree) emits the same text and keeps its object cache keys; else `abs`, which compiles
 /// from any location.
 pub fn include_name(abs: str, dir: str) String {
-    let mut wd = PathBuf {};
-    let mut dot = String::from_str(".");
-    // A real path: `/...`, or `X:/...` on Windows (sc_realpath writes forward slashes there).
+    // A real path: `/...`, or `X:/...` on Windows (fs::realpath writes forward slashes there).
     let rooted = abs.starts_with("/") || abs.len() > 2 && abs[1] == b':';
-    if !rooted || unsafe shim::sc_realpath(dot.cstr(), &mut wd[0]) == null {
+    if !rooted {
         return String::from_str(abs);
     }
-    let c = str::from_cbuf(wd.as_slice());
+    let wd = fs::realpath(".");
+    if wd.is_err() {
+        return String::from_str(abs);
+    }
+    let cwd = wd.unwrap();
+    let c = cwd.as_str();
     if c.len() <= 1 || !below(abs, c) || dir != c && !below(dir, c) {
         return String::from_str(abs);
     }
@@ -405,121 +485,93 @@ pub fn write_file_atomic(path: str, body: str) bool {
 pub fn write_file_atomic_parts(path: str, head: str, body: str) bool {
     let mut tmp = String::from_str(path);
     tmp.push_str(".tmp");
-    let mut dst = String::from_str(path);
-    if write_file_parts(tmp.as_str(), head, body) && unsafe shim::sc_rename(tmp.cstr(), dst.cstr()) == 0 {
+    if write_file_parts(tmp.as_str(), head, body) && fs::rename(tmp.as_str(), path).is_ok() {
         return true;
     }
-    let _ = unsafe shim::sc_unlink(tmp.cstr());
+    let _ = fs::unlink(tmp.as_str());
     return false;
 }
 
 /// The entry names of `dir` in directory order, without "." and ".." (and without any dot-entry
 /// unless `hidden`); None when the directory cannot be opened.
 pub fn list_dir(dir: str, hidden: bool) Option<Vector<String>> {
-    let mut d = String::from_str(dir);
-    let dh = unsafe shim::sc_opendir(d.cstr());
-    if dh == null {
+    let opened = fs::read_dir(dir);
+    if opened.is_err() {
         return Option::<Vector<String>>::None;
     }
+    let mut d = opened.unwrap();
     let mut names = Vector::<String>::new();
-    loop {
-        let e = unsafe shim::sc_readdir(dh);
-        if e == null {
-            break;
-        }
-        let nm = unsafe str::from_cstr(shim::sc_dirent_name(e));
-        if nm.starts_with(".") && (!hidden || nm == "." || nm == "..") {
+    // Bounded by the entries of the directory; a read error ends the listing, as the end does.
+    while let Some(Ok(e)) = d.next() {
+        if e.name.starts_with(".") && !hidden {
             continue;
         }
-        names.push(String::from_str(nm));
+        names.push(String::from_str(e.name));
     }
-    unsafe shim::sc_closedir(dh);
     return Option::<Vector<String>>::Some(names);
 }
 
 /// Create `path` and any missing parent directories (like `mkdir -p`); existing dirs are ignored.
 /// An existing directory costs one stat: the components are created only when it is missing.
 pub fn mkdir_p(path: str) {
-    let n = path.len();
-    if n == 0 || n >= 4096 {
+    if path.len() == 0 || is_dir(path) {
         return;
     }
-    let mut buf = Array::<char, 4096>::new();
-    unsafe buf.copy_from(path.ptr(), n);
-    buf[n] = 0 as char;
-    let base = (&buf[0]) as *const char; // read-only C string view; the buffer is edited in place below
-    if unsafe shim::sc_stat_isdir(base) == 1 {
-        return;
-    }
-    for i in 1..n {
-        if buf[i] == '/' as char {
-            buf[i] = 0 as char;
-            let _ = unsafe shim::sc_mkdir(base);
-            buf[i] = '/' as char;
-        }
-    }
-    let _ = unsafe shim::sc_mkdir(base);
+    let _ = fs::mkdir_all(path);
 }
 
 /// Make file `path` hold exactly `body`, creating missing parent directories: a file that already holds
 /// it is not written, so it keeps its mtime (the build's staleness anchor). 1 when the file was written,
 /// 0 when it already held `body`, -1 when it could not be opened, written or closed in full.
-pub fn publish_file(path: &mut String, body: str) i32 {
-    return unsafe shim::sc_publish(path.cstr(), body.ptr(), body.len());
+pub fn publish_file(path: str, body: str) i32 {
+    let r = fs::publish(path, unsafe Slice::<u8> { ptr: body.ptr(), len: body.len() });
+    if r.is_err() {
+        return -1;
+    }
+    return r.unwrap() as i32;
 }
 
 /// Recursively delete every .c/.h under `dir` that is NOT in the keep-list (the files this run wrote), then
 /// drop any directory left empty. The compiler overwrites build/ in place but must also remove outputs the
 /// program does not produce (a removed module/instance/@test-runner/@c.source wrapper); a stale TU would
 /// otherwise linger and break `cc build/**/*.c`. Path comparison is exact ("<dir>/<name>", like build_out_path).
-pub fn prune_orphans(dir: *const char, keep: &Vector<String>) {
+pub fn prune_orphans(dir: str, keep: &Vector<String>) {
     let mut ks = Set::<str>::new();
     for i in 0..keep.len() {
         ks.insert(keep[i].as_str());
     }
-    prune_dir(dir, &ks);
+    let mut path = String::from_str(dir);
+    prune_dir(&mut path, &ks);
 }
 
-fn prune_dir(dir: *const char, keep: &Set<str>) {
-    let d = unsafe shim::sc_opendir(dir);
-    if d == null {
+// Prune directory `dir` (restored on return): one path buffer for the whole walk.
+fn prune_dir(dir: &mut String, keep: &Set<str>) {
+    let opened = fs::read_dir(dir.as_str());
+    if opened.is_err() {
         return;
     }
-    loop {
-        let e = unsafe shim::sc_readdir(d);
-        if e == null {
-            break;
-        }
-        let name = unsafe shim::sc_dirent_name(e);
-        if unsafe cstring::strcmp(name, ".".ptr() as *const char) == 0 || unsafe cstring::strcmp(
-            name,
-            "..".ptr() as *const char,
-        ) == 0 {
-            continue;
-        }
-
-        let mut pb = PathBuf {};
-        let np = unsafe stdio::snprintf(&mut pb[0], 4096, "%s/%s".ptr() as *const char, dir, name);
-        if np < 0 || np as usize >= 4096 {
-            continue;
-        }
-        let path = (&pb[0]) as *const char;
+    let mut d = opened.unwrap();
+    let base = dir.len();
+    // Bounded by the entries of the directory; a read error ends the walk, as the end does.
+    while let Some(Ok(e)) = d.next() {
         // Only generated .c/.h translation units are ours to prune. Such a name is a file (a module
         // directory name has no dot), so only other names cost a stat.
-        let l = unsafe cstring::strlen(name);
-        if !(l >= 2 && unsafe name[l - 2] == '.' as char && (unsafe name[l - 1] == 'c' as char || unsafe name[l - 1] == 'h' as char)) {
-            if unsafe shim::sc_stat_isdir(path) == 1 {
-                prune_dir(path, keep);
-                let _ = unsafe shim::sc_rmdir(path);
+        let unit = e.name.ends_with(".c") || e.name.ends_with(".h");
+        dir.push_byte(b'/');
+        dir.push_str(e.name);
+        if !unit {
+            if is_dir(dir.as_str()) {
+                prune_dir(dir, keep);
+                let _ = fs::rmdir(dir.as_str());
             }
-            continue;
+        } else {
+            let ds = dir.as_str();
+            if !keep.contains(&ds) {
+                let _ = fs::unlink(ds);
+            }
         }
-        let ps = unsafe str::from_cstr(path);
-        if !keep.contains(&ps) {
-            let _ = unsafe shim::sc_unlink(path);
-        }
+        dir.truncate(base);
     }
-    let _ = unsafe shim::sc_closedir(d);
 }
 
 /// The C backend's runtime header shared by every generated file (`emit::rt_h`), published with
@@ -530,7 +582,7 @@ pub fn write_super_rt(gen_dir: str) i32 {
     let mut h = String::from_str("#ifndef SUPER_RT_H\n#define SUPER_RT_H\n");
     h.push_str(rth::super_rt_h());
     h.push_str("#endif\n");
-    let hr = publish_file(&mut path, h.as_str());
+    let hr = publish_file(path.as_str(), h.as_str());
     if hr < 0 {
         unsafe stdio::perror(path.cstr());
         return -1;

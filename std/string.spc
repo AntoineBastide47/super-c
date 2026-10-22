@@ -597,7 +597,7 @@ extend<A: Allocator> String<A> {
 
     /// Remove and return the last UTF-8 scalar value (walking back over continuation bytes), or 0 if
     /// empty: the inverse of `push`.
-    pub fn pop(self: &mut String<A>) u32 {
+    pub const fn pop(self: &mut String<A>) u32 {
         let len = self.len();
         if len == 0 {
             return 0;
@@ -700,7 +700,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// Number of UTF-8 scalar values: every byte that is not a 0b10xxxxxx continuation starts one.
-    pub fn char_count(self: &String<A>) usize {
+    pub const fn char_count(self: &String<A>) usize {
         let n = self.len();
         let p = self.as_ptr();
         let mut count: usize = 0;
@@ -773,7 +773,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// ASCII-case-insensitive content equality (multibyte bytes must match exactly).
-    pub fn eq_ignore_ascii_case(self: &String<A>, other: &String<A>) bool {
+    pub const fn eq_ignore_ascii_case(self: &String<A>, other: &String<A>) bool {
         let n = self.len();
         if n != other.len() {
             return false;
@@ -797,7 +797,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// True if every byte is ASCII (< 0x80): i.e. no multibyte UTF-8 sequences.
-    pub fn is_ascii(self: &String<A>) bool {
+    pub const fn is_ascii(self: &String<A>) bool {
         let n = self.len();
         let p = self.as_ptr();
         for i in 0..n {
@@ -834,7 +834,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// First index of byte `b`, or `len` (a past-the-end sentinel) if absent.
-    pub fn index_of_byte(self: &String<A>, b: u8) usize {
+    pub const fn index_of_byte(self: &String<A>, b: u8) usize {
         let n = self.len();
         let p = self.as_ptr();
         for i in 0..n {
@@ -846,7 +846,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// Last index of byte `b`, or `len` if absent.
-    pub fn last_index_of_byte(self: &String<A>, b: u8) usize {
+    pub const fn last_index_of_byte(self: &String<A>, b: u8) usize {
         let n = self.len();
         let p = self.as_ptr();
         let mut i = n;
@@ -860,12 +860,12 @@ extend<A: Allocator> String<A> {
     }
 
     /// True when byte `b` occurs.
-    pub fn contains_byte(self: &String<A>, b: u8) bool {
+    pub const fn contains_byte(self: &String<A>, b: u8) bool {
         return self.index_of_byte(b) < self.len();
     }
 
     /// Count of (non-overlapping at the byte level) occurrences of byte `b`.
-    pub fn count_byte(self: &String<A>, b: u8) usize {
+    pub const fn count_byte(self: &String<A>, b: u8) usize {
         let len = self.len();
         let p = self.as_ptr();
         let mut n: usize = 0;
@@ -878,7 +878,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// First byte index where `needle` occurs, or `len` if absent (naive O(n*m) window scan).
-    pub fn find(self: &String<A>, needle: str) usize {
+    pub const fn find(self: &String<A>, needle: str) usize {
         let n = self.len();
         if needle.len() == 0 {
             return 0;
@@ -897,7 +897,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// Last byte index where `needle` occurs, or `len` if absent.
-    pub fn rfind(self: &String<A>, needle: str) usize {
+    pub const fn rfind(self: &String<A>, needle: str) usize {
         let n = self.len();
         if needle.len() == 0 {
             return n;
@@ -917,14 +917,14 @@ extend<A: Allocator> String<A> {
     }
 
     /// True when `needle` occurs as a substring.
-    pub fn contains(self: &String<A>, needle: str) bool {
+    pub const fn contains(self: &String<A>, needle: str) bool {
         return self.find(needle) != self.len();
     }
 
     // --- transform & replace -------------------------------------------------------------------.
 
     /// Uppercase every ASCII letter in place; other bytes untouched.
-    pub fn to_ascii_upper(self: &mut String<A>) {
+    pub const fn to_ascii_upper(self: &mut String<A>) {
         let n = self.len();
         let p = self.data_ptr();
         for i in 0..n {
@@ -937,7 +937,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// Lowercase every ASCII letter in place; other bytes untouched.
-    pub fn to_ascii_lower(self: &mut String<A>) {
+    pub const fn to_ascii_lower(self: &mut String<A>) {
         let n = self.len();
         let p = self.data_ptr();
         for i in 0..n {
@@ -950,7 +950,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// Replace every byte equal to `from` with `to`, in place.
-    pub fn replace_byte(self: &mut String<A>, from: u8, to: u8) {
+    pub const fn replace_byte(self: &mut String<A>, from: u8, to: u8) {
         let n = self.len();
         let p = self.data_ptr();
         for i in 0..n {
@@ -988,7 +988,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// Free leading ASCII whitespace (space, tab, newline, carriage return), shifting bytes left.
-    pub fn trim_start(self: &mut String<A>) {
+    pub const fn trim_start(self: &mut String<A>) {
         let len = self.len();
         let p = self.data_ptr();
         let mut start: usize = 0;
@@ -1006,7 +1006,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// Free trailing ASCII whitespace.
-    pub fn trim_end(self: &mut String<A>) {
+    pub const fn trim_end(self: &mut String<A>) {
         let p = self.data_ptr();
         let mut len = self.len();
         while len > 0 {
@@ -1020,7 +1020,7 @@ extend<A: Allocator> String<A> {
     }
 
     /// Free ASCII whitespace from both ends.
-    pub fn trim(self: &mut String<A>) {
+    pub const fn trim(self: &mut String<A>) {
         self.trim_end();
         self.trim_start();
     }

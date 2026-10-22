@@ -716,7 +716,7 @@ const fn step(s: &mut u64) u64 {
 }
 
 // A random fraction field.
-fn rand_frac<const E: usize, const F: usize>(s: &mut u64) UInt<{1 + E + F}> {
+const fn rand_frac<const E: usize, const F: usize>(s: &mut u64) UInt<{1 + E + F}> {
     let mut v = UInt::<{1 + E + F}>::zero();
     for i in 0..UInt::<{1 + E + F}>::limbs() {
         v.set_limb(i, step(s));

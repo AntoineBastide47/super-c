@@ -39,7 +39,7 @@ fn fn_body<'a>(c: str<'a>, name: str) str<'a> {
 }
 
 // The line of `c` that holds the first `needle`; empty when none does.
-fn line_of<'a>(c: str<'a>, needle: str) str<'a> {
+const fn line_of<'a>(c: str<'a>, needle: str) str<'a> {
     let k = c.find(needle);
     if k < 0 {
         return "";

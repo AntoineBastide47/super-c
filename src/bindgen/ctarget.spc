@@ -6,6 +6,7 @@
 
 import stdlib;
 import driver_shim as shim;
+import std::platform::fs;
 import module::loader as loader;
 import driver::util as *;
 import build_system::objcache as oc;
@@ -35,7 +36,7 @@ pub struct CTarget {
 }
 
 /// The text of built-in header `name`; empty when there is none.
-pub fn builtin_header(name: str) str<'static> {
+pub const fn builtin_header(name: str) str<'static> {
     let hs: []hdrs::Header = hdrs::HEADERS;
     for i in 0..hs.len() {
         if hs[i].name == name {
@@ -66,7 +67,7 @@ fn merge_layers(ids: []u8, layers: []str<'static>, out: &mut Vector<str<'static>
 }
 
 // The name of a table entry: a macro line's identifier, else the whole `kind:name` line.
-fn entry_name<'a>(line: str<'a>) str<'a> {
+const fn entry_name<'a>(line: str<'a>) str<'a> {
     let mut e: usize = 0;
     while e < line.len() && line[e] != b' ' && line[e] != b'(' {
         e += 1;
@@ -120,7 +121,7 @@ fn fill_headers(arch: i32, out: &mut CTarget) {
 }
 
 // `path` without trailing slashes: the root "/" becomes "".
-fn trim_slashes(path: str) str {
+const fn trim_slashes(path: str) str {
     let mut e = path.len();
     while e > 0 && path[e - 1] == b'/' {
         e -= 1;
@@ -262,11 +263,12 @@ fn mingw_root(dir: str, out: &mut String) bool {
         if oc::which_path(names[i].as_str(), &mut found) == 0 {
             continue;
         }
-        let mut real = PathBuf {};
-        if unsafe shim::sc_realpath(found.cstr(), &mut real[0]) == null {
+        let resolved = fs::realpath(found.as_str());
+        if resolved.is_err() {
             continue;
         }
-        let bin = loader::dirname_of(str::from_cbuf(real.as_slice()));
+        let real = resolved.unwrap();
+        let bin = loader::dirname_of(real.as_str());
         let root = loader::dirname_of(bin);
         if is_mingw_tree(root, dir) {
             out.push_str(root);
@@ -281,8 +283,8 @@ fn mingw_root(dir: str, out: &mut String) bool {
 fn is_mingw_tree(root: str, dir: str) bool {
     let base = trim_slashes(root);
     for c in [format("{}/{}/include", base, dir), format("{}/include", base)] {
-        let mut marker = format("{}/_mingw.h", c.as_str());
-        if unsafe shim::sc_mtime(marker.cstr()) != 0 {
+        let marker = format("{}/_mingw.h", c.as_str());
+        if file_mtime(marker.as_str()) != 0 {
             return true;
         }
     }
@@ -385,7 +387,7 @@ fn define(predefs: &mut String, text: str) {
 }
 
 // The value of macro `name` in `predefs`; empty when undefined.
-fn value_of<'a>(predefs: &'a String, name: str) str<'a> {
+const fn value_of<'a>(predefs: &'a String, name: str) str<'a> {
     let mut it = predefs.as_str().lines();
     while let Some(line) = it.next() {
         if line.starts_with("#define ") {

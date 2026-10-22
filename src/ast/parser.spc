@@ -149,6 +149,35 @@ extend Parser {
         return true;
     }
 
+    // A visibility modifier: none, `pub`, or `pub(file)`, `pub(module)`, `pub(package)`. `pub(file)` is a field
+    // level only: on an item it is the default, an error.
+    pub fn parse_vis(self: &mut Self, field: bool) u8 {
+        if !self.match(TokenType::Pub) {
+            return VIS_PRIVATE;
+        }
+        let i = self.current;
+        if !self.check(TokenType::LeftParen) || i + 2 >= self.tokens.len() || self.tokens[i + 2].kind() != TokenType::RightParen {
+            return VIS_PUB;
+        }
+        let t = self.tokens[i + 1];
+        let mut v = VIS_PUB;
+        if self.text_is(t, "module") {
+            v = VIS_MODULE;
+        } else if self.text_is(t, "package") {
+            v = VIS_PACKAGE;
+        } else if self.text_is(t, "file") {
+            v = VIS_FILE;
+        } else {
+            return VIS_PUB;
+        }
+        self.current = i + 3;
+        if v == VIS_FILE && !field {
+            self.errors.emit_span(t.span(), format("'pub(file)' is the default visibility of an item: remove it"));
+            return VIS_PRIVATE;
+        }
+        return v;
+    }
+
     pub const fn previous_end(self: &Self) u32 {
         if self.current != 0 {
             return self.tokens[self.current - 1].end();
@@ -1087,14 +1116,14 @@ extend Parser {
         // span starts AFTER the attributes: the formatter prints them as leading trivia from the
         // inter-field gap, so the field's own span must not swallow them
         let start = self.raw_peek().start();
-        let is_public = self.match(TokenType::Pub);
+        let vis = self.parse_vis(true);
         let name = self.identifier();
         self.expect(TokenType::Colon, "':'");
         let ty = self.parse_type();
         let fid = self.mk(
             NodeKind::NODE_FIELD,
             Span::new(start, self.node_span(ty).end),
-            NodeAs { field: FieldData { name: name, ty: ty, is_public: is_public } },
+            NodeAs { field: FieldData { name: name, ty: ty, vis: vis } },
         );
         // `@import("select")` on a header type's field names its C member, which a Super-C keyword
         // cannot spell.
@@ -1453,39 +1482,39 @@ extend Parser {
         while !self.check(TokenType::RightBrace) && !self.at_end() {
             let mut attrs = self.parse_attributes(16);
             self.reject_derive_here();
-            let is_public = self.match(TokenType::Pub);
+            let vis = self.parse_vis(false);
             if self.check(TokenType::Fn) {
                 let f = self.parse_function(true, false);
-                self.ast.at(f).as_data.function.set(FN_PUBLIC, is_public);
+                self.ast.at(f).as_data.function.vis = vis;
                 self.reject_method_bench(&attrs, f);
                 self.add_attrs_to(&mut attrs, f);
                 self.ast.push(f);
             } else if self.check(TokenType::Unsafe) {
                 let f = self.parse_unsafe_fn();
                 if f != NODE_NONE {
-                    self.ast.at(f).as_data.function.set(FN_PUBLIC, is_public);
+                    self.ast.at(f).as_data.function.vis = vis;
                     self.reject_method_bench(&attrs, f);
                     self.add_attrs_to(&mut attrs, f);
                     self.ast.push(f);
                 }
-            } else if self.check(TokenType::Type) && !is_public {
+            } else if self.check(TokenType::Type) && vis == VIS_PRIVATE {
                 let ta = self.parse_type_alias(false);
                 self.ast.push(ta);
             } else if self.check(TokenType::Const) {
                 let cn = self.parse_const_or_fn();
                 if cn != NODE_NONE {
                     if self.ast.at_const(cn).kind == NodeKind::NODE_FUNCTION {
-                        self.ast.at(cn).as_data.function.set(FN_PUBLIC, is_public);
+                        self.ast.at(cn).as_data.function.vis = vis;
                         self.reject_method_bench(&attrs, cn);
                         self.add_attrs_to(&mut attrs, cn);
                     } else {
-                        self.ast.at(cn).as_data.const_def.is_public = is_public;
+                        self.ast.at(cn).as_data.const_def.vis = vis;
                     }
                     self.ast.push(cn);
                 }
             } else {
                 self.error_here(
-                    if is_public {
+                    if vis != VIS_PRIVATE {
                         "'pub' may only be applied to a function or const here";
                     } else {
                         "expected extension item";
@@ -1558,7 +1587,7 @@ extend Parser {
         while !self.check(TokenType::RightBrace) && !self.at_end() {
             let mut attrs = self.parse_attributes(16);
             self.reject_derive_here();
-            let is_public = self.match(TokenType::Pub);
+            let vis = self.parse_vis(false);
             if self.check(TokenType::Fn) {
                 let f = self.parse_function(false, true);
                 // The body of an `@unsafe(const)` function is its compile-time model; any other
@@ -1581,7 +1610,7 @@ extend Parser {
                         ),
                     );
                 }
-                self.ast.at(f).as_data.function.set(FN_PUBLIC, is_public);
+                self.ast.at(f).as_data.function.vis = vis;
                 self.ast.at(f).as_data.function.set(FN_EXTERN, true);
                 self.add_attrs_to(&mut attrs, f);
                 if !has_body {
@@ -1593,7 +1622,7 @@ extend Parser {
                 // `@import` pin), this only names its constants.
                 let ed = self.parse_enum();
                 if ed != NODE_NONE {
-                    self.ast.at(ed).as_data.aggregate.is_public = is_public;
+                    self.ast.at(ed).as_data.aggregate.vis = vis;
                     self.ast.at(ed).as_data.aggregate.is_extern = true;
                     self.add_attrs_to(&mut attrs, ed);
                     self.need_header(header, ed, "an enum");
@@ -1614,7 +1643,7 @@ extend Parser {
                             format("an extern type cannot be generic: C has no such declaration to match"),
                         );
                     }
-                    self.ast.at(sd).as_data.aggregate.is_public = is_public;
+                    self.ast.at(sd).as_data.aggregate.vis = vis;
                     self.ast.at(sd).as_data.aggregate.is_extern = true;
                     self.add_attrs_to(&mut attrs, sd);
                     self.need_header(header, sd, pick(is_union, "a union", "a struct"));
@@ -1622,7 +1651,7 @@ extend Parser {
                 }
             } else if self.check(TokenType::Type) {
                 let ta = self.parse_type_alias(true);
-                self.ast.at(ta).as_data.type_alias.is_public = is_public;
+                self.ast.at(ta).as_data.type_alias.vis = vis;
                 // Attached, not dropped: `@import` on an opaque handle is what pins its C spelling.
                 self.add_attrs_to(&mut attrs, ta);
                 if self.ast.attr_of(ta, AttrKind::ATTR_LAYOUT) != null {
@@ -1663,7 +1692,7 @@ extend Parser {
                             name: cname,
                             ty: ctype,
                             value: pick(has_value, cvalue, NODE_NONE),
-                            is_public: is_public,
+                            vis: vis,
                             is_extern: !has_value,
                             is_static_mut: is_static,
                             c_macro: has_value,
@@ -1677,7 +1706,7 @@ extend Parser {
                 self.ast.push(cnode);
             } else {
                 self.error_here(
-                    if is_public {
+                    if vis != VIS_PRIVATE {
                         "'pub' may only be applied to an extern function, type, struct, union, enum, const, or static";
                     } else {
                         "expected extern item";
@@ -1721,12 +1750,12 @@ extend Parser {
             self.add_attrs_to(&mut attrs, id);
             return id;
         }
-        let is_public = self.match(TokenType::Pub);
+        let vis = self.parse_vis(false);
         if self.check(TokenType::Static) {
             self.reject_derive_here();
             let sid = self.parse_static();
             if sid != NODE_NONE {
-                self.ast.at(sid).as_data.const_def.is_public = is_public;
+                self.ast.at(sid).as_data.const_def.vis = vis;
             }
             self.add_attrs_to(&mut attrs, sid);
             return sid;
@@ -1738,11 +1767,11 @@ extend Parser {
         let saved_derives = replace(&mut self.derive_ifaces, Vector::<NodeId>::new());
         let saved_dstart = self.derive_start;
         let saved_dend = self.derive_end;
-        if is_public && !self.check(TokenType::Fn) && !self.check(TokenType::Struct) && !self.check(TokenType::Union) && !self.check(
-            TokenType::Enum,
-        ) && !self.check(TokenType::Const) && !self.check(TokenType::Type) && !self.check(TokenType::Interface) && !self.check(
-            TokenType::Unsafe,
-        ) {
+        if vis != VIS_PRIVATE && !self.check(TokenType::Fn) && !self.check(TokenType::Struct) && !self.check(
+            TokenType::Union,
+        ) && !self.check(TokenType::Enum) && !self.check(TokenType::Const) && !self.check(TokenType::Type) && !self.check(
+            TokenType::Interface,
+        ) && !self.check(TokenType::Unsafe) {
             self.error_here(
                 "'pub' may only be applied to a struct, union, enum, function, const, static, interface, or type",
             );
@@ -1751,45 +1780,45 @@ extend Parser {
         switch self.peek_type() {
             Fn => {
                 id = self.parse_function(true, false);
-                self.ast.at(id).as_data.function.set(FN_PUBLIC, is_public);
+                self.ast.at(id).as_data.function.vis = vis;
             },
             Unsafe => {
                 id = self.parse_unsafe_fn();
                 if id != NODE_NONE {
-                    self.ast.at(id).as_data.function.set(FN_PUBLIC, is_public);
+                    self.ast.at(id).as_data.function.vis = vis;
                 }
             },
             Struct => {
                 id = self.parse_struct();
-                self.ast.at(id).as_data.aggregate.is_public = is_public;
+                self.ast.at(id).as_data.aggregate.vis = vis;
             },
             Union => {
                 id = self.parse_struct();
-                self.ast.at(id).as_data.aggregate.is_public = is_public;
+                self.ast.at(id).as_data.aggregate.vis = vis;
                 self.ast.at(id).as_data.aggregate.is_union = true;
             },
             Enum => {
                 id = self.parse_enum();
-                self.ast.at(id).as_data.aggregate.is_public = is_public;
+                self.ast.at(id).as_data.aggregate.vis = vis;
             },
             Interface => {
                 id = self.parse_interface();
-                self.ast.at(id).as_data.interface_def.is_public = is_public;
+                self.ast.at(id).as_data.interface_def.vis = vis;
             },
             Extend => {
                 id = self.parse_extend();
             },
             Type => {
                 id = self.parse_type_alias(false);
-                self.ast.at(id).as_data.type_alias.is_public = is_public;
+                self.ast.at(id).as_data.type_alias.vis = vis;
             },
             Const => {
                 id = self.parse_const_or_fn();
                 if id != NODE_NONE {
                     if self.ast.at_const(id).kind == NodeKind::NODE_FUNCTION {
-                        self.ast.at(id).as_data.function.set(FN_PUBLIC, is_public);
+                        self.ast.at(id).as_data.function.vis = vis;
                     } else {
-                        self.ast.at(id).as_data.const_def.is_public = is_public;
+                        self.ast.at(id).as_data.const_def.vis = vis;
                     }
                 }
             },

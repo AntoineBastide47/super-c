@@ -79,7 +79,7 @@ pub const ROWS: [Row; 11] = [
 ];
 
 /// The row of `target` (a `PLATFORM_NAMES` index) and `arch` (an `ARCH_NAMES` index), or -1.
-pub fn find_row(target: i32, arch: i32) isize {
+pub const fn find_row(target: i32, arch: i32) isize {
     let rows: []Row = ROWS;
     for i in 0..rows.len() {
         if rows[i].target == target && rows[i].arch == arch {

@@ -5,7 +5,8 @@
 // holds a hash of the inputs (compiler path and mtime, target, arch, compile and link flags) and the
 // compiler version line, then one line per measured probe. A probe runs only when a build needs its
 // result and the record does not hold it, beside the compiler version probe (`Probes::start`).
-import driver_shim as shim;
+import std::platform::fs;
+import std::platform::process;
 import module::loader as loader;
 import driver::util as *;
 import build_system::objcache as *;
@@ -274,7 +275,7 @@ pub const fn table() Slice<'static, Probe> {
 }
 
 /// The index of the probe `id`, or -1 (an empty id names none).
-pub fn index_of(id: str) i32 {
+pub const fn index_of(id: str) i32 {
     for i in 0..table().len() {
         if table()[i].id == id {
             return i as i32;
@@ -300,7 +301,7 @@ pub const PCH_NO_TIME: usize = 21;
 pub const ALL: u64 = (1u64 << 22) - 1;
 
 // Field `idx` of `s` split at byte `sep`; the last field runs to the end, and a missing one is empty.
-fn nth(s: str, sep: u8, idx: usize) str {
+const fn nth(s: str, sep: u8, idx: usize) str {
     let mut a: usize = 0;
     let mut k: usize = 0;
     for i in 0..s.len() + 1 {
@@ -316,7 +317,7 @@ fn nth(s: str, sep: u8, idx: usize) str {
 }
 
 // Name list `names` (space-separated) is empty or holds `name`.
-fn names_hold(names: str, name: str) bool {
+const fn names_hold(names: str, name: str) bool {
     if names.len() == 0 {
         return true;
     }
@@ -333,7 +334,7 @@ fn names_hold(names: str, name: str) bool {
 }
 
 // The spellings probe `pr` tries: one for a probe without forms.
-fn form_count(pr: &Probe) usize {
+const fn form_count(pr: &Probe) usize {
     let mut n: usize = 1;
     for i in 0..pr.forms.len() {
         if pr.forms[i] == b'|' {
@@ -377,7 +378,7 @@ pub struct Probes {
     pub ver: String, // the compiler version line the results belong to
     pub res: Vector<String>, // per probe; empty = not measured
     pub aux: Vector<String>, // per probe: what else must hold for the result (the ThinLTO linker line)
-    pub pids: Vector<i64>, // per probe and spelling: the running child, -1 = none
+    pub pids: Vector<Option<process::Child>>, // per probe and spelling: the running child
     pub running: Vector<bool>, // per probe: its children were started
     pub argv: Vector<String>, // the compiler driver words, then the compile flags
     pub ldflags: String, // the link flags of a "link" probe
@@ -399,7 +400,7 @@ extend Probes {
             ver: String::new(),
             res: Vector::<String>::with_capacity(table().len()),
             aux: Vector::<String>::with_capacity(table().len()),
-            pids: Vector::<i64>::with_capacity(table().len() * MAX_FORMS),
+            pids: Vector::<Option<process::Child>>::with_capacity(table().len() * MAX_FORMS),
             running: Vector::<bool>::with_capacity(table().len()),
             argv: argv,
             ldflags: String::from_str(ldflags),
@@ -424,7 +425,7 @@ extend Probes {
             p.aux.push(String::new());
             p.running.push(false);
             for _ in 0..MAX_FORMS {
-                p.pids.push(-1);
+                p.pids.push(Option::<process::Child>::None);
             }
         }
         let old = loader::read_file(p.path.as_str());
@@ -496,7 +497,7 @@ extend Probes {
                 }
                 let mut log = stem.clone();
                 log.push_str(".log");
-                self.pids[i * MAX_FORMS + k] = spawn_args(&mut args, log.cstr());
+                self.pids[i * MAX_FORMS + k] = spawn_args(&args, log.as_str());
             }
         }
     }
@@ -526,15 +527,13 @@ extend Probes {
             let pr = &table()[i];
             let mut first: isize = -1; // the first spelling that compiled
             for k in 0..form_count(pr) {
-                let pid = self.pids[i * MAX_FORMS + k];
-                self.pids[i * MAX_FORMS + k] = -1;
                 let mut code: i32 = 1;
-                if pid < 0 || unsafe shim::sc_waitpid(pid, &mut code) != 0 {
-                    code = 1;
+                if let Some(mut c) = self.pids[i * MAX_FORMS + k].take() {
+                    code = c.wait().map(|st: process::ExitStatus| exit_code(st)).unwrap_or(1);
                 }
                 let stem = loader::join2(self.dir.as_str(), format("{}.{}", i, k).as_str());
-                let mut out = out_path(&stem, pr.step);
-                if code == 0 && unsafe shim::sc_mtime(out.cstr()) != 0 && first < 0 {
+                let out = out_path(&stem, pr.step);
+                if code == 0 && file_mtime(out.as_str()) != 0 && first < 0 {
                     first = k as isize;
                 }
             }
@@ -560,8 +559,7 @@ extend Probes {
             self.dirty = true;
         }
         if ran {
-            let mut d = self.dir.clone();
-            let _ = unsafe shim::sc_rm_rf(d.cstr());
+            let _ = fs::remove_all(self.dir.as_str());
         }
     }
 
@@ -569,16 +567,13 @@ extend Probes {
     pub fn abandon(self: &mut Self) {
         let mut ran = false;
         for i in 0..self.pids.len() {
-            if self.pids[i] >= 0 {
-                let mut code: i32 = 0;
-                let _ = unsafe shim::sc_waitpid(self.pids[i], &mut code);
-                self.pids[i] = -1;
+            if let Some(mut c) = self.pids[i].take() {
+                let _ = c.wait();
                 ran = true;
             }
         }
         if ran {
-            let mut d = self.dir.clone();
-            let _ = unsafe shim::sc_rm_rf(d.cstr());
+            let _ = fs::remove_all(self.dir.as_str());
         }
     }
 

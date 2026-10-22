@@ -310,7 +310,7 @@ files of the old layout. Three costs had to be removed to get there:
 One tree: the emitter writes `gen_root` in place and the C compiler reads it. Before, a
 manifest build wrote every file into `raw/` and its sink wrote it again into a
 content-synced `gen/`, the compiled tree (about 95 ms per emitting build on macOS, 24 to
-49 ms on Linux, 254 to 350 ms on Windows). Now `publish_file` (`sc_publish`) compares each
+49 ms on Linux, 254 to 350 ms on Windows). Now `publish_file` (`std::platform::fs::publish`) compares each
 file with the text first (its size, then its bytes; never the manifest's hash, which would
 hide a hand edit) and writes only a changed file, with one `write` call, so an unchanged
 file keeps its mtime, the staleness anchor of its object. The sink hears whether each file

@@ -8,7 +8,7 @@ import std::math::quat as *;
 import std::math::packing as *;
 
 // Every component of `a` within `eps` of `b`.
-fn near<const N: usize>(a: Vec<f32, N>, b: Vec<f32, N>, eps: f32) bool {
+const fn near<const N: usize>(a: Vec<f32, N>, b: Vec<f32, N>, eps: f32) bool {
     for i in 0..N {
         if !((a[i] - b[i]).abs() <= eps) {
             return false;

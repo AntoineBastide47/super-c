@@ -745,7 +745,7 @@ pub fn transpose<T: Scalar, const C: usize, const R: usize>(m: Mat<T, C, R>) Mat
 }
 
 /// The element-wise product.
-pub fn matrix_comp_mult<T: Scalar, const C: usize, const R: usize>(x: Mat<T, C, R>, y: Mat<T, C, R>) Mat<T, C, R> {
+pub const fn matrix_comp_mult<T: Scalar, const C: usize, const R: usize>(x: Mat<T, C, R>, y: Mat<T, C, R>) Mat<T, C, R> {
     let mut m = x;
     for i in 0..C {
         unsafe {
@@ -1063,7 +1063,7 @@ extend<T: Float> Mat<T, 4, 4> as AffineInverse {
 
 /// The transposed inverse of a 2x2, 3x3 or 4x4 matrix (another size is a compile error), by
 /// cofactors. Exception: the 2x2 result is the inverse, not transposed.
-pub fn inverse_transpose<T: Float, const N: usize>(m: Mat<T, N, N>) Mat<T, N, N> {
+pub const fn inverse_transpose<T: Float, const N: usize>(m: Mat<T, N, N>) Mat<T, N, N> {
     static_assert(N >= 2 && N <= 4, "inverse_transpose of a 2x2, 3x3 or 4x4 matrix");
     let mut r = m;
     if N == 2 {

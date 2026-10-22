@@ -47,7 +47,7 @@ pub struct CFlow {
 }
 
 // A block that only forwards: no statements, an unconditional goto. Predecessors thread through it.
-fn trivial(b: &ir::CoreBody, x: u32) bool {
+const fn trivial(b: &ir::CoreBody, x: u32) bool {
     let blk = b.blocks.at(x as usize);
     if blk.term.kind != ir::TM_GOTO {
         return false;
@@ -62,7 +62,7 @@ fn trivial(b: &ir::CoreBody, x: u32) bool {
 }
 
 // Raw successor edge count (switch: one per arm plus the otherwise edge).
-fn n_succ(b: &ir::CoreBody, x: u32) u32 {
+const fn n_succ(b: &ir::CoreBody, x: u32) u32 {
     let t = b.blocks.at(x as usize).term;
     if t.kind == ir::TM_RETURN || t.kind == ir::TM_UNREACHABLE {
         return 0;
@@ -78,7 +78,7 @@ fn n_succ(b: &ir::CoreBody, x: u32) u32 {
 
 /// The live edge of switch block `x` when it switches on a literal; NONE otherwise. Removing the dead
 /// edges keeps them out of reachability, dominance, loop discovery, and the final C layout.
-pub fn const_switch_edge(b: &ir::CoreBody, x: u32) u32 {
+pub const fn const_switch_edge(b: &ir::CoreBody, x: u32) u32 {
     let t = b.blocks.at(x as usize).term;
     if t.kind != ir::TM_SWITCH {
         return NONE;
@@ -100,7 +100,7 @@ pub fn const_switch_edge(b: &ir::CoreBody, x: u32) u32 {
 }
 
 // Raw k-th successor block (pre-threading).
-fn raw_succ(b: &ir::CoreBody, x: u32, k: u32) u32 {
+const fn raw_succ(b: &ir::CoreBody, x: u32, k: u32) u32 {
     let t = b.blocks.at(x as usize).term;
     if t.kind == ir::TM_SWITCH {
         let ce = const_switch_edge(b, x);
@@ -128,7 +128,7 @@ fn fill_none(v: &mut Vector<u32>, len: u32) {
 
 extend CFlow {
     /// Threaded k-th successor of x.
-    pub fn succ(self: &Self, b: &ir::CoreBody, x: u32, k: u32) u32 {
+    pub const fn succ(self: &Self, b: &ir::CoreBody, x: u32, k: u32) u32 {
         return *self.thread.at(raw_succ(b, x, k) as usize);
     }
 
@@ -558,7 +558,7 @@ extend CFlow {
 
     // True when every retreating reverse edge (forward edge x -> s with s not after x in the reverse
     // RPO) has x post-dominating s in the current tree: the round already reached the fixed point.
-    fn pdom_settled(self: &Self) bool {
+    const fn pdom_settled(self: &Self) bool {
         let m = self.s_post.len();
         for i in 1..m {
             let x = *self.s_post.at(m - 1 - i);
@@ -580,7 +580,7 @@ extend CFlow {
         return true;
     }
 
-    fn pintersect(self: &Self, a0: u32, b0: u32) u32 {
+    const fn pintersect(self: &Self, a0: u32, b0: u32) u32 {
         let mut a = a0;
         let mut bb = b0;
         while a != bb {
@@ -594,7 +594,7 @@ extend CFlow {
         return a;
     }
 
-    fn intersect(self: &Self, a0: u32, b0: u32) u32 {
+    const fn intersect(self: &Self, a0: u32, b0: u32) u32 {
         let mut a = a0;
         let mut bb = b0;
         while a != bb {
@@ -800,7 +800,7 @@ extend CFlow {
     }
 
     // Whether block `s` lies in the loop headed by `h`: `h` encloses its innermost loop.
-    fn in_loop(self: &Self, h: u32, s: u32) bool {
+    const fn in_loop(self: &Self, h: u32, s: u32) bool {
         let mut g = *self.loop_of.at(s as usize);
         // Each step leaves one enclosing loop.
         while g != NONE {

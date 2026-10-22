@@ -3,8 +3,22 @@
 // over the stream's descriptor, so the server can ask whether another message has arrived
 // without blocking. Writes flush per message: the client blocks on responses.
 import stdio;
-import driver_shim as shim;
+import std::platform::fs;
 import lsp::text as text;
+
+// The native handle under a C stream: its descriptor, or on Windows the HANDLE of the C runtime's.
+@platform(!windows)
+extern "C" "stdio.h" {
+    fn fileno(f: *mut stdio::FILE) i32;
+}
+@platform(windows)
+extern "C" "stdio.h" {
+    fn _fileno(f: *mut stdio::FILE) i32;
+}
+@platform(windows)
+extern "C" "io.h" {
+    fn _get_osfhandle(fd: i32) isize;
+}
 
 const FILL: usize = 65536; // bytes asked of the descriptor per read
 const HDR_MAX: usize = 511; // a header line longer than this (without its newline) is malformed
@@ -25,7 +39,17 @@ extend Reader {
 
     /// True when an unread byte is buffered or the descriptor would hand one over now.
     pub fn pending(self: &Self) bool {
-        return self.pos < self.buf.len() || !self.eof && unsafe shim::sc_file_pending(self.f) == 1;
+        if self.pos < self.buf.len() {
+            return true;
+        }
+        if self.eof {
+            return false;
+        }
+        // The stream owns the handle: the File only borrows it.
+        let f = unsafe fs::File::from_raw(handle_of(self.f));
+        let r = f.pending();
+        let _ = f.into_raw();
+        return r.unwrap_or(false);
     }
 
     // Move the unread bytes to the front, then append what the descriptor has: false at the end
@@ -44,7 +68,7 @@ extend Reader {
         }
         let old = self.buf.len();
         self.buf.resize_default(old + FILL);
-        let r = unsafe shim::sc_file_read(self.f, (self.buf.as_ptr() + old) as *mut void, FILL);
+        let r = read_raw(self.f, (unsafe (self.buf.as_ptr() + old)) as *mut u8, FILL);
         if r <= 0 {
             self.buf.truncate(old);
             self.eof = true;
@@ -96,7 +120,7 @@ extend Reader {
             }
             let want = n - body.len();
             let dst = body.spare_mut(want);
-            let r = unsafe shim::sc_file_read(self.f, dst, want);
+            let r = read_raw(self.f, dst, want);
             if r <= 0 {
                 self.eof = true;
                 return Option::<String>::None;
@@ -107,8 +131,27 @@ extend Reader {
     }
 }
 
+// One read of at most `n` bytes of stream `f`'s descriptor into `dst`, past the stdio buffer: what the
+// read returns (a pipe hands over what has arrived), 0 at the end of the stream, -1 on an error.
+fn read_raw(f: *mut stdio::FILE, dst: *mut u8, n: usize) i64 {
+    // The stream owns the handle: the File only borrows it.
+    let mut file = unsafe fs::File::from_raw(handle_of(f));
+    let r = file.read(unsafe SliceMut::<u8> { ptr: dst, len: n });
+    let _ = file.into_raw();
+    return r.map(|k: usize| k as i64).unwrap_or(-1);
+}
+
+@platform(!windows)
+fn handle_of(f: *mut stdio::FILE) fs::RawHandle {
+    return unsafe fileno(f);
+}
+@platform(windows)
+fn handle_of(f: *mut stdio::FILE) fs::RawHandle {
+    return ((unsafe _get_osfhandle(_fileno(f))) as usize) as *mut void;
+}
+
 // Case-insensitive header-name prefix test (`name` is the lowercase spelling with its colon).
-fn header_is(line: str, name: str) bool {
+const fn header_is(line: str, name: str) bool {
     return line.len() >= name.len() && text::ci_at(line, 0, name);
 }
 

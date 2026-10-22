@@ -643,7 +643,7 @@ fn fit_n(g: &Grid<Q>, dense: &Grid<Q>, dw0: bool, n: usize, bits: i32) (Vector<f
 }
 
 // `v` rounded to the lane type of `bits` significand bits, as an f64.
-fn rnd_q(v: Q, bits: i32) f64 {
+const fn rnd_q(v: Q, bits: i32) f64 {
     if bits == 24 {
         return v.to_f32();
     }
@@ -739,7 +739,7 @@ pub fn hex(v: f64, out: &mut String) {
 }
 
 // The f64 nearest `x`, or (lane type of 24 bits) the f32 nearest, as an f64.
-fn rnd(x: Z, bits: i32) f64 {
+const fn rnd(x: Z, bits: i32) f64 {
     if bits == 24 {
         return x.to_f32();
     }
@@ -1138,7 +1138,7 @@ fn polys(sp: &Vector<Spec>, fits: &mut Vector<Slot>, bits: i32, out: &mut String
         names.push(up);
     }
     out.format_into(
-        "\n/// Polynomial `P` of the kernels at `z`.\npub fn poly<const P: Poly, const N: usize>(z: Simd<{}, N>) Simd<{}, N> {{\n    return switch P {{\n",
+        "\n/// Polynomial `P` of the kernels at `z`.\npub const fn poly<const P: Poly, const N: usize>(z: Simd<{}, N>) Simd<{}, N> {{\n    return switch P {{\n",
         ty,
         ty,
     );

@@ -5,7 +5,7 @@
 // builtin_decls array length is an enum-cast const evaluated pre-typecheck).
 import tests::cli_harness as cli;
 import stdio;
-import driver_shim as shim;
+import std::platform::fs;
 import module::loader as loader;
 import lsp::json as json;
 import lsp::text as text;
@@ -108,7 +108,7 @@ fn lsp_run(root: str) i32 {
 }
 
 // Count non-overlapping occurrences of `needle` in `hay`.
-fn count(hay: str, needle: str) usize {
+const fn count(hay: str, needle: str) usize {
     let mut n: usize = 0;
     let mut i: usize = 0;
     while i + needle.len() <= hay.len() {
@@ -183,6 +183,73 @@ fn lsp_diagnostics_lifecycle() {
     assert(count(o, "textDocument/publishDiagnostics") >= 2);
     assert(o.contains("\"severity\":1"));
     assert(o.contains("{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":null}"));
+}
+
+// The code the build settings remove (a gated-out item with its visibility modifier, a branch not taken)
+// is published to an open document as a hint tagged Unnecessary, which the client fades: once, also for
+// a document outside the manifest's closure, which the workspace batch holds too.
+@test
+fn lsp_inactive_code_fades() {
+    let src = "@when(THREAD_SANITIZER)\nfn race_only() {}\n\nfn main() i32 {\n    if THREAD_SANITIZER {\n        return 1;\n    }\n    return 0;\n}\n";
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", src);
+    let extra = "@when(THREAD_SANITIZER)\npub fn x() {}\n";
+    p.mkfile("src/extra.spc", extra);
+    let root = p.dir();
+    let mut ses = String::new();
+    let mut b = String::new();
+    b.format_into(
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"rootUri\":\"file://{}\"}}}}",
+        root,
+    );
+    frame(&mut ses, &b);
+    b.clear();
+    b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}");
+    frame(&mut ses, &b);
+    b.clear();
+    b.format_into(
+        "{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{{\"textDocument\":{{\"uri\":\"file://{}/src/main.spc\",\"languageId\":\"super-c\",\"version\":1,\"text\":",
+        root,
+    );
+    json::dump_escaped(src, &mut b);
+    b.push_str("}}}");
+    frame(&mut ses, &b);
+    b.clear();
+    b.format_into(
+        "{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{{\"textDocument\":{{\"uri\":\"file://{}/src/extra.spc\",\"languageId\":\"super-c\",\"version\":1,\"text\":",
+        root,
+    );
+    json::dump_escaped(extra, &mut b);
+    b.push_str("}}}");
+    frame(&mut ses, &b);
+    b.clear();
+    b.push_str("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\",\"params\":null}");
+    frame(&mut ses, &b);
+    b.clear();
+    b.push_str("{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}");
+    frame(&mut ses, &b);
+    p.mkfile("session.bin", ses.as_str());
+    assert_eq(lsp_run(root), 0);
+    let out = loader::read_file(format("{}/out.txt", root).as_str()).unwrap();
+    let o = out.as_str();
+    // The item `fn race_only() {}` (line 1) and the branch `{ return 1; }` (lines 4 to 6).
+    assert(
+        o.contains(
+            "{\"range\":{\"start\":{\"line\":1,\"character\":0},\"end\":{\"line\":1,\"character\":17}},\"severity\":4",
+        ),
+    );
+    assert(
+        o.contains(
+            "{\"range\":{\"start\":{\"line\":4,\"character\":24},\"end\":{\"line\":6,\"character\":5}},\"severity\":4",
+        ),
+    );
+    assert(o.contains("\"tags\":[1]"));
+    // `pub fn x() {}` with its `pub`, once per publication of extra.spc.
+    let xr = "{\"range\":{\"start\":{\"line\":1,\"character\":0},\"end\":{\"line\":1,\"character\":13}},\"severity\":4";
+    assert(count(o, xr) >= 1);
+    assert_eq(count(o, xr), count(o, "/src/extra.spc\""));
+    assert(!o.contains("\"severity\":1"));
 }
 
 @test
@@ -609,10 +676,10 @@ fn lsp_rename_workspace_relative() {
 
     // inside: this repo's workspace contains std/; renaming Vector::push answers with edits that
     // reach std/vector.spc (nothing is written: rename only RETURNS a WorkspaceEdit).
-    let mut rb = Array::<char, 4096>::new();
-    let mut dot = String::from_str(".");
-    assert(unsafe shim::sc_realpath(dot.cstr(), &mut rb[0]) != null);
-    let repo = str::from_cbuf(rb.as_slice());
+    let real = fs::realpath(".");
+    assert(real.is_ok());
+    let rs = real.unwrap();
+    let repo = rs.as_str();
     let p2 = cli::proj_new(); // scratch dir for the session/out files only
     let root2 = p2.dir();
     let mut ses2 = String::new();

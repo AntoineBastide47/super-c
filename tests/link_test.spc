@@ -4,6 +4,7 @@
 import stdlib;
 import build_system::build as bsys;
 import driver_shim as shim;
+import driver::util as dutil;
 import tests::cli_harness as cli;
 
 @test
@@ -97,16 +98,16 @@ fn a_failed_strip_installs_nothing() {
     let build = format("build --cc={}/cc.sh", root);
     let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", build.as_str());
     assert(!r.ok() && r.out_has("strip failed (exit 3)"), "the failed strip fails the build");
-    let mut bin = format("{}/build/debug/app", root);
-    assert(unsafe shim::sc_mtime(bin.cstr()) == 0, "nothing is installed");
+    let bin = format("{}/build/debug/app", root);
+    assert(dutil::file_mtime(bin.as_str()) == 0, "nothing is installed");
     let mut rec = bsys::link_record(format("{}/build", root).as_str(), "build/debug/app");
     rec.push_str(".cmd");
-    assert(unsafe shim::sc_mtime(rec.cstr()) == 0, "no link is recorded");
+    assert(dutil::file_mtime(rec.as_str()) == 0, "no link is recorded");
     p.mkfile("bin/strip", "#!/bin/sh\nexit 0\n");
     let r2 = cli::superc_env_in(root, "SC_NO_CACHE", "1", build.as_str());
     assert(r2.ok(), "the next build links and strips");
-    assert(unsafe shim::sc_mtime(bin.cstr()) != 0, "and installs the binary");
-    assert(unsafe shim::sc_mtime(rec.cstr()) != 0, "and records the link");
+    assert(dutil::file_mtime(bin.as_str()) != 0, "and installs the binary");
+    assert(dutil::file_mtime(rec.as_str()) != 0, "and records the link");
 }
 
 // The compiles and the link start the compiler PATH names by its path; a PATH match that cannot start

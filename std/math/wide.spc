@@ -28,7 +28,7 @@ const fn wzero<const W: usize>() Wf<W> {
 }
 
 // (-1)^neg * v * 2^e for any width of `v`, truncated to W bits.
-fn wnorm<const W: usize, const N: usize>(neg: bool, e: i64, v: UInt<N>) Wf<W> {
+const fn wnorm<const W: usize, const N: usize>(neg: bool, e: i64, v: UInt<N>) Wf<W> {
     if v.is_zero() {
         return wzero::<W>();
     }
@@ -40,11 +40,11 @@ fn wnorm<const W: usize, const N: usize>(neg: bool, e: i64, v: UInt<N>) Wf<W> {
     return Wf::<W> { neg: neg, e: e - (W - n) as i64, m: UInt::<W>::cast_unsigned(&v) << W - n };
 }
 
-fn wfrom_u64<const W: usize>(v: u64) Wf<W> {
+const fn wfrom_u64<const W: usize>(v: u64) Wf<W> {
     return wnorm::<W, 64>(false, 0, UInt::<64>::from_u64(v));
 }
 
-fn wfrom_i64<const W: usize>(v: i64) Wf<W> {
+const fn wfrom_i64<const W: usize>(v: i64) Wf<W> {
     let mag = if v < 0 {
         0u64.wrapping_sub(v as u64);
     } else {
@@ -54,11 +54,11 @@ fn wfrom_i64<const W: usize>(v: i64) Wf<W> {
     return Wf::<W> { neg: v < 0 && !a.m.is_zero(), e: a.e, m: a.m };
 }
 
-fn wone<const W: usize>() Wf<W> {
+const fn wone<const W: usize>() Wf<W> {
     return wfrom_u64::<W>(1);
 }
 
-fn wneg<const W: usize>(a: Wf<W>) Wf<W> {
+const fn wneg<const W: usize>(a: Wf<W>) Wf<W> {
     return Wf::<W> { neg: !a.neg && !a.m.is_zero(), e: a.e, m: a.m };
 }
 
@@ -67,7 +67,7 @@ const fn wabs<const W: usize>(a: Wf<W>) Wf<W> {
 }
 
 // a * 2^k.
-fn wscale<const W: usize>(a: Wf<W>, k: i64) Wf<W> {
+const fn wscale<const W: usize>(a: Wf<W>, k: i64) Wf<W> {
     if a.m.is_zero() {
         return a;
     }
@@ -75,7 +75,7 @@ fn wscale<const W: usize>(a: Wf<W>, k: i64) Wf<W> {
 }
 
 // The order of |a| and |b|: -1, 0 or 1.
-fn wcmp_abs<const W: usize>(a: Wf<W>, b: Wf<W>) i32 {
+const fn wcmp_abs<const W: usize>(a: Wf<W>, b: Wf<W>) i32 {
     if a.m.is_zero() || b.m.is_zero() {
         return if a.m.is_zero() && b.m.is_zero() {
             0;
@@ -96,7 +96,7 @@ fn wcmp_abs<const W: usize>(a: Wf<W>, b: Wf<W>) i32 {
 }
 
 // Whether |a| < 2^k.
-fn wbelow<const W: usize>(a: Wf<W>, k: i64) bool {
+const fn wbelow<const W: usize>(a: Wf<W>, k: i64) bool {
     return a.m.is_zero() || a.e + W as i64 <= k;
 }
 
@@ -113,7 +113,7 @@ fn wmul<const W: usize>(a: Wf<W>, b: Wf<W>) Wf<W> {
 }
 
 // a + b, exact in 2W + 2 bits, then truncated.
-fn wadd<const W: usize>(a: Wf<W>, b: Wf<W>) Wf<W> {
+const fn wadd<const W: usize>(a: Wf<W>, b: Wf<W>) Wf<W> {
     if a.m.is_zero() {
         return b;
     }
@@ -145,11 +145,11 @@ fn wadd<const W: usize>(a: Wf<W>, b: Wf<W>) Wf<W> {
     return wnorm::<W, {2 * W + 2}>(x.neg, x.e - W as i64, s);
 }
 
-fn wsub<const W: usize>(a: Wf<W>, b: Wf<W>) Wf<W> {
+const fn wsub<const W: usize>(a: Wf<W>, b: Wf<W>) Wf<W> {
     return wadd(a, wneg(b));
 }
 
-fn wdiv<const W: usize>(a: Wf<W>, b: Wf<W>) Wf<W> {
+const fn wdiv<const W: usize>(a: Wf<W>, b: Wf<W>) Wf<W> {
     if a.m.is_zero() {
         return wzero::<W>();
     }
@@ -159,7 +159,7 @@ fn wdiv<const W: usize>(a: Wf<W>, b: Wf<W>) Wf<W> {
 }
 
 // a / d for 0 < d < 2^32, limb by limb.
-fn wdiv_small<const W: usize>(a: Wf<W>, d: u64) Wf<W> {
+const fn wdiv_small<const W: usize>(a: Wf<W>, d: u64) Wf<W> {
     if a.m.is_zero() {
         return a;
     }
@@ -186,7 +186,7 @@ fn wmul_small<const W: usize>(a: Wf<W>, k: u64) Wf<W> {
 }
 
 // sqrt(a) for a >= 0: the integer square root of m * 2^s, s = W or W - 1 with e - s even.
-fn wsqrt<const W: usize>(a: Wf<W>) Wf<W> {
+const fn wsqrt<const W: usize>(a: Wf<W>) Wf<W> {
     if a.m.is_zero() {
         return a;
     }
@@ -209,7 +209,7 @@ fn wsqrt<const W: usize>(a: Wf<W>) Wf<W> {
 }
 
 // The integer nearest a (halves away from zero), for |a| < 2^62.
-fn wround_i64<const W: usize>(a: Wf<W>) i64 {
+const fn wround_i64<const W: usize>(a: Wf<W>) i64 {
     if a.m.is_zero() {
         return 0;
     }
@@ -228,7 +228,7 @@ fn wround_i64<const W: usize>(a: Wf<W>) i64 {
 }
 
 // The value in [1/2, 1) of the leading bits of `t` (bits after the binary point, most significant first).
-fn wconst<const W: usize>(t: []u64) Wf<W> {
+const fn wconst<const W: usize>(t: []u64) Wf<W> {
     static_assert(W <= 64 * 64, "the functions of this format need more bits of pi and ln 2");
     let l = (W + 63) / 64;
     let mut acc = UInt::<{W + 64}>::zero();
@@ -238,16 +238,16 @@ fn wconst<const W: usize>(t: []u64) Wf<W> {
     return wnorm::<W, {W + 64}>(false, -(64 * l as i64), acc);
 }
 
-fn wpi4<const W: usize>() Wf<W> {
+const fn wpi4<const W: usize>() Wf<W> {
     return wconst::<W>(wc::PI4_BITS);
 }
 
-fn wln2<const W: usize>() Wf<W> {
+const fn wln2<const W: usize>() Wf<W> {
     return wconst::<W>(wc::LN2_BITS);
 }
 
 // Bits i0 .. i0 + N - 1 (bit i weighs 2^-i) of 2/pi as an integer.
-fn two_over_pi_bits<const N: usize>(i0: u64) UInt<N> {
+const fn two_over_pi_bits<const N: usize>(i0: u64) UInt<N> {
     let t = wc::TWO_OVER_PI_BITS;
     let l = (N + 63) / 64;
     let mut acc = UInt::<{N + 64}>::zero();
@@ -266,7 +266,7 @@ fn two_over_pi_bits<const N: usize>(i0: u64) UInt<N> {
 }
 
 // Whether a series term no longer reaches the sum's last bits.
-fn wnegligible<const W: usize>(term: Wf<W>, sum: Wf<W>) bool {
+const fn wnegligible<const W: usize>(term: Wf<W>, sum: Wf<W>) bool {
     return term.m.is_zero() || !sum.m.is_zero() && term.e + W as i64 < sum.e - 1;
 }
 
@@ -556,7 +556,7 @@ const fn bias<const E: usize>() i64 {
 }
 
 // The exact value of a finite x.
-fn to_w<const E: usize, const F: usize, const FAMILY: sf::FloatFamily>(x: Float<E, F, FAMILY>) Wf<{F + 66}> {
+const fn to_w<const E: usize, const F: usize, const FAMILY: sf::FloatFamily>(x: Float<E, F, FAMILY>) Wf<{F + 66}> {
     let (neg, eb, fr) = x.to_parts();
     let mut sig = UInt::<{F + 66}>::cast_unsigned(&fr);
     let mut ex = 1 - bias::<E>() - F as i64;
@@ -607,7 +607,7 @@ fn huge<const E: usize, const F: usize, const FAMILY: sf::FloatFamily>(neg: bool
     return h;
 }
 
-fn signed_zero<const E: usize, const F: usize, const FAMILY: sf::FloatFamily>(neg: bool) Float<E, F, FAMILY> {
+const fn signed_zero<const E: usize, const F: usize, const FAMILY: sf::FloatFamily>(neg: bool) Float<E, F, FAMILY> {
     if neg {
         return Float::<E, F, FAMILY>::neg_zero();
     }

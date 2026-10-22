@@ -40,7 +40,10 @@ extern "C" {
   (`<ws2tcpip.h>` before `<windows.h>`). A unit that includes such a header compiles outside the
   unity build.
 - A function of a block without a header gets a C prototype from its Super-C declaration, unless
-  a header the runtime always includes declares it (the C library) or its name starts with `__sc_` (the runtime's entry points).
+  a header the runtime always includes declares it at the build's POSIX level (the C library) or its name starts
+  with `__sc_` (the runtime's entry points). A BSD or GNU addition those headers hide at that level
+  (`arc4random_buf`, `strlcpy`, `memmem`, `qsort_r`: `C_EXT_NAMES` in `src/emit/mangle.spc`) and a `_np` name
+  get the prototype.
   Use such a block for a function whose header the build's feature macros
   (`-D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700`) cannot include, such as macOS `sysctlbyname`; never define a
   feature macro (`_DARWIN_C_SOURCE`) for it. A Win32 function binds in a `"windows.h"` block, its
@@ -82,7 +85,7 @@ auto-included via `super_rt.h`, so standard C functions need no explicit header.
 
 The header declares the functions of such a block, so a call converts each argument to a `*mut void` or
 `*const void` parameter through `void *`: a binding may spell a pointer type no Super-C type matches
-that way (Win32 `DWORD *`, C `unsigned long *`, in `src/driver_shim.spc`).
+that way (Win32 `DWORD *`, C `unsigned long *`, in `std/platform/fs.spc`).
 
 `setjmp.h` is banned: `longjmp` bypasses normal control flow (drops, defers, borrow scopes) and
 breaks the memory-safety model. Never add it to the runtime includes or to `ffi/`.
@@ -651,11 +654,11 @@ Windows 7, whose headers hide the Windows 8 functions the runtime calls.
 
 - macOS: strict `_POSIX_C_SOURCE` breaks `<sys/sysctl.h>`, `<libproc.h>` and
   `<malloc/malloc.h>`, hides `struct rusage_info_v4` and names `struct rusage`'s counters
-  `ru_opaque`. src/driver_shim.spc and std/testing/bench_sys.spc bind such functions in blocks without a
+  `ru_opaque`. std/platform/process.spc and std/testing/bench_sys.spc bind such functions in blocks without a
   header (each gets a prototype from its Super-C declaration) and mirrors the hidden records as
   Super-C structs with the header's layout.
 - Windows (mingw) fakes POSIX. `stat().st_ino` is 0, so a dev+ino identity test matches
-  unrelated files (src/driver_shim.spc uses `GetFileInformationByHandle`). Files and stdio
+  unrelated files (std/platform/fs.spc uses `GetFileInformationByHandle`). Files and stdio
   default to text mode: CRLF breaks `\`-continued macros and byte framing, so open with
   `"wb"` and set stdio binary. `tmpfile()` writes to the drive root: use `GetTempPathA`
   (`%TEMP%`) and `fopen(.., "wb")`. There is no `open_memstream`.
@@ -669,7 +672,7 @@ Windows 7, whose headers hide the Windows 8 functions the runtime calls.
 | Repeating `@link` in every importing module | Declare it once on the binding module |
 | Using `void` for opaque types | Use `type X;` (with its defining header): renders as the real C name |
 | Assuming `String::ptr()` is NUL-terminated | It is not. Use `String::cstr()` |
-| Passing `.ptr()` to an `sc_*` path call (`sc_mkdir`, `sc_stat_isdir` in src/driver_shim.spc) | Use `.cstr()` as for any C call; a heap string whose allocation equals its length has no NUL after it, so failures depend on the length |
+| Passing a `str`'s `.ptr()` to a C path parameter | Use `.cstr()`, or `std::platform::path::native` inside std; a heap string whose allocation equals its length has no NUL after it, so failures depend on the length |
 | Inventing an opaque type name (`type CFile;`) | The name must be a real C type a header defines |
 | Mirroring a C struct as a Super-C `struct` | Declare it in the header's extern block: a header type uses the C layout and checks its fields |
 | A typedef'd header type declared as `struct pthread_attr_t {}` | That spells `struct pthread_attr_t`: add `@import("pthread_attr_t")` |

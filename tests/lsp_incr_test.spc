@@ -146,7 +146,7 @@ fn round_diags(
 }
 
 // Errors recorded against module `<name>`.
-fn errors_in(p: &loader::Package, diags: &Vector<an::DiagRec>, name: str) usize {
+const fn errors_in(p: &loader::Package, diags: &Vector<an::DiagRec>, name: str) usize {
     let m = mod_of(p, name);
     let mut n: usize = 0;
     for i in 0..diags.len() {
@@ -185,6 +185,91 @@ fn fresh(ws: &Ws, ovf: &Vector<String>, ovt: &Vector<String>, diags: &mut Vector
     );
     settle(&mut p, ovf, diags);
     return p;
+}
+
+// The language server reports a struct literal of an alias of a scalar where it is written.
+@test
+fn struct_literal_of_an_alias_is_reported() {
+    let ws = ws_of(
+        "import b;\nfn main() i32 {\n    return b::mk(1) as i32;\n}\n",
+        "pub type D = u64;\npub fn mk(n: u64) D {\n    return D { ns: n };\n}\n",
+        "",
+        "",
+    );
+    let ovf = Vector::<String>::new();
+    let ovt = Vector::<String>::new();
+    let mut diags = Vector::<an::DiagRec>::new();
+    let p = fresh(&ws, &ovf, &ovt, &mut diags);
+    let m = mod_of(&p, "/b.spc");
+    let mut hit = false;
+    for i in 0..diags.len() {
+        let d = diags.at(i);
+        hit = hit || d.module as usize == m && d.severity == 1 && d.start == 51 && d.msg.as_str().contains(
+            "'D' is 'u64'",
+        );
+    }
+    assert(hit, "the error is published at the literal of b.spc");
+}
+
+// Hover and go-to-definition on a variant's own declaration, also one without payload, whose node is as wide
+// as its name.
+@test
+fn variant_declarations_hover_and_define() {
+    let a = "enum K {\n    Alpha, // first\n    Beta(i32),\n}\nfn main() i32 {\n    let _ = K::Alpha;\n    return 0;\n}\n";
+    let ws = ws_of(a, "", "", "");
+    let ovf = Vector::<String>::new();
+    let ovt = Vector::<String>::new();
+    let mut diags = Vector::<an::DiagRec>::new();
+    let p = fresh(&ws, &ovf, &ovt, &mut diags);
+    let m = mod_of(&p, "/a.spc");
+    for w in ["Alpha,", "Beta("] {
+        let off = a.find(w) as u32 + 1;
+        let d = feat::definition(&p, m, off);
+        assert(d.is_some() && d.unwrap().start == a.find(w) as u32, w);
+        let h = feat::hover(&p, m, off);
+        assert(h.is_some() && h.unwrap().as_str().contains(w.slice(0, w.len() - 1)), w);
+    }
+}
+
+// Semantic tokens and go-to-definition cover a pattern binding where it is introduced and each module
+// qualifier of a path, in an expression and in a type.
+@test
+fn binding_and_qualifier_tokens() {
+    let a = "import b;\nfn main() i32 {\n    let t: b::T = b::T {};\n    if let Ok(abs) = b::f() {\n        return abs;\n    }\n    return 0;\n}\n";
+    let ws = ws_of(
+        a,
+        "pub struct T {}\npub fn f() Result<i32, i32> {\n    return Result::<i32, i32>::Ok(1);\n}\n",
+        "",
+        "",
+    );
+    // Open (an overlay): a closed document's bodies are released after the round.
+    let mut ovf = Vector::<String>::new();
+    let mut ovt = Vector::<String>::new();
+    ov(&ws, "a.spc", a, &mut ovf, &mut ovt);
+    let mut diags = Vector::<an::DiagRec>::new();
+    let p = fresh(&ws, &ovf, &ovt, &mut diags);
+    let m = mod_of(&p, "/a.spc");
+    let toks = feat::semantic_tokens(&p, m);
+    // (text, offset, token type, modifiers): `namespace` 0, `enumMember` 3, `variable` 7; 1 = declaration.
+    let want = [
+        ("b", a.find("b::T =") as u32, 0, 0u32),
+        ("b", a.find("b::T {") as u32, 0, 0u32),
+        ("b", a.find("b::f") as u32, 0, 0u32),
+        ("Ok", a.find("Ok(") as u32, 3, 0u32),
+        ("abs", a.find("abs)") as u32, 7, 1u32),
+        ("abs", a.find("abs;") as u32, 7, 0u32),
+    ];
+    for w in want {
+        let mut hit = false;
+        for t in toks.iter() {
+            hit = hit || t.start == w.1 && t.end == w.1 + w.0.len() as u32 && t.ty == w.2 && t.mods == w.3;
+        }
+        assert(hit, w.0);
+    }
+    let d = feat::definition(&p, m, a.find("abs;") as u32);
+    assert(d.is_some() && d.unwrap().start == a.find("abs)") as u32, "a use goes to its binding");
+    let d2 = feat::definition(&p, m, a.find("abs)") as u32 + 1);
+    assert(d2.is_some() && d2.unwrap().start == a.find("abs)") as u32, "the binding is its own definition");
 }
 
 // Multiset equality over the semantic identity of each record.
@@ -267,7 +352,7 @@ fn probe_res(p: &loader::Package, mid: usize, needle: str) u64 {
 }
 
 // Module index of `<name>` inside the package (by file suffix match).
-fn mod_of(p: &loader::Package, name: str) usize {
+const fn mod_of(p: &loader::Package, name: str) usize {
     for i in 0..p.modules.len() {
         if p.modules.at(i).file.as_str().ends_with(name) {
             return i;
@@ -1405,7 +1490,7 @@ fn const_eval_budget_follows_manifest() {
 }
 
 // Unbounded-recursion records.
-fn recur_errors(diags: &Vector<an::DiagRec>) usize {
+const fn recur_errors(diags: &Vector<an::DiagRec>) usize {
     let mut n: usize = 0;
     for i in 0..diags.len() {
         if diags.at(i).phase == an::PH_RECUR && diags.at(i).severity == 1 {
@@ -1491,7 +1576,7 @@ fn main() i32 {
 )";
     let ws = ws_of(
         a0,
-        M"(import std::parallel::time as time;
+        M"(import std::time as time;
 
 @tail_recurse
 pub fn spin(n: i64) i64 {
@@ -1530,7 +1615,7 @@ pub fn spin(n: i64) i64 {
     assert(cancel_errors(&diags) == 1, "the revert reports it again");
 }
 
-fn cancel_errors(diags: &Vector<an::DiagRec>) usize {
+const fn cancel_errors(diags: &Vector<an::DiagRec>) usize {
     let mut n: usize = 0;
     for i in 0..diags.len() {
         if diags.at(i).phase == an::PH_BORROW && diags.at(i).msg.as_str().contains("it can accept a task cancellation") {
@@ -1541,7 +1626,7 @@ fn cancel_errors(diags: &Vector<an::DiagRec>) usize {
 }
 
 // Borrow-check records.
-fn borrow_errors(diags: &Vector<an::DiagRec>) usize {
+const fn borrow_errors(diags: &Vector<an::DiagRec>) usize {
     let mut n: usize = 0;
     for i in 0..diags.len() {
         if diags.at(i).phase == an::PH_BORROW && diags.at(i).severity == 1 {
@@ -1735,7 +1820,7 @@ fn helper(v: i32) i32 {
     assert(unused_warnings(&diags) == 0, "the warning clears");
 }
 
-fn unused_warnings(diags: &Vector<an::DiagRec>) usize {
+const fn unused_warnings(diags: &Vector<an::DiagRec>) usize {
     let mut n: usize = 0;
     for i in 0..diags.len() {
         if diags.at(i).phase == an::PH_UNUSED {

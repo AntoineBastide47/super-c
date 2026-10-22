@@ -5,6 +5,7 @@
 // another module's semantic diagnostics. The borrow check runs after the analysis, as its own round
 // (`borrowck_pending`): the server publishes the analysis first, and a new edit abandons the round.
 import driver_shim as shim;
+import std::platform::fs;
 import module::loader as loader;
 import ast::ast as *;
 import ast::parser as par;
@@ -156,12 +157,7 @@ fn harvest_parse_errors(p: &loader::Package, i: usize, diags: &mut Vector<DiagRe
 
 /// Canonicalize `path` via realpath; a file not on disk yet keeps the given form.
 pub fn canon_path(path: str) String {
-    let mut pb = String::from_str(path);
-    let mut rb = dutil::PathBuf {};
-    if unsafe shim::sc_realpath(pb.cstr(), &mut rb[0]) != null {
-        return String::from_str(str::from_cbuf(rb.as_slice()));
-    }
-    return pb;
+    return fs::realpath(path).unwrap_or(String::from_str(path));
 }
 
 // The build settings the analysis reads, as the build of the project at `dir` reads them
@@ -172,6 +168,7 @@ struct BuildSettings {
     pub profiles: Vector<String>,
     pub ce_steps: u32,
     pub ce_mem: u64,
+    pub std_internals: bool,
 }
 
 // The nearest `build.toml` at or above `dir` (the manifest discovery of a manifest command) gives
@@ -200,6 +197,7 @@ fn lsp_build_settings(dir: str, target: i32) BuildSettings {
                     profiles: bsys::profile_names(&mm),
                     ce_steps: mm.ce_steps,
                     ce_mem: mm.ce_mem,
+                    std_internals: mm.std_internals,
                 };
             }
             break;
@@ -229,6 +227,7 @@ fn lsp_apply_settings(p: &mut loader::Package, mut bs: BuildSettings) {
     p.profiles = replace(&mut bs.profiles, Vector::<String>::new());
     p.ce_steps = bs.ce_steps;
     p.ce_mem = bs.ce_mem;
+    p.std_internals = bs.std_internals;
 }
 
 // A constant engine with the budgets of the build the analysis stands for. A round's engine
@@ -255,8 +254,7 @@ fn lsp_lint_wanted(p: &mut loader::Package, i: usize, root_file: str, lint_dir: 
     if !p.modules[i].prelude && i as i32 != p.rt_module {
         return true;
     }
-    let mut rf = String::from_str(root_file);
-    if unsafe shim::sc_same_file(p.modules[i].file.cstr(), rf.cstr()) == 1 {
+    if dutil::same_file(p.modules[i].file.as_str(), root_file) {
         return true;
     }
     if lint_dir.len() == 0 {
@@ -331,7 +329,7 @@ pub fn compile(
     lint_dir: str,
     diags: &mut Vector<DiagRec>,
 ) loader::Package {
-    let t0 = unsafe shim::sc_ticks_ms();
+    let t0 = dutil::ticks_ms();
     let bs = lsp_build_settings(
         if lint_dir.len() != 0 {
             lint_dir;
@@ -362,16 +360,16 @@ pub fn compile_batch(
     ov_texts: Vector<String>,
     diags: &mut Vector<DiagRec>,
 ) loader::Package {
-    let t0 = unsafe shim::sc_ticks_ms();
+    let t0 = dutil::ticks_ms();
     let bs = lsp_build_settings(root_dir, target);
     lsp_load_target(&bs);
     let mut p = loader::package_load_prelude(root_dir, alt_dir, std_dir, target, ov_files, ov_texts);
     let mut mids = Vector::<i32>::new();
     for k in 0..files.len() {
-        let mut fc = String::from_str(files.at(k).as_str());
+        let fc = files.at(k).as_str();
         let mut mid: i32 = -1;
         for m in 0..p.modules.len() {
-            if p.modules[m].has_ast && unsafe shim::sc_same_file(fc.cstr(), p.modules[m].file.cstr()) == 1 {
+            if p.modules[m].has_ast && dutil::same_file(fc, p.modules[m].file.as_str()) {
                 mid = m as i32;
                 break;
             }
@@ -624,7 +622,7 @@ fn record_refs(p: &mut loader::Package, i: usize) {
 }
 
 // The first recorded edge of module `m` whose key is at least `want`.
-fn ref_lower_bound(v: &Vector<loader::RefEdge>, want: u64) usize {
+const fn ref_lower_bound(v: &Vector<loader::RefEdge>, want: u64) usize {
     let mut a: usize = 0;
     let mut b: usize = v.len();
     while a < b {
@@ -640,7 +638,7 @@ fn ref_lower_bound(v: &Vector<loader::RefEdge>, want: u64) usize {
 
 /// True when module `m`'s recorded references name a declaration of module `dm` with a node in
 /// [lo, hi] (a binary search over the sorted record; false for an unrecorded module).
-pub fn refers(p: &loader::Package, m: usize, dm: u32, lo: u32, hi: u32) bool {
+pub const fn refers(p: &loader::Package, m: usize, dm: u32, lo: u32, hi: u32) bool {
     if m >= p.def_refs.len() {
         return false;
     }
@@ -876,9 +874,9 @@ fn overlay_slots(p: &loader::Package, ov_files: &Vector<str>) Vector<i64> {
     out.reserve(p.modules.len());
     for i in 0..p.modules.len() {
         let mut slot: i64 = -1;
-        let mut mf = p.modules.at(i).file.clone();
+        let mf = p.modules.at(i).file.as_str();
         for k in 0..fcs.len() {
-            if unsafe shim::sc_same_file(fcs[k].cstr(), mf.cstr()) == 1 {
+            if dutil::same_file(fcs[k].as_str(), mf) {
                 slot = k as i64;
                 break;
             }
@@ -954,7 +952,7 @@ pub fn recompile(
     diags: &mut Vector<DiagRec>,
     st: &mut RecompileStats,
 ) bool {
-    let t0 = unsafe shim::sc_ticks_ms();
+    let t0 = dutil::ticks_ms();
     let n = p.modules.len();
     // A resolve-gated baseline (run_pipeline typechecks NOTHING while any module has a resolve
     // error) holds no semantic state to extend: an empty per-node type table on a parsed module
@@ -2076,7 +2074,7 @@ fn stats_line(p: &loader::Package, what: str, t0: i64, st: &RecompileStats) {
         released,
         held,
         p.retained_bytes() / 1024,
-        unsafe shim::sc_ticks_ms() - t0,
+        dutil::ticks_ms() - t0,
         st.bodies_back,
         st.passes,
     );

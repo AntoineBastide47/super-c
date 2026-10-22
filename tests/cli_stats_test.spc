@@ -69,7 +69,7 @@ fn borrow_probe_reads_the_slots_after_the_stage() {
 }
 
 // The calls column of the borrow probe's row `name` in output `t`; 0 when the row is absent.
-fn probe_calls(t: str, name: str) u64 {
+const fn probe_calls(t: str, name: str) u64 {
     for ln in t.lines() {
         let s = ln.trim();
         if !s.starts_with(name) || !s.slice(name.len(), s.len()).starts_with(" ") {

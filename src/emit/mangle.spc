@@ -328,6 +328,29 @@ wcslcat
 iswalnum iswalpha iswblank iswcntrl iswdigit iswgraph iswlower iswprint iswpunct iswspace iswupper
 iswxdigit iswctype wctype towlower towupper towctrans wctrans wctype_t wctrans_t)";
 
+// The C_LIB_NAMES that Apple's libc and glibc declare only above the build's POSIX level (BSD and GNU
+// additions, which `_POSIX_C_SOURCE=200809L` hides): a call through a header-less extern block needs its
+// own prototype. Whitespace-separated.
+const C_EXT_NAMES: str<'static> = M"(asprintf vasprintf fgetln funopen setbuffer setlinebuf arc4random arc4random_uniform
+arc4random_buf reallocarray qsort_r getprogname setprogname strlcpy strlcat strsep memmem strcasestr strnstr
+memset_s explicit_bzero timegm timelocal wcslcpy wcslcat)";
+
+// Whether whitespace-separated `list` holds the word `w`.
+const fn word_in(list: str, w: str) bool {
+    let mut i: usize = 0;
+    while i + w.len() <= list.len() {
+        let end = i + w.len();
+        if list.slice(i, end) == w && (end == list.len() || list.byte_at(end) == b' ' || list.byte_at(end) == b'\n') {
+            return true;
+        }
+        while i < list.len() && list.byte_at(i) != b' ' && list.byte_at(i) != b'\n' {
+            i += 1;
+        }
+        i += 1;
+    }
+    return false;
+}
+
 // Whether `s` falls in a family the included headers reserve for their declarations: <threads.h>
 // `cnd_`, `mtx_`, `thrd_` and `tss_` and <pthread.h> `pthread_`, each followed by a lowercase
 // letter, and the <stdint.h> `int*_t` and `uint*_t` typedefs.
@@ -1838,8 +1861,9 @@ extend Mangler {
     // Suffix one `_` to the unprefixed file-scope symbol `out[st..]` when a header the emitted C
     // includes declares that name: the symbol would redeclare it.
     /// Whether a header the emitted C always includes declares `name` (`C_LIB_NAMES`, `c_lib_family`).
+    /// Whether a header the emitted C includes declares `name` at the build's POSIX level.
     pub fn c_lib_declared(self: &Self, name: str) bool {
-        return c_lib_family(name) || self.lib_names.contains(&name);
+        return c_lib_family(name) || self.lib_names.contains(&name) && !word_in(C_EXT_NAMES, name);
     }
 
     fn lib_escape(self: &Self, out: &mut String, st: usize) {

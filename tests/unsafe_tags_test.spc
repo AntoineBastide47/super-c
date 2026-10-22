@@ -42,7 +42,7 @@ fn main() i32 {
 )";
 
 // True when one line of `text` contains both `a` and `b`.
-fn line_has(text: str, a: str, b: str) bool {
+const fn line_has(text: str, a: str, b: str) bool {
     let mut start: usize = 0;
     for i in 0..text.len() + 1 {
         if i == text.len() || text.byte_at(i) == b'\n' {

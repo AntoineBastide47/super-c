@@ -15,7 +15,7 @@ fn near<T: Float, const N: usize>(a: Vec<T, N>, b: Vec<T, N>, eps: T) bool {
 }
 
 // The dot product for the swizzle checks: the component products summed left to right.
-fn dot_of<T: Scalar, const N: usize>(a: Vec<T, N>, b: Vec<T, N>) T {
+const fn dot_of<T: Scalar, const N: usize>(a: Vec<T, N>, b: Vec<T, N>) T {
     let p = a * b;
     let mut s = p[0];
     for i in 1..N {

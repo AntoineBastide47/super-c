@@ -25,7 +25,8 @@ import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;
 import std::parallel::platform as platform;
 import std::testing::bench as bench;
-import driver_shim as dshim;
+import std::platform::process;
+import std::platform::fs;
 
 import fcntl;
 import unistd;
@@ -120,12 +121,12 @@ static mut G_DIR: str<'static> = "";
 
 @platform(macos | linux)
 fn dir_setup(name: str) bool {
-    let mut d = String::from_str(unsafe str::from_cstr(dshim::sc_tmpdir()));
+    let mut d = fs::temp_dir().unwrap_or(String::from_str("."));
     d.push_str("/sc-bench-");
     d.push_str(name);
     d.push_byte(b'-');
-    d.push_i64(unsafe dshim::sc_getpid());
-    if d.len() >= 1024 || unsafe dshim::sc_mkdir_p(d.cstr()) != 0 {
+    d.push_i64(process::pid().unwrap_or(1));
+    if d.len() >= 1024 || fs::mkdir_all(d.as_str()).is_err() {
         let mut what = String::from_str("cannot create ");
         what.push_string(&d);
         bench::fail(what.as_str());
@@ -140,8 +141,8 @@ fn dir_setup(name: str) bool {
 
 @platform(macos | linux)
 fn dir_teardown() {
-    let mut d = String::from_str(unsafe G_DIR);
-    let _ = unsafe dshim::sc_rm_rf(d.cstr());
+    let d = String::from_str(unsafe G_DIR);
+    let _ = fs::remove_all(d.as_str());
 }
 
 // One durable unit, identical in every compared lane: create a file, write PAYLOAD zero bytes, make it

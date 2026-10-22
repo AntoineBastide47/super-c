@@ -466,6 +466,16 @@ import geom as g;            // alias
 Imports are public and C-style transitive, so there is no `pub import`. Cycles are legal. Prelude types (`String`,
 `Option`, `Vector`, `Box`, `Result`, `Map`, `Set`, `str`) resolve unqualified.
 
+`import a::b;` loads `<root>/a/b.spc`, else the directory index `<root>/a/b/b.spc`, through the import roots (the
+project, its `src/`, std, `ffi/`); when neither exists and `<root>/a/b/` is a directory, the import is an implicit
+index: a module that glob-imports every `.spc` file directly in the directory (in name order; subdirectories stay
+modules of their own). An explicit index decides what its module exposes through its own imports. A name that two
+files of an implicit index declare is "'x' is ambiguous: two files of directory module 'a::b' declare it" where it
+is used, not where the directory is imported.
+
+A glob import re-exports: `m::x` names `m`'s own item `x`, else the first `x` that a module `m` glob-imports (or one
+of that module's imports) declares. The unused-import lint reports a glob import only in the program's root module.
+
 An unqualified name the module does not declare is looked up in its glob imports first, then in
 the prelude: a glob-imported `String` or `dot` shadows the prelude's, as a declaration does. A
 glob import without an alias (`import m::qq as *;`) also makes its last segment a module
@@ -475,9 +485,25 @@ always names the module.
 
 ## Visibility
 
-Private by default. `pub` on structs, enums, functions, fields, constants, type aliases.
-A private field is visible only inside its type's own `extend` blocks (member access, struct
-literals and struct patterns), in the declaring module too.
+| Spelling | Item visible to | Field visible to |
+| --- | --- | --- |
+| none | its file | its type's own `extend` blocks (member access, struct literals and patterns), in the declaring file too |
+| `pub(file)` | an error ("'pub(file)' is the default visibility of an item") | its file |
+| `pub(module)` | the files whose path is the declaring file's path minus its last segment, or starts with it and `::` (a directory index's whole path; a root-level file's: its package) | the same |
+| `pub(package)` | the files of its package: the project (root, `src/`, `tests/`, `bench/`), std, `ffi/`, or one `vendor/<name>` | the same |
+| `pub` | every file | every file |
+
+The modifier applies to structs, unions, enums, functions, methods, constants, statics, type aliases, interfaces and
+fields. A project whose `build.toml` sets `std_internals = true` sees std's `pub(package)` items (unstable
+internals such as `std::platform`); without it naming one is an error whose note names the key. Enum variants and
+interface members take the visibility of their declaration; a conformance (`extend T as I`) has none. A method or
+associated constant is at most as visible as its type. A signature, field type, alias target or bound of an item
+visible beyond its file names no type less visible than the item ("'T' is less visible than the pub item that names
+it"); an associated type has its interface's visibility. A call that lowering synthesizes (format sugar, `launch`)
+reaches its target whatever its level. The levels are source rules: `pub(module)`, `pub(package)` and `pub` emit the
+same C.
+[migration.md](references/migration.md) maps the levels and the std contracts to their Go, Rust, Odin and C++
+names.
 
 ## Slices and Arrays
 
@@ -842,3 +868,10 @@ enforced at spawn boundaries.
 | `Arc<T>` | Atomic reference counting |
 | `Mutex<T>` / `RwLock<T>` | Synchronization |
 | `Channel<T>` | Bounded/unbounded channels |
+| `Unit` | The zero-sized success value of a status-only operation (`Result<Unit, IoError>`) |
+| `IoError` | `kind: IoErrorKind` (the stable category), `code` (the native error number, 0 when none), `op: IoOp` (the failed operation) |
+| `Reader` / `Writer` | `read(buf) Result<usize, IoError>`, `write(bytes) Result<usize, IoError>`: `Ok(n)` once a byte moved, a fault after a partial transfer on the next call, `Ok(0)` from `read` only at the end or for an empty buffer |
+| `TryFrom<T>` / `TryInto<T>` | Fallible conversion with an associated `type Error`; `x.try_into()` returns `Result<U, U::Error>` |
+| `std::time`, `std::net` | Durations, deadlines and task-aware `sleep`; task-aware TCP and UDP |
+| `std::text::utf16` | `encode`, `encode_into`, `decode` between UTF-8 and UTF-16 code units, with the offset of ill-formed input |
+| `std::platform::*` | std's internal operating-system layer (files, paths, clocks, entropy, memory, threads, processes, environment, signals, sockets, libraries): unstable, for std and projects with `std_internals = true` |

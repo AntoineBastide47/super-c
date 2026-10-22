@@ -15,7 +15,7 @@ import ast::ast as *;
 import emit::mangle as mbe;
 import ir::inline as inl;
 import module::loader as loader;
-import driver_shim as shim;
+import std::platform::fs;
 import driver::util as *;
 import stdlib;
 
@@ -185,7 +185,7 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
 /// Fold `p`'s coroutine and cancellation reachability into hash `h0`. It is package-wide: a launched
 /// body in one module decides the safepoints and cancellation probes emitted in modules it never
 /// imports. The language server reads it to see whether a solve changed the answer.
-pub fn reach_fold(h0: u64, p: &loader::Package) u64 {
+pub const fn reach_fold(h0: u64, p: &loader::Package) u64 {
     let mut h = h0;
     let mut reach = p.co_state as u64 | p.cancel_state as u64 << 8;
     if p.cancel_used {
@@ -328,7 +328,7 @@ pub fn tuc_setup(p: &loader::Package, live: *const bool, target: i32, gen_root: 
         // the tree would otherwise hold a cache this build did not produce.
         let mut old = String::from_str(gen_root);
         old.push_str("/.tu_cache");
-        let _ = unsafe shim::sc_unlink(old.cstr());
+        let _ = fs::unlink(old.as_str());
         return t;
     }
     t.hdr = header_hash(p, target);
@@ -658,7 +658,7 @@ const fn tt_ref_ok(tab: &Vector<TtEnt>, r: u32) bool {
 }
 
 // Every table ref `ev_patch` rewrites is in range.
-fn ev_refs_ok(tab: &Vector<TtEnt>, ev: &mbe::RecEv) bool {
+const fn ev_refs_ok(tab: &Vector<TtEnt>, ev: &mbe::RecEv) bool {
     if (ev.kind == mbe::RK_GLUE || ev.kind == mbe::RK_STAT || ev.kind == mbe::RK_DYNTAB) && !tt_ref_ok(tab, ev.d) {
         return false;
     }

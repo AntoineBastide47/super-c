@@ -362,7 +362,7 @@ pub fn bucket_loans_by_base(
 }
 
 // The token of `'static` (see `Owner::lt_tok`).
-fn static_tok() u64 {
+const fn static_tok() u64 {
     return 1u64 << 63 | "'static".hash() & 0x7FFFFFFFFFFFFFFF;
 }
 
@@ -376,7 +376,7 @@ const fn lt_class_hit(cls: &Vector<u8>, k: usize, tk: u64) bool {
 }
 
 // Whether positions `a0..a1` of classes `ca` and `b0..b1` of `cb` share a lifetime group.
-fn lt_meet(ca: &Vector<u8>, a0: u32, a1: u32, cb: &Vector<u8>, b0: u32, b1: u32) bool {
+const fn lt_meet(ca: &Vector<u8>, a0: u32, a1: u32, cb: &Vector<u8>, b0: u32, b1: u32) bool {
     for i in a0..a1 {
         for j in b0..b1 {
             if i as usize < ca.len() && j as usize < cb.len() && ca[i as usize] >= LC_GROUP && ca[i as usize] == cb[j as usize] {
@@ -389,7 +389,7 @@ fn lt_meet(ca: &Vector<u8>, a0: u32, a1: u32, cb: &Vector<u8>, b0: u32, b1: u32)
 
 // Whether positions `s0..s1` of `cls` share a lifetime group with a position `base + k` that
 // `reach[k]` marks.
-fn lt_meet_where(cls: &Vector<u8>, s0: u32, s1: u32, base: u32, reach: &Vector<bool>) bool {
+const fn lt_meet_where(cls: &Vector<u8>, s0: u32, s1: u32, base: u32, reach: &Vector<bool>) bool {
     for k in 0..reach.len() {
         if reach[k] && lt_meet(cls, s0, s1, cls, base + k as u32, base + k as u32 + 1) {
             return true;
@@ -407,7 +407,7 @@ fn rel_push(out: &mut Vector<u64>, sup: u64, sub: u64) {
 }
 
 // Whether two lifetime-token lists share a token.
-fn tokens_meet(a: &Vector<u64>, b: &Vector<u64>) bool {
+const fn tokens_meet(a: &Vector<u64>, b: &Vector<u64>) bool {
     for x in 0..a.len() {
         if b.contains(&a[x]) {
             return true;
@@ -1599,7 +1599,7 @@ extend Gen {
 
     // Whether store `st` through a closure passes over loan `l`, or the copy edge from `from` into
     // `to` (`l` BF_NONE): one a capture outside `st.caps` put into the closure value.
-    fn cap_skip(self: &Self, st: &StoreVia, l: u32, from: u32, to: u32) bool {
+    const fn cap_skip(self: &Self, st: &StoreVia, l: u32, from: u32, to: u32) bool {
         if st.cnode == NODE_NONE {
             return false;
         }
@@ -4336,7 +4336,7 @@ extend Gen {
     }
 
     // Is `a`'s projection path a must-equal prefix of `b`'s (same base)?
-    fn kill_covers(self: &Self, a: ir::PlaceId, bp: ir::PlaceId) bool {
+    const fn kill_covers(self: &Self, a: ir::PlaceId, bp: ir::PlaceId) bool {
         let pa = self.place_of(a);
         let pb = self.place_of(bp);
         if pa.base != pb.base || pa.proj_len > pb.proj_len {
@@ -4364,7 +4364,7 @@ extend Gen {
 
 /// May accesses of `a` and `b` touch overlapping storage? Same base local, and neither path proves
 /// disjointness (differing fields, variants, or constant indexes) before one ends.
-pub fn places_conflict(b: &ir::CoreBody, a: ir::PlaceId, c: ir::PlaceId) bool {
+pub const fn places_conflict(b: &ir::CoreBody, a: ir::PlaceId, c: ir::PlaceId) bool {
     let pa = *b.places.at(a as usize);
     let pc = *b.places.at(c as usize);
     if pa.base != pc.base {
@@ -4741,7 +4741,7 @@ extend Owner {
     }
 
     /// Does relation `rel` declare a lifetime to outlive another lifetime than `'static`?
-    pub fn rel_sup_any(self: &Self, rel: u64) bool {
+    pub const fn rel_sup_any(self: &Self, rel: u64) bool {
         let st = (rel >> 16) as usize;
         let stt = static_tok();
         for i in 0..(rel & 0xFFFF) as usize {
@@ -4753,7 +4753,7 @@ extend Owner {
     }
 
     /// Does relation `rel` declare a lifetime of `toks` to outlive another lifetime than `'static`?
-    pub fn rel_sup_in(self: &Self, rel: u64, toks: &Vector<u64>) bool {
+    pub const fn rel_sup_in(self: &Self, rel: u64, toks: &Vector<u64>) bool {
         let st = (rel >> 16) as usize;
         let stt = static_tok();
         for i in 0..(rel & 0xFFFF) as usize {

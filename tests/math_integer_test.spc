@@ -540,7 +540,7 @@ fn bitfield_interleave_all_widths() {
 }
 
 // The reference interleave: bit i of the k-th input goes to bit i * count + k.
-fn interleave_ref(v: []u64, bits: u64) u64 {
+const fn interleave_ref(v: []u64, bits: u64) u64 {
     let mut r: u64 = 0;
     let n = v.len() as u64;
     for i in 0..bits {

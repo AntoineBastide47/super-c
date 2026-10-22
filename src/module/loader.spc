@@ -3,10 +3,10 @@
 // package-level lookups every later stage relies on (O(1) public-decl name index, cached import
 // closures). After typechecking, propagates concrete generic instances to their home modules
 // (owner-emits, to a fixpoint) and computes the dependency-first module emit order for codegen.
-import string as cstring;
 import stdio;
 import atomic;
 import driver_shim as shim;
+import std::platform::fs;
 import lexer::token as tok;
 import lexer::lexer as lexer;
 import lexer::token_type as tt;
@@ -43,7 +43,26 @@ pub struct Module {
     /// The vector backend file (`std/simd/backend/<isa>.spc`): its entries render apart, so the
     /// module emits no unit of its own.
     pub backend: bool,
+    /// The import root the file came from (`PKG_*`, or `PKG_VENDOR + k` for the k-th `vendor/<name>`):
+    /// what `pub(package)` reaches.
+    pub pkg: u16,
+    /// What `pub(module)` reaches: the files whose path is this one or starts with it and `::` (the
+    /// declaring file's path minus its last segment, the whole path for a directory index; `std` for the
+    /// prelude). Empty: the whole package.
+    pub scope: String,
+    /// A directory imported without an index file: its source glob-imports every `.spc` file in it.
+    pub implicit_index: bool,
 }
+
+/// `Module.pkg` values: std (the prelude, the runtime and `std::`), the `ffi/` bindings, the project (its
+/// root, `src/`, `tests/`, `bench/`), then one per `vendor/<name>`.
+pub const PKG_STD: u16 = 0;
+pub const PKG_FFI: u16 = 1;
+pub const PKG_PROJECT: u16 = 2;
+pub const PKG_VENDOR: u16 = 3;
+
+/// `lookup`'s asking module for a lookup the compiler makes itself: every exported item answers.
+pub const FROM_ANY: u32 = 0xFFFFFFFF;
 
 /// One shard-policy entry: module `module` (its `::` path) emits `tus` module TUs and `insts`
 /// instance shards; a count is a schema, changed only by editing the policy.
@@ -195,6 +214,10 @@ pub struct Package {
     pub cc: String, // the C compiler the command line named for a bare build; empty = resolve as usual
     pub cstd: String, // the base C flags the command line named for a bare build (`--cstd`); empty = the default
     pub std_root: String, // second import search root (parent of std/); empty = none
+    /// The project's manifest sets `std_internals = true`: its files see std's `pub(package)` items.
+    pub std_internals: bool,
+    /// The `vendor/<name>` packages in load order: `Module.pkg` is `PKG_VENDOR` plus the index.
+    pub vendors: Vector<String>,
     pub alt_root: String, // optional search root between the project root and std (manifest src/ dir)
     pub ok: bool, // false if any read/parse/cycle error was reported during loading
     /// Resolved external C inputs (`@c.source` files and implicit backing-header `.c` siblings),
@@ -507,7 +530,7 @@ pub struct ItemMeta {
     pub len: u32,
     pub module: ModuleId,
     pub kind: u8, // ItemKind
-    pub is_public: bool,
+    pub vis: u8, // VIS_*
     pub is_type: bool, // occupies the type namespace in name lookup
 }
 
@@ -605,12 +628,14 @@ pub struct PkgIndex {
     pub syms: SymTab,
     pub items: Vector<ItemMeta>,
     pub mod_items: Vector<u32>, // modules+1 offsets into `items`
-    pub name_maps: Vector<Map<u64, u32>>, // per module: sym*4 + is_type*2 + is_pub -> ItemId, first wins
+    pub name_maps: Vector<Map<u64, u32>>, // per module: sym*4 + is_type*2 + exported -> ItemId, first wins
+    pub globs: Vector<ModuleId>, // the modules each module glob-imports, declaration order, per-module dedup
+    pub mod_globs: Vector<u32>, // modules+1 offsets into `globs`
     pub imports: Vector<ModuleId>, // resolved direct imports, declaration order, per-module dedup
     pub mod_imports: Vector<u32>, // modules+1 offsets into `imports`
     pub scc_of: Vector<u32>, // module -> import-graph SCC id (completion order; deterministic)
     pub sugar_items: Vector<LookupHit>, // SugarItem -> std shim fn (node == NODE_NONE when absent)
-    pub pl_map: Map<u64, u64>, // sym*2 + want_type -> node << 32 | module: every public top-level prelude name, the first prelude module wins (prelude_lookup)
+    pub pl_map: Map<u64, u64>, // sym*2 + want_type -> node << 32 | module: every exported top-level prelude name, the first prelude module wins (prelude_lookup)
     /// Every top-level prelude declaration's name, public or not: the prelude's bare C symbols.
     pub pl_names: Set<SymbolId>,
     /// The `pl_names` that begin longer prelude C symbols: a type's, an interface's or a generic
@@ -1119,7 +1144,7 @@ extend ReachScan {
 
     // The innermost declaration whose span covers `sp`, or CO_NONE (a site outside every
     // declaration, such as a const initializer, never runs on a coroutine).
-    fn decl_at(self: &Self, sp: tok::Span) u32 {
+    const fn decl_at(self: &Self, sp: tok::Span) u32 {
         let mut l: usize = 0;
         let mut h = self.d_span.len();
         while l < h {
@@ -1143,7 +1168,7 @@ extend ReachScan {
     // `decl_at` for a site near the one whose innermost declaration is `hint` (CO_NONE: none): `hint`
     // itself when it covers `sp` and the next declaration starts after `sp` (none inside `hint` can
     // cover it), else the search. Sites in node order mostly share their declaration.
-    fn decl_near(self: &Self, sp: tok::Span, hint: u32) u32 {
+    const fn decl_near(self: &Self, sp: tok::Span, hint: u32) u32 {
         if hint != CO_NONE {
             let hs = self.d_span[hint as usize];
             let nx = hint as usize + 1;
@@ -1175,26 +1200,75 @@ pub fn read_file(path: str) Option<String> {
     return read_file_mt(path, &mut mt);
 }
 
-/// `read_file`, and the file's mtime (`sc_mtime`) into `mt` from the fstat taken before the read: a later
-/// edit changes the mtime, so the pair vouches for the content read.
+/// `read_file`, and the file's mtime (`dutil::file_mtime`) into `mt` from the fstat taken before the read: a
+/// later edit changes the mtime, so the pair vouches for the content read.
 pub fn read_file_mt(path: str, mt: &mut i64) Option<String> {
-    let mut pc = String::from_str(path);
-    let mut sz: i64 = 0;
-    let fd = unsafe shim::sc_file_open(pc.cstr(), &mut sz, mt);
-    if fd < 0 {
+    let opened = fs::open(path, fs::OpenOptions { read: true });
+    if opened.is_err() {
         return Option::<String>::None;
     }
+    let mut f = opened.unwrap();
+    let md = f.metadata();
+    if md.is_err() {
+        return Option::<String>::None;
+    }
+    let m = md.unwrap();
+    if m.kind != fs::FileKind::File {
+        return Option::<String>::None;
+    }
+    *mt = dutil::mtime_s(m.modified_ns);
     // Read straight into the result, pre-sized to content + read-ahead padding so pad_nul does not
     // reallocate, then append lexer::SOURCE_PAD trailing NUL bytes PAST len (len stays n): a read-ahead
     // sentinel the lexer relies on to over-read safely (see lexer::SOURCE_PAD).
-    let mut out = String::with_capacity(sz as usize + lexer::SOURCE_PAD);
-    let n = unsafe shim::sc_file_read_close(fd, out.spare_mut(sz as usize), sz as usize);
-    if n < 0 {
+    let sz = m.size as usize;
+    let mut out = String::with_capacity(sz + lexer::SOURCE_PAD);
+    let n = f.read_full(unsafe SliceMut::<u8> { ptr: out.spare_mut(sz), len: sz });
+    if n.is_err() || f.close().is_err() {
         return Option::<String>::None;
     }
-    out.advance_len(n as usize);
+    out.advance_len(n.unwrap());
     out.pad_nul(lexer::SOURCE_PAD);
     return Option::<String>::Some(out);
+}
+
+/// The source of module `path` read from `file`: the file's text (`read_file_mt`), or for an implicit
+/// directory index (`file` is the directory and a '/'), one glob import of `path::<stem>` per `.spc` file
+/// directly in the directory whose stem is an identifier, in name order. Subdirectories stay modules of
+/// their own.
+pub fn read_module(path: str, file: str, mt: &mut i64) Option<String> {
+    if !file.ends_with("/") {
+        return read_file_mt(file, mt);
+    }
+    let mut names = Vector::<String>::new();
+    if dir_listing(file.slice(0, file.len() - 1), &mut names) != DIR_LISTED {
+        return Option::<String>::None;
+    }
+    let mut out = String::new();
+    for i in 0..names.len() {
+        let n = names.at(i).as_str();
+        if !n.ends_with(".spc") || !ident_text(n.slice(0, n.len() - 4)) {
+            continue;
+        }
+        out.push_str("import ");
+        out.push_str(path);
+        out.push_str("::");
+        out.push_str(n.slice(0, n.len() - 4));
+        out.push_str(" as *;\n");
+    }
+    out.pad_nul(lexer::SOURCE_PAD);
+    return Option::<String>::Some(out);
+}
+
+// Whether `s` spells an identifier: a letter or '_', then letters, digits and '_'.
+const fn ident_text(s: str) bool {
+    for i in 0..s.len() {
+        let c = s.byte_at(i);
+        let alpha = c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c == b'_';
+        if !alpha && (i == 0 || c < b'0' || c > b'9') {
+            return false;
+        }
+    }
+    return s.len() != 0;
 }
 
 /// The directory portion of `path` (a view into it, without the trailing slash), or "." when there is none.
@@ -1262,7 +1336,7 @@ fn module_index_path(root_dir: str, ast: &Ast, src: str, parts: NodeList) String
     return out;
 }
 
-/// Heap "<a>/<b>".
+/// Returns a new string containing `a`/`b`
 pub fn join2(a: str, b: str) String {
     let mut out = String::with_capacity(a.len() + 1 + b.len());
     out.push_str(a);
@@ -1320,6 +1394,11 @@ extend DirCache {
         }
         *self = d;
     }
+    /// Whether `dir` is a directory that lists.
+    pub fn listed(self: &mut Self, dir: str) bool {
+        let i = self.index_of(dir);
+        return self.state[i] == DIR_LISTED;
+    }
     /// Does `path` (a <dir>/<file>) exist? Answered from the cached listing; a listing miss (dir present but
     /// the name not listed) falls back to fopen so the result matches path_exists exactly, incl. case-
     /// insensitive filesystems. A missing directory is authoritative (fopen would fail too), saving the probe;
@@ -1364,6 +1443,20 @@ extend DirCache {
         return path_exists(path);
     }
 }
+/// The source of item `n` with its visibility modifier, which its span starts after.
+const fn item_span(src: str, n: &Node) tok::Span {
+    let v = node_vis(n);
+    let mut i = n.span.start as usize;
+    while i > 0 && (src.byte_at(i - 1) == b' ' || src.byte_at(i - 1) == b'\t') {
+        i -= 1;
+    }
+    let t = vis_text(v).trim();
+    if v == VIS_PRIVATE || i < t.len() || src.slice(i - t.len(), i) != t {
+        return n.span;
+    }
+    return tok::Span { start: (i - t.len()) as u32, end: n.span.end };
+}
+
 /// `dir_listing` results: the directory listed, does not exist (nothing under it does), or exists but
 /// does not list (no read permission, no descriptor left): only an open of a file under it tells.
 pub const DIR_ABSENT: u8 = 0;
@@ -1373,22 +1466,18 @@ pub const DIR_UNREAD: u8 = 2;
 /// The entry names of `dir`, sorted, into `names`, and whether it listed (`DIR_LISTED`, `DIR_ABSENT`,
 /// `DIR_UNREAD`). What `DirCache` answers from, and what the prelude image checks its directories against.
 pub fn dir_listing(dir: str, names: &mut Vector<String>) u8 {
-    let mut dp = String::from_str(dir);
-    let d = unsafe shim::sc_opendir(dp.cstr());
-    if d == null {
-        if unsafe shim::sc_errno_absent() == 1 {
+    let opened = fs::read_dir(dir);
+    if opened.is_err() {
+        if opened.unwrap_err().kind == IoErrorKind::NotFound {
             return DIR_ABSENT;
         }
         return DIR_UNREAD;
     }
-    loop {
-        let e = unsafe shim::sc_readdir(d);
-        if e == null {
-            break;
-        }
-        names.push(unsafe String::from_cstr(shim::sc_dirent_name(e)));
+    let mut d = opened.unwrap();
+    // Bounded by the entries of the directory; a read error ends the listing, as the end does.
+    while let Some(Ok(e)) = d.next() {
+        names.push(String::from_str(e.name));
     }
-    let _ = unsafe shim::sc_closedir(d);
     names.sort();
     return DIR_LISTED;
 }
@@ -1437,6 +1526,19 @@ fn resolve_import_file(
     if dc.exists(ffi_rel.as_str()) {
         return ffi_rel;
     }
+    // Last, a directory without an index file: an implicit index (`read_module`), named by the directory
+    // and a '/'.
+    for r in [root_dir, alt_root, std_root] {
+        if !r.is_empty() {
+            let f = module_file_path(r, ast, src, parts);
+            let d = f.as_str().slice(0, f.len() - 4);
+            if dc.listed(d) {
+                let mut out = String::from_str(d);
+                out.push_byte(b'/');
+                return out;
+            }
+        }
+    }
     return root_rel;
 }
 
@@ -1468,7 +1570,7 @@ pub fn imports_resolve(path: str, root_dir: str, alt_root: str, std_dir: str) bo
                 src.as_str(),
                 n.as_data.import_decl.path,
             );
-            if !dc.exists(f.as_str()) {
+            if !f.as_str().ends_with("/") && !dc.exists(f.as_str()) {
                 return false;
             }
         }
@@ -1553,7 +1655,7 @@ pub fn set_load_jobs(j: u32) {
 // One speculative parse unit: filled by a worker task; imports are collected and resolved by the
 // coordinator as each unit finishes (the dir cache is a serial memo), and ids are assigned afterwards
 // by a serial DFS replay, so module identity is byte-for-byte the recursive loader's.
-struct PUnit {
+pub struct PUnit {
     pub path: String,
     pub file: String,
     pub source: String,
@@ -1570,7 +1672,7 @@ struct PUnit {
 
 // The units of one parallel load, each in a box of its own so a task's unit stays in place while the
 // vector grows, and `heads`: a path hash -> the newest unit with that hash.
-struct PUnits {
+pub struct PUnits {
     pub units: Vector<Box<PUnit>>,
     pub heads: Map<u64, u32>,
 }
@@ -1688,7 +1790,7 @@ fn par_parse_task(t: PParse) {
 
 fn par_parse_one(t: PParse) {
     let u = unsafe &mut *t.u;
-    switch read_file_mt(u.file.as_str(), &mut u.mtime) {
+    switch read_module(u.path.as_str(), u.file.as_str(), &mut u.mtime) {
         Some(sx) => {
             u.source = sx;
             u.src_id = dutil::str_id(u.source.as_str());
@@ -1748,17 +1850,7 @@ pub fn package_load_overlaid(
 
 /// The real path of file `path`, or empty when it does not resolve.
 pub fn real_path_of(path: str) String {
-    let mut pb = RealBuf {};
-    let mut rb = RealBuf {};
-    if path.len() >= 4096 {
-        return String::new();
-    }
-    unsafe cstring::memcpy(&mut pb.b[0], path.ptr(), path.len());
-    unsafe pb.b[path.len()] = 0 as char;
-    if unsafe shim::sc_realpath(&pb.b[0], &mut rb.b[0]) == null {
-        return String::new();
-    }
-    return String::from_str(str::from_cbuf(rb.b));
+    return fs::realpath(path).unwrap_or(String::new());
 }
 
 /// An empty package with its import roots, for a driver that sets the build settings (`arch`,
@@ -1888,11 +1980,6 @@ pub fn prelude_package_arch(std_dir: str, target: i32, arch: i32, vectors: bool)
     return p;
 }
 
-// A PATH_MAX realpath scratch buffer (the omitted array field zero-fills on partial init).
-struct RealBuf {
-    pub b: [char; 4096],
-}
-
 // Append the `str::hash` of every identifier of `src[lo..hi]` to `out` (a word that starts with a
 // digit is a number, not a name).
 fn bc_scan_names(src: str, lo: u32, hi: u32, out: &mut Vector<u64>) {
@@ -1960,7 +2047,7 @@ const fn pub_key_cmp(a: &PubKey, b: &PubKey) i32 {
 
 // The depth of batch record `b`: 1 + the deepest batch child, 0 for a record whose children are all
 // final (`depth` holds the answers for the smaller batch ids).
-fn pub_depth(batch: &TypePool, depth: &Vector<u32>, b: usize) u32 {
+const fn pub_depth(batch: &TypePool, depth: &Vector<u32>, b: usize) u32 {
     let y = batch.at(b);
     let k = y.kind;
     let mut d: u32 = 0;
@@ -2398,7 +2485,7 @@ extend Package {
 
     /// The analysis worker count for this loaded package: `jobs` when the user source is large enough
     /// for the parallel frontiers to pay for themselves, else 1 (see PAR_MIN_USER_BYTES).
-    pub fn analysis_jobs(self: &Self, jobs: u32) u32 {
+    pub const fn analysis_jobs(self: &Self, jobs: u32) u32 {
         if jobs == 1 {
             return 1;
         }
@@ -2657,7 +2744,7 @@ extend Package {
     }
 
     /// Whether module `m` is std's `target.spc`, the declarer of the build-constant enums.
-    pub fn is_target_module(self: &Self, m: ModuleId) bool {
+    pub const fn is_target_module(self: &Self, m: ModuleId) bool {
         return m as usize < self.modules.len() && self.modules[m as usize].prelude && basename_of(
             self.modules[m as usize].file.as_str(),
         ) == "target.spc";
@@ -2751,6 +2838,22 @@ extend Package {
             bc_scan_names(self.modules[mi].source.as_str(), n.span.start, ks, &mut names);
             bc_scan_names(self.modules[mi].source.as_str(), ke, n.span.end, &mut names);
             let ast = &mut self.modules[mi].ast;
+            // The branches not taken, as written (an inner site decided first keeps its span in its cut).
+            if n.kind == NodeKind::NODE_IF {
+                for b in [n.as_data.if_stmt.then_branch, n.as_data.if_stmt.else_branch] {
+                    if b != NODE_NONE && b != take {
+                        ast.bc_dead.push(ast.written_span(b));
+                    }
+                }
+            } else {
+                let arms = n.as_data.match_expr.arms;
+                for k in 0..arms.len {
+                    let arm = unsafe ast.list(arms)[k as usize];
+                    if ast.at_const(arm).as_data.match_arm.body != take {
+                        ast.bc_dead.push(ast.at_const(arm).span);
+                    }
+                }
+            }
             ast.bc_cuts.push(BcCut { node: id, span: n.span });
             if take == NODE_NONE {
                 *ast.at(id) = Node {
@@ -2957,6 +3060,7 @@ extend Package {
             }
         }
         if dropped.len() == 0 {
+            m.ast.settle_dead();
             return;
         }
         dropped.sort();
@@ -2981,6 +3085,8 @@ extend Package {
                             kept = kept + 1;
                         } else {
                             let _ = m.ast.member_of.remove(&mid);
+                            let msp = item_span(m.source.as_str(), m.ast.at_const(mid));
+                            m.ast.bc_dead.push(msp);
                         }
                     }
                     if is_ext {
@@ -2992,6 +3098,7 @@ extend Package {
             } else {
                 // A dropped container's members no longer have one.
                 let n = *m.ast.at_const(id);
+                m.ast.bc_dead.push(item_span(m.source.as_str(), &n));
                 if n.kind == NodeKind::NODE_EXTEND {
                     m.ast.set_members(NODE_NONE, n.as_data.extend_def.items);
                 } else if n.kind == NodeKind::NODE_INTERFACE {
@@ -3000,6 +3107,7 @@ extend Package {
             }
         }
         m.ast.at(root).as_data.program.items.len = w;
+        m.ast.settle_dead();
     }
 
     /// Put every module under the package type table (package identity): each module's pool then
@@ -3053,7 +3161,7 @@ extend Package {
     /// A total order over two modules' const-expression forms by content (`module << 32 | pool
     /// index` each): the constant, the term count, the divisor, the types, then each term's
     /// parameter and coefficient.
-    fn clin_less(self: &Self, x: u64, y: u64) bool {
+    const fn clin_less(self: &Self, x: u64, y: u64) bool {
         let a = self.modules[(x >> 32) as usize].ast.pool.const_lin_at((x & 0xFFFFFFFFu64) as usize);
         let b = self.modules[(y >> 32) as usize].ast.pool.const_lin_at((y & 0xFFFFFFFFu64) as usize);
         if a.k != b.k {
@@ -3416,7 +3524,7 @@ extend Package {
 
     /// True when a loop in the body whose span is `osp` (module `m`) can run inside a coroutine
     /// and therefore needs a preemption safepoint at its backedges.
-    pub fn co_on(self: &Self, m: ModuleId, osp: tok::Span) bool {
+    pub const fn co_on(self: &Self, m: ModuleId, osp: tok::Span) bool {
         if self.co_state != 1 {
             return true;
         }
@@ -3435,7 +3543,7 @@ extend Package {
 
     /// Is the std decl declared exactly at `sp` (module `m`) one whose ticks its instances decide
     /// (`co_inst`)?
-    pub fn co_inst_on(self: &Self, m: ModuleId, sp: tok::Span) bool {
+    pub const fn co_inst_on(self: &Self, m: ModuleId, sp: tok::Span) bool {
         if m as usize >= self.co_inst.len() {
             return false;
         }
@@ -4862,12 +4970,11 @@ extend Package {
         if ex >= 0 || !path.starts_with("std::") {
             return ex;
         }
-        let mut f = String::from_str(file);
         for i in 0..self.modules.len() {
-            if self.modules[i].prelude && basename_of(self.modules[i].file.as_str()) == basename_of(file) && unsafe shim::sc_same_file(
-                f.cstr(),
-                self.modules[i].file.cstr(),
-            ) == 1 {
+            if self.modules[i].prelude && basename_of(self.modules[i].file.as_str()) == basename_of(file) && dutil::same_file(
+                file,
+                self.modules[i].file.as_str(),
+            ) {
                 self.alias_path.push(String::from_str(path));
                 self.alias_id.push(i as u32);
                 return i as i32;
@@ -4923,6 +5030,7 @@ extend Package {
             },
         );
         self.mod_index.insert(h, id as u32);
+        let (pkg, scope) = self.module_place(path.as_str(), file.as_str());
         self.modules.push(
             Module {
                 path: path,
@@ -4933,6 +5041,9 @@ extend Package {
                 ast: ast,
                 has_ast: has_ast,
                 prelude: false,
+                pkg: pkg,
+                scope: scope,
+                implicit_index: file.as_str().ends_with("/"),
             },
         );
         // A module loaded after `bind_types` (an import resolved on demand) joins the package
@@ -4943,6 +5054,135 @@ extend Package {
         return id;
     }
 
+    // The package and the `pub(module)` scope of module `path`, read from `file` (`Module.pkg`, `Module.scope`).
+    // The prelude's `__std::` paths are std's.
+    fn module_place(self: &mut Self, path: str, file: str) (u16, String) {
+        let p = if path.starts_with("__std::") {
+            path.slice(2, path.len());
+        } else {
+            path;
+        };
+        let mut pkg = PKG_PROJECT;
+        if p.starts_with("std::") {
+            pkg = PKG_STD;
+        } else if p.starts_with("vendor::") {
+            let rest = p.slice(8, p.len());
+            let f = rest.find("::");
+            let name = rest.slice(
+                0,
+                if f < 0 {
+                    rest.len();
+                } else {
+                    f as usize;
+                },
+            );
+            let mut k: usize = 0;
+            while k < self.vendors.len() && self.vendors[k].as_str() != name {
+                k += 1;
+            }
+            if k == self.vendors.len() {
+                self.vendors.push(String::from_str(name));
+            }
+            pkg = PKG_VENDOR + k as u16;
+        } else if !self.std_root.is_empty() && file.starts_with(self.std_root.as_str()) && file.slice(
+            self.std_root.len(),
+            file.len(),
+        ).starts_with("/ffi/") {
+            pkg = PKG_FFI;
+        }
+        // `p` minus its last segment; a directory index (`a/b/b.spc` for `a::b`, or an implicit one) is its
+        // directory's module, so its scope is `p` itself.
+        let mut tail = String::with_capacity(p.len() + 16);
+        let mut cut: usize = 0;
+        let mut last: usize = 0;
+        let mut i: usize = 0;
+        while i < p.len() {
+            if p.byte_at(i) == b':' {
+                cut = i;
+                last = i + 2;
+                tail.push_byte(b'/');
+                i += 2;
+            } else {
+                tail.push_byte(p.byte_at(i));
+                i += 1;
+            }
+        }
+        tail.push_byte(b'/');
+        tail.push_str(p.slice(last, p.len()));
+        tail.push_str(".spc");
+        if file.ends_with("/") || file.ends_with(tail.as_str()) && file.len() > tail.len() && file.byte_at(
+            file.len() - tail.len() - 1,
+        ) == b'/' {
+            return pkg, String::from_str(p);
+        }
+        return pkg, String::from_str(p.slice(0, cut));
+    }
+
+    /// Whether module `from` (`FROM_ANY`: the compiler itself) sees an item of module `owner` declared with
+    /// visibility `vis` (`VIS_*`, `VIS_MODULE` or wider). A module outside the package (the standalone test
+    /// Ast) is a project file at the root.
+    pub const fn vis_ok(self: &Self, from: u32, owner: ModuleId, vis: u8) bool {
+        if vis == VIS_PUB || from == owner as u32 || from == FROM_ANY {
+            return true;
+        }
+        let o = self.modules.at(owner as usize);
+        let fm = from as usize < self.modules.len();
+        let fpkg = if fm {
+            self.modules[from as usize].pkg;
+        } else {
+            PKG_PROJECT;
+        };
+        if vis == VIS_PACKAGE {
+            return fpkg == o.pkg || o.pkg == PKG_STD && fpkg == PKG_PROJECT && self.std_internals;
+        }
+        if vis < VIS_MODULE || fpkg != o.pkg {
+            return false;
+        }
+        let d = o.scope.as_str();
+        if d.is_empty() {
+            return true;
+        }
+        let fp = if fm {
+            self.modules[from as usize].path.as_str();
+        } else {
+            "";
+        };
+        let f = if fp.starts_with("__std::") {
+            fp.slice(2, fp.len());
+        } else {
+            fp;
+        };
+        return f.starts_with(d) && (f.len() == d.len() || f.slice(d.len(), f.len()).starts_with("::"));
+    }
+
+    /// Whether every module that sees an item of module `im` with visibility `iv` also sees an item of
+    /// module `tm` with visibility `tv` (`VIS_*`; an item without a modifier is its file's).
+    pub const fn vis_covers(self: &Self, im: ModuleId, iv: u8, tm: ModuleId, tv: u8) bool {
+        if tv == VIS_PUB || im == tm && (tv >= iv || iv < VIS_MODULE) {
+            return true;
+        }
+        let a = self.modules.at(im as usize);
+        let b = self.modules.at(tm as usize);
+        if iv == VIS_PUB || tv < VIS_MODULE || a.pkg != b.pkg {
+            return false;
+        }
+        if tv == VIS_PACKAGE {
+            return true;
+        }
+        let d = b.scope.as_str();
+        if iv == VIS_PACKAGE || d.is_empty() {
+            return d.is_empty();
+        }
+        let x = if iv == VIS_MODULE {
+            a.scope.as_str();
+        } else if a.path.as_str().starts_with("__std::") {
+            a.path.as_str().slice(2, a.path.len());
+        } else {
+            a.path.as_str();
+        };
+        return x.starts_with(d) && (x.len() == d.len() || x.slice(d.len(), x.len()).starts_with("::"));
+    }
+
     // Overlay slot naming the same file as `path`: load paths are root-relative, overlay keys canonical
     // absolute, so `path` is realpath'd when possible (raw compare stays as the fallback for files not on
     // disk). -1 = none.
@@ -4950,17 +5190,12 @@ extend Package {
         if self.overlay_files.len() == 0 {
             return -1;
         }
-        let mut key = path;
-        let mut pb = RealBuf {};
-        let mut rb = RealBuf {};
-        let pl = path.len();
-        if pl < 4096 {
-            unsafe cstring::memcpy(&mut pb.b[0], path.ptr(), pl);
-            unsafe pb.b[pl] = 0 as char;
-            if unsafe shim::sc_realpath(&pb.b[0], &mut rb.b[0]) != null {
-                key = str::from_cbuf(rb.b);
-            }
-        }
+        let real = real_path_of(path);
+        let key = if real.len() != 0 {
+            real.as_str();
+        } else {
+            path;
+        };
         for i in 0..self.overlay_files.len() {
             let f = self.overlay_files.at(i).as_str();
             if f == key || f == path {
@@ -4987,8 +5222,8 @@ extend Package {
                 }
             }
         }
-        let mut sf = self.modules.at(m).file.clone();
-        if unsafe shim::sc_same_file(f.cstr(), sf.cstr()) == 1 {
+        let sf = self.modules.at(m).file.clone();
+        if dutil::same_file(f.as_str(), sf.as_str()) {
             return;
         }
         let path = self.modules.at(m).path.as_str();
@@ -5349,7 +5584,7 @@ extend Package {
             s.pad_nul(lexer::SOURCE_PAD);
             source = s;
         } else {
-            switch read_file_mt(file_path, &mut mt) {
+            switch read_module(mod_path, file_path, &mut mt) {
                 Some(s) => {
                     source = s;
                 },
@@ -5410,7 +5645,7 @@ extend Package {
                     let id = self.modules[i].ast.add(
                         Node {
                             kind: NodeKind::NODE_STRUCT,
-                            as_data: NodeAs { aggregate: AggregateData { name: NODE_NONE, is_public: true } },
+                            as_data: NodeAs { aggregate: AggregateData { name: NODE_NONE, vis: VIS_PUB } },
                         },
                     );
                     unsafe self.builtin_decls[b] = id;
@@ -5431,7 +5666,7 @@ extend Package {
     }
 
     /// If (module, node) names a builtin's synthetic core decl, its BuiltinType; else -1.
-    pub fn builtin_of_decl(self: &Self, module: ModuleId, node: NodeId) i32 {
+    pub const fn builtin_of_decl(self: &Self, module: ModuleId, node: NodeId) i32 {
         if !self.core_seeded || module != self.core_module || node == NODE_NONE {
             return -1;
         }
@@ -6112,6 +6347,7 @@ extend Package {
             idx.mod_items.push(idx.items.len() as u32);
             idx.name_maps.push(Map::<u64, u32>::new());
             idx.mod_imports.push(idx.imports.len() as u32);
+            idx.mod_globs.push(idx.globs.len() as u32);
             idx.mod_exts.push(idx.exts.len() as u32);
             if self.modules[m].has_ast {
                 self.index_module(&mut idx, m as ModuleId);
@@ -6119,6 +6355,7 @@ extend Package {
         }
         idx.mod_items.push(idx.items.len() as u32);
         idx.mod_imports.push(idx.imports.len() as u32);
+        idx.mod_globs.push(idx.globs.len() as u32);
         idx.mod_exts.push(idx.exts.len() as u32);
         // Strongly connected components of the import graph (mutually importing modules share one),
         // numbered in completion order.
@@ -6145,7 +6382,7 @@ extend Package {
                 ).as_data.function.generics.len != 0 {
                     idx.pl_stems.insert(im.name);
                 }
-                if !im.is_public {
+                if !vis_exported(im.vis) {
                     continue;
                 }
                 let key = im.name as u64 * 2u64 + if im.is_type {
@@ -6187,12 +6424,14 @@ extend Package {
         // Drop the end sentinels, append the new modules' rows, put the sentinels back.
         let _ = self.idx.mod_items.pop();
         let _ = self.idx.mod_imports.pop();
+        let _ = self.idx.mod_globs.pop();
         let _ = self.idx.mod_exts.pop();
         let mut idx = replace(&mut self.idx, PkgIndex {});
         for m in from..n {
             idx.mod_items.push(idx.items.len() as u32);
             idx.name_maps.push(Map::<u64, u32>::new());
             idx.mod_imports.push(idx.imports.len() as u32);
+            idx.mod_globs.push(idx.globs.len() as u32);
             idx.mod_exts.push(idx.exts.len() as u32);
             if self.modules[m].has_ast {
                 self.index_module(&mut idx, m as ModuleId);
@@ -6200,6 +6439,7 @@ extend Package {
         }
         idx.mod_items.push(idx.items.len() as u32);
         idx.mod_imports.push(idx.imports.len() as u32);
+        idx.mod_globs.push(idx.globs.len() as u32);
         idx.mod_exts.push(idx.exts.len() as u32);
         idx.built_mods = n as u32;
         let mut tgt = Vector::<u32>::with_capacity(idx.imports.len());
@@ -6355,30 +6595,30 @@ extend Package {
         let ast = unsafe &*self.module_ast_const(mid);
         let n = ast.at_const(node);
         let mut is_type = true;
-        let mut is_public = false;
+        let mut vis = VIS_PRIVATE;
         let mut name_node = NODE_NONE;
         let mut kind = ItemKind::IK_STRUCT;
         switch n.kind {
             NODE_STRUCT | NODE_ENUM => {
                 name_node = n.as_data.aggregate.name;
-                is_public = n.as_data.aggregate.is_public;
+                vis = n.as_data.aggregate.vis;
                 if n.kind == NodeKind::NODE_ENUM {
                     kind = ItemKind::IK_ENUM;
                 }
             },
             NODE_TYPE_ALIAS => {
                 name_node = n.as_data.type_alias.name;
-                is_public = n.as_data.type_alias.is_public;
+                vis = n.as_data.type_alias.vis;
                 kind = ItemKind::IK_TYPE_ALIAS;
             },
             NODE_INTERFACE => {
                 name_node = n.as_data.interface_def.name;
-                is_public = n.as_data.interface_def.is_public;
+                vis = n.as_data.interface_def.vis;
                 kind = ItemKind::IK_INTERFACE;
             },
             NODE_FUNCTION => {
                 name_node = n.as_data.function.name;
-                is_public = n.as_data.function.is_public();
+                vis = n.as_data.function.vis;
                 is_type = false;
                 kind = if owner == ITEM_NONE {
                     ItemKind::IK_FUNCTION;
@@ -6388,7 +6628,7 @@ extend Package {
             },
             NODE_CONST => {
                 name_node = n.as_data.const_def.name;
-                is_public = n.as_data.const_def.is_public;
+                vis = n.as_data.const_def.vis;
                 is_type = false;
                 kind = if owner == ITEM_NONE {
                     ItemKind::IK_CONST;
@@ -6413,7 +6653,7 @@ extend Package {
                 owner: owner,
                 kind: kind as u8,
                 name: sym,
-                is_public: is_public,
+                vis: vis,
                 is_type: is_type,
                 start: sp.start,
                 len: len,
@@ -6424,7 +6664,7 @@ extend Package {
                 2u64;
             } else {
                 0u64;
-            } + if is_public {
+            } + if vis_exported(vis) {
                 1u64;
             } else {
                 0u64;
@@ -6501,6 +6741,13 @@ extend Package {
                     if !dup {
                         idx.imports.push(c as ModuleId);
                     }
+                    let mut gdup = !n.as_data.import_decl.glob;
+                    for e in idx.mod_globs[m] as usize..idx.globs.len() {
+                        gdup = gdup || idx.globs[e] == c as ModuleId;
+                    }
+                    if !gdup {
+                        idx.globs.push(c as ModuleId);
+                    }
                 }
             } else if n.kind == NodeKind::NODE_EXTERN_BLOCK {
                 // `pub` raw bindings / opaque handles live one level down, inside the extern block;
@@ -6522,7 +6769,7 @@ extend Package {
                         owner: ITEM_NONE,
                         kind: ItemKind::IK_EXTEND as u8,
                         name: SYM_NONE,
-                        is_public: false,
+                        vis: VIS_PRIVATE,
                         is_type: false,
                         start: esp.start,
                         len: esp.end - esp.start,
@@ -6550,11 +6797,12 @@ extend Package {
         }
     }
 
-    /// Find a *public* top-level declaration named `name` in module `mid`: a type when `want_type`,
-    /// otherwise a value. Returns the decl's NodeId within module `mid`'s Ast, or NODE_NONE. O(1):
-    /// a byte-exact symbol probe plus one name-map probe into the package declaration index.
+    /// Find a top-level declaration named `name` in module `mid` that module `from` sees (`vis_ok`;
+    /// `FROM_ANY`: every exported one): a type when `want_type`, otherwise a value. Returns the decl's
+    /// NodeId within module `mid`'s Ast, or NODE_NONE. O(1): a byte-exact symbol probe plus one name-map
+    /// probe into the package declaration index.
     @always_inline
-    pub fn lookup(self: &Self, mid: ModuleId, name: str, want_type: bool) NodeId {
+    pub fn lookup(self: &Self, from: u32, mid: ModuleId, name: str, want_type: bool) NodeId {
         if !self.modules[mid as usize].has_ast {
             return NODE_NONE;
         }
@@ -6564,22 +6812,69 @@ extend Package {
         if s == SYM_NONE {
             return NODE_NONE;
         }
-        return self.lookup_sym(mid, s, want_type);
+        return self.lookup_sym(from, mid, s, want_type);
     }
 
     /// `lookup` by the name's interned symbol `s`, for a caller that probes many modules with one
     /// name. The index must cover `mid` (`ensure_index`); a module without an Ast has no entry.
     @always_inline
-    pub fn lookup_sym(self: &Self, mid: ModuleId, s: SymbolId, want_type: bool) NodeId {
+    pub fn lookup_sym(self: &Self, from: u32, mid: ModuleId, s: SymbolId, want_type: bool) NodeId {
         let key = s as u64 * 4u64 + if want_type {
             2u64;
         } else {
             0u64;
         } + 1u64;
-        return switch self.idx.name_maps[mid as usize].get(&key) {
-            Some(it) => self.idx.items[(*it) as usize].node,
-            None => NODE_NONE,
-        };
+        let it = self.idx.name_maps[mid as usize].get(&key);
+        if it.is_none() {
+            return NODE_NONE;
+        }
+        let im = self.idx.items.at((*it.unwrap()) as usize);
+        if !self.vis_ok(from, mid, im.vis) {
+            return NODE_NONE;
+        }
+        return im.node;
+    }
+
+    /// What `<mid>::<s>` names for module `from`: an item `mid` declares, else the first in import order
+    /// that a module `mid` glob-imports declares, or one of that module's imports. An implicit directory
+    /// index reaches its files' own items only, and sets `amb` when two of its files declare the name.
+    pub fn qual_lookup(self: &Self, from: u32, mid: ModuleId, s: SymbolId, want_type: bool, amb: &mut bool) LookupHit {
+        let d = self.lookup_sym(from, mid, s, want_type);
+        if d != NODE_NONE {
+            return LookupHit { node: d, mid: mid };
+        }
+        let ii = self.modules[mid as usize].implicit_index;
+        let mut hit = LookupHit { node: NODE_NONE, mid: 0 };
+        let mp = (self as *const Package) as *mut Package;
+        for g in self.idx.mod_globs[mid as usize] as usize..self.idx.mod_globs[mid as usize + 1] as usize {
+            let gm = self.idx.globs[g];
+            let mut h = LookupHit { node: self.lookup_sym(from, gm, s, want_type), mid: gm };
+            if !ii {
+                unsafe (*mp).ensure_closure(gm);
+                let lst = self.clo_lists.at(gm as usize);
+                let mut i: usize = 1; // the closure starts with `gm` itself
+                while h.node == NODE_NONE && i < lst.len() {
+                    h = LookupHit { node: self.lookup_sym(from, lst[i], s, want_type), mid: lst[i] };
+                    i += 1;
+                }
+            }
+            if h.node != NODE_NONE {
+                if hit.node != NODE_NONE {
+                    *amb = true;
+                    break;
+                }
+                hit = h;
+                if !ii {
+                    break;
+                }
+            }
+        }
+        return hit;
+    }
+
+    /// The `VIS_*` of declaration `node` of module `mid`.
+    pub fn decl_vis(self: &Self, mid: ModuleId, node: NodeId) u8 {
+        return node_vis(unsafe (*self.module_ast_const(mid)).at_const(node));
     }
 
     /// Like lookup but across every prelude module (the first in module order wins); the hit's `mid`
@@ -6642,7 +6937,7 @@ extend Package {
         let lst = self.clo_lists.at(mid as usize);
         for i in 0..lst.len() {
             let mo = lst[i];
-            let d = self.lookup(mo, name, want_type);
+            let d = self.lookup(FROM_ANY, mo, name, want_type);
             if d != NODE_NONE {
                 return LookupHit { node: d, mid: mo };
             }
@@ -6921,7 +7216,7 @@ extend Package {
     // user's own `std/` folder. Names are sorted for deterministic module ids regardless of readdir order.
     // `user_vectors`: a module the caller loads after the prelude names a vector (`package_from_source_arch`).
     /// Whether a loaded module names a vector (`Ast.names_vectors`; std's own simd.spc aside).
-    pub fn names_vectors(self: &Self) bool {
+    pub const fn names_vectors(self: &Self) bool {
         for i in 0..self.modules.len() {
             let md = &self.modules[i];
             if md.has_ast && md.ast.names_vectors && !(md.prelude && basename_of(md.file.as_str()) == "simd.spc") {
@@ -6974,8 +7269,7 @@ extend Package {
     // Whether the std directory `std_dir` names is missing (empty names none): reported once, here,
     // instead of as one failed import per module that needs it.
     fn std_missing(self: &mut Self, std_dir: str) bool {
-        let mut sd = String::from_str(std_dir);
-        if std_dir.len() == 0 || unsafe shim::sc_stat_isdir(sd.cstr()) == 1 {
+        if std_dir.len() == 0 || dutil::is_dir(std_dir) {
             return false;
         }
         unsafe stdio::fprintf(
@@ -7003,39 +7297,28 @@ extend Package {
         if std_dir.len() == 0 {
             return false;
         }
-        let mut sd = String::from_str(std_dir);
-        let dir = unsafe shim::sc_opendir(sd.cstr());
-        if dir == null {
+        let opened = fs::read_dir(std_dir);
+        if opened.is_err() {
             return false;
         }
+        let mut d = opened.unwrap();
         let mut names = Vector::<String>::new();
-        loop {
-            let e = unsafe shim::sc_readdir(dir);
-            if e == null {
-                break;
-            }
-            let nm = unsafe shim::sc_dirent_name(e);
-            let l = unsafe cstring::strlen(nm);
-            if l < 5 {
+        // Bounded by the entries of the directory; a read error ends the listing, as the end does.
+        while let Some(Ok(e)) = d.next() {
+            if e.name.len() < 5 || !e.name.ends_with(".spc") {
                 continue;
             }
-            if unsafe cstring::strcmp(nm + (l - 4), ".spc".ptr() as *const char) != 0 {
-                continue;
+            // Skip subdirectories named "*.spc" straight from the listing's kind; only an unknown kind
+            // needs a stat.
+            let dir = if let Some(k) = e.kind {
+                k == fs::FileKind::Dir;
+            } else {
+                dutil::is_dir(join2(std_dir, e.name).as_str());
+            };
+            if !dir {
+                names.push(String::from_str(e.name));
             }
-            // Skip subdirectories named "*.spc" straight from readdir's d_type; only DT_UNKNOWN needs a stat.
-            let dt = unsafe shim::sc_dirent_isdir(e);
-            if dt == 1 {
-                continue;
-            }
-            if dt < 0 {
-                let mut probe = join2(std_dir, unsafe str::from_cstr(nm));
-                if unsafe shim::sc_stat_isdir(probe.cstr()) == 1 {
-                    continue;
-                }
-            }
-            names.push(unsafe String::from_cstr(nm));
         }
-        let _ = unsafe shim::sc_closedir(dir);
         // Sort by name (small: the std/ file list), byte-lexicographic with a length tiebreak (equivalent to
         // strcmp over these NUL-free views).
         names.sort();
@@ -7050,13 +7333,13 @@ extend Package {
         let par = unsafe G_LOAD_JOBS != 1 && self.overlay_files.len() == 0;
         let mut us = PUnits {};
         for k in 0..names.len() {
-            let mut file = join2(std_dir, names[k].as_str());
+            let file = join2(std_dir, names[k].as_str());
             let mut dup = false;
             for i2 in 0..m0 {
                 if basename_of(self.modules[i2].file.as_str()) != names[k].as_str() {
                     continue;
                 }
-                if unsafe shim::sc_same_file(file.cstr(), self.modules[i2].file.cstr()) == 1 {
+                if dutil::same_file(file.as_str(), self.modules[i2].file.as_str()) {
                     self.modules[i2].prelude = true;
                     dup = true;
                     break;
@@ -7098,15 +7381,15 @@ extend Package {
             return;
         }
         // The runtime the emitted code calls (traps, allocation tracking, the stack-overflow report).
-        let mut rf = join2(std_dir, "rt/base.spc");
-        if self.rt_module < 0 && unsafe shim::sc_mtime(rf.cstr()) != 0 {
+        let rf = join2(std_dir, "rt/base.spc");
+        if self.rt_module < 0 && dutil::file_mtime(rf.as_str()) != 0 {
             self.rt_module = self.load_module("std::rt::base", rf.as_str(), self.bootstrap, target);
         }
         let backends: [str<'static>; 3] = ["x86_64", "aarch64", "wasm"];
         if self.arch >= 0 && self.arch < 3 && !cf::is_empty(self.features) && (user_vectors || self.names_vectors()) {
             let bn = unsafe backends[self.arch as usize];
-            let mut bf = join2(std_dir, format("simd/backend/{}.spc", bn).as_str());
-            if unsafe shim::sc_mtime(bf.cstr()) != 0 {
+            let bf = join2(std_dir, format("simd/backend/{}.spc", bn).as_str());
+            if dutil::file_mtime(bf.as_str()) != 0 {
                 let id = self.load_module(
                     format("std::simd::backend::{}", bn).as_str(),
                     bf.as_str(),
@@ -7119,8 +7402,8 @@ extend Package {
             }
             // The run-time choice of the copies reads the CPU detector (`sc_cpu_words`).
             if self.simd_levels.len() != 0 {
-                let mut cf9 = join2(dirname_of(std_dir), "ffi/sc_cpu.spc");
-                if unsafe shim::sc_mtime(cf9.cstr()) != 0 {
+                let cf9 = join2(dirname_of(std_dir), "ffi/sc_cpu.spc");
+                if dutil::file_mtime(cf9.as_str()) != 0 {
                     let _ = self.load_module("sc_cpu", cf9.as_str(), self.bootstrap, target);
                 }
             }

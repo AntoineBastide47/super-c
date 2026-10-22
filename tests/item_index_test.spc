@@ -224,7 +224,7 @@ fn indexed(ws: &Ws, a: str, b: str, c: str, with_edges: bool) loader::Package {
     return p;
 }
 
-fn mod_of(p: &loader::Package, name: str) usize {
+const fn mod_of(p: &loader::Package, name: str) usize {
     for i in 0..p.modules.len() {
         if p.modules.at(i).file.as_str().ends_with(name) {
             return i;
@@ -244,7 +244,7 @@ fn item_named(p: &loader::Package, m: usize, name: str) loader::ItemId {
     return loader::ITEM_NONE;
 }
 
-fn has_edge(off: &Vector<u32>, tgt: &Vector<u32>, from: loader::ItemId, to: loader::ItemId) bool {
+const fn has_edge(off: &Vector<u32>, tgt: &Vector<u32>, from: loader::ItemId, to: loader::ItemId) bool {
     for e in off[from as usize] as usize..off[from as usize + 1] as usize {
         if tgt[e] == to {
             return true;
@@ -253,11 +253,11 @@ fn has_edge(off: &Vector<u32>, tgt: &Vector<u32>, from: loader::ItemId, to: load
     return false;
 }
 
-fn pre(p: &loader::Package, from: loader::ItemId, to: loader::ItemId) bool {
+const fn pre(p: &loader::Package, from: loader::ItemId, to: loader::ItemId) bool {
     return has_edge(&p.sched.pre_off, &p.sched.pre_edges, from, to);
 }
 
-fn fin(p: &loader::Package, from: loader::ItemId, to: loader::ItemId) bool {
+const fn fin(p: &loader::Package, from: loader::ItemId, to: loader::ItemId) bool {
     return has_edge(&p.sched.fin_off, &p.sched.fin_edges, from, to);
 }
 

@@ -46,7 +46,7 @@ extend Ctl {
 
 /// A count with an optional K, M or G suffix (powers of 1024): "4096", "64K", "16m", "1G". None when
 /// `s` is anything else (empty, a sign, a space, another suffix) or the value exceeds u64.
-pub fn parse_size(s: str) Option<u64> {
+pub const fn parse_size(s: str) Option<u64> {
     let mut v: u64 = 0;
     let mut i: usize = 0;
     while i < s.len() && s.byte_at(i) >= b'0' && s.byte_at(i) <= b'9' {

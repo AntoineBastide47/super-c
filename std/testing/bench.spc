@@ -743,7 +743,7 @@ fn calibrate() {
 
 // The benchmark selection from the runner's arguments: the text after `--filter=`, or "" when every
 // benchmark runs.
-fn filter_of<'a>(argv: &Vector<str<'a>>) str<'a> {
+const fn filter_of<'a>(argv: &Vector<str<'a>>) str<'a> {
     for i in 0..argv.len() {
         let a = argv[i];
         if a.starts_with("--filter=") {
@@ -754,11 +754,11 @@ fn filter_of<'a>(argv: &Vector<str<'a>>) str<'a> {
 }
 
 // Whether the benchmark called `name` runs under `filter`: a substring match, and "" selects all.
-fn selected(name: str, filter: str) bool {
+const fn selected(name: str, filter: str) bool {
     return filter.len() == 0 || name.contains(filter);
 }
 
-fn has_flag(argv: &Vector<str>, flag: str) bool {
+const fn has_flag(argv: &Vector<str>, flag: str) bool {
     for i in 0..argv.len() {
         if argv[i] == flag {
             return true;

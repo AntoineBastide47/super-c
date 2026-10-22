@@ -6,7 +6,7 @@ import tests::gen::loops as loops;
 import tests::gen::vector as vector;
 import tests::gen::math as math;
 import tests::cli_harness as cli;
-import driver_shim as shim;
+import driver::util as dutil;
 import stdlib;
 
 fn expect_seeds<M: gen::Model + Clone>(m: &mut M, seeds: []u64) {
@@ -80,7 +80,7 @@ fn gen_finds_planted_defect() {
 }
 
 // The `opq::<` inputs of a generated expression.
-fn count_leaves(text: str) usize {
+const fn count_leaves(text: str) usize {
     let mut n: usize = 0;
     let mut rest = text;
     loop {
@@ -112,7 +112,7 @@ fn gen_random_run() {
     if runs == 0 {
         return;
     }
-    let base = env_u64("SC_GEN_SEED", (unsafe shim::sc_ticks_ms()) as u64);
+    let base = env_u64("SC_GEN_SEED", dutil::ticks_ms() as u64);
     let only = stdlib::getenv("SC_GEN_MODEL");
     let model = if only == null {
         "";

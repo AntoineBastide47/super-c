@@ -8,6 +8,7 @@ import module::loader as loader;
 import lsp::json as json;
 import ast::parser as par;
 import driver_shim as shim;
+import std::platform::fs;
 
 fn frame(out: &mut String, body: &String) {
     out.format_into("Content-Length: {}\r\n\r\n", body.len());
@@ -34,7 +35,7 @@ fn lsp_run_args(root: str, args: str) i32 {
     return cli::run_io(cmd.cstr(), inp.cstr(), outp.cstr(), errp.cstr());
 }
 
-fn count(hay: str, needle: str) usize {
+const fn count(hay: str, needle: str) usize {
     let mut n: usize = 0;
     let mut i: usize = 0;
     while i + needle.len() <= hay.len() {
@@ -648,7 +649,7 @@ fn push_init_caps(ses: &mut String, root: str, caps: str, opts: str) {
 
 // The single framed response BODY containing `marker`: from the marker's message start (the byte
 // after the framing header's blank line) to the next `Content-Length:` header or end of output.
-fn response_of<'a>(out: str<'a>, marker: str) str<'a> {
+const fn response_of<'a>(out: str<'a>, marker: str) str<'a> {
     let hdr = "Content-Length:";
     let mut i: usize = 0;
     while i + marker.len() <= out.len() {
@@ -672,7 +673,7 @@ fn response_of<'a>(out: str<'a>, marker: str) str<'a> {
 }
 
 // The value of the FIRST `"resultId":"..."` in `hay` after `from` ("" when absent).
-fn result_id_in<'a>(hay: str<'a>) str<'a> {
+const fn result_id_in<'a>(hay: str<'a>) str<'a> {
     let key = "\"resultId\":\"";
     let mut i: usize = 0;
     while i + key.len() <= hay.len() {
@@ -1530,7 +1531,7 @@ fn lsp_build_constants() {
 }
 
 // The response that starts at byte `at` of session output `o`, up to the next frame header.
-fn one_response<'a>(o: str<'a>, at: isize) str<'a> {
+const fn one_response<'a>(o: str<'a>, at: isize) str<'a> {
     let r = o.slice(at as usize, o.len());
     let e = r.find("Content-Length");
     if e < 0 {
@@ -1747,8 +1748,8 @@ const RECUR_FIXED: str = "fn forever(n: u64) u64 {\n    if n > 9 {\n        retu
 const RECUR_MSG: str = "function 'forever' cannot return without calling itself";
 // A launched self call that can accept a task cancellation keeps the check after it: the borrow round
 // lowers a module with a `@tail_recurse` function with the build's cancellation checks.
-const TAIL_CANCEL_BAD: str = "import std::parallel::runtime as rt;\nimport std::parallel::sync as sync;\nimport std::parallel::time as time;\n\n@tail_recurse\nfn spin(n: i64) i64 {\n    if n == 0 {\n        return 0;\n    }\n    time::sleep(time::Duration::from_nanos(1));\n    return spin(n - 1);\n}\n\nfn main() i32 {\n    let wg = sync::WaitGroup::new();\n    wg.add(1);\n    let w = wg.clone();\n    launch || {\n        let _ = spin(3);\n        w.done();\n    };\n    let _ = rt::request_cancel(rt::current_key(), rt::CR_USER);\n    wg.wait();\n    rt::shutdown();\n    return 0;\n}\n";
-const TAIL_CANCEL_FIXED: str = "import std::parallel::runtime as rt;\nimport std::parallel::sync as sync;\nimport std::parallel::time as time;\n\nfn spin(n: i64) i64 {\n    if n == 0 {\n        return 0;\n    }\n    time::sleep(time::Duration::from_nanos(1));\n    return spin(n - 1);\n}\n\nfn main() i32 {\n    let wg = sync::WaitGroup::new();\n    wg.add(1);\n    let w = wg.clone();\n    launch || {\n        let _ = spin(3);\n        w.done();\n    };\n    let _ = rt::request_cancel(rt::current_key(), rt::CR_USER);\n    wg.wait();\n    rt::shutdown();\n    return 0;\n}\n";
+const TAIL_CANCEL_BAD: str = "import std::parallel::runtime as rt;\nimport std::parallel::sync as sync;\nimport std::time as time;\n\n@tail_recurse\nfn spin(n: i64) i64 {\n    if n == 0 {\n        return 0;\n    }\n    time::sleep(time::Duration::from_nanos(1));\n    return spin(n - 1);\n}\n\nfn main() i32 {\n    let wg = sync::WaitGroup::new();\n    wg.add(1);\n    let w = wg.clone();\n    launch || {\n        let _ = spin(3);\n        w.done();\n    };\n    let _ = rt::request_cancel(rt::current_key(), rt::CR_USER);\n    wg.wait();\n    rt::shutdown();\n    return 0;\n}\n";
+const TAIL_CANCEL_FIXED: str = "import std::parallel::runtime as rt;\nimport std::parallel::sync as sync;\nimport std::time as time;\n\nfn spin(n: i64) i64 {\n    if n == 0 {\n        return 0;\n    }\n    time::sleep(time::Duration::from_nanos(1));\n    return spin(n - 1);\n}\n\nfn main() i32 {\n    let wg = sync::WaitGroup::new();\n    wg.add(1);\n    let w = wg.clone();\n    launch || {\n        let _ = spin(3);\n        w.done();\n    };\n    let _ = rt::request_cancel(rt::current_key(), rt::CR_USER);\n    wg.wait();\n    rt::shutdown();\n    return 0;\n}\n";
 const TAIL_CANCEL_MSG: str = "cannot become a jump: it can accept a task cancellation";
 
 // Open `bad`, then change it to `fixed`: the borrow round of version 1 publishes `msg`, and version 2
@@ -1853,10 +1854,10 @@ fn lsp_nested_project_uses_its_roots() {
     p.mkfile("tools/gen/lib/helper.spc", "pub fn one() i32 {\n    return 1;\n}\n");
     p.mkfile("tools/gen/bad.spc", STRAY_ERR);
     p.mkfile("tools/gen/lib/x/deep.spc", NEST_DEEP);
-    let mut rb = Array::<char, 4096>::new();
-    let mut pd = String::from_str(p.dir());
-    assert(unsafe shim::sc_realpath(pd.cstr(), &mut rb[0]) != null, "the project root resolves");
-    let root = str::from_cbuf(rb.as_slice());
+    let real = fs::realpath(p.dir());
+    assert(real.is_ok(), "the project root resolves");
+    let rs = real.unwrap();
+    let root = rs.as_str();
     let mut ses = String::new();
     push_init(&mut ses, root);
     push_initialized(&mut ses);

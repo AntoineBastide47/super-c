@@ -2,12 +2,12 @@
 // the excluded overlong, surrogate and above-U+10FFFF forms, truncation and bad continuations, then
 // every (lead, second byte) pair against a decode-and-range reference.
 
-fn valid(s: []u8, n: usize) bool {
+const fn valid(s: []u8, n: usize) bool {
     return (unsafe str::from_raw(s.ptr, n)).is_valid_utf8();
 }
 
 // Reference: decode each sequence by its bit pattern, then reject what Table 3-7 excludes.
-fn reference(s: []u8, n: usize) bool {
+const fn reference(s: []u8, n: usize) bool {
     let mut i: usize = 0;
     while i < n {
         let b = s[i];
@@ -50,7 +50,7 @@ fn reference(s: []u8, n: usize) bool {
     return true;
 }
 
-fn ok(s: []u8) bool {
+const fn ok(s: []u8) bool {
     return valid(s, s.len);
 }
 

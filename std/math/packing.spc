@@ -54,7 +54,7 @@ pub fn unpack_unorm4x8(p: u32) Vec<f32, 4> {
 }
 
 /// Each component clamped to [-1, 1], times 127, rounded; x in the low byte.
-pub fn pack_snorm4x8(v: Vec<f32, 4>) u32 {
+pub const fn pack_snorm4x8(v: Vec<f32, 4>) u32 {
     let mut r: u32 = 0;
     for i in 0..4 {
         r = r | ((snorm(unsafe v.e[i], 127.0) as i8) as u8) as u32 << (i * 8) as u32;
@@ -91,7 +91,7 @@ pub const fn pack_half2x16(v: Vec<f32, 2>) u32 {
 }
 
 /// The two float16 fields of `v` as floats.
-pub fn unpack_half2x16(v: u32) Vec<f32, 2> {
+pub const fn unpack_half2x16(v: u32) Vec<f32, 2> {
     return Vec::<f32, 2> { e: [to_float32((v as u16) as i16), to_float32(((v >> 16) as u16) as i16)] };
 }
 
@@ -147,7 +147,7 @@ pub const fn unpack_unorm1x16(p: u16) f32 {
 }
 
 /// Each component as `pack_unorm1x16`, x in the low 16 bits.
-pub fn pack_unorm4x16(v: Vec<f32, 4>) u64 {
+pub const fn pack_unorm4x16(v: Vec<f32, 4>) u64 {
     let mut r: u64 = 0;
     for i in 0..4 {
         r = r | (unorm(unsafe v.e[i], 65535.0) as u16) as u64 << (i * 16) as u64;
@@ -177,7 +177,7 @@ pub fn unpack_snorm1x16(p: u16) f32 {
 }
 
 /// Each component as `pack_snorm1x16`, x in the low 16 bits.
-pub fn pack_snorm4x16(v: Vec<f32, 4>) u64 {
+pub const fn pack_snorm4x16(v: Vec<f32, 4>) u64 {
     let mut r: u64 = 0;
     for i in 0..4 {
         r = r | ((snorm(unsafe v.e[i], 32767.0) as i16) as u16) as u64 << (i * 16) as u64;
@@ -202,12 +202,12 @@ pub const fn pack_half1x16(v: f32) u16 {
 }
 
 /// The float16 `v` as a float.
-pub fn unpack_half1x16(v: u16) f32 {
+pub const fn unpack_half1x16(v: u16) f32 {
     return to_float32(v as i16);
 }
 
 /// Each component as `pack_half1x16`, x in the low 16 bits.
-pub fn pack_half4x16(v: Vec<f32, 4>) u64 {
+pub const fn pack_half4x16(v: Vec<f32, 4>) u64 {
     let mut r: u64 = 0;
     for i in 0..4 {
         r = r | (to_float16(unsafe v.e[i]) as u16) as u64 << (i * 16) as u64;
@@ -443,7 +443,7 @@ pub const fn unpack_unorm2x4(p: u8) Vec<f32, 2> {
 }
 
 /// Each component clamped to [0, 1], times 15, rounded, in 4 bits, x lowest.
-pub fn pack_unorm4x4(v: Vec<f32, 4>) u16 {
+pub const fn pack_unorm4x4(v: Vec<f32, 4>) u16 {
     let mut r: u32 = 0;
     for i in 0..4 {
         r = r | (unorm(unsafe v.e[i], 15.0) & 0xF) << (i * 4) as u32;
@@ -712,7 +712,7 @@ const fn to_float16(f: f32) i16 {
 }
 
 // The float16 bits `value` as an f32: exact; a NaN keeps its sign and mantissa bits.
-fn to_float32(value: i16) f32 {
+const fn to_float32(value: i16) f32 {
     let v = value as i32;
     let s = v >> 15 & 0x00000001;
     let mut e = v >> 10 & 0x0000001f;

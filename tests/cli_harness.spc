@@ -4,6 +4,9 @@ import stdio;
 import stdlib;
 import string as cstring;
 import driver_shim as shim;
+import std::platform::fs;
+import std::platform::env as penv;
+import std::platform::process;
 import driver::util as dutil;
 import build_system::objcache as ocache;
 
@@ -29,7 +32,7 @@ extend CliResult {
         return contains_str(self.out, needle);
     }
     /// The captured output (empty when none was captured).
-    pub fn text(self: &CliResult) str {
+    pub const fn text(self: &CliResult) str {
         if self.out == null {
             return "";
         }
@@ -94,6 +97,12 @@ pub fn contains_str(hay: *const char, needle: str) bool {
     return unsafe cstring::strstr(hay, nb.cstr()) != null;
 }
 
+/// The system temp directory, without a trailing separator ('/' separators on Windows); "." when the
+/// system names none.
+pub fn tmp_dir() String {
+    return fs::temp_dir().unwrap_or(String::from_str("."));
+}
+
 /// True when the host platform is Windows.
 pub const fn on_windows() bool {
     return unsafe shim::sc_host_platform() == 0;
@@ -115,17 +124,16 @@ fn superc() *const char {
         return &unsafe SUPERC_RESOLVED[0];
     }
     let sc = stdlib::getenv("SUPERC");
-    let mut want = if sc == null || unsafe *sc == 0 as char {
+    let want = if sc == null || unsafe *sc == 0 as char {
         format("./super-c{}", unsafe str::from_cstr(binext()));
     } else {
         unsafe String::from_cstr(sc);
     };
     let slot = ((&mut unsafe SUPERC_RESOLVED) as *mut PathMax) as *mut char;
-    if unsafe shim::sc_realpath(want.cstr(), slot) == null {
-        assert(want.len() < 4096, "the compiler path fits");
-        unsafe cstring::memcpy(slot, want.as_ptr(), want.len());
-        unsafe slot[want.len()] = 0 as char;
-    }
+    let real = fs::realpath(want.as_str()).unwrap_or(want);
+    assert(real.len() < 4096, "the compiler path fits");
+    unsafe cstring::memcpy(slot, real.as_ptr(), real.len());
+    unsafe slot[real.len()] = 0 as char;
     return slot;
 }
 
@@ -207,7 +215,7 @@ fn slurp(path: *const char) *mut char {
 }
 
 // Run `basecmd` with stdout+stderr captured into `outpath` and read back. The redirection is the runner's
-// (shim::sc_run), not the shell's, so `basecmd` is a plain command line that means the same thing to
+// (`run_with`), not the shell's, so `basecmd` is a plain command line that means the same thing to
 // /bin/sh and to CreateProcess.
 fn exec(basecmd: *const char, outpath: *const char) CliResult {
     return exec_env(basecmd, outpath, "");
@@ -231,7 +239,147 @@ pub fn run_with(cmd: *const char, in_path: *const char, out_path: *const char, e
         e.push_str("SC_LEAK_CHECK=fatal ");
     }
     e.push_str(env);
-    return unsafe shim::sc_run(cmd, in_path, out_path, err_path, e.cstr());
+    let mut sets = Vector::<String>::new();
+    if !env_parse(e.as_str(), &mut sets) {
+        return -1;
+    }
+    // The child's whole environment: this process's, each assigned name replaced by its last assignment.
+    let vars = penv::vars().unwrap();
+    let mut it = vars.iter();
+    let mut kept = Vector::<String>::new();
+    while let Some((name, value)) = it.next() {
+        if !env_assigns(sets[0..sets.len()], name) {
+            kept.push(format("{}={}", name, value));
+        }
+    }
+    let mut all = Vector::<str>::new();
+    for i in 0..kept.len() {
+        all.push(kept.at(i).as_str());
+    }
+    for i in 0..sets.len() {
+        let s = sets.at(i).as_str();
+        let eq = s.find_byte(b'=') as usize;
+        // An empty value removes the variable on Windows, as the C runtime's `_putenv_s` does.
+        let removed = on_windows() && eq + 1 == s.len();
+        if !removed && !env_assigns(sets[i + 1..sets.len()], s.slice(0, eq)) {
+            all.push(s);
+        }
+    }
+    let line = unsafe str::from_cstr(cmd);
+    let sh: [str; 3] = ["sh", "-c", line];
+    let none: [str; 0] = [];
+    let mut c = if on_windows() {
+        process::Command::new(none);
+    } else {
+        process::Command::new(sh);
+    };
+    // POSIX runs the line through /bin/sh; Windows hands it to CreateProcess as written, with no shell.
+    if on_windows() {
+        c.command_line = Option::<str>::Some(line);
+    } else {
+        c.program = Option::<str>::Some("/bin/sh");
+    }
+    c.env = Option::<Slice<str>>::Some(all[0..all.len()]);
+    c.stdin = redirect_of(in_path, process::Redirect::Null);
+    c.stdout = redirect_of(out_path, process::Redirect::Null);
+    c.stderr = redirect_of(err_path, process::Redirect::Stdout);
+    let started = process::spawn(c);
+    if started.is_err() {
+        return -1;
+    }
+    let mut child = started.unwrap();
+    return switch child.wait() {
+        Ok(Code(code)) => code,
+        _ => -1,
+    };
+}
+
+// The redirect of a child stream to the file `path` names, or `none` for a null `path`.
+const fn redirect_of<'a>(path: *const char, none: process::Redirect<'a>) process::Redirect<'a> {
+    if path == null {
+        return none;
+    }
+    return process::Redirect::Path(unsafe str::from_cstr(path));
+}
+
+// The most assignments one `run_with` environment takes, and the longest name.
+const ENV_MAX: usize = 8;
+const ENV_NAME_MAX: usize = 63;
+
+// Parse `env`: NAME=VALUE assignments, space separated (a VALUE in double quotes may hold spaces), into
+// `out` as NAME=VALUE: false when one is malformed or there are more than ENV_MAX, so a child never runs
+// with part of the environment its caller asked for.
+fn env_parse(env: str, out: &mut Vector<String>) bool {
+    let n = env.len();
+    let mut p: usize = 0;
+    // Bounded: each assignment consumes at least its '='.
+    loop {
+        while p < n && (env.byte_at(p) == b' ' || env.byte_at(p) == b'\t') {
+            p += 1;
+        }
+        if p == n {
+            return true;
+        }
+        let mut eq = p;
+        while eq < n && env.byte_at(eq) != b'=' && env.byte_at(eq) != b' ' && env.byte_at(eq) != b'\t' {
+            eq += 1;
+        }
+        if eq == n || env.byte_at(eq) != b'=' || out.len() == ENV_MAX {
+            return false;
+        }
+        let mut v0 = eq + 1;
+        let mut v1 = v0;
+        let mut end = v0;
+        if v0 < n && env.byte_at(v0) == b'"' {
+            v0 += 1;
+            v1 = v0;
+            while v1 < n && env.byte_at(v1) != b'"' {
+                v1 += 1;
+            }
+            if v1 == n {
+                return false;
+            }
+            end = v1 + 1;
+        } else {
+            while v1 < n && env.byte_at(v1) != b' ' && env.byte_at(v1) != b'\t' {
+                v1 += 1;
+            }
+            end = v1;
+        }
+        if end < n && env.byte_at(end) != b' ' && env.byte_at(end) != b'\t' {
+            return false;
+        }
+        let nl = eq - p;
+        if nl == 0 || nl > ENV_NAME_MAX {
+            return false;
+        }
+        let mut a = String::from_str(env.slice(p, eq + 1));
+        a.push_str(env.slice(v0, v1));
+        out.push(a);
+        p = end;
+    }
+}
+
+// Whether one of the NAME=VALUE assignments `sets` names variable `name` (any case on Windows, whose
+// names are case-insensitive).
+const fn env_assigns(sets: []String, name: str) bool {
+    for i in 0..sets.len() {
+        let s = sets[i].as_str();
+        let k = s.slice(0, s.find_byte(b'=') as usize);
+        if k == name || on_windows() && k.len() == name.len() && ascii_eq_nocase(k, name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+const fn ascii_eq_nocase(a: str, b: str) bool {
+    for i in 0..a.len() {
+        if (a.byte_at(i) | 0x20) != (b.byte_at(i) | 0x20) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Run a command with its output discarded and return its exit code: the escape hatch for the few checks
@@ -267,20 +415,18 @@ extend Proj {
         // the clock; a directory an aborted test left under a reused pid is cleared before use, so a
         // fixture never reads another test's files.
         unsafe C_SEQ = unsafe C_SEQ + 1;
-        let pid = unsafe shim::sc_getpid();
         let mut p = Proj { root: Array::<char, 256> {} };
-        let n = unsafe stdio::snprintf(
-            &mut p.root[0],
-            256,
-            "%s/sccli_%d_%llu_%llu".ptr() as *const char,
-            unsafe shim::sc_tmpdir(),
-            pid,
+        let root = format(
+            "{}/sccli_{}_{}_{}",
+            tmp_dir().as_str(),
+            process::pid().unwrap_or(1),
             unsafe C_SEQ,
-            (unsafe shim::sc_ticks_ms()) as u64,
+            dutil::ticks_ms() as u64,
         );
-        assert(n > 0 && n < 256, "the scratch path fits");
-        let _ = unsafe shim::sc_rm_rf(&p.root[0]);
-        let _ = unsafe shim::sc_mkdir_p(&p.root[0]);
+        assert(root.len() < 256, "the scratch path fits");
+        unsafe p.root.copy_from(root.as_ptr(), root.len());
+        let _ = fs::remove_all(root.as_str());
+        let _ = fs::mkdir_all(root.as_str());
         return p;
     }
 
@@ -307,8 +453,8 @@ extend Proj {
             }
         }
         if cut > 0 {
-            let mut dir = String::from_str(path.as_str().slice(0, cut));
-            let _ = unsafe shim::sc_mkdir_p(dir.cstr()); // a failure shows as the open's below
+            let dir = String::from_str(path.as_str().slice(0, cut));
+            let _ = fs::mkdir_all(dir.as_str()); // a failure shows as the open's below
         }
         let f = stdio::fopen(path.as_str(), "wb"); // binary: no Windows CRLF in emitted test files
         if f == null {
@@ -369,22 +515,11 @@ extend Proj {
 
     // Every `*.c` under `dir` (recursively) into `out`: the `find` a shell command would run.
     fn c_files(self: &Proj, dir: str, out: &mut Vector<String>) {
-        let mut dirb = String::from_str(dir);
-        let d = unsafe shim::sc_opendir(dirb.cstr());
-        if d == null {
-            return;
-        }
-        loop {
-            let e = unsafe shim::sc_readdir(d);
-            if e == null {
-                break;
-            }
-            let nm = unsafe str::from_cstr(shim::sc_dirent_name(e));
-            if nm == "." || nm == ".." {
-                continue;
-            }
-            let mut child = format("{}/{}", dir, nm);
-            if unsafe shim::sc_stat_isdir(child.cstr()) == 1 {
+        let names = dutil::list_dir(dir, true).unwrap_or(Vector::<String>::new());
+        for i in 0..names.len() {
+            let nm = names.at(i).as_str();
+            let child = format("{}/{}", dir, nm);
+            if dutil::is_dir(child.as_str()) {
                 self.c_files(child.as_str(), out);
                 continue;
             }
@@ -392,7 +527,6 @@ extend Proj {
                 out.push(child);
             }
         }
-        let _ = unsafe shim::sc_closedir(d);
     }
 
     // The `@c.link` flags the emit wrote to build/debug/raw/__ldflags, space separated (empty when there are
@@ -607,24 +741,14 @@ extend Proj {
     // asserts that generated wrapper TUs are pruned.
     /// Number of entries under build/debug/raw whose name starts with `prefix`.
     pub fn gen_count(self: &Proj, prefix: str) i32 {
-        let mut raw = format("{}/build/debug/raw", self.dir());
-        let d = unsafe shim::sc_opendir(raw.cstr());
-        if d == null {
-            return 0;
-        }
+        let raw = format("{}/build/debug/raw", self.dir());
+        let names = dutil::list_dir(raw.as_str(), true).unwrap_or(Vector::<String>::new());
         let mut n: i32 = 0;
-        let pl = prefix.len();
-        loop {
-            let e = unsafe shim::sc_readdir(d);
-            if e == null {
-                break;
-            }
-            let nm = unsafe shim::sc_dirent_name(e);
-            if unsafe cstring::strncmp(nm, prefix.ptr() as *const char, pl) == 0 {
+        for i in 0..names.len() {
+            if names.at(i).starts_with(prefix) {
                 n = n + 1;
             }
         }
-        let _ = unsafe shim::sc_closedir(d);
         return n;
     }
 
@@ -658,7 +782,7 @@ extend Proj {
 
 extend Proj as Free {
     pub fn free(self: &mut Self) {
-        let _ = unsafe shim::sc_rm_rf(self.rootp());
+        let _ = fs::remove_all(self.dir());
     }
 }
 
@@ -682,8 +806,7 @@ extend EnvGuard {
         if prev != null {
             g.old = unsafe String::from_cstr(prev);
         }
-        let mut v = String::from_str(value);
-        assert(unsafe shim::sc_setenv(g.name.cstr(), v.cstr()) == 0, "the variable is set");
+        assert(unsafe penv::set(name, value).is_ok(), "the variable is set");
         return g;
     }
 }
@@ -691,11 +814,11 @@ extend EnvGuard {
 extend EnvGuard as Free {
     pub fn free(self: &mut Self) {
         let rc = if self.had {
-            unsafe shim::sc_setenv(self.name.cstr(), self.old.cstr());
+            unsafe penv::set(self.name.as_str(), self.old.as_str());
         } else {
-            unsafe shim::sc_unsetenv(self.name.cstr());
+            unsafe penv::unset(self.name.as_str());
         };
-        assert(rc == 0, "the variable is restored");
+        assert(rc.is_ok(), "the variable is restored");
         self.name.free();
         self.old.free();
     }
@@ -760,8 +883,7 @@ fn exe_in(exe: str, dir: str, env: str, args: str) CliResult {
     cmd.format_into("\"{}\" {}", exe, args);
     let mut op = String::new();
     op.format_into("{}/.envout", dir);
-    let mut d = String::from_str(dir);
-    if unsafe shim::sc_chdir(d.cstr()) != 0 {
+    if process::set_current_dir(dir).is_err() {
         return CliResult { exit: -1, out: null };
     }
     return exec_env(cmd.cstr(), op.cstr(), env);
@@ -769,46 +891,21 @@ fn exe_in(exe: str, dir: str, env: str, args: str) CliResult {
 
 /// How many entries of `dir` end with `suffix`.
 pub fn dir_count_suffix(dir: str, suffix: str) i32 {
-    let mut d = String::from_str(dir);
-    let dh = unsafe shim::sc_opendir(d.cstr());
-    if dh == null {
-        return 0;
-    }
+    let names = dutil::list_dir(dir, true).unwrap_or(Vector::<String>::new());
     let mut n = 0;
-    loop {
-        let e = unsafe shim::sc_readdir(dh);
-        if e == null {
-            break;
-        }
-        let nm = unsafe str::from_cstr(shim::sc_dirent_name(e));
-        if nm.ends_with(suffix) {
+    for i in 0..names.len() {
+        if names.at(i).ends_with(suffix) {
             n = n + 1;
         }
     }
-    unsafe shim::sc_closedir(dh);
     return n;
 }
 
 /// Overwrite every `suffix`-named entry of `dir` with junk; how many were hit. What proves a cache is
 /// really READ: a later consumer must choke on the junk.
 pub fn dir_corrupt_suffix(dir: str, suffix: str) i32 {
-    let mut d = String::from_str(dir);
-    let dh = unsafe shim::sc_opendir(d.cstr());
-    if dh == null {
-        return 0;
-    }
-    let mut names = Vector::<String>::new();
-    loop {
-        let e = unsafe shim::sc_readdir(dh);
-        if e == null {
-            break;
-        }
-        let nm = unsafe str::from_cstr(shim::sc_dirent_name(e));
-        if nm.ends_with(suffix) {
-            names.push(String::from_str(nm));
-        }
-    }
-    unsafe shim::sc_closedir(dh);
+    let mut names = dutil::list_dir(dir, true).unwrap_or(Vector::<String>::new());
+    names.retain(|n: &String| n.ends_with(suffix));
     for i in 0..names.len() {
         let mut fp = String::from_str(dir);
         fp.push_str("/");

@@ -4,7 +4,8 @@
 import tests::cli_harness as cli;
 import build_system::build as bsys;
 import stdio;
-import driver_shim as shim;
+import std::platform::env as penv;
+import std::platform::fs;
 
 const E: str = "SC_NO_EMIT_CACHE";
 
@@ -228,10 +229,10 @@ fn emit_stamp_keys_on_the_compiler_content() {
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 3;\n}\n");
     let root = p.dir();
     // tc/super-c: a copy of the compiler under test, with std/ and ffi/ beside it; tc/ref keeps its mtime.
-    let mut here = Array::<char, 4096> {};
-    let mut dot = String::from_str(".");
-    assert(unsafe shim::sc_realpath(dot.cstr(), &mut here[0]) != null, "the working directory resolves");
-    let cwd = str::from_cbuf(here.as_slice());
+    let here = fs::realpath(".");
+    assert(here.is_ok(), "the working directory resolves");
+    let hs = here.unwrap();
+    let cwd = hs.as_str();
     p.mkfile("tc/.keep", "");
     let mut exe = String::new();
     exe.format_into("{}/tc/super-c", root);
@@ -323,7 +324,7 @@ fn emit_stamp_records_the_text_the_build_read() {
     p.mkfile("lib.next", "pub fn v() i32 {\n    return 5;\n}\n");
     let root = p.dir();
     // The FIFO is the per-TU cache image: the cache must be on.
-    unsafe shim::sc_unsetenv("SC_NO_TU_CACHE".ptr() as *const char);
+    let _ = unsafe penv::unset("SC_NO_TU_CACHE");
     assert_eq(cli::superc_env_in(root, "SC_STAMP_TEST", "1", "build -o app").exit, 0);
     p.mkfile("src/lib.spc", "pub fn v() i32 {\n    return 4;\n}\n");
     let mut cmd = format(

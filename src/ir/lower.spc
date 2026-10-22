@@ -318,7 +318,7 @@ extend Keep {
 
     /// Rewrite every kept body's types through the package's last publication; returns how many
     /// bodies had a map to apply.
-    pub fn remap_types(self: &mut Self, p: &loader::Package) usize {
+    pub const fn remap_types(self: &mut Self, p: &loader::Package) usize {
         let mut n: usize = 0;
         for i in 0..self.kept.len() {
             let lw = self.kept.index_mut(i);
@@ -364,10 +364,10 @@ extend Keep {
 }
 
 // Decode call_info: (fmod << 40 | fdecl << 8 | skip).
-const fn ci_module(v: u64) ModuleId {
+pub const fn ci_module(v: u64) ModuleId {
     return (v >> 40) as ModuleId;
 }
-const fn ci_decl(v: u64) NodeId {
+pub const fn ci_decl(v: u64) NodeId {
     return (v >> 8 & 0xFFFFFFFFu64) as NodeId;
 }
 
@@ -576,7 +576,7 @@ extend Lowerer {
     /// Lets a construct whose CFG order differs from walk order (a do-while tail condition) record
     /// its events in place and land them where the replay expects them. No-op when nothing landed.
     /// Rotates in place: reversing both runs and then the whole range swaps their order.
-    fn tape_splice(self: &mut Self, at: usize, from: usize) {
+    const fn tape_splice(self: &mut Self, at: usize, from: usize) {
         let n = self.tape.len();
         if from <= at || from >= n {
             return;
@@ -587,7 +587,7 @@ extend Lowerer {
     }
 
     // Reverse the tape events in `[lo..hi)`.
-    fn tape_reverse(self: &mut Self, lo: usize, hi: usize) {
+    const fn tape_reverse(self: &mut Self, lo: usize, hi: usize) {
         let mut i = lo;
         let mut j = hi;
         while i + 1 < j {
@@ -1710,7 +1710,7 @@ extend Lowerer {
         self.seal(t, next);
     }
 
-    fn find_loop(self: &Self, label: tok::Span) i64 {
+    const fn find_loop(self: &Self, label: tok::Span) i64 {
         let mut i = self.loops.len();
         while i > 0 {
             i -= 1;
@@ -2216,7 +2216,7 @@ extend Lowerer {
     }
 
     // The innermost active frame for `binder`, or -1.
-    fn proj_frame_of(self: &Self, binder: NodeId) i64 {
+    const fn proj_frame_of(self: &Self, binder: NodeId) i64 {
         let mut i = self.proj_frames.len();
         while i > 0 {
             i -= 1;
@@ -3569,7 +3569,7 @@ extend Lowerer {
     }
 
     // Do the blocks from `first` on run no call, drop or safepoint?
-    fn chunk_free(self: &Self, first: ir::BlockId) bool {
+    const fn chunk_free(self: &Self, first: ir::BlockId) bool {
         for bi in first as usize..self.body.blocks.len() {
             let bb = *self.body.blocks.at(bi);
             if bb.term.kind == ir::TM_CALL || bb.term.kind == ir::TM_DROP {
@@ -3924,7 +3924,7 @@ extend Lowerer {
     // The one rvalue that defines whole-local place `pl` after the lowering that wrote statements
     // `s0..` and opened blocks `b0..` from open block `blk0`: its one write there, when that is in the
     // open block (every path of the lowering ends through it). IR_NONE otherwise.
-    fn built_def(self: &Self, pl: ir::PlaceId, s0: u32, b0: u32, blk0: ir::BlockId) ir::RvalueId {
+    const fn built_def(self: &Self, pl: ir::PlaceId, s0: u32, b0: u32, blk0: ir::BlockId) ir::RvalueId {
         let b = &self.body;
         let x = b.places.at(pl as usize).base;
         if b.places.at(pl as usize).proj_len != 0 {
@@ -5852,7 +5852,7 @@ extend Lowerer {
     }
 
     // Is `n` a clean node of the open root?
-    fn chk_has(self: &Self, n: NodeId) bool {
+    const fn chk_has(self: &Self, n: NodeId) bool {
         for i in self.chk_base..self.chk_nodes.len() {
             if self.chk_nodes[i] == n {
                 return true;
@@ -7793,7 +7793,7 @@ extend Lowerer {
     }
 
     // Does a statement from index `from` on store to a place other than a fresh temporary?
-    fn writes_since(self: &Self, from: usize) bool {
+    const fn writes_since(self: &Self, from: usize) bool {
         for i in from..self.body.statements.len() {
             let st = *self.body.statements.at(i);
             if st.kind == ir::ST_ASSIGN {
@@ -9234,7 +9234,7 @@ const fn compound_base_op(op: tt::TokenType) u32 {
 
 // An integer literal's exact magnitude (dec/hex, `_` separators, [iu]NN suffix stripped);
 // false when the spelling is not a plain integer or passes 2^63 (the magnitude of i64's minimum).
-fn lit_int_value(src: str, sp: tok::Span, out: &mut u64) bool {
+const fn lit_int_value(src: str, sp: tok::Span, out: &mut u64) bool {
     let mut i = sp.start as usize;
     let mut e = sp.end as usize;
     if e > src.len() || e <= i {
@@ -9301,7 +9301,7 @@ fn lit_int_value(src: str, sp: tok::Span, out: &mut u64) bool {
 
 // Decimal fast path for integer literal spellings; 0 for hex/underscored/suffixed forms and values
 // past i64 (the span keeps the exact spelling for CTFE).
-fn parse_dec(src: str, sp: tok::Span) i64 {
+const fn parse_dec(src: str, sp: tok::Span) i64 {
     let mut v: i64 = 0;
     let mut i = sp.start as usize;
     while i < sp.end as usize {

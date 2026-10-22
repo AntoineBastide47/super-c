@@ -8,7 +8,8 @@
 // process keeps the working directory the client started it in.
 import stdio;
 import stdlib;
-import driver_shim as shim;
+import std::platform::fs;
+import std::platform::process;
 import ast::parser as par;
 import lexer::lexer as lex;
 import lexer::token_type as ltt;
@@ -208,6 +209,12 @@ fn diag_json(range: json::JSON, severity: i64, source: str, msg: str) json::JSON
     dj.emplace("severity", json::JSON::integer(severity));
     dj.emplace("source", json::JSON::str(source));
     dj.emplace("message", json::JSON::str(msg));
+    if severity == 4 {
+        // Inactive code (the only hint): the client fades it (DiagnosticTag.Unnecessary).
+        let mut tags = json::JSON::array();
+        tags.push_back(json::JSON::integer(1));
+        dj.emplace("tags", tags);
+    }
     return dj;
 }
 
@@ -357,7 +364,7 @@ fn uri_doc_path(uri: str) String {
 }
 
 // The `params.textDocument.uri` of a request; empty when absent.
-fn doc_uri(req: &json::JSON) str {
+const fn doc_uri(req: &json::JSON) str {
     if let Some(params) = req.value("params") {
         if let Some(td) = params.value("textDocument") {
             return td.value_str("uri");
@@ -508,7 +515,8 @@ pub fn run(std_dir: str, target: i32) i32 {
         }
         sv.tick += 1;
         // Parent-death detection: after the client's process dies, the next message (or EOF) ends the server.
-        if sv.parent_pid > 0 && unsafe shim::sc_process_alive(sv.parent_pid) == 0 {
+        // A pid the system cannot ask about (WASI, an error) counts as alive.
+        if sv.parent_pid > 0 && !process::is_alive(sv.parent_pid as u32).unwrap_or(true) {
             return 1;
         }
         let method = req.value_str("method");
@@ -675,7 +683,7 @@ pub fn run(std_dir: str, target: i32) i32 {
 }
 
 extend Server {
-    fn find_doc(self: &Self, uri: str) i32 {
+    const fn find_doc(self: &Self, uri: str) i32 {
         for i in 0..self.docs.len() {
             if self.docs.at(i).uri.as_str() == uri {
                 return i as i32;
@@ -685,7 +693,7 @@ extend Server {
     }
 
     // Module id of `path` inside root `r`, -1 when it is not part of that package.
-    fn root_module(self: &Self, r: usize, path: str) i32 {
+    const fn root_module(self: &Self, r: usize, path: str) i32 {
         let files = &self.roots.at(r).files;
         for m in 0..files.len() {
             if files.at(m).as_str() == path {
@@ -704,7 +712,7 @@ extend Server {
     // doc's per-file root, built from the live overlay, wins over the batch's disk-built copy),
     // -1 if none. A budget-evicted root (files kept for diag republishing, package dropped) owns
     // nothing: its module table is empty, so feature queries must not land on it.
-    fn owning_root(self: &Self, path: str) i32 {
+    const fn owning_root(self: &Self, path: str) i32 {
         for r in 0..self.roots.len() {
             if !self.is_batch(r) && self.roots.at(r).built && self.roots.at(r).pkg.modules.len() != 0 && self.root_module(
                 r,
@@ -767,7 +775,7 @@ extend Server {
     }
 
     // The workspace folder that contains `path` ("" when none does).
-    fn folder_of(self: &Self, path: str) str {
+    const fn folder_of(self: &Self, path: str) str {
         for i in 0..self.folders.len() {
             let fo = self.folders.at(i).as_str();
             if path.len() > fo.len() + 1 && path.starts_with(fo) && path[fo.len()] == b'/' {
@@ -827,8 +835,8 @@ extend Server {
 
     // Directory `dir` holds a build.toml file.
     fn has_manifest_file(dir: str) bool {
-        let mut man = Server::abs_under(dir, "build.toml");
-        return unsafe shim::sc_stat_isdir(man.cstr()) == 0;
+        let man = Server::abs_under(dir, "build.toml");
+        return fs::stat(man.as_str()).map(|m: fs::Metadata| m.kind != fs::FileKind::Dir).unwrap_or(false);
     }
 
     // The workspace sweep: every .spc under the build.toml folder that no other package owns joins
@@ -955,7 +963,7 @@ extend Server {
         }
     }
 
-    fn out_skip_of(self: &Self, folder: str) str {
+    const fn out_skip_of(self: &Self, folder: str) str {
         for i in 0..self.out_folders.len() {
             if self.out_folders.at(i).as_str() == folder {
                 return self.out_skips.at(i).as_str();
@@ -1011,24 +1019,11 @@ extend Server {
         if depth > SWEEP_MAX_DEPTH {
             return;
         }
-        let mut db = String::from_str(dir);
-        let dh = unsafe shim::sc_opendir(db.cstr());
-        if dh == null {
+        let listed = dutil::list_dir(dir, false);
+        if listed.is_none() {
             return;
         }
-        let mut names = Vector::<String>::new();
-        loop {
-            let e = unsafe shim::sc_readdir(dh);
-            if e == null {
-                break;
-            }
-            let nm = unsafe shim::sc_dirent_name(e);
-            if unsafe nm[0] == '.' as char {
-                continue;
-            }
-            names.push(unsafe String::from_cstr(nm));
-        }
-        unsafe shim::sc_closedir(dh);
+        let names = listed.unwrap();
         let top = dir == proj;
         for i in 0..names.len() {
             if top && osk.len() != 0 && names.at(i).as_str() == osk {
@@ -1037,8 +1032,14 @@ extend Server {
             let mut p = String::from_str(dir);
             p.push_byte(b'/');
             p.push_string(names.at(i));
-            let kind = unsafe shim::sc_lstat_isdir(p.cstr());
-            if kind == 1 && Server::has_manifest_file(p.as_str()) {
+            // A real directory descends; a link to one (a POSIX symlink, a Windows link or junction) never does.
+            let lk = fs::lstat(p.as_str());
+            if lk.is_err() {
+                continue;
+            }
+            let kind = lk.unwrap().kind;
+            let real_dir = kind == fs::FileKind::Dir;
+            if real_dir && Server::has_manifest_file(p.as_str()) {
                 // The out-dir of a manifest that does not load is the default one.
                 let mut nosk = String::from_str("build");
                 let mp = Server::abs_under(p.as_str(), "build.toml");
@@ -1046,14 +1047,16 @@ extend Server {
                     nosk = m.out_dir.clone();
                 }
                 Server::walk_project(p.as_str(), depth + 1, nosk.as_str(), std_dir, out);
-            } else if kind == 1 {
+            } else if real_dir {
                 let ns = if top {
                     p.as_str();
                 } else {
                     sub;
                 };
                 Server::walk_dir(p.as_str(), proj, alt, ns, depth + 1, "", std_dir, out);
-            } else if kind == 0 && p.as_str().ends_with(".spc") && unsafe shim::sc_stat_isdir(p.cstr()) == 0 {
+            } else if kind != fs::FileKind::DirSymlink && p.as_str().ends_with(".spc") && fs::stat(p.as_str()).map(
+                |m: fs::Metadata| m.kind != fs::FileKind::Dir,
+            ).unwrap_or(false) {
                 let cp = analysis::canon_path(p.as_str());
                 let mut rd = String::new();
                 let mut ad = String::new();
@@ -1063,7 +1066,7 @@ extend Server {
         }
     }
 
-    fn doc_open(self: &Self, path: str) bool {
+    const fn doc_open(self: &Self, path: str) bool {
         for i in 0..self.docs.len() {
             if self.docs.at(i).path.as_str() == path {
                 return true;
@@ -1074,7 +1077,7 @@ extend Server {
 
     // Drop per-file roots whose doc closed and batch roots without a member (their diagnostics
     // clear via the published-set diff).
-    fn drop_orphan_roots(self: &mut Self) {
+    const fn drop_orphan_roots(self: &mut Self) {
         let mut r: usize = 0;
         while r < self.roots.len() {
             let mut keep = self.roots.at(r).origin.len() == 0 && !(self.roots.at(r).sweep && self.roots.at(r).members.len() == 0);
@@ -1212,11 +1215,12 @@ extend Server {
                 return -1;
             }
         }
-        // A batch module whose file has a live per-file root (its doc is open) publishes from
-        // that root's overlay-fresh build, not the batch's disk-built copy.
+        // A batch module whose file has a per-file root (its doc is open) publishes from that root's
+        // overlay-fresh build, not the batch's disk-built copy, also in the round that builds that root
+        // after the batch.
         if self.is_batch(r) {
             for q in 0..self.roots.len() {
-                if q != r && self.roots.at(q).built && self.roots.at(q).origin.as_str() == file {
+                if q != r && self.roots.at(q).origin.as_str() == file {
                     return -1;
                 }
             }
@@ -1268,6 +1272,33 @@ extend Server {
             };
             let dj = diag_json(range, d.severity, "super-c", d.msg.as_str());
             ps.arrs[slots[m] as usize].push_back(dj);
+        }
+        if evicted {
+            return;
+        }
+        // The code the build settings remove from each open document: a hint the client fades.
+        for i in 0..self.docs.len() {
+            let mi = self.root_module(r, self.docs.at(i).path.as_str());
+            if mi < 0 || root.pkg.modules.at(mi as usize).ast.bc_dead.len() == 0 {
+                continue;
+            }
+            let m = mi as usize;
+            if slots[m] == -2 {
+                slots.set(m, self.publish_slot(r, m, &owners, ps, only));
+            }
+            if slots[m] < 0 {
+                continue;
+            }
+            let src = root.pkg.modules.at(m).source.as_str();
+            lm.update(r, m as u32, src);
+            let dead = &root.pkg.modules.at(m).ast.bc_dead;
+            for k in 0..dead.len() {
+                let sp = dead[k];
+                let range = range_json(src, &lm.ls, sp.start, sp.end - sp.start);
+                ps.arrs[slots[m] as usize].push_back(
+                    diag_json(range, 4, "super-c", "inactive code: the analysed target's build settings remove it"),
+                );
+            }
         }
     }
 
@@ -2092,7 +2123,7 @@ extend Server {
     }
 
     // True when `path` sits inside a workspace folder.
-    fn in_workspace(self: &Self, path: str) bool {
+    const fn in_workspace(self: &Self, path: str) bool {
         return self.folder_of(path).len() != 0;
     }
 
@@ -2328,7 +2359,7 @@ extend Server {
     }
 
     // The semantic-token cache slot of `uri`, or tok_uris.len() when it has none.
-    fn token_slot(self: &Self, uri: str) usize {
+    const fn token_slot(self: &Self, uri: str) usize {
         for i in 0..self.tok_uris.len() {
             if self.tok_uris.at(i).as_str() == uri {
                 return i;
@@ -2354,7 +2385,7 @@ extend Server {
     }
 
     // Forget `uri`'s semantic-token state (its document closed).
-    fn token_cache_drop(self: &mut Self, uri: str) {
+    const fn token_cache_drop(self: &mut Self, uri: str) {
         let i = self.token_slot(uri);
         if i < self.tok_uris.len() {
             let _ = self.tok_uris.swap_remove(i);
@@ -2968,7 +2999,7 @@ extend Server {
     }
 
     // The `name` inside the first single-quote pair of `msg` ("" when there is none).
-    fn quoted_name(msg: str) str {
+    const fn quoted_name(msg: str) str {
         let mut i: usize = 0;
         while i < msg.len() && msg[i] != b'\'' {
             i += 1;

@@ -489,7 +489,7 @@ const fn fits(b: BuiltinType, v: i64, pw: i32) bool {
 
 /// The exact value of evaluated integer `v`: a u64 or usize value above i64::MAX is held as negative
 /// bits.
-pub fn iv_exact(v: &IVal) i128 {
+pub const fn iv_exact(v: &IVal) i128 {
     let big = v.i < 0 && (v.ty == Ast::builtin(BuiltinType::BT_U64) || v.ty == Ast::builtin(BuiltinType::BT_USIZE));
     return cval_exact(v.i, pick(big, BuiltinType::BT_U64, BuiltinType::BT_I64));
 }
@@ -773,7 +773,7 @@ struct TiCx {
     pub mesz: u64,
 }
 
-struct DeclView {
+pub struct DeclView {
     pub p: i32,
     pub l: i32,
     pub fp: i32,
@@ -786,7 +786,7 @@ const MEMO_KEEP_ROWS: usize = 4096;
 
 /// One memoized scalar call: the callee, its arguments (`n` values at `a0` of the memo's pool)
 /// and its result.
-struct MemoRow {
+pub struct MemoRow {
     pub a0: u32,
     pub n: u32,
     pub fm: ModuleId,
@@ -1235,7 +1235,7 @@ fn ext_all_bound(list: &Vector<ISub>, xa: &Ast, xm: ModuleId, ext: NodeId, pat: 
 }
 
 // "_<k>" into `buf` (32 bytes): the field names a tuple's members answer to.
-fn ti_tuple_name<'a>(buf: *mut u8, k: u32) str<'a> {
+const fn ti_tuple_name<'a>(buf: *mut u8, k: u32) str<'a> {
     unsafe buf[0] = 95;
     let mut n: usize = 1;
     let mut digits: [u8; 16] = [0; 16];
@@ -1341,7 +1341,7 @@ extend Interp {
     }
 
     @cold
-    fn it_trap(self: &mut Self, kind: u8, msg: str<'static>) {
+    const fn it_trap(self: &mut Self, kind: u8, msg: str<'static>) {
         if self.trap.len() == 0 {
             self.trap = msg;
             self.trap_depth = self.item_active.len() as u32;
@@ -1407,7 +1407,7 @@ extend Interp {
 
     // The trap of an access to dead storage `d` (`DEAD_FREED`, `DEAD_RETURNED`).
     @cold
-    fn dead_trap(self: &mut Self, d: u8) bool {
+    const fn dead_trap(self: &mut Self, d: u8) bool {
         if d == DEAD_RETURNED {
             self.it_trap(IT_TRAP_UB_USE_AFTER_FREE, "use after return");
         } else {
@@ -1427,7 +1427,7 @@ extend Interp {
         return false;
     }
 
-    fn tick(self: &mut Self) bool {
+    const fn tick(self: &mut Self) bool {
         self.steps += 1;
         if self.steps > self.max_steps {
             self.it_trap(IT_TRAP_BUDGET_STEPS, "const-eval step budget exceeded");
@@ -1871,7 +1871,7 @@ extend Interp {
     }
 
     // Read through an abstract pointer with the null/dead/bounds trap ladder.
-    fn loadp(self: &mut Self, pv: IVal, out: &mut IVal) bool {
+    const fn loadp(self: &mut Self, pv: IVal, out: &mut IVal) bool {
         if pv.kind != IV_PTR {
             return false;
         }
@@ -3386,7 +3386,7 @@ extend Interp {
 
     // A failure at or below a `const fn`: it carries the const-fn guarantee, and once the package
     // is fully typed a silent failure becomes the definite trap.
-    fn constfn_fail(self: &mut Self) {
+    const fn constfn_fail(self: &mut Self) {
         if self.trap.len() == 0 && self.all_typed {
             self.it_trap(
                 IT_TRAP_UNSUPPORTED,
@@ -5161,7 +5161,7 @@ extend Interp {
     // Fail as the evaluation `f` of a constant failed, from the current frames: what evaluating it
     // here again would do (that evaluation is isolated, so the trap keeps its own step count).
     // `dead`: `f` is a record of `item_dead`.
-    fn item_replay(self: &mut Self, f: ItemFail, dead: bool) IVal {
+    const fn item_replay(self: &mut Self, f: ItemFail, dead: bool) IVal {
         if f.own && self.trap.len() == 0 {
             self.trap = f.trap;
             self.trap_kind = f.kind;
@@ -7569,7 +7569,7 @@ extend Interp {
     // Whether the exact sum (`add`) or product of the `n` integer lanes of `v` fits their type `bt`.
     // The sum runs in 128 bits (`hi`:`lo`); a product with no zero lane only grows in magnitude, so
     // one past 64 bits never fits.
-    fn exact_fits(self: &Self, add: bool, v: IVal, n: u64, em: ModuleId, et: TypeId, bt: BuiltinType) bool {
+    const fn exact_fits(self: &Self, add: bool, v: IVal, n: u64, em: ModuleId, et: TypeId, bt: BuiltinType) bool {
         let pw = self.pw();
         let w = bt_bits(bt, pw) as u64;
         let sg = bt_signed(bt);
@@ -7889,7 +7889,16 @@ extend Interp {
         return self.bail();
     }
 
-    fn int_op(self: &mut Self, a: i64, c: i64, tok2: u32, lb: BuiltinType, rb: BuiltinType, m: ModuleId, target: TypeId) IVal {
+    const fn int_op(
+        self: &mut Self,
+        a: i64,
+        c: i64,
+        tok2: u32,
+        lb: BuiltinType,
+        rb: BuiltinType,
+        m: ModuleId,
+        target: TypeId,
+    ) IVal {
         let t = (tok2 as u8) as TokenType;
         // A shift and a comparison compute at the left operand's type; every other operator at the result's,
         // which the checker widened a narrower operand to (`u8 + u64`), as the emitted C does.
@@ -9560,7 +9569,7 @@ extend Interp {
     // ---- effect summary (fx) ----------------------------------------------------------------------
     // Lazy, memoized, per-function CTFE-eligibility verdicts. FX_NO implies the interpreter would fail. The
     // shallow scan covers the body's leading straight-line statements; deep mode recurses into
-    // if/match/defer so FX_YES means every path is provably evaluable.
+    // if/match/defer/loops so FX_YES means every path is provably evaluable.
 
     // The verdict tables hold two rows per module: the module arena's functions, then the body
     // arena's closures (a closure's tagged id indexes the second row by its arena index).
@@ -9721,6 +9730,11 @@ extend Interp {
                 return FX_NO; // inline assembly is never compile-time evaluable
             } else if deep && k == NodeKind::NODE_DEFER {
                 st = self.fx_scan_body(m, owner, a.at_const(sid).as_data.single.value, depth + 1);
+            } else if deep && (k == NodeKind::NODE_WHILE || k == NodeKind::NODE_FOR || k == NodeKind::NODE_INLINE_FOR) {
+                st = self.fx_scan_loop(m, owner, sid, depth + 1);
+            } else if deep && (k == NodeKind::NODE_BREAK || k == NodeKind::NODE_CONTINUE) {
+                // nothing executes after a jump
+                return fx_meet(acc, self.fx_scan_expr(m, owner, a.at_const(sid).as_data.flow.value, depth + 1, true));
             } else {
                 return fx_meet(acc, FX_MAYBE); // control flow: the spine ends here
             }
@@ -9740,6 +9754,44 @@ extend Interp {
             return self.fx_scan_stmts(m, owner, id, depth, true);
         }
         return self.fx_scan_expr(m, owner, id, depth, true);
+    }
+
+    // Deep: the condition or iterable, the body, and the `next` call of a `for` over the iterator
+    // protocol. A loop that never ends is no disqualifier: the step budget bounds it.
+    fn fx_scan_loop(self: &mut Self, m: ModuleId, owner: NodeId, id: NodeId, depth: u32) u8 {
+        let a = unsafe &*self.p().module_ast_const(m);
+        let n = a.at_const(id);
+        if n.kind == NodeKind::NODE_WHILE {
+            let c = self.fx_scan_expr(m, owner, n.as_data.while_stmt.condition, depth + 1, true);
+            if c == FX_NO {
+                return FX_NO;
+            }
+            return fx_meet(c, self.fx_scan_body(m, owner, n.as_data.while_stmt.body, depth + 1));
+        }
+        let d = n.as_data.for_stmt;
+        let mut acc = self.fx_scan_expr(m, owner, d.iterable, depth + 1, true);
+        if acc == FX_NO {
+            return FX_NO;
+        }
+        // Mirrors Lowerer::lower_for: a range, the `next` the checker selected, else an index loop.
+        if a.at_const(d.iterable).kind != NodeKind::NODE_RANGE {
+            switch a.call_info_of(id) {
+                Some(ci) => {
+                    let nd = DefId { module: irl::ci_module(ci), node: irl::ci_decl(ci) };
+                    acc = self.fx_scan_callee(m, owner, id, nd, acc, true);
+                    if acc == FX_NO {
+                        return FX_NO;
+                    }
+                },
+                None => {
+                    let t = self.tof(m, a, d.iterable);
+                    if t == TYPE_NONE || a.type_at(t).kind != TypeKind::TYPE_ARRAY && a.type_at(t).kind != TypeKind::TYPE_SLICE {
+                        return FX_MAYBE; // a Range value or another sequence: unmodeled
+                    }
+                },
+            };
+        }
+        return fx_meet(acc, self.fx_scan_body(m, owner, d.body, depth + 1));
     }
 
     fn fx_scan_match(self: &mut Self, m: ModuleId, owner: NodeId, id: NodeId, depth: u32) u8 {
@@ -10101,6 +10153,11 @@ extend Interp {
         if fd.node == NODE_NONE {
             return FX_MAYBE;
         }
+        return self.fx_scan_callee(m, owner, id, fd, acc, deep);
+    }
+
+    // The verdict of a call at `id` to `fd`, whose arguments and receiver scanned to `acc`.
+    fn fx_scan_callee(self: &mut Self, m: ModuleId, owner: NodeId, id: NodeId, fd: DefId, acc: u8, deep: bool) u8 {
         let fa = unsafe &*self.p().module_ast_const(fd.module);
         let dk = fa.at_const(fd.node).kind;
         if dk == NodeKind::NODE_VARIANT {
@@ -11228,7 +11285,7 @@ extend Interp {
         unsafe (*self.obj_ptr(o)).slots.set(i_ar as usize, iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), ar));
         unsafe (*self.obj_ptr(o)).slots.set(
             i_pub as usize,
-            iv_bool(0, Ast::builtin(BuiltinType::BT_BOOL), fd.is_public()),
+            iv_bool(0, Ast::builtin(BuiltinType::BT_BOOL), fd.vis == VIS_PUB),
         );
         unsafe (*self.obj_ptr(o)).slots.set(i_ret as usize, iv_int(cx.tim, cx.kty, rtag));
         return IVal { kind: IV_OBJ, tm: cx.tim, ty: hty, i: o, f: 0.0 };
@@ -11802,7 +11859,7 @@ extend Interp {
 
 // The call memo's hash over every semantic input: the callee and each argument's kind, type
 // module, type, and bits.
-fn memo_key(fm: ModuleId, fnode: NodeId, args: &Vector<IVal>) u64 {
+const fn memo_key(fm: ModuleId, fnode: NodeId, args: &Vector<IVal>) u64 {
     let mut k: u64 = 0xcbf29ce484222325u64;
     k = (k ^ fm as u64).wrapping_mul(1099511628211u64);
     k = (k ^ fnode as u64).wrapping_mul(1099511628211u64);

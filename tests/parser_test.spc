@@ -630,55 +630,75 @@ fn switch_pattern_ranges() {
     );
 }
 
-// `pub` sets is_public on structs, functions, methods, and fields; its absence leaves them private.
+// `pub` sets VIS_PUB on structs, functions, methods, and fields; its absence leaves them private.
 @test
 fn pub_modifiers() {
     let src = "pub struct S { pub x: i32, y: i32, }\nextend S { pub fn shown() {} fn hidden() {} }\npub fn f() {}\nfn g() {}\npub enum E { A, B }\nenum F { C }\npub const K: i32 = 1;\nconst L: i32 = 2;\npub type Ta = i32;\ntype Tb = i32;\n";
     let c = h::parse_ast(src);
     assert(c.errors == 0, "pub modifiers parses");
     assert(
-        item(&c.ast, 0).kind == NodeKind::NODE_STRUCT && item(&c.ast, 0).as_data.aggregate.is_public,
+        item(&c.ast, 0).kind == NodeKind::NODE_STRUCT && item(&c.ast, 0).as_data.aggregate.vis == VIS_PUB,
         "pub struct is public",
     );
     let members = item(&c.ast, 0).as_data.aggregate.members;
     let fields = c.ast.list(members);
     let f0 = unsafe fields[0];
     let f1 = unsafe fields[1];
-    assert(c.ast.at_const(f0).as_data.field.is_public, "pub field x is public");
-    assert(!c.ast.at_const(f1).as_data.field.is_public, "non-pub field y is private");
+    assert(c.ast.at_const(f0).as_data.field.vis == VIS_PUB, "pub field x is public");
+    assert(c.ast.at_const(f1).as_data.field.vis == VIS_PRIVATE, "non-pub field y is private");
     let ext_items = item(&c.ast, 1).as_data.extend_def.items;
     let methods = c.ast.list(ext_items);
     let m0 = unsafe methods[0];
     let m1 = unsafe methods[1];
-    assert(c.ast.at_const(m0).as_data.function.is_public(), "pub method is public");
-    assert(!c.ast.at_const(m1).as_data.function.is_public(), "non-pub method is private");
-    assert(item(&c.ast, 2).as_data.function.is_public(), "pub fn is public");
-    assert(!item(&c.ast, 3).as_data.function.is_public(), "non-pub fn is private");
+    assert(c.ast.at_const(m0).as_data.function.vis == VIS_PUB, "pub method is public");
+    assert(c.ast.at_const(m1).as_data.function.vis == VIS_PRIVATE, "non-pub method is private");
+    assert(item(&c.ast, 2).as_data.function.vis == VIS_PUB, "pub fn is public");
+    assert(item(&c.ast, 3).as_data.function.vis == VIS_PRIVATE, "non-pub fn is private");
     assert(
-        item(&c.ast, 4).kind == NodeKind::NODE_ENUM && item(&c.ast, 4).as_data.aggregate.is_public,
+        item(&c.ast, 4).kind == NodeKind::NODE_ENUM && item(&c.ast, 4).as_data.aggregate.vis == VIS_PUB,
         "pub enum is public",
     );
     assert(
-        item(&c.ast, 5).kind == NodeKind::NODE_ENUM && !item(&c.ast, 5).as_data.aggregate.is_public,
+        item(&c.ast, 5).kind == NodeKind::NODE_ENUM && item(&c.ast, 5).as_data.aggregate.vis == VIS_PRIVATE,
         "non-pub enum is private",
     );
     assert(
-        item(&c.ast, 6).kind == NodeKind::NODE_CONST && item(&c.ast, 6).as_data.const_def.is_public,
+        item(&c.ast, 6).kind == NodeKind::NODE_CONST && item(&c.ast, 6).as_data.const_def.vis == VIS_PUB,
         "pub const is public",
     );
     assert(
-        item(&c.ast, 7).kind == NodeKind::NODE_CONST && !item(&c.ast, 7).as_data.const_def.is_public,
+        item(&c.ast, 7).kind == NodeKind::NODE_CONST && item(&c.ast, 7).as_data.const_def.vis == VIS_PRIVATE,
         "non-pub const is private",
     );
     assert(
-        item(&c.ast, 8).kind == NodeKind::NODE_TYPE_ALIAS && item(&c.ast, 8).as_data.type_alias.is_public,
+        item(&c.ast, 8).kind == NodeKind::NODE_TYPE_ALIAS && item(&c.ast, 8).as_data.type_alias.vis == VIS_PUB,
         "pub type is public",
     );
     assert(
-        item(&c.ast, 9).kind == NodeKind::NODE_TYPE_ALIAS && !item(&c.ast, 9).as_data.type_alias.is_public,
+        item(&c.ast, 9).kind == NodeKind::NODE_TYPE_ALIAS && item(&c.ast, 9).as_data.type_alias.vis == VIS_PRIVATE,
         "non-pub type is private",
     );
     assert(h::parse_has_error("pub let x: i32 = 1;\n"), "pub before a non-item is rejected");
+}
+
+// `pub(module)`, `pub(package)` and a field's `pub(file)` set their levels; `pub(file)` on an item is an error.
+@test
+fn visibility_levels() {
+    let src = "pub(module) struct S { pub(file) a: i32, pub(package) b: i32 }\npub(package) fn f() {}\npub(module) const K: i32 = 1;\npub(package) type T = i32;\npub(module) interface I {}\n";
+    let c = h::parse_ast(src);
+    assert(c.errors == 0, "visibility levels parse");
+    assert(item(&c.ast, 0).as_data.aggregate.vis == VIS_MODULE, "pub(module) struct");
+    let fields = c.ast.list(item(&c.ast, 0).as_data.aggregate.members);
+    assert(c.ast.at_const(unsafe fields[0]).as_data.field.vis == VIS_FILE, "pub(file) field");
+    assert(c.ast.at_const(unsafe fields[1]).as_data.field.vis == VIS_PACKAGE, "pub(package) field");
+    assert(item(&c.ast, 1).as_data.function.vis == VIS_PACKAGE, "pub(package) fn");
+    assert(item(&c.ast, 2).as_data.const_def.vis == VIS_MODULE, "pub(module) const");
+    assert(item(&c.ast, 3).as_data.type_alias.vis == VIS_PACKAGE, "pub(package) type");
+    assert(item(&c.ast, 4).as_data.interface_def.vis == VIS_MODULE, "pub(module) interface");
+    assert(h::parse_has_error("pub(file) fn f() {}\n"), "pub(file) on an item is rejected");
+    // A tuple type after `pub` is no modifier.
+    let t = h::parse_ast("struct W { pub x: (i32, i32) }\n");
+    assert(t.errors == 0, "a tuple field type parses");
 }
 
 // An untagged `union` parses like a struct (NODE_STRUCT) but is flagged is_union.
@@ -690,13 +710,13 @@ fn unions() {
         assert(c.errors == 0, "union decl parses");
         assert(item(&c.ast, 0).kind == NodeKind::NODE_STRUCT, "union parses as a NODE_STRUCT");
         assert(item(&c.ast, 0).as_data.aggregate.is_union, "union is flagged is_union");
-        assert(item(&c.ast, 0).as_data.aggregate.is_public, "pub union is public");
+        assert(item(&c.ast, 0).as_data.aggregate.vis == VIS_PUB, "pub union is public");
         let members = item(&c.ast, 0).as_data.aggregate.members;
         let fields = c.ast.list(members);
         let f0 = unsafe fields[0];
         let f1 = unsafe fields[1];
-        assert(c.ast.at_const(f0).as_data.field.is_public, "pub union field is public");
-        assert(!c.ast.at_const(f1).as_data.field.is_public, "non-pub union field is private");
+        assert(c.ast.at_const(f0).as_data.field.vis == VIS_PUB, "pub union field is public");
+        assert(c.ast.at_const(f1).as_data.field.vis == VIS_PRIVATE, "non-pub union field is private");
     }
     // A plain struct is not flagged is_union.
     {
@@ -1232,7 +1252,7 @@ fn diagnostics_by_message() {
     );
     h::expect_err_msg(
         "two timeouts",
-        "import std::parallel::channel as chan;\nimport std::parallel::time as time;\nfn main() i32 { let c = chan::Channel::<i32>::bounded(1); let rx = c.receiver(); let d = time::Duration::from_millis(1); select { v = rx.recv() => {} timeout(d) => {} timeout(d) => {} } return 0; }\n",
+        "import std::parallel::channel as chan;\nimport std::time as time;\nfn main() i32 { let c = chan::Channel::<i32>::bounded(1); let rx = c.receiver(); let d = time::Duration::from_millis(1); select { v = rx.recv() => {} timeout(d) => {} timeout(d) => {} } return 0; }\n",
         "'select' allows at most one 'timeout' and one 'default' arm",
     );
     h::expect_err_msg(

@@ -9,6 +9,7 @@ import tests::gen::vector as vec;
 import tests::harness as h;
 import tests::cli_harness as cli;
 import driver_shim as shim;
+import std::platform::fs;
 import ir::cpu_features as cf;
 import stdlib;
 
@@ -26,7 +27,7 @@ pub struct Entry {
 }
 
 // The model's lane type of name `s` (i8 0 .. i64 3, u8 4 .. u64 7, f32 8, f64 9), or 255.
-fn lane_of(s: str) u8 {
+const fn lane_of(s: str) u8 {
     let names: []str = ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64"];
     for i in 0..names.len() {
         if names[i] == s {
@@ -38,7 +39,7 @@ fn lane_of(s: str) u8 {
 
 // The lane type and count of type text `s`: `f32x4`, `Simd<i32, 2>`, a scalar lane type as one lane;
 // 255 for any other type.
-fn shape_of(s: str, t: &mut u8, n: &mut u64) {
+const fn shape_of(s: str, t: &mut u8, n: &mut u64) {
     let ty = s.trim();
     let simd = ty.starts_with("Simd<");
     let x = ty.find(pick(simd, ",", "x"));
@@ -134,7 +135,7 @@ pub fn entries(text: str) Vector<Entry> {
 }
 
 // The vector model's operation named `name`, or 255.
-fn model_op(name: str) u8 {
+const fn model_op(name: str) u8 {
     let vops: []vec::VOp = vec::VOPS;
     for i in 0..vops.len() {
         if vops[i].name == name {
@@ -436,24 +437,19 @@ const fn pick<T>(c: bool, a: T, b: T) T {
 // The text of every C file of the build directory `dir`.
 fn c_text(dir: str) String {
     let mut all = String::new();
-    let mut d = String::from_str(dir);
-    let dh = unsafe shim::sc_opendir(d.cstr());
-    if dh == null {
+    let opened = fs::read_dir(dir);
+    if opened.is_err() {
         return all;
     }
-    loop {
-        let e = unsafe shim::sc_readdir(dh);
-        if e == null {
-            break;
-        }
-        let nm = unsafe str::from_cstr(shim::sc_dirent_name(e));
+    let mut d = opened.unwrap();
+    while let Some(Ok(e)) = d.next() {
+        let nm = e.name;
         if nm.ends_with(".c") || nm.ends_with(".h") {
             let mut p = String::from_str(dir);
             p.format_into("/{}", nm);
             all.push_str(cli::read_text(p.as_str()).as_str());
         }
     }
-    unsafe shim::sc_closedir(dh);
     return all;
 }
 

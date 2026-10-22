@@ -1886,6 +1886,42 @@ fn deref() {
     );
 }
 
+// A struct literal of a type that resolves to no struct, union or enum is an error at the literal, never a
+// literal the backend cannot emit: an alias of a scalar, a builtin, a pointer alias.
+@test
+fn struct_literal_of_a_non_aggregate() {
+    let want = "a struct literal needs a struct, a union or an enum variant; 'D' is 'u64'";
+    h::expect_err_msg(
+        "an alias of a scalar",
+        "pub type D = u64;\nfn main() i32 { let d = D { ns: 1 }; return d as i32; }\n",
+        want,
+    );
+    h::expect_err_msg(
+        "a builtin",
+        "fn main() i32 { let d = u64 { ns: 1 }; return d as i32; }\n",
+        "a struct literal needs a struct, a union or an enum variant; 'u64' is 'u64'",
+    );
+    h::expect_err_msg(
+        "an alias of a pointer",
+        "type P = *mut i32;\nfn main() i32 { let p = P {}; return 0; }\n",
+        "a struct literal needs a struct, a union or an enum variant; 'P' is '*mut i32'",
+    );
+}
+
+// `assert_eq` compares what `==` compares: an inherited `eq`, never one whose extend's bounds fail.
+@test
+fn assert_eq_follows_eq_operator() {
+    h::expect_ok(
+        "assert_eq takes a derived Eq",
+        "struct E { pub a: i32 }\nextend E as Eq {}\nfn main() i32 { let x = E { a: 1 }; assert_eq(x, E { a: 1 }); return 0; }\n",
+    );
+    h::expect_err_msg(
+        "assert_eq reports an unmet extend bound",
+        "struct U {}\nfn f() Result<U, i32> { return Result::<U, i32>::Ok(U {}); }\nfn main() i32 { assert_eq(f(), f()); return 0; }\n",
+        "unsatisfied interface bounds",
+    );
+}
+
 @test
 fn alias_extend() {
     h::expect_ok(
@@ -1894,7 +1930,7 @@ fn alias_extend() {
     );
     h::expect_ok(
         "extend an alias of a struct targets the struct",
-        "struct P { pub x: i32 }\npub type Q = P;\nextend Q { pub fn get(self: &Self) i32 { return self.x; } }\nfn main() i32 { let p = P { x: 7 }; return p.get() - 7; }\n",
+        "pub struct P { pub x: i32 }\npub type Q = P;\nextend Q { pub fn get(self: &Self) i32 { return self.x; } }\nfn main() i32 { let p = P { x: 7 }; return p.get() - 7; }\n",
     );
     h::expect_ok("builtin name as a '::' base", "fn main() i32 { return u64::max(1, 2) as i32 - 2; }\n");
     h::expect_err_msg(
@@ -4546,7 +4582,7 @@ fn main(args: Vector<str>) i32 {
 )";
 
 // The occurrences of `needle` in `s`.
-fn occurrences(s: str, needle: str) usize {
+const fn occurrences(s: str, needle: str) usize {
     let mut n: usize = 0;
     let mut at: usize = 0;
     while at < s.len() {

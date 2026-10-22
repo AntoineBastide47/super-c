@@ -132,6 +132,12 @@ its lowering and its std use land in one commit. The formatter
 ships in the same commit as the parser: an old `fmt` deletes syntax it does not know. Until
 step 4, tests embed the new syntax only inside string literals.
 
+The visibility levels `pub(module)` and `pub(package)` and the implicit directory imports are such new syntax: until
+a release parses them, `std/` and `src/` write `pub` and import each file of a directory (`std::platform` items
+are `pub`, documented as unstable), and tests use the new forms only inside string literals. The release after
+that turns every `std::platform` item into `pub(package)`; the compiler's `build.toml` already sets
+`std_internals = true`.
+
 ## Runtime Helpers Called by std
 
 No hand-written C sits beside std or ffi. The runtime every program links is Super-C,
@@ -162,7 +168,7 @@ not help. Download the release binary as `check.sh` does
 A Windows-only failure often comes from mingw emulating POSIX:
 
 - `stat().st_ino` is 0, so file identity uses `GetFileInformationByHandle`
-  (`sc_same_file` in `src/driver_shim.spc`).
+  (`std::platform::fs::stat` on Windows, read by `util::same_file`).
 - Files and stdio open in text mode: write with `"wb"` and use binary stdio, else CRLF
   breaks `\`-continued macros and LSP framing.
 - `_dup2` returns 0 on success. `_spawnv` joins arguments with spaces and quotes nothing.

@@ -54,7 +54,7 @@ pub const fn max_bits(fs: cf::CpuFeatureSet, width: u32) u32 {
 /// its indexes to 64 bits); -1 when none. Under a memory checker
 /// (`checked`) an entry that touches memory in active lanes only (`SimdEntry.lanes`) is never one:
 /// the checked lane loop reports an inactive lane's access, a binding could not.
-pub fn find(
+pub const fn find(
     tab: &Vector<cf::SimdEntry>,
     fs: cf::CpuFeatureSet,
     checked: bool,

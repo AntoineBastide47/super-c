@@ -17,6 +17,8 @@ import ir::lower as irl;
 import borrowck::facts as bfx;
 import borrowck::flow_ir as bfi;
 import driver_shim as shim;
+import std::platform::fs;
+import std::platform::process;
 import lsp::json as json;
 import tests::cli_harness as cli;
 import driver::util as dutil;
@@ -533,8 +535,8 @@ fn slurp(path: *const char) *mut char {
     return buf;
 }
 
-fn rm_dir(dir: *const char) {
-    let _ = unsafe shim::sc_rm_rf(dir);
+fn rm_dir(dir: str) {
+    let _ = fs::remove_all(dir);
 }
 
 /// Build `src` as a program and run it, capturing stdout.
@@ -546,19 +548,18 @@ pub fn compile_and_run(src: str) RunResult {
 /// `compile_and_run` with `env` (space-separated NAME=VALUE) applied to the program.
 pub fn compile_and_run_env(src: str, env: str) RunResult {
     let mut r = RunResult { built: false, exit: -1, out: null };
-    let mut dir = scratch_dir();
+    let dir = scratch_dir();
     if dir.len() == 0 {
         return r;
     }
-    let dirp = dir.cstr();
     let d = dir.as_str();
     if !write_text(format("{}/main.spc", d).as_str(), src) {
-        rm_dir(dirp);
+        rm_dir(d);
         return r;
     }
     let bin = format("{}/prog{}", d, unsafe str::from_cstr(cli::binext()));
     if !build_script(d, bin.as_str()) {
-        rm_dir(dirp);
+        rm_dir(d);
         return r;
     } // did not build
     r.built = true;
@@ -566,7 +567,7 @@ pub fn compile_and_run_env(src: str, env: str) RunResult {
     let mut outp = format("{}/out", d);
     r.exit = cli::run_with(run.cstr(), null, outp.cstr(), null, env);
     r.out = slurp(outp.cstr());
-    rm_dir(dirp);
+    rm_dir(d);
     return r;
 }
 
@@ -574,16 +575,15 @@ pub fn compile_and_run_env(src: str, env: str) RunResult {
 // Process-local: one forked process per test, and the name carries the pid, the sequence and the clock.
 fn scratch_dir() String {
     unsafe R_SEQ = unsafe R_SEQ + 1;
-    let mut dir = format(
+    let dir = format(
         "{}/scr_{}_{}_{}",
-        unsafe str::from_cstr(shim::sc_tmpdir()),
-        unsafe shim::sc_getpid(),
+        cli::tmp_dir().as_str(),
+        process::pid().unwrap_or(1),
         unsafe R_SEQ,
-        (unsafe shim::sc_ticks_ms()) as u64,
+        dutil::ticks_ms() as u64,
     );
-    let dirp = dir.cstr();
-    rm_dir(dirp); // a directory an aborted test left under a reused pid
-    if unsafe shim::sc_mkdir_p(dirp) != 0 {
+    rm_dir(dir.as_str()); // a directory an aborted test left under a reused pid
+    if fs::mkdir_all(dir.as_str()).is_err() {
         return String::new();
     }
     return dir;
@@ -655,7 +655,7 @@ pub struct ExitBatch {
 // The `main` of case program `s`: the offset of its `fn main(`, the offset of the `)` that ends its
 // parameters, and whether it takes the arguments (`NAME: Vector<str>`). The offset is -1 when `s` has
 // no `main` of these two forms, or more than one `fn main(`.
-fn case_main_of(s: str) (isize, usize, bool) {
+const fn case_main_of(s: str) (isize, usize, bool) {
     let at = s.find("fn main(");
     if at < 0 {
         return -1, 0, false;
@@ -737,7 +737,7 @@ extend ExitBatch {
             }
             return;
         }
-        let mut dir = scratch_dir();
+        let dir = scratch_dir();
         assert(dir.len() != 0, "harness: no scratch directory for the batch");
         let d = dir.as_str();
         // The argument vector is gone before a case without arguments runs: a case may end the process
@@ -782,7 +782,7 @@ extend ExitBatch {
         assert(write_text(format("{}/main.spc", d).as_str(), root.as_str()), "harness: cannot write the batch root");
         let bin = format("{}/prog{}", d, unsafe str::from_cstr(cli::binext()));
         if !build_script(d, bin.as_str()) {
-            rm_dir(dir.cstr());
+            rm_dir(dir.as_str());
             for i in 0..batched.len() {
                 self.alone(batched[i]);
             }
@@ -796,7 +796,7 @@ extend ExitBatch {
             exits.push(cli::run_with(run.cstr(), null, outp.cstr(), null, ""));
             outs.push(cli::read_text(outp.as_str()));
         }
-        rm_dir(dir.cstr());
+        rm_dir(dir.as_str());
         for i in 0..batched.len() {
             let k = batched[i];
             let msg = self.traps[k].as_str();
@@ -947,7 +947,6 @@ pub fn diff_build_in(p: cli::Proj, opts: []str) DiffBuild {
         },
     );
     let exe = cli::superc_path(); // resolved before the chdir below
-    let mut root = String::from_str(p.dir());
     let mut cmd = String::new();
     cmd.format_into("\"{}\" build", exe);
     let mut env = String::new();
@@ -980,10 +979,10 @@ pub fn diff_build_in(p: cli::Proj, opts: []str) DiffBuild {
     }
     cmd.format_into(" -o prog{}", unsafe str::from_cstr(cli::binext()));
     let mut outp = String::new();
-    outp.format_into("{}/.build", root.as_str());
+    outp.format_into("{}/.build", p.dir());
     // The engine reads build.toml from its working directory.
     let mut rc = -1;
-    if unsafe shim::sc_chdir(root.cstr()) == 0 {
+    if process::set_current_dir(p.dir()).is_ok() {
         rc = cli::run_with(cmd.cstr(), null, outp.cstr(), null, env.as_str());
     }
     return DiffBuild { proj: p, built: rc == 0, diag: cli::read_text(outp.as_str()), wasm: wasm };
@@ -1103,7 +1102,7 @@ pub fn trap_text(err: str) String {
 }
 
 // A sanitizer finding is a defect on its own, whatever the other side of a comparison printed.
-fn sanitizer_report(err: str) bool {
+const fn sanitizer_report(err: str) bool {
     return err.contains("runtime error:") || err.contains("Sanitizer");
 }
 
@@ -1173,7 +1172,7 @@ pub fn expect_same_output(label: str, src: str, opts_a: []str, opts_b: []str) {
 /// The trap class a compile-time error names for a trap ("arithmetic overflow", "division by zero",
 /// "shift out of range"), or the text from `lane <i>: ` of a vector operation's trap, the same at run
 /// time; empty for any other error.
-pub fn const_trap_class<'a>(msg: str<'a>) str<'a> {
+pub const fn const_trap_class<'a>(msg: str<'a>) str<'a> {
     let lane = msg.find("lane ");
     if lane >= 0 && lane as usize + 5 < msg.len() && msg.byte_at(lane as usize + 5) >= b'0' && msg.byte_at(
         lane as usize + 5,
@@ -1203,7 +1202,7 @@ pub fn const_trap_class<'a>(msg: str<'a>) str<'a> {
 /// The trap class of a run-time trap message (`rt_h.spc` arithmetic and index helpers), in the words a constant
 /// reports for the same trap, or the text from `lane <i>: ` of a vector operation's trap; empty for any
 /// other trap.
-pub fn runtime_trap_class<'a>(trap: str<'a>) str<'a> {
+pub const fn runtime_trap_class<'a>(trap: str<'a>) str<'a> {
     let lane = trap.find("lane ");
     if lane >= 0 && lane as usize + 5 < trap.len() && trap.byte_at(lane as usize + 5) >= b'0' && trap.byte_at(
         lane as usize + 5,
@@ -1329,7 +1328,7 @@ fn parity_attribute(diag: str, first: usize, ct: &mut Vector<String>, omit: &mut
 }
 
 // The value a parity run printed under `tag` ("c" or "r"); empty when it printed none.
-fn parity_value<'a>(out: str<'a>, tag: str) str<'a> {
+const fn parity_value<'a>(out: str<'a>, tag: str) str<'a> {
     for line in out.lines() {
         if line.len() > tag.len() && line.starts_with(tag) && line.byte_at(tag.len()) == b' ' {
             return line.slice(tag.len() + 1, line.len()).trim();
@@ -1615,7 +1614,7 @@ pub fn asm_text(b: &DiffBuild, opts: []str, function: str, out: &mut String) Str
     let mut outp = String::new();
     outp.format_into("{}/.asm", root);
     let mut rc = -1;
-    if unsafe shim::sc_chdir(dir.cstr()) == 0 {
+    if process::set_current_dir(dir.as_str()).is_ok() {
         rc = cli::run_with(cmd.cstr(), null, outp.cstr(), null, "");
     }
     if rc != 0 {
@@ -1763,7 +1762,7 @@ fn h_borrowck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled,
 
 /// A host prelude package, resolved and type-checked, and the constant engine bound to it. Each
 /// points at the other, so a snapshot stays where it was built.
-struct Snap {
+pub struct Snap {
     pub p: loader::Package,
     pub cir: iri::Interp,
 }

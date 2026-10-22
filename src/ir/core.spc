@@ -156,7 +156,7 @@ extend Constant {
     /// hex, binary, octal, underscores, width suffixes, character literals with escapes, and `null`
     /// (0). `val` holds only the common decimal case. False past u64::MAX or for a malformed
     /// character literal.
-    pub fn int_value(self: &Self, src: str, out: &mut i64) bool {
+    pub const fn int_value(self: &Self, src: str, out: &mut i64) bool {
         let sp = self.raw;
         if sp.end <= sp.start || sp.end as usize > src.len() {
             *out = self.val;
@@ -583,7 +583,7 @@ pub const SI_SIMD: u32 = 4; // RV_SIMD, c = the code
 pub const SI_HINT: u32 = 5; // RV_INTRINSIC, c = IN_LIKELY, IN_UNLIKELY or IN_RETURN_ADDRESS
 
 /// The lowering of `@intrinsic("<name>")`: SI_* << 8 | c, or 0 for an unknown name.
-pub fn simd_intrinsic(name: str) u32 {
+pub const fn simd_intrinsic(name: str) u32 {
     if name == "float.to_int_unchecked" {
         return SI_CAST << 8 | CAST_UNCHECKED as u32;
     }
@@ -1138,7 +1138,7 @@ extend CoreBody {
     /// Rewrite every type this body holds through a publication map (`Package::map_type` for the
     /// body's module): locals, places, projections, operands, constants, generic arguments, rvalue
     /// result types and the type payloads of dyn construction and the measuring intrinsics.
-    pub fn remap_types(self: &mut Self, map: &Vector<TypeId>) {
+    pub const fn remap_types(self: &mut Self, map: &Vector<TypeId>) {
         for i in 0..self.locals.len() {
             let l = self.locals.index_mut(i);
             l.ty = pub_map1(map, l.ty);
@@ -1309,7 +1309,7 @@ extend CoreBody {
 
     /// Append statement `place = rv`.
     /// Does the body hold a preemption safepoint (plain or combined)?
-    pub fn has_safepoint(self: &Self) bool {
+    pub const fn has_safepoint(self: &Self) bool {
         for si in 0..self.statements.len() {
             let s = *self.statements.at(si);
             if s.kind == ST_ASSIGN {

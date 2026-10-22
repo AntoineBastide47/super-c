@@ -724,7 +724,7 @@ pub struct LtCall {
 /// `node` of module `m`, which names the lifetime and type parameters of aggregate `owner` (module `m`;
 /// NODE_NONE: a node of the function under check) that the instance path `inst` of frame `parent`
 /// gives arguments.
-struct LtFrame {
+pub struct LtFrame {
     pub expr: NodeId,
     pub m: ModuleId,
     pub node: NodeId,
@@ -736,7 +736,7 @@ struct LtFrame {
 /// An unannotated local whose initializer is a literal of aggregate `owner` (module `m`), let `decl`:
 /// its lifetime parameters are inference variables (`LT_VAR` tokens) the function's later uses of it
 /// bind (`lt_pool`). A frame whose `parent` is `-2 - index` stands for it.
-struct LtPend {
+pub struct LtPend {
     pub decl: NodeId,
     pub owner: NodeId,
     pub m: ModuleId,
@@ -880,7 +880,7 @@ const fn ls_held(k: u8) bool {
 }
 
 /// The token of lifetime name `name`, as the borrow checker spells a signature's (`Owner::lt_tok`).
-pub fn lt_tok_of(name: str) u64 {
+pub const fn lt_tok_of(name: str) u64 {
     return 1u64 << 63 | name.hash() & 0x7FFFFFFFFFFFFFFF;
 }
 
@@ -929,7 +929,7 @@ fn ls_new(s: &mut LtSys, k: u8, tok: u64) u32 {
 }
 
 // The number of outer classes of canonical classes `cls`.
-fn ls_nouter(cls: &Vector<u8>) u32 {
+const fn ls_nouter(cls: &Vector<u8>) u32 {
     let mut n: u32 = 0;
     for k in 0..cls.len() {
         if cls[k] >= LC_OUTER && cls[k] != LC_TOO_MANY {
@@ -1714,7 +1714,7 @@ extend<'a> TypeChecker<'a> {
         }
         self.nloops = le as u32;
     }
-    fn tc_find_loop(self: &Self, label: tok::Span) i32 {
+    const fn tc_find_loop(self: &Self, label: tok::Span) i32 {
         let mut i = self.nloops;
         while i > self.loop_floor {
             i = i - 1;
@@ -1728,7 +1728,7 @@ extend<'a> TypeChecker<'a> {
         return -1;
     }
 
-    fn tc_is_test_fn(self: &Self, m: ModuleId, fnode: NodeId) bool {
+    const fn tc_is_test_fn(self: &Self, m: ModuleId, fnode: NodeId) bool {
         let a = self.mod_ast(m);
         for i in 0..unsafe (*a).attrs.len() {
             let at = unsafe (*a).attrs.at(i);
@@ -8387,7 +8387,7 @@ extend<'a> TypeChecker<'a> {
     // The inexact case: keep the divisor ON the form; `{(BITS + 7) / 8}` stays floor((BITS+7)/8)
     // until a substitution makes it a number. Installed only onto an empty accumulator, because the
     // divisor covers the whole form.
-    fn tc_lin_floor(self: &Self, lhs: &ConstLin, d: i128, out: &mut ConstLin) bool {
+    const fn tc_lin_floor(self: &Self, lhs: &ConstLin, d: i128, out: &mut ConstLin) bool {
         let one = i128::one();
         if d <= one || lhs.div_of() != one {
             return false;
@@ -12605,15 +12605,15 @@ extend<'a> TypeChecker<'a> {
             for j in 0..ms.len {
                 let mid = unsafe (*a).list(ms)[j as usize];
                 let mn = unsafe (*a).at_const(mid);
-                // Privacy: a method from another module must be `pub` (mirrors find_assoc_const).
-                if mn.kind == NodeKind::NODE_FUNCTION && !(mm != self.cur_module() && !mn.as_data.function.is_public()) {
+                // Privacy: a method of another module must be visible here (mirrors find_assoc_const).
+                if mn.kind == NodeKind::NODE_FUNCTION {
                     let mname = unsafe (*a).at_const(mn.as_data.function.name).as_data.name.text;
                     let hit = if lit.len() != 0 {
                         span_is(self.mod_src(mm), mname, lit);
                     } else {
                         spans_eq2(self.source, name, self.mod_src(mm), mname);
                     };
-                    if hit {
+                    if hit && self.member_seen(mm, e.node, mn.as_data.function.vis) {
                         self.tc_mark_method_used(DefId { module: mm, node: mid });
                         return DefId { module: mm, node: mid };
                     }
@@ -12675,7 +12675,7 @@ extend<'a> TypeChecker<'a> {
             for j in 0..ms.len {
                 let mid = unsafe (*a).list(ms)[j as usize];
                 let mn = unsafe (*a).at_const(mid);
-                if mn.kind != NodeKind::NODE_FUNCTION || mm != self.cur_module() && !mn.as_data.function.is_public() {
+                if mn.kind != NodeKind::NODE_FUNCTION {
                     continue;
                 }
                 let mname = unsafe (*a).at_const(mn.as_data.function.name).as_data.name.text;
@@ -12684,7 +12684,7 @@ extend<'a> TypeChecker<'a> {
                 } else {
                     spans_eq2(self.source, name, self.mod_src(mm), mname);
                 };
-                if hit && nout as usize <= out.len() {
+                if hit && nout as usize <= out.len() && self.member_seen(mm, iid, mn.as_data.function.vis) {
                     if nout as usize < out.len() {
                         out[nout as usize] = DefId { module: mm, node: mid };
                     }
@@ -13022,11 +13022,15 @@ extend<'a> TypeChecker<'a> {
             for j in 0..ed.items.len {
                 let mid = unsafe (*xa).list(ed.items)[j as usize];
                 let mn = unsafe (*xa).at_const(mid);
-                if mn.kind != NodeKind::NODE_FUNCTION || e.module != self.cur_module() && !mn.as_data.function.is_public() {
+                if mn.kind != NodeKind::NODE_FUNCTION {
                     continue;
                 }
                 let mname = unsafe (*xa).at_const(mn.as_data.function.name).as_data.name.text;
-                if spans_eq2(self.source, name, self.mod_src(e.module), mname) {
+                if spans_eq2(self.source, name, self.mod_src(e.module), mname) && self.member_seen(
+                    e.module,
+                    e.node,
+                    mn.as_data.function.vis,
+                ) {
                     if n == TC_MAX_CANDIDATES {
                         over = true;
                         break;
@@ -14216,11 +14220,15 @@ extend<'a> TypeChecker<'a> {
             for j in 0..ms.len {
                 let cid = unsafe (*a).list(ms)[j as usize];
                 let cn = unsafe (*a).at_const(cid);
-                if cn.kind != NodeKind::NODE_CONST || sm != wm && !cn.as_data.const_def.is_public {
+                if cn.kind != NodeKind::NODE_CONST {
                     continue;
                 }
                 let cs = unsafe (*a).at_const(cn.as_data.const_def.name).as_data.name.text;
-                if n <= out.len() && self.mod_src(sm).slice(cs.start as usize, cs.end as usize) == name {
+                if n <= out.len() && self.mod_src(sm).slice(cs.start as usize, cs.end as usize) == name && (sm == wm || self.member_seen(
+                    sm,
+                    e.node,
+                    cn.as_data.const_def.vis,
+                )) {
                     if n < out.len() {
                         out[n] = DefId { module: sm, node: cid };
                     }
@@ -14624,7 +14632,7 @@ extend<'a> TypeChecker<'a> {
 
     // Whether arguments `have[0..hn]` satisfy the wanted `want[0..wn]`: no wanted arguments, no known
     // ones, or equal counts and each wanted argument equal (TYPE_NONE and the error type match any).
-    fn tc_args_match(self: &Self, have: *const TypeId, hn: i32, want: *const TypeId, wn: i32) bool {
+    const fn tc_args_match(self: &Self, have: *const TypeId, hn: i32, want: *const TypeId, wn: i32) bool {
         if wn == 0 || hn == 0 {
             return true;
         }
@@ -15421,7 +15429,7 @@ extend<'a> TypeChecker<'a> {
     // Does this module already hold deferred projection obligation `ob`? A recursive call chain
     // hands the same obligation up on every pass, so without this check the driver's discharge
     // passes would never stop growing.
-    fn tc_has_proj_ob(self: &Self, ob: ProjOb) bool {
+    const fn tc_has_proj_ob(self: &Self, ob: ProjOb) bool {
         let obs = unsafe &(*self.cur_ast()).proj_obs;
         for i in 0..obs.len() {
             let o = obs.at(i);
@@ -18696,7 +18704,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// True when `decl` is queued for late (post-module) checking.
-    pub fn tc_is_late(self: &Self, decl: NodeId) bool {
+    pub const fn tc_is_late(self: &Self, decl: NodeId) bool {
         for i in 0..self.nlate {
             if unsafe self.late[i as usize] == decl {
                 return true;
@@ -18706,7 +18714,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// Queue `decl` for late checking (idempotent; drops silently past the fixed capacity).
-    pub fn tc_add_late(self: &mut Self, decl: NodeId) {
+    pub const fn tc_add_late(self: &mut Self, decl: NodeId) {
         if self.tc_is_late(decl) {
             return;
         }
@@ -20310,7 +20318,7 @@ fn lin_div_exact(x: i128, d: i128, q: &mut i128) bool {
 // form of anything this can compare.
 // Span `sp` of source `src` widened over the parentheses its operands' spans leave out: a binary
 // node spans its operands, so `(N - 10) / 4` reads `N - 10) / 4`.
-fn paren_span(src: str, sp: tok::Span) tok::Span {
+const fn paren_span(src: str, sp: tok::Span) tok::Span {
     let mut open: i64 = 0;
     for i in sp.start..sp.end {
         if src[i as usize] == b'(' {
@@ -22888,7 +22896,17 @@ extend TypeChecker {
             let mut om: ModuleId = 0;
             let mut od = NODE_NONE;
             if self.aggregate_decl(base, &mut om, &mut od) {
-                comparable = self.find_method_cstr(om, od, "eq").node != NODE_NONE;
+                // What `==` accepts: an `eq` method or the default a conformance inherits, whose extend's
+                // bounds the type meets.
+                let mut md = self.find_method_cstr(om, od, "eq");
+                if md.node == NODE_NONE {
+                    md = self.find_default_method_cstr(om, od, "eq");
+                }
+                if md.node != NODE_NONE && !self.method_extend_bounds_hold(base, md) {
+                    self.err_method_extend_bounds(sp, base, md);
+                    return Ast::builtin(BuiltinType::BT_VOID);
+                }
+                comparable = md.node != NODE_NONE;
                 if !comparable && self.is_plain_enum(base) {
                     comparable = true;
                 }
@@ -23502,10 +23520,59 @@ extend TypeChecker {
 
     fn check_field_visibility(self: &mut Self, m: ModuleId, field: NodeId, owner: NodeId, at: tok::Span) {
         let f = unsafe (*self.mod_ast(m)).at_const(field);
-        let inside_owner = m == self.cur_module() && owner == self.current_self;
-        if f.kind == NodeKind::NODE_FIELD && !f.as_data.field.is_public && !inside_owner {
-            self.errors.emit_span(at, format("field '{}' is private", diag::span_str(self.source, at.start, at.end)));
+        if f.kind == NodeKind::NODE_FIELD && !self.field_seen(m, owner, f.as_data.field.vis) {
+            self.errors.emit_span(
+                at,
+                format(
+                    "field '{}' is {}",
+                    diag::span_str(self.source, at.start, at.end),
+                    if f.as_data.field.vis == VIS_PRIVATE {
+                        "private";
+                    } else {
+                        "not visible here";
+                    },
+                ),
+            );
         }
+    }
+
+    // Whether the module being checked sees an item of module `m` with visibility `v`: one of its own, or a
+    // `VIS_MODULE` or wider one `Package::vis_ok` admits.
+    const fn vis_seen(self: &Self, m: ModuleId, v: u8) bool {
+        return m == self.cur_module() || v >= VIS_MODULE && (self.package == null || unsafe (*self.package).vis_ok(
+            self.cur_module(),
+            m,
+            v,
+        ));
+    }
+
+    // Whether the module being checked sees a field of visibility `v` of type `owner` of module `m`: a field
+    // without a modifier inside the type's own `extend` blocks, a `pub(file)` one in its file.
+    const fn field_seen(self: &Self, m: ModuleId, owner: NodeId, v: u8) bool {
+        if v == VIS_PRIVATE {
+            return m == self.cur_module() && owner == self.current_self;
+        }
+        return self.vis_seen(m, v);
+    }
+
+    // Whether the module being checked sees method or associated constant visibility `v` of extend `ext`
+    // of module `m`: a member is at most as visible as the type its extend extends.
+    fn member_seen(self: &Self, m: ModuleId, ext: NodeId, v: u8) bool {
+        if m == self.cur_module() || v < VIS_MODULE {
+            return m == self.cur_module();
+        }
+        let mut w = v;
+        if self.package != null {
+            let a = self.mod_ast(m);
+            let td = unsafe (*a).resolution_def(unsafe (*a).at_const(ext).as_data.extend_def.target_type);
+            if td.node != NODE_NONE {
+                let tv = unsafe (*self.package).decl_vis(td.module, td.node);
+                if tv < w {
+                    w = tv;
+                }
+            }
+        }
+        return self.vis_seen(m, w);
     }
 
     fn check_call(self: &mut Self, id: NodeId, want: TypeId) TypeId {
@@ -26904,6 +26971,21 @@ extend TypeChecker {
         if !self.aggregate_of(sty, &mut smod, &mut decl, &mut gp, &mut ga, &mut gn) {
             decl = NODE_NONE;
         }
+        // A type that resolved to no struct, union or enum (a scalar, a pointer, an alias of one) has no
+        // fields to fill. A type that did not resolve is reported where it is spelled.
+        if decl == NODE_NONE && sty != TYPE_ERROR && sty != TYPE_NONE {
+            let sp = unsafe (*a).at_const(stn).span;
+            let ts = self.type_str(sty);
+            self.errors.emit_span(
+                sp,
+                format(
+                    "a struct literal needs a struct, a union or an enum variant; '{}' is '{}'",
+                    diag::span_str(self.source, sp.start, sp.end),
+                    ts.as_str(),
+                ),
+            );
+            return TYPE_ERROR;
+        }
         // A view literal claims that `len` elements at `ptr` are valid and, for `[]mut T`, reachable
         // through no other path: an unchecked promise, as Rust's `from_raw_parts` is.
         if self.tc_is_view_decl(smod, decl) && self.tc_needs_unsafe() {
@@ -27091,7 +27173,10 @@ extend TypeChecker {
                 continue;
             }
             let ft = self.subst_type(self.decl_type_in(m, mid), gp, ga, gn);
-            if (mn.as_data.field.is_public || inside || variant != NODE_NONE) && self.tc_zero_ok(ft, 0) {
+            if (self.field_seen(m, decl, mn.as_data.field.vis) || inside || variant != NODE_NONE) && self.tc_zero_ok(
+                ft,
+                0,
+            ) {
                 continue;
             }
             let nm = unsafe (*da).at_const(mn.as_data.field.name).as_data.name.text;
@@ -27158,7 +27243,7 @@ extend TypeChecker {
             if mn.kind != NodeKind::NODE_FIELD {
                 continue;
             }
-            if !mn.as_data.field.is_public && !inside {
+            if !inside && !self.field_seen(m, decl, mn.as_data.field.vis) {
                 return false;
             }
             if !self.tc_zero_ok(self.subst_type(self.decl_type_in(m, mid), &gp[0], &ga[0], gn), depth + 1) {

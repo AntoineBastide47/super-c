@@ -74,7 +74,6 @@ pub enum AttrKind {
     ATTR_PACKED,
     ATTR_EXPORT,
     ATTR_IMPORT,
-    ATTR_SECTION, // unused: a section is `@unsafe(link_section = "s")` (ATTR_UNSAFE)
     ATTR_USED,
     ATTR_UNUSED,
     ATTR_EMIT_MACRO,
@@ -172,7 +171,7 @@ pub struct WhereBound {
 /// The build-setting constants the compiler defines in every package, by index (`BC_*`). The names
 /// are reserved: no item or binding may take one, so a bare use always means the constant, and the
 /// platform filter decides a condition over them before name resolution.
-const BC_NAMES: [str<'static>; 10] = [
+const BC_NAMES: [str; 10] = [
     "PLATFORM",
     "ARCH",
     "TEST",
@@ -536,8 +535,49 @@ pub struct FunctionData {
     pub where_clause: NodeList,
     pub body: NodeId,
     pub flags: u8, // FN_* bits; one byte keeps Node at 56 bytes
+    pub vis: u8,
 }
-pub const FN_PUBLIC: u8 = 1;
+/// Visibility levels, narrowest first (the `vis` of items and fields). An item without a modifier is visible to
+/// its file; a field without one to its type's own `extend` blocks.
+pub const VIS_PRIVATE: u8 = 0;
+pub const VIS_FILE: u8 = 1; // `pub(file)`: a field only
+pub const VIS_MODULE: u8 = 2; // `pub(module)`: the files of the declaring file's directory and its subdirectories
+pub const VIS_PACKAGE: u8 = 3; // `pub(package)`: the files of the declaring package
+pub const VIS_PUB: u8 = 4; // `pub`
+
+/// Whether an item of visibility `vis` is visible outside its file (C linkage, cross-module lookup).
+pub const fn vis_exported(vis: u8) bool {
+    return vis >= VIS_MODULE;
+}
+
+/// The `VIS_*` of declaration `n`; VIS_PUB for a kind without one.
+pub const fn node_vis(n: &Node) u8 {
+    return switch n.kind {
+        NODE_STRUCT | NODE_ENUM => n.as_data.aggregate.vis,
+        NODE_TYPE_ALIAS => n.as_data.type_alias.vis,
+        NODE_INTERFACE => n.as_data.interface_def.vis,
+        NODE_FUNCTION => n.as_data.function.vis,
+        NODE_CONST => n.as_data.const_def.vis,
+        _ => VIS_PUB,
+    };
+}
+
+/// The modifier that spells visibility `vis`, with its trailing space; empty for none.
+pub const fn vis_text(vis: u8) str<'static> {
+    return if vis == VIS_PUB {
+        "pub ";
+    } else if vis == VIS_PACKAGE {
+        "pub(package) ";
+    } else if vis == VIS_MODULE {
+        "pub(module) ";
+    } else if vis == VIS_FILE {
+        "pub(file) ";
+    } else {
+        "";
+    };
+}
+
+static_assert(sizeof(Node) == 56, "Node must stay 56 bytes");
 pub const FN_EXTERN: u8 = 2;
 pub const FN_VARIADIC: u8 = 4;
 pub const FN_CONST: u8 = 8; // `const fn`: must evaluate at compile time when its arguments are known
@@ -547,10 +587,6 @@ pub const FN_FEATURES: u8 = 64; // `@target_feature` or `@simd_impl`: a call nee
 pub const FN_LANE_ACCESS: u8 = 128; // `@lane_access`: memory in active lanes at lane-dependent addresses
 
 extend FunctionData {
-    pub const fn is_public(self: &Self) bool {
-        return (self.flags & FN_PUBLIC) != 0;
-    }
-
     pub const fn is_extern(self: &Self) bool {
         return (self.flags & FN_EXTERN) != 0;
     }
@@ -593,19 +629,16 @@ pub struct AggregateData {
     pub name: NodeId,
     pub generics: NodeList,
     pub members: NodeList,
-    pub is_public: bool,
+    pub vis: u8,
     pub is_union: bool,
     pub is_tuple: bool,
-    /// Declared inside an `extern "C" "hdr.h"` block: the HEADER defines this type, and the members here
-    /// only state its layout. Codegen emits no definition for it and spells it the way C does, so the
-    /// binding's type IS the C one; the layout static_assert then checks that claim against the header.
     pub is_extern: bool,
 }
 pub struct FieldData {
     pub name: NodeId,
     pub ty: NodeId,
     pub value: NodeId,
-    pub is_public: bool,
+    pub vis: u8,
 }
 pub struct VariantData {
     pub name: NodeId,
@@ -618,33 +651,29 @@ pub struct InterfaceData {
     pub generics: NodeList,
     pub bounds: NodeList,
     pub items: NodeList,
-    pub is_public: bool,
+    pub vis: u8,
 }
 pub struct ExtendData {
     pub generics: NodeList,
     pub interface_type: NodeId,
     pub target_type: NodeId,
     pub items: NodeList,
-    // `unsafe extend T as I {}`: the conformance asserts something the compiler cannot check, so the author
-    // carries the obligation. The type checker requires it on Send and Sync conformances.
     pub is_unsafe: bool,
 }
 pub struct TypeAliasData {
     pub name: NodeId,
     pub generics: NodeList,
     pub ty: NodeId,
-    pub is_public: bool,
+    pub vis: u8,
 }
 pub struct ConstData {
     pub name: NodeId,
     pub ty: NodeId,
     pub value: NodeId,
-    pub is_public: bool,
+    pub vis: u8,
     pub is_extern: bool,
     pub is_static_mut: bool,
-    pub is_local: bool, // declared in a body: another body may reuse the name
-    // A constant of an `extern "C"` block with a value: a Super-C constant, and the C compile checks
-    // that the C name (a macro or an enumerator of the header) has that value.
+    pub is_local: bool,
     pub c_macro: bool,
 }
 pub struct ExternBlockData {
@@ -1085,7 +1114,7 @@ extend ConstLin {
         return self.div;
     }
 
-    pub fn is_concrete(self: &Self) bool {
+    pub const fn is_concrete(self: &Self) bool {
         for i in 0..self.n {
             if !unsafe self.c[i as usize].is_zero() {
                 return false;
@@ -1207,7 +1236,7 @@ extend ConstStep {
         return !sum.is_negative() || sum.rem_euclid(&self.div).is_zero();
     }
 
-    pub fn same(self: &Self, o: &ConstStep) bool {
+    pub const fn same(self: &Self, o: &ConstStep) bool {
         return self.key == o.key && self.owner == o.owner && self.div == o.div && self.module == o.module && self.span.start == o.span.start && self.span.end == o.span.end && self.root == o.root && self.canon == o.canon && self.idx == o.idx && const_lin_eq(
             &self.lin,
             &o.lin,
@@ -1228,7 +1257,7 @@ pub fn lin_acc(acc: &mut i128, c: i128, x: i128) bool {
 
 /// The exact value of two's complement pattern `bits` read as integer type `bt`: zero-extended for an unsigned
 /// type, sign-extended for any other.
-pub fn cval_exact(bits: i64, bt: BuiltinType) i128 {
+pub const fn cval_exact(bits: i64, bt: BuiltinType) i128 {
     if bt_is_unsigned(bt) {
         let mut r = i128::zero();
         r.set_limb(0, bits as u64);
@@ -1335,7 +1364,7 @@ pub const fn bt_holds(bt: BuiltinType, v: i128, ptr32: bool) bool {
 }
 
 /// The least and the greatest value of integer type `bt` (usize and isize are 32-bit under `ptr32`).
-pub fn bt_range(bt: BuiltinType, ptr32: bool, lo: &mut i128, hi: &mut i128) {
+pub const fn bt_range(bt: BuiltinType, ptr32: bool, lo: &mut i128, hi: &mut i128) {
     let w = bt_int_width(bt, ptr32) as u64;
     if bt_is_unsigned(bt) {
         let mut m = i128::zero();
@@ -1981,7 +2010,7 @@ pub const fn skey_mix(h: u64, v: u64) u64 {
     return x ^ x >> 31;
 }
 
-pub fn const_lin_eq(a: &ConstLin, b: &ConstLin) bool {
+pub const fn const_lin_eq(a: &ConstLin, b: &ConstLin) bool {
     if a.k != b.k || a.div_of() != b.div_of() || a.ty != b.ty || a.to != b.to {
         return false;
     }
@@ -2087,7 +2116,7 @@ pub const fn rec_len(it: &TyInstance) u32 {
 
 /// Whether lifetime classes `cls` (`nres` result positions first, canonical) are the default ones:
 /// no `'static`, and the results, if any, share the lifetime of the only input position.
-pub fn lt_default(cls: &Vector<u8>, nres: u32) bool {
+pub const fn lt_default(cls: &Vector<u8>, nres: u32) bool {
     for k in 0..cls.len() {
         if cls[k] == LC_STATIC || cls[k] >= LC_OUTER || nres == 0 && cls[k] != LC_FREE || nres != 0 && cls[k] != LC_GROUP {
             return false;
@@ -2145,7 +2174,7 @@ extend Ty {
     }
 
     /// A TYPE_CONST's exact value.
-    pub fn cval(self: &Self) i128 {
+    pub const fn cval(self: &Self) i128 {
         return cval_exact(self.as_data.value, self.cbt());
     }
 
@@ -3292,6 +3321,9 @@ pub struct Ast {
     pub bc_errs: Vector<BcErr>,
     /// Every site the platform filter replaced, in prune order.
     pub bc_cuts: Vector<BcCut>,
+    /// The source the build settings remove, sorted, none inside another: each gated-out item or member and
+    /// each branch of a decided site that is not taken. The language server shows it as inactive.
+    pub bc_dead: Vector<tok::Span>,
     /// The sorted distinct `str::hash` of every identifier in the removed source text: the removed
     /// code is never resolved, so the lints that count uses treat these names as used.
     pub bc_names: Vector<u64>,
@@ -3358,6 +3390,7 @@ extend Ast as Free {
         self.bc_sites.free();
         self.bc_errs.free();
         self.bc_cuts.free();
+        self.bc_dead.free();
         self.bc_names.free();
         self.csteps.free();
     }
@@ -3365,12 +3398,42 @@ extend Ast as Free {
 
 extend Ast {
     /// Whether identifier text `name` occurs in code the platform filter removed.
-    pub fn bc_removed_name(self: &Self, name: str) bool {
+    pub const fn bc_removed_name(self: &Self, name: str) bool {
         return self.bc_names.len() != 0 && self.bc_names.binary_search(&name.hash()).is_ok();
     }
 
+    /// The span branch `b` was written with: a decided site's cut keeps it after the site took its branch's.
+    pub fn written_span(self: &Self, b: NodeId) tok::Span {
+        for i in 0..self.bc_cuts.len() {
+            if self.bc_cuts[i].node == b {
+                return self.bc_cuts[i].span;
+            }
+        }
+        return self.at_const(b).span;
+    }
+
+    /// Sort `bc_dead` and drop each span inside an earlier one.
+    pub fn settle_dead(self: &mut Self) {
+        self.bc_dead.sort_by(
+            |x: &tok::Span, y: &tok::Span| if x.start != y.start {
+                x.start.cmp(&y.start);
+            } else {
+                y.end.cmp(&x.end);
+            },
+        );
+        let mut w: usize = 0;
+        for i in 0..self.bc_dead.len() {
+            let s = self.bc_dead[i];
+            if w == 0 || s.end > self.bc_dead[w - 1].end {
+                self.bc_dead.set(w, s);
+                w += 1;
+            }
+        }
+        self.bc_dead.truncate(w);
+    }
+
     /// Whether node `id` (source span `sp`) is or holds a site the platform filter replaced.
-    pub fn bc_cut_at(self: &Self, id: NodeId, sp: tok::Span) bool {
+    pub const fn bc_cut_at(self: &Self, id: NodeId, sp: tok::Span) bool {
         for i in 0..self.bc_cuts.len() {
             let c = self.bc_cuts[i];
             if c.node == id || c.span.start >= sp.start && c.span.end <= sp.end {
@@ -5362,7 +5425,7 @@ fn ensure_u32_len(v: &mut Vector<u32>, nodes_len: usize, need: usize) {
 /// The builtin type a numeric literal's suffix names, or BT_COUNT if it has none. On a match,
 /// *sfx_start receives the suffix's start offset. In a hex literal, f32/f64 only
 /// count as a suffix after a 'p' exponent -- otherwise those bytes are hex digits.
-pub fn ast_numeric_suffix(src: str, start: u32, end: u32, sfx_start: &mut u32) BuiltinType {
+pub const fn ast_numeric_suffix(src: str, start: u32, end: u32, sfx_start: &mut u32) BuiltinType {
     let hex = end - start > 2 && src[start as usize] == b'0' && (src[(start + 1) as usize] | 0x20u8) == b'x';
     let mut hexf = false;
     let mut i = start + 2;
@@ -5416,7 +5479,7 @@ pub fn float_literal_value(src: str, raw: tok::Span, single: bool) Option<f64> {
 
 // The value of hex float digits `t` (after `0x`: hex digits, an optional fraction, a `p` exponent),
 // rounded once, to nearest even, to f32 (`single`) or f64, subnormals included.
-fn hex_float_value(t: str, single: bool) Option<f64> {
+const fn hex_float_value(t: str, single: bool) Option<f64> {
     let mut mant: u64 = 0;
     let mut e: i64 = 0;
     let mut sticky = false;
@@ -5542,7 +5605,7 @@ fn hex_float_value(t: str, single: bool) Option<f64> {
 
 /// The value of a decimal integer literal (`_` separators and an integer suffix allowed), -1 for
 /// any other literal text.
-pub fn bc_decimal(src: str, raw: tok::Span) i64 {
+pub const fn bc_decimal(src: str, raw: tok::Span) i64 {
     let mut end = raw.end;
     let sfx = ast_numeric_suffix(src, raw.start, raw.end, &mut end);
     if sfx == BuiltinType::BT_F32 || sfx == BuiltinType::BT_F64 || end <= raw.start {

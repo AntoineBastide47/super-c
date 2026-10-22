@@ -103,7 +103,7 @@ const fn make_pair<A, B>(first: A, second: B) Pair<A, B> {
     return Pair::<A, B> { first: first, second: second };
 }
 
-fn sum_inline<const N: usize>() usize {
+const fn sum_inline<const N: usize>() usize {
     let mut total: usize = 0;
     inline for i in 0..N {
         total += i;
@@ -165,7 +165,7 @@ const fn checked_twice(value: i32) Result<i32, i32> {
     return Result::<i32, i32>::Ok(next * 2);
 }
 
-fn sum_slice(values: []i32) i32 {
+const fn sum_slice(values: []i32) i32 {
     let mut total = 0;
     for i in 0..values.len() {
         total += *values.get(i);

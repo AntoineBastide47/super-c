@@ -502,7 +502,7 @@ fn term_reads(b: &ir::CoreBody, t: &ir::Terminator, l: u32) bool {
 // The frame local whose storage place `pl` lies in, LOCAL_UNKNOWN for frame storage the taint
 // cannot name, or IR_NONE outside the frame (a static, or behind a reference that holds no borrow
 // of the frame).
-fn place_root(b: &ir::CoreBody, tn: &Taint, pl: u32) u32 {
+const fn place_root(b: &ir::CoreBody, tn: &Taint, pl: u32) u32 {
     let p = *b.places.at(pl as usize);
     if b.locals.at(p.base as usize).storage == ir::LS_STATIC_REF {
         return ir::IR_NONE;

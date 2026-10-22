@@ -99,7 +99,7 @@ fn spans_of(p: &loader::Package, m: usize) Spans {
 }
 
 // Index of the last span starting at or before `off` when that span also ends after `off`.
-fn span_find(s: &Vector<u32>, e: &Vector<u32>, off: u32) u32 {
+const fn span_find(s: &Vector<u32>, e: &Vector<u32>, off: u32) u32 {
     let mut lo: usize = 0;
     let mut hi: usize = s.len();
     while lo < hi {
@@ -118,7 +118,7 @@ fn span_find(s: &Vector<u32>, e: &Vector<u32>, off: u32) u32 {
 
 // The innermost item of module `m` whose declaration holds byte `off`, or NONE (an import, a
 // synthesized node without a source span).
-fn owner_at(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, m: u32, off: u32) u32 {
+const fn owner_at(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, m: u32, off: u32) u32 {
     if c.m == m && c.leaf && off >= c.s && off < c.e {
         return c.item;
     }
@@ -383,7 +383,7 @@ fn csr(n: usize, edges: &Vector<u64>, off: &mut Vector<u32>, tgt: &mut Vector<u3
 }
 
 // The largest target id of a CSR's edges (0 when empty): the dedupe stamps are indexed by it.
-fn tgt_max(tgt: &Vector<u32>) usize {
+const fn tgt_max(tgt: &Vector<u32>) usize {
     let mut m: usize = 0;
     for i in 0..tgt.len() {
         m = m.max(tgt[i] as usize);
@@ -755,7 +755,7 @@ pub fn builtin_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &m
 
 // The 32-bit key of member name `s` in `ItemSched.bnames` (equal names share it, and a collision
 // only adds an edge), marking its bit in the prefilter `mask`.
-fn name_key(mask: &mut u64, s: str) u64 {
+const fn name_key(mask: &mut u64, s: str) u64 {
     if s.len() != 0 {
         *mask = *mask | 1u64 << mask_bit(s);
     }
@@ -959,7 +959,7 @@ fn sig_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, i: usize, a
     let it = *p.idx.items.at(i);
     let m = it.module as usize;
     let a = &p.modules.at(m).ast;
-    let mut h = mix(mix(p.sched.key[i], it.kind), it.is_public as u64);
+    let mut h = mix(mix(p.sched.key[i], it.kind), it.vis);
     let mut k = switch akeys.binary_search(&(it.node as u64 << 32)) {
         Ok(x) => x,
         Err(x) => x,
@@ -1213,7 +1213,7 @@ pub fn condense(n: usize, off: &Vector<u32>, tgt: &Vector<u32>, comp: &mut Vecto
 
 /// A digest of the index (keys, hashes, precheck and final edges, components, states) for the
 /// serial/parallel identity gate.
-pub fn digest(p: &loader::Package) u64 {
+pub const fn digest(p: &loader::Package) u64 {
     let s = &p.sched;
     let mut h = FNV_OFF;
     for i in 0..s.key.len() {
@@ -1560,7 +1560,7 @@ fn frontier_line(p: &loader::Package, what: str, rec: &Vector<u64>, task_ns: u64
 }
 
 // Longest-job-first order for the independent-job schedules.
-fn sort_longest_first(v: &mut Vector<u64>) {
+const fn sort_longest_first(v: &mut Vector<u64>) {
     v.sort();
     v.reverse();
 }

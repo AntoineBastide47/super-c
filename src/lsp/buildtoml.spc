@@ -25,7 +25,7 @@ struct Key {
     pub doc: str<'static>,
 }
 
-const KEYS: [Key; 30] = [
+const KEYS: [Key; 35] = [
     Key { sec: "", name: "bin", doc: "name of the binary this project builds" },
     Key { sec: "", name: "root", doc: "entry source file (default: src/main.spc)" },
     Key { sec: "", name: "out-dir", doc: "directory for build output (default: build)" },
@@ -40,6 +40,12 @@ const KEYS: [Key; 30] = [
     Key { sec: "", name: "const-eval-steps", doc: "compile-time evaluation step budget" },
     Key { sec: "", name: "const-eval-memory", doc: "compile-time evaluation memory budget (B, or NK/NM/NG)" },
     Key { sec: "", name: "default-profile", doc: "profile used when none is named" },
+    Key {
+        sec: "",
+        name: "cache-size",
+        doc: "bytes the project's build cache keeps: a byte count or B/KiB/MiB/GiB (default 2GiB)",
+    },
+    Key { sec: "", name: "std_internals", doc: "name std's unstable pub(package) internals (std::platform)" },
     Key { sec: "", name: "target-features", doc: "CPU features to enable, e.g. [\"simd128\"] (default: none)" },
     Key {
         sec: "",
@@ -52,9 +58,16 @@ const KEYS: [Key; 30] = [
         name: "simd-dispatch",
         doc: "x86_64: the levels run-time copies of the functions with vector code are made for (default \"x86-64-v3\", \"off\" at opt-level 0 or 1), or \"off\"",
     },
+    Key {
+        sec: "profile.",
+        name: "opt-level",
+        doc: "0, 1, 2, 3, \"s\" or \"z\": -O<level> on every compile and the link",
+    },
     Key { sec: "profile.", name: "cflags", doc: "C compiler flags for this profile" },
     Key { sec: "profile.", name: "ldflags", doc: "linker flags for this profile" },
+    Key { sec: "profile.", name: "link-args", doc: "linker arguments, each passed as -Wl,<entry>" },
     Key { sec: "profile.", name: "strip", doc: "strip the linked binary (bool)" },
+    Key { sec: "profile.", name: "lto", doc: "link-time optimization: none, full, auto or thin" },
     Key { sec: "profile.", name: "overflow-checks", doc: "trap signed overflow (bool; default: opt-level < 2)" },
     Key { sec: "profile.", name: "target-features", doc: "CPU features for this profile; replaces the build's list" },
     Key { sec: "command.", name: "run", doc: "the command line to run, as an array of strings" },
@@ -108,7 +121,7 @@ pub fn section_at(src: str, at: usize) String {
 }
 
 // The identifier-ish run of bytes around `at` (letters, digits, '-', '_', '.').
-fn word_at(src: str, at: usize) str {
+const fn word_at(src: str, at: usize) str {
     let mut s = at;
     while s > 0 && is_word(src[s - 1]) {
         s = s - 1;
@@ -126,7 +139,7 @@ const fn is_word(c: u8) bool {
 
 /// Is byte `at` inside a section header (between '[' and ']' on its line)? Header position completes
 /// section names; anywhere else completes keys.
-pub fn in_header(src: str, at: usize) bool {
+pub const fn in_header(src: str, at: usize) bool {
     let mut i = at;
     while i > 0 && src[i - 1] != b'\n' {
         i = i - 1;

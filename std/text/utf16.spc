@@ -44,7 +44,7 @@ pub fn encode<A: Allocator>(s: str, out: &mut Vector<u16, A>) Result<Unit, Encod
 
 /// Write the UTF-16 code units of `s` to the start of `out`: the count written. `out.len() >= s.len()`
 /// always suffices. On error the units of `out` past the valid prefix are unspecified.
-pub fn encode_into(s: str, out: []mut u16) Result<usize, EncodeError> {
+pub const fn encode_into(s: str, out: []mut u16) Result<usize, EncodeError> {
     let mut i: usize = 0;
     let mut k: usize = 0;
     // Each pass consumes at least one byte.
@@ -106,7 +106,7 @@ pub fn decode<A: Allocator>(units: []u16, out: &mut String<A>) Result<Unit, Deco
 // bytes at `i` are not well-formed (an overlong form, a surrogate, a value above U+10FFFF, a stray
 // continuation byte or a truncated sequence). The second byte's range carries the overlong, surrogate and
 // U+10FFFF limits; every later byte is a plain continuation.
-fn scalar_at(s: str, i: usize) (u32, usize) {
+const fn scalar_at(s: str, i: usize) (u32, usize) {
     let b = s.byte_at(i) as u32;
     if b < 0x80 {
         return b, 1;

@@ -87,7 +87,7 @@ extend Parser {
     }
 
     // Skip spaces, tabs and comments; newlines too when `nl` is set.
-    fn skip_ws(self: &mut Self, nl: bool) {
+    const fn skip_ws(self: &mut Self, nl: bool) {
         while !self.at_end() {
             let b = self.peek();
             if b == b' ' || b == b'\t' || b == b'\r' {

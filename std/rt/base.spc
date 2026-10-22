@@ -139,7 +139,7 @@ const fn hex_digit(d: u8) u8 {
 }
 
 // The decimal digits of `v` at the end of `b`; returns how many.
-fn dec_text(b: &mut [u8; 24], v: u64) usize {
+const fn dec_text(b: &mut [u8; 24], v: u64) usize {
     let mut i: usize = 24;
     let mut x = v;
     loop {
@@ -580,7 +580,7 @@ fn stack_task_size(bytes: usize) {
 
 // Append the NUL-terminated `s` to the 256-byte report `b` at `n`.
 @platform(!wasm)
-fn stk_put(b: &mut [u8; 256], n: usize, s: *const char) usize {
+const fn stk_put(b: &mut [u8; 256], n: usize, s: *const char) usize {
     let mut k = n;
     let mut i: usize = 0;
     while (unsafe s[i]) as u8 != 0 && k < 255 {
@@ -593,7 +593,7 @@ fn stk_put(b: &mut [u8; 256], n: usize, s: *const char) usize {
 
 // Append `v` in decimal to the report `b` at `n`.
 @platform(!wasm)
-fn stk_num(b: &mut [u8; 256], n: usize, v: u64) usize {
+const fn stk_num(b: &mut [u8; 256], n: usize, v: u64) usize {
     let mut d = [0u8; 24];
     let w = dec_text(&mut d, v);
     let mut k = n;
@@ -1238,7 +1238,7 @@ const fn lk_slot(p: *const void, cap: usize) usize {
 }
 
 // The live entry of `p` in shard `s`, or null.
-fn lk_find(s: *mut LkShard, p: *const void) *mut LkEnt {
+const fn lk_find(s: *mut LkShard, p: *const void) *mut LkEnt {
     let cap = unsafe (*s).cap;
     if cap == 0 {
         return null;
@@ -1300,7 +1300,7 @@ fn lk_grow(s: *mut LkShard) bool {
 }
 
 // Remove `entry` from its table, moving later entries of the probe run back into the hole.
-fn lk_erase(s: *mut LkShard, entry: *mut LkEnt) {
+const fn lk_erase(s: *mut LkShard, entry: *mut LkEnt) {
     let tab = unsafe (*s).tab;
     let cap = unsafe (*s).cap;
     let mut hole = (entry as usize - tab as usize) / sizeof(LkEnt);
@@ -1341,7 +1341,7 @@ fn lk_remember_free(s: *mut LkShard, entry: LkEnt, site: *const void) {
 }
 
 // The freed-history entry of `p` in shard `s`, newest first, or null.
-fn lk_find_freed(s: *mut LkShard, p: *const void) *mut LkEnt {
+const fn lk_find_freed(s: *mut LkShard, p: *const void) *mut LkEnt {
     let mut i = unsafe (*s).freed_next;
     for _ in 0..unsafe (*s).freed_count {
         i = (i + LK_FREED_HISTORY - 1) % LK_FREED_HISTORY;

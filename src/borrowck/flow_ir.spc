@@ -120,7 +120,7 @@ extend BcStats {
     }
 
     /// Record body `id` (module << 32 | node) that took `ns` when it ranks among the slowest.
-    fn top_insert(self: &mut Self, ns: u64, id: u64, sz: u64) {
+    const fn top_insert(self: &mut Self, ns: u64, id: u64, sz: u64) {
         if ns <= self.top_ns[TOP_N - 1] {
             return;
         }
@@ -158,7 +158,7 @@ extend BcStats {
 
     /// Tally one lowering's product: its tape entries by kind, its pools' bytes and the type ids a
     /// publication remap would rewrite (`CoreBody::remap_types`).
-    pub fn tally_ir(self: &mut Self, lw: &irl::Lowerer) {
+    pub const fn tally_ir(self: &mut Self, lw: &irl::Lowerer) {
         let b = &lw.body;
         for i in 0..lw.tape.len() {
             self.tape[(lw.tape[i] >> 56) as usize % TP_KINDS] += 1;
@@ -412,7 +412,7 @@ extend UniSt {
 
     // Does a region arriving at its own level (`a0`), behind a reference (`a1`) or at either (`va`)
     // outlive no region of the slot's at that level (`s0` its own, `s1` behind a reference)?
-    fn fails(self: &Self, a0: u64, a1: u64, va: u64, s0: u64, s1: u64) bool {
+    const fn fails(self: &Self, a0: u64, a1: u64, va: u64, s0: u64, s1: u64) bool {
         if (a0 | a1 | va) == 0 || (s0 | s1) == 0 {
             return false;
         }
@@ -2839,7 +2839,7 @@ extend tc::TypeChecker {
     }
 
     // The block of `point` (the operation at it is statement `*si`, the terminator past the last).
-    fn bc_uni_site(self: &Self, f: &bfx::BodyFacts, point: u32, si: &mut u32) usize {
+    const fn bc_uni_site(self: &Self, f: &bfx::BodyFacts, point: u32, si: &mut u32) usize {
         let mut lo: usize = 0;
         let mut hi = f.block_base.len();
         while hi - lo > 1 {
@@ -2856,7 +2856,14 @@ extend tc::TypeChecker {
 
     // The operands the operation at `point` reads into its result: an oper_pool range `start`,
     // `len` (true), or the single operand `start` (false).
-    fn bc_uni_ops(self: &Self, body: &ir::CoreBody, f: &bfx::BodyFacts, point: u32, start: &mut u32, len: &mut u32) bool {
+    const fn bc_uni_ops(
+        self: &Self,
+        body: &ir::CoreBody,
+        f: &bfx::BodyFacts,
+        point: u32,
+        start: &mut u32,
+        len: &mut u32,
+    ) bool {
         let mut si: u32 = 0;
         let blk = *body.blocks.at(self.bc_uni_site(f, point, &mut si));
         *start = 0;

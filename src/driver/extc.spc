@@ -6,9 +6,25 @@
 import stdio;
 import string as cstring;
 import ast::ast as *;
-import driver_shim as shim;
+import std::platform::fs;
 import module::loader as loader;
 import driver::util as *;
+
+// The real path of the C string in `rel`, NUL-terminated into `out`: false when it does not resolve or
+// does not fit.
+fn real_into(rel: &PathBuf, out: &mut PathBuf) bool {
+    let r = fs::realpath(str::from_cbuf(rel.as_slice()));
+    if r.is_err() {
+        return false;
+    }
+    let real = r.unwrap();
+    if real.len() >= 4096 {
+        return false;
+    }
+    unsafe out.copy_from(real.as_ptr() as *const char, real.len());
+    out[real.len()] = 0 as char;
+    return true;
+}
 
 // "<dir of file>/<v[0..vl]>" (or "<v>") into `out` (a 4096-byte buffer).
 fn ext_rel(file: *const char, v: *const char, vl: i32, out: *mut char) {
@@ -73,7 +89,7 @@ fn ext_c_wrap(
         "/* external C source pulled into the build -- generated, do not edit */\n#include \"{}\"\n",
         inc.as_str(),
     );
-    let rc = publish_file(&mut path, text.as_str());
+    let rc = publish_file(path.as_str(), text.as_str());
     if rc < 0 {
         unsafe stdio::perror(path.cstr());
         *err = true;
@@ -163,9 +179,9 @@ pub fn ext_c_collect(
             let mut rel = PathBuf {};
             let mut rsl = PathBuf {};
             ext_rel(file, v, vl, &mut rel[0]);
-            if unsafe shim::sc_realpath(&rel[0], &mut rsl[0]) == null {
+            if !real_into(&rel, &mut rsl) {
                 unsafe stdio::snprintf(&mut rel[0], 4096, "%.*s".ptr() as *const char, vl, v);
-                if unsafe shim::sc_realpath(&rel[0], &mut rsl[0]) == null {
+                if !real_into(&rel, &mut rsl) {
                     unsafe stdio::fprintf(
                         stdio::stderr(),
                         "error: cannot find C source '%.*s'\n".ptr() as *const char,
@@ -203,7 +219,7 @@ pub fn ext_c_collect(
             ext_rel(file, hv, hl, &mut rel[0]);
             // One stat, not a realpath: most headers are the system's and absent here, and a failed
             // realpath costs about ten times a failed stat.
-            if unsafe shim::sc_stat_isdir(&rel[0]) == -1 {
+            if fs::stat(str::from_cbuf(rel.as_slice())).is_err() {
                 continue;
             }
             let dot = unsafe cstring::strrchr(&rel[0], '.');
@@ -220,7 +236,7 @@ pub fn ext_c_collect(
                 rel[dotoff + 2] = 0 as char;
             }
             let mut cabs = PathBuf {};
-            if unsafe shim::sc_realpath(&rel[0], &mut cabs[0]) != null {
+            if real_into(&rel, &mut cabs) {
                 p.ext_inputs.push(String::from_str(str::from_cbuf(cabs.as_slice())));
                 ext_c_wrap(root, keep, fresh, &mut seen, &mut nsrc, &cabs[0], err);
             }
@@ -241,6 +257,6 @@ pub fn ext_c_collect(
             *err = true;
         }
     } else {
-        let _ = unsafe shim::sc_unlink(ldpath.cstr());
+        let _ = fs::unlink(ldpath.as_str());
     }
 }

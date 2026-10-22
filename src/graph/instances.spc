@@ -3319,7 +3319,7 @@ extend InstGraph {
                 } else if n.kind == NodeKind::NODE_TYPE_ALIAS {
                     // an exported alias of a concrete instantiation (`pub type u128 = UInt<128>`)
                     // is API surface: the instance is reachable without any body naming it.
-                    if n.as_data.type_alias.is_public && n.as_data.type_alias.ty != NODE_NONE {
+                    if vis_exported(n.as_data.type_alias.vis) && n.as_data.type_alias.ty != NODE_NONE {
                         self.note_type(a, a.type_of(n.as_data.type_alias.ty), &empty, 0);
                         self.note_type(a, a.type_of(nid), &empty, 0);
                         if self.fault_hit {
@@ -3374,7 +3374,7 @@ fn ty_names(a: &Ast, t: TypeId, d: DefId, depth: i32) bool {
 
 // The parameter index of identity form `l` (one coefficient-1 parameter, no constant, no divisor,
 // no retyping), else -1.
-fn lin_identity(l: &ConstLin) i64 {
+const fn lin_identity(l: &ConstLin) i64 {
     let mut nact: u32 = 0;
     let mut hit: i64 = -1;
     for i in 0..l.n {

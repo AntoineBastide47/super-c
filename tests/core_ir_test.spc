@@ -126,7 +126,7 @@ fn lowered(p: &loader::Package, name: str) String {
     return irp::print_body(&lw.body);
 }
 
-fn has(s: &String, needle: str) bool {
+const fn has(s: &String, needle: str) bool {
     return s.contains(needle);
 }
 

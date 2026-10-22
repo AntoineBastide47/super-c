@@ -4,6 +4,7 @@
 import tests::cli_harness as cli;
 import build_system::build as bsys;
 import driver_shim as shim;
+import std::platform::fs;
 
 const E: str = "SC_NO_EMIT_CACHE";
 
@@ -255,18 +256,11 @@ fn failed_emission_keeps_the_tree() {
 // How many C files module `main` emits into `dir`: `main.c` and its parts `main__p<k>.c`.
 fn shard_parts(dir: str) i32 {
     let mut n: i32 = 0;
-    let mut d = String::from_str(dir);
-    let dh = unsafe shim::sc_opendir(d.cstr());
-    assert(dh != null, dir);
-    loop {
-        let e = unsafe shim::sc_readdir(dh);
-        if e == null {
-            break;
-        }
-        let nm = unsafe str::from_cstr(shim::sc_dirent_name(e));
+    let mut d = fs::read_dir(dir).unwrap();
+    while let Some(Ok(e)) = d.next() {
+        let nm = e.name;
         n += (nm == "main.c" || nm.starts_with("main__p") && nm.ends_with(".c")) as i32;
     }
-    unsafe shim::sc_closedir(dh);
     return n;
 }
 

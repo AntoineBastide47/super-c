@@ -90,6 +90,9 @@ def check_source_references(errors: list[str]) -> None:
                 continue
             if match.group(1).endswith("/X.spc"):
                 continue
+            # A `.c` or `.h` file the compiler emits for a module (`std/rt/base.c` of `std/rt/base.spc`).
+            if match.group(1).endswith((".c", ".h")) and (ROOT / match.group(1)).with_suffix(".spc").exists():
+                continue
             path = ROOT / match.group(1)
             if "*" in match.group(1):
                 if not any(ROOT.glob(match.group(1))):

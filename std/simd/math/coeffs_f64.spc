@@ -991,7 +991,7 @@ const CBRT_B: [f64; 6] = [
 ];
 
 /// Polynomial `P` of the kernels at `z`.
-pub fn poly<const P: Poly, const N: usize>(z: Simd<f64, N>) Simd<f64, N> {
+pub const fn poly<const P: Poly, const N: usize>(z: Simd<f64, N>) Simd<f64, N> {
     return switch P {
         ExpP => horner(z, &EXP_P),
         LogP => horner(z, &LOG_P),

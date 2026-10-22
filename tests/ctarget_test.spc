@@ -6,6 +6,8 @@
 // ABI and discovery tests need no compiler.
 import stdlib;
 import driver_shim as shim;
+import std::platform::fs;
+import std::platform::process;
 import driver::util as dutil;
 import module::loader as loader;
 import bindgen::ctarget as ct;
@@ -45,7 +47,7 @@ fn run(cmd: str, work: str, out: &mut String) i32 {
 }
 
 // The major release of the pinned clang.
-fn pinned_major() str<'static> {
+const fn pinned_major() str<'static> {
     let v = data::PINNED_VERSION;
     return v.slice(0, v.find_byte(b'.') as usize);
 }
@@ -61,8 +63,8 @@ fn find_oracle() Oracle {
     }
     cands.push(String::from_str("clang"));
     cands.push(String::from_str("cc"));
-    let mut work = String::from_str(unsafe str::from_cstr(shim::sc_tmpdir()));
-    work.format_into("/super-c-ctarget-oracle-{}", unsafe shim::sc_getpid());
+    let mut work = cli::tmp_dir();
+    work.format_into("/super-c-ctarget-oracle-{}", process::pid().unwrap_or(1));
     let want = format("#define __clang_major__ {}\n", pinned_major());
     for i in 0..cands.len() {
         let mut out = String::new();
@@ -83,12 +85,11 @@ fn find_oracle() Oracle {
     if o.clang.len() != 0 && run(format("{} --version", o.clang.as_str()).as_str(), work.as_str(), &mut ver) == 0 {
         o.debian = ver.as_str().contains("Debian clang") || ver.as_str().contains("Ubuntu clang");
     }
-    let mut w = work.clone();
-    let _ = unsafe shim::sc_unlink(w.cstr());
+    let _ = fs::unlink(work.as_str());
     return o;
 }
 
-fn is_pinned(name: str) bool {
+const fn is_pinned(name: str) bool {
     let p: []str<'static> = PINNED;
     for i in 0..p.len() {
         if p[i] == name {
@@ -100,7 +101,7 @@ fn is_pinned(name: str) bool {
 
 // The name a `#define` line defines, with the pinned version macros left out: empty for those and
 // for any other line.
-fn defined_name(line: str) str {
+const fn defined_name(line: str) str {
     if !line.starts_with("#define ") {
         return "";
     }
@@ -556,7 +557,7 @@ fn answers(text: str) Map<String, bool> {
     return m;
 }
 
-fn debian_drops(key: str) bool {
+const fn debian_drops(key: str) bool {
     let d: []str<'static> = DEBIAN_DROPS;
     for i in 0..d.len() {
         if d[i] == key {
@@ -634,28 +635,15 @@ fn scan_has(dir: str, depth: usize, out: &mut Vector<String>) {
     if depth > 8 {
         return;
     }
-    let mut d = String::from_str(dir);
-    let dh = unsafe shim::sc_opendir(d.cstr());
-    if dh == null {
+    let listed = dutil::list_dir(dir, false);
+    if listed.is_none() {
         return;
     }
-    let mut names = Vector::<String>::new();
-    loop {
-        let e = unsafe shim::sc_readdir(dh);
-        if e == null {
-            break;
-        }
-        let nm = unsafe shim::sc_dirent_name(e);
-        if unsafe nm[0] == '.' as char {
-            continue;
-        }
-        names.push(unsafe String::from_cstr(nm));
-    }
-    let _ = unsafe shim::sc_closedir(dh);
+    let names = listed.unwrap();
     for i in 0..names.len() {
         let n = names[i].as_str();
-        let mut child = format("{}/{}", dir, n);
-        if unsafe shim::sc_stat_isdir(child.cstr()) == 1 {
+        let child = format("{}/{}", dir, n);
+        if dutil::is_dir(child.as_str()) {
             if n != "c++" {
                 scan_has(child.as_str(), depth + 1, out);
             }
@@ -672,7 +660,7 @@ const fn is_name_byte(c: u8) bool {
     return c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9' || c == b'_' || c == b':';
 }
 
-fn skip_blanks(text: str, i: usize) usize {
+const fn skip_blanks(text: str, i: usize) usize {
     let mut j = i;
     while j < text.len() && (text[j] == b' ' || text[j] == b'\t') {
         j += 1;
@@ -736,13 +724,13 @@ fn sysroot_discovery_finds_the_host_headers() {
     assert(t.sys_dirs.len() >= 2, "the built-in directory and a system one");
     for i in 0..t.sys_dirs.len() {
         if t.sys_dirs[i].as_str() != ct::BUILTIN_DIR {
-            let mut d = t.sys_dirs[i].clone();
-            assert(unsafe shim::sc_stat_isdir(d.cstr()) == 1, d.as_str());
+            let d = t.sys_dirs[i].clone();
+            assert(dutil::is_dir(d.as_str()), d.as_str());
         }
     }
     for i in 0..t.frameworks.len() {
-        let mut d = t.frameworks[i].clone();
-        assert(unsafe shim::sc_stat_isdir(d.cstr()) == 1, d.as_str());
+        let d = t.frameworks[i].clone();
+        assert(dutil::is_dir(d.as_str()), d.as_str());
     }
 }
 

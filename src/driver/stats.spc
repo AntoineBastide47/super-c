@@ -7,7 +7,7 @@
 // variable set every entry point returns on a null pointer and the build pays nothing.
 import stdio;
 import stdlib;
-import driver_shim as shim;
+import std::platform::process;
 import std::parallel::platform as platform;
 import lsp::json as ljson;
 
@@ -194,7 +194,7 @@ pub fn mark(b: usize) {
             unsafe (*g).t[i] = now;
             let k = mem_index(i);
             if k < MEM_N {
-                unsafe (*g).rss[k] = unsafe shim::sc_peak_rss();
+                unsafe (*g).rss[k] = process::peak_rss().unwrap_or(0) as i64;
                 if unsafe (*g).mem_on {
                     sample(g, k);
                     unsafe sc_lk_epoch_set(k as u32 + 1);

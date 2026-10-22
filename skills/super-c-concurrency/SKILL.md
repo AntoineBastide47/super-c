@@ -187,8 +187,7 @@ worker) instead of blocking the OS thread.
 | `Semaphore` | Counting semaphore |
 
 Timed forms: `acquire_timeout`, `wait_timeout`, `Condvar::wait_until`. `time::sleep`
-parks on the scheduler's timer heap (`import std::parallel::time as time;`,
-`time::Duration::from_secs`/`from_millis`).
+parks on the scheduler's timer heap (`import std::time;`, `time::Duration::from_secs`/`from_millis`).
 
 **Waiting costs no allocation, and neither does a primitive.** A `Mutex<T>` holds its lock
 word inline and a `Condvar` holds its wait queue inline, so constructing either allocates
@@ -392,7 +391,8 @@ Each iteration emits `{ const T i = k; <block> }`.
 
 ## Async I/O
 
-A reactor (`kqueue` / `epoll`) turns descriptor readiness into coroutine wakes.
+A reactor (`kqueue` / `epoll`) turns descriptor readiness into coroutine wakes. The task-aware sockets are
+`std::net` (`import std::net;`; `IoError` and `IoErrorKind` are prelude types).
 
 ```superc
 let listener = net::TcpListener::bind("127.0.0.1", 0).unwrap();  // (host, port); 0 = ephemeral

@@ -19,6 +19,8 @@ import build_system::manifest as mf;
 import std::testing::bench_sys as sys;
 import std::testing::bench as bench;
 import driver_shim as dshim;
+import std::platform::env as penv;
+import std::platform::fs;
 import stdio;
 import stdlib;
 import time;
@@ -92,7 +94,7 @@ fn count_bytes(ctx: *mut void, path: str, _text: str, _kind: i32, _changed: bool
 // One round: the transpile step into a fresh tree under `pdir`, every boundary sampled into `mk`. False
 // when the transpile failed or skipped a boundary.
 fn transpile_round(m: &mf::Manifest, cx: &bsys::BuildCtx, pdir: &mut String, sink: *mut demit::EmitSink, mk: &mut Marks) bool {
-    let _ = unsafe dshim::sc_rm_rf(pdir.cstr());
+    let _ = fs::remove_all(pdir.as_str());
     mk.seen = 0;
     sample(mk, 0);
     let hook = bst::PhaseHook { ctx: mk as *mut Marks, at: on_mark };
@@ -172,9 +174,7 @@ fn json_phase(js: &mut String, name: str, a: &PhaseAvg) {
 }
 
 fn set_env(name: str, value: str) {
-    let mut n = String::from_str(name);
-    let mut v = String::from_str(value);
-    let _ = unsafe dshim::sc_setenv(n.cstr(), v.cstr());
+    let _ = unsafe penv::set(name, value);
 }
 
 // Milliseconds between two boundaries of a build record.
@@ -187,9 +187,9 @@ const fn build_ms(g: &bst::BuildStats, from: usize, to: usize) f64 {
 // engine's own record is appended to `js` and summarized; a failing compiler, C compiler or linker fails
 // the benchmark and the scratch tree stays for inspection.
 fn real_build(js: &mut String) bool {
-    let mut dir = String::from_str(unsafe str::from_cstr(dshim::sc_tmpdir()));
+    let mut dir = fs::temp_dir().unwrap_or(String::from_str("."));
     dir.push_str("/sc_bench_build");
-    let _ = unsafe dshim::sc_rm_rf(dir.cstr());
+    let _ = fs::remove_all(dir.as_str());
     let m0 = mf::load("build.toml", false);
     if m0.is_none() {
         eprintln("bench: cannot load build.toml (run from the repo root)");
@@ -201,7 +201,7 @@ fn real_build(js: &mut String) bool {
     // out-dir starts without a per-TU cache.
     set_env("SC_NO_CACHE", "1");
     set_env("SC_NO_EMIT_CACHE", "1");
-    let jobs = (unsafe dshim::sc_ncpu()) as u32;
+    let jobs = bsys::cpu_count();
     let mut bin = dir.clone();
     bin.push_str("/super-c");
     bst::arm();
@@ -263,7 +263,7 @@ fn real_build(js: &mut String) bool {
         eprintln("bench: the real build failed (exit {}); its outputs are kept under {}", rc, dir.as_str());
         return false;
     }
-    let _ = unsafe dshim::sc_rm_rf(dir.cstr());
+    let _ = fs::remove_all(dir.as_str());
     return true;
 }
 
@@ -328,7 +328,7 @@ fn run_report(b: &mut bench::Bencher) bool {
         return false;
     }
     let mut m = m0.unwrap();
-    let mut dir = String::from_str(unsafe str::from_cstr(dshim::sc_tmpdir()));
+    let mut dir = fs::temp_dir().unwrap_or(String::from_str("."));
     dir.push_str("/sc_bench_transpile");
     m.out_dir = dir.clone();
     let mut pdir = loader::join2(dir.as_str(), BUILD_PROFILE);
@@ -436,7 +436,7 @@ fn run_report(b: &mut bench::Bencher) bool {
             unsafe sys::sc_bs_alloc_bytes() - yl0,
         );
     }
-    let _ = unsafe dshim::sc_rm_rf(dir.cstr());
+    let _ = fs::remove_all(dir.as_str());
     let rounds = totals_ms.len();
     if !ok || rounds != ITERS as usize {
         return false;

@@ -1,11 +1,12 @@
 import stdio;
 import stdlib;
-import string as cstring;
 import lexer::lexer as lex;
 import ast::ast as *;
 import ast::parser as par;
 import fmt::builder as fbld;
 import driver_shim as shim;
+import std::platform::fs;
+import std::platform::process;
 import std::parallel::runtime as prt;
 import module::loader as loader;
 import resolver::resolver as resolver;
@@ -47,7 +48,7 @@ fn run_file(
     profile: str,
 ) i32 {
     loader::set_load_jobs(jobs);
-    let tl0 = unsafe shim::sc_ticks_ms();
+    let tl0 = ticks_ms();
     // The build settings the prelude's build constants spell, set before the load.
     let mut p = loader::package_new(loader::dirname_of(path), "", std_dir);
     p.arch = arch;
@@ -67,7 +68,7 @@ fn run_file(
         p.load_user(path, std_dir, target);
     }
     if stdlib::getenv("SC_CEMIT_STATS") != null {
-        eprintln("phase load: {} ms", unsafe shim::sc_ticks_ms() - tl0);
+        eprintln("phase load: {} ms", ticks_ms() - tl0);
     }
     loader::set_load_jobs(1);
     // `--out-dir`, `--cc` and `--cstd` apply to a bare build exactly as to a manifest one: the emitted tree
@@ -109,9 +110,8 @@ fn run_file(
         // One process builds a tree at a time, as in a manifest build.
         default_gen_root(&mut p);
         let lk = bsys::tree_lock(loader::dirname_of(p.gen_root.as_str()));
-        if lk >= 0 {
+        if lk.held() {
             rc = run_package(&mut p, topts, out_bin, target, lint, cflags, ccflags, null);
-            unsafe shim::sc_tree_unlock(lk);
         }
     }
     return rc;
@@ -180,22 +180,20 @@ fn exe_std_dir(argv0: *const char) String {
     if ov.len() != 0 {
         return ov;
     }
-    let mut buf = PathBuf {};
-    let mut path = argv0;
-    if unsafe shim::sc_exe_path(&mut buf[0], 4096) == 0 {
-        path = &buf[0];
-    }
-    // Last path separator, '/' or '\\' (Windows), whichever occurs later: branch-free, no platform detection.
-    let s1 = unsafe cstring::strrchr(path, '/');
-    let s2 = unsafe cstring::strrchr(path, '\\');
-    let slash = if s2 as usize > s1 as usize {
-        s2;
+    let exe = exe_path();
+    let path = if exe.len() != 0 {
+        exe.as_str();
     } else {
-        s1;
+        unsafe str::from_cstr(argv0);
     };
+    // Last path separator, '/' or '\\' (Windows), whichever occurs later.
+    let mut slash = path.len();
+    while slash > 0 && path.byte_at(slash - 1) != b'/' && path.byte_at(slash - 1) != b'\\' {
+        slash -= 1;
+    }
     let mut base = String::new();
-    if slash != null {
-        base.push_str(unsafe str::from_raw(path as *const u8, slash as usize - path as usize));
+    if slash != 0 {
+        base.push_str(path.slice(0, slash - 1));
     } else {
         base.push_str(".");
     }
@@ -206,7 +204,7 @@ fn exe_std_dir(argv0: *const char) String {
         let mut probe = String::with_capacity(cut + 4);
         probe.push_str(unsafe str::from_raw(base.as_str().ptr(), cut));
         probe.push_str("/std");
-        if unsafe shim::sc_stat_isdir(probe.cstr()) == 1 {
+        if is_dir(probe.as_str()) {
             return probe;
         }
         let mut k = cut;
@@ -283,7 +281,7 @@ fn project_paths() Vector<String> {
         }
         probe.clear();
         probe.push_str(n);
-        if unsafe shim::sc_stat_isdir(probe.cstr()) == 1 || n.ends_with(".spc") {
+        if is_dir(probe.as_str()) || n.ends_with(".spc") {
             out.push(String::from_str(n));
         }
     }
@@ -437,8 +435,8 @@ fn lint_project(
     // A nested project lints as from its own directory: its manifest, its imports.
     let home = canon_cwd();
     for k in 0..nested.len() {
-        let mut nd = nested.at(k).clone();
-        if unsafe shim::sc_chdir(nd.cstr()) != 0 {
+        let nd = nested.at(k).clone();
+        if process::set_current_dir(nd.as_str()).is_err() {
             eprintln("lint: cannot enter '{}'", nd.as_str());
             rc = 1;
             continue;
@@ -448,8 +446,7 @@ fn lint_project(
             eprintln("lint: the findings above are in the project '{}'", nd.as_str());
             rc = 1;
         }
-        let mut hc = home.clone();
-        assert(unsafe shim::sc_chdir(hc.cstr()) == 0, "lint: cannot return to the working directory");
+        assert(process::set_current_dir(home.as_str()).is_ok(), "lint: cannot return to the working directory");
     }
     return rc;
 }
@@ -514,31 +511,34 @@ fn apply_lint_fixes(src: str, fixes: &mut Vector<diag::LintFix>, texts: &Vector<
 // as the secondary import root so tests/ and bench/ files linted from the project root resolve
 // their compiler-module imports.
 fn lint_alt() str<'static> {
-    if unsafe shim::sc_stat_isdir("src".ptr() as *const char) == 1 {
+    if is_dir("src") {
         return "src";
     }
     return "";
 }
 
-// One lint pass over the loaded package `p`, reporting as lint_package with `lint_mod`. Without
-// `fix`: the exit code. With `fix` (quiet): 1 on an error or a failed write; else, when `apply`, the
-// machine fixes are written (each fixed file reformatted: canonicalization can unlock paren-guarded
-// fixes) and the result is 2 if any was written; else 0.
-// The profiles a PROFILE comparison may name in a lint run: the manifest's, else the built-ins.
-fn lint_profiles() Vector<String> {
+// The manifest settings of a lint run on `p`: the profiles a PROFILE comparison may name (the manifest's,
+// else the built-ins) and `std_internals`.
+fn lint_settings(p: &mut loader::Package) {
     let manf = stdio::fopen("build.toml", "rb");
     if manf != null {
         unsafe stdio::fclose(manf);
         let mo = bman::load("build.toml", false);
         if !mo.is_none() {
             let man = mo.unwrap();
-            return bsys::profile_names(&man);
+            p.profiles = bsys::profile_names(&man);
+            p.std_internals = man.std_internals;
+            return;
         }
     }
     let bi = bman::builtins_only();
-    return bsys::profile_names(&bi);
+    p.profiles = bsys::profile_names(&bi);
 }
 
+// One lint pass over the loaded package `p`, reporting as lint_package with `lint_mod`. Without
+// `fix`: the exit code. With `fix` (quiet): 1 on an error or a failed write; else, when `apply`, the
+// machine fixes are written (each fixed file reformatted: canonicalization can unlock paren-guarded
+// fixes) and the result is 2 if any was written; else 0.
 fn lint_pass(
     p: &mut loader::Package,
     target: i32,
@@ -550,11 +550,11 @@ fn lint_pass(
     sc: bool,
 ) i32 {
     // Parallel analysis; resolves to 1 on wasm.
-    p.jobs = p.analysis_jobs((unsafe shim::sc_ncpu()) as u32);
+    p.jobs = p.analysis_jobs(bsys::cpu_count());
     if p.jobs == 1 {
         prt::shutdown(); // parallel loading may have started the pool
     }
-    p.profiles = lint_profiles();
+    lint_settings(p);
     let mut cirv = iri::interp_master(p as *mut loader::Package, ce_steps, ce_mem);
     p.cir = &mut cirv;
     let mut rc = 0;
@@ -612,12 +612,11 @@ fn lint_one(path: str, root: str, std_dir: str, ce_steps: u32, ce_mem: u64, targ
     // and sets the exit code.
     let mut pass = 0;
     loop {
-        let mut pathc = String::from_str(path);
         let mut p = loader::package_from_source("", std_dir, target);
         let mut lint_mod = p.modules.len(); // the appended empty root; replaced below
         let mut found = false;
         for m in 0..p.modules.len() {
-            if p.modules[m].has_ast && unsafe shim::sc_same_file(pathc.cstr(), p.modules[m].file.cstr()) == 1 {
+            if p.modules[m].has_ast && same_file(path, p.modules[m].file.as_str()) {
                 lint_mod = m;
                 found = true;
                 break;
@@ -656,7 +655,7 @@ fn spc_collect(dir: str, cmd: str, files: &mut Vector<String>) i32 {
 fn has_manifest(dir: str) bool {
     let mut man = String::from_str(dir);
     man.push_str("/build.toml");
-    return unsafe shim::sc_stat_isdir(man.cstr()) == 0;
+    return fs::stat(man.as_str()).map(|m: fs::Metadata| m.kind != fs::FileKind::Dir).unwrap_or(false);
 }
 
 // `spc_collect`; with `nested`, a subdirectory holding its own build.toml is another project: its path
@@ -673,7 +672,7 @@ fn spc_collect_in(dir: str, cmd: str, files: &mut Vector<String>, nested: *mut V
         let mut p = String::from_str(dir);
         p.push_byte(b'/');
         p.push_string(names.at(i));
-        if unsafe shim::sc_stat_isdir(p.cstr()) == 1 {
+        if is_dir(p.as_str()) {
             if nested != null && has_manifest(p.as_str()) {
                 unsafe (*nested).push(p);
             } else if spc_collect_in(p.as_str(), cmd, files, nested) != 0 {
@@ -699,16 +698,16 @@ fn lint_load_batch(files: &Vector<String>, root: str, alt: str, std_dir: str, ta
     );
     let mut mids = Vector::<i32>::new();
     for k in 0..files.len() {
-        let mut fc = String::from_str(files.at(k).as_str());
-        let base = loader::basename_of(files.at(k).as_str());
+        let fc = files.at(k).as_str();
+        let base = loader::basename_of(fc);
         // Already present? (a prelude module, or pulled in by an earlier file's imports). The basename
         // compare needs no syscall, so the file-identity check runs only on the rare collisions.
         let mut mid: i32 = -1;
         for m in 0..p.modules.len() {
-            if p.modules[m].has_ast && loader::basename_of(p.modules[m].file.as_str()) == base && unsafe shim::sc_same_file(
-                fc.cstr(),
-                p.modules[m].file.cstr(),
-            ) == 1 {
+            if p.modules[m].has_ast && loader::basename_of(p.modules[m].file.as_str()) == base && same_file(
+                fc,
+                p.modules[m].file.as_str(),
+            ) {
                 mid = m as i32;
                 break;
             }
@@ -785,10 +784,8 @@ fn run_fmt(path: str, check: bool) i32 {
 // Replace a source file through a temp file and a rename, so a failed write leaves it intact. The link
 // target is replaced when `path` is a symlink, never the link itself.
 fn write_source(path: str, body: str) bool {
-    let mut p = String::from_str(path);
-    let mut abs = PathBuf {};
-    if unsafe shim::sc_realpath(p.cstr(), &mut abs[0]) != null {
-        return write_file_atomic(str::from_cbuf(abs.as_slice()), body);
+    if let Ok(abs) = fs::realpath(path) {
+        return write_file_atomic(abs.as_str(), body);
     }
     return write_file_atomic(path, body);
 }
@@ -850,7 +847,7 @@ enum Mode {
     MODE_BINDGEN, // `super-c bindgen <header.h>`: C header -> an `extern "C"` module
 }
 
-fn subcommand(arg: str) Mode {
+const fn subcommand(arg: str) Mode {
     return (bman::subcommand_index(arg) + 1) as Mode;
 }
 
@@ -996,19 +993,14 @@ extend<'a> BuildOpts<'a> {
 }
 
 fn canon_cwd() String {
-    let mut dot = String::from_str(".");
-    let mut buf = PathBuf {};
-    if unsafe shim::sc_realpath(dot.cstr(), &mut buf[0]) != null {
-        return String::from_str(str::from_cbuf(buf.as_slice()));
-    }
-    return dot;
+    return fs::realpath(".").unwrap_or(String::from_str("."));
 }
 
 // Cargo-style manifest discovery: when the cwd has no build.toml, walk toward the filesystem root and
 // chdir to the nearest directory that has one. A miss changes nothing: the caller reports it.
 fn chdir_to_manifest() {
-    if let Some(mut dir) = nearest_manifest() {
-        let _ = unsafe shim::sc_chdir(dir.cstr());
+    if let Some(dir) = nearest_manifest() {
+        let _ = process::set_current_dir(dir.as_str());
     }
 }
 
@@ -1489,8 +1481,7 @@ fn main(argv: Vector<str>) i32 {
             out_abs.push_str(out_bin);
             out_bin = out_abs.as_str();
         }
-        let mut d = String::from_str(proj_dir);
-        if unsafe shim::sc_chdir(d.cstr()) != 0 {
+        if process::set_current_dir(proj_dir).is_err() {
             eprintln("error: cannot enter '{}'", proj_dir);
             return 1;
         }
@@ -1516,7 +1507,7 @@ fn main(argv: Vector<str>) i32 {
     let jobs_wanted = if bo.jobs != 0 {
         bo.jobs;
     } else {
-        (unsafe shim::sc_ncpu()) as u32;
+        bsys::cpu_count();
     };
     // Waiting test parents transfer their slots to nested compilers. One process-tree slot per core keeps
     // independent tests parallel while nested compilers run serially instead of competing for the same cores.
@@ -1617,8 +1608,7 @@ fn main(argv: Vector<str>) i32 {
     if emit_sub.len() != 0 {
         // The transpile form works from the project directory, as the engine that runs it does.
         if manifest_dir.len() != 0 {
-            let mut md = String::from_str(manifest_dir);
-            if unsafe shim::sc_chdir(md.cstr()) != 0 {
+            if process::set_current_dir(manifest_dir).is_err() {
                 eprintln("error: cannot enter '{}'", manifest_dir);
                 return 1;
             }

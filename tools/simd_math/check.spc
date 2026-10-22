@@ -1134,7 +1134,7 @@ extend Stat {
         }
     }
 
-    fn merge(self: &mut Stat, o: &Stat) {
+    const fn merge(self: &mut Stat, o: &Stat) {
         for c in 0..CLASSES {
             if unsafe o.max[c] > unsafe self.max[c] {
                 unsafe self.max[c] = unsafe o.max[c];

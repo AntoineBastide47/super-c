@@ -398,7 +398,7 @@ extend Lexer {
     // Decodes one UTF-8 scalar starting at `current` (first byte `b`). Any malformed sequence sets
     // *size to 0 and returns 0 UNDIAGNOSED; the caller owns the error report.
     @cold
-    fn decode_at_b(self: &Self, b: u8, current: usize, size: &mut usize) u32 {
+    const fn decode_at_b(self: &Self, b: u8, current: usize, size: &mut usize) u32 {
         let mut minimum: u32 = 0x10000;
         let mut width: usize = 4;
         if b <= 0xDFu8 {
@@ -514,7 +514,7 @@ extend Lexer {
         return i + size;
     }
 
-    fn whitespace(self: &mut Self) {
+    const fn whitespace(self: &mut Self) {
         let mut i = self.current;
         while (self.class[self.at(i) as usize] & CC_WS) != 0u8 {
             i += 1;
@@ -713,7 +713,7 @@ extend Lexer {
 
     // After a '\'': true when an identifier run follows WITHOUT a closing '\'', so a label/lifetime
     // token, not a character literal ('a vs 'a'). The parser's lifetime grammar relies on this split.
-    fn label_ahead(self: &Self) bool {
+    const fn label_ahead(self: &Self) bool {
         let mut i = self.current;
         let mut b: u8 = 0;
         if i < self.bytes.len() {
@@ -790,7 +790,7 @@ extend Lexer {
     // (strictly nested pairs, possibly empty) followed by a `"` is ahead. Anything else leaves `M` an
     // ordinary identifier, so existing code like a call `M("x")` or a struct literal `M{}` is
     // untouched: those never abut a quote through a well-nested chain.
-    fn matchertext_ahead(self: &Self) bool {
+    const fn matchertext_ahead(self: &Self) bool {
         let mut i = self.current;
         let mut dn: usize = 0;
         while i < self.bytes.len() && is_mt_open(self.at(i)) {
@@ -970,7 +970,7 @@ extend Lexer {
 
     // Scans a decimal digit run allowing '_' only BETWEEN digits; the first bad separator position latches into
     // *error_at (USIZE_MAX = none yet) while scanning continues, so the run is consumed whole.
-    fn digits(self: &mut Self, component_start: usize, error_at: &mut usize) {
+    const fn digits(self: &mut Self, component_start: usize, error_at: &mut usize) {
         let mut i = self.current;
         while i < self.bytes.len() {
             let b = self.at(i);

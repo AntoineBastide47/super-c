@@ -68,15 +68,16 @@ fn redundant_cast_lint_covers_all_implicits() {
 }
 
 // `--const`: the deep (all-paths) CTFE scan flags functions provably evaluable at compile
-// time: through branches, matches and statically-resolved method calls, and stays silent on
-// loops, extern calls, recursion, `@no_const` functions and declared `const fn`s. Off by
+// time: through branches, matches, loops and statically-resolved method calls, and stays silent
+// on extern calls (also in a loop body), recursion, `@no_const` functions, declared `const fn`s
+// and functions holding a build-constant branch (another build runs the removed code). Off by
 // default (no warning without the flag).
 @test
 fn const_suggestion_lint() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "struct P {\n    pub x: i32,\n}\n\nextend P {\n    fn norm(self: Self) i32 {\n        if self.x < 0 {\n            return -self.x;\n        }\n        return self.x;\n    }\n}\n\nfn branchy(a: i32) i32 {\n    if a > 10 {\n        return a - 10;\n    }\n    return 10 - a;\n}\n\nfn use_method(p: P) i32 {\n    return p.norm();\n}\n\nconst fn already(a: i32) i32 {\n    return a + 1;\n}\n\nfn looping(n: i32) i32 {\n    let mut s = 0;\n    for i in 0..n {\n        s = s + i;\n    }\n    return s;\n}\n\nfn prints(a: i32) i32 {\n    println(\"{}\", a);\n    return a;\n}\n\nfn rec(n: i32) i32 {\n    if n <= 1 {\n        return 1;\n    }\n    return n * rec(n - 1);\n}\n\n@no_const\nfn tagged(a: i32) i32 {\n    return a + 1;\n}\n\nfn main() i32 {\n    let p = P { x: 3 };\n    return branchy(4) + use_method(p) + already(1) + looping(2) + prints(0) + rec(2) + tagged(0) - 22;\n}\n",
+        "struct P {\n    pub x: i32,\n}\n\nextend P {\n    fn norm(self: Self) i32 {\n        if self.x < 0 {\n            return -self.x;\n        }\n        return self.x;\n    }\n}\n\nfn branchy(a: i32) i32 {\n    if a > 10 {\n        return a - 10;\n    }\n    return 10 - a;\n}\n\nfn use_method(p: P) i32 {\n    return p.norm();\n}\n\nconst fn already(a: i32) i32 {\n    return a + 1;\n}\n\nfn looping(n: i32) i32 {\n    let mut s = 0;\n    for i in 0..n {\n        s = s + i;\n    }\n    while s > 100 {\n        s = s - 1;\n        if s == 50 {\n            break;\n        }\n    }\n    return s;\n}\n\nfn loop_prints(n: i32) i32 {\n    for i in 0..n {\n        println(\"{}\", i);\n    }\n    return n;\n}\n\nfn prints(a: i32) i32 {\n    println(\"{}\", a);\n    return a;\n}\n\nfn rec(n: i32) i32 {\n    if n <= 1 {\n        return 1;\n    }\n    return n * rec(n - 1);\n}\n\n@no_const\nfn tagged(a: i32) i32 {\n    return a + 1;\n}\n\nfn gated() i32 {\n    if THREAD_SANITIZER {\n        return 1;\n    }\n    return 0;\n}\n\nfn main() i32 {\n    let p = P { x: 3 };\n    return branchy(4) + use_method(p) + already(1) + looping(2) + loop_prints(0) + prints(0) + rec(2) + tagged(0) + gated() - 22;\n}\n",
     );
     let root = p.dir();
     let mut args = String::from_str("lint --const \"");
@@ -89,10 +90,12 @@ fn const_suggestion_lint() {
     assert(r.out_has("function 'branchy' can be declared 'const fn'"));
     assert(r.out_has("function 'use_method' can be declared 'const fn'"));
     assert(!r.out_has("'already'"));
-    assert(!r.out_has("'looping'"));
+    assert(r.out_has("function 'looping' can be declared 'const fn'"));
+    assert(!r.out_has("'loop_prints'"), "an extern call in a loop body disqualifies");
     assert(!r.out_has("'prints'"));
     assert(!r.out_has("'rec'"));
     assert(!r.out_has("'tagged'"), "a '@no_const' function is never suggested");
+    assert(!r.out_has("'gated'"), "code another build runs may not be constant");
     assert(!r.out_has("'main'"));
 
     // Off by default: the same file lints clean.
@@ -116,7 +119,8 @@ fn const_suggestion_lint() {
     assert(fixed.as_str().contains("const fn use_method"));
     // Extend member.
     assert(fixed.as_str().contains("const fn norm"));
-    assert(!fixed.as_str().contains("const fn looping"));
+    assert(fixed.as_str().contains("const fn looping"));
+    assert(!fixed.as_str().contains("const fn loop_prints"));
     assert(!fixed.as_str().contains("const fn prints"));
     assert(!fixed.as_str().contains("const fn rec"));
     assert(!fixed.as_str().contains("const fn main"));
@@ -281,6 +285,18 @@ fn non_ascii_char_ranges_are_disjoint() {
     let r = p.run_raw(args.as_str());
     assert(!r.out_has("unreachable arm"));
     assert_eq(r.exit, 0);
+}
+
+// A glob import re-exports its module's names: unused, it is reported in the program's root module only.
+@test
+fn glob_imports_re_export() {
+    let p = cli::proj_new();
+    p.mkfile("extra.spc", "pub fn e() i32 {\n    return 1;\n}\n");
+    p.mkfile("lib.spc", "import extra as *;\n\npub fn l() i32 {\n    return 2;\n}\n");
+    p.mkfile("main.spc", "import lib;\nimport extra as *;\n\nfn main() i32 {\n    return lib::l() - 2;\n}\n");
+    let r = cli::superc_in(p.dir(), "lint main.spc");
+    assert(r.out_has("unused import 'extra'") && r.out_has("main.spc:2:1"));
+    assert(!r.out_has("lib.spc"));
 }
 
 // The driver lints: unused imports (fixable), never-read private fields, unused tagged-enum
@@ -563,7 +579,7 @@ fn main() i32 {
         "task.spc",
         M"(import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
-import std::parallel::time as time;
+import std::time as time;
 
 fn spin(n: i64) i64 {
     time::sleep(time::Duration::from_nanos(1));

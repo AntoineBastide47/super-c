@@ -20,7 +20,7 @@ fn near_v<T: Float, const N: usize>(x: Vec<T, N>, y: Vec<T, N>, eps: T) bool {
     return true;
 }
 
-fn all<const N: usize>(b: Vec<bool, N>) bool {
+const fn all<const N: usize>(b: Vec<bool, N>) bool {
     for i in 0..N {
         if !b[i] {
             return false;
@@ -29,7 +29,7 @@ fn all<const N: usize>(b: Vec<bool, N>) bool {
     return true;
 }
 
-fn any<const N: usize>(b: Vec<bool, N>) bool {
+const fn any<const N: usize>(b: Vec<bool, N>) bool {
     for i in 0..N {
         if b[i] {
             return true;

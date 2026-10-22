@@ -11,6 +11,7 @@ import ast::ast as *;
 import ast::parser as par;
 import fmt::builder as fbld;
 import driver_shim as shim;
+import std::platform::fs;
 import module::loader as loader;
 import resolver::resolver as resolver;
 import typechecker::typechecker as tc;
@@ -1680,7 +1681,7 @@ pub fn write_test_main(p: &mut loader::Package, plan: &TestPlan, fresh: &mut boo
     o.push_str("#else\n");
     o.push_str(unsafe str::from_cstr(test_runner_main_posix()));
     o.push_str("#endif\n");
-    let rc = publish_file(&mut path, o.as_str());
+    let rc = publish_file(path.as_str(), o.as_str());
     if rc < 0 {
         unsafe stdio::perror(path.cstr());
         return Option::<String>::None;
@@ -1824,15 +1825,15 @@ pub fn test_build_and_run(
     let n = args.len() - first;
     let ldpath = build_out_path(root, "__ldflags", "");
     push_ldflags(&mut args, ldpath.as_str());
-    let mut rsp = loader::join2(root, "__link.rsp");
+    let rsp = loader::join2(root, "__link.rsp");
     let fit = bsys::fit_cmdline(&mut args, first, n, rsp.as_str(), bsys::cmdline_max());
     let brc = if fit < 0 {
         1;
     } else {
-        exec_args(&mut args, null);
+        exec_args(&args, "");
     };
     if fit > 0 {
-        let _ = unsafe shim::sc_unlink(rsp.cstr());
+        let _ = fs::unlink(rsp.as_str());
     }
     if brc != 0 {
         eprintln("super-c: {} failed ({})", what, ccs.as_str());
@@ -1878,7 +1879,7 @@ pub fn test_run_runner(topts: *const TestOpts, bin: str) i32 {
     run.push(String::from_str(str::from_cbuf(tb.as_slice())));
     let dur = unsafe (*topts).durations;
     // The shards balance by the recorded durations when the file exists.
-    if dur != null && unsafe shim::sc_mtime(dur) != 0 {
+    if dur != null && file_mtime(unsafe str::from_cstr(dur)) != 0 {
         let mut w = String::from_str("--weights=");
         w.push_str(unsafe str::from_cstr(dur));
         run.push(w);
@@ -1906,7 +1907,7 @@ pub fn test_run_runner(topts: *const TestOpts, bin: str) i32 {
         run.push(String::from_str(str::from_cbuf(sb.as_slice())));
     }
     unsafe shim::sc_jobserver_release_claim();
-    let rrc = exec_args(&mut run, null);
+    let rrc = exec_args(&run, "");
     if rrc < 0 {
         eprintln("super-c: cannot run the test runner '{}'", bin);
         return 1;

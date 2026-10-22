@@ -322,7 +322,7 @@ pub fn compute_covariance_matrix_with_center<T: Scalar, const N: usize>(v: []Vec
 }
 
 // m[x][y] += v[x] * v[y].
-fn add_outer<T: Scalar, const N: usize>(m: &mut Mat<T, N, N>, v: Vec<T, N>) {
+const fn add_outer<T: Scalar, const N: usize>(m: &mut Mat<T, N, N>, v: Vec<T, N>) {
     for x in 0..N {
         for y in 0..N {
             unsafe {
@@ -567,7 +567,7 @@ fn sort_eigen_pair<T: Scalar, const N: usize>(values: &mut Vec<T, N>, vectors: &
 // Matrix factorization.
 
 /// The columns of `m` in reverse order.
-pub fn fliplr<T: Scalar, const C: usize, const R: usize>(m: Mat<T, C, R>) Mat<T, C, R> {
+pub const fn fliplr<T: Scalar, const C: usize, const R: usize>(m: Mat<T, C, R>) Mat<T, C, R> {
     let mut out = m;
     for i in 0..C {
         unsafe {
@@ -578,7 +578,7 @@ pub fn fliplr<T: Scalar, const C: usize, const R: usize>(m: Mat<T, C, R>) Mat<T,
 }
 
 /// The rows of `m` in reverse order.
-pub fn flipud<T: Scalar, const C: usize, const R: usize>(m: Mat<T, C, R>) Mat<T, C, R> {
+pub const fn flipud<T: Scalar, const C: usize, const R: usize>(m: Mat<T, C, R>) Mat<T, C, R> {
     let mut out = m;
     for i in 0..C {
         for j in 0..R {

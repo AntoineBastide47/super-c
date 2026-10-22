@@ -6,6 +6,8 @@
 // build_system::build.
 import stdlib;
 import driver_shim as shim;
+import std::platform::fs;
+import std::platform::process;
 import module::loader as loader;
 import ast::ast as *;
 import driver::util as *;
@@ -105,7 +107,7 @@ pub const fn key_prefixed(name: str) bool {
 
 /// Mix `n` bytes at `p` into the two key lanes. Two independent lanes: an object served for the WRONG
 /// key would be a silent mislink, so the key is 128 bits, not 64.
-pub fn ch_mix_bytes(h1: &mut u64, h2: &mut u64, p: *const u8, n: usize) {
+pub const fn ch_mix_bytes(h1: &mut u64, h2: &mut u64, p: *const u8, n: usize) {
     let mut a = *h1;
     let mut b = *h2;
     let mut i: usize = 0;
@@ -414,7 +416,7 @@ pub fn which_path(cmd: str, out: &mut String) i64 {
                             if x == 1 {
                                 cand.push_str(".exe");
                             }
-                            let mt = unsafe shim::sc_mtime(cand.cstr());
+                            let mt = file_mtime(cand.as_str());
                             if mt != 0 {
                                 out.push_string(&cand);
                                 return mt;
@@ -432,18 +434,13 @@ pub fn which_path(cmd: str, out: &mut String) i64 {
     out.push_str(name);
     cand.clear();
     cand.push_str(name);
-    return unsafe shim::sc_mtime(cand.cstr());
+    return file_mtime(cand.as_str());
 }
 
 /// The developer directory `xcode-select` chose (the target of `/var/db/xcode_select_link`); empty when
 /// none is set.
 pub fn xcode_select_dir() String {
-    let mut lb = PathBuf {};
-    let mut link = String::new();
-    if unsafe shim::sc_readlink("/var/db/xcode_select_link".ptr() as *const char, &mut lb[0], 4096) > 0 {
-        link.push_str(str::from_cbuf(lb.as_slice()));
-    }
-    return link;
+    return fs::readlink("/var/db/xcode_select_link").unwrap_or(String::new());
 }
 
 /// The identity of compiler command `cc` that a recorded version line stands for: the command, and
@@ -470,8 +467,8 @@ fn cc_identity(cc: str) String {
         for d in devs {
             for c in clangs {
                 if d.len() != 0 {
-                    let mut cp = loader::join2(d, c);
-                    id.format_into("\t{}", unsafe shim::sc_mtime(cp.cstr()));
+                    let cp = loader::join2(d, c);
+                    id.format_into("\t{}", file_mtime(cp.as_str()));
                 }
             }
         }
@@ -594,9 +591,9 @@ pub fn direct_cc(cc: String, target: i32, dir: str) String {
         } else {
             loader::join2(dir, ".xcrun");
         };
-        let pid = unsafe shim::sc_getpid();
-        let mut tout = format("{}.{}t", base.as_str(), pid);
-        let mut sout = format("{}.{}s", base.as_str(), pid);
+        let pid = process::pid().unwrap_or(1);
+        let tout = format("{}.{}t", base.as_str(), pid);
+        let sout = format("{}.{}s", base.as_str(), pid);
         let mut fa = Vector::<String>::new();
         fa.push(String::from_str("xcrun"));
         fa.push(String::from_str("-f"));
@@ -604,21 +601,20 @@ pub fn direct_cc(cc: String, target: i32, dir: str) String {
         let mut sa = Vector::<String>::new();
         sa.push(String::from_str("xcrun"));
         sa.push(String::from_str("--show-sdk-path"));
-        let xcrun = "/usr/bin/xcrun".ptr() as *const char;
-        let tpid = spawn_at(xcrun, &mut fa, tout.cstr());
-        let spid = spawn_at(xcrun, &mut sa, sout.cstr());
-        let mut code: i32 = 0;
-        if tpid >= 0 {
-            let _ = unsafe shim::sc_waitpid(tpid, &mut code);
+        let xcrun = "/usr/bin/xcrun";
+        let tc = spawn_at(xcrun, &fa, tout.as_str());
+        let sc = spawn_at(xcrun, &sa, sout.as_str());
+        if let Some(mut c) = tc {
+            let _ = c.wait();
         }
-        if spid >= 0 {
-            let _ = unsafe shim::sc_waitpid(spid, &mut code);
+        if let Some(mut c) = sc {
+            let _ = c.wait();
         }
         tool = take_first_line(tout.as_str()).unwrap_or(String::new());
         sdk = take_first_line(sout.as_str()).unwrap_or(String::new());
-        let _ = unsafe shim::sc_unlink(tout.cstr());
-        let _ = unsafe shim::sc_unlink(sout.cstr());
-        if !tool.as_str().starts_with("/") || unsafe shim::sc_mtime(tool.cstr()) == 0 || !is_dir(sdk.as_str()) {
+        let _ = fs::unlink(tout.as_str());
+        let _ = fs::unlink(sout.as_str());
+        if !tool.as_str().starts_with("/") || file_mtime(tool.as_str()) == 0 || !is_dir(sdk.as_str()) {
             return cc;
         }
         if rp.len() != 0 {
@@ -656,16 +652,15 @@ pub fn cc_version(cc: str, dir: str) String {
 /// every object key and command fingerprint, so a toolchain upgrade invalidates objects whose sources
 /// and flags did not change. Empty when the command prints nothing.
 pub fn cc_version_argv(args: &mut Vector<String>, dir: str) String {
-    let mut vf = loader::join2(dir, ".ccver");
-    let _ = exec_args(args, vf.cstr());
+    let vf = loader::join2(dir, ".ccver");
+    let _ = exec_args(args, vf.as_str());
     return take_first_line(vf.as_str()).unwrap_or(String::new());
 }
 
 /// The first line of file `path`, which is then removed; None when it cannot be read.
 pub fn take_first_line(path: str) Option<String> {
     let v = loader::read_file(path);
-    let mut pc = String::from_str(path);
-    unsafe shim::sc_unlink(pc.cstr());
+    let _ = fs::unlink(path);
     if v.is_none() {
         return Option::<String>::None;
     }
@@ -701,12 +696,12 @@ pub fn script_entry(ns: str, name: str) String {
 /// Whether `flags` make an object depend on the directory it was compiled in or on the object's path:
 /// debug information (`-g` other than `-g0`, which records the compile directory) and coverage or
 /// profile instrumentation (`instruments`). Such a unit's key holds its tree's path.
-pub fn records_dir(flags: &Vector<String>) bool {
+pub const fn records_dir(flags: &Vector<String>) bool {
     return debug_info(flags) || instruments(flags);
 }
 
 /// Whether `flags` ask for debug information (`-g` other than `-g0`).
-pub fn debug_info(flags: &Vector<String>) bool {
+pub const fn debug_info(flags: &Vector<String>) bool {
     for i in 0..flags.len() {
         let f = flags.at(i).as_str();
         if f.starts_with("-g") && f != "-g0" {
@@ -717,7 +712,7 @@ pub fn debug_info(flags: &Vector<String>) bool {
 }
 
 /// Whether `flags` ask for coverage or profile instrumentation, which records where its data goes.
-pub fn instruments(flags: &Vector<String>) bool {
+pub const fn instruments(flags: &Vector<String>) bool {
     for i in 0..flags.len() {
         let f = flags.at(i).as_str();
         if f == "--coverage" || f == "-ftest-coverage" || f == "-fprofile-arcs" || f.starts_with("-fprofile-generate") {
@@ -738,7 +733,7 @@ const fn abs_path(p: str) bool {
 }
 
 // Whether `w` names a path relative to the working directory: it has a separator and is not absolute.
-fn rel_path(w: str) bool {
+const fn rel_path(w: str) bool {
     return !abs_path(w) && (w.find("/") >= 0 || w.find("\\") >= 0);
 }
 
@@ -762,7 +757,7 @@ const PATH_FLAGS: [str<'static>; NPATH_FLAGS] = [
 /// Whether the command words `cc` then `flags` mean the same from any working directory: no word
 /// names a path relative to it (the compiler itself, an include or library directory, a sysroot,
 /// a response file, a `--flag=<path>` value). Only then may a unit compile from its object directory.
-pub fn cwd_free(cc: &Vector<String>, flags: &Vector<String>) bool {
+pub const fn cwd_free(cc: &Vector<String>, flags: &Vector<String>) bool {
     let mut pending = false;
     for i in 0..cc.len() + flags.len() {
         let w = if i < cc.len() {
@@ -849,8 +844,7 @@ pub fn compile_units(
     }
     let objdir = loader::join2(loader::dirname_of(aroot.as_str()), "obj");
     mkdir_p(objdir.as_str());
-    let mut nsb = String::from_str(ns);
-    let fresh = unsafe shim::sc_mtime(nsb.cstr()) == 0;
+    let fresh = file_mtime(ns) == 0;
     mkdir_p(ns);
     // The version line joins every key: the line recorded for this compiler, else the probe, started
     // first.
@@ -862,20 +856,15 @@ pub fn compile_units(
         ccs.push_string(cc.at(i));
     }
     let known = ccver_recorded(ccs.as_str()).unwrap_or(String::new());
-    let mut vf = loader::join2(objdir.as_str(), ".ccver");
-    let mut vpid: i64 = -1;
+    let vf = loader::join2(objdir.as_str(), ".ccver");
+    let mut vpid = Option::<process::Child>::None;
     if known.len() == 0 {
         let mut va = Vector::<String>::with_capacity(cc.len() + 1);
         for i in 0..cc.len() {
             va.push(cc.at(i).clone());
         }
         va.push(String::from_str("--version"));
-        let mut vptrs = Vector::<usize>::with_capacity(va.len() + 1);
-        for i in 0..va.len() {
-            vptrs.push(va[i].cstr() as usize);
-        }
-        vptrs.push(0);
-        vpid = unsafe shim::sc_spawn_argv(null, vptrs.as_ptr() as *const *const char, vf.cstr());
+        vpid = spawn_args(&va, vf.as_str());
     }
     // Per unit: its object path and the hash of its relative name and its text with its includes
     // (`ok` false: something unreadable, not cacheable).
@@ -920,8 +909,8 @@ pub fn compile_units(
     // An object of an earlier build may be a name of a cache entry: a compiler that writes its output
     // in place would rewrite the entry.
     for i in 0..miss.len() {
-        let mut op = opaths.at(miss[i] as usize).clone();
-        let _ = unsafe shim::sc_unlink(op.cstr());
+        let op = opaths.at(miss[i] as usize).clone();
+        let _ = fs::unlink(op.as_str());
     }
     let rc = run_jobs(cc, flags, aroot.as_str(), units, root, objdir.as_str(), &opaths, &miss, &mut vpid);
     if rc != 0 {
@@ -939,10 +928,9 @@ pub fn compile_units(
         // A temp of this process, then a rename: concurrent builds installing the same key each
         // move a whole object into place, and a reader opens either one.
         mkdir_p(loader::dirname_of(cobj.as_str()));
-        let mut tmp = format("{}.{}.tmp", cobj.as_str(), unsafe shim::sc_getpid());
-        let mut dst = cobj.clone();
-        if !link_or_copy(opaths.at(u).as_str(), tmp.as_str()) || unsafe shim::sc_rename(tmp.cstr(), dst.cstr()) != 0 {
-            let _ = unsafe shim::sc_unlink(tmp.cstr());
+        let tmp = format("{}.{}.tmp", cobj.as_str(), process::pid().unwrap_or(1));
+        if !link_or_copy(opaths.at(u).as_str(), tmp.as_str()) || fs::rename(tmp.as_str(), cobj.as_str()).is_err() {
+            let _ = fs::unlink(tmp.as_str());
         }
     }
     for i in 0..opaths.len() {
@@ -952,14 +940,14 @@ pub fn compile_units(
 }
 
 // Take the version line: `known` (recorded for compiler command `ccs`), else the probe `vpid`'s
-// (spawned into file `vf`; -1 = not started or already waited for), then recorded. Fill `cobjs` with every unit's cache entry under namespace `ns`: the key of the version line,
+// (spawned into file `vf`; None = not started or already waited for), then recorded. Fill `cobjs` with every unit's cache entry under namespace `ns`: the key of the version line,
 // the compiler command `cc` (its own arguments, `-arch x86_64` say, change the output and not the
 // version line), the compile `flags`, the tree path `aroot` when the flags record it, and the unit's
 // hash pair in `hs`; empty for a unit whose `ok` is false.
 fn cache_keys(
     known: &String,
     ccs: str,
-    vpid: &mut i64,
+    vpid: &mut Option<process::Child>,
     vf: str,
     cc: &Vector<String>,
     flags: &Vector<String>,
@@ -971,10 +959,8 @@ fn cache_keys(
 ) {
     let mut ccver = known.clone();
     if ccver.len() == 0 {
-        if *vpid >= 0 {
-            let mut code: i32 = 0;
-            let _ = unsafe shim::sc_waitpid(*vpid, &mut code);
-            *vpid = -1;
+        if let Some(mut c) = vpid.take() {
+            let _ = c.wait();
         }
         ccver = take_first_line(vf).unwrap_or(String::new());
         ccver_record(ccs, &ccver);
@@ -1012,7 +998,7 @@ fn cache_keys(
 }
 
 // The base name of path `p` (after its last separator).
-fn base_name(p: str) str {
+const fn base_name(p: str) str {
     let mut i = p.len();
     while i > 0 && p[i - 1] != b'/' && p[i - 1] != b'\\' {
         i -= 1;
@@ -1055,7 +1041,7 @@ fn job_args(
 }
 
 // Compile the units `miss` (indices into `units`) as `compile_units` describes, with the version
-// probe `vpid` (-1: none running) reaped among the compiles and waited for before returning, so no
+// probe `vpid` (None: none running) reaped among the compiles and waited for before returning, so no
 // child outlives the call. Returns 0, or the exit code of the first command that failed (1 when a
 // compiler did not start or an object could not move into place); after a failure no command starts
 // and the running ones are waited for.
@@ -1068,7 +1054,7 @@ fn run_jobs(
     objdir: str,
     opaths: &Vector<String>,
     miss: &Vector<u32>,
-    vpid: &mut i64,
+    vpid: &mut Option<process::Child>,
 ) i32 {
     // Batch the units whose file name no other unit to compile shares; the rest compile alone.
     let mut order = Vector::<u32>::with_capacity(miss.len());
@@ -1116,10 +1102,10 @@ fn run_jobs(
     }
     let cap = pick(slots > 0, slots, 1);
     // The running children, the version probe included, and per entry its job (-1: the probe).
-    let mut pids = Vector::<i64>::with_capacity(cap + 1);
+    let mut kids = Vector::<process::Child>::with_capacity(cap + 1);
     let mut pjob = Vector::<i64>::with_capacity(cap + 1);
-    if *vpid >= 0 {
-        pids.push(*vpid);
+    if let Some(c) = vpid.take() {
+        kids.push(c);
         pjob.push(-1);
     }
     let mut args = Vector::<String>::new();
@@ -1128,27 +1114,25 @@ fn run_jobs(
     let mut rc: i32 = 0;
     // Bounded: every job starts at most once, and a split adds one single-unit job per unit of a
     // multi-unit job, which never splits again.
-    while next < jobs.len() && rc == 0 || pids.len() != 0 {
+    while next < jobs.len() && rc == 0 || kids.len() != 0 {
         while rc == 0 && next < jobs.len() && running < cap {
-            let mut j = CJob { dir: jobs.at(next).dir.clone(), first: jobs.at(next).first, n: jobs.at(next).n };
+            let j = CJob { dir: jobs.at(next).dir.clone(), first: jobs.at(next).first, n: jobs.at(next).n };
             next += 1;
             if j.dir.len() != 0 {
                 mkdir_p(j.dir.as_str());
             }
             job_args(cc, flags, aroot, units, root, opaths, &order, &j, &mut args);
-            let mut ptrs = Vector::<usize>::with_capacity(args.len() + 1);
+            let mut argv = Vector::<str>::with_capacity(args.len());
             for k in 0..args.len() {
-                ptrs.push(args[k].cstr() as usize);
+                argv.push(args.at(k).as_str());
             }
-            ptrs.push(0);
-            let dirp: *const char = if j.dir.len() != 0 {
-                j.dir.cstr();
-            } else {
-                null;
-            };
-            let pid = unsafe shim::sc_spawn_argv_in(ptrs.as_ptr() as *const *const char, null, dirp);
-            if pid >= 0 {
-                pids.push(pid);
+            let mut cmd = process::Command::new(argv[0..argv.len()]);
+            if j.dir.len() != 0 {
+                cmd.cwd = Option::<str>::Some(j.dir.as_str());
+            }
+            let started = process::spawn(cmd);
+            if started.is_ok() {
+                kids.push(started.unwrap());
                 pjob.push((next - 1) as i64);
                 running += 1;
             } else if j.dir.len() != 0 {
@@ -1160,21 +1144,21 @@ fn run_jobs(
                 rc = 1;
             }
         }
-        if pids.len() == 0 {
+        if kids.len() == 0 {
             continue;
         }
-        let mut code: i32 = 0;
-        let w = unsafe shim::sc_wait_any(pids.as_ptr(), pids.len() as i32, &mut code);
-        if w < 0 {
+        let nk = kids.len();
+        let waited = process::wait_any(kids.index_range_mut(0..nk));
+        if waited.is_err() {
             // No child can be waited for: none of the running ones will report.
-            *vpid = -1;
             return pick(rc != 0, rc, 1);
         }
-        let ji = pjob[w as usize];
-        let _ = pids.swap_remove(w as usize);
-        let _ = pjob.swap_remove(w as usize);
+        let (w, st) = waited.unwrap();
+        let code = exit_code(st);
+        let ji = pjob[w];
+        let _ = kids.swap_remove(w);
+        let _ = pjob.swap_remove(w);
         if ji < 0 {
-            *vpid = -1;
             continue;
         }
         running -= 1;
@@ -1192,9 +1176,8 @@ fn run_jobs(
         for k in jb.first..jb.first + jb.n {
             let op = opaths.at(order[k as usize] as usize);
             let bn = base_name(op.as_str());
-            let mut from = format("{}/{}", jb.dir.as_str(), bn);
-            let mut to = op.clone();
-            if unsafe shim::sc_rename(from.cstr(), to.cstr()) != 0 && rc == 0 {
+            let from = format("{}/{}", jb.dir.as_str(), bn);
+            if fs::rename(from.as_str(), op.as_str()).is_err() && rc == 0 {
                 eprintln("build: cannot move '{}' into place", from.as_str());
                 rc = 1;
             }
@@ -1205,8 +1188,7 @@ fn run_jobs(
 
 /// Record a use of cache entry `cobj`: the trims delete the least recently used entries first.
 pub fn touch_entry(cobj: str) {
-    let mut o = String::from_str(cobj);
-    let _ = unsafe shim::sc_touch(o.cstr());
+    let _ = fs::set_times(cobj, fs::FileTime::Now, fs::FileTime::Now);
 }
 
 // One object entry `<key>.o` of the cache, as `trim_objects` lists it.
@@ -1314,10 +1296,10 @@ pub fn trim_objects(od: str, now: i64, budget: u64, max: usize, keep: usize, cle
 // Delete entry `e` and its dependency list.
 fn remove_entry(e: &Entry) {
     let mut o = e.path.clone();
-    let _ = unsafe shim::sc_unlink(o.cstr());
+    let _ = fs::unlink(o.as_str());
     o.truncate(o.len() - 1);
     o.push_str("d");
-    let _ = unsafe shim::sc_unlink(o.cstr());
+    let _ = fs::unlink(o.as_str());
 }
 
 // List the script namespace `ns` (the layout of `script_entry`) into `es`. An entry directly in `ns` (a
@@ -1326,13 +1308,13 @@ fn list_script(ns: str, now: i64, es: &mut Vector<Entry>) {
     let top = list_dir(ns, false).unwrap_or(Vector::<String>::new());
     for i in 0..top.len() {
         let n = top.at(i).as_str();
-        let mut p = loader::join2(ns, n);
+        let p = loader::join2(ns, n);
         if n.len() == 34 && key_prefixed(n) {
             mkdir_p(loader::join2(ns, n.slice(0, 2)).as_str());
-            let mut to = script_entry(ns, n);
-            let _ = unsafe shim::sc_rename(p.cstr(), to.cstr());
-        } else if n.ends_with(".tmp") && now - unsafe shim::sc_mtime(p.cstr()) >= TMP_IDLE {
-            let _ = unsafe shim::sc_unlink(p.cstr());
+            let to = script_entry(ns, n);
+            let _ = fs::rename(p.as_str(), to.as_str());
+        } else if n.ends_with(".tmp") && now - file_mtime(p.as_str()) >= TMP_IDLE {
+            let _ = fs::unlink(p.as_str());
         }
     }
     let subs = list_dir(ns, false).unwrap_or(Vector::<String>::new());
@@ -1351,14 +1333,14 @@ fn list_entries(dir: str, now: i64, es: &mut Vector<Entry>) {
     names.sort();
     for i in 0..names.len() {
         let n = names.at(i).as_str();
-        let mut p = loader::join2(dir, n);
+        let p = loader::join2(dir, n);
         let key = n.len() == 34 && key_prefixed(n);
         if n.ends_with(".tmp") {
-            if now - unsafe shim::sc_mtime(p.cstr()) >= TMP_IDLE {
-                let _ = unsafe shim::sc_unlink(p.cstr());
+            if now - file_mtime(p.as_str()) >= TMP_IDLE {
+                let _ = fs::unlink(p.as_str());
             }
         } else if key && n.ends_with(".z") {
-            let _ = unsafe shim::sc_unlink(p.cstr());
+            let _ = fs::unlink(p.as_str());
         } else if key && n.ends_with(".d") {
             let next = if i + 1 < names.len() {
                 names.at(i + 1).as_str();
@@ -1366,13 +1348,13 @@ fn list_entries(dir: str, now: i64, es: &mut Vector<Entry>) {
                 "";
             };
             if !(next.len() == 34 && next.starts_with(n.slice(0, 33)) && next.ends_with(".o")) {
-                let _ = unsafe shim::sc_unlink(p.cstr());
+                let _ = fs::unlink(p.as_str());
             }
         } else if key && n.ends_with(".o") {
-            let mut e = Entry { path: p };
-            e.links = unsafe shim::sc_file_links(e.path.cstr(), &mut e.id, &mut e.size, &mut e.mt);
-            if e.links > 0 {
-                es.push(e);
+            if let Ok(m) = fs::stat(p.as_str()) {
+                es.push(
+                    Entry { path: p, id: m.ino, links: m.links as i32, size: m.size as i64, mt: mtime_s(m.modified_ns) },
+                );
             }
         }
     }

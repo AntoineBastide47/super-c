@@ -929,48 +929,48 @@ const fn swizzle_zero<T: SimdElement, U: SimdInt, const N: usize, const M: usize
 const fn swizzle_oob<T: SimdElement, U: SimdInt, const N: usize, const M: usize>(v: Simd<T, N>, idx: Simd<U, M>) Mask<M>;
 
 /// Lane `i` is `v[N - 1 - i]`.
-pub fn reverse<T: SimdElement, const N: usize>(v: Simd<T, N>) Simd<T, N> {
+pub const fn reverse<T: SimdElement, const N: usize>(v: Simd<T, N>) Simd<T, N> {
     return swizzle(v, lane_list::<N>(N - 1, 0, 1, 0));
 }
 
 /// Lane `i` is `v[(i + K) % N]`.
-pub fn rotate_lanes_left<const K: usize, T: SimdElement, const N: usize>(v: Simd<T, N>) Simd<T, N> {
+pub const fn rotate_lanes_left<const K: usize, T: SimdElement, const N: usize>(v: Simd<T, N>) Simd<T, N> {
     return swizzle(v, lane_list::<N>(K % N, 1, 0, 1));
 }
 
 /// Lane `i` is `v[(i + N - K % N) % N]`.
-pub fn rotate_lanes_right<const K: usize, T: SimdElement, const N: usize>(v: Simd<T, N>) Simd<T, N> {
+pub const fn rotate_lanes_right<const K: usize, T: SimdElement, const N: usize>(v: Simd<T, N>) Simd<T, N> {
     return swizzle(v, lane_list::<N>(N - K % N, 1, 0, 1));
 }
 
 /// Lane `i` is `a[i / 2]` for an even `i`, else `b[i / 2]`.
-pub fn interleave_low<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) Simd<T, N> {
+pub const fn interleave_low<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) Simd<T, N> {
     return shuffle(a, b, lane_list::<N>(0, 2, 0, 0));
 }
 
 /// Lane `i` is `a[N / 2 + i / 2]` for an even `i`, else `b[N / 2 + i / 2]`.
-pub fn interleave_high<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) Simd<T, N> {
+pub const fn interleave_high<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) Simd<T, N> {
     return shuffle(a, b, lane_list::<N>(N / 2, 2, 0, 0));
 }
 
 /// The even lanes of `a`, then those of `b`: lane `i` is `a[2 * i]` below `N / 2`, else `b[2 * i - N]`.
-pub fn deinterleave_even<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) Simd<T, N> {
+pub const fn deinterleave_even<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) Simd<T, N> {
     return shuffle(a, b, lane_list::<N>(0, 3, 0, 0));
 }
 
 /// The odd lanes of `a`, then those of `b`: lane `i` is `a[2 * i + 1]` below `N / 2`, else
 /// `b[2 * i + 1 - N]`.
-pub fn deinterleave_odd<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) Simd<T, N> {
+pub const fn deinterleave_odd<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) Simd<T, N> {
     return shuffle(a, b, lane_list::<N>(1, 3, 0, 0));
 }
 
 /// `(interleave_low(a, b), interleave_high(a, b))`.
-pub fn zip<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
+pub const fn zip<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     return shuffle(a, b, lane_list::<N>(0, 2, 0, 0)), shuffle(a, b, lane_list::<N>(N / 2, 2, 0, 0));
 }
 
 /// `(deinterleave_even(a, b), deinterleave_odd(a, b))`.
-pub fn unzip<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
+pub const fn unzip<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) (Simd<T, N>, Simd<T, N>) {
     return shuffle(a, b, lane_list::<N>(0, 3, 0, 0)), shuffle(a, b, lane_list::<N>(1, 3, 0, 0));
 }
 
@@ -1247,7 +1247,7 @@ extend<const N: usize> Mask<N> {
     }
 
     /// The mask of the lanes `a`.
-    pub fn from_array(a: [bool; N]) Self {
+    pub const fn from_array(a: [bool; N]) Self {
         let mut bits: u64 = 0;
         let mut i: u64 = 0;
         for x in a {
@@ -1260,7 +1260,7 @@ extend<const N: usize> Mask<N> {
     }
 
     /// The lanes as an array.
-    pub fn to_array(self: Self) [bool; N] {
+    pub const fn to_array(self: Self) [bool; N] {
         let mut a = [false; N];
         let bits = self as u64;
         for i in 0..N {

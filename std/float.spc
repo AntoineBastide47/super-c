@@ -271,17 +271,17 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
 
     // The biased exponent field. E <= 30, so it always fits a u64: extracted by shifting the field's
     // bottom to bit 0, where to_u64 reads it whatever the total width is.
-    fn exp_field(self: &Float<E, F, FAMILY>) u64 {
+    const fn exp_field(self: &Float<E, F, FAMILY>) u64 {
         return self.bits.shr(F).to_u64() & Float::<E, F, FAMILY>::exp_field_max();
     }
 
     // The stored fraction: the low F bits.
-    fn frac_field(self: &Float<E, F, FAMILY>) UInt<{1 + E + F}> {
+    const fn frac_field(self: &Float<E, F, FAMILY>) UInt<{1 + E + F}> {
         let m = UInt::<{1 + E + F}>::max().shr(1 + E);
         return self.bits.bit_and(&m);
     }
 
-    fn pack(negative: bool, ebits: u64, frac: &UInt<{1 + E + F}>) Float<E, F, FAMILY> {
+    const fn pack(negative: bool, ebits: u64, frac: &UInt<{1 + E + F}>) Float<E, F, FAMILY> {
         let mut b = UInt::<{1 + E + F}>::from_u64(ebits).shl(F).bit_or(frac);
         if negative {
             let s = UInt::<{1 + E + F}>::one().shl(E + F);
@@ -296,19 +296,19 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 
     /// -0.0.
-    pub fn neg_zero() Float<E, F, FAMILY> {
+    pub const fn neg_zero() Float<E, F, FAMILY> {
         let z = UInt::<{1 + E + F}>::zero();
         return Float::<E, F, FAMILY>::pack(true, 0, &z);
     }
 
     /// 1.0.
-    pub fn one() Float<E, F, FAMILY> {
+    pub const fn one() Float<E, F, FAMILY> {
         let z = UInt::<{1 + E + F}>::zero();
         return Float::<E, F, FAMILY>::pack(false, Float::<E, F, FAMILY>::bias() as u64, &z);
     }
 
     /// +inf, or -inf when `negative`. Panics: FINITE_ONLY family, which has no infinity.
-    pub fn infinity(negative: bool) Float<E, F, FAMILY> {
+    pub const fn infinity(negative: bool) Float<E, F, FAMILY> {
         if FAMILY == FloatFamily::FF_FINITE_ONLY {
             panic("a FINITE_ONLY float format has no infinity");
         }
@@ -318,7 +318,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
 
     /// The canonical quiet NaN. IEEE: exponent all ones, fraction MSB set. Finite-only: the single
     /// all-ones encoding. Operations produce this one; payloads of incoming NaNs are not propagated.
-    pub fn nan() Float<E, F, FAMILY> {
+    pub const fn nan() Float<E, F, FAMILY> {
         if FAMILY == FloatFamily::FF_FINITE_ONLY {
             let fr = UInt::<{1 + E + F}>::max().shr(1 + E);
             return Float::<E, F, FAMILY>::pack(false, Float::<E, F, FAMILY>::exp_field_max(), &fr);
@@ -348,13 +348,13 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 
     /// The smallest positive value: the least subnormal.
-    pub fn min_positive() Float<E, F, FAMILY> {
+    pub const fn min_positive() Float<E, F, FAMILY> {
         let fr = UInt::<{1 + E + F}>::one();
         return Float::<E, F, FAMILY>::pack(false, 0, &fr);
     }
 
     /// The IEEE class: zero, subnormal, normal, infinite, or NaN.
-    pub fn classify(self: &Float<E, F, FAMILY>) FpClass {
+    pub const fn classify(self: &Float<E, F, FAMILY>) FpClass {
         let eb = self.exp_field();
         let fz = self.frac_field().is_zero();
         if eb == 0 {
@@ -379,7 +379,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 
     /// True for any NaN; for FINITE_ONLY, the family's single NaN encoding.
-    pub fn is_nan(self: &Float<E, F, FAMILY>) bool {
+    pub const fn is_nan(self: &Float<E, F, FAMILY>) bool {
         if FAMILY == FloatFamily::FF_FINITE_ONLY {
             // The single NaN encoding: top exponent AND all-ones fraction.
             let fm = UInt::<{1 + E + F}>::max().shr(1 + E);
@@ -389,7 +389,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 
     /// True for +inf or -inf (never for FINITE_ONLY).
-    pub fn is_infinite(self: &Float<E, F, FAMILY>) bool {
+    pub const fn is_infinite(self: &Float<E, F, FAMILY>) bool {
         if FAMILY == FloatFamily::FF_FINITE_ONLY {
             // The family has no infinities.
             return false;
@@ -398,12 +398,12 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 
     /// True for +0.0 or -0.0.
-    pub fn is_zero(self: &Float<E, F, FAMILY>) bool {
+    pub const fn is_zero(self: &Float<E, F, FAMILY>) bool {
         return self.exp_field() == 0 && self.frac_field().is_zero();
     }
 
     /// True when neither NaN nor infinite.
-    pub fn is_finite(self: &Float<E, F, FAMILY>) bool {
+    pub const fn is_finite(self: &Float<E, F, FAMILY>) bool {
         return !self.is_nan() && !self.is_infinite();
     }
 
@@ -413,13 +413,13 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 
     /// The value with its sign flipped.
-    pub fn neg(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+    pub const fn neg(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
         let s = UInt::<{1 + E + F}>::one().shl(E + F);
         return Float::<E, F, FAMILY> { bits: self.bits.bit_xor(&s) };
     }
 
     /// The value with its sign cleared.
-    pub fn abs(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+    pub const fn abs(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
         let m = UInt::<{1 + E + F}>::max().shr(1);
         return Float::<E, F, FAMILY> { bits: self.bits.bit_and(&m) };
     }
@@ -428,7 +428,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     // guard, round and sticky below them, all zero here: with the MSB at bit F+3, subnormals
     // normalized into the same shape. The value is sig3 * 2^(exp - F - 3).
 
-    fn decode_sig3(self: &Float<E, F, FAMILY>, exp_out: *mut i64) UInt<{F + 8}> {
+    const fn decode_sig3(self: &Float<E, F, FAMILY>, exp_out: *mut i64) UInt<{F + 8}> {
         let eb = self.exp_field();
         let fr = self.frac_field();
         let mut sig = UInt::<{F + 8}>::zero();
@@ -523,7 +523,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
 
     // Shift right with the classic jam: any bit that falls off keeps the result odd, so one later
     // rounding sees that something was there.
-    fn shr_jam(v: &UInt<{F + 8}>, sh: usize) UInt<{F + 8}> {
+    const fn shr_jam(v: &UInt<{F + 8}>, sh: usize) UInt<{F + 8}> {
         if sh == 0 {
             return *v;
         }
@@ -741,7 +741,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 
     // A grid value reduced to the F+4-bit sig3 shape round_pack takes, jamming what falls off.
-    fn grid_to_sig3(w: &UInt<{4 * F + 40}>, bl: usize) UInt<{F + 8}> {
+    const fn grid_to_sig3(w: &UInt<{4 * F + 40}>, bl: usize) UInt<{F + 8}> {
         let mut sig = UInt::<{F + 8}>::zero();
         if bl <= F + 4 {
             let mut i: usize = 0;
@@ -1038,7 +1038,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     // one value, and everything else follows the encoding, which is monotonic within a sign.
 
     /// IEEE equality: NaN equals nothing, -0.0 == +0.0.
-    pub fn ieee_eq(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) bool {
+    pub const fn ieee_eq(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) bool {
         if self.is_nan() || other.is_nan() {
             return false;
         }
@@ -1049,7 +1049,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 
     /// IEEE less-than: false whenever either side is NaN.
-    pub fn ieee_lt(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) bool {
+    pub const fn ieee_lt(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) bool {
         if self.is_nan() || other.is_nan() {
             return false;
         }
@@ -1068,7 +1068,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 
     /// IEEE less-or-equal: false whenever either side is NaN.
-    pub fn ieee_le(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) bool {
+    pub const fn ieee_le(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) bool {
         return self.ieee_lt(other) || self.ieee_eq(other);
     }
 
@@ -1143,7 +1143,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 
     /// The nearest f64.
-    pub fn to_f64(self: &Float<E, F, FAMILY>) f64 {
+    pub const fn to_f64(self: &Float<E, F, FAMILY>) f64 {
         if Float::<E, F, FAMILY>::widens(11, 52) {
             return f64_from_bits(self.widen_f64_bits());
         }
@@ -1151,7 +1151,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 
     /// The nearest f32.
-    pub fn to_f32(self: &Float<E, F, FAMILY>) f32 {
+    pub const fn to_f32(self: &Float<E, F, FAMILY>) f32 {
         if Float::<E, F, FAMILY>::widens(8, 23) {
             return f32_from_bits(self.widen_f32_bits());
         }
@@ -1195,7 +1195,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
 
     // Round THIS value into a built-in format's fields, packed as its raw bits in a u64. The target
     // significand always fits one limb, so the rounding runs in plain u64 arithmetic.
-    fn to_scalar_bits(self: &Float<E, F, FAMILY>, de: usize, df: usize) u64 {
+    const fn to_scalar_bits(self: &Float<E, F, FAMILY>, de: usize, df: usize) u64 {
         let sbit = if self.sign() {
             1u64 << (de + df) as u64;
         } else {
@@ -1272,7 +1272,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     // the one-step corrections go through add/sub, which are exact on integers this small.
 
     /// The integer part: rounds toward zero.
-    pub fn trunc(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+    pub const fn trunc(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
         if self.is_nan() || self.is_infinite() {
             return *self;
         }
@@ -1314,7 +1314,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     // The half bit and what lies below it, for the two round flavors. Works from the NORMALIZED
     // significand (decode_sig3 renormalizes subnormals), so a family whose subnormals reach past 0.5
     // is read correctly too.
-    fn round_parts(self: &Float<E, F, FAMILY>, half: &mut bool, rest: &mut bool, odd: &mut bool) i64 {
+    const fn round_parts(self: &Float<E, F, FAMILY>, half: &mut bool, rest: &mut bool, odd: &mut bool) i64 {
         let mut e: i64 = 0;
         let sig = self.decode_sig3(&mut e).shr(3);
         *half = false;
@@ -1395,7 +1395,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
 
     /// The smaller value, IGNORING a NaN operand (both NaN gives NaN); the negative zero counts as
     /// smaller than the positive one, so the answer is deterministic everywhere.
-    pub fn min(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+    pub const fn min(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
         if self.is_nan() {
             return *other;
         }
@@ -1416,7 +1416,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 
     /// The larger value, ignoring a NaN argument.
-    pub fn max(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+    pub const fn max(self: &Float<E, F, FAMILY>, other: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
         if self.is_nan() {
             return *other;
         }
@@ -1437,7 +1437,11 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
 
     /// Clamps into [lo, hi]. Panics when lo > hi or a bound is NaN: the RANGE is the caller's
     /// constant, so a broken one is a bug, not an input. A NaN VALUE passes through as NaN.
-    pub fn clamp(self: &Float<E, F, FAMILY>, lo: &Float<E, F, FAMILY>, hi: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+    pub const fn clamp(self: &Float<E, F, FAMILY>, lo: &Float<E, F, FAMILY>, hi: &Float<E, F, FAMILY>) Float<
+        E,
+        F,
+        FAMILY
+    > {
         if lo.is_nan() || hi.is_nan() || hi.ieee_lt(lo) {
             panic("clamp requires an ordered, NaN-free range");
         }
@@ -1454,7 +1458,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 
     /// The value with `from`'s sign: including onto NaN and zero, which negation alone cannot reach.
-    pub fn copysign(self: &Float<E, F, FAMILY>, from: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+    pub const fn copysign(self: &Float<E, F, FAMILY>, from: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
         if self.sign() == from.sign() {
             return *self;
         }
@@ -1462,7 +1466,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 
     /// +-1 by the sign, so signum(-0) is -1 and signum(+0) is +1 (copysign's reading); NaN stays NaN.
-    pub fn signum(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+    pub const fn signum(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
         if self.is_nan() {
             return *self;
         }
@@ -1503,7 +1507,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
 
     /// The distance to the next representable magnitude: 2^(max(e, emin) - F). The smallest positive
     /// subnormal for zero, infinity for infinity, NaN for NaN.
-    pub fn ulp(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
+    pub const fn ulp(self: &Float<E, F, FAMILY>) Float<E, F, FAMILY> {
         if self.is_nan() {
             return *self;
         }
@@ -1551,12 +1555,12 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
 
     /// Sign, biased exponent field, and stored fraction: the raw fields, not the mathematical
     /// significand (the implicit bit is not included).
-    pub fn to_parts(self: &Float<E, F, FAMILY>) (bool, u64, UInt<{1 + E + F}>) {
+    pub const fn to_parts(self: &Float<E, F, FAMILY>) (bool, u64, UInt<{1 + E + F}>) {
         return self.sign(), self.exp_field(), self.frac_field();
     }
 
     /// The inverse of to_parts; the exponent and fraction are masked to their fields.
-    pub fn from_parts(negative: bool, ebits: u64, frac: &UInt<{1 + E + F}>) Float<E, F, FAMILY> {
+    pub const fn from_parts(negative: bool, ebits: u64, frac: &UInt<{1 + E + F}>) Float<E, F, FAMILY> {
         let m = UInt::<{1 + E + F}>::max().shr(1 + E);
         let f = frac.bit_and(&m);
         return Float::<E, F, FAMILY>::pack(negative, ebits & Float::<E, F, FAMILY>::exp_field_max(), &f);
@@ -1615,14 +1619,14 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     /// The integer part, SATURATING like the built-in casts: NaN and everything below zero give
     /// zero, values at or past 2^M give max(). An OUT parameter names the width: `x.to_uint(&mut
     /// r)`: because a generic return position binds nothing at a call site.
-    pub fn to_uint<const M: usize>(self: &Float<E, F, FAMILY>, out: &mut UInt<M>) {
+    pub const fn to_uint<const M: usize>(self: &Float<E, F, FAMILY>, out: &mut UInt<M>) {
         *out = UInt::<M>::zero();
         Float::<E, F, FAMILY>::mag_into(self, out);
     }
 
     // The shared magnitude conversion. An OUT parameter rather than a generic return, because the
     // width is inferred from an argument: a return position binds nothing.
-    fn mag_into<const M: usize>(v: &Float<E, F, FAMILY>, out: &mut UInt<M>) {
+    const fn mag_into<const M: usize>(v: &Float<E, F, FAMILY>, out: &mut UInt<M>) {
         if v.is_nan() || v.is_zero() || v.sign() {
             return;
         }
@@ -2020,7 +2024,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
 }
 
 extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FAMILY> {
-    fn total_key(v: &Float<E, F, FAMILY>) UInt<{1 + E + F}> {
+    const fn total_key(v: &Float<E, F, FAMILY>) UInt<{1 + E + F}> {
         let top = UInt::<{1 + E + F}>::one().shl(E + F);
         if v.sign() {
             return v.bits.bit_not();

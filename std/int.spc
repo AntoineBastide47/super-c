@@ -219,7 +219,7 @@ extend<const BITS: usize> IntBits<BITS> {
         return r;
     }
 
-    fn is_zero(self: &IntBits<BITS>) bool {
+    const fn is_zero(self: &IntBits<BITS>) bool {
         for i in 0..IntBits::<BITS>::nlimbs() {
             if self.get(i) != 0 {
                 return false;
@@ -251,7 +251,7 @@ extend<const BITS: usize> IntBits<BITS> {
 
     // The limbs up to the highest nonzero one: 0 for zero. Multiplication and division run over these
     // only, so a short value costs what its size does, not what the width does.
-    fn len(self: &IntBits<BITS>) usize {
+    const fn len(self: &IntBits<BITS>) usize {
         let mut n = IntBits::<BITS>::nlimbs();
         while n > 0 && unsafe self.limbs[n - 1] == 0 {
             n = n - 1;
@@ -260,7 +260,7 @@ extend<const BITS: usize> IntBits<BITS> {
     }
 
     // Index of the highest set bit, or -1 for zero. Drives division's iteration count.
-    fn top_bit(self: &IntBits<BITS>) i64 {
+    const fn top_bit(self: &IntBits<BITS>) i64 {
         let mut i = IntBits::<BITS>::nlimbs();
         while i > 0 {
             i = i - 1;
@@ -518,7 +518,7 @@ extend<const BITS: usize> IntBits<BITS> {
         return prod;
     }
 
-    fn bit_and(self: &IntBits<BITS>, other: &IntBits<BITS>) IntBits<BITS> {
+    const fn bit_and(self: &IntBits<BITS>, other: &IntBits<BITS>) IntBits<BITS> {
         let mut r = IntBits::<BITS>::zero();
         for i in 0..IntBits::<BITS>::nlimbs() {
             r.set(i, self.get(i) & other.get(i));
@@ -526,7 +526,7 @@ extend<const BITS: usize> IntBits<BITS> {
         return r;
     }
 
-    fn bit_or(self: &IntBits<BITS>, other: &IntBits<BITS>) IntBits<BITS> {
+    const fn bit_or(self: &IntBits<BITS>, other: &IntBits<BITS>) IntBits<BITS> {
         let mut r = IntBits::<BITS>::zero();
         for i in 0..IntBits::<BITS>::nlimbs() {
             r.set(i, self.get(i) | other.get(i));
@@ -534,7 +534,7 @@ extend<const BITS: usize> IntBits<BITS> {
         return r;
     }
 
-    fn bit_xor(self: &IntBits<BITS>, other: &IntBits<BITS>) IntBits<BITS> {
+    const fn bit_xor(self: &IntBits<BITS>, other: &IntBits<BITS>) IntBits<BITS> {
         let mut r = IntBits::<BITS>::zero();
         for i in 0..IntBits::<BITS>::nlimbs() {
             r.set(i, self.get(i) ^ other.get(i));
@@ -542,7 +542,7 @@ extend<const BITS: usize> IntBits<BITS> {
         return r;
     }
 
-    fn bit_not(self: &IntBits<BITS>) IntBits<BITS> {
+    const fn bit_not(self: &IntBits<BITS>) IntBits<BITS> {
         let mut r = IntBits::<BITS>::zero();
         for i in 0..IntBits::<BITS>::nlimbs() {
             r.set(i, ~self.get(i));
@@ -551,7 +551,7 @@ extend<const BITS: usize> IntBits<BITS> {
     }
 
     // Left shift; bits shifted past the top are discarded, as they are for the built-in types.
-    fn shl(self: &IntBits<BITS>, amount: usize) IntBits<BITS> {
+    const fn shl(self: &IntBits<BITS>, amount: usize) IntBits<BITS> {
         let mut r = IntBits::<BITS>::zero();
         if amount >= BITS {
             return r;
@@ -576,7 +576,7 @@ extend<const BITS: usize> IntBits<BITS> {
     }
 
     // Logical right shift: zeros in at the top, whatever the sign bit says.
-    fn shr_logical(self: &IntBits<BITS>, amount: usize) IntBits<BITS> {
+    const fn shr_logical(self: &IntBits<BITS>, amount: usize) IntBits<BITS> {
         let mut r = IntBits::<BITS>::zero();
         if amount >= BITS {
             return r;
@@ -599,7 +599,7 @@ extend<const BITS: usize> IntBits<BITS> {
     }
 
     // Arithmetic right shift: the sign bit is what fills the top, so `-1 >> k` stays `-1`.
-    fn shr_arith(self: &IntBits<BITS>, amount: usize) IntBits<BITS> {
+    const fn shr_arith(self: &IntBits<BITS>, amount: usize) IntBits<BITS> {
         let neg = self.bit(BITS - 1) != 0;
         if !neg {
             return self.shr_logical(amount);
@@ -615,7 +615,7 @@ extend<const BITS: usize> IntBits<BITS> {
         return r.bit_or(&ones);
     }
 
-    fn cmp_unsigned(self: &IntBits<BITS>, other: &IntBits<BITS>) i32 {
+    const fn cmp_unsigned(self: &IntBits<BITS>, other: &IntBits<BITS>) i32 {
         let mut i = IntBits::<BITS>::nlimbs();
         while i > 0 {
             i = i - 1;
@@ -631,7 +631,7 @@ extend<const BITS: usize> IntBits<BITS> {
         return 0;
     }
 
-    fn eq_bits(self: &IntBits<BITS>, other: &IntBits<BITS>) bool {
+    const fn eq_bits(self: &IntBits<BITS>, other: &IntBits<BITS>) bool {
         for i in 0..IntBits::<BITS>::nlimbs() {
             if self.get(i) != other.get(i) {
                 return false;
@@ -833,7 +833,7 @@ extend<const BITS: usize> IntBits<BITS> {
 
     // The limbs in reverse order, each bit-reversed (`bits`) or byte-reversed, then shifted down by the
     // unused top bits: the whole width reversed.
-    fn reversed(self: &IntBits<BITS>, bits: bool) IntBits<BITS> {
+    const fn reversed(self: &IntBits<BITS>, bits: bool) IntBits<BITS> {
         let n = IntBits::<BITS>::nlimbs();
         let mut r = IntBits::<BITS>::zero();
         for i in 0..n {
@@ -905,7 +905,7 @@ extend<const BITS: usize> UInt<BITS> {
     }
 
     /// The largest value: every bit set.
-    pub fn max() UInt<BITS> {
+    pub const fn max() UInt<BITS> {
         return UInt::<BITS> { bits: IntBits::<BITS>::zero().bit_not() };
     }
 
@@ -935,7 +935,7 @@ extend<const BITS: usize> UInt<BITS> {
     }
 
     /// True when every bit is clear.
-    pub fn is_zero(self: &UInt<BITS>) bool {
+    pub const fn is_zero(self: &UInt<BITS>) bool {
         return self.bits.is_zero();
     }
 
@@ -945,17 +945,17 @@ extend<const BITS: usize> UInt<BITS> {
     }
 
     /// Bits needed to represent the value: 0 for zero, otherwise one past the highest set bit.
-    pub fn bit_length(self: &UInt<BITS>) usize {
+    pub const fn bit_length(self: &UInt<BITS>) usize {
         return (self.bits.top_bit() + 1) as usize;
     }
 
     /// Zero bits above the most significant set bit (BITS for zero).
-    pub fn leading_zeros(self: &UInt<BITS>) usize {
+    pub const fn leading_zeros(self: &UInt<BITS>) usize {
         return BITS - self.bit_length();
     }
 
     /// Number of set bits.
-    pub fn count_ones(self: &UInt<BITS>) usize {
+    pub const fn count_ones(self: &UInt<BITS>) usize {
         let mut n: usize = 0;
         for i in 0..UInt::<BITS>::limbs() {
             n = n + self.bits.get(i).count_ones();
@@ -964,12 +964,12 @@ extend<const BITS: usize> UInt<BITS> {
     }
 
     /// Number of clear bits.
-    pub fn count_zeros(self: &UInt<BITS>) usize {
+    pub const fn count_zeros(self: &UInt<BITS>) usize {
         return BITS - self.count_ones();
     }
 
     /// Zero bits below the least significant set bit (BITS for zero).
-    pub fn trailing_zeros(self: &UInt<BITS>) usize {
+    pub const fn trailing_zeros(self: &UInt<BITS>) usize {
         for i in 0..UInt::<BITS>::limbs() {
             let l = self.bits.get(i);
             if l != 0 {
@@ -981,7 +981,7 @@ extend<const BITS: usize> UInt<BITS> {
 
     /// Rotation at the type's own width: bits leaving one end come back in at the other, so a partial
     /// width rotates through exactly BITS positions, not through a limb's 64.
-    pub fn rotate_left(self: &UInt<BITS>, amount: usize) UInt<BITS> {
+    pub const fn rotate_left(self: &UInt<BITS>, amount: usize) UInt<BITS> {
         let k = amount % BITS;
         if k == 0 {
             return *self;
@@ -991,7 +991,7 @@ extend<const BITS: usize> UInt<BITS> {
     }
 
     /// Bits rotated right by `amount` modulo BITS.
-    pub fn rotate_right(self: &UInt<BITS>, amount: usize) UInt<BITS> {
+    pub const fn rotate_right(self: &UInt<BITS>, amount: usize) UInt<BITS> {
         let k = amount % BITS;
         if k == 0 {
             return *self;
@@ -1001,18 +1001,18 @@ extend<const BITS: usize> UInt<BITS> {
     }
 
     /// Byte order reversed. Bytes are a claim about layout, so this exists only for whole-byte widths.
-    pub fn swap_bytes(self: &UInt<BITS>) UInt<BITS> {
+    pub const fn swap_bytes(self: &UInt<BITS>) UInt<BITS> {
         static_assert(BITS % 8 == 0, "swap_bytes needs a whole number of bytes");
         return UInt::<BITS> { bits: self.bits.reversed(false) };
     }
 
     /// Bit order reversed over the full width.
-    pub fn reverse_bits(self: &UInt<BITS>) UInt<BITS> {
+    pub const fn reverse_bits(self: &UInt<BITS>) UInt<BITS> {
         return UInt::<BITS> { bits: self.bits.reversed(true) };
     }
 
     /// True for exactly one set bit.
-    pub fn is_power_of_two(self: &UInt<BITS>) bool {
+    pub const fn is_power_of_two(self: &UInt<BITS>) bool {
         return self.count_ones() == 1;
     }
 
@@ -1079,7 +1079,7 @@ extend<const BITS: usize> UInt<BITS> {
     /// The widening conversion between widths: a `UInt<M>` read as a `UInt<BITS>` at least as wide. The
     /// compiler applies it implicitly wherever a `UInt<BITS>` is expected, exactly as a narrower built-in
     /// integer widens to a wider one; a narrowing M is rejected where the copy would lose limbs.
-    pub fn widen<const M: usize>(v: &UInt<M>) UInt<BITS> {
+    pub const fn widen<const M: usize>(v: &UInt<M>) UInt<BITS> {
         static_assert(M <= BITS, "widen: the target must be at least as wide as the source");
         let mut r = UInt::<BITS>::zero();
         for i in 0..(M + 63) / 64 {
@@ -1094,7 +1094,7 @@ extend<const BITS: usize> UInt<BITS> {
     /// range become infinity, as the built-in conversions do: the scaling by powers of two after the one
     /// rounding is exact up to that overflow. A scale of 2^1100 from u >= 2^63 is past 2^1024 already,
     /// so at most 18 steps scale.
-    pub fn to_f64(self: &UInt<BITS>) f64 {
+    pub const fn to_f64(self: &UInt<BITS>) f64 {
         let n = self.bit_length();
         if n <= 64 {
             return self.limb(0) as f64;
@@ -1119,7 +1119,7 @@ extend<const BITS: usize> UInt<BITS> {
 
     /// The same, to f32: the u64 carrier holds every bit that can matter for a 24-bit mantissa too, and
     /// past 2^128 the result is infinite.
-    pub fn to_f32(self: &UInt<BITS>) f32 {
+    pub const fn to_f32(self: &UInt<BITS>) f32 {
         let n = self.bit_length();
         if n <= 64 {
             return self.limb(0) as f32;
@@ -1147,7 +1147,7 @@ extend<const BITS: usize> UInt<BITS> {
     /// below 2^1024, so k <= 15); then each limb from the top, p = 2^(64 j), is floor(rest / p), and rest -
     /// limb p is exact, because the limb's bits are bits of rest. 53 significant bits span at most two
     /// limbs, so the steps end at a zero rest.
-    pub fn from_f64(v: f64) UInt<BITS> {
+    pub const fn from_f64(v: f64) UInt<BITS> {
         if !(v == v) || v < 1.0 {
             return UInt::<BITS>::zero();
         }
@@ -1204,7 +1204,7 @@ extend<const BITS: usize> UInt<BITS> {
     /// extension follows the SOURCE's signedness. `as` dispatches to whichever the operand fits; the pair
     /// is named by source rather than overloaded so the two monomorphize to distinct symbols. Not applied
     /// implicitly: an implicit conversion must be lossless, and these deliberately are not.
-    pub fn cast_unsigned<const M: usize>(v: &UInt<M>) UInt<BITS> {
+    pub const fn cast_unsigned<const M: usize>(v: &UInt<M>) UInt<BITS> {
         let mut r = UInt::<BITS>::zero();
         for i in 0..UInt::<BITS>::limbs() {
             if i < (M + 63) / 64 {
@@ -1215,7 +1215,7 @@ extend<const BITS: usize> UInt<BITS> {
     }
 
     /// Sign-extend or truncate an Int<M> into this width.
-    pub fn cast_signed<const M: usize>(v: &Int<M>) UInt<BITS> {
+    pub const fn cast_signed<const M: usize>(v: &Int<M>) UInt<BITS> {
         let fill = if v.is_negative() {
             0xFFFFFFFFFFFFFFFFu64;
         } else {
@@ -1437,7 +1437,7 @@ extend<const BITS: usize> UInt<BITS> {
     // bytes() and masks anything past the width, so a round-trip is exact.
 
     /// Write the value little-endian into `out`, which must hold `bytes()` bytes.
-    pub fn to_le_bytes(self: &UInt<BITS>, out: []mut u8) {
+    pub const fn to_le_bytes(self: &UInt<BITS>, out: []mut u8) {
         let nb = UInt::<BITS>::bytes();
         if out.len() < nb {
             panic("to_le_bytes: the buffer is smaller than the value");
@@ -1448,7 +1448,7 @@ extend<const BITS: usize> UInt<BITS> {
     }
 
     /// The value of little-endian bytes `b` (short input is zero-extended, extra bytes ignored).
-    pub fn from_le_bytes(b: []u8) UInt<BITS> {
+    pub const fn from_le_bytes(b: []u8) UInt<BITS> {
         let mut nb = UInt::<BITS>::bytes();
         if b.len() < nb {
             // Missing high bytes read as the zeros they are.
@@ -1463,7 +1463,7 @@ extend<const BITS: usize> UInt<BITS> {
     }
 
     /// Write the value big-endian into `out`, which must hold `bytes()` bytes.
-    pub fn to_be_bytes(self: &UInt<BITS>, out: []mut u8) {
+    pub const fn to_be_bytes(self: &UInt<BITS>, out: []mut u8) {
         let nb = UInt::<BITS>::bytes();
         if out.len() < nb {
             panic("to_be_bytes: the buffer is smaller than the value");
@@ -1474,7 +1474,7 @@ extend<const BITS: usize> UInt<BITS> {
     }
 
     /// The value of big-endian bytes `b` (short input is zero-extended, extra bytes ignored).
-    pub fn from_be_bytes(b: []u8) UInt<BITS> {
+    pub const fn from_be_bytes(b: []u8) UInt<BITS> {
         let n = b.len();
         let mut nb = UInt::<BITS>::bytes();
         if n < nb {
@@ -1816,12 +1816,12 @@ extend<const BITS: usize> Int<BITS> {
     }
 
     /// The largest value.
-    pub fn max() Int<BITS> {
+    pub const fn max() Int<BITS> {
         return Int::<BITS> { bits: IntBits::<BITS>::zero().bit_not().shr_logical(1) };
     }
 
     /// Sign-extended from a 64-bit value, so a negative one stays negative at any width.
-    pub fn from_i64(v: i64) Int<BITS> {
+    pub const fn from_i64(v: i64) Int<BITS> {
         let mut b = IntBits::<BITS>::from_u64(v as u64);
         if v < 0 {
             for i in 1..(BITS + 63) / 64 {
@@ -1852,7 +1852,7 @@ extend<const BITS: usize> Int<BITS> {
     }
 
     /// True when every bit is clear.
-    pub fn is_zero(self: &Int<BITS>) bool {
+    pub const fn is_zero(self: &Int<BITS>) bool {
         return self.bits.is_zero();
     }
 
@@ -1867,51 +1867,51 @@ extend<const BITS: usize> Int<BITS> {
     }
 
     /// Number of set bits.
-    pub fn count_ones(self: &Int<BITS>) usize {
+    pub const fn count_ones(self: &Int<BITS>) usize {
         return self.to_unsigned().count_ones();
     }
 
     /// Number of clear bits.
-    pub fn count_zeros(self: &Int<BITS>) usize {
+    pub const fn count_zeros(self: &Int<BITS>) usize {
         return BITS - self.count_ones();
     }
 
     /// Zero bits above the most significant set bit (BITS for zero).
-    pub fn leading_zeros(self: &Int<BITS>) usize {
+    pub const fn leading_zeros(self: &Int<BITS>) usize {
         return self.to_unsigned().leading_zeros();
     }
 
     /// Zero bits below the least significant set bit (BITS for zero).
-    pub fn trailing_zeros(self: &Int<BITS>) usize {
+    pub const fn trailing_zeros(self: &Int<BITS>) usize {
         return self.to_unsigned().trailing_zeros();
     }
 
     /// Bits rotated left by `amount` modulo BITS.
-    pub fn rotate_left(self: &Int<BITS>, amount: usize) Int<BITS> {
+    pub const fn rotate_left(self: &Int<BITS>, amount: usize) Int<BITS> {
         let u = self.to_unsigned().rotate_left(amount);
         return Int::<BITS>::from_unsigned(&u);
     }
 
     /// Bits rotated right by `amount` modulo BITS.
-    pub fn rotate_right(self: &Int<BITS>, amount: usize) Int<BITS> {
+    pub const fn rotate_right(self: &Int<BITS>, amount: usize) Int<BITS> {
         let u = self.to_unsigned().rotate_right(amount);
         return Int::<BITS>::from_unsigned(&u);
     }
 
     /// Byte order reversed over the `bytes()` storage bytes.
-    pub fn swap_bytes(self: &Int<BITS>) Int<BITS> {
+    pub const fn swap_bytes(self: &Int<BITS>) Int<BITS> {
         let u = self.to_unsigned().swap_bytes();
         return Int::<BITS>::from_unsigned(&u);
     }
 
     /// Bit order reversed over the full width.
-    pub fn reverse_bits(self: &Int<BITS>) Int<BITS> {
+    pub const fn reverse_bits(self: &Int<BITS>) Int<BITS> {
         let u = self.to_unsigned().reverse_bits();
         return Int::<BITS>::from_unsigned(&u);
     }
 
     /// -1, 0 or 1 by the value's sign.
-    pub fn signum(self: &Int<BITS>) Int<BITS> {
+    pub const fn signum(self: &Int<BITS>) Int<BITS> {
         if self.is_negative() {
             return Int::<BITS>::from_i64(-1);
         }
@@ -1932,7 +1932,7 @@ extend<const BITS: usize> Int<BITS> {
 
     /// The widening conversion between widths, SIGN-EXTENDING: the source's sign fills every limb above
     /// it, so a negative value stays the same number. Applied implicitly, as the built-in signed types are.
-    pub fn widen<const M: usize>(v: &Int<M>) Int<BITS> {
+    pub const fn widen<const M: usize>(v: &Int<M>) Int<BITS> {
         static_assert(M <= BITS, "widen: the target must be at least as wide as the source");
         let mut r = Int::<BITS>::zero();
         let fill = if v.is_negative() {
@@ -1994,7 +1994,7 @@ extend<const BITS: usize> Int<BITS> {
     /// `expr as iN`, with C's cast semantics: truncate when narrower, extend per the SOURCE's
     /// signedness when wider. Named by source rather than overloaded so the two monomorphize to
     /// distinct symbols; not applied implicitly.
-    pub fn cast_signed<const M: usize>(v: &Int<M>) Int<BITS> {
+    pub const fn cast_signed<const M: usize>(v: &Int<M>) Int<BITS> {
         let fill = if v.is_negative() {
             0xFFFFFFFFFFFFFFFFu64;
         } else {
@@ -2015,7 +2015,7 @@ extend<const BITS: usize> Int<BITS> {
     }
 
     /// Zero-extend or truncate a UInt<M> into this width.
-    pub fn cast_unsigned<const M: usize>(v: &UInt<M>) Int<BITS> {
+    pub const fn cast_unsigned<const M: usize>(v: &UInt<M>) Int<BITS> {
         let mut r = Int::<BITS>::zero();
         for i in 0..Int::<BITS>::limbs() {
             if i < (M + 63) / 64 {
@@ -2296,14 +2296,14 @@ extend<const BITS: usize> Int<BITS> {
     }
 
     // MIN / -1 and MIN % -1: the quotient is out of range.
-    fn is_min_by_neg1(self: &Int<BITS>, other: &Int<BITS>) bool {
+    const fn is_min_by_neg1(self: &Int<BITS>, other: &Int<BITS>) bool {
         let mn = Int::<BITS>::min();
         let neg1 = Int::<BITS>::from_i64(-1);
         return self.eq(&mn) && other.eq(&neg1);
     }
 
     // The traps of the built-in `%`, whose messages differ from `/`'s (divmod's).
-    fn rem_traps(self: &Int<BITS>, other: &Int<BITS>) {
+    const fn rem_traps(self: &Int<BITS>, other: &Int<BITS>) {
         if other.is_zero() {
             unsafe sc_int_div_zero("attempt to calculate the remainder with a divisor of zero".ptr());
         }
@@ -2366,23 +2366,23 @@ extend<const BITS: usize> Int<BITS> {
     // The unsigned view's serialization over the same two's-complement bits.
 
     /// Write the value little-endian into `out`, which must hold `bytes()` bytes.
-    pub fn to_le_bytes(self: &Int<BITS>, out: []mut u8) {
+    pub const fn to_le_bytes(self: &Int<BITS>, out: []mut u8) {
         self.to_unsigned().to_le_bytes(out);
     }
 
     /// The value of little-endian bytes `b` (short input is zero-extended, extra bytes ignored).
-    pub fn from_le_bytes(b: []u8) Int<BITS> {
+    pub const fn from_le_bytes(b: []u8) Int<BITS> {
         let u = UInt::<BITS>::from_le_bytes(b);
         return Int::<BITS>::from_unsigned(&u);
     }
 
     /// Write the value big-endian into `out`, which must hold `bytes()` bytes.
-    pub fn to_be_bytes(self: &Int<BITS>, out: []mut u8) {
+    pub const fn to_be_bytes(self: &Int<BITS>, out: []mut u8) {
         self.to_unsigned().to_be_bytes(out);
     }
 
     /// The value of big-endian bytes `b` (short input is zero-extended, extra bytes ignored).
-    pub fn from_be_bytes(b: []u8) Int<BITS> {
+    pub const fn from_be_bytes(b: []u8) Int<BITS> {
         let u = UInt::<BITS>::from_be_bytes(b);
         return Int::<BITS>::from_unsigned(&u);
     }

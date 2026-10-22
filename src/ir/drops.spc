@@ -441,7 +441,7 @@ const fn payload_count(ow: &bf::Owner, mid: ModuleId, forest: &mp::MoveForest, d
 }
 
 // The number of tracked children of path `p`.
-fn child_count(forest: &mp::MoveForest, p: u32) i64 {
+const fn child_count(forest: &mp::MoveForest, p: u32) i64 {
     let mut n: i64 = 0;
     let mut c = forest.paths.at(p as usize).first_child;
     while c != mp::MP_NONE {
@@ -844,7 +844,7 @@ pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveFor
 // before the marker, releasing path by path.
 
 // True when `row` holds a path of `sub` that `owned` marks (see `dv_owned_paths`).
-fn dv_any_owned(row: &Vector<u64>, owned: &Vector<u64>, sub: &Vector<u32>) bool {
+const fn dv_any_owned(row: &Vector<u64>, owned: &Vector<u64>, sub: &Vector<u32>) bool {
     for i in 0..sub.len() {
         if bits::bit_get(row, sub[i]) && bits::bit_get(owned, sub[i]) {
             return true;
@@ -853,7 +853,7 @@ fn dv_any_owned(row: &Vector<u64>, owned: &Vector<u64>, sub: &Vector<u32>) bool 
     return false;
 }
 
-fn dv_all(row: &Vector<u64>, sub: &Vector<u32>) bool {
+const fn dv_all(row: &Vector<u64>, sub: &Vector<u32>) bool {
     for i in 0..sub.len() {
         if !bits::bit_get(row, sub[i]) {
             return false;

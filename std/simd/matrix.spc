@@ -222,7 +222,7 @@ fn mul_widened<const E: usize, const F: usize>(
 
 // The portable kernel: each row of `c` from +0.0, then for each p the row of `b` times `a[i][p]` added
 // with one rounding, 16 lanes at a time, `mul_add` past them.
-fn mul_f32_lanes(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
+const fn mul_f32_lanes(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
     let nv = n - n % 16;
     for i in 0..m {
         let row = i * n;
@@ -246,7 +246,7 @@ fn mul_f32_lanes(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize)
     }
 }
 
-fn mul_f64_lanes(c: []mut f64, a: []f64, b: []f64, m: usize, k: usize, n: usize) {
+const fn mul_f64_lanes(c: []mut f64, a: []f64, b: []f64, m: usize, k: usize, n: usize) {
     let nv = n - n % 8;
     for i in 0..m {
         let row = i * n;
@@ -271,7 +271,7 @@ fn mul_f64_lanes(c: []mut f64, a: []f64, b: []f64, m: usize, k: usize, n: usize)
 }
 
 // Each row of `c` from 0, then for each p the row of `b` widened to i32 times `a[i][p]`, added modulo 2^32.
-fn mul_i8_lanes(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
+const fn mul_i8_lanes(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
     let nv = n - n % 16;
     for i in 0..m {
         let row = i * n;

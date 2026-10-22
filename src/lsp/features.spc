@@ -86,6 +86,16 @@ pub const fn decl_name(a: *const Ast, id: NodeId) NodeId {
     return NODE_NONE;
 }
 
+// The name node of pattern binding `i` and `i` itself (a cursor lands on either), else NODE_NONE: a
+// pattern name that resolves is a variant or constant pattern, no binding.
+fn binding_name(a: *const Ast, i: NodeId) NodeId {
+    let n = unsafe (*a).at_const(i);
+    if n.kind != NodeKind::NODE_PATTERN_NAME || unsafe (*a).resolution_def(i).node != NODE_NONE {
+        return NODE_NONE;
+    }
+    return n.as_data.pattern.name;
+}
+
 // The smallest node containing `off` that carries a resolution (a name node's resolution sometimes
 // lives on its enclosing member/path node, so innermost-alone is not enough).
 fn resolved_at(p: &loader::Package, a: *const Ast, off: u32) DefId {
@@ -119,13 +129,25 @@ pub fn def_at(p: &loader::Package, mi: usize, off: u32) DefId {
     if d.node != NODE_NONE {
         return d;
     }
-    // Maybe the cursor is on a decl's own name: find the decl this name node belongs to.
+    // Maybe the cursor is on a decl's own name: find the decl this name node belongs to. A decl as wide as
+    // its name (a variant without payload) is itself the smallest node there.
     let id = node_at_or_before(a, off);
+    let nm = if id == NODE_NONE {
+        NODE_NONE;
+    } else {
+        decl_name(a, id);
+    };
+    if nm != NODE_NONE && nm != id && unsafe (*a).at_const(nm).span.start == unsafe (*a).at_const(id).span.start && unsafe (*a).at_const(
+        nm,
+    ).span.end == unsafe (*a).at_const(id).span.end {
+        return DefId { module: mi as ModuleId, node: id };
+    }
     if id != NODE_NONE {
         let n = unsafe (*a).nnodes();
         for i0 in 1..n {
             let i = unsafe (*a).nth_id(i0);
-            if decl_name(a, i) == id && i != id {
+            let bn = binding_name(a, i);
+            if decl_name(a, i) == id && i != id || bn != NODE_NONE && (bn == id || i == id) {
                 return DefId { module: mi as ModuleId, node: i };
             }
         }
@@ -189,7 +211,7 @@ const fn is_eol(b: u8) bool {
 }
 
 // Start of the line containing `pos` (the byte after the previous line end).
-fn line_start_of(src: str, pos: usize) usize {
+const fn line_start_of(src: str, pos: usize) usize {
     let mut i = pos;
     while i > 0 && !is_eol(src[i - 1]) {
         i -= 1;
@@ -873,6 +895,73 @@ fn token_type_of(p: &loader::Package, d: DefId, mc: &mut MethodCache) i32 {
     return -1;
 }
 
+// A `namespace` token for each module segment of the qualified path `i` (`fs::realpath`, `m::T`,
+// `std::time::Duration`): an unresolved segment whose prefix names a loaded module or, alone, an import of
+// module `mi`.
+fn qualifier_tokens(p: &loader::Package, a: *const Ast, mi: usize, i: NodeId, out: &mut Vector<Tok>) {
+    let mut segs = Vector::<NodeId>::new();
+    let n = unsafe (*a).at_const(i);
+    if n.kind == NodeKind::NODE_TYPE_PATH {
+        for k in 0..n.as_data.type_path.head {
+            segs.push(unsafe (*a).list(n.as_data.type_path.parts)[k as usize]);
+        }
+    } else if n.kind == NodeKind::NODE_MEMBER && n.as_data.member.path {
+        let mut o = n.as_data.member.object;
+        // Each step moves to the object of one `::`; the node count bounds the chain.
+        for _ in 0..unsafe (*a).nnodes() {
+            let on = unsafe (*a).at_const(o);
+            if on.kind == NodeKind::NODE_IDENTIFIER {
+                segs.push(o);
+                break;
+            }
+            if on.kind != NodeKind::NODE_MEMBER || !on.as_data.member.path || unsafe (*a).resolution_def(o).node != NODE_NONE {
+                return;
+            }
+            segs.push(on.as_data.member.member);
+            o = on.as_data.member.object;
+        }
+        segs.reverse();
+    }
+    let mut prefix = String::new();
+    for k in 0..segs.len() {
+        let sg = segs[k];
+        if k != 0 {
+            prefix.push_str("::");
+        }
+        prefix.push_str(name_str(p, mi, sg));
+        if unsafe (*a).resolution_def(sg).node == NODE_NONE && (p.find(prefix.as_str()) >= 0 || k == 0 && import_binds(
+            p,
+            a,
+            mi,
+            prefix.as_str(),
+        )) {
+            let sp = unsafe (*a).at_const(sg).span;
+            tok_push(out, sp.start, sp.end, 0, 0);
+        }
+    }
+}
+
+// Whether an import of module `mi` binds `name` as a qualifier: its alias, else its last segment.
+fn import_binds(p: &loader::Package, a: *const Ast, mi: usize, name: str) bool {
+    let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+    for i in 0..items.len {
+        let im = unsafe (*a).at_const(unsafe (*a).list(items)[i as usize]);
+        if im.kind != NodeKind::NODE_IMPORT {
+            continue;
+        }
+        let d = im.as_data.import_decl;
+        let q = if d.alias != NODE_NONE {
+            d.alias;
+        } else {
+            unsafe (*a).list(d.path)[(d.path.len - 1) as usize];
+        };
+        if name_str(p, mi, q) == name {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn tok_push(out: &mut Vector<Tok>, start: u32, end: u32, ty: i32, mods: u32) {
     if ty < 0 || start >= end {
         return;
@@ -909,10 +998,17 @@ pub fn semantic_tokens(p: &loader::Package, mi: usize) Vector<Tok> {
             mods = 2;
         }
         tok_push(&mut out, sp.start, sp.end, token_type_of(p, d, &mut mc), mods);
+        qualifier_tokens(p, a, mi, i, &mut out);
     }
     let n = unsafe (*a).nnodes();
     for i0 in 1..n {
         let i = unsafe (*a).nth_id(i0);
+        let bn = binding_name(a, i);
+        if bn != NODE_NONE {
+            let bs = unsafe (*a).at_const(bn).span;
+            tok_push(&mut out, bs.start, bs.end, 7, 1);
+            continue;
+        }
         let nm = decl_name(a, i);
         if nm == NODE_NONE || nm == i {
             continue;
@@ -994,7 +1090,10 @@ const fn name_str(p: &loader::Package, m: usize, name_node: NodeId) str {
     }
     let a = mod_ast(p, m);
     let k = unsafe (*a).at_const(name_node).kind;
-    if k != NodeKind::NODE_IDENTIFIER && k != NodeKind::NODE_PATTERN_NAME {
+    if k == NodeKind::NODE_PATTERN_NAME {
+        return name_str(p, m, unsafe (*a).at_const(name_node).as_data.pattern.name);
+    }
+    if k != NodeKind::NODE_IDENTIFIER {
         return "";
     }
     let sp = unsafe (*a).at_const(name_node).as_data.name.text;
@@ -1005,9 +1104,27 @@ const fn name_str(p: &loader::Package, m: usize, name_node: NodeId) str {
     return src.slice(sp.start as usize, sp.end as usize);
 }
 
+// Whether module `req` sees an item or member of module `m` with visibility `v` (`Package::vis_ok`); one
+// without a modifier or `pub(file)` only in its module.
+const fn seen(p: &loader::Package, req: usize, m: usize, v: u8) bool {
+    return req == m || v >= VIS_MODULE && p.vis_ok(req as u32, m as ModuleId, v);
+}
+
+// The visibility of top-level item `n`; VIS_PRIVATE for a kind that names no item.
+const fn item_vis(n: &Node) u8 {
+    return switch n.kind {
+        NODE_FUNCTION => n.as_data.function.vis,
+        NODE_STRUCT | NODE_ENUM => n.as_data.aggregate.vis,
+        NODE_CONST => n.as_data.const_def.vis,
+        NODE_TYPE_ALIAS => n.as_data.type_alias.vis,
+        NODE_INTERFACE => n.as_data.interface_def.vis,
+        _ => VIS_PRIVATE,
+    };
+}
+
 // Fields and methods of the aggregate decl (dm, dn): fields from its member list, methods from every
 // module's `extend` blocks whose target resolves to it. `req_mod` is the module the request came
-// from: private fields and methods are offered only inside their owning module.
+// from: only the fields and methods it sees are offered.
 fn comp_aggregate(p: &loader::Package, dm: usize, dn: NodeId, req_mod: usize, out: &mut Vector<CompItem>) {
     let da = mod_ast(p, dm);
     let n = unsafe (*da).at_const(dn);
@@ -1017,7 +1134,7 @@ fn comp_aggregate(p: &loader::Package, dm: usize, dn: NodeId, req_mod: usize, ou
             let mid = unsafe (*da).list(ms)[i as usize];
             let mk = unsafe (*da).at_const(mid).kind;
             if mk == NodeKind::NODE_FIELD {
-                if !unsafe (*da).at_const(mid).as_data.field.is_public && dm != req_mod {
+                if !seen(p, req_mod, dm, unsafe (*da).at_const(mid).as_data.field.vis) {
                     continue;
                 }
                 let d = decl_signature(p, DefId { module: dm as ModuleId, node: mid });
@@ -1050,7 +1167,7 @@ fn comp_aggregate(p: &loader::Package, dm: usize, dn: NodeId, req_mod: usize, ou
                 if unsafe (*am).at_const(fid).kind != NodeKind::NODE_FUNCTION {
                     continue;
                 }
-                if !unsafe (*am).at_const(fid).as_data.function.is_public() && mm != req_mod {
+                if !seen(p, req_mod, mm, unsafe (*am).at_const(fid).as_data.function.vis) {
                     continue;
                 }
                 let sig = decl_signature(p, DefId { module: mm as ModuleId, node: fid });
@@ -1060,30 +1177,25 @@ fn comp_aggregate(p: &loader::Package, dm: usize, dn: NodeId, req_mod: usize, ou
     }
 }
 
-// The name of top-level item `iid` of module `mm` when it is one of the public declarations
-// `comp_module_publics` offers, else "".
-const fn public_item_name(p: &loader::Package, mm: usize, iid: NodeId) str {
+// The name of top-level item `iid` of module `mm` when it is one of the declarations
+// `comp_module_publics` offers module `req`, else "".
+const fn public_item_name(p: &loader::Package, req: usize, mm: usize, iid: NodeId) str {
     let n = unsafe (*mod_ast(p, mm)).at_const(iid);
-    if n.kind == NodeKind::NODE_FUNCTION && n.as_data.function.is_public() {
-        return name_str(p, mm, n.as_data.function.name);
+    let v = item_vis(n);
+    if v < VIS_MODULE || !seen(p, req, mm, v) {
+        return "";
     }
-    if (n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM) && n.as_data.aggregate.is_public {
-        return name_str(p, mm, n.as_data.aggregate.name);
-    }
-    if n.kind == NodeKind::NODE_CONST && n.as_data.const_def.is_public {
-        return name_str(p, mm, n.as_data.const_def.name);
-    }
-    if n.kind == NodeKind::NODE_TYPE_ALIAS && n.as_data.type_alias.is_public {
-        return name_str(p, mm, n.as_data.type_alias.name);
-    }
-    if n.kind == NodeKind::NODE_INTERFACE && n.as_data.interface_def.is_public {
-        return name_str(p, mm, n.as_data.interface_def.name);
-    }
-    return "";
+    return switch n.kind {
+        NODE_FUNCTION => name_str(p, mm, n.as_data.function.name),
+        NODE_STRUCT | NODE_ENUM => name_str(p, mm, n.as_data.aggregate.name),
+        NODE_CONST => name_str(p, mm, n.as_data.const_def.name),
+        NODE_TYPE_ALIAS => name_str(p, mm, n.as_data.type_alias.name),
+        _ => name_str(p, mm, n.as_data.interface_def.name),
+    };
 }
 
-// Public top-level declarations of module `mm`.
-fn comp_module_publics(p: &loader::Package, mm: usize, out: &mut Vector<CompItem>) {
+// The top-level declarations of module `mm` that module `req` sees from another module.
+fn comp_module_publics(p: &loader::Package, req: usize, mm: usize, out: &mut Vector<CompItem>) {
     let am = mod_ast(p, mm);
     if !p.modules.at(mm).has_ast {
         return;
@@ -1092,29 +1204,33 @@ fn comp_module_publics(p: &loader::Package, mm: usize, out: &mut Vector<CompItem
     for i in 0..items.len {
         let iid = unsafe (*am).list(items)[i as usize];
         let n = unsafe (*am).at_const(iid);
-        if n.kind == NodeKind::NODE_FUNCTION && n.as_data.function.is_public() {
+        let v = item_vis(n);
+        if v < VIS_MODULE || !seen(p, req, mm, v) {
+            continue;
+        }
+        if n.kind == NodeKind::NODE_FUNCTION {
             comp_push(
                 out,
                 name_str(p, mm, n.as_data.function.name),
                 3,
                 decl_signature(p, DefId { module: mm as ModuleId, node: iid }),
             );
-        } else if (n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM) && n.as_data.aggregate.is_public {
+        } else if n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM {
             let mut kind = 22;
             if n.kind == NodeKind::NODE_ENUM {
                 kind = 13;
             }
             comp_push(out, name_str(p, mm, n.as_data.aggregate.name), kind, String::new());
-        } else if n.kind == NodeKind::NODE_CONST && n.as_data.const_def.is_public {
+        } else if n.kind == NodeKind::NODE_CONST {
             comp_push(
                 out,
                 name_str(p, mm, n.as_data.const_def.name),
                 21,
                 decl_signature(p, DefId { module: mm as ModuleId, node: iid }),
             );
-        } else if n.kind == NodeKind::NODE_TYPE_ALIAS && n.as_data.type_alias.is_public {
+        } else if n.kind == NodeKind::NODE_TYPE_ALIAS {
             comp_push(out, name_str(p, mm, n.as_data.type_alias.name), 7, String::new());
-        } else if n.kind == NodeKind::NODE_INTERFACE && n.as_data.interface_def.is_public {
+        } else if n.kind == NodeKind::NODE_INTERFACE {
             comp_push(out, name_str(p, mm, n.as_data.interface_def.name), 8, String::new());
         }
     }
@@ -1183,7 +1299,7 @@ pub fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector<CompItem
                 }
                 let mid = p.find(mp.as_str());
                 if mid >= 0 {
-                    comp_module_publics(p, mid as usize, &mut out);
+                    comp_module_publics(p, mi, mid as usize, &mut out);
                 }
                 return out;
             }
@@ -1361,7 +1477,7 @@ pub fn complete_general(p: &loader::Package, mi: usize, off: u32) Vector<CompIte
     }
     for mm in 0..p.modules.len() {
         if p.modules.at(mm).prelude {
-            comp_module_publics(p, mm, &mut out);
+            comp_module_publics(p, mi, mm, &mut out);
         }
     }
     return out;
@@ -1500,7 +1616,12 @@ pub fn complete_interfaces(p: &loader::Package, mi: usize) Vector<CompItem> {
         let its = unsafe (*am).at_const((*am).root).as_data.program.items;
         for i in 0..its.len {
             let iid = unsafe (*am).list(its)[i as usize];
-            if unsafe (*am).at_const(iid).kind == NodeKind::NODE_INTERFACE && unsafe (*am).at_const(iid).as_data.interface_def.is_public {
+            if unsafe (*am).at_const(iid).kind == NodeKind::NODE_INTERFACE && seen(
+                p,
+                mi,
+                mm,
+                item_vis(unsafe (*am).at_const(iid)),
+            ) {
                 comp_push(
                     &mut out,
                     name_str(p, mm, unsafe (*am).at_const(iid).as_data.interface_def.name),
@@ -1706,7 +1827,7 @@ pub struct WsSym {
 }
 
 // Case-insensitive substring match (an empty query matches everything).
-fn fuzzy_has(name: str, q: str) bool {
+const fn fuzzy_has(name: str, q: str) bool {
     if q.len() == 0 {
         return true;
     }
@@ -1769,22 +1890,8 @@ const fn decl_generics(n: &Node) NodeList {
     return NodeList { start: 0, len: 0 };
 }
 
-// Whether top-level item `n` is visible outside its module.
-const fn item_public(n: &Node) bool {
-    if n.kind == NodeKind::NODE_FUNCTION {
-        return n.as_data.function.is_public();
-    } else if n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM {
-        return n.as_data.aggregate.is_public;
-    } else if n.kind == NodeKind::NODE_INTERFACE {
-        return n.as_data.interface_def.is_public;
-    } else if n.kind == NodeKind::NODE_TYPE_ALIAS {
-        return n.as_data.type_alias.is_public;
-    }
-    return false;
-}
-
 // The generic declaration named `name` that module `mi` sees: unqualified, an item of `mi` or a
-// public item of a prelude module; qualified by `qual`, a public item of the module an import of
+// visible item of a prelude module; qualified by `qual`, a visible item of the module an import of
 // `mi` names `qual` (by its alias or its last segment). NODE_NONE when there is none.
 fn generic_decl_named(p: &loader::Package, mi: usize, qual: str, name: str) DefId {
     let a = mod_ast(p, mi);
@@ -1828,7 +1935,7 @@ fn generic_decl_named(p: &loader::Package, mi: usize, qual: str, name: str) DefI
         for i in 0..items.len {
             let iid = unsafe (*am).list(items)[i as usize];
             let n = unsafe (*am).at_const(iid);
-            if decl_generics(n).len != 0 && (mm == mi || item_public(n)) && name_str(p, mm, decl_name(am, iid)) == name {
+            if decl_generics(n).len != 0 && seen(p, mi, mm, item_vis(n)) && name_str(p, mm, decl_name(am, iid)) == name {
                 return DefId { module: mm as ModuleId, node: iid };
             }
         }
@@ -2772,7 +2879,7 @@ pub fn body_functions(p: &loader::Package, mi: usize) Vector<FnSpan> {
 
 /// The innermost function of `fns` whose span holds `off` (the first in node order on a tie), or
 /// NODE_NONE.
-pub fn enclosing_in(fns: &Vector<FnSpan>, off: u32) NodeId {
+pub const fn enclosing_in(fns: &Vector<FnSpan>, off: u32) NodeId {
     let mut best = NODE_NONE;
     let mut blen: u32 = 0xFFFFFFFF;
     for k in 0..fns.len() {
@@ -2843,7 +2950,7 @@ pub fn import_candidates(p: &loader::Package, mi: usize, name: str) Vector<Strin
         let am = mod_ast(p, mm);
         let items = unsafe (*am).at_const((*am).root).as_data.program.items;
         for i in 0..items.len {
-            if public_item_name(p, mm, unsafe (*am).list(items)[i as usize]) == name {
+            if public_item_name(p, mi, mm, unsafe (*am).list(items)[i as usize]) == name {
                 out.push(p.modules.at(mm).path.clone());
                 break;
             }
@@ -2854,7 +2961,7 @@ pub fn import_candidates(p: &loader::Package, mi: usize, name: str) Vector<Strin
 
 /// Byte offset where a new `import ...;` line belongs in module `mi`: right after the last existing
 /// top-level import line, else at the top of the file.
-pub fn import_insert_at(p: &loader::Package, mi: usize) u32 {
+pub const fn import_insert_at(p: &loader::Package, mi: usize) u32 {
     let src = p.modules.at(mi).source.as_str();
     let mut at: u32 = 0;
     let mut i: usize = 0;

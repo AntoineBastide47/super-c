@@ -1033,7 +1033,7 @@ struct CCall<F, T> {
 }
 
 // The cache class of a record size: 0 for the smallest, or CLASSES for a size the cache does not keep.
-fn cache_class(bytes: usize) usize {
+const fn cache_class(bytes: usize) usize {
     let mut c: usize = 0;
     let mut sz = CACHE_MIN;
     while sz < bytes && c < CLASSES {

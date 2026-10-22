@@ -269,7 +269,7 @@ extend Errors {
     // Structural equality for dedup: span, message bytes, and the note chains. Severity is
     // implied (dedup runs within one record vector).
     @cold
-    fn same_diag(self: &Self, a: &Diagnostic, b: &Diagnostic) bool {
+    const fn same_diag(self: &Self, a: &Diagnostic, b: &Diagnostic) bool {
         if a.start != b.start || a.len != b.len || !a.msg.equals(&b.msg) {
             return false;
         }
@@ -378,7 +378,7 @@ fn line_starts_of(source: str) Vector<u32> {
     return line_starts;
 }
 
-fn line_index(line_starts: &Vector<u32>, off: u32) usize {
+const fn line_index(line_starts: &Vector<u32>, off: u32) usize {
     let mut lo: usize = 0;
     let mut hi = line_starts.len();
     while lo < hi {

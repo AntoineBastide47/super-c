@@ -1560,7 +1560,7 @@ unsafe fn resolve(host: *const char, svc: *const char, hints: &addrinfo) *mut ad
 // `port` as decimal text with its NUL, as snprintf's "%d" writes it: the service name for getaddrinfo,
 // built with no allocation between a failing call and the caller reading its error.
 @platform(!wasm)
-fn port_text(port: i32) [char; 12] {
+const fn port_text(port: i32) [char; 12] {
     let mut digits: [u8; 10] = [0u8; 10];
     let mut n: usize = 0;
     let mut v: u32 = if port < 0 {

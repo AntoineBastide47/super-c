@@ -56,7 +56,7 @@ pub fn greater_than_equal<G: Ordered>(x: G, y: G) G::Bools {
 }
 
 /// True when a component is true.
-pub fn any<const N: usize>(v: Vec<bool, N>) bool {
+pub const fn any<const N: usize>(v: Vec<bool, N>) bool {
     let mut r = false;
     for i in 0..N {
         r = r || unsafe v.e[i];
@@ -65,7 +65,7 @@ pub fn any<const N: usize>(v: Vec<bool, N>) bool {
 }
 
 /// True when every component is true.
-pub fn all<const N: usize>(v: Vec<bool, N>) bool {
+pub const fn all<const N: usize>(v: Vec<bool, N>) bool {
     let mut r = true;
     for i in 0..N {
         r = r && unsafe v.e[i];
@@ -74,7 +74,7 @@ pub fn all<const N: usize>(v: Vec<bool, N>) bool {
 }
 
 /// Each component negated.
-pub fn not_<const N: usize>(v: Vec<bool, N>) Vec<bool, N> {
+pub const fn not_<const N: usize>(v: Vec<bool, N>) Vec<bool, N> {
     let mut r = v;
     for i in 0..N {
         unsafe {

@@ -142,18 +142,18 @@ extend MoveForest {
 
     /// The existing child of `parent` naming field `fdecl` (member places carry field identity in
     /// `sub`), or MP_NONE when that field was never mentioned.
-    pub fn field_child(self: &Self, parent: u32, fdecl: NodeId) u32 {
+    pub const fn field_child(self: &Self, parent: u32, fdecl: NodeId) u32 {
         return self.find_child(parent, elem_key(ir::PJ_FIELD, ir::IR_NONE, fdecl));
     }
 
     /// The existing child of `parent` naming positional tuple member `idx` (member places carry the
     /// index in `data` and NODE_NONE in `sub`), or MP_NONE when it was never mentioned.
-    pub fn tuple_child(self: &Self, parent: u32, idx: u32) u32 {
+    pub const fn tuple_child(self: &Self, parent: u32, idx: u32) u32 {
         return self.find_child(parent, elem_key(ir::PJ_FIELD, idx, NODE_NONE));
     }
 
     // The existing child of `parent` for canonical element `elem`, or MP_NONE.
-    fn find_child(self: &Self, parent: u32, elem: u64) u32 {
+    const fn find_child(self: &Self, parent: u32, elem: u64) u32 {
         let mut c = self.paths.at(parent as usize).first_child;
         while c != MP_NONE {
             if self.paths.at(c as usize).elem == elem {

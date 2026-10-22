@@ -26,7 +26,7 @@ fn zeros(n: usize) Vector<u64> {
 }
 
 // `a /= d` for `0 < d < 2^31`; the digits before `lead` are zero.
-fn div_small(a: &mut Vector<u64>, d: u64, lead: usize) {
+const fn div_small(a: &mut Vector<u64>, d: u64, lead: usize) {
     let mut rem: u64 = 0;
     for i in lead..a.len() {
         let cur = rem << 32 | a[i];

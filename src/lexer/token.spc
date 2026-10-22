@@ -82,7 +82,7 @@ extend Token {
 /// escape (`\n \r \t \\ \' \" \0 \xHH \u{H..}`). Every pass that needs a literal's value calls this, so
 /// the checker, pattern analysis, lowering and CTFE agree. None: the spelling is malformed (the lexer
 /// already reported it).
-pub fn char_literal_value(src: str, sp: Span) Option<i64> {
+pub const fn char_literal_value(src: str, sp: Span) Option<i64> {
     if sp.end < sp.start + 3 || sp.end as usize > src.len() {
         return Option::<i64>::None;
     }

@@ -3,7 +3,7 @@
 // results do not depend on the vector lowering (`simd_math_test.spc` checks that every lowering gives
 // the same bits), so this file's path names no `simd_`: CI's per-level `--filter=simd_` runs skip it.
 import tests::cli_harness as cli;
-import driver_shim as shim;
+import std::platform::fs;
 
 // A copy of `tools/simd_math` in a scratch project, its binary `bin` built with the release profile (the
 // tools' f128 arithmetic needs inlining across units); the binary's path.
@@ -25,9 +25,9 @@ fn tool(p: &cli::Proj, root: str, bin: str) String {
 
 // The repository root: the test's working directory.
 fn repo_root() String {
-    let mut buf: [char; 4096] = [0 as char; 4096];
-    assert(unsafe shim::sc_realpath(".".ptr() as *const char, &mut buf[0]) != null, "the working directory resolves");
-    return unsafe String::from_cstr(&buf[0]);
+    let real = fs::realpath(".");
+    assert(real.is_ok(), "the working directory resolves");
+    return real.unwrap();
 }
 
 @test(timeout = 300)
@@ -37,8 +37,7 @@ fn generator_reproduces_coefficients() {
     let exe = tool(&p, root.as_str(), "simd-math-gen");
     let mut out = String::from_str(p.dir());
     out.push_str("/out");
-    let mut od = out.clone();
-    let _ = unsafe shim::sc_mkdir_p(od.cstr());
+    let _ = fs::mkdir_all(out.as_str());
     let mut args = String::from_str("--jobs=1 ");
     args.push_str(out.as_str());
     let r = cli::exe_env_in(exe.as_str(), p.dir(), "SC_LEAK_CHECK", "0", args.as_str());

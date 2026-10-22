@@ -342,6 +342,7 @@ target-cpu = "x86-64-v2"     # x86_64 level before the feature lists (skipped on
 simd-width = 256             # vector width the planner prefers on AVX-512: 256 or 512
 simd-dispatch = "x86-64-v3"  # x86_64: levels of the run-time copies of vector code, or "off"
 cache-size = "2GiB"          # bytes the project's cache root keeps: a byte count, or B/KiB/MiB/GiB (default 2GiB)
+std_internals = true         # the project names std's unstable `pub(package)` items (std::platform); the compiler sets it
 
 [lib]                        # library target (optional; root defaults to src/lib.spc,
 type = ["static", "shared"]  # type defaults to static)

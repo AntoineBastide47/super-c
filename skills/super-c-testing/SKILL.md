@@ -338,6 +338,11 @@ gets `SC_LEAK_CHECK=fatal` unless the test sets `SC_LEAK_CHECK` on it itself (`r
 `compile_flags_env`, `compile_and_run_env`), so a leak in a program or compiler a test runs fails
 the test with or without the gate. Only a leak in the test process itself needs the gate.
 
+The platform layer's tests (`tests/platform_*_test.spc`, helper `tests/platform_harness.spc`) run each
+`std::platform` module on the host; `platform_wasi_test` builds one program with `--target=wasm`, runs it under
+wasmtime and checks every WASI `Unsupported` path, and returns early without `WASI_SDK_PATH`. Windows-only paths
+compile there and run on the Windows runner.
+
 The wasm lane runs the same suite with `SC_TEST_SUPERC=ci/wasm-superc.sh`: the wrapper runs
 every transpile-class command (a script, `fmt`, `lint`, the transpile form an engine's
 `--transpiler` runs) inside wasmtime and sends the commands that spawn processes (`build`,
@@ -739,12 +744,13 @@ Choosing an oracle, batching cases and keeping a test's CPU and energy cost low:
 - **Restore what a test sets.** A test changes its own process environment through
   `cli::set_env(name, value)`, whose guard puts the old value back (or removes the variable) when
   it drops: under `--test-no-fork` every test shares one process.
-- **Unset, do not empty.** `sc_unsetenv` removes a variable; a variable set to `""` still
-  passes a `getenv(..) != NULL` check. On Windows `sc_unsetenv` is `_putenv_s(name, "")`,
-  which removes it.
-- **No shell on Windows.** `sc_run` and `sc_exec` call `CreateProcessA` directly. A harness
-  command line never uses `cd X && K=V cmd`: pass the variable through `sc_run`'s env
-  parameter and change directory with `shim::sc_chdir` (`cli::superc_env_in`), resolving
+- **Unset, do not empty.** `std::platform::env::unset` removes a variable; a variable set to `""`
+  still passes a `getenv(..) != NULL` check. On Windows an empty value removes it, as `_putenv_s` does.
+- **No shell on Windows.** `cli::run_with` and a custom `[command]` line (`bsys::run_line`) run
+  `/bin/sh -c` on POSIX and pass the line as written to `CreateProcessW` on Windows. A harness
+  command line never uses `cd X && K=V cmd`: pass the variable through `run_with`'s env
+  parameter (the child's whole environment) and change directory with
+  `std::platform::process::set_current_dir` (`cli::superc_env_in`), resolving
   `cli::superc_path()` before the change. A test that runs a shell line returns early under
   `if cli::on_wasm() || cli::on_windows() { return; }`.
 - **No parallel `system()`.** macOS `system()` serializes across threads; `popen` or a

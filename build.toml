@@ -1,5 +1,6 @@
 bin = "super-c"
 root = "src/main.spc"
+std_internals = true
 
 [command.bootstrap]
 run = [

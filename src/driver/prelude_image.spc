@@ -11,7 +11,7 @@
 // sweep deletes the stale images and the idle ones beyond the most recent (`sweep`), and SC_NO_CACHE
 // turns the cache off.
 import module::loader as loader;
-import driver_shim as shim;
+import std::platform::fs;
 import ir::interp as iri;
 import ast::ast as *;
 import build_system::objcache as ocache;
@@ -49,7 +49,7 @@ pub fn key(p: &loader::Package, std_dir: str, target: i32, steps: u32, mem: u64)
 }
 
 // `s` mixed into `h` with its length, so two strings cannot run together.
-fn mix_str(h: u64, s: str) u64 {
+const fn mix_str(h: u64, s: str) u64 {
     return skey_mix(fnv_cont(h, s), s.len() as u64);
 }
 
@@ -87,7 +87,7 @@ pub fn dir_id(dir: str) u64 {
 }
 
 // The identity of a listing: its `loader::dir_listing` state and its sorted names.
-fn listing_id(st: u8, names: &Vector<String>) u64 {
+const fn listing_id(st: u8, names: &Vector<String>) u64 {
     let mut h = skey_mix(FNV_BASIS, st);
     for i in 0..names.len() {
         h = mix_str(h, names.at(i).as_str());
@@ -275,7 +275,7 @@ pub fn write(cache: str, key: u64, cid: u64, q: &loader::Package, std_dir: str, 
 /// The image file in cache root `cache` for `key` that compiler `cid` wrote and whose std files are
 /// current, and the offset of its payload (16-byte aligned, as `load` reads it); None when there is none.
 pub fn read(cache: str, key: u64, cid: u64, at: &mut usize) Option<String> {
-    let mut path = image_path(cache, key, cid);
+    let path = image_path(cache, key, cid);
     let body = loader::read_file(path.as_str());
     if body.is_none() {
         return Option::<String>::None;
@@ -287,7 +287,7 @@ pub fn read(cache: str, key: u64, cid: u64, at: &mut usize) Option<String> {
         return Option::<String>::None;
     }
     // A use: the sweep deletes an image idle for its period.
-    let _ = unsafe shim::sc_touch(path.cstr());
+    let _ = fs::set_times(path.as_str(), fs::FileTime::Now, fs::FileTime::Now);
     return Option::<String>::Some(b);
 }
 
@@ -342,23 +342,23 @@ pub fn sweep(root: str, now: i64) {
     let mut kept = Vector::<Kept>::new();
     for i in 0..names.len() {
         let n = names.at(i).as_str();
-        let mut p = loader::join2(dir.as_str(), n);
+        let p = loader::join2(dir.as_str(), n);
         let mut mt: i64 = 0;
         if n.ends_with(".tmp") {
-            if now - unsafe shim::sc_mtime(p.cstr()) >= ocache::TMP_IDLE {
-                let _ = unsafe shim::sc_unlink(p.cstr());
+            if now - file_mtime(p.as_str()) >= ocache::TMP_IDLE {
+                let _ = fs::unlink(p.as_str());
             }
         } else if live(p.as_str(), n, &mut ids, &mut mt) {
             kept.push(Kept { name: String::from_str(n), mt: mt });
         } else {
-            let _ = unsafe shim::sc_unlink(p.cstr());
+            let _ = fs::unlink(p.as_str());
         }
     }
     kept.sort_by(kept_newer);
     for i in IMAGE_KEEP..kept.len() {
         if now - kept[i].mt >= IMAGE_IDLE {
-            let mut p = loader::join2(dir.as_str(), kept.at(i).name.as_str());
-            let _ = unsafe shim::sc_unlink(p.cstr());
+            let p = loader::join2(dir.as_str(), kept.at(i).name.as_str());
+            let _ = fs::unlink(p.as_str());
         }
     }
 }
@@ -366,15 +366,25 @@ pub fn sweep(root: str, now: i64) {
 // Whether image file `path` named `name` checks, its compiler is still at the path it records, and its
 // std files are current; its last use into `mt`.
 fn live(path: str, name: str, ids: &mut Ids, mt: &mut i64) bool {
-    let mut pc = String::from_str(path);
-    let mut size: i64 = 0;
-    let fd = unsafe shim::sc_file_open(pc.cstr(), &mut size, mt);
-    if fd < 0 {
+    let opened = fs::open(path, fs::OpenOptions { read: true });
+    if opened.is_err() {
         return false;
     }
+    let mut f = opened.unwrap();
+    let md = f.metadata();
+    if md.is_err() {
+        return false;
+    }
+    let m = md.unwrap();
+    if m.kind != fs::FileKind::File {
+        return false;
+    }
+    *mt = mtime_s(m.modified_ns);
+    let size = m.size as i64;
     let want = (size as usize).min(HEAD_READ);
     let mut h = String::with_capacity(want);
-    if unsafe shim::sc_file_read_close(fd, h.spare_mut(want), want) != want as i64 {
+    let got = f.read_full(unsafe SliceMut::<u8> { ptr: h.spare_mut(want), len: want });
+    if got.is_err() || got.unwrap() != want || f.close().is_err() {
         return false;
     }
     h.advance_len(want);

@@ -110,7 +110,7 @@ extend<T: Elem, const N: usize> Vec<T, N> {
         return Vec::<T, 4> { e: [unsafe self.e[I], unsafe self.e[J], unsafe self.e[K], unsafe self.e[L]] };
     }
     /// The first M components, M <= N. A longer M is a compile error.
-    pub fn truncate<const M: usize>(self: Vec<T, N>) Vec<T, M> {
+    pub const fn truncate<const M: usize>(self: Vec<T, N>) Vec<T, M> {
         static_assert(M <= N, "truncate to more components than the vector has");
         let mut r = Vec::<T, M> { e: [unsafe self.e[0]; M] };
         for i in 0..M {
@@ -121,7 +121,7 @@ extend<T: Elem, const N: usize> Vec<T, N> {
         return r;
     }
     /// `self` followed by `s`: N + 1 components.
-    pub fn append(self: Vec<T, N>, s: T) Vec<T, {N + 1}> {
+    pub const fn append(self: Vec<T, N>, s: T) Vec<T, {N + 1}> {
         let mut r = Vec::<T, {N + 1}> { e: [s; N + 1] };
         for i in 0..N {
             unsafe {
@@ -131,7 +131,7 @@ extend<T: Elem, const N: usize> Vec<T, N> {
         return r;
     }
     /// `self` followed by `b`: N + M components.
-    pub fn concat<const M: usize>(self: Vec<T, N>, b: Vec<T, M>) Vec<T, {N + M}> {
+    pub const fn concat<const M: usize>(self: Vec<T, N>, b: Vec<T, M>) Vec<T, {N + M}> {
         let mut r = Vec::<T, {N + M}> { e: [unsafe b.e[0]; N + M] };
         for i in 0..N {
             unsafe {
@@ -879,7 +879,7 @@ pub fn make_vec4_from_vec<T: Scalar, const M: usize>(v: Vec<T, M>) Vec<T, 4> {
 }
 
 // The components both lengths have from `v`, the others from `fill`.
-fn resize<T: Elem, const M: usize, const K: usize>(v: Vec<T, M>, fill: Vec<T, K>) Vec<T, K> {
+const fn resize<T: Elem, const M: usize, const K: usize>(v: Vec<T, M>, fill: Vec<T, K>) Vec<T, K> {
     let mut r = fill;
     for i in 0..K {
         if i < M {

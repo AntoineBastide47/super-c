@@ -167,7 +167,7 @@ pub const fn at_most<T: Lane, const N: usize>(v: Simd<T, N>, hi: Simd<T, N>) Sim
 }
 
 /// `p(z)` for coefficients `c`, lowest power first (`eval_pairs`).
-pub fn horner<T: SimdFloat, const N: usize, const K: usize>(z: Simd<T, N>, c: &[T; K]) Simd<T, N> {
+pub const fn horner<T: SimdFloat, const N: usize, const K: usize>(z: Simd<T, N>, c: &[T; K]) Simd<T, N> {
     let mut v: [Simd<T, N>; K] = [Simd::<T, N>::splat(unsafe c[0]); K];
     for i in 1..K {
         unsafe v[i] = Simd::splat(unsafe c[i]);
@@ -179,7 +179,7 @@ pub fn horner<T: SimdFloat, const N: usize, const K: usize>(z: Simd<T, N>, c: &[
 /// them in z^2. No power past z^2 is formed (z^4 of a small f32 z underflows, and an x86 core takes a
 /// microcode assist for each subnormal result), and the dependency chain is half of Horner's rule over
 /// z. `v` is scratch.
-pub fn eval_pairs<T: SimdFloat, const N: usize, const K: usize>(z: Simd<T, N>, v: &mut [Simd<T, N>; K], n: usize) Simd<
+pub const fn eval_pairs<T: SimdFloat, const N: usize, const K: usize>(z: Simd<T, N>, v: &mut [Simd<T, N>; K], n: usize) Simd<
     T,
     N
 > {

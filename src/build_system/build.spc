@@ -4,7 +4,7 @@
 // optionally strip. `super-c command <name>` and `super-c clean` live here too.
 //
 // Process discipline: every compiler, linker, archiver, strip, probe, and git invocation is an argv
-// child (sc_spawn_argv, no shell), so paths pass through verbatim: spaces, quotes, non-ASCII. The
+// child (process::spawn, no shell), so paths pass through verbatim: spaces, quotes, non-ASCII. The
 // ONE shell survivor is `super-c command`, whose manifest lines are sh/cmd syntax by user contract. Flag
 // STRINGS keep their historic whitespace-splitting. compile_commands.json (one `arguments` row per
 // TU) lands beside raw/obj; .cmd fingerprints, the link record, and the emit stamp write through
@@ -14,6 +14,10 @@ import stdio;
 import stdlib;
 import time;
 import driver_shim as shim;
+import std::platform::cpu;
+import std::platform::env;
+import std::platform::fs;
+import std::platform::process;
 import driver::stats as bst;
 import std::parallel::platform as platform;
 import std::parallel::runtime as prt;
@@ -69,8 +73,8 @@ fn cat_file_bounded(path: str, limit: usize) {
 fn walk_files(dir: str, base_len: usize, out: &mut Vector<String>) {
     let names = list_dir(dir, false).unwrap_or(Vector::<String>::new());
     for i in 0..names.len() {
-        let mut p = loader::join2(dir, names.at(i).as_str());
-        if unsafe shim::sc_stat_isdir(p.cstr()) == 1 {
+        let p = loader::join2(dir, names.at(i).as_str());
+        if is_dir(p.as_str()) {
             walk_files(p.as_str(), base_len, out);
         } else {
             let full = p.as_str();
@@ -85,8 +89,8 @@ fn walk_gen_files(dir: str, base_len: usize, out: &mut Vector<String>) {
     let names = list_dir(dir, false).unwrap_or(Vector::<String>::new());
     for i in 0..names.len() {
         let nm = names.at(i).as_str();
-        let mut p = loader::join2(dir, nm);
-        if !nm.ends_with(".c") && !nm.ends_with(".h") && unsafe shim::sc_stat_isdir(p.cstr()) == 1 {
+        let p = loader::join2(dir, nm);
+        if !nm.ends_with(".c") && !nm.ends_with(".h") && is_dir(p.as_str()) {
             walk_gen_files(p.as_str(), base_len, out);
         } else {
             let full = p.as_str();
@@ -95,7 +99,7 @@ fn walk_gen_files(dir: str, base_len: usize, out: &mut Vector<String>) {
     }
 }
 
-fn contains(v: &Vector<String>, s: str) bool {
+const fn contains(v: &Vector<String>, s: str) bool {
     for i in 0..v.len() {
         if v.at(i).as_str() == s {
             return true;
@@ -107,24 +111,9 @@ fn contains(v: &Vector<String>, s: str) bool {
 /// Recursive delete (files then directories); silently ignores a missing path. Never follows a link:
 /// a POSIX symlink is unlinked and a Windows directory link or junction is removed without descending.
 pub fn rm_rf(path: str) {
-    let mut p = String::from_str(path);
-    let isdir = unsafe shim::sc_lstat_isdir(p.cstr());
-    if isdir == 2 {
-        unsafe shim::sc_rmdir(p.cstr());
-    } else if isdir == 1 {
-        let names = list_dir(path, true).unwrap_or(Vector::<String>::new());
-        for i in 0..names.len() {
-            let c = loader::join2(path, names.at(i).as_str());
-            rm_rf(c.as_str());
-        }
-        unsafe shim::sc_rmdir(p.cstr());
-    } else if isdir == 0 {
-        if unsafe shim::sc_unlink(p.cstr()) != 0 {
-            // Read-only file (a vendored repository's git objects): make it writable and retry.
-            let _ = unsafe shim::sc_chmod_rw(p.cstr());
-            unsafe shim::sc_unlink(p.cstr());
-        }
-    }
+    // A read-only file (a vendored repository's git objects) goes too: Windows refuses to unlink one,
+    // and `fs::remove_all` makes it writable first.
+    let _ = fs::remove_all(path);
 }
 
 // The global object cache: ~/.super-c/cache, content-addressed
@@ -186,12 +175,11 @@ fn obj_cache_ns(root: str, pdir: str) String {
 
 /// The newest mtime of `dir` and its entries (0 when `dir` is missing).
 fn newest_mtime(dir: str) i64 {
-    let mut d = String::from_str(dir);
-    let mut best = unsafe shim::sc_mtime(d.cstr());
+    let mut best = file_mtime(dir);
     let names = list_dir(dir, false).unwrap_or(Vector::<String>::new());
     for i in 0..names.len() {
-        let mut p = loader::join2(dir, names.at(i).as_str());
-        let mt = unsafe shim::sc_mtime(p.cstr());
+        let p = loader::join2(dir, names.at(i).as_str());
+        let mt = file_mtime(p.as_str());
         if mt > best {
             best = mt;
         }
@@ -269,12 +257,12 @@ fn obj_cache_commit(ns: str, keys: &mut Vector<String>, tree: str, now: i64) {
     let mut next: u64 = 1;
     if seqs.len() != 0 {
         next = seqs[0] + 1;
-        let mut gp = gen_path(ns, seqs[0]);
+        let gp = gen_path(ns, seqs[0]);
         let old = loader::read_file(gp.as_str());
         if !old.is_none() {
             let ob = old.unwrap();
             if ob.as_str() == text.as_str() {
-                if now - unsafe shim::sc_mtime(gp.cstr()) >= 86400 {
+                if now - file_mtime(gp.as_str()) >= 86400 {
                     let _ = write_file_atomic(gp.as_str(), text.as_str());
                 }
                 return;
@@ -296,7 +284,7 @@ fn obj_cache_commit(ns: str, keys: &mut Vector<String>, tree: str, now: i64) {
     let mut live = Set::<String>::new();
     add_keys(&mut live, text.as_str());
     for i in 0..seqs.len() {
-        let mut p = gen_path(ns, seqs[i]);
+        let p = gen_path(ns, seqs[i]);
         if i + 1 < OBJ_GENS {
             let g = loader::read_file(p.as_str());
             if !g.is_none() {
@@ -304,20 +292,20 @@ fn obj_cache_commit(ns: str, keys: &mut Vector<String>, tree: str, now: i64) {
                 add_keys(&mut live, gb.as_str());
             }
         } else {
-            let _ = unsafe shim::sc_unlink(p.cstr());
+            let _ = fs::unlink(p.as_str());
         }
     }
     for i in 0..names.len() {
         let n = names.at(i).as_str();
-        let mut p = loader::join2(ns, n);
+        let p = loader::join2(ns, n);
         if n.ends_with(".tmp") {
-            if now - unsafe shim::sc_mtime(p.cstr()) >= TMP_IDLE {
-                let _ = unsafe shim::sc_unlink(p.cstr());
+            if now - file_mtime(p.as_str()) >= TMP_IDLE {
+                let _ = fs::unlink(p.as_str());
             }
         } else if n.len() == 34 && key_prefixed(n) {
             let stem = String::from_str(n.slice(0, 32));
             if !live.contains(&stem) {
-                let _ = unsafe shim::sc_unlink(p.cstr());
+                let _ = fs::unlink(p.as_str());
             }
         }
     }
@@ -347,8 +335,7 @@ fn ns_dead(name: str, ns: str, now: i64) bool {
         return idle >= TMP_IDLE;
     }
     let ob = own.unwrap();
-    let mut od = String::from_str(ob.as_str());
-    if unsafe shim::sc_mtime(od.cstr()) == 0 {
+    if file_mtime(ob.as_str()) == 0 {
         return true;
     }
     let mut want = String::new();
@@ -377,8 +364,8 @@ pub fn sweep(m: *const mf::Manifest, now: i64, clean: bool) {
 // Whether the sweep whose stamp is `<dir>/.sweep` is due (no stamp, or one older than SWEEP_EVERY); a
 // due sweep restamps first, and one whose stamp cannot be written does not run: every build would sweep.
 fn sweep_due(dir: str, now: i64) bool {
-    let mut stamp = loader::join2(dir, ".sweep");
-    let last = unsafe shim::sc_mtime(stamp.cstr());
+    let stamp = loader::join2(dir, ".sweep");
+    let last = file_mtime(stamp.as_str());
     if last != 0 && now - last < SWEEP_EVERY {
         return false;
     }
@@ -464,24 +451,20 @@ fn rm_unlocked(p: str) {
     for i in 0..subs.len() {
         locks.push(loader::join2(loader::join2(p, subs.at(i).as_str()).as_str(), ".lock"));
     }
-    let mut held = Vector::<i64>::new();
     let mut busy = false;
-    for i in 0..locks.len() {
-        let mut lp = locks.at(i).clone();
-        if !busy && unsafe shim::sc_mtime(lp.cstr()) != 0 {
-            let h = unsafe shim::sc_tree_lock(lp.cstr(), 0);
-            if h < 0 {
-                busy = true;
-            } else {
+    {
+        let mut held = Vector::<Lock>::new();
+        for i in 0..locks.len() {
+            let lp = locks.at(i).as_str();
+            if !busy && file_mtime(lp) != 0 {
+                let h = lock_file(lp, 0);
+                busy = !h.held();
                 held.push(h);
             }
         }
-    }
-    if !busy {
-        rm_rf(p);
-    }
-    for i in 0..held.len() {
-        unsafe shim::sc_tree_unlock(held[i]);
+        if !busy {
+            rm_rf(p);
+        }
     }
     if !busy {
         rm_rf(p);
@@ -503,8 +486,8 @@ fn root_trees(m: &mf::Manifest) Vector<String> {
     let names = list_dir(b.as_str(), false).unwrap_or(Vector::<String>::new());
     for i in 0..names.len() {
         let pd = loader::join2(b.as_str(), names.at(i).as_str());
-        let mut rt = loader::join2(pd.as_str(), "raw/super_rt.h");
-        if unsafe shim::sc_mtime(rt.cstr()) != 0 {
+        let rt = loader::join2(pd.as_str(), "raw/super_rt.h");
+        if file_mtime(rt.as_str()) != 0 {
             out.push(pd);
         }
     }
@@ -516,20 +499,19 @@ fn root_trees(m: &mf::Manifest) Vector<String> {
 // directory and its `build` parent when nothing else is left in them. The lock stays held while the
 // tree goes, and the lock file goes again once it is released (Windows deletes no open file).
 fn rm_root_tree(pd: str) {
-    let mut lp = loader::join2(pd, ".lock");
-    let h = unsafe shim::sc_tree_lock(lp.cstr(), 0);
-    if h < 0 {
-        return;
+    let lp = loader::join2(pd, ".lock");
+    {
+        let h = lock_file(lp.as_str(), 0);
+        if !h.held() {
+            return;
+        }
+        rm_rf(loader::join2(pd, "raw").as_str());
+        rm_rf(loader::join2(pd, "obj").as_str());
+        let _ = fs::unlink(lp.as_str());
     }
-    rm_rf(loader::join2(pd, "raw").as_str());
-    rm_rf(loader::join2(pd, "obj").as_str());
-    let _ = unsafe shim::sc_unlink(lp.cstr());
-    unsafe shim::sc_tree_unlock(h);
-    let _ = unsafe shim::sc_unlink(lp.cstr());
-    let mut d = String::from_str(pd);
-    let _ = unsafe shim::sc_rmdir(d.cstr());
-    let mut b = String::from_str(loader::dirname_of(pd));
-    let _ = unsafe shim::sc_rmdir(b.cstr());
+    let _ = fs::unlink(lp.as_str());
+    let _ = fs::rmdir(pd);
+    let _ = fs::rmdir(loader::dirname_of(pd));
 }
 
 // The gen-tree prefix in a stored .d is replaced by `@/`, so a dependency list written in one project
@@ -620,8 +602,8 @@ fn obj_stale(
     gen: str,
     mtimes: &mut Map<String, i64>,
 ) bool {
-    let omt = unsafe shim::sc_mtime_ns(cmdpath.cstr());
-    if omt == 0 || unsafe shim::sc_mtime(opath.cstr()) == 0 {
+    let omt = file_mtime_ns(cmdpath.as_str());
+    if omt == 0 || file_mtime(opath.as_str()) == 0 {
         return true;
     }
     if rewritten_dep(cpath.as_str(), rewritten, gen) {
@@ -679,7 +661,7 @@ fn obj_stale(
             let mt = switch mtimes.get(&dep_path) {
                 Some(v) => *v,
                 None => {
-                    let v9 = unsafe shim::sc_mtime_ns(dep_path.cstr());
+                    let v9 = file_mtime_ns(dep_path.as_str());
                     mtimes.insert(dep_path.clone(), v9);
                     v9;
                 },
@@ -849,7 +831,7 @@ pub fn profile_lto(name: str) i32 {
 const LTO_SCHEMA: u32 = 1;
 
 // Field `idx` of `s` split at byte `sep`; the last field runs to the end, and a missing one is empty.
-fn field_of(s: str, sep: u8, idx: usize) str {
+const fn field_of(s: str, sep: u8, idx: usize) str {
     let mut a: usize = 0;
     let mut k: usize = 0;
     for i in 0..s.len() {
@@ -893,8 +875,8 @@ fn linker_of_log(path: str, out: &mut String) {
                 } {
                     y += 1;
                 }
-                let mut prog = String::from_str(s.slice(x, y));
-                let mt = unsafe shim::sc_mtime(prog.cstr());
+                let prog = String::from_str(s.slice(x, y));
+                let mt = file_mtime(prog.as_str());
                 if mt != 0 {
                     out.clear();
                     out.push_str("ld\t");
@@ -976,7 +958,6 @@ struct Pend {
 
 // One in-flight compile job: its child pid plus what to record/cleanup on completion.
 struct Job {
-    pub pid: i64,
     pub fp: String,
     pub log: String,
     pub cmdpath: String,
@@ -985,6 +966,21 @@ struct Job {
     pub sobj: String,
     pub oout: String,
     pub dout: String,
+}
+
+extend Lock {
+    pub const fn held(self: &Lock) bool {
+        return switch self {
+            Held(_) => true,
+            _ => false,
+        };
+    }
+    pub const fn busy(self: &Lock) bool {
+        return switch self {
+            Busy => true,
+            _ => false,
+        };
+    }
 }
 
 extend Job {
@@ -1013,7 +1009,7 @@ extend Job {
                 cache_install(self.sobj.as_str(), self.oout.as_str(), self.dout.as_str(), gen, aobj);
             }
         }
-        unsafe shim::sc_unlink(self.log.cstr());
+        let _ = fs::unlink(self.log.as_str());
         return code;
     }
 }
@@ -1027,21 +1023,20 @@ fn cache_install(cobj: str, oout: str, dout: str, gen: str, aobj: str) {
         return;
     }
     mkdir_p(loader::dirname_of(cobj));
-    let pid = unsafe shim::sc_getpid();
-    let mut tmp = format("{}.{}.tmp", cobj, pid);
-    let mut oc = String::from_str(cobj);
-    if !link_or_copy(oout, tmp.as_str()) || unsafe shim::sc_rename(tmp.cstr(), oc.cstr()) != 0 {
-        let _ = unsafe shim::sc_unlink(tmp.cstr());
+    let pid = process::pid().unwrap_or(1);
+    let tmp = format("{}.{}.tmp", cobj, pid);
+    if !link_or_copy(oout, tmp.as_str()) || fs::rename(tmp.as_str(), cobj).is_err() {
+        let _ = fs::unlink(tmp.as_str());
     }
     let dep = loader::read_file(dout);
     if !dep.is_none() {
         let d = dep.unwrap();
         let port = dep_portable(d.as_str(), gen, aobj);
-        let mut dtmp = format("{}.{}.d.tmp", cobj, pid);
+        let dtmp = format("{}.{}.d.tmp", cobj, pid);
         let mut cd = String::from_str(cobj.slice(0, cobj.len() - 2));
         cd.push_str(".d");
-        if !write_file(dtmp.as_str(), port.as_str()) || unsafe shim::sc_rename(dtmp.cstr(), cd.cstr()) != 0 {
-            let _ = unsafe shim::sc_unlink(dtmp.cstr());
+        if !write_file(dtmp.as_str(), port.as_str()) || fs::rename(dtmp.as_str(), cd.as_str()).is_err() {
+            let _ = fs::unlink(dtmp.as_str());
         }
     }
 }
@@ -1121,7 +1116,7 @@ fn profile_bin(m: &mf::Manifest, prof_name: str, target: i32) String {
 // Copy the profile's binary to `to`, the path the manifest calls the project's binary. A copy rather than a
 // move, so the profile keeps the file its next build compares against. Written beside the target and
 // renamed onto it, never written over it: truncating an executable that is currently running corrupts the
-// image the OS is still paging from, and sc_rename knows how to displace a running one on Windows.
+// image the OS is still paging from, and fs::rename knows how to displace a running one on Windows.
 fn install_bin(from: str, to: str) i32 {
     let cur = loader::read_file(from);
     if cur.is_none() {
@@ -1136,14 +1131,13 @@ fn install_bin(from: str, to: str) i32 {
     }
     let mut tmp = String::from_str(to);
     tmp.push_str(".tmp");
-    let mut tob = String::from_str(to);
     if !write_file(tmp.as_str(), body.as_str()) {
-        let _ = unsafe shim::sc_unlink(tmp.cstr());
+        let _ = fs::unlink(tmp.as_str());
         eprintln("build: cannot write '{}'", tmp.as_str());
         return 1;
     }
-    let _ = unsafe shim::sc_chmod_exec(tmp.cstr());
-    if unsafe shim::sc_rename(tmp.cstr(), tob.cstr()) != 0 {
+    let _ = fs::set_permissions(tmp.as_str(), 0o755);
+    if fs::rename(tmp.as_str(), to).is_err() {
         eprintln("build: cannot replace '{}'", to);
         return 1;
     }
@@ -1160,7 +1154,7 @@ pub const fn resolve_profile<'a>(m: &'a mf::Manifest<'a>, cli: str<'a>) str<'a> 
 
 // The streaming compile pipeline: run_package's EmitSink feeds every finished output file here, so
 // a TU's compile job is spawned while later TUs are still being emitted. The emit pass writes all
-// headers before the first source, so a source's compile can never miss an include. Reaping in-flight jobs uses sc_try_wait only: the blocking sc_wait_any
+// headers before the first source, so a source's compile can never miss an include. Reaping in-flight jobs uses process::try_wait_any only: the blocking process::wait_any
 // (waitpid(-1)) would steal the emit workers' exit statuses while they are alive.
 struct CcStream {
     pub src_len: usize, // gen_root prefix; rel = path[src_len+1..]
@@ -1178,7 +1172,7 @@ struct CcStream {
     pub lto_cache: bool, // the link line names a ThinLTO cache directory
     pub lto_reason: String, // why ThinLTO or its cache was rejected; empty when both are in use
     pub lto_ld: Vector<String>, // the mode's link arguments: `-flto=..` and the linker cache options
-    pub probe_ver_pid: i64, // background `<cc> --version` probe; -1 = resolve synchronously
+    pub probe_ver: Option<process::Child>, // background `<cc> --version` probe; None = resolve synchronously
     pub ccver_path: String, // <pdir>/.ccver, the version probe's output file
     pub probes: pr::Probes, // the toolchain probe record and the probes this build needs
     pub feats: cf::CpuFeatureSet, // the build's CPU features beyond the baseline: their flags' probes must accept them
@@ -1191,6 +1185,7 @@ struct CcStream {
     pub objs: Vector<String>,
     pub pend: Vector<Pend>, // binary heap, `pend_before` order at the root
     pub window: Vector<Job>,
+    pub kids: Vector<process::Child>, // the compile of `window[i]` is `kids[i]`
     pub total_c: usize,
     pub stale_n: usize,
     // `<link record>.pending`: written before the first object this build replaces (compiled or
@@ -1256,9 +1251,9 @@ extend CcStream {
         self.cc_ready = true;
         split_args(&mut self.cc_args, self.cc_raw.as_str());
         let mut have_ver = self.ccver.len() != 0;
-        if !have_ver && self.probe_ver_pid >= 0 {
-            let mut code2: i32 = 0;
-            let _ = unsafe shim::sc_waitpid(self.probe_ver_pid, &mut code2);
+        if !have_ver && self.probe_ver.is_some() {
+            let mut c = self.probe_ver.take().unwrap();
+            let _ = c.wait();
             let v = take_first_line(self.ccver_path.as_str());
             if !v.is_none() {
                 let line = v.unwrap();
@@ -1358,9 +1353,9 @@ extend CcStream {
         let mut ld = String::new();
         let rec = self.probes.res.at(pr::LTO).as_str();
         let l1 = self.probes.aux.at(pr::LTO).as_str();
-        let mut ldp = String::from_str(stamp_field(l1, 1));
+        let ldp = String::from_str(stamp_field(l1, 1));
         let ldmt = stamp_field(l1, 2).parse_i64();
-        if ldp.as_str() == "-" || !ldmt.is_none() && unsafe shim::sc_mtime(ldp.cstr()) == ldmt.unwrap() {
+        if ldp.as_str() == "-" || !ldmt.is_none() && file_mtime(ldp.as_str()) == ldmt.unwrap() {
             if rec.starts_with("thin ") {
                 let f = rec.slice(5, rec.len()).parse_i64();
                 if !f.is_none() && f.unwrap() >= 0 && f.unwrap() <= 3 {
@@ -1405,9 +1400,9 @@ extend CcStream {
         rm_rf(dir.as_str());
         mkdir_p(dir.as_str());
         let src = loader::join2(dir.as_str(), "p.c");
-        let mut obj = loader::join2(dir.as_str(), "p.o");
-        let mut exe = loader::join2(dir.as_str(), "p.out");
-        let mut log = loader::join2(dir.as_str(), "log");
+        let obj = loader::join2(dir.as_str(), "p.o");
+        let exe = loader::join2(dir.as_str(), "p.out");
+        let log = loader::join2(dir.as_str(), "log");
         let mut form: i32 = -1;
         ld.push_str("ld\t-\t0");
         if !write_file(src.as_str(), "int main(void) {\n    return 0;\n}\n") {
@@ -1419,7 +1414,7 @@ extend CcStream {
             ca.push(src.clone());
             push_arg(&mut ca, "-o");
             ca.push(obj.clone());
-            if exec_args(&mut ca, log.cstr()) != 0 || unsafe shim::sc_mtime(obj.cstr()) == 0 {
+            if exec_args(&ca, log.as_str()) != 0 || file_mtime(obj.as_str()) == 0 {
                 self.lto_reason.push_str("the compiler rejects -flto=thin");
             } else {
                 let mut lb = clone_args(&self.cc_args);
@@ -1430,7 +1425,7 @@ extend CcStream {
                 push_arg(&mut lb, "-flto=thin");
                 let mut lv = clone_args(&lb);
                 push_arg(&mut lv, "-v");
-                if exec_args(&mut lv, log.cstr()) != 0 || unsafe shim::sc_mtime(exe.cstr()) == 0 {
+                if exec_args(&lv, log.as_str()) != 0 || file_mtime(exe.as_str()) == 0 {
                     self.lto_reason.push_str("the linker rejects -flto=thin");
                 } else {
                     form = 0;
@@ -1443,11 +1438,11 @@ extend CcStream {
                         } else {
                             (k + 1) % 3 + 1;
                         };
-                        unsafe shim::sc_unlink(exe.cstr());
+                        let _ = fs::unlink(exe.as_str());
                         rm_rf(cache.as_str());
                         let mut fa = clone_args(&lb);
                         lto_cache_args(f, cache.as_str(), &mut fa);
-                        if exec_args(&mut fa, log.cstr()) == 0 && unsafe shim::sc_mtime(exe.cstr()) != 0 && cache_has_entry(
+                        if exec_args(&fa, log.as_str()) == 0 && file_mtime(exe.as_str()) != 0 && cache_has_entry(
                             cache.as_str(),
                         ) {
                             form = f;
@@ -1583,8 +1578,8 @@ extend CcStream {
             }
         }
         // A compiler may write the file in place: no record names a file a stopped build left torn.
-        let _ = unsafe shim::sc_unlink(cmdpath.cstr());
-        let _ = unsafe shim::sc_unlink(opath.cstr());
+        let _ = fs::unlink(cmdpath.as_str());
+        let _ = fs::unlink(opath.as_str());
         self.pch = PCH_RUN;
         self.pend_push(
             Pend {
@@ -1611,8 +1606,8 @@ extend CcStream {
             self.pch = PCH_FAIL;
             let rec = format("{}\n0\nfail", j.fp.as_str());
             let _ = write_file_atomic(j.cmdpath.as_str(), rec.as_str());
-            let _ = unsafe shim::sc_unlink(j.oout.cstr());
-            let _ = unsafe shim::sc_unlink(j.log.cstr());
+            let _ = fs::unlink(j.oout.as_str());
+            let _ = fs::unlink(j.log.as_str());
         }
         let wait = replace(&mut self.pch_wait, Vector::<String>::new());
         for i in 0..wait.len() {
@@ -1762,7 +1757,7 @@ extend CcStream {
             }
             // The old object may be a name of a cache entry: a compiler that writes its output in
             // place (GNU as) would rewrite the entry.
-            let _ = unsafe shim::sc_unlink(opath.cstr());
+            let _ = fs::unlink(opath.as_str());
             let mut log = opath.clone();
             log.push_str(".log");
             self.pend_push(
@@ -1812,7 +1807,7 @@ extend CcStream {
         // An earlier failed compile's log describes text the restored object replaces, as after a compile.
         let mut lg = String::from_str(opath);
         lg.push_str(".log");
-        let _ = unsafe shim::sc_unlink(lg.cstr());
+        let _ = fs::unlink(lg.as_str());
         return true;
     }
 
@@ -1823,12 +1818,10 @@ extend CcStream {
             return;
         }
         self.cc_ready = true;
-        let mut code: i32 = 0;
-        if self.probe_ver_pid >= 0 {
-            let _ = unsafe shim::sc_waitpid(self.probe_ver_pid, &mut code);
+        if let Some(mut c) = self.probe_ver.take() {
+            let _ = c.wait();
         }
-        let mut vp = String::from_str(self.ccver_path.as_str());
-        unsafe shim::sc_unlink(vp.cstr());
+        let _ = fs::unlink(self.ccver_path.as_str());
         self.probes.abandon();
     }
 
@@ -1836,17 +1829,19 @@ extend CcStream {
     pub fn pump(self: &mut Self) {
         loop {
             while self.window.len() != 0 {
-                let mut pids = Vector::<i64>::new();
-                for i in 0..self.window.len() {
-                    pids.push(self.window.at(i).pid);
-                }
-                let mut code: i32 = 0;
-                let idx = unsafe shim::sc_try_wait(&pids[0], self.window.len() as i32, &mut code);
-                if idx < 0 {
+                let n = self.kids.len();
+                let done = process::try_wait_any(self.kids.index_range_mut(0..n));
+                if done.is_err() {
                     break;
                 }
-                let mut j = self.window.remove(idx as usize).unwrap();
-                self.reap(&mut j, code);
+                let ended = done.unwrap();
+                if ended.is_none() {
+                    break;
+                }
+                let (idx, st) = ended.unwrap();
+                let _ = self.kids.remove(idx);
+                let mut j = self.window.remove(idx).unwrap();
+                self.reap(&mut j, exit_code(st));
             }
             if self.pend.len() == 0 || self.window.len() as u32 >= self.jobs {
                 break;
@@ -1859,16 +1854,16 @@ extend CcStream {
     // last. Among equal durations the earliest queued starts first.
     fn spawn_next(self: &mut Self) {
         let mut w = self.pend_pop();
-        let pid = spawn_at(file_of(&mut self.cc_file), &mut w.args, w.log.cstr());
-        if pid < 0 {
+        let c = spawn_at(self.cc_file.as_str(), &w.args, w.log.as_str());
+        if c.is_none() {
             eprintln("build: cannot spawn compiler");
             self.ret = 1;
-            unsafe shim::sc_unlink(w.log.cstr());
+            let _ = fs::unlink(w.log.as_str());
             return;
         }
+        self.kids.push(c.unwrap());
         self.window.push(
             Job {
-                pid: pid,
                 fp: replace(&mut w.fp, String::new()),
                 log: replace(&mut w.log, String::new()),
                 cmdpath: replace(&mut w.cmdpath, String::new()),
@@ -1890,7 +1885,7 @@ extend CcStream {
         }
     }
 
-    fn pend_pop(self: &mut Self) Pend {
+    const fn pend_pop(self: &mut Self) Pend {
         let last = self.pend.len() - 1;
         self.pend.swap(0, last);
         let top = self.pend.pop().unwrap();
@@ -1915,7 +1910,7 @@ extend CcStream {
     }
 
     /// Run everything left to completion (blocking): only called once the emit workers are gone, so
-    /// sc_wait_any's waitpid(-1) cannot reap anything but our compile jobs. `discard` abandons units
+    /// process::wait_any's waitpid(-1) cannot reap anything but our compile jobs. `discard` abandons units
     /// not yet started: the error path, which still must reap what is in flight.
     pub fn drain(self: &mut Self, discard: bool) {
         if discard {
@@ -1930,19 +1925,17 @@ extend CcStream {
             if self.window.len() == 0 {
                 break;
             }
-            let mut pids = Vector::<i64>::new();
-            for i in 0..self.window.len() {
-                pids.push(self.window.at(i).pid);
-            }
-            let mut code: i32 = 0;
-            let idx = unsafe shim::sc_wait_any(&pids[0], self.window.len() as i32, &mut code);
-            if idx < 0 {
+            let n = self.kids.len();
+            let done = process::wait_any(self.kids.index_range_mut(0..n));
+            if done.is_err() {
                 eprintln("build: wait failed");
                 self.ret = 1;
                 break;
             }
-            let mut j = self.window.remove(idx as usize).unwrap();
-            self.reap(&mut j, code);
+            let (idx, st) = done.unwrap();
+            let _ = self.kids.remove(idx);
+            let mut j = self.window.remove(idx).unwrap();
+            self.reap(&mut j, exit_code(st));
         }
     }
 }
@@ -1973,15 +1966,15 @@ const STAMP_HEAD: str<'static> = "sc-emit-stamp v4";
 
 // Field `idx` of the tab-separated stamp record `line`: the whole field or `stamp_u64` as a decimal
 // number (0 when it is not one: the check then fails and the stamp is rewritten).
-fn stamp_field(line: str, idx: usize) str {
+const fn stamp_field(line: str, idx: usize) str {
     return field_of(line, b'\t', idx);
 }
 
-fn stamp_u64(line: str, idx: usize) u64 {
+const fn stamp_u64(line: str, idx: usize) u64 {
     return stamp_field(line, idx).parse_u64().unwrap_or(0);
 }
 
-/// What the emit stamp takes before the load reads any input: the clock (`sc_ticks_ms`), and the mtime
+/// What the emit stamp takes before the load reads any input: the clock (`ticks_ms`), and the mtime
 /// and `.spc` listing (`stamp_dir_hash`) of the std directory, the prelude's file set.
 struct StampLoad {
     pub t0: i64,
@@ -1990,18 +1983,17 @@ struct StampLoad {
 }
 
 fn stamp_load(std_dir: str) StampLoad {
-    let mut sl = StampLoad { t0: unsafe shim::sc_ticks_ms(), std_mt: 0, std_h: 0 };
+    let mut sl = StampLoad { t0: ticks_ms(), std_mt: 0, std_h: 0 };
     if std_dir.len() != 0 {
-        let mut sd = String::from_str(std_dir);
-        sl.std_mt = unsafe shim::sc_mtime(sd.cstr());
+        sl.std_mt = file_mtime(std_dir);
         sl.std_h = stamp_dir_hash(std_dir);
     }
     return sl;
 }
 
-// The whole seconds since `t0` (`sc_ticks_ms`), rounded up.
+// The whole seconds since `t0` (`ticks_ms`), rounded up.
 fn stamp_lag(t0: i64) u64 {
-    return ((unsafe shim::sc_ticks_ms() - t0 + 999) / 1000) as u64;
+    return ((ticks_ms() - t0 + 999) / 1000) as u64;
 }
 
 // The emitting compiler's record: its content hash (`compiler_id`), taken once before the emission, and
@@ -2017,8 +2009,7 @@ fn stamp_exe_line(out: &mut String, cid: u64, lag: u64) {
 // The record of the file at `path` as it is now: its mtime, then its content id; false when it cannot
 // be read.
 fn stamp_push_input(out: &mut String, path: str) bool {
-    let mut pp = String::from_str(path);
-    let mt = unsafe shim::sc_mtime(pp.cstr());
+    let mt = file_mtime(path);
     if mt == 0 {
         return false;
     }
@@ -2044,24 +2035,18 @@ fn stamp_line(out: &mut String, kind: str, mt: u64, h: u64, path: str) {
 // Order-independent hash of the `.spc` names in `dir`: the names import resolution and the prelude
 // can pick up. A missing directory hashes like one with no such name.
 fn stamp_dir_hash(dir: str) u64 {
-    let mut d = String::from_str(dir);
-    let dh = unsafe shim::sc_opendir(d.cstr());
-    if dh == null {
+    let opened = fs::read_dir(dir);
+    if opened.is_err() {
         return 0;
     }
+    let mut d = opened.unwrap();
     let mut h: u64 = 0;
-    loop {
-        let e = unsafe shim::sc_readdir(dh);
-        if e == null {
-            break;
+    // Bounded by the entries of the directory; a read error ends the listing, as the end does.
+    while let Some(Ok(e)) = d.next() {
+        if e.name.ends_with(".spc") {
+            h = h.wrapping_add(e.name.hash());
         }
-        let nm = unsafe str::from_cstr(shim::sc_dirent_name(e));
-        if !nm.ends_with(".spc") {
-            continue;
-        }
-        h = h.wrapping_add(nm.hash());
     }
-    unsafe shim::sc_closedir(dh);
     return h;
 }
 
@@ -2069,8 +2054,7 @@ fn stamp_dir_hash(dir: str) u64 {
 // listed it: its mtime, then that hash. False when the listing now differs: the directory changed
 // during the build.
 fn stamp_push_dir(out: &mut String, dir: str, h: u64) bool {
-    let mut dp = String::from_str(dir);
-    let mt = unsafe shim::sc_mtime(dp.cstr());
+    let mt = file_mtime(dir);
     if stamp_dir_hash(dir) != h {
         return false;
     }
@@ -2169,7 +2153,8 @@ fn stamp_write(
     }
     for i in 0..p.modules.len() {
         let md = p.modules.at(i);
-        if md.file.len() != 0 {
+        // An implicit directory index is its directory's listing, which a `dir` record below covers.
+        if md.file.len() != 0 && !md.implicit_index {
             stamp_line(&mut out, "in\t", md.mtime as u64, md.src_id, md.file.as_str());
         }
     }
@@ -2224,7 +2209,7 @@ fn stamp_fresh(
     if cid == 0 {
         return false;
     }
-    let t0 = unsafe shim::sc_ticks_ms();
+    let t0 = ticks_ms();
     let body0 = loader::read_file(path);
     if body0.is_none() {
         return false;
@@ -2234,8 +2219,7 @@ fn stamp_fresh(
     // Second-granularity mtimes cannot distinguish an edit made in the same second as the read the
     // stamp vouches for: entries stamped within 2s of the stamp file's own mtime, less the record's lag,
     // verify by content instead.
-    let mut spb = String::from_str(path);
-    let mut recent = unsafe shim::sc_mtime(spb.cstr()) - 2;
+    let mut recent = file_mtime(path) - 2;
     let mut fresh = true;
     let mut drift = false;
     let mut saw_end = false;
@@ -2279,8 +2263,7 @@ fn stamp_fresh(
         } else if kind == "in" {
             let mt0 = stamp_u64(line, 1) as i64;
             let fp = stamp_field(line, 3);
-            let mut pp = String::from_str(fp);
-            let mt = unsafe shim::sc_mtime(pp.cstr());
+            let mt = file_mtime(fp);
             if mt == 0 {
                 return false;
             }
@@ -2304,8 +2287,7 @@ fn stamp_fresh(
         } else if kind == "dir" {
             let mt0 = stamp_u64(line, 1) as i64;
             let dp = stamp_field(line, 3);
-            let mut dpp = String::from_str(dp);
-            let mt = unsafe shim::sc_mtime(dpp.cstr());
+            let mt = file_mtime(dp);
             if mt == mt0 && mt0 < recent {
                 rewritten.push_str(line);
                 rewritten.push_str("\n");
@@ -2388,7 +2370,7 @@ pub const fn simd_dispatch<'a>(m: &'a mf::Manifest, cx: &BuildCtx<'a>) str<'a> {
 /// opt-level 0 or 1 (`debug`, `test`: the copies make the C compile of vector code 1.4 to 1.7 times
 /// longer and add little speed there) and in a script build without a profile (no `-O` flag), the
 /// default elsewhere.
-pub fn dispatch_for<'a>(m: &mf::Manifest, prof: str, spec: str<'a>) str<'a> {
+pub const fn dispatch_for<'a>(m: &mf::Manifest, prof: str, spec: str<'a>) str<'a> {
     let pi = m.profile_index(prof);
     let slow = prof.len() == 0 || pi >= 0 && m.profiles.at(pi as usize).opt >= 0 && m.profiles.at(pi as usize).opt <= 1;
     if spec.len() == 0 && slow {
@@ -2421,7 +2403,7 @@ pub fn check_features(m: &mf::Manifest, cli: str) bool {
 }
 
 /// Whether C flags `fl` enable a memory checker: an address, memory or thread sanitizer.
-pub fn mem_checker(fl: str) bool {
+pub const fn mem_checker(fl: str) bool {
     let mut at = fl.find("-fsanitize=");
     while at >= 0 {
         let rest = fl.slice(at as usize + 11, fl.len());
@@ -2446,7 +2428,7 @@ pub fn mem_checker(fl: str) bool {
 /// The C compile's configuration in compile flags `fl`, as the build constants read it
 /// (`Package.build_cfg`): bit 0 ThreadSanitizer, bit 1 AddressSanitizer, bit 2 lock-order tracking
 /// (`-DSC_LOCKDEP`), bit 3 wrapping arithmetic (`-DSC_ARITH_WRAP`).
-pub fn build_cfg(fl: str) u32 {
+pub const fn build_cfg(fl: str) u32 {
     let mut cfg: u32 = 0;
     let mut rest = fl;
     loop {
@@ -2519,7 +2501,7 @@ fn emit_closure(
         StampLoad { t0: 0, std_mt: 0, std_h: 0 };
     };
     loader::set_load_jobs(jobs);
-    let tl0 = unsafe shim::sc_ticks_ms();
+    let tl0 = ticks_ms();
     // The build settings the prelude's build constants spell (`@arch` gates on the instruction
     // set too), set before the load.
     let mut p = loader::package_new(root_dir, alt, cx.std_dir);
@@ -2550,11 +2532,13 @@ fn emit_closure(
     let mut cirv = iri::interp_master(pkg, cx.ce_steps, cx.ce_mem);
     let cdir = object_cache_dir(project_name(m));
     if prelude_stage(&mut p, &mut cirv, cx.std_dir, root, cx.target, jobs, cx.ce_steps, cx.ce_mem, cdir.as_str()) {
+        // After the prelude stage, which may swap in a saved prelude package.
+        p.std_internals = m.std_internals;
         p.load_user(root, cx.std_dir, cx.target);
     }
     bst::mark(bst::B_LOAD);
     if stdlib::getenv("SC_CEMIT_STATS") != null {
-        eprintln("phase load: {} ms", unsafe shim::sc_ticks_ms() - tl0);
+        eprintln("phase load: {} ms", ticks_ms() - tl0);
     }
     loader::set_load_jobs(1);
     if !p.ok {
@@ -2603,9 +2587,9 @@ fn transpiler_id(cmd: str) u64 {
             which_path(w, &mut path);
         } else {
             path.push_str(w);
-            unsafe shim::sc_mtime(path.cstr());
+            file_mtime(path.as_str());
         };
-        if mt != 0 && unsafe shim::sc_stat_isdir(path.cstr()) != 1 {
+        if mt != 0 && !is_dir(path.as_str()) {
             h = skey_mix(h, file_id(path.as_str()));
         }
     }
@@ -2624,12 +2608,12 @@ fn run_transpiler(m: &mf::Manifest, prof_name: str, root: str, sub: str, cx: &Bu
     push_arg(&mut args, root);
     args.push(format("--emit-sub={}", sub));
     // Absolute: a transpiler under a WASI runtime starts in the guest's "/".
-    let mut cwdb = PathBuf {};
-    if unsafe shim::sc_realpath(".".ptr() as *const char, &mut cwdb[0]) == null {
+    let cwd = fs::realpath(".");
+    if cwd.is_err() {
         eprintln("build: cannot resolve the working directory for the transpiler");
         return 1;
     }
-    args.push(format("--manifest-dir={}", str::from_cbuf(cwdb.as_slice())));
+    args.push(format("--manifest-dir={}", cwd.unwrap().as_str()));
     args.push(format("--out-dir={}", m.out_dir.as_str()));
     args.push(format("--profile={}", prof_name));
     args.push(format("--target={}", par::axis_names(false)[cx.target as usize]));
@@ -2658,7 +2642,7 @@ fn run_transpiler(m: &mf::Manifest, prof_name: str, root: str, sub: str, cx: &Bu
     if cid != 0 {
         args.push(format("--emit-id={}", cid));
     }
-    let rc = exec_args(&mut args, null);
+    let rc = exec_args(&args, "");
     if rc != 0 {
         eprintln("build: transpiler failed (exit {}): {}", rc, render_cmd(&args).as_str());
         return 1;
@@ -2724,7 +2708,7 @@ fn build_jobs(m: &mf::Manifest, cx: &BuildCtx) u32 {
     if m.jobs != 0 {
         return m.jobs;
     }
-    return (unsafe shim::sc_ncpu()) as u32;
+    return cpu_count();
 }
 
 /// The outcome of `transpile_step`.
@@ -2755,7 +2739,7 @@ pub fn transpile_step(
 ) Transpiled {
     let pdir = loader::join2(m.out_dir.as_str(), sub);
     let srcgen = loader::join2(pdir.as_str(), "raw");
-    let mut stamp_path = loader::join2(pdir.as_str(), ".emit_stamp");
+    let stamp_path = loader::join2(pdir.as_str(), ".emit_stamp");
     let mut stamp_new = stamp_path.clone();
     stamp_new.push_str(".new");
     let cache_on = stdlib::getenv("SC_NO_EMIT_CACHE") == null;
@@ -2791,11 +2775,11 @@ pub fn transpile_step(
     // An emission that stops part way leaves raw/ partly rewritten: no stamp may vouch for it, or a
     // later build with the old inputs would skip the transpile over a mixed tree. An external
     // transpiler's record of the files it rewrites must be its own.
-    let _ = unsafe shim::sc_unlink(stamp_path.cstr());
-    let _ = unsafe shim::sc_unlink(stamp_new.cstr());
+    let _ = fs::unlink(stamp_path.as_str());
+    let _ = fs::unlink(stamp_new.as_str());
     if external {
-        let mut rw = loader::join2(pdir.as_str(), ".emit_rewritten");
-        let _ = unsafe shim::sc_unlink(rw.cstr());
+        let rw = loader::join2(pdir.as_str(), ".emit_rewritten");
+        let _ = fs::unlink(rw.as_str());
     }
     let rc = if external {
         run_transpiler(m, prof_name, root, sub, cx, cid);
@@ -2917,7 +2901,7 @@ fn push_uvm(probes: &mut pr::Probes, out: &mut String) bool {
     return true;
 }
 
-fn feature_probes(s: cf::CpuFeatureSet) u64 {
+const fn feature_probes(s: cf::CpuFeatureSet) u64 {
     let mut need: u64 = 0;
     for i in 0..cf::FEATURE_COUNT {
         let k = pr::index_of(cf::row(i).probe);
@@ -3014,14 +2998,14 @@ fn cc_stream(
     if ccpath.as_str().starts_with("/") && unsafe shim::sc_host_platform() != 0 {
         cc_file.push_string(&ccpath);
     }
-    let mut ccver_path = loader::join2(pdir.as_str(), ".ccver");
+    let ccver_path = loader::join2(pdir.as_str(), ".ccver");
     let ccver0 = ccver_recorded(cc_raw.as_str());
-    let mut probe_ver_pid: i64 = -1;
+    let mut probe_ver = Option::<process::Child>::None;
     if ccver0.is_none() {
         let mut va = Vector::<String>::new();
         split_args(&mut va, cc_raw.as_str());
         push_arg(&mut va, "--version");
-        probe_ver_pid = spawn_at(file_of(&mut cc_file), &mut va, ccver_path.cstr());
+        probe_ver = spawn_at(cc_file.as_str(), &va, ccver_path.as_str());
     }
     // The toolchain probes of `need` the record does not hold start beside it. The record's key: the
     // schema, the compiler's path, mtime and command (its arguments select a target too), the target
@@ -3050,12 +3034,7 @@ fn cc_stream(
         need | feature_probes(cf::beyond_baseline(feats, cx.target)) | uvm_need(cx.target, m.arch) | novec_need(lto_req),
     );
     // The compile argv runs from the process working directory; record it for compile_commands.json.
-    let mut cwdb = PathBuf {};
-    let ccdb_dir = if unsafe shim::sc_realpath(".".ptr() as *const char, &mut cwdb[0]) != null {
-        String::from_str(str::from_cbuf(cwdb.as_slice()));
-    } else {
-        String::from_str(".");
-    };
+    let ccdb_dir = fs::realpath(".").unwrap_or(String::from_str("."));
     return CcStream {
         src_len: pdir.len() + 4, // <pdir>/raw
         gen: loader::join2(pdir.as_str(), "raw"),
@@ -3078,7 +3057,7 @@ fn cc_stream(
         lto_cache: false,
         lto_reason: String::new(),
         lto_ld: Vector::<String>::new(),
-        probe_ver_pid: probe_ver_pid,
+        probe_ver: probe_ver,
         ccver_path: ccver_path,
         probes: probes,
         cc_args: Vector::<String>::new(),
@@ -3089,6 +3068,7 @@ fn cc_stream(
         objs: Vector::<String>::new(),
         pend: Vector::<Pend>::new(),
         window: Vector::<Job>::new(),
+        kids: Vector::<process::Child>::new(),
         total_c: 0,
         stale_n: 0,
         pending: pending,
@@ -3134,13 +3114,12 @@ fn engine_build(
 ) i32 {
     let pdir = loader::join2(m.out_dir.as_str(), sub);
     let lk = tree_lock(pdir.as_str());
-    if lk < 0 {
+    if !lk.held() {
         return 1;
     }
     bst::begin();
     let rc = engine_build_i(m, prof_name, root, root_dir, alt, sub, bin, cx, link_kind, topts);
     bst::finish(rc);
-    unsafe shim::sc_tree_unlock(lk);
     return rc;
 }
 
@@ -3150,24 +3129,67 @@ const TREE_LOCK_WAIT_MS: i64 = 30 * 60 * 1000;
 /// Take the lock of build tree `dir` (the file `<dir>/.lock`): one process builds a tree at a time. A
 /// second build would rewrite the units the first one compiles, so the first could compile a torn unit
 /// and install that object in the object cache under the key of the text it hashed. Waits for a build in
-/// progress at most TREE_LOCK_WAIT_MS. The handle for `sc_tree_unlock`, or -1 after a reported error.
-pub fn tree_lock(dir: str) i64 {
+/// progress at most TREE_LOCK_WAIT_MS. The lock, released when it drops; not `held` after a reported
+/// error.
+pub fn tree_lock(dir: str) Lock {
     mkdir_p(dir);
-    let mut p = loader::join2(dir, ".lock");
-    let mut h = unsafe shim::sc_tree_lock(p.cstr(), 0);
-    if h == -1 {
+    let p = loader::join2(dir, ".lock");
+    let mut h = lock_file(p.as_str(), 0);
+    if h.busy() {
         eprintln("build: waiting for another build of '{}'", dir);
-        h = unsafe shim::sc_tree_lock(p.cstr(), TREE_LOCK_WAIT_MS);
-        if h == -1 {
+        h = lock_file(p.as_str(), TREE_LOCK_WAIT_MS);
+        if h.busy() {
             eprintln("build: another build held '{}' for {} minutes", dir, TREE_LOCK_WAIT_MS / 60000);
-            return -1;
+            return Lock::Failed;
         }
     }
-    if h < 0 {
+    if !h.held() {
         eprintln("build: cannot lock '{}'", p.as_str());
-        return -1;
     }
     return h;
+}
+
+/// An exclusive lock on a file (`lock_file`).
+pub enum Lock {
+    /// Held through the open file until it drops; None under WASI, which has no file locks: a WASI
+    /// compiler runs as the transpiler of an engine that holds the lock.
+    Held(Option<fs::File>),
+    /// Another process still holds it.
+    Busy,
+    /// The file cannot be opened or locked.
+    Failed,
+}
+
+/// The exclusive lock of file `p` (created when missing), waiting at most `wait_ms` for another process
+/// to release it. No child process inherits it, and the system releases it when this process ends.
+pub fn lock_file(p: str, wait_ms: i64) Lock {
+    if PLATFORM == Platform::Wasm {
+        return Lock::Held(Option::<fs::File>::None);
+    }
+    let opened = fs::open(p, fs::OpenOptions { read: true, write: true, create: true, mode: 0o644 });
+    if opened.is_err() {
+        return Lock::Failed;
+    }
+    let mut f = opened.unwrap();
+    let r = f.lock_exclusive(wait_ms as u64 * 1000000);
+    if r.is_ok() {
+        return Lock::Held(Option::<fs::File>::Some(f));
+    }
+    if r.unwrap_err().kind == IoErrorKind::TimedOut {
+        return Lock::Busy;
+    }
+    return Lock::Failed;
+}
+
+/// Modification time of `path` in nanoseconds (100 ns steps on Windows); 0 when it does not exist.
+pub fn file_mtime_ns(path: str) i64 {
+    return fs::stat(path).map(|m: fs::Metadata| m.modified_ns).unwrap_or(0);
+}
+
+/// The online core count, at least 1; 1 under WASI (one thread of execution: the parallel frontiers
+/// resolve to the serial path).
+pub fn cpu_count() u32 {
+    return cpu::count().unwrap_or(1) as u32;
 }
 
 fn engine_build_i(
@@ -3188,7 +3210,7 @@ fn engine_build_i(
         return 1;
     }
     let prof = m.profiles.at(pi as usize);
-    let t0 = unsafe shim::sc_ticks_ms();
+    let t0 = ticks_ms();
     bst::mark(bst::B_START);
 
     // Compile-side setup happens BEFORE the transpile: the EmitSink streams each finished TU into
@@ -3246,7 +3268,7 @@ fn engine_build_i(
             stream.drain(true);
             return tr.rc;
         }
-        t_transpile = unsafe shim::sc_ticks_ms();
+        t_transpile = ticks_ms();
 
         // 2) An external transpiler streams nothing: the record it left names the files it rewrote
         // (`manifest_emit`); without one, every file of its tree counts as rewritten.
@@ -3266,15 +3288,15 @@ fn engine_build_i(
         // The emission wrote its stamp beside the final one; only a complete tree gets it. A missing stamp
         // (an input the emission could not read) only makes the next build transpile again.
         if ret == 0 && tr.cid != 0 {
-            let mut stamp_path = loader::join2(pdir.as_str(), ".emit_stamp");
+            let stamp_path = loader::join2(pdir.as_str(), ".emit_stamp");
             let mut stamp_new = stamp_path.clone();
             stamp_new.push_str(".new");
-            let _ = unsafe shim::sc_rename(stamp_new.cstr(), stamp_path.cstr());
+            let _ = fs::rename(stamp_new.as_str(), stamp_path.as_str());
         }
     } else {
-        t_transpile = unsafe shim::sc_ticks_ms();
+        t_transpile = ticks_ms();
     }
-    let t_sync = unsafe shim::sc_ticks_ms();
+    let t_sync = ticks_ms();
     bst::mark(bst::B_SYNC);
     let mut t_compile = t_sync;
     let mut t_link = t_sync;
@@ -3340,7 +3362,7 @@ fn engine_build_i(
         // the link fingerprint embeds the full command.
         let mut objs = replace(&mut stream.objs, Vector::<String>::new());
         objs.sort();
-        t_compile = unsafe shim::sc_ticks_ms();
+        t_compile = ticks_ms();
         t_link = t_compile;
         bst::mark(bst::B_COMPILE);
         if stats != null {
@@ -3358,8 +3380,7 @@ fn engine_build_i(
         // 4) link when anything changed: a fresh object, a missing/out-of-date binary, or a link
         // command (flags, libs, __ldflags, linker version) differing from the recorded one.
         if ret == 0 {
-            let mut binb = String::from_str(bin);
-            let bmt = unsafe shim::sc_mtime(binb.cstr());
+            let bmt = file_mtime(bin);
             let mut tmp = String::from_str(bin);
             tmp.push_str(".tmp");
             let mut largs = Vector::<String>::new();
@@ -3410,7 +3431,7 @@ fn engine_build_i(
             if prof.strip {
                 fp.push_str(" +strip");
             }
-            let mut need = bmt == 0 || unsafe shim::sc_mtime(stream.pending.cstr()) != 0;
+            let mut need = bmt == 0 || file_mtime(stream.pending.as_str()) != 0;
             // An object's time is its `.cmd` record's (see `obj_stale`): another tree's use of a
             // shared cache entry refreshes the object's own mtime.
             for i in 0..objs.len() {
@@ -3418,7 +3439,7 @@ fn engine_build_i(
                     let o = objs.at(i).as_str();
                     let mut cp = String::from_str(o.slice(0, o.len() - 2));
                     cp.push_str(".cmd");
-                    need = unsafe shim::sc_mtime(cp.cstr()) > bmt;
+                    need = file_mtime(cp.as_str()) > bmt;
                 }
             }
             if !need {
@@ -3434,17 +3455,17 @@ fn engine_build_i(
                 linked = true;
                 // `ar rcs` updates an existing archive, so a temp an interrupted link left behind would
                 // keep the objects of deleted modules.
-                let _ = unsafe shim::sc_unlink(tmp.cstr());
+                let _ = fs::unlink(tmp.as_str());
                 let mut rsp = lrec.clone();
                 rsp.push_str(".rsp");
                 let fit = fit_cmdline(&mut largs, first, objs.len(), rsp.as_str(), cmdline_max());
                 let lrc = if fit < 0 {
                     -1;
                 } else {
-                    exec_at(file_of(&mut lfile), &mut largs, null);
+                    exec_at(lfile.as_str(), &largs, "");
                 };
                 if fit > 0 {
-                    let _ = unsafe shim::sc_unlink(rsp.cstr());
+                    let _ = fs::unlink(rsp.as_str());
                 }
                 if lrc != 0 {
                     eprintln("build: link failed (exit {}): {}", lrc, lrendered.as_str());
@@ -3455,26 +3476,26 @@ fn engine_build_i(
                     let mut st = Vector::<String>::new();
                     push_arg(&mut st, "strip");
                     st.push(tmp.clone());
-                    let src = exec_args(&mut st, null);
+                    let src = exec_args(&st, "");
                     if src != 0 {
                         eprintln("build: strip failed (exit {}): '{}'", src, tmp.as_str());
                         ret = 1;
                     }
                 }
                 if ret == 0 {
-                    if unsafe shim::sc_rename(tmp.cstr(), binb.cstr()) != 0 {
+                    if fs::rename(tmp.as_str(), bin).is_err() {
                         eprintln("build: cannot move '{}' into place", bin);
                         ret = 1;
                     } else if write_file_atomic(fppath.as_str(), fp.as_str()) {
                         // The pending marker goes only once the link record holds this link: without
                         // the record, a same-second object could leave the next build on this binary.
-                        let _ = unsafe shim::sc_unlink(stream.pending.cstr());
+                        let _ = fs::unlink(stream.pending.as_str());
                     } else {
                         eprintln("build: cannot write '{}'; the next build relinks", fppath.as_str());
                     }
                 }
             }
-            t_link = unsafe shim::sc_ticks_ms();
+            t_link = ticks_ms();
         }
         // Retention runs only after a successful build: a failed one may leave its objects unnamed.
         if ret == 0 {
@@ -3557,14 +3578,6 @@ pub fn manifest_print_probes(m: &mf::Manifest, profile: str, cx: &BuildCtx) i32 
 // wasm linkers' (lld) output either. A macOS or iOS binary runs `strip`: ld64 has no full strip.
 const fn strips_at_link(m: &mf::Manifest) bool {
     return m.target != 1 && m.target != 4;
-}
-
-// The path `cstr` of `s` for a spawn's program; null for an empty `s` (the spawn searches PATH).
-fn file_of(s: &mut String) *const char {
-    if s.len() == 0 {
-        return null;
-    }
-    return s.cstr();
 }
 
 /// The link record of binary path `bin` in out-dir `out_dir`, without its `.cmd` extension (also the
@@ -3862,14 +3875,13 @@ pub fn scaffold_project(dir: str, name: str) i32 {
         let _ = write_file(gi.as_str(), "/build\n");
     }
     let gitdir = loader::join2(dir, ".git");
-    let mut gd = gitdir.clone();
-    if unsafe shim::sc_stat_isdir(gd.cstr()) != 1 {
+    if !is_dir(gitdir.as_str()) {
         let mut ga = Vector::<String>::new();
         push_arg(&mut ga, "git");
         push_arg(&mut ga, "init");
         push_arg(&mut ga, "-q");
         push_arg(&mut ga, dir);
-        let _ = exec_args(&mut ga, null); // best-effort: no git, no repository, no error
+        let _ = exec_args(&ga, ""); // best-effort: no git, no repository, no error
     }
     println("created {} project at {}", name, dir);
     return 0;
@@ -3899,8 +3911,7 @@ fn copy_tree(srcd: str, dstd: str, depth: u32) bool {
         }
         let s = loader::join2(srcd, names.at(i).as_str());
         let d = loader::join2(dstd, names.at(i).as_str());
-        let mut sc = s.clone();
-        if unsafe shim::sc_stat_isdir(sc.cstr()) == 1 {
+        if is_dir(s.as_str()) {
             if !copy_tree(s.as_str(), d.as_str(), depth + 1) {
                 ok = false;
             }
@@ -3920,10 +3931,10 @@ fn strip_git(dir: str) {
     }
     let names = lo.unwrap();
     for i in 0..names.len() {
-        let mut d = loader::join2(dir, names.at(i).as_str());
+        let d = loader::join2(dir, names.at(i).as_str());
         if names.at(i).as_str() == ".git" {
             rm_rf(d.as_str());
-        } else if unsafe shim::sc_lstat_isdir(d.cstr()) == 1 {
+        } else if fs::lstat(d.as_str()).map(|m: fs::Metadata| m.kind == fs::FileKind::Dir).unwrap_or(false) {
             strip_git(d.as_str());
         }
     }
@@ -3964,8 +3975,7 @@ pub fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, force: bool)
     }
     let vdir = loader::join2(root, "vendor");
     let dest = loader::join2(vdir.as_str(), name);
-    let mut dp = dest.clone();
-    if unsafe shim::sc_stat_isdir(dp.cstr()) == 1 {
+    if is_dir(dest.as_str()) {
         if !force {
             eprintln("vendor: '{}' already exists (replace it with --force)", dest.as_str());
             return 1;
@@ -3989,7 +3999,7 @@ pub fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, force: bool)
         push_arg(&mut ga, "--recurse-submodules");
         push_arg(&mut ga, src);
         ga.push(dest.clone());
-        if exec_args(&mut ga, null) != 0 {
+        if exec_args(&ga, "") != 0 {
             eprintln("vendor: git clone failed for '{}'", src);
             return 1;
         }
@@ -4003,7 +4013,7 @@ pub fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, force: bool)
             push_arg(&mut co, "-q");
             push_arg(&mut co, "--detach");
             push_arg(&mut co, ref_arg);
-            if exec_args(&mut co, null) != 0 {
+            if exec_args(&co, "") != 0 {
                 eprintln("vendor: no ref '{}' in '{}'", ref_arg, src);
                 rm_rf(dest.as_str());
                 return 1;
@@ -4018,7 +4028,7 @@ pub fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, force: bool)
             push_arg(&mut su, "-q");
             push_arg(&mut su, "--init");
             push_arg(&mut su, "--recursive");
-            if exec_args(&mut su, null) != 0 {
+            if exec_args(&su, "") != 0 {
                 eprintln("vendor: submodule update failed at '{}' in '{}'", ref_arg, src);
                 rm_rf(dest.as_str());
                 return 1;
@@ -4033,8 +4043,7 @@ pub fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, force: bool)
         }
         strip_git(dest.as_str());
     } else {
-        let mut sp = String::from_str(src);
-        if unsafe shim::sc_stat_isdir(sp.cstr()) != 1 {
+        if !is_dir(src) {
             eprintln("vendor: '{}' is not a directory (a git source needs a scheme, git@, or .git)", src);
             return 1;
         }
@@ -4054,7 +4063,6 @@ pub fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, force: bool)
 // back through `tmp`; empty when git fails or is absent. The exec API does the redirection
 // itself: a `>` in the command would need a shell, which Windows does not get.
 fn git_capture(dir: str, tmp: str, a: str, b: str, c: str) String {
-    let mut tp = String::from_str(tmp);
     let mut ga = Vector::<String>::new();
     push_arg(&mut ga, "git");
     push_arg(&mut ga, "-C");
@@ -4066,7 +4074,7 @@ fn git_capture(dir: str, tmp: str, a: str, b: str, c: str) String {
     if c.len() != 0 {
         push_arg(&mut ga, c);
     }
-    let rc = exec_args(&mut ga, tp.cstr());
+    let rc = exec_args(&ga, tmp);
     let mut out = String::new();
     if rc == 0 {
         switch loader::read_file(tmp) {
@@ -4106,7 +4114,7 @@ fn git_build_id(dir: str, tmp_dir: str) String {
 }
 
 // Length of a URL scheme prefix ("https://...") including the separator, 0 when there is none.
-fn scheme_len(s: str) usize {
+const fn scheme_len(s: str) usize {
     for i in 0..s.len() {
         let c = s[i];
         if c == b':' {
@@ -4158,7 +4166,7 @@ pub fn manifest_run_bin(m: &mf::Manifest, profile: str, bin_override: str, sel_b
         }
         let mut ra0 = Vector::<String>::new();
         ra0.push(path.clone());
-        return exec_args(&mut ra0, null);
+        return exec_args(&ra0, "");
     }
     let rc = if bin_override.len() != 0 {
         built = exe_name(bin_override, cx.target);
@@ -4178,7 +4186,7 @@ pub fn manifest_run_bin(m: &mf::Manifest, profile: str, bin_override: str, sel_b
     let mut ra = Vector::<String>::new();
     ra.push(path.clone());
     // A built binary: argv exec, never through a shell.
-    return exec_args(&mut ra, null);
+    return exec_args(&ra, "");
 }
 
 /// `super-c test`: build the project, then discover <test-dir>/**/*.spc (default tests/), synthesize
@@ -4186,9 +4194,8 @@ pub fn manifest_run_bin(m: &mf::Manifest, profile: str, bin_override: str, sel_b
 pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *const TestOpts) i32 {
     let mut nolint = *cx;
     nolint.lint = false;
-    let mut tdir = m.test_dir.clone();
-    if unsafe shim::sc_stat_isdir(tdir.cstr()) != 1 {
-        eprintln("test: no {}/ directory next to src/", tdir.as_str());
+    if !is_dir(m.test_dir.as_str()) {
+        eprintln("test: no {}/ directory next to src/", m.test_dir.as_str());
         return 1;
     }
     // The profile's own binary, left where it was linked: `test` must not stand in for `build`, or a run of
@@ -4206,8 +4213,8 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
         return rc;
     }
     let mut src = String::new();
-    if suite_import_root(tdir.as_str(), "test", &mut src) == 0 {
-        eprintln("test: no .spc files under {}/", tdir.as_str());
+    if suite_import_root(m.test_dir.as_str(), "test", &mut src) == 0 {
+        eprintln("test: no .spc files under {}/", m.test_dir.as_str());
         return 1;
     }
     mkdir_p(m.out_dir.as_str());
@@ -4229,7 +4236,7 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
             return 1;
         }
         let mut tpref = String::new();
-        push_module_path(&mut tpref, tdir.as_str());
+        push_module_path(&mut tpref, m.test_dir.as_str());
         tpref.push_str("::");
         src.clear();
         src.push_str("// generated by `super-c test` -- do not edit\n");
@@ -4261,12 +4268,12 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
         }
         binb.push_string(&binp);
     }
-    unsafe shim::sc_setenv("SUPERC".ptr() as *const char, binb.cstr());
+    let _ = unsafe env::set("SUPERC", binb.as_str());
     // That compiler looks for std/ beside its binary, which `--out-dir` may place outside the project:
     // a project that holds a std tree names it (`SC_STD_DIR`, read by main.spc's `exe_std_dir`).
     if real_path("std/core.spc").len() != 0 && stdlib::get_env("SC_STD_DIR").is_none() {
-        let mut sd = real_path("std");
-        unsafe shim::sc_setenv("SC_STD_DIR".ptr() as *const char, sd.cstr());
+        let sd = real_path("std");
+        let _ = unsafe env::set("SC_STD_DIR", sd.as_str());
     }
     // The runner is built through the engine under the `test` profile, in its own <out-dir>/test tree:
     // per-TU parallel compiles, the object cache and the emit stamp turn an unchanged suite into a
@@ -4291,7 +4298,7 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
     }
     // The suite's recorded durations balance the shards: `--test-durations`, else
     // `<test dir>/durations.tsv` (written by --test-record-durations).
-    let mut durp = loader::join2(tdir.as_str(), "durations.tsv");
+    let mut durp = loader::join2(m.test_dir.as_str(), "durations.tsv");
     let mut o = unsafe *topts;
     if o.durations == null {
         o.durations = durp.cstr();
@@ -4310,8 +4317,8 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
         rm_rf(tcache.as_str());
     }
     mkdir_p(tcache.as_str());
-    let mut ac = real_path(tcache.as_str());
-    unsafe shim::sc_setenv("SC_CACHE_DIR".ptr() as *const char, ac.cstr());
+    let ac = real_path(tcache.as_str());
+    let _ = unsafe env::set("SC_CACHE_DIR", ac.as_str());
     let trc = test_run_runner(&o, tbin.as_str());
     if kept.len() == 0 {
         rm_rf(tcache.as_str());
@@ -4467,7 +4474,7 @@ fn bench_collect(p: &loader::Package, prefix: str, out: &mut Vector<String>) boo
                 // A `@bench` on anything else is the parser's error.
                 continue;
             }
-            if !fnode.as_data.function.is_public() {
+            if fnode.as_data.function.vis != VIS_PUB {
                 let sp = fnode.span;
                 eprintln(
                     "bench: '@bench' function at {}:{} must be 'pub' -- the generated runner calls it from another module",
@@ -4571,23 +4578,22 @@ fn bench_run_root(found: &Vector<String>, prefix: str, build_id: str, flags: str
 pub fn manifest_bench(m: &mf::Manifest, profile: str, no_run: bool, filter: str, cx: &BuildCtx) i32 {
     let mut nolint = *cx;
     nolint.lint = false;
-    let mut bdir = m.bench_dir.clone();
-    if unsafe shim::sc_stat_isdir(bdir.cstr()) != 1 {
-        eprintln("bench: no {}/ directory next to src/", bdir.as_str());
+    if !is_dir(m.bench_dir.as_str()) {
+        eprintln("bench: no {}/ directory next to src/", m.bench_dir.as_str());
         return 1;
     }
     // The module-path prefix the discovery root gives every bench module ("<bench-dir>::").
     let mut bpref = String::new();
-    push_module_path(&mut bpref, bdir.as_str());
+    push_module_path(&mut bpref, m.bench_dir.as_str());
     bpref.push_str("::");
     // Two passes, because a benchmark is DISCOVERED rather than registered. The first root imports every
     // module under bench/ so they all get parsed; walking those ASTs for `@bench` gives the list; the second
     // root is written with a call to each one. Loading twice is cheap (the first pass only parses) and it
     // is what keeps a bench file from having to be wired into a hand-maintained `main`.
     let mut listing = String::new();
-    let nmods = suite_import_root(bdir.as_str(), "bench", &mut listing);
+    let nmods = suite_import_root(m.bench_dir.as_str(), "bench", &mut listing);
     if nmods == 0 {
-        eprintln("bench: no .spc files under {}/", bdir.as_str());
+        eprintln("bench: no .spc files under {}/", m.bench_dir.as_str());
         return 1;
     }
     mkdir_p(m.out_dir.as_str());
@@ -4602,7 +4608,7 @@ pub fn manifest_bench(m: &mf::Manifest, profile: str, no_run: bool, filter: str,
         return 1;
     }
     if found.len() == 0 {
-        eprintln("bench: no '@bench' functions under {}/", bdir.as_str());
+        eprintln("bench: no '@bench' functions under {}/", m.bench_dir.as_str());
         return 1;
     }
     // The selection is part of the generated root, so only the selected benchmarks' modules are built. The
@@ -4684,7 +4690,7 @@ pub fn manifest_bench(m: &mf::Manifest, profile: str, no_run: bool, filter: str,
     let mut ra = Vector::<String>::new();
     ra.push(bin.clone());
     // A built binary: argv exec, never through a shell.
-    return exec_args(&mut ra, null);
+    return exec_args(&ra, "");
 }
 
 /// `super-c command <name>`: run a manifest command, building first when it asks for it. Lines run in
@@ -4705,21 +4711,53 @@ pub fn manifest_run(m: &mf::Manifest, name: str, profile: str, cx: &BuildCtx) i3
     // Set in this process, which runs nothing else afterwards, so every line inherits it: a `KEY=v cmd`
     // prefix would need quoting for the shell, and Windows runs the line with no shell at all.
     for e in 0..c.env_k.len() {
-        let mut k = c.env_k.at(e).clone();
-        let mut v = c.env_v.at(e).clone();
-        if unsafe shim::sc_setenv(k.cstr(), v.cstr()) != 0 {
-            eprintln("command: cannot set environment variable '{}'", k.as_str());
+        let k = c.env_k.at(e).as_str();
+        if unsafe env::set(k, c.env_v.at(e).as_str()).is_err() {
+            eprintln("command: cannot set environment variable '{}'", k);
             return 1;
         }
     }
     for i in 0..c.run.len() {
-        let mut cmd = c.run.at(i).clone();
-        let rc = unsafe shim::sc_exec(cmd.cstr());
+        let rc = run_line(c.run.at(i).as_str());
         if rc != 0 {
             return rc;
         }
     }
     return 0;
+}
+
+/// Run command line `line` with this process's standard streams and wait: its exit code, or -1 when it
+/// could not start or did not exit (a signal ended it). POSIX runs it through `/bin/sh -c`; Windows hands
+/// the line to CreateProcess as written, with no shell, so a line means the same on both only with
+/// double quotes and no operators. Never `system()`: on Windows that is cmd.exe, which drops the outer
+/// quotes of its `/c` line and then splits the program name at the first '/'.
+pub fn run_line(line: str) i32 {
+    let sh: [str; 3] = ["sh", "-c", line];
+    let none: [str; 0] = [];
+    let mut cmd = if PLATFORM == Platform::Windows {
+        process::Command::new(none);
+    } else {
+        process::Command::new(sh);
+    };
+    if PLATFORM == Platform::Windows {
+        cmd.command_line = Option::<str>::Some(line);
+    } else {
+        cmd.program = Option::<str>::Some("/bin/sh");
+    }
+    return wait_code(process::spawn(cmd));
+}
+
+/// The exit code of the child `c` started, once it ends: -1 when it did not start, the wait failed or a
+/// signal ended it.
+pub fn wait_code(c: Result<process::Child, IoError>) i32 {
+    if c.is_err() {
+        return -1;
+    }
+    let mut child = c.unwrap();
+    return switch child.wait() {
+        Ok(Code(code)) => code,
+        _ => -1,
+    };
 }
 
 /// `super-c clean`: the sweeps every build runs at most once per SWEEP_EVERY, now, deleting every unused

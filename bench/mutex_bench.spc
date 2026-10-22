@@ -17,7 +17,7 @@ import std::parallel::thread as thread;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atomics;
 import std::parallel::platform as platform;
-import std::parallel::time as time;
+import std::time as time;
 import std::testing::bench as bench;
 
 const OPS: i64 = 20000; // operations per round in the single-caller lanes

@@ -263,7 +263,7 @@ fn product_int<T: Scalar>(c: []mut T, a: []T, b: []T, m: usize, k: usize, n: usi
     }
 }
 
-fn axpy_int<T: Scalar>(y: []mut T, a: T, x: []T) {
+const fn axpy_int<T: Scalar>(y: []mut T, a: T, x: []T) {
     for i in 0..y.len() {
         y[i] = a * x[i] + y[i];
     }

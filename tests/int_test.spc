@@ -1910,7 +1910,7 @@ fn division_is_the_same_at_compile_time() {
 
 // Random operands with a random count of live limbs, each limb 0, 1, all ones, the top bit alone or random
 // bits: the short and full lengths the multiplication and division loops take.
-fn rand_uint<const W: usize>(s: &mut u64) UInt<W> {
+const fn rand_uint<const W: usize>(s: &mut u64) UInt<W> {
     let nl = UInt::<W>::limbs();
     *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     let live = 1 + (*s >> 33) as usize % nl;

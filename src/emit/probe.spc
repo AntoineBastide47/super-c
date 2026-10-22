@@ -155,7 +155,7 @@ extend Probe {
 
     /// Fold `other` (a shard's or a pooled context's probe) into this one. The tallies fold even
     /// when the regions are off: the build record reports the re-lowering counts of every build.
-    pub fn merge(self: &mut Self, other: &Probe) {
+    pub const fn merge(self: &mut Self, other: &Probe) {
         for k in 0..C_COUNT {
             self.c[k] += other.c[k];
         }

@@ -117,7 +117,7 @@ struct DeadStore {
 
 // Span-based helpers (no resolver state).
 
-fn name_hash(src: str, s: tok::Span) u32 {
+const fn name_hash(src: str, s: tok::Span) u32 {
     let mut h: u32 = 2166136261u32;
     let mut i = s.start;
     while i < s.end {
@@ -160,7 +160,7 @@ const fn label_flow_cmp(src: str, label: tok::Span, start: u32, f: &LabelFlow) i
     return 0;
 }
 
-fn is_builtin_type(src: str, s: tok::Span) bool {
+const fn is_builtin_type(src: str, s: tok::Span) bool {
     return bt_of_name(src, s) >= 0;
 }
 
@@ -509,7 +509,7 @@ extend Resolver {
         }
         for i in 0..self.glob_mids.len() {
             let mo = self.glob_mids[i];
-            let d = pkg.lookup_sym(mo, sym, want_type);
+            let d = pkg.lookup_sym(self.ast.module, mo, sym, want_type);
             if d != NODE_NONE {
                 return loader::LookupHit { node: d, mid: mo };
             }
@@ -517,24 +517,106 @@ extend Resolver {
         return miss;
     }
 
-    // Resolve a public top-level decl `name` in module `mid` and record it (cross-module) on `ref`.
-    fn resolve_module_decl(self: &mut Self, refn: NodeId, mid: ModuleId, name: tok::Span, want_type: bool, kind: str) {
+    // The directory this module glob-imports without an index whose files declare `name` twice, or -1.
+    fn glob_ambiguous(self: &Self, name: tok::Span, want_type: bool) i32 {
         let pkg = unsafe &*self.package;
-        let nm = (unsafe (self.source.ptr() + name.start as usize)) as *const char;
-        let nl = (name.end - name.start) as usize;
-        let decl = pkg.lookup(mid, unsafe str::from_raw(nm as *const u8, nl), want_type);
-        if decl != NODE_NONE {
-            self.ast.set_resolution_def(refn, DefId { module: mid, node: decl });
+        let sym = pkg.idx.syms.find(self.source.slice(name.start as usize, name.end as usize));
+        for i in 0..self.glob_mids.len() {
+            let mo = self.glob_mids[i];
+            let mut amb = false;
+            if pkg.modules[mo as usize].implicit_index {
+                let _ = pkg.qual_lookup(self.ast.module, mo, sym, want_type, &mut amb);
+            }
+            if amb {
+                return mo;
+            }
+        }
+        return -1;
+    }
+
+    // A prelude hit, or a miss when this module does not see it (`pub(package)` std items).
+    fn prelude_seen(self: &Self, hit: loader::LookupHit) loader::LookupHit {
+        let pkg = unsafe &*self.package;
+        if hit.node == NODE_NONE || pkg.vis_ok(self.ast.module, hit.mid, pkg.decl_vis(hit.mid, hit.node)) {
+            return hit;
+        }
+        return loader::LookupHit { node: NODE_NONE, mid: 0 };
+    }
+
+    // `mid::name` as this module sees it (`Package::qual_lookup`).
+    fn qual_hit(self: &Self, mid: ModuleId, name: tok::Span, want_type: bool, amb: &mut bool) loader::LookupHit {
+        unsafe (*(self.package as *mut loader::Package)).ensure_index();
+        let pkg = unsafe &*self.package;
+        let sym = pkg.idx.syms.find(self.source.slice(name.start as usize, name.end as usize));
+        if sym == loader::SYM_NONE {
+            return loader::LookupHit { node: NODE_NONE, mid: 0 };
+        }
+        return pkg.qual_lookup(self.ast.module, mid, sym, want_type, amb);
+    }
+
+    // Report `name`, which two files of directory module `mid` (or of one this module glob-imports) declare.
+    fn ambiguous(self: &mut Self, mid: ModuleId, name: tok::Span) {
+        let pkg = unsafe &*self.package;
+        self.errors.emit_span(
+            name,
+            format(
+                "'{}' is ambiguous: two files of directory module '{}' declare it",
+                diag::span_str(self.source, name.start, name.end),
+                pkg.modules[mid as usize].path.as_str(),
+            ),
+        );
+        self.errors.note(format("import the file that declares the one you mean"));
+    }
+
+    // The note of a qualified miss: the item exists but this module does not see it, or it is missing.
+    fn qual_miss_note(self: &mut Self, mid: ModuleId, name: tok::Span) {
+        let pkg = unsafe &*self.package;
+        let sym = pkg.idx.syms.find(self.source.slice(name.start as usize, name.end as usize));
+        let mut amb = false;
+        let mut hit = loader::LookupHit { node: NODE_NONE, mid: 0 };
+        if sym != loader::SYM_NONE {
+            hit = pkg.qual_lookup(loader::FROM_ANY, mid, sym, false, &mut amb);
+            if hit.node == NODE_NONE {
+                hit = pkg.qual_lookup(loader::FROM_ANY, mid, sym, true, &mut amb);
+            }
+        }
+        if hit.node == NODE_NONE {
+            self.errors.note(format("the item is missing, or private to its file"));
+            return;
+        }
+        let v = pkg.decl_vis(hit.mid, hit.node);
+        let m = pkg.modules.at(hit.mid as usize);
+        if v == VIS_PACKAGE && m.pkg == loader::PKG_STD {
+            self.errors.note(
+                format(
+                    "it is 'pub(package)' in std: unstable std internals, which a project names only with 'std_internals = true' in its build.toml",
+                ),
+            );
+        } else if v == VIS_PACKAGE {
+            self.errors.note(format("it is 'pub(package)': visible to the files of its package only"));
+        } else {
+            self.errors.note(format("it is 'pub(module)': visible to the files under '{}' only", m.scope.as_str()));
+        }
+    }
+
+    // Resolve a top-level decl `name` of module `mid` this module sees and record it (cross-module) on `ref`.
+    fn resolve_module_decl(self: &mut Self, refn: NodeId, mid: ModuleId, name: tok::Span, want_type: bool, kind: str) {
+        let mut amb = false;
+        let hit = self.qual_hit(mid, name, want_type, &mut amb);
+        if amb {
+            self.ambiguous(mid, name);
+        } else if hit.node != NODE_NONE {
+            self.ast.set_resolution_def(refn, DefId { module: hit.mid, node: hit.node });
         } else {
             self.errors.emit_span(
                 name,
                 format(
-                    "no public {} '{}' in the imported module",
+                    "no visible {} '{}' in the imported module",
                     kind,
                     diag::span_str(self.source, name.start, name.end),
                 ),
             );
-            self.errors.note(format("only 'pub' top-level items are visible across module boundaries"));
+            self.qual_miss_note(mid, name);
         }
     }
 
@@ -617,7 +699,7 @@ extend Resolver {
             // A ONE-segment prefix is this module's own import binding before it is a package path. The
             // other order lets any module anywhere hijack a local alias merely by importing a module whose
             // path is that one word: `import time;` (ffi) in one file made every `time::` elsewhere resolve
-            // to it, including inside std, where the alias plainly says std::parallel::time.
+            // to it, including inside std, where the import plainly says std::time.
             let mut found: i32 = -1;
             let mut aliased = false;
             if m == 1 {
@@ -637,24 +719,25 @@ extend Resolver {
                 if nn - m == 1 {
                     // module::decl; a function (preferred) or type.
                     let dn = self.name_span(unsafe seg[m as usize]);
-                    let dnm = (unsafe (self.source.ptr() + dn.start as usize)) as *const char;
-                    let dl = (dn.end - dn.start) as usize;
-                    let mut decl = pkg.lookup(mid, unsafe str::from_raw(dnm as *const u8, dl), false);
-                    if decl == NODE_NONE {
-                        decl = pkg.lookup(mid, unsafe str::from_raw(dnm as *const u8, dl), true);
+                    let mut amb = false;
+                    let mut hit = self.qual_hit(mid, dn, false, &mut amb);
+                    if hit.node == NODE_NONE && !amb {
+                        hit = self.qual_hit(mid, dn, true, &mut amb);
                     }
-                    if decl != NODE_NONE {
-                        self.ast.set_resolution_def(id, DefId { module: mid, node: decl });
+                    if amb {
+                        self.ambiguous(mid, dn);
+                    } else if hit.node != NODE_NONE {
+                        self.ast.set_resolution_def(id, DefId { module: hit.mid, node: hit.node });
                     } else {
                         self.errors.emit_span(
                             dn,
                             format(
-                                "no public item '{}' in module '{}'",
+                                "no visible item '{}' in module '{}'",
                                 diag::span_str(self.source, dn.start, dn.end),
                                 unsafe str::from_raw(prefix, plen),
                             ),
                         );
-                        self.errors.note(format("the module was found, but this item is missing or not public"));
+                        self.qual_miss_note(mid, dn);
                     }
                     handled = true;
                 } else if nn - m == 2 {
@@ -717,8 +800,17 @@ extend Resolver {
             let nl = (name.end - name.start) as usize;
             let want_type = ns == Namespace::NS_TYPE;
             let mut hit = self.glob_lookup(name, want_type);
+            let dir = if hit.node == NODE_NONE {
+                -1;
+            } else {
+                self.glob_ambiguous(name, want_type);
+            };
+            if dir >= 0 {
+                self.ambiguous(dir as ModuleId, name);
+                return;
+            }
             if hit.node == NODE_NONE {
-                hit = pkg.prelude_lookup(unsafe str::from_raw(nm as *const u8, nl), want_type);
+                hit = self.prelude_seen(pkg.prelude_lookup(unsafe str::from_raw(nm as *const u8, nl), want_type));
             }
             if hit.node != NODE_NONE {
                 self.ast.set_resolution_def(refn, DefId { module: hit.mid, node: hit.node });
@@ -775,7 +867,7 @@ extend Resolver {
             let nm = (unsafe (self.source.ptr() + name.start as usize)) as *const char;
             let nl = (name.end - name.start) as usize;
             let s = unsafe str::from_raw(nm as *const u8, nl);
-            if pkg.prelude_lookup(s, want_type).node != NODE_NONE {
+            if self.prelude_seen(pkg.prelude_lookup(s, want_type)).node != NODE_NONE {
                 return true;
             }
             if self.glob_lookup(name, want_type).node != NODE_NONE {
@@ -811,10 +903,9 @@ extend Resolver {
             // `m::B`: a module's public constant reads like the unqualified name.
             let mq = self.module_qualified_type(tp.parts);
             if tp.args.len == 0 && mq.mid >= 0 && mq.head == tp.parts.len - 1 {
-                let pkg = unsafe &*self.package;
                 let ns = self.name_span(mq.type_node);
-                let nm = self.source.slice(ns.start as usize, ns.end as usize);
-                if pkg.lookup(mq.mid as ModuleId, nm, true) == NODE_NONE {
+                let mut amb = false;
+                if self.qual_hit(mq.mid as ModuleId, ns, true, &mut amb).node == NODE_NONE && !amb {
                     self.ast.at(a).as_data.type_path.head = mq.head;
                     self.resolve_module_decl(a, mq.mid as ModuleId, ns, false, "type or constant");
                     return;
@@ -1741,7 +1832,7 @@ extend Resolver {
                     let nl = (name.end - name.start) as usize;
                     let mut hit = self.glob_lookup(name, true);
                     if hit.node == NODE_NONE {
-                        hit = pkg.prelude_lookup(unsafe str::from_raw(nm as *const u8, nl), true);
+                        hit = self.prelude_seen(pkg.prelude_lookup(unsafe str::from_raw(nm as *const u8, nl), true));
                     }
                     if hit.node != NODE_NONE {
                         self.ast.set_resolution_def(v, DefId { module: hit.mid, node: hit.node });
@@ -1965,11 +2056,170 @@ extend Resolver {
             }
         }
         self.scope_exit();
+        if self.package != null {
+            self.check_leaks(items);
+        }
         if self.lint {
             self.lint_module();
         }
         let fstr = self.package_file();
         self.errors.finalize(self.source, fstr);
+    }
+
+    // An item visible beyond its file names in its signature, field types, alias target and bounds no type
+    // less visible than itself (`Package::vis_covers`). A method is at most as visible as its type; a
+    // conformance's members have no visibility of their own.
+    fn check_leaks(self: &mut Self, items: NodeList) {
+        for i in 0..items.len {
+            let id = self.child(items, i);
+            let n = *self.ast.at_const(id);
+            switch n.kind {
+                NODE_FUNCTION => self.leak_fn(id, n.as_data.function.vis),
+                NODE_STRUCT | NODE_ENUM => {
+                    let v = n.as_data.aggregate.vis;
+                    self.leak_generics(n.as_data.aggregate.generics, v);
+                    for k in 0..n.as_data.aggregate.members.len {
+                        let mn = *self.ast.at_const(self.child(n.as_data.aggregate.members, k));
+                        if mn.kind == NodeKind::NODE_FIELD && mn.as_data.field.vis >= VIS_FILE {
+                            self.leak_type(mn.as_data.field.ty, pick(mn.as_data.field.vis < v, mn.as_data.field.vis, v));
+                        } else if mn.kind == NodeKind::NODE_VARIANT {
+                            self.leak_list(mn.as_data.variant.payload, v);
+                        }
+                    }
+                },
+                NODE_TYPE_ALIAS => {
+                    self.leak_generics(n.as_data.type_alias.generics, n.as_data.type_alias.vis);
+                    self.leak_type(n.as_data.type_alias.ty, n.as_data.type_alias.vis);
+                },
+                NODE_INTERFACE => {
+                    let v = n.as_data.interface_def.vis;
+                    self.leak_generics(n.as_data.interface_def.generics, v);
+                    self.leak_list(n.as_data.interface_def.bounds, v);
+                    for k in 0..n.as_data.interface_def.items.len {
+                        let m = self.child(n.as_data.interface_def.items, k);
+                        if self.ast.at_const(m).kind == NodeKind::NODE_FUNCTION {
+                            self.leak_fn(m, v);
+                        }
+                    }
+                },
+                NODE_CONST => self.leak_type(n.as_data.const_def.ty, n.as_data.const_def.vis),
+                NODE_EXTEND => {
+                    if n.as_data.extend_def.interface_type == NODE_NONE {
+                        let td = self.ast.resolution_def(n.as_data.extend_def.target_type);
+                        let tv = if td.node == NODE_NONE {
+                            VIS_PUB;
+                        } else {
+                            unsafe (*self.package).decl_vis(td.module, td.node);
+                        };
+                        for k in 0..n.as_data.extend_def.items.len {
+                            let m = self.child(n.as_data.extend_def.items, k);
+                            let mn = *self.ast.at_const(m);
+                            if mn.kind == NodeKind::NODE_FUNCTION {
+                                self.leak_fn(m, pick(mn.as_data.function.vis < tv, mn.as_data.function.vis, tv));
+                            } else if mn.kind == NodeKind::NODE_CONST {
+                                self.leak_type(
+                                    mn.as_data.const_def.ty,
+                                    pick(mn.as_data.const_def.vis < tv, mn.as_data.const_def.vis, tv),
+                                );
+                            }
+                        }
+                    }
+                },
+                NODE_EXTERN_BLOCK => self.check_leaks(n.as_data.extern_block.items),
+                _ => {},
+            };
+        }
+    }
+
+    fn leak_fn(self: &mut Self, f: NodeId, v: u8) {
+        let fd = self.ast.at_const(f).as_data.function;
+        self.leak_generics(fd.generics, v);
+        for k in 0..fd.params.len {
+            self.leak_type(self.ast.at_const(self.child(fd.params, k)).as_data.parameter.ty, v);
+        }
+        self.leak_list(fd.returns, v);
+        for k in 0..fd.where_clause.len {
+            let wp = self.ast.at_const(self.child(fd.where_clause, k)).as_data.where_predicate;
+            self.leak_type(wp.ty, v);
+            self.leak_list(wp.bounds, v);
+        }
+    }
+
+    fn leak_generics(self: &mut Self, gs: NodeList, v: u8) {
+        for k in 0..gs.len {
+            let g = self.ast.at_const(self.child(gs, k)).as_data.generic_param;
+            self.leak_list(g.bounds, v);
+            self.leak_type(g.default_type, v);
+            self.leak_type(g.const_type, v);
+        }
+    }
+
+    fn leak_list(self: &mut Self, ts: NodeList, v: u8) {
+        for k in 0..ts.len {
+            self.leak_type(self.child(ts, k), v);
+        }
+    }
+
+    // Report every type `t` names that an item of visibility `v` of this module may not name.
+    fn leak_type(self: &mut Self, t: NodeId, v: u8) {
+        if t == NODE_NONE || v < VIS_MODULE {
+            return;
+        }
+        let n = *self.ast.at_const(t);
+        switch n.kind {
+            NODE_TYPE_PATH => {
+                let d = self.ast.resolution_def(t);
+                if d.node != NODE_NONE {
+                    let pkg = unsafe &*self.package;
+                    let da = pkg.module_ast_const(d.module);
+                    let k = unsafe (*da).at_const(d.node).kind;
+                    let tv = pkg.decl_vis(d.module, d.node);
+                    // An associated type has its interface's or its conformance's visibility.
+                    let named = (k == NodeKind::NODE_STRUCT || k == NodeKind::NODE_ENUM || k == NodeKind::NODE_TYPE_ALIAS || k == NodeKind::NODE_INTERFACE) && unsafe (*da).container_of(
+                        d.node,
+                    ) == NODE_NONE;
+                    if named && !pkg.vis_covers(self.ast.module, v, d.module, tv) {
+                        let sp = n.span;
+                        self.errors.emit_span(
+                            sp,
+                            format(
+                                "'{}' is less visible than the {}item that names it",
+                                diag::span_str(self.source, sp.start, sp.end),
+                                vis_text(v),
+                            ),
+                        );
+                        self.errors.note(
+                            format(
+                                "it is {}: widen it, or narrow the item",
+                                if tv < VIS_MODULE {
+                                    "private to its file";
+                                } else {
+                                    vis_text(tv).trim();
+                                },
+                            ),
+                        );
+                    }
+                }
+                self.leak_list(n.as_data.type_path.args, v);
+                for k in 0..n.as_data.type_path.bindings.len {
+                    self.leak_type(
+                        self.ast.at_const(self.child(n.as_data.type_path.bindings, k)).as_data.type_alias.ty,
+                        v,
+                    );
+                }
+            },
+            NODE_POINTER_TYPE | NODE_REFERENCE_TYPE | NODE_SLICE_TYPE | NODE_DYN_TYPE => self.leak_type(
+                n.as_data.indirect_type.ty,
+                v,
+            ),
+            NODE_TUPLE_TYPE => self.leak_list(n.as_data.array_literal.elements, v),
+            NODE_ARRAY_TYPE => self.leak_type(n.as_data.array_type.element, v),
+            NODE_FUNCTION_TYPE => {
+                self.leak_list(n.as_data.function_type.params, v);
+                self.leak_list(n.as_data.function_type.returns, v);
+            },
+            _ => {},
+        };
     }
 
     /// True once any resolution error is recorded.

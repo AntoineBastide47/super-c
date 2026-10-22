@@ -340,7 +340,7 @@ extend<T: Ord, const N: usize> StaticVector<T, N> {
     }
 
     // Restore the max-heap property at `root` over the prefix `[0, end)` by sifting it down.
-    fn sift_down(self: &mut StaticVector<T, N>, root: usize, end: usize) {
+    const fn sift_down(self: &mut StaticVector<T, N>, root: usize, end: usize) {
         let mut r = root;
         let mut child = 2 * r + 1;
         while child < end {

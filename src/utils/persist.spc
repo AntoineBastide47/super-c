@@ -107,7 +107,7 @@ extend Reader {
     }
 
     /// The next 8 bytes as a little-endian `u64`; 0 past the end.
-    pub fn u64(self: &mut Reader) u64 {
+    pub const fn u64(self: &mut Reader) u64 {
         let p = self.view(8);
         let mut v: u64 = 0;
         if p != null {

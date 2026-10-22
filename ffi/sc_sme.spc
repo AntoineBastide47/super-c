@@ -205,7 +205,7 @@ unsafe fn mul_wide(c: *mut f32, a: *const u64, b: *const u64, m: usize, k: usize
 // `len` f16 (`bf` false) or bf16 encodings, each in the low 16 bits of a u64, widened exactly to f32.
 @platform(macos | ios | linux | android)
 @arch(aarch64)
-unsafe fn widen(d: *mut f32, s: *const u64, len: usize, bf: bool) {
+unsafe const fn widen(d: *mut f32, s: *const u64, len: usize, bf: bool) {
     if bf {
         for i in 0..len {
             d[i] = (*((s + i) as *const bf16)).to_f32();

@@ -198,9 +198,18 @@ pub struct Package {
 Package slot. There is no `override_ast` indirection (it was deleted); the Ast never
 leaves its slot, so lookups that land back on the in-flight module read the live tree.
 
-**Cross-module lookup:** `Package::lookup(mid, name, want_type)` finds a public top-level
-decl. It is **O(1)**: a byte-exact symbol probe plus one name-map probe into the package
-declaration index (`ensure_index`, built in deterministic module and source order).
+**Cross-module lookup:** `Package::lookup(from, mid, name, want_type)` finds a top-level decl
+of module `mid` that module `from` sees (`FROM_ANY`: the compiler's own lookups, every item
+visible beyond its file). It is **O(1)**: a byte-exact symbol probe plus one name-map probe into
+the package declaration index (`ensure_index`, built in deterministic module and source order),
+whose name maps hold every item visible beyond its file with its level (`ItemMeta.vis`), then
+`Package::vis_ok`: one level compare, then a package compare (`Module.pkg`) or a prefix compare of
+the asking file's path with the owner's `Module.scope`. `Package::qual_lookup` is what `m::x`
+names: `m`'s own item, else one its glob imports reach (`PkgIndex.globs`); an implicit directory
+index (`Module.implicit_index`, file = the directory and a `/`, source synthesized by
+`loader::read_module`) reaches its files' own items and reports an ambiguity. The resolver checks
+signatures for less visible types (`check_leaks`) and the typechecker field and member levels
+(`field_seen`, `member_seen`).
 
 **Mangling** (`src/emit/mangle.spc`, the frozen symbol-naming authority):
 

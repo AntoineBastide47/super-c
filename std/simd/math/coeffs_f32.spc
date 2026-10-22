@@ -129,7 +129,7 @@ const ATAN_F: [f32; 2] = [-0x1.53d03ep-2, 0x1.5d1468p-3];
 const CBRT_P: [f32; 3] = [0x1.3e3708p-1, 0x1.c1fd0ap-2, -0x1.ee22f2p-5];
 
 /// Polynomial `P` of the kernels at `z`.
-pub fn poly<const P: Poly, const N: usize>(z: Simd<f32, N>) Simd<f32, N> {
+pub const fn poly<const P: Poly, const N: usize>(z: Simd<f32, N>) Simd<f32, N> {
     return switch P {
         ExpP => horner(z, &EXP_P),
         LogP => horner(z, &LOG_P),
