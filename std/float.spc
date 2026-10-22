@@ -1169,7 +1169,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     // loop vectorizes: the magnitude fields placed in the target's position read as the value times
     // 2^(bias - target bias), and the power-of-two scale back is exact for normals and subnormals
     // alike. Exact only without flush-to-zero, which Super-C never turns on.
-    fn widen_f64_bits(self: &Float<E, F, FAMILY>) u64 {
+    const fn widen_f64_bits(self: &Float<E, F, FAMILY>) u64 {
         let r = self.bits.to_u64();
         let mag = r & (1u64 << (E + F) as u64) - 1;
         let inf = Float::<E, F, FAMILY>::exp_field_max() << F as u64;
@@ -1181,7 +1181,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         return r >> (E + F) as u64 << 63 | v;
     }
 
-    fn widen_f32_bits(self: &Float<E, F, FAMILY>) u32 {
+    const fn widen_f32_bits(self: &Float<E, F, FAMILY>) u32 {
         let r = self.bits.to_u64() as u32;
         let mag = r & (1u32 << (E + F) as u32) - 1;
         let inf = (Float::<E, F, FAMILY>::exp_field_max() << F as u64) as u32;

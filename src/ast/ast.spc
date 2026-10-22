@@ -3880,7 +3880,7 @@ extend Ast {
     }
 
     // Whether provisional type `id` is one a rolled-back stage created; clears its bit.
-    fn spec_take(self: &mut Self, id: TypeId) bool {
+    const fn spec_take(self: &mut Self, id: TypeId) bool {
         let k = (id & TYPE_PROV_MASK) as usize;
         if k / 64 >= self.used_spec.len() || (self.used_spec[k / 64] >> (k % 64) as u64 & 1) == 0 {
             return false;

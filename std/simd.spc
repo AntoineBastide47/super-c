@@ -1165,7 +1165,7 @@ pub const fn gather<T: SimdElement, I: SimdInt, const N: usize>(
 }
 
 /// `gather` without the index check: the caller guarantees every active index below `s.len()`.
-pub unsafe fn gather_unchecked<T: SimdElement, I: SimdInt, const N: usize>(
+pub unsafe const fn gather_unchecked<T: SimdElement, I: SimdInt, const N: usize>(
     s: []T,
     idx: Simd<I, N>,
     m: Mask<N>,

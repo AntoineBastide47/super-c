@@ -389,7 +389,7 @@ fn sweep_due(dir: str, now: i64) bool {
 }
 
 /// The cache root's directory name of project `m`: its `bin`, else its `[lib]` name.
-pub fn project_name<'a>(m: &'a mf::Manifest) str<'a> {
+pub const fn project_name<'a>(m: &'a mf::Manifest) str<'a> {
     if m.bin.len() != 0 {
         return m.bin.as_str();
     }
@@ -2376,7 +2376,7 @@ pub const fn simd_width(m: &mf::Manifest, cx: &BuildCtx) u32 {
 
 /// The run-time copies' levels (`loader::Package.simd_dispatch`): `--simd-dispatch`, else
 /// `simd-dispatch`; empty for the default.
-pub fn simd_dispatch<'a>(m: &'a mf::Manifest, cx: &BuildCtx<'a>) str<'a> {
+pub const fn simd_dispatch<'a>(m: &'a mf::Manifest, cx: &BuildCtx<'a>) str<'a> {
     return if cx.simd_dispatch.len() != 0 {
         cx.simd_dispatch;
     } else {
@@ -2880,7 +2880,7 @@ pub fn features_accepted(
 
 // The no-prelink-vectorize probe's bit for an LTO mode that can compile as full LTO (`full`, `auto`,
 // and a ThinLTO request, which falls back to `auto`), else 0.
-fn novec_need(lto: i32) u64 {
+const fn novec_need(lto: i32) u64 {
     return pick(lto == mf::LTO_FULL || lto == mf::LTO_AUTO || lto == mf::LTO_THIN, 1u64 << pr::NOVEC as u64, 0);
 }
 
@@ -3555,7 +3555,7 @@ pub fn manifest_print_probes(m: &mf::Manifest, profile: str, cx: &BuildCtx) i32 
 // Whether a stripped build strips at link (`-Wl,--strip-all`): every linker but Apple's can, which
 // saves the `strip` process and a rewrite of the binary; the host `strip` cannot read the Android and
 // wasm linkers' (lld) output either. A macOS or iOS binary runs `strip`: ld64 has no full strip.
-fn strips_at_link(m: &mf::Manifest) bool {
+const fn strips_at_link(m: &mf::Manifest) bool {
     return m.target != 1 && m.target != 4;
 }
 
@@ -3617,7 +3617,7 @@ pub fn archiver(cc: str, target: i32) String {
 const WIN_CMDLINE_MAX: usize = 8192;
 
 /// The longest command line `fit_cmdline` leaves as it is on this host.
-pub fn cmdline_max() usize {
+pub const fn cmdline_max() usize {
     if unsafe shim::sc_host_platform() == 0 {
         return WIN_CMDLINE_MAX;
     }

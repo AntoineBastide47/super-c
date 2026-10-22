@@ -557,7 +557,7 @@ const ELEM_CHAIN_MAX: u32 = 4096;
 
 extend InlineCtx {
     /// Bytes the translation tables hold (SC_TYPE_STATS): the tables, the shape keys and their index.
-    pub fn xm_bytes(self: &Self) u64 {
+    pub const fn xm_bytes(self: &Self) u64 {
         let b = (self.xm_tys.len() + self.xm_keys.len()) * 8 + self.xm_ko.len() * 13;
         return (b + self.xm_ix.len() * 17 * 2 + self.xm_pfs.len()) as u64;
     }
@@ -1156,7 +1156,7 @@ fn vet_decl(pkg: *const loader::Package, d: DefId, ext: &mut NodeId, demand: &mu
 // The bit of function `d` in a called set whose per-module first words are `base` (one entry per
 // module and a last one: a module's words end where the next one's start), or -1 when its module
 // holds no such bit: a module without an Ast, or a node of the body arena, which `build` never vets.
-fn called_bit(base: &Vector<usize>, d: DefId) i64 {
+const fn called_bit(base: &Vector<usize>, d: DefId) i64 {
     let m = d.module as usize;
     if Ast::in_body(d.node) || d.node as usize >= (base[m + 1] - base[m]) * 64 {
         return -1;
@@ -2015,7 +2015,7 @@ const fn eff_pty(b: &ir::CoreBody, plid: ir::PlaceId) TypeId {
 
 /// Where entry `e` of a pool its entries fill in order ends: where entry `e + 1` starts (`starts`),
 /// or at the pool's length `n` for the last.
-fn pool_end(starts: &Vector<u32>, n: usize, e: usize) usize {
+const fn pool_end(starts: &Vector<u32>, n: usize, e: usize) usize {
     if e + 1 < starts.len() {
         return starts[e + 1] as usize;
     }
@@ -3143,7 +3143,7 @@ fn block_source(b: &ir::CoreBody, pl: u32, cb: usize) ir::Rvalue {
 
 extend Growth {
     /// Count one splice of callee `k`: its pools, and the prelude and join it brings.
-    fn add(self: &mut Self, k: &ir::CoreBody) {
+    const fn add(self: &mut Self, k: &ir::CoreBody) {
         let io = (k.args + k.returns) as usize;
         self.locals += k.locals.len();
         self.blocks += k.blocks.len() + 2;

@@ -409,7 +409,7 @@ fn call_ends(p: &loader::Package, t: &ir::Terminator) bool {
 }
 
 // The name of index item `item`.
-fn item_name(p: &loader::Package, item: u32) str {
+const fn item_name(p: &loader::Package, item: u32) str {
     let it = *p.idx.items.at(item as usize);
     return p.modules.at(it.module as usize).source.as_str().slice(it.start as usize, (it.start + it.len) as usize);
 }

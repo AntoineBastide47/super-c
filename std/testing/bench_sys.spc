@@ -599,7 +599,7 @@ const fn counted() bool {
 }
 
 /// Whether malloc-family calls are counted on this platform: 1, else 0.
-pub unsafe fn sc_bs_alloc_supported() i32 {
+pub unsafe const fn sc_bs_alloc_supported() i32 {
     return counted() as i32;
 }
 
@@ -1057,7 +1057,7 @@ unsafe fn cpu_model_line(line: []u8, n: usize, buf: *mut char, cap: usize) i32 {
 
 /// The operating system this binary runs on: "macos" (every Apple target), "linux" (Android too),
 /// "windows" or "wasm".
-pub unsafe fn sc_bs_os() *const char {
+pub unsafe const fn sc_bs_os() *const char {
     if PLATFORM == Platform::Windows {
         return "windows".ptr() as *const char;
     } else if PLATFORM == Platform::MacOS || PLATFORM == Platform::IOS {
@@ -1069,7 +1069,7 @@ pub unsafe fn sc_bs_os() *const char {
 }
 
 /// The architecture this binary was built for: "aarch64", "x86_64" or "wasm32".
-pub unsafe fn sc_bs_arch() *const char {
+pub unsafe const fn sc_bs_arch() *const char {
     if ARCH == Arch::AArch64 {
         return "aarch64".ptr() as *const char;
     } else if ARCH == Arch::X86_64 {

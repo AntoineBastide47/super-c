@@ -95,7 +95,7 @@ pub fn contains_str(hay: *const char, needle: str) bool {
 }
 
 /// True when the host platform is Windows.
-pub fn on_windows() bool {
+pub const fn on_windows() bool {
     return unsafe shim::sc_host_platform() == 0;
 }
 
@@ -149,7 +149,7 @@ pub fn cc_name() *const char {
 // The C standard the harness compiles emitted trees with. mingw hides POSIX prototypes behind
 // `__STRICT_ANSI__` under a strict `-std=c11`, so the Windows leg asks for the GNU dialect instead.
 /// The C standard the harness compiles with (c11, or gnu11 on Windows).
-pub fn cstd() *const char {
+pub const fn cstd() *const char {
     if on_windows() {
         return "-std=gnu11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700".ptr() as *const char;
     }
@@ -160,7 +160,7 @@ pub fn cstd() *const char {
 // is already this exact string. Passing a partial override (`-std=c11` without the POSIX define) is worse
 // than passing nothing: glibc then hides the prototypes the emitted C needs, which Darwin never does.
 /// `cstd()` as a `-std=` flag.
-pub fn cstd_flag() *const char {
+pub const fn cstd_flag() *const char {
     if on_windows() {
         return "\"--cstd=-std=gnu11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700\"".ptr() as *const char;
     }
@@ -170,7 +170,7 @@ pub fn cstd_flag() *const char {
 // The executable suffix a linked test binary gets ("" or ".exe"). mingw's gcc appends `.exe` to an output
 // name that has no extension, so the harness names its binaries with the suffix already on.
 /// The executable suffix: `.exe` on Windows, empty elsewhere.
-pub fn binext() *const char {
+pub const fn binext() *const char {
     if on_windows() {
         return ".exe".ptr() as *const char;
     }

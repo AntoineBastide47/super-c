@@ -14,13 +14,13 @@ import tests::harness as h;
 import tests::cli_harness as cli;
 
 // A fixed sequence of values in [-1, 1).
-fn next(r: &mut u64) f32 {
+const fn next(r: &mut u64) f32 {
     *r = r.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     return (*r >> 40 & 0xFFFFFF) as f32 / 8388608.0 - 1.0;
 }
 
 // The error of `x` in units in the last place of the f32 nearest to the reference `r`.
-fn ulps(x: f32, r: f64) f64 {
+const fn ulps(x: f32, r: f64) f64 {
     let n = (r as f32).abs();
     let up = fl::f32_from_bits(fl::f32_bits(n) + 1) as f64 - n as f64;
     return (x as f64 - r).abs() / up;
@@ -61,7 +61,7 @@ const L: f32 = length_fused(vec3::new(0.1, 0.7, -0.3));
 const N3: vec3 = normalize_fused(vec3::new(0.1, 0.7, -0.3));
 
 @c.noinline
-fn opaque(v: vec3) vec3 {
+const fn opaque(v: vec3) vec3 {
     return v;
 }
 

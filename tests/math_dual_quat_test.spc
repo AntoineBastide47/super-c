@@ -20,14 +20,14 @@ struct Rand {
 }
 
 extend Rand {
-    fn new() Rand {
+    const fn new() Rand {
         return Rand { hold: 1 };
     }
-    fn next(self: &mut Rand) i32 {
+    const fn next(self: &mut Rand) i32 {
         self.hold = self.hold.wrapping_mul(214013).wrapping_add(2531011);
         return self.hold >> 16 & 0x7fff;
     }
-    fn frand(self: &mut Rand) f32 {
+    const fn frand(self: &mut Rand) f32 {
         return (self.next() as f64 / 0x7ffff as f64) as f32 * 2.0 - 1.0;
     }
 }
@@ -41,7 +41,7 @@ fn eps_dq(a: dualquat, b: dualquat, eps: f32) bool {
     return eps_quat(a.real, b.real, eps) && eps_quat(a.dual, b.dual, eps);
 }
 
-fn copies<T: Copy>(x: T) (T, T) {
+const fn copies<T: Copy>(x: T) (T, T) {
     return x, x;
 }
 

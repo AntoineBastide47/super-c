@@ -183,7 +183,7 @@ const fn make_payload() Payload {
     return Payload { n: 5 };
 }
 
-fn take_sum(p: Payload, x: i64) i64 {
+const fn take_sum(p: Payload, x: i64) i64 {
     return p.n + x;
 }
 
@@ -1836,7 +1836,7 @@ extend MaskSleeper as Free {
     }
 }
 
-fn mask_sleeper() i64 {
+const fn mask_sleeper() i64 {
     let _p = MaskSleeper { k: 0 };
     return 7;
 }

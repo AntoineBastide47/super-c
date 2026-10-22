@@ -100,7 +100,7 @@ fn fill_tables(row: &data::Row, out: &mut CTarget) {
     merge_layers(row.layers, hl, &mut out.has);
 }
 
-fn arch_bit(arch: i32) u8 {
+const fn arch_bit(arch: i32) u8 {
     if arch == 0 {
         return 1;
     }
@@ -212,7 +212,7 @@ fn elf_dirs(root: str, dir: str, out: &mut Vector<String>) {
     push_dir(root, "/usr/include", out);
 }
 
-fn is_host(row: &data::Row) bool {
+const fn is_host(row: &data::Row) bool {
     return unsafe shim::sc_host_platform() == row.target && unsafe shim::sc_host_arch() == row.arch;
 }
 

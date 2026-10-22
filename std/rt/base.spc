@@ -131,7 +131,7 @@ fn put_hex(v: u64) {
 }
 
 // The lowercase hexadecimal digit of `d` (below 16).
-fn hex_digit(d: u8) u8 {
+const fn hex_digit(d: u8) u8 {
     if d < 10 {
         return b'0' + d;
     }
@@ -244,8 +244,8 @@ static mut PRE_HOOK: fn() = no_preempt;
 static mut CANCEL_HOOK: fn() i32 = no_cancel;
 
 // The hooks before the scheduler installs its own.
-fn no_preempt() {}
-fn no_cancel() i32 {
+const fn no_preempt() {}
+const fn no_cancel() i32 {
     return 0;
 }
 
@@ -317,7 +317,7 @@ const ASAN: bool = false;
 // 1 in a program built with AddressSanitizer, whose frames carry redzones: std's runtime sizes its default
 // task stack by it.
 @export("sc_rt_asan")
-fn rt_asan() i32 {
+const fn rt_asan() i32 {
     return ASAN as i32;
 }
 
@@ -564,7 +564,7 @@ static mut ILL_PREV: sigaction = sigaction { handler: sig_unset };
 
 // The handler a previous action holds until `sigaction` records the real one.
 @platform(macos | ios | linux | android)
-fn sig_unset(_sig: i32) {}
+const fn sig_unset(_sig: i32) {}
 @platform(macos | ios | linux | android)
 @thread_local
 static mut STK_MINE: *mut void = null; // this thread's signal stack
@@ -724,7 +724,7 @@ fn stk_bounds(main: bool) (usize, usize) {
 // check for a target this runtime does not run on), which reports every fault as one beyond the slack.
 @platform(macos | ios)
 @arch(x86_64 | aarch64)
-fn stk_sp(uc: *mut void) usize {
+const fn stk_sp(uc: *mut void) usize {
     let mc = unsafe *((uc as usize + UC_MCONTEXT_AT) as *const usize);
     return unsafe *((mc + MC_SP_AT) as *const usize);
 }
@@ -1165,7 +1165,7 @@ fn lk_set(st: i32) {
 }
 
 // xorshift of the address: shifts drop the bits they push out, so no step overflows.
-fn lk_hash(p: *const void) usize {
+const fn lk_hash(p: *const void) usize {
     let mut x = p as usize >> 4;
     x ^= x << 13;
     x ^= x >> 7;
@@ -1233,7 +1233,7 @@ fn lk_shard_clear(s: *mut LkShard) {
     }
 }
 
-fn lk_slot(p: *const void, cap: usize) usize {
+const fn lk_slot(p: *const void, cap: usize) usize {
     return lk_hash(p) >> LK_SHARD_BITS & cap - 1;
 }
 
@@ -1448,7 +1448,7 @@ fn lk_double(p: *const void, snap: LkEnt, site: *const void) {
 }
 
 // The report's order: by site, then by size.
-fn lk_group_cmp(va: *const void, vb: *const void) i32 {
+const fn lk_group_cmp(va: *const void, vb: *const void) i32 {
     let a = unsafe *(va as *const LkEnt);
     let b = unsafe *(vb as *const LkEnt);
     if a.site != b.site {
@@ -1720,7 +1720,7 @@ fn lk_track(p: *mut void, n: usize, site: *const void, aligned: u32) {
 // The code address an allocation entry returns to: its caller's call site. Each entry is `@noinline`, so
 // the address is in its caller in every profile.
 @intrinsic("frame.return_address")
-fn return_address() *const void;
+const fn return_address() *const void;
 
 @export("sc_lk_malloc")
 @noinline

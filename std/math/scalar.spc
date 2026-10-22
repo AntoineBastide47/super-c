@@ -2106,7 +2106,7 @@ extend<const B: usize> si::UInt<B> as Scalar {
 
 // A shift count of `Int`'s `shl` and `shr`: past the width it shifts every bit out, as the type's own
 // shift does.
-fn wide_count<const B: usize>(n: si::UInt<B>) usize {
+const fn wide_count<const B: usize>(n: si::UInt<B>) usize {
     if n >= si::UInt::<B>::from_u64(B as u64) {
         return B;
     }

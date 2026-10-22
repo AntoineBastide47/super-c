@@ -109,19 +109,19 @@ fn color_encoding_srgb() {
     assert(all(epsilon_equal(rgba, convert_srgb_to_linear_gamma(srgba, 2.8f32), 0.00001f32)));
 }
 
-fn bits3(v: vec3) [u32; 3] {
+const fn bits3(v: vec3) [u32; 3] {
     return [f32_bits(v.x()), f32_bits(v.y()), f32_bits(v.z())];
 }
 
-fn bits3d(v: dvec3) [u64; 3] {
+const fn bits3d(v: dvec3) [u64; 3] {
     return [f64_bits(v.x()), f64_bits(v.y()), f64_bits(v.z())];
 }
 
-fn same3(a: [u32; 3], b: [u32; 3]) bool {
+const fn same3(a: [u32; 3], b: [u32; 3]) bool {
     return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
 }
 
-fn same3d(a: [u64; 3], b: [u64; 3]) bool {
+const fn same3d(a: [u64; 3], b: [u64; 3]) bool {
     return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
 }
 

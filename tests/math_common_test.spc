@@ -38,11 +38,11 @@ fn any<const N: usize>(b: Vec<bool, N>) bool {
     return false;
 }
 
-fn same_bits32(x: f32, y: f32) bool {
+const fn same_bits32(x: f32, y: f32) bool {
     return f32_bits(x) == f32_bits(y);
 }
 
-fn same_bits64(x: f64, y: f64) bool {
+const fn same_bits64(x: f64, y: f64) bool {
     return f64_bits(x) == f64_bits(y);
 }
 

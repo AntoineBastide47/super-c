@@ -23,7 +23,7 @@ struct Wf<const W: usize> {
     pub m: UInt<W>,
 }
 
-fn wzero<const W: usize>() Wf<W> {
+const fn wzero<const W: usize>() Wf<W> {
     return Wf::<W> { neg: false, e: 0, m: UInt::<W>::zero() };
 }
 
@@ -62,7 +62,7 @@ fn wneg<const W: usize>(a: Wf<W>) Wf<W> {
     return Wf::<W> { neg: !a.neg && !a.m.is_zero(), e: a.e, m: a.m };
 }
 
-fn wabs<const W: usize>(a: Wf<W>) Wf<W> {
+const fn wabs<const W: usize>(a: Wf<W>) Wf<W> {
     return Wf::<W> { neg: false, e: a.e, m: a.m };
 }
 
@@ -543,7 +543,7 @@ fn atanh_w<const W: usize>(x: Wf<W>) Wf<W> {
 // ---- the formats -------------------------------------------------------------------------------------
 
 /// Whether `Float<E, F, FAMILY>` is exact in f64: its functions compute there and round once.
-pub fn exact_in_f64<const E: usize, const F: usize, const FAMILY: sf::FloatFamily>() bool {
+pub const fn exact_in_f64<const E: usize, const F: usize, const FAMILY: sf::FloatFamily>() bool {
     return F <= 52 && (E < 11 || E == 11 && FAMILY == sf::FloatFamily::FF_IEEE);
 }
 
@@ -551,7 +551,7 @@ fn of64<const E: usize, const F: usize, const FAMILY: sf::FloatFamily>(v: f64) F
     return Float::<E, F, FAMILY>::from_f64(v);
 }
 
-fn bias<const E: usize>() i64 {
+const fn bias<const E: usize>() i64 {
     return (1i64 << (E - 1) as i64) - 1;
 }
 

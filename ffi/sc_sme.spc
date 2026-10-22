@@ -10,7 +10,7 @@ import stdlib;
 import string as cstring;
 
 /// 1 where this module has the kernels (macOS, iOS, Linux and Android on aarch64), else 0.
-pub fn sc_sme_built() i32 {
+pub const fn sc_sme_built() i32 {
     if PLATFORM != Platform::Windows && PLATFORM != Platform::Wasm && ARCH == Arch::AArch64 {
         return 1;
     }
@@ -173,7 +173,7 @@ pub unsafe fn sc_sme_mul_bf16(_c: *mut f32, _a: *const u64, _b: *const u64, _m: 
 // allocated.
 @platform(macos | ios | linux | android)
 @arch(aarch64)
-fn panel(k: usize, lanes: usize, esz: usize) *mut void {
+const fn panel(k: usize, lanes: usize, esz: usize) *mut void {
     let (row, o1) = lanes.overflowing_mul(esz);
     let (size, o2) = k.overflowing_mul(row);
     if o1 || o2 {

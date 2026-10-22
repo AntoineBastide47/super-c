@@ -497,11 +497,11 @@ extend Names {
         return n;
     }
 
-    fn count(self: &Names) usize {
+    const fn count(self: &Names) usize {
         return self.offsets.len() - 1;
     }
 
-    fn spell(self: &Names, id: u32) str {
+    const fn spell(self: &Names, id: u32) str {
         let a = self.offsets[id as usize] as usize;
         let b = self.offsets[id as usize + 1] as usize;
         return self.strs.as_str().slice(a, b);
@@ -1211,7 +1211,7 @@ extend Pp {
         self.pool.push(v);
     }
 
-    fn macro_index(self: &Pp, id: u32) u32 {
+    const fn macro_index(self: &Pp, id: u32) u32 {
         if id as usize < self.macro_table.len() {
             return self.macro_table[id as usize];
         }
@@ -1622,11 +1622,11 @@ extend Pp {
         }
     }
 
-    fn skipping(self: &Pp) bool {
+    const fn skipping(self: &Pp) bool {
         return self.conditions.len() > 0 && (self.conditions[self.conditions.len() - 1] & 3) != C_TAKE;
     }
 
-    fn fix_line(self: &Pp, t: Tok) Tok {
+    const fn fix_line(self: &Pp, t: Tok) Tok {
         let mut r = t;
         r.line = (t.line as i64 + self.delta) as u32;
         return r;
@@ -1645,7 +1645,7 @@ extend Pp {
         }
     }
 
-    fn at_directive(self: &Pp) bool {
+    const fn at_directive(self: &Pp) bool {
         let t = self.toks[self.pos];
         return (t.flags & F_BOL) != 0 && is_hash(t);
     }
@@ -2263,7 +2263,7 @@ extend Pp {
 
     // ---- Expansion ---------------------------------------------------------------------------------------
 
-    fn file_ready(self: &Pp) bool {
+    const fn file_ready(self: &Pp) bool {
         if self.pos >= self.end {
             return false;
         }
@@ -2305,7 +2305,7 @@ extend Pp {
         return Tok { kind: K_OTHER, flags: 0, id: 0, line: self.error_line, hide: 0 };
     }
 
-    fn lparen_next(self: &Pp, st: &Vector<Tok>, from_file: bool) bool {
+    const fn lparen_next(self: &Pp, st: &Vector<Tok>, from_file: bool) bool {
         if st.len() > 0 {
             return is_punct(st[st.len() - 1], ID_LPAREN);
         }
@@ -3011,7 +3011,7 @@ extend Pp {
     }
 
     // The operator at the cursor as its bytes (`pair_code` for two), or 0.
-    fn expr_op(self: &Pp) u32 {
+    const fn expr_op(self: &Pp) u32 {
         if self.expr_pos >= self.expr.len() {
             return 0;
         }

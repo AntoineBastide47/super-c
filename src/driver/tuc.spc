@@ -53,7 +53,7 @@ fn w128(o: &mut String, v: i128) {
 }
 
 // Overwrite the u32 at `at` (a slot `w32` reserved).
-fn p32(o: &mut String, at: usize, v: u32) {
+const fn p32(o: &mut String, at: usize, v: u32) {
     o.set_byte(at, (v & 0xFF) as u8);
     o.set_byte(at + 1, (v >> 8 & 0xFF) as u8);
     o.set_byte(at + 2, (v >> 16 & 0xFF) as u8);

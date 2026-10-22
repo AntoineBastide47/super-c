@@ -409,7 +409,7 @@ fn reads_any(b: &ir::CoreBody, rv: &ir::Rvalue, ls: &Vector<u32>) bool {
 }
 
 // Is operand `o` a read of the whole local `l`?
-fn whole_read(b: &ir::CoreBody, o: u32, l: u32) bool {
+const fn whole_read(b: &ir::CoreBody, o: u32, l: u32) bool {
     let op = *b.operands.at(o as usize);
     if op.kind == ir::OP_CONST {
         return false;
@@ -941,7 +941,7 @@ fn reachable(b: &ir::CoreBody, out: &mut Vector<bool>) {
 }
 
 // Is `rv` a read of the whole local `l` (a store into `l` that changes nothing)?
-fn identity(b: &ir::CoreBody, rv: &ir::Rvalue, l: u32) bool {
+const fn identity(b: &ir::CoreBody, rv: &ir::Rvalue, l: u32) bool {
     return rv.kind == ir::RV_USE && whole_read(b, rv.a, l);
 }
 

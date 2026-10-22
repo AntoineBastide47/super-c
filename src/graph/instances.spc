@@ -2987,7 +2987,7 @@ extend InstGraph {
     }
 
     /// The body of slot `ki` (a `kept_ix` value).
-    pub fn kept_mut(self: &mut Self, ki: usize) &mut irl::KeptBody {
+    pub const fn kept_mut(self: &mut Self, ki: usize) &mut irl::KeptBody {
         if ki < self.kept.len() {
             return self.kept.index_mut(ki);
         }
@@ -2995,7 +2995,7 @@ extend InstGraph {
     }
 
     // The body of slot `ki`, which stays in place while bodies are added.
-    fn kept_at(self: &Self, ki: i64) *const irl::KeptBody {
+    const fn kept_at(self: &Self, ki: i64) *const irl::KeptBody {
         if ki as usize < self.kept.len() {
             return self.kept.at(ki as usize);
         }

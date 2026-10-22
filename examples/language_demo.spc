@@ -207,7 +207,7 @@ unsafe const fn raw_read_twice(pointer: *const i32) i32 {
     return *pointer + pointer[0];
 }
 
-fn pointer_and_defer() i32 {
+const fn pointer_and_defer() i32 {
     let pointer = (unsafe malloc(sizeof(i32))) as *mut i32;
     defer unsafe free(pointer);
     unsafe *pointer = 21;

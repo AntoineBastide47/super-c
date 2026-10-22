@@ -45,7 +45,7 @@ fn push_quat_parts<T: Float>(s: &mut String, q: &Quat<T>) {
 }
 
 // `seed ^ (h + (0x9e3779b9 + (seed << 6) + (seed >> 2)))`, wrapping.
-fn hash_combine(seed: u64, h: u64) u64 {
+const fn hash_combine(seed: u64, h: u64) u64 {
     return seed ^ h.wrapping_add(0x9e3779b9u64.wrapping_add(seed << 6).wrapping_add(seed >> 2));
 }
 

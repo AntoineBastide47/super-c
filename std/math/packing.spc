@@ -5,20 +5,20 @@ import std::math::scalar as *;
 import std::math::vec as *;
 
 /// Each component clamped to [0, 1], times 65535, rounded; x in the low 16 bits.
-pub fn pack_unorm2x16(v: Vec<f32, 2>) u32 {
+pub const fn pack_unorm2x16(v: Vec<f32, 2>) u32 {
     let x = unorm(v.e[0], 65535.0) as u16;
     let y = unorm(v.e[1], 65535.0) as u16;
     return x as u32 | y as u32 << 16;
 }
 
 /// Each 16-bit field times 1 / 65535.
-pub fn unpack_unorm2x16(p: u32) Vec<f32, 2> {
+pub const fn unpack_unorm2x16(p: u32) Vec<f32, 2> {
     let s: f32 = 1.5259021896696421759365224689097e-5;
     return Vec::<f32, 2> { e: [(p & 0xFFFF) as f32 * s, (p >> 16) as f32 * s] };
 }
 
 /// Each component clamped to [-1, 1], times 32767, rounded; x in the low 16 bits.
-pub fn pack_snorm2x16(v: Vec<f32, 2>) u32 {
+pub const fn pack_snorm2x16(v: Vec<f32, 2>) u32 {
     let x = (snorm(v.e[0], 32767.0) as i16) as u16;
     let y = (snorm(v.e[1], 32767.0) as i16) as u16;
     return x as u32 | y as u32 << 16;
@@ -33,7 +33,7 @@ pub fn unpack_snorm2x16(p: u32) Vec<f32, 2> {
 }
 
 /// Each component clamped to [0, 1], times 255, rounded; x in the low byte.
-pub fn pack_unorm4x8(v: Vec<f32, 4>) u32 {
+pub const fn pack_unorm4x8(v: Vec<f32, 4>) u32 {
     let x = unorm(v.e[0], 255.0);
     let y = unorm(v.e[1], 255.0);
     let z = unorm(v.e[2], 255.0);
@@ -75,18 +75,18 @@ pub fn unpack_snorm4x8(p: u32) Vec<f32, 4> {
 }
 
 /// The double whose low 32 bits are x and high 32 bits y.
-pub fn pack_double2x32(v: Vec<u32, 2>) f64 {
+pub const fn pack_double2x32(v: Vec<u32, 2>) f64 {
     return f64_from_bits(v.e[0] as u64 | v.e[1] as u64 << 32);
 }
 
 /// The low and high 32 bits of `v`.
-pub fn unpack_double2x32(v: f64) Vec<u32, 2> {
+pub const fn unpack_double2x32(v: f64) Vec<u32, 2> {
     let b = f64_bits(v);
     return Vec::<u32, 2> { e: [b as u32, (b >> 32) as u32] };
 }
 
 /// The x and y components as float16 (round to nearest, halves up), x in the low 16 bits.
-pub fn pack_half2x16(v: Vec<f32, 2>) u32 {
+pub const fn pack_half2x16(v: Vec<f32, 2>) u32 {
     return (to_float16(v.e[0]) as u16) as u32 | (to_float16(v.e[1]) as u16) as u32 << 16;
 }
 
@@ -96,28 +96,28 @@ pub fn unpack_half2x16(v: u32) Vec<f32, 2> {
 }
 
 /// `v` clamped to [0, 1], times 255, rounded.
-pub fn pack_unorm1x8(v: f32) u8 {
+pub const fn pack_unorm1x8(v: f32) u8 {
     return unorm(v, 255.0) as u8;
 }
 
 /// `p` times 1 / 255 (an f64 constant rounded to f32).
-pub fn unpack_unorm1x8(p: u8) f32 {
+pub const fn unpack_unorm1x8(p: u8) f32 {
     return p as f32 * UNORM8_SCALE as f32;
 }
 
 /// The x and y components as `pack_unorm1x8`, x in the low byte.
-pub fn pack_unorm2x8(v: Vec<f32, 2>) u16 {
+pub const fn pack_unorm2x8(v: Vec<f32, 2>) u16 {
     return (unorm(v.e[0], 255.0) as u8) as u16 | (unorm(v.e[1], 255.0) as u8) as u16 << 8;
 }
 
 /// Each byte of `p` as `unpack_unorm1x8`.
-pub fn unpack_unorm2x8(p: u16) Vec<f32, 2> {
+pub const fn unpack_unorm2x8(p: u16) Vec<f32, 2> {
     let s = UNORM8_SCALE as f32;
     return Vec::<f32, 2> { e: [(p & 0xFF) as f32 * s, (p >> 8) as f32 * s] };
 }
 
 /// `v` clamped to [-1, 1], times 127, rounded, as the bits of an `i8`.
-pub fn pack_snorm1x8(v: f32) u8 {
+pub const fn pack_snorm1x8(v: f32) u8 {
     return (snorm(v, 127.0) as i8) as u8;
 }
 
@@ -127,7 +127,7 @@ pub fn unpack_snorm1x8(p: u8) f32 {
 }
 
 /// The x and y components as `pack_snorm1x8`, x in the low byte.
-pub fn pack_snorm2x8(v: Vec<f32, 2>) u16 {
+pub const fn pack_snorm2x8(v: Vec<f32, 2>) u16 {
     return ((snorm(v.e[0], 127.0) as i8) as u8) as u16 | ((snorm(v.e[1], 127.0) as i8) as u8) as u16 << 8;
 }
 
@@ -137,12 +137,12 @@ pub fn unpack_snorm2x8(p: u16) Vec<f32, 2> {
 }
 
 /// `v` clamped to [0, 1], times 65535, rounded.
-pub fn pack_unorm1x16(v: f32) u16 {
+pub const fn pack_unorm1x16(v: f32) u16 {
     return unorm(v, 65535.0) as u16;
 }
 
 /// `p` times 1 / 65535.
-pub fn unpack_unorm1x16(p: u16) f32 {
+pub const fn unpack_unorm1x16(p: u16) f32 {
     return p as f32 * UNORM16_SCALE;
 }
 
@@ -167,7 +167,7 @@ pub fn unpack_unorm4x16(p: u64) Vec<f32, 4> {
 }
 
 /// `v` clamped to [-1, 1], times 32767, rounded, as the bits of an `i16`.
-pub fn pack_snorm1x16(v: f32) u16 {
+pub const fn pack_snorm1x16(v: f32) u16 {
     return (snorm(v, 32767.0) as i16) as u16;
 }
 
@@ -197,7 +197,7 @@ pub fn unpack_snorm4x16(p: u64) Vec<f32, 4> {
 }
 
 /// `v` as float16 bits (round to nearest, halves up).
-pub fn pack_half1x16(v: f32) u16 {
+pub const fn pack_half1x16(v: f32) u16 {
     return to_float16(v) as u16;
 }
 
@@ -227,28 +227,28 @@ pub fn unpack_half4x16(p: u64) Vec<f32, 4> {
 }
 
 /// The low 10 bits of x, y, z and the low 2 bits of w, x lowest.
-pub fn pack_i3x10_1x2(v: Vec<i32, 4>) u32 {
+pub const fn pack_i3x10_1x2(v: Vec<i32, 4>) u32 {
     return fields_3x10_1x2(v.e[0] as u32, v.e[1] as u32, v.e[2] as u32, v.e[3] as u32);
 }
 
 /// The three 10-bit fields and the 2-bit field of `p`, sign-extended.
-pub fn unpack_i3x10_1x2(p: u32) Vec<i32, 4> {
+pub const fn unpack_i3x10_1x2(p: u32) Vec<i32, 4> {
     return Vec::<i32, 4> { e: [(p << 22) as i32 >> 22, (p << 12) as i32 >> 22, (p << 2) as i32 >> 22, p as i32 >> 30] };
 }
 
 /// The low 10 bits of x, y, z and the low 2 bits of w, x lowest.
-pub fn pack_u3x10_1x2(v: Vec<u32, 4>) u32 {
+pub const fn pack_u3x10_1x2(v: Vec<u32, 4>) u32 {
     return fields_3x10_1x2(v.e[0], v.e[1], v.e[2], v.e[3]);
 }
 
 /// The three 10-bit fields and the 2-bit field of `p`.
-pub fn unpack_u3x10_1x2(p: u32) Vec<u32, 4> {
+pub const fn unpack_u3x10_1x2(p: u32) Vec<u32, 4> {
     return Vec::<u32, 4> { e: [p & 0x3FF, p >> 10 & 0x3FF, p >> 20 & 0x3FF, p >> 30] };
 }
 
 /// The x, y, z components clamped to [-1, 1] times 511 and w clamped times 1, rounded, in the fields of
 /// `pack_i3x10_1x2`.
-pub fn pack_snorm3x10_1x2(v: Vec<f32, 4>) u32 {
+pub const fn pack_snorm3x10_1x2(v: Vec<f32, 4>) u32 {
     let x = snorm(v.e[0], 511.0) as u32;
     let y = snorm(v.e[1], 511.0) as u32;
     let z = snorm(v.e[2], 511.0) as u32;
@@ -272,7 +272,7 @@ pub fn unpack_snorm3x10_1x2(p: u32) Vec<f32, 4> {
 
 /// The x, y, z components clamped to [0, 1] times 1023 and w times 3, rounded, in the fields of
 /// `pack_u3x10_1x2`.
-pub fn pack_unorm3x10_1x2(v: Vec<f32, 4>) u32 {
+pub const fn pack_unorm3x10_1x2(v: Vec<f32, 4>) u32 {
     let x = unorm(v.e[0], 1023.0);
     let y = unorm(v.e[1], 1023.0);
     let z = unorm(v.e[2], 1023.0);
@@ -281,7 +281,7 @@ pub fn pack_unorm3x10_1x2(v: Vec<f32, 4>) u32 {
 }
 
 /// The fields of `unpack_u3x10_1x2` times 1 / 1023 (w times 1 / 3).
-pub fn unpack_unorm3x10_1x2(p: u32) Vec<f32, 4> {
+pub const fn unpack_unorm3x10_1x2(p: u32) Vec<f32, 4> {
     let u = unpack_u3x10_1x2(p);
     let s: f32 = 1.0 / 1023.0;
     let sw: f32 = 1.0 / 3.0;
@@ -291,13 +291,13 @@ pub fn unpack_unorm3x10_1x2(p: u32) Vec<f32, 4> {
 /// The x and y components as unsigned 11-bit floats (6-bit mantissa), z as an unsigned 10-bit float
 /// (5-bit mantissa), x lowest. The sign is dropped, zero packs 0, NaN all ones and an infinity the
 /// maximum exponent, and a value below the smallest exponent packs garbage bits.
-pub fn pack_f2x11_1x10(v: Vec<f32, 3>) u32 {
+pub const fn pack_f2x11_1x10(v: Vec<f32, 3>) u32 {
     return float_to_11bit(v.e[0]) & 0x7FF | (float_to_11bit(v.e[1]) & 0x7FF) << 11 | (float_to_10bit(v.e[2]) & 0x3FF) << 22;
 }
 
 /// The inverse of `pack_f2x11_1x10`. A NaN or infinity field unpacks to -1, and x reads the whole word,
 /// so it is 0 only when `p` is 0.
-pub fn unpack_f2x11_1x10(p: u32) Vec<f32, 3> {
+pub const fn unpack_f2x11_1x10(p: u32) Vec<f32, 3> {
     return Vec::<f32, 3> { e: [packed11_to_float(p), packed11_to_float(p >> 11), packed10_to_float(p >> 22)] };
 }
 
@@ -330,7 +330,7 @@ pub fn pack_f3x9_e1x5(v: Vec<f32, 3>) u32 {
 }
 
 /// The three 9-bit mantissas of `p` times 2^(exponent - 24).
-pub fn unpack_f3x9_e1x5(p: u32) Vec<f32, 3> {
+pub const fn unpack_f3x9_e1x5(p: u32) Vec<f32, 3> {
     let scale = 2.0f32.powf((p >> 27) as f32 - 15.0 - 9.0);
     return Vec::<f32, 3> {
         e: [(p & 0x1FF) as f32 * scale, (p >> 9 & 0x1FF) as f32 * scale, (p >> 18 & 0x1FF) as f32 * scale],
@@ -430,14 +430,14 @@ pub fn unpack_snorm<F: Float, I: Int, const N: usize>(v: Vec<I, N>) Vec<F, N> {
 }
 
 /// The x and y components clamped to [0, 1], times 15, rounded, in 4 bits each, x lowest.
-pub fn pack_unorm2x4(v: Vec<f32, 2>) u8 {
+pub const fn pack_unorm2x4(v: Vec<f32, 2>) u8 {
     let x = unorm(v.e[0], 15.0);
     let y = unorm(v.e[1], 15.0);
     return (x & 0xF | (y & 0xF) << 4) as u8;
 }
 
 /// Each 4-bit field times 1 / 15.
-pub fn unpack_unorm2x4(p: u8) Vec<f32, 2> {
+pub const fn unpack_unorm2x4(p: u8) Vec<f32, 2> {
     let s: f32 = 1.0 / 15.0;
     return Vec::<f32, 2> { e: [(p & 0xF) as f32 * s, (p >> 4) as f32 * s] };
 }
@@ -464,7 +464,7 @@ pub fn unpack_unorm4x4(p: u16) Vec<f32, 4> {
 }
 
 /// The x, y, z components clamped to [0, 1] times 31, 63, 31, rounded, in 5, 6 and 5 bits, x lowest.
-pub fn pack_unorm1x5_1x6_1x5(v: Vec<f32, 3>) u16 {
+pub const fn pack_unorm1x5_1x6_1x5(v: Vec<f32, 3>) u16 {
     let x = unorm(v.e[0], 31.0);
     let y = unorm(v.e[1], 63.0);
     let z = unorm(v.e[2], 31.0);
@@ -472,7 +472,7 @@ pub fn pack_unorm1x5_1x6_1x5(v: Vec<f32, 3>) u16 {
 }
 
 /// The fields times 1 / 31, 1 / 63, 1 / 31.
-pub fn unpack_unorm1x5_1x6_1x5(p: u16) Vec<f32, 3> {
+pub const fn unpack_unorm1x5_1x6_1x5(p: u16) Vec<f32, 3> {
     let s5: f32 = 1.0 / 31.0;
     let s6: f32 = 1.0 / 63.0;
     return Vec::<f32, 3> { e: [(p & 0x1F) as f32 * s5, (p >> 5 & 0x3F) as f32 * s6, (p >> 11) as f32 * s5] };
@@ -480,7 +480,7 @@ pub fn unpack_unorm1x5_1x6_1x5(p: u16) Vec<f32, 3> {
 
 /// The x, y, z components clamped to [0, 1] times 31 and w times 1, rounded, in 5, 5, 5 and 1 bits,
 /// x lowest.
-pub fn pack_unorm3x5_1x1(v: Vec<f32, 4>) u16 {
+pub const fn pack_unorm3x5_1x1(v: Vec<f32, 4>) u16 {
     let x = unorm(v.e[0], 31.0);
     let y = unorm(v.e[1], 31.0);
     let z = unorm(v.e[2], 31.0);
@@ -489,7 +489,7 @@ pub fn pack_unorm3x5_1x1(v: Vec<f32, 4>) u16 {
 }
 
 /// The fields times 1 / 31 (w times 1).
-pub fn unpack_unorm3x5_1x1(p: u16) Vec<f32, 4> {
+pub const fn unpack_unorm3x5_1x1(p: u16) Vec<f32, 4> {
     let s: f32 = 1.0 / 31.0;
     return Vec::<f32, 4> {
         e: [(p & 0x1F) as f32 * s, (p >> 5 & 0x1F) as f32 * s, (p >> 10 & 0x1F) as f32 * s, (p >> 15) as f32 * 1.0],
@@ -497,7 +497,7 @@ pub fn unpack_unorm3x5_1x1(p: u16) Vec<f32, 4> {
 }
 
 /// The x, y, z components clamped to [0, 1] times 7, 7, 3, rounded, in 3, 3 and 2 bits, x lowest.
-pub fn pack_unorm2x3_1x2(v: Vec<f32, 3>) u8 {
+pub const fn pack_unorm2x3_1x2(v: Vec<f32, 3>) u8 {
     let x = unorm(v.e[0], 7.0);
     let y = unorm(v.e[1], 7.0);
     let z = unorm(v.e[2], 3.0);
@@ -505,111 +505,111 @@ pub fn pack_unorm2x3_1x2(v: Vec<f32, 3>) u8 {
 }
 
 /// The fields times 1 / 7, 1 / 7, 1 / 3.
-pub fn unpack_unorm2x3_1x2(p: u8) Vec<f32, 3> {
+pub const fn unpack_unorm2x3_1x2(p: u8) Vec<f32, 3> {
     let s7: f32 = 1.0 / 7.0;
     let s3: f32 = 1.0 / 3.0;
     return Vec::<f32, 3> { e: [(p & 7) as f32 * s7, (p >> 3 & 7) as f32 * s7, (p >> 6) as f32 * s3] };
 }
 
 /// The bytes of x and y, x low.
-pub fn pack_int2x8(v: Vec<i8, 2>) i16 {
+pub const fn pack_int2x8(v: Vec<i8, 2>) i16 {
     return ((v.e[0] as u8) as u16 | (v.e[1] as u8) as u16 << 8) as i16;
 }
 
 /// The low and high bytes of `p`.
-pub fn unpack_int2x8(p: i16) Vec<i8, 2> {
+pub const fn unpack_int2x8(p: i16) Vec<i8, 2> {
     return Vec::<i8, 2> { e: [p as i8, (p as u16 >> 8) as i8] };
 }
 
 /// The bytes of x and y, x low.
-pub fn pack_uint2x8(v: Vec<u8, 2>) u16 {
+pub const fn pack_uint2x8(v: Vec<u8, 2>) u16 {
     return v.e[0] as u16 | v.e[1] as u16 << 8;
 }
 
 /// The low and high bytes of `p`.
-pub fn unpack_uint2x8(p: u16) Vec<u8, 2> {
+pub const fn unpack_uint2x8(p: u16) Vec<u8, 2> {
     return Vec::<u8, 2> { e: [p as u8, (p >> 8) as u8] };
 }
 
 /// The bytes of x, y, z, w, x lowest.
-pub fn pack_int4x8(v: Vec<i8, 4>) i32 {
+pub const fn pack_int4x8(v: Vec<i8, 4>) i32 {
     return pack_uint4x8(Vec::<u8, 4> { e: [v.e[0] as u8, v.e[1] as u8, v.e[2] as u8, v.e[3] as u8] }) as i32;
 }
 
 /// The bytes of `p`, lowest first.
-pub fn unpack_int4x8(p: i32) Vec<i8, 4> {
+pub const fn unpack_int4x8(p: i32) Vec<i8, 4> {
     let u = unpack_uint4x8(p as u32);
     return Vec::<i8, 4> { e: [u.e[0] as i8, u.e[1] as i8, u.e[2] as i8, u.e[3] as i8] };
 }
 
 /// The bytes of x, y, z, w, x lowest.
-pub fn pack_uint4x8(v: Vec<u8, 4>) u32 {
+pub const fn pack_uint4x8(v: Vec<u8, 4>) u32 {
     return v.e[0] as u32 | v.e[1] as u32 << 8 | v.e[2] as u32 << 16 | v.e[3] as u32 << 24;
 }
 
 /// The bytes of `p`, lowest first.
-pub fn unpack_uint4x8(p: u32) Vec<u8, 4> {
+pub const fn unpack_uint4x8(p: u32) Vec<u8, 4> {
     return Vec::<u8, 4> { e: [p as u8, (p >> 8) as u8, (p >> 16) as u8, (p >> 24) as u8] };
 }
 
 /// The 16-bit halves x and y, x low.
-pub fn pack_int2x16(v: Vec<i16, 2>) i32 {
+pub const fn pack_int2x16(v: Vec<i16, 2>) i32 {
     return ((v.e[0] as u16) as u32 | (v.e[1] as u16) as u32 << 16) as i32;
 }
 
 /// The low and high 16 bits of `p`.
-pub fn unpack_int2x16(p: i32) Vec<i16, 2> {
+pub const fn unpack_int2x16(p: i32) Vec<i16, 2> {
     return Vec::<i16, 2> { e: [p as i16, (p as u32 >> 16) as i16] };
 }
 
 /// The 16-bit fields x, y, z, w, x lowest.
-pub fn pack_int4x16(v: Vec<i16, 4>) i64 {
+pub const fn pack_int4x16(v: Vec<i16, 4>) i64 {
     return pack_uint4x16(Vec::<u16, 4> { e: [v.e[0] as u16, v.e[1] as u16, v.e[2] as u16, v.e[3] as u16] }) as i64;
 }
 
 /// The 16-bit fields of `p`, lowest first.
-pub fn unpack_int4x16(p: i64) Vec<i16, 4> {
+pub const fn unpack_int4x16(p: i64) Vec<i16, 4> {
     let u = unpack_uint4x16(p as u64);
     return Vec::<i16, 4> { e: [u.e[0] as i16, u.e[1] as i16, u.e[2] as i16, u.e[3] as i16] };
 }
 
 /// The 16-bit halves x and y, x low.
-pub fn pack_uint2x16(v: Vec<u16, 2>) u32 {
+pub const fn pack_uint2x16(v: Vec<u16, 2>) u32 {
     return v.e[0] as u32 | v.e[1] as u32 << 16;
 }
 
 /// The low and high 16 bits of `p`.
-pub fn unpack_uint2x16(p: u32) Vec<u16, 2> {
+pub const fn unpack_uint2x16(p: u32) Vec<u16, 2> {
     return Vec::<u16, 2> { e: [p as u16, (p >> 16) as u16] };
 }
 
 /// The 16-bit fields x, y, z, w, x lowest.
-pub fn pack_uint4x16(v: Vec<u16, 4>) u64 {
+pub const fn pack_uint4x16(v: Vec<u16, 4>) u64 {
     return v.e[0] as u64 | v.e[1] as u64 << 16 | v.e[2] as u64 << 32 | v.e[3] as u64 << 48;
 }
 
 /// The 16-bit fields of `p`, lowest first.
-pub fn unpack_uint4x16(p: u64) Vec<u16, 4> {
+pub const fn unpack_uint4x16(p: u64) Vec<u16, 4> {
     return Vec::<u16, 4> { e: [p as u16, (p >> 16) as u16, (p >> 32) as u16, (p >> 48) as u16] };
 }
 
 /// The 32-bit halves x and y, x low.
-pub fn pack_int2x32(v: Vec<i32, 2>) i64 {
+pub const fn pack_int2x32(v: Vec<i32, 2>) i64 {
     return ((v.e[0] as u32) as u64 | (v.e[1] as u32) as u64 << 32) as i64;
 }
 
 /// The low and high 32 bits of `p`.
-pub fn unpack_int2x32(p: i64) Vec<i32, 2> {
+pub const fn unpack_int2x32(p: i64) Vec<i32, 2> {
     return Vec::<i32, 2> { e: [p as i32, (p as u64 >> 32) as i32] };
 }
 
 /// The 32-bit halves x and y, x low.
-pub fn pack_uint2x32(v: Vec<u32, 2>) u64 {
+pub const fn pack_uint2x32(v: Vec<u32, 2>) u64 {
     return v.e[0] as u64 | v.e[1] as u64 << 32;
 }
 
 /// The low and high 32 bits of `p`.
-pub fn unpack_uint2x32(p: u64) Vec<u32, 2> {
+pub const fn unpack_uint2x32(p: u64) Vec<u32, 2> {
     return Vec::<u32, 2> { e: [p as u32, (p >> 32) as u32] };
 }
 
@@ -638,7 +638,7 @@ fn clamp_f<T: Float>(x: T, lo: T, hi: T) T {
 
 // `round(clamp(x, 0, 1) * scale)` as an integer, for a `scale` below 2^31. The lower bound is
 // tested first, so a NaN takes it: every result fits, and NaN gives 0 as a saturating `as` does.
-fn unorm(x: f32, scale: f32) u32 {
+const fn unorm(x: f32, scale: f32) u32 {
     let lo = if 0.0 < x {
         x;
     } else {
@@ -653,7 +653,7 @@ fn unorm(x: f32, scale: f32) u32 {
 }
 
 // `round(clamp(x, -1, 1) * scale)` as an integer, as `unorm` (NaN gives 0).
-fn snorm(x: f32, scale: f32) i32 {
+const fn snorm(x: f32, scale: f32) i32 {
     let lo = if -1.0 < x {
         x;
     } else if x == x {
@@ -670,14 +670,14 @@ fn snorm(x: f32, scale: f32) i32 {
 }
 
 // Bit fields 10, 10, 10, 2 from the lowest bit; each value keeps its low bits.
-fn fields_3x10_1x2(x: u32, y: u32, z: u32, w: u32) u32 {
+const fn fields_3x10_1x2(x: u32, y: u32, z: u32, w: u32) u32 {
     return x & 0x3FF | (y & 0x3FF) << 10 | (z & 0x3FF) << 20 | (w & 3) << 30;
 }
 
 // `f` as float16 bits: round to nearest with halves up; overflow gives an infinity, NaN keeps the sign
 // and the top 10 mantissa bits (at least one set). An exponent overflow does not raise the
 // floating-point overflow flag.
-fn to_float16(f: f32) i16 {
+const fn to_float16(f: f32) i16 {
     let i = f32_bits(f) as i32;
     let s = i >> 16 & 0x00008000;
     let mut e = (i >> 23 & 0x000000ff) - (127 - 15);
@@ -741,7 +741,7 @@ fn to_float32(value: i16) f32 {
 
 // `x` as an unsigned 11-bit float (5-bit exponent, 6-bit mantissa); the sign is dropped and the
 // exponent rebias wraps as a `u32`.
-fn float_to_11bit(x: f32) u32 {
+const fn float_to_11bit(x: f32) u32 {
     if x == 0.0 {
         return 0;
     } else if x.is_nan() {
@@ -754,7 +754,7 @@ fn float_to_11bit(x: f32) u32 {
 }
 
 // `x` as an unsigned 10-bit float, as `float_to_11bit` with a 5-bit mantissa.
-fn float_to_10bit(x: f32) u32 {
+const fn float_to_10bit(x: f32) u32 {
     if x == 0.0 {
         return 0;
     } else if x.is_nan() {
@@ -767,7 +767,7 @@ fn float_to_10bit(x: f32) u32 {
 }
 
 // An unsigned 11-bit float as an f32: -1 for NaN and infinity.
-fn packed11_to_float(x: u32) f32 {
+const fn packed11_to_float(x: u32) f32 {
     if x == 0 {
         return 0.0;
     } else if x == (1 << 11) - 1 || x == 0x1f << 6 {
@@ -777,7 +777,7 @@ fn packed11_to_float(x: u32) f32 {
 }
 
 // An unsigned 10-bit float as an f32: -1 for NaN and infinity.
-fn packed10_to_float(x: u32) f32 {
+const fn packed10_to_float(x: u32) f32 {
     if x == 0 {
         return 0.0;
     } else if x == (1 << 10) - 1 || x == 0x1f << 5 {

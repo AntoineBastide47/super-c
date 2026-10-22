@@ -319,7 +319,7 @@ fn unit_length<T: Float>(v: Vec<T, 3>) Vec<T, 3> {
     return v * T::one() / length(v);
 }
 
-fn combine<T: Float>(a: Vec<T, 3>, b: Vec<T, 3>, ascl: T, bscl: T) Vec<T, 3> {
+const fn combine<T: Float>(a: Vec<T, 3>, b: Vec<T, 3>, ascl: T, bscl: T) Vec<T, 3> {
     return a * ascl + b * bscl;
 }
 

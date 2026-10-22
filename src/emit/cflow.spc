@@ -793,7 +793,7 @@ extend CFlow {
     }
 
     // Whether `m` can be the join of branch `x` (see compute_follows).
-    fn joins(self: &Self, x: u32, m: u32) bool {
+    const fn joins(self: &Self, x: u32, m: u32) bool {
         return m != NONE && m != self.n && m != x && self.dominates(x, m) && *self.loop_of.at(x as usize) == *self.loop_of.at(
             m as usize,
         );

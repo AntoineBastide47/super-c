@@ -214,7 +214,7 @@ pub fn rgb_to_ycocg<T: Scalar>(rgb_color: Vec<T, 3>) Vec<T, 3> {
 }
 
 /// The RGB color of a YCoCg color: (r, g, b) = (Y + Co - Cg, Y + Cg, Y - Co - Cg).
-pub fn ycocg_to_rgb<T: Scalar>(ycocg_color: Vec<T, 3>) Vec<T, 3> {
+pub const fn ycocg_to_rgb<T: Scalar>(ycocg_color: Vec<T, 3>) Vec<T, 3> {
     let y = ycocg_color.e[0];
     let co = ycocg_color.e[1];
     let cg = ycocg_color.e[2];

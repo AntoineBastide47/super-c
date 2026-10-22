@@ -425,12 +425,12 @@ pub fn bitfield_fill_zero<T: Int, G: Gen<T>>(v: G, first_bit: i32, bit_count: i3
 }
 
 /// The bits of `x` and `y` alternated, `x` in the even bits.
-pub fn bitfield_interleave_i8x2(x: i8, y: i8) i16 {
+pub const fn bitfield_interleave_i8x2(x: i8, y: i8) i16 {
     return bitfield_interleave_u8x2(x as u8, y as u8) as i16;
 }
 
 /// The bits of `x` and `y` alternated, `x` in the even bits.
-pub fn bitfield_interleave_u8x2(x: u8, y: u8) u16 {
+pub const fn bitfield_interleave_u8x2(x: u8, y: u8) u16 {
     let mut r1 = x as u16;
     let mut r2 = y as u16;
     r1 = (r1 << 4 | r1) & 0x0F0F;
@@ -443,17 +443,17 @@ pub fn bitfield_interleave_u8x2(x: u8, y: u8) u16 {
 }
 
 /// `bitfield_interleave_u8x2` of the components of `v`.
-pub fn bitfield_interleave_u8vec2(v: Vec<u8, 2>) u16 {
+pub const fn bitfield_interleave_u8vec2(v: Vec<u8, 2>) u16 {
     return bitfield_interleave_u8x2(v.e[0], v.e[1]);
 }
 
 /// The bits of `x` and `y` alternated, `x` in the even bits.
-pub fn bitfield_interleave_i16x2(x: i16, y: i16) i32 {
+pub const fn bitfield_interleave_i16x2(x: i16, y: i16) i32 {
     return bitfield_interleave_u16x2(x as u16, y as u16) as i32;
 }
 
 /// The bits of `x` and `y` alternated, `x` in the even bits.
-pub fn bitfield_interleave_u16x2(x: u16, y: u16) u32 {
+pub const fn bitfield_interleave_u16x2(x: u16, y: u16) u32 {
     let mut r1 = x as u32;
     let mut r2 = y as u32;
     r1 = (r1 << 8 | r1) & 0x00FF00FF;
@@ -468,17 +468,17 @@ pub fn bitfield_interleave_u16x2(x: u16, y: u16) u32 {
 }
 
 /// `bitfield_interleave_u16x2` of the components of `v`.
-pub fn bitfield_interleave_u16vec2(v: Vec<u16, 2>) u32 {
+pub const fn bitfield_interleave_u16vec2(v: Vec<u16, 2>) u32 {
     return bitfield_interleave_u16x2(v.e[0], v.e[1]);
 }
 
 /// The bits of `x` and `y` alternated, `x` in the even bits.
-pub fn bitfield_interleave_i32x2(x: i32, y: i32) i64 {
+pub const fn bitfield_interleave_i32x2(x: i32, y: i32) i64 {
     return bitfield_interleave_u32x2(x as u32, y as u32) as i64;
 }
 
 /// The bits of `x` and `y` alternated, `x` in the even bits.
-pub fn bitfield_interleave_u32x2(x: u32, y: u32) u64 {
+pub const fn bitfield_interleave_u32x2(x: u32, y: u32) u64 {
     let mut r1 = x as u64;
     let mut r2 = y as u64;
     r1 = (r1 << 16 | r1) & 0x0000FFFF0000FFFF;
@@ -495,17 +495,17 @@ pub fn bitfield_interleave_u32x2(x: u32, y: u32) u64 {
 }
 
 /// `bitfield_interleave_u32x2` of the components of `v`.
-pub fn bitfield_interleave_u32vec2(v: Vec<u32, 2>) u64 {
+pub const fn bitfield_interleave_u32vec2(v: Vec<u32, 2>) u64 {
     return bitfield_interleave_u32x2(v.e[0], v.e[1]);
 }
 
 /// `x`, `y`, `z` in bits 3k, 3k + 1, 3k + 2.
-pub fn bitfield_interleave_i8x3(x: i8, y: i8, z: i8) i32 {
+pub const fn bitfield_interleave_i8x3(x: i8, y: i8, z: i8) i32 {
     return bitfield_interleave_u8x3(x as u8, y as u8, z as u8) as i32;
 }
 
 /// `x`, `y`, `z` in bits 3k, 3k + 1, 3k + 2.
-pub fn bitfield_interleave_u8x3(x: u8, y: u8, z: u8) u32 {
+pub const fn bitfield_interleave_u8x3(x: u8, y: u8, z: u8) u32 {
     let mut r1 = x as u32;
     let mut r2 = y as u32;
     let mut r3 = z as u32;
@@ -525,32 +525,32 @@ pub fn bitfield_interleave_u8x3(x: u8, y: u8, z: u8) u32 {
 }
 
 /// `bitfield_interleave_u8x3` of the components of `v`.
-pub fn bitfield_interleave_u8vec3(v: Vec<u8, 3>) u32 {
+pub const fn bitfield_interleave_u8vec3(v: Vec<u8, 3>) u32 {
     return bitfield_interleave_u8x3(v.e[0], v.e[1], v.e[2]);
 }
 
 /// `x`, `y`, `z` in bits 3k, 3k + 1, 3k + 2.
-pub fn bitfield_interleave_i16x3(x: i16, y: i16, z: i16) i64 {
+pub const fn bitfield_interleave_i16x3(x: i16, y: i16, z: i16) i64 {
     return bitfield_interleave_u16x3(x as u16, y as u16, z as u16) as i64;
 }
 
 /// `x`, `y`, `z` in bits 3k, 3k + 1, 3k + 2.
-pub fn bitfield_interleave_u16x3(x: u16, y: u16, z: u16) u64 {
+pub const fn bitfield_interleave_u16x3(x: u16, y: u16, z: u16) u64 {
     return bitfield_interleave_u32x3(x, y, z);
 }
 
 /// `bitfield_interleave_u16x3` of the components of `v`.
-pub fn bitfield_interleave_u16vec3(v: Vec<u16, 3>) u64 {
+pub const fn bitfield_interleave_u16vec3(v: Vec<u16, 3>) u64 {
     return bitfield_interleave_u32x3(v.e[0], v.e[1], v.e[2]);
 }
 
 /// `x`, `y`, `z` in bits 3k, 3k + 1, 3k + 2: only the low 21 bits of each input reach the result.
-pub fn bitfield_interleave_i32x3(x: i32, y: i32, z: i32) i64 {
+pub const fn bitfield_interleave_i32x3(x: i32, y: i32, z: i32) i64 {
     return bitfield_interleave_u32x3(x as u32, y as u32, z as u32) as i64;
 }
 
 /// `x`, `y`, `z` in bits 3k, 3k + 1, 3k + 2: only the low 21 bits of each input reach the result.
-pub fn bitfield_interleave_u32x3(x: u32, y: u32, z: u32) u64 {
+pub const fn bitfield_interleave_u32x3(x: u32, y: u32, z: u32) u64 {
     let mut r1 = x as u64;
     let mut r2 = y as u64;
     let mut r3 = z as u64;
@@ -573,17 +573,17 @@ pub fn bitfield_interleave_u32x3(x: u32, y: u32, z: u32) u64 {
 }
 
 /// `bitfield_interleave_u32x3` of the components of `v`.
-pub fn bitfield_interleave_u32vec3(v: Vec<u32, 3>) u64 {
+pub const fn bitfield_interleave_u32vec3(v: Vec<u32, 3>) u64 {
     return bitfield_interleave_u32x3(v.e[0], v.e[1], v.e[2]);
 }
 
 /// `x`, `y`, `z`, `w` in bits 4k .. 4k + 3.
-pub fn bitfield_interleave_i8x4(x: i8, y: i8, z: i8, w: i8) i32 {
+pub const fn bitfield_interleave_i8x4(x: i8, y: i8, z: i8, w: i8) i32 {
     return bitfield_interleave_u8x4(x as u8, y as u8, z as u8, w as u8) as i32;
 }
 
 /// `x`, `y`, `z`, `w` in bits 4k .. 4k + 3.
-pub fn bitfield_interleave_u8x4(x: u8, y: u8, z: u8, w: u8) u32 {
+pub const fn bitfield_interleave_u8x4(x: u8, y: u8, z: u8, w: u8) u32 {
     let mut r1 = x as u32;
     let mut r2 = y as u32;
     let mut r3 = z as u32;
@@ -604,17 +604,17 @@ pub fn bitfield_interleave_u8x4(x: u8, y: u8, z: u8, w: u8) u32 {
 }
 
 /// `bitfield_interleave_u8x4` of the components of `v`.
-pub fn bitfield_interleave_u8vec4(v: Vec<u8, 4>) u32 {
+pub const fn bitfield_interleave_u8vec4(v: Vec<u8, 4>) u32 {
     return bitfield_interleave_u8x4(v.e[0], v.e[1], v.e[2], v.e[3]);
 }
 
 /// `x`, `y`, `z`, `w` in bits 4k .. 4k + 3.
-pub fn bitfield_interleave_i16x4(x: i16, y: i16, z: i16, w: i16) i64 {
+pub const fn bitfield_interleave_i16x4(x: i16, y: i16, z: i16, w: i16) i64 {
     return bitfield_interleave_u16x4(x as u16, y as u16, z as u16, w as u16) as i64;
 }
 
 /// `x`, `y`, `z`, `w` in bits 4k .. 4k + 3.
-pub fn bitfield_interleave_u16x4(x: u16, y: u16, z: u16, w: u16) u64 {
+pub const fn bitfield_interleave_u16x4(x: u16, y: u16, z: u16, w: u16) u64 {
     let mut r1 = x as u64;
     let mut r2 = y as u64;
     let mut r3 = z as u64;
@@ -639,12 +639,12 @@ pub fn bitfield_interleave_u16x4(x: u16, y: u16, z: u16, w: u16) u64 {
 }
 
 /// `bitfield_interleave_u16x4` of the components of `v`.
-pub fn bitfield_interleave_u16vec4(v: Vec<u16, 4>) u64 {
+pub const fn bitfield_interleave_u16vec4(v: Vec<u16, 4>) u64 {
     return bitfield_interleave_u16x4(v.e[0], v.e[1], v.e[2], v.e[3]);
 }
 
 /// The inverse of `bitfield_interleave_u8x2`.
-pub fn bitfield_deinterleave_u16(x: u16) Vec<u8, 2> {
+pub const fn bitfield_deinterleave_u16(x: u16) Vec<u8, 2> {
     let mut r1 = x;
     let mut r2 = x >> 1;
     r1 = r1 & 0x5555;
@@ -659,7 +659,7 @@ pub fn bitfield_deinterleave_u16(x: u16) Vec<u8, 2> {
 }
 
 /// The inverse of `bitfield_interleave_u16x2`.
-pub fn bitfield_deinterleave_u32(x: u32) Vec<u16, 2> {
+pub const fn bitfield_deinterleave_u32(x: u32) Vec<u16, 2> {
     let mut r1 = x;
     let mut r2 = x >> 1;
     r1 = r1 & 0x55555555;
@@ -676,7 +676,7 @@ pub fn bitfield_deinterleave_u32(x: u32) Vec<u16, 2> {
 }
 
 /// The inverse of `bitfield_interleave_u32x2`.
-pub fn bitfield_deinterleave_u64(x: u64) Vec<u32, 2> {
+pub const fn bitfield_deinterleave_u64(x: u64) Vec<u32, 2> {
     let mut r1 = x;
     let mut r2 = x >> 1;
     r1 = r1 & 0x5555555555555555;
@@ -696,7 +696,7 @@ pub fn bitfield_deinterleave_u64(x: u64) Vec<u32, 2> {
 
 // The low `bits` bits set, computed in `i32`: `bits` >= 32 gives all ones and `bits` = 31 gives
 // 0x7FFFFFFF, with no overflow trap.
-fn int_mask(bits: i32) i32 {
+const fn int_mask(bits: i32) i32 {
     if bits >= 32 {
         return -1;
     }

@@ -17,7 +17,7 @@ fn near<const N: usize>(a: Vec<f32, N>, b: Vec<f32, N>, eps: f32) bool {
     return true;
 }
 
-fn near1(a: f32, b: f32, eps: f32) bool {
+const fn near1(a: f32, b: f32, eps: f32) bool {
     return (a - b).abs() <= eps;
 }
 

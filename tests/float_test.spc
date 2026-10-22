@@ -136,7 +136,7 @@ fn f16_known_encodings() {
 
 // The value of the IEEE encoding `raw` with `e` exponent and `f` fraction bits, from its fields in f64
 // arithmetic, exact for the formats below.
-fn field_value(raw: u64, e: usize, f: usize) f64 {
+const fn field_value(raw: u64, e: usize, f: usize) f64 {
     let emask = (1u64 << e as u64) - 1;
     let ef = raw >> f as u64 & emask;
     let fr = raw & (1u64 << f as u64) - 1;

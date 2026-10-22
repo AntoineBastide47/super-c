@@ -687,7 +687,7 @@ fn texture_levels() {
 
 // `fmod`, `isdenormal` and bounds tests.
 
-fn mod_trunc(a: f32, b: f32) f32 {
+const fn mod_trunc(a: f32, b: f32) f32 {
     return a - b * (a / b).trunc();
 }
 

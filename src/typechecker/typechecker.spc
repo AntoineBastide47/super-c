@@ -12331,7 +12331,7 @@ extend<'a> TypeChecker<'a> {
 
     /// The next extend of `c` (module + extend node), or NODE_NONE after the last: the target's own,
     /// then the generic extends of the scope, which may apply to it.
-    fn ext_next(self: &Self, c: &mut ExtCursor) DefId {
+    const fn ext_next(self: &Self, c: &mut ExtCursor) DefId {
         if c.at != EXT_END {
             let h = self.ext_hits[c.at as usize];
             c.at = h.next;

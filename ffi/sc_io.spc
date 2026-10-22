@@ -1433,12 +1433,12 @@ fn sock_of(fd: i32) usize {
 }
 
 @platform(macos | ios | linux | android)
-fn fd_of(s: i32) i32 {
+const fn fd_of(s: i32) i32 {
     return s;
 }
 
 @platform(macos | ios | linux | android)
-fn sock_of(fd: i32) i32 {
+const fn sock_of(fd: i32) i32 {
     return fd;
 }
 
@@ -1454,7 +1454,7 @@ fn close_sock(s: i32) {
 
 // Network byte order is big-endian.
 @platform(!wasm)
-fn ntohs(x: u16) u16 {
+const fn ntohs(x: u16) u16 {
     if ENDIAN == Endian::Little {
         return (x & 0xFF) << 8 | x >> 8;
     }
@@ -1490,7 +1490,7 @@ fn startup() {
 }
 
 @platform(macos | ios | linux | android)
-fn startup() {}
+const fn startup() {}
 
 @platform(windows)
 unsafe fn open_socket(family: i32, kind: i32, proto: i32) usize {
@@ -1653,7 +1653,7 @@ unsafe fn addr_len(ai: *const addrinfo) socklen_t {
 }
 
 @platform(macos | ios | linux | android)
-unsafe fn addr_len(ai: *const addrinfo) socklen_t {
+unsafe const fn addr_len(ai: *const addrinfo) socklen_t {
     return unsafe (*ai).ai_addrlen;
 }
 
@@ -1664,7 +1664,7 @@ fn buf_len(n: usize) BufLen {
 }
 
 @platform(macos | ios | linux | android)
-fn buf_len(n: usize) BufLen {
+const fn buf_len(n: usize) BufLen {
     return n;
 }
 
@@ -1675,7 +1675,7 @@ fn ssize(r: i32) isize {
 }
 
 @platform(macos | ios | linux | android)
-fn ssize(r: isize) isize {
+const fn ssize(r: isize) isize {
     return r;
 }
 

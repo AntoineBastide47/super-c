@@ -387,11 +387,11 @@ const L2_BETWEEN: f32 = l2_norm_between(vec3::new(1.0, 2.0, 3.0), vec3::new(-1.0
 
 // The identity at run time: the call it feeds cannot fold.
 @c.noinline
-fn rt<T: Copy>(x: T) T {
+const fn rt<T: Copy>(x: T) T {
     return x;
 }
 
-fn same_vec3(a: Vec<f32, 3>, b: Vec<f32, 3>) bool {
+const fn same_vec3(a: Vec<f32, 3>, b: Vec<f32, 3>) bool {
     return f32_bits(a.e[0]) == f32_bits(b.e[0]) && f32_bits(a.e[1]) == f32_bits(b.e[1]) && f32_bits(a.e[2]) == f32_bits(
         b.e[2],
     );

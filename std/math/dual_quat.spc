@@ -129,7 +129,7 @@ extend<T: Float> DualQuat<T> {
     pub const LEN: usize = 2;
 
     /// The dual quaternion `real + dual e`.
-    pub fn new(real: Quat<T>, dual: Quat<T>) DualQuat<T> {
+    pub const fn new(real: Quat<T>, dual: Quat<T>) DualQuat<T> {
         return DualQuat::<T> { real: real, dual: dual };
     }
     /// The real part `real`, the dual part 0.
@@ -164,7 +164,7 @@ extend<T: Float> DualQuat<T> {
         return DualQuat::<U> { real: self.real.cast::<U>(), dual: self.dual.cast::<U>() };
     }
     /// 2; an open-ended range (`dq[1..]`) ends there.
-    pub fn len(self: &DualQuat<T>) usize {
+    pub const fn len(self: &DualQuat<T>) usize {
         return 2;
     }
 }

@@ -273,7 +273,7 @@ const BUCKET_BITS: u64 = 6;
 const BUCKETS: usize = 64;
 
 // The bucket of `addr` in either parking lot: the hash keeps the top BUCKET_BITS bits.
-fn addr_bucket(addr: *const void) usize {
+const fn addr_bucket(addr: *const void) usize {
     return (((addr as usize >> 4) as u64).wrapping_mul(0x9E3779B97F4A7C15u64) >> 64 - BUCKET_BITS) as usize;
 }
 
@@ -1113,7 +1113,7 @@ pub unsafe fn sc_rt_stack_guard_install() {
 // The bounds of this thread's stack, so a fault at its guard reads as an overflow wherever the stack
 // pointer is; (0, 0) when unknown. The program's runtime reads them itself on macOS.
 @platform(macos | ios)
-fn own_stack_bounds() (usize, usize) {
+const fn own_stack_bounds() (usize, usize) {
     return 0, 0;
 }
 @platform(linux | android)
@@ -2670,7 +2670,7 @@ pub unsafe fn sc_rt_ctx_alloc() *mut void {
 
 /// Bytes an inline context needs: a context fits inside the task record (zeroed before its first init).
 @platform(!wasm)
-pub fn sc_rt_ctx_inline_size() usize {
+pub const fn sc_rt_ctx_inline_size() usize {
     if PLATFORM == Platform::Windows && ARCH == Arch::AArch64 {
         return 0;
     }
@@ -2831,7 +2831,7 @@ pub unsafe fn sc_rt_ctx_entered(ctx: *mut void) {
 
 /// Release a context from `sc_rt_ctx_alloc`.
 @platform(!wasm)
-pub unsafe fn sc_rt_ctx_free(ctx: *mut void) {
+pub unsafe const fn sc_rt_ctx_free(ctx: *mut void) {
     unsafe sc_rt_ctx_drop(ctx);
     unsafe stdlib::free(ctx);
 }

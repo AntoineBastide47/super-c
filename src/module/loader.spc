@@ -1620,7 +1620,7 @@ extend PUnits {
     }
 
     // The parse task of unit `k`, which reports to `done`.
-    fn task(self: &mut Self, k: usize, tags: bool, done: *const PDone) PParse {
+    const fn task(self: &mut Self, k: usize, tags: bool, done: *const PDone) PParse {
         return PParse { u: self.units.index_mut(k).deref_mut(), k: k as u32, tags: tags, done: done };
     }
 }

@@ -25,7 +25,7 @@ pub fn detected() cpu::CpuFeatures {
 
 /// The features the build enables (`TARGET_FEATURES`): the platform's baseline, `target-features`,
 /// `--target-feature`, and what they imply. Every machine that runs the program has them.
-pub fn static_features() cpu::CpuFeatures {
+pub const fn static_features() cpu::CpuFeatures {
     let mut w: [u64; 2] = [0, 0];
     unsafe sc_cpu::sc_cpu_static_words(&mut w[0]);
     return cpu::CpuFeatures { bits: w };

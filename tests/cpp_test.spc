@@ -27,7 +27,7 @@ fn one(text: str, predefs: str) Pp {
     return Pp::new(make_config(files, predefs));
 }
 
-fn tok_class(c: u8) u32 {
+const fn tok_class(c: u8) u32 {
     if c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c == b'_' || c == b'$' || c >= 0x80 {
         return 1;
     }

@@ -637,7 +637,7 @@ extend Lowerer {
 
     /// Lower for compile-time evaluation `ev`: a declaration record of an item the reader does not see
     /// checked fails the lowering, and the evaluation runs again once the owner is checked.
-    pub fn read_for(self: &mut Self, ev: *const iri::Interp) {
+    pub const fn read_for(self: &mut Self, ev: *const iri::Interp) {
         self.ev = ev;
         self.lay.ev = ev;
     }

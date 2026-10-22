@@ -45,18 +45,18 @@ pub interface QuatRotate<T: Float>: Copy {
 
 extend<T: Float> Quat<T> {
     /// The quaternion `w + xi + yj + zk`, real part first.
-    pub fn new(w: T, x: T, y: T, z: T) Quat<T> {
+    pub const fn new(w: T, x: T, y: T, z: T) Quat<T> {
         return Quat::<T> { x: x, y: y, z: z, w: w };
     }
     /// The real part `s`, the vector part `v`.
-    pub fn from_scalar_vec(s: T, v: Vec<T, 3>) Quat<T> {
+    pub const fn from_scalar_vec(s: T, v: Vec<T, 3>) Quat<T> {
         return Quat::<T> { x: v.e[0], y: v.e[1], z: v.e[2], w: s };
     }
     /// The number of components.
     pub const LEN: usize = 4;
 
     /// 4; an open-ended range (`q[1..]`) ends there.
-    pub fn len(self: &Quat<T>) usize {
+    pub const fn len(self: &Quat<T>) usize {
         return 4;
     }
     /// The identity rotation `1 + 0i + 0j + 0k`.
@@ -265,7 +265,7 @@ extend<T: Float> Quat<T> as ValuePtr<T> {
 
 /// x, y, z, w from the 4 `T`s at `ptr`, in that order (the storage order, not the argument order of
 /// `Quat::new`). Safety: `ptr` addresses 4 valid `T`s.
-pub unsafe fn make_quat<T: Float>(ptr: *const T) Quat<T> {
+pub unsafe const fn make_quat<T: Float>(ptr: *const T) Quat<T> {
     return Quat::<T> { x: ptr[0], y: ptr[1], z: ptr[2], w: ptr[3] };
 }
 
@@ -275,7 +275,7 @@ fn mix_of<T: Float>(x: T, y: T, a: T) T {
 }
 
 /// The conjugate `(w, -x, -y, -z)`.
-pub fn conjugate<T: Float>(q: Quat<T>) Quat<T> {
+pub const fn conjugate<T: Float>(q: Quat<T>) Quat<T> {
     return Quat::<T>::new(q.w, -q.x, -q.y, -q.z);
 }
 
@@ -469,7 +469,7 @@ pub fn quat_identity<T: Float>() Quat<T> {
 }
 
 /// `q * v`, `v` rotated by `q`.
-pub fn cross_quat_vec<T: Float>(q: Quat<T>, v: Vec<T, 3>) Vec<T, 3> {
+pub const fn cross_quat_vec<T: Float>(q: Quat<T>, v: Vec<T, 3>) Vec<T, 3> {
     return q * v;
 }
 
@@ -779,7 +779,7 @@ extend<T: Float> Quat<T> as EpsilonEqual<T> {
 }
 
 // `(x.x - y.x, x.y - y.y, x.z - y.z, x.w - y.w)`.
-fn quat_diff<T: Float>(x: Quat<T>, y: Quat<T>) Vec<T, 4> {
+const fn quat_diff<T: Float>(x: Quat<T>, y: Quat<T>) Vec<T, 4> {
     return Vec::<T, 4>::new(x.x - y.x, x.y - y.y, x.z - y.z, x.w - y.w);
 }
 

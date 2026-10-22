@@ -49,7 +49,7 @@ pub unsafe fn sc_cpu_detected_words(out: *mut u64) {
 }
 
 /// The features the build enables (`TARGET_FEATURES`), two words.
-pub unsafe fn sc_cpu_static_words(out: *mut u64) {
+pub unsafe const fn sc_cpu_static_words(out: *mut u64) {
     out[0] = TARGET_FEATURES[0];
     out[1] = TARGET_FEATURES[1];
 }

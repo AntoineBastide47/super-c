@@ -113,7 +113,7 @@ fn recompile_ov(
     return ok;
 }
 
-fn never_stop(_ctx: *mut void, _between: bool) bool {
+const fn never_stop(_ctx: *mut void, _between: bool) bool {
     return false;
 }
 
@@ -1551,12 +1551,12 @@ fn borrow_errors(diags: &Vector<an::DiagRec>) usize {
     return n;
 }
 
-fn always_stop(_ctx: *mut void, _between: bool) bool {
+const fn always_stop(_ctx: *mut void, _between: bool) bool {
     return true;
 }
 
 // A request always waits: the stop the server answers between two checks.
-fn stop_between(_ctx: *mut void, between: bool) bool {
+const fn stop_between(_ctx: *mut void, between: bool) bool {
     return between;
 }
 

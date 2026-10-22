@@ -1968,7 +1968,7 @@ fn reach_settle(p: &mut loader::Package, root_file: str, lint_dir: str, st: &mut
 
 // Lower without the reachability: no cancellation check, a preemption tick in every loop (an
 // analysis outside the borrow round sees what the build's type check sees).
-fn reach_off(p: &mut loader::Package) {
+const fn reach_off(p: &mut loader::Package) {
     p.co_state = 0;
     p.cancel_state = 0;
 }
@@ -2043,7 +2043,7 @@ fn analysis_errors(p: &loader::Package, diags: &Vector<DiagRec>) Vector<bool> {
 
 // The instruction set the driver builds for `target` without `--arch`: wasm32 for wasm, aarch64 for
 // iOS and Android, else the host's.
-fn target_arch(target: i32) i32 {
+const fn target_arch(target: i32) i32 {
     if target == 3 {
         return 2;
     }

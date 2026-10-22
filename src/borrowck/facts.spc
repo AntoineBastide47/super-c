@@ -367,7 +367,7 @@ fn static_tok() u64 {
 }
 
 // Whether position `k` of classes `cls` has the lifetime token `tk` names (`tc::lt_class_tok`).
-fn lt_class_hit(cls: &Vector<u8>, k: usize, tk: u64) bool {
+const fn lt_class_hit(cls: &Vector<u8>, k: usize, tk: u64) bool {
     let c = (tk >> 32 & 255) as u8;
     if c == LC_OUTER {
         return k as u64 == (tk & 0xFFFFFFFF);

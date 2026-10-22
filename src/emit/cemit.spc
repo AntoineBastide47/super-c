@@ -3028,7 +3028,7 @@ extend CEmit {
     }
 
     // The place whose address local `base` folds (`fold_addresses`), or IR_NONE.
-    fn folded_address(self: &Self, b: &ir::CoreBody, base: u32) ir::PlaceId {
+    const fn folded_address(self: &Self, b: &ir::CoreBody, base: u32) ir::PlaceId {
         let r = *self.sx_coal.at(base as usize);
         let d = *self.sx_inline.at(r as usize);
         if d == ir::IR_NONE {
@@ -9385,7 +9385,7 @@ extend CEmit {
     // Whether a vector of `2 * hb` bytes and its halves of `hb` bytes are whole 16-byte chunks: the
     // vector names its chunks (`Mangler::vec_chunked`), and a half is one chunk or names its own. A
     // merged operand (`fused`) is a lane value, not a vector.
-    fn chunk_halves(self: &Self, hb: u64, fused: bool) bool {
+    const fn chunk_halves(self: &Self, hb: u64, fused: bool) bool {
         return !fused && self.mg.vec_chunked(2 * hb, 16) && (hb == 16 || self.mg.vec_chunked(hb, 16));
     }
 

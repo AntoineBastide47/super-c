@@ -26,7 +26,7 @@ extend Writer {
     }
 
     /// The bytes written (counted, for a sizing writer).
-    pub fn len(self: &Writer) usize {
+    pub const fn len(self: &Writer) usize {
         if self.sizing {
             return self.size;
         }
@@ -76,17 +76,17 @@ pub struct Reader {
 
 extend Reader {
     /// A reader over the `len` bytes at `buf`, which must be 16-byte aligned.
-    pub fn new(buf: *const u8, len: usize) Reader {
+    pub const fn new(buf: *const u8, len: usize) Reader {
         return Reader { buf: buf, len: len, at: 0, ok: true };
     }
 
     /// The bytes not read yet.
-    pub fn left(self: &Reader) usize {
+    pub const fn left(self: &Reader) usize {
         return self.len - self.at;
     }
 
     /// The `n` bytes at the read position, in place, and step past them; null past the end.
-    pub fn view(self: &mut Reader, n: usize) *const u8 {
+    pub const fn view(self: &mut Reader, n: usize) *const u8 {
         if !self.ok || n > self.len - self.at {
             self.ok = false;
             return null;
@@ -97,7 +97,7 @@ extend Reader {
     }
 
     /// Copy the next `n` bytes to `p`; zeros past the end.
-    pub fn bytes(self: &mut Reader, p: *mut u8, n: usize) {
+    pub const fn bytes(self: &mut Reader, p: *mut u8, n: usize) {
         let src = self.view(n);
         if src == null {
             unsafe cstring::memset(p, 0, n);
@@ -119,7 +119,7 @@ extend Reader {
     }
 
     /// Skip the writer's padding to a multiple of 16 bytes.
-    pub fn align(self: &mut Reader) {
+    pub const fn align(self: &mut Reader) {
         let pad = (16 - self.at % 16) % 16;
         let _ = self.view(pad);
     }
@@ -149,7 +149,7 @@ pub fn save_bytes<T>(v: &T, w: &mut Writer) {
 }
 
 /// Load the bytes of plain value `v`.
-pub fn load_bytes<T>(v: &mut T, r: &mut Reader) {
+pub const fn load_bytes<T>(v: &mut T, r: &mut Reader) {
     r.bytes((v as *mut T) as *mut u8, sizeof(T));
 }
 

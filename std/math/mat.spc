@@ -197,11 +197,11 @@ extend<T: Scalar, const C: usize, const R: usize> Mat<T, C, R> {
     pub const LEN: usize = C;
 
     /// The number of columns, C; an open-ended range (`m[1..]`) ends there.
-    pub fn len(self: &Mat<T, C, R>) usize {
+    pub const fn len(self: &Mat<T, C, R>) usize {
         return C;
     }
 
-    pub fn from_cols(c: [Vec<T, R>; C]) Mat<T, C, R> {
+    pub const fn from_cols(c: [Vec<T, R>; C]) Mat<T, C, R> {
         return Mat::<T, C, R> { c: c };
     }
     /// Every element zero.
@@ -257,47 +257,47 @@ extend<T: Scalar, const C: usize, const R: usize> Mat<T, C, R> {
 }
 
 extend<T: Scalar, const R: usize> Mat<T, 2, R> {
-    pub fn cols(c0: Vec<T, R>, c1: Vec<T, R>) Mat<T, 2, R> {
+    pub const fn cols(c0: Vec<T, R>, c1: Vec<T, R>) Mat<T, 2, R> {
         return Mat::<T, 2, R> { c: [c0, c1] };
     }
 }
 
 extend<T: Scalar, const R: usize> Mat<T, 3, R> {
-    pub fn cols(c0: Vec<T, R>, c1: Vec<T, R>, c2: Vec<T, R>) Mat<T, 3, R> {
+    pub const fn cols(c0: Vec<T, R>, c1: Vec<T, R>, c2: Vec<T, R>) Mat<T, 3, R> {
         return Mat::<T, 3, R> { c: [c0, c1, c2] };
     }
 }
 
 extend<T: Scalar, const R: usize> Mat<T, 4, R> {
-    pub fn cols(c0: Vec<T, R>, c1: Vec<T, R>, c2: Vec<T, R>, c3: Vec<T, R>) Mat<T, 4, R> {
+    pub const fn cols(c0: Vec<T, R>, c1: Vec<T, R>, c2: Vec<T, R>, c3: Vec<T, R>) Mat<T, 4, R> {
         return Mat::<T, 4, R> { c: [c0, c1, c2, c3] };
     }
 }
 
 extend<T: Scalar> Mat<T, 2, 2> {
     /// Column by column: `x0, y0` is column 0.
-    pub fn new(x0: T, y0: T, x1: T, y1: T) Mat<T, 2, 2> {
+    pub const fn new(x0: T, y0: T, x1: T, y1: T) Mat<T, 2, 2> {
         return Mat::<T, 2, 2> { c: [Vec::<T, 2> { e: [x0, y0] }, Vec::<T, 2> { e: [x1, y1] }] };
     }
 }
 
 extend<T: Scalar> Mat<T, 2, 3> {
     /// Column by column.
-    pub fn new(x0: T, y0: T, z0: T, x1: T, y1: T, z1: T) Mat<T, 2, 3> {
+    pub const fn new(x0: T, y0: T, z0: T, x1: T, y1: T, z1: T) Mat<T, 2, 3> {
         return Mat::<T, 2, 3> { c: [Vec::<T, 3> { e: [x0, y0, z0] }, Vec::<T, 3> { e: [x1, y1, z1] }] };
     }
 }
 
 extend<T: Scalar> Mat<T, 2, 4> {
     /// Column by column.
-    pub fn new(x0: T, y0: T, z0: T, w0: T, x1: T, y1: T, z1: T, w1: T) Mat<T, 2, 4> {
+    pub const fn new(x0: T, y0: T, z0: T, w0: T, x1: T, y1: T, z1: T, w1: T) Mat<T, 2, 4> {
         return Mat::<T, 2, 4> { c: [Vec::<T, 4> { e: [x0, y0, z0, w0] }, Vec::<T, 4> { e: [x1, y1, z1, w1] }] };
     }
 }
 
 extend<T: Scalar> Mat<T, 3, 2> {
     /// Column by column.
-    pub fn new(x0: T, y0: T, x1: T, y1: T, x2: T, y2: T) Mat<T, 3, 2> {
+    pub const fn new(x0: T, y0: T, x1: T, y1: T, x2: T, y2: T) Mat<T, 3, 2> {
         return Mat::<T, 3, 2> {
             c: [Vec::<T, 2> { e: [x0, y0] }, Vec::<T, 2> { e: [x1, y1] }, Vec::<T, 2> { e: [x2, y2] }],
         };
@@ -306,7 +306,7 @@ extend<T: Scalar> Mat<T, 3, 2> {
 
 extend<T: Scalar> Mat<T, 3, 3> {
     /// Column by column.
-    pub fn new(x0: T, y0: T, z0: T, x1: T, y1: T, z1: T, x2: T, y2: T, z2: T) Mat<T, 3, 3> {
+    pub const fn new(x0: T, y0: T, z0: T, x1: T, y1: T, z1: T, x2: T, y2: T, z2: T) Mat<T, 3, 3> {
         return Mat::<T, 3, 3> {
             c: [Vec::<T, 3> { e: [x0, y0, z0] }, Vec::<T, 3> { e: [x1, y1, z1] }, Vec::<T, 3> { e: [x2, y2, z2] }],
         };
@@ -315,7 +315,7 @@ extend<T: Scalar> Mat<T, 3, 3> {
 
 extend<T: Scalar> Mat<T, 3, 4> {
     /// Column by column.
-    pub fn new(x0: T, y0: T, z0: T, w0: T, x1: T, y1: T, z1: T, w1: T, x2: T, y2: T, z2: T, w2: T) Mat<T, 3, 4> {
+    pub const fn new(x0: T, y0: T, z0: T, w0: T, x1: T, y1: T, z1: T, w1: T, x2: T, y2: T, z2: T, w2: T) Mat<T, 3, 4> {
         return Mat::<T, 3, 4> {
             c: [
                 Vec::<T, 4> { e: [x0, y0, z0, w0] },
@@ -328,7 +328,7 @@ extend<T: Scalar> Mat<T, 3, 4> {
 
 extend<T: Scalar> Mat<T, 4, 2> {
     /// Column by column.
-    pub fn new(x0: T, y0: T, x1: T, y1: T, x2: T, y2: T, x3: T, y3: T) Mat<T, 4, 2> {
+    pub const fn new(x0: T, y0: T, x1: T, y1: T, x2: T, y2: T, x3: T, y3: T) Mat<T, 4, 2> {
         return Mat::<T, 4, 2> {
             c: [
                 Vec::<T, 2> { e: [x0, y0] },
@@ -342,7 +342,7 @@ extend<T: Scalar> Mat<T, 4, 2> {
 
 extend<T: Scalar> Mat<T, 4, 3> {
     /// Column by column.
-    pub fn new(x0: T, y0: T, z0: T, x1: T, y1: T, z1: T, x2: T, y2: T, z2: T, x3: T, y3: T, z3: T) Mat<T, 4, 3> {
+    pub const fn new(x0: T, y0: T, z0: T, x1: T, y1: T, z1: T, x2: T, y2: T, z2: T, x3: T, y3: T, z3: T) Mat<T, 4, 3> {
         return Mat::<T, 4, 3> {
             c: [
                 Vec::<T, 3> { e: [x0, y0, z0] },
@@ -356,7 +356,7 @@ extend<T: Scalar> Mat<T, 4, 3> {
 
 extend<T: Scalar> Mat<T, 4, 4> {
     /// Column by column.
-    pub fn new(
+    pub const fn new(
         x0: T,
         y0: T,
         z0: T,
@@ -413,7 +413,7 @@ extend<T: Scalar, const C: usize, const R: usize> Mat<T, C, R> as IndexMut<Vec<T
 }
 
 // The half-open bounds of `r` within `[0, n)`; a range outside traps.
-fn col_range(r: Range<usize>, n: usize) (usize, usize) {
+const fn col_range(r: Range<usize>, n: usize) (usize, usize) {
     let hi = if r.inclusive {
         r.end + 1;
     } else {
@@ -768,7 +768,7 @@ pub fn outer_product<T: Scalar, const R: usize, const C: usize>(c: Vec<T, R>, r:
 
 /// The determinant of a 2x2, 3x3 or 4x4 matrix (another size is a compile error), by cofactor
 /// expansion.
-pub fn determinant<T: Scalar, const N: usize>(m: Mat<T, N, N>) T {
+pub const fn determinant<T: Scalar, const N: usize>(m: Mat<T, N, N>) T {
     static_assert(N >= 2 && N <= 4, "determinant of a 2x2, 3x3 or 4x4 matrix");
     if N == 2 {
         return unsafe m.c[0].e[0] * m.c[1].e[1] - m.c[1].e[0] * m.c[0].e[1];
@@ -1014,7 +1014,7 @@ pub fn set_row<T: Scalar, const C: usize, const R: usize>(m: Mat<T, C, R>, index
 }
 
 /// Column `index` of `m`. Panics: `index >= C`.
-pub fn column<T: Scalar, const C: usize, const R: usize>(m: Mat<T, C, R>, index: usize) Vec<T, R> {
+pub const fn column<T: Scalar, const C: usize, const R: usize>(m: Mat<T, C, R>, index: usize) Vec<T, R> {
     return m[index];
 }
 

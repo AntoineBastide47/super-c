@@ -167,7 +167,7 @@ fn diff_defines(label: str, ours: str, theirs: str) usize {
     return n;
 }
 
-fn row_at(i: usize) data::Row {
+const fn row_at(i: usize) data::Row {
     let rows: []data::Row = data::ROWS;
     return rows[i];
 }
@@ -668,7 +668,7 @@ fn scan_has(dir: str, depth: usize, out: &mut Vector<String>) {
 }
 
 // A letter, digit, underscore, or the colon of a `scope::name`.
-fn is_name_byte(c: u8) bool {
+const fn is_name_byte(c: u8) bool {
     return c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9' || c == b'_' || c == b':';
 }
 
@@ -825,7 +825,7 @@ fn sdk_flag(t: &ct::CTarget) String {
 }
 
 // Whether built-in header `name` includes the C library's headers (math.h, complex.h, stdlib.h).
-fn needs_libc(name: str) bool {
+const fn needs_libc(name: str) bool {
     return name == "tgmath.h" || name == "mm_malloc.h" || name.ends_with("intrin.h") && name != "mmintrin.h";
 }
 

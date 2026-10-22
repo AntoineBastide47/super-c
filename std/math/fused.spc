@@ -424,17 +424,17 @@ extend<T: LargeElem> LargeVec<T> {
     }
 
     /// The element count.
-    pub fn len(self: &LargeVec<T>) usize {
+    pub const fn len(self: &LargeVec<T>) usize {
         return self.e.len();
     }
 
     /// The elements.
-    pub fn as_slice(self: &LargeVec<T>) []T {
+    pub const fn as_slice(self: &LargeVec<T>) []T {
         return self.e[0..self.e.len()];
     }
 
     /// The elements, writable.
-    pub fn as_mut_slice(self: &mut LargeVec<T>) []mut T {
+    pub const fn as_mut_slice(self: &mut LargeVec<T>) []mut T {
         let n = self.e.len();
         return self.e.index_range_mut(0..n);
     }
@@ -603,17 +603,17 @@ extend<T: LargeElem> LargeMat<T> {
     }
 
     /// The row count.
-    pub fn rows(self: &LargeMat<T>) usize {
+    pub const fn rows(self: &LargeMat<T>) usize {
         return self.r;
     }
 
     /// The column count.
-    pub fn cols(self: &LargeMat<T>) usize {
+    pub const fn cols(self: &LargeMat<T>) usize {
         return self.c;
     }
 
     /// Element (i, j). Panics: out of bounds.
-    pub fn get(self: &LargeMat<T>, i: usize, j: usize) T {
+    pub const fn get(self: &LargeMat<T>, i: usize, j: usize) T {
         if i >= self.r || j >= self.c {
             panic("LargeMat::get: index out of bounds");
         }
@@ -621,7 +621,7 @@ extend<T: LargeElem> LargeMat<T> {
     }
 
     /// Set element (i, j) to `v`. Panics: out of bounds.
-    pub fn set(self: &mut LargeMat<T>, i: usize, j: usize, v: T) {
+    pub const fn set(self: &mut LargeMat<T>, i: usize, j: usize, v: T) {
         if i >= self.r || j >= self.c {
             panic("LargeMat::set: index out of bounds");
         }
@@ -630,7 +630,7 @@ extend<T: LargeElem> LargeMat<T> {
     }
 
     /// Column `j`. Panics: out of bounds.
-    pub fn column(self: &LargeMat<T>, j: usize) []T {
+    pub const fn column(self: &LargeMat<T>, j: usize) []T {
         if j >= self.c {
             panic("LargeMat::column: index out of bounds");
         }
@@ -638,7 +638,7 @@ extend<T: LargeElem> LargeMat<T> {
     }
 
     /// The column-major elements.
-    pub fn as_slice(self: &LargeMat<T>) []T {
+    pub const fn as_slice(self: &LargeMat<T>) []T {
         return self.e[0..self.e.len()];
     }
 

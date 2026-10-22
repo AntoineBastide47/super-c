@@ -79,33 +79,33 @@ extend<T: Elem, const N: usize> Vec<T, N> {
     pub const LEN: usize = N;
 
     /// The number of components, N; an open-ended range (`v[1..]`) ends there.
-    pub fn len(self: &Vec<T, N>) usize {
+    pub const fn len(self: &Vec<T, N>) usize {
         return N;
     }
 
     /// Every component `s`.
-    pub fn splat(s: T) Vec<T, N> {
+    pub const fn splat(s: T) Vec<T, N> {
         return Vec::<T, N> { e: [s; N] };
     }
-    pub fn from_array(a: [T; N]) Vec<T, N> {
+    pub const fn from_array(a: [T; N]) Vec<T, N> {
         return Vec::<T, N> { e: a };
     }
-    pub fn to_array(self: Vec<T, N>) [T; N] {
+    pub const fn to_array(self: Vec<T, N>) [T; N] {
         return self.e;
     }
     /// The components `I`, `J`: `v.swizzle2::<1, 0>()` is y, then x. An index of N or more is a compile
     /// error.
-    pub fn swizzle2<const I: usize, const J: usize>(self: Vec<T, N>) Vec<T, 2> {
+    pub const fn swizzle2<const I: usize, const J: usize>(self: Vec<T, N>) Vec<T, 2> {
         static_assert(I < N && J < N, "swizzle index out of range");
         return Vec::<T, 2> { e: [unsafe self.e[I], unsafe self.e[J]] };
     }
     /// The components `I`, `J`, `K`.
-    pub fn swizzle3<const I: usize, const J: usize, const K: usize>(self: Vec<T, N>) Vec<T, 3> {
+    pub const fn swizzle3<const I: usize, const J: usize, const K: usize>(self: Vec<T, N>) Vec<T, 3> {
         static_assert(I < N && J < N && K < N, "swizzle index out of range");
         return Vec::<T, 3> { e: [unsafe self.e[I], unsafe self.e[J], unsafe self.e[K]] };
     }
     /// The components `I`, `J`, `K`, `L`.
-    pub fn swizzle4<const I: usize, const J: usize, const K: usize, const L: usize>(self: Vec<T, N>) Vec<T, 4> {
+    pub const fn swizzle4<const I: usize, const J: usize, const K: usize, const L: usize>(self: Vec<T, N>) Vec<T, 4> {
         static_assert(I < N && J < N && K < N && L < N, "swizzle index out of range");
         return Vec::<T, 4> { e: [unsafe self.e[I], unsafe self.e[J], unsafe self.e[K], unsafe self.e[L]] };
     }
@@ -234,97 +234,97 @@ extend<T: Scalar, const N: usize> Vec<T, N> as Arg<Vec<T, N>> {
 }
 
 extend<T: Elem> Vec<T, 1> {
-    pub fn new(x: T) Vec<T, 1> {
+    pub const fn new(x: T) Vec<T, 1> {
         return Vec::<T, 1> { e: [x] };
     }
-    pub fn x(self: Vec<T, 1>) T {
+    pub const fn x(self: Vec<T, 1>) T {
         return self.e[0];
     }
-    pub fn r(self: Vec<T, 1>) T {
+    pub const fn r(self: Vec<T, 1>) T {
         return self.e[0];
     }
 }
 
 extend<T: Elem> Vec<T, 2> {
-    pub fn new(x: T, y: T) Vec<T, 2> {
+    pub const fn new(x: T, y: T) Vec<T, 2> {
         return Vec::<T, 2> { e: [x, y] };
     }
-    pub fn x(self: Vec<T, 2>) T {
+    pub const fn x(self: Vec<T, 2>) T {
         return self.e[0];
     }
-    pub fn y(self: Vec<T, 2>) T {
+    pub const fn y(self: Vec<T, 2>) T {
         return self.e[1];
     }
-    pub fn r(self: Vec<T, 2>) T {
+    pub const fn r(self: Vec<T, 2>) T {
         return self.e[0];
     }
-    pub fn g(self: Vec<T, 2>) T {
+    pub const fn g(self: Vec<T, 2>) T {
         return self.e[1];
     }
 }
 
 extend<T: Elem> Vec<T, 3> {
-    pub fn new(x: T, y: T, z: T) Vec<T, 3> {
+    pub const fn new(x: T, y: T, z: T) Vec<T, 3> {
         return Vec::<T, 3> { e: [x, y, z] };
     }
-    pub fn x(self: Vec<T, 3>) T {
+    pub const fn x(self: Vec<T, 3>) T {
         return self.e[0];
     }
-    pub fn y(self: Vec<T, 3>) T {
+    pub const fn y(self: Vec<T, 3>) T {
         return self.e[1];
     }
-    pub fn z(self: Vec<T, 3>) T {
+    pub const fn z(self: Vec<T, 3>) T {
         return self.e[2];
     }
-    pub fn r(self: Vec<T, 3>) T {
+    pub const fn r(self: Vec<T, 3>) T {
         return self.e[0];
     }
-    pub fn g(self: Vec<T, 3>) T {
+    pub const fn g(self: Vec<T, 3>) T {
         return self.e[1];
     }
-    pub fn b(self: Vec<T, 3>) T {
+    pub const fn b(self: Vec<T, 3>) T {
         return self.e[2];
     }
     /// The x and y components.
-    pub fn xy(self: Vec<T, 3>) Vec<T, 2> {
+    pub const fn xy(self: Vec<T, 3>) Vec<T, 2> {
         return Vec::<T, 2> { e: [self.e[0], self.e[1]] };
     }
 }
 
 extend<T: Elem> Vec<T, 4> {
-    pub fn new(x: T, y: T, z: T, w: T) Vec<T, 4> {
+    pub const fn new(x: T, y: T, z: T, w: T) Vec<T, 4> {
         return Vec::<T, 4> { e: [x, y, z, w] };
     }
-    pub fn x(self: Vec<T, 4>) T {
+    pub const fn x(self: Vec<T, 4>) T {
         return self.e[0];
     }
-    pub fn y(self: Vec<T, 4>) T {
+    pub const fn y(self: Vec<T, 4>) T {
         return self.e[1];
     }
-    pub fn z(self: Vec<T, 4>) T {
+    pub const fn z(self: Vec<T, 4>) T {
         return self.e[2];
     }
-    pub fn w(self: Vec<T, 4>) T {
+    pub const fn w(self: Vec<T, 4>) T {
         return self.e[3];
     }
-    pub fn r(self: Vec<T, 4>) T {
+    pub const fn r(self: Vec<T, 4>) T {
         return self.e[0];
     }
-    pub fn g(self: Vec<T, 4>) T {
+    pub const fn g(self: Vec<T, 4>) T {
         return self.e[1];
     }
-    pub fn b(self: Vec<T, 4>) T {
+    pub const fn b(self: Vec<T, 4>) T {
         return self.e[2];
     }
-    pub fn a(self: Vec<T, 4>) T {
+    pub const fn a(self: Vec<T, 4>) T {
         return self.e[3];
     }
     /// The x and y components.
-    pub fn xy(self: Vec<T, 4>) Vec<T, 2> {
+    pub const fn xy(self: Vec<T, 4>) Vec<T, 2> {
         return Vec::<T, 2> { e: [self.e[0], self.e[1]] };
     }
     /// The x, y and z components.
-    pub fn xyz(self: Vec<T, 4>) Vec<T, 3> {
+    pub const fn xyz(self: Vec<T, 4>) Vec<T, 3> {
         return Vec::<T, 3> { e: [self.e[0], self.e[1], self.e[2]] };
     }
 }
@@ -344,7 +344,7 @@ extend<T: Elem, const N: usize> Vec<T, N> as Index<T, []T> {
 }
 
 // The half-open bounds of `r` within `[0, n)`; a range outside traps.
-fn range_bounds(r: Range<usize>, n: usize) (usize, usize) {
+const fn range_bounds(r: Range<usize>, n: usize) (usize, usize) {
     let hi = if r.inclusive {
         r.end + 1;
     } else {
@@ -859,7 +859,7 @@ extend<T: Elem, const N: usize> Vec<T, N> as ValuePtr<T> {
 }
 
 /// The x component of `v`.
-pub fn make_vec1<T: Elem, const M: usize>(v: Vec<T, M>) Vec<T, 1> {
+pub const fn make_vec1<T: Elem, const M: usize>(v: Vec<T, M>) Vec<T, 1> {
     return Vec::<T, 1> { e: [v.e[0]] };
 }
 
@@ -892,16 +892,16 @@ fn resize<T: Elem, const M: usize, const K: usize>(v: Vec<T, M>, fill: Vec<T, K>
 }
 
 /// The 2 components at `ptr`. Safety: `ptr` addresses 2 valid `T`s.
-pub unsafe fn make_vec2<T: Elem>(ptr: *const T) Vec<T, 2> {
+pub unsafe const fn make_vec2<T: Elem>(ptr: *const T) Vec<T, 2> {
     return Vec::<T, 2> { e: [ptr[0], ptr[1]] };
 }
 
 /// The 3 components at `ptr`. Safety: `ptr` addresses 3 valid `T`s.
-pub unsafe fn make_vec3<T: Elem>(ptr: *const T) Vec<T, 3> {
+pub unsafe const fn make_vec3<T: Elem>(ptr: *const T) Vec<T, 3> {
     return Vec::<T, 3> { e: [ptr[0], ptr[1], ptr[2]] };
 }
 
 /// The 4 components at `ptr`. Safety: `ptr` addresses 4 valid `T`s.
-pub unsafe fn make_vec4<T: Elem>(ptr: *const T) Vec<T, 4> {
+pub unsafe const fn make_vec4<T: Elem>(ptr: *const T) Vec<T, 4> {
     return Vec::<T, 4> { e: [ptr[0], ptr[1], ptr[2], ptr[3]] };
 }

@@ -28,12 +28,12 @@ fn all_cols_differ<T: Float, const C: usize, const R: usize>(a: Mat<T, C, R>, b:
     return true;
 }
 
-fn differs(x: f32, y: f32, eps: f32) bool {
+const fn differs(x: f32, y: f32, eps: f32) bool {
     return (x - y).abs().greater(eps);
 }
 
 // The depth of the view-space point (0, 0, z) after `p` and the division by w.
-fn depth(p: mat4, z: f32) f32 {
+const fn depth(p: mat4, z: f32) f32 {
     let v = p * vec4::new(0.0, 0.0, z, 1.0);
     return (v / v.w()).z();
 }

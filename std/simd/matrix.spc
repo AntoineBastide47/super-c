@@ -55,7 +55,7 @@ pub fn mul_f64(c: []mut f64, a: []f64, b: []f64, m: usize, k: usize, n: usize) {
 }
 
 // Whether `len` is the element count of an `r x s` matrix (no overflow).
-fn fits(len: usize, r: usize, s: usize) bool {
+const fn fits(len: usize, r: usize, s: usize) bool {
     return switch r.checked_mul(s) {
         Some(e) => e == len,
         None => false,

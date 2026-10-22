@@ -4793,7 +4793,7 @@ extend Interp {
 
     // Whether a nested evaluation starting here is past IT_DEFER_DEPTH native levels above the
     // outermost one; if so, it is recorded as the attempt's stop (`defer_task`, `dtask_id`).
-    fn defer_deep(self: &mut Self, kind: u8, key: u64, m: ModuleId, node: NodeId) bool {
+    const fn defer_deep(self: &mut Self, kind: u8, key: u64, m: ModuleId, node: NodeId) bool {
         if self.ndepth as i64 - self.defer_base < IT_DEFER_DEPTH as i64 {
             return false;
         }

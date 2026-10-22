@@ -34,6 +34,6 @@ pub fn hermite<T: Scalar, G: Copy + Add<Output = G> + Mul<T, Output = G>>(v1: G,
 }
 
 /// The polynomial `((v1 s + v2) s + v3) s + v4`.
-pub fn cubic<T: Scalar, G: Copy + Add<Output = G> + Mul<T, Output = G>>(v1: G, v2: G, v3: G, v4: G, s: T) G {
+pub const fn cubic<T: Scalar, G: Copy + Add<Output = G> + Mul<T, Output = G>>(v1: G, v2: G, v3: G, v4: G, s: T) G {
     return ((v1 * s + v2) * s + v3) * s + v4;
 }

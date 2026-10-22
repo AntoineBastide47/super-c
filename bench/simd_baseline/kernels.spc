@@ -248,7 +248,7 @@ pub fn isa_count() usize {
 }
 
 // The portable row's name: on x86_64 with the build's level beyond SSE2 (`portable-avx2`).
-fn level() str<'static> {
+const fn level() str<'static> {
     let s = detect::static_features();
     if ARCH != Arch::X86_64 || !s.has(cpu::Feature::Avx2) {
         return "portable";

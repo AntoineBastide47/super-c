@@ -162,7 +162,7 @@ pub fn mod_int<X: PowSqrtMod>(x: X, y: X) X {
 }
 
 /// The number of leading zero bits, 32 for 0 (`31 - find_msb(x)`).
-pub fn nlz(x: u32) u32 {
+pub const fn nlz(x: u32) u32 {
     return x.leading_zeros() as u32;
 }
 
@@ -767,7 +767,7 @@ pub fn mixed_product<T: Float>(v1: Vec<T, 3>, v2: Vec<T, 3>, v3: Vec<T, 3>) T {
 }
 
 /// The 2D cross product `v.x * u.y - u.x * v.y`.
-pub fn cross_2d<T: Float>(v: Vec<T, 2>, u: Vec<T, 2>) T {
+pub const fn cross_2d<T: Float>(v: Vec<T, 2>, u: Vec<T, 2>) T {
     return v.e[0] * u.e[1] - u.e[0] * v.e[1];
 }
 
@@ -804,32 +804,32 @@ pub fn row_major4_from_mat<T: Scalar>(m: Mat<T, 4, 4>) Mat<T, 4, 4> {
 }
 
 /// The matrix whose columns are `v1` and `v2`.
-pub fn col_major2<T: Scalar>(v1: Vec<T, 2>, v2: Vec<T, 2>) Mat<T, 2, 2> {
+pub const fn col_major2<T: Scalar>(v1: Vec<T, 2>, v2: Vec<T, 2>) Mat<T, 2, 2> {
     return Mat::<T, 2, 2>::cols(v1, v2);
 }
 
 /// `m` unchanged.
-pub fn col_major2_from_mat<T: Scalar>(m: Mat<T, 2, 2>) Mat<T, 2, 2> {
+pub const fn col_major2_from_mat<T: Scalar>(m: Mat<T, 2, 2>) Mat<T, 2, 2> {
     return m;
 }
 
 /// The matrix whose columns are `v1`, `v2` and `v3`.
-pub fn col_major3<T: Scalar>(v1: Vec<T, 3>, v2: Vec<T, 3>, v3: Vec<T, 3>) Mat<T, 3, 3> {
+pub const fn col_major3<T: Scalar>(v1: Vec<T, 3>, v2: Vec<T, 3>, v3: Vec<T, 3>) Mat<T, 3, 3> {
     return Mat::<T, 3, 3>::cols(v1, v2, v3);
 }
 
 /// `m` unchanged.
-pub fn col_major3_from_mat<T: Scalar>(m: Mat<T, 3, 3>) Mat<T, 3, 3> {
+pub const fn col_major3_from_mat<T: Scalar>(m: Mat<T, 3, 3>) Mat<T, 3, 3> {
     return m;
 }
 
 /// The matrix whose columns are `v1` to `v4`.
-pub fn col_major4<T: Scalar>(v1: Vec<T, 4>, v2: Vec<T, 4>, v3: Vec<T, 4>, v4: Vec<T, 4>) Mat<T, 4, 4> {
+pub const fn col_major4<T: Scalar>(v1: Vec<T, 4>, v2: Vec<T, 4>, v3: Vec<T, 4>, v4: Vec<T, 4>) Mat<T, 4, 4> {
     return Mat::<T, 4, 4>::cols(v1, v2, v3, v4);
 }
 
 /// `m` unchanged.
-pub fn col_major4_from_mat<T: Scalar>(m: Mat<T, 4, 4>) Mat<T, 4, 4> {
+pub const fn col_major4_from_mat<T: Scalar>(m: Mat<T, 4, 4>) Mat<T, 4, 4> {
     return m;
 }
 
