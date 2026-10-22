@@ -9,13 +9,13 @@
 import sc_io;
 import std::parallel::runtime as rt;
 import std::parallel::io as io;
-import std::parallel::net as net;
+import std::net as net;
 import std::parallel::sync as sync;
 import std::parallel::channel as chan;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atomics;
 import std::parallel::platform as platform;
-import std::parallel::time as time;
+import std::time as time;
 
 struct Pair {
     pub a: net::TcpStream,

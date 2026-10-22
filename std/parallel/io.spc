@@ -45,7 +45,7 @@ import sc_runtime;
 import atomic;
 import sc_io;
 import std::parallel::runtime as runtime;
-import std::parallel::time as time;
+import std::time;
 
 // Interest and readiness bits, as the poller spells them; `CLOSE` marks a command node that reports a
 // closed descriptor rather than a wait.
@@ -88,7 +88,7 @@ pub struct IoStats {
 // and publishes it through the park hand-off; from then on only the reactor reads or writes it, except
 // `ack`, which the task writes before publishing its disarm and the reactor reads after popping that.
 @no_const
-struct IoWait {
+pub struct IoWait {
     pub co: *mut runtime::Coroutine,
     pub token: u32, // the wait's park token: what a readiness event claims
     pub ack: u32, // the acknowledgement park's token: what the disarm's completion claims
@@ -118,7 +118,7 @@ const CMD_MASK: usize = 1;
 // reported through `io::close`, so the number's next file starts a new generation, every waiter of the
 // old one has been settled, and a node is only ever unlinked from the generation that linked it.
 @no_const
-struct FdRec {
+pub struct FdRec {
     pub rd: *mut IoWait,
     pub wr: *mut IoWait,
     pub evt: u64,
@@ -142,7 +142,7 @@ struct EvBuf {
 // every event on separate lines: the command head takes a compare-and-swap from every worker that arms,
 // and must not invalidate the line the reactor finds its poller and table on.
 @no_const
-struct Reactor {
+pub struct Reactor {
     pub base: *mut void, // the allocation this line-aligned record lives in
     pub poller: *mut void,
     pub thread: *mut void,

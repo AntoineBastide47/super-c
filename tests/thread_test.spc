@@ -10,7 +10,7 @@ import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
 import std::parallel::blocking as blocking;
 import std::parallel::io as io;
-import std::parallel::time as time;
+import std::time as time;
 import std::parallel::platform as platform;
 import std::testing::bench_sys as sys;
 import tests::cli_harness as cli;

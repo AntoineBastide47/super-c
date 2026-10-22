@@ -9,17 +9,17 @@
 
 import std::parallel::runtime as rt;
 import std::parallel::io as io;
-import std::parallel::net as net;
+import std::net as net;
 import std::parallel::sync as sync;
 import std::parallel::channel as chan;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atomics;
 import std::parallel::platform as platform;
-import std::parallel::time as time;
+import std::time as time;
 import tests::parallel_harness as ph;
 import tests::cli_harness as cli;
 import sc_io;
-import driver_shim as shim;
+import std::platform::process;
 
 // A connected pair: `a` is the client end, `b` the accepted end.
 struct Pair {
@@ -553,7 +553,7 @@ fn shutdown_settles_a_pending_wait() {
 @test
 fn idle_descriptors_leave_an_active_one_served() {
     // A thousand descriptors and the suite's own: past macOS's default soft limit of 256.
-    assert(unsafe shim::sc_raise_open_files(2048) == 0, "the open-file limit allows 2048 descriptors");
+    assert(process::raise_open_file_limit(2048).is_ok(), "the open-file limit allows 2048 descriptors");
     rt::set_worker_count(2);
     let l = net::TcpListener::bind("127.0.0.1", 0).unwrap();
     let idle: i64 = 500; // pairs, so a thousand descriptors
@@ -618,7 +618,7 @@ fn idle_descriptors_leave_an_active_one_served() {
 // for all of them every command reaches the reactor and every wait is served exactly once.
 @test
 fn a_burst_of_waits_from_one_worker_is_all_served() {
-    assert(unsafe shim::sc_raise_open_files(2048) == 0, "the open-file limit allows 2048 descriptors");
+    assert(process::raise_open_file_limit(2048).is_ok(), "the open-file limit allows 2048 descriptors");
     rt::set_worker_count(1);
     let l = net::TcpListener::bind("127.0.0.1", 0).unwrap();
     let n: i64 = 300;

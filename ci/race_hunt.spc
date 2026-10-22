@@ -22,7 +22,7 @@ import std::parallel::thread as thread;
 import std::parallel::data as data;
 import std::parallel::atomics as atomics;
 import std::parallel::blocking as blocking;
-import std::parallel::time as time;
+import std::time as time;
 import std::parallel::platform as platform;
 import atomic;
 import sc_runtime;

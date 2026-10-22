@@ -23,7 +23,7 @@ import std::parallel::thread as thread;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atomics;
 import std::parallel::platform as platform;
-import std::parallel::time as time;
+import std::time as time;
 
 const ROUNDS: i64 = 60; // rounds per shape: bounded, so the program always ends
 const HOOK_NS: u64 = 20000; // how wide each forced window is held open

@@ -6,7 +6,7 @@
 import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
 import std::parallel::channel as chan;
-import std::parallel::time as time;
+import std::time as time;
 import std::parallel::task as task;
 import std::parallel::blocking as blocking;
 

@@ -319,9 +319,16 @@ pub interface Format {
     }
 }
 
-/// A sink of bytes (files, buffers, sockets). `write` returns the number of bytes accepted.
+/// A sink of bytes (files, buffers, sockets). A call that accepts at least one byte returns `Ok(n)`; a fault
+/// after a partial transfer appears on the next call. An interrupted call is retried, never returned.
 pub interface Writer {
-    fn write(self: &mut Self, bytes: []u8) usize;
+    fn write(self: &mut Self, bytes: []u8) Result<usize, IoError>;
+}
+
+/// A source of bytes. A call that moves at least one byte returns `Ok(n)`; a fault after a partial transfer
+/// appears on the next call. `Ok(0)` means the end of the stream, or an empty `buf`.
+pub interface Reader {
+    fn read(self: &mut Self, buf: []mut u8) Result<usize, IoError>;
 }
 
 /// A source of values produced one at a time; `next` yields `None` when exhausted.
@@ -332,11 +339,14 @@ pub interface Iterator<T> {
 /// Fallible value conversion. `TryFrom` is the one a type implements; `TryInto` is its compiler-provided
 /// mirror (`x.try_into()` -> `U::try_from(x)`), so implementing `TryFrom` gives `.try_into()` for free.
 pub interface TryFrom<T> {
-    fn try_from(value: T) Result<Self, i32>;
+    /// What a failed conversion returns.
+    type Error;
+    fn try_from(value: T) Result<Self, Self::Error>;
 }
-/// Fallible conversion by value; blanket-provided from `TryFrom`.
+/// Fallible conversion by value; blanket-provided from `TryFrom`, with the target's `Error`.
 pub interface TryInto<T> {
-    fn try_into(self: Self) Result<T, i32>;
+    type Error;
+    fn try_into(self: Self) Result<T, Self::Error>;
 }
 
 /// Index operator overloading. `T` is the element yielded by `obj[i]`; `S` is the sub-view yielded by

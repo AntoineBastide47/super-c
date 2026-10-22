@@ -13,7 +13,7 @@ import std::parallel::sync as sync;
 import std::parallel::channel as chan;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atomics;
-import std::parallel::time as time;
+import std::time as time;
 
 fn counter() arc::Arc<atomics::Atomic<i64>> {
     return arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));

@@ -33,7 +33,7 @@
 import std::parallel::sync as sync;
 import std::parallel::channel as channel;
 import std::parallel::runtime as runtime;
-import std::parallel::time as time;
+import std::time;
 import std::parallel::platform as platform;
 
 /// The most operations one selector can wait on.

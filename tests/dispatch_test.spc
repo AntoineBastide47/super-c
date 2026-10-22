@@ -10,7 +10,7 @@ import std::parallel::data as data;
 import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;
 import std::parallel::platform as platform;
-import std::parallel::time as time;
+import std::time as time;
 import tests::parallel_harness as ph;
 
 // Exact-destruction counter: every `free` of a Tracked bumps it.

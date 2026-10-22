@@ -11,7 +11,7 @@ import sc_runtime;
 import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;
 import std::parallel::runtime as runtime;
-import std::parallel::time as time;
+import std::time;
 
 // RawMutex: the task-aware lock behind Mutex<T>, and the wait primitive the rest of the module reuses.
 

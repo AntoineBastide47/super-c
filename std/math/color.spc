@@ -222,7 +222,7 @@ pub const fn ycocg_to_rgb<T: Scalar>(ycocg_color: Vec<T, 3>) Vec<T, 3> {
 }
 
 // The YCoCg-R lifting steps with shifts for an integer `T`, with halves and quarters for a float one.
-interface YCoCgR: Scalar {
+pub interface YCoCgR: Scalar {
     fn rgb_to_ycocg_r(rgb: Vec<Self, 3>) Vec<Self, 3>;
     fn ycocg_r_to_rgb(ycocg: Vec<Self, 3>) Vec<Self, 3>;
 }

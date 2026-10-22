@@ -9,7 +9,7 @@ import std::parallel::runtime as rt;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atomics;
 import std::parallel::platform as platform;
-import std::parallel::time as time;
+import std::time as time;
 
 const BOUND_NS: u64 = 5000000000;
 

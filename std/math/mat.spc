@@ -1019,7 +1019,11 @@ pub const fn column<T: Scalar, const C: usize, const R: usize>(m: Mat<T, C, R>, 
 }
 
 /// `m` with column `index` replaced by `x`. Panics: `index >= C`.
-pub fn set_column<T: Scalar, const C: usize, const R: usize>(m: Mat<T, C, R>, index: usize, x: Vec<T, R>) Mat<T, C, R> {
+pub const fn set_column<T: Scalar, const C: usize, const R: usize>(m: Mat<T, C, R>, index: usize, x: Vec<T, R>) Mat<
+    T,
+    C,
+    R
+> {
     let mut r = m;
     r[index] = x;
     return r;

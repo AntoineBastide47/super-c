@@ -1169,7 +1169,7 @@ fn tail_recurse_rejects_a_cancellation_check_after_the_call() {
     // The program imports std::parallel, which the in-process compile does not load: a build.
     h::expect_build_err(
         "cancellation",
-        "import std::parallel::runtime as rt;\nimport std::parallel::sync as sync;\nimport std::parallel::time as time;\n@tail_recurse\nfn spin(n: i64) i64 {\n    if n == 0 {\n        return 0;\n    }\n    time::sleep(time::Duration::from_nanos(1));\n    return spin(n - 1);\n}\nfn main() i32 {\n    let wg = sync::WaitGroup::new();\n    wg.add(1);\n    let w = wg.clone();\n    launch || {\n        let _ = spin(3);\n        w.done();\n    };\n    let _ = rt::request_cancel(rt::current_key(), rt::CR_USER);\n    wg.wait();\n    rt::shutdown();\n    return 0;\n}\n",
+        "import std::parallel::runtime as rt;\nimport std::parallel::sync as sync;\nimport std::time as time;\n@tail_recurse\nfn spin(n: i64) i64 {\n    if n == 0 {\n        return 0;\n    }\n    time::sleep(time::Duration::from_nanos(1));\n    return spin(n - 1);\n}\nfn main() i32 {\n    let wg = sync::WaitGroup::new();\n    wg.add(1);\n    let w = wg.clone();\n    launch || {\n        let _ = spin(3);\n        w.done();\n    };\n    let _ = rt::request_cancel(rt::current_key(), rt::CR_USER);\n    wg.wait();\n    rt::shutdown();\n    return 0;\n}\n",
         "cannot become a jump: it can accept a task cancellation",
     );
 }

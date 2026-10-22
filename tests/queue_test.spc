@@ -10,7 +10,7 @@ import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;
 import std::parallel::platform as platform;
 import std::parallel::task as task;
-import std::parallel::time as time;
+import std::time as time;
 
 // A single owner pushes sixteen rings' worth of tasks while the other workers steal: the ring wraps many
 // times, thieves copy batches across the wrap, and the count comes out exact.

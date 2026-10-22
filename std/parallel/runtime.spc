@@ -3150,7 +3150,7 @@ pub fn deadline_after(ns: u64) u64 {
 }
 
 /// Suspend for `ns` nanoseconds. A coroutine parks on the scheduler's timer heap, so its worker keeps
-/// running other tasks; any other thread sleeps outright. `std::parallel::time::sleep` is the friendly form.
+/// running other tasks; any other thread sleeps outright. `std::time::sleep` is the friendly form.
 pub fn sleep_ns(ns: i64) {
     if ns <= 0 {
         return;

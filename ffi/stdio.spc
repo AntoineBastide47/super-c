@@ -6,6 +6,7 @@
 // helper functions. Calling the raw bindings requires `unsafe` except `getchar`/`putchar`; the `File`
 // methods and the wrapper functions do not.
 
+import errno;
 import stdlib;
 
 extern "C" {
@@ -161,8 +162,15 @@ extend File as Free {
 }
 
 extend File as Writer {
-    fn write(self: &mut File, bytes: []u8) usize {
-        return unsafe fwrite(bytes.as_ptr(), 1, bytes.len(), self.handle);
+    /// One `fwrite`: the count it took, or its error (the C errno, kind `Other`) when it took no byte.
+    fn write(self: &mut File, bytes: []u8) Result<usize, IoError> {
+        let n = unsafe fwrite(bytes.as_ptr(), 1, bytes.len(), self.handle);
+        if n == 0 && bytes.len() != 0 {
+            return Result::<usize, IoError>::Err(
+                IoError { kind: IoErrorKind::Other, code: errno::errno(), op: IoOp::Write },
+            );
+        }
+        return Result::<usize, IoError>::Ok(n);
     }
 }
 

@@ -5,7 +5,7 @@
 
 import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
-import std::parallel::time as time;
+import std::time as time;
 import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;
 import std::parallel::platform as platform;

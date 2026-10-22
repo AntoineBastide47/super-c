@@ -92,7 +92,7 @@ struct StringLarge {
 // `StringLarge` is 12 bytes, so a fixed 23-byte inline buffer would put the discriminant byte past `cap`
 // altogether: every heap string then read back as inline and printed its own header.
 const SSO_CAP: usize = sizeof(StringLarge) - 1;
-const LARGE_BIT: usize = 1 as usize << sizeof(usize) * 8 - 1;
+const LARGE_BIT: usize = 1 << sizeof(usize) * 8 - 1;
 
 // Inline representation: up to SSO_CAP UTF-8 bytes plus a 0..=SSO_CAP length whose high bit (the
 // discriminant) is always clear.
@@ -1196,11 +1196,10 @@ extend<A: Allocator> String<A> as Format {
 }
 
 extend<A: Allocator> String<A> as Writer {
-    /// Append the bytes, returning the number written (always the slice length: the buffer grows on demand).
-    pub fn write(self: &mut String<A>, bytes: []u8) usize {
-        let n = bytes.len();
+    /// Append the bytes: always `Ok(bytes.len())`, the buffer grows on demand.
+    pub fn write(self: &mut String<A>, bytes: []u8) Result<usize, IoError> {
         self.push_bytes(bytes);
-        return n;
+        return Result::<usize, IoError>::Ok(bytes.len());
     }
 }
 

@@ -89,7 +89,7 @@ pub struct Job {
 
 // A coroutine waiting for admission: the node lives in its frame, on the pool's list under the lock.
 @no_const
-struct Admit {
+pub struct Admit {
     pub co: *mut runtime::Coroutine,
     pub token: u32,
     pub next: *mut Admit,
@@ -99,7 +99,7 @@ struct Admit {
 // an idle thread parks on `park` from the idle stack; retirement moves the record from `live` to
 // `retired`, whose handles a reap joins.
 @no_const
-struct PThread {
+pub struct PThread {
     pub handle: *mut void,
     pub mtx: *mut void, // where this thread sleeps when idle: its own, so a wake is an uncontended
     pub cv: *mut void, // lock and one signal that reaches exactly this thread
@@ -114,7 +114,7 @@ struct PThread {
 
 // A recycled `call_c` record, linked by class.
 @no_const
-struct CacheBlk {
+pub struct CacheBlk {
     pub next: *mut CacheBlk,
 }
 
@@ -143,7 +143,7 @@ pub struct ShutdownReport {
 }
 
 @no_const
-struct Pool {
+pub struct Pool {
     pub spin: i32, // the queue lock: guards everything below but the atomics and the cache
     pub head: *mut Job, // written with atomic stores: the spinner reads it without the lock
     pub tail: *mut Job,

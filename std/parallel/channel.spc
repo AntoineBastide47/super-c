@@ -20,7 +20,7 @@
 import atomic;
 import std::parallel::sync as sync;
 import std::parallel::atomics as atomics;
-import std::parallel::time as time;
+import std::time;
 import std::parallel::runtime as runtime;
 
 /// The outcome of a `send`: `Sent`, or `Rejected(value)` when the channel is closed or has no receivers;
@@ -35,7 +35,7 @@ const UNBOUNDED_START: usize = 8;
 
 // The mutex-guarded state: a ring buffer of `cap` slots plus the live-handle counts and the closed flag.
 @no_const
-struct ChannelState<T> {
+pub struct ChannelState<T> {
     pub slots: *mut T,
     pub cap: usize,
     pub head: usize, // index of the oldest buffered item
@@ -129,7 +129,7 @@ extend<T> ChannelState<T> as Free {
 // "item ready", and (for a payload with a size) the inline ring right behind it. Freed by the handle that
 // drops the count to zero; freeing the mutex frees the state, and with it the buffered payloads.
 @no_const
-struct ChannelInner<T> {
+pub struct ChannelInner<T> {
     pub strong: usize, // atomic: live handles, the `Channel` value included
     pub state: sync::Mutex<ChannelState<T>>,
     pub not_full: sync::Condvar,

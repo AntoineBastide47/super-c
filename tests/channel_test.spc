@@ -15,7 +15,7 @@ import std::parallel::thread as thread;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atomics;
 import std::parallel::platform as platform;
-import std::parallel::time as time;
+import std::time as time;
 import std::testing::bench_sys as sys;
 
 // Exact-destruction counter: every `free` of a Payload bumps it, so a test can prove one destruction.

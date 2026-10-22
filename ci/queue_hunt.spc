@@ -10,7 +10,7 @@ import std::parallel::sync as sync;
 import std::parallel::arc as arc;
 import std::parallel::atomics as atomics;
 import std::parallel::task as task;
-import std::parallel::time as time;
+import std::time as time;
 
 // One owner spawns far more tasks than its ring holds while every other worker steals from it: the ring
 // wraps many times and thieves batch-copy across the wrap.

@@ -1,22 +1,19 @@
-// Durations, deadlines and suspension. Import with `import std::parallel::time as time;`.
+// Durations, deadlines and suspension. Import with `import std::time;`.
 //
-// `sleep` is the reason this module exists in `parallel`: inside a coroutine it parks on the scheduler's
-// timer heap, so the worker thread keeps running other tasks for the duration, while on any other thread it
-// sleeps outright. Deadlines are monotonic `platform::now_ns()` values; the timed `sync` and `channel`
+// `sleep` is task-aware: inside a coroutine it parks on the scheduler's timer heap, so the worker thread keeps
+// running other tasks for the duration, while on any other thread it sleeps outright. Deadlines are monotonic `platform::now_ns()` values; the timed `sync` and `channel`
 // waits take one, and `remaining_ns` is how a wait loop asks how much of its budget is left.
 
 import std::parallel::runtime as runtime;
 import std::parallel::platform as platform;
 
 /// A span of time held as whole nanoseconds. Build one with `Duration::from_millis(50)` and friends.
-pub struct Duration {
-    pub ns: u64,
-}
+pub type Duration = u64;
 
 extend Duration {
     /// A duration of `n` nanoseconds.
     pub const fn from_nanos(n: u64) Duration {
-        return Duration { ns: n };
+        return n;
     }
     /// A duration of `n` microseconds, saturating at the largest duration.
     pub const fn from_micros(n: u64) Duration {
@@ -34,27 +31,27 @@ extend Duration {
     // (`runtime::deadline_after`): a wrapped duration would be a short one.
     const fn scaled(n: u64, unit: u64) Duration {
         if n > 18446744073709551615u64 / unit {
-            return Duration { ns: 18446744073709551615u64 };
+            return 18446744073709551615u64;
         }
-        return Duration { ns: n * unit };
+        return n * unit;
     }
     /// The duration in whole nanoseconds.
     pub const fn as_nanos(self: &Duration) u64 {
-        return self.ns;
+        return *self;
     }
     /// The duration truncated to whole milliseconds.
     pub const fn as_millis(self: &Duration) u64 {
-        return self.ns / 1000000;
+        return *self / 1000000;
     }
     /// The duration truncated to whole seconds.
     pub const fn as_secs(self: &Duration) u64 {
-        return self.ns / 1000000000;
+        return *self / 1000000000;
     }
 }
 
 /// The monotonic deadline `d` from now, in the units every timed wait takes.
 pub fn deadline_in(d: Duration) u64 {
-    return runtime::deadline_after(d.ns);
+    return runtime::deadline_after(d);
 }
 
 /// Nanoseconds left until `deadline`; `0` once it has passed. A wait loop stops when this reaches zero.
@@ -70,10 +67,10 @@ pub fn remaining_ns(deadline: u64) u64 {
 /// sleeps. Never blocks a worker thread inside a coroutine.
 pub fn sleep(d: Duration) {
     // Clamped to the largest `i64`: the cast alone turns a huge duration negative, which sleeps not at all.
-    let ns = if d.ns > 9223372036854775807u64 {
+    let ns = if d > 9223372036854775807u64 {
         9223372036854775807i64;
     } else {
-        d.ns as i64;
+        d as i64;
     };
     runtime::sleep_ns(ns);
 }
