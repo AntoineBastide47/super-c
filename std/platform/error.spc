@@ -139,7 +139,7 @@ pub const fn kind_of(e: i32) IoErrorKind {
 @platform(windows)
 pub fn kind_of(e: i32) IoErrorKind {
     return switch e {
-        2 | 3 | 15 | 53 | 67 | 161 | 267 => IoErrorKind::NotFound, // FILE_NOT_FOUND, PATH_NOT_FOUND, INVALID_DRIVE, BAD_NETPATH, BAD_NET_NAME, BAD_PATHNAME, DIRECTORY (a file where a directory is named: POSIX ENOTDIR)
+        2 | 3 | 15 | 53 | 67 | 126 | 127 | 161 | 267 => IoErrorKind::NotFound, // FILE_NOT_FOUND, PATH_NOT_FOUND, INVALID_DRIVE, BAD_NETPATH, BAD_NET_NAME, MOD_NOT_FOUND, PROC_NOT_FOUND, BAD_PATHNAME, DIRECTORY (a file where a directory is named: POSIX ENOTDIR)
         5 | 19 | 32 | 33 | 1314 | 10013 => IoErrorKind::PermissionDenied, // ACCESS_DENIED, WRITE_PROTECT, SHARING_VIOLATION, LOCK_VIOLATION, PRIVILEGE_NOT_HELD, WSAEACCES
         80 | 183 => IoErrorKind::AlreadyExists, // FILE_EXISTS, ALREADY_EXISTS
         6 | 17 | 87 | 123 | 206 | 4390 | 10022 => IoErrorKind::InvalidInput, // INVALID_HANDLE, NOT_SAME_DEVICE, INVALID_PARAMETER, INVALID_NAME, FILENAME_EXCED_RANGE, NOT_A_REPARSE_POINT, WSAEINVAL

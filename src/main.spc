@@ -6,6 +6,7 @@ import ast::parser as par;
 import fmt::builder as fbld;
 import driver_shim as shim;
 import std::platform::fs;
+import std::platform::path;
 import std::platform::process;
 import std::parallel::runtime as prt;
 import module::loader as loader;
@@ -1475,7 +1476,7 @@ fn main(argv: Vector<str>) i32 {
     // `build <dir>` and `release <dir>`: the project of that directory, as from inside it; a relative -o
     // still names a path from here.
     if proj_dir.len() != 0 {
-        if out_bin.len() != 0 && !out_bin.starts_with("/") {
+        if out_bin.len() != 0 && !path::is_absolute(out_bin) {
             out_abs = canon_cwd();
             out_abs.push_byte(b'/');
             out_abs.push_str(out_bin);

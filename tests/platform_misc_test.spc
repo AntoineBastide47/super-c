@@ -2,6 +2,7 @@
 // queries, reserved and committed memory, OS threads, thread-local keys and parking, signals, dynamic
 // libraries, and sockets with their WouldBlock contract.
 
+import std::parallel::atomics as atomics;
 import std::platform::clock;
 import std::platform::cpu;
 import std::platform::dylib;
@@ -91,11 +92,14 @@ fn a_misaligned_range_panics() {
 }
 
 @platform(!wasm)
-static mut DETACHED: i32 = 0;
-
-@platform(!wasm)
 const fn store_42(arg: *mut void) *mut void {
     unsafe *(arg as *mut i32) = 42;
+    return arg;
+}
+
+@platform(!wasm)
+fn publish_42(arg: *mut void) *mut void {
+    (unsafe &*(arg as *const atomics::Atomic<i32>)).store(42, atomics::MemoryOrder::Release);
     return arg;
 }
 
@@ -106,11 +110,20 @@ fn threads_run_and_join() {
     let t = unsafe thread::spawn(store_42, &mut cell).unwrap();
     t.join().unwrap();
     assert_eq(cell, 42);
-    // A dropped handle detaches; the thread still runs to its end, so it writes a static.
+    // A dropped handle detaches and the thread runs on. The wait for its store keeps the process alive
+    // until it started, which frees its start record on Windows.
+    let mut seen = atomics::Atomic::<i32>::new(0);
     {
-        let _d = unsafe thread::spawn(store_42, unsafe &mut DETACHED).unwrap();
+        let _d = unsafe thread::spawn(publish_42, &mut seen).unwrap();
     }
-    thread::yield_now();
+    // Bounded: ten seconds.
+    for _ in 0..10000 {
+        if seen.load(atomics::MemoryOrder::Acquire) == 42 {
+            break;
+        }
+        clock::sleep_ns(1000000);
+    }
+    assert_eq(seen.load(atomics::MemoryOrder::Acquire), 42);
 }
 
 @test

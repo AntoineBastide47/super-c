@@ -51,12 +51,9 @@ and run: it is the compiler that runs every later step of the gate (the one-work
 every-core builds under each task-delay seed, the strict C warnings). Its
 one-worker tree must equal generation one's every-core tree, so the fixpoint holds
 across generations and worker counts at once. `check.sh` (the commit hook) ends with
-`sh ci/gate.sh --core` over the compiler its bootstrap step rebuilt: the
-fixpoint, the worker-count identity under every seed, and the strict C warnings (about 30 s on
-a warm object cache). The release workflow runs `sh ci/gate.sh --core` and, in a job beside it,
-`sh ci/gate.sh --profiles` (every built-in profile but test, built by the compiler the `compile`
-job made: the gate's fixpoint proves the two generations emit the same C; a local gate leaves the
-profiles to CI, the release and bench links being full LTO), on macOS, Linux and
+`sh ci/gate.sh --core` over the compiler its bootstrap step rebuilt: the std package rules
+(`tools/std_packages`), the fixpoint, the worker-count identity under every seed, and the strict C warnings (about 30 s on
+a warm object cache). The release workflow runs `sh ci/gate.sh --core` on macOS, Linux and
 Windows; on Windows the strict warnings use `SC_CSTD`, `-std=gnu11`, because mingw hides POSIX
 prototypes under `-std=c11`.
 

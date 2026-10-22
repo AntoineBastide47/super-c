@@ -389,6 +389,7 @@ extern "C" "windows.h" {
     const GENERIC_WRITE: u32 = 0x40000000;
     const FILE_APPEND_DATA: u32 = 4;
     const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+    const SYNCHRONIZE: u32 = 0x00100000;
     const CREATE_NEW: u32 = 1;
     const CREATE_ALWAYS: u32 = 2;
     const OPEN_EXISTING: u32 = 3;
@@ -572,11 +573,11 @@ pub fn open(path: str, opts: OpenOptions) Result<File, IoError> {
     if opts.read {
         access = access | GENERIC_READ;
     }
-    if opts.write {
-        access = access | GENERIC_WRITE;
-    }
+    // FILE_WRITE_DATA (in GENERIC_WRITE) would turn appends into writes at the file position.
     if opts.append {
-        access = access | FILE_APPEND_DATA;
+        access = access | FILE_APPEND_DATA | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE;
+    } else if opts.write {
+        access = access | GENERIC_WRITE;
     }
     let disposition = if opts.create_new {
         CREATE_NEW;
@@ -1908,6 +1909,7 @@ extend ReadDir as Free {
         if self.state.find != INVALID_HANDLE_VALUE {
             let _ = unsafe FindClose(self.state.find);
         }
+        self.state.name.free();
     }
 }
 

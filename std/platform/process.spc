@@ -153,8 +153,10 @@ extern "C" "mach-o/dyld.h" {
     fn _NSGetExecutablePath(buf: *mut char, size: *mut u32) i32;
 }
 
+// unistd.h declares pipe2 only under _GNU_SOURCE, which the build does not define: a block without a header
+// gives it a prototype from this declaration.
 @platform(linux | android)
-extern "C" "unistd.h" {
+extern "C" {
     fn pipe2(fds: *mut i32, flags: i32) i32;
 }
 

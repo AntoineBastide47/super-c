@@ -287,14 +287,17 @@ fn non_ascii_char_ranges_are_disjoint() {
     assert_eq(r.exit, 0);
 }
 
-// A glob import re-exports its module's names: unused, it is reported in the program's root module only.
+// A glob import re-exports its module's names: unused, it is reported only in a module nothing imports.
 @test
 fn glob_imports_re_export() {
     let p = cli::proj_new();
     p.mkfile("extra.spc", "pub fn e() i32 {\n    return 1;\n}\n");
     p.mkfile("lib.spc", "import extra as *;\n\npub fn l() i32 {\n    return 2;\n}\n");
     p.mkfile("main.spc", "import lib;\nimport extra as *;\n\nfn main() i32 {\n    return lib::l() - 2;\n}\n");
-    let r = cli::superc_in(p.dir(), "lint main.spc");
+    let mut args = String::from_str("lint \"");
+    args.push_str(p.dir());
+    args.push_str("/main.spc\"");
+    let r = p.run_raw(args.as_str());
     assert(r.out_has("unused import 'extra'") && r.out_has("main.spc:2:1"));
     assert(!r.out_has("lib.spc"));
 }

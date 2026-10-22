@@ -248,15 +248,14 @@ In both workflows, each platform builds its compiler once (`compile`, `windows-c
 slowest runner, two elsewhere). Every CI suite runs `super-c test --sanitizers`: the compiler under
 test and the runner build with ASan and UBSan there (no-op on Windows), while a local run stays
 without them for speed. In the release workflow (macOS, Linux and Windows in one matrix)
-the correctness gate (`ci/gate.sh --core`), its profile builds (`gate-profiles`,
-`ci/gate.sh --profiles`), the x86-64 levels and the `ctarget` job (Linux: the C environment tables
+the correctness gate (`ci/gate.sh --core`), the x86-64 levels and the `ctarget` job (Linux: the C environment tables
 against clang 22) run beside the shards, and the release binary is
 built after all of them pass. Only the release workflow on main saves caches (the toolchain action's
 `save: true`), so no other workflow or branch evicts its entries. Each platform keeps one object
 cache, `objcache-<target>-<sha>` (the cache base `~/.super-c/cache`, the tests' `.tests` included):
 the compile, test and package jobs upload the files they added or changed and the list of those they
 deleted (`.github/actions/cache-save/delta.py`), and the `caches` job merges them over the platform's
-newest cache at the end of the run. Gate, gate profiles, counts, ctarget and the wasm checks save only their
+newest cache at the end of the run. Gate, counts, ctarget and the wasm checks save only their
 own delta (`objdelta-<target>-<role>-<sha>`), which the toolchain action restores over the platform
 cache. The installation caches are restored every run, so GitHub's eviction past its limit takes the
 superseded caches of older commits first. The toolchain and bootstrap steps live in `.github/actions/`. An
@@ -341,7 +340,8 @@ the test with or without the gate. Only a leak in the test process itself needs 
 The platform layer's tests (`tests/platform_*_test.spc`, helper `tests/platform_harness.spc`) run each
 `std::platform` module on the host; `platform_wasi_test` builds one program with `--target=wasm`, runs it under
 wasmtime and checks every WASI `Unsupported` path, and returns early without `WASI_SDK_PATH`. Windows-only paths
-compile there and run on the Windows runner.
+compile there and run on the Windows runner. `tests/std_packages_test.spc` builds `tools/std_packages` and runs
+it on fixture trees (an upward import, a forbidden `extern "C"` function, a cross-package cycle).
 
 The wasm lane runs the same suite with `SC_TEST_SUPERC=ci/wasm-superc.sh`: the wrapper runs
 every transpile-class command (a script, `fmt`, `lint`, the transpile form an engine's

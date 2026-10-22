@@ -1,0 +1,3 @@
+bin = "std-packages"
+root = "main.spc"
+std_internals = true

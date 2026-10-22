@@ -474,7 +474,7 @@ files of an implicit index declare is "'x' is ambiguous: two files of directory 
 is used, not where the directory is imported.
 
 A glob import re-exports: `m::x` names `m`'s own item `x`, else the first `x` that a module `m` glob-imports (or one
-of that module's imports) declares. The unused-import lint reports a glob import only in the program's root module.
+of that module's imports) declares. The unused-import lint reports a glob import only in a module no other module imports.
 
 An unqualified name the module does not declare is looked up in its glob imports first, then in
 the prelude: a glob-imported `String` or `dot` shadows the prelude's, as a declaration does. A
@@ -875,3 +875,8 @@ enforced at spawn boundaries.
 | `std::time`, `std::net` | Durations, deadlines and task-aware `sleep`; task-aware TCP and UDP |
 | `std::text::utf16` | `encode`, `encode_into`, `decode` between UTF-8 and UTF-16 code units, with the offset of ill-formed input |
 | `std::platform::*` | std's internal operating-system layer (files, paths, clocks, entropy, memory, threads, processes, environment, signals, sockets, libraries): unstable, for std and projects with `std_internals = true` |
+
+Every std package declares its tier and target support in `std/packages.toml` (0 prelude; 1 portable, no
+operating system; 2 allocating; 3 operating system, I/O and concurrency; 4 encodings and protocols; 5 tooling).
+A module imports no module of a higher tier and joins no import cycle across packages; platform FFI stays in
+`std::platform` and the substrate modules the file exempts (`ci/gate.sh` checks it with `tools/std_packages`).

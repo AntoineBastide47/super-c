@@ -11670,6 +11670,12 @@ fn import_removed_use(p: &loader::Package, a: *const Ast, src: str, iid: NodeId,
 
 fn lint_unused_imports(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector<diag::LintFix>) {
     let nm = p.modules.len();
+    p.ensure_index();
+    let mut imported = Vector::<bool>::new();
+    imported.resize_default(nm);
+    for k in 0..p.idx.imports.len() {
+        imported.set(p.idx.imports[k] as usize, true);
+    }
     for m in 0..nm {
         if !p.modules[m].has_ast || p.modules[m].prelude || !lint_reported(p, m, only_mod) {
             continue;
@@ -11694,9 +11700,9 @@ fn lint_unused_imports(p: &mut loader::Package, only_mod: i32, fixes: *mut Vecto
             if unsafe (*a).at_const(iid).kind != NodeKind::NODE_IMPORT {
                 continue;
             }
-            // A glob import re-exports its module's names (`m::x` reaches them): only the program's root module,
-            // which nothing imports, can hold an unused one.
-            if unsafe (*a).at_const(iid).as_data.import_decl.glob && m as i32 != p.root {
+            // A glob import re-exports its module's names (`m::x` reaches them): only a module nothing imports
+            // can hold an unused one.
+            if unsafe (*a).at_const(iid).as_data.import_decl.glob && imported[m] {
                 continue;
             }
             let path = loader::join_parts(unsafe &*a, src, unsafe (*a).at_const(iid).as_data.import_decl.path, "::");

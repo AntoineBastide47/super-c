@@ -185,7 +185,10 @@ super-c command gate         # ci/gate.sh: the full correctness gate (settings i
 
 `ci/contract.sh` holds the gate's settings: the profiles, the worker count and task-delay
 seeds, the strict C flags, the readability rules and the files excluded from byte
-comparison.
+comparison. Before the fixpoint the gate builds and runs `tools/std_packages` over
+`std/packages.toml` (both modes): every std package declared with its tier, no upward tier edge,
+no import cycle across packages, and platform FFI only in `std::platform` and the exempt substrate
+modules.
 
 ### Formatting
 

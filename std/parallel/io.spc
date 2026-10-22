@@ -186,7 +186,8 @@ static mut G_CLOSERS: i32 = 0;
 // wedges both threads in the kernel for good (measured: every run of a registration racing a close),
 // so a registering thread counts itself in (`reg_enter`), and a closer waits for every count to reach
 // zero before it closes. Registering threads back off while a close is pending, so a close never waits
-// for more than the registrations already under way.
+// for more than the registrations already under way. The close report is published before the flag drops,
+// so it precedes every arm on a file that reuses the number.
 static mut G_CLOSING: i32 = 0;
 // Registration counters, one cache line per slot: slot 0 is the reactor thread, slot 1 + (worker index
 // mod REG_SLOTS) a worker; sharing a slot is safe, it only makes two workers wait for each other's close.
@@ -1105,10 +1106,34 @@ pub fn close(fd: i32) i32 {
         let _ = unsafe atomic::sub_i32(cp, 1, 4);
         return rc;
     }
-    // Stopping (3) still needs the exclusion: a wait admitted before the stop may be registering now.
+    // Stopping (3) still needs the exclusion: a wait admitted before the stop may be registering now. A
+    // stopping reactor settles every wait as not ready and keeps no record past its exit, so it gets no
+    // report.
     let r = unsafe G_REACTOR;
+    let mut n: *mut IoWait = null;
+    if st == 2 {
+        let mut g = Global {};
+        n = (unsafe g.alloc(sizeof(IoWait), alignof(IoWait))) as *mut IoWait;
+        if n == null {
+            panic("reactor: cannot allocate a close report");
+        }
+        unsafe n[0] = IoWait {
+            co: null,
+            token: 0,
+            ack: 0,
+            fd: fd,
+            dir: CLOSE,
+            state: NS_NEW,
+            rc: 0,
+            gen: 0,
+            seq: 0,
+            anext: 0,
+            dnext: 0,
+            lnext: null,
+        };
+    }
     // No registration may overlap the close (see `G_CLOSING`): raise the flag, wait out the ones under
-    // way, close, lower it.
+    // way, close, report, lower it.
     let _ = unsafe atomic::add_i32(&mut unsafe G_CLOSING, 1, 4);
     for slot in 0..REG_SLOTS + 1 {
         let f = unsafe ((*r).regs + slot * (R_ALIGN / 4));
@@ -1117,36 +1142,15 @@ pub fn close(fd: i32) i32 {
         }
     }
     let rc = unsafe sc_io::sc_io_close(fd);
+    if n != null {
+        // Counted before the report is published, so an arm that saw the old count and then finds the new
+        // one knows its registration may have died with the descriptor.
+        let _ = unsafe atomic::add_u64(&mut unsafe G_CLOSES, 1, 4);
+        // Published before the flag drops: a file that takes the number after close(2) registers its first
+        // wait only then, so that arm is ordered behind this report and the report cannot settle it.
+        push_cmd(r, n, CMD_ARM, true);
+    }
     let _ = unsafe atomic::sub_i32(&mut unsafe G_CLOSING, 1, 4);
-    if st == 3 {
-        // A stopping reactor settles every wait as not ready and keeps no record past its exit, so a
-        // report would settle nothing.
-        let _ = unsafe atomic::sub_i32(cp, 1, 4);
-        return rc;
-    }
-    // Counted before the report is published, so an arm that saw the old count and then finds the new one
-    // knows its registration may have died with the descriptor.
-    let _ = unsafe atomic::add_u64(&mut unsafe G_CLOSES, 1, 4);
-    let mut g = Global {};
-    let n = (unsafe g.alloc(sizeof(IoWait), alignof(IoWait))) as *mut IoWait;
-    if n == null {
-        panic("reactor: cannot allocate a close report");
-    }
-    unsafe n[0] = IoWait {
-        co: null,
-        token: 0,
-        ack: 0,
-        fd: fd,
-        dir: CLOSE,
-        state: NS_NEW,
-        rc: 0,
-        gen: 0,
-        seq: 0,
-        anext: 0,
-        dnext: 0,
-        lnext: null,
-    };
-    push_cmd(r, n, CMD_ARM, true);
     let _ = unsafe atomic::sub_i32(cp, 1, 4);
     return rc;
 }

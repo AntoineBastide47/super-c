@@ -3,7 +3,7 @@ name: Release
 # Owner-only, manual-trigger release: builds the `super-c` binary for macOS, Linux and Windows and publishes
 # a GitHub Release with one archive per platform.
 #
-# resolve -> compile -> test shards, levels, gate, gate-profiles, ctarget (Linux) -> package -> release
+# resolve -> compile -> test shards, levels, gate, ctarget (Linux) -> package -> release
 #            wasm-compile -> wasm-checks, wasm-test -> wasm-package ----------------^
 #
 # `commit` is what keeps a run of untagged commits from being all-or-nothing. Left empty the tag lands on the
@@ -59,7 +59,7 @@ jobs:
 
   # The pipeline of macOS, Linux, Windows and wasm: one job builds the compiler, the test shards (three
   # on Windows, the slowest runner, two elsewhere), the x86-64 levels, the correctness gate and the
-  # gate's profile builds and the transpile work count run in parallel on that binary, and the release
+  # transpile work count run in parallel on that binary, and the release
   # binary is built only after all but the count pass. A count that grew by the limit or more, or that
   # failed, holds only the publishing: `counts approval` waits for an approval in the `release-approval`
   # environment (required reviewer: the owner):
@@ -67,13 +67,12 @@ jobs:
   #   compile --+--> test 1/N .. N/N -----------+
   #             +--> levels (Linux, Windows) ---+--> package -----------------------+--> release
   #             +--> gate ----------------------+                                   |
-  #             +--> gate profiles -------------+                                   |
   #             +--> counts --> transpile counts --> counts approval (when held) ---+
   #
   # Caches: only this workflow on main saves (the toolchain action restores, `cache-save` saves last), so
   # no other workflow or branch evicts these entries from the repository's cache. Each platform keeps one
   # object cache, `objcache-<target>-<sha>`, which `caches` merges at the end of the run from the deltas
-  # its compile, test and package jobs upload; gate, gate profiles, counts and the wasm checks keep only
+  # its compile, test and package jobs upload; gate, counts and the wasm checks keep only
   # their own deltas (`objdelta-<target>-<role>-<sha>`). The installation caches (Homebrew, mingw-w64,
   # llvm-mingw, wasi) are restored every run, so the least recently used entries GitHub evicts past its
   # limit are the superseded caches of older commits.
@@ -317,9 +316,8 @@ jobs:
         with:
           name: compiler-${{ matrix.target }}
 
-      # ci/gate.sh without its check.sh step, which `compile` and `test` replace, and without the profile
-      # builds, which `gate-profiles` runs beside it: the two-generation fixpoint, the worker-count
-      # identity under each task-delay seed, and the strict C warnings.
+      # ci/gate.sh without its check.sh step, which `compile` and `test` replace: the two-generation
+      # fixpoint, the worker-count identity under each task-delay seed, and the strict C warnings.
       - name: Run the correctness gate
         run: |
           chmod +x "./super-c${BINEXT:-}"
@@ -383,54 +381,6 @@ jobs:
         with:
           target: linux
           role: ctarget
-          sha: ${{ needs.resolve.outputs.sha }}
-
-  # Every built-in profile but test builds the compiler (ci/gate.sh's last step), beside the gate: the
-  # gate's fixpoint proves the two generations emit the same C, so the compiler `compile` built builds
-  # them here.
-  gate-profiles:
-    needs: [resolve, compile]
-    if: github.actor == github.repository_owner
-    name: gate profiles (${{ matrix.target }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            target: macos
-          - os: ubuntu-latest
-            target: linux
-          - os: windows-latest
-            target: windows
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.resolve.outputs.sha }}
-
-      - uses: ./.github/actions/toolchain
-        with:
-          target: ${{ matrix.target }}
-          role: profiles
-          save: true
-          sha: ${{ needs.resolve.outputs.sha }}
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: compiler-${{ matrix.target }}
-
-      - name: Build every profile
-        run: |
-          chmod +x "./super-c${BINEXT:-}"
-          sh ci/gate.sh --profiles
-
-      - uses: ./.github/actions/cache-save
-        with:
-          target: ${{ matrix.target }}
-          role: profiles
           sha: ${{ needs.resolve.outputs.sha }}
 
   # The transpile work count beside the shards (.github/actions/transpile-counts): this commit's compiler
@@ -525,7 +475,7 @@ jobs:
 
   # The release binary, built by the compiler the suite and the gate passed with.
   package:
-    needs: [resolve, compile, test, levels, gate, gate-profiles, ctarget]
+    needs: [resolve, compile, test, levels, gate, ctarget]
     if: github.actor == github.repository_owner
     name: package (${{ matrix.target }})
     strategy:

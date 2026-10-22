@@ -192,7 +192,7 @@ fn the_running_process_answers_its_queries(fx: &mut Fx) {
     assert(process::peak_rss().unwrap() > 0);
     process::raise_open_file_limit(64).unwrap();
     if PLATFORM == Platform::Windows {
-        assert(exe.find("\\") == usize::MAX);
-        assert(here.find("\\") == usize::MAX);
+        assert(!exe.contains_byte(b'\\'));
+        assert(!here.contains_byte(b'\\'));
     }
 }

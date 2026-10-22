@@ -1,0 +1,206 @@
+# The std packages: one [package.NAME] row per package, read by the checker in tools/std_packages. A package is the prelude (every top-level std/*.spc file, row
+# `prelude`) or one first-level directory of std/ (std/parallel is the package `parallel`). A module is one
+# file: std/simd/math/fast.spc is std::simd::math::fast, and its name inside its package is `math::fast`.
+#
+# Tiers: 0 prelude and primitive contracts; 1 portable, no operating system, no required allocation;
+# 2 portable, allocator-enabled; 3 operating system, process, I/O, network and concurrency; 4 encodings,
+# protocols, compression, crypto and higher services; 5 tooling, testing, profiling and development support.
+#
+# The rules read every `import` item and every function of every `extern` block in every .spc file under
+# std/. Text in comments and string literals does not count; an item under `@platform`, `@arch` or `@when`
+# counts. The checker fails on:
+#   - Undeclared package: a file whose package has no row.
+#   - Upward tier edge: a module imports a module of a package of a higher tier. An import `std::a::b` names
+#     what the loader loads: std/a/b.spc, else the index std/a/b/b.spc, else every file directly in std/a/b/.
+#     `__std::...` (generated) and ffi/ imports name no std package.
+#   - Cyclic tier edge: an import inside an import cycle of modules (a strongly connected component of the
+#     module import graph) that spans two or more packages. A cycle of packages without a cycle of modules
+#     is allowed: std::parallel::channel imports std::time, and std::time imports
+#     std::parallel::runtime, which imports no std::time module.
+#   - Platform FFI outside an exempt module, which its row's `platform_ffi` names (`*`: every module of
+#     the package). Platform FFI is (1) an import of an ffi/ module that [ffi] `modules` does not list, and
+#     (2) an extern function whose C symbol (its `@import` pin, else its name) neither [ffi] `functions`
+#     nor its row's `c_functions` lists. An import of `stdio` or `stdlib` is platform FFI as a whole: a
+#     module that needs only listed functions of them declares those in its own extern block.
+#   - Unreadable input: a file the scan cannot read (it does not read matchertext literals), and an import
+#     `std::...` that names no file.
+#   - Stale data: a row without a file, and a `platform_ffi` entry that names no module.
+#
+# Row keys: `tier`; `targets`, the status of each of macos, ios, linux, android, windows and wasm: `full`
+# (every operation works), `reduced` (some operations work differently or fail) or `unavailable` (an
+# operation is a compile error or returns an `Unsupported` error); `limits`, what `reduced` and
+# `unavailable` mean for the package, set exactly when a target is not `full`; `capabilities`, what the
+# target must provide; `accelerations`, optional faster paths; `allocator`; `thread_safety`; `blocking`;
+# `errors`, the panic and error behavior; the optional exemption lists `platform_ffi` and `c_functions` (a
+# C symbol, or a prefix that ends in `*`).
+
+[ffi]
+# The ffi/ modules that do not reach the operating system.
+modules = ["atomic", "ctype", "math", "string", "immintrin", "arm_neon", "wasm_simd128", "sc_sme"]
+# The C library functions that are not operating-system calls: memory, string, allocation, `abort`,
+# <ctype.h> and <math.h>.
+functions = [
+    "memcpy", "memmove", "memset", "memcmp", "memchr",
+    "strlen", "strcmp", "strncmp", "strchr", "strrchr", "strstr",
+    "malloc", "calloc", "realloc", "free", "abort",
+    "isalpha", "isdigit", "isalnum", "isspace", "isupper", "islower", "ispunct", "iscntrl", "isprint",
+    "isgraph", "isblank", "isxdigit", "toupper", "tolower",
+    "acos", "asin", "atan", "atan2", "cos", "sin", "tan", "acosh", "asinh", "atanh", "cosh", "sinh", "tanh",
+    "exp", "exp2", "expm1", "frexp", "ilogb", "ldexp", "log", "log10", "log1p", "log2", "logb", "modf",
+    "scalbn", "scalbln", "cbrt", "fabs", "hypot", "pow", "sqrt", "erf", "erfc", "lgamma", "tgamma",
+    "ceil", "floor", "nearbyint", "rint", "lrint", "llrint", "round", "lround", "llround", "trunc",
+    "fmod", "remainder", "remquo", "copysign", "nan", "nextafter", "nexttoward", "fdim", "fmax", "fmin",
+    "fma",
+    "acosf", "asinf", "atanf", "atan2f", "cosf", "sinf", "tanf", "acoshf", "asinhf", "atanhf", "coshf",
+    "sinhf", "tanhf", "expf", "exp2f", "expm1f", "frexpf", "ilogbf", "ldexpf", "logf", "log10f", "log1pf",
+    "log2f", "logbf", "modff", "scalbnf", "scalblnf", "cbrtf", "fabsf", "hypotf", "powf", "sqrtf", "erff",
+    "erfcf", "lgammaf", "tgammaf", "ceilf", "floorf", "nearbyintf", "rintf", "lrintf", "llrintf", "roundf",
+    "lroundf", "llroundf", "truncf", "fmodf", "remainderf", "remquof", "copysignf", "nanf", "nextafterf",
+    "nexttowardf", "fdimf", "fmaxf", "fminf", "fmaf",
+]
+
+[package.prelude]
+tier = 0
+targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "full", wasm = "full" }
+capabilities = ["C library memory, string and math functions", "C stdout and stderr streams"]
+accelerations = [
+    "vector instructions for `Simd` through the std::simd backends",
+    "128-bit integer and binary128 float arithmetic where the C compiler has it",
+]
+allocator = "`String`, `Vector`, `Map`, `Set` and `Box` take `A: Allocator = Global` and have `new_in`; `Global` is the C heap and aborts when it is exhausted."
+thread_safety = "No shared mutable state; a type is `Send` and `Sync` as its parts are."
+blocking = "Never blocks, except `print`, `println`, `eprint` and `eprintln`, which write to the C streams."
+errors = "Expected failures return `Option` or `Result`; a contract violation (an index out of bounds, a failed `assert`, `unwrap` of `None` or `Err`, integer overflow under overflow checks) panics."
+# The runtime helpers of the generated-program runtime, and the output path of `print` and `eprint`
+# (std/string.spc).
+c_functions = ["sc_*", "__sc_*", "fwrite", "fputc", "putchar", "snprintf", "__acrt_iob_func"]
+
+[package.simd]
+tier = 1
+targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "full", wasm = "full" }
+capabilities = []
+accelerations = [
+    "SSE2 to AVX-512 (x86_64)",
+    "NEON and SME (aarch64)",
+    "SIMD128 and relaxed SIMD (wasm32)",
+    "run-time dispatch through std::cpu::detect",
+]
+allocator = "No allocation, except the scratch the SME kernels of `std::simd::matrix` take from the C heap; when it cannot be allocated, the portable kernels run."
+thread_safety = "Pure functions; `std::simd::matrix` publishes its dispatch choices atomically."
+blocking = "Never blocks."
+errors = "`std::simd::matrix` panics on a slice whose length is not its matrix's element count; the math functions give IEEE results and never fail."
+
+[package.text]
+tier = 1
+targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "full", wasm = "full" }
+capabilities = []
+accelerations = []
+allocator = "`encode` reserves once in the caller's `Vector<u16, A>` and `decode` appends to the caller's `String<A>`; `encode_into` writes a caller buffer and allocates nothing."
+thread_safety = "Pure functions."
+blocking = "Never blocks."
+errors = "Ill-formed UTF-8 returns its byte offset, an unpaired surrogate its unit offset, a short buffer `BufferTooSmall`; the output keeps its previous contents. No panic."
+
+[package.math]
+tier = 2
+targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "full", wasm = "full" }
+capabilities = ["C library math functions"]
+accelerations = ["fused multiply-add where the CPU has it", "SME tiles for `LargeMat` products through std::simd::matrix"]
+allocator = "`Vec`, `Mat`, `Quat` and `DualQuat` are fixed-size values; `LargeVec`, `LargeMat` and the text of std::math::format allocate from `Global`, with no allocator parameter."
+thread_safety = "Pure functions; a random generator such as `Pcg32` is a plain value."
+blocking = "Never blocks."
+errors = "Float results follow IEEE and the C library; an index out of bounds, an easing input outside [0, 1], `LargeVec` and `LargeMat` operands of different sizes, and a random rejection loop past `MAX_TRIES` panic."
+
+[package.cpu]
+# Tier 1: the CPU feature query is a target capability that the vector code of tier 1 needs for its run-time
+# dispatch, not an operating-system service; it is an exempt substrate owner of its few platform calls.
+tier = 1
+targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "full", wasm = "reduced" }
+limits = "WebAssembly: no run-time detection; the features are the build's (an engine rejects a module whose features it lacks)."
+capabilities = [
+    "CPUID and XGETBV (x86_64)",
+    "`sysctlbyname` (macOS, iOS)",
+    "`getauxval` (Linux, Android)",
+    "`IsProcessorFeaturePresent` (Windows on aarch64)",
+]
+accelerations = []
+allocator = "Never allocates."
+thread_safety = "Safe from every thread; `dispatch` publishes its choice with a release store, and two first callers store the same choice."
+blocking = "Never blocks."
+errors = "No errors: a feature the operating system does not report reads as absent."
+platform_ffi = ["detect"]
+
+[package.net]
+tier = 3
+targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "full", wasm = "unavailable" }
+limits = "WebAssembly: WASI preview 1 has no sockets; every operation returns an error."
+capabilities = ["BSD sockets or Winsock", "`getaddrinfo`", "the std::parallel::io reactor"]
+accelerations = []
+allocator = "A host name is copied into a C string per call; reads and writes use the caller's buffer and allocate nothing."
+thread_safety = "Sockets are `Send`, not `Sync`: one task uses a socket at a time."
+blocking = "Task-aware: a coroutine parks on the reactor while its socket is not ready, and a plain thread blocks; name resolution (`getaddrinfo`) blocks the calling thread."
+errors = "Fallible operations return `Result<T, IoError>` with the native error number; no panic."
+
+[package.parallel]
+tier = 3
+targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "full", wasm = "reduced" }
+limits = "WebAssembly: one thread; an operation that needs a second thread or stack (`launch`, `thread::spawn`, `blocking::call`) fails at the call, and a wait that would block never ends."
+capabilities = [
+    "OS threads",
+    "guard-paged stacks",
+    "address-based parking",
+    "kqueue, epoll or select readiness polling",
+    "a context switch for x86_64 or aarch64",
+]
+accelerations = []
+allocator = "Task stacks are mapped from the operating system and pooled within a byte budget; a channel is one allocation; a wait allocates nothing. `Global` only, no allocator parameter."
+thread_safety = "The thread-safety layer: `launch`, `thread::spawn` and the data-parallel calls check `Send` and `Sync`."
+blocking = "Task-aware: a coroutine that waits parks and frees its worker, and any other thread blocks; `blocking::call` moves blocking work to a bounded pool of OS threads."
+errors = "Timed waits report a timeout as a value and a closed channel hands the value back; a failed thread creation, join or detach, or stack mapping, ends the process with a message; an invalid memory order panics."
+platform_ffi = ["arc", "atomics", "blocking", "channel", "data", "io", "platform", "runtime", "selector", "sync", "task", "thread"]
+
+[package.platform]
+tier = 3
+targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "full", wasm = "reduced" }
+limits = "WebAssembly (WASI): no processes, threads, address-range reservations, signals, sockets, dynamic libraries, permission bits or file locks; those operations return `Unsupported`."
+capabilities = ["the operating system's file, directory, clock, entropy, memory, thread, process, environment, signal, socket and dynamic-library calls"]
+accelerations = []
+allocator = "A path converts to a native string per call; a value read from the environment is a copy; a handle owns its native resource."
+thread_safety = "Safe from every thread, except `env::set` and `env::unset`, which are `unsafe` on POSIX: a concurrent read of the C environment is not safe against them."
+blocking = "Blocking: file, process and socket calls block the calling OS thread, and `clock::sleep_ns` sleeps it."
+errors = "Every fallible operation returns `Result<T, IoError>` with the failed operation and the native error number; an interrupted call runs again inside."
+platform_ffi = ["*"]
+
+[package.rt]
+tier = 3
+targets = { macos = "full", ios = "full", linux = "full", android = "reduced", windows = "full", wasm = "reduced" }
+limits = "Android: allocation sites are bare addresses (no frame walk before API level 33). WebAssembly: no signals, so no stack-overflow or illegal-instruction report and no test-timeout stack dump; allocation sites are bare addresses."
+capabilities = ["signals and an alternate signal stack (POSIX)", "vectored exception handling (Windows)", "page mapping for the leak tracker's tables"]
+accelerations = []
+allocator = "The leak tracker's tables are pages from the operating system; nothing comes from `Global`."
+thread_safety = "Safe from every thread; its signal handlers call only async-signal-safe functions."
+blocking = "Never blocks."
+errors = "A trap (a panic, a failed assertion, an integer overflow, a stack overflow) prints its report to stderr and aborts the process."
+platform_ffi = ["base"]
+
+[package.time]
+tier = 3
+targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "reduced", wasm = "full" }
+limits = "Windows: sleeps and timed waits have millisecond granularity."
+capabilities = ["a monotonic clock", "thread sleep"]
+accelerations = []
+allocator = "Never allocates."
+thread_safety = "`Duration` is a plain value; `sleep` is safe from every thread."
+blocking = "Task-aware: `sleep` parks a coroutine on the scheduler's timer heap, and any other thread sleeps."
+errors = "No errors: a duration saturates at the largest value instead of wrapping."
+
+[package.testing]
+tier = 5
+targets = { macos = "full", ios = "full", linux = "full", android = "reduced", windows = "reduced", wasm = "reduced" }
+limits = "Android: no allocation accounting. Windows: no allocation accounting and no fresh process per benchmark. WebAssembly: no allocation accounting, process CPU time, resident set or fresh process."
+capabilities = ["CPU cycle and process CPU time counters", "resident set queries", "`fork` for a fresh process per benchmark"]
+accelerations = []
+allocator = "Samples go into `Vector`s from `Global`; allocation accounting counts the binary's C `malloc`, `calloc` and `realloc` calls."
+thread_safety = "A `Bencher` serves one benchmark; allocation accounting is per thread."
+blocking = "Runs the measured work on the calling thread; a fresh-process run waits for its child."
+errors = "A counter a target lacks reports itself unavailable (-1), never zero."
+platform_ffi = ["bench", "bench_sys"]

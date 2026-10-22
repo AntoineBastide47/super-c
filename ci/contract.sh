@@ -4,9 +4,6 @@
 # `super-c release` the release profile.
 CONTRACT_BIN=./super-c
 
-# Every built-in profile but test must build the compiler on the host (`super-c build --profile=P`).
-# The `test` profile builds the test runner and the compiler under test, and `super-c test` exercises it.
-CONTRACT_PROFILES="debug release bench race"
 # The worker-count identity: gen2, `--jobs=1` (also compared with gen1's tree) against `--jobs=<max>` under
 # every SC_TASK_DELAY seed below: the same tree comparison, the SC_TYPE_TABLE dumps, the SC_ITEM_STATS
 # index digest and the diagnostics byte for byte. check.sh (the commit hook) runs these steps on each run

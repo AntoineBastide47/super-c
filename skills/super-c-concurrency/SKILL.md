@@ -458,7 +458,9 @@ one direction are all woken by its event and each retries. Every `net` handle cl
 a `close` overlapping a `kevent` registration of the same socket wedges both threads in
 the kernel for good, and the process stays unkillable in state `?E` until a reboot, so do
 not run wedge experiments casually; registering threads count themselves into per-slot counters and
-back off while a close is pending), then reports the close to the reactor: the record's
+back off while a close is pending), then reports the close to the reactor before the
+exclusion ends, so the first arm on a file that reuses the number follows the report (a
+report pushed after the exclusion once settled that arm as not ready): the record's
 generation moves on, every wait on the number settles as not ready at once, and an arm
 whose registration raced the close registers again and fails. The exclusion also holds
 while the reactor is stopping; once it has left, a close is a plain close. The leaving

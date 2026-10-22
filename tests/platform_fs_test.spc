@@ -248,7 +248,8 @@ fn remove_all_does_not_follow_links(fx: &mut Fx) {
 
 @test
 fn read_dir_lists_each_entry_once(fx: &mut Fx) {
-    ph::write_text(fx.s.at("b").as_str(), "");
+    // A name past the inline String budget: the listing's name buffer goes to the heap.
+    ph::write_text(fx.s.at("b_longer_than_the_inline_budget").as_str(), "");
     ph::write_text(fx.s.at("a").as_str(), "");
     fs::mkdir(fx.s.at("c").as_str()).unwrap();
     let mut names = Vector::<String>::new();
@@ -268,7 +269,7 @@ fn read_dir_lists_each_entry_once(fx: &mut Fx) {
     names.sort();
     assert_eq(names.len(), 3);
     assert(names.at(0).eq_str("a"));
-    assert(names.at(1).eq_str("b"));
+    assert(names.at(1).eq_str("b_longer_than_the_inline_budget"));
     assert(names.at(2).eq_str("c"));
     let mut empty = fs::read_dir(fx.s.at("c").as_str()).unwrap();
     assert(empty.next().is_none());
@@ -289,8 +290,11 @@ fn metadata_reports_kind_identity_links_and_times(fx: &mut Fx) {
     let mb = fs::stat(b.as_str()).unwrap();
     assert(ma.same_file(&mb));
     assert_eq(ma.links, 2);
-    let f = fs::open(b.as_str(), fs::OpenOptions { read: true }).unwrap();
-    assert(f.metadata().unwrap().same_file(&ma));
+    {
+        // Closed before the rename below: Windows does not replace an open file, it moves it aside.
+        let f = fs::open(b.as_str(), fs::OpenOptions { read: true }).unwrap();
+        assert(f.metadata().unwrap().same_file(&ma));
+    }
     let c = fx.s.at("c");
     ph::write_text(c.as_str(), "other");
     assert(!fs::stat(c.as_str()).unwrap().same_file(&ma));
@@ -345,7 +349,7 @@ fn temp_dir_is_a_directory_without_a_trailing_separator() {
     assert(!path::is_separator(t.byte(t.len() - 1)));
     assert(fs::stat(t.as_str()).unwrap().kind == fs::FileKind::Dir);
     if PLATFORM == Platform::Windows {
-        assert(t.find("\\") == usize::MAX);
+        assert(!t.contains_byte(b'\\'));
     }
 }
 

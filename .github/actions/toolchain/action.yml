@@ -17,7 +17,7 @@ inputs:
     description: "the commit under test, the last part of the object cache key"
     required: true
   role:
-    description: "a job outside the platform cache (gate, profiles, counts, checks): its own delta is restored too"
+    description: "a job outside the platform cache (gate, counts, checks): its own delta is restored too"
     required: false
     default: ""
   save:
