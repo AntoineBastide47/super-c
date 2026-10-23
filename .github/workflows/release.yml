@@ -211,6 +211,8 @@ jobs:
           chmod +x "./$bin"
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
           dur=tests/durations/${{ matrix.target }}.tsv; [ -f "$dur" ] || dur=tests/durations.tsv # shard balance (test-durations.yml)
+          # The first shard of each target also checks both builds with LIR (check.sh's SC_LIR); the C is the same.
+          if [ "${{ matrix.cache_shard }}" = 1 ]; then export SC_LIR=1; fi
           SC_LEAK_CHECK=fatal "./$bin" test --sanitizers --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur" \
             --test-record-durations="durations-${{ matrix.target }}-${{ matrix.cache_shard }}.tsv" ${cstd:+"$cstd"}
 

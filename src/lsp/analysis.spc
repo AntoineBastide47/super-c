@@ -12,6 +12,7 @@ import ast::parser as par;
 import lexer::lexer as lex;
 import resolver::resolver as resolver;
 import hir::lower as hirl;
+import target::table as tgt;
 import typechecker::typechecker as tc;
 import borrowck::facts as bfx;
 import borrowck::flow_ir as bfi;
@@ -211,7 +212,7 @@ fn lsp_build_settings(dir: str, target: i32) BuildSettings {
     let bi = bman::builtins_only();
     return BuildSettings {
         arch: arch,
-        features: cf::close(cf::baseline(target, arch)),
+        features: cf::close(tgt::baseline(target, arch)),
         profiles: bsys::profile_names(&bi),
     };
 }
@@ -2039,14 +2040,12 @@ fn analysis_errors(p: &loader::Package, diags: &Vector<DiagRec>) Vector<bool> {
     return err;
 }
 
-// The instruction set the driver builds for `target` without `--arch`: wasm32 for wasm, aarch64 for
-// iOS and Android, else the host's.
+// The instruction set the driver builds for `target` without `--arch`: the system's usual one, else the
+// host's.
 const fn target_arch(target: i32) i32 {
-    if target == 3 {
-        return 2;
-    }
-    if target == 4 || target == 5 {
-        return 1;
+    let d = tgt::os(target).isa_default;
+    if d >= 0 {
+        return d;
     }
     return unsafe shim::sc_host_arch();
 }

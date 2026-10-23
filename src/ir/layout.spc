@@ -6,6 +6,7 @@
 import ast::ast as *;
 import module::loader as loader;
 import ir::interp as iri;
+import target::table as tgt;
 
 /// Immutable target data. Every supported target currently shares the flat C data model except for
 /// pointer width; new axes (endianness, aggregate rules) join here, not at call sites.
@@ -13,12 +14,10 @@ pub struct Target {
     pub ptr: u64, // pointer size == alignment
 }
 
-/// The target record for a package's instruction-set selection (loader arch codes; 2 = wasm32).
+/// The target record for a package's instruction set (a `target::table::ISAS` index; -1, unknown,
+/// lays out as 64-bit).
 pub const fn target_for(arch: i32) Target {
-    if arch == 2 {
-        return Target { ptr: 4 };
-    }
-    return Target { ptr: 8 };
+    return Target { ptr: tgt::isa(arch).ptr_bytes };
 }
 
 pub struct Layout {

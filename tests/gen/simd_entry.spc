@@ -4,6 +4,7 @@
 // tests the model has no operation for. The oracle builds each program twice, planned and with the
 // planner forced to lane loops (SC_SIMD_SCALAR=1), and requires the same value or trap per case, and
 // a call of every entry in the planned C.
+import target::table as tgt;
 import tests::gen::driver as gen;
 import tests::gen::vector as vec;
 import tests::harness as h;
@@ -516,7 +517,7 @@ fn mask_form_instead(es: &Vector<Entry>, e: &Entry, seen: &String) bool {
 pub fn run_features(with_more: bool) cf::CpuFeatureSet {
     let t = unsafe shim::sc_host_platform();
     let a = unsafe shim::sc_host_arch();
-    let mut s = cf::baseline(t, a);
+    let mut s = tgt::baseline(t, a);
     let mut err = String::new();
     let more = stdlib::getenv("SC_SIMD_FEATURES");
     if with_more && more != null {

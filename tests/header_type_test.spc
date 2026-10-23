@@ -544,6 +544,26 @@ fn header_enum_wrong_spelling() {
     assert(next < 0 || msg < first + 6 + next, "the first error shows the completeness check");
 }
 
+// An extern enum that skips an enumerator gives the ones after it values the header does not: the C
+// compile stops at the first enumerator whose value differs, with a message that names it.
+@test
+fn header_enum_wrong_value() {
+    let p = h::diff_proj();
+    p.mkfile("lib.h", ENUM_H);
+    p.mkfile(
+        "main.spc",
+        "extern \"C\" \"lib.h\" {\n    enum color { RED, BLUE }\n}\n\nfn main() i32 {\n    let c = color::BLUE;\n    return c as i32 - 1;\n}\n",
+    );
+    let b = h::diff_build_in(p, ["--jobs=1"]);
+    let d = b.diag.as_str();
+    if b.built || d.find("super-c: 'color::BLUE' must be 1 in C") < 0 {
+        eprintln("{}", d);
+    }
+    assert(!b.built, "the C compile fails");
+    assert(d.find("super-c: 'color::BLUE' must be 1 in C") >= 0, "the check names the enumerator and its value");
+    assert(d.find("'color::RED'") < 0, "an enumerator of the header's value passes");
+}
+
 // `struct stat` of each target's C library, every member in its order, as the build's feature macros
 // (`_POSIX_C_SOURCE=200809L`) define it.
 const STAT: str = M"(extern "C" "sys/stat.h" {

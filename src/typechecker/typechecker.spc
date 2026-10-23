@@ -15,6 +15,7 @@ import pattern::pattern as pat;
 import ir::interp as iri;
 import ir::core as ir;
 import ir::layout as lay;
+import target::table as tgt;
 import typechecker::infer as inf;
 import utils::errors as diag;
 import ir::cpu_features as cf;
@@ -2403,11 +2404,12 @@ extend<'a> TypeChecker<'a> {
         let a = self.cur_ast();
         let sp = self.name_span(fnd.name);
         let pk = unsafe &*self.package;
-        if pk.arch == 2 {
+        if !tgt::isa(pk.arch).naked {
             self.errors.emit_span(
                 sp,
                 format(
-                    "'@unsafe(naked)' is not supported on wasm32: a WebAssembly function has no prologue or epilogue",
+                    "'@unsafe(naked)' is not supported on {}: a function there has no prologue or epilogue to omit",
+                    tgt::isa(pk.arch).name,
                 ),
             );
             return;
@@ -2521,10 +2523,10 @@ extend<'a> TypeChecker<'a> {
         }
         let sp = unsafe (*at).str_span;
         let name = diag::span_str(self.source, sp.start, sp.end);
-        let target = unsafe (*self.package).build_target;
-        let macho = target == 1 || target == 4;
+        let sections = tgt::obj_of(unsafe (*self.package).build_target).sections;
+        let macho = sections == tgt::SEC_MACHO;
         let mut why: str = "";
-        if is_fn && target == 3 {
+        if is_fn && sections == tgt::SEC_DATA_ONLY {
             why = "a WebAssembly function is always in the code section";
         } else if name.len() == 0 {
             why = "the name is empty";

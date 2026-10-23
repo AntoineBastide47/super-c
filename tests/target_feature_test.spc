@@ -7,6 +7,7 @@ import build_system::build as bsys;
 import build_system::manifest as mf;
 import std::cpu;
 import std::simd;
+import target::table as tgt;
 import tests::harness as h;
 import tests::cli_harness as cli;
 import string as cstring;
@@ -49,7 +50,7 @@ static_assert(ops_match(), "std::simd::Op follows the compiler's operation table
 // implies; a name of another instruction set or an unknown one is an error listing the valid names.
 @test
 fn feature_lists_apply_in_order_and_close() {
-    let mut s = cf::baseline(3, 2);
+    let mut s = tgt::baseline(3, 2);
     let mut err = String::new();
     assert(cf::is_empty(s), "wasm32 has no baseline feature");
     assert(cf::apply("+relaxed-simd", 3, 2, true, &mut s, &mut err), "a known name");
@@ -63,13 +64,13 @@ fn feature_lists_apply_in_order_and_close() {
     err.clear();
     assert(!cf::apply("+bogus", 3, 2, true, &mut s, &mut err), "an unknown feature");
     assert_eq(err.as_str(), "unknown target feature 'bogus' for wasm32; the wasm32 features are: simd128, relaxed-simd");
-    assert(cf::has(cf::baseline(2, 0), 2) && cf::has(cf::baseline(2, 1), 3), "sse2 and neon are the baselines");
+    assert(cf::has(tgt::baseline(2, 0), 2) && cf::has(tgt::baseline(2, 1), 3), "sse2 and neon are the baselines");
     err.clear();
     assert(!cf::apply("-sse2", 2, 0, true, &mut s, &mut err), "a baseline feature stays");
     assert_eq(err.as_str(), "target feature 'sse2' is part of every x86_64 build");
     // A lenient list (build.toml) skips another instruction set's features; an unknown name fails.
-    let mut h = cf::baseline(2, 1);
-    assert(cf::apply("+simd128", 2, 1, false, &mut h, &mut err) && h.w[0] == cf::baseline(2, 1).w[0], "skipped");
+    let mut h = tgt::baseline(2, 1);
+    assert(cf::apply("+simd128", 2, 1, false, &mut h, &mut err) && h.w[0] == tgt::baseline(2, 1).w[0], "skipped");
     err.clear();
     assert(!cf::apply("+simd128", 2, -1, true, &mut h, &mut err), "an unknown instruction set");
     assert_eq(err.as_str(), "no target feature 'simd128' for this instruction set; it has none");
@@ -79,40 +80,40 @@ fn feature_lists_apply_in_order_and_close() {
 // name their default CPU, the others `armv8-a`; a platform's baseline feature stays.
 @test
 fn aarch64_baselines_and_c_flags() {
-    let mac = cf::baseline(1, 1);
-    let lin = cf::baseline(2, 1);
-    let ios = cf::baseline(4, 1);
+    let mac = tgt::baseline(1, 1);
+    let lin = tgt::baseline(2, 1);
+    let ios = tgt::baseline(4, 1);
     assert(
         cf::count(lin) == 1 && cf::count(ios) == 3 && cf::count(mac) == 9,
         "neon; aes, sha2; fp16 dotprod rdm sha3 crc lse",
     );
-    assert(cf::baseline(0, 1).w[0] == lin.w[0] && cf::baseline(5, 1).w[0] == lin.w[0], "Windows and Android: neon");
+    assert(tgt::baseline(0, 1).w[0] == lin.w[0] && tgt::baseline(5, 1).w[0] == lin.w[0], "Windows and Android: neon");
     let mut f = String::new();
-    cf::push_c_flags(mac, 1, &mut f);
-    cf::push_c_flags(lin, 2, &mut f);
-    cf::push_c_flags(ios, 4, &mut f);
+    cf::push_c_flags(mac, 1, 1, &mut f);
+    cf::push_c_flags(lin, 2, 1, &mut f);
+    cf::push_c_flags(ios, 4, 1, &mut f);
     assert_eq(f.as_str(), "");
     let mut s = lin;
     let mut err = String::new();
     assert(cf::apply("+dotprod,+i8mm,+rdm,+sve2", 2, 1, true, &mut s, &mut err), "optional features");
-    cf::push_c_flags(cf::close(s), 2, &mut f);
+    cf::push_c_flags(cf::close(s), 2, 1, &mut f);
     assert_eq(f.as_str(), " -march=armv8.2-a+fp16+dotprod+i8mm+sve+sve2");
     f.clear();
-    cf::push_c_flags(cf::close(cf::join(mac, s)), 1, &mut f);
+    cf::push_c_flags(cf::close(cf::join(mac, s)), 1, 1, &mut f);
     assert_eq(f.as_str(), " -mcpu=apple-m1+i8mm+sve+sve2");
     f.clear();
-    cf::push_c_flags(cf::with(ios, cf::F_DOTPROD), 4, &mut f);
+    cf::push_c_flags(cf::with(ios, cf::F_DOTPROD), 4, 1, &mut f);
     assert_eq(f.as_str(), " -march=armv8.2-a+dotprod+aes+sha2");
     f.clear();
-    cf::push_c_flags(cf::close(cf::with(cf::with(lin, 6), 9)), 2, &mut f);
+    cf::push_c_flags(cf::close(cf::with(cf::with(lin, 6), 9)), 2, 1, &mut f);
     assert_eq(f.as_str(), " -march=armv8.1-a+aes");
     // An Armv8.2-A feature implies the Armv8.1-A ones its flag brings; `sha3` implies `sha2`.
     let d = cf::close(cf::with(lin, cf::F_DOTPROD));
     assert(cf::has(d, 6) && cf::has(d, 12) && cf::has(d, 13), "dotprod: rdm, crc, lse");
     f.clear();
-    cf::push_c_flags(cf::close(cf::with(lin, 11)), 2, &mut f);
+    cf::push_c_flags(cf::close(cf::with(lin, 11)), 2, 1, &mut f);
     assert_eq(f.as_str(), " -march=armv8.2-a+sha2+sha3");
-    let mut a = cf::baseline(1, 1);
+    let mut a = tgt::baseline(1, 1);
     assert(!cf::apply("+sve", 1, 1, true, &mut a, &mut err), "no Apple core has SVE");
     assert_eq(err.as_str(), "target feature 'sve' exists on no macos machine");
     err.clear();
@@ -136,10 +137,10 @@ fn aarch64_baselines_and_c_flags() {
 // default never decides), then each other feature's flag.
 @test
 fn x86_levels_and_c_flags() {
-    let lin = cf::baseline(2, 0);
+    let lin = tgt::baseline(2, 0);
     assert(
-        cf::count(lin) == 1 && cf::count(cf::baseline(1, 0)) == 5 && cf::count(cf::baseline(4, 0)) == 5 && cf::count(
-            cf::baseline(5, 0),
+        cf::count(lin) == 1 && cf::count(tgt::baseline(1, 0)) == 5 && cf::count(tgt::baseline(4, 0)) == 5 && cf::count(
+            tgt::baseline(5, 0),
         ) == 7,
         "sse2; core2; core2; the Android ABI",
     );
@@ -160,11 +161,11 @@ fn x86_levels_and_c_flags() {
     ];
     for c in cases {
         let t = (c[1].byte_at(0) - b'0') as i32;
-        let mut s = cf::baseline(t, 0);
+        let mut s = tgt::baseline(t, 0);
         let mut err = String::new();
         assert(cf::apply(c[0], t, 0, true, &mut s, &mut err), c[0]);
         let mut f = String::new();
-        cf::push_c_flags(cf::close(s), t, &mut f);
+        cf::push_c_flags(cf::close(s), t, 0, &mut f);
         assert_eq(f.as_str(), c[2]);
     }
     let ten = cf::close(cf::with(lin, 47));
@@ -176,7 +177,7 @@ fn x86_levels_and_c_flags() {
         err.as_str(),
         "unknown target CPU 'x86-64-v9'; the x86_64 levels are: x86-64, x86-64-v2, x86-64-v3, x86-64-v4",
     );
-    let mut a = cf::baseline(2, 1);
+    let mut a = tgt::baseline(2, 1);
     assert(cf::apply("x86-64-v3", 2, 1, false, &mut a, &mut err) && cf::count(a) == 1, "a lenient list skips it");
     assert(cf::apply("aes", 2, 0, true, &mut s, &mut err) && cf::has(s, 45), "x86 aes");
     assert(cf::apply("aes", 2, 1, true, &mut a, &mut err) && cf::has(a, 9), "aarch64 aes");
@@ -217,7 +218,7 @@ fn manifest_and_command_line_features() {
     // another build; an unknown name is an error.
     m.arch = 0;
     assert(bsys::check_features(&m, ""), "a native build of a project with a wasm32 list");
-    assert(bsys::features_for(&m, "relaxed", "").w[0] == cf::baseline(m.target, 0).w[0], "the baseline alone");
+    assert(bsys::features_for(&m, "relaxed", "").w[0] == tgt::baseline(m.target, 0).w[0], "the baseline alone");
     p.mkfile(
         "build.toml",
         "bin = \"app\"\nroot = \"main.spc\"\n[profile.web]\ntarget-features = [\"sse2\", \"bogus\"]\n",

@@ -12,6 +12,7 @@ import module::loader as loader;
 import ast::ast as *;
 import driver::util as *;
 import string as cstring;
+import target::table as tgt;
 
 /// A temp file an interrupted install left behind is removed after this many seconds.
 pub const TMP_IDLE: i64 = 3600;
@@ -386,7 +387,7 @@ pub fn which_path(cmd: str, out: &mut String) i64 {
         e += 1;
     }
     let name = cmd.slice(0, e);
-    let win = unsafe shim::sc_host_platform() == 0;
+    let win = PLATFORM == Platform::Windows;
     let mut cand = String::new();
     let mut has_dir = false;
     for i in 0..name.len() {
@@ -453,7 +454,7 @@ fn cc_identity(cc: str) String {
     let mut path = String::new();
     let mt = which_path(cc, &mut path);
     let mut id = format("{}\t{}\t{}", cc, path.as_str(), mt);
-    if unsafe shim::sc_host_platform() == 1 && path.as_str().starts_with("/usr/bin/") {
+    if PLATFORM == Platform::MacOS && path.as_str().starts_with("/usr/bin/") {
         let env = stdlib::get_env("DEVELOPER_DIR").unwrap_or(String::new());
         let link = xcode_select_dir();
         id.format_into(
@@ -548,7 +549,8 @@ pub fn ccver_record(cc: str, line: &String) {
 /// toolchain; with the object cache off, once per call, its output captured in directory `dir`. `cc`
 /// unchanged otherwise: a lookup that fails, or a path with a space (the command is split at spaces).
 pub fn direct_cc(cc: String, target: i32, dir: str) String {
-    if target != 1 || unsafe shim::sc_host_platform() != 1 {
+    let o = tgt::os(target);
+    if target != unsafe shim::sc_host_platform() || !o.darwin || o.sdk != tgt::SDK_NONE {
         return cc;
     }
     let mut path = String::new();

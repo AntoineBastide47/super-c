@@ -12,6 +12,7 @@ import driver::util as *;
 import build_system::objcache as oc;
 import bindgen::ctarget_data as data;
 import bindgen::ctarget_headers as hdrs;
+import target::table as tgt;
 
 /// The directory name of the built-in headers in `CTarget.sys_dirs`; `builtin_header` serves its files.
 pub const BUILTIN_DIR: str<'static> = "<super-c>";
@@ -101,20 +102,11 @@ fn fill_tables(row: &data::Row, out: &mut CTarget) {
     merge_layers(row.layers, hl, &mut out.has);
 }
 
-const fn arch_bit(arch: i32) u8 {
-    if arch == 0 {
-        return 1;
-    }
-    if arch == 1 {
-        return 2;
-    }
-    return 4;
-}
-
+// `Header.arch` holds bit `i` for instruction set `i` (a `target::table::ISAS` index).
 fn fill_headers(arch: i32, out: &mut CTarget) {
     let hs: []hdrs::Header = hdrs::HEADERS;
     for i in 0..hs.len() {
-        if (hs[i].arch & arch_bit(arch)) != 0 {
+        if (hs[i].arch >> arch as u8 & 1) != 0 {
             out.headers.push(hs[i].name);
         }
     }
@@ -143,10 +135,10 @@ fn no_sysroot(row: &data::Row, hint: str) bool {
 
 // The SDK of an Apple target, found as `xcrun` finds it from the build's toolchain lookup (`objcache::cc_identity`):
 // $SDKROOT (macOS only), else the SDKs of $DEVELOPER_DIR, the `xcode-select` directory and the Command Line Tools,
-// in that order. No process runs. The iOS x86_64 target is the simulator.
-fn apple_sdk(row: &data::Row, out: &mut String) bool {
-    // `xcrun --sdk` ignores $SDKROOT for iOS, so does this; "/" counts as unset.
-    if row.target == 1 {
+// in that order. No process runs. The SDK's platform name is the target's (`apple_sdk`).
+fn apple_sdk(t: &tgt::Target, out: &mut String) bool {
+    // `xcrun --sdk` honors $SDKROOT only for the system it runs on, so does this; "/" counts as unset.
+    if tgt::os(t.os).sdk == tgt::SDK_NONE {
         let env = stdlib::get_env("SDKROOT").unwrap_or(String::new());
         let root = trim_slashes(env.as_str());
         if root.len() != 0 && is_dir(root) {
@@ -154,17 +146,10 @@ fn apple_sdk(row: &data::Row, out: &mut String) bool {
             return true;
         }
     }
-    if unsafe shim::sc_host_platform() != 1 {
+    if !tgt::os(unsafe shim::sc_host_platform()).darwin {
         return false;
     }
-    let mut platform = "MacOSX";
-    if row.target == 4 {
-        platform = if row.arch == 0 {
-            "iPhoneSimulator";
-        } else {
-            "iPhoneOS";
-        };
-    }
+    let platform = t.apple_sdk;
     let devs = [
         stdlib::get_env("DEVELOPER_DIR").unwrap_or(String::new()),
         oc::xcode_select_dir(),
@@ -187,9 +172,9 @@ fn apple_sdk(row: &data::Row, out: &mut String) bool {
 }
 
 // Clang searches `<sdk>/usr/local/include`, its resource directory, then `<sdk>/usr/include`.
-fn apple_dirs(row: &data::Row, sysroot: str, out: &mut CTarget) bool {
+fn apple_dirs(t: &tgt::Target, row: &data::Row, sysroot: str, out: &mut CTarget) bool {
     let mut sdk = String::from_str(trim_slashes(sysroot));
-    if sysroot.len() == 0 && !apple_sdk(row, &mut sdk) {
+    if sysroot.len() == 0 && !apple_sdk(t, &mut sdk) {
         return no_sysroot(row, "set SDKROOT or DEVELOPER_DIR, or pass the SDK path");
     }
     let base = sdk.as_str();
@@ -213,16 +198,12 @@ fn elf_dirs(root: str, dir: str, out: &mut Vector<String>) {
     push_dir(root, "/usr/include", out);
 }
 
-const fn is_host(row: &data::Row) bool {
-    return unsafe shim::sc_host_platform() == row.target && unsafe shim::sc_host_arch() == row.arch;
-}
-
-fn linux_dirs(row: &data::Row, sysroot: str, out: &mut CTarget) bool {
+fn linux_dirs(t: &tgt::Target, row: &data::Row, sysroot: str, out: &mut CTarget) bool {
     if sysroot.len() == 0 {
         // The running system serves its own architecture; another one only through a multiarch
         // directory that holds that architecture's headers.
         let multiarch = format("/usr/include/{}", row.dir);
-        let ok = unsafe shim::sc_host_platform() == 2 && is_dir("/usr/include") && (is_host(row) || is_dir(
+        let ok = unsafe shim::sc_host_platform() == t.os as i32 && is_dir("/usr/include") && (unsafe shim::sc_host_arch() == t.isa as i32 || is_dir(
             multiarch.as_str(),
         ));
         if !ok {
@@ -323,7 +304,7 @@ fn wasm_dirs(row: &data::Row, sysroot: str, out: &mut CTarget) bool {
     return true;
 }
 
-/// Fills `out` with the C environment of `target` and `arch` (`PLATFORM_NAMES` and `ARCH_NAMES` indexes, as every
+/// Fills `out` with the C environment of `target` and `arch` (`target::table` indexes, as every
 /// driver entry takes them). `sysroot` is the target's C library tree: the SDK of macOS and iOS, the root of a
 /// Linux or Android tree, the root of a mingw-w64 tree, the wasi sysroot. Empty: discover it, as the
 /// build does where it can: `$SDKROOT`, then the SDKs of `$DEVELOPER_DIR`, `xcode-select` and the
@@ -333,21 +314,24 @@ fn wasm_dirs(row: &data::Row, sysroot: str, out: &mut CTarget) bool {
 /// `$WASI_SYSROOT` for wasm. Returns false, with a message on stderr, for an unknown pair or when no
 /// sysroot exists.
 pub fn c_target(target: i32, arch: i32, sysroot: str, out: &mut CTarget) bool {
-    let ri = data::find_row(target, arch);
-    if ri < 0 {
+    let to = tgt::target_of(target, arch);
+    if to.is_none() {
         eprintln("super-c: no C environment for target code {} with arch code {}", target, arch);
         return false;
     }
+    let tv = to.unwrap();
+    let t = &tv;
     let rows: []data::Row = data::ROWS;
-    let row = &rows[ri as usize];
+    let row = &rows[t.cenv as usize];
     *out = CTarget::new();
-    let ok = if target == 1 || target == 4 {
-        apple_dirs(row, sysroot, out);
-    } else if target == 2 {
-        linux_dirs(row, sysroot, out);
-    } else if target == 5 {
+    let sr = tgt::os(target).sysroot;
+    let ok = if sr == tgt::SYSROOT_APPLE {
+        apple_dirs(t, row, sysroot, out);
+    } else if sr == tgt::SYSROOT_LINUX {
+        linux_dirs(t, row, sysroot, out);
+    } else if sr == tgt::SYSROOT_ANDROID {
         android_dirs(row, sysroot, out);
-    } else if target == 0 {
+    } else if sr == tgt::SYSROOT_MINGW {
         windows_dirs(row, sysroot, out);
     } else {
         wasm_dirs(row, sysroot, out);
@@ -439,7 +423,8 @@ fn apply_std(predefs: &mut String, std: str) bool {
     if strict {
         define(predefs, "__STRICT_ANSI__ 1");
         // The names that are not in the implementation's namespace go.
-        for n in ["linux", "unix", "WIN32", "WIN64", "WINNT"] {
+        let names: []str<'static> = tgt::STRICT_UNDEFINED;
+        for n in names {
             undefine(predefs, n);
         }
     }

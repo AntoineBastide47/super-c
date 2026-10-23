@@ -15,6 +15,7 @@ import ast::facts as facts;
 import module::loader as loader;
 import resolver::resolver as resolver;
 import hir::lower as hirl;
+import target::table as tgt;
 import typechecker::typechecker as tc;
 import borrowck::borrowck as bck;
 import borrowck::flow_ir as bfi;
@@ -34,6 +35,7 @@ import ir::recursion as recur;
 import ir::layout as lay;
 import ir::cpu_features as cf;
 import emit::cemit as cbe;
+import lir::lower as lw;
 import emit::cflow as cfl;
 import emit::probe as prb;
 import emit::mangle as mbe;
@@ -1251,7 +1253,7 @@ fn feature_use(p: &loader::Package, m: usize, fc: &FeatureCall) u8 {
         fc.callee.node,
         AttrKind::ATTR_ALWAYS_INLINE,
     ) != null;
-    return pick(p.arch == 2 || inl, 2u8, 1u8);
+    return pick(!tgt::isa(p.arch).fn_features || inl, 2u8, 1u8);
 }
 
 // Each reported module's `feature_lints`, as lints.
@@ -1277,7 +1279,7 @@ pub fn feature_lints(p: &loader::Package, m: usize, errs: &mut diag::Errors) {
         let fr = *a.feature_rows.at(k);
         let need = p.fn_features(fr.callee.module, fr.callee.node);
         let have = cf::close(cf::with(p.features, fr.feature as usize));
-        if p.arch != 2 && !cf::contains(have, need) {
+        if tgt::isa(p.arch).fn_features && !cf::contains(have, need) {
             let mut miss = String::new();
             for b in 0..cf::FEATURE_COUNT {
                 if cf::has(need, b) && !cf::has(have, b) {
@@ -1344,7 +1346,7 @@ fn feature_err(
     let ca = &p.modules[m as usize].ast;
     let nm = ca.at_const(ca.at_const(f).as_data.function.name).as_data.name.text;
     let fname = p.modules[m as usize].source.as_str().slice(nm.start as usize, nm.end as usize);
-    if p.arch == 2 || why.len() != 0 {
+    if !tgt::isa(p.arch).fn_features || why.len() != 0 {
         errs.emit_span(
             sp,
             format("`{}` needs `{}` (`--target-feature={}`){}", fname, miss.as_str(), miss.as_str(), why),
@@ -2754,7 +2756,7 @@ fn cemit_seed_module(
         if n.as_data.function.is_extern() || n.as_data.function.body == NODE_NONE {
             continue;
         }
-        if n.as_data.function.needs_features() && (a.attr_of(nid, AttrKind::ATTR_SIMD_IMPL) != null || p.arch == 2 && !cf::contains(
+        if n.as_data.function.needs_features() && (a.attr_of(nid, AttrKind::ATTR_SIMD_IMPL) != null || !tgt::isa(p.arch).fn_features && !cf::contains(
             p.features,
             p.fn_features(m as ModuleId, nid),
         )) {
@@ -3973,6 +3975,7 @@ fn cemit_seed_merge_um(cem: &mut cbe::CEmit, o: &mut SeedShard) {
 }
 
 fn cemit_take_refused(cem: &mut cbe::CEmit, o: &mut SeedShard) {
+    cem.lir_absorb(&mut o.cem);
     for i in 0..o.cem.refused.len() {
         cem.refused.push(o.cem.refused[i]);
     }
@@ -4473,6 +4476,20 @@ pub fn cemit_package(
         eprint("cemit-stage inst-asserts: {} ms, {} instances\n", t9 - tt0, ian);
         tt0 = t9;
     }
+    // The LIR check compares each test's CTFE run with the evaluator's: CTFE reads the syntax.
+    let mut ctfe = Vector::<lw::CtfeRes>::new();
+    if testing && stdlib::getenv("SC_LIR") != null {
+        let mut ts = Vector::<u64>::new();
+        let mut sp = Vector::<bool>::new();
+        for i in 0..tplan.cases.len() {
+            let tc = tplan.cases[i];
+            if tc.wants == 0 {
+                ts.push(tc.mod as u64 << 32 | tc.func as u64);
+                sp.push(tc.should_panic);
+            }
+        }
+        ctfe = lw::probe_tests(p, &ts, &sp);
+    }
     // Every body is lowered and kept, every constant and static_assert is evaluated, and the live
     // set and the emit order have read their last reference: the body syntax has no reader left.
     p.release_bodies();
@@ -4515,6 +4532,9 @@ pub fn cemit_package(
     // recorded substitution chain. The drained symbol set is the closed instance set the old
     // propagation computed, derived from Core IR alone.
     let mut cem = cbe::CEmit::new(p);
+    if let Some(l) = &mut cem.lir {
+        l.deref_mut().ctfe = ctfe;
+    }
     cem.collect_demand = true;
     cem.mg.agg_on = true;
     cem.mg.share_short(&mut em.mg);
@@ -5458,6 +5478,22 @@ pub fn cemit_package(
                 // of the constant's type.
                 v = cdit.cell_of(v, em2, cty);
             }
+            // The LIR check defines the item as data too: its read-only, thread-local and alignment.
+            let mut lro = false;
+            let mut ltls = false;
+            let mut lal: u64 = 0;
+            if cem.lir.is_some() {
+                lro = cem.stat_ro(cdef, em2, cty);
+                ltls = cda.attr_of(cdef.node, AttrKind::ATTR_THREAD_LOCAL) != null;
+                let at = cda.attr_of(cdef.node, AttrKind::ATTR_ALIGN);
+                if at != null {
+                    lal = if unsafe (*at).expr {
+                        cda.attr_value(cdef.node, AttrKind::ATTR_ALIGN).v;
+                    } else {
+                        unsafe (*at).arg;
+                    };
+                }
+            }
             // Array-of-string consts render from their literal initializer directly.
             if v.kind == iri::IV_OBJ || v.kind == iri::IV_NONE {
                 let vn0 = cda.at_const(cdn.as_data.const_def.value);
@@ -5467,6 +5503,7 @@ pub fn cemit_package(
                         line3.push_str(" = {0};\n");
                         cdefs.txt.push_string(&line3);
                         cd_ok += 1;
+                        lir_zero(&mut cem, csym.as_str(), em2, cty, lro, ltls, lal);
                         continue;
                     }
                 }
@@ -5553,6 +5590,18 @@ pub fn cemit_package(
                     if ok2 {
                         cdefs.txt.push_string(&line2);
                         cd_ok += 1;
+                        lir_elems(
+                            &mut cem,
+                            &mut cdit,
+                            csym.as_str(),
+                            em2,
+                            cty,
+                            cdef.module,
+                            vn0.as_data.array_literal.elements,
+                            lro,
+                            ltls,
+                            lal,
+                        );
                         continue;
                     }
                 }
@@ -5592,6 +5641,7 @@ pub fn cemit_package(
                     &mut rootd3,
                 ) {
                     cd_ok += 1;
+                    lir_group(&mut cem, &cdit, csym.as_str(), root3 as u32, lro, ltls, lal);
                     continue;
                 }
             }
@@ -5636,6 +5686,7 @@ pub fn cemit_package(
                 line.push_str(";\n");
                 cdefs.txt.push_string(&line);
                 cd_ok += 1;
+                lir_value(&mut cem, &mut cdit, csym.as_str(), em2, cty, v, lro, ltls, lal);
             } else {
                 if verbose {
                     eprint("const-skip: `{}` kind {}\n", csym.as_str(), v.kind);
@@ -5654,10 +5705,10 @@ pub fn cemit_package(
     // @reflect exports + `type_info` descriptor groups: the CTFE static graph rendered as file-
     // scope const data (extern roots; `__ct%u` auxiliaries static per group).
     // Descriptor roots the registry indexes carry hidden visibility where the target supports it.
-    let vis9 = if target == 0 {
-        "";
-    } else {
+    let vis9 = if tgt::obj_of(target).hidden {
         "__attribute__((visibility(\"hidden\"))) ";
+    } else {
+        "";
     };
     let mut sdefs = Segs::new();
     let mut tdecl = Segs::new();
@@ -5689,6 +5740,7 @@ pub fn cemit_package(
                     let mut rootd = String::new();
                     ok9b = st_define(p, &mut cem, &cdit, sym9.as_str(), root9, "const ", &mut sdefs.txt, &mut rootd);
                     if ok9b {
+                        lir_group(&mut cem, &cdit, sym9.as_str(), root9, true, false, 0);
                         tdecl.txt.push_str("extern const ");
                         tdecl.txt.push_string(&rootd);
                         tdecl.txt.push_str(";\n");
@@ -5772,6 +5824,7 @@ pub fn cemit_package(
                     if ok9b {
                         reg_names.push(nm9.clone());
                         reg_decls.push(rootd.clone());
+                        lir_group(&mut cem, &cdit, nm9.as_str(), root9, true, false, 0);
                     }
                     if ok9b {
                         ti_ok += 1;
@@ -5853,6 +5906,18 @@ pub fn cemit_package(
     }
     prd.merge(&dow.pr);
     prd.merge(&cem.pr);
+    // The LIR check of a build that emitted every body (a refused one fails the build already).
+    if cem.lir.is_some() && p.ok && cem.refused.len() == 0 {
+        let mut l = replace(&mut cem.lir, Option::<Box<lw::Lower>>::None).unwrap();
+        let mut text = String::new();
+        if !l.deref_mut().check_all(p, &mut text) {
+            p.ok = false;
+        }
+        let tp = stdlib::get_env("SC_LIR_TEXT");
+        if tp.is_some() {
+            let _ = write_file(tp.unwrap().as_str(), text.as_str());
+        }
+    }
     o.refused = replace(&mut cem.refused, Vector::<cbe::Refusal>::new());
     p.inl_store = null;
     bst::relower(prd.c[prb::C_RELOWER_REFLECT], prd.c[prb::C_RELOWER_ZST]);
@@ -6725,6 +6790,65 @@ fn st_define(
     return true;
 }
 
+// The LIR check's data for an emitted constant or static: its CTFE value `v`, its zero bytes, or its
+// captured group `root` (`Lower::static_value`, `static_zero`, `static_group`).
+fn lir_value(
+    cem: &mut cbe::CEmit,
+    cev: &mut iri::Interp,
+    name: str,
+    em: ModuleId,
+    ty: TypeId,
+    v: iri::IVal,
+    ro: bool,
+    tls: bool,
+    al: u64,
+) {
+    if cem.lir.is_none() {
+        return;
+    }
+    let mut l = replace(&mut cem.lir, Option::<Box<lw::Lower>>::None).unwrap();
+    l.deref_mut().static_value(cem, cev, name, em, ty, v, ro, tls, al);
+    cem.lir = Option::<Box<lw::Lower>>::Some(l);
+}
+
+fn lir_elems(
+    cem: &mut cbe::CEmit,
+    cev: &mut iri::Interp,
+    name: str,
+    em: ModuleId,
+    ty: TypeId,
+    cm: ModuleId,
+    els: NodeList,
+    ro: bool,
+    tls: bool,
+    al: u64,
+) {
+    if cem.lir.is_none() {
+        return;
+    }
+    let mut l = replace(&mut cem.lir, Option::<Box<lw::Lower>>::None).unwrap();
+    l.deref_mut().static_elems(cem, cev, name, em, ty, cm, els, ro, tls, al);
+    cem.lir = Option::<Box<lw::Lower>>::Some(l);
+}
+
+fn lir_zero(cem: &mut cbe::CEmit, name: str, em: ModuleId, ty: TypeId, ro: bool, tls: bool, al: u64) {
+    if cem.lir.is_none() {
+        return;
+    }
+    let mut l = replace(&mut cem.lir, Option::<Box<lw::Lower>>::None).unwrap();
+    l.deref_mut().static_zero(cem, name, em, ty, ro, tls, al);
+    cem.lir = Option::<Box<lw::Lower>>::Some(l);
+}
+
+fn lir_group(cem: &mut cbe::CEmit, cev: &iri::Interp, name: str, root: u32, ro: bool, tls: bool, al: u64) {
+    if cem.lir.is_none() {
+        return;
+    }
+    let mut l = replace(&mut cem.lir, Option::<Box<lw::Lower>>::None).unwrap();
+    l.deref_mut().static_group(cem, cev, name, root, ro, tls, al);
+    cem.lir = Option::<Box<lw::Lower>>::Some(l);
+}
+
 // `@emit_macro` template rewriting: trim trailing newlines, escape the rest as line
 // continuations, expand the paste marker (byte 1) to `##`.
 fn macro_finish(body: str, out: &mut String) {
@@ -6864,6 +6988,7 @@ fn cemit_simd_entries(
             );
         }
     }
+    cem.lir_absorb(&mut sc);
     for i in 0..sc.refused.len() {
         cem.refused.push(sc.refused[i]);
     }
@@ -7520,7 +7645,27 @@ fn header_type_checks(p: &loader::Package, m: ModuleId, items: NodeList, out: &m
             sname,
         );
         if sk == NodeKind::NODE_ENUM {
-            continue; // its constants are the header's own names
+            // Its constants are the header's own names, of the values Super-C gives them.
+            let it = p.cir as *mut iri::Interp;
+            let mut cur: i64 = -1;
+            for k in 0..agg.members.len {
+                let vid = unsafe a.list(agg.members)[k as usize];
+                let ok = unsafe (*it).discr(m, vid, cur, &mut cur);
+                assert(ok, "the checker folds every enumerator of an extern block");
+                let mut cn = String::new();
+                let vs = a.at_const(a.at_const(vid).as_data.variant.name).as_data.name.text;
+                cn.push_str(src.slice(vs.start as usize, vs.end as usize));
+                mbe::x_alias(p, DefId { module: m, node: sid }, &mut cn, 0);
+                out.format_into(
+                    "_Static_assert(({}) == {}, \"super-c: '{}::{}' must be {} in C: declare every enumerator of the header's type, in its order\");\n",
+                    cn.as_str(),
+                    cur,
+                    sname,
+                    src.slice(vs.start as usize, vs.end as usize),
+                    cur,
+                );
+            }
+            continue;
         }
         let l = svc.decl_layout(m, sid);
         assert(l.ok, "the checker lays out every header struct and union");

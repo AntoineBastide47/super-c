@@ -16,6 +16,8 @@ import module::loader as loader;
 import emit::simd_plan as sp;
 import ir::cpu_features as cf;
 import ir::inline as inl;
+import target::table as tgt;
+import lir::lower as lw;
 
 /// Nesting bound for the recursive renderers (operands through inlined temporaries, structured
 /// control flow through regions): clang's default bracket depth, past which the C would not
@@ -58,10 +60,53 @@ pub struct Refusal {
     pub why: str<'static>,
 }
 
+/// A module's backend bits: the C renderer emits its C; LIR lowers its bodies.
+pub const BK_C: u8 = 1;
+pub const BK_LIR: u8 = 2;
+
+/// The backends of each module of `pk`: the C renderer for every module, and LIR beside it for the
+/// modules `SC_LIR` names: `1` every module, else a comma-separated list of module paths
+/// (`lir::lower,std::string`). Until a native backend exists, LIR is a check of the C path's bodies
+/// (`Lower::check_all`); the C renderer stays on.
+pub fn backends_of(pk: &loader::Package) Vector<u8> {
+    let n = pk.modules.len();
+    let mut out = Vector::<u8>::with_capacity(n);
+    let sel = stdlib::get_env("SC_LIR").unwrap_or(String::new());
+    let all = sel.as_str() == "1";
+    for i in 0..n {
+        let mut on = all;
+        if !all && sel.len() != 0 {
+            let path = pk.modules.at(i).path.as_str();
+            let mut rest = sel.as_str();
+            for _ in 0..rest.len() + 1 {
+                let c = rest.find_byte(b',');
+                let item = if c < 0 {
+                    rest;
+                } else {
+                    rest.slice(0, c as usize);
+                };
+                on = on || item == path;
+                if c < 0 {
+                    break;
+                }
+                rest = rest.slice(c as usize + 1, rest.len());
+            }
+        }
+        out.push(BK_C | ast::pick(on, BK_LIR, 0u8));
+    }
+    return out;
+}
+
 /// The body emitter: per-TU output buffers, the mangler, the dedup gates every demand kind goes
 /// through, and the per-body scratch (local names, coalescing, inlining decisions).
 pub struct CEmit {
     pub pkg: *const loader::Package,
+    /// The LIR lowering of the bodies of the modules whose backend holds BK_LIR; none when no module's
+    /// does. It reads what the rendering bound and writes no C.
+    pub lir: Option<Box<lw::Lower>>,
+    /// Each module's backends (`backends_of`): BK_C, plus BK_LIR where LIR lowers its bodies too.
+    pub backends: Vector<u8>,
+    snap_out: *mut Vector<mbe::MSub>, // `callee_binds`: where `callee_sym` puts a generic callee's bindings
     pub out: String, // the reusable output buffer (caller-owned lifecycle, cleared per TU)
     pub err: str<'static>, // first unsupported-construct reason ("" = ok)
     pub refused: Vector<Refusal>, // every body `emit_fn`/`emit_closure` refused, for the driver's report
@@ -413,8 +458,23 @@ extend CEmit {
         mg.tn_on = true;
         let pk = unsafe &*pkg;
         let simd_on = mg.vec_regs;
+        let backends = backends_of(pk);
+        let mut any = false;
+        for i in 0..backends.len() {
+            any = any || (backends[i] & BK_LIR) != 0;
+        }
+        let lir = if any {
+            Option::<Box<lw::Lower>>::Some(
+                Box::new(lw::Lower::new(lay::target_for(pk.arch).ptr as u32, pk.bc_value(BC_OVERFLOW_CHECKS) == 0)),
+            );
+        } else {
+            Option::<Box<lw::Lower>>::None;
+        };
         return CEmit {
             pkg: pkg,
+            lir: lir,
+            backends: backends,
+            snap_out: null,
             simd_on: simd_on,
             vec_prog: pk.names_vectors(),
             no_split: false,
@@ -704,6 +764,11 @@ extend CEmit {
 
     const fn p<'a>(self: &Self) &'a loader::Package {
         return unsafe &*self.pkg;
+    }
+
+    // The build's instruction set.
+    const fn isa(self: &Self) tgt::Isa {
+        return tgt::isa(self.p().arch);
     }
 
     const fn fail(self: &mut Self, why: str<'static>) bool {
@@ -1536,10 +1601,39 @@ extend CEmit {
         let d0 = self.pr.ns[prb::P_DECL];
         let a0 = self.pr.an[prb::P_DECL];
         let b0 = self.pr.ab[prb::P_DECL];
+        let nr = self.noret;
         let ok = self.emit_fn_inner(b, name);
         self.pr.stop_less(prb::P_RENDER, pm, prb::P_DECL, d0, a0, b0);
         self.noret = false;
+        if ok && self.lir_on(b.module) {
+            self.lir_body(b, name, 0, NODE_NONE, nr);
+        }
         return self.close_body(b, mark, ok);
+    }
+
+    // Whether LIR lowers what module `m` emits (a `@emit_macro` template is C text only).
+    fn lir_on(self: &Self, m: ModuleId) bool {
+        return self.lir.is_some() && !self.mg.macro_on && (self.backends[m as usize] & BK_LIR) != 0;
+    }
+
+    // Lower body `b` (symbol `name`; a closure's when `cnode` names it) to LIR with the bindings the
+    // rendering used.
+    fn lir_body(self: &mut Self, b: &ir::CoreBody, name: str, cm: ModuleId, cnode: NodeId, noret: bool) {
+        let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
+        let _ = l.deref_mut().body(self, b, name, cm, cnode, noret);
+        self.lir = Option::<Box<lw::Lower>>::Some(l);
+    }
+
+    /// Move `other`'s LIR into this emitter's.
+    pub fn lir_absorb(self: &mut Self, other: &mut CEmit) {
+        if self.lir.is_none() || other.lir.is_none() {
+            return;
+        }
+        let mut a = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
+        let mut o = replace(&mut other.lir, Option::<Box<lw::Lower>>::None).unwrap();
+        a.deref_mut().absorb(o.deref_mut());
+        self.lir = Option::<Box<lw::Lower>>::Some(a);
+        other.lir = Option::<Box<lw::Lower>>::Some(o);
     }
 
     // Keep a rendered body (counted) or drop its partial output and report the refusal.
@@ -4093,7 +4187,7 @@ extend CEmit {
                 // slice (borrowed apart, so not overlapping) merges only on wasm: elsewhere the C
                 // compiler, unable to tell the two apart, keeps the merged loop scalar.
                 let ev = *b.rvalues.at(b.statements.at(e as usize).rvalue as usize);
-                if rv.kind == ir::RV_SIMD && rv.c == ir::SIMD_LOAD && ev.kind == ir::RV_SIMD && ev.c == ir::SIMD_STORE && (self.p().arch != 2 || CEmit::rv_reads(
+                if rv.kind == ir::RV_SIMD && rv.c == ir::SIMD_LOAD && ev.kind == ir::RV_SIMD && ev.c == ir::SIMD_STORE && (!self.isa().merge_apart || CEmit::rv_reads(
                     b,
                     &rv,
                     b.places.at(b.operands.at(b.oper_pool[ev.a as usize] as usize).data as usize).base,
@@ -7169,6 +7263,9 @@ extend CEmit {
         let b0 = self.pr.ab[prb::P_DECL];
         let ok = self.emit_closure_inner(b, cm, cnode, sym, env_out);
         self.pr.stop_less(prb::P_RENDER, pm, prb::P_DECL, d0, a0, b0);
+        if ok && self.lir_on(b.module) {
+            self.lir_body(b, sym, cm, cnode, false);
+        }
         self.cap_base = 0;
         self.cap_on = false;
         self.cap_mut = 0;
@@ -10774,7 +10871,7 @@ extend CEmit {
         if !self.simd_on || vp.pl.form == sp::PF_SCALAR {
             return CK_SUM;
         }
-        return pick(fold && (self.p().arch == 1 || vp.pl.chunks > 1), CK_FOLD, CK_BITS);
+        return pick(fold && (self.isa().mask_fold || vp.pl.chunks > 1), CK_FOLD, CK_BITS);
     }
 
     // Whether call `t` is the `sc_popcount64` of a comparison's `count` that the comparison already
@@ -12517,7 +12614,7 @@ extend CEmit {
     }
 
     /// Whether static `item` is `@thread_local`.
-    fn is_tls(self: &Self, item: DefId) bool {
+    pub fn is_tls(self: &Self, item: DefId) bool {
         return item.node != NODE_NONE && unsafe (*self.p().module_ast_const(item.module)).attr_of(
             item.node,
             AttrKind::ATTR_THREAD_LOCAL,
@@ -12573,7 +12670,7 @@ extend CEmit {
     // not an extern block's) of a scalar, a payload-free enum, `str`, or an array of them. Such a type
     // holds no `UnsafeCell` and takes a leading `const`; any other constant stays writable C data (a
     // struct may hold an `UnsafeCell`, a pointer would spell a const pointee).
-    fn stat_ro(self: &Self, item: DefId, em: ModuleId, ty: TypeId) bool {
+    pub fn stat_ro(self: &Self, item: DefId, em: ModuleId, ty: TypeId) bool {
         let cd = unsafe (*self.p().module_ast_const(item.module)).at_const(item.node);
         if cd.kind != NodeKind::NODE_CONST || cd.as_data.const_def.is_static_mut || cd.as_data.const_def.is_extern {
             return false;
@@ -12597,7 +12694,7 @@ extend CEmit {
     // A generic extend's constant `c` spells `<module prefix><InstName>__<NAME>`, a generic function's
     // local constant `<its symbol>__<Args>` (`tc_local_const_env`): static data per instance, which
     // the declaring module defines by evaluating the initializer for that instance.
-    fn assoc_const_ref(self: &mut Self, b: &ir::CoreBody, c: &ir::Constant, dst: &mut String) bool {
+    pub fn assoc_const_ref(self: &mut Self, b: &ir::CoreBody, c: &ir::Constant, dst: &mut String) bool {
         let tgt = self.mg.method_target(c.item.module, c.item.node);
         let n = c.targ_len();
         if n > 8 {
@@ -12791,7 +12888,7 @@ extend CEmit {
 
     // Spell aggregate `(rm, rt)`'s operator method `mn` into `dst`: its own impl (demanded when
     // generic) or the interface default. False when neither exists.
-    fn agg_op_sym(self: &mut Self, rm: ModuleId, rt: TypeId, mn: str, dst: &mut String) bool {
+    pub fn agg_op_sym(self: &mut Self, rm: ModuleId, rt: TypeId, mn: str, dst: &mut String) bool {
         let mut s = self.sget();
         let ok = if self.mg.method_by_name(rm, rt, mn, &mut s) {
             self.demand_impl(rm, rt, &s);
@@ -12832,7 +12929,7 @@ extend CEmit {
 
     // Aggregate operands that dispatch operators through methods: structs, instances, and
     // payload-carrying enums (their C value is a struct; bare enums compare as integers).
-    fn op_dispatch_agg(self: &mut Self, rm: ModuleId, rt: TypeId) bool {
+    pub fn op_dispatch_agg(self: &mut Self, rm: ModuleId, rt: TypeId) bool {
         let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_INSTANCE {
             return true;
@@ -13689,6 +13786,73 @@ extend CEmit {
         return true;
     }
 
+    /// The vtable slot (in pointers) of interface method `callee` in the table of dyn type `(pm, t)`:
+    /// `__free`, `tid`, then each interface's methods that take a receiver in the hierarchy's order.
+    /// NONE when it has none; `Free::free` is slot 0.
+    pub fn vt_slot(self: &mut Self, pm: ModuleId, t: TypeId, callee: DefId) u32 {
+        let ca = self.p().module_ast_const(callee.module);
+        let mn = unsafe (*ca).at_const(unsafe (*ca).at_const(callee.node).as_data.function.name).as_data.name.text;
+        if self.p().modules.at(callee.module as usize).source.as_str().slice(mn.start as usize, mn.end as usize) == "free" {
+            return 0;
+        }
+        let iface = self.mg.in_interface(callee.module, callee.node);
+        let mut sup = Vector::<TypeId>::new();
+        if !self.dyn_supers(pm, t, &mut sup) {
+            return 0xFFFFFFFF;
+        }
+        let a = self.p().module_ast_const(pm);
+        let mut k: u32 = 2;
+        for si in 0..sup.len() {
+            let it = *unsafe (*a).instance(unsafe (*a).type_at(sup[si]).as_data.inst);
+            let da = self.p().module_ast_const(it.module);
+            let ms = unsafe (*da).at_const(it.decl).as_data.interface_def.items;
+            for i in 0..ms.len {
+                let mid = unsafe (*da).list(ms)[i as usize];
+                let mnd = unsafe (*da).at_const(mid);
+                if mnd.kind != NodeKind::NODE_FUNCTION || mnd.as_data.function.params.len == 0 {
+                    continue;
+                }
+                if it.module == callee.module && it.decl == iface && mid == callee.node {
+                    return k;
+                }
+                k += 1;
+            }
+        }
+        return 0xFFFFFFFF;
+    }
+
+    /// The vtable slot (in pointers) of the table pointer of superinterface dyn type `(dm, dt)` in the
+    /// table of dyn type `(pm, t)`: after every method slot. NONE when it is no superinterface.
+    pub fn super_slot(self: &mut Self, pm: ModuleId, t: TypeId, dm: ModuleId, dt: TypeId) u32 {
+        let mut sup = Vector::<TypeId>::new();
+        if !self.dyn_supers(pm, t, &mut sup) {
+            return 0xFFFFFFFF;
+        }
+        let a = self.p().module_ast_const(pm);
+        let mut k: u32 = 2;
+        for si in 0..sup.len() {
+            let it = *unsafe (*a).instance(unsafe (*a).type_at(sup[si]).as_data.inst);
+            let da = self.p().module_ast_const(it.module);
+            let ms = unsafe (*da).at_const(it.decl).as_data.interface_def.items;
+            for i in 0..ms.len {
+                let mnd = unsafe (*da).at_const(unsafe (*da).list(ms)[i as usize]);
+                if mnd.kind == NodeKind::NODE_FUNCTION && mnd.as_data.function.params.len != 0 {
+                    k += 1;
+                }
+            }
+        }
+        let dy = *unsafe (*self.p().module_ast_const(dm)).type_at(dt);
+        let dit = *unsafe (*self.p().module_ast_const(dm)).instance(dy.as_data.inst);
+        for si in 1..sup.len() {
+            let it = *unsafe (*a).instance(unsafe (*a).type_at(sup[si]).as_data.inst);
+            if it.module == dit.module && it.decl == dit.decl {
+                return k;
+            }
+            k += 1;
+        }
+        return 0xFFFFFFFF;
+    }
+
     // The instance of the interface that declares `callee` in the hierarchy of dyn type `(pm, t)`:
     // the dyn type's own, or a superinterface's under the arguments the hierarchy gives it.
     fn dyn_iface_inst(self: &mut Self, pm: ModuleId, t: TypeId, callee: DefId, out: &mut TyInstance) bool {
@@ -13779,7 +13943,7 @@ extend CEmit {
     // Thunks + the vtable definition for one coercion pair (source type -> dyn stem); `own` makes
     // the vtable's `__free` destroy and deallocate the heap payload, through the allocator `(am, at)`
     // (TYPE_NONE: Global) its `Default` rebuilds. Appends `<pair>` to `pair`.
-    fn dyn_pair(
+    pub fn dyn_pair(
         self: &mut Self,
         pm: ModuleId,
         dt: TypeId,
@@ -14449,7 +14613,14 @@ extend CEmit {
     // A conversion method WITH its own generics: the receiver instance is the coercion TARGET;
     // the method's params bind by unifying its first declared parameter against the argument.
     // Symbol: `<InstName>__<method>__<bound mangles...>` (the spec rule), demanded accordingly.
-    fn conv_sym(self: &mut Self, b: &ir::CoreBody, callee: DefId, arg_ty: TypeId, target_ty: TypeId, dst: &mut String) bool {
+    pub fn conv_sym(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        callee: DefId,
+        arg_ty: TypeId,
+        target_ty: TypeId,
+        dst: &mut String,
+    ) bool {
         let ca = self.p().module_ast_const(callee.module);
         let fd = unsafe (*ca).at_const(callee.node);
         let tgt = self.mg.method_target(callee.module, callee.node);
@@ -14902,7 +15073,7 @@ extend CEmit {
     // user code runs only through bound dispatch (`Package::co_inst_on`) prints them only when a
     // binding names a type whose methods can be user code; with std types alone its loops are bounded
     // by their inputs.
-    fn ticks_on(self: &mut Self, b: &ir::CoreBody) bool {
+    pub fn ticks_on(self: &mut Self, b: &ir::CoreBody) bool {
         if !self.safepoints_on(b.module) {
             return false;
         }
@@ -15359,7 +15530,7 @@ extend CEmit {
     // The callee's C symbol: the frozen fn symbol plus `__<targ>` per bound generic argument
     // (free-fn specializations and generic methods share that composition). `iface`: a bound
     // call's conformance (`Terminator.iface`), TYPE_NONE otherwise.
-    fn callee_sym(
+    pub fn callee_sym(
         self: &mut Self,
         b: &ir::CoreBody,
         callee: DefId,
@@ -15480,7 +15651,7 @@ extend CEmit {
 
     // callee_sym for call terminator `t`: the receiver type is the first argument's, the destination
     // type the single destination's (when `with_dest`).
-    fn term_callee_sym(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator, with_dest: bool, dst: &mut String) bool {
+    pub fn term_callee_sym(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator, with_dest: bool, dst: &mut String) bool {
         let mut recv_ty = TYPE_NONE;
         if t.args_len > 0 {
             recv_ty = b.operands.at(b.oper_pool[t.args_start as usize] as usize).ty;
@@ -15850,6 +16021,20 @@ extend CEmit {
             dst.push_string(sym);
             return true;
         }
+        if self.snap_out != null {
+            // The bindings the callee's instance reads (`callee_binds`).
+            *unsafe &mut *self.snap_out = self.callee_snap(
+                b,
+                callee,
+                rpm,
+                &rit,
+                is_minst,
+                keyed,
+                recv_targs,
+                targs_start,
+                targs_len,
+            );
+        }
         // A generic call's symbol is a pure function of the callee, the receiver instance, the
         // bound targs and the active env: the same fingerprint the demand dedup keys on, minus
         // the spelling itself, interns it (a first spelling records its demand and cross-TU
@@ -15942,40 +16127,7 @@ extend CEmit {
                 if fresh9 {
                     self.demand_seen.insert(dk9);
                 }
-                let mut snap = mbe::subs_copy(&self.mg.subs);
-                let g0 = snap.len() as u32;
-                if is_minst {
-                    let ext = self.mg.extend_of(callee.module, callee.node);
-                    self.bind_recv(&mut snap, callee.module, ext, rpm, &rit);
-                }
-                let mut gskip: u32 = 0;
-                if keyed {
-                    let xg = unsafe (*ca).at_const(self.mg.extend_of(callee.module, callee.node)).as_data.extend_def.generics;
-                    while gskip < xg.len && gskip < targs_len {
-                        self.push_bind(
-                            &mut snap,
-                            callee.module,
-                            unsafe (*ca).list(xg)[gskip as usize],
-                            b.module,
-                            b.targ_pool[(targs_start + gskip) as usize],
-                            g0,
-                        );
-                        gskip += 1;
-                    }
-                }
-                let gens = fd.as_data.function.generics;
-                let mut gi2: u32 = 0;
-                while !recv_targs && gi2 < gens.len && gskip + gi2 < targs_len {
-                    self.push_bind(
-                        &mut snap,
-                        callee.module,
-                        unsafe (*ca).list(gens)[gi2 as usize],
-                        b.module,
-                        b.targ_pool[(targs_start + gskip + gi2) as usize],
-                        g0,
-                    );
-                    gi2 += 1;
-                }
+                let snap = self.callee_snap(b, callee, rpm, &rit, is_minst, keyed, recv_targs, targs_start, targs_len);
                 let mut sfx = String::new();
                 let mut sok = true;
                 if is_minst {
@@ -16003,6 +16155,69 @@ extend CEmit {
             dst.push_string(sym);
         }
         return ok;
+    }
+
+    // The bindings of a generic call's callee instance: the active env, then the receiver instance's
+    // arguments for a generic extend's method, a keyed extend's arguments, and the callee's own.
+    fn callee_snap(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        callee: DefId,
+        rpm: ModuleId,
+        rit: &TyInstance,
+        is_minst: bool,
+        keyed: bool,
+        recv_targs: bool,
+        targs_start: u32,
+        targs_len: u32,
+    ) Vector<mbe::MSub> {
+        let ca = self.p().module_ast_const(callee.module);
+        let fd = unsafe (*ca).at_const(callee.node);
+        let mut snap = mbe::subs_copy(&self.mg.subs);
+        let g0 = snap.len() as u32;
+        if is_minst {
+            let ext = self.mg.extend_of(callee.module, callee.node);
+            self.bind_recv(&mut snap, callee.module, ext, rpm, rit);
+        }
+        let mut gskip: u32 = 0;
+        if keyed {
+            let xg = unsafe (*ca).at_const(self.mg.extend_of(callee.module, callee.node)).as_data.extend_def.generics;
+            while gskip < xg.len && gskip < targs_len {
+                self.push_bind(
+                    &mut snap,
+                    callee.module,
+                    unsafe (*ca).list(xg)[gskip as usize],
+                    b.module,
+                    b.targ_pool[(targs_start + gskip) as usize],
+                    g0,
+                );
+                gskip += 1;
+            }
+        }
+        let gens = fd.as_data.function.generics;
+        let mut gi2: u32 = 0;
+        while !recv_targs && gi2 < gens.len && gskip + gi2 < targs_len {
+            self.push_bind(
+                &mut snap,
+                callee.module,
+                unsafe (*ca).list(gens)[gi2 as usize],
+                b.module,
+                b.targ_pool[(targs_start + gskip + gi2) as usize],
+                g0,
+            );
+            gi2 += 1;
+        }
+        return snap;
+    }
+
+    /// The bindings call `t` of body `b` binds its callee's generic parameters with (none for a
+    /// concrete callee) into `out`, after the active env's: what its parameter and result types read.
+    pub fn callee_binds(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator, out: &mut Vector<mbe::MSub>) {
+        out.clear();
+        let mut s = String::new();
+        self.snap_out = out;
+        let _ = self.term_callee_sym(b, t, false, &mut s);
+        self.snap_out = null;
     }
 
     // A fixed array flowing into a slice-typed destination wraps `{ arr, N }` (the C array decays).
@@ -16803,9 +17018,9 @@ extend CEmit {
                 // wasm has no frame walk.
                 dst.push_str(
                     mbe::if_s(
-                        self.p().arch == 2,
-                        "((void *)0)",
+                        self.isa().return_address,
                         "__builtin_extract_return_addr(__builtin_return_address(0))",
+                        "((void *)0)",
                     ),
                 );
                 return true;
@@ -17478,7 +17693,7 @@ extend CEmit {
     // Does the user `free` of resolved type `(rm, rt)` apply to it? An instance whose `free`
     // extend bounds a parameter with `Free` is covered only when that argument owns memory;
     // an uncovered instance drops through the derived glue, which frees its owning members.
-    fn user_free_covers(self: &mut Self, rm: ModuleId, rt: TypeId) bool {
+    pub fn user_free_covers(self: &mut Self, rm: ModuleId, rt: TypeId) bool {
         let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
         if y.kind != TypeKind::TYPE_INSTANCE {
             return true;
@@ -17760,6 +17975,12 @@ extend CEmit {
             self.mg.push_msub(sb0);
         }
         let ok0x = self.emit_glue_inner(idx);
+        if ok0x && self.lir_on(self.glue.at(idx).em) {
+            let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
+            let sym = self.glue.at(idx).sym.clone();
+            let _ = l.deref_mut().glue(self, self.glue.at(idx).em, self.glue.at(idx).ty, sym.as_str());
+            self.lir = Option::<Box<lw::Lower>>::Some(l);
+        }
         self.mg.pop_subs(gn0);
         return ok0x;
     }
@@ -17965,7 +18186,7 @@ extend CEmit {
     // dispatches through the vtable: the pair's type into `(om, ot)` and the references it sits
     // behind into `stars` (a generic `&T` with T = Box<dyn I> stays a reference in the body).
     // IR_NONE for any other call.
-    fn dyn_recv_of(
+    pub fn dyn_recv_of(
         self: &mut Self,
         b: &ir::CoreBody,
         t: &ir::Terminator,
@@ -18841,7 +19062,7 @@ pub fn push_c_number(txt: str, dst: &mut String) {
 
 /// The most bytes of an expression's source an assertion message spells: two of them and the
 /// message text stay under STR_LIT_MAX.
-const ASSERT_SRC_MAX: usize = 1000;
+pub const ASSERT_SRC_MAX: usize = 1000;
 
 /// Expression source `txt` in an assertion message, escaped for an fprintf format (`fmt`) or a
 /// plain C string: past ASSERT_SRC_MAX bytes, cut at a character boundary and ended with `...`.

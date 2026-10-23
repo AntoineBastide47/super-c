@@ -4,9 +4,8 @@
 // sets a macro (a function-like macro is `NAME(args) body`); the has layers hold `kind:name` lines.
 // `__clang_version__` and `__VERSION__` depend on the vendor's build: ctarget.spc pins them.
 
+/// The C environment of `target::table::TARGETS` row `i` is row `i`.
 pub struct Row {
-    pub target: i32,
-    pub arch: i32,
     pub triple: str<'static>,
     pub dir: str<'static>,
     pub flags: str<'static>,
@@ -16,78 +15,23 @@ pub struct Row {
 pub const PINNED_VERSION: str<'static> = "22.1.8";
 
 pub const ROWS: [Row; 11] = [
-    Row { target: 1, arch: 0, triple: "x86_64-apple-macos11.0", dir: "", flags: "", layers: [0, 1, 3, 6] },
-    Row { target: 1, arch: 1, triple: "arm64-apple-macos11.0", dir: "", flags: "", layers: [0, 2, 3, 7] },
-    Row { target: 4, arch: 0, triple: "x86_64-apple-ios13.0-simulator", dir: "", flags: "", layers: [0, 1, 3, 8] },
-    Row { target: 4, arch: 1, triple: "arm64-apple-ios13.0", dir: "", flags: "", layers: [0, 2, 3, 9] },
+    Row { triple: "x86_64-apple-macos11.0", dir: "", flags: "", layers: [0, 1, 3, 6] },
+    Row { triple: "arm64-apple-macos11.0", dir: "", flags: "", layers: [0, 2, 3, 7] },
+    Row { triple: "x86_64-apple-ios13.0-simulator", dir: "", flags: "", layers: [0, 1, 3, 8] },
+    Row { triple: "arm64-apple-ios13.0", dir: "", flags: "", layers: [0, 2, 3, 9] },
+    Row { triple: "x86_64-unknown-linux-gnu", dir: "x86_64-linux-gnu", flags: "", layers: [0, 1, 4, 10] },
+    Row { triple: "aarch64-unknown-linux-gnu", dir: "aarch64-linux-gnu", flags: "", layers: [0, 2, 4, 11] },
+    Row { triple: "x86_64-linux-android24", dir: "x86_64-linux-android", flags: "", layers: [0, 1, 4, 12] },
+    Row { triple: "aarch64-linux-android24", dir: "aarch64-linux-android", flags: "", layers: [0, 2, 4, 13] },
+    Row { triple: "x86_64-w64-mingw32", dir: "x86_64-w64-mingw32", flags: "", layers: [0, 1, 5, 14] },
+    Row { triple: "aarch64-w64-mingw32", dir: "aarch64-w64-mingw32", flags: "", layers: [0, 2, 5, 15] },
     Row {
-        target: 2,
-        arch: 0,
-        triple: "x86_64-unknown-linux-gnu",
-        dir: "x86_64-linux-gnu",
-        flags: "",
-        layers: [0, 1, 4, 10],
-    },
-    Row {
-        target: 2,
-        arch: 1,
-        triple: "aarch64-unknown-linux-gnu",
-        dir: "aarch64-linux-gnu",
-        flags: "",
-        layers: [0, 2, 4, 11],
-    },
-    Row {
-        target: 5,
-        arch: 0,
-        triple: "x86_64-linux-android24",
-        dir: "x86_64-linux-android",
-        flags: "",
-        layers: [0, 1, 4, 12],
-    },
-    Row {
-        target: 5,
-        arch: 1,
-        triple: "aarch64-linux-android24",
-        dir: "aarch64-linux-android",
-        flags: "",
-        layers: [0, 2, 4, 13],
-    },
-    Row {
-        target: 0,
-        arch: 0,
-        triple: "x86_64-w64-mingw32",
-        dir: "x86_64-w64-mingw32",
-        flags: "",
-        layers: [0, 1, 5, 14],
-    },
-    Row {
-        target: 0,
-        arch: 1,
-        triple: "aarch64-w64-mingw32",
-        dir: "aarch64-w64-mingw32",
-        flags: "",
-        layers: [0, 2, 5, 15],
-    },
-    Row {
-        target: 3,
-        arch: 2,
         triple: "wasm32-wasip1",
         dir: "wasm32-wasip1",
         flags: " -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS",
         layers: [0, 16, 255, 255],
     },
 ];
-
-/// The row of `target` (a `PLATFORM_NAMES` index) and `arch` (an `ARCH_NAMES` index), or -1.
-pub const fn find_row(target: i32, arch: i32) isize {
-    let rows: []Row = ROWS;
-    for i in 0..rows.len() {
-        if rows[i].target == target && rows[i].arch == arch {
-            return i as isize;
-        }
-    }
-    return -1;
-}
 
 pub const MACRO_LAYERS: [str<'static>; 17] = [
     M"(__ATOMIC_ACQUIRE 2

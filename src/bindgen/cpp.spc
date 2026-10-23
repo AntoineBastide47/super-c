@@ -3,6 +3,7 @@
 // `cc -E` text with line markers. Bounds: include depth 200, `#if` nesting 1024, expression and argument
 // nesting 256, and 2^24 token steps per top-level expansion; every other loop is bounded by its input.
 import module::loader as loader;
+import utils::names as nm;
 import std::platform::fs;
 
 const NONE: u32 = 0xFFFFFFFFu32;
@@ -289,17 +290,6 @@ struct Val {
     pub u: bool,
 }
 
-const fn hash_bytes(p: *const u8, n: usize) u64 {
-    let mut h: u64 = 0xcbf29ce484222325u64;
-    let mut i: usize = 0;
-    while i < n {
-        let b = unsafe p[i];
-        h = (h ^ b as u64).wrapping_mul(0x100000001b3u64);
-        i += 1;
-    }
-    return h;
-}
-
 const fn is_id_start(c: u8) bool {
     return c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c == b'_' || c == b'$' || c >= 0x80;
 }
@@ -467,88 +457,20 @@ const fn find_splice(p: *const u8, i: usize, n: usize) usize {
     return n;
 }
 
-// Spellings, interned once. A name is an index into one byte arena.
-struct Names {
-    pub strs: String,
-    pub offsets: Vector<u32>,
-    pub table: Vector<u32>,
-}
-
-extend Names {
-    fn new() Names {
-        let mut tab = Vector::<u32>::new();
-        tab.resize_default(1 << 14);
-        let mut n = Names {
-            strs: String::with_capacity(1 << 20),
-            offsets: Vector::<u32>::with_capacity(1 << 15),
-            table: tab,
-        };
-        n.offsets.push(0);
-        n.intern("");
-        for b in 1..256u32 {
-            let c = b as u8;
-            let id = n.intern(unsafe str::from_raw(&c, 1));
-            assert_eq(id, b);
-        }
-        for k in 0..FIXED.len() {
-            let id = n.intern(FIXED[k]);
-            assert_eq(id, ID_ELLIPSIS + k as u32);
-        }
-        return n;
+// Spellings, interned once: the single bytes first, so a byte is its own id, then the fixed names.
+fn names_new() nm::Names {
+    let mut n = nm::Names::with_capacity(1 << 20, 1 << 14);
+    n.intern("");
+    for b in 1..256u32 {
+        let c = b as u8;
+        let id = n.intern(unsafe str::from_raw(&c, 1));
+        assert_eq(id, b);
     }
-
-    const fn count(self: &Names) usize {
-        return self.offsets.len() - 1;
+    for k in 0..FIXED.len() {
+        let id = n.intern(FIXED[k]);
+        assert_eq(id, ID_ELLIPSIS + k as u32);
     }
-
-    const fn spell(self: &Names, id: u32) str {
-        let a = self.offsets[id as usize] as usize;
-        let b = self.offsets[id as usize + 1] as usize;
-        return self.strs.as_str().slice(a, b);
-    }
-
-    fn intern(self: &mut Names, s: str) u32 {
-        let h = hash_bytes(s.ptr(), s.len());
-        let mask = self.table.len() - 1;
-        let mut i = h as usize & mask;
-        let mut probes: usize = 0;
-        while probes <= mask {
-            let e = self.table[i];
-            if e == 0 {
-                break;
-            }
-            if self.spell(e - 1) == s {
-                return e - 1;
-            }
-            i = i + 1 & mask;
-            probes += 1;
-        }
-        assert(probes <= mask);
-        let id = self.count() as u32;
-        self.strs.push_str(s);
-        self.offsets.push(self.strs.len() as u32);
-        self.table[i] = id + 1;
-        if (id as usize + 2) * 2 > self.table.len() {
-            self.grow();
-        }
-        return id;
-    }
-
-    fn grow(self: &mut Names) {
-        let size = self.table.len() * 2;
-        let mut tab = Vector::<u32>::new();
-        tab.resize_default(size);
-        let mask = size - 1;
-        for id in 0..self.count() {
-            let s = self.spell(id as u32);
-            let mut i = hash_bytes(s.ptr(), s.len()) as usize & mask;
-            while tab[i] != 0 {
-                i = i + 1 & mask;
-            }
-            tab[i] = id as u32 + 1;
-        }
-        self.table = tab;
-    }
+    return n;
 }
 
 // Hide sets: sorted lists of macro names, hash-consed so a set is its id. Set 0 is empty.
@@ -775,7 +697,7 @@ extend Hides {
 
 // Tokenise `text` (phases 1 to 3), appending to `toks`. The byte at `text[len]` and the `TEXT_PAD - 1` after
 // it must be readable zeros. Returns 0, or the line of an unterminated comment.
-fn tokenize(names: &mut Names, text: str, toks: &mut Vector<Tok>) u32 {
+fn tokenize(names: &mut nm::Names, text: str, toks: &mut Vector<Tok>) u32 {
     let n0 = text.len();
     let p0 = text.ptr();
     let first = find_splice(p0, 0, n0);
@@ -802,7 +724,7 @@ fn tokenize(names: &mut Names, text: str, toks: &mut Vector<Tok>) u32 {
     return lex(names, clean.as_ptr(), clean.len(), &cuts, toks);
 }
 
-fn lex(names: &mut Names, p: *const u8, n: usize, cuts: &Vector<u32>, toks: &mut Vector<Tok>) u32 {
+fn lex(names: &mut nm::Names, p: *const u8, n: usize, cuts: &Vector<u32>, toks: &mut Vector<Tok>) u32 {
     let mut i: usize = 0;
     let mut line: u32 = 1;
     let mut cut: usize = 0;
@@ -973,7 +895,7 @@ fn push_escaped(out: &mut String, s: str) {
 
 // The string literal of `toks[s..s + l]` as `#` spells it: one space where a token had white space, and a
 // backslash before each quote and backslash inside a string or character literal. Placemarkers are skipped.
-fn stringify_tokens(names: &mut Names, tmp: &mut String, toks: &Vector<Tok>, s: usize, l: usize) u32 {
+fn stringify_tokens(names: &mut nm::Names, tmp: &mut String, toks: &Vector<Tok>, s: usize, l: usize) u32 {
     tmp.clear();
     tmp.push_byte(b'"');
     let mut first = true;
@@ -1038,7 +960,7 @@ pub struct Pp {
     predefs: String,
     cmdline: String,
     has: Set<String>,
-    names: Names,
+    names: nm::Names,
     hides: Hides,
     macros: Vector<Macro>,
     macro_table: Vector<u32>,
@@ -1122,7 +1044,7 @@ extend Pp {
             predefs: replace(&mut config.predefs, String::new()),
             cmdline: replace(&mut config.cmdline, String::new()),
             has: has,
-            names: Names::new(),
+            names: names_new(),
             hides: Hides::new(),
             macros: Vector::<Macro>::new(),
             macro_table: tab,

@@ -71,7 +71,9 @@ cemit_package             -- InstGraph.collect() over the kept Core IR bodies of
   |                          Package::release_bodies frees the body syntax; then per-module
   |                          TU emission (emit/tu.spc); per body: drop elaboration only for
   |                          a body emission lowered itself, the inliner, bounds-check
-  |                          elimination (DropCtx::apply_drops); parallel frontier under --jobs
+  |                          elimination (DropCtx::apply_drops); parallel frontier under --jobs;
+  |                          a module whose backend holds BK_LIR also lowers each rendered body
+  |                          and derived destructor to LIR (see LIR)
 serial write-out          -- __sc_fwd.h, one __sc_t/<type>.h per type, per-module .h, then the
   |                          module TU shards (<module>.c, __p<k>), per-owner instance shards
   |                          (<module>__inst.c), __sc_registry.c and __sc_manifest (a shard
@@ -719,6 +721,14 @@ was deleted). It serves typechecker folds (array lengths, const args, static_ass
 `const`/`static mut` initializers, the constant-trap scan), `const`/`static` emission,
 `type_info` rendering, the `fx` scanner (const-fn eligibility, always-panics), and lint probes.
 
+A pointer into an array that an object holds by value (a member array, an element of an array
+of structs) moves on past that array through the scalars of the outermost holding object in
+member order (`flat_elem`), as in C memory, while every scalar it crosses has the type of the
+array's first one; past the holder it traps out of bounds, and where a crossed scalar's type does
+not resolve the evaluation fails (no fold) instead. A body found in the engine's cache still
+records the item edge from the item under check to the body's item (`note_body_edge`), so the
+final item edges do not depend on which item lowered the body first.
+
 The constant-trap scan (`tc_ct_check`, after each binary, unary and assignment node in
 `check_expr_w`) folds the integer operations over closed operands and reports a trap at the
 operation (operations.md); a mandatory evaluation (`tc_mandatory_const`,
@@ -893,6 +903,36 @@ Full monomorphization is the only generic backend.
   `rt_satisfies`: conformances, `Copy`/`Send`/`Sync` structurally, `Free` through ownership facts).
 - **Emit order:** `Package::emit_order`: if module `a` re-homes a concrete instance of
   a generic owned by `b`, then `b` emits first. Kahn topo-sort, lowest-id tiebreak.
+
+## LIR
+
+`src/lir/` is the IR below Core IR, the input of a native backend: SSA with block parameters,
+machine types only (integers, floats, a pointer, vectors of 2 to 64 lanes), stack slots, calls
+above the C ABI (an aggregate passes by address, its layout record in the body's pool), one
+16-byte instruction, dense `u32` ids. A body holds its instructions, blocks, parameter types,
+pool, slots, symbols, messages and one location entry per instruction.
+
+| File | Content |
+|------|---------|
+| `ir.spc` | The data, the opcode table, type helpers (`type_bytes`, `type_align`: a vector aligns to its size up to 16 bytes, as the C layout does), and the tool calls (`Package::add_symbol`, `add_message`, `add_file`, `define`; `Body::add_block`, `begin`, `emit`, `edge`, `signature`, `layout`) |
+| `verify.spc` | `Verifier::check`: dominance, block-parameter arity and types, machine types, slot accesses inside the slot and aligned as slot and offset allow, layout leaves inside their size, reducibility. `check_calls`: each direct call takes its callee's signature |
+| `print.spc`, `parse.spc` | The text form; print, parse and print gives the same bytes |
+| `eval.spc` | The evaluator: byte-addressed memory with the target's data model; models the C heap, memory routines, traps, the runtime's arithmetic and bit-count primitives, libm and `std::testing::bench_sys`'s allocation accounting; stops with `EV_FFI` at any other external function |
+| `lower.spc` | Core IR to LIR (`Lower::body`, `Lower::glue` for derived destructors, static data), then `tidy` (drops unused pure values, threads jumps through blocks that only jump, merges single-predecessor blocks, hoists and deduplicates constants into the entry, deduplicates layout records); `check_all` |
+
+The backend switch is per module: `cbe::backends_of` gives each module BK_C, plus BK_LIR for the
+modules `SC_LIR` names. The C renderer runs for every module; LIR lowers beside it from the
+bindings the rendering used (`CEmit::lir_on`, `CEmit::callee_binds` for a generic callee's
+parameter types), so the shared planning (liveness, emit order, the instance graph, demand) stays
+in `cemit_package`. Today LIR is a check of the C path; a native backend makes a module take LIR
+alone, with C as its fallback, and `--emit-c` gives every module C.
+
+`check_all` (end of `cemit_package`, under `SC_LIR`) verifies every body, round-trips the text,
+and in a test build runs each test without fixture arguments in the evaluator: against the CTFE
+run (`lw::probe_tests`, before the body syntax is released; trap kind and location must match),
+or, where CTFE cannot finish without an FFI call, against the test's expectation (it passes, or
+with `should_panic` it traps). A test that calls FFI (CTFE's `Interp.ffi`, or the evaluator's
+`EV_FFI`) or passes a budget is not compared. Inline-assembly and naked bodies stay in C.
 
 ## Emission Buffers and Probes
 

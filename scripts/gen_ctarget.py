@@ -15,9 +15,10 @@ import re
 import subprocess
 import sys
 
-# (target, arch, clang triple, flags the build adds, family, system directory name). target codes are
-# PLATFORM_NAMES indexes (windows 0, macos 1, linux 2, wasm 3, ios 4, android 5), arch codes ARCH_NAMES
-# indexes (x86_64 0, aarch64 1, wasm32 2).
+# (target, arch, clang triple, flags the build adds, family, system directory name), one per row of
+# src/target/table.spc's TARGETS, in its order: row i of ROWS is the C environment of TARGETS row i.
+# target codes are its OSES indexes (windows 0, macos 1, linux 2, wasm 3, ios 4, android 5), arch codes
+# its ISAS indexes (x86_64 0, aarch64 1, wasm32 2).
 WASI = " -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS"
 TARGETS = [
     (1, 0, "x86_64-apple-macos11.0", "", "apple", ""),
@@ -317,16 +318,15 @@ def main(argv):
     out.append("// The reference compiler's answer per target decides which names are kept. A layer line `NAME VALUE`\n")
     out.append("// sets a macro (a function-like macro is `NAME(args) body`); the has layers hold `kind:name` lines.\n")
     out.append("// `__clang_version__` and `__VERSION__` depend on the vendor's build: ctarget.spc pins them.\n\n")
-    out.append("pub struct Row {\n    pub target: i32,\n    pub arch: i32,\n    pub triple: str<'static>,\n")
+    out.append("/// The C environment of `target::table::TARGETS` row `i` is row `i`.\n")
+    out.append("pub struct Row {\n    pub triple: str<'static>,\n")
     out.append("    pub dir: str<'static>,\n    pub flags: str<'static>,\n    pub layers: [u8; 4],\n}\n\n")
     out.append("pub const PINNED_VERSION: str<'static> = \"%s\";\n\n" % clang_version)
     out.append("pub const ROWS: [Row; %d] = [\n" % len(TARGETS))
-    for i, (tg, ar, triple, flags, _, d) in enumerate(TARGETS):
+    for i, (_, _, triple, flags, _, d) in enumerate(TARGETS):
         assert len(plan[i]) <= 4
         ids = plan[i] + [255] * (4 - len(plan[i]))
         fields = [
-            "target: %d" % tg,
-            "arch: %d" % ar,
             'triple: "%s"' % triple,
             'dir: "%s"' % d,
             'flags: "%s"' % flags,
@@ -336,18 +336,6 @@ def main(argv):
         # The formatter keeps a row on one line up to 120 columns.
         out.append(one + "\n" if len(one) <= 120 else "    Row {\n" + "".join("        %s,\n" % f for f in fields) + "    },\n")
     out.append("];\n\n")
-    out.append(
-        "/// The row of `target` (a `PLATFORM_NAMES` index) and `arch` (an `ARCH_NAMES` index), or -1.\n"
-        "pub fn find_row(target: i32, arch: i32) isize {\n"
-        "    let rows: []Row = ROWS;\n"
-        "    for i in 0..rows.len() {\n"
-        "        if rows[i].target == target && rows[i].arch == arch {\n"
-        "            return i as isize;\n"
-        "        }\n"
-        "    }\n"
-        "    return -1;\n"
-        "}\n\n"
-    )
     for const, tables in (("MACRO_LAYERS", macro_layers), ("HAS_LAYERS", has_layers)):
         out.append("pub const %s: [str<'static>; %d] = [\n" % (const, len(tables)))
         for t in tables:

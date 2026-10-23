@@ -937,6 +937,12 @@ the build's set included: a program can choose code at run time, never a result.
 | `SC_SIMD_LEVEL` | Test switch: the run-time copy level `k` (0 the bodies without the copies' features) the dispatch checks of an x86_64 program read instead of the CPU's (an emulator that hides features it runs) |
 | `SC_SIMD_SCALAR` | `1`: the vector planner uses no `@simd_impl` entry; every vector operation keeps its lane loop (the entry differential oracle) |
 | `SC_SIMD_TRACE` | Print each vector operation for which `simd_plan` finds no single entry (`simd: no native entry for <Op> on <T>xN: chunks` or `the lane loop`) |
+| `SC_LIR` | The LIR check (super-c-compiler-internals, "LIR"): `1` lowers every module's bodies to LIR beside the C, a comma-separated list of module paths (`lir::lower,std::string`) only those modules'. At the end of the emission the build fails when a body fails the verifier, the text form does not read back to the same bytes, or (in `super-c test`) a test's evaluator run disagrees with CTFE. The emitted C is the same; the emit stamp and the per-TU cache are off. `super-c test` unsets it for the test binary. `check.sh` runs the suite under `SC_LIR=1` |
+| `SC_LIR_STATS` | With `SC_LIR`: print the body counts, the text size, the round trip, and the CTFE comparison tally (compared, checked against the test's expectation, FFI, past a budget) even when the check passes |
+| `SC_LIR_TEXT` | With `SC_LIR`: path; write the package's LIR text form |
+| `SC_LIR_DUMP` | With `SC_LIR`: a symbol or a refusal reason; print the Core IR of that refused body, and of each body that fails the verifier |
+| `SC_LIR_RUN` | With `SC_LIR`: a symbol; run it in the LIR evaluator with no arguments and print the outcome |
+| `SC_LIR_TRACE` | With `SC_LIR`: the evaluator prints each call with its argument words and each return with its result words (`lir-trace <depth> ...`) |
 | `SC_ITEM_STATS` | The item schedule index measurement (`src/graph/items.spc`): per-item typecheck costs, the graph and its components, the predicted item-schedule makespans against the module-level schedule the type check ran before, per-body borrow and per-module panics and emission costs, the index digest (serial builds; `--jobs=1` for the costs). Keeps every body arena until emission planning (its final graph reads the bodies) |
 
 ### LSP

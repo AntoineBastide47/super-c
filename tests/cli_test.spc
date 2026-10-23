@@ -12240,13 +12240,14 @@ fn instances_check_indexes_and_default_bodies() {
 }
 
 // A variant the build constants do not have is an error even in a removed branch, and so is a
-// profile name no profile has; the build-constant names are reserved.
+// profile name no profile has; the build-constant names are reserved. An unknown platform or
+// instruction set is no error: it names no target of the compiler, so it equals no setting.
 @test
 fn build_constant_mistakes_are_errors() {
-    h::expect_err_msg(
-        "an unknown Platform variant in a removed branch",
-        "fn main() i32 {\n    if PLATFORM == Platform::Macos {\n        return 1;\n    }\n    return 0;\n}\n",
-        "unknown Platform variant 'Macos'; expected Windows, MacOS, Linux, Wasm, IOS, or Android",
+    h::expect_exit(
+        "an unknown Platform variant equals no platform",
+        "fn main() i32 {\n    if PLATFORM == Platform::Haiku {\n        return 1;\n    }\n    if ARCH != Arch::Sparc64 {\n        return 0;\n    }\n    return 2;\n}\n",
+        0,
     );
     h::expect_err_msg(
         "an unknown Endian variant in a switch arm",

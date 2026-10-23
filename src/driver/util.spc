@@ -16,6 +16,7 @@ import emit::rt_h as rth;
 import ir::cpu_features as cf;
 import bindgen::ctarget_data as ctd;
 import atomic;
+import target::table as tgt;
 
 /// The 64-bit FNV-1a offset basis: the state of an empty hash (std `str::hash` starts from it).
 pub const FNV_BASIS: u64 = 0xcbf29ce484222325u64;
@@ -595,28 +596,18 @@ pub fn write_super_rt(gen_dir: str) i32 {
 // a target that reaches only one of them mis-builds silently: the front end gates items on the target while
 // the C compiler still builds for the host.
 
-/// The SDK a `--target=` needs, as an index into the helpers below: 1 iOS, 2 Android, 3 wasm, 0 none
-/// (windows/macos/linux compile with the ordinary `cc`).
+/// The cross toolchain (`target::table::SDK_*`) a `--target=` needs; `SDK_NONE` compiles with the
+/// ordinary `cc`.
 pub const fn target_sdk(target: i32) i32 {
-    if target == 3 {
-        return 3;
-    }
-    if target == 4 {
-        return 1;
-    }
-    if target == 5 {
-        return 2;
-    }
-    return 0;
+    return tgt::os(target).sdk;
 }
 
-/// The C compiler command: `cc` when set (the manifest's or the package's), else the cross target
-/// `sdk`'s own toolchain for instruction set `arch` ($CC on the host would build a host binary), else $CC,
-/// else `cc`.
-pub fn resolve_cc(cc: str, sdk: i32, arch: i32) String {
+/// The C compiler command: `cc` when set (the manifest's or the package's), else the cross toolchain of
+/// `target` and instruction set `arch` ($CC on the host would build a host binary), else $CC, else `cc`.
+pub fn resolve_cc(cc: str, target: i32, arch: i32) String {
     let mut out = String::from_str(cc);
-    if out.len() == 0 && sdk != 0 {
-        sdk_cc(sdk, arch, &mut out);
+    if out.len() == 0 && target_sdk(target) != tgt::SDK_NONE as i32 {
+        sdk_cc(target, arch, &mut out);
     }
     if out.len() == 0 {
         let env = stdlib::get_env("CC").unwrap_or(String::new());
@@ -663,30 +654,27 @@ pub fn wasi_sysroot(out: &mut String) bool {
     return false;
 }
 
-/// The cross compiler for `sdk`, found through the SDK's own environment variable so no path is baked
-/// into the compiler. Empty when the toolchain is not installed; the caller then falls back and the
-/// C compiler reports what is missing.
-pub fn sdk_cc(sdk: i32, arch: i32, out: &mut String) {
-    if sdk == 1 {
-        // IOS: clang from the active Xcode, selected by `xcrun` so the SDK path comes from the toolchain;
-        // the x86_64 target is the simulator, whose SDK is another one.
-        out.push_str(
-            if arch == 0 {
-                "xcrun --sdk iphonesimulator clang";
-            } else {
-                "xcrun --sdk iphoneos clang";
-            },
-        );
+/// The cross compiler of `target` and `arch`, found through the SDK's own environment variable so no
+/// path is baked into the compiler. Empty when the toolchain is not installed; the caller then falls
+/// back and the C compiler reports what is missing.
+pub fn sdk_cc(target: i32, arch: i32, out: &mut String) {
+    let sdk = tgt::os(target).sdk;
+    if sdk == tgt::SDK_XCRUN {
+        // Clang from the active Xcode, selected by `xcrun` so the SDK path comes from the toolchain (a
+        // simulator's SDK is another one).
+        if let Some(t) = tgt::target_of(target, arch) {
+            out.push_str(t.sdk_cc);
+        }
         return;
     }
-    if sdk == 2 {
+    if sdk == tgt::SDK_NDK {
         // Android: the NDK's prebuilt clang.
         if ndk_llvm(out) {
             out.push_str("/bin/clang");
         }
         return;
     }
-    if sdk == 3 {
+    if sdk == tgt::SDK_WASI {
         // WebAssembly: the wasi-sdk's clang when present (it brings wasi-libc), else a plain clang,
         // which can only build freestanding code.
         let w = stdlib::get_env("WASI_SDK_PATH").unwrap_or(String::new());
@@ -701,68 +689,45 @@ pub fn sdk_cc(sdk: i32, arch: i32, out: &mut String) {
 
 // The NDK lays its prebuilt toolchains out per build host.
 const fn ndk_host_tag() str<'static> {
-    if unsafe shim::sc_host_platform() == 0 {
-        return "windows-x86_64";
-    }
-    if unsafe shim::sc_host_platform() == 1 {
-        // The NDK ships one universal darwin toolchain under this name.
-        return "darwin-x86_64";
-    }
-    return "linux-x86_64";
+    return tgt::os(unsafe shim::sc_host_platform()).ndk_host;
 }
 
 /// Flags every translation unit needs for a cross target: the triple, and for wasm the wasi sysroot's
 /// own defaults, then the flags of the enabled CPU `features` in table order. Nothing here overrides
 /// the manifest: these come first, manifest flags after. Callers split the result on whitespace
 /// (`split_args`), so no quoting: a sysroot path must hold no space.
-pub fn push_sdk_flags(cmd: &mut String, target: i32, sdk: i32, arch: i32, features: cf::CpuFeatureSet) {
-    push_triple(cmd, sdk, arch);
-    cf::push_c_flags(features, target, cmd);
+pub fn push_sdk_flags(cmd: &mut String, target: i32, arch: i32, features: cf::CpuFeatureSet) {
+    push_triple(cmd, target, arch);
+    cf::push_c_flags(features, target, arch, cmd);
 }
 
 /// The flags that decide what the C headers declare, as every compile of the generated tree has them and
-/// bindgen preprocesses under them: `cstd` (the dialect and the POSIX level), the unsigned `char`, and on
-/// `target` Windows one API level for every mingw toolchain. MSYS2 defaults `_WIN32_WINNT` to Windows 10,
-/// llvm-mingw to Windows 7, whose headers hide the Windows 8 functions the runtime calls
-/// (GetCurrentThreadStackLimits).
+/// bindgen preprocesses under them: `cstd` (the dialect and the POSIX level), the unsigned `char`, and
+/// the defines of `target` (Windows: one API level for every mingw toolchain; MSYS2 defaults
+/// `_WIN32_WINNT` to Windows 10, llvm-mingw to Windows 7, whose headers hide the Windows 8 functions the
+/// runtime calls, GetCurrentThreadStackLimits).
 pub fn push_c_env(cmd: &mut String, cstd: str, target: i32) {
     cmd.push_str(cstd);
     cmd.push_str(" -funsigned-char");
-    if target == 0 {
-        cmd.push_str(" -D_WIN32_WINNT=0x0A00");
-    }
+    cmd.push_str(tgt::os(target).c_defines);
 }
 
-fn push_triple(cmd: &mut String, sdk: i32, arch: i32) {
-    if sdk == 0 {
+fn push_triple(cmd: &mut String, target: i32, arch: i32) {
+    let sdk = tgt::os(target).sdk;
+    let to = tgt::target_of(target, arch);
+    if sdk == tgt::SDK_NONE || to.is_none() {
         return;
     }
-    // The triples are `ctarget_data`'s, the ones bindgen's C environment models: iOS carries the
+    let t = to.unwrap();
+    // The triples are the target table's, the ones bindgen's C environment models: iOS carries the
     // deployment floor (without a version clang assumes an iOS old enough to lack thread-local storage,
     // which the runtime's preemption tick needs), Android the API level (24 is the oldest still widely
     // supported).
-    let target = if sdk == 1 {
-        4;
-    } else if sdk == 2 {
-        5;
-    } else {
-        3;
-    };
-    let ri = ctd::find_row(
-        target,
-        if sdk == 3 {
-            2;
-        } else if arch == 0 {
-            0;
-        } else {
-            1;
-        },
-    );
     let rows: []ctd::Row = ctd::ROWS;
-    let row = &rows[ri as usize];
-    if sdk != 3 {
+    let row = &rows[t.cenv as usize];
+    if sdk != tgt::SDK_WASI {
         cmd.push_str(" -target ");
-        cmd.push_str(row.triple);
+        cmd.push_str(t.triple);
         return;
     }
     // A wasi sysroot supplies the libc the emitted C needs. With none, only freestanding code can
@@ -771,7 +736,7 @@ fn push_triple(cmd: &mut String, sdk: i32, arch: i32) {
     if wasi_sysroot(&mut sr) {
         cmd.push_str(row.flags);
         cmd.push_str(" -target ");
-        cmd.push_str(row.triple);
+        cmd.push_str(t.triple);
         cmd.push_str(" --sysroot=");
         cmd.push_string(&sr);
         return;
@@ -783,11 +748,6 @@ fn push_triple(cmd: &mut String, sdk: i32, arch: i32) {
 /// target, so a program that runs on one runs on all: wasm-ld's default stack is 64 KiB (placed first, so an
 /// overflow traps rather than overwriting static data), a Windows executable reserves 1 MiB unless its
 /// header says otherwise. A wasm link's libraries come from the toolchain probes (`push_rtlib`).
-pub fn push_sdk_libs(cmd: &mut String, target: i32, sdk: i32) {
-    if target == 0 && sdk == 0 {
-        cmd.push_str(" -Wl,--stack,8388608");
-    }
-    if sdk == 3 {
-        cmd.push_str(" -Wl,-z,stack-size=8388608 -Wl,--stack-first");
-    }
+pub fn push_sdk_libs(cmd: &mut String, target: i32) {
+    cmd.push_str(tgt::os(target).exe_link);
 }

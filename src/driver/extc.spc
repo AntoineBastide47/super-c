@@ -5,6 +5,7 @@ import ast::ast as *;
 import std::platform::fs;
 import module::loader as loader;
 import driver::util as *;
+import target::table as tgt;
 
 /// Scan every module for `@link` and write the flags to `<gen_root>/__ldflags` (removed when none). A C
 /// library comes prebuilt and reaches the link through `@link` only: no C source of the program's tree is
@@ -18,8 +19,9 @@ pub fn ext_c_collect(p: &mut loader::Package, err: &mut bool, target: i32) {
     // `@link` on the prelude's extern block because that block DECLARES the functions for every target,
     // Windows included: gating it to carry the flag would take the declarations away from Windows, whose
     // CRT provides the functions and has no libm to name. wasm links its own C library, `std::rt::libm`.
-    if target != 0 && target != 3 {
-        ld.push(String::from_str("-lm"));
+    let libm = tgt::os(target).libm;
+    if libm.len() != 0 {
+        ld.push(String::from_str(libm));
     }
     let n = p.modules.len();
     for m in 0..n {

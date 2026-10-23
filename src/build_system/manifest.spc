@@ -139,14 +139,11 @@ pub struct Command<'a> {
 /// Ownership: `toml` keeps the parsed items alive; Profile/Command `name` views borrow into their
 /// section strings.
 pub struct Manifest<'a> {
-    /// Instruction set `@arch` gates against: 0 x86_64, 1 aarch64, 2 wasm32, -1 unknown. Defaults to the
+    /// Instruction set `@arch` gates against (a `target::table::ISAS` index), -1 unknown. Defaults to the
     /// host; the driver overwrites it for `--arch=`.
     pub arch: i32,
-    /// Cross-compilation toolchain: 0 none (host cc), 1 ios, 2 android, 3 wasm. Set by `--target=`; it
-    /// selects the compiler, sysroot and triple, never the platform gate.
-    pub sdk: i32,
-    /// Platform (`PLATFORM_NAMES` index) the build is for: the host, or `--target=`. Its baseline CPU
-    /// features and their C flag depend on it.
+    /// Platform (a `target::table::OSES` index) the build is for: the host, or `--target=`. Its cross
+    /// toolchain, baseline CPU features and their C flag depend on it.
     pub target: i32,
     pub toml: Vector<toml::TomlItem>,
     pub bin: String,
@@ -744,7 +741,6 @@ extend Manifest {
     fn new<'a>() Manifest<'a> {
         return Manifest {
             arch: unsafe shim::sc_host_arch(),
-            sdk: 0,
             target: unsafe shim::sc_host_platform(),
             toml: Vector::<toml::TomlItem>::new(),
             bin: String::new(),

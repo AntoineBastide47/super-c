@@ -3,6 +3,7 @@
 // (prepareRename, conflicts, interface relations), and the navigation features: all driven as
 // framed JSON-RPC sessions against a `super-c lsp` subprocess, plus the parser's attribute
 // inventory as the completion source of truth.
+import target::table as tgt;
 import tests::cli_harness as cli;
 import module::loader as loader;
 import lsp::json as json;
@@ -625,8 +626,8 @@ fn attribute_inventory_is_complete() {
         }
         assert(found, "attribute missing from the inventory");
     }
-    assert_eq(par::axis_names(false).len(), 6);
-    assert_eq(par::axis_names(true).len(), 3);
+    assert_eq(tgt::axis_names(false).len(), 6);
+    assert_eq(tgt::axis_names(true).len(), 3);
 }
 
 // Gap coverage: incremental sync, pull diagnostics, delta tokens, code actions, hierarchies, limits.
@@ -1499,7 +1500,7 @@ fn lsp_build_constants_follow_the_target() {
 }
 
 const BC_DOC: str = "fn main() i32 {\n    if PROFILE == \"debug\" {\n        return 0;\n    }\n    if TEST {\n        return missing;\n    }\n    return 1;\n}\n";
-const BC_EDIT: str = "fn main() i32 {\n    if PROFILE == \"debug\" {\n        return 0;\n    }\n    if PLATFORM == Platform::Macos {\n        return missing;\n    }\n    return 1;\n}\n";
+const BC_EDIT: str = "fn main() i32 {\n    if PROFILE == \"debug\" {\n        return 0;\n    }\n    if ENDIAN == Endian::Large {\n        return missing;\n    }\n    return 1;\n}\n";
 
 // Hover on a build constant shows its value; it has no definition site to go to; the branch the
 // platform filter removed is not analyzed; an edit re-decides the module's conditions.
@@ -1527,7 +1528,7 @@ fn lsp_build_constants() {
     assert(r5.contains("The build profile"));
     let r6 = response_of(o, "\"id\":6");
     assert(r6.contains("\"result\":null"));
-    assert(o.contains("unknown Platform variant 'Macos'"));
+    assert(o.contains("unknown Endian variant 'Large'"));
 }
 
 // The response that starts at byte `at` of session output `o`, up to the next frame header.

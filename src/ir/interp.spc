@@ -21,6 +21,11 @@ import lexer::token as tok;
 import lexer::token_type as *;
 import utils::persist as *;
 
+// `flat_elem`'s outcomes.
+const FE_OUT: u8 = 0;
+const FE_OK: u8 = 1;
+const FE_UNKNOWN: u8 = 2;
+
 pub const IV_NONE: u8 = 0; // not evaluable (unsupported construct, trap, or budget)
 pub const IV_INT: u8 = 1;
 pub const IV_BOOL: u8 = 2;
@@ -498,12 +503,12 @@ const fn bt_unsigned(b: BuiltinType) bool {
     return b == BuiltinType::BT_U8 || b == BuiltinType::BT_U16 || b == BuiltinType::BT_U32 || b == BuiltinType::BT_U64 || b == BuiltinType::BT_USIZE || b == BuiltinType::BT_CHAR;
 }
 
-struct DblRes {
+pub struct DblRes {
     pub ok: bool,
     pub v: f64,
 }
 
-const fn libm1(name: str, x: f64) DblRes {
+pub const fn libm1(name: str, x: f64) DblRes {
     if name == "sqrt" {
         return DblRes { ok: true, v: math::sqrt(x) };
     }
@@ -585,7 +590,7 @@ const fn libm1(name: str, x: f64) DblRes {
     return DblRes { ok: false, v: 0.0 };
 }
 
-const fn libm2(name: str, x: f64, y: f64) DblRes {
+pub const fn libm2(name: str, x: f64, y: f64) DblRes {
     if name == "pow" {
         return DblRes { ok: true, v: math::pow(x, y) };
     }
@@ -612,7 +617,7 @@ const fn libm2(name: str, x: f64, y: f64) DblRes {
 
 // libm1 over the f32 function of the same name (`sqrtf` for "sqrt"): the f64 result narrowed to
 // f32 can differ from the f32 function the program calls.
-const fn libm1f(name: str, x: f32) DblRes {
+pub const fn libm1f(name: str, x: f32) DblRes {
     if name == "sqrt" {
         return DblRes { ok: true, v: math::sqrtf(x) };
     }
@@ -695,7 +700,7 @@ const fn libm1f(name: str, x: f32) DblRes {
 }
 
 // libm2 over the f32 function of the same name.
-const fn libm2f(name: str, x: f32, y: f32) DblRes {
+pub const fn libm2f(name: str, x: f32, y: f32) DblRes {
     if name == "pow" {
         return DblRes { ok: true, v: math::powf(x, y) };
     }
@@ -916,6 +921,8 @@ pub struct Interp {
     pub slot_cap: u64, // slot capacity the object store holds, live and retained
     pub zcell: u32, // the one-slot object every zero-sized place behind a sentinel pointer resolves to; 0 = none yet
     pub failed: bool,
+    /// `probe_test`: the run stopped at an extern function the interpreter does not model.
+    pub ffi: bool,
     // `read_place`/`write_place` admit a scalar union member other than the active one (`pun_ok`);
     // `resolve_place` then reports the member asked for (`pun_slot`, -1 for none) and resolves to the
     // active one.
@@ -1074,6 +1081,7 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         slot_cap: 0,
         zcell: 0,
         failed: false,
+        ffi: false,
         pun_ok: false,
         pun_slot: -1,
         deref_obj: 0,
@@ -1893,6 +1901,16 @@ extend Interp {
             return self.dead_trap(unsafe (*o).dead);
         }
         if pv_off(pv) as usize >= unsafe (*o).slots.len() {
+            let mut fo: u32 = 0;
+            let mut fs: u32 = 0;
+            let fe = self.flat_elem(id, pv_off(pv), &mut fo, &mut fs);
+            if fe == FE_OK {
+                *out = unsafe (*self.obj_ptr(fo)).slots[fs as usize];
+                return out.kind != IV_NONE;
+            }
+            if fe == FE_UNKNOWN {
+                return self.fail();
+            }
             self.it_trap(IT_TRAP_UB_OOB, "out-of-bounds access");
             return false;
         }
@@ -2969,6 +2987,11 @@ extend Interp {
         }
         let hit = self.body_find(bkey, m, fnode, binds);
         if hit >= 0 {
+            // The checked item needs the body's item whichever item lowered the body first: the
+            // edge does not depend on the order the checks ran in.
+            if !closure {
+                self.note_body_edge(m, fnode);
+            }
             let si = hit as usize;
             if self.copy_kept && (self.body_slot[si] & BODY_KEPT) != 0 {
                 let owned = self.own_kept(self.body_slot[si] & BODY_MASK);
@@ -3006,19 +3029,12 @@ extend Interp {
             // its enclosing extend/interface. Closures live inside some checked body's item; the
             // engine only ever reaches one through a value its checked context built.
             if !closure {
-                let mut cont = NODE_NONE;
-                let ck9 = self.container_of(m, fnode, &mut cont);
-                let item9 = if ck9 == 0 {
-                    fnode;
-                } else {
-                    cont;
-                };
                 if !self.visible_node(m, fnode) {
                     self.note_missing(m);
-                    self.note_dyn_edge(m, item9);
+                    self.note_body_edge(m, fnode);
                     return -1;
                 }
-                self.note_dyn_edge(m, item9);
+                self.note_body_edge(m, fnode);
             }
         }
         {
@@ -3119,6 +3135,20 @@ extend Interp {
     // names its item.
     fn note_dyn_edge(self: &mut Self, m: ModuleId, item9: NodeId) {
         self.note_item_edge(self.p().item_of(m, item9));
+    }
+
+    // `note_dyn_edge` to the item of function `fnode` of module `m`: itself or its extend or interface.
+    fn note_body_edge(self: &mut Self, m: ModuleId, fnode: NodeId) {
+        if !self.dyn_rec || self.cur_item == loader::ITEM_NONE {
+            return;
+        }
+        let mut cont = NODE_NONE;
+        let item9 = if self.container_of(m, fnode, &mut cont) == 0 {
+            fnode;
+        } else {
+            cont;
+        };
+        self.note_dyn_edge(m, item9);
     }
 
     // `note_dyn_edge` to item `callee`.
@@ -4196,6 +4226,7 @@ extend Interp {
             let mut f32suf = false;
             let name = self.libm_name(fm, nm, &mut f32suf);
             if name.len() == 0 || nargs < 1 || nargs > 3 {
+                self.ffi = true;
                 return self.fail();
             }
             let mut inv: [f64; 3] = [0.0f64, 0.0f64, 0.0f64];
@@ -5536,6 +5567,15 @@ extend Interp {
         }
         let no = pv_off(p) as i64 + idx;
         if no < 0 || no as usize >= unsafe (*top).slots.len() {
+            // Past a member array: the enclosing object's scalars, as C lays them out.
+            let fe = self.flat_elem(tid, no, obj, slot);
+            if fe == FE_OK {
+                *out = unsafe (*self.obj_ptr(*obj)).slots[(*slot) as usize];
+                return true;
+            }
+            if fe == FE_UNKNOWN {
+                return self.fail();
+            }
             self.it_trap(IT_TRAP_UB_OOB, "out-of-bounds access");
             return false;
         }
@@ -5543,6 +5583,98 @@ extend Interp {
         *slot = no as u32;
         *out = unsafe (*top).slots[no as usize];
         return true;
+    }
+
+    // Slot `no` of object `tid` past its slots, where `tid` is held by value in a slot of another
+    // object (a member array, the element of an array of structs): the scalar `no` places after slot
+    // 0 in the outermost holder (not a frame, a closure environment or an item cell), counted in
+    // member order. C lays out a run of one scalar type with no gap, so when every scalar from slot 0
+    // to it has slot 0's type the pointer reaches that element in memory: FE_OK, `obj` and `slot` set.
+    // FE_OUT when the element is outside the outermost holder; FE_UNKNOWN when a scalar's type does
+    // not resolve here or differs (its bytes are not modeled).
+    const fn flat_elem(self: &Self, tid: u32, no: i64, obj: &mut u32, slot: &mut u32) u8 {
+        let mut root = tid;
+        for _ in 0..16 {
+            let h = self.holder_of(root);
+            if h == 0 {
+                break;
+            }
+            root = h;
+        }
+        if root == tid || unsafe (*self.obj_ptr(tid)).slots.len() == 0 {
+            return FE_OUT;
+        }
+        let mut leaves = Vector::<u64>::new();
+        self.leaves_of(root, &mut leaves, 0);
+        let me = tid as u64 << 32;
+        let mut start: i64 = -1;
+        for k in 0..leaves.len() {
+            if leaves[k] == me {
+                start = k as i64;
+                break;
+            }
+        }
+        let at = start + no;
+        if start < 0 || at < 0 || at as usize >= leaves.len() {
+            return FE_OUT;
+        }
+        let v0 = unsafe (*self.obj_ptr(tid)).slots[0];
+        let mut b0 = BuiltinType::BT_COUNT;
+        if v0.kind != IV_INT && v0.kind != IV_FLOAT || !self.bt_of(v0.tm, v0.ty, &mut b0) {
+            return FE_UNKNOWN;
+        }
+        let mut lo = start;
+        let mut hi = at;
+        if at < start {
+            lo = at;
+            hi = start;
+        }
+        for k in lo..hi + 1 {
+            let o = (leaves[k as usize] >> 32) as u32;
+            let v = unsafe (*self.obj_ptr(o)).slots[(leaves[k as usize] as u32) as usize];
+            let mut b = BuiltinType::BT_COUNT;
+            if v.kind != v0.kind || !self.bt_of(v.tm, v.ty, &mut b) || b != b0 {
+                return FE_UNKNOWN;
+            }
+        }
+        *obj = (leaves[at as usize] >> 32) as u32;
+        *slot = leaves[at as usize] as u32;
+        return FE_OK;
+    }
+
+    // The live object that holds object `id` by value in a slot, or 0: a frame, a closure environment
+    // and an item cell hold variables, not members.
+    const fn holder_of(self: &Self, id: u32) u32 {
+        for o in 1..self.objs_live as u32 + 1 {
+            let ob = self.obj_ptr(o);
+            if unsafe (*ob).dead != 0 || unsafe (*ob).frame != 0 || unsafe (*ob).clos != 0 || unsafe (*ob).item != 0 {
+                continue;
+            }
+            for k in 0..unsafe (*ob).slots.len() {
+                let v = unsafe (*ob).slots[k];
+                if v.kind == IV_OBJ && v.i == id as i64 {
+                    return o;
+                }
+            }
+        }
+        return 0;
+    }
+
+    // The scalar slots of object `o` and of the objects its slots hold, in member order, as
+    // object << 32 | slot.
+    const fn leaves_of(self: &Self, o: u32, out: &mut Vector<u64>, depth: u32) {
+        let ob = self.obj_ptr(o);
+        if ob == null || depth > 16 {
+            return;
+        }
+        for k in 0..unsafe (*ob).slots.len() {
+            let v = unsafe (*ob).slots[k];
+            if v.kind == IV_OBJ {
+                self.leaves_of(v.i as u32, out, depth + 1);
+            } else {
+                out.push(o as u64 << 32 | k as u64);
+            }
+        }
     }
 
     fn resolve_place(self: &mut Self, b: &ir::CoreBody, env: u32, pid: ir::PlaceId, obj: &mut u32, slot: &mut u32) bool {
@@ -5695,6 +5827,16 @@ extend Interp {
                     return self.fail();
                 }
                 let ns = (*slot) as i64 + idx;
+                if ns < 0 || ns as usize >= unsafe (*op2).slots.len() {
+                    let fe = self.flat_elem(*obj, ns, obj, slot);
+                    if fe == FE_OK {
+                        cur = unsafe (*self.obj_ptr(*obj)).slots[(*slot) as usize];
+                        continue;
+                    }
+                    if fe == FE_UNKNOWN {
+                        return self.fail();
+                    }
+                }
                 if ns < 0 || ns as usize >= unsafe (*op2).slots.len() {
                     self.it_trap(IT_TRAP_UB_OOB, "out-of-bounds access");
                     return false;
@@ -9564,6 +9706,37 @@ extend Interp {
             return self.trap_span;
         }
         return zero;
+    }
+
+    /// Run fn `fn_id` of module `m`, which takes no parameter and no generic argument, as a test: its
+    /// trap kind (IT_TRAP_NONE when it returns) with `trap`, and in `trap_span` the top-frame statement
+    /// that trapped. A call the interpreter cannot run ends it with no trap and `failed` set.
+    pub fn probe_test(self: &mut Self, m: ModuleId, fn_id: NodeId) u8 {
+        self.eng_enter();
+        self.eval_reset();
+        self.subst.truncate(0);
+        self.sub_base = 0;
+        let zero = tok::Span { start: 0, end: 0 };
+        self.top_span = zero;
+        self.trap_span = zero;
+        self.ffi = false;
+        let binds = Vector::<ISub>::new();
+        let bidx = self.body_of(m, fn_id, &binds, false);
+        let mut k = IT_TRAP_UNSUPPORTED;
+        if bidx >= 0 {
+            self.lint_on = true;
+            let bb = self.body_at(bidx);
+            let args = Vector::<IVal>::new();
+            let _ = self.run(unsafe &*bb, &args);
+            self.lint_on = false;
+            k = self.trap_kind;
+            if self.failed && k == IT_TRAP_NONE {
+                k = IT_TRAP_UNSUPPORTED;
+            }
+        }
+        self.failed = false;
+        self.eng_leave();
+        return k;
     }
 
     // ---- effect summary (fx) ----------------------------------------------------------------------
