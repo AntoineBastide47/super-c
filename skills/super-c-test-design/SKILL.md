@@ -87,7 +87,7 @@ Rules for the costly rungs:
   `.scripts/o/script`), so a build does not start a `--version` probe.
 - The checked std prelude is cached in the cache root too (`<root>/prelude/`): a build
   checks only the program. A test that must see the prelude checked (a std edit, a std tree of its own) sets
-  its own `SC_CACHE_DIR`, as `tests/prelude_image_test.spc` does; the first build in a new cache
+  its own `SC_CACHE_DIR`, as `tests/cli/prelude_image_test.spc` does; the first build in a new cache
   root checks the prelude once.
 
 ## Sanitizers and profiles

@@ -1,6 +1,6 @@
 // The shared pattern compiler: matrix usefulness drives exhaustiveness and
 // unreachable-arm verdicts, and the decision tree drives Core IR match lowering. The sequential walker's
-// verdicts are pinned by tests/typechecker_test.spc::switch_exhaustiveness; this file pins the
+// verdicts are pinned by tests/frontend/typechecker_test.spc::switch_exhaustiveness; this file pins the
 // matrix's added precision and the engine's direct answers.
 import tests::harness as h;
 import driver_shim as shim;

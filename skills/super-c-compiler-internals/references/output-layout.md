@@ -350,9 +350,9 @@ is rewritten).
   type-need row (`RK_TNEED`: its sorted distinct keys as word pairs), array wrapper
   requests (`RK_WRAP`) and result carrier requests (`RK_PACK`); format version 8.
   A replayed tree must match a `SC_NO_TU_CACHE=1` tree byte for byte after an edit
-  (`tests/cli_test.spc`, `build_staleness_gates` covers the header-change and
+  (`tests/cli/cli_test.spc`, `build_staleness_gates` covers the header-change and
   layout-change cases).
-- `tests/cli_test.spc`: `build_type_edit_stays_local` (a type edit leaves units without
+- `tests/cli/cli_test.spc`: `build_type_edit_stays_local` (a type edit leaves units without
   the module's types untouched), `build_new_type_recompiles_no_user` (a new type in a
   module every unit uses recompiles no unit; removing it prunes its header and its
   manifest record), `build_field_edit_recompiles_users` (a field edit recompiles the

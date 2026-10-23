@@ -8,7 +8,7 @@
 import atomic;
 import sc_runtime;
 import std::parallel::runtime as rt;
-import tests::parallel_harness as ph;
+import tests::concurrency::parallel_harness as ph;
 import std::parallel::sync as sync;
 import std::parallel::blocking as blocking;
 import std::parallel::channel as chan;

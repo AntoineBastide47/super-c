@@ -3,7 +3,7 @@
 // (the kernels lane operations express; the others run their scalar loops). The C kernels come prebuilt:
 // kernels.sh archives them into build/simd_baseline/<arch>/libsimd_baseline.a, which the build links. Every implementation of a
 // kernel gives the scalar loop's bits, any NaN counting as one value: `first_mismatch` checks that on
-// every tail length, and the benchmark and tests/simd_baseline_test.spc run it. The benchmark fails when
+// every tail length, and the benchmark and tests/simd/simd_baseline_test.spc run it. The benchmark fails when
 // a portable kernel runs more than 15% slower than its scalar loop. On x86_64 the portable row names the
 // build's level (`portable`, `portable-avx2`, `portable-avx512`: `--target-cpu`), and a `simd_gap` row
 // reports its time over the hand-written kernel of that level (SSE2 for a baseline build): an arithmetic

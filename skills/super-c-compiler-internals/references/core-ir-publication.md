@@ -175,7 +175,7 @@ measurement (`SC_ITEM_STATS`) read, before the release.
 | Lint and diagnostic probes (`lint_body`, `fn_const_suggest`, `lint_unused_*`) | `lint_body` runs kept bodies | `lint_unused_items`: the item index edges and `method_refs`; `lint_unused_members` and `lint_unused_imports` run under the lint driver, which keeps the syntax | none needed |
 | Emission liveness and order (`compute_emit_live`, `emit_order`) | none | the module arena's resolutions, the index edges, the type and instance tables; `emit_dep_row` reads the body arena's generic-call sites | none needed |
 | Reflection and zero-size specialization (`lower.spc` binder frames, `layout.spc`) | `has_reflect`, `has_zst_cond`, `IN_SIZEOF`/`IN_ALIGNOF` | module arena: aggregate members, generic parameters | none needed |
-| IR printer, verifier and tests (`ir/print.spc`, `ir/verify.spc`, `tests/core_ir_test.spc`) | every pool | module arena: names for the print | none needed |
+| IR printer, verifier and tests (`ir/print.spc`, `ir/verify.spc`, `tests/ir/core_ir_test.spc`) | every pool | module arena: names for the print | none needed |
 
 Two syntax consumers run before the first lowering and are not blockers, both in the borrow
 stage's prologue (`borrowck_all`, one job per module, `bc_pre_job`, with the module's row of the

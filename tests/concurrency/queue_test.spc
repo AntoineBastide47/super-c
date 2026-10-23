@@ -4,7 +4,7 @@
 // every task; and shutdown drains work still arriving from cancellation cleanup.
 
 import std::parallel::runtime as rt;
-import tests::parallel_harness as ph;
+import tests::concurrency::parallel_harness as ph;
 import std::parallel::sync as sync;
 import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;

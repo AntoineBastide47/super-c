@@ -7,7 +7,7 @@
 import std::platform::env;
 import std::platform::fs;
 import std::platform::process;
-import tests::platform_harness as ph;
+import tests::platform::platform_harness as ph;
 
 const PROGRAM: str = M"(
 import std::platform::clock;

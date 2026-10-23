@@ -8,7 +8,7 @@ import std::platform::path;
 import std::platform::process;
 import std::platform::signal;
 import std::platform::socket;
-import tests::platform_harness as ph;
+import tests::platform::platform_harness as ph;
 
 @platform(macos | ios | linux | android)
 extern "C" "unistd.h" {

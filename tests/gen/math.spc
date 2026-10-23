@@ -4,7 +4,7 @@
 // result lane at compile time equals its run time (`const_runtime_parity`). Oracle 1: the planned build
 // and the scalar lowering (`SC_SIMD_SCALAR=1`) print the same result bits, and each lane equals the
 // same function on that lane's input alone (no lane depends on its neighbors). Each build runs one
-// compile job (`--jobs=1`), as `simd_math_test.spc`.
+// compile job (`--jobs=1`), as `tests/simd/simd_math_test.spc`.
 import tests::gen::driver as *;
 import tests::harness as h;
 

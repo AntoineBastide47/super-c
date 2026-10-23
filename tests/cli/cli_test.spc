@@ -96,7 +96,7 @@ fn language_demo_emits_valid_c() {
 // Array<T, 0> and a loop over one in a const-generic instance compile under -pedantic-errors and
 // -Wtype-limits (no `i < 0` loop header, no unsigned `i >= 0` bounds test) and run leak-free. A
 // zero-length array of an owning element holds nothing: its drop emits no loop over absent storage
-// (tests/zst_test.spc has the semantics).
+// (tests/ir/zst_test.spc has the semantics).
 @test
 fn zero_length_arrays_emit_valid_c() {
     let p = cli::proj_new();

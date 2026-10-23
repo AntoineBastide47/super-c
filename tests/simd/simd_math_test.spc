@@ -1,7 +1,7 @@
 // The vector math classes (`std::simd::math`, `balanced`, `fast`): the special values of every
 // function, evaluated at compile time and at run time, agree bit for bit; every lowering gives the same
 // results (hashed: the planned build, the scalar lowering, and a fixed hash every target must give).
-// The tools' tests (generator, reduced accuracy check) are in `vector_math_tools_test.spc`. Each build
+// The tools' tests (generator, reduced accuracy check) are in `tests/cli/vector_math_tools_test.spc`. Each build
 // runs one compile job (`--jobs=1`): a test of the parallel suite takes one CPU, so its large programs
 // do not slow the tests that run beside it.
 import tests::harness as h;

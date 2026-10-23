@@ -18,6 +18,15 @@ allowed-tools: Bash Read
 Super-C has a built-in test framework. Tests are declared with attributes, discovered
 automatically, and run in forked child processes for isolation.
 
+`super-c test` imports every `.spc` file under `tests/`, subdirectories included; a file's path is its
+module path, so `tests/simd/simd_x86_test.spc` holds the tests `tests::simd::simd_x86_test::*`. The suite
+groups its files by area: `frontend/` (lexer to type checker), `borrowck/`, `ir/`, `codegen/`, `simd/`,
+`math/`, `stdlib/`, `concurrency/`, `platform/`, `cli/`, `lsp/`, `tooling/` (fmt, lint, doc IR, the C
+preprocessor) and `gen/` (the program generators and their test). The shared helpers stay at the top
+(`tests/harness.spc`, `tests/cli_harness.spc`); an area's own helper lives in its folder
+(`tests/concurrency/parallel_harness.spc`, `tests/platform/platform_harness.spc`). A file keeps its area
+prefix (`simd_`, `math_`, `cli_`, `lsp_`, `platform_`) so a `--filter` on it still selects the area.
+
 ## Writing Tests
 
 ### Basic test
@@ -57,7 +66,7 @@ matching parameter. Constraints: the `@test_init` function takes no parameters a
 return a plain non-generic struct or enum; a suite `@test_init` (inside an `extend`) must
 return the extended type itself. Fixtures are values because a `static mut` cannot hold a
 `Free` type. A test that reads a process-lifetime counter (such as the runtime's cancel
-count) records its baseline in a `@test_init` fixture (`Base` in `tests/cancel_test.spc`)
+count) records its baseline in a `@test_init` fixture (`Base` in `tests/concurrency/cancel_test.spc`)
 and never assumes a fresh process.
 
 ### Teardown with `@test_free`
@@ -339,12 +348,12 @@ gets `SC_LEAK_CHECK=fatal` unless the test sets `SC_LEAK_CHECK` on it itself (`r
 `compile_flags_env`, `compile_and_run_env`), so a leak in a program or compiler a test runs fails
 the test with or without the gate. Only a leak in the test process itself needs the gate.
 
-The platform layer's tests (`tests/platform_*_test.spc`, helper `tests/platform_harness.spc`) run each
+The platform layer's tests (`tests/platform/platform_*_test.spc`, helper `tests/platform/platform_harness.spc`) run each
 `std::platform` module on the host; `platform_wasi_test` builds one program with `--target=wasm`, runs it under
 wasmtime and checks every WASI `Unsupported` path, and returns early without `WASI_SDK_PATH`. Windows-only paths
-compile there and run on the Windows runner. `tests/std_packages_test.spc` builds `tools/std_packages` and runs
+compile there and run on the Windows runner. `tests/cli/std_packages_test.spc` builds `tools/std_packages` and runs
 it on fixture trees (an upward import, a forbidden `extern "C"` function, a cross-package cycle, the text of a
-matchertext literal). `tests/wasm_libc_test.spc` checks wasm's C library against the one it replaces: a program
+matchertext literal). `tests/codegen/wasm_libc_test.spc` checks wasm's C library against the one it replaces: a program
 on `std::rt::libc` and `std::rt::libm` and the same program in C on wasi-libc (the wasi-sdk's clang) print the
 same 27,100 lines under wasmtime (the bits of every math function at 300 arguments, printf, strtod, strtol,
 qsort), and the program's name section holds no wasi-libc function; a second pair prints the same 873 lines
@@ -393,7 +402,7 @@ that leaks on purpose uses `forget(..)`.
 
 A lint test that imports a sibling fixture file must run the lint from the fixture root
 (`cli::superc_env_in(root, ..)`, as `lint_reports_cross_module_duplicate_conformance` in
-`tests/lint_test.spc` does); otherwise use a prelude-loaded ffi module such as `stdio`.
+`tests/tooling/lint_test.spc` does); otherwise use a prelude-loaded ffi module such as `stdio`.
 
 ## The Compiler's Own Test Corpus
 
@@ -426,18 +435,18 @@ filtering for the host and loads the vector backend for a snippet that names a v
 real build, except the three differential oracles, which build
 through the compiler under test (below).
 
-`tests/ctarget_test.spc` checks bindgen's C environment tables (`src/bindgen/ctarget_data.spc`)
+`tests/codegen/ctarget_test.spc` checks bindgen's C environment tables (`src/bindgen/ctarget_data.spc`)
 against clang of the pinned major release (`ctarget_data::PINNED_VERSION`). The oracle is the first of
 `$SC_CTARGET_CLANG`, `$CC`, `clang` and `cc` with that major. Without one, the macro and `__has_*`
 tests pass without checking anything (the runner discards a passing test's output); with
 `SC_CTARGET_REQUIRE=1` they fail instead. The `ctarget` job of the release workflow installs clang 22
 and sets both variables. The built-in header tests run with any clang. `scripts/gen_ctarget.py`
-regenerates the tables and `tests/ctarget_universe.spc`. The generator and the tests ask clang with
+regenerates the tables and `tests/codegen/ctarget_universe.spc`. The generator and the tests ask clang with
 `--no-default-config --rtlib=platform`, so a vendor's configuration file or `CLANG_DEFAULT_RTLIB`
 does not change the answers. A Debian or Ubuntu clang is not asked about `strlcpy` and `strlcat`:
 Debian's packages remove those two library builtins (`DEBIAN_DROPS`).
 
-`tests/cpp_test.spc` checks bindgen's preprocessor (`src/bindgen/cpp.spc`) against the host C
+`tests/tooling/cpp_test.spc` checks bindgen's preprocessor (`src/bindgen/cpp.spc`) against the host C
 compiler's `cc -E` and `cc -E -dM` under the host's own search list (`-nostdinc` with `-isystem` and
 `-iframework`): tokens, origins, line numbers and the macro set must be equal, over synthetic
 sources and the system and framework headers the host has.
@@ -519,10 +528,10 @@ folds through the compiler's own C library, which is that module in the wasm com
   match; an entry that starts with `%` matches the whole instruction (`asm_instructions`), its
   register operands included. x86_64 and aarch64 work on the host and, on macOS, for the other architecture through
   `--arch=` plus `--cc=cc -target <triple>`; wasm32 needs `--target=wasm` and `WASI_SDK_PATH`,
-  which the wasm lane sets (`asm_wasm32` in `tests/differential_test.spc` returns early without it).
+  which the wasm lane sets (`asm_wasm32` in `tests/ir/differential_test.spc` returns early without it).
   Its two halves serve many functions from one build: `asm_text(b, opts, function, out)` compiles
   the unit of build `b` that defines `function` to assembly once, and `asm_match(text, function,
-  contains, absent)` checks any function of it (`tests/simd_aarch64_test.spc` builds all its
+  contains, absent)` checks any function of it (`tests/simd/simd_aarch64_test.spc` builds all its
   kernels as one program).
 
 ### The vector conformance lane
@@ -559,7 +568,7 @@ one runner per level, beside the test shards) run `--filter=simd_` at `x86-64-v2
 `x86-64-v3` only: a hosted runner's CPU is not selectable, so no CI job runs `x86-64-v4`. A machine
 without AVX-512 checks those entries in the assembly only.
 
-- `tests/simd_entry_test.spc` (the entry model, `tests/gen/simd_entry.spc`): every `@simd_impl`
+- `tests/simd/simd_entry_test.spc` (the entry model, `tests/gen/simd_entry.spc`): every `@simd_impl`
   entry of `std/simd/backend/wasm.spc` (in the lane), `aarch64.spc` or `x86_64.spc` (on such a host), through four vector model cases of each operation that
   reaches it at its lane count and at the most lanes (a `less_than` entry also through `count` and a
   `choose` of narrower lanes), and a choice, compress, expand or masked access over at most four
@@ -568,7 +577,7 @@ without AVX-512 checks those entries in the assembly only.
   (`Cmp*Lanes`, `ChooseLanes`, `LanesToMask`, `MaskToLanes`, `AnyLanes`, `AllLanes`) whose lanes the
   C handles through a called mask-register entry (AVX-512). Loads, stores and the `any`/`all`
   forms go through one extra program. Elsewhere the tests return at once.
-- `tests/simd_wasm_test.spc`: the C of a program without vectors is byte-identical with and without
+- `tests/simd/simd_wasm_test.spc`: the C of a program without vectors is byte-identical with and without
   the features; `expect_asm` checks that kernels use their SIMD128 instructions (`f32x4.add`,
   `i8x16.eq`, `v128.bitselect`, `i8x16.bitmask`, `v128.any_true`, `v128.load32_lane`) with no
   `call`, that a constant shuffle is `i8x16.shuffle` (no swizzle, no lane loads), that a
@@ -604,7 +613,7 @@ runs), then report the model, seed, failure, reduced program and a replay line. 
   executes every case from a start and prints to stderr, so a trap costs one more run from the next
   case, not a process per case; the program is built with `--profile=ubsan`, and a trap exits with
   status 134 through a SIGABRT handler, as a crash report or core dump costs more than the run.
-  `tests/simd_ops_test.spc` sweeps every operation, lane type, lane count and conversion target
+  `tests/simd/simd_ops_test.spc` sweeps every operation, lane type, lane count and conversion target
   through the same functions, in programs of at most 256 cases.
 
 - `math.spc`: calls of the vector math classes (`std::simd::math`, `balanced`, `fast`) on lanes drawn
@@ -613,7 +622,7 @@ runs), then report the model, seed, failure, reduced program and a replay line. 
   planned build with `SC_SIMD_SCALAR=1` and checks that each lane equals the same call on that lane's
   input alone.
 
-`tests/gen_test.spc` runs seeds 1 to 3 of each model in the normal suite and the planted defect
+`tests/gen/gen_test.spc` runs seeds 1 to 3 of each model in the normal suite and the planted defect
 (`-DSC_ARITH_WRAP` through `--cstd` under `debug`: the runtime wraps, the constant traps), which the
 scalar model must find at seed 7 and reduce to one case. The long run is `super-c command gen`
 (200 seeds from the clock); replay or extend with
@@ -658,7 +667,7 @@ tools/simd_math/build/release-bin-simd-math-bench/simd-math-bench [--only=NAME]
   (precise not slower than the library; balanced 20% faster than precise and fast 20% faster than
   balanced for exp, log, sin and cos, faster for the rest); exit status 1 when one fails.
 
-`tests/simd_math_test.spc` runs in the normal suite: the special values of every function, class
+`tests/simd/simd_math_test.spc` runs in the normal suite: the special values of every function, class
 and lane type at compile time against run time (`const_runtime_parity`, Annex F domain edges and
 pow's special pairs included; each function through a `@noinline` wrapper, so its kernel is in the
 C once), a hash of 10^5 results per function and kind (the planned build
@@ -668,7 +677,7 @@ combined hash per class and lane type every target must give, one test each (`AL
 `ALL_FAST_64`): after a kernel or coefficient change, set it to the `all` line the failing test
 prints). Its builds and the math model's (`tests/gen/math.spc`) run one compile job (`--jobs=1`): a
 test of the parallel suite takes one CPU, so its large programs do not starve the tests beside it;
-its tests take `@test(timeout = 300)`. `tests/vector_math_tools_test.spc` runs the generator against the committed coefficients
+its tests take `@test(timeout = 300)`. `tests/cli/vector_math_tools_test.spc` runs the generator against the committed coefficients
 and the reduced check (10^6 inputs per function: `--n=500000 --sample32=500000`, a third of the
 functions per test), each tool built with the release profile (their f128 arithmetic needs
 inlining across units) in a scratch copy. Their results do not depend on the lowering, so that
@@ -690,7 +699,7 @@ Choosing an oracle, batching cases and keeping a test's CPU and energy cost low:
   that need cleanup go in `@test_free`.
 - **A cancelled task reports through `defer`.** Code after a cancelled wait never runs,
   so a `WaitGroup::done` or counter written after the wait is lost and the waiter hangs.
-  Put the report in a `defer` at the top of the body; `tests/cancel_test.spc` and the
+  Put the report in a `defer` at the top of the body; `tests/concurrency/cancel_test.spc` and the
   cancellation benchmark lanes follow this rule.
 - **A concurrency test never depends on the scheduler's order.** It asserts only what
   holds for every legal interleaving, and it waits for the STATE it needs, never for a
@@ -700,7 +709,7 @@ Choosing an oracle, batching cases and keeping a test's CPU and energy cost low:
   runner, where a preemption landed inside the window. A test's sleep is legitimate
   only as a cancellation point inside a task, as a widening of the window for a DEFECT
   to show in a negative test, or as a bounded poll interval.
-- **Wait on state through `tests/parallel_harness.spc`** (`import tests::parallel_harness
+- **Wait on state through `tests/concurrency/parallel_harness.spc`** (`import tests::concurrency::parallel_harness
   as ph;`): `wait_parked(key)` until a task is at its wait (the snapshot shows its wait
   kind, so a cancellation requested next is claimed by that park), `wait_waiting(kind, n)`
   until `n` tasks wait on a `WK_*` kind, `wait_gone(key)` and `wait_quiescent()` until a
@@ -717,7 +726,7 @@ Choosing an oracle, batching cases and keeping a test's CPU and energy cost low:
   `admit_waits`).
 - **Hold with a gate, not a clock.** A pool thread or a lock holder that must stay busy
   while other callers queue holds until a shared counter opens (`hold_open` in
-  `tests/blocking_test.spc`, `hold_until` in `tests/mutex_test.spc`), and the test
+  `tests/concurrency/blocking_test.spc`, `hold_until` in `tests/concurrency/mutex_test.spc`), and the test
   opens it once the queueing it wanted is a fact. A hold measured in milliseconds loses
   to a slow launch.
 - **A signal lands before the signaller's cleanup.** A `defer w.done()` fires before
@@ -725,7 +734,7 @@ Choosing an oracle, batching cases and keeping a test's CPU and energy cost low:
   guard, and a blocking-pool caller is woken before the thread that ran its call counts
   itself out. Drop the guard in an inner block before signalling, and a waiter that
   asserts on a destruction count or on pool statistics polls for that state with a bound
-  (`wait_frees`, `wait_quiet` in `tests/blocking_test.spc`) instead of asserting right
+  (`wait_frees`, `wait_quiet` in `tests/concurrency/blocking_test.spc`) instead of asserting right
   after the wait.
 - **A wake's latency belongs to a benchmark.** A test asserts that a wake happened and
   followed its cause, not that it arrived within some milliseconds or before a deadline:
@@ -736,7 +745,7 @@ Choosing an oracle, batching cases and keeping a test's CPU and energy cost low:
   bound (a deadline was waited out, a sleep never ends early) is kept: load only makes
   it hold more easily.
 - **Prove a blocking call leaves its worker with a gate.** `blocking_attribute` in
-  `tests/cli_test.spc` gives the blocking calls a C wait that returns only once another
+  `tests/cli/cli_test.spc` gives the blocking calls a C wait that returns only once another
   task on the same single worker opens it, so the calls return the open gate only if
   they parked; a duration they overlap in measures the runner.
 - **Grep every new or reviewed concurrency test** for `time::sleep(` and `now_ns() - `;
@@ -748,7 +757,7 @@ Choosing an oracle, batching cases and keeping a test's CPU and energy cost low:
   `_Exit(23)`, which drops buffered stdout. Detect a stuck run by process age, not by a
   missing marker line.
 - **Failure injection counts every substrate allocation.** `sc_rt_fail_arm(FAIL_ALLOC, n)`
-  fails the `n`th allocation of the C substrate in construction order (`tests/thread_test.spc`
+  fails the `n`th allocation of the C substrate in construction order (`tests/concurrency/thread_test.spc`
   comments name each one). Edit one call by its unique context; a search-and-replace on
   `FAIL_ALLOC, n` changes every test with that `n`.
 - **Allocation-count tests divide over many runs** (64). Under `SC_LEAK_CHECK` the tracker
@@ -770,7 +779,7 @@ Choosing an oracle, batching cases and keeping a test's CPU and energy cost low:
   spawn scales (about seven times). Run parallel subprocess work through those.
 - **Pin our own rules, not libc's.** C leaves the zero sign of `fmin`/`fmax` unspecified
   (glibc returns the second operand for `(+0, -0)`), so a differential test asserts our
-  sign rule on both-zero pairs (`tests/float_test.spc`).
+  sign rule on both-zero pairs (`tests/stdlib/float_test.spc`).
 - **Drive the driver through subprocess tests.** Prune and macro-paste defects that do
   not change emitted C pass the self-hosting fixpoint; only a test that runs the built
   driver catches them.

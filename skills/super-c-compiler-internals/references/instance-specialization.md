@@ -123,7 +123,7 @@ definitions to the late section. Constants and statics do not come from the clos
 emitter demands each one where a body spells it (`CEmit::stat_demand`), and a parallel seed
 shard passes its demands to the master with its capture (`cemit_seed_merge_range`), so a
 constant only a seed shard demands is defined too (regression test
-`generic_extend_constant_from_a_parallel_seed`, `tests/codegen_run_test.spc`).
+`generic_extend_constant_from_a_parallel_seed`, `tests/codegen/codegen_run_test.spc`).
 
 Two costs were byte-preserving by construction and are fixed:
 
@@ -146,7 +146,7 @@ budget. So a speculative walk (the signature propagation, the demand cross produ
 expansion of a record either created) creates no aggregate record through a computed const
 argument (`InstGraph::note_type`, `folds_const`; an identity form `{N}` is not computed). A
 demanded body that names the width still creates its record. The regression test is
-`computed_width_signature_does_not_chain` (`tests/cli_stats_test.spc`): a `grow` that returns
+`computed_width_signature_does_not_chain` (`tests/cli/cli_stats_test.spc`): a `grow` that returns
 `V<{N + 1}>` builds without a budget stop and its called width is defined.
 
 Two other trims were measured and rejected: narrowing the per-declaration pairing to

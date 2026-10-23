@@ -655,7 +655,7 @@ A wasm build links no C library of the toolchain: the loader adds `std::rt::libc
 `std::rt::libm` (`std/rt/libc.spc`, `std/rt/libm.spc`, `Package::rt_libc`, `rt_libm`) to every
 `--target=wasm` program, and the link is `-nostdlib` plus compiler-rt's builtins (the `rtlib`
 probe), without `-lm` or the `wasi-emulated` libraries. The modules call WASI preview 1 directly and
-compute what wasi-libc computes, bit for bit (`tests/wasm_libc_test.spc` checks the math functions,
+compute what wasi-libc computes, bit for bit (`tests/codegen/wasm_libc_test.spc` checks the math functions,
 printf, strtod, strtol, qsort, the scanf family, locales, the time functions, signals, `sbrk` and more
 against wasi-libc). The C compile still reads wasi-libc's headers
 from the sysroot. The units of the two modules compile alone (in no pack, without the precompiled
@@ -961,7 +961,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `SC_SCHED_SEED` | Scheduler seed, read only when the program set none itself (deterministic replay) |
 | `SC_LOCK_ORDER` | Lock-order inversion checking (`ffi/sc_runtime.spc`) in a build with `-DSC_LOCKDEP` (the `race` profile; the build constant `LOCKDEP`): non-`0` reports; `f`/`F` prefix aborts |
 | `SC_TEST_SUPERC` | Path of compiler under test (wasm lane) |
-| `SC_CTARGET_CLANG` | Clang of the pinned major release that `tests/ctarget_test.spc` compares bindgen's C environment tables with |
+| `SC_CTARGET_CLANG` | Clang of the pinned major release that `tests/codegen/ctarget_test.spc` compares bindgen's C environment tables with |
 | `SC_CTARGET_REQUIRE` | Non-empty: a missing oracle clang fails those tests instead of passing them without checking |
 
 ## Two-Stage Bootstrap

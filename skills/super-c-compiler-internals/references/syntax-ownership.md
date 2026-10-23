@@ -178,7 +178,7 @@ tables). The round parses back:
 
 A changed module always parses whole, so its arenas are a fresh parse's and every round leaves
 the state a fresh analysis of the same buffers leaves (`incr_state_equals_fresh_over_edit_series`
-in `tests/lsp_incr_test.spc`). The affected set of the round is item-level. `Package.def_refs`
+in `tests/lsp/lsp_incr_test.spc`). The affected set of the round is item-level. `Package.def_refs`
 records, per module after each analysis of it (`record_refs`), one edge per (item, declaration
 of another item) pair its resolution tables name, keyed by the named declaration
 (`module << 32 | node`) with the naming item's declaration node and a flag for a naming node

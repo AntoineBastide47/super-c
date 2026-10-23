@@ -260,10 +260,10 @@ tree is part of the identity protocol for that reason.
 
 `ci/gate.sh` runs the fixpoint and worker-identity builds under `SC_TYPE_VALIDATE` and
 compares the `SC_TYPE_TABLE` dumps of one worker and every core (the many-worker build
-also under `SC_TASK_DELAY`). Tests: `tests/cli_test.spc` `type_table_is_deterministic`
+also under `SC_TASK_DELAY`). Tests: `tests/cli/cli_test.spc` `type_table_is_deterministic`
 (one worker, four delayed workers and a colliding hash publish one table; no two
 records read the same; a body-only edit keeps every signature-class line) and
-`tests/ast_test.spc` `interner_survives_full_collisions` and
+`tests/frontend/ast_test.spc` `interner_survives_full_collisions` and
 `interner_index_rebuilds_geometrically`.
 
 ## Measurements

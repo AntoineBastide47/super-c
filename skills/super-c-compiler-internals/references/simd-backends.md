@@ -256,7 +256,7 @@ Each decision, accepted or rejected with its reason, is recorded below.
 The work for an accepted architecture `A`, in order:
 
 1. Its rows in `CPU_FEATURES` (name, implies, C flag, per-OS baseline) and the matching
-   `cpu::Feature` variants in the same order (`tests/target_feature_test.spc` asserts both).
+   `cpu::Feature` variants in the same order (`tests/simd/target_feature_test.spc` asserts both).
 2. A binding module `ffi/<header>.spc` with `@arch(A)`: the register types as `@value` types,
    `@target_feature` on each intrinsic, and `@reads`/`@writes` with the exact byte count on
    every intrinsic that reads or writes memory through a pointer.
@@ -275,7 +275,7 @@ The work for an accepted architecture `A`, in order:
 6. A module `std::simd::<A>` only for operations with no portable meaning and a named client.
 
 The backend is accepted when the full vector conformance suite gives the lane loop's results; every
-entry of the file passes `tests/simd_entry_test.spc`; `expect_asm` finds the hardware instructions
+entry of the file passes `tests/simd/simd_entry_test.spc`; `expect_asm` finds the hardware instructions
 of lane arithmetic, a comparison, `choose`, a load, a store and an integer reduction; every memory
 intrinsic of the binding module has a memory annotation; a baseline build runs on the minimum CPU of
 `A`; the portable arithmetic kernels of `bench/simd_baseline` are within 10% of hand-written
@@ -292,24 +292,24 @@ streaming mode itself.
 
 ## Tests
 
-- `tests/target_feature_test.spc`: the enums against the compiler tables (compile-time asserts),
+- `tests/simd/target_feature_test.spc`: the enums against the compiler tables (compile-time asserts),
   feature lists, manifest and command line, the attributes' diagnostics, the feature fingerprint
   and the rejected-probe error.
-- `tests/simd_plan_test.spc`: `simd_plan::plan` over a fixed synthetic table.
-- `tests/simd_wasm_test.spc`: byte-identical C without vectors, instruction checks, the wasm32
+- `tests/simd/simd_plan_test.spc`: `simd_plan::plan` over a fixed synthetic table.
+- `tests/simd/simd_wasm_test.spc`: byte-identical C without vectors, instruction checks, the wasm32
   module against a scalar model.
-- `tests/simd_entry_test.spc` (`tests/gen/simd_entry.spc`): every entry against the lane loop,
+- `tests/simd/simd_entry_test.spc` (`tests/gen/simd_entry.spc`): every entry against the lane loop,
   in the wasm lane and on an aarch64 or x86_64 host, each entry the run's features
   (`SC_SIMD_FEATURES`) reach and no run with fewer features reaches (the baseline run, and at 512
   bits the 256-bit run); an entry another of its key and other features shadows in this
   build is called in a build of the other set.
-- `tests/simd_x86_test.spc`: per-function planning, the memory annotations of
+- `tests/simd/simd_x86_test.spc`: per-function planning, the memory annotations of
   `ffi/immintrin.spc`, and on an x86_64 host byte-identical C without vectors, instruction checks
   per level (no `ymm`/`zmm` in a baseline function) and `std::simd::x86` against scalar models.
-- `tests/multiversion_test.spc`: the `@target_feature` use rules and lint, closure bounds,
+- `tests/simd/multiversion_test.spc`: the `@target_feature` use rules and lint, closure bounds,
   `@export`, the target attributes and the inliner, function-address casts, `detect::dispatch`
   (order, fallback by `SC_CPU_OFF`, one detection, the race and LTO builds) and the x86 detection
   decision on fixed registers.
-- `tests/simd_aarch64_test.spc`: byte-identical C without vectors across the optional features,
+- `tests/simd/simd_aarch64_test.spc`: byte-identical C without vectors across the optional features,
   instruction checks, the halves order of a float tree sum, `std::simd::aarch64` against scalar
   models, the memory annotations of `ffi/arm_neon.spc`, and `std::cpu::detect`.

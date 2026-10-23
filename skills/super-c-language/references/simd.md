@@ -434,7 +434,7 @@ the features to code:
 
 A misspelled variant is an error at the argument ("no variant, method, or constant 'Neonn'"),
 a value of another enum a type error. `std::cpu::Feature` follows the compiler's feature table
-and `std::simd::Op` its operation table, name and discriminant (`tests/target_feature_test.spc`
+and `std::simd::Op` its operation table, name and discriminant (`tests/simd/target_feature_test.spc`
 asserts both at compile time).
 
 ### Backend files
@@ -474,7 +474,7 @@ operation, lane type, lane count and feature set (closed under `implies`): two a
 naming both. An entry may
 call bindings, and functions of its file that inline (one that does not fails the build); it
 must give the operation's exact result for
-every input, NaN payloads aside (`tests/simd_entry_test.spc` compares every entry with the lane
+every input, NaN payloads aside (`tests/simd/simd_entry_test.spc` compares every entry with the lane
 loop on boundary inputs, in the wasm conformance lane and on an aarch64 or x86_64 host; with
 `SC_SIMD_FEATURES` it requires the entries the run's features reach and the baseline does not).
 

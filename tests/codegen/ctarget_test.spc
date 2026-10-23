@@ -13,7 +13,7 @@ import module::loader as loader;
 import bindgen::ctarget as ct;
 import bindgen::ctarget_data as data;
 import tests::cli_harness as cli;
-import tests::ctarget_universe as univ;
+import tests::codegen::ctarget_universe as univ;
 
 const PINNED: [str<'static>; 5] = [
     "__clang_major__",

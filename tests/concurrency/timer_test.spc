@@ -9,7 +9,7 @@ import std::time as time;
 import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;
 import std::parallel::platform as platform;
-import tests::parallel_harness as ph;
+import tests::concurrency::parallel_harness as ph;
 
 // A sleep ends at or after its deadline: never early. Deadlines are drawn increasing, decreasing, equal and
 // pseudo-random across a thousand tasks, all armed at once. How LATE a sleep may end is the runner's

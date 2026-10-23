@@ -422,7 +422,7 @@ features. The scalar loop defines each result: every implementation gives its bi
 counts as one value). `first_mismatch` checks that on inputs of every tail length, in modes that
 put NaNs, zeros of both signs in both orders and all-equal bytes into every lane; the
 `simd_baseline` benchmark runs it before it times anything, so the wasm run checks SIMD128,
-and `tests/simd_baseline_test.spc` runs it on the host's instruction sets: it archives the host's
+and `tests/simd/simd_baseline_test.spc` runs it on the host's instruction sets: it archives the host's
 kernels and builds a program over the module in a scratch project, so the suite links no kernel. Every round
 repeats one input: at 4 KiB and 64 KiB its branches fit the branch predictor, so a
 scalar loop that compiles to a data-dependent branch (`filter_gt_f32`, and `mix_width` and

@@ -6,7 +6,7 @@
 import std::platform::fs;
 import std::platform::path;
 import std::platform::process;
-import tests::platform_harness as ph;
+import tests::platform::platform_harness as ph;
 
 struct Fx {
     pub s: ph::Scratch,

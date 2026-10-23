@@ -11,7 +11,7 @@
 import std::platform::env;
 import std::platform::fs;
 import std::platform::process;
-import tests::platform_harness as ph;
+import tests::platform::platform_harness as ph;
 import tools::std_packages::files as sfiles;
 import tools::std_packages::scan as sscan;
 

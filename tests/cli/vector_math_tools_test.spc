@@ -1,6 +1,6 @@
 // The tools of the vector math classes (`tools/simd_math`): the coefficient generator reproduces the
 // committed coefficients, and the reduced accuracy check (10^6 inputs per function) holds. Their
-// results do not depend on the vector lowering (`simd_math_test.spc` checks that every lowering gives
+// results do not depend on the vector lowering (`tests/simd/simd_math_test.spc` checks that every lowering gives
 // the same bits), so this file's path names no `simd_`: CI's per-level `--filter=simd_` runs skip it.
 import tests::cli_harness as cli;
 import std::platform::fs;

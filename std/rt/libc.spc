@@ -1,7 +1,7 @@
 // wasm's C library (`loader::Package::rt_libc`): wasm has no system C library, so a wasm build links this
 // module and `std::rt::libm` in its place, with no C library of the toolchain (`-nostdlib`). It implements
 // every C function and object that the runtime, std, the ffi bindings and the compiler bind for wasm (a test
-// checks it: `tests/wasm_libc_test.spc`), over WASI preview 1, which it imports directly: the entry point,
+// checks it: `tests/codegen/wasm_libc_test.spc`), over WASI preview 1, which it imports directly: the entry point,
 // the arguments and the environment (`environ`), the allocator with `sbrk`, the string, character and
 // conversion functions, buffered stdio with the printf and scanf families, the file system through the
 // preopened directories, the clocks and the broken-down time functions, locales, signals as wasi-libc

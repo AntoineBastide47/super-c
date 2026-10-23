@@ -5933,7 +5933,7 @@ fn gated_static_assert() {
 
 // A struct/union/enum declared inside an `extern "C" "hdr.h"` block is the HEADER's type: the members
 // name some of its fields, and the emitted C keeps using the header's own definition and checks each
-// field against it (tests/header_type_test.spc).
+// field against it (tests/codegen/header_type_test.spc).
 @test
 fn extern_aggregates() {
     h::expect_err_msg(

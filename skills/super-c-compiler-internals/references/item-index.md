@@ -355,9 +355,9 @@ MiB (tests), a transient of the type-check stage that the tracker's boundaries d
 
 ## Validation
 
-`tests/cli_test.spc`: `item_jobs_publish_diagnostics_in_declaration_order` (one worker and
+`tests/cli/cli_test.spc`: `item_jobs_publish_diagnostics_in_declaration_order` (one worker and
 four delayed workers print one text, a module-level `static_assert` between the items around
-it) and `item_jobs_fold_across_an_import_cycle`. `tests/item_index_test.spc`: edge coverage
+it) and `item_jobs_fold_across_an_import_cycle`. `tests/frontend/item_index_test.spc`: edge coverage
 over cross-module and same-module calls, constants,
 statics, generic templates, struct literals, field owners, methods (final graph), the generated
 `format` body's prelude shim, ownership edges and no self edges; components collapse mutual

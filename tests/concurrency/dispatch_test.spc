@@ -11,7 +11,7 @@ import std::parallel::atomics as atomics;
 import std::parallel::arc as arc;
 import std::parallel::platform as platform;
 import std::time as time;
-import tests::parallel_harness as ph;
+import tests::concurrency::parallel_harness as ph;
 
 // Exact-destruction counter: every `free` of a Tracked bumps it.
 static mut G_FREES: i64 = 0;

@@ -2,7 +2,7 @@
 
 The language rules for local type inference. These rules are normative: the checker
 implements them, and a checker behavior that contradicts them is a compiler bug.
-`tests/infer_test.spc` locks the observable behavior; its "known gap" cases name the
+`tests/frontend/infer_test.spc` locks the observable behavior; its "known gap" cases name the
 places where the current engine still deviates from a rule here.
 
 ## Scope
@@ -87,7 +87,7 @@ Ranked from best to worst for candidate comparison:
 
 The integer widening matrix and the reference, pointer and void-pointer coercion matrices are
 user decisions, pinned by `int_widening_matrix`, `ref_pointer_coalescing` and
-`void_pointer_coalescing` (tests/typechecker_test.spc); do not change them without asking.
+`void_pointer_coalescing` (tests/frontend/typechecker_test.spc); do not change them without asking.
 
 Nested type positions require equality, not conversion, unless the declared variance
 of the position says otherwise. A top-level safe conversion never makes a nested
@@ -260,7 +260,7 @@ condition, a pattern, a loop, a format argument, or a constant evaluation that n
 ## Current engine deviations
 
 The engine still deviates from the rules above in these known ways, each locked by a
-regression case in `tests/infer_test.spc`:
+regression case in `tests/frontend/infer_test.spc`:
 
 - Top-level directional evidence joins order-independently under the modeled
   conversions (identity, integer widening, `f32` to `f64`, `&mut T` to `&T`). An
