@@ -98,6 +98,7 @@ const fn listing_id(st: u8, names: &Vector<String>) u64 {
 /// What a checked prelude was read from: every module file with its content hash, every directory the
 /// loader listed (the std directory and the import lookups) with its listing's identity, and the real
 /// path of the compiler that checked it.
+@derive(Persist)
 struct Deps {
     pub exe: String,
     pub files: Vector<String>,
@@ -105,8 +106,6 @@ struct Deps {
     pub dirs: Vector<String>,
     pub dir_ids: Vector<u64>,
 }
-
-extend Deps as Persist {}
 
 // What `q` was checked from, as its load read it: a file edited or a directory changed during the check
 // then fails `deps_current`. `std_id` is `dir_id(std_dir)` from before the load.

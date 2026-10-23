@@ -20,17 +20,17 @@ extern "C" "signal.h" {
     @platform(macos | ios)
     struct sigaction {
         @import("sa_handler")
-        pub handler: *mut void,
+        pub handler: fn(i32),
         pub sa_mask: sigset_t,
         pub sa_flags: i32,
     }
     @platform(linux | android)
     struct sigaction {
         @import("sa_handler")
-        pub handler: *mut void,
+        pub handler: fn(i32),
         pub sa_mask: sigset_t,
         pub sa_flags: i32,
-        pub sa_restorer: *mut void,
+        pub sa_restorer: fn(),
     }
     @import("sigaction")
     fn c_sigaction(sig: i32, act: *const sigaction, old: *mut sigaction) i32;
@@ -57,12 +57,16 @@ const SIGWINCH: i32 = 28;
 
 @platform(windows)
 extern "C" "windows.h" {
-    // The routine is a `PHANDLER_ROUTINE`, `BOOL (WINAPI *)(DWORD)`: passed through `void *`.
-    fn SetConsoleCtrlHandler(routine: *mut void, add: i32) i32;
+    // `BOOL (WINAPI *)(DWORD)`: `DWORD` is a C `unsigned long`, which no Super-C type spells (`u32` is
+    // `unsigned int`), so a routine passes through `ConsoleHandler`.
+    @layout(8, 8)
+    type PHANDLER_ROUTINE;
+    fn SetConsoleCtrlHandler(routine: PHANDLER_ROUTINE, add: i32) i32;
 }
 
 /// A POSIX signal a program commonly handles or ignores.
 @platform(!windows)
+@derive(Eq, Format)
 pub enum Signal {
     Hangup,
     Interrupt,
@@ -78,6 +82,7 @@ pub enum Signal {
 
 /// A Windows console event, as a handler routine receives it (`CTRL_*_EVENT`).
 @platform(windows)
+@derive(Eq, Format)
 pub enum ConsoleEvent {
     CtrlC = 0,
     CtrlBreak = 1,
@@ -86,18 +91,19 @@ pub enum ConsoleEvent {
     Shutdown = 6,
 }
 
-// A handler's address, as `sa_handler` holds it.
+// The bits of `sa_handler`, which holds SIG_DFL (0) or SIG_IGN (1) in place of a handler.
 @platform(macos | ios | linux | android)
 union SignalHandler {
     pub f: fn(i32),
     pub p: *mut void,
 }
 
-// A console routine's address, as SetConsoleCtrlHandler takes it.
+// A console routine's address, as SetConsoleCtrlHandler takes it (`h`; null removes every routine).
 @platform(windows)
 union ConsoleHandler {
     pub f: fn(u32) i32,
     pub p: *mut void,
+    pub h: PHANDLER_ROUTINE,
 }
 
 /// The signal number of `s` on this system.
@@ -147,7 +153,7 @@ pub unsafe fn set_handler(_s: Signal, _handler: fn(i32)) Result<Unit, IoError> {
 @platform(macos | ios | linux | android)
 fn install(s: Signal, h: *mut void) Result<Unit, IoError> {
     let mut sa = unsafe zeroed::<sigaction>();
-    sa.handler = h;
+    sa.handler = SignalHandler { p: h }.f;
     sa.sa_flags = SA_RESTART;
     unsafe sigemptyset(&mut sa.sa_mask);
     if unsafe c_sigaction(number(s), &sa, null) != 0 {
@@ -196,20 +202,8 @@ pub fn console_event(code: u32) Option<ConsoleEvent> {
 
 @platform(windows)
 fn console_handler(p: *mut void, add: i32) Result<Unit, IoError> {
-    if unsafe SetConsoleCtrlHandler(p, add) == 0 {
+    if unsafe SetConsoleCtrlHandler(ConsoleHandler { p: p }.h, add) == 0 {
         return Result::<Unit, IoError>::Err(error::last_error(IoOp::Signal));
     }
     return Result::<Unit, IoError>::Ok(Unit {});
 }
-
-@platform(!windows)
-extend Signal as Eq {}
-
-@platform(!windows)
-extend Signal as Format {}
-
-@platform(windows)
-extend ConsoleEvent as Eq {}
-
-@platform(windows)
-extend ConsoleEvent as Format {}

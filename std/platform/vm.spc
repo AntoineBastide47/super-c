@@ -38,6 +38,7 @@ extern "C" "windows.h" {
 }
 
 /// The access a range of pages allows.
+@derive(Eq, Format)
 pub enum Protection {
     None,
     Read,
@@ -194,7 +195,3 @@ extend Mapping as Free {
     @platform(wasm)
     pub fn free(self: &mut Mapping) {}
 }
-
-extend Protection as Eq {}
-
-extend Protection as Format {}

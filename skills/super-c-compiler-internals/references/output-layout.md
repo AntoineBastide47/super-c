@@ -37,7 +37,7 @@ and every tree comparison compares within one profile.
 | `<mod>.c`, `<mod>__p<k>.c` | the includes (forward header, the definition headers the module's text and its declarations need), copies of the typedef lines of the types it and its declarations name only through pointers, the cross-TU declarations (of every prototype header) its text spells, `_ret` typedefs first (`XDecls`, below), then the module's bodies, sharded by `stable_item_hash(symbol) mod count`; the count comes from the rendered size (`shard_policy`: one shard per 256 KiB of C; a count read from the previous `__sc_shards` is kept while every shard stays within half and one and a half times that), or from `[shards]` in build.toml; a static closure follows the body before it | |
 | `<mod>__inst.c`, `<mod>__inst__p<k>.c` | generic instances of the module's generics, glue of its types, its constants and descriptors, dyn tables of its receivers (same policy per owner; `[instance-shards]` overrides); includes as for a module TU, from the instance context's rows | |
 | `__sc_shards` | `super-c-shards<TAB>1`, then `module<TAB>tus<TAB>insts` for every module with more than one shard of either kind: the counts this build used, which the next build reads as its starting point; `packs<TAB>n`, the pack count, read the same way; `pch<TAB>1` when the units compile through the precompiled header of `__sc_fwd.h` (from `PCH_UNITS`, four, units that include it: each shard that compiles alone, each pack), which a build that plans the tree without its emission reads | the next build |
-| `__sc_registry.c` | ZST sentinels; the reflection registry: the `@reflect` roots sorted by symbol (each root is an external `const` with hidden visibility except on Windows, defined in its owner's instance shard), one pointer table, one constructor passing that sorted table to `__sc_reflect_register` once (the runtime keeps its address and count: no capacity limit, lookup never depends on constructor order) | |
+| `__sc_registry.c` | in every program: the external definitions of the inline helpers of `super_rt.h` and `__sc_fwd.h` (`SC_RT_EXTERNS`, `extern __typeof__(f) f;` per helper, which C11 6.7.4p7 makes the unit's definitions external whatever its include order); ZST sentinels; the reflection registry: the `@reflect` roots sorted by symbol (each root is an external `const` with hidden visibility except on Windows, defined in its owner's instance shard), one pointer table, one constructor passing that sorted table to `__sc_reflect_register` once (the runtime keeps its address and count: no capacity limit, lookup never depends on constructor order) | |
 | `__sc_unity.c` | only for a small program (module, instance and registry units under `UNITY_MAX`, 2 MiB of C, and more than one of them): one `#include` per such unit, in write order. The build compiles it alone and none of its members: one compiler process, the shared headers parsed once (about 4 times less compile CPU on a test program). A test runner, wasm's C library and a unit that includes a `__scx` file, also through a definition header (`tu_x`, `inst_x`, `reg_x`: the header's macros would reach the members after it, its declarations the members before it), compile on their own | the build (the only C unit of its members) |
 | `__sc_pack<k>.c` | only for a larger program with at least two units of one shard and less than `PACK_UNIT` (64 KiB) of C: one `#include` per such unit whose file stem hashes to pack `k` modulo the pack count, in write order, written after every unit (`pack_plan`). The count is `shard_policy` of those units' bytes from the previous `packs` line of `__sc_shards`; every pack below the count is written, an empty one too. The build compiles each pack and none of its members | the build (the only C unit of its members) |
 | `__sc_manifest` | one record per output (kind `u` for `__sc_unity.c` and the packs): kind, path, 64-bit content hash, owner module, shard index, generated headers included; the effective shard counts (`shards` lines, whether chosen or overridden); the C command inputs; the registry roots | tooling |
@@ -147,8 +147,8 @@ the header of the type it collides with.
   the splice would bring the header, and its macros, into the caller's unit. A unit that uses a
   scoped header itself sees its macros: a local named `near` there fails the C compile. Every TU
   can call any other header-declared extern function (and a header-less one through its
-  prototype, below), so the Core IR inliner splices a callee that calls one into any TU; the runtime's bit counts (behind `u64::trailing_zeros`) and atomics (`ffi/atomic.spc`, verified intrinsic calls) are `static inline` in every
-  TU's `super_rt.h`, so a callee that calls one splices too (`detect::dispatch`'s acquire
+  prototype, below), so the Core IR inliner splices a callee that calls one into any TU; the runtime's bit counts (behind `u64::trailing_zeros`) and atomics (`ffi/atomic.spc`, verified intrinsic calls) are inline definitions with external linkage in every
+  TU's `super_rt.h` (an inline function with external linkage may call them: C11 6.7.4p3), so a callee that calls one splices too (`detect::dispatch`'s acquire
   load). A splice accepts an argument whose C value is the parameter's: a reference into a
   pointer parameter, a function into a function-pointer parameter.
 - An extern function of a block without a header gets a prototype in `__sc_fwd.h`
@@ -156,10 +156,10 @@ the header of the type it collides with.
   annotations' recorded types in the callee's module), unless an always-included header declares
   it (`Mangler::c_lib_declared`: `C_LIB_NAMES` and `c_lib_family`) or its name starts with `__sc_`
   (an entry point of the runtime, `std/rt/base.spc`, which `super_rt.h` or the runtime module's
-  prototypes declare). An extern `malloc`, `calloc`, `realloc` or `free` outside the runtime spells
-  the leak tracker's `sc_lk_*` entry (`Mangler::tracked_alloc`), which `super_rt.h` declares. It matches the runtime's own definition (`static inline
-  uint64_t sc_mul64(uint64_t, uint64_t, uint64_t *)`) and binds a function whose header the
-  build's feature macros cannot include (macOS `sysctlbyname`).
+  prototypes declare), or `super_rt.h` defines it (`rt_h::rt_defines`, `sc_ctz64`): a declaration
+  without `inline` would make every unit's copy an external definition. An extern `malloc`, `calloc`, `realloc` or `free` outside the runtime spells
+  the leak tracker's `sc_lk_*` entry (`Mangler::tracked_alloc`), which `super_rt.h` declares. The prototype binds a function whose header the build's feature
+  macros cannot include (macOS `sysctlbyname`).
 - A `@thread_local` static's definition and declarations take `_Thread_local`
   (`CEmit::stat_specs`). Every access spells `(*sym__tls())`, a per-unit `static noinline`
   accessor under a `sym__tls_d` guard (`CEmit::tls_accessor`) that the static's demand writes

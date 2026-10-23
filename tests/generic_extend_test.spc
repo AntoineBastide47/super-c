@@ -8,10 +8,10 @@ import tests::cli_harness as cli;
 const PROGRAM: str = M"(interface Lane {}
 extend f32 as Lane {}
 extend i64 as Lane {}
+@derive(Lane)
 struct P { pub x: i32 }
-extend P as Lane {}
+@derive(Lane)
 struct G<T> { pub v: T }
-extend<T> G<T> as Lane {}
 interface Twice {
     fn twice(self: &Self) i64;
     fn base(self: &Self) i64 { return 5; }
@@ -203,10 +203,10 @@ fn instances_through_bounds_and_dyn_are_checked() {
 // `Copy` bound included.
 fn reflection_lists_applying_generic_conformances(b: &mut h::ExitBatch) {
     let src = M"(interface Lane {}
+@derive(Lane)
 struct P { pub x: i32 }
-extend P as Lane {}
+@derive(Lane)
 struct Q { pub s: String }
-extend Q as Lane {}
 interface Twice { fn twice(self: &Self) i64; }
 extend<T: Lane> T as Twice {
     pub fn twice(self: &Self) i64 { return 2; }
@@ -413,10 +413,10 @@ extend i32 as Sz {
 struct NoSz {
     pub p: u32,
 }
+@derive(Sz)
 struct G<T> {
     pub x: T,
 }
-extend<T> G<T> as Sz {}
 struct H<T> {
     pub v: T,
 }
@@ -434,6 +434,27 @@ fn main() i32 {
 }
 )",
         "a field of 'G<NoSz>' does not satisfy a bound required by the interface's default method 'sz'",
+    );
+}
+
+// The instance obligation pairs the extend's written arguments with the instance's: a lifetime argument
+// (`View<'a, T>`) takes no instance argument, so `View<i32>` is checked with `T = i32`, and its `&'a T`
+// field, a reference, lacks `Eq`.
+@test
+fn an_instance_of_a_lifetime_generic_meets_the_default_bounds() {
+    h::expect_build_err(
+        "a reference field lacks Eq",
+        M"(struct View<'a, T> {
+    pub r: &'a T,
+}
+extend<'a, T> View<'a, T> as Eq {}
+fn main() i32 {
+    let x = 7;
+    let a = View::<i32> { r: &x };
+    return (a == View::<i32> { r: &x }) as i32 - 1;
+}
+)",
+        "a field of 'View<i32>' does not satisfy a bound required by the interface's default method 'eq'",
     );
 }
 

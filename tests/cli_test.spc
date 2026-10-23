@@ -1058,8 +1058,8 @@ pub struct Point { pub x: i32, pub y: i32, }
         M"(import lib;
 @derive(Format)
 enum Shape { Dot, Pair(i32, i64), }
+@derive(Format)
 struct Duo<A: Format, B: Format> { pub a: A, pub b: B, }
-extend<A: Format, B: Format> Duo<A, B> as Format {}
 fn mk() lib::Point { return lib::Point { x: 9, y: 8 }; }
 fn show(v: &dyn Format) String { return v.fmt(); }
 const fn ph() u64 { let p = lib::Point { x: 1, y: 2 }; return p.hash(); }
@@ -7128,8 +7128,7 @@ fn main() i32 {
 }
 
 // External C code: a backing header's same-stem `.c` file is no part of the build (C comes prebuilt,
-// through `@link`); @link lands in build/__ldflags; removing the block prunes its flag; `@c.source` is
-// an unknown attribute.
+// through `@link`); @link lands in build/__ldflags; removing the block prunes its flag;
 @test
 fn external_c_sources() {
     let p = cli::proj_new();
@@ -9979,8 +9978,8 @@ const fn cz() bool {
   return z.x == 0 && z.f == 0.0 && z.inner.n == 0 && z.inner.p == null && !z.ok;
 }
 static_assert(cz(), "zeroed folds recursively");
+@derive(Default)
 struct Point2 { pub a: i32, pub b: i32, }
-extend Point2 as Default {}
 const fn cd() i32 {
   let d = Point2::default();
   return d.a + d.b;

@@ -32,18 +32,23 @@
 # Editors / Project
 .vscode/
 **/.DS_Store
-build
+
+# Generated folders and files
+**/build
 super-c
-tools/simd_math/simd-math-gen
-examples/*
-!examples/language_demo.spc
-todos.md
-profile.json.gz
 stage*-super-c
-release.sh
+super-c.wasm
+profile.json.gz
 editors/vscode/node_modules/
 bench/compare/rust/target/
 bench/compare/go/sccompare
-super-c.wasm
+
+# Internal files and folders
+release.sh
 plans
-v2
+
+# Ignore all markdown scratch files
+*.md
+!CLAUDE.md
+!AGENTS.md
+!README.md

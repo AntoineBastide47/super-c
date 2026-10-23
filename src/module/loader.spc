@@ -27,6 +27,7 @@ pub const BT_COUNT_N: usize = BuiltinType::BT_COUNT as usize;
 
 /// One loaded module: its `::`-joined module path (the mangling/lookup key), the file it came from, its
 /// source text and parsed Ast. The Ast is held by value, so `has_ast` records whether lex/parse succeeded.
+@derive(Persist)
 pub struct Module {
     pub path: String, // "std::string"; the root module is its file stem (owned)
     pub file: String, // filesystem path the source was read from (owned)
@@ -402,6 +403,7 @@ pub struct Package {
 /// resolution edges and post-typecheck edges (`graph::items` raw edges), and their readiness
 /// states, result-attributability verdicts and dynamic evaluation edges. `items` 0: no prelude
 /// stage ran (the one-stage pipeline).
+@derive(Persist)
 pub struct PreludeCarry {
     pub items: u32,
     /// The package runs the prelude stage: its analysis keeps its raw edges here.
@@ -412,14 +414,6 @@ pub struct PreludeCarry {
     pub ret_attr: Vector<u8>,
     pub dyn_edges: Set<u64>,
 }
-
-extend PreludeCarry as Persist {}
-
-extend Module as Persist {}
-
-extend SymTab as Persist {}
-
-extend PkgIndex as Persist {}
 
 extend ItemMeta as Persist {
     fn plain() bool {
@@ -543,6 +537,7 @@ static_assert(sizeof(ItemMeta) == 28, "ItemMeta must stay 28 bytes");
 /// FINDS an entry, identity is the dense `names` vector; same-hash names chain through `chain` and
 /// every probe is verified byte-exact, so a 64-bit collision degrades to a short walk, never a wrong
 /// answer. Built in deterministic module and source order by build_index.
+@derive(Persist)
 pub struct SymTab {
     pub names: Vector<String>,
     pub index: Map<u64, u32>, // fnv(name) -> first SymbolId with that hash
@@ -627,6 +622,7 @@ const SI_NAMES: [str<'static>; SI_COUNT_N] = [
 /// parsed (and rebuilt if a module is appended, e.g. the LSP's batch load). Owns the symbol table,
 /// one ItemMeta per declaration (module order, source order), per-module name maps for O(1) lookup,
 /// the resolved direct-import adjacency, and its strongly connected components.
+@derive(Persist)
 pub struct PkgIndex {
     pub syms: SymTab,
     pub items: Vector<ItemMeta>,

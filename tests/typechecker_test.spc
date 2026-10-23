@@ -1913,7 +1913,7 @@ fn struct_literal_of_a_non_aggregate() {
 fn assert_eq_follows_eq_operator() {
     h::expect_ok(
         "assert_eq takes a derived Eq",
-        "struct E { pub a: i32 }\nextend E as Eq {}\nfn main() i32 { let x = E { a: 1 }; assert_eq(x, E { a: 1 }); return 0; }\n",
+        "@derive(Eq)\nstruct E { pub a: i32 }\nfn main() i32 { let x = E { a: 1 }; assert_eq(x, E { a: 1 }); return 0; }\n",
     );
     h::expect_err_msg(
         "assert_eq reports an unmet extend bound",
@@ -3316,7 +3316,7 @@ fn only_explicit_free_observes_stored_borrows() {
 // once the binding is dead, even when blocks after the arm are numbered past the claim.
 @test
 fn switch_arm_borrows_end_at_last_use() {
-    let decl = "struct V { pub k: i32 }\nextend V as Copy {}\nstruct H { pub m: Map<u64, V>, pub n: i32 }\nextend H {\n    fn use_v(self: &mut Self, v: V) i32 { self.n = v.k; return self.n; }\n    fn go(self: &mut Self) i32 {\n        switch self.m.get(&1u64) {\n            Some(v) => {\n                let c = self.use_v(*v);\n                if c != 0 || self.n == 1 {\n                    return c;\n                }\n            },\n            None => {},\n        };\n        return 0;\n    }\n}\n";
+    let decl = "@derive(Copy)\nstruct V { pub k: i32 }\nstruct H { pub m: Map<u64, V>, pub n: i32 }\nextend H {\n    fn use_v(self: &mut Self, v: V) i32 { self.n = v.k; return self.n; }\n    fn go(self: &mut Self) i32 {\n        switch self.m.get(&1u64) {\n            Some(v) => {\n                let c = self.use_v(*v);\n                if c != 0 || self.n == 1 {\n                    return c;\n                }\n            },\n            None => {},\n        };\n        return 0;\n    }\n}\n";
     h::expect_ok("through &mut self", format("{}fn main() i32 {{ return 0; }}\n", decl).as_str());
     h::expect_ok(
         "on a local owner",
@@ -5525,7 +5525,7 @@ fn copy_marker() {
     );
     h::expect_ok(
         "a bound whose superinterface is Copy makes T copyable",
-        "interface Handle: Copy {}\nstruct H { pub id: i32 }\nextend H as Handle {}\nfn two<T: Handle>(h: T) T { let a = h; let b = h; return a; }\nfn main() i32 { return two(H { id: 4 }).id - 4; }\n",
+        "interface Handle: Copy {}\n@derive(Handle)\nstruct H { pub id: i32 }\nfn two<T: Handle>(h: T) T { let a = h; let b = h; return a; }\nfn main() i32 { return two(H { id: 4 }).id - 4; }\n",
     );
     h::expect_ok(
         "a where-clause Copy bound makes T copyable",

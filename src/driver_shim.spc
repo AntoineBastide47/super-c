@@ -2,7 +2,7 @@
 // std::platform): the build target of the running compiler, the argv[0] a WASI module is known by, the
 // process-tree jobserver (byte-range locks on one shared slot file) and the crash trace printed on SIGABRT.
 // POSIX (macOS, iOS, Linux, Android) goes through libc, Windows through the Win32 API, and wasm through
-// wasi-libc, which has neither locks nor signals: there the jobserver is off and the trace is a no-op.
+// std::rt::libc, which has neither locks nor signals: there the jobserver is off and the trace is a no-op.
 import errno;
 import fcntl;
 import signal;

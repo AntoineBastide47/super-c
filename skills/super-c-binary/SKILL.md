@@ -159,7 +159,9 @@ a benchmark that cancels tasks puts cancellation ticks and probes into the code 
 other benchmark of the binary, so build a profiling or measuring binary with `--filter`. `tests/` and `bench/` sit beside `src/` at the project
 root. A bench file that imports the program's root module links a second `main`
 (duplicate `__sc_user_main`): put the code under benchmark in a module other than the
-root. The generated runner carries the checkout's identity
+root. In this repository a build that includes `simd_baseline` (an unfiltered one too)
+links its prebuilt C kernels: run `sh bench/simd_baseline/kernels.sh` first, see
+`super-c-compiler-optimization`. The generated runner carries the checkout's identity
 (the short commit, `-dirty` when tracked files differ, `unknown` without version
 control) and prints it as `running benchmarks (build <id>)`. The filter is forwarded to the
 bench binary as a run-time argument, so a filtered run never relinks; a filter that
@@ -298,8 +300,10 @@ module's check at most), and the next round resumes, so every round that no edit
 a check. A module whose own analysis failed owes no borrow check; a module whose import closure
 has an error waits for it.
 
-To measure server memory, drive a scripted session (`initialize`, `didOpen`, a loop of
-`didChange`) and sample `ps -o rss= -p <pid>`; `SC_LSP_STATS` shows what each round retains.
+To measure the server, run `super-c bench --filter=lsp_` from the repository root (POSIX only):
+`lsp_session` runs a scripted session on this repository in-process and reports latency, cycles,
+allocations and peak memory per step; `lsp_reuse` reports the modules each edit analyzes again and
+the bytes the manifest root retains by kind. `SC_LSP_STATS` shows what each round retains.
 
 ### Project scaffolding
 
@@ -348,7 +352,8 @@ cache-size = "2GiB"          # bytes the project's cache root keeps: a byte coun
 std_internals = true         # the project names std's unstable `pub(package)` items (std::platform); the compiler sets it
 
 [lib]                        # library target (optional; root defaults to src/lib.spc,
-type = ["static", "shared"]  # type defaults to static)
+type = ["static", "shared"]  # type defaults to static; a shared library records its own file name
+                             # (`@rpath/lib<name>.dylib`, `-soname lib<name>.so`) as its install name)
 
 [bin.tool]                   # extra binary (optional)
 root = "tools/tool.spc"
@@ -986,7 +991,7 @@ build/
     std/
       rt/base.c       # the runtime: traps, leak/double-free tracker, overflow report (std/rt/base.spc)
     __sc_fwd.h        # runtime and extern-block includes, dyn/extern declarations shared by every TU
-    __sc_registry.c   # ZST sentinels and the reflection registry
+    __sc_registry.c   # runtime helper definitions, ZST sentinels and the reflection registry
     __sc_manifest     # output paths, content hashes, header dependencies, shard counts
     __sc_shards       # the shard counts this build used (read back by the next build)
     __ldflags         # linker flags collected from @link (one per line)
@@ -1039,8 +1044,9 @@ non-prelude source (`Package::analysis_jobs`,
 serial compile and gains a few milliseconds at most, so small compiles run serially and
 hand their jobserver slots back. The parallel C compile is unaffected.
 
-Includes are relative: `cc -funsigned-char -ffp-contract=off $(find build/debug/raw -name '*.c' ! -name '__sc_unity.c' ! -name '__sc_pack*.c') $(cat build/debug/raw/__ldflags)`
+Includes are relative: `cc -std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -funsigned-char -ffp-contract=off $(find build/debug/raw -name '*.c' ! -name '__sc_unity.c' ! -name '__sc_pack*.c') $(cat build/debug/raw/__ldflags)`
 builds the whole tree with no `-I` flags (`__sc_unity.c` and `__sc_pack<k>.c` include other units, so a
-build compiles them or their members, never both) (verified: the tree compiles and runs with bare `clang`;
+build compiles them or their members, never both; without the feature macros of the default `cstd`,
+Darwin's `struct stat` lacks the fields std binds) (verified: the tree compiles and runs with `clang`;
 add `-DSC_ARITH_WRAP` for wrapping integer overflow, and the `LIBM_AS_WRITTEN` flags for the
 engine's libm results).

@@ -53,6 +53,9 @@ pub struct Seed {
     pub def: DefId,
 }
 
+// The `@derive(Copy)` tags of this file restate the derivation for the bootstrap compiler, which checks a
+// `Copy` bound against written conformances only.
+@derive(Copy)
 pub struct DefId {
     pub module: ModuleId,
     pub node: NodeId,
@@ -80,7 +83,6 @@ pub enum AttrKind {
     ATTR_TEST,
     ATTR_TEST_INIT,
     ATTR_TEST_FREE,
-    ATTR_C_SOURCE, // unused: the removed `@c.source`
     ATTR_C_LINK,
     ATTR_COLD,
     ATTR_PLATFORM,
@@ -275,6 +277,7 @@ pub const fn bc_variant(k: i32, s: str) i32 {
 
 /// A reference to an unknown variant in a build-constant comparison or `switch` arm, found at
 /// parse time and reported by the resolver (the platform filter may remove the code before then).
+@derive(Persist)
 pub struct BcErr {
     pub span: tok::Span,
     pub msg: String,
@@ -973,6 +976,7 @@ pub union NodeAs {
     pub pattern_range: PatternRangeData,
 }
 
+@derive(Copy)
 pub struct Node {
     pub kind: NodeKind,
     pub span: tok::Span,
@@ -2159,6 +2163,7 @@ pub union TyAs {
     pub proj: TyProj, // TYPE_FIELD_PROJECTION
     pub fnp: TyFn, // TYPE_FUNCTION with FN_SIG
 }
+@derive(Copy)
 pub struct Ty {
     pub kind: TypeKind,
     pub qualifier: u8,
@@ -2269,6 +2274,7 @@ pub const fn array_ty(k: TypeKind, elem: TypeId, lt: TypeId, ly: &Ty) Ty {
     return Ty { kind: TypeKind::TYPE_ARRAY, qualifier: ARR_SYM, as_data: TyAs { arr: TyArr { elem: elem, len: lt } } };
 }
 
+@derive(Copy)
 pub struct TyInstance {
     pub module: ModuleId,
     pub decl: NodeId,
@@ -2333,6 +2339,7 @@ pub struct MonoUse {
 /// table's length just before (`pre`) and just after (`post`) it. The SC_FACTS_CHECK watermarks
 /// compare `pre` with their snapshot and `post` with the table, so a change on either side of the
 /// release still shows; every later read or write of the freed part is an assertion failure.
+@derive(Persist)
 pub struct Released {
     pub on: bool,
     pub pre: u32,
@@ -2396,13 +2403,6 @@ extend TyInstance as Eq {
 pub const POOL_SHIFT: usize = 12;
 pub const POOL_CHUNK: usize = 1usize << 12;
 pub const POOL_SLOTS: usize = 512;
-
-// Restated derived conformances: the bootstrap compiler predates the `Copy` derivation and checks the
-// pools' `T: Copy` bound against written conformances only.
-extend DefId as Copy {}
-extend Node as Copy {}
-extend Ty as Copy {}
-extend TyInstance as Copy {}
 
 pub struct ChunkPool<T: Copy> {
     tab: *mut *mut T,
@@ -2806,6 +2806,7 @@ pub const TYPE_MAX: TypeId = 0x1FFFFFF0;
 /// is stored twice, and every hit verifies the entry). Ids are dense insertion-order indices, so
 /// identity never depends on the hash. One per module holds provisional types; the package's
 /// (`Package.tt`) holds the published ones, `open` while a serial phase may append to it directly.
+@derive(Persist)
 pub struct TypePool {
     pub tys: ChunkPool<Ty>,
     tix: Vector<u32>,
@@ -3127,6 +3128,7 @@ extend TypePool {
 /// a desugar appends to such a body) and the per-node side tables of those nodes. Ids carry
 /// NODE_BODY. The driver frees the arena once the last consumer of body syntax has run
 /// (`Ast::release_bodies`); an access after that is a bounds abort.
+@derive(Persist)
 pub struct BodyArena {
     pub nodes: SplitVec<Node>,
     pub children: SplitVec<u32>,
@@ -3170,6 +3172,7 @@ extend BodyArena {
 // The bound of a write-lock hand-over's wait for the engine to take the lock (`Ast::wl_yield`).
 const WL_SPIN: u32 = 4096;
 
+@derive(Persist)
 pub struct Ast {
     pub nodes: SplitVec<Node>,
     /// An identifier of the module names a vector type or the vector module (the lexer's
@@ -6070,13 +6073,3 @@ extend ConstLin as Persist {
         load_bytes(self, r);
     }
 }
-
-extend BcErr as Persist {}
-
-extend TypePool as Persist {}
-
-extend BodyArena as Persist {}
-
-extend Released as Persist {}
-
-extend Ast as Persist {}

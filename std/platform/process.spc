@@ -295,6 +295,7 @@ extern "C" "psapi.h" {
 // ---- Types ------------------------------------------------------------------------------------------
 
 /// How a child process ended.
+@derive(Eq, Format)
 pub enum ExitStatus {
     /// It exited with this code (the low 8 bits on POSIX; the whole 32-bit code on Windows).
     Code(i32),
@@ -1341,7 +1342,3 @@ extend Child as Free {
         unsafe CloseHandle(self.raw);
     }
 }
-
-extend ExitStatus as Eq {}
-
-extend ExitStatus as Format {}

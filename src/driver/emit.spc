@@ -1854,9 +1854,7 @@ fn cemit_fn_attrs(p: &loader::Package, m: ModuleId, nid: NodeId, fs: cf::CpuFeat
         }
     }
     if inl || always {
-        // C11 `extern inline`: the definition still provides the external symbol (plain `inline`
-        // would not: a non-inlined cross-TU caller then fails to link), and carries the hint.
-        out.push_str("extern inline ");
+        out.push_str("inline ");
     }
     let mut g = String::new();
     if naked {
@@ -8174,7 +8172,7 @@ fn cemit_assemble(
         rest.push_string(&cem.dyn_decls);
         rest.push_string(&cem.sent_decls);
         let mut fh = String::from_str(
-            "#ifndef SC_CEMIT_FWD_H\n#define SC_CEMIT_FWD_H\n#include \"super_rt.h\"\n#include <math.h>\n#include <pthread.h>\ntypedef struct { const uint8_t *ptr; size_t len; } SCslice;\nstatic inline void *__sc_wrap(const void *p) { return (void *)p; }\n#pragma GCC diagnostic ignored \"-Wunused-but-set-variable\"\n#pragma GCC diagnostic ignored \"-Wunused-variable\"\n#pragma GCC diagnostic ignored \"-Wunused-function\"\n#pragma GCC diagnostic ignored \"-Wunused-parameter\"\n#pragma GCC diagnostic ignored \"-Wunused-label\"\n",
+            "#ifndef SC_CEMIT_FWD_H\n#define SC_CEMIT_FWD_H\n#include \"super_rt.h\"\n#include <math.h>\n#include <pthread.h>\ntypedef struct { const uint8_t *ptr; size_t len; } SCslice;\ninline void *__sc_wrap(const void *p) { return (void *)p; }\n#pragma GCC diagnostic ignored \"-Wunused-but-set-variable\"\n#pragma GCC diagnostic ignored \"-Wunused-variable\"\n#pragma GCC diagnostic ignored \"-Wunused-function\"\n#pragma GCC diagnostic ignored \"-Wunused-parameter\"\n#pragma GCC diagnostic ignored \"-Wunused-label\"\n",
         );
         fh.push_string(ext_incs);
         // A scoped extern header a declaration or a check here names (a dyn table of a header type):
@@ -8557,9 +8555,10 @@ fn cemit_assemble(
         o.tus.set(t, replace(acc.ch.bufs.index_mut(t), String::new()));
     }
     o.inst_c = replace(acc.ch.bufs.index_mut(n), String::new());
-    // The registry TU: ZST sentinels and the reflection registry (sorted roots, one pointer
-    // table, one registration entry point; lookups never depend on constructor order).
-    if cem.sent_defs.len() != 0 || reg_names.len() != 0 || xall.len() != 0 {
+    // The registry TU, in every program: the external definitions of the inline helpers of
+    // `super_rt.h` and `__sc_fwd.h` (`SC_RT_EXTERNS`), ZST sentinels and the reflection registry (sorted
+    // roots, one pointer table, one registration entry point; lookups never depend on constructor order).
+    {
         let mut rg = String::new();
         rg.push_string(&cem.sent_defs);
         if reg_names.len() != 0 {
@@ -8599,6 +8598,7 @@ fn cemit_assemble(
         }
         let mut rc = String::from_str("#include \"__sc_fwd.h\"\n");
         rc.push_string(&xall);
+        rc.push_str("SC_RT_EXTERNS\nSC_RT_X(__sc_wrap)\n");
         fd.copy(rg.as_str(), NO_HOME, &incd, &mut rc);
         rc.push_string(&rg);
         o.registry_c = rc;
@@ -10386,9 +10386,7 @@ fn proto_of(body: &String, out: &mut String) {
     // `_Noreturn` specifier and return type follow this prefix and stay.
     let mut start: usize = 0;
     loop {
-        if start + 7 <= n && bs.slice(start, start + 7) == "extern " {
-            start += 7;
-        } else if start + 7 <= n && bs.slice(start, start + 7) == "inline " {
+        if start + 7 <= n && bs.slice(start, start + 7) == "inline " {
             start += 7;
         } else if start + 13 <= n && bs.slice(start, start + 13) == "__attribute__" {
             let mut j = start + 13;

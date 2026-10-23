@@ -31,6 +31,11 @@ Top-down order within each file:
 7. One `extend` block per type at file end
 8. Interface conformance blocks (`extend T as I { .. }`) separate
 
+A conformance with an empty body is a `@derive(I, ..)` tag on the struct or enum declaration, never
+an `extend T as I {}` line. Write the empty `extend` only where `@derive` cannot apply: a builtin or
+foreign type, a union, one instance (`extend W<bool> as D {}`), bounds
+other than the declaration's, or a test of the written conformance itself.
+
 Module-level constants must be declared **above** their first use. Keep important
 definitions near the top when dependencies allow it.
 

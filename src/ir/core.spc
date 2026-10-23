@@ -34,7 +34,10 @@ pub const LK_LET: u8 = 1;
 pub const LK_FOR: u8 = 3; // `for` / `inline for` binding
 pub const LK_PATTERN: u8 = 4;
 
+// The `@derive(Copy)` tags of this file restate the derivation for the bootstrap compiler, which checks a
+// `Copy` bound against written conformances only.
 /// One local slot: argument, return slot, user variable, or compiler temporary.
+@derive(Copy)
 pub struct LocalDecl {
     pub ty: TypeId,
     pub storage: u8,
@@ -76,6 +79,7 @@ extend LocalDecl {
 
 /// One inline-assembly statement's text (see IN_ASM): the template and, in `CoreBody.asm_spans`
 /// from `cons`, the output constraints, the input constraints, then the clobbers.
+@derive(Copy)
 pub struct AsmRec {
     pub template: tok::Span, // empty = none
     pub cons: u32,
@@ -92,6 +96,7 @@ pub const PJ_UNION_FIELD: u32 = 0xFFFFFFFE; // PJ_FIELD data marker: union membe
 pub const PJ_INDEX_OP: u8 = 3; // data = OperandId of the dynamic index
 pub const PJ_DOWNCAST: u8 = 4; // data = variant index, sub = variant decl NodeId
 
+@derive(Copy)
 pub struct Projection {
     pub kind: u8,
     pub data: u32,
@@ -100,6 +105,7 @@ pub struct Projection {
 }
 
 /// A place: base local plus a projection range (into CoreBody.projections).
+@derive(Copy)
 pub struct Place {
     pub base: LocalId,
     pub proj_start: u32,
@@ -112,6 +118,7 @@ pub const OP_COPY: u8 = 0; // data = PlaceId
 pub const OP_MOVE: u8 = 1; // data = PlaceId
 pub const OP_CONST: u8 = 2; // data = ConstId
 
+@derive(Copy)
 pub struct Operand {
     pub kind: u8,
     pub data: u32,
@@ -127,6 +134,7 @@ pub const CK_UNIT: u8 = 4; // no value (void/empty)
 pub const CK_ITEM: u8 = 5; // item = resolved fn/const DefId; val = bound generic arguments (targ_val)
 pub const CK_WIDE: u8 = 6; // val = wide-literal record index in the module Ast
 
+@derive(Copy)
 pub struct Constant {
     pub kind: u8,
     pub ty: TypeId,
@@ -839,6 +847,7 @@ pub const fn check_arity(c: u8) u32 {
 
 // Field order packs to 24 bytes (kind/c share the item's tail padding); bodies hold one record
 // per expression, so the two byte flags sit last.
+@derive(Copy)
 pub struct Rvalue {
     pub a: u32,
     pub b: u32,
@@ -858,6 +867,7 @@ pub const ST_ASSIGN: u8 = 0; // place = rvalue
 pub const ST_STORAGE_LIVE: u8 = 1; // a = LocalId
 pub const ST_STORAGE_DEAD: u8 = 2; // a = LocalId
 
+@derive(Copy)
 pub struct Statement {
     pub kind: u8,
     pub place: PlaceId,
@@ -974,6 +984,7 @@ pub const fn ci_name(k: u8) str<'static> {
 }
 
 // Field order leaves no interior padding: 68 bytes, the three byte fields in the tail.
+@derive(Copy)
 pub struct Terminator {
     pub a: u32, // per kind (see above)
     pub args_start: u32, // TM_CALL: argument operand range
@@ -1030,6 +1041,7 @@ pub const fn goto_term(to: BlockId, sp: tok::Span) Terminator {
 }
 
 /// One basic block: a statement range plus exactly one terminator.
+@derive(Copy)
 pub struct BasicBlock {
     pub stmt_start: u32,
     pub stmt_len: u32,
@@ -1109,19 +1121,6 @@ fn exact<T: Copy>(v: &Vector<T>) Vector<T> {
     out.extend_copy(v);
     return out;
 }
-
-// Restated derived conformances: the bootstrap compiler checks `exact`'s `T: Copy` bound against
-// written conformances only.
-extend LocalDecl as Copy {}
-extend BasicBlock as Copy {}
-extend Statement as Copy {}
-extend Place as Copy {}
-extend Projection as Copy {}
-extend Operand as Copy {}
-extend Rvalue as Copy {}
-extend Constant as Copy {}
-extend AsmRec as Copy {}
-extend Terminator as Copy {}
 
 extend CoreBody {
     /// True when a projection of place `pl` is a deref: the place reaches through a reference.

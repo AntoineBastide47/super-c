@@ -1075,7 +1075,7 @@ extern "C" "signal.h" {
         pub handler: fn(i32),
         pub sa_mask: sigset_t,
         pub sa_flags: i32,
-        pub sa_restorer: *mut void,
+        pub sa_restorer: fn(),
     }
     @import("sigaction")
     fn c_sigaction(sig: i32, act: *const sigaction, old: *mut sigaction) i32;

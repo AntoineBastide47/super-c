@@ -13,8 +13,7 @@ extern "C" "pthread.h" {
     @platform(linux | android)
     @layout(4, 4)
     type pthread_key_t;
-    // The destructor is a `void (*)(void *)`, always null here.
-    fn pthread_key_create(key: *mut pthread_key_t, destructor: *mut void) i32;
+    fn pthread_key_create(key: *mut pthread_key_t, destructor: fn(*mut void)) i32;
     fn pthread_key_delete(key: pthread_key_t) i32;
     fn pthread_getspecific(key: pthread_key_t) *mut void;
     fn pthread_setspecific(key: pthread_key_t, value: *const void) i32;
@@ -49,6 +48,13 @@ type KeySlot = pthread_key_t;
 type KeySlot = u32;
 @platform(wasm)
 type KeySlot = *mut void;
+
+// The bits of a key destructor, `void (*)(void *)`: null passes as one, for a key without a destructor.
+@platform(macos | ios | linux | android)
+union KeyDestructor {
+    pub f: fn(*mut void),
+    pub p: *mut void,
+}
 
 /// Start an OS thread that runs `entry(arg)`. Unsupported on WASI.
 /// Safety: `arg` stays valid, and is safe to use from the new thread, for as long as `entry` uses it.
@@ -135,7 +141,7 @@ extend TlsKey {
     @platform(macos | ios | linux | android)
     pub fn new() Result<TlsKey, IoError> {
         let mut k = unsafe zeroed::<pthread_key_t>();
-        let rc = unsafe pthread_key_create(&mut k, null);
+        let rc = unsafe pthread_key_create(&mut k, KeyDestructor { p: null }.f);
         if rc != 0 {
             return Result::<TlsKey, IoError>::Err(error::code_error(rc, IoOp::ThreadLocal));
         }

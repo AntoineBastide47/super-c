@@ -101,13 +101,10 @@ fn remove_frees_the_key() {
 }
 
 // Default needs no Default key or value: an empty map holds neither.
+@derive(Hash, Eq)
 struct NoDefault {
     pub n: i32,
 }
-
-extend NoDefault as Hash {}
-
-extend NoDefault as Eq {}
 
 @test
 fn default_without_default_elements() {

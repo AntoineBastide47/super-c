@@ -3414,6 +3414,14 @@ fn engine_build_i(
                     if cx.target != 0 {
                         push_arg(&mut largs, "-fPIC");
                     }
+                    // The library's own name, not the temporary it links to: a program that links it
+                    // records this name and loads the library through it.
+                    let leaf = loader::basename_of(bin);
+                    if is_darwin(cx.target) {
+                        largs.push(format("-Wl,-install_name,@rpath/{}", leaf));
+                    } else if cx.target == 2 || cx.target == 5 {
+                        largs.push(format("-Wl,-soname,{}", leaf));
+                    }
                 }
                 push_arg(&mut largs, "-o");
                 largs.push(tmp.clone());

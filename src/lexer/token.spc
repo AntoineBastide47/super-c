@@ -4,14 +4,14 @@
 import lexer::token_type as *;
 import utils::persist as *;
 
+// `@derive(Copy)` restates the derivation for the bootstrap compiler, which checks a `Copy` bound against
+// written conformances only.
 /// Half-open byte range [start, end) into a source buffer.
+@derive(Copy)
 pub struct Span {
     pub start: u32,
     pub end: u32,
 }
-
-// Restated derived conformance for the bootstrap compiler (see ir::core `exact`).
-extend Span as Copy {}
 
 extend Span as Persist {
     fn plain() bool {

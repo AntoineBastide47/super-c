@@ -428,11 +428,11 @@ extend i32 as Sz {
         return 1;
     }
 }
+@derive(Sz)
 struct S {
     pub a: i32,
     pub w: u32,
 }
-extend S as Sz {}
 fn main() i32 {
     let s = S { a: 1, w: 7 };
     return s.sz();

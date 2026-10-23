@@ -635,17 +635,17 @@ extern "C" "signal.h" {
     @platform(macos | ios)
     struct sigaction {
         @import("sa_handler")
-        pub handler: *mut void,
+        pub handler: fn(i32),
         pub sa_mask: sigset_t,
         pub sa_flags: i32,
     }
     @platform(linux | android)
     struct sigaction {
         @import("sa_handler")
-        pub handler: *mut void,
+        pub handler: fn(i32),
         pub sa_mask: sigset_t,
         pub sa_flags: i32,
-        pub sa_restorer: *mut void,
+        pub sa_restorer: fn(),
     }
     @import("sigaction")
     fn c_sigaction(sig: i32, act: *const sigaction, old: *mut sigaction) i32;
@@ -660,7 +660,7 @@ extern "C" "signal.h" {
     const SA_RESTART: i32 = 0x10000000;
 }
 
-// A signal handler's address, as `sa_handler` holds it.
+// The bits of `sa_handler`, which holds SIG_DFL (0) or SIG_IGN (1) in place of a handler.
 @platform(macos | ios | linux | android)
 union HandlerBits {
     pub f: fn(i32),
@@ -1285,15 +1285,14 @@ static mut DIAG_PATH: [u8; 1024] = [0u8; 1024];
 static mut DIAG_FD: i32 = -1;
 // Storage for the action SIGURG had before: the runtime's own dump, run first.
 @platform(macos | ios | linux | android)
-static mut DIAG_PREV: sigaction = sigaction {};
+static mut DIAG_PREV: sigaction = unsafe zeroed::<sigaction>();
 
 @platform(macos | ios | linux | android)
 fn diag_run(sig: i32) {
     // The runtime's own dump first: the process header and every thread's stack. SIG_DFL is 0, SIG_IGN 1.
-    let prev = unsafe DIAG_PREV.handler;
-    if prev as usize > 1 {
-        let h = HandlerBits { p: prev };
-        h.f(sig);
+    let prev = HandlerBits { f: unsafe DIAG_PREV.handler };
+    if prev.p as usize > 1 {
+        prev.f(sig);
     }
     unsafe DIAG_FD = unsafe c_open(((&DIAG_PATH[0]) as *const u8) as *const char, O_WRONLY | O_APPEND | O_CREAT, 0o644);
     if unsafe DIAG_FD < 0 {
@@ -1353,8 +1352,7 @@ pub unsafe fn sc_rt_diag_chain(dump: fn()) {
             let mut sa = unsafe zeroed::<sigaction>();
             unsafe sigemptyset(&mut sa.sa_mask);
             sa.sa_flags = SA_RESTART;
-            let h = HandlerBits { f: diag_run };
-            sa.handler = h.p;
+            sa.handler = diag_run;
             unsafe c_sigaction(SIGURG, &sa, &mut DIAG_PREV);
         }
     }

@@ -341,7 +341,8 @@ symbols from. Then, in emit order:
    namespace, so it lands in `__std/` and never collides with a user `std/` directory.
 3. Per-owner instance shards `<module>__inst.c` (+ `__inst__p<k>.c` under
    `[instance-shards]`): generic instances, glue, constants, descriptors and dyn tables
-   the module owns; then `__sc_registry.c` (ZST sentinels, reflection registry).
+   the module owns; then `__sc_registry.c` in every program (the external definitions of the runtime header's inline
+   helpers, ZST sentinels, reflection registry).
 4. The per-TU cache image is published only after a fully successful emission, then
    `__sc_manifest` (atomically: temporary + rename).
 5. `prune_orphans`: outputs from a previous build that this one no longer emits are

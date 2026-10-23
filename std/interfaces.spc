@@ -244,16 +244,15 @@ extern "C" {
 // is 8, below wasi-libc's 16, so a 16-aligned type there takes the over-aligned path, which is also correct.
 const MALLOC_ALIGN: usize = 2 * sizeof(usize);
 
+// `@derive(Copy)` restates the derivation for the bootstrap compiler, which checks a `Copy` bound against
+// written conformances only.
 /// The default allocator: the C heap, aborting on out-of-memory. A zero-sized tag: it stores nothing, so
 /// `Box<T>` is `{ ptr }` with no space overhead. An `align` up to what `malloc` guarantees takes
 /// `malloc`/`realloc`/`free`; a larger one takes the platform's aligned allocation (`aligned_alloc`, or
 /// `_aligned_malloc` on Windows), and the same `align` must be passed back to `realloc` and `dealloc`.
 /// The bookkeeping `size`s matter only for moving an over-aligned block.
+@derive(Copy)
 pub struct Global {}
-
-// Restates the derived conformance: the bootstrap compiler predates the derivation and checks
-// `Allocator`'s superinterface against written conformances only.
-extend Global as Copy {}
 
 // Each method inlines into its caller, so the leak tracker records the allocation at the container code
 // that asked for the block, in every profile.

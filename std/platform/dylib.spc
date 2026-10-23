@@ -11,8 +11,18 @@ import std::platform::path;
 @platform(windows)
 extern "C" "windows.h" {
     fn LoadLibraryW(path: *const u16) *mut void;
-    fn GetProcAddress(module: *mut void, name: *const char) *mut void;
+    // `INT_PTR (WINAPI *)(void)`: any symbol's address, read through `ProcBits`.
+    @layout(8, 8)
+    type FARPROC;
+    fn GetProcAddress(module: *mut void, name: *const char) FARPROC;
     fn FreeLibrary(module: *mut void) i32;
+}
+
+// The address GetProcAddress returns, as a data pointer.
+@platform(windows)
+union ProcBits {
+    pub h: FARPROC,
+    pub p: *mut void,
 }
 
 /// A loaded library. Dropping it unloads it: every address taken from it is then dangling.
@@ -80,7 +90,7 @@ extend Library {
         if name.find_byte(0) >= 0 {
             return Result::<*mut void, IoError>::Err(IoError::new(IoErrorKind::InvalidInput, IoOp::Symbol));
         }
-        let p = unsafe GetProcAddress(self.handle, n.cstr());
+        let p = ProcBits { h: unsafe GetProcAddress(self.handle, n.cstr()) }.p;
         if p == null {
             return Result::<*mut void, IoError>::Err(error::last_error(IoOp::Symbol));
         }

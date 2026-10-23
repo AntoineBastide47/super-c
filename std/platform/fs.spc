@@ -2,8 +2,8 @@
 // or a Win32 HANDLE) and closes it when dropped; path operations take `str` paths and convert them to the
 // native form inside (UTF-16 on Windows). Every call returns a `Result` with an `IoError`; an interrupted
 // call runs again inside. POSIX (macOS, iOS, Linux, Android) goes through libc, Windows through the Win32
-// API, WASI through wasi-libc, which has no permission bits and no file locks: those calls are Unsupported
-// there. Unstable, internal to std and the compiler.
+// API, WASI through std::rt::libc, which has no permission bits and no file locks: those calls are
+// Unsupported there. Unstable, internal to std and the compiler.
 //
 // Time of check to time of use: a path names whatever file is there at the moment of each call. A `stat`
 // followed by an `open`, or a `read_dir` followed by an operation on an entry, can see two different
@@ -459,6 +459,7 @@ pub enum SeekFrom {
 }
 
 /// The kind of a file system entry.
+@derive(Eq, Format)
 pub enum FileKind {
     File,
     Dir,
@@ -487,6 +488,7 @@ pub struct Metadata {
 }
 
 /// A time `set_times` gives a file.
+@derive(Eq)
 pub enum FileTime {
     Now,
     Keep,
@@ -494,6 +496,7 @@ pub enum FileTime {
 }
 
 /// One of the process's standard streams.
+@derive(Eq)
 pub enum StdStream {
     Input,
     Output,
@@ -1919,11 +1922,3 @@ extend Metadata {
         return self.dev == other.dev && self.ino == other.ino;
     }
 }
-
-extend FileKind as Eq {}
-
-extend FileKind as Format {}
-
-extend FileTime as Eq {}
-
-extend StdStream as Eq {}

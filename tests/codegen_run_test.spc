@@ -1243,6 +1243,17 @@ fn box_reaches_a_generic_reference_param_unchanged() {
     assert_eq(r.exit, 40);
 }
 
+// `@derive` on a type with lifetime parameters conforms every instance: the extend takes the type's
+// lifetimes (`extend<'a, T> Tag<'a, T> as Eq {}`), so the derived `eq` compares a borrowed `str` field.
+@test
+fn derive_takes_lifetime_parameters() {
+    let r = h::compile_and_run(
+        "@derive(Eq, Copy)\nstruct Tag<'a, T: Copy> {\n    pub name: str<'a>,\n    pub v: T,\n}\nfn twice<C: Copy>(c: C) (C, C) {\n    return c, c;\n}\nfn main() i32 {\n    let s = String::from_str(\"ab\");\n    let a = Tag::<i32> { name: s.as_str(), v: 1 };\n    let (b, c) = twice(Tag::<i32> { name: \"ab\", v: 1 });\n    return (a == b) as i32 + (b == c) as i32 + (a != Tag::<i32> { name: \"ab\", v: 2 }) as i32 - 3;\n}\n",
+    );
+    assert(r.built, "a derived conformance of a lifetime-parameterized type builds");
+    assert_eq(r.exit, 0);
+}
+
 fn compile_time_layout_and_zero_sized_maps(b: &mut h::ExitBatch) {
     // Nested instances of one generic lay out at compile time (they are no by-value cycle), and a
     // map or box of zero-sized values folds: its storage is the dangling sentinel.
@@ -2886,7 +2897,7 @@ fn instance_static_assert_calls_a_function() {
     );
     // A blanket conformance's method on an instance receiver binds T to the receiver `G<u8>`, never
     // to the instance's own argument `u8`; the note names the instance with its arguments.
-    const BLANKET: str = "interface Lane {}\nstruct G<T> { pub v: T, pub w: T, pub z: T }\nextend<T> G<T> as Lane {}\ninterface Twice { fn twice(self: &Self) i64; }\n";
+    const BLANKET: str = "interface Lane {}\n@derive(Lane)\nstruct G<T> { pub v: T, pub w: T, pub z: T }\ninterface Twice { fn twice(self: &Self) i64; }\n";
     const CALL: str = "fn main() i32 { let g = G::<u8> { v: 1, w: 2, z: 3 }; return (g.twice() - 1) as i32; }\n";
     b.add(
         "a blanket conformance's method on an instance",
@@ -3596,8 +3607,8 @@ fn boxed_dyn_frees_through_its_allocator(b: &mut h::ExitBatch) {
         M"(extern "C" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; }
 static mut LIVE: i32 = 0;
 static mut DEFAULTS: i32 = 0;
+@derive(Copy)
 struct Tagged { pub tag: u64 }
-extend Tagged as Copy {}
 extend Tagged as Allocator {
     unsafe fn alloc(self: &mut Tagged, n: usize, align: usize) *mut void { unsafe { LIVE += 1; } return unsafe malloc(n); }
     unsafe fn realloc(self: &mut Tagged, p: *mut void, old_n: usize, n: usize, align: usize) *mut void { return unsafe realloc(p, n); }
@@ -4551,6 +4562,7 @@ interface N {
 interface M: N {
     fn m(self: &Self) i32 { return 10 * self.n(); }
 }
+@derive(M)
 struct S { pub v: i32 }
 extend S as A<i32> { pub fn get(self: &Self) i32 { return self.v; } }
 extend S as A<bool> {
@@ -4561,7 +4573,6 @@ extend S as B<i32> { pub fn name(self: &Self) String { return String::from_str("
 extend S as B<bool> { pub fn name(self: &Self) String { return String::from_str("Bb"); } }
 extend S as C { pub fn c(self: &Self) i32 { return 5; } }
 extend S as N { pub fn n(self: &Self) i32 { return self.v; } }
-extend S as M {}
 fn bi(b: &dyn B<i32>) i32 {
     let (x, y) = b.pair();
     return x + y + b.name().len() as i32 + b.twice();

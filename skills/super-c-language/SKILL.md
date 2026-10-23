@@ -432,6 +432,11 @@ takes its implementing type from the receiver argument, a type parameter's bound
 several conformances of the receiver to one generic interface the expected result type chooses
 ("ambiguous call to 'conv': 'P' conforms to 'Conv' with several arguments that fit" without one).
 
+`@derive(I, J)` on a struct or enum declaration expands to `extend<params> T<params> as I {}` per
+interface, with the declaration's lifetime and generic parameters, their bounds, and its `@platform`,
+`@arch` and `@when` gates; it takes any interface, markers (`Copy`, `Send`) included. Use it for every
+empty conformance (references/style.md). A union cannot take it.
+
 The prelude defaults of `Clone`, `Default`, `Eq` and `Ord` (what `@derive` and an empty `extend`
 use) work field by field. An enum must define `clone` and `default` itself, and a union also `eq`
 and `cmp`; inheriting one of those defaults is a compile error at the conformance.

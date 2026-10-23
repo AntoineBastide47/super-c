@@ -749,8 +749,7 @@ fn attributes() {
     }
 }
 
-// Each C-facing attribute has a one-part spelling; the removed `@c.` spellings are unknown attributes, as
-// any other unknown name is, and so is `@source`.
+// Each C-facing attribute has a one-part spelling
 @test
 fn one_part_c_attributes() {
     let src = "@packed\n@align(8)\nstruct H { x: u32, }\n@inline\n@always_inline\n@noinline\n@cold\n@noreturn\n@used\n@unused\n@export(\"sym\")\nfn f() {}\n@link(\"m\")\nextern \"C\" {\n    @import(\"abs\")\n    fn a(x: i32) i32;\n    @reads(p, n)\n    @writes(q, n)\n    fn g(p: *const u8, q: *mut u8, n: usize);\n    @lane_access\n    fn l(p: *const u8);\n    @value(16, 16)\n    pub type R;\n}\n";

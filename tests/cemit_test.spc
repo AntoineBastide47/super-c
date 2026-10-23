@@ -116,9 +116,11 @@ fn compile_run(em: &cb::CEmit, main_body: str) i32 {
     let p = cli::proj_new();
     let root = p.dir();
     let mut src = String::from_str(em.out.as_str());
+    // The probe is the whole program: it holds the external definitions of super_rt.h's inline helpers.
+    src.push_str("SC_RT_EXTERNS\n");
     // The runtime traps the inline helpers of super_rt.h call (std/rt/base.spc in a program).
     src.push_str(
-        "_Noreturn void __sc_panic(const char *__m) { fputs(__m, stderr); abort(); }\n_Noreturn void __sc_panic_str(const uint8_t *__p, size_t __n) { fwrite(__p, 1, __n, stderr); abort(); }\n",
+        "_Noreturn void __sc_panic(const char *__m) { fputs(__m, stderr); abort(); }\n_Noreturn void __sc_panic_str(const uint8_t *__p, size_t __n) { fwrite(__p, 1, __n, stderr); abort(); }\n_Noreturn void __sc_trap_order(void) { abort(); }\n",
     );
     src.push_str(main_body);
     p.mkfile("probe.c", src.as_str());

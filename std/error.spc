@@ -46,6 +46,7 @@ pub struct Unit {}
 
 /// The stable category of an I/O or operating-system failure: what a caller branches on. The native error
 /// number stays in `IoError.code`.
+@derive(Eq, Format)
 pub enum IoErrorKind {
     Refused, // nothing is listening
     Unreachable, // no route, or the name does not resolve
@@ -69,6 +70,7 @@ pub enum IoErrorKind {
 }
 
 /// The operation that failed.
+@derive(Eq, Format)
 pub enum IoOp {
     Other,
     Open,
@@ -129,6 +131,7 @@ pub enum IoOp {
 
 /// Why an I/O or operating-system operation failed. `code` is the native error number (`errno`, a Win32 or
 /// Winsock code), 0 when there is none. Error text is not identity: compare `kind`.
+@derive(Eq, Format)
 pub struct IoError {
     pub kind: IoErrorKind,
     pub code: i32,
@@ -145,15 +148,3 @@ extend IoError {
         return self.kind;
     }
 }
-
-extend IoErrorKind as Eq {}
-
-extend IoErrorKind as Format {}
-
-extend IoOp as Eq {}
-
-extend IoOp as Format {}
-
-extend IoError as Eq {}
-
-extend IoError as Format {}

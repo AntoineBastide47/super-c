@@ -16,6 +16,7 @@ import module::loader as loader;
 import emit::simd_plan as sp;
 import ir::cpu_features as cf;
 import ir::inline as inl;
+import emit::rt_h as rth;
 
 /// Nesting bound for the recursive renderers (operands through inlined temporaries, structured
 /// control flow through regions): clang's default bracket depth, past which the C would not
@@ -48,6 +49,10 @@ const FOLD_READS_MAX: u32 = 64;
 /// Longest chain of folded temporaries one read spells (see `compute_inline`); well under
 /// RENDER_NEST_MAX so a chain nests inside other renderer levels.
 const INLINE_CHAIN_MAX: u32 = 64;
+
+/// Mixed into a symbol hash in `extern_seen`: the extern function is one `super_rt.h` defines, so it takes no
+/// prototype.
+const RT_DEFINED_KEY: u64 = 0x5bd1e9955bd1e995;
 
 /// A body the backend refused to emit: its module, a source span inside it (the function's or
 /// closure's own span when it has a return slot or parameter) and the first reason.
@@ -17336,7 +17341,15 @@ extend CEmit {
             return;
         }
         let h = sym.as_str().hash();
+        if self.extern_seen.contains(&(h ^ RT_DEFINED_KEY)) {
+            return;
+        }
         let fresh = !self.extern_seen.contains(&h);
+        if fresh && sym.as_str().starts_with("sc_") && rth::rt_defines(sym.as_str()) {
+            // `super_rt.h` defines it inline: a second declaration would make each unit's copy external.
+            self.extern_seen.insert(h ^ RT_DEFINED_KEY);
+            return;
+        }
         if !fresh && !(self.mg.rec_on && self.mg.rec_dup_once(h ^ 9)) {
             return;
         }

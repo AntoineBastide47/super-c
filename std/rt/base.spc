@@ -407,7 +407,7 @@ extern "C" "signal.h" {
         pub handler: fn(i32),
         pub sa_mask: sigset_t,
         pub sa_flags: i32,
-        pub sa_restorer: *mut void,
+        pub sa_restorer: fn(),
     }
     @platform(macos | ios)
     @import("stack_t")
@@ -556,11 +556,19 @@ static mut STK_ON: i32 = 0; // the handler is installed
 static mut STK_ALT: usize = 0; // bytes of each signal stack
 // The actions installed before this runtime's, which `sigaction` fills in at startup.
 @platform(macos | ios | linux | android)
-static mut STK_PREV_SEGV: sigaction = sigaction { handler: sig_unset };
+static mut STK_PREV_SEGV: sigaction = unset_action();
 @platform(macos | ios | linux | android)
-static mut STK_PREV_BUS: sigaction = sigaction { handler: sig_unset };
+static mut STK_PREV_BUS: sigaction = unset_action();
 @platform(macos | ios | linux | android)
-static mut ILL_PREV: sigaction = sigaction { handler: sig_unset };
+static mut ILL_PREV: sigaction = unset_action();
+
+// An action whose handler is `sig_unset`, every other member zero.
+@platform(macos | ios | linux | android)
+const fn unset_action() sigaction {
+    let mut a = unsafe zeroed::<sigaction>();
+    a.handler = sig_unset;
+    return a;
+}
 
 // The handler a previous action holds until `sigaction` records the real one.
 @platform(macos | ios | linux | android)

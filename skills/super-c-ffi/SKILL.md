@@ -51,6 +51,14 @@ extern "C" {
   prototype of its own with another pointee type is a C error ("conflicting types").
 - `stdlib::c_ulong` spells `uint32_t` on Windows, which C does not convert to `unsigned long *`
   (`LPDWORD`): bind such a pointer parameter as `*mut void`.
+- A C function pointer binds as a `fn(..)` type (a parameter, a result, a header type's field), never
+  `*mut void`: C converts a function pointer to `void *` only as an extension, which
+  `-pedantic-errors` rejects. A value that may be null or a sentinel (`SIG_DFL`, a null destructor)
+  passes through a union of the `fn` type and `*mut void` (`HandlerBits`, `KeyDestructor`), since a
+  `fn` value is never null. A Win32 function type whose C signature names `DWORD` or `LONG` (`C
+  unsigned long`, `long`, which no Super-C type spells) binds as an opaque `@layout(8, 8)` type of its
+  typedef (`PHANDLER_ROUTINE`, `FARPROC`, `PVECTORED_EXCEPTION_HANDLER`), reached through a union with
+  the `fn` type.
 - A typed pointer passed to a parameter declared `*mut void` or `*const void` is spelled
   `(void *)(arg)` in C, so the header may declare another pointee (Winsock's `char *` option
   values, `u_long *`).

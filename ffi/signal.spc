@@ -4,7 +4,7 @@
 
 extern "C" "signal.h" {
     /// Install `handler` for `sig`; the previous handler, or SIG_ERR.
-    pub fn signal(sig: i32, handler: fn(i32) void) *mut void;
+    pub fn signal(sig: i32, handler: fn(i32) void) fn(i32);
     /// Deliver `sig` to this process; 0 on success.
     pub fn raise(sig: i32) i32;
 

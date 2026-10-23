@@ -15726,18 +15726,25 @@ extend<'a> TypeChecker<'a> {
                             let mut pa = Tys8 {};
                             let mut np: i32 = 0;
                             let mut usable = true;
+                            // The instance's arguments erase lifetimes: a written lifetime argument
+                            // (`View<'a, T>`) takes no instance argument.
                             let mut kk: u32 = 0;
-                            while kk < targs.len && kk < it2.n as u32 && np < 8 {
+                            let mut ka: u32 = 0;
+                            while kk < targs.len && ka < it2.n as u32 && np < 8 {
                                 let an = unsafe (*self.cur_ast()).list(targs)[kk as usize];
+                                kk = kk + 1;
+                                if unsafe (*self.cur_ast()).at_const(an).kind == NodeKind::NODE_LIFETIME {
+                                    continue;
+                                }
                                 let pd = unsafe (*self.cur_ast()).resolution_def(an);
-                                let ca = unsafe (*self.cur_ast()).reintern(unsafe &*oa, unsafe it2.args[kk as usize]);
+                                let ca = unsafe (*self.cur_ast()).reintern(unsafe &*oa, unsafe it2.args[ka as usize]);
+                                ka = ka + 1;
                                 if pd.node == NODE_NONE || !unsafe (*self.cur_ast()).type_concrete(ca) {
                                     usable = false;
                                 }
                                 pp[np as usize] = pd;
                                 pa[np as usize] = ca;
                                 np = np + 1;
-                                kk = kk + 1;
                             }
                             if !usable {
                                 continue;

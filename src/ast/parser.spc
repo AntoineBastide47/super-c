@@ -1874,9 +1874,9 @@ extend Parser {
         return self.mk(NodeKind::NODE_TYPE_PATH, sp, NodeAs { type_path: TypePathData { parts: parts } });
     }
 
-    // `@derive(I, ..)` on the just-parsed aggregate: one empty `extend<G..> T<G..> as I {}` sibling
-    // per interface, pushed onto the open top-level item list ahead of the declaration. The extend
-    // REUSES the declaration's generic-param nodes (same names, same bounds -> a conditional
+    // `@derive(I, ..)` on the just-parsed aggregate: one empty `extend<'a.., G..> T<'a.., G..> as I {}`
+    // sibling per interface, pushed onto the open top-level item list ahead of the declaration. The extend
+    // REUSES the declaration's lifetime and generic-param nodes (same names, same bounds -> a conditional
     // conformance when the params are bounded); the target's arguments are fresh name references so
     // each scope resolves its own. The declaration's `@platform`/`@arch` gates are copied onto the
     // extends so a gated type never leaves an unfiltered conformance behind.
@@ -1885,22 +1885,19 @@ extend Parser {
             self.reject_derive_here();
             return;
         }
-        if self.ast.lifetimes_of(decl).len != 0 {
-            self.errors.emit(
-                self.derive_start,
-                self.derive_end - self.derive_start,
-                format(
-                    "'@derive' cannot synthesize a conformance for a lifetime-parameterized type; write the 'extend' explicitly",
-                ),
-            );
-            self.derive_ifaces.clear();
-            return;
-        }
         let agg = self.ast.at_const(decl).as_data.aggregate;
         let nsp = self.ast.at_const(agg.name).as_data.name.text;
         // Copied out first: node building below grows the arenas a `list` pointer indexes into.
         let mut gid_copy = Vector::<NodeId>::new();
         let mut gsp_copy = Vector::<Span>::new();
+        let mut lid_copy = Vector::<NodeId>::new();
+        let mut lsp_copy = Vector::<Span>::new();
+        let lts = self.ast.lifetimes_of(decl);
+        for l in 0..lts.len {
+            let lid = unsafe self.ast.list(lts)[l as usize];
+            lid_copy.push(lid);
+            lsp_copy.push(self.ast.at_const(self.ast.at_const(lid).as_data.generic_param.name).as_data.name.text);
+        }
         for g in 0..agg.generics.len {
             let gid = unsafe self.ast.list(agg.generics)[g as usize];
             gid_copy.push(gid);
@@ -1912,6 +1909,11 @@ extend Parser {
             self.ast.push(self.make_name(nsp));
             let parts = self.ast.commit(pmark);
             let amark = self.ast.mark();
+            for l in 0..lsp_copy.len() {
+                self.ast.push(
+                    self.mk(NodeKind::NODE_LIFETIME, lsp_copy[l], NodeAs { name: NameData { text: lsp_copy[l] } }),
+                );
+            }
             for g in 0..gsp_copy.len() {
                 self.ast.push(self.make_simple_type(gsp_copy[g]));
             }
@@ -1931,6 +1933,12 @@ extend Parser {
                 Span::new(self.derive_start, self.derive_end),
                 NodeAs { extend_def: ExtendData { generics: egen, interface_type: iface, target_type: target } },
             );
+            let lmark = self.ast.mark();
+            for l in 0..lid_copy.len() {
+                self.ast.push(lid_copy[l]);
+            }
+            let elts = self.ast.commit(lmark);
+            self.ast.set_lifetimes(ext, elts);
             for a in 0..attrs.len() {
                 let at = *attrs.at(a);
                 if at.kind == AttrKind::ATTR_PLATFORM as u8 || at.kind == AttrKind::ATTR_ARCH as u8 || at.kind == AttrKind::ATTR_WHEN as u8 {
