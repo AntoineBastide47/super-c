@@ -225,6 +225,9 @@ pub struct Package {
     pub std_root: String, // second import search root (parent of std/); empty = none
     /// The project's manifest sets `std_internals = true`: its files see std's `pub(package)` items.
     pub std_internals: bool,
+    /// The build emits the manifest's `[lib]` target: the project's exported functions are its API, so
+    /// each is emitted whether or not the library calls it (`reach_roots`).
+    pub lib_build: bool,
     /// The `vendor/<name>` packages in load order: `Module.pkg` is `PKG_VENDOR` plus the index.
     pub vendors: Vector<String>,
     pub alt_root: String, // optional search root between the project root and std (manifest src/ dir)

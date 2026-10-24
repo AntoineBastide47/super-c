@@ -20,7 +20,7 @@ import driver::util as *;
 import stdlib;
 
 const TUC_MAGIC: u32 = 0x53435455; // "UTCS" little-endian spells SCTU on disk
-const TUC_VER: u32 = 12;
+const TUC_VER: u32 = 13;
 
 const fn fnv_mix(h: u64, v: u64) u64 {
     let mut x = h;
@@ -301,7 +301,7 @@ fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) 
 /// Open the cache for this build: compute every live module's key, load the previous image from
 /// `gen_root`, mark the modules whose sections still match, and reserve `est` bytes for the next image.
 /// Off when SC_NO_TU_CACHE is set, which also removes an existing image.
-pub fn tuc_setup(p: &loader::Package, live: *const bool, target: i32, gen_root: str, est: usize) Tuc {
+pub fn tuc_setup(p: &loader::Package, live: *const bool, salt: &Vector<u64>, target: i32, gen_root: str, est: usize) Tuc {
     let mut t = Tuc {
         on: false,
         hdr: 0,
@@ -336,6 +336,10 @@ pub fn tuc_setup(p: &loader::Package, live: *const bool, target: i32, gen_root: 
         return t;
     }
     keys_compute(p, live, &mut t.keys);
+    // The functions the seed pass emits per module (`salt`): a section holds the chunks of its own set.
+    for m in 0..n {
+        t.keys.set(m, fnv_mix(t.keys[m], salt[m]));
+    }
     t.path.push_str(gen_root);
     t.path.push_str("/.tu_cache");
     t.on = true;

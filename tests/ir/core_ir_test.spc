@@ -928,6 +928,7 @@ const TAIL_DEEP: str = M"(struct Counter {
     pub c: i64,
 }
 extend Counter {
+    @noinline
     @tail_recurse
     fn go(self: &mut Counter, n: i64) {
         if n == 0 {
@@ -954,6 +955,7 @@ enum E {
     A(i64),
     B,
 }
+@noinline
 @tail_recurse
 fn count(n: i64, acc: i64) i64 {
     if n == 0 {
@@ -968,6 +970,7 @@ fn swap(a: i64, b: i64, n: i64) i64 {
     }
     return swap(b, a, n - 1);
 }
+@noinline
 @tail_recurse
 fn fill(v: &mut Vector<i64>, n: i64) {
     if n == 0 {
@@ -985,6 +988,7 @@ fn grow(acc: String, n: i64) String {
     a.push_str("x");
     return grow(a, n - 1);
 }
+@noinline
 @tail_recurse
 fn sw(a: String, b: String, n: i64) String {
     if n == 0 {

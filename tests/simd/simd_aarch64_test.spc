@@ -787,7 +787,7 @@ fn a_choose_through_copies_reads_lane_masks() {
 @test
 fn a_choose_after_calls_reads_lane_masks() {
     // The comparison's masks live across the call of `big`, in a later block.
-    let src = "@noinline\nfn big() f32x4 {\n    return f32x4::splat(9.0);\n}\nfn pick(x: f32x4) f32x4 {\n    return choose(x.greater_than(f32x4::splat(1.0)), big(), choose(x.less_than(f32x4::splat(-1.0)), f32x4::splat(0.0), x));\n}\nfn main() i32 {\n    let r = pick(f32x4::from_array([2.0, -2.0, 0.5, -0.5]));\n    return (r.get(0) == 9.0 && r.get(1) == 0.0 && r.get(2) == 0.5 && r.get(3) == -0.5) as i32;\n}\n";
+    let src = "@noinline\nfn big() f32x4 {\n    return f32x4::splat(9.0);\n}\n@noinline\nfn pick(x: f32x4) f32x4 {\n    return choose(x.greater_than(f32x4::splat(1.0)), big(), choose(x.less_than(f32x4::splat(-1.0)), f32x4::splat(0.0), x));\n}\nfn main() i32 {\n    let r = pick(f32x4::from_array([2.0, -2.0, 0.5, -0.5]));\n    return (r.get(0) == 9.0 && r.get(1) == 0.0 && r.get(2) == 0.5 && r.get(3) == -0.5) as i32;\n}\n";
     let c = h::compile_c_arch(src, 1);
     assert(c.ok(), "the program builds");
     if aarch64_host() {

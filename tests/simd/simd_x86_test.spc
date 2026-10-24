@@ -56,7 +56,7 @@ const fn line_of<'a>(c: str<'a>, needle: str) str<'a> {
 @test
 fn each_function_plans_with_its_own_features() {
     let c = h::compile_c_arch(
-        "import std::cpu;\n@arch(x86_64)\n@target_feature(cpu::X86_64_V3)\nfn wide(a: f32x8, b: f32x8) f32x8 {\n    return a + b;\n}\nfn base(a: f32x8, b: f32x8) f32x8 {\n    return a + b;\n}\n@arch(x86_64)\n@target_feature(cpu::X86_64_V4)\nfn wide4(a: f32x16, b: f32x16) f32x16 {\n    return a * b;\n}\nfn main() i32 {\n    let v = f32x8::splat(1.0);\n    let z = f32x16::splat(1.0);\n    return base(v, v).get(0) as i32 + unsafe wide(v, v).get(0) as i32 + unsafe wide4(z, z).get(0) as i32 - 5;\n}\n",
+        "import std::cpu;\n@arch(x86_64)\n@target_feature(cpu::X86_64_V3)\nfn wide(a: f32x8, b: f32x8) f32x8 {\n    return a + b;\n}\nfn base(a: f32x8, b: f32x8) f32x8 {\n    return a + b;\n}\n@noinline\nfn ap(f: fn(f32x8, f32x8) f32x8, v: f32x8) f32x8 {\n    return f(v, v);\n}\n@arch(x86_64)\n@target_feature(cpu::X86_64_V4)\nfn wide4(a: f32x16, b: f32x16) f32x16 {\n    return a * b;\n}\nfn main() i32 {\n    let v = f32x8::splat(1.0);\n    let z = f32x16::splat(1.0);\n    return ap(base, v).get(0) as i32 + unsafe wide(v, v).get(0) as i32 + unsafe wide4(z, z).get(0) as i32 - 5;\n}\n",
         0,
     );
     assert(c.ok(), "the program builds");

@@ -648,7 +648,7 @@ fn register_types_in_inferred_storage() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "extern \"C\" \"stdint.h\" {\n    @value(8, 8)\n    pub type int64_t;\n}\nextern \"C\" \"math.h\" {\n    @value(8, 8)\n    pub type double_t;\n}\nfn two(a: int64_t) (int64_t, int64_t) {\n    return a, a;\n}\nfn twod(a: double_t) (double_t, double_t) {\n    return a, a;\n}\npub fn use_both(a: int64_t, d: double_t) {\n    let (x, _y) = two(a);\n    let (u, _v) = twod(d);\n    let _ = x;\n    let _ = u;\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "extern \"C\" \"stdint.h\" {\n    @value(8, 8)\n    pub type int64_t;\n}\nextern \"C\" \"math.h\" {\n    @value(8, 8)\n    pub type double_t;\n}\n@noinline\nfn two(a: int64_t) (int64_t, int64_t) {\n    return a, a;\n}\n@noinline\nfn twod(a: double_t) (double_t, double_t) {\n    return a, a;\n}\n@used\npub fn use_both(a: int64_t, d: double_t) {\n    let (x, _y) = two(a);\n    let (u, _v) = twod(d);\n    let _ = x;\n    let _ = u;\n}\nfn main() i32 {\n    return 0;\n}\n",
     );
     assert(p.compile("main.spc").ok(), "it compiles");
     assert(

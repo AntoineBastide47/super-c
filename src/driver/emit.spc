@@ -2695,6 +2695,93 @@ fn cemit_take_body(
     return ok;
 }
 
+// The roots of the functions a program uses (`InstGraph::reach`): into `fns`, every concrete function
+// called from outside the emitted C: the program entry, the runtime (the C runtime calls it), a test
+// build's test items, a library build's exported functions, every function of the project's package
+// when the build has no entry and no tests (a translation without a program: its functions are its
+// interface), and each function C code, the linker or a
+// section walk finds by its symbol or its section (`@export`, `@used`, a link section), and the methods
+// the emitter's fixed text calls: `Global`'s `alloc` and `dealloc` (closure environments, boxed `dyn`
+// values) and `str::from_cstr` (the C `main` wrapper); and every constant or static the emitter defines
+// whatever names it.
+fn reach_roots(p: &loader::Package, g: &ig::InstGraph, live: *const bool, testing: bool, fns: &mut Vector<DefId>) {
+    let mut entry = testing || p.lib_build;
+    for m in 0..p.modules.len() {
+        if !entry && p.is_root_module(m as ModuleId) && p.modules[m].has_ast {
+            let a = unsafe &*p.module_ast_const(m as ModuleId);
+            let its = a.at_const(a.root).as_data.program.items;
+            for i in 0..its.len {
+                let nid = unsafe a.list(its)[i as usize];
+                entry = entry || a.at_const(nid).kind == NodeKind::NODE_FUNCTION && p.is_entry(m as ModuleId, nid);
+            }
+        }
+    }
+    for m in 0..p.modules.len() {
+        if !module_emits(p, live, m) {
+            continue;
+        }
+        let a = unsafe &*p.module_ast_const(m as ModuleId);
+        let proj = p.modules[m].pkg == loader::PKG_PROJECT;
+        let lib = p.lib_build && proj;
+        let all = !entry && proj;
+        let its = a.at_const(a.root).as_data.program.items;
+        for i in 0..its.len {
+            let nid = unsafe a.list(its)[i as usize];
+            let n = a.at_const(nid);
+            if n.kind == NodeKind::NODE_FUNCTION {
+                if reach_root(p, a, m as ModuleId, nid, testing, all || lib && vis_exported(n.as_data.function.vis)) {
+                    fns.push(DefId { module: m as ModuleId, node: nid });
+                }
+            } else if n.kind == NodeKind::NODE_CONST {
+                // A constant or static the emitter defines whatever names it (`stat_item`'s roots).
+                if !n.as_data.const_def.is_extern && reach_root(p, a, m as ModuleId, nid, false, false) {
+                    fns.push(DefId { module: m as ModuleId, node: nid });
+                }
+            } else if n.kind == NodeKind::NODE_EXTEND && n.as_data.extend_def.generics.len == 0 {
+                let ms = n.as_data.extend_def.items;
+                for j in 0..ms.len {
+                    let mid = unsafe a.list(ms)[j as usize];
+                    let mn = a.at_const(mid);
+                    if mn.kind == NodeKind::NODE_FUNCTION && reach_root(
+                        p,
+                        a,
+                        m as ModuleId,
+                        mid,
+                        testing,
+                        all || lib && vis_exported(mn.as_data.function.vis),
+                    ) {
+                        fns.push(DefId { module: m as ModuleId, node: mid });
+                    }
+                }
+            }
+        }
+    }
+    let fixed: [(str, str); 3] = [("Global", "alloc"), ("Global", "dealloc"), ("str", "from_cstr")];
+    for (ty, name) in fixed {
+        let h = p.prelude_lookup(ty, true);
+        if h.node != NODE_NONE {
+            let md = g.method_named(DefId { module: h.mid, node: h.node }, name);
+            if md.node != NODE_NONE {
+                fns.push(md);
+            }
+        }
+    }
+}
+
+// Whether function or constant `nid` of module `m` (tree `a`) is a reachability root (`reach_roots`);
+// `api`: it is a library build's exported function.
+fn reach_root(p: &loader::Package, a: &Ast, m: ModuleId, nid: NodeId, testing: bool, api: bool) bool {
+    if api || p.is_rt(m) || a.at_const(nid).kind == NodeKind::NODE_FUNCTION && p.is_entry(m, nid) || testing && is_test_item(
+        a,
+        nid,
+    ) {
+        return true;
+    }
+    return a.attr_of(nid, AttrKind::ATTR_EXPORT) != null || a.attr_of(nid, AttrKind::ATTR_USED) != null || (a.unsafe_claims(
+        nid,
+    ) & UNSAFE_LINK_SECTION) != 0;
+}
+
 // Replay one cached module: pool interns first (verified id by id), then the journaled events
 // through the emitter's live dedup gates. 0 = replayed, 1 = clean reject (nothing landed; emit
 // live and re-record), 2 = dirty reject (side effects landed; void the section, skip recording).
@@ -2740,6 +2827,8 @@ fn cemit_tuc_replay(p: &mut loader::Package, cem: &mut cbe::CEmit, m: usize, t: 
             acc.have_main = true;
             acc.main_mod = m as u64;
             acc.main_argv = ev.a != 0;
+        } else if ev.kind == mbe::RK_FNREF {
+            cem.mg.fn_ref(ev.a as ModuleId, ev.b);
         } else {
             cem.tuc_replay(&ev);
         }
@@ -2808,160 +2897,188 @@ fn cemit_seed_module(
     }
     for i in 0..cands.len() {
         let nid = cands[i];
-        let n = a.at_const(nid);
-        if n.as_data.function.is_extern() || n.as_data.function.body == NODE_NONE {
+        // The seed pass emits the functions the reachability walk predicts (`fn_pred`); a function
+        // only the emitted text names comes later (`cemit_drain_late`).
+        if cem.mg.fn_pred != null && !unsafe (*cem.mg.fn_pred).contains(&(m as u64 << 32 | nid as u64)) {
             continue;
         }
-        if n.as_data.function.needs_features() && (a.attr_of(nid, AttrKind::ATTR_SIMD_IMPL) != null || p.arch == 2 && !cf::contains(
-            p.features,
-            p.fn_features(m as ModuleId, nid),
-        )) {
-            // On wasm32 no call can reach it in this build, and its body may name what the build
-            // lacks; an entry's definition is its definition header (`cemit_simd_entries`).
-            continue;
-        }
-        if !testing && is_test_item(a, nid) {
-            // Test-family items exist only under --test.
-            continue;
-        }
-        if cem.mg.in_generic_extend(m as ModuleId, nid) {
-            // Its instances are demand-emitted; leave the cached body for them.
-            continue;
-        }
-        let mut lw = irl::Lowerer::new(p, m as ModuleId, nid);
-        if !cemit_seed_take(g, p, m as ModuleId, nid, &mut lw, kl, false, &mut dow.pr) {
-            continue;
-        }
-        if lw.body.is_generic {
-            continue;
-        }
-        dow.apply_drops(&mut lw);
-        if !dow.inl.off && inl::holds_vector(&lw.body, p) {
-            // A call a splice brought through an interface binds and inlines too.
-            let mut sites = Vector::<BoundSite>::new();
-            bind_calls(cem, dow, &mut lw, &mut sites);
-        }
-        let mut sym = String::new();
-        let sm9 = cem.pr.start();
-        let tgt = cem.mg.method_target(m as ModuleId, nid);
-        let sym_ok9 = cem.mg.fn_sym(m as ModuleId, nid, tgt, &mut sym);
-        cem.pr.stop(prb::P_SYM, sm9);
-        if !sym_ok9 {
-            continue;
-        }
-        if sym.as_str() == "assert" || sym.as_str() == "assert_eq" || sym.as_str() == "assert_ne" {
-            // Desugared builtins; the C names collide with <assert.h>'s macro.
-            continue;
-        }
-        cem.out.clear();
-        let is_main = sym.as_str() == "main";
+        cemit_seed_fn(p, cem, g, dow, cl_cache, clws, m, nid, testing, verbose, kl, acc);
+    }
+}
+
+// Whether `cemit_seed_fn` lowers function `nid` of module `m` (and emits it unless the body is
+// generic). Not an extern or bodyless function; not a vector-backend entry (its definition is its definition header,
+// `cemit_simd_entries`) nor, on wasm32, a function needing features the build lacks (no call reaches
+// it, and its body may name them); not a test item outside --test; not a generic extend's member
+// (its instances are demand-emitted).
+fn seed_emits(p: &loader::Package, cem: &mut cbe::CEmit, m: ModuleId, nid: NodeId, testing: bool) bool {
+    let a = unsafe &*p.module_ast_const(m);
+    let n = a.at_const(nid);
+    if n.kind != NodeKind::NODE_FUNCTION || n.as_data.function.is_extern() || n.as_data.function.body == NODE_NONE {
+        return false;
+    }
+    if n.as_data.function.needs_features() && (a.attr_of(nid, AttrKind::ATTR_SIMD_IMPL) != null || p.arch == 2 && !cf::contains(
+        p.features,
+        p.fn_features(m, nid),
+    )) {
+        return false;
+    }
+    return (testing || !is_test_item(a, nid)) && !cem.mg.in_generic_extend(m, nid);
+}
+
+// Emit concrete function `nid` of module `m` (a top-level function or a method of a non-generic
+// extend) as chunks of `m`'s TU, with its closures; a function the build does not emit (extern,
+// bodyless, a vector-backend entry, a test item outside --test, a generic extend's member) adds nothing.
+fn cemit_seed_fn(
+    p: &mut loader::Package,
+    cem: &mut cbe::CEmit,
+    g: &mut ig::InstGraph,
+    dow: &mut DropCtx,
+    cl_cache: &mut Map<u64, u64>,
+    clws: &mut Vector<irl::Lowerer>,
+    m: usize,
+    nid: NodeId,
+    testing: bool,
+    verbose: bool,
+    kl: *const psync::Semaphore,
+    acc: &mut SeedAcc,
+) {
+    let a = unsafe &*p.module_ast_const(m as ModuleId);
+    let n = a.at_const(nid);
+    if !seed_emits(p, cem, m as ModuleId, nid, testing) {
+        return;
+    }
+    let mut lw = irl::Lowerer::new(p, m as ModuleId, nid);
+    if !cemit_seed_take(g, p, m as ModuleId, nid, &mut lw, kl, false, &mut dow.pr) {
+        return;
+    }
+    if lw.body.is_generic {
+        return;
+    }
+    dow.apply_drops(&mut lw);
+    if !dow.inl.off && inl::holds_vector(&lw.body, p) {
+        // A call a splice brought through an interface binds and inlines too.
+        let mut sites = Vector::<BoundSite>::new();
+        bind_calls(cem, dow, &mut lw, &mut sites);
+    }
+    let mut sym = String::new();
+    let sm9 = cem.pr.start();
+    let tgt = cem.mg.method_target(m as ModuleId, nid);
+    let sym_ok9 = cem.mg.fn_sym(m as ModuleId, nid, tgt, &mut sym);
+    cem.pr.stop(prb::P_SYM, sm9);
+    if !sym_ok9 {
+        return;
+    }
+    if sym.as_str() == "assert" || sym.as_str() == "assert_eq" || sym.as_str() == "assert_ne" {
+        // Desugared builtins; the C names collide with <assert.h>'s macro.
+        return;
+    }
+    cem.out.clear();
+    let is_main = sym.as_str() == "main";
+    if is_main {
+        sym.truncate(0);
+        // The argv wrapper below owns the C `main`.
+        sym.push_str("__sc_user_main");
+    }
+    let mut gfs = Vector::<String>::new();
+    let mut gts = Vector::<TypeId>::new();
+    let is_glue = cemit_free_glue_fields(p, cem, m as ModuleId, nid, &mut gfs, &mut gts);
+    if is_glue {
+        sym.push_str("__fb");
+    }
+    cem.noret = a.attr_of(nid, AttrKind::ATTR_NORETURN) != null;
+    cem.fn_attrs.truncate(0);
+    cem.fs = p.fn_set(m as ModuleId, nid);
+    cemit_fn_attrs(p, m as ModuleId, nid, cem.fs, &mut cem.fn_attrs);
+    if cem.emit_fn(&lw.body, sym.as_str()) {
+        acc.seeds += 1;
         if is_main {
-            sym.truncate(0);
-            // The argv wrapper below owns the C `main`.
-            sym.push_str("__sc_user_main");
+            acc.have_main = true;
+            acc.main_mod = m as u64;
+            acc.main_argv = n.as_data.function.params.len != 0;
+            if cem.mg.rec_on {
+                let mut ev9 = mbe::RecEv::blank(mbe::RK_MAIN);
+                ev9.a = acc.main_argv as u32;
+                cem.mg.rec.push(ev9);
+            }
         }
-        let mut gfs = Vector::<String>::new();
-        let mut gts = Vector::<TypeId>::new();
-        let is_glue = cemit_free_glue_fields(p, cem, m as ModuleId, nid, &mut gfs, &mut gts);
+        acc.chunk(m as u64, m as ModuleId, &cem.out, cem.mg.rec_on, &mut cem.mg.rec);
         if is_glue {
-            sym.push_str("__fb");
-        }
-        cem.noret = a.attr_of(nid, AttrKind::ATTR_NORETURN) != null;
-        cem.fn_attrs.truncate(0);
-        cem.fs = p.fn_set(m as ModuleId, nid);
-        cemit_fn_attrs(p, m as ModuleId, nid, cem.fs, &mut cem.fn_attrs);
-        if cem.emit_fn(&lw.body, sym.as_str()) {
-            acc.seeds += 1;
-            if is_main {
-                acc.have_main = true;
-                acc.main_mod = m as u64;
-                acc.main_argv = n.as_data.function.params.len != 0;
-                if cem.mg.rec_on {
-                    let mut ev9 = mbe::RecEv::blank(mbe::RK_MAIN);
-                    ev9.a = acc.main_argv as u32;
-                    cem.mg.rec.push(ev9);
-                }
+            // The public wrapper: the sig is the __fb sig without the suffix.
+            let mut wr = String::new();
+            let bs9 = cem.out.as_str();
+            let mut le = 0 as usize;
+            while le < bs9.len() && bs9.byte_at(le) != 10 {
+                le += 1;
             }
-            {
-                acc.chunk(m as u64, m as ModuleId, &cem.out, cem.mg.rec_on, &mut cem.mg.rec);
+            let sig = bs9.slice(0, le);
+            let mut cut = 0 as usize;
+            while cut + 4 < sig.len() && sig.slice(cut, cut + 5) != "__fb(" {
+                cut += 1;
             }
-            if is_glue {
-                // The public wrapper: the sig is the __fb sig without the suffix.
-                let mut wr = String::new();
-                let bs9 = cem.out.as_str();
-                let mut le = 0 as usize;
-                while le < bs9.len() && bs9.byte_at(le) != 10 {
-                    le += 1;
+            wr.push_str(sig.slice(0, cut));
+            wr.push_str(sig.slice(cut + 4, sig.len()));
+            // The receiver is the first argument (locals are return-slots then args): ask the
+            // emitter for its C spelling; it may preserve the source name (`self`) over `_N`.
+            let mut selfp = String::new();
+            cem.lspell(lw.body.returns, &mut selfp);
+            wr.push_str("\n  ");
+            wr.push_str(sym.as_str());
+            wr.push_str("(");
+            wr.push_string(&selfp);
+            wr.push_str(");\n");
+            let mut wok = true;
+            for gi in 0..gfs.len() {
+                if !wok {
+                    break;
                 }
-                let sig = bs9.slice(0, le);
-                let mut cut = 0 as usize;
-                while cut + 4 < sig.len() && sig.slice(cut, cut + 5) != "__fb(" {
-                    cut += 1;
-                }
-                wr.push_str(sig.slice(0, cut));
-                wr.push_str(sig.slice(cut + 4, sig.len()));
-                // The receiver is the first argument (locals are return-slots then args): ask the
-                // emitter for its C spelling; it may preserve the source name (`self`) over `_N`.
-                let mut selfp = String::new();
-                cem.lspell(lw.body.returns, &mut selfp);
-                wr.push_str("\n  ");
-                wr.push_str(sym.as_str());
-                wr.push_str("(");
-                wr.push_string(&selfp);
-                wr.push_str(");\n");
-                let mut wok = true;
-                for gi in 0..gfs.len() {
-                    if !wok {
-                        break;
-                    }
-                    let mut fe9 = String::new();
-                    let mut frm9 = m as ModuleId;
-                    let mut frt9 = gts[gi];
-                    let _ = cem.mg.resolve(m as ModuleId, gts[gi], &mut frm9, &mut frt9);
-                    wok = cem.free_expr(frm9, frt9, &mut fe9);
-                    if wok {
-                        wr.push_str("  ");
-                        wr.push_string(&fe9);
-                        if cem.mg.is_zst(frm9, frt9) {
-                            // The field has no C member: its destructor runs on the sentinel.
-                            wr.push_str("(");
-                            let mut zr9 = String::new();
-                            let _ = cem.zst_sentinel_ref(frm9, frt9, &mut zr9);
-                            wr.push_string(&zr9);
-                            wr.push_str(");\n");
-                        } else {
-                            wr.push_str("(&");
-                            wr.push_string(&selfp);
-                            wr.push_str("->");
-                            wr.push_string(&gfs[gi]);
-                            wr.push_str(");\n");
-                        }
-                    }
-                }
-                wr.push_str("}\n");
+                let mut fe9 = String::new();
+                let mut frm9 = m as ModuleId;
+                let mut frt9 = gts[gi];
+                let _ = cem.mg.resolve(m as ModuleId, gts[gi], &mut frm9, &mut frt9);
+                wok = cem.free_expr(frm9, frt9, &mut fe9);
                 if wok {
-                    acc.chunk(m as u64, m as ModuleId, &wr, cem.mg.rec_on, &mut cem.mg.rec);
+                    wr.push_str("  ");
+                    wr.push_string(&fe9);
+                    if cem.mg.is_zst(frm9, frt9) {
+                        // The field has no C member: its destructor runs on the sentinel.
+                        wr.push_str("(");
+                        let mut zr9 = String::new();
+                        let _ = cem.zst_sentinel_ref(frm9, frt9, &mut zr9);
+                        wr.push_string(&zr9);
+                        wr.push_str(");\n");
+                    } else {
+                        wr.push_str("(&");
+                        wr.push_string(&selfp);
+                        wr.push_str("->");
+                        wr.push_string(&gfs[gi]);
+                        wr.push_str(");\n");
+                    }
                 }
             }
-            cemit_closure_queue(
-                p,
-                cem,
-                g,
-                dow,
-                cl_cache,
-                clws,
-                kl,
-                m as ModuleId,
-                m as u64,
-                &lw.closures,
-                cem.mg.rec_on,
-                acc,
-            );
-        } else {
-            acc.seed_skip += 1;
-            if verbose {
-                eprint("seed-emit-fail: `{}` {}\n", sym.as_str(), cem.err);
+            wr.push_str("}\n");
+            if wok {
+                acc.chunk(m as u64, m as ModuleId, &wr, cem.mg.rec_on, &mut cem.mg.rec);
             }
+        }
+        cemit_closure_queue(
+            p,
+            cem,
+            g,
+            dow,
+            cl_cache,
+            clws,
+            kl,
+            m as ModuleId,
+            m as u64,
+            &lw.closures,
+            cem.mg.rec_on,
+            acc,
+        );
+    } else {
+        acc.seed_skip += 1;
+        if verbose {
+            eprint("seed-emit-fail: `{}` {}\n", sym.as_str(), cem.err);
         }
     }
 }
@@ -3097,6 +3214,7 @@ struct CapMark {
     pub envn: u32,
     pub dclo: u32,
     pub hedge: u32,
+    pub fndem: u32,
 }
 
 const fn cap_zero() CapMark {
@@ -3122,6 +3240,7 @@ const fn cap_zero() CapMark {
         envn: 0,
         dclo: 0,
         hedge: 0,
+        fndem: 0,
     };
 }
 
@@ -3135,6 +3254,7 @@ extend SeedShard {
         env_defined: &Vector<u64>,
         ext_keys: &Vector<u64>,
         ctx: i64,
+        pred: *const Set<u64>,
     ) SeedShard {
         let mut sh = SeedShard {
             cem: cbe::CEmit::new(p),
@@ -3149,6 +3269,7 @@ extend SeedShard {
             dclo_keys: Vector::<u64>::new(),
             dclo: Vector::<irl::Lowerer>::new(),
         };
+        sh.cem.mg.fn_pred = pred;
         if used {
             sh.cem.collect_demand = true;
             sh.cem.mg.agg_on = true;
@@ -3189,6 +3310,7 @@ extend SeedShard {
             envn: self.acc.env_names.len() as u32,
             dclo: self.dclo_keys.len() as u32,
             hedge: sc.hdr_k.len() as u32,
+            fndem: sc.mg.fn_dem.len() as u32,
         };
     }
 }
@@ -4238,6 +4360,11 @@ const fn cap_pe(rows: &Vector<u32>, a: u32) u32 {
 
 fn cemit_seed_merge_range(cem: &mut cbe::CEmit, o: &mut SeedShard, a: &CapMark, b: &CapMark) {
     let sc = &mut o.cem;
+    // The functions the range's text named outside the seed set, at the master's slot: the late
+    // queue's order is the serial loop's.
+    for i in a.fndem as usize..b.fndem as usize {
+        cem.mg.fn_take(*sc.mg.fn_dem.at(i));
+    }
     let mut pe = cap_pe(&sc.sh_env_e, a.env);
     for i in a.env as usize..b.env as usize {
         let k = sc.sh_env_k[i];
@@ -4531,12 +4658,30 @@ pub fn cemit_package(
         eprint("cemit-stage inst-asserts: {} ms, {} instances\n", t9 - tt0, ian);
         tt0 = t9;
     }
+    // The concrete functions the seed pass emits: what the walks reach from the roots. A function only
+    // the emitted text names is emitted late, so the set predicts the seeds and never decides output.
+    let mut pred = Set::<u64>::new();
+    {
+        let mut rf = Vector::<DefId>::new();
+        reach_roots(p, &g, live, testing, &mut rf);
+        // A call of an inline candidate splices its body: with the inliner on, the call alone does
+        // not make the callee emitted (`InstGraph::reach`).
+        let st = if stdlib::env_is("SC_INLINE", "0") {
+            null;
+        } else {
+            (&inls) as *const inl::InlineStore;
+        };
+        g.reach(&rf, st);
+        pred = replace(&mut g.reached, Set::<u64>::new());
+    }
+    let predp = (&pred) as *const Set<u64>;
     // Every body is lowered and kept, every constant and static_assert is evaluated, and the live
     // set and the emit order have read their last reference: the body syntax has no reader left.
     p.release_bodies();
     syntax_stats_report(p, "release");
     let mut em = tbe::TuEmit::new(p);
     em.mg.agg_on = true;
+    em.mg.fn_pred = predp;
     let mut items = Vector::<tbe::AggItem>::new();
     for m in 0..p.modules.len() {
         if !module_emits(p, live, m) {
@@ -4573,6 +4718,7 @@ pub fn cemit_package(
     // recorded substitution chain. The drained symbol set is the closed instance set the old
     // propagation computed, derived from Core IR alone.
     let mut cem = cbe::CEmit::new(p);
+    cem.mg.fn_pred = predp;
     cem.collect_demand = true;
     cem.mg.agg_on = true;
     cem.mg.share_short(&mut em.mg);
@@ -4624,9 +4770,19 @@ pub fn cemit_package(
     // Per-TU cache: fingerprint every module up front; a hit replays the module's journaled side
     // effects instead of lowering it, a miss emits live under journaling. Test builds opt out (the
     // wrapper set would join the fingerprint for little gain).
+    // A cached section replays the seeds of the prediction it recorded: each module's prediction keys it.
+    let mut salt = Vector::<u64>::new();
+    salt.resize_default(p.modules.len());
+    for k in pred.iter() {
+        let m = (*k >> 32) as usize;
+        if m < salt.len() {
+            salt.set(m, salt[m].wrapping_add(skey_mix(0x9E3779B97F4A7C15u64, *k)));
+        }
+    }
     let mut tuc = tuc::tuc_setup(
         p,
         live,
+        &salt,
         target,
         if testing {
             // The wrapper set would join the fingerprint for little gain.
@@ -4656,7 +4812,7 @@ pub fn cemit_package(
             } else {
                 String::new();
             };
-            let mut sh = SeedShard::new(p, TuBufs::one(m, buf), used, &em.env_defined, &ext_keys, m as i64);
+            let mut sh = SeedShard::new(p, TuBufs::one(m, buf), used, &em.env_defined, &ext_keys, m as i64, predp);
             sh.cem.mg.share_short(&mut em.mg);
             sh.cem.mg.rec_on = used && tuc.on;
             shards.push(sh);
@@ -4776,6 +4932,11 @@ pub fn cemit_package(
     // the emission grows the heap.
     tuc.raw = String::new();
     stage_ms(verbose, &mut tt0, "cemit-stage seed");
+    // The aggregate pass's own spellings join the late queue.
+    for i in 0..em.mg.fn_dem.len() {
+        cem.mg.fn_take(*em.mg.fn_dem.at(i));
+    }
+    em.mg.fn_dem.truncate(0);
     // @test wrappers: per-case runner entry points + the global-env hooks, emitted as ordinary
     // chunks of their owning module's TU (their fixture frees join the glue/demand worklists).
     let mut tw_ok: u64 = 0;
@@ -4839,189 +5000,19 @@ pub fn cemit_package(
     let mut dwaves: u64 = 0;
     let mut dtasks: u64 = 0;
     let mut dslices: u64 = 0;
-    while (qi < cem.demand.len() || gi9 < cem.glue.len()) && qi < DEMAND_CAP {
-        // Derived destructors drain alongside instances (each may enqueue the other).
-        cemit_drain_glue(&mut cem, &mut gi9, &mut acc, verbose);
-        if qi >= cem.demand.len() {
-            continue;
-        }
-        if !par9 {
-            let di0 = qi;
-            qi += 1;
-            cemit_drain_demand(
-                p,
-                &mut cem,
-                &mut g,
-                &mut dow,
-                &mut lw_cache,
-                &mut lws,
-                &mut cl_cache,
-                &mut clws,
-                &mut cfs,
-                &mut cf_ok,
-                &mut done,
-                &mut sa_seen,
-                &mut ia_idx,
-                &mut ia_built,
-                di0,
-                verbose,
-                &mut acc,
-                &mut reasons,
-                &mut rcounts,
-            );
-            continue;
-        }
-        dwaves += 1;
-        let len0 = cem.demand.len();
-        let mut widx = Vector::<u64>::new(); // tasked demand indices, ascending
-        let mut wli = Vector::<u64>::new(); // their base lowering slots (0xFF.. = pending phase L)
-        let mut wdef = Vector::<u64>::new(); // their packed defs
-        let mut wkey = Vector::<u64>::new(); // their symbol hashes
-        let mut wave_seen = Map::<u64, u64>::new();
-        let mut newdefs = Vector::<u64>::new();
-        let mut newsyms = Vector::<String>::new(); // first demanding symbol, for the failure print
-        let mut newdef_seen = Map::<u64, u64>::new();
-        for j in qi..len0 {
-            let dkj = fnv(cem.demand.at(j).sym.as_str());
-            let seenj = done.contains_key(&dkj);
-            if seenj {
-                continue;
-            }
-            let wavedup = wave_seen.contains_key(&dkj);
-            if wavedup {
-                // A later chain retries on the master only if the first fails.
-                continue;
-            }
-            wave_seen.insert(dkj, 1);
-            let jd = cem.demand.at(j).def;
-            let jkey = jd.module as u64 << 32 | jd.node as u64;
-            let base = switch lw_cache.get(&skey_mix(0, jkey)) {
-                Some(v) => *v,
-                None => 0xFFFFFFFFFFFFFFFEu64,
-            };
-            if base == 0xFFFFFFFFFFFFFFFFu64 {
-                // Known-unlowerable: the merge fallback counts the skip.
-                continue;
-            }
-            if base == 0xFFFFFFFFFFFFFFFEu64 {
-                let nds = newdef_seen.contains_key(&jkey);
-                if !nds {
-                    newdef_seen.insert(jkey, 1);
-                    newdefs.push(jkey);
-                    newsyms.push(cem.demand.at(j).sym.clone());
-                }
-            }
-            widx.push(j as u64);
-            wli.push(base);
-            wdef.push(jkey);
-            wkey.push(dkj);
-        }
-        // Phase L: lower this wave's missing base definitions in parallel slices.
-        if newdefs.len() != 0 {
-            let nd = newdefs.len();
-            let mut res9 = Vector::<irl::Lowerer>::new();
-            let mut cfr9 = Vector::<cfl::CFlow>::new();
-            let mut oks9 = Vector::<bool>::new();
-            for _i in 0..nd {
-                res9.push(irl::Lowerer::new(p, 0, NODE_NONE));
-                cfr9.push(cfl::CFlow::new_empty());
-                oks9.push(false);
-            }
-            cemit_low_launch(p, &mut g, &mut kl9, &newdefs, &mut res9, &mut cfr9, &mut oks9, p.jobs);
-            for i in 0..nd {
-                let jkey = newdefs[i];
-                if oks9[i] {
-                    while cfs.len() < lws.len() {
-                        cfs.push(cfl::CFlow::new_empty());
-                        cf_ok.push(false);
-                    }
-                    let slot = lws.len() as u64;
-                    count_template(&res9.at(i).body, &mut prd);
-                    lws.push(replace(res9.index_mut(i), irl::Lowerer::new(p, 0, NODE_NONE)));
-                    cfs.push(replace(cfr9.index_mut(i), cfl::CFlow::new_empty()));
-                    cf_ok.push(true);
-                    lw_cache.insert(skey_mix(0, jkey), slot);
-                } else {
-                    eprint("inst-lower-fail: `{}` {}\n", newsyms.at(i).as_str(), "");
-                    lw_cache.insert(skey_mix(0, jkey), 0xFFFFFFFFFFFFFFFFu64);
-                }
-            }
-        }
-        // Resolve pending base slots; drop entries whose base failed (merge fallback counts them).
-        {
-            let mut w2 = Vector::<u64>::new();
-            let mut l2 = Vector::<u64>::new();
-            let mut k2 = Vector::<u64>::new();
-            for i in 0..widx.len() {
-                let mut li9 = wli[i];
-                if li9 == 0xFFFFFFFFFFFFFFFEu64 {
-                    li9 = (switch lw_cache.get(&skey_mix(0, wdef[i])) {
-                        Some(v) => *v,
-                        None => 0xFFFFFFFFFFFFFFFFu64,
-                    });
-                }
-                if li9 == 0xFFFFFFFFFFFFFFFFu64 {
-                    continue;
-                }
-                w2.push(widx[i]);
-                l2.push(li9);
-                k2.push(wkey[i]);
-            }
-            widx = w2;
-            wli = l2;
-            wkey = k2;
-        }
-        // Phase E: contiguous demand slices, each emitting into one private shard.
-        let mut envh9 = Vector::<u64>::new();
-        for ei in 0..cem.env_hashes.len() {
-            envh9.push(*cem.env_hashes.at(ei));
-        }
-        let mut nsl9: usize = 1;
-        if p.jobs >= 2 && widx.len() > 1 {
-            nsl9 = 2 * p.jobs as usize;
-            if nsl9 > widx.len() {
-                nsl9 = widx.len();
-            }
-        }
-        let mut sbounds = Vector::<u64>::new();
-        for i in 0..nsl9 {
-            sbounds.push((widx.len() * (i + 1) / nsl9) as u64);
-        }
-        let mut dsh = Vector::<SeedShard>::new();
-        for _i in 0..nsl9 {
-            let mut sh = SeedShard::new(p, TuBufs::new(0), true, &em.env_defined, &ext_keys, -1);
-            sh.cem.mg.share_short(&mut em.mg);
-            for ei in 0..envh9.len() {
-                sh.cem.env_skip.insert(envh9[ei], 1);
-            }
-            dsh.push(sh);
-        }
-        dtasks += widx.len() as u64;
-        dslices += nsl9 as u64;
-        cemit_drain_launch(
-            p,
-            &mut g,
-            &mut kl9,
-            &mut cem,
-            &lws,
-            &cfs,
-            &lw_cache,
-            &cl_cache,
-            &clws,
-            &mut dsh,
-            &sbounds,
-            &widx,
-            &wli,
-            verbose,
-        );
-        // Merge in exact queue order, glue interleaved exactly as the serial loop drains it.
-        let mut wcur: usize = 0;
-        let mut scur: usize = 0;
-        let mut slo: usize = 0;
-        for j in qi..len0 {
+    // The functions only the emitted text names (`fn_ref`) render between full drains, so the serial
+    // loop and the waves queue them alike; each may demand instances, glue and more such functions.
+    let mut fi: usize = 0;
+    loop {
+        while (qi < cem.demand.len() || gi9 < cem.glue.len()) && qi < DEMAND_CAP {
+            // Derived destructors drain alongside instances (each may enqueue the other).
             cemit_drain_glue(&mut cem, &mut gi9, &mut acc, verbose);
-            let tasked = wcur < widx.len() && widx[wcur] == j as u64;
-            if !tasked {
+            if qi >= cem.demand.len() {
+                continue;
+            }
+            if !par9 {
+                let di0 = qi;
+                qi += 1;
                 cemit_drain_demand(
                     p,
                     &mut cem,
@@ -5037,7 +5028,7 @@ pub fn cemit_package(
                     &mut sa_seen,
                     &mut ia_idx,
                     &mut ia_built,
-                    j,
+                    di0,
                     verbose,
                     &mut acc,
                     &mut reasons,
@@ -5045,117 +5036,318 @@ pub fn cemit_package(
                 );
                 continue;
             }
-            let d_ord = wcur - slo;
-            let dkj = wkey[wcur];
-            wcur += 1;
-            {
+            dwaves += 1;
+            let len0 = cem.demand.len();
+            let mut widx = Vector::<u64>::new(); // tasked demand indices, ascending
+            let mut wli = Vector::<u64>::new(); // their base lowering slots (0xFF.. = pending phase L)
+            let mut wdef = Vector::<u64>::new(); // their packed defs
+            let mut wkey = Vector::<u64>::new(); // their symbol hashes
+            let mut wave_seen = Map::<u64, u64>::new();
+            let mut newdefs = Vector::<u64>::new();
+            let mut newsyms = Vector::<String>::new(); // first demanding symbol, for the failure print
+            let mut newdef_seen = Map::<u64, u64>::new();
+            for j in qi..len0 {
+                let dkj = fnv(cem.demand.at(j).sym.as_str());
+                let seenj = done.contains_key(&dkj);
+                if seenj {
+                    continue;
+                }
+                let wavedup = wave_seen.contains_key(&dkj);
+                if wavedup {
+                    // A later chain retries on the master only if the first fails.
+                    continue;
+                }
+                wave_seen.insert(dkj, 1);
                 let jd = cem.demand.at(j).def;
-                let jsubs = mbe::subs_copy(&cem.demand.at(j).subs);
-                cemit_inst_asserts(p, &mut cem.mg, jd, &jsubs, dkj, &mut sa_seen, &mut ia_idx, &mut ia_built);
-            }
-            {
-                let o = dsh.index_mut(scur);
-                let ma = if d_ord == 0 {
-                    cap_zero();
-                } else {
-                    *o.dmarks.at(d_ord - 1);
+                let jkey = jd.module as u64 << 32 | jd.node as u64;
+                let base = switch lw_cache.get(&skey_mix(0, jkey)) {
+                    Some(v) => *v,
+                    None => 0xFFFFFFFFFFFFFFFEu64,
                 };
-                let mb = *o.dmarks.at(d_ord);
-                let out9 = o.douts[d_ord];
-                if out9 == 3 {
-                    // Emitted, with the program error its re-lowering found: reported here, in demand
-                    // order. A bare lowering finds the node again (no drops, no probe counts).
-                    let mut lw9 = irl::Lowerer::new(p, cem.demand.at(j).def.module, cem.demand.at(j).def.node);
-                    let js9 = mbe::subs_copy(&cem.demand.at(j).subs);
-                    for k9 in 0..js9.len() {
-                        let sb9 = *js9.at(k9);
-                        lw9.env.push(irl::LSub { pm: sb9.pm, pnode: sb9.pnode, am: sb9.am, at: sb9.at });
-                    }
-                    let _ = lw9.lower_fn(cem.demand.at(j).def.node);
-                    cemit_inst_error(p, cem.demand.at(j).def, &js9, &lw9);
+                if base == 0xFFFFFFFFFFFFFFFFu64 {
+                    // Known-unlowerable: the merge fallback counts the skip.
+                    continue;
                 }
-                if out9 == 0 || out9 == 3 {
-                    done.insert(dkj, 1);
-                    acc.inst_ok += 1;
-                    let vix = o.dvix[d_ord];
-                    if vix != 0xFFFFFFFFFFFFFFFFu64 && o.dvkeys[vix as usize] != 0 {
-                        let zk = o.dvkeys[vix as usize];
-                        let zseen = lw_cache.contains_key(&zk);
-                        if !zseen && o.dvars.at(vix as usize).body.blocks.len() != 0 {
-                            while cfs.len() < lws.len() {
-                                cfs.push(cfl::CFlow::new_empty());
-                                cf_ok.push(false);
-                            }
-                            let slot = lws.len() as u64;
-                            let mv9 = replace(o.dvars.index_mut(vix as usize), irl::Lowerer::new(p, 0, NODE_NONE));
-                            let mut cf9 = cfl::CFlow::new_empty();
-                            cf9.build_into(&mv9.body);
-                            lws.push(mv9);
-                            cfs.push(cf9);
-                            cf_ok.push(true);
-                            lw_cache.insert(zk, slot);
+                if base == 0xFFFFFFFFFFFFFFFEu64 {
+                    let nds = newdef_seen.contains_key(&jkey);
+                    if !nds {
+                        newdef_seen.insert(jkey, 1);
+                        newdefs.push(jkey);
+                        newsyms.push(cem.demand.at(j).sym.clone());
+                    }
+                }
+                widx.push(j as u64);
+                wli.push(base);
+                wdef.push(jkey);
+                wkey.push(dkj);
+            }
+            // Phase L: lower this wave's missing base definitions in parallel slices.
+            if newdefs.len() != 0 {
+                let nd = newdefs.len();
+                let mut res9 = Vector::<irl::Lowerer>::new();
+                let mut cfr9 = Vector::<cfl::CFlow>::new();
+                let mut oks9 = Vector::<bool>::new();
+                for _i in 0..nd {
+                    res9.push(irl::Lowerer::new(p, 0, NODE_NONE));
+                    cfr9.push(cfl::CFlow::new_empty());
+                    oks9.push(false);
+                }
+                cemit_low_launch(p, &mut g, &mut kl9, &newdefs, &mut res9, &mut cfr9, &mut oks9, p.jobs);
+                for i in 0..nd {
+                    let jkey = newdefs[i];
+                    if oks9[i] {
+                        while cfs.len() < lws.len() {
+                            cfs.push(cfl::CFlow::new_empty());
+                            cf_ok.push(false);
                         }
+                        let slot = lws.len() as u64;
+                        count_template(&res9.at(i).body, &mut prd);
+                        lws.push(replace(res9.index_mut(i), irl::Lowerer::new(p, 0, NODE_NONE)));
+                        cfs.push(replace(cfr9.index_mut(i), cfl::CFlow::new_empty()));
+                        cf_ok.push(true);
+                        lw_cache.insert(skey_mix(0, jkey), slot);
+                    } else {
+                        eprint("inst-lower-fail: `{}` {}\n", newsyms.at(i).as_str(), "");
+                        lw_cache.insert(skey_mix(0, jkey), 0xFFFFFFFFFFFFFFFFu64);
                     }
-                    for k2 in ma.dclo as usize..mb.dclo as usize {
-                        let ckey = o.dclo_keys[k2];
-                        let cseen = cl_cache.contains_key(&ckey);
-                        if !cseen {
-                            let lw9 = replace(o.dclo.index_mut(k2), irl::Lowerer::new(p, 0, NODE_NONE));
-                            if lw9.body.blocks.len() != 0 {
-                                let slot = clws.len() as u64;
-                                clws.push(lw9);
-                                cl_cache.insert(ckey, slot);
-                            } else {
-                                cl_cache.insert(ckey, 0xFFFFFFFFFFFFFFFFu64);
-                            }
-                        }
+                }
+            }
+            // Resolve pending base slots; drop entries whose base failed (merge fallback counts them).
+            {
+                let mut w2 = Vector::<u64>::new();
+                let mut l2 = Vector::<u64>::new();
+                let mut k2 = Vector::<u64>::new();
+                for i in 0..widx.len() {
+                    let mut li9 = wli[i];
+                    if li9 == 0xFFFFFFFFFFFFFFFEu64 {
+                        li9 = (switch lw_cache.get(&skey_mix(0, wdef[i])) {
+                            Some(v) => *v,
+                            None => 0xFFFFFFFFFFFFFFFFu64,
+                        });
                     }
-                    let oc = &o.acc.ch;
-                    let base9 = acc.ch.bufs.at(acc.ch.n).len() as u64;
-                    for k2 in ma.chunks as usize..mb.chunks as usize {
-                        acc.ch.chunk_mod.push(oc.chunk_mod[k2]);
-                        acc.ch.chunk_own.push(oc.chunk_own[k2]);
-                        acc.ch.chunk_off.push(oc.chunk_off[k2] - ma.bodies + base9);
-                        acc.ch.chunk_end.push(oc.chunk_end[k2] - ma.bodies + base9);
+                    if li9 == 0xFFFFFFFFFFFFFFFFu64 {
+                        continue;
                     }
-                    acc.ch.bufs.index_mut(acc.ch.n).push_str(
-                        oc.bufs.at(0).as_str().slice(ma.bodies as usize, mb.bodies as usize),
+                    w2.push(widx[i]);
+                    l2.push(li9);
+                    k2.push(wkey[i]);
+                }
+                widx = w2;
+                wli = l2;
+                wkey = k2;
+            }
+            // Phase E: contiguous demand slices, each emitting into one private shard.
+            let mut envh9 = Vector::<u64>::new();
+            for ei in 0..cem.env_hashes.len() {
+                envh9.push(*cem.env_hashes.at(ei));
+            }
+            let mut nsl9: usize = 1;
+            if p.jobs >= 2 && widx.len() > 1 {
+                nsl9 = 2 * p.jobs as usize;
+                if nsl9 > widx.len() {
+                    nsl9 = widx.len();
+                }
+            }
+            let mut sbounds = Vector::<u64>::new();
+            for i in 0..nsl9 {
+                sbounds.push((widx.len() * (i + 1) / nsl9) as u64);
+            }
+            let mut dsh = Vector::<SeedShard>::new();
+            for _i in 0..nsl9 {
+                let mut sh = SeedShard::new(p, TuBufs::new(0), true, &em.env_defined, &ext_keys, -1, predp);
+                sh.cem.mg.share_short(&mut em.mg);
+                for ei in 0..envh9.len() {
+                    sh.cem.env_skip.insert(envh9[ei], 1);
+                }
+                dsh.push(sh);
+            }
+            dtasks += widx.len() as u64;
+            dslices += nsl9 as u64;
+            cemit_drain_launch(
+                p,
+                &mut g,
+                &mut kl9,
+                &mut cem,
+                &lws,
+                &cfs,
+                &lw_cache,
+                &cl_cache,
+                &clws,
+                &mut dsh,
+                &sbounds,
+                &widx,
+                &wli,
+                verbose,
+            );
+            // Merge in exact queue order, glue interleaved exactly as the serial loop drains it.
+            let mut wcur: usize = 0;
+            let mut scur: usize = 0;
+            let mut slo: usize = 0;
+            for j in qi..len0 {
+                cemit_drain_glue(&mut cem, &mut gi9, &mut acc, verbose);
+                let tasked = wcur < widx.len() && widx[wcur] == j as u64;
+                if !tasked {
+                    cemit_drain_demand(
+                        p,
+                        &mut cem,
+                        &mut g,
+                        &mut dow,
+                        &mut lw_cache,
+                        &mut lws,
+                        &mut cl_cache,
+                        &mut clws,
+                        &mut cfs,
+                        &mut cf_ok,
+                        &mut done,
+                        &mut sa_seen,
+                        &mut ia_idx,
+                        &mut ia_built,
+                        j,
+                        verbose,
+                        &mut acc,
+                        &mut reasons,
+                        &mut rcounts,
                     );
-                    acc.protos.push_str(o.acc.protos.as_str().slice(ma.protos as usize, mb.protos as usize));
-                    acc.take_envs(&mut o.acc, ma.envn as usize, mb.envn as usize);
-                    cemit_seed_merge_range(&mut cem, o, &ma, &mb);
-                } else if out9 == 1 {
-                    acc.inst_skip += 1;
-                } else {
-                    if verbose {
-                        eprint("inst-emit-fail: `{}` {}\n", cem.demand.at(j).sym.as_str(), o.derrs[d_ord]);
+                    continue;
+                }
+                let d_ord = wcur - slo;
+                let dkj = wkey[wcur];
+                wcur += 1;
+                {
+                    let jd = cem.demand.at(j).def;
+                    let jsubs = mbe::subs_copy(&cem.demand.at(j).subs);
+                    cemit_inst_asserts(p, &mut cem.mg, jd, &jsubs, dkj, &mut sa_seen, &mut ia_idx, &mut ia_built);
+                }
+                {
+                    let o = dsh.index_mut(scur);
+                    let ma = if d_ord == 0 {
+                        cap_zero();
+                    } else {
+                        *o.dmarks.at(d_ord - 1);
+                    };
+                    let mb = *o.dmarks.at(d_ord);
+                    let out9 = o.douts[d_ord];
+                    if out9 == 3 {
+                        // Emitted, with the program error its re-lowering found: reported here, in demand
+                        // order. A bare lowering finds the node again (no drops, no probe counts).
+                        let mut lw9 = irl::Lowerer::new(p, cem.demand.at(j).def.module, cem.demand.at(j).def.node);
+                        let js9 = mbe::subs_copy(&cem.demand.at(j).subs);
+                        for k9 in 0..js9.len() {
+                            let sb9 = *js9.at(k9);
+                            lw9.env.push(irl::LSub { pm: sb9.pm, pnode: sb9.pnode, am: sb9.am, at: sb9.at });
+                        }
+                        let _ = lw9.lower_fn(cem.demand.at(j).def.node);
+                        cemit_inst_error(p, cem.demand.at(j).def, &js9, &lw9);
                     }
-                    let mut found = false;
-                    for r2 in 0..reasons.len() {
-                        if reasons[r2] == o.derrs[d_ord] {
-                            rcounts.set(r2, rcounts[r2] + 1);
-                            found = true;
-                            break;
+                    if out9 == 0 || out9 == 3 {
+                        done.insert(dkj, 1);
+                        acc.inst_ok += 1;
+                        let vix = o.dvix[d_ord];
+                        if vix != 0xFFFFFFFFFFFFFFFFu64 && o.dvkeys[vix as usize] != 0 {
+                            let zk = o.dvkeys[vix as usize];
+                            let zseen = lw_cache.contains_key(&zk);
+                            if !zseen && o.dvars.at(vix as usize).body.blocks.len() != 0 {
+                                while cfs.len() < lws.len() {
+                                    cfs.push(cfl::CFlow::new_empty());
+                                    cf_ok.push(false);
+                                }
+                                let slot = lws.len() as u64;
+                                let mv9 = replace(o.dvars.index_mut(vix as usize), irl::Lowerer::new(p, 0, NODE_NONE));
+                                let mut cf9 = cfl::CFlow::new_empty();
+                                cf9.build_into(&mv9.body);
+                                lws.push(mv9);
+                                cfs.push(cf9);
+                                cf_ok.push(true);
+                                lw_cache.insert(zk, slot);
+                            }
+                        }
+                        for k2 in ma.dclo as usize..mb.dclo as usize {
+                            let ckey = o.dclo_keys[k2];
+                            let cseen = cl_cache.contains_key(&ckey);
+                            if !cseen {
+                                let lw9 = replace(o.dclo.index_mut(k2), irl::Lowerer::new(p, 0, NODE_NONE));
+                                if lw9.body.blocks.len() != 0 {
+                                    let slot = clws.len() as u64;
+                                    clws.push(lw9);
+                                    cl_cache.insert(ckey, slot);
+                                } else {
+                                    cl_cache.insert(ckey, 0xFFFFFFFFFFFFFFFFu64);
+                                }
+                            }
+                        }
+                        let oc = &o.acc.ch;
+                        let base9 = acc.ch.bufs.at(acc.ch.n).len() as u64;
+                        for k2 in ma.chunks as usize..mb.chunks as usize {
+                            acc.ch.chunk_mod.push(oc.chunk_mod[k2]);
+                            acc.ch.chunk_own.push(oc.chunk_own[k2]);
+                            acc.ch.chunk_off.push(oc.chunk_off[k2] - ma.bodies + base9);
+                            acc.ch.chunk_end.push(oc.chunk_end[k2] - ma.bodies + base9);
+                        }
+                        acc.ch.bufs.index_mut(acc.ch.n).push_str(
+                            oc.bufs.at(0).as_str().slice(ma.bodies as usize, mb.bodies as usize),
+                        );
+                        acc.protos.push_str(o.acc.protos.as_str().slice(ma.protos as usize, mb.protos as usize));
+                        acc.take_envs(&mut o.acc, ma.envn as usize, mb.envn as usize);
+                        cemit_seed_merge_range(&mut cem, o, &ma, &mb);
+                    } else if out9 == 1 {
+                        acc.inst_skip += 1;
+                    } else {
+                        if verbose {
+                            eprint("inst-emit-fail: `{}` {}\n", cem.demand.at(j).sym.as_str(), o.derrs[d_ord]);
+                        }
+                        let mut found = false;
+                        for r2 in 0..reasons.len() {
+                            if reasons[r2] == o.derrs[d_ord] {
+                                rcounts.set(r2, rcounts[r2] + 1);
+                                found = true;
+                                break;
+                            }
+                        }
+                        if !found {
+                            reasons.push(o.derrs[d_ord]);
+                            rcounts.push(1);
                         }
                     }
-                    if !found {
-                        reasons.push(o.derrs[d_ord]);
-                        rcounts.push(1);
-                    }
+                }
+                // Slice exhausted: absorb its order-insensitive remainder once.
+                if scur < sbounds.len() && wcur == sbounds[scur] as usize {
+                    let o = dsh.index_mut(scur);
+                    acc.clos_ok += o.acc.clos_ok;
+                    acc.clos_skip += o.acc.clos_skip;
+                    cem.pr.merge(&o.cem.pr);
+                    cemit_seed_merge_um(&mut cem, o);
+                    slo = wcur;
+                    scur += 1;
                 }
             }
-            // Slice exhausted: absorb its order-insensitive remainder once.
-            if scur < sbounds.len() && wcur == sbounds[scur] as usize {
-                let o = dsh.index_mut(scur);
-                acc.clos_ok += o.acc.clos_ok;
-                acc.clos_skip += o.acc.clos_skip;
-                cem.pr.merge(&o.cem.pr);
-                cemit_seed_merge_um(&mut cem, o);
-                slo = wcur;
-                scur += 1;
-            }
+            qi = len0;
         }
-        qi = len0;
+        if qi >= DEMAND_CAP || fi >= cem.mg.fn_dem.len() {
+            break;
+        }
+        while fi < cem.mg.fn_dem.len() {
+            let d = *cem.mg.fn_dem.at(fi);
+            fi += 1;
+            if !module_emits(p, live, d.module as usize) {
+                continue;
+            }
+            cem.mg.mark_ctx = d.module;
+            cemit_seed_fn(
+                p,
+                &mut cem,
+                &mut g,
+                &mut dow,
+                &mut cl_cache,
+                &mut clws,
+                d.module as usize,
+                d.node,
+                testing,
+                verbose,
+                null,
+                &mut acc,
+            );
+        }
+        cem.mg.mark_ctx = -1;
     }
     if qi < cem.demand.len() || gi9 < cem.glue.len() {
         // The drain stopped at its bound: every demand and destructor left is code not emitted.
@@ -5198,8 +5390,10 @@ pub fn cemit_package(
     }
     if verbose {
         eprint(
-            "cemit-tu-inst: {} seeds ({} skipped), {} instances, {} inst-skipped, {} demanded, {} closures ({} skipped), {} glue ({} skipped)\n",
+            "cemit-tu-inst: {} seeds ({} predicted, {} late, {} skipped), {} instances, {} inst-skipped, {} demanded, {} closures ({} skipped), {} glue ({} skipped)\n",
             acc.seeds,
+            pred.len(),
+            fi,
             acc.seed_skip,
             acc.inst_ok,
             acc.inst_skip,
@@ -5847,6 +6041,22 @@ pub fn cemit_package(
         o.skips += ti_skip;
     }
     stage_ms(verbose, &mut tt0, "cemit-stage statics+ti");
+    // The graph freed its bodies after the drain: a function the text named since is a reference the
+    // reachability walk missed, which no later step can emit.
+    for i in 0..em.mg.fn_dem.len() {
+        cem.mg.fn_take(*em.mg.fn_dem.at(i));
+    }
+    while fi < cem.mg.fn_dem.len() {
+        let d = *cem.mg.fn_dem.at(fi);
+        fi += 1;
+        let dn9 = (unsafe &*p.module_ast_const(d.module)).at_const(d.node);
+        if module_emits(p, live, d.module as usize) && seed_emits(p, &mut cem, d.module, d.node, testing) && dn9.as_data.function.generics.len == 0 {
+            let mut sym9 = String::new();
+            let _ = cem.mg.fn_sym(d.module, d.node, cem.mg.method_target(d.module, d.node), &mut sym9);
+            eprint("error: internal: the emitted C names '{}' after the functions were emitted\n", sym9.as_str());
+            o.skips += 1;
+        }
+    }
     let asm9 = prd.start();
     cemit_assemble(
         p,

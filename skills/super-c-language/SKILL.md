@@ -788,7 +788,7 @@ source text, values, and file:line on failure.
 | `@packed` | Pack a struct or a union, a header type of an `extern "C"` block too (an error on any other item). A reference or autoref to a field whose alignment exceeds 1 is "cannot borrow a field of a '@packed' struct" (copy it into a local first), and such a field cannot need a `free` |
 | `@export("sym")` | Pin exact C symbol; a constant or `static mut` is defined also when no code names it |
 | `@import("sym")` | Import exact C symbol; on an extern type, its C spelling; on a header type's field, its C member |
-| `@used` | Prevent dead-code elimination; a constant or `static mut` is defined also when no code names it, with C `used` |
+| `@used` | Prevent dead-code elimination: the function, constant or `static mut` is emitted also when no code names it, with C `used`. Without it (or `@export`), a function a program with `main` never reaches, or whose every call is inlined, has no C definition |
 | `@unused` | Suppress unused warnings |
 | `@emit_macro` | Export generic as reusable C macro |
 | `@fmt.skip` | Exempt from formatter |

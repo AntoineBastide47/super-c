@@ -276,10 +276,11 @@ fn shard_parts(dir: str) i32 {
 fn shard_counts_follow_emitted_size() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
-    // 1,500 small functions render to several hundred KiB of C: more than one shard.
+    // 1,500 small functions render to several hundred KiB of C: more than one shard. `@used` keeps the
+    // ones `main` does not call.
     let mut src = String::new();
     for i in 0..1500 {
-        src.push_str("fn f");
+        src.push_str("@used\nfn f");
         src.push_u64(i as u64);
         src.push_str("(a: i32) i32 {\n    let mut s = a;\n");
         for k in 0..6 {
