@@ -8,6 +8,13 @@
 // `Hash` through the IEEE-754 TOTAL order (`total_cmp`): -NaN < -inf < .. < -0.0 < +0.0 < .. < +inf < NaN,
 // every value equal to itself (including NaN), so sorting and Map/Set keys work: note `-0.0 != 0.0`
 // under this order, unlike `==`. Complex numbers stay out: they admit no total order.
+//
+// The inherent blocks hold the scalar methods under Rust's names, every one a `const fn`: integer bit
+// counts, rotations, byte order and byte arrays, powers, roots, logarithms, Euclidean division and the
+// wrapping, checked, overflowing and saturating flavors; float encodings, classes, neighbors and the IEEE
+// 754-2019 `maximum` and `minimum`; the bool and the char and u8 ASCII methods. A method that uses a plain
+// operator traps where the operator does (operations.md); the flavored methods never trap on overflow.
+// Each method is O(1), except `pow` (O(log exp) multiplications) and `ilog` (O(log_base self) divisions).
 
 /// Branch hint: this condition is expected to be TRUE. Returns `c` (const-evaluable); the branch that
 /// tests the call tells the C compiler (`__builtin_expect(c, 1)`), which then lays out the expected
@@ -97,10 +104,9 @@ extern "C" {
 
 // Bit counts and wrapping arithmetic over a u64 (primitives of the C backend's runtime): the C compiler's
 // builtins with the zero input defined as 64, and C's unsigned operators, which wrap in every profile.
-// The IR interpreter models these names, so the `trailing_zeros`, `leading_zeros`, `count_ones`,
-// `wrapping_*`, `overflowing_*`, `checked_*` and `saturating_*` methods below evaluate at compile time
-// and a `const fn` may call them. The methods are plain `fn`s: the bootstrap release rejects a `const
-// fn` that calls an extern function it does not model.
+// The IR interpreter models these names, so every integer method below evaluates at compile time. The
+// methods call no other runtime helper (`sc_bitrev64` has no model): a helper the interpreter or the
+// release's runtime header lacks would fail the constant or the bootstrap build.
 extern "C" {
     fn sc_ctz64(x: u64) u32;
     fn sc_clz64(x: u64) u32;
@@ -125,6 +131,48 @@ pub fn panic(msg: str) {
     unsafe __sc_panic_str(msg.ptr(), msg.len());
 }
 
+// Every power of ten a u64 holds, 10^0 to 10^19: the table of `ilog10_u64`.
+const POW10_U64: [u64; 20] = [
+    1,
+    10,
+    100,
+    1000,
+    10000,
+    100000,
+    1000000,
+    10000000,
+    100000000,
+    1000000000,
+    10000000000,
+    100000000000,
+    1000000000000,
+    10000000000000,
+    100000000000000,
+    1000000000000000,
+    10000000000000000,
+    100000000000000000,
+    1000000000000000000,
+    10000000000000000000,
+];
+
+// The floor of log10(x) for x > 0. The bit length times 1233 / 4096 (just below log10(2)) is the result
+// or one above it; one table compare decides. The estimate is at most 19, inside the table.
+const fn ilog10_u64(x: u64) u32 {
+    let t = (64 - x.leading_zeros() as u32) * 1233 >> 12;
+    return t - (x < unsafe POW10_U64[t as usize]) as u32;
+}
+
+// The floor of log_b(x) for x > 0 and b >= 2: at most 63 divisions.
+const fn ilog_u64(x: u64, b: u64) u32 {
+    let mut n: u32 = 0;
+    let mut r = x;
+    while r >= b {
+        r /= b;
+        n += 1;
+    }
+    return n;
+}
+
 extend i8 as Eq {
     pub const fn eq(self: &i8, other: &i8) bool {
         return *self == *other;
@@ -142,8 +190,8 @@ extend i8 as Ord {
     }
 }
 extend i8 as Hash {
-    pub const fn hash(self: &i8) u64 {
-        return (*self) as u64;
+    pub const fn hash_into<H: Hasher>(self: &i8, h: &mut H) {
+        h.write_u64((*self) as u64);
     }
 }
 extend i8 as Clone {
@@ -177,8 +225,8 @@ extend i16 as Ord {
     }
 }
 extend i16 as Hash {
-    pub const fn hash(self: &i16) u64 {
-        return (*self) as u64;
+    pub const fn hash_into<H: Hasher>(self: &i16, h: &mut H) {
+        h.write_u64((*self) as u64);
     }
 }
 extend i16 as Clone {
@@ -212,8 +260,8 @@ extend i32 as Ord {
     }
 }
 extend i32 as Hash {
-    pub const fn hash(self: &i32) u64 {
-        return (*self) as u64;
+    pub const fn hash_into<H: Hasher>(self: &i32, h: &mut H) {
+        h.write_u64((*self) as u64);
     }
 }
 extend i32 as Clone {
@@ -247,8 +295,8 @@ extend i64 as Ord {
     }
 }
 extend i64 as Hash {
-    pub const fn hash(self: &i64) u64 {
-        return (*self) as u64;
+    pub const fn hash_into<H: Hasher>(self: &i64, h: &mut H) {
+        h.write_u64((*self) as u64);
     }
 }
 extend i64 as Clone {
@@ -282,8 +330,8 @@ extend isize as Ord {
     }
 }
 extend isize as Hash {
-    pub const fn hash(self: &isize) u64 {
-        return (*self) as u64;
+    pub const fn hash_into<H: Hasher>(self: &isize, h: &mut H) {
+        h.write_u64((*self) as u64);
     }
 }
 extend isize as Clone {
@@ -317,8 +365,8 @@ extend u8 as Ord {
     }
 }
 extend u8 as Hash {
-    pub const fn hash(self: &u8) u64 {
-        return *self;
+    pub const fn hash_into<H: Hasher>(self: &u8, h: &mut H) {
+        h.write_u64(*self);
     }
 }
 extend u8 as Clone {
@@ -352,8 +400,8 @@ extend u16 as Ord {
     }
 }
 extend u16 as Hash {
-    pub const fn hash(self: &u16) u64 {
-        return *self;
+    pub const fn hash_into<H: Hasher>(self: &u16, h: &mut H) {
+        h.write_u64(*self);
     }
 }
 extend u16 as Clone {
@@ -387,8 +435,8 @@ extend u32 as Ord {
     }
 }
 extend u32 as Hash {
-    pub const fn hash(self: &u32) u64 {
-        return *self;
+    pub const fn hash_into<H: Hasher>(self: &u32, h: &mut H) {
+        h.write_u64(*self);
     }
 }
 extend u32 as Clone {
@@ -425,8 +473,8 @@ extend u64 as Ord {
     }
 }
 extend u64 as Hash {
-    pub const fn hash(self: &u64) u64 {
-        return *self;
+    pub const fn hash_into<H: Hasher>(self: &u64, h: &mut H) {
+        h.write_u64(*self);
     }
 }
 extend u64 as Clone {
@@ -460,8 +508,8 @@ extend usize as Ord {
     }
 }
 extend usize as Hash {
-    pub const fn hash(self: &usize) u64 {
-        return (*self) as u64;
+    pub const fn hash_into<H: Hasher>(self: &usize, h: &mut H) {
+        h.write_u64((*self) as u64);
     }
 }
 extend usize as Clone {
@@ -495,8 +543,8 @@ extend char as Ord {
     }
 }
 extend char as Hash {
-    pub const fn hash(self: &char) u64 {
-        return (*self) as u64;
+    pub const fn hash_into<H: Hasher>(self: &char, h: &mut H) {
+        h.write_u64((*self) as u64);
     }
 }
 extend char as Clone {
@@ -530,8 +578,8 @@ extend bool as Ord {
     }
 }
 extend bool as Hash {
-    pub const fn hash(self: &bool) u64 {
-        return (*self) as u64;
+    pub const fn hash_into<H: Hasher>(self: &bool, h: &mut H) {
+        h.write_u64((*self) as u64);
     }
 }
 extend bool as Clone {
@@ -595,8 +643,9 @@ extend f32 as Ord {
     }
 }
 extend f32 as Hash {
-    pub const fn hash(self: &f32) u64 {
-        return f32_total_key(*self);
+    /// The total-order key `Eq` compares, so equal values hash alike.
+    pub const fn hash_into<H: Hasher>(self: &f32, h: &mut H) {
+        h.write_u64(f32_total_key(*self));
     }
 }
 extend f32 as Clone {
@@ -632,8 +681,9 @@ extend f64 as Ord {
     }
 }
 extend f64 as Hash {
-    pub const fn hash(self: &f64) u64 {
-        return f64_total_key(*self);
+    /// The total-order key `Eq` compares, so equal values hash alike.
+    pub const fn hash_into<H: Hasher>(self: &f64, h: &mut H) {
+        h.write_u64(f64_total_key(*self));
     }
 }
 extend f64 as Clone {
@@ -683,6 +733,8 @@ extend i8 {
     pub const MIN: i8 = -128;
     /// The largest value.
     pub const MAX: i8 = 127;
+    /// The width in bits.
+    pub const BITS: u32 = 8;
     /// Zero bits below the lowest set bit of the two's complement pattern (8 for zero).
     pub const fn trailing_zeros(self: i8) usize {
         return (self as u8).trailing_zeros();
@@ -876,6 +928,362 @@ extend i8 {
         }
         return 127;
     }
+    /// Number of clear bits in the two's complement pattern.
+    pub const fn count_zeros(self: i8) usize {
+        return (self as u8).count_zeros();
+    }
+    /// One bits above the highest clear bit of the two's complement pattern (the width for -1).
+    pub const fn leading_ones(self: i8) usize {
+        return (self as u8).leading_ones();
+    }
+    /// One bits below the lowest clear bit of the two's complement pattern (the width for -1).
+    pub const fn trailing_ones(self: i8) usize {
+        return (self as u8).trailing_ones();
+    }
+    /// The two's complement bits rotated toward the high end by `n % N`.
+    pub const fn rotate_left(self: i8, n: u32) i8 {
+        return (self as u8).rotate_left(n) as i8;
+    }
+    /// The two's complement bits rotated toward the low end by `n % N`.
+    pub const fn rotate_right(self: i8, n: u32) i8 {
+        return (self as u8).rotate_right(n) as i8;
+    }
+    /// The bytes in reverse order.
+    pub const fn swap_bytes(self: i8) i8 {
+        return (self as u8).swap_bytes() as i8;
+    }
+    /// The two's complement bits in reverse order: bit 0 becomes bit N - 1.
+    pub const fn reverse_bits(self: i8) i8 {
+        return (self as u8).reverse_bits() as i8;
+    }
+    /// `self` in big-endian byte order: `swap_bytes` on a little-endian target, `self` on a big-endian one.
+    pub const fn to_be(self: i8) i8 {
+        return (self as u8).to_be() as i8;
+    }
+    /// `self` in little-endian byte order: `self` on a little-endian target, `swap_bytes` on a big-endian one.
+    pub const fn to_le(self: i8) i8 {
+        return (self as u8).to_le() as i8;
+    }
+    /// The value whose big-endian representation is `x`.
+    pub const fn from_be(x: i8) i8 {
+        return (x as u8).to_be() as i8;
+    }
+    /// The value whose little-endian representation is `x`.
+    pub const fn from_le(x: i8) i8 {
+        return (x as u8).to_le() as i8;
+    }
+    /// The two's complement bytes of `self`, most significant first.
+    pub const fn to_be_bytes(self: i8) [u8; 1] {
+        return (self as u8).to_be_bytes();
+    }
+    /// The two's complement bytes of `self`, least significant first.
+    pub const fn to_le_bytes(self: i8) [u8; 1] {
+        return (self as u8).to_le_bytes();
+    }
+    /// The two's complement bytes of `self` in the target's byte order.
+    pub const fn to_ne_bytes(self: i8) [u8; 1] {
+        return (self as u8).to_ne_bytes();
+    }
+    /// The value of the two's complement bytes `b`, most significant first.
+    pub const fn from_be_bytes(b: [u8; 1]) i8 {
+        return u8::from_be_bytes(b) as i8;
+    }
+    /// The value of the two's complement bytes `b`, least significant first.
+    pub const fn from_le_bytes(b: [u8; 1]) i8 {
+        return u8::from_le_bytes(b) as i8;
+    }
+    /// The value of the two's complement bytes `b` in the target's byte order.
+    pub const fn from_ne_bytes(b: [u8; 1]) i8 {
+        return u8::from_ne_bytes(b) as i8;
+    }
+    /// `self` raised to `exp` (1 for `exp` 0); overflow traps with overflow checks and wraps without.
+    pub const fn pow(self: i8, exp: u32) i8 {
+        if exp == 0 {
+            return 1;
+        }
+        let mut base = self;
+        let mut acc: i8 = 1;
+        let mut e = exp;
+        while e > 1 {
+            if (e & 1) == 1 {
+                acc = acc * base;
+            }
+            e = e >> 1;
+            base = base * base;
+        }
+        return acc * base;
+    }
+    /// The floor of the square root. Panics when `self` is negative.
+    pub const fn isqrt(self: i8) i8 {
+        if self < 0 {
+            panic("argument of integer square root cannot be negative");
+        }
+        return (self as u8).isqrt() as i8;
+    }
+    /// The floor of log2(self). Panics when `self` is not positive.
+    pub const fn ilog2(self: i8) u32 {
+        if self <= 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return (self as u8).ilog2();
+    }
+    /// The floor of log10(self). Panics when `self` is not positive.
+    pub const fn ilog10(self: i8) u32 {
+        if self <= 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog10_u64(self as u64);
+    }
+    /// The floor of the logarithm of `self` in `base`. Panics when `base` is below 2 or `self` is not
+    /// positive.
+    pub const fn ilog(self: i8, base: i8) u32 {
+        if base < 2 {
+            panic("base of integer logarithm must be at least 2");
+        }
+        if self <= 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog_u64(self as u64, base as u64);
+    }
+    /// `|self - other|` as a `u8`: exact for every pair.
+    pub const fn abs_diff(self: i8, other: i8) u8 {
+        if self < other {
+            return (other as u8).wrapping_sub(self as u8);
+        }
+        return (self as u8).wrapping_sub(other as u8);
+    }
+    /// `|self|` as a `u8`: exact for MIN too.
+    pub const fn unsigned_abs(self: i8) u8 {
+        return self.wrapping_abs() as u8;
+    }
+    /// `(self + rhs) / 2` rounded toward zero, without overflow.
+    pub const fn midpoint(self: i8, rhs: i8) i8 {
+        let floor = (self & rhs) + ((self ^ rhs) >> 1);
+        if floor < 0 && ((self ^ rhs) & 1) == 1 {
+            return floor + 1;
+        }
+        return floor;
+    }
+    /// The Euclidean quotient: the `q` with `self == q * rhs + r` and `0 <= r < |rhs|`. Traps on a zero
+    /// divisor and on MIN / -1.
+    pub const fn div_euclid(self: i8, rhs: i8) i8 {
+        let q = self / rhs;
+        if self % rhs < 0 {
+            if rhs > 0 {
+                return q - 1;
+            }
+            return q + 1;
+        }
+        return q;
+    }
+    /// The Euclidean remainder, in `[0, |rhs|)`. Traps on a zero divisor and on MIN % -1.
+    pub const fn rem_euclid(self: i8, rhs: i8) i8 {
+        let r = self % rhs;
+        if r < 0 {
+            return r.wrapping_add(rhs.wrapping_abs());
+        }
+        return r;
+    }
+    /// The same bits as a `u8`: negative values become large.
+    pub const fn cast_unsigned(self: i8) u8 {
+        return self as u8;
+    }
+    /// `self / rhs`, with MIN / -1 giving MIN. Traps on a zero divisor.
+    pub const fn wrapping_div(self: i8, rhs: i8) i8 {
+        if self == -128 && rhs == -1 {
+            return -128;
+        }
+        return self / rhs;
+    }
+    /// `self % rhs`, with MIN % -1 giving 0. Traps on a zero divisor.
+    pub const fn wrapping_rem(self: i8, rhs: i8) i8 {
+        if rhs == -1 {
+            return 0;
+        }
+        return self % rhs;
+    }
+    /// `self.div_euclid(rhs)`, with MIN / -1 giving MIN. Traps on a zero divisor.
+    pub const fn wrapping_div_euclid(self: i8, rhs: i8) i8 {
+        if self == -128 && rhs == -1 {
+            return -128;
+        }
+        return self.div_euclid(rhs);
+    }
+    /// `self.rem_euclid(rhs)`, with MIN % -1 giving 0. Traps on a zero divisor.
+    pub const fn wrapping_rem_euclid(self: i8, rhs: i8) i8 {
+        if rhs == -1 {
+            return 0;
+        }
+        return self.rem_euclid(rhs);
+    }
+    /// `|self|` modulo 2^N (MIN stays MIN).
+    pub const fn wrapping_abs(self: i8) i8 {
+        if self < 0 {
+            return self.wrapping_neg();
+        }
+        return self;
+    }
+    /// `self` raised to `exp` modulo 2^N.
+    pub const fn wrapping_pow(self: i8, exp: u32) i8 {
+        return (self as u8).wrapping_pow(exp) as i8;
+    }
+    /// `-self` modulo 2^N and whether `self` is MIN.
+    pub const fn overflowing_neg(self: i8) (i8, bool) {
+        return self.wrapping_neg(), self == -128;
+    }
+    /// `self.wrapping_shl(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shl(self: i8, n: u32) (i8, bool) {
+        return self.wrapping_shl(n), n >= 8;
+    }
+    /// `self.wrapping_shr(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shr(self: i8, n: u32) (i8, bool) {
+        return self.wrapping_shr(n), n >= 8;
+    }
+    /// `self.wrapping_div(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
+    pub const fn overflowing_div(self: i8, rhs: i8) (i8, bool) {
+        if self == -128 && rhs == -1 {
+            return self, true;
+        }
+        return self / rhs, false;
+    }
+    /// `self.wrapping_rem(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
+    pub const fn overflowing_rem(self: i8, rhs: i8) (i8, bool) {
+        if rhs == -1 {
+            return 0, self == -128;
+        }
+        return self % rhs, false;
+    }
+    /// `self.wrapping_div_euclid(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
+    pub const fn overflowing_div_euclid(self: i8, rhs: i8) (i8, bool) {
+        if self == -128 && rhs == -1 {
+            return self, true;
+        }
+        return self.div_euclid(rhs), false;
+    }
+    /// `self.wrapping_rem_euclid(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
+    pub const fn overflowing_rem_euclid(self: i8, rhs: i8) (i8, bool) {
+        if rhs == -1 {
+            return 0, self == -128;
+        }
+        return self.rem_euclid(rhs), false;
+    }
+    /// `self.wrapping_abs()` and whether `self` is MIN.
+    pub const fn overflowing_abs(self: i8) (i8, bool) {
+        return self.wrapping_abs(), self == -128;
+    }
+    /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
+    pub const fn overflowing_pow(self: i8, exp: u32) (i8, bool) {
+        if exp == 0 {
+            return 1, false;
+        }
+        let mut base = self;
+        let mut acc: i8 = 1;
+        let mut e = exp;
+        let mut o = false;
+        while e > 1 {
+            if (e & 1) == 1 {
+                let (r, ro) = acc.overflowing_mul(base);
+                acc = r;
+                o = o || ro;
+            }
+            e = e >> 1;
+            let (sq, so) = base.overflowing_mul(base);
+            base = sq;
+            o = o || so;
+        }
+        let (r, ro) = acc.overflowing_mul(base);
+        return r, o || ro;
+    }
+    /// `|self|`, or None for MIN.
+    pub const fn checked_abs(self: i8) Option<i8> {
+        if self == -128 {
+            return Option::<i8>::None;
+        }
+        return Option::<i8>::Some(self.wrapping_abs());
+    }
+    /// `self` raised to `exp`, or None when it overflows.
+    pub const fn checked_pow(self: i8, exp: u32) Option<i8> {
+        let (r, o) = self.overflowing_pow(exp);
+        if o {
+            return Option::<i8>::None;
+        }
+        return Option::<i8>::Some(r);
+    }
+    /// The floor of the square root, or None when `self` is negative.
+    pub const fn checked_isqrt(self: i8) Option<i8> {
+        if self < 0 {
+            return Option::<i8>::None;
+        }
+        return Option::<i8>::Some((self as u8).isqrt() as i8);
+    }
+    /// The floor of log2(self), or None when `self` is not positive.
+    pub const fn checked_ilog2(self: i8) Option<u32> {
+        if self <= 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some((self as u8).ilog2());
+    }
+    /// The floor of log10(self), or None when `self` is not positive.
+    pub const fn checked_ilog10(self: i8) Option<u32> {
+        if self <= 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog10_u64(self as u64));
+    }
+    /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is not
+    /// positive.
+    pub const fn checked_ilog(self: i8, base: i8) Option<u32> {
+        if base < 2 || self <= 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog_u64(self as u64, base as u64));
+    }
+    /// `self.div_euclid(rhs)`, or None for a zero divisor or MIN / -1.
+    pub const fn checked_div_euclid(self: i8, rhs: i8) Option<i8> {
+        if rhs == 0 || self == -128 && rhs == -1 {
+            return Option::<i8>::None;
+        }
+        return Option::<i8>::Some(self.div_euclid(rhs));
+    }
+    /// `self.rem_euclid(rhs)`, or None for a zero divisor or MIN % -1.
+    pub const fn checked_rem_euclid(self: i8, rhs: i8) Option<i8> {
+        if rhs == 0 || self == -128 && rhs == -1 {
+            return Option::<i8>::None;
+        }
+        return Option::<i8>::Some(self.rem_euclid(rhs));
+    }
+    /// `-self`, with MIN giving MAX.
+    pub const fn saturating_neg(self: i8) i8 {
+        if self == -128 {
+            return 127;
+        }
+        return -self;
+    }
+    /// `|self|`, with MIN giving MAX.
+    pub const fn saturating_abs(self: i8) i8 {
+        if self == -128 {
+            return 127;
+        }
+        return self.wrapping_abs();
+    }
+    /// `self / rhs`, with MIN / -1 giving MAX. Traps on a zero divisor.
+    pub const fn saturating_div(self: i8, rhs: i8) i8 {
+        if self == -128 && rhs == -1 {
+            return 127;
+        }
+        return self / rhs;
+    }
+    /// `self` raised to `exp`, clamped to [MIN, MAX].
+    pub const fn saturating_pow(self: i8, exp: u32) i8 {
+        let (r, o) = self.overflowing_pow(exp);
+        if !o {
+            return r;
+        }
+        if self < 0 && (exp & 1) == 1 {
+            return -128;
+        }
+        return 127;
+    }
 }
 
 extend i16 {
@@ -883,6 +1291,8 @@ extend i16 {
     pub const MIN: i16 = -32768;
     /// The largest value.
     pub const MAX: i16 = 32767;
+    /// The width in bits.
+    pub const BITS: u32 = 16;
     /// Zero bits below the lowest set bit of the two's complement pattern (16 for zero).
     pub const fn trailing_zeros(self: i16) usize {
         return (self as u16).trailing_zeros();
@@ -1076,6 +1486,362 @@ extend i16 {
         }
         return 32767;
     }
+    /// Number of clear bits in the two's complement pattern.
+    pub const fn count_zeros(self: i16) usize {
+        return (self as u16).count_zeros();
+    }
+    /// One bits above the highest clear bit of the two's complement pattern (the width for -1).
+    pub const fn leading_ones(self: i16) usize {
+        return (self as u16).leading_ones();
+    }
+    /// One bits below the lowest clear bit of the two's complement pattern (the width for -1).
+    pub const fn trailing_ones(self: i16) usize {
+        return (self as u16).trailing_ones();
+    }
+    /// The two's complement bits rotated toward the high end by `n % N`.
+    pub const fn rotate_left(self: i16, n: u32) i16 {
+        return (self as u16).rotate_left(n) as i16;
+    }
+    /// The two's complement bits rotated toward the low end by `n % N`.
+    pub const fn rotate_right(self: i16, n: u32) i16 {
+        return (self as u16).rotate_right(n) as i16;
+    }
+    /// The bytes in reverse order.
+    pub const fn swap_bytes(self: i16) i16 {
+        return (self as u16).swap_bytes() as i16;
+    }
+    /// The two's complement bits in reverse order: bit 0 becomes bit N - 1.
+    pub const fn reverse_bits(self: i16) i16 {
+        return (self as u16).reverse_bits() as i16;
+    }
+    /// `self` in big-endian byte order: `swap_bytes` on a little-endian target, `self` on a big-endian one.
+    pub const fn to_be(self: i16) i16 {
+        return (self as u16).to_be() as i16;
+    }
+    /// `self` in little-endian byte order: `self` on a little-endian target, `swap_bytes` on a big-endian one.
+    pub const fn to_le(self: i16) i16 {
+        return (self as u16).to_le() as i16;
+    }
+    /// The value whose big-endian representation is `x`.
+    pub const fn from_be(x: i16) i16 {
+        return (x as u16).to_be() as i16;
+    }
+    /// The value whose little-endian representation is `x`.
+    pub const fn from_le(x: i16) i16 {
+        return (x as u16).to_le() as i16;
+    }
+    /// The two's complement bytes of `self`, most significant first.
+    pub const fn to_be_bytes(self: i16) [u8; 2] {
+        return (self as u16).to_be_bytes();
+    }
+    /// The two's complement bytes of `self`, least significant first.
+    pub const fn to_le_bytes(self: i16) [u8; 2] {
+        return (self as u16).to_le_bytes();
+    }
+    /// The two's complement bytes of `self` in the target's byte order.
+    pub const fn to_ne_bytes(self: i16) [u8; 2] {
+        return (self as u16).to_ne_bytes();
+    }
+    /// The value of the two's complement bytes `b`, most significant first.
+    pub const fn from_be_bytes(b: [u8; 2]) i16 {
+        return u16::from_be_bytes(b) as i16;
+    }
+    /// The value of the two's complement bytes `b`, least significant first.
+    pub const fn from_le_bytes(b: [u8; 2]) i16 {
+        return u16::from_le_bytes(b) as i16;
+    }
+    /// The value of the two's complement bytes `b` in the target's byte order.
+    pub const fn from_ne_bytes(b: [u8; 2]) i16 {
+        return u16::from_ne_bytes(b) as i16;
+    }
+    /// `self` raised to `exp` (1 for `exp` 0); overflow traps with overflow checks and wraps without.
+    pub const fn pow(self: i16, exp: u32) i16 {
+        if exp == 0 {
+            return 1;
+        }
+        let mut base = self;
+        let mut acc: i16 = 1;
+        let mut e = exp;
+        while e > 1 {
+            if (e & 1) == 1 {
+                acc = acc * base;
+            }
+            e = e >> 1;
+            base = base * base;
+        }
+        return acc * base;
+    }
+    /// The floor of the square root. Panics when `self` is negative.
+    pub const fn isqrt(self: i16) i16 {
+        if self < 0 {
+            panic("argument of integer square root cannot be negative");
+        }
+        return (self as u16).isqrt() as i16;
+    }
+    /// The floor of log2(self). Panics when `self` is not positive.
+    pub const fn ilog2(self: i16) u32 {
+        if self <= 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return (self as u16).ilog2();
+    }
+    /// The floor of log10(self). Panics when `self` is not positive.
+    pub const fn ilog10(self: i16) u32 {
+        if self <= 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog10_u64(self as u64);
+    }
+    /// The floor of the logarithm of `self` in `base`. Panics when `base` is below 2 or `self` is not
+    /// positive.
+    pub const fn ilog(self: i16, base: i16) u32 {
+        if base < 2 {
+            panic("base of integer logarithm must be at least 2");
+        }
+        if self <= 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog_u64(self as u64, base as u64);
+    }
+    /// `|self - other|` as a `u16`: exact for every pair.
+    pub const fn abs_diff(self: i16, other: i16) u16 {
+        if self < other {
+            return (other as u16).wrapping_sub(self as u16);
+        }
+        return (self as u16).wrapping_sub(other as u16);
+    }
+    /// `|self|` as a `u16`: exact for MIN too.
+    pub const fn unsigned_abs(self: i16) u16 {
+        return self.wrapping_abs() as u16;
+    }
+    /// `(self + rhs) / 2` rounded toward zero, without overflow.
+    pub const fn midpoint(self: i16, rhs: i16) i16 {
+        let floor = (self & rhs) + ((self ^ rhs) >> 1);
+        if floor < 0 && ((self ^ rhs) & 1) == 1 {
+            return floor + 1;
+        }
+        return floor;
+    }
+    /// The Euclidean quotient: the `q` with `self == q * rhs + r` and `0 <= r < |rhs|`. Traps on a zero
+    /// divisor and on MIN / -1.
+    pub const fn div_euclid(self: i16, rhs: i16) i16 {
+        let q = self / rhs;
+        if self % rhs < 0 {
+            if rhs > 0 {
+                return q - 1;
+            }
+            return q + 1;
+        }
+        return q;
+    }
+    /// The Euclidean remainder, in `[0, |rhs|)`. Traps on a zero divisor and on MIN % -1.
+    pub const fn rem_euclid(self: i16, rhs: i16) i16 {
+        let r = self % rhs;
+        if r < 0 {
+            return r.wrapping_add(rhs.wrapping_abs());
+        }
+        return r;
+    }
+    /// The same bits as a `u16`: negative values become large.
+    pub const fn cast_unsigned(self: i16) u16 {
+        return self as u16;
+    }
+    /// `self / rhs`, with MIN / -1 giving MIN. Traps on a zero divisor.
+    pub const fn wrapping_div(self: i16, rhs: i16) i16 {
+        if self == -32768 && rhs == -1 {
+            return -32768;
+        }
+        return self / rhs;
+    }
+    /// `self % rhs`, with MIN % -1 giving 0. Traps on a zero divisor.
+    pub const fn wrapping_rem(self: i16, rhs: i16) i16 {
+        if rhs == -1 {
+            return 0;
+        }
+        return self % rhs;
+    }
+    /// `self.div_euclid(rhs)`, with MIN / -1 giving MIN. Traps on a zero divisor.
+    pub const fn wrapping_div_euclid(self: i16, rhs: i16) i16 {
+        if self == -32768 && rhs == -1 {
+            return -32768;
+        }
+        return self.div_euclid(rhs);
+    }
+    /// `self.rem_euclid(rhs)`, with MIN % -1 giving 0. Traps on a zero divisor.
+    pub const fn wrapping_rem_euclid(self: i16, rhs: i16) i16 {
+        if rhs == -1 {
+            return 0;
+        }
+        return self.rem_euclid(rhs);
+    }
+    /// `|self|` modulo 2^N (MIN stays MIN).
+    pub const fn wrapping_abs(self: i16) i16 {
+        if self < 0 {
+            return self.wrapping_neg();
+        }
+        return self;
+    }
+    /// `self` raised to `exp` modulo 2^N.
+    pub const fn wrapping_pow(self: i16, exp: u32) i16 {
+        return (self as u16).wrapping_pow(exp) as i16;
+    }
+    /// `-self` modulo 2^N and whether `self` is MIN.
+    pub const fn overflowing_neg(self: i16) (i16, bool) {
+        return self.wrapping_neg(), self == -32768;
+    }
+    /// `self.wrapping_shl(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shl(self: i16, n: u32) (i16, bool) {
+        return self.wrapping_shl(n), n >= 16;
+    }
+    /// `self.wrapping_shr(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shr(self: i16, n: u32) (i16, bool) {
+        return self.wrapping_shr(n), n >= 16;
+    }
+    /// `self.wrapping_div(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
+    pub const fn overflowing_div(self: i16, rhs: i16) (i16, bool) {
+        if self == -32768 && rhs == -1 {
+            return self, true;
+        }
+        return self / rhs, false;
+    }
+    /// `self.wrapping_rem(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
+    pub const fn overflowing_rem(self: i16, rhs: i16) (i16, bool) {
+        if rhs == -1 {
+            return 0, self == -32768;
+        }
+        return self % rhs, false;
+    }
+    /// `self.wrapping_div_euclid(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
+    pub const fn overflowing_div_euclid(self: i16, rhs: i16) (i16, bool) {
+        if self == -32768 && rhs == -1 {
+            return self, true;
+        }
+        return self.div_euclid(rhs), false;
+    }
+    /// `self.wrapping_rem_euclid(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
+    pub const fn overflowing_rem_euclid(self: i16, rhs: i16) (i16, bool) {
+        if rhs == -1 {
+            return 0, self == -32768;
+        }
+        return self.rem_euclid(rhs), false;
+    }
+    /// `self.wrapping_abs()` and whether `self` is MIN.
+    pub const fn overflowing_abs(self: i16) (i16, bool) {
+        return self.wrapping_abs(), self == -32768;
+    }
+    /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
+    pub const fn overflowing_pow(self: i16, exp: u32) (i16, bool) {
+        if exp == 0 {
+            return 1, false;
+        }
+        let mut base = self;
+        let mut acc: i16 = 1;
+        let mut e = exp;
+        let mut o = false;
+        while e > 1 {
+            if (e & 1) == 1 {
+                let (r, ro) = acc.overflowing_mul(base);
+                acc = r;
+                o = o || ro;
+            }
+            e = e >> 1;
+            let (sq, so) = base.overflowing_mul(base);
+            base = sq;
+            o = o || so;
+        }
+        let (r, ro) = acc.overflowing_mul(base);
+        return r, o || ro;
+    }
+    /// `|self|`, or None for MIN.
+    pub const fn checked_abs(self: i16) Option<i16> {
+        if self == -32768 {
+            return Option::<i16>::None;
+        }
+        return Option::<i16>::Some(self.wrapping_abs());
+    }
+    /// `self` raised to `exp`, or None when it overflows.
+    pub const fn checked_pow(self: i16, exp: u32) Option<i16> {
+        let (r, o) = self.overflowing_pow(exp);
+        if o {
+            return Option::<i16>::None;
+        }
+        return Option::<i16>::Some(r);
+    }
+    /// The floor of the square root, or None when `self` is negative.
+    pub const fn checked_isqrt(self: i16) Option<i16> {
+        if self < 0 {
+            return Option::<i16>::None;
+        }
+        return Option::<i16>::Some((self as u16).isqrt() as i16);
+    }
+    /// The floor of log2(self), or None when `self` is not positive.
+    pub const fn checked_ilog2(self: i16) Option<u32> {
+        if self <= 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some((self as u16).ilog2());
+    }
+    /// The floor of log10(self), or None when `self` is not positive.
+    pub const fn checked_ilog10(self: i16) Option<u32> {
+        if self <= 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog10_u64(self as u64));
+    }
+    /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is not
+    /// positive.
+    pub const fn checked_ilog(self: i16, base: i16) Option<u32> {
+        if base < 2 || self <= 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog_u64(self as u64, base as u64));
+    }
+    /// `self.div_euclid(rhs)`, or None for a zero divisor or MIN / -1.
+    pub const fn checked_div_euclid(self: i16, rhs: i16) Option<i16> {
+        if rhs == 0 || self == -32768 && rhs == -1 {
+            return Option::<i16>::None;
+        }
+        return Option::<i16>::Some(self.div_euclid(rhs));
+    }
+    /// `self.rem_euclid(rhs)`, or None for a zero divisor or MIN % -1.
+    pub const fn checked_rem_euclid(self: i16, rhs: i16) Option<i16> {
+        if rhs == 0 || self == -32768 && rhs == -1 {
+            return Option::<i16>::None;
+        }
+        return Option::<i16>::Some(self.rem_euclid(rhs));
+    }
+    /// `-self`, with MIN giving MAX.
+    pub const fn saturating_neg(self: i16) i16 {
+        if self == -32768 {
+            return 32767;
+        }
+        return -self;
+    }
+    /// `|self|`, with MIN giving MAX.
+    pub const fn saturating_abs(self: i16) i16 {
+        if self == -32768 {
+            return 32767;
+        }
+        return self.wrapping_abs();
+    }
+    /// `self / rhs`, with MIN / -1 giving MAX. Traps on a zero divisor.
+    pub const fn saturating_div(self: i16, rhs: i16) i16 {
+        if self == -32768 && rhs == -1 {
+            return 32767;
+        }
+        return self / rhs;
+    }
+    /// `self` raised to `exp`, clamped to [MIN, MAX].
+    pub const fn saturating_pow(self: i16, exp: u32) i16 {
+        let (r, o) = self.overflowing_pow(exp);
+        if !o {
+            return r;
+        }
+        if self < 0 && (exp & 1) == 1 {
+            return -32768;
+        }
+        return 32767;
+    }
 }
 
 extend i32 {
@@ -1083,6 +1849,8 @@ extend i32 {
     pub const MIN: i32 = -2147483648;
     /// The largest value.
     pub const MAX: i32 = 2147483647;
+    /// The width in bits.
+    pub const BITS: u32 = 32;
     /// Zero bits below the lowest set bit of the two's complement pattern (32 for zero).
     pub const fn trailing_zeros(self: i32) usize {
         return (self as u32).trailing_zeros();
@@ -1276,6 +2044,362 @@ extend i32 {
         }
         return 2147483647;
     }
+    /// Number of clear bits in the two's complement pattern.
+    pub const fn count_zeros(self: i32) usize {
+        return (self as u32).count_zeros();
+    }
+    /// One bits above the highest clear bit of the two's complement pattern (the width for -1).
+    pub const fn leading_ones(self: i32) usize {
+        return (self as u32).leading_ones();
+    }
+    /// One bits below the lowest clear bit of the two's complement pattern (the width for -1).
+    pub const fn trailing_ones(self: i32) usize {
+        return (self as u32).trailing_ones();
+    }
+    /// The two's complement bits rotated toward the high end by `n % N`.
+    pub const fn rotate_left(self: i32, n: u32) i32 {
+        return (self as u32).rotate_left(n) as i32;
+    }
+    /// The two's complement bits rotated toward the low end by `n % N`.
+    pub const fn rotate_right(self: i32, n: u32) i32 {
+        return (self as u32).rotate_right(n) as i32;
+    }
+    /// The bytes in reverse order.
+    pub const fn swap_bytes(self: i32) i32 {
+        return (self as u32).swap_bytes() as i32;
+    }
+    /// The two's complement bits in reverse order: bit 0 becomes bit N - 1.
+    pub const fn reverse_bits(self: i32) i32 {
+        return (self as u32).reverse_bits() as i32;
+    }
+    /// `self` in big-endian byte order: `swap_bytes` on a little-endian target, `self` on a big-endian one.
+    pub const fn to_be(self: i32) i32 {
+        return (self as u32).to_be() as i32;
+    }
+    /// `self` in little-endian byte order: `self` on a little-endian target, `swap_bytes` on a big-endian one.
+    pub const fn to_le(self: i32) i32 {
+        return (self as u32).to_le() as i32;
+    }
+    /// The value whose big-endian representation is `x`.
+    pub const fn from_be(x: i32) i32 {
+        return (x as u32).to_be() as i32;
+    }
+    /// The value whose little-endian representation is `x`.
+    pub const fn from_le(x: i32) i32 {
+        return (x as u32).to_le() as i32;
+    }
+    /// The two's complement bytes of `self`, most significant first.
+    pub const fn to_be_bytes(self: i32) [u8; 4] {
+        return (self as u32).to_be_bytes();
+    }
+    /// The two's complement bytes of `self`, least significant first.
+    pub const fn to_le_bytes(self: i32) [u8; 4] {
+        return (self as u32).to_le_bytes();
+    }
+    /// The two's complement bytes of `self` in the target's byte order.
+    pub const fn to_ne_bytes(self: i32) [u8; 4] {
+        return (self as u32).to_ne_bytes();
+    }
+    /// The value of the two's complement bytes `b`, most significant first.
+    pub const fn from_be_bytes(b: [u8; 4]) i32 {
+        return u32::from_be_bytes(b) as i32;
+    }
+    /// The value of the two's complement bytes `b`, least significant first.
+    pub const fn from_le_bytes(b: [u8; 4]) i32 {
+        return u32::from_le_bytes(b) as i32;
+    }
+    /// The value of the two's complement bytes `b` in the target's byte order.
+    pub const fn from_ne_bytes(b: [u8; 4]) i32 {
+        return u32::from_ne_bytes(b) as i32;
+    }
+    /// `self` raised to `exp` (1 for `exp` 0); overflow traps with overflow checks and wraps without.
+    pub const fn pow(self: i32, exp: u32) i32 {
+        if exp == 0 {
+            return 1;
+        }
+        let mut base = self;
+        let mut acc: i32 = 1;
+        let mut e = exp;
+        while e > 1 {
+            if (e & 1) == 1 {
+                acc = acc * base;
+            }
+            e = e >> 1;
+            base = base * base;
+        }
+        return acc * base;
+    }
+    /// The floor of the square root. Panics when `self` is negative.
+    pub const fn isqrt(self: i32) i32 {
+        if self < 0 {
+            panic("argument of integer square root cannot be negative");
+        }
+        return (self as u32).isqrt() as i32;
+    }
+    /// The floor of log2(self). Panics when `self` is not positive.
+    pub const fn ilog2(self: i32) u32 {
+        if self <= 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return (self as u32).ilog2();
+    }
+    /// The floor of log10(self). Panics when `self` is not positive.
+    pub const fn ilog10(self: i32) u32 {
+        if self <= 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog10_u64(self as u64);
+    }
+    /// The floor of the logarithm of `self` in `base`. Panics when `base` is below 2 or `self` is not
+    /// positive.
+    pub const fn ilog(self: i32, base: i32) u32 {
+        if base < 2 {
+            panic("base of integer logarithm must be at least 2");
+        }
+        if self <= 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog_u64(self as u64, base as u64);
+    }
+    /// `|self - other|` as a `u32`: exact for every pair.
+    pub const fn abs_diff(self: i32, other: i32) u32 {
+        if self < other {
+            return (other as u32).wrapping_sub(self as u32);
+        }
+        return (self as u32).wrapping_sub(other as u32);
+    }
+    /// `|self|` as a `u32`: exact for MIN too.
+    pub const fn unsigned_abs(self: i32) u32 {
+        return self.wrapping_abs() as u32;
+    }
+    /// `(self + rhs) / 2` rounded toward zero, without overflow.
+    pub const fn midpoint(self: i32, rhs: i32) i32 {
+        let floor = (self & rhs) + ((self ^ rhs) >> 1);
+        if floor < 0 && ((self ^ rhs) & 1) == 1 {
+            return floor + 1;
+        }
+        return floor;
+    }
+    /// The Euclidean quotient: the `q` with `self == q * rhs + r` and `0 <= r < |rhs|`. Traps on a zero
+    /// divisor and on MIN / -1.
+    pub const fn div_euclid(self: i32, rhs: i32) i32 {
+        let q = self / rhs;
+        if self % rhs < 0 {
+            if rhs > 0 {
+                return q - 1;
+            }
+            return q + 1;
+        }
+        return q;
+    }
+    /// The Euclidean remainder, in `[0, |rhs|)`. Traps on a zero divisor and on MIN % -1.
+    pub const fn rem_euclid(self: i32, rhs: i32) i32 {
+        let r = self % rhs;
+        if r < 0 {
+            return r.wrapping_add(rhs.wrapping_abs());
+        }
+        return r;
+    }
+    /// The same bits as a `u32`: negative values become large.
+    pub const fn cast_unsigned(self: i32) u32 {
+        return self as u32;
+    }
+    /// `self / rhs`, with MIN / -1 giving MIN. Traps on a zero divisor.
+    pub const fn wrapping_div(self: i32, rhs: i32) i32 {
+        if self == -2147483648 && rhs == -1 {
+            return -2147483648;
+        }
+        return self / rhs;
+    }
+    /// `self % rhs`, with MIN % -1 giving 0. Traps on a zero divisor.
+    pub const fn wrapping_rem(self: i32, rhs: i32) i32 {
+        if rhs == -1 {
+            return 0;
+        }
+        return self % rhs;
+    }
+    /// `self.div_euclid(rhs)`, with MIN / -1 giving MIN. Traps on a zero divisor.
+    pub const fn wrapping_div_euclid(self: i32, rhs: i32) i32 {
+        if self == -2147483648 && rhs == -1 {
+            return -2147483648;
+        }
+        return self.div_euclid(rhs);
+    }
+    /// `self.rem_euclid(rhs)`, with MIN % -1 giving 0. Traps on a zero divisor.
+    pub const fn wrapping_rem_euclid(self: i32, rhs: i32) i32 {
+        if rhs == -1 {
+            return 0;
+        }
+        return self.rem_euclid(rhs);
+    }
+    /// `|self|` modulo 2^N (MIN stays MIN).
+    pub const fn wrapping_abs(self: i32) i32 {
+        if self < 0 {
+            return self.wrapping_neg();
+        }
+        return self;
+    }
+    /// `self` raised to `exp` modulo 2^N.
+    pub const fn wrapping_pow(self: i32, exp: u32) i32 {
+        return (self as u32).wrapping_pow(exp) as i32;
+    }
+    /// `-self` modulo 2^N and whether `self` is MIN.
+    pub const fn overflowing_neg(self: i32) (i32, bool) {
+        return self.wrapping_neg(), self == -2147483648;
+    }
+    /// `self.wrapping_shl(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shl(self: i32, n: u32) (i32, bool) {
+        return self.wrapping_shl(n), n >= 32;
+    }
+    /// `self.wrapping_shr(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shr(self: i32, n: u32) (i32, bool) {
+        return self.wrapping_shr(n), n >= 32;
+    }
+    /// `self.wrapping_div(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
+    pub const fn overflowing_div(self: i32, rhs: i32) (i32, bool) {
+        if self == -2147483648 && rhs == -1 {
+            return self, true;
+        }
+        return self / rhs, false;
+    }
+    /// `self.wrapping_rem(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
+    pub const fn overflowing_rem(self: i32, rhs: i32) (i32, bool) {
+        if rhs == -1 {
+            return 0, self == -2147483648;
+        }
+        return self % rhs, false;
+    }
+    /// `self.wrapping_div_euclid(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
+    pub const fn overflowing_div_euclid(self: i32, rhs: i32) (i32, bool) {
+        if self == -2147483648 && rhs == -1 {
+            return self, true;
+        }
+        return self.div_euclid(rhs), false;
+    }
+    /// `self.wrapping_rem_euclid(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
+    pub const fn overflowing_rem_euclid(self: i32, rhs: i32) (i32, bool) {
+        if rhs == -1 {
+            return 0, self == -2147483648;
+        }
+        return self.rem_euclid(rhs), false;
+    }
+    /// `self.wrapping_abs()` and whether `self` is MIN.
+    pub const fn overflowing_abs(self: i32) (i32, bool) {
+        return self.wrapping_abs(), self == -2147483648;
+    }
+    /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
+    pub const fn overflowing_pow(self: i32, exp: u32) (i32, bool) {
+        if exp == 0 {
+            return 1, false;
+        }
+        let mut base = self;
+        let mut acc: i32 = 1;
+        let mut e = exp;
+        let mut o = false;
+        while e > 1 {
+            if (e & 1) == 1 {
+                let (r, ro) = acc.overflowing_mul(base);
+                acc = r;
+                o = o || ro;
+            }
+            e = e >> 1;
+            let (sq, so) = base.overflowing_mul(base);
+            base = sq;
+            o = o || so;
+        }
+        let (r, ro) = acc.overflowing_mul(base);
+        return r, o || ro;
+    }
+    /// `|self|`, or None for MIN.
+    pub const fn checked_abs(self: i32) Option<i32> {
+        if self == -2147483648 {
+            return Option::<i32>::None;
+        }
+        return Option::<i32>::Some(self.wrapping_abs());
+    }
+    /// `self` raised to `exp`, or None when it overflows.
+    pub const fn checked_pow(self: i32, exp: u32) Option<i32> {
+        let (r, o) = self.overflowing_pow(exp);
+        if o {
+            return Option::<i32>::None;
+        }
+        return Option::<i32>::Some(r);
+    }
+    /// The floor of the square root, or None when `self` is negative.
+    pub const fn checked_isqrt(self: i32) Option<i32> {
+        if self < 0 {
+            return Option::<i32>::None;
+        }
+        return Option::<i32>::Some((self as u32).isqrt() as i32);
+    }
+    /// The floor of log2(self), or None when `self` is not positive.
+    pub const fn checked_ilog2(self: i32) Option<u32> {
+        if self <= 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some((self as u32).ilog2());
+    }
+    /// The floor of log10(self), or None when `self` is not positive.
+    pub const fn checked_ilog10(self: i32) Option<u32> {
+        if self <= 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog10_u64(self as u64));
+    }
+    /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is not
+    /// positive.
+    pub const fn checked_ilog(self: i32, base: i32) Option<u32> {
+        if base < 2 || self <= 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog_u64(self as u64, base as u64));
+    }
+    /// `self.div_euclid(rhs)`, or None for a zero divisor or MIN / -1.
+    pub const fn checked_div_euclid(self: i32, rhs: i32) Option<i32> {
+        if rhs == 0 || self == -2147483648 && rhs == -1 {
+            return Option::<i32>::None;
+        }
+        return Option::<i32>::Some(self.div_euclid(rhs));
+    }
+    /// `self.rem_euclid(rhs)`, or None for a zero divisor or MIN % -1.
+    pub const fn checked_rem_euclid(self: i32, rhs: i32) Option<i32> {
+        if rhs == 0 || self == -2147483648 && rhs == -1 {
+            return Option::<i32>::None;
+        }
+        return Option::<i32>::Some(self.rem_euclid(rhs));
+    }
+    /// `-self`, with MIN giving MAX.
+    pub const fn saturating_neg(self: i32) i32 {
+        if self == -2147483648 {
+            return 2147483647;
+        }
+        return -self;
+    }
+    /// `|self|`, with MIN giving MAX.
+    pub const fn saturating_abs(self: i32) i32 {
+        if self == -2147483648 {
+            return 2147483647;
+        }
+        return self.wrapping_abs();
+    }
+    /// `self / rhs`, with MIN / -1 giving MAX. Traps on a zero divisor.
+    pub const fn saturating_div(self: i32, rhs: i32) i32 {
+        if self == -2147483648 && rhs == -1 {
+            return 2147483647;
+        }
+        return self / rhs;
+    }
+    /// `self` raised to `exp`, clamped to [MIN, MAX].
+    pub const fn saturating_pow(self: i32, exp: u32) i32 {
+        let (r, o) = self.overflowing_pow(exp);
+        if !o {
+            return r;
+        }
+        if self < 0 && (exp & 1) == 1 {
+            return -2147483648;
+        }
+        return 2147483647;
+    }
 }
 
 extend i64 {
@@ -1283,6 +2407,8 @@ extend i64 {
     pub const MIN: i64 = -9223372036854775808;
     /// The largest value.
     pub const MAX: i64 = 9223372036854775807;
+    /// The width in bits.
+    pub const BITS: u32 = 64;
     /// Zero bits below the lowest set bit of the two's complement pattern (64 for zero).
     pub const fn trailing_zeros(self: i64) usize {
         return (self as u64).trailing_zeros();
@@ -1474,6 +2600,362 @@ extend i64 {
         }
         return 9223372036854775807;
     }
+    /// Number of clear bits in the two's complement pattern.
+    pub const fn count_zeros(self: i64) usize {
+        return (self as u64).count_zeros();
+    }
+    /// One bits above the highest clear bit of the two's complement pattern (the width for -1).
+    pub const fn leading_ones(self: i64) usize {
+        return (self as u64).leading_ones();
+    }
+    /// One bits below the lowest clear bit of the two's complement pattern (the width for -1).
+    pub const fn trailing_ones(self: i64) usize {
+        return (self as u64).trailing_ones();
+    }
+    /// The two's complement bits rotated toward the high end by `n % N`.
+    pub const fn rotate_left(self: i64, n: u32) i64 {
+        return (self as u64).rotate_left(n) as i64;
+    }
+    /// The two's complement bits rotated toward the low end by `n % N`.
+    pub const fn rotate_right(self: i64, n: u32) i64 {
+        return (self as u64).rotate_right(n) as i64;
+    }
+    /// The bytes in reverse order.
+    pub const fn swap_bytes(self: i64) i64 {
+        return (self as u64).swap_bytes() as i64;
+    }
+    /// The two's complement bits in reverse order: bit 0 becomes bit N - 1.
+    pub const fn reverse_bits(self: i64) i64 {
+        return (self as u64).reverse_bits() as i64;
+    }
+    /// `self` in big-endian byte order: `swap_bytes` on a little-endian target, `self` on a big-endian one.
+    pub const fn to_be(self: i64) i64 {
+        return (self as u64).to_be() as i64;
+    }
+    /// `self` in little-endian byte order: `self` on a little-endian target, `swap_bytes` on a big-endian one.
+    pub const fn to_le(self: i64) i64 {
+        return (self as u64).to_le() as i64;
+    }
+    /// The value whose big-endian representation is `x`.
+    pub const fn from_be(x: i64) i64 {
+        return (x as u64).to_be() as i64;
+    }
+    /// The value whose little-endian representation is `x`.
+    pub const fn from_le(x: i64) i64 {
+        return (x as u64).to_le() as i64;
+    }
+    /// The two's complement bytes of `self`, most significant first.
+    pub const fn to_be_bytes(self: i64) [u8; 8] {
+        return (self as u64).to_be_bytes();
+    }
+    /// The two's complement bytes of `self`, least significant first.
+    pub const fn to_le_bytes(self: i64) [u8; 8] {
+        return (self as u64).to_le_bytes();
+    }
+    /// The two's complement bytes of `self` in the target's byte order.
+    pub const fn to_ne_bytes(self: i64) [u8; 8] {
+        return (self as u64).to_ne_bytes();
+    }
+    /// The value of the two's complement bytes `b`, most significant first.
+    pub const fn from_be_bytes(b: [u8; 8]) i64 {
+        return u64::from_be_bytes(b) as i64;
+    }
+    /// The value of the two's complement bytes `b`, least significant first.
+    pub const fn from_le_bytes(b: [u8; 8]) i64 {
+        return u64::from_le_bytes(b) as i64;
+    }
+    /// The value of the two's complement bytes `b` in the target's byte order.
+    pub const fn from_ne_bytes(b: [u8; 8]) i64 {
+        return u64::from_ne_bytes(b) as i64;
+    }
+    /// `self` raised to `exp` (1 for `exp` 0); overflow traps with overflow checks and wraps without.
+    pub const fn pow(self: i64, exp: u32) i64 {
+        if exp == 0 {
+            return 1;
+        }
+        let mut base = self;
+        let mut acc: i64 = 1;
+        let mut e = exp;
+        while e > 1 {
+            if (e & 1) == 1 {
+                acc = acc * base;
+            }
+            e = e >> 1;
+            base = base * base;
+        }
+        return acc * base;
+    }
+    /// The floor of the square root. Panics when `self` is negative.
+    pub const fn isqrt(self: i64) i64 {
+        if self < 0 {
+            panic("argument of integer square root cannot be negative");
+        }
+        return (self as u64).isqrt() as i64;
+    }
+    /// The floor of log2(self). Panics when `self` is not positive.
+    pub const fn ilog2(self: i64) u32 {
+        if self <= 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return (self as u64).ilog2();
+    }
+    /// The floor of log10(self). Panics when `self` is not positive.
+    pub const fn ilog10(self: i64) u32 {
+        if self <= 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog10_u64(self as u64);
+    }
+    /// The floor of the logarithm of `self` in `base`. Panics when `base` is below 2 or `self` is not
+    /// positive.
+    pub const fn ilog(self: i64, base: i64) u32 {
+        if base < 2 {
+            panic("base of integer logarithm must be at least 2");
+        }
+        if self <= 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog_u64(self as u64, base as u64);
+    }
+    /// `|self - other|` as a `u64`: exact for every pair.
+    pub const fn abs_diff(self: i64, other: i64) u64 {
+        if self < other {
+            return (other as u64).wrapping_sub(self as u64);
+        }
+        return (self as u64).wrapping_sub(other as u64);
+    }
+    /// `|self|` as a `u64`: exact for MIN too.
+    pub const fn unsigned_abs(self: i64) u64 {
+        return self.wrapping_abs() as u64;
+    }
+    /// `(self + rhs) / 2` rounded toward zero, without overflow.
+    pub const fn midpoint(self: i64, rhs: i64) i64 {
+        let floor = (self & rhs) + ((self ^ rhs) >> 1);
+        if floor < 0 && ((self ^ rhs) & 1) == 1 {
+            return floor + 1;
+        }
+        return floor;
+    }
+    /// The Euclidean quotient: the `q` with `self == q * rhs + r` and `0 <= r < |rhs|`. Traps on a zero
+    /// divisor and on MIN / -1.
+    pub const fn div_euclid(self: i64, rhs: i64) i64 {
+        let q = self / rhs;
+        if self % rhs < 0 {
+            if rhs > 0 {
+                return q - 1;
+            }
+            return q + 1;
+        }
+        return q;
+    }
+    /// The Euclidean remainder, in `[0, |rhs|)`. Traps on a zero divisor and on MIN % -1.
+    pub const fn rem_euclid(self: i64, rhs: i64) i64 {
+        let r = self % rhs;
+        if r < 0 {
+            return r.wrapping_add(rhs.wrapping_abs());
+        }
+        return r;
+    }
+    /// The same bits as a `u64`: negative values become large.
+    pub const fn cast_unsigned(self: i64) u64 {
+        return self as u64;
+    }
+    /// `self / rhs`, with MIN / -1 giving MIN. Traps on a zero divisor.
+    pub const fn wrapping_div(self: i64, rhs: i64) i64 {
+        if self == -9223372036854775807 - 1 && rhs == -1 {
+            return -9223372036854775807 - 1;
+        }
+        return self / rhs;
+    }
+    /// `self % rhs`, with MIN % -1 giving 0. Traps on a zero divisor.
+    pub const fn wrapping_rem(self: i64, rhs: i64) i64 {
+        if rhs == -1 {
+            return 0;
+        }
+        return self % rhs;
+    }
+    /// `self.div_euclid(rhs)`, with MIN / -1 giving MIN. Traps on a zero divisor.
+    pub const fn wrapping_div_euclid(self: i64, rhs: i64) i64 {
+        if self == -9223372036854775807 - 1 && rhs == -1 {
+            return -9223372036854775807 - 1;
+        }
+        return self.div_euclid(rhs);
+    }
+    /// `self.rem_euclid(rhs)`, with MIN % -1 giving 0. Traps on a zero divisor.
+    pub const fn wrapping_rem_euclid(self: i64, rhs: i64) i64 {
+        if rhs == -1 {
+            return 0;
+        }
+        return self.rem_euclid(rhs);
+    }
+    /// `|self|` modulo 2^N (MIN stays MIN).
+    pub const fn wrapping_abs(self: i64) i64 {
+        if self < 0 {
+            return self.wrapping_neg();
+        }
+        return self;
+    }
+    /// `self` raised to `exp` modulo 2^N.
+    pub const fn wrapping_pow(self: i64, exp: u32) i64 {
+        return (self as u64).wrapping_pow(exp) as i64;
+    }
+    /// `-self` modulo 2^N and whether `self` is MIN.
+    pub const fn overflowing_neg(self: i64) (i64, bool) {
+        return self.wrapping_neg(), self == -9223372036854775807 - 1;
+    }
+    /// `self.wrapping_shl(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shl(self: i64, n: u32) (i64, bool) {
+        return self.wrapping_shl(n), n >= 64;
+    }
+    /// `self.wrapping_shr(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shr(self: i64, n: u32) (i64, bool) {
+        return self.wrapping_shr(n), n >= 64;
+    }
+    /// `self.wrapping_div(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
+    pub const fn overflowing_div(self: i64, rhs: i64) (i64, bool) {
+        if self == -9223372036854775807 - 1 && rhs == -1 {
+            return self, true;
+        }
+        return self / rhs, false;
+    }
+    /// `self.wrapping_rem(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
+    pub const fn overflowing_rem(self: i64, rhs: i64) (i64, bool) {
+        if rhs == -1 {
+            return 0, self == -9223372036854775807 - 1;
+        }
+        return self % rhs, false;
+    }
+    /// `self.wrapping_div_euclid(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
+    pub const fn overflowing_div_euclid(self: i64, rhs: i64) (i64, bool) {
+        if self == -9223372036854775807 - 1 && rhs == -1 {
+            return self, true;
+        }
+        return self.div_euclid(rhs), false;
+    }
+    /// `self.wrapping_rem_euclid(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
+    pub const fn overflowing_rem_euclid(self: i64, rhs: i64) (i64, bool) {
+        if rhs == -1 {
+            return 0, self == -9223372036854775807 - 1;
+        }
+        return self.rem_euclid(rhs), false;
+    }
+    /// `self.wrapping_abs()` and whether `self` is MIN.
+    pub const fn overflowing_abs(self: i64) (i64, bool) {
+        return self.wrapping_abs(), self == -9223372036854775807 - 1;
+    }
+    /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
+    pub const fn overflowing_pow(self: i64, exp: u32) (i64, bool) {
+        if exp == 0 {
+            return 1, false;
+        }
+        let mut base = self;
+        let mut acc: i64 = 1;
+        let mut e = exp;
+        let mut o = false;
+        while e > 1 {
+            if (e & 1) == 1 {
+                let (r, ro) = acc.overflowing_mul(base);
+                acc = r;
+                o = o || ro;
+            }
+            e = e >> 1;
+            let (sq, so) = base.overflowing_mul(base);
+            base = sq;
+            o = o || so;
+        }
+        let (r, ro) = acc.overflowing_mul(base);
+        return r, o || ro;
+    }
+    /// `|self|`, or None for MIN.
+    pub const fn checked_abs(self: i64) Option<i64> {
+        if self == -9223372036854775807 - 1 {
+            return Option::<i64>::None;
+        }
+        return Option::<i64>::Some(self.wrapping_abs());
+    }
+    /// `self` raised to `exp`, or None when it overflows.
+    pub const fn checked_pow(self: i64, exp: u32) Option<i64> {
+        let (r, o) = self.overflowing_pow(exp);
+        if o {
+            return Option::<i64>::None;
+        }
+        return Option::<i64>::Some(r);
+    }
+    /// The floor of the square root, or None when `self` is negative.
+    pub const fn checked_isqrt(self: i64) Option<i64> {
+        if self < 0 {
+            return Option::<i64>::None;
+        }
+        return Option::<i64>::Some((self as u64).isqrt() as i64);
+    }
+    /// The floor of log2(self), or None when `self` is not positive.
+    pub const fn checked_ilog2(self: i64) Option<u32> {
+        if self <= 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some((self as u64).ilog2());
+    }
+    /// The floor of log10(self), or None when `self` is not positive.
+    pub const fn checked_ilog10(self: i64) Option<u32> {
+        if self <= 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog10_u64(self as u64));
+    }
+    /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is not
+    /// positive.
+    pub const fn checked_ilog(self: i64, base: i64) Option<u32> {
+        if base < 2 || self <= 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog_u64(self as u64, base as u64));
+    }
+    /// `self.div_euclid(rhs)`, or None for a zero divisor or MIN / -1.
+    pub const fn checked_div_euclid(self: i64, rhs: i64) Option<i64> {
+        if rhs == 0 || self == -9223372036854775807 - 1 && rhs == -1 {
+            return Option::<i64>::None;
+        }
+        return Option::<i64>::Some(self.div_euclid(rhs));
+    }
+    /// `self.rem_euclid(rhs)`, or None for a zero divisor or MIN % -1.
+    pub const fn checked_rem_euclid(self: i64, rhs: i64) Option<i64> {
+        if rhs == 0 || self == -9223372036854775807 - 1 && rhs == -1 {
+            return Option::<i64>::None;
+        }
+        return Option::<i64>::Some(self.rem_euclid(rhs));
+    }
+    /// `-self`, with MIN giving MAX.
+    pub const fn saturating_neg(self: i64) i64 {
+        if self == -9223372036854775807 - 1 {
+            return 9223372036854775807;
+        }
+        return -self;
+    }
+    /// `|self|`, with MIN giving MAX.
+    pub const fn saturating_abs(self: i64) i64 {
+        if self == -9223372036854775807 - 1 {
+            return 9223372036854775807;
+        }
+        return self.wrapping_abs();
+    }
+    /// `self / rhs`, with MIN / -1 giving MAX. Traps on a zero divisor.
+    pub const fn saturating_div(self: i64, rhs: i64) i64 {
+        if self == -9223372036854775807 - 1 && rhs == -1 {
+            return 9223372036854775807;
+        }
+        return self / rhs;
+    }
+    /// `self` raised to `exp`, clamped to [MIN, MAX].
+    pub const fn saturating_pow(self: i64, exp: u32) i64 {
+        let (r, o) = self.overflowing_pow(exp);
+        if !o {
+            return r;
+        }
+        if self < 0 && (exp & 1) == 1 {
+            return -9223372036854775807 - 1;
+        }
+        return 9223372036854775807;
+    }
 }
 
 extend isize {
@@ -1481,6 +2963,8 @@ extend isize {
     pub const MIN: isize = -((~0usize >> 1) as isize) - 1;
     /// The largest value (the target's pointer width).
     pub const MAX: isize = (~0usize >> 1) as isize;
+    /// The width in bits.
+    pub const BITS: u32 = usize::BITS;
     /// Zero bits below the lowest set bit of the two's complement pattern (the width for zero).
     pub const fn trailing_zeros(self: isize) usize {
         return (self as usize).trailing_zeros();
@@ -1674,6 +3158,386 @@ extend isize {
         }
         return (~0usize >> 1) as isize;
     }
+    /// Number of clear bits in the two's complement pattern.
+    pub const fn count_zeros(self: isize) usize {
+        return (self as usize).count_zeros();
+    }
+    /// One bits above the highest clear bit of the two's complement pattern (the width for -1).
+    pub const fn leading_ones(self: isize) usize {
+        return (self as usize).leading_ones();
+    }
+    /// One bits below the lowest clear bit of the two's complement pattern (the width for -1).
+    pub const fn trailing_ones(self: isize) usize {
+        return (self as usize).trailing_ones();
+    }
+    /// The two's complement bits rotated toward the high end by `n % N`.
+    pub const fn rotate_left(self: isize, n: u32) isize {
+        return (self as usize).rotate_left(n) as isize;
+    }
+    /// The two's complement bits rotated toward the low end by `n % N`.
+    pub const fn rotate_right(self: isize, n: u32) isize {
+        return (self as usize).rotate_right(n) as isize;
+    }
+    /// The bytes in reverse order.
+    pub const fn swap_bytes(self: isize) isize {
+        return (self as usize).swap_bytes() as isize;
+    }
+    /// The two's complement bits in reverse order: bit 0 becomes bit N - 1.
+    pub const fn reverse_bits(self: isize) isize {
+        return (self as usize).reverse_bits() as isize;
+    }
+    /// `self` in big-endian byte order: `swap_bytes` on a little-endian target, `self` on a big-endian one.
+    pub const fn to_be(self: isize) isize {
+        return (self as usize).to_be() as isize;
+    }
+    /// `self` in little-endian byte order: `self` on a little-endian target, `swap_bytes` on a big-endian one.
+    pub const fn to_le(self: isize) isize {
+        return (self as usize).to_le() as isize;
+    }
+    /// The value whose big-endian representation is `x`.
+    pub const fn from_be(x: isize) isize {
+        return (x as usize).to_be() as isize;
+    }
+    /// The value whose little-endian representation is `x`.
+    pub const fn from_le(x: isize) isize {
+        return (x as usize).to_le() as isize;
+    }
+    /// The two's complement bytes of `self`, most significant first.
+    pub const fn to_be_bytes(self: isize) [u8; sizeof(usize)] {
+        if POINTER_WIDTH == 32 {
+            return (self as u32).to_be_bytes();
+        } else {
+            return (self as u64).to_be_bytes();
+        }
+    }
+    /// The two's complement bytes of `self`, least significant first.
+    pub const fn to_le_bytes(self: isize) [u8; sizeof(usize)] {
+        if POINTER_WIDTH == 32 {
+            return (self as u32).to_le_bytes();
+        } else {
+            return (self as u64).to_le_bytes();
+        }
+    }
+    /// The two's complement bytes of `self` in the target's byte order.
+    pub const fn to_ne_bytes(self: isize) [u8; sizeof(usize)] {
+        if POINTER_WIDTH == 32 {
+            return (self as u32).to_ne_bytes();
+        } else {
+            return (self as u64).to_ne_bytes();
+        }
+    }
+    /// The value of the two's complement bytes `b`, most significant first.
+    pub const fn from_be_bytes(b: [u8; sizeof(usize)]) isize {
+        if POINTER_WIDTH == 32 {
+            return u32::from_be_bytes(b) as isize;
+        } else {
+            return u64::from_be_bytes(b) as isize;
+        }
+    }
+    /// The value of the two's complement bytes `b`, least significant first.
+    pub const fn from_le_bytes(b: [u8; sizeof(usize)]) isize {
+        if POINTER_WIDTH == 32 {
+            return u32::from_le_bytes(b) as isize;
+        } else {
+            return u64::from_le_bytes(b) as isize;
+        }
+    }
+    /// The value of the two's complement bytes `b` in the target's byte order.
+    pub const fn from_ne_bytes(b: [u8; sizeof(usize)]) isize {
+        if POINTER_WIDTH == 32 {
+            return u32::from_ne_bytes(b) as isize;
+        } else {
+            return u64::from_ne_bytes(b) as isize;
+        }
+    }
+    /// `self` raised to `exp` (1 for `exp` 0); overflow traps with overflow checks and wraps without.
+    pub const fn pow(self: isize, exp: u32) isize {
+        if exp == 0 {
+            return 1;
+        }
+        let mut base = self;
+        let mut acc: isize = 1;
+        let mut e = exp;
+        while e > 1 {
+            if (e & 1) == 1 {
+                acc = acc * base;
+            }
+            e = e >> 1;
+            base = base * base;
+        }
+        return acc * base;
+    }
+    /// The floor of the square root. Panics when `self` is negative.
+    pub const fn isqrt(self: isize) isize {
+        if self < 0 {
+            panic("argument of integer square root cannot be negative");
+        }
+        return (self as usize).isqrt() as isize;
+    }
+    /// The floor of log2(self). Panics when `self` is not positive.
+    pub const fn ilog2(self: isize) u32 {
+        if self <= 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return (self as usize).ilog2();
+    }
+    /// The floor of log10(self). Panics when `self` is not positive.
+    pub const fn ilog10(self: isize) u32 {
+        if self <= 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog10_u64(self as u64);
+    }
+    /// The floor of the logarithm of `self` in `base`. Panics when `base` is below 2 or `self` is not
+    /// positive.
+    pub const fn ilog(self: isize, base: isize) u32 {
+        if base < 2 {
+            panic("base of integer logarithm must be at least 2");
+        }
+        if self <= 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog_u64(self as u64, base as u64);
+    }
+    /// `|self - other|` as a `usize`: exact for every pair.
+    pub const fn abs_diff(self: isize, other: isize) usize {
+        if self < other {
+            return (other as usize).wrapping_sub(self as usize);
+        }
+        return (self as usize).wrapping_sub(other as usize);
+    }
+    /// `|self|` as a `usize`: exact for MIN too.
+    pub const fn unsigned_abs(self: isize) usize {
+        return self.wrapping_abs() as usize;
+    }
+    /// `(self + rhs) / 2` rounded toward zero, without overflow.
+    pub const fn midpoint(self: isize, rhs: isize) isize {
+        let floor = (self & rhs) + ((self ^ rhs) >> 1);
+        if floor < 0 && ((self ^ rhs) & 1) == 1 {
+            return floor + 1;
+        }
+        return floor;
+    }
+    /// The Euclidean quotient: the `q` with `self == q * rhs + r` and `0 <= r < |rhs|`. Traps on a zero
+    /// divisor and on MIN / -1.
+    pub const fn div_euclid(self: isize, rhs: isize) isize {
+        let q = self / rhs;
+        if self % rhs < 0 {
+            if rhs > 0 {
+                return q - 1;
+            }
+            return q + 1;
+        }
+        return q;
+    }
+    /// The Euclidean remainder, in `[0, |rhs|)`. Traps on a zero divisor and on MIN % -1.
+    pub const fn rem_euclid(self: isize, rhs: isize) isize {
+        let r = self % rhs;
+        if r < 0 {
+            return r.wrapping_add(rhs.wrapping_abs());
+        }
+        return r;
+    }
+    /// The same bits as a `usize`: negative values become large.
+    pub const fn cast_unsigned(self: isize) usize {
+        return self as usize;
+    }
+    /// `self / rhs`, with MIN / -1 giving MIN. Traps on a zero divisor.
+    pub const fn wrapping_div(self: isize, rhs: isize) isize {
+        if self == -((~0usize >> 1) as isize) - 1 && rhs == -1 {
+            return -((~0usize >> 1) as isize) - 1;
+        }
+        return self / rhs;
+    }
+    /// `self % rhs`, with MIN % -1 giving 0. Traps on a zero divisor.
+    pub const fn wrapping_rem(self: isize, rhs: isize) isize {
+        if rhs == -1 {
+            return 0;
+        }
+        return self % rhs;
+    }
+    /// `self.div_euclid(rhs)`, with MIN / -1 giving MIN. Traps on a zero divisor.
+    pub const fn wrapping_div_euclid(self: isize, rhs: isize) isize {
+        if self == -((~0usize >> 1) as isize) - 1 && rhs == -1 {
+            return -((~0usize >> 1) as isize) - 1;
+        }
+        return self.div_euclid(rhs);
+    }
+    /// `self.rem_euclid(rhs)`, with MIN % -1 giving 0. Traps on a zero divisor.
+    pub const fn wrapping_rem_euclid(self: isize, rhs: isize) isize {
+        if rhs == -1 {
+            return 0;
+        }
+        return self.rem_euclid(rhs);
+    }
+    /// `|self|` modulo 2^N (MIN stays MIN).
+    pub const fn wrapping_abs(self: isize) isize {
+        if self < 0 {
+            return self.wrapping_neg();
+        }
+        return self;
+    }
+    /// `self` raised to `exp` modulo 2^N.
+    pub const fn wrapping_pow(self: isize, exp: u32) isize {
+        return (self as usize).wrapping_pow(exp) as isize;
+    }
+    /// `-self` modulo 2^N and whether `self` is MIN.
+    pub const fn overflowing_neg(self: isize) (isize, bool) {
+        return self.wrapping_neg(), self == -((~0usize >> 1) as isize) - 1;
+    }
+    /// `self.wrapping_shl(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shl(self: isize, n: u32) (isize, bool) {
+        return self.wrapping_shl(n), n >= sizeof(usize) as u32 * 8;
+    }
+    /// `self.wrapping_shr(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shr(self: isize, n: u32) (isize, bool) {
+        return self.wrapping_shr(n), n >= sizeof(usize) as u32 * 8;
+    }
+    /// `self.wrapping_div(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
+    pub const fn overflowing_div(self: isize, rhs: isize) (isize, bool) {
+        if self == -((~0usize >> 1) as isize) - 1 && rhs == -1 {
+            return self, true;
+        }
+        return self / rhs, false;
+    }
+    /// `self.wrapping_rem(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
+    pub const fn overflowing_rem(self: isize, rhs: isize) (isize, bool) {
+        if rhs == -1 {
+            return 0, self == -((~0usize >> 1) as isize) - 1;
+        }
+        return self % rhs, false;
+    }
+    /// `self.wrapping_div_euclid(rhs)` and whether it is MIN / -1. Traps on a zero divisor.
+    pub const fn overflowing_div_euclid(self: isize, rhs: isize) (isize, bool) {
+        if self == -((~0usize >> 1) as isize) - 1 && rhs == -1 {
+            return self, true;
+        }
+        return self.div_euclid(rhs), false;
+    }
+    /// `self.wrapping_rem_euclid(rhs)` and whether it is MIN % -1. Traps on a zero divisor.
+    pub const fn overflowing_rem_euclid(self: isize, rhs: isize) (isize, bool) {
+        if rhs == -1 {
+            return 0, self == -((~0usize >> 1) as isize) - 1;
+        }
+        return self.rem_euclid(rhs), false;
+    }
+    /// `self.wrapping_abs()` and whether `self` is MIN.
+    pub const fn overflowing_abs(self: isize) (isize, bool) {
+        return self.wrapping_abs(), self == -((~0usize >> 1) as isize) - 1;
+    }
+    /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
+    pub const fn overflowing_pow(self: isize, exp: u32) (isize, bool) {
+        if exp == 0 {
+            return 1, false;
+        }
+        let mut base = self;
+        let mut acc: isize = 1;
+        let mut e = exp;
+        let mut o = false;
+        while e > 1 {
+            if (e & 1) == 1 {
+                let (r, ro) = acc.overflowing_mul(base);
+                acc = r;
+                o = o || ro;
+            }
+            e = e >> 1;
+            let (sq, so) = base.overflowing_mul(base);
+            base = sq;
+            o = o || so;
+        }
+        let (r, ro) = acc.overflowing_mul(base);
+        return r, o || ro;
+    }
+    /// `|self|`, or None for MIN.
+    pub const fn checked_abs(self: isize) Option<isize> {
+        if self == -((~0usize >> 1) as isize) - 1 {
+            return Option::<isize>::None;
+        }
+        return Option::<isize>::Some(self.wrapping_abs());
+    }
+    /// `self` raised to `exp`, or None when it overflows.
+    pub const fn checked_pow(self: isize, exp: u32) Option<isize> {
+        let (r, o) = self.overflowing_pow(exp);
+        if o {
+            return Option::<isize>::None;
+        }
+        return Option::<isize>::Some(r);
+    }
+    /// The floor of the square root, or None when `self` is negative.
+    pub const fn checked_isqrt(self: isize) Option<isize> {
+        if self < 0 {
+            return Option::<isize>::None;
+        }
+        return Option::<isize>::Some((self as usize).isqrt() as isize);
+    }
+    /// The floor of log2(self), or None when `self` is not positive.
+    pub const fn checked_ilog2(self: isize) Option<u32> {
+        if self <= 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some((self as usize).ilog2());
+    }
+    /// The floor of log10(self), or None when `self` is not positive.
+    pub const fn checked_ilog10(self: isize) Option<u32> {
+        if self <= 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog10_u64(self as u64));
+    }
+    /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is not
+    /// positive.
+    pub const fn checked_ilog(self: isize, base: isize) Option<u32> {
+        if base < 2 || self <= 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog_u64(self as u64, base as u64));
+    }
+    /// `self.div_euclid(rhs)`, or None for a zero divisor or MIN / -1.
+    pub const fn checked_div_euclid(self: isize, rhs: isize) Option<isize> {
+        if rhs == 0 || self == -((~0usize >> 1) as isize) - 1 && rhs == -1 {
+            return Option::<isize>::None;
+        }
+        return Option::<isize>::Some(self.div_euclid(rhs));
+    }
+    /// `self.rem_euclid(rhs)`, or None for a zero divisor or MIN % -1.
+    pub const fn checked_rem_euclid(self: isize, rhs: isize) Option<isize> {
+        if rhs == 0 || self == -((~0usize >> 1) as isize) - 1 && rhs == -1 {
+            return Option::<isize>::None;
+        }
+        return Option::<isize>::Some(self.rem_euclid(rhs));
+    }
+    /// `-self`, with MIN giving MAX.
+    pub const fn saturating_neg(self: isize) isize {
+        if self == -((~0usize >> 1) as isize) - 1 {
+            return (~0usize >> 1) as isize;
+        }
+        return -self;
+    }
+    /// `|self|`, with MIN giving MAX.
+    pub const fn saturating_abs(self: isize) isize {
+        if self == -((~0usize >> 1) as isize) - 1 {
+            return (~0usize >> 1) as isize;
+        }
+        return self.wrapping_abs();
+    }
+    /// `self / rhs`, with MIN / -1 giving MAX. Traps on a zero divisor.
+    pub const fn saturating_div(self: isize, rhs: isize) isize {
+        if self == -((~0usize >> 1) as isize) - 1 && rhs == -1 {
+            return (~0usize >> 1) as isize;
+        }
+        return self / rhs;
+    }
+    /// `self` raised to `exp`, clamped to [MIN, MAX].
+    pub const fn saturating_pow(self: isize, exp: u32) isize {
+        let (r, o) = self.overflowing_pow(exp);
+        if !o {
+            return r;
+        }
+        if self < 0 && (exp & 1) == 1 {
+            return -((~0usize >> 1) as isize) - 1;
+        }
+        return (~0usize >> 1) as isize;
+    }
 }
 
 extend u8 {
@@ -1681,6 +3545,8 @@ extend u8 {
     pub const MIN: u8 = 0;
     /// The largest value.
     pub const MAX: u8 = 255;
+    /// The width in bits.
+    pub const BITS: u32 = 8;
     /// Zero bits below the lowest set bit (8 for zero).
     pub const fn trailing_zeros(self: u8) usize {
         return (unsafe sc_ctz64(self as u64 | 1u64 << 8)) as usize; // bit 8 set: a zero counts 8
@@ -1841,6 +3707,430 @@ extend u8 {
         }
         return r;
     }
+    /// Number of clear bits.
+    pub const fn count_zeros(self: u8) usize {
+        return (~self).count_ones();
+    }
+    /// One bits above the highest clear bit (the width for MAX).
+    pub const fn leading_ones(self: u8) usize {
+        return (~self).leading_zeros();
+    }
+    /// One bits below the lowest clear bit (the width for MAX).
+    pub const fn trailing_ones(self: u8) usize {
+        return (~self).trailing_zeros();
+    }
+    /// The bits rotated toward the high end by `n % N`: the bits shifted out enter at the low end.
+    pub const fn rotate_left(self: u8, n: u32) u8 {
+        let k = (n & 7) as u8;
+        return self << k | self >> (8 - k & 7);
+    }
+    /// The bits rotated toward the low end by `n % N`: the bits shifted out enter at the high end.
+    pub const fn rotate_right(self: u8, n: u32) u8 {
+        let k = (n & 7) as u8;
+        return self >> k | self << (8 - k & 7);
+    }
+    /// The bytes in reverse order: `self` for a single byte.
+    pub const fn swap_bytes(self: u8) u8 {
+        return self;
+    }
+    /// The bits in reverse order: bit 0 becomes bit N - 1.
+    pub const fn reverse_bits(self: u8) u8 {
+        let mut x = self >> 4 | self << 4;
+        x = x >> 2 & 0x33 | (x & 0x33) << 2;
+        return x >> 1 & 0x55 | (x & 0x55) << 1;
+    }
+    /// `self` in big-endian byte order: `swap_bytes` on a little-endian target, `self` on a big-endian one.
+    pub const fn to_be(self: u8) u8 {
+        if ENDIAN == Endian::Big {
+            return self;
+        } else {
+            return self.swap_bytes();
+        }
+    }
+    /// `self` in little-endian byte order: `self` on a little-endian target, `swap_bytes` on a big-endian one.
+    pub const fn to_le(self: u8) u8 {
+        if ENDIAN == Endian::Little {
+            return self;
+        } else {
+            return self.swap_bytes();
+        }
+    }
+    /// The value whose big-endian representation is `x`.
+    pub const fn from_be(x: u8) u8 {
+        return x.to_be();
+    }
+    /// The value whose little-endian representation is `x`.
+    pub const fn from_le(x: u8) u8 {
+        return x.to_le();
+    }
+    /// The bytes of `self`, most significant first.
+    pub const fn to_be_bytes(self: u8) [u8; 1] {
+        return [self];
+    }
+    /// The bytes of `self`, least significant first.
+    pub const fn to_le_bytes(self: u8) [u8; 1] {
+        return [self];
+    }
+    /// The bytes of `self` in the target's byte order.
+    pub const fn to_ne_bytes(self: u8) [u8; 1] {
+        if ENDIAN == Endian::Big {
+            return self.to_be_bytes();
+        } else {
+            return self.to_le_bytes();
+        }
+    }
+    /// The value of the bytes `b`, most significant first.
+    pub const fn from_be_bytes(b: [u8; 1]) u8 {
+        return b[0];
+    }
+    /// The value of the bytes `b`, least significant first.
+    pub const fn from_le_bytes(b: [u8; 1]) u8 {
+        return b[0];
+    }
+    /// The value of the bytes `b` in the target's byte order.
+    pub const fn from_ne_bytes(b: [u8; 1]) u8 {
+        if ENDIAN == Endian::Big {
+            return u8::from_be_bytes(b);
+        } else {
+            return u8::from_le_bytes(b);
+        }
+    }
+    /// The smallest power of two not below `self` (1 for 0). Above the largest power of two it traps
+    /// with overflow checks and gives 0 without.
+    pub const fn next_power_of_two(self: u8) u8 {
+        if self <= 1 {
+            return 1;
+        }
+        return (255 >> (self - 1).leading_zeros() as u8) + 1;
+    }
+    /// The smallest power of two not below `self` (1 for 0), or None when it does not fit.
+    pub const fn checked_next_power_of_two(self: u8) Option<u8> {
+        if self <= 1 {
+            return Option::<u8>::Some(1);
+        }
+        return (255u8 >> (self - 1).leading_zeros() as u8).checked_add(1);
+    }
+    /// `self` raised to `exp` (1 for `exp` 0); overflow traps with overflow checks and wraps without.
+    pub const fn pow(self: u8, exp: u32) u8 {
+        if exp == 0 {
+            return 1;
+        }
+        let mut base = self;
+        let mut acc: u8 = 1;
+        let mut e = exp;
+        while e > 1 {
+            if (e & 1) == 1 {
+                acc = acc * base;
+            }
+            e = e >> 1;
+            base = base * base;
+        }
+        return acc * base;
+    }
+    /// The floor of the square root.
+    pub const fn isqrt(self: u8) u8 {
+        return (self as u32).isqrt() as u8;
+    }
+    /// The floor of log2(self). Panics when `self` is 0.
+    pub const fn ilog2(self: u8) u32 {
+        if self == 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return 7 - self.leading_zeros() as u32;
+    }
+    /// The floor of log10(self). Panics when `self` is 0.
+    pub const fn ilog10(self: u8) u32 {
+        if self == 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog10_u64(self);
+    }
+    /// The floor of the logarithm of `self` in `base`. Panics when `base` is below 2 or `self` is 0.
+    pub const fn ilog(self: u8, base: u8) u32 {
+        if base < 2 {
+            panic("base of integer logarithm must be at least 2");
+        }
+        if self == 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog_u64(self, base);
+    }
+    /// `|self - other|`.
+    pub const fn abs_diff(self: u8, other: u8) u8 {
+        if self < other {
+            return other - self;
+        }
+        return self - other;
+    }
+    /// `(self + rhs) / 2` rounded down, without overflow.
+    pub const fn midpoint(self: u8, rhs: u8) u8 {
+        return (self & rhs) + ((self ^ rhs) >> 1);
+    }
+    /// `self / rhs` rounded up. Traps on a zero divisor.
+    pub const fn div_ceil(self: u8, rhs: u8) u8 {
+        let q = self / rhs;
+        if self % rhs > 0 {
+            return q + 1;
+        }
+        return q;
+    }
+    /// The smallest multiple of `rhs` not below `self`. Traps on a zero `rhs`; overflow traps with
+    /// overflow checks and wraps without.
+    pub const fn next_multiple_of(self: u8, rhs: u8) u8 {
+        let r = self % rhs;
+        if r == 0 {
+            return self;
+        }
+        return self + (rhs - r);
+    }
+    /// The smallest multiple of `rhs` not below `self`, or None for a zero `rhs` or on overflow.
+    pub const fn checked_next_multiple_of(self: u8, rhs: u8) Option<u8> {
+        if rhs == 0 {
+            return Option::<u8>::None;
+        }
+        let r = self % rhs;
+        if r == 0 {
+            return Option::<u8>::Some(self);
+        }
+        return self.checked_add(rhs - r);
+    }
+    /// True when `self` is a multiple of `rhs`; for a zero `rhs`, only 0 is.
+    pub const fn is_multiple_of(self: u8, rhs: u8) bool {
+        if rhs == 0 {
+            return self == 0;
+        }
+        return self % rhs == 0;
+    }
+    /// `self / rhs`: unsigned division is already Euclidean. Traps on a zero divisor.
+    pub const fn div_euclid(self: u8, rhs: u8) u8 {
+        return self / rhs;
+    }
+    /// `self % rhs`: unsigned remainder is already Euclidean. Traps on a zero divisor.
+    pub const fn rem_euclid(self: u8, rhs: u8) u8 {
+        return self % rhs;
+    }
+    /// The same bits as a `i8`: values above `127` become negative.
+    pub const fn cast_signed(self: u8) i8 {
+        return self as i8;
+    }
+    /// `self / rhs`: unsigned division never wraps. Traps on a zero divisor.
+    pub const fn wrapping_div(self: u8, rhs: u8) u8 {
+        return self / rhs;
+    }
+    /// `self % rhs`: unsigned remainder never wraps. Traps on a zero divisor.
+    pub const fn wrapping_rem(self: u8, rhs: u8) u8 {
+        return self % rhs;
+    }
+    /// `self / rhs`. Traps on a zero divisor.
+    pub const fn wrapping_div_euclid(self: u8, rhs: u8) u8 {
+        return self / rhs;
+    }
+    /// `self % rhs`. Traps on a zero divisor.
+    pub const fn wrapping_rem_euclid(self: u8, rhs: u8) u8 {
+        return self % rhs;
+    }
+    /// `self` raised to `exp` modulo 2^N.
+    pub const fn wrapping_pow(self: u8, exp: u32) u8 {
+        if exp == 0 {
+            return 1;
+        }
+        let mut base = self;
+        let mut acc: u8 = 1;
+        let mut e = exp;
+        while e > 1 {
+            if (e & 1) == 1 {
+                acc = acc.wrapping_mul(base);
+            }
+            e = e >> 1;
+            base = base.wrapping_mul(base);
+        }
+        return acc.wrapping_mul(base);
+    }
+    /// `self + rhs` modulo 2^N for a signed `rhs`.
+    pub const fn wrapping_add_signed(self: u8, rhs: i8) u8 {
+        return self.wrapping_add(rhs as u8);
+    }
+    /// `0 - self` modulo 2^N and whether `self` is nonzero.
+    pub const fn overflowing_neg(self: u8) (u8, bool) {
+        return self.wrapping_neg(), self != 0;
+    }
+    /// `self.wrapping_shl(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shl(self: u8, n: u32) (u8, bool) {
+        return self.wrapping_shl(n), n >= 8;
+    }
+    /// `self.wrapping_shr(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shr(self: u8, n: u32) (u8, bool) {
+        return self.wrapping_shr(n), n >= 8;
+    }
+    /// `self / rhs` and false: unsigned division never overflows. Traps on a zero divisor.
+    pub const fn overflowing_div(self: u8, rhs: u8) (u8, bool) {
+        return self / rhs, false;
+    }
+    /// `self % rhs` and false: unsigned remainder never overflows. Traps on a zero divisor.
+    pub const fn overflowing_rem(self: u8, rhs: u8) (u8, bool) {
+        return self % rhs, false;
+    }
+    /// `self / rhs` and false. Traps on a zero divisor.
+    pub const fn overflowing_div_euclid(self: u8, rhs: u8) (u8, bool) {
+        return self / rhs, false;
+    }
+    /// `self % rhs` and false. Traps on a zero divisor.
+    pub const fn overflowing_rem_euclid(self: u8, rhs: u8) (u8, bool) {
+        return self % rhs, false;
+    }
+    /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
+    pub const fn overflowing_pow(self: u8, exp: u32) (u8, bool) {
+        if exp == 0 {
+            return 1, false;
+        }
+        let mut base = self;
+        let mut acc: u8 = 1;
+        let mut e = exp;
+        let mut o = false;
+        while e > 1 {
+            if (e & 1) == 1 {
+                let (r, ro) = acc.overflowing_mul(base);
+                acc = r;
+                o = o || ro;
+            }
+            e = e >> 1;
+            let (sq, so) = base.overflowing_mul(base);
+            base = sq;
+            o = o || so;
+        }
+        let (r, ro) = acc.overflowing_mul(base);
+        return r, o || ro;
+    }
+    /// `self + rhs` modulo 2^N for a signed `rhs`, and whether the exact sum leaves [0, MAX].
+    pub const fn overflowing_add_signed(self: u8, rhs: i8) (u8, bool) {
+        let (r, o) = self.overflowing_add(rhs as u8);
+        return r, o != rhs < 0;
+    }
+    /// `self` raised to `exp`, or None when it overflows.
+    pub const fn checked_pow(self: u8, exp: u32) Option<u8> {
+        let (r, o) = self.overflowing_pow(exp);
+        if o {
+            return Option::<u8>::None;
+        }
+        return Option::<u8>::Some(r);
+    }
+    /// The floor of log2(self), or None for 0.
+    pub const fn checked_ilog2(self: u8) Option<u32> {
+        if self == 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(self.ilog2());
+    }
+    /// The floor of log10(self), or None for 0.
+    pub const fn checked_ilog10(self: u8) Option<u32> {
+        if self == 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog10_u64(self));
+    }
+    /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is 0.
+    pub const fn checked_ilog(self: u8, base: u8) Option<u32> {
+        if base < 2 || self == 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog_u64(self, base));
+    }
+    /// `self / rhs`, or None for a zero divisor.
+    pub const fn checked_div_euclid(self: u8, rhs: u8) Option<u8> {
+        return self.checked_div(rhs);
+    }
+    /// `self % rhs`, or None for a zero divisor.
+    pub const fn checked_rem_euclid(self: u8, rhs: u8) Option<u8> {
+        return self.checked_rem(rhs);
+    }
+    /// `self + rhs` for a signed `rhs`, or None when the sum leaves [0, MAX].
+    pub const fn checked_add_signed(self: u8, rhs: i8) Option<u8> {
+        let (r, o) = self.overflowing_add_signed(rhs);
+        if o {
+            return Option::<u8>::None;
+        }
+        return Option::<u8>::Some(r);
+    }
+    /// `self / rhs`: unsigned division never saturates. Traps on a zero divisor.
+    pub const fn saturating_div(self: u8, rhs: u8) u8 {
+        return self / rhs;
+    }
+    /// `self` raised to `exp`, clamped to MAX.
+    pub const fn saturating_pow(self: u8, exp: u32) u8 {
+        let (r, o) = self.overflowing_pow(exp);
+        if o {
+            return 255;
+        }
+        return r;
+    }
+    /// `self + rhs` for a signed `rhs`, clamped to [0, MAX].
+    pub const fn saturating_add_signed(self: u8, rhs: i8) u8 {
+        let (r, o) = self.overflowing_add(rhs as u8);
+        if o == rhs < 0 {
+            return r;
+        }
+        if o {
+            return 255;
+        }
+        return 0;
+    }
+    /// True for an ASCII byte: 0x00 to 0x7F.
+    pub const fn is_ascii(self: u8) bool {
+        return self < 0x80;
+    }
+    /// True for `A` to `Z` and `a` to `z`.
+    pub const fn is_ascii_alphabetic(self: u8) bool {
+        return self.is_ascii_uppercase() || self.is_ascii_lowercase();
+    }
+    /// True for `A` to `Z`.
+    pub const fn is_ascii_uppercase(self: u8) bool {
+        return self >= b'A' && self <= b'Z';
+    }
+    /// True for `a` to `z`.
+    pub const fn is_ascii_lowercase(self: u8) bool {
+        return self >= b'a' && self <= b'z';
+    }
+    /// True for `0` to `9`, `A` to `Z` and `a` to `z`.
+    pub const fn is_ascii_alphanumeric(self: u8) bool {
+        return self.is_ascii_digit() || self.is_ascii_alphabetic();
+    }
+    /// True for `0` to `9`.
+    pub const fn is_ascii_digit(self: u8) bool {
+        return self >= b'0' && self <= b'9';
+    }
+    /// True for `0` to `9`, `A` to `F` and `a` to `f`.
+    pub const fn is_ascii_hexdigit(self: u8) bool {
+        return self.is_ascii_digit() || self >= b'A' && self <= b'F' || self >= b'a' && self <= b'f';
+    }
+    /// True for the graphic ASCII bytes that are not alphanumeric: `!` to `/`, `:` to `@`, `[` to 0x60
+    /// and `{` to `~`.
+    pub const fn is_ascii_punctuation(self: u8) bool {
+        return self.is_ascii_graphic() && !self.is_ascii_alphanumeric();
+    }
+    /// True for the visible ASCII bytes: `!` (0x21) to `~` (0x7E).
+    pub const fn is_ascii_graphic(self: u8) bool {
+        return self >= 0x21 && self <= 0x7E;
+    }
+    /// True for space, tab, line feed, form feed and carriage return; not vertical tab (the WHATWG set).
+    pub const fn is_ascii_whitespace(self: u8) bool {
+        return self == b' ' || self == b'\t' || self == b'\n' || self == 0x0C || self == b'\r';
+    }
+    /// True for the ASCII control bytes: 0x00 to 0x1F and 0x7F.
+    pub const fn is_ascii_control(self: u8) bool {
+        return self < 0x20 || self == 0x7F;
+    }
+    /// `self` with `a` to `z` mapped to `A` to `Z`; every other byte unchanged.
+    pub const fn to_ascii_uppercase(self: u8) u8 {
+        return self ^ self.is_ascii_lowercase() as u8 << 5;
+    }
+    /// `self` with `A` to `Z` mapped to `a` to `z`; every other byte unchanged.
+    pub const fn to_ascii_lowercase(self: u8) u8 {
+        return self ^ self.is_ascii_uppercase() as u8 << 5;
+    }
+    /// True when `self` and `other` are equal after `to_ascii_lowercase`.
+    pub const fn eq_ignore_ascii_case(self: u8, other: u8) bool {
+        return self.to_ascii_lowercase() == other.to_ascii_lowercase();
+    }
 }
 
 extend u16 {
@@ -1848,6 +4138,8 @@ extend u16 {
     pub const MIN: u16 = 0;
     /// The largest value.
     pub const MAX: u16 = 65535;
+    /// The width in bits.
+    pub const BITS: u32 = 16;
     /// Zero bits below the lowest set bit (16 for zero).
     pub const fn trailing_zeros(self: u16) usize {
         return (unsafe sc_ctz64(self as u64 | 1u64 << 16)) as usize; // bit 16 set: a zero counts 16
@@ -2008,6 +4300,374 @@ extend u16 {
         }
         return r;
     }
+    /// Number of clear bits.
+    pub const fn count_zeros(self: u16) usize {
+        return (~self).count_ones();
+    }
+    /// One bits above the highest clear bit (the width for MAX).
+    pub const fn leading_ones(self: u16) usize {
+        return (~self).leading_zeros();
+    }
+    /// One bits below the lowest clear bit (the width for MAX).
+    pub const fn trailing_ones(self: u16) usize {
+        return (~self).trailing_zeros();
+    }
+    /// The bits rotated toward the high end by `n % N`: the bits shifted out enter at the low end.
+    pub const fn rotate_left(self: u16, n: u32) u16 {
+        let k = (n & 15) as u16;
+        return self << k | self >> (16 - k & 15);
+    }
+    /// The bits rotated toward the low end by `n % N`: the bits shifted out enter at the high end.
+    pub const fn rotate_right(self: u16, n: u32) u16 {
+        let k = (n & 15) as u16;
+        return self >> k | self << (16 - k & 15);
+    }
+    /// The bytes in reverse order.
+    pub const fn swap_bytes(self: u16) u16 {
+        return self << 8 | self >> 8;
+    }
+    /// The bits in reverse order: bit 0 becomes bit N - 1.
+    pub const fn reverse_bits(self: u16) u16 {
+        let mut x = self.swap_bytes();
+        x = x >> 4 & 0x0F0F | (x & 0x0F0F) << 4;
+        x = x >> 2 & 0x3333 | (x & 0x3333) << 2;
+        return x >> 1 & 0x5555 | (x & 0x5555) << 1;
+    }
+    /// `self` in big-endian byte order: `swap_bytes` on a little-endian target, `self` on a big-endian one.
+    pub const fn to_be(self: u16) u16 {
+        if ENDIAN == Endian::Big {
+            return self;
+        } else {
+            return self.swap_bytes();
+        }
+    }
+    /// `self` in little-endian byte order: `self` on a little-endian target, `swap_bytes` on a big-endian one.
+    pub const fn to_le(self: u16) u16 {
+        if ENDIAN == Endian::Little {
+            return self;
+        } else {
+            return self.swap_bytes();
+        }
+    }
+    /// The value whose big-endian representation is `x`.
+    pub const fn from_be(x: u16) u16 {
+        return x.to_be();
+    }
+    /// The value whose little-endian representation is `x`.
+    pub const fn from_le(x: u16) u16 {
+        return x.to_le();
+    }
+    /// The bytes of `self`, most significant first.
+    pub const fn to_be_bytes(self: u16) [u8; 2] {
+        return [(self >> 8) as u8, self as u8];
+    }
+    /// The bytes of `self`, least significant first.
+    pub const fn to_le_bytes(self: u16) [u8; 2] {
+        return [self as u8, (self >> 8) as u8];
+    }
+    /// The bytes of `self` in the target's byte order.
+    pub const fn to_ne_bytes(self: u16) [u8; 2] {
+        if ENDIAN == Endian::Big {
+            return self.to_be_bytes();
+        } else {
+            return self.to_le_bytes();
+        }
+    }
+    /// The value of the bytes `b`, most significant first.
+    pub const fn from_be_bytes(b: [u8; 2]) u16 {
+        return b[0] as u16 << 8 | b[1] as u16;
+    }
+    /// The value of the bytes `b`, least significant first.
+    pub const fn from_le_bytes(b: [u8; 2]) u16 {
+        return b[0] as u16 | b[1] as u16 << 8;
+    }
+    /// The value of the bytes `b` in the target's byte order.
+    pub const fn from_ne_bytes(b: [u8; 2]) u16 {
+        if ENDIAN == Endian::Big {
+            return u16::from_be_bytes(b);
+        } else {
+            return u16::from_le_bytes(b);
+        }
+    }
+    /// The smallest power of two not below `self` (1 for 0). Above the largest power of two it traps
+    /// with overflow checks and gives 0 without.
+    pub const fn next_power_of_two(self: u16) u16 {
+        if self <= 1 {
+            return 1;
+        }
+        return (65535 >> (self - 1).leading_zeros() as u16) + 1;
+    }
+    /// The smallest power of two not below `self` (1 for 0), or None when it does not fit.
+    pub const fn checked_next_power_of_two(self: u16) Option<u16> {
+        if self <= 1 {
+            return Option::<u16>::Some(1);
+        }
+        return (65535u16 >> (self - 1).leading_zeros() as u16).checked_add(1);
+    }
+    /// `self` raised to `exp` (1 for `exp` 0); overflow traps with overflow checks and wraps without.
+    pub const fn pow(self: u16, exp: u32) u16 {
+        if exp == 0 {
+            return 1;
+        }
+        let mut base = self;
+        let mut acc: u16 = 1;
+        let mut e = exp;
+        while e > 1 {
+            if (e & 1) == 1 {
+                acc = acc * base;
+            }
+            e = e >> 1;
+            base = base * base;
+        }
+        return acc * base;
+    }
+    /// The floor of the square root.
+    pub const fn isqrt(self: u16) u16 {
+        return (self as u32).isqrt() as u16;
+    }
+    /// The floor of log2(self). Panics when `self` is 0.
+    pub const fn ilog2(self: u16) u32 {
+        if self == 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return 15 - self.leading_zeros() as u32;
+    }
+    /// The floor of log10(self). Panics when `self` is 0.
+    pub const fn ilog10(self: u16) u32 {
+        if self == 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog10_u64(self);
+    }
+    /// The floor of the logarithm of `self` in `base`. Panics when `base` is below 2 or `self` is 0.
+    pub const fn ilog(self: u16, base: u16) u32 {
+        if base < 2 {
+            panic("base of integer logarithm must be at least 2");
+        }
+        if self == 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog_u64(self, base);
+    }
+    /// `|self - other|`.
+    pub const fn abs_diff(self: u16, other: u16) u16 {
+        if self < other {
+            return other - self;
+        }
+        return self - other;
+    }
+    /// `(self + rhs) / 2` rounded down, without overflow.
+    pub const fn midpoint(self: u16, rhs: u16) u16 {
+        return (self & rhs) + ((self ^ rhs) >> 1);
+    }
+    /// `self / rhs` rounded up. Traps on a zero divisor.
+    pub const fn div_ceil(self: u16, rhs: u16) u16 {
+        let q = self / rhs;
+        if self % rhs > 0 {
+            return q + 1;
+        }
+        return q;
+    }
+    /// The smallest multiple of `rhs` not below `self`. Traps on a zero `rhs`; overflow traps with
+    /// overflow checks and wraps without.
+    pub const fn next_multiple_of(self: u16, rhs: u16) u16 {
+        let r = self % rhs;
+        if r == 0 {
+            return self;
+        }
+        return self + (rhs - r);
+    }
+    /// The smallest multiple of `rhs` not below `self`, or None for a zero `rhs` or on overflow.
+    pub const fn checked_next_multiple_of(self: u16, rhs: u16) Option<u16> {
+        if rhs == 0 {
+            return Option::<u16>::None;
+        }
+        let r = self % rhs;
+        if r == 0 {
+            return Option::<u16>::Some(self);
+        }
+        return self.checked_add(rhs - r);
+    }
+    /// True when `self` is a multiple of `rhs`; for a zero `rhs`, only 0 is.
+    pub const fn is_multiple_of(self: u16, rhs: u16) bool {
+        if rhs == 0 {
+            return self == 0;
+        }
+        return self % rhs == 0;
+    }
+    /// `self / rhs`: unsigned division is already Euclidean. Traps on a zero divisor.
+    pub const fn div_euclid(self: u16, rhs: u16) u16 {
+        return self / rhs;
+    }
+    /// `self % rhs`: unsigned remainder is already Euclidean. Traps on a zero divisor.
+    pub const fn rem_euclid(self: u16, rhs: u16) u16 {
+        return self % rhs;
+    }
+    /// The same bits as a `i16`: values above `32767` become negative.
+    pub const fn cast_signed(self: u16) i16 {
+        return self as i16;
+    }
+    /// `self / rhs`: unsigned division never wraps. Traps on a zero divisor.
+    pub const fn wrapping_div(self: u16, rhs: u16) u16 {
+        return self / rhs;
+    }
+    /// `self % rhs`: unsigned remainder never wraps. Traps on a zero divisor.
+    pub const fn wrapping_rem(self: u16, rhs: u16) u16 {
+        return self % rhs;
+    }
+    /// `self / rhs`. Traps on a zero divisor.
+    pub const fn wrapping_div_euclid(self: u16, rhs: u16) u16 {
+        return self / rhs;
+    }
+    /// `self % rhs`. Traps on a zero divisor.
+    pub const fn wrapping_rem_euclid(self: u16, rhs: u16) u16 {
+        return self % rhs;
+    }
+    /// `self` raised to `exp` modulo 2^N.
+    pub const fn wrapping_pow(self: u16, exp: u32) u16 {
+        if exp == 0 {
+            return 1;
+        }
+        let mut base = self;
+        let mut acc: u16 = 1;
+        let mut e = exp;
+        while e > 1 {
+            if (e & 1) == 1 {
+                acc = acc.wrapping_mul(base);
+            }
+            e = e >> 1;
+            base = base.wrapping_mul(base);
+        }
+        return acc.wrapping_mul(base);
+    }
+    /// `self + rhs` modulo 2^N for a signed `rhs`.
+    pub const fn wrapping_add_signed(self: u16, rhs: i16) u16 {
+        return self.wrapping_add(rhs as u16);
+    }
+    /// `0 - self` modulo 2^N and whether `self` is nonzero.
+    pub const fn overflowing_neg(self: u16) (u16, bool) {
+        return self.wrapping_neg(), self != 0;
+    }
+    /// `self.wrapping_shl(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shl(self: u16, n: u32) (u16, bool) {
+        return self.wrapping_shl(n), n >= 16;
+    }
+    /// `self.wrapping_shr(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shr(self: u16, n: u32) (u16, bool) {
+        return self.wrapping_shr(n), n >= 16;
+    }
+    /// `self / rhs` and false: unsigned division never overflows. Traps on a zero divisor.
+    pub const fn overflowing_div(self: u16, rhs: u16) (u16, bool) {
+        return self / rhs, false;
+    }
+    /// `self % rhs` and false: unsigned remainder never overflows. Traps on a zero divisor.
+    pub const fn overflowing_rem(self: u16, rhs: u16) (u16, bool) {
+        return self % rhs, false;
+    }
+    /// `self / rhs` and false. Traps on a zero divisor.
+    pub const fn overflowing_div_euclid(self: u16, rhs: u16) (u16, bool) {
+        return self / rhs, false;
+    }
+    /// `self % rhs` and false. Traps on a zero divisor.
+    pub const fn overflowing_rem_euclid(self: u16, rhs: u16) (u16, bool) {
+        return self % rhs, false;
+    }
+    /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
+    pub const fn overflowing_pow(self: u16, exp: u32) (u16, bool) {
+        if exp == 0 {
+            return 1, false;
+        }
+        let mut base = self;
+        let mut acc: u16 = 1;
+        let mut e = exp;
+        let mut o = false;
+        while e > 1 {
+            if (e & 1) == 1 {
+                let (r, ro) = acc.overflowing_mul(base);
+                acc = r;
+                o = o || ro;
+            }
+            e = e >> 1;
+            let (sq, so) = base.overflowing_mul(base);
+            base = sq;
+            o = o || so;
+        }
+        let (r, ro) = acc.overflowing_mul(base);
+        return r, o || ro;
+    }
+    /// `self + rhs` modulo 2^N for a signed `rhs`, and whether the exact sum leaves [0, MAX].
+    pub const fn overflowing_add_signed(self: u16, rhs: i16) (u16, bool) {
+        let (r, o) = self.overflowing_add(rhs as u16);
+        return r, o != rhs < 0;
+    }
+    /// `self` raised to `exp`, or None when it overflows.
+    pub const fn checked_pow(self: u16, exp: u32) Option<u16> {
+        let (r, o) = self.overflowing_pow(exp);
+        if o {
+            return Option::<u16>::None;
+        }
+        return Option::<u16>::Some(r);
+    }
+    /// The floor of log2(self), or None for 0.
+    pub const fn checked_ilog2(self: u16) Option<u32> {
+        if self == 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(self.ilog2());
+    }
+    /// The floor of log10(self), or None for 0.
+    pub const fn checked_ilog10(self: u16) Option<u32> {
+        if self == 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog10_u64(self));
+    }
+    /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is 0.
+    pub const fn checked_ilog(self: u16, base: u16) Option<u32> {
+        if base < 2 || self == 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog_u64(self, base));
+    }
+    /// `self / rhs`, or None for a zero divisor.
+    pub const fn checked_div_euclid(self: u16, rhs: u16) Option<u16> {
+        return self.checked_div(rhs);
+    }
+    /// `self % rhs`, or None for a zero divisor.
+    pub const fn checked_rem_euclid(self: u16, rhs: u16) Option<u16> {
+        return self.checked_rem(rhs);
+    }
+    /// `self + rhs` for a signed `rhs`, or None when the sum leaves [0, MAX].
+    pub const fn checked_add_signed(self: u16, rhs: i16) Option<u16> {
+        let (r, o) = self.overflowing_add_signed(rhs);
+        if o {
+            return Option::<u16>::None;
+        }
+        return Option::<u16>::Some(r);
+    }
+    /// `self / rhs`: unsigned division never saturates. Traps on a zero divisor.
+    pub const fn saturating_div(self: u16, rhs: u16) u16 {
+        return self / rhs;
+    }
+    /// `self` raised to `exp`, clamped to MAX.
+    pub const fn saturating_pow(self: u16, exp: u32) u16 {
+        let (r, o) = self.overflowing_pow(exp);
+        if o {
+            return 65535;
+        }
+        return r;
+    }
+    /// `self + rhs` for a signed `rhs`, clamped to [0, MAX].
+    pub const fn saturating_add_signed(self: u16, rhs: i16) u16 {
+        let (r, o) = self.overflowing_add(rhs as u16);
+        if o == rhs < 0 {
+            return r;
+        }
+        if o {
+            return 65535;
+        }
+        return 0;
+    }
 }
 
 extend u32 {
@@ -2015,6 +4675,8 @@ extend u32 {
     pub const MIN: u32 = 0;
     /// The largest value.
     pub const MAX: u32 = 4294967295;
+    /// The width in bits.
+    pub const BITS: u32 = 32;
     /// Zero bits below the lowest set bit (32 for zero).
     pub const fn trailing_zeros(self: u32) usize {
         return (unsafe sc_ctz64(self as u64 | 1u64 << 32)) as usize; // bit 32 set: a zero counts 32
@@ -2175,6 +4837,376 @@ extend u32 {
         }
         return r;
     }
+    /// Number of clear bits.
+    pub const fn count_zeros(self: u32) usize {
+        return (~self).count_ones();
+    }
+    /// One bits above the highest clear bit (the width for MAX).
+    pub const fn leading_ones(self: u32) usize {
+        return (~self).leading_zeros();
+    }
+    /// One bits below the lowest clear bit (the width for MAX).
+    pub const fn trailing_ones(self: u32) usize {
+        return (~self).trailing_zeros();
+    }
+    /// The bits rotated toward the high end by `n % N`: the bits shifted out enter at the low end.
+    pub const fn rotate_left(self: u32, n: u32) u32 {
+        let k = n & 31;
+        return self << k | self >> (32 - k & 31);
+    }
+    /// The bits rotated toward the low end by `n % N`: the bits shifted out enter at the high end.
+    pub const fn rotate_right(self: u32, n: u32) u32 {
+        let k = n & 31;
+        return self >> k | self << (32 - k & 31);
+    }
+    /// The bytes in reverse order.
+    pub const fn swap_bytes(self: u32) u32 {
+        let x = self << 16 | self >> 16;
+        return (x & 0x00FF_00FF) << 8 | x >> 8 & 0x00FF_00FF;
+    }
+    /// The bits in reverse order: bit 0 becomes bit N - 1.
+    pub const fn reverse_bits(self: u32) u32 {
+        let mut x = self.swap_bytes();
+        x = x >> 4 & 0x0F0F_0F0F | (x & 0x0F0F_0F0F) << 4;
+        x = x >> 2 & 0x3333_3333 | (x & 0x3333_3333) << 2;
+        return x >> 1 & 0x5555_5555 | (x & 0x5555_5555) << 1;
+    }
+    /// `self` in big-endian byte order: `swap_bytes` on a little-endian target, `self` on a big-endian one.
+    pub const fn to_be(self: u32) u32 {
+        if ENDIAN == Endian::Big {
+            return self;
+        } else {
+            return self.swap_bytes();
+        }
+    }
+    /// `self` in little-endian byte order: `self` on a little-endian target, `swap_bytes` on a big-endian one.
+    pub const fn to_le(self: u32) u32 {
+        if ENDIAN == Endian::Little {
+            return self;
+        } else {
+            return self.swap_bytes();
+        }
+    }
+    /// The value whose big-endian representation is `x`.
+    pub const fn from_be(x: u32) u32 {
+        return x.to_be();
+    }
+    /// The value whose little-endian representation is `x`.
+    pub const fn from_le(x: u32) u32 {
+        return x.to_le();
+    }
+    /// The bytes of `self`, most significant first.
+    pub const fn to_be_bytes(self: u32) [u8; 4] {
+        return [(self >> 24) as u8, (self >> 16) as u8, (self >> 8) as u8, self as u8];
+    }
+    /// The bytes of `self`, least significant first.
+    pub const fn to_le_bytes(self: u32) [u8; 4] {
+        return [self as u8, (self >> 8) as u8, (self >> 16) as u8, (self >> 24) as u8];
+    }
+    /// The bytes of `self` in the target's byte order.
+    pub const fn to_ne_bytes(self: u32) [u8; 4] {
+        if ENDIAN == Endian::Big {
+            return self.to_be_bytes();
+        } else {
+            return self.to_le_bytes();
+        }
+    }
+    /// The value of the bytes `b`, most significant first.
+    pub const fn from_be_bytes(b: [u8; 4]) u32 {
+        return b[0] as u32 << 24 | b[1] as u32 << 16 | b[2] as u32 << 8 | b[3] as u32;
+    }
+    /// The value of the bytes `b`, least significant first.
+    pub const fn from_le_bytes(b: [u8; 4]) u32 {
+        return b[0] as u32 | b[1] as u32 << 8 | b[2] as u32 << 16 | b[3] as u32 << 24;
+    }
+    /// The value of the bytes `b` in the target's byte order.
+    pub const fn from_ne_bytes(b: [u8; 4]) u32 {
+        if ENDIAN == Endian::Big {
+            return u32::from_be_bytes(b);
+        } else {
+            return u32::from_le_bytes(b);
+        }
+    }
+    /// The smallest power of two not below `self` (1 for 0). Above the largest power of two it traps
+    /// with overflow checks and gives 0 without.
+    pub const fn next_power_of_two(self: u32) u32 {
+        if self <= 1 {
+            return 1;
+        }
+        return (4294967295 >> (self - 1).leading_zeros() as u32) + 1;
+    }
+    /// The smallest power of two not below `self` (1 for 0), or None when it does not fit.
+    pub const fn checked_next_power_of_two(self: u32) Option<u32> {
+        if self <= 1 {
+            return Option::<u32>::Some(1);
+        }
+        return (4294967295u32 >> (self - 1).leading_zeros() as u32).checked_add(1);
+    }
+    /// `self` raised to `exp` (1 for `exp` 0); overflow traps with overflow checks and wraps without.
+    pub const fn pow(self: u32, exp: u32) u32 {
+        if exp == 0 {
+            return 1;
+        }
+        let mut base = self;
+        let mut acc: u32 = 1;
+        let mut e = exp;
+        while e > 1 {
+            if (e & 1) == 1 {
+                acc = acc * base;
+            }
+            e = e >> 1;
+            base = base * base;
+        }
+        return acc * base;
+    }
+    /// The floor of the square root.
+    pub const fn isqrt(self: u32) u32 {
+        // Exact: the f64 square root of a 32-bit value is never within rounding error of the next integer.
+        return unsafe (self as f64).sqrt().to_int_unchecked::<u32>();
+    }
+    /// The floor of log2(self). Panics when `self` is 0.
+    pub const fn ilog2(self: u32) u32 {
+        if self == 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return 31 - self.leading_zeros() as u32;
+    }
+    /// The floor of log10(self). Panics when `self` is 0.
+    pub const fn ilog10(self: u32) u32 {
+        if self == 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog10_u64(self);
+    }
+    /// The floor of the logarithm of `self` in `base`. Panics when `base` is below 2 or `self` is 0.
+    pub const fn ilog(self: u32, base: u32) u32 {
+        if base < 2 {
+            panic("base of integer logarithm must be at least 2");
+        }
+        if self == 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog_u64(self, base);
+    }
+    /// `|self - other|`.
+    pub const fn abs_diff(self: u32, other: u32) u32 {
+        if self < other {
+            return other - self;
+        }
+        return self - other;
+    }
+    /// `(self + rhs) / 2` rounded down, without overflow.
+    pub const fn midpoint(self: u32, rhs: u32) u32 {
+        return (self & rhs) + ((self ^ rhs) >> 1);
+    }
+    /// `self / rhs` rounded up. Traps on a zero divisor.
+    pub const fn div_ceil(self: u32, rhs: u32) u32 {
+        let q = self / rhs;
+        if self % rhs > 0 {
+            return q + 1;
+        }
+        return q;
+    }
+    /// The smallest multiple of `rhs` not below `self`. Traps on a zero `rhs`; overflow traps with
+    /// overflow checks and wraps without.
+    pub const fn next_multiple_of(self: u32, rhs: u32) u32 {
+        let r = self % rhs;
+        if r == 0 {
+            return self;
+        }
+        return self + (rhs - r);
+    }
+    /// The smallest multiple of `rhs` not below `self`, or None for a zero `rhs` or on overflow.
+    pub const fn checked_next_multiple_of(self: u32, rhs: u32) Option<u32> {
+        if rhs == 0 {
+            return Option::<u32>::None;
+        }
+        let r = self % rhs;
+        if r == 0 {
+            return Option::<u32>::Some(self);
+        }
+        return self.checked_add(rhs - r);
+    }
+    /// True when `self` is a multiple of `rhs`; for a zero `rhs`, only 0 is.
+    pub const fn is_multiple_of(self: u32, rhs: u32) bool {
+        if rhs == 0 {
+            return self == 0;
+        }
+        return self % rhs == 0;
+    }
+    /// `self / rhs`: unsigned division is already Euclidean. Traps on a zero divisor.
+    pub const fn div_euclid(self: u32, rhs: u32) u32 {
+        return self / rhs;
+    }
+    /// `self % rhs`: unsigned remainder is already Euclidean. Traps on a zero divisor.
+    pub const fn rem_euclid(self: u32, rhs: u32) u32 {
+        return self % rhs;
+    }
+    /// The same bits as a `i32`: values above `2147483647` become negative.
+    pub const fn cast_signed(self: u32) i32 {
+        return self as i32;
+    }
+    /// `self / rhs`: unsigned division never wraps. Traps on a zero divisor.
+    pub const fn wrapping_div(self: u32, rhs: u32) u32 {
+        return self / rhs;
+    }
+    /// `self % rhs`: unsigned remainder never wraps. Traps on a zero divisor.
+    pub const fn wrapping_rem(self: u32, rhs: u32) u32 {
+        return self % rhs;
+    }
+    /// `self / rhs`. Traps on a zero divisor.
+    pub const fn wrapping_div_euclid(self: u32, rhs: u32) u32 {
+        return self / rhs;
+    }
+    /// `self % rhs`. Traps on a zero divisor.
+    pub const fn wrapping_rem_euclid(self: u32, rhs: u32) u32 {
+        return self % rhs;
+    }
+    /// `self` raised to `exp` modulo 2^N.
+    pub const fn wrapping_pow(self: u32, exp: u32) u32 {
+        if exp == 0 {
+            return 1;
+        }
+        let mut base = self;
+        let mut acc: u32 = 1;
+        let mut e = exp;
+        while e > 1 {
+            if (e & 1) == 1 {
+                acc = acc.wrapping_mul(base);
+            }
+            e = e >> 1;
+            base = base.wrapping_mul(base);
+        }
+        return acc.wrapping_mul(base);
+    }
+    /// `self + rhs` modulo 2^N for a signed `rhs`.
+    pub const fn wrapping_add_signed(self: u32, rhs: i32) u32 {
+        return self.wrapping_add(rhs as u32);
+    }
+    /// `0 - self` modulo 2^N and whether `self` is nonzero.
+    pub const fn overflowing_neg(self: u32) (u32, bool) {
+        return self.wrapping_neg(), self != 0;
+    }
+    /// `self.wrapping_shl(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shl(self: u32, n: u32) (u32, bool) {
+        return self.wrapping_shl(n), n >= 32;
+    }
+    /// `self.wrapping_shr(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shr(self: u32, n: u32) (u32, bool) {
+        return self.wrapping_shr(n), n >= 32;
+    }
+    /// `self / rhs` and false: unsigned division never overflows. Traps on a zero divisor.
+    pub const fn overflowing_div(self: u32, rhs: u32) (u32, bool) {
+        return self / rhs, false;
+    }
+    /// `self % rhs` and false: unsigned remainder never overflows. Traps on a zero divisor.
+    pub const fn overflowing_rem(self: u32, rhs: u32) (u32, bool) {
+        return self % rhs, false;
+    }
+    /// `self / rhs` and false. Traps on a zero divisor.
+    pub const fn overflowing_div_euclid(self: u32, rhs: u32) (u32, bool) {
+        return self / rhs, false;
+    }
+    /// `self % rhs` and false. Traps on a zero divisor.
+    pub const fn overflowing_rem_euclid(self: u32, rhs: u32) (u32, bool) {
+        return self % rhs, false;
+    }
+    /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
+    pub const fn overflowing_pow(self: u32, exp: u32) (u32, bool) {
+        if exp == 0 {
+            return 1, false;
+        }
+        let mut base = self;
+        let mut acc: u32 = 1;
+        let mut e = exp;
+        let mut o = false;
+        while e > 1 {
+            if (e & 1) == 1 {
+                let (r, ro) = acc.overflowing_mul(base);
+                acc = r;
+                o = o || ro;
+            }
+            e = e >> 1;
+            let (sq, so) = base.overflowing_mul(base);
+            base = sq;
+            o = o || so;
+        }
+        let (r, ro) = acc.overflowing_mul(base);
+        return r, o || ro;
+    }
+    /// `self + rhs` modulo 2^N for a signed `rhs`, and whether the exact sum leaves [0, MAX].
+    pub const fn overflowing_add_signed(self: u32, rhs: i32) (u32, bool) {
+        let (r, o) = self.overflowing_add(rhs as u32);
+        return r, o != rhs < 0;
+    }
+    /// `self` raised to `exp`, or None when it overflows.
+    pub const fn checked_pow(self: u32, exp: u32) Option<u32> {
+        let (r, o) = self.overflowing_pow(exp);
+        if o {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(r);
+    }
+    /// The floor of log2(self), or None for 0.
+    pub const fn checked_ilog2(self: u32) Option<u32> {
+        if self == 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(self.ilog2());
+    }
+    /// The floor of log10(self), or None for 0.
+    pub const fn checked_ilog10(self: u32) Option<u32> {
+        if self == 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog10_u64(self));
+    }
+    /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is 0.
+    pub const fn checked_ilog(self: u32, base: u32) Option<u32> {
+        if base < 2 || self == 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog_u64(self, base));
+    }
+    /// `self / rhs`, or None for a zero divisor.
+    pub const fn checked_div_euclid(self: u32, rhs: u32) Option<u32> {
+        return self.checked_div(rhs);
+    }
+    /// `self % rhs`, or None for a zero divisor.
+    pub const fn checked_rem_euclid(self: u32, rhs: u32) Option<u32> {
+        return self.checked_rem(rhs);
+    }
+    /// `self + rhs` for a signed `rhs`, or None when the sum leaves [0, MAX].
+    pub const fn checked_add_signed(self: u32, rhs: i32) Option<u32> {
+        let (r, o) = self.overflowing_add_signed(rhs);
+        if o {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(r);
+    }
+    /// `self / rhs`: unsigned division never saturates. Traps on a zero divisor.
+    pub const fn saturating_div(self: u32, rhs: u32) u32 {
+        return self / rhs;
+    }
+    /// `self` raised to `exp`, clamped to MAX.
+    pub const fn saturating_pow(self: u32, exp: u32) u32 {
+        let (r, o) = self.overflowing_pow(exp);
+        if o {
+            return 4294967295;
+        }
+        return r;
+    }
+    /// `self + rhs` for a signed `rhs`, clamped to [0, MAX].
+    pub const fn saturating_add_signed(self: u32, rhs: i32) u32 {
+        let (r, o) = self.overflowing_add(rhs as u32);
+        if o == rhs < 0 {
+            return r;
+        }
+        if o {
+            return 4294967295;
+        }
+        return 0;
+    }
 }
 
 extend u64 {
@@ -2182,6 +5214,8 @@ extend u64 {
     pub const MIN: u64 = 0;
     /// The largest value.
     pub const MAX: u64 = 18446744073709551615;
+    /// The width in bits.
+    pub const BITS: u32 = 64;
     /// Zero bits below the lowest set bit (64 for zero).
     pub const fn trailing_zeros(self: u64) usize {
         return (unsafe sc_ctz64(self)) as usize;
@@ -2341,6 +5375,404 @@ extend u64 {
         }
         return r;
     }
+    /// Number of clear bits.
+    pub const fn count_zeros(self: u64) usize {
+        return (~self).count_ones();
+    }
+    /// One bits above the highest clear bit (the width for MAX).
+    pub const fn leading_ones(self: u64) usize {
+        return (~self).leading_zeros();
+    }
+    /// One bits below the lowest clear bit (the width for MAX).
+    pub const fn trailing_ones(self: u64) usize {
+        return (~self).trailing_zeros();
+    }
+    /// The bits rotated toward the high end by `n % N`: the bits shifted out enter at the low end.
+    pub const fn rotate_left(self: u64, n: u32) u64 {
+        let k = n & 63;
+        return self << k | self >> (64 - k & 63);
+    }
+    /// The bits rotated toward the low end by `n % N`: the bits shifted out enter at the high end.
+    pub const fn rotate_right(self: u64, n: u32) u64 {
+        let k = n & 63;
+        return self >> k | self << (64 - k & 63);
+    }
+    /// The bytes in reverse order.
+    pub const fn swap_bytes(self: u64) u64 {
+        let mut x = self << 32 | self >> 32;
+        x = (x & 0x0000_FFFF_0000_FFFF) << 16 | x >> 16 & 0x0000_FFFF_0000_FFFF;
+        return (x & 0x00FF_00FF_00FF_00FF) << 8 | x >> 8 & 0x00FF_00FF_00FF_00FF;
+    }
+    /// The bits in reverse order: bit 0 becomes bit N - 1.
+    pub const fn reverse_bits(self: u64) u64 {
+        let mut x = self.swap_bytes();
+        x = x >> 4 & 0x0F0F_0F0F_0F0F_0F0F | (x & 0x0F0F_0F0F_0F0F_0F0F) << 4;
+        x = x >> 2 & 0x3333_3333_3333_3333 | (x & 0x3333_3333_3333_3333) << 2;
+        return x >> 1 & 0x5555_5555_5555_5555 | (x & 0x5555_5555_5555_5555) << 1;
+    }
+    /// `self` in big-endian byte order: `swap_bytes` on a little-endian target, `self` on a big-endian one.
+    pub const fn to_be(self: u64) u64 {
+        if ENDIAN == Endian::Big {
+            return self;
+        } else {
+            return self.swap_bytes();
+        }
+    }
+    /// `self` in little-endian byte order: `self` on a little-endian target, `swap_bytes` on a big-endian one.
+    pub const fn to_le(self: u64) u64 {
+        if ENDIAN == Endian::Little {
+            return self;
+        } else {
+            return self.swap_bytes();
+        }
+    }
+    /// The value whose big-endian representation is `x`.
+    pub const fn from_be(x: u64) u64 {
+        return x.to_be();
+    }
+    /// The value whose little-endian representation is `x`.
+    pub const fn from_le(x: u64) u64 {
+        return x.to_le();
+    }
+    /// The bytes of `self`, most significant first.
+    pub const fn to_be_bytes(self: u64) [u8; 8] {
+        return [
+            (self >> 56) as u8,
+            (self >> 48) as u8,
+            (self >> 40) as u8,
+            (self >> 32) as u8,
+            (self >> 24) as u8,
+            (self >> 16) as u8,
+            (self >> 8) as u8,
+            self as u8,
+        ];
+    }
+    /// The bytes of `self`, least significant first.
+    pub const fn to_le_bytes(self: u64) [u8; 8] {
+        return [
+            self as u8,
+            (self >> 8) as u8,
+            (self >> 16) as u8,
+            (self >> 24) as u8,
+            (self >> 32) as u8,
+            (self >> 40) as u8,
+            (self >> 48) as u8,
+            (self >> 56) as u8,
+        ];
+    }
+    /// The bytes of `self` in the target's byte order.
+    pub const fn to_ne_bytes(self: u64) [u8; 8] {
+        if ENDIAN == Endian::Big {
+            return self.to_be_bytes();
+        } else {
+            return self.to_le_bytes();
+        }
+    }
+    /// The value of the bytes `b`, most significant first.
+    pub const fn from_be_bytes(b: [u8; 8]) u64 {
+        return b[0] as u64 << 56 | b[1] as u64 << 48 | b[2] as u64 << 40 | b[3] as u64 << 32 | b[4] as u64 << 24 | b[5] as u64 << 16 | b[6] as u64 << 8 | b[7] as u64;
+    }
+    /// The value of the bytes `b`, least significant first.
+    pub const fn from_le_bytes(b: [u8; 8]) u64 {
+        return b[0] as u64 | b[1] as u64 << 8 | b[2] as u64 << 16 | b[3] as u64 << 24 | b[4] as u64 << 32 | b[5] as u64 << 40 | b[6] as u64 << 48 | b[7] as u64 << 56;
+    }
+    /// The value of the bytes `b` in the target's byte order.
+    pub const fn from_ne_bytes(b: [u8; 8]) u64 {
+        if ENDIAN == Endian::Big {
+            return u64::from_be_bytes(b);
+        } else {
+            return u64::from_le_bytes(b);
+        }
+    }
+    /// The smallest power of two not below `self` (1 for 0). Above the largest power of two it traps
+    /// with overflow checks and gives 0 without.
+    pub const fn next_power_of_two(self: u64) u64 {
+        if self <= 1 {
+            return 1;
+        }
+        return (18446744073709551615 >> (self - 1).leading_zeros() as u64) + 1;
+    }
+    /// The smallest power of two not below `self` (1 for 0), or None when it does not fit.
+    pub const fn checked_next_power_of_two(self: u64) Option<u64> {
+        if self <= 1 {
+            return Option::<u64>::Some(1);
+        }
+        return (18446744073709551615u64 >> (self - 1).leading_zeros() as u64).checked_add(1);
+    }
+    /// `self` raised to `exp` (1 for `exp` 0); overflow traps with overflow checks and wraps without.
+    pub const fn pow(self: u64, exp: u32) u64 {
+        if exp == 0 {
+            return 1;
+        }
+        let mut base = self;
+        let mut acc: u64 = 1;
+        let mut e = exp;
+        while e > 1 {
+            if (e & 1) == 1 {
+                acc = acc * base;
+            }
+            e = e >> 1;
+            base = base * base;
+        }
+        return acc * base;
+    }
+    /// The floor of the square root.
+    pub const fn isqrt(self: u64) u64 {
+        // The f64 estimate is within one of the result: correct it once in each direction.
+        let mut r = unsafe (self as f64).sqrt().to_int_unchecked::<u64>();
+        let (sq, o) = r.overflowing_mul(r);
+        if o || sq > self {
+            r -= 1;
+        }
+        let (sq_next, o_next) = (r + 1).overflowing_mul(r + 1);
+        if !o_next && sq_next <= self {
+            r += 1;
+        }
+        return r;
+    }
+    /// The floor of log2(self). Panics when `self` is 0.
+    pub const fn ilog2(self: u64) u32 {
+        if self == 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return 63 - self.leading_zeros() as u32;
+    }
+    /// The floor of log10(self). Panics when `self` is 0.
+    pub const fn ilog10(self: u64) u32 {
+        if self == 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog10_u64(self);
+    }
+    /// The floor of the logarithm of `self` in `base`. Panics when `base` is below 2 or `self` is 0.
+    pub const fn ilog(self: u64, base: u64) u32 {
+        if base < 2 {
+            panic("base of integer logarithm must be at least 2");
+        }
+        if self == 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog_u64(self, base);
+    }
+    /// `|self - other|`.
+    pub const fn abs_diff(self: u64, other: u64) u64 {
+        if self < other {
+            return other - self;
+        }
+        return self - other;
+    }
+    /// `(self + rhs) / 2` rounded down, without overflow.
+    pub const fn midpoint(self: u64, rhs: u64) u64 {
+        return (self & rhs) + ((self ^ rhs) >> 1);
+    }
+    /// `self / rhs` rounded up. Traps on a zero divisor.
+    pub const fn div_ceil(self: u64, rhs: u64) u64 {
+        let q = self / rhs;
+        if self % rhs > 0 {
+            return q + 1;
+        }
+        return q;
+    }
+    /// The smallest multiple of `rhs` not below `self`. Traps on a zero `rhs`; overflow traps with
+    /// overflow checks and wraps without.
+    pub const fn next_multiple_of(self: u64, rhs: u64) u64 {
+        let r = self % rhs;
+        if r == 0 {
+            return self;
+        }
+        return self + (rhs - r);
+    }
+    /// The smallest multiple of `rhs` not below `self`, or None for a zero `rhs` or on overflow.
+    pub const fn checked_next_multiple_of(self: u64, rhs: u64) Option<u64> {
+        if rhs == 0 {
+            return Option::<u64>::None;
+        }
+        let r = self % rhs;
+        if r == 0 {
+            return Option::<u64>::Some(self);
+        }
+        return self.checked_add(rhs - r);
+    }
+    /// True when `self` is a multiple of `rhs`; for a zero `rhs`, only 0 is.
+    pub const fn is_multiple_of(self: u64, rhs: u64) bool {
+        if rhs == 0 {
+            return self == 0;
+        }
+        return self % rhs == 0;
+    }
+    /// `self / rhs`: unsigned division is already Euclidean. Traps on a zero divisor.
+    pub const fn div_euclid(self: u64, rhs: u64) u64 {
+        return self / rhs;
+    }
+    /// `self % rhs`: unsigned remainder is already Euclidean. Traps on a zero divisor.
+    pub const fn rem_euclid(self: u64, rhs: u64) u64 {
+        return self % rhs;
+    }
+    /// The same bits as a `i64`: values above `9223372036854775807` become negative.
+    pub const fn cast_signed(self: u64) i64 {
+        return self as i64;
+    }
+    /// `self / rhs`: unsigned division never wraps. Traps on a zero divisor.
+    pub const fn wrapping_div(self: u64, rhs: u64) u64 {
+        return self / rhs;
+    }
+    /// `self % rhs`: unsigned remainder never wraps. Traps on a zero divisor.
+    pub const fn wrapping_rem(self: u64, rhs: u64) u64 {
+        return self % rhs;
+    }
+    /// `self / rhs`. Traps on a zero divisor.
+    pub const fn wrapping_div_euclid(self: u64, rhs: u64) u64 {
+        return self / rhs;
+    }
+    /// `self % rhs`. Traps on a zero divisor.
+    pub const fn wrapping_rem_euclid(self: u64, rhs: u64) u64 {
+        return self % rhs;
+    }
+    /// `self` raised to `exp` modulo 2^N.
+    pub const fn wrapping_pow(self: u64, exp: u32) u64 {
+        if exp == 0 {
+            return 1;
+        }
+        let mut base = self;
+        let mut acc: u64 = 1;
+        let mut e = exp;
+        while e > 1 {
+            if (e & 1) == 1 {
+                acc = acc.wrapping_mul(base);
+            }
+            e = e >> 1;
+            base = base.wrapping_mul(base);
+        }
+        return acc.wrapping_mul(base);
+    }
+    /// `self + rhs` modulo 2^N for a signed `rhs`.
+    pub const fn wrapping_add_signed(self: u64, rhs: i64) u64 {
+        return self.wrapping_add(rhs as u64);
+    }
+    /// `0 - self` modulo 2^N and whether `self` is nonzero.
+    pub const fn overflowing_neg(self: u64) (u64, bool) {
+        return self.wrapping_neg(), self != 0;
+    }
+    /// `self.wrapping_shl(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shl(self: u64, n: u32) (u64, bool) {
+        return self.wrapping_shl(n), n >= 64;
+    }
+    /// `self.wrapping_shr(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shr(self: u64, n: u32) (u64, bool) {
+        return self.wrapping_shr(n), n >= 64;
+    }
+    /// `self / rhs` and false: unsigned division never overflows. Traps on a zero divisor.
+    pub const fn overflowing_div(self: u64, rhs: u64) (u64, bool) {
+        return self / rhs, false;
+    }
+    /// `self % rhs` and false: unsigned remainder never overflows. Traps on a zero divisor.
+    pub const fn overflowing_rem(self: u64, rhs: u64) (u64, bool) {
+        return self % rhs, false;
+    }
+    /// `self / rhs` and false. Traps on a zero divisor.
+    pub const fn overflowing_div_euclid(self: u64, rhs: u64) (u64, bool) {
+        return self / rhs, false;
+    }
+    /// `self % rhs` and false. Traps on a zero divisor.
+    pub const fn overflowing_rem_euclid(self: u64, rhs: u64) (u64, bool) {
+        return self % rhs, false;
+    }
+    /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
+    pub const fn overflowing_pow(self: u64, exp: u32) (u64, bool) {
+        if exp == 0 {
+            return 1, false;
+        }
+        let mut base = self;
+        let mut acc: u64 = 1;
+        let mut e = exp;
+        let mut o = false;
+        while e > 1 {
+            if (e & 1) == 1 {
+                let (r, ro) = acc.overflowing_mul(base);
+                acc = r;
+                o = o || ro;
+            }
+            e = e >> 1;
+            let (sq, so) = base.overflowing_mul(base);
+            base = sq;
+            o = o || so;
+        }
+        let (r, ro) = acc.overflowing_mul(base);
+        return r, o || ro;
+    }
+    /// `self + rhs` modulo 2^N for a signed `rhs`, and whether the exact sum leaves [0, MAX].
+    pub const fn overflowing_add_signed(self: u64, rhs: i64) (u64, bool) {
+        let (r, o) = self.overflowing_add(rhs as u64);
+        return r, o != rhs < 0;
+    }
+    /// `self` raised to `exp`, or None when it overflows.
+    pub const fn checked_pow(self: u64, exp: u32) Option<u64> {
+        let (r, o) = self.overflowing_pow(exp);
+        if o {
+            return Option::<u64>::None;
+        }
+        return Option::<u64>::Some(r);
+    }
+    /// The floor of log2(self), or None for 0.
+    pub const fn checked_ilog2(self: u64) Option<u32> {
+        if self == 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(self.ilog2());
+    }
+    /// The floor of log10(self), or None for 0.
+    pub const fn checked_ilog10(self: u64) Option<u32> {
+        if self == 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog10_u64(self));
+    }
+    /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is 0.
+    pub const fn checked_ilog(self: u64, base: u64) Option<u32> {
+        if base < 2 || self == 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog_u64(self, base));
+    }
+    /// `self / rhs`, or None for a zero divisor.
+    pub const fn checked_div_euclid(self: u64, rhs: u64) Option<u64> {
+        return self.checked_div(rhs);
+    }
+    /// `self % rhs`, or None for a zero divisor.
+    pub const fn checked_rem_euclid(self: u64, rhs: u64) Option<u64> {
+        return self.checked_rem(rhs);
+    }
+    /// `self + rhs` for a signed `rhs`, or None when the sum leaves [0, MAX].
+    pub const fn checked_add_signed(self: u64, rhs: i64) Option<u64> {
+        let (r, o) = self.overflowing_add_signed(rhs);
+        if o {
+            return Option::<u64>::None;
+        }
+        return Option::<u64>::Some(r);
+    }
+    /// `self / rhs`: unsigned division never saturates. Traps on a zero divisor.
+    pub const fn saturating_div(self: u64, rhs: u64) u64 {
+        return self / rhs;
+    }
+    /// `self` raised to `exp`, clamped to MAX.
+    pub const fn saturating_pow(self: u64, exp: u32) u64 {
+        let (r, o) = self.overflowing_pow(exp);
+        if o {
+            return 18446744073709551615;
+        }
+        return r;
+    }
+    /// `self + rhs` for a signed `rhs`, clamped to [0, MAX].
+    pub const fn saturating_add_signed(self: u64, rhs: i64) u64 {
+        let (r, o) = self.overflowing_add(rhs as u64);
+        if o == rhs < 0 {
+            return r;
+        }
+        if o {
+            return 18446744073709551615;
+        }
+        return 0;
+    }
 }
 
 extend usize {
@@ -2348,6 +5780,8 @@ extend usize {
     pub const MIN: usize = 0;
     /// The largest value (the target's pointer width).
     pub const MAX: usize = ~0usize;
+    /// The width in bits.
+    pub const BITS: u32 = sizeof(usize) as u32 * 8;
     /// Zero bits below the lowest set bit (the width for zero).
     pub const fn trailing_zeros(self: usize) usize {
         let n = (unsafe sc_ctz64(self as u64)) as usize;
@@ -2509,6 +5943,387 @@ extend usize {
         }
         return r;
     }
+    /// Number of clear bits.
+    pub const fn count_zeros(self: usize) usize {
+        return (~self).count_ones();
+    }
+    /// One bits above the highest clear bit (the width for MAX).
+    pub const fn leading_ones(self: usize) usize {
+        return (~self).leading_zeros();
+    }
+    /// One bits below the lowest clear bit (the width for MAX).
+    pub const fn trailing_ones(self: usize) usize {
+        return (~self).trailing_zeros();
+    }
+    /// The bits rotated toward the high end by `n % N`: the bits shifted out enter at the low end.
+    pub const fn rotate_left(self: usize, n: u32) usize {
+        let k = n & sizeof(usize) as u32 * 8 - 1;
+        return self << k as usize | self >> (sizeof(usize) as u32 * 8 - k & sizeof(usize) as u32 * 8 - 1) as usize;
+    }
+    /// The bits rotated toward the low end by `n % N`: the bits shifted out enter at the high end.
+    pub const fn rotate_right(self: usize, n: u32) usize {
+        let k = n & sizeof(usize) as u32 * 8 - 1;
+        return self >> k as usize | self << (sizeof(usize) as u32 * 8 - k & sizeof(usize) as u32 * 8 - 1) as usize;
+    }
+    /// The bytes in reverse order.
+    pub const fn swap_bytes(self: usize) usize {
+        return ((self as u64).swap_bytes() >> 64 - sizeof(usize) as u32 * 8) as usize;
+    }
+    /// The bits in reverse order: bit 0 becomes bit N - 1.
+    pub const fn reverse_bits(self: usize) usize {
+        return ((self as u64).reverse_bits() >> 64 - sizeof(usize) as u32 * 8) as usize;
+    }
+    /// `self` in big-endian byte order: `swap_bytes` on a little-endian target, `self` on a big-endian one.
+    pub const fn to_be(self: usize) usize {
+        if ENDIAN == Endian::Big {
+            return self;
+        } else {
+            return self.swap_bytes();
+        }
+    }
+    /// `self` in little-endian byte order: `self` on a little-endian target, `swap_bytes` on a big-endian one.
+    pub const fn to_le(self: usize) usize {
+        if ENDIAN == Endian::Little {
+            return self;
+        } else {
+            return self.swap_bytes();
+        }
+    }
+    /// The value whose big-endian representation is `x`.
+    pub const fn from_be(x: usize) usize {
+        return x.to_be();
+    }
+    /// The value whose little-endian representation is `x`.
+    pub const fn from_le(x: usize) usize {
+        return x.to_le();
+    }
+    /// The bytes of `self`, most significant first.
+    pub const fn to_be_bytes(self: usize) [u8; sizeof(usize)] {
+        if POINTER_WIDTH == 32 {
+            return (self as u32).to_be_bytes();
+        } else {
+            return (self as u64).to_be_bytes();
+        }
+    }
+    /// The bytes of `self`, least significant first.
+    pub const fn to_le_bytes(self: usize) [u8; sizeof(usize)] {
+        if POINTER_WIDTH == 32 {
+            return (self as u32).to_le_bytes();
+        } else {
+            return (self as u64).to_le_bytes();
+        }
+    }
+    /// The bytes of `self` in the target's byte order.
+    pub const fn to_ne_bytes(self: usize) [u8; sizeof(usize)] {
+        if POINTER_WIDTH == 32 {
+            return (self as u32).to_ne_bytes();
+        } else {
+            return (self as u64).to_ne_bytes();
+        }
+    }
+    /// The value of the bytes `b`, most significant first.
+    pub const fn from_be_bytes(b: [u8; sizeof(usize)]) usize {
+        if POINTER_WIDTH == 32 {
+            return u32::from_be_bytes(b) as usize;
+        } else {
+            return u64::from_be_bytes(b) as usize;
+        }
+    }
+    /// The value of the bytes `b`, least significant first.
+    pub const fn from_le_bytes(b: [u8; sizeof(usize)]) usize {
+        if POINTER_WIDTH == 32 {
+            return u32::from_le_bytes(b) as usize;
+        } else {
+            return u64::from_le_bytes(b) as usize;
+        }
+    }
+    /// The value of the bytes `b` in the target's byte order.
+    pub const fn from_ne_bytes(b: [u8; sizeof(usize)]) usize {
+        if POINTER_WIDTH == 32 {
+            return u32::from_ne_bytes(b) as usize;
+        } else {
+            return u64::from_ne_bytes(b) as usize;
+        }
+    }
+    /// The smallest power of two not below `self` (1 for 0). Above the largest power of two it traps
+    /// with overflow checks and gives 0 without.
+    pub const fn next_power_of_two(self: usize) usize {
+        if self <= 1 {
+            return 1;
+        }
+        return (~0usize >> (self - 1).leading_zeros()) + 1;
+    }
+    /// The smallest power of two not below `self` (1 for 0), or None when it does not fit.
+    pub const fn checked_next_power_of_two(self: usize) Option<usize> {
+        if self <= 1 {
+            return Option::<usize>::Some(1);
+        }
+        return (~0usize >> (self - 1).leading_zeros()).checked_add(1);
+    }
+    /// `self` raised to `exp` (1 for `exp` 0); overflow traps with overflow checks and wraps without.
+    pub const fn pow(self: usize, exp: u32) usize {
+        if exp == 0 {
+            return 1;
+        }
+        let mut base = self;
+        let mut acc: usize = 1;
+        let mut e = exp;
+        while e > 1 {
+            if (e & 1) == 1 {
+                acc = acc * base;
+            }
+            e = e >> 1;
+            base = base * base;
+        }
+        return acc * base;
+    }
+    /// The floor of the square root.
+    pub const fn isqrt(self: usize) usize {
+        return (self as u64).isqrt() as usize;
+    }
+    /// The floor of log2(self). Panics when `self` is 0.
+    pub const fn ilog2(self: usize) u32 {
+        if self == 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return sizeof(usize) as u32 * 8 - 1 - self.leading_zeros() as u32;
+    }
+    /// The floor of log10(self). Panics when `self` is 0.
+    pub const fn ilog10(self: usize) u32 {
+        if self == 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog10_u64(self as u64);
+    }
+    /// The floor of the logarithm of `self` in `base`. Panics when `base` is below 2 or `self` is 0.
+    pub const fn ilog(self: usize, base: usize) u32 {
+        if base < 2 {
+            panic("base of integer logarithm must be at least 2");
+        }
+        if self == 0 {
+            panic("argument of integer logarithm must be positive");
+        }
+        return ilog_u64(self as u64, base as u64);
+    }
+    /// `|self - other|`.
+    pub const fn abs_diff(self: usize, other: usize) usize {
+        if self < other {
+            return other - self;
+        }
+        return self - other;
+    }
+    /// `(self + rhs) / 2` rounded down, without overflow.
+    pub const fn midpoint(self: usize, rhs: usize) usize {
+        return (self & rhs) + ((self ^ rhs) >> 1);
+    }
+    /// `self / rhs` rounded up. Traps on a zero divisor.
+    pub const fn div_ceil(self: usize, rhs: usize) usize {
+        let q = self / rhs;
+        if self % rhs > 0 {
+            return q + 1;
+        }
+        return q;
+    }
+    /// The smallest multiple of `rhs` not below `self`. Traps on a zero `rhs`; overflow traps with
+    /// overflow checks and wraps without.
+    pub const fn next_multiple_of(self: usize, rhs: usize) usize {
+        let r = self % rhs;
+        if r == 0 {
+            return self;
+        }
+        return self + (rhs - r);
+    }
+    /// The smallest multiple of `rhs` not below `self`, or None for a zero `rhs` or on overflow.
+    pub const fn checked_next_multiple_of(self: usize, rhs: usize) Option<usize> {
+        if rhs == 0 {
+            return Option::<usize>::None;
+        }
+        let r = self % rhs;
+        if r == 0 {
+            return Option::<usize>::Some(self);
+        }
+        return self.checked_add(rhs - r);
+    }
+    /// True when `self` is a multiple of `rhs`; for a zero `rhs`, only 0 is.
+    pub const fn is_multiple_of(self: usize, rhs: usize) bool {
+        if rhs == 0 {
+            return self == 0;
+        }
+        return self % rhs == 0;
+    }
+    /// `self / rhs`: unsigned division is already Euclidean. Traps on a zero divisor.
+    pub const fn div_euclid(self: usize, rhs: usize) usize {
+        return self / rhs;
+    }
+    /// `self % rhs`: unsigned remainder is already Euclidean. Traps on a zero divisor.
+    pub const fn rem_euclid(self: usize, rhs: usize) usize {
+        return self % rhs;
+    }
+    /// The same bits as a `isize`: values above `((~0usize >> 1) as isize)` become negative.
+    pub const fn cast_signed(self: usize) isize {
+        return self as isize;
+    }
+    /// `self / rhs`: unsigned division never wraps. Traps on a zero divisor.
+    pub const fn wrapping_div(self: usize, rhs: usize) usize {
+        return self / rhs;
+    }
+    /// `self % rhs`: unsigned remainder never wraps. Traps on a zero divisor.
+    pub const fn wrapping_rem(self: usize, rhs: usize) usize {
+        return self % rhs;
+    }
+    /// `self / rhs`. Traps on a zero divisor.
+    pub const fn wrapping_div_euclid(self: usize, rhs: usize) usize {
+        return self / rhs;
+    }
+    /// `self % rhs`. Traps on a zero divisor.
+    pub const fn wrapping_rem_euclid(self: usize, rhs: usize) usize {
+        return self % rhs;
+    }
+    /// `self` raised to `exp` modulo 2^N.
+    pub const fn wrapping_pow(self: usize, exp: u32) usize {
+        if exp == 0 {
+            return 1;
+        }
+        let mut base = self;
+        let mut acc: usize = 1;
+        let mut e = exp;
+        while e > 1 {
+            if (e & 1) == 1 {
+                acc = acc.wrapping_mul(base);
+            }
+            e = e >> 1;
+            base = base.wrapping_mul(base);
+        }
+        return acc.wrapping_mul(base);
+    }
+    /// `self + rhs` modulo 2^N for a signed `rhs`.
+    pub const fn wrapping_add_signed(self: usize, rhs: isize) usize {
+        return self.wrapping_add(rhs as usize);
+    }
+    /// `0 - self` modulo 2^N and whether `self` is nonzero.
+    pub const fn overflowing_neg(self: usize) (usize, bool) {
+        return self.wrapping_neg(), self != 0;
+    }
+    /// `self.wrapping_shl(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shl(self: usize, n: u32) (usize, bool) {
+        return self.wrapping_shl(n), n >= sizeof(usize) as u32 * 8;
+    }
+    /// `self.wrapping_shr(n)` and whether `n` is at least the width.
+    pub const fn overflowing_shr(self: usize, n: u32) (usize, bool) {
+        return self.wrapping_shr(n), n >= sizeof(usize) as u32 * 8;
+    }
+    /// `self / rhs` and false: unsigned division never overflows. Traps on a zero divisor.
+    pub const fn overflowing_div(self: usize, rhs: usize) (usize, bool) {
+        return self / rhs, false;
+    }
+    /// `self % rhs` and false: unsigned remainder never overflows. Traps on a zero divisor.
+    pub const fn overflowing_rem(self: usize, rhs: usize) (usize, bool) {
+        return self % rhs, false;
+    }
+    /// `self / rhs` and false. Traps on a zero divisor.
+    pub const fn overflowing_div_euclid(self: usize, rhs: usize) (usize, bool) {
+        return self / rhs, false;
+    }
+    /// `self % rhs` and false. Traps on a zero divisor.
+    pub const fn overflowing_rem_euclid(self: usize, rhs: usize) (usize, bool) {
+        return self % rhs, false;
+    }
+    /// `self` raised to `exp` modulo 2^N and whether the exact power overflows.
+    pub const fn overflowing_pow(self: usize, exp: u32) (usize, bool) {
+        if exp == 0 {
+            return 1, false;
+        }
+        let mut base = self;
+        let mut acc: usize = 1;
+        let mut e = exp;
+        let mut o = false;
+        while e > 1 {
+            if (e & 1) == 1 {
+                let (r, ro) = acc.overflowing_mul(base);
+                acc = r;
+                o = o || ro;
+            }
+            e = e >> 1;
+            let (sq, so) = base.overflowing_mul(base);
+            base = sq;
+            o = o || so;
+        }
+        let (r, ro) = acc.overflowing_mul(base);
+        return r, o || ro;
+    }
+    /// `self + rhs` modulo 2^N for a signed `rhs`, and whether the exact sum leaves [0, MAX].
+    pub const fn overflowing_add_signed(self: usize, rhs: isize) (usize, bool) {
+        let (r, o) = self.overflowing_add(rhs as usize);
+        return r, o != rhs < 0;
+    }
+    /// `self` raised to `exp`, or None when it overflows.
+    pub const fn checked_pow(self: usize, exp: u32) Option<usize> {
+        let (r, o) = self.overflowing_pow(exp);
+        if o {
+            return Option::<usize>::None;
+        }
+        return Option::<usize>::Some(r);
+    }
+    /// The floor of log2(self), or None for 0.
+    pub const fn checked_ilog2(self: usize) Option<u32> {
+        if self == 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(self.ilog2());
+    }
+    /// The floor of log10(self), or None for 0.
+    pub const fn checked_ilog10(self: usize) Option<u32> {
+        if self == 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog10_u64(self as u64));
+    }
+    /// The floor of the logarithm of `self` in `base`, or None when `base` is below 2 or `self` is 0.
+    pub const fn checked_ilog(self: usize, base: usize) Option<u32> {
+        if base < 2 || self == 0 {
+            return Option::<u32>::None;
+        }
+        return Option::<u32>::Some(ilog_u64(self as u64, base as u64));
+    }
+    /// `self / rhs`, or None for a zero divisor.
+    pub const fn checked_div_euclid(self: usize, rhs: usize) Option<usize> {
+        return self.checked_div(rhs);
+    }
+    /// `self % rhs`, or None for a zero divisor.
+    pub const fn checked_rem_euclid(self: usize, rhs: usize) Option<usize> {
+        return self.checked_rem(rhs);
+    }
+    /// `self + rhs` for a signed `rhs`, or None when the sum leaves [0, MAX].
+    pub const fn checked_add_signed(self: usize, rhs: isize) Option<usize> {
+        let (r, o) = self.overflowing_add_signed(rhs);
+        if o {
+            return Option::<usize>::None;
+        }
+        return Option::<usize>::Some(r);
+    }
+    /// `self / rhs`: unsigned division never saturates. Traps on a zero divisor.
+    pub const fn saturating_div(self: usize, rhs: usize) usize {
+        return self / rhs;
+    }
+    /// `self` raised to `exp`, clamped to MAX.
+    pub const fn saturating_pow(self: usize, exp: u32) usize {
+        let (r, o) = self.overflowing_pow(exp);
+        if o {
+            return ~0usize;
+        }
+        return r;
+    }
+    /// `self + rhs` for a signed `rhs`, clamped to [0, MAX].
+    pub const fn saturating_add_signed(self: usize, rhs: isize) usize {
+        let (r, o) = self.overflowing_add(rhs as usize);
+        if o == rhs < 0 {
+            return r;
+        }
+        if o {
+            return ~0usize;
+        }
+        return 0;
+    }
 }
 
 extend f32 {
@@ -2516,6 +6331,30 @@ extend f32 {
     pub const MIN: f32 = -3.40282347e38;
     /// The largest finite value.
     pub const MAX: f32 = 3.40282347e38;
+    /// The difference between 1.0 and the next larger value: 2^-23.
+    pub const EPSILON: f32 = 1.19209290e-7;
+    /// The smallest positive normal value: 2^-126.
+    pub const MIN_POSITIVE: f32 = 1.17549435e-38;
+    /// A quiet NaN with a clear sign and a zero payload (0x7FC0_0000).
+    pub const NAN: f32 = f32::from_bits(0x7FC0_0000);
+    /// Positive infinity.
+    pub const INFINITY: f32 = f32::from_bits(0x7F80_0000);
+    /// Negative infinity.
+    pub const NEG_INFINITY: f32 = f32::from_bits(0xFF80_0000);
+    /// The base of the encoding.
+    pub const RADIX: u32 = 2;
+    /// Significand bits, the implicit leading bit included.
+    pub const MANTISSA_DIGITS: u32 = 24;
+    /// Decimal digits that survive a decimal to f32 to decimal round trip.
+    pub const DIGITS: u32 = 6;
+    /// One above the smallest normal binary exponent: MIN_POSITIVE is 2^(MIN_EXP - 1).
+    pub const MIN_EXP: i32 = -125;
+    /// One above the largest binary exponent: MAX is below 2^MAX_EXP.
+    pub const MAX_EXP: i32 = 128;
+    /// The smallest `n` with 10^n a normal value.
+    pub const MIN_10_EXP: i32 = -37;
+    /// The largest `n` with 10^n a finite value.
+    pub const MAX_10_EXP: i32 = 38;
     /// True for any NaN.
     pub const fn is_nan(self: f32) bool {
         return self != self;
@@ -2722,6 +6561,159 @@ extend f32 {
     /// other value is undefined behavior, and an error in a constant.
     @intrinsic("float.to_int_unchecked")
     pub unsafe const fn to_int_unchecked<I: SimdInt>(self: f32) I;
+    /// The IEEE 754 encoding of `self`, NaN payload included.
+    pub const fn to_bits(self: f32) u32 {
+        let v = F32Bits { f: self };
+        return v.u;
+    }
+    /// The value with the IEEE 754 encoding `v`, NaN payload included.
+    pub const fn from_bits(v: u32) f32 {
+        let b = F32Bits { u: v };
+        return b.f;
+    }
+    /// The bytes of the encoding, most significant first.
+    pub const fn to_be_bytes(self: f32) [u8; 4] {
+        return self.to_bits().to_be_bytes();
+    }
+    /// The bytes of the encoding, least significant first.
+    pub const fn to_le_bytes(self: f32) [u8; 4] {
+        return self.to_bits().to_le_bytes();
+    }
+    /// The bytes of the encoding in the target's byte order.
+    pub const fn to_ne_bytes(self: f32) [u8; 4] {
+        return self.to_bits().to_ne_bytes();
+    }
+    /// The value whose encoding has the bytes `b`, most significant first.
+    pub const fn from_be_bytes(b: [u8; 4]) f32 {
+        return f32::from_bits(u32::from_be_bytes(b));
+    }
+    /// The value whose encoding has the bytes `b`, least significant first.
+    pub const fn from_le_bytes(b: [u8; 4]) f32 {
+        return f32::from_bits(u32::from_le_bytes(b));
+    }
+    /// The value whose encoding has the bytes `b` in the target's byte order.
+    pub const fn from_ne_bytes(b: [u8; 4]) f32 {
+        return f32::from_bits(u32::from_ne_bytes(b));
+    }
+    /// The IEEE 754 class of `self`: zero, subnormal, normal, infinite or NaN (either sign).
+    pub const fn classify(self: f32) FpClass {
+        let v = self.to_bits();
+        let e = v >> 23 & 0xFF;
+        let m = v & 0x7F_FFFF;
+        if e == 0 {
+            if m == 0 {
+                return FpClass::FP_ZERO;
+            }
+            return FpClass::FP_SUBNORMAL;
+        }
+        if e == 0xFF {
+            if m == 0 {
+                return FpClass::FP_INFINITE;
+            }
+            return FpClass::FP_NAN;
+        }
+        return FpClass::FP_NORMAL;
+    }
+    /// True when `self` is neither zero, subnormal, infinite nor NaN.
+    pub const fn is_normal(self: f32) bool {
+        let e = self.to_bits() >> 23 & 0xFF;
+        return e != 0 && e != 0xFF;
+    }
+    /// True for a nonzero value whose magnitude is below MIN_POSITIVE.
+    pub const fn is_subnormal(self: f32) bool {
+        let a = self.to_bits() & 0x7FFF_FFFF;
+        return a != 0 && a < 0x0080_0000;
+    }
+    /// The least value above `self`: NaN and +inf return themselves, -inf gives MIN, both zeros give the
+    /// smallest positive subnormal, and MAX gives +inf.
+    pub const fn next_up(self: f32) f32 {
+        let v = self.to_bits();
+        if self.is_nan() || v == 0x7F80_0000 {
+            return self;
+        }
+        let a = v & 0x7FFF_FFFF;
+        if a == 0 {
+            return f32::from_bits(1);
+        }
+        if v == a {
+            return f32::from_bits(v + 1);
+        }
+        return f32::from_bits(v - 1);
+    }
+    /// The greatest value below `self`: NaN and -inf return themselves, +inf gives MAX, both zeros give
+    /// the negative subnormal closest to zero, and MIN gives -inf.
+    pub const fn next_down(self: f32) f32 {
+        let v = self.to_bits();
+        if self.is_nan() || v == 0xFF80_0000 {
+            return self;
+        }
+        let a = v & 0x7FFF_FFFF;
+        if a == 0 {
+            return f32::from_bits(0x8000_0000 | 1);
+        }
+        if v == a {
+            return f32::from_bits(v - 1);
+        }
+        return f32::from_bits(v + 1);
+    }
+    /// `(self + other) / 2` without intermediate overflow: NaN when either is NaN or for +inf and -inf.
+    pub const fn midpoint(self: f32, other: f32) f32 {
+        // The f64 sum of two f32 values cannot overflow.
+        return ((self as f64 + other as f64) / 2.0) as f32;
+    }
+    /// The Euclidean quotient: `(self / rhs).trunc()` moved down by one step when `self % rhs` is
+    /// negative (up for a negative `rhs`), so that `self.rem_euclid(rhs)` is not negative.
+    pub const fn div_euclid(self: f32, rhs: f32) f32 {
+        let q = (self / rhs).trunc();
+        if self % rhs < 0.0 {
+            if rhs > 0.0 {
+                return q - 1.0;
+            }
+            return q + 1.0;
+        }
+        return q;
+    }
+    /// The least non-negative remainder of `self / rhs`: in `[0, |rhs|]`, where rounding can give
+    /// exactly `|rhs|`. NaN for a zero `rhs`, as `%`.
+    pub const fn rem_euclid(self: f32, rhs: f32) f32 {
+        let r = self % rhs;
+        if r < 0.0 {
+            return r + rhs.abs();
+        }
+        return r;
+    }
+    /// The larger of the two by IEEE 754-2019 `maximum`: NaN when either is NaN, and +0.0 above -0.0.
+    pub const fn maximum(self: f32, other: f32) f32 {
+        if self > other {
+            return self;
+        }
+        if other > self {
+            return other;
+        }
+        if self == other {
+            if self.is_sign_positive() && other.is_sign_negative() {
+                return self;
+            }
+            return other;
+        }
+        return self + other; // a NaN operand: the sum is a quiet NaN
+    }
+    /// The smaller of the two by IEEE 754-2019 `minimum`: NaN when either is NaN, and -0.0 below +0.0.
+    pub const fn minimum(self: f32, other: f32) f32 {
+        if self < other {
+            return self;
+        }
+        if other < self {
+            return other;
+        }
+        if self == other {
+            if self.is_sign_negative() && other.is_sign_positive() {
+                return self;
+            }
+            return other;
+        }
+        return self + other; // a NaN operand: the sum is a quiet NaN
+    }
 }
 
 extend f64 {
@@ -2729,6 +6721,30 @@ extend f64 {
     pub const MIN: f64 = -1.7976931348623157e308;
     /// The largest finite value.
     pub const MAX: f64 = 1.7976931348623157e308;
+    /// The difference between 1.0 and the next larger value: 2^-52.
+    pub const EPSILON: f64 = 2.220446049250313e-16;
+    /// The smallest positive normal value: 2^-1022.
+    pub const MIN_POSITIVE: f64 = 2.2250738585072014e-308;
+    /// A quiet NaN with a clear sign and a zero payload (0x7FF8_0000_0000_0000).
+    pub const NAN: f64 = f64::from_bits(0x7FF8_0000_0000_0000);
+    /// Positive infinity.
+    pub const INFINITY: f64 = f64::from_bits(0x7FF0_0000_0000_0000);
+    /// Negative infinity.
+    pub const NEG_INFINITY: f64 = f64::from_bits(0xFFF0_0000_0000_0000);
+    /// The base of the encoding.
+    pub const RADIX: u32 = 2;
+    /// Significand bits, the implicit leading bit included.
+    pub const MANTISSA_DIGITS: u32 = 53;
+    /// Decimal digits that survive a decimal to f64 to decimal round trip.
+    pub const DIGITS: u32 = 15;
+    /// One above the smallest normal binary exponent: MIN_POSITIVE is 2^(MIN_EXP - 1).
+    pub const MIN_EXP: i32 = -1021;
+    /// One above the largest binary exponent: MAX is below 2^MAX_EXP.
+    pub const MAX_EXP: i32 = 1024;
+    /// The smallest `n` with 10^n a normal value.
+    pub const MIN_10_EXP: i32 = -307;
+    /// The largest `n` with 10^n a finite value.
+    pub const MAX_10_EXP: i32 = 308;
     /// True for any NaN.
     pub const fn is_nan(self: f64) bool {
         return self != self;
@@ -2935,6 +6951,280 @@ extend f64 {
     /// other value is undefined behavior, and an error in a constant.
     @intrinsic("float.to_int_unchecked")
     pub unsafe const fn to_int_unchecked<I: SimdInt>(self: f64) I;
+    /// The IEEE 754 encoding of `self`, NaN payload included.
+    pub const fn to_bits(self: f64) u64 {
+        let v = F64Bits { f: self };
+        return v.u;
+    }
+    /// The value with the IEEE 754 encoding `v`, NaN payload included.
+    pub const fn from_bits(v: u64) f64 {
+        let b = F64Bits { u: v };
+        return b.f;
+    }
+    /// The bytes of the encoding, most significant first.
+    pub const fn to_be_bytes(self: f64) [u8; 8] {
+        return self.to_bits().to_be_bytes();
+    }
+    /// The bytes of the encoding, least significant first.
+    pub const fn to_le_bytes(self: f64) [u8; 8] {
+        return self.to_bits().to_le_bytes();
+    }
+    /// The bytes of the encoding in the target's byte order.
+    pub const fn to_ne_bytes(self: f64) [u8; 8] {
+        return self.to_bits().to_ne_bytes();
+    }
+    /// The value whose encoding has the bytes `b`, most significant first.
+    pub const fn from_be_bytes(b: [u8; 8]) f64 {
+        return f64::from_bits(u64::from_be_bytes(b));
+    }
+    /// The value whose encoding has the bytes `b`, least significant first.
+    pub const fn from_le_bytes(b: [u8; 8]) f64 {
+        return f64::from_bits(u64::from_le_bytes(b));
+    }
+    /// The value whose encoding has the bytes `b` in the target's byte order.
+    pub const fn from_ne_bytes(b: [u8; 8]) f64 {
+        return f64::from_bits(u64::from_ne_bytes(b));
+    }
+    /// The IEEE 754 class of `self`: zero, subnormal, normal, infinite or NaN (either sign).
+    pub const fn classify(self: f64) FpClass {
+        let v = self.to_bits();
+        let e = v >> 52 & 0x7FF;
+        let m = v & 0x000F_FFFF_FFFF_FFFF;
+        if e == 0 {
+            if m == 0 {
+                return FpClass::FP_ZERO;
+            }
+            return FpClass::FP_SUBNORMAL;
+        }
+        if e == 0x7FF {
+            if m == 0 {
+                return FpClass::FP_INFINITE;
+            }
+            return FpClass::FP_NAN;
+        }
+        return FpClass::FP_NORMAL;
+    }
+    /// True when `self` is neither zero, subnormal, infinite nor NaN.
+    pub const fn is_normal(self: f64) bool {
+        let e = self.to_bits() >> 52 & 0x7FF;
+        return e != 0 && e != 0x7FF;
+    }
+    /// True for a nonzero value whose magnitude is below MIN_POSITIVE.
+    pub const fn is_subnormal(self: f64) bool {
+        let a = self.to_bits() & 0x7FFF_FFFF_FFFF_FFFF;
+        return a != 0 && a < 0x0010_0000_0000_0000;
+    }
+    /// The least value above `self`: NaN and +inf return themselves, -inf gives MIN, both zeros give the
+    /// smallest positive subnormal, and MAX gives +inf.
+    pub const fn next_up(self: f64) f64 {
+        let v = self.to_bits();
+        if self.is_nan() || v == 0x7FF0_0000_0000_0000 {
+            return self;
+        }
+        let a = v & 0x7FFF_FFFF_FFFF_FFFF;
+        if a == 0 {
+            return f64::from_bits(1);
+        }
+        if v == a {
+            return f64::from_bits(v + 1);
+        }
+        return f64::from_bits(v - 1);
+    }
+    /// The greatest value below `self`: NaN and -inf return themselves, +inf gives MAX, both zeros give
+    /// the negative subnormal closest to zero, and MIN gives -inf.
+    pub const fn next_down(self: f64) f64 {
+        let v = self.to_bits();
+        if self.is_nan() || v == 0xFFF0_0000_0000_0000 {
+            return self;
+        }
+        let a = v & 0x7FFF_FFFF_FFFF_FFFF;
+        if a == 0 {
+            return f64::from_bits(0x8000_0000_0000_0000 | 1);
+        }
+        if v == a {
+            return f64::from_bits(v - 1);
+        }
+        return f64::from_bits(v + 1);
+    }
+    /// `(self + other) / 2` without intermediate overflow: NaN when either is NaN or for +inf and -inf.
+    pub const fn midpoint(self: f64, other: f64) f64 {
+        let lo: f64 = 4.450147717014403e-308; // MIN_POSITIVE * 2
+        let hi: f64 = 8.988465674311579e307; // MAX / 2
+        let a = self.abs();
+        let b = other.abs();
+        if a <= hi && b <= hi {
+            return (self + other) / 2.0; // no overflow
+        }
+        if a < lo {
+            return self + other / 2.0; // halving `self` would lose its bits
+        }
+        if b < lo {
+            return self / 2.0 + other;
+        }
+        return self / 2.0 + other / 2.0;
+    }
+    /// The Euclidean quotient: `(self / rhs).trunc()` moved down by one step when `self % rhs` is
+    /// negative (up for a negative `rhs`), so that `self.rem_euclid(rhs)` is not negative.
+    pub const fn div_euclid(self: f64, rhs: f64) f64 {
+        let q = (self / rhs).trunc();
+        if self % rhs < 0.0 {
+            if rhs > 0.0 {
+                return q - 1.0;
+            }
+            return q + 1.0;
+        }
+        return q;
+    }
+    /// The least non-negative remainder of `self / rhs`: in `[0, |rhs|]`, where rounding can give
+    /// exactly `|rhs|`. NaN for a zero `rhs`, as `%`.
+    pub const fn rem_euclid(self: f64, rhs: f64) f64 {
+        let r = self % rhs;
+        if r < 0.0 {
+            return r + rhs.abs();
+        }
+        return r;
+    }
+    /// The larger of the two by IEEE 754-2019 `maximum`: NaN when either is NaN, and +0.0 above -0.0.
+    pub const fn maximum(self: f64, other: f64) f64 {
+        if self > other {
+            return self;
+        }
+        if other > self {
+            return other;
+        }
+        if self == other {
+            if self.is_sign_positive() && other.is_sign_negative() {
+                return self;
+            }
+            return other;
+        }
+        return self + other; // a NaN operand: the sum is a quiet NaN
+    }
+    /// The smaller of the two by IEEE 754-2019 `minimum`: NaN when either is NaN, and -0.0 below +0.0.
+    pub const fn minimum(self: f64, other: f64) f64 {
+        if self < other {
+            return self;
+        }
+        if other < self {
+            return other;
+        }
+        if self == other {
+            if self.is_sign_negative() && other.is_sign_positive() {
+                return self;
+            }
+            return other;
+        }
+        return self + other; // a NaN operand: the sum is a quiet NaN
+    }
+}
+
+extend bool {
+    /// `Some(f())` when `self` is true, else None; `f` runs only when `self` is true.
+    pub const fn then<T, F: fn() T>(self: bool, f: F) Option<T> {
+        if self {
+            return Option::<T>::Some(f());
+        }
+        return Option::<T>::None;
+    }
+    /// `Some(v)` when `self` is true, else None. `v` is evaluated either way and dropped when false.
+    pub const fn then_some<T>(self: bool, v: T) Option<T> {
+        if self {
+            return Option::<T>::Some(v);
+        }
+        return Option::<T>::None;
+    }
+}
+
+extend char {
+    /// True for an ASCII character: 0x00 to 0x7F.
+    pub const fn is_ascii(self: char) bool {
+        return (self as u8).is_ascii();
+    }
+    /// True for `A` to `Z` and `a` to `z`.
+    pub const fn is_ascii_alphabetic(self: char) bool {
+        return (self as u8).is_ascii_alphabetic();
+    }
+    /// True for `A` to `Z`.
+    pub const fn is_ascii_uppercase(self: char) bool {
+        return (self as u8).is_ascii_uppercase();
+    }
+    /// True for `a` to `z`.
+    pub const fn is_ascii_lowercase(self: char) bool {
+        return (self as u8).is_ascii_lowercase();
+    }
+    /// True for `0` to `9`, `A` to `Z` and `a` to `z`.
+    pub const fn is_ascii_alphanumeric(self: char) bool {
+        return (self as u8).is_ascii_alphanumeric();
+    }
+    /// True for `0` to `9`.
+    pub const fn is_ascii_digit(self: char) bool {
+        return (self as u8).is_ascii_digit();
+    }
+    /// True for `0` to `9`, `A` to `F` and `a` to `f`.
+    pub const fn is_ascii_hexdigit(self: char) bool {
+        return (self as u8).is_ascii_hexdigit();
+    }
+    /// True for the graphic ASCII characters that are not alphanumeric: `!` to `/`, `:` to `@`, `[` to
+    /// 0x60 and `{` to `~`.
+    pub const fn is_ascii_punctuation(self: char) bool {
+        return (self as u8).is_ascii_punctuation();
+    }
+    /// True for the visible ASCII characters: `!` (0x21) to `~` (0x7E).
+    pub const fn is_ascii_graphic(self: char) bool {
+        return (self as u8).is_ascii_graphic();
+    }
+    /// True for space, tab, line feed, form feed and carriage return; not vertical tab (the WHATWG set).
+    pub const fn is_ascii_whitespace(self: char) bool {
+        return (self as u8).is_ascii_whitespace();
+    }
+    /// True for the ASCII control characters: 0x00 to 0x1F and 0x7F.
+    pub const fn is_ascii_control(self: char) bool {
+        return (self as u8).is_ascii_control();
+    }
+    /// `self` with `a` to `z` mapped to `A` to `Z`; every other character unchanged.
+    pub const fn to_ascii_uppercase(self: char) char {
+        return (self as u8).to_ascii_uppercase() as char;
+    }
+    /// `self` with `A` to `Z` mapped to `a` to `z`; every other character unchanged.
+    pub const fn to_ascii_lowercase(self: char) char {
+        return (self as u8).to_ascii_lowercase() as char;
+    }
+    /// True when `self` and `other` are equal after `to_ascii_lowercase`.
+    pub const fn eq_ignore_ascii_case(self: char, other: char) bool {
+        return (self as u8).eq_ignore_ascii_case(other as u8);
+    }
+    /// The value of `self` as a digit in `radix`: `0` to `9`, then `a` to `z` or `A` to `Z` for 10 to 35;
+    /// None when it is not a digit below `radix`. Panics when `radix` is outside 2 to 36.
+    pub const fn to_digit(self: char, radix: u32) Option<u32> {
+        if radix < 2 || radix > 36 {
+            panic("to_digit: radix must be in 2 to 36");
+        }
+        let c = self as u32;
+        let mut d: u32 = 36; // not a digit in any radix
+        if self.is_ascii_digit() {
+            d = c - 48;
+        } else if self.is_ascii_alphabetic() {
+            d = (c | 0x20) - 87;
+        }
+        if d < radix {
+            return Option::<u32>::Some(d);
+        }
+        return Option::<u32>::None;
+    }
+    /// The character of digit `num` in `radix`: `0` to `9`, then `a` to `z`; None when `num` is not below
+    /// `radix`. Panics when `radix` is outside 2 to 36.
+    pub const fn from_digit(num: u32, radix: u32) Option<char> {
+        if radix < 2 || radix > 36 {
+            panic("from_digit: radix must be in 2 to 36");
+        }
+        if num >= radix {
+            return Option::<char>::None;
+        }
+        if num < 10 {
+            return Option::<char>::Some((48 + num) as char);
+        }
+        return Option::<char>::Some((87 + num) as char);
+    }
 }
 
 /// Move the value out of `slot`, installing `value` in its place: the ownership-safe way to take

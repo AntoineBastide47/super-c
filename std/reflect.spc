@@ -90,21 +90,6 @@ fn reflect_fmt_field<V: Format>(out: &mut String, x: &V) {
     out.push_str(x.fmt().as_str());
 }
 
-/// FNV-1a over every field's own `Hash`, in declaration order. Two values of one type hash equal
-/// when their fields do; the field ORDER is part of the hash, the field names are not.
-pub fn reflect_hash<T>(v: &T) u64 {
-    let mut h: u64 = 1469598103934665603u64;
-    inline for f in fields(v) {
-        h = h ^ reflect_hash_field(&f.value);
-        h = h.wrapping_mul(1099511628211u64);
-    }
-    return h;
-}
-
-fn reflect_hash_field<V: Hash>(x: &V) u64 {
-    return x.hash();
-}
-
 /// `"Dot"` / `"Line(42)"` / `"Pair(1, 2)"` for any enum: the ACTIVE variant's name, then every
 /// payload value it carries, in order, each through its own `Format`.
 pub fn reflect_variant_string<T>(e: &T) String {
@@ -127,23 +112,6 @@ pub fn reflect_variant_string<T>(e: &T) String {
     return s;
 }
 
-/// FNV-1a over the ACTIVE variant's tag, then each of its payload values' own `Hash`, in order:
-/// so payload-less variants hash by tag alone, and equal values hash equally.
-pub fn reflect_variant_hash<T>(e: &T) u64 {
-    let mut h: u64 = 1469598103934665603u64;
-    inline for v in variants(e) {
-        if v.is_active {
-            h = h ^ v.tag as u64;
-            h = h.wrapping_mul(1099511628211u64);
-            inline for p in payloads(v) {
-                h = h ^ reflect_hash_field(&p.value);
-                h = h.wrapping_mul(1099511628211u64);
-            }
-        }
-    }
-    return h;
-}
-
 /// Struct-or-enum dispatch for the interface defaults: an enum goes through its variants, anything
 /// else through its fields. The untaken branch's reflection loop has zero copies, so it costs nothing.
 pub fn reflect_any_string<T>(v: &T) String {
@@ -153,12 +121,36 @@ pub fn reflect_any_string<T>(v: &T) String {
     return reflect_string(v);
 }
 
-/// The derived hash of `v`: field-wise for structs and tuples, variant-wise for enums.
-pub fn reflect_any_hash<T>(v: &T) u64 {
-    if type_info::<T>().kind == TypeTag::Enum {
-        return reflect_variant_hash(v);
+/// Every field fed through its own `Hash::hash_into`, in declaration order.
+pub fn reflect_hash_into<T, H: Hasher>(v: &T, h: &mut H) {
+    inline for f in fields(v) {
+        reflect_hash_into_field(&f.value, h);
     }
-    return reflect_hash(v);
+}
+
+fn reflect_hash_into_field<V: Hash, H: Hasher>(x: &V, h: &mut H) {
+    x.hash_into(h);
+}
+
+/// The ACTIVE variant's tag, then each of its payloads through its own `Hash::hash_into`.
+pub fn reflect_variant_hash_into<T, H: Hasher>(e: &T, h: &mut H) {
+    inline for v in variants(e) {
+        if v.is_active {
+            h.write_u64(v.tag as u64);
+            inline for p in payloads(v) {
+                reflect_hash_into_field(&p.value, h);
+            }
+        }
+    }
+}
+
+/// The derived `hash_into` of `v`: field-wise for structs and tuples, variant-wise for enums.
+pub fn reflect_any_hash_into<T, H: Hasher>(v: &T, h: &mut H) {
+    if type_info::<T>().kind == TypeTag::Enum {
+        reflect_variant_hash_into(v, h);
+        return;
+    }
+    reflect_hash_into(v, h);
 }
 
 /// Field-by-field equality through each field's own `Eq`, in declaration order: `fields(a, b)`

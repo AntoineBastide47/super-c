@@ -582,6 +582,42 @@ fn memory_intrinsics_evaluate_at_compile_time() {
     );
 }
 
+// A `const fn` of an extend over a lifetime parameter runs at compile time: the receiver's instance
+// binds the extend's type parameters past the lifetime (`for x in v.iter()` reaches `VecIter`'s `next`).
+@test
+fn const_fn_of_an_extend_with_a_lifetime_evaluates() {
+    run_leak_checked(
+        "an extend with a lifetime parameter in a constant",
+        M"(pub struct C<'a, T> {
+    pub n: usize,
+    pub p: *const T,
+}
+extend<'a, T> C<'a, T> {
+    pub const fn get(self: &C<'a, T>) usize {
+        return self.n;
+    }
+}
+const fn f() usize {
+    let c = C::<u8> { n: 3, p: null };
+    let mut v = Vector::<usize>::new();
+    v.push(4);
+    v.push(5);
+    let mut t = c.get();
+    for x in v.iter() {
+        t = t * 10 + *x;
+    }
+    return t;
+}
+const F: usize = f();
+static_assert(F == 345, "the extend's method folds");
+fn main() i32 {
+    return (f() != F) as i32;
+}
+)",
+        0,
+    );
+}
+
 const SIMD_SRC: str = "fn f(s: []i32, d: []mut i32, p: *mut i32) Simd<i32, 4> {\n    let v = load::<i32, 4>(s, 0);\n    store(d, 0, v);\n    let w = unsafe load_unaligned::<i32, 4>(p);\n    unsafe store_unaligned(p, w);\n    let m = v.less_than(w);\n    return m.choose(v.min(w), w) + v;\n}\n";
 
 // The statements of `b` whose rvalue is an RV_SIMD, in order.

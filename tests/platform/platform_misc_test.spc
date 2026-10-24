@@ -132,7 +132,7 @@ fn thread_local_keys_hold_one_value_per_thread() {
     assert(k.get() == null);
     let mut x: i32 = 5;
     k.set(&mut x).unwrap();
-    assert(k.get() == (&mut x) as *mut void);
+    assert(k.get() == ((&mut x) as *mut i32) as *mut void);
     k.set(null).unwrap();
     assert(k.get() == null);
 }

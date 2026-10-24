@@ -77,3 +77,21 @@ fn struct_array_const_header_includes_its_element_type() {
     let r = cli::superc_env_in(p.dir(), "SC_NO_EMIT_CACHE", "1", "run");
     assert_eq(r.exit, 0);
 }
+
+// A default interface body emits one copy per conforming type, named after the type: two modules that
+// each conform a type of one name get two symbols, not one copy called with both types.
+@test
+fn default_bodies_of_same_named_types_in_two_modules_stay_apart() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/twice.spc",
+        "pub interface Twice {\n    fn one(self: &Self) i32;\n    fn two(self: &Self) i32 {\n        return self.one() * 2;\n    }\n}\n",
+    );
+    let m = "import twice;\npub struct T {\n    pub n: i32,\n}\nextend T as twice::Twice {\n    pub fn one(self: &T) i32 {\n        return self.n;\n    }\n}\npub fn run(n: i32) i32 {\n    let t = T { n: n };\n    return t.two();\n}\n";
+    p.mkfile("src/a.spc", m);
+    p.mkfile("src/b.spc", m);
+    p.mkfile("src/main.spc", "import a;\nimport b;\nfn main() i32 {\n    return a::run(3) + b::run(4) - 14;\n}\n");
+    let r = cli::superc_env_in(p.dir(), "SC_NO_EMIT_CACHE", "1", "run");
+    assert_eq(r.exit, 0);
+}

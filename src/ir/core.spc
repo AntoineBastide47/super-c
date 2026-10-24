@@ -90,7 +90,7 @@ pub struct AsmRec {
 
 /// Place projections (applied left to right from the base local).
 pub const PJ_DEREF: u8 = 0;
-pub const PJ_FIELD: u8 = 1; // data = stable field index, sub = field decl NodeId
+pub const PJ_FIELD: u8 = 1; // sub = field decl NodeId (data then IR_NONE or the index); positional: data = index
 pub const PJ_INDEX_CONST: u8 = 2; // data = constant index
 pub const PJ_UNION_FIELD: u32 = 0xFFFFFFFE; // PJ_FIELD data marker: union member (fields alias)
 pub const PJ_INDEX_OP: u8 = 3; // data = OperandId of the dynamic index
@@ -102,6 +102,26 @@ pub struct Projection {
     pub data: u32,
     pub sub: u32,
     pub ty: TypeId, // the type AFTER this projection applies
+}
+
+/// Do field projections `x` and `y` of one struct name different members? Named members compare by
+/// declaration (`data` may or may not carry the index), positional members by index; a named and a
+/// positional projection prove nothing. Union members (`PJ_UNION_FIELD`) share storage: test them
+/// first, as everything below one union member overlaps everything below another.
+pub const fn fields_differ(x: &Projection, y: &Projection) bool {
+    if x.sub != NODE_NONE || y.sub != NODE_NONE {
+        return x.sub != NODE_NONE && y.sub != NODE_NONE && x.sub != y.sub;
+    }
+    return x.data != IR_NONE && y.data != IR_NONE && x.data != y.data;
+}
+
+/// The `data` of field projection `pj` with a named member's index dropped, so one member has one
+/// identity whichever form names it.
+pub const fn field_data(pj: &Projection) u32 {
+    if pj.sub != NODE_NONE && pj.data != PJ_UNION_FIELD {
+        return IR_NONE;
+    }
+    return pj.data;
 }
 
 /// A place: base local plus a projection range (into CoreBody.projections).
@@ -162,7 +182,7 @@ extend Constant {
 
     /// CK_INT: the exact integer behind the spelling in `src`, the source its span indexes: decimal,
     /// hex, binary, octal, underscores, width suffixes, character literals with escapes, and `null`
-    /// (0). `val` holds only the common decimal case. False past u64::MAX or for a malformed
+    /// (0). A lowered literal's `val` holds the same value. False past u64::MAX or for a malformed
     /// character literal.
     pub const fn int_value(self: &Self, src: str, out: &mut i64) bool {
         let sp = self.raw;
@@ -588,7 +608,7 @@ pub const SI_BINARY: u32 = 1; // RV_BINARY, c = the operator token
 pub const SI_UNARY: u32 = 2; // RV_UNARY, b = the operator token
 pub const SI_CAST: u32 = 3; // RV_CAST, c = the cast kind
 pub const SI_SIMD: u32 = 4; // RV_SIMD, c = the code
-pub const SI_HINT: u32 = 5; // RV_INTRINSIC, c = IN_LIKELY, IN_UNLIKELY or IN_RETURN_ADDRESS
+pub const SI_HINT: u32 = 5; // RV_INTRINSIC, c = IN_LIKELY, IN_UNLIKELY, IN_RETURN_ADDRESS, IN_VOLATILE_LOAD or IN_VOLATILE_STORE
 
 /// The lowering of `@intrinsic("<name>")`: SI_* << 8 | c, or 0 for an unknown name.
 pub const fn simd_intrinsic(name: str) u32 {
@@ -600,6 +620,9 @@ pub const fn simd_intrinsic(name: str) u32 {
     }
     if name == "frame.return_address" {
         return SI_HINT << 8 | IN_RETURN_ADDRESS as u32;
+    }
+    if name == "mem.volatile_load" || name == "mem.volatile_store" {
+        return SI_HINT << 8 | pick(name == "mem.volatile_load", IN_VOLATILE_LOAD, IN_VOLATILE_STORE) as u32;
     }
     if !name.starts_with("simd.") {
         return 0;
@@ -830,6 +853,12 @@ pub const IN_UNLIKELY: u8 = 24;
 /// the target has no frame walk (wasm). No compile-time value. Only a `@noinline` function names its
 /// own caller with it (`std::rt::base`'s allocation sites).
 pub const IN_RETURN_ADDRESS: u8 = 25;
+/// IN_VOLATILE_LOAD(p): the value `p` points to, read once (`*(volatile T *)p`); target = T.
+/// IN_VOLATILE_STORE(p, v): writes `v` where `p` points, once; target = void. Neither is pure: no
+/// pass drops one, merges two, or moves one across another, and C keeps each access. The evaluator
+/// runs them as an ordinary load and store.
+pub const IN_VOLATILE_LOAD: u8 = 26;
+pub const IN_VOLATILE_STORE: u8 = 27;
 
 /// True for the six safe-access check intrinsics.
 pub const fn is_check(c: u8) bool {

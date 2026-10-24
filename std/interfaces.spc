@@ -197,12 +197,54 @@ pub interface Ord: Eq {
     }
 }
 
-/// A stable hash of the value, for hash maps and sets. Equal values (per `Eq`) must hash equally.
-/// `hash` DEFAULTS to the reflected FNV-1a over the fields' (or the active variant's) own hashes,
-/// so a bare `extend T as Hash {}` derives it (see `@derive`); implement `hash` to override.
+/// A sink that reduces a byte stream to a 64-bit digest: what a keyed hash builder feeds a key into
+/// (`Hash::hash_into`). `write_u8` and `write_u64` are `write` of the value's little-endian bytes; a
+/// hasher may override them with a faster path that keeps that meaning.
+pub interface Hasher {
+    fn write(self: &mut Self, bytes: []u8);
+    fn finish(self: &Self) u64;
+
+    fn write_u8(self: &mut Self, v: u8) {
+        let b: [u8; 1] = [v];
+        self.write(b);
+    }
+
+    fn write_u64(self: &mut Self, v: u64) {
+        let b: [u8; 8] = [
+            v as u8,
+            (v >> 8) as u8,
+            (v >> 16) as u8,
+            (v >> 24) as u8,
+            (v >> 32) as u8,
+            (v >> 40) as u8,
+            (v >> 48) as u8,
+            (v >> 56) as u8,
+        ];
+        self.write(b);
+    }
+}
+
+/// How a hash table turns a key into the 64-bit hash it indexes by: `Map` and `Set` take one as their
+/// last type parameter. `Copy`, as an allocator is: a table's clone copies it. The prelude's
+/// `DefaultHash` is unkeyed and deterministic; `std::hash::keyed` has a keyed one for keys that come from
+/// untrusted input.
+pub interface BuildHasher: Copy {
+    fn hash_one<K: Hash>(self: &Self, key: &K) u64;
+}
+
+/// A value a hash table can key by: `hash_into` feeds it into a `Hasher`, so the hasher sees the input
+/// itself (a keyed hasher keeps its protection). Equal values (per `Eq`) must feed equal streams.
+/// `hash_into` DEFAULTS to the fields' (or the active variant's tag and payloads') own `hash_into`, in
+/// declaration order, so a bare `extend T as Hash {}` derives it (see `@derive`). The default is
+/// consistent only with the default (field-wise) `Eq`: a type that writes its own `eq` must write
+/// `hash_into` too, and a build that hashes such a type through the default stops with a static
+/// assertion. A conformance is a deliberate choice: types with interior mutability (`Cell`, `RefCell`,
+/// atomics, locks) are not `Hash`, because a key that changes in place loses its slot. `hash(&v)` is the
+/// prelude's 64-bit hash of a value.
 pub interface Hash {
-    fn hash(self: &Self) u64 {
-        return reflect_any_hash(self);
+    fn hash_into<H: Hasher>(self: &Self, h: &mut H) {
+        static_assert(type_info::<Self>().method("eq").is_none(), "a type that defines its own 'eq' must define 'hash_into'");
+        reflect_any_hash_into(self, h);
     }
 }
 
@@ -333,6 +375,19 @@ pub interface Reader {
 /// A source of values produced one at a time; `next` yields `None` when exhausted.
 pub interface Iterator<T> {
     fn next(self: &mut Self) Option<T>;
+
+    /// Bounds on the number of values left: at least the first, at most the second (`None` when
+    /// unknown). Equal bounds are an exact size. A wrong hint is a defect of the iterator, never a
+    /// memory error: consumers use it only to reserve.
+    fn size_hint(self: &Self) (usize, Option<usize>) {
+        return 0, Option::<usize>::None;
+    }
+}
+
+/// An iterator that also yields from its far end. `next` and `next_back` take values from one
+/// sequence and meet in the middle: after the last value either side returns `None`.
+pub interface DoubleEndedIterator<T>: Iterator<T> {
+    fn next_back(self: &mut Self) Option<T>;
 }
 
 /// Fallible value conversion. `TryFrom` is the one a type implements; `TryInto` is its compiler-provided

@@ -27,7 +27,7 @@ import module::loader as loader;
 
 pub const EF_NONE: u8 = 0; // reads at most
 pub const EF_WRITE: u8 = 1; // writes place `a` (a whole local, an interior, or through a deref)
-pub const EF_PTR: u8 = 2; // writes through pointer operand `a` (a memory or atomic intrinsic, a vector store)
+pub const EF_PTR: u8 = 2; // writes through pointer operand `a` (a memory or atomic intrinsic, a vector or volatile store)
 pub const EF_SYNC: u8 = 3; // writes nothing, but an ordered atomic makes other threads' writes visible
 pub const EF_CALL: u8 = 4; // an unknown call: the heap, statics, escaped storage and the `roots`
 pub const EF_DROP: u8 = 5; // drops place `a`: its ownership tree, or what a call reaches
@@ -77,6 +77,9 @@ pub fn stmt_effect(b: &ir::CoreBody, s: &ir::Statement) Effect {
         if ir::simd_writes(rv.c) {
             return effect(EF_PTR, b.oper_pool[rv.a as usize]);
         }
+    }
+    if rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_VOLATILE_STORE {
+        return effect(EF_PTR, b.oper_pool[rv.a as usize]);
     }
     if rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_ASM {
         let mut e = effect(EF_ASM, s.place);
@@ -3696,8 +3699,11 @@ pub const fn places_overlap(b: &ir::CoreBody, p1: u32, p2: u32) bool {
         if x.kind != y.kind {
             return true;
         }
-        if x.kind == ir::PJ_FIELD && x.data != ir::PJ_UNION_FIELD && y.data != ir::PJ_UNION_FIELD && (x.sub != NODE_NONE && y.sub != NODE_NONE && x.sub != y.sub || x.data != ir::IR_NONE && y.data != ir::IR_NONE && x.data != y.data) {
-            return false; // two fields of one struct (by declaration, or by index when both carry one)
+        if x.kind == ir::PJ_FIELD && (x.data == ir::PJ_UNION_FIELD || y.data == ir::PJ_UNION_FIELD) {
+            return true;
+        }
+        if x.kind == ir::PJ_FIELD && ir::fields_differ(&x, &y) {
+            return false;
         }
         if x.kind == ir::PJ_INDEX_CONST && x.data != y.data {
             return false;

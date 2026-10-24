@@ -144,7 +144,7 @@ read from the syntax in `open`; `bmask`: a first-byte and length prefilter). It 
 the resolve frontier beside `module_edges` (and in `build_serial`), never for the final ranges,
 which carry the checker's resolution of the call instead. Prelude extends get no names: a prelude
 item is visible to every other item, and inside the prelude the common names (`fmt`, `eq`,
-`hash`) merged 940 of 1,832 items of a small program into one component (336 without them).
+`hash_into`) merged 940 of 1,832 items of a small program into one component (336 without them).
 
 The schedule graph is conservative: a missing edge is a correctness failure, an extra edge only
 costs parallelism. The final graph adds the method and field resolutions typecheck writes and

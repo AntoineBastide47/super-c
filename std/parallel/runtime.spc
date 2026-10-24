@@ -636,12 +636,12 @@ fn reg_init() {
         unsafe segs[i] = null;
     }
     unsafe r[0] = Registry { segs: segs, nsegs: 0, len: 0, free_head: -1, spin: 0 };
-    unsafe atomic::store_ptr((&mut unsafe G_REG) as *mut usize, r as usize, 2);
+    unsafe atomic::store_ptr(((&mut unsafe G_REG) as *mut *mut Registry) as *mut usize, r as usize, 2);
 }
 
 // The registry, or null while no pool exists, for a reader not ordered after the pool's start.
 fn reg_load() *mut Registry {
-    return (unsafe atomic::load_ptr((&mut unsafe G_REG) as *const usize, 1)) as *mut Registry;
+    return (unsafe atomic::load_ptr(((&mut unsafe G_REG) as *const *mut Registry) as *const usize, 1)) as *mut Registry;
 }
 
 fn reg_slot(r: *mut Registry, idx: usize) *mut TaskSlot {
@@ -729,7 +729,7 @@ fn reg_free() {
     }
     unsafe g.dealloc(unsafe (*r).segs, REG_MAX_SEGS * sizeof(*mut TaskSlot), alignof(*mut TaskSlot));
     unsafe g.dealloc(r, sizeof(Registry), alignof(Registry));
-    unsafe atomic::store_ptr((&mut unsafe G_REG) as *mut usize, 0, 2);
+    unsafe atomic::store_ptr(((&mut unsafe G_REG) as *mut *mut Registry) as *mut usize, 0, 2);
 }
 
 // Read one live slot into a TaskInfo row. Caller holds the registry spinlock. The slot lock pins the
@@ -1953,7 +1953,7 @@ fn release_block(co: *mut Coroutine) {
     // After this no key or scan can reach the block.
     reg_retire(co);
     unsafe sc_runtime::sc_rt_stack_free((*co).stack, (*co).stack_size);
-    if unsafe (*co).ctx == (&mut unsafe (*co).ctx_mem[0]) as *mut void {
+    if unsafe (*co).ctx == ((&mut unsafe (*co).ctx_mem[0]) as *mut u64) as *mut void {
         unsafe sc_runtime::sc_rt_ctx_drop((*co).ctx);
     } else {
         unsafe sc_runtime::sc_rt_ctx_free((*co).ctx);
@@ -2118,7 +2118,7 @@ fn worker_main(arg: *mut void) *mut void {
     let mut sched_mem = Array::<u64, 2>::new();
     let ctx_inline = sc_runtime::sc_rt_ctx_inline_size() != 0;
     let sched_ctx = if ctx_inline {
-        (&mut sched_mem[0]) as *mut void;
+        ((&mut sched_mem[0]) as *mut u64) as *mut void;
     } else {
         unsafe sc_runtime::sc_rt_ctx_alloc();
     };

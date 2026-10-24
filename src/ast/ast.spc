@@ -856,6 +856,9 @@ pub struct ClosureData {
     pub returns: NodeList,
     pub body: NodeId,
     pub expr_body: bool,
+    /// A block body without written results returns a value: its type is the body node's
+    /// (`closure_body_ret`).
+    pub ret_infer: bool,
     pub captures: NodeList,
     pub mut_caps: u32,
     pub ref_caps: u32,
@@ -1804,13 +1807,32 @@ pub fn lin_subst_form(
     if depth > 12 {
         return false;
     }
-    if form.div_of() != i128::one() {
-        // The divisor covers the WHOLE form, so it transfers only onto an empty accumulator.
-        if !out.k.is_zero() || out.n != 0 || out.div_of() != i128::one() {
-            return false;
-        }
+    // The divisor covers the WHOLE form, so it transfers only onto an empty accumulator, and only
+    // once the terms are in: a term added to a divided form would be divided.
+    let divided = form.div_of() != i128::one();
+    if divided && (!out.k.is_zero() || out.n != 0 || out.div_of() != i128::one()) {
+        return false;
+    }
+    if !lin_subst_terms(dst, form, params, args, n, out, ptr32, depth) {
+        return false;
+    }
+    if divided {
         out.div = form.div;
     }
+    return true;
+}
+
+// `lin_subst_form` of `form`'s constant and terms, without its divisor.
+fn lin_subst_terms(
+    dst: &Ast,
+    form: &ConstLin,
+    params: *const DefId,
+    args: *const TypeId,
+    n: i32,
+    out: &mut ConstLin,
+    ptr32: bool,
+    depth: i32,
+) bool {
     if !lin_acc(&mut out.k, i128::one(), form.k) {
         return false;
     }
@@ -1998,6 +2020,16 @@ pub fn ts_phase(label: str) {
 
 fn ts_delta(i: usize) u64 {
     return unsafe TS[i] - unsafe TS_LAST[i];
+}
+
+/// 64-bit FNV-1a of `s`: the compiler's name key. Byte-serial on purpose: the emitter's text scans hash
+/// an identifier byte by byte as they read it, and must meet the keys that whole names hash to.
+pub const fn fnv(s: str) u64 {
+    let mut h: u64 = 0xcbf29ce484222325u64;
+    for k in 0..s.len() {
+        h = (h ^ s.byte_at(k) as u64).wrapping_mul(0x100000001b3u64);
+    }
+    return h;
 }
 
 /// One mixing round, the mixer behind the type, instance and body-cache keys. A plain FNV-1a round is NOT
@@ -2237,19 +2269,20 @@ extend Ty as Hash {
     // sized, so `sizeof(Ty)/8` aligned u64 loads cover every byte the per-byte loop did -- ~8x fewer rounds.
     // The hash only selects a probe bucket: `eq` stays a full memcmp and intern_type numbers TypeIds in
     // insertion order, so the hash function never affects interned identity or emitted output.
-    pub fn hash(self: &Self) u64 {
+    pub fn hash_into<H: Hasher>(self: &Self, h: &mut H) {
         if unsafe TS_COLLIDE {
-            return 7;
+            h.write_u64(7);
+            return;
         }
         // Every word is mixed down into the low bits the index masks: a multiply-only chain
         // leaves the index a function of the payload's low bits alone, and records that differ
         // only above them (an array's length, a projection's binder) then probe in one chain.
         let p = (self as *const Ty) as *const u64;
-        let mut h: u64 = 0xcbf29ce484222325u64;
+        let mut x: u64 = 0xcbf29ce484222325u64;
         for i in 0..sizeof(Ty) / 8 {
-            h = skey_mix(h, unsafe p[i]);
+            x = skey_mix(x, unsafe p[i]);
         }
-        return h;
+        h.write_u64(x);
     }
 }
 
@@ -2321,12 +2354,49 @@ pub struct BoundCall {
     pub iface: TypeId,
 }
 
-// One deferred field-projection bound: prove `iface` for every field of `owner` once a call binds
-// the owner; owned by fn decl `fnd` in this module.
+// One deferred field-projection bound: prove `iface` for every member of `owner` the reflection loop
+// of `mode` visits (0 `fields`: a struct's fields; 1 `variants`: each variant's single payload; 2
+// `payloads`: every payload of every variant) once a call binds the owner; owned by fn decl `fnd` in
+// this module. A demand (`demand`) is instead an instance of the
+// generic interface default method `iface` under `args[0..n]`, in `TypeChecker::dmd_params` order
+// (`Self` first): its own obligations hold only when `Self`'s conformance inherits the default, so
+// they run once `args` are concrete (`Ast.dmd_uses`, where `fnd` is the call that made them so).
 pub struct ProjOb {
     pub fnd: NodeId,
     pub owner: TypeId,
     pub iface: DefId,
+    pub demand: bool,
+    pub n: u8,
+    pub args: [TypeId; 16],
+    pub guard: ObGuard,
+    pub mode: u8,
+}
+
+/// The per-copy `if` conditions around a reflection loop's bound check (`chain`, an index plus one
+/// into module `m`'s `Ast.ob_guards`; 0 for none), over loop `binder`. A field whose copy folds one
+/// of them against its branch is never emitted, so it owes the bound nothing.
+pub struct ObGuard {
+    pub m: ModuleId,
+    pub binder: NodeId,
+    pub chain: u32,
+}
+
+/// One guard condition: the branch the check sits in (`taken`: the then branch) and the enclosing
+/// condition's entry (index plus one; 0 at the loop body).
+pub struct GuardEnt {
+    pub cond: NodeId,
+    pub taken: bool,
+    pub parent: u32,
+}
+
+/// A call of a method whose generic parameters its receiver binds (a generic interface default's
+/// `Self` and the interface's parameters, or a generic extend's parameters): those arguments, in
+/// `TypeChecker::frame_params` order (TYPE_NONE where the call binds none). The obligation discharge
+/// substitutes them with the call's own type arguments (`mono`).
+pub struct FrameUse {
+    pub node: NodeId,
+    pub n: u8,
+    pub args: [TypeId; 8],
 }
 
 pub struct MonoUse {
@@ -2364,19 +2434,20 @@ pub struct DerefUse {
 // never affect identity. This exactly mirrors intern_instance's linear comparison, keeping the interned
 // index numbering byte-identical.
 extend TyInstance as Hash {
-    pub fn hash(self: &Self) u64 {
+    pub fn hash_into<H: Hasher>(self: &Self, h: &mut H) {
         if unsafe TS_COLLIDE {
-            return 7;
+            h.write_u64(7);
+            return;
         }
-        let mut h = skey_mix(0xcbf29ce484222325u64, self.module as u64 << 32 | self.decl as u64);
-        h = skey_mix(h, self.n);
+        let mut x = skey_mix(0xcbf29ce484222325u64, self.module as u64 << 32 | self.decl as u64);
+        x = skey_mix(x, self.n);
         for i in 0..self.n {
-            h = skey_mix(h, unsafe self.args[i]);
+            x = skey_mix(x, unsafe self.args[i]);
         }
         if self.lts != 0 {
-            h = skey_mix(h, self.lts);
+            x = skey_mix(x, self.lts);
         }
-        return h;
+        h.write_u64(x);
     }
 }
 extend TyInstance as Eq {
@@ -2685,6 +2756,14 @@ pub const fn pub_map1(map: &Vector<TypeId>, t: TypeId) TypeId {
     return map[(t & TYPE_PROV_MASK) as usize];
 }
 
+// An obligation's types under publication map `map`.
+const fn pub_map_ob(map: &Vector<TypeId>, o: &mut ProjOb) {
+    o.owner = pub_map1(map, o.owner);
+    for k in 0..o.n {
+        unsafe o.args[k] = pub_map1(map, unsafe o.args[k]);
+    }
+}
+
 /// Provisional ids: a type interned into a module's pool while the package table is closed carries
 /// this bit over its pool index until a publication maps it to a final package id. Final ids stay
 /// below TYPE_MAX; the publication aborts the compile past it. Bit 29: the inference solver packs a
@@ -2740,7 +2819,7 @@ fn ix_ready<T: Copy + Hash>(ix: &mut Vector<u32>, used: &mut u32, pool: &ChunkPo
     *used = pool.len() as u32;
     let mask = cap - 1;
     for id in 0..pool.len() {
-        let mut i = pool.at(id).hash() as usize & mask;
+        let mut i = hash(pool.at(id)) as usize & mask;
         while ix[i] != 0xFFFFFFFFu32 {
             i = i + 1 & mask;
         }
@@ -2757,7 +2836,7 @@ fn ix_slot<T: Copy + Hash + Eq>(ix: &Vector<u32>, pool: &ChunkPool<T>, v: &T, hi
     let mask = ix.len() - 1;
     let ixp = ix.as_ptr();
     let pn = pool.len();
-    let mut i = v.hash() as usize & mask;
+    let mut i = hash(v) as usize & mask;
     loop {
         let idx = unsafe ixp[i];
         if idx == 0xFFFFFFFFu32 {
@@ -2786,7 +2865,7 @@ const fn ix_find<T: Copy + Hash + Eq>(ix: &Vector<u32>, pool: &ChunkPool<T>, v: 
     let mask = ix.len() - 1;
     let ixp = ix.as_ptr();
     let pn = pool.len();
-    let mut i = v.hash() as usize & mask;
+    let mut i = hash(v) as usize & mask;
     loop {
         let idx = unsafe ixp[i];
         if idx == 0xFFFFFFFFu32 {
@@ -3227,6 +3306,13 @@ pub struct Ast {
     // the callee's obligations. A callee checked after its caller (one dependency cycle) records
     // more later; the driver's pass runs those.
     pub ob_seen: Map<u32, u32>,
+    pub frame_uses: Vector<FrameUse>,
+    // Per call node: its `frame_uses` index plus one (a re-checked call records again in place).
+    pub frame_at: Map<u32, u32>,
+    // The concrete default-method instances this module's calls demand (`ProjOb.demand`), run once
+    // every obligation list is complete.
+    pub dmd_uses: Vector<ProjOb>,
+    pub ob_guards: Vector<GuardEnt>,
     pub mono_at: Vector<u32>,
     pub method_refs: Vector<MethodRef>,
     pub wide_lits: Vector<WideLit>,
@@ -3356,6 +3442,10 @@ extend Ast as Free {
         self.types.free();
         self.mono.free();
         self.proj_obs.free();
+        self.frame_uses.free();
+        self.frame_at.free();
+        self.dmd_uses.free();
+        self.ob_guards.free();
         self.mono_at.free();
         self.method_refs.free();
         self.wide_lits.free();
@@ -3402,7 +3492,7 @@ extend Ast as Free {
 extend Ast {
     /// Whether identifier text `name` occurs in code the platform filter removed.
     pub const fn bc_removed_name(self: &Self, name: str) bool {
-        return self.bc_names.len() != 0 && self.bc_names.binary_search(&name.hash()).is_ok();
+        return self.bc_names.len() != 0 && self.bc_names.binary_search(&fnv(name)).is_ok();
     }
 
     /// The span branch `b` was written with: a decided site's cut keeps it after the site took its branch's.
@@ -4366,8 +4456,16 @@ extend Ast {
             c.target = pub_map1(map, c.target);
         }
         for i in 0..self.proj_obs.len() {
-            let o = self.proj_obs.index_mut(i);
-            o.owner = pub_map1(map, o.owner);
+            pub_map_ob(map, self.proj_obs.index_mut(i));
+        }
+        for i in 0..self.dmd_uses.len() {
+            pub_map_ob(map, self.dmd_uses.index_mut(i));
+        }
+        for i in 0..self.frame_uses.len() {
+            let f = self.frame_uses.index_mut(i);
+            for k in 0..f.n {
+                unsafe f.args[k] = pub_map1(map, unsafe f.args[k]);
+            }
         }
         for i in 0..self.bound_calls.len() {
             let c = self.bound_calls.index_mut(i);
@@ -5339,7 +5437,7 @@ extend Ast {
     /// Approximate owned bytes (vector CAPACITIES, not lengths): the LSP retention budget's
     /// accounting unit. The map tables are omitted -- small next to the arenas.
     pub const fn retained_bytes(self: &Self) usize {
-        return self.nodes.retained() + self.children.retained() + self.b.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.retained() + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.attr_vals.capacity() * sizeof(AttrVal) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.bound_calls.capacity() * sizeof(BoundCall) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl) + self.where_bounds.capacity() * sizeof(WhereBound) + self.seeds.capacity() * sizeof(Seed) + self.closure_facts.capacity() * sizeof(ClosureFact) + self.cap_facts.capacity() * sizeof(CapFact) + self.closure_lts.capacity() * 8 + self.free_touched.capacity() * 8;
+        return self.nodes.retained() + self.children.retained() + self.b.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.retained() + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.attr_vals.capacity() * sizeof(AttrVal) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.bound_calls.capacity() * sizeof(BoundCall) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.dmd_uses.capacity() * sizeof(ProjOb) + self.frame_uses.capacity() * sizeof(FrameUse) + self.ob_guards.capacity() * sizeof(GuardEnt) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl) + self.where_bounds.capacity() * sizeof(WhereBound) + self.seeds.capacity() * sizeof(Seed) + self.closure_facts.capacity() * sizeof(ClosureFact) + self.cap_facts.capacity() * sizeof(CapFact) + self.closure_lts.capacity() * 8 + self.free_touched.capacity() * 8;
     }
 
     /// Add this module's syntax accounting to `out` (SC_SYNTAX_STATS): the body arena holds the
@@ -5748,6 +5846,34 @@ extend MonoUse as Persist {
     }
 
     fn load(self: &mut MonoUse, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend GuardEnt as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &GuardEnt, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut GuardEnt, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend FrameUse as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &FrameUse, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut FrameUse, r: &mut Reader) {
         load_bytes(self, r);
     }
 }

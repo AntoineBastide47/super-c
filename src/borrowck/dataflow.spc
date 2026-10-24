@@ -496,6 +496,38 @@ extend MoveFlow {
         return (self.mi.capacity() * sizeof(u64) + self.di.capacity() * sizeof(u64) + self.mm.capacity() * sizeof(u64) + self.errs.capacity() * sizeof(MoveErr) + self.s_reached.capacity() * sizeof(bool) + self.s_queue.capacity() * sizeof(u32) + self.s_queued.capacity() * sizeof(bool) + self.s_scratch.capacity() * sizeof(u32) + self.s_sub.capacity() * sizeof(u32) + (self.s_ctx.mi.capacity() + self.s_ctx.di.capacity() + self.s_ctx.mm.capacity()) * 8) as u64;
     }
 
+    /// May move path `path` hold a value just before `point` of block `bi` (after `build_into`)? The
+    /// block's state-changing events before the point replay over its entry row. A path holds a value
+    /// when a path of its subtree may be initialized and is a leaf or has storage no child tracks
+    /// (`MoveForest.covered`): moving every member out one by one empties the whole.
+    pub fn holds_at(self: &mut Self, forest: &mp::MoveForest, f: &bf::BodyFacts, bi: u32, point: u32, path: u32) bool {
+        let w = self.words as usize;
+        let base = bi as usize * w;
+        for k in 0..w {
+            self.s_ctx.mi.set(k, self.mi[base + k]);
+            self.s_ctx.di.set(k, self.di[base + k]);
+            self.s_ctx.mm.set(k, self.mm[base + k]);
+        }
+        for e in f.mev_start[bi as usize]..f.mev_start[bi as usize + 1] {
+            let ev = *f.mev.at(e as usize);
+            if ev.point >= point {
+                break;
+            }
+            self.s_ctx.step(forest, &ev, &mut self.s_scratch, &mut self.s_sub, false, &mut self.errs);
+        }
+        if forest.is_leaf(path) {
+            return bit_get(&self.s_ctx.mi, path);
+        }
+        forest.subtree(path, &mut self.s_scratch, &mut self.s_sub);
+        for i in 0..self.s_sub.len() {
+            let p = self.s_sub[i];
+            if bit_get(&self.s_ctx.mi, p) && (forest.is_leaf(p) || !bit_get(&forest.covered, p)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// Solve in place, keeping capacity from earlier bodies.
     pub fn build_into(self: &mut Self, b: &ir::CoreBody, forest: &mp::MoveForest, f: &bf::BodyFacts, c: &Cfg) {
         let mf = self;

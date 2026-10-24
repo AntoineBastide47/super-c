@@ -380,7 +380,7 @@ static mut AT_HEAP: *mut fn() = null;
 static mut AT_LEN: usize = 0;
 static mut AT_CAP: usize = 32;
 
-fn noop_handler() {}
+const fn noop_handler() {}
 
 /// Register `f` to run at `exit`; 0, or -1 when no memory is left.
 @export("atexit")
@@ -445,7 +445,7 @@ pub fn abort() {
 
 /// The process id: WASI has none, so every process is 42, as wasi-libc's emulation answers.
 @export("getpid")
-pub fn getpid() i32 {
+pub const fn getpid() i32 {
     return 42;
 }
 
@@ -615,7 +615,7 @@ const SIG_NAMES: [str<'static>; 65] = [
 
 /// `SIG_IGN`: does nothing.
 @export("__SIG_IGN")
-pub fn sig_ign(_sig: i32) {}
+pub const fn sig_ign(_sig: i32) {}
 
 /// `SIG_ERR`: a trap, should it ever run.
 @export("__SIG_ERR")
@@ -626,7 +626,7 @@ pub fn sig_err(_sig: i32) {
 
 /// The description of signal `sig`; "Unknown signal" outside 1 to 64.
 @export("strsignal")
-pub fn strsignal(sig: i32) *mut char {
+pub const fn strsignal(sig: i32) *mut char {
     let i = if (sig as u32).wrapping_sub(1) >= (NSIG - 1) as u32 {
         0usize;
     } else {
@@ -707,7 +707,7 @@ pub fn pthread_self() *mut PThread {
 
 /// Whether `a` and `b` name the same thread.
 @export("pthread_equal")
-pub fn pthread_equal(a: *mut PThread, b: *mut PThread) i32 {
+pub const fn pthread_equal(a: *mut PThread, b: *mut PThread) i32 {
     return (a == b) as i32;
 }
 
@@ -751,24 +751,24 @@ static mut HEAP_END: usize = 0;
 // The end of the memory the heap took: past it, `sbrk` may have taken memory the heap must skip.
 static mut HEAP_TOP: usize = 0;
 
-fn word(a: usize) usize {
+const fn word(a: usize) usize {
     return unsafe *(a as *const usize);
 }
 
-fn set_word(a: usize, v: usize) {
+const fn set_word(a: usize, v: usize) {
     unsafe *(a as *mut usize) = v;
 }
 
-fn bsize(b: usize) usize {
+const fn bsize(b: usize) usize {
     return word(b) & SIZE_MASK;
 }
 
-fn floor_log2(x: usize) usize {
+const fn floor_log2(x: usize) usize {
     return 31 - (x as u32).leading_zeros();
 }
 
 // The class (first level, second level) of a free block of `size` bytes.
-fn class_of(size: usize, fl: &mut usize, sl: &mut usize) {
+const fn class_of(size: usize, fl: &mut usize, sl: &mut usize) {
     if size < SMALL {
         *fl = 0;
         *sl = size / 16;
@@ -937,7 +937,7 @@ fn extend_heap(end: usize) {
 }
 
 // The block size that holds `n` payload bytes.
-fn block_size(n: usize) usize {
+const fn block_size(n: usize) usize {
     let s = n + HDR + ALIGN - 1 & ~(ALIGN - 1);
     return if s < MIN_BLOCK {
         MIN_BLOCK;
@@ -1169,7 +1169,7 @@ pub fn sbrk(inc: isize) *mut void {
 // ---- strings -------------------------------------------------------------------------------------------
 
 // Copy `n` bytes forward: 8 at a time when both addresses share their alignment mod 8.
-fn copy(d: *mut u8, s: *const u8, n: usize) {
+const fn copy(d: *mut u8, s: *const u8, n: usize) {
     let mut i: usize = 0;
     if ((d as usize ^ s as usize) & 7) == 0 {
         while i < n && (d as usize + i & 7) != 0 {
@@ -1206,7 +1206,7 @@ fn copy(d: *mut u8, s: *const u8, n: usize) {
 }
 
 // Copy `n` bytes backward, for an overlap where the destination is after the source.
-fn copy_back(d: *mut u8, s: *const u8, n: usize) {
+const fn copy_back(d: *mut u8, s: *const u8, n: usize) {
     let mut i = n;
     if ((d as usize ^ s as usize) & 7) == 0 {
         while i > 0 && (d as usize + i & 7) != 0 {
@@ -1225,7 +1225,7 @@ fn copy_back(d: *mut u8, s: *const u8, n: usize) {
 }
 
 // Set `n` bytes to `c`: 8 at a time past the alignment.
-fn fill(d: *mut u8, c: u8, n: usize) {
+const fn fill(d: *mut u8, c: u8, n: usize) {
     let mut i: usize = 0;
     while i < n && (d as usize + i & 7) != 0 {
         unsafe d[i] = c;
@@ -1244,14 +1244,14 @@ fn fill(d: *mut u8, c: u8, n: usize) {
 
 /// Copy `n` bytes; the regions must not overlap.
 @export("memcpy")
-pub fn memcpy(dst: *mut void, src: *const void, n: usize) *mut void {
+pub const fn memcpy(dst: *mut void, src: *const void, n: usize) *mut void {
     copy(dst as *mut u8, src as *const u8, n);
     return dst;
 }
 
 /// Copy `n` bytes; the regions may overlap.
 @export("memmove")
-pub fn memmove(dst: *mut void, src: *const void, n: usize) *mut void {
+pub const fn memmove(dst: *mut void, src: *const void, n: usize) *mut void {
     let d = dst as usize;
     let s = src as usize;
     if d.wrapping_sub(s) >= n {
@@ -1265,14 +1265,14 @@ pub fn memmove(dst: *mut void, src: *const void, n: usize) *mut void {
 
 /// Set `n` bytes to `c` (as an unsigned char).
 @export("memset")
-pub fn memset(dst: *mut void, c: i32, n: usize) *mut void {
+pub const fn memset(dst: *mut void, c: i32, n: usize) *mut void {
     fill(dst as *mut u8, c as u8, n);
     return dst;
 }
 
 /// Compare `n` bytes as unsigned chars: negative, zero or positive.
 @export("memcmp")
-pub fn memcmp(a: *const void, b: *const void, n: usize) i32 {
+pub const fn memcmp(a: *const void, b: *const void, n: usize) i32 {
     let x = a as *const u8;
     let y = b as *const u8;
     for i in 0..n {
@@ -1286,7 +1286,7 @@ pub fn memcmp(a: *const void, b: *const void, n: usize) i32 {
 
 /// The first of `n` bytes equal to `c` (as an unsigned char), or null.
 @export("memchr")
-pub fn memchr(p: *const void, c: i32, n: usize) *mut void {
+pub const fn memchr(p: *const void, c: i32, n: usize) *mut void {
     let s = p as *const u8;
     let b = c as u8;
     for i in 0..n {
@@ -1299,7 +1299,7 @@ pub fn memchr(p: *const void, c: i32, n: usize) *mut void {
 
 /// The length of NUL-terminated `s`.
 @export("strlen")
-pub fn strlen(s: *const char) usize {
+pub const fn strlen(s: *const char) usize {
     let p = s as *const u8;
     let mut i: usize = 0;
     while unsafe p[i] != 0 {
@@ -1310,7 +1310,7 @@ pub fn strlen(s: *const char) usize {
 
 /// The length of `s`, at most `max`.
 @export("strnlen")
-pub fn strnlen(s: *const char, max: usize) usize {
+pub const fn strnlen(s: *const char, max: usize) usize {
     let p = s as *const u8;
     let mut i: usize = 0;
     while i < max && unsafe p[i] != 0 {
@@ -1321,7 +1321,7 @@ pub fn strnlen(s: *const char, max: usize) usize {
 
 /// Compare NUL-terminated strings as unsigned chars.
 @export("strcmp")
-pub fn strcmp(a: *const char, b: *const char) i32 {
+pub const fn strcmp(a: *const char, b: *const char) i32 {
     let x = a as *const u8;
     let y = b as *const u8;
     let mut i: usize = 0;
@@ -1333,7 +1333,7 @@ pub fn strcmp(a: *const char, b: *const char) i32 {
 
 /// Compare at most `n` bytes of NUL-terminated strings.
 @export("strncmp")
-pub fn strncmp(a: *const char, b: *const char, n: usize) i32 {
+pub const fn strncmp(a: *const char, b: *const char, n: usize) i32 {
     let x = a as *const u8;
     let y = b as *const u8;
     if n == 0 {
@@ -1348,7 +1348,7 @@ pub fn strncmp(a: *const char, b: *const char, n: usize) i32 {
 
 /// The first `c` (as a char) in `s`, its terminator included, or null.
 @export("strchr")
-pub fn strchr(s: *const char, c: i32) *mut char {
+pub const fn strchr(s: *const char, c: i32) *mut char {
     let p = s as *const u8;
     let b = c as u8;
     let mut i: usize = 0;
@@ -1364,7 +1364,7 @@ pub fn strchr(s: *const char, c: i32) *mut char {
 }
 
 // The first `c` in `s`, or its terminator.
-fn chrnul(s: *const u8, c: u8) *const u8 {
+const fn chrnul(s: *const u8, c: u8) *const u8 {
     let mut i: usize = 0;
     while unsafe s[i] != 0 && unsafe s[i] != c {
         i += 1;
@@ -1374,7 +1374,7 @@ fn chrnul(s: *const u8, c: u8) *const u8 {
 
 /// The last `c` (as a char) in `s`, its terminator included, or null.
 @export("strrchr")
-pub fn strrchr(s: *const char, c: i32) *mut char {
+pub const fn strrchr(s: *const char, c: i32) *mut char {
     let p = s as *const u8;
     let b = c as u8;
     let n = strlen(s);
@@ -1390,7 +1390,7 @@ pub fn strrchr(s: *const char, c: i32) *mut char {
 
 /// The first occurrence of `needle` in `hay`, or null; `hay` for an empty needle.
 @export("strstr")
-pub fn strstr(hay: *const char, needle: *const char) *mut char {
+pub const fn strstr(hay: *const char, needle: *const char) *mut char {
     let h = hay as *const u8;
     let nd = needle as *const u8;
     let nl = strlen(needle);
@@ -1409,7 +1409,7 @@ pub fn strstr(hay: *const char, needle: *const char) *mut char {
 
 /// Copy `src` with its terminator to `dst`; `dst`.
 @export("strcpy")
-pub fn strcpy(dst: *mut char, src: *const char) *mut char {
+pub const fn strcpy(dst: *mut char, src: *const char) *mut char {
     copy(dst as *mut u8, src as *const u8, strlen(src) + 1);
     return dst;
 }
@@ -1430,79 +1430,79 @@ pub fn strdup(s: *const char) *mut char {
 
 /// Whether `c` is a letter.
 @export("isalpha")
-pub fn isalpha(c: i32) i32 {
+pub const fn isalpha(c: i32) i32 {
     return ((c as u32 | 32).wrapping_sub(97) < 26) as i32;
 }
 
 /// Whether `c` is a decimal digit.
 @export("isdigit")
-pub fn isdigit(c: i32) i32 {
+pub const fn isdigit(c: i32) i32 {
     return ((c as u32).wrapping_sub(48) < 10) as i32;
 }
 
 /// Whether `c` is a letter or a digit.
 @export("isalnum")
-pub fn isalnum(c: i32) i32 {
+pub const fn isalnum(c: i32) i32 {
     return isalpha(c) | isdigit(c);
 }
 
 /// Whether `c` is white space: space, \t, \n, \v, \f or \r.
 @export("isspace")
-pub fn isspace(c: i32) i32 {
+pub const fn isspace(c: i32) i32 {
     return (c == 32 || (c as u32).wrapping_sub(9) < 5) as i32;
 }
 
 /// Whether `c` is an uppercase letter.
 @export("isupper")
-pub fn isupper(c: i32) i32 {
+pub const fn isupper(c: i32) i32 {
     return ((c as u32).wrapping_sub(65) < 26) as i32;
 }
 
 /// Whether `c` is a lowercase letter.
 @export("islower")
-pub fn islower(c: i32) i32 {
+pub const fn islower(c: i32) i32 {
     return ((c as u32).wrapping_sub(97) < 26) as i32;
 }
 
 /// Whether `c` is printable and not a space.
 @export("isgraph")
-pub fn isgraph(c: i32) i32 {
+pub const fn isgraph(c: i32) i32 {
     return ((c as u32).wrapping_sub(33) < 94) as i32;
 }
 
 /// Whether `c` is printable, the space included.
 @export("isprint")
-pub fn isprint(c: i32) i32 {
+pub const fn isprint(c: i32) i32 {
     return ((c as u32).wrapping_sub(32) < 95) as i32;
 }
 
 /// Whether `c` is punctuation: printable, not a space, a letter or a digit.
 @export("ispunct")
-pub fn ispunct(c: i32) i32 {
+pub const fn ispunct(c: i32) i32 {
     return (isgraph(c) != 0 && isalnum(c) == 0) as i32;
 }
 
 /// Whether `c` is a control character.
 @export("iscntrl")
-pub fn iscntrl(c: i32) i32 {
+pub const fn iscntrl(c: i32) i32 {
     return (c as u32 < 32 || c == 127) as i32;
 }
 
 /// Whether `c` is a space or a tab.
 @export("isblank")
-pub fn isblank(c: i32) i32 {
+pub const fn isblank(c: i32) i32 {
     return (c == 32 || c == 9) as i32;
 }
 
 /// Whether `c` is a hexadecimal digit.
 @export("isxdigit")
-pub fn isxdigit(c: i32) i32 {
+pub const fn isxdigit(c: i32) i32 {
     return (isdigit(c) != 0 || (c as u32 | 32).wrapping_sub(97) < 6) as i32;
 }
 
 /// `c` in uppercase when it is a lowercase letter.
 @export("toupper")
-pub fn toupper(c: i32) i32 {
+pub const fn toupper(c: i32) i32 {
     if islower(c) != 0 {
         return c & 0x5f;
     }
@@ -1511,7 +1511,7 @@ pub fn toupper(c: i32) i32 {
 
 /// `c` in lowercase when it is an uppercase letter.
 @export("tolower")
-pub fn tolower(c: i32) i32 {
+pub const fn tolower(c: i32) i32 {
     if isupper(c) != 0 {
         return c | 32;
     }
@@ -1665,7 +1665,7 @@ struct Scan {
 }
 
 // A cursor of `kind` over string `s` or stream `st`.
-fn scan_of(kind: u8, s: *const u8, st: *mut Stream) Scan {
+const fn scan_of(kind: u8, s: *const u8, st: *mut Stream) Scan {
     return Scan { s: s, pos: 0, bad: false, kind: kind, at: 0, st: st, lim: 0, end: false };
 }
 
@@ -1709,7 +1709,7 @@ extend Scan {
         return c;
     }
 
-    fn unget(self: &mut Scan) {
+    const fn unget(self: &mut Scan) {
         if self.kind == 0 {
             self.pos -= 1;
             return;
@@ -1726,7 +1726,7 @@ extend Scan {
     }
 
     // musl's `shlim`: count from here, and read at most `n` bytes (0: no limit).
-    fn limit(self: &mut Scan, n: i64) {
+    const fn limit(self: &mut Scan, n: i64) {
         self.lim = n;
         self.pos = 0;
         self.end = false;
@@ -1734,7 +1734,7 @@ extend Scan {
     }
 
     // The bytes the conversion consumed.
-    fn used(self: &Scan) usize {
+    const fn used(self: &Scan) usize {
         return if self.bad {
             0usize;
         } else {
@@ -1744,7 +1744,7 @@ extend Scan {
 }
 
 // The digit value of `c` in bases up to 36, or 255.
-fn digit_val(c: i32) u32 {
+const fn digit_val(c: i32) u32 {
     let u = c as u32;
     if u.wrapping_sub(48) < 10 {
         return u - 48;
@@ -1871,7 +1871,7 @@ pub fn strtoull(s: *const char, end: *mut *mut char, base: i32) u64 {
 
 // musl's `atoi` and its kin: optional white space and sign, then decimal digits, accumulated negative so
 // the most negative value fits; an overflow wraps.
-fn ato(s: *const char) i64 {
+const fn ato(s: *const char) i64 {
     let p = s as *const u8;
     let mut i: usize = 0;
     while isspace(unsafe p[i]) != 0 {
@@ -1898,26 +1898,26 @@ fn ato(s: *const char) i64 {
 
 /// `s` as an `int` in base 10 (an overflow wraps, as C leaves it undefined).
 @export("atoi")
-pub fn atoi(s: *const char) i32 {
+pub const fn atoi(s: *const char) i32 {
     // musl accumulates in `int`: the low 32 bits of the `long long` result are the same.
     return ato(s) as i32;
 }
 
 /// `s` as a `long` in base 10.
 @export("atol")
-pub fn atol(s: *const char) isize {
+pub const fn atol(s: *const char) isize {
     return ato(s) as isize;
 }
 
 /// `s` as a `long long` in base 10.
 @export("atoll")
-pub fn atoll(s: *const char) i64 {
+pub const fn atoll(s: *const char) i64 {
     return ato(s);
 }
 
 /// |x|.
 @export("abs")
-pub fn abs(x: i32) i32 {
+pub const fn abs(x: i32) i32 {
     return if x < 0 {
         x.wrapping_neg();
     } else {
@@ -1927,7 +1927,7 @@ pub fn abs(x: i32) i32 {
 
 /// |x| of a `long`.
 @export("labs")
-pub fn labs(x: isize) isize {
+pub const fn labs(x: isize) isize {
     return if x < 0 {
         x.wrapping_neg();
     } else {
@@ -1937,7 +1937,7 @@ pub fn labs(x: isize) isize {
 
 /// |x| of a `long long`.
 @export("llabs")
-pub fn llabs(x: i64) i64 {
+pub const fn llabs(x: i64) i64 {
     return if x < 0 {
         x.wrapping_neg();
     } else {
@@ -2035,7 +2035,7 @@ pub fn clock() i64 {
 
 /// `a - b` in seconds.
 @export("difftime")
-pub fn difftime(a: i64, b: i64) f64 {
+pub const fn difftime(a: i64, b: i64) f64 {
     return a as f64 - b as f64;
 }
 
@@ -2128,7 +2128,7 @@ static mut LOCAL_TM: tm = tm {
 
 // musl's `__secs_to_tm`: the calendar fields of `t` seconds past the epoch; false when the year overflows
 // an int.
-fn secs_to_tm(t: i64, out: &mut tm) bool {
+const fn secs_to_tm(t: i64, out: &mut tm) bool {
     let days_in_month = [31, 30, 31, 30, 31, 31, 30, 31, 30, 31, 31, 29];
     if t < INT_MIN as i64 * 31622400 || t > INT_MAX as i64 * 31622400 {
         return false;
@@ -2196,7 +2196,7 @@ fn secs_to_tm(t: i64, out: &mut tm) bool {
 
 // musl's `__year_to_secs`: the seconds from the epoch to the start of year `year` (past 1900), and whether
 // it is a leap year.
-fn year_to_secs(year: i64, is_leap: &mut bool) i64 {
+const fn year_to_secs(year: i64, is_leap: &mut bool) i64 {
     if (year as u64).wrapping_sub(2) <= 136 {
         let y = year as i32;
         let mut leaps = y - 68 >> 2;
@@ -2244,7 +2244,7 @@ fn year_to_secs(year: i64, is_leap: &mut bool) i64 {
 }
 
 // musl's `__tm_to_secs`: the seconds from the epoch to the time `t` names, its fields out of range carried.
-fn tm_to_secs(t: &tm) i64 {
+const fn tm_to_secs(t: &tm) i64 {
     let mut year = t.tm_year as i64;
     let mut month = t.tm_mon;
     if month >= 12 || month < 0 {
@@ -2332,7 +2332,7 @@ pub fn mktime(t: *mut tm) i64 {
 }
 
 // musl's `is_leap` of `strftime`: whether year `y` (past 1900) is a leap year.
-fn tm_is_leap(y0: i32) bool {
+const fn tm_is_leap(y0: i32) bool {
     let mut y = y0;
     if y > INT_MAX - 1900 {
         y -= 2000;
@@ -2342,7 +2342,7 @@ fn tm_is_leap(y0: i32) bool {
 }
 
 // musl's `week_num`: the ISO 8601 week of `t`.
-fn week_num(t: &tm) i32 {
+const fn week_num(t: &tm) i32 {
     let wday = t.tm_wday as u32;
     let yday = t.tm_yday as u32;
     let mut val = (yday.wrapping_add(7).wrapping_sub(wday.wrapping_add(6) % 7) / 7) as i32;
@@ -2766,7 +2766,7 @@ fn preopens_init() {
 }
 
 // Whether preopen prefix `pre` (`pl` bytes) is a path prefix of `path` (no leading "/").
-fn prefix_matches(pre: *const u8, pl: usize, path: *const u8) bool {
+const fn prefix_matches(pre: *const u8, pl: usize, path: *const u8) bool {
     if unsafe path[0] != 47 && pl == 0 {
         return true;
     }
@@ -3021,16 +3021,16 @@ extern "C" "sys/stat.h" {
     }
 }
 
-fn zero_filestat() FileStat {
+const fn zero_filestat() FileStat {
     return FileStat { dev: 0, ino: 0, filetype: 0, nlink: 0, size: 0, atim: 0, mtim: 0, ctim: 0 };
 }
 
-fn ts_of(t: u64) timespec {
+const fn ts_of(t: u64) timespec {
     return timespec { tv_sec: (t / 1000000000) as i64, tv_nsec: (t % 1000000000) as isize };
 }
 
 // cloudlibc's `to_public_stat`.
-fn put_stat(fs: &FileStat, out: *mut stat) {
+const fn put_stat(fs: &FileStat, out: *mut stat) {
     let mode = if fs.filetype == 1 {
         S_IFBLK;
     } else if fs.filetype == 2 {
@@ -3513,7 +3513,7 @@ pub fn access(path: *const char, _mode: i32) i32 {
 }
 
 // cloudlibc's `utimens_get_timestamps`: the times and the WASI flags; false for an invalid time.
-fn utime_args(times: *const timespec, at: &mut u64, mt: &mut u64, fl: &mut u16) bool {
+const fn utime_args(times: *const timespec, at: &mut u64, mt: &mut u64, fl: &mut u16) bool {
     if times == null {
         *fl = 2 | 8;
         *at = 0;
@@ -3610,7 +3610,7 @@ pub fn readlink(path: *const char, buf: *mut char, cap: usize) isize {
 }
 
 // The count of slashes at `s`.
-fn slash_len(s: *const u8) usize {
+const fn slash_len(s: *const u8) usize {
     let mut i: usize = 0;
     while unsafe s[i] == 47 {
         i += 1;
@@ -3869,7 +3869,7 @@ pub fn opendir(path: *const char) *mut DIR {
     return d as *mut DIR;
 }
 
-fn rd_u64(p: *const u8) u64 {
+const fn rd_u64(p: *const u8) u64 {
     let mut v: u64 = 0;
     for i in 0..8 {
         v |= (unsafe p[i]) as u64 << (8 * i) as u64;
@@ -3877,7 +3877,7 @@ fn rd_u64(p: *const u8) u64 {
     return v;
 }
 
-fn rd_u32(p: *const u8) u32 {
+const fn rd_u32(p: *const u8) u32 {
     let mut v: u32 = 0;
     for i in 0..4 {
         v |= (unsafe p[i]) as u32 << (8 * i) as u32;
@@ -3886,7 +3886,7 @@ fn rd_u32(p: *const u8) u32 {
 }
 
 // The `DT_*` type of mode `m`.
-fn dt_of(m: u32) u8 {
+const fn dt_of(m: u32) u8 {
     let t = m & S_IFMT;
     return if t == S_IFBLK {
         1u8;
@@ -4027,7 +4027,7 @@ pub fn closedir(dir: *mut DIR) i32 {
 
 /// Start `dir` over from its first entry.
 @export("rewinddir")
-pub fn rewinddir(dir: *mut DIR) {
+pub const fn rewinddir(dir: *mut DIR) {
     let d = dir as *mut Dir;
     unsafe (*d).cookie = 0;
     unsafe (*d).used = unsafe (*d).size;
@@ -4247,7 +4247,7 @@ pub fn stdio_stream(fd: i32) *mut FILE {
     return ((unsafe &mut STD_ERR) as *mut Stream) as *mut FILE;
 }
 
-fn st<'a>(f: *mut FILE) &'a mut Stream {
+const fn st<'a>(f: *mut FILE) &'a mut Stream {
     return unsafe &mut *(f as *mut Stream);
 }
 
@@ -4767,25 +4767,25 @@ pub fn fgets(buf: *mut char, size: i32, f: *mut FILE) *mut char {
 
 /// Whether a read of `f` hit end of file.
 @export("feof")
-pub fn feof(f: *mut FILE) i32 {
+pub const fn feof(f: *mut FILE) i32 {
     return ((st(f).flags & F_EOF) != 0) as i32;
 }
 
 /// Whether an operation on `f` failed.
 @export("ferror")
-pub fn ferror(f: *mut FILE) i32 {
+pub const fn ferror(f: *mut FILE) i32 {
     return ((st(f).flags & F_ERR) != 0) as i32;
 }
 
 /// Clear the end-of-file and error flags of `f`.
 @export("clearerr")
-pub fn clearerr(f: *mut FILE) {
+pub const fn clearerr(f: *mut FILE) {
     st(f).flags &= ~(F_EOF | F_ERR);
 }
 
 /// The descriptor of `f`.
 @export("fileno")
-pub fn fileno(f: *mut FILE) i32 {
+pub const fn fileno(f: *mut FILE) i32 {
     return st(f).fd;
 }
 
@@ -4998,7 +4998,7 @@ fn get_locale(cat: i32, val0: *const u8) *const u8 {
     return unsafe &(*l).name[0];
 }
 
-fn loc_name(l: *const u8) *const u8 {
+const fn loc_name(l: *const u8) *const u8 {
     return if l == null {
         "C".ptr();
     } else {
@@ -5183,7 +5183,7 @@ const ERR_MSG: [str<'static>; 77] = [
 
 /// The message of error code `code`.
 @export("strerror")
-pub fn strerror(code: i32) *mut char {
+pub const fn strerror(code: i32) *mut char {
     let i = if code < 0 || code >= 77 {
         0usize;
     } else {
@@ -5260,7 +5260,7 @@ fn pad(o: &mut Out, c: u8, w: i32, l: i32, fl: u32) {
 const XDIGITS: str<'static> = "0123456789ABCDEF";
 
 // The digits of `x` written backward ending at `s`; the first digit's address.
-fn fmt_x(x0: u64, s0: *mut u8, lower: u8) *mut u8 {
+const fn fmt_x(x0: u64, s0: *mut u8, lower: u8) *mut u8 {
     let mut s = s0;
     let mut x = x0;
     while x != 0 {
@@ -5271,7 +5271,7 @@ fn fmt_x(x0: u64, s0: *mut u8, lower: u8) *mut u8 {
     return s;
 }
 
-fn fmt_o(x0: u64, s0: *mut u8) *mut u8 {
+const fn fmt_o(x0: u64, s0: *mut u8) *mut u8 {
     let mut s = s0;
     let mut x = x0;
     while x != 0 {
@@ -5282,7 +5282,7 @@ fn fmt_o(x0: u64, s0: *mut u8) *mut u8 {
     return s;
 }
 
-fn fmt_u(x0: u64, s0: *mut u8) *mut u8 {
+const fn fmt_u(x0: u64, s0: *mut u8) *mut u8 {
     let mut s = s0;
     let mut x = x0;
     while x != 0 {
@@ -5293,7 +5293,7 @@ fn fmt_u(x0: u64, s0: *mut u8) *mut u8 {
     return s;
 }
 
-fn imax(a: i32, b: i32) i32 {
+const fn imax(a: i32, b: i32) i32 {
     return if a > b {
         a;
     } else {
@@ -5301,7 +5301,7 @@ fn imax(a: i32, b: i32) i32 {
     };
 }
 
-fn imin(a: i32, b: i32) i32 {
+const fn imin(a: i32, b: i32) i32 {
     return if a < b {
         a;
     } else {
@@ -6276,7 +6276,7 @@ fn pop_arg(ty: u32, ap: &mut va_list) Arg {
 }
 
 // The decimal number at `*s`, advancing it; -1 on an int overflow.
-fn getint(s: &mut *const u8) i32 {
+const fn getint(s: &mut *const u8) i32 {
     let mut i: i32 = 0;
     while isdigit(unsafe (*s)[0]) != 0 {
         let d = (unsafe (*s)[0] - 48) as i32;
@@ -6921,7 +6921,7 @@ fn mb_byte(st: &mut u32, b: u8, wc: &mut i32) i32 {
 }
 
 // Store `i` through `dest`, as the integer type of `size`.
-fn store_int(dest: *mut void, size: i32, i: u64) {
+const fn store_int(dest: *mut void, size: i32, i: u64) {
     if dest == null {
         return;
     }
@@ -6948,7 +6948,7 @@ fn arg_n(ap: va_list, n: u32) *mut void {
 }
 
 // The bytes `f` read since its `limit`.
-fn scnt(f: &Scan) u64 {
+const fn scnt(f: &Scan) u64 {
     return f.used() as u64;
 }
 
@@ -7968,7 +7968,7 @@ pub fn atof(s: *const char) f64 {
 // musl's `qsort`: smoothsort, O(n log n) and close to O(n) on sorted input.
 
 // wasm's `i32.ctz`: 32 for zero, as musl's `__builtin_ctz` compiles there.
-fn ctz32(x: usize) u32 {
+const fn ctz32(x: usize) u32 {
     return if x == 0 {
         32u32;
     } else {
@@ -7977,7 +7977,7 @@ fn ctz32(x: usize) u32 {
 }
 
 // musl's `pntz` over the two-word bit string `p`, as it runs on wasm.
-fn pntz(p: &[usize; 2]) u32 {
+const fn pntz(p: &[usize; 2]) u32 {
     let r = ctz32(p[0].wrapping_sub(1));
     if r != 0 {
         return r;
@@ -7990,7 +7990,7 @@ fn pntz(p: &[usize; 2]) u32 {
 }
 
 // musl's `shl` and `shr` of the two-word bit string `p`, with wasm's shift counts (modulo 32).
-fn shl2(p: &mut [usize; 2], n0: u32) {
+const fn shl2(p: &mut [usize; 2], n0: u32) {
     let mut n = n0;
     if n >= 32 {
         n -= 32;
@@ -8001,7 +8001,7 @@ fn shl2(p: &mut [usize; 2], n0: u32) {
     p[0] = p[0].wrapping_shl(n);
 }
 
-fn shr2(p: &mut [usize; 2], n0: u32) {
+const fn shr2(p: &mut [usize; 2], n0: u32) {
     let mut n = n0;
     if n >= 32 {
         n -= 32;
@@ -8014,7 +8014,7 @@ fn shr2(p: &mut [usize; 2], n0: u32) {
 
 // musl's `cycle`: the `width`-byte elements at `ar[0..n]` move one place toward the front of the list,
 // and the first goes to the last place.
-fn cycle(width: usize, ar: &mut [*mut u8; 57], n: usize) {
+const fn cycle(width: usize, ar: &mut [*mut u8; 57], n: usize) {
     if n < 2 {
         return;
     }

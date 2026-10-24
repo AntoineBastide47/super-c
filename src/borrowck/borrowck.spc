@@ -3235,7 +3235,17 @@ extend tc::TypeChecker {
         // a variable first. (`self`-by-value methods return an owned value, not a borrow of a temp.)
         let rvk = self.type_at(unsafe (*a).type_of(recv)).kind;
         let recv_is_owned_temp = !self.is_place(recv) && rvk != TypeKind::TYPE_REFERENCE && rvk != TypeKind::TYPE_POINTER;
-        if returns.len == 1 && recv_is_owned_temp {
+        // A method that takes `self` by value cannot return a borrow of it (the callee would return a
+        // reference to its own local): its reference result comes from the borrows the value holds,
+        // which outlive the temporary (`m.entry(k).or_insert(0)`).
+        let mut self_by_ref = true;
+        if params.len >= 1 {
+            let fa1 = self.mod_ast(fmod);
+            let p0 = unsafe (*fa1).list(params)[0];
+            let pt = unsafe (*fa1).at_const(p0).as_data.parameter.ty;
+            self_by_ref = pt == NODE_NONE || unsafe (*fa1).at_const(pt).kind == NodeKind::NODE_REFERENCE_TYPE;
+        }
+        if returns.len == 1 && recv_is_owned_temp && self_by_ref {
             let fa0 = self.mod_ast(fmod);
             let r0 = unsafe (*fa0).list(returns)[0];
             if unsafe (*fa0).at_const(r0).is_ref_type() {

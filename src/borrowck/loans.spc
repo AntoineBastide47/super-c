@@ -103,16 +103,15 @@ pub struct Solver {
 /// Origin x point cells above which a body takes the sparse rows.
 pub const SPARSE_MIN_CELLS: u64 = 1u64 << 20;
 
-// The reference level (0 or 1) a loan at level `d` reaches over a subset edge of kind `delta`,
-// or 2 when the edge drops it (see bf::SD_KEEP).
+// The reference level (0, 1 or 2) a loan at level `d` reaches over a subset edge of kind `delta`,
+// or bf::SD_DROP when the edge drops it (see bf::SD_KEEP).
 const fn edge_level(delta: u8, d: u32) u32 {
-    if delta == bf::SD_REF {
-        return 1;
-    }
-    if delta == bf::SD_DEREF && d == 0 {
-        return 2;
-    }
-    return d;
+    return bf::sd_level(delta, d);
+}
+
+// A flood node: origin << 32 | level << 30 | point.
+const fn flood_node(o: u32, p: u32, d: u32) u64 {
+    return o as u64 << 32 | d as u64 << 30 | p as u64;
 }
 
 /// Solve body `b` from scratch: the returned solver's `errs` holds every borrow error.
@@ -415,12 +414,17 @@ extend Solver {
         // is point << 32 | local, bit 63 marking a def and bit 62 a copy-out use.
         let mut uses = replace(&mut self.s_uses, Vector::<u64>::new()); // sorted by point
         uses.truncate(0);
+        let mut df: usize = 0; // cursor into the ascending `dead_free`
         for a in 0..f.accesses.len() {
             let ac = *f.accesses.at(a);
             if ac.place == bf::BF_NONE {
                 // Destruction of an owned carrier OBSERVES its stored borrows: a point-level use (of a
-                // closure's drop slot when it has one).
-                if ac.local != bf::BF_NONE && f.observed[ac.local as usize] {
+                // closure's drop slot when it has one), unless the local is moved out there.
+                let freed = df < f.dead_free.len() && f.dead_free[df] == a as u32;
+                if freed {
+                    df += 1;
+                }
+                if !freed && ac.local != bf::BF_NONE && f.observed[ac.local as usize] {
                     let l = if f.drop_slot[ac.local as usize] != bf::BF_NONE {
                         f.drop_slot[ac.local as usize];
                     } else {
@@ -433,9 +437,13 @@ extend Solver {
                 continue;
             }
             let pl = *self.body().places.at(ac.place as usize);
-            // A new closure value ends the destruction its drop slot stands for.
-            if ac.def && f.drop_slot[pl.base as usize] != bf::BF_NONE {
-                uses.push(ac.point as u64 << 32 | f.drop_slot[pl.base as usize] as u64 | 1u64 << 63);
+            // A new closure value ends the destruction its drop slot stands for; a read of the whole
+            // value passes it on (`Gen::op_read`).
+            let ds = f.drop_slot[pl.base as usize];
+            if ds != bf::BF_NONE && ac.def {
+                uses.push(ac.point as u64 << 32 | ds as u64 | 1u64 << 63);
+            } else if ds != bf::BF_NONE && pl.proj_len == 0 && (self.s_omask[(ds / 64) as usize] >> (ds & 63) as u64 & 1u64) != 0 {
+                uses.push(ac.point as u64 << 32 | ds as u64);
             }
             if (self.s_omask[(pl.base / 64) as usize] >> (pl.base & 63) as u64 & 1u64) == 0 {
                 continue;
@@ -1149,19 +1157,19 @@ extend Solver {
         }
     }
 
-    // Mark flood node (o, p) visited at level `d` (level 1 covers level 0, as in the dense bits);
-    // false when it already was.
+    // Mark flood node (o, p) visited at level `d` (a level covers every level below it, as in the
+    // dense bits); false when it already was.
     fn vt_mark(self: &mut Self, o: u32, p: u32, d: u32) bool {
         let k = o as u64 << 32 | p as u64;
         let slot = self.vt_find(k);
         let e = self.vt[slot];
-        if (e >> d as u64 & 1u64) != 0 {
+        if (e & 3u64) > d as u64 {
             return false;
         }
         if e == 0 {
             self.vt_used.push(slot as u32);
         }
-        self.vt.set(slot, k << 2 | e & 3u64 | 1u64 + 2u64 * d as u64);
+        self.vt.set(slot, k << 2 | d as u64 + 1u64);
         if self.vt_used.len() * 2 > self.vt.len() {
             self.vt_grow();
         }
@@ -1197,7 +1205,8 @@ extend Solver {
             }
             self.s_rq.truncate(0);
         } else {
-            // Two visit bits per (origin, point): the loan's reference level there (bf::SD_KEEP).
+            // Two visit bits per (origin, point): the highest reference level the loan reached there
+            // plus one (bf::SD_KEEP), 0 when unvisited.
             let vwords = ((f.norigins as u64 * f.npoints as u64 * 2 + 63) / 64) as usize;
             // Keep `visit` sized once per body and clear only the words the previous query set: the
             // flood touches at most `steps` words, so this is O(touched) instead of
@@ -1213,15 +1222,17 @@ extend Solver {
         // A loan never flows into the origin of the local it borrows: `&mut p` handed onward must
         // not pin `p` through p's OWN origin (the invariance backlink would self-contain it).
         let self_org = f.local_origin[self.body().places.at(lo.place as usize).base as usize];
-        self.work.push(lo.origin as u64 << 32 | lo.issued_at as u64 | lo.deep as u64 << 31);
+        assert(f.npoints < 1u32 << 30, "a flood node leaves room for its level bits");
+        self.work.push(flood_node(lo.origin, lo.issued_at, lo.level));
         let mut succs = replace(&mut self.succs, Vector::<u32>::new());
         while self.work.len() != 0 {
             let node = self.work[self.work.len() - 1];
             let _ = self.work.pop();
             let o = (node >> 32) as u32;
-            let p = (node & 0x7FFFFFFFu64) as u32;
-            let d = (node >> 31 & 1u64) as u32;
-            // Level 1 reaches everything level 0 reaches (no edge drops it), so it marks both.
+            let p = (node & 0x3FFFFFFFu64) as u32;
+            let d = (node >> 30 & 3u64) as u32;
+            // A higher level reaches everything a lower one reaches (an edge maps levels in order and
+            // never drops a higher one first), so a visit at a level marks every level below it.
             if self.sparse {
                 if !self.vt_mark(o, p, d) {
                     continue;
@@ -1229,14 +1240,14 @@ extend Solver {
             } else {
                 let bit = (o as u64 * f.npoints as u64 + p as u64) * 2;
                 let w = (bit / 64) as usize;
-                let msk = 1u64 + 2u64 * d as u64 << (bit & 63);
-                if (self.visit[w] & 1u64 << (bit & 63) + d as u64) != 0 {
+                let sh = bit & 63;
+                if (self.visit[w] >> sh & 3u64) > d as u64 {
                     continue;
                 }
                 if self.visit[w] == 0 {
                     self.visit_dirty.push(w as u32);
                 }
-                self.visit.set(w, self.visit[w] | msk);
+                self.visit.set(w, self.visit[w] & ~(3u64 << sh) | d as u64 + 1u64 << sh);
             }
             if self.origin_live_at(o, p) {
                 if self.sparse {
@@ -1252,12 +1263,12 @@ extend Solver {
             for i in self.sub_pt_start[p as usize]..self.sub_pt_start[p as usize + 1] {
                 let e = *f.subsets.at(self.sub_by_point[i as usize] as usize);
                 let nd = edge_level(e.delta, d);
-                if e.from == o && nd <= 1 && (self_org == bf::BF_NONE || e.to != self_org) {
+                if e.from == o && nd != bf::SD_DROP as u32 && (self_org == bf::BF_NONE || e.to != self_org) {
                     let mut tp = p;
                     if self.cut_at(e.to, p) {
                         tp = p + 1;
                     }
-                    self.work.push(e.to as u64 << 32 | tp as u64 | nd as u64 << 31);
+                    self.work.push(flood_node(e.to, tp, nd));
                 }
             }
             // Liveness edges along the CFG (universal origins always flow, rebind cuts sever).
@@ -1268,7 +1279,7 @@ extend Solver {
                     continue;
                 }
                 if o < f.nuniversal || self.origin_live_at(o, q) {
-                    self.work.push(o as u64 << 32 | q as u64 | d as u64 << 31);
+                    self.work.push(flood_node(o, q, d));
                 }
             }
         }
@@ -1409,15 +1420,10 @@ extend Solver {
                 };
                 let lo = *f.loans.at(li);
                 if ac.place == bf::BF_NONE {
-                    // Whole-local access: the borrowed storage dies. A loan THROUGH a dereference
-                    // borrows foreign storage and merely becomes unreachable (its kill handles it),
-                    // and a loan on a VIEW value aliases what the view points at, not this storage.
-                    if lo.view {
-                        continue;
-                    }
-                    if self.body().places.at(lo.place as usize).base != ac.local || self.body().place_has_deref(
-                        lo.place,
-                    ) {
+                    // Whole-local access: the borrowed storage dies. A loan THROUGH a reference or a
+                    // view borrows foreign storage and merely becomes unreachable (its kill handles
+                    // it); the reference's own loans keep that storage alive.
+                    if lo.through || self.body().places.at(lo.place as usize).base != ac.local {
                         continue;
                     }
                 } else {
@@ -1520,17 +1526,13 @@ extend Solver {
         let bd = unsafe &*self.b;
         for li in 0..f.loans.len() {
             let lo = *f.loans.at(li);
-            if lo.view {
-                // A borrow OF a view chains to the view's own origin, not local storage.
+            if lo.through {
+                // A reborrow's storage belongs to the reference or view it went through.
                 continue;
             }
             let pl = *bd.places.at(lo.place as usize);
             let st = bd.locals.at(pl.base as usize).storage;
             if st == ir::LS_STATIC_REF {
-                continue;
-            }
-            if bd.place_has_deref(lo.place) {
-                // A reborrow's storage belongs to the reference it went through.
                 continue;
             }
             // Prepass filter, then precise flood: does the loan reach any placeholder?
@@ -1667,21 +1669,21 @@ pub fn solve_reference(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df
     for li in 0..f.loans.len() {
         let lo = *f.loans.at(li);
         let mut seen = Vector::<u64>::new();
-        let vwords = ((f.norigins as u64 * f.npoints as u64 * 2 + 63) / 64) as usize;
+        let vwords = ((f.norigins as u64 * f.npoints as u64 * 4 + 63) / 64) as usize;
         seen.resize_default(vwords);
         let mut req = Vector::<u64>::new();
         req.resize_default(pwords as usize);
         let mut work = Vector::<u64>::new();
         let self_org = f.local_origin[b.places.at(lo.place as usize).base as usize];
-        work.push(lo.origin as u64 << 32 | lo.issued_at as u64 | lo.deep as u64 << 31);
+        work.push(flood_node(lo.origin, lo.issued_at, lo.level));
         let mut succs = Vector::<u32>::new();
         while work.len() != 0 {
             let node = work[work.len() - 1];
             let _ = work.pop();
             let o = (node >> 32) as u32;
-            let p = (node & 0x7FFFFFFFu64) as u32;
-            let d = (node >> 31 & 1u64) as u32;
-            let bit = (o as u64 * f.npoints as u64 + p as u64) * 2 + d as u64;
+            let p = (node & 0x3FFFFFFFu64) as u32;
+            let d = (node >> 30 & 3u64) as u32;
+            let bit = (o as u64 * f.npoints as u64 + p as u64) * 4 + d as u64;
             if (seen[(bit / 64) as usize] & 1u64 << (bit & 63)) != 0 {
                 continue;
             }
@@ -1692,12 +1694,12 @@ pub fn solve_reference(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df
             for i in 0..f.subsets.len() {
                 let e = *f.subsets.at(i);
                 let nd = edge_level(e.delta, d);
-                if e.point == p && e.from == o && nd <= 1 && (self_org == bf::BF_NONE || e.to != self_org) {
+                if e.point == p && e.from == o && nd != bf::SD_DROP as u32 && (self_org == bf::BF_NONE || e.to != self_org) {
                     let mut tp = p;
                     if sv.cut_at(e.to, p) {
                         tp = p + 1;
                     }
-                    work.push(e.to as u64 << 32 | tp as u64 | nd as u64 << 31);
+                    work.push(flood_node(e.to, tp, nd));
                 }
             }
             sv.point_succs(p, &mut succs);
@@ -1707,7 +1709,7 @@ pub fn solve_reference(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df
                     continue;
                 }
                 if o < f.nuniversal || sv.origin_live_at(o, q) {
-                    work.push(o as u64 << 32 | q as u64 | d as u64 << 31);
+                    work.push(flood_node(o, q, d));
                 }
             }
         }

@@ -589,7 +589,7 @@ fn check(n: usize) i32 {
     if let F = &c { return 41; }
     if let D(s) = P::D(String::from_str("abc")) { if s.len() != 3 { return 42; } } else { return 43; }
     if P::B == P::C || P::G != P::G || P::A(1) == P::A(2) || P::A(1) != P::A(1) { return 44; }
-    if P::G.hash() != P::G.hash() || P::G.hash() == P::F.hash() { return 45; }
+    if hash(&P::G) != hash(&P::G) || hash(&P::G) == hash(&P::F) { return 45; }
     if format("{} {} {}", P::G, P::A(3), P::D(String::from_str("q"))).as_str() != "G A(3) D(q)" { return 46; }
     if !(P::F < P::G && P::G < P::A(0) && P::A(9) < P::B && P::B < P::E && P::A(1) < P::A(2)) { return 47; }
     if unsafe *(&c as *const P as *const i32) != 10 { return 48; }
@@ -2860,6 +2860,58 @@ fn main() i32 {
     );
 }
 
+// The default `Hash::hash_into` hashes every field, which matches only the default `Eq`: a type that
+// writes its own `eq` and keeps the default stops the build, however the hash is reached (the method,
+// the prelude `hash`, a `Map` key). Writing `hash_into` or keeping both defaults builds.
+@test
+fn own_eq_requires_own_hash_into() {
+    const K: str = "struct K {\n    pub a: u32,\n    pub b: u32,\n}\nextend K as Eq {\n    pub fn eq(self: &K, o: &K) bool {\n        return self.a == o.a;\n    }\n}\n";
+    const MSG: str = "static assertion failed: a type that defines its own 'eq' must define 'hash_into'";
+    const USES: [str; 3] = [
+        "fn main() i32 {\n    let k = K { a: 1, b: 2 };\n    let mut h = DefaultHasher::new();\n    k.hash_into(&mut h);\n    let _ = h.finish();\n    return 0;\n}\n",
+        "fn main() i32 {\n    let k = K { a: 1, b: 2 };\n    let j = K { a: 1, b: 9 };\n    return (hash(&k) != hash(&j)) as i32;\n}\n",
+        "fn main() i32 {\n    let mut m = Map::<K, i32>::new();\n    m.insert(K { a: 1, b: 2 }, 5);\n    let k = K { a: 1, b: 3 };\n    return *m.get(&k).unwrap_or(&0) - 5;\n}\n",
+    ];
+    let mut b = h::ExitBatch::new();
+    for u in USES {
+        h::expect_build_err(u, format("{}extend K as Hash {{}}\n{}", K, u).as_str(), MSG);
+        let own = "extend K as Hash {\n    pub fn hash_into<H: Hasher>(self: &K, h: &mut H) {\n        h.write_u64(self.a as u64);\n    }\n}\n";
+        b.add(u, format("{}{}{}", K, own, u).as_str(), 0);
+    }
+    b.add(
+        "both defaults",
+        "@derive(Eq, Hash)\nstruct D {\n    pub a: u32,\n    pub s: String,\n}\nfn main() i32 {\n    let mut m = Map::<D, i32>::new();\n    m.insert(D { a: 1, s: String::from_str(\"x\") }, 7);\n    let k = D { a: 1, s: String::from_str(\"x\") };\n    return *m.get(&k).unwrap_or(&0) - 7;\n}\n",
+        0,
+    );
+    b.run();
+}
+
+// A local bound to a call and read by an `assert_eq` and by a later call runs the call once, whatever
+// the right side; a failing assert spells each side as written, parentheses included.
+@test
+fn assert_eq_reads_a_call_result_once() {
+    const C: str = "struct C {\n    pub n: i64,\n}\nextend C {\n    @noinline\n    fn bump(self: &mut C) i64 {\n        self.n += 1;\n        return self.n;\n    }\n}\n@noinline\nfn sink(x: i64) i64 {\n    return x;\n}\n";
+    const RIGHTS: [str; 3] = ["1", "k as i64", "(k - 1) as i64 + 1"];
+    let mut b = h::ExitBatch::new();
+    for r in RIGHTS {
+        b.add(
+            r,
+            format(
+                "{}fn main() i32 {{\n    let mut c = C {{ n: 0 }};\n    let k: usize = 1;\n    let v = c.bump();\n    assert_eq(v, {});\n    let _ = sink(v);\n    return c.n as i32 - 1;\n}}\n",
+                C,
+                r,
+            ).as_str(),
+            0,
+        );
+    }
+    b.add_trap(
+        "the spelling of a parenthesized side",
+        "fn main() i32 {\n    let k: usize = 2;\n    assert_eq(k * 3, (k - 1) * 2 + (1));\n    return 0;\n}\n",
+        "assertion failed: `k * 3 == (k - 1) * 2 + (1)`",
+    );
+    b.run();
+}
+
 // A static_assert of a generic function whose condition calls a function evaluates for each
 // instance a concrete call makes, whatever else evaluated that function.
 @test
@@ -3007,7 +3059,7 @@ static mut Z: pthread_t = unsafe zeroed::<pthread_t>();
 const R: i32 = P { ready: 5 }.ready;
 fn main() i32 {
     let l = P { ready: 4 };
-    let w = (unsafe &Z) as *const usize;
+    let w = ((unsafe &Z) as *const pthread_t) as *const usize;
     let s = unsafe (G.ready + B.n + B.p.ready + T.ready + G.u.a as i32 + B.p.u.a as i32 + *w as i32);
     return s + l.ready + l.u.a as i32 + R - 15;
 }
@@ -3025,7 +3077,7 @@ fn zero_length_field_address_is_its_offset(b: &mut h::ExitBatch) {
 fn main() i32 {
     let mut buf: [u32; 4] = [0u32; 4];
     let h = &mut buf[0] as *mut u32 as *mut H;
-    let q = (unsafe &(*h).tail) as *const u8;
+    let q = ((unsafe &(*h).tail) as *const [u8; 0]) as *const u8;
     return (q as usize - h as usize) as i32 - 4;
 }
 )",
@@ -5392,6 +5444,326 @@ fn exit_cases_08() {
     bindings_avoid_generated_spellings(&mut b);
     f32_argument_widens_before_a_c_call(&mut b);
     b.run();
+}
+
+// An integer literal keeps its value in every spelling where an inlined callee passes it on: a `u8`
+// parameter the checker widens to a C `int` parameter receives `0x01`, `5u8` and `0b11`.
+fn literal_spellings_reach_a_c_parameter(b: &mut h::ExitBatch) {
+    b.add(
+        "hex, suffixed and binary literals through an inlined u8 parameter",
+        "extern \"C\" { fn memset(dst: *mut void, value: i32, n: usize) *mut void; }\nfn fill(dst: *mut u8, byte: u8, n: usize) { unsafe memset(dst, byte, n); }\nfn main() i32 {\n    let mut a: [u8; 4] = [9, 9, 9, 9];\n    fill(&mut a[0], 0x01, 2);\n    fill(&mut a[2], 5u8, 1);\n    fill(&mut a[3], 0b11, 1);\n    return a[0] as i32 + a[1] as i32 + a[2] as i32 + a[3] as i32 - 10;\n}\n",
+        0,
+    );
+}
+
+// An owning temporary of a loop condition drops on every evaluation: the loop ends by its condition, by
+// `break` or by a `do`-while condition, and the leak check of the run finds nothing.
+fn loop_condition_temporaries_drop_per_evaluation(b: &mut h::ExitBatch) {
+    b.add(
+        "owning temporaries of while and do-while conditions",
+        "fn heap(n: i32) Option<String> {\n    let mut x = String::from_str(\"a string long enough to live on the heap\");\n    x.push_str(\"!\");\n    if n > 3 {\n        return Option::<String>::None;\n    }\n    return Option::<String>::Some(x);\n}\nfn main() i32 {\n    let mut n = 0;\n    while heap(0).is_some() {\n        n += 1;\n        if n == 5 {\n            break;\n        }\n    }\n    let mut k = 0;\n    while heap(k).is_some() && k < 9 {\n        k += 1;\n    }\n    let mut j = 0;\n    do {\n        j += 1;\n    } while heap(j).is_some();\n    return n + k + j - 13;\n}\n",
+        0,
+    );
+}
+
+// A reference to a zero-sized field of a generic instance is the owner's address plus the field's
+// offset, in a method over the instance's parameters and through a raw pointer in a `Free` conformance.
+fn zero_sized_fields_of_generic_instances(b: &mut h::ExitBatch) {
+    b.add(
+        "&mut self.alloc of a zero-sized allocator",
+        M"(struct Holder<A> {
+    pub n: usize,
+    pub alloc: A,
+}
+fn release<A: Allocator>(alloc: &mut A, p: *mut void) usize {
+    unsafe alloc.dealloc(p, 8, 8);
+    return alloc as *mut A as usize;
+}
+extend<A: Allocator> Holder<A> {
+    fn drop_block(self: &mut Holder<A>, p: *mut void) usize {
+        return release(&mut self.alloc, p) - (self as *mut Holder<A> as usize);
+    }
+}
+fn main() i32 {
+    let mut h = Holder::<Global> { n: 0, alloc: Global {} };
+    let p = unsafe h.alloc.alloc(8, 8);
+    return (h.drop_block(p) - sizeof(usize)) as i32;
+}
+)",
+        0,
+    );
+    b.add(
+        "&mut (*self.ptr).value of a zero-sized T in Free",
+        M"(struct Inner<T> {
+    pub n: usize,
+    pub value: T,
+}
+struct Handle<T> {
+    pub ptr: *mut Inner<T>,
+    pub off: *mut usize,
+}
+extend<T> Handle<T> as Free {
+    pub fn free(self: &mut Handle<T>) {
+        let vp = &mut unsafe (*self.ptr).value;
+        unsafe *self.off = vp as *mut T as usize - self.ptr as usize;
+    }
+}
+fn main() i32 {
+    let mut off: usize = 0;
+    let mut x = Inner::<Unit> { n: 1, value: Unit {} };
+    {
+        let _h = Handle::<Unit> { ptr: &mut x, off: &mut off };
+    }
+    return (off - sizeof(usize)) as i32;
+}
+)",
+        0,
+    );
+    b.add(
+        "Arc of a zero-sized value",
+        "import std::parallel::arc as *;\nfn main() i32 { let a = Arc::<Unit>::new(Unit {}); let c = a.clone(); return a.strong_count() as i32 - 2; }\n",
+        0,
+    );
+}
+
+// The results of a call that are all zero-sized at its instance have no C storage, as the callee
+// returns C `void`: a generic function, a forwarded call, a method of a generic extend, a function value,
+// a `dyn` method, and a call whose results are discarded.
+fn zero_sized_results_of_multi_value_calls(b: &mut h::ExitBatch) {
+    b.add(
+        "multi-value calls with zero-sized results",
+        M"(struct Zst {}
+extend Zst as Copy {}
+struct H<A> { pub a: A }
+extend<A: Copy> H<A> {
+    @noinline
+    fn two(self: &H<A>) (A, A) { return self.a, self.a; }
+}
+fn both<A, B>(a: A, b: B) (A, B) { return a, b; }
+@noinline
+fn keep<A, B>(a: A, b: B) (A, B) {
+    let mut x = a;
+    let mut y = b;
+    for _ in 0..2 {
+        let (p, q) = both(x, y);
+        x = p;
+        y = q;
+    }
+    return x, y;
+}
+@noinline
+fn fwd<A, B>(a: A, b: B) (A, B) { return keep(a, b); }
+interface Two { fn two(self: &Self) (Zst, Zst); }
+struct T2 { pub k: i32 }
+extend T2 as Two { fn two(self: &Self) (Zst, Zst) { return Zst {}, Zst {}; } }
+fn main() i32 {
+    let (x, y) = keep(Zst {}, Zst {});
+    let (p, q) = fwd(Zst {}, 3);
+    keep(Zst {}, Zst {});
+    let (u, v) = H::<Zst> { a: Zst {} }.two();
+    let f = keep::<Zst, Zst>;
+    let (c, d) = f(Zst {}, Zst {});
+    let t = T2 { k: 1 };
+    let r: &dyn Two = &t;
+    let (e, g) = r.two();
+    let (m, n) = fwd(1, 2);
+    return m + n + q - 6;
+}
+)",
+        0,
+    );
+}
+
+// A view of zero-sized elements needs no pointer arithmetic and no storage: a range of a `Vector<Z>`
+// starts at its pointer, and an array of them, whole or a range, points at the aligned sentinel.
+fn zero_sized_element_views(b: &mut h::ExitBatch) {
+    b.add(
+        "slices of zero-sized elements",
+        M"(struct Z {}
+fn count(s: []Z) usize {
+    let mut n: usize = 0;
+    for _ in s {
+        n += 1;
+    }
+    return n + s.len;
+}
+fn units(s: []Unit) usize { return s.len; }
+fn main() i32 {
+    let mut v = Vector::<Z>::new();
+    for _ in 0..5 {
+        v.push(Z {});
+    }
+    let a: [Z; 4] = [Z {}, Z {}, Z {}, Z {}];
+    let u: [Unit; 3] = [Unit {}, Unit {}, Unit {}];
+    let mut w = Vector::<Unit>::new();
+    w.push(Unit {});
+    let n = count(v[1..4]) + count(a[1..]) + count(a) + count(v[0..]) + units(u) + units(w[0..]);
+    return n as i32 - 34;
+}
+)",
+        0,
+    );
+}
+
+// A closure that writes no capture its env holds takes its env as a pointer to const: a call through a
+// shared reference to it (`(*cmp)(a, b)` with `cmp: &F`) passes that env, for captures by value, by
+// reference and of an array.
+fn closure_called_through_a_shared_reference(b: &mut h::ExitBatch) {
+    b.add(
+        "(*f)(..) with f: &F",
+        M"(fn apply<F: fn(i32, i32) i32>(f: &F, a: i32, b: i32) i32 {
+    return (*f)(a, b);
+}
+fn twice<F: fn(i32, i32) i32>(f: F) i32 {
+    return apply(&f, 1, 2) + apply(&f, 3, 4);
+}
+fn main() i32 {
+    let k = 2;
+    let s = String::from_str("abc");
+    let t = [1, 2, 3];
+    let mut hits = 0;
+    let r = twice(|a: i32, b: i32| a * k + b + s.len() as i32 + t[2]);
+    let w = twice(move |a: i32, b: i32| a + b + t[0]);
+    let m = twice(fn(a: i32, b: i32) i32 {
+        hits += 1;
+        return a - b;
+    });
+    return r + w + m + hits - 38;
+}
+)",
+        0,
+    );
+}
+
+// The Map entry API folds at compile time to the value it gives at run time: an extend over a lifetime
+// parameter binds from its receiver, and a receiver borrowed implicitly and stored in the entry
+// (`Entry { map: self }`) stays the map, so the writes through the entry reach it.
+fn map_entry_api_folds(b: &mut h::ExitBatch) {
+    b.add(
+        "entry API in a constant",
+        M"(const fn f() i64 {
+    let mut m = Map::<i64, i64>::new();
+    m.insert(4, 1);
+    let mut r: i64 = 0;
+    switch m.entry(4) {
+        Occupied(o) => {
+            r = *o.get();
+        },
+        Vacant(_) => {},
+    };
+    *m.entry(4).or_insert(0) += 10;
+    *m.entry(7).or_insert(5) += 1;
+    m.entry(7).and_modify(fn(v: &mut i64) { *v *= 2; });
+    *m.entry(9).or_default() += 3;
+    switch m.entry(9) {
+        Occupied(mut o) => {
+            r += o.insert(100);
+            *o.get_mut() += 1;
+        },
+        Vacant(_) => {},
+    };
+    switch m.entry(11) {
+        Occupied(_) => {},
+        Vacant(v) => {
+            r += *v.key();
+            let _ = v.insert(2);
+        },
+    };
+    switch m.entry(4) {
+        Occupied(o) => {
+            r += o.remove();
+        },
+        Vacant(_) => {},
+    };
+    return r * 1000 + *m.get(&7).unwrap() * 100 + *m.get(&9).unwrap() + m.len() as i64;
+}
+const A: i64 = f();
+fn main() i32 {
+    static_assert(A == 27304, "the entry API folds");
+    return (A != f()) as i32;
+}
+)",
+        0,
+    );
+}
+
+// A generic value bound to a reference or a pointer owns nothing: the inlined callee's drop of it
+// frees no referent, and the referent stays usable (the leak check would also report a double free).
+fn inlined_drop_of_a_borrowed_generic_value(b: &mut h::ExitBatch) {
+    b.add(
+        "drop of a T = &String parameter",
+        M"(fn drop_it<T>(x: T) {}
+fn arm<T>(o: Option<T>) i32 {
+    return switch o {
+        Some(v) => 1,
+        None => 0,
+    };
+}
+fn main() i32 {
+    let mut b = String::from_str("a string long enough to live on the heap");
+    drop_it(&b);
+    drop_it(&mut b);
+    drop_it(&mut b as *mut String);
+    let k = arm(Option::<&String>::Some(&b));
+    b.push_str("!");
+    return (b.len() as i32) + k - 42;
+}
+)",
+        0,
+    );
+}
+
+// A method call on a receiver behind several references reads through the extra ones: `&&String`,
+// `&&&String`, `&mut &mut Vector` and a by-value `self` behind `&&u32`, at run time and in a constant.
+fn method_receiver_behind_several_references(b: &mut h::ExitBatch) {
+    b.add(
+        "s.len() with s: &&String",
+        M"(fn f3(s: &&&String) usize { return s.len(); }
+fn bump(v: &mut &mut Vector<i32>) { v.push(4); }
+const fn cw(x: &&u32) u32 { return x.wrapping_add(1); }
+const C: u32 = cw(&&5);
+fn main() i32 {
+    let a = String::from_str("abc");
+    let r = &a;
+    let rr = &r;
+    let mut v = Vector::<i32>::new();
+    v.push(String::from_str("xy").len() as i32);
+    let mut mv = &mut v;
+    bump(&mut mv);
+    let mut w = Vector::<String>::new();
+    w.push(String::from_str("abc"));
+    let n = count(filter(w.iter(), |s: &&String| s.len() > 1));
+    return (f3(&rr) + v.len() + n) as i32 + cw(&&2) as i32 + C as i32 - 15;
+}
+)",
+        0,
+    );
+}
+
+@test
+fn exit_cases_09() {
+    let mut b = h::ExitBatch::new();
+    inlined_drop_of_a_borrowed_generic_value(&mut b);
+    method_receiver_behind_several_references(&mut b);
+    map_entry_api_folds(&mut b);
+    closure_called_through_a_shared_reference(&mut b);
+    zero_sized_element_views(&mut b);
+    zero_sized_results_of_multi_value_calls(&mut b);
+    zero_sized_fields_of_generic_instances(&mut b);
+    literal_spellings_reach_a_c_parameter(&mut b);
+    loop_condition_temporaries_drop_per_evaluation(&mut b);
+    b.run();
+}
+
+// An integer the checker widens to a C function's parameter type is converted in the call, so C checks
+// the call at the parameter's type (`abs` of a `uint8_t` warns).
+@test
+fn widened_c_argument_is_cast() {
+    h::expect_c(
+        "a u8 argument of a C int parameter",
+        "extern \"C\" { fn abs(v: i32) i32; }\nfn pass(byte: u8) i32 { return unsafe abs(byte); }\nfn main() i32 { return pass(1) - 1; }\n",
+        "abs((int32_t)(byte))",
+    );
 }
 
 // A tuple argument fails like the same value in a `let`: a literal out of range, an arity mismatch, an

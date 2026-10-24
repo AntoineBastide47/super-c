@@ -5,6 +5,11 @@
 // borrow (`at` -> `&T`, bounds-checked `get`/`first`/`last`/`find` -> `Option<&T>`), removers move the
 // element out, `set` frees the replaced element. Conditionally `Free`: a StaticVector of a Free element
 // type deep-frees its live elements at scope exit; one of plain values stays a plain value.
+//
+// Complexity: push, pop, at, get, set, swap and swap_remove are O(1); insert and remove are O(len -
+// index); the sequence algorithms of `as_mut_slice()` keep the bounds std/slice.spc states. The storage
+// is inline: push and pop never move it, so only moving the StaticVector or mutating it ends a borrow;
+// iteration is in index order. No allocation; a StaticVector is Send / Sync when its elements are.
 
 /// A vector with inline storage for at most N elements and no heap allocation; pushing past N panics.
 pub struct StaticVector<T, const N: usize> {
@@ -127,6 +132,16 @@ extend<T, const N: usize> StaticVector<T, N> {
         return &unsafe self.data[0];
     }
 
+    /// A view of the live elements; invalidated when the StaticVector is moved.
+    pub const fn as_slice(self: &StaticVector<T, N>) []T {
+        return unsafe Slice::<T> { ptr: &self.data[0], len: self.len };
+    }
+
+    /// A writable view of the live elements: the shared slice algorithms run on it.
+    pub const fn as_mut_slice(self: &mut StaticVector<T, N>) []mut T {
+        return unsafe SliceMut::<T> { ptr: &mut self.data[0], len: self.len };
+    }
+
     /// Insert `value` at `index`, shifting later elements right. `index` must be <= len; panics when full.
     pub const fn insert(self: &mut StaticVector<T, N>, index: usize, value: T) {
         if self.len == N {
@@ -186,16 +201,7 @@ extend<T, const N: usize> StaticVector<T, N> {
 
     /// Reverse the elements in place.
     pub const fn reverse(self: &mut StaticVector<T, N>) {
-        if self.len == 0 {
-            return;
-        }
-        let mut i: usize = 0;
-        let mut j = self.len - 1;
-        while i < j {
-            self.swap(i, j);
-            i = i + 1;
-            j = j - 1;
-        }
+        self.as_mut_slice().reverse();
     }
 
     /// A new vector (same capacity) with `f` applied to every element. `f` BORROWS each element (`&T`):
@@ -286,194 +292,54 @@ extend<T: Eq, const N: usize> StaticVector<T, N> {
     /// Remove consecutive runs of equal elements, keeping the first of each run. The dropped duplicates
     /// are freed (no-op when T isn't Free). O(n); only adjacent equals are removed (sort first for global).
     pub const fn dedup(self: &mut StaticVector<T, N>) {
-        if self.len < 2 {
-            return;
-        }
-        let mut w: usize = 1;
-        let mut r: usize = 1;
-        while r < self.len {
-            if unsafe self.data[r] == unsafe self.data[w - 1] {
-                unsafe self.data[r].free();
-            } else {
-                unsafe self.data[w] = unsafe self.data[r];
-                w = w + 1;
-            }
-            r = r + 1;
-        }
-        self.len = w;
+        let k = self.as_mut_slice().partition_dedup();
+        self.truncate(k);
     }
 }
 
-// Order-based algorithms (available when the element type is `Ord`).
+// Order-based algorithms: the shared slice algorithms (std/slice.spc) over the live elements.
 extend<T: Ord, const N: usize> StaticVector<T, N> {
     /// True if the elements are in non-decreasing order (per `Ord`).
     pub const fn is_sorted(self: &StaticVector<T, N>) bool {
-        if self.len < 2 {
-            return true;
-        }
-        let mut i: usize = 0;
-        while i + 1 < self.len {
-            if unsafe self.data[i] > unsafe self.data[i + 1] {
-                return false;
-            }
-            i = i + 1;
-        }
-        return true;
+        return self.as_slice().is_sorted();
     }
 
-    /// Binary search of a sorted vector: `Ok(i)` where an equal element lives, or `Err(i)` the index a
-    /// missing element would be inserted at to keep order. Behaviour is unspecified if not sorted.
+    /// Binary search of a sorted vector: `Ok(i)` where an equal element lives (any one of several), or
+    /// `Err(i)`, the index a missing element would be inserted at to keep order. O(log n); unspecified
+    /// result if not sorted.
     pub const fn binary_search(self: &StaticVector<T, N>, x: &T) Result<usize, usize> {
-        let mut lo: usize = 0;
-        let mut hi: usize = self.len;
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            if unsafe self.data[mid] == x {
-                return Result::<usize, usize>::Ok(mid);
-            } else if unsafe self.data[mid] < x {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        return Result::<usize, usize>::Err(lo);
+        return self.as_slice().binary_search(x);
     }
 
-    // Restore the max-heap property at `root` over the prefix `[0, end)` by sifting it down.
-    const fn sift_down(self: &mut StaticVector<T, N>, root: usize, end: usize) {
-        let mut r = root;
-        let mut child = 2 * r + 1;
-        while child < end {
-            if child + 1 < end && unsafe self.data[child] < unsafe self.data[child + 1] {
-                child = child + 1;
-            }
-            if unsafe self.data[r] >= unsafe self.data[child] {
-                return;
-            }
-            self.swap(r, child);
-            r = child;
-            child = 2 * r + 1;
-        }
-    }
-
-    /// Sort the elements in place into non-decreasing order (heapsort: O(n log n), no allocation).
+    /// Sort in place into non-decreasing order, unstable (pattern-defeating quicksort: O(n log n) worst
+    /// case, no allocation).
     pub const fn sort(self: &mut StaticVector<T, N>) {
-        let n = self.len;
-        if n < 2 {
-            return;
-        }
-        let mut start = n / 2;
-        while start > 0 {
-            start = start - 1;
-            self.sift_down(start, n);
-        }
-        let mut end = n;
-        while end > 1 {
-            end = end - 1;
-            self.swap(0, end);
-            self.sift_down(0, end);
-        }
+        self.as_mut_slice().sort();
+    }
+
+    /// Sort in place into non-decreasing order, stable, with no allocation: O(n log n) comparisons and
+    /// O(n log^2 n) moves (`SliceMut::sort_stable_in_place`).
+    pub fn sort_stable_in_place(self: &mut StaticVector<T, N>) {
+        self.as_mut_slice().sort_stable_in_place();
     }
 }
 
 // Comparator-driven sorting (no `Ord` required: the closure decides the order).
 extend<T, const N: usize> StaticVector<T, N> {
-    /// Sort in place by a comparator returning negative / zero / positive (heapsort: O(n log n)).
-    /// The sift is inlined for the same reason as Vector::sort_by: a generic method calling another
-    /// generic method with its own F is not transitively instantiated yet.
+    /// Sort in place by a comparator returning negative / zero / positive, unstable. O(n log n).
     pub const fn sort_by<F: fn(&T, &T) i32>(self: &mut StaticVector<T, N>, cmp: F) {
-        let n = self.len;
-        if n < 2 {
-            return;
-        }
-        let mut phase: usize = 0; // 0: heapify roots n/2-1..0; 1: pop the max to the end, re-sift
-        let mut start = n / 2;
-        let mut end = n;
-        loop {
-            let mut r: usize = 0;
-            if phase == 0 {
-                if start == 0 {
-                    phase = 1;
-                    continue;
-                }
-                start = start - 1;
-                r = start;
-            } else {
-                if end <= 1 {
-                    break;
-                }
-                end = end - 1;
-                self.swap(0, end);
-            }
-            let mut lim = n;
-            if phase == 1 {
-                lim = end;
-            }
-            let mut child = 2 * r + 1;
-            while child < lim {
-                if child + 1 < lim && cmp(&unsafe self.data[child], &unsafe self.data[child + 1]) < 0 {
-                    child = child + 1;
-                }
-                if cmp(&unsafe self.data[r], &unsafe self.data[child]) >= 0 {
-                    break;
-                }
-                self.swap(r, child);
-                r = child;
-                child = 2 * r + 1;
-            }
-        }
+        self.as_mut_slice().sort_by(cmp);
     }
 
-    /// Sort in place by a derived `Ord` key (`v.sort_by_key(|p: &P| p.age)`): the heapsort of `sort_by`
-    /// ordered by the extracted keys, so O(n log n) and, like `sort_by`, not stable. The sift is inlined
-    /// for the same reason as `sort_by`'s.
+    /// Stable `sort_by` with no allocation (`SliceMut::sort_stable_in_place_by`).
+    pub fn sort_stable_in_place_by<F: fn(&T, &T) i32>(self: &mut StaticVector<T, N>, cmp: F) {
+        self.as_mut_slice().sort_stable_in_place_by(cmp);
+    }
+
+    /// Sort in place by a derived `Ord` key, unstable. O(n log n); the key is computed twice per
+    /// comparison.
     pub const fn sort_by_key<K: Ord, F: fn(&T) K>(self: &mut StaticVector<T, N>, key: F) {
-        let n = self.len;
-        if n < 2 {
-            return;
-        }
-        let mut phase: usize = 0; // 0: heapify roots n/2-1..0; 1: pop the max to the end, re-sift
-        let mut start = n / 2;
-        let mut end = n;
-        loop {
-            let mut r: usize = 0;
-            if phase == 0 {
-                if start == 0 {
-                    phase = 1;
-                    continue;
-                }
-                start = start - 1;
-                r = start;
-            } else {
-                if end <= 1 {
-                    break;
-                }
-                end = end - 1;
-                self.swap(0, end);
-            }
-            let mut lim = n;
-            if phase == 1 {
-                lim = end;
-            }
-            let mut child = 2 * r + 1;
-            while child < lim {
-                if child + 1 < lim {
-                    let kc = key(&unsafe self.data[child]);
-                    let kn = key(&unsafe self.data[child + 1]);
-                    if kc < kn {
-                        child = child + 1;
-                    }
-                }
-                let kr = key(&unsafe self.data[r]);
-                let kc = key(&unsafe self.data[child]);
-                if kr >= kc {
-                    break;
-                }
-                self.swap(r, child);
-                r = child;
-                child = 2 * r + 1;
-            }
-        }
+        self.as_mut_slice().sort_by_key::<K, F>(key);
     }
 }
 
@@ -532,7 +398,7 @@ extend<T, const N: usize> StaticVector<T, N> as IndexMut<T, []mut T> {
 }
 
 // Conditional conformances: a StaticVector is Clone/Eq/Hash exactly when its element is. Each dispatches
-// to the element's bound method (`e.clone()`, `a.eq(&b)`, `e.hash()`), monomorphized per element type.
+// to the element's bound method (`e.clone()`, `a.eq(&b)`, `e.hash_into(h)`), monomorphized per element type.
 extend<T: Clone, const N: usize> StaticVector<T, N> as Clone {
     /// A deep copy whose elements are independent clones.
     pub const fn clone(self: &StaticVector<T, N>) StaticVector<T, N> {
@@ -562,14 +428,12 @@ extend<T: Eq, const N: usize> StaticVector<T, N> as Eq {
 }
 
 extend<T: Hash, const N: usize> StaticVector<T, N> as Hash {
-    /// FNV-1a over the elements' own hashes.
-    pub const fn hash(self: &StaticVector<T, N>) u64 {
-        let mut h: u64 = 0xcbf29ce484222325;
-        for i in 0..self.len {
-            let e = self.at(i);
-            h = (h ^ e.hash()).wrapping_mul(0x100000001b3);
+    /// The length, then every element through its own `hash_into`: equal sequences feed equal streams.
+    pub fn hash_into<H: Hasher>(self: &StaticVector<T, N>, h: &mut H) {
+        h.write_u64(self.len() as u64);
+        for i in 0..self.len() {
+            self.at(i).hash_into(h);
         }
-        return h;
     }
 }
 

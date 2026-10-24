@@ -150,27 +150,48 @@ fn text_is_cut_at_4095_bytes() {
 
 @test
 fn signed_zeros_hash_equally() {
-    assert_eq(vec2::new(0.0, -0.0).hash(), vec2::new(-0.0, 0.0).hash());
-    assert_eq(dvec1::new(-0.0).hash(), dvec1::new(0.0).hash());
-    assert_eq(quat::new(-0.0, 0.0, -0.0, 0.0).hash(), quat::new(0.0, -0.0, 0.0, -0.0).hash());
+    let (a, b) = (vec2::new(0.0, -0.0), vec2::new(-0.0, 0.0));
+    assert_eq(hash(&a), hash(&b));
+    let (c, d) = (dvec1::new(-0.0), dvec1::new(0.0));
+    assert_eq(hash(&c), hash(&d));
+    let (e, f) = (quat::new(-0.0, 0.0, -0.0, 0.0), quat::new(0.0, -0.0, 0.0, -0.0));
+    assert_eq(hash(&e), hash(&f));
     let m = mat2::cols(vec2::new(-0.0, 1.0), vec2::new(2.0, 0.0));
-    assert_eq(m.hash(), mat2::cols(vec2::new(0.0, 1.0), vec2::new(2.0, -0.0)).hash());
+    let n = mat2::cols(vec2::new(0.0, 1.0), vec2::new(2.0, -0.0));
+    assert_eq(hash(&m), hash(&n));
     assert(vec2::new(0.0, -0.0) == vec2::new(-0.0, 0.0));
     let p = dualquat::new(quat::new(1.0, -0.0, 0.0, 0.0), quat::new(0.0, 0.0, -0.0, 2.0));
     let q = dualquat::new(quat::new(1.0, 0.0, -0.0, 0.0), quat::new(-0.0, 0.0, 0.0, 2.0));
     assert(p == q);
-    assert_eq(p.hash(), q.hash());
+    assert_eq(hash(&p), hash(&q));
 }
 
+// The hash of the words `ws` fed to a fresh `DefaultHasher`, in order.
+fn stream(ws: []u64) u64 {
+    let mut h = DefaultHasher::new();
+    for w in ws {
+        h.write_u64(w);
+    }
+    return h.finish();
+}
+
+// A vector, matrix or quaternion feeds one word per component, x (column 0) first: an integer's value
+// sign-extended, a bool as 0 or 1, a float's bits with both zeros as 0.
 @test
 fn hash_values() {
-    assert_eq(ivec1::new(-5).hash(), 0xfffffffffffffffbu64);
-    assert_eq(ivec3::new(1, 2, 3).hash(), 0xa16fb58d153u64);
-    assert_eq(imat2x2::cols(ivec2::new(1, 2), ivec2::new(3, 4)).hash(), 0xaa7d20141b0u64);
-    assert_eq(bvec2::new(true, false).hash(), 0x28cd94bf1du64);
-    assert_eq(vec2::new(1.0, -0.0).hash(), 0x389e34bfdeu64);
-    assert_eq(dvec2::new(1.0, 0.0).hash(), 0x340c0028cd94bfdeu64);
-    assert_eq(quat::new(1.0, 0.0, -0.0, 2.0).hash(), 0x28223d9cd221au64);
+    let (iv1, iv3) = (ivec1::new(-5), ivec3::new(1, 2, 3));
+    assert_eq(hash(&iv1), stream([(-5i64) as u64]));
+    assert_eq(hash(&iv3), stream([1u64, 2, 3]));
+    let im = imat2x2::cols(ivec2::new(1, 2), ivec2::new(3, 4));
+    assert_eq(hash(&im), stream([1u64, 2, 3, 4]));
+    let bv = bvec2::new(true, false);
+    assert_eq(hash(&bv), stream([1u64, 0]));
+    let (v, dv) = (vec2::new(1.0, -0.0), dvec2::new(1.0, 0.0));
+    assert_eq(hash(&v), stream([f32_bits(1.0) as u64, 0]));
+    assert_eq(hash(&dv), stream([f64_bits(1.0), 0]));
+    // `new` takes w first; the hash feeds x, y, z, then w.
+    let q = quat::new(1.0, 0.0, -0.0, 2.0);
+    assert_eq(hash(&q), stream([0u64, 0, f32_bits(2.0) as u64, f32_bits(1.0) as u64]));
 }
 
 @test

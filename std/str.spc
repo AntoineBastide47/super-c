@@ -290,13 +290,11 @@ extend str as Ord {
 }
 
 extend str as Hash {
-    /// 64-bit FNV-1a over the bytes (matching String::hash, so a `str` and an equal `String` hash alike).
-    pub const fn hash(self: &str) u64 {
-        let mut h: u64 = 0xcbf29ce484222325;
-        for i in 0..self.len {
-            h = (h ^ (unsafe self.ptr[i]) as u64).wrapping_mul(0x100000001b3);
-        }
-        return h;
+    /// The bytes, then a 0xFF terminator that no UTF-8 text contains, so the boundary between two
+    /// strings of a key is part of what the hasher sees.
+    pub fn hash_into<H: Hasher>(self: &str, h: &mut H) {
+        h.write(unsafe Slice::<u8> { ptr: self.ptr, len: self.len });
+        h.write_u8(0xFF);
     }
 }
 

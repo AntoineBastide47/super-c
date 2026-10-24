@@ -884,7 +884,8 @@ fn reflect_derives() {
         M"(struct Point { pub x: i32, pub y: u8, }
 struct Nested { pub p: Point, pub n: i64, }
 extend Point as Format { pub fn fmt(self: &Point) String { return reflect_string(self); } }
-extend Point as Hash { pub fn hash(self: &Point) u64 { return reflect_hash(self); } }
+extend Point as Hash {}
+extend Nested as Hash {}
 fn main() i32 {
   let p = Point { x: 7, y: 3 };
   let s = reflect_string(&p);
@@ -898,9 +899,10 @@ fn main() i32 {
   s2.free();
   if !ok2 { return 2; }
   let q = Point { x: 7, y: 3 };
-  if reflect_hash(&p) != reflect_hash(&q) { return 3; }
-  if reflect_hash(&p) == reflect_hash(&Point { x: 7, y: 4 }) { return 4; }
-  if reflect_hash(&nv) == 0 { return 5; }
+  let r = Point { x: 7, y: 4 };
+  if hash(&p) != hash(&q) { return 3; }
+  if hash(&p) == hash(&r) { return 4; }
+  if hash(&nv) == 0 { return 5; }
   return 0;
 }
 )",
@@ -952,9 +954,9 @@ fn main() i32 {
   let ok3 = sd.as_str() == "Dot";
   sd.free();
   if !ok3 { return 3; }
-  if l.hash() != l2.hash() { return 4; }
-  if l.hash() == l3.hash() { return 5; }
-  if d.hash() == pr.hash() { return 6; }
+  if hash(&l) != hash(&l2) { return 4; }
+  if hash(&l) == hash(&l3) { return 5; }
+  if hash(&d) == hash(&pr) { return 6; }
   let q = Duo::<i32, str> { a: 7, b: "hi" };
   let qs = q.fmt();
   let qp = q.pp();
@@ -963,7 +965,7 @@ fn main() i32 {
   qp.free();
   if !ok4 { return 7; }
   let p2 = lib::Point { x: 1, y: 2 };
-  if p.hash() != p2.hash() { return 8; }
+  if hash(&p) != hash(&p2) { return 8; }
   print("ok\n");
   return 0;
 }
@@ -1062,7 +1064,7 @@ enum Shape { Dot, Pair(i32, i64), }
 struct Duo<A: Format, B: Format> { pub a: A, pub b: B, }
 fn mk() lib::Point { return lib::Point { x: 9, y: 8 }; }
 fn show(v: &dyn Format) String { return v.fmt(); }
-const fn ph() u64 { let p = lib::Point { x: 1, y: 2 }; return p.hash(); }
+const fn ph() u64 { let p = lib::Point { x: 1, y: 2 }; return hash(&p); }
 static_assert(ph() != 0, "derived hash folds at compile time");
 fn main() i32 {
   let p = lib::Point { x: 1, y: 2 };
@@ -2856,7 +2858,7 @@ fn main() i32 {
   s.push_str("0123456789");
   let mut c = s.clone();
   let mut f = s.fmt();
-  let ok = s.eq_str("abcdefghijklmnopqrstuvwxyz0123456789") && s.cmp(&c) == 0 && s.hash() == c.hash() && f.len() == s.len();
+  let ok = s.eq_str("abcdefghijklmnopqrstuvwxyz0123456789") && s.cmp(&c) == 0 && hash(&s) == hash(&c) && f.len() == s.len();
   if ok { return 42; }
   return 1;
 }
@@ -3679,8 +3681,8 @@ struct Key {
 }
 
 extend Key as Hash {
-    pub fn hash(self: &Key) u64 {
-        return self.k;
+    pub fn hash_into<H: Hasher>(self: &Key, h: &mut H) {
+        h.write_u64(self.k);
     }
 }
 
@@ -7440,7 +7442,11 @@ fn module_errors() {
     // A missing module stops the compile before any located error: alone.
     let miss = cli::proj_new();
     miss.mkfile("main.spc", "import nope::nope;\nfn main() i32 { return 0; }\n");
-    miss.expect_fail("main.spc", "cannot open module");
+    miss.expect_fail("main.spc", "main.spc:1: error: cannot open module 'nope::nope'");
+    // The error names the importing file and the line of its import, also below the root.
+    miss.mkfile("main.spc", "import util;\nfn main() i32 { return util::u(); }\n");
+    miss.mkfile("util.spc", "// util\n\nimport gone;\npub fn u() i32 { return 0; }\n");
+    miss.expect_fail("main.spc", "util.spc:3: error: cannot open module 'gone'");
 
     // Each case imports its own library directory.
     let p = cli::proj_new();
@@ -12533,6 +12539,7 @@ import std::time as ptime;
 // waits, and finishes once the holder releases the tree. Two builds of one tree would otherwise
 // rewrite the units each other compiles and cache objects under the wrong keys.
 // Start `argv` in directory `dir` with its stdout and stderr in file `log`.
+@platform(!wasm)
 fn spawn_logged(argv: []str, log: str, dir: str) process::Child {
     let mut cmd = process::Command::new(argv);
     cmd.cwd = Option::<str>::Some(dir);
@@ -12544,11 +12551,10 @@ fn spawn_logged(argv: []str, log: str, dir: str) process::Child {
 // Release lock `h` here: the scope's end would release it only after the asserts that follow.
 const fn drop_lock(_h: bsys::Lock) {}
 
+// WASI has no file locks or processes.
+@platform(!wasm)
 @test
 fn a_build_waits_for_the_holder_of_its_tree() {
-    if cli::on_wasm() {
-        return; // WASI has no file locks
-    }
     let p = cli::proj_new();
     p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
     assert(p.compile("main.spc").ok());
@@ -12579,11 +12585,10 @@ fn a_build_waits_for_the_holder_of_its_tree() {
 // four-slot jobserver, then waits; killed there, its slots are free for the next claim. (Under
 // --test-no-fork the process keeps this jobserver for the later tests: a smaller budget, never a wrong
 // result.)
+// WASI has no file locks and no jobserver.
+@platform(!wasm)
 @test
 fn a_killed_build_gives_its_jobserver_slots_back() {
-    if cli::on_wasm() {
-        return; // WASI has no file locks and no jobserver
-    }
     let _js = cli::set_env("SC_JOBSERVER", "");
     assert(unsafe shim::sc_jobserver_init(4) == 1, "the test makes a jobserver of its own");
     // A manifest build takes its tree's lock with every slot it claimed (a serial script build hands

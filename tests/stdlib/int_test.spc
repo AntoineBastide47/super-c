@@ -371,7 +371,7 @@ fn conformances() {
     let a = u128::from_u64(5);
     let b = u128::from_u64(5);
     assert(a == b);
-    assert_eq(a.hash(), b.hash());
+    assert_eq(hash(&a), hash(&b));
     assert(u128::default().is_zero());
     assert(i128::default().is_zero());
     assert(a.clone() == a);

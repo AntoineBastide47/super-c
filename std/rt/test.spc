@@ -33,7 +33,7 @@ struct Table {
 }
 
 extend Table {
-    fn name(self: &Table, i: usize) str<'static> {
+    const fn name(self: &Table, i: usize) str<'static> {
         return unsafe str::from_cstr(self.names[i]);
     }
 
@@ -42,13 +42,13 @@ extend Table {
         f(genv);
     }
 
-    fn should_panic(self: &Table, i: usize) bool {
+    const fn should_panic(self: &Table, i: usize) bool {
         return unsafe self.panics[i] != 0;
     }
 
     @platform(!wasm)
     // The seconds test `i` may run: its own `@test(timeout = N)`, else the run's `--timeout` (0: none).
-    fn limit(self: &Table, i: usize, timeout: i32) u32 {
+    const fn limit(self: &Table, i: usize, timeout: i32) u32 {
         let own = unsafe self.timeouts[i];
         if own != 0 {
             return own;
@@ -305,7 +305,7 @@ fn parse_arg(a: str<'static>, o: &mut Opts) bool {
 }
 
 // The decimal integer `s` starts with, 0 without one (as C's atoi).
-fn leading_int(s: str) i32 {
+const fn leading_int(s: str) i32 {
     let mut e: usize = 0;
     if e < s.len() && (s.byte_at(0) == b'-' || s.byte_at(0) == b'+') {
         e = 1;
@@ -333,7 +333,7 @@ struct Named {
     pub i: u32,
 }
 
-fn named_cmp(a: &Named, b: &Named) i32 {
+const fn named_cmp(a: &Named, b: &Named) i32 {
     return a.name.cmp(&b.name);
 }
 
@@ -350,7 +350,7 @@ extend Durations {
     }
 
     // The index of the test named `name`, or -1 when this binary does not have it.
-    fn find(self: &Durations, t: &Table, name: str) isize {
+    const fn find(self: &Durations, t: &Table, name: str) isize {
         let mut lo: isize = 0;
         let mut hi = self.by_name.len() as isize - 1;
         while lo <= hi {
@@ -465,7 +465,7 @@ struct Line {
     pub secs: f64,
 }
 
-fn line_cmp(a: &Line, b: &Line) i32 {
+const fn line_cmp(a: &Line, b: &Line) i32 {
     let bn = b.name.as_str();
     return a.name.as_str().cmp(&bn);
 }
@@ -569,7 +569,7 @@ struct Weighted {
 }
 
 // The longest first; equal ones in table order.
-fn weighted_cmp(a: &Weighted, b: &Weighted) i32 {
+const fn weighted_cmp(a: &Weighted, b: &Weighted) i32 {
     if a.secs != b.secs {
         return if a.secs < b.secs {
             1;
@@ -584,7 +584,7 @@ fn weighted_cmp(a: &Weighted, b: &Weighted) i32 {
     };
 }
 
-fn f64_cmp(a: &f64, b: &f64) i32 {
+const fn f64_cmp(a: &f64, b: &f64) i32 {
     return if *a < *b {
         -1;
     } else if *a > *b {
@@ -906,7 +906,7 @@ fn js_give_back() {
 
 @platform(!wasm)
 // The slot count and the rest of an `SC_JOBSERVER` value `<n>,<rest>`, None when malformed.
-fn js_parse(v: str<'static>) Option<(i32, str<'static>)> {
+const fn js_parse(v: str<'static>) Option<(i32, str<'static>)> {
     let c = v.find_byte(b',');
     if c <= 0 {
         return Option::<(i32, str<'static>)>::None;
@@ -968,20 +968,20 @@ extend Tokens {
 // ---- POSIX ----------------------------------------------------------------------------------------------------
 
 @platform(macos | ios | linux | android)
-fn prepare_stderr() {}
+const fn prepare_stderr() {}
 
 @platform(macos | ios | linux | android)
-fn cap_jobs(jobs: i32) i32 {
+const fn cap_jobs(jobs: i32) i32 {
     return jobs;
 }
 
 @platform(macos | ios | linux | android)
-fn win_arg(_a: str<'static>, _o: &mut Opts) bool {
+const fn win_arg(_a: str<'static>, _o: &mut Opts) bool {
     return false;
 }
 
 @platform(macos | ios | linux | android)
-fn run_one(_t: &Table, _o: &Opts) i32 {
+const fn run_one(_t: &Table, _o: &Opts) i32 {
     return 2;
 }
 
@@ -1329,7 +1329,7 @@ fn diag_request(root: i32, path: str, limit: u32) {
 }
 
 @platform(macos | ios)
-fn kernel_view(_tr: &Vector<i32>, _path: str) {}
+const fn kernel_view(_tr: &Vector<i32>, _path: str) {}
 
 @platform(linux | android)
 fn kernel_view(tr: &Vector<i32>, path: str) {
@@ -1470,17 +1470,17 @@ fn why_posix(st: i32, should_panic: bool) String {
 @platform(macos | ios | linux | android)
 // The wait status macros: the low 7 bits are the terminating signal (0: exited, 0x7f: stopped), the next
 // byte the exit code.
-fn exited(st: i32) bool {
+const fn exited(st: i32) bool {
     return (st & 0x7f) == 0;
 }
 
 @platform(macos | ios | linux | android)
-fn exit_code(st: i32) i32 {
+const fn exit_code(st: i32) i32 {
     return st >> 8 & 0xff;
 }
 
 @platform(macos | ios | linux | android)
-fn signaled(st: i32) bool {
+const fn signaled(st: i32) bool {
     return (st & 0x7f) != 0 && (st & 0x7f) != 0x7f;
 }
 

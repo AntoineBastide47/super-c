@@ -602,7 +602,7 @@ const EXT_END: u32 = 0xFFFFFFFFu32;
 /// `mark_ctx` of owner module `o`'s instance shard: `CTX_INST | o`.
 pub const CTX_INST: i64 = 0x10000;
 
-// FNV-1a of the bytes hashed into `h` followed by `s` (`fnv_more(x.hash(), s) == (x + s).hash()`).
+// FNV-1a of the bytes hashed into `h` followed by `s` (`fnv_more(fnv(x), s) == fnv((x + s))`).
 const fn fnv_more(h: u64, s: str) u64 {
     let mut x = h;
     for k in 0..s.len() {
@@ -1033,7 +1033,7 @@ extend Mangler {
 
     /// `ground` reading only the frames below `lim`. An associated type (`T::Output`) grounds to its
     /// conformance's type (`Package::assoc_norm`).
-    fn ground_l(self: &Self, pm: ModuleId, t: TypeId, dm: ModuleId, lim: usize, out: &mut TypeId, depth: u32) bool {
+    pub fn ground_l(self: &Self, pm: ModuleId, t: TypeId, dm: ModuleId, lim: usize, out: &mut TypeId, depth: u32) bool {
         if depth > 16 {
             return false;
         }
@@ -1579,7 +1579,7 @@ extend Mangler {
             let ne = replace(&mut self.no_edges, true);
             let ok = self.type_m(rm, rt, &mut nm);
             self.no_edges = ne;
-            return pick(ok, nm.as_str().hash(), 0u64);
+            return pick(ok, fnv(nm.as_str()), 0u64);
         }
         let mut key: u64 = 0;
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
@@ -1623,7 +1623,7 @@ extend Mangler {
         self.no_edges = ne;
         self.agg_on = agg;
         let h = if ok {
-            nm.as_str().hash();
+            fnv(nm.as_str());
         } else {
             0u64;
         };
@@ -1650,7 +1650,7 @@ extend Mangler {
                 nm.clear();
                 self.qualified(m, dn.as_data.aggregate.name, &mut nm);
                 self.no_edges = ne;
-                let h9 = nm.as_str().hash();
+                let h9 = fnv(nm.as_str());
                 self.tn_buf = nm;
                 self.tn_memo.insert(key, h9);
                 h9;
@@ -2121,7 +2121,25 @@ extend Mangler {
         self.ident(y.module, unsafe (*da).at_const(pn.as_data.generic_param.name).as_data.name.text, out);
     }
 
-    /// True when `(pm, t)` is the prelude `Global` allocator type (the trailing-arg elision rule).
+    /// True when argument `i` of an instance of aggregate `(dm, dn)`, resolved to `(am, at)`, is the
+    /// struct its parameter defaults to: instance names elide such trailing arguments (`A = Global`:
+    /// `Vector<T, Global>` -> `Vector__T`). One value per position elides, so the names stay distinct.
+    pub const fn is_default_arg(self: &Self, dm: ModuleId, dn: NodeId, i: u32, am: ModuleId, at: TypeId) bool {
+        let y = *unsafe (*self.p().module_ast_const(am)).type_at(at);
+        let da = self.p().module_ast_const(dm);
+        let gens = unsafe (*da).at_const(dn).as_data.aggregate.generics;
+        if y.kind != TypeKind::TYPE_STRUCT || i >= gens.len {
+            return false;
+        }
+        let d = unsafe (*da).at_const(unsafe (*da).list(gens)[i as usize]).as_data.generic_param.default_type;
+        if d == NODE_NONE {
+            return false;
+        }
+        let r = unsafe (*da).resolution_def(d);
+        return r.node == y.as_data.decl && r.module == y.module;
+    }
+
+    /// True when `(pm, t)` is the prelude `Global` allocator type.
     pub const fn is_global(self: &Self, pm: ModuleId, t: TypeId) bool {
         let y = *unsafe (*self.p().module_ast_const(pm)).type_at(t);
         return y.kind == TypeKind::TYPE_STRUCT && y.module == self.ph_global.mid && y.as_data.decl == self.ph_global.node;
@@ -3324,7 +3342,7 @@ extend Mangler {
                 let st = out.len();
                 self.qualified(y.module, dn.as_data.aggregate.name, out);
                 if self.tn_on && !self.no_edges && !self.tn_recent(pm, t, self.ptr_depth == 0, 0) {
-                    self.need_name(out.as_str().slice(st, out.len()).hash(), self.ptr_depth == 0);
+                    self.need_name(fnv(out.as_str().slice(st, out.len())), self.ptr_depth == 0);
                 }
             }
             self.join_decl("", decl, out);
@@ -3411,7 +3429,7 @@ extend Mangler {
                 self.ptr_depth == 0,
                 pick(y.concrete, 0, self.subs_gen),
             ) {
-                self.need_name(out.as_str().slice(st, out.len()).hash(), self.ptr_depth == 0);
+                self.need_name(fnv(out.as_str().slice(st, out.len())), self.ptr_depth == 0);
             }
             self.join_decl("", decl, out);
             return true;
@@ -3438,7 +3456,7 @@ extend Mangler {
                 let st = out.len();
                 self.closure_sym(y.module, y.as_data.decl, out);
                 if self.tn_on {
-                    self.need_name(fnv_more(out.as_str().slice(st, out.len()).hash(), "_env"), self.ptr_depth == 0);
+                    self.need_name(fnv_more(fnv(out.as_str().slice(st, out.len())), "_env"), self.ptr_depth == 0);
                 }
                 self.join_decl("_env", decl, out);
                 return true;
@@ -3600,7 +3618,7 @@ extend Mangler {
                 );
             }
         }
-        let h = out.as_str().slice(st, out.len()).hash();
+        let h = fnv(out.as_str().slice(st, out.len()));
         if ok && !self.wrap_seen.contains(&h) {
             self.wrap_seen.insert(h);
             let nm = out.as_str().slice(st, out.len());
@@ -3681,7 +3699,7 @@ extend Mangler {
                 break;
             }
         }
-        let h = out.as_str().slice(st, out.len()).hash();
+        let h = fnv(out.as_str().slice(st, out.len()));
         if ok && !self.pack_seen.contains(&h) {
             let nm = String::from_str(out.as_str().slice(st, out.len()));
             let mut body = String::from_str("typedef struct ");
@@ -3751,7 +3769,7 @@ extend Mangler {
     /// another wider one of 16-byte chunks also names them, `c[k]` in a union with `l`: a split
     /// operation reads and writes its chunks in place (`vec_chunked`).
     fn vec_def(self: &mut Self, pm: ModuleId, elem: TypeId, nm: str, n: u64, size: u64, align: u64) bool {
-        let h = nm.hash();
+        let h = fnv(nm);
         if !self.pack_seen.contains(&h) {
             let reg = self.vec_regs && n >= 2 && (size <= 16 && align == size || size <= self.vec_reg_bytes && align == 16);
             let k = size / 16;
@@ -3817,7 +3835,7 @@ extend Mangler {
     /// registers copies one by one, `__sc_bounds_vec`).
     pub fn lane_check_use(self: &mut Self) {
         let nm = "__sc_lane_check";
-        let h = nm.hash();
+        let h = fnv(nm);
         if !self.pack_seen.contains(&h) {
             self.pack_seen.insert(h);
             self.pack_reqs.push(WrapReq { h: h, elem: String::from_str(nm), body: String::from_str(LANE_CHECK_C) });
@@ -4002,8 +4020,8 @@ extend Mangler {
         return true;
     }
 
-    /// `<Qualified>[__<arg>...]` with trailing prelude-Global (default allocator) args elided:
-    /// `String<Global>` -> `String`, `Vector<T, Global>` -> `Vector__T`. A symbol segment unless
+    /// `<Qualified>[__<arg>...]` with trailing arguments equal to their parameter's default elided
+    /// (`is_default_arg`): `String<Global>` -> `String`, `Map<K, V, Global, DefaultHash>` -> `Map__K__V`. A symbol segment unless
     /// inside a C type spelling (`inst_type_name`).
     pub fn inst_name(self: &mut Self, pm: ModuleId, it: &TyInstance, out: &mut String) bool {
         self.seg_depth += 1;
@@ -4031,8 +4049,7 @@ extend Mangler {
             if !self.resolve(pm, gt, &mut gm, &mut gt) {
                 break;
             }
-            let y = *unsafe (*self.p().module_ast_const(gm)).type_at(gt);
-            if self.ph_global.node != NODE_NONE && y.kind == TypeKind::TYPE_STRUCT && y.module == self.ph_global.mid && y.as_data.decl == self.ph_global.node {
+            if self.is_default_arg(it.module, it.decl, ne - 1, gm, gt) {
                 ne -= 1;
             } else {
                 break;
@@ -4043,7 +4060,7 @@ extend Mangler {
         }
         // A vector's or mask's anchor names its methods only: its storage is not the struct.
         if self.agg_on && self.p().tt.deref().vec_of(it.module, it.decl, &it.args[0]).kind == TypeKind::TYPE_ERROR {
-            let h9 = out.as_str().slice(base9, out.len()).hash();
+            let h9 = fnv(out.as_str().slice(base9, out.len()));
             let new9 = switch self.agg_seen.get(&h9) {
                 Some(_v) => false,
                 None => true,

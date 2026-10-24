@@ -776,8 +776,8 @@ const fn temp_source(b: &ir::CoreBody, pl0: u32, s0: usize, l0: u32, bl0: usize)
     return pick(n == 1, src, none);
 }
 
-// The exact value of integer or boolean constant `c` of `b`: `val`, except for a literal spelled other
-// than in plain decimal (`0x41`), whose span holds it (`Constant::int_value`).
+// The exact value of integer or boolean constant `c` of `b`, an integer's read from its spelling
+// (`Constant::int_value`).
 const fn const_value(p: &loader::Package, b: &ir::CoreBody, c: &ir::Constant, v: &mut i64) bool {
     *v = c.val;
     if c.kind != ir::CK_INT {
@@ -793,7 +793,7 @@ const fn const_value(p: &loader::Package, b: &ir::CoreBody, c: &ir::Constant, v:
 }
 
 // Whether a switch may read scrutinee `o` of `b` in place of its temp: a constant whose `val`, the
-// value `CFlow` and `reach` match the cases against, is its value (a literal `0x41` stays a read).
+// value `CFlow` and `reach` match the cases against, is the value its spelling holds.
 const fn switch_on_const(p: &loader::Package, b: &ir::CoreBody, o: u32) bool {
     if b.operands.at(o as usize).kind != ir::OP_CONST {
         return false;
@@ -2066,6 +2066,20 @@ fn ty_table(pairs: &Vector<u64>, out: &mut Vector<u64>) {
 
 /// Type `t` of a callee in the caller, through translation table `tymap` (`ty_table`); TYPE_NONE
 /// stays TYPE_NONE, and so does a type the table lacks.
+// Whether a drop of a callee place of type `t` drops a value the substitution `tymap` makes a reference
+// or a pointer, where the callee's own type is neither (types of the package table, read through
+// module `m`).
+fn drop_of_borrow(p: &loader::Package, m: ModuleId, t: TypeId, tymap: []u64) bool {
+    let a = unsafe &*p.module_ast_const(m);
+    let st = mty(tymap, t);
+    if st == t || t == TYPE_NONE {
+        return false;
+    }
+    let k = a.type_at(t).kind;
+    let sk = a.type_at(st).kind;
+    return k != TypeKind::TYPE_REFERENCE && k != TypeKind::TYPE_POINTER && (sk == TypeKind::TYPE_REFERENCE || sk == TypeKind::TYPE_POINTER);
+}
+
 const fn mty(tymap: []u64, t: TypeId) TypeId {
     if t == TYPE_NONE {
         return t;
@@ -2761,8 +2775,8 @@ fn splice(
         }
         if c.kind == ir::CK_STR || c.kind == ir::CK_FLOAT || c.kind == ir::CK_INT {
             // the spelling spans a FOREIGN module's source; item marks it (established CK_STR
-            // convention, extended to CK_FLOAT and CK_INT in the emitter -- an integer literal's
-            // `val` is only the decimal fast path, hex/binary spellings live in the span)
+            // convention, extended to CK_FLOAT and CK_INT in the emitter, which spells an integer
+            // literal from its span)
             if c.item.node == NODE_NONE {
                 c.item = DefId { module: km, node: k.owner.node };
             }
@@ -2906,6 +2920,16 @@ fn splice(
                 tm.a += o0;
                 tm.sw_start += sw0;
                 tm.t0 += b0;
+            } else if tm.kind == ir::TM_DROP && drop_of_borrow(
+                unsafe &*pkg9,
+                b.module,
+                k.places.at(tm.a as usize).ty,
+                tymap,
+            ) {
+                // The scheduled drop of a value of a parameter the call binds to a reference or a
+                // pointer owns nothing; as a drop of a reference-typed place it would read as an
+                // explicit free of the referent (`p.free()`).
+                tm = ir::goto_term(tm.t0 + b0, sp);
             } else if tm.kind == ir::TM_DROP {
                 tm.a += p0;
                 if tm.args_len == 1 {

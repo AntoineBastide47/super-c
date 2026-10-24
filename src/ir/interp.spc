@@ -20,6 +20,7 @@ import borrowck::facts as bcf;
 import lexer::token as tok;
 import lexer::token_type as *;
 import utils::persist as *;
+import utils::errors as diag;
 
 pub const IV_NONE: u8 = 0; // not evaluable (unsupported construct, trap, or budget)
 pub const IV_INT: u8 = 1;
@@ -814,8 +815,8 @@ pub struct MKey {
 }
 
 extend MKey as Hash {
-    pub fn hash(self: &Self) u64 {
-        return (self.callee ^ self.recv.wrapping_mul(1099511628211u64)).wrapping_mul(1099511628211u64);
+    pub fn hash_into<H: Hasher>(self: &Self, h: &mut H) {
+        h.write_u64((self.callee ^ self.recv.wrapping_mul(1099511628211u64)).wrapping_mul(1099511628211u64));
     }
 }
 
@@ -1048,6 +1049,19 @@ pub struct Interp {
     /// Set when a lowering this engine needed stopped at a node the checker rejected: the
     /// failure is that error's, already reported. The checker clears it before an evaluation.
     pub err_refused: bool,
+    // Every statement and terminator run, never reset: one failure's frames all see the same count.
+    pub ticks: u64,
+    // The innermost operation of the last silent failure, at `unsup_ticks`: the statement's rvalue
+    // kind, or the terminator kind (`unsup_term`) and a call's target, and where it is written.
+    pub unsup_ticks: u64,
+    pub unsup_rv: u8,
+    pub unsup_term: u8,
+    pub unsup_callee: DefId,
+    pub unsup_m: ModuleId,
+    pub unsup_span: tok::Span,
+    // Each module's line ends (`diag::line_starts_of`), built once: a const-fn failure names its
+    // line, and the always-panics probes fail many times over.
+    pub line_tabs: Map<ModuleId, Vector<u32>>,
 }
 
 pub fn interp_new(pkg: *const loader::Package) Interp {
@@ -1164,6 +1178,14 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         body_miss_n: 0,
         dyn_rec: false,
         err_refused: false,
+        ticks: 0,
+        unsup_ticks: 0,
+        unsup_rv: 0xFF,
+        unsup_term: 0xFF,
+        unsup_callee: DefId { module: 0, node: NODE_NONE },
+        unsup_m: 0,
+        unsup_span: tok::Span { start: 0, end: 0 },
+        line_tabs: Map::<ModuleId, Vector<u32>>::new(),
     };
 }
 
@@ -1429,6 +1451,7 @@ extend Interp {
 
     const fn tick(self: &mut Self) bool {
         self.steps += 1;
+        self.ticks += 1;
         if self.steps > self.max_steps {
             self.it_trap(IT_TRAP_BUDGET_STEPS, "const-eval step budget exceeded");
             return false;
@@ -1868,6 +1891,52 @@ extend Interp {
         let mut out = v;
         out.i = id;
         return out;
+    }
+
+    // Write `v` through abstract pointer `pv` with `loadp`'s trap ladder; an aggregate the pointer
+    // addresses takes `v`'s contents in place, as `*r = v` does (`write_place`).
+    fn store_through(self: &mut Self, pv: IVal, v: IVal) bool {
+        if pv.kind != IV_PTR {
+            return false;
+        }
+        let id = pv_obj(pv);
+        if id == 0 {
+            if pv_off(pv) != 0 {
+                return self.fail();
+            }
+            self.it_trap(IT_TRAP_UB_NULL_DEREF, "null dereference");
+            return false;
+        }
+        let o = self.obj_ptr(id);
+        if o == null {
+            return false;
+        }
+        if unsafe (*o).dead != 0 {
+            return self.dead_trap(unsafe (*o).dead);
+        }
+        let off = pv_off(pv) as usize;
+        if off >= unsafe (*o).slots.len() {
+            self.it_trap(IT_TRAP_UB_OOB, "out-of-bounds access");
+            return false;
+        }
+        let cv = self.obj_clone(v, 0);
+        if v.kind != IV_NONE && cv.kind == IV_NONE {
+            return false;
+        }
+        let cur = unsafe (*o).slots[off];
+        if cur.kind == IV_OBJ && cv.kind == IV_OBJ {
+            let dst = self.obj_ptr(cur.i as u32);
+            let src = self.obj_ptr(cv.i as u32);
+            if dst == null || src == null || unsafe (*dst).slots.len() != unsafe (*src).slots.len() {
+                return false;
+            }
+            for k in 0..unsafe (*src).slots.len() {
+                self.store(cur.i as u32, k, unsafe (*self.obj_ptr(cv.i as u32)).slots[k]);
+            }
+            return true;
+        }
+        self.store(id, off, cv);
+        return true;
     }
 
     // Read through an abstract pointer with the null/dead/bounds trap ladder.
@@ -2633,12 +2702,26 @@ extend Interp {
         if pat != TYPE_NONE && !ext_is_identity(xa, pat, xa, xm, extnode) {
             return self.bind_extend_solved(list, xm, extnode, pat, rn, ram, rat);
         }
-        if xa.at_const(target).kind != NodeKind::NODE_TYPE_PATH || xa.at_const(target).as_data.type_path.args.len != rn as u32 {
+        // The target's lifetime arguments (`OccupiedEntry<'a, K, V>`) are erased: the receiver's
+        // arguments match the others in order.
+        if xa.at_const(target).kind != NodeKind::NODE_TYPE_PATH {
             return false;
         }
         let targs = xa.at_const(target).as_data.type_path.args;
+        let mut nt: u32 = 0;
+        for k in 0..targs.len {
+            nt += (xa.at_const(unsafe xa.list(targs)[k as usize]).kind != NodeKind::NODE_LIFETIME) as u32;
+        }
+        if nt != rn as u32 {
+            return false;
+        }
+        let mut j: u32 = 0;
         for i in 0..rn {
-            let aid = unsafe xa.list(targs)[i as usize];
+            while xa.at_const(unsafe xa.list(targs)[j as usize]).kind == NodeKind::NODE_LIFETIME {
+                j += 1;
+            }
+            let aid = unsafe xa.list(targs)[j as usize];
+            j += 1;
             let ad = xa.resolution_def(aid);
             let ram_i = unsafe ram[i as usize];
             let rat_i = unsafe rat[i as usize];
@@ -2887,6 +2970,13 @@ extend Interp {
                     }
                     let v = self.rvalue(b, env, s.rvalue);
                     if self.failed {
+                        self.note_unsup(
+                            b.module,
+                            s.span,
+                            b.rvalues.at(s.rvalue as usize).kind,
+                            ir::IR_NONE as u8,
+                            DefId { module: 0, node: NODE_NONE },
+                        );
                         break;
                     }
                     self.write_place(b, env, s.place, v);
@@ -2910,6 +3000,7 @@ extend Interp {
                 let d = self.operand(b, env, t.a);
                 if d.kind != IV_INT && d.kind != IV_BOOL {
                     let _ = self.bail();
+                    self.note_unsup(b.module, t.span, ir::IR_NONE as u8, t.kind, t.callee);
                     break;
                 }
                 let mut target = t.t0;
@@ -2940,11 +3031,13 @@ extend Interp {
                 break;
             } else if t.kind == ir::TM_CALL {
                 if !self.call(b, env, &t) {
+                    self.note_unsup(b.module, t.span, ir::IR_NONE as u8, t.kind, t.callee);
                     break;
                 }
                 blk = t.t0;
             } else {
                 let _ = self.bail();
+                self.note_unsup(b.module, t.span, ir::IR_NONE as u8, t.kind, t.callee);
                 break;
             }
         }
@@ -3386,14 +3479,86 @@ extend Interp {
 
     // A failure at or below a `const fn`: it carries the const-fn guarantee, and once the package
     // is fully typed a silent failure becomes the definite trap.
-    const fn constfn_fail(self: &mut Self) {
+    fn constfn_fail(self: &mut Self) {
         if self.trap.len() == 0 && self.all_typed {
-            self.it_trap(
-                IT_TRAP_UNSUPPORTED,
-                "a 'const fn' hit an operation the compile-time evaluator does not support",
-            );
+            let mut text = String::from_str("a 'const fn' hit an operation the compile-time evaluator does not support");
+            if self.unsup_ticks == self.ticks && (self.unsup_rv != ir::IR_NONE as u8 || self.unsup_term != ir::IR_NONE as u8) {
+                text.push_str(": ");
+                self.unsup_text(&mut text);
+            }
+            self.it_trap_text(IT_TRAP_UNSUPPORTED, text);
         }
         self.trap_in_constfn = true;
+    }
+
+    // Record the innermost operation of a silent failure: the first frame to see the failure at this
+    // count (`ticks`) is the one that ran it; the frames it unwinds through see the same count.
+    const fn note_unsup(self: &mut Self, m: ModuleId, sp: tok::Span, rv: u8, term: u8, callee: DefId) {
+        if self.trap.len() != 0 || self.unsup_ticks == self.ticks && (self.unsup_rv != ir::IR_NONE as u8 || self.unsup_term != ir::IR_NONE as u8) {
+            return;
+        }
+        self.unsup_ticks = self.ticks;
+        self.unsup_rv = rv;
+        self.unsup_term = term;
+        self.unsup_callee = callee;
+        self.unsup_m = m;
+        self.unsup_span = sp;
+    }
+
+    // The operation `note_unsup` recorded, and where: `the call of 'get' (map.spc:640)`.
+    @cold
+    fn unsup_text(self: &mut Self, out: &mut String) {
+        let rv = self.unsup_rv;
+        if self.unsup_term == ir::TM_CALL && self.unsup_callee.node != NODE_NONE {
+            let ca = unsafe &*self.p().module_ast_const(self.unsup_callee.module);
+            let nd = ca.at_const(self.unsup_callee.node);
+            out.push_str("the call of '");
+            if nd.kind == NodeKind::NODE_FUNCTION {
+                let nsp = ca.at_const(nd.as_data.function.name).as_data.name.text;
+                out.push_str(self.src_of(self.unsup_callee.module).slice(nsp.start as usize, nsp.end as usize));
+            }
+            out.push_str("'");
+        } else if self.unsup_term == ir::TM_CALL {
+            out.push_str("a call of a function value");
+        } else if self.unsup_term == ir::TM_SWITCH {
+            out.push_str("a switch on a value with no compile-time integer");
+        } else if self.unsup_term != ir::IR_NONE as u8 {
+            out.push_str("a control transfer");
+        } else if rv == ir::RV_USE {
+            out.push_str("a read of a value");
+        } else if rv == ir::RV_UNARY || rv == ir::RV_BINARY {
+            out.push_str("an operator");
+        } else if rv == ir::RV_CAST {
+            out.push_str("a conversion");
+        } else if rv == ir::RV_REF || rv == ir::RV_ADDR {
+            out.push_str("a borrow");
+        } else if rv == ir::RV_AGGREGATE || rv == ir::RV_REPEAT {
+            out.push_str("an aggregate");
+        } else if rv == ir::RV_DYN {
+            out.push_str("a dyn value");
+        } else if rv == ir::RV_CLOSURE {
+            out.push_str("a closure");
+        } else if rv == ir::RV_INTRINSIC {
+            out.push_str("an intrinsic");
+        } else if rv == ir::RV_SIMD {
+            out.push_str("a vector operation");
+        } else {
+            out.push_str("a length, discriminant or slice");
+        }
+        let m = self.unsup_m;
+        if !self.line_tabs.contains_key(&m) {
+            let starts = diag::line_starts_of(self.p().modules.at(m as usize).source.as_str());
+            self.line_tabs.insert(m, starts);
+        }
+        let line = diag::line_in(self.line_tabs.get(&m).unwrap(), self.unsup_span.start);
+        let f = self.p().modules.at(m as usize).file.as_str();
+        let mut base: usize = 0;
+        for i in 0..f.len() {
+            if f.byte_at(i) == 47 || f.byte_at(i) == 92 {
+                base = i + 1;
+            }
+        }
+        out.format_into(" ({}:{})", f.slice(base, f.len()), line);
     }
 
     // Bind extend `ext`'s generic parameters from receiver type `rty` of module `m`; false when
@@ -3446,8 +3611,10 @@ extend Interp {
     }
 
     // The implicit borrow of a receiver passed by value to a reference parameter (`x.get()` for
-    // `get(self: &Self)`, which the emitter spells `&x`). An aggregate handle is its own referent;
-    // a scalar becomes a pointer to the place it was read from, or to a new cell for a temporary.
+    // `get(self: &Self)`, which the emitter spells `&x`): a pointer to the place it was read from, as
+    // `&x` gives, or to a new cell for a temporary scalar. An aggregate's handle is no reference: a
+    // callee that stores it (`Entry { map: self }`) and copies the aggregate holding it would copy
+    // the referent.
     fn autoref_args(
         self: &mut Self,
         b: &ir::CoreBody,
@@ -3483,7 +3650,7 @@ extend Interp {
                 }
                 continue;
             }
-            if v.kind == IV_PTR || v.kind == IV_OBJ {
+            if v.kind == IV_PTR {
                 continue;
             }
             let pn = fa.at_const(unsafe fa.list(ps)[i]);
@@ -3495,6 +3662,10 @@ extend Interp {
                 continue;
             }
             let op = *b.operands.at(b.oper_pool[t.args_start as usize + i] as usize);
+            if v.kind == IV_OBJ && op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
+                // A constant aggregate: nothing else names it, so its handle is its referent.
+                continue;
+            }
             let mut obj: u32 = 0;
             let mut slot: u32 = 0;
             if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
@@ -6298,6 +6469,23 @@ extend Interp {
             if rv.c == ir::IN_RETURN_ADDRESS {
                 self.it_trap(IT_TRAP_UNSUPPORTED, "a return address has no compile-time value");
                 return none();
+            }
+            if rv.c == ir::IN_VOLATILE_LOAD {
+                // At compile time a volatile access is an ordinary one.
+                let pv = self.operand(b, env, b.oper_pool[rv.a as usize]);
+                let mut v = none();
+                if self.failed || !self.loadp(pv, &mut v) {
+                    return self.bail();
+                }
+                return v;
+            }
+            if rv.c == ir::IN_VOLATILE_STORE {
+                let pv = self.operand(b, env, b.oper_pool[rv.a as usize]);
+                let v = self.operand(b, env, b.oper_pool[(rv.a + 1) as usize]);
+                if self.failed || !self.store_through(pv, v) {
+                    return self.bail();
+                }
+                return iv_unit();
             }
             if rv.c == ir::IN_BOUNDS || rv.c == ir::IN_BOUNDS_PROVEN {
                 // PROVEN keeps the identical check here: CTFE catches a false proof as a trap

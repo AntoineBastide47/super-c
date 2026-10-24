@@ -15,7 +15,7 @@ pub fn rt_has_header(h: str) bool {
 /// Whether `super_rt.h` defines function `name` itself (a helper std binds without a header, as
 /// `sc_ctz64`): the emitted C must not declare it again, since a declaration without `inline` would make
 /// the unit's inline definition an external one.
-pub fn rt_defines(name: str) bool {
+pub const fn rt_defines(name: str) bool {
     for line in super_rt_h().lines() {
         if line.starts_with("inline ") {
             let open = line.find_byte(b'(');

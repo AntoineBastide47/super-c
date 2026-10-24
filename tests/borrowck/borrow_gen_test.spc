@@ -967,3 +967,467 @@ fn argument_reads_take_their_position() {
     assert(r.built, "an exit in a later argument builds");
     assert_eq(r.exit, 39);
 }
+
+// A by-value argument tied to a result only through tokens behind its references passes on what
+// lies behind them, not what its own references borrow: `Option<&K>` tied through `K`, or
+// `Option<&'a S<'b>>` tied through `'b`, adds no `'a` region and no loan on the `S`. A token at
+// the argument's own level still ties its references, so every dangling case stays rejected.
+@test
+fn reference_levels_inside_by_value_arguments() {
+    let hold = "struct Holder<'b> { pub r: &'b i32 }\n";
+    let get = "fn get<'a, 'b>(o: Option<&'a Holder<'b>>) Option<&'b i32> { return switch o { Some(h) => Option::<&i32>::Some(h.r), None => Option::<&i32>::None, }; }\n";
+    let id = "fn id<'a, 'b>(o: Option<&'a Holder<'b>>) Option<&'a Holder<'b>> { return o; }\n";
+    let ret = "lifetime mismatch: the returned value's lifetime is not declared to outlive the return type's lifetime";
+    let dead = "borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored";
+    h::expect_ok(
+        "Option<&K> tied through K into a lifetime-generic result",
+        "struct M<K> { pub x: K }\npub struct It<'a, K> { pub p: *const K }\nextend<K> M<K> { fn range<'s>(self: &'s M<K>, lo: Option<&K>) It<'s, K> { let _ = lo; return It::<K> { p: &self.x }; } }\nfn fwd<'s, K>(m: &'s M<K>, lo: Option<&K>) It<'s, K> { return m.range(lo); }\nfn main() i32 { return 0; }\n",
+    );
+    h::expect_ok(
+        "Option<&'a S<'b>> forwarded to a 'b result",
+        format(
+            "{}{}fn fwd<'a, 'b>(o: Option<&'a Holder<'b>>) Option<&'b i32> {{ return get(o); }}\nfn main() i32 {{ return 0; }}\n",
+            hold,
+            get,
+        ).as_str(),
+    );
+    h::expect_ok(
+        "a 'b result holds no loan on the Holder its argument borrows",
+        format(
+            "{}{}fn main() i32 {{ let x = 5; let y = 6; let mut h = Holder {{ r: &x }}; let res = get(Option::<&Holder>::Some(&h)); h = Holder {{ r: &y }}; let _ = h.r; return switch res {{ Some(r) => *r - 5, None => 1, }}; }}\n",
+            hold,
+            get,
+        ).as_str(),
+    );
+    let out = "struct Out<'x, 'b> { pub o: Option<&'x Holder<'b>> }\n";
+    h::expect_ok(
+        "an Option<&'x S<'b>> struct member forwarded to a 'b result",
+        format(
+            "{}{}{}fn f<'x, 'b>(s: Out<'x, 'b>) Option<&'b i32> {{ return get(s.o); }}\nfn l<'x, 'b>(o: Option<&'x Holder<'b>>) Option<&'b i32> {{ let s = Out {{ o: o }}; return get(s.o); }}\nfn main() i32 {{ let x = 5; let mut res = Option::<&i32>::None; {{ let h = Holder {{ r: &x }}; let s = Out {{ o: Option::<&Holder>::Some(&h) }}; res = get(s.o); }} return switch res {{ Some(r) => *r - 5, None => 1, }}; }}\n",
+            hold,
+            out,
+            get,
+        ).as_str(),
+    );
+    h::expect_ok(
+        "Vector<&'a K> tied through K",
+        "fn first<'a, K: Copy>(v: Vector<&'a K>) K { return *v[0]; }\nfn fwd<'a, 'b>(v: Vector<&'a &'b i32>) &'b i32 { return first(v); }\nfn main() i32 { return 0; }\n",
+    );
+    h::expect_ok(
+        "a store of K out of an Option<&K> holds no loan of the Option's reference",
+        "fn put<K: Copy>(v: &mut Vector<K>, x: Option<&K>) { switch x { Some(k) => { v.push(*k); }, None => {}, }; }\nfn main() i32 { let a = 1; let b = 2; let mut v = Vector::<&i32>::new(); let mut k = &a; put(&mut v, Option::<&&i32>::Some(&k)); k = &b; let _ = *k; return *v[0] - 1; }\n",
+    );
+    h::expect_err_msg(
+        "a returned Option's own 'a is not 'b",
+        format(
+            "{}fn bad<'a, 'b>(o: Option<&'a Holder<'b>>) Option<&'b Holder<'b>> {{ return o; }}\nfn main() i32 {{ return 0; }}\n",
+            hold,
+        ).as_str(),
+        ret,
+    );
+    h::expect_err_msg(
+        "a struct member's own 'x is not 'b",
+        format(
+            "{}{}fn g<'x, 'b>(s: Out<'x, 'b>) Option<&'b Holder<'b>> {{ return s.o; }}\nfn main() i32 {{ return 0; }}\n",
+            hold,
+            out,
+        ).as_str(),
+        ret,
+    );
+    h::expect_err_msg(
+        "a call tied through the Option's own 'a returns it",
+        format(
+            "{}{}fn bad<'a, 'b>(o: Option<&'a Holder<'b>>) Option<&'b Holder<'b>> {{ return id(o); }}\nfn main() i32 {{ return 0; }}\n",
+            hold,
+            id,
+        ).as_str(),
+        ret,
+    );
+    h::expect_err_msg(
+        "a Vector<&'a K> call tied through 'a returns it",
+        "fn get0<'a, K>(v: Vector<&'a K>) &'a K { return v[0]; }\nfn bad<'a, 'b>(v: Vector<&'a &'b i32>) &'b &'b i32 { return get0(v); }\nfn main() i32 { return 0; }\n",
+        ret,
+    );
+    h::expect_err_msg(
+        "a result tied through the Option's own 'a borrows the Holder",
+        format(
+            "{}{}fn main() i32 {{ let x = 5; let y = 6; let mut h = Holder {{ r: &x }}; let res = id(Option::<&Holder>::Some(&h)); h = Holder {{ r: &y }}; let _ = h.r; return switch res {{ Some(r) => *r.r - 5, None => 1, }}; }}\n",
+            hold,
+            id,
+        ).as_str(),
+        "cannot assign to this value while it is borrowed",
+    );
+    h::expect_err_msg(
+        "a 'b result outlives the value behind the reference",
+        format(
+            "{}{}fn main() i32 {{ let mut res = Option::<&i32>::None; {{ let x = 5; let h = Holder {{ r: &x }}; res = get(Option::<&Holder>::Some(&h)); }} return switch res {{ Some(r) => *r - 5, None => 1, }}; }}\n",
+            hold,
+            get,
+        ).as_str(),
+        dead,
+    );
+    h::expect_err_msg(
+        "an elided output keeps the Option's own reference",
+        "fn f<K>(o: Option<&K>) Option<&K> { return o; }\nfn main() i32 { let mut res = Option::<&i32>::None; { let k = 1; res = f(Option::<&i32>::Some(&k)); } return switch res { Some(r) => *r, None => 0, }; }\n",
+        dead,
+    );
+    h::expect_err_msg(
+        "a type argument at the own level keeps the reference",
+        "fn h<T>(x: Option<T>) T { return x.unwrap(); }\nfn main() i32 { let mut r = &0; { let k = 1; r = h(Option::<&i32>::Some(&k)); } return *r; }\n",
+        dead,
+    );
+    h::expect_err_msg(
+        "a store tied through the Option's own 'a keeps the reference",
+        "fn put<'a, K>(v: &mut Vector<Option<&'a K>>, x: Option<&'a K>) { v.push(x); }\nfn main() i32 { let mut v = Vector::<Option<&i32>>::new(); { let k = 1; put(&mut v, Option::<&i32>::Some(&k)); } return v.len() as i32 - 1; }\n",
+        dead,
+    );
+}
+
+// `&x` of a local that holds borrows (a reference, a struct with a lifetime) is a loan on x's own
+// storage: it may neither outlive x nor leave the function.
+@test
+fn borrows_of_borrow_carrying_locals() {
+    h::expect_err_msg(
+        "a reference to a reference local outlives it",
+        "fn main() i32 { let x = 5; let res: &&i32; { let h = &x; res = &h; } return **res - 5; }\n",
+        "borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored",
+    );
+    h::expect_err_msg(
+        "an Option of a reference to a lifetime-generic struct local outlives it",
+        "struct Holder<'b> { pub r: &'b i32 }\nfn main() i32 { let x = 5; let mut res = Option::<&Holder>::None; { let h = Holder { r: &x }; res = Option::<&Holder>::Some(&h); } return switch res { Some(r) => *r.r - 5, None => 1, }; }\n",
+        "borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored",
+    );
+    h::expect_err_msg(
+        "a reference to a reference local is returned",
+        "fn h<'a>(x: &'a i32) &'a &'a i32 { let a = x; return &a; }\nfn main() i32 { return 0; }\n",
+        "returning a pointer/reference to a local variable, which does not outlive the call",
+    );
+}
+
+// An element of a `[]T` or `[]mut T` view is the storage the view borrows, as `(*r)[i]` is: a borrow
+// of it holds the view's loans, a store through it lands in that storage, and an array's or a
+// vector's view holds a loan on the array or vector, whatever its elements hold.
+@test
+fn slice_views_of_local_storage() {
+    let dead = "borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored";
+    let esc = "returning a value borrowing from a local, which does not outlive the call";
+    h::expect_err_msg(
+        "a view of a local array of references is returned",
+        "const G: i32 = 7;\nfn h<'a>(x: &'a i32) []'a &'static i32 { let _ = x; let a = [&G, &G]; return a; }\nfn main() i32 { return 0; }\n",
+        esc,
+    );
+    h::expect_err_msg(
+        "a sub-view of a local array of references is returned",
+        "const G: i32 = 7;\nfn h<'a>(x: &'a i32) []'a &'static i32 { let _ = x; let a = [&G, &G]; return a[0..2]; }\nfn main() i32 { return 0; }\n",
+        esc,
+    );
+    h::expect_err_msg(
+        "a borrow of a view's element outlives the array",
+        "fn main() i32 { let s: []i32; let r: &i32; { let a = [1, 2]; s = a; r = &s[0]; } return *r - 1; }\n",
+        dead,
+    );
+    h::expect_err_msg(
+        "the array is written while a borrow of a view's element is live",
+        "fn main() i32 { let mut a = [1, 2]; let s: []i32 = a; let r = &s[0]; a[0] = 9; return *r - 1; }\n",
+        "cannot assign to this value while it is borrowed",
+    );
+    h::expect_err_msg(
+        "a vector grows while a sub-view of its references is live",
+        "fn main() i32 { let x = 1; let mut v = Vector::<&i32>::new(); v.push(&x); let t = v[0..1]; v.push(&x); return *t[0] - 1; }\n",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+    h::expect_err_msg(
+        "a store through a []mut view lands in the array",
+        "fn main() i32 { let g = 1; let mut a = [&g, &g]; { let s: []mut &i32 = a; let x = 5; s[0] = &x; } return *a[0] - 5; }\n",
+        dead,
+    );
+    h::expect_ok(
+        "a borrow of a view's element outlives the view",
+        "fn main() i32 { let a = [1, 2]; let r: &i32; { let s: []i32 = a; r = &s[0]; } return *r - 1; }\n",
+    );
+    h::expect_ok(
+        "elements and sub-views of a view parameter keep its lifetime",
+        "fn first<'a>(s: []'a i32) &'a i32 { let t = s; return &t[0]; }\nfn tail<'a>(s: []'a &'static i32) &'static i32 { let t = s[1..]; return t[0]; }\nfn sub<'a>(s: []'a i32) []'a i32 { let t = s; return t[1..]; }\nfn pick(c: u32) str<'static> { let cmp: []str = [\"a\", \"b\"]; return cmp[c as usize]; }\nfn main() i32 { let a = [1, 2]; return *first(a) + sub(a)[0] + pick(1).len() as i32 - 4; }\n",
+    );
+    h::expect_ok(
+        "a []mut view writes its array, and a vector grows once its sub-view is dead",
+        "fn fill(s: []mut i32) { s[0] = 5; }\nfn main() i32 { let mut a = [1, 2]; { let s: []mut i32 = a; s[1] = 4; fill(s); } let mut v = Vector::<i32>::new(); v.push(1); let t = v[0..1]; let n = t[0]; v.push(2); return a[0] + a[1] + n - 10; }\n",
+    );
+}
+
+// A loan keeps three reference levels (its own, behind one reference, behind two or more): a value
+// read through two references, or a call tied through a position behind two, holds only what lies
+// that deep, and a store through two references lands two levels down.
+@test
+fn three_reference_levels() {
+    let ret = "lifetime mismatch: the returned value's lifetime is not declared to outlive the return type's lifetime";
+    let asg = "cannot assign to this value while it is borrowed";
+    let k = "fn k<'x, K: Copy>(r: &'x Option<&K>) K { return *r.unwrap(); }\n";
+    h::expect_ok(
+        "a call tied through K of &'x Option<&K> holds no loan on the inner reference",
+        format(
+            "{}fn main() i32 {{ let a = 1; let b = 2; let mut h = &a; let o = Option::<&&i32>::Some(&h); let r = k(&o); h = &b; let _ = *h; return *r - 1; }}\n",
+            k,
+        ).as_str(),
+    );
+    h::expect_ok(
+        "a call tied through K of &'x Option<&'a &'b i32> returns the 'b region",
+        format(
+            "{}fn fwd<'x, 'a, 'b>(r: &'x Option<&'a &'b i32>) &'b i32 {{ return k(r); }}\nfn main() i32 {{ return 0; }}\n",
+            k,
+        ).as_str(),
+    );
+    h::expect_ok(
+        "a copy read through two references holds only the innermost borrow",
+        "fn main() i32 { let x = 1; let y = 2; let mut a = &x; let b = &a; let c = &b; let r: &i32 = **c; a = &y; let _ = *a; return *r - 1; }\n",
+    );
+    h::expect_ok(
+        "a by-value Option<&'a &'b i32> tied through 'b holds no loan on the middle reference",
+        "fn g<'a, 'b>(x: Option<&'a &'b i32>) &'b i32 { return *x.unwrap(); }\nfn main() i32 { let a = 1; let b = 2; let mut h = &a; let r = g(Option::<&&i32>::Some(&h)); h = &b; let _ = *h; return *r - 1; }\n",
+    );
+    h::expect_err_msg(
+        "a value read through one of two references still borrows the middle one",
+        "fn main() i32 { let x = 1; let y = 2; let mut a = &x; let b = &a; let c = &b; let r2: &&i32 = *c; a = &y; let _ = *a; return **r2 - 1; }\n",
+        asg,
+    );
+    h::expect_err_msg(
+        "a call returning the Option one level down borrows the inner reference",
+        "fn k2<'x, 'y, K>(r: &'x Option<&'y K>) Option<&'y K> { return *r; }\nfn main() i32 { let a = 1; let b = 2; let mut h = &a; let o = Option::<&&i32>::Some(&h); let r = k2(&o); h = &b; let _ = *h; return **r.unwrap() - 1; }\n",
+        asg,
+    );
+    h::expect_err_msg(
+        "a call tied through 'a too borrows the middle reference",
+        "fn g2<'a, 'b>(x: Option<&'a &'b i32>) &'a &'b i32 { return x.unwrap(); }\nfn main() i32 { let a = 1; let b = 2; let mut h = &a; let r = g2(Option::<&&i32>::Some(&h)); h = &b; let _ = *h; return **r - 1; }\n",
+        asg,
+    );
+    h::expect_err_msg(
+        "the innermost borrow still ends with its value",
+        format(
+            "{}fn main() i32 {{ let mut res = &0; {{ let x = 1; let h = &x; let o = Option::<&&i32>::Some(&h); res = k(&o); }} return *res; }}\n",
+            k,
+        ).as_str(),
+        "borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored",
+    );
+    h::expect_err_msg(
+        "a store through two references lands in the outer local",
+        "fn main() i32 { let g = 1; let mut q = &g; { let mut p1 = &mut q; let p2 = &mut p1; let y = 2; **p2 = &y; } return *q; }\n",
+        "borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored",
+    );
+    h::expect_err_msg(
+        "returning the middle reference of &'x Option<&'a &'b i32> needs 'a",
+        "fn k<'x, 'a, 'b>(r: &'x Option<&'a &'b i32>) &'b &'b i32 { return r.unwrap(); }\nfn main() i32 { return 0; }\n",
+        ret,
+    );
+}
+
+// The destruction of an owned carrier observes what it stores only where it may still hold a value:
+// moved out on every path, it keeps no borrow alive to the end of its scope. A closure value moved
+// into another passes its destruction on.
+@test
+fn moved_owned_carriers_observe_nothing() {
+    let asg = "cannot assign to this value while it is borrowed";
+    let sink = "fn sink(v: Vector<&&i32>) { let _ = v.len(); }\n";
+    h::expect_ok(
+        "a vector moved into a call",
+        format(
+            "{}fn main() i32 {{ let x = 1; let mut h = &x; let y = 2; let mut v = Vector::<&&i32>::new(); v.push(&h); sink(v); h = &y; let _ = *h; return 0; }}\n",
+            sink,
+        ).as_str(),
+    );
+    h::expect_ok(
+        "a vector moved on every path of a branch",
+        format(
+            "{}fn f(c: bool) i32 {{ let x = 1; let mut h = &x; let y = 2; let mut v = Vector::<&&i32>::new(); v.push(&h); if c {{ sink(v); }} else {{ let u = v; let _ = u.len(); }} h = &y; let _ = *h; return 0; }}\nfn main() i32 {{ return f(true); }}\n",
+            sink,
+        ).as_str(),
+    );
+    h::expect_err_msg(
+        "a vector moved on one path only",
+        format(
+            "{}fn f(c: bool) i32 {{ let x = 1; let mut h = &x; let y = 2; let mut v = Vector::<&&i32>::new(); v.push(&h); if c {{ sink(v); }} h = &y; let _ = *h; return 0; }}\nfn main() i32 {{ return f(true); }}\n",
+            sink,
+        ).as_str(),
+        asg,
+    );
+    h::expect_err_msg(
+        "a vector moved and given a new value",
+        "fn main() i32 { let x = 1; let mut h = &x; let y = 2; let mut v = Vector::<&&i32>::new(); let w = v; let _ = w.len(); v = Vector::<&&i32>::new(); v.push(&h); h = &y; let _ = *h; return 0; }\n",
+        asg,
+    );
+    h::expect_err_msg(
+        "a closure moved into another local",
+        "fn main() i32 { let mut y = 1; let mut v: Vector<&i32> = Vector::new(); v.push(&y); let mut n = 0; let k = || { n += v.len() as i32; }; let mut k2 = k; k2(); y = 2; return 0; }\n",
+        asg,
+    );
+}
+
+// A carrier whose every member is moved out one by one holds nothing at its storage end, as one moved
+// whole does; a member left in place, or a member moved out on one path only, still holds a value.
+@test
+fn carriers_emptied_member_by_member_observe_nothing() {
+    let asg = "cannot assign to this value while it is borrowed";
+    let pair = "struct P<'a> { pub a: Vector<&'a &'a i32>, pub b: Vector<&'a &'a i32> }\nstruct Q<'a> { pub p: P<'a>, pub c: Vector<&'a &'a i32> }\n";
+    let head = "let x = 1; let mut h = &x; let y = 2; let mut p = P { a: Vector::<&&i32>::new(), b: Vector::<&&i32>::new() }; p.a.push(&h);";
+    h::expect_ok(
+        "every field freed",
+        format("{}fn main() i32 {{ {} p.a.free(); p.b.free(); h = &y; let _ = *h; return 0; }}\n", pair, head).as_str(),
+    );
+    h::expect_ok(
+        "every tuple member freed",
+        "fn main() i32 { let x = 1; let mut h = &x; let y = 2; let mut t = (Vector::<&&i32>::new(), Vector::<&&i32>::new()); t.0.push(&h); t.0.free(); t.1.free(); h = &y; let _ = *h; return 0; }\n",
+    );
+    h::expect_ok(
+        "every field of a nested carrier freed",
+        format(
+            "{}fn main() i32 {{ {} let mut q = Q {{ p: p, c: Vector::<&&i32>::new() }}; q.p.a.free(); q.p.b.free(); q.c.free(); h = &y; let _ = *h; return 0; }}\n",
+            pair,
+            head,
+        ).as_str(),
+    );
+    h::expect_err_msg(
+        "one field left in place",
+        format("{}fn main() i32 {{ {} p.a.free(); h = &y; let _ = *h; return 0; }}\n", pair, head).as_str(),
+        asg,
+    );
+    h::expect_err_msg(
+        "a field freed on one path only",
+        format(
+            "{}fn f(c: bool) i32 {{ {} if c {{ p.a.free(); }} p.b.free(); h = &y; let _ = *h; return 0; }}\nfn main() i32 {{ return f(true); }}\n",
+            pair,
+            head,
+        ).as_str(),
+        asg,
+    );
+    h::expect_err_msg(
+        "a freed field given a new value",
+        format(
+            "{}fn main() i32 {{ {} p.a.free(); p.b.free(); p.a = Vector::<&&i32>::new(); p.a.push(&h); h = &y; let _ = *h; return 0; }}\n",
+            pair,
+            head,
+        ).as_str(),
+        asg,
+    );
+    h::expect_err_msg(
+        "a nested carrier with one inner field left",
+        format(
+            "{}fn main() i32 {{ {} let mut q = Q {{ p: p, c: Vector::<&&i32>::new() }}; q.p.a.free(); q.c.free(); h = &y; let _ = *h; return 0; }}\n",
+            pair,
+            head,
+        ).as_str(),
+        asg,
+    );
+}
+
+// A build-constant `if` or `switch` the early prune replaced by its taken arm keeps the extension
+// the arm has: the temporaries its value borrows live to the end of the block around the whole
+// expression, as they do under a run-time condition.
+@test
+fn pruned_arm_values_keep_their_temporaries() {
+    h::expect_ok(
+        "a build-constant if whose arm value views an arm literal",
+        "fn pick() usize { let s: []str = if ARCH == Arch::AArch64 { [\"a\"]; } else { [\"b\", \"c\"]; }; let mut n: usize = 0; for x in s { n += x.len(); } return n; }\nfn main() i32 { return pick() as i32 - pick() as i32; }\n",
+    );
+    h::expect_ok(
+        "a build-constant switch whose arm value views an arm literal",
+        "fn pick() usize { let s: []str = switch ARCH { AArch64 => [\"a\"], _ => [\"b\", \"c\"], }; let mut n: usize = 0; for x in s { n += x.len(); } return n; }\nfn main() i32 { return pick() as i32 - pick() as i32; }\n",
+    );
+    h::expect_ok(
+        "a build-constant if whose arm value views owned arm temporaries",
+        "fn pick() usize { let s: []String = if ARCH == Arch::AArch64 { [String::from_str(\"a\")]; } else { [String::from_str(\"bb\"), String::from_str(\"c\")]; }; let mut n: usize = 0; for i in 0..s.len { n += s[i].len(); } return n; }\nfn main() i32 { return pick() as i32 - pick() as i32; }\n",
+    );
+    h::expect_err_msg(
+        "the extension ends with the block around a build-constant if",
+        "fn pick() usize { let s: []str; { s = if ARCH == Arch::AArch64 { [\"a\"]; } else { [\"b\", \"c\"]; }; } return s.len; }\nfn main() i32 { return pick() as i32; }\n",
+        "borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored",
+    );
+}
+
+// A closure value holds a by-reference capture's place behind its reference, as `&p` does: called
+// through a function-type bound, it returns what that place holds, and the bound's lifetimes tie
+// the result to the closure argument.
+@test
+fn closure_values_called_through_bounds() {
+    let call = "fn call<'a, F: fn() &'a i32>(f: F) &'a i32 { return f(); }\n";
+    h::expect_err_msg(
+        "a borrow inside a captured vector outlives its value",
+        format(
+            "{}fn main() i32 {{ let mut r = &0; {{ let x = 41; let mut v = Vector::<&i32>::new(); v.push(&x); let f = || v[0]; r = call(f); }} return *r; }}\n",
+            call,
+        ).as_str(),
+        "borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored",
+    );
+    h::expect_err_msg(
+        "a borrow inside a captured struct is assigned over",
+        format(
+            "struct H<'a> {{ pub r: &'a i32, pub s: String }}\n{}fn main() i32 {{ let mut x = 1; let h = H {{ r: &x, s: String::new() }}; let f = || h.r; let r = call(f); x = 5; return *r; }}\n",
+            call,
+        ).as_str(),
+        "cannot assign to this value while it is borrowed",
+    );
+    h::expect_ok(
+        "the result of a direct closure call outlives the capture",
+        "struct H<'a> { pub r: &'a i32, pub s: String }\nfn main() i32 { let mut x = 1; let mut r = &0; { let h = H { r: &x, s: String::new() }; let f = || h.r; r = f(); } let _ = *r; x = 5; return 0; }\n",
+    );
+}
+
+// A call through a closure value tied by a function-type bound keeps what the closure's results can
+// hold (`Owner::res_deep`): a closure returning what a by-reference capture holds does not keep the
+// capture's own storage borrowed; one returning a reference into a capture, or a by-value capture,
+// does.
+@test
+fn closure_results_through_bounds() {
+    let call = "fn call<'a, F: fn() &'a i32>(f: F) &'a i32 { return f(); }\n";
+    let dead = "borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored";
+    h::expect_ok(
+        "a copied element of a captured vector outlives the vector",
+        format(
+            "{}fn main() i32 {{ let x = 1; let mut r = &0; {{ let mut v = Vector::<&i32>::new(); v.push(&x); let f = || v[0]; r = call(f); }} return *r - 1; }}\n",
+            call,
+        ).as_str(),
+    );
+    h::expect_err_msg(
+        "a copied element of a captured vector does not outlive its value",
+        format(
+            "{}fn main() i32 {{ let mut r = &0; {{ let x = 41; let mut v = Vector::<&i32>::new(); v.push(&x); let f = || v[0]; r = call(f); }} return *r; }}\n",
+            call,
+        ).as_str(),
+        dead,
+    );
+    h::expect_err_msg(
+        "a copied element of a captured vector keeps its value borrowed",
+        format(
+            "{}fn main() i32 {{ let mut x = 1; let mut r = &0; {{ let mut v = Vector::<&i32>::new(); v.push(&x); let f = || v[0]; r = call(f); }} x = 5; return *r; }}\n",
+            call,
+        ).as_str(),
+        "cannot assign to this value while it is borrowed",
+    );
+    h::expect_err_msg(
+        "a field of a captured struct keeps its value borrowed",
+        format(
+            "struct H<'a> {{ pub r: &'a i32, pub s: String }}\n{}fn main() i32 {{ let mut x = 1; let mut r = &0; {{ let h = H {{ r: &x, s: String::new() }}; let f = || h.r; r = call(f); }} x = 5; return *r; }}\n",
+            call,
+        ).as_str(),
+        "cannot assign to this value while it is borrowed",
+    );
+    h::expect_err_msg(
+        "a reference into a captured vector keeps the vector borrowed",
+        format(
+            "{}fn main() i32 {{ let x = 1; let mut r = &0; {{ let mut v = Vector::<i32>::new(); v.push(x); let f = || &v[0]; r = call(f); }} return *r; }}\n",
+            call,
+        ).as_str(),
+        dead,
+    );
+    h::expect_err_msg(
+        "a reference captured by value keeps its value borrowed",
+        format(
+            "{}fn main() i32 {{ let mut r = &0; {{ let x = 1; let h = &x; let f = move || h; r = call(f); }} return *r; }}\n",
+            call,
+        ).as_str(),
+        dead,
+    );
+    h::expect_err_msg(
+        "a generic returning the closure value keeps its captures borrowed",
+        "fn keep<'a, F: fn() &'a i32>(f: F) F { return f; }\nfn main() i32 { let x = 1; let mut v = Vector::<&i32>::new(); v.push(&x); let g = keep(|| v[0]); v.push(&x); return *g() - 1; }\n",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+}

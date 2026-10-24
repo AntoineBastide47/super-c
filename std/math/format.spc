@@ -44,11 +44,6 @@ fn push_quat_parts<T: Float>(s: &mut String, q: &Quat<T>) {
     s.push_str("}");
 }
 
-// `seed ^ (h + (0x9e3779b9 + (seed << 6) + (seed >> 2)))`, wrapping.
-const fn hash_combine(seed: u64, h: u64) u64 {
-    return seed ^ h.wrapping_add(0x9e3779b9u64.wrapping_add(seed << 6).wrapping_add(seed >> 2));
-}
-
 // An integer's value (sign-extended), a float's bits (zero-extended for f32), 0 for +0.0 and -0.0, which
 // compare equal.
 fn component_hash<T: Scalar>(v: T) u64 {
@@ -88,17 +83,12 @@ extend<T: Scalar, const N: usize> Vec<T, N> as Format {
 }
 
 extend<T: Scalar, const N: usize> Vec<T, N> as Hash {
-    /// A vec1 hashes as its component, a longer vector combines its components x first. Equal vectors
-    /// (`==`, IEEE) hash equally: +0.0 and -0.0 hash as 0.
-    pub fn hash(self: &Vec<T, N>) u64 {
-        if N == 1 {
-            return component_hash(self.e[0]);
-        }
-        let mut seed: u64 = 0;
+    /// Every component, x first: an integer's value (sign-extended), a float's bits, 0 for +0.0 and -0.0,
+    /// so vectors equal under `==` (IEEE) hash alike.
+    pub fn hash_into<H: Hasher>(self: &Vec<T, N>, h: &mut H) {
         for i in 0..N {
-            seed = hash_combine(seed, component_hash(unsafe self.e[i]));
+            h.write_u64(component_hash(unsafe self.e[i]));
         }
-        return seed;
     }
 }
 
@@ -127,16 +117,11 @@ extend<const N: usize> Vec<bool, N> as Format {
 }
 
 extend<const N: usize> Vec<bool, N> as Hash {
-    /// A vec1 hashes as its component (0 or 1), a longer vector combines its components x first.
-    pub fn hash(self: &Vec<bool, N>) u64 {
-        if N == 1 {
-            return self.e[0] as u64;
-        }
-        let mut seed: u64 = 0;
+    /// Every component (0 or 1), x first.
+    pub fn hash_into<H: Hasher>(self: &Vec<bool, N>, h: &mut H) {
         for i in 0..N {
-            seed = hash_combine(seed, (unsafe self.e[i]) as u64);
+            h.write_u64((unsafe self.e[i]) as u64);
         }
-        return seed;
     }
 }
 
@@ -167,13 +152,11 @@ extend<T: Scalar, const C: usize, const R: usize> Mat<T, C, R> as Format {
 }
 
 extend<T: Scalar, const C: usize, const R: usize> Mat<T, C, R> as Hash {
-    /// The column hashes combined, column 0 first.
-    pub fn hash(self: &Mat<T, C, R>) u64 {
-        let mut seed: u64 = 0;
+    /// Every column, column 0 first.
+    pub fn hash_into<H: Hasher>(self: &Mat<T, C, R>, h: &mut H) {
         for i in 0..C {
-            seed = hash_combine(seed, unsafe self.c[i].hash());
+            (unsafe self.c[i]).hash_into(h);
         }
-        return seed;
     }
 }
 
@@ -190,12 +173,12 @@ extend<T: Float> Quat<T> as Format {
 }
 
 extend<T: Float> Quat<T> as Hash {
-    /// The component hashes combined x, y, z, then w.
-    pub fn hash(self: &Quat<T>) u64 {
-        let mut seed = hash_combine(0, component_hash(self.x));
-        seed = hash_combine(seed, component_hash(self.y));
-        seed = hash_combine(seed, component_hash(self.z));
-        return hash_combine(seed, component_hash(self.w));
+    /// The components x, y, z, then w, as `Vec` hashes them.
+    pub fn hash_into<H: Hasher>(self: &Quat<T>, h: &mut H) {
+        h.write_u64(component_hash(self.x));
+        h.write_u64(component_hash(self.y));
+        h.write_u64(component_hash(self.z));
+        h.write_u64(component_hash(self.w));
     }
 }
 
@@ -214,8 +197,9 @@ extend<T: Float> DualQuat<T> as Format {
 }
 
 extend<T: Float> DualQuat<T> as Hash {
-    /// The hashes of the real and the dual quaternion combined.
-    pub fn hash(self: &DualQuat<T>) u64 {
-        return hash_combine(hash_combine(0, self.real.hash()), self.dual.hash());
+    /// The real, then the dual quaternion.
+    pub fn hash_into<H: Hasher>(self: &DualQuat<T>, h: &mut H) {
+        self.real.hash_into(h);
+        self.dual.hash_into(h);
     }
 }

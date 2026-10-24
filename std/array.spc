@@ -5,6 +5,11 @@
 // `get`/`first`/`last`/`find` -> `Option<&T>`), `set` frees the replaced element. Construct with `new()`
 // (every slot `T::default()`) or `filled(&x)` (every slot a clone of `x`). Conditionally `Free`: an Array of
 // a Free element type deep-frees its elements at scope exit; an Array of plain values stays a plain value.
+//
+// Complexity: every access is O(1); swap is O(1); reverse, map, find and the sequence algorithms of
+// `as_mut_slice()` keep the bounds std/slice.spc states. The storage never moves while the Array does not,
+// so a borrow ends only when the Array is moved or mutated; iteration is in index order. No allocation; an
+// Array is Send / Sync when its elements are.
 
 /// A fixed-size inline array of N elements, always fully initialized. A distinct type from the builtin `[T; N]`.
 pub struct Array<T, const N: usize> {
@@ -84,6 +89,11 @@ extend<T, const N: usize> Array<T, N> {
         return unsafe Slice::<T> { ptr: self.as_ptr(), len: N };
     }
 
+    /// A writable view of every element: the shared slice algorithms run on it.
+    pub const fn as_mut_slice(self: &mut Array<T, N>) []mut T {
+        return unsafe SliceMut::<T> { ptr: &mut self.data[0], len: N };
+    }
+
     /// Raw byte copy into the array's storage: `memcpy(&data[0], src, n)`. Unsafe: the caller
     /// promises `n` readable bytes at `src`, `n <= N * sizeof(T)`, and that the bytes form valid `T`s;
     /// overwritten elements are NOT freed (raw overwrite, unlike `set`).
@@ -104,16 +114,7 @@ extend<T, const N: usize> Array<T, N> {
 
     /// Reverse the elements in place.
     pub const fn reverse(self: &mut Array<T, N>) {
-        if N == 0 {
-            return;
-        }
-        let mut i: usize = 0;
-        let mut j = N - 1;
-        while i < j {
-            self.swap(i, j);
-            i = i + 1;
-            j = j - 1;
-        }
+        self.as_mut_slice().reverse();
     }
 
     /// A new Array with `f` applied to every element. `f` BORROWS each element (`&T`): this map reads
@@ -211,174 +212,49 @@ extend<T: Eq, const N: usize> Array<T, N> {
     }
 }
 
-// Order-based algorithms (available when the element type is `Ord`).
+// Order-based algorithms: the shared slice algorithms (std/slice.spc) over the elements.
 extend<T: Ord, const N: usize> Array<T, N> {
     /// True if the elements are in non-decreasing order (per `Ord`).
     pub const fn is_sorted(self: &Array<T, N>) bool {
-        if N < 2 {
-            return true;
-        }
-        let mut i: usize = 0;
-        while i + 1 < N {
-            if unsafe self.data[i] > unsafe self.data[i + 1] {
-                return false;
-            }
-            i = i + 1;
-        }
-        return true;
+        return self.as_slice().is_sorted();
     }
 
-    /// Binary search of a sorted array: `Ok(i)` where an equal element lives, or `Err(i)` the index a
-    /// missing element would be inserted at to keep order. Behaviour is unspecified if not sorted.
+    /// Binary search of a sorted array: `Ok(i)` where an equal element lives (any one of several), or
+    /// `Err(i)`, the index a missing element would be inserted at to keep order. O(log n); unspecified
+    /// result if not sorted.
     pub const fn binary_search(self: &Array<T, N>, x: &T) Result<usize, usize> {
-        let mut lo: usize = 0;
-        let mut hi: usize = N;
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            if unsafe self.data[mid] == x {
-                return Result::<usize, usize>::Ok(mid);
-            } else if unsafe self.data[mid] < x {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        return Result::<usize, usize>::Err(lo);
+        return self.as_slice().binary_search(x);
     }
 
-    // Restore the max-heap property at `root` over the prefix `[0, end)` by sifting it down.
-    const fn sift_down(self: &mut Array<T, N>, root: usize, end: usize) {
-        let mut r = root;
-        let mut child = 2 * r + 1;
-        while child < end {
-            if child + 1 < end && unsafe self.data[child] < unsafe self.data[child + 1] {
-                child = child + 1;
-            }
-            if unsafe self.data[r] >= unsafe self.data[child] {
-                return;
-            }
-            self.swap(r, child);
-            r = child;
-            child = 2 * r + 1;
-        }
-    }
-
-    /// Sort the elements in place into non-decreasing order (heapsort: O(n log n), no allocation).
+    /// Sort in place into non-decreasing order, unstable (pattern-defeating quicksort: O(n log n) worst
+    /// case, no allocation).
     pub const fn sort(self: &mut Array<T, N>) {
-        if N < 2 {
-            return;
-        }
-        let mut start = N / 2;
-        while start > 0 {
-            start = start - 1;
-            self.sift_down(start, N);
-        }
-        let mut end = N;
-        while end > 1 {
-            end = end - 1;
-            self.swap(0, end);
-            self.sift_down(0, end);
-        }
+        self.as_mut_slice().sort();
+    }
+
+    /// Sort in place into non-decreasing order, stable, with no allocation: O(n log n) comparisons and
+    /// O(n log^2 n) moves (`SliceMut::sort_stable_in_place`).
+    pub fn sort_stable_in_place(self: &mut Array<T, N>) {
+        self.as_mut_slice().sort_stable_in_place();
     }
 }
 
 // Comparator-driven sorting (no `Ord` required: the closure decides the order).
 extend<T, const N: usize> Array<T, N> {
-    /// Sort in place by a comparator returning negative / zero / positive (heapsort: O(n log n)).
-    /// The sift is inlined for the same reason as Vector::sort_by: a generic method calling another
-    /// generic method with its own F is not transitively instantiated yet.
+    /// Sort in place by a comparator returning negative / zero / positive, unstable. O(n log n).
     pub const fn sort_by<F: fn(&T, &T) i32>(self: &mut Array<T, N>, cmp: F) {
-        if N < 2 {
-            return;
-        }
-        let mut phase: usize = 0; // 0: heapify roots N/2-1..0; 1: pop the max to the end, re-sift
-        let mut start = N / 2;
-        let mut end = N;
-        loop {
-            let mut r: usize = 0;
-            if phase == 0 {
-                if start == 0 {
-                    phase = 1;
-                    continue;
-                }
-                start = start - 1;
-                r = start;
-            } else {
-                if end <= 1 {
-                    break;
-                }
-                end = end - 1;
-                self.swap(0, end);
-            }
-            let mut lim = N;
-            if phase == 1 {
-                lim = end;
-            }
-            let mut child = 2 * r + 1;
-            while child < lim {
-                if child + 1 < lim && cmp(&unsafe self.data[child], &unsafe self.data[child + 1]) < 0 {
-                    child = child + 1;
-                }
-                if cmp(&unsafe self.data[r], &unsafe self.data[child]) >= 0 {
-                    break;
-                }
-                self.swap(r, child);
-                r = child;
-                child = 2 * r + 1;
-            }
-        }
+        self.as_mut_slice().sort_by(cmp);
     }
 
-    /// Sort in place by a derived `Ord` key (`v.sort_by_key(|p: &P| p.age)`): the heapsort of `sort_by`
-    /// ordered by the extracted keys, so O(n log n) and, like `sort_by`, not stable. The sift is inlined
-    /// for the same reason as `sort_by`'s.
+    /// Stable `sort_by` with no allocation (`SliceMut::sort_stable_in_place_by`).
+    pub fn sort_stable_in_place_by<F: fn(&T, &T) i32>(self: &mut Array<T, N>, cmp: F) {
+        self.as_mut_slice().sort_stable_in_place_by(cmp);
+    }
+
+    /// Sort in place by a derived `Ord` key, unstable. O(n log n); the key is computed twice per
+    /// comparison.
     pub const fn sort_by_key<K: Ord, F: fn(&T) K>(self: &mut Array<T, N>, key: F) {
-        let n = N;
-        if n < 2 {
-            return;
-        }
-        let mut phase: usize = 0; // 0: heapify roots n/2-1..0; 1: pop the max to the end, re-sift
-        let mut start = n / 2;
-        let mut end = n;
-        loop {
-            let mut r: usize = 0;
-            if phase == 0 {
-                if start == 0 {
-                    phase = 1;
-                    continue;
-                }
-                start = start - 1;
-                r = start;
-            } else {
-                if end <= 1 {
-                    break;
-                }
-                end = end - 1;
-                self.swap(0, end);
-            }
-            let mut lim = n;
-            if phase == 1 {
-                lim = end;
-            }
-            let mut child = 2 * r + 1;
-            while child < lim {
-                if child + 1 < lim {
-                    let kc = key(&unsafe self.data[child]);
-                    let kn = key(&unsafe self.data[child + 1]);
-                    if kc < kn {
-                        child = child + 1;
-                    }
-                }
-                let kr = key(&unsafe self.data[r]);
-                let kc = key(&unsafe self.data[child]);
-                if kr >= kc {
-                    break;
-                }
-                self.swap(r, child);
-                r = child;
-                child = 2 * r + 1;
-            }
-        }
+        self.as_mut_slice().sort_by_key::<K, F>(key);
     }
 }
 
@@ -436,7 +312,7 @@ extend<T, const N: usize> Array<T, N> as IndexMut<T, []mut T> {
 }
 
 // Conditional conformances: an Array is Clone/Eq/Hash exactly when its element is. Each dispatches to
-// the element's bound method (`e.clone()`, `a.eq(&b)`, `e.hash()`), monomorphized per element type.
+// the element's bound method (`e.clone()`, `a.eq(&b)`, `e.hash_into(h)`), monomorphized per element type.
 extend<T: Clone, const N: usize> Array<T, N> as Clone {
     /// A deep copy whose elements are independent clones.
     pub const fn clone(self: &Array<T, N>) Array<T, N> {
@@ -464,14 +340,12 @@ extend<T: Eq, const N: usize> Array<T, N> as Eq {
 }
 
 extend<T: Hash, const N: usize> Array<T, N> as Hash {
-    /// FNV-1a over the elements' own hashes.
-    pub const fn hash(self: &Array<T, N>) u64 {
-        let mut h: u64 = 0xcbf29ce484222325;
-        for i in 0..N {
-            let e = self.at(i);
-            h = (h ^ e.hash()).wrapping_mul(0x100000001b3);
+    /// The length, then every element through its own `hash_into`: equal sequences feed equal streams.
+    pub fn hash_into<H: Hasher>(self: &Array<T, N>, h: &mut H) {
+        h.write_u64(self.len() as u64);
+        for i in 0..self.len() {
+            self.at(i).hash_into(h);
         }
-        return h;
     }
 }
 

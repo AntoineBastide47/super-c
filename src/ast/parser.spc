@@ -75,6 +75,10 @@ pub struct Parser<'a> {
     pub intrinsic_next: bool,
     // Parsing the items of an `extern` block.
     pub in_extern: bool,
+    // Per node (`paren_key`): the parenthesized expression's text with its parentheses (`start << 32 |
+    // end`, 0 when none). The node keeps its own span, which the formatter prints verbatim; a node built around it
+    // covers the parentheses (`outer`).
+    pub parens: Vector<u64>,
 }
 
 extend Parser {
@@ -89,6 +93,7 @@ extend Parser {
             nrets: Vector::<NodeId>::new(),
             derive_ifaces: Vector::<NodeId>::new(),
             bind_buf: Vector::<NodeId>::new(),
+            parens: Vector::<u64>::new(),
             expand_derive: true,
             pending_metas: Vector::<MetaAttr>::new(),
         };
@@ -202,6 +207,21 @@ extend Parser {
             return Span::empty();
         }
         return self.ast.at_const(id).span;
+    }
+
+    // The text of operand `id` with the parentheses around it: a node built around an operand covers them.
+    const fn outer(self: &Self, id: NodeId) Span {
+        let k = Parser::paren_key(id);
+        if k < self.parens.len() && self.parens[k] != 0 {
+            let p = self.parens[k];
+            return Span::new((p >> 32) as u32, p as u32);
+        }
+        return self.node_span(id);
+    }
+
+    // The dense `parens` index of node `id`: its arena index, interleaving the two arenas.
+    const fn paren_key(id: NodeId) usize {
+        return (id & NODE_BODY_MASK) as usize << 1 | Ast::in_body(id) as usize;
     }
 
     // Report `message` at the current token, skip that token, and return NODE_NONE.
@@ -2521,6 +2541,13 @@ extend Parser {
                 );
             }
             self.expect(TokenType::RightParen, "')'");
+            if value != NODE_NONE {
+                let k = Parser::paren_key(value);
+                if self.parens.len() <= k {
+                    self.parens.resize_default(k + 1);
+                }
+                self.parens.set(k, start as u64 << 32 | self.previous_end() as u64);
+            }
             return value;
         }
         if kind == TokenType::Switch {
@@ -2655,7 +2682,7 @@ extend Parser {
 
     fn parse_postfix_after_mode(self: &mut Self, mut expr: NodeId, grammar: ExpressionGrammar) NodeId {
         loop {
-            let start = self.node_span(expr).start;
+            let start = self.outer(expr).start;
             if self.match(TokenType::LeftParen) {
                 let args = self.parse_arguments();
                 self.expect(TokenType::RightParen, "')'");
@@ -2775,7 +2802,7 @@ extend Parser {
                 TypeQualifier::TYPE_QUAL_NONE;
             };
             let operand = self.parse_unary_mode(grammar);
-            let end = self.node_span(operand).end;
+            let end = self.outer(operand).end;
             let inner = self.mk(
                 NodeKind::NODE_UNARY,
                 Span::new(op.start() + 1, end),
@@ -2808,7 +2835,7 @@ extend Parser {
             };
             self.mk(
                 NodeKind::NODE_UNARY,
-                Span::new(op.start(), self.node_span(operand).end),
+                Span::new(op.start(), self.outer(operand).end),
                 NodeAs { unary: UnaryData { op: op.kind(), operand: operand, qualifier: qualifier } },
             );
         };
@@ -2820,7 +2847,7 @@ extend Parser {
     fn add_binary(self: &mut Self, left: NodeId, op: TokenType, right: NodeId) NodeId {
         return self.mk(
             NodeKind::NODE_BINARY,
-            Span::new(self.node_span(left).start, self.node_span(right).end),
+            Span::new(self.outer(left).start, self.outer(right).end),
             NodeAs { binary: BinaryData { op: op, left: left, right: right } },
         );
     }
@@ -2832,7 +2859,7 @@ extend Parser {
             let cast_type = self.parse_cast_type();
             expr = self.mk(
                 NodeKind::NODE_CAST,
-                Span::new(self.node_span(expr).start, self.node_span(cast_type).end),
+                Span::new(self.outer(expr).start, self.node_span(cast_type).end),
                 NodeAs { cast: CastData { expression: expr, ty: cast_type } },
             );
         }
@@ -2927,7 +2954,7 @@ extend Parser {
         self.depth = self.depth - 1;
         return self.mk(
             NodeKind::NODE_ASSIGNMENT,
-            Span::new(self.node_span(left).start, self.node_span(right).end),
+            Span::new(self.outer(left).start, self.outer(right).end),
             NodeAs { binary: BinaryData { op: op, left: left, right: right } },
         );
     }
@@ -3016,12 +3043,12 @@ extend Parser {
             self.error_here("an inclusive range '..=' needs an end");
         }
         let lo = if start_node != NODE_NONE {
-            self.node_span(start_node).start;
+            self.outer(start_node).start;
         } else {
             op_start;
         };
         let hi = if end != NODE_NONE {
-            self.node_span(end).end;
+            self.outer(end).end;
         } else {
             self.previous_end();
         };
@@ -3451,7 +3478,7 @@ extend Parser {
                 };
                 let unary = self.mk(
                     NodeKind::NODE_UNARY,
-                    Span::new(start, self.node_span(operand).end),
+                    Span::new(start, self.outer(operand).end),
                     NodeAs {
                         unary: UnaryData { op: op.kind(), operand: operand, qualifier: TypeQualifier::TYPE_QUAL_NONE },
                     },

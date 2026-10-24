@@ -190,6 +190,14 @@ extern "C" "fcntl.h" {
     const AT_FDCWD: i32;
 }
 
+// The length of `dirent.d_name`, per platform: the directory reader views the name through a pointer
+// to that array.
+@platform(macos | ios)
+const D_NAME_LEN: usize = 1024;
+@platform(linux | android)
+const D_NAME_LEN: usize = 256;
+@platform(wasm)
+const D_NAME_LEN: usize = 0;
 @platform(macos | ios)
 extern "C" "dirent.h" {
     struct dirent {
@@ -198,7 +206,7 @@ extern "C" "dirent.h" {
         pub d_reclen: u16,
         pub d_namlen: u16,
         pub d_type: u8,
-        pub d_name: [char; 1024],
+        pub d_name: [char; D_NAME_LEN],
     }
 }
 @platform(linux | android)
@@ -208,7 +216,7 @@ extern "C" "dirent.h" {
         pub d_off: i64,
         pub d_reclen: u16,
         pub d_type: u8,
-        pub d_name: [char; 256],
+        pub d_name: [char; D_NAME_LEN],
     }
 }
 // The build's feature level hides the DT_* names on Darwin and glibc; both define them as these values,
@@ -224,7 +232,7 @@ extern "C" "dirent.h" {
     struct dirent {
         pub d_ino: u64,
         pub d_type: u8,
-        pub d_name: [char; 0],
+        pub d_name: [char; D_NAME_LEN],
     }
     const DT_DIR: u8 = 3;
     const DT_REG: u8 = 4;
@@ -1130,7 +1138,7 @@ pub fn readlink(path: str) Result<String, IoError> {
     }
     if n as usize < 1024 {
         let mut out = String::new();
-        out.push_bytes(unsafe Slice::<u8> { ptr: (&small[0]) as *const u8, len: n as usize });
+        out.push_bytes(unsafe Slice::<u8> { ptr: ((&small[0]) as *const char) as *const u8, len: n as usize });
         return Result::<String, IoError>::Ok(out);
     }
     // A text that fills the buffer may be cut: read it again into a buffer that doubles each pass, up to
@@ -1845,7 +1853,7 @@ extend ReadDir {
                 }
                 return Option::<Result<DirEntry, IoError>>::None;
             }
-            let p = (unsafe &(*e).d_name) as *const u8;
+            let p = ((unsafe &(*e).d_name) as *const [char; D_NAME_LEN]) as *const u8;
             let name = unsafe str::from_raw(p, cstring::strlen(p as *const char));
             if name == "." || name == ".." {
                 continue;

@@ -137,6 +137,16 @@ still-generic owner) the call-time check could not run, once every module is typ
 callee's, and a same-module callee's checked after its caller (one dependency cycle, such as an
 interface default calling a `fields` helper; `Ast.ob_seen` records what the call-time check ran).
 An obligation that reaches an interface default holds for every conformance that inherits it.
+Each call of a method whose obligations name `Self` or a generic extend's parameters records
+what its receiver binds (`FrameUse`, `tc_note_frame`), and the discharge substitutes it with the
+call's own arguments; a generic default reached with an open `Self` (through a bound or a
+projection) becomes a demand (`ProjOb.demand`) that moves up the generic call chain and runs after
+the fixpoint (`run_dmd_uses`), for the `Self` types that inherit the default. Bounds are proved per
+loop kind (`ProjOb.mode`: `fields`, `variants`, `payloads`): struct fields, every payload of an
+enum, a variant's first payload; per-copy guards (`p.index`, `v.index`, `v.tag`, metadata) fold as
+the lowering folds them (`tc_binder_cond`), so a skipped copy owes nothing. Emission decides an
+instance's static_asserts from the innermost binding of each of its own parameters, grounded
+through the demand chain (`cemit_inst_asserts`, `Mangler::ground_l`).
 
 **Freeze point:** at type-check completion every semantic decision table is final; only
 append-only interning (the module `pool` and the package type table) may grow later

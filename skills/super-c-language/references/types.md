@@ -533,7 +533,9 @@ enum Result<T, E> {
 
 ## Tuples
 
-First-class values, 2–4 elements. Lower to prelude `Tuple2`..`Tuple4`.
+First-class values, 2–4 elements. Lower to prelude `Tuple2`..`Tuple4`, which conform to `Eq`, `Ord`
+(lexicographic), `Hash`, `Clone`, `Default` and `Format` when every element does, so a tuple is a map key
+and sorts.
 
 ```superc
 let t = ((1, true), 2);

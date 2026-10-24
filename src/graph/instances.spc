@@ -155,8 +155,8 @@ pub struct InstGraph {
     // name the same interned types over and over, and a completed depth-0 walk covers every revisit.
     // A speculative walk sets no entry: a later demanded walk must still promote what it reaches.
     noted: Vector<bool>,
-    // Demand cross product cursors: per demanded method declaration (and per interface default
-    // per conforming extend), how many records of its target's instance group it has paired.
+    // Demand cross product cursors: per demanded method declaration, how many records of its
+    // target's instance group it has paired.
     // Groups only grow in record order, so a round pairs each declaration with the new records
     // alone and the insertion order equals a full re-pairing's (the earlier pairs exist).
     pair_cur: Map<u64, u64>,
@@ -238,9 +238,9 @@ const ORG_BODY: u64 = 1u64 << 63;
 const ORG_MEMBER: u64 = 1u64 << 62;
 const RF_SPEC: u8 = 1;
 const RF_WALKED: u8 = 2;
-// A speculative aggregate whose layout holds an out-of-range array: it can never be emitted, so its
-// method signatures are not expanded and it pairs with no method. A demand clears the bit, and the
-// record walks again and reports its fault.
+// A speculative aggregate whose layout holds an out-of-range array: it can never be emitted. Like every
+// speculative aggregate, its method signatures are not expanded and it pairs with no method. A demand
+// clears the bit, and the record walks again and reports its fault.
 const RF_DEAD: u8 = 4;
 // The most cleared frames the graph keeps for reuse.
 const POOL_MAX: usize = 64;
@@ -433,10 +433,9 @@ extend InstGraph {
                         if (fl & RF_WALKED) != 0 {
                             self.redo.push(cur);
                         }
-                        if (fl & RF_DEAD) != 0 {
-                            // The pairings skipped it: pair every group again from its start.
-                            self.pair_cur.clear();
-                        }
+                        // The pairings skipped it: pair every group again from its start (`add` keeps the
+                        // pairs already made).
+                        self.pair_cur.clear();
                     }
                     *fresh = false;
                     if ts {
@@ -1813,8 +1812,8 @@ extend InstGraph {
     // A call of generic interface method `t.callee` (module AST `a`, under `frame`) dispatches per
     // instance to the method of the receiver's conformance, with the call's arguments bound to that
     // method's parameters by position, or runs the interface's default body under the conformance:
-    // that method's record, or the default body's walk, once the receiver and the arguments are
-    // concrete. False when the callee is no interface method.
+    // that method's record, or the default body's (`bind_default`), once the receiver and the
+    // arguments are concrete. False when the callee is no interface method.
     fn note_iface_call(self: &mut Self, a: &Ast, t: &ir::Terminator, b: &ir::CoreBody, frame: &Vector<Subst>) bool {
         let p = unsafe &*self.pkg;
         let ca = unsafe &*p.module_ast_const(t.callee.module);
@@ -1945,17 +1944,9 @@ extend InstGraph {
             if ca.at_const(t.callee.node).as_data.function.body == NODE_NONE {
                 return true;
             }
-            // The inherited default body under `Self`, the conformance's interface arguments and
-            // the call's.
-            let mut wk = skey_mix(skey_mix(0, t.callee.module as u64 << 32 | t.callee.node as u64), ri);
-            wk = skey_mix(wk, rk.ty as u64 | 1u64 << 40);
-            for k in 0..tk.len() {
-                wk = skey_mix(wk, tk.at(k).ty);
-            }
-            if self.dwalked.contains(&wk) {
-                return true;
-            }
-            self.dwalked.insert(wk);
+            // The inherited default body: the interface method's record, keyed by `Self`, the
+            // conformance's interface arguments and the call's (`bind_default`).
+            let base = ef.len();
             ef.push(Subst { pmod: t.callee.module, pdecl: inode, key: rk });
             if dt != TYPE_NONE {
                 let di = *ea.instance(ea.type_at(dt).as_data.inst);
@@ -1971,10 +1962,15 @@ extend InstGraph {
                     g += 1;
                 }
             }
-            for k in 0..fg.len {
-                ef.push(Subst { pmod: t.callee.module, pdecl: unsafe ca.list(fg)[k as usize], key: *tk.at(k as usize) });
+            self.argbuf.truncate(0);
+            for k in base..ef.len() {
+                self.argbuf.push(ef.at(k).key);
             }
-            self.seed_body(t.callee.module, t.callee.node, ca, &ef);
+            for k in 0..tk.len() {
+                self.argbuf.push(*tk.at(k));
+            }
+            let mut fresh = false;
+            let _ = self.add(IG_METHOD, t.callee, &mut fresh);
             return true;
         }
         return true;
@@ -2044,8 +2040,8 @@ extend InstGraph {
     // Pair every demanded method DECL with every instance of its extend's target (bounds filtering
     // stays with the emitter: the graph is a superset, which is the diff direction that matters).
     // Three demand sources need no call site: `free` (RAII inserts the calls after lowering),
-    // interface DEFAULT bodies (one copy per conforming instance, unconditionally), and dyn-vtable
-    // methods (every interface method of a dyn-erased source type).
+    // interface DEFAULT bodies (one walk per conforming instance, unconditionally: `cross_defaults`),
+    // and dyn-vtable methods (every interface method of a dyn-erased source type).
     fn cross_demand(self: &mut Self) {
         // Demanded method decls, deduped: the records' first, then `dm_static`.
         let mut dm = Vector::<DefId>::new();
@@ -2183,7 +2179,9 @@ extend InstGraph {
         let glen = groups[gi as usize].len();
         for k9 in start..glen {
             let id = groups[gi as usize][k9];
-            if (self.flags[id as usize] & RF_DEAD) != 0 {
+            // A speculative instance pairs with no method until a demand promotes it; the promotion
+            // resets the cursors.
+            if (self.flags[id as usize] & (RF_DEAD | RF_SPEC)) != 0 {
                 continue;
             }
             let rec = *self.recs.at(id as usize);
@@ -2202,8 +2200,8 @@ extend InstGraph {
     }
 
     // Interface default bodies: every extend that conforms `Target as Iface` emits one copy of each
-    // default-bodied interface method per Target instance: record those pairs so the emitted-set
-    // diff can find them (def = the INTERFACE's method decl, keys = the instance args).
+    // default-bodied interface method per Target instance, walked by `walk_defaults`. A call with
+    // the method's own arguments records its instance (`note_iface_call`).
     fn cross_defaults(self: &mut Self, gk: &Map<u64, u64>, groups: &Vector<Vector<u32>>) {
         for x in 0..self.exts.len() {
             let row = *self.exts.at(x);
@@ -2243,10 +2241,7 @@ extend InstGraph {
                     }
                 }
                 if !overridden {
-                    // Pair with every instance of the extend's target.
-                    let tg = self.ext_target(a, row.enode);
                     let ck = skey_mix(skey_mix(0, x as u64 << 32 | imid as u64), 2);
-                    self.pair_group(gk, groups, tg, ck, DefId { module: iface.module, node: imid }, x as u32);
                     self.walk_defaults(gk, groups, x as u32, iface, imid, ck);
                 }
             }
@@ -2419,9 +2414,21 @@ extend InstGraph {
         self.step_fault = false;
         if r.kind == IG_AGG {
             self.expand_fields(&r);
-            if (self.flags[id as usize] & RF_DEAD) == 0 {
+            // A speculative aggregate's method signatures are expanded when a demand promotes it
+            // (`add` queues its walk again): expanding them now would chase `X<&T>` from `X<T>`
+            // through every speculative depth.
+            if (self.flags[id as usize] & (RF_DEAD | RF_SPEC)) == 0 {
                 self.expand_signatures(&r);
             }
+            return;
+        }
+        let inode = self.default_iface(&r);
+        if inode != NODE_NONE {
+            let mut frame = self.take_frame();
+            self.bind_default(&r, inode, &mut frame);
+            self.check_steps(r.def.module, r.def.node, &frame);
+            self.seed_body(r.def.module, r.def.node, unsafe &*(&*self.pkg).module_ast_const(r.def.module), &frame);
+            self.give_frame(frame);
             return;
         }
         // An extend member reached as a plain call (assoc fns, turbofish method values) still
@@ -2893,6 +2900,46 @@ extend InstGraph {
         }
     }
 
+    // The interface whose default method record `r` instantiates (`note_iface_call`), else NODE_NONE.
+    fn default_iface(self: &Self, r: &InstRec) NodeId {
+        if r.kind != IG_METHOD {
+            return NODE_NONE;
+        }
+        return switch self.iface_of.get(&skey_mix(0, r.def.module as u64 << 32 | r.def.node as u64)) {
+            Some(v) => (*v) as NodeId,
+            None => NODE_NONE,
+        };
+    }
+
+    // Bind default method record `r` of interface `inode` into `frame`: its keys are `Self`, the
+    // conformance's interface arguments, then the method's own parameters.
+    fn bind_default(self: &Self, r: &InstRec, inode: NodeId, frame: &mut Vector<Subst>) {
+        let a = unsafe &*(&*self.pkg).module_ast_const(r.def.module);
+        let fg = a.at_const(r.def.node).as_data.function.generics;
+        assert(r.args_len > fg.len, "a default method record keys Self and the method's parameters");
+        let ni = r.args_len - 1 - fg.len;
+        let igens = a.at_const(inode).as_data.interface_def.generics;
+        frame.push(Subst { pmod: r.def.module, pdecl: inode, key: *self.keys.at(r.args_start as usize) });
+        for g in 0..ni {
+            frame.push(
+                Subst {
+                    pmod: r.def.module,
+                    pdecl: unsafe a.list(igens)[g as usize],
+                    key: *self.keys.at((r.args_start + 1 + g) as usize),
+                },
+            );
+        }
+        for k in 0..fg.len {
+            frame.push(
+                Subst {
+                    pmod: r.def.module,
+                    pdecl: unsafe a.list(fg)[k as usize],
+                    key: *self.keys.at((r.args_start + 1 + ni + k) as usize),
+                },
+            );
+        }
+    }
+
     // The first `exts` row whose extend targets `d` (IG_NONE = none); `ext_next` chains the rest
     // in `exts` order.
     fn ext_first(self: &Self, d: DefId) u32 {
@@ -3174,12 +3221,17 @@ extend InstGraph {
             return false;
         }
         let mut frame = self.take_frame();
-        let x = self.enclosing_row(r.def);
-        let mut pos: u32 = 0;
-        if x != IG_NONE {
-            pos = self.bind_ext_keys(x, &self.keys, r.args_start, r.args_len, &mut frame);
+        let inode = self.default_iface(&r);
+        if inode != NODE_NONE {
+            self.bind_default(&r, inode, &mut frame);
+        } else {
+            let x = self.enclosing_row(r.def);
+            let mut pos: u32 = 0;
+            if x != IG_NONE {
+                pos = self.bind_ext_keys(x, &self.keys, r.args_start, r.args_len, &mut frame);
+            }
+            self.bind_generics(a, a.at_const(r.def.node).as_data.function.generics, &r, pos, &mut frame);
         }
-        self.bind_generics(a, a.at_const(r.def.node).as_data.function.generics, &r, pos, &mut frame);
         for i in 0..frame.len() {
             prm.push(frame.at(i).pdecl);
             tys.push(frame.at(i).key.ty);

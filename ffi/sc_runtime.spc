@@ -2712,7 +2712,7 @@ const CTX_FRAME: usize = 22;
 @platform(macos | ios | linux | android)
 @arch(x86_64)
 fn forge(f: *mut *mut void, body: *mut void, arg: *mut void, tramp: *mut void) {
-    save_fpctl(f as *mut void); // MXCSR + x87 control word
+    save_fpctl(f); // MXCSR + x87 control word
     unsafe f[3] = arg; // r13
     unsafe f[4] = body; // r12
     unsafe f[7] = tramp; // the return address of the trailing `ret`

@@ -533,7 +533,7 @@ fn report(out: &Vector<Vector<Sample>>) {
     }
 }
 
-fn mib(n: i64) f64 {
+const fn mib(n: i64) f64 {
     return n as f64 / 1048576.0;
 }
 

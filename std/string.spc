@@ -1125,15 +1125,9 @@ extend<A: Allocator> String<A> as Eq {
 }
 
 extend<A: Allocator> String<A> as Hash {
-    /// 64-bit FNV-1a over the bytes (matches str::hash, so an equal `str` and `String` hash alike).
-    pub fn hash(self: &String<A>) u64 {
-        let n = self.len();
-        let p = self.as_ptr();
-        let mut h: u64 = 0xcbf29ce484222325;
-        for i in 0..n {
-            h = (h ^ (unsafe p[i]) as u64).wrapping_mul(0x100000001b3);
-        }
-        return h;
+    /// The bytes and terminator `str::hash_into` feeds, so an equal `str` and `String` hash alike.
+    pub fn hash_into<H: Hasher>(self: &String<A>, h: &mut H) {
+        self.as_str().hash_into(h);
     }
 }
 

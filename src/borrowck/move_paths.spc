@@ -29,10 +29,14 @@ pub struct MoveForest {
     // one-bit/4-byte rows instead of pulling a 32-byte MovePath record per event.
     pub leaf: Vector<u64>, // bit per path: no tracked children
     pub parent: Vector<u32>, // per path: parent id (MP_NONE for a root)
+    // Bit per path: every member of its struct or tuple has a tracked child, so the path holds no
+    // storage of its own. Zero after `build_into`; `Owner::mark_covered` sets it.
+    pub covered: Vector<u64>,
 }
 
-// Field identity lives in `sub` (the field decl node; `data` is IR_NONE on member places), variant
-// and index identity in `data`. Pack both under the kind tag.
+// Named field identity lives in `sub` (the field decl node; `ir::field_data` drops an index some
+// places also carry), positional field, variant and index identity in `data`. Pack both under the
+// kind tag.
 const fn elem_key(kind: u8, data: u32, sub: u32) u64 {
     return kind as u64 << 56 | (data as u64 & 0xFFFFFF) << 32 | sub as u64;
 }
@@ -47,6 +51,7 @@ extend MoveForest {
             place_cut: Vector::<u32>::new(),
             leaf: Vector::<u64>::new(),
             parent: Vector::<u32>::new(),
+            covered: Vector::<u64>::new(),
         };
     }
 
@@ -89,7 +94,9 @@ extend MoveForest {
             let mut cut = MP_NONE;
             for i in 0..pl.proj_len {
                 let pj = *b.projections.at((pl.proj_start + i) as usize);
-                if pj.kind == ir::PJ_FIELD || pj.kind == ir::PJ_DOWNCAST {
+                if pj.kind == ir::PJ_FIELD {
+                    cur = f.child(cur, elem_key(pj.kind, ir::field_data(&pj), pj.sub), pj.ty, pl.base);
+                } else if pj.kind == ir::PJ_DOWNCAST {
                     cur = f.child(cur, elem_key(pj.kind, pj.data, pj.sub), pj.ty, pl.base);
                 } else {
                     cut = cur;
@@ -103,7 +110,9 @@ extend MoveForest {
         // The tree is final here, so the dense mirrors are filled in one pass.
         f.leaf.truncate(0);
         f.parent.truncate(0);
+        f.covered.truncate(0);
         f.leaf.resize_default((f.paths.len() + 63) / 64);
+        f.covered.resize_default((f.paths.len() + 63) / 64);
         for p in 0..f.paths.len() {
             let mp = f.paths.at(p);
             f.parent.push(mp.parent);
@@ -166,7 +175,7 @@ extend MoveForest {
 
     /// Heap bytes the forest keeps across bodies.
     pub const fn scratch_bytes(self: &Self) u64 {
-        return (self.paths.capacity() * sizeof(MovePath) + (self.local_root.capacity() + self.place_path.capacity() + self.place_cut.capacity() + self.parent.capacity()) * 4 + self.leaf.capacity() * 8) as u64;
+        return (self.paths.capacity() * sizeof(MovePath) + (self.local_root.capacity() + self.place_path.capacity() + self.place_cut.capacity() + self.parent.capacity()) * 4 + (self.leaf.capacity() + self.covered.capacity()) * 8) as u64;
     }
 
     /// True when `p` tracks no sub-places (its subtree is itself); a dense-bit read, replay-hot.

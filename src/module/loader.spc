@@ -21,6 +21,7 @@ import ir::recursion as recur;
 import utils::persist as *;
 import driver::util as dutil;
 import emit::rt_h as rth;
+import utils::errors as errs;
 
 /// Number of nominal builtin types; sizes Package.builtin_decls. Pinned to BuiltinType::BT_COUNT.
 pub const BT_COUNT_N: usize = BuiltinType::BT_COUNT as usize;
@@ -669,7 +670,7 @@ extend SymTab {
     /// The SymbolId already interned for `name`, or SYM_NONE. Byte-exact.
     @always_inline
     pub fn find(self: &Self, name: str) SymbolId {
-        return switch self.index.get(&name.hash()) {
+        return switch self.index.get(&fnv(name)) {
             Some(h) => {
                 let mut s = *h;
                 while s != SYM_NONE && !self.names[s as usize].eq_str(name) {
@@ -683,7 +684,7 @@ extend SymTab {
 
     /// Intern `name`, returning its dense SymbolId (existing entries are found byte-exact).
     pub fn intern(self: &mut Self, name: str) SymbolId {
-        let h = name.hash();
+        let h = fnv(name);
         let head = switch self.index.get(&h) {
             Some(v) => *v,
             None => SYM_NONE,
@@ -1347,7 +1348,7 @@ pub fn join2(a: str, b: str) String {
 extend DirCache {
     // Index of `dir` in the cache, scanning (opendir/readdir) it once on first request.
     fn index_of(self: &mut Self, dir: str) usize {
-        let h = dir.hash();
+        let h = fnv(dir);
         let head = switch self.heads.get(&h) {
             Some(i) => *i,
             None => SYM_NONE,
@@ -1379,7 +1380,7 @@ extend DirCache {
         let mut d = DirCache {};
         for j in 0..n {
             let i = ix[j] as usize;
-            let h = self.dirs[i].as_str().hash();
+            let h = fnv(self.dirs[i].as_str());
             d.next.push(
                 switch d.heads.get(&h) {
                     Some(v) => *v,
@@ -1665,6 +1666,7 @@ pub struct PUnit {
     pub resolved: bool, // `file` is what resolve_import_file gives for `path`
     pub child_paths: Vector<String>,
     pub child_files: Vector<String>,
+    pub child_offs: Vector<u32>, // where each import is written (IMPORT_OFF_NONE: a keyword's dependency)
     pub log: String, // the errors its imports gave (`std_shadowed`), printed when it gets its id
     pub next: u32, // the previous unit whose path hashes alike, or SYM_NONE
 }
@@ -1679,7 +1681,7 @@ pub struct PUnits {
 extend PUnits {
     // Append the unit for `path`, read from `file`; `resolved` as PUnit.resolved.
     fn push(self: &mut Self, path: str, file: str, resolved: bool) {
-        let h = path.hash();
+        let h = fnv(path);
         let next = switch self.heads.get(&h) {
             Some(u) => *u,
             None => SYM_NONE,
@@ -1698,6 +1700,7 @@ extend PUnits {
                     resolved: resolved,
                     child_paths: Vector::<String>::new(),
                     child_files: Vector::<String>::new(),
+                    child_offs: Vector::<u32>::new(),
                     log: String::new(),
                     next: next,
                 },
@@ -1707,7 +1710,7 @@ extend PUnits {
 
     // The index of the unit for `path`, or `units.len()`.
     fn find(self: &Self, path: str) usize {
-        let mut u = switch self.heads.get(&path.hash()) {
+        let mut u = switch self.heads.get(&fnv(path)) {
             Some(h) => *h,
             None => SYM_NONE,
         };
@@ -1733,9 +1736,15 @@ struct PDone {
 }
 
 // One module on the serial loader's depth-first stack: its unloaded imports and the next to load.
+// The offset of an import a keyword implies (`launch`, `select`, `parallel for`, `@blocking`): it is
+// written nowhere.
+const IMPORT_OFF_NONE: u32 = 0xFFFFFFFF;
+
 struct LoadFrame {
+    pub owner: i32, // the importing module
     pub paths: Vector<String>,
     pub files: Vector<String>,
+    pub offs: Vector<u32>, // where each import is written (IMPORT_OFF_NONE: a keyword's dependency)
     pub next: usize,
 }
 
@@ -1870,7 +1879,21 @@ pub fn package_load_prelude(
     overlay_files: Vector<String>,
     overlay_texts: Vector<String>,
 ) Package {
+    return package_load_prelude_as(root_dir, alt_dir, std_dir, target, false, overlay_files, overlay_texts);
+}
+
+/// `package_load_prelude` for a test build when `test_build` (the TEST build constant).
+pub fn package_load_prelude_as(
+    root_dir: str,
+    alt_dir: str,
+    std_dir: str,
+    target: i32,
+    test_build: bool,
+    overlay_files: Vector<String>,
+    overlay_texts: Vector<String>,
+) Package {
     let mut p = package_base(root_dir, alt_dir, std_dir, overlay_files, overlay_texts);
+    p.test_build = test_build;
     p.load_prelude(std_dir, target, false);
     p.seed_core();
     p.bind_types();
@@ -1994,7 +2017,7 @@ fn bc_scan_names(src: str, lo: u32, hi: u32, out: &mut Vector<u64>) {
             i += 1;
         }
         if c < b'0' || c > b'9' {
-            out.push(src.slice(st, i).hash());
+            out.push(fnv(src.slice(st, i)));
         }
     }
 }
@@ -3754,7 +3777,7 @@ extend Package {
                 hint = d;
                 if d != CO_NONE {
                     s.r_decl.push(d);
-                    s.r_tgt.push(CO_TGT_OP | agg_op_name(a, n).hash() & 0xFFFFFFFFu64);
+                    s.r_tgt.push(CO_TGT_OP | fnv(agg_op_name(a, n)) & 0xFFFFFFFFu64);
                     s.r_site.push(CO_NONE);
                     s.r_chk.push(0);
                 }
@@ -4275,7 +4298,7 @@ extend Package {
         }
         // Dispatch: an interface method reaches every conformance method of its name, a checked
         // entry (the method's call sites check the conformance's needs, merged below).
-        let free_h = "free".hash() & 0xFFFFFFFFu64;
+        let free_h = fnv("free") & 0xFFFFFFFFu64;
         let mut frees = Vector::<u32>::new();
         for i in 0..imp.len() {
             if imp[i] >> 32 == free_h {
@@ -4700,7 +4723,7 @@ extend Package {
                     if a.at_const(f).kind != NodeKind::NODE_FUNCTION {
                         continue;
                     }
-                    let e = (fn_name(a, src, f).hash() & 0xFFFFFFFFu64) << 32 | defs.len() as u64;
+                    let e = (fnv(fn_name(a, src, f)) & 0xFFFFFFFFu64) << 32 | defs.len() as u64;
                     defs.push(m as u64 << 32 | f as u64);
                     if conf {
                         imp.push(e);
@@ -4978,7 +5001,7 @@ extend Package {
 
     /// Find a module by its `::`-joined path; returns its ModuleId, or -1 if absent.
     pub fn find(self: &Self, path: str) i32 {
-        let mut m = switch self.mod_index.get(&path.hash()) {
+        let mut m = switch self.mod_index.get(&fnv(path)) {
             Some(h) => *h,
             None => SYM_NONE,
         };
@@ -5054,7 +5077,7 @@ extend Package {
         has_ast: bool,
     ) i32 {
         let id = self.modules.len() as i32;
-        let h = path.as_str().hash();
+        let h = fnv(path.as_str());
         self.mod_chain.push(
             switch self.mod_index.get(&h) {
                 Some(v) => *v,
@@ -5271,11 +5294,27 @@ extend Package {
     // loading pushes to self.modules, which may realloc and move this module's by-value Ast.
     fn import_frame(self: &mut Self, id: i32, target: i32) LoadFrame {
         let mut dc = replace(&mut self.dir_cache, DirCache {});
-        let mut f = LoadFrame { paths: Vector::<String>::new(), files: Vector::<String>::new(), next: 0 };
+        let mut f = LoadFrame {
+            owner: id,
+            paths: Vector::<String>::new(),
+            files: Vector::<String>::new(),
+            offs: Vector::<u32>::new(),
+            next: 0,
+        };
         let ap = (&self.modules.at(id as usize).ast) as *const Ast;
         let src = self.modules.at(id as usize).source.as_str();
         let mut log = String::new();
-        self.collect_imports(unsafe &*ap, src, &mut dc, &PUnits {}, target, &mut f.paths, &mut f.files, &mut log);
+        self.collect_imports(
+            unsafe &*ap,
+            src,
+            &mut dc,
+            &PUnits {},
+            target,
+            &mut f.paths,
+            &mut f.files,
+            &mut f.offs,
+            &mut log,
+        );
         self.dir_cache = dc;
         self.print_log(&log);
         return f;
@@ -5308,6 +5347,7 @@ extend Package {
         target: i32,
         child_paths: &mut Vector<String>,
         child_files: &mut Vector<String>,
+        child_offs: &mut Vector<u32>,
         log: &mut String,
     ) {
         let root_dir = self.root_dir.as_str();
@@ -5345,6 +5385,7 @@ extend Package {
                     child_files.push(resolve_import_file(dc, root_dir, alt_root, std_root, a, src, parts));
                 }
                 child_paths.push(cp);
+                child_offs.push(n.span.start);
             }
         }
         // Sugar-keyword dependency: the `launch` statement lowers to std::parallel::runtime::submit, so
@@ -5357,6 +5398,7 @@ extend Package {
                 rf.push_str("/std/parallel/runtime.spc");
                 child_paths.push(String::from_str("std::parallel::runtime"));
                 child_files.push(rf);
+                child_offs.push(IMPORT_OFF_NONE);
             }
             // Same for `select`, which lowers to std::parallel::selector's `sugar_*` shims.
             if (a.sugar_marks & SUGAR_SELECT) != 0 {
@@ -5364,6 +5406,7 @@ extend Package {
                 sf.push_str("/std/parallel/selector.spc");
                 child_paths.push(String::from_str("std::parallel::selector"));
                 child_files.push(sf);
+                child_offs.push(IMPORT_OFF_NONE);
             }
             // Same for `parallel for`, which lowers to std::parallel::data's `range`.
             if (a.sugar_marks & SUGAR_PARFOR) != 0 {
@@ -5371,6 +5414,7 @@ extend Package {
                 df.push_str("/std/parallel/data.spc");
                 child_paths.push(String::from_str("std::parallel::data"));
                 child_files.push(df);
+                child_offs.push(IMPORT_OFF_NONE);
             }
             // Same bargain for `@blocking`: a call to one of those functions is emitted as a wrapper
             // that hands the work to the blocking pool, so that module has to be linked in, but only
@@ -5387,6 +5431,7 @@ extend Package {
                 bf.push_str("/std/parallel/blocking.spc");
                 child_paths.push(String::from_str("std::parallel::blocking"));
                 child_files.push(bf);
+                child_offs.push(IMPORT_OFF_NONE);
             }
         }
     }
@@ -5397,7 +5442,7 @@ extend Package {
         if unsafe G_LOAD_JOBS != 1 && self.overlay_files.len() == 0 {
             return self.load_module_par(mod_path, file_path, bootstrap_tags, target);
         }
-        return self.load_module_serial(mod_path, file_path, bootstrap_tags, target);
+        return self.load_module_serial(mod_path, file_path, -1, IMPORT_OFF_NONE, bootstrap_tags, target);
     }
 
     // Speculative wave-parallel subtree load: parse tasks fan out per wave; the coordinator
@@ -5468,8 +5513,19 @@ extend Package {
                 let sp2 = us.units.at(k).source.as_str();
                 let mut all_paths = Vector::<String>::new();
                 let mut all_files = Vector::<String>::new();
+                let mut all_offs = Vector::<u32>::new();
                 let mut log = String::new();
-                self.collect_imports(unsafe &*ap, sp2, &mut dc, us, target, &mut all_paths, &mut all_files, &mut log);
+                self.collect_imports(
+                    unsafe &*ap,
+                    sp2,
+                    &mut dc,
+                    us,
+                    target,
+                    &mut all_paths,
+                    &mut all_files,
+                    &mut all_offs,
+                    &mut log,
+                );
                 us.units.index_mut(k).log = log;
                 for c in 0..all_paths.len() {
                     let cp = all_paths[c].as_str();
@@ -5479,6 +5535,7 @@ extend Package {
                     let seen = us.find(cp) < us.units.len();
                     us.units.index_mut(k).child_paths.push(String::from_str(cp));
                     us.units.index_mut(k).child_files.push(String::from_str(all_files[c].as_str()));
+                    us.units.index_mut(k).child_offs.push(all_offs[c]);
                     if !seen {
                         us.push(cp, all_files[c].as_str(), true);
                     }
@@ -5496,12 +5553,15 @@ extend Package {
     // each unit's source/ast on first visit (later visits of the same path are find() hits).
     fn par_replay(self: &mut Self, us: &mut PUnits, r: usize, bootstrap_tags: bool, target: i32) i32 {
         let mut expand = false;
-        let root = self.par_visit(us, r, bootstrap_tags, target, &mut expand);
+        let root = self.par_visit(us, r, -1, IMPORT_OFF_NONE, bootstrap_tags, target, &mut expand);
         // (unit << 32 | next import) pairs: an explicit stack, bounded by the unit count, so a long import
         // chain cannot exhaust the call stack.
+        // `ids`: the module id of each stack entry's unit, the importer a child's read failure names.
         let mut stack = Vector::<u64>::new();
+        let mut ids = Vector::<i32>::new();
         if expand {
             stack.push(r as u64 << 32);
+            ids.push(root);
         }
         while stack.len() != 0 {
             let top = stack.len() - 1;
@@ -5509,6 +5569,7 @@ extend Package {
             let c = (stack[top] & 0xFFFFFFFFu64) as usize;
             if c == us.units.at(ui).child_paths.len() {
                 let _ = stack.pop();
+                let _ = ids.pop();
                 continue;
             }
             stack.set(top, stack[top] + 1);
@@ -5520,19 +5581,30 @@ extend Package {
             // The discovery gave every recorded import its own unit.
             let ci = us.find(cp);
             assert(ci < us.units.len());
-            let _ = self.par_visit(us, ci, bootstrap_tags, target, &mut expand);
+            let off = us.units.at(ui).child_offs[c];
+            let id = self.par_visit(us, ci, ids[top], off, bootstrap_tags, target, &mut expand);
             if expand {
                 stack.push(ci as u64 << 32);
+                ids.push(id);
             }
         }
         return root;
     }
 
     // Give unit `ui` its module id: a loaded path keeps its id, a unit that failed to read or parse goes
-    // through the serial loader (which prints its diagnostics and loads its imports), and a parsed unit
-    // is added and prints its import errors. `expand` reports the last case: its imports are the replay's
-    // to visit.
-    fn par_visit(self: &mut Self, us: &mut PUnits, ui: usize, bootstrap_tags: bool, target: i32, expand: &mut bool) i32 {
+    // through the serial loader (which prints its diagnostics, at the import `from` writes at `off`, and
+    // loads its imports), and a parsed unit is added and prints its import errors. `expand` reports the
+    // last case: its imports are the replay's to visit.
+    fn par_visit(
+        self: &mut Self,
+        us: &mut PUnits,
+        ui: usize,
+        from: i32,
+        off: u32,
+        bootstrap_tags: bool,
+        target: i32,
+        expand: &mut bool,
+    ) i32 {
         *expand = false;
         let ex = self.find_file(us.units.at(ui).path.as_str(), us.units.at(ui).file.as_str());
         if ex >= 0 {
@@ -5541,7 +5613,7 @@ extend Package {
         if !us.units.at(ui).ok {
             let pth = String::from_str(us.units.at(ui).path.as_str());
             let fl = String::from_str(us.units.at(ui).file.as_str());
-            return self.load_module_serial(pth.as_str(), fl.as_str(), bootstrap_tags, target);
+            return self.load_module_serial(pth.as_str(), fl.as_str(), from, off, bootstrap_tags, target);
         }
         let u = us.units.index_mut(ui).deref_mut();
         let id = self.add_module(
@@ -5563,13 +5635,22 @@ extend Package {
     // Load `mod_path` and its import closure depth-first. A module gets its id before its imports, which
     // load in declaration order; a module already loaded (an import cycle) keeps its id: modules are
     // parsed whole before any resolution, so mutual imports need no special handling. The stack is
-    // explicit, bounded by the module count, so a long import chain cannot exhaust the call stack.
-    fn load_module_serial(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool, target: i32) i32 {
+    // explicit, bounded by the module count, so a long import chain cannot exhaust the call stack. `from`
+    // and `off` name the import that asks for `mod_path` (-1: none), for a read failure's location.
+    fn load_module_serial(
+        self: &mut Self,
+        mod_path: str,
+        file_path: str,
+        from: i32,
+        off: u32,
+        bootstrap_tags: bool,
+        target: i32,
+    ) i32 {
         let existing = self.find_file(mod_path, file_path);
         if existing >= 0 {
             return existing;
         }
-        let root = self.parse_module(mod_path, file_path, bootstrap_tags);
+        let root = self.parse_module(mod_path, file_path, from, off, bootstrap_tags);
         if root < 0 || !self.modules[root as usize].has_ast {
             return root;
         }
@@ -5585,6 +5666,8 @@ extend Package {
             stack.index_mut(top).next = k + 1;
             let cp = replace(stack.index_mut(top).paths.index_mut(k), String::new());
             let cf = replace(stack.index_mut(top).files.index_mut(k), String::new());
+            let from = stack.at(top).owner;
+            let off = stack.at(top).offs[k];
             if self.find_file(cp.as_str(), cf.as_str()) >= 0 {
                 continue;
             }
@@ -5594,7 +5677,7 @@ extend Package {
                 let _ = self.load_module_par(cp.as_str(), cf.as_str(), bootstrap_tags, target);
                 continue;
             }
-            let id = self.parse_module(cp.as_str(), cf.as_str(), bootstrap_tags);
+            let id = self.parse_module(cp.as_str(), cf.as_str(), from, off, bootstrap_tags);
             if id >= 0 && self.modules[id as usize].has_ast {
                 stack.push(self.import_frame(id, target));
             }
@@ -5602,9 +5685,10 @@ extend Package {
         return root;
     }
 
-    // Read, parse and add one module (not its imports). -1 when the file cannot be read; a module that
-    // fails to parse is added without an Ast. Either failure clears `ok`.
-    fn parse_module(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool) i32 {
+    // Read, parse and add one module (not its imports). -1 when the file cannot be read, reported at the
+    // import module `from` writes at `off` (`file:line: `, or `file: ` for a keyword's dependency; none
+    // when `from` is -1); a module that fails to parse is added without an Ast. Either failure clears `ok`.
+    fn parse_module(self: &mut Self, mod_path: str, file_path: str, from: i32, off: u32, bootstrap_tags: bool) i32 {
         let mut source = String::new();
         let mut mt: i64 = 0;
         let ovi = self.overlay_index(file_path);
@@ -5621,14 +5705,17 @@ extend Package {
                     source = s;
                 },
                 None => {
-                    unsafe stdio::fprintf(
-                        stdio::stderr(),
-                        "error: cannot open module '%.*s' (%.*s)\n".ptr() as *const char,
-                        mod_path.len() as i32,
-                        mod_path.ptr(),
-                        file_path.len() as i32,
-                        file_path.ptr(),
-                    );
+                    let mut msg = String::new();
+                    if from >= 0 {
+                        let m = self.modules.at(from as usize);
+                        msg.push_string(&m.file);
+                        if off != IMPORT_OFF_NONE {
+                            msg.format_into(":{}", errs::line_of(m.source.as_str(), off));
+                        }
+                        msg.push_str(": ");
+                    }
+                    msg.format_into("error: cannot open module '{}' ({})\n", mod_path, file_path);
+                    msg.eprint();
                     self.ok = false;
                     return -1;
                 },

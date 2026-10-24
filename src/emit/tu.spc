@@ -135,7 +135,7 @@ extend TuEmit {
             self.skipped += 1;
             return true;
         }
-        let key = nm.as_str().hash();
+        let key = fnv(nm.as_str());
         let st = switch self.state.get(&key) {
             Some(v) => *v,
             None => 0u64,
@@ -233,7 +233,7 @@ extend TuEmit {
                 let mut nm = String::new();
                 self.mg.closure_sym(y.module, y.as_data.decl, &mut nm);
                 nm.push_str("_env");
-                let key = nm.as_str().hash();
+                let key = fnv(nm.as_str());
                 let st = switch self.state.get(&key) {
                     Some(v) => *v,
                     None => 0u64,
@@ -706,7 +706,7 @@ extend TuEmit {
         if n.as_data.aggregate.is_extern {
             return;
         }
-        let fk = nm.hash();
+        let fk = fnv(nm);
         switch self.fwds.get(&fk) {
             Some(_v) => {
                 return;
@@ -751,7 +751,7 @@ extend TuEmit {
             self.skipped += 1;
             return true;
         }
-        let key = nm.as_str().hash();
+        let key = fnv(nm.as_str());
         let st = switch self.state.get(&key) {
             Some(v) => *v,
             None => 0u64,

@@ -113,7 +113,12 @@ Evidence binds a generic parameter in this order, and all evidence must agree:
 1. Explicit turbofish arguments (`f::<T>(..)`, `X::m::<T>(..)`, `x.m::<T>(..)`), bound to the leading
    parameters in order; a lifetime argument binds none.
 2. The receiver's instance arguments (owner substitution).
-3. Value argument types against declared parameter types, structurally.
+3. Value argument types against declared parameter types, structurally. At a top-level
+   parameter, the conversions a call applies count too: an array argument binds a `[]T`
+   parameter's element, and a reference argument binds a pointer parameter's pointee
+   (`rd(&x)` with `rd<T>(p: *const T)` binds `T` to `x`'s type). A callback argument whose type
+   is the caller's own `fn` bound is evidence for the callee's `fn` bound, and a callee's
+   `where`-clause `fn` bound is read from the callee.
 4. The expected result type.
 5. Declared interface bounds (arguments of a proven conformance): with `T` known, a bound
    `T: I<A>` gives `A` the arguments of the one conformance of `T` to `I` (a type parameter's own
@@ -191,6 +196,8 @@ of this struct literal; give it an expected type or explicit type arguments`.
 
 - An expected function type (from an annotation, a declared parameter, or a generic
   call whose parameter resolved) supplies untyped closure parameters and the result.
+- A block-bodied closure without a written result takes the expected function type's result when
+  that is concrete, else the type of its `return` values.
 - Explicit annotations always win and bind immediately.
 - A closure whose parameter types depend on generic arguments still being solved is
   checked once, after those arguments resolve; it is never re-checked per overload

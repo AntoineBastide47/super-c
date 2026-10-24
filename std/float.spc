@@ -2017,9 +2017,9 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
 }
 
 extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FAMILY> as Hash {
-    /// The encoding's hash: equal encodings, which is what Eq compares, hash alike.
-    pub fn hash(self: &Float<E, F, FAMILY>) u64 {
-        return self.bits.hash();
+    /// The encoding, which is what `Eq` compares, so equal values hash alike.
+    pub fn hash_into<H: Hasher>(self: &Float<E, F, FAMILY>, h: &mut H) {
+        self.bits.hash_into(h);
     }
 }
 

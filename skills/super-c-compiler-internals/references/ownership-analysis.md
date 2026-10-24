@@ -13,7 +13,7 @@ Every analysis input is a Core IR fact of the lowered body or an immutable type 
 
 | Product | Built by | Input |
 |---------|----------|-------|
-| move paths (`MoveForest`, `borrowck/move_paths.spc`) | `build_into(body)` | locals, places, projections (field and downcast chains; a dereference or index cuts) |
+| move paths (`MoveForest`, `borrowck/move_paths.spc`) | `build_into(body)` | locals, places, projections (field and downcast chains; a dereference or index cuts; a named field is one path whether or not its projection carries the index, `ir::field_data`) |
 | control-flow facts (`Cfg`, `borrowck/dataflow.spc`) | `build_into`, `build_preds` on demand | terminators; successors, predecessors, reverse postorder, the acyclic bit |
 | facts (`BodyFacts`, `borrowck/facts.spc`) | `Owner::generate_into(.., loans)` | statements and terminators in order, callee signatures through the package, the ownership oracle over types; loans only when asked |
 | loans (`Solver`, `borrowck/loans.spc`) | `build_into` | facts, CFG, liveness |

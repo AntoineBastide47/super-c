@@ -405,8 +405,23 @@ than defining a new context. Two layers:
      (`LK_MUT`) when the parameter is `&mut` (or the callee a fn value) and the result grants
      write, as an autoref's is (`implicit_borrow`), else shared: `let d = r.index_mut(0);
      r.len(); *d = 1` conflicts as `(*r).index_mut(0)` does. Loans carry a
-     reference level (`Loan.deep`; subset edges `SD_KEEP`/`SD_DEREF`/`SD_REF`), so a
-     reference's own loans and what its referent holds stay apart. No loan forms on a
+     reference level (`Loan.level`: 0 own, 1 behind one reference, 2 behind two or more, which
+     saturates), so a reference's own loans and what its referents hold stay apart. A subset edge
+     is a table of where it sends levels 0 and 1 (`sd_level`; `SD_KEEP`, `SD_DEREF`,
+     `SD_DEREF2`, `SD_REF`, `SD_SAT`, `SD_KEEP_SAT`), composed exactly by `sd_then`; reads
+     through k references are `sd_sink(k)`, stores through k are `sd_lift(k)`, and an edge
+     whose depth is unknown (a fn value without lifetime classes, an undeclared parameter)
+     saturates, which reproduces the two-level model and stays sound. A by-value argument tied to
+     the result only through tokens behind its references (`Option<&'a K>` tied through `K`) feeds
+     the result by `SD_DEREF`, not by a level-keeping edge, and a store into a `&mut` container
+     follows the same rule (`Gen::own_range`, `own_walk`, `own_ties`, widened by the call's
+     outlives relation): the argument's own references stay out of the result (`tie_depth`,
+     `tie_lift`). A function-type bound (`F: fn() &'a T`) ties through the lifetimes it names
+     outside its own `for<..>` (`fn_type_tokens`). `&x` of a local is an ordinary loan, checked at its storage death and
+     escape, and so is an array's or an owned container's slice view (`RV_SLICE` of an owned
+     container is `borrow_place`): an index into a `[]T`, `[]mut T` or `str` value is a
+     dereference (`Gen::behind`, `ref_steps`), and `Loan.through` marks a loan reached through
+     a deref reborrow or behind a reference or view. No loan forms on a
      place reached through a raw-pointer deref (`behind_raw`). A call-entry claim or a
      two-phase activation conflicts with loans live at the claim's successor point, so
      an argument's borrow carried into the call conflicts and a copied-out value does
@@ -419,7 +434,16 @@ than defining a new context. Two layers:
      local of its own kind moves (`plain_copy`); one stored into a field, a literal member or a
      copied closure capture issues a `LK_MUT` loan on it with `deref` set (`reborrow_store`),
      held by the destination's origin, which a fn-value call passes on to its result. Only a type with an explicit `Free` (itself or a member) reads its stored
-     borrows at destruction (`Owner::observes`); a closure, through the captures it owns. Such a
+     borrows at destruction (`Owner::observes`); a closure, through the captures it owns. A
+     by-reference capture (shared or mutable) also flows the captured place's origin into the
+     closure origin behind the capture's reference, as `&p` does (`Gen::cap_contents`), so a call
+     through the closure value returns what the place holds. A
+     destruction applies only where the local may still hold a value: the walk records it as a
+     `DropUse`, `bc_run_stages` solves moves before liveness when any was recorded, and
+     `MoveFlow::holds_at` decides each (`BodyFacts.drop_use`, else `BodyFacts.dead_free`): a path of
+     the local's subtree that may be initialized and is a leaf or not `MoveForest.covered` (a struct
+     or tuple whose every member has a tracked child, `Owner::mark_covered`), so a local emptied
+     member by member holds nothing. Such a
      closure local gets a drop origin (`BodyFacts.drop_origin`) with its own liveness slot past the
      locals (`drop_slot`, `nlive`): its destruction keeps that origin live, not the closure's own,
      and every flow into the closure value reaches it but the loans and copies of captures the
@@ -445,7 +469,10 @@ than defining a new context. Two layers:
      array viewed as a slice, a `&` operand: the nodes of `Lowerer.ext`, `ExtCx`) is registered in
      the scope around the whole expression (`ext_depth_for`, nested value expressions in arm-value
      position share the outermost one), so its storage ends there; an arm's own locals end with the
-     arm and the loan analysis rejects a value borrowing one. The emitter declares a local at its
+     arm and the loan analysis rejects a value borrowing one. A block in value position is a
+     build-constant `if` or `switch` the early prune (`Package::prune_build_sites`) replaced by its
+     taken arm; it lowers with the arm's extension (`ExtCx` at `ext_depth_for`), so its value's
+     temporaries live as long as under a run-time condition. The emitter declares a local at its
      initializing write only when that block also dominates the storage ends of a borrowed local
      (`compute_fusion`), so the C scope holds every read through the borrow.
    - Stores through a `&mut` argument (a signature tie to the parameter's pointee, or a
@@ -465,7 +492,10 @@ than defining a new context. Two layers:
      of the slot at its level. A read of a parameter's field, or of a slice or array
      parameter's element, takes the declared type's regions (`bc_uni_place`). A body local of
      a struct or tuple type (at most `UNI_MEMBERS_MAX` members, never a union) keeps one state
-     per member (`UniSt.mem`): a member store, an aggregate built from an origin's places and
+     per member (`UniSt.mem`). Each origin and member keeps four words (`UNI_SW`: own level, behind
+     a reference, either, and the regions that may lie behind two or more, so a `SD_DEREF2` edge
+     passes only those on), a parameter three (`UNI_AW`); a lifetime-generic aggregate's
+     arguments, generic bounds, `dyn` and function types count as deep (`UL_DEEP`). A member store, an aggregate built from an origin's places and
      a whole copy between locals of one type pass regions member by member (`bc_uni_pass`), a
      member read passes its member (`bc_uni_read`), and a slot of a struct or tuple type
      takes such a value member by member (`bc_uni_split`, member slots from
@@ -492,7 +522,14 @@ than defining a new context. Two layers:
      endpoints and a `Mutex` to each other (`Gen::ties`, `istores`).
    - A closure body may not flow a parameter's placeholder into `'static`, a capture's
      placeholder or storage, or another parameter's placeholder (`bc_closure_escape`), which also
-     records per parameter the captures it reaches (`Owner::cap_reach`). A capture the body writes
+     records per parameter the captures it reaches (`Owner::cap_reach`). It also records whether the
+     closure's results hold only what lies behind its by-reference captures (`Owner::res_deep`,
+     `bc_closure_result`): no origin reaching a return slot is a by-value capture's, and no loan
+     reaching one borrows a capture's own storage. A call through a known closure value tied only
+     by a function-type bound (a type parameter with only function-type bounds that the return
+     does not name) then takes what lies behind the value's references, so the capture's own
+     storage stays out of the result (`Gen::closure_result_tie`); a closure not known at the call
+     (`dyn fn`, a function pointer, a parameter) keeps the whole value. A capture the body writes
      into (taken by `&mut`, or held by value: the closure value keeps it across calls) maps to its
      placeholder (`Gen::cap_ph`), so a reference to the body's own copy of a capture cannot be
      stored into one. A closure whose body names a lifetime of the
@@ -592,10 +629,11 @@ Rules for a new borrow or region rule:
   source and were reverted. The fixes that held changed the model (where a borrow is
   rooted, reborrow versus fresh borrow), not the engine.
 - `str` is a long-lived field type (`self.source: str`). A rule that pins every `str`
-  producer over-rejects. A borrow-carrying result pins its receiver only when the receiver
-  carries no borrow (`String::as_str` pins the `String`); a borrow-carrying receiver
+  producer over-rejects. A borrow-carrying result of a method pins its receiver only when the
+  receiver carries no borrow (`String::as_str` pins the `String`); a borrow-carrying receiver
   passes its region through (the result-pin step in `src/borrowck/borrowck.spc`,
-  `pin_view` in `src/borrowck/facts.spc`).
+  `pin_view` in `src/borrowck/facts.spc`). Structural slicing (`RV_SLICE`) of an owned
+  container always borrows the container.
 - A point-set (MIR-style) region engine was measured: about 15 NLL divergence cases, all
   accepted already. Do not build one without a concrete over-rejection.
 
@@ -847,8 +885,11 @@ Full monomorphization is the only generic backend.
 - **Generic interface methods:** a call terminator whose callee is an interface method with its own
   generic parameters carries them as its trailing type arguments. `InstGraph::note_iface_call`
   resolves the receiver's conformance under the frame and records the implementation's method
-  (`IG_FN`, or `IG_METHOD` with the receiver's arguments first) or walks the inherited default body
-  with `Self`, the conformance's arguments and the method's bound; the emitter
+  (`IG_FN`, or `IG_METHOD` with the receiver's arguments first), or, for an inherited default
+  body, records an `IG_METHOD` record of the interface method keyed by `Self`, the conformance's
+  interface arguments, then the method's own arguments (`bind_default` reads that layout for
+  `expand` and `assert_binds`), so the default is walked, its steps checked and its static_asserts
+  decided as for any instance, also when only a bound reaches it; the emitter
   (`iface_target_sym`, `IfTargs`) spells the same instance (`C__conv__u8`) and demands it
   (`demand_impl_targs`); the evaluator binds them in `call_in`. The demand's bindings of the method's
   own parameters read the call's arguments under the caller's env (`bind_targs`' `lim`), below the

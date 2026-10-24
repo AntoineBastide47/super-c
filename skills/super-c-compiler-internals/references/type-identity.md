@@ -73,7 +73,8 @@ lowers once more past the type memos with `st_capture`, then `lin_subst_form` bi
 arguments; an argument form is a step of its own). Every place an instantiation binds values
 A constant index into a symbolic-length array is a step too (`idx`: `lin` the length, `div` the
 index, which must be below it). The graph checks the steps of an interface default body per
-implementing instance under the conformance's frame (`walk_defaults`: the extend's parameters
+implementing instance under the conformance's frame, and a called generic default's record runs
+`check_steps` too (`walk_defaults`: the extend's parameters
 through `bind_ext_keys`, `Self`, the interface's parameters from the conformance's arguments). An
 extend binds its parameters through `xarg_of` (`src/ast/ast.spc`) wherever a stage maps an instance
 of its target to them (checker `tc_ext_args`, graph `bind_ext_keys`, emitter `bind_recv`, lowering

@@ -102,7 +102,7 @@ extend NativePath {
         if self.heap.len() != 0 {
             return self.heap.as_ptr() as *const char;
         }
-        return (&self.inline[0]) as *const char;
+        return ((&self.inline[0]) as *const u8) as *const char;
     }
     /// The NUL-terminated UTF-16 units, valid while the path lives.
     @platform(windows)

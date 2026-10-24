@@ -624,7 +624,8 @@ fn neighbours_parts_and_scalbn() {
     let back = Float::<11, 52>::from_parts(sg, eb, &fr);
     assert(same64(back.to_f64(), v.to_f64()));
     // Hash follows Eq: equal encodings hash alike.
-    assert_eq(Float::<11, 52>::neg_zero().hash(), Float::<11, 52>::neg_zero().hash());
+    let (z1, z2) = (Float::<11, 52>::neg_zero(), Float::<11, 52>::neg_zero());
+    assert_eq(hash(&z1), hash(&z2));
     // Past the exponent span scalbn still overflows or underflows (a wide exponent field included).
     let wide = Float::<20, 10>::min_positive();
     assert(wide.scalbn(1100000).is_infinite() && wide.scalbn(0 - 10).is_zero());

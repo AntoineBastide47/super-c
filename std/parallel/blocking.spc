@@ -289,7 +289,7 @@ fn unlock(p: *mut Pool) {
 // The queue head is read by the spinner without the lock: every write is an atomic store (a plain
 // store on every target, and a defined one against that read).
 fn head_store(p: *mut Pool, j: *mut Job) {
-    unsafe atomic::store_usize((&mut unsafe (*p).head) as *mut usize, j as usize, 0);
+    unsafe atomic::store_usize(((&mut unsafe (*p).head) as *mut *mut Job) as *mut usize, j as usize, 0);
 }
 
 fn on_pool_thread() bool {
@@ -604,7 +604,7 @@ fn spin_for_work(p: *mut Pool) bool {
     let mut spins: i32 = 0;
     let mut found = false;
     while spins < budget {
-        if unsafe atomic::load_usize((&mut unsafe (*p).head) as *mut usize, 1) != 0 {
+        if unsafe atomic::load_usize(((&mut unsafe (*p).head) as *mut *mut Job) as *mut usize, 1) != 0 {
             found = true;
             break;
         }

@@ -134,7 +134,7 @@ fn dir_setup(name: str) bool {
     }
     unsafe {
         G_DIR_BUF.copy_from(d.as_str().ptr(), d.len());
-        G_DIR = str::from_raw((&G_DIR_BUF[0]) as *const u8, d.len());
+        G_DIR = str::from_raw(((&G_DIR_BUF[0]) as *const char) as *const u8, d.len());
     }
     return true;
 }

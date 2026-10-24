@@ -125,9 +125,8 @@ extend<T: Eq, A: Allocator> Box<T, A> as Eq {
 }
 
 extend<T: Hash, A: Allocator> Box<T, A> as Hash {
-    pub const fn hash(self: &Box<T, A>) u64 {
-        let v = self.get();
-        return v.hash();
+    pub fn hash_into<H: Hasher>(self: &Box<T, A>, h: &mut H) {
+        self.get().hash_into(h);
     }
 }
 

@@ -2035,7 +2035,7 @@ fn stamp_dir_hash(dir: str) u64 {
     // Bounded by the entries of the directory; a read error ends the listing, as the end does.
     while let Some(Ok(e)) = d.next() {
         if e.name.ends_with(".spc") {
-            h = h.wrapping_add(e.name.hash());
+            h = h.wrapping_add(fnv(e.name));
         }
     }
     return h;
@@ -2159,7 +2159,7 @@ fn stamp_write(
             let ents = dc.entries.at(i);
             for k in 0..ents.len() {
                 if ents.at(k).as_str().ends_with(".spc") {
-                    h = h.wrapping_add(ents.at(k).as_str().hash());
+                    h = h.wrapping_add(fnv(ents.at(k).as_str()));
                 }
             }
         }

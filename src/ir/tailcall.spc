@@ -645,8 +645,9 @@ fn taint(b: &ir::CoreBody, ow: &mut bfx::Owner) Taint {
             if src == ir::IR_NONE {
                 continue;
             }
-            if rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_ASM && tn.raw == ir::IR_NONE {
-                // Inline assembly can keep any address it is given.
+            if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_ASM || rv.c == ir::IN_VOLATILE_STORE) && tn.raw == ir::IR_NONE {
+                // Inline assembly can keep any address it is given; a volatile store keeps the one
+                // it stores.
                 tn.raw = src;
                 grew = true;
             }

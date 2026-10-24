@@ -76,7 +76,7 @@ pub unsafe fn dispatch<F: FnPtr, const K: usize>(d: *mut Dispatch, table: [(cpu:
     // A copy the first call reads: the argument's address never escapes, so the steady state does not
     // write it.
     let rows = table;
-    return dispatch_first(d, (&rows) as *const cpu::Feature, K, fallback as usize) as F;
+    return dispatch_first(d, ((&rows) as *const [(cpu::Feature, F); K]) as *const cpu::Feature, K, fallback as usize) as F;
 }
 
 /// The first call of `dispatch` on `d` over the `k` rows of its table at `rows`, each a feature and a

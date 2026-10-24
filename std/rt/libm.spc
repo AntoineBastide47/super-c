@@ -176,15 +176,15 @@ const fn flt(i: u32) f32 {
 }
 
 // The high and low words of a double, and a double from them (musl's EXTRACT_WORDS and INSERT_WORDS).
-fn hi(x: f64) u32 {
+const fn hi(x: f64) u32 {
     return (bits(x) >> 32) as u32;
 }
 
-fn lo(x: f64) u32 {
+const fn lo(x: f64) u32 {
     return bits(x) as u32;
 }
 
-fn words(h: u32, l: u32) f64 {
+const fn words(h: u32, l: u32) f64 {
     return dbl(h as u64 << 32 | l as u64);
 }
 
@@ -215,16 +215,16 @@ fn fabsf(x: f32) f32 {
 const INF: f64 = dbl(0x7ff0000000000000);
 const INFF: f32 = flt(0x7f800000);
 
-fn isnan(x: f64) bool {
+const fn isnan(x: f64) bool {
     return x != x;
 }
 
-fn isnanf(x: f32) bool {
+const fn isnanf(x: f32) bool {
     return x != x;
 }
 
 // musl's `__math_*`: the results of the special cases, computed so they are correctly signed.
-fn xflow(sign: u32, y: f64) f64 {
+const fn xflow(sign: u32, y: f64) f64 {
     return if sign != 0 {
         -y;
     } else {
@@ -232,19 +232,19 @@ fn xflow(sign: u32, y: f64) f64 {
     } * y;
 }
 
-fn oflow(sign: u32) f64 {
+const fn oflow(sign: u32) f64 {
     return xflow(sign, 0x1p769);
 }
 
-fn uflow(sign: u32) f64 {
+const fn uflow(sign: u32) f64 {
     return xflow(sign, 0x1p-767);
 }
 
-fn invalid(x: f64) f64 {
+const fn invalid(x: f64) f64 {
     return (x - x) / (x - x);
 }
 
-fn divzero(sign: u32) f64 {
+const fn divzero(sign: u32) f64 {
     return if sign != 0 {
         -1.0;
     } else {
@@ -252,7 +252,7 @@ fn divzero(sign: u32) f64 {
     } / 0.0;
 }
 
-fn xflowf(sign: u32, y: f32) f32 {
+const fn xflowf(sign: u32, y: f32) f32 {
     return if sign != 0 {
         -y;
     } else {
@@ -260,19 +260,19 @@ fn xflowf(sign: u32, y: f32) f32 {
     } * y;
 }
 
-fn oflowf(sign: u32) f32 {
+const fn oflowf(sign: u32) f32 {
     return xflowf(sign, 0x1p97f32);
 }
 
-fn uflowf(sign: u32) f32 {
+const fn uflowf(sign: u32) f32 {
     return xflowf(sign, 0x1p-95f32);
 }
 
-fn invalidf(x: f32) f32 {
+const fn invalidf(x: f32) f32 {
     return (x - x) / (x - x);
 }
 
-fn divzerof(sign: u32) f32 {
+const fn divzerof(sign: u32) f32 {
     return if sign != 0 {
         -1.0f32;
     } else {
@@ -287,7 +287,7 @@ const TOINTF: f32 = 1.0f32 / 1.1920929e-7f32;
 
 /// x rounded to the nearest integer, a half away from zero.
 @export("round")
-pub fn round(x0: f64) f64 {
+pub const fn round(x0: f64) f64 {
     let mut x = x0;
     let ui = bits(x);
     let e = (ui >> 52 & 0x7ff) as i32;
@@ -316,7 +316,7 @@ pub fn round(x0: f64) f64 {
 
 /// x rounded to the nearest integer, a half away from zero.
 @export("roundf")
-pub fn roundf(x0: f32) f32 {
+pub const fn roundf(x0: f32) f32 {
     let mut x = x0;
     let ui = bitsf(x);
     let e = (ui >> 23 & 0xff) as i32;
@@ -345,7 +345,7 @@ pub fn roundf(x0: f32) f32 {
 
 /// x - n*y, n the quotient truncated, exactly.
 @export("fmod")
-pub fn fmod(x: f64, y: f64) f64 {
+pub const fn fmod(x: f64, y: f64) f64 {
     let ux = bits(x);
     let mut uy = bits(y);
     let mut ex = (ux >> 52 & 0x7ff) as i32;
@@ -420,7 +420,7 @@ pub fn fmod(x: f64, y: f64) f64 {
 
 /// x - n*y, n the quotient truncated, exactly.
 @export("fmodf")
-pub fn fmodf(x: f32, y: f32) f32 {
+pub const fn fmodf(x: f32, y: f32) f32 {
     let ux = bitsf(x);
     let mut uy = bitsf(y);
     let mut ex = (ux >> 23 & 0xff) as i32;
@@ -492,7 +492,7 @@ pub fn fmodf(x: f32, y: f32) f32 {
 
 /// x - n*y, n the quotient rounded to nearest even; the low bits of n through `quo`.
 @export("remquo")
-pub fn remquo(x0: f64, y0: f64, quo: *mut i32) f64 {
+pub const fn remquo(x0: f64, y0: f64, quo: *mut i32) f64 {
     let mut x = x0;
     let mut y = y0;
     let ux = bits(x);
@@ -593,7 +593,7 @@ pub fn remquo(x0: f64, y0: f64, quo: *mut i32) f64 {
 
 /// x - n*y, n the quotient rounded to nearest even; the low bits of n through `quo`.
 @export("remquof")
-pub fn remquof(x0: f32, y0: f32, quo: *mut i32) f32 {
+pub const fn remquof(x0: f32, y0: f32, quo: *mut i32) f32 {
     let mut x = x0;
     let mut y = y0;
     let ux = bitsf(x);
@@ -694,21 +694,21 @@ pub fn remquof(x0: f32, y0: f32, quo: *mut i32) f32 {
 
 /// x - n*y, n the quotient rounded to nearest even.
 @export("remainder")
-pub fn remainder(x: f64, y: f64) f64 {
+pub const fn remainder(x: f64, y: f64) f64 {
     let mut q: i32 = 0;
     return remquo(x, y, &mut q);
 }
 
 /// x - n*y, n the quotient rounded to nearest even.
 @export("remainderf")
-pub fn remainderf(x: f32, y: f32) f32 {
+pub const fn remainderf(x: f32, y: f32) f32 {
     let mut q: i32 = 0;
     return remquof(x, y, &mut q);
 }
 
 /// The smaller of x and y, a NaN ignored, -0 below +0.
 @export("fmin")
-pub fn fmin(x: f64, y: f64) f64 {
+pub const fn fmin(x: f64, y: f64) f64 {
     if isnan(x) {
         return y;
     }
@@ -732,7 +732,7 @@ pub fn fmin(x: f64, y: f64) f64 {
 
 /// The larger of x and y, a NaN ignored, +0 above -0.
 @export("fmax")
-pub fn fmax(x: f64, y: f64) f64 {
+pub const fn fmax(x: f64, y: f64) f64 {
     if isnan(x) {
         return y;
     }
@@ -756,7 +756,7 @@ pub fn fmax(x: f64, y: f64) f64 {
 
 /// The smaller of x and y, a NaN ignored, -0 below +0.
 @export("fminf")
-pub fn fminf(x: f32, y: f32) f32 {
+pub const fn fminf(x: f32, y: f32) f32 {
     if isnanf(x) {
         return y;
     }
@@ -780,7 +780,7 @@ pub fn fminf(x: f32, y: f32) f32 {
 
 /// The larger of x and y, a NaN ignored, +0 above -0.
 @export("fmaxf")
-pub fn fmaxf(x: f32, y: f32) f32 {
+pub const fn fmaxf(x: f32, y: f32) f32 {
     if isnanf(x) {
         return y;
     }
@@ -804,7 +804,7 @@ pub fn fmaxf(x: f32, y: f32) f32 {
 
 /// x * 2^n, rounded once.
 @export("scalbn")
-pub fn scalbn(x: f64, n0: i32) f64 {
+pub const fn scalbn(x: f64, n0: i32) f64 {
     let mut n = n0;
     let mut y = x;
     if n > 1023 {
@@ -834,7 +834,7 @@ pub fn scalbn(x: f64, n0: i32) f64 {
 
 /// x * 2^n, rounded once.
 @export("scalbnf")
-pub fn scalbnf(x: f32, n0: i32) f32 {
+pub const fn scalbnf(x: f32, n0: i32) f32 {
     let mut n = n0;
     let mut y = x;
     if n > 127 {
@@ -863,13 +863,13 @@ pub fn scalbnf(x: f32, n0: i32) f32 {
 
 /// x * 2^n.
 @export("ldexp")
-pub fn ldexp(x: f64, n: i32) f64 {
+pub const fn ldexp(x: f64, n: i32) f64 {
     return scalbn(x, n);
 }
 
 /// x * 2^n.
 @export("ldexpf")
-pub fn ldexpf(x: f32, n: i32) f32 {
+pub const fn ldexpf(x: f32, n: i32) f32 {
     return scalbnf(x, n);
 }
 
@@ -885,7 +885,7 @@ struct Num {
     pub sign: i32,
 }
 
-fn normalize(x: f64) Num {
+const fn normalize(x: f64) Num {
     let mut ix = bits(x);
     let mut e = (ix >> 52) as i32;
     let sign = e & 0x800;
@@ -907,7 +907,7 @@ fn normalize(x: f64) Num {
 }
 
 // The 128-bit product of x and y.
-fn mul128(hi: &mut u64, lo: &mut u64, x: u64, y: u64) {
+const fn mul128(hi: &mut u64, lo: &mut u64, x: u64, y: u64) {
     let xlo = x & 0xFFFFFFFF;
     let xhi = x >> 32;
     let ylo = y & 0xFFFFFFFF;
@@ -919,13 +919,13 @@ fn mul128(hi: &mut u64, lo: &mut u64, x: u64, y: u64) {
     *hi = t3.wrapping_add(t2 >> 32).wrapping_add((t1 > *lo) as u64);
 }
 
-fn clz64(x: u64) i32 {
+const fn clz64(x: u64) i32 {
     return x.leading_zeros() as i32;
 }
 
 /// x * y + z, rounded once.
 @export("fma")
-pub fn fma(x: f64, y: f64, z: f64) f64 {
+pub const fn fma(x: f64, y: f64, z: f64) f64 {
     let nx = normalize(x);
     let ny = normalize(y);
     let nz = normalize(z);
@@ -1066,7 +1066,7 @@ pub fn fma(x: f64, y: f64, z: f64) f64 {
 /// x * y + z, rounded once: the double product is exact, and a sum that lands exactly between two floats
 /// is corrected toward the true value.
 @export("fmaf")
-pub fn fmaf(x: f32, y: f32, z: f32) f32 {
+pub const fn fmaf(x: f32, y: f32, z: f32) f32 {
     let xy = x as f64 * y as f64;
     let result = xy + z as f64;
     let mut ui = bits(result);
@@ -1387,7 +1387,7 @@ const PIO2_3T: f64 = 8.47842766036889956997e-32;
 
 // The medium-size reduction of `__rem_pio2` (Cody and Waite, with the extra pieces of pi/2 when bits
 // cancel). wasi-libc leaves out upstream musl's correction of n by one.
-fn rem_pio2_medium(x: f64, ix: u32, y: &mut [f64; 2]) i32 {
+const fn rem_pio2_medium(x: f64, ix: u32, y: &mut [f64; 2]) i32 {
     let fn_ = x * INVPIO2 + TOINT_R - TOINT_R;
     let n = fn_ as i32;
     let mut r = x - fn_ * PIO2_1;
@@ -1566,7 +1566,7 @@ const S5: f64 = -2.50507602534068634195e-08;
 const S6: f64 = 1.58969099521155010221e-10;
 
 // sin(x + y) on [-pi/4, pi/4], y the tail of x when `iy` is 1.
-fn k_sin(x: f64, y: f64, iy: i32) f64 {
+const fn k_sin(x: f64, y: f64, iy: i32) f64 {
     let z = x * x;
     let w = z * z;
     let r = S2 + z * (S3 + z * S4) + z * w * (S5 + z * S6);
@@ -1585,7 +1585,7 @@ const C5: f64 = 2.08757232129817482790e-09;
 const C6: f64 = -1.13596475577881948265e-11;
 
 // cos(x + y) on [-pi/4, pi/4].
-fn k_cos(x: f64, y: f64) f64 {
+const fn k_cos(x: f64, y: f64) f64 {
     let z = x * x;
     let mut w = z * z;
     let r = z * (C1 + z * (C2 + z * C3)) + w * w * (C4 + z * (C5 + z * C6));
@@ -1613,7 +1613,7 @@ const PIO4: f64 = 7.85398163397448278999e-01;
 const PIO4LO: f64 = 3.06161699786838301793e-17;
 
 // tan(x + y) on [-pi/4, pi/4], or -1/tan when `odd` is 1.
-fn k_tan(x0: f64, y0: f64, odd: i32) f64 {
+const fn k_tan(x0: f64, y0: f64, odd: i32) f64 {
     let mut x = x0;
     let mut y = y0;
     let hx = hi(x);
@@ -1744,7 +1744,7 @@ const SF2: f64 = 0x111110896efbb2.0p-59;
 const SF3: f64 = -0x1a00f9e2cae774.0p-65;
 const SF4: f64 = 0x16cd878c3b46a7.0p-71;
 
-fn k_sindf(x: f64) f32 {
+const fn k_sindf(x: f64) f32 {
     let z = x * x;
     let w = z * z;
     let r = SF3 + z * SF4;
@@ -1758,7 +1758,7 @@ const CF1: f64 = 0x155553e1053a42.0p-57;
 const CF2: f64 = -0x16c087e80f1e27.0p-62;
 const CF3: f64 = 0x199342e0ee5069.0p-68;
 
-fn k_cosdf(x: f64) f32 {
+const fn k_cosdf(x: f64) f32 {
     let z = x * x;
     let w = z * z;
     let r = CF2 + z * CF3;
@@ -1775,7 +1775,7 @@ const TF: [f64; 6] = [
     0x1362b9bf971bcd.0p-59,
 ];
 
-fn k_tandf(x: f64, odd: i32) f32 {
+const fn k_tandf(x: f64, odd: i32) f32 {
     let z = x * x;
     let mut r = TF[4] + z * TF[5];
     let t = TF[2] + z * TF[3];
@@ -2279,12 +2279,12 @@ const EXP_TAB: [u64; 256] = [
     0x3feff3c22b8f71f1,
 ];
 
-fn top12(x: f64) u32 {
+const fn top12(x: f64) u32 {
     return (bits(x) >> 52) as u32;
 }
 
 // exp(x) in the cases scale * (1 + tmp) overflows or underflows: k is out of the exponent range.
-fn exp_special(tmp: f64, sbits0: u64, ki: u64) f64 {
+const fn exp_special(tmp: f64, sbits0: u64, ki: u64) f64 {
     let mut sbits = sbits0;
     if (ki & 0x80000000) == 0 {
         // k > 0, the exponent of scale might have overflowed by <= 460.
@@ -2310,7 +2310,7 @@ fn exp_special(tmp: f64, sbits0: u64, ki: u64) f64 {
 
 /// e^x.
 @export("exp")
-pub fn exp(x: f64) f64 {
+pub const fn exp(x: f64) f64 {
     let mut abstop = top12(x) & 0x7ff;
     if abstop.wrapping_sub(top12(0x1p-54)) >= top12(512.0) - top12(0x1p-54) {
         if abstop.wrapping_sub(top12(0x1p-54)) >= 0x80000000 {
@@ -2361,7 +2361,7 @@ pub fn exp(x: f64) f64 {
     return scale + scale * tmp;
 }
 
-fn exp2_special(tmp: f64, sbits0: u64, ki: u64) f64 {
+const fn exp2_special(tmp: f64, sbits0: u64, ki: u64) f64 {
     let mut sbits = sbits0;
     if (ki & 0x80000000) == 0 {
         // k > 0, the exponent of scale might have overflowed by 1.
@@ -2384,7 +2384,7 @@ fn exp2_special(tmp: f64, sbits0: u64, ki: u64) f64 {
 
 /// 2^x.
 @export("exp2")
-pub fn exp2(x: f64) f64 {
+pub const fn exp2(x: f64) f64 {
     let mut abstop = top12(x) & 0x7ff;
     if abstop.wrapping_sub(top12(0x1p-54)) >= top12(512.0) - top12(0x1p-54) {
         if abstop.wrapping_sub(top12(0x1p-54)) >= 0x80000000 {
@@ -2976,13 +2976,13 @@ const LOG_TAB2: [f64; 256] = [
     -0x1.47eb780ed6904p-54,
 ];
 
-fn top16(x: f64) u32 {
+const fn top16(x: f64) u32 {
     return (bits(x) >> 48) as u32;
 }
 
 /// The natural logarithm of x.
 @export("log")
-pub fn log(x: f64) f64 {
+pub const fn log(x: f64) f64 {
     let mut ix = bits(x);
     let top = top16(x);
     let lo_b = bits(1.0 - 0x1p-4);
@@ -3335,7 +3335,7 @@ const LOG2_TAB2: [f64; 128] = [
 
 /// The base-2 logarithm of x.
 @export("log2")
-pub fn log2(x: f64) f64 {
+pub const fn log2(x: f64) f64 {
     let mut ix = bits(x);
     let top = top16(x);
     let lo_b = bits(1.0 - 0x1.5b51p-5);
@@ -3934,7 +3934,7 @@ const POW_TAB: [f64; 512] = [
 ];
 
 // log(x) as hi + *tail, for pow: about 68 bits.
-fn pow_log(ix: u64, tail: &mut f64) f64 {
+const fn pow_log(ix: u64, tail: &mut f64) f64 {
     // x = 2^k z; where z is in range [OFF,2*OFF) and exact.
     // The range is split into N subintervals.
     // The ith subinterval contains z and c is near its center.
@@ -4069,7 +4069,7 @@ fn pow_exp(x: f64, xtail: f64, sign_bias: u32) f64 {
 }
 
 // 0 when y is not an integer, 1 when it is odd, 2 when it is even.
-fn checkint(iy: u64) i32 {
+const fn checkint(iy: u64) i32 {
     let e = (iy >> 52 & 0x7ff) as i32;
     if e < 0x3ff {
         return 0;
@@ -4087,7 +4087,7 @@ fn checkint(iy: u64) i32 {
 }
 
 // Whether x (its bits) is zero, an infinity or a NaN.
-fn zeroinfnan(i: u64) bool {
+const fn zeroinfnan(i: u64) bool {
     return (i << 1).wrapping_sub(1) >= (bits(INF) << 1) - 1;
 }
 
@@ -4225,13 +4225,13 @@ const EXP2F_INVLN2_SCALED: f64 = 0x1.71547652b82fep+5;
 const EXP2F_POLY: [f64; 3] = [0x1.c6af84b912394p-5, 0x1.ebfce50fac4f3p-3, 0x1.62e42ff0c52d6p-1];
 const EXP2F_POLY_SCALED: [f64; 3] = [0x1.c6af84b912394p-20, 0x1.ebfce50fac4f3p-13, 0x1.62e42ff0c52d6p-6];
 
-fn top12f(x: f32) u32 {
+const fn top12f(x: f32) u32 {
     return bitsf(x) >> 20;
 }
 
 /// e^x.
 @export("expf")
-pub fn expf(x: f32) f32 {
+pub const fn expf(x: f32) f32 {
     let xd = x as f64;
     let abstop = top12f(x) & 0x7ff;
     if abstop >= top12f(88.0f32) {
@@ -4273,7 +4273,7 @@ pub fn expf(x: f32) f32 {
 
 /// 2^x.
 @export("exp2f")
-pub fn exp2f(x: f32) f32 {
+pub const fn exp2f(x: f32) f32 {
     let xd = x as f64;
     let abstop = top12f(x) & 0x7ff;
     if abstop >= top12f(128.0f32) {
@@ -4348,7 +4348,7 @@ const LOGF_POLY: [f64; 3] = [-0x1.00ea348b88334p-2, 0x1.5575b0be00b6ap-2, -0x1.f
 
 /// The natural logarithm of x.
 @export("logf")
-pub fn logf(x: f32) f32 {
+pub const fn logf(x: f32) f32 {
     let mut ix = bitsf(x);
     if ix.wrapping_sub(0x00800000) >= 0x7f800000 - 0x00800000 {
         // x < 0x1p-126 or inf or nan.
@@ -4426,7 +4426,7 @@ const LOG2F_POLY: [f64; 4] = [-0x1.712b6f70a7e4dp-2, 0x1.ecabf496832e0p-2, -0x1.
 
 /// The base-2 logarithm of x.
 @export("log2f")
-pub fn log2f(x: f32) f32 {
+pub const fn log2f(x: f32) f32 {
     let mut ix = bitsf(x);
     if ix.wrapping_sub(0x00800000) >= 0x7f800000 - 0x00800000 {
         // x < 0x1p-126 or inf or nan.
@@ -4511,7 +4511,7 @@ const POWF_POLY: [f64; 5] = [
 ];
 
 // log2(x), x a normal positive float given by its bits, to about 1.27 ulp of a double.
-fn powf_log2(ix: u32) f64 {
+const fn powf_log2(ix: u32) f64 {
     // x = 2^k z; where z is in range [OFF,2*OFF] and exact.
     // The range is split into N subintervals.
     // The ith subinterval contains z and c is near its center.
@@ -4540,7 +4540,7 @@ fn powf_log2(ix: u32) f64 {
 const SIGN_BIASF: u32 = 1 << 5 + 11;
 
 // 2^xd, negated when `sign_bias` is SIGN_BIASF: the second half of powf.
-fn powf_exp2(xd: f64, sign_bias: u32) f32 {
+const fn powf_exp2(xd: f64, sign_bias: u32) f32 {
     // x = k/N + r with r in [-1/(2N), 1/(2N)]
     let mut kd = xd + EXP2F_SHIFT_SCALED;
     let ki = bits(kd);
@@ -4560,7 +4560,7 @@ fn powf_exp2(xd: f64, sign_bias: u32) f32 {
 }
 
 // 0 when y is not an integer, 1 when it is odd, 2 when it is even.
-fn checkintf(iy: u32) i32 {
+const fn checkintf(iy: u32) i32 {
     let e = (iy >> 23 & 0xff) as i32;
     if e < 0x7f {
         return 0;
@@ -4578,13 +4578,13 @@ fn checkintf(iy: u32) i32 {
 }
 
 // Whether x (its bits) is zero, an infinity or a NaN.
-fn zeroinfnanf(ix: u32) bool {
+const fn zeroinfnanf(ix: u32) bool {
     return (ix << 1).wrapping_sub(1) >= (0x7f800000u32 << 1) - 1;
 }
 
 /// x^y.
 @export("powf")
-pub fn powf(x: f32, y: f32) f32 {
+pub const fn powf(x: f32, y: f32) f32 {
     let mut sign_bias: u32 = 0;
     let mut ix = bitsf(x);
     let iy = bitsf(y);
@@ -4673,7 +4673,7 @@ const QS3: f64 = -6.88283971605453293030e-01;
 const QS4: f64 = 7.70381505559019352791e-02;
 
 // (asin(sqrt(z)) - sqrt(z)) / sqrt(z)^3, a rational approximation.
-fn asin_r(z: f64) f64 {
+const fn asin_r(z: f64) f64 {
     let p = z * (PS0 + z * (PS1 + z * (PS2 + z * (PS3 + z * (PS4 + z * PS5)))));
     let q = 1.0 + z * (QS1 + z * (QS2 + z * (QS3 + z * QS4)));
     return p / q;
@@ -4767,7 +4767,7 @@ const PS1F: f32 = -4.2743422091e-02f32;
 const PS2F: f32 = -8.6563630030e-03f32;
 const QS1F: f32 = -7.0662963390e-01f32;
 
-fn asinf_r(z: f32) f32 {
+const fn asinf_r(z: f32) f32 {
     let p = z * (PS0F + z * (PS1F + z * PS2F));
     let q = 1.0f32 + z * QS1F;
     return p / q;
@@ -5208,7 +5208,7 @@ const EQ5: f64 = -2.01099218183624371326e-07;
 
 /// e^x - 1, accurate for x near 0.
 @export("expm1")
-pub fn expm1(x0: f64) f64 {
+pub const fn expm1(x0: f64) f64 {
     let mut x = x0;
     let hx = (bits(x) >> 32 & 0x7fffffff) as u32;
     let sign = bits(x) >> 63 != 0;
@@ -5310,7 +5310,7 @@ const EQ2F: f32 = 1.5807170421e-3f32; //  0xcf3010.0p-33
 
 /// e^x - 1, accurate for x near 0.
 @export("expm1f")
-pub fn expm1f(x0: f32) f32 {
+pub const fn expm1f(x0: f32) f32 {
     let mut x = x0;
     let hx = bitsf(x) & 0x7fffffff;
     let sign = bitsf(x) >> 31 != 0;
@@ -5414,7 +5414,7 @@ const LG7: f64 = 1.479819860511658591e-01;
 
 /// log(1 + x), accurate for x near 0.
 @export("log1p")
-pub fn log1p(x: f64) f64 {
+pub const fn log1p(x: f64) f64 {
     let hx = hi(x);
     let mut k: i32 = 1;
     let mut c: f64 = 0.0;
@@ -5480,7 +5480,7 @@ const LG4F: f32 = 0xf89e26.0p-26f32; // 0.24279078841
 
 /// log(1 + x), accurate for x near 0.
 @export("log1pf")
-pub fn log1pf(x: f32) f32 {
+pub const fn log1pf(x: f32) f32 {
     let ix = bitsf(x);
     let mut k: i32 = 1;
     let mut c: f32 = 0.0f32;
@@ -5545,7 +5545,7 @@ const LOG10_2LO: f64 = 3.69423907715893078616e-13;
 
 /// The base-10 logarithm of x.
 @export("log10")
-pub fn log10(x0: f64) f64 {
+pub const fn log10(x0: f64) f64 {
     let mut x = x0;
     let mut hx = hi(x);
     let mut k: i32 = 0;
@@ -5602,7 +5602,7 @@ const LOG10_2LOF: f32 = 7.9034151668e-07f32;
 
 /// The base-10 logarithm of x.
 @export("log10f")
-pub fn log10f(x0: f32) f32 {
+pub const fn log10f(x0: f32) f32 {
     let mut x = x0;
     let mut ix = bitsf(x);
     let mut k: i32 = 0;
@@ -5645,7 +5645,7 @@ pub fn log10f(x0: f32) f32 {
 // ---- sinh, cosh, tanh ------------------------------------------------------------------------------------
 
 // exp(x)/2 for x >= log(DBL_MAX), slightly better than 0.5*exp(x/2)*exp(x/2).
-fn expo2(x: f64) f64 {
+const fn expo2(x: f64) f64 {
     // note that k is odd and scale*scale overflows
     let scale = words((0x3ff + 2043 / 2) as u32 << 20, 0);
     // exp(x - k ln2) * 2**(k-1)
@@ -5653,7 +5653,7 @@ fn expo2(x: f64) f64 {
 }
 
 // expf(x)/2 for x >= log(FLT_MAX), slightly better than 0.5f*expf(x/2)*expf(x/2).
-fn expo2f(x: f32) f32 {
+const fn expo2f(x: f32) f32 {
     // note that k is odd and scale*scale overflows
     let scale = flt((0x7f + 235 / 2) as u32 << 23);
     // exp(x - k ln2) * 2**(k-1)
@@ -5662,7 +5662,7 @@ fn expo2f(x: f32) f32 {
 
 /// The hyperbolic sine of x.
 @export("sinh")
-pub fn sinh(x: f64) f64 {
+pub const fn sinh(x: f64) f64 {
     let mut h: f64 = 0.5;
     if bits(x) >> 63 != 0 {
         h = -h;
@@ -5692,7 +5692,7 @@ pub fn sinh(x: f64) f64 {
 
 /// The hyperbolic sine of x.
 @export("sinhf")
-pub fn sinhf(x: f32) f32 {
+pub const fn sinhf(x: f32) f32 {
     let mut h: f32 = 0.5f32;
     if bitsf(x) >> 31 != 0 {
         h = -h;
@@ -5718,7 +5718,7 @@ pub fn sinhf(x: f32) f32 {
 
 /// The hyperbolic cosine of x.
 @export("cosh")
-pub fn cosh(x0: f64) f64 {
+pub const fn cosh(x0: f64) f64 {
     // |x|
     let ui = bits(x0) & 0x7fffffffffffffff;
     let x = dbl(ui);
@@ -5744,7 +5744,7 @@ pub fn cosh(x0: f64) f64 {
 
 /// The hyperbolic cosine of x.
 @export("coshf")
-pub fn coshf(x0: f32) f32 {
+pub const fn coshf(x0: f32) f32 {
     // |x|
     let ui = bitsf(x0) & 0x7fffffff;
     let x = flt(ui);
@@ -5768,7 +5768,7 @@ pub fn coshf(x0: f32) f32 {
 
 /// The hyperbolic tangent of x.
 @export("tanh")
-pub fn tanh(x0: f64) f64 {
+pub const fn tanh(x0: f64) f64 {
     let sign = bits(x0) >> 63 != 0;
     // x = |x|
     let ui = bits(x0) & 0x7fffffffffffffff;
@@ -5807,7 +5807,7 @@ pub fn tanh(x0: f64) f64 {
 
 /// The hyperbolic tangent of x.
 @export("tanhf")
-pub fn tanhf(x0: f32) f32 {
+pub const fn tanhf(x0: f32) f32 {
     let sign = bitsf(x0) >> 31 != 0;
     // x = |x|
     let ui = bitsf(x0) & 0x7fffffff;
@@ -5932,7 +5932,7 @@ pub fn acoshf(x: f32) f32 {
 
 /// The inverse hyperbolic tangent of x.
 @export("atanh")
-pub fn atanh(x: f64) f64 {
+pub const fn atanh(x: f64) f64 {
     let e = (bits(x) >> 52 & 0x7ff) as u32;
     let s = bits(x) >> 63 != 0;
     // |x|
@@ -5955,7 +5955,7 @@ pub fn atanh(x: f64) f64 {
 
 /// The inverse hyperbolic tangent of x.
 @export("atanhf")
-pub fn atanhf(x: f32) f32 {
+pub const fn atanhf(x: f32) f32 {
     let s = bitsf(x) >> 31 != 0;
     // |x|
     let u = bitsf(x) & 0x7fffffff;
@@ -5989,7 +5989,7 @@ const CP4: f64 = 0.145996192886612446982;
 
 /// The cube root of x.
 @export("cbrt")
-pub fn cbrt(x: f64) f64 {
+pub const fn cbrt(x: f64) f64 {
     let mut ui = bits(x);
     let mut hx = (ui >> 32 & 0x7fffffff) as u32;
     if hx >= 0x7ff00000 {
@@ -6030,7 +6030,7 @@ const CB2F: u32 = 642849266; // B2 = (127-127.0/3-24/3-0.03306235651)*2**23
 
 /// The cube root of x.
 @export("cbrtf")
-pub fn cbrtf(x: f32) f32 {
+pub const fn cbrtf(x: f32) f32 {
     let mut ui = bitsf(x);
     let mut hx = ui & 0x7fffffff;
     if hx >= 0x7f800000 {
@@ -6065,7 +6065,7 @@ pub fn cbrtf(x: f32) f32 {
 }
 
 // x*x as hi + lo exactly.
-fn sq(hi_: &mut f64, lo_: &mut f64, x: f64) {
+const fn sq(hi_: &mut f64, lo_: &mut f64, x: f64) {
     let xc = x * (0x1p27 + 1.0);
     let xh = x - xc + xc;
     let xl = x - xh;
@@ -6528,7 +6528,7 @@ pub fn frexpf(x: f32, e: *mut i32) f32 {
 
 /// The fractional part of x, with x's sign, and through `ip` its integral part.
 @export("modf")
-pub fn modf(x: f64, ip: *mut f64) f64 {
+pub const fn modf(x: f64, ip: *mut f64) f64 {
     let i = bits(x);
     let e = (i >> 52 & 0x7ff) as i32 - 0x3ff;
     if e >= 52 {
@@ -6556,7 +6556,7 @@ pub fn modf(x: f64, ip: *mut f64) f64 {
 
 /// The fractional part of x, with x's sign, and through `ip` its integral part.
 @export("modff")
-pub fn modff(x: f32, ip: *mut f32) f32 {
+pub const fn modff(x: f32, ip: *mut f32) f32 {
     let i = bitsf(x);
     let e = (i >> 23 & 0xff) as i32 - 0x7f;
     if e >= 23 {
@@ -6584,7 +6584,7 @@ pub fn modff(x: f32, ip: *mut f32) f32 {
 
 /// The next double after x toward y; y when they are equal, a NaN when either is one.
 @export("nextafter")
-pub fn nextafter(x: f64, y: f64) f64 {
+pub const fn nextafter(x: f64, y: f64) f64 {
     if x != x || y != y {
         return x + y;
     }
@@ -6610,7 +6610,7 @@ pub fn nextafter(x: f64, y: f64) f64 {
 
 /// The next float after x toward y; y when they are equal, a NaN when either is one.
 @export("nextafterf")
-pub fn nextafterf(x: f32, y: f32) f32 {
+pub const fn nextafterf(x: f32, y: f32) f32 {
     if x != x || y != y {
         return x + y;
     }
@@ -7132,7 +7132,7 @@ const FACT: [f64; 23] = [
 ];
 
 // S(x) rational function for positive x.
-fn lanczos_s(x: f64) f64 {
+const fn lanczos_s(x: f64) f64 {
     let mut num: f64 = 0.0;
     let mut den: f64 = 0.0;
     // to avoid overflow handle large x differently

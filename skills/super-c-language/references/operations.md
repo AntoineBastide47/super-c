@@ -69,13 +69,27 @@ helpers and evaluate at compile time, also inside a `const fn`.
 | `wrapping_shl/shr(n: u32)` | the count modulo the width (`1u8.wrapping_shl(9)` is 2); `shr` is arithmetic on signed types |
 | `overflowing_add/sub/mul(rhs)` | the wrapped value and whether it overflowed: `let (r, o) = a.overflowing_add(b);` |
 | `checked_add/sub/mul/div/rem(rhs)`, `checked_neg()`, `checked_shl/shr(n: u32)` | `Option`: `None` on overflow, a zero divisor, MIN / -1, a count of the width or more, or an unsigned negation of a nonzero value |
-| `saturating_add/sub/mul(rhs)` | clamped to `MIN` or `MAX` |
+| `saturating_add/sub/mul/div(rhs)`, `saturating_neg/abs()`, `saturating_pow(e)` | clamped to `MIN` or `MAX` |
+| `wrapping_/overflowing_/checked_` forms of `pow`, `div`, `rem`, `div_euclid`, `rem_euclid`, `abs`, `neg`, `shl`, `shr` | as the rows above for the same flavor |
+| unsigned `wrapping_/overflowing_/checked_/saturating_add_signed(rhs)` | the unsigned value plus a signed one, in the same flavors |
 
 Use them for every intentional wraparound: hashes, random number generators, checksums, and two's
 complement bit tricks (`x & x.wrapping_neg()`).
 
-`trailing_zeros()`, `leading_zeros()`, and `count_ones()` return `usize`; a zero input gives the bit
-width, and a signed value counts its two's complement pattern.
+`trailing_zeros()`, `leading_zeros()`, `trailing_ones()`, `leading_ones()`, `count_ones()` and
+`count_zeros()` return `usize`; a zero input gives the bit width, and a signed value counts its two's
+complement pattern. `rotate_left/right(n: u32)` take the count modulo the width; `swap_bytes`,
+`reverse_bits`, `to_be/to_le/from_be/from_le` and the `to_*_bytes`/`from_*_bytes` arrays follow `ENDIAN`.
+
+Plain `pow(e)`, `next_power_of_two()` and `next_multiple_of(m)` overflow as `*` does (trap with
+overflow checks, wrap without); `div_euclid` and `rem_euclid` trap as `/` and `%` do. `ilog2`, `ilog10`
+and `ilog(base)` panic on a value below 1 ("argument of integer logarithm must be positive") or a base
+below 2, and a signed `isqrt` on a negative value; their `checked_` forms return `None`. `isqrt`,
+`abs_diff`, `unsigned_abs`, `midpoint`, `div_ceil` and `is_multiple_of` never trap.
+
+Floats: `to_bits`/`from_bits`, `classify` (`FpClass`), `next_up`/`next_down`, `midpoint`,
+`div_euclid`/`rem_euclid`, and `maximum`/`minimum` (IEEE 754-2019: a NaN propagates, -0.0 is below
++0.0), beside `max`/`min`, which return the other operand when one is NaN.
 
 ## Conversions
 
@@ -118,7 +132,7 @@ width, and a signed value counts its two's complement pattern.
 | a reference from a number | an error ("a reference never comes from a number"): cast to a raw pointer, then dereference inside `unsafe`; a generic cast whose instance makes a reference from anything but a reference fails at that instance |
 | zero-sized types | `p + n` is `p`; a zero-byte access touches nothing |
 | dereference | the pointer is non-null, aligned, and addresses `sizeof(T)` bytes of one live object with the access permission; otherwise undefined |
-| a view of another type | a pointer cast from an aggregate to another element type (bytes across a nested array or a vector's lanes) is valid inside the object; the compile-time evaluator follows only a cast to the element type of an array or vector, and has no value for any other view, so it never reports one as a fault |
+| a view of another type | only a pointer casts to a pointer of another pointee type; a reference casts to a pointer to its own referent first (`(&x as *const T) as *const U`). A pointer cast from an aggregate to another element type (bytes across a nested array or a vector's lanes) is valid inside the object; the compile-time evaluator follows only a cast to the element type of an array or vector, and has no value for any other view, so it never reports one as a fault |
 
 ## Atomics
 

@@ -161,7 +161,7 @@ Marker interfaces in `std/interfaces.spc`. Structural auto-conformance:
 | Closures | if all captures are `Send` | if all captures are `Sync` |
 | Aggregates | if all fields are `Send`/`Sync` | (same) |
 | `String`, `Vector<T>`, `Box<T>`, `Map<K,V>` | if `T: Send` | if `T: Send` |
-| `Arc<T>` | if `T: Send + Sync` | if `T: Send + Sync` |
+| `Arc<T>`, `arc::Weak<T>` | if `T: Send + Sync` | if `T: Send + Sync` |
 | `UnsafeCell<T>` | if `T: Send` | no |
 
 A `const` is shared by every task: one holding an `UnsafeCell` must be `Sync`. Share through

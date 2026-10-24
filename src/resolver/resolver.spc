@@ -232,6 +232,12 @@ extend Resolver {
         self.symbol_previous.truncate(start as usize);
     }
 
+    // Whether `decl` is a pattern name without subpatterns (a binding or a unit variant).
+    fn bare_pattern_name(self: &Self, decl: NodeId) bool {
+        let n = self.ast.at_const(decl);
+        return n.kind == NodeKind::NODE_PATTERN_NAME && n.as_data.pattern.children.len == 0;
+    }
+
     fn declare(self: &mut Self, name_node: NodeId, decl: NodeId, ns: Namespace) {
         if name_node == NODE_NONE {
             return;
@@ -277,6 +283,14 @@ extend Resolver {
             }
             let sname = self.symbols[i].name;
             if span_eq(self.source, sname, name) {
+                let first = self.symbols[i].decl & 0x7FFFFFFFu32;
+                if self.bare_pattern_name(decl) && self.bare_pattern_name(first) {
+                    // A bare name in a pattern may be a unit variant (`(None, None)`), which only the
+                    // scrutinee's type tells: the checker reports the name bound twice
+                    // (`check_pattern_inner`), and uses resolve to the first.
+                    self.ast.set_resolution(name_node, first);
+                    return;
+                }
                 self.errors.emit_span(
                     name,
                     format("duplicate definition of '{}'", diag::span_str(self.source, name.start, name.end)),

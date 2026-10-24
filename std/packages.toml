@@ -152,11 +152,21 @@ capabilities = [
     "a context switch for x86_64 or aarch64",
 ]
 accelerations = []
-allocator = "Task stacks are mapped from the operating system and pooled within a byte budget; a channel is one allocation; a wait allocates nothing. `Global` only, no allocator parameter."
-thread_safety = "The thread-safety layer: `launch`, `thread::spawn` and the data-parallel calls check `Send` and `Sync`."
+allocator = "Task stacks are mapped from the operating system and pooled within a byte budget; a channel is one allocation; a wait allocates nothing; all from `Global` without an allocator parameter. `arc::Arc` and `arc::Weak` share one block from `Global`."
+thread_safety = "The thread-safety layer: `launch`, `thread::spawn` and the data-parallel calls check `Send` and `Sync`; `arc::Weak` is `Send` and `Sync` as `Arc` is."
 blocking = "Task-aware: a coroutine that waits parks and frees its worker, and any other thread blocks; `blocking::call` moves blocking work to a bounded pool of OS threads."
-errors = "Timed waits report a timeout as a value and a closed channel hands the value back; a failed thread creation, join or detach, or stack mapping, ends the process with a message; an invalid memory order panics."
+errors = "Timed waits report a timeout as a value and a closed channel hands the value back; a failed thread creation, join or detach, or stack mapping, ends the process with a message; an invalid memory order and an `Arc` reference count past `isize::MAX` panic."
 platform_ffi = ["arc", "atomics", "blocking", "channel", "data", "io", "platform", "runtime", "selector", "sync", "task", "thread"]
+
+[package.hash]
+tier = 3
+targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "full", wasm = "full" }
+capabilities = ["an operating-system entropy source for `KeyedHash::random` (through std::platform::entropy)"]
+accelerations = []
+allocator = "Never allocates."
+thread_safety = "The hashers and builders are plain values; `KeyedHash::random` publishes the process key with one compare-and-swap and reads it with an acquire load."
+blocking = "Never blocks; the first `KeyedHash::random` makes one entropy system call."
+errors = "No error values: `KeyedHash::random` panics when the entropy source fails, as a predictable fallback key would remove the protection."
 
 [package.platform]
 tier = 3

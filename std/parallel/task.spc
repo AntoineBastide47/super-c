@@ -137,7 +137,7 @@ fn unlink_locked(sh: &CancelShared, m: *mut Member) {
 // recycled: every record leaves its source list (under that source's lock), gives its reference back, and
 // heap records are freed. Runs on the worker, outside any task, holding no lock across records.
 fn membership_release(mb: *mut runtime::Membership) {
-    let inl = (&mut unsafe (*mb).inline_mem[0]) as *mut Member;
+    let inl = ((&mut unsafe (*mb).inline_mem[0]) as *mut u64) as *mut Member;
     let mut m = (unsafe (*mb).head) as *mut Member;
     unsafe (*mb).head = null;
     let mut g = Global {};
@@ -319,7 +319,7 @@ extend CancelToken {
         }
         let sh = self.shared.get();
         let want = sh as *const CancelShared;
-        let inl = (&mut unsafe (*mb).inline_mem[0]) as *mut Member;
+        let inl = ((&mut unsafe (*mb).inline_mem[0]) as *mut u64) as *mut Member;
         let mut m = (unsafe (*mb).head) as *mut Member;
         while m != null {
             if (unsafe (*m).src.get()) as *const CancelShared == want {

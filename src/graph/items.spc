@@ -401,7 +401,7 @@ pub fn open(p: &mut loader::Package) {
     // Stable keys: the module path, the top-level ordinal, the member ordinal (0 at top level).
     sch.key.reserve(n);
     for m in 0..nm {
-        let mh = p.modules.at(m).path.as_str().hash();
+        let mh = fnv(p.modules.at(m).path.as_str());
         let mut top: u64 = 0;
         let mut mem: u64 = 0;
         for i in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
@@ -727,7 +727,7 @@ pub fn builtin_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &m
         if nt.len() == 0 || (p.sched.bmask >> mask_bit(nt) & 1) == 0 {
             continue;
         }
-        let h = nt.hash() >> 32;
+        let h = fnv(nt) >> 32;
         let mut k = switch names.binary_search(&(h << 32)) {
             Ok(v) => v,
             Err(v) => v,
@@ -759,7 +759,7 @@ const fn name_key(mask: &mut u64, s: str) u64 {
     if s.len() != 0 {
         *mask = *mask | 1u64 << mask_bit(s);
     }
-    return s.hash() >> 32;
+    return fnv(s) >> 32;
 }
 
 // The prefilter bit of a nonempty name: its first byte and length, which most member names in a
@@ -1072,7 +1072,7 @@ fn decl_key(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, m: usize, n
     let s = a.at_const(node).span.start;
     let ow = owner_at(p, sps, c, m as u32, s);
     if ow == NONE {
-        return mix(p.modules.at(m).path.as_str().hash(), s);
+        return mix(fnv(p.modules.at(m).path.as_str()), s);
     }
     return mix(p.sched.key[ow as usize], s - c.s);
 }

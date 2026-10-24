@@ -138,7 +138,7 @@ fn parse_test_shard(s: *const char, topts: &mut TestOpts) bool {
 
 fn parse_test_flag(arg: str, topts: &mut TestOpts, bad: &mut bool) bool {
     if arg.starts_with("--test-jobs=") {
-        topts.jobs = unsafe stdlib::atoi((&arg[12]) as *const char);
+        topts.jobs = unsafe stdlib::atoi(((&arg[12]) as *const u8) as *const char);
         if topts.jobs < 1 {
             *bad = true;
         }
@@ -155,17 +155,17 @@ fn parse_test_flag(arg: str, topts: &mut TestOpts, bad: &mut bool) bool {
         topts.record = true;
     } else if arg.starts_with("--test-record-durations=") && arg.len() > 24 {
         topts.record = true;
-        topts.record_to = (&arg[24]) as *const char;
+        topts.record_to = ((&arg[24]) as *const u8) as *const char;
     } else if arg.starts_with("--test-durations=") && arg.len() > 17 {
-        topts.durations = (&arg[17]) as *const char;
+        topts.durations = ((&arg[17]) as *const u8) as *const char;
     } else if arg == "--test-no-fork" {
         topts.no_fork = true;
     } else if arg == "--quiet" {
         topts.quiet = true;
     } else if arg.starts_with("--filter=") {
-        topts.filter = (&arg[9]) as *const char;
+        topts.filter = ((&arg[9]) as *const u8) as *const char;
     } else if arg.starts_with("--test-shard=") {
-        if !parse_test_shard((&arg[13]) as *const char, topts) {
+        if !parse_test_shard(((&arg[13]) as *const u8) as *const char, topts) {
             *bad = true;
         }
     } else {
@@ -511,6 +511,24 @@ fn apply_lint_fixes(src: str, fixes: &mut Vector<diag::LintFix>, texts: &Vector<
 // Convention fallback for rooted loads: when a src/ directory exists (manifest layout), it serves
 // as the secondary import root so tests/ and bench/ files linted from the project root resolve
 // their compiler-module imports.
+// The directory `super-c test` discovers the suite in: build.toml's `test-dir`, else `tests`.
+fn lint_test_dir() String {
+    if has_manifest(".") {
+        let mo = bman::load("build.toml", false);
+        if !mo.is_none() {
+            return mo.unwrap().test_dir.clone();
+        }
+    }
+    return String::from_str("tests");
+}
+
+// Whether path `f` lies under directory `d` (both relative to the working directory, `./` aside).
+const fn in_dir(f: str, d: str) bool {
+    let fp = pick(f.starts_with("./"), f.slice(2, f.len()), f);
+    let dp = pick(d.starts_with("./"), d.slice(2, d.len()), d);
+    return dp.len() != 0 && fp.len() > dp.len() && fp.starts_with(dp) && fp.byte_at(dp.len()) == b'/';
+}
+
 fn lint_alt() str<'static> {
     if is_dir("src") {
         return "src";
@@ -688,12 +706,13 @@ fn spc_collect_in(dir: str, cmd: str, files: &mut Vector<String>, nested: *mut V
 
 // One-package load for the batch: prelude first (so std/ffi files keep their prelude identity), then
 // each listed file joins the closure once, marked in lint_set.
-fn lint_load_batch(files: &Vector<String>, root: str, alt: str, std_dir: str, target: i32) loader::Package {
-    let mut p = loader::package_load_prelude(
+fn lint_load_batch(files: &Vector<String>, root: str, alt: str, std_dir: str, target: i32, test_build: bool) loader::Package {
+    let mut p = loader::package_load_prelude_as(
         root,
         alt,
         std_dir,
         target,
+        test_build,
         Vector::<String>::new(),
         Vector::<String>::new(),
     );
@@ -747,9 +766,22 @@ fn lint_batch(
     sc: bool,
     lint_pub: bool,
 ) i32 {
+    // A batch with a file of the test suite lints as `super-c test` builds it: with TEST set.
+    let mut test_build = false;
+    let td = lint_test_dir();
+    let cwd = canon_cwd();
+    for k in 0..files.len() {
+        let f = files.at(k).as_str();
+        let rel = if f.starts_with(cwd.as_str()) && f.len() > cwd.len() && f.byte_at(cwd.len()) == b'/' {
+            f.slice(cwd.len() + 1, f.len());
+        } else {
+            f;
+        };
+        test_build = test_build || in_dir(rel, td.as_str());
+    }
     let mut pass = 0;
     loop {
-        let mut p = lint_load_batch(files, root, alt, std_dir, target);
+        let mut p = lint_load_batch(files, root, alt, std_dir, target, test_build);
         p.lint_pub = lint_pub;
         if !p.ok {
             return 1;
@@ -980,7 +1012,7 @@ extend<'a> BuildOpts<'a> {
         } else if arg == "--sanitizers" {
             self.sanitizers = true;
         } else if arg.starts_with("--jobs=") {
-            let v = unsafe stdlib::atoi((&arg[7]) as *const char);
+            let v = unsafe stdlib::atoi(((&arg[7]) as *const u8) as *const char);
             if v < 1 {
                 co.bad = true;
             } else {

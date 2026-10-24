@@ -462,7 +462,7 @@ fn interface_bounds() {
     );
     h::expect_err_msg(
         "subinterface extend requires explicit superinterface satisfaction",
-        "interface EqLike { fn eq(self: &Self, other: &Self) bool; }\ninterface OrdLike: EqLike { fn cmp(self: &Self, other: &Self) i32; }\nstruct S { pub x: i32 }\nextend S as OrdLike {\n  fn eq(self: &Self, other: &Self) bool { return self.x == other.x; }\n  fn cmp(self: &Self, other: &Self) i32 { return self.x - other.x; }\n}\nfn main() i32 { return 0; }\n",
+        "interface EqLike { fn eq(self: &Self, other: &Self) bool; }\ninterface OrdLike: EqLike { fn cmp(self: &Self, other: &Self) i32; }\nstruct S { pub x: i32 }\nextend S as OrdLike {\n  fn cmp(self: &Self, other: &Self) i32 { return self.x - other.x; }\n}\nfn main() i32 { return 0; }\n",
         "required superinterface",
     );
     h::expect_ok(
@@ -1596,6 +1596,11 @@ fn symbolic_array_lengths() {
     b.add(
         "nested symbolic fields fold at every level",
         "struct G<const N: usize> { pub g: [[i32; N]; 2], pub e: [[u8; 2]; N] }\nextend<const N: usize> G<N> {\n    pub fn corner(self: &Self) i32 { return unsafe self.g[1][N - 1]; }\n}\nfn mk<const N: usize>(g: [[i32; N]; 2], e: [[u8; 2]; N]) G<N> { return G::<N> { g: g, e: e }; }\nfn main() i32 {\n    let x: G<3> = G::<3> { g: [[1, 2, 3], [4, 5, 6]], e: [[7, 8], [9, 10], [11, 12]] };\n    static_assert(sizeof(G<3>) == 32);\n    if x.g[1][2] != 6 || x.e[2][1] != 12 { return 1; }\n    if x.corner() != 6 { return 2; }\n    let y = mk([[1, 2], [3, 4]], [[5, 6], [7, 8]]);\n    static_assert(sizeof(y) == 20);\n    if y.corner() != 4 || y.e[1][0] != 7 { return 3; }\n    return 0;\n}\n",
+        0,
+    );
+    b.add(
+        "later elements of an unannotated array literal take the first element's type",
+        "fn main() i32 {\n    let mut s: usize = 0;\n    for p in [(1usize, 2usize), (3, 4)] {\n        let (a, c) = p;\n        s += a + c;\n    }\n    let w = [Option::<u8>::Some(250), Option::Some(5)];\n    let k = [[1u8, 2], [3, 4]];\n    if s != 10 || w[1].unwrap() != 5 || k[1][1] != 4 { return 1; }\n    return 0;\n}\n",
         0,
     );
     b.add(
@@ -2965,7 +2970,7 @@ fn mut_views_and_refs_stay_exclusive() {
     errs.push(
         (
             "a view literal needs unsafe",
-            "let p = &mut x as *mut i32; g(SliceMut::<i32> { ptr: p, len: 4 }); return 0;",
+            "let p = &mut x[0] as *mut i32; g(SliceMut::<i32> { ptr: p, len: 4 }); return 0;",
             "building a slice view from raw parts requires an 'unsafe' block"
         ),
     );
@@ -3008,7 +3013,7 @@ fn mut_views_and_refs_stay_exclusive() {
     oks.push(
         (
             "an unsafe view literal",
-            "let p = &mut x as *mut i32; g(unsafe SliceMut::<i32> { ptr: p, len: 4 }); return x[0] - 7;"
+            "let p = &mut x[0] as *mut i32; g(unsafe SliceMut::<i32> { ptr: p, len: 4 }); return x[0] - 7;"
         ),
     );
     oks.push(("an unsafe len write", "let mut s: []mut i32 = x; unsafe s.len = 2; return s.len as i32 - 2;"));
@@ -3027,7 +3032,7 @@ fn mut_views_and_refs_stay_exclusive() {
 // promises what it cannot check.
 @test
 fn raw_pointer_constructors_need_unsafe() {
-    let head = "fn main() i32 {\n    let a: [u8; 2] = [104, 105];\n    let p = &a as *const u8;\n    ";
+    let head = "fn main() i32 {\n    let a: [u8; 2] = [104, 105];\n    let p = &a[0] as *const u8;\n    ";
     let mut errs = Vector::<(str, str)>::new();
     errs.push(("str::from_raw", "let s = str::from_raw(p, 2);\n    return s.len() as i32;"));
     errs.push(("str::from_cstr", "let s = str::from_cstr(p as *const char);\n    return s.len() as i32;"));
@@ -3854,6 +3859,111 @@ fn several_results_have_no_members() {
         "a generic call's several results",
         "fn dup<T: Copy>(a: T) (T, T) { return a, a; }\nfn main() i32 { return dup(3).0; }\n",
         "a call with several results has no members",
+    );
+}
+
+// The evaluator names the operation a `const fn` reached that it cannot run, and where.
+@test
+fn unsupported_const_fn_operation_is_named() {
+    h::expect_build_err(
+        "a pointer converted to an address",
+        "const fn f() i64 {\n    let v = Vector::<i64>::new();\n    return v.as_ptr() as usize as i64;\n}\nconst A: i64 = f();\nfn main() i32 { return A as i32; }\n",
+        "a 'const fn' hit an operation the compile-time evaluator does not support: a conversion (",
+    );
+}
+
+// Several results are no value: a call with them is an error in an argument, an operand, a
+// single binding and an `assert_eq`, and binds, forwards and stands as a statement.
+@test
+fn several_results_are_no_value() {
+    const PRE: str = "fn two() (usize, usize) { return 1, 2; }\nfn one(t: (usize, usize)) usize { return t.0; }\n";
+    const MSG: str = "a call with several results is not a value: bind them with `let (a, b) = ..`";
+    let bodies = [
+        "fn main() i32 { assert_eq(two(), (1usize, 2usize)); return 0; }\n",
+        "fn main() i32 { let x = two(); return 0; }\n",
+        "fn main() i32 { return one(two()) as i32; }\n",
+        "fn main() i32 { return (two() == (1usize, 2usize)) as i32; }\n",
+        // The tail of a value block is its value, not a statement.
+        "fn main() i32 { let x = if true { two(); } else { two(); }; return 0; }\n",
+        "fn main() i32 { let x = unsafe { two(); }; return 0; }\n",
+    ];
+    for body in bodies {
+        let mut src = String::from_str(PRE);
+        src.push_str(body);
+        h::expect_err_msg(body, src.as_str(), MSG);
+    }
+    let mut ok = String::from_str(PRE);
+    ok.push_str(
+        "fn fwd() (usize, usize) { return two(); }\nfn main() i32 { two(); unsafe two(); let (a, b) = fwd(); return (a + b + one((a, b))) as i32 - 4; }\n",
+    );
+    h::expect_exit("several results bound, forwarded and discarded", ok.as_str(), 0);
+}
+
+// Every method of a conformance block is a member of its interface (a superinterface's methods are its
+// own conformance's); a helper belongs in a plain `extend`.
+@test
+fn conformance_methods_are_interface_members() {
+    const IF: str = "interface Base { fn base(self: &Self) i32; }\ninterface Top: Base { fn top(self: &Self) i32; fn twice(self: &Self) i32 { return self.top() * 2; } }\nstruct S { pub a: i32 }\n";
+    h::expect_err_msg(
+        "a helper in a conformance block",
+        format(
+            "{}extend S as Base {{\n    fn base(self: &S) i32 {{ return self.a; }}\n    fn helper(self: &S) i32 {{ return 1; }}\n}}\nfn main() i32 {{ return 0; }}\n",
+            IF,
+        ).as_str(),
+        "'helper' is not a member of interface 'Base': define it in a plain 'extend' of the type",
+    );
+    h::expect_err_msg(
+        "a superinterface's method in the sub-interface's block",
+        format(
+            "{}extend S as Base {{\n    fn base(self: &S) i32 {{ return self.a; }}\n}}\nextend S as Top {{\n    fn top(self: &S) i32 {{ return 1; }}\n    fn base(self: &S) i32 {{ return 2; }}\n}}\nfn main() i32 {{ return 0; }}\n",
+            IF,
+        ).as_str(),
+        "'base' is not a member of interface 'Top': define it in a plain 'extend' of the type",
+    );
+    h::expect_exit(
+        "members and an overridden default, with the superinterface's own block",
+        format(
+            "{}extend S as Base {{\n    fn base(self: &S) i32 {{ return self.a; }}\n}}\nextend S as Top {{\n    fn top(self: &S) i32 {{ return self.a + 1; }}\n    fn twice(self: &S) i32 {{ return 7; }}\n}}\nextend S {{\n    fn helper(self: &S) i32 {{ return 1; }}\n}}\nfn main() i32 {{\n    let s = S {{ a: 2 }};\n    return s.base() + s.top() + s.twice() + s.helper() - 13;\n}}\n",
+            IF,
+        ).as_str(),
+        0,
+    );
+}
+
+// A reference casts only to a pointer to its own referent type; a view as another type is a second
+// cast, from that pointer, so the reinterpretation is written out.
+@test
+fn reference_casts_keep_the_referent_type() {
+    h::expect_err_msg(
+        "a reference cast that changes the pointee type",
+        "fn main() i32 { let mut seen = 0; let p = (&mut seen) as *mut usize; unsafe *p = 1; return seen; }\n",
+        "a reference to 'i32' casts only to a pointer to 'i32': cast to '*mut i32' first, then to '*mut usize'",
+    );
+    h::expect_err_msg(
+        "an array reference cast to its element pointer",
+        "fn main() i32 { let a: [u8; 4] = [1, 2, 3, 4]; let p = (&a) as *const u8; return unsafe *p as i32; }\n",
+        "a reference to '[u8; 4]' casts only to a pointer to '[u8; 4]': cast to '*const [u8; 4]' first, then to '*const u8'",
+    );
+    h::expect_exit(
+        "the referent's pointer, then a pointer cast",
+        "fn main() i32 {\n    let mut x: u32 = 0;\n    let p = ((&mut x) as *mut u32) as *mut u8;\n    unsafe *p = 7;\n    let a: [u8; 4] = [1, 2, 3, 4];\n    let q = (&a[1]) as *const u8;\n    let r = (&a) as *const [u8; 4];\n    return (x as i32 - 7) + (unsafe *q as i32 - 2) + (unsafe (*r)[3] as i32 - 4);\n}\n",
+        0,
+    );
+}
+
+// A reference argument converts to a pointer parameter, so its referent binds the pointee's generic
+// parameter; a shared reference still does not convert to `*mut T`.
+@test
+fn reference_arguments_bind_pointer_parameters() {
+    h::expect_exit(
+        "a reference binds *const T",
+        "fn rd<T: Copy>(p: *const T) T { return unsafe *p; }\nfn wr<T: Copy>(p: *mut T, v: T) { unsafe *p = v; }\nfn main() i32 {\n    let x: u64 = 5;\n    let mut y: u16 = 0;\n    wr(&mut y, 7);\n    return (rd(&x) - 5) as i32 + (y - 7) as i32;\n}\n",
+        0,
+    );
+    h::expect_err_msg(
+        "a shared reference is no *mut T",
+        "fn rd<T: Copy>(p: *mut T) T { return unsafe *p; }\nfn main() i32 { let x: u64 = 5; return rd(&x) as i32; }\n",
+        "mismatched types: expected '*mut u64', found '&u64'",
     );
 }
 
@@ -8288,4 +8398,564 @@ fn exit_cases_01() {
     platform_gate_values(&mut b);
     arm_value_programs(&mut b);
     b.run();
+}
+
+// The reflection loop of a method whose receiver binds its parameters (a generic interface default's
+// `Self`, a generic extend's parameters) owes its bound for the receiver's type: proved where the
+// receiver is concrete, at the call or, through a bound, where the generic is instantiated, for a
+// `Self` whose conformance inherits the default. A field the loop's per-copy `if` skips owes nothing.
+// The obligations run in the driver's package-wide pass: builds.
+const RB_HEAD: str = M"(interface Hz {
+    fn hz(self: &Self) u64 {
+        return 7;
+    }
+    fn walk<Q>(self: &Self, q: Q) u64 {
+        let mut s: u64 = 0;
+        inline for f in fields(self) {
+            s = s + put_field(&f.value);
+        }
+        return s;
+    }
+}
+fn put_field<V: Hz>(x: &V) u64 {
+    return x.hz();
+}
+extend i32 as Hz {
+    pub fn hz(self: &i32) u64 {
+        return *self as u64;
+    }
+}
+pub struct NoH {
+    pub x: i32,
+}
+)";
+
+const RB_FNV: str = M"(pub struct Fnv {
+    pub h: u64,
+}
+extend Fnv as Hasher {
+    fn write(self: &mut Self, bytes: []u8) {
+        for b in bytes {
+            self.h = (self.h ^ b as u64).wrapping_mul(1099511628211u64);
+        }
+    }
+    fn finish(self: &Self) u64 {
+        return self.h;
+    }
+}
+fn feed<T: Hash>(t: &T) u64 {
+    let mut f = Fnv { h: 7 };
+    t.hash_into(&mut f);
+    return f.finish();
+}
+)";
+
+@test
+fn reflection_bounds_of_method_instances() {
+    let mut b = cli::Batch::new(RB_HEAD, "");
+    b.add(
+        "a generic default called on a concrete receiver",
+        "pub struct S {\n    pub a: NoH,\n    pub k: i32,\n}\nextend S as Hz {}\nfn main() i32 {\n    let s = S { a: NoH { x: 1 }, k: 5 };\n    return s.walk(1) as i32;\n}\n",
+        "a field of 'S' does not satisfy a bound the callee's reflection loop requires",
+    );
+    b.add(
+        "a generic default called through a bound",
+        "pub struct S {\n    pub a: NoH,\n    pub k: i32,\n}\nextend S as Hz {}\nfn via<T: Hz>(t: &T) u64 {\n    return t.walk(1);\n}\nfn main() i32 {\n    let s = S { a: NoH { x: 1 }, k: 5 };\n    return via(&s) as i32;\n}\n",
+        "a field of 'S' does not satisfy a bound the callee's reflection loop requires",
+    );
+    b.add(
+        "a method of a generic extend",
+        "pub struct W<T> {\n    pub a: T,\n    pub k: i32,\n}\nextend<T> W<T> {\n    fn sum(self: &Self) u64 {\n        let mut s: u64 = 0;\n        inline for f in fields(self) {\n            s = s + put_field(&f.value);\n        }\n        return s;\n    }\n}\nfn main() i32 {\n    let w = W::<NoH> { a: NoH { x: 1 }, k: 5 };\n    return w.sum() as i32;\n}\n",
+        "a field of 'W<NoH>' does not satisfy a bound the callee's reflection loop requires",
+    );
+    b.add(
+        "a field copy no per-copy condition skips",
+        "pub struct Bad {\n    pub k: i32,\n    pub a: NoH,\n}\nfn tail<T>(v: &T) u64 {\n    let mut s: u64 = 0;\n    inline for f in fields(v) {\n        if f.index != 0 {\n            s = s + put_field(&f.value);\n        }\n    }\n    return s;\n}\nfn main() i32 {\n    let b = Bad { k: 1, a: NoH { x: 2 } };\n    return tail(&b) as i32;\n}\n",
+        "a field of 'Bad' does not satisfy a bound the callee's reflection loop requires",
+    );
+    h::expect_build_errs(b);
+    let mut n = cli::Batch::new(RB_FNV, "");
+    n.add(
+        "a field type that inherits the reflective hash_into",
+        "pub struct NoH {\n    pub x: i32,\n}\npub struct In2 {\n    pub n: NoH,\n}\nextend In2 as Hash {}\npub struct Out2 {\n    pub i: In2,\n    pub k: i32,\n}\nextend Out2 as Hash {}\nfn main() i32 {\n    let o = Out2 { i: In2 { n: NoH { x: 1 } }, k: 2 };\n    return feed(&o) as i32;\n}\n",
+        "a field of 'In2' does not satisfy a bound the callee's reflection loop requires",
+    );
+    h::expect_build_errs(n);
+    let mut e = h::ExitBatch::new();
+    e.add(
+        "an overriding conformance owes the default's bound nothing",
+        format(
+            "{}pub struct O {{\n    pub a: NoH,\n}}\nextend O as Hz {{\n    fn walk<Q>(self: &Self, q: Q) u64 {{\n        return 1;\n    }}\n}}\npub struct G {{\n    pub k: i32,\n}}\nextend G as Hz {{}}\nfn via<T: Hz>(t: &T) u64 {{\n    return t.walk(1);\n}}\nfn main() i32 {{\n    let o = O {{ a: NoH {{ x: 1 }} }};\n    let g = G {{ k: 3 }};\n    return (via(&o) + via(&g) + Hz::walk(&g, 2)) as i32 - 7;\n}}\n",
+            RB_HEAD,
+        ).as_str(),
+        0,
+    );
+    e.add(
+        "per-copy conditions skip the fields they exclude",
+        format(
+            "{}pub struct S {{\n    @reflect(skip)\n    pub a: NoH,\n    pub k: i32,\n}}\nfn tail<T>(v: &T) u64 {{\n    let mut s: u64 = 0;\n    inline for f in fields(v) {{\n        if f.index != 0 {{\n            s = s + put_field(&f.value);\n        }}\n    }}\n    return s;\n}}\nfn tagged<T>(v: &T) u64 {{\n    let mut s: u64 = 0;\n    inline for f in fields(v) {{\n        if f.has_meta(\"skip\") {{\n            s = s + 1;\n        }} else {{\n            s = s + put_field(&f.value);\n        }}\n    }}\n    return s;\n}}\nfn main() i32 {{\n    let s = S {{ a: NoH {{ x: 1 }}, k: 5 }};\n    let mut t: u64 = 0;\n    inline for f in fields(&s) {{\n        if !f.has_meta(\"skip\") {{\n            t = t + put_field(&f.value);\n        }}\n    }}\n    return (tail(&s) + tagged(&s) + t) as i32 - 16;\n}}\n",
+            RB_HEAD,
+        ).as_str(),
+        0,
+    );
+    e.add(
+        "a field type that overrides hash_into",
+        format(
+            "{}pub struct NoH {{\n    pub x: i32,\n}}\npub struct In {{\n    pub n: NoH,\n}}\nextend In as Hash {{\n    fn hash_into<H: Hasher>(self: &Self, h: &mut H) {{\n        h.write_u64(1);\n    }}\n}}\npub struct Out {{\n    pub i: In,\n    pub k: i32,\n}}\nextend Out as Hash {{}}\nfn main() i32 {{\n    let o = Out {{ i: In {{ n: NoH {{ x: 1 }} }}, k: 2 }};\n    return if feed(&o) != 0 {{\n        0;\n    }} else {{\n        1;\n    }};\n}}\n",
+            RB_FNV,
+        ).as_str(),
+        0,
+    );
+    e.add(
+        "a conformance whose bounds an instance misses does not check it",
+        "pub struct P<A> {\n    pub a: A,\n}\nextend<A: Eq> P<A> as Eq {}\nfn main() i32 {\n    let x = 1;\n    let p = P::<&i32> { a: &x };\n    return *p.a - 1;\n}\n",
+        0,
+    );
+    e.run();
+}
+
+// The per-instance static_assert's note names an interface default's `Self` as `Self`.
+@test
+fn instance_note_names_self() {
+    h::expect_build_err(
+        "Self in the instantiation note",
+        format(
+            "{}pub struct In3 {{\n    pub k: i32,\n}}\nextend In3 as Eq {{\n    fn eq(self: &Self, o: &Self) bool {{\n        return self.k == o.k;\n    }}\n}}\nextend In3 as Hash {{}}\nfn main() i32 {{\n    let x = In3 {{ k: 1 }};\n    let mut f = Fnv {{ h: 7 }};\n    x.hash_into(&mut f);\n    return f.finish() as i32;\n}}\n",
+            RB_FNV,
+        ).as_str(),
+        "in the instantiation where Self = In3",
+    );
+}
+
+// Module `dig` of `dig_proj`: an interface whose generic default carries a per-instance static_assert
+// and walks the fields, or the active variant's payloads, of `Self` through a bounded helper. The
+// generic code that calls it sits in other modules, as a std interface's does.
+const DG_LIB: str = M"(pub interface Sink {
+    fn put(self: &mut Self, v: u64);
+}
+pub struct Acc {
+    pub v: u64,
+}
+extend Acc as Sink {
+    fn put(self: &mut Self, v: u64) {
+        self.v = self.v * 31 + v;
+    }
+}
+pub interface Dig {
+    fn tag(self: &Self) u64 {
+        return 1;
+    }
+    fn dig<S: Sink>(self: &Self, s: &mut S) {
+        static_assert(type_info::<Self>().method("tag").is_none(), "a type that defines 'tag' must define 'dig'");
+        inline for f in fields(self) {
+            dig_part(&f.value, s);
+        }
+        inline for v in variants(self) {
+            if v.is_active {
+                s.put(v.index as u64);
+                inline for p in payloads(v) {
+                    dig_part(&p.value, s);
+                }
+            }
+        }
+    }
+}
+pub fn dig_part<V: Dig, S: Sink>(x: &V, s: &mut S) {
+    x.dig(s);
+}
+extend i32 as Dig {
+    fn tag(self: &Self) u64 {
+        return 0;
+    }
+    fn dig<S: Sink>(self: &Self, s: &mut S) {
+        s.put(*self as u64);
+    }
+}
+pub struct NoD {
+    pub x: i32,
+}
+)";
+
+// Module `walk` of `dig_proj`: generic code that reaches `Dig::dig` through a bound.
+const DG_WALK: str = M"(import dig as *;
+
+pub fn via<T: Dig>(t: &T) u64 {
+    let mut a = Acc { v: 0 };
+    t.dig(&mut a);
+    return a.v;
+}
+pub struct Holder<T> {
+    pub t: T,
+}
+extend<T: Dig> Holder<T> {
+    pub fn run(self: &Self) u64 {
+        let mut a = Acc { v: 0 };
+        self.t.dig(&mut a);
+        return a.v;
+    }
+}
+)";
+
+// A project holding modules `dig` (`DG_LIB`) and `walk` (`DG_WALK`).
+fn dig_proj() cli::Proj {
+    let p = cli::proj_new();
+    p.mkfile("dig.spc", DG_LIB);
+    p.mkfile("walk.spc", DG_WALK);
+    return p;
+}
+
+// The cases of `b`, each a module that imports `dig` and `walk`, checked in `dig_proj`.
+fn expect_dig_errs(mut b: cli::Batch) {
+    b.forbid("C compile failed");
+    b.forbid("internal");
+    dig_proj().expect_batch(b);
+}
+
+// An inherited generic default is instantiated with the method's own type arguments wherever it is
+// reached: called directly, through a bound, through a generic type's method, or through another
+// default's reflection loop. Its per-instance static_assert holds for each.
+@test
+fn generic_default_asserts_per_instance() {
+    let own = "pub struct Own {\n    pub k: i32,\n}\nextend Own as Dig {\n    fn tag(self: &Self) u64 {\n        return 2;\n    }\n}\n";
+    let msg = "static assertion failed: a type that defines 'tag' must define 'dig'";
+    let mut b = cli::Batch::new("import dig as *;\nimport walk as *;\n", "");
+    b.add(
+        "called directly",
+        format(
+            "{}fn main() i32 {{\n    let mut a = Acc {{ v: 0 }};\n    Own {{ k: 1 }}.dig(&mut a);\n    return a.v as i32;\n}}\n",
+            own,
+        ).as_str(),
+        msg,
+    );
+    b.add(
+        "through a bound",
+        format("{}fn main() i32 {{\n    return via(&Own {{ k: 1 }}) as i32;\n}}\n", own).as_str(),
+        msg,
+    );
+    b.add(
+        "through a generic type's method",
+        format(
+            "{}fn main() i32 {{\n    let h = Holder::<Own> {{ t: Own {{ k: 1 }} }};\n    return h.run() as i32;\n}}\n",
+            own,
+        ).as_str(),
+        msg,
+    );
+    b.add(
+        "through another default's reflection loop",
+        format(
+            "{}pub struct Out {{\n    pub o: Own,\n}}\nextend Out as Dig {{}}\nfn main() i32 {{\n    return via(&Out {{ o: Own {{ k: 1 }} }}) as i32;\n}}\n",
+            own,
+        ).as_str(),
+        msg,
+    );
+    b.add(
+        "the instantiation note names the method's own argument",
+        format("{}fn main() i32 {{\n    return via(&Own {{ k: 1 }}) as i32;\n}}\n", own).as_str(),
+        "in the instantiation where Self = Own, S = Acc",
+    );
+    expect_dig_errs(b);
+}
+
+// A reflection loop over `variants` or `payloads` owes its bound for every payload it visits: a
+// payload type that misses it is named with its variant.
+@test
+fn reflection_bounds_over_enum_payloads() {
+    let mut b = cli::Batch::new("import dig as *;\nimport walk as *;\n", "");
+    b.add(
+        "a generic default over a payload",
+        "pub enum E {\n    A(NoD),\n    B(i32),\n}\nextend E as Dig {}\nfn main() i32 {\n    let e = E::B(1);\n    return via(&e) as i32;\n}\n",
+        "a payload of 'E' does not satisfy a bound the callee's reflection loop requires",
+    );
+    b.add(
+        "the note names the payload and its variant",
+        "pub enum E {\n    A(i32, NoD),\n    B,\n}\nextend E as Dig {}\nfn main() i32 {\n    let e = E::B;\n    return via(&e) as i32;\n}\n",
+        "payload 1 of variant 'A' of 'E' is 'NoD', which does not satisfy the bound",
+    );
+    b.add(
+        "a default checked at the conformance",
+        "pub enum F {\n    A(NoD),\n    B,\n}\nextend F as Eq {}\nfn main() i32 {\n    return 0;\n}\n",
+        "a payload of 'F' does not satisfy a bound required by the interface's default method 'eq'",
+    );
+    b.add(
+        "a generic enum instance",
+        "pub enum Op<T> {\n    Some(T),\n    None,\n}\nextend<T> Op<T> as Eq {}\nfn main() i32 {\n    let o = Op::<NoD>::None;\n    return 0;\n}\n",
+        "payload 0 of variant 'Some' of 'Op<NoD>' is 'NoD', which does not satisfy the bound",
+    );
+    b.add(
+        "a loop over a concrete enum",
+        "pub enum E {\n    A(NoD),\n    B(i32),\n}\nfn main() i32 {\n    let e = E::B(3);\n    let mut s: u64 = 0;\n    inline for v in variants(&e) {\n        inline for p in payloads(v) {\n            s = s + via(&p.value);\n        }\n    }\n    return s as i32;\n}\n",
+        "type 'payload of E' does not satisfy bound 'Dig'",
+    );
+    b.add(
+        "a variant binder's value",
+        "pub enum E {\n    A(NoD, i32),\n    B(i32),\n}\nfn one<T>(e: &T) u64 {\n    let mut s: u64 = 0;\n    inline for v in variants(e) {\n        if v.payload == 2 {\n            s = s + via(&v.value);\n        }\n    }\n    return s;\n}\nfn main() i32 {\n    let e = E::B(3);\n    return one(&e) as i32;\n}\n",
+        "payload 0 of variant 'A' of 'E' is 'NoD', which does not satisfy the bound",
+    );
+    expect_dig_errs(b);
+}
+
+// The accepted counterparts: a type that writes both methods, reached every way; an enum whose
+// payloads satisfy the bounds, digested and compared; a `fields` loop over an enum and the payload
+// copies a per-copy condition skips, which owe nothing.
+@test
+fn generic_defaults_and_enum_payloads_accepted() {
+    let p = dig_proj();
+    p.mkfile(
+        "main.spc",
+        M"(import dig as *;
+import walk as *;
+
+pub struct Both {
+    pub k: i32,
+}
+extend Both as Dig {
+    fn tag(self: &Self) u64 {
+        return 2;
+    }
+    fn dig<S: Sink>(self: &Self, s: &mut S) {
+        s.put(self.k as u64);
+    }
+}
+pub struct Out {
+    pub b: Both,
+}
+extend Out as Dig {}
+pub enum Shape {
+    Dot,
+    Line(i32),
+    Pair(i32, i32),
+}
+extend Shape as Dig {}
+extend Shape as Eq {}
+pub enum E {
+    A(NoD, i32),
+    B(i32),
+}
+fn tail<T>(e: &T) u64 {
+    let mut s: u64 = 0;
+    inline for v in variants(e) {
+        if v.is_active {
+            inline for p in payloads(v) {
+                if p.index != 0 {
+                    s = s + via(&p.value);
+                }
+            }
+        }
+    }
+    return s;
+}
+fn bytag<T>(e: &T) u64 {
+    let mut s: u64 = 0;
+    inline for v in variants(e) {
+        if v.tag == 1 {
+            if v.is_active {
+                inline for p in payloads(v) {
+                    s = s + via(&p.value);
+                }
+            }
+        }
+    }
+    return s;
+}
+fn single<T>(e: &T) u64 {
+    let mut s: u64 = 0;
+    inline for v in variants(e) {
+        if v.payload == 1 {
+            if v.is_active {
+                s = s + via(&v.value);
+            }
+        }
+    }
+    return s;
+}
+fn flds<T>(e: &T) u64 {
+    let mut s: u64 = 0;
+    inline for f in fields(e) {
+        s = s + via(&f.value);
+    }
+    return s;
+}
+fn main() i32 {
+    let mut acc = Acc { v: 0 };
+    Both { k: 5 }.dig(&mut acc);
+    let hb = Holder::<Both> { t: Both { k: 5 } };
+    if acc.v + via(&Both { k: 5 }) + hb.run() + via(&Out { b: Both { k: 5 } }) != 20 {
+        return 1;
+    }
+    let a = Shape::Line(3);
+    let b = Shape::Line(3);
+    let c = Shape::Pair(3, 1);
+    let d = Shape::Dot;
+    if via(&a) != via(&b) || via(&a) == via(&c) || via(&a) == via(&d) {
+        return 2;
+    }
+    let hs = Holder::<Shape> { t: Shape::Pair(3, 1) };
+    if hs.run() != via(&c) {
+        return 3;
+    }
+    if a != b || a == c || c == d {
+        return 4;
+    }
+    let e = E::B(3);
+    return (tail(&e) + bytag(&e) + single(&e) + flds(&e)) as i32 - 6;
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    if !r.ok() {
+        eprintln("{}", r.text());
+    }
+    assert(r.ok(), "the program compiles");
+    assert(p.cc_build("").ok(), "the emitted C compiles and links");
+    assert_eq(p.run_bin(), 0);
+}
+
+// A closure that writes its environment (an owned capture it mutates) is called only through a
+// writable value: never through `&F` with a `fn move` bound, a shared reference to it, or `&dyn fn`.
+@test
+fn env_writing_closures_need_a_writable_value() {
+    h::expect_err_msg(
+        "a fn move bound called through a shared reference",
+        "fn call_ref<F: fn move() usize>(f: &F) usize {\n    return (*f)();\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "cannot call this closure through a shared reference",
+    );
+    h::expect_err_msg(
+        "a writing closure called through a shared reference",
+        "fn main() i32 {\n    let mut s = String::from_str(\"a\");\n    let c = move fn() usize {\n        s.push_str(\"b\");\n        return s.len();\n    };\n    let r = &c;\n    return (*r)() as i32;\n}\n",
+        "cannot call this closure through a shared reference",
+    );
+    h::expect_err_msg(
+        "a writing closure viewed as &dyn fn",
+        "fn run(f: &dyn fn() usize) usize {\n    return f();\n}\nfn main() i32 {\n    let mut s = String::from_str(\"a\");\n    let c = move fn() usize {\n        s.push_str(\"b\");\n        return s.len();\n    };\n    return run(&c) as i32;\n}\n",
+        "cannot be viewed as '&dyn fn'",
+    );
+    h::expect_ok(
+        "a plain fn bound and a reading closure through shared references",
+        "fn call_ref<F: fn() usize>(f: &F) usize {\n    return (*f)();\n}\nfn main() i32 {\n    let k: usize = 3;\n    let d = fn() usize { return k; };\n    let rd = &d;\n    return ((*rd)() + call_ref(&d)) as i32 - 6;\n}\n",
+    );
+}
+
+// The checker defects of the core-values work: receivers, sub-views, folded type info, inference
+// through forwarded bounds, divided array lengths, open ranges, patterns, closure results, function
+// joins, conversions and dyn self-references.
+@test
+fn core_value_regressions() {
+    h::expect_err_msg(
+        "a receiver type other than the target",
+        "extend<T> Option<T> {\n    pub fn flatten2(self: Option<Option<T>>) Option<T> {\n        return Option::<T>::None;\n    }\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "a 'self' parameter must be 'Option<T>', a reference to it or a raw pointer to it",
+    );
+    h::expect_ok(
+        "inference through a forwarded fn bound and a where-clause fn bound",
+        "fn inner<T, K: Ord, F: fn(&T) K>(x: &T, key: F) K {\n    return key(x);\n}\nfn inner2<T, K, F>(x: &T, key: F) K where F: fn(&T) K, K: Ord {\n    return key(x);\n}\nstruct W<T> { pub v: T }\nextend<T> W<T> {\n    fn by2<K, F>(self: &W<T>, key: F) K where F: fn(&T) K, K: Ord {\n        return inner2(&self.v, key);\n    }\n}\nfn outer<T, K: Ord, F: fn(&T) K>(x: &T, key: F) K {\n    let r = inner(x, key);\n    return r;\n}\nfn main() i32 {\n    let w = W::<i64> { v: 4 };\n    return (w.by2(|a: &i64| *a + 2) + outer(&w.v, |a: &i64| *a + 1)) as i32 - 11;\n}\n",
+    );
+    h::expect_err_msg(
+        "a divided form prints its parentheses",
+        "fn f<const N: usize>() usize {\n    let c: [u64; (N + 63) / 64] = [0u64; N / 64];\n    return 0;\n}\nfn main() i32 {\n    return f::<128>() as i32;\n}\n",
+        "expected '[u64; {(N + 63) / 64}]', found '[u64; {N / 64}]'",
+    );
+    h::expect_err_msg(
+        "an open range takes no static len of a generic extend",
+        "interface Q {}\nextend i32 as Q {}\ninterface L {\n    fn len() usize;\n}\nextend<T: Q> T as L {\n    pub fn len() usize { return 3; }\n}\nstruct W { pub x: u64 }\nextend W as Index<u64, u64> {\n    pub fn index(self: &W, i: usize) &u64 { return &self.x; }\n    pub fn index_range(self: &W, r: Range<usize>) u64 { return r.start as u64; }\n}\nfn main() i32 {\n    let w = W { x: 3 };\n    return w[1..] as i32;\n}\n",
+        "an open-ended range index needs a 'len' method returning 'usize'",
+    );
+    h::expect_err_msg(
+        "a name bound twice in one pattern",
+        "fn f(a: Option<i32>, b: Option<i32>) i32 {\n    return switch (a, b) {\n        (Some(x), Some(x)) => x,\n        _ => 0,\n    };\n}\nfn main() i32 {\n    return f(Option::<i32>::None, Option::<i32>::None);\n}\n",
+        "duplicate definition of 'x'",
+    );
+    h::expect_err_msg(
+        "a closure result that a path misses",
+        "fn call<T, F: fn() T>(f: F) T {\n    return f();\n}\nfn main() i32 {\n    let b: i32 = call(|| {\n        if b0() {\n            return 6;\n        }\n    });\n    return b;\n}\nfn b0() bool {\n    return true;\n}\n",
+        "this closure can reach the end of its body without returning a value",
+    );
+    h::expect_ok(
+        "a dyn of its own interface in a dyn-compatible method",
+        "pub interface Link {\n    fn next(self: &Self) Option<&dyn Link>;\n}\nfn main() i32 {\n    return 0;\n}\n",
+    );
+    let mut b = h::ExitBatch::new();
+    b.add(
+        "a mutated sub-view of a vector, an array and a view",
+        "fn main() i32 {\n    let mut a: [i32; 2] = [5, 6];\n    let w = &mut a[0..1];\n    w[0] = 7;\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let sm = &mut v[0..2];\n    let u = &mut sm[1..2];\n    u[0] = 9;\n    return a[0] + v[1] - 16;\n}\n",
+        0,
+    );
+    b.add(
+        "type info of a type parameter in a local constant",
+        "struct A { pub x: i32, pub y: u8 }\nextend A {\n    fn hello(self: &A) i32 { return 1; }\n}\nfn f<T>() usize {\n    const C: usize = type_info::<T>().size;\n    const M: bool = type_info::<T>().method(\"hello\").is_some();\n    const K: usize = type_info::<T>().fields.len;\n    return C + (if M { 100usize; } else { 0usize; }) + K * 1000;\n}\nfn main() i32 {\n    return (f::<A>() - 2108 + f::<i32>() - 4) as i32;\n}\n",
+        0,
+    );
+    b.add(
+        "a divided array length of a field",
+        "struct A<const N: usize> {\n    c: [u64; N / 64],\n    d: [u64; (N + 63) / 64],\n}\nextend<const N: usize> A<N> {\n    pub fn new() A<N> {\n        let c: [u64; N / 64] = [0u64; N / 64];\n        let d: [u64; (N + 63) / 64] = [0u64; (N + 63) / 64];\n        return A::<N> { c: c, d: d };\n    }\n    pub fn get(self: &A<N>) [u64; N / 64] {\n        return self.c;\n    }\n}\nfn main() i32 {\n    let x = A::<128>::new();\n    return x.get()[1] as i32;\n}\n",
+        0,
+    );
+    b.add(
+        "a unit variant twice in a tuple pattern",
+        "enum Col { Red, Blue }\nfn f(a: Col, b: Col) i32 {\n    return switch (a, b) {\n        (Red, Red) => 1,\n        (Blue, Blue) => 2,\n        _ => 0,\n    };\n}\nfn both(a: Option<i32>, b: Option<i32>) i32 {\n    return switch (a, b) {\n        (None, None) => 3,\n        _ => 0,\n    };\n}\nfn main() i32 {\n    return f(Col::Blue, Col::Blue) + both(Option::<i32>::None, Option::<i32>::None) - 5;\n}\n",
+        0,
+    );
+    b.add(
+        "a block closure's result from its bound or its returns",
+        "fn call<T, F: fn() T>(f: F) T {\n    return f();\n}\nfn twice(f: fn(i32) i32, x: i32) i32 {\n    return f(f(x));\n}\nfn main() i32 {\n    let b: i32 = call(|| {\n        return 6;\n    });\n    let c = call(|| {\n        if b > 100 {\n            return 1u8;\n        }\n        return 2u8;\n    });\n    let d = twice(|x: i32| {\n        return x + 1;\n    }, 3);\n    let mut n = 0;\n    let g = || {\n        n += 1;\n    };\n    g();\n    return b + c as i32 + d + n - 14;\n}\n",
+        0,
+    );
+    b.add(
+        "two functions of one signature join",
+        "fn apply<F: fn(i64) i64>(x: i64, f: F) i64 {\n    return f(x);\n}\nfn f1(x: i64) i64 { return x + 1; }\nfn f2(x: i64) i64 { return x * 100; }\nfn main() i32 {\n    let r: i64 = 3;\n    let h = if r > 0 { f2; } else { f1; };\n    let k = if r < 0 { f2; } else { f1; };\n    return (h(5) + apply(5, k) - 506) as i32;\n}\n",
+        0,
+    );
+    b.add(
+        "into() as a call argument",
+        "struct A { pub v: i32 }\nstruct B { pub v: i32 }\nextend B as From<A> {\n    pub fn from(value: A) B { return B { v: value.v }; }\n}\nstruct C { pub k: i32 }\nextend C {\n    fn take(self: &C, b: B, x: i32) i32 { return b.v + x + self.k; }\n}\nfn take_b(b: B) i32 {\n    return b.v;\n}\nfn main() i32 {\n    let c = C { k: 1 };\n    return c.take(A { v: 2 }.into(), 3) + take_b(A { v: 4 }.into()) - 10;\n}\n",
+        0,
+    );
+    b.add(
+        "a dyn method returning a dyn of its own interface",
+        "pub interface Link {\n    fn next(self: &Self) Option<&dyn Link>;\n    fn val(self: &Self) i32;\n}\nstruct N { pub v: i32, pub nx: *const N }\nextend N as Link {\n    fn next(self: &N) Option<&dyn Link> {\n        if self.nx == null {\n            return Option::<&dyn Link>::None;\n        }\n        let r: &dyn Link = unsafe &*self.nx;\n        return Option::<&dyn Link>::Some(r);\n    }\n    fn val(self: &N) i32 { return self.v; }\n}\nfn sum(l: &dyn Link) i32 {\n    let mut s = l.val();\n    let mut cur = l.next();\n    for _ in 0..16 {\n        if cur.is_none() {\n            break;\n        }\n        let c = cur.unwrap();\n        s += c.val();\n        cur = c.next();\n    }\n    return s;\n}\nfn main() i32 {\n    let b = N { v: 2, nx: null };\n    let a = N { v: 1, nx: &b };\n    return sum(&a) - 3;\n}\n",
+        0,
+    );
+    b.run();
+}
+
+// A borrow made through `&'a dyn I` is the referent's, as through `&'a T`; a closure tying its
+// result to its argument meets `F: fn(T) Option<U>`, and the call relates the two; an accessor
+// indexing a raw-pointer field is not tied to `self`, as its dereference form is not.
+@test
+fn borrow_relations_through_dyn_bounds_and_raw_fields() {
+    h::expect_ok(
+        "a borrow through &'a dyn",
+        "pub interface Named {\n    fn name(self: &Self) &i32;\n}\npub struct K { pub v: i32 }\npub struct Holder<'a> { pub r: &'a i32 }\nfn keep<'a>(h: &mut Holder<'a>, e: &'a dyn Named) {\n    h.r = e.name();\n}\nfn get<'a>(e: &'a dyn Named) &'a i32 {\n    return e.name();\n}\nextend K as Named {\n    pub fn name(self: &K) &i32 { return &self.v; }\n}\nfn main() i32 {\n    let k = K { v: 3 };\n    let z = 0;\n    let mut h = Holder { r: &z };\n    keep(&mut h, &k);\n    return *h.r + *get(&k) - 6;\n}\n",
+    );
+    h::expect_err_msg(
+        "a borrow through a dyn view outlives its referent",
+        "pub interface Named {\n    fn name(self: &Self) &i32;\n}\npub struct K { pub v: i32 }\nextend K as Named {\n    pub fn name(self: &K) &i32 { return &self.v; }\n}\nfn main() i32 {\n    let z = 0;\n    let mut r = &z;\n    {\n        let k = K { v: 3 };\n        let d: &dyn Named = &k;\n        r = d.name();\n    }\n    return *r - 3;\n}\n",
+        "does not live long enough",
+    );
+    h::expect_ok(
+        "a closure returning its borrowed argument",
+        "fn fm<T, U, F: fn(T) Option<U>>(x: T, f: F) Option<U> {\n    return f(x);\n}\nfn main() i32 {\n    let s = String::from_str(\"abc\");\n    let o = fm(&s, |s: &String| Option::<&String>::Some(s));\n    return (o.unwrap().len() as i32) - 3;\n}\n",
+    );
+    h::expect_err_msg(
+        "the call relates the bound's type parameters",
+        "fn fm<T, U, F: fn(T) Option<U>>(x: T, f: F) Option<U> {\n    return f(x);\n}\nfn main() i32 {\n    let z = String::from_str(\"zz\");\n    let mut o = Option::<&String>::Some(&z);\n    {\n        let s = String::from_str(\"abc\");\n        o = fm(&s, |q: &String| Option::<&String>::Some(q));\n    }\n    return (o.unwrap().len() as i32) - 3;\n}\n",
+        "does not live long enough",
+    );
+    h::expect_ok(
+        "an index of a raw-pointer field",
+        "struct It<'a> {\n    pub data: *const i32,\n    pub idx: usize,\n}\nextend<'a> It<'a> {\n    fn by_deref(self: &mut It<'a>) &'a i32 {\n        return unsafe &*(self.data + self.idx);\n    }\n    fn by_index(self: &mut It<'a>) &'a i32 {\n        return &unsafe self.data[self.idx];\n    }\n}\nfn main() i32 {\n    let a: [i32; 2] = [1, 2];\n    let mut it = It { data: &a[0], idx: 1 };\n    return *it.by_deref() + *it.by_index() - 4;\n}\n",
+    );
+}
+
+// `Self` of a foreign extend whose target has a lifetime and a defaulted type parameter is the
+// receiver's instance, not the default.
+@test
+fn foreign_self_with_a_defaulted_parameter() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "wmod.spc",
+        "pub struct D {}\npub struct E {}\n\npub struct W<'a, T = D> {\n    pub p: *const T,\n}\n\nextend<'a, T> W<'a, T> {\n    pub fn make() Self {\n        return W::<T> { p: null };\n    }\n}\n",
+    );
+    p.mkfile("main.spc", "import wmod as *;\n\nfn main() i32 {\n    let a: W<E> = W::<E>::make();\n    return 0;\n}\n");
+    let r = p.compile("main.spc");
+    assert(r.ok(), "W::<E>::make() is a W<E>");
 }

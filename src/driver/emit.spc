@@ -461,6 +461,23 @@ fn discharge_obligations(p: &mut loader::Package, n: usize, dup_done: bool, dup_
             break;
         }
     }
+    // Every obligation list is complete: run the default-method instances the calls demand.
+    for i in 0..pick(p.ok, n, 0) {
+        let pkg = p as *mut loader::Package;
+        let m = &mut p.modules[i];
+        if (unsafe m.ast.dmd_uses).len() == 0 {
+            continue;
+        }
+        let src = m.source.as_str().ptr() as *const char;
+        let len = m.source.len();
+        let mut t = tc::TypeChecker::new(&mut m.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+        t.run_dmd_uses();
+        if t.has_errors() {
+            t.errors.finalize(unsafe str::from_raw(src as *const u8, len), p.modules[i].file.as_str());
+            t.log_errors();
+            p.ok = false;
+        }
+    }
 }
 
 struct RsOut {
@@ -1973,16 +1990,22 @@ fn inst_where(
     let mut names = Array::<u64, 8> {};
     let mut nn: usize = 0;
     for k in 0..np {
-        let gs = pa.at_const(pa.at_const(prm[k as usize]).as_data.generic_param.name).as_data.name.text;
-        let gn = psrc.slice(gs.start as usize, gs.end as usize);
+        // An interface node stands for the interface's `Self`.
+        let pn = pa.at_const(prm[k as usize]);
+        let gn = if pn.kind == NodeKind::NODE_GENERIC_PARAM {
+            let gs = pa.at_const(pn.as_data.generic_param.name).as_data.name.text;
+            psrc.slice(gs.start as usize, gs.end as usize);
+        } else {
+            "Self";
+        };
         let mut seen = false;
         for j in 0..nn {
-            seen = seen || names[j] == gn.hash();
+            seen = seen || names[j] == fnv(gn);
         }
         if seen {
             continue;
         }
-        names[nn] = gn.hash();
+        names[nn] = fnv(gn);
         nn += 1;
         if nn != 1 {
             tn.push_str(", ");
@@ -2008,7 +2031,7 @@ fn cemit_inst_error(p: &mut loader::Package, d: DefId, subs: &Vector<mbe::MSub>,
     let mut np: u8 = 0;
     for k in 0..subs.len() {
         let sb = *subs.at(k);
-        if sb.pm == subs.at(0).pm && np < 8 {
+        if sb.pm == d.module && np < 8 {
             prm[np as usize] = sb.pnode;
             ams[np as usize] = sb.am;
             ats[np as usize] = sb.at;
@@ -2017,16 +2040,18 @@ fn cemit_inst_error(p: &mut loader::Package, d: DefId, subs: &Vector<mbe::MSub>,
     }
     let mut errs = diag::Errors::new();
     errs.emit_span(a.at_const(lw.user_err).span, format("{}", lw.user_msg));
-    errs.note(inst_where(p, subs.at(0).pm, &prm, &ams, &ats, np));
+    errs.note(inst_where(p, d.module, &prm, &ams, &ats, np));
     errs.finalize(p.modules[d.module as usize].source.as_str(), p.modules[d.module as usize].file.as_str());
     errs.log();
     p.ok = false;
 }
 
 // Per-instantiation static_asserts inside a demanded generic body: evaluate each under the
-// demand's substitution; false fails the build, naming every binding.
+// demand's substitution; false fails the build, naming every binding. `mg` (null when `subs` is
+// flat and concrete) grounds an emission demand's chain.
 fn cemit_inst_asserts(
     p: &mut loader::Package,
+    mg: *mut mbe::Mangler,
     d_def: DefId,
     subs: &Vector<mbe::MSub>,
     dk: u64,
@@ -2060,19 +2085,54 @@ fn cemit_inst_asserts(
         return;
     }
     let fsp = a.at_const(d_def.node).span;
+    let mut held = false;
+    for ni in 0..ia.at(dm).len() {
+        let sp = a.at_const(*ia.at(dm).at(ni)).span;
+        held = held || sp.start >= fsp.start && sp.end <= fsp.end;
+    }
+    if !held {
+        seen.insert(dk, 1);
+        return;
+    }
     let cev = p.cir as *mut iri::Interp;
-    let pmod = subs.at(0).pm;
+    // The instance's own bindings: the innermost entry of each of its parameters. A demand from a
+    // generic body lists the caller's frames first, and its entries may name them: `mg` grounds
+    // each through the frames below its group (`MSub.lim`).
+    let pmod = d_def.module;
     let mut prm = Array::<NodeId, 8> {};
     let mut ams = Array::<ModuleId, 8> {};
     let mut ats = Array::<TypeId, 8> {};
     let mut np: u8 = 0;
+    let mut saved = Vector::<mbe::MSub>::new();
+    if mg != null {
+        saved = mbe::subs_copy(unsafe &(*mg).subs);
+        unsafe (*mg).clear_subs();
+        for k in 0..subs.len() {
+            unsafe (*mg).push_msub(*subs.at(k));
+        }
+    }
     for k in 0..subs.len() {
         let sb = *subs.at(k);
-        if sb.pm == pmod && np < 8 {
-            prm[np as usize] = sb.pnode;
-            ams[np as usize] = sb.am;
-            ats[np as usize] = sb.at;
-            np += 1;
+        let mut inner = true;
+        for j in k + 1..subs.len() {
+            inner = inner && (subs.at(j).pm != sb.pm || subs.at(j).pnode != sb.pnode);
+        }
+        if sb.pm != pmod || !inner || np >= 8 {
+            continue;
+        }
+        let mut at = sb.at;
+        if mg != null && !unsafe (*mg).ground_l(sb.am, sb.at, sb.am, sb.lim as usize, &mut at, 0) {
+            continue;
+        }
+        prm[np as usize] = sb.pnode;
+        ams[np as usize] = sb.am;
+        ats[np as usize] = at;
+        np += 1;
+    }
+    if mg != null {
+        unsafe (*mg).clear_subs();
+        for k in 0..saved.len() {
+            unsafe (*mg).push_msub(*saved.at(k));
         }
     }
     let src = p.modules[d_def.module as usize].source.as_str();
@@ -2145,7 +2205,7 @@ fn flush_inst_asserts(p: &mut loader::Package) {
             );
             dk = skey_mix(dk, (unsafe r.ams[k as usize]) as u64 << 32 | at as u64);
         }
-        cemit_inst_asserts(p, r.f, &subs, dk, &mut seen, &mut ia, &mut ia_built);
+        cemit_inst_asserts(p, null, r.f, &subs, dk, &mut seen, &mut ia, &mut ia_built);
     }
 }
 
@@ -2183,7 +2243,7 @@ fn graph_inst_asserts(p: &mut loader::Package, g: &mut ig::InstGraph) u64 {
             subs.push(mbe::MSub { pnode: prm[k], at: tys[k], lim: 0, pm: f.module, am: f.module });
             dk = skey_mix(dk, tys[k]);
         }
-        cemit_inst_asserts(p, f, &subs, dk, &mut seen, &mut ia, &mut ia_built);
+        cemit_inst_asserts(p, null, f, &subs, dk, &mut seen, &mut ia, &mut ia_built);
         n += 1;
     }
     unsafe (*cev).inst_asserts_failed = !p.ok;
@@ -2209,7 +2269,7 @@ fn struct_def_names(text: str, out: &mut Set<u64>) {
                 j += 1;
             }
             if j > s0 && j + 2 <= n && text.byte_at(j) == b' ' && text.byte_at(j + 1) == b'{' {
-                out.insert(text.slice(s0, j).hash());
+                out.insert(fnv(text.slice(s0, j)));
             }
             i = j;
         } else {
@@ -2219,7 +2279,7 @@ fn struct_def_names(text: str, out: &mut Set<u64>) {
 }
 
 const fn struct_def_hit(defined: &Set<u64>, nm: str) bool {
-    return defined.contains(&nm.hash());
+    return defined.contains(&fnv(nm));
 }
 
 // Every module's instance records by the module that declares the generic: a module checks the
@@ -2347,7 +2407,7 @@ fn cemit_layout_asserts(
             any = true;
         } else {
             push_layout_assert(
-                lay.index_mut((*ds.idx.get(&nkey(nm.as_str().hash())).unwrap()) as usize),
+                lay.index_mut((*ds.idx.get(&nkey(fnv(nm.as_str()))).unwrap()) as usize),
                 nm.as_str(),
                 lo.size,
                 lo.align,
@@ -2380,7 +2440,7 @@ fn cemit_layout_asserts(
                 continue;
             }
             push_layout_assert(
-                lay.index_mut((*ds.idx.get(&nkey(nm.as_str().hash())).unwrap()) as usize),
+                lay.index_mut((*ds.idx.get(&nkey(fnv(nm.as_str()))).unwrap()) as usize),
                 nm.as_str(),
                 lo.size,
                 lo.align,
@@ -2459,7 +2519,7 @@ fn cemit_relower_census(
         }
         let txt = irp::print_body(&lws.at(i).body);
         let ts = txt.as_str();
-        let h = ts.hash();
+        let h = fnv(ts);
         hashes.set(i, h);
         let mut same = false;
         for j in 0..i {
@@ -2478,7 +2538,7 @@ fn cemit_relower_census(
     let mut seen = Set::<u64>::new();
     for di in 0..cem.demand.len() {
         let ds = cem.demand.at(di).sym.as_str();
-        let dk = ds.hash();
+        let dk = fnv(ds);
         if !done.contains_key(&dk) || seen.contains(&dk) {
             continue;
         }
@@ -2957,7 +3017,7 @@ fn cemit_closure_queue(
         }
         acc.clos_ok += 1;
         if envs.len() != 0 {
-            let eh9 = fnv_cont(csym.as_str().hash(), "_env");
+            let eh9 = fnv_cont(fnv(csym.as_str()), "_env");
             if rec {
                 let mut ev9 = mbe::RecEv::blank(mbe::RK_ENV);
                 ev9.h = eh9;
@@ -3349,7 +3409,7 @@ fn cemit_drain_demand(
 ) {
     let d_def = cem.demand.at(di).def;
     let ds = cem.demand.at(di).sym.as_str();
-    let dk = ds.hash();
+    let dk = fnv(ds);
     // Dedup on SUCCESS only: two demands for one symbol can carry different substitution
     // chains, and the first may be the incomplete one; a later, fuller chain must retry.
     let seen = done.contains_key(&dk);
@@ -3384,7 +3444,7 @@ fn cemit_drain_demand(
     let d_sfx = cem.demand.at(di).sfx.clone();
     // Per-instantiation static_asserts: under this demand's substitution the condition is
     // this instance's compile-time fact; false is a COMPILE error naming the type argument.
-    cemit_inst_asserts(p, d_def, &d_subs, dk, sa_seen, ia_idx, ia_built);
+    cemit_inst_asserts(p, &mut cem.mg, d_def, &d_subs, dk, sa_seen, ia_idx, ia_built);
     // A body with an UNEXPANDED reflection binder re-lowers per instance: the demand env
     // makes the binder's owner concrete, so the copies expand for real. A body whose only
     // env-dependence is `sizeof(T) <op> 0` branches re-lowers once per ZST-BIT SIGNATURE of
@@ -3792,7 +3852,7 @@ fn cemit_drain_slice_one(
         if cemit_queued_closure(sh, d_def.module, cn, clp, &mut clsq, &mut csym, &mut envs) {
             o.acc.clos_ok += 1;
             if envs.len() != 0 {
-                o.acc.env_names.push(fnv_cont(csym.as_str().hash(), "_env"));
+                o.acc.env_names.push(fnv_cont(fnv(csym.as_str()), "_env"));
                 o.acc.env_bodies.push(envs);
                 o.acc.env_own.push(d_def.module);
             }
@@ -4822,7 +4882,7 @@ pub fn cemit_package(
         let mut newsyms = Vector::<String>::new(); // first demanding symbol, for the failure print
         let mut newdef_seen = Map::<u64, u64>::new();
         for j in qi..len0 {
-            let dkj = cem.demand.at(j).sym.as_str().hash();
+            let dkj = fnv(cem.demand.at(j).sym.as_str());
             let seenj = done.contains_key(&dkj);
             if seenj {
                 continue;
@@ -4991,7 +5051,7 @@ pub fn cemit_package(
             {
                 let jd = cem.demand.at(j).def;
                 let jsubs = mbe::subs_copy(&cem.demand.at(j).subs);
-                cemit_inst_asserts(p, jd, &jsubs, dkj, &mut sa_seen, &mut ia_idx, &mut ia_built);
+                cemit_inst_asserts(p, &mut cem.mg, jd, &jsubs, dkj, &mut sa_seen, &mut ia_idx, &mut ia_built);
             }
             {
                 let o = dsh.index_mut(scur);
@@ -5111,7 +5171,7 @@ pub fn cemit_package(
         let mut fseen = Map::<u64, u64>::new();
         for di9 in 0..cem.demand.len() {
             let fs9 = cem.demand.at(di9).sym.as_str();
-            let fk9 = fs9.hash();
+            let fk9 = fnv(fs9);
             let emitted9 = done.contains_key(&fk9);
             let counted9 = fseen.contains_key(&fk9);
             if !emitted9 && !counted9 {
@@ -6181,7 +6241,13 @@ fn st_ctype(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, gi: u
     let mut ok = true;
     if unsafe (*g).nargs != 0 {
         let mut last = unsafe (*g).nargs;
-        while last > 0 && mg.is_global(unsafe (*g).am[(last - 1) as usize], unsafe (*g).at[(last - 1) as usize]) {
+        while last > 0 && mg.is_default_arg(
+            dm,
+            dn,
+            last - 1,
+            unsafe (*g).am[(last - 1) as usize],
+            unsafe (*g).at[(last - 1) as usize],
+        ) {
             last -= 1;
         }
         for i in 0..last {
@@ -6196,7 +6262,7 @@ fn st_ctype(p: &loader::Package, mg: &mut mbe::Mangler, cev: &iri::Interp, gi: u
     if !ok {
         return false;
     }
-    mg.need_name(out.as_str().slice(st, out.len()).hash(), true);
+    mg.need_name(fnv(out.as_str().slice(st, out.len())), true);
     if decl.len() != 0 {
         out.push_str(" ");
         out.push_str(decl);
@@ -6867,7 +6933,7 @@ fn cemit_simd_entries(
     }
     // The constants the entries address (a shuffle's index table): defined with every other one.
     for j in 0..sc.stat_items.len() {
-        let k = sc.stat_items.at(j).sym.as_str().hash(); // before the move below
+        let k = fnv(sc.stat_items.at(j).sym.as_str()); // before the move below
         if cem.stat_seen.contains(&k) {
             continue;
         }
@@ -7284,7 +7350,7 @@ fn extern_block_aliases(
 fn x_define(c: str, toks: &mut Set<u64>, names: &mut Vector<String>, defs: &mut String) {
     let mut t = String::new();
     mbe::x_token(c, &mut t);
-    let h = t.as_str().hash();
+    let h = fnv(t.as_str());
     if !toks.contains(&h) {
         toks.insert(h);
         defs.format_into("#define {} {}\n", t.as_str(), c);
@@ -7934,7 +8000,7 @@ fn cemit_assemble(
     ws.sort_by(wrap_req_cmp);
     let mut wfirst = Map::<u64, u32>::new(); // element name key -> its first wrapper in `ws`
     for j in 0..ws.len() {
-        let k = nkey(ws[j].elem.as_str().hash());
+        let k = nkey(fnv(ws[j].elem.as_str()));
         if !wfirst.contains_key(&k) {
             wfirst.insert(k, j as u32);
         }
@@ -7954,7 +8020,7 @@ fn cemit_assemble(
             cap_pe(&em.chunk_name_end, i as u32) as usize,
             em.chunk_name_end[i] as usize,
         );
-        let w0 = switch wfirst.get(&nkey(nm.hash())) {
+        let w0 = switch wfirst.get(&nkey(fnv(nm))) {
             Some(v) => (*v) as usize,
             None => ws.len(),
         };
@@ -8078,7 +8144,7 @@ fn cemit_assemble(
             }
             let line = src.slice(a, b + 1);
             let name = typedef_name(line);
-            let home = switch ds.idx.get(&nkey(name.hash())) {
+            let home = switch ds.idx.get(&nkey(fnv(name))) {
                 Some(v) => *v,
                 None => ANY_HOME,
             };
@@ -8281,9 +8347,9 @@ fn cemit_assemble(
         cem.mg.mark_used(s9.mid);
         cem.mg.mark_used(s9.mid | 0x8000);
         cem.mg.mark_used(v9.mid | 0x8000);
-        cem.mg.need_name("Vector__str".hash(), true);
-        cem.mg.need_name("str".hash(), true);
-        cem.mg.need_name("Global".hash(), false);
+        cem.mg.need_name(fnv("Vector__str"), true);
+        cem.mg.need_name(fnv("str"), true);
+        cem.mg.need_name(fnv("Global"), false);
     }
     let tnr = TnRows::new(&cem.mg, 2 * n + 1);
     let mut pend = Vector::<u32>::new();
@@ -8649,7 +8715,7 @@ extend FwdDecls {
 
     /// Record declaration `text` of `name` homed in `home`; false when `name` already has one.
     fn add(self: &mut Self, name: str, text: str, home: u32) bool {
-        let h = nkey(name.hash());
+        let h = nkey(fnv(name));
         if self.keys.contains_key(&h) {
             return false;
         }
@@ -8668,7 +8734,7 @@ extend FwdDecls {
     /// (`mbe::x_alias`): a file that spells it includes that header (`scan`). False when `name`
     /// already has a declaration.
     fn add_header(self: &mut Self, name: str, home: u32) bool {
-        let h = nkey(name.hash());
+        let h = nkey(fnv(name));
         if self.keys.contains_key(&h) {
             return false;
         }
@@ -8870,7 +8936,7 @@ extend DefSet {
     /// Add the definition `body` of C name `nm` owned by `own`; its index.
     fn add(self: &mut Self, nm: str, body: str, own: ModuleId) u32 {
         let d = self.key.len() as u32;
-        let h = nkey(nm.hash());
+        let h = nkey(fnv(nm));
         assert(!self.idx.contains_key(&h));
         self.idx.insert(h, d);
         self.key.push(h);
@@ -9139,7 +9205,7 @@ extend XDecls {
     // Record alias token `name` of the scoped extern header of definition header `d`: a unit that
     // spells it includes that header. A name recorded already keeps its entry.
     fn add_header(self: &mut Self, name: str, d: u32) {
-        let h = nkey(name.hash());
+        let h = nkey(fnv(name));
         if self.keys.contains_key(&h) {
             return;
         }
@@ -9176,7 +9242,7 @@ extend XDecls {
                 continue;
             }
             let dl = text.slice(a, end);
-            let h = nkey(decl_name(dl).hash());
+            let h = nkey(fnv(decl_name(dl)));
             if fd.find(h) == 0xFFFFFFFF && !self.keys.contains_key(&h) {
                 self.keys.insert(h, self.seg.end.len() as u32);
                 let w = (h & 0xFFFF) as usize / 64;
@@ -9871,7 +9937,7 @@ const fn item_hash(pl: str) u64 {
         }
         s -= 1;
     }
-    return pl.slice(s, e).hash();
+    return fnv(pl.slice(s, e));
 }
 
 // Module `m`'s shard count under the policy: its TU shards, or its instance shards (`inst`).
@@ -9979,17 +10045,17 @@ fn pack_plan(
     for k in 0..lm.len() {
         let t = lm[k] as usize;
         if pack_small(unity, co.tu_heads.at(t).len(), tsz[t]) && !co.tu_x[t] {
-            tu_pk.set(t, (p.modules[t].path.as_str().hash() % np as u64) as u32 + 1);
+            tu_pk.set(t, (fnv(p.modules[t].path.as_str()) % np as u64) as u32 + 1);
         }
     }
     for k in 0..iq.len() {
         let q = iq[k] as usize;
         if pack_small(unity, co.inst_heads.at(q).len(), isz[q]) && !co.inst_x[q] {
-            in_pk.set(q, (format("{}__inst", p.modules[q].path.as_str()).as_str().hash() % np as u64) as u32 + 1);
+            in_pk.set(q, (fnv(format("{}__inst", p.modules[q].path.as_str()).as_str()) % np as u64) as u32 + 1);
         }
     }
     if small_reg {
-        *reg_pk = ("__sc_registry".hash() % np as u64) as u32 + 1;
+        *reg_pk = (fnv("__sc_registry") % np as u64) as u32 + 1;
     }
     return np;
 }
@@ -10898,12 +10964,12 @@ fn report_len_faults(p: &mut loader::Package, fs: &Vector<ig::LenFault>) {
     let mut user = Set::<u64>::new();
     for i in 0..fs.len() {
         if !p.modules[fs.at(i).module as usize].prelude {
-            user.insert(fs.at(i).msg.as_str().hash());
+            user.insert(fnv(fs.at(i).msg.as_str()));
         }
     }
     for i in 0..fs.len() {
         let f = fs.at(i);
-        if p.modules[f.module as usize].prelude && user.contains(&f.msg.as_str().hash()) {
+        if p.modules[f.module as usize].prelude && user.contains(&fnv(f.msg.as_str())) {
             continue;
         }
         let mut errs = diag::Errors::new();
@@ -11303,7 +11369,7 @@ pub fn lint_unused_items(p: &mut loader::Package, only_mod: i32, sink: *mut Vect
                     let nid = lint_item_name(a, e[k].node);
                     if !e[k].root && nid != NODE_NONE {
                         let nsp = unsafe (*a).at_const(nid).as_data.name.text;
-                        if removed.binary_search(&src.slice(nsp.start as usize, nsp.end as usize).hash()).is_ok() {
+                        if removed.binary_search(&fnv(src.slice(nsp.start as usize, nsp.end as usize))).is_ok() {
                             e.index_mut(k).root = true;
                         }
                     }
@@ -11945,7 +12011,7 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
                 };
                 // Code the platform filter removed may hold the only use.
                 if nsp.end <= nsp.start || src[nsp.start as usize] == b'_' || hit || removed.binary_search(
-                    &src.slice(nsp.start as usize, nsp.end as usize).hash(),
+                    &fnv(src.slice(nsp.start as usize, nsp.end as usize)),
                 ).is_ok() {
                     continue;
                 }

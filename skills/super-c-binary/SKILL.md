@@ -215,7 +215,8 @@ super-c lint --target=linux --arch=x86_64 --target-cpu=x86-64-v3   # another tar
 `lint` applies build.toml's `target-cpu` and `target-features` when the file exists, then the
 command line's, as a build does. In a project with `src/`, a subdirectory with its own
 `build.toml` is a nested project: `lint` checks it as `lint` run in that subdirectory does
-(its manifest, its imports; `lint_project` in `src/main.spc`).
+(its manifest, its imports; `lint_project` in `src/main.spc`). A batch that holds a file of the
+manifest's test directory lints with `TEST` set, as `super-c test` builds it.
 
 Lints: unused imports/members/labels, unnecessary `mut`/`unsafe`/cast, unreachable
 statements/arms/branches (after a `return`, an `if` whose two branches both leave, a

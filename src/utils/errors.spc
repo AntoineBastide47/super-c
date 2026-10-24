@@ -354,7 +354,7 @@ extend Errors {
 
 // The start offset of every line of `source`: after `\n`, `\r\n`, or a lone `\r`.
 @cold
-fn line_starts_of(source: str) Vector<u32> {
+pub fn line_starts_of(source: str) Vector<u32> {
     let len = source.len();
     let mut line_starts = Vector::<u32>::new();
     line_starts.reserve(len / 16);
@@ -393,6 +393,11 @@ const fn line_index(line_starts: &Vector<u32>, off: u32) usize {
         return 0;
     }
     return lo - 1;
+}
+
+/// The 1-based line of byte `off`, given the line ends `line_starts_of` returned for its source.
+pub const fn line_in(line_starts: &Vector<u32>, off: u32) u32 {
+    return line_index(line_starts, off) as u32 + 1;
 }
 
 /// The 1-based line of byte `off` of `source`, with the line ends of `line_starts_of`.

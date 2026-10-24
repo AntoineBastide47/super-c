@@ -1126,3 +1126,25 @@ fn const_eval_operator_reads_foreign_provisional_types() {
     let r = p.run_raw(args.as_str());
     assert(r.ok(), "lint evaluates the constant");
 }
+
+// A file of the test suite lints as `super-c test` builds it, with TEST set: an `@when(TEST)` item
+// of the sources that only the tests use resolves.
+@test
+fn lint_sets_test_for_the_test_suite() {
+    if cli::on_wasm() {
+        return; // the project layout is read from the working directory, which the guest lacks
+    }
+    let p = cli::proj_new();
+    p.mkfile("src/main.spc", "import util;\n\nfn main() i32 {\n    return util::twice(0);\n}\n");
+    p.mkfile(
+        "src/util.spc",
+        "pub fn twice(x: i32) i32 {\n    return x * 2;\n}\n\n@when(TEST)\npub fn probe() i32 {\n    return 21;\n}\n",
+    );
+    p.mkfile(
+        "tests/util_test.spc",
+        "import util;\n\n@test\nfn probe_doubles() {\n    assert(util::twice(util::probe()) == 42, \"probe\");\n}\n",
+    );
+    let r = cli::superc_env_in(p.dir(), "SC_NO_EMIT_CACHE", "1", "lint");
+    assert(!r.out_shows("no visible item 'probe'"), "the test file sees the TEST item");
+    assert_eq(r.exit, 0);
+}

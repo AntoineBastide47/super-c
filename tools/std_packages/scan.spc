@@ -117,7 +117,7 @@ const fn matchertext_ahead(src: str, i: usize) bool {
 // The index past the matchertext literal without holes whose `"` is at `i` (`M"(..)"`): its content is
 // verbatim and its matchers match, so the literal ends at the closer that matches its opener, then a `"`.
 // 0 when the source ends first. `line` counts the newlines of the content.
-fn raw_mt_end(src: str, i: usize, line: &mut u32) usize {
+const fn raw_mt_end(src: str, i: usize, line: &mut u32) usize {
     let o = at(src, i + 1);
     if o != b'(' && o != b'[' && o != b'{' {
         return 0;
@@ -306,7 +306,7 @@ const fn is_word(src: str, toks: &Vector<Tok>, k: usize, w: str) bool {
 
 // Whether the `@platform(..)` or `@arch(..)` whose `(` is token `k` keeps wasm32: a list of names joined by
 // `|` that holds `wasm` (`wasm32` for an arch), or `!` and another name. `*end` is set past its `)`.
-fn keeps_wasm(src: str, toks: &Vector<Tok>, k: usize, arch: bool, end: &mut usize) bool {
+const fn keeps_wasm(src: str, toks: &Vector<Tok>, k: usize, arch: bool, end: &mut usize) bool {
     let want = if arch {
         "wasm32";
     } else {

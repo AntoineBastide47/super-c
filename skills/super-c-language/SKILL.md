@@ -76,7 +76,10 @@ type when omitted. The program entry is the root module's top-level `main`, decl
 named `main`, is an ordinary function of any signature.
 
 A parenthesized return list (`fn f() (A, B)`) is several results, not a tuple. To return a
-tuple, name it through an alias: `type P = (A, B); fn f() P`.
+tuple, name it through an alias: `type P = (A, B); fn f() P`. A call with several results is not
+a value: it is allowed only as `let (a, b) = f();`, `return f();`, or a statement that discards
+them. Anywhere else (an argument, an operand, `assert_eq(pair(), (1, 2))`) is an error: "a call
+with several results is not a value: bind them with `let (a, b) = ..`".
 
 A direct call of a function to itself whose result the function returns as it is becomes a
 jump in every profile, so the recursion runs in one frame. It stays a call when a drop, a
@@ -110,7 +113,8 @@ extend Counter {
 
 Fields are private by default: only the type's own `extend` blocks can name a private field, even
 in the same module; `pub` exposes it everywhere. One `extend` block per
-type at file end. Interface conformance blocks (`extend T as I { .. }`) stay separate.
+type at file end. Interface conformance blocks (`extend T as I { .. }`) stay separate. A method's
+`self` is the extend's target (`Self`), a reference to it, or a raw pointer to it.
 
 A method or associated constant is defined once for any one instance of its type: a second item of
 the name (a method or a constant, any signature) in a plain `extend` that applies to a common
@@ -318,6 +322,13 @@ arguments of one call cannot reach the same storage when one of them hands it ov
 value as mutable while it is already borrowed as ..." errors. A reference erased to a raw pointer
 in the same call (`h4(r, r as *mut i32)`) is not checked.
 
+A reference casts only to a pointer to its own referent type (`&x as *const T` for `x: T`).
+Viewing the memory as another type is a second cast, from that pointer:
+`(&mut x as *mut i32) as *mut usize`, `(&a as *const [u8; 4]) as *const u8`, or the element's own
+address `&a[0] as *const u8`. A single cast that changes the type is "a reference to 'i32' casts only
+to a pointer to 'i32': cast to '*mut i32' first, then to '*mut usize'": a reinterpretation, and the
+undefined behavior a wrong one causes, is always written out.
+
 There is no auto-dereference through a raw pointer (the Rust rule): for `p: *mut T`,
 `p.f` and `p.m()` are errors; write `unsafe (*p).f` and `unsafe (*p).m()`. A method whose
 `self` is the raw pointer type itself applies to `p` directly. The explicit form keeps the
@@ -396,7 +407,14 @@ Any closure or function, with or without captures, erases to `&dyn fn(..)` or `B
 (`Box::new(closure)` too; a boxed env frees its owned captures once). `move` before a closure literal is the closure itself.
 A runtime `fn(..)` pointer value does not erase (`&p` included): wrap it in a closure. A call
 through a reference to a `dyn fn` value or a function pointer calls the pointee (`v.at(0)()` for
-`Vector<Box<dyn fn() i32>>`).
+`Vector<Box<dyn fn() i32>>`). A closure that writes its environment (an owned capture it mutates)
+and any value of an `F: fn move` bound cannot be called through a shared reference (`f: &F`) or
+viewed as `&dyn fn(..)`: take it by value or by `&mut`. A read-only closure and a plain `fn` bound
+are callable through `&`.
+
+A block-bodied closure with no written result type takes it from the expected function type when
+that is concrete (`let f: fn(i32) i32 = |x: i32| { return x + 1; };`), else from its `return`
+values; a path that can reach the end without returning is an error.
 
 A closure parameter's type may name lifetimes, with a function type's meaning
 ([types.md](references/types.md)): `|x: &'static i32|` takes only `'static` borrows, and
@@ -424,6 +442,10 @@ extend Circle as Shape {
 }
 ```
 
+A conformance block defines only members of its interface: another method is "'helper' is not a
+member of interface 'Eq': define it in a plain 'extend' of the type". A superinterface's methods
+go in that superinterface's own conformance block.
+
 `Self::f()`, `Self::K` and `Self { .. }` name the implementing type inside an extend or an
 interface default body. A call on a concrete receiver chooses by its arguments among the methods
 its extends define and the defaults its conformances inherit (see the generics section of
@@ -437,9 +459,15 @@ interface, with the declaration's lifetime and generic parameters, their bounds,
 `@arch` and `@when` gates; it takes any interface, markers (`Copy`, `Send`) included. Use it for every
 empty conformance (references/style.md). A union cannot take it.
 
-The prelude defaults of `Clone`, `Default`, `Eq` and `Ord` (what `@derive` and an empty `extend`
-use) work field by field. An enum must define `clone` and `default` itself, and a union also `eq`
-and `cmp`; inheriting one of those defaults is a compile error at the conformance.
+The prelude defaults of `Clone`, `Default`, `Eq`, `Ord`, `Format` and `Hash` (what `@derive` and an
+empty `extend` use) work field by field, or by an enum's active variant and its payloads. An enum
+must define `clone` and `default` itself, and a union also `eq` and `cmp`; inheriting one of those
+defaults is a compile error at the conformance. Each field, or each payload of each variant, must
+meet the interface the default walks with: the build names the one that does not ("payload 1 of
+variant 'A' of 'E' is 'NoD', which does not satisfy the bound"), however the default is reached
+(directly, through a bound, or through another type's default). A copy a guard skips
+(`if p.index > 0`, a variant-tag test) owes nothing. The `Hash` default is consistent only with
+the `Eq` default: a type that writes its own `eq` must write `hash_into`.
 
 Bounds are enforced at instantiation, with a generic interface's arguments: `T: I<bool>` needs a
 conformance as `I<bool>`, a type parameter meets a bound only through its own bounds, and a call
@@ -532,7 +560,8 @@ pointer and a length (`types.md`). The compiler's own sources (`src/`, `std/`, `
 array like `&a` (`&mut a` for `[]mut`) and never moves it: the array must outlive the view and
 cannot be written, moved or viewed mutably while the view is live. A `[]mut T` coerces to `[]T` (a
 generic `[]T` parameter infers `T` from it); the `[]T` borrows the `[]mut T` shared, and a `[]mut T`
-passed to a call is a mutable use of it, as a `&mut` argument is. A literal coerced to a slice
+passed to a call is a mutable use of it, as a `&mut` argument is. `&mut x[a..b]` on an array, a
+`[]mut T` or a container with `index_range_mut` is a `[]mut T`, and `&x[a..b]` a `[]T`. A literal coerced to a slice
 (`let s: []u8 = [x, y];`, `f([x, y])`) builds its array in a temporary that lives to the end of
 its block, so its view cannot leave the block or be returned. An `if` or `switch` arm whose value
 borrows a temporary of the arm (an array viewed as a slice, `&S { .. }`) keeps the temporary to
@@ -543,7 +572,11 @@ each arm to the parameter's type, as a `let`'s annotation does.
 `[T; N]` is a distinct type and a value: assignment, an argument, a struct field, a variant payload, a tuple
 element, a closure capture and a return copy it. An array literal has its own length; against
 an expected `[T; n]` it must have exactly `n` elements (a designated literal may have fewer and
-zero-fills the rest), and a nested literal is checked against the element type at every level. A
+zero-fills the rest), and a nested literal is checked against the element type at every level.
+Without an expected type, the first element's type is the one the later elements are checked
+against, as an annotation would give it (`[(1u8, 2u8), (3, 4)]`, `[Some(1u8), Some(2)]`), except
+by a nested array literal of another length, which reports "array literal element has length 3,
+but the first element has length 2". A
 repeat `[e; n]` evaluates `e` once and copies the value into every element (`[f(); 4]` calls `f`
 once). A
 nested literal without an annotation takes its inner length from its elements
@@ -772,7 +805,7 @@ source text, values, and file:line on failure.
 | `@blocking` | Run extern on blocking pool |
 | `@tail_recurse` | Every call of the function to itself must become a jump (see Functions); a function with a body only |
 | `@no_const` | Struct, union or enum whose values never exist at compile time; a function that is never a `const fn` (an error on one; `lint --const` skips it) |
-| `@intrinsic("<name>")` | `std` only: a function without a body whose call is the operation the name gives: a vector operation `simd.<name>` (references/simd.md), `float.to_int_unchecked` (references/operations.md), the branch hints `hint.likely` and `hint.unlikely` (Branch Hints below), or `frame.return_address` (the running function's return address, null on wasm; the leak tracker's allocation sites) |
+| `@intrinsic("<name>")` | `std` only: a function without a body whose call is the operation the name gives: a vector operation `simd.<name>` (references/simd.md), `float.to_int_unchecked` (references/operations.md), the branch hints `hint.likely` and `hint.unlikely` (Branch Hints below), `frame.return_address` (the running function's return address, null on wasm; the leak tracker's allocation sites), or `mem.volatile_load` / `mem.volatile_store` (one access the C compiler keeps, orders and never merges: `std::mem::volatile` wraps them as `read_volatile`, `write_volatile` and `zeroize`) |
 | `@unsafe(safe, const)` | Unverified claims on an extern function, any order, at least one: `safe` = callable without `unsafe`, `const` = its body models it at compile time (see `super-c-ffi`) |
 | `@unsafe(link_section = "s")` | Place a function with a body or a `static mut` in object-file section `s`; a `static mut` in a section is defined also when no code names it (Unsafe Placement below) |
 | `@unsafe(naked)` | The function's `asm` statements are its whole machine code: no prologue or epilogue (Unsafe Placement below) |
@@ -865,12 +898,14 @@ enforced at spawn boundaries.
 | `Box<T>` | Heap-allocated single value |
 | `Option<T>` | `Option::Some(x)` / `Option::None` in values; bare `Some(..)`/`None` in patterns only |
 | `Result<T, E>` | `Ok(T)` or `Err(E)` |
-| `Map<K, V>` | Hash map; `keys()` and `values()` borrow it (`MapKeys<'a, K>`, `MapValues<'a, V>`) |
-| `Set<T>` | Hash set; `iter()` borrows it |
+| `Map<K, V, A = Global, S = DefaultHash>` | Hash map; `S: BuildHasher` turns a key into its hash (`DefaultHash` is unkeyed and deterministic, `std::hash::keyed::KeyedHash` keyed); `entry(k)` (`or_insert`, `or_default`, `and_modify`, `Occupied`/`Vacant`), `iter()`, `iter_mut()`, `keys()`, `values()`, `drain()`, `retain`; the cursors borrow the map, double-ended with an exact `size_hint` |
+| `Set<T, A = Global, S = DefaultHash>` | Hash set; `iter()` borrows it; `set_union`, `intersection`, `difference`, `symmetric_difference` iterate both sets lazily |
 | `Array<T, N>` | Fixed-size const-generic array, a type distinct from `[T; N]`. `new()` needs `T: Default`; for raw pointers write `Array::<*mut T, N> {}` |
-| `Slice<T>` / `SliceMut<T>` | Fat-pointer views |
-| `Tuple2<A, B>` ... `Tuple4` | Tuples (access: `.0`, `.1`) |
-| `Arc<T>` | Atomic reference counting |
+| `Slice<T>` / `SliceMut<T>` | Fat-pointer views, and the one implementation of the sequence algorithms `Vector`, `Array` and `StaticVector` reach through `as_slice()`/`as_mut_slice()`: `sort` (unstable), `sort_stable` (a scratch block of `len` elements; `_in(alloc)` names its allocator), `sort_stable_in_place` (no heap memory, a 4 KiB stack buffer; about 1.25x the time of `sort_stable` on large inputs), `select_nth_unstable`, the heap operations, `binary_search`, `partition_point`, `partition`, `partition_dedup`, `rotate_left`; comparators return a negative, zero or positive `i32`. A `SliceMut` method takes the view by value: it is reborrowed for the call and conflicts with a live element borrow |
+| `Tuple2<A, B>` ... `Tuple4` | Tuples (access: `.0`, `.1`); `Eq`, `Ord` (lexicographic), `Hash`, `Clone`, `Default` and `Format` when every element has them |
+| `Iterator<T>` / `DoubleEndedIterator<T>` | `next`, `size_hint` (bounds; equal bounds are an exact size), `next_back`; the adapters of the prelude `iter` module (`map`, `filter`, `take`, `skip`, `chain`, `rev`, `zip`, `enumerate`, `flat_map`, `step_by`, `peekable`, ..) and consumers (`fold`, `any`, `all`, `find`, `min`, `max`, `collect`, `try_collect`, ..) are free functions; a `Range<T>` of a builtin integer is a double-ended iterator |
+| `Hash` / `Hasher` / `BuildHasher` | One method, `hash_into(h)`: feeds the value into a `Hasher` (derived: field by field, consistent only with the derived `Eq`; a type that writes its own `eq` must write `hash_into`, else a static assertion stops the build). Conforming is explicit (`@derive(Hash)`): interior-mutable types (`Cell`, `RefCell`, atomics, locks) are not `Hash`. `hash(&v)` is the prelude's 64-bit hash (`DefaultHasher`), the one `DefaultHash` maps use |
+| `Arc<T>` / `arc::Weak<T>` | Atomic reference counting; `downgrade`, `Weak::upgrade`, `get_mut`, `try_unwrap` |
 | `Mutex<T>` / `RwLock<T>` | Synchronization |
 | `Channel<T>` | Bounded/unbounded channels |
 | `Unit` | The zero-sized success value of a status-only operation (`Result<Unit, IoError>`) |
@@ -879,6 +914,7 @@ enforced at spawn boundaries.
 | `TryFrom<T>` / `TryInto<T>` | Fallible conversion with an associated `type Error`; `x.try_into()` returns `Result<U, U::Error>` |
 | `std::time`, `std::net` | Durations, deadlines and task-aware `sleep`; task-aware TCP and UDP |
 | `std::text::utf16` | `encode`, `encode_into`, `decode` between UTF-8 and UTF-16 code units, with the offset of ill-formed input |
+| `std::hash::keyed` | `KeyedHash` (SipHash-1-3 under a 128-bit key from `with_key` or the process's entropy, `random`), `SipHasher13`, `SipHasher24`: the builder for maps whose keys come from untrusted input |
 | `std::platform::*` | std's internal operating-system layer (files, paths, clocks, entropy, memory, threads, processes, environment, signals, sockets, libraries): unstable, for std and projects with `std_internals = true` |
 
 Every std package declares its tier and target support in `std/packages.toml` (0 prelude; 1 portable, no

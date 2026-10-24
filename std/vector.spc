@@ -6,6 +6,14 @@
 // at scope exit). `new()`/`with_capacity()` use a default-constructed allocator; pass a stateful arena/pool with
 // `new_in`/`with_capacity_in`, or pick a non-default zero-sized allocator with a turbofish:
 // `Vector::<T, MyAlloc>::new()`.
+//
+// Complexity: push is amortized O(1) (the capacity doubles, so n pushes move O(n) elements); pop, at, get,
+// set, swap and swap_remove are O(1); insert and remove are O(n - index); truncate, clear and retain are
+// O(n). The sequence algorithms run on `as_mut_slice()` (std/slice.spc states their bounds). Invalidation:
+// any growth (push, insert, reserve) may move the buffer, so it ends every element borrow, view and
+// iterator, which the borrow checker enforces; raw pointers from `as_ptr` are not tracked. Iteration is in
+// index order, double-ended, with an exact size. Thread safety: no internal synchronization; a Vector is
+// Send / Sync when its elements and allocator are.
 
 /// A growable heap array of T through allocator A; capacity grows geometrically, elements are freed
 /// with the vector.
@@ -209,6 +217,17 @@ extend<T, A: Allocator> Vector<T, A> {
         return self.ptr;
     }
 
+    /// A view of the elements; invalidated by any reallocating mutation.
+    pub const fn as_slice(self: &Vector<T, A>) []T {
+        return unsafe Slice::<T> { ptr: self.ptr, len: self.len };
+    }
+
+    /// A writable view of the elements: the shared slice algorithms (`select_nth_unstable`,
+    /// `rotate_left`, heap operations, ...) run on it.
+    pub const fn as_mut_slice(self: &mut Vector<T, A>) []mut T {
+        return unsafe SliceMut::<T> { ptr: self.ptr, len: self.len };
+    }
+
     /// Insert `value` at `index`, shifting later elements right. Panics when `index > len`.
     pub const fn insert(self: &mut Vector<T, A>, index: usize, value: T) {
         if index > self.len {
@@ -262,18 +281,7 @@ extend<T, A: Allocator> Vector<T, A> {
 
     /// Reverse the elements in place.
     pub const fn reverse(self: &mut Vector<T, A>) {
-        if self.len == 0 {
-            return;
-        }
-        let mut i: usize = 0;
-        let mut j = self.len - 1;
-        while i < j {
-            let tmp = unsafe self.ptr[i];
-            unsafe self.ptr[i] = unsafe self.ptr[j];
-            unsafe self.ptr[j] = tmp;
-            i = i + 1;
-            j = j - 1;
-        }
+        self.as_mut_slice().reverse();
     }
 
     /// A new vector (same allocator) with `f` applied to every element. `f` BORROWS each element (`&T`): this
@@ -356,6 +364,12 @@ extend<T: Default, A: Allocator> Vector<T, A> {
 extend<T: Copy, A: Allocator> Vector<T, A> {
     /// Append a copy of every element of `src` with one byte copy.
     pub fn extend_copy(self: &mut Vector<T, A>, src: &Vector<T, A>) {
+        self.extend_from_slice(src.as_slice());
+    }
+
+    /// Append a copy of every element of `src` with one byte copy: one capacity check, no per-element
+    /// work. `src` must not view this vector's own buffer (a growth would move it).
+    pub fn extend_from_slice(self: &mut Vector<T, A>, src: []T) {
         let n = src.len;
         if n == 0 {
             return;
@@ -426,192 +440,86 @@ extend<T: Eq, A: Allocator> Vector<T, A> {
     /// Remove consecutive runs of equal elements, keeping the first of each run. The dropped duplicates
     /// are freed (no-op when T isn't Free). O(n); only adjacent equals are removed (sort first for global).
     pub const fn dedup(self: &mut Vector<T, A>) {
-        if self.len < 2 {
-            return;
-        }
-        let mut w: usize = 1;
-        for r in 1..self.len {
-            if unsafe self.ptr[r] == unsafe self.ptr[w - 1] {
-                unsafe self.ptr[r].free();
-            } else {
-                unsafe self.ptr[w] = unsafe self.ptr[r];
-                w = w + 1;
-            }
-        }
-        self.len = w;
+        let k = self.as_mut_slice().partition_dedup();
+        self.truncate(k);
     }
 }
 
-// Order-based algorithms (available when the element type is `Ord`).
+// Order-based algorithms: the shared slice algorithms (std/slice.spc) over the elements.
 extend<T: Ord, A: Allocator> Vector<T, A> {
     /// True if the elements are in non-decreasing order (per `Ord`).
     pub const fn is_sorted(self: &Vector<T, A>) bool {
-        if self.len < 2 {
-            return true;
-        }
-        let mut i: usize = 0;
-        while i + 1 < self.len {
-            if unsafe self.ptr[i] > unsafe self.ptr[i + 1] {
-                return false;
-            }
-            i = i + 1;
-        }
-        return true;
+        return self.as_slice().is_sorted();
     }
 
-    /// Binary search of a sorted vector: `Ok(i)` where an equal element lives, or `Err(i)` the index a
-    /// missing element would be inserted at to keep order. Behaviour is unspecified if not sorted.
+    /// Binary search of a sorted vector: `Ok(i)` where an equal element lives (any one of several), or
+    /// `Err(i)`, the index a missing element would be inserted at to keep order. O(log n); unspecified
+    /// result if not sorted.
     pub const fn binary_search(self: &Vector<T, A>, x: &T) Result<usize, usize> {
-        let mut lo: usize = 0;
-        let mut hi: usize = self.len;
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            if unsafe self.ptr[mid] == *x {
-                return Result::<usize, usize>::Ok(mid);
-            } else if unsafe self.ptr[mid] < *x {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        return Result::<usize, usize>::Err(lo);
+        return self.as_slice().binary_search(x);
     }
 
-    // Restore the max-heap property at `root` over the prefix `[0, end)` by sifting it down.
-    const fn sift_down(self: &mut Vector<T, A>, root: usize, end: usize) {
-        let mut r = root;
-        let mut child = 2 * r + 1;
-        while child < end {
-            if child + 1 < end && unsafe self.ptr[child] < unsafe self.ptr[child + 1] {
-                child = child + 1;
-            }
-            if unsafe self.ptr[r] >= unsafe self.ptr[child] {
-                return;
-            }
-            self.swap(r, child);
-            r = child;
-            child = 2 * r + 1;
-        }
-    }
-
-    /// Sort the elements in place into non-decreasing order (heapsort: O(n log n), no allocation).
+    /// Sort in place into non-decreasing order, unstable (pattern-defeating quicksort: O(n log n) worst
+    /// case, no allocation).
     pub const fn sort(self: &mut Vector<T, A>) {
-        let n = self.len;
-        if n < 2 {
-            return;
-        }
-        let mut start = n / 2;
-        while start > 0 {
-            start = start - 1;
-            self.sift_down(start, n);
-        }
-        let mut end = n;
-        while end > 1 {
-            end = end - 1;
-            self.swap(0, end);
-            self.sift_down(0, end);
-        }
+        self.as_mut_slice().sort();
+    }
+
+    /// Sort in place into non-decreasing order, stable, with no allocation: O(n log n) comparisons and
+    /// O(n log^2 n) moves (`SliceMut::sort_stable_in_place`).
+    pub fn sort_stable_in_place(self: &mut Vector<T, A>) {
+        self.as_mut_slice().sort_stable_in_place();
+    }
+
+    /// Sort in place into non-decreasing order, stable, with scratch for `len` elements from the
+    /// vector's allocator.
+    pub fn sort_stable(self: &mut Vector<T, A>) {
+        let a = self.alloc;
+        self.as_mut_slice().sort_stable_in(a);
     }
 }
 
 // Comparator-driven sorting (no `Ord` required: the closure decides the order).
 extend<T, A: Allocator> Vector<T, A> {
-    /// Sort in place by a comparator returning negative / zero / positive (heapsort: O(n log n)).
-    /// The sift is inlined: a generic method calling another generic method with its own F is not
-    /// transitively instantiated yet, so the helper stays inside the one specialization.
+    /// Sort in place by a comparator returning negative / zero / positive, unstable. O(n log n).
     pub const fn sort_by<F: fn(&T, &T) i32>(self: &mut Vector<T, A>, cmp: F) {
-        let n = self.len;
-        if n < 2 {
-            return;
-        }
-        let mut phase: usize = 0; // 0: heapify roots n/2-1..0; 1: pop the max to the end, re-sift
-        let mut start = n / 2;
-        let mut end = n;
-        loop {
-            let mut r: usize = 0;
-            if phase == 0 {
-                if start == 0 {
-                    phase = 1;
-                    continue;
-                }
-                start = start - 1;
-                r = start;
-            } else {
-                if end <= 1 {
-                    break;
-                }
-                end = end - 1;
-                self.swap(0, end);
-            }
-            let mut lim = n;
-            if phase == 1 {
-                lim = end;
-            }
-            let mut child = 2 * r + 1;
-            while child < lim {
-                if child + 1 < lim && cmp(&unsafe self.ptr[child], &unsafe self.ptr[child + 1]) < 0 {
-                    child = child + 1;
-                }
-                if cmp(&unsafe self.ptr[r], &unsafe self.ptr[child]) >= 0 {
-                    break;
-                }
-                self.swap(r, child);
-                r = child;
-                child = 2 * r + 1;
-            }
-        }
+        self.as_mut_slice().sort_by(cmp);
     }
 
-    /// Sort in place by a derived `Ord` key (`v.sort_by_key(|p: &P| p.age)`): the heapsort of `sort_by`
-    /// ordered by the extracted keys, so O(n log n) and, like `sort_by`, not stable. The sift is inlined
-    /// for the same reason as `sort_by`'s.
+    /// Stable `sort_by` with no allocation (`SliceMut::sort_stable_in_place_by`).
+    pub fn sort_stable_in_place_by<F: fn(&T, &T) i32>(self: &mut Vector<T, A>, cmp: F) {
+        self.as_mut_slice().sort_stable_in_place_by(cmp);
+    }
+
+    /// Sort in place by a derived `Ord` key (`v.sort_by_key(|p: &P| p.age)`), unstable. O(n log n); the
+    /// key is computed twice per comparison.
     pub const fn sort_by_key<K: Ord, F: fn(&T) K>(self: &mut Vector<T, A>, key: F) {
-        let n = self.len;
-        if n < 2 {
-            return;
-        }
-        let mut phase: usize = 0; // 0: heapify roots n/2-1..0; 1: pop the max to the end, re-sift
-        let mut start = n / 2;
-        let mut end = n;
-        loop {
-            let mut r: usize = 0;
-            if phase == 0 {
-                if start == 0 {
-                    phase = 1;
-                    continue;
-                }
-                start = start - 1;
-                r = start;
-            } else {
-                if end <= 1 {
-                    break;
-                }
-                end = end - 1;
-                self.swap(0, end);
-            }
-            let mut lim = n;
-            if phase == 1 {
-                lim = end;
-            }
-            let mut child = 2 * r + 1;
-            while child < lim {
-                if child + 1 < lim {
-                    let kc = key(&unsafe self.ptr[child]);
-                    let kn = key(&unsafe self.ptr[child + 1]);
-                    if kc < kn {
-                        child = child + 1;
-                    }
-                }
-                let kr = key(&unsafe self.ptr[r]);
-                let kc = key(&unsafe self.ptr[child]);
-                if kr >= kc {
-                    break;
-                }
-                self.swap(r, child);
-                r = child;
-                child = 2 * r + 1;
-            }
-        }
+        self.as_mut_slice().sort_by_key::<K, F>(key);
+    }
+
+    /// Stable `sort_by`, with scratch from the vector's allocator.
+    pub fn sort_stable_by<F: fn(&T, &T) i32>(self: &mut Vector<T, A>, cmp: F) {
+        let a = self.alloc;
+        self.as_mut_slice().sort_stable_by_in(a, cmp);
+    }
+
+    /// Stable `sort_by_key`, with scratch from the vector's allocator.
+    pub fn sort_stable_by_key<K: Ord, F: fn(&T) K>(self: &mut Vector<T, A>, key: F) {
+        let a = self.alloc;
+        self.as_mut_slice().sort_stable_by_key_in::<A, K, F>(a, key);
+    }
+
+    /// Remove consecutive elements that `same(earlier, later)` joins to the element kept before them,
+    /// freeing them (no-op when T isn't Free). O(n).
+    pub fn dedup_by<F: fn(&T, &T) bool>(self: &mut Vector<T, A>, same: F) {
+        let k = self.as_mut_slice().partition_dedup_by(same);
+        self.truncate(k);
+    }
+
+    /// Remove consecutive elements with equal keys, keeping the first of each run. O(n).
+    pub fn dedup_by_key<K: Eq, F: fn(&T) K>(self: &mut Vector<T, A>, key: F) {
+        let k = self.as_mut_slice().partition_dedup_by_key::<K, F>(key);
+        self.truncate(k);
     }
 }
 
@@ -629,14 +537,29 @@ extend<T, A: Allocator> Vector<T, A> {
     }
 }
 
-extend<T> VecIter<T> as Iterator<&T> {
-    pub const fn next(self: &mut VecIter<T>) Option<&T> {
+extend<'a, T> VecIter<'a, T> as Iterator<&'a T> {
+    pub const fn next(self: &mut VecIter<'a, T>) Option<&'a T> {
         if self.idx >= self.stop {
-            return Option::<&T>::none();
+            return Option::<&'a T>::none();
         }
-        let r = &unsafe self.data[self.idx];
+        let r = unsafe &*(self.data + self.idx);
         self.idx = self.idx + 1;
-        return Option::<&T>::some(r);
+        return Option::<&'a T>::some(r);
+    }
+
+    pub const fn size_hint(self: &VecIter<'a, T>) (usize, Option<usize>) {
+        let n = self.stop - self.idx;
+        return n, Option::<usize>::Some(n);
+    }
+}
+
+extend<'a, T> VecIter<'a, T> as DoubleEndedIterator<&'a T> {
+    pub const fn next_back(self: &mut VecIter<'a, T>) Option<&'a T> {
+        if self.idx >= self.stop {
+            return Option::<&'a T>::none();
+        }
+        self.stop = self.stop - 1;
+        return Option::<&'a T>::some(unsafe &*(self.data + self.stop));
     }
 }
 
@@ -694,7 +617,7 @@ extend<T, A: Allocator> Vector<T, A> as IndexMut<T, []mut T> {
 }
 
 // Conditional conformances: a Vector is Clone/Eq/Hash exactly when its element is. Each dispatches to the
-// element's bound method (`e.clone()`, `a.eq(&b)`, `e.hash()`), monomorphized per element type.
+// element's bound method (`e.clone()`, `a.eq(&b)`, `e.hash_into(h)`), monomorphized per element type.
 extend<T: Clone, A: Allocator> Vector<T, A> as Clone {
     /// A deep copy: a fresh backing store (same allocator) whose elements are independent clones.
     pub const fn clone(self: &Vector<T, A>) Vector<T, A> {
@@ -724,14 +647,12 @@ extend<T: Eq, A: Allocator> Vector<T, A> as Eq {
 }
 
 extend<T: Hash, A: Allocator> Vector<T, A> as Hash {
-    /// FNV-1a over the elements' own hashes.
-    pub const fn hash(self: &Vector<T, A>) u64 {
-        let mut h: u64 = 0xcbf29ce484222325;
+    /// The length, then every element through its own `hash_into`: equal sequences feed equal streams.
+    pub fn hash_into<H: Hasher>(self: &Vector<T, A>, h: &mut H) {
+        h.write_u64(self.len() as u64);
         for i in 0..self.len() {
-            let e = self.at(i);
-            h = (h ^ e.hash()).wrapping_mul(0x100000001b3);
+            self.at(i).hash_into(h);
         }
-        return h;
     }
 }
 

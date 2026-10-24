@@ -3696,7 +3696,7 @@ extend Server {
         let arr = self.current_diags_for(uri);
         let dumped = arr.dump();
         let mut rid = String::from_str("d");
-        rid.push_u64(dumped.as_str().hash());
+        rid.push_u64(hash(&dumped));
         let mut res = json::JSON::object();
         if prev.len() != 0 && prev == rid.as_str() {
             res.emplace("kind", json::JSON::str("unchanged"));

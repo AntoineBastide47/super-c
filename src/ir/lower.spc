@@ -1297,9 +1297,10 @@ extend Lowerer {
             let _ = self.body.add_local(self.local_decl(rt, ir::LS_RET, true, sp, NODE_NONE));
         }
         self.body.returns = rets.len;
-        if rets.len == 0 && cd.expr_body {
-            // an expr-body closure with no written return list still returns its body's INFERRED
-            // type (comparators etc); a unit body keeps zero return slots
+        if rets.len == 0 && (cd.expr_body || cd.ret_infer) {
+            // a closure with no written return list still returns its body's INFERRED type (an
+            // expression body's, or what a block's `return`s give); a unit body keeps zero return
+            // slots
             let bt = self.nty(cd.body);
             if bt != TYPE_NONE && !(self.f.ty(bt).kind == TypeKind::TYPE_BUILTIN && self.f.ty(bt).as_data.builtin == BuiltinType::BT_VOID) {
                 let _ = self.body.add_local(self.local_decl(bt, ir::LS_RET, true, sp, NODE_NONE));
@@ -1938,7 +1939,7 @@ extend Lowerer {
             if d.condition != NODE_NONE {
                 self.tp(ir::TP_MARK_PUSH, 0, id);
                 let cb = self.chk_open(d.condition, false);
-                let cop = self.lower_expr(d.condition);
+                let cop = self.lower_loop_cond(d.condition, sp);
                 self.chk_close(cb);
                 self.tp(ir::TP_MARK_POP, 0, id);
                 if cop == ir::IR_NONE {
@@ -1962,7 +1963,7 @@ extend Lowerer {
                 let cond_from = self.tape.len();
                 self.tp(ir::TP_MARK_PUSH, 0, id);
                 let cb = self.chk_open(d.condition, false);
-                let cop = self.lower_expr(d.condition);
+                let cop = self.lower_loop_cond(d.condition, sp);
                 self.chk_close(cb);
                 self.tp(ir::TP_MARK_POP, 0, id);
                 self.tape_splice(cond_at, cond_from);
@@ -1978,6 +1979,20 @@ extend Lowerer {
             self.seal(ir::goto_term(head, sp), exit);
         }
         self.tp(ir::TP_LOOP_POP, 0, id);
+    }
+
+    // Lower loop condition `c` in a scope of its own: the temporaries one evaluation owns drop before
+    // the branch, so each iteration releases its own. A value read out of such a temporary is copied
+    // first.
+    fn lower_loop_cond(self: &mut Self, c: NodeId, sp: tok::Span) ir::OperandId {
+        self.scope_enter();
+        let mark = self.scope_locals.len();
+        let mut cop = self.lower_expr(c);
+        if cop != ir::IR_NONE && self.scope_locals.len() > mark && self.body.operands.at(cop as usize).kind != ir::OP_CONST {
+            cop = self.copy_op(self.spill(cop, sp));
+        }
+        self.scope_exit();
+        return cop;
     }
 
     // ---- reflection binder expansion --------------------------------------------------------------
@@ -4442,8 +4457,14 @@ extend Lowerer {
             return self.out_op(dest, pl);
         }
         if k == NodeKind::NODE_BLOCK {
+            // A block in value position is a build-constant `if` or `switch` the early prune
+            // replaced by its taken arm: the temporaries its value borrows live as long as that
+            // arm's would (`ExtCx`).
             let pl = self.out_place(dest, ty, sp);
+            let outer = self.ext;
+            self.ext = ExtCx { arm: id, val: self.value_tail(id), rf: NODE_NONE, depth: self.ext_depth_for(id) };
             self.lower_value_block(id, pl, false);
+            self.ext = outer;
             return self.out_op(dest, pl);
         }
         if k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF {
@@ -4534,9 +4555,18 @@ extend Lowerer {
         if t == tt::TokenType::CharacterLiteral || t == tt::TokenType::ByteCharacterLiteral {
             return self.kop(ir::CK_INT, ty, tok::char_literal_value(self.src, d.raw).unwrap_or(0), d.raw);
         }
-        // Integer/char literals: the exact value is CTFE's business; the span keeps the
-        // spelling, `val` carries the common decimal fast path.
-        return self.kop(ir::CK_INT, ty, parse_dec(self.src, d.raw), d.raw);
+        // Integer literals: `val` is the exact value of every spelling (hex, binary, octal,
+        // separators, suffixes); 0 past u64::MAX, which the checker reports.
+        let c = ir::Constant {
+            kind: ir::CK_INT,
+            ty: ty,
+            val: 0,
+            raw: d.raw,
+            item: DefId { module: 0, node: NODE_NONE },
+        };
+        let mut v: i64 = 0;
+        let _ = c.int_value(self.src, &mut v);
+        return self.kop(ir::CK_INT, ty, v, d.raw);
     }
 
     fn lower_unary(self: &mut Self, id: NodeId, dest: ir::PlaceId) ir::OperandId {
@@ -5421,6 +5451,29 @@ extend Lowerer {
                 if ptk1 == NodeKind::NODE_REFERENCE_TYPE && self.body.operands.at(rop as usize).kind == ir::OP_CONST {
                     rop = self.copy_op(self.spill(rop, sp));
                 }
+                // The checker looks the method up on the receiver's referent: a receiver behind more
+                // than one reference (`s.len()` with `s: &&String`) reads through the extra ones, so
+                // the call takes one reference, or the value of a by-value `self`.
+                if ptk1 != NodeKind::NODE_POINTER_TYPE && (du9 == null || unsafe (*du9).n == 0) {
+                    for _ in 0..8 {
+                        let ry = *self.f.ty(self.body.operands.at(rop as usize).ty);
+                        if ry.kind != TypeKind::TYPE_REFERENCE || self.f.ty(ry.as_data.elem).kind != TypeKind::TYPE_REFERENCE {
+                            break;
+                        }
+                        let ro = *self.body.operands.at(rop as usize);
+                        let rpl = if ro.kind == ir::OP_COPY || ro.kind == ir::OP_MOVE {
+                            ro.data;
+                        } else {
+                            self.spill(rop, sp);
+                        };
+                        rop = self.copy_op(
+                            self.place_project(
+                                rpl,
+                                ir::Projection { kind: ir::PJ_DEREF, data: 0, sub: 0, ty: ry.as_data.elem },
+                            ),
+                        );
+                    }
+                }
             }
             rop = self.pin_read(rop, recv, d.args, 0, target, 0);
             argv.push(rop);
@@ -6269,9 +6322,14 @@ extend Lowerer {
                     item: no9,
                 },
             );
+            // The report reads the values through operands of its own: the emitter counts a local's
+            // reads by operand, and the comparison already holds `lsave` and `rsave`.
+            self.body.operands.push(*self.body.operands.at(lsave as usize));
+            self.body.operands.push(*self.body.operands.at(rsave as usize));
+            let nops = self.body.operands.len() as u32;
             let mut av = self.avget();
-            av.push(lsave);
-            av.push(rsave);
+            av.push(nops - 2);
+            av.push(nops - 1);
             av.push(lsc);
             av.push(rsc);
             tm.args_start = self.pool_ops(&av);
@@ -9297,25 +9355,6 @@ const fn lit_int_value(src: str, sp: tok::Span, out: &mut u64) bool {
     }
     *out = v;
     return true;
-}
-
-// Decimal fast path for integer literal spellings; 0 for hex/underscored/suffixed forms and values
-// past i64 (the span keeps the exact spelling for CTFE).
-const fn parse_dec(src: str, sp: tok::Span) i64 {
-    let mut v: i64 = 0;
-    let mut i = sp.start as usize;
-    while i < sp.end as usize {
-        let b = src[i];
-        if b < b'0' || b > b'9' {
-            return 0;
-        }
-        if v > 922337203685477580 || v == 922337203685477580 && b > b'7' {
-            return 0;
-        }
-        v = v * 10 + (b - b'0') as i64;
-        i += 1;
-    }
-    return v;
 }
 
 // Whether a type of kind `k` is concrete: no substitution can still change it.

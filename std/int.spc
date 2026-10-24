@@ -1742,12 +1742,11 @@ extend<const BITS: usize> UInt<BITS> as Ord {
 }
 
 extend<const BITS: usize> UInt<BITS> as Hash {
-    pub fn hash(self: &UInt<BITS>) u64 {
-        let mut h: u64 = 0xcbf29ce484222325;
+    /// Every limb, least significant first.
+    pub fn hash_into<H: Hasher>(self: &UInt<BITS>, h: &mut H) {
         for i in 0..UInt::<BITS>::limbs() {
-            h = (h ^ self.bits.get(i)).wrapping_mul(1099511628211u64);
+            h.write_u64(self.bits.get(i));
         }
-        return h;
     }
 }
 
@@ -2622,12 +2621,11 @@ extend<const BITS: usize> Int<BITS> as Ord {
 }
 
 extend<const BITS: usize> Int<BITS> as Hash {
-    pub fn hash(self: &Int<BITS>) u64 {
-        let mut h: u64 = 0xcbf29ce484222325;
+    /// Every limb of the two's complement encoding, least significant first.
+    pub fn hash_into<H: Hasher>(self: &Int<BITS>, h: &mut H) {
         for i in 0..Int::<BITS>::limbs() {
-            h = (h ^ self.bits.get(i)).wrapping_mul(1099511628211u64);
+            h.write_u64(self.bits.get(i));
         }
-        return h;
     }
 }
 

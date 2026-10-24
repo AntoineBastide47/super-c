@@ -299,23 +299,43 @@ const UNI_MEMBERS_MAX: u32 = 16;
 const UA_EDGE: u8 = 0;
 const UA_KEEP: u8 = 1;
 const UA_EITHER: u8 = 2;
+/// Words per origin and per member in `UniSt.st` and `UniSt.mem`: the regions arrived at the
+/// value's own level, behind a reference, at either level, and those that may lie behind two or more
+/// references (a DEREF2 edge passes only these on).
+const UNI_SW: usize = 4;
+/// Words per parameter in `UniSt.arg`: its regions at the value's own level, behind a reference, and
+/// those that may lie behind two or more.
+const UNI_AW: usize = 3;
+/// The level of a region a type walk marks (`UniSt::mark`): bit 0 behind a reference, bit 1 maybe
+/// behind two or more (a lifetime-generic aggregate's fields may place its arguments deeper).
+const UL_OWN: u8 = 0;
+const UL_BEHIND: u8 = 1;
+const UL_DEEP: u8 = 2;
+
+/// The level of what lies behind a reference at level `lvl`.
+const fn ul_ref(lvl: u8) u8 {
+    if lvl != UL_OWN {
+        return UL_BEHIND | UL_DEEP;
+    }
+    return UL_BEHIND;
+}
 
 /// Scratch of the universal-region check (`bc_ir_universal`), kept across bodies. Region 0 is
 /// `'static`; every other region is a lifetime the signature names or an elided input position.
 pub struct UniSt {
     pub names: Vector<tok::Span>, // per region: its name, empty for an elided input position
     pub ol: Vector<u64>, // per region: the regions it is known to outlive
-    pub arg: Vector<u64>, // per parameter: its regions at the value's own level, then behind a reference
+    pub arg: Vector<u64>, // per parameter: UNI_AW words
     pub ret: Vector<u64>, // per return slot: the same two words
     pub sink: Vector<u64>, // per universal origin: the two words of the slots it stands for
-    pub st: Vector<u64>, // per origin: the regions arrived at its own level, behind, and at either
+    pub st: Vector<u64>, // per origin: UNI_SW words
     pub start: Vector<u32>, // per origin (+1): CSR into `edges` of the subset edges leaving it
     pub edges: Vector<u32>,
     pub queue: Vector<u32>,
     pub queued: Vector<bool>,
     pub argof: Vector<u32>, // per origin: the parameter whose local owns it, or UNI_NONE
     pub mb: Vector<u64>, // per origin: its first member slot in `mem` << 32 | its member count
-    pub mem: Vector<u64>, // per member of a body local's struct or tuple: the three words of `st`
+    pub mem: Vector<u64>, // per member of a body local's struct or tuple: the UNI_SW words of `st`
     pub sm: Vector<u64>, // a slot's members: per member, its regions at its own level and behind
     pub pm: ModuleId, // `bc_uni_place`'s result: the place's type node, its module and frame struct
     pub pdecl: NodeId,
@@ -326,6 +346,7 @@ pub struct UniSt {
     pub first: u32, // the first region of the parameter being walked
     pub m0: u64, // the walk's regions at the value's own level
     pub m1: u64, // the walk's regions behind a reference
+    pub m2: u64, // the walk's regions that may lie behind two or more references
     pub over: bool, // the signature has more than UNI_MAX regions
 }
 
@@ -356,6 +377,7 @@ extend UniSt {
             first: UNI_NONE,
             m0: 0,
             m1: 0,
+            m2: 0,
             over: false,
         };
     }
@@ -365,49 +387,100 @@ extend UniSt {
         return (self.names.capacity() * sizeof(tok::Span) + (self.ol.capacity() + self.arg.capacity() + self.ret.capacity() + self.sink.capacity() + self.st.capacity()) * sizeof(u64) + (self.start.capacity() + self.edges.capacity() + self.queue.capacity() + self.argof.capacity()) * sizeof(u32) + (self.pos.capacity() + self.fa.capacity() + self.fb.capacity() + self.mb.capacity() + self.mem.capacity() + self.sm.capacity()) * sizeof(u64) + self.queued.capacity()) as u64;
     }
 
-    // Add region `r` to the walk's regions at the value's own level, or behind a reference.
-    const fn mark(self: &mut Self, r: u32, behind: bool) {
-        if behind {
+    // Add the regions of set `rs` to the walk's regions at level `lvl`, as `mark` does.
+    const fn mark_set(self: &mut Self, rs: u64, lvl: u8) {
+        if (lvl & UL_BEHIND) != 0 {
+            self.m1 = self.m1 | rs;
+        } else {
+            self.m0 = self.m0 | rs;
+        }
+        if (lvl & UL_DEEP) != 0 {
+            self.m2 = self.m2 | rs;
+        }
+    }
+
+    // Add region `r` to the walk's regions at level `lvl` (UL_*): its own or behind a reference, and
+    // among those that may lie behind two or more.
+    const fn mark(self: &mut Self, r: u32, lvl: u8) {
+        if (lvl & UL_BEHIND) != 0 {
             self.m1 = self.m1 | 1u64 << r as u64;
         } else {
             self.m0 = self.m0 | 1u64 << r as u64;
         }
+        if (lvl & UL_DEEP) != 0 {
+            self.m2 = self.m2 | 1u64 << r as u64;
+        }
     }
 
     // The regions a subset edge of kind `delta` passes on from (`s0` own level, `s1` behind a
-    // reference, `sa` either): `m0` and `m1` take the arriving own-level and behind regions, the
-    // result is those at either level. A read through a reference drops the reference's own
-    // regions and leaves the level of those behind it unknown; a store behind one puts all behind.
-    const fn carry(self: &mut Self, delta: u8, s0: u64, s1: u64, sa: u64) u64 {
-        if delta == bfx::SD_DEREF {
+    // reference, `sa` either, `s2` maybe behind two or more): `m0`, `m1` and `m2` take the arriving
+    // own-level, behind and deep regions, the result is those at either level. A read through a
+    // reference drops the reference's own regions and leaves the level of those behind it unknown; a
+    // read through two drops those of both references; a store behind one puts all behind.
+    const fn carry(self: &mut Self, delta: u8, s0: u64, s1: u64, sa: u64, s2: u64) u64 {
+        let f0 = bfx::sd_level(delta, 0);
+        let f1 = bfx::sd_level(delta, 1);
+        let drop = bfx::SD_DROP as u32;
+        if f0 == drop && f1 == drop {
             self.m0 = 0;
             self.m1 = 0;
-            return s1 | sa;
+            self.m2 = 0;
+            return s2 | sa;
         }
-        if delta == bfx::SD_REF {
+        if f0 == drop {
+            let ea = s1 | s2 | sa;
+            if f1 == 0 {
+                self.m0 = 0;
+                self.m1 = 0;
+                self.m2 = 0;
+                return ea;
+            }
             self.m0 = 0;
-            self.m1 = s0 | s1 | sa;
+            self.m1 = ea;
+            self.m2 = if f1 >= 2 {
+                ea;
+            } else {
+                s2 | sa;
+            };
             return 0;
         }
-        self.m0 = s0;
-        self.m1 = s1;
-        return sa;
+        if f0 == 0 {
+            self.m0 = s0;
+            self.m1 = s1;
+            self.m2 = if f1 >= 2 {
+                s1 | s2;
+            } else {
+                s2;
+            };
+            return sa;
+        }
+        self.m0 = 0;
+        self.m1 = s0 | s1 | s2 | sa;
+        self.m2 = if f0 >= 2 {
+            s0 | s1 | s2 | sa;
+        } else {
+            s1 | s2 | sa;
+        };
+        return 0;
     }
 
-    // The regions a value (`s0` own level, `s1` behind a reference, `sa` either) brings into a slot
-    // in `mode` (UA_*) over an edge of kind `delta`: into `m0` and `m1`, returning those at either.
-    const fn arrive(self: &mut Self, mode: u8, delta: u8, s0: u64, s1: u64, sa: u64) u64 {
+    // The regions a value (`s0` own level, `s1` behind a reference, `sa` either, `s2` deep) brings
+    // into a slot in `mode` (UA_*) over an edge of kind `delta`: into `m0`, `m1` and `m2`, returning
+    // those at either.
+    const fn arrive(self: &mut Self, mode: u8, delta: u8, s0: u64, s1: u64, sa: u64, s2: u64) u64 {
         if mode == UA_KEEP {
             self.m0 = s0;
             self.m1 = s1;
+            self.m2 = s2;
             return sa;
         }
         if mode == UA_EITHER {
             self.m0 = 0;
             self.m1 = 0;
-            return s1 | sa;
+            self.m2 = 0;
+            return s1 | s2 | sa;
         }
-        return self.carry(delta, s0, s1, sa);
+        return self.carry(delta, s0, s1, sa, s2);
     }
 
     // Does a region arriving at its own level (`a0`), behind a reference (`a1`) or at either (`va`)
@@ -436,17 +509,19 @@ extend UniSt {
         return false;
     }
 
-    // Add the three words `w0`, `w1`, `wa` to the three at `v[i..i + 3]`; true when one gained a bit.
-    fn join(v: &mut Vector<u64>, i: usize, w0: u64, w1: u64, wa: u64) bool {
+    // Add the words `w0`, `w1`, `wa`, `w2` to the UNI_SW at `v[i..]`; true when one gained a bit.
+    fn join(v: &mut Vector<u64>, i: usize, w0: u64, w1: u64, wa: u64, w2: u64) bool {
         let n0 = v[i] | w0;
         let n1 = v[i + 1] | w1;
         let na = v[i + 2] | wa;
-        if n0 == v[i] && n1 == v[i + 1] && na == v[i + 2] {
+        let n2 = v[i + 3] | w2;
+        if n0 == v[i] && n1 == v[i + 1] && na == v[i + 2] && n2 == v[i + 3] {
             return false;
         }
         v.set(i, n0);
         v.set(i + 1, n1);
         v.set(i + 2, na);
+        v.set(i + 3, n2);
         return true;
     }
 
@@ -737,6 +812,20 @@ pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBo
     // return only stores the stale pointer).
     if lv_need || mv_need {
         ctx.ensure_cfg(body);
+    }
+    // A destruction observes what its local stores only where the local may still hold a value: the
+    // move/init solution decides each recorded one before liveness reads the rows.
+    if ctx.facts.drop_uses.len() != 0 {
+        if mv_need {
+            ctx.ensure_cfg(body);
+            ctx.ensure_moves(body);
+            ow.mark_covered(body.module, &mut ctx.forest);
+        }
+        for i in 0..ctx.facts.drop_uses.len() {
+            let du = *ctx.facts.drop_uses.at(i);
+            let runs = !mv_need || ctx.moves.holds_at(&ctx.forest, &ctx.facts, du.block, du.point, du.path);
+            ctx.facts.drop_use(i, runs);
+        }
     }
     if lv_need {
         // Liveness is the only predecessor consumer.
@@ -1730,6 +1819,7 @@ extend tc::TypeChecker {
         ow.cap_reach_pool.resize_default(start + np as usize);
         ow.cap_reach.insert(key, start as u64 << 16 | np as u64);
         ow.cap_keep.insert(key, self.bc_closure_keep(ow, body, f, np));
+        ow.res_deep.insert(key, self.bc_closure_result(body, f, np));
         for p in 0..np {
             let up = f.arg_universal[(body.returns + p) as usize];
             if up == bfx::BF_NONE {
@@ -1821,6 +1911,90 @@ extend tc::TypeChecker {
             }
             ow.cap_reach_pool.set(start + p as usize, m);
         }
+    }
+
+    // Do the results of closure `body` (`np` parameters) hold only what lies behind its by-reference
+    // captures? None of the origins that reach a return slot is a by-value capture's (its own or its
+    // placeholder), and no loan that reaches one borrows a capture's own storage. A caller then
+    // ties a call through the closure value to what lies behind the value's references only
+    // (`Owner::res_deep`, `Gen::closure_result_tie`).
+    fn bc_closure_result(self: &Self, body: &ir::CoreBody, f: &bfx::BodyFacts, np: u32) bool {
+        let no = f.norigins as usize;
+        if body.args - np > 64 {
+            return false;
+        }
+        let cf = unsafe (*self.mod_ast(body.owner.module)).closure_fact(body.owner.node);
+        let by_ptr = if cf != null {
+            unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps;
+        } else {
+            0u64;
+        };
+        // The origins that reach a return slot, found backward from the slots.
+        let mut into = Vector::<bool>::new();
+        into.resize_default(no);
+        let mut stack = Vector::<u32>::new();
+        for r in 0..body.returns {
+            let lo = f.local_origin[r as usize];
+            if lo != bfx::BF_NONE && !into[lo as usize] {
+                into.set(lo as usize, true);
+                stack.push(lo);
+            }
+            if r as usize < f.ret_origin.len() {
+                let ro = f.ret_origin[r as usize];
+                if ro != bfx::BF_NONE && !into[ro as usize] {
+                    into.set(ro as usize, true);
+                    stack.push(ro);
+                }
+            }
+        }
+        let mut st = Vector::<u32>::new();
+        st.resize_default(no + 1);
+        for e in 0..f.subsets.len() {
+            let t = f.subsets.at(e).to as usize;
+            st.set(t + 1, st[t + 1] + 1);
+        }
+        for o in 0..no {
+            st.set(o + 1, st[o + 1] + st[o]);
+        }
+        let mut cur = Vector::<u32>::new();
+        for o in 0..no {
+            cur.push(st[o]);
+        }
+        let mut src = Vector::<u32>::new();
+        src.resize_default(st[no] as usize);
+        for e in 0..f.subsets.len() {
+            let sb = *f.subsets.at(e);
+            src.set(cur[sb.to as usize] as usize, sb.from);
+            cur.set(sb.to as usize, cur[sb.to as usize] + 1);
+        }
+        // Each origin is pushed once.
+        while stack.len() != 0 {
+            let x = stack[stack.len() - 1] as usize;
+            stack.truncate(stack.len() - 1);
+            for i in st[x]..st[x + 1] {
+                let y = src[i as usize];
+                if !into[y as usize] {
+                    into.set(y as usize, true);
+                    stack.push(y);
+                }
+            }
+        }
+        for k in np..body.args {
+            let l = (body.returns + k) as usize;
+            let lo = f.local_origin[l];
+            let uo = f.arg_universal[l];
+            if (by_ptr >> (k - np) as u64 & 1u64) == 0 && (lo != bfx::BF_NONE && into[lo as usize] || uo != bfx::BF_NONE && into[uo as usize]) {
+                return false;
+            }
+        }
+        for i in 0..f.loans.len() {
+            let ln = *f.loans.at(i);
+            let b = body.places.at(ln.place as usize).base;
+            if into[ln.origin as usize] && !ln.through && b >= body.returns + np && b < body.returns + body.args {
+                return false;
+            }
+        }
+        return true;
     }
 
     // The captures (bit k) whose contents the destruction of closure `body` (`np` parameters) may
@@ -2088,15 +2262,17 @@ extend tc::TypeChecker {
             u.first = UNI_NONE;
             u.m0 = 0;
             u.m1 = 0;
+            u.m2 = 0;
             let _ = self.bc_uni_type(
                 u,
                 unsafe (*a).slot_type_node(unsafe (*a).list(params)[i as usize]),
-                false,
+                UL_OWN,
                 UNI_NONE,
                 0,
             );
             u.arg.push(u.m0);
             u.arg.push(u.m1);
+            u.arg.push(u.m2);
             if i as i32 == es && u.first != UNI_NONE {
                 elide = u.first;
             }
@@ -2104,7 +2280,14 @@ extend tc::TypeChecker {
         for r in 0..nr {
             u.m0 = 0;
             u.m1 = 0;
-            let _ = self.bc_uni_type(u, unsafe (*a).slot_type_node(unsafe (*a).list(rets)[r as usize]), false, elide, 0);
+            u.m2 = 0;
+            let _ = self.bc_uni_type(
+                u,
+                unsafe (*a).slot_type_node(unsafe (*a).list(rets)[r as usize]),
+                UL_OWN,
+                elide,
+                0,
+            );
             u.ret.push(u.m0);
             u.ret.push(u.m1);
         }
@@ -2158,7 +2341,7 @@ extend tc::TypeChecker {
         u.sink.set(1, 1u64);
         let no = f.norigins as usize;
         u.st.truncate(0);
-        u.st.resize_default(no * 3);
+        u.st.resize_default(no * UNI_SW);
         u.queued.truncate(0);
         u.queued.resize_default(no);
         u.queue.truncate(0);
@@ -2170,14 +2353,15 @@ extend tc::TypeChecker {
             let l = (body.returns + i) as usize;
             let uo = f.arg_universal[l];
             if uo != bfx::BF_NONE {
-                u.sink.set(uo as usize * 2, u.sink[uo as usize * 2] | u.arg[i as usize * 2]);
-                u.sink.set(uo as usize * 2 + 1, u.sink[uo as usize * 2 + 1] | u.arg[i as usize * 2 + 1]);
+                u.sink.set(uo as usize * 2, u.sink[uo as usize * 2] | u.arg[i as usize * UNI_AW]);
+                u.sink.set(uo as usize * 2 + 1, u.sink[uo as usize * 2 + 1] | u.arg[i as usize * UNI_AW + 1]);
             }
             // Each parameter's regions start at its local.
             let lo = f.local_origin[l];
-            if lo != bfx::BF_NONE && (u.arg[i as usize * 2] | u.arg[i as usize * 2 + 1]) != 0 {
-                u.st.set(lo as usize * 3, u.arg[i as usize * 2]);
-                u.st.set(lo as usize * 3 + 1, u.arg[i as usize * 2 + 1]);
+            if lo != bfx::BF_NONE && (u.arg[i as usize * UNI_AW] | u.arg[i as usize * UNI_AW + 1]) != 0 {
+                u.st.set(lo as usize * UNI_SW, u.arg[i as usize * UNI_AW]);
+                u.st.set(lo as usize * UNI_SW + 1, u.arg[i as usize * UNI_AW + 1]);
+                u.st.set(lo as usize * UNI_SW + 3, u.arg[i as usize * UNI_AW + 2]);
                 u.queued.set(lo as usize, true);
                 u.queue.push(lo);
                 u.argof.set(lo as usize, i);
@@ -2189,7 +2373,7 @@ extend tc::TypeChecker {
             let nm = f.uni_name[(f.named[k] & 0xFFFFFFFFu64) as usize];
             for i in 1..u.names.len() {
                 if tc::spans_eq2(self.source, u.names[i], self.source, nm) {
-                    u.st.set(to * 3, u.st[to * 3] | 1u64 << i as u64);
+                    u.st.set(to * UNI_SW, u.st[to * UNI_SW] | 1u64 << i as u64);
                     if !u.queued[to] {
                         u.queued.set(to, true);
                         u.queue.push(to as u32);
@@ -2207,8 +2391,8 @@ extend tc::TypeChecker {
                 let mut d = DefId { module: 0, node: NODE_NONE };
                 cnt = self.bc_uni_local_members(body, l, &mut d);
             }
-            u.mb.push((u.mem.len() / 3) as u64 << 32 | cnt as u64);
-            u.mem.resize_default(u.mem.len() + cnt as usize * 3);
+            u.mb.push((u.mem.len() / UNI_SW) as u64 << 32 | cnt as u64);
+            u.mem.resize_default(u.mem.len() + cnt as usize * UNI_SW);
         }
         for r in 0..nr {
             let ro = f.ret_origin[r as usize];
@@ -2247,7 +2431,7 @@ extend tc::TypeChecker {
         u.start.set(0, 0);
         // A body origin's words (its own three, its members') only gain bits, and each gain queues it
         // once.
-        let bound = u.queue.len() as u64 + (no * 3 + u.mem.len()) as u64 * UNI_MAX as u64;
+        let bound = u.queue.len() as u64 + (no * UNI_SW + u.mem.len()) as u64 * UNI_MAX as u64;
         let mut pushes = u.queue.len() as u64;
         while u.queue.len() != 0 {
             let x = u.queue[u.queue.len() - 1] as usize;
@@ -2298,6 +2482,7 @@ extend tc::TypeChecker {
             let v0 = self.bc_uni_from(u, body, f, e.from as usize, e.point);
             let f0 = u.m0;
             let f1 = u.m1;
+            let f2 = u.m2;
             let mut s0 = u.sink[ph * 2];
             let mut s1 = u.sink[ph * 2 + 1];
             let mut si: u32 = 0;
@@ -2311,7 +2496,8 @@ extend tc::TypeChecker {
                 let st = *body.statements.at((blk.stmt_start + si) as usize);
                 sp = st.span;
                 let dl = body.places.at(st.place as usize).base;
-                if !ret && ph != 0 && st.kind == ir::ST_ASSIGN && dl >= body.returns && dl < body.returns + np && f.arg_universal[dl as usize] == e.to && body.place_has_deref(
+                if !ret && ph != 0 && st.kind == ir::ST_ASSIGN && dl >= body.returns && dl < body.returns + np && f.arg_universal[dl as usize] == e.to && self.bc_place_behind(
+                    body,
                     st.place,
                 ) && e.delta != bfx::SD_KEEP {
                     // An assignment through the parameter: the value keeps its own levels in the
@@ -2321,7 +2507,7 @@ extend tc::TypeChecker {
                     if self.bc_uni_place(u, body, ptn, st.place) {
                         s0 = u.m0;
                         s1 = u.m1;
-                        mode = if e.delta == bfx::SD_REF {
+                        mode = if e.delta == bfx::SD_REF || e.delta == bfx::SD_SAT {
                             UA_KEEP;
                         } else {
                             UA_EITHER;
@@ -2342,7 +2528,7 @@ extend tc::TypeChecker {
             }
             let mut bad = false;
             if !self.bc_uni_split(u, body, f, &e, mode, &mut bad) {
-                let va = u.arrive(mode, e.delta, f0, f1, v0);
+                let va = u.arrive(mode, e.delta, f0, f1, v0, f2);
                 bad = u.fails(u.m0, u.m1, va, s0, s1);
             }
             if !bad {
@@ -2380,6 +2566,27 @@ extend tc::TypeChecker {
         }
     }
 
+    // Does `place` reach storage through a reference or a slice view's elements, as `Gen::behind`
+    // counts it (a `str`'s elements hold no region)?
+    fn bc_place_behind(self: &Self, body: &ir::CoreBody, place: ir::PlaceId) bool {
+        let pl = *body.places.at(place as usize);
+        let mut prev = body.locals.at(pl.base as usize).ty;
+        for i in 0..pl.proj_len {
+            let pj = *body.projections.at((pl.proj_start + i) as usize);
+            if pj.kind == ir::PJ_DEREF {
+                return true;
+            }
+            if (pj.kind == ir::PJ_INDEX_OP || pj.kind == ir::PJ_INDEX_CONST) && prev != TYPE_NONE && self.type_at(prev).kind == TypeKind::TYPE_INSTANCE {
+                let it = unsafe (*self.cur_ast()).instance(self.type_at(prev).as_data.inst);
+                if it.module == self.ph_slice.mid && it.decl == self.ph_slice.node || it.module == self.ph_slicemut.mid && it.decl == self.ph_slicemut.node {
+                    return true;
+                }
+            }
+            prev = pj.ty;
+        }
+        return false;
+    }
+
     // The regions origin `x` passes on at `point`, before the edge's own level change: at its own
     // level in `u.m0`, behind a reference in `u.m1`, returning those at either. A parameter's own
     // regions leave at the regions of the place the operation there reads (`bc_uni_edge`); a local
@@ -2387,15 +2594,18 @@ extend tc::TypeChecker {
     // when it reads none); what else reached a local leaves as a whole.
     fn bc_uni_from(self: &Self, u: &mut UniSt, body: &ir::CoreBody, f: &bfx::BodyFacts, x: usize, point: u32) u64 {
         let ai = u.argof[x];
-        let mut s0 = u.st[x * 3];
-        let mut s1 = u.st[x * 3 + 1];
-        let mut sa = u.st[x * 3 + 2];
+        let mut s0 = u.st[x * UNI_SW];
+        let mut s1 = u.st[x * UNI_SW + 1];
+        let mut sa = u.st[x * UNI_SW + 2];
+        let mut s2 = u.st[x * UNI_SW + 3];
         if ai != UNI_NONE {
-            s0 = s0 & ~u.arg[ai as usize * 2];
-            s1 = s1 & ~u.arg[ai as usize * 2 + 1];
+            s0 = s0 & ~u.arg[ai as usize * UNI_AW];
+            s1 = s1 & ~u.arg[ai as usize * UNI_AW + 1];
+            s2 = s2 & ~u.arg[ai as usize * UNI_AW + 2];
             sa = sa | self.bc_uni_edge(u, body, f, ai, point);
             s0 = s0 | u.m0;
             s1 = s1 | u.m1;
+            s2 = s2 | u.m2;
         } else if (u.mb[x] & 0xFFFFFFFFu64) != 0 {
             let l = f.origin_local[x];
             let mut start: u32 = 0;
@@ -2417,6 +2627,7 @@ extend tc::TypeChecker {
                     sa = sa | self.bc_uni_read(u, body, x, op.data);
                     s0 = s0 | u.m0;
                     s1 = s1 | u.m1;
+                    s2 = s2 | u.m2;
                 }
             }
             // A borrow or view of a place of it reads that place.
@@ -2432,19 +2643,22 @@ extend tc::TypeChecker {
                     sa = sa | self.bc_uni_read(u, body, x, rv.a);
                     s0 = s0 | u.m0;
                     s1 = s1 | u.m1;
+                    s2 = s2 | u.m2;
                 }
             }
             if !hit {
-                let base = (u.mb[x] >> 32) as usize * 3;
+                let base = (u.mb[x] >> 32) as usize * UNI_SW;
                 for i in 0..(u.mb[x] & 0xFFFFFFFFu64) as usize {
-                    s0 = s0 | u.mem[base + i * 3];
-                    s1 = s1 | u.mem[base + i * 3 + 1];
-                    sa = sa | u.mem[base + i * 3 + 2];
+                    s0 = s0 | u.mem[base + i * UNI_SW];
+                    s1 = s1 | u.mem[base + i * UNI_SW + 1];
+                    sa = sa | u.mem[base + i * UNI_SW + 2];
+                    s2 = s2 | u.mem[base + i * UNI_SW + 3];
                 }
             }
         }
         u.m0 = s0;
         u.m1 = s1;
+        u.m2 = s2;
         return sa;
     }
 
@@ -2454,40 +2668,47 @@ extend tc::TypeChecker {
     // fails); a local keeping members, those of the member the place names (every member for the
     // whole value); besides, what else reached the origin.
     fn bc_uni_read(self: &Self, u: &mut UniSt, body: &ir::CoreBody, x: usize, place: ir::PlaceId) u64 {
-        let mut s0 = u.st[x * 3];
-        let mut s1 = u.st[x * 3 + 1];
-        let mut sa = u.st[x * 3 + 2];
+        let mut s0 = u.st[x * UNI_SW];
+        let mut s1 = u.st[x * UNI_SW + 1];
+        let mut sa = u.st[x * UNI_SW + 2];
+        let mut s2 = u.st[x * UNI_SW + 3];
         let ai = u.argof[x];
         if ai != UNI_NONE {
-            let a0 = u.arg[ai as usize * 2];
-            let a1 = u.arg[ai as usize * 2 + 1];
+            let a0 = u.arg[ai as usize * UNI_AW];
+            let a1 = u.arg[ai as usize * UNI_AW + 1];
+            let a2 = u.arg[ai as usize * UNI_AW + 2];
             s0 = s0 & ~a0;
             s1 = s1 & ~a1;
+            s2 = s2 & ~a2;
             let a = self.cur_ast();
             let params = unsafe (*a).at_const(body.owner.node).as_data.function.params;
             let ptn = unsafe (*a).slot_type_node(unsafe (*a).list(params)[ai as usize]);
             if !self.bc_uni_place(u, body, ptn, place) {
                 s0 = s0 | a0;
                 s1 = s1 | a1;
-            } else if body.place_has_deref(place) {
-                sa = sa | u.m0 | u.m1;
+                s2 = s2 | a2;
+            } else if self.bc_place_behind(body, place) {
+                sa = sa | u.m0 | u.m1 | u.m2;
             } else {
                 s0 = s0 | u.m0;
                 s1 = s1 | u.m1;
+                s2 = s2 | u.m2;
             }
         } else {
             let k = self.bc_uni_member(u, body, x, place);
-            let base = (u.mb[x] >> 32) as usize * 3;
+            let base = (u.mb[x] >> 32) as usize * UNI_SW;
             for i in 0..(u.mb[x] & 0xFFFFFFFFu64) as u32 {
                 if k == UNI_NONE || k == i {
-                    s0 = s0 | u.mem[base + i as usize * 3];
-                    s1 = s1 | u.mem[base + i as usize * 3 + 1];
-                    sa = sa | u.mem[base + i as usize * 3 + 2];
+                    s0 = s0 | u.mem[base + i as usize * UNI_SW];
+                    s1 = s1 | u.mem[base + i as usize * UNI_SW + 1];
+                    sa = sa | u.mem[base + i as usize * UNI_SW + 2];
+                    s2 = s2 | u.mem[base + i as usize * UNI_SW + 3];
                 }
             }
         }
         u.m0 = s0;
         u.m1 = s1;
+        u.m2 = s2;
         return sa;
     }
 
@@ -2498,7 +2719,7 @@ extend tc::TypeChecker {
     fn bc_uni_pass(self: &Self, u: &mut UniSt, body: &ir::CoreBody, f: &bfx::BodyFacts, x: usize, e: &bfx::SubsetAt) bool {
         let t = e.to as usize;
         let tc = (u.mb[t] & 0xFFFFFFFFu64) as u32;
-        let tb = (u.mb[t] >> 32) as usize * 3;
+        let tb = (u.mb[t] >> 32) as usize * UNI_SW;
         let mut si: u32 = 0;
         let blk = *body.blocks.at(self.bc_uni_site(f, e.point, &mut si));
         if tc != 0 && si < blk.stmt_len {
@@ -2508,8 +2729,8 @@ extend tc::TypeChecker {
                 let k = self.bc_uni_member(u, body, t, st.place);
                 if k != UNI_NONE {
                     let sa = self.bc_uni_from(u, body, f, x, e.point);
-                    let wa = u.carry(e.delta, u.m0, u.m1, sa);
-                    return UniSt::join(&mut u.mem, tb + k as usize * 3, u.m0, u.m1, wa);
+                    let wa = u.carry(e.delta, u.m0, u.m1, sa, u.m2);
+                    return UniSt::join(&mut u.mem, tb + k as usize * UNI_SW, u.m0, u.m1, wa, u.m2);
                 }
                 let rv = *body.rvalues.at(st.rvalue as usize);
                 let whole = body.places.at(st.place as usize).proj_len == 0;
@@ -2525,8 +2746,8 @@ extend tc::TypeChecker {
                         if (op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE) && body.places.at(op.data as usize).base == lx {
                             hit = true;
                             let sa = self.bc_uni_read(u, body, x, op.data);
-                            let wa = u.carry(e.delta, u.m0, u.m1, sa);
-                            grew = UniSt::join(&mut u.mem, tb + i as usize * 3, u.m0, u.m1, wa) || grew;
+                            let wa = u.carry(e.delta, u.m0, u.m1, sa, u.m2);
+                            grew = UniSt::join(&mut u.mem, tb + i as usize * UNI_SW, u.m0, u.m1, wa, u.m2) || grew;
                         }
                     }
                     if hit {
@@ -2539,12 +2760,24 @@ extend tc::TypeChecker {
                     let op = *body.operands.at(rv.a as usize);
                     let xp = *body.places.at(op.data as usize);
                     if (op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE) && xp.base == lx && xp.proj_len == 0 {
-                        let wa = u.carry(e.delta, u.st[x * 3], u.st[x * 3 + 1], u.st[x * 3 + 2]);
-                        let mut grew = UniSt::join(&mut u.st, t * 3, u.m0, u.m1, wa);
-                        let xb = (u.mb[x] >> 32) as usize * 3;
+                        let wa = u.carry(
+                            e.delta,
+                            u.st[x * UNI_SW],
+                            u.st[x * UNI_SW + 1],
+                            u.st[x * UNI_SW + 2],
+                            u.st[x * UNI_SW + 3],
+                        );
+                        let mut grew = UniSt::join(&mut u.st, t * UNI_SW, u.m0, u.m1, wa, u.m2);
+                        let xb = (u.mb[x] >> 32) as usize * UNI_SW;
                         for i in 0..tc as usize {
-                            let wm = u.carry(e.delta, u.mem[xb + i * 3], u.mem[xb + i * 3 + 1], u.mem[xb + i * 3 + 2]);
-                            grew = UniSt::join(&mut u.mem, tb + i * 3, u.m0, u.m1, wm) || grew;
+                            let wm = u.carry(
+                                e.delta,
+                                u.mem[xb + i * UNI_SW],
+                                u.mem[xb + i * UNI_SW + 1],
+                                u.mem[xb + i * UNI_SW + 2],
+                                u.mem[xb + i * UNI_SW + 3],
+                            );
+                            grew = UniSt::join(&mut u.mem, tb + i * UNI_SW, u.m0, u.m1, wm, u.m2) || grew;
                         }
                         return grew;
                     }
@@ -2552,8 +2785,8 @@ extend tc::TypeChecker {
             }
         }
         let sa = self.bc_uni_from(u, body, f, x, e.point);
-        let wa = u.carry(e.delta, u.m0, u.m1, sa);
-        return UniSt::join(&mut u.st, t * 3, u.m0, u.m1, wa);
+        let wa = u.carry(e.delta, u.m0, u.m1, sa, u.m2);
+        return UniSt::join(&mut u.st, t * UNI_SW, u.m0, u.m1, wa, u.m2);
     }
 
     // Check edge `e` into a slot with members (`u.sm`) member by member, when the operation stores an
@@ -2593,7 +2826,7 @@ extend tc::TypeChecker {
                 if (op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE) && body.places.at(op.data as usize).base == lx {
                     hit = true;
                     let sa = self.bc_uni_read(u, body, x, op.data);
-                    let va = u.arrive(mode, e.delta, u.m0, u.m1, sa);
+                    let va = u.arrive(mode, e.delta, u.m0, u.m1, sa, u.m2);
                     if u.fails(u.m0, u.m1, va, u.sm[i as usize * 2], u.sm[i as usize * 2 + 1]) {
                         *bad = true;
                     }
@@ -2605,14 +2838,15 @@ extend tc::TypeChecker {
             let op = *body.operands.at(rv.a as usize);
             let xp = *body.places.at(op.data as usize);
             if (op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE) && xp.base == lx && xp.proj_len == 0 {
-                let xb = (u.mb[x] >> 32) as usize * 3;
+                let xb = (u.mb[x] >> 32) as usize * UNI_SW;
                 for i in 0..cnt as usize {
                     let va = u.arrive(
                         mode,
                         e.delta,
-                        u.st[x * 3] | u.mem[xb + i * 3],
-                        u.st[x * 3 + 1] | u.mem[xb + i * 3 + 1],
-                        u.st[x * 3 + 2] | u.mem[xb + i * 3 + 2],
+                        u.st[x * UNI_SW] | u.mem[xb + i * UNI_SW],
+                        u.st[x * UNI_SW + 1] | u.mem[xb + i * UNI_SW + 1],
+                        u.st[x * UNI_SW + 2] | u.mem[xb + i * UNI_SW + 2],
+                        u.st[x * UNI_SW + 3] | u.mem[xb + i * UNI_SW + 3],
                     );
                     if u.fails(u.m0, u.m1, va, u.sm[i * 2], u.sm[i * 2 + 1]) {
                         *bad = true;
@@ -2749,7 +2983,8 @@ extend tc::TypeChecker {
             for i in 0..es.len {
                 u.m0 = 0;
                 u.m1 = 0;
-                if !self.bc_uni_frame_type(u, m, decl, unsafe (*a).list(es)[i as usize], false, 0) {
+                u.m2 = 0;
+                if !self.bc_uni_frame_type(u, m, decl, unsafe (*a).list(es)[i as usize], UL_OWN, 0) {
                     u.sm.truncate(0);
                     return false;
                 }
@@ -2781,12 +3016,13 @@ extend tc::TypeChecker {
             let fd = unsafe (*da).list(ms)[j as usize];
             u.m0 = 0;
             u.m1 = 0;
+            u.m2 = 0;
             if unsafe (*da).at_const(fd).kind != NodeKind::NODE_FIELD || !self.bc_uni_frame_type(
                 u,
                 d.module,
                 d.node,
                 unsafe (*da).at_const(fd).as_data.field.ty,
-                false,
+                UL_OWN,
                 0,
             ) {
                 u.sm.truncate(0);
@@ -2896,10 +3132,12 @@ extend tc::TypeChecker {
         let mut ops_start: u32 = 0;
         let mut ops_len: u32 = 0;
         let pool = self.bc_uni_ops(body, f, point, &mut ops_start, &mut ops_len);
-        let a0 = u.arg[ai as usize * 2];
-        let a1 = u.arg[ai as usize * 2 + 1];
+        let a0 = u.arg[ai as usize * UNI_AW];
+        let a1 = u.arg[ai as usize * UNI_AW + 1];
+        let a2 = u.arg[ai as usize * UNI_AW + 2];
         let mut m0: u64 = 0;
         let mut m1: u64 = 0;
+        let mut m2: u64 = 0;
         let mut ma: u64 = 0;
         let mut hit = false;
         for k in 0..ops_len {
@@ -2922,23 +3160,27 @@ extend tc::TypeChecker {
             if !self.bc_uni_place(u, body, ptn, op.data) {
                 m0 = a0;
                 m1 = a1;
+                m2 = a2;
                 ma = 0;
                 break;
             }
-            if body.place_has_deref(op.data) {
-                ma = ma | u.m0 | u.m1;
+            if self.bc_place_behind(body, op.data) {
+                ma = ma | u.m0 | u.m1 | u.m2;
             } else {
                 m0 = m0 | u.m0;
                 m1 = m1 | u.m1;
+                m2 = m2 | u.m2;
             }
         }
         if !hit {
             m0 = a0;
             m1 = a1;
+            m2 = a2;
             ma = 0;
         }
         u.m0 = m0;
         u.m1 = m1;
+        u.m2 = m2;
         return ma;
     }
 
@@ -3017,7 +3259,8 @@ extend tc::TypeChecker {
         u.ptyn = tyn;
         u.m0 = 0;
         u.m1 = 0;
-        return self.bc_uni_frame_type(u, m, decl, tyn, false, 0);
+        u.m2 = 0;
+        return self.bc_uni_frame_type(u, m, decl, tyn, UL_OWN, 0);
     }
 
     // The region (one bit) lifetime node `lt` of module `m` denotes in a place walk's frame: the
@@ -3067,7 +3310,7 @@ extend tc::TypeChecker {
     // The regions of type node `tyn` of module `m` in a place walk's frame (see `bc_uni_frame_lt`),
     // added to `u.m0` or, behind a reference, to `u.m1`. False when a lifetime is unknown or a type
     // parameter of the frame's struct stands in for a type.
-    fn bc_uni_frame_type(self: &Self, u: &mut UniSt, m: ModuleId, decl: NodeId, tyn: NodeId, behind: bool, depth: i32) bool {
+    fn bc_uni_frame_type(self: &Self, u: &mut UniSt, m: ModuleId, decl: NodeId, tyn: NodeId, lvl: u8, depth: i32) bool {
         if tyn == NODE_NONE || depth > 6 {
             return false;
         }
@@ -3078,20 +3321,16 @@ extend tc::TypeChecker {
             if r == 0 {
                 return false;
             }
-            if behind {
-                u.m1 = u.m1 | r;
-            } else {
-                u.m0 = u.m0 | r;
-            }
-            return self.bc_uni_frame_type(u, m, decl, n.as_data.indirect_type.ty, true, depth + 1);
+            u.mark_set(r, lvl);
+            return self.bc_uni_frame_type(u, m, decl, n.as_data.indirect_type.ty, ul_ref(lvl), depth + 1);
         }
         if n.kind == NodeKind::NODE_ARRAY_TYPE {
-            return self.bc_uni_frame_type(u, m, decl, n.as_data.array_type.element, behind, depth + 1);
+            return self.bc_uni_frame_type(u, m, decl, n.as_data.array_type.element, lvl, depth + 1);
         }
         if n.kind == NodeKind::NODE_TUPLE_TYPE {
             let es = n.as_data.array_literal.elements;
             for i in 0..es.len {
-                if !self.bc_uni_frame_type(u, m, decl, unsafe (*a).list(es)[i as usize], behind, depth + 1) {
+                if !self.bc_uni_frame_type(u, m, decl, unsafe (*a).list(es)[i as usize], lvl, depth + 1) {
                     return false;
                 }
             }
@@ -3116,7 +3355,7 @@ extend tc::TypeChecker {
                 m,
                 decl,
                 unsafe (*a).at_const(ext).as_data.extend_def.target_type,
-                behind,
+                lvl,
                 depth + 1,
             );
         }
@@ -3130,6 +3369,13 @@ extend tc::TypeChecker {
             return decl == NODE_NONE;
         }
         let args = n.as_data.type_path.args;
+        let nlt = unsafe (*self.mod_ast(d.module)).lifetimes_of(d.node).len;
+        // A lifetime-generic aggregate's fields may place its arguments deeper.
+        let al = if nlt != 0 {
+            lvl | UL_DEEP;
+        } else {
+            lvl;
+        };
         let mut named: u32 = 0;
         for i in 0..args.len {
             let aid = unsafe (*a).list(args)[i as usize];
@@ -3139,26 +3385,17 @@ extend tc::TypeChecker {
                 if r == 0 {
                     return false;
                 }
-                if behind {
-                    u.m1 = u.m1 | r;
-                } else {
-                    u.m0 = u.m0 | r;
-                }
-            } else if !self.bc_uni_frame_type(u, m, decl, aid, behind, depth + 1) {
+                u.mark_set(r, al);
+            } else if !self.bc_uni_frame_type(u, m, decl, aid, al, depth + 1) {
                 return false;
             }
         }
-        let nlt = unsafe (*self.mod_ast(d.module)).lifetimes_of(d.node).len;
         for k in named..nlt {
             let r = self.bc_uni_frame_lt(u, m, decl, NODE_NONE, tyn, k);
             if r == 0 {
                 return false;
             }
-            if behind {
-                u.m1 = u.m1 | r;
-            } else {
-                u.m0 = u.m0 | r;
-            }
+            u.mark_set(r, al);
         }
         return true;
     }
@@ -3202,7 +3439,7 @@ extend tc::TypeChecker {
     // level or to `u.m1` behind a reference; `elide` as in `bc_uni_region`. A reference or slice
     // records the bounds it implies: every region behind it outlives its own. Returns every region
     // found.
-    fn bc_uni_type(self: &Self, u: &mut UniSt, tyn: NodeId, behind: bool, elide: u32, depth: i32) u64 {
+    fn bc_uni_type(self: &Self, u: &mut UniSt, tyn: NodeId, lvl: u8, elide: u32, depth: i32) u64 {
         if tyn == NODE_NONE || depth > 6 {
             return 0;
         }
@@ -3210,7 +3447,7 @@ extend tc::TypeChecker {
         let n = *unsafe (*a).at_const(tyn);
         if n.kind == NodeKind::NODE_REFERENCE_TYPE || n.kind == NodeKind::NODE_SLICE_TYPE {
             let r = self.bc_uni_region(u, n.as_data.indirect_type.lifetime, elide, tyn, 0);
-            let inner = self.bc_uni_type(u, n.as_data.indirect_type.ty, true, elide, depth + 1);
+            let inner = self.bc_uni_type(u, n.as_data.indirect_type.ty, ul_ref(lvl), elide, depth + 1);
             if r == UNI_NONE {
                 return inner;
             }
@@ -3219,38 +3456,38 @@ extend tc::TypeChecker {
                     u.ol.set(x, u.ol[x] | 1u64 << r as u64);
                 }
             }
-            u.mark(r, behind);
+            u.mark(r, lvl);
             return inner | 1u64 << r as u64;
         }
         if n.kind == NodeKind::NODE_ARRAY_TYPE {
-            return self.bc_uni_type(u, n.as_data.array_type.element, behind, elide, depth + 1);
+            return self.bc_uni_type(u, n.as_data.array_type.element, lvl, elide, depth + 1);
         }
         if n.kind == NodeKind::NODE_TUPLE_TYPE {
             let mut m: u64 = 0;
             let es = n.as_data.array_literal.elements;
             for i in 0..es.len {
-                m = m | self.bc_uni_type(u, unsafe (*a).list(es)[i as usize], behind, elide, depth + 1);
+                m = m | self.bc_uni_type(u, unsafe (*a).list(es)[i as usize], lvl, elide, depth + 1);
             }
             return m;
         }
         if n.kind == NodeKind::NODE_DYN_TYPE {
             // An erased object holds borrows its type does not show: an owned `dyn I` only `'static`
             // ones (Rust's default object lifetime), a `&'a dyn I` ones that outlive `'a`.
-            let fm = self.bc_uni_fn(u, n.as_data.indirect_type.ty, behind, depth);
+            let fm = self.bc_uni_fn(u, n.as_data.indirect_type.ty, lvl, depth);
             if n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_NONE {
-                u.mark(0, behind);
+                u.mark(0, lvl | UL_DEEP);
                 return 1u64 | fm;
             }
             let r = self.bc_uni_region(u, n.as_data.indirect_type.lifetime, elide, tyn, 0);
             if r == UNI_NONE {
                 return fm;
             }
-            u.mark(r, behind);
-            u.mark(r, true);
+            u.mark(r, lvl);
+            u.mark(r, UL_BEHIND | UL_DEEP);
             return 1u64 << r as u64 | fm;
         }
         if n.kind == NodeKind::NODE_FUNCTION_TYPE {
-            return self.bc_uni_fn(u, tyn, behind, depth);
+            return self.bc_uni_fn(u, tyn, lvl, depth);
         }
         if n.kind != NodeKind::NODE_TYPE_PATH {
             return 0;
@@ -3261,13 +3498,7 @@ extend tc::TypeChecker {
             if ext == NODE_NONE {
                 return 0;
             }
-            return self.bc_uni_type(
-                u,
-                unsafe (*a).at_const(ext).as_data.extend_def.target_type,
-                behind,
-                elide,
-                depth + 1,
-            );
+            return self.bc_uni_type(u, unsafe (*a).at_const(ext).as_data.extend_def.target_type, lvl, elide, depth + 1);
         }
         let d = unsafe (*a).path_def(tyn);
         if d.node == NODE_NONE {
@@ -3281,7 +3512,7 @@ extend tc::TypeChecker {
             let mut gm = self.bc_uni_bounds(
                 u,
                 unsafe (*a).at_const(d.node).as_data.generic_param.bounds,
-                behind,
+                lvl | UL_DEEP,
                 elide,
                 depth,
             );
@@ -3292,7 +3523,7 @@ extend tc::TypeChecker {
                     gm = gm | self.bc_uni_bounds(
                         u,
                         unsafe (*a).at_const(pred).as_data.where_predicate.bounds,
-                        behind,
+                        lvl | UL_DEEP,
                         elide,
                         depth,
                     );
@@ -3303,25 +3534,31 @@ extend tc::TypeChecker {
         let mut m: u64 = 0;
         let mut named: u32 = 0;
         let args = n.as_data.type_path.args;
+        let nlt = unsafe (*self.mod_ast(d.module)).lifetimes_of(d.node).len;
+        // A lifetime-generic aggregate's fields may place its arguments deeper.
+        let al = if nlt != 0 {
+            lvl | UL_DEEP;
+        } else {
+            lvl;
+        };
         for i in 0..args.len {
             let aid = unsafe (*a).list(args)[i as usize];
             if unsafe (*a).at_const(aid).kind == NodeKind::NODE_LIFETIME {
                 named += 1;
                 let r = self.bc_uni_region(u, aid, elide, tyn, named - 1);
                 if r != UNI_NONE {
-                    u.mark(r, behind);
+                    u.mark(r, al);
                     m = m | 1u64 << r as u64;
                 }
             } else {
-                m = m | self.bc_uni_type(u, aid, behind, elide, depth + 1);
+                m = m | self.bc_uni_type(u, aid, al, elide, depth + 1);
             }
         }
         // Lifetime parameters the path leaves unwritten are elided positions.
-        let nlt = unsafe (*self.mod_ast(d.module)).lifetimes_of(d.node).len;
         for k in named..nlt {
             let r = self.bc_uni_region(u, NODE_NONE, elide, tyn, k);
             if r != UNI_NONE {
-                u.mark(r, behind);
+                u.mark(r, al);
                 m = m | 1u64 << r as u64;
             }
         }
@@ -3331,7 +3568,7 @@ extend tc::TypeChecker {
     // The regions the arguments of bound list `bs` (current module) name, as `bc_uni_type` adds them.
     // The regions function type `fnn` fixes (current module): the lifetimes its positions name that
     // its own `for<..>` does not bind. A value of it holds them: a call stores its arguments there.
-    fn bc_uni_fn(self: &Self, u: &mut UniSt, fnn: NodeId, behind: bool, depth: i32) u64 {
+    fn bc_uni_fn(self: &Self, u: &mut UniSt, fnn: NodeId, lvl: u8, depth: i32) u64 {
         let a = self.cur_ast();
         if fnn == NODE_NONE || depth > 6 || unsafe (*a).at_const(fnn).kind != NodeKind::NODE_FUNCTION_TYPE {
             return 0;
@@ -3363,20 +3600,20 @@ extend tc::TypeChecker {
             if own || r == UNI_NONE {
                 continue;
             }
-            u.mark(r, behind);
-            u.mark(r, true);
+            u.mark(r, lvl | UL_DEEP);
+            u.mark(r, UL_BEHIND | UL_DEEP);
             m = m | 1u64 << r as u64;
         }
         return m;
     }
 
-    fn bc_uni_bounds(self: &Self, u: &mut UniSt, bs: NodeList, behind: bool, elide: u32, depth: i32) u64 {
+    fn bc_uni_bounds(self: &Self, u: &mut UniSt, bs: NodeList, lvl: u8, elide: u32, depth: i32) u64 {
         let a = self.cur_ast();
         let mut m: u64 = 0;
         for i in 0..bs.len {
             let b = unsafe (*a).list(bs)[i as usize];
             if unsafe (*a).at_const(b).kind == NodeKind::NODE_FUNCTION_TYPE {
-                m = m | self.bc_uni_fn(u, b, behind, depth);
+                m = m | self.bc_uni_fn(u, b, lvl, depth);
                 continue;
             }
             if unsafe (*a).at_const(b).kind != NodeKind::NODE_TYPE_PATH {
@@ -3388,11 +3625,11 @@ extend tc::TypeChecker {
                 if unsafe (*a).at_const(aid).kind == NodeKind::NODE_LIFETIME {
                     let r = self.bc_uni_region(u, aid, elide, b, j);
                     if r != UNI_NONE {
-                        u.mark(r, behind);
+                        u.mark(r, lvl);
                         m = m | 1u64 << r as u64;
                     }
                 } else {
-                    m = m | self.bc_uni_type(u, aid, behind, elide, depth + 1);
+                    m = m | self.bc_uni_type(u, aid, lvl, elide, depth + 1);
                 }
             }
         }

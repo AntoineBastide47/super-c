@@ -838,7 +838,7 @@ fn diag_len(head: usize) u64 {
     let mut w = head as *mut IoWait;
     while w != null && n < 100000 {
         n = n + 1;
-        w = (unsafe atomic::load_usize((&mut (*w).lnext) as *mut usize, 0)) as *mut IoWait;
+        w = (unsafe atomic::load_usize(((&mut (*w).lnext) as *mut *mut IoWait) as *mut usize, 0)) as *mut IoWait;
     }
     return n;
 }
@@ -875,12 +875,12 @@ fn io_diag() {
     l.put(" closes ");
     l.num(unsafe atomic::load_u64(&mut unsafe G_CLOSES, 0));
     l.end();
-    let recs = (unsafe atomic::load_usize((&mut (*r).recs) as *mut usize, 0)) as *mut FdRec;
+    let recs = (unsafe atomic::load_usize(((&mut (*r).recs) as *mut *mut FdRec) as *mut usize, 0)) as *mut FdRec;
     let nrec = unsafe atomic::load_usize(&mut unsafe (*r).nrec, 0);
     for i in 0..nrec {
         let rec = unsafe (recs + i);
-        let rd = unsafe atomic::load_usize((&mut (*rec).rd) as *mut usize, 0);
-        let wr = unsafe atomic::load_usize((&mut (*rec).wr) as *mut usize, 0);
+        let rd = unsafe atomic::load_usize(((&mut (*rec).rd) as *mut *mut IoWait) as *mut usize, 0);
+        let wr = unsafe atomic::load_usize(((&mut (*rec).wr) as *mut *mut IoWait) as *mut usize, 0);
         let stale = unsafe atomic::load_u8(&mut unsafe (*rec).stale, 0);
         if rd == 0 && wr == 0 && stale == 0 {
             continue;

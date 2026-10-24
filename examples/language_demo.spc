@@ -142,7 +142,7 @@ extend Counter {
         return Self { label: label, hits: Self::START };
     }
 
-    pub fn bump(self: &mut Self) i32 {
+    pub const fn bump(self: &mut Self) i32 {
         self.hits += 1;
         return self.hits;
     }
@@ -280,7 +280,7 @@ const fn lane_bytes<T>() usize {
     return BYTES;
 }
 
-fn sum3<T: Add<Output = T> + Copy>(a: T, b: T, c: T) T {
+const fn sum3<T: Add<Output = T> + Copy>(a: T, b: T, c: T) T {
     return a + b + c;
 }
 
