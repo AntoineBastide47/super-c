@@ -49,71 +49,82 @@ fn run_file(
     cstd: str,
     profile: str,
 ) i32 {
-    loader::set_load_jobs(jobs);
-    let tl0 = ticks_ms();
-    // The build settings the prelude's build constants spell, set before the load.
-    let mut p = loader::package_new(loader::dirname_of(path), "", std_dir);
-    p.arch = arch;
-    p.features = features;
-    p.simd_width = pick(simd_width != 0, simd_width, 256);
-    let bi = bman::builtins_only();
-    p.simd_dispatch = String::from_str(bsys::dispatch_for(&bi, profile, simd_dispatch));
-    p.mem_check = bsys::mem_checker(cflags);
-    p.build_cfg = bsys::build_cfg(cflags);
-    p.test_build = unsafe (*topts).enabled;
-    p.profile = String::from_str(profile);
-    p.profiles = bsys::profile_names(&bi);
-    p.bootstrap = bootstrap_tags;
-    let mut cirv = iri::interp_master((&mut p) as *mut loader::Package, ce_steps, ce_mem);
-    let cdir = ocache::object_cache_dir("");
-    if prelude_stage(&mut p, &mut cirv, std_dir, path, target, jobs, ce_steps, ce_mem, cdir.as_str()) {
-        p.load_user(path, std_dir, target);
-    }
-    if stdlib::getenv("SC_CEMIT_STATS") != null {
-        eprintln("phase load: {} ms", ticks_ms() - tl0);
-    }
-    loader::set_load_jobs(1);
-    // `--out-dir`, `--cc` and `--cstd` apply to a bare build exactly as to a manifest one: the emitted tree
-    // goes under the named directory, and the named compiler builds the program with the named base flags.
-    if out_dir.len() != 0 {
-        let mut g = String::from_str(out_dir);
-        g.push_byte(b'/');
-        g.push_str(p.profile_name());
-        g.push_str("/raw");
-        p.gen_root = g;
-    }
-    if cc.len() != 0 {
-        p.cc = String::from_str(cc);
-    }
-    if cstd.len() != 0 {
-        p.cstd = String::from_str(cstd);
-    }
-    // A standalone script is a binary with no test suite to count as callers: unreachable pub
-    // functions are dead weight. Project trees get this from the whole-workspace lint instead,
-    // where @test roots keep test-only helpers alive.
-    let manf = stdio::fopen("build.toml", "rb");
-    if manf != null {
-        unsafe stdio::fclose(manf);
-    } else {
-        p.lint_pub = lint;
-    }
+    // The modules whose bodies render though the native backend may take them: a second run gets the
+    // names a first one returned with RC_NATIVE_RETRY, and asks for no other.
+    let mut retry = Vector::<String>::new();
     let mut rc: i32 = 1;
-    if !p.ok && jobs != 1 {
-        prt::shutdown(); // parallel loading started the pool; the leak gate needs it gone
-    }
-    if p.ok {
-        p.jobs = p.analysis_jobs(jobs);
-        if p.jobs == 1 && jobs != 1 {
-            prt::shutdown(); // parallel loading may have started the pool
-            // A serial compile hands its slots back.
-            unsafe shim::sc_jobserver_release_claim();
+    for _ in 0..2 {
+        loader::set_load_jobs(jobs);
+        let tl0 = ticks_ms();
+        // The build settings the prelude's build constants spell, set before the load.
+        let mut p = loader::package_new(loader::dirname_of(path), "", std_dir);
+        p.arch = arch;
+        p.features = features;
+        p.simd_width = pick(simd_width != 0, simd_width, 256);
+        let bi = bman::builtins_only();
+        p.simd_dispatch = String::from_str(bsys::dispatch_for(&bi, profile, simd_dispatch));
+        p.mem_check = bsys::mem_checker(cflags);
+        p.build_cfg = bsys::build_cfg(cflags);
+        p.test_build = unsafe (*topts).enabled;
+        p.profile = String::from_str(profile);
+        p.profiles = bsys::profile_names(&bi);
+        p.bootstrap = bootstrap_tags;
+        let mut cirv = iri::interp_master((&mut p) as *mut loader::Package, ce_steps, ce_mem);
+        let cdir = ocache::object_cache_dir("");
+        if prelude_stage(&mut p, &mut cirv, std_dir, path, target, jobs, ce_steps, ce_mem, cdir.as_str()) {
+            p.load_user(path, std_dir, target);
         }
-        p.cir = &mut cirv;
-        // One process builds a tree at a time, as in a manifest build.
-        default_gen_root(&mut p);
-        let lk = bsys::tree_lock(loader::dirname_of(p.gen_root.as_str()));
-        if lk.held() {
-            rc = run_package(&mut p, topts, out_bin, target, lint, cflags, ccflags, null);
+        if stdlib::getenv("SC_CEMIT_STATS") != null {
+            eprintln("phase load: {} ms", ticks_ms() - tl0);
+        }
+        loader::set_load_jobs(1);
+        // `--out-dir`, `--cc` and `--cstd` apply to a bare build exactly as to a manifest one: the emitted tree
+        // goes under the named directory, and the named compiler builds the program with the named base flags.
+        if out_dir.len() != 0 {
+            let mut g = String::from_str(out_dir);
+            g.push_byte(b'/');
+            g.push_str(p.profile_name());
+            g.push_str("/raw");
+            p.gen_root = g;
+        }
+        if cc.len() != 0 {
+            p.cc = String::from_str(cc);
+        }
+        if cstd.len() != 0 {
+            p.cstd = String::from_str(cstd);
+        }
+        // A standalone script is a binary with no test suite to count as callers: unreachable pub
+        // functions are dead weight. Project trees get this from the whole-workspace lint instead,
+        // where @test roots keep test-only helpers alive.
+        let manf = stdio::fopen("build.toml", "rb");
+        if manf != null {
+            unsafe stdio::fclose(manf);
+        } else {
+            p.lint_pub = lint;
+        }
+        rc = 1;
+        if !p.ok && jobs != 1 {
+            prt::shutdown(); // parallel loading started the pool; the leak gate needs it gone
+        }
+        if p.ok {
+            p.jobs = p.analysis_jobs(jobs);
+            if p.jobs == 1 && jobs != 1 {
+                prt::shutdown(); // parallel loading may have started the pool
+                // A serial compile hands its slots back.
+                unsafe shim::sc_jobserver_release_claim();
+            }
+            p.cir = &mut cirv;
+            // One process builds a tree at a time, as in a manifest build.
+            default_gen_root(&mut p);
+            let lk = bsys::tree_lock(loader::dirname_of(p.gen_root.as_str()));
+            if lk.held() {
+                p.nat_retry = replace(&mut retry, Vector::<String>::new());
+                rc = run_package(&mut p, topts, out_bin, target, lint, cflags, ccflags, null);
+                retry = replace(&mut p.nat_retry, Vector::<String>::new());
+            }
+        }
+        if rc != RC_NATIVE_RETRY {
+            break;
         }
     }
     return rc;

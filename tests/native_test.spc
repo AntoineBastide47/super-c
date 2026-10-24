@@ -217,6 +217,37 @@ fn header_scalars_cross_the_c_abi() {
     assert_eq(p.run_bin(), 0);
 }
 
+// A call the native backend refuses after its module lowered (a C type of unknown class by value) sends
+// the module through C: the build renders its C in a second run. A rebuild that changes only `main`
+// replays the std modules, which rendered no C.
+@test
+fn a_module_the_backend_refuses_goes_through_c() {
+    if !nat::supported(tgt::host_os(), tgt::host_isa()) {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("h.h", "typedef struct { double a; long b; } pair;\ndouble sum(pair p);\n");
+    p.mkfile("h.c", "#include \"h.h\"\ndouble sum(pair p) { return p.a + (double)p.b + 7; }\n");
+    assert(p.c_lib("hp", "h.c"), "the C library builds");
+    p.mkfile("main.spc", pair_main(p.dir(), "").as_str());
+    let r = cli::superc_env_in(p.dir(), "SC_NATIVE_STATS", "1", "build main.spc -o bin");
+    assert(r.ok(), "the program builds");
+    assert(r.out_has("main through C"), "main goes through C");
+    assert_eq(p.run_bin(), 7);
+    p.mkfile("main.spc", pair_main(p.dir(), " + 1").as_str());
+    assert(cli::superc_in(p.dir(), "build main.spc -o bin").ok(), "the program builds again");
+    assert_eq(p.run_bin(), 8);
+}
+
+// The `main` of `a_module_the_backend_refuses_goes_through_c`, linked from `dir`, its result plus `more`.
+fn pair_main(dir: str, more: str) String {
+    return format(
+        "@link(\"-L{} -lhp\")\nextern \"C\" \"h.h\" {{\n    @layout(16, 8)\n    type pair;\n    fn sum(p: pair) f64;\n}}\n\nfn main() i32 {{\n    return unsafe sum(unsafe zeroed::<pair>()) as i32{};\n}}\n",
+        dir,
+        more,
+    );
+}
+
 // Vectors of 4 to 32 bytes between modules: built with each module alone native, under both C vector
 // forms (vector registers, and lane arrays with SC_SIMD_SCALAR=1), C and native code must agree on where
 // each vector travels.
@@ -272,7 +303,8 @@ fn vectors_cross_between_c_and_native_modules() {
 }
 
 // A native object holds the C header constants it reads, so an edit of the header rebuilds it; a header's
-// `static` function, which no object exports, sends its caller through C.
+// `static` function, which no object exports, sends its caller through C: a first build renders its C in
+// a second run, and a rebuild replays the modules that rendered none with what they demanded.
 @test
 fn header_edits_reach_native_objects() {
     if !nat::supported(tgt::host_os(), tgt::host_isa()) {
@@ -288,6 +320,12 @@ fn header_edits_reach_native_objects() {
     assert_eq(cli::superc_in(p.dir(), "run").exit, 41);
     p.mkfile("val.h", "#define KVAL 41\nstatic inline int one(void) { return 1; }\n");
     assert_eq(cli::superc_in(p.dir(), "run").exit, 42);
+    // Only `main` changes: the std modules replay.
+    p.mkfile(
+        "main.spc",
+        "extern \"C\" \"val.h\" {\n    const KVAL: i32;\n    fn one() i32;\n}\n\nfn main() i32 {\n    return KVAL + unsafe one() + 1;\n}\n",
+    );
+    assert_eq(cli::superc_in(p.dir(), "run").exit, 43);
 }
 
 // The native objects under `dir` (`rel` its path below the tree's root), each as its relative path and

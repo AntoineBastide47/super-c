@@ -8,6 +8,7 @@
 // a use but not the definition (the value must survive the back edge). The CFG is reducible (the verifier
 // checks it), so an edge to a block not later in reverse postorder is a back edge.
 import lir::ir as *;
+import lir::verify as lv;
 
 /// The analysis of one body. Values index `insts` first, then `params`, then the overflow flags that have
 /// a use (`flag_of`).
@@ -399,10 +400,10 @@ extend Live {
 pub fn each_use(b: &Body, t: Inst, out: &mut Vector<Value>) {
     out.truncate(0);
     let f = op_info(t.op).form;
-    if value_a(f) && t.a != VNONE {
+    if lv::operand_a(f) && t.a != VNONE {
         out.push(t.a);
     }
-    if value_b(f) && t.b != VNONE {
+    if lv::operand_b(f) && t.b != VNONE {
         out.push(t.b);
     }
     if f == F_TRI && t.c != VNONE {
@@ -470,16 +471,6 @@ pub const fn edge_of(b: &Body, t: Inst, k: u32) u32 {
         };
     }
     return b.switch_edge(t, k);
-}
-
-/// Whether operand `a` of form `f` is a value.
-pub const fn value_a(f: u8) bool {
-    return f == F_UN || f == F_BIN || f == F_CMP || f == F_OVF || f == F_TRI || f == F_PTRADD || f == F_LOAD || f == F_STORE || f == F_CALLIND || f == F_BR || f == F_SWITCH || f == F_RET;
-}
-
-/// Whether operand `b` of form `f` is a value (VNONE where optional).
-pub const fn value_b(f: u8) bool {
-    return f == F_BIN || f == F_CMP || f == F_OVF || f == F_TRI || f == F_PTRADD || f == F_STORE || f == F_PANIC;
 }
 
 // `v` as `n` copies of `x`, its buffer reused.

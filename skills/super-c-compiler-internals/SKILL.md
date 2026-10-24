@@ -954,7 +954,9 @@ A native build compiles each module's LIR to a machine object in place of its C 
 on a supported target, or what `SC_NATIVE` says. `native_header_facts` reads the constants of the
 scoped C headers with the own preprocessor (in parallel, cached in `__sc_hfacts` by file size and
 mtime), and the scalar class of each `@layout` opaque type through its typedefs
-(`Package.opaque_cls`, `bindgen::scalar_class`). The calling conventions classify an aggregate by its
+(`Package.opaque_cls`, `bindgen::scalar_class`). Lowering gives such a type that LIR scalar type, not
+an aggregate: Microsoft x64 passes a one-field struct of a `double` in an integer register, the
+`double` itself in xmm. The calling conventions classify an aggregate by its
 layout leaves (scalars at offsets; an enum's tag and a capture by reference are leaves). A layout of
 1 to 64 bytes whose leaves are unknown (an opaque type that is no scalar) keeps none
 (`abi::unknown_class`), so the LIR stays complete; the native generators refuse a body whose
@@ -967,7 +969,22 @@ needs C (an intrinsic, a header's `static` function: `Package.c_fns`); its reaso
 `SC_NATIVE_STATS`. Each native module gives `m.o` (its own items, reused by the emission cache) and
 `m__inst.o` (the rest). The record `__sc_native` holds, per module, whether its last emission gave
 an object (`NAT_OBJ`) or went through C (`NAT_C`); `nat_trust` turns a cache hit into a miss when
-the record does not hold the module under the current key (`nat_key`, which mixes in `SC_NATIVE`).
+the record does not hold the module under the current key (`nat_key`, which mixes in `SC_NATIVE`),
+or when the module now renders its bodies but its section rendered none.
+
+A native module's bodies render no C (`Package.nat_render`, `cemit::backends_of`: no `BK_C`;
+`emit_body_core` returns at once); its declarations still render, and so does every body of the
+vector backend entries' emitter (`CEmit.render_all`: a header's `static inline` C, no object's). `native_render` decides it before
+the emission: a body renders where SC_NATIVE leaves the module out, for module-level assembly, for a
+thread-local where `nat::tls_native` is false (Windows), for a module the record sent through C
+(`NAT_C`), and for the modules the caller names (`nat_retry`). Where a body renders no C, its lowering
+journals for the TU cache what it demands (`rec_on` stays on: statics through `lir_stat_need`, type
+descriptors through `CEmit::ti_need`), which the renderer journals otherwise. A module that goes
+through C though its bodies rendered none (the lowering or the backend refused it after all, or a
+unit whose C compiles took a body without C: `Lower.retry`) makes `run_package` return
+`RC_NATIVE_RETRY` with `Package.nat_retry` naming them: `main.spc::run_file` and
+`build::emit_closure` load the package again and run once more, and that run's record keeps them on
+C for the next builds.
 The registry unit stays C: it includes the scoped headers so the C compiler checks the extern
 declarations. The vector bounds-check helpers live in `std/rt/lanes.spc`, loaded only when a
 program names a vector type.

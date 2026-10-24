@@ -152,6 +152,8 @@ pub struct Lower {
     /// The units a C chunk without a LIR body landed in, which compile through C, and why.
     pub conly: Vector<u32>,
     pub conly_why: Vector<String>,
+    /// The modules a body of which rendered no C though a unit whose C compiles took it (`CEmit::lir_claim`).
+    pub retry: Vector<u32>,
     /// The CTFE outcome of each test (`probe_tests`) the check compares the evaluator's with.
     pub ctfe: Vector<CtfeRes>,
     /// The build wraps on integer overflow (a profile without overflow checks).
@@ -195,6 +197,8 @@ pub struct Lower {
     sym_map: Map<u32, u32>,
     zeros: Map<u32, Value>, // per type: its zero in the entry block
     loc: u32, // the location of the statement being lowered
+    loc_m: ModuleId, // `loc_at`'s last module and line index there
+    loc_line: u32,
     ret_ptr: Value, // the result memory of an aggregate or multi-value result
     env: Value, // a closure's env pointer
     noret: bool,
@@ -223,6 +227,7 @@ extend Lower {
             fails_seen: 0,
             conly: Vector::<u32>::new(),
             conly_why: Vector::<String>::new(),
+            retry: Vector::<u32>::new(),
             ctfe: Vector::<CtfeRes>::new(),
             wrap: wrap,
             nbodies: 0,
@@ -262,6 +267,8 @@ extend Lower {
             sym_map: Map::<u32, u32>::new(),
             zeros: Map::<u32, Value>::new(),
             loc: 0,
+            loc_m: 0,
+            loc_line: NONE,
             ret_ptr: VNONE,
             env: VNONE,
             noret: false,
@@ -1400,9 +1407,10 @@ extend Lower {
         let cd = c.collect_demand;
         let ro = c.mg.rec_on;
         // A native build compiles what the body calls, which the C may have inlined away; a check of the
-        // LIR leaves the C untouched.
+        // LIR leaves the C untouched. The TU cache journals what the rendering demanded, or the lowering's
+        // demands where the body renders no C.
         c.collect_demand = cd && Lower::p(c).native;
-        c.mg.rec_on = false;
+        c.mg.rec_on = ro && !c.renders(b.module);
         self.err = "";
         self.dbg = self.dump.len() != 0 && self.dump.as_str() == name;
         let ok = self.body_i(c, b, name, cm, cnode, noret);
@@ -1958,10 +1966,24 @@ extend Lower {
         if m >= p.lines.len() || pos as usize >= p.modules.at(m).source.len() {
             return 0;
         }
-        // The last line start at or before `pos`.
+        // The last line start at or before `pos`: a body's statements come in nearby lines, so the search
+        // gallops on from the last one found.
         let ls = &p.lines[m];
         let mut lo: usize = 0;
         let mut hi = ls.len();
+        let last = self.loc_line as usize;
+        if self.loc_m == self.m && last < hi && ls[last] <= pos {
+            lo = last;
+            let mut step: usize = 1;
+            // Each step doubles: at most 32 steps.
+            while lo + step < hi && ls[lo + step] <= pos {
+                lo += step;
+                step *= 2;
+            }
+            if lo + step < hi {
+                hi = lo + step;
+            }
+        }
         while hi - lo > 1 {
             let mid = (lo + hi) / 2;
             if ls[mid] <= pos {
@@ -1971,6 +1993,8 @@ extend Lower {
             }
         }
         let col = pos - ls[lo] + 1;
+        self.loc_m = self.m;
+        self.loc_line = lo as u32;
         return self.b.loc(Loc { file: self.file, line: lo as u32 + 1, col: col });
     }
 
@@ -6459,6 +6483,10 @@ extend Lower {
         }
         other.conly.truncate(0);
         other.conly_why.truncate(0);
+        for i in 0..other.retry.len() {
+            self.retry.push(other.retry[i]);
+        }
+        other.retry.truncate(0);
         for i in 0..other.fails.len() {
             self.fails.push(LFail { sym: other.fails[i].sym.clone(), why: other.fails[i].why });
         }
@@ -6829,8 +6857,8 @@ extend Lower {
 extend Lower {
     // The address of the type descriptor of `(rm, rt)`.
     fn type_info(self: &mut Self, c: &mut cbe::CEmit, rm: ModuleId, rt: TypeId) Value {
-        let mut s = String::from_str("__sc_ti__");
-        if !c.mg.type_m(rm, rt, &mut s) {
+        let mut s = String::new();
+        if !c.ti_need(rm, rt, &mut s) {
             return self.fail_v("type-info");
         }
         return self.symaddr(s.as_str(), SK_DATA);

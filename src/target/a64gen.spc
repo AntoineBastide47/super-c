@@ -99,6 +99,7 @@ pub struct Gen {
     va: Vector<Va>,
     code: Vector<u32>,
     owner: Vector<u32>, // per register number, the value index it holds, NONE
+    held: u64, // a bit per register whose `owner` is a value
     lock: u64, // registers the current instruction reads or writes
     tmps: u64, // registers the current instruction took as temporaries
     fixed_busy: u64,
@@ -184,6 +185,7 @@ extend Gen {
             va: Vector::<Va>::new(),
             code: Vector::<u32>::new(),
             owner: owner,
+            held: 0,
             lock: 0,
             tmps: 0,
             fixed_busy: 0,
@@ -334,12 +336,22 @@ extend Gen {
         }
         self.va.index_mut(x as usize).reg = NOREG;
         self.va.index_mut(x as usize).dirty = false;
-        self.owner[r as usize] = NONE;
+        self.set_owner(r, NONE);
     }
 
     // Whether value `x` is used after the current instruction.
     const fn live_on(self: &Self, x: u32) bool {
         return self.lv.uses[x as usize] != 0 || self.lv.end[x as usize] > self.pos;
+    }
+
+    // Register `r` holds value `x` from now on (NONE: no value).
+    fn set_owner(self: &mut Self, r: u8, x: u32) {
+        self.owner[r as usize] = x;
+        if x == NONE {
+            self.held &= ~bit(r);
+        } else {
+            self.held |= bit(r);
+        }
     }
 
     // Store value `x`'s register to its home, giving it a stack slot first.
@@ -382,7 +394,7 @@ extend Gen {
 
     // Bind register `r` to value index `x` as its newest copy.
     fn bind(self: &mut Self, x: u32, r: u8) {
-        self.owner[r as usize] = x;
+        self.set_owner(r, x);
         self.lock |= bit(r);
         let va = self.va.index_mut(x as usize);
         va.reg = r;
@@ -455,7 +467,7 @@ extend Gen {
             if (set & bit(r as u8)) != 0 && (self.fixed_busy & bit(r as u8)) == 0 {
                 self.fixed_busy |= bit(r as u8);
                 self.csr |= bit(r as u8);
-                self.owner[r as usize] = x;
+                self.set_owner(r as u8, x);
                 let va = self.va.index_mut(x as usize);
                 va.reg = r as u8;
                 va.home = H_FIXED;
@@ -626,7 +638,7 @@ extend Gen {
     fn release(self: &mut Self, x: u32) {
         let va = self.va[x as usize];
         if va.reg != NOREG && self.owner[va.reg as usize] == x {
-            self.owner[va.reg as usize] = NONE;
+            self.set_owner(va.reg, NONE);
             if va.home == H_FIXED {
                 self.fixed_busy &= ~bit(va.reg);
             }
@@ -965,6 +977,7 @@ extend Gen {
         }
         fill32(&mut self.osym, b.syms.len(), NONE);
         fill32(&mut self.owner, 64, NONE);
+        self.held = 0;
         fill32(&mut self.blk_at, b.blocks.len(), NONE);
         self.code.truncate(0);
         self.fix.truncate(0);
@@ -1182,7 +1195,7 @@ extend Gen {
                 return;
             }
         }
-        self.owner[r as usize] = x;
+        self.set_owner(r, x);
         let va = self.va.index_mut(x as usize);
         va.reg = r;
         va.dirty = true;
@@ -1200,7 +1213,7 @@ extend Gen {
                 if x != NONE && self.va[x as usize].home != H_FIXED {
                     self.va.index_mut(x as usize).reg = NOREG;
                     self.va.index_mut(x as usize).dirty = false;
-                    self.owner[r] = NONE;
+                    self.set_owner(r as u8, NONE);
                 }
             }
         }
@@ -1298,7 +1311,7 @@ extend Gen {
         let t = self.xty(x);
         if !Gen::in_mem(t) && self.fix_eligible(x) && self.take_fixed(x, Gen::is_v(t)) != NOREG {
             // The register holds nothing until the edge moves write it.
-            self.owner[self.va[x as usize].reg as usize] = x;
+            self.set_owner(self.va[x as usize].reg, x);
             return;
         }
         let n = type_bytes(t, self.ptr);
@@ -3037,10 +3050,13 @@ extend Gen {
     // reads is in its home, and only the values `keep` (the register arguments' sources) keep their
     // registers, until `forget_caller_saved`.
     fn spill_around_call(self: &mut Self, keep: &Vector<u32>) {
-        let callee_saved = XFIX | vfix();
-        for r in 0..64u32 {
+        let mut m = self.held & ~(XFIX | vfix());
+        // Each step clears one register's bit: at most 64 steps.
+        while m != 0 {
+            let r = m.trailing_zeros() as u8;
+            m &= m - 1;
             let x = self.owner[r as usize];
-            if x == NONE || (callee_saved & bit(r as u8)) != 0 || self.va[x as usize].home == H_FIXED {
+            if self.va[x as usize].home == H_FIXED {
                 continue;
             }
             let mut kept = false;
@@ -3057,7 +3073,7 @@ extend Gen {
             if !kept {
                 self.va.index_mut(x as usize).reg = NOREG;
                 self.va.index_mut(x as usize).dirty = false;
-                self.owner[r as usize] = NONE;
+                self.set_owner(r, NONE);
             }
         }
         self.lock = 0;
@@ -3066,15 +3082,18 @@ extend Gen {
 
     // After a call's arguments are in place: the caller-saved registers hold no value.
     fn forget_caller_saved(self: &mut Self) {
-        let callee_saved = XFIX | vfix();
-        for r in 0..64u32 {
+        let mut m = self.held & ~(XFIX | vfix());
+        // Each step clears one register's bit: at most 64 steps.
+        while m != 0 {
+            let r = m.trailing_zeros() as u8;
+            m &= m - 1;
             let x = self.owner[r as usize];
-            if x == NONE || (callee_saved & bit(r as u8)) != 0 || self.va[x as usize].home == H_FIXED {
+            if self.va[x as usize].home == H_FIXED {
                 continue;
             }
             self.va.index_mut(x as usize).reg = NOREG;
             self.va.index_mut(x as usize).dirty = false;
-            self.owner[r as usize] = NONE;
+            self.set_owner(r, NONE);
         }
     }
 

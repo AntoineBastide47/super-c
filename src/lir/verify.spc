@@ -872,14 +872,36 @@ extend Verifier {
     }
 }
 
+// Per form, whether its operand `a` (bit 1) or `b` (bit 2) is a value; a byte indexes the 256 entries.
+const OPS: [u8; 256] = operand_bits();
+
+const fn operand_bits() [u8; 256] {
+    let mut t = [0u8; 256];
+    let a: [u8; 12] = [F_UN, F_BIN, F_CMP, F_OVF, F_TRI, F_PTRADD, F_LOAD, F_STORE, F_CALLIND, F_BR, F_SWITCH, F_RET];
+    let b: [u8; 7] = [F_BIN, F_CMP, F_OVF, F_TRI, F_PTRADD, F_STORE, F_PANIC];
+    for f in a {
+        // A form stays below the 256 entries.
+        unsafe {
+            t[f as usize] |= 1;
+        }
+    }
+    for f in b {
+        // A form stays below the 256 entries.
+        unsafe {
+            t[f as usize] |= 2;
+        }
+    }
+    return t;
+}
+
 /// Whether operand `a` of form `f` is a value.
 pub const fn operand_a(f: u8) bool {
-    return f == F_UN || f == F_BIN || f == F_CMP || f == F_OVF || f == F_TRI || f == F_PTRADD || f == F_LOAD || f == F_STORE || f == F_CALLIND || f == F_BR || f == F_SWITCH || f == F_RET;
+    return (unsafe OPS[f as usize] & 1) != 0;
 }
 
 /// Whether operand `b` of form `f` is a value (VNONE allowed where optional).
 pub const fn operand_b(f: u8) bool {
-    return f == F_BIN || f == F_CMP || f == F_OVF || f == F_TRI || f == F_PTRADD || f == F_STORE || f == F_PANIC;
+    return (unsafe OPS[f as usize] & 2) != 0;
 }
 
 /// Whether operand `c` of form `f` is a value.

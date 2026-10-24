@@ -305,6 +305,12 @@ pub struct Package {
     /// Whether the build writes native objects for its modules (`SC_NATIVE` on a target the native backend
     /// supports, in a build whose link takes objects); set by `driver::emit::run_package`.
     pub native: bool,
+    /// Per module, in a native build: its function bodies render to C (`cemit::backends_of`). The others
+    /// render no body: their native objects need none.
+    pub nat_render: Vector<bool>,
+    /// The paths of the modules whose bodies render in a native build though the backend would take them:
+    /// the caller's input, and `run_package`'s output when it returns `RC_NATIVE_RETRY`.
+    pub nat_retry: Vector<String>,
     /// The C dialect, the manifest's and the profile's C flags of a manifest build; empty for a bare build,
     /// whose dialect is `cstd`.
     pub cflags: String,

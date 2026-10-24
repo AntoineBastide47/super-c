@@ -27,6 +27,12 @@ const fn windows_x64(os: i32, isa: i32) bool {
     return tgt::os(os).name == "windows" && tgt::isa(isa).name == "x86_64";
 }
 
+/// Whether the backend for `(os, isa)` defines and reaches thread-local variables (Windows: the C
+/// compiler's model, emutls before gcc 16, is not followed yet).
+pub const fn tls_native(os: i32, isa: i32) bool {
+    return !windows_x64(os, isa);
+}
+
 /// Write into `out` an object for `(os, isa)` that defines function symbols `funcs` and data symbols
 /// `datas` of package `p`. False, with the function and the reason in `err`, when a body is outside what
 /// the backend compiles.

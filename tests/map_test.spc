@@ -116,3 +116,30 @@ fn default_without_default_elements() {
     let s = Set::<NoDefault>::default();
     assert(m.len() == 1 && s.is_empty(), "defaulted containers");
 }
+
+// `clear` frees the owned entries and the map refills: after a fill far larger than what follows (the
+// storage is released), and after one of the same size (the storage is kept).
+@test
+fn clear_frees_and_refills() {
+    let mut m = Map::<u64, String>::new();
+    for k in 0..1000u64 {
+        m.insert(k, format("v{}", k));
+    }
+    m.clear();
+    assert(m.is_empty(), "a cleared map is empty");
+    let k5: u64 = 5;
+    assert(m.get(&k5).is_none(), "a cleared key is gone");
+    for k in 0..3u64 {
+        m.insert(k * 7, format("w{}", k));
+    }
+    assert_eq(m.len(), 3);
+    let k14: u64 = 14;
+    assert(m.get(&k14).unwrap().as_str() == "w2", "a refill after a release reads back");
+    m.clear();
+    m.clear();
+    for k in 0..3u64 {
+        m.insert(k, format("x{}", k));
+    }
+    let k1: u64 = 1;
+    assert(m.get(&k1).unwrap().as_str() == "x1", "a refill after a kept clear reads back");
+}

@@ -39,6 +39,7 @@ import lir::lower as lw;
 import lir::ir as lir_ir;
 import target::native as nat;
 import bindgen::bindgen as bg;
+import bindgen::ctarget as ct;
 import build_system::manifest as bman;
 import emit::cflow as cfl;
 import emit::probe as prb;
@@ -59,6 +60,10 @@ import driver::util as *;
 
 import driver::extc as *;
 import driver::test as *;
+
+extern "C" {
+    fn memchr(s: *const void, c: i32, n: usize) *mut void;
+}
 
 // The instance drain's bound on demand-queue entries: a program over it is a runaway instantiation.
 const DEMAND_CAP: usize = 200000;
@@ -271,6 +276,20 @@ fn module_has_asm(p: &loader::Package, m: usize) bool {
     let its = a.at_const(a.root).as_data.program.items;
     for i in 0..its.len {
         if a.at_const(unsafe a.list(its)[i as usize]).kind == NodeKind::NODE_ASM {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Whether module `m` declares a thread-local variable.
+fn module_has_tls(p: &loader::Package, m: usize) bool {
+    if !p.modules[m].has_ast || p.modules[m].backend {
+        return false;
+    }
+    let a = unsafe &*p.module_ast_const(m as ModuleId);
+    for i in 0..a.nodes.len() {
+        if a.at_const(i as NodeId).kind == NodeKind::NODE_CONST && a.attr_of(i as NodeId, AttrKind::ATTR_THREAD_LOCAL) != null {
             return true;
         }
     }
@@ -6994,6 +7013,8 @@ fn cemit_simd_entries(
     }
     let mut skips: u64 = 0;
     let mut sc = cbe::CEmit::new(p);
+    // An entry is a `static inline` C function of a header: no native object defines it.
+    sc.render_all = true;
     // An entry's own vector operations keep their lane loops: no entry calls another.
     sc.simd_on = false;
     // The planner spells an entry's call with the struct ABI.
@@ -10624,12 +10645,13 @@ fn lir_lines(p: &mut loader::Package) {
         let mut ls = Vector::<u32>::with_capacity(src.len() / 32 + 1);
         ls.push(0);
         let mut at: usize = 0;
+        // Each step passes one newline: at most one step per byte.
         for _ in 0..src.len() {
-            let k = src.slice(at, src.len()).find_byte(b'\n');
-            if k < 0 {
+            let f = (unsafe memchr(src.ptr() + at, b'\n', src.len() - at)) as *const u8;
+            if f == null {
                 break;
             }
-            at += k as usize + 1;
+            at = f as usize - src.ptr() as usize + 1;
             ls.push(at as u32);
         }
         p.lines.push(ls);
@@ -10789,6 +10811,7 @@ fn native_header_facts(p: &mut loader::Package) {
             target: p.build_target,
             arch: p.arch,
             flags: &flags,
+            env: null,
             header: hnames.at(k),
             names: names.at(k),
             fnames: fnames.at(k),
@@ -10810,6 +10833,13 @@ fn native_header_facts(p: &mut loader::Package) {
     let mut miss: usize = 0;
     for q in 0..tasks.len() {
         miss += (!tasks[q].hit) as usize;
+    }
+    // One C environment for every scan: each would build the same.
+    let mut env = ct::CTarget::new();
+    if miss != 0 && bg::header_env(p.build_target, p.arch, flags.as_str(), &mut env) {
+        for q in 0..tasks.len() {
+            tasks.index_mut(q).env = &env;
+        }
     }
     if p.jobs != 1 && miss > 1 {
         let wg = psync::WaitGroup::new();
@@ -10882,6 +10912,7 @@ struct HfTask {
     pub target: i32,
     pub arch: i32,
     pub flags: *const String,
+    pub env: *const ct::CTarget, // the C environment the scan runs under, null when none applies
     pub header: *const String,
     pub names: *const Vector<String>,
     pub fnames: *const Vector<String>,
@@ -10920,10 +10951,12 @@ fn hf_run(t: &mut HfTask) {
     for j in 0..tnames.len() {
         ts9.push(tnames.at(j).as_str());
     }
+    if t.env == null {
+        t.ok = false;
+        return;
+    }
     t.ok = bg::header_facts(
-        t.target,
-        t.arch,
-        unsafe (*t.flags).as_str(),
+        unsafe &*t.env,
         unsafe (*t.header).as_str(),
         ns[0..ns.len()],
         &mut t.vals,
@@ -11117,7 +11150,38 @@ fn nat_task(t: NatTask) {
     );
 }
 
-/// The native objects' record (`__sc_native` in the tree): per module, the key its own part was compiled
+//// `run_package`'s result when a module whose bodies rendered no C goes through C: the caller loads the
+/// package again and runs it with `Package.nat_retry`, which names the modules that render then.
+pub const RC_NATIVE_RETRY: i32 = 75;
+
+// Which modules render their bodies to C in a native build (`Package.nat_render`): those the native backend
+// does not take whatever their code (not named by SC_NATIVE, module-level assembly, a thread-local where
+// the backend has none), the ones the caller names (`nat_retry`), and the ones an earlier build of this
+// tree sent through C (`NAT_C` in its record).
+fn native_render(p: &mut loader::Package) {
+    let n = p.modules.len();
+    let tls = nat::tls_native(p.build_target, p.arch);
+    let sel = stdlib::get_env("SC_NATIVE").unwrap_or(String::from_str("1"));
+    let rec = if p.gen_root.len() != 0 {
+        nat_record(build_out_path(p.gen_root.as_str(), NAT_RECORD, "").as_str());
+    } else {
+        Map::<String, u64>::new();
+    };
+    p.nat_render.truncate(0);
+    for m in 0..n {
+        let path = &p.modules[m].path;
+        let mut r = !cbe::in_list(sel.as_str(), path.as_str()) || module_has_asm(p, m) || !tls && module_has_tls(p, m);
+        if let Some(v) = rec.get(path) {
+            r = r || (*v & NAT_C) != 0;
+        }
+        for k in 0..p.nat_retry.len() {
+            r = r || p.nat_retry[k].as_str() == path.as_str();
+        }
+        p.nat_render.push(r);
+    }
+}
+
+// The native objects' record (`__sc_native` in the tree): per module, the key its own part was compiled
 /// under (`nat_key`), its low bits `NAT_OBJ` when that part has an object and `NAT_C` when the module went
 /// through C (`<key> <path>` lines). A cached emission of a module counts only under its record's key.
 const NAT_RECORD: str = "__sc_native";
@@ -11157,7 +11221,9 @@ fn nat_trust(p: &loader::Package, t: &mut tuc::Tuc) {
             Some(v) => *v,
             None => 0,
         };
-        if r == 0 || (r & ~3u64) != (nat_key(p, &t.keys, m) & ~3u64) {
+        // A module whose bodies render replays only an emission that went through C: any other
+        // rendered no body.
+        if r == 0 || (r & ~3u64) != (nat_key(p, &t.keys, m) & ~3u64) || p.nat_render[m] && (r & NAT_C) == 0 {
             t.hit.set(m, false);
         }
     }
@@ -11218,7 +11284,8 @@ fn nat_key(p: &loader::Package, keys: &Vector<u64>, m: usize) u64 {
 // module compiles through C when it has module-level assembly, C text the lowering does not see (the C
 // `main`, say), a body the lowering refused, or one the backend refuses. A module the emission cache
 // replayed (`hit`) takes the route its record `rec` holds (`nat_trust`): its own object, or C.
-// SC_NATIVE_STATS reports each module that goes through C and why.
+// SC_NATIVE_STATS reports each module that goes through C and why. `retry` takes the paths of the
+// modules that go through C though their bodies rendered no C (`Package.nat_render`).
 fn native_plan(
     p: &loader::Package,
     l: &lw::Lower,
@@ -11229,6 +11296,7 @@ fn native_plan(
     rec: &Map<String, u64>,
     isnat: &mut Vector<bool>,
     objs: &mut Vector<NatObj>,
+    retry: &mut Vector<String>,
 ) {
     let n = p.modules.len();
     let t0 = ticks_ms();
@@ -11402,6 +11470,9 @@ fn native_plan(
             continue;
         }
         nc += 1;
+        if !p.nat_render[m] {
+            retry.push(p.modules[m].path.clone());
+        }
         if stats {
             let w = if whys.at(2 * m).len() != 0 {
                 whys.at(2 * m).as_str();
@@ -11410,6 +11481,16 @@ fn native_plan(
             };
             eprint("native: {} through C: {}\n", p.modules[m].path.as_str(), w);
         }
+    }
+    for k in 0..l.retry.len() {
+        let m = l.retry[k] as usize;
+        if m < n && !p.nat_render[m] && !retry.contains(&p.modules[m].path) {
+            retry.push(p.modules[m].path.clone());
+        }
+    }
+    if retry.len() != 0 {
+        // The build runs again: its count is the next run's.
+        return;
     }
     if stats {
         eprint("native: {} modules native, {} through C, {} ms\n", nn, nc, ticks_ms() - t0);
@@ -13835,6 +13916,9 @@ pub fn run_package(
     if cbe::native_on(p) || stdlib::getenv("SC_LIR") != null {
         lir_lines(p);
     }
+    if cbe::native_on(p) {
+        native_render(p);
+    }
     cemit_package(p, testing, &plan, live.as_ptr(), target, &mut co, &mut irkeep);
     // The emission frontier restarted the pool; release it again before any test-runner fork.
     if p.jobs != 1 {
@@ -13951,8 +14035,16 @@ pub fn run_package(
         if co.tuc_keys.len() != 0 {
             nat_rec = nat_record(nat_rp.as_str());
         }
+        let mut retry = Vector::<String>::new();
         if let Some(l) = &co.lir {
-            native_plan(p, l, &lm, &iq, root, &co.tuc_hit, &nat_rec, &mut nat_mod, &mut nat_objs);
+            native_plan(p, l, &lm, &iq, root, &co.tuc_hit, &nat_rec, &mut nat_mod, &mut nat_objs, &mut retry);
+        }
+        if retry.len() != 0 {
+            // A module the backend does not take rendered no C: the caller runs the build again with it
+            // rendering. A second run renders every module it names, so it never asks again.
+            assert(p.nat_retry.len() == 0, "native: a run with modules to render asks for no other");
+            p.nat_retry = retry;
+            return RC_NATIVE_RETRY;
         }
         let isnat = &nat_mod;
         let mut lm2 = Vector::<ModuleId>::new();

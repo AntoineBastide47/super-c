@@ -579,16 +579,20 @@ fn preprocess(
     return true;
 }
 
-/// The facts of C header `header` (an `#include` operand: `<name>` or `"path"`) under the C environment of target
-/// `target` and `arch` with the C flags `flags` (`ct::apply_c_flags`) that a native build reads: the
+/// The C environment of target `target` and `arch` with the C flags `flags` (`ct::apply_c_flags`) into
+/// `env`; false when the target has none or a flag does not apply.
+pub fn header_env(target: i32, arch: i32, flags: str, env: &mut ct::CTarget) bool {
+    return ct::c_target(target, arch, "", env) && ct::apply_c_flags(flags, env);
+}
+
+/// The facts of C header `header` (an `#include` operand: `<name>` or `"path"`) under C environment
+/// `env` (`header_env`) that a native build reads: the
 /// values of the integer constants `names` it defines (macros, which may name enumerators and other
 /// macros, or enumerators), `vals[k]` holding the value of `names[k]` when `oks[k]`, and whether each of
 /// the functions `fns` is `static` there (`statics[k]`): no object exports it. `read` takes the files the
 /// preprocessor read. False when the header does not preprocess.
 pub fn header_facts(
-    target: i32,
-    arch: i32,
-    flags: str,
+    env: &ct::CTarget,
     header: str,
     names: []str,
     vals: &mut Vector<i64>,
@@ -599,17 +603,13 @@ pub fn header_facts(
     classes: &mut Vector<u8>,
     read: &mut Vector<String>,
 ) bool {
-    let mut env = ct::CTarget::new();
-    if !ct::c_target(target, arch, "", &mut env) || !ct::apply_c_flags(flags, &mut env) {
-        return false;
-    }
     let path = "/__sc_header_ints.c";
     let mut files = Vector::<cpp::VFile>::new();
     files.push(cpp::VFile { path: String::from_str(path), text: format("#include {}\n", header) });
     let mut text = String::new();
     let mut dump = String::new();
     let none = Vector::<String>::new();
-    if !preprocess(&env, path, &none, files, &mut text, &mut dump, read, true) {
+    if !preprocess(env, path, &none, files, &mut text, &mut dump, read, true) {
         return false;
     }
     let mut c = Collected {
@@ -620,7 +620,7 @@ pub fn header_facts(
         enums: Vector::<EnumDef>::new(),
         consts: Vector::<ConstDef>::new(),
         globals: Vector::<ConstDef>::new(),
-        widths: read_widths(dump.as_str()),
+        widths: Widths { short_b: 2, int_b: 4, long_b: 8, llong_b: 8 },
         cur_mine: false,
         pending_agg: -1,
         pending_is_enum: false,
@@ -630,6 +630,7 @@ pub fn header_facts(
         statics: Set::<String>::new(),
     };
     c.index_macros(dump.as_str());
+    c.widths = read_widths(&c, dump.as_str());
     let mut lx = Lexer::new(text.as_str());
     lx.parse_unit(&mut c, path, &none, dump.as_str());
     for k in 0..names.len() {
@@ -705,37 +706,28 @@ const fn line_at<'a>(text: str<'a>, i: usize, end: &mut usize) str<'a> {
     return text.slice(i, e);
 }
 
-// `__SIZEOF_*__` is what the target reports, so `long` maps to what it will be.
-const fn read_widths(text: str) Widths {
-    let mut w = Widths { short_b: 2, int_b: 4, long_b: 8, llong_b: 8 };
-    let n = text.len();
-    let mut i: usize = 0;
-    while i < n {
-        let mut e: usize = 0;
-        let line = line_at(text, i, &mut e);
-        let v = macro_int(line);
-        if v > 0 {
-            if line_defines(line, "__SIZEOF_SHORT__") {
-                w.short_b = v;
-            } else if line_defines(line, "__SIZEOF_INT__") {
-                w.int_b = v;
-            } else if line_defines(line, "__SIZEOF_LONG__") {
-                w.long_b = v;
-            } else if line_defines(line, "__SIZEOF_LONG_LONG__") {
-                w.llong_b = v;
-            }
-        }
-        i = e + 1;
-    }
-    return w;
+// `__SIZEOF_*__` is what the target reports, so `long` maps to what it will be: from the macros
+// `index_macros` read.
+fn read_widths(c: &Collected, dump: str) Widths {
+    return Widths {
+        short_b: size_macro(c, dump, "__SIZEOF_SHORT__", 2),
+        int_b: size_macro(c, dump, "__SIZEOF_INT__", 4),
+        long_b: size_macro(c, dump, "__SIZEOF_LONG__", 8),
+        llong_b: size_macro(c, dump, "__SIZEOF_LONG_LONG__", 8),
+    };
 }
 
-const fn line_defines(line: str, name: str) bool {
-    if !line.starts_with("#define ") {
-        return false;
+// The value of size macro `name`, else `dflt`.
+fn size_macro(c: &Collected, dump: str, name: str, dflt: i32) i32 {
+    let mut v = String::new();
+    if !c.macro_value(dump, name, &mut v) {
+        return dflt;
     }
-    let rest = line[8..];
-    return rest.starts_with(name) && rest.len() > name.len() && rest.byte_at(name.len()) == b' ';
+    let b = macro_int(v.as_str());
+    if b <= 0 {
+        return dflt;
+    }
+    return b;
 }
 
 const fn macro_int(line: str) i32 {
@@ -1582,8 +1574,8 @@ fn run_one(
         eprintln("super-c: the preprocessor failed on '{}'", header);
         return 1;
     }
-    c.widths = read_widths(mdump.as_str());
     c.index_macros(mdump.as_str());
+    c.widths = read_widths(&c, mdump.as_str());
     let mut lx = Lexer::new(text.as_str());
     lx.parse_unit(&mut c, hdr.as_str(), froms, mdump.as_str());
     c.collect_consts(hdr.as_str(), mdump.as_str());

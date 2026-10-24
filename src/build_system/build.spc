@@ -2500,67 +2500,79 @@ fn emit_closure(
     } else {
         StampLoad { t0: 0, std_mt: 0, std_h: 0 };
     };
-    loader::set_load_jobs(jobs);
-    let tl0 = ticks_ms();
-    // The build settings the prelude's build constants spell (`@arch` gates on the instruction
-    // set too), set before the load.
-    let mut p = loader::package_new(root_dir, alt, cx.std_dir);
-    p.arch = m.arch;
-    p.features = features_for(m, prof_name, cx.target_features);
-    p.simd_width = simd_width(m, cx);
-    p.simd_dispatch = String::from_str(dispatch_for(m, prof_name, simd_dispatch(m, cx)));
-    let pi = m.profile_index(prof_name);
-    if pi >= 0 {
-        let mut fl = String::new();
-        push_all(&mut fl, &m.cflags);
-        push_profile_side(&mut fl, m.profiles.at(pi as usize), &m.profiles.at(pi as usize).cflags, false, cx.target);
-        p.mem_check = mem_checker(fl.as_str());
-        p.build_cfg = build_cfg(fl.as_str());
-        p.cflags = m.cstd.clone();
-        p.cflags.push_string(&fl);
-    }
-    p.pic = m.lib_shared && tgt::obj_of(cx.target).pic;
-    p.test_build = topts != null && unsafe (*topts).enabled;
-    p.profile = String::from_str(prof_name);
-    p.profiles = profile_names(m);
-    p.bootstrap = cx.bootstrap_tags;
-    let pkg = (&mut p) as *mut loader::Package;
-    let mut cirv = iri::interp_master(pkg, cx.ce_steps, cx.ce_mem);
-    let cdir = object_cache_dir(project_name(m));
-    if prelude_stage(&mut p, &mut cirv, cx.std_dir, root, cx.target, jobs, cx.ce_steps, cx.ce_mem, cdir.as_str()) {
-        // After the prelude stage, which may swap in a saved prelude package.
-        p.std_internals = m.std_internals;
-        p.load_user(root, cx.std_dir, cx.target);
-    }
-    bst::mark(bst::B_LOAD);
-    if stdlib::getenv("SC_CEMIT_STATS") != null {
-        eprintln("phase load: {} ms", ticks_ms() - tl0);
-    }
-    loader::set_load_jobs(1);
-    if !p.ok {
-        if jobs != 1 {
-            prt::shutdown(); // parallel loading started the pool
+    // The modules whose bodies render though the native backend may take them: a second run gets the
+    // names a first one returned with RC_NATIVE_RETRY, and asks for no other.
+    let mut retry = Vector::<String>::new();
+    let mut rc: i32 = 1;
+    for _ in 0..2 {
+        loader::set_load_jobs(jobs);
+        let tl0 = ticks_ms();
+        // The build settings the prelude's build constants spell (`@arch` gates on the instruction
+        // set too), set before the load.
+        let mut p = loader::package_new(root_dir, alt, cx.std_dir);
+        p.arch = m.arch;
+        p.features = features_for(m, prof_name, cx.target_features);
+        p.simd_width = simd_width(m, cx);
+        p.simd_dispatch = String::from_str(dispatch_for(m, prof_name, simd_dispatch(m, cx)));
+        let pi = m.profile_index(prof_name);
+        if pi >= 0 {
+            let mut fl = String::new();
+            push_all(&mut fl, &m.cflags);
+            push_profile_side(&mut fl, m.profiles.at(pi as usize), &m.profiles.at(pi as usize).cflags, false, cx.target);
+            p.mem_check = mem_checker(fl.as_str());
+            p.build_cfg = build_cfg(fl.as_str());
+            p.cflags = m.cstd.clone();
+            p.cflags.push_string(&fl);
         }
-        return 1;
-    }
-    p.gen_root = String::from_str(srcgen);
-    for i in 0..m.shards.len() {
-        p.shard_rules.push(
-            loader::ShardRule {
-                module: m.shards.at(i).module.clone(),
-                tus: m.shards.at(i).tus,
-                insts: m.shards.at(i).insts,
-            },
-        );
-    }
-    p.jobs = p.analysis_jobs(jobs);
-    if p.jobs == 1 && jobs != 1 {
-        prt::shutdown(); // parallel loading may have started the pool
-    }
-    p.cir = &mut cirv;
-    let rc = run_package(&mut p, topts, "", cx.target, cx.lint, "", "", sink);
-    if rc == 0 && cid != 0 {
-        stamp_write(stamp, &p, m, cx.std_dir, root_dir, cx.target, cx.bootstrap_tags, cx.lint, p.c_files, cid, &sl);
+        p.pic = m.lib_shared && tgt::obj_of(cx.target).pic;
+        p.test_build = topts != null && unsafe (*topts).enabled;
+        p.profile = String::from_str(prof_name);
+        p.profiles = profile_names(m);
+        p.bootstrap = cx.bootstrap_tags;
+        let pkg = (&mut p) as *mut loader::Package;
+        let mut cirv = iri::interp_master(pkg, cx.ce_steps, cx.ce_mem);
+        let cdir = object_cache_dir(project_name(m));
+        if prelude_stage(&mut p, &mut cirv, cx.std_dir, root, cx.target, jobs, cx.ce_steps, cx.ce_mem, cdir.as_str()) {
+            // After the prelude stage, which may swap in a saved prelude package.
+            p.std_internals = m.std_internals;
+            p.load_user(root, cx.std_dir, cx.target);
+        }
+        bst::mark(bst::B_LOAD);
+        if stdlib::getenv("SC_CEMIT_STATS") != null {
+            eprintln("phase load: {} ms", ticks_ms() - tl0);
+        }
+        loader::set_load_jobs(1);
+        if !p.ok {
+            if jobs != 1 {
+                prt::shutdown(); // parallel loading started the pool
+            }
+            return 1;
+        }
+        p.gen_root = String::from_str(srcgen);
+        for i in 0..m.shards.len() {
+            p.shard_rules.push(
+                loader::ShardRule {
+                    module: m.shards.at(i).module.clone(),
+                    tus: m.shards.at(i).tus,
+                    insts: m.shards.at(i).insts,
+                },
+            );
+        }
+        p.jobs = p.analysis_jobs(jobs);
+        if p.jobs == 1 && jobs != 1 {
+            prt::shutdown(); // parallel loading may have started the pool
+        }
+        p.cir = &mut cirv;
+        p.nat_retry = replace(&mut retry, Vector::<String>::new());
+        rc = run_package(&mut p, topts, "", cx.target, cx.lint, "", "", sink);
+        retry = replace(&mut p.nat_retry, Vector::<String>::new());
+        if rc == RC_NATIVE_RETRY {
+            continue;
+        }
+        if rc == 0 && cid != 0 {
+            stamp_write(stamp, &p, m, cx.std_dir, root_dir, cx.target, cx.bootstrap_tags, cx.lint, p.c_files, cid, &sl);
+        }
+        break;
     }
     // The stamp record is the last output of the emission; the package's teardown that follows
     // belongs to the sync phase.

@@ -2,7 +2,8 @@
 # content, run on demand from the Actions tab. Edit the job for the next investigation; do not remove
 # the file. Current probe: the Windows test suite (quiet run, failures replay streams straight into
 # the job log), a verbose Linux run with a stuck-program watchdog, plus the release workflow's wasm leg
-# without its self-host fixpoint (the release workflow keeps it).
+# without its self-host fixpoint (the release workflow keeps it), and the native backend against the C
+# pipeline on macOS, Linux and Windows (`speed`, ci/speed.sh).
 # Each platform builds its compiler once (`*-compile`) and runs its test shards in parallel on it (three
 # on Windows, the slowest runner, two elsewhere). It restores the release workflow's caches and saves none.
 name: Debug
@@ -278,3 +279,67 @@ jobs:
           chmod +x ./super-c
           dur=tests/durations/wasm.tsv; [ -f "$dur" ] || dur=tests/durations.tsv # shard balance (test-durations.yml)
           SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --sanitizers --test-shard=${{ matrix.test_shard }} --test-durations="$dur"
+
+  # The native backend against the C pipeline on each platform (ci/speed.sh): cold self-builds, the
+  # speed of the compiler each pipeline produces, and the transpile count of each.
+  speed:
+    name: speed (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: macos
+          - os: ubuntu-latest
+            target: linux
+          - os: windows-latest
+            target: windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: ${{ matrix.target }}
+          sha: ${{ github.sha }}
+          cstd: ${{ matrix.target == 'windows' && '-std=gnu11 -D_POSIX_C_SOURCE=200809L -g1' || '' }}
+          llvm-mingw: ${{ matrix.target == 'windows' }}
+
+      - name: Exclude work dirs from Defender
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
+          Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP"
+          Add-MpPreference -ExclusionProcess "gcc.exe"
+          Add-MpPreference -ExclusionProcess "ld.exe"
+          Add-MpPreference -ExclusionProcess "clang.exe"
+          Add-MpPreference -ExclusionProcess "super-c.exe"
+          Add-MpPreference -ExclusionProcess "sc.exe"
+
+      - uses: ./.github/actions/bootstrap
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Build the compiler
+        run: |
+          set -eu
+          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
+          "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${cstd:+"$cstd"}
+          bin="super-c${BINEXT:-}"
+          [ -f "./$bin" ] || mv "./super-c" "./$bin"
+          test -x "./$bin"
+
+      - name: Compare the native backend with the C pipeline
+        run: |
+          set -eu
+          case "$RUNNER_OS" in
+            Linux) export CC_COUNTS=clang PROFDATA="llvm-profdata-$(clang -dumpversion | cut -d. -f1)" ;;
+            macOS) export CC_COUNTS=cc PROFDATA="$(xcrun -f llvm-profdata)" ;;
+            *) export CC_COUNTS="$LLVM_MINGW/x86_64-w64-mingw32-clang.exe" PROFDATA="$LLVM_MINGW/llvm-profdata.exe" ;;
+          esac
+          bash ci/speed.sh
