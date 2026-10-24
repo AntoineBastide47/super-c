@@ -8617,7 +8617,13 @@ fn bindgen_constants_follow_c_types() {
     assert(t.contains("pub const LIB_TOP: u64 = 9223372036854775807;"));
     assert(t.contains("pub const LIB_SIGN: i32 = -2147483648;"));
     assert(t.contains("pub const LIB_CONV: u32 = 4294967295;"));
-    assert(t.contains("pub const LIB_WIDE: i32 = -1;"));
+    // `long` is 64 bits under LP64, so `-1L + 0u` stays a signed -1; 32 bits under LLP64 (Windows),
+    // where the sum converts to `unsigned long`.
+    if cli::on_windows() {
+        assert(t.contains("pub const LIB_WIDE: u32 = 4294967295;"));
+    } else {
+        assert(t.contains("pub const LIB_WIDE: i32 = -1;"));
+    }
     assert(t.contains("pub const LIB_USHR: u32 = 268435455;"));
     assert(t.contains("pub const LIB_NOT: u32 = 4294967295;"));
     assert(t.contains("pub const LIB_HEX: u32 = 4294967295;"));

@@ -134,7 +134,7 @@ fn win_unwind(
 // The layout of signature `sig` of body `b` into `out`, by Microsoft x64 (`win`) or System V.
 fn classify(win: bool, b: &Body, sig: u32, ptr: u32, vregs: u32, out: &mut ab::CallLayout) {
     if win {
-        w64::classify(b, sig, ptr, vregs, out);
+        w64::classify(b, sig, ptr, out);
     } else {
         cc::classify(b, sig, ptr, vregs, out);
     }

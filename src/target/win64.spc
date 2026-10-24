@@ -3,9 +3,10 @@
 // on the stack past the callee's 32-byte home area. An aggregate of 1, 2, 4 or 8 bytes passes as an
 // integer of its size; any other aggregate, an i128 and a vector past 8 bytes pass as a pointer to a
 // copy the caller makes. A variadic float goes in both its vector and its integer register. A result of
-// 1, 2, 4 or 8 bytes returns in rax, a float in xmm0, an i128 and a 16-byte vector register in xmm0
-// (gcc's choice); any other result goes through memory whose address the caller passes as the first
-// argument and the callee returns in rax.
+// 1, 2, 4 or 8 bytes returns in rax, a float in xmm0; any other result goes through memory whose
+// address the caller passes as the first argument and the callee returns in rax. C holds an i128 and
+// every vector in a struct (`Int__128`, `mangle::vec_def`), so they follow the aggregate rules (the
+// runtime's own `__int128` calls are `x64gen::rt_call128_win`'s).
 import lir::ir as *;
 import codegen::abi as *;
 
@@ -27,9 +28,9 @@ fn size_of(b: &Body, pt: u32, ptr: u32) u32 {
     return type_bytes(pt as u8, ptr);
 }
 
-/// The layout of signature `sig` of body `b` (`ptr`-byte pointers, `vregs` the package's `vec_regs`: 0
-/// when C holds a vector as an array of its lanes, an aggregate then).
-pub fn classify(b: &Body, sig: u32, ptr: u32, vregs: u32, out: &mut CallLayout) {
+/// The layout of signature `sig` of body `b` (`ptr`-byte pointers). C passes every vector as a struct,
+/// so the package's `vec_regs` changes nothing.
+pub fn classify(b: &Body, sig: u32, ptr: u32, out: &mut CallLayout) {
     out.locs.truncate(0);
     out.parts.truncate(0);
     let np = b.pool[sig as usize];
@@ -50,13 +51,12 @@ pub fn classify(b: &Body, sig: u32, ptr: u32, vregs: u32, out: &mut CallLayout) 
     if rt != T_NONE as u32 {
         let n = size_of(b, rt, ptr);
         let t = rt as u8;
-        let agg = (rt & AGG) != 0 || is_vec(t) && vregs == 0;
         r.p0 = out.parts.len() as u32;
-        if !agg && (is_float(t) || t == T_I128 || is_vec(t) && n == 16) {
+        if (rt & AGG) == 0 && is_float(t) {
             r.kind = L_REG;
             r.n = 1;
             out.parts.push(Part { reg: 0, v: true, size: n as u8, off: 0 });
-        } else if reg_size(n) && (agg || !is_vec(t) || n <= 8) {
+        } else if reg_size(n) {
             r.kind = L_REG;
             r.n = 1;
             out.parts.push(Part { reg: 0, v: false, size: n as u8, off: 0 });

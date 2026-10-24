@@ -113,11 +113,14 @@ fn float_immediates_run() {
     assert_eq(run_native(lir, drv), 0);
 }
 
-// A vector wider than 16 bytes travels by reference, its result through x8, as C passes it.
+// A vector wider than the C side's vector registers (16 bytes here) passes as C declares it, a struct of
+// its lanes: through memory (System V: on the stack, the result through rdi; arm64 and Microsoft x64:
+// by reference, the result through x8 or rcx). A bare `vector_size(32)` type is no such case: gcc and
+// clang return one differently without AVX.
 @test
 fn wide_vectors_cross_the_c_abi() {
     let lir = "lir ptr 8\nsym @tw fn global\nfn @tw\n  sig (v8f32) -> v8f32\nb0(v0: v8f32):\n  v1 = fadd.v8f32 v0, v0\n  ret v1\n";
-    let drv = "typedef float v8 __attribute__((vector_size(32)));\nv8 tw(v8);\nint main(void) {\n  v8 a = {1, 2, 3, 4, 5, 6, 7, 8};\n  v8 r = tw(a);\n  for (int i = 0; i < 8; i++) if (r[i] != 2 * a[i]) return 1;\n  return 0;\n}\n";
+    let drv = "typedef struct { _Alignas(32) float l[8]; } v8;\nv8 tw(v8);\nint main(void) {\n  v8 a = {{1, 2, 3, 4, 5, 6, 7, 8}};\n  v8 r = tw(a);\n  for (int i = 0; i < 8; i++) if (r.l[i] != 2 * a.l[i]) return 1;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
 }
 
@@ -184,7 +187,7 @@ fn c_and_native_modules_call_each_other() {
 }
 
 // C values of `@layout` types pass as the scalars their header's typedefs name: a `double` handle in a
-// vector register, an `unsigned long` one and a pointer one in integer registers, from native code. The
+// vector register, an `unsigned long long` one and a pointer one in integer registers, from native code. The
 // header's pointer constants (a cast to `void *`, and to a typedef of a pointer) are read too.
 @test
 fn header_scalars_cross_the_c_abi() {
@@ -194,7 +197,7 @@ fn header_scalars_cross_the_c_abi() {
     let p = cli::proj_new();
     p.mkfile(
         "h.h",
-        "typedef double dv;\ntypedef unsigned long hv;\ntypedef struct node *pv;\n#define VBAD ((void *)-2)\n#define HBAD ((pv)(long long)-1)\ndv mk(double x);\ndouble get(dv v);\ndv half(dv v, hv k, dv w);\nhv inc(hv k, dv v);\npv same(pv x);\n",
+        "typedef double dv;\ntypedef unsigned long long hv;\ntypedef struct node *pv;\n#define VBAD ((void *)-2)\n#define HBAD ((pv)(long long)-1)\ndv mk(double x);\ndouble get(dv v);\ndv half(dv v, hv k, dv w);\nhv inc(hv k, dv v);\npv same(pv x);\n",
     );
     p.mkfile(
         "h.c",
