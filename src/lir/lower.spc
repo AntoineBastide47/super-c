@@ -416,7 +416,35 @@ extend Lower {
                 return true;
             }
         }
-        if y.kind == TypeKind::TYPE_ARRAY || y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_INSTANCE || y.kind == TypeKind::TYPE_OPAQUE {
+        if y.kind == TypeKind::TYPE_OPAQUE {
+            // A C value (`@layout`): the scalar its header's typedef names, which C passes as that scalar
+            // (a struct of it may travel otherwise: Microsoft x64), else memory of its layout, whose
+            // leaves are unknown.
+            if !self.mem_ty(c, rm, rt, out) {
+                return false;
+            }
+            let k = Lower::p(c).opaque_cls.get(&(y.module as u64 << 32 | y.as_data.decl as u64));
+            let cl = if k.is_some() {
+                *k.unwrap();
+            } else {
+                bg::SC_NONE;
+            };
+            let n = out.size;
+            let mt = if cl == bg::SC_INT && n <= 8 && (n & n - 1) == 0 {
+                ast::pick(n == 8, T_I64, ast::pick(n == 4, T_I32, ast::pick(n == 2, T_I16, T_I8)));
+            } else if cl == bg::SC_F32 && n == 4 {
+                T_F32;
+            } else if cl == bg::SC_F64 && n == 8 {
+                T_F64;
+            } else {
+                T_NONE;
+            };
+            if mt != T_NONE && out.align == n {
+                *out = TyI { cls: VC_SCALAR, mty: mt, size: n, align: n };
+            }
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_ARRAY || y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_INSTANCE {
             return self.mem_ty(c, rm, rt, out);
         }
         self.debug_ty(c, "type", rm, rt);
@@ -648,29 +676,6 @@ extend Lower {
             for k in 0..ti.size / self.pkg.ptr_bytes {
                 out.push((off + k * self.pkg.ptr_bytes, T_PTR));
             }
-            return true;
-        }
-        if y.kind == TypeKind::TYPE_OPAQUE {
-            // A C value: the scalar its header's typedef names.
-            let k = Lower::p(c).opaque_cls.get(&(y.module as u64 << 32 | y.as_data.decl as u64));
-            let cl = if k.is_some() {
-                *k.unwrap();
-            } else {
-                bg::SC_NONE;
-            };
-            let mt = if cl == bg::SC_INT && ti.size <= 8 && (ti.size & ti.size - 1) == 0 {
-                ast::pick(ti.size == 8, T_I64, ast::pick(ti.size == 4, T_I32, ast::pick(ti.size == 2, T_I16, T_I8)));
-            } else if cl == bg::SC_F32 && ti.size == 4 {
-                T_F32;
-            } else if cl == bg::SC_F64 && ti.size == 8 {
-                T_F64;
-            } else {
-                T_NONE;
-            };
-            if mt == T_NONE {
-                return false;
-            }
-            out.push((off, mt));
             return true;
         }
         if y.kind == TypeKind::TYPE_DYN || y.kind == TypeKind::TYPE_SLICE {
