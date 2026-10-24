@@ -914,6 +914,9 @@ enforced at spawn boundaries.
 | `TryFrom<T>` / `TryInto<T>` | Fallible conversion with an associated `type Error`; `x.try_into()` returns `Result<U, U::Error>` |
 | `std::time`, `std::net` | Durations, deadlines and task-aware `sleep`; task-aware TCP and UDP |
 | `std::text::utf16` | `encode`, `encode_into`, `decode` between UTF-8 and UTF-16 code units, with the offset of ill-formed input |
+| `std::collections` | `deque::Deque`, `deque::RingBuffer`, `heap::BinaryHeap` with `heap::Reverse`, `btree::BTreeMap` and `BTreeSet`, `bits::BitSet`, `BitVec` and `BitField`, `mdspan::MdSpan` and `MdSpanMut`; each module's header states its complexity, invalidation and allocator use |
+| `std::alloc` | `Arena`, `Pool` and `NoAlloc` (C++ `<memory_resource>`): an owning resource and a `Copy` handle that implements `Allocator`; `std::parallel::pool::SyncPool` is the shared pool |
+| `std::mem` | `layout::Layout`, `ptr` (unaligned and raw copies, `bit_cast`), `endian` (byte-order reads and writes), `cell::Cell`, `RefCell`, `OnceCell`, `rc::Rc` and `rc::Weak`, `volatile` (volatile access and zeroization) |
 | `std::hash::keyed` | `KeyedHash` (SipHash-1-3 under a 128-bit key from `with_key` or the process's entropy, `random`), `SipHasher13`, `SipHasher24`: the builder for maps whose keys come from untrusted input |
 | `std::platform::*` | std's internal operating-system layer (files, paths, clocks, entropy, memory, threads, processes, environment, signals, sockets, libraries): unstable, for std and projects with `std_internals = true` |
 

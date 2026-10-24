@@ -152,11 +152,41 @@ capabilities = [
     "a context switch for x86_64 or aarch64",
 ]
 accelerations = []
-allocator = "Task stacks are mapped from the operating system and pooled within a byte budget; a channel is one allocation; a wait allocates nothing; all from `Global` without an allocator parameter. `arc::Arc` and `arc::Weak` share one block from `Global`."
-thread_safety = "The thread-safety layer: `launch`, `thread::spawn` and the data-parallel calls check `Send` and `Sync`; `arc::Weak` is `Send` and `Sync` as `Arc` is."
+allocator = "Task stacks are mapped from the operating system and pooled within a byte budget; a channel is one allocation; a wait allocates nothing; all from `Global` without an allocator parameter, except `std::parallel::pool::SyncPool`, a `std::alloc::Pool` over an upstream `A: Allocator = Global` behind a task-aware mutex. `arc::Arc` and `arc::Weak` share one block from `Global`."
+thread_safety = "The thread-safety layer: `launch`, `thread::spawn` and the data-parallel calls check `Send` and `Sync`; `SyncPool` and its handle `SyncPoolAlloc` are `Send` and `Sync` when the upstream is `Send`; `arc::Weak` is `Send` and `Sync` as `Arc` is."
 blocking = "Task-aware: a coroutine that waits parks and frees its worker, and any other thread blocks; `blocking::call` moves blocking work to a bounded pool of OS threads."
 errors = "Timed waits report a timeout as a value and a closed channel hands the value back; a failed thread creation, join or detach, or stack mapping, ends the process with a message; an invalid memory order and an `Arc` reference count past `isize::MAX` panic."
 platform_ffi = ["arc", "atomics", "blocking", "channel", "data", "io", "platform", "runtime", "selector", "sync", "task", "thread"]
+
+[package.collections]
+tier = 2
+targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "full", wasm = "full" }
+capabilities = ["C library memory functions"]
+accelerations = ["the C compiler's vectorization of the branch-free word loops of `bits`"]
+allocator = "`Deque`, `BinaryHeap`, `BTreeMap`, `BTreeSet` and `BitVec` take `A: Allocator = Global` with `new_in`: a Deque and a BinaryHeap hold one block grown geometrically, a B-tree one block per node, a BitVec one block of words; nothing allocates per element. `RingBuffer`, `BitSet`, `BitField` and the `mdspan` views never allocate."
+thread_safety = "No internal synchronization; every container is `Send` and `Sync` when its elements and allocator are; an `MdSpan` is `Sync` when `T` is."
+blocking = "Never blocks."
+errors = "Lookups and removals return `Option`; an index or range out of bounds, a `range` whose start is above its end, a `BitVec` length mismatch, a `BitField` value wider than its field and a capacity overflow panic; `BitSet::parse` returns `ParseBitsError`, the `mdspan` constructors `MdSpanError`, a full `RingBuffer` push `Err(value)`; a non-power-of-two `RingBuffer` capacity and a `BitField` that does not fit its word fail the build."
+
+[package.alloc]
+tier = 2
+targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "full", wasm = "full" }
+capabilities = []
+accelerations = []
+allocator = "`Arena` and `Pool` take their chunks from an upstream `A: Allocator = Global` and hand out blocks through the `Copy` handles `ArenaAlloc` and `PoolAlloc`; `NoAlloc` has no memory. Chunks grow geometrically: an arena's from 4 KiB, doubling up to 64 MiB; a pool class's from 1 KiB, doubling up to 64 KiB. A pool request above 4096 bytes goes to the upstream."
+thread_safety = "`Arena` and `Pool` are `Send` when their upstream is, never `Sync`; their handles are neither. `std::parallel::pool::SyncPool` is the shared pool."
+blocking = "Never blocks."
+errors = "No error values: on exhaustion the upstream decides (`Global` aborts, `NoAlloc` panics), and an arena chunk size past `usize` panics. A size or alignment that does not describe the block is undefined, as for every `Allocator`."
+
+[package.mem]
+tier = 2
+targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "full", wasm = "full" }
+capabilities = ["C library memory functions"]
+accelerations = []
+allocator = "`Rc` and `rc::Weak` take `A: Allocator = Global` with `new_in` and allocate one block per `Rc::new`; `endian::append_le` and `append_be` grow the caller's `Vector` through its allocator; `layout::alloc_layout` calls the given allocator; everything else allocates nothing."
+thread_safety = "`Cell`, `RefCell`, `OnceCell`, `Rc` and `rc::Weak` are single-threaded: none is `Sync`, and `Rc` and `rc::Weak` are not `Send`; the layout, pointer, byte-order and volatile functions are pure."
+blocking = "Never blocks."
+errors = "A layout that does not fit returns `None`; a short slice returns `None` from `try_read_le` and `try_read_be` and panics in the other byte-order functions; a conflicting `RefCell` borrow, a reentrant `OnceCell` initialization, a reference count past `usize::MAX` and an alignment that is not a power of two panic; the `ptr` and raw volatile functions are `unsafe` and leave a violated precondition undefined."
 
 [package.hash]
 tier = 3

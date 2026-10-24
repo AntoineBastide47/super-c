@@ -105,11 +105,32 @@ reach them through `as_slice()` / `as_mut_slice()` and keep `sort`, `sort_by`, `
 | `Map::entry` (`or_insert`, `or_insert_with`, `or_default`, `and_modify`) | none | `HashMap::entry` | none | `try_emplace` |
 | `Map::iter`, `iter_mut`, `values_mut`, `drain`, `retain`, `get_key_value`, `remove_entry`, `reserve` | `range`, `maps.DeleteFunc` | same names | `for k, v in m` | `begin`, `erase_if`, `extract`, `reserve` |
 | `Set::set_union`, `intersection`, `difference`, `symmetric_difference`, `is_subset` | none | `union` and the same names | `card(a & b)` on bit sets only | `std::set_union` and kin |
+| `std::collections::deque::Deque` | none | `VecDeque` | `container/queue.Queue` | `std::deque` |
+| `std::collections::deque::RingBuffer<T, N>` | `container/ring` | none | `container/queue` over a fixed buffer | none |
+| `std::collections::heap::BinaryHeap`, `Reverse` | `container/heap` | `BinaryHeap`, `cmp::Reverse` | `container/priority_queue` | `std::priority_queue`, `std::greater` |
+| `std::collections::btree::BTreeMap`, `BTreeSet`, `Bound` | none | `BTreeMap`, `BTreeSet`, `Bound` | `container/rbtree` | `std::map`, `std::set` |
+| `std::collections::bits::BitSet<N>`, `BitVec`, `BitField` | `math/bits` per word | none (`fixedbitset` crate) | `bit_set`, `container/bit_array`, `bit_field` | `std::bitset`, `std::vector<bool>`, bit-field members |
+| `std::collections::mdspan::MdSpan`, `MdSpanMut` (`row_major`, `col_major`, `strided`) | none | none | none | `std::mdspan` (`layout_right`, `layout_left`, `layout_stride`) |
+
+## Allocators
+
+| Super-C | Go | Rust | Odin | C++ |
+| --- | --- | --- | --- | --- |
+| `std::alloc::Arena` (`allocator()`, `reset`, `with_buffer`) | none | none | `mem.Arena`, `mem.Dynamic_Arena` | `std::pmr::monotonic_buffer_resource` |
+| `std::alloc::Pool` | none | none | none | `std::pmr::unsynchronized_pool_resource` |
+| `std::parallel::pool::SyncPool` | `sync.Pool` (an object cache, not an allocator) | none | none | `std::pmr::synchronized_pool_resource` |
+| `std::alloc::NoAlloc` | none | none | `mem.panic_allocator` | `std::pmr::null_memory_resource` |
 
 ## Memory and shared ownership
 
 | Super-C | Go | Rust | Odin | C++ |
 | --- | --- | --- | --- | --- |
+| `std::mem::layout::Layout` (`new`, `array`, `followed_by`, `pad_to_align`) | none | `Layout` (`extend` is `followed_by`) | `size_of`, `align_of` | `sizeof`, `alignof` |
+| `std::mem::ptr` (`read_unaligned`, `copy`, `copy_nonoverlapping`, `swap`, `write_bytes`, `bit_cast`) | `copy`, `math.Float64bits` | `core::ptr`, `transmute` | `mem.copy`, `transmute` | `std::memcpy`, `std::bit_cast` |
+| `std::mem::endian` (`read_le`, `read_be`, `write_le`, `try_read_le`, `append_le`) | `binary.LittleEndian.Uint32`, `PutUint32`, `AppendUint32` | `from_le_bytes`, `to_le_bytes` | `endian.get_u32`, `put_u32` | `std::byteswap` with `memcpy` |
+| `std::mem::volatile` (`read_volatile`, `write_volatile`, `zeroize`) | none | `ptr::read_volatile`, `write_volatile` | `intrinsics.volatile_load` | `volatile` |
+| `std::mem::cell::Cell`, `RefCell`, `OnceCell` | none (`sync.OnceValue` is thread-safe) | same names | none | none |
+| `std::mem::rc::Rc`, `rc::Weak` (`downgrade`, `upgrade`, `make_mut`) | none (`weak.Pointer` for Weak) | `Rc`, `rc::Weak` | none | `std::shared_ptr`, `std::weak_ptr` (atomic counts) |
 | `std::parallel::arc::Arc`, `arc::Weak` | none | `Arc`, `sync::Weak` | none | `std::shared_ptr`, `std::weak_ptr` |
 
 ## Scalars

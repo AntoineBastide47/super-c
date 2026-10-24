@@ -162,7 +162,9 @@ Marker interfaces in `std/interfaces.spc`. Structural auto-conformance:
 | Aggregates | if all fields are `Send`/`Sync` | (same) |
 | `String`, `Vector<T>`, `Box<T>`, `Map<K,V>` | if `T: Send` | if `T: Send` |
 | `Arc<T>`, `arc::Weak<T>` | if `T: Send + Sync` | if `T: Send + Sync` |
-| `UnsafeCell<T>` | if `T: Send` | no |
+| `UnsafeCell<T>`, and `std::mem::cell`'s `Cell`, `RefCell`, `OnceCell` | if `T: Send` | no |
+| `std::mem::rc::Rc<T>`, `rc::Weak<T>` | no | no |
+| `std::parallel::pool::SyncPoolAlloc` | if the upstream allocator is `Send` | if the upstream allocator is `Send` |
 
 A `const` is shared by every task: one holding an `UnsafeCell` must be `Sync`. Share through
 `Arc`. Mutate through `Mutex`, `RwLock`, or atomics. Raw pointers cannot
