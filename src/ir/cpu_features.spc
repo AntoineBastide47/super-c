@@ -704,7 +704,7 @@ pub const fn find(name: str, arch: i32) i32 {
 pub fn level(name: str, arch: i32, strict: bool, s: &mut CpuFeatureSet, err: &mut String) bool {
     let ns: []str<'static> = ["x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4"];
     let xl: []u64 = X_LEVELS;
-    for i in 0..4 {
+    for i in 0..ns.len() {
         if ns[i] == name {
             if arch == 0 {
                 *s = join(*s, x(xl[i]));

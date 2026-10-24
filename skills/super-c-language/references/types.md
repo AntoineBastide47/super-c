@@ -285,9 +285,13 @@ operand chooses, an unsuffixed literal taking the type of the one conformance it
 (`w * 3` with `W as Mul<u8>`). A compound assignment `x op= r` on a struct or a generic instance
 that defines the method is `x = x op r` through the same choice (`v += 1` takes `Add<i32>`), and
 the method's result must be the left operand's type ("mismatched types: the operator's result 'P'
-is not 'V'"). Indexing an aggregate calls its `Index`/`IndexMut` methods (the prelude views `str`,
-`Slice`, `SliceMut`, `String`, `Vector` and `Array` index structurally): `obj[i]` reads through
+is not 'V'"). Indexing an aggregate calls its `Index`/`IndexMut` methods, std's views and
+containers included (`[]T`, `[]mut T`, `str`, `String`, `Vector`, `Array`): `obj[i]` reads through
 `index`, a written element (`obj[i] = v`, `obj[i] += v`, `&mut obj[i]`) goes through `index_mut`.
+The index method's parameter types the index expression, as a parameter types an argument (a view
+takes `usize`: `s[if c { 1; } else { 0; }]`; a float or `i32` index is "mismatched types"). A shared
+view's element and sub-view borrow what the view borrows (`Slice::index<'a>(self: &Slice<'a, T>, i)
+&'a T`), so `fn first(a: []u8) &u8 { return &a[0]; }` is valid; a `[]mut T` element borrows the view.
 `obj[lo..hi]`, in every range form, calls `index_range` with the bounds checked as `usize` and
 packed into a `Range<usize>` (`r.inclusive` set by `..=`); a missing start is 0 and a missing end
 is the value's `len()`, which must return `usize` ("an open-ended range index needs a 'len' method

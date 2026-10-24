@@ -415,9 +415,16 @@ than defining a new context. Two layers:
      the result only through tokens behind its references (`Option<&'a K>` tied through `K`) feeds
      the result by `SD_DEREF`, not by a level-keeping edge, and a store into a `&mut` container
      follows the same rule (`Gen::own_range`, `own_walk`, `own_ties`, widened by the call's
-     outlives relation): the argument's own references stay out of the result (`tie_depth`,
-     `tie_lift`). A function-type bound (`F: fn() &'a T`) ties through the lifetimes it names
-     outside its own `for<..>` (`fn_type_tokens`). `&x` of a local is an ordinary loan, checked at its storage death and
+     outlives relation; a view's type argument lies behind the view, as an index into it is a
+     dereference): the argument's own references stay out of the result (`tie_depth`). Only the
+     levels from the shallowest position whose token lies behind a reference of the result
+     saturate (`tie_lift`: `SD_SAT` or `SD_KEEP_SAT`), so `Slice::index(&s, i)` keeps the view's
+     own loan at level 0 while `[]str` elements saturate. A function-type bound (`F: fn() &'a T`) ties through the lifetimes it names
+     outside its own `for<..>` (`fn_type_tokens`). As the source of a store into another
+     argument, a closure passed as such an `F` brings only `F` and its bounds' result tokens when
+     none of its own parameters can take a store (`callable_out_tokens`, `takes_store`: a `&mut`
+     to a borrow-carrying pointee, a raw pointer, a shared reference reaching an `UnsafeCell`,
+     `Owner::decl_has_cell`), so a counting comparator over references stores nothing. `&x` of a local is an ordinary loan, checked at its storage death and
      escape, and so is an array's or an owned container's slice view (`RV_SLICE` of an owned
      container is `borrow_place`): an index into a `[]T`, `[]mut T` or `str` value is a
      dereference (`Gen::behind`, `ref_steps`), and `Loan.through` marks a loan reached through
@@ -463,6 +470,8 @@ than defining a new context. Two layers:
      a loan on the array place held by the view's origin, never a move. Lowering builds a
      literal coerced to a slice as an array temp, and registers an unregistered array temp
      in its scope (`own_temp`): its storage ends, and an owning one drops, at the block's end.
+     The object of an index through `Index` (`mk()[1]`, `mk()[1..3]`) registers alike, as an
+     operator's left operand does (`own_operand`).
      The value of an `if`, `switch` or value-block arm (`lower_value_into`) takes the conversions
      the checker recorded on the arm (`apply_adjust` on the arm block, `arm_view` when the whole
      expression is typed as the slice of the arms' arrays). A temporary that value borrows (an
@@ -474,7 +483,9 @@ than defining a new context. Two layers:
      taken arm; it lowers with the arm's extension (`ExtCx` at `ext_depth_for`), so its value's
      temporaries live as long as under a run-time condition. The emitter declares a local at its
      initializing write only when that block also dominates the storage ends of a borrowed local
-     (`compute_fusion`), so the C scope holds every read through the borrow.
+     (`compute_fusion`), so the C scope holds every read through the borrow. A local read only
+     through its borrows counts as read: declared apart, a struct a call returns would pass
+     through a second stack slot at -O0.
    - Stores through a `&mut` argument (a signature tie to the parameter's pointee, or a
      `&mut self` receiver whose pointee holds borrows) flow into a frame-owned container at
      once; through a reference they are recorded (`StoreVia`) and `resolve_stores` resolves
@@ -486,20 +497,30 @@ than defining a new context. Two layers:
      borrow reaching a placeholder is reported at the borrow (`bc_ir_escape`): through the
      return when a return carries it, else as a store into caller-visible data.
    - `bc_ir_universal` is Rust's check of universal regions: `'static`, the signature's named
-     lifetimes and elided input positions, related by declared and implied bounds. The
-     parameters' regions flow over the subset edges, flow-insensitively, into the return
-     slots, the storage the parameters reach and `'static`; each arrival must outlive a region
-     of the slot at its level. A read of a parameter's field, or of a slice or array
-     parameter's element, takes the declared type's regions (`bc_uni_place`). A body local of
-     a struct or tuple type (at most `UNI_MEMBERS_MAX` members, never a union) keeps one state
-     per member (`UniSt.mem`). Each origin and member keeps four words (`UNI_SW`: own level, behind
-     a reference, either, and the regions that may lie behind two or more, so a `SD_DEREF2` edge
-     passes only those on), a parameter three (`UNI_AW`); a lifetime-generic aggregate's
-     arguments, generic bounds, `dyn` and function types count as deep (`UL_DEEP`). A member store, an aggregate built from an origin's places and
-     a whole copy between locals of one type pass regions member by member (`bc_uni_pass`), a
-     member read passes its member (`bc_uni_read`), and a slot of a struct or tuple type
-     takes such a value member by member (`bc_uni_split`, member slots from
-     `bc_uni_members`).
+     lifetimes and elided input positions, related by declared and implied bounds (`rel_widen`).
+     It is per position: each origin's value has one slot per lifetime position of its type
+     (`bc_uni_len`, at most `UNI_SLOTS_MAX`; the walk `bc_uni_walk` visits references, arrays,
+     declarations' lifetime and type arguments, a type parameter as one slot, a function pointer
+     as one slot per outer lifetime class, a `dyn fn` as its captures plus its outer classes, a
+     `Box<dyn ..>` as the owned `dyn`). `UniSt` holds per slot its regions (`st`), the declared
+     region (`sk`), whether caller storage holds it (`cv`), whether it is a type parameter's
+     (`gen`) and its variance (`vr`). The regions flow over the subset edges,
+     flow-insensitively, slot to slot along each edge's map (`bc_uni_map`, cached in `emap`): a
+     copy or projection by place, a call through the callee's signature keys (`bc_uni_call_keys`,
+     with Rust's elision rule, an outlives relation widened at the call, variadic arguments
+     keyless), a function value's call through its class slots (`bc_uni_map_call`). An edge whose
+     operation the map cannot follow is `EM_COARSE`: every region of the source reaches every
+     slot of the target; the compiler and std build with none. A region arriving at a slot must
+     satisfy its declared region by variance (`fails_at`: covariant outlives it, contravariant is
+     outlived, invariant both); at a coarse slot it must outlive every region the slot declares.
+     An edge into `'static` checks the slots of the places the operation reads (`bc_uni_static`);
+     it keeps only positions behind a reference when the edge drops the value's own level and
+     the place does not itself read through a reference or view (`bc_uni_through`), since the
+     place's projection already left that position. Stores into a parameter's local check only its caller-visible slots (`vis`); the edge a
+     mutable borrow adds back into the borrowed parameter is skipped, since the store through it
+     reports where it happens. A whole assignment to a by-value parameter keeps its declared
+     regions (Rust's fixed type: `x = y` between distinct elided lifetimes behind a view is an
+     error), since later stores through it check those regions.
    - `bc_elaborate` then classifies the body's storage markers against the same forest,
      facts and move/init solution (building the CFG and the solution when the analyses
      skipped them) and rewrites the body with `TM_DROP` terminators (`ir/drops.spc`), so
@@ -516,7 +537,10 @@ than defining a new context. Two layers:
      `resolve_stores` follows them, and past its bound the store reaches `'static`.
    - A `dyn` or generic receiver whose interface (or bound) names a lifetime is a store target
      (`bound_tokens`: a generic parameter carries its bounds' arguments; an interface's `Self`
-     carries the interface's lifetime and type arguments). A shared reference is a store target
+     carries the interface's lifetime and type arguments). So is a by-value argument whose type
+     holds a `&mut` or a `[]mut` (`holds_mut`: a store reaches its referent; a `[]mut E` taken
+     whole only where `E` can hold a borrow, since only its elements are written) and a reference to a
+     type parameter with bounds (`bounded_param`). A shared reference is a store target
      where its pointee keeps a type argument behind an `UnsafeCell` (`Owner::interior_mask`,
      `interior_tokens`); `resolve_interior` ties the stored borrows of a channel, its
      endpoints and a `Mutex` to each other (`Gen::ties`, `istores`).
@@ -711,8 +735,9 @@ ownership analysis ever runs on a merged body. Elaboration runs once per kept lo
 instances share it as they share the lowering. The inliner's callees come from the
 package's `InlineStore` (`src/ir/inline.spc`): every kept env-free lowering is vetted once
 at the start of `cemit_package` (the size gate reads `CoreBody.inline_size_ok`, recorded
-before the rewrite), and the accepted ones are copied compact; no task lowers a callee
-from syntax. The store also vets every conformance's method (a call through its interface
+before the rewrite; an `@always_inline` callee passes it, as std's view `index_range` methods do so
+their guards fold against the caller's facts), and the accepted ones are copied compact; no task
+lowers a callee from syntax. The store also vets every conformance's method (a call through its interface
 reaches it). A callee generic over a const parameter splices with each read of the parameter
 (and each `{N / 2}` form in its types) replaced by the bound value, or by a read of the caller's
 own parameter when the binding is that parameter; a switch on such a parameter then reads a
@@ -747,7 +772,11 @@ parameters of a generic extend's function called through its receiver type (`V::
 bound call made direct) from `Terminator.recv`. The variant
 serves that demand only. A concrete body that holds a vector runs the same rounds after its own
 inlining (`cemit_seed_module`): a generic callee spliced into it brings interface calls the splice
-already translated to concrete receivers. The record of the migration, the analysis boundary and the validation
+already translated to concrete receivers. A per-caller table of each local's writes (`Writes`: count
+and one whole assignment; built at the first splice, then kept by rescanning each splice's new blocks
+and removing the spliced call's results, as the exposure counts are) answers which argument a struct
+aggregate built once (`once_aggregate`) and which field operand keeps its value (`agg_field`), so a
+splice reads no whole caller body. The record of the migration, the analysis boundary and the validation
 checks is [ownership-analysis.md](references/ownership-analysis.md).
 
 ## CTFE (Compile-Time Function Evaluation)
@@ -756,6 +785,9 @@ checks is [ownership-analysis.md](references/ownership-analysis.md).
 was deleted). It serves typechecker folds (array lengths, const args, static_assert,
 `const`/`static mut` initializers, the constant-trap scan), `const`/`static` emission,
 `type_info` rendering, the `fx` scanner (const-fn eligibility, always-panics), and lint probes.
+A scalar read from or written to a place takes the place's checked type (`place_typed`): the literal
+stored by `let e: i64 = 0` is an `i64` in its slot, so a pointer view of the slot (`&mut e` as a
+`*mut i64` argument) passes the slot type check (`scalar_view`).
 
 The constant-trap scan (`tc_ct_check`, after each binary, unary and assignment node in
 `check_expr_w`) folds the integer operations over closed operands and reports a trap at the
@@ -780,7 +812,7 @@ so with the same result). That pass runs only the constants whose initializer di
 whole before the keep's view opened (`Interp.whole`): a whole evaluation reached only the
 engine's own boxes, which stay. A call-bearing constant initializer evaluates once in the type
 check: its static capture runs first, and a scalar result answers the fold from the memo.
-emission-time fold failures. A `static_assert` in a generic function's body holds per
+A `static_assert` in a generic function's body holds per
 instance. The resolver records each function whose body holds one and that has its own
 generic parameters or sits in an extend with parameters (`Ast.assert_fns`); a checked call
 with concrete arguments queues the instance (`tc_defer_inst_asserts`,
@@ -1096,7 +1128,9 @@ longer emits.
    loop, never `memcpy` into a temporary, and declares no temporary that only copies a value.
    The per-body decisions in `src/emit/cemit.spc`:
    - A copy shares one C variable with its source. `setup_locals` merges a single-use
-     temporary into its copy's destination; `coalesce_copies` does it over the CFG when the
+     temporary into its copy's destination, except a retyping (`same_c_cast`) into a temporary
+     read once: both fold into that read instead, since a merged destination never folds (a
+     reference made a raw pointer for an argument spells `f((void *)(&x))`); `coalesce_copies` does it over the CFG when the
      source is dead after the copy and the destination holds no value the source's live range
      can reach (`copy_range`, `live_from`): an `if` or `switch` value and a short-circuit result
      write the binding in each arm, through chains of copies. A temporary copy of an immutable
@@ -1115,6 +1149,11 @@ longer emits.
      holds at most one folded expression that can panic (`one_panic_per_reader`). A spliced
      callee's parameter reads its argument in place unless the callee can reach the argument's
      storage (`ir::inline::param_facts`, `exposed`); `vec_literals`, `vec_fusion` fold vectors.
+   - A pointer local defined once by the address of a place that stays where it is, and read
+     only through a dereference, spells that place at each use (`fold_addresses`): the path
+     dereferences at most its base, a local never written whole, and indexes only an array held
+     in place, by a constant, a temporary written once or an argument never written, none of them
+     addressed (`fixed_index`). An inlined `Array::index` writes `pad.data[7] = n`.
    - A single-use call result is spelled at its read (`compute_call_fwd`): along the same goto
      chains, through copies folded at their read, into a literal's member and into a field or
      element of a local's own storage, when nothing between emits and no other operand can

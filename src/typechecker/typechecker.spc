@@ -19,6 +19,7 @@ import typechecker::infer as inf;
 import utils::errors as diag;
 import ir::cpu_features as cf;
 import ast::parser as par;
+import typechecker::render as *;
 
 /// Alias-chain hops before a cycle is reported.
 pub const TYPE_ALIAS_MAX_DEPTH: u32 = 64;
@@ -61,12 +62,6 @@ const fn score_better(a: &CandScore, b: &CandScore) bool {
 /// The concrete default-method instances one module's run may demand (`TypeChecker::run_dmd_uses`):
 /// every instance is distinct, so only a type that holds an ever-growing instance of itself nears it.
 const DMD_USES_MAX: usize = 65536;
-
-// Whether closure node `n` returns its body's value without a written result list: an expression
-// body, or a block whose `return`s give one (`ClosureData.ret_infer`).
-const fn closure_body_ret(n: &Node) bool {
-    return n.as_data.closure.expr_body || n.as_data.closure.ret_infer;
-}
 
 // Whether obligations `a` and `b` (any owning function) demand the same proof.
 const fn same_ob(a: &ProjOb, b: &ProjOb) bool {
@@ -671,14 +666,14 @@ pub struct TypeChecker<'a> {
     pub ph_unsafecell: loader::LookupHit,
     pub ph_send: loader::LookupHit,
     pub ph_sync: loader::LookupHit,
+    pub ph_copy: loader::LookupHit,
+    pub ph_free: loader::LookupHit,
+    pub ph_fnptr: loader::LookupHit,
+    pub ph_zeroable: loader::LookupHit,
     pub ph_allocator: loader::LookupHit,
     pub ph_slice: loader::LookupHit,
     pub ph_slicemut: loader::LookupHit,
-    pub ph_vector: loader::LookupHit,
     in_extern: bool, // checking an `extern` block's items: they keep the C names they declare
-    pub ph_array: loader::LookupHit,
-    pub ph_map: loader::LookupHit,
-    pub ph_set: loader::LookupHit,
     pub ph_range: loader::LookupHit,
     pub ph_box: loader::LookupHit,
     pub ph_global: loader::LookupHit,
@@ -693,6 +688,11 @@ pub struct TypeChecker<'a> {
 
 fn ph_lookup(package: *mut loader::Package, name: str) loader::LookupHit {
     return unsafe (*package).prelude_lookup(name, true);
+}
+
+// Is declaration `tr` the prelude declaration `h` resolves to? A program's item of the same name is not.
+const fn is_ph(tr: DefId, h: loader::LookupHit) bool {
+    return tr.node != NODE_NONE && tr.node == h.node && tr.module == h.mid;
 }
 
 /// A function type's parameter list, read one parameter at a time through `fn_param`, and its
@@ -1575,13 +1575,13 @@ extend<'a> TypeChecker<'a> {
             ph_unsafecell: ph_lookup(package, "UnsafeCell"),
             ph_send: ph_lookup(package, "Send"),
             ph_sync: ph_lookup(package, "Sync"),
+            ph_copy: ph_lookup(package, "Copy"),
+            ph_free: ph_lookup(package, "Free"),
+            ph_fnptr: ph_lookup(package, "FnPtr"),
+            ph_zeroable: ph_lookup(package, "Zeroable"),
             ph_allocator: ph_lookup(package, "Allocator"),
             ph_slice: ph_lookup(package, "Slice"),
             ph_slicemut: ph_lookup(package, "SliceMut"),
-            ph_vector: ph_lookup(package, "Vector"),
-            ph_array: ph_lookup(package, "Array"),
-            ph_map: ph_lookup(package, "Map"),
-            ph_set: ph_lookup(package, "Set"),
             ph_range: ph_lookup(package, "Range"),
             ph_box: ph_lookup(package, "Box"),
             ph_global: ph_lookup(package, "Global"),
@@ -7687,627 +7687,6 @@ const fn plural(n: u64) str<'static> {
         return "";
     }
     return "s";
-}
-
-// The Ast to read for module `m`'s decls when rendering against the current ast `a` (mirrors
-// TypeChecker::mod_ast): foreign modules come from the package, the current one from `a` itself.
-const fn rt_ast(pkg: *const loader::Package, a: *const Ast, m: ModuleId) *const Ast {
-    if m != unsafe (*a).module {
-        return unsafe &(*pkg).modules[m as usize].ast;
-    }
-    return a;
-}
-const fn rt_src(pkg: *const loader::Package, a: *const Ast, cur_src: str, m: ModuleId) str {
-    if m != unsafe (*a).module {
-        return unsafe (*pkg).modules[m as usize].source.as_str();
-    }
-    return cur_src;
-}
-
-// `fn(P, Q) R` from a function type's decl node. Reads the CACHED type of each parameter/return node
-// rather than lowering (no checker here); an uncached slot renders `..`, so a signature never checked
-// still names itself. Without this every function type printed as a bare "fn" and a mismatch between
-// two of them read "expected 'fn', found 'fn'".
-fn render_fn_sig_str(pkg: *const loader::Package, a: *const Ast, cur_src: str, ty: &Ty, out: &mut String) {
-    if ty.fn_sig() {
-        render_sig_str(pkg, a, cur_src, ty, out);
-        return;
-    }
-    let ma = rt_ast(pkg, a, ty.module);
-    let mut ps = NodeList { start: 0, len: 0 };
-    let mut rs = NodeList { start: 0, len: 0 };
-    if !unsafe (*ma).sig_lists(ty.as_data.decl, &mut ps, &mut rs) {
-        out.push_str("fn");
-        return;
-    }
-    out.push_str("fn(");
-    for i in 0..ps.len {
-        if i != 0 {
-            out.push_str(", ");
-        }
-        render_slot_str(pkg, a, cur_src, ma, unsafe (*ma).list(ps)[i as usize], out);
-    }
-    out.push_str(")");
-    let dn = unsafe (*ma).at_const(ty.as_data.decl);
-    // A closure that lists no return and returns its body's value: the body's type is the return type.
-    let bt = if dn.kind == NodeKind::NODE_CLOSURE && closure_body_ret(dn) && rs.len == 0 {
-        unsafe (*ma).type_of(dn.as_data.closure.body);
-    } else {
-        TYPE_NONE;
-    };
-    if rs.len == 1 {
-        out.push_str(" ");
-        render_slot_str(pkg, a, cur_src, ma, unsafe (*ma).list(rs)[0], out);
-    } else if rs.len > 1 {
-        // Several results in parentheses, as `render_sig_str` spells them.
-        out.push_str(" (");
-        for i in 0..rs.len {
-            if i != 0 {
-                out.push_str(", ");
-            }
-            render_slot_str(pkg, a, cur_src, ma, unsafe (*ma).list(rs)[i as usize], out);
-        }
-        out.push_str(")");
-    } else if bt != TYPE_NONE && !(unsafe (*ma).type_at(bt).kind == TypeKind::TYPE_BUILTIN && unsafe (*ma).type_at(bt).as_data.builtin == BuiltinType::BT_VOID) {
-        out.push_str(" ");
-        render_type_str(pkg, ma, rt_src(pkg, a, cur_src, unsafe (*ma).module), bt, out);
-    }
-}
-
-// Function-pointer type `ty` (pool `a`): `fn(P, ..) R`, `move fn(..)`, several results in parentheses.
-fn render_sig_str(pkg: *const loader::Package, a: *const Ast, cur_src: str, ty: &Ty, out: &mut String) {
-    let mut next: u8 = 0;
-    let none = Vector::<String>::new();
-    render_sig_lts(pkg, a, cur_src, ty, &none, &mut next, false, out);
-}
-
-// Append function-pointer type `ty` with the lifetimes it names: a lifetime it takes from outside it
-// as `outer` names it (else `'1`, `'2`, ..), its own groups as letters from `*next` on, under a
-// `for<..>` when `binder`.
-fn render_sig_lts(
-    pkg: *const loader::Package,
-    a: *const Ast,
-    cur_src: str,
-    ty: &Ty,
-    outer: &Vector<String>,
-    next: &mut u8,
-    binder: bool,
-    out: &mut String,
-) {
-    let mut cls = Vector::<u8>::new();
-    let mut fl = Vector::<u8>::new();
-    let mut nres: u32 = 0;
-    if pkg != null && unsafe (*a).instance(ty.as_data.fnp.sig).lts != 0 {
-        unsafe (*pkg).sig_classes(unsafe &*a, ty, &mut cls, &mut fl, &mut nres, &mut loader::Invariant {});
-    }
-    // The name at each position.
-    let first = *next;
-    let mut names = Vector::<String>::new();
-    let mut letter = Vector::<u8>::new();
-    letter.resize_default(LC_OUTER as usize);
-    for k in 0..cls.len() {
-        let c = cls[k];
-        let mut nm = String::new();
-        if c == LC_STATIC {
-            nm.push_str("'static");
-        } else if c >= LC_OUTER && c != LC_TOO_MANY {
-            let g = (c - LC_OUTER) as usize;
-            if g < outer.len() {
-                nm.push_str(outer[g].as_str());
-            } else {
-                nm.push_byte(b'\'');
-                nm.push_u64(g as u64 + 1);
-            }
-        } else if c >= LC_GROUP && c < LC_OUTER {
-            if letter[c as usize] == 0 {
-                letter.set(c as usize, *next + 1);
-                *next = *next + 1;
-            }
-            lt_letter(&mut nm, letter[c as usize] - 1);
-        }
-        names.push(nm);
-    }
-    if (ty.qualifier & FN_MOVE) != 0 {
-        out.push_str("move ");
-    }
-    if binder && *next != first {
-        out.push_str("for<");
-        for l in first..*next {
-            if l != first {
-                out.push_str(", ");
-            }
-            lt_letter(out, l);
-        }
-        out.push_str("> ");
-    }
-    out.push_str("fn(");
-    let np = unsafe (*a).sig_len(ty, false);
-    let nr = unsafe (*a).sig_len(ty, true);
-    let mut pos = nres;
-    for i in 0..np {
-        if i != 0 {
-            out.push_str(", ");
-        }
-        render_lt_type(pkg, a, cur_src, unsafe (*a).sig_at(ty, false, i), &names, &mut pos, out, 0, next);
-    }
-    out.push_str(")");
-    pos = 0;
-    for i in 0..nr {
-        if i != 0 {
-            out.push_str(", ");
-        } else if nr > 1 {
-            out.push_str(" (");
-        } else {
-            out.push_str(" ");
-        }
-        render_lt_type(pkg, a, cur_src, unsafe (*a).sig_at(ty, true, i), &names, &mut pos, out, 0, next);
-    }
-    if nr > 1 {
-        out.push_str(")");
-    }
-}
-
-// Append lifetime letter `l`: `'a` .. `'z`, then `'a26` ...
-fn lt_letter(out: &mut String, l: u8) {
-    out.push_byte(b'\'');
-    out.push_byte(b'a' + l % 26);
-    if l >= 26 {
-        out.push_u64(l);
-    }
-}
-
-// The lifetime positions of `t` (`Package::lt_count`), 0 without a package.
-fn rt_lt_count(pkg: *const loader::Package, a: *const Ast, t: TypeId) u32 {
-    if pkg == null {
-        return 0;
-    }
-    return unsafe (*pkg).lt_count(unsafe &*a, t);
-}
-
-// Append type `t` with the lifetime names `names` at its positions, from `*pos` on, and advance
-// `*pos` past them (`Package::lt_walk` order; `depth` its depth there). A function type in it names
-// its own lifetimes from `*next` on.
-fn render_lt_type(
-    pkg: *const loader::Package,
-    a: *const Ast,
-    cur_src: str,
-    t: TypeId,
-    names: &Vector<String>,
-    pos: &mut u32,
-    out: &mut String,
-    depth: u32,
-    next: &mut u8,
-) {
-    let n = if depth > 16 {
-        0;
-    } else {
-        rt_lt_count(pkg, a, t);
-    };
-    let mut named = false;
-    for k in *pos..(*pos + n).min(names.len() as u32) {
-        named = named || names[k as usize].len() != 0;
-    }
-    let y = *unsafe (*a).type_at(t);
-    let k = y.kind;
-    let dsig = if k == TypeKind::TYPE_DYN {
-        unsafe (*a).dyn_fn_sig(&y);
-    } else {
-        TYPE_NONE;
-    };
-    if !named && !y.fn_sig() && dsig == TYPE_NONE {
-        render_type_str(pkg, a, cur_src, t, out);
-        *pos = *pos + n;
-        return;
-    }
-    if k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
-        out.push_str(
-            if k == TypeKind::TYPE_SLICE {
-                "[]";
-            } else {
-                "&";
-            },
-        );
-        render_lt_name(names, pos, out, false);
-        if k == TypeKind::TYPE_REFERENCE && y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
-            out.push_str("mut ");
-        }
-        render_lt_type(pkg, a, cur_src, y.as_data.elem, names, pos, out, depth + 1, next);
-    } else if k == TypeKind::TYPE_POINTER {
-        out.push_str(
-            if y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
-                "*mut ";
-            } else if y.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8 {
-                "*const ";
-            } else {
-                "*";
-            },
-        );
-        render_lt_type(pkg, a, cur_src, y.as_data.elem, names, pos, out, depth + 1, next);
-    } else if k == TypeKind::TYPE_ARRAY {
-        out.push_str("[");
-        render_lt_type(pkg, a, cur_src, y.as_data.arr.elem, names, pos, out, depth + 1, next);
-        out.push_str("; ");
-        if y.arr_sym() {
-            render_type_str(pkg, a, cur_src, y.as_data.arr.len, out);
-        } else {
-            out.push_u64(y.as_data.arr.len);
-        }
-        out.push_str("]");
-    } else if k == TypeKind::TYPE_STRUCT || k == TypeKind::TYPE_ENUM {
-        render_type_str(pkg, a, cur_src, t, out);
-        out.push_str("<");
-        for i in 0..n {
-            if i != 0 {
-                out.push_str(", ");
-            }
-            render_lt_name(names, pos, out, true);
-        }
-        out.push_str(">");
-    } else if y.fn_sig() {
-        render_lt_fn(pkg, a, cur_src, &y, names, pos, out, next);
-    } else if k == TypeKind::TYPE_INSTANCE || k == TypeKind::TYPE_DYN {
-        let mut it = *unsafe (*a).instance(y.as_data.inst);
-        if k == TypeKind::TYPE_INSTANCE {
-            let _ = unsafe (*a).targs_of(t, &mut it);
-        }
-        let ma = rt_ast(pkg, a, it.module);
-        if k == TypeKind::TYPE_DYN {
-            if y.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8 {
-                out.push_str("Box<");
-            } else {
-                out.push_str("&");
-                render_lt_name(names, pos, out, false);
-                if y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
-                    out.push_str("mut ");
-                }
-            }
-            out.push_str("dyn ");
-            if dsig != TYPE_NONE {
-                render_lt_fn(pkg, a, cur_src, unsafe (*a).type_at(dsig), names, pos, out, next);
-                if y.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8 {
-                    out.push_str(">");
-                }
-                return;
-            }
-        }
-        let nm = if k == TypeKind::TYPE_DYN {
-            unsafe (*ma).at_const(unsafe (*ma).at_const(it.decl).as_data.interface_def.name).as_data.name.text;
-        } else {
-            unsafe (*ma).at_const(unsafe (*ma).at_const(it.decl).as_data.aggregate.name).as_data.name.text;
-        };
-        out.push_str(rt_src(pkg, a, cur_src, it.module).slice(nm.start as usize, nm.end as usize));
-        let nlt = unsafe (*pkg).decl_nlt(unsafe &*a, it.module, it.decl);
-        if nlt + it.n as u32 != 0 {
-            out.push_str("<");
-            for i in 0..nlt {
-                if i != 0 {
-                    out.push_str(", ");
-                }
-                render_lt_name(names, pos, out, true);
-            }
-            for i in 0..it.n {
-                if nlt + i as u32 != 0 {
-                    out.push_str(", ");
-                }
-                render_lt_type(pkg, a, cur_src, unsafe it.args[i as usize], names, pos, out, depth + 1, next);
-            }
-            out.push_str(">");
-        }
-        if k == TypeKind::TYPE_DYN && y.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8 {
-            out.push_str(">");
-        }
-    }
-}
-
-// Append function-pointer type `y` inside a rendered type: its positions there (`names` from `*pos`
-// on) name the lifetimes it takes from outside it; one with no name is a lifetime of the enclosing
-// type's own, named from `*next` on.
-fn render_lt_fn(
-    pkg: *const loader::Package,
-    a: *const Ast,
-    cur_src: str,
-    y: &Ty,
-    names: &Vector<String>,
-    pos: &mut u32,
-    out: &mut String,
-    next: &mut u8,
-) {
-    let mut outer = Vector::<String>::new();
-    let mut vs = Vector::<u32>::new();
-    if pkg != null {
-        unsafe (*pkg).sig_outer(unsafe &*a, y, &mut vs, 0, &mut loader::Invariant {});
-    }
-    for _ in 0..vs.len() {
-        let mut nm = String::new();
-        if (*pos) as usize < names.len() && names[(*pos) as usize].len() != 0 {
-            nm.push_str(names[(*pos) as usize].as_str());
-        } else {
-            lt_letter(&mut nm, *next);
-            *next = *next + 1;
-        }
-        outer.push(nm);
-        *pos = *pos + 1;
-    }
-    render_sig_lts(pkg, a, cur_src, y, &outer, next, true, out);
-}
-
-// Append the lifetime name at position `*pos` of `names` and advance; an elided one is `'_` as an
-// argument (`whole`), or nothing after `&` and `[]`. Not as an argument, a space follows a name.
-fn render_lt_name(names: &Vector<String>, pos: &mut u32, out: &mut String, whole: bool) {
-    let p = (*pos) as usize;
-    *pos = *pos + 1;
-    if p >= names.len() || names[p].len() == 0 {
-        if whole {
-            out.push_str("'_");
-        }
-        return;
-    }
-    out.push_str(names[p].as_str());
-    if !whole {
-        out.push_byte(b' ');
-    }
-}
-
-// Text `w` on one line: each run of white space as one space.
-fn one_line(w: str) String {
-    let mut s = String::new();
-    let mut gap = false;
-    for i in 0..w.len() {
-        let c = w.byte_at(i);
-        if c == b' ' || c == b'\n' || c == b'\t' || c == b'\r' {
-            gap = true;
-            continue;
-        }
-        if gap && s.len() != 0 {
-            s.push_byte(b' ');
-        }
-        gap = false;
-        s.push_byte(c);
-    }
-    return s;
-}
-
-// One parameter/return slot of a function type: the node is either a NODE_PARAMETER wrapping a type
-// node or the type node itself. A type that names a lifetime renders as written (a type does not keep
-// lifetime names).
-fn render_slot_str(
-    pkg: *const loader::Package,
-    a: *const Ast,
-    cur_src: str,
-    ma: *const Ast,
-    slot: NodeId,
-    out: &mut String,
-) {
-    let tn = unsafe (*ma).slot_type_node(slot);
-    let mut t = TYPE_NONE;
-    if tn != NODE_NONE {
-        t = unsafe (*ma).type_of(tn);
-        let sp = unsafe (*ma).at_const(tn).span;
-        let w = rt_src(pkg, a, cur_src, unsafe (*ma).module).slice(sp.start as usize, sp.end as usize);
-        if t != TYPE_NONE && w.contains("'") {
-            out.push_str(one_line(w).as_str());
-            return;
-        }
-    }
-    if t == TYPE_NONE {
-        t = unsafe (*ma).type_of(slot);
-    }
-    if t == TYPE_NONE {
-        out.push_str("..");
-        return;
-    }
-    render_type_str(pkg, ma, rt_src(pkg, a, cur_src, unsafe (*ma).module), t, out);
-}
-
-// Append name span `s` of module `m`'s source.
-fn rt_put_name(pkg: *const loader::Package, a: *const Ast, cur_src: str, m: ModuleId, s: tok::Span, out: &mut String) {
-    out.push_str(rt_src(pkg, a, cur_src, m).slice(s.start as usize, s.end as usize));
-}
-
-/// The interface instance a `dyn` type `t` erases to, as written in a bound or a conformance:
-/// `Mul<Simd<f32, 4>>`, `fn(i32) i32`, appended to `out`.
-pub fn render_iface_str(pkg: *const loader::Package, a: *const Ast, cur_src: str, t: TypeId, out: &mut String) {
-    let ty = *unsafe (*a).type_at(t);
-    rt_dyn_str(pkg, a, cur_src, &ty, out);
-}
-
-// Append the interface or function type `dyn` type `ty` erases to.
-fn rt_dyn_str(pkg: *const loader::Package, a: *const Ast, cur_src: str, ty: &Ty, out: &mut String) {
-    let ma = rt_ast(pkg, a, ty.module);
-    let dsig = unsafe (*a).dyn_fn_sig(ty);
-    if dsig != TYPE_NONE {
-        render_type_str(pkg, a, cur_src, dsig, out);
-        return;
-    }
-    let ddecl = unsafe (*a).dyn_decl_of(ty);
-    let s = unsafe (*ma).at_const(unsafe (*ma).at_const(ddecl).as_data.interface_def.name).as_data.name.text;
-    rt_put_name(pkg, a, cur_src, ty.module, s, out);
-    let di = *unsafe (*a).instance(ty.as_data.inst);
-    if di.n == 0 {
-        return;
-    }
-    // A generic interface names its arguments: `&dyn I<bool>`, never a bare `&dyn I`.
-    out.push_str("<");
-    for i in 0..di.n {
-        if i != 0 {
-            out.push_str(", ");
-        }
-        render_type_str(pkg, a, cur_src, unsafe di.args[i as usize], out);
-    }
-    out.push_str(">");
-}
-
-/// Render `tid` as Super-C surface syntax. The standalone form of TypeChecker::type_str: `a` is the
-/// Ast owning the type pool (a checker's in-flight ast, or a module's held ast after the build),
-/// `cur_src` that module's source, `pkg` the package for cross-module decl names (null falls back to
-/// `a`/`cur_src` for everything). Also serves LSP hover, which renders from a fully built package.
-pub fn type_str_of(pkg: *const loader::Package, a: *const Ast, cur_src: str, tid: TypeId) String {
-    let mut out = String::new();
-    render_type_str(pkg, a, cur_src, tid, &mut out);
-    return out;
-}
-
-/// Append `tid` as Super-C surface syntax to `out` (`type_str_of`).
-pub fn render_type_str(pkg: *const loader::Package, a: *const Ast, cur_src: str, tid: TypeId, out: &mut String) {
-    if tid == TYPE_NONE {
-        // No type was ever assigned: there is nothing IN the value to render. Instance arguments
-        // recover the parameter's NAME from their declaration below; a bare hole has no declaration.
-        out.push_str("_");
-        return;
-    }
-    let ty = *unsafe (*a).type_at(tid);
-    if ty.kind == TypeKind::TYPE_ERROR {
-        out.push_str("_");
-    } else if ty.kind == TypeKind::TYPE_BUILTIN {
-        out.push_str(bt_name(ty.as_data.builtin));
-    } else if ty.kind == TypeKind::TYPE_NEVER {
-        out.push_str("never");
-    } else if ty.kind == TypeKind::TYPE_POINTER || ty.kind == TypeKind::TYPE_REFERENCE {
-        out.push_str(pick(ty.kind == TypeKind::TYPE_POINTER, "*", "&"));
-        if ty.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
-            out.push_str("mut ");
-        } else if ty.kind == TypeKind::TYPE_POINTER && ty.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8 {
-            // A bare `*T` and `*const T` are distinct types.
-            out.push_str("const ");
-        }
-        render_type_str(pkg, a, cur_src, ty.as_data.elem, out);
-    } else if ty.kind == TypeKind::TYPE_SLICE {
-        out.push_str("[]");
-        render_type_str(pkg, a, cur_src, ty.as_data.elem, out);
-    } else if ty.kind == TypeKind::TYPE_ARRAY {
-        out.push_str("[");
-        render_type_str(pkg, a, cur_src, ty.as_data.arr.elem, out);
-        out.push_str("; ");
-        if ty.arr_sym() {
-            render_type_str(pkg, a, cur_src, ty.as_data.arr.len, out);
-        } else {
-            out.push_u64(ty.as_data.arr.len);
-        }
-        out.push_str("]");
-    } else if ty.kind == TypeKind::TYPE_STRUCT || ty.kind == TypeKind::TYPE_ENUM || ty.kind == TypeKind::TYPE_GENERIC {
-        let ma = rt_ast(pkg, a, ty.module);
-        let d = unsafe (*ma).at_const(ty.as_data.decl);
-        let mut nm = d.as_data.aggregate.name;
-        if d.kind == NodeKind::NODE_GENERIC_PARAM {
-            nm = d.as_data.generic_param.name;
-        }
-        rt_put_name(pkg, a, cur_src, ty.module, unsafe (*ma).at_const(nm).as_data.name.text, out);
-    } else if ty.kind == TypeKind::TYPE_OPAQUE {
-        let ma = rt_ast(pkg, a, ty.module);
-        let s = unsafe (*ma).at_const(unsafe (*ma).at_const(ty.as_data.decl).as_data.type_alias.name).as_data.name.text;
-        rt_put_name(pkg, a, cur_src, ty.module, s, out);
-    } else if ty.kind == TypeKind::TYPE_ASSOC {
-        // `T::Output`: the projected type, then the associated type's name.
-        let it = *unsafe (*a).instance(ty.as_data.inst);
-        render_type_str(pkg, a, cur_src, it.args[0], out);
-        out.push_str("::");
-        let ma = rt_ast(pkg, a, it.module);
-        let s = unsafe (*ma).at_const(unsafe (*ma).at_const(it.decl).as_data.type_alias.name).as_data.name.text;
-        rt_put_name(pkg, a, cur_src, it.module, s, out);
-    } else if ty.kind == TypeKind::TYPE_INSTANCE || ty.is_vec() {
-        let mut it = TyInstance {};
-        let _ = unsafe (*a).targs_of(tid, &mut it);
-        let ma = rt_ast(pkg, a, it.module);
-        let s = unsafe (*ma).at_const(unsafe (*ma).at_const(it.decl).as_data.aggregate.name).as_data.name.text;
-        rt_put_name(pkg, a, cur_src, it.module, s, out);
-        out.push_str("<");
-        for i in 0..it.n {
-            if i != 0 {
-                out.push_str(", ");
-            }
-            let ai = unsafe it.args[i as usize];
-            if ai == TYPE_NONE || unsafe (*a).type_at(ai).kind == TypeKind::TYPE_ERROR {
-                // An argument inference never filled: name the declaration's own parameter;
-                // `UInt<BITS>` says WHAT is undetermined, where `UInt<?>` said nothing.
-                let gens = unsafe (*ma).at_const(it.decl).as_data.aggregate.generics;
-                if i as u32 < gens.len {
-                    let gid = unsafe (*ma).list(gens)[i as usize];
-                    let gn = unsafe (*ma).at_const(unsafe (*ma).at_const(gid).as_data.generic_param.name).as_data.name.text;
-                    rt_put_name(pkg, a, cur_src, it.module, gn, out);
-                } else {
-                    out.push_str("?");
-                }
-            } else {
-                render_type_str(pkg, a, cur_src, ai, out);
-            }
-        }
-        out.push_str(">");
-    } else if ty.kind == TypeKind::TYPE_FUNCTION {
-        render_fn_sig_str(pkg, a, cur_src, &ty, out);
-    } else if ty.kind == TypeKind::TYPE_DYN {
-        out.push_str(
-            if ty.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
-                "&mut dyn ";
-            } else if ty.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8 {
-                "&dyn ";
-            } else {
-                "Box<dyn ";
-            },
-        );
-        rt_dyn_str(pkg, a, cur_src, &ty, out);
-        if ty.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8 {
-            out.push_str(">");
-        }
-    } else if ty.kind == TypeKind::TYPE_CONST {
-        // A concrete const argument prints its VALUE: `UInt<64>`, not `UInt<?>`; the number is the
-        // whole point of the diagnostic.
-        out.push_str(ty.cval().to_string().as_str());
-    } else if ty.kind == TypeKind::TYPE_CONST_EXPR {
-        // Printed from the canonical form rather than as written: two of these failing to match is the
-        // one diagnostic this type produces, and the forms are what differ.
-        let l = unsafe (*a).const_lin_at(ty.as_data.inst);
-        let mut t = String::from_str("{");
-        // A divisor covers the whole sum: `{(N + 63) / 64}`.
-        let mut parts: u32 = pick(l.k.is_zero(), 0u32, 1u32);
-        for i in 0..l.n {
-            parts += pick(unsafe l.c[i as usize].is_zero(), 0u32, 1u32);
-        }
-        let paren = l.div_of() != i128::one() && parts > 1;
-        if paren {
-            t.push_str("(");
-        }
-        for i in 0..l.n {
-            let c = unsafe &l.c[i as usize];
-            if c.is_zero() {
-                continue;
-            }
-            let pd = unsafe l.p[i as usize];
-            let pa = rt_ast(pkg, a, pd.module);
-            let ns = unsafe (*pa).at_const(unsafe (*pa).at_const(pd.node).as_data.generic_param.name).as_data.name.text;
-            if t.len() > pick(paren, 2usize, 1usize) {
-                t.push_str(" + ");
-            }
-            if *c != i128::one() {
-                t.format_into("{}", *c);
-                t.push_str(" * ");
-            }
-            t.push_str(rt_src(pkg, a, cur_src, pd.module).slice(ns.start as usize, ns.end as usize));
-        }
-        if !l.k.is_zero() {
-            t.push_str(" + ");
-            t.format_into("{}", l.k);
-        }
-        if paren {
-            t.push_str(")");
-        }
-        if l.div_of() != i128::one() {
-            t.push_str(" / ");
-            t.format_into("{}", l.div_of());
-        }
-        t.push_str("}");
-        out.push_str(t.as_str());
-    } else if ty.kind == TypeKind::TYPE_FIELD_PROJECTION {
-        // The symbolic per-field type of a reflection loop: name it by what it projects, a field or
-        // (a `variants` or `payloads` loop's) a payload.
-        let pa = rt_ast(pkg, a, ty.module);
-        let it = unsafe (*pa).at_const(ty.as_data.proj.binder).as_data.for_stmt.iterable;
-        let cs = unsafe (*pa).at_const(unsafe (*pa).at_const(it).as_data.call.callee).as_data.name.text;
-        let cn = rt_src(pkg, a, cur_src, ty.module).slice(cs.start as usize, cs.end as usize);
-        out.push_str(pick(cn == "variants" || cn == "payloads", "payload of ", "field of "));
-        render_type_str(pkg, a, cur_src, ty.as_data.proj.owner, out);
-    } else {
-        out.push_str("?");
-    }
 }
 
 /// No type to check an operand against: none recorded (a `null`, an untyped node), or TYPE_ERROR,
@@ -16832,7 +16211,7 @@ extend<'a> TypeChecker<'a> {
         if self.is_send_iface(iface) {
             return self.tc_thread_marker(ty, false, depth);
         }
-        if self.iface_named(iface, "FnPtr") {
+        if is_ph(iface, self.ph_fnptr) {
             return unsafe (*self.package).fn_value_type(unsafe &*self.cur_ast(), ty);
         }
         if self.is_sync_iface(iface) {
@@ -17049,32 +16428,18 @@ extend<'a> TypeChecker<'a> {
     }
 
     const fn is_free_iface(self: &Self, tr: DefId) bool {
-        if tr.node == NODE_NONE {
-            return false;
-        }
-        let trn = unsafe (*self.mod_ast(tr.module)).at_const(tr.node);
-        return trn.kind == NodeKind::NODE_INTERFACE && span_is(
-            self.mod_src(tr.module),
-            unsafe (*self.mod_ast(tr.module)).at_const(trn.as_data.interface_def.name).as_data.name.text,
-            "Free",
-        );
+        return is_ph(tr, self.ph_free);
     }
+    // Is interface `tr` the prelude's interface `name`, by its declaration? For the checks that run
+    // rarely; a hot one keeps its handle (`ph_send`, ..).
     const fn iface_named(self: &Self, tr: DefId, name: str) bool {
-        if tr.node == NODE_NONE {
-            return false;
-        }
-        let trn = unsafe (*self.mod_ast(tr.module)).at_const(tr.node);
-        return trn.kind == NodeKind::NODE_INTERFACE && span_is(
-            self.mod_src(tr.module),
-            unsafe (*self.mod_ast(tr.module)).at_const(trn.as_data.interface_def.name).as_data.name.text,
-            name,
-        );
+        return unsafe (*self.package).is_prelude_item(tr, name);
     }
     const fn is_send_iface(self: &Self, tr: DefId) bool {
-        return self.iface_named(tr, "Send");
+        return is_ph(tr, self.ph_send);
     }
     const fn is_copy_iface(self: &Self, tr: DefId) bool {
-        return self.iface_named(tr, "Copy");
+        return is_ph(tr, self.ph_copy);
     }
     // A function pointer type, or a type parameter whose bounds reach `FnPtr`.
     fn tc_fn_ptr(self: &mut Self, t: TypeId) bool {
@@ -17195,7 +16560,7 @@ extend<'a> TypeChecker<'a> {
         return hit.node != NODE_NONE && unsafe (*self.cur_ast()).module == hit.mid && self.current_self == hit.node;
     }
     const fn is_sync_iface(self: &Self, tr: DefId) bool {
-        return self.iface_named(tr, "Sync");
+        return is_ph(tr, self.ph_sync);
     }
     // Is this aggregate the prelude `UnsafeCell`? See the `Sync` rule in `tc_thread_marker`.
     const fn is_unsafe_cell_decl(self: &Self, om: ModuleId, od: NodeId) bool {
@@ -19612,21 +18977,19 @@ extend<'a> TypeChecker<'a> {
                     y = *self.type_at(oty);
                 }
             }
-            let mut sk: i32 = 0;
-            if nk == NodeKind::NODE_INDEX {
-                sk = self.slice_kind(oty, null);
-                // A mutated sub-view of a view, an array or a prelude container is a `[]mut T`, as
-                // `index_range_mut` gives a user type's below: the node's type (its result) is
-                // switched here.
-                if unsafe (*a).at_const(unsafe (*a).at_const(node).as_data.index.index).kind == NodeKind::NODE_RANGE {
-                    let vt = self.tc_mut_view_type(oty, sk);
-                    if vt != TYPE_NONE {
-                        unsafe (*self.cur_ast()).set_type(node, vt);
-                    }
-                }
+            // A `SliceMut` writes through its pointer, as a `&mut` does: its element is writable
+            // through any binding of it (the `index_mut` call reborrows the view).
+            if nk == NodeKind::NODE_INDEX && self.slice_kind(oty, null) == 2 {
+                via_ref = true;
+                ref_mut = true;
             }
-            if sk != 0 {
-                return sk == 2;
+            // A mutated sub-view of an array is a `[]mut T`, as `index_range_mut` gives a view's or a
+            // container's below: the node's type (its result) is switched here.
+            if nk == NodeKind::NODE_INDEX && self.type_at(oty).kind == TypeKind::TYPE_ARRAY && unsafe (*a).at_const(
+                unsafe (*a).at_const(node).as_data.index.index,
+            ).kind == NodeKind::NODE_RANGE {
+                let vt = self.prelude_slice_type(self.type_at(oty).as_data.arr.elem, true);
+                unsafe (*self.cur_ast()).set_type(node, vt);
             }
             let ot = *self.type_at(oty);
             if nk == NodeKind::NODE_INDEX && ot.kind == TypeKind::TYPE_GENERIC {
@@ -19664,7 +19027,7 @@ extend<'a> TypeChecker<'a> {
                     return false;
                 }
                 let ix = unsafe (*a).at_const(node).as_data.index.index;
-                if unsafe (*a).at_const(ix).kind == NodeKind::NODE_RANGE && !self.tc_structural_index(oty) {
+                if unsafe (*a).at_const(ix).kind == NodeKind::NODE_RANGE {
                     // A mutated sub-view is `index_range_mut`'s: the recorded `index_range` and the
                     // node's type (its result) are switched here.
                     let rm = self.find_method_cstr(om, od, "index_range_mut");
@@ -19693,9 +19056,7 @@ extend<'a> TypeChecker<'a> {
                     return false;
                 }
                 // A mutated element is `index_mut`'s: the recorded `index` is switched here.
-                if !self.tc_structural_index(oty) {
-                    self.tc_record_index_method(node, oty, im, unsafe (*a).at_const(node).as_data.index.index);
-                }
+                self.tc_record_index_method(node, oty, im, unsafe (*a).at_const(node).as_data.index.index);
                 if via_ref {
                     return ref_mut;
                 }
@@ -19711,34 +19072,6 @@ extend<'a> TypeChecker<'a> {
         }
         return false;
     }
-    // The `[]mut T` a mutated range index of `oty` (`slice_kind` `sk`) yields where indexing is
-    // structural: a `[]mut T` view, an array, or a prelude container with `index_range_mut`.
-    // TYPE_NONE for every other type.
-    fn tc_mut_view_type(self: &mut Self, oty: TypeId, sk: i32) TypeId {
-        let mut elem = TYPE_NONE;
-        if sk == 2 {
-            let _ = self.slice_kind(oty, &mut elem);
-            return self.prelude_slice_type(elem, true);
-        }
-        let y = *self.type_at(oty);
-        if y.kind == TypeKind::TYPE_ARRAY {
-            return self.prelude_slice_type(y.as_data.arr.elem, true);
-        }
-        if sk != 0 || !self.tc_structural_index(oty) {
-            return TYPE_NONE;
-        }
-        let mut om: ModuleId = 0;
-        let mut od = NODE_NONE;
-        if !self.aggregate_decl(oty, &mut om, &mut od) {
-            return TYPE_NONE;
-        }
-        let rm = self.find_method_cstr(om, od, "index_range_mut");
-        if rm.node == NODE_NONE || !self.method_extend_bounds_hold(oty, rm) {
-            return TYPE_NONE;
-        }
-        return self.tc_method_ret(oty, rm);
-    }
-
     /// Syntactic place (lvalue) test; a path member (`E::x`) counts only when it names a 'static mut'.
     pub fn is_place(self: &Self, id: NodeId) bool {
         let node = unsafe (*self.cur_ast()).peel(id, false);
@@ -20687,14 +20020,16 @@ extend<'a> TypeChecker<'a> {
         };
         self.errors.emit_span(sp, format("'Copy' cannot be declared for '{}': {}", ty.as_str(), why));
     }
-    // `Send` and `Sync` are the two conformances the compiler cannot verify. Every other interface is checked
-    // against its requirements; these two are DERIVED structurally, and writing one by hand overrides that
-    // derivation: it asserts a synchronisation discipline living outside the type system (an `Arc`'s
-    // refcount, a `Mutex`'s lock, an atomic instruction). Nothing checks the claim, so the claim is marked:
-    // `unsafe extend` puts every such assertion one grep away from an audit.
+    // `Send`, `Sync` and `Zeroable` are the conformances the compiler cannot verify. Every other interface is
+    // checked against its requirements; `Send` and `Sync` are DERIVED structurally, and writing one by hand
+    // overrides that derivation: it asserts a synchronisation discipline living outside the type system (an
+    // `Arc`'s refcount, a `Mutex`'s lock, an atomic instruction); `Zeroable` asserts that a type's private
+    // fields hold no invariant at zero. Nothing checks the claim, so the claim is marked: `unsafe extend`
+    // puts every such assertion one grep away from an audit.
     fn check_marker_is_unsafe(self: &mut Self, id: NodeId, iface: DefId) {
         let send = self.is_send_iface(iface);
-        if !send && !self.is_sync_iface(iface) {
+        let zero = iface.module == self.ph_zeroable.mid && iface.node == self.ph_zeroable.node && iface.node != NODE_NONE;
+        if !send && !zero && !self.is_sync_iface(iface) {
             return;
         }
         if unsafe (*self.cur_ast()).at_const(id).as_data.extend_def.is_unsafe {
@@ -20704,6 +20039,8 @@ extend<'a> TypeChecker<'a> {
         let sp = unsafe (*self.cur_ast()).at_const(itype).span;
         let name = if send {
             "Send";
+        } else if zero {
+            "Zeroable";
         } else {
             "Sync";
         };
@@ -28321,7 +27658,7 @@ extend TypeChecker {
             unsafe (*da).at_const(decl).as_data.aggregate.members;
         };
         let fields = unsafe (*a).at_const(id).as_data.struct_initializer.fields;
-        let inside = m == self.cur_module() && decl == self.current_self || self.tc_zero_empty(m, decl);
+        let inside = m == self.cur_module() && decl == self.current_self || self.tc_zeroable(m, decl, ga, gn);
         for j in 0..members.len {
             let mid = unsafe (*da).list(members)[j as usize];
             let mn = unsafe (*da).at_const(mid);
@@ -28400,9 +27737,9 @@ extend TypeChecker {
         if dn.as_data.aggregate.is_union || m == self.ph_int.mid && decl == self.ph_int.node || m == self.ph_uint.mid && decl == self.ph_uint.node {
             return true;
         }
-        // The prelude views, containers, arrays and wide integers are empty or zero when zero: their
-        // private fields hold no other invariant.
-        let inside = m == self.cur_module() && decl == self.current_self || self.tc_zero_empty(m, decl);
+        // A type asserting `Zeroable` (std's views and containers) is empty when zero: its private
+        // fields hold no other invariant, and each field's type is still checked below.
+        let inside = m == self.cur_module() && decl == self.current_self || self.tc_zeroable(m, decl, &ga[0], gn);
         let members = dn.as_data.aggregate.members;
         for j in 0..members.len {
             let mid = unsafe (*self.mod_ast(m)).list(members)[j as usize];
@@ -28432,11 +27769,28 @@ extend TypeChecker {
         return variants.len != 0;
     }
 
-    const fn tc_zero_empty(self: &Self, m: ModuleId, d: NodeId) bool {
-        return d != NODE_NONE && (m == self.ph_str.mid && d == self.ph_str.node || m == self.ph_string.mid && d == self.ph_string.node || m == self.ph_vector.mid && d == self.ph_vector.node || m == self.ph_array.mid && d == self.ph_array.node || m == self.ph_map.mid && d == self.ph_map.node || m == self.ph_set.mid && d == self.ph_set.node || self.tc_is_view_decl(
+    // Does an `unsafe extend` of `Zeroable` apply to aggregate (m, d) with arguments `ga[0..gn]`: its
+    // private fields hold no invariant at zero, so an omitted one may be zero-filled where its type is
+    // valid as zero?
+    fn tc_zeroable(self: &mut Self, m: ModuleId, d: NodeId, ga: *const TypeId, gn: i32) bool {
+        let h = self.ph_zeroable;
+        if d == NODE_NONE || h.node == NODE_NONE {
+            return false;
+        }
+        let mut imod: ModuleId = 0;
+        let mut ea = Tys8 {};
+        let mut en: i32 = 0;
+        return self.tc_conform_ext(
             m,
             d,
-        ));
+            DefId { module: h.mid, node: h.node },
+            TYPE_NONE,
+            ga,
+            gn,
+            &mut imod,
+            &mut ea,
+            &mut en,
+        ) != NODE_NONE;
     }
 
     // Is `ty` an instance of aggregate `decl` of module `m`?
@@ -29087,25 +28441,6 @@ extend TypeChecker {
         );
     }
 
-    // Whether the lowering addresses an element of aggregate `ty` structurally: the prelude views
-    // (`str`, `Slice`, `SliceMut`, `String`, `Vector`) and `Array`. Every other aggregate indexes
-    // through its `index` or `index_mut` call.
-    fn tc_structural_index(self: &Self, ty: TypeId) bool {
-        let mut om: ModuleId = 0;
-        let mut od = NODE_NONE;
-        if !self.aggregate_decl(ty, &mut om, &mut od) {
-            return false;
-        }
-        let pk = unsafe &*self.package;
-        for name in ["str", "Slice", "SliceMut", "String", "Vector", "Array"] {
-            let h = pk.prelude_lookup(name, true);
-            if h.mid == om && h.node == od {
-                return true;
-            }
-        }
-        return false;
-    }
-
     // Record method `md` (`index` or `index_mut` of `recv`) as what index expression `id` calls,
     // with the extend arguments its instance solves.
     fn tc_record_index_method(self: &mut Self, id: NodeId, recv: TypeId, md: DefId, index_n: NodeId) {
@@ -29134,7 +28469,6 @@ extend TypeChecker {
         let idxn_kind = unsafe (*a).at_const(index_n).kind;
         if idxn_kind == NodeKind::NODE_RANGE {
             let mut elem = TYPE_NONE;
-            let mut selem: TypeId = TYPE_NONE;
             let mut user_result = TYPE_NONE;
             let mut user_call = false;
             if ot.kind == TypeKind::TYPE_ARRAY || ot.kind == TypeKind::TYPE_POINTER {
@@ -29142,8 +28476,6 @@ extend TypeChecker {
                     self.err_unsafe(unsafe (*a).at_const(obj_n).span, "slicing a raw pointer");
                 }
                 elem = ot.as_data.elem;
-            } else if self.slice_kind(obj, &mut selem) != 0 {
-                elem = selem;
             } else if ot.kind == TypeKind::TYPE_STRUCT || ot.kind == TypeKind::TYPE_INSTANCE {
                 let mut om: ModuleId = 0;
                 let mut od = NODE_NONE;
@@ -29180,16 +28512,13 @@ extend TypeChecker {
                         }
                         let rty = self.prelude_range_type(ut);
                         user_result = self.tc_method_ret(recv, md);
-                        // Every type but the prelude views calls `index_range` with the bounds packed
-                        // into a `Range<usize>` (the range node's type); a missing end is the `len`
-                        // call recorded on the range node.
-                        if !self.tc_structural_index(recv) {
-                            user_call = true;
-                            unsafe (*a).set_type(index_n, rty);
-                            self.tc_record_index_method(id, recv, md, index_n);
-                            if ln.node != NODE_NONE {
-                                self.tc_record_index_method(index_n, recv, ln, NODE_NONE);
-                            }
+                        // `index_range` takes the bounds packed into a `Range<usize>` (the range
+                        // node's type); a missing end is the `len` call recorded on the range node.
+                        user_call = true;
+                        unsafe (*a).set_type(index_n, rty);
+                        self.tc_record_index_method(id, recv, md, index_n);
+                        if ln.node != NODE_NONE {
+                            self.tc_record_index_method(index_n, recv, ln, NODE_NONE);
                         }
                     }
                 }
@@ -29267,11 +28596,31 @@ extend TypeChecker {
             }
             return sresult;
         }
-        let idx = self.check_expr(index_n);
+        // A struct's `index` method, found first: its index parameter types the index expression, as
+        // an argument's parameter types an argument (`v[if c { 1; } else { 0; }]`).
+        let mut imd = DefId { module: 0, node: NODE_NONE };
+        let mut want = TYPE_NONE;
+        if !untyped(obj) && (ot.kind == TypeKind::TYPE_STRUCT || ot.kind == TypeKind::TYPE_INSTANCE) {
+            let mut om: ModuleId = 0;
+            let mut od = NODE_NONE;
+            let sp = unsafe (*a).at_const(obj_n).span;
+            if self.aggregate_decl(self.strip(obj), &mut om, &mut od) {
+                let md = self.find_method_cstr(om, od, "index");
+                if md.node == NODE_NONE {
+                    let ty = self.type_str(self.strip(obj));
+                    self.errors.emit_span(sp, format("'{}' has no 'index' method for '[]'", ty.as_str()));
+                } else if !self.method_extend_bounds_hold(self.strip(obj), md) {
+                    self.err_method_extend_bounds(sp, self.strip(obj), md);
+                } else {
+                    imd = md;
+                    want = self.tc_method_param(self.strip(obj), md, 1);
+                }
+            }
+        }
+        let idx = self.check_expr_w(index_n, want);
         let mut overloaded = false;
         let mut result = TYPE_NONE;
         if !untyped(obj) {
-            let mut selem: TypeId = TYPE_NONE;
             if ot.kind == TypeKind::TYPE_SIMD {
                 // A lane index is checked: a constant one here (per instance against a symbolic
                 // lane count), any other one at run time.
@@ -29320,33 +28669,16 @@ extend TypeChecker {
                     }
                 }
                 result = ot.as_data.elem;
-            } else if self.slice_kind(obj, &mut selem) != 0 {
-                result = selem;
             } else if ot.kind == TypeKind::TYPE_STRUCT || ot.kind == TypeKind::TYPE_INSTANCE {
                 overloaded = true;
-                let mut om: ModuleId = 0;
-                let mut od = NODE_NONE;
-                let sp = unsafe (*a).at_const(obj_n).span;
-                if self.aggregate_decl(self.strip(obj), &mut om, &mut od) {
-                    let md = self.find_method_cstr(om, od, "index");
-                    if md.node == NODE_NONE {
-                        let ty = self.type_str(self.strip(obj));
-                        self.errors.emit_span(sp, format("'{}' has no 'index' method for '[]'", ty.as_str()));
-                    } else if !self.method_extend_bounds_hold(self.strip(obj), md) {
-                        self.err_method_extend_bounds(sp, self.strip(obj), md);
-                        result = TYPE_NONE;
-                    } else {
-                        let p1 = self.tc_method_param(self.strip(obj), md, 1);
-                        if !self.operand_fits_param(p1, index_n) {
-                            self.err_mismatch(index_n, p1);
-                        }
-                        if !self.tc_structural_index(self.strip(obj)) {
-                            self.tc_record_index_method(id, self.strip(obj), md, index_n);
-                        }
-                        result = self.tc_method_ret(self.strip(obj), md);
-                        if result != TYPE_NONE && self.type_at(result).kind == TypeKind::TYPE_REFERENCE {
-                            result = self.type_at(result).as_data.elem;
-                        }
+                if imd.node != NODE_NONE {
+                    if !self.operand_fits_param(want, index_n) {
+                        self.err_mismatch(index_n, want);
+                    }
+                    self.tc_record_index_method(id, self.strip(obj), imd, index_n);
+                    result = self.tc_method_ret(self.strip(obj), imd);
+                    if result != TYPE_NONE && self.type_at(result).kind == TypeKind::TYPE_REFERENCE {
+                        result = self.type_at(result).as_data.elem;
                     }
                 }
             } else if ot.kind == TypeKind::TYPE_GENERIC {

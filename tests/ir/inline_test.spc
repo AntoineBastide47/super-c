@@ -399,7 +399,8 @@ fn main(args: Vector<str>) i32 {
     q.push(n);
     q.push(n);
     let k = args.len() - 1;
-    return take(p.sum(), w * 3) + q[k + 1] - 5;
+    let qs: []i32 = q[0..q.len()];
+    return take(p.sum(), w * 3) + qs[k + 1] - 5;
 }
 )";
 
@@ -417,7 +418,8 @@ fn arguments_read_in_place() {
     // `i`, an immutable local read once, folds into the index too.
     expect_user_c("an index folds", IN_PLACE, "v[__sc_add_usize(__sc_sub_usize(", true);
     expect_user_c("a call argument folds", IN_PLACE, "__sc_mul_i32(w, 3LL))", true);
-    expect_user_c("a check operand folds", IN_PLACE, "__sc_bounds(__sc_add_usize(k, 1ULL)", true);
+    // A view's element check is its `index` method's guard, over the index computed once in place.
+    expect_user_c("a check operand folds", IN_PLACE, "= __sc_add_usize(k, 1ULL);", true);
     expect_inlined("in-place arguments", IN_PLACE, 0);
 }
 

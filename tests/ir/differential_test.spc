@@ -62,7 +62,8 @@ fn same_output_with_bounds_checks_forced() {
     // The strided loop reads v[12] of 9: the run prints the full loop's sum, then traps.
     let r = h::diff_run(&b, "");
     assert(r.out.as_str() == "36\n", "the full loop's sum prints");
-    assert(r.err.contains("super-c: index out of bounds"), "the strided loop traps");
+    // A Vector's element check is its `index` method's guard: std's panic names the type.
+    assert(r.err.contains("panic: Vector<") && r.err.contains("[i]: index out of bounds"), "the strided loop traps");
 }
 
 // An add, a wrapping add, a signed shift, a float division, a saturating cast and a const fn call: one

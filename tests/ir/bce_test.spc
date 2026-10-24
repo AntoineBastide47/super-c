@@ -15,10 +15,75 @@ import typechecker::typechecker as tc;
 import ir::interp as iri;
 import ir::lower as irl;
 
+// How many times `needle` occurs in `code`.
+fn occurrences(code: str, needle: str) usize {
+    let mut n: usize = 0;
+    let mut rest = code;
+    loop {
+        let at = rest.find(needle);
+        if at < 0 {
+            return n;
+        }
+        n += 1;
+        rest = rest.slice(at as usize + needle.len(), rest.len());
+    }
+}
+
+// How many checks of the kind `kind` names a snippet's C spells; any other `kind` counts as itself. A
+// structural view's check calls the runtime helper `kind` names; a std container's check is the panic
+// guard of its `index` method, inlined (its message, counted once per panic site by the literal's
+// first spelling: a `str` literal spells its text twice) or called. "__sc_bounds(": an element check;
+// "__sc_bounds_group(": a group, a coalesced check or a widened guard (`__sc_fits`), whose one panic
+// message is the group's, not an element check's; "__sc_range(": a range check.
+fn check_count(code: str, kind: str) usize {
+    if kind == "__sc_bounds_group(" {
+        return occurrences(code, kind) + occurrences(code, "__sc_fits(");
+    }
+    if kind == "__sc_range(" {
+        return occurrences(code, kind) + occurrences(code, "[a..b]: range out of bounds\",") + occurrences(
+            code,
+            "__index_range(",
+        );
+    }
+    if kind == "__sc_bounds(" {
+        let n = occurrences(code, kind) + occurrences(code, "[i]: index out of bounds\",") + occurrences(
+            code,
+            "__index(",
+        );
+        let g = occurrences(code, "__sc_fits(");
+        if n < g {
+            return 0;
+        }
+        return n - g;
+    }
+    return occurrences(code, kind);
+}
+
+// Does the snippet's C spell a check of kind `kind` (`check_count`)?
+fn spelled(c: &h::CompiledC, kind: str) bool {
+    return c.code != null && check_count(unsafe str::from_cstr(c.code), kind) != 0;
+}
+
+// The snippet's C function `def` opens spells a check of kind `kind` (`check_count`) when `present`, and
+// none otherwise. A program's own container keeps its `index` method, guard included, in the snippet's
+// unit: only the function under test counts.
+fn expect_in_fn(label: str, src: str, def: str, kind: str, present: bool) {
+    let c = h::compile_c_user(src);
+    assert(c.ok(), label);
+    let body = h::c_fn(unsafe str::from_cstr(c.code), def);
+    if check_count(body, kind) != 0 != present {
+        eprintln("{}", body);
+    }
+    assert(check_count(body, kind) != 0 == present, label);
+}
+
 fn expect_c_user_absent(label: str, src: str, needle: str) {
     let c = h::compile_c_user(src);
     assert(c.ok(), label);
-    assert(!c.code_has(needle), label);
+    if spelled(&c, needle) {
+        eprintln("{}", unsafe str::from_cstr(c.code));
+    }
+    assert(!spelled(&c, needle), label);
 }
 
 // Program `s` as a batch module: its one `fn main(argv: Vector<str>) i32` renamed `case_main`, public
@@ -95,13 +160,13 @@ fn safety_range_checks(b: &mut h::ExitBatch) {
     b.add_trap(
         "inclusive end == len panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let hi = argv.len() + 3; // == 4\n    let t: []i32 = s[0..=hi];\n    return t.len() as i32;\n}\n",
-        "index out of bounds",
+        "range out of bounds",
     );
     // inclusive range with end == usize::MAX: `end + 1` must NOT wrap past the check.
     b.add_trap(
         "inclusive end == usize::MAX panics",
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 4];\n    let s: []i32 = a[0..4];\n    let hi = 0xFFFFFFFFFFFFFFFFu64 as usize - 1 + argv.len(); // == usize::MAX\n    let t: []i32 = s[0..=hi];\n    return t.len() as i32;\n}\n",
-        "index out of bounds",
+        "range out of bounds",
     );
     // A range whose length subtraction would underflow without the ordered check.
     b.add_trap(
@@ -163,14 +228,26 @@ fn removal_canonical_loops() {
         "fn all(s: []i32) []i32 { return s[0..s.len()]; }\n",
         "__sc_range(",
     );
+    // A byte, cast up, indexes 256 elements in bounds.
+    expect_in_fn(
+        "a byte index into 256 elements",
+        "pub struct T { pub c: Array<u8, 256> }\n@noinline\npub fn at(t: &T, b: u8) u8 {\n    return t.c[b as usize];\n}\n",
+        "at(",
+        "__sc_bounds(",
+        false,
+    );
 }
 
 @test
 fn removal_keeps_unproved() {
     // An arbitrary dynamic index keeps exactly its check.
-    h::expect_c("unproved index keeps its check", "fn get(s: []i32, i: usize) i32 { return s[i]; }\n", "__sc_bounds(");
+    expect_c_user_present(
+        "unproved index keeps its check",
+        "fn get(s: []i32, i: usize) i32 { return s[i]; }\n",
+        "__sc_bounds(",
+    );
     // A mutation between the guard and the access keeps the check.
-    h::expect_c(
+    expect_c_user_present(
         "mutating call between guard and access keeps the check",
         "fn get(v: &mut Vector<i32>, i: usize) i32 {\n    if i < v.len() {\n        v.push(0);\n        return (*v)[i];\n    }\n    return 0;\n}\n",
         "__sc_bounds(",
@@ -183,7 +260,7 @@ fn removal_keeps_unproved() {
             "struct W<'a> { pub s: []'a i32 }\nfn poke() {}\nfn get(w: &mut W, i: usize) i32 {\n    if i < w.s.len() {\n        let f: fn() = poke;\n        f();\n        return w.s[i];\n    }\n    return 0;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(3);\n    let mut w = W { s: v[0..1] };\n    return get(&mut w, argv.len() - 1) - 3;\n}\n",
         );
         assert(c.ok(), "fn-value call snippet compiles");
-        assert(c.code_has("__sc_bounds("), "a fn-value call between guard and access keeps the check");
+        assert(spelled(&c, "__sc_bounds("), "a fn-value call between guard and access keeps the check");
         expect_c_user_absent(
             "a fn-value call cannot reach a local view",
             "fn poke() {}\nfn get(s: []i32, i: usize) i32 {\n    if i < s.len() {\n        let f: fn() = poke;\n        f();\n        return s[i];\n    }\n    return 0;\n}\n",
@@ -191,7 +268,7 @@ fn removal_keeps_unproved() {
         );
     }
     // A dynamic range keeps its range check.
-    h::expect_c(
+    expect_c_user_present(
         "dynamic range keeps its check",
         "fn cut(s: []i32, a: usize, b: usize) []i32 { return s[a..b]; }\n",
         "__sc_range(",
@@ -261,7 +338,10 @@ fn verifier_rejects_malformed_checks() {
 fn expect_c_user_present(label: str, src: str, needle: str) {
     let c = h::compile_c_user(src);
     assert(c.ok(), label);
-    assert(c.code_has(needle), label);
+    if !spelled(&c, needle) {
+        eprintln("{}", unsafe str::from_cstr(c.code));
+    }
+    assert(spelled(&c, needle), label);
 }
 
 fn affine_guard_removes_check(b: &mut h::ExitBatch) {
@@ -287,6 +367,70 @@ fn coalescing_panic_parity() {
     // The guard restores the variable when the test ends; the spawned build inherits it.
     let _env2 = cli::set_env("SC_BCE", "0");
     h::expect_trap("disabled pass panics identically", SRC, "index out of bounds");
+}
+
+// A program's own container: its `index` checks its own length field, as std's do.
+const BUF: str = M"(struct Buf {
+    pub ptr: *const i32,
+    pub n: usize,
+}
+extend Buf as Index<i32, []i32> {
+    pub fn index(self: &Self, i: usize) &i32 {
+        if i >= self.n {
+            panic("Buf[i]: index out of bounds");
+        }
+        return &unsafe self.ptr[i];
+    }
+    pub fn index_range(self: &Self, r: Range<usize>) []i32 {
+        return unsafe Slice::<i32> { ptr: self.ptr + r.start, len: r.end - r.start };
+    }
+}
+)";
+
+@test
+fn guard_widening_groups_any_container() {
+    // Three guards over one root and one length, with pure code between: one group test at the first,
+    // and the member guards fold, for std's Vector and for the program's own container alike.
+    let tri_user = format("{}fn tri(b: &Buf, j: usize) i32 {{\n    return b[j] + b[j + 1] + b[j + 2];\n}}\n", BUF);
+    expect_in_fn("a user container's guards widen", tri_user.as_str(), "int32_t tri(", "__sc_bounds_group(", true);
+    expect_in_fn("no member guard of a user container", tri_user.as_str(), "int32_t tri(", "__sc_bounds(", false);
+    let tri_vec = "fn tri(v: &Vector<i32>, j: usize) i32 {\n    return v[j] + v[j + 1] + v[j + 2];\n}\n";
+    expect_c_user_present("a Vector's guards widen", tri_vec, "__sc_bounds_group(");
+    expect_c_user_absent("no member guard of a Vector", tri_vec, "__sc_bounds(");
+    // A loop bounded by the container's own length field proves its guard.
+    let sum_user = format(
+        "{}fn sum(b: &Buf) i32 {{\n    let mut s = 0;\n    for i in 0..b.n {{\n        s += b[i];\n    }}\n    return s;\n}}\n",
+        BUF,
+    );
+    expect_in_fn("a user container's loop guard folds", sum_user.as_str(), "int32_t sum(", "__sc_bounds(", false);
+}
+
+@test
+fn guard_widening_keeps_its_panic() {
+    // The widened test fails with the guards' own panic, and only where a member would.
+    let SRC = format(
+        "{}fn tri(b: &Buf, j: usize) i32 {{\n    return b[j] + b[j + 1] + b[j + 2];\n}}\nfn main(argv: Vector<str>) i32 {{\n    let mut v = Vector::<i32>::new();\n    for i in 0..64 {{\n        v.push(i);\n    }}\n    let b = Buf {{ ptr: v.as_ptr(), n: v.len() }};\n    return tri(&b, argv.len() + 60) - 186;\n}}\n",
+        BUF,
+    );
+    h::expect_exit("the last member in range", SRC.as_str(), 0);
+    let BAD = SRC.replace("argv.len() + 60", "argv.len() + 61");
+    h::expect_trap("the last member out of range", BAD.as_str(), "panic: Buf[i]: index out of bounds");
+}
+
+@test
+fn guard_widening_stops_at_effects_and_other_panics() {
+    // A store between the guards: each keeps its own guard.
+    let store = format(
+        "{}fn f(b: &Buf, j: usize, out: &mut i32) i32 {{\n    let x = b[j];\n    *out = x;\n    return x + b[j + 1];\n}}\n",
+        BUF,
+    );
+    expect_in_fn("no group across a store", store.as_str(), "int32_t f(", "__sc_bounds_group(", false);
+    expect_in_fn("each guard stays across a store", store.as_str(), "int32_t f(", "__sc_bounds(", true);
+    // Guards written by hand widen when they panic alike, and not when the panics differ.
+    let same = "fn g(s: []i32, j: usize) i32 {\n    if j >= s.len() {\n        panic(\"out\");\n    }\n    if j + 1 >= s.len() {\n        panic(\"out\");\n    }\n    return 0;\n}\n";
+    expect_c_user_present("one panic: the guards widen", same, "__sc_fits(");
+    let differ = "fn g(s: []i32, j: usize) i32 {\n    if j >= s.len() {\n        panic(\"first\");\n    }\n    if j + 1 >= s.len() {\n        panic(\"second\");\n    }\n    return 0;\n}\n";
+    expect_c_user_absent("two panics: no widening", differ, "__sc_fits(");
 }
 
 fn coalescing_blocked_by_mutation(b: &mut h::ExitBatch) {
@@ -369,7 +513,7 @@ fn find_fn(p: &loader::Package, name: str) NodeId {
 
 @test
 fn verifier_rejects_unchecked_projection() {
-    let p = typed_package("pub fn f(v: &Vector<i32>, i: usize) i32 {\n    return v[i];\n}\n");
+    let p = typed_package("pub fn f(v: Simd<i32, 4>, i: usize) i32 {\n    return v[i];\n}\n");
     let node = find_fn(&p, "f");
     assert(node != NODE_NONE, "f found");
     let u = (p.modules.len() - 1) as ModuleId;
@@ -397,7 +541,7 @@ fn verifier_rejects_unchecked_projection() {
 @test
 fn verifier_rejects_unvalidated_slice_end() {
     let p = typed_package(
-        "pub fn g(v: &Vector<i32>, a2: usize, b2: usize) usize {\n    let t: []i32 = v[a2..b2];\n    return t.len();\n}\n",
+        "pub fn g(v: [i32; 4], a2: usize, b2: usize) usize {\n    let t: []i32 = unsafe v[a2..b2];\n    return t.len();\n}\n",
     );
     let node = find_fn(&p, "g");
     assert(node != NODE_NONE, "g found");
@@ -505,7 +649,7 @@ fn sig_mut_call_kills() {
         "@noinline\nfn grow(v: &mut Vector<i32>) {\n    v.push(9);\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let k = argv.len() - 1;\n    if k < v.len() {\n        grow(&mut v);\n        return v[k] - 1;\n    }\n    return 1;\n}\n",
     );
     assert(c.ok(), "mut-call snippet compiles");
-    assert(c.code_has("__sc_bounds("), "a &mut call kills the guard fact");
+    assert(spelled(&c, "__sc_bounds("), "a &mut call kills the guard fact");
 }
 
 @test
@@ -516,7 +660,7 @@ fn sig_raw_arg_kills() {
         "@noinline\nfn taker(p: *mut Vector<i32>) i32 {\n    return unsafe (*p).len() as i32;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let q = &mut v as *mut Vector<i32>;\n    let k = argv.len() - 1;\n    if k < v.len() {\n        let t = taker(q);\n        return v[k] - t;\n    }\n    return 1;\n}\n",
     );
     assert(c.ok(), "raw-arg snippet compiles");
-    assert(c.code_has("__sc_bounds("), "a raw-pointer argument keeps the check");
+    assert(spelled(&c, "__sc_bounds("), "a raw-pointer argument keeps the check");
 }
 
 @test
@@ -526,7 +670,7 @@ fn sig_static_kills() {
         "static mut G: str = \"abcd\";\n@noinline\nfn shrink() {\n    unsafe {\n        G = \"a\";\n    }\n}\nfn main(argv: Vector<str>) i32 {\n    let k = argv.len() + 1;\n    if k < unsafe G.len() {\n        shrink();\n        return unsafe G[k] as i32 - 99;\n    }\n    return 1;\n}\n",
     );
     assert(c.ok(), "static snippet compiles");
-    assert(c.code_has("__sc_bounds("), "a static collection keeps its check across calls");
+    assert(spelled(&c, "__sc_bounds("), "a static collection keeps its check across calls");
 }
 
 @test
@@ -537,7 +681,7 @@ fn sig_escaped_ref_kills() {
         "struct Slot<'a> {\n    pub m: &'a mut Vector<i32>,\n}\n@noinline\nfn touch() i32 {\n    return 1;\n}\n@noinline\nfn use_slot(s: &Slot) i32 {\n    return s.m.len() as i32;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let k = argv.len() - 1;\n    let mut out = 0;\n    {\n        let s = Slot { m: &mut v };\n        out += use_slot(&s);\n    }\n    if k < v.len() {\n        let t = touch();\n        return v[k] + out - t - 2;\n    }\n    return 1;\n}\n",
     );
     assert(c.ok(), "escaped-ref snippet compiles");
-    assert(c.code_has("__sc_bounds("), "an escaped &mut keeps the check across later calls");
+    assert(spelled(&c, "__sc_bounds("), "an escaped &mut keeps the check across later calls");
 }
 
 @test
@@ -825,23 +969,23 @@ fn main(argv: Vector<str>) i32 {
 )",
         "index out of bounds",
     );
-    b.add_trap(
+    // The object `x[0]` is read before the index operand empties `x`: its element is still there.
+    b.add(
         "view reassigned by an index operand",
-        M"(fn pick(mut x: [][]u32, y: [][]u32, go: bool) u32 {
+        M"(fn pick(mut x: [][]u32, go: bool) u32 {
     if !go {
         return 0;
     }
+    let y = x[1..1];
     return x[0][switch 0 { _ => { x = y; 0; } }];
 }
 fn main(argv: Vector<str>) i32 {
     let a0: []u32 = [7];
     let x: [][]u32 = [a0];
-    let back: [[]u32; 1] = [a0];
-    let y: [][]u32 = back[1..1];
-    return pick(x, y, argv.len() < 5) as i32;
+    return pick(x, argv.len() < 5) as i32;
 }
 )",
-        "index out of bounds",
+        7,
     );
 }
 

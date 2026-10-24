@@ -663,8 +663,9 @@ fn taint(b: &ir::CoreBody, ow: &mut bfx::Owner) Taint {
                 grew = true;
             }
             if b.place_has_deref(st.place) {
-                // Stored through a reference: into a borrowed local the taint cannot name.
-                if mark_borrowed(&mut tn, ow, b) {
+                // Stored through a reference: into a borrowed local the taint cannot name (a value
+                // that holds no borrow stores none).
+                if ow.carries(b.module, d.ty) && mark_borrowed(&mut tn, ow, b) {
                     grew = true;
                 }
             } else if mark(&mut tn, ow, b, d.base, src) {
@@ -703,6 +704,8 @@ fn call_taint(b: &ir::CoreBody, ow: &mut bfx::Owner, tn: &mut Taint, t: &ir::Ter
     let mut grew = false;
     let mut given: u32 = 0;
     let mut src = ir::IR_NONE;
+    // The taint the result may hold: an implicit borrow reaches it only through the signature.
+    let mut rsrc = ir::IR_NONE;
     let ps = callee_params(ow, t);
     if t.a != ir::IR_NONE {
         let s = operand_taint(b, tn, t.a);
@@ -727,12 +730,14 @@ fn call_taint(b: &ir::CoreBody, ow: &mut bfx::Owner, tn: &mut Taint, t: &ir::Ter
                 }
             }
         }
+        let mut implicit = false;
         if op.kind != ir::OP_CONST && pk == TypeKind::TYPE_REFERENCE {
             let ok = ow.ast_of(b.module).type_at(op.ty).kind;
             if ok != TypeKind::TYPE_REFERENCE && ok != TypeKind::TYPE_POINTER {
                 let r = place_root(b, tn, op.data);
                 if r != ir::IR_NONE {
                     s = r;
+                    implicit = true;
                     if r != LOCAL_UNKNOWN && !tn.addr[r as usize] {
                         tn.addr.set(r as usize, true);
                         grew = true;
@@ -745,6 +750,9 @@ fn call_taint(b: &ir::CoreBody, ow: &mut bfx::Owner, tn: &mut Taint, t: &ir::Ter
         }
         given += 1;
         src = s;
+        if !implicit || autoref_returned(ow, t, k) {
+            rsrc = s;
+        }
         if pk == TypeKind::TYPE_POINTER && tn.raw == ir::IR_NONE {
             tn.raw = s;
             grew = true;
@@ -755,7 +763,7 @@ fn call_taint(b: &ir::CoreBody, ow: &mut bfx::Owner, tn: &mut Taint, t: &ir::Ter
     }
     for k in 0..t.dests_len {
         let dp = *b.places.at(b.dest_pool[(t.dests_start + k) as usize] as usize);
-        if mark(tn, ow, b, dp.base, src) {
+        if rsrc != ir::IR_NONE && mark(tn, ow, b, dp.base, rsrc) {
             grew = true;
         }
     }
@@ -763,6 +771,145 @@ fn call_taint(b: &ir::CoreBody, ow: &mut bfx::Owner, tn: &mut Taint, t: &ir::Ter
         grew = true;
     }
     return grew;
+}
+
+// Does call `t` return what its implicit borrow of argument `k` borrows: the reference parameter's
+// lifetime appears in a result (an elided one: when that parameter can be the elision source), or a
+// declared outlives bound may widen it there?
+fn autoref_returned(ow: &mut bfx::Owner, t: &ir::Terminator, k: u32) bool {
+    let ps = callee_params(ow, t);
+    if k >= ps.len {
+        return true;
+    }
+    let rel = ow.callee_rel(t.callee);
+    let cm = t.callee.module;
+    let ca = ow.ast_of(cm);
+    let pn = ca.at_const(ca.at_const(unsafe ca.list(ps)[k as usize]).as_data.parameter.ty);
+    if !pn.is_ref_type() {
+        return true;
+    }
+    let tk = ow.lt_tok(cm, pn.as_data.indirect_type.lifetime);
+    if tk != 0 && (rel & 0xFFFF) != 0 {
+        return true;
+    }
+    // An elided result lifetime is the `self` reference's when there is one.
+    let p0 = ca.at_const(unsafe ca.list(ps)[0]);
+    let self_ref = ca.at_const(p0.as_data.parameter.ty).is_ref_type() && ow.span_text_is(
+        cm,
+        ca.at_const(p0.as_data.parameter.name).as_data.name.text,
+        "self",
+    );
+    let rets = ca.at_const(t.callee.node).as_data.function.returns;
+    for r in 0..rets.len {
+        let rn = ca.slot_type_node(unsafe ca.list(rets)[r as usize]);
+        if tk != 0 && node_names_lt(ow, cm, rn, tk, 0) {
+            return true;
+        }
+        if tk == 0 && (k == 0 || !self_ref) && node_elides(ow, cm, rn, 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Does type node `tn` of module `m` name lifetime token `tk`? `Self` may name any.
+fn node_names_lt(ow: &bfx::Owner, m: ModuleId, tn: NodeId, tk: u64, depth: i32) bool {
+    if tn == NODE_NONE || depth > 6 {
+        return false;
+    }
+    let a = ow.ast_of(m);
+    let n = a.at_const(tn);
+    if n.has_lt_slot() {
+        return ow.lt_tok(m, n.as_data.indirect_type.lifetime) == tk || node_names_lt(
+            ow,
+            m,
+            n.as_data.indirect_type.ty,
+            tk,
+            depth + 1,
+        );
+    }
+    if n.kind == NodeKind::NODE_ARRAY_TYPE {
+        return node_names_lt(ow, m, n.as_data.array_type.element, tk, depth + 1);
+    }
+    let args = if n.kind == NodeKind::NODE_TYPE_PATH {
+        n.as_data.type_path.args;
+    } else if n.kind == NodeKind::NODE_TUPLE_TYPE {
+        n.as_data.array_literal.elements;
+    } else {
+        return n.kind != NodeKind::NODE_POINTER_TYPE;
+    };
+    if n.kind == NodeKind::NODE_TYPE_PATH && n.as_data.type_path.parts.len == 1 && ow.span_text_is(
+        m,
+        a.at_const(unsafe a.list(n.as_data.type_path.parts)[0]).as_data.name.text,
+        "Self",
+    ) {
+        return true;
+    }
+    for i in 0..args.len {
+        let aid = unsafe a.list(args)[i as usize];
+        if a.at_const(aid).kind == NodeKind::NODE_LIFETIME {
+            if ow.lt_tok(m, aid) == tk {
+                return true;
+            }
+        } else if node_names_lt(ow, m, aid, tk, depth + 1) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Does type node `tn` of module `m` hold an elided lifetime position? `Self` may hold one.
+fn node_elides(ow: &bfx::Owner, m: ModuleId, tn: NodeId, depth: i32) bool {
+    if tn == NODE_NONE || depth > 6 {
+        return false;
+    }
+    let a = ow.ast_of(m);
+    let n = a.at_const(tn);
+    if n.has_lt_slot() {
+        return ow.lt_tok(m, n.as_data.indirect_type.lifetime) == 0 || node_elides(
+            ow,
+            m,
+            n.as_data.indirect_type.ty,
+            depth + 1,
+        );
+    }
+    if n.kind == NodeKind::NODE_ARRAY_TYPE {
+        return node_elides(ow, m, n.as_data.array_type.element, depth + 1);
+    }
+    if n.kind == NodeKind::NODE_TUPLE_TYPE {
+        let es = n.as_data.array_literal.elements;
+        for i in 0..es.len {
+            if node_elides(ow, m, unsafe a.list(es)[i as usize], depth + 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if n.kind != NodeKind::NODE_TYPE_PATH {
+        return n.kind != NodeKind::NODE_POINTER_TYPE;
+    }
+    if n.as_data.type_path.parts.len == 1 && ow.span_text_is(
+        m,
+        a.at_const(unsafe a.list(n.as_data.type_path.parts)[0]).as_data.name.text,
+        "Self",
+    ) {
+        return true;
+    }
+    let args = n.as_data.type_path.args;
+    let mut named: u32 = 0;
+    for i in 0..args.len {
+        let aid = unsafe a.list(args)[i as usize];
+        if a.at_const(aid).kind == NodeKind::NODE_LIFETIME {
+            if ow.lt_tok(m, aid) == 0 {
+                return true;
+            }
+            named += 1;
+        } else if node_elides(ow, m, aid, depth + 1) {
+            return true;
+        }
+    }
+    let d = a.path_def(tn);
+    return d.node != NODE_NONE && ow.ast_of(d.module).lifetimes_of(d.node).len > named;
 }
 
 // Replace each call block in `sites` with the parameter stores and a jump to the start of the body.

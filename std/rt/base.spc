@@ -206,6 +206,18 @@ fn trap_str(p: *const u8, n: usize) {
     die();
 }
 
+// `panic: <the n bytes at p><the m bytes at q>` on stderr, then abort: `panic_parts` of std's core.
+@export("__sc_panic_str2")
+@noreturn
+@cold
+fn trap_str2(p: *const u8, n: usize, q: *const u8, m: usize) {
+    trap_head("panic: ");
+    put_bytes(p, n);
+    put_bytes(q, m);
+    put("\n");
+    die();
+}
+
 // A failed `assert`: `head`, the `n` bytes at `m` and `tail` on stderr, then abort.
 @export("__sc_assert_fail")
 @noreturn

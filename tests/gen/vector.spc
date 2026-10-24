@@ -1220,7 +1220,7 @@ pub fn helpers() String {
     );
     s.push_str("const fn hmix(h: u64, x: u64) u64 {\n    return (h ^ x).wrapping_mul(0x100000001B3);\n}\n");
     let names: []str = LANE_NAMES;
-    for k in 0..10 {
+    for k in 0..names.len() {
         let t = names[k];
         if k < 8 {
             s.format_into(

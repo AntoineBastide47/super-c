@@ -19,12 +19,12 @@ const CDEF2: str = "struct H { pub v: i32 }\nextend H { fn geti(self: &H) &i32 {
 const SINK: str = "struct Own { pub id: i32 }\nextend Own as Free { fn free(self: &mut Own) { } }\nfn sink(v: Own) i32 { return v.id; }\n";
 
 // Two borrow-place overlap rules: whole `p` (index 0) overlaps everything; `p.a` (1) and `p.b` (2) are disjoint.
-const fn overlap(i: i32, j: i32) bool {
+const fn overlap(i: usize, j: usize) bool {
     return i == j || i == 0 || j == 0;
 }
 
 // An i32-valued use of reference binding `name` that borrows place `pi`: `name.a` (whole, auto-deref) or `*name`.
-fn use_ref(name: str, pi: i32) String {
+fn use_ref(name: str, pi: usize) String {
     if pi == 0 {
         return format("{}.a", name);
     }
@@ -70,10 +70,10 @@ fn case_pre(pre: str, body: str, label: str, ok: bool) {
 fn aliasing() {
     let kinds: []str = ["", "mut "];
     let places: []str = ["p", "p.a", "p.b"];
-    for k1 in 0..2 {
-        for k2 in 0..2 {
-            for p1 in 0..3 {
-                for p2 in 0..3 {
+    for k1 in 0..kinds.len() {
+        for k2 in 0..kinds.len() {
+            for p1 in 0..places.len() {
+                for p2 in 0..places.len() {
                     let src = format(
                         "{}fn main() i32 {{ let mut p = P {{ a: 1, b: 2 }};\n  let b1 = &{}{};\n  let b2 = &{}{};\n  let keep = {} + {}; return keep; }}\n",
                         PRE,
@@ -98,9 +98,9 @@ fn aliasing() {
 fn use_while_borrowed() {
     let kinds: []str = ["", "mut "];
     let places: []str = ["p", "p.a", "p.b"];
-    for k in 0..2 {
-        for p1 in 0..3 {
-            for p2 in 0..3 {
+    for k in 0..kinds.len() {
+        for p1 in 0..places.len() {
+            for p2 in 0..places.len() {
                 let src = format(
                     "{}fn main() i32 {{ let mut p = P {{ a: 1, b: 2 }};\n  let r = &{}{};\n  let y = {};\n  let keep = {}; return keep; }}\n",
                     PRE,
@@ -121,9 +121,9 @@ fn use_while_borrowed() {
 fn nll() {
     let kinds: []str = ["", "mut "];
     let places: []str = ["p", "p.a", "p.b"];
-    for k in 0..2 {
-        for p1 in 0..3 {
-            for p2 in 0..3 {
+    for k in 0..kinds.len() {
+        for p1 in 0..places.len() {
+            for p2 in 0..places.len() {
                 let src = format(
                     "{}fn main() i32 {{ let mut p = P {{ a: 1, b: 2 }};\n  let r = &{}{};\n  let used = {};\n  let y = {}; return used; }}\n",
                     PRE,
@@ -250,6 +250,26 @@ fn closed_gaps() {
         "mutate origin while reborrow live",
         "fn main() i32 { let mut x = 5; let r = &mut x; let s = &*r; x = 9; return *s; }\n",
         false,
+    );
+    check_case(
+        "reassign a reference while a reborrow through it is live",
+        "fn main() i32 { let x = 5; let y = 6; let mut r = &x; let s = &*r; r = &y; return *s + *r; }\n",
+        true,
+    );
+    check_case(
+        "reassign a &mut while a reborrow through it is live",
+        "fn main() i32 { let mut x = 5; let mut y = 6; let mut r = &mut x; let s = &mut *r; r = &mut y; *s = 1; *r = 2; return x + y; }\n",
+        true,
+    );
+    check_case(
+        "assign the referent while a reborrow through a reassigned reference is live",
+        "fn main() i32 { let mut x = 5; let y = 6; let mut r = &x; let s = &*r; r = &y; x = 9; return *s + *r; }\n",
+        false,
+    );
+    check_case(
+        "an overloaded index result borrowed across loop iterations",
+        "struct N { pub v: Vector<String> }\nextend N as Index<String, []String> {\n    pub fn index(self: &Self, i: usize) &String { return &self.v[i]; }\n    pub fn index_range(self: &Self, r: Range<usize>) []String { return self.v[r.start..r.end]; }\n}\nfn main() i32 { let mut n = N { v: Vector::<String>::new() }; n.v.push(String::from_str(\"a\")); let mut ks = Vector::<str>::new(); for i in 0..n.v.len() { ks.push(n[i].as_str()); } return ks[0].len() as i32 - 1; }\n",
+        true,
     );
     check_case(
         "assign arg while call-result ref live",
@@ -580,10 +600,10 @@ fn third_audit() {
 fn aliasing3() {
     let kinds: []str = ["", "mut "];
     let places: []str = ["p", "p.a", "p.b"];
-    let triples: [][i32; 3] = [[1, 2, 1], [2, 1, 2], [1, 2, 0], [0, 1, 2], [1, 1, 2], [2, 2, 2]];
-    for k1 in 0..2 {
-        for k2 in 0..2 {
-            for k3 in 0..2 {
+    let triples: [][usize; 3] = [[1, 2, 1], [2, 1, 2], [1, 2, 0], [0, 1, 2], [1, 1, 2], [2, 2, 2]];
+    for k1 in 0..kinds.len() {
+        for k2 in 0..kinds.len() {
+            for k3 in 0..kinds.len() {
                 for t in 0..triples.len() {
                     let p1 = triples[t][0];
                     let p2 = triples[t][1];
@@ -1429,5 +1449,63 @@ fn closure_results_through_bounds() {
         "a generic returning the closure value keeps its captures borrowed",
         "fn keep<'a, F: fn() &'a i32>(f: F) F { return f; }\nfn main() i32 { let x = 1; let mut v = Vector::<&i32>::new(); v.push(&x); let g = keep(|| v[0]); v.push(&x); return *g() - 1; }\n",
         "cannot borrow this value as mutable while it is already borrowed as immutable",
+    );
+}
+
+// A value read through a reference or a view's element carries the lifetimes behind it into a
+// `'static` parameter; a `'static` element of a view of a local array leaves the array behind.
+@test
+fn static_reads_through_references_and_views() {
+    let need = "fn need(x: &'static i32) {\n    let _ = x;\n}\n";
+    let msg = "lifetime mismatch: this argument's lifetime is not declared to outlive 'static";
+    h::expect_err_msg(
+        "a reference read through a reference",
+        format("{}fn f<'a>(r: &&'a i32) {{\n    need(*r);\n}}\nfn main() i32 {{\n    return 0;\n}}\n", need).as_str(),
+        msg,
+    );
+    h::expect_err_msg(
+        "a reference read through two references",
+        format("{}fn f<'a>(r: &&&'a i32) {{\n    need(**r);\n}}\nfn main() i32 {{\n    return 0;\n}}\n", need).as_str(),
+        msg,
+    );
+    h::expect_err_msg(
+        "a reference element of a view",
+        format("{}fn f<'a>(s: []&'a i32) {{\n    need(s[0]);\n}}\nfn main() i32 {{\n    return 0;\n}}\n", need).as_str(),
+        msg,
+    );
+    h::expect_ok(
+        "a 'static element of a view of a local array",
+        "fn pick(c: u8) str<'static> {\n    let cmp: []str = [\"a\", \"b\"];\n    return cmp[c as usize];\n}\nfn main() i32 {\n    return pick(1).len() as i32 - 1;\n}\n",
+    );
+}
+
+// A closure argument passes its captures out of a call through its results, and through a
+// parameter of its own that can take a store (a `&mut`, a raw pointer, a shared reference to a
+// cell); a counting closure over references stores nothing.
+@test
+fn closure_arguments_store_through_results_and_writable_parameters() {
+    let msg = "borrowed value does not live long enough: it is stored into caller-visible data whose lifetime it is not declared to outlive";
+    h::expect_ok(
+        "a counting predicate over a parameter's vector of references",
+        "pub fn f(v: &mut Vector<&i64>) u64 {\n    let mut c: u64 = 0;\n    v.retain(fn(x: &&i64) bool {\n        c += 1;\n        return **x > 0;\n    });\n    return c;\n}\nfn main() i32 {\n    return 0;\n}\n",
+    );
+    h::expect_ok(
+        "a counting comparator over a view of references",
+        "pub fn f(s: []mut &i64) u64 {\n    let mut c: u64 = 0;\n    s.sort_by(fn(x: &&i64, y: &&i64) i32 {\n        c += 1;\n        return (**x).cmp(*y);\n    });\n    return c;\n}\nfn main() i32 {\n    return 0;\n}\n",
+    );
+    h::expect_err_msg(
+        "a closure writes a capture through its &mut parameter",
+        "fn apply<T, F: fn(&mut T)>(x: &mut T, f: F) {\n    f(x);\n}\npub fn f(v: &mut &i64) {\n    let local: i64 = 1;\n    apply(v, fn(p: &mut &i64) {\n        *p = &local;\n    });\n}\nfn main() i32 {\n    return 0;\n}\n",
+        msg,
+    );
+    h::expect_err_msg(
+        "a closure writes a capture through a shared parameter's cell",
+        "pub struct C<T> {\n    v: UnsafeCell<T>,\n}\nextend<T> C<T> {\n    pub fn set(self: &C<T>, x: T) {\n        unsafe *self.v.get() = x;\n    }\n}\nfn apply<T, F: fn(&T)>(x: &T, f: F) {\n    f(x);\n}\npub fn f(c: &C<&i64>) {\n    let local: i64 = 1;\n    apply(c, fn(p: &C<&i64>) {\n        p.set(&local);\n    });\n}\nfn main() i32 {\n    return 0;\n}\n",
+        msg,
+    );
+    h::expect_err_msg(
+        "the callee stores a closure's result",
+        "fn fill<T, F: fn() T>(s: []mut T, f: F) {\n    s[0] = f();\n}\npub fn f(s: []mut &i64) {\n    let local: i64 = 1;\n    let r = &local;\n    fill(s, fn() &i64 {\n        return r;\n    });\n}\nfn main() i32 {\n    return 0;\n}\n",
+        msg,
     );
 }

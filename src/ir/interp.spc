@@ -21,6 +21,7 @@ import lexer::token as tok;
 import lexer::token_type as *;
 import utils::persist as *;
 import utils::errors as diag;
+import typechecker::render as rnd;
 
 pub const IV_NONE: u8 = 0; // not evaluable (unsupported construct, trap, or budget)
 pub const IV_INT: u8 = 1;
@@ -4298,10 +4299,18 @@ extend Interp {
         } else if self.span_is(fm, nm, "abort") {
             self.it_trap(IT_TRAP_PANIC, "abort reached at compile time");
             return false;
-        } else if self.span_is(fm, nm, "__sc_panic_str") || self.span_is(fm, nm, "__sc_panic") {
-            // `panic(msg)` traps with its message, as the run time prints it.
+        } else if self.span_is(fm, nm, "__sc_panic_str") || self.span_is(fm, nm, "__sc_panic_str2") || self.span_is(
+            fm,
+            nm,
+            "__sc_panic",
+        ) {
+            // `panic(msg)` and `panic_parts(head, tail)` trap with their message, as the run time prints it.
             let mut text = Vector::<u8>::new();
-            if nargs == 2 && self.ptr_bytes(*args.at(0), *args.at(1), &mut text) {
+            if nargs == 2 && self.ptr_bytes(*args.at(0), *args.at(1), &mut text) || nargs == 4 && self.ptr_bytes(
+                *args.at(0),
+                *args.at(1),
+                &mut text,
+            ) && self.ptr_bytes(*args.at(2), *args.at(3), &mut text) {
                 let mut msg = String::new();
                 msg.push_bytes(text[0..text.len()]);
                 self.it_trap_text(IT_TRAP_PANIC, msg);
@@ -4680,25 +4689,21 @@ extend Interp {
         return -1;
     }
 
-    // Classify decl (dm, dn) by name as an indexable view the way cemit routes subscripts: 1 =
-    // ptr/len view (str, Slice, SliceMut, Vector), 2 = Array, 0 = not a view.
+    // Classify decl (dm, dn) as an indexable view the way cemit routes subscripts: 1 = ptr/len view
+    // (std's str, Slice, SliceMut, Vector), 2 = std's Array, 0 = not a view. A user type of one of
+    // these names is not a view.
     const fn view_kind(self: &Self, dm: ModuleId, dn: NodeId) u8 {
-        let a = unsafe &*self.p().module_ast_const(dm);
-        if a.at_const(dn).kind != NodeKind::NODE_STRUCT || a.at_const(dn).as_data.aggregate.is_tuple {
-            return 0;
+        for name in ["str", "Slice", "SliceMut", "Vector"] {
+            if self.is_prelude_decl(dm, dn, name) {
+                return 1;
+            }
         }
-        let nm = a.at_const(a.at_const(dn).as_data.aggregate.name).as_data.name.text;
-        if self.span_is(dm, nm, "str") || self.span_is(dm, nm, "Slice") || self.span_is(dm, nm, "SliceMut") || self.span_is(
-            dm,
-            nm,
-            "Vector",
-        ) {
-            return 1;
-        }
-        if self.span_is(dm, nm, "Array") {
-            return 2;
-        }
-        return 0;
+        return pick(self.is_prelude_decl(dm, dn, "Array"), 2u8, 0u8);
+    }
+
+    // Is decl (dm, dn) the prelude's type `name`?
+    const fn is_prelude_decl(self: &Self, dm: ModuleId, dn: NodeId, name: str) bool {
+        return self.p().is_prelude_item(DefId { module: dm, node: dn }, name);
     }
 
     // The view shape and the `ptr`/`len` field ordinals of decl (dm, dn), memoized: subscripts,
@@ -5440,12 +5445,17 @@ extend Interp {
             }
             bytes.push(c);
         }
-        // the str struct decl comes from the literal's own type
+        return self.str_object(m, v.ty, &mut bytes);
+    }
+
+    // A `str` value of type `ty` (of module `m`) over a static copy of `bytes`.
+    fn str_object(self: &mut Self, m: ModuleId, ty: TypeId, bytes: &mut Vector<u8>) IVal {
+        // the str struct decl comes from the value's own type
         let a = unsafe &*self.p().module_ast_const(m);
         let mut dm: ModuleId = 0;
         let mut dn = NODE_NONE;
-        if v.ty != TYPE_NONE {
-            let y = *a.type_at(v.ty);
+        if ty != TYPE_NONE {
+            let y = *a.type_at(ty);
             if y.kind == TypeKind::TYPE_STRUCT {
                 dm = y.module;
                 dn = y.as_data.decl;
@@ -5490,7 +5500,7 @@ extend Interp {
         }
         unsafe (*self.obj_ptr(so)).slots.set(ptr_i as usize, iv_ptr(0, TYPE_NONE, block, 0));
         unsafe (*self.obj_ptr(so)).slots.set(len_i as usize, iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), nb));
-        return IVal { kind: IV_OBJ, tm: m, ty: v.ty, i: so, f: 0.0 };
+        return IVal { kind: IV_OBJ, tm: m, ty: ty, i: so, f: 0.0 };
     }
 
     // A fixed array flowing into a slice-typed destination wraps into a view over its own
@@ -5973,8 +5983,23 @@ extend Interp {
         return Interp::bits_lane(Interp::lane_bits(v, sb, pw), db, m, t, pw);
     }
 
+    // Scalar `v` read from or written to place `pid`, typed by the place: the PLACE's checked type
+    // is authoritative, as a literal may carry its own (pre-adoption) type, and width-sensitive ops
+    // and pointer views of the stored slot derive widths from it.
+    fn place_typed(self: &Self, b: &ir::CoreBody, pid: ir::PlaceId, v: IVal) IVal {
+        if v.kind != IV_INT && v.kind != IV_FLOAT {
+            return v;
+        }
+        let pty = b.places.at(pid as usize).ty;
+        let mut pb = BuiltinType::BT_COUNT;
+        if pty == TYPE_NONE || !self.bt_of(b.module, pty, &mut pb) || pb == BuiltinType::BT_COUNT {
+            return v;
+        }
+        return IVal { kind: v.kind, tm: b.module, ty: pty, i: v.i, f: v.f };
+    }
+
     fn write_place(self: &mut Self, b: &ir::CoreBody, env: u32, pid: ir::PlaceId, v0: IVal) {
-        let v = self.maybe_slice_wrap(b.module, b.places.at(pid as usize).ty, v0);
+        let v = self.place_typed(b, pid, self.maybe_slice_wrap(b.module, b.places.at(pid as usize).ty, v0));
         let mut obj: u32 = 0;
         let mut slot: u32 = 0;
         self.pun_ok = true;
@@ -6055,20 +6080,8 @@ extend Interp {
     fn operand(self: &mut Self, b: &ir::CoreBody, env: u32, opid: ir::OperandId) IVal {
         let op = *b.operands.at(opid as usize);
         if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
-            let mut v = self.read_place(b, env, op.data);
-            // the PLACE's checked type is authoritative for a scalar read: a stored literal may
-            // carry its own (pre-adoption) type, and width-sensitive ops derive widths from it
-            if v.kind == IV_INT || v.kind == IV_FLOAT {
-                let pty = b.places.at(op.data as usize).ty;
-                if pty != TYPE_NONE {
-                    let mut pb = BuiltinType::BT_COUNT;
-                    if self.bt_of(b.module, pty, &mut pb) && pb != BuiltinType::BT_COUNT {
-                        v.tm = b.module;
-                        v.ty = pty;
-                    }
-                }
-            }
-            return v;
+            let v = self.read_place(b, env, op.data);
+            return self.place_typed(b, op.data, v);
         }
         if op.kind != ir::OP_CONST {
             return self.bail();
@@ -6466,6 +6479,19 @@ extend Interp {
             if rv.c == ir::IN_LIKELY || rv.c == ir::IN_UNLIKELY {
                 return self.operand(b, env, b.oper_pool[rv.a as usize]);
             }
+            if rv.c == ir::IN_GROUP_FITS {
+                let iv = self.operand(b, env, b.oper_pool[rv.a as usize]);
+                let lv = self.operand(b, env, b.oper_pool[(rv.a + 1) as usize]);
+                let wv = self.operand(b, env, b.oper_pool[(rv.a + 2) as usize]);
+                if iv.kind != IV_INT || lv.kind != IV_INT || wv.kind != IV_INT {
+                    return self.bail();
+                }
+                return iv_bool(
+                    b.module,
+                    rv.target,
+                    iv.i as u64 <= lv.i as u64 && wv.i as u64 <= lv.i as u64 - iv.i as u64,
+                );
+            }
             if rv.c == ir::IN_RETURN_ADDRESS {
                 self.it_trap(IT_TRAP_UNSUPPORTED, "a return address has no compile-time value");
                 return none();
@@ -6580,6 +6606,25 @@ extend Interp {
                 out.tm = b.module;
                 out.ty = rv.target;
                 return out;
+            }
+            if rv.c == ir::IN_TYPE_NAME {
+                let mut tm2: ModuleId = 0;
+                let mut tt2 = TYPE_NONE;
+                if !self.rty(b.module, rv.b, &mut tm2, &mut tt2) {
+                    return self.bail();
+                }
+                let mut nm = String::new();
+                rnd::render_qualified_name(self.p(), self.p().module_ast_const(tm2), tt2, &mut nm);
+                let mut bytes = Vector::<u8>::with_capacity(nm.len() + 1);
+                for k in 0..nm.len() {
+                    bytes.push(nm.as_str().byte_at(k));
+                }
+                // a name is static data: evaluation-wide storage
+                let l0 = self.lvl;
+                self.lvl = 0;
+                let v = self.str_object(b.module, rv.target, &mut bytes);
+                self.lvl = l0;
+                return v;
             }
             if rv.c == ir::IN_TYPE_INFO {
                 // rv.b = T; the result type names the TypeInfo decl
@@ -8676,13 +8721,7 @@ extend Interp {
 
     // Whether interface `iface` is the prelude's interface named `name`.
     const fn rt_iface_is(self: &Self, iface: DefId, name: str) bool {
-        let ia = unsafe &*self.p().module_ast_const(iface.module);
-        let n = ia.at_const(iface.node);
-        return n.kind == NodeKind::NODE_INTERFACE && self.p().modules.at(iface.module as usize).prelude && self.span_is(
-            iface.module,
-            ia.at_const(n.as_data.interface_def.name).as_data.name.text,
-            name,
-        );
+        return self.p().is_prelude_item(iface, name);
     }
 
     // The member types of concrete aggregate `(m, t)` (fields, or every variant's payload), each a
@@ -10265,15 +10304,15 @@ extend Interp {
             fm,
             nm,
             "abort",
-        ) || self.span_is(fm, nm, "__sc_panic_str") || self.span_is(fm, nm, "__sc_panic") || self.span_is(
+        ) || self.span_is(fm, nm, "__sc_panic_str") || self.span_is(fm, nm, "__sc_panic_str2") || self.span_is(
             fm,
             nm,
-            "sc_int_overflow",
-        ) || self.span_is(fm, nm, "sc_int_div_zero") || self.span_is(fm, nm, "sc_int_div_overflow") || self.span_is(
+            "__sc_panic",
+        ) || self.span_is(fm, nm, "sc_int_overflow") || self.span_is(fm, nm, "sc_int_div_zero") || self.span_is(
             fm,
             nm,
-            "sc_has_i128",
-        ) || self.bits_name(fm, nm) || self.wrap_name(fm, nm) {
+            "sc_int_div_overflow",
+        ) || self.span_is(fm, nm, "sc_has_i128") || self.bits_name(fm, nm) || self.wrap_name(fm, nm) {
             return true;
         }
         let mut f32suf = false;
@@ -12013,6 +12052,16 @@ extend Interp {
             iv_int(0, Ast::builtin(BuiltinType::BT_USIZE), alen as i64),
         );
         unsafe (*self.obj_ptr(to)).slots.set(i_name as usize, nmv);
+        let i_qual = self.ti_findf(tim, tin, "qualified_name");
+        if i_qual >= 0 {
+            let mut qn = String::new();
+            rnd::render_qualified_name(self.p(), self.p().module_ast_const(tm), tt, &mut qn);
+            let qv = self.ti_str(strm, strn, tim, sty, qn.as_str());
+            if qv.kind != IV_OBJ {
+                return none();
+            }
+            unsafe (*self.obj_ptr(to)).slots.set(i_qual as usize, qv);
+        }
         unsafe (*self.obj_ptr(to)).slots.set(i_kind as usize, iv_int(tim, kty, tag));
         unsafe (*self.obj_ptr(to)).slots.set(
             i_size as usize,

@@ -105,6 +105,11 @@ pub struct CmpBind {
     pub le: bool, // true: a <= b, false: a < b
     pub my_v: u32,
     pub ok: bool,
+    // 0: the comparison. Else the binding of `IN_GROUP_FITS(a, b, w)`: true means `a + k < b` for
+    // every k < w; false means nothing.
+    pub w: i64,
+    pub ao: u32, // a comparison's operands for `a` and `b` (IR_NONE for a group)
+    pub bo: u32,
 }
 // `l = IN_CHUNK(i, e)` at version `my_v`: `l <= e`, so a branch fact `x < l` (or `x <= l`) also
 // holds for `e`, whose key and length place are captured here. A strip-mined loop's body learns
@@ -139,6 +144,8 @@ const LREADS_MAX: usize = 16;
 pub struct Bce {
     pub fx: fx::Facts,
     pub lenof: Vector<LenBind>,
+    pub glp: LenBind, // a guard proof's length operand read in place: its place identity
+    pub reads: Vector<u32>, // per local of the body: the operands that read it whole (`local_reads`; empty until asked)
     pub cmpof: Vector<CmpBind>,
     pub remof: Vector<RemBind>,
     pub alof: Vector<AlBind>,
@@ -164,6 +171,7 @@ pub struct Bce {
     pub limited: bool,
     pub off: bool, // SC_BCE=0
     pub no_fold: bool, // SC_BCE_DISABLE rule switches
+    pub no_widen: bool,
     pub no_sig: bool,
     pub no_int: bool,
     // Coalescing-lookahead scratch (per try_coalesce call; kept for capacity). `cwritten[l] ==
@@ -175,6 +183,9 @@ pub struct Bce {
     pub la_off: Vector<i64>,
     pub ll_dest: Vector<u32>,
     pub ll_pl: Vector<u32>,
+    // Widening-lookahead scratch: the window's references (`rf_dest[i] = &rf_pl[i]`).
+    pub rf_dest: Vector<u32>,
+    pub rf_pl: Vector<u32>,
 }
 
 // The successor a two-way branch on a bool takes when the bool is `v`, or IR_NONE for another shape
@@ -220,6 +231,8 @@ extend Bce {
         return Bce {
             fx: fx::Facts::new(d.contains("sig")),
             lenof: Vector::<LenBind>::with_capacity(fx::TABLE_MIN),
+            glp: lenbind_none(),
+            reads: Vector::<u32>::new(),
             cmpof: Vector::<CmpBind>::with_capacity(fx::TABLE_MIN),
             remof: Vector::<RemBind>::with_capacity(fx::TABLE_MIN),
             alof: Vector::<AlBind>::with_capacity(fx::TABLE_MIN),
@@ -240,6 +253,7 @@ extend Bce {
             limited: false,
             off: stdlib::env_is("SC_BCE", "0"),
             no_fold: d.contains("fold"),
+            no_widen: d.contains("widen"),
             no_sig: d.contains("sig"),
             no_int: d.contains("int"),
             cwritten: Vector::<u32>::with_capacity(fx::TABLE_MIN),
@@ -248,6 +262,8 @@ extend Bce {
             la_off: Vector::<i64>::new(),
             ll_dest: Vector::<u32>::new(),
             ll_pl: Vector::<u32>::new(),
+            rf_dest: Vector::<u32>::new(),
+            rf_pl: Vector::<u32>::new(),
         };
     }
 
@@ -317,9 +333,10 @@ extend Bce {
     }
 
     /// A length-place identity for a comparison operand: a still-current length local (behind
-    /// copies), a read of a prelude view's `len` field in place, or a direct `[r, deref, .len]` read
-    /// of a prelude view whose base resolves through a current reference binding -- stamped with
-    /// the CURRENT generations, because the read happens here.
+    /// copies), a read of a prelude view's `len` field in place, a direct `[r, deref, .len]` read
+    /// of a prelude view whose base resolves through a current reference binding, or a read of any
+    /// other integer field (a user container's length) -- stamped with the CURRENT generations,
+    /// because the read happens here.
     fn oper_len_lp(self: &mut Self, b: &mut ir::CoreBody, opid: u32) LenBind {
         let op = *b.operands.at(opid as usize);
         if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
@@ -339,7 +356,12 @@ extend Bce {
             b.projections.at((p.proj_start + p.proj_len - 2) as usize).ty;
         };
         if !self.fx.is_prelude_field(b, vt, last.sub, "len") {
-            return lenbind_none();
+            // The field place itself names the value: its generations end the identity at every
+            // write that can reach it.
+            if !self.int_ty(b, last.ty) {
+                return lenbind_none();
+            }
+            return self.len_capture(b, op.data, 0);
         }
         if p.proj_len != 2 || b.projections.at(p.proj_start as usize).kind != ir::PJ_DEREF {
             // A `len` field read in place of a view (a spliced callee's `len()` reads its receiver's
@@ -373,6 +395,26 @@ extend Bce {
         if !ik.is_const && !ik.is_local {
             return false;
         }
+        // Zero is at most any unsigned value.
+        if need_le && ik.is_const && ik.c == 0 && lk.is_local && lk.off == 0 {
+            let t = b.locals.at(lk.l as usize).ty;
+            if t != TYPE_NONE {
+                let y = *(unsafe &*(&*self.fx.pkg).module_ast_const(b.module)).type_at(t);
+                if y.kind == TypeKind::TYPE_BUILTIN && bt_is_unsigned(y.as_data.builtin) {
+                    return true;
+                }
+            }
+        }
+        // A value is at most itself: the same value, or a read of the same length place.
+        if need_le && ik.is_local && ik.off == 0 {
+            if lk.is_local && lk.l == ik.l && lk.v == ik.v && lk.off == 0 {
+                return true;
+            }
+            let ilp = self.len_place_of(ik.l);
+            if ilp.ok && l_lp.ok && self.lp_same(b, &ilp, l_lp) {
+                return true;
+            }
+        }
         for i in 0..self.facts.len() {
             let f = *self.facts.at(i);
             if f.kind != 0 && !need_le {
@@ -403,7 +445,8 @@ extend Bce {
 
     /// The panic-guard shape: from `blk0`, through at most four effect-free goto hops, every path
     /// ends in a trap (an unreachable terminator or a direct `@noreturn` call). Statements on
-    /// the way may only be storage markers or pure whole-local RV_USE/RV_REF assigns.
+    /// the way may only be storage markers or pure whole-local RV_USE/RV_REF assigns and
+    /// qualified type names (a message naming a type).
     fn doomed_panic(self: &Self, b: &ir::CoreBody, blk0: u32) bool {
         let mut cur = blk0;
         let mut guard = 0;
@@ -421,8 +464,8 @@ extend Bce {
                 if b.places.at(s.place as usize).proj_len != 0 {
                     return false; // a memory write is a visible effect
                 }
-                let k = b.rvalues.at(s.rvalue as usize).kind;
-                if k != ir::RV_USE && k != ir::RV_REF {
+                let rv = b.rvalues.at(s.rvalue as usize);
+                if rv.kind != ir::RV_USE && rv.kind != ir::RV_REF && !(rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_TYPE_NAME) {
                     return false;
                 }
             }
@@ -538,6 +581,13 @@ extend Bce {
                 return true;
             }
         }
+        // a length read in place (an inlined guard's `self.len`): its place identity
+        if !lk.is_local && !lk.is_const && self.glp.ok && f.lp_ok {
+            let flp = fact_lp(f);
+            if self.lp_same(b, &self.glp, &flp) {
+                return true;
+            }
+        }
         return false;
     }
 
@@ -566,9 +616,15 @@ extend Bce {
     /// Is local `l` of an integer type? A float comparison's false edge gives no fact: a NaN makes
     /// both `a < b` and `b <= a` false.
     const fn int_local(self: &Self, b: &ir::CoreBody, l: u32) bool {
-        let t = b.locals.at(l as usize).ty;
+        return self.int_ty(b, b.locals.at(l as usize).ty);
+    }
+
+    const fn int_ty(self: &Self, b: &ir::CoreBody, t: TypeId) bool {
+        if t == TYPE_NONE {
+            return false;
+        }
         let y = *(unsafe &*(&*self.fx.pkg).module_ast_const(b.module)).type_at(t);
-        return t != TYPE_NONE && y.kind == TypeKind::TYPE_BUILTIN && bt_int_width(y.as_data.builtin, false) != 0;
+        return y.kind == TypeKind::TYPE_BUILTIN && bt_int_width(y.as_data.builtin, false) != 0;
     }
 
     /// Prove `index < length` for one IN_BOUNDS site. Returns true when removable; fills the
@@ -586,6 +642,9 @@ extend Bce {
         if !ik.is_const && !ik.is_local {
             *reason = BR_UNKNOWN_INDEX;
             return false;
+        }
+        if lk.is_const && self.narrow_below(b, &ik, lk.c) {
+            return true;
         }
         for i in 0..self.facts.len() {
             let f = *self.facts.at(i);
@@ -631,6 +690,29 @@ extend Bce {
             *reason = BR_WIDENED;
         }
         return false;
+    }
+
+    /// Is index `ik` an unsigned value of fewer bits cast up, whole, so that it stays below the
+    /// constant length `len` (a `u8` index into 256 elements)?
+    fn narrow_below(self: &Self, b: &ir::CoreBody, ik: &fx::VKey, len: i64) bool {
+        if !ik.is_local || ik.off != 0 || ik.l as usize >= self.fx.ndef.len() || self.fx.ndef[ik.l as usize] != 1 {
+            return false;
+        }
+        let rv = *b.rvalues.at(b.statements.at(self.fx.def1[ik.l as usize] as usize).rvalue as usize);
+        if rv.kind != ir::RV_CAST {
+            return false;
+        }
+        let o = *b.operands.at(rv.a as usize);
+        if o.ty == TYPE_NONE {
+            return false;
+        }
+        let y = *(unsafe &*(&*self.fx.pkg).module_ast_const(b.module)).type_at(o.ty);
+        if y.kind != TypeKind::TYPE_BUILTIN {
+            return false;
+        }
+        let bt = y.as_data.builtin;
+        let w = bt_int_width(bt, false);
+        return (bt == BuiltinType::BT_U8 || bt == BuiltinType::BT_U16 || bt == BuiltinType::BT_U32) && w < 63 && 1i64 << w as i64 <= len;
     }
 
     /// Prove `start <= len && w <= len - start` for the group check of a vector access: its last lane
@@ -888,16 +970,7 @@ extend Bce {
     /// panic. On a hit the CURRENT check is rewritten in place to IN_BOUNDS_GROUP covering the
     /// widest offset span (one stronger check at the first site; the members then prove against
     /// the per-offset facts recorded here). Returns the number of later member checks covered.
-    fn try_coalesce(
-        self: &mut Self,
-        b: &mut ir::CoreBody,
-        bb: &ir::BasicBlock,
-        si: u32,
-        rid: usize,
-        iop: u32,
-        lop: u32,
-        sp: tok::Span,
-    ) u32 {
+    fn try_coalesce(self: &mut Self, b: &mut ir::CoreBody, bb: &ir::BasicBlock, si: u32, rid: usize, iop: u32, lop: u32) u32 {
         let ik = self.vkey(b, iop);
         if !ik.is_local {
             return 0;
@@ -1088,7 +1161,13 @@ extend Bce {
         let w = maxoff - ik.off + 1;
         let ut = b.rvalues.at(rid).target;
         b.constants.push(
-            ir::Constant { kind: ir::CK_INT, ty: ut, val: w, raw: sp, item: DefId { module: 0, node: NODE_NONE } },
+            ir::Constant {
+                kind: ir::CK_INT,
+                ty: ut,
+                val: w,
+                raw: tok::Span::empty(),
+                item: DefId { module: 0, node: NODE_NONE },
+            },
         );
         b.operands.push(ir::Operand { kind: ir::OP_CONST, data: b.constants.len() as u32 - 1, ty: ut });
         let wop = b.operands.len() as u32 - 1;
@@ -1107,9 +1186,688 @@ extend Bce {
         }
         return members;
     }
+
+    // ---- guard widening ------------------------------------------------------------------------
+
+    // The block a panic-guard path from `blk0` ends in (the `doomed_panic` walk), or IR_NONE.
+    const fn doomed_end(self: &Self, b: &ir::CoreBody, blk0: u32) u32 {
+        let mut cur = blk0;
+        for _h in 0..4 {
+            let t = &b.blocks.at(cur as usize).term;
+            if t.kind != ir::TM_GOTO {
+                return cur;
+            }
+            cur = t.t0;
+        }
+        return ir::IR_NONE;
+    }
+
+    // The value operand `opid` names on the panic-guard path from `blk0`: a constant (its id), or the
+    // qualified-name rvalue the path last assigned its whole local (its id, `is_rv` set). IR_NONE for
+    // anything else.
+    const fn path_value(self: &Self, b: &ir::CoreBody, blk0: u32, opid: u32, is_rv: &mut bool) u32 {
+        *is_rv = false;
+        let op = *b.operands.at(opid as usize);
+        if op.kind == ir::OP_CONST {
+            return op.data;
+        }
+        if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
+            return ir::IR_NONE;
+        }
+        let x = self.fx.whole_local(b, op.data);
+        if x == ir::IR_NONE {
+            return ir::IR_NONE;
+        }
+        let mut found = ir::IR_NONE;
+        let mut cur = blk0;
+        for _h in 0..4 {
+            let bb = b.blocks.at(cur as usize);
+            for si in 0..bb.stmt_len {
+                let s = *b.statements.at((bb.stmt_start + si) as usize);
+                if s.kind != ir::ST_ASSIGN || self.fx.whole_local(b, s.place) != x {
+                    continue;
+                }
+                let rv = *b.rvalues.at(s.rvalue as usize);
+                found = ir::IR_NONE;
+                *is_rv = false;
+                if rv.kind == ir::RV_USE && b.operands.at(rv.a as usize).kind == ir::OP_CONST {
+                    found = b.operands.at(rv.a as usize).data;
+                } else if rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_TYPE_NAME {
+                    found = s.rvalue;
+                    *is_rv = true;
+                }
+            }
+            if bb.term.kind != ir::TM_GOTO {
+                break;
+            }
+            cur = bb.term.t0;
+        }
+        return found;
+    }
+
+    /// Do the panic-guard paths from `d1` and `d2` fail alike: both end in an unreachable trap, or
+    /// both call one `@noreturn` callee with equal constant arguments (one literal of one source, or
+    /// the qualified name of one type)?
+    fn same_panic(self: &Self, b: &ir::CoreBody, d1: u32, d2: u32) bool {
+        let e1 = self.doomed_end(b, d1);
+        let e2 = self.doomed_end(b, d2);
+        if e1 == ir::IR_NONE || e2 == ir::IR_NONE {
+            return false;
+        }
+        let t1 = b.blocks.at(e1 as usize).term;
+        let t2 = b.blocks.at(e2 as usize).term;
+        if t1.kind == ir::TM_UNREACHABLE && t2.kind == ir::TM_UNREACHABLE {
+            return true;
+        }
+        if t1.kind != ir::TM_CALL || t2.kind != ir::TM_CALL || t1.callee.module != t2.callee.module || t1.callee.node != t2.callee.node || t1.args_len != t2.args_len {
+            return false;
+        }
+        for k in 0..t1.args_len {
+            let mut r1 = false;
+            let mut r2 = false;
+            let c1 = self.path_value(b, d1, b.oper_pool[(t1.args_start + k) as usize], &mut r1);
+            let c2 = self.path_value(b, d2, b.oper_pool[(t2.args_start + k) as usize], &mut r2);
+            if c1 == ir::IR_NONE || c2 == ir::IR_NONE || r1 != r2 {
+                return false;
+            }
+            if r1 {
+                if b.rvalues.at(c1 as usize).b != b.rvalues.at(c2 as usize).b {
+                    return false;
+                }
+                continue;
+            }
+            let x = *b.constants.at(c1 as usize);
+            let y = *b.constants.at(c2 as usize);
+            if x.kind != y.kind || x.ty != y.ty || x.val != y.val {
+                return false;
+            }
+            if x.kind == ir::CK_STR {
+                // Two literals of one text (`val` keeps their form).
+                if self.const_text(b, &x) != self.const_text(b, &y) {
+                    return false;
+                }
+            } else if x.kind != ir::CK_INT && x.kind != ir::CK_BOOL && (x.raw.start != y.raw.start || x.raw.end != y.raw.end || x.item.module != y.item.module || x.item.node != y.item.node) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The source text of constant `c`: an inlined one spans the module its `item` names.
+    const fn const_text(self: &Self, b: &ir::CoreBody, c: &ir::Constant) str {
+        let m = if c.item.node != NODE_NONE {
+            c.item.module;
+        } else {
+            b.module;
+        };
+        let src = unsafe (*self.fx.pkg).modules.at(m as usize).source.as_str();
+        if c.raw.end < c.raw.start || c.raw.end as usize > src.len() {
+            return "";
+        }
+        return src.slice(c.raw.start as usize, c.raw.end as usize);
+    }
+
+    // The local a length identity's place is based on.
+    const fn lp_base(self: &Self, b: &ir::CoreBody, lb: &LenBind) u32 {
+        if (lb.pl & fx::SYNTH_PL) != 0 {
+            return lb.pl & ~fx::SYNTH_PL;
+        }
+        return b.places.at(lb.pl as usize).base;
+    }
+
+    // The statement of block `blk` that last assigns whole local `l`, or IR_NONE.
+    const fn def_in(self: &Self, b: &ir::CoreBody, blk: u32, l: u32) u32 {
+        let bb = b.blocks.at(blk as usize);
+        let mut si = bb.stmt_len;
+        while si > 0 {
+            si -= 1;
+            let s = *b.statements.at((bb.stmt_start + si) as usize);
+            if s.kind == ir::ST_ASSIGN && self.fx.whole_local(b, s.place) == l {
+                return bb.stmt_start + si;
+            }
+        }
+        return ir::IR_NONE;
+    }
+
+    /// The panic guard block `blk` ends in, branching on the comparison statement `sid`: when one
+    /// edge is a pure panic and the other needs a strict `index < len`, sets the index and length
+    /// operands, the survivor and the doomed block, and `len_b` when the length is the canonical
+    /// right side (`index < len`; else the guard panics on `len <= index`).
+    fn guard_shape(
+        self: &Self,
+        b: &ir::CoreBody,
+        blk: u32,
+        sid: u32,
+        iop: &mut u32,
+        lop: &mut u32,
+        surv: &mut u32,
+        doom: &mut u32,
+        len_b: &mut bool,
+    ) bool {
+        let t = b.blocks.at(blk as usize).term;
+        let tt9 = (b.switch_pool[t.sw_start as usize] & 0xFFFFFFFFu64) as u32;
+        let rv = *b.rvalues.at(b.statements.at(sid as usize).rvalue as usize);
+        if rv.kind != ir::RV_BINARY {
+            return false;
+        }
+        // canonical `ca OP cb` with OP in {<, <=}
+        let swap = rv.c == tt::TokenType::GreaterThan as u8 || rv.c == tt::TokenType::GreaterThanEqual as u8;
+        let le = rv.c == tt::TokenType::LessThanEqual as u8 || rv.c == tt::TokenType::GreaterThanEqual as u8;
+        if !swap && !le && rv.c != tt::TokenType::LessThan as u8 {
+            return false;
+        }
+        let ca = pick(swap, rv.b, rv.a);
+        let cb = pick(swap, rv.a, rv.b);
+        let d_false = self.doomed_panic(b, t.t0);
+        let d_true = self.doomed_panic(b, tt9);
+        if d_false && !d_true && !le {
+            *iop = ca;
+            *lop = cb;
+            *surv = tt9;
+            *doom = t.t0;
+            *len_b = true;
+            return true;
+        }
+        if d_true && !d_false && le {
+            *iop = cb;
+            *lop = ca;
+            *surv = t.t0;
+            *doom = tt9;
+            *len_b = false;
+            return true;
+        }
+        return false;
+    }
+
+    // How many operands read whole local `l`: counted once per body, since the run adds no operand
+    // that reads a local and rewrites none.
+    fn local_reads(self: &mut Self, b: &ir::CoreBody, l: u32) u32 {
+        if self.reads.len() == 0 {
+            self.reads.resize_default(b.locals.len());
+            for i in 0..b.operands.len() {
+                let op = *b.operands.at(i);
+                if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
+                    let x = b.places.at(op.data as usize).base as usize;
+                    self.reads.set(x, self.reads[x] + 1);
+                }
+            }
+        }
+        return self.reads[l as usize];
+    }
+
+    // The place operand `opid` reads in place (a copy of a projected place), else IR_NONE.
+    const fn in_place_read(self: &Self, b: &ir::CoreBody, opid: u32) u32 {
+        let op = *b.operands.at(opid as usize);
+        if (op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE) && b.places.at(op.data as usize).proj_len != 0 {
+            return op.data;
+        }
+        return ir::IR_NONE;
+    }
+
+    /// One statement of a widening window: true when it writes no memory, cannot panic (the
+    /// arithmetic `try_coalesce` crosses too) and redefines none of the index root `ik`, the length
+    /// local `lk` and the locals `pr` the length read is based on. Records in-window affine aliases of
+    /// the root (like `try_coalesce`), references, and copies of in-place reads.
+    fn widen_step(self: &mut Self, b: &ir::CoreBody, s2: &ir::Statement, ik: &fx::VKey, lk: &fx::VKey, pr: &[u32; 3]) bool {
+        if s2.kind == ir::ST_STORAGE_LIVE {
+            return true;
+        }
+        let kept = |l: u32| l != ik.l && !(lk.is_local && l == lk.l) && l != pr[0] && l != pr[1] && l != pr[2];
+        if s2.kind == ir::ST_STORAGE_DEAD {
+            return kept(s2.a);
+        }
+        if s2.kind != ir::ST_ASSIGN {
+            return false;
+        }
+        let p2 = *b.places.at(s2.place as usize);
+        if p2.proj_len != 0 || !kept(p2.base) {
+            return false;
+        }
+        let rv2 = *b.rvalues.at(s2.rvalue as usize);
+        let k2 = rv2.kind;
+        let mut bind_aff = false;
+        let mut bind_off: i64 = 0;
+        let mut bind_pl = ir::IR_NONE; // the place an in-place read copies
+        let mut bind_rf = ir::IR_NONE; // the place a reference is taken of
+        if k2 == ir::RV_USE {
+            let o2 = *b.operands.at(rv2.a as usize);
+            if o2.kind == ir::OP_COPY || o2.kind == ir::OP_MOVE {
+                let x = self.fx.whole_local(b, o2.data);
+                if x != ir::IR_NONE {
+                    bind_aff = self.root_off(b, x, rv2.a, ik, &mut bind_off);
+                    bind_pl = self.window_copy(&self.ll_dest, &self.ll_pl, x);
+                    bind_rf = self.window_copy(&self.rf_dest, &self.rf_pl, x);
+                } else {
+                    bind_pl = o2.data;
+                }
+            }
+        } else if k2 == ir::RV_REF {
+            bind_rf = rv2.a;
+        } else if k2 == ir::RV_BINARY && (rv2.c == tt::TokenType::Plus as u8 || rv2.c == tt::TokenType::Minus as u8) {
+            let ka = self.vkey_c(b, rv2.a);
+            let kb = self.vkey_c(b, rv2.b);
+            let ao = *b.operands.at(rv2.a as usize);
+            let bo = *b.operands.at(rv2.b as usize);
+            let mut basex = ir::IR_NONE;
+            let mut ck: i64 = 0;
+            let mut side = rv2.a;
+            if (ao.kind == ir::OP_COPY || ao.kind == ir::OP_MOVE) && kb.is_const {
+                basex = self.fx.whole_local(b, ao.data);
+                ck = pick(rv2.c == tt::TokenType::Plus as u8, kb.c, 0 - kb.c);
+            } else if ka.is_const && rv2.c == tt::TokenType::Plus as u8 && (bo.kind == ir::OP_COPY || bo.kind == ir::OP_MOVE) {
+                basex = self.fx.whole_local(b, bo.data);
+                ck = ka.c;
+                side = rv2.b;
+            }
+            let mut baseoff: i64 = 0;
+            if basex != ir::IR_NONE && self.root_off(b, basex, side, ik, &mut baseoff) {
+                bind_aff = true;
+                bind_off = baseoff + ck;
+            }
+        } else if k2 == ir::RV_BINARY && (rv2.c == tt::TokenType::LessThan as u8 || rv2.c == tt::TokenType::LessThanEqual as u8 || rv2.c == tt::TokenType::GreaterThan as u8 || rv2.c == tt::TokenType::GreaterThanEqual as u8) {
+            // a pure comparison
+        } else if k2 == ir::RV_INTRINSIC && (rv2.c == ir::IN_BOUNDS_PROVEN || rv2.c == ir::IN_BOUNDS_GROUP_PROVEN || rv2.c == ir::IN_GROUP_FITS) {
+            // cannot panic
+        } else if k2 != ir::RV_ADDR && k2 != ir::RV_LEN && k2 != ir::RV_DISCRIMINANT {
+            return false; // anything else may write memory, allocate, or panic
+        }
+        // a reassigned local no longer names its old value anywhere below
+        self.cwritten.set(p2.base as usize, self.cstamp);
+        for q in 0..self.la_dest.len() {
+            if self.la_dest[q] == p2.base {
+                self.la_dest.set(q, ir::IR_NONE);
+            }
+        }
+        for q in 0..self.ll_dest.len() {
+            if self.ll_dest[q] == p2.base {
+                self.ll_dest.set(q, ir::IR_NONE);
+            }
+        }
+        for q in 0..self.rf_dest.len() {
+            if self.rf_dest[q] == p2.base {
+                self.rf_dest.set(q, ir::IR_NONE);
+            }
+        }
+        if bind_aff && self.la_dest.len() < 16 {
+            self.la_dest.push(p2.base);
+            self.la_off.push(bind_off);
+        }
+        if bind_pl != ir::IR_NONE && self.ll_dest.len() < 16 {
+            self.ll_dest.push(p2.base);
+            self.ll_pl.push(bind_pl);
+        }
+        if bind_rf != ir::IR_NONE && self.rf_dest.len() < 16 {
+            self.rf_dest.push(p2.base);
+            self.rf_pl.push(bind_rf);
+        }
+        return true;
+    }
+
+    // The place window table `dest`/`pl` binds local `x` to, else IR_NONE.
+    const fn window_copy(self: &Self, dest: &Vector<u32>, pl: &Vector<u32>, x: u32) u32 {
+        let mut q = dest.len();
+        while q > 0 {
+            q -= 1;
+            if dest[q] == x {
+                return pl[q];
+            }
+        }
+        return ir::IR_NONE;
+    }
+
+    // Read place `pl` written from its root: when it first derefs a reference bound to `&q` (in the
+    // window, else by the walk and not reassigned in the window), `q` with `skip` 1; else IR_NONE.
+    const fn read_root(self: &Self, b: &ir::CoreBody, pl: u32, skip: &mut u32) u32 {
+        *skip = 0;
+        let p = *b.places.at(pl as usize);
+        if p.proj_len == 0 || b.projections.at(p.proj_start as usize).kind != ir::PJ_DEREF {
+            return ir::IR_NONE;
+        }
+        *skip = 1;
+        let q = self.window_copy(&self.rf_dest, &self.rf_pl, p.base);
+        if q != ir::IR_NONE {
+            return q;
+        }
+        let rl = self.fx.copy_root(p.base);
+        let rb = *self.fx.refof.at(rl as usize);
+        if self.cwritten[p.base as usize] != self.cstamp && self.cwritten[rl as usize] != self.cstamp && rb.ok && rb.my_v == self.fx.ver(
+            rl,
+        ) && (rb.pl & fx::SYNTH_PL) == 0 {
+            return rb.pl;
+        }
+        *skip = 0;
+        return ir::IR_NONE;
+    }
+
+    // Projection `i` of read place `pl` written from its root `root` (IR_NONE: `pl` itself) past `skip`.
+    const fn read_proj(self: &Self, b: &ir::CoreBody, root: u32, pl: u32, skip: u32, i: u32) ir::Projection {
+        let n0 = if root == ir::IR_NONE {
+            0u32;
+        } else {
+            b.places.at(root as usize).proj_len;
+        };
+        if i < n0 {
+            return *b.projections.at((b.places.at(root as usize).proj_start + i) as usize);
+        }
+        return *b.projections.at((b.places.at(pl as usize).proj_start + skip + i - n0) as usize);
+    }
+
+    // The projection count of root `r` (IR_NONE: none).
+    const fn root_len(self: &Self, b: &ir::CoreBody, r: u32) u32 {
+        if r == ir::IR_NONE {
+            return 0;
+        }
+        return b.places.at(r as usize).proj_len;
+    }
+
+    /// Do read places `p1` and `p2` name one place once each is written from its root: one base local
+    /// and equal projections (no dynamic index)?
+    fn same_read(self: &Self, b: &ir::CoreBody, p1: u32, p2: u32) bool {
+        let mut s1: u32 = 0;
+        let mut s2: u32 = 0;
+        let r1 = self.read_root(b, p1, &mut s1);
+        let r2 = self.read_root(b, p2, &mut s2);
+        let base1 = b.places.at(pick(r1 == ir::IR_NONE, p1, r1) as usize).base;
+        let base2 = b.places.at(pick(r2 == ir::IR_NONE, p2, r2) as usize).base;
+        let n1 = self.root_len(b, r1) + b.places.at(p1 as usize).proj_len - s1;
+        let n2 = self.root_len(b, r2) + b.places.at(p2 as usize).proj_len - s2;
+        if base1 != base2 || n1 != n2 {
+            return false;
+        }
+        for i in 0..n1 {
+            let x = self.read_proj(b, r1, p1, s1, i);
+            let y = self.read_proj(b, r2, p2, s2, i);
+            if x.kind != y.kind || x.kind == ir::PJ_INDEX_OP || x.data != y.data || x.sub != y.sub {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The base locals read place `pl` depends on: its own base, and its root's (`read_root`).
+    fn read_bases(self: &Self, b: &ir::CoreBody, pl: u32, pr: &mut [u32; 3]) {
+        let mut sk: u32 = 0;
+        let r = self.read_root(b, pl, &mut sk);
+        pr[0] = b.places.at(pl as usize).base;
+        pr[1] = if r == ir::IR_NONE {
+            ir::IR_NONE;
+        } else {
+            b.places.at(r as usize).base;
+        };
+    }
+
+    // The place length operand `lop` reads in place, through an in-window copy (`widen_step`), else
+    // IR_NONE.
+    const fn window_read(self: &Self, b: &ir::CoreBody, lop: u32) u32 {
+        let r = self.in_place_read(b, lop);
+        if r != ir::IR_NONE {
+            return r;
+        }
+        let o = *b.operands.at(lop as usize);
+        if o.kind != ir::OP_COPY && o.kind != ir::OP_MOVE {
+            return ir::IR_NONE;
+        }
+        let x = self.fx.whole_local(b, o.data);
+        if x == ir::IR_NONE {
+            return ir::IR_NONE;
+        }
+        return self.window_copy(&self.ll_dest, &self.ll_pl, x);
+    }
+
+    // The place whole local `l` holds a read of, through the copies made of it in block `blk` and in
+    // the blocks that reach it alone by a goto, when nothing after the read writes memory or a base
+    // local the read depends on (`read_bases`); IR_NONE else.
+    fn block_read(self: &Self, b: &ir::CoreBody, blk: u32, l: u32) u32 {
+        let mut chain: [u32; 4] = [[0] = ir::IR_NONE]; // the blocks after `cur`, up to `blk`
+        let mut nc: usize = 0;
+        let mut cur = blk;
+        let mut x = l;
+        for _h in 0..8 {
+            let sid = self.def_in(b, cur, x);
+            if sid == ir::IR_NONE {
+                // the read is in the one block that reaches `cur`, by a goto
+                if nc == 4 || self.fx.npred[cur as usize] != 1 {
+                    return ir::IR_NONE;
+                }
+                let pb = self.fx.plist[self.fx.pstart[cur as usize] as usize];
+                let pt = b.blocks.at(pb as usize).term;
+                if pt.kind != ir::TM_GOTO || pt.t0 != cur {
+                    return ir::IR_NONE;
+                }
+                unsafe chain[nc] = cur;
+                nc += 1;
+                cur = pb;
+                continue;
+            }
+            let rv = *b.rvalues.at(b.statements.at(sid as usize).rvalue as usize);
+            if rv.kind != ir::RV_USE {
+                return ir::IR_NONE;
+            }
+            let pl = self.in_place_read(b, rv.a);
+            if pl == ir::IR_NONE {
+                let o = *b.operands.at(rv.a as usize);
+                if o.kind != ir::OP_COPY && o.kind != ir::OP_MOVE {
+                    return ir::IR_NONE;
+                }
+                x = self.fx.whole_local(b, o.data);
+                if x == ir::IR_NONE {
+                    return ir::IR_NONE;
+                }
+                continue;
+            }
+            let mut pr: [u32; 3] = [[0] = ir::IR_NONE];
+            self.read_bases(b, pl, &mut pr);
+            let bb = b.blocks.at(cur as usize);
+            if !self.no_write_since(b, sid + 1, bb.stmt_start + bb.stmt_len, &pr) {
+                return ir::IR_NONE;
+            }
+            for c in 0..nc {
+                let cb = b.blocks.at((unsafe chain[c]) as usize);
+                if !self.no_write_since(b, cb.stmt_start, cb.stmt_start + cb.stmt_len, &pr) {
+                    return ir::IR_NONE;
+                }
+            }
+            return pl;
+        }
+        return ir::IR_NONE;
+    }
+
+    // Do statements `lo..hi` write no memory and none of the locals `pr`?
+    const fn no_write_since(self: &Self, b: &ir::CoreBody, lo: u32, hi: u32, pr: &[u32; 3]) bool {
+        for k in lo..hi {
+            let s = *b.statements.at(k as usize);
+            if s.kind != ir::ST_ASSIGN {
+                continue;
+            }
+            let wp = b.places.at(s.place as usize);
+            if wp.proj_len != 0 || wp.base == pr[0] || wp.base == pr[1] {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Guard widening. Block `blk` ends in a panic guard on local `cl` (comparison `cb`, unproven)
+    /// whose survivor needs `index < len`. Lookahead along the survivor for later guards
+    /// `root + k < len` over the same root and the same length that panic alike, separated only by
+    /// statements `widen_step` accepts. On a hit the guard's comparison becomes
+    /// `IN_GROUP_FITS(index, len, width)` over the widest offset and keeps its panic: a member that
+    /// would fail panics with the same panic, only before pure statements. The true edge then
+    /// proves every member, which folds. Returns the number of members.
+    fn try_widen(self: &mut Self, b: &mut ir::CoreBody, blk: u32, cl: u32, cb: &CmpBind) u32 {
+        let sid = self.def_in(b, blk, cl);
+        if sid == ir::IR_NONE || self.local_reads(b, cl) != 1 {
+            return 0; // the branch must be the comparison's only reader
+        }
+        let mut iop = ir::IR_NONE;
+        let mut lop = ir::IR_NONE;
+        let mut surv = ir::IR_NONE;
+        let mut doom = ir::IR_NONE;
+        let mut len_b = false;
+        if !self.guard_shape(b, blk, sid, &mut iop, &mut lop, &mut surv, &mut doom, &mut len_b) {
+            return 0;
+        }
+        let ik = pick(len_b, cb.a, cb.b);
+        let lk = pick(len_b, cb.b, cb.a);
+        // a fresh window: no table of an earlier one (of this body or another) may answer for this one
+        self.cstamp += 1;
+        self.la_dest.clear();
+        self.la_off.clear();
+        self.ll_dest.clear();
+        self.ll_pl.clear();
+        self.rf_dest.clear();
+        self.rf_pl.clear();
+        // the length read in place, directly or by a copy this block made
+        let mut lread = self.in_place_read(b, lop);
+        let lo = *b.operands.at(lop as usize);
+        if lread == ir::IR_NONE && (lo.kind == ir::OP_COPY || lo.kind == ir::OP_MOVE) && self.fx.whole_local(b, lo.data) != ir::IR_NONE {
+            lread = self.block_read(b, blk, self.fx.whole_local(b, lo.data));
+        }
+        if !ik.is_local || !lk.is_const && !lk.is_local && lread == ir::IR_NONE {
+            return 0;
+        }
+        let lb = pick(len_b, cb.b_lp, cb.a_lp);
+        // the window keeps every local the length read depends on
+        let mut pr: [u32; 3] = [[0] = ir::IR_NONE];
+        if lread != ir::IR_NONE {
+            self.read_bases(b, lread, &mut pr);
+        }
+        if lb.ok {
+            pr[2] = self.lp_base(b, &lb);
+        }
+        let mut maxoff = ik.off;
+        let mut members: u32 = 0;
+        let mut cur = surv;
+        let mut nst: u32 = 0;
+        for _h in 0..16 {
+            if cur == blk || self.fx.npred[cur as usize] != 1 {
+                break;
+            }
+            let bb = *b.blocks.at(cur as usize);
+            let mut clean = true;
+            for si in 0..bb.stmt_len {
+                nst += 1;
+                let s2 = *b.statements.at((bb.stmt_start + si) as usize);
+                if nst > 64 || !self.widen_step(b, &s2, &ik, &lk, &pr) {
+                    clean = false;
+                    break;
+                }
+            }
+            if !clean {
+                break;
+            }
+            let t2 = bb.term;
+            if t2.kind == ir::TM_GOTO {
+                cur = t2.t0;
+                continue;
+            }
+            if t2.kind != ir::TM_SWITCH || t2.sw_len != 1 || t2.a == ir::IR_NONE || b.switch_pool[t2.sw_start as usize] >> 32 != 1 {
+                break;
+            }
+            let o2 = *b.operands.at(t2.a as usize);
+            if o2.kind != ir::OP_COPY && o2.kind != ir::OP_MOVE {
+                break;
+            }
+            let c2 = self.fx.whole_local(b, o2.data);
+            let sid2 = if c2 == ir::IR_NONE {
+                ir::IR_NONE;
+            } else {
+                self.def_in(b, cur, c2);
+            };
+            let mut iop2 = ir::IR_NONE;
+            let mut lop2 = ir::IR_NONE;
+            let mut surv2 = ir::IR_NONE;
+            let mut doom2 = ir::IR_NONE;
+            let mut len_b2 = false;
+            if sid2 == ir::IR_NONE || !self.guard_shape(
+                b,
+                cur,
+                sid2,
+                &mut iop2,
+                &mut lop2,
+                &mut surv2,
+                &mut doom2,
+                &mut len_b2,
+            ) || !self.same_panic(b, doom, doom2) {
+                break;
+            }
+            // the member's index: an affine offset of the root
+            let mut off2: i64 = 0;
+            let o3 = *b.operands.at(iop2 as usize);
+            let mut x = ir::IR_NONE;
+            if o3.kind == ir::OP_COPY || o3.kind == ir::OP_MOVE {
+                x = self.fx.whole_local(b, o3.data);
+            }
+            if !self.root_off(b, x, iop2, &ik, &mut off2) || off2 < ik.off || off2 - ik.off >= 8 {
+                break;
+            }
+            // its length: the same value, or the same place read again (the window wrote no memory
+            // and kept the place's base)
+            let k3 = self.vkey_c(b, lop2);
+            let lread2 = self.window_read(b, lop2);
+            let same_len = lk.is_const && k3.is_const && k3.c == lk.c || lk.is_local && k3.is_local && k3.l == lk.l && k3.v == lk.v && k3.off == lk.off || lread != ir::IR_NONE && lread2 != ir::IR_NONE && self.same_read(
+                b,
+                lread,
+                lread2,
+            );
+            if !same_len {
+                break;
+            }
+            if off2 > maxoff {
+                maxoff = off2;
+            }
+            members += 1;
+            cur = surv2;
+        }
+        if members == 0 || maxoff <= ik.off {
+            return 0;
+        }
+        // the comparison becomes IN_GROUP_FITS(index, len, width); true is the survivor
+        let w = maxoff - ik.off + 1;
+        let ut = Ast::builtin(BuiltinType::BT_USIZE);
+        b.constants.push(
+            ir::Constant {
+                kind: ir::CK_INT,
+                ty: ut,
+                val: w,
+                raw: tok::Span::empty(),
+                item: DefId { module: 0, node: NODE_NONE },
+            },
+        );
+        b.operands.push(ir::Operand { kind: ir::OP_CONST, data: b.constants.len() as u32 - 1, ty: ut });
+        let wop = b.operands.len() as u32 - 1;
+        let start = b.oper_pool.len() as u32;
+        b.oper_pool.push(iop);
+        b.oper_pool.push(lop);
+        b.oper_pool.push(wop);
+        let rid = b.statements.at(sid as usize).rvalue as usize;
+        let tgt = b.rvalues.at(rid).target;
+        b.rvalues[rid] = ir::rv(ir::RV_INTRINSIC, start, 3, ir::IN_GROUP_FITS, tgt);
+        let mut t = b.blocks.at(blk as usize).term;
+        t.t0 = doom;
+        b.switch_pool[t.sw_start as usize] = 1u64 << 32 | surv as u64;
+        b.blocks[blk as usize].term = t;
+        self.cmpof.set(
+            cl as usize,
+            CmpBind {
+                a: ik,
+                b: lk,
+                a_lp: lenbind_none(),
+                b_lp: lb,
+                le: false,
+                my_v: cb.my_v,
+                ok: true,
+                w: w,
+                ao: ir::IR_NONE,
+                bo: ir::IR_NONE,
+            },
+        );
+        return members;
+    }
     /// DropCtx emits.
     // Push the true-edge fact of comparison `cb` with its right side read as `rk` (length place
-    // `lp`), within the edge's fact budget (the edge's facts start at `st0`).
+    // `lp`; a value key only when `rk` is a local), within the edge's fact budget (the edge's facts
+    // start at `st0`).
     fn edge_fact(self: &mut Self, le: bool, ik: fx::VKey, rk: fx::VKey, lp: LenBind, st0: usize) {
         if self.in_facts.len() - st0 >= MAX_EDGE_FACTS {
             return;
@@ -1126,7 +1884,7 @@ extend Bce {
                 il: ik.l,
                 iv: ik.v,
                 ioff: ik.off,
-                ln_ok: true,
+                ln_ok: rk.is_local,
                 ln_l: rk.l,
                 ln_v: rk.v,
                 ln_off: rk.off,
@@ -1273,6 +2031,9 @@ extend Bce {
                     le: false,
                     my_v: 0,
                     ok: false,
+                    w: 0,
+                    ao: ir::IR_NONE,
+                    bo: ir::IR_NONE,
                 },
             );
             self.remof.push(RemBind { x: fx::vkey_none(), x_lp: lenbind_none(), c: 0, my_v: 0, ok: false });
@@ -1317,14 +2078,11 @@ extend Bce {
         }
         let mut go = self.ialign || self.fx.fixed_len(b, lop) || self.fx.const_ge2(b, lop);
         if !go {
-            let lk = self.vkey(b, lop);
-            if lk.is_local && lk.off == 0 {
-                let lp = self.len_place_of(lk.l);
-                for i in 0..self.clens.len() {
-                    if lp.ok && self.lp_same(b, &self.clens[i], &lp) {
-                        go = true;
-                        break;
-                    }
+            let lp = self.lop_place(b, lop);
+            for i in 0..self.clens.len() {
+                if lp.ok && self.lp_same(b, &self.clens[i], &lp) {
+                    go = true;
+                    break;
                 }
             }
         }
@@ -1341,6 +2099,19 @@ extend Bce {
 
     /// Prove `x < len` (`strict`) or `x <= len` from the solved interval of `x` and of an earlier
     /// read of the same length (same place, same generations, its local unchanged).
+    /// The length place length operand `lop` reads: through its local, or in place as a guard's
+    /// length operand (`glp`).
+    fn lop_place(self: &Self, b: &ir::CoreBody, lop: u32) LenBind {
+        let lk = self.vkey(b, lop);
+        if lk.is_local && lk.off == 0 {
+            return self.len_place_of(lk.l);
+        }
+        if !lk.is_local && !lk.is_const {
+            return self.glp;
+        }
+        return lenbind_none();
+    }
+
     fn int_len_bound(self: &Self, b: &ir::CoreBody, xop: u32, lop: u32, strict: bool) bool {
         let mut xw: u32 = 0;
         let mut xs = false;
@@ -1348,11 +2119,7 @@ extend Bce {
         if xw == 0 || xs || x.hn {
             return false;
         }
-        let lk = self.vkey(b, lop);
-        if !lk.is_local || lk.off != 0 {
-            return false;
-        }
-        let lp = self.len_place_of(lk.l);
+        let lp = self.lop_place(b, lop);
         if !lp.ok {
             return false;
         }
@@ -1463,7 +2230,7 @@ extend Bce {
                     let mut grouped: u32 = 0;
                     // A lane check keeps its own trap text: it never joins a group.
                     if rv.c == ir::IN_BOUNDS && rv.item.node != ir::CHECK_LANES {
-                        grouped = self.try_coalesce(b, bb, si, rid, iop, lop, stm.span);
+                        grouped = self.try_coalesce(b, bb, si, rid, iop, lop);
                     }
                     if grouped != 0 {
                         st.coalesced += grouped;
@@ -1510,6 +2277,9 @@ extend Bce {
         let mut lp1 = lenbind_none();
         let mut lp2 = lenbind_none();
         let mut le = false;
+        let mut gw: i64 = 0; // an IN_GROUP_FITS width
+        let mut cao = ir::IR_NONE; // a comparison's canonical operands
+        let mut cbo = ir::IR_NONE;
         let is_cmp = rv.kind == ir::RV_BINARY && (rv.c == tt::TokenType::LessThan as u8 || rv.c == tt::TokenType::LessThanEqual as u8 || rv.c == tt::TokenType::GreaterThan as u8 || rv.c == tt::TokenType::GreaterThanEqual as u8);
         // the alignment pattern `a - a % c` exists only in a body with a remainder by a constant
         let is_rem = self.fx.grem && rv.kind == ir::RV_BINARY && (rv.c == op9 || rv.c == tt::TokenType::PercentEqual as u8) && usz;
@@ -1520,6 +2290,15 @@ extend Bce {
                 let eop = b.oper_pool[(rv.a + 1) as usize];
                 ck = self.vkey(b, eop);
                 lp1 = self.oper_len_lp(b, eop);
+            } else if rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_GROUP_FITS {
+                let lop = b.oper_pool[(rv.a + 1) as usize];
+                let wo = *b.operands.at(b.oper_pool[(rv.a + 2) as usize] as usize);
+                if wo.kind == ir::OP_CONST && b.constants.at(wo.data as usize).kind == ir::CK_INT {
+                    ck = self.vkey(b, b.oper_pool[rv.a as usize]);
+                    ck2 = self.vkey(b, lop);
+                    lp2 = self.oper_len_lp(b, lop);
+                    gw = b.constants.at(wo.data as usize).val;
+                }
             } else if is_cmp {
                 // canonical form: > and >= swap operands (a > b == b < a; a >= b == b <= a)
                 let swap = rv.c == tt::TokenType::GreaterThan as u8 || rv.c == tt::TokenType::GreaterThanEqual as u8;
@@ -1535,6 +2314,8 @@ extend Bce {
                 };
                 ck = self.vkey(b, aop);
                 ck2 = self.vkey(b, bop);
+                cao = aop;
+                cbo = bop;
                 lp1 = self.oper_len_lp(b, aop);
                 lp2 = self.oper_len_lp(b, bop);
                 if self.iwant && self.clens.len() < LREADS_MAX {
@@ -1570,8 +2351,11 @@ extend Bce {
         } else if rv.kind == ir::RV_LEN {
             self.lenof.set(dest as usize, self.len_capture(b, rv.a, dv));
             self.note_read(dest);
-        } else if is_cmp {
-            self.cmpof.set(dest as usize, CmpBind { a: ck, b: ck2, a_lp: lp1, b_lp: lp2, le: le, my_v: dv, ok: true });
+        } else if is_cmp || gw > 0 {
+            self.cmpof.set(
+                dest as usize,
+                CmpBind { a: ck, b: ck2, a_lp: lp1, b_lp: lp2, le: le, my_v: dv, ok: true, w: gw, ao: cao, bo: cbo },
+            );
         } else if is_rem {
             if ck2.is_const && ck2.c > 0 {
                 self.remof.set(dest as usize, RemBind { x: ck, x_lp: lp1, c: ck2.c, my_v: dv, ok: true });
@@ -1693,12 +2477,13 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
         return "";
     }
     z.begin_body(b, pkg);
-    // the integer facts serve only the checks, solved on demand: a body with no check allocates no
-    // solver state
-    z.iwant = checks && !z.no_int && z.fx.want_ints(b);
+    // the integer facts serve the checks and the panic guards, solved on demand: a body without a
+    // length comparison they can use allocates no solver state
+    z.iwant = !z.no_int && z.fx.want_ints(b);
     z.itried = false;
     z.ialign = false;
     z.clens.clear();
+    z.reads.clear();
     let mut err: str<'static> = "";
     // Only a check or a fold candidate gets a result, and facts flow only forward: the walk ends
     // with the last block in reverse postorder that holds one. The SC_CORE_IR re-proof walks every
@@ -1733,7 +2518,7 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
             let ck = z.vkey(b, t.a);
             if ck.is_local && ck.off == 0 {
                 let cb = *z.cmpof.at(ck.l as usize);
-                if cb.ok && cb.my_v == ck.v {
+                if cb.ok && cb.my_v == ck.v && cb.w == 0 {
                     // the condition is a canonical `a OP b`; a proof of it (or of its negation)
                     // whose doomed successor is a pure panic shape folds the branch away
                     let mut dir: u32 = 0;
@@ -1743,6 +2528,21 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
                         dir = 1; // always true
                     } else if z.fold_proved(b, &cb.b, &cb.a, &cb.a_lp, !cb.le) {
                         dir = 2; // always false (the negation swaps sides and flips strictness)
+                    } else if cb.ao != ir::IR_NONE {
+                        // A strict comparison an element check's proof shows (the aligned strides, the
+                        // solved intervals): `a < b`, or for `a <= b` its negation `b < a`.
+                        let mut why: u8 = 0;
+                        z.glp = if cb.le {
+                            cb.a_lp;
+                        } else {
+                            cb.b_lp;
+                        };
+                        if !cb.le && z.prove_elem(b, cb.ao, cb.bo, &mut why) {
+                            dir = 1;
+                        } else if cb.le && z.prove_elem(b, cb.bo, cb.ao, &mut why) {
+                            dir = 2;
+                        }
+                        z.glp = lenbind_none();
                     }
                     if dir != 0 {
                         let doomed = if dir == 1 {
@@ -1767,6 +2567,12 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
                             b.blocks[blk].term = t;
                             st.folded += 1;
                         }
+                    } else if !check_only && !z.no_fold && !z.no_widen {
+                        let n9 = z.try_widen(b, blk as u32, ck.l, &cb);
+                        if n9 != 0 {
+                            st.coalesced += n9;
+                            t = b.blocks[blk].term;
+                        }
                     }
                 }
             }
@@ -1782,6 +2588,20 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
                     } else {
                         z.fold_proved(b, &cb.b, &cb.a, &cb.a_lp, !cb.le);
                     };
+                    let mut why: u8 = 0;
+                    if !ok9 && cb.ao != ir::IR_NONE {
+                        z.glp = if cb.le {
+                            cb.a_lp;
+                        } else {
+                            cb.b_lp;
+                        };
+                        ok9 = if t.args_len == 1 {
+                            !cb.le && z.prove_elem(b, cb.ao, cb.bo, &mut why);
+                        } else {
+                            cb.le && z.prove_elem(b, cb.bo, cb.ao, &mut why);
+                        };
+                        z.glp = lenbind_none();
+                    }
                 }
             }
             if !ok9 {
@@ -1828,10 +2648,10 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
                 let ck = z.vkey(b, t.a);
                 if ck.is_local {
                     let cb = *z.cmpof.at(ck.l as usize);
-                    if cb.ok && cb.my_v == ck.v && (cb.b.is_const || cb.b.is_local) && cb.a.is_local && z.int_local(
+                    if cb.ok && cb.my_v == ck.v && cb.w == 0 && (cb.b.is_const || cb.b.is_local) && (cb.a.is_local && z.int_local(
                         b,
                         cb.a.l,
-                    ) {
+                    ) || !cb.a.is_local && cb.a_lp.ok) {
                         z.edge_fact(!cb.le, cb.b, cb.a, cb.a_lp, st0);
                     }
                 }
@@ -1851,10 +2671,17 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
             let ck = z.vkey(b, t.a);
             if ck.is_local {
                 let cb = *z.cmpof.at(ck.l as usize);
-                if cb.ok && cb.my_v == ck.v && (cb.a.is_const || cb.a.is_local) && cb.b.is_local {
+                if cb.ok && cb.my_v == ck.v && cb.w > 0 && cb.a.is_local && (cb.b.is_local || cb.b_lp.ok) {
+                    // a widened guard: every member offset is below the length
+                    for k in 0..cb.w {
+                        let mut ak = cb.a;
+                        ak.off = cb.a.off + k;
+                        z.edge_fact(false, ak, cb.b, cb.b_lp, st0);
+                    }
+                } else if cb.ok && cb.my_v == ck.v && cb.w == 0 && (cb.a.is_const || cb.a.is_local) && (cb.b.is_local || cb.b_lp.ok) {
                     let lp = cb.b_lp; // captured at the comparison, so never stale here
                     z.edge_fact(cb.le, cb.a, cb.b, lp, st0);
-                    if cb.b.off == 0 {
+                    if cb.b.is_local && cb.b.off == 0 {
                         // `x < lim` with `lim = IN_CHUNK(i, e)`: also `x < e`
                         for ci in 0..z.chunks.len() {
                             let ch = z.chunks[ci];
@@ -1884,7 +2711,7 @@ pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &
             }
             let tr = z.fx.copy_root(tl);
             let cb = *z.cmpof.at(tr as usize);
-            if cb.ok && cb.my_v == z.fx.ver(tr) && (cb.a.is_const || cb.a.is_local) && cb.b.is_local {
+            if cb.ok && cb.my_v == z.fx.ver(tr) && cb.w == 0 && (cb.a.is_const || cb.a.is_local) && cb.b.is_local {
                 z.edge_fact(cb.le, cb.a, cb.b, cb.b_lp, st0);
             }
             z.in_start.set(tj as usize, st0 as u32);

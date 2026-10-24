@@ -11,6 +11,8 @@ pub struct Set<T, A = Global, S = DefaultHash> {
     m: Map<T, Present, A, S>,
 }
 
+unsafe extend<T, A, S> Set<T, A, S> as Zeroable {}
+
 // The zero-sized value every member maps to.
 @derive(Clone)
 struct Present {}

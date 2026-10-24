@@ -333,25 +333,25 @@ extend<T: Elem> Vec<T, 4> {
 extend<T: Elem, const N: usize> Vec<T, N> as Index<T, []T> {
     pub fn index(self: &Vec<T, N>, i: usize) &T {
         if i >= N {
-            panic("Vec<T, N>[i]: index out of bounds");
+            panic_parts("Vec<T, N>", "[i]: index out of bounds");
         }
         return &unsafe self.e[i];
     }
     pub fn index_range(self: &Vec<T, N>, r: Range<usize>) []T {
-        let (lo, hi) = range_bounds(r, N);
+        let (lo, hi) = range_bounds(r, N, "Vec<T, N>");
         return unsafe Slice::<T> { ptr: (&self.e[0]) as *const T + lo, len: hi - lo };
     }
 }
 
-// The half-open bounds of `r` within `[0, n)`; a range outside traps.
-const fn range_bounds(r: Range<usize>, n: usize) (usize, usize) {
+// The half-open bounds of `r` within `[0, n)` of a value of type `name`; a range outside traps.
+const fn range_bounds(r: Range<usize>, n: usize, name: str) (usize, usize) {
     let hi = if r.inclusive {
         r.end + 1;
     } else {
         r.end;
     };
     if r.start > hi || hi > n {
-        panic("Vec<T, N>[a..b]: range out of bounds");
+        panic_parts(name, "[a..b]: range out of bounds");
     }
     return r.start, hi;
 }
@@ -359,12 +359,12 @@ const fn range_bounds(r: Range<usize>, n: usize) (usize, usize) {
 extend<T: Elem, const N: usize> Vec<T, N> as IndexMut<T, []mut T> {
     pub fn index_mut(self: &mut Vec<T, N>, i: usize) &mut T {
         if i >= N {
-            panic("Vec<T, N>[i]: index out of bounds");
+            panic_parts("Vec<T, N>", "[i]: index out of bounds");
         }
         return &mut unsafe self.e[i];
     }
     pub fn index_range_mut(self: &mut Vec<T, N>, r: Range<usize>) []mut T {
-        let (lo, hi) = range_bounds(r, N);
+        let (lo, hi) = range_bounds(r, N, "Vec<T, N>");
         return unsafe SliceMut::<T> { ptr: (&mut self.e[0]) as *mut T + lo, len: hi - lo };
     }
 }

@@ -403,6 +403,7 @@ pub struct Owner {
     pub sc_istores: Vector<StoreVia>,
     unsafe_cell: DefId, // the prelude's `UnsafeCell`: what a shared reference may write through
     interior_memo: Map<u64, u64>, // (mod << 32 | decl) -> `interior_mask` (INTERIOR_BUSY while computed)
+    cell_memo: Map<u64, bool>, // (mod << 32 | decl) -> `decl_has_cell` (false while computed)
 }
 
 // Read/grow a `[mid][ty]` cache byte; -1 means uncomputed. Type ids are dense per module.
@@ -1851,6 +1852,12 @@ extend Gen {
                         } else {
                             self.subset_d(st.from, ob, st.point, sd_then(st.e, st.te));
                             self.interior_store(st.from, ob, st.point, st.e, st.te);
+                            // A view's elements are the storage it borrows: a store reaching a borrow
+                            // of the view itself (`index_mut(&mut s, i)`) lands there too.
+                            if self.view_ty(self.place_of(lo.place).ty) && !bits::bit_get(&visit, ob) {
+                                bits::bit_set(&mut visit, ob);
+                                stack.push(ob);
+                            }
                             let pb = self.place_bounds(lo.place);
                             if (pb & MB_STATIC) != 0 {
                                 self.subset_d(st.from, 0, st.point, sd_then(st.e, st.te));
@@ -2603,7 +2610,7 @@ extend Gen {
         for i in 0..bs.len {
             let b = unsafe self.owner().ast_of(m).list(bs)[i as usize];
             if self.owner().ast_of(m).at_const(b).kind == NodeKind::NODE_FUNCTION_TYPE {
-                self.fn_type_tokens(m, b, out, depth);
+                self.fn_type_tokens(m, b, out, depth, true);
                 continue;
             }
             if self.owner().ast_of(m).at_const(b).kind != NodeKind::NODE_TYPE_PATH {
@@ -2621,12 +2628,17 @@ extend Gen {
         }
     }
 
-    // The tokens function type node `fnn` (module `m`) names in its parameters and results, but for
-    // the lifetimes its own `for<..>` binds.
-    fn fn_type_tokens(self: &mut Self, m: ModuleId, fnn: NodeId, out: &mut Vector<u64>, depth: i32) {
+    // The tokens function type node `fnn` (module `m`) names in its results, and in its parameters
+    // when `params`, but for the lifetimes its own `for<..>` binds.
+    fn fn_type_tokens(self: &mut Self, m: ModuleId, fnn: NodeId, out: &mut Vector<u64>, depth: i32, params: bool) {
         let ft = self.owner().ast_of(m).at_const(fnn).as_data.function_type;
         let mark = out.len();
-        for i in 0..ft.params.len + ft.returns.len {
+        let first = if params {
+            0u32;
+        } else {
+            ft.params.len;
+        };
+        for i in first..ft.params.len + ft.returns.len {
             let a = self.owner().ast_of(m);
             let sl = if i < ft.params.len {
                 unsafe a.list(ft.params)[i as usize];
@@ -2934,6 +2946,11 @@ extend Gen {
             return;
         }
         let args = n.as_data.type_path.args;
+        // A view's type argument is its elements' type: they lie behind it, as `ref_steps` counts an
+        // index into one.
+        let sl = self.owner().slice;
+        let sm = self.owner().slice_mut;
+        let view = d.module == sl.module && d.node == sl.node || d.module == sm.module && d.node == sm.node;
         let mut named: u32 = 0;
         for i in 0..args.len {
             let aid = unsafe self.owner().ast_of(m).list(args)[i as usize];
@@ -2943,8 +2960,10 @@ extend Gen {
                     named += 1;
                     out.push(tk);
                 }
-            } else {
+            } else if !view {
                 self.own_walk(m, aid, out, depth + 1, refs);
+            } else if refs != 0 {
+                self.own_walk(m, aid, out, depth + 1, refs - 1);
             }
         }
         if named < self.owner().ast_of(d.module).lifetimes_of(d.node).len && !(n.as_data.type_path.parts.len == 1 && self.owner().span_text_is(
@@ -3055,14 +3074,14 @@ extend Gen {
                 SD_KEEP;
             };
             if !lvl && !pn.is_ref_type() {
-                r = sd_then(SD_DEREF, self.tie_lift(cm, ptn, rbeh, picked));
+                r = sd_then(SD_DEREF, self.tie_lift(cm, ptn, rbeh, picked, 1));
             } else if !lvl {
                 let d = if by_tok {
                     self.tie_depth(cm, pn.as_data.indirect_type.ty, rtok, picked && relided);
                 } else {
                     0u32;
                 };
-                r = sd_then(sd_sink(1 + d), self.tie_lift(cm, pn.as_data.indirect_type.ty, rbeh, picked));
+                r = sd_then(sd_sink(1 + d), self.tie_lift(cm, pn.as_data.indirect_type.ty, rbeh, picked, d));
             }
             if yk == TypeKind::TYPE_REFERENCE {
                 return sd_then(e, r);
@@ -3084,7 +3103,108 @@ extend Gen {
         if d == 0 && by_tok && k == 0 && self.closure_result_tie(cm, ptn, rtok, ty) {
             d = 1;
         }
-        return sd_then(e, sd_then(sd_sink(d), self.tie_lift(cm, ptn, rbeh, picked)));
+        return sd_then(e, sd_then(sd_sink(d), self.tie_lift(cm, ptn, rbeh, picked, d)));
+    }
+
+    // The tokens a closure of type `ty` passed as parameter type `ptn` can carry out of the call into
+    // `out`: `ptn`'s own token and those of its bounds' results, when `ptn` is a type parameter
+    // bounded only by function types and no parameter of the closure can take a store
+    // (`takes_store`), so its captures leave only through what it returns. False, `out` unchanged,
+    // otherwise.
+    fn callable_out_tokens(self: &mut Self, cm: ModuleId, ptn: NodeId, ty: TypeId, out: &mut Vector<u64>) bool {
+        if ty == TYPE_NONE || !self.closure_ty(ty) || self.owner().ast_of(cm).at_const(ptn).kind != NodeKind::NODE_TYPE_PATH {
+            return false;
+        }
+        let d = self.owner().ast_of(cm).path_def(ptn);
+        if d.node == NODE_NONE || self.owner().ast_of(d.module).at_const(d.node).kind != NodeKind::NODE_GENERIC_PARAM {
+            return false;
+        }
+        let bs = self.owner().ast_of(d.module).at_const(d.node).as_data.generic_param.bounds;
+        if bs.len == 0 {
+            return false;
+        }
+        for i in 0..bs.len {
+            let b = unsafe self.owner().ast_of(d.module).list(bs)[i as usize];
+            if self.owner().ast_of(d.module).at_const(b).kind != NodeKind::NODE_FUNCTION_TYPE {
+                return false;
+            }
+        }
+        let nw = self.owner().ast_of(d.module).where_bounds.len();
+        for w in 0..nw {
+            if self.owner().ast_of(d.module).where_scope(w, d.node, NODE_NONE) == WHERE_OWN {
+                return false;
+            }
+        }
+        let y = *self.owner().ast_of(self.body().module).type_at(ty);
+        if y.module != self.body().module {
+            return false;
+        }
+        let ps = self.owner().ast_of(y.module).at_const(y.as_data.decl).as_data.closure.params;
+        for i in 0..ps.len {
+            let pt = self.owner().ast_of(y.module).type_of(unsafe self.owner().ast_of(y.module).list(ps)[i as usize]);
+            if pt == TYPE_NONE || self.takes_store(pt) {
+                return false;
+            }
+        }
+        out.push(d.module as u64 << 32 | d.node as u64);
+        for i in 0..bs.len {
+            let b = unsafe self.owner().ast_of(d.module).list(bs)[i as usize];
+            self.fn_type_tokens(d.module, b, out, 0, false);
+        }
+        return true;
+    }
+
+    // Can a closure parameter of type `pt` (this body's pool) take a borrow the closure stores
+    // through it: a `&mut` to a borrow-carrying pointee, a raw pointer, a shared reference to one
+    // whose pointee reaches an `UnsafeCell` (`reaches_cell`), or a value holding either?
+    fn takes_store(self: &mut Self, pt: TypeId) bool {
+        let m = self.body().module;
+        let y = *self.owner().ast_of(m).type_at(pt);
+        if y.kind == TypeKind::TYPE_POINTER {
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_REFERENCE {
+            if !self.owner().carries(m, y.as_data.elem) {
+                return false;
+            }
+            return y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 || self.reaches_cell(y.as_data.elem, 0);
+        }
+        return self.owner().carries(m, pt) && (self.holds_mut(pt, 0) || self.reaches_cell(pt, 0));
+    }
+
+    // Does a value of type `ty` (this body's pool) reach an `UnsafeCell`, so that a shared reference
+    // to it can store? A type parameter, an erased object, a closure and a raw pointer may.
+    fn reaches_cell(self: &mut Self, ty: TypeId, depth: i32) bool {
+        if ty == TYPE_NONE || depth > 6 {
+            return true;
+        }
+        let m = self.body().module;
+        let y = *self.owner().ast_of(m).type_at(ty);
+        if y.kind == TypeKind::TYPE_REFERENCE {
+            return self.reaches_cell(y.as_data.elem, depth + 1);
+        }
+        if y.kind == TypeKind::TYPE_ARRAY {
+            return self.reaches_cell(y.as_data.arr.elem, depth + 1);
+        }
+        if y.kind == TypeKind::TYPE_BUILTIN || y.fn_sig() {
+            return false;
+        }
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            return self.owner().decl_has_cell(y.module, y.as_data.decl, 0);
+        }
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return true;
+        }
+        let it = *self.owner().ast_of(m).instance(y.as_data.inst);
+        if self.owner().decl_has_cell(it.module, it.decl, 0) {
+            return true;
+        }
+        for k in 0..it.n {
+            if self.reaches_cell(unsafe it.args[k as usize], depth + 1) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // Is a value of closure type `ty` passed as parameter type `ptn` tied to the result only through
@@ -3128,27 +3248,35 @@ extend Gen {
         return true;
     }
 
-    // SAT when a value of parameter type `ptn` may land behind a reference of the result: a token of
-    // it (or an elided position the elision rule picks) is in the return's behind-reference tokens
-    // `rbeh`; else KEEP.
-    fn tie_lift(self: &mut Self, cm: ModuleId, ptn: NodeId, rbeh: u64, picked: bool) u8 {
+    // The edge of a value of parameter type `ptn`, its levels counted from `d` references into it,
+    // into a result that may hold it behind a reference: from the shallowest position whose token
+    // (or an elided position the elision rule picks) is in the return's behind-reference tokens
+    // `rbeh`, its levels land there at a depth the signature does not give (saturated); the levels
+    // above it keep theirs.
+    fn tie_lift(self: &mut Self, cm: ModuleId, ptn: NodeId, rbeh: u64, picked: bool, d: u32) u8 {
         if (rbeh & 0xFFFF) == 0 {
             return SD_KEEP;
         }
-        let mut itok = replace(&mut self.owner().sc_tok_b, Vector::<u64>::new());
-        itok.truncate(0);
-        self.lt_tokens(cm, ptn, &mut itok, 0);
-        self.owner().rel_widen(self.rel, false, &mut itok);
-        let deep = self.range_meets(rbeh, &itok) || picked && self.range_has(rbeh, ELIDED_TOK) && self.has_elided_lt(
-            cm,
-            ptn,
-            0,
-        );
-        self.owner().sc_tok_b = itok;
-        if deep {
-            return SD_SAT;
+        let elided = picked && self.range_has(rbeh, ELIDED_TOK);
+        let mut toks = replace(&mut self.owner().sc_tok_b, Vector::<u64>::new());
+        toks.truncate(0);
+        let st = (rbeh >> 16) as usize;
+        for i in 0..(rbeh & 0xFFFF) as usize {
+            toks.push(self.owner().tok_pool[st + i]);
         }
-        return SD_KEEP;
+        let mut r = SD_KEEP;
+        for j in 0..d + 2 {
+            if self.own_ties(cm, ptn, &toks, elided, j) {
+                r = if j <= d {
+                    SD_SAT;
+                } else {
+                    SD_KEEP_SAT;
+                };
+                break;
+            }
+        }
+        self.owner().sc_tok_b = toks;
+        return r;
     }
 
     // The edge of argument `pid` (passed as parameter type `ptn` in mode `k`) stored into a
@@ -3704,6 +3832,111 @@ extend Gen {
         return false;
     }
 
+    // Is `ty` (this body's module) a type parameter whose bounds name a type or a lifetime? A method of
+    // such a bound may store a borrow into a value of it.
+    fn bounded_param(self: &Self, ty: TypeId) bool {
+        let y = *self.owner().ast_of(self.body().module).type_at(ty);
+        if y.kind != TypeKind::TYPE_GENERIC {
+            return false;
+        }
+        let ga = self.owner().ast_of(y.module);
+        let gn = ga.at_const(y.as_data.decl);
+        if gn.kind != NodeKind::NODE_GENERIC_PARAM {
+            return false;
+        }
+        let bs = gn.as_data.generic_param.bounds;
+        for i in 0..bs.len {
+            let b = ga.at_const(unsafe ga.list(bs)[i as usize]);
+            if b.kind != NodeKind::NODE_TYPE_PATH || b.as_data.type_path.args.len != 0 {
+                return true;
+            }
+        }
+        for w in 0..ga.where_bounds.len() {
+            if ga.where_scope(w, y.as_data.decl, NODE_NONE) != WHERE_NONE {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Does a value of type `ty` (this body's module) hold a `&mut` or a `[]mut` view a callee taking it
+    // whole can store through: itself, in a type argument, or in a field of its declaration?
+    fn holds_mut(self: &Self, ty: TypeId, depth: i32) bool {
+        if self.grants_write(ty, depth) {
+            return true;
+        }
+        let d = self.agg_decl(ty);
+        return d.node != NODE_NONE && self.decl_holds_mut(d, depth + 1);
+    }
+
+    // Does a field of struct or enum `d` hold a `&mut` or a `[]mut` view by its declared type?
+    fn decl_holds_mut(self: &Self, d: DefId, depth: i32) bool {
+        if depth > 4 {
+            return false;
+        }
+        let a = self.owner().ast_of(d.module);
+        let n = a.at_const(d.node);
+        if n.kind != NodeKind::NODE_STRUCT && n.kind != NodeKind::NODE_ENUM {
+            return false;
+        }
+        let ms = n.as_data.aggregate.members;
+        for j in 0..ms.len {
+            let mn = unsafe a.list(ms)[j as usize];
+            let m = a.at_const(mn);
+            if m.kind == NodeKind::NODE_FIELD {
+                if self.node_holds_mut(d.module, m.as_data.field.ty, depth) {
+                    return true;
+                }
+            } else if m.kind == NodeKind::NODE_VARIANT {
+                let ps = m.as_data.variant.payload;
+                for k in 0..ps.len {
+                    let pn = unsafe a.list(ps)[k as usize];
+                    let tn = if a.at_const(pn).kind == NodeKind::NODE_FIELD {
+                        a.at_const(pn).as_data.field.ty;
+                    } else {
+                        pn;
+                    };
+                    if self.node_holds_mut(d.module, tn, depth) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    // Does type node `tn` of module `m` spell a `&mut`, a `[]mut` view, or a declaration holding one?
+    fn node_holds_mut(self: &Self, m: ModuleId, tn: NodeId, depth: i32) bool {
+        if tn == NODE_NONE || depth > 4 {
+            return false;
+        }
+        let a = self.owner().ast_of(m);
+        let n = a.at_const(tn);
+        if n.has_lt_slot() {
+            return n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT;
+        }
+        if n.kind == NodeKind::NODE_ARRAY_TYPE {
+            return self.node_holds_mut(m, n.as_data.array_type.element, depth + 1);
+        }
+        if n.kind == NodeKind::NODE_TUPLE_TYPE {
+            let es = n.as_data.array_literal.elements;
+            for i in 0..es.len {
+                if self.node_holds_mut(m, unsafe a.list(es)[i as usize], depth + 1) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if n.kind != NodeKind::NODE_TYPE_PATH {
+            return false;
+        }
+        let d = a.path_def(tn);
+        if d.node == self.owner().slice_mut.node && d.module == self.owner().slice_mut.module {
+            return true;
+        }
+        return d.node != NODE_NONE && self.decl_holds_mut(d, depth + 1);
+    }
+
     fn walk(self: &mut Self) {
         let nlocals = self.body().locals.len() as u32;
         let nb = self.body().blocks.len();
@@ -4035,8 +4268,19 @@ extend Gen {
                 // into the storage that argument reaches.
                 // A shared reference stores too where its pointee keeps a type argument behind an
                 // `UnsafeCell` (`send(self: &Sender<T>, value: T)`): those arguments' tokens only.
+                // A value taken whole that holds a `&mut` or a `[]mut` view stores through it alike.
                 for j in 0..ptyn.len() {
-                    if kinds[j] != 2 && kinds[j] != 1 {
+                    let mut interior = false;
+                    if kinds[j] == 0 {
+                        let oj = *self.body().operands.at(
+                            self.body().oper_pool[(t.args_start + j as u32) as usize] as usize,
+                        );
+                        interior = (oj.kind == ir::OP_COPY || oj.kind == ir::OP_MOVE) && self.holds_mut(
+                            self.place_of(oj.data).ty,
+                            0,
+                        );
+                    }
+                    if kinds[j] != 2 && kinds[j] != 1 && !interior {
                         continue;
                     }
                     let mut jtok = replace(&mut self.owner().sc_tok_a, Vector::<u64>::new());
@@ -4048,7 +4292,7 @@ extend Gen {
                             pointee = pn.as_data.indirect_type.ty;
                         }
                     }
-                    if kinds[j] == 2 {
+                    if kinds[j] == 2 || interior {
                         self.lt_tokens(t.callee.module, pointee, &mut jtok, 0);
                     } else {
                         self.interior_tokens(t.callee.module, pointee, &mut jtok);
@@ -4071,11 +4315,16 @@ extend Gen {
                             let mut pointee_ty = jty;
                             if y.kind == TypeKind::TYPE_REFERENCE {
                                 pointee_ty = y.as_data.elem;
+                            } else if interior && self.mut_view_ty(jty) {
+                                // A `[]mut E` taken whole is written only in its elements.
+                                pointee_ty = self.owner().ast_of(bmod).instance(y.as_data.inst).args[0];
                             }
-                            if y.kind != TypeKind::TYPE_POINTER && self.owner().carries(bmod, pointee_ty) {
+                            if y.kind != TypeKind::TYPE_POINTER && (self.owner().carries(bmod, pointee_ty) || self.bounded_param(
+                                pointee_ty,
+                            )) {
                                 tor = self.origin_of_place(oj.data);
                                 owned = y.kind != TypeKind::TYPE_REFERENCE && !self.behind(oj.data);
-                                through = self.type_through(pointee_ty);
+                                through = self.type_through(pointee_ty) || interior;
                             }
                         }
                         for i in 0..ptyn.len() {
@@ -4090,7 +4339,14 @@ extend Gen {
                             }
                             let mut itok = replace(&mut self.owner().sc_tok_b, Vector::<u64>::new());
                             itok.truncate(0);
-                            self.arg_tokens(t.callee.module, oi.data, kinds[i], ptyn[i], &mut itok);
+                            if kinds[i] != 0 || !self.callable_out_tokens(
+                                t.callee.module,
+                                ptyn[i],
+                                self.place_of(oi.data).ty,
+                                &mut itok,
+                            ) {
+                                self.arg_tokens(t.callee.module, oi.data, kinds[i], ptyn[i], &mut itok);
+                            }
                             self.owner().rel_widen(self.rel, false, &mut itok);
                             if tokens_meet(&itok, &jtok) {
                                 let aor = self.origin_of_place(oi.data);
@@ -4165,7 +4421,14 @@ extend Gen {
                                 }
                                 let mut itok3 = replace(&mut self.owner().sc_tok_b, Vector::<u64>::new());
                                 itok3.truncate(0);
-                                self.arg_tokens(t.callee.module, oj.data, kinds[j], ptyn[j], &mut itok3);
+                                if kinds[j] != 0 || !self.callable_out_tokens(
+                                    t.callee.module,
+                                    ptyn[j],
+                                    self.place_of(oj.data).ty,
+                                    &mut itok3,
+                                ) {
+                                    self.arg_tokens(t.callee.module, oj.data, kinds[j], ptyn[j], &mut itok3);
+                                }
                                 self.owner().rel_widen(self.rel, false, &mut itok3);
                                 if tokens_meet(&itok3, &jtok0) {
                                     let e = self.store_arg_edge(t.callee.module, oj.data, kinds[j], ptyn[j], &jtok0);
@@ -4638,7 +4901,7 @@ extend Gen {
             self.op_read(rv.a, entry, s.span);
             self.op_read(rv.b, entry, s.span);
             self.calling = false;
-        } else if rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF || rv.c == ir::IN_TYPE_INFO || rv.c == ir::IN_DANGLING) {
+        } else if rv.kind == ir::RV_INTRINSIC && ir::type_payload(rv.c) {
             // No operands: `b` is the measured/described type.
         } else if rv.kind == ir::RV_AGGREGATE || rv.kind == ir::RV_INTRINSIC || rv.kind == ir::RV_SIMD {
             // A vector operation reads its operands; a store (whole, masked, scatter or compressing)
@@ -4863,6 +5126,7 @@ extend Owner {
             str_def: DefId { module: ss.mid, node: ss.node },
             unsafe_cell: DefId { module: uc.mid, node: uc.node },
             interior_memo: Map::<u64, u64>::new(),
+            cell_memo: Map::<u64, bool>::new(),
             free_ext: Map::<u64, u64>::new(),
             ext_built: false,
             owns_arr: Vector::<Vector<u64>>::new(),
@@ -4922,7 +5186,7 @@ extend Owner {
         return s;
     }
 
-    const fn span_text_is(self: &Self, m: ModuleId, sp: tok::Span, what: str) bool {
+    pub const fn span_text_is(self: &Self, m: ModuleId, sp: tok::Span, what: str) bool {
         let s = self.src_of(m);
         if sp.end <= sp.start || sp.end as usize > s.len() {
             return false;
@@ -5245,15 +5509,7 @@ extend Owner {
                 if tr.node == NODE_NONE {
                     continue;
                 }
-                let trn = self.ast_of(tr.module).at_const(tr.node);
-                if trn.kind != NodeKind::NODE_INTERFACE {
-                    continue;
-                }
-                if !self.span_text_is(
-                    tr.module,
-                    self.ast_of(tr.module).at_const(trn.as_data.interface_def.name).as_data.name.text,
-                    "Free",
-                ) {
+                if !self.p().is_prelude_item(tr, "Free") {
                     continue;
                 }
                 let tg = a.resolution_def(it.as_data.extend_def.target_type);
@@ -5302,12 +5558,7 @@ extend Owner {
             if bd.node == NODE_NONE {
                 continue;
             }
-            let bn = self.ast_of(bd.module).at_const(bd.node);
-            if bn.kind == NodeKind::NODE_INTERFACE && self.span_text_is(
-                bd.module,
-                self.ast_of(bd.module).at_const(bn.as_data.interface_def.name).as_data.name.text,
-                "Free",
-            ) {
+            if self.p().is_prelude_item(bd, "Free") {
                 return true;
             }
         }
@@ -5357,13 +5608,7 @@ extend Owner {
             }
         }
         for i in 0..n {
-            let a = self.ast_of(seen[i].module);
-            let cn = a.at_const(seen[i].node);
-            if cn.kind == NodeKind::NODE_INTERFACE && self.span_text_is(
-                seen[i].module,
-                a.at_const(cn.as_data.interface_def.name).as_data.name.text,
-                "Copy",
-            ) {
+            if self.p().is_prelude_item(seen[i], "Copy") {
                 return true;
             }
         }
@@ -5896,6 +6141,92 @@ extend Owner {
         }
         self.interior_memo.insert(key, mask);
         return mask;
+    }
+
+    /// Does a field or variant payload of declaration `(m, decl)`, through its declared types,
+    /// reach an `UnsafeCell` (its own type parameters aside: their arguments decide)? A recursive
+    /// type adds no cell by recursing.
+    pub fn decl_has_cell(self: &mut Self, m: ModuleId, decl: NodeId, depth: u32) bool {
+        if decl == NODE_NONE {
+            return false;
+        }
+        if m == self.unsafe_cell.module && decl == self.unsafe_cell.node || depth > 6 {
+            return true;
+        }
+        let key = m as u64 << 32 | decl as u64;
+        switch self.cell_memo.get(&key) {
+            Some(v) => {
+                return *v;
+            },
+            None => {},
+        };
+        let dn = *self.ast_of(m).at_const(decl);
+        if dn.kind != NodeKind::NODE_STRUCT && dn.kind != NodeKind::NODE_ENUM {
+            return false;
+        }
+        self.cell_memo.insert(key, false);
+        let mut r = false;
+        let ms = dn.as_data.aggregate.members;
+        for j in 0..ms.len {
+            let mn = unsafe self.ast_of(m).list(ms)[j as usize];
+            let mk = self.ast_of(m).at_const(mn).kind;
+            if mk == NodeKind::NODE_FIELD {
+                r = r || self.node_has_cell(m, self.ast_of(m).at_const(mn).as_data.field.ty, depth);
+            } else if mk == NodeKind::NODE_VARIANT {
+                let ps = self.ast_of(m).at_const(mn).as_data.variant.payload;
+                for k in 0..ps.len {
+                    let pn = unsafe self.ast_of(m).list(ps)[k as usize];
+                    let tn = if self.ast_of(m).at_const(pn).kind == NodeKind::NODE_FIELD {
+                        self.ast_of(m).at_const(pn).as_data.field.ty;
+                    } else {
+                        pn;
+                    };
+                    r = r || self.node_has_cell(m, tn, depth);
+                }
+            }
+        }
+        self.cell_memo.insert(key, r);
+        return r;
+    }
+
+    // Does type node `tyn` (module `m`) reach an `UnsafeCell` (`decl_has_cell`)?
+    fn node_has_cell(self: &mut Self, m: ModuleId, tyn: NodeId, depth: u32) bool {
+        if tyn == NODE_NONE {
+            return false;
+        }
+        if depth > 6 {
+            return true;
+        }
+        let n = *self.ast_of(m).at_const(tyn);
+        if n.kind == NodeKind::NODE_POINTER_TYPE || n.kind == NodeKind::NODE_REFERENCE_TYPE || n.kind == NodeKind::NODE_SLICE_TYPE {
+            return self.node_has_cell(m, n.as_data.indirect_type.ty, depth + 1);
+        }
+        if n.kind == NodeKind::NODE_ARRAY_TYPE {
+            return self.node_has_cell(m, n.as_data.array_type.element, depth + 1);
+        }
+        if n.kind == NodeKind::NODE_TUPLE_TYPE {
+            let es = n.as_data.array_literal.elements;
+            for i in 0..es.len {
+                if self.node_has_cell(m, unsafe self.ast_of(m).list(es)[i as usize], depth + 1) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if n.kind == NodeKind::NODE_DYN_TYPE {
+            return true;
+        }
+        if n.kind != NodeKind::NODE_TYPE_PATH {
+            return false;
+        }
+        let args = n.as_data.type_path.args;
+        for i in 0..args.len {
+            if self.node_has_cell(m, unsafe self.ast_of(m).list(args)[i as usize], depth + 1) {
+                return true;
+            }
+        }
+        let d = self.ast_of(m).path_def(tyn);
+        return d.node != NODE_NONE && self.decl_has_cell(d.module, d.node, depth + 1);
     }
 
     // The parameters of `decl` (module `m`) that type node `tyn` places in an interior position.

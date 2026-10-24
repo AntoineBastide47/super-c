@@ -793,3 +793,15 @@ fn exit_cases_00() {
     int_switches(&mut b);
     b.run();
 }
+
+// A local reached only through borrows (each indexing borrows it) declares at its initializer: a
+// separate declaration and assignment of a returned struct whose address escapes costs C a temporary
+// and a copy, a whole extra frame of the struct in a recursion.
+@test
+fn borrowed_local_declares_at_its_initializer() {
+    h::expect_c(
+        "an indexed array wrapper",
+        "fn f(n: u64) u64 {\n    let mut pad = Array::<u64, 8>::new();\n    pad[7] = n;\n    return pad[7] + n;\n}\nfn main() i32 { return f(1) as i32 - 2; }\n",
+        "Array__u64__8 pad = ",
+    );
+}

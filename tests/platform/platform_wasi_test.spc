@@ -56,7 +56,7 @@ fn main() i32 {
     let va: []u8 = a;
     let vb: []u8 = b;
     let mut same = true;
-    for i in 0..32 {
+    for i in 0..32usize {
         same = same && va[i] == vb[i];
     }
     check("entropy differs", !same);

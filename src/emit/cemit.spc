@@ -17,6 +17,7 @@ import emit::simd_plan as sp;
 import ir::cpu_features as cf;
 import ir::inline as inl;
 import emit::rt_h as rth;
+import typechecker::render as rnd;
 
 /// Nesting bound for the recursive renderers (operands through inlined temporaries, structured
 /// control flow through regions): clang's default bracket depth, past which the C would not
@@ -959,21 +960,16 @@ extend CEmit {
         }
     }
 
-    // The source name of aggregate declaration `decl` in module `m`.
-    const fn agg_name<'a>(self: &Self, m: ModuleId, decl: NodeId) str<'a> {
-        let da = self.p().module_ast_const(m);
-        let sp = unsafe (*da).at_const(unsafe (*da).at_const(decl).as_data.aggregate.name).as_data.name.text;
-        return self.p().modules.at(m as usize).source.as_str().slice(sp.start as usize, sp.end as usize);
+    // Is declaration (m, decl) the prelude's type `name`? A user type of that name is not.
+    const fn is_prelude(self: &Self, m: ModuleId, decl: NodeId, name: str) bool {
+        return self.p().is_prelude_item(DefId { module: m, node: decl }, name);
     }
 
-    // The prelude `str` view type (STRUCT named `str` in a prelude module).
+    // The prelude `str` view type.
     const fn is_str_ty(self: &Self, rm: ModuleId, rt: TypeId) bool {
         let a = self.p().module_ast_const(rm);
         let y = *unsafe (*a).type_at(rt);
-        if y.kind != TypeKind::TYPE_STRUCT || !self.p().modules.at(y.module as usize).prelude {
-            return false;
-        }
-        return self.agg_name(y.module, y.as_data.decl) == "str";
+        return y.kind == TypeKind::TYPE_STRUCT && self.is_prelude(y.module, y.as_data.decl, "str");
     }
 
     // The cast that prefixes each operand of comparison `t` over operand type `rt`: an ordered raw-pointer
@@ -1277,7 +1273,7 @@ extend CEmit {
                             param_box = true;
                         } else if pe != TYPE_NONE && unsafe (*fap).type_at(pe).kind == TypeKind::TYPE_INSTANCE {
                             let pit = *unsafe (*fap).instance(unsafe (*fap).type_at(pe).as_data.inst);
-                            param_box = self.agg_name(pit.module, pit.decl) == "Box";
+                            param_box = self.is_prelude(pit.module, pit.decl, "Box");
                         }
                     }
                 }
@@ -1326,7 +1322,7 @@ extend CEmit {
         if ay.kind == TypeKind::TYPE_INSTANCE {
             let a2 = self.p().module_ast_const(rm);
             let it = *unsafe (*a2).instance(ay.as_data.inst);
-            if !param_box && self.agg_name(it.module, it.decl) == "Box" {
+            if !param_box && self.is_prelude(it.module, it.decl, "Box") {
                 // A folded definition (`&b`) binds looser than the member access.
                 let op9 = *b.operands.at(opid as usize);
                 let folded = op9.kind != ir::OP_CONST && b.places.at(op9.data as usize).proj_len == 0 && *self.sx_inline.at(
@@ -1934,7 +1930,7 @@ extend CEmit {
             return false;
         }
         let it = *unsafe (*self.p().module_ast_const(rm)).instance(y.as_data.inst);
-        return self.p().modules.at(it.module as usize).prelude && self.agg_name(it.module, it.decl) == "SliceMut";
+        return self.is_prelude(it.module, it.decl, "SliceMut");
     }
 
     // Does body `b` take a `[]mut T` by value? Its definition `<name>__r` then receives each one as a
@@ -2567,6 +2563,11 @@ extend CEmit {
             if dty != TYPE_NONE && self.erased(b, dty) {
                 continue;
             }
+            if rv.kind != ir::RV_USE && tempish && dstore == ir::LS_TEMP && *self.sx_uses.at(pl.base as usize) == 1 {
+                // A retyped temporary read once (a reference made a raw pointer for an argument): both
+                // fold into the read (`compute_inline`), which a merged destination could not.
+                continue;
+            }
             if binding_source {
                 self.sx_coal.set(sp.base as usize, pl.base);
                 coal_root.set(pl.base as usize, true);
@@ -3065,11 +3066,20 @@ extend CEmit {
             let ap = *b.places.at(rv.a as usize);
             let ab = (*self.sx_coal.at(ap.base as usize)) as usize;
             let mut stays = ab != l && *self.sx_inline.at(ab) == ir::IR_NONE;
+            let mut prev = b.locals.at(ap.base as usize).ty;
             for i in 0..ap.proj_len {
                 let pj = *b.projections.at((ap.proj_start + i) as usize);
-                if pj.kind == ir::PJ_INDEX_OP || pj.kind == ir::PJ_DEREF && (i != 0 || writes[ab] != 0) {
+                // An operand index stays only into an array held in place (an index through a pointer
+                // reads the pointer again where the use spells it).
+                if pj.kind == ir::PJ_INDEX_OP && (prev == TYPE_NONE || self.rty_y(b, prev).kind != TypeKind::TYPE_ARRAY || !self.fixed_index(
+                    b,
+                    pj.data,
+                    &writes,
+                    &bad,
+                )) || pj.kind == ir::PJ_DEREF && (i != 0 || writes[ab] != 0) {
                     stays = false;
                 }
+                prev = pj.ty;
             }
             if stays {
                 self.sx_inline.set(l, defrv[l]);
@@ -3082,6 +3092,27 @@ extend CEmit {
         self.uput(bare);
         self.uput(merged);
         self.bput(bad);
+    }
+
+    // `fold_addresses`: does index operand `opid` keep its value wherever the folded place is spelled?
+    // A constant, a temporary written once or an argument never written, whose address is never taken.
+    fn fixed_index(self: &Self, b: &ir::CoreBody, opid: u32, writes: &Vector<u32>, bad: &Vector<bool>) bool {
+        let op = *b.operands.at(opid as usize);
+        if op.kind == ir::OP_CONST {
+            return true;
+        }
+        let pl = *b.places.at(op.data as usize);
+        if pl.proj_len != 0 {
+            return false;
+        }
+        let st = b.locals.at(pl.base as usize).storage;
+        let r = (*self.sx_coal.at(pl.base as usize)) as usize;
+        let most = if st == ir::LS_ARG {
+            0u32;
+        } else {
+            1u32;
+        };
+        return (st == ir::LS_TEMP || st == ir::LS_INL || st == ir::LS_ARG) && writes[r] <= most && !bad[r];
     }
 
     // `fold_addresses`: a use of place `p` disqualifies its root unless it dereferences it first.
@@ -3596,7 +3627,7 @@ extend CEmit {
         if c == ir::IN_BOUNDS {
             return i < 2;
         }
-        if c == ir::IN_BOUNDS_GROUP || c == ir::IN_RANGE_BOUNDS {
+        if c == ir::IN_BOUNDS_GROUP || c == ir::IN_RANGE_BOUNDS || c == ir::IN_GROUP_FITS {
             return i < 3;
         }
         if c == ir::IN_BOUNDS_PROVEN || c == ir::IN_BOUNDS_GROUP_PROVEN {
@@ -5034,7 +5065,8 @@ extend CEmit {
                 decl_ok = self.untyped_ret_struct(b, l as u32, &mut rs);
                 self.sput(rs);
             }
-            if *nread.at(l) == 0 || !decl_ok {
+            // A borrowed local is read through its borrows (`&mut a.data[i]` of an indexing).
+            if *nread.at(l) == 0 && !*borrowed.at(l) || !decl_ok {
                 continue;
             }
             {
@@ -8066,8 +8098,11 @@ extend CEmit {
                 let yS = *unsafe (*self.p().module_ast_const(rmS)).type_at(rtS);
                 if yS.kind == TypeKind::TYPE_INSTANCE {
                     let itS = *unsafe (*self.p().module_ast_const(rmS)).instance(yS.as_data.inst);
-                    let nm9 = self.agg_name(itS.module, itS.decl);
-                    if (nm9 == "Slice" || nm9 == "SliceMut") && itS.n >= 1 {
+                    if (self.is_prelude(itS.module, itS.decl, "Slice") || self.is_prelude(
+                        itS.module,
+                        itS.decl,
+                        "SliceMut",
+                    )) && itS.n >= 1 {
                         let mut lhs9 = self.sget();
                         let mut cast9 = self.sget();
                         let mut et9 = self.sget();
@@ -10604,8 +10639,7 @@ extend CEmit {
                 if r == ir::RV_SLICE {
                     CEmit::lf_read(b, cf, rv.item.node, bu, k, &mut seen, &mut bad, &dblk, &dk);
                 }
-                let pool = r == ir::RV_AGGREGATE || r == ir::RV_CLOSURE || r == ir::RV_SIMD || r == ir::RV_INTRINSIC && rv.c as u32 != ir::IN_SIZEOF as u32 && rv.c as u32 != ir::IN_ALIGNOF as u32;
-                for j in 0..pick(pool, rv.b, 0u32) {
+                for j in 0..pick(ir::has_op_range(&rv), rv.b, 0u32) {
                     CEmit::lf_read(b, cf, b.oper_pool[(rv.a + j) as usize], bu, k, &mut seen, &mut bad, &dblk, &dk);
                 }
             }
@@ -11690,8 +11724,15 @@ extend CEmit {
                     if ek2 == TypeKind::TYPE_INSTANCE {
                         let a3 = self.p().module_ast_const(nm2);
                         let it3 = *unsafe (*a3).instance(unsafe (*a3).type_at(nt2).as_data.inst);
-                        let nm3s = self.agg_name(it3.module, it3.decl);
-                        hop = nm3s == "Array" || nm3s == "Vector" || nm3s == "Slice" || nm3s == "SliceMut";
+                        hop = self.is_prelude(it3.module, it3.decl, "Array") || self.is_prelude(
+                            it3.module,
+                            it3.decl,
+                            "Vector",
+                        ) || self.is_prelude(it3.module, it3.decl, "Slice") || self.is_prelude(
+                            it3.module,
+                            it3.decl,
+                            "SliceMut",
+                        );
                     }
                     if !hop {
                         // Raw pointer arithmetic subscripts the pointer itself.
@@ -11729,7 +11770,7 @@ extend CEmit {
                 let mut wrapped = unsafe (*a2).type_at(rt2).kind == TypeKind::TYPE_POINTER;
                 if unsafe (*a2).type_at(rt2).kind == TypeKind::TYPE_INSTANCE {
                     let it2 = *unsafe (*a2).instance(unsafe (*a2).type_at(rt2).as_data.inst);
-                    let arr_st = self.agg_name(it2.module, it2.decl) == "Array";
+                    let arr_st = self.is_prelude(it2.module, it2.decl, "Array");
                     dst.push_str(mbe::if_s(arr_st, ".data", ".ptr"));
                     wrapped = !arr_st;
                 } else if self.is_str_ty(rm2, rt2) {
@@ -13584,9 +13625,7 @@ extend CEmit {
             if mname8 == "free" {
                 let interface_decl = self.mg.in_interface(callee.module, callee.node);
                 assert(interface_decl != NODE_NONE);
-                let interface_name = unsafe (*ca8).at_const(interface_decl).as_data.interface_def.name;
-                let interface_span = unsafe (*ca8).at_const(interface_name).as_data.name.text;
-                if msrc8.slice(interface_span.start as usize, interface_span.end as usize) == "Free" {
+                if self.is_prelude(callee.module, interface_decl, "Free") {
                     if !self.free_expr(rm6, rt6, sym) {
                         return false;
                     }
@@ -15111,8 +15150,7 @@ extend CEmit {
         }
         let y = self.rty_y(b, b.operands.at(opid as usize).ty);
         if y.kind == TypeKind::TYPE_STRUCT {
-            let nm = self.agg_name(y.module, y.as_data.decl);
-            if nm == "str" {
+            if self.is_prelude(y.module, y.as_data.decl, "str") {
                 o.push_str("fprintf(stderr, \"  ");
                 o.push_str(label);
                 o.push_str(" \\\"%.*s\\\"\\n\", (int)(");
@@ -16300,8 +16338,7 @@ extend CEmit {
             return false;
         }
         let it = *unsafe (*self.p().module_ast_const(rm)).instance(yw.as_data.inst);
-        let nmi = self.agg_name(it.module, it.decl);
-        if nmi != "Slice" && nmi != "SliceMut" {
+        if !self.is_prelude(it.module, it.decl, "Slice") && !self.is_prelude(it.module, it.decl, "SliceMut") {
             return false;
         }
         let mk = dst.len();
@@ -16784,16 +16821,17 @@ extend CEmit {
                 return true;
             }
             if y.kind == TypeKind::TYPE_INSTANCE {
+                // The views measure by their `len` field, std's `Array` by its storage; nothing else
+                // takes RV_LEN.
                 let dai = self.p().module_ast_const(rm);
                 let it = *unsafe (*dai).instance(y.as_data.inst);
-                let nm = self.agg_name(it.module, it.decl);
-                if nm == "Slice" || nm == "SliceMut" || nm == "Vector" || nm == "String" {
+                if self.is_prelude(it.module, it.decl, "Slice") || self.is_prelude(it.module, it.decl, "SliceMut") {
                     dst.push_str("(");
                     let ok = self.emit_place(b, rv.a, dst);
                     dst.push_str(").len");
                     return ok;
                 }
-                if nm == "Array" {
+                if self.is_prelude(it.module, it.decl, "Array") {
                     let mut pv = self.sget();
                     let ok = self.emit_place(b, rv.a, &mut pv);
                     dst.push_str("(sizeof((");
@@ -16893,6 +16931,28 @@ extend CEmit {
                 dst.push_str(mbe::if_s(k == ir::IN_SIZEOF as u32, "sizeof(", "_Alignof("));
                 let ok = self.ty_c(b.module, rv.b, "", dst);
                 dst.push_str(")");
+                return ok;
+            }
+            if k == ir::IN_TYPE_NAME as u32 {
+                // The instance's spelling, as a `str` literal.
+                if rv.b == TYPE_NONE {
+                    return self.fail("type-name");
+                }
+                let mut rm = b.module;
+                let mut rt = rv.b;
+                self.rty(b, rv.b, &mut rm, &mut rt);
+                let mut nm = self.sget();
+                rnd::render_qualified_name(self.p(), self.p().module_ast_const(rm), rt, &mut nm);
+                let mut lit = self.sget();
+                lit.push_str("\"");
+                push_c_escaped(nm.as_str(), &mut lit);
+                lit.push_str("\"");
+                dst.push_str("(");
+                let ok = self.ty_c(b.module, rv.target, "", dst);
+                dst.push_str(")");
+                push_c_str_view(lit.as_str(), dst);
+                self.sput(lit);
+                self.sput(nm);
                 return ok;
             }
             if k == ir::IN_TYPE_INFO as u32 {
@@ -17071,6 +17131,9 @@ extend CEmit {
             if k == ir::IN_BOUNDS_GROUP_PROVEN as u32 {
                 return self.emit_operand(b, b.oper_pool[rv.a as usize], dst);
             }
+            if k == ir::IN_GROUP_FITS as u32 {
+                return self.emit_intrinsic_call(b, "__sc_fits(", rv.a, 3, dst);
+            }
             if k == ir::IN_RANGE_BOUNDS as u32 {
                 return self.emit_intrinsic_call(b, "__sc_range(", rv.a, 3, dst);
             }
@@ -17178,7 +17241,7 @@ extend CEmit {
                 if oy.kind == TypeKind::TYPE_INSTANCE {
                     let a9 = self.p().module_ast_const(om);
                     let it9 = *unsafe (*a9).instance(oy.as_data.inst);
-                    if self.agg_name(it9.module, it9.decl) == "Box" && it9.n > 0 {
+                    if self.is_prelude(it9.module, it9.decl, "Box") && it9.n > 0 {
                         let mut em = om;
                         let mut et = it9.args[0];
                         if !self.mg.resolve(om, it9.args[0], &mut em, &mut et) {
@@ -17249,7 +17312,7 @@ extend CEmit {
         let mut is_arri = false;
         if !is_arr && by.kind == TypeKind::TYPE_INSTANCE {
             let itA = *unsafe (*self.p().module_ast_const(rm)).instance(by.as_data.inst);
-            is_arri = self.agg_name(itA.module, itA.decl) == "Array";
+            is_arri = self.is_prelude(itA.module, itA.decl, "Array");
         }
         if ok {
             dst.push_str("(");
@@ -17806,13 +17869,8 @@ extend CEmit {
             if bd.node == NODE_NONE {
                 continue;
             }
-            let ba = self.p().module_ast_const(bd.module);
-            let bn = unsafe (*ba).at_const(bd.node);
-            if bn.kind == NodeKind::NODE_INTERFACE {
-                let ns = unsafe (*ba).at_const(bn.as_data.interface_def.name).as_data.name.text;
-                if self.p().modules.at(bd.module as usize).source.as_str().slice(ns.start as usize, ns.end as usize) == "Free" {
-                    return true;
-                }
+            if self.p().is_prelude_item(bd, "Free") {
+                return true;
             }
         }
         return false;

@@ -107,41 +107,41 @@ fn ok() {
 fn errors() {
     h::expect_err_msg(
         "use after move",
-        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn main() i32 { let a = R { t: 1 }; let b = a; return a.t; }\n",
+        "struct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn main() i32 { let a = R { t: 1 }; let b = a; return a.t; }\n",
         "use of moved value",
     );
     h::expect_err_msg(
         "use after conditional move",
-        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) {}\nfn main() i32 { let a = R { t: 1 }; if true { take(a); } return a.t; }\n",
+        "struct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) {}\nfn main() i32 { let a = R { t: 1 }; if true { take(a); } return a.t; }\n",
         "use of moved value",
     );
     h::expect_err_msg(
         "use after move on both branches",
-        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) {}\nfn main() i32 { let a = R { t: 1 }; if true { take(a); } else { take(a); } return a.t; }\n",
+        "struct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) {}\nfn main() i32 { let a = R { t: 1 }; if true { take(a); } else { take(a); } return a.t; }\n",
         "use of moved value",
     );
     h::expect_ok(
         "sibling-branch move does not taint the other arm",
-        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) {}\nfn main() i32 { let a = R { t: 1 }; if false { take(a); } else { return a.t; } return 0; }\n",
+        "struct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) {}\nfn main() i32 { let a = R { t: 1 }; if false { take(a); } else { return a.t; } return 0; }\n",
     );
     h::expect_err_msg(
         "use after explicit free",
-        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) {}\nfn main() i32 { let mut a = R { t: 1 }; a.free(); return a.t; }\n",
+        "struct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) {}\nfn main() i32 { let mut a = R { t: 1 }; a.free(); return a.t; }\n",
         "use after free",
     );
     h::expect_err_msg(
         "use after by-value-self method call",
-        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) {}\nextend R { fn consume(self: R) i32 { return self.t; } }\nfn main() i32 { let a = R { t: 1 }; let x = a.consume(); return a.t; }\n",
+        "struct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) {}\nextend R { fn consume(self: R) i32 { return self.t; } }\nfn main() i32 { let a = R { t: 1 }; let x = a.consume(); return a.t; }\n",
         "use of moved value",
     );
     h::expect_ok(
         "by-ref-self method call does not consume the receiver",
-        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) {}\nextend R { fn peek(self: &R) i32 { return self.t; } }\nfn main() i32 { let a = R { t: 1 }; let x = a.peek(); return a.t + x; }\n",
+        "struct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn take(r: R) {}\nextend R { fn peek(self: &R) i32 { return self.t; } }\nfn main() i32 { let a = R { t: 1 }; let x = a.peek(); return a.t + x; }\n",
     );
     // A raw pointer copies, also to a Free type: a struct field takes it and the parameter stays usable.
     h::expect_ok(
         "raw pointer to a Free type copies",
-        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nstruct H { pub p: *mut R, pub t: i32 }\nfn mk(p: *mut R) H { return H { p: p, t: unsafe (*p).t }; }\n",
+        "struct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nstruct H { pub p: *mut R, pub t: i32 }\nfn mk(p: *mut R) H { return H { p: p, t: unsafe (*p).t }; }\n",
     );
     h::expect_err_msg(
         "read of uninitialized binding",
@@ -160,7 +160,7 @@ fn errors() {
     );
     h::expect_err_msg(
         "deferred-init Free binding",
-        "interface Free { fn free(self: &mut Self); }\nstruct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn main() i32 { let mut x: R; x = R { t: 1 }; return 0; }\n",
+        "struct R { pub t: i32 }\nextend R as Free { fn free(self: &mut Self) {} }\nfn main() i32 { let mut x: R; x = R { t: 1 }; return 0; }\n",
         "must be initialized when declared",
     );
     h::expect_ok("definitely initialized before read", "fn main() i32 { let mut x: i32; x = 7; return x; }\n");
@@ -7877,7 +7877,7 @@ fn arrays_have_no_equality() {
     h::expect_err_msg(
         "a float index literal",
         "fn f(s: []i32) i32 { return s[1.5]; }\nfn main() i32 { return 0; }\n",
-        "index must be an integer",
+        "expected 'usize', found 'f32'",
     );
 }
 
@@ -7942,9 +7942,29 @@ fn whole_value_writes_through_self_fold(b: &mut h::ExitBatch) {
     );
 }
 
+// A reference into a raw-pointer slot, made a pointer by an argument's coercion or by `as`, writes the
+// place it points at: the stored scalar keeps the place's type, so a pointer view of it folds.
+fn raw_pointer_writes_fold(b: &mut h::ExitBatch) {
+    b.add(
+        "writes through coerced pointers fold",
+        "fn put(out: *mut i64) u64 {\n    unsafe *out = 3;\n    return 4;\n}\nfn coerced() u64 {\n    let mut e: i64 = 0;\n    let s = put(&mut e);\n    return s + e as u64;\n}\nfn cast() u64 {\n    let mut e: i64 = 0;\n    let r = &mut e;\n    let s = put(r as *mut i64);\n    return s + e as u64;\n}\nstatic_assert(coerced() == 7 && cast() == 7);\nstatic_assert(f128::from_f64(1.5) + f128::from_f64(2.0) == f128::from_f64(3.5));\nfn main() i32 {\n    return (coerced() + cast()) as i32 - 14;\n}\n",
+        0,
+    );
+}
+
+// The `index` parameter types the index expression, as a parameter types its argument: the arms of an
+// `if` or a `switch` index take `usize`.
+fn index_parameter_types_the_index(b: &mut h::ExitBatch) {
+    b.add(
+        "branchy index expressions",
+        "fn pick(v: &Vector<u32>, s: []u32, c: bool) u32 {\n    let a = (*v)[if c { 1; } else { 0; }];\n    let x = s[switch 0 { _ => { 1; } }];\n    return a + x;\n}\nfn main() i32 {\n    let mut v = Vector::<u32>::new();\n    v.push(1);\n    v.push(2);\n    let s: []u32 = v[0..2];\n    return pick(&v, s, true) as i32 - 4;\n}\n",
+        0,
+    );
+}
+
 // Every borrow reads the place's current value: a `&mut` of a moved or uninitialized place is a use
 // of it, so its holder cannot read or drop stale bytes. An index operand that moves the indexed
-// value leaves the access a use of a moved value.
+// value moves it while the outer access's `index_mut` call, evaluated first, borrows it.
 @test
 fn mut_borrow_requires_init() {
     h::expect_err_msg(
@@ -7960,7 +7980,7 @@ fn mut_borrow_requires_init() {
     h::expect_err_msg(
         "an index operand moves the indexed vector",
         "fn main() i32 {\n    let mut row = Vector::<i32>::new();\n    row.push(42);\n    let mut arr = Vector::<Vector<i32>>::new();\n    arr.push(row);\n    let alias = &mut arr[0][switch 0 { _ => { let moved = arr; 0usize; } }];\n    return *alias;\n}\n",
-        "use of moved value",
+        "cannot move this value while it is borrowed",
     );
 }
 
@@ -8201,7 +8221,7 @@ fn mut_view_sub_slices_reborrow() {
     h::expect_err_msg(
         "a write through a []mut while its sub-view lives",
         "fn main() i32 {\n    let mut a: [i32; 4] = [1, 2, 3, 4];\n    let x: []mut i32 = a;\n    let y = x[0..2];\n    x[0] = 9;\n    return y[0];\n}\n",
-        "cannot assign to this value while it is borrowed",
+        "cannot borrow this value as mutable while it is already borrowed as immutable",
     );
     h::expect_err_msg(
         "a []mut and its shared sub-view passed together",
@@ -8394,6 +8414,8 @@ fn exit_cases_00() {
 fn exit_cases_01() {
     let mut b = h::ExitBatch::new();
     whole_value_writes_through_self_fold(&mut b);
+    raw_pointer_writes_fold(&mut b);
+    index_parameter_types_the_index(&mut b);
     arch_gate(&mut b);
     platform_gate_values(&mut b);
     arm_value_programs(&mut b);

@@ -125,7 +125,11 @@ four ordered steps:
 The same order binds new std surface that the release cannot parse or fold, except a new
 `@intrinsic`: a release whose `--bootstrap-tags` accepts unknown intrinsics builds a std that declares
 and calls one, as long as the compiler's own build emits no body that calls it, so the intrinsic,
-its lowering and its std use land in one commit. The formatter
+its lowering and its std use land in one commit. A new `TypeInfo` field is such surface: a release
+fills only the fields it knows and builds no descriptor otherwise (`SC_CEMIT_STATS=1` shows
+`cemit-reflect: N skipped`, then "the backend refused N emissions"), and std's derive helpers
+(`reflect_string`) build descriptors in the compiler's own build. std code the release's checkers
+reject is too: until the release that accepts it, std writes a form both accept. The formatter
 ships in the same commit as the parser: an old `fmt` deletes syntax it does not know. Until
 step 4, tests embed the new syntax only inside string literals.
 

@@ -162,30 +162,34 @@ extend<T> SliceMut<T> {
     }
 }
 
-// Index conformances. The `[]` operator on slice VALUES keeps its inline lowering (the compiler builds
-// the `{ptr,len}` view directly), so these exist for interface bounds (`fn f<C: Index<i32, []i32>>`) and
-// direct calls. Bounds-checked (panic) like the rest of the surface; `get_unsafe` is the unchecked tier.
-// `index_range` honors the written bounds: `..=` includes `r.end`; an open end arrives as `len()`.
+// Index conformances: the `[]` operator on a view calls them. Bounds-checked (panic) like the rest of
+// the surface; `get_unsafe` is the unchecked tier. `index_range` honors the written bounds: `..=`
+// includes `r.end`; an open end arrives as `len()`. A shared view's element and sub-view borrow what
+// the view borrows, not the view itself.
 extend<T> Slice<T> as Index<T, []T> {
-    pub const fn index(self: &Slice<T>, i: usize) &T {
+    pub const fn index<'a>(self: &Slice<'a, T>, i: usize) &'a T {
         if i >= self.len {
-            panic("Slice[i]: index out of bounds");
+            panic_parts("Slice<T>", "[i]: index out of bounds");
         }
         return &unsafe self.ptr[i];
     }
-    pub const fn index_range(self: &Slice<T>, r: Range<usize>) []T {
-        // Inclusive ends validate before `end + 1` so `end == usize::MAX` cannot wrap past the
-        // check. Every std range method keeps this order.
-        if r.inclusive && r.end >= self.len {
-            panic("Slice[a..b]: range out of bounds");
-        }
+    @always_inline
+    pub const fn index_range<'a>(self: &Slice<'a, T>, r: Range<usize>) []'a T {
+        // An inclusive end validates before `end + 1`, so `end == usize::MAX` cannot wrap past the
+        // check. One comparison per guard: the bounds-check pass removes each it proves.
         let hi = if r.inclusive {
+            if r.end >= self.len {
+                panic_parts("Slice<T>", "[a..b]: range out of bounds");
+            }
             r.end + 1;
         } else {
             r.end;
         };
-        if r.start > hi || hi > self.len {
-            panic("Slice[a..b]: range out of bounds");
+        if hi > self.len {
+            panic_parts("Slice<T>", "[a..b]: range out of bounds");
+        }
+        if r.start > hi {
+            panic_parts("Slice<T>", "[a..b]: range out of bounds");
         }
         return unsafe Slice::<T> { ptr: self.ptr + r.start, len: hi - r.start };
     }
@@ -194,21 +198,27 @@ extend<T> Slice<T> as Index<T, []T> {
 extend<T> SliceMut<T> as Index<T, []T> {
     pub const fn index(self: &SliceMut<T>, i: usize) &T {
         if i >= self.len {
-            panic("SliceMut[i]: index out of bounds");
+            panic_parts("SliceMut<T>", "[i]: index out of bounds");
         }
         return &unsafe self.ptr[i];
     }
+    @always_inline
     pub const fn index_range(self: &SliceMut<T>, r: Range<usize>) []T {
-        if r.inclusive && r.end >= self.len {
-            panic("Slice[a..b]: range out of bounds");
-        }
+        // An inclusive end validates before `end + 1`, so `end == usize::MAX` cannot wrap past the
+        // check. One comparison per guard: the bounds-check pass removes each it proves.
         let hi = if r.inclusive {
+            if r.end >= self.len {
+                panic_parts("SliceMut<T>", "[a..b]: range out of bounds");
+            }
             r.end + 1;
         } else {
             r.end;
         };
-        if r.start > hi || hi > self.len {
-            panic("Slice[a..b]: range out of bounds");
+        if hi > self.len {
+            panic_parts("SliceMut<T>", "[a..b]: range out of bounds");
+        }
+        if r.start > hi {
+            panic_parts("SliceMut<T>", "[a..b]: range out of bounds");
         }
         return unsafe Slice::<T> { ptr: self.ptr + r.start, len: hi - r.start };
     }
@@ -217,21 +227,27 @@ extend<T> SliceMut<T> as Index<T, []T> {
 extend<T> SliceMut<T> as IndexMut<T, []mut T> {
     pub const fn index_mut(self: &mut SliceMut<T>, i: usize) &mut T {
         if i >= self.len {
-            panic("SliceMut[i]: index out of bounds");
+            panic_parts("SliceMut<T>", "[i]: index out of bounds");
         }
         return &mut unsafe self.ptr[i];
     }
+    @always_inline
     pub const fn index_range_mut(self: &mut SliceMut<T>, r: Range<usize>) []mut T {
-        if r.inclusive && r.end >= self.len {
-            panic("SliceMut[a..b]: range out of bounds");
-        }
+        // An inclusive end validates before `end + 1`, so `end == usize::MAX` cannot wrap past the
+        // check. One comparison per guard: the bounds-check pass removes each it proves.
         let hi = if r.inclusive {
+            if r.end >= self.len {
+                panic_parts("SliceMut<T>", "[a..b]: range out of bounds");
+            }
             r.end + 1;
         } else {
             r.end;
         };
-        if r.start > hi || hi > self.len {
-            panic("SliceMut[a..b]: range out of bounds");
+        if hi > self.len {
+            panic_parts("SliceMut<T>", "[a..b]: range out of bounds");
+        }
+        if r.start > hi {
+            panic_parts("SliceMut<T>", "[a..b]: range out of bounds");
         }
         return unsafe SliceMut::<T> { ptr: self.ptr + r.start, len: hi - r.start };
     }

@@ -272,6 +272,56 @@ fn binding_and_qualifier_tokens() {
     assert(d2.is_some() && d2.unwrap().start == a.find("abs)") as u32, "the binding is its own definition");
 }
 
+// Go-to-definition, hover and implementations on an operator name the method the checker chose for
+// it: a conformance in the module, a bound's interface method, and std's `Index` and `Simd` `Add`.
+@test
+fn operators_define_to_their_method() {
+    let a = "import std::simd;\nstruct P {\n    pub x: i32,\n}\nextend P as Add {\n    type Output = P;\n    pub fn add(self: &Self, o: &P) P {\n        return P { x: self.x + o.x };\n    }\n}\nextend P as Neg {\n    type Output = P;\n    pub fn neg(self: &Self) P {\n        return P { x: 0 - self.x };\n    }\n}\nfn sum<T: Add<Output = T>>(a: T, b: T) T {\n    return a + b;\n}\nfn main() i32 {\n    let p = P { x: 1 };\n    let mut q = p + p;\n    q = -q;\n    q += p;\n    let mut v = Vector::<i32>::new();\n    v.push(sum(p, p).x);\n    let s = Simd::<f32, 4>::splat(1.0);\n    let t = s + s;\n    let w = &v;\n    v[0] = w[0];\n    return q.x + v[0..1].len() as i32 + t[0] as i32;\n}\n";
+    let ws = ws_of(a, "", "", "");
+    let mut ovf = Vector::<String>::new();
+    let mut ovt = Vector::<String>::new();
+    ov(&ws, "a.spc", a, &mut ovf, &mut ovt);
+    let mut diags = Vector::<an::DiagRec>::new();
+    let p = fresh(&ws, &ovf, &ovt, &mut diags);
+    for i in 0..diags.len() {
+        assert(diags.at(i).severity != 1, diags.at(i).msg.as_str());
+    }
+    let m = mod_of(&p, "/a.spc");
+    // (operator site, file of the method, method name).
+    let want = [
+        ("+ p;", "/a.spc", "add"),
+        ("-q;", "/a.spc", "neg"),
+        ("+= p", "/a.spc", "add"),
+        ("+ b;", "std/interfaces.spc", "add"),
+        ("[0] =", "std/vector.spc", "index_mut"),
+        ("] =", "std/vector.spc", "index_mut"),
+        ("[0];", "std/vector.spc", "index"),
+        ("[0..1]", "std/vector.spc", "index_range"),
+        ("+ s;", "std/simd.spc", "add"),
+    ];
+    for w in want {
+        let off = a.find(w.0) as u32;
+        let d = feat::definition(&p, m, off);
+        assert(d.is_some(), w.0);
+        let l = d.unwrap();
+        let dm = p.modules.at(l.module as usize);
+        assert(dm.file.as_str().ends_with(w.1), w.0);
+        assert(dm.source.as_str().slice(l.start as usize, l.end as usize) == w.2, w.0);
+        let h = feat::hover(&p, m, off);
+        assert(h.is_some() && h.unwrap().as_str().contains("fn"), w.0);
+    }
+    // An operand still names its own declaration.
+    let d = feat::definition(&p, m, a.find("p + p") as u32);
+    assert(d.is_some() && d.unwrap().start == a.find("p = P") as u32, "an operand");
+    // From the bound's operator, the implementations are the conformances of `Add`.
+    let im = feat::implementations(&p, m, a.find("+ b;") as u32);
+    let mut local = false;
+    for i in 0..im.len() {
+        local = local || im.at(i).module as usize == m && im.at(i).start == a.find("add(self") as u32;
+    }
+    assert(local, "the module's conformance implements the bound's method");
+}
+
 // Multiset equality over the semantic identity of each record.
 fn diags_equal(a: &Vector<an::DiagRec>, b: &Vector<an::DiagRec>) bool {
     if a.len() != b.len() {

@@ -126,9 +126,11 @@ A struct literal names each field once ("field 'x' is initialized twice"). A fie
 zero-filled, so it must be visible at the literal and its type valid as zero bytes: scalars, raw
 pointers, vectors, arrays, unions and structs of such, an enum without payloads or written
 discriminants, an extern opaque type with a layout (`@layout`, `@value`: C's static
-initialization), and the prelude views and containers (`str`, `String`, `Vector`, `Array`, `Map`, `Set`, `Slice`,
-`SliceMut`). Else it is "missing field 'f': an omitted field is zero-filled, and zero is not a valid
-value of its type here" (a `&T`, `Box`, `fn` field, ...). A union literal sets one member.
+initialization), and a type asserting `Zeroable` (`unsafe extend T as Zeroable {}`: its private fields
+hold no invariant at zero, each field's type still checked), as std's `str`, `String`, `Vector`, `Array`,
+`Map` and `Set` do ("asserting 'Zeroable' requires 'unsafe extend'"). Else it is "missing field 'f': an
+omitted field is zero-filled, and zero is not a valid value of its type here" (a `&T`, `Box`, `fn`
+field, ...). A union literal sets one member.
 `unsafe zeroed::<T>()` is the all-zero value of any type. The address of a zero-sized field
 (`&s.tail` of a `[T; 0]` field) is its offset inside `s`; the address of any other zero-sized value
 is a shared sentinel.
@@ -320,7 +322,10 @@ is reborrowed for as long as that holder lives, so the source is unusable until 
 arguments of one call cannot reach the same storage when one of them hands it over mutably (a `&mut`, a `[]mut T`, or a `&mut` autoref): `h(r, r)`, `h2(r, r)` with
 `h2(a: &mut i32, b: &i32)`, `f(s, s)` for one `[]mut` view and `(*r).m(r)` are "cannot borrow this
 value as mutable while it is already borrowed as ..." errors. A reference erased to a raw pointer
-in the same call (`h4(r, r as *mut i32)`) is not checked.
+in the same call (`h4(r, r as *mut i32)`) is not checked. A reference going into a raw-pointer slot
+(an argument, a struct field, an array or tuple element) becomes the pointer there: the borrow is
+checked where it is made (it reads the place, so the place must be initialized) and ends at once, so
+`f(&mut a[0], &mut a[1])` with `*mut` parameters is accepted.
 
 A reference casts only to a pointer to its own referent type (`&x as *const T` for `x: T`).
 Viewing the memory as another type is a second cast, from that pointer:
@@ -593,6 +598,8 @@ moves like its element and frees nothing. An array has no `==` or ordering ("doe
 
 Always on, in constant contexts: `const` and `static` initializers (local constants too),
 array lengths, const generic arguments, `static_assert`, enum discriminants and `type_info`.
+`panic_parts(head, tail)` panics with `head` then `tail` without allocating, so a message can name a
+type (`panic_parts("Vector<T, A>", "[i]: index out of bounds")`).
 A failed evaluation there is an error, and a local constant's initializer cannot read a
 variable. A constant context can call any function. Outside one, every call runs at run
 time, `const fn` calls with known arguments included. `const fn` adds a declaration check

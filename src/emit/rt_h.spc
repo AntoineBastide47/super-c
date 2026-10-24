@@ -217,6 +217,7 @@ inline void __sc_atomic_fence(int mo){__atomic_thread_fence(SC_MO_RMW(mo));}
    enough for the C compiler to inline: it prints `__head`, the `__n` bytes at `__m` and `__tail`. */
 _Noreturn __attribute__((cold)) void __sc_panic(const char *__m);
 _Noreturn __attribute__((cold)) void __sc_panic_str(const uint8_t *__p, size_t __n);
+_Noreturn __attribute__((cold)) void __sc_panic_str2(const uint8_t *__p, size_t __n, const uint8_t *__q, size_t __m);
 _Noreturn __attribute__((cold, noinline)) void __sc_assert_fail(const char *__head, const uint8_t *__m, size_t __n, const char *__tail);
 inline size_t __sc_bounds(size_t __i, size_t __n) {
   if (__i >= __n) __sc_panic("index out of bounds");
@@ -232,6 +233,10 @@ inline size_t __sc_range(size_t __s, size_t __e, size_t __n) {
 inline size_t __sc_bounds_group(size_t __i, size_t __n, size_t __w) {
   if (__i > __n || __w > __n - __i) __sc_panic("index out of bounds");
   return __i;
+}
+/* A widened panic guard's test (IN_GROUP_FITS): index + width <= len in overflow-safe form. */
+inline bool __sc_fits(size_t __i, size_t __n, size_t __w) {
+  return __i <= __n && __w <= __n - __i;
 }
 /* Integer arithmetic the C operators do not give (language skill, operations.md). + - * and signed
    negation trap on overflow, or wrap modulo the width when the build defines SC_ARITH_WRAP (a profile
@@ -503,7 +508,7 @@ inline void sc_f128_div(uint64_t sc_al, uint64_t sc_ah, uint64_t sc_bl, uint64_t
 #pragma GCC diagnostic pop
 #endif
 /* The external declaration of every helper above, for the registry unit. */
-#define SC_RT_EXTERNS SC_RT_ATOMIC_NAMES SC_RT_X(__sc_bounds) SC_RT_X(__sc_range) SC_RT_X(__sc_bounds_group) \
+#define SC_RT_EXTERNS SC_RT_ATOMIC_NAMES SC_RT_X(__sc_bounds) SC_RT_X(__sc_range) SC_RT_X(__sc_bounds_group) SC_RT_X(__sc_fits) \
 SC_SIGNED_TYPES(SC_SIGNED_NAMES) SC_UNSIGNED_TYPES(SC_UNSIGNED_NAMES) SC_F2I_SIGNED_TYPES(SC_F2I_SIGNED_NAMES) \
 SC_F2I_UNSIGNED_TYPES(SC_F2I_UNSIGNED_NAMES) SC_RT_X(__sc_chunk_end) SC_RT_X(sc_ctz64) SC_RT_X(sc_clz64) \
 SC_RT_X(sc_popcount64) SC_RT_X(sc_bitrev64) SC_RT_X(sc_wadd64) SC_RT_X(sc_wsub64) SC_RT_X(sc_wmul64) SC_RT_X(sc_wshl64) \

@@ -417,7 +417,7 @@ pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) 
                     return "check-operand-out-of-range";
                 }
             }
-        } else if r.kind == ir::RV_INTRINSIC && (r.c == ir::IN_SIZEOF || r.c == ir::IN_ALIGNOF || r.c == ir::IN_TYPE_INFO || r.c == ir::IN_DANGLING) {
+        } else if r.kind == ir::RV_INTRINSIC && ir::type_payload(r.c) {
             // `b` carries the measured/described TypeId, not an operand count
             if r.b as usize >= type_bound {
                 return "intrinsic-type-out-of-range";

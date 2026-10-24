@@ -13,7 +13,8 @@
 // Candidate policy: direct non-variadic calls to known function bodies of at most
 // MAX_CALLEE_STMTS statements / MAX_CALLEE_BLOCKS blocks / MAX_CALLEE_LOCALS locals (VEC_SCALE
 // times more for a vector signature; a body past them with a switch on a const-generic parameter is
-// sized per call by the arms its bindings take), non-recursive through the active splice chain, at
+// sized per call by the arms its bindings take; `@always_inline` lifts them), non-recursive through
+// the active splice chain, at
 // most MAX_DEPTH splices deep and MAX_ADDED_STMTS statements per caller (VEC_SCALE times more in a
 // caller that holds a vector), without asm, closures, variadic intrinsics, reflection, asserts, wide
 // literals, statics of a generic scope, or `from` coercions, and without attributes beyond the
@@ -265,6 +266,7 @@ pub struct InlineCtx {
     pub sc_live: Vector<bool>,
     pub sc_stack: Vector<u32>,
     pub sc_expo: Vector<u32>, // per caller local: the operations that may address its storage (`exposed`)
+    pub sc_writes: Writes, // per caller local: its writes (`once_aggregate`, `agg_field`)
     pub sc_oref: Vector<u32>, // per caller operand: a mark (`unread`)
     pub sc_orph: Vector<u32>, // the call operands of arguments read in place (`unread`)
     pub sc_pf: Vector<u8>, // per callee parameter: its `PF_*` facts
@@ -591,6 +593,7 @@ extend InlineCtx {
             sc_live: Vector::<bool>::new(),
             sc_stack: Vector::<u32>::new(),
             sc_expo: Vector::<u32>::new(),
+            sc_writes: Writes { cnt: Vector::<u32>::new(), rv: Vector::<u32>::new() },
             sc_oref: Vector::<u32>::new(),
             sc_orph: Vector::<u32>::new(),
             sc_pf: Vector::<u8>::new(),
@@ -1251,9 +1254,11 @@ extend InlineStore {
                 continue;
             }
             // The size gate first: it rejects most bodies at once, before the declaration checks
-            // walk the module's attributes.
+            // walk the module's attributes. `@always_inline` asks past it.
             let mut r: u64 = 0;
-            if !lw.body.inline_size_ok && !param_switch(p, &lw.body) {
+            if !lw.body.inline_size_ok && !param_switch(p, &lw.body) && (!p.modules.at(d.module as usize).has_ast || unsafe (*p.module_ast_const(
+                d.module,
+            )).attr_of(d.node, AttrKind::ATTR_ALWAYS_INLINE) == null) {
                 r = REJ_BASE | IJ_TOO_BIG as u64;
             } else {
                 let mut ext = NODE_NONE;
@@ -1389,7 +1394,14 @@ extend InlineStore {
         }
         let slot = self.kept.len() as u64;
         self.kept.push(
-            CalleeInfo { body: kb, gp: gp, fg: fgl.len, demand: demand, big: !body.inline_size_ok, vec_only: vec_only },
+            CalleeInfo {
+                body: kb,
+                gp: gp,
+                fg: fgl.len,
+                demand: demand,
+                big: !body.inline_size_ok && a.attr_of(d.node, AttrKind::ATTR_ALWAYS_INLINE) == null,
+                vec_only: vec_only,
+            },
         );
         return slot;
     }
@@ -1464,6 +1476,9 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
     let mut orph = replace(&mut cx.sc_orph, Vector::<u32>::new());
     orph.truncate(0);
     let mut expo_on = false;
+    // Built at the first splice (`once_aggregate`, `agg_field`).
+    let mut wr = replace(&mut cx.sc_writes, Writes { cnt: Vector::<u32>::new(), rv: Vector::<u32>::new() });
+    let mut wr_on = false;
     let mut pf = replace(&mut cx.sc_pf, Vector::<u8>::new());
     // A closure's captures live in its environment, which the closure value owns.
     let cl = unsafe (&*(*pkg).module_ast_const(lw.body.owner.module)).closure_fact(lw.body.owner.node) != null;
@@ -1804,13 +1819,40 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
             reserved = true;
             expect_growth(cx, &lw.body, bi - 1, &live, owner_key, budget).reserve_in(&mut lw.body);
         }
-        splice(lw, ki, &t, bi - 1, tyr, &binds, &alias, &wire, &mut blk_origin, &mut origins, &expo, &mut pf, wfree, cl);
+        if !wr_on {
+            writes_all(&lw.body, &mut wr);
+            wr_on = true;
+        }
+        splice(
+            lw,
+            ki,
+            &t,
+            bi - 1,
+            tyr,
+            &binds,
+            &alias,
+            &wire,
+            &mut blk_origin,
+            &mut origins,
+            &expo,
+            &wr,
+            &mut pf,
+            wfree,
+            cl,
+        );
         if expo_on && multi {
             // The splice moved member reads of the call's temporary onto the return slots.
             scan_all(unsafe &*pkg, &lw.body, cma, &mut expo);
         } else if expo_on {
             expo.resize_default(lw.body.locals.len());
             scan_from(unsafe &*pkg, &lw.body, cma, b_old, &mut expo);
+        }
+        // The call's results now come from the spliced returns.
+        if multi {
+            writes_all(&lw.body, &mut wr);
+        } else {
+            writes_term(&lw.body, &t, &mut wr, false);
+            writes_from(&lw.body, b_old, &mut wr);
         }
         // An argument read in place leaves the call's operand unread (`unread`).
         if !ki.demand {
@@ -1841,6 +1883,7 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
         unread(&mut lw.body, &orph, &mut oref);
     }
     cx.sc_expo = expo;
+    cx.sc_writes = wr;
     cx.sc_oref = oref;
     cx.sc_orph = orph;
     cx.sc_pf = pf;
@@ -1920,7 +1963,7 @@ fn body_types(k: &ir::CoreBody, out: &mut Vector<TypeId>) {
 
 // Whether `rv.b` is a type (`body_types`).
 const fn takes_type(rv: &ir::Rvalue) bool {
-    return rv.kind == ir::RV_DYN || rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF || rv.c == ir::IN_TYPE_INFO || rv.c == ir::IN_DANGLING);
+    return rv.kind == ir::RV_DYN || rv.kind == ir::RV_INTRINSIC && ir::type_payload(rv.c);
 }
 
 /// Body `lw.body` with every generic parameter `binds` names substituted (`xty`): one instance's
@@ -2456,7 +2499,7 @@ fn addr_kept(pk: &loader::Package, b: &ir::CoreBody, a: &Ast, p: ir::PlaceId, cn
 
 // The intrinsics that write no memory.
 const fn pure_intrinsic(c: u8) bool {
-    return c == ir::IN_SIZEOF || c == ir::IN_ALIGNOF || c == ir::IN_TYPE_INFO || c == ir::IN_ZEROED || c == ir::IN_DANGLING || c == ir::IN_DYN_TID || c == ir::IN_DYN_DATA || c == ir::IN_LIKELY || c == ir::IN_UNLIKELY || ir::is_check(
+    return ir::type_payload(c) || c == ir::IN_ZEROED || c == ir::IN_DYN_TID || c == ir::IN_DYN_DATA || c == ir::IN_LIKELY || c == ir::IN_UNLIKELY || c == ir::IN_GROUP_FITS || ir::is_check(
         c,
     );
 }
@@ -2614,6 +2657,145 @@ fn param_facts(p: &loader::Package, k: &ir::CoreBody, a: &Ast, tymap: []u64, pf:
 
 /// Append the callee body to the caller with every index rebased, rewrite the call block to jump
 /// into it, and join every callee return back to the call's continuation.
+// Per caller local: how many operations may write it (an assignment to it or into it, a borrow of
+// it, a call result into it), and its one whole assignment's rvalue + 1 (0: none, WR_MULTI: a
+// second one, or an assignment into it). Kept in step with the splices (`writes_from`).
+pub struct Writes {
+    pub cnt: Vector<u32>,
+    pub rv: Vector<u32>,
+}
+
+const WR_MULTI: u32 = 0xFFFFFFFF;
+
+// Add the writes of statement `st`.
+fn writes_stmt(b: &ir::CoreBody, st: &ir::Statement, w: &mut Writes) {
+    if st.kind != ir::ST_ASSIGN {
+        return;
+    }
+    let pl = *b.places.at(st.place as usize);
+    let x = pl.base as usize;
+    w.cnt.set(x, w.cnt[x] + 1);
+    w.rv.set(
+        x,
+        if pl.proj_len == 0 && w.rv[x] == 0 {
+            st.rvalue + 1;
+        } else {
+            WR_MULTI;
+        },
+    );
+    let rv = *b.rvalues.at(st.rvalue as usize);
+    if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR {
+        let y = b.places.at(rv.a as usize).base as usize;
+        w.cnt.set(y, w.cnt[y] + 1);
+    }
+}
+
+// Add (`up`) or remove the call results of terminator `t`.
+fn writes_term(b: &ir::CoreBody, t: &ir::Terminator, w: &mut Writes, up: bool) {
+    if t.kind != ir::TM_CALL {
+        return;
+    }
+    for d in 0..t.dests_len {
+        let x = b.places.at(b.dest_pool[(t.dests_start + d) as usize] as usize).base as usize;
+        if up {
+            w.cnt.set(x, w.cnt[x] + 1);
+        } else {
+            w.cnt.set(x, w.cnt[x] - 1);
+        }
+    }
+}
+
+// Add the writes of the blocks of `b` from `b0`.
+fn writes_from(b: &ir::CoreBody, b0: usize, w: &mut Writes) {
+    w.cnt.resize_default(b.locals.len());
+    w.rv.resize_default(b.locals.len());
+    for bi in b0..b.blocks.len() {
+        let blk = *b.blocks.at(bi);
+        for si in 0..blk.stmt_len {
+            writes_stmt(b, b.statements.at((blk.stmt_start + si) as usize), w);
+        }
+        writes_term(b, &blk.term, w, true);
+    }
+}
+
+// `writes_from` over the whole body.
+fn writes_all(b: &ir::CoreBody, w: &mut Writes) {
+    w.cnt.truncate(0);
+    w.rv.truncate(0);
+    writes_from(b, 0, w);
+}
+
+// The struct aggregate rvalue that alone defines place `p`, a whole caller temporary; IR_NONE when it
+// is no such place or another operation writes it.
+fn once_aggregate(b: &ir::CoreBody, w: &Writes, p: ir::PlaceId) u32 {
+    let pl = *b.places.at(p as usize);
+    if pl.proj_len != 0 || b.locals.at(pl.base as usize).storage != ir::LS_TEMP {
+        return ir::IR_NONE;
+    }
+    let x = pl.base as usize;
+    if w.cnt[x] != 1 || w.rv[x] == 0 || w.rv[x] == WR_MULTI {
+        return ir::IR_NONE;
+    }
+    let r = w.rv[x] - 1;
+    let rv = *b.rvalues.at(r as usize);
+    if rv.kind != ir::RV_AGGREGATE || rv.c != ir::AGG_STRUCT {
+        return ir::IR_NONE;
+    }
+    return r;
+}
+
+// The operand of struct aggregate rvalue `r` for the field projection `pj` names, when it is a
+// constant, or a whole local of a builtin type that keeps its value (a temporary one operation
+// defines, a parameter nothing writes), else IR_NONE.
+fn agg_field(p: &loader::Package, b: &ir::CoreBody, w: &Writes, r: u32, pj: &ir::Projection) u32 {
+    let rv = *b.rvalues.at(r as usize);
+    let a = unsafe &*p.module_ast_const(b.module);
+    let mut i = pj.data;
+    if i == ir::IR_NONE {
+        // The struct's declaration: the aggregate's item, else its type's.
+        let mut d = rv.item;
+        if d.node == NODE_NONE && rv.target != TYPE_NONE {
+            let y = *a.type_at(rv.target);
+            if y.kind == TypeKind::TYPE_STRUCT {
+                d = DefId { module: y.module, node: y.as_data.decl };
+            } else if y.kind == TypeKind::TYPE_INSTANCE {
+                d = DefId { module: a.instance(y.as_data.inst).module, node: a.instance(y.as_data.inst).decl };
+            }
+        }
+        if d.node != NODE_NONE {
+            let da = unsafe &*p.module_ast_const(d.module);
+            let ms = da.at_const(d.node).as_data.aggregate.members;
+            for j in 0..ms.len {
+                if unsafe da.list(ms)[j as usize] == pj.sub {
+                    i = j;
+                }
+            }
+        }
+    }
+    if i >= rv.b {
+        return ir::IR_NONE;
+    }
+    let oi = b.oper_pool[(rv.a + i) as usize];
+    if oi == ir::IR_NONE {
+        return ir::IR_NONE;
+    }
+    let o = *b.operands.at(oi as usize);
+    if o.kind == ir::OP_CONST {
+        return oi;
+    }
+    let pl = *b.places.at(o.data as usize);
+    let sg = b.locals.at(pl.base as usize).storage;
+    if pl.proj_len != 0 || sg != ir::LS_TEMP && sg != ir::LS_ARG || o.ty == TYPE_NONE || a.type_at(o.ty).kind != TypeKind::TYPE_BUILTIN {
+        return ir::IR_NONE;
+    }
+    // A temporary's one definition, or a parameter nothing writes (a borrow of it counts: a store
+    // through it could write).
+    if w.cnt[pl.base as usize] != pick(sg == ir::LS_ARG, 0u32, 1u32) {
+        return ir::IR_NONE;
+    }
+    return oi;
+}
+
 fn splice(
     lw: &mut irl::Lowerer,
     ki: &CalleeInfo,
@@ -2626,6 +2808,7 @@ fn splice(
     blk_origin: &mut Vector<u32>,
     origins: &mut Vector<Origin>,
     expo: &Vector<u32>,
+    wr: &Writes,
     pf: &mut Vector<u8>,
     wfree: bool,
     cl: bool,
@@ -2791,6 +2974,17 @@ fn splice(
         }
         b.constants.push(c);
     }
+    // Per parameter read in place: the struct aggregate its argument (a caller temporary) was built
+    // by once, or IR_NONE.
+    let mut agg = Vector::<u32>::new();
+    for j in 0..k.args {
+        let mut r = ir::IR_NONE;
+        let op = *b.operands.at(b.oper_pool[(t.args_start + j) as usize] as usize);
+        if pf[j as usize] >> SUB_SHIFT == SUB_PLACE && op.kind != ir::OP_CONST {
+            r = once_aggregate(b, wr, op.data);
+        }
+        agg.push(r);
+    }
     for i in 0..k.operands.len() {
         let mut o = *k.operands.at(i);
         o.ty = mty(tymap, o.ty);
@@ -2800,10 +2994,28 @@ fn splice(
         } else {
             k.places.at(o.data as usize).base;
         };
+        let mut fo = ir::IR_NONE;
+        if px >= k.returns && px < k.returns + k.args && agg[(px - k.returns) as usize] != ir::IR_NONE && k.places.at(
+            o.data as usize,
+        ).proj_len == 1 {
+            let pj = *k.projections.at(k.places.at(o.data as usize).proj_start as usize);
+            if pj.kind == ir::PJ_FIELD {
+                fo = agg_field(unsafe &*pkg9, b, wr, agg[(px - k.returns) as usize], &pj);
+            }
+        }
         if px >= k.returns && px < k.returns + k.args && pf[(px - k.returns) as usize] >> SUB_SHIFT == SUB_CONST {
             // A read of a parameter whose argument is a constant: the constant.
             o.kind = ir::OP_CONST;
             o.data = b.operands.at(b.oper_pool[(t.args_start + px - k.returns) as usize] as usize).data;
+        } else if fo != ir::IR_NONE {
+            // A field of an argument built once from a constant or a scalar temporary: that value.
+            let f = *b.operands.at(fo as usize);
+            o.kind = if f.kind == ir::OP_CONST {
+                ir::OP_CONST;
+            } else {
+                ir::OP_COPY;
+            };
+            o.data = f.data;
         } else if (o.kind == ir::OP_COPY || o.kind == ir::OP_MOVE) && k.places.at(o.data as usize).proj_len == 0 && param_value(
             unsafe &*pkg9,
             k.locals.at(k.places.at(o.data as usize).base as usize).item,
@@ -2860,7 +3072,7 @@ fn splice(
                 rv.item.node += ax0;
             }
         } else if rv.kind == ir::RV_INTRINSIC {
-            if rv.c == ir::IN_SIZEOF || rv.c == ir::IN_ALIGNOF || rv.c == ir::IN_TYPE_INFO || rv.c == ir::IN_DANGLING {
+            if ir::type_payload(rv.c) {
                 rv.b = mty(tymap, rv.b);
             } else if rv.b != 0 {
                 rv.a += op0;

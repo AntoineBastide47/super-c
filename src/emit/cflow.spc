@@ -76,27 +76,11 @@ const fn n_succ(b: &ir::CoreBody, x: u32) u32 {
     return 1;
 }
 
-/// The live edge of switch block `x` when it switches on a literal; NONE otherwise. Removing the dead
-/// edges keeps them out of reachability, dominance, loop discovery, and the final C layout.
+/// The live edge of switch block `x` when it switches on a literal (`ir::const_switch_edge`); NONE
+/// otherwise. Removing the dead edges keeps them out of reachability, dominance, loop discovery, and
+/// the final C layout.
 pub const fn const_switch_edge(b: &ir::CoreBody, x: u32) u32 {
-    let t = b.blocks.at(x as usize).term;
-    if t.kind != ir::TM_SWITCH {
-        return NONE;
-    }
-    let op = *b.operands.at(t.a as usize);
-    if op.kind != ir::OP_CONST {
-        return NONE;
-    }
-    let c = *b.constants.at(op.data as usize);
-    if c.kind != ir::CK_INT && c.kind != ir::CK_BOOL {
-        return NONE;
-    }
-    for k in 0..t.sw_len {
-        if (b.switch_pool[(t.sw_start + k) as usize] >> 32) as u32 == c.val as u32 {
-            return k;
-        }
-    }
-    return t.sw_len;
+    return ir::const_switch_edge(b, x);
 }
 
 // Raw k-th successor block (pre-threading).

@@ -5815,10 +5815,10 @@ extend Package {
         if inn.kind != NodeKind::NODE_INTERFACE {
             return true;
         }
-        let ins = unsafe (*ia).at_const(inn.as_data.interface_def.name).as_data.name.text;
-        let iname = self.modules.at(iface.module as usize).source.as_str().slice(ins.start as usize, ins.end as usize);
-        if self.modules.at(iface.module as usize).prelude && (iname == "Copy" || iname == "Send" || iname == "Sync" || iname == "Free" || iname == "FnPtr") {
-            return true;
+        for marker in ["Copy", "Send", "Sync", "Free", "FnPtr"] {
+            if self.is_prelude_item(iface, marker) {
+                return true;
+            }
         }
         let da = self.module_ast_const(dm) as *mut Ast;
         let y = *unsafe (*da).type_at(t);
@@ -7001,6 +7001,12 @@ extend Package {
 
     /// Like lookup but across every prelude module (the first in module order wins); the hit's `mid`
     /// is the owning module. One probe of the index's prelude name map.
+    /// Is declaration `d` the prelude's type or interface `name`? A program's item of that name is not.
+    pub fn is_prelude_item(self: &Self, d: DefId, name: str) bool {
+        let h = self.prelude_lookup(name, true);
+        return h.node != NODE_NONE && d.node == h.node && d.module == h.mid;
+    }
+
     pub fn prelude_lookup(self: &Self, name: str, want_type: bool) LookupHit {
         let mp = (self as *const Package) as *mut Package;
         unsafe (*mp).ensure_index();

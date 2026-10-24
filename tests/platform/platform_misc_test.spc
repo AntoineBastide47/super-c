@@ -26,7 +26,7 @@ fn entropy_fills_the_whole_buffer_with_os_bytes() {
     let vb: []u8 = b;
     let mut same = true;
     let mut zero = true;
-    for i in 0..64 {
+    for i in 0..va.len() {
         same = same && va[i] == vb[i];
         zero = zero && va[i] == 0;
     }

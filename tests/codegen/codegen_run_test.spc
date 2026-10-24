@@ -1231,6 +1231,62 @@ fn a_harness_run_fails_on_a_leak_without_the_gate() {
     assert_eq(r.exit, 23);
 }
 
+// `panic_parts(head, tail)` panics with `head` then `tail`, at run time and at compile time.
+@test
+fn panic_parts_joins_its_message() {
+    h::expect_trap(
+        "a run-time panic_parts",
+        "fn main(argv: Vector<str>) i32 {\n    if argv.len() > 0 {\n        panic_parts(\"Vector<u8>\", \"[i]: tail\");\n    }\n    return 0;\n}\n",
+        "panic: Vector<u8>[i]: tail",
+    );
+    h::expect_build_err(
+        "a compile-time panic_parts",
+        "const fn f() i32 {\n    panic_parts(\"head \", \"tail\");\n    return 0;\n}\nconst X: i32 = f();\nfn main() i32 {\n    return X;\n}\n",
+        "head tail",
+    );
+}
+
+// An omitted field is zero-filled where its type is valid as zero: std's containers assert `Zeroable`
+// for their private fields, a program's type does the same with `unsafe extend`, and nothing else does.
+@test
+fn zeroable_asserts_private_fields() {
+    let r = h::compile_and_run(
+        "struct W {\n    pub v: Vector<i32>,\n    pub s: String,\n    pub m: Map<i32, i32>,\n    pub t: Set<i32>,\n    pub a: Array<i32, 3>,\n    pub r: str<'static>,\n}\nfn main() i32 {\n    let w = W {};\n    return (w.v.len() + w.s.len() + w.m.len() + w.t.len() + w.r.len()) as i32 + w.a[0];\n}\n",
+    );
+    assert(r.built, "std's containers zero-fill");
+    assert_eq(r.exit, 0);
+    h::expect_err_msg(
+        "the assertion without unsafe",
+        "struct Z {\n    n: usize,\n}\nextend Z as Zeroable {}\nfn main() i32 {\n    return 0;\n}\n",
+        "asserting 'Zeroable' requires 'unsafe extend'",
+    );
+    // A private field another file declares: zero-filled only under the assertion.
+    let main = "import z;\nstruct W {\n    pub z: z::Z,\n}\nfn main() i32 {\n    let w = W {};\n    return 0;\n}\n";
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", main);
+    p.mkfile("src/z.spc", "pub struct Z {\n    n: usize,\n}\nunsafe extend Z as Zeroable {}\n");
+    let ok = cli::superc_in(p.dir(), "run");
+    assert_eq(ok.exit, 0);
+    let q = cli::proj_new();
+    q.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    q.mkfile("src/main.spc", main);
+    q.mkfile("src/z.spc", "pub struct Z {\n    n: usize,\n}\n");
+    let bad = cli::superc_in(q.dir(), "build");
+    assert(bad.exit != 0 && bad.out_has("missing field 'z'"), "a private field without the assertion");
+}
+
+// The markers are the prelude's declarations, not their names: a program's own `Free` interface is an
+// ordinary interface, so its `free` runs only where called.
+@test
+fn a_program_interface_named_free_is_not_the_marker() {
+    let r = h::compile_and_run(
+        "static mut FREED: i32 = 0;\ninterface Free {\n    fn free(self: &mut Self);\n}\nstruct S {\n    pub n: i32,\n}\nextend S as Free {\n    pub fn free(self: &mut Self) {\n        unsafe FREED += 1;\n    }\n}\nfn main() i32 {\n    {\n        let s = S { n: 1 };\n        let _ = s.n;\n    }\n    return unsafe FREED;\n}\n",
+    );
+    assert(r.built, "a program's Free interface builds");
+    assert_eq(r.exit, 0);
+}
+
 @test
 fn box_reaches_a_generic_reference_param_unchanged() {
     // A `&Box<String>` argument binds a generic `&T` param to the Box itself: a derived Clone's

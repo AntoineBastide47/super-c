@@ -98,8 +98,9 @@ extern "C" {
     fn fmaxf(x: f32, y: f32) f32;
     fn fmaf(x: f32, y: f32, z: f32) f32;
 
-    // The runtime trap: prints `panic: <msg>`, aborts.
+    // The runtime traps: print `panic: <msg>` (or `panic: <head><tail>`), abort.
     fn __sc_panic_str(msg: *const u8, len: usize) void;
+    fn __sc_panic_str2(head: *const u8, hlen: usize, tail: *const u8, tlen: usize) void;
 }
 
 // Bit counts and wrapping arithmetic over a u64 (primitives of the C backend's runtime): the C compiler's
@@ -129,6 +130,16 @@ extern "C" {
 @no_const
 pub fn panic(msg: str) {
     unsafe __sc_panic_str(msg.ptr(), msg.len());
+}
+
+/// `panic` with the message `head` then `tail`, built without allocating: a panic site whose
+/// message names a type passes the name as `head` (`panic_parts("Vector<T, A>", "[i]: index out of
+/// bounds")`).
+@noreturn
+@cold
+@no_const
+pub fn panic_parts(head: str, tail: str) {
+    unsafe __sc_panic_str2(head.ptr(), head.len(), tail.ptr(), tail.len());
 }
 
 // Every power of ten a u64 holds, 10^0 to 10^19: the table of `ilog10_u64`.

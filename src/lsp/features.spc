@@ -5,7 +5,7 @@
 import lexer::token as tok;
 import ast::ast as *;
 import module::loader as loader;
-import typechecker::typechecker as tc;
+import typechecker::render as rnd;
 import ast::parser as par;
 import lsp::text as ltext;
 
@@ -153,6 +153,23 @@ pub fn def_at(p: &loader::Package, mi: usize, off: u32) DefId {
         }
     }
     return DefId { module: 0, node: NODE_NONE };
+}
+
+// def_at, where an operator (`+`, a unary `-`, the brackets of `v[i]`) names the method the checker
+// chose for it. The operator node is the innermost node only off its operands. Rename and references
+// keep def_at: an operator site does not spell the method's name.
+fn target_at(p: &loader::Package, mi: usize, off: u32) DefId {
+    let a = mod_ast(p, mi);
+    let id = node_at(a, off);
+    if id != NODE_NONE {
+        switch unsafe (*a).op_method.get(&id) {
+            Some(v) => {
+                return DefId { module: (*v >> 32) as ModuleId, node: (*v & 0xFFFFFFFFu64) as NodeId };
+            },
+            None => {},
+        };
+    }
+    return def_at(p, mi, off);
 }
 
 // Trimmed source slice of a declaration's head: a function up to its body, a type up to its name, a
@@ -474,7 +491,7 @@ const REFLECT_INTRINSICS: [ReflectDoc; 5] = [
     ReflectDoc {
         name: "type_info",
         sig: "type_info::<T>() TypeInfo",
-        doc: "A non-owning descriptor of `T`: name, kind, size, alignment, fields, variants, `@reflect` entries and methods. It folds at compile time; a run-time use reads static data. An opaque FFI type has none.",
+        doc: "A non-owning descriptor of `T`: name, qualified name (`Vector<i32>`), kind, size, alignment, fields, variants, `@reflect` entries and methods. It folds at compile time; a run-time use reads static data. An opaque FFI type has none.",
     },
     ReflectDoc {
         name: "zeroed",
@@ -698,7 +715,7 @@ pub fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
     if unsafe (*a).valid(id) {
         t = unsafe (*a).type_of(id);
     }
-    let d = def_at(p, mi, off);
+    let d = target_at(p, mi, off);
     if t != TYPE_NONE {
         let mut buf = String::new();
         let src = p.modules.at(mi).source.as_str();
@@ -708,9 +725,9 @@ pub fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
             p,
             d.module as usize,
         )).at_const(d.node).kind == NodeKind::NODE_INTERFACE {
-            tc::render_iface_str(p, a, src, t, &mut buf);
+            rnd::render_iface_str(p, a, src, t, &mut buf);
         } else {
-            tc::render_type_str(p, a, src, t, &mut buf);
+            rnd::render_type_str(p, a, src, t, &mut buf);
         }
         out.push_str("```super-c\n");
         out.push_str(buf.as_str());
@@ -752,7 +769,7 @@ pub fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
 /// The definition site for the position: the resolved decl's name span (decl span as the fallback).
 /// A build constant has none: the compiler generates its module (hover shows its value).
 pub fn definition(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
-    let d = def_at(p, mi, off);
+    let d = target_at(p, mi, off);
     if d.node == NODE_NONE || p.modules.at(d.module as usize).file.len() == 0 {
         return Option::<Loc>::None;
     }
@@ -2176,7 +2193,7 @@ fn owning_interface(p: &loader::Package, im: usize, fnid: NodeId) NodeId {
 /// conforming `extend ... as I` block's target span; for one of its methods, each conformer's method.
 pub fn implementations(p: &loader::Package, mi: usize, off: u32) Vector<Loc> {
     let mut out = Vector::<Loc>::new();
-    let d = def_at(p, mi, off);
+    let d = target_at(p, mi, off);
     if d.node == NODE_NONE {
         return out;
     }
@@ -2377,7 +2394,7 @@ pub fn inlay_hints(p: &loader::Package, mi: usize, start: u32, end: u32) Vector<
         if t == TYPE_NONE {
             continue;
         }
-        let buf = tc::type_str_of(p, a, p.modules.at(mi).source.as_str(), t);
+        let buf = rnd::type_str_of(p, a, p.modules.at(mi).source.as_str(), t);
         let rendered = buf.as_str();
         if rendered.len() == 0 || rendered.len() > 60 {
             continue;

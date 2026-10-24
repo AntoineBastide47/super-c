@@ -92,7 +92,6 @@ struct ViewDecls {
     pub v_slice_mut: DefId,
     pub v_vector: DefId,
     pub v_string: DefId,
-    pub v_array: DefId,
 }
 
 // The nodes whose value an `if`, `switch` or value-block arm yields as the whole expression's value:
@@ -432,7 +431,6 @@ extend Lowerer {
                 v_slice_mut: vd_none(),
                 v_vector: vd_none(),
                 v_string: vd_none(),
-                v_array: vd_none(),
             },
             ev: null,
             need_m: 0,
@@ -4269,6 +4267,55 @@ extend Lowerer {
         return op;
     }
 
+    // Is parameter `i` of the call's callee (`target`, else the function value `callee_op`) of a
+    // raw-pointer type?
+    fn param_is_ptr(self: &mut Self, target: DefId, callee_op: ir::OperandId, i: u32) bool {
+        if target.node != NODE_NONE {
+            let ca = unsafe &*(&*self.pkg).module_ast_const(target.module);
+            let n = ca.at_const(target.node);
+            if n.kind != NodeKind::NODE_FUNCTION || i >= n.as_data.function.params.len {
+                return false;
+            }
+            let pn = ca.at_const(unsafe ca.list(n.as_data.function.params)[i as usize]).as_data.parameter.ty;
+            return pn != NODE_NONE && ca.at_const(pn).kind == NodeKind::NODE_POINTER_TYPE;
+        }
+        if callee_op == ir::IR_NONE {
+            return false;
+        }
+        let fy = *self.f.ty(self.body.operands.at(callee_op as usize).ty);
+        let sa = unsafe &*(&*self.pkg).module_ast_const(self.module);
+        if !fy.fn_sig() || i >= sa.sig_len(&fy, false) {
+            return false;
+        }
+        return self.f.ty(sa.sig_at(&fy, false, i)).kind == TypeKind::TYPE_POINTER;
+    }
+
+    // Expression `e` lowered into a slot of raw-pointer type when `ptr`: a reference becomes the
+    // pointer where it is made, as `as` makes it, so the borrow it took ends there.
+    fn lower_slot(self: &mut Self, e: NodeId, ptr: bool, sp: tok::Span) ir::OperandId {
+        let op = self.lower_expr(e);
+        if !ptr || op == ir::IR_NONE {
+            return op;
+        }
+        let ot = self.body.operands.at(op as usize).ty;
+        if ot == TYPE_NONE || self.f.ty(ot).kind != TypeKind::TYPE_REFERENCE {
+            return op;
+        }
+        let y = *self.f.ty(ot);
+        let q = if y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+            TypeQualifier::TYPE_QUAL_MUT as u8;
+        } else {
+            TypeQualifier::TYPE_QUAL_CONST as u8;
+        };
+        let sa = unsafe &mut *((&*self.pkg).module_ast_const(self.module) as *mut Ast);
+        let pt = sa.intern_type(
+            Ty { kind: TypeKind::TYPE_POINTER, qualifier: q, as_data: TyAs { elem: y.as_data.elem } },
+        );
+        let r = self.copy_op(self.rv_temp(ir::rv(ir::RV_CAST, op, self.cast_kind(ot, pt), 0, pt), sp));
+        self.tp(ir::TP_CAST_ERASE, 0, e);
+        return r;
+    }
+
     // The view of kind `vk` and type `vt` of array operand `op`, stored into `dest` (`rv_out`); a
     // temporary array lives in the scope `key` registers it in (`own_temp`).
     fn view_of(self: &mut Self, op: ir::OperandId, key: NodeId, vt: TypeId, vk: u32, sp: tok::Span, dest: ir::PlaceId) ir::OperandId {
@@ -4297,6 +4344,19 @@ extend Lowerer {
         let k = self.f.node(id).kind;
         let sp = self.f.node(id).span;
         let ty = self.nty(id);
+        // `type_info::<T>().qualified_name` read alone: the name constant, no descriptor.
+        if k == NodeKind::NODE_MEMBER && self.node_name_eq(self.f.node(id).as_data.member.member, "qualified_name") {
+            let call = self.f.node(id).as_data.member.object;
+            if self.f.node(call).kind == NodeKind::NODE_CALL && self.is_intrinsic_callee(
+                self.f.node(call).as_data.call.callee,
+                "type_info",
+            ) {
+                let mu = self.f.type_args(call);
+                if mu != null && unsafe (*mu).n != 0 {
+                    return self.intrinsic_value(ir::IN_TYPE_NAME, unsafe (*mu).args[0], ty, sp, dest);
+                }
+            }
+        }
         if k == NodeKind::NODE_LITERAL {
             return self.lower_literal(id);
         }
@@ -4579,6 +4639,27 @@ extend Lowerer {
         }
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
+        if d.op == tt::TokenType::Ampersand && ty != TYPE_NONE && self.f.ty(ty).kind == TypeKind::TYPE_REFERENCE && self.f.derefs(
+            id,
+        ) == null {
+            // `&*e` of a raw-pointer value that is no place (`&*(p + i)`): that pointer, retyped, so
+            // no temporary holds it only to be dereferenced. A reborrow through a raw pointer holds
+            // no loan either way.
+            let on = *self.f.node(d.operand);
+            if on.kind == NodeKind::NODE_UNARY && on.as_data.unary.op == tt::TokenType::Star && self.f.derefs(d.operand) == null {
+                let inner = on.as_data.unary.operand;
+                let it = self.nty(inner);
+                let ik = self.f.node(inner).kind;
+                if it != TYPE_NONE && self.f.ty(it).kind == TypeKind::TYPE_POINTER && (ik == NodeKind::NODE_BINARY || ik == NodeKind::NODE_CALL) {
+                    self.tp(ir::TP_REF, 0, id);
+                    let pop = self.lower_expr(inner);
+                    if pop == ir::IR_NONE {
+                        return ir::IR_NONE;
+                    }
+                    return self.rv_out(dest, ir::rv(ir::RV_USE, pop, 0, 0, ty), sp);
+                }
+            }
+        }
         if d.op == tt::TokenType::Ampersand || d.op == tt::TokenType::AmpersandAmpersand {
             // `&` as an arm's value: the temporary it borrows lives as the arm's value needs.
             let rf = self.ext.rf;
@@ -5511,7 +5592,7 @@ extend Lowerer {
                 self.list_node = a;
                 continue;
             }
-            let mut op = self.lower_expr(a);
+            let mut op = self.lower_slot(a, self.param_is_ptr(target, callee_op, argv.len() as u32), sp);
             if op == ir::IR_NONE {
                 return ir::IR_NONE;
             }
@@ -6495,11 +6576,7 @@ extend Lowerer {
                 let fi = unsafe self.f.list(d.fields)[i as usize];
                 let fnm = self.f.node(self.f.node(fi).as_data.field_initializer.name).as_data.name.text;
                 let ntxt = self.src.slice(fnm.start as usize, fnm.end as usize);
-                let op = self.lower_expr(self.f.node(fi).as_data.field_initializer.value);
-                if op == ir::IR_NONE {
-                    return ir::IR_NONE;
-                }
-                self.mark_user_move(op);
+                let fv = self.f.node(fi).as_data.field_initializer.value;
                 let mut idx: i64 = -1;
                 for j in 0..members.len {
                     let fid = unsafe da.list(members)[j as usize];
@@ -6513,6 +6590,16 @@ extend Lowerer {
                     self.fail_at("struct-field", id);
                     return ir::IR_NONE;
                 }
+                let fty = da.at_const(unsafe da.list(members)[idx as usize]).as_data.field.ty;
+                let op = self.lower_slot(
+                    fv,
+                    fty != NODE_NONE && da.at_const(fty).kind == NodeKind::NODE_POINTER_TYPE,
+                    sp,
+                );
+                if op == ir::IR_NONE {
+                    return ir::IR_NONE;
+                }
+                self.mark_user_move(op);
                 argv.set(idx as usize, op);
             }
         } else {
@@ -6598,6 +6685,13 @@ extend Lowerer {
         let mut argv = self.avget();
         let mut cur: i64 = 0;
         let mut designated = false;
+        // The element type an array literal's elements go into (a tuple's: per element below).
+        let mut et = TYPE_NONE;
+        if ty != TYPE_NONE && self.f.ty(ty).kind == TypeKind::TYPE_ARRAY {
+            et = self.f.ty(ty).as_data.arr.elem;
+        } else if self.slice_view(ty) {
+            et = self.f.instance(self.f.ty(ty).as_data.inst).args[0];
+        }
         for i in 0..d.elements.len {
             let mut e = unsafe self.f.list(d.elements)[i as usize];
             if self.f.node(e).kind == NodeKind::NODE_FIELD_INITIALIZER {
@@ -6620,7 +6714,13 @@ extend Lowerer {
                 designated = true;
                 e = self.f.node(e).as_data.field_initializer.value;
             }
-            let op = self.lower_expr(e);
+            let mut st = et;
+            if k == NodeKind::NODE_TUPLE && ty != TYPE_NONE && self.f.ty(ty).kind == TypeKind::TYPE_INSTANCE && i < self.f.instance(
+                self.f.ty(ty).as_data.inst,
+            ).n as u32 {
+                st = unsafe self.f.instance(self.f.ty(ty).as_data.inst).args[i as usize];
+            }
+            let op = self.lower_slot(e, st != TYPE_NONE && self.f.ty(st).kind == TypeKind::TYPE_POINTER, sp);
             self.mark_user_move(op);
             if op == ir::IR_NONE {
                 return ir::IR_NONE;
@@ -7610,7 +7710,6 @@ extend Lowerer {
             let hm = pk.prelude_lookup("SliceMut", true);
             let hv = pk.prelude_lookup("Vector", true);
             let hg = pk.prelude_lookup("String", true);
-            let ha = pk.prelude_lookup("Array", true);
             self.views = ViewDecls {
                 ok: true,
                 v_str: DefId { module: hs.mid, node: hs.node },
@@ -7618,7 +7717,6 @@ extend Lowerer {
                 v_slice_mut: DefId { module: hm.mid, node: hm.node },
                 v_vector: DefId { module: hv.mid, node: hv.node },
                 v_string: DefId { module: hg.mid, node: hg.node },
-                v_array: DefId { module: ha.mid, node: ha.node },
             };
         }
         return self.views;
@@ -7683,20 +7781,6 @@ extend Lowerer {
             return natural;
         }
         return ty;
-    }
-
-    /// True for the prelude `Array<T, N>` instance (fixed length; range-validated like a view).
-    fn array_view(self: &mut Self, ty: TypeId) bool {
-        if ty == TYPE_NONE {
-            return false;
-        }
-        let y = *self.f.ty(ty);
-        if y.kind != TypeKind::TYPE_INSTANCE {
-            return false;
-        }
-        let it = *self.f.instance(y.as_data.inst);
-        let v = self.view_decls();
-        return vd_is(v.v_array, it.decl, it.module);
     }
 
     /// `base` reached through every reference wrapper: the place of the value itself. Element
@@ -7788,6 +7872,8 @@ extend Lowerer {
         if lop == ir::IR_NONE {
             return ir::IR_NONE;
         }
+        // A temporary object (`mk()[1..3]`) is the scope's to drop, as an operator's left operand.
+        self.own_operand(lop, d.object);
         let recv = self.op_recv(md, lop, sp);
         let rd = self.f.node(d.index).as_data.pattern_range;
         let ut = Ast::builtin(BuiltinType::BT_USIZE);
@@ -7899,6 +7985,8 @@ extend Lowerer {
                 if lop == ir::IR_NONE {
                     return ir::IR_NONE;
                 }
+                // A temporary object (`mk()[1]`) is the scope's to drop, as an operator's left operand.
+                self.own_operand(lop, d.object);
                 // `&E` from `index`, `&mut E` from `index_mut`: the method's declared result.
                 let ma = unsafe (&*self.pkg).module_ast_const((m >> 32) as ModuleId);
                 let mf = unsafe (*ma).at_const((m & 0xFFFFFFFFu64) as NodeId).as_data.function;
@@ -7961,10 +8049,10 @@ extend Lowerer {
             // Range validation (bounds-check normalization): materialize the length, prove
             // `start <= end <= len` BEFORE any pointer arithmetic, and hand RV_SLICE the
             // validated EXCLUSIVE end. An inclusive end first proves `end < len`, so `end + 1`
-            // cannot overflow. Bases outside the known safe views keep the legacy operands.
+            // cannot overflow. A raw pointer keeps the legacy operands; a view slices through its
+            // `index_range`.
             let pvt = self.peeled_view_ty(base);
-            let is_arr = pvt != TYPE_NONE && self.f.ty(pvt).kind == TypeKind::TYPE_ARRAY;
-            if self.checked_view(pvt) || is_arr || self.array_view(pvt) {
+            if pvt != TYPE_NONE && self.f.ty(pvt).kind == TypeKind::TYPE_ARRAY {
                 let ut = Ast::builtin(BuiltinType::BT_USIZE);
                 let vbase = self.deref_refs(base);
                 let lpl = self.len_temp(vbase, sp);

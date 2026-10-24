@@ -24,6 +24,13 @@ pub interface Send {}
 /// Structural and automatic on the same rules as `Send`; override with an explicit `extend T as Sync {}`.
 pub interface Sync {}
 
+/// Marker: all-zero bytes are a valid, empty value of the type whatever its private fields hold, so a
+/// struct literal that omits a field of the type zero-fills it (each field's own type must still be
+/// valid as zero). Nothing verifies the claim: it is asserted with `unsafe extend T as Zeroable {}`.
+/// std's containers assert it (`str`, `String`, `Vector`, `Array`, `Map`, `Set`); `Slice` and
+/// `SliceMut` need no assertion, their fields are public.
+pub interface Zeroable {}
+
 /// Marker: a `Copy` value is duplicated by a plain bitwise copy, so a use of it never moves it. Conformance
 /// is STRUCTURAL and automatic: scalars, `str`, raw pointers, shared references, `fn` pointers, and arrays,
 /// slices, tuples and non-`Free` aggregates whose members are all `Copy`. An owning value (`Free`, an

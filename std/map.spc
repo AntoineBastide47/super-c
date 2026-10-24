@@ -152,6 +152,7 @@ pub struct Map<K, V, A = Global, S = DefaultHash> {
     pub(file) hasher: S, // the hash builder (private; zero-sized for DefaultHash)
 }
 
+unsafe extend<K, V, A, S> Map<K, V, A, S> as Zeroable {}
 // A Map owns its keys and values, so it is Send / Sync when they, its allocator and its builder are.
 unsafe extend<K: Send, V: Send, A: Send, S: Send> Map<K, V, A, S> as Send {}
 

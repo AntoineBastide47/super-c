@@ -849,11 +849,15 @@ extend Facts {
 
     // ---- CFG -----------------------------------------------------------------------------------------
 
-    // The successors of block `blk`'s terminator: switch targets first, then the shared t0 edge.
+    // The successors of block `blk`'s terminator: switch targets first, then the shared t0 edge; a
+    // switch on a literal has its live edge only (`ir::const_switch_edge`).
     const fn succ_count(self: &Self, b: &ir::CoreBody, blk: usize) u32 {
         let t = &b.blocks.at(blk).term;
         let mut n: u32 = 0;
         if t.kind == ir::TM_SWITCH {
+            if ir::const_switch_edge(b, blk as u32) != ir::IR_NONE {
+                return 1;
+            }
             n = t.sw_len;
         }
         if t.kind == ir::TM_GOTO || t.kind == ir::TM_CALL || t.kind == ir::TM_DROP || t.kind == ir::TM_ASSERT || t.kind == ir::TM_SWITCH {
@@ -864,8 +868,15 @@ extend Facts {
 
     const fn succ_at(self: &Self, b: &ir::CoreBody, blk: usize, i: u32) u32 {
         let t = &b.blocks.at(blk).term;
-        if t.kind == ir::TM_SWITCH && i < t.sw_len {
-            return (b.switch_pool[(t.sw_start + i) as usize] & 0xFFFFFFFFu64) as u32;
+        let mut k = i;
+        if t.kind == ir::TM_SWITCH {
+            let ce = ir::const_switch_edge(b, blk as u32);
+            if ce != ir::IR_NONE {
+                k = ce;
+            }
+        }
+        if t.kind == ir::TM_SWITCH && k < t.sw_len {
+            return (b.switch_pool[(t.sw_start + k) as usize] & 0xFFFFFFFFu64) as u32;
         }
         return t.t0;
     }
@@ -3012,6 +3023,13 @@ extend Facts {
             ) && self.const_ge2(b, rv.a)) {
                 let _ = self.irel_op(b, rv.a);
                 let _ = self.irel_op(b, rv.b);
+            } else if rv.kind == ir::RV_BINARY && norm_op(rv.c) >= tt::TokenType::EqualEqual as u8 && norm_op(rv.c) <= tt::TokenType::GreaterThanEqual as u8 && (field_read(
+                b,
+                rv.a,
+            ) || field_read(b, rv.b)) {
+                // an index compared with a length read in place: the guard an inlined `index` panics on
+                let _ = self.irel_op(b, rv.a);
+                let _ = self.irel_op(b, rv.b);
             }
         }
         // closure over definitions, bounded
@@ -3192,15 +3210,7 @@ extend Facts {
         if rv.kind == ir::RV_LEN {
             return true;
         }
-        if rv.kind != ir::RV_USE {
-            return false;
-        }
-        let op = *b.operands.at(rv.a as usize);
-        if op.kind == ir::OP_CONST {
-            return false;
-        }
-        let p = *b.places.at(op.data as usize);
-        return p.proj_len != 0 && b.projections.at((p.proj_start + p.proj_len - 1) as usize).kind == ir::PJ_FIELD;
+        return rv.kind == ir::RV_USE && field_read(b, rv.a);
     }
 
     // Mark the whole-local integer operand `opid` tracked; true when newly marked.
@@ -3715,6 +3725,16 @@ pub const fn places_overlap(b: &ir::CoreBody, p1: u32, p2: u32) bool {
 // The base local of place `pl`.
 const fn rp_base(b: &ir::CoreBody, pl: u32) u32 {
     return b.places.at(pl as usize).base;
+}
+
+// Does operand `opid` read a field in place (a length, as `s.len`)?
+const fn field_read(b: &ir::CoreBody, opid: u32) bool {
+    let op = *b.operands.at(opid as usize);
+    if op.kind == ir::OP_CONST {
+        return false;
+    }
+    let p = *b.places.at(op.data as usize);
+    return p.proj_len != 0 && b.projections.at((p.proj_start + p.proj_len - 1) as usize).kind == ir::PJ_FIELD;
 }
 
 // A compound-assignment operator as its plain operator.

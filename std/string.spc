@@ -120,6 +120,7 @@ pub struct String<A = Global> {
 
 // A String owns its bytes, so it is safe to send to / share with another thread when its allocator is
 // (the raw buffer pointer would otherwise make it structurally neither).
+unsafe extend<A> String<A> as Zeroable {}
 unsafe extend<A: Send> String<A> as Send {}
 
 unsafe extend<A: Sync> String<A> as Sync {}
@@ -1204,13 +1205,13 @@ extend<A: Allocator> String<A> as Writer {
 extend<A: Allocator> String<A> as Index<u8, str> {
     pub fn index(self: &String<A>, i: usize) &u8 {
         if i >= self.len() {
-            panic("String[i]: index out of bounds");
+            panic_parts("String<A>", "[i]: index out of bounds");
         }
         return &unsafe self.as_str().ptr()[i];
     }
     pub fn index_range(self: &String<A>, r: Range<usize>) str {
         if r.inclusive && r.end >= self.len() {
-            panic("String[a..b]: range out of bounds");
+            panic_parts("String<A>", "[a..b]: range out of bounds");
         }
         let hi = if r.inclusive {
             r.end + 1;
@@ -1218,7 +1219,7 @@ extend<A: Allocator> String<A> as Index<u8, str> {
             r.end;
         };
         if r.start > hi || hi > self.len() {
-            panic("String[a..b]: range out of bounds");
+            panic_parts("String<A>", "[a..b]: range out of bounds");
         }
         return self.as_str().slice(r.start, hi);
     }

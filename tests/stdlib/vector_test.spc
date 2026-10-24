@@ -313,3 +313,24 @@ fn range_index_through_a_reference() {
     let r = &a;
     assert_eq(r[1..3].len(), 2);
 }
+
+fn counted(n: usize) Vector<u8> {
+    let mut v = Vector::<u8>::new();
+    for i in 0..n {
+        v.push(i as u8);
+    }
+    return v;
+}
+
+fn view_len(s: []u8) usize {
+    return s.len();
+}
+
+// A temporary indexed by an element or a range is destroyed with its scope (the leak check fails a
+// leaked buffer).
+@test
+fn indexed_temporaries_are_destroyed() {
+    assert_eq(view_len(counted(3)[0..2]), 2);
+    assert_eq(counted(3)[1], 1u8);
+    assert_eq(counted(4)[1..3].len(), 2);
+}

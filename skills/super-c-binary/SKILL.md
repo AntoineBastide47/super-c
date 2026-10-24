@@ -258,7 +258,10 @@ Advertised capabilities (`src/lsp/server.spc:capabilities_with`): push diagnosti
 hover, go-to-definition, type definition, implementation, references, document
 highlight, rename (with prepare), document formatting, code actions (quick fixes),
 completion, signature help, document and workspace symbols, folding ranges, selection
-ranges, inlay hints, and semantic tokens (full + range). Hover documents the reflection
+ranges, inlay hints, and semantic tokens (full + range). Definition, hover and implementation on an
+operator (`+`, a unary `-`, `+=`, the brackets of `v[i]`) name the method the checker chose for it
+(`op_method`: `index_mut` for a written element); rename and references do not, since an operator
+site does not spell the method's name. Hover documents the reflection
 constructs no declaration documents (`reflect_hover`): the intrinsics and the members of an
 `inline for` binder, by binder kind. Hover on an interface in a bound or a conformance shows the interface
 instance with its defaulted arguments (`Mul<V<T, N>>`); a type's signature shows its generic
@@ -941,7 +944,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `SC_INLINE_STATS` | Per-body inliner decision counters |
 | `SC_BCE_STATS` | Per-body bounds-check elimination counters (`BceStats`): checks and range checks seen and removed, coalesced, folded, signature crossings in the walked blocks, and the kept checks per reason (six reason columns, `BR_WIDENED` the last) |
 | `SC_BCE` | `0` turns bounds-check elimination off: every check stays (the generator's BCE differential oracle) |
-| `SC_BCE_DISABLE` | A list of BCE rules to turn off, matched by substring: `fold` (folded panic guards), `sig` (signature facts), `int` (the interval facts of `ir/facts.spc`) |
+| `SC_BCE_DISABLE` | A list of BCE rules to turn off, matched by substring: `fold` (folded panic guards, and their widening), `widen` (guard widening alone), `sig` (signature facts), `int` (the interval facts of `ir/facts.spc`) |
 | `SC_SIMD_LEVEL` | Test switch: the run-time copy level `k` (0 the bodies without the copies' features) the dispatch checks of an x86_64 program read instead of the CPU's (an emulator that hides features it runs) |
 | `SC_SIMD_SCALAR` | `1`: the vector planner uses no `@simd_impl` entry; every vector operation keeps its lane loop (the entry differential oracle) |
 | `SC_SIMD_TRACE` | Print each vector operation for which `simd_plan` finds no single entry (`simd: no native entry for <Op> on <T>xN: chunks` or `the lane loop`) |

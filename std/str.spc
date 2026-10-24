@@ -298,6 +298,8 @@ extend str as Hash {
     }
 }
 
+unsafe extend str as Zeroable {}
+
 extend str as Default {
     /// The empty view (a null, zero-length `str`).
     pub const fn default() str<'static> {
@@ -308,17 +310,17 @@ extend str as Default {
 // Index conformance: `s[i]` borrows the byte at `i`; `s[lo..hi]`; any range form, `..=` including the
 // end byte, an open end meaning `len()`: is the sub-view `slice(lo, hi)`. Byte-addressed: bounds past
 // `len` panic, and the caller keeps them on UTF-8 boundaries, exactly like `byte_at`/`slice`.
-// No IndexMut: a `str` is a read-only view.
+// No IndexMut: a `str` is a read-only view. The byte and the sub-view borrow what the view borrows.
 extend str as Index<u8, str> {
-    pub const fn index(self: &str, i: usize) &u8 {
+    pub const fn index<'a>(self: &str<'a>, i: usize) &'a u8 {
         if i >= self.len() {
-            panic("str[i]: index out of bounds");
+            panic_parts("str", "[i]: index out of bounds");
         }
         return &unsafe self.ptr[i];
     }
     pub const fn index_range<'a>(self: &str<'a>, r: Range<usize>) str<'a> {
         if r.inclusive && r.end >= self.len() {
-            panic("str[a..b]: range out of bounds");
+            panic_parts("str", "[a..b]: range out of bounds");
         }
         let hi = if r.inclusive {
             r.end + 1;
@@ -326,7 +328,7 @@ extend str as Index<u8, str> {
             r.end;
         };
         if r.start > hi || hi > self.len() {
-            panic("str[a..b]: range out of bounds");
+            panic_parts("str", "[a..b]: range out of bounds");
         }
         return self.slice(r.start, hi);
     }

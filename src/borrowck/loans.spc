@@ -1473,9 +1473,13 @@ extend Solver {
                         }
                     }
                 }
-                if overwrite && lo.deref {
-                    // Overwriting the reference a reborrow went through replaces the reference, not
-                    // the borrowed pointee: the write only ends the loan.
+                if overwrite && (lo.deref || ac.place != bf::BF_NONE && self.body().deref_past(
+                    lo.place,
+                    self.body().places.at(ac.place as usize).proj_len,
+                )) {
+                    // Overwriting the reference a reborrow went through (a call argument's, or one the
+                    // borrowed place derefs past the written one) replaces the reference, not the
+                    // borrowed pointee: the write only ends the loan.
                     continue;
                 }
                 // A write at a call's entry is an argument autoref claiming `&mut`, and an activation

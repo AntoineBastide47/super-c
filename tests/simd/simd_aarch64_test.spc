@@ -806,7 +806,7 @@ fn a_choose_after_calls_reads_lane_masks() {
 // inserts in each narrowing `Cast` entry of a `choose` of bytes by `f32` lanes).
 @test
 fn halves_and_concat_copy_chunks() {
-    let src = "import std::simd;\n@noinline\nfn mix(a: [u32; 8], b: [u8; 64]) u32 {\n    let v = Simd::<u32, 8>::from_array(a);\n    let w = Simd::<u8, 64>::from_array(b);\n    let c = simd::concat(v.high_half(), v.low_half());\n    let e = simd::concat(v, c);\n    let h = w.high_half().low_half();\n    return c[0] + c[7] + e[15] + h[0] as u32;\n}\nfn main() i32 {\n    let mut b: [u8; 64] = [0; 64];\n    let s: []mut u8 = b;\n    for i in 0..64 {\n        s[i] = i as u8;\n    }\n    return (mix([1, 2, 3, 4, 5, 6, 7, 8], b) == 45) as i32;\n}\n";
+    let src = "import std::simd;\n@noinline\nfn mix(a: [u32; 8], b: [u8; 64]) u32 {\n    let v = Simd::<u32, 8>::from_array(a);\n    let w = Simd::<u8, 64>::from_array(b);\n    let c = simd::concat(v.high_half(), v.low_half());\n    let e = simd::concat(v, c);\n    let h = w.high_half().low_half();\n    return c[0] + c[7] + e[15] + h[0] as u32;\n}\nfn main() i32 {\n    let mut b: [u8; 64] = [0; 64];\n    let s: []mut u8 = b;\n    for i in 0..s.len() {\n        s[i] = i as u8;\n    }\n    return (mix([1, 2, 3, 4, 5, 6, 7, 8], b) == 45) as i32;\n}\n";
     let c = h::compile_c_arch(src, 1);
     assert(c.ok(), "the program builds");
     if aarch64_host() {

@@ -389,12 +389,12 @@ extend<T: Scalar> Mat<T, 4, 4> {
 extend<T: Scalar, const C: usize, const R: usize> Mat<T, C, R> as Index<Vec<T, R>, []Vec<T, R>> {
     pub fn index(self: &Mat<T, C, R>, i: usize) &Vec<T, R> {
         if i >= C {
-            panic("Mat<T, C, R>[i]: index out of bounds");
+            panic_parts("Mat<T, C, R>", "[i]: index out of bounds");
         }
         return &unsafe self.c[i];
     }
     pub fn index_range(self: &Mat<T, C, R>, r: Range<usize>) []Vec<T, R> {
-        let (lo, hi) = col_range(r, C);
+        let (lo, hi) = col_range(r, C, "Mat<T, C, R>");
         return unsafe Slice::<Vec<T, R>> { ptr: (&self.c[0]) as *const Vec<T, R> + lo, len: hi - lo };
     }
 }
@@ -402,25 +402,25 @@ extend<T: Scalar, const C: usize, const R: usize> Mat<T, C, R> as Index<Vec<T, R
 extend<T: Scalar, const C: usize, const R: usize> Mat<T, C, R> as IndexMut<Vec<T, R>, []mut Vec<T, R>> {
     pub fn index_mut(self: &mut Mat<T, C, R>, i: usize) &mut Vec<T, R> {
         if i >= C {
-            panic("Mat<T, C, R>[i]: index out of bounds");
+            panic_parts("Mat<T, C, R>", "[i]: index out of bounds");
         }
         return &mut unsafe self.c[i];
     }
     pub fn index_range_mut(self: &mut Mat<T, C, R>, r: Range<usize>) []mut Vec<T, R> {
-        let (lo, hi) = col_range(r, C);
+        let (lo, hi) = col_range(r, C, "Mat<T, C, R>");
         return unsafe SliceMut::<Vec<T, R>> { ptr: (&mut self.c[0]) as *mut Vec<T, R> + lo, len: hi - lo };
     }
 }
 
-// The half-open bounds of `r` within `[0, n)`; a range outside traps.
-const fn col_range(r: Range<usize>, n: usize) (usize, usize) {
+// The half-open bounds of `r` within `[0, n)` of a value of type `name`; a range outside traps.
+const fn col_range(r: Range<usize>, n: usize, name: str) (usize, usize) {
     let hi = if r.inclusive {
         r.end + 1;
     } else {
         r.end;
     };
     if r.start > hi || hi > n {
-        panic("Mat<T, C, R>[a..b]: range out of bounds");
+        panic_parts(name, "[a..b]: range out of bounds");
     }
     return r.start, hi;
 }

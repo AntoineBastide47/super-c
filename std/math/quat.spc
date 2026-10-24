@@ -108,7 +108,7 @@ extend<T: Float> Quat<T> as Index<T, []T> {
             1 => &self.y,
             2 => &self.z,
             3 => &self.w,
-            _ => panic("Quat<T>[i]: index out of bounds"),
+            _ => panic_parts("Quat<T>", "[i]: index out of bounds"),
         };
     }
     pub fn index_range(self: &Quat<T>, r: Range<usize>) []T {
@@ -118,7 +118,7 @@ extend<T: Float> Quat<T> as Index<T, []T> {
             r.end;
         };
         if r.start > hi || hi > 4 {
-            panic("Quat<T>[a..b]: range out of bounds");
+            panic_parts("Quat<T>", "[a..b]: range out of bounds");
         }
         return unsafe Slice::<T> { ptr: (&self.x) as *const T + r.start, len: hi - r.start };
     }
@@ -131,7 +131,7 @@ extend<T: Float> Quat<T> as IndexMut<T, []mut T> {
             1 => &mut self.y,
             2 => &mut self.z,
             3 => &mut self.w,
-            _ => panic("Quat<T>[i]: index out of bounds"),
+            _ => panic_parts("Quat<T>", "[i]: index out of bounds"),
         };
     }
     pub fn index_range_mut(self: &mut Quat<T>, r: Range<usize>) []mut T {
@@ -141,7 +141,7 @@ extend<T: Float> Quat<T> as IndexMut<T, []mut T> {
             r.end;
         };
         if r.start > hi || hi > 4 {
-            panic("Quat<T>[a..b]: range out of bounds");
+            panic_parts("Quat<T>", "[a..b]: range out of bounds");
         }
         return unsafe SliceMut::<T> { ptr: (&mut self.x) as *mut T + r.start, len: hi - r.start };
     }

@@ -124,8 +124,8 @@ Each `Projection` carries the type **after** it applies.
 | `RV_LEN` / `RV_DISCRIMINANT` | Of a place |
 | `RV_DYN` | Dynamic-interface construction |
 | `RV_CLOSURE` | Capture operand range; `item` = closure body owner |
-| `RV_INTRINSIC` | `c` = IntrinsicKind: `IN_SIZEOF`, `IN_ALIGNOF`, `IN_VA_START/ARG/END`, `IN_TYPE_INFO`, `IN_ZEROED`, `IN_REFLECT`, `IN_ASM` (the rvalue's `item.node` indexes the body's `asms` text record), `IN_SAFEPOINT` / `IN_SAFEPOINT_C` (loop preemption tick, plain or with the cancellation check), `IN_CHUNK` (a strip-mined counted loop's chunk end: operands `(i, end)`, result `lim` with `i < lim <= end`; BCE reads `lim <= end`), `IN_DANGLING`, `IN_BOUNDS_GROUP` / `IN_BOUNDS_GROUP_PROVEN` (index, length, width: BCE coalescing's check of a run of element accesses, and a vector load's or store's, see `RV_SIMD`), `IN_BOUNDS` (an element check; on a vector lane index `item.node` is `CHECK_LANES` and the length operand is the lane count, a constant when known: the trap names the index and the count, through `__sc_lane`, which the vector's definition header carries, and BCE never groups it), `IN_DYN_TID`/`IN_DYN_DATA` (dyn_cast), `IN_LIKELY` / `IN_UNLIKELY` (the success test of `?`, and the `likely` / `unlikely` calls through `@intrinsic("hint.likely")` / `("hint.unlikely")`, `SI_HINT`: returns its one bool operand; the emitter spells `__builtin_expect(x, 1)` or `(x, 0)` and folds it into its branch, because clang drops a hint read through a variable), `IN_RETURN_ADDRESS` (no operand: `@intrinsic("frame.return_address")`, also `SI_HINT`; `__builtin_extract_return_addr(__builtin_return_address(0))`, null on wasm; no compile-time value), `IN_VOLATILE_LOAD` / `IN_VOLATILE_STORE` (`@intrinsic("mem.volatile_load")` / `("mem.volatile_store")`, also `SI_HINT`: operands `(p)` and `(p, v)`; the emitter spells `(*(T const volatile *)(p))` and `*(T volatile *)(p) = v;`, never drops, folds or moves them; the store's effect is `EF_PTR` on `p` and its address escapes for `tailcall`; the evaluator runs them as a plain load and store) |
-| `RV_SLICE` | Structural `base[lo..hi]` view, kept structural so end-openness survives |
+| `RV_INTRINSIC` | `c` = IntrinsicKind: `IN_SIZEOF`, `IN_ALIGNOF`, `IN_VA_START/ARG/END`, `IN_TYPE_INFO`, `IN_ZEROED`, `IN_REFLECT`, `IN_ASM` (the rvalue's `item.node` indexes the body's `asms` text record), `IN_SAFEPOINT` / `IN_SAFEPOINT_C` (loop preemption tick, plain or with the cancellation check), `IN_CHUNK` (a strip-mined counted loop's chunk end: operands `(i, end)`, result `lim` with `i < lim <= end`; BCE reads `lim <= end`), `IN_DANGLING`, `IN_BOUNDS_GROUP` / `IN_BOUNDS_GROUP_PROVEN` (index, length, width: BCE coalescing's check of a run of element accesses, and a vector load's or store's, see `RV_SIMD`), `IN_BOUNDS` (an element check; on a vector lane index `item.node` is `CHECK_LANES` and the length operand is the lane count, a constant when known: the trap names the index and the count, through `__sc_lane`, which the vector's definition header carries, and BCE never groups it), `IN_GROUP_FITS` (index, length, width: the bool `index <= len && width <= len - index` of a widened panic guard), `IN_TYPE_NAME` (`type_info::<T>().qualified_name` read alone, where std's `TypeInfo` has that field, `T` in `b`: a `str` constant the emitter and the interpreter spell with `typechecker::render`, so no descriptor is built), `IN_DYN_TID`/`IN_DYN_DATA` (dyn_cast), `IN_LIKELY` / `IN_UNLIKELY` (the success test of `?`, and the `likely` / `unlikely` calls through `@intrinsic("hint.likely")` / `("hint.unlikely")`, `SI_HINT`: returns its one bool operand; the emitter spells `__builtin_expect(x, 1)` or `(x, 0)` and folds it into its branch, because clang drops a hint read through a variable), `IN_RETURN_ADDRESS` (no operand: `@intrinsic("frame.return_address")`, also `SI_HINT`; `__builtin_extract_return_addr(__builtin_return_address(0))`, null on wasm; no compile-time value), `IN_VOLATILE_LOAD` / `IN_VOLATILE_STORE` (`@intrinsic("mem.volatile_load")` / `("mem.volatile_store")`, also `SI_HINT`: operands `(p)` and `(p, v)`; the emitter spells `(*(T const volatile *)(p))` and `*(T volatile *)(p) = v;`, never drops, folds or moves them; the store's effect is `EF_PTR` on `p` and its address escapes for `tailcall`; the evaluator runs them as a plain load and store) |
+| `RV_SLICE` | Structural `base[lo..hi]` view of a fixed array (range-validated by `IN_RANGE_BOUNDS`) or a raw pointer, kept structural so end-openness survives; a view or container slices through its `index_range` |
 | `RV_SIMD` | A named vector operation: `a`, `b` = operand range in `oper_pool`, `c` = the `SIMD_*` code, `target` = result type; `item.node` = the start of its index list in `simd_aux` (`SIMD_SWIZZLE`, `SIMD_SHUFFLE`), else `IR_NONE` |
 
 `RV_SIMD` codes are indexes of `SIMD_OPS` (`core.spc`, append-only), one row per code: the
@@ -272,7 +272,31 @@ dead result temp keeps it declared; the statement pool is rebuilt in block order
 
 The fact service over one final elaborated body; bounds-check elimination (`ir/bce.spc`) is its
 first client and keeps only its proof rules (affine index facts, length identities, coalescing,
-panic-guard folding).
+panic-guard folding and widening).
+
+- **Panic guards.** A branch whose one edge only panics (`doomed_panic`: a `@noreturn` call or an
+  unreachable trap after copies and qualified type names) is a guard: BCE folds it when the facts prove
+  its condition, the same way for std's inlined `index` methods and for code a program writes. A
+  length is identified as the value of a prelude view's `len` field, or of any integer field read
+  (`oper_len_lp`), so a program's own container proves its guards as std's do. A guard reads its
+  length in place (`s.len`): the comparison's recorded length place (`CmpBind.a_lp`/`b_lp`) is the
+  proof's length identity while the guard is proved (`Bce.glp`, read by `len_matches` and
+  `lop_place`). The proofs are the element check's (`prove_elem`: facts, aligned strides, solved
+  intervals; an unsigned value of `w` bits cast up stays below a constant length of at least `2^w`,
+  `narrow_below`, so a byte indexes a 256-element array unguarded) and `fold_proved`'s (a value is at
+  most itself; zero is at most any unsigned value). The
+  interval solver runs for a body with a guard too (`want_ints`): it tracks the operands of a
+  comparison with a field read in place (`field_read`) beside the checks' operands. A switch on a
+  constant takes one edge (`ir::const_switch_edge`, shared with `CFlow`), so facts flow only there.
+- **Guard widening** (`try_widen`). An unproven guard `index < len` whose survivor leads, through
+  single-predecessor blocks of statements that write no memory and cannot panic (`widen_step`, the
+  arithmetic `try_coalesce` crosses too), to guards `root + k < len` over the same root, the same length
+  (one value, or one place read again: `same_read` writes a read through a bound reference from its
+  referent) and the same panic (`same_panic`: one callee, equal constants, one literal text) becomes
+  `IN_GROUP_FITS(index, len, width)`, a bool the emitter spells `__sc_fits`: the guard keeps its panic,
+  its true edge proves every member offset, and the members fold. A member that would fail panics with
+  the same panic, before the pure statements between. The guard's comparison must have one reader, counted once
+  per body (`local_reads`: the run adds no operand that reads a local).
 
 - **Memory effects.** `stmt_effect` and `term_effect` are pure functions of the body:
   `EF_WRITE` (a place, through a deref or not), `EF_PTR` (a write through a pointer operand: a

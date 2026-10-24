@@ -326,9 +326,35 @@ pub const RV_SLICE: u8 = 13;
 /// Lane-wise operators and casts stay RV_BINARY, RV_UNARY and RV_CAST over vector types.
 pub const RV_SIMD: u8 = 14;
 
+/// The live edge of switch block `x` of `b` when it switches on a literal: the index of the case it
+/// takes (`sw_len` for the default edge), IR_NONE otherwise. Every pass that walks the control flow
+/// skips the dead edges.
+pub const fn const_switch_edge(b: &CoreBody, x: u32) u32 {
+    let t = b.blocks.at(x as usize).term;
+    if t.kind != TM_SWITCH {
+        return IR_NONE;
+    }
+    let op = *b.operands.at(t.a as usize);
+    if op.kind != OP_CONST {
+        return IR_NONE;
+    }
+    let c = *b.constants.at(op.data as usize);
+    if c.kind != CK_INT && c.kind != CK_BOOL {
+        return IR_NONE;
+    }
+    for k in 0..t.sw_len {
+        if (b.switch_pool[(t.sw_start + k) as usize] >> 32) as u32 == c.val as u32 {
+            return k;
+        }
+    }
+    return t.sw_len;
+}
+
 /// True for the rvalue kinds whose operands are the range `a`, `b` long, in `oper_pool`.
 pub const fn has_op_range(rv: &Rvalue) bool {
-    return rv.kind == RV_AGGREGATE || rv.kind == RV_CLOSURE || rv.kind == RV_SIMD || rv.kind == RV_INTRINSIC && rv.c != IN_SIZEOF && rv.c != IN_ALIGNOF && rv.c != IN_TYPE_INFO && rv.c != IN_DANGLING;
+    return rv.kind == RV_AGGREGATE || rv.kind == RV_CLOSURE || rv.kind == RV_SIMD || rv.kind == RV_INTRINSIC && !type_payload(
+        rv.c,
+    );
 }
 
 /// RV_SIMD operation codes (`Rvalue.c`), indexes of SIMD_OPS. Append-only. One code per lane rule:
@@ -859,6 +885,19 @@ pub const IN_RETURN_ADDRESS: u8 = 25;
 /// runs them as an ordinary load and store.
 pub const IN_VOLATILE_LOAD: u8 = 26;
 pub const IN_VOLATILE_STORE: u8 = 27;
+/// IN_GROUP_FITS(index, len, width): the bool `index <= len && width <= len - index`, the
+/// overflow-safe spelling of `index + width <= len`. It never panics: BCE widens the first of a run
+/// of panic guards `root + k < len` to it, and its true edge proves every member guard.
+pub const IN_GROUP_FITS: u8 = 28;
+/// IN_TYPE_NAME: `type_info::<T>().qualified_name` read alone, T in `b`: a `str` constant spelling T,
+/// with the trailing generic arguments that equal their parameter's default dropped (`Vector<i32>`).
+pub const IN_TYPE_NAME: u8 = 29;
+
+/// True for the intrinsics whose `b` is a type, not an operand count: the measuring, describing and
+/// naming intrinsics and `dangling`.
+pub const fn type_payload(c: u8) bool {
+    return c == IN_SIZEOF || c == IN_ALIGNOF || c == IN_TYPE_INFO || c == IN_DANGLING || c == IN_TYPE_NAME;
+}
 
 /// True for the six safe-access check intrinsics.
 pub const fn is_check(c: u8) bool {
@@ -1154,8 +1193,14 @@ fn exact<T: Copy>(v: &Vector<T>) Vector<T> {
 extend CoreBody {
     /// True when a projection of place `pl` is a deref: the place reaches through a reference.
     pub const fn place_has_deref(self: &Self, pl: PlaceId) bool {
+        return self.deref_past(pl, 0);
+    }
+
+    /// True when a projection of place `pl` past its first `n` is a deref: a place `n` projections
+    /// long on its path holds a reference the place reaches through.
+    pub const fn deref_past(self: &Self, pl: PlaceId, n: u32) bool {
         let p = self.places.at(pl as usize);
-        for i in 0..p.proj_len {
+        for i in n..p.proj_len {
             if self.projections.at((p.proj_start + i) as usize).kind == PJ_DEREF {
                 return true;
             }
@@ -1203,7 +1248,7 @@ extend CoreBody {
         for i in 0..self.rvalues.len() {
             let rv = self.rvalues.index_mut(i);
             rv.target = pub_map1(map, rv.target);
-            if rv.kind == RV_DYN || rv.kind == RV_INTRINSIC && (rv.c == IN_SIZEOF || rv.c == IN_ALIGNOF || rv.c == IN_TYPE_INFO || rv.c == IN_DANGLING) {
+            if rv.kind == RV_DYN || rv.kind == RV_INTRINSIC && type_payload(rv.c) {
                 rv.b = pub_map1(map, rv.b);
             }
         }
