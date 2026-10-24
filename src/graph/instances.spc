@@ -2,14 +2,17 @@
 // lowered Core IR bodies from concrete roots, expanding generic bodies under substitution frames.
 // Keys are package-stable: a declaration DefId plus the final package id of every concrete
 // argument (the substituted type, interned into the package table), so records from different
-// modules compare by integer.
+// modules compare by integer. Every walk also records what its unit references (`edge`), and `reach`
+// closes those references from the program's roots: the concrete functions a program uses.
 import ast::ast as *;
 import module::loader as loader;
 import ir::core as ir;
 import ir::lower as irl;
 import ir::layout as lay;
 import lexer::token as tok;
+import lexer::token_type as tt;
 import typechecker::typechecker as tc;
+import ir::inline as inl;
 
 /// Record kinds.
 pub const IG_AGG: u8 = 0; // generic struct/enum instantiation
@@ -105,11 +108,13 @@ struct Subst {
 struct WalkCache {
     pub built: bool,
     pub tys: u32, // unique local/rvalue types, first-occurrence order
-    pub consts: u32, // CK_ITEM constant ids carrying bound targs
+    pub consts: u32, // CK_ITEM constant ids
     pub meas: u32, // statement ids assigning a `sizeof`/`alignof`
     pub calls: u32, // per resolved TM_CALL: block id << 2, | 2 for an interface member, | 1 when `recv_binds`
     pub dyns: u32, // rvalue ids of `dyn` erasures (`RV_DYN`)
     pub casts: u32, // statement ids of `as` casts whose type names a generic parameter
+    pub bins: u32, // rvalue ids of binary operators an aggregate operand may dispatch (`note_binop`)
+    pub stats: u32, // local ids naming a constant or static (`LS_STATIC_REF`)
     pub end: u32,
 }
 
@@ -189,6 +194,7 @@ pub struct InstGraph {
     wt_seen: Map<u64, u64>,
     wt_dyns: Vector<u32>, // scratch: the cache's `dyns` list, found by the pass over the rvalues
     wt_casts: Vector<u32>, // scratch: its `casts` list, found by the pass over the statements
+    wt_bins: Vector<u32>, // scratch: its `bins` list, found by the pass over the rvalues
     /// Borrowck's finished lowerings (null = none): `body_idx` moves an entry into `kept` on first
     /// demand instead of lowering the body a second time.
     keep: *mut irl::Keep,
@@ -232,7 +238,35 @@ pub struct InstGraph {
     // `free`, in that order, deduplicated, each a method of a generic extend without generics of
     // its own.
     dm_static: Vector<DefId>,
+    // Reachability: unit keys by dense id (`UNIT_DEAD`, then `UNIT_ROOT`), the index of the keys, the
+    // references between units (`esrc[i]` references `edst[i]`), the unit the walk runs in, and a
+    // filter of the references just recorded (most repeat within a walk).
+    unit_key: Vector<u64>,
+    unit_ix: Map<u64, u32>,
+    esrc: Vector<u32>,
+    edst: Vector<u32>,
+    cur_unit: u32,
+    erecent: Vector<u64>,
+    /// The concrete functions `reach` found, as `module << 32 | node`.
+    pub reached: Set<u64>,
 }
+
+// Reachability unit keys, the kind in the top bits: a record (its id), a concrete function, a concrete
+// aggregate's or a builtin's declaration (what using a value of it needs: its conformances, its
+// `free`), a type walked under `noted` (its id), the default body a concrete conformance inherits
+// (`exts` row << 32 | interface method node), the roots' own unit, and a direct call of a concrete
+// function (`reach`).
+const U_REC: u64 = 0;
+const U_FN: u64 = 1u64 << 61;
+const U_TY: u64 = 2u64 << 61;
+const U_TN: u64 = 3u64 << 61;
+const U_DEF: u64 = 4u64 << 61;
+const U_ROOT: u64 = 5u64 << 61;
+const U_CALL: u64 = 6u64 << 61;
+const U_KIND: u64 = 7u64 << 61;
+const UNIT_DEAD: u32 = 0; // records no reference
+const UNIT_ROOT: u32 = 1;
+const EDGE_RECENT: usize = 4096;
 
 const ORG_BODY: u64 = 1u64 << 63;
 const ORG_MEMBER: u64 = 1u64 << 62;
@@ -285,6 +319,7 @@ extend InstGraph {
             wt_seen: Map::<u64, u64>::new(),
             wt_dyns: Vector::<u32>::new(),
             wt_casts: Vector::<u32>::new(),
+            wt_bins: Vector::<u32>::new(),
             bodies: 0,
             rounds: 0,
             overflow: false,
@@ -303,7 +338,66 @@ extend InstGraph {
             chk_decl: DefId { module: 0, node: NODE_NONE },
             chk_span: tok::Span { start: 0, end: 0 },
             dm_static: Vector::<DefId>::new(),
+            unit_key: Vector::<u64>::new(),
+            unit_ix: Map::<u64, u32>::new(),
+            esrc: Vector::<u32>::new(),
+            edst: Vector::<u32>::new(),
+            cur_unit: UNIT_ROOT,
+            erecent: Vector::<u64>::new(),
+            reached: Set::<u64>::new(),
         };
+    }
+
+    // The dense id of unit `key`, interned on first use.
+    fn unit(self: &mut Self, key: u64) u32 {
+        if self.unit_key.len() == 0 {
+            self.unit_key.push(0xFFFFFFFFFFFFFFFFu64);
+            self.unit_key.push(U_ROOT);
+            self.unit_ix.insert(U_ROOT, UNIT_ROOT);
+            self.erecent.resize_default(EDGE_RECENT);
+        }
+        switch self.unit_ix.get(&key) {
+            Some(v) => {
+                return *v;
+            },
+            None => {},
+        };
+        let id = self.unit_key.len() as u32;
+        self.unit_key.push(key);
+        self.unit_ix.insert(key, id);
+        return id;
+    }
+
+    // Run the walks that follow in unit `key`; returns the unit to restore.
+    fn enter(self: &mut Self, key: u64) u32 {
+        let prev = self.cur_unit;
+        self.cur_unit = self.unit(key);
+        return prev;
+    }
+
+    // Record that the current unit references unit `key`.
+    fn edge(self: &mut Self, key: u64) {
+        if self.cur_unit == UNIT_DEAD {
+            return;
+        }
+        let d = self.unit(key);
+        if d == self.cur_unit {
+            return;
+        }
+        let e = self.cur_unit as u64 << 32 | d as u64;
+        let slot = (e.wrapping_mul(0x9E3779B97F4A7C15u64) >> 52) as usize;
+        if self.erecent[slot] == e {
+            return;
+        }
+        self.erecent.set(slot, e);
+        self.esrc.push(self.cur_unit);
+        self.edst.push(d);
+    }
+
+    // Record that the current unit references function `d` (a concrete function's body is emitted
+    // only when a reached unit references it; a generic or bodyless one makes the reference inert).
+    fn edge_fn(self: &mut Self, d: DefId) {
+        self.edge(U_FN | d.module as u64 << 32 | d.node as u64);
     }
 
     // An empty frame, reusing a returned one's allocation.
@@ -412,6 +506,7 @@ extend InstGraph {
                 let id = self.recs.len() as u32 - 1;
                 self.index.set(i, id);
                 *fresh = true;
+                self.edge(U_REC | id as u64);
                 if ts {
                     ts_add(TS_IGADD_NS, ts_now() - t0);
                 }
@@ -438,6 +533,7 @@ extend InstGraph {
                         self.pair_cur.clear();
                     }
                     *fresh = false;
+                    self.edge(U_REC | cur as u64);
                     if ts {
                         ts_add(TS_IGADD_HIT, 1);
                         ts_add(TS_IGADD_NS, ts_now() - t0);
@@ -1495,12 +1591,22 @@ extend InstGraph {
         if t == TYPE_NONE || depth > 8 {
             return;
         }
-        // Only final ids memoize: a provisional id belongs to one module's transient pool.
+        // Only final ids memoize: a provisional id belongs to one module's transient pool. A memoized
+        // type is its own unit: every walker references it, and its first walk records what it reaches.
         let memo = frame.len() == 0 && (t & TYPE_PROV) == 0;
+        if memo {
+            self.edge(U_TN | t as u64);
+        }
         if memo && t as usize < self.noted.len() && self.noted[t as usize] {
             return;
         }
+        let prev = if memo {
+            self.enter(U_TN | t as u64);
+        } else {
+            self.cur_unit;
+        };
         self.note_type_walk(a, t, frame, depth);
+        self.cur_unit = prev;
         if memo && depth == 0 && !self.in_spec {
             while self.noted.len() <= t as usize {
                 self.noted.push(false);
@@ -1575,6 +1681,11 @@ extend InstGraph {
             }
             return;
         }
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            // A value of a concrete aggregate needs what `ty_targets` lists.
+            self.edge(U_TY | y.module as u64 << 32 | y.as_data.decl as u64);
+            return;
+        }
         if y.kind != TypeKind::TYPE_INSTANCE && y.kind != TypeKind::TYPE_DYN {
             return;
         }
@@ -1616,8 +1727,9 @@ extend InstGraph {
         }
     }
 
-    // Walk one lowered body under `frame`: every type it stores, every resolved call, every item
-    // constant. Fresh generic-fn instances queue their own expansion.
+    // Walk one lowered constant initializer under `frame`: every type it stores, every resolved call,
+    // every item constant. Fresh generic-fn instances queue their own expansion. Its calls run at
+    // compile time, so only its function values are references (`edge_fn`): what its value can hold.
     fn walk_body(self: &mut Self, b: &ir::CoreBody, a: &Ast, frame: &Vector<Subst>) {
         self.bodies += 1;
         for i in 0..b.locals.len() {
@@ -1637,6 +1749,8 @@ extend InstGraph {
             let c = b.constants.at(i);
             if c.kind == ir::CK_ITEM && c.targ_len() != 0 {
                 self.note_call(a, c.item, b, c.targ_start(), c.targ_len(), frame, c.raw);
+            } else if c.kind == ir::CK_ITEM {
+                self.edge_fn(c.item);
             }
         }
         for i in 0..b.blocks.len() {
@@ -1653,6 +1767,8 @@ extend InstGraph {
             let rv = *b.rvalues.at(i);
             if rv.kind == ir::RV_DYN {
                 self.note_dyn(a, &rv, b, frame);
+            } else if rv.kind == ir::RV_BINARY && binop_dispatches(a, b, &rv) {
+                self.note_binop(a, &rv, b, frame);
             }
         }
     }
@@ -1717,7 +1833,14 @@ extend InstGraph {
             let row = *self.exts.at(ri as usize);
             let ea = unsafe &*p.module_ast_const(row.emod);
             let ir = self.ext_interface(ea, row.enode);
-            if !self.shapes.at(ri as usize).keyed || ir.module != di.module || ir.node != di.decl {
+            if ir.module != di.module || ir.node != di.decl {
+                continue;
+            }
+            if !self.shapes.at(ri as usize).keyed {
+                // A concrete conformance's vtable holds its methods and the defaults it inherits.
+                if ea.at_const(row.enode).as_data.extend_def.generics.len == 0 {
+                    self.edge_vtable(ri, ir);
+                }
                 continue;
             }
             let mut ef = Vector::<Subst>::new();
@@ -1899,6 +2022,10 @@ extend InstGraph {
             if fg.len == 0 && !self.shapes.at(ri as usize).keyed {
                 // A method without parameters of its own pairs through its declaration's demand
                 // (`cross_demand`); only a keyed extend, which no target instance binds, records here.
+                // A concrete conformance's method, or the default body it inherits, is referenced.
+                if ed.generics.len == 0 {
+                    self.edge_conf(ri, mname, t.callee.node);
+                }
                 return true;
             }
             let dt = ea.type_of(ed.interface_type);
@@ -2193,8 +2320,13 @@ extend InstGraph {
                 let k0 = *self.keys.at((rec.args_start + k) as usize);
                 self.argbuf.push(k0);
             }
+            // A pairing is the planner's superset, not a reference: the record's walk counts only
+            // when a call names it.
             let mut fresh = false;
+            let u0 = self.cur_unit;
+            self.cur_unit = UNIT_DEAD;
             let _ = self.add(IG_METHOD, def, &mut fresh);
+            self.cur_unit = u0;
         }
         self.pair_cur.insert(ck, glen as u64);
     }
@@ -2267,7 +2399,9 @@ extend InstGraph {
         if !generic {
             if !self.dwalked.contains(&ck) {
                 self.dwalked.insert(ck);
+                let u0 = self.enter(U_DEF | x as u64 << 32 | imid as u64);
                 self.walk_default(x, iface, imid, 0, 0, IG_NONE);
+                self.cur_unit = u0;
             }
             return;
         }
@@ -2291,7 +2425,11 @@ extend InstGraph {
                 continue;
             }
             self.dwalked.insert(wk);
+            // A walk for the checks: a call of the default records its own instance.
+            let u0 = self.cur_unit;
+            self.cur_unit = UNIT_DEAD;
             self.walk_default(x, iface, imid, rec.args_start, rec.args_len, id);
+            self.cur_unit = u0;
         }
     }
 
@@ -2399,7 +2537,9 @@ extend InstGraph {
             }
             self.recs[id as usize].expanded = true;
             self.flags.set(id as usize, self.flags[id as usize] | RF_WALKED);
+            let u0 = self.enter(U_REC | id as u64);
             self.expand(id);
+            self.cur_unit = u0;
         }
         self.redo.truncate(0);
         self.cur_rec = IG_NONE;
@@ -3082,6 +3222,7 @@ extend InstGraph {
             let stamp = ki as u32 + 1;
             self.wt_dyns.truncate(0);
             self.wt_casts.truncate(0);
+            self.wt_bins.truncate(0);
             let mut w = WalkCache { built: true, tys: self.wpool.len() as u32 };
             for i in 0..b.locals.len() {
                 self.list_type(b.locals.at(i).ty, stamp);
@@ -3091,12 +3232,13 @@ extend InstGraph {
                 self.list_type(rv.target, stamp);
                 if rv.kind == ir::RV_DYN {
                     self.wt_dyns.push(i as u32);
+                } else if rv.kind == ir::RV_BINARY && binop_dispatches(a, b, rv) {
+                    self.wt_bins.push(i as u32);
                 }
             }
             w.consts = self.wpool.len() as u32;
             for i in 0..b.constants.len() {
-                let c = b.constants.at(i);
-                if c.kind == ir::CK_ITEM && c.targ_len() != 0 {
+                if b.constants.at(i).kind == ir::CK_ITEM {
                     self.wpool.push(i as u32);
                 }
             }
@@ -3134,6 +3276,16 @@ extend InstGraph {
             for i in 0..self.wt_casts.len() {
                 self.wpool.push(self.wt_casts[i]);
             }
+            w.bins = self.wpool.len() as u32;
+            for i in 0..self.wt_bins.len() {
+                self.wpool.push(self.wt_bins[i]);
+            }
+            w.stats = self.wpool.len() as u32;
+            for i in 0..b.locals.len() {
+                if b.locals.at(i).storage == ir::LS_STATIC_REF && b.locals.at(i).item.node != NODE_NONE {
+                    self.wpool.push(i as u32);
+                }
+            }
             w.end = self.wpool.len() as u32;
             self.wcache.set(ki as usize, w);
         }
@@ -3155,13 +3307,25 @@ extend InstGraph {
             let si = self.wpool[i as usize];
             self.check_measured(b, si, a, frame);
         }
-        for i in w.casts..w.end {
+        for i in w.casts..w.bins {
             let si = self.wpool[i as usize];
             self.check_cast(b, si, a, frame);
         }
+        for i in w.bins..w.stats {
+            let rv = *b.rvalues.at(self.wpool[i as usize] as usize);
+            self.note_binop(a, &rv, b, frame);
+        }
+        for i in w.stats..w.end {
+            // A constant's or static's data can hold function values (`walk_body`).
+            self.edge_fn(b.locals.at(self.wpool[i as usize] as usize).item);
+        }
         for i in w.consts..w.meas {
             let c = *b.constants.at(self.wpool[i as usize] as usize);
-            self.note_call(a, c.item, b, c.targ_start(), c.targ_len(), frame, c.raw);
+            if c.targ_len() != 0 {
+                self.note_call(a, c.item, b, c.targ_start(), c.targ_len(), frame, c.raw);
+            } else {
+                self.edge_fn(c.item);
+            }
         }
         for i in w.calls..w.dyns {
             let e = self.wpool[i as usize];
@@ -3169,6 +3333,8 @@ extend InstGraph {
             let iface = (e & 2) != 0 && self.note_iface_call(a, &t, b, frame);
             if !iface && t.targs_len != 0 && (e & 1) == 0 {
                 self.note_call(a, t.callee, b, t.targs_start, t.targs_len, frame, t.span);
+            } else if !iface && (e & 1) == 0 {
+                self.edge(U_CALL | t.callee.module as u64 << 32 | t.callee.node as u64);
             }
             if (e & 1) != 0 {
                 self.note_method_of(a, &t, b, frame);
@@ -3242,6 +3408,268 @@ extend InstGraph {
 
     /// Seed every concrete body of every emitted module (functions, methods, constant initializers)
     /// and run the expansion worklist to its fixed point.
+    // Reference every method of the concrete conformance of `exts` row `x` to interface `iface`: its
+    // own functions and the default bodies it inherits, the entries of its vtable.
+    fn edge_vtable(self: &mut Self, x: u32, iface: DefId) {
+        let p = unsafe &*self.pkg;
+        let ia = unsafe &*p.module_ast_const(iface.module);
+        if ia.at_const(iface.node).kind != NodeKind::NODE_INTERFACE {
+            return;
+        }
+        let isrc = p.modules.at(iface.module as usize).source.as_str();
+        let ims = ia.at_const(iface.node).as_data.interface_def.items;
+        for j in 0..ims.len {
+            let imid = unsafe ia.list(ims)[j as usize];
+            let imf = ia.at_const(imid);
+            if imf.kind != NodeKind::NODE_FUNCTION {
+                continue;
+            }
+            let isp = ia.at_const(imf.as_data.function.name).as_data.name.text;
+            self.edge_conf(x, isrc.slice(isp.start as usize, isp.end as usize), imid);
+        }
+    }
+
+    // Reference the method an operator on a value of concrete aggregate `d` dispatches to (`==` and
+    // `!=` through `eq`, the ordering through `cmp`, the others through their operator method): the
+    // first non-generic extend's function of that name, else the default body a conformance inherits.
+    fn edge_named(self: &mut Self, d: DefId, name: str) {
+        let p = unsafe &*self.pkg;
+        let md = self.method_named(d, name);
+        if md.node != NODE_NONE {
+            self.edge_fn(md);
+            return;
+        }
+        let mut r = self.ext_first(d);
+        while r != IG_NONE {
+            let x = r;
+            r = *self.ext_next.at(x as usize);
+            let row = *self.exts.at(x as usize);
+            let ea = unsafe &*p.module_ast_const(row.emod);
+            if ea.at_const(row.enode).as_data.extend_def.generics.len != 0 {
+                continue;
+            }
+            let iface = self.ext_interface(ea, row.enode);
+            if iface.node == NODE_NONE {
+                continue;
+            }
+            let ia = unsafe &*p.module_ast_const(iface.module);
+            if ia.at_const(iface.node).kind != NodeKind::NODE_INTERFACE {
+                continue;
+            }
+            let isrc = p.modules.at(iface.module as usize).source.as_str();
+            let ims = ia.at_const(iface.node).as_data.interface_def.items;
+            for j in 0..ims.len {
+                let imid = unsafe ia.list(ims)[j as usize];
+                let imf = ia.at_const(imid);
+                if imf.kind != NodeKind::NODE_FUNCTION || imf.as_data.function.body == NODE_NONE {
+                    continue;
+                }
+                let isp = ia.at_const(imf.as_data.function.name).as_data.name.text;
+                if isrc.slice(isp.start as usize, isp.end as usize) == name {
+                    self.edge(U_DEF | x as u64 << 32 | imid as u64);
+                    return;
+                }
+            }
+        }
+    }
+
+    // A binary operator `rv` of a body under `frame` whose operand is a concrete aggregate dispatches
+    // to that aggregate's operator method (`edge_named`).
+    fn note_binop(self: &mut Self, a: &Ast, rv: &ir::Rvalue, b: &ir::CoreBody, frame: &Vector<Subst>) {
+        let t = rv.c as tt::TokenType;
+        let name = if t == tt::TokenType::EqualEqual || t == tt::TokenType::BangEqual {
+            "eq";
+        } else if t == tt::TokenType::LessThan || t == tt::TokenType::LessThanEqual || t == tt::TokenType::GreaterThan || t == tt::TokenType::GreaterThanEqual {
+            "cmp";
+        } else {
+            t.op_method();
+        };
+        if name.len() == 0 || rv.a as usize >= b.operands.len() {
+            return;
+        }
+        let mut ot = b.operands.at(rv.a as usize).ty;
+        for _ in 0..4 {
+            if ot == TYPE_NONE {
+                return;
+            }
+            let y = *a.type_at(ot);
+            if y.kind != TypeKind::TYPE_POINTER && y.kind != TypeKind::TYPE_REFERENCE {
+                break;
+            }
+            ot = y.as_data.elem;
+        }
+        if ot == TYPE_NONE || !self.concrete_subst(a, ot, frame, 0) {
+            return;
+        }
+        let k = self.argkey_subst(a, ot, frame);
+        let y = *a.type_at(k.ty);
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            self.edge_named(DefId { module: y.module, node: y.as_data.decl }, name);
+        }
+    }
+
+    // Reference method `mname` of the concrete conformance of `exts` row `x`: its own function, or the
+    // default body of interface method `imid` that it inherits.
+    fn edge_conf(self: &mut Self, x: u32, mname: str, imid: NodeId) {
+        let row = *self.exts.at(x as usize);
+        let p = unsafe &*self.pkg;
+        let ea = unsafe &*p.module_ast_const(row.emod);
+        let esrc = p.modules.at(row.emod as usize).source.as_str();
+        let items = ea.at_const(row.enode).as_data.extend_def.items;
+        for j in 0..items.len {
+            let hid = unsafe ea.list(items)[j as usize];
+            let hn = ea.at_const(hid);
+            if hn.kind != NodeKind::NODE_FUNCTION {
+                continue;
+            }
+            let hs = ea.at_const(hn.as_data.function.name).as_data.name.text;
+            if esrc.slice(hs.start as usize, hs.end as usize) == mname {
+                self.edge_fn(DefId { module: row.emod, node: hid });
+                return;
+            }
+        }
+        self.edge(U_DEF | x as u64 << 32 | imid as u64);
+    }
+
+    // What destroying a value of concrete aggregate `d` runs, appended to `out` as unit keys: its
+    // `free`, and the destruction of its members (`member_ty`). The members' instances join through the
+    // records the walks create; a function only the emitter names is its own late demand.
+    fn ty_targets(self: &Self, d: DefId, out: &mut Vector<u64>) {
+        let p = unsafe &*self.pkg;
+        let fr = self.method_named(d, "free");
+        if fr.node != NODE_NONE {
+            out.push(U_FN | fr.module as u64 << 32 | fr.node as u64);
+        }
+        // The members a destruction frees: concrete aggregates by value, through arrays.
+        let da = unsafe &*p.module_ast_const(d.module);
+        let dn = da.at_const(d.node);
+        if dn.kind != NodeKind::NODE_STRUCT && dn.kind != NodeKind::NODE_ENUM {
+            return;
+        }
+        let ms = dn.as_data.aggregate.members;
+        for i in 0..ms.len {
+            let mid = unsafe da.list(ms)[i as usize];
+            let mk = da.at_const(mid).kind;
+            if mk == NodeKind::NODE_FIELD || dn.as_data.aggregate.is_tuple {
+                let tn = da.member_type_node(mid, dn.as_data.aggregate.is_tuple);
+                let mut t = da.type_of(mid);
+                if t == TYPE_NONE && tn != NODE_NONE {
+                    t = da.type_of(tn);
+                }
+                member_ty(da, t, out);
+            } else if mk == NodeKind::NODE_VARIANT {
+                let pl = da.at_const(mid).as_data.variant.payload;
+                for j in 0..pl.len {
+                    let pn = unsafe da.list(pl)[j as usize];
+                    let mut t = da.type_of(pn);
+                    if t == TYPE_NONE && da.at_const(pn).kind == NodeKind::NODE_PARAMETER {
+                        t = da.type_of(da.at_const(pn).as_data.parameter.ty);
+                    }
+                    member_ty(da, t, out);
+                }
+            }
+        }
+    }
+
+    /// Close the references the walks recorded from the program's roots: the functions and constants
+    /// `roots` names and every unit the walks recorded outside a unit of their own. Fills `reached` with
+    /// the concrete functions found. A direct call of an inline candidate of `inls` (null: the inliner
+    /// is off) reaches what the callee references, not the callee: the call splices its body. A call
+    /// the inliner keeps (its budget, depth or features) spells the callee, which the emitter then
+    /// renders late (`Mangler::fn_ref`).
+    pub fn reach(self: &mut Self, roots: &Vector<DefId>, inls: *const inl::InlineStore) {
+        let _ = self.unit(U_ROOT);
+        let n = self.unit_key.len();
+        // The references by source unit (a counting sort).
+        let mut off = Vector::<u32>::new();
+        off.resize_default(n + 1);
+        for i in 0..self.esrc.len() {
+            off.set(self.esrc[i] as usize + 1, off[self.esrc[i] as usize + 1] + 1);
+        }
+        for i in 0..n {
+            off.set(i + 1, off[i + 1] + off[i]);
+        }
+        let mut adj = Vector::<u32>::new();
+        adj.resize_default(self.edst.len());
+        let mut fill = off.clone();
+        for i in 0..self.esrc.len() {
+            let s = self.esrc[i] as usize;
+            adj.set(fill[s] as usize, self.edst[i]);
+            fill.set(s, fill[s] + 1);
+        }
+        // A unit no walk ran in has no recorded references (a declaration, an unwalked function).
+        let mut seen = Set::<u64>::new();
+        let mut stack = Vector::<u64>::new();
+        stack.push(U_ROOT);
+        seen.insert(U_ROOT);
+        for i in 0..roots.len() {
+            let k = U_FN | roots.at(i).module as u64 << 32 | roots.at(i).node as u64;
+            if !seen.contains(&k) {
+                seen.insert(k);
+                stack.push(k);
+            }
+        }
+        let mut lazy = Vector::<u64>::new();
+        while let Some(k0) = stack.pop() {
+            let mut k = k0;
+            lazy.truncate(0);
+            if (k & U_KIND) == U_CALL {
+                k = U_FN | k & ~U_KIND;
+                let d = DefId { module: (k >> 32 & 0xFFFF) as ModuleId, node: k as NodeId };
+                if inls == null || !unsafe (*inls).keeps(d) {
+                    lazy.push(k);
+                    k = U_CALL;
+                }
+            } else if (k & U_KIND) == U_FN {
+                self.reached.insert(k & ~U_KIND);
+            } else if (k & U_KIND) == U_TY {
+                self.ty_targets(DefId { module: (k >> 32 & 0xFFFF) as ModuleId, node: k as NodeId }, &mut lazy);
+            }
+            switch self.unit_ix.get(&k) {
+                Some(u) => {
+                    for e in off[(*u) as usize]..off[(*u) as usize + 1] {
+                        lazy.push(self.unit_key[adj[e as usize] as usize]);
+                    }
+                },
+                None => {},
+            };
+            for i in 0..lazy.len() {
+                if !seen.contains(&lazy[i]) {
+                    seen.insert(lazy[i]);
+                    stack.push(lazy[i]);
+                }
+            }
+        }
+    }
+
+    /// The method named `name` that a non-generic extend of declaration `d` defines, or NODE_NONE.
+    pub fn method_named(self: &Self, d: DefId, name: str) DefId {
+        let p = unsafe &*self.pkg;
+        let mut r = self.ext_first(d);
+        while r != IG_NONE {
+            let row = *self.exts.at(r as usize);
+            r = *self.ext_next.at(r as usize);
+            let ea = unsafe &*p.module_ast_const(row.emod);
+            if ea.at_const(row.enode).as_data.extend_def.generics.len != 0 {
+                continue;
+            }
+            let esrc = p.modules.at(row.emod as usize).source.as_str();
+            let items = ea.at_const(row.enode).as_data.extend_def.items;
+            for j in 0..items.len {
+                let hid = unsafe ea.list(items)[j as usize];
+                let hn = ea.at_const(hid);
+                if hn.kind != NodeKind::NODE_FUNCTION {
+                    continue;
+                }
+                let hs = ea.at_const(hn.as_data.function.name).as_data.name.text;
+                if esrc.slice(hs.start as usize, hs.end as usize) == name {
+                    return DefId { module: row.emod, node: hid };
+                }
+            }
+        }
+        return DefId { module: 0, node: NODE_NONE };
+    }
+
     pub fn collect(self: &mut Self) {
         let p = unsafe &*self.pkg;
         let empty = Vector::<Subst>::new();
@@ -3340,7 +3768,9 @@ extend InstGraph {
                 let n = a.at_const(nid);
                 if n.kind == NodeKind::NODE_FUNCTION {
                     if n.as_data.function.generics.len == 0 && !n.as_data.function.is_extern() && n.as_data.function.body != NODE_NONE {
+                        let u0 = self.enter(U_FN | m as u64 << 32 | nid as u64);
                         self.seed_body(m as ModuleId, nid, a, &empty);
+                        self.cur_unit = u0;
                     }
                 } else if n.kind == NodeKind::NODE_EXTEND {
                     if n.as_data.extend_def.generics.len != 0 {
@@ -3352,7 +3782,9 @@ extend InstGraph {
                         let iid = unsafe a.list(inner)[j as usize];
                         let it = a.at_const(iid);
                         if it.kind == NodeKind::NODE_FUNCTION && it.as_data.function.body != NODE_NONE && it.as_data.function.generics.len == 0 {
+                            let u0 = self.enter(U_FN | m as u64 << 32 | iid as u64);
                             self.seed_body(m as ModuleId, iid, a, &empty);
+                            self.cur_unit = u0;
                         }
                     }
                 } else if (n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM) && n.as_data.aggregate.generics.len == 0 {
@@ -3363,9 +3795,12 @@ extend InstGraph {
                     if !n.as_data.const_def.is_extern && n.as_data.const_def.value != NODE_NONE {
                         self.clow.retarget(m as ModuleId);
                         if self.clow.relower_const(nid) {
-                            // Raw borrow: the walk never lowers through `clow`.
+                            // Raw borrow: the walk never lowers through `clow`. The constant is its own
+                            // unit: a body that names it references it.
                             let cb = (&self.clow.body) as *const ir::CoreBody;
+                            let u0 = self.enter(U_FN | m as u64 << 32 | nid as u64);
                             self.walk_body(unsafe &*cb, a, &empty);
+                            self.cur_unit = u0;
                         }
                     }
                 } else if n.kind == NodeKind::NODE_TYPE_ALIAS {
@@ -3400,6 +3835,47 @@ extend InstGraph {
             self.walk_kept(bi, a, frame);
             self.expand_closures(bi, m, frame);
         }
+    }
+}
+
+// Whether binary operator `rv` of body `b` (tree `a`) may dispatch to an operator method: its left
+// operand is not a builtin scalar, pointer to one or `str` (an aggregate, or a type a frame binds).
+fn binop_dispatches(a: &Ast, b: &ir::CoreBody, rv: &ir::Rvalue) bool {
+    if rv.a as usize >= b.operands.len() {
+        return false;
+    }
+    let mut t = b.operands.at(rv.a as usize).ty;
+    for _ in 0..4 {
+        if t == TYPE_NONE {
+            return false;
+        }
+        let y = *a.type_at(t);
+        if y.kind != TypeKind::TYPE_POINTER && y.kind != TypeKind::TYPE_REFERENCE {
+            break;
+        }
+        t = y.as_data.elem;
+    }
+    let k = a.type_at(t).kind;
+    return k == TypeKind::TYPE_STRUCT || k == TypeKind::TYPE_ENUM || k == TypeKind::TYPE_INSTANCE || k == TypeKind::TYPE_GENERIC || k == TypeKind::TYPE_ASSOC;
+}
+
+// The unit of member type `t` of an aggregate in `a` that the aggregate's destruction reaches: a
+// concrete aggregate held by value, also as an array element.
+fn member_ty(a: &Ast, t: TypeId, out: &mut Vector<u64>) {
+    let mut u = t;
+    for _ in 0..8 {
+        if u == TYPE_NONE {
+            return;
+        }
+        let y = *a.type_at(u);
+        if y.kind == TypeKind::TYPE_ARRAY {
+            u = y.as_data.arr.elem;
+            continue;
+        }
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            out.push(U_TY | y.module as u64 << 32 | y.as_data.decl as u64);
+        }
+        return;
     }
 }
 

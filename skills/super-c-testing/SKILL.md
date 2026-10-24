@@ -430,6 +430,11 @@ The compiler's tests live in `tests/` at the repo root. Count test files with
 | `expect_build_err(label, src, needle)` | Require the build to fail with `needle`, before any C compile and with no internal error |
 | `expect_asm(label, src, opts, function, contains, absent)` | Check instruction names in the assembly of C function `function` (a `contains` entry `a|b` is met by either, for equivalent instructions C compilers pick between (`uminv|umaxv`); an `absent` entry `=name` matches that mnemonic exactly: `=bl` is a call, not `tbl`; `%reg` matches an operand in AT&T syntax: `%ymm`) |
 
+A program with `main` emits only the functions it reaches, and a function the inliner splices at
+every call has no definition. A test that inspects a function's C keeps it emitted: `@noinline` on
+it, `@used` on one `main` does not call, or a use as a function value when an attribute on the
+definition line would change the checked text.
+
 These are backed by `loader::package_from_source`, which applies `@platform`/`@arch`
 filtering for the host and loads the vector backend for a snippet that names a vector, like a
 real build, except the three differential oracles, which build

@@ -3,7 +3,7 @@
 // the behavior of a built program.
 import tests::harness as h;
 
-const BROAD: str = "struct Point { pub x: i32, }\nextend Point { fn get(self: &Point) i32 { return self.x; } }\nfn add(a: i32, b: i32) i32 { return a + b; }\nfn main() i32 {\n  let p: Point = Point { x: 1, };\n  let y: i32 = p.get();\n  let z: i32 = add(1, 2);\n  if (true) { let w: i32 = 0; }\n  while (false) { }\n  return y + z;\n}\n";
+const BROAD: str = "struct Point { pub x: i32, }\nextend Point { fn get(self: &Point) i32 { return self.x; } }\n@noinline\nfn add(a: i32, b: i32) i32 { return a + b; }\nfn main() i32 {\n  let p: Point = Point { x: 1, };\n  let y: i32 = p.get();\n  let z: i32 = add(1, 2);\n  if (true) { let w: i32 = 0; }\n  while (false) { }\n  return y + z;\n}\n";
 
 const CONTROL: str = "fn classify(c: u8) i32 { return switch c { 0 => 1, n => 2, _ => 0, }; }\nfn sum(xs: [i32; 3]) i32 {\n  let mut total: i32 = 0;\n  for x in xs { total = total + x; }\n  return total;\n}\n";
 
@@ -19,7 +19,7 @@ const STR: str = "fn f(s: str) usize { return s.len(); }\nfn main() i32 { let g:
 
 // The streaming backend reconstructs structured C (if/else, native switch, while) from Core IR and
 // forwards return slots, instead of the raw block/goto CFG. These assertions pin the readable shape.
-const STRUCT: str = "fn f(n: i32) i32 { if n > 0 { return 1; } return 0; }\nfn g(n: i32) i32 { let mut s: i32 = 0; let mut i: i32 = 0; while i < n { s = s + i; i = i + 1; } return s; }\nfn main() i32 { return f(1) + g(3) - 4; }\n";
+const STRUCT: str = "@noinline\nfn f(n: i32) i32 { if n > 0 { return 1; } return 0; }\n@noinline\nfn g(n: i32) i32 { let mut s: i32 = 0; let mut i: i32 = 0; while i < n { s = s + i; i = i + 1; } return s; }\nfn main() i32 { return f(1) + g(3) - 4; }\n";
 
 // These pin the structured SHAPES the backend produces, plus behavior. (The whole-program goto
 // reduction is measured separately.)
@@ -37,13 +37,13 @@ fn structured_backend() {
     b.add("owning-value forwarding behaves", SUGAR, 0);
 
     // A discriminant match lowers to a native C switch, not a goto chain.
-    let ENUM: str = "enum C { Red, Green, Blue }\nfn f(c: C) i32 { return switch c { Red => 1, Green => 2, Blue => 3, }; }\nfn main() i32 { return f(C::Green) - 2; }\n";
+    let ENUM: str = "enum C { Red, Green, Blue }\n@noinline\nfn f(c: C) i32 { return switch c { Red => 1, Green => 2, Blue => 3, }; }\nfn main() i32 { return f(C::Green) - 2; }\n";
     h::expect_c("discriminant match is a native switch", ENUM, "switch (");
     h::expect_c("switch case on the tag", ENUM, "case 1:");
     b.add("native switch behaves", ENUM, 0);
 
     // An early return inside a loop stays fully structured (a while plus an inner if).
-    let EARLY: str = "fn e(n: i32) i32 { let mut i: i32 = 0; while i < n { if i == 5 { return i; } i = i + 1; } return -1; }\nfn main() i32 { return e(10) - 5; }\n";
+    let EARLY: str = "@noinline\nfn e(n: i32) i32 { let mut i: i32 = 0; while i < n { if i == 5 { return i; } i = i + 1; } return -1; }\nfn main() i32 { return e(10) - 5; }\n";
     h::expect_c("early-return-in-loop is structured", EARLY, "while (i < n)");
     b.add("early-return-in-loop behaves", EARLY, 0);
 
@@ -76,7 +76,7 @@ fn structured_backend() {
 
     // A labeled multi-level break is not simple: the body uses the goto layout as its fallback, and
     // still runs correctly.
-    let IRRED: str = "fn f(n: i32) i32 { let mut s: i32 = 0; 'outer: for i in 0..n { for j in 0..n { if i + j == 3 { break 'outer; } s = s + 1; } } return s; }\nfn main() i32 { return f(3) - 5; }\n";
+    let IRRED: str = "@noinline\nfn f(n: i32) i32 { let mut s: i32 = 0; 'outer: for i in 0..n { for j in 0..n { if i + j == 3 { break 'outer; } s = s + 1; } } return s; }\nfn main() i32 { return f(3) - 5; }\n";
     h::expect_c("labeled multi-level control uses the goto fallback", IRRED, "goto ");
     b.add("the goto-fallback body still behaves", IRRED, 0);
     b.run();
@@ -237,10 +237,14 @@ fn externs() {
 
     h::expect_c(
         "complex builtin renders to _Complex",
-        "fn main() i32 { let z: c64 = 3.0; let w: c32 = 1.0; return 0; }\n",
+        "@noinline\nfn id(z: c64) c64 { return z; }\nfn main() i32 { let _ = id(3.0); return 0; }\n",
         "double _Complex",
     );
-    h::expect_c("c32 renders to float _Complex", "fn main() i32 { let w: c32 = 1.0; return 0; }\n", "float _Complex");
+    h::expect_c(
+        "c32 renders to float _Complex",
+        "@noinline\nfn id(w: c32) c32 { return w; }\nfn main() i32 { let _ = id(1.0); return 0; }\n",
+        "float _Complex",
+    );
 }
 
 fn str(b: &mut h::ExitBatch) {
@@ -452,10 +456,10 @@ fn static_initializers_leave_out_zero_members() {
 
 @test
 fn attributes() {
-    h::expect_c("noreturn", "@noreturn\nfn die() {}\nfn main() i32 { return 0; }\n", "_Noreturn");
+    h::expect_c("noreturn", "@noreturn\n@used\nfn die() {}\nfn main() i32 { return 0; }\n", "_Noreturn void die(");
     h::expect_c(
         "always_inline",
-        "@always_inline\nfn a(x: i32) i32 { return x; }\nfn main() i32 { return a(0); }\n",
+        "@always_inline\nfn a(x: i32) i32 { return x; }\nfn main() i32 { let f: fn(i32) i32 = a; return f(0); }\n",
         "inline __attribute__((always_inline))",
     );
     h::expect_c(
@@ -534,7 +538,7 @@ fn lifetimes_are_erased() {
 
 // Prelude `likely`/`unlikely`: they return their condition (also in a constant), and the branch that
 // tests one carries the hint to the C compiler (std/core.spc).
-const HINTS: str<'static> = "fn pick(n: i32) i32 { if unlikely(n < 0) { return -1; } if likely(n < 100) { return 1; } return 2; }\nfn main() i32 { if pick(-5) != -1 || pick(7) != 1 || pick(500) != 2 { return 1; } const F: bool = likely(true); if !F { return 1; } return 0; }\n";
+const HINTS: str<'static> = "@noinline\nfn pick(n: i32) i32 { if unlikely(n < 0) { return -1; } if likely(n < 100) { return 1; } return 2; }\nfn main() i32 { if pick(-5) != -1 || pick(7) != 1 || pick(500) != 2 { return 1; } const F: bool = likely(true); if !F { return 1; } return 0; }\n";
 
 fn branch_hints(b: &mut h::ExitBatch) {
     b.add("branch hints keep value semantics", HINTS, 0);

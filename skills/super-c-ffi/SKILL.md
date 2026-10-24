@@ -481,6 +481,11 @@ extern "C" "legacy.h" {
 }
 ```
 
+C code calls a Super-C function through `@export`: a program with `main` emits only the functions
+it reaches from `main` (and the ones whose calls are not all inlined), so a function only C calls
+needs `@export` (or `@used`) to have a definition. A build with no `main` emits every function of
+the project; a `[lib]` build emits its exported (`pub`) functions and what they reach.
+
 Exported functions get external linkage (non-`static` in the generated C). The definition and
 its prototype spell the symbol parenthesized (`void *(malloc)(size_t n)`), so a function-like
 macro of that name (super_rt.h's leak-tracker `malloc`, `calloc`, `realloc`, `free`) does not

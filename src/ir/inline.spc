@@ -655,7 +655,7 @@ extend InlineCtx {
 
     /// Whether the shared store keeps callee `d` as a candidate.
     pub fn kept(self: &Self, d: DefId) bool {
-        return self.callee_slot(d) < REJ_BASE;
+        return unsafe (*self.store).keeps(d);
     }
 
     /// Whether kept callee `d` (package `pkg`) computes its result from the instance's arguments
@@ -1165,6 +1165,14 @@ const fn called_bit(base: &Vector<usize>, d: DefId) i64 {
 }
 
 extend InlineStore {
+    /// Whether callee `d` is an inline candidate.
+    pub fn keeps(self: &Self, d: DefId) bool {
+        return switch self.keep_ix.get(&callee_key(d)) {
+            Some(v) => *v < REJ_BASE,
+            None => false,
+        };
+    }
+
     pub fn new() InlineStore {
         return InlineStore {
             keep_ix: Map::<u64, u64>::new(),

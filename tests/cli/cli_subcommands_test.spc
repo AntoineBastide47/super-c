@@ -280,7 +280,7 @@ fn external_transpiler_builds_and_keys_the_emit_stamp() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "import lib;\n\nfn main() i32 {\n    return lib::v();\n}\n");
-    p.mkfile("src/lib.spc", "pub fn v() i32 {\n    return 3;\n}\n");
+    p.mkfile("src/lib.spc", "@noinline\npub fn v() i32 {\n    return 3;\n}\n");
     let root = p.dir();
     let ext = format("build --out-dir=ext \"--transpiler={}\" -o app", cli::superc_path());
     let first = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", ext.as_str());

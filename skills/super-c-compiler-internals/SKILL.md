@@ -858,6 +858,26 @@ Full monomorphization is the only generic backend.
   every other aggregate a body names is defined by the late replay of the mangler's
   spellings, so the closure's breadth decides an aggregate's placement, not its existence. The
   demand cross product pairs each declaration with its target's new instances only (`pair_cur`).
+- **Function reachability:** a concrete function is emitted only when the program uses it. Each
+  walk runs in a unit (a concrete function or constant `U_FN`, a record, a concrete aggregate
+  `U_TY`, a memoized type walk, a concrete conformance's inherited default `U_DEF`, the roots)
+  and records what it references (`InstGraph::edge`): direct calls (`U_CALL`), function values,
+  interface calls
+  that land on a concrete conformance (`edge_conf`), `dyn` vtables (`edge_vtable`), operators on an
+  aggregate (`note_binop`: `eq`, `cmp`, the operator methods), the records it creates, and the
+  `free` and members a value's destruction runs (`ty_targets`). A constant initializer records only
+  its function values (its calls run at compile time); a pairing of the cross product and the
+  unconditional default walks record nothing (`UNIT_DEAD`). `InstGraph::reach` closes the
+  references from `reach_roots` (`src/driver/emit.spc`): the program entry, the runtime modules,
+  test items under `--test`, a `[lib]` build's exported functions, every project function of a
+  build with no entry, `@export`/`@used`/link-section items, and the methods the emitter's fixed
+  text calls (`Global::alloc`, `Global::dealloc`, `str::from_cstr`). The result predicts the seeds
+  (`Mangler.fn_pred`). A direct call of an inline candidate (`InlineStore::keeps`) reaches what the
+  callee references, not the callee, since the call splices its body. Every other concrete function
+  the rendered text spells (`Mangler::fn_ref`, inside `fn_sym`; journaled as `RK_FNREF`), such as a
+  candidate a call site does not splice (budget, depth, features), is rendered late, between full
+  instance drains (`cemit_seed_fn`). A name spelled after the graph freed its bodies is an internal
+  error. The per-TU cache keys each module on its predicted set.
   A speculative walk (signature propagation, the demand cross product and the expansion of a
   record they created) creates no aggregate record through a computed const argument
   (`folds_const`: `{N + 1}`, `{BITS * 2}`; an identity `{N}` in `N`'s own type does not count, `lin_identity`), and the collect line

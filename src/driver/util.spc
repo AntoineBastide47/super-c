@@ -712,11 +712,22 @@ const fn ndk_host_tag() str<'static> {
 }
 
 /// Flags every translation unit needs for a cross target: the triple, and for wasm the wasi sysroot's
-/// own defaults, then the flags of the enabled CPU `features` in table order. Nothing here overrides
-/// the manifest: these come first, manifest flags after. Callers split the result on whitespace
-/// (`split_args`), so no quoting: a sysroot path must hold no space.
+/// own defaults (on macOS, the instruction set when it is not the host's), then the flags of the
+/// enabled CPU `features` in table order. Nothing here overrides the manifest: these come first,
+/// manifest flags after. Callers split the result on whitespace (`split_args`), so no quoting: a
+/// sysroot path must hold no space.
 pub fn push_sdk_flags(cmd: &mut String, target: i32, sdk: i32, arch: i32, features: cf::CpuFeatureSet) {
     push_triple(cmd, sdk, arch);
+    if target == 1 && sdk == 0 && arch != unsafe shim::sc_host_arch() {
+        // Apple's clang builds either instruction set from the one macOS SDK.
+        cmd.push_str(
+            if arch == 0 {
+                " -arch x86_64";
+            } else {
+                " -arch arm64";
+            },
+        );
+    }
     cf::push_c_flags(features, target, cmd);
 }
 

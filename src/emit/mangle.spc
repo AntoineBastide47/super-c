@@ -526,6 +526,12 @@ pub struct Mangler {
     /// SAME gates without lowering its bodies. Off during replay and outside the seed loop.
     pub rec_on: bool,
     pub rec: Vector<RecEv>,
+    /// The concrete functions the seed pass emits, as `module << 32 | node` (null: every one, and
+    /// `fn_ref` records nothing). A function the text spells outside it joins `fn_dem` once, in
+    /// spelling order, and the driver emits it late.
+    pub fn_pred: *const Set<u64>,
+    pub fn_seen: Set<u64>,
+    pub fn_dem: Vector<DefId>,
     /// Attempts already journaled, keyed (gate key, mark_ctx): a dup attempt must be replayable
     /// once per module (its first claimant may vanish), and never more.
     pub rec_dups: Set<u64>,
@@ -595,6 +601,7 @@ pub const RK_HEDGE: u8 = 19; // a = owner module, h = definition key of the embe
 pub const RK_TNEED: u8 = 20; // xs = type-need keys of this module's row as (low, high) word pairs (driver-recorded)
 pub const RK_WRAP: u8 = 21; // h = wrapper name hash, s1 = element C name, s2 = wrapper definition
 pub const RK_PACK: u8 = 22; // h = result pack name hash, s1 = its C name, s2 = its definition
+pub const RK_FNREF: u8 = 23; // a/b = a concrete function the module's text spells (`fn_ref`)
 // The slot count of `Mangler.esc_seen` (`>> 52` of a 64-bit hash picks one).
 const ESC_SLOTS: usize = 4096;
 // The end of an `ext_next` chain.
@@ -747,6 +754,9 @@ extend Mangler {
             fp_bufs: Vector::<String>::new(),
             mark_ctx: -1,
             last_method_def: DefId { module: 0, node: NODE_NONE },
+            fn_pred: null,
+            fn_seen: Set::<u64>::new(),
+            fn_dem: Vector::<DefId>::new(),
             agg_on: false,
             sh_on: false,
             sh_agg_k: Vector::<u64>::new(),
@@ -2429,8 +2439,40 @@ extend Mangler {
 
     /// The C symbol of function `fnode` (module `fm`) with resolved extend target `target`
     /// (`target.node == NODE_NONE` = free function): pin | `[modpfx][Target__]name[suffix]`.
+    /// Record that the text being written spells function `(fm, fnode)` (`fn_pred`): journaled for the
+    /// per-TU cache, and queued once when the seed pass does not emit it.
+    pub fn fn_ref(self: &mut Self, fm: ModuleId, fnode: NodeId) {
+        if self.fn_pred == null || self.no_edges || self.seg_depth != 0 {
+            return;
+        }
+        if self.rec_on {
+            let mut ev = RecEv::blank(RK_FNREF);
+            ev.a = fm;
+            ev.b = fnode;
+            self.rec.push(ev);
+        }
+        let k = fm as u64 << 32 | fnode as u64;
+        if unsafe (*self.fn_pred).contains(&k) || self.fn_seen.contains(&k) {
+            return;
+        }
+        self.fn_seen.insert(k);
+        self.fn_dem.push(DefId { module: fm, node: fnode });
+    }
+
+    /// Queue function `d`, which a shard's text named outside `fn_pred` (`fn_ref`), unless it is queued.
+    pub fn fn_take(self: &mut Self, d: DefId) {
+        let k = d.module as u64 << 32 | d.node as u64;
+        if !self.fn_seen.contains(&k) {
+            self.fn_seen.insert(k);
+            self.fn_dem.push(d);
+        }
+    }
+
     pub fn fn_sym(self: &mut Self, fm: ModuleId, fnode: NodeId, target: DefId, out: &mut String) bool {
         let st = out.len();
+        if !unsafe (*self.p().module_ast_const(fm)).at_const(fnode).as_data.function.is_extern() {
+            self.fn_ref(fm, fnode);
+        }
         if self.sym_override(fm, fnode, out) {
             // An `@export` function is still its module's: the spelling unit needs that module's
             // prototype header, as for a prefixed symbol.

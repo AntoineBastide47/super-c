@@ -5761,7 +5761,7 @@ fn exit_cases_09() {
 fn widened_c_argument_is_cast() {
     h::expect_c(
         "a u8 argument of a C int parameter",
-        "extern \"C\" { fn abs(v: i32) i32; }\nfn pass(byte: u8) i32 { return unsafe abs(byte); }\nfn main() i32 { return pass(1) - 1; }\n",
+        "extern \"C\" { fn abs(v: i32) i32; }\n@noinline\nfn pass(byte: u8) i32 { return unsafe abs(byte); }\nfn main() i32 { return pass(1) - 1; }\n",
         "abs((int32_t)(byte))",
     );
 }

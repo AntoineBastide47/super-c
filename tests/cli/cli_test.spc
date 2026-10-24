@@ -340,7 +340,7 @@ fn hex_shift_counts_reach_the_checked_helper() {
     p.expect_fail("hex.spc", "error: this operation is undefined behavior when executed: shift out of range\n--> ");
     p.mkfile(
         "main.spc",
-        "static mut K: u64 = 200;\nfn f(x: u64, n: u64) u64 {\n    return x / 0x10 + (x >> n);\n}\nfn main() i32 {\n    print(\"{}\\n\", f(unsafe K, unsafe K - 0x88));\n    return 0;\n}\n",
+        "static mut K: u64 = 200;\n@noinline\nfn f(x: u64, n: u64) u64 {\n    return x / 0x10 + (x >> n);\n}\nfn main() i32 {\n    print(\"{}\\n\", f(unsafe K, unsafe K - 0x88));\n    return 0;\n}\n",
     );
     assert(p.compile("main.spc").ok());
     assert(p.gen_has("main.c", "__sc_shr_u64(x, n)") && p.gen_has("main.c", "(x / 0x10ULL)"));
@@ -357,7 +357,7 @@ fn inlined_self_comparison_folds() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
     p.mkfile(
         "main.spc",
-        "fn tail(s: str, end: usize) str {\n    return s.slice(end, end);\n}\nfn main() i32 {\n    return tail(\"abc\", 2).len() as i32;\n}\n",
+        "@noinline\nfn tail(s: str, end: usize) str {\n    return s.slice(end, end);\n}\nfn main() i32 {\n    return tail(\"abc\", 2).len() as i32;\n}\n",
     );
     let r = cli::superc_in(p.dir(), "build --profile=release");
     assert(r.ok() && !r.out_has("tautological"));
@@ -390,7 +390,7 @@ fn mut_refs_restrict_and_question_success_is_likely() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "fn bump(n: &mut i32, by: &i32) { *n = *n + *by; }\nconst fn half(x: i32) Option<i32> {\n    if x % 2 == 0 {\n        return Option::<i32>::Some(x / 2);\n    }\n    return Option::<i32>::None;\n}\nconst fn quarter(x: i32) Option<i32> {\n    let h = half(x)?;\n    return half(h);\n}\nconst Q: i32 = quarter(8).unwrap_or(0);\nfn main() i32 {\n    let mut n = 1;\n    let k = 2;\n    bump(&mut n, &k);\n    return switch quarter(4 * n) {\n        Some(q) => q - 3 + Q - 2,\n        None => 1,\n    };\n}\n",
+        "@noinline\nfn bump(n: &mut i32, by: &i32) { *n = *n + *by; }\nconst fn half(x: i32) Option<i32> {\n    if x % 2 == 0 {\n        return Option::<i32>::Some(x / 2);\n    }\n    return Option::<i32>::None;\n}\nconst fn quarter(x: i32) Option<i32> {\n    let h = half(x)?;\n    return half(h);\n}\nconst Q: i32 = quarter(8).unwrap_or(0);\nfn main() i32 {\n    let mut n = 1;\n    let k = 2;\n    bump(&mut n, &k);\n    return switch quarter(4 * n) {\n        Some(q) => q - 3 + Q - 2,\n        None => 1,\n    };\n}\n",
     );
     assert(p.compile("main.spc").ok());
     assert(p.gen_has("main.c", "int32_t *restrict n, const int32_t *by"), "only the &mut parameter is restrict");
@@ -4946,7 +4946,7 @@ fn main() i32 {
 fn small_program_compiles_as_one_unit() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
-    p.mkfile("src/util.spc", "pub fn three() i32 {\n    return 3;\n}\n");
+    p.mkfile("src/util.spc", "@noinline\npub fn three() i32 {\n    return 3;\n}\n");
     p.mkfile(
         "src/main.spc",
         "import util;\n\nfn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(util::three());\n    return v[0];\n}\n",
@@ -4972,7 +4972,7 @@ fn small_units_compile_in_packs() {
     let _unit = cli::set_env("SC_UNITY_MAX", "1"); // over the limit: no `__sc_unity.c`
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
-    p.mkfile("src/util.spc", "pub fn three() i32 {\n    return 3;\n}\n");
+    p.mkfile("src/util.spc", "@noinline\npub fn three() i32 {\n    return 3;\n}\n");
     p.mkfile("src/main.spc", "import util;\n\nfn main() i32 {\n    return util::three();\n}\n");
     let root = p.dir();
     assert_eq(cli::superc_in(root, "run").exit, 3);
@@ -4985,7 +4985,7 @@ fn small_units_compile_in_packs() {
     let po = format("{}/build/debug/obj/__sc_pack0.o", root);
     let mo = format("{}/build/debug/obj/main.o", root);
     assert(du::file_mtime(po.as_str()) != 0 && du::file_mtime(mo.as_str()) == 0, "only the pack compiles");
-    p.mkfile("src/util.spc", "pub fn three() i32 {\n    return 4;\n}\n");
+    p.mkfile("src/util.spc", "@noinline\npub fn three() i32 {\n    return 4;\n}\n");
     // No object cache: a run before this one may hold the edited pack's object.
     let r = cli::superc_env_in(root, "SC_BUILD_STATS", "- SC_NO_CACHE=1", "build");
     assert(r.ok() && r.out_has("\"stale\":1,"), "the edit compiles its pack only");
@@ -7038,9 +7038,9 @@ fn non_root_main_is_ordinary() {
 @test
 fn module_prefixes_stay_apart_from_prelude_symbols() {
     let p = cli::proj_new();
-    p.mkfile("str.spc", "pub fn len(x: i32) i32 {\n    return x;\n}\n");
-    p.mkfile("Vector/i32.spc", "pub fn push(x: i32) i32 {\n    return x + 1;\n}\n");
-    p.mkfile("other/i32.spc", "pub fn push(x: i32) i32 {\n    return x + 2;\n}\n");
+    p.mkfile("str.spc", "@noinline\npub fn len(x: i32) i32 {\n    return x;\n}\n");
+    p.mkfile("Vector/i32.spc", "@noinline\npub fn push(x: i32) i32 {\n    return x + 1;\n}\n");
+    p.mkfile("other/i32.spc", "@noinline\npub fn push(x: i32) i32 {\n    return x + 2;\n}\n");
     p.mkfile(
         "main.spc",
         "import str as su;\nimport Vector::i32 as vi;\nimport other::i32 as oi;\nfn main(args: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(args[0].len() as i32);\n    return su::len(v[0]) + vi::push(0) + oi::push(0) - args[0].len() as i32 - 3;\n}\n",

@@ -1,10 +1,12 @@
 // `super-c fmt` and `super-c lint` with no path argument: the whole-project sweep. project_paths reads
 // build.toml, skips the out-dir, and hands every top-level directory and .spc file to the formatter or
 // linter. Also covers `lint <dir>` recursion, `build <dir>`, `--bin` with `-o`, the strip of a
-// cross-linked release, the probe record's key, and the std tree `SC_STD_DIR` names. Driven from inside
-// a scratch project.
+// cross-linked release, a macOS build for the other instruction set, the probe record's key, and the std
+// tree `SC_STD_DIR` names. Driven from inside a scratch project.
 import stdlib;
 import tests::cli_harness as cli;
+import module::loader as loader;
+import driver_shim as shim;
 
 const CLEAN_A: str = "pub fn helper(x: i32) i32 {\n    return x + 1;\n}\n";
 const CLEAN_MAIN: str = "import lib::a;\n\nfn main() i32 {\n    return lib::a::helper(1) - 2;\n}\n";
@@ -218,6 +220,29 @@ fn a_cross_linked_release_strips_at_link() {
     let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", b.as_str());
     assert(r.ok() && !r.out_has("strip failed"), "the release links without the host strip");
     assert(cli::read_text(format("{}/cc.log", root).as_str()).contains("-Wl,--strip-all"), "the link strips");
+}
+
+// On macOS, `--arch` of the instruction set the host does not run builds for it: the host `cc` gets
+// `-arch`, so the executable's Mach-O header names that CPU (x86_64 0x01000007, arm64 0x0100000C).
+@test
+fn a_macos_build_for_the_other_arch_targets_it() {
+    if PLATFORM != Platform::MacOS {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
+    p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    // The other instruction set: its option and the low byte of its Mach-O CPU type.
+    let (opt, cpu) = if unsafe shim::sc_host_arch() == 1 {
+        ("build --arch=x86_64 -o app", 0x07u8);
+    } else {
+        ("build --arch=aarch64 -o app", 0x0Cu8);
+    };
+    let r = cli::superc_env_in(p.dir(), "SC_NO_CACHE", "1", opt);
+    assert(r.ok(), "the build for the other instruction set links");
+    let bin = loader::read_file(format("{}/app", p.dir()).as_str()).unwrap();
+    let b = bin.as_str();
+    assert(b.len() >= 8 && b.byte_at(4) == cpu && b.byte_at(7) == 0x01u8, "its Mach-O CPU type");
 }
 
 // The probe record's key holds the C compiler's whole command: its arguments select a target too, so
