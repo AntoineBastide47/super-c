@@ -146,10 +146,10 @@ fn the_evaluator_runs_vector_operations() {
     let o = e.run(p.find_symbol("sat"), none);
     assert_eq(o.kind, leval::EV_OK);
     assert_eq(o.value, 0xFC);
-    // Lane 3 holds i8::MIN: its absolute value overflows.
+    // Lane 3 holds i8::MIN: its absolute value overflows, and the trap names the lane.
     let o2 = e.run(p.find_symbol("abs"), none);
     assert_eq(o2.kind, iri::IT_TRAP_UB_OVERFLOW);
-    assert_eq(o2.msg.as_str(), "attempt to negate with overflow");
+    assert_eq(o2.msg.as_str(), "lane 3: attempt to negate with overflow");
 }
 
 @test

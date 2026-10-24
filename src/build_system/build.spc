@@ -84,14 +84,14 @@ fn walk_files(dir: str, base_len: usize, out: &mut Vector<String>) {
     }
 }
 
-// `walk_files` over a generated tree: a `.c` or `.h` name there is a file, so only other names cost
-// a stat (the tree holds one definition header per type).
+// `walk_files` over a generated tree: a `.c`, `.h` or `.o` name there is a file, so only other names
+// cost a stat (the tree holds one definition header per type).
 fn walk_gen_files(dir: str, base_len: usize, out: &mut Vector<String>) {
     let names = list_dir(dir, false).unwrap_or(Vector::<String>::new());
     for i in 0..names.len() {
         let nm = names.at(i).as_str();
         let p = loader::join2(dir, nm);
-        if !nm.ends_with(".c") && !nm.ends_with(".h") && is_dir(p.as_str()) {
+        if !nm.ends_with(".c") && !nm.ends_with(".h") && !nm.ends_with(".o") && is_dir(p.as_str()) {
             walk_gen_files(p.as_str(), base_len, out);
         } else {
             let full = p.as_str();
@@ -1467,6 +1467,18 @@ extend CcStream {
         if changed {
             self.rewritten.insert(String::from_str(rel));
         }
+        if kind == 3 {
+            // A native object: linked as it is. A new one relinks, as a compiled object does.
+            if changed && !self.marked {
+                self.marked = true;
+                if !write_file(self.pending.as_str(), "") {
+                    eprintln("build: cannot write '{}'", self.pending.as_str());
+                    self.ret = 1;
+                }
+            }
+            self.objs.push(String::from_str(path));
+            return;
+        }
         if kind != 1 {
             if text.len() != 0 && self.cache.len() != 0 {
                 let mut key = String::new();
@@ -2142,6 +2154,15 @@ fn stamp_write(
             stamp_line(&mut out, "in\t", md.mtime as u64, md.src_id, md.file.as_str());
         }
     }
+    // A native build reads C headers' constants into its objects.
+    for i in 0..p.header_files.len() {
+        let hp = p.header_files.at(i).as_str();
+        let h = file_id(hp);
+        if h == 0 {
+            return;
+        }
+        stamp_line(&mut out, "in\t", file_mtime(hp) as u64, h, hp);
+    }
     // Every directory import resolution listed, and the prelude's: a new `.spc` file there can shadow an
     // import (a root file beside an alt-root or std module) or join the prelude without changing any
     // input recorded above.
@@ -2495,7 +2516,10 @@ fn emit_closure(
         push_profile_side(&mut fl, m.profiles.at(pi as usize), &m.profiles.at(pi as usize).cflags, false, cx.target);
         p.mem_check = mem_checker(fl.as_str());
         p.build_cfg = build_cfg(fl.as_str());
+        p.cflags = m.cstd.clone();
+        p.cflags.push_string(&fl);
     }
+    p.pic = m.lib_shared && tgt::obj_of(cx.target).pic;
     p.test_build = topts != null && unsafe (*topts).enabled;
     p.profile = String::from_str(prof_name);
     p.profiles = profile_names(m);
@@ -2717,13 +2741,14 @@ pub fn transpile_step(
     // The LIR check needs every body emitted.
     let cache_on = stdlib::getenv("SC_NO_EMIT_CACHE") == null && stdlib::getenv("SC_LIR") == null;
     let external = cx.transpiler.len() != 0;
-    // The emitting compiler's identity, read before the emission: the tree it emits is its function.
+    // The emitting compiler's identity, read before the emission: the tree it emits is its function, and
+    // of the backend selection (SC_NATIVE).
     let cid = if !cache_on {
         0 as u64;
     } else if external {
         transpiler_id(cx.transpiler);
     } else {
-        compiler_id();
+        compiler_id() ^ stdlib::get_env("SC_NATIVE").unwrap_or(String::from_str("-")).as_str().hash();
     };
     let mut gen_files = Vector::<String>::new();
     let skipped = cache_on && stamp_fresh(
@@ -3326,6 +3351,10 @@ fn engine_build_i(
                 let rel = rels.at(i).as_str();
                 if rel.ends_with(".c") && !included.contains(rels.at(i)) {
                     stream.plan_c(rel, "");
+                } else if rel.ends_with(".o") {
+                    // A native object the emission wrote.
+                    let op = loader::join2(gen.as_str(), rel);
+                    stream.on_file(op.as_str(), "", 3, false);
                 }
             }
         }
@@ -3433,12 +3462,18 @@ fn engine_build_i(
             let mut need = bmt == 0 || file_mtime(stream.pending.as_str()) != 0;
             // An object's time is its `.cmd` record's (see `obj_stale`): another tree's use of a
             // shared cache entry refreshes the object's own mtime.
+            // A native object has no record: its own time.
             for i in 0..objs.len() {
                 if !need {
                     let o = objs.at(i).as_str();
                     let mut cp = String::from_str(o.slice(0, o.len() - 2));
                     cp.push_str(".cmd");
-                    need = file_mtime(cp.as_str()) > bmt;
+                    let ct = file_mtime(cp.as_str());
+                    need = if ct != 0 {
+                        ct > bmt;
+                    } else {
+                        file_mtime(o) > bmt;
+                    };
                 }
             }
             if !need {

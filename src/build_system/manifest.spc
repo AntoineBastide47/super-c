@@ -37,6 +37,24 @@ pub const OPT_FLAGS: i32 = -1;
 pub const OPT_S: i32 = 4;
 pub const OPT_Z: i32 = 5;
 
+/// Whether C flags `fl` compile without optimization: their last `-O` flag is `-O0`, or they have none.
+pub const fn unoptimized(fl: str) bool {
+    let mut zero = true;
+    let mut rest = fl;
+    for _ in 0..fl.len() + 1 {
+        let at = rest.find("-O");
+        if at < 0 {
+            break;
+        }
+        let i = at as usize;
+        if i == 0 || rest.byte_at(i - 1) == b' ' {
+            zero = i + 3 <= rest.len() && rest.byte_at(i + 2) == b'0' && (i + 3 == rest.len() || rest.byte_at(i + 3) == b' ');
+        }
+        rest = rest.slice(i + 2, rest.len());
+    }
+    return zero;
+}
+
 /// The compiler flag of `opt`; empty for OPT_FLAGS.
 pub const fn opt_flag(opt: i32) str<'static> {
     return if opt == 0 {

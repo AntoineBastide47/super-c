@@ -48,11 +48,12 @@ result builds generation one, generation one emits generation two at the same pa
 same options (both under the test profile: optimized, overflow checks kept; the emitted C does not
 depend on the profile), the two trees are compared byte for byte, and generation two is compiled
 and run: it is the compiler that runs every later step of the gate (the one-worker and
-every-core builds under each task-delay seed, the strict C warnings). Its
+every-core builds under each task-delay seed, which emit C (`SC_NATIVE=0`), the one-worker and
+every-core debug builds, whose native objects must be byte-identical, the strict C warnings). Its
 one-worker tree must equal generation one's every-core tree, so the fixpoint holds
 across generations and worker counts at once. `check.sh` (the commit hook) ends with
 `sh ci/gate.sh --core` over the compiler its bootstrap step rebuilt: the std package rules
-(`tools/std_packages`), the fixpoint, the worker-count identity under every seed, and the strict C warnings (about 30 s on
+(`tools/std_packages`), the fixpoint, the worker-count identity under every seed, the native object identity, and the strict C warnings (about 30 s on
 a warm object cache). The release workflow runs `sh ci/gate.sh --core` on macOS, Linux and
 Windows; on Windows the strict warnings use `SC_CSTD`, `-std=gnu11`, because mingw hides POSIX
 prototypes under `-std=c11`.

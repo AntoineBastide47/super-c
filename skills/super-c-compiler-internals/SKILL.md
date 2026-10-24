@@ -921,11 +921,56 @@ pool, slots, symbols, messages and one location entry per instruction.
 | `lower.spc` | Core IR to LIR (`Lower::body`, `Lower::glue` for derived destructors, static data), then `tidy` (drops unused pure values, threads jumps through blocks that only jump, merges single-predecessor blocks, hoists and deduplicates constants into the entry, deduplicates layout records); `check_all` |
 
 The backend switch is per module: `cbe::backends_of` gives each module BK_C, plus BK_LIR for the
-modules `SC_LIR` names. The C renderer runs for every module; LIR lowers beside it from the
-bindings the rendering used (`CEmit::lir_on`, `CEmit::callee_binds` for a generic callee's
-parameter types), so the shared planning (liveness, emit order, the instance graph, demand) stays
-in `cemit_package`. Today LIR is a check of the C path; a native backend makes a module take LIR
-alone, with C as its fallback, and `--emit-c` gives every module C.
+modules `SC_LIR` names, or for every module in a native build (`Package.native`). The C renderer
+runs for every module; LIR lowers beside it from the bindings the rendering used (`CEmit::lir_on`,
+`CEmit::callee_binds` for a generic callee's parameter types), so the shared planning (liveness,
+emit order, the instance graph, demand) stays in `cemit_package`. Locations come from the shared
+line starts `Package.lines` (`driver::emit::lir_lines`). The lowering folds a constant
+non-negative index into a `ptradd` offset only when the element stays inside the base slot: a
+bounds check guards any other.
+
+## Native backend
+
+A native build compiles each module's LIR to a machine object in place of its C units.
+
+| File | Content |
+|------|---------|
+| `src/codegen/live.spc` | The analysis pass (TPDE): block layout in reverse postorder with each loop contiguous and cold blocks last, loop nesting, each value's live range and use count |
+| `src/codegen/obj.spc` | The format-neutral object: sections, symbols, relocations |
+| `src/codegen/abi.spc` | The calling conventions' shared records: `Part`, `ALoc`, `CallLayout` |
+| `src/target/a64.spc` | The arm64 encoder, one function per instruction form |
+| `src/target/a64gen.spc` | One code generation pass per body: greedy registers, values live past their block in stack slots, callee-saved registers for loop values, far-branch retry |
+| `src/target/aapcs64.spc` | AAPCS64 with Apple's variant |
+| `src/target/macho.spc` | The Mach-O object writer, thread-locals included |
+| `src/target/x64.spc` | The x86-64 encoder; `Code::relax` gives each jump that reaches its 2-byte form |
+| `src/target/x64gen.spc` | `a64gen`'s design on x86-64 at the SSE2 baseline, for System V or Microsoft x64 (`Gen.win`): shift counts in cl and divisions in rdx:rax vacated per instruction, a callee-saved register when an instruction needs more than the caller-saved ones |
+| `src/target/sysv.spc` | The System V eightbyte classification, from the layout leaves |
+| `src/target/win64.spc` | The Microsoft x64 classification, as mingw-w64 gcc applies it |
+| `src/target/elf.spc` | The ELF object writer: `.eh_frame` against section symbols, `.note.GNU-stack`, thread-locals |
+| `src/target/coff.spc` | The COFF object writer: `.pdata` and `.xdata` from the frames' UNWIND_INFO |
+| `src/target/native.spc` | The entry: `supported`, `object` |
+
+`driver::emit` decides `Package.native`: a linking build with unoptimized C flags and no sanitizer
+on a supported target, or what `SC_NATIVE` says. `native_header_facts` reads the constants of the
+scoped C headers with the own preprocessor (in parallel, cached in `__sc_hfacts` by file size and
+mtime), and the scalar class of each `@layout` opaque type through its typedefs
+(`Package.opaque_cls`, `bindgen::scalar_class`). The calling conventions classify an aggregate by its
+layout leaves (scalars at offsets; an enum's tag and a capture by reference are leaves). A layout of
+1 to 64 bytes whose leaves are unknown (an opaque type that is no scalar) keeps none
+(`abi::unknown_class`), so the LIR stays complete; the native generators refuse a body whose
+signature or call passes one (`CallLayout.unknown`), and its module goes through C. A shared-library build
+sets `Package.pic` (the C compile's `-fPIC`): x86-64 code then reaches every global symbol through the
+GOT. A call moves its scalar register arguments in one parallel move from where they are. On Windows
+a module that defines or reaches a thread-local goes through C: the C compiler's model (emutls before
+gcc 16) is not followed yet. A module goes through C for module-level assembly, a body that stays in C, or a call that
+needs C (an intrinsic, a header's `static` function: `Package.c_fns`); its reason is in
+`SC_NATIVE_STATS`. Each native module gives `m.o` (its own items, reused by the emission cache) and
+`m__inst.o` (the rest). The record `__sc_native` holds, per module, whether its last emission gave
+an object (`NAT_OBJ`) or went through C (`NAT_C`); `nat_trust` turns a cache hit into a miss when
+the record does not hold the module under the current key (`nat_key`, which mixes in `SC_NATIVE`).
+The registry unit stays C: it includes the scoped headers so the C compiler checks the extern
+declarations. The vector bounds-check helpers live in `std/rt/lanes.spc`, loaded only when a
+program names a vector type.
 
 `check_all` (end of `cemit_package`, under `SC_LIR`) verifies every body, round-trips the text,
 and in a test build runs each test without fixture arguments in the evaluator: against the CTFE

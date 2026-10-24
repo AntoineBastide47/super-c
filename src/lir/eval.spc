@@ -414,6 +414,9 @@ extend Eval {
             if is_vec(t.ty) {
                 return self.vec_int(&f, b, t, dst);
             }
+            if t.ty == T_I128 {
+                return self.int128(&f, b, t, dst);
+            }
             return self.int_op(
                 op,
                 t.ty,
@@ -426,6 +429,20 @@ extend Eval {
                 dst,
             );
         }
+        if op == O_CLZ || op == O_CTZ || op == O_POPCNT {
+            let bits = type_bits(t.ty, ptr);
+            let x = trunc_bits(self.val(&f, b, t.a), bits);
+            self.vals[dst as usize] = if op == O_POPCNT {
+                x.count_ones() as u64;
+            } else if x == 0 {
+                bits;
+            } else if op == O_CLZ {
+                (x.leading_zeros() - (64 - bits as usize)) as u64;
+            } else {
+                x.trailing_zeros() as u64;
+            };
+            return true;
+        }
         if op == O_ADDO || op == O_SUBO || op == O_MULO {
             let x = self.val(&f, b, t.a);
             let y = self.val(&f, b, t.b);
@@ -434,6 +451,18 @@ extend Eval {
         }
         if op == O_ICMP {
             let ty = b.type_of(t.a);
+            if ty == T_I128 {
+                let wa = self.word(&f, b, t.a);
+                let wb = self.word(&f, b, t.b);
+                self.vals[dst as usize] = icmp128(
+                    t.aux,
+                    self.vals[wa as usize],
+                    self.vals[wa as usize + 1],
+                    self.vals[wb as usize],
+                    self.vals[wb as usize + 1],
+                ) as u64;
+                return true;
+            }
             self.vals[dst as usize] = icmp(t.aux, ty, ptr, self.val(&f, b, t.a), self.val(&f, b, t.b)) as u64;
             return true;
         }
@@ -615,10 +644,12 @@ extend Eval {
             return true;
         }
         if op == O_PANIC {
-            return self.stop(
-                iri::IT_TRAP_PANIC,
-                (unsafe &*self.pkg).spell((unsafe &*self.pkg).msgs[b.msgs[t.a as usize] as usize]),
-            );
+            let m = (unsafe &*self.pkg).spell((unsafe &*self.pkg).msgs[b.msgs[t.a as usize] as usize]);
+            if t.b == VNONE {
+                return self.stop(iri::IT_TRAP_PANIC, m);
+            }
+            let lane = self.val(&f, b, t.b).trailing_zeros();
+            return self.stop(iri::IT_TRAP_PANIC, format("lane {}: {}", lane, m).as_str());
         }
         if op == O_UNREACHABLE {
             return self.stop(EV_ERROR, "unreachable reached");
@@ -652,11 +683,85 @@ extend Eval {
         return true;
     }
 
+    // A 128-bit integer operation: each value is two words, the low one first.
+    fn int128(self: &mut Self, f: &Frame, b: &Body, t: Inst, dst: u32) bool {
+        let op = t.op;
+        let wa = self.word(f, b, t.a);
+        let xl = self.vals[wa as usize];
+        let xh = self.vals[wa as usize + 1];
+        let mut yl: u64 = 0;
+        let mut yh: u64 = 0;
+        if op != O_NEG && op != O_NOT {
+            let wb = self.word(f, b, t.b);
+            yl = self.vals[wb as usize];
+            yh = self.vals[wb as usize + 1];
+        }
+        let mut rl: u64 = 0;
+        let mut rh: u64 = 0;
+        if op == O_ADD {
+            rl = xl.wrapping_add(yl);
+            rh = xh.wrapping_add(yh).wrapping_add((rl < xl) as u64);
+        } else if op == O_SUB {
+            rl = xl.wrapping_sub(yl);
+            rh = xh.wrapping_sub(yh).wrapping_sub((xl < yl) as u64);
+        } else if op == O_MUL {
+            let (pl, ph) = mul64(xl, yl);
+            rl = pl;
+            rh = ph.wrapping_add(xl.wrapping_mul(yh)).wrapping_add(xh.wrapping_mul(yl));
+        } else if op >= O_SDIV && op <= O_UREM {
+            if yl == 0 && yh == 0 {
+                return self.stop(iri::IT_TRAP_UB_DIV_ZERO, "division by zero");
+            }
+            let signed = op == O_SDIV || op == O_SREM;
+            let xn = signed && xh >> 63 != 0;
+            let yn = signed && yh >> 63 != 0;
+            if signed && xh == 0x8000000000000000 && xl == 0 && yl == 0xFFFFFFFFFFFFFFFF && yh == 0xFFFFFFFFFFFFFFFF {
+                return self.stop(iri::IT_TRAP_UB_OVERFLOW, "arithmetic overflow");
+            }
+            // Magnitudes divided; the quotient negative when the signs differ, the remainder with the dividend's.
+            let (al, ah) = neg_if(xn, xl, xh);
+            let (bl, bh) = neg_if(yn, yl, yh);
+            let (ql, qh, ml, mh) = divmod128(al, ah, bl, bh);
+            if op == O_SDIV || op == O_UDIV {
+                let (u, v) = neg_if(xn != yn, ql, qh);
+                rl = u;
+                rh = v;
+            } else {
+                let (u, v) = neg_if(xn, ml, mh);
+                rl = u;
+                rh = v;
+            }
+        } else if op == O_AND {
+            rl = xl & yl;
+            rh = xh & yh;
+        } else if op == O_OR {
+            rl = xl | yl;
+            rh = xh | yh;
+        } else if op == O_XOR {
+            rl = xl ^ yl;
+            rh = xh ^ yh;
+        } else if op == O_SHL || op == O_LSHR || op == O_ASHR {
+            if yh != 0 || yl >= 128 {
+                return self.stop(iri::IT_TRAP_UB_SHIFT, "shift out of range");
+            }
+            let (u, v) = shift128(op, xl, xh, yl as u32);
+            rl = u;
+            rh = v;
+        } else if op == O_NEG {
+            let (u, v) = neg_if(true, xl, xh);
+            rl = u;
+            rh = v;
+        } else {
+            rl = ~xl;
+            rh = ~xh;
+        }
+        self.vals[dst as usize] = rl;
+        self.vals[dst as usize + 1] = rh;
+        return true;
+    }
+
     fn int_op(self: &mut Self, op: u8, ty: u8, x: u64, y: u64, dst: u32) bool {
         let ptr = (unsafe &*self.pkg).ptr_bytes;
-        if ty == T_I128 {
-            return self.stop(EV_ERROR, "i128 arithmetic is not evaluated");
-        }
         let bits = type_bits(ty, ptr);
         let sx = sign_ext(x, bits);
         let sy = sign_ext(y, bits);
@@ -728,6 +833,25 @@ extend Eval {
             return true;
         }
         let x = self.val(f, b, t.a);
+        if t.ty == T_I128 && (t.op == O_SEXT || t.op == O_ZEXT) {
+            // The low word extended to 64 bits, the high word its sign or 0.
+            let fb = type_bits(from, ptr);
+            let lo = if t.op == O_SEXT {
+                sign_ext(x, fb) as u64;
+            } else {
+                trunc_bits(x, fb);
+            };
+            self.vals[dst as usize] = lo;
+            self.vals[dst as usize + 1] = pick_u64(t.op == O_SEXT && lo >> 63 != 0, 0xFFFFFFFFFFFFFFFF, 0);
+            return true;
+        }
+        if from == T_I128 && t.op == O_TRUNC {
+            self.vals[dst as usize] = trunc_bits(x, type_bits(t.ty, ptr));
+            return true;
+        }
+        if from == T_I128 || t.ty == T_I128 {
+            return self.stop(EV_ERROR, "an i128 float conversion is not evaluated");
+        }
         let mut r: u64 = 0;
         if !scalar_convert(t.op, t.aux, from, t.ty, ptr, x, &mut r) {
             return self.stop(iri::IT_TRAP_UB_OVERFLOW, "arithmetic overflow");
@@ -1151,6 +1275,30 @@ extend Eval {
         if ic == IC_TRAP_ORDER {
             return self.stop(iri::IT_TRAP_PANIC, "invalid memory order");
         }
+        if ic == IC_INDEX_BOUNDS {
+            let m = format("index out of bounds: the index is {} but the length is {}", args[0], args[1]);
+            return self.stop(iri::IT_TRAP_UB_OOB, m.as_str());
+        }
+        if ic == IC_VEC_BOUNDS {
+            let m = format("index out of bounds: {} lanes from {} but the length is {}", args[0], args[1], args[2]);
+            return self.stop(iri::IT_TRAP_UB_OOB, m.as_str());
+        }
+        if ic == IC_LANE_BOUNDS {
+            let mut m = format("lane {}: index out of bounds: the index is {}", args[0], args[1]);
+            if (args[3] & 1) != 0 {
+                m.format_into(" + {}", args[0]);
+            }
+            m.format_into(" but the length is {}", args[2]);
+            return self.stop(iri::IT_TRAP_UB_OOB, m.as_str());
+        }
+        if ic == IC_LANE_PANIC {
+            let mut t = String::new();
+            if !self.cstring(args[1], &mut t) {
+                return false;
+            }
+            let m = format("lane {}: {}", args[0], t.as_str());
+            return self.stop(iri::IT_TRAP_PANIC, m.as_str());
+        }
         if ic == IC_ZST_DIFF {
             return self.stop(iri::IT_TRAP_PANIC, "pointer distance on a zero-sized element type");
         }
@@ -1492,6 +1640,105 @@ const fn trunc_bits(x: u64, bits: u32) u64 {
     return x & (1u64 << bits as u64) - 1;
 }
 
+// The 128-bit product of `x` and `y`: its low and high words.
+const fn mul64(x: u64, y: u64) (u64, u64) {
+    let (x0, x1) = (x & 0xFFFFFFFF, x >> 32);
+    let (y0, y1) = (y & 0xFFFFFFFF, y >> 32);
+    let p00 = x0 * y0;
+    let p01 = x0 * y1;
+    let p10 = x1 * y0;
+    let mid = (p00 >> 32) + (p01 & 0xFFFFFFFF) + (p10 & 0xFFFFFFFF);
+    return mid << 32 | p00 & 0xFFFFFFFF, x1 * y1 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+}
+
+// The 128-bit value `(l, h)`, negated when `neg`.
+const fn neg_if(neg: bool, l: u64, h: u64) (u64, u64) {
+    if !neg {
+        return l, h;
+    }
+    return 0u64.wrapping_sub(l), (~h).wrapping_add((l == 0) as u64);
+}
+
+// `(l, h)` shifted by `n` (below 128) by shift operation `op`.
+const fn shift128(op: u8, l: u64, h: u64, n: u32) (u64, u64) {
+    if n == 0 {
+        return l, h;
+    }
+    let fill = pick_u64(op == O_ASHR && h >> 63 != 0, 0xFFFFFFFFFFFFFFFF, 0);
+    if n >= 64 {
+        let k = (n - 64) as u64;
+        if op == O_SHL {
+            return 0, l << k;
+        }
+        let hi = if op == O_ASHR {
+            (h as i64 >> k as i64) as u64;
+        } else {
+            h >> k;
+        };
+        return hi, fill;
+    }
+    let k = n as u64;
+    if op == O_SHL {
+        return l << k, h << k | l >> 64 - k;
+    }
+    let hi = if op == O_ASHR {
+        (h as i64 >> k as i64) as u64;
+    } else {
+        h >> k;
+    };
+    return l >> k | h << 64 - k, hi;
+}
+
+// The unsigned quotient and remainder of `(al, ah)` by `(bl, bh)` (not 0), one bit per step.
+const fn divmod128(al: u64, ah: u64, bl: u64, bh: u64) (u64, u64, u64, u64) {
+    let mut ql: u64 = 0;
+    let mut qh: u64 = 0;
+    let mut rl: u64 = 0;
+    let mut rh: u64 = 0;
+    for k in 0..128u32 {
+        let i = 127 - k;
+        // r = r << 1 | bit i of a.
+        rh = rh << 1 | rl >> 63;
+        let bit = if i >= 64 {
+            ah >> (i - 64) as u64;
+        } else {
+            al >> i as u64;
+        };
+        rl = rl << 1 | bit & 1;
+        if rh > bh || rh == bh && rl >= bl {
+            let bw = (rl < bl) as u64;
+            rl = rl.wrapping_sub(bl);
+            rh = rh.wrapping_sub(bh).wrapping_sub(bw);
+            if i >= 64 {
+                qh |= 1u64 << (i - 64) as u64;
+            } else {
+                ql |= 1u64 << i as u64;
+            }
+        }
+    }
+    return ql, qh, rl, rh;
+}
+
+// Condition `c` between the 128-bit values `(xl, xh)` and `(yl, yh)`.
+const fn icmp128(c: u16, xl: u64, xh: u64, yl: u64, yh: u64) bool {
+    if c == C_EQ || c == C_NE {
+        return (xl == yl && xh == yh) == (c == C_EQ);
+    }
+    let signed = c == C_SLT || c == C_SLE || c == C_SGT || c == C_SGE;
+    let less = xh != yh && (signed && xh as i64 < yh as i64 || !signed && xh < yh) || xh == yh && xl < yl;
+    let eq = xl == yl && xh == yh;
+    if c == C_SLT || c == C_ULT {
+        return less;
+    }
+    if c == C_SLE || c == C_ULE {
+        return less || eq;
+    }
+    if c == C_SGT || c == C_UGT {
+        return !less && !eq;
+    }
+    return !less;
+}
+
 const fn sign_ext(x: u64, bits: u32) i64 {
     return lprint::sign_extend(x, bits);
 }
@@ -1782,6 +2029,10 @@ const IC_ALIGNED: u8 = 23; // sc_lk_aligned_alloc(n, align)
 const IC_ACCT_ON: u8 = 24; // std::testing::bench_sys's allocation accounting switch
 const IC_ACCT_ENABLED: u8 = 25;
 const IC_ACCT_SNAPSHOT: u8 = 26;
+const IC_INDEX_BOUNDS: u8 = 27; // __sc_index_bounds(i, n)
+const IC_VEC_BOUNDS: u8 = 28; // __sc_vec_bounds(w, i, n)
+const IC_LANE_BOUNDS: u8 = 29; // __sc_lane_bounds(lane, x, n, start)
+const IC_LANE_PANIC: u8 = 30; // __sc_lane_panic(lane, m)
 
 // The routine function symbol `name` names (`__sc_x_<c name>` is a C library name's alias).
 fn icode_of(name0: str) u8 {
@@ -1840,11 +2091,23 @@ fn icode_of(name0: str) u8 {
     if name == "__sc_panic_str" {
         return IC_PANIC_STR;
     }
-    if name == "__sc_assert_fail" {
+    if name == "__sc_assert_fail" || name == "__sc_assert_vals" {
         return IC_ASSERT;
     }
     if name == "__sc_trap_order" {
         return IC_TRAP_ORDER;
+    }
+    if name == "__sc_index_bounds" {
+        return IC_INDEX_BOUNDS;
+    }
+    if name == "__sc_vec_bounds" {
+        return IC_VEC_BOUNDS;
+    }
+    if name == "__sc_lane_bounds" {
+        return IC_LANE_BOUNDS;
+    }
+    if name == "__sc_lane_panic" {
+        return IC_LANE_PANIC;
     }
     if name == "__sc_zst_ptrdiff" {
         return IC_ZST_DIFF;
@@ -1979,6 +2242,9 @@ extend Eval {
             } else if fl {
                 r = lane_float(c, a, c2, c3, lt, &mut bit);
             } else if !self.lane_int(c, a, c2, lt, sg, rlt, dsg, &mut r, &mut bit) {
+                // The trap names its lane, as a lane check does.
+                let m = replace(&mut self.out.msg, format("lane {}: ", i));
+                self.out.msg.push_string(&m);
                 return false;
             }
             if mask {

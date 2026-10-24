@@ -30,6 +30,9 @@ pub struct Isa {
     pub merge_apart: bool,
     pub simd_backend: str<'static>, // `std/simd/backend/<name>.spc`
     pub probes: str<'static>, // the toolchain probes (`build_system::probe`) its builds run, space-separated
+    /// The C headers whose functions are the C compiler's intrinsics, space-separated: no object defines
+    /// them, so a native backend compiles their callers through C.
+    pub intrinsics: str<'static>,
 }
 
 /// A calling convention: how arguments and results pass, the callee-saved registers, varargs and
@@ -147,6 +150,7 @@ pub const ISAS: [Isa; 3] = [
         merge_apart: false,
         simd_backend: "x86_64",
         probes: "target-attr-x86_64 march-x86-64-v2 march-x86-64-v3 march-x86-64-v4 cpuid-count x86-features",
+        intrinsics: "immintrin.h x86intrin.h",
     },
     Isa {
         name: "aarch64",
@@ -161,6 +165,7 @@ pub const ISAS: [Isa; 3] = [
         merge_apart: false,
         simd_backend: "aarch64",
         probes: "target-attr-aarch64 aarch64-features",
+        intrinsics: "arm_neon.h arm_acle.h arm_sve.h arm_sme.h",
     },
     Isa {
         name: "wasm32",
@@ -175,6 +180,7 @@ pub const ISAS: [Isa; 3] = [
         merge_apart: true,
         simd_backend: "wasm",
         probes: "wasm-simd128 wasm-relaxed-simd",
+        intrinsics: "wasm_simd128.h",
     },
 ];
 
@@ -504,6 +510,7 @@ const UNKNOWN_ISA: Isa = Isa {
     merge_apart: false,
     simd_backend: "",
     probes: "",
+    intrinsics: "",
 };
 
 /// Instruction set `isa` (an `ISAS` index, or -1 for an unknown one).
@@ -689,3 +696,13 @@ const fn word_in(list: str, w: str) bool {
 /// The predefined C macros outside the implementation's namespace, which a strict `-std=cN` removes on
 /// every target that defines them.
 pub const STRICT_UNDEFINED: [str<'static>; 5] = ["linux", "unix", "WIN32", "WIN64", "WINNT"];
+
+/// The operating system the compiler runs on (an `OSES` index).
+pub const fn host_os() i32 {
+    return PLATFORM as i32;
+}
+
+/// The instruction set the compiler runs on (an `ISAS` index).
+pub const fn host_isa() i32 {
+    return ARCH as i32;
+}

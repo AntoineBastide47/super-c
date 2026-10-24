@@ -111,6 +111,9 @@ pub struct InferenceContext {
     pub unsafe_at: u32, // the innermost 'unsafe' marker's start + 1; 0: none
     pub unsafe_feat: u32, // calls of functions that need CPU features inside it (`FeatureCall`)
     pub mret_call: NodeId,
+    /// The expression whose several results its parent reads (`let (..) =`, a forwarding `return`, a
+    /// statement that drops them): a call with several results anywhere else is an error.
+    pub mret_ok: NodeId,
     pub mret_types: [TypeId; 8],
     pub mret_n: u8,
     pub mret_total: u32,
@@ -149,6 +152,7 @@ extend InferenceContext {
             unsafe_depth: 0,
             unsafe_used: 0,
             mret_call: NODE_NONE,
+            mret_ok: NODE_NONE,
             mret_n: 0,
             mret_total: 0,
             call_args: NodeList { start: 0, len: 0 },

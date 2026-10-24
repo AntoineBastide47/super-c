@@ -885,8 +885,9 @@ pub const TM_ASSERT: u8 = 5; // a = condition OperandId; t0 = success
 pub const TM_UNREACHABLE: u8 = 6;
 
 /// Verified intrinsic calls (Terminator.intr): a TM_CALL of the extern C memory or atomic routine the
-/// kind names, with the routine's arity and a pointer first argument (CI_FENCE takes none). Analyses
-/// read the exact effect from the kind; the call itself stays an ordinary call. Append-only.
+/// kind names, with the routine's arity and a pointer or reference first argument (CI_FENCE takes
+/// none). Analyses read the exact effect from the kind; the call itself stays an ordinary call.
+/// Append-only.
 pub const CI_NONE: u8 = 0;
 pub const CI_MEMCPY: u8 = 1;
 pub const CI_MEMMOVE: u8 = 2;

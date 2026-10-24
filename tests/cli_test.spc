@@ -4922,6 +4922,7 @@ fn main() i32 {
 // them, and the build compiles it alone (no object of its members), beside the runtime.
 @test
 fn small_program_compiles_as_one_unit() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/util.spc", "pub fn three() i32 {\n    return 3;\n}\n");
@@ -4947,6 +4948,7 @@ fn small_program_compiles_as_one_unit() {
 // edit of one member compiles its pack again, and nothing else.
 @test
 fn small_units_compile_in_packs() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "1"); // over the limit: no `__sc_unity.c`
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
@@ -4977,6 +4979,7 @@ fn small_units_compile_in_packs() {
 // text.
 @test
 fn edited_header_recompiles_its_units() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
@@ -4999,6 +5002,7 @@ fn edited_header_recompiles_its_units() {
 // unchanged header does not try again.
 @test
 fn units_parse_the_header_a_compiler_cannot_precompile() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     if cli::on_windows() || cli::on_wasm() {
         return; // the compiler is a shell script
     }
@@ -8431,7 +8435,7 @@ fn bindgen_generates_records_enums_and_consts() {
     let p = cli::proj_new();
     p.mkfile(
         "lib.h",
-        "#ifndef LIB_H\n#define LIB_H\n#include <stddef.h>\n#define LIB_VERSION 7\n#define LIB_NAME \"lib\"\n#define LIB_SCALE 0.5\n#define LIB_EXPR (LIB_VERSION + 1)\nenum lib_mode { LIB_FAST, LIB_SLOW = 10, LIB_LAST };\nenum { LIB_FLAG_A = 1, LIB_FLAG_B = 2 };\ntypedef struct lib_pt { int x; int y; } lib_pt;\nstruct lib_cfg { const char *name; size_t len; lib_pt origin; char tag[8]; enum lib_mode mode; };\nstruct lib_bits { unsigned a : 3; };\nstruct lib_wrap { struct lib_bits b; int n; };\nint lib_wrap_n(const struct lib_wrap *w);\nint lib_wrap_by_value(struct lib_wrap w);\nint lib_sum(const struct lib_cfg *c);\nlib_pt lib_origin(const struct lib_cfg *c);\nint lib_mode_of(enum lib_mode m);\n#endif\n",
+        "#ifndef LIB_H\n#define LIB_H\n#include <stddef.h>\n#define LIB_VERSION 7\n#define LIB_NAME \"lib\"\n#define LIB_SCALE 0.5\n#define LIB_EXPR (LIB_VERSION + 1)\n#define LIB_MODE 0170000\n#define LIB_MASK 0b101u\n#define LIB_ZERO 0\nenum lib_mode { LIB_FAST, LIB_SLOW = 10, LIB_LAST };\nenum { LIB_FLAG_A = 1, LIB_FLAG_B = 2 };\ntypedef struct lib_pt { int x; int y; } lib_pt;\nstruct lib_cfg { const char *name; size_t len; lib_pt origin; char tag[8]; enum lib_mode mode; };\nstruct lib_bits { unsigned a : 3; };\nstruct lib_wrap { struct lib_bits b; int n; };\nint lib_wrap_n(const struct lib_wrap *w);\nint lib_wrap_by_value(struct lib_wrap w);\nint lib_sum(const struct lib_cfg *c);\nlib_pt lib_origin(const struct lib_cfg *c);\nint lib_mode_of(enum lib_mode m);\n#endif\n",
     );
     p.mkfile(
         "lib.c",
@@ -8459,6 +8463,10 @@ fn bindgen_generates_records_enums_and_consts() {
     assert(spc.as_str().contains("pub const LIB_FLAG_B: i32 = 2;"));
     // Folded from LIB_VERSION + 1.
     assert(spc.as_str().contains("pub const LIB_EXPR: i32 = 8;"));
+    // C's octal and binary literals.
+    assert(spc.as_str().contains("pub const LIB_MODE: i32 = 61440;"));
+    assert(spc.as_str().contains("pub const LIB_MASK: u32 = 5;"));
+    assert(spc.as_str().contains("pub const LIB_ZERO: i32 = 0;"));
     assert(spc.as_str().contains("LIB_SLOW = 10"));
     // A tag C never typedef'd spells as its tag, with no pin.
     assert(spc.as_str().contains("    pub enum lib_mode {"));
@@ -8588,6 +8596,36 @@ fn bindgen_overflow_fnptr_params_and_field_opaques() {
     // The generated module resolves: every type it names is declared.
     p.mkfile("main.spc", "import lib;\n\nfn main() i32 {\n    return 0;\n}\n");
     assert(p.compile("main.spc").ok());
+}
+
+// Constants take C's types: a literal the type its base and suffix give it, operands the usual arithmetic
+// conversions, an unsigned result wraps, a cast converts; a result C leaves undefined is left out.
+@test
+fn bindgen_constants_follow_c_types() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "lib.h",
+        "typedef unsigned short lib_u16;\n#define LIB_CAST ((unsigned)-1)\n#define LIB_TOP (((unsigned long long)1 << 63) - 1)\n#define LIB_SIGN (1 << 31)\n#define LIB_CONV (-1 + 0u)\n#define LIB_WIDE (-1L + 0u)\n#define LIB_USHR (0xFFFFFFF0u >> 4)\n#define LIB_NOT (~0u)\n#define LIB_HEX 0xFFFFFFFF\n#define LIB_UDIV (-7 / 2u)\n#define LIB_TD ((lib_u16)70000)\n#define LIB_LOST (2 << 31)\n#define LIB_SCHAR ((signed char)200)\n#define LIB_CHAR ((char)1)\n",
+    );
+    let root = p.dir();
+    let mut args = String::new();
+    args.format_into("bindgen \"{}/lib.h\" --header=lib.h -o \"{}/lib.spc\"", root, root);
+    assert_eq(p.run_raw(args.as_str()).exit, 0);
+    let spc = loader::read_file(format("{}/lib.spc", root).as_str()).unwrap();
+    let t = spc.as_str();
+    assert(t.contains("pub const LIB_CAST: u32 = 4294967295;"));
+    assert(t.contains("pub const LIB_TOP: u64 = 9223372036854775807;"));
+    assert(t.contains("pub const LIB_SIGN: i32 = -2147483648;"));
+    assert(t.contains("pub const LIB_CONV: u32 = 4294967295;"));
+    assert(t.contains("pub const LIB_WIDE: i32 = -1;"));
+    assert(t.contains("pub const LIB_USHR: u32 = 268435455;"));
+    assert(t.contains("pub const LIB_NOT: u32 = 4294967295;"));
+    assert(t.contains("pub const LIB_HEX: u32 = 4294967295;"));
+    assert(t.contains("pub const LIB_UDIV: u32 = 2147483644;"));
+    assert(t.contains("pub const LIB_TD: i32 = 4464;"));
+    assert(!t.contains("LIB_LOST"));
+    assert(!t.contains("LIB_SCHAR"));
+    assert(!t.contains("LIB_CHAR"));
 }
 
 // The shapes a real C library uses that a literals-only reader loses: constants written as expressions
@@ -9242,6 +9280,7 @@ fn cache_version(p: &cli::Proj, v: i32) {
 // older one compiles again once the shared `script` namespace no longer holds it either.
 @test
 fn object_cache_keeps_four_generations() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     let root = p.dir();
@@ -9286,6 +9325,7 @@ fn object_cache_keeps_four_generations() {
 // the objects are dated into the future, so only the rewrite record can find them stale.
 @test
 fn rewritten_header_restales_units() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     if cli::on_windows() || cli::on_wasm() {
         return; // `find` and `touch -t` need a POSIX host
@@ -9416,6 +9456,7 @@ fn rec_key(rec_path: str) String {
 // object, its namespace's entry and the shared `script` namespace's entry.
 @test
 fn object_cache_links_one_copy() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
@@ -9438,6 +9479,7 @@ fn object_cache_links_one_copy() {
 // bytes (a compiler that writes its output in place would rewrite the entry through the shared name).
 @test
 fn object_cache_entry_survives_a_recompile() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
@@ -9498,6 +9540,7 @@ fn object_cache_entry_use_dates_no_object() {
 // build's own tree stays. A fresh stamp skips the sweep.
 @test
 fn project_sweep_removes_idle_outputs() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     if cli::on_windows() || cli::on_wasm() {
         return; // `find` and `touch -t` need a POSIX host
@@ -9562,6 +9605,7 @@ fn project_sweep_keeps_the_tree_of_a_root_beside_the_manifest() {
 // project's cache root instead, not another project's; `--cache` is no longer a flag.
 @test
 fn clean_sweeps_and_full_removes() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     if cli::on_windows() || cli::on_wasm() {
         return; // `find` and `touch -t` need a POSIX host
@@ -9810,6 +9854,7 @@ pub fn one_call(b: &mut bench::Bencher) {
 // no other program built from it has.
 @test
 fn bench_runner_names_no_benchmark_as_a_fn_value() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
@@ -10151,6 +10196,7 @@ fn build_paths_with_spaces() {
 // invalidates every object through the command fingerprint, again without touching the generated C.
 @test
 fn build_staleness_gates() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
@@ -10210,6 +10256,7 @@ fn build_staleness_gates() {
 // and its object, and the shared forward header carries no type declaration.
 @test
 fn build_type_edit_stays_local() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
@@ -10264,6 +10311,7 @@ fn build_type_edit_stays_local() {
 // again prunes that header and drops it from the manifest.
 @test
 fn build_new_type_recompiles_no_user() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
@@ -10314,6 +10362,7 @@ fn build_new_type_recompiles_no_user() {
 // uses another type of the same module keep their objects.
 @test
 fn build_field_edit_recompiles_users() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
@@ -10401,6 +10450,7 @@ fn build_array_elements_include_definitions() {
 // header, so a type edit in util leaves the unit untouched.
 @test
 fn build_symbol_segment_includes_no_type() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
@@ -10740,6 +10790,7 @@ fn build_relinks_after_failed_link_in_same_second() {
 // publishes and links it once the file is writable again.
 @test
 fn build_publication_failure_keeps_artifact() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 3;\n}\n");
@@ -10766,6 +10817,7 @@ fn build_publication_failure_keeps_artifact() {
 // file as it is, so the tooling does not reload it.
 @test
 fn build_compile_commands_json() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
@@ -11032,6 +11084,7 @@ fn jobs_file(root: str, tag: str, rel: str) String {
 // every core asked it again in the instance shard, and the shard included headers it never used.
 @test
 fn worker_count_keeps_instance_shard_includes() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile(
@@ -12324,6 +12377,7 @@ fn script_run(dir: str) i32 {
 // it does not share with the first, and both programs run.
 @test
 fn script_builds_share_cached_objects() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     if cli::on_wasm() {
         return;

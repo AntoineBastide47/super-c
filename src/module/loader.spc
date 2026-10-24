@@ -184,6 +184,8 @@ pub struct Package {
     /// The build runs under a memory checker (an address, memory or thread sanitizer in its C flags):
     /// the planner keeps the checked lane loop of every masked or gather access.
     pub mem_check: bool,
+    /// The build makes a shared library: its code is position-independent (the C compile's `-fPIC`).
+    pub pic: bool,
     /// The C compile's configuration (`bsys::build_cfg`): bit `k - BC_THREAD_SANITIZER` holds build
     /// constant `k`, except that the OVERFLOW_CHECKS bit is set where the profile wraps.
     pub build_cfg: u32,
@@ -207,6 +209,8 @@ pub struct Package {
     /// has no system C library, and these call WASI directly; -1 for any other target.
     pub rt_libc: i32,
     pub rt_libm: i32,
+    /// The traps of the native backends' vector code (`std::rt::lanes`), loaded with a vector; -1 else.
+    pub rt_lanes: i32,
     /// The module the package was loaded from, whose top-level `main` is the program entry; -1 when
     /// the package has none (a batch lint, whose listed files `lint_set` marks as roots instead).
     pub root: i32,
@@ -282,6 +286,28 @@ pub struct Package {
     /// The items of the extern blocks whose header is scoped, as `module << 32 | node`
     /// (`scope_extern_items`); empty outside an emission.
     pub xscoped: Set<u64>,
+    /// The values of the integer constants of extern blocks with a header, as `module << 32 | node`, that a
+    /// native build reads from the headers (`driver::emit::native_header_facts`); empty otherwise.
+    pub extern_ints: Map<u64, i64>,
+    /// The functions of extern blocks that only a C compile defines, as `module << 32 | node`, in a native
+    /// build: the instruction set's intrinsics (`Isa.intrinsics`) and a header's `static` functions. Empty
+    /// otherwise.
+    pub c_fns: Set<u64>,
+    /// The scalar class (`bindgen::SC_*`) of the opaque `@layout` types of extern blocks with a header, as
+    /// `module << 32 | node`, in a native build: what the calling conventions pass them as.
+    pub opaque_cls: Map<u64, u8>,
+    /// The C header files those facts were read from (`extern_ints`, `c_fns`, `opaque_cls`): inputs of the
+    /// emission.
+    pub header_files: Vector<String>,
+    /// Per module, the offsets where its source's lines start, for the locations of LIR
+    /// (`driver::emit::lir_lines`); empty in a build that lowers no LIR.
+    pub lines: Vector<Vector<u32>>,
+    /// Whether the build writes native objects for its modules (`SC_NATIVE` on a target the native backend
+    /// supports, in a build whose link takes objects); set by `driver::emit::run_package`.
+    pub native: bool,
+    /// The C dialect, the manifest's and the profile's C flags of a manifest build; empty for a bare build,
+    /// whose dialect is `cstd`.
+    pub cflags: String,
     /// Compiler-stage parallelism: worker count for the parallel frontiers (0/1 = serial). Set by
     /// the driver from --jobs before run_package; the parallel cc window reads its own copy.
     pub jobs: u32,
@@ -2595,7 +2621,9 @@ extend Package {
         q.simd_width = self.simd_width;
         q.simd_dispatch = self.simd_dispatch.clone();
         q.mem_check = self.mem_check;
+        q.pic = self.pic;
         q.build_cfg = self.build_cfg;
+        q.cflags = self.cflags.clone();
         q.test_build = self.test_build;
         q.profile = self.profile.clone();
         for i in 0..self.profiles.len() {
@@ -3589,6 +3617,7 @@ extend Package {
             rt_test: -1,
             rt_libc: -1,
             rt_libm: -1,
+            rt_lanes: -1,
             root: -1,
             tt: Box::<TypePool>::new(TypePool::new()),
             ok: true,
@@ -7474,8 +7503,14 @@ extend Package {
                 self.rt_libm = self.load_module("std::rt::libm", mf.as_str(), self.bootstrap, target);
             }
         }
+        let vectors = user_vectors || self.names_vectors();
+        // The traps the native backends' vector code calls.
+        let lf = join2(std_dir, "rt/lanes.spc");
+        if vectors && self.rt_lanes < 0 && dutil::file_mtime(lf.as_str()) != 0 {
+            self.rt_lanes = self.load_module("std::rt::lanes", lf.as_str(), self.bootstrap, target);
+        }
         let bn = tgt::isa(self.arch).simd_backend;
-        if bn.len() != 0 && !cf::is_empty(self.features) && (user_vectors || self.names_vectors()) {
+        if bn.len() != 0 && !cf::is_empty(self.features) && vectors {
             let bf = join2(std_dir, format("simd/backend/{}.spc", bn).as_str());
             if dutil::file_mtime(bf.as_str()) != 0 {
                 let id = self.load_module(

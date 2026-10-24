@@ -1,0 +1,78 @@
+// The call layout every calling convention fills: where each parameter and the result of a signature
+// travel, in registers, on the stack or through memory the caller provides. The code generator moves the
+// bytes.
+import lir::ir as *;
+
+/// Location kinds.
+pub const L_NONE: u8 = 0; // nothing passes (no result)
+pub const L_REG: u8 = 1; // in registers: `parts`
+pub const L_STACK: u8 = 2; // the value's `size` bytes at stack offset `off`
+pub const L_REF_REG: u8 = 3; // a pointer to a copy, in integer register `parts[p0].reg`
+pub const L_REF_STACK: u8 = 4; // a pointer to a copy, at stack offset `off`
+pub const L_SRET: u8 = 5; // a result through memory the caller passes (x8; SysV: the first argument)
+
+/// A register part of a value: argument register `reg` of its file (the integer one, or the vector one
+/// when `v`) holds the `size` bytes at byte `off` of the value.
+pub struct Part {
+    pub reg: u8,
+    pub v: bool,
+    pub size: u8,
+    pub off: u32,
+}
+
+extend Part as Copy {}
+
+/// Where a parameter or the result travels.
+pub struct ALoc {
+    pub kind: u8,
+    pub n: u8, // register parts
+    pub p0: u32, // the first part in `CallLayout.parts`
+    pub off: u32, // stack offset (L_STACK, L_REF_STACK)
+    pub size: u32, // bytes on the stack (L_STACK)
+    pub ext: u8, // an argument narrower than 32 bits: 1 zero-extends, 2 sign-extends; else 0
+}
+
+extend ALoc as Copy {}
+
+/// The locations of one signature's parameters and result.
+pub struct CallLayout {
+    pub locs: Vector<ALoc>,
+    pub parts: Vector<Part>,
+    pub ret: ALoc,
+    pub stack_bytes: u32, // the stack argument area, rounded up to 16
+    pub named_bytes: u32, // the stack bytes of the fixed parameters (the variadic ones follow, 8-aligned)
+    pub named_gp: u8, // SysV: the integer registers the fixed parameters take (`va_start`)
+    pub named_vr: u8, // SysV: the vector registers the fixed parameters take
+    pub vr_used: u8, // SysV: the vector registers every argument takes (`al` at a variadic call)
+    pub unknown: bool, // a parameter or the result is an aggregate whose class its layout does not give
+}
+
+extend CallLayout {
+    pub fn new() CallLayout {
+        return CallLayout {
+            locs: Vector::<ALoc>::new(),
+            parts: Vector::<Part>::new(),
+            ret: none(),
+            stack_bytes: 0,
+            named_bytes: 0,
+            named_gp: 0,
+            named_vr: 0,
+            vr_used: 0,
+            unknown: false,
+        };
+    }
+}
+
+/// Whether signature type `pt` of body `b` is an aggregate whose register class its layout does not
+/// give: 1 to 64 bytes and no leaves (the lowering keeps none when they are unknown).
+pub fn unknown_class(b: &Body, pt: u32) bool {
+    if (pt & AGG) == 0 {
+        return false;
+    }
+    let l = (pt & ~AGG) as usize;
+    return b.pool[l] != 0 && b.pool[l] <= 64 && b.pool[l + 2] == 0;
+}
+
+pub const fn none() ALoc {
+    return ALoc { kind: L_NONE, n: 0, p0: 0, off: 0, size: 0, ext: 0 };
+}

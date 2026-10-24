@@ -112,8 +112,9 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
     // The CPU features, a memory checker and the backend table decide the vector entries a body
     // calls: every entry's key, features and name.
     h = fnv_mix(fnv_mix(fnv_mix(fnv_mix(h, p.features.w[0]), p.features.w[1]), p.mem_check as u64), p.simd_width);
-    // The build constants of the C compile's configuration select code.
-    h = fnv_mix(h, p.build_cfg);
+    // The build constants of the C compile's configuration select code; a native build renders whole
+    // slice parameters (no `__r` split, `cbe::native_on`).
+    h = fnv_mix(fnv_mix(h, p.build_cfg), p.native as u64);
     for i in 0..p.simd_levels.len() {
         h = fnv_mix(fnv_mix(h, p.simd_levels[i].w[0]), p.simd_levels[i].w[1]);
     }

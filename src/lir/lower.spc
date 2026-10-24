@@ -25,6 +25,7 @@ import lir::parse as lparse;
 import lir::eval as le;
 import stdlib;
 import ir::print as irp;
+import bindgen::bindgen as bg;
 
 // Value classes of a type.
 const VC_ZST: u8 = 0; // no storage: unit, void, never, zero-sized
@@ -103,14 +104,12 @@ pub struct CtfeRes {
     pub m: ModuleId,
     pub node: NodeId,
     pub kind: u8,
-    pub msg: str<'static>,
+    pub msg: String, // a copy: the trap's text lives in the interpreter's memory, which the next run reuses
     pub line: u32,
     pub col: u32,
     pub ffi: bool, // the run stopped at an extern function CTFE does not model
     pub panics: bool, // `@test(should_panic)`
 }
-
-extend CtfeRes as Copy {}
 
 /// Run each test `(m, node)` of `tests` under CTFE, before the function syntax is released.
 pub fn probe_tests(pk: *const loader::Package, tests: &Vector<u64>, panics: &Vector<bool>) Vector<CtfeRes> {
@@ -123,7 +122,16 @@ pub fn probe_tests(pk: *const loader::Package, tests: &Vector<u64>, panics: &Vec
         let m = (tests[i] >> 32) as ModuleId;
         let n = tests[i] as NodeId;
         let k = it.probe_test(m, n);
-        let mut r = CtfeRes { m: m, node: n, kind: k, msg: it.trap, line: 0, col: 0, ffi: it.ffi, panics: panics[i] };
+        let mut r = CtfeRes {
+            m: m,
+            node: n,
+            kind: k,
+            msg: String::from_str(it.trap),
+            line: 0,
+            col: 0,
+            ffi: it.ffi,
+            panics: panics[i],
+        };
         if k != iri::IT_TRAP_NONE {
             line_col(unsafe (*pk).modules.at(m as usize).source.as_str(), it.trap_span.start, &mut r.line, &mut r.col);
         }
@@ -137,6 +145,13 @@ pub struct Lower {
     pub pkg: Package,
     pub fails: Vector<LFail>,
     pub tests: Vector<LTest>,
+    /// The function symbols lowered since the last `claim`.
+    pend: Vector<u32>,
+    pend_c: str<'static>, // what in them only C compiles (a C header's constant, an intrinsic), else empty
+    fails_seen: usize, // `fails` at the last claim
+    /// The units a C chunk without a LIR body landed in, which compile through C, and why.
+    pub conly: Vector<u32>,
+    pub conly_why: Vector<String>,
     /// The CTFE outcome of each test (`probe_tests`) the check compares the evaluator's with.
     pub ctfe: Vector<CtfeRes>,
     /// The build wraps on integer overflow (a profile without overflow checks).
@@ -151,10 +166,15 @@ pub struct Lower {
     file: u32,
     b: Body,
     li: Vector<LInfo>,
-    tcache: Map<u64, TyI>, // the classes of concrete types
+    tcache: Map<u64, TyI>, // the classes of concrete types, for every body
+    fcache: Map<u64, u64>, // the members of concrete aggregates (`fields_of`): start << 32 | count in `fpool`
+    fpool: Vector<FieldAt>,
     bm: ModuleId, // the module of the body being lowered: the pool grounded member types go to
     fl_depth: u32, // the nesting of `fields_layout`
     pmty: u8, // `arg_mode`: the machine type of the parameter's scalar type, T_NONE when unknown
+    psgn: bool, // `arg_mode`: the parameter's scalar type is signed
+    ind_m: ModuleId, // `arg_mode` of an indirect call: the callee's type, in `ind_m`; TYPE_NONE for a
+    ind_t: TypeId, // direct call
     binds: Vector<mbe::MSub>, // scratch: a generic callee's bindings
     td: Tidy, // scratch of `tidy`
     lays: Map<u64, u32>, // the body's layout records by content hash
@@ -180,8 +200,8 @@ pub struct Lower {
     noret: bool,
     scratch: Vector<u32>,
     sbuf: String,
-    lines: Vector<Vector<u32>>, // per module, the line starts of its source, filled on first use
     escaped: Vector<bool>, // per local: its address escapes
+    fresh: u32, // the local whose storage the block's last statement makes live (NONE: none)
     order: Vector<u32>, // the reachable core blocks in reverse postorder
     temps_free: Vector<u64>, // free temporary slots: size << 40 | align_log2 << 32 | slot
     temps_used: Vector<u64>, // the ones the current statement holds
@@ -198,6 +218,11 @@ extend Lower {
             pkg: Package::new(ptr_bytes),
             fails: Vector::<LFail>::new(),
             tests: Vector::<LTest>::new(),
+            pend: Vector::<u32>::new(),
+            pend_c: "",
+            fails_seen: 0,
+            conly: Vector::<u32>::new(),
+            conly_why: Vector::<String>::new(),
             ctfe: Vector::<CtfeRes>::new(),
             wrap: wrap,
             nbodies: 0,
@@ -209,9 +234,14 @@ extend Lower {
             b: Body::new(),
             li: Vector::<LInfo>::new(),
             tcache: Map::<u64, TyI>::new(),
+            fcache: Map::<u64, u64>::new(),
+            fpool: Vector::<FieldAt>::new(),
             bm: 0,
             fl_depth: 0,
             pmty: T_NONE,
+            psgn: false,
+            ind_m: 0,
+            ind_t: TYPE_NONE,
             binds: Vector::<mbe::MSub>::new(),
             td: Tidy::new(),
             lays: Map::<u64, u32>::new(),
@@ -237,8 +267,8 @@ extend Lower {
             noret: false,
             scratch: Vector::<u32>::new(),
             sbuf: String::new(),
-            lines: Vector::<Vector<u32>>::new(),
             escaped: Vector::<bool>::new(),
+            fresh: NONE,
             order: Vector::<u32>::new(),
             temps_free: Vector::<u64>::new(),
             temps_used: Vector::<u64>::new(),
@@ -513,13 +543,43 @@ extend Lower {
 
     // The layout record of memory type `ti` of `(m, t)` in the body's pool: its size, alignment and,
     // up to 64 bytes, its scalar leaves.
+    // The signature type of a parameter of memory class `ti` of `(m, t)`: an array passes as a pointer to
+    // its elements (a C array parameter), any other aggregate as itself.
+    fn param_sig(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, t: TypeId, ti: TyI) u32 {
+        if Lower::is_array(c, m, t) {
+            return T_PTR;
+        }
+        return AGG | self.layout_of(c, m, t, ti);
+    }
+
+    // Whether `bt` is an integer type, `char` included.
+    const fn is_int_bt(bt: BuiltinType) bool {
+        return bt == BuiltinType::BT_I8 || bt == BuiltinType::BT_I16 || bt == BuiltinType::BT_I32 || bt == BuiltinType::BT_I64 || bt == BuiltinType::BT_ISIZE || bt == BuiltinType::BT_U8 || bt == BuiltinType::BT_U16 || bt == BuiltinType::BT_U32 || bt == BuiltinType::BT_U64 || bt == BuiltinType::BT_USIZE || bt == BuiltinType::BT_CHAR;
+    }
+
+    // Whether `(m, t)` resolves to `str`.
+    fn is_str(c: &cbe::CEmit, m: ModuleId, t: TypeId) bool {
+        let mut rm = m;
+        let mut rt = TYPE_NONE;
+        let y = Lower::resolved(c, m, t, &mut rm, &mut rt);
+        return y.kind == TypeKind::TYPE_STRUCT && Lower::decl_name(c, y.module, y.as_data.decl) == "str";
+    }
+
+    // Whether `(m, t)` resolves to an array.
+    fn is_array(c: &cbe::CEmit, m: ModuleId, t: TypeId) bool {
+        let mut rm = m;
+        let mut rt = TYPE_NONE;
+        return t != TYPE_NONE && Lower::resolved(c, m, t, &mut rm, &mut rt).kind == TypeKind::TYPE_ARRAY;
+    }
+
+    // The layout record of aggregate `(m, t)`. The calling conventions classify one of at most 64 bytes by
+    // its leaves: one whose leaves are unknown (an opaque type that is no scalar, nesting past 8) keeps
+    // none, which `abi::unknown_class` reads; past 16 leaves it is no register aggregate, and the first 16
+    // say so.
     fn layout_of(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, t: TypeId, ti: TyI) u32 {
         let mut leaves = Vector::<(u32, u8)>::new();
-        if ti.size <= 64 {
-            let _ = self.leaves(c, m, t, 0, &mut leaves, 0);
-            if leaves.len() > 16 {
-                leaves.truncate(0);
-            }
+        if ti.size <= 64 && !self.leaves(c, m, t, 0, &mut leaves, 0) {
+            leaves.truncate(ast::pick(leaves.len() > 16, 16usize, 0usize));
         }
         return self.layout(ti.size, log2(ti.align), &leaves);
     }
@@ -590,6 +650,29 @@ extend Lower {
             }
             return true;
         }
+        if y.kind == TypeKind::TYPE_OPAQUE {
+            // A C value: the scalar its header's typedef names.
+            let k = Lower::p(c).opaque_cls.get(&(y.module as u64 << 32 | y.as_data.decl as u64));
+            let cl = if k.is_some() {
+                *k.unwrap();
+            } else {
+                bg::SC_NONE;
+            };
+            let mt = if cl == bg::SC_INT && ti.size <= 8 && (ti.size & ti.size - 1) == 0 {
+                ast::pick(ti.size == 8, T_I64, ast::pick(ti.size == 4, T_I32, ast::pick(ti.size == 2, T_I16, T_I8)));
+            } else if cl == bg::SC_F32 && ti.size == 4 {
+                T_F32;
+            } else if cl == bg::SC_F64 && ti.size == 8 {
+                T_F64;
+            } else {
+                T_NONE;
+            };
+            if mt == T_NONE {
+                return false;
+            }
+            out.push((off, mt));
+            return true;
+        }
         if y.kind == TypeKind::TYPE_DYN || y.kind == TypeKind::TYPE_SLICE {
             out.push((off, T_PTR));
             out.push((off + self.pkg.ptr_bytes, ast::pick(y.kind == TypeKind::TYPE_DYN, T_PTR, self.ptr_int())));
@@ -615,7 +698,11 @@ extend Lower {
         }
         for k in 0..fl.len() {
             let f = fl[k];
-            if !self.leaves(c, f.m, f.t, off + f.off, out, depth + 1) {
+            if f.t == TYPE_NONE {
+                // An enum's tag or a capture by reference: its scalar alone.
+                assert(f.mty != T_NONE, "lir: a member without a type is a scalar");
+                out.push((off + f.off, f.mty));
+            } else if !self.leaves(c, f.m, f.t, off + f.off, out, depth + 1) {
                 return false;
             }
         }
@@ -630,6 +717,29 @@ extend Lower {
         // Grounded first: an instance's arguments may read the bindings in place (`Float<{E + 2}, ..>`
         // inside `Float<E, ..>`'s instance), which binding the instance's own parameters would shadow.
         let (rm, rt) = self.grounded(c, rm0, rt0);
+        // A concrete aggregate's members are the same in every body.
+        let key = rm as u64 << 32 | rt as u64;
+        if let Some(v) = self.fcache.get(&key) {
+            let at = (*v >> 32) as usize;
+            for k in 0..(*v & 0xFFFFFFFF) as usize {
+                out.push(self.fpool[at + k]);
+            }
+            return true;
+        }
+        let n0 = out.len();
+        if !self.fields_of_i(c, rm, rt, out) {
+            return false;
+        }
+        if Lower::ast(c, rm).type_concrete(rt) {
+            self.fcache.insert(key, self.fpool.len() as u64 << 32 | (out.len() - n0) as u64);
+            for k in n0..out.len() {
+                self.fpool.push(out[k]);
+            }
+        }
+        return true;
+    }
+
+    fn fields_of_i(self: &mut Self, c: &mut cbe::CEmit, rm: ModuleId, rt: TypeId, out: &mut Vector<FieldAt>) bool {
         let y = *Lower::ast(c, rm).type_at(rt);
         if y.kind == TypeKind::TYPE_FUNCTION {
             let a = Lower::ast(c, y.module);
@@ -659,6 +769,7 @@ extend Lower {
                         idx: k,
                         node: NODE_NONE,
                         variant: NODE_NONE,
+                        mty: ast::pick(byref, T_PTR, T_NONE),
                     },
                 );
                 off += sz;
@@ -967,16 +1078,46 @@ extend Lower {
 
     fn load(self: &mut Self, ty: u8, addr: Value, off: u32, packed: bool) Value {
         let al = ast::pick(packed, 0u16, log2(type_align(ty, self.pkg.ptr_bytes)) as u16);
-        return self.inst(O_LOAD, ty, al, addr, VNONE, off);
+        let (a, o) = self.fold_addr(addr, off);
+        return self.inst(O_LOAD, ty, al, a, VNONE, o);
     }
 
     fn store(self: &mut Self, v: Value, addr: Value, off: u32, packed: bool) {
         let ty = self.vty(v);
         let al = ast::pick(packed, 0u16, log2(type_align(ty, self.pkg.ptr_bytes)) as u16);
-        let _ = self.inst(O_STORE, T_NONE, al, addr, v, off);
+        let (a, o) = self.fold_addr(addr, off);
+        let _ = self.inst(O_STORE, T_NONE, al, a, v, o);
     }
 
-    fn ptradd(self: &mut Self, base: Value, ix: Value, scale: u32, off: u32) Value {
+    // Address `addr` + `off` with a constant `ptradd` behind `addr` folded into the offset: its base, and
+    // the two offsets' sum when it fits.
+    fn fold_addr(self: &Self, addr: Value, off: u32) (Value, u32) {
+        if (addr & (VPARAM | VFLAG)) != 0 || addr == VNONE {
+            return addr, off;
+        }
+        let d = self.b.insts[addr as usize];
+        if d.op != O_PTRADD || d.b != VNONE || d.c > 0xFFFFFFFF - off {
+            return addr, off;
+        }
+        return d.a, d.c + off;
+    }
+
+    fn ptradd(self: &mut Self, base0: Value, ix: Value, scale: u32, off0: u32) Value {
+        let (base, off) = self.fold_addr(base0, off0);
+        if ix != VNONE && (ix & (VPARAM | VFLAG)) == 0 && self.b.insts[ix as usize].op == O_ICONST {
+            // A constant index (sign-extended from its type) at or above zero: its bytes join the offset
+            // when they fit.
+            let k = self.b.insts[ix as usize].b as u64 << 32 | self.b.insts[ix as usize].a as u64;
+            let top = 1u64 << (type_bits(self.vty(ix), self.pkg.ptr_bytes) - 1) as u64;
+            // Inside a slot, only an element inside it: a bounds check guards the access of another.
+            let mut room: u64 = 0xFFFFFFFF;
+            if (base & (VPARAM | VFLAG)) == 0 && self.b.insts[base as usize].op == O_SLOTADDR {
+                room = self.b.slots[self.b.insts[base as usize].a as usize].size;
+            }
+            if k < top && k < 0xFFFFFFFF && off as u64 <= room && (k + 1) * scale as u64 <= room - off as u64 {
+                return self.ptradd(base, VNONE, 0, off + (k * scale as u64) as u32);
+            }
+        }
         if ix == VNONE && off == 0 {
             return base;
         }
@@ -1124,6 +1265,12 @@ extend Lower {
         return self.inst(O_SYMADDR, T_PTR, 0, k, 0, VNONE);
     }
 
+    // Symbol `name` is a C library's (`Sym.ext`).
+    fn mark_ext(self: &mut Self, name: str) {
+        let s = self.pkg.find_symbol(name);
+        self.pkg.syms.index_mut(s as usize).ext = true;
+    }
+
     // A call of `name` with `args` of types `tys` (each a type code or AGG | layout) and result `ret`.
     fn call_sym(self: &mut Self, name: str, args: []Value, tys: []u32, ret: u32) Value {
         let sg = self.b.signature(tys, tys.len() as u32, false, ret);
@@ -1247,7 +1394,9 @@ extend Lower {
         }
         let cd = c.collect_demand;
         let ro = c.mg.rec_on;
-        c.collect_demand = false;
+        // A native build compiles what the body calls, which the C may have inlined away; a check of the
+        // LIR leaves the C untouched.
+        c.collect_demand = cd && Lower::p(c).native;
         c.mg.rec_on = false;
         self.err = "";
         self.dbg = self.dump.len() != 0 && self.dump.as_str() == name;
@@ -1264,6 +1413,10 @@ extend Lower {
         self.tidy();
         let s = self.pkg.symbol(name, SK_FUNC);
         let _ = self.pkg.define(s, &self.b);
+        self.pend.push(s);
+        if cnode == NODE_NONE {
+            self.item_attrs(c, s, b.owner.module, b.owner.node);
+        }
         // A test without parameters runs in the CTFE comparison.
         let oa = Lower::ast(c, b.owner.module);
         if cnode == NODE_NONE && b.owner.node != NODE_NONE && b.args == 0 && oa.attr_of(
@@ -1279,7 +1432,6 @@ extend Lower {
         self.m = m;
         self.b.clear();
         self.li.truncate(0);
-        self.tcache.clear();
         self.var_ty.truncate(0);
         self.spc = NONE;
         self.defs.clear();
@@ -1607,10 +1759,10 @@ extend Lower {
                 continue;
             }
             if info.ti.cls == VC_SCALAR {
-                ptys.push(info.ti.mty);
+                ptys.push(sig_code(info.ti.mty, Lower::signed(c, b.module, b.locals[l as usize].ty)));
                 etys.push(info.ti.mty);
             } else {
-                ptys.push(AGG | self.layout_of(c, b.module, b.locals[l as usize].ty, info.ti));
+                ptys.push(self.param_sig(c, b.module, b.locals[l as usize].ty, info.ti));
                 etys.push(T_PTR);
             }
             pl.push(l);
@@ -1619,7 +1771,7 @@ extend Lower {
         if b.returns == 1 {
             let info = self.li[0];
             if info.ti.cls == VC_SCALAR {
-                ret = info.ti.mty;
+                ret = sig_code(info.ti.mty, Lower::signed(c, b.module, b.locals[0].ty));
             } else if info.ti.cls == VC_MEM {
                 ret = AGG | self.layout_of(c, b.module, b.locals[0].ty, info.ti);
             }
@@ -1686,6 +1838,11 @@ extend Lower {
                 let a = self.new_slot(info.ti);
                 self.li.index_mut(l as usize).addr = a;
                 self.store(v, a, 0, false);
+            } else if b.locals[l as usize].is_mutable && Lower::is_array(c, b.module, b.locals[l as usize].ty) {
+                // The caller's array (a C array parameter): a mutable one takes a copy, as C does.
+                let a = self.new_slot(info.ti);
+                self.memcpy(a, v, info.ti.size);
+                self.li.index_mut(l as usize).addr = a;
             } else {
                 self.li.index_mut(l as usize).addr = v;
             }
@@ -1757,6 +1914,7 @@ extend Lower {
         let mut off: u32 = 0;
         let mut al: u32 = 1;
         let mut any = false;
+        let mut known = true;
         let mut leaves = Vector::<(u32, u8)>::new();
         for r in 0..tys.len() {
             let mut ti = TyI { cls: 0 };
@@ -1770,7 +1928,7 @@ extend Lower {
             any = true;
             off = round_up(off, ti.align);
             self.ret_off.push(off);
-            let _ = self.leaves(c, m, tys[r], off, &mut leaves, 0);
+            known = known && (leaves.len() > 16 || self.leaves(c, m, tys[r], off, &mut leaves, 0));
             off += ti.size;
             al = ast::pick(ti.align > al, ti.align, al);
         }
@@ -1778,9 +1936,11 @@ extend Lower {
             return NONE;
         }
         let size = round_up(off, al);
-        if size > 64 || leaves.len() > 16 {
+        // As `layout_of`: none when unknown, the first 16 past 16.
+        if size > 64 || !known && leaves.len() <= 16 {
             leaves.truncate(0);
         }
+        leaves.truncate(ast::pick(leaves.len() > 16, 16usize, leaves.len()));
         return self.layout(size, log2(al), &leaves);
     }
 
@@ -1788,25 +1948,13 @@ extend Lower {
 
     // The location of byte `pos` of the body's source.
     fn loc_at(self: &mut Self, c: &cbe::CEmit, pos: u32) u32 {
-        let src = Lower::p(c).modules.at(self.m as usize).source.as_str();
-        if pos as usize >= src.len() {
+        let p = Lower::p(c);
+        let m = self.m as usize;
+        if m >= p.lines.len() || pos as usize >= p.modules.at(m).source.len() {
             return 0;
         }
-        let m = self.m as usize;
-        if m >= self.lines.len() {
-            self.lines.resize_default(Lower::p(c).modules.len());
-        }
-        if self.lines[m].len() == 0 {
-            let ls = self.lines.index_mut(m);
-            ls.push(0);
-            for k in 0..src.len() {
-                if src.byte_at(k) == b'\n' {
-                    ls.push(k as u32 + 1);
-                }
-            }
-        }
         // The last line start at or before `pos`.
-        let ls = &self.lines[m];
+        let ls = &p.lines[m];
         let mut lo: usize = 0;
         let mut hi = ls.len();
         while hi - lo > 1 {
@@ -2057,11 +2205,44 @@ extend Lower {
             return self.fail("place-value");
         }
         cur.kind = ast::pick(cur.ti.cls == VC_ZST, PR_ZST, PR_MEM);
-        if cur.kind == PR_ZST && pl.proj_len != 0 {
+        if cur.kind == PR_ZST && pl.proj_len != 0 && !self.zst_place_kept(c, b, pl) {
             cur.addr = self.sentinel(c, b.module, pl.ty);
         }
         *out = cur;
         return true;
+    }
+
+    // Whether zero-sized place `pl` keeps its own address instead of the sentinel, as C's references do:
+    // `*p` is the pointer, and a field of a sized struct (a flexible array member) sits at its offset.
+    fn zst_place_kept(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, pl: irc::Place) bool {
+        let last = b.projections[(pl.proj_start + pl.proj_len - 1) as usize];
+        if last.kind == irc::PJ_DEREF {
+            return true;
+        }
+        if last.kind != irc::PJ_FIELD {
+            return false;
+        }
+        let mut fm = b.module;
+        let mut ft = last.ty;
+        let fy = Lower::resolved(c, b.module, last.ty, &mut fm, &mut ft);
+        if fy.kind == TypeKind::TYPE_BUILTIN && fy.as_data.builtin == BuiltinType::BT_VOID {
+            return false;
+        }
+        let ownt = if pl.proj_len > 1 {
+            b.projections[(pl.proj_start + pl.proj_len - 2) as usize].ty;
+        } else {
+            b.locals[pl.base as usize].ty;
+        };
+        let mut om = b.module;
+        let mut ot = ownt;
+        let oy = Lower::resolved(c, b.module, ownt, &mut om, &mut ot);
+        let mut ostruct = oy.kind == TypeKind::TYPE_STRUCT;
+        if oy.kind == TypeKind::TYPE_INSTANCE {
+            let oi = *Lower::ast(c, om).instance(oy.as_data.inst);
+            ostruct = Lower::ast(c, oi.module).at_const(oi.decl).kind == NodeKind::NODE_STRUCT;
+        }
+        let mut oti = TyI { cls: 0 };
+        return ostruct && self.ty(c, b.module, ownt, &mut oti) && oti.cls != VC_ZST;
     }
 
     // The number of captures of the body being lowered (0 outside a closure).
@@ -2133,13 +2314,16 @@ extend Lower {
         let _ = Lower::resolved(c, m, t, &mut rm, &mut rt);
         let lo = c.mg.layout_sub(rm, rt);
         let al: u64 = ast::pick(lo.ok && lo.align > 1, lo.align, 1u64);
-        let s = self.sentinel_sym(al);
+        let s = self.sentinel_sym(c, al);
         let k = self.sym_of(s);
         return self.inst(O_SYMADDR, T_PTR, 0, k, 0, VNONE);
     }
 
     // The sentinel byte `__sc_zst_<align>` every zero-sized reference of that alignment addresses.
-    fn sentinel_sym(self: &mut Self, al: u64) u32 {
+    fn sentinel_sym(self: &mut Self, c: &mut cbe::CEmit, al: u64) u32 {
+        // The registry unit defines it: one byte per alignment program-wide.
+        let mut cn = String::new();
+        c.sentinel(al, &mut cn);
         self.sbuf.clear();
         self.sbuf.push_str("__sc_zst_");
         self.sbuf.push_u64(al);
@@ -2167,12 +2351,34 @@ extend Lower {
         if item.node == NODE_NONE || !c.mg.const_sym(item.module, item.node, &mut sym) {
             return self.fail("static-sym");
         }
+        let ia = Lower::ast(c, item.module).at_const(item.node);
+        if ia.kind == NodeKind::NODE_CONST && ia.as_data.const_def.is_extern && !ia.as_data.const_def.is_static_mut {
+            // A C header's constant: its value as the header defines it, else only the C compiler knows it.
+            if let Some(x) = Lower::p(c).extern_ints.get(&(item.module as u64 << 32 | item.node as u64)) {
+                let mut ti = TyI { cls: 0 };
+                if !self.ty(c, b.module, d.ty, &mut ti) {
+                    return false;
+                }
+                if ti.cls == VC_SCALAR && (is_int(ti.mty) && ti.mty != T_I128 || ti.mty == T_PTR) {
+                    *val = self.iconst(ti.mty, (*x) as u64);
+                    return true;
+                }
+            }
+            self.pend_c = "reads a C header's constant";
+        }
+        // Its storage, which C may not have needed.
+        if !c.lir_stat_need(b.module, item, d.ty, sym.as_str()) {
+            return self.fail("static-type");
+        }
         if c.is_tls(item) {
             let k = self.sym(sym.as_str(), SK_TLS);
             *addr = self.inst(O_SYMADDR, T_PTR, 0, k, 0, VNONE);
             return true;
         }
         *addr = self.symaddr(sym.as_str(), SK_DATA);
+        if ia.kind == NodeKind::NODE_CONST && ia.as_data.const_def.is_extern {
+            self.mark_ext(sym.as_str());
+        }
         return true;
     }
 
@@ -2377,7 +2583,12 @@ extend Lower {
             ) {
                 return self.fail_v("item-sym");
             }
-            return self.symaddr(s.as_str(), SK_FUNC);
+            let v = self.symaddr(s.as_str(), SK_FUNC);
+            let fnn = ia.at_const(k.item.node);
+            if fnn.kind == NodeKind::NODE_FUNCTION && fnn.as_data.function.is_extern() {
+                self.mark_ext(s.as_str());
+            }
+            return v;
         }
         return self.fail_v("constant");
     }
@@ -2735,9 +2946,71 @@ extend Lower {
 
     // Trap with `msg` when lane mask `m` has a bit set.
     fn lane_check(self: &mut Self, m: Value, msg: str) {
-        let z = self.zero(self.vty(m));
-        let f = self.icmp(C_NE, m, z);
-        self.check(f, msg);
+        self.lane_checks(m, msg, VNONE, "");
+    }
+
+    // Trap at the lowest lane set in lane mask `m0` or `m1` (VNONE: none): `lane <k>: ` and `msg0` when
+    // `m0` holds that lane, else `msg1`, as C's `__sc_panic_lane` does.
+    fn lane_checks(self: &mut Self, m0: Value, msg0: str, m1: Value, msg1: str) {
+        let f = if m1 == VNONE {
+            m0;
+        } else {
+            self.arith(O_OR, m0, m1);
+        };
+        let z = self.zero(self.vty(f));
+        let fail = self.icmp(C_NE, f, z);
+        let pb = self.cold_block();
+        let next = self.block();
+        let ep = self.edge(pb, NONE, NONE);
+        let en = self.edge(next, NONE, NONE);
+        let _ = self.inst(O_BR, T_NONE, 0, fail, ep, en);
+        self.b.begin(pb);
+        if m1 == VNONE {
+            self.lane_panic(msg0, f);
+        } else {
+            // The lowest failing lane's bit, and whether `m0` holds it.
+            let neg = self.arith(O_SUB, z, f);
+            let low = self.arith(O_AND, f, neg);
+            let in0 = self.arith(O_AND, m0, low);
+            let s = self.icmp(C_NE, in0, z);
+            let p0 = self.cold_block();
+            let p1 = self.cold_block();
+            let e0 = self.edge(p0, NONE, NONE);
+            let e1 = self.edge(p1, NONE, NONE);
+            let _ = self.inst(O_BR, T_NONE, 0, s, e0, e1);
+            self.b.begin(p0);
+            self.lane_panic(msg0, f);
+            self.b.begin(p1);
+            self.lane_panic(msg1, f);
+        }
+        self.b.begin(next);
+    }
+
+    // When `fail` is not 0, the call of the runtime's trap `name` with `args` (of types `tys`), which does
+    // not return.
+    fn trap_call(self: &mut Self, fail: Value, name: str, args: []Value, tys: []u32) {
+        let pb = self.cold_block();
+        let next = self.block();
+        let ep = self.edge(pb, NONE, NONE);
+        let en = self.edge(next, NONE, NONE);
+        let _ = self.inst(O_BR, T_NONE, 0, fail, ep, en);
+        self.b.begin(pb);
+        let _ = self.call_sym(name, args, tys, T_NONE);
+        let _ = self.inst(O_UNREACHABLE, T_NONE, 0, VNONE, VNONE, VNONE);
+        self.b.begin(next);
+    }
+
+    // A new block that holds only a failure path.
+    fn cold_block(self: &mut Self) u32 {
+        let k = self.block();
+        self.b.blocks.index_mut(k as usize).flags = BLOCK_COLD;
+        return k;
+    }
+
+    // A panic with `msg` at the lowest lane set in mask `m`.
+    fn lane_panic(self: &mut Self, msg: str, m: Value) {
+        let mid = self.b.ref_msg(self.pkg.add_message(msg));
+        let _ = self.inst(O_PANIC, T_NONE, 0, mid, m, VNONE);
     }
 
     // A vector operation `op` (an `irc::OP_*` code with VOP flags) on `args`, of result type `ty`;
@@ -3222,12 +3495,13 @@ extend Lower {
                 let c64 = self.int_to(y, T_I64, false);
                 let lim = self.iconst(T_I64, bits);
                 let f = self.icmp(C_UGE, c64, lim);
+                // Every lane fails: the lowest is lane 0.
                 self.check(
                     f,
                     ast::pick(
                         t == tt::TokenType::LeftShift,
-                        "attempt to shift left with overflow",
-                        "attempt to shift right with overflow",
+                        "lane 0: attempt to shift left with overflow",
+                        "lane 0: attempt to shift right with overflow",
                     ),
                 );
                 let cnt = self.int_to(y, lane_type(vt), false);
@@ -3297,18 +3571,22 @@ extend Lower {
             let div = t == tt::TokenType::Slash;
             let z = self.zero(vt);
             let m = self.vop((irc::OP_SIMD + irc::SIMD_CMP_EQ as u32) as u16, mt, [y, z], VNONE);
-            self.lane_check(
-                m,
-                ast::pick(div, "attempt to divide by zero", "attempt to calculate the remainder with a divisor of zero"),
+            let zmsg = ast::pick(
+                div,
+                "attempt to divide by zero",
+                "attempt to calculate the remainder with a divisor of zero",
             );
             if signed {
+                // A zero divisor and MIN / -1: one trap, at the lowest lane of either.
                 let bits = type_bits(lane_type(vt), 8);
                 let mn = self.splat(vt, 1u64 << (bits - 1) as u64);
                 let m1 = self.splat(vt, 0xFFFFFFFFFFFFFFFF);
                 let fx = self.vop((irc::OP_SIMD + irc::SIMD_CMP_EQ as u32) as u16, mt, [x, mn], VNONE);
                 let fy = self.vop((irc::OP_SIMD + irc::SIMD_CMP_EQ as u32) as u16, mt, [y, m1], VNONE);
                 let f = self.arith(O_AND, fx, fy);
-                self.lane_check(
+                self.lane_checks(
+                    m,
+                    zmsg,
                     f,
                     ast::pick(
                         div,
@@ -3316,6 +3594,8 @@ extend Lower {
                         "attempt to calculate the remainder with overflow",
                     ),
                 );
+            } else {
+                self.lane_check(m, zmsg);
             }
             let op = if div {
                 ast::pick(signed, O_SDIV, O_UDIV);
@@ -3560,7 +3840,14 @@ extend Lower {
         }
         if k == irc::IN_BOUNDS {
             let f = self.icmp(C_UGE, v[0], v[1]);
-            self.check(f, "index out of bounds");
+            if rv.item.node == irc::CHECK_LANES {
+                // A vector's lane index: the trap names the index and the lane count.
+                let pi = self.ptr_int() as u32;
+                let tys: [u32; 2] = [pi, pi];
+                self.trap_call(f, "__sc_index_bounds", v[0..2], tys[0..2]);
+            } else {
+                self.check(f, "index out of bounds");
+            }
             return self.int_to(v[0], ti.mty, false);
         }
         if k == irc::IN_BOUNDS_PROVEN || k == irc::IN_BOUNDS_GROUP_PROVEN {
@@ -3571,7 +3858,15 @@ extend Lower {
             let room = self.arith(O_SUB, v[1], v[0]);
             let f2 = self.icmp(C_UGT, v[2], room);
             let f = self.arith(O_OR, f1, f2);
-            self.check(f, "index out of bounds");
+            if rv.item.node == irc::CHECK_VEC {
+                // A vector load or store: the trap names the lanes, the start and the length.
+                let pi = self.ptr_int() as u32;
+                let tys: [u32; 3] = [pi, pi, pi];
+                let args: [Value; 3] = [v[2], v[0], v[1]];
+                self.trap_call(f, "__sc_vec_bounds", args[0..3], tys[0..3]);
+            } else {
+                self.check(f, "index out of bounds");
+            }
             return self.int_to(v[0], ti.mty, false);
         }
         if k == irc::IN_RANGE_BOUNDS {
@@ -4226,7 +4521,7 @@ extend Lower {
             if !self.ty(c, om, ott, &mut ei) || !c.dyn_pair(dm, dt, om, ott, true, 0, TYPE_NONE, &mut pair) {
                 return self.fail("dyn-closure");
             }
-            let pa = self.sentinel1();
+            let pa = self.sentinel1(c);
             let sz = self.iconst(self.ptr_int(), ast::pick(ei.size == 0, 1u32, ei.size));
             let al = self.iconst(self.ptr_int(), ast::pick(ei.align == 0, 1u32, ei.align));
             let args: []Value = [pa, sz, al];
@@ -4287,13 +4582,8 @@ extend Lower {
     }
 
     // The 1-aligned sentinel's address (the `Global` allocator's receiver).
-    fn sentinel1(self: &mut Self) Value {
-        let s = self.pkg.symbol("__sc_zst_1", SK_DATA);
-        if self.pkg.syms[s as usize].def == NONE {
-            let none: []u8 = [];
-            let nr: []Reloc = [];
-            let _ = self.pkg.add_data(s, 1, 0, false, none, nr);
-        }
+    fn sentinel1(self: &mut Self, c: &mut cbe::CEmit) Value {
+        let _ = self.sentinel_sym(c, 1);
         return self.symaddr("__sc_zst_1", SK_DATA);
     }
 
@@ -4329,34 +4619,59 @@ extend Lower {
     // reads the caller's, which those would shadow.
     fn arg_mode(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, callee: DefId, i: u32, opid: u32) u8 {
         self.pmty = T_NONE;
-        if callee.node == NODE_NONE {
-            return AM_VAL;
-        }
-        let fa = Lower::ast(c, callee.module);
-        let fnn = fa.at_const(callee.node);
-        if fnn.kind != NodeKind::NODE_FUNCTION {
-            return AM_VAL;
-        }
-        let ps = fnn.as_data.function.params;
-        if i >= ps.len {
-            return ast::pick(fnn.as_data.function.is_variadic(), AM_VARARG, AM_VAL);
-        }
-        let pn = fa.at_const(unsafe fa.list(ps)[i as usize]);
-        if pn.kind != NodeKind::NODE_PARAMETER || pn.as_data.parameter.ty == NODE_NONE {
-            return AM_VAL;
-        }
-        let mut pty = fa.type_of(pn.as_data.parameter.ty);
         let mut pm = callee.module;
+        let mut pty = TYPE_NONE;
+        if callee.node == NODE_NONE {
+            // An indirect call: a function pointer's signature, else a closure's declaration.
+            if self.ind_t == TYPE_NONE {
+                return AM_VAL;
+            }
+            let ia = Lower::ast(c, self.ind_m);
+            let iy = *ia.type_at(self.ind_t);
+            if iy.fn_sig() {
+                if i >= ia.sig_len(&iy, false) {
+                    return AM_VAL;
+                }
+                pm = self.ind_m;
+                pty = ia.sig_at(&iy, false, i);
+            } else if iy.kind == TypeKind::TYPE_FUNCTION {
+                // A closure: its declaration's facts hold its parameter types.
+                let da = Lower::ast(c, iy.module);
+                let cf = da.closure_fact(iy.as_data.decl);
+                if cf == null || i >= unsafe (*cf).nparams {
+                    return AM_VAL;
+                }
+                pm = iy.module;
+                pty = da.cap_facts[(unsafe (*cf).cap_start + unsafe (*cf).ncaps + i) as usize].ty;
+            } else {
+                return AM_VAL;
+            }
+        } else {
+            let fa = Lower::ast(c, callee.module);
+            let fnn = fa.at_const(callee.node);
+            if fnn.kind != NodeKind::NODE_FUNCTION {
+                return AM_VAL;
+            }
+            let ps = fnn.as_data.function.params;
+            if i >= ps.len {
+                return ast::pick(fnn.as_data.function.is_variadic(), AM_VARARG, AM_VAL);
+            }
+            let pn = fa.at_const(unsafe fa.list(ps)[i as usize]);
+            if pn.kind != NodeKind::NODE_PARAMETER || pn.as_data.parameter.ty == NODE_NONE {
+                return AM_VAL;
+            }
+            pty = fa.type_of(pn.as_data.parameter.ty);
+        }
         if pty == TYPE_NONE {
             return AM_VAL;
         }
-        let pk0 = fa.type_at(pty).kind;
+        let pk0 = Lower::ast(c, pm).type_at(pty).kind;
         if pk0 == TypeKind::TYPE_GENERIC || pk0 == TypeKind::TYPE_ASSOC {
             // A generic parameter decides by its bound type; an unbound one decides nothing.
-            let mut xm = callee.module;
+            let mut xm = pm;
             let mut xt = pty;
             self.push_binds(c);
-            let grounded = c.mg.resolve(callee.module, pty, &mut xm, &mut xt);
+            let grounded = c.mg.resolve(pm, pty, &mut xm, &mut xt);
             c.mg.pop_subs(self.binds.len());
             let xk = Lower::ast(c, xm).type_at(xt).kind;
             if !grounded || xk == TypeKind::TYPE_GENERIC || xk == TypeKind::TYPE_ASSOC {
@@ -4374,15 +4689,24 @@ extend Lower {
             self.push_binds(c);
             if self.ty(c, pm, pty, &mut pi) && pi.cls == VC_SCALAR {
                 self.pmty = pi.mty;
+                self.psgn = Lower::signed(c, pm, pty);
             }
             c.mg.pop_subs(self.binds.len());
             self.err = e0;
         }
+        if py.kind == TypeKind::TYPE_BUILTIN && py.as_data.builtin == BuiltinType::BT_F64 && Lower::builtin(
+            c,
+            b.module,
+            aty,
+        ) == BuiltinType::BT_F32 {
+            return AM_F64;
+        }
+        if callee.node == NODE_NONE {
+            // Through a pointer only the prototype's scalar conversions apply.
+            return AM_VAL;
+        }
         if py.kind != TypeKind::TYPE_REFERENCE && py.kind != TypeKind::TYPE_POINTER {
             if py.kind == TypeKind::TYPE_BUILTIN {
-                if py.as_data.builtin == BuiltinType::BT_F64 && Lower::builtin(c, b.module, aty) == BuiltinType::BT_F32 {
-                    return AM_F64;
-                }
                 let op = b.operands[opid as usize];
                 if op.kind == irc::OP_CONST && b.constants[op.data as usize].kind == irc::CK_WIDE {
                     return AM_WIDE;
@@ -4539,7 +4863,7 @@ extend Lower {
             } else {
                 v = self.temp(ei);
                 self.memcpy(v, p, ei.size);
-                t = AGG | self.layout_of(c, rm, y.as_data.elem, ei);
+                t = self.param_sig(c, rm, y.as_data.elem, ei);
             }
         } else if am == AM_WIDE {
             let k = b.constants[b.operands[opid as usize].data as usize];
@@ -4587,13 +4911,17 @@ extend Lower {
                         return false;
                     }
                 }
-                t = AGG | self.layout_of(c, b.module, aty, ti);
+                t = self.param_sig(c, b.module, aty, ti);
             }
         }
         if v == VNONE {
             return self.fail("argument");
         }
         args.push(v);
+        if t == T_I8 as u32 || t == T_I16 as u32 {
+            let s = ast::pick(self.pmty != T_NONE, self.psgn, aty != TYPE_NONE && Lower::signed(c, b.module, aty));
+            t |= ast::pick(s, SIG_SEXT, 0);
+        }
         tys.push(t);
         return true;
     }
@@ -4619,7 +4947,7 @@ extend Lower {
         all.extend_copy(args);
         let mut out = VNONE;
         if ti.cls == VC_SCALAR {
-            ret = ti.mty;
+            ret = sig_code(ti.mty, t != TYPE_NONE && Lower::signed(c, m, t));
         } else if ti.cls == VC_MEM {
             out = dst;
             if out == VNONE {
@@ -4658,6 +4986,13 @@ extend Lower {
             self.release_temps();
         }
         self.loc = self.loc_at(c, bb.term.span.start);
+        self.fresh = NONE;
+        if bb.stmt_len != 0 {
+            let s = b.statements[(bb.stmt_start + bb.stmt_len - 1) as usize];
+            if s.kind == irc::ST_STORAGE_LIVE {
+                self.fresh = s.a;
+            }
+        }
         let ok = self.term(c, b, blk, bb.term);
         self.release_temps();
         if !ok && self.dbg {
@@ -4894,6 +5229,19 @@ extend Lower {
             v = self.int_to(v, self.ptr_int(), false);
         }
         let ty = b.operands[t.a as usize].ty;
+        if t.sw_len == 1 && ty != TYPE_NONE && Lower::builtin(c, b.module, ty) == BuiltinType::BT_BOOL {
+            // A bool's one case: a two-way branch, which the code generator fuses with its comparison.
+            let pr = b.switch_pool[t.sw_start as usize];
+            let to = pr as u32;
+            let ec = self.edge(self.lblk[to as usize], self.cur, to);
+            let ed = self.edge(self.lblk[t.t0 as usize], self.cur, t.t0);
+            if pr >> 32 == 0 {
+                let _ = self.inst(O_BR, T_NONE, 0, v, ed, ec);
+            } else {
+                let _ = self.inst(O_BR, T_NONE, 0, v, ec, ed);
+            }
+            return true;
+        }
         let signed = ty != TYPE_NONE && Lower::signed(c, b.module, ty);
         let w0 = self.b.words.len() as u32;
         let mut es = Vector::<u32>::new();
@@ -4970,6 +5318,70 @@ extend Lower {
         tail.push_str(":");
         tail.push_u64(self.b.lines[self.loc as usize].line);
         tail.push_str("\n");
+        if t.args_len == 4 {
+            // `assert_eq`/`assert_ne`: the operands, as C prints them (`__sc_assert_vals`).
+            head.push_str("\n");
+            let hv = self.cstr(head.as_str());
+            let tv = self.cstr(tail.as_str().slice(1, tail.len()));
+            let mut kind: u64 = 0;
+            let mut w: [Value; 4] = [VNONE, VNONE, VNONE, VNONE];
+            for k in 0..2u32 {
+                let opid = b.oper_pool[(t.args_start + k) as usize];
+                let ot = b.operands[opid as usize].ty;
+                let bt = Lower::builtin(c, b.module, ot);
+                let mut v = VNONE;
+                let mut n = self.iconst(T_I64, 0);
+                if bt == BuiltinType::BT_BOOL || bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64 || Lower::is_int_bt(
+                    bt,
+                ) {
+                    v = self.operand(c, b, opid);
+                    if v == VNONE {
+                        return false;
+                    }
+                    if bt == BuiltinType::BT_BOOL {
+                        kind = 4;
+                        v = self.int_to(v, T_I64, false);
+                    } else if bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64 {
+                        kind = 3;
+                        if bt == BuiltinType::BT_F32 {
+                            v = self.inst(O_FPEXT, T_F64, 0, v, VNONE, VNONE);
+                        }
+                        v = self.inst(O_BITCAST, T_I64, 0, v, VNONE, VNONE);
+                    } else {
+                        let sg = Lower::signed(c, b.module, ot);
+                        kind = ast::pick(sg, 1u64, 2u64);
+                        v = self.int_to(v, T_I64, sg);
+                    }
+                } else if Lower::is_str(c, b.module, ot) {
+                    kind = 5;
+                    let strt = TyI { cls: VC_MEM, mty: T_NONE, size: 2 * self.pkg.ptr_bytes, align: self.pkg.ptr_bytes };
+                    let sa = self.operand_addr(c, b, opid, strt);
+                    if sa == VNONE {
+                        return false;
+                    }
+                    v = self.int_to(self.load(T_PTR, sa, 0, false), T_I64, false);
+                    n = self.int_to(self.load(self.ptr_int(), sa, self.pkg.ptr_bytes, false), T_I64, false);
+                } else {
+                    v = self.iconst(T_I64, 0);
+                }
+                unsafe w[(2 * k) as usize] = v;
+                unsafe w[(2 * k + 1) as usize] = n;
+            }
+            let kv = self.iconst(T_I32, kind);
+            let vargs: []Value = [hv, kv, w[0], w[1], w[2], w[3], tv];
+            let vtys: []u32 = [
+                T_PTR as u32,
+                T_I32 as u32,
+                T_I64 as u32,
+                T_I64 as u32,
+                T_I64 as u32,
+                T_I64 as u32,
+                T_PTR as u32,
+            ];
+            let _ = self.call_sym("__sc_assert_vals", vargs, vtys, T_NONE);
+            let _ = self.inst(O_UNREACHABLE, T_NONE, 0, VNONE, VNONE, VNONE);
+            return true;
+        }
         let hp = self.cstr(head.as_str());
         let tp = self.cstr(tail.as_str());
         let mut mp = self.iconst(T_PTR, 0);
@@ -5006,7 +5418,10 @@ extend Lower {
         if is_ptr && !c.is_destructible(em, et) {
             return true;
         }
-        if !is_ptr && y.kind != TypeKind::TYPE_DYN && !c.is_destructible(rm, rt) {
+        if !is_ptr && (y.kind == TypeKind::TYPE_DYN && !y.dyn_owns() || y.kind != TypeKind::TYPE_DYN && !c.is_destructible(
+            rm,
+            rt,
+        )) {
             return true;
         }
         if y.kind == TypeKind::TYPE_BUILTIN {
@@ -5061,6 +5476,9 @@ extend Lower {
         let y = *Lower::ast(c, rm).type_at(rt);
         let pb = self.pkg.ptr_bytes;
         if y.kind == TypeKind::TYPE_DYN {
+            if !y.dyn_owns() {
+                return true; // a borrowed dyn
+            }
             let d = self.load(T_PTR, addr, 0, false);
             let vt = self.load(T_PTR, addr, pb, false);
             let fp = self.load(T_PTR, vt, 0, false);
@@ -5119,6 +5537,9 @@ extend Lower {
         if !c.mg.free_target(rm, rt, user, &mut fs) {
             return self.fail("drop-target");
         }
+        if c.collect_demand {
+            c.note_free(rm, rt, fs.as_str());
+        }
         let a = if c.mg.is_zst(rm, rt) {
             self.sentinel(c, rm, rt);
         } else {
@@ -5169,7 +5590,10 @@ extend Lower {
             let mut cm = b.module;
             let mut ctt = TYPE_NONE;
             let cy = Lower::resolved(c, b.module, ct, &mut cm, &mut ctt);
+            self.ind_m = cm;
+            self.ind_t = ctt;
             if cy.kind == TypeKind::TYPE_DYN {
+                self.ind_t = Lower::ast(c, cm).dyn_fn_sig(&cy);
                 let fa = self.operand_addr(c, b, t.a, fat);
                 if fa == VNONE {
                     return false;
@@ -5227,6 +5651,9 @@ extend Lower {
                 if !c.term_callee_sym(b, &t, true, &mut name) {
                     return self.fail("callee-sym");
                 }
+                if Lower::p(c).c_fns.contains(&(t.callee.module as u64 << 32 | t.callee.node as u64)) {
+                    self.pend_c = "calls a function only a C compile defines (an intrinsic, a header's `static` one)";
+                }
                 if c.mg.in_interface(t.callee.module, t.callee.node) != NODE_NONE && c.mg.last_method_def.node != NODE_NONE {
                     pcallee = c.mg.last_method_def;
                 }
@@ -5249,10 +5676,12 @@ extend Lower {
             }
             if !self.call_arg(c, b, t.callee, pcallee, i, opid, &mut args, &mut tys) {
                 self.binds.clear();
+                self.ind_t = TYPE_NONE;
                 return false;
             }
         }
         self.binds.clear();
+        self.ind_t = TYPE_NONE;
         if nfixed == NONE {
             nfixed = args.len() as u32;
         }
@@ -5293,7 +5722,9 @@ extend Lower {
                     return false;
                 }
                 let pl = b.places[dp as usize];
-                if pl.proj_len == 0 && !self.escaped[pl.base as usize] && self.li[pl.base as usize].kind == LK_MEM && !Lower::moved_arg(
+                // A local whose storage just became live holds no value an escaped pointer may read.
+                let unseen = !self.escaped[pl.base as usize] || self.fresh == pl.base;
+                if pl.proj_len == 0 && unseen && self.li[pl.base as usize].kind == LK_MEM && !Lower::moved_arg(
                     b,
                     &t,
                     pl.base,
@@ -5357,7 +5788,10 @@ extend Lower {
                 return true;
             }
         }
-        let r = self.emit_call(name.as_str(), fv, &args, &tys, nfixed, variadic, ti, c, b.module, dty, dst);
+        let mut r = VNONE;
+        if fv != VNONE || !self.rt_prim(name.as_str(), &args, &mut r) {
+            r = self.emit_call(name.as_str(), fv, &args, &tys, nfixed, variadic, ti, c, b.module, dty, dst);
+        }
         if t.dests_len == 1 && ti.cls == VC_SCALAR {
             let mut p = PlaceRef { kind: 0 };
             if !self.place(c, b, b.dest_pool[t.dests_start as usize], &mut p) || !self.write(p, r) {
@@ -5368,6 +5802,153 @@ extend Lower {
         }
         self.after_call(t);
         return true;
+    }
+
+    // A primitive of the C runtime (`super_rt.h`: `std::core`'s bit counts and wrapping arithmetic over 64
+    // bits, `std::int`'s 128-bit limb operations and traps, `std::float`'s binary128 probe) as operations:
+    // true, with the value in `out` (VNONE for none), when `name` is one.
+    fn rt_prim(self: &mut Self, name: str, a: &Vector<Value>, out: &mut Value) bool {
+        *out = VNONE;
+        if !name.starts_with("sc_") {
+            return false;
+        }
+        let n = a.len();
+        if n == 0 {
+            if name == "sc_has_i128" || name == "sc_has_f128" {
+                // The native backends have 128-bit integers and no binary128 floats (Apple's C compilers on
+                // arm64 neither), so the limb code of `std::float` stands.
+                *out = self.iconst(T_I32, ast::pick(name == "sc_has_i128", 1u64, 0u64));
+                return true;
+            }
+            return false;
+        }
+        if n == 1 && (name == "sc_clz64" || name == "sc_ctz64" || name == "sc_popcount64") {
+            let op = ast::pick(name == "sc_clz64", O_CLZ, ast::pick(name == "sc_ctz64", O_CTZ, O_POPCNT));
+            let c = self.inst(op, T_I64, 0, a[0], VNONE, VNONE);
+            *out = self.inst(O_TRUNC, T_I32, 0, c, VNONE, VNONE);
+            return true;
+        }
+        if n == 1 && (name == "sc_int_overflow" || name == "sc_int_div_zero" || name == "sc_int_div_overflow") {
+            // A trap with the operator's message; overflow wraps instead in a build without overflow checks.
+            if !self.wrap || name != "sc_int_overflow" {
+                let sg = self.b.signature([T_PTR as u32][0..1], 1, false, T_NONE);
+                let at = self.b.pool_list(a[0..1]);
+                let k = self.sym("__sc_panic", SK_FUNC);
+                let _ = self.inst(O_CALL, T_NONE, 1, k, sg, at);
+            }
+            return true;
+        }
+        if n == 2 && (name == "sc_wadd64" || name == "sc_wsub64" || name == "sc_wmul64") {
+            *out = self.arith(
+                ast::pick(name == "sc_wadd64", O_ADD, ast::pick(name == "sc_wsub64", O_SUB, O_MUL)),
+                a[0],
+                a[1],
+            );
+            return true;
+        }
+        if n == 2 && (name == "sc_wshl64" || name == "sc_wshr64" || name == "sc_wsar64") {
+            let s = self.inst(O_ZEXT, T_I64, 0, a[1], VNONE, VNONE);
+            *out = self.arith(
+                ast::pick(name == "sc_wshl64", O_SHL, ast::pick(name == "sc_wshr64", O_LSHR, O_ASHR)),
+                a[0],
+                s,
+            );
+            return true;
+        }
+        if n == 2 && (name == "sc_mulo_u64" || name == "sc_mulo_i64") {
+            *out = VFLAG | self.inst(O_MULO, T_I64, ast::pick(name == "sc_mulo_i64", OV_SIGNED, 0), a[0], a[1], VNONE);
+            return true;
+        }
+        if n == 3 && name == "sc_mul64" {
+            // The full product: the low half returned, the high half stored.
+            let p = self.arith(O_MUL, self.wide(a[0]), self.wide(a[1]));
+            self.store(self.high(p), a[2], 0, false);
+            *out = self.inst(O_TRUNC, T_I64, 0, p, VNONE, VNONE);
+            return true;
+        }
+        if n == 4 && name == "sc_div128by64" {
+            let u = self.pair(a[1], a[0]);
+            let v = self.wide(a[2]);
+            self.store(self.inst(O_TRUNC, T_I64, 0, self.arith(O_UREM, u, v), VNONE, VNONE), a[3], 0, false);
+            *out = self.inst(O_TRUNC, T_I64, 0, self.arith(O_UDIV, u, v), VNONE, VNONE);
+            return true;
+        }
+        if n == 7 && (name == "sc_i128_add" || name == "sc_i128_sub") {
+            // Limb by limb: the carry (borrow) of the low limbs into the high ones, out of either.
+            let op = ast::pick(name == "sc_i128_add", O_ADDO, O_SUBO);
+            let lo = self.inst(op, T_I64, 0, a[0], a[2], VNONE);
+            let hi0 = self.inst(op, T_I64, 0, a[1], a[3], VNONE);
+            let c0 = self.inst(O_ZEXT, T_I64, 0, VFLAG | lo, VNONE, VNONE);
+            let hi = self.inst(op, T_I64, 0, hi0, c0, VNONE);
+            let c = self.arith(O_OR, VFLAG | hi0, VFLAG | hi);
+            self.store(lo, a[4], 0, false);
+            self.store(hi, a[5], 0, false);
+            self.store(self.inst(O_ZEXT, T_I64, 0, c, VNONE, VNONE), a[6], 0, false);
+            return true;
+        }
+        if n == 8 && name == "sc_i128_mul" {
+            // The 256-bit product from four 64 x 64 partials (`super_rt.h`'s order): m1 cannot overflow; m2
+            // can, and its carry lands 128 bits up.
+            let p0 = self.arith(O_MUL, self.wide(a[0]), self.wide(a[2]));
+            let m1 = self.arith(O_ADD, self.arith(O_MUL, self.wide(a[0]), self.wide(a[3])), self.high_wide(p0));
+            let m2 = self.arith(O_ADD, m1, self.arith(O_MUL, self.wide(a[1]), self.wide(a[2])));
+            let cy = self.inst(O_ZEXT, T_I128, 0, self.icmp(C_ULT, m2, m1), VNONE, VNONE);
+            let h0 = self.arith(O_ADD, self.arith(O_MUL, self.wide(a[1]), self.wide(a[3])), self.high_wide(m2));
+            let hi = self.arith(O_ADD, h0, self.arith(O_SHL, cy, self.w128(64)));
+            self.store(self.inst(O_TRUNC, T_I64, 0, p0, VNONE, VNONE), a[4], 0, false);
+            self.store(self.inst(O_TRUNC, T_I64, 0, m2, VNONE, VNONE), a[5], 0, false);
+            self.store(self.inst(O_TRUNC, T_I64, 0, hi, VNONE, VNONE), a[6], 0, false);
+            self.store(self.inst(O_TRUNC, T_I64, 0, self.high_wide(hi), VNONE, VNONE), a[7], 0, false);
+            return true;
+        }
+        if n == 8 && name == "sc_i128_divmod" {
+            let x = self.pair(a[0], a[1]);
+            let y = self.pair(a[2], a[3]);
+            let q = self.arith(O_UDIV, x, y);
+            let r = self.arith(O_UREM, x, y);
+            self.store(self.inst(O_TRUNC, T_I64, 0, q, VNONE, VNONE), a[4], 0, false);
+            self.store(self.inst(O_TRUNC, T_I64, 0, self.high_wide(q), VNONE, VNONE), a[5], 0, false);
+            self.store(self.inst(O_TRUNC, T_I64, 0, r, VNONE, VNONE), a[6], 0, false);
+            self.store(self.inst(O_TRUNC, T_I64, 0, self.high_wide(r), VNONE, VNONE), a[7], 0, false);
+            return true;
+        }
+        if name.starts_with("sc_f128_") {
+            // Unreachable behind `sc_has_f128` (0): the C stubs abort.
+            let sg = self.b.signature([T_PTR as u32][0..0], 0, false, T_NONE);
+            let at = self.b.pool_list(a[0..0]);
+            let k = self.sym("abort", SK_FUNC);
+            let _ = self.inst(O_CALL, T_NONE, 0, k, sg, at);
+            return true;
+        }
+        return false;
+    }
+
+    // The 128-bit constant `v`.
+    fn w128(self: &mut Self, v: u64) Value {
+        let w = self.b.words.len() as u32;
+        self.b.words.push(v);
+        self.b.words.push(0);
+        return self.inst(O_WCONST, T_I128, 0, w, 2, VNONE);
+    }
+
+    // 64-bit `v` zero-extended to 128 bits.
+    fn wide(self: &mut Self, v: Value) Value {
+        return self.inst(O_ZEXT, T_I128, 0, v, VNONE, VNONE);
+    }
+
+    // The 128-bit value of 64-bit limbs `lo` and `hi`.
+    fn pair(self: &mut Self, lo: Value, hi: Value) Value {
+        return self.arith(O_OR, self.arith(O_SHL, self.wide(hi), self.w128(64)), self.wide(lo));
+    }
+
+    // The high 64 bits of 128-bit `v`, as a 128-bit value.
+    fn high_wide(self: &mut Self, v: Value) Value {
+        return self.arith(O_LSHR, v, self.w128(64));
+    }
+
+    // The high 64 bits of 128-bit `v`.
+    fn high(self: &mut Self, v: Value) Value {
+        return self.inst(O_TRUNC, T_I64, 0, self.high_wide(v), VNONE, VNONE);
     }
 
     // Continue after a call: to its successor, or nowhere when it does not return.
@@ -5479,30 +6060,38 @@ extend Lower {
                 return false;
             }
         } else {
-            // Each order, the failure order taken as strong as the success one's strongest legal.
+            // A runtime order: a block per code it can take, others trap.
             let done = self.block();
-            let mut es = Vector::<u32>::new();
-            let mut bl = Vector::<u32>::new();
-            let w0 = self.b.words.len() as u32;
-            for o in 0..5u64 {
+            let fcodes: []u64 = [0, 1, 4];
+            let mut fbl = Vector::<u32>::new();
+            if fk {
                 let k = self.block();
-                bl.push(k);
-                es.push(self.edge(k, NONE, NONE));
-                self.b.words.push(o);
+                let ek = self.edge(k, NONE, NONE);
+                let _ = self.inst(O_JMP, T_NONE, 0, ek, VNONE, VNONE);
+                fbl.push(k);
+            } else {
+                self.order_switch(v[fi as usize], fcodes, &mut fbl);
             }
-            let bad = self.panic_block("invalid memory order");
-            es.push(self.edge(bad, NONE, NONE));
-            let el = self.b.pool_list(es[0..es.len()]);
-            let ov = self.int_to(v[oi as usize], T_I32, false);
-            let _ = self.inst(O_SWITCH, T_NONE, 5, ov, w0, el);
-            for o in 0..5 {
-                self.b.begin(bl[o as usize]);
-                let f = ast::pick(fi == NONE, 0i64, ast::pick(o == 4, 4i64, ast::pick(o == 0 || o == 2, 0i64, 1i64)));
-                if !self.atomic(c, b, t, v, o, ast::pick(fk, fo, f), rslot, dti.mty) {
-                    return false;
+            for j in 0..fbl.len() {
+                self.b.begin(fbl[j]);
+                let f = ast::pick(fk, fo, fcodes[j] as i64);
+                let scodes: []u64 = [0, 1, 2, 3, 4];
+                let mut sbl = Vector::<u32>::new();
+                if sk {
+                    sbl.push(fbl[j]);
+                } else {
+                    self.order_switch(v[oi as usize], scodes, &mut sbl);
                 }
-                let ed = self.edge(done, NONE, NONE);
-                let _ = self.inst(O_JMP, T_NONE, 0, ed, VNONE, VNONE);
+                for i in 0..sbl.len() {
+                    if !sk {
+                        self.b.begin(sbl[i]);
+                    }
+                    if !self.atomic(c, b, t, v, ast::pick(sk, so, i as i64), f, rslot, dti.mty) {
+                        return false;
+                    }
+                    let ed = self.edge(done, NONE, NONE);
+                    let _ = self.inst(O_JMP, T_NONE, 0, ed, VNONE, VNONE);
+                }
             }
             self.b.begin(done);
         }
@@ -5512,6 +6101,24 @@ extend Lower {
             return self.place(c, b, b.dest_pool[t.dests_start as usize], &mut p) && self.write(p, r);
         }
         return true;
+    }
+
+    // A switch on memory order `ov` to a new block per code of `codes` (into `out`), any other code to the
+    // trap.
+    fn order_switch(self: &mut Self, ov: Value, codes: []u64, out: &mut Vector<u32>) {
+        let mut es = Vector::<u32>::with_capacity(codes.len() + 1);
+        let w0 = self.b.words.len() as u32;
+        for i in 0..codes.len() {
+            let k = self.block();
+            out.push(k);
+            es.push(self.edge(k, NONE, NONE));
+            self.b.words.push(codes[i]);
+        }
+        let bad = self.panic_block("invalid memory order");
+        es.push(self.edge(bad, NONE, NONE));
+        let el = self.b.pool_list(es[0..es.len()]);
+        let o = self.int_to(ov, T_I32, false);
+        let _ = self.inst(O_SWITCH, T_NONE, codes.len() as u16, o, w0, el);
     }
 
     // One atomic operation with orders `so` and `fo`; its result into `rslot`.
@@ -5776,9 +6383,77 @@ extend Lower {
 }
 
 extend Lower {
+    /// The C chunk `what` of unit `unit` (a module) just landed: the functions lowered for it are that
+    /// unit's, its `own` ones when the chunk is of the module's own items. A chunk with none (C text the
+    /// lowering does not see, or a refused body) or one that needs C (`pend_c`) puts the unit on C.
+    pub fn claim(self: &mut Self, unit: u32, what: str, own: bool) {
+        if self.pend.len() == 0 || self.pend_c.len() != 0 {
+            self.conly.push(unit);
+            let mut why = String::new();
+            if self.pend_c.len() != 0 {
+                why.format_into("{} {}", what, self.pend_c);
+            } else if self.fails.len() > self.fails_seen {
+                let f = self.fails.at(self.fails.len() - 1);
+                why.format_into("{} `{}` refused: {}", what, f.sym.as_str(), f.why);
+            } else {
+                why.format_into("{} has no LIR", what);
+            }
+            self.conly_why.push(why);
+        }
+        self.fails_seen = self.fails.len();
+        self.pend_c = "";
+        for i in 0..self.pend.len() {
+            let y = self.pkg.syms.index_mut(self.pend[i] as usize);
+            y.unit = unit;
+            y.own = own;
+        }
+        self.pend.truncate(0);
+    }
+
+    /// Item `(m, n)`'s `@used` and `@unsafe(link_section)` onto the symbol named `name`, when defined.
+    pub fn item_attrs_named(self: &mut Self, c: &mut cbe::CEmit, name: str, m: ModuleId, n: NodeId) {
+        let s = self.pkg.find_symbol(name);
+        if s != NONE {
+            self.item_attrs(c, s, m, n);
+        }
+    }
+
+    // Item `(m, n)`'s `@used` and `@unsafe(link_section)` onto symbol `s`.
+    fn item_attrs(self: &mut Self, c: &mut cbe::CEmit, s: u32, m: ModuleId, n: NodeId) {
+        if n == NODE_NONE {
+            return;
+        }
+        let a = Lower::ast(c, m);
+        let ua = a.attr_of(n, AttrKind::ATTR_UNSAFE);
+        if ua != null && (unsafe (*ua).arg & UNSAFE_LINK_SECTION) != 0 {
+            let ss = unsafe (*ua).str_span;
+            let spec = Lower::p(c).modules.at(m as usize).source.as_str().slice(ss.start as usize, ss.end as usize);
+            self.pkg.set_section(s, spec);
+        } else if a.attr_of(n, AttrKind::ATTR_USED) != null {
+            self.pkg.syms.index_mut(s as usize).used = true;
+        }
+    }
+
+    /// Data symbol `name` belongs to unit `unit`; without a LIR definition the unit compiles through C.
+    pub fn claim_data(self: &mut Self, name: str, unit: u32) {
+        let s = self.pkg.find_symbol(name);
+        if s != NONE && self.pkg.syms[s as usize].def != NONE {
+            self.pkg.syms.index_mut(s as usize).unit = unit;
+            return;
+        }
+        self.conly.push(unit);
+        self.conly_why.push(format("`{}` has no LIR", name));
+    }
+
     /// Move `other`'s bodies, data and refusals into this lowering.
     pub fn absorb(self: &mut Self, other: &mut Lower) {
         let _ = self.pkg.absorb(&other.pkg);
+        for i in 0..other.conly.len() {
+            self.conly.push(other.conly[i]);
+            self.conly_why.push(replace(other.conly_why.index_mut(i), String::new()));
+        }
+        other.conly.truncate(0);
+        other.conly_why.truncate(0);
         for i in 0..other.fails.len() {
             self.fails.push(LFail { sym: other.fails[i].sym.clone(), why: other.fails[i].why });
         }
@@ -5793,7 +6468,7 @@ extend Lower {
         other.nbodies = 0;
     }
 
-    /// The step 4 checks over the merged package, reported on stderr: every body lowered, every
+    /// The `SC_LIR` checks over the merged package, reported on stderr: every body lowered, every
     /// body verified, and print, parse and print giving the same text. True when all hold.
     pub fn check_all(self: &mut Self, pk: *const loader::Package, text: &mut String) bool {
         // A body with inline assembly stays on the C path by design.
@@ -6032,12 +6707,39 @@ extend Lower {
             } else {
                 let mut rm = b.module;
                 let mut rt = TYPE_NONE;
-                let y = Lower::resolved(c, b.module, b.operands[t.a as usize].ty, &mut rm, &mut rt);
+                let mut y = Lower::resolved(c, b.module, b.operands[t.a as usize].ty, &mut rm, &mut rt);
                 let a = Lower::ast(c, rm);
-                for k in 0..a.sig_len(&y, true) {
-                    tys.push(a.sig_at(&y, true, k));
+                if y.kind == TypeKind::TYPE_DYN {
+                    // A `dyn fn`: its function type's results.
+                    y = *a.type_at(a.dyn_fn_sig(&y));
                 }
-                tm = rm;
+                let item = y.kind == TypeKind::TYPE_FUNCTION && !y.fn_sig();
+                let da = Lower::ast(c, y.module);
+                let cf = if item {
+                    da.closure_fact(y.as_data.decl);
+                } else {
+                    null;
+                };
+                if cf != null {
+                    // A closure: the result types its facts record after the captures and parameters.
+                    let at = unsafe (*cf).cap_start + unsafe (*cf).ncaps + unsafe (*cf).nparams;
+                    for r in 0..unsafe (*cf).nrets {
+                        tys.push(da.cap_facts[(at + r) as usize].ty);
+                    }
+                    tm = y.module;
+                } else if item {
+                    // A function item: its declaration's results.
+                    let rs = da.at_const(y.as_data.decl).as_data.function.returns;
+                    for k in 0..rs.len {
+                        tys.push(da.type_of(unsafe da.list(rs)[k as usize]));
+                    }
+                    tm = y.module;
+                } else {
+                    for k in 0..a.sig_len(&y, true) {
+                        tys.push(a.sig_at(&y, true, k));
+                    }
+                    tm = rm;
+                }
             }
             let mut all = true;
             for k in 0..tys.len() {
@@ -6233,7 +6935,7 @@ extend Lower {
         let mut budget: u64 = 0;
         let stats = stdlib::getenv("SC_LIR_STATS") != null;
         for i in 0..self.ctfe.len() {
-            let r = self.ctfe[i];
+            let r = self.ctfe.at(i);
             let k = r.kind;
             let ti = by.get(&(r.m as u64 << 32 | r.node as u64));
             if r.ffi || ti.is_none() {
@@ -6284,7 +6986,7 @@ extend Lower {
                         "lir: ctfe: {}: CTFE kind {} \"{}\" at {}:{}, the evaluator {} (test statement {}:{})\n",
                         t.sym.as_str(),
                         k,
-                        r.msg,
+                        r.msg.as_str(),
                         r.line,
                         r.col,
                         lt.as_str(),
@@ -6338,7 +7040,7 @@ fn trap_class(o: &le::Outcome) u8 {
     if m.starts_with("attempt to ") && m.ends_with(" with overflow") {
         return iri::IT_TRAP_UB_OVERFLOW;
     }
-    if m == "index out of bounds" || m == "range out of bounds" {
+    if m.starts_with("index out of bounds") || m == "range out of bounds" {
         return iri::IT_TRAP_UB_OOB;
     }
     return iri::IT_TRAP_PANIC;
@@ -6545,7 +7247,7 @@ extend Lower {
             return self.ty(c, unsafe (*g).vm, unsafe (*g).vt, out);
         }
         if shape == iri::SS_HEAP || shape == iri::SS_ARRAY || shape == iri::SS_CELL {
-            if !self.ty(c, unsafe (*g).etm, unsafe (*g).ety, out) {
+            if !self.elem_ty(c, cev, gi, out) {
                 return false;
             }
             if shape != iri::SS_CELL {
@@ -6558,6 +7260,54 @@ extend Lower {
         let ok = self.decl_ty(c, unsafe (*g).dm, unsafe (*g).dn, out);
         c.mg.pop_subs(nb);
         return ok;
+    }
+
+    // The element type of array or heap object `gi`, the value type of a cell: the recorded one, the
+    // element of the array (or the type) an item's object declares, a share of the parent's place for an embedded array,
+    // else the type of its first typed slot; a refusal when none is known (offsets need the element's
+    // size).
+    fn elem_ty(self: &mut Self, c: &mut cbe::CEmit, cev: &iri::Interp, gi: u32, out: &mut TyI) bool {
+        let g = cev.static_at(gi);
+        if unsafe (*g).ety != TYPE_NONE {
+            return self.ty(c, unsafe (*g).etm, unsafe (*g).ety, out);
+        }
+        let n = (unsafe (*g).slots.len()) as u32;
+        if unsafe (*g).inode != NODE_NONE {
+            let a = Lower::ast(c, unsafe (*g).im);
+            let tn = a.at_const(unsafe (*g).inode).as_data.const_def.ty;
+            if tn != NODE_NONE {
+                let mut rm = unsafe (*g).im;
+                let mut rt = TYPE_NONE;
+                let y = Lower::resolved(c, unsafe (*g).im, a.type_of(tn), &mut rm, &mut rt);
+                // A cell holds the item's value whole.
+                if y.kind == TypeKind::TYPE_ARRAY && unsafe (*g).shape != iri::SS_CELL {
+                    return self.ty(c, rm, y.as_data.arr.elem, out);
+                }
+                return self.ty(c, rm, rt, out);
+            }
+        }
+        if unsafe (*g).parent != iri::S_NO_PARENT && n != 0 {
+            // The parent's place holds the whole array: each element its share.
+            let mut pt = TyI { cls: 0 };
+            let mut po: u32 = 0;
+            let mut zal: u64 = 0;
+            if !self.slot_ty(c, cev, unsafe (*g).parent, unsafe (*g).pslot, &mut po, &mut zal, &mut pt) {
+                return false;
+            }
+            *out = TyI { cls: VC_MEM, mty: T_NONE, size: pt.size / n, align: pt.align };
+            return true;
+        }
+        for k in 0..n {
+            let sl = *unsafe (*g).slots.at(k as usize);
+            if sl.ty != TYPE_NONE {
+                return self.ty(c, sl.tm, sl.ty, out);
+            }
+        }
+        if n == 0 {
+            *out = TyI { cls: VC_ZST, mty: T_NONE, size: 0, align: 1 };
+            return true;
+        }
+        return self.fail("static-elem");
     }
 
     // Bind the generic parameters of static object `g`'s aggregate to its recorded arguments.
@@ -6639,7 +7389,7 @@ extend Lower {
         }
         if shape == iri::SS_ARRAY || shape == iri::SS_HEAP {
             let mut ei = TyI { cls: 0 };
-            if !self.ty(c, unsafe (*g).etm, unsafe (*g).ety, &mut ei) {
+            if !self.elem_ty(c, cev, gi, &mut ei) {
                 return false;
             }
             for k in 0..nslots {
@@ -6781,13 +7531,19 @@ extend Lower {
         if unsafe (*t).ety != TYPE_NONE && ti.size == 0 && unsafe (*t).inode == NODE_NONE {
             let lo = c.mg.layout_sub(unsafe (*t).etm, unsafe (*t).ety);
             let al: u64 = ast::pick(lo.ok && lo.align > 1, lo.align, 1u64);
-            d.relocs.push(Reloc { offset: off, sym: self.sentinel_sym(al), addend: 0 });
+            d.relocs.push(Reloc { offset: off, sym: self.sentinel_sym(c, al), addend: 0 });
             return true;
         }
         // The place: an element or a field of the target, inside its standalone owner.
         let mut add: u32 = 0;
-        if r.toff != 0 && !self.slot_off(c, cev, r.target, r.toff, &mut add) {
+        let mut zal: u64 = 0;
+        if r.toff != 0 && !self.slot_off(c, cev, r.target, r.toff, &mut add, &mut zal) {
             return false;
+        }
+        if zal != 0 {
+            // A zero-sized place: the sentinel, as every zero-sized address.
+            d.relocs.push(Reloc { offset: off, sym: self.sentinel_sym(c, zal), addend: 0 });
+            return true;
         }
         let mut o = r.target;
         for _ in 0..1024 {
@@ -6796,7 +7552,7 @@ extend Lower {
                 break;
             }
             let mut so: u32 = 0;
-            if !self.slot_off(c, cev, unsafe (*og).parent, unsafe (*og).pslot, &mut so) {
+            if !self.slot_off(c, cev, unsafe (*og).parent, unsafe (*og).pslot, &mut so, &mut zal) {
                 return false;
             }
             add += so;
@@ -6817,32 +7573,55 @@ extend Lower {
         return true;
     }
 
-    // The offset of slot `k` inside static object `gi`.
-    fn slot_off(self: &mut Self, c: &mut cbe::CEmit, cev: &iri::Interp, gi: u32, k: u32, out: &mut u32) bool {
+    // The offset of slot `k` inside static object `gi`; `zal` the alignment of the slot's type when it is
+    // zero-sized, else 0.
+    fn slot_off(self: &mut Self, c: &mut cbe::CEmit, cev: &iri::Interp, gi: u32, k: u32, out: &mut u32, zal: &mut u64) bool {
+        let mut st = TyI { cls: 0 };
+        return self.slot_ty(c, cev, gi, k, out, zal, &mut st);
+    }
+
+    // `slot_off`, and the slot's type into `st`.
+    fn slot_ty(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        cev: &iri::Interp,
+        gi: u32,
+        k: u32,
+        out: &mut u32,
+        zal: &mut u64,
+        st: &mut TyI,
+    ) bool {
         let g = cev.static_at(gi);
         let shape = unsafe (*g).shape;
-        if shape == iri::SS_CELL {
-            *out = 0;
-            return true;
-        }
-        if shape == iri::SS_ARRAY || shape == iri::SS_HEAP {
-            let mut ei = TyI { cls: 0 };
-            if !self.ty(c, unsafe (*g).etm, unsafe (*g).ety, &mut ei) {
+        *zal = 0;
+        if shape == iri::SS_CELL || shape == iri::SS_ARRAY || shape == iri::SS_HEAP {
+            if !self.elem_ty(c, cev, gi, st) {
                 return false;
             }
-            *out = k * ei.size;
-            return true;
+            *out = ast::pick(shape == iri::SS_CELL, 0u32, k * st.size);
+        } else {
+            let nb = self.push_obj_args(c, g);
+            let ok = self.field_slot(c, g, k, out, st);
+            c.mg.pop_subs(nb);
+            if !ok {
+                return false;
+            }
         }
-        let nb = self.push_obj_args(c, g);
+        if st.size == 0 {
+            *zal = ast::pick(st.align > 1, st.align, 1u32);
+        }
+        return true;
+    }
+
+    // The offset and the type of field slot `k` of struct or enum object `g`, its arguments bound.
+    fn field_slot(self: &mut Self, c: &mut cbe::CEmit, g: *const iri::StaticObj, k: u32, out: &mut u32, st: &mut TyI) bool {
         let mut fl = Vector::<FieldAt>::new();
-        let ok = self.decl_fields(c, unsafe (*g).dm, unsafe (*g).dn, &mut fl);
-        c.mg.pop_subs(nb);
-        if !ok {
+        if !self.decl_fields(c, unsafe (*g).dm, unsafe (*g).dn, &mut fl) {
             return false;
         }
         let mut variant = NODE_NONE;
         let mut idx = k;
-        if shape == iri::SS_ENUM {
+        if unsafe (*g).shape == iri::SS_ENUM {
             let a = Lower::ast(c, unsafe (*g).dm);
             let ms = a.at_const(unsafe (*g).dn).as_data.aggregate.members;
             variant = unsafe a.list(ms)[(unsafe (*g).slots.at(0).i) as usize];
@@ -6851,7 +7630,7 @@ extend Lower {
         for i in 0..fl.len() {
             if fl[i].idx == idx && fl[i].variant == variant {
                 *out = fl[i].off;
-                return true;
+                return self.ty(c, fl[i].m, fl[i].t, st);
             }
         }
         return self.fail("static-place");
@@ -6930,7 +7709,7 @@ extend Lower {
         let mut v = DataBuf { bytes: Vector::<u8>::new(), relocs: Vector::<Reloc>::new() };
         v.bytes.resize_default(ti.size as usize);
         let ds = if els.len == 0 {
-            self.sentinel_sym(ast::pick(ei.align > 1, ei.align, 1u64));
+            self.sentinel_sym(c, ast::pick(ei.align > 1, ei.align, 1u64));
         } else {
             let mut dn = String::from_str(name);
             dn.push_str("__data");
@@ -7123,6 +7902,11 @@ extend Tidy {
             blocks: Vector::<Block>::new(),
         };
     }
+}
+
+// The signature code of scalar machine type `t`: an `i8` or `i16` of a signed type with SIG_SEXT.
+const fn sig_code(t: u8, signed: bool) u32 {
+    return t as u32 | ast::pick(signed && (t == T_I8 || t == T_I16), SIG_SEXT, 0);
 }
 
 // Whether instruction `t` has no effect but its value: dropped when nothing uses it.
@@ -7455,6 +8239,10 @@ extend Lower {
                 if self.td.imap[i as usize] == NONE || t.op != O_ICONST && t.op != O_FCONST && t.op != O_SYMADDR && t.op != O_SLOTADDR {
                     continue;
                 }
+                // A thread-local variable's address is the running thread's: computed where it is read.
+                if t.op == O_SYMADDR && self.pkg.syms[self.b.syms[t.a as usize] as usize].kind == SK_TLS {
+                    continue;
+                }
                 self.td.hoisted[i as usize] = true;
                 let key = (t.op as u64 << 56 | t.ty as u64 << 48 | t.b as u64).wrapping_mul(0x9E3779B97F4A7C15u64) ^ t.a as u64;
                 let mut at = NONE;
@@ -7640,41 +8428,819 @@ extend Lower {
     /// Lower derived destructor `sym` of resolved type `(rm, rt)`, under the bindings its use recorded:
     /// `void sym(T *self)` frees each destructible member in order, an enum's under its variant's tag
     /// and a closure env's owned captures. A refusal goes to `fails`.
-    pub fn glue(self: &mut Self, c: &mut cbe::CEmit, rm: ModuleId, rt: TypeId, sym: str) bool {
-        self.nbodies += 1;
+    /// The destructor `sym` of a type `rt` of module `rm`: with `fb` empty the derived one, which frees
+    /// every member; else a user `free`'s wrapper, which calls the user body `fb` and then frees the
+    /// members `fields` (their declarations) that body leaves.
+    pub fn glue(self: &mut Self, c: &mut cbe::CEmit, rm: ModuleId, rt: TypeId, sym: str, fb: str, fields: []NodeId) bool {
         let s0 = self.pkg.find_symbol(sym);
         if s0 != NONE && self.pkg.syms[s0 as usize].def != NONE {
             return true;
         }
+        let (cd, ro) = self.synth_begin(c, rm);
+        let ok = self.glue_i(c, rm, rt, fb, fields);
+        return self.synth_end(c, cd, ro, sym, ok);
+    }
+
+    // Begin a body the lowering makes without Core IR, in module `m`: the emitter's demand collection and
+    // recording pause (their settings returned).
+    fn synth_begin(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId) (bool, bool) {
+        self.nbodies += 1;
         let cd = c.collect_demand;
         let ro = c.mg.rec_on;
         c.collect_demand = false;
         c.mg.rec_on = false;
         self.err = "";
-        self.reset(rm);
-        self.bm = rm;
+        self.reset(m);
+        self.bm = m;
         self.noret = false;
-        self.file = self.pkg.add_file(Lower::p(c).modules.at(rm as usize).file.as_str());
-        let ok = self.glue_i(c, rm, rt) && self.finish(sym);
+        self.file = self.pkg.add_file(Lower::p(c).modules.at(m as usize).file.as_str());
+        return cd, ro;
+    }
+
+    // End the body `synth_begin` began: when `ok`, finished as function `sym`; else a refusal.
+    fn synth_end(self: &mut Self, c: &mut cbe::CEmit, cd: bool, ro: bool, sym: str, ok: bool) bool {
+        let done = ok && self.finish(sym);
         c.collect_demand = cd;
         c.mg.rec_on = ro;
-        if !ok {
+        if !done {
             self.fails.push(LFail { sym: String::from_str(sym), why: self.err });
             return false;
         }
         self.tidy();
         let s = self.pkg.symbol(sym, SK_FUNC);
         let _ = self.pkg.define(s, &self.b);
+        self.pend.push(s);
         return true;
     }
 
-    fn glue_i(self: &mut Self, c: &mut cbe::CEmit, rm: ModuleId, rt: TypeId) bool {
+    /// The test wrapper `__sc_test_w_<tm>_<func>(genv)` (`CEmit::emit_test_wrapper`): with `wants` bit 0 a
+    /// fixture from `fx_init`, then the call of test `func` with the fixture's address and (bit 1) the
+    /// global env, then the fixture's teardown `fx_free` (NODE_NONE: none) and its destructor.
+    pub fn test_wrapper(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        tm: ModuleId,
+        func: NodeId,
+        wants: u8,
+        fx_init: NodeId,
+        fx_free: NodeId,
+    ) bool {
+        let mut name = String::new();
+        name.format_into("__sc_test_w_{}_{}", tm, func);
+        if self.pkg.find_symbol(name.as_str()) != NONE && self.pkg.syms[self.pkg.find_symbol(name.as_str()) as usize].def != NONE {
+            return true;
+        }
+        let (cd, ro) = self.synth_begin(c, tm);
+        let ok = self.test_wrapper_i(c, tm, func, wants, fx_init, fx_free);
+        return self.synth_end(c, cd, ro, name.as_str(), ok);
+    }
+
+    fn test_wrapper_i(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        tm: ModuleId,
+        func: NodeId,
+        wants: u8,
+        fx_init: NodeId,
+        fx_free: NodeId,
+    ) bool {
+        let pt: []u32 = [T_PTR as u32];
+        self.b.sig = self.b.signature(pt, 1, false, T_NONE);
+        let pb: []u8 = [T_PTR];
+        let b0 = self.b.add_block(pb);
+        self.b.begin(b0);
+        let genv = self.b.param(b0, 0);
+        let mut fx = VNONE;
+        let mut fxt = TYPE_NONE;
+        if (wants & 1) != 0 {
+            fxt = c.fn_ret_ty(tm, fx_init);
+            if fxt == TYPE_NONE {
+                return self.fail("test-fx");
+            }
+            fx = self.call_init(c, tm, fx_init, fxt);
+            if fx == VNONE {
+                return false;
+            }
+        }
+        let mut args = Vector::<Value>::new();
+        if (wants & 1) != 0 {
+            args.push(fx);
+        }
+        if (wants & 2) != 0 {
+            args.push(genv);
+        }
+        if !self.call_fn(c, tm, func, args[0..args.len()]) {
+            return false;
+        }
+        if (wants & 1) != 0 {
+            if fx_free != NODE_NONE {
+                let one: []Value = [fx];
+                if !self.call_fn(c, tm, fx_free, one) {
+                    return false;
+                }
+            }
+            if c.is_destructible(tm, fxt) && !self.drop_at(c, tm, fxt, fx, 0) {
+                return false;
+            }
+        }
+        let _ = self.inst(O_RET, T_NONE, 0, VNONE, VNONE, VNONE);
+        return true;
+    }
+
+    // The value of init function `(m, f)` (no arguments, of result type `ty`) in memory: its address, the
+    // sentinel for a zero-sized one; VNONE on a refusal.
+    fn call_init(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, f: NodeId, ty: TypeId) Value {
+        let mut ti = TyI { cls: 0 };
+        if !self.ty(c, m, ty, &mut ti) {
+            return VNONE;
+        }
+        let mut s = String::new();
+        if !c.mg.fn_sym(m, f, c.mg.method_target(m, f), &mut s) {
+            return self.fail_v("test-sym");
+        }
+        let k = self.sym(s.as_str(), SK_FUNC);
+        let none: []u32 = [];
+        let nv: []Value = [];
+        if ti.cls == VC_ZST {
+            let sg = self.b.signature(none, 0, false, T_NONE);
+            let at = self.b.pool_list(nv);
+            let _ = self.inst(O_CALL, T_NONE, 0, k, sg, at);
+            return self.sentinel(c, m, ty);
+        }
+        let slot = self.temp(ti);
+        if ti.cls == VC_SCALAR {
+            let sg = self.b.signature(none, 0, false, ti.mty);
+            let at = self.b.pool_list(nv);
+            let r = self.inst(O_CALL, ti.mty, 0, k, sg, at);
+            self.store(r, slot, 0, false);
+            return slot;
+        }
+        let lt = self.layout_of(c, m, ty, ti);
+        let sg = self.b.signature(none, 0, false, AGG | lt);
+        let one: [Value; 1] = [slot];
+        let at = self.b.pool_list(one[0..1]);
+        let _ = self.inst(O_CALL, T_NONE, 1, k, sg, at);
+        return slot;
+    }
+
+    /// The wrapper `wn` of extern function `d` (C name `callee`) that C emits beside it
+    /// (`CEmit::blk_wrapper_defs`): with `blocking` it moves the call to a blocking thread
+    /// (`__sc_blocking_run` with `<wn>_run` and an env of the arguments and the result), else it calls
+    /// `callee` itself. Both are module `d.module`'s. A parameter of array type (C copies it) is refused.
+    pub fn blk_wrapper(self: &mut Self, c: &mut cbe::CEmit, d: DefId, wn: str, callee: str, blocking: bool) bool {
+        let s0 = self.pkg.find_symbol(wn);
+        if s0 != NONE && self.pkg.syms[s0 as usize].def != NONE {
+            return true;
+        }
+        let m = d.module;
+        let a = Lower::ast(c, m);
+        let f = a.at_const(d.node).as_data.function;
+        // The parameters' and the result's types, and the env's layout: each argument, then the result.
+        let mut pts = Vector::<TypeId>::new();
+        let mut tis = Vector::<TyI>::new();
+        let mut offs = Vector::<u32>::new();
+        let mut at: u32 = 0;
+        let mut al: u32 = 1;
+        let mut ok = true;
+        for k in 0..f.params.len {
+            let pid = unsafe a.list(f.params)[k as usize];
+            let pt = a.type_of(a.at_const(pid).as_data.parameter.ty);
+            let mut ti = TyI { cls: 0 };
+            if Lower::is_array(c, m, pt) {
+                // An array parameter is a pointer to the caller's array (`param_sig`).
+                let pb = self.pkg.ptr_bytes;
+                ti = TyI { cls: VC_SCALAR, mty: T_PTR, size: pb, align: pb };
+            } else {
+                ok = self.ty(c, m, pt, &mut ti);
+            }
+            if !ok {
+                break;
+            }
+            at = round_up(at, ti.align);
+            offs.push(at);
+            at += ti.size;
+            al = ast::pick(ti.align > al, ti.align, al);
+            pts.push(pt);
+            tis.push(ti);
+        }
+        let mut rt = TYPE_NONE;
+        let mut ri = TyI { cls: VC_ZST, mty: T_NONE, size: 0, align: 1 };
+        if ok && f.returns.len == 1 {
+            rt = a.type_of(unsafe a.list(f.returns)[0]);
+            ok = self.ty(c, m, rt, &mut ri);
+        }
+        if !ok {
+            self.fails.push(LFail { sym: String::from_str(wn), why: "blocking-wrapper" });
+            return false;
+        }
+        at = round_up(at, ri.align);
+        let roff = at;
+        at += ri.size;
+        let env = TyI { cls: VC_MEM, mty: T_NONE, size: round_up(at, al), align: al };
+        let mut run = String::from_str(wn);
+        run.push_str("_run");
+        let (cd, ro) = self.synth_begin(c, m);
+        let ok1 = self.blk_outer(c, m, &pts, &tis, &offs, rt, ri, roff, env, run.as_str(), callee, blocking);
+        if !self.synth_end(c, cd, ro, wn, ok1) {
+            return false;
+        }
+        self.own_last(m);
+        if !blocking {
+            return true;
+        }
+        let (cd2, ro2) = self.synth_begin(c, m);
+        let ok2 = self.blk_run(c, m, &pts, &tis, &offs, rt, ri, roff, callee);
+        if !self.synth_end(c, cd2, ro2, run.as_str(), ok2) {
+            return false;
+        }
+        self.own_last(m);
+        return true;
+    }
+
+    // The function `synth_end` just defined is unit `m`'s, not the claim's next chunk's.
+    fn own_last(self: &mut Self, m: ModuleId) {
+        let s = self.pend.pop().unwrap();
+        self.pkg.syms.index_mut(s as usize).unit = m;
+    }
+
+    // The signature types of parameters `(m, pts)` of classes `tis` (zero-sized ones take none) and of the
+    // result `(m, rt)` of class `ri`: into `ptys`; the entry block's value types into `etys`.
+    fn blk_sig(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        m: ModuleId,
+        pts: &Vector<TypeId>,
+        tis: &Vector<TyI>,
+        rt: TypeId,
+        ri: TyI,
+        etys: &mut Vector<u8>,
+    ) {
+        let mut ptys = Vector::<u32>::new();
+        for k in 0..pts.len() {
+            let ti = tis[k];
+            if ti.cls == VC_SCALAR {
+                ptys.push(sig_code(ti.mty, Lower::signed(c, m, pts[k])));
+                etys.push(ti.mty);
+            } else if ti.cls == VC_MEM {
+                ptys.push(self.param_sig(c, m, pts[k], ti));
+                etys.push(T_PTR);
+            }
+        }
+        let mut ret = T_NONE as u32;
+        if ri.cls == VC_SCALAR {
+            ret = sig_code(ri.mty, Lower::signed(c, m, rt));
+        } else if ri.cls == VC_MEM {
+            ret = AGG | self.layout_of(c, m, rt, ri);
+            etys.push(T_PTR);
+        }
+        self.b.sig = self.b.signature(ptys[0..ptys.len()], ptys.len() as u32, false, ret);
+    }
+
+    // The wrapper itself: the arguments into the env, the run on a blocking thread, the result from it; or,
+    // not `blocking`, the call of `callee` with the arguments.
+    fn blk_outer(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        m: ModuleId,
+        pts: &Vector<TypeId>,
+        tis: &Vector<TyI>,
+        offs: &Vector<u32>,
+        rt: TypeId,
+        ri: TyI,
+        roff: u32,
+        env: TyI,
+        run: str,
+        callee: str,
+        blocking: bool,
+    ) bool {
+        let mut etys = Vector::<u8>::new();
+        self.blk_sig(c, m, pts, tis, rt, ri, &mut etys);
+        let sig = self.b.sig;
+        let b0 = self.b.add_block(etys[0..etys.len()]);
+        self.b.begin(b0);
+        let mut ps = Vector::<Value>::new();
+        for k in 0..etys.len() {
+            ps.push(self.b.param(b0, k as u32));
+        }
+        let rmem = if ri.cls == VC_MEM {
+            ps[ps.len() - 1];
+        } else {
+            VNONE;
+        };
+        if !blocking {
+            let k = self.sym(callee, SK_FUNC);
+            let at = self.b.pool_list(ps[0..ps.len()]);
+            let r = self.inst(O_CALL, ast::pick(ri.cls == VC_SCALAR, ri.mty, T_NONE), ps.len() as u16, k, sig, at);
+            let _ = self.inst(O_RET, T_NONE, 0, ast::pick(ri.cls == VC_SCALAR, r, VNONE), VNONE, VNONE);
+            return true;
+        }
+        let e = self.temp(env);
+        let mut q: usize = 0;
+        for k in 0..pts.len() {
+            let ti = tis[k];
+            if ti.cls == VC_ZST {
+                continue;
+            }
+            let fa = self.ptradd(e, VNONE, 0, offs[k]);
+            if ti.cls == VC_SCALAR {
+                self.store(ps[q], fa, 0, false);
+            } else {
+                self.memcpy(fa, ps[q], ti.size);
+            }
+            q += 1;
+        }
+        let kr = self.symaddr(run, SK_FUNC);
+        let two: []u32 = [T_PTR as u32, T_PTR as u32];
+        let rsig = self.b.signature(two, 2, false, T_NONE);
+        let args: []Value = [kr, e];
+        let at = self.b.pool_list(args);
+        let kb = self.sym("__sc_blocking_run", SK_FUNC);
+        let _ = self.inst(O_CALL, T_NONE, 2, kb, rsig, at);
+        let ra = self.ptradd(e, VNONE, 0, roff);
+        let mut r = VNONE;
+        if ri.cls == VC_SCALAR {
+            r = self.load(ri.mty, ra, 0, false);
+        } else if ri.cls == VC_MEM {
+            self.memcpy(rmem, ra, ri.size);
+        }
+        let _ = self.inst(O_RET, T_NONE, 0, r, VNONE, VNONE);
+        return true;
+    }
+
+    // `<wn>_run(env)`: the call of `callee` with the env's arguments, its result into the env.
+    fn blk_run(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        m: ModuleId,
+        pts: &Vector<TypeId>,
+        tis: &Vector<TyI>,
+        offs: &Vector<u32>,
+        rt: TypeId,
+        ri: TyI,
+        roff: u32,
+        callee: str,
+    ) bool {
+        let one: []u32 = [T_PTR as u32];
+        self.b.sig = self.b.signature(one, 1, false, T_NONE);
+        let pb: []u8 = [T_PTR];
+        let b0 = self.b.add_block(pb);
+        self.b.begin(b0);
+        let e = self.b.param(b0, 0);
+        // The callee's signature: the wrapper's.
+        let mut etys = Vector::<u8>::new();
+        let saved = self.b.sig;
+        self.blk_sig(c, m, pts, tis, rt, ri, &mut etys);
+        let csig = self.b.sig;
+        self.b.sig = saved;
+        let mut args = Vector::<Value>::new();
+        for k in 0..pts.len() {
+            let ti = tis[k];
+            if ti.cls == VC_ZST {
+                continue;
+            }
+            let fa = self.ptradd(e, VNONE, 0, offs[k]);
+            if ti.cls == VC_SCALAR {
+                args.push(self.load(ti.mty, fa, 0, false));
+            } else {
+                // A copy the callee owns: the env's own, which no one reads after.
+                args.push(fa);
+            }
+        }
+        let ra = self.ptradd(e, VNONE, 0, roff);
+        if ri.cls == VC_MEM {
+            args.push(ra);
+        }
+        let k = self.sym(callee, SK_FUNC);
+        let at = self.b.pool_list(args[0..args.len()]);
+        let r = self.inst(O_CALL, ast::pick(ri.cls == VC_SCALAR, ri.mty, T_NONE), args.len() as u16, k, csig, at);
+        if ri.cls == VC_SCALAR {
+            self.store(r, ra, 0, false);
+        }
+        let _ = self.inst(O_RET, T_NONE, 0, VNONE, VNONE, VNONE);
+        return true;
+    }
+
+    // Whether function or data `sym` has a definition.
+    fn defined(self: &Self, sym: str) bool {
+        let s = self.pkg.find_symbol(sym);
+        return s != NONE && self.pkg.syms[s as usize].def != NONE;
+    }
+
+    /// A dyn table's slot `sym(self, args)` (`CEmit::dyn_thunk`) of unit `unit`: the call of `callee` with
+    /// `self` first when `env`, then the arguments, of types `(m, ps)`; its result, of types `(m, rs)`.
+    pub fn dyn_thunk(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        m: ModuleId,
+        ps: &Vector<TypeId>,
+        rs: &Vector<TypeId>,
+        sym: str,
+        callee: str,
+        env: bool,
+        unit: ModuleId,
+    ) bool {
+        if self.defined(sym) {
+            return true;
+        }
+        let (cd, ro) = self.synth_begin(c, m);
+        let ok = self.thunk_i(c, m, ps, rs, callee, env);
+        if !self.synth_end(c, cd, ro, sym, ok) {
+            return false;
+        }
+        self.own_last(unit);
+        return true;
+    }
+
+    fn thunk_i(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        m: ModuleId,
+        ps: &Vector<TypeId>,
+        rs: &Vector<TypeId>,
+        callee: str,
+        env: bool,
+    ) bool {
+        let mut ptys = Vector::<u32>::new();
+        let mut etys = Vector::<u8>::new();
+        ptys.push(T_PTR);
+        etys.push(T_PTR);
+        for k in 0..ps.len() {
+            let mut ti = TyI { cls: 0 };
+            if !self.ty(c, m, ps[k], &mut ti) {
+                return false;
+            }
+            if ti.cls == VC_SCALAR {
+                ptys.push(sig_code(ti.mty, Lower::signed(c, m, ps[k])));
+                etys.push(ti.mty);
+            } else if ti.cls == VC_MEM {
+                ptys.push(self.param_sig(c, m, ps[k], ti));
+                etys.push(T_PTR);
+            }
+        }
+        let mut ret = T_NONE as u32;
+        let mut rty = T_NONE;
+        if rs.len() == 1 {
+            let mut ri = TyI { cls: 0 };
+            if !self.ty(c, m, rs[0], &mut ri) {
+                return false;
+            }
+            if ri.cls == VC_SCALAR {
+                ret = sig_code(ri.mty, Lower::signed(c, m, rs[0]));
+                rty = ri.mty;
+            } else if ri.cls == VC_MEM {
+                ret = AGG | self.layout_of(c, m, rs[0], ri);
+            }
+        } else if rs.len() > 1 {
+            let lt = self.pack(c, m, rs);
+            if lt == NONE && self.err.len() != 0 {
+                return false;
+            }
+            if lt != NONE {
+                ret = AGG | lt;
+            }
+        }
+        if (ret & AGG) != 0 {
+            etys.push(T_PTR);
+        }
+        let n = ptys.len() as u32;
+        self.b.sig = self.b.signature(ptys[0..ptys.len()], n, false, ret);
+        // A callee without an env takes the arguments only.
+        let skip = ast::pick(env, 0u32, 1u32);
+        let csig = if env {
+            self.b.sig;
+        } else {
+            self.b.signature(ptys[1..ptys.len()], n - 1, false, ret);
+        };
+        let b0 = self.b.add_block(etys[0..etys.len()]);
+        self.b.begin(b0);
+        let mut args = Vector::<Value>::new();
+        for k in skip..etys.len() as u32 {
+            args.push(self.b.param(b0, k));
+        }
+        let kf = self.sym(callee, SK_FUNC);
+        let at = self.b.pool_list(args[0..args.len()]);
+        let r = self.inst(O_CALL, rty, args.len() as u16, kf, csig, at);
+        let _ = self.inst(O_RET, T_NONE, 0, ast::pick(rty != T_NONE, r, VNONE), VNONE, VNONE);
+        return true;
+    }
+
+    /// An owned dyn table's `__free` slot `sym(self)` of unit `unit`: the destructor of the value of type
+    /// `(sm, st)` at `self`, then its block back to `Global`, or (`at` not TYPE_NONE) to the allocator
+    /// `(am, at)` its `Default` rebuilds.
+    pub fn dyn_free(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        sm: ModuleId,
+        st: TypeId,
+        am: ModuleId,
+        at: TypeId,
+        sym: str,
+        unit: ModuleId,
+    ) bool {
+        if self.defined(sym) {
+            return true;
+        }
+        let (cd, ro) = self.synth_begin(c, sm);
+        let ok = self.dyn_free_i(c, sm, st, am, at);
+        if !self.synth_end(c, cd, ro, sym, ok) {
+            return false;
+        }
+        self.own_last(unit);
+        return true;
+    }
+
+    fn dyn_free_i(self: &mut Self, c: &mut cbe::CEmit, sm: ModuleId, st: TypeId, am: ModuleId, at: TypeId) bool {
+        let one: []u32 = [T_PTR as u32];
+        self.b.sig = self.b.signature(one, 1, false, T_NONE);
+        let pb: []u8 = [T_PTR];
+        let b0 = self.b.add_block(pb);
+        self.b.begin(b0);
+        let p = self.b.param(b0, 0);
+        let mut rm = sm;
+        let mut rt = TYPE_NONE;
+        let _ = Lower::resolved(c, sm, st, &mut rm, &mut rt);
+        let mut ti = TyI { cls: 0 };
+        if !self.ty(c, sm, st, &mut ti) || c.is_destructible(rm, rt) && !self.drop_at(c, rm, rt, p, 0) {
+            return false;
+        }
+        let pi = self.ptr_int();
+        let sz = self.iconst(pi, ti.size);
+        let al = self.iconst(pi, ast::pick(ti.align == 0, 1u32, ti.align));
+        let dt: []u32 = [T_PTR as u32, T_PTR as u32, pi as u32, pi as u32];
+        if at == TYPE_NONE {
+            let g = self.sentinel1(c);
+            let args: []Value = [g, p, sz, al];
+            let _ = self.call_sym("Global__dealloc", args, dt, T_NONE);
+        } else {
+            // The allocator its `Default` rebuilds: the fat value carries no allocator state.
+            let mut ds = String::new();
+            let mut dd = String::new();
+            let mut ai = TyI { cls: 0 };
+            if !c.mg.method_by_name(am, at, "default", &mut ds) || !c.mg.method_by_name(am, at, "dealloc", &mut dd) || !self.ty(
+                c,
+                am,
+                at,
+                &mut ai,
+            ) {
+                return self.fail("dyn-free-allocator");
+            }
+            let none: []Value = [];
+            let nt: []u32 = [];
+            let mut a = VNONE;
+            if ai.cls == VC_ZST {
+                let _ = self.call_sym(ds.as_str(), none, nt, T_NONE);
+                a = self.sentinel(c, am, at);
+            } else if ai.cls == VC_SCALAR {
+                let v = self.call_sym(ds.as_str(), none, nt, sig_code(ai.mty, Lower::signed(c, am, at)));
+                a = self.temp(ai);
+                self.store(v, a, 0, false);
+            } else {
+                a = self.temp(ai);
+                let sr: []Value = [a];
+                let _ = self.call_sym(ds.as_str(), sr, nt, AGG | self.layout_of(c, am, at, ai));
+            }
+            let args: []Value = [a, p, sz, al];
+            let _ = self.call_sym(dd.as_str(), args, dt, T_NONE);
+        }
+        let _ = self.inst(O_RET, T_NONE, 0, VNONE, VNONE, VNONE);
+        return true;
+    }
+
+    /// The dyn table `sym` of unit `unit` (`CEmit::dyn_pair_tabs`): the `__free` slot `free` ("": null),
+    /// the erased type's name `tid` when `named`, then the slots `slots`, each a function, or (`data`)
+    /// another table.
+    pub fn dyn_table(
+        self: &mut Self,
+        sym: str,
+        free: str,
+        named: bool,
+        tid: str,
+        slots: &Vector<String>,
+        data: &Vector<bool>,
+        unit: ModuleId,
+    ) bool {
+        if self.defined(sym) {
+            return true;
+        }
+        let pb = self.pkg.ptr_bytes;
+        let mut rs = Vector::<Reloc>::with_capacity(slots.len() + 2);
+        let mut at: u32 = 0;
+        if free.len() != 0 {
+            rs.push(Reloc { offset: 0, sym: self.pkg.symbol(free, SK_FUNC), addend: 0 });
+        }
+        at += pb;
+        if named {
+            let mut bytes = String::from_str(tid);
+            rs.push(Reloc { offset: at, sym: self.rodata(&mut bytes), addend: 0 });
+            at += pb;
+        }
+        for k in 0..slots.len() {
+            let kd = ast::pick(data[k], SK_DATA, SK_FUNC);
+            rs.push(Reloc { offset: at, sym: self.pkg.symbol(slots.at(k).as_str(), kd), addend: 0 });
+            at += pb;
+        }
+        let s = self.pkg.symbol(sym, SK_DATA);
+        let none: []u8 = [];
+        if !self.pkg.add_data(s, at, log2(pb) as u8, true, none, rs[0..rs.len()]) {
+            return false;
+        }
+        self.pkg.syms.index_mut(s as usize).unit = unit;
+        return true;
+    }
+
+    // A call of function `(m, f)` with pointer arguments `args` and no result.
+    fn call_fn(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, f: NodeId, args: []Value) bool {
+        let mut s = String::new();
+        if !c.mg.fn_sym(m, f, c.mg.method_target(m, f), &mut s) {
+            return self.fail("test-sym");
+        }
+        let k = self.sym(s.as_str(), SK_FUNC);
+        let mut pt = Vector::<u32>::new();
+        for _ in 0..args.len() {
+            pt.push(T_PTR);
+        }
+        let sg = self.b.signature(pt[0..pt.len()], args.len() as u32, false, T_NONE);
+        let at = self.b.pool_list(args);
+        let _ = self.inst(O_CALL, T_NONE, args.len() as u16, k, sg, at);
+        return true;
+    }
+
+    /// The global test env hooks (`CEmit::emit_test_genv`): `__sc_test_genv_init` keeps the env of `ginit`
+    /// in a cell and returns its address; `__sc_test_genv_free(p)` runs teardown `gfree` (NODE_NONE: none)
+    /// then the env's destructor.
+    pub fn test_genv(self: &mut Self, c: &mut cbe::CEmit, gm: ModuleId, ginit: NodeId, gfree: NodeId) bool {
+        let gt = c.fn_ret_ty(gm, ginit);
+        if gt == TYPE_NONE {
+            return false;
+        }
+        let (cd, ro) = self.synth_begin(c, gm);
+        let ok = self.genv_init_i(c, gm, ginit, gt);
+        if !self.synth_end(c, cd, ro, "__sc_test_genv_init", ok) {
+            return false;
+        }
+        let (cd2, ro2) = self.synth_begin(c, gm);
+        let ok2 = self.genv_free_i(c, gm, gfree, gt);
+        return self.synth_end(c, cd2, ro2, "__sc_test_genv_free", ok2);
+    }
+
+    fn genv_init_i(self: &mut Self, c: &mut cbe::CEmit, gm: ModuleId, ginit: NodeId, gt: TypeId) bool {
+        let none: []u32 = [];
+        self.b.sig = self.b.signature(none, 0, false, T_PTR);
+        let pb: []u8 = [];
+        let b0 = self.b.add_block(pb);
+        self.b.begin(b0);
+        let mut ti = TyI { cls: 0 };
+        if !self.ty(c, gm, gt, &mut ti) {
+            return false;
+        }
+        let mut r = VNONE;
+        if ti.cls == VC_ZST {
+            r = self.call_init(c, gm, ginit, gt);
+        } else {
+            // The env's cell: a zeroed static of its type, filled by the init's result.
+            let s = self.pkg.symbol("__sc_test_genv", SK_DATA);
+            if self.pkg.syms[s as usize].def == NONE {
+                let nb: []u8 = [];
+                let nr: []Reloc = [];
+                let _ = self.pkg.add_data(s, ti.size, log2(ti.align) as u8, false, nb, nr);
+                self.pend.push(s);
+            }
+            let v = self.call_init(c, gm, ginit, gt);
+            if v == VNONE {
+                return false;
+            }
+            r = self.symaddr("__sc_test_genv", SK_DATA);
+            self.memcpy(r, v, ti.size);
+        }
+        if r == VNONE {
+            return false;
+        }
+        let _ = self.inst(O_RET, T_NONE, 0, r, VNONE, VNONE);
+        return true;
+    }
+
+    fn genv_free_i(self: &mut Self, c: &mut cbe::CEmit, gm: ModuleId, gfree: NodeId, gt: TypeId) bool {
+        let pt: []u32 = [T_PTR as u32];
+        self.b.sig = self.b.signature(pt, 1, false, T_NONE);
+        let pb: []u8 = [T_PTR];
+        let b0 = self.b.add_block(pb);
+        self.b.begin(b0);
+        let p = self.b.param(b0, 0);
+        if gfree != NODE_NONE {
+            let one: []Value = [p];
+            if !self.call_fn(c, gm, gfree, one) {
+                return false;
+            }
+        }
+        if c.is_destructible(gm, gt) && !self.drop_at(c, gm, gt, p, 0) {
+            return false;
+        }
+        let _ = self.inst(O_RET, T_NONE, 0, VNONE, VNONE, VNONE);
+        return true;
+    }
+
+    /// The C entry `main(argc, argv)` of the main module `m` (`cemit_main_wrapper`): the value of the user
+    /// main `__sc_user_main`, which takes the arguments as a `Vector<str>` when it has a parameter.
+    pub fn main_wrapper(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, argv: bool) bool {
+        let (cd, ro) = self.synth_begin(c, m);
+        let ok = self.main_i(c, argv);
+        return self.synth_end(c, cd, ro, "main", ok);
+    }
+
+    // The user main `__sc_user_main` returns an i32 and, when `wants`, takes the arguments as a
+    // `Vector<str>`: pointer, length and capacity.
+    fn main_i(self: &mut Self, c: &mut cbe::CEmit, wants: bool) bool {
+        let pb = self.pkg.ptr_bytes;
+        let pi = self.ptr_int();
+        let np = wants as u32;
+        let tys: []u32 = [T_I32 as u32, T_PTR as u32];
+        self.b.sig = self.b.signature(tys, 2, false, T_I32);
+        let pt: []u8 = [T_I32, T_PTR];
+        let b0 = self.b.add_block(pt);
+        self.b.begin(b0);
+        let argc = self.b.param(b0, 0);
+        let argv = self.b.param(b0, 1);
+        let mut args = Vector::<Value>::new();
+        let mut atys = Vector::<u32>::new();
+        if wants {
+            let al = log2(pb);
+            let mut leaves = Vector::<(u32, u8)>::new();
+            leaves.push((0u32, T_PTR));
+            leaves.push((pb, pi));
+            leaves.push((2 * pb, pi));
+            let lt = self.layout(3 * pb, al, &leaves);
+            let vec = self.temp(TyI { cls: VC_MEM, mty: T_NONE, size: 3 * pb, align: pb });
+            let zero = self.iconst(pi, 0);
+            for k in 0..3u32 {
+                self.store(zero, vec, k * pb, false);
+            }
+            let n = self.int_to(argc, pi, true);
+            let some = self.icmp(C_SGT, argc, self.iconst(T_I32, 0));
+            let done = self.block();
+            self.split(some, done, false);
+            // The strings: each argument and its length.
+            let bytes = self.arith(O_MUL, n, self.iconst(pi, 2 * pb as u64));
+            let atys3: []u32 = [T_PTR as u32, pi as u32, pi as u32];
+            let sg = self.b.signature(atys3, 3, false, T_PTR);
+            let g = self.sentinel1(c);
+            let alv = self.iconst(pi, pb);
+            let av: []Value = [g, bytes, alv];
+            let at = self.b.pool_list(av);
+            let k = self.sym("Global__alloc", SK_FUNC);
+            let buf = self.inst(O_CALL, T_PTR, 3, k, sg, at);
+            self.store(buf, vec, 0, false);
+            self.store(n, vec, pb, false);
+            self.store(n, vec, 2 * pb, false);
+            let islot = self.temp(TyI { cls: VC_SCALAR, mty: pi, size: pb, align: pb });
+            self.store(zero, islot, 0, false);
+            let lp = self.block();
+            let el = self.edge(lp, NONE, NONE);
+            let _ = self.inst(O_JMP, T_NONE, 0, el, VNONE, VNONE);
+            self.b.begin(lp);
+            let i = self.load(pi, islot, 0, false);
+            let pa = self.ptradd(argv, i, pb, 0);
+            let s = self.load(T_PTR, pa, 0, false);
+            let st: []u32 = [T_PTR as u32];
+            let ssg = self.b.signature(st, 1, false, pi);
+            let sv: []Value = [s];
+            let sat = self.b.pool_list(sv);
+            let sk = self.sym("strlen", SK_FUNC);
+            let len = self.inst(O_CALL, pi, 1, sk, ssg, sat);
+            let ea = self.ptradd(buf, i, 2 * pb, 0);
+            self.store(s, ea, 0, false);
+            self.store(len, ea, pb, false);
+            let i1 = self.arith(O_ADD, i, self.iconst(pi, 1));
+            self.store(i1, islot, 0, false);
+            let more = self.icmp(C_ULT, i1, n);
+            let eb = self.edge(lp, NONE, NONE);
+            let ed = self.edge(done, NONE, NONE);
+            let _ = self.inst(O_BR, T_NONE, 0, more, eb, ed);
+            self.b.begin(done);
+            args.push(vec);
+            atys.push(AGG | lt);
+        }
+        let usg = self.b.signature(atys[0..atys.len()], np, false, T_I32);
+        let uat = self.b.pool_list(args[0..args.len()]);
+        let uk = self.sym("__sc_user_main", SK_FUNC);
+        let r = self.inst(O_CALL, T_I32, np as u16, uk, usg, uat);
+        let _ = self.inst(O_RET, T_NONE, 0, r, VNONE, VNONE);
+        return true;
+    }
+
+    fn glue_i(self: &mut Self, c: &mut cbe::CEmit, rm: ModuleId, rt: TypeId, fb: str, fields: []NodeId) bool {
         let tys: []u32 = [T_PTR as u32];
         self.b.sig = self.b.signature(tys, 1, false, T_NONE);
         let pt: []u8 = [T_PTR];
         let b0 = self.b.add_block(pt);
         self.b.begin(b0);
         let me = self.b.param(b0, 0);
+        if fb.len() != 0 {
+            let k = self.sym(fb, SK_FUNC);
+            let sg = self.b.signature(tys, 1, false, T_NONE);
+            let ms: []Value = [me];
+            let at = self.b.pool_list(ms);
+            let _ = self.inst(O_CALL, T_NONE, 1, k, sg, at);
+        }
         let mut fl = Vector::<FieldAt>::new();
         let y = *Lower::ast(c, rm).type_at(rt);
         let decl = if y.kind == TypeKind::TYPE_ENUM {
@@ -7718,7 +9284,7 @@ extend Lower {
             }
             let mut any = false;
             for j in k..end {
-                any = any || self.glue_member(c, fl[j], VNONE, true);
+                any = any || Lower::listed(fb, fields, fl[j].node) && self.glue_member(c, fl[j], VNONE, true);
             }
             if any {
                 let mut skip = NONE;
@@ -7737,7 +9303,9 @@ extend Lower {
                     self.b.begin(body);
                 }
                 for j in k..end {
-                    let _ = self.glue_member(c, fl[j], me, false);
+                    if Lower::listed(fb, fields, fl[j].node) {
+                        let _ = self.glue_member(c, fl[j], me, false);
+                    }
                     if self.err.len() != 0 {
                         return false;
                     }
@@ -7752,6 +9320,20 @@ extend Lower {
         }
         let _ = self.inst(O_RET, T_NONE, 0, VNONE, VNONE, VNONE);
         return true;
+    }
+
+    // Whether a destructor frees member `node`: a derived one (`fb` empty) every member, a wrapper the
+    // `fields` it lists.
+    const fn listed(fb: str, fields: []NodeId, node: NodeId) bool {
+        if fb.len() == 0 {
+            return true;
+        }
+        for i in 0..fields.len() {
+            if fields[i] == node {
+                return true;
+            }
+        }
+        return false;
     }
 
     // Whether member `f` (not an enum's tag, not a capture by reference) needs a free; with `probe`

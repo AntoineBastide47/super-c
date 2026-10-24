@@ -66,6 +66,8 @@ extern "C" "stdlib.h" {
 extern "C" "stdio.h" {
     @import("fflush")
     fn c_fflush(f: *mut void) i32;
+    @import("snprintf")
+    fn c_snprintf(buf: *mut char, n: usize, fmt: *const char, ...) i32;
 }
 
 // The bytes the reports print go straight to file descriptor 2, unbuffered as C's stderr is.
@@ -218,6 +220,61 @@ fn assert_fail(head: *const char, m: *const u8, n: usize, tail: *const char) {
     }
     put(tail);
     die();
+}
+
+// A failed `assert_eq` or `assert_ne` the native backends compile: `head`, the two operands of kind `kind`
+// (`ASSERT_*`: a signed or unsigned integer, an f64 by its bits, a bool, a `str` of `n` bytes at `v`, or
+// none to print) as C prints them, and `tail`; then abort.
+@export("__sc_assert_vals")
+@noreturn
+@cold
+@noinline
+fn assert_vals(head: *const char, kind: u32, l: u64, ln: u64, r: u64, rn: u64, tail: *const char) {
+    put(head);
+    assert_val("  left:  ", kind, l, ln);
+    assert_val("  right: ", kind, r, rn);
+    put(tail);
+    die();
+}
+
+const ASSERT_I64: u32 = 1;
+const ASSERT_U64: u32 = 2;
+const ASSERT_F64: u32 = 3;
+const ASSERT_BOOL: u32 = 4;
+const ASSERT_STR: u32 = 5;
+
+// One operand line of `assert_vals`.
+fn assert_val(label: *const char, kind: u32, v: u64, n: u64) {
+    if kind == 0 || kind > ASSERT_STR {
+        return;
+    }
+    put(label);
+    if kind == ASSERT_I64 && v >> 63 != 0 {
+        put("-");
+        put_dec(~v + 1);
+    } else if kind == ASSERT_I64 || kind == ASSERT_U64 {
+        put_dec(v);
+    } else if kind == ASSERT_F64 {
+        let mut b = [0 as char; 64];
+        // The bits as a double, by a copy: a cast pointer would break C's aliasing rules.
+        let mut f: f64 = 0.0;
+        unsafe c_memcpy(&mut f, &v, 8);
+        let w = unsafe c_snprintf(&mut b[0], 64, "%g", f);
+        put_bytes((&b[0]) as *const u8, w as usize);
+    } else if kind == ASSERT_BOOL {
+        put(
+            if v != 0 {
+                "true";
+            } else {
+                "false";
+            },
+        );
+    } else {
+        put("\"");
+        put_bytes(v as *const u8, n as usize);
+        put("\"");
+    }
+    put("\n");
 }
 
 // An atomic operation given a memory order it cannot take.

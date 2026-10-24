@@ -790,6 +790,7 @@ fn extern_void_pointer_argument_spells_the_conversion() {
 // binding unit compiles outside the unity build, whose later members would see the macros too.
 @test
 fn header_macros_stay_in_the_units_that_use_the_header() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("lib.h", "#ifndef LIB_H\n#define LIB_H\n#define near\n#define far\nint twice(int x);\n#endif\n");
     p.mkfile("lib.c", "#include \"lib.h\"\nint twice(int x) { return 2 * x; }\n");

@@ -165,6 +165,16 @@ pub struct CalleeInfo {
     pub demand: bool, // a generic body with a per-instantiation static_assert: the splice keeps the demand
     pub big: bool, // past the size gate, with a switch on a const-generic parameter: sized per call (`live_size`)
     pub vec_only: bool, // inlines into a caller that holds a vector only (`vet_body`)
+    /// `@always_inline` in a native build, whose backend inlines nothing: past the size, budget and
+    /// vector gates (`always_native`).
+    pub always: bool,
+}
+
+/// Whether `d` is `@always_inline` in a native build of `pkg`: the splice is its only inlining, so it
+/// splices whatever its size, the budget and its callers (the C compiler inlines it in a C build).
+pub fn always_native(pkg: *const loader::Package, d: DefId) bool {
+    let p = unsafe &*pkg;
+    return p.native && unsafe (*p.module_ast_const(d.module)).attr_of(d.node, AttrKind::ATTR_ALWAYS_INLINE) != null;
 }
 
 /// One generic-parameter binding: `(pm, pnode)` resolves to the caller's type `at`.
@@ -647,6 +657,7 @@ extend InlineCtx {
                 demand: unsafe (*ki).demand,
                 big: unsafe (*ki).big,
                 vec_only: unsafe (*ki).vec_only,
+                always: unsafe (*ki).always,
             },
         );
         self.rl_ix.insert(key, self.rl.len() as u64 - 1);
@@ -1245,7 +1256,7 @@ extend InlineStore {
             // The size gate first: it rejects most bodies at once, before the declaration checks
             // walk the module's attributes.
             let mut r: u64 = 0;
-            if !lw.body.inline_size_ok && !param_switch(p, &lw.body) {
+            if !lw.body.inline_size_ok && !param_switch(p, &lw.body) && !always_native(pkg, d) {
                 r = REJ_BASE | IJ_TOO_BIG as u64;
             } else {
                 let mut ext = NODE_NONE;
@@ -1363,6 +1374,8 @@ extend InlineStore {
                 body.locals.at(i).item,
             );
         }
+        let always = always_native(pkg, d);
+        vec_only = vec_only && !always;
         // A program without vectors has no caller for it.
         if vec_only && !vec_prog {
             return shape;
@@ -1381,7 +1394,15 @@ extend InlineStore {
         }
         let slot = self.kept.len() as u64;
         self.kept.push(
-            CalleeInfo { body: kb, gp: gp, fg: fgl.len, demand: demand, big: !body.inline_size_ok, vec_only: vec_only },
+            CalleeInfo {
+                body: kb,
+                gp: gp,
+                fg: fgl.len,
+                demand: demand,
+                big: !body.inline_size_ok && !always,
+                vec_only: vec_only,
+                always: always,
+            },
         );
         return slot;
     }
@@ -1469,7 +1490,7 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
             continue;
         }
         st.considered += 1;
-        if cx.only_fixed && !cx.fixed_result(pkg, t.callee) {
+        if cx.only_fixed && !cx.fixed_result(pkg, t.callee) && !always_native(pkg, t.callee) {
             st.reasons[IJ_SHAPE as usize] = st.reasons[IJ_SHAPE as usize] + 1;
             continue;
         }
@@ -1533,7 +1554,7 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
             st.reasons[IJ_SHAPE as usize] = st.reasons[IJ_SHAPE as usize] + 1;
             continue;
         }
-        if !ki0.big && added + k0.statements.len() + k0.args as usize + k0.returns as usize > budget {
+        if !ki0.big && !ki0.always && added + k0.statements.len() + k0.args as usize + k0.returns as usize > budget {
             st.reasons[IJ_BUDGET as usize] = st.reasons[IJ_BUDGET as usize] + 1;
             continue;
         }
@@ -1694,12 +1715,16 @@ pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
             let mut mode: u8 = 255;
             if pt != TYPE_NONE && sty != TYPE_NONE {
                 // &mut T into a &T parameter, *mut T into *const T, a reference into a pointer
-                // parameter, a function into a function-pointer parameter (the checker matched the
-                // signatures): the same C value, no adjustment needed
+                // parameter, any pointer into a `*void` one, a function into a function-pointer
+                // parameter (the checker matched the signatures): the same C value, no adjustment
+                // needed
                 let py0 = *ca.type_at(pt);
                 let sy0 = *ca.type_at(sty);
                 let ptr_like = py0.kind == sy0.kind && (py0.kind == TypeKind::TYPE_REFERENCE || py0.kind == TypeKind::TYPE_POINTER) || py0.kind == TypeKind::TYPE_POINTER && sy0.kind == TypeKind::TYPE_REFERENCE;
-                if ptr_like && py0.as_data.elem == sy0.as_data.elem {
+                let to_void = py0.kind == TypeKind::TYPE_POINTER && ca.type_at(py0.as_data.elem).kind == TypeKind::TYPE_BUILTIN && ca.type_at(
+                    py0.as_data.elem,
+                ).as_data.builtin == BuiltinType::BT_VOID;
+                if ptr_like && (py0.as_data.elem == sy0.as_data.elem || to_void) {
                     mode = W_PTR;
                 } else if py0.kind == TypeKind::TYPE_FUNCTION && py0.fn_sig() && sy0.kind == TypeKind::TYPE_FUNCTION && !sy0.fn_sig() {
                     mode = W_FN;

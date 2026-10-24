@@ -329,6 +329,14 @@ extend<'a> Parser<'a> {
             return self.fail("the pointer size is 4 or 8");
         }
         self.pkg.ptr_bytes = pb;
+        self.skip_spaces();
+        if self.peek() == b'v' {
+            let mut vb: u32 = 0;
+            if !self.expect_word("vec", "expected 'vec'") || !self.uint(&mut vb) || vb != 0 && vb != 16 && vb != 32 && vb != 64 {
+                return self.fail("the vector register width is 0, 16, 32 or 64");
+            }
+            self.pkg.vec_regs = vb;
+        }
         let mut loc = Loc { file: 0, line: 0, col: 0 };
         if !self.line_end_loc(&mut loc) {
             return false;
@@ -383,8 +391,18 @@ extend<'a> Parser<'a> {
             } else {
                 SK_DATA;
             };
-            if self.pkg.add_symbol(nm.as_str(), sk, ast::pick(link == "global", SL_GLOBAL, SL_LOCAL)) == NONE {
+            let s = self.pkg.add_symbol(nm.as_str(), sk, ast::pick(link == "global", SL_GLOBAL, SL_LOCAL));
+            if s == NONE {
                 return self.fail("the symbol is declared twice");
+            }
+            self.pkg.syms.index_mut(s as usize).used = self.keyword("used");
+            self.pkg.syms.index_mut(s as usize).ext = self.keyword("ext");
+            if self.keyword("section") {
+                let mut sp = String::new();
+                if !self.quoted(&mut sp) {
+                    return false;
+                }
+                self.pkg.set_section(s, sp.as_str());
             }
             return self.line_end_loc(&mut loc);
         }
@@ -566,11 +584,19 @@ extend<'a> Parser<'a> {
             *out = T_NONE;
             return true;
         }
-        let mut t: u8 = 0;
-        if !self.ty(&mut t) {
-            return false;
+        let w = self.word();
+        let s = w.ends_with(".s");
+        let t = type_of_text(
+            if s {
+                w.slice(0, w.len() - 2);
+            } else {
+                w;
+            },
+        );
+        if t == T_NONE || s && t != T_I8 && t != T_I16 {
+            return self.fail("expected a machine type");
         }
-        *out = t;
+        *out = t as u32 | ast::pick(s, SIG_SEXT, 0);
         return true;
     }
 
@@ -1222,7 +1248,7 @@ extend<'a> Parser<'a> {
                 return false;
             }
             t.a = self.body.ref_msg(self.pkg.add_message(m.as_str()));
-            return true;
+            return !self.keyword("lane") || self.inst_value(1, &mut t.b);
         }
         if op == O_FENCE {
             return self.order(&mut t.aux);

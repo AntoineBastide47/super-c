@@ -16,11 +16,6 @@ pub const VNONE: Value = 0xFFFFFFFF;
 pub const VPARAM: Value = 0x80000000;
 pub const VFLAG: Value = 0x40000000;
 
-/// Whether `v` is the overflow flag of a checked operation.
-pub const fn is_flag(v: Value) bool {
-    return (v & (VPARAM | VFLAG)) == VFLAG;
-}
-
 // ---- Types ------------------------------------------------------------------------------------------
 
 /// A machine type, one byte. Integers carry no sign: the operation does. A pointer is the data model's
@@ -141,7 +136,7 @@ pub const F_JMP: u8 = 15; // a = edge (pool)
 pub const F_BR: u8 = 16; // a = condition, b = edge taken when it is not 0, c = the other edge
 pub const F_SWITCH: u8 = 17; // a = value, b = first case (words), c = edge list (pool: one per case, then the default's), aux = case count
 pub const F_RET: u8 = 18; // a = value or VNONE
-pub const F_PANIC: u8 = 19; // a = body message
+pub const F_PANIC: u8 = 19; // a = body message, b = a lane mask or VNONE: `lane <its lowest set bit>: ` leads the message
 pub const F_OVF: u8 = 20; // aux = OV_SIGNED or 0, a, b = values; two results: the wrapped value, then its flag
 
 pub const O_ICONST: u8 = 1;
@@ -210,7 +205,11 @@ pub const O_SWITCH: u8 = 63;
 pub const O_RET: u8 = 64;
 pub const O_PANIC: u8 = 65;
 pub const O_UNREACHABLE: u8 = 66;
-pub const OP_COUNT: u8 = 67;
+/// Bit counts of an integer: leading zeros, trailing zeros (each the width for 0), set bits.
+pub const O_CLZ: u8 = 67;
+pub const O_CTZ: u8 = 68;
+pub const O_POPCNT: u8 = 69;
+pub const OP_COUNT: u8 = 70;
 
 /// One opcode: its text name and its operand form.
 pub struct OpInfo {
@@ -218,7 +217,7 @@ pub struct OpInfo {
     pub form: u8,
 }
 
-pub const OPS: [OpInfo; 67] = [
+pub const OPS: [OpInfo; 70] = [
     OpInfo { name: "", form: F_NONE },
     OpInfo { name: "iconst", form: F_IMM },
     OpInfo { name: "fconst", form: F_IMM },
@@ -286,6 +285,9 @@ pub const OPS: [OpInfo; 67] = [
     OpInfo { name: "ret", form: F_RET },
     OpInfo { name: "panic", form: F_PANIC },
     OpInfo { name: "unreachable", form: F_NONE },
+    OpInfo { name: "clz", form: F_UN },
+    OpInfo { name: "ctz", form: F_UN },
+    OpInfo { name: "popcnt", form: F_UN },
 ];
 
 /// The row of opcode `op`.
@@ -458,6 +460,20 @@ pub struct Sym {
     pub kind: u8,
     pub linkage: u8,
     pub def: u32,
+    /// The compilation unit (a module) whose object defines it, NONE when no unit claims it: the
+    /// native backends' object per module reads it; the text form does not carry it.
+    pub unit: u32,
+    /// The object section that holds it (a string id: the object format's own spelling,
+    /// `@unsafe(link_section)`), NONE for its kind's section.
+    pub sect: u32,
+    /// The linker keeps it though nothing refers to it (`@used`, a named section).
+    pub used: bool,
+    /// Defined by its unit's own items, not added by the build (an instance, glue, data): a cached
+    /// emission of the unit holds it. The text form does not carry it.
+    pub own: bool,
+    /// A C library's symbol (an extern declaration's): it may be in a shared library, so code takes its
+    /// address through the linker's address slot. Every other symbol is in the program's image.
+    pub ext: bool,
 }
 
 pub const NONE: u32 = 0xFFFFFFFF;
@@ -488,6 +504,9 @@ pub struct Reloc {
 // layout is: size, log2 of the alignment, leaf count, then per leaf its offset and type: the scalars the
 // calling convention classifies.
 pub const AGG: u32 = 0x80000000;
+/// An `i8` or `i16` parameter or result that is signed: the calling convention sign-extends it, else
+/// zero-extends it.
+pub const SIG_SEXT: u32 = 0x40000000;
 pub const SIG_VARIADIC: u32 = 0x80000000;
 
 /// A body: its instructions and every table they index. `syms` and `msgs` map the body's symbol and
@@ -763,6 +782,12 @@ extend Body {
 /// is the same as a lowered one.
 pub struct Package {
     pub ptr_bytes: u32, // the data model's pointer size
+    /// The widest vector the C side passes in one vector register (16, 32 or 64), or 0 when C holds a
+    /// vector as an array of its lanes: the calling conventions follow it (`mangle::vec_def`).
+    pub vec_regs: u32,
+    /// Position-independent code for a shared library: a reference to a global symbol goes through the
+    /// global offset table, as the symbol may resolve outside the library.
+    pub pic: bool,
     pub names: nm::Names, // file paths, symbol names and messages
     pub files: Vector<u32>, // file id -> name id
     pub syms: Vector<Sym>,
@@ -782,6 +807,8 @@ extend Package {
     pub fn new(ptr_bytes: u32) Package {
         return Package {
             ptr_bytes: ptr_bytes,
+            vec_regs: 16,
+            pic: false,
             names: nm::Names::with_capacity(1 << 14, 1 << 10),
             files: Vector::<u32>::new(),
             syms: Vector::<Sym>::new(),
@@ -838,7 +865,19 @@ extend Package {
         if self.sym_of[n as usize] != 0 {
             return NONE;
         }
-        self.syms.push(Sym { name: n, kind: kind, linkage: linkage, def: NONE });
+        self.syms.push(
+            Sym {
+                name: n,
+                kind: kind,
+                linkage: linkage,
+                def: NONE,
+                unit: NONE,
+                sect: NONE,
+                used: false,
+                own: false,
+                ext: false,
+            },
+        );
         self.sym_of[n as usize] = self.syms.len() as u32;
         return self.syms.len() as u32 - 1;
     }
@@ -850,6 +889,14 @@ extend Package {
             return s;
         }
         return self.add_symbol(name, kind, SL_GLOBAL);
+    }
+
+    /// Symbol `s` lives in the object section `spec` (its format's spelling) and is kept.
+    pub fn set_section(self: &mut Self, s: u32, spec: str) {
+        let n = self.name(spec);
+        let y = self.syms.index_mut(s as usize);
+        y.sect = n;
+        y.used = true;
     }
 
     /// The id of panic message `text`, interned.
@@ -933,6 +980,9 @@ extend Package {
             let s = self.symbol(other.spell(os.name), os.kind);
             fresh.push(self.syms[s as usize].def == NONE);
             smap.push(s);
+            if os.ext {
+                self.syms.index_mut(s as usize).ext = true;
+            }
         }
         for i in 0..other.syms.len() {
             let os = other.syms[i];
@@ -941,6 +991,12 @@ extend Package {
             }
             let s = smap[i];
             self.syms.index_mut(s as usize).linkage = os.linkage;
+            self.syms.index_mut(s as usize).unit = os.unit;
+            self.syms.index_mut(s as usize).used = os.used;
+            self.syms.index_mut(s as usize).own = os.own;
+            if os.sect != NONE {
+                self.syms.index_mut(s as usize).sect = self.name(other.spell(os.sect));
+            }
             if os.kind == SK_FUNC {
                 let mut b = other.bodies[os.def as usize].compact();
                 for k in 0..b.syms.len() {

@@ -5173,8 +5173,8 @@ extend Lowerer {
     }
 
     // The verified intrinsic kind of a call of `callee` with the `n` arguments at `start`: the callee
-    // is the extern routine `ir::ci_of_name` names, the arity matches, and the first argument is a
-    // pointer (a fence takes none). CI_NONE otherwise.
+    // is the extern routine `ir::ci_of_name` names (by its `@import` C name when it has one), the arity
+    // matches, and the first argument is a pointer or a reference (a fence takes none). CI_NONE otherwise.
     const fn call_intr(self: &Self, callee: DefId, start: u32, n: u32) u8 {
         if callee.node == NODE_NONE {
             return ir::CI_NONE;
@@ -5184,7 +5184,12 @@ extend Lowerer {
         if nd.kind != NodeKind::NODE_FUNCTION || !nd.as_data.function.is_extern() {
             return ir::CI_NONE;
         }
-        let nsp = a.at_const(nd.as_data.function.name).as_data.name.text;
+        let at = a.attr_of(callee.node, AttrKind::ATTR_IMPORT);
+        let nsp = if at != null {
+            unsafe (*at).str_span;
+        } else {
+            a.at_const(nd.as_data.function.name).as_data.name.text;
+        };
         let src = unsafe (&*self.pkg).modules.at(callee.module as usize).source.as_str();
         let k = ir::ci_of_name(src.slice(nsp.start as usize, nsp.end as usize));
         if k == ir::CI_NONE || ir::ci_arity(k) != n {
@@ -5192,7 +5197,8 @@ extend Lowerer {
         }
         if k != ir::CI_FENCE {
             let op = *self.body.operands.at(self.body.oper_pool[start as usize] as usize);
-            if self.f.ty(op.ty).kind != TypeKind::TYPE_POINTER {
+            let pk = self.f.ty(op.ty).kind;
+            if pk != TypeKind::TYPE_POINTER && pk != TypeKind::TYPE_REFERENCE {
                 return ir::CI_NONE;
             }
         }

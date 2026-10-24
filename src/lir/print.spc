@@ -15,7 +15,11 @@ pub fn print_body(p: &Package, name: str, b: &Body, out: &mut String) {
 
 /// The text of package `p`.
 pub fn print_package(p: &Package, out: &mut String) {
-    out.format_into("lir ptr {}\n", p.ptr_bytes);
+    out.format_into("lir ptr {}", p.ptr_bytes);
+    if p.vec_regs != 16 {
+        out.format_into(" vec {}", p.vec_regs);
+    }
+    out.push_str("\n");
     for i in 0..p.files.len() {
         out.format_into("file f{} ", i);
         push_quoted(p.spell(p.files[i]), out);
@@ -34,7 +38,18 @@ pub fn print_package(p: &Package, out: &mut String) {
                 " data";
             },
         );
-        out.push_str(ast::pick(s.linkage == SL_GLOBAL, " global\n", " local\n"));
+        out.push_str(ast::pick(s.linkage == SL_GLOBAL, " global", " local"));
+        if s.used {
+            out.push_str(" used");
+        }
+        if s.ext {
+            out.push_str(" ext");
+        }
+        if s.sect != NONE {
+            out.push_str(" section ");
+            push_quoted(p.spell(s.sect), out);
+        }
+        out.push_byte(b'\n');
     }
     let mut pr = Printer::new();
     for i in 0..p.syms.len() {
@@ -236,6 +251,9 @@ extend Printer {
             out.push_str("void");
         } else {
             push_type(pt as u8, out);
+            if (pt & SIG_SEXT) != 0 {
+                out.push_str(".s");
+            }
         }
     }
 
@@ -433,6 +451,10 @@ extend Printer {
         } else if f == F_PANIC {
             out.push_byte(b' ');
             push_quoted(p.spell(p.msgs[b.msgs[t.a as usize] as usize]), out);
+            if t.b != VNONE {
+                out.push_str(" lane ");
+                self.val(t.b, out);
+            }
         } else if t.op == O_FENCE {
             out.format_into(" {}", order_name(t.aux));
         }

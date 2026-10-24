@@ -865,14 +865,16 @@ const fn is_hashhash(t: Tok) bool {
     return t.kind == K_PUNCT && (t.id == ID_HASHHASH || t.id == ID_DIGRAPH_HASHHASH);
 }
 
-fn report(err: &mut String, file: str, line: u32, msg: str) {
+fn report(err: &mut String, file: str, line: u32, msg: str, quiet: bool) {
     err.clear();
     err.push_str(file);
     err.push_byte(b':');
     err.push_u64(line);
     err.push_str(": ");
     err.push_str(msg);
-    err.eprintln();
+    if !quiet {
+        err.eprintln();
+    }
 }
 
 // Append the strings of `src` to `dst`, in order, without copying them.
@@ -1003,6 +1005,10 @@ pub struct Pp {
     counter: u64,
     error_line: u32,
     failed: bool,
+    /// The paths of the files read from disk, in the order of the first read.
+    pub disk_paths: Vector<String>,
+    /// Errors are kept in `err`, not printed.
+    pub quiet: bool,
     primed: bool,
     in_args: bool,
     queried_seen: Set<String>,
@@ -1087,6 +1093,8 @@ extend Pp {
             counter: 0,
             error_line: 0,
             failed: false,
+            disk_paths: Vector::<String>::new(),
+            quiet: false,
             primed: false,
             in_args: false,
             queried_seen: Set::<String>::new(),
@@ -1118,7 +1126,7 @@ extend Pp {
             return;
         }
         self.failed = true;
-        report(&mut self.err, self.name.as_str(), self.error_line, msg);
+        report(&mut self.err, self.name.as_str(), self.error_line, msg, self.quiet);
     }
 
     fn take_vec(self: &mut Pp) Vector<Tok> {
@@ -1161,7 +1169,7 @@ extend Pp {
         if error_line != 0 {
             self.toks.truncate(start);
             self.failed = true;
-            report(&mut self.err, path, error_line, "unterminated /* comment");
+            report(&mut self.err, path, error_line, "unterminated /* comment", self.quiet);
             return Option::<u32>::None;
         }
         let end = self.toks.len();
@@ -1267,10 +1275,11 @@ extend Pp {
                 disk = t;
             } else {
                 self.failed = true;
-                report(&mut self.err, path, 0, "cannot read file");
+                report(&mut self.err, path, 0, "cannot read file", self.quiet);
                 return Option::<u32>::None;
             }
             disk.pad_nul(TEXT_PAD);
+            self.disk_paths.push(String::from_str(path));
             found = self.add_file(disk.as_str(), path);
         }
         if let Some(f) = found {
@@ -1495,7 +1504,7 @@ extend Pp {
             self.run_file(main.unwrap(), first.as_str(), NONE, NONE, out);
         } else if !self.failed {
             self.failed = true;
-            report(&mut self.err, path, 0, "cannot open file");
+            report(&mut self.err, path, 0, "cannot open file", self.quiet);
         }
         if !self.at_bol {
             out.push_byte(b'\n');

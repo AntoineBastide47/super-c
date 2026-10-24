@@ -176,7 +176,9 @@ aligned to <align> in C")`, so its block needs a header ("an opaque type with a 
 pointer-sized handle takes `@layout(sizeof(usize), sizeof(usize))` (`pthread::pthread_t`). The
 type is then a value like any other: a field of a header struct,
 an array element, a static, `sizeof` at compile time. A register type takes no `@layout` ("a
-register type ('@value') states its layout: it takes no '@layout'").
+register type ('@value') states its layout: it takes no '@layout'"). The native backend passes such
+a value as the scalar the header's typedef names (an integer or pointer, `float`, `double`); a
+module that passes one of any other C type by value goes through C.
 
 ### Register types: `@value(size, align)`
 
@@ -301,6 +303,11 @@ C header: the block needs that header"). A constant without a value is the C nam
 run time. An extern `static mut` takes no value. Its block's header declares it; one of a block
 without a header is declared by every unit that uses it (`extern T name;`), as a header-less
 function gets its prototype.
+
+A native build (super-c-compiler-internals, "Native backend") reads the value of a constant
+without a value from its header with the compiler's own preprocessor, so the object holds it and
+an edit of the header rebuilds the object. A call of a function the header defines `static` (no
+object exports it) sends the calling module through C.
 
 ## C Integer Widths
 
@@ -605,7 +612,10 @@ member, and a tagged enum an extern `enum`: a tagged record or enum spells as it
 only a typedef names pins that name, and a member named by a keyword pins its C name. Any other
 record, and a record that holds an opaque type by value, stays an opaque `pub type`. An integer
 macro or anonymous enumerator becomes a constant with a value inside the extern block (its C
-compile checks the value); a float or string macro becomes a plain top-level constant. The output
+compile checks the value). An integer macro takes the type C gives it, from the literal's suffix
+and base and the usual conversions of its operators and casts (`u32`, `u64`, `i32`, `i64`); a
+value outside `i64`'s range, or a signed overflow, leaves the macro out. A float or string macro
+becomes a plain top-level constant. The output
 is the build target's: generate it per target where the values differ.
 
 ## Atomics and Memory-Order Codes

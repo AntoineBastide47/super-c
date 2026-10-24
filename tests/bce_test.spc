@@ -636,6 +636,7 @@ fn interval_widening_terminates_on_nested_loops(b: &mut h::ExitBatch) {
 // Project program `src` (it imports std::simd) calls the vector range check in its C when `present`,
 // and its run exits 0, or traps with `trap` when that is not empty.
 fn vec_check(label: str, src: str, present: bool, trap: str) {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units
     let b = h::diff_build(src, []);
     assert(b.built, label);
     let mut path = String::from_str(b.proj.dir());

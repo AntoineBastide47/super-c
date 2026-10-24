@@ -36,6 +36,10 @@ import ir::layout as lay;
 import ir::cpu_features as cf;
 import emit::cemit as cbe;
 import lir::lower as lw;
+import lir::ir as lir_ir;
+import target::native as nat;
+import bindgen::bindgen as bg;
+import build_system::manifest as bman;
 import emit::cflow as cfl;
 import emit::probe as prb;
 import emit::mangle as mbe;
@@ -1763,8 +1767,13 @@ pub struct CemitOut {
     /// fully successful emission, so a failed build never publishes sections it did not finish.
     pub tuc_img: String,
     pub tuc_path: String,
+    /// The emission cache's module keys and hits (empty when it is off), for the native objects' reuse.
+    pub tuc_keys: Vector<u64>,
+    pub tuc_hit: Vector<bool>,
     /// Merged emission counters (SC_CEMIT_STATS); the write stage adds publication and reports.
     pub pr: prb::Probe,
+    /// The LIR of every body of a native build (`cbe::native_on`), for the write stage's objects.
+    pub lir: Option<Box<lw::Lower>>,
 }
 
 extend CemitOut {
@@ -1802,7 +1811,10 @@ extend CemitOut {
             edges: Vector::<u64>::new(),
             tuc_img: String::new(),
             tuc_path: String::new(),
+            tuc_keys: Vector::<u64>::new(),
+            tuc_hit: Vector::<bool>::new(),
             pr: prb::Probe::new(false, false),
+            lir: Option::<Box<lw::Lower>>::None,
         };
         o.protos_h.resize_default(n);
         o.tu_incs.resize_default(n);
@@ -2806,7 +2818,8 @@ fn cemit_seed_module(
         }
         let mut gfs = Vector::<String>::new();
         let mut gts = Vector::<TypeId>::new();
-        let is_glue = cemit_free_glue_fields(p, cem, m as ModuleId, nid, &mut gfs, &mut gts);
+        let mut gns = Vector::<NodeId>::new();
+        let is_glue = cemit_free_glue_fields(p, cem, m as ModuleId, nid, &mut gfs, &mut gts, &mut gns);
         if is_glue {
             sym.push_str("__fb");
         }
@@ -2828,6 +2841,7 @@ fn cemit_seed_module(
             }
             {
                 acc.chunk(m as u64, m as ModuleId, &cem.out, cem.mg.rec_on, &mut cem.mg.rec);
+                cem.lir_claim(m as u32, "a function", true);
             }
             if is_glue {
                 // The public wrapper: the sig is the __fb sig without the suffix.
@@ -2885,6 +2899,14 @@ fn cemit_seed_module(
                 wr.push_str("}\n");
                 if wok {
                     acc.chunk(m as u64, m as ModuleId, &wr, cem.mg.rec_on, &mut cem.mg.rec);
+                    let tgt9 = cem.mg.method_target(m as ModuleId, nid);
+                    let a9 = unsafe &mut *(p.module_ast_const(m as ModuleId) as *mut Ast);
+                    let st9 = a9.intern_type(
+                        Ty { kind: TypeKind::TYPE_STRUCT, module: m as ModuleId, as_data: TyAs { decl: tgt9.node } },
+                    );
+                    let wsym = sym.as_str().slice(0, sym.len() - 4);
+                    cem.lir_free_wrapper(m as ModuleId, st9, wsym, sym.as_str(), gns[0..gns.len()]);
+                    cem.lir_claim(m as u32, "a `free` wrapper", true);
                 }
             }
             cemit_closure_queue(
@@ -2973,6 +2995,7 @@ fn cemit_closure_queue(
             acc.env_own.push(m);
         }
         acc.chunk(key, m, &cem.out, rec, &mut cem.mg.rec);
+        cem.lir_claim(m, "a closure", key != 65534);
     }
 }
 
@@ -3306,7 +3329,10 @@ fn bound_calls(
         let t = b.blocks.at(i).term;
         let mut rv = TYPE_NONE;
         let md = cem.bound_target(b, &t, &mut rv);
-        if md.node == NODE_NONE || !dow.inl.kept(md) || dow.inl.only_fixed && !dow.inl.fixed_result(pkg, md) {
+        if md.node == NODE_NONE || !dow.inl.kept(md) || dow.inl.only_fixed && !dow.inl.fixed_result(pkg, md) && !inl::always_native(
+            pkg,
+            md,
+        ) {
             continue;
         }
         let own = (unsafe &*(&*pkg).module_ast_const(md.module)).at_const(md.node).as_data.function.generics.len;
@@ -3489,6 +3515,7 @@ fn cemit_drain_demand(
         acc.inst_ok += 1;
         cem.pr.count(prb::C_INSTANCES, 1);
         acc.chunk(65534, d_def.module, &cem.out, false, &mut cem.mg.rec);
+        cem.lir_claim(d_def.module, "an instance", false);
         cemit_closure_queue(
             p,
             cem,
@@ -3743,6 +3770,7 @@ fn cemit_drain_slice_one(
     }
     proto_of(&sh.out, &mut o.acc.protos);
     o.acc.ch.add(65534, d_def.module, &sh.out);
+    sh.lir_claim(d_def.module, "an instance", false);
     let mut clsq = Vector::<NodeId>::new();
     for c2 in 0..blw.closures.len() {
         clsq.push(blw.closures[c2]);
@@ -3802,6 +3830,7 @@ fn cemit_drain_slice_one(
             }
             proto_of(&sh.out, &mut o.acc.protos);
             o.acc.ch.add(65534, d_def.module, &sh.out);
+            sh.lir_claim(d_def.module, "a closure", false);
         } else {
             o.acc.clos_skip += 1;
         }
@@ -4152,6 +4181,7 @@ fn cemit_drain_glue(cem: &mut cbe::CEmit, gi: &mut usize, acc: &mut SeedAcc, ver
         if cem.emit_glue(*gi) {
             acc.glue_ok += 1;
             acc.chunk(65534, go, &cem.out, false, &mut cem.mg.rec);
+            cem.lir_claim(go, "a destructor", false);
         } else {
             if verbose {
                 eprint("glue-emit-fail: `{}` {}\n", cem.glue.at(*gi).sym.as_str(), cem.err);
@@ -4278,6 +4308,7 @@ fn cemit_seed_merge_range(cem: &mut cbe::CEmit, o: &mut SeedShard, a: &CapMark, 
             cem.sh_dyt_e.push(cem.dyn_tabs.len() as u32);
             cem.sh_dyt_e2.push(cem.dyn_decls.len() as u32);
             cem.dyt_own.push(sc.dyt_own[i]);
+            cem.dyt_sym.push(sc.dyt_sym.at(i).clone());
         }
         pe = e;
         pe2 = e2;
@@ -4599,6 +4630,7 @@ pub fn cemit_package(
         // A section carries its module's C text, as large as the module's TU buffer.
         2 * src_total,
     );
+    nat_trust(p, &mut tuc);
     let par9 = p.jobs != 1 && p.modules.len() > 1;
     if par9 {
         // Parallel seed frontier: one task per module with a private emitter shard; gated
@@ -4760,6 +4792,8 @@ pub fn cemit_package(
             if cem.emit_test_wrapper(tc.mod, tc.func, tc.wants, fxi, fxf, tplan.genv_mod, tplan.genv_init) {
                 tw_ok += 1;
                 acc.chunk(tc.mod, tc.mod, &cem.out, false, &mut cem.mg.rec);
+                cem.lir_test_wrapper(tc.mod, tc.func, tc.wants, fxi, fxf);
+                cem.lir_claim(tc.mod, "a test wrapper", false);
             } else {
                 tw_skip += 1;
                 eprint("cemit-test-miss: {}\n", cem.err);
@@ -4770,6 +4804,8 @@ pub fn cemit_package(
             if cem.emit_test_genv(tplan.genv_mod, tplan.genv_init, tplan.genv_free) {
                 tw_ok += 1;
                 acc.chunk(tplan.genv_mod, tplan.genv_mod, &cem.out, false, &mut cem.mg.rec);
+                cem.lir_test_genv(tplan.genv_mod, tplan.genv_init, tplan.genv_free);
+                cem.lir_claim(tplan.genv_mod, "the test environment", false);
             } else {
                 tw_skip += 1;
                 eprint("cemit-test-miss: {}\n", cem.err);
@@ -5504,6 +5540,7 @@ pub fn cemit_package(
                         cdefs.txt.push_string(&line3);
                         cd_ok += 1;
                         lir_zero(&mut cem, csym.as_str(), em2, cty, lro, ltls, lal);
+                        lir_own_item(&mut cem, csym.as_str(), cd_own9, cdef);
                         continue;
                     }
                 }
@@ -5602,6 +5639,7 @@ pub fn cemit_package(
                             ltls,
                             lal,
                         );
+                        lir_own_item(&mut cem, csym.as_str(), cd_own9, cdef);
                         continue;
                     }
                 }
@@ -5642,6 +5680,7 @@ pub fn cemit_package(
                 ) {
                     cd_ok += 1;
                     lir_group(&mut cem, &cdit, csym.as_str(), root3 as u32, lro, ltls, lal);
+                    lir_own_item(&mut cem, csym.as_str(), cd_own9, cdef);
                     continue;
                 }
             }
@@ -5687,6 +5726,7 @@ pub fn cemit_package(
                 cdefs.txt.push_string(&line);
                 cd_ok += 1;
                 lir_value(&mut cem, &mut cdit, csym.as_str(), em2, cty, v, lro, ltls, lal);
+                lir_own_item(&mut cem, csym.as_str(), cd_own9, cdef);
             } else {
                 if verbose {
                     eprint("const-skip: `{}` kind {}\n", csym.as_str(), v.kind);
@@ -5741,6 +5781,7 @@ pub fn cemit_package(
                     ok9b = st_define(p, &mut cem, &cdit, sym9.as_str(), root9, "const ", &mut sdefs.txt, &mut rootd);
                     if ok9b {
                         lir_group(&mut cem, &cdit, sym9.as_str(), root9, true, false, 0);
+                        lir_own(&mut cem, sym9.as_str(), sd_own9);
                         tdecl.txt.push_str("extern const ");
                         tdecl.txt.push_string(&rootd);
                         tdecl.txt.push_str(";\n");
@@ -5825,6 +5866,7 @@ pub fn cemit_package(
                         reg_names.push(nm9.clone());
                         reg_decls.push(rootd.clone());
                         lir_group(&mut cem, &cdit, nm9.as_str(), root9, true, false, 0);
+                        lir_own(&mut cem, nm9.as_str(), sd_own9);
                     }
                     if ok9b {
                         ti_ok += 1;
@@ -5903,11 +5945,13 @@ pub fn cemit_package(
     if tuc.on {
         o.tuc_img = replace(&mut tuc.out, String::new());
         o.tuc_path = replace(&mut tuc.path, String::new());
+        o.tuc_keys = replace(&mut tuc.keys, Vector::<u64>::new());
+        o.tuc_hit = replace(&mut tuc.hit, Vector::<bool>::new());
     }
     prd.merge(&dow.pr);
     prd.merge(&cem.pr);
     // The LIR check of a build that emitted every body (a refused one fails the build already).
-    if cem.lir.is_some() && p.ok && cem.refused.len() == 0 {
+    if cem.lir.is_some() && p.ok && cem.refused.len() == 0 && stdlib::getenv("SC_LIR") != null {
         let mut l = replace(&mut cem.lir, Option::<Box<lw::Lower>>::None).unwrap();
         let mut text = String::new();
         if !l.deref_mut().check_all(p, &mut text) {
@@ -5917,6 +5961,10 @@ pub fn cemit_package(
         if tp.is_some() {
             let _ = write_file(tp.unwrap().as_str(), text.as_str());
         }
+        cem.lir = Option::<Box<lw::Lower>>::Some(l);
+    }
+    if cbe::native_on(p) {
+        o.lir = replace(&mut cem.lir, Option::<Box<lw::Lower>>::None);
     }
     o.refused = replace(&mut cem.refused, Vector::<cbe::Refusal>::new());
     p.inl_store = null;
@@ -6148,6 +6196,13 @@ fn render_const_elem(p: &loader::Package, mg: &mut mbe::Mangler, a: &Ast, src: s
             }
         } else if n.as_data.literal.token_type == TokenType::Null {
             out.push_str("0");
+        } else if tk == TokenType::CharacterLiteral || tk == TokenType::ByteCharacterLiteral {
+            // The decoded value: C spells no byte literal, and a char above 127 narrows with a cast.
+            let v = tok::char_literal_value(src, rsp).unwrap_or(0);
+            if tk == TokenType::CharacterLiteral && v > 127 {
+                out.push_str("(char)");
+            }
+            out.push_i64(v);
         } else {
             out.push_str(txt);
         }
@@ -6792,6 +6847,24 @@ fn st_define(
 
 // The LIR check's data for an emitted constant or static: its CTFE value `v`, its zero bytes, or its
 // captured group `root` (`Lower::static_value`, `static_zero`, `static_group`).
+// Static `name` defined in a TU of module `unit`: its LIR data is that unit's, or the unit compiles
+// through C when the lowering could not define it.
+fn lir_own(cem: &mut cbe::CEmit, name: str, unit: u32) {
+    if let Some(l) = &mut cem.lir {
+        l.claim_data(name, unit);
+    }
+}
+
+// `lir_own` of constant or static item `d`, with its `@used` and section.
+fn lir_own_item(cem: &mut cbe::CEmit, name: str, unit: u32, d: DefId) {
+    lir_own(cem, name, unit);
+    if cem.lir.is_some() {
+        let mut l = replace(&mut cem.lir, Option::<Box<lw::Lower>>::None).unwrap();
+        l.deref_mut().item_attrs_named(cem, name, d.module, d.node);
+        cem.lir = Option::<Box<lw::Lower>>::Some(l);
+    }
+}
+
 fn lir_value(
     cem: &mut cbe::CEmit,
     cev: &mut iri::Interp,
@@ -7909,6 +7982,7 @@ fn cemit_free_glue_fields(
     fnid: NodeId,
     out_f: &mut Vector<String>,
     out_t: &mut Vector<TypeId>,
+    out_n: &mut Vector<NodeId>,
 ) bool {
     let tgt = cem.mg.method_target(m, fnid);
     if tgt.node == NODE_NONE || tgt.module != m {
@@ -7964,6 +8038,7 @@ fn cemit_free_glue_fields(
             }
             out_f.push(fname);
             out_t.push(ft);
+            out_n.push(fid);
         }
     }
     return out_f.len() != 0;
@@ -8411,6 +8486,9 @@ fn cemit_assemble(
             let e = cem.sh_dyt_e[i];
             ih.index_mut(cem.dyt_own[i] as usize).push_str(cem.dyn_tabs.as_str().slice(pe as usize, e as usize));
             pe = e;
+            if let Some(l) = &mut cem.lir {
+                l.claim_data(cem.dyt_sym.at(i).as_str(), cem.dyt_own[i]);
+            }
         }
     }
     // Per-module TU shards and per-owner instance shards: chunk shards from the stable item hash
@@ -8581,6 +8659,8 @@ fn cemit_assemble(
             let mut tail = String::new();
             if has_wrap {
                 cemit_main_wrapper(&mut tail, acc.main_argv);
+                cem.lir_main_wrapper(t as ModuleId, acc.main_argv);
+                cem.lir_claim(t as u32, "the C `main`", false);
             }
             let inc = unit_incs(
                 cem,
@@ -8688,11 +8768,13 @@ fn cemit_assemble(
         o.inst_x.set(t, lc || x_any(&xr, &inst_dv[t]));
     }
     // The registry TU includes every scoped extern header that has checks and that no unit includes, so
-    // they run once also where no unit uses the header's items (a constant that folds to its value).
+    // they run once also where no unit uses the header's items (a constant that folds to its value). In a
+    // native build, whose modules' units may not compile, it includes every one, and it is the C unit that
+    // checks the extern blocks against their headers.
     let used = unit_reach(ddeps.len(), &ddeps, &tu_dv, &inst_dv);
     let mut xall = String::new();
     for d in 0..nx {
-        if xhdrs[d as usize].checks.len() != 0 && !used[d as usize] {
+        if xhdrs[d as usize].checks.len() != 0 && (!used[d as usize] || p.native) {
             def_inc(0, ds.stem[d as usize].as_str(), &mut xall);
         }
     }
@@ -8704,7 +8786,7 @@ fn cemit_assemble(
     o.inst_c = replace(acc.ch.bufs.index_mut(n), String::new());
     // The registry TU: ZST sentinels and the reflection registry (sorted roots, one pointer
     // table, one registration entry point; lookups never depend on constructor order).
-    if cem.sent_defs.len() != 0 || reg_names.len() != 0 || xall.len() != 0 {
+    if cem.sent_defs.len() != 0 || reg_names.len() != 0 || xall.len() != 0 || p.native && ext_incs.len() != 0 {
         let mut rg = String::new();
         rg.push_string(&cem.sent_defs);
         if reg_names.len() != 0 {
@@ -10505,6 +10587,835 @@ fn manifest_publish(root: str, man: &String, keep: &mut Vector<String>) {
     };
     if write_file_atomic(mp.as_str(), man.as_str()) {
         keep.push(mp);
+    }
+}
+
+// Whether `w` is a word of space-separated list `list`.
+const fn word_in(list: str, w: str) bool {
+    let mut rest = list;
+    for _ in 0..list.len() + 1 {
+        let sp = rest.find_byte(b' ');
+        let item = if sp < 0 {
+            rest;
+        } else {
+            rest.slice(0, sp as usize);
+        };
+        if item == w {
+            return true;
+        }
+        if sp < 0 {
+            return false;
+        }
+        rest = rest.slice(sp as usize + 1, rest.len());
+    }
+    return false;
+}
+
+// The C facts of every extern block with a header a native build's objects need, each header preprocessed
+// once under the target's C environment: the values of its integer constants (`Package.extern_ints`), and
+// its functions that only a C compile defines (`Package.c_fns`): every one of an intrinsics header, else
+// the header's `static` ones. A constant the header does not define as an integer stays without one, and
+// the modules that read it go through C.
+// Every module's line starts (`Package.lines`), which the parallel LIR lowerings share.
+fn lir_lines(p: &mut loader::Package) {
+    p.lines.truncate(0);
+    for m in 0..p.modules.len() {
+        let src = p.modules[m].source.as_str();
+        let mut ls = Vector::<u32>::with_capacity(src.len() / 32 + 1);
+        ls.push(0);
+        let mut at: usize = 0;
+        for _ in 0..src.len() {
+            let k = src.slice(at, src.len()).find_byte(b'\n');
+            if k < 0 {
+                break;
+            }
+            at += k as usize + 1;
+            ls.push(at as u32);
+        }
+        p.lines.push(ls);
+    }
+}
+
+fn native_header_facts(p: &mut loader::Package) {
+    let intr = tgt::isa(p.arch).intrinsics;
+    let mut heads = Map::<String, u32>::new();
+    let mut hnames = Vector::<String>::new();
+    let mut names = Vector::<Vector<String>>::new();
+    let mut keys = Vector::<Vector<u64>>::new();
+    let mut fnames = Vector::<Vector<String>>::new();
+    let mut fkeys = Vector::<Vector<u64>>::new();
+    let mut tnames = Vector::<Vector<String>>::new();
+    let mut tkeys = Vector::<Vector<u64>>::new();
+    for m in 0..p.modules.len() {
+        if !p.modules[m].has_ast {
+            continue;
+        }
+        let a = unsafe &*p.module_ast_const(m as ModuleId);
+        let src = p.modules[m].source.as_str();
+        let its = a.at_const(a.root).as_data.program.items;
+        for i in 0..its.len {
+            let nid = unsafe a.list(its)[i as usize];
+            if a.at_const(nid).kind != NodeKind::NODE_EXTERN_BLOCK {
+                continue;
+            }
+            let eb = a.at_const(nid).as_data.extern_block;
+            if eb.header == NODE_NONE {
+                continue;
+            }
+            let hs = a.at_const(eb.header).span;
+            if hs.end <= hs.start + 2 {
+                continue;
+            }
+            let htxt = src.slice((hs.start + 1) as usize, (hs.end - 1) as usize);
+            if word_in(intr, htxt) {
+                for j in 0..eb.items.len {
+                    let fid = unsafe a.list(eb.items)[j as usize];
+                    if a.at_const(fid).kind == NodeKind::NODE_FUNCTION {
+                        p.c_fns.insert(m as u64 << 32 | fid as u64);
+                    }
+                }
+                continue;
+            }
+            // The include operand: the header beside the module's file when it is there, as the C
+            // units include it, else the name on the search path.
+            let mut h = format("<{}>", htxt);
+            let mf = p.modules[m].file.as_str();
+            if mf.len() != 0 {
+                let mut dend = mf.len();
+                while dend > 0 && mf.byte_at(dend - 1) != b'/' {
+                    dend -= 1;
+                }
+                let rel = format(
+                    "{}{}",
+                    if dend != 0 {
+                        mf.slice(0, dend);
+                    } else {
+                        "./";
+                    },
+                    htxt,
+                );
+                if let Ok(real) = fs::realpath(rel.as_str()) {
+                    h = format("\"{}\"", real.as_str());
+                }
+            }
+            let hi = switch heads.get(&h) {
+                Some(k) => *k,
+                None => {
+                    let k = hnames.len() as u32;
+                    heads.insert(h.clone(), k);
+                    hnames.push(h);
+                    names.push(Vector::<String>::new());
+                    keys.push(Vector::<u64>::new());
+                    fnames.push(Vector::<String>::new());
+                    fkeys.push(Vector::<u64>::new());
+                    tnames.push(Vector::<String>::new());
+                    tkeys.push(Vector::<u64>::new());
+                    k;
+                },
+            };
+            for j in 0..eb.items.len {
+                let sid = unsafe a.list(eb.items)[j as usize];
+                let sn = a.at_const(sid);
+                if sn.kind == NodeKind::NODE_FUNCTION {
+                    let fs = a.at_const(sn.as_data.function.name).as_data.name.text;
+                    fnames.index_mut(hi as usize).push(String::from_str(src.slice(fs.start as usize, fs.end as usize)));
+                    fkeys.index_mut(hi as usize).push(m as u64 << 32 | sid as u64);
+                    continue;
+                }
+                if sn.kind == NodeKind::NODE_TYPE_ALIAS && sn.as_data.type_alias.ty == NODE_NONE && a.attr_of(
+                    sid,
+                    AttrKind::ATTR_LAYOUT,
+                ) != null {
+                    let ts = a.at_const(sn.as_data.type_alias.name).as_data.name.text;
+                    tnames.index_mut(hi as usize).push(String::from_str(src.slice(ts.start as usize, ts.end as usize)));
+                    tkeys.index_mut(hi as usize).push(m as u64 << 32 | sid as u64);
+                    continue;
+                }
+                if sn.kind != NodeKind::NODE_CONST || !sn.as_data.const_def.is_extern || sn.as_data.const_def.is_static_mut {
+                    continue;
+                }
+                let ns = a.at_const(sn.as_data.const_def.name).as_data.name.text;
+                names.index_mut(hi as usize).push(String::from_str(src.slice(ns.start as usize, ns.end as usize)));
+                keys.index_mut(hi as usize).push(m as u64 << 32 | sid as u64);
+            }
+        }
+    }
+    // The C compile's dialect and macro flags (`push_c_env`, then the manifest's), which select what the
+    // headers define.
+    let mut all = String::new();
+    push_c_env(
+        &mut all,
+        if p.cflags.len() != 0 {
+            p.cflags.as_str();
+        } else if p.cstd.len() != 0 {
+            p.cstd.as_str();
+        } else {
+            bman::DEFAULT_CSTD;
+        },
+        p.build_target,
+    );
+    let mut words = Vector::<String>::new();
+    split_args(&mut words, all.as_str());
+    let mut flags = String::new();
+    let mut w: usize = 0;
+    while w < words.len() {
+        let x = words[w].as_str();
+        let two = (x == "-D" || x == "-U") && w + 1 < words.len();
+        if x.starts_with("-std=") || x.starts_with("-D") || x.starts_with("-U") || x == "-funsigned-char" || x == "-fsigned-char" {
+            flags.push_str(x);
+            flags.push_byte(b' ');
+            if two {
+                flags.push_string(&words[w + 1]);
+                flags.push_byte(b' ');
+                w += 1;
+            }
+        }
+        w += 1;
+    }
+    // Each header's facts: the record of an earlier build's scan when every file it read is unchanged,
+    // else a scan, the headers in parallel.
+    let cpath = if p.gen_root.len() != 0 {
+        build_out_path(p.gen_root.as_str(), HF_RECORD, "");
+    } else {
+        String::new();
+    };
+    let old = loader::read_file(cpath.as_str()).unwrap_or(String::new());
+    let mut tasks = Vector::<HfTask>::new();
+    for k in 0..hnames.len() {
+        if names.at(k).len() + fnames.at(k).len() + tnames.at(k).len() == 0 {
+            continue;
+        }
+        let mut t = HfTask {
+            target: p.build_target,
+            arch: p.arch,
+            flags: &flags,
+            header: hnames.at(k),
+            names: names.at(k),
+            fnames: fnames.at(k),
+            tnames: tnames.at(k),
+            k: k as u32,
+            key: 0,
+            vals: Vector::<i64>::new(),
+            oks: Vector::<bool>::new(),
+            sts: Vector::<bool>::new(),
+            cls: Vector::<u8>::new(),
+            read: Vector::<String>::new(),
+            ok: false,
+            hit: false,
+        };
+        t.key = hf_key(&t);
+        t.hit = hf_find(old.as_str(), &mut t);
+        tasks.push(t);
+    }
+    let mut miss: usize = 0;
+    for q in 0..tasks.len() {
+        miss += (!tasks[q].hit) as usize;
+    }
+    if p.jobs != 1 && miss > 1 {
+        let wg = psync::WaitGroup::new();
+        for q in 0..tasks.len() {
+            if tasks[q].hit {
+                continue;
+            }
+            wg.add(1);
+            let r = HfRef { t: tasks.index_mut(q) };
+            let wgc = wg.clone();
+            launch || {
+                hf_run(unsafe &mut *r.t);
+                wgc.done();
+            };
+        }
+        wg.wait_masked();
+    } else {
+        for q in 0..tasks.len() {
+            if !tasks[q].hit {
+                hf_run(tasks.index_mut(q));
+            }
+        }
+    }
+    let mut rec = String::new();
+    for q in 0..tasks.len() {
+        let t = tasks.index_mut(q);
+        let k = t.k as usize;
+        hf_write(&mut rec, t);
+        for j in 0..t.read.len() {
+            if !p.header_files.contains(&t.read[j]) {
+                p.header_files.push(t.read[j].clone());
+            }
+        }
+        if !t.ok {
+            // A header the preprocessor cannot read: its functions may be anything.
+            for j in 0..fkeys.at(k).len() {
+                p.c_fns.insert(fkeys.at(k)[j]);
+            }
+            continue;
+        }
+        for j in 0..t.oks.len() {
+            if t.oks[j] {
+                p.extern_ints.insert(keys.at(k)[j], t.vals[j]);
+            }
+        }
+        for j in 0..t.sts.len() {
+            if t.sts[j] {
+                p.c_fns.insert(fkeys.at(k)[j]);
+            }
+        }
+        for j in 0..t.cls.len() {
+            p.opaque_cls.insert(tkeys.at(k)[j], t.cls[j]);
+        }
+    }
+    if cpath.len() != 0 && rec.as_str() != old.as_str() {
+        let _ = write_file_atomic(cpath.as_str(), rec.as_str());
+    }
+}
+
+/// The record of a native build's header scan (`native_header_facts`): per scanned header, its key, the
+/// files the scan read with their sizes and modification times, and the facts.
+const HF_RECORD: str = "__sc_hfacts";
+
+// One header's scan (`bg::header_facts`) for `native_header_facts`: under the build's target and C
+// flags, header `header`'s constants `names`, functions `fnames` and opaque types `tnames` (the `k`-th
+// header, key `key`); the constants' values `vals` where `oks`, the `static` functions `sts`, the types'
+// scalar classes `cls`, the files the scan read, and whether the preprocessor read the header (`ok`);
+// `hit` when an earlier build's record gave them.
+struct HfTask {
+    pub target: i32,
+    pub arch: i32,
+    pub flags: *const String,
+    pub header: *const String,
+    pub names: *const Vector<String>,
+    pub fnames: *const Vector<String>,
+    pub tnames: *const Vector<String>,
+    pub k: u32,
+    pub key: u64,
+    pub vals: Vector<i64>,
+    pub oks: Vector<bool>,
+    pub sts: Vector<bool>,
+    pub cls: Vector<u8>,
+    pub read: Vector<String>,
+    pub ok: bool,
+    pub hit: bool,
+}
+
+// One header scan for a task of its own; each task writes only its own.
+struct HfRef {
+    pub t: *mut HfTask,
+}
+
+unsafe extend HfRef as Send {}
+
+fn hf_run(t: &mut HfTask) {
+    let names = unsafe &*t.names;
+    let fnames = unsafe &*t.fnames;
+    let mut ns = Vector::<str>::with_capacity(names.len());
+    for j in 0..names.len() {
+        ns.push(names.at(j).as_str());
+    }
+    let mut fs9 = Vector::<str>::with_capacity(fnames.len());
+    for j in 0..fnames.len() {
+        fs9.push(fnames.at(j).as_str());
+    }
+    let tnames = unsafe &*t.tnames;
+    let mut ts9 = Vector::<str>::with_capacity(tnames.len());
+    for j in 0..tnames.len() {
+        ts9.push(tnames.at(j).as_str());
+    }
+    t.ok = bg::header_facts(
+        t.target,
+        t.arch,
+        unsafe (*t.flags).as_str(),
+        unsafe (*t.header).as_str(),
+        ns[0..ns.len()],
+        &mut t.vals,
+        &mut t.oks,
+        fs9[0..fs9.len()],
+        &mut t.sts,
+        ts9[0..ts9.len()],
+        &mut t.cls,
+        &mut t.read,
+    );
+}
+
+// The key of `t`'s scan: the target, the flags, the header and the names it asks for.
+fn hf_key(t: &HfTask) u64 {
+    let mut h = t.target as u64 << 32 ^ t.arch as u64;
+    h = (h ^ unsafe (*t.flags).as_str().hash()).wrapping_mul(0x100000001B3);
+    h = (h ^ unsafe (*t.header).as_str().hash()).wrapping_mul(0x100000001B3);
+    let names = unsafe &*t.names;
+    for j in 0..names.len() {
+        h = (h ^ names.at(j).as_str().hash()).wrapping_mul(0x100000001B3);
+    }
+    h = (h ^ 0x2F).wrapping_mul(0x100000001B3);
+    let fnames = unsafe &*t.fnames;
+    for j in 0..fnames.len() {
+        h = (h ^ fnames.at(j).as_str().hash()).wrapping_mul(0x100000001B3);
+    }
+    h = (h ^ 0x2F).wrapping_mul(0x100000001B3);
+    let tnames = unsafe &*t.tnames;
+    for j in 0..tnames.len() {
+        h = (h ^ tnames.at(j).as_str().hash()).wrapping_mul(0x100000001B3);
+    }
+    return h;
+}
+
+// `t`'s record line (`HF_RECORD`): `<key> <ok> <files> <constants>`, then per file `<size> <mtime> <path>`,
+// per constant `<0|1> <value>`, the `static` flags as one line of `0` and `1`, and the types' classes as
+// one line of their `bindgen::SC_*` bytes.
+fn hf_write(out: &mut String, t: &HfTask) {
+    out.format_into("{} {} {} {}\n", t.key, t.ok as u32, t.read.len(), t.vals.len());
+    for j in 0..t.read.len() {
+        let (sz, mt) = hf_stat(t.read.at(j).as_str());
+        out.format_into("{} {} {}\n", sz, mt, t.read.at(j).as_str());
+    }
+    for j in 0..t.vals.len() {
+        out.format_into("{} {}\n", t.oks[j] as u32, t.vals[j]);
+    }
+    for j in 0..t.sts.len() {
+        out.push_byte(
+            if t.sts[j] {
+                b'1';
+            } else {
+                b'0';
+            },
+        );
+    }
+    out.push_byte(b'\n');
+    for j in 0..t.cls.len() {
+        out.push_byte(t.cls[j]);
+    }
+    out.push_byte(b'\n');
+}
+
+// File `path`'s size and modification time in nanoseconds; zeros when it is gone.
+fn hf_stat(path: str) (u64, i64) {
+    if let Ok(m) = fs::stat(path) {
+        return m.size, m.modified_ns;
+    }
+    return 0, 0;
+}
+
+// `t`'s facts from record `rec` (`hf_write`) when it holds `t`'s key and every file the scan read is
+// unchanged.
+fn hf_find(rec: str, t: &mut HfTask) bool {
+    let mut rest = rec;
+    let nf = unsafe (*t.fnames).len();
+    for _ in 0..rec.len() {
+        let mut line = hf_line(&mut rest);
+        if line.len() == 0 {
+            return false;
+        }
+        let key = hf_word(&mut line).parse_u64().unwrap_or(0);
+        let ok = hf_word(&mut line) == "1";
+        let nr = hf_word(&mut line).parse_u64().unwrap_or(0) as usize;
+        let nv = hf_word(&mut line).parse_u64().unwrap_or(0) as usize;
+        if key != t.key {
+            // Another header's entry: its files, constants, flags and classes.
+            for _ in 0..nr + nv + 2 {
+                let _ = hf_line(&mut rest);
+            }
+            continue;
+        }
+        let mut same = true;
+        for _ in 0..nr {
+            let mut fl = hf_line(&mut rest);
+            let sz = hf_word(&mut fl).parse_u64().unwrap_or(U64_MAX9);
+            let mt = hf_word(&mut fl).parse_i64().unwrap_or(-1);
+            let (sz2, mt2) = hf_stat(fl);
+            same = same && sz == sz2 && mt == mt2;
+            t.read.push(String::from_str(fl));
+        }
+        for _ in 0..nv {
+            let mut vl = hf_line(&mut rest);
+            t.oks.push(hf_word(&mut vl) == "1");
+            t.vals.push(vl.parse_i64().unwrap_or(0));
+        }
+        let sl = hf_line(&mut rest);
+        let cl = hf_line(&mut rest);
+        same = same && nv == unsafe (*t.names).len() && (!ok || sl.len() == nf && cl.len() == unsafe (*t.tnames).len());
+        for j in 0..sl.len() {
+            t.sts.push(sl.byte_at(j) == b'1');
+        }
+        for j in 0..cl.len() {
+            t.cls.push(cl.byte_at(j));
+        }
+        if !same {
+            t.read.truncate(0);
+            t.oks.truncate(0);
+            t.vals.truncate(0);
+            t.sts.truncate(0);
+            t.cls.truncate(0);
+            return false;
+        }
+        t.ok = ok;
+        return true;
+    }
+    return false;
+}
+
+const U64_MAX9: u64 = 0xFFFFFFFFFFFFFFFF;
+
+// The next line of `rest`, without its newline, and `rest` past it; "" at the end.
+fn hf_line<'a>(rest: &mut str<'a>) str<'a> {
+    let r = *rest;
+    let nl = r.find_byte(b'\n');
+    if nl < 0 {
+        *rest = r.slice(r.len(), r.len());
+        return r;
+    }
+    *rest = r.slice(nl as usize + 1, r.len());
+    return r.slice(0, nl as usize);
+}
+
+// The next space-separated word of `line`, and `line` past it.
+fn hf_word<'a>(line: &mut str<'a>) str<'a> {
+    let r = *line;
+    let sp = r.find_byte(b' ');
+    if sp < 0 {
+        *line = r.slice(r.len(), r.len());
+        return r;
+    }
+    *line = r.slice(sp as usize + 1, r.len());
+    return r.slice(0, sp as usize);
+}
+
+// One object of a native build: its unit's own part (`own`: the module's own items) or the part the
+// build adds (instances, glue, data, wrappers): its bytes, or the reused object's (`old`).
+struct NatObj {
+    pub m: ModuleId,
+    pub own: bool,
+    pub bytes: Vector<u8>,
+    pub old: String,
+}
+
+// One part of one unit to compile: its functions `fs` and data `ds` of LIR package `pk` for `(os, isa)`
+// into `bytes`, `ok` when it compiles, else the reason in `why`.
+struct NatTask {
+    pub pk: *const lir_ir::Package,
+    pub os: i32,
+    pub isa: i32,
+    pub fs: *const Vector<u32>,
+    pub ds: *const Vector<u32>,
+    pub bytes: *mut Vector<u8>,
+    pub why: *mut String,
+    pub ok: *mut bool,
+}
+
+// Tasks read the finished LIR and their part's symbol lists, and write their own slots.
+unsafe extend NatTask as Send {}
+
+fn nat_task(t: NatTask) {
+    let fs = unsafe &*t.fs;
+    let ds = unsafe &*t.ds;
+    unsafe *t.ok = nat::object(
+        unsafe &*t.pk,
+        t.os,
+        t.isa,
+        fs[0..fs.len()],
+        ds[0..ds.len()],
+        unsafe &mut *t.bytes,
+        unsafe &mut *t.why,
+    );
+}
+
+/// The native objects' record (`__sc_native` in the tree): per module, the key its own part was compiled
+/// under (`nat_key`), its low bits `NAT_OBJ` when that part has an object and `NAT_C` when the module went
+/// through C (`<key> <path>` lines). A cached emission of a module counts only under its record's key.
+const NAT_RECORD: str = "__sc_native";
+const NAT_OBJ: u64 = 1;
+const NAT_C: u64 = 2;
+
+// The native record at `path`: each module path's key and flags (`NAT_RECORD`); empty without one.
+fn nat_record(path: str) Map<String, u64> {
+    let mut rec = Map::<String, u64>::new();
+    let rt = loader::read_file(path).unwrap_or(String::new());
+    let mut rest = rt.as_str();
+    for _ in 0..rt.len() {
+        let nl = rest.find_byte(b'\n');
+        let sp = rest.find_byte(b' ');
+        if nl < 0 || sp < 0 || sp > nl {
+            break;
+        }
+        let k = rest.slice(0, sp as usize).parse_u64().unwrap_or(0);
+        rec.insert(String::from_str(rest.slice(sp as usize + 1, nl as usize)), k);
+        rest = rest.slice(nl as usize + 1, rest.len());
+    }
+    return rec;
+}
+
+// A native build replays a module's cached emission only when the record holds it under its key: its
+// own object, or its route through C. The rest emit again.
+fn nat_trust(p: &loader::Package, t: &mut tuc::Tuc) {
+    if !t.on || !p.native {
+        return;
+    }
+    let rec = nat_record(build_out_path(p.gen_root.as_str(), NAT_RECORD, "").as_str());
+    for m in 0..p.modules.len() {
+        if !t.hit[m] {
+            continue;
+        }
+        let r = switch rec.get(&p.modules[m].path) {
+            Some(v) => *v,
+            None => 0,
+        };
+        if r == 0 || (r & ~3u64) != (nat_key(p, &t.keys, m) & ~3u64) {
+            t.hit.set(m, false);
+        }
+    }
+}
+
+// The key of module `m`'s own object: its emission cache key (`keys`) and what the native code reads
+// beyond the C text: the build configuration, the CPU features, the C headers' constants and the functions
+// only C defines.
+fn nat_key(p: &loader::Package, keys: &Vector<u64>, m: usize) u64 {
+    let mut h = keys[m] ^ p.build_cfg as u64 << 40 ^ p.features.w[0].wrapping_mul(0x9E3779B97F4A7C15) ^ p.features.w[1];
+    h = h ^ p.build_target as u64 << 8 ^ p.arch as u64 ^ p.pic as u64 << 7;
+    // The modules SC_NATIVE names.
+    h = h ^ stdlib::get_env("SC_NATIVE").unwrap_or(String::from_str("1")).as_str().hash().wrapping_mul(
+        0xFF51AFD7ED558CCD,
+    );
+    let mut ci = p.c_fns.iter();
+    loop {
+        switch ci.next() {
+            Some(k) => {
+                h = h ^ k.wrapping_mul(0xC2B2AE3D27D4EB4F);
+            },
+            None => {
+                break;
+            },
+        };
+    }
+    // Order-free sums over the opaque types' classes and the constants.
+    let mut ot = p.opaque_cls.keys();
+    loop {
+        switch ot.next() {
+            Some(k) => {
+                h = h ^ (k.wrapping_mul(0xD6E8FEB86659FD93) ^ (*p.opaque_cls.get(k).unwrap()) as u64).wrapping_mul(
+                    0x100000001B3,
+                );
+            },
+            None => {
+                break;
+            },
+        };
+    }
+    let mut it = p.extern_ints.keys();
+    loop {
+        switch it.next() {
+            Some(k) => {
+                let v = (*p.extern_ints.get(k).unwrap()) as u64;
+                h = h ^ (k.wrapping_mul(0x9E3779B97F4A7C15) ^ v).wrapping_mul(0x100000001B3);
+            },
+            None => {
+                break;
+            },
+        };
+    }
+    return h;
+}
+
+// The modules of a native build its backend compiles: each module of `lm` and `iq` (those with C units)
+// whose functions and data all lowered and compile, its objects into `objs`; `isnat` marks them. A
+// module compiles through C when it has module-level assembly, C text the lowering does not see (the C
+// `main`, say), a body the lowering refused, or one the backend refuses. A module the emission cache
+// replayed (`hit`) takes the route its record `rec` holds (`nat_trust`): its own object, or C.
+// SC_NATIVE_STATS reports each module that goes through C and why.
+fn native_plan(
+    p: &loader::Package,
+    l: &lw::Lower,
+    lm: &Vector<ModuleId>,
+    iq: &Vector<ModuleId>,
+    root: str,
+    hit: &Vector<bool>,
+    rec: &Map<String, u64>,
+    isnat: &mut Vector<bool>,
+    objs: &mut Vector<NatObj>,
+) {
+    let n = p.modules.len();
+    let t0 = ticks_ms();
+    isnat.truncate(0);
+    isnat.resize_default(n);
+    let mut unit = Vector::<bool>::new();
+    unit.resize_default(n);
+    for k in 0..lm.len() {
+        unit.set(lm[k] as usize, true);
+    }
+    for k in 0..iq.len() {
+        unit.set(iq[k] as usize, true);
+    }
+    // Per unit, 1 + the index in `l.conly_why` of the first reason it goes through C, 0 for none.
+    let mut conly = Vector::<u32>::new();
+    conly.resize_default(n);
+    for k in 0..l.conly.len() {
+        let u = l.conly[k] as usize;
+        if u < n && conly[u] == 0 {
+            conly.set(u, k as u32 + 1);
+        }
+    }
+    // Each part's symbols, in symbol order: part 2m is unit m's own, 2m + 1 the rest.
+    let mut funcs = Vector::<Vector<u32>>::new();
+    let mut datas = Vector::<Vector<u32>>::new();
+    funcs.resize_default(2 * n);
+    datas.resize_default(2 * n);
+    for i in 0..l.pkg.syms.len() {
+        let y = l.pkg.syms[i];
+        if y.def == lir_ir::NONE || y.unit as usize >= n {
+            continue;
+        }
+        let part = 2 * y.unit as usize + (!y.own) as usize;
+        if y.kind == lir_ir::SK_FUNC {
+            funcs.index_mut(part).push(i as u32);
+        } else {
+            datas.index_mut(part).push(i as u32);
+        }
+    }
+    // In name order (by a 64-bit hash of the name): the symbols' order follows the emission's, which a
+    // cached emission changes.
+    let mut key = Vector::<u128>::new();
+    for q in 0..2 * n {
+        for d in 0..2usize {
+            let v = if d == 0 {
+                funcs.index_mut(q);
+            } else {
+                datas.index_mut(q);
+            };
+            if v.len() < 2 {
+                continue;
+            }
+            key.truncate(0);
+            for k in 0..v.len() {
+                key.push(l.pkg.spell(l.pkg.syms[v[k] as usize].name).hash() as u128 << 32 | v[k]);
+            }
+            key.sort();
+            for k in 0..v.len() {
+                v.set(k, (key[k] & 0xFFFFFFFF) as u32);
+            }
+        }
+    }
+    let stats = stdlib::getenv("SC_NATIVE_STATS") != null;
+    let sel = stdlib::get_env("SC_NATIVE").unwrap_or(String::from_str("1"));
+    // Each unit's reason to go through C, else its parts, compiled in parallel; a replayed unit's own
+    // part is its recorded object.
+    let mut bytes = Vector::<Vector<u8>>::new();
+    let mut olds = Vector::<String>::new();
+    olds.resize_default(n);
+    let mut whys = Vector::<String>::new();
+    let mut oks = Vector::<bool>::new();
+    bytes.resize_default(2 * n);
+    whys.resize_default(2 * n);
+    oks.resize_default(2 * n);
+    let mut todo = Vector::<u64>::new();
+    for m in 0..n {
+        if !*unit.at(m) {
+            continue;
+        }
+        let why = whys.index_mut(2 * m);
+        if !cbe::in_list(sel.as_str(), p.modules[m].path.as_str()) {
+            why.push_str("not named by SC_NATIVE");
+            continue;
+        }
+        if module_has_asm(p, m) {
+            why.push_str("module-level assembly");
+            continue;
+        }
+        if conly[m] != 0 {
+            why.push_string(l.conly_why.at(conly[m] as usize - 1));
+            continue;
+        }
+        if hit.len() != 0 && hit[m] {
+            // The record holds the module under its key (`nat_trust`).
+            let r = *rec.get(&p.modules[m].path).unwrap();
+            if (r & NAT_C) != 0 {
+                why.push_str("its cached emission went through C");
+                continue;
+            }
+            if (r & NAT_OBJ) != 0 {
+                let old = loader::read_file(build_out_path(root, p.modules[m].path.as_str(), ".o").as_str());
+                if old.is_none() {
+                    why.push_str("its cached emission has no native object");
+                    continue;
+                }
+                olds.set(m, old.unwrap());
+            }
+            oks.set(2 * m, true);
+        } else if funcs.at(2 * m).len() + datas.at(2 * m).len() != 0 {
+            todo.push(0xFFFFFFFFu64 - funcs.at(2 * m).len() as u64 << 32 | (2 * m) as u64);
+        } else {
+            oks.set(2 * m, true);
+        }
+        if funcs.at(2 * m + 1).len() + datas.at(2 * m + 1).len() != 0 {
+            todo.push(0xFFFFFFFFu64 - funcs.at(2 * m + 1).len() as u64 << 32 | (2 * m + 1) as u64);
+        } else {
+            oks.set(2 * m + 1, true);
+        }
+    }
+    // Largest first, for the balance of the pool.
+    todo.sort();
+    let pk = (&l.pkg) as *const lir_ir::Package;
+    let wg = psync::WaitGroup::new();
+    for k in 0..todo.len() {
+        let q = (todo[k] & 0xFFFFFFFF) as usize;
+        let t = NatTask {
+            pk: pk,
+            os: p.build_target,
+            isa: p.arch,
+            fs: funcs.at(q),
+            ds: datas.at(q),
+            bytes: bytes.index_mut(q),
+            why: whys.index_mut(q),
+            ok: oks.index_mut(q),
+        };
+        if p.jobs == 1 || todo.len() == 1 {
+            nat_task(t);
+            continue;
+        }
+        wg.add(1);
+        let wgc = wg.clone();
+        launch || {
+            nat_task(t);
+            wgc.done();
+        };
+    }
+    wg.wait_masked();
+    let mut nc: u64 = 0;
+    let mut nn: u64 = 0;
+    for m in 0..n {
+        if !*unit.at(m) {
+            continue;
+        }
+        if whys.at(2 * m).len() == 0 && oks[2 * m] && oks[2 * m + 1] {
+            isnat.set(m, true);
+            nn += 1;
+            for part in 0..2usize {
+                let old = if part == 0 {
+                    replace(olds.index_mut(m), String::new());
+                } else {
+                    String::new();
+                };
+                if bytes.at(2 * m + part).len() != 0 || old.len() != 0 {
+                    let b = replace(bytes.index_mut(2 * m + part), Vector::<u8>::new());
+                    objs.push(NatObj { m: m as ModuleId, own: part == 0, bytes: b, old: old });
+                }
+            }
+            if stats {
+                eprint("native: {} native\n", p.modules[m].path.as_str());
+            }
+            continue;
+        }
+        nc += 1;
+        if stats {
+            let w = if whys.at(2 * m).len() != 0 {
+                whys.at(2 * m).as_str();
+            } else {
+                whys.at(2 * m + 1).as_str();
+            };
+            eprint("native: {} through C: {}\n", p.modules[m].path.as_str(), w);
+        }
+    }
+    if stats {
+        eprint("native: {} modules native, {} through C, {} ms\n", nn, nc, ticks_ms() - t0);
+    } else if nc != 0 {
+        // The C-fallback count; SC_NATIVE_STATS=1 names each module and its reason.
+        eprint("native: {} of {} modules through C\n", nc, nn + nc);
     }
 }
 
@@ -12393,7 +13304,7 @@ pub fn lint_package(
 /// Per-file completion callback for the streaming build: the engine starts compiling a finished TU
 /// while later ones are still being emitted. `kind` 0 = header (or a unit compiled only through a
 /// pack), 1 = C source, 2 = the shared `__sc_fwd.h` of a tree whose units compile through its
-/// precompiled header. Paths are full paths under the package's gen_root, the one tree the
+/// precompiled header, 3 = a native object the link takes as it is. Paths are full paths under the package's gen_root, the one tree the
 /// C compiler reads. Notifications for one build arrive from a single thread.
 pub struct EmitSink {
     pub ctx: *mut void,
@@ -12677,6 +13588,22 @@ pub fn run_package(
     }
     let tstat = stdlib::getenv("SC_CEMIT_STATS") != null;
     let mut tp0 = ticks_ms();
+    // Only a link takes the native objects (a build system's, a script's or the test runner's): an
+    // emission alone writes C. An unoptimized build without sanitizers takes them where the target has a
+    // native backend; SC_NATIVE overrides: 0 for none, 1 for every module, else a list of modules.
+    let links = sink != null || out_bin.len() != 0 || topts != null && unsafe (*topts).enabled;
+    let sel = stdlib::get_env("SC_NATIVE");
+    let fl = if p.cflags.len() != 0 {
+        p.cflags.as_str();
+    } else {
+        ccflags;
+    };
+    let wanted = if sel.is_some() {
+        sel.unwrap().as_str() != "0";
+    } else {
+        bman::unoptimized(fl) && (p.build_cfg & 3) == 0 && !p.mem_check;
+    };
+    p.native = links && wanted && nat::supported(target, p.arch);
     syntax_stats_report(p, "parse");
     p.platform_filter(target);
     // No module parses after the load: the token recycling buffer has no next user.
@@ -12901,6 +13828,13 @@ pub fn run_package(
         }
     }
     stage_ms(tstat, &mut tp0, "phase mid");
+    if cbe::native_on(p) {
+        native_header_facts(p);
+        stage_ms(tstat, &mut tp0, "phase native facts");
+    }
+    if cbe::native_on(p) || stdlib::getenv("SC_LIR") != null {
+        lir_lines(p);
+    }
     cemit_package(p, testing, &plan, live.as_ptr(), target, &mut co, &mut irkeep);
     // The emission frontier restarted the pool; release it again before any test-runner fork.
     if p.jobs != 1 {
@@ -12918,11 +13852,7 @@ pub fn run_package(
     if co.skips != 0 && !co.len_faults {
         let _ = report_refusals(p, &mut co.refused, false);
         if !deep {
-            unsafe stdio::fprintf(
-                stdio::stderr(),
-                "error: internal: the backend refused %llu emissions\n".ptr() as *const char,
-                co.skips,
-            );
+            eprint("error: internal: the backend refused {} emissions\n", co.skips);
             if p.bootstrap {
                 // `bc_lower_err` lets such a body go unchecked; it cannot lower for the emission.
                 eprint(
@@ -13011,6 +13941,36 @@ pub fn run_package(
         }
     }
     sort_big_first(&mut iq, &isz);
+    // A native build compiles its modules into objects; the rest go through C.
+    let mut nat_objs = Vector::<NatObj>::new();
+    let mut nat_mod = Vector::<bool>::new(); // per module, native
+    let mut nat_rec = Map::<String, u64>::new();
+    let nat_rp = build_out_path(root, NAT_RECORD, "");
+    if co.lir.is_some() && !err {
+        // The record of the objects an earlier build left, for the modules the emission cache replayed.
+        if co.tuc_keys.len() != 0 {
+            nat_rec = nat_record(nat_rp.as_str());
+        }
+        if let Some(l) = &co.lir {
+            native_plan(p, l, &lm, &iq, root, &co.tuc_hit, &nat_rec, &mut nat_mod, &mut nat_objs);
+        }
+        let isnat = &nat_mod;
+        let mut lm2 = Vector::<ModuleId>::new();
+        for k in 0..lm.len() {
+            if !isnat[lm[k] as usize] {
+                lm2.push(lm[k]);
+            }
+        }
+        lm = lm2;
+        let mut iq2 = Vector::<ModuleId>::new();
+        for k in 0..iq.len() {
+            if !isnat[iq[k] as usize] {
+                iq2.push(iq[k]);
+            }
+        }
+        iq = iq2;
+        co.lir = Option::<Box<lw::Lower>>::None;
+    }
     let tw0 = ticks_ms();
     let pub9 = co.pr.start();
     // A small program compiles as one unit (`__sc_unity.c` includes its module, instance and registry
@@ -13266,6 +14226,63 @@ pub fn run_package(
             }
         }
     }
+    // The native objects, beside the C units they replace: per module its own items' and the rest; the
+    // record of the own objects, with their keys, when the emission cache is on.
+    let mut nat_paths = Vector::<String>::new();
+    let mut rec_txt = String::new();
+    if wtree {
+        for k in 0..nat_objs.len() {
+            let ob = nat_objs.at(k);
+            let mp = p.modules[ob.m as usize].path.as_str();
+            let mut op = build_out_path(
+                root,
+                mp,
+                if ob.own {
+                    ".o";
+                } else {
+                    "__inst.o";
+                },
+            );
+            let body = if ob.old.len() != 0 {
+                ob.old.as_str();
+            } else {
+                unsafe str::from_raw(ob.bytes.as_ptr(), ob.bytes.len());
+            };
+            if publish_out(osink, &mut co.pr, &mut op, body, 3) {
+                nat_paths.push(op.clone());
+                keep.push(op);
+            } else {
+                err = true;
+            }
+        }
+        // Every module, with whether it has an own object or went through C.
+        if co.tuc_keys.len() != 0 && nat_mod.len() != 0 {
+            let mut has = Vector::<bool>::new();
+            has.resize_default(p.modules.len());
+            for k in 0..nat_objs.len() {
+                if nat_objs.at(k).own {
+                    has.set(nat_objs.at(k).m as usize, true);
+                }
+            }
+            for m in 0..p.modules.len() {
+                let fl = if !nat_mod[m] {
+                    NAT_C;
+                } else if has[m] {
+                    NAT_OBJ;
+                } else {
+                    0;
+                };
+                rec_txt.format_into("{} {}\n", nat_key(p, &co.tuc_keys, m) & ~3u64 | fl, p.modules[m].path.as_str());
+            }
+        }
+        if !err && rec_txt.len() != 0 {
+            if write_file_atomic(nat_rp.as_str(), rec_txt.as_str()) {
+                keep.push(nat_rp.clone());
+            }
+        } else {
+            let _ = fs::unlink(nat_rp.as_str());
+        }
+    }
     if stdlib::getenv("SC_CEMIT_STATS") != null {
         eprint("cemit-stage write: {} ms\n", ticks_ms() - tw0);
         co.pr.stop(prb::P_PUBLISH, pub9);
@@ -13313,7 +14330,7 @@ pub fn run_package(
     let mut rc: i32 = err as i32;
     if out_bin.len() != 0 {
         if !err {
-            rc = test_build_and_run(p, null, &cunits, out_bin, cflags, ccflags, target);
+            rc = test_build_and_run(p, null, &cunits, &nat_paths, out_bin, cflags, ccflags, target);
         }
     } else if testing && !err {
         if plan.cases.len() == 0 {
@@ -13327,7 +14344,7 @@ pub fn run_package(
                     cunits.push(runner.clone());
                     keep.push(runner);
                     if sink == null {
-                        rc = test_build_and_run(p, topts, &cunits, "", cflags, ccflags, target);
+                        rc = test_build_and_run(p, topts, &cunits, &nat_paths, "", cflags, ccflags, target);
                     }
                 },
                 None => {

@@ -227,6 +227,7 @@ fn parity_mixed_cases() {
 // exists to find: the constant traps, the run time wraps.
 @test
 fn parity_reports_missing_runtime_check() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the planted defect is a C flag: the C backend's
     let mut cstd = String::from_str("--cstd=");
     cstd.push_str(unsafe str::from_cstr(cli::cstd()));
     cstd.push_str(" -DSC_ARITH_WRAP");

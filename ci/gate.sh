@@ -8,7 +8,7 @@
 #   3. the two-generation fixpoint: gen1 and gen2 emit byte-identical C;
 #   4. the worker-count identity, run by generation two: one worker and every core under each
 #      task-delay seed emit byte-identical C, publish the same package type table and item index,
-#      and print the same diagnostics;
+#      and print the same diagnostics; one worker and every core give byte-identical native objects;
 #   5. every emitted translation unit compiles under the strict warning set, and the tree meets the
 #      readability rules.
 # Any failure stops the gate with a nonzero exit. Scratch trees live under $TMPDIR and are removed.
@@ -74,10 +74,11 @@ echo "gate: byte-identical"
 # One frontend build of the tree by gen2: $1 workers, $2 the SC_TASK_DELAY seed (empty = none), $3
 # the record name under $tmp (<name>-build/debug/raw, <name>-types, <name>-err). The no-op C compiler
 # leaves no binary, so its checked install error is the expected end of these emission-only builds.
-# Generation two itself was compiled and linked above.
+# Generation two itself was compiled and linked above. The builds emit C (`SC_NATIVE=0`): the debug
+# profile's native objects are the last step's.
 gen2_build() {
     rc=0
-    ( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 SC_ITEM_STATS=1 SC_TYPE_TABLE="$tmp/$3-types" env ${2:+SC_TASK_DELAY=$2} "./gen2-super-c$x" build --jobs="$1" --cc=true --out-dir="$tmp/$3-build" -o "$tmp/noop-bin$x" ${cstd:+"$cstd"} >/dev/null 2>"$tmp/$3-err" ) || rc=$?
+    ( cd "$tree" && SC_NATIVE=0 SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 SC_ITEM_STATS=1 SC_TYPE_TABLE="$tmp/$3-types" env ${2:+SC_TASK_DELAY=$2} "./gen2-super-c$x" build --jobs="$1" --cc=true --out-dir="$tmp/$3-build" -o "$tmp/noop-bin$x" ${cstd:+"$cstd"} >/dev/null 2>"$tmp/$3-err" ) || rc=$?
     if [ "$rc" -ne 1 ] || ! grep -q '^build: cannot move .* into place$' "$tmp/$3-err"; then
         cat "$tmp/$3-err" >&2
         fail "gen2 build $3 (--jobs=$1${2:+, SC_TASK_DELAY=$2}) failed (above)"
@@ -103,6 +104,14 @@ for seed in $CONTRACT_DELAY_SEEDS; do
     same_record j1 "jn$seed"
     echo "gate: seed $seed byte-identical"
 done
+
+step "native worker identity: --jobs=$CONTRACT_WORKERS_MIN vs --jobs=$ncpu"
+# The debug profile's build: native objects where the host has the native backend, else C.
+for j in "$CONTRACT_WORKERS_MIN" "$ncpu"; do
+    ( cd "$tree" && SC_LEAK_CHECK=fatal "./gen2-super-c$x" build --jobs="$j" --out-dir="$tmp/nat$j-build" -o "$tmp/nat$j-bin$x" ${cstd:+"$cstd"} >/dev/null ) || fail "gen2 native build (--jobs=$j) failed"
+done
+same_tree "$tmp/nat$CONTRACT_WORKERS_MIN-build/debug/raw" "$tmp/nat$ncpu-build/debug/raw" || fail "one worker and every core built different native objects (above)"
+echo "gate: native objects byte-identical"
 
 strict_cstd=${SC_CSTD:-$CONTRACT_CSTD}
 step "strict C warnings ($strict_cstd $CONTRACT_STRICT_CFLAGS) and readability"

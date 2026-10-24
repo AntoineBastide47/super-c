@@ -25931,7 +25931,8 @@ extend TypeChecker {
         self.icx.call_args = NodeList { start: 0, len: 0 };
         self.icx.call_targs = NodeList { start: 0, len: 0 };
         self.icx.proj_obj_ok = true;
-        let obj = self.check_expr(obj_node);
+        // Several results get the member access's own diagnostic below.
+        let obj = self.check_expr_mret(obj_node, TYPE_NONE);
         self.icx.proj_obj_ok = false;
         self.icx.call_args = ca;
         self.icx.call_targs = cta;
@@ -28355,6 +28356,27 @@ extend TypeChecker {
         self.lt_conv = id;
         let r = self.check_expr_w_i(id, expected);
         self.lt_conv = oc;
+        if r == TYPE_NONE && id != NODE_NONE && self.icx.mret_call == id && self.icx.mret_ok != id {
+            // Several results are no value.
+            let sp = unsafe (*self.cur_ast()).at_const(id).span;
+            self.errors.emit_span(
+                sp,
+                format(
+                    "a call with several results is no value: bind them with `let (..) =` or forward them with `return`",
+                ),
+            );
+            self.icx.mret_call = NODE_NONE;
+            return TYPE_ERROR;
+        }
+        return r;
+    }
+
+    // Check `id`, whose several results, when it is a call with them, its parent reads.
+    fn check_expr_mret(self: &mut Self, id: NodeId, expected: TypeId) TypeId {
+        let o = self.icx.mret_ok;
+        self.icx.mret_ok = id;
+        let r = self.check_expr_w(id, expected);
+        self.icx.mret_ok = o;
         return r;
     }
 
@@ -29632,6 +29654,18 @@ extend TypeChecker {
             let last = unsafe (*a).at_const(lastid);
             let lv = pick(last.kind == NodeKind::NODE_EXPRESSION_STATEMENT, last.as_data.single.value, NODE_NONE);
             if lv != NODE_NONE && unsafe (*a).at_const(lv).kind != NodeKind::NODE_ASSIGNMENT {
+                if self.icx.mret_call == lv && unsafe (*a).type_of(lv) == TYPE_NONE {
+                    // The tail statement dropped several results, which are no value.
+                    let sp = unsafe (*a).at_const(lv).span;
+                    self.errors.emit_span(
+                        sp,
+                        format(
+                            "a call with several results is no value: bind them with `let (..) =` or forward them with `return`",
+                        ),
+                    );
+                    self.icx.mret_call = NODE_NONE;
+                    return TYPE_ERROR;
+                }
                 self.tc_tail_adapt(expected, lv);
                 return unsafe (*a).type_of(lv);
             }
@@ -29787,12 +29821,15 @@ extend TypeChecker {
         let tyn = unsafe (*a).at_const(id).as_data.let_stmt.ty;
         let declared = pick(tyn != NODE_NONE, self.resolve_type(tyn), TYPE_NONE);
         self.icx.mret_call = NODE_NONE;
-        let vt = self.check_expr_w(value, declared);
         // `unsafe f()` is the call's value: the binding reads through the `unsafe`.
         let mut core = value;
         while core != NODE_NONE && unsafe (*a).at_const(core).kind == NodeKind::NODE_UNARY && unsafe (*a).at_const(core).as_data.unary.op == TokenType::Unsafe {
             core = unsafe (*a).at_const(core).as_data.unary.operand;
         }
+        let o = self.icx.mret_ok;
+        self.icx.mret_ok = core;
+        let vt = self.check_expr_w(value, declared);
+        self.icx.mret_ok = o;
         let stashed = core != NODE_NONE && self.icx.mret_call == core;
         if vt == TYPE_ERROR && !stashed {
             for i in 0..names.len {
@@ -29915,7 +29952,12 @@ extend TypeChecker {
         }
         for i in 0..values.len {
             let vid = unsafe (*a).list(values)[i as usize];
-            self.check_expr_w(vid, rvwant);
+            if values.len == 1 {
+                // `return pair();` forwards the results.
+                self.check_expr_mret(vid, rvwant);
+            } else {
+                self.check_expr_w(vid, rvwant);
+            }
         }
         let expected = pick(returns_void, 0, rets.len);
         if values.len == 1 && expected > 1 && self.icx.mret_call == unsafe (*a).list(values)[0] && self.icx.mret_total == expected {
@@ -31391,7 +31433,7 @@ extend TypeChecker {
                 self.check_return(id);
             },
             NODE_DEFER => {
-                let _dv = self.check_expr(unsafe (*a).at_const(id).as_data.single.value);
+                let _dv = self.check_expr_mret(unsafe (*a).at_const(id).as_data.single.value, TYPE_NONE);
             },
             NODE_ASM => {
                 self.tc_check_asm(id);
@@ -31406,7 +31448,7 @@ extend TypeChecker {
                 self.tc_check_for(id);
             },
             NODE_EXPRESSION_STATEMENT => {
-                let _es = self.check_expr(unsafe (*a).at_const(id).as_data.single.value);
+                let _es = self.check_expr_mret(unsafe (*a).at_const(id).as_data.single.value, TYPE_NONE);
             },
             NODE_BREAK | NODE_CONTINUE => {
                 let lb = unsafe (*a).at_const(id).as_data.flow.label;

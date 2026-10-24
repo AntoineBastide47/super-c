@@ -76,7 +76,10 @@ type when omitted. The program entry is the root module's top-level `main`, decl
 named `main`, is an ordinary function of any signature.
 
 A parenthesized return list (`fn f() (A, B)`) is several results, not a tuple. To return a
-tuple, name it through an alias: `type P = (A, B); fn f() P`.
+tuple, name it through an alias: `type P = (A, B); fn f() P`. A call with several results is no
+value: bind its results with `let (a, b) = f();`, forward them with `return f();`, or drop them
+in an expression statement. It cannot be an operand, an argument, a member receiver, an `if` arm's
+value or a block's tail value.
 
 A direct call of a function to itself whose result the function returns as it is becomes a
 jump in every profile, so the recursion runs in one frame. It stays a call when a drop, a
