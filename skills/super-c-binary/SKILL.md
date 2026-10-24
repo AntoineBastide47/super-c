@@ -32,7 +32,9 @@ super-c build app.spc -o app # compile + link only, name the binary (default: a.
 
 A bare `.spc` argument compiles the file (and its transitive imports) and emits a `build/`
 tree of `.h`/`.c` files. It links and runs nothing.
-Use `super-c build <file.spc> -o <name>` to link a named binary, then run it yourself. Single-file programs
+Use `super-c build <file.spc> -o <name>` to link a named binary, then run it yourself. A single-file build
+takes every option of its built-in profile (`--profile=release` or `super-c release file.spc` strips the
+binary, as a manifest build does); a profile with other options needs a `build.toml`. Single-file programs
 emit plain C names (a name that a prelude item also has gains `_`: `format` becomes `format_`);
 multi-module programs mangle symbols by module path.
 

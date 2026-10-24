@@ -109,6 +109,7 @@ reach them through `as_slice()` / `as_mut_slice()` and keep `sort`, `sort_by`, `
 | `std::collections::deque::RingBuffer<T, N>` | `container/ring` | none | `container/queue` over a fixed buffer | none |
 | `std::collections::heap::BinaryHeap`, `Reverse` | `container/heap` | `BinaryHeap`, `cmp::Reverse` | `container/priority_queue` | `std::priority_queue`, `std::greater` |
 | `std::collections::btree::BTreeMap`, `BTreeSet`, `Bound` | none | `BTreeMap`, `BTreeSet`, `Bound` | `container/rbtree` | `std::map`, `std::set` |
+| `std::collections::hive::Hive`, `HiveHandle` (`insert`, unsafe `get`, `remove`; `retain`, `reserve`, `trim_capacity`) | none | none | none | `std::hive` (`insert`, `erase`, `erase_if`, `reserve`, `trim_capacity`) |
 | `std::collections::bits::BitSet<N>`, `BitVec`, `BitField` | `math/bits` per word | none (`fixedbitset` crate) | `bit_set`, `container/bit_array`, `bit_field` | `std::bitset`, `std::vector<bool>`, bit-field members |
 | `std::collections::mdspan::MdSpan`, `MdSpanMut` (`row_major`, `col_major`, `strided`) | none | none | none | `std::mdspan` (`layout_right`, `layout_left`, `layout_stride`) |
 

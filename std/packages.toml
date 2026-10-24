@@ -163,10 +163,10 @@ tier = 2
 targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "full", wasm = "full" }
 capabilities = ["C library memory functions"]
 accelerations = ["the C compiler's vectorization of the branch-free word loops of `bits`"]
-allocator = "`Deque`, `BinaryHeap`, `BTreeMap`, `BTreeSet` and `BitVec` take `A: Allocator = Global` with `new_in`: a Deque and a BinaryHeap hold one block grown geometrically, a B-tree one block per node, a BitVec one block of words; nothing allocates per element. `RingBuffer`, `BitSet`, `BitField` and the `mdspan` views never allocate."
-thread_safety = "No internal synchronization; every container is `Send` and `Sync` when its elements and allocator are; an `MdSpan` is `Sync` when `T` is."
+allocator = "`Deque`, `BinaryHeap`, `BTreeMap`, `BTreeSet`, `Hive` and `BitVec` take `A: Allocator = Global` with `new_in`: a Deque and a BinaryHeap hold one block grown geometrically, a B-tree one block per node, a Hive blocks of geometrically growing capacity that it keeps when they empty, a BitVec one block of words; nothing allocates per element. `RingBuffer`, `BitSet`, `BitField` and the `mdspan` views never allocate."
+thread_safety = "No internal synchronization; every container is `Send` and `Sync` when its elements and allocator are; an `MdSpan` is `Sync` when `T` is; a `HiveHandle` is neither."
 blocking = "Never blocks."
-errors = "Lookups and removals return `Option`; an index or range out of bounds, a `range` whose start is above its end, a `BitVec` length mismatch, a `BitField` value wider than its field and a capacity overflow panic; `BitSet::parse` returns `ParseBitsError`, the `mdspan` constructors `MdSpanError`, a full `RingBuffer` push `Err(value)`; a non-power-of-two `RingBuffer` capacity and a `BitField` that does not fit its word fail the build."
+errors = "Lookups and removals return `Option`, except the `Hive` handle operations, which are `unsafe` and require a live handle; an index or range out of bounds, a `range` whose start is above its end, a `BitVec` length mismatch, a `BitField` value wider than its field and a capacity overflow panic; `BitSet::parse` returns `ParseBitsError`, the `mdspan` constructors `MdSpanError`, a full `RingBuffer` push `Err(value)`; a non-power-of-two `RingBuffer` capacity and a `BitField` that does not fit its word fail the build."
 
 [package.alloc]
 tier = 2

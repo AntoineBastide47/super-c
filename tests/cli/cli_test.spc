@@ -365,6 +365,24 @@ fn inlined_self_comparison_folds() {
     assert(!c.as_str().contains("(end > end)") && c.as_str().contains("((void)(end), false)"));
 }
 
+// A single-file build takes every option of its profile: the release profile strips the binary, at
+// the link or with `strip` after it, as a manifest build does.
+@test
+fn a_single_file_release_build_is_stripped() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "@noinline\nfn zz_strip_probe_fn(x: i32) i32 {\n    return x * 3 + 1;\n}\nfn main(args: Vector<str>) i32 {\n    return zz_strip_probe_fn(args.len() as i32) - 4;\n}\n",
+    );
+    let root = p.dir();
+    let r = cli::superc_in(root, "build --profile=release main.spc -o bin");
+    r.show();
+    assert(r.ok(), "the program builds at the release profile");
+    assert_eq(p.run_bin(), 0);
+    let bin = loader::read_file(format("{}/bin{}", root, unsafe str::from_cstr(cli::binext())).as_str()).unwrap();
+    assert(!bin.as_str().contains("zz_strip_probe_fn"), "the binary holds no symbol names");
+}
+
 // A `&mut` parameter is exclusive for the call, so its C parameter is `restrict`; a `&` one is not. The
 // success test of `?` reaches C as a likely branch, at run time and in constant evaluation alike.
 @test
@@ -2149,7 +2167,8 @@ fn leak_tracker() {
 // A leak's site is the function that asked for the block, in every profile: the tracker's entry
 // points never inline into their caller (whose return address would name the caller's caller), and
 // `Global`'s methods inline into the container that calls them. Only macOS prints a site by name:
-// `backtrace_symbols` elsewhere prints an offset for a function the binary does not export.
+// `backtrace_symbols` elsewhere prints an offset for a function the binary does not export. The
+// release build keeps its symbols (`strip = false`): a stripped binary names no function.
 @test
 fn leak_sites_name_the_allocating_function() {
     if PLATFORM != Platform::MacOS {
@@ -2160,11 +2179,12 @@ fn leak_sites_name_the_allocating_function() {
         "main.spc",
         "extern \"C\" { fn malloc(n: usize) *mut void; }\n@noinline\nfn leak_site(n: usize) usize {\n    let pt = unsafe malloc(48 + n);\n    return (pt != null) as usize + n;\n}\nfn main(args: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    forget(v);\n    return (leak_site(args.len()) - 2) as i32;\n}\n",
     );
+    p.mkfile("build.toml", "bin = \"bin\"\nroot = \"main.spc\"\n\n[profile.release]\nstrip = false\n");
     let root = p.dir();
     for prof in ["debug", "release"] {
         let mut args = String::new();
-        args.format_into("build --profile={} \"{}/main.spc\" -o \"{}/bin\"", prof, root, root);
-        assert(p.run_raw(args.as_str()).ok(), "the program builds");
+        args.format_into("build --profile={}", prof);
+        assert(cli::superc_in(root, args.as_str()).ok(), "the program builds");
         let lk = p.run_bin_env("SC_LEAK_CHECK=1 ");
         assert(lk.ok(), "the program runs");
         assert(lk.out_has(" leak_site + "), "the raw block names its function");
@@ -12551,10 +12571,13 @@ fn spawn_logged(argv: []str, log: str, dir: str) process::Child {
 // Release lock `h` here: the scope's end would release it only after the asserts that follow.
 const fn drop_lock(_h: bsys::Lock) {}
 
-// WASI has no file locks or processes.
+// A test binary for WASI has no processes, and a WASI compiler takes no file lock.
 @platform(!wasm)
 @test
 fn a_build_waits_for_the_holder_of_its_tree() {
+    if cli::on_wasm() {
+        return; // the compiler under test runs on WASI: no file locks
+    }
     let p = cli::proj_new();
     p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
     assert(p.compile("main.spc").ok());
@@ -12585,10 +12608,13 @@ fn a_build_waits_for_the_holder_of_its_tree() {
 // four-slot jobserver, then waits; killed there, its slots are free for the next claim. (Under
 // --test-no-fork the process keeps this jobserver for the later tests: a smaller budget, never a wrong
 // result.)
-// WASI has no file locks and no jobserver.
+// A test binary for WASI has no processes, and a WASI compiler takes no file lock and no jobserver slot.
 @platform(!wasm)
 @test
 fn a_killed_build_gives_its_jobserver_slots_back() {
+    if cli::on_wasm() {
+        return; // the compiler under test runs on WASI: no file locks and no jobserver
+    }
     let _js = cli::set_env("SC_JOBSERVER", "");
     assert(unsafe shim::sc_jobserver_init(4) == 1, "the test makes a jobserver of its own");
     // A manifest build takes its tree's lock with every slot it claimed (a serial script build hands

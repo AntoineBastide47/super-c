@@ -47,7 +47,8 @@ const fn label_of(l: str) str {
     return l.slice(0, l.len() - 1);
 }
 
-// The zero stores in the functions of disassembly `text` whose name holds `main` or `zeroize`.
+// The zero stores in the functions of disassembly `text` whose name holds `main` or `zeroize`. A line
+// ends at "\n" or "\r\n": a Windows disassembler writes its output in text mode.
 const fn zero_stores_in_scope(text: str) u32 {
     let mut n: u32 = 0;
     let mut inside = false;
@@ -55,12 +56,15 @@ const fn zero_stores_in_scope(text: str) u32 {
     while at < text.len() {
         let rest = text.slice(at, text.len());
         let e = rest.find("\n");
-        let line = if e < 0 {
+        let mut line = if e < 0 {
             rest;
         } else {
             rest.slice(0, e as usize);
         };
         at += line.len() + 1;
+        if line.ends_with("\r") {
+            line = line.slice(0, line.len() - 1);
+        }
         let lab = label_of(line);
         if lab.len() != 0 {
             inside = lab.find("main") >= 0 || lab.find("zeroize") >= 0;
@@ -78,10 +82,10 @@ fn zeroize_of_a_dead_buffer_survives_release() {
     }
     let p = cli::proj_new();
     p.mkfile("main.spc", DEAD_KEY);
+    // The release profile with its symbols: the disassembly must name the functions it scopes to.
+    p.mkfile("build.toml", "bin = \"bin\"\nroot = \"main.spc\"\n\n[profile.release]\nstrip = false\n");
     let root = p.dir();
-    let mut args = String::new();
-    args.format_into("build --profile=release \"{}/main.spc\" -o \"{}/bin\"", root, root);
-    let r = p.run_raw(args.as_str());
+    let r = cli::superc_in(root, "build --profile=release");
     r.show();
     assert(r.ok(), "the program builds at the release profile");
     assert_eq(p.run_bin(), 6);
@@ -100,5 +104,9 @@ fn zeroize_of_a_dead_buffer_survives_release() {
         return;
     }
     let dis = cli::read_text(outp.as_str());
-    assert(zero_stores_in_scope(dis.as_str()) >= 1, "the object code keeps the stores of the dead buffer");
+    let n = zero_stores_in_scope(dis.as_str());
+    if n == 0 {
+        eprintln("`{}` printed:\n{}", cmd.as_str(), dis.as_str().slice(0, dis.len().min(4000)));
+    }
+    assert(n >= 1, "the object code keeps the stores of the dead buffer");
 }

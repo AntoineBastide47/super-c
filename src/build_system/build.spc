@@ -786,6 +786,10 @@ pub fn profile_flags(name: str, target: i32, sdk: i32, compile_only: bool, sanit
         push_profile_side(&mut out, prof, &prof.cflags, false, target, sdk);
         if !compile_only {
             push_profile_side(&mut out, prof, &prof.ldflags, true, target, sdk);
+            // A macOS or iOS link strips after it (`profile_strip`).
+            if prof.strip && strips_at_link(target) {
+                out.push_str(" -Wl,--strip-all");
+            }
         }
         // A script build links once, with no link record to relink against, so a ThinLTO request has
         // no probe here and keeps the automatic mode.
@@ -811,6 +815,14 @@ pub fn profile_flags(name: str, target: i32, sdk: i32, compile_only: bool, sanit
         push_profile(&mut out, &sf, target, sdk);
     }
     return out;
+}
+
+/// Whether a build without a manifest runs `strip` on the binary it links with built-in profile `name` on
+/// target `target`: the profile strips and the target's link does not (`strips_at_link`).
+pub fn profile_strip(name: str, target: i32) bool {
+    let m = mf::builtins_only();
+    let pi = m.profile_index(name);
+    return pi >= 0 && m.profiles.at(pi as usize).strip && !strips_at_link(target);
 }
 
 /// The LTO mode a build without a manifest compiles built-in profile `name` with (`profile_flags`):
@@ -2989,7 +3001,7 @@ fn cc_stream(
     let mut ldbase = String::new();
     push_sdk_flags(&mut ldbase, m.target, m.sdk, m.arch, feats);
     push_sdk_libs(&mut ldbase, m.target, m.sdk);
-    if prof.strip && strips_at_link(m) {
+    if prof.strip && strips_at_link(m.target) {
         ldbase.push_str(" -Wl,--strip-all");
     }
     push_all(&mut ldbase, &m.ldflags);
@@ -3489,7 +3501,7 @@ fn engine_build_i(
                 if lrc != 0 {
                     eprintln("build: link failed (exit {}): {}", lrc, lrendered.as_str());
                     ret = 1;
-                } else if prof.strip && link_kind == 0 && !strips_at_link(m) {
+                } else if prof.strip && link_kind == 0 && !strips_at_link(m.target) {
                     // The temp is stripped, so no unstripped binary is ever installed, and a failed
                     // strip leaves the previous binary and its record: the next build links again.
                     let mut st = Vector::<String>::new();
@@ -3595,8 +3607,8 @@ pub fn manifest_print_probes(m: &mf::Manifest, profile: str, cx: &BuildCtx) i32 
 // Whether a stripped build strips at link (`-Wl,--strip-all`): every linker but Apple's can, which
 // saves the `strip` process and a rewrite of the binary; the host `strip` cannot read the Android and
 // wasm linkers' (lld) output either. A macOS or iOS binary runs `strip`: ld64 has no full strip.
-const fn strips_at_link(m: &mf::Manifest) bool {
-    return m.target != 1 && m.target != 4;
+pub const fn strips_at_link(target: i32) bool {
+    return target != 1 && target != 4;
 }
 
 /// The link record of binary path `bin` in out-dir `out_dir`, without its `.cmd` extension (also the

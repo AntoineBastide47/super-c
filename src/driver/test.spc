@@ -750,6 +750,16 @@ pub fn test_build_and_run(
         eprintln("super-c: {} failed ({})", what, ccs.as_str());
         return 1;
     }
+    if bsys::profile_strip(p.profile.as_str(), target) {
+        let mut st = Vector::<String>::new();
+        st.push(String::from_str("strip"));
+        st.push(outp.clone());
+        let src = exec_args(&st, "");
+        if src != 0 {
+            eprintln("super-c: strip failed (exit {}): '{}'", src, outp.as_str());
+            return 1;
+        }
+    }
     bsys::sweep(null, time::now(), false);
     // The `build` subcommand: the program is linked, nothing to run.
     if out_bin.len() != 0 {
