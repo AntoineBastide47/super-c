@@ -21,27 +21,27 @@ import module::loader as loader;
 import stdlib;
 
 // Retained-check reasons (report order).
-pub const BR_UNKNOWN_INDEX: u8 = 0;
-pub const BR_UNKNOWN_LENGTH: u8 = 1;
-pub const BR_OVERFLOW_UNKNOWN: u8 = 2;
-pub const BR_JOIN_LOST_FACT: u8 = 3;
-pub const BR_RESOURCE_LIMIT: u8 = 4;
-pub const BR_WIDENED: u8 = 5; // the index's interval was lost to loop-header widening
-pub const BR_COUNT: usize = 6;
+pub(package) const BR_UNKNOWN_INDEX: u8 = 0;
+pub(package) const BR_UNKNOWN_LENGTH: u8 = 1;
+pub(package) const BR_OVERFLOW_UNKNOWN: u8 = 2;
+pub(package) const BR_JOIN_LOST_FACT: u8 = 3;
+pub(package) const BR_RESOURCE_LIMIT: u8 = 4;
+pub(package) const BR_WIDENED: u8 = 5; // the index's interval was lost to loop-header widening
+pub(package) const BR_COUNT: usize = 6;
 
-pub struct BceStats {
-    pub total: u32,
-    pub removed: u32,
-    pub ranges_total: u32,
-    pub ranges_removed: u32,
-    pub coalesced: u32,
-    pub folded: u32,
-    pub sig_kept: u32, // calls the walk crossed without discarding collection facts (signature transparency)
-    pub reasons: [u32; 6],
+pub(package) struct BceStats {
+    pub(package) total: u32,
+    pub(package) removed: u32,
+    pub(package) ranges_total: u32,
+    pub(package) ranges_removed: u32,
+    pub(package) coalesced: u32,
+    pub(package) folded: u32,
+    pub(package) sig_kept: u32, // calls the walk crossed without discarding collection facts (signature transparency)
+    pub(package) reasons: [u32; 6],
 }
 
 extend BceStats {
-    pub fn new() BceStats {
+    pub(package) fn new() BceStats {
         return BceStats {
             total: 0,
             removed: 0,
@@ -57,26 +57,26 @@ extend BceStats {
 
 // One established or branch-derived fact. kinds: 0 = idx < len, 1 = idx <= len.
 // Fields sort by size (8, 4, then 1 byte) so the struct has no padding holes.
-pub struct Fact {
+pub(package) struct Fact {
     // index key: a constant or a (local, version) value plus an affine constant offset
-    pub ic: i64,
-    pub ioff: i64,
+    pub(package) ic: i64,
+    pub(package) ioff: i64,
     // length value identity (local, version, affine offset)
-    pub ln_off: i64,
-    pub il: u32,
-    pub iv: u32,
-    pub ln_l: u32,
-    pub ln_v: u32,
+    pub(package) ln_off: i64,
+    pub(package) il: u32,
+    pub(package) iv: u32,
+    pub(package) ln_l: u32,
+    pub(package) ln_v: u32,
     // length place identity (structural place + generations at capture)
-    pub lp: u32,
-    pub lp_hg: u32,
-    pub lp_bg: u32,
-    pub lp_pg: u32,
-    pub lp_fg: u32,
-    pub kind: u8,
-    pub iconst: bool,
-    pub ln_ok: bool,
-    pub lp_ok: bool,
+    pub(package) lp: u32,
+    pub(package) lp_hg: u32,
+    pub(package) lp_bg: u32,
+    pub(package) lp_pg: u32,
+    pub(package) lp_fg: u32,
+    pub(package) kind: u8,
+    pub(package) iconst: bool,
+    pub(package) ln_ok: bool,
+    pub(package) lp_ok: bool,
 }
 
 const MAX_EDGE_FACTS: usize = 96;
@@ -84,108 +84,108 @@ const MAX_TOTAL_FACTS: usize = 16384;
 
 // Per-local length bindings, stamped with the version of the OWNER local at definition time so a
 // redefinition invalidates them without any sweep.
-pub struct LenBind {
-    pub pl: u32, // the measured place (structural identity)
-    pub hg: u32,
-    pub bg: u32,
-    pub pg: u32,
-    pub fg: u32, // the buffer generation; compared only for a place that heap memory may hold
-    pub my_v: u32,
-    pub ok: bool,
+pub(package) struct LenBind {
+    pub(package) pl: u32, // the measured place (structural identity)
+    pub(package) hg: u32,
+    pub(package) bg: u32,
+    pub(package) pg: u32,
+    pub(package) fg: u32, // the buffer generation; compared only for a place that heap memory may hold
+    pub(package) my_v: u32,
+    pub(package) ok: bool,
 }
 // Canonical comparison binding: every <, <=, > and >= records as `a OP b` with OP in {<, <=}
 // (the operand pair swaps for > and >=). `a_lp`/`b_lp` are the sides' length-place identities
 // captured AT THE COMPARISON (a still-current length local, or a direct prelude len-field read),
 // so a later fold proof can match the side against a recorded length fact.
-pub struct CmpBind {
-    pub a: fx::VKey,
-    pub b: fx::VKey,
-    pub a_lp: LenBind,
-    pub b_lp: LenBind,
-    pub le: bool, // true: a <= b, false: a < b
-    pub my_v: u32,
-    pub ok: bool,
+pub(package) struct CmpBind {
+    pub(package) a: fx::VKey,
+    pub(package) b: fx::VKey,
+    pub(package) a_lp: LenBind,
+    pub(package) b_lp: LenBind,
+    pub(package) le: bool, // true: a <= b, false: a < b
+    pub(package) my_v: u32,
+    pub(package) ok: bool,
     // 0: the comparison. Else the binding of `IN_GROUP_FITS(a, b, w)`: true means `a + k < b` for
     // every k < w; false means nothing.
-    pub w: i64,
-    pub ao: u32, // a comparison's operands for `a` and `b` (IR_NONE for a group)
-    pub bo: u32,
+    pub(package) w: i64,
+    pub(package) ao: u32, // a comparison's operands for `a` and `b` (IR_NONE for a group)
+    pub(package) bo: u32,
 }
 // `l = IN_CHUNK(i, e)` at version `my_v`: `l <= e`, so a branch fact `x < l` (or `x <= l`) also
 // holds for `e`, whose key and length place are captured here. A strip-mined loop's body learns
 // its index bound through this.
-pub struct ChunkBind {
-    pub e: fx::VKey,
-    pub e_lp: LenBind,
-    pub l: u32,
-    pub my_v: u32,
+pub(package) struct ChunkBind {
+    pub(package) e: fx::VKey,
+    pub(package) e_lp: LenBind,
+    pub(package) l: u32,
+    pub(package) my_v: u32,
 }
 // `l = x % c` (usize, c > 0) at version `my_v`: `x - l` is at most `x` and a multiple of `c`.
-pub struct RemBind {
-    pub x: fx::VKey,
-    pub x_lp: LenBind,
-    pub c: i64,
-    pub my_v: u32,
-    pub ok: bool,
+pub(package) struct RemBind {
+    pub(package) x: fx::VKey,
+    pub(package) x_lp: LenBind,
+    pub(package) c: i64,
+    pub(package) my_v: u32,
+    pub(package) ok: bool,
 }
 // The value of a local at version `my_v` is a multiple of `st` (0: no binding).
-pub struct AlBind {
-    pub st: u64,
-    pub my_v: u32,
+pub(package) struct AlBind {
+    pub(package) st: u64,
+    pub(package) my_v: u32,
 }
 // Local `l` at version `v` holds the length `lb` names: its solved interval bounds that length.
-pub struct LRead {
-    pub lb: LenBind,
-    pub l: u32,
-    pub v: u32,
+pub(package) struct LRead {
+    pub(package) lb: LenBind,
+    pub(package) l: u32,
+    pub(package) v: u32,
 }
 const LREADS_MAX: usize = 16;
 
-pub struct Bce {
-    pub fx: fx::Facts,
-    pub lenof: Vector<LenBind>,
-    pub glp: LenBind, // a guard proof's length operand read in place: its place identity
-    pub reads: Vector<u32>, // per local of the body: the operands that read it whole (`local_reads`; empty until asked)
-    pub cmpof: Vector<CmpBind>,
-    pub remof: Vector<RemBind>,
-    pub alof: Vector<AlBind>,
-    pub chunks: Vector<ChunkBind>, // the body's chunk ends, few per body
-    pub lreads: Vector<LRead>, // the latest length reads, at most LREADS_MAX
+pub(package) struct Bce {
+    pub(package) fx: fx::Facts,
+    pub(package) lenof: Vector<LenBind>,
+    pub(package) glp: LenBind, // a guard proof's length operand read in place: its place identity
+    pub(package) reads: Vector<u32>, // per local of the body: the operands that read it whole (`local_reads`; empty until asked)
+    pub(package) cmpof: Vector<CmpBind>,
+    pub(package) remof: Vector<RemBind>,
+    pub(package) alof: Vector<AlBind>,
+    pub(package) chunks: Vector<ChunkBind>, // the body's chunk ends, few per body
+    pub(package) lreads: Vector<LRead>, // the latest length reads, at most LREADS_MAX
     // Integer facts solve on demand: `iwant` when the body could use them, `itried` once solved,
     // `clens` the length identities compared with a constant of 2 or more, `ialign` when a
     // remainder alignment was bound, and the walk's position for the replay.
-    pub iwant: bool,
-    pub itried: bool,
-    pub ialign: bool,
-    pub clens: Vector<LenBind>,
-    pub cur_blk: u32,
-    pub cur_sid: u32,
-    pub facts: Vector<Fact>, // facts of the block being processed
+    pub(package) iwant: bool,
+    pub(package) itried: bool,
+    pub(package) ialign: bool,
+    pub(package) clens: Vector<LenBind>,
+    pub(package) cur_blk: u32,
+    pub(package) cur_sid: u32,
+    pub(package) facts: Vector<Fact>, // facts of the block being processed
     // Facts entering each block, filled by its single forward predecessor: block k's facts are
     // in_facts[in_start[k] .. in_start[k] + in_len[k]] (one pool per pass, no per-block vectors).
-    pub in_facts: Vector<Fact>,
-    pub in_start: Vector<u32>,
-    pub in_len: Vector<u32>,
-    pub in_set: Vector<bool>,
-    pub total_facts: usize,
-    pub limited: bool,
-    pub off: bool, // SC_BCE=0
-    pub no_fold: bool, // SC_BCE_DISABLE rule switches
-    pub no_widen: bool,
-    pub no_sig: bool,
-    pub no_int: bool,
+    pub(package) in_facts: Vector<Fact>,
+    pub(package) in_start: Vector<u32>,
+    pub(package) in_len: Vector<u32>,
+    pub(package) in_set: Vector<bool>,
+    pub(package) total_facts: usize,
+    pub(package) limited: bool,
+    pub(package) off: bool, // SC_BCE=0
+    pub(package) no_fold: bool, // SC_BCE_DISABLE rule switches
+    pub(package) no_widen: bool,
+    pub(package) no_sig: bool,
+    pub(package) no_int: bool,
     // Coalescing-lookahead scratch (per try_coalesce call; kept for capacity). `cwritten[l] ==
     // cstamp` marks a local reassigned inside the current window, whose recorded binds describe its
     // OLD value; each window takes a fresh stamp, so no per-window reset touches every local.
-    pub cwritten: Vector<u32>,
-    pub cstamp: u32,
-    pub la_dest: Vector<u32>,
-    pub la_off: Vector<i64>,
-    pub ll_dest: Vector<u32>,
-    pub ll_pl: Vector<u32>,
+    pub(package) cwritten: Vector<u32>,
+    pub(package) cstamp: u32,
+    pub(package) la_dest: Vector<u32>,
+    pub(package) la_off: Vector<i64>,
+    pub(package) ll_dest: Vector<u32>,
+    pub(package) ll_pl: Vector<u32>,
     // Widening-lookahead scratch: the window's references (`rf_dest[i] = &rf_pl[i]`).
-    pub rf_dest: Vector<u32>,
-    pub rf_pl: Vector<u32>,
+    pub(package) rf_dest: Vector<u32>,
+    pub(package) rf_pl: Vector<u32>,
 }
 
 // The successor a two-way branch on a bool takes when the bool is `v`, or IR_NONE for another shape
@@ -225,7 +225,7 @@ const fn lenbind_at(lb: LenBind, my_v: u32) LenBind {
 extend Bce {
     /// Emission-lifetime state (one per DropCtx): the env switches read once, every per-body
     /// table kept for capacity. `run` resets what a body needs, and sets the package.
-    pub fn new() Bce {
+    pub(package) fn new() Bce {
         let dis = stdlib::get_env("SC_BCE_DISABLE").unwrap_or(String::new());
         let d = dis.as_str();
         return Bce {
@@ -2415,7 +2415,7 @@ extend Bce {
     }
 }
 
-pub fn stats_line(st: &BceStats, out: &mut String) {
+pub(package) fn stats_line(st: &BceStats, out: &mut String) {
     out.push_str("bce total ");
     out.push_u64(st.total);
     out.push_str(" removed ");
@@ -2441,7 +2441,7 @@ pub fn stats_line(st: &BceStats, out: &mut String) {
 /// `z` is the emission-lifetime state pooled in the caller's DropCtx; every per-body table is
 /// reset here. `check_only` re-proves instead: a PROVEN operation this pass cannot re-prove is
 /// a compiler error (the SC_CORE_IR development verification), returned as a non-empty reason.
-pub fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &mut BceStats, check_only: bool) str<
+pub(package) fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut Bce, st: &mut BceStats, check_only: bool) str<
     'static
 > {
     if z.off {

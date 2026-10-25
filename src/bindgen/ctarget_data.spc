@@ -5,16 +5,16 @@
 // `__clang_version__` and `__VERSION__` depend on the vendor's build: ctarget.spc pins them.
 
 /// The C environment of `target::table::TARGETS` row `i` is row `i`.
-pub struct Row {
-    pub triple: str<'static>,
-    pub dir: str<'static>,
-    pub flags: str<'static>,
-    pub layers: [u8; 4],
+pub(package) struct Row {
+    pub(package) triple: str<'static>,
+    pub(package) dir: str<'static>,
+    pub(package) flags: str<'static>,
+    pub(package) layers: [u8; 4],
 }
 
-pub const PINNED_VERSION: str<'static> = "22.1.8";
+pub(package) const PINNED_VERSION: str<'static> = "22.1.8";
 
-pub const ROWS: [Row; 11] = [
+pub(package) const ROWS: [Row; 11] = [
     Row { triple: "x86_64-apple-macos11.0", dir: "", flags: "", layers: [0, 1, 3, 6] },
     Row { triple: "arm64-apple-macos11.0", dir: "", flags: "", layers: [0, 2, 3, 7] },
     Row { triple: "x86_64-apple-ios13.0-simulator", dir: "", flags: "", layers: [0, 1, 3, 8] },
@@ -33,7 +33,7 @@ pub const ROWS: [Row; 11] = [
     },
 ];
 
-pub const MACRO_LAYERS: [str<'static>; 17] = [
+pub(package) const MACRO_LAYERS: [str<'static>; 17] = [
     M"(__ATOMIC_ACQUIRE 2
 __ATOMIC_ACQ_REL 4
 __ATOMIC_CONSUME 1
@@ -1084,7 +1084,7 @@ __wasm_sign_ext__ 1
 )",
 ];
 
-pub const HAS_LAYERS: [str<'static>; 17] = [
+pub(package) const HAS_LAYERS: [str<'static>; 17] = [
     M"(attribute:NSObject
 attribute:__NSObject__
 attribute:____const__

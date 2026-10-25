@@ -11,12 +11,12 @@ import ir::core as core;
 import lir::print as lprint;
 
 /// The limits a body stays within: an instruction index stays below VFLAG.
-pub const MAX_INSTS: u32 = 0x3FFFFFFF;
-pub const MAX_ARGS: u32 = 65535;
+pub(package) const MAX_INSTS: u32 = 0x3FFFFFFF;
+pub(package) const MAX_ARGS: u32 = 65535;
 
 // Scratch reused across bodies.
-pub struct Verifier {
-    pub err: String,
+pub(package) struct Verifier {
+    pub(package) err: String,
     rpo: Vector<u32>, // blocks in reverse postorder
     order: Vector<u32>, // per block, its position in `rpo`; NONE when unreachable
     idom: Vector<u32>,
@@ -30,7 +30,7 @@ pub struct Verifier {
 }
 
 extend Verifier {
-    pub fn new() Verifier {
+    pub(package) fn new() Verifier {
         return Verifier {
             err: String::new(),
             rpo: Vector::<u32>::new(),
@@ -48,7 +48,7 @@ extend Verifier {
 
     /// Check body `b` of symbol `name` against package `p`; true when it holds. On a failure `err` names
     /// the location of the instruction (or the block) and the rule.
-    pub fn check(self: &mut Self, p: &Package, name: str, b: &Body) bool {
+    pub(package) fn check(self: &mut Self, p: &Package, name: str, b: &Body) bool {
         self.err.clear();
         self.pkg = p;
         let n = b.insts.len();
@@ -604,7 +604,7 @@ extend Verifier {
     /// signature: its parameter types (the fixed ones of a variadic callee) and its result, an
     /// aggregate's layout compared by its size, alignment and leaves. False, with `err`, at the first
     /// call that does not.
-    pub fn check_calls(self: &mut Self, p: &Package, name: str, b: &Body) bool {
+    pub(package) fn check_calls(self: &mut Self, p: &Package, name: str, b: &Body) bool {
         self.err.clear();
         self.pkg = p;
         for i in 0..b.insts.len() {
@@ -939,23 +939,23 @@ const fn operand_bits() [u8; 256] {
 }
 
 /// Whether operand `a` of form `f` is a value.
-pub const fn operand_a(f: u8) bool {
+pub(package) const fn operand_a(f: u8) bool {
     return (unsafe OPS[f as usize] & 1) != 0;
 }
 
 /// Whether operand `b` of form `f` is a value (VNONE allowed where optional).
-pub const fn operand_b(f: u8) bool {
+pub(package) const fn operand_b(f: u8) bool {
     return (unsafe OPS[f as usize] & 2) != 0;
 }
 
 /// Whether operand `c` of form `f` is a value.
-pub const fn operand_c(f: u8) bool {
+pub(package) const fn operand_c(f: u8) bool {
     return f == F_TRI;
 }
 
 /// Whether `t` is a machine type: a scalar, or a vector of 2 to 64 lanes of a scalar of up to 64 bits
 /// whose size is at most 64 bytes.
-pub const fn type_ok(t: u8) bool {
+pub(package) const fn type_ok(t: u8) bool {
     if !is_vec(t) {
         return t >= T_I8 && t <= T_PTR;
     }

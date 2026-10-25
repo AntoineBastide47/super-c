@@ -10,7 +10,7 @@ import target::table as tgt;
 /// Scan every module for `@link` and write the flags to `<gen_root>/__ldflags` (removed when none). A C
 /// library comes prebuilt and reaches the link through `@link` only: no C source of the program's tree is
 /// compiled. Sets `*err` on a write failure; an already-set value is never cleared.
-pub fn ext_c_collect(p: &mut loader::Package, err: &mut bool, target: i32) {
+pub(package) fn ext_c_collect(p: &mut loader::Package, err: &mut bool, target: i32) {
     let root = p.gen_root.as_str();
     let mut ld = Vector::<String>::new();
     // Libm, on every POSIX link line: the prelude's float methods (`f64::fma` and friends) are emitted into

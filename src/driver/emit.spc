@@ -132,9 +132,9 @@ fn mark_type_modules(p: &loader::Package, am: ModuleId, t: TypeId, row: *mut u64
 // with `core` set the core module too when the type mentions a builtin (`mono_live_arg`). One row of
 // `w` words per id, filled before the rows read it.
 struct TypeMarks {
-    pub w: usize,
-    pub rows: Vector<u64>,
-    pub state: Vector<u8>, // per id: TM_UNSET, TM_SET, or TM_CORE (the type mentions a builtin)
+    pub(package) w: usize,
+    pub(package) rows: Vector<u64>,
+    pub(package) state: Vector<u8>, // per id: TM_UNSET, TM_SET, or TM_CORE (the type mentions a builtin)
 }
 
 const TM_UNSET: u8 = 0;
@@ -262,10 +262,10 @@ fn mono_live_arg(p: &loader::Package, m: usize, t: TypeId, row: *mut u64) {
 
 // `p` and `tm` are opaque so the release bootstrap's borrow checker accepts the payload as 'static.
 struct LiveTask {
-    pub p: *const void,
-    pub tm: *const void,
-    pub row: *mut u64,
-    pub m: u64,
+    pub(package) p: *const void,
+    pub(package) tm: *const void,
+    pub(package) row: *mut u64,
+    pub(package) m: u64,
 }
 
 // Tasks only read the frozen package and the filled type rows, and write disjoint rows.
@@ -517,18 +517,18 @@ fn discharge_obligations(p: &mut loader::Package, n: usize, dup_done: bool, dup_
 }
 
 struct RsOut {
-    pub ok: bool,
-    pub warns: u32,
-    pub errors: diag::Errors,
-    pub edges: Vector<u64>, // the module's item dependency edges (graph::items)
+    pub(package) ok: bool,
+    pub(package) warns: u32,
+    pub(package) errors: diag::Errors,
+    pub(package) edges: Vector<u64>, // the module's item dependency edges (graph::items)
 }
 
 struct RsTask {
-    pub p: *mut loader::Package,
-    pub outs: *mut RsOut,
-    pub m: u64,
-    pub lint: bool,
-    pub spans: *const Vector<gitems::Spans>, // every module's declaration spans, read-only
+    pub(package) p: *mut loader::Package,
+    pub(package) outs: *mut RsOut,
+    pub(package) m: u64,
+    pub(package) lint: bool,
+    pub(package) spans: *const Vector<gitems::Spans>, // every module's declaration spans, read-only
 }
 
 unsafe extend RsTask as Send {}
@@ -622,9 +622,9 @@ fn resolve_all_par(p: &mut loader::Package, lint: bool) {
 /// Per-item outputs: the item's diagnostics in emission order, and its range in the module's
 /// method-mark log (`TcStage.logs`: one log per module, its entries in check order).
 struct TcOut {
-    pub errors: Option<Box<diag::Errors>>,
-    pub log_lo: u32,
-    pub log_hi: u32,
+    pub(package) errors: Option<Box<diag::Errors>>,
+    pub(package) log_lo: u32,
+    pub(package) log_hi: u32,
 }
 
 // One item's diagnostics as its result slot: the checker's buffer moves out only when it holds
@@ -648,17 +648,17 @@ fn append_errs(dst: &mut diag::Errors, slot: &mut Option<Box<diag::Errors>>) {
 }
 
 struct TcStage {
-    pub p: *mut loader::Package,
-    pub outs: *mut TcOut, // per item
-    pub logs: *mut tc::TcMarkLog, // per module
-    pub tail: *mut diag::Errors, // per module: the close step's diagnostics (the whole-module lints)
-    pub orphans: *mut Vector<diag::Errors>, // per module: the non-item nodes' diagnostics, declaration order
-    pub chk: *mut Vector<Box<tc::TypeChecker>>, // per module: its checker while it has items left (one at most)
-    pub lease: *mut psync::Mutex<u8>, // per module: one job checks a module at a time
-    pub left: *mut u32, // per module: top-level items not yet checked (atomic)
-    pub edges: *mut Vector<u64>, // per module: the post-typecheck item edges, written at its close
-    pub spans: *const Vector<gitems::Spans>,
-    pub lint: *const bool, // per module
+    pub(package) p: *mut loader::Package,
+    pub(package) outs: *mut TcOut, // per item
+    pub(package) logs: *mut tc::TcMarkLog, // per module
+    pub(package) tail: *mut diag::Errors, // per module: the close step's diagnostics (the whole-module lints)
+    pub(package) orphans: *mut Vector<diag::Errors>, // per module: the non-item nodes' diagnostics, declaration order
+    pub(package) chk: *mut Vector<Box<tc::TypeChecker>>, // per module: its checker while it has items left (one at most)
+    pub(package) lease: *mut psync::Mutex<u8>, // per module: one job checks a module at a time
+    pub(package) left: *mut u32, // per module: top-level items not yet checked (atomic)
+    pub(package) edges: *mut Vector<u64>, // per module: the post-typecheck item edges, written at its close
+    pub(package) spans: *const Vector<gitems::Spans>,
+    pub(package) lint: *const bool, // per module
 }
 
 // One component: its top-level items in index order (members go with their extend).
@@ -1120,10 +1120,10 @@ fn error_type_abort(p: &loader::Package, m: usize, n: NodeId) {
 // module is typechecked (the check reads other modules' frozen syntax, so it is decidable only
 // then, and it writes nothing shared: errors buffer per module and log in module order).
 struct DupTask {
-    pub p: *mut loader::Package,
-    pub i: usize,
-    pub out: *mut diag::Errors,
-    pub idx: *const Map<tc::ConfKey, u64>,
+    pub(package) p: *mut loader::Package,
+    pub(package) i: usize,
+    pub(package) out: *mut diag::Errors,
+    pub(package) idx: *const Map<tc::ConfKey, u64>,
 }
 
 unsafe extend DupTask as Send {}
@@ -1161,7 +1161,7 @@ fn check_package_wide(p: &mut loader::Package, n: usize) {
 /// and then by feature count, the largest first. Two entries with one key and the same feature count
 /// are an error naming both: either is the same entry twice, or the planner could not choose. Returns
 /// the first error as rendered (empty when none); every error is logged.
-pub fn build_simd_table(p: &mut loader::Package, n: usize) String {
+pub(package) fn build_simd_table(p: &mut loader::Package, n: usize) String {
     let mut first = String::new();
     p.simd_table.clear();
     for i in 0..n {
@@ -1218,7 +1218,7 @@ pub fn build_simd_table(p: &mut loader::Package, n: usize) String {
 // (`feature_use`); a function the program's environment calls (`main`, `@test`, `@bench`) needs them in
 // the build, and a `@export` function cannot need any. Read after every module is typed, when every
 // attribute holds its value.
-pub fn check_feature_calls(p: &mut loader::Package, n: usize) {
+pub(package) fn check_feature_calls(p: &mut loader::Package, n: usize) {
     p.fn_union = p.features;
     for i in 0..n {
         let a = &p.modules[i].ast;
@@ -1242,7 +1242,7 @@ pub fn check_feature_calls(p: &mut loader::Package, n: usize) {
 
 /// The errors of module `i`'s functions that need CPU features (`check_feature_calls`) into `errs`: the
 /// uses beyond their callers' features, and the functions called from outside the program.
-pub fn feature_errors(p: &loader::Package, i: usize, errs: &mut diag::Errors) {
+pub(package) fn feature_errors(p: &loader::Package, i: usize, errs: &mut diag::Errors) {
     let a = &p.modules[i].ast;
     for k in 0..a.attrs.len() {
         let at = *a.attrs.at(k);
@@ -1317,7 +1317,7 @@ fn lint_feature_unsafe(p: &mut loader::Package, only_mod: i32, fixes: *mut Vecto
 /// The lints of module `m`'s uses of functions that need CPU features, into `errs`: a dispatch row
 /// whose feature does not imply its function's, and an `unsafe` marker whose only reason is such a call
 /// where no such call needs it (`feature_use`: "unnecessary 'unsafe'", with the prefix form's removal).
-pub fn feature_lints(p: &loader::Package, m: usize, errs: &mut diag::Errors) {
+pub(package) fn feature_lints(p: &loader::Package, m: usize, errs: &mut diag::Errors) {
     let a = &p.modules[m].ast;
     // A dispatch row runs its function where the machine has the row's feature: that feature, with the
     // build's and what they imply, must hold the function's.
@@ -1603,18 +1603,18 @@ fn layout_pass(p: &mut loader::Package) {
 /// `chunk_off[i] .. chunk_end[i]` its bytes inside that TU's buffer. A TU's chunks are contiguous
 /// and in table order, so its parts are offset ranges of its own buffer: nothing is copied between
 /// rendering and the file write. A seed shard holds module `lo`'s buffer alone (`one`).
-pub struct TuBufs {
-    pub bufs: Vector<String>,
-    pub chunk_mod: Vector<u64>,
-    pub chunk_own: Vector<ModuleId>, // the chunk's owner module (its prototype header and shard)
-    pub chunk_off: Vector<u64>,
-    pub chunk_end: Vector<u64>,
-    pub n: usize,
-    pub lo: usize, // the module of bufs[0]
+pub(package) struct TuBufs {
+    pub(package) bufs: Vector<String>,
+    pub(package) chunk_mod: Vector<u64>,
+    pub(package) chunk_own: Vector<ModuleId>, // the chunk's owner module (its prototype header and shard)
+    pub(package) chunk_off: Vector<u64>,
+    pub(package) chunk_end: Vector<u64>,
+    pub(package) n: usize,
+    pub(package) lo: usize, // the module of bufs[0]
 }
 
 extend TuBufs {
-    pub fn new(n: usize) TuBufs {
+    pub(package) fn new(n: usize) TuBufs {
         let mut t = TuBufs {
             bufs: Vector::<String>::new(),
             chunk_mod: Vector::<u64>::new(),
@@ -1629,14 +1629,14 @@ extend TuBufs {
     }
 
     /// Module `m`'s TU buffer `buf` alone: a seed shard renders into no other TU.
-    pub fn one(m: usize, buf: String) TuBufs {
+    pub(package) fn one(m: usize, buf: String) TuBufs {
         let mut t = TuBufs::new(0);
         t.lo = m;
         t.bufs.set(0, buf);
         return t;
     }
 
-    pub const fn slot(self: &Self, m: u64) usize {
+    pub(package) const fn slot(self: &Self, m: u64) usize {
         if m == 65534 {
             return self.n;
         }
@@ -1644,7 +1644,7 @@ extend TuBufs {
     }
 
     /// Append one chunk owned by module `own` to TU `m`'s buffer and record it.
-    pub fn add(self: &mut Self, m: u64, own: ModuleId, text: &String) {
+    pub(package) fn add(self: &mut Self, m: u64, own: ModuleId, text: &String) {
         let sl = self.slot(m);
         let off = self.bufs.at(sl).len() as u64;
         self.bufs.index_mut(sl).push_string(text);
@@ -1654,11 +1654,11 @@ extend TuBufs {
         self.chunk_end.push(self.bufs.at(sl).len() as u64);
     }
 
-    pub const fn last_off(self: &Self) u64 {
+    pub(package) const fn last_off(self: &Self) u64 {
         return self.chunk_off[self.chunk_off.len() - 1];
     }
 
-    pub const fn last_end(self: &Self) u64 {
+    pub(package) const fn last_end(self: &Self) u64 {
         return self.chunk_end[self.chunk_end.len() - 1];
     }
 }
@@ -1667,22 +1667,22 @@ extend TuBufs {
 /// with chunk k), closure environment structs, the C `main` choice and the counters. The master
 /// holds one; each parallel shard holds its own, merged into the master in module order.
 struct SeedAcc {
-    pub ch: TuBufs,
-    pub protos: String,
-    pub env_names: Vector<u64>,
-    pub env_bodies: Vector<String>,
-    pub env_own: Vector<ModuleId>,
-    pub have_main: bool,
-    pub main_mod: u64,
-    pub main_argv: bool,
-    pub seeds: u64,
-    pub seed_skip: u64,
-    pub clos_ok: u64,
-    pub clos_skip: u64,
-    pub inst_ok: u64,
-    pub inst_skip: u64,
-    pub glue_ok: u64,
-    pub glue_skip: u64,
+    pub(package) ch: TuBufs,
+    pub(package) protos: String,
+    pub(package) env_names: Vector<u64>,
+    pub(package) env_bodies: Vector<String>,
+    pub(package) env_own: Vector<ModuleId>,
+    pub(package) have_main: bool,
+    pub(package) main_mod: u64,
+    pub(package) main_argv: bool,
+    pub(package) seeds: u64,
+    pub(package) seed_skip: u64,
+    pub(package) clos_ok: u64,
+    pub(package) clos_skip: u64,
+    pub(package) inst_ok: u64,
+    pub(package) inst_skip: u64,
+    pub(package) glue_ok: u64,
+    pub(package) glue_skip: u64,
 }
 
 extend SeedAcc {
@@ -1758,71 +1758,71 @@ extend SeedAcc {
 /// One assembled new-backend emission. TU texts carry NO include lines; the writer prepends the
 /// layout-relative include of the forward header. `skips` MUST be zero for the output to be
 /// complete (every count is an emission the backend refused).
-pub struct CemitOut {
+pub(package) struct CemitOut {
     /// The forward header (runtime and extern-block includes, declarations shared by every TU).
-    pub fwd_h: String,
+    pub(package) fwd_h: String,
     /// The definition headers (text, file stem under `__sc_t/`, owner module) and, per module,
     /// its prototype header (empty when it has none).
-    pub defs_h: Vector<String>,
-    pub defs_stem: Vector<String>,
-    pub defs_own: Vector<ModuleId>,
-    pub protos_h: Vector<String>,
+    pub(package) defs_h: Vector<String>,
+    pub(package) defs_stem: Vector<String>,
+    pub(package) defs_own: Vector<ModuleId>,
+    pub(package) protos_h: Vector<String>,
     /// Per module: the TU's include prefix, body buffer, chunk indexes, one head per shard
     /// (static closure prototypes; shard 0 also carries the asserts), and the tail of shard 0
     /// (the C `main` wrapper). A module with no shards emits no TU.
-    pub tu_incs: Vector<String>,
-    pub tus: Vector<String>,
-    pub tu_chunks: Vector<Vector<u32>>,
-    pub tu_heads: Vector<Vector<String>>,
-    pub tu_tail: Vector<String>,
+    pub(package) tu_incs: Vector<String>,
+    pub(package) tus: Vector<String>,
+    pub(package) tu_chunks: Vector<Vector<u32>>,
+    pub(package) tu_heads: Vector<Vector<String>>,
+    pub(package) tu_tail: Vector<String>,
     /// The chunk table: bounds in the owning buffer and the shard each chunk landed in.
-    pub ck_off: Vector<u32>,
-    pub ck_end: Vector<u32>,
-    pub ck_shard: Vector<u8>,
+    pub(package) ck_off: Vector<u32>,
+    pub(package) ck_end: Vector<u32>,
+    pub(package) ck_shard: Vector<u8>,
     /// The instance buffer and, per owner module, its instance shards shaped like a TU (head 0
     /// carries the owner's data definitions).
-    pub inst_c: String,
-    pub inst_incs: Vector<String>,
+    pub(package) inst_c: String,
+    pub(package) inst_incs: Vector<String>,
     /// Per module: its TU, or its instance unit, includes a scoped extern header, directly or through
     /// a definition header (`cemit_extern_includes`), or belongs to wasm's C library
     /// (`loader::libc_unit`): the unit compiles alone (`pack_plan`).
-    pub tu_x: Vector<bool>,
-    pub inst_x: Vector<bool>,
+    pub(package) tu_x: Vector<bool>,
+    pub(package) inst_x: Vector<bool>,
     /// The registry TU includes a scoped extern header: it compiles alone too (`pack_plan`).
-    pub reg_x: bool,
-    pub inst_chunks: Vector<Vector<u32>>,
-    pub inst_heads: Vector<Vector<String>>,
+    pub(package) reg_x: bool,
+    pub(package) inst_chunks: Vector<Vector<u32>>,
+    pub(package) inst_heads: Vector<Vector<String>>,
     /// The registry TU (ZST sentinels, reflection registry) and its sorted root symbols.
-    pub registry_c: String,
-    pub reg_inputs: String,
+    pub(package) registry_c: String,
+    pub(package) reg_inputs: String,
     /// The alignments of the ZST sentinels the registry defines, ascending.
-    pub zst: Vector<u64>,
-    pub have_main: bool,
-    pub main_mod: u64,
-    pub main_argv: bool,
-    pub skips: u64,
+    pub(package) zst: Vector<u64>,
+    pub(package) have_main: bool,
+    pub(package) main_mod: u64,
+    pub(package) main_argv: bool,
+    pub(package) skips: u64,
     /// An instance folded an array length out of range: the located errors are reported, and the
     /// refusals of the bodies that hold the length are their consequence.
-    pub len_faults: bool,
+    pub(package) len_faults: bool,
     /// The refused bodies behind `skips` that carry a source location.
-    pub refused: Vector<cbe::Refusal>,
-    pub edges: Vector<u64>, // (spelling TU << 32 | owner module): cross-TU symbol references
+    pub(package) refused: Vector<cbe::Refusal>,
+    pub(package) edges: Vector<u64>, // (spelling TU << 32 | owner module): cross-TU symbol references
     /// Next per-TU cache image + its path ("" = caching off): run_package persists it only after a
     /// fully successful emission, so a failed build never publishes sections it did not finish.
-    pub tuc_img: String,
-    pub tuc_path: String,
+    pub(package) tuc_img: String,
+    pub(package) tuc_path: String,
     /// The emission cache's module keys and hits (empty when it is off), for the native objects' reuse.
-    pub tuc_keys: Vector<u64>,
-    pub tuc_hit: Vector<bool>,
+    pub(package) tuc_keys: Vector<u64>,
+    pub(package) tuc_hit: Vector<bool>,
     /// Merged emission counters (SC_CEMIT_STATS); the write stage adds publication and reports.
-    pub pr: prb::Probe,
+    pub(package) pr: prb::Probe,
     /// The LIR of every body of a native build (`cbe::native_on`), for the write stage's objects.
-    pub lir: Option<Box<lw::Lower>>,
+    pub(package) lir: Option<Box<lw::Lower>>,
 }
 
 extend CemitOut {
     /// Empty output buffers for a package of `n` modules.
-    pub fn new(n: usize) CemitOut {
+    pub(package) fn new(n: usize) CemitOut {
         let mut o = CemitOut {
             fwd_h: String::new(),
             defs_h: Vector::<String>::new(),
@@ -2328,8 +2328,8 @@ const fn struct_def_hit(defined: &Set<u64>, nm: str) bool {
 // layout of its instances whichever module's code named them (`cemit_layout_asserts`). A record a
 // module holds under a provisional id names that module's pool: only the module itself reads it.
 struct InstRecs {
-    pub off: Vector<u32>, // per declaring module + 1: its range of `rec`
-    pub rec: Vector<u64>, // recording module << 32 | record index
+    pub(package) off: Vector<u32>, // per declaring module + 1: its range of `rec`
+    pub(package) rec: Vector<u64>, // recording module << 32 | record index
 }
 
 fn inst_recs(p: &loader::Package) InstRecs {
@@ -3226,48 +3226,48 @@ fn cemit_queued_closure(
 }
 
 struct SeedShard {
-    pub cem: cbe::CEmit,
+    pub(package) cem: cbe::CEmit,
     // Seed shards: module m's chunks in m's own buffer. Drain shards: this slice's instance-TU
     // chunks, in the one buffer of a TuBufs::new(0).
-    pub acc: SeedAcc,
-    pub used: bool,
+    pub(package) acc: SeedAcc,
+    pub(package) used: bool,
     // Drain-slice state: one shard per SLICE of a wave in the parallel instance frontier;
     // per-demand capture marks let the merge replay each demand's claims at its exact queue slot.
-    pub dmarks: Vector<CapMark>,
-    pub douts: Vector<u8>, // per demand: 0 = emitted, 1 = lowering-path skip, 2 = emit failure, 3 = emitted with a program error the merge reports
-    pub derrs: Vector<str<'static>>,
-    pub dvix: Vector<u64>, // per demand: index into dvars (0xFF.. = none)
-    pub dvkeys: Vector<u64>, // per dvars entry: the zst-signature cache key
-    pub dvars: Vector<irl::Lowerer>,
-    pub dclo_keys: Vector<u64>, // closure lowerings this slice produced on a shared-cache miss
-    pub dclo: Vector<irl::Lowerer>,
+    pub(package) dmarks: Vector<CapMark>,
+    pub(package) douts: Vector<u8>, // per demand: 0 = emitted, 1 = lowering-path skip, 2 = emit failure, 3 = emitted with a program error the merge reports
+    pub(package) derrs: Vector<str<'static>>,
+    pub(package) dvix: Vector<u64>, // per demand: index into dvars (0xFF.. = none)
+    pub(package) dvkeys: Vector<u64>, // per dvars entry: the zst-signature cache key
+    pub(package) dvars: Vector<irl::Lowerer>,
+    pub(package) dclo_keys: Vector<u64>, // closure lowerings this slice produced on a shared-cache miss
+    pub(package) dclo: Vector<irl::Lowerer>,
 }
 
 // Counts of a drain shard's capture rows and sink sizes at one demand boundary; every row carries
 // its absolute text end, so counts alone define a replayable range.
 struct CapMark {
-    pub env: u32,
-    pub stat: u32,
-    pub glue: u32,
-    pub ext: u32,
-    pub dyd: u32,
-    pub dyt: u32,
-    pub blk: u32,
-    pub sent: u32,
-    pub ti: u32,
-    pub aux: u32,
-    pub dem: u32,
-    pub agg: u32,
-    pub dynr: u32,
-    pub wrap: u32,
-    pub pack: u32,
-    pub chunks: u32,
-    pub bodies: u64,
-    pub protos: u64,
-    pub envn: u32,
-    pub dclo: u32,
-    pub hedge: u32,
-    pub fndem: u32,
+    pub(package) env: u32,
+    pub(package) stat: u32,
+    pub(package) glue: u32,
+    pub(package) ext: u32,
+    pub(package) dyd: u32,
+    pub(package) dyt: u32,
+    pub(package) blk: u32,
+    pub(package) sent: u32,
+    pub(package) ti: u32,
+    pub(package) aux: u32,
+    pub(package) dem: u32,
+    pub(package) agg: u32,
+    pub(package) dynr: u32,
+    pub(package) wrap: u32,
+    pub(package) pack: u32,
+    pub(package) chunks: u32,
+    pub(package) bodies: u64,
+    pub(package) protos: u64,
+    pub(package) envn: u32,
+    pub(package) dclo: u32,
+    pub(package) hedge: u32,
+    pub(package) fndem: u32,
 }
 
 const fn cap_zero() CapMark {
@@ -3369,15 +3369,15 @@ extend SeedShard {
 }
 
 struct SeedTask {
-    pub p: *mut loader::Package,
-    pub ctl: *const tctl::Ctl,
-    pub est: u64,
-    pub g: *mut ig::InstGraph,
-    pub out: *mut SeedShard,
-    pub m: usize,
-    pub testing: bool,
-    pub verbose: bool,
-    pub kl: *const psync::Semaphore,
+    pub(package) p: *mut loader::Package,
+    pub(package) ctl: *const tctl::Ctl,
+    pub(package) est: u64,
+    pub(package) g: *mut ig::InstGraph,
+    pub(package) out: *mut SeedShard,
+    pub(package) m: usize,
+    pub(package) testing: bool,
+    pub(package) verbose: bool,
+    pub(package) kl: *const psync::Semaphore,
 }
 
 unsafe extend SeedTask as Send {}
@@ -3516,10 +3516,10 @@ fn bind_rounds(cem: &mut cbe::CEmit, dow: &mut DropCtx, lw: &mut irl::Lowerer, s
 // A call `bound_calls` found: its block, the method it dispatches to, the receiver, and the method's
 // own type-argument count.
 struct BoundSite {
-    pub blk: u32,
-    pub md: DefId,
-    pub recv: TypeId,
-    pub own: u32,
+    pub(package) blk: u32,
+    pub(package) md: DefId,
+    pub(package) recv: TypeId,
+    pub(package) own: u32,
 }
 
 // The calls of `b` whose interface method dispatches to a method the inliner keeps
@@ -3768,21 +3768,21 @@ fn cemit_drain_demand(
 // One demanded instance emitted into a private shard by the parallel instance frontier. Shared
 // caches are READ-ONLY during a wave (the master mutates them only at merge).
 struct DrainTask {
-    pub p: *mut loader::Package,
-    pub g: *mut ig::InstGraph,
-    pub out: *mut SeedShard,
-    pub dem: *const Vector<cbe::Demand>, // frozen during the wave, like the five below
-    pub lws: *const Vector<irl::Lowerer>,
-    pub cfs: *const Vector<cfl::CFlow>,
-    pub lwc: *const Map<u64, u64>, // lw_cache
-    pub clc: *const Map<u64, u64>, // cl_cache
-    pub clw: *const Vector<irl::Lowerer>, // clws
-    pub widx: *const u64, // tasked demand indices, ascending
-    pub wli: *const u64, // their base lowering slots
-    pub lo: u64, // this slice: widx[lo..hi)
-    pub hi: u64,
-    pub kl: *const psync::Semaphore,
-    pub verbose: bool,
+    pub(package) p: *mut loader::Package,
+    pub(package) g: *mut ig::InstGraph,
+    pub(package) out: *mut SeedShard,
+    pub(package) dem: *const Vector<cbe::Demand>, // frozen during the wave, like the five below
+    pub(package) lws: *const Vector<irl::Lowerer>,
+    pub(package) cfs: *const Vector<cfl::CFlow>,
+    pub(package) lwc: *const Map<u64, u64>, // lw_cache
+    pub(package) clc: *const Map<u64, u64>, // cl_cache
+    pub(package) clw: *const Vector<irl::Lowerer>, // clws
+    pub(package) widx: *const u64, // tasked demand indices, ascending
+    pub(package) wli: *const u64, // their base lowering slots
+    pub(package) lo: u64, // this slice: widx[lo..hi)
+    pub(package) hi: u64,
+    pub(package) kl: *const psync::Semaphore,
+    pub(package) verbose: bool,
 }
 
 unsafe extend DrainTask as Send {}
@@ -4050,15 +4050,15 @@ fn cemit_drain_slice_one(
 
 // One slice of a wave's unique base-definition lowerings; results land in disjoint slots.
 struct LowTask {
-    pub p: *mut loader::Package,
-    pub g: *mut ig::InstGraph,
-    pub defs: *const u64, // packed module << 32 | node
-    pub res: *mut irl::Lowerer, // slot base (disjoint writes per index)
-    pub cfr: *mut cfl::CFlow, // slot base
-    pub oks: *mut bool,
-    pub lo: u64,
-    pub hi: u64,
-    pub kl: *const psync::Semaphore,
+    pub(package) p: *mut loader::Package,
+    pub(package) g: *mut ig::InstGraph,
+    pub(package) defs: *const u64, // packed module << 32 | node
+    pub(package) res: *mut irl::Lowerer, // slot base (disjoint writes per index)
+    pub(package) cfr: *mut cfl::CFlow, // slot base
+    pub(package) oks: *mut bool,
+    pub(package) lo: u64,
+    pub(package) hi: u64,
+    pub(package) kl: *const psync::Semaphore,
 }
 
 unsafe extend LowTask as Send {}
@@ -4288,12 +4288,12 @@ fn cemit_seed_master(
 
 // The journal and accumulator lengths a module's TU-cache section starts at.
 struct RecMark {
-    pub seg: usize, // journal events
-    pub aux: usize,
-    pub efwd: usize,
-    pub eh: usize, // environment hashes
-    pub hedge: usize, // header edges
-    pub tn: usize, // type-need log entries
+    pub(package) seg: usize, // journal events
+    pub(package) aux: usize,
+    pub(package) efwd: usize,
+    pub(package) eh: usize, // environment hashes
+    pub(package) hedge: usize, // header edges
+    pub(package) tn: usize, // type-need log entries
 }
 
 // Close module `m`'s section: journal the trailing deltas past `mk` (their accumulators are consumed
@@ -4624,7 +4624,7 @@ fn cemit_seed_merge_range(cem: &mut cbe::CEmit, o: &mut SeedShard, a: &CapMark, 
 /// declarations and bodies, the shared instance TU, the test runner when `testing`, and the
 /// per-module TU-cache sections. `live` (per module) and `target` select what is emitted;
 /// `irkeep` (null = discard) supplies the borrow checker's kept lowerings.
-pub fn cemit_package(
+pub(package) fn cemit_package(
     p: &mut loader::Package,
     testing: bool,
     tplan: &TestPlan,
@@ -6301,7 +6301,7 @@ pub fn cemit_package(
 /// and the borrow-check frontier (before emission) each end with every provisional type
 /// published under a final package id and every retained store remapped: the module tables, the
 /// constant engine, and the kept lowerings.
-pub fn publish_checkpoint(p: &mut loader::Package, keep: *mut irl::Keep) {
+pub(package) fn publish_checkpoint(p: &mut loader::Package, keep: *mut irl::Keep) {
     if p.tt.deref().len() == 0 {
         return; // module-local identity (no bind_types): nothing to publish
     }
@@ -7450,11 +7450,11 @@ const fn imported_beyond_backends(p: &loader::Package, m: ModuleId) bool {
 // seen from `__sc_t/`, the alias definitions of its blocks' items (`mbe::x_alias`), their tokens, the
 // checks of its blocks' types and constants, and the headers it needs before it (`pre`).
 struct XHdr {
-    pub line: String,
-    pub defs: String,
-    pub names: Vector<String>,
-    pub checks: String,
-    pub pre: Vector<u32>,
+    pub(package) line: String,
+    pub(package) defs: String,
+    pub(package) names: Vector<String>,
+    pub(package) checks: String,
+    pub(package) pre: Vector<u32>,
 }
 
 // `extern "C" "<header>"` blocks across the package: each unique header (module-relative realpath
@@ -8175,19 +8175,19 @@ fn dctx_drop(acc: &mut prb::Probe) {
 }
 
 struct DropCtx {
-    pub ow: bfx::Owner,
-    pub forest: bmp::MoveForest,
-    pub facts: bfx::BodyFacts,
-    pub cfg: bdf::Cfg,
-    pub mv: bdf::MoveFlow,
-    pub el: ird::ElabCtx,
-    pub inl: inl::InlineCtx,
-    pub bce: bce::Bce,
-    pub core_ir: bool, // SC_CORE_IR development re-verification
-    pub bce_stats: bool, // SC_BCE_STATS per-owner report lines
-    pub validate: bool, // SC_BC_VALIDATE: every body elaborated here is verified like a kept one
+    pub(package) ow: bfx::Owner,
+    pub(package) forest: bmp::MoveForest,
+    pub(package) facts: bfx::BodyFacts,
+    pub(package) cfg: bdf::Cfg,
+    pub(package) mv: bdf::MoveFlow,
+    pub(package) el: ird::ElabCtx,
+    pub(package) inl: inl::InlineCtx,
+    pub(package) bce: bce::Bce,
+    pub(package) core_ir: bool, // SC_CORE_IR development re-verification
+    pub(package) bce_stats: bool, // SC_BCE_STATS per-owner report lines
+    pub(package) validate: bool, // SC_BC_VALIDATE: every body elaborated here is verified like a kept one
     /// Emission counters (SC_CEMIT_STATS): acquisition, re-lowering, inlining, drop preparation.
-    pub pr: prb::Probe,
+    pub(package) pr: prb::Probe,
 }
 
 extend DropCtx {
@@ -9170,9 +9170,9 @@ const ANY_HOME: u32 = 0xFFFFFFFE;
 /// one its text spells (C11 allows a repeated typedef; an enum copy keeps its include guard), so
 /// no file depends on the declarations of types it does not spell.
 struct FwdDecls {
-    pub seg: Segs, // declaration texts
-    pub home: Vector<u32>, // per declaration: its definition header, NO_HOME or ANY_HOME
-    pub always: Vector<bool>, // per declaration: an alias of a scoped extern header, whose file every use includes
+    pub(package) seg: Segs, // declaration texts
+    pub(package) home: Vector<u32>, // per declaration: its definition header, NO_HOME or ANY_HOME
+    pub(package) always: Vector<bool>, // per declaration: an alias of a scoped extern header, whose file every use includes
     keys: Map<u64, u32>, // name FNV -> declaration index
     filt: Vector<u64>, // 65536-bit filter over the name FNVs: most identifiers stop here
     stamp: Vector<u32>, // per declaration: the serial of the last header that took it
@@ -9394,11 +9394,11 @@ extend FwdDecls {
 /// The definition headers: per header its C name and body (`own` = the owner module), the FNV of
 /// its name, the index by FNV and the file stem.
 struct DefSet {
-    pub name: Segs,
-    pub body: Segs,
-    pub key: Vector<u64>,
-    pub idx: Map<u64, u32>, // name key (`nkey`) -> header
-    pub stem: Vector<String>,
+    pub(package) name: Segs,
+    pub(package) body: Segs,
+    pub(package) key: Vector<u64>,
+    pub(package) idx: Map<u64, u32>, // name key (`nkey`) -> header
+    pub(package) stem: Vector<String>,
     rank: Vector<u32>, // per header: its position in stem order
     order: Vector<u32>, // per position in stem order: the header
 }
@@ -9665,9 +9665,9 @@ fn unit_incs(
 /// a header declares, and C parses every declaration it includes (on the compiler's build, about 10%
 /// of the clang compile and 4% of the gcc one).
 struct XDecls {
-    pub seg: Segs, // declaration texts, in prototype-header order
-    pub tdef: Vector<bool>, // per declaration: a `_ret` typedef
-    pub hdr: Vector<u32>, // per declaration: the definition header of a scoped extern header's alias, else NO_HOME
+    pub(package) seg: Segs, // declaration texts, in prototype-header order
+    pub(package) tdef: Vector<bool>, // per declaration: a `_ret` typedef
+    pub(package) hdr: Vector<u32>, // per declaration: the definition header of a scoped extern header's alias, else NO_HOME
     keys: Map<u64, u32>, // name FNV -> declaration
     filt: Vector<u64>, // 65536-bit filter over the name FNVs: most identifiers stop here
 }
@@ -9783,21 +9783,21 @@ const XD_WORKERS: usize = 8;
 
 /// One worker's share of `xd_rows`: the rows `rows[lo..hi]` of `n` modules.
 struct XdTask {
-    pub xd: *const XDecls,
-    pub tu: *const Vector<Vector<u32>>,
-    pub inst: *const Vector<Vector<u32>>,
-    pub bufs: *const Vector<String>,
-    pub off: *const Vector<u32>,
-    pub end: *const Vector<u32>,
-    pub ih: *const Vector<String>,
-    pub main_mod: usize,
-    pub tail: *const u8,
-    pub tail_len: usize,
-    pub out: *mut Vector<u32>,
-    pub rows: *const u32,
-    pub n: usize,
-    pub lo: usize,
-    pub hi: usize,
+    pub(package) xd: *const XDecls,
+    pub(package) tu: *const Vector<Vector<u32>>,
+    pub(package) inst: *const Vector<Vector<u32>>,
+    pub(package) bufs: *const Vector<String>,
+    pub(package) off: *const Vector<u32>,
+    pub(package) end: *const Vector<u32>,
+    pub(package) ih: *const Vector<String>,
+    pub(package) main_mod: usize,
+    pub(package) tail: *const u8,
+    pub(package) tail_len: usize,
+    pub(package) out: *mut Vector<u32>,
+    pub(package) rows: *const u32,
+    pub(package) n: usize,
+    pub(package) lo: usize,
+    pub(package) hi: usize,
 }
 
 // Tasks only read the texts and the declarations, and write disjoint result rows.
@@ -10035,8 +10035,8 @@ const fn decl_name(dl: str) str {
 /// The type-need log (`Mangler::tn_key`) grouped by row: row `r`'s keys are
 /// `key[off[r]..off[r + 1]]`, in log order.
 struct TnRows {
-    pub off: Vector<u32>,
-    pub key: Vector<u64>,
+    pub(package) off: Vector<u32>,
+    pub(package) key: Vector<u64>,
 }
 
 extend TnRows {
@@ -10274,9 +10274,9 @@ const fn typedef_name(line: str) str {
 
 /// Text entries with one owner module each: `end[i]` closes entry i (it starts at `end[i-1]`).
 struct Segs {
-    pub txt: String,
-    pub own: Vector<ModuleId>,
-    pub end: Vector<u32>,
+    pub(package) txt: String,
+    pub(package) own: Vector<ModuleId>,
+    pub(package) end: Vector<u32>,
 }
 
 extend Segs {
@@ -10305,9 +10305,9 @@ extend Segs {
 
 /// A module with its size and its position before sorting (the tie break).
 struct SizePos {
-    pub size: u64,
-    pub pos: u32,
-    pub m: ModuleId,
+    pub(package) size: u64,
+    pub(package) pos: u32,
+    pub(package) m: ModuleId,
 }
 
 const fn size_pos_cmp(a: &SizePos, b: &SizePos) i32 {
@@ -10331,8 +10331,8 @@ fn sort_big_first(idx: &mut Vector<ModuleId>, size: &Vector<u64>) {
 
 /// A sort key with the index it orders (module paths, registry roots).
 struct KeyIdx<'a> {
-    pub key: str<'a>,
-    pub idx: u32,
+    pub(package) key: str<'a>,
+    pub(package) idx: u32,
 }
 
 const fn key_idx_cmp(a: &KeyIdx, b: &KeyIdx) i32 {
@@ -10783,8 +10783,8 @@ fn shard_text(co: &CemitOut, t: usize, x: u8, inst: bool, tail: str, sg: &ShardG
 /// A module's chunks grouped by shard, each group in emission order: shard x's chunk indexes are
 /// `ord[off[x]..off[x + 1]]`.
 struct ShardGroups {
-    pub off: Vector<u32>,
-    pub ord: Vector<u32>,
+    pub(package) off: Vector<u32>,
+    pub(package) ord: Vector<u32>,
 }
 
 extend ShardGroups {
@@ -11982,36 +11982,36 @@ const HF_FORMAT: str = "hfacts 4\n";
 // the scan read, and whether the preprocessor read the header (`ok`); `hit` when an earlier build's record
 // gave them.
 struct HfTask {
-    pub target: i32,
-    pub arch: i32,
-    pub sysroot: *const String,
-    pub flags: *const String,
-    pub env: *const ct::CTarget, // the C environment the scan runs under, null when none applies
-    pub pre: *const String, // the `#include` lines of the headers (`native_header_facts`)
-    pub names: *const Vector<String>,
-    pub fnames: *const Vector<String>,
-    pub tnames: *const Vector<String>,
-    pub anames: *const Vector<String>,
-    pub snames: *const Vector<String>,
-    pub k: u32,
-    pub key: u64,
-    pub vals: Vector<i64>,
-    pub oks: Vector<bool>,
-    pub sts: Vector<bool>,
-    pub cls: Vector<u8>,
-    pub lays: Vector<String>,
-    pub szs: Vector<u64>,
-    pub afacts: Vector<String>,
-    pub shapes: Vector<String>,
-    pub sigs: Vector<String>,
-    pub read: Vector<String>,
-    pub ok: bool,
-    pub hit: bool,
+    pub(package) target: i32,
+    pub(package) arch: i32,
+    pub(package) sysroot: *const String,
+    pub(package) flags: *const String,
+    pub(package) env: *const ct::CTarget, // the C environment the scan runs under, null when none applies
+    pub(package) pre: *const String, // the `#include` lines of the headers (`native_header_facts`)
+    pub(package) names: *const Vector<String>,
+    pub(package) fnames: *const Vector<String>,
+    pub(package) tnames: *const Vector<String>,
+    pub(package) anames: *const Vector<String>,
+    pub(package) snames: *const Vector<String>,
+    pub(package) k: u32,
+    pub(package) key: u64,
+    pub(package) vals: Vector<i64>,
+    pub(package) oks: Vector<bool>,
+    pub(package) sts: Vector<bool>,
+    pub(package) cls: Vector<u8>,
+    pub(package) lays: Vector<String>,
+    pub(package) szs: Vector<u64>,
+    pub(package) afacts: Vector<String>,
+    pub(package) shapes: Vector<String>,
+    pub(package) sigs: Vector<String>,
+    pub(package) read: Vector<String>,
+    pub(package) ok: bool,
+    pub(package) hit: bool,
 }
 
 // One header scan for a task of its own; each task writes only its own.
 struct HfRef {
-    pub t: *mut HfTask,
+    pub(package) t: *mut HfTask,
 }
 
 unsafe extend HfRef as Send {}
@@ -12282,24 +12282,24 @@ const fn hf_word<'a>(line: &mut str<'a>) str<'a> {
 // One object of a native build: its unit's own part (`own`: the module's own items) or the part the
 // build adds (instances, glue, data, wrappers): its bytes, or the reused object's (`old`).
 struct NatObj {
-    pub m: ModuleId,
-    pub own: bool,
-    pub bytes: Vector<u8>,
-    pub old: String,
+    pub(package) m: ModuleId,
+    pub(package) own: bool,
+    pub(package) bytes: Vector<u8>,
+    pub(package) old: String,
 }
 
 // One part of one unit to compile: its functions `fs` and data `ds` of LIR package `pk` for `(os, isa)`
 // into `bytes`, `ok` when it compiles, else the reason in `why`.
 struct NatTask {
-    pub pk: *const lir_ir::Package,
-    pub os: i32,
-    pub isa: i32,
-    pub fs: *const Vector<u32>,
-    pub ds: *const Vector<u32>,
-    pub text: *const String,
-    pub bytes: *mut Vector<u8>,
-    pub why: *mut String,
-    pub ok: *mut bool,
+    pub(package) pk: *const lir_ir::Package,
+    pub(package) os: i32,
+    pub(package) isa: i32,
+    pub(package) fs: *const Vector<u32>,
+    pub(package) ds: *const Vector<u32>,
+    pub(package) text: *const String,
+    pub(package) bytes: *mut Vector<u8>,
+    pub(package) why: *mut String,
+    pub(package) ok: *mut bool,
 }
 
 // Tasks read the finished LIR and their part's symbol lists, and write their own slots.
@@ -12698,9 +12698,9 @@ fn proto_of(body: &String, out: &mut String) {
 
 /// One job: the items at by_node positions `[lo, hi)` (source order) of module `m`.
 struct BcJob {
-    pub m: u32,
-    pub lo: u32,
-    pub hi: u32,
+    pub(package) m: u32,
+    pub(package) lo: u32,
+    pub(package) hi: u32,
 }
 
 /// One analysis slot: an ownership oracle and a borrow pipeline. A job leases one from the pool
@@ -12709,8 +12709,8 @@ struct BcJob {
 /// single slot). Memo answers depend only on (module, type), so which slot serves a body never
 /// changes an outcome.
 struct BcSlot {
-    pub ow: bfx::Owner,
-    pub ctx: bfi::BorrowCtx,
+    pub(package) ow: bfx::Owner,
+    pub(package) ctx: bfi::BorrowCtx,
 }
 
 unsafe extend BcSlot as Send {}
@@ -12719,18 +12719,18 @@ unsafe extend BcSlot as Send {}
 /// a returned slot has no next lease and is freed at once, unless `reported`: the borrow probe and
 /// the item measurement read every slot after the stage.
 struct BcPool {
-    pub idle: Vector<BcSlot>,
-    pub unleased: usize,
-    pub reported: bool,
+    pub(package) idle: Vector<BcSlot>,
+    pub(package) unleased: usize,
+    pub(package) reported: bool,
 }
 
 struct BcStage {
-    pub p: *mut loader::Package,
-    pub jobs: *const Vector<BcJob>,
-    pub outs: *mut Option<Box<diag::Errors>>, // per item
-    pub slots: *mut psync::Mutex<BcPool>,
-    pub master: *mut irl::Keep, // null = discard the lowerings
-    pub validate: bool,
+    pub(package) p: *mut loader::Package,
+    pub(package) jobs: *const Vector<BcJob>,
+    pub(package) outs: *mut Option<Box<diag::Errors>>, // per item
+    pub(package) slots: *mut psync::Mutex<BcPool>,
+    pub(package) master: *mut irl::Keep, // null = discard the lowerings
+    pub(package) validate: bool,
 }
 
 fn bc_slot_new(p: *const loader::Package) BcSlot {
@@ -12842,12 +12842,12 @@ fn bc_jobs(p: &loader::Package, out: &mut Vector<BcJob>) {
 /// reachability scan (`scans`, null when the package's reachability is known). Each job writes
 /// only its module's entries.
 struct BcPre {
-    pub p: *const loader::Package,
-    pub cx: *const loader::ReachCtx,
-    pub refs: *mut u64,
-    pub w: usize,
-    pub bodies: *mut usize,
-    pub scans: *mut loader::ReachScan,
+    pub(package) p: *const loader::Package,
+    pub(package) cx: *const loader::ReachCtx,
+    pub(package) refs: *mut u64,
+    pub(package) w: usize,
+    pub(package) bodies: *mut usize,
+    pub(package) scans: *mut loader::ReachScan,
 }
 
 fn bc_pre_job(ctx: *mut void, j: u32) {
@@ -12865,7 +12865,7 @@ fn bc_pre_job(ctx: *mut void, j: u32) {
 /// per slot in flight (the serial path's single slot serves every body), outputs published in
 /// module and item order, so both paths print and lower identically. `keep` (null = discard)
 /// collects every lowered body for the backend. False when any module reported an error.
-pub fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
+pub(package) fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
     // The stage's own regions (the slots' probes hold the per-body ones).
     let mut st0 = bc_stats_new();
     let tp = st0.pr.start();
@@ -13026,7 +13026,7 @@ fn bc_stats_print(st: &bfi::BcStats, ctx: &bfi::BorrowCtx) {
 
 /// The message of a deferred static_assert that failed once the whole package was typed (`msg`:
 /// the engine's detail, null for a condition that folded to false).
-pub fn flush_assert_text(msg: *const char) String {
+pub(package) fn flush_assert_text(msg: *const char) String {
     if msg != null {
         return format("static assertion cannot be evaluated: {}", unsafe str::from_cstr(msg));
     }
@@ -13035,7 +13035,7 @@ pub fn flush_assert_text(msg: *const char) String {
 
 /// The message of a deferred call-bearing const initializer that still cannot be evaluated once
 /// the package is typed.
-pub fn flush_const_text(msg: *const char) String {
+pub(package) fn flush_const_text(msg: *const char) String {
     return format("constant cannot be evaluated at compile time: {}", unsafe str::from_cstr(msg));
 }
 
@@ -13061,8 +13061,8 @@ fn flush_err(ctx: *mut void, m: ModuleId, id: NodeId, msg: String) {
 
 // (module, source position, record index) order of fold-failure references.
 struct FoldRef {
-    pub key: u64, // module << 32 | span start
-    pub i: u32, // index in the recorded sequence (the engine's fold_errs, the refusals)
+    pub(package) key: u64, // module << 32 | span start
+    pub(package) i: u32, // index in the recorded sequence (the engine's fold_errs, the refusals)
 }
 
 const fn fold_ref_cmp(a: &FoldRef, b: &FoldRef) i32 {
@@ -13254,10 +13254,10 @@ fn sort_refusals(rs: &mut Vector<cbe::Refusal>) {
 // (per-file `lint` invocations treat other modules as live; the full-build lint reports every module
 // outside the std and ffi trees, so cross-module dead cycles are caught there).
 struct LintEnt {
-    pub start: u32,
-    pub end: u32,
-    pub node: NodeId,
-    pub root: bool,
+    pub(package) start: u32,
+    pub(package) end: u32,
+    pub(package) node: NodeId,
+    pub(package) root: bool,
 }
 
 const LINT_NONE: u32 = 0xFFFFFFFF; // an item outside the entries
@@ -13538,7 +13538,7 @@ fn lint_entry(a: *const Ast, ents: &Vector<LintEnt>, iid: NodeId) usize {
 
 /// `sink` null: the findings log (and count) per module; else module `m`'s warnings go to
 /// `sink[m]`, unfinalized (the language server publishes them itself).
-pub fn lint_unused_items(p: &mut loader::Package, only_mod: i32, sink: *mut Vector<diag::Errors>) {
+pub(package) fn lint_unused_items(p: &mut loader::Package, only_mod: i32, sink: *mut Vector<diag::Errors>) {
     let nm = p.modules.len();
     // Prelude modules only participate when a linted module IS prelude (std lint invocation): the
     // prelude never references user code, and std cross-references must count when linting std itself.
@@ -13768,7 +13768,7 @@ fn ap_check_fn(errs: &mut diag::Errors, a: *const Ast, m: usize, fnode: NodeId, 
 /// typed; an inline per-module pass would silently fold nothing (module order). @test fns are
 /// exempt (panicking on purpose is a feature there), as are explicit `panic(..)` calls (only a
 /// panic reached THROUGH a `const fn` frame classifies; see Interp::lint_body).
-pub fn check_always_panics_module(p: &mut loader::Package, m: usize, errs: &mut diag::Errors) {
+pub(package) fn check_always_panics_module(p: &mut loader::Package, m: usize, errs: &mut diag::Errors) {
     if p.cir == null {
         return;
     }
@@ -14231,13 +14231,13 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
 // item order.
 
 struct ApStage {
-    pub p: *mut loader::Package,
-    pub jobs: *const Vector<BcJob>,
-    pub outs: *mut Option<Box<diag::Errors>>, // per item
-    pub engines: *mut Vector<Box<iri::Interp>>, // idle private engines, under `elock`
-    pub unleased: *mut usize, // jobs that have not taken an engine yet, under `elock`
-    pub elock: *mut i32,
-    pub ran0: *const Set<u64>, // the master's `ran0` as the stage starts, which the master grows during it
+    pub(package) p: *mut loader::Package,
+    pub(package) jobs: *const Vector<BcJob>,
+    pub(package) outs: *mut Option<Box<diag::Errors>>, // per item
+    pub(package) engines: *mut Vector<Box<iri::Interp>>, // idle private engines, under `elock`
+    pub(package) unleased: *mut usize, // jobs that have not taken an engine yet, under `elock`
+    pub(package) elock: *mut i32,
+    pub(package) ran0: *const Set<u64>, // the master's `ran0` as the stage starts, which the master grows during it
 }
 
 fn ap_engine_take(st: &ApStage) Box<iri::Interp> {
@@ -14418,7 +14418,7 @@ fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
 /// report-only passes restricted to the same set. No code is emitted. Returns 0 only when clean; any
 /// error or remaining warning returns 1. `fixes != null` (`lint --fix`) collects machine fixes instead
 /// of printing.
-pub fn lint_package(
+pub(package) fn lint_package(
     p: &mut loader::Package,
     target: i32,
     lint_mod: usize,
@@ -14511,11 +14511,11 @@ pub fn lint_package(
 /// pack), 1 = C source, 2 = the shared `__sc_fwd.h` of a tree whose units compile through its
 /// precompiled header, 3 = a native object the link takes as it is. Paths are full paths under the package's gen_root, the one tree the
 /// C compiler reads. Notifications for one build arrive from a single thread.
-pub struct EmitSink {
-    pub ctx: *mut void,
+pub(package) struct EmitSink {
+    pub(package) ctx: *mut void,
     /// (ctx, path, body, kind, changed): `body` is the file's text, or empty when the sink reads the
     /// file; `changed` is set when this build rewrote the file (an unchanged one keeps its mtime).
-    pub notify: fn(*mut void, str, str, i32, bool) void,
+    pub(package) notify: fn(*mut void, str, str, i32, bool) void,
 }
 
 fn sink_notify(sink: *mut EmitSink, pr: &mut prb::Probe, path: str, body: str, kind: i32, changed: bool) {
@@ -14547,12 +14547,12 @@ const PUB_WORKERS: usize = 4;
 // One worker's share of a header batch: files `lo..hi`, each `publish_file` of path `path[i]` with the
 // `len[i]` bytes at `text[i]`, its result into `rc[i]`.
 struct PubTask {
-    pub path: *const String,
-    pub text: *const usize,
-    pub len: *const usize,
-    pub rc: *mut i32,
-    pub lo: u64,
-    pub hi: u64,
+    pub(package) path: *const String,
+    pub(package) text: *const usize,
+    pub(package) len: *const usize,
+    pub(package) rc: *mut i32,
+    pub(package) lo: u64,
+    pub(package) hi: u64,
 }
 
 // Tasks only read their files' texts and write disjoint result slots.
@@ -14623,7 +14623,7 @@ fn stage_ms(on: bool, t0: &mut i64, label: str) {
 
 /// Manifest builds point `p.gen_root` into their out-dir; a bare invocation defaults it next to the
 /// sources, one tree per profile (PROFILE makes the emitted C depend on it).
-pub fn default_gen_root(p: &mut loader::Package) {
+pub(package) fn default_gen_root(p: &mut loader::Package) {
     if p.gen_root.len() == 0 {
         let mut g = String::from_str(p.root_dir.as_str());
         g.push_str("/build/");
@@ -14656,7 +14656,7 @@ fn resolve_stage(p: &mut loader::Package, lint: bool) {
 /// deferred checks. `jobs` is the requested worker count, `steps` and `mem` the evaluation budgets of
 /// `e`, `cache` the build's cache root (`objcache::object_cache_dir`; empty: no image is kept). False,
 /// with the errors logged, when the prelude does not check.
-pub fn prelude_stage(
+pub(package) fn prelude_stage(
     p: &mut loader::Package,
     e: &mut iri::Interp,
     std_dir: str,
@@ -14772,7 +14772,7 @@ fn check_prelude(q: &mut loader::Package, target: i32) bool {
     return true;
 }
 
-pub fn run_package(
+pub(package) fn run_package(
     p: &mut loader::Package,
     topts: *const TestOpts,
     out_bin: str,
@@ -15615,7 +15615,7 @@ fn native_test_main(p: &loader::Package, plan: &TestPlan, out: &mut Vector<u8>) 
 }
 
 /// The native registry object's name in the tree: a build that links it links no C registry object.
-pub const NAT_REGISTRY: str = "__sc_registry_n";
+pub(package) const NAT_REGISTRY: str = "__sc_registry_n";
 
 // The registry of a build whose modules are all native, as an object of the target: the ZST sentinels
 // of alignments `zst`, and with reflection roots `roots` (space-separated, sorted) their table and the

@@ -39,7 +39,7 @@ const KEPT_STATE: u32 = NONE;
 const SLOT_WRITES_MAX: u32 = 64;
 
 /// The optimizer's scratch, reused from body to body.
-pub struct Opt {
+pub(package) struct Opt {
     // The control flow graph: per block, its successors and predecessors as ranges of one list each.
     succ_at: Vector<u32>,
     succs: Vector<u32>,
@@ -120,28 +120,28 @@ pub struct Opt {
 // A write into private memory whose address does not escape: bytes `off` to `end` of `slot` (`Opt.sbase`),
 // by store `inst` in block `blk` (NONE: a copy or a fill).
 struct SlotWrite {
-    pub slot: u32,
-    pub off: i64,
-    pub end: i64,
-    pub inst: u32,
-    pub blk: u32,
+    pub(package) slot: u32,
+    pub(package) off: i64,
+    pub(package) end: i64,
+    pub(package) inst: u32,
+    pub(package) blk: u32,
 }
 
 extend SlotWrite as Copy {}
 
 // A memory place in a memory state, and the value it holds.
 struct Place {
-    pub addr: u32,
-    pub off: u32,
-    pub ty: u8,
-    pub state: u32,
-    pub val: u32,
+    pub(package) addr: u32,
+    pub(package) off: u32,
+    pub(package) ty: u8,
+    pub(package) state: u32,
+    pub(package) val: u32,
 }
 
 extend Place as Copy {}
 
 extend Opt {
-    pub fn new() Opt {
+    pub(package) fn new() Opt {
         return Opt {
             succ_at: Vector::<u32>::new(),
             succs: Vector::<u32>::new(),
@@ -208,7 +208,7 @@ extend Opt {
 
     /// Optimize body `b` of package `pk`; with `force` the rebuild runs though nothing changed (after the
     /// inliner, which leaves blocks the entry may not reach). Whether it changed.
-    pub fn run(self: &mut Self, pk: &Package, b: &mut Body, force: bool) bool {
+    pub(package) fn run(self: &mut Self, pk: &Package, b: &mut Body, force: bool) bool {
         if b.naked {
             return false;
         }
@@ -1528,7 +1528,7 @@ extend Opt {
 /// may inline (0 without any; a call back into a body the walk is inside does not count), and the
 /// bodies of one level go in parallel, reading the lower levels'. A body of a unit `sealed` marks (by
 /// unit) inlines into bodies of its unit only.
-pub fn optimize(pk: &mut Package, jobs: u32, sealed: &Vector<bool>) {
+pub(package) fn optimize(pk: &mut Package, jobs: u32, sealed: &Vector<bool>) {
     let mut bodies = replace(&mut pk.bodies, Vector::<Body>::new());
     {
         let p: &Package = pk;

@@ -8,22 +8,22 @@ import lexer::token_type as *;
 import utils::errors as diag;
 
 /// Sentinel for "none" in u32 positions and scalar values.
-pub const UINT32_MAX: u32 = 0xFFFFFFFFu32;
+pub(package) const UINT32_MAX: u32 = 0xFFFFFFFFu32;
 /// Sentinel for "none" in usize positions.
-pub const USIZE_MAX: usize = 0xFFFFFFFFFFFFFFFFu64 as usize;
+pub(package) const USIZE_MAX: usize = 0xFFFFFFFFFFFFFFFFu64 as usize;
 
 /// Read-ahead sentinel padding a lexed source buffer MUST carry past its logical end (all NUL): the loader
 /// pads every module source (String::pad_nul) so the lexer's scan loops drop their per-byte bounds check
 /// and rely on the trailing NUL to terminate. Fixed lookahead reads at most 4 bytes past the end; an
 /// 8-byte word read starts at or before the first NUL past the end, so it ends at most 7 bytes past it.
-pub const SOURCE_PAD: usize = 8;
+pub(package) const SOURCE_PAD: usize = 8;
 
 /// Per-byte character-class flags, indexed by byte value (see build_char_class). Held BY VALUE in each Lexer
 /// so there is no global mutable state (the compiler lexes many sources, possibly concurrently in-process).
-pub const CC_ID_PART: u8 = 1;
-pub const CC_WS: u8 = 2;
-pub const CC_ID_START: u8 = 4; // an identifier's first byte, except `M` and `b` (literal prefixes)
-pub type CharClass = Array<u8, 256>;
+pub(package) const CC_ID_PART: u8 = 1;
+pub(package) const CC_WS: u8 = 2;
+pub(package) const CC_ID_START: u8 = 4; // an identifier's first byte, except `M` and `b` (literal prefixes)
+pub(package) type CharClass = Array<u8, 256>;
 
 const fn build_char_class() CharClass {
     let mut c = CharClass {};
@@ -47,26 +47,26 @@ const fn build_char_class() CharClass {
 /// delimiter chain is not copied: `dpos`/`d_len` index its openers in the source. `base` is where
 /// this literal's open matchers start in `mt_stack`; `hole_depth` counts matcher tokens open in
 /// the current hole so the closing delimiter sequence is only recognized at hole level.
-pub struct MtFrame {
-    pub dpos: u32,
-    pub d_len: u8,
-    pub base: u32,
-    pub hole_depth: u32,
+pub(package) struct MtFrame {
+    pub(package) dpos: u32,
+    pub(package) d_len: u8,
+    pub(package) base: u32,
+    pub(package) hole_depth: u32,
 }
 
 /// Scanner state over one padded source buffer; `tokens` and `errors` accumulate until taken.
-pub struct Lexer<'a> {
-    pub bytes: str<'a>,
-    pub start: usize,
-    pub current: usize,
-    pub file: str<'a>,
-    pub tokens: Vector<Token>,
-    pub errors: diag::Errors,
-    pub class: CharClass,
-    pub keep_trivia: bool, // emit comment tokens (the formatter); off for the parser path
-    pub mt: Vector<MtFrame>, // matchertext literals paused at an interpolation hole, innermost last
-    pub mt_stack: Vector<u8>, // open matchers of ALL paused templates (frames slice it via `base`)
-    pub vectors: bool, // an identifier names a vector type or the vector module (`vector_name`)
+pub(package) struct Lexer<'a> {
+    pub(package) bytes: str<'a>,
+    pub(package) start: usize,
+    pub(package) current: usize,
+    pub(package) file: str<'a>,
+    pub(package) tokens: Vector<Token>,
+    pub(package) errors: diag::Errors,
+    pub(package) class: CharClass,
+    pub(package) keep_trivia: bool, // emit comment tokens (the formatter); off for the parser path
+    pub(package) mt: Vector<MtFrame>, // matchertext literals paused at an interpolation hole, innermost last
+    pub(package) mt_stack: Vector<u8>, // open matchers of ALL paused templates (frames slice it via `base`)
+    pub(package) vectors: bool, // an identifier names a vector type or the vector module (`vector_name`)
 }
 
 const fn is_id_start(b: u8) bool {
@@ -146,8 +146,8 @@ const fn vector_name(p: *const u8, n: usize, in_path: bool) bool {
 
 // The keywords of 2 to 8 bytes; `interface` and `static_assert` are the longer ones (`long_keyword`).
 struct Keyword {
-    pub text: str<'static>,
-    pub kind: TokenType,
+    pub(package) text: str<'static>,
+    pub(package) kind: TokenType,
 }
 
 const KEYWORD_COUNT: usize = 44;
@@ -205,8 +205,8 @@ const KW_MUL: u64 = 0x82D32DADCCA398C7u64;
 const KW_SLOTS: usize = 128;
 
 struct KeywordTable {
-    pub word: [u64; KW_SLOTS],
-    pub kind: [TokenType; KW_SLOTS],
+    pub(package) word: [u64; KW_SLOTS],
+    pub(package) kind: [TokenType; KW_SLOTS],
 }
 
 // The top 7 bits of the product (KW_SLOTS = 128).
@@ -269,7 +269,7 @@ const fn long_keyword(p: *const u8, len: usize) TokenType {
 }
 
 /// True when `s` is a reserved word: the lexer never scans it as an identifier.
-pub const fn is_keyword(s: str) bool {
+pub(package) const fn is_keyword(s: str) bool {
     if s.len() <= 8 {
         return s.len() >= 2 && short_keyword(word_of(s)) != TokenType::Identifier;
     }
@@ -324,7 +324,7 @@ const fn num_suffix_kind(p: *const u8, n: usize) i32 {
 extend Lexer {
     /// Pads `source` with trailing NULs IN PLACE (the sentinel the scan loops rely on; see
     /// SOURCE_PAD) and borrows it for the Lexer's lifetime.
-    pub fn new<'a>(source: &'a mut String, file: str<'a>) Lexer<'a> {
+    pub(package) fn new<'a>(source: &'a mut String, file: str<'a>) Lexer<'a> {
         source.pad_nul(SOURCE_PAD);
         return Lexer {
             bytes: source.as_str(),
@@ -1489,7 +1489,7 @@ extend Lexer {
     /// Scans the whole source into `tokens`, ending with an Eof token spanning (len, 0). Recovers
     /// from every error (diagnostics accumulate in `errors`; the stream is always complete). A
     /// UTF-8 BOM is consumed only at byte 0; anywhere else it is diagnosed.
-    pub fn scan_tokens(self: &mut Self) {
+    pub(package) fn scan_tokens(self: &mut Self) {
         if self.bytes.len() > 0xFFFFFFFF {
             // Token and diagnostic offsets are u32.
             self.errors.emit(0, 0, String::from_str("a source file must be smaller than 4 GiB"));
@@ -1519,16 +1519,16 @@ extend Lexer {
     }
 
     /// Moves the token vector out; the lexer is left holding an empty one.
-    pub fn take_tokens(self: &mut Self) Vector<Token> {
+    pub(package) fn take_tokens(self: &mut Self) Vector<Token> {
         return replace(&mut self.tokens, Vector::<Token>::new());
     }
 
     /// True once any scan error is recorded.
-    pub const fn has_errors(self: &Self) bool {
+    pub(package) const fn has_errors(self: &Self) bool {
         return self.errors.has_errors();
     }
     /// Print the accumulated diagnostics to stderr.
-    pub fn log_errors(self: &Self) {
+    pub(package) fn log_errors(self: &Self) {
         self.errors.log();
     }
 }

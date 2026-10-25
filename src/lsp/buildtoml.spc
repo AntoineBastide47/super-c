@@ -9,7 +9,7 @@ import utils::errors as diag;
 /// Validate `src` as a manifest: raw byte spans and messages, ready for the server to map to ranges.
 /// The build's own checker produces these, so the editor never disagrees with `super-c build` about
 /// what is wrong.
-pub fn diagnostics(src: str) Vector<diag::Diagnostic> {
+pub(package) fn diagnostics(src: str) Vector<diag::Diagnostic> {
     let (_, errs) = bsys::parse_check(src, "", false);
     let mut e = errs;
     return replace(&mut e.errors, Vector::<diag::Diagnostic>::new());
@@ -20,9 +20,9 @@ pub fn diagnostics(src: str) Vector<diag::Diagnostic> {
 // section with that prefix (`profile.` covers `[profile.release]`).
 
 struct Key {
-    pub sec: str<'static>,
-    pub name: str<'static>,
-    pub doc: str<'static>,
+    pub(package) sec: str<'static>,
+    pub(package) name: str<'static>,
+    pub(package) doc: str<'static>,
 }
 
 const KEYS: [Key; 31] = [
@@ -87,7 +87,7 @@ const fn sec_matches(pat: str, sec: str) bool {
 }
 
 /// The section header in force at byte `at`: the last `[name]` at or before it, "" for the top level.
-pub fn section_at(src: str, at: usize) String {
+pub(package) fn section_at(src: str, at: usize) String {
     let mut sec = String::new();
     let mut i: usize = 0;
     let mut line_start: usize = 0;
@@ -131,7 +131,7 @@ const fn is_word(c: u8) bool {
 
 /// Is byte `at` inside a section header (between '[' and ']' on its line)? Header position completes
 /// section names; anywhere else completes keys.
-pub const fn in_header(src: str, at: usize) bool {
+pub(package) const fn in_header(src: str, at: usize) bool {
     let mut i = at;
     while i > 0 && src[i - 1] != b'\n' {
         i = i - 1;
@@ -149,15 +149,15 @@ pub const fn in_header(src: str, at: usize) bool {
 }
 
 /// One completion item: the text to insert and its one-line documentation.
-pub struct Item {
-    pub label: String,
-    pub doc: String,
+pub(package) struct Item {
+    pub(package) label: String,
+    pub(package) doc: String,
 }
 
 /// What may be written at `at`: section names inside a `[...]` header, else the keys of the section in
 /// force. Already-present keys are not filtered out: a duplicate is the validator's business, and
 /// hiding a key the cursor is currently retyping would be worse.
-pub fn completions(src: str, at: usize) Vector<Item> {
+pub(package) fn completions(src: str, at: usize) Vector<Item> {
     let mut out = Vector::<Item>::new();
     if in_header(src, at) {
         let secs: []Key = SECTIONS;
@@ -179,7 +179,7 @@ pub fn completions(src: str, at: usize) Vector<Item> {
 }
 
 /// The documentation for the key or section name under `at`, or an empty string.
-pub fn hover(src: str, at: usize) String {
+pub(package) fn hover(src: str, at: usize) String {
     let w = word_at(src, at);
     if w.len() == 0 {
         return String::new();

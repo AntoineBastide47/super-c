@@ -26,7 +26,7 @@ const S_ATTR_CODE: u32 = 0x80000400; // pure and some instructions
 const S_ATTR_SOME_INSTRUCTIONS: u32 = 0x400;
 const S_ATTR_PURE_INSTRUCTIONS: u32 = 0x80000000;
 
-pub const NONE32: u32 = 0xFFFFFFFF;
+pub(package) const NONE32: u32 = 0xFFFFFFFF;
 const N_EXT: u8 = 1;
 const N_SECT: u8 = 0xE;
 const N_PEXT: u8 = 0x10;
@@ -86,7 +86,7 @@ fn wname(o: &mut Vector<u8>, s: str) {
 /// The section and segment names and the flags of named section `spec` (`segment,section[,type[,attr+
 /// ...]]`), holding `code` when a function is there; NONE32 for a type or attribute this writer does not
 /// know. A code section without attributes holds pure instructions, as the C compiler marks it.
-pub fn named_flags<'a>(spec: str<'a>, code: bool, sect: &mut str<'a>, seg: &mut str<'a>) u32 {
+pub(package) fn named_flags<'a>(spec: str<'a>, code: bool, sect: &mut str<'a>, seg: &mut str<'a>) u32 {
     let mut parts = Vector::<str<'a>>::new();
     let mut at: usize = 0;
     for i in 0..spec.len() + 1 {
@@ -190,7 +190,7 @@ fn sec_names<'a>(o: &'a ob::Obj, k: u8, sect: &mut str<'a>, seg: &mut str<'a>) u
 }
 
 /// Write object `o` as a Mach-O arm64 object into `out`.
-pub fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
+pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
     // The functions' compact unwind entries, which the linker turns into `__unwind_info`: each one's
     // address, size and encoding, no personality and no language data.
     if o.frames.len() != 0 {

@@ -22,16 +22,16 @@ import ast::ast as *;
 /// Read-only view of one module's typed AST. Holds a raw pointer because consumers thread it through
 /// stages that also hold the package; the Ast must outlive the view (it always does: views are built
 /// per pass over a loaded package).
-pub struct TypedFacts {
-    pub ast: *const Ast,
+pub(package) struct TypedFacts {
+    pub(package) ast: *const Ast,
     /// The reader cannot see this item's checked state (`graph::items::visible`): every TYPED
     /// accessor answers as an unchecked item would (syntax accessors stay live), whatever a
     /// worker has done with it, so every schedule reads the same facts.
-    pub unchecked_view: bool,
+    pub(package) unchecked_view: bool,
 }
 
 extend TypedFacts {
-    pub const fn of(a: *const Ast) TypedFacts {
+    pub(package) const fn of(a: *const Ast) TypedFacts {
         return TypedFacts { ast: a, unchecked_view: false };
     }
 
@@ -40,46 +40,46 @@ extend TypedFacts {
     }
 
     /// The node itself (syntax structure stays readable through the boundary).
-    pub const fn node(self: &Self, n: NodeId) &Node {
+    pub(package) const fn node(self: &Self, n: NodeId) &Node {
         return self.a().at_const(n);
     }
 
-    pub const fn list(self: &Self, l: NodeList) *const NodeId {
+    pub(package) const fn list(self: &Self, l: NodeList) *const NodeId {
         return self.a().list(l);
     }
 
     /// The checked type of expression/decl node `n`.
-    pub const fn node_type(self: &Self, n: NodeId) TypeId {
+    pub(package) const fn node_type(self: &Self, n: NodeId) TypeId {
         if self.unchecked_view {
             return TYPE_NONE;
         }
         return self.a().type_of(n);
     }
 
-    pub const fn ty(self: &Self, t: TypeId) &Ty {
+    pub(package) const fn ty(self: &Self, t: TypeId) &Ty {
         return self.a().type_at(t);
     }
 
-    pub const fn instance(self: &Self, i: u32) &TyInstance {
+    pub(package) const fn instance(self: &Self, i: u32) &TyInstance {
         return self.a().instance(i);
     }
 
     /// `Ast::targs_of`: instance `t`, or a vector or mask as the instance it stands for.
-    pub const fn targs_of(self: &Self, t: TypeId, out: &mut TyInstance) bool {
+    pub(package) const fn targs_of(self: &Self, t: TypeId, out: &mut TyInstance) bool {
         return self.a().targs_of(t, out);
     }
 
-    pub const fn lanes(self: &Self, y: &Ty) u64 {
+    pub(package) const fn lanes(self: &Self, y: &Ty) u64 {
         return self.a().lanes(y);
     }
 
     /// The resolved declaration a reference names (module-qualified).
-    pub const fn res(self: &Self, n: NodeId) DefId {
+    pub(package) const fn res(self: &Self, n: NodeId) DefId {
         return self.a().resolution_def(n); // resolution is resolve-final: live in every view
     }
 
     /// The type args recorded for `n` (turbofish/inference), or null.
-    pub const fn type_args(self: &Self, n: NodeId) *const MonoUse {
+    pub(package) const fn type_args(self: &Self, n: NodeId) *const MonoUse {
         if self.unchecked_view {
             return null;
         }
@@ -88,7 +88,7 @@ extend TypedFacts {
 
     /// The call target + ABI data the type checker selected at call node `n`
     /// ((fmod << 40 | fdecl << 8 | skip) -- the record borrowck replays), or None.
-    pub const fn call_info(self: &Self, n: NodeId) Option<u64> {
+    pub(package) const fn call_info(self: &Self, n: NodeId) Option<u64> {
         if self.unchecked_view {
             return Option::<u64>::None;
         }
@@ -96,7 +96,7 @@ extend TypedFacts {
     }
 
     /// The operator method selected at operator node `n` ((module << 32 | node)), or None.
-    pub const fn op_method(self: &Self, n: NodeId) Option<u64> {
+    pub(package) const fn op_method(self: &Self, n: NodeId) Option<u64> {
         if self.unchecked_view {
             return Option::<u64>::None;
         }
@@ -108,7 +108,7 @@ extend TypedFacts {
 
     /// The value of integer constant pattern `n` (a literal-pattern value or a range bound) in the
     /// matched type, as two's complement bits, or None.
-    pub const fn pat_value(self: &Self, n: NodeId) Option<u64> {
+    pub(package) const fn pat_value(self: &Self, n: NodeId) Option<u64> {
         if self.unchecked_view {
             return Option::<u64>::None;
         }
@@ -119,7 +119,7 @@ extend TypedFacts {
     }
 
     /// The conversion recorded at `n` (`target::from(expr)` or a builtin widening), or null.
-    pub const fn coercion(self: &Self, n: NodeId) *const CoerceUse {
+    pub(package) const fn coercion(self: &Self, n: NodeId) *const CoerceUse {
         if self.unchecked_view {
             return null;
         }
@@ -127,7 +127,7 @@ extend TypedFacts {
     }
 
     /// The `dyn I<args>` naming the conformance bound call `n` dispatches to, or TYPE_NONE.
-    pub const fn bound_call(self: &Self, n: NodeId) TypeId {
+    pub(package) const fn bound_call(self: &Self, n: NodeId) TypeId {
         if self.unchecked_view {
             return TYPE_NONE;
         }
@@ -135,7 +135,7 @@ extend TypedFacts {
     }
 
     /// The auto-dereference chain recorded at `n` (receiver adjustments, in order), or null.
-    pub const fn derefs(self: &Self, n: NodeId) *const DerefUse {
+    pub(package) const fn derefs(self: &Self, n: NodeId) *const DerefUse {
         if self.unchecked_view {
             return null;
         }
@@ -143,7 +143,7 @@ extend TypedFacts {
     }
 
     /// The dynamic-interface erasure recorded at `n`, or null.
-    pub const fn dyn_conv(self: &Self, n: NodeId) *const DynUse {
+    pub(package) const fn dyn_conv(self: &Self, n: NodeId) *const DynUse {
         if self.unchecked_view {
             return null;
         }
@@ -151,7 +151,7 @@ extend TypedFacts {
     }
 
     /// The wide-literal record for `n` (limbs already two's-complemented/masked), or null.
-    pub const fn wide_lit(self: &Self, n: NodeId) *const WideLit {
+    pub(package) const fn wide_lit(self: &Self, n: NodeId) *const WideLit {
         if self.unchecked_view {
             return null;
         }
@@ -164,7 +164,7 @@ extend TypedFacts {
 
     /// A closure's captures: the binding list the type checker recorded on the closure node (its
     /// `mut_caps` mask names the captures taken as implicit `&mut`).
-    pub const fn captures(self: &Self, closure: NodeId) NodeList {
+    pub(package) const fn captures(self: &Self, closure: NodeId) NodeList {
         return self.node(closure).as_data.closure.captures;
     }
 }
@@ -172,8 +172,8 @@ extend TypedFacts {
 /// Type-check completion watermarks for one module: the length of every semantic table when the
 /// checker finished. SC_FACTS_CHECK compares these after later stages -- borrow checking must change
 /// nothing; codegen/propagation changes must stay inside the documented allowlist above.
-pub struct FactsWatermark {
-    pub n: [usize; WM_N],
+pub(package) struct FactsWatermark {
+    pub(package) n: [usize; WM_N],
 }
 
 const WM_N: usize = 22;
@@ -214,7 +214,7 @@ static_assert(WM_NAMES[WM_METHOD_REFS] == "method_refs", "WM_METHOD_REFS names t
 static_assert(WM_NAMES[WM_CALL_INFO] == "call_info", "WM_CALL_INFO names the call_info entry");
 
 /// Snapshot module `a`'s semantic-table lengths, in WM_NAMES order.
-pub const fn watermark(a: &Ast) FactsWatermark {
+pub(package) const fn watermark(a: &Ast) FactsWatermark {
     return FactsWatermark {
         n: [
             a.nodes.len(),
@@ -251,7 +251,7 @@ pub const fn watermark(a: &Ast) FactsWatermark {
 /// since, and must be released at its point: the body facts with the body arena, `method_refs` and
 /// `seeds` once `after_checks`.
 @cold
-pub fn watermark_check(a: &Ast, w: &FactsWatermark, mid: u32, after_checks: bool) u32 {
+pub(package) fn watermark_check(a: &Ast, w: &FactsWatermark, mid: u32, after_checks: bool) u32 {
     let now = watermark(a);
     let live_body = a.b.nodes.len() != 0;
     let mut d: u32 = 0;

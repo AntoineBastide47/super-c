@@ -11,37 +11,37 @@ import module::loader as loader;
 
 /// One aggregate to define: the declaration plus, for instances, the anchor pool type that binds
 /// its generic parameters (`aty == TYPE_NONE` = concrete declaration).
-pub struct AggItem {
-    pub m: ModuleId,
-    pub decl: NodeId,
-    pub amod: ModuleId,
-    pub aty: TypeId,
+pub(package) struct AggItem {
+    pub(package) m: ModuleId,
+    pub(package) decl: NodeId,
+    pub(package) amod: ModuleId,
+    pub(package) aty: TypeId,
 }
 
 /// Declaration-layer emitter state for one TU; `out` collects the bodies, `fwd` the forward typedefs.
-pub struct TuEmit {
-    pub pkg: *const loader::Package,
-    pub mg: mbe::Mangler,
-    pub out: String,
+pub(package) struct TuEmit {
+    pub(package) pkg: *const loader::Package,
+    pub(package) mg: mbe::Mangler,
+    pub(package) out: String,
     /// Every forward typedef, kept apart from `out`: the assembly puts each one ahead of the
     /// body in the definition header of its aggregate and copies it into every other file that
     /// spells it, so a pointer field may name an aggregate defined later (or replayed late).
-    pub fwd2: String,
-    pub skipped: u64, // aggregates outside the frozen subset (dyn/env fields, unbound params)
+    pub(package) fwd2: String,
+    pub(package) skipped: u64, // aggregates outside the frozen subset (dyn/env fields, unbound params)
     /// FNVs of closure-env struct names this pass DEFINED (embedded in aggregates): the body
     /// emitter must not define them again.
-    pub env_defined: Vector<u64>,
-    pub emitted: u64,
+    pub(package) env_defined: Vector<u64>,
+    pub(package) emitted: u64,
     /// Every definition chunk of `out` in order: its start offset, its owner module (the
     /// declaring module; a generic instance's is the generic's), whether it is a payload-less
     /// enum, which prototypes need complete: the assembly copies it into every other header
     /// that spells it (its include guard makes the copies one definition), and the C name it
     /// defines (`chunk_name[chunk_name_end[i-1]..chunk_name_end[i]]`).
-    pub chunk_off: Vector<u32>,
-    pub chunk_own: Vector<ModuleId>,
-    pub chunk_enum: Vector<bool>,
-    pub chunk_name: String,
-    pub chunk_name_end: Vector<u32>,
+    pub(package) chunk_off: Vector<u32>,
+    pub(package) chunk_own: Vector<ModuleId>,
+    pub(package) chunk_enum: Vector<bool>,
+    pub(package) chunk_name: String,
+    pub(package) chunk_name_end: Vector<u32>,
     // Emission state keyed by the FNV of the mangled type name: 0 absent / 1 in progress / 2 done.
     state: Map<u64, u64>,
     fwds: Map<u64, u64>, // forward-typedef'd names (deps discovered mid-DFS need one too)
@@ -55,7 +55,7 @@ pub struct TuEmit {
 
 extend TuEmit {
     /// An emitter over `pkg` (which must outlive it) with empty buffers.
-    pub fn new(pkg: *const loader::Package) TuEmit {
+    pub(package) fn new(pkg: *const loader::Package) TuEmit {
         return TuEmit {
             pkg: pkg,
             mg: mbe::Mangler::new(pkg),
@@ -129,7 +129,7 @@ extend TuEmit {
 
     /// Emit `it` (and, first, every by-value aggregate it depends on). False only on cycle
     /// corruption; out-of-subset items count as skipped and emit nothing.
-    pub fn emit_agg(self: &mut Self, it: &AggItem) bool {
+    pub(package) fn emit_agg(self: &mut Self, it: &AggItem) bool {
         let mut nm = String::new();
         if !self.item_name(it, &mut nm) {
             self.skipped += 1;
@@ -187,7 +187,7 @@ extend TuEmit {
     /// Emit dependencies of a by-value field type, then spell it. Pointers/references need only the
     /// forward typedef (the assembly gives it to every header that spells it), so they never recurse. Descriptor data also calls it for the
     /// aggregates it names (`FieldInfo`, `MetaInfo`, ...) that no live body reaches.
-    pub fn field_dep(self: &mut Self, pm: ModuleId, t: TypeId) bool {
+    pub(package) fn field_dep(self: &mut Self, pm: ModuleId, t: TypeId) bool {
         let mut rm = pm;
         let mut rt = t;
         if !self.mg.resolve(pm, t, &mut rm, &mut rt) {
@@ -692,7 +692,7 @@ extend TuEmit {
     }
 
     /// Forward-typedef every aggregate name so pointer fields never need definition order.
-    pub fn emit_fwd(self: &mut Self, it: &AggItem) {
+    pub(package) fn emit_fwd(self: &mut Self, it: &AggItem) {
         let mut nm = String::new();
         if !self.item_name(it, &mut nm) {
             return;
@@ -731,11 +731,11 @@ extend TuEmit {
     }
 
     /// Mark an env-struct name (FNV) as defined; `env_done` queries it.
-    pub fn mark_env_done(self: &mut Self, h: u64) {
+    pub(package) fn mark_env_done(self: &mut Self, h: u64) {
         self.state.insert(h, 2);
     }
     /// True once mark_env_done recorded `h`.
-    pub fn env_done(self: &Self, h: u64) bool {
+    pub(package) fn env_done(self: &Self, h: u64) bool {
         return switch self.state.get(&h) {
             Some(v) => *v == 2,
             None => false,
@@ -744,7 +744,7 @@ extend TuEmit {
 
     /// Define an instance aggregate first named by a demand-driven body: no anchor TypeId exists,
     /// so the generics bind straight from the descriptor before the usual dependency DFS.
-    pub fn emit_agg_inst(self: &mut Self, pm: ModuleId, inst0: TyInstance) bool {
+    pub(package) fn emit_agg_inst(self: &mut Self, pm: ModuleId, inst0: TyInstance) bool {
         let inst = &inst0;
         let mut nm = String::new();
         if !self.mg.inst_type_name(pm, inst, &mut nm) {

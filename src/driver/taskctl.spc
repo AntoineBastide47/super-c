@@ -7,7 +7,7 @@ import std::parallel::sync as psy;
 /// Weighted memory gate: `acquire` parks the SUBMITTER until the live estimate fits the budget, so
 /// a frontier never puts more estimated bytes in flight than the build allows. A task larger than
 /// the whole budget runs alone (the gate admits it when nothing else is live). Budget 0 = off.
-pub struct Ctl {
+pub(package) struct Ctl {
     mu: psy::Mutex<u64>,
     cv: psy::Condvar,
     budget: u64,
@@ -15,12 +15,12 @@ pub struct Ctl {
 
 extend Ctl {
     /// A gate with `budget` bytes; 0 disables it.
-    pub fn new(budget: u64) Ctl {
+    pub(package) fn new(budget: u64) Ctl {
         return Ctl { mu: psy::Mutex::<u64>::new(0), cv: psy::Condvar::new(), budget: budget };
     }
 
     /// `bytes` is the task's estimated memory.
-    pub fn acquire(self: &Self, bytes: u64) {
+    pub(package) fn acquire(self: &Self, bytes: u64) {
         if self.budget == 0 || bytes == 0 {
             return;
         }
@@ -32,7 +32,7 @@ extend Ctl {
     }
 
     /// Return `bytes` taken by `acquire` and wake parked submitters.
-    pub fn release(self: &Self, bytes: u64) {
+    pub(package) fn release(self: &Self, bytes: u64) {
         if self.budget == 0 || bytes == 0 {
             return;
         }
@@ -46,7 +46,7 @@ extend Ctl {
 
 /// A count with an optional K, M or G suffix (powers of 1024): "4096", "64K", "16m", "1G". None when
 /// `s` is anything else (empty, a sign, a space, another suffix) or the value exceeds u64.
-pub const fn parse_size(s: str) Option<u64> {
+pub(package) const fn parse_size(s: str) Option<u64> {
     let mut v: u64 = 0;
     let mut i: usize = 0;
     while i < s.len() && s.byte_at(i) >= b'0' && s.byte_at(i) <= b'9' {
@@ -83,7 +83,7 @@ pub const fn parse_size(s: str) Option<u64> {
 
 /// The build memory budget: `SC_BUILD_MEM_BUDGET` in bytes with an optional K/M/G suffix; unset or
 /// empty = off (0). Any other spelling, or a value past u64, is a fatal configuration error.
-pub fn budget_from_env() u64 {
+pub(package) fn budget_from_env() u64 {
     let e = stdlib::get_env("SC_BUILD_MEM_BUDGET").unwrap_or(String::new());
     if e.len() == 0 {
         return 0;

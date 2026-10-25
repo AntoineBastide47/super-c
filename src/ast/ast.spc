@@ -13,53 +13,53 @@ import lexer::token_type as tt;
 import target::table as tgt;
 import utils::persist as *;
 
-pub type NodeId = u32;
-pub const NODE_NONE: NodeId = 0;
+pub(package) type NodeId = u32;
+pub(package) const NODE_NONE: NodeId = 0;
 /// Bit 30 of a NodeId (and of a NodeList start) names the module's body arena (`Ast.b`): the
 /// syntax of releasable bodies. Every other id indexes the module arena (`Ast.nodes`).
-pub const NODE_BODY: u32 = 0x40000000;
-pub const NODE_BODY_MASK: u32 = 0x3FFFFFFF;
+pub(package) const NODE_BODY: u32 = 0x40000000;
+pub(package) const NODE_BODY_MASK: u32 = 0x3FFFFFFF;
 
-pub struct NodeList {
-    pub start: u32,
-    pub len: u32,
+pub(package) struct NodeList {
+    pub(package) start: u32,
+    pub(package) len: u32,
 }
-pub type ModuleId = u16;
+pub(package) type ModuleId = u16;
 
 /// The emission facts of a function type's declaration node (`Ast::closure_fact`): a closure
 /// (`is_closure`) or a `fn(..)` type written in a body. From `cap_start` in `cap_facts`: its
 /// `ncaps` captures in capture order, then its `nparams` parameter types, then its `nrets` return
 /// types (one entry, possibly TYPE_NONE, for an expression-bodied closure); and the closure's
 /// mutable-capture and borrowed-capture masks.
-pub struct ClosureFact {
-    pub node: NodeId,
-    pub is_closure: bool,
-    pub nparams: u32,
-    pub nrets: u32,
-    pub ncaps: u32,
-    pub cap_start: u32,
-    pub mut_caps: u64,
-    pub ref_caps: u64,
+pub(package) struct ClosureFact {
+    pub(package) node: NodeId,
+    pub(package) is_closure: bool,
+    pub(package) nparams: u32,
+    pub(package) nrets: u32,
+    pub(package) ncaps: u32,
+    pub(package) cap_start: u32,
+    pub(package) mut_caps: u64,
+    pub(package) ref_caps: u64,
 }
 
 /// One capture (the captured binding's name text and its type) or one signature type (empty name).
-pub struct CapFact {
-    pub name: tok::Span,
-    pub ty: TypeId,
+pub(package) struct CapFact {
+    pub(package) name: tok::Span,
+    pub(package) ty: TypeId,
 }
 
 /// One seeded resolution (`Ast::seed_resolution`).
-pub struct Seed {
-    pub at: NodeId,
-    pub def: DefId,
+pub(package) struct Seed {
+    pub(package) at: NodeId,
+    pub(package) def: DefId,
 }
 
 // The `@derive(Copy)` tags of this file restate the derivation for the bootstrap compiler, which checks a
 // `Copy` bound against written conformances only.
 @derive(Copy)
-pub struct DefId {
-    pub module: ModuleId,
-    pub node: NodeId,
+pub(package) struct DefId {
+    pub(package) module: ModuleId,
+    pub(package) node: NodeId,
 }
 
 extend DefId as Default {
@@ -69,7 +69,7 @@ extend DefId as Default {
     }
 }
 
-pub enum AttrKind {
+pub(package) enum AttrKind {
     ATTR_INLINE,
     ATTR_ALWAYS_INLINE,
     ATTR_NOINLINE,
@@ -112,63 +112,63 @@ pub enum AttrKind {
 /// `const` gives it a body that models it at compile time; `naked` makes a function's body its whole
 /// machine code, no prologue or epilogue; `link_section` places a function or `static mut` in the
 /// object-file section `Attr.str_span` names.
-pub const UNSAFE_SAFE: u32 = 1;
-pub const UNSAFE_CONST: u32 = 2;
-pub const UNSAFE_NAKED: u32 = 4;
-pub const UNSAFE_LINK_SECTION: u32 = 8;
+pub(package) const UNSAFE_SAFE: u32 = 1;
+pub(package) const UNSAFE_CONST: u32 = 2;
+pub(package) const UNSAFE_NAKED: u32 = 4;
+pub(package) const UNSAFE_LINK_SECTION: u32 = 8;
 
 /// `Ast.sugar_marks` bits: the module holds a `launch`, `select` or `parallel for` marker.
-pub const SUGAR_LAUNCH: u32 = 1;
-pub const SUGAR_SELECT: u32 = 2;
-pub const SUGAR_PARFOR: u32 = 4;
+pub(package) const SUGAR_LAUNCH: u32 = 1;
+pub(package) const SUGAR_SELECT: u32 = 2;
+pub(package) const SUGAR_PARFOR: u32 = 4;
 
 // A decl's lifetime generic params (`fn f<'a>`, `struct S<'a>`). Held in an Ast SIDE TABLE rather
 // than inline on the decl data, so `Node` keeps its tuned size: lifetimes are erased, rare, and only
 // read by the formatter and the region checker.
-pub struct LifetimeDecl {
-    pub owner: NodeId,
-    pub list: NodeList,
+pub(package) struct LifetimeDecl {
+    pub(package) owner: NodeId,
+    pub(package) list: NodeList,
 }
 
 /// How a `where` predicate bounds a type parameter for a code point: `Ast::where_scope` answers.
-pub const WHERE_NONE: u8 = 0;
-pub const WHERE_OWN: u8 = 1;
-pub const WHERE_IN: u8 = 2;
-pub const WHERE_OUT: u8 = 3;
+pub(package) const WHERE_NONE: u8 = 0;
+pub(package) const WHERE_OWN: u8 = 1;
+pub(package) const WHERE_IN: u8 = 2;
+pub(package) const WHERE_OUT: u8 = 3;
 
 /// A call (at `span`) of function `callee`, which needs CPU features, from function `caller` of the
 /// module (NODE_NONE outside a function and in a closure), or a value use of it, inside `unsafe`
 /// (`in_unsafe`): its innermost `unsafe` marker starts at `marker - 1` (0: none, an `unsafe fn`).
-pub struct FeatureCall {
-    pub span: tok::Span,
-    pub callee: DefId,
-    pub caller: NodeId,
-    pub marker: u32,
-    pub in_unsafe: bool,
+pub(package) struct FeatureCall {
+    pub(package) span: tok::Span,
+    pub(package) callee: DefId,
+    pub(package) caller: NodeId,
+    pub(package) marker: u32,
+    pub(package) in_unsafe: bool,
 }
 
 /// A row `(feature, f)` of a tuple literal whose function `callee` needs CPU features (a
 /// `detect::dispatch` table): `f` runs where the machine has `feature` (a `cpu::Feature`
 /// discriminant), so that feature with the build's must imply every feature `f` needs. `span`: `f`.
-pub struct FeatureRow {
-    pub span: tok::Span,
-    pub feature: u32,
-    pub callee: DefId,
+pub(package) struct FeatureRow {
+    pub(package) span: tok::Span,
+    pub(package) feature: u32,
+    pub(package) callee: DefId,
 }
 
 /// An `unsafe` marker at `start` whose only reason is a call of a function that needs CPU features:
 /// the lint reports it when no such call needs it (`fix_end`: the end of the keyword's removal for
 /// the prefix form, 0 for a block).
-pub struct UnsafeLint {
-    pub start: u32,
-    pub fix_end: u32,
+pub(package) struct UnsafeLint {
+    pub(package) start: u32,
+    pub(package) fix_end: u32,
 }
 
 /// A `where` predicate (`pred`) of the function `func`, recorded at parse time. `Ast::where_scope`
 /// matches it to a type parameter through the resolver's binding of its type.
-pub struct WhereBound {
-    pub func: NodeId,
-    pub pred: NodeId,
+pub(package) struct WhereBound {
+    pub(package) func: NodeId,
+    pub(package) pred: NodeId,
 }
 
 /// The build-setting constants the compiler defines in every package, by index (`BC_*`). The names
@@ -184,27 +184,27 @@ const BC_NAMES: [str; 8] = [
     "LOCKDEP",
     "OVERFLOW_CHECKS",
 ];
-pub const BC_PLATFORM: i32 = 0;
-pub const BC_ARCH: i32 = 1;
-pub const BC_TEST: i32 = 2;
-pub const BC_POINTER_WIDTH: i32 = 3;
-pub const BC_ENDIAN: i32 = 4;
-pub const BC_PROFILE: i32 = 5;
+pub(package) const BC_PLATFORM: i32 = 0;
+pub(package) const BC_ARCH: i32 = 1;
+pub(package) const BC_TEST: i32 = 2;
+pub(package) const BC_POINTER_WIDTH: i32 = 3;
+pub(package) const BC_ENDIAN: i32 = 4;
+pub(package) const BC_PROFILE: i32 = 5;
 /// The `bool` constants of the build's configuration, from its profile (`build_cfg`): lock-order tracking
 /// (the profile's `lockdep`) and integer overflow checks (false where the profile wraps). Bit
 /// `k - BC_LOCKDEP` of `Package.build_cfg`.
-pub const BC_LOCKDEP: i32 = 6;
-pub const BC_OVERFLOW_CHECKS: i32 = 7;
+pub(package) const BC_LOCKDEP: i32 = 6;
+pub(package) const BC_OVERFLOW_CHECKS: i32 = 7;
 
 /// Whether build constant `k` is a `bool`: TEST, or one of the configuration constants.
-pub const fn bc_is_bool(k: i32) bool {
+pub(package) const fn bc_is_bool(k: i32) bool {
     return k == BC_TEST || k >= BC_LOCKDEP;
 }
 
 /// The variable of boolean build constant `k` (`bc_is_bool`) in a `@when` truth table: bit
 /// `when_var(k)` of the table's index is the constant's value. TEST is 0, the configuration constants
 /// follow in `BC_*` order.
-pub const fn when_var(k: i32) u32 {
+pub(package) const fn when_var(k: i32) u32 {
     return if k == BC_TEST {
         0u32;
     } else {
@@ -217,7 +217,7 @@ pub const fn when_var(k: i32) u32 {
 const ENDIAN_VARIANTS: [str<'static>; 2] = ["Little", "Big"];
 
 /// The build constant `s` names (a `BC_*` index), -1 for any other text.
-pub const fn bc_index(s: str) i32 {
+pub(package) const fn bc_index(s: str) i32 {
     let names: Slice<'static, str<'static>> = BC_NAMES;
     for i in 0..names.len() {
         if names[i] == s {
@@ -229,12 +229,12 @@ pub const fn bc_index(s: str) i32 {
 
 /// Whether `s` names one of std's build-constant enums (`Platform`, `Arch`, `Endian`): reserved like
 /// the constants, so the platform filter reads `Platform::X` as std's variant before resolution.
-pub const fn bc_type_name(s: str) bool {
+pub(package) const fn bc_type_name(s: str) bool {
     return s == "Platform" || s == "Arch" || s == "Endian";
 }
 
 /// The std enum build constant `k` holds (`Platform`, `Arch`, `Endian`), "" for the others.
-pub const fn bc_enum(k: i32) str<'static> {
+pub(package) const fn bc_enum(k: i32) str<'static> {
     if k == BC_PLATFORM {
         return "Platform";
     }
@@ -248,7 +248,7 @@ pub const fn bc_enum(k: i32) str<'static> {
 }
 
 /// The variants of the enum build constant `k` (PLATFORM, ARCH or ENDIAN) holds.
-pub const fn bc_variants(k: i32) Slice<'static, str<'static>> {
+pub(package) const fn bc_variants(k: i32) Slice<'static, str<'static>> {
     if k == BC_PLATFORM || k == BC_ARCH {
         return tgt::axis_variants(k == BC_ARCH);
     }
@@ -257,7 +257,7 @@ pub const fn bc_variants(k: i32) Slice<'static, str<'static>> {
 
 /// The index of variant `s` of the enum build constant `k` (PLATFORM, ARCH or ENDIAN) holds, -1
 /// when it names none.
-pub const fn bc_variant(k: i32, s: str) i32 {
+pub(package) const fn bc_variant(k: i32, s: str) i32 {
     let vs = bc_variants(k);
     for i in 0..vs.len() {
         if vs[i] == s {
@@ -270,47 +270,47 @@ pub const fn bc_variant(k: i32, s: str) i32 {
 /// A reference to an unknown variant in a build-constant comparison or `switch` arm, found at
 /// parse time and reported by the resolver (the platform filter may remove the code before then).
 @derive(Persist)
-pub struct BcErr {
-    pub span: tok::Span,
-    pub msg: String,
+pub(package) struct BcErr {
+    pub(package) span: tok::Span,
+    pub(package) msg: String,
 }
 
 /// A site the platform filter replaced: its node (now the taken branch) and its source span.
-pub struct BcCut {
-    pub node: NodeId,
-    pub span: tok::Span,
+pub(package) struct BcCut {
+    pub(package) node: NodeId,
+    pub(package) span: tok::Span,
 }
 
 /// `expr`: the arguments are constant expressions (`attr_expr_args`): `arg` is the node of the one
 /// argument, or of a NODE_TUPLE of several, in the module arena; `str_span` is the source text
 /// between the parentheses; the value is in `Ast.attr_vals`.
-pub struct Attr {
-    pub owner: NodeId,
-    pub kind: u8,
-    pub expr: bool,
-    pub arg: u32,
-    pub str_span: tok::Span,
+pub(package) struct Attr {
+    pub(package) owner: NodeId,
+    pub(package) kind: u8,
+    pub(package) expr: bool,
+    pub(package) arg: u32,
+    pub(package) str_span: tok::Span,
 }
 
 /// `@test` arguments in `Attr.arg`: the `should_panic` bit, and the `timeout = N` seconds above
 /// TEST_TIMEOUT_SHIFT (0: the run's global timeout).
-pub const TEST_SHOULD_PANIC: u32 = 1;
-pub const TEST_TIMEOUT_SHIFT: u32 = 1;
+pub(package) const TEST_SHOULD_PANIC: u32 = 1;
+pub(package) const TEST_TIMEOUT_SHIFT: u32 = 1;
 
 /// The kinds of a constant-expression attribute argument (`attr_expr_args`): a `u32`, a `usize`, a
 /// `[cpu::Feature; K]` (any K), a `simd::Op`, a parameter of the function, or a byte count: a
 /// `usize` constant or an expression over `usize` parameters of the function.
-pub const AA_U32: u32 = 1;
-pub const AA_USIZE: u32 = 2;
-pub const AA_FEATURES: u32 = 3;
-pub const AA_OP: u32 = 4;
-pub const AA_PARAM: u32 = 5;
-pub const AA_BYTES: u32 = 6;
+pub(package) const AA_U32: u32 = 1;
+pub(package) const AA_USIZE: u32 = 2;
+pub(package) const AA_FEATURES: u32 = 3;
+pub(package) const AA_OP: u32 = 4;
+pub(package) const AA_PARAM: u32 = 5;
+pub(package) const AA_BYTES: u32 = 6;
 
 /// The attribute kinds whose arguments are constant expressions, and the argument kinds of each, the
 /// first in the low four bits. The resolver resolves `@reads` and `@writes` among the function's
 /// parameters, the others in the declaration's scope.
-pub const ATTR_EXPR_KINDS: [AttrKind; 7] = [
+pub(package) const ATTR_EXPR_KINDS: [AttrKind; 7] = [
     AttrKind::ATTR_ALIGN,
     AttrKind::ATTR_TARGET_FEATURE,
     AttrKind::ATTR_SIMD_IMPL,
@@ -331,7 +331,7 @@ const ATTR_EXPR_ARGS: [u32; 7] = [
 
 /// The argument kinds of attribute `kind` (`AA_*`, four bits each, the first lowest); 0 when its
 /// arguments are not constant expressions.
-pub const fn attr_expr_args(kind: u8) u32 {
+pub(package) const fn attr_expr_args(kind: u8) u32 {
     let ks: Slice<'static, AttrKind> = ATTR_EXPR_KINDS;
     let ts: Slice<'static, u32> = ATTR_EXPR_ARGS;
     for i in 0..ks.len() {
@@ -343,7 +343,7 @@ pub const fn attr_expr_args(kind: u8) u32 {
 }
 
 /// The number of arguments of argument kinds `args`.
-pub const fn attr_arity(args: u32) u32 {
+pub(package) const fn attr_arity(args: u32) u32 {
     let mut n: u32 = 0;
     while args >> 4 * n != 0 {
         n += 1;
@@ -352,22 +352,22 @@ pub const fn attr_arity(args: u32) u32 {
 }
 
 /// Whether the resolver resolves attribute `kind`'s arguments among its function's parameters.
-pub const fn attr_in_params(kind: u8) bool {
+pub(package) const fn attr_in_params(kind: u8) bool {
     return (attr_expr_args(kind) & 15) == AA_PARAM;
 }
 
 /// The largest `@align` value: the smallest page size of the targets. A larger one is reduced in a
 /// static's section (Mach-O caps it at 16 KiB), and a frame realigned to it can step past a task
 /// stack's guard page.
-pub const C_ALIGN_MAX: u64 = 4096;
+pub(package) const C_ALIGN_MAX: u64 = 4096;
 
 /// Whether `v` is a valid `@align` value: a power of two, at most `C_ALIGN_MAX`.
-pub const fn c_align_ok(v: u64) bool {
+pub(package) const fn c_align_ok(v: u64) bool {
     return v != 0 && (v & v - 1) == 0 && v <= C_ALIGN_MAX;
 }
 
 /// The error for an invalid `@align` value `v`, literal or evaluated.
-pub fn c_align_error(v: u64) String {
+pub(package) fn c_align_error(v: u64) String {
     return format("'@align' needs a power of two from 1 to {}, found {}", C_ALIGN_MAX, v);
 }
 
@@ -377,26 +377,26 @@ pub fn c_align_error(v: u64) String {
 /// `@writes` parameter index; `w` the feature set of `@target_feature` and `@simd_impl` (bit `i`
 /// is `cpu::Feature` discriminant `i`), `w[0]` the `@value` alignment, and for `@reads` and
 /// `@writes` `w[0]` the byte count, or `w[1] = 1` when the count is an expression over parameters.
-pub struct AttrVal {
-    pub attr: u32,
-    pub ok: bool,
-    pub v: u64,
-    pub w: [u64; 2],
+pub(package) struct AttrVal {
+    pub(package) attr: u32,
+    pub(package) ok: bool,
+    pub(package) v: u64,
+    pub(package) w: [u64; 2],
 }
 
 /// One `@reflect(key = value)` entry, in its own side table: the key/value payload does not fit
 /// Attr, and the consumers (the type_info graph builder, the binder members) read it by OWNER.
 /// `vkind`: 0 = bool (a bare key is `true`), 1 = int, 2 = string (`vspan` is the content, no
 /// quotes; spans index the owning module's source).
-pub struct MetaAttr {
-    pub owner: NodeId,
-    pub vkind: u8,
-    pub ival: i64,
-    pub key: tok::Span,
-    pub vspan: tok::Span,
+pub(package) struct MetaAttr {
+    pub(package) owner: NodeId,
+    pub(package) vkind: u8,
+    pub(package) ival: i64,
+    pub(package) key: tok::Span,
+    pub(package) vspan: tok::Span,
 }
 
-pub enum TypeQualifier {
+pub(package) enum TypeQualifier {
     TYPE_QUAL_NONE,
     TYPE_QUAL_CONST,
     TYPE_QUAL_MUT,
@@ -404,14 +404,14 @@ pub enum TypeQualifier {
 
 /// Which operation a `select` arm waits on. Classified by the parser from the arm's expression shape, so
 /// no later pass has to re-read the source text.
-pub enum SelectArmKind {
+pub(package) enum SelectArmKind {
     SELECT_RECV, // `ch.recv()`
     SELECT_SEND, // `ch.send(v)`
     SELECT_TIMEOUT, // `timeout(d)`
     SELECT_DEFAULT, // `default`
 }
 
-pub enum NodeKind {
+pub(package) enum NodeKind {
     NODE_NONE_KIND,
     NODE_PROGRAM,
     NODE_IDENTIFIER,
@@ -504,49 +504,49 @@ pub enum NodeKind {
     NODE_INTERP,
 }
 
-pub const VA_START: u8 = 0;
-pub const VA_ARG: u8 = 1;
-pub const VA_END: u8 = 2;
+pub(package) const VA_START: u8 = 0;
+pub(package) const VA_ARG: u8 = 1;
+pub(package) const VA_END: u8 = 2;
 
-pub struct ProgramData {
-    pub items: NodeList,
+pub(package) struct ProgramData {
+    pub(package) items: NodeList,
 }
-pub struct NameData {
-    pub text: tok::Span,
-    pub is_mutable: bool,
+pub(package) struct NameData {
+    pub(package) text: tok::Span,
+    pub(package) is_mutable: bool,
 }
-pub struct LiteralData {
-    pub raw: tok::Span,
-    pub token_type: tt::TokenType,
+pub(package) struct LiteralData {
+    pub(package) raw: tok::Span,
+    pub(package) token_type: tt::TokenType,
     // `format` desugar segment: `raw` is BARE content (no quotes) inside a template literal, and
     // doubled braces in it collapse to one on emission/evaluation. Parser-built literals never set this.
-    pub seg: bool,
+    pub(package) seg: bool,
 }
-pub struct FunctionData {
-    pub name: NodeId,
-    pub generics: NodeList,
-    pub params: NodeList,
-    pub returns: NodeList,
-    pub where_clause: NodeList,
-    pub body: NodeId,
-    pub flags: u8, // FN_* bits; one byte keeps Node at 56 bytes
-    pub vis: u8,
+pub(package) struct FunctionData {
+    pub(package) name: NodeId,
+    pub(package) generics: NodeList,
+    pub(package) params: NodeList,
+    pub(package) returns: NodeList,
+    pub(package) where_clause: NodeList,
+    pub(package) body: NodeId,
+    pub(package) flags: u8, // FN_* bits; one byte keeps Node at 56 bytes
+    pub(package) vis: u8,
 }
 /// Visibility levels, narrowest first (the `vis` of items and fields). An item without a modifier is visible to
 /// its file; a field without one to its type's own `extend` blocks.
-pub const VIS_PRIVATE: u8 = 0;
-pub const VIS_FILE: u8 = 1; // `pub(file)`: a field only
-pub const VIS_MODULE: u8 = 2; // `pub(module)`: the files of the declaring file's directory and its subdirectories
-pub const VIS_PACKAGE: u8 = 3; // `pub(package)`: the files of the declaring package
-pub const VIS_PUB: u8 = 4; // `pub`
+pub(package) const VIS_PRIVATE: u8 = 0;
+pub(package) const VIS_FILE: u8 = 1; // `pub(file)`: a field only
+pub(package) const VIS_MODULE: u8 = 2; // `pub(module)`: the files of the declaring file's directory and its subdirectories
+pub(package) const VIS_PACKAGE: u8 = 3; // `pub(package)`: the files of the declaring package
+pub(package) const VIS_PUB: u8 = 4; // `pub`
 
 /// Whether an item of visibility `vis` is visible outside its file (C linkage, cross-module lookup).
-pub const fn vis_exported(vis: u8) bool {
+pub(package) const fn vis_exported(vis: u8) bool {
     return vis >= VIS_MODULE;
 }
 
 /// The `VIS_*` of declaration `n`; VIS_PUB for a kind without one.
-pub const fn node_vis(n: &Node) u8 {
+pub(package) const fn node_vis(n: &Node) u8 {
     return switch n.kind {
         NODE_STRUCT | NODE_ENUM => n.as_data.aggregate.vis,
         NODE_TYPE_ALIAS => n.as_data.type_alias.vis,
@@ -558,7 +558,7 @@ pub const fn node_vis(n: &Node) u8 {
 }
 
 /// The modifier that spells visibility `vis`, with its trailing space; empty for none.
-pub const fn vis_text(vis: u8) str<'static> {
+pub(package) const fn vis_text(vis: u8) str<'static> {
     return if vis == VIS_PUB {
         "pub ";
     } else if vis == VIS_PACKAGE {
@@ -573,40 +573,40 @@ pub const fn vis_text(vis: u8) str<'static> {
 }
 
 static_assert(sizeof(Node) == 56, "Node must stay 56 bytes");
-pub const FN_EXTERN: u8 = 2;
-pub const FN_VARIADIC: u8 = 4;
-pub const FN_CONST: u8 = 8; // `const fn`: must evaluate at compile time when its arguments are known
-pub const FN_UNSAFE: u8 = 16; // `unsafe fn`: calls require an unsafe context (like extern "C" fns)
-pub const FN_INTRINSIC: u8 = 32; // `@intrinsic("name")`: a call lowers to the operation it names; the body is an empty block in its place
-pub const FN_FEATURES: u8 = 64; // `@target_feature` or `@simd_impl`: a call needs the build to have the features
+pub(package) const FN_EXTERN: u8 = 2;
+pub(package) const FN_VARIADIC: u8 = 4;
+pub(package) const FN_CONST: u8 = 8; // `const fn`: must evaluate at compile time when its arguments are known
+pub(package) const FN_UNSAFE: u8 = 16; // `unsafe fn`: calls require an unsafe context (like extern "C" fns)
+pub(package) const FN_INTRINSIC: u8 = 32; // `@intrinsic("name")`: a call lowers to the operation it names; the body is an empty block in its place
+pub(package) const FN_FEATURES: u8 = 64; // `@target_feature` or `@simd_impl`: a call needs the build to have the features
 
 extend FunctionData {
-    pub const fn is_extern(self: &Self) bool {
+    pub(package) const fn is_extern(self: &Self) bool {
         return (self.flags & FN_EXTERN) != 0;
     }
 
-    pub const fn needs_features(self: &Self) bool {
+    pub(package) const fn needs_features(self: &Self) bool {
         return (self.flags & FN_FEATURES) != 0;
     }
 
-    pub const fn is_variadic(self: &Self) bool {
+    pub(package) const fn is_variadic(self: &Self) bool {
         return (self.flags & FN_VARIADIC) != 0;
     }
 
-    pub const fn is_const(self: &Self) bool {
+    pub(package) const fn is_const(self: &Self) bool {
         return (self.flags & FN_CONST) != 0;
     }
 
-    pub const fn is_unsafe(self: &Self) bool {
+    pub(package) const fn is_unsafe(self: &Self) bool {
         return (self.flags & FN_UNSAFE) != 0;
     }
 
-    pub const fn is_intrinsic(self: &Self) bool {
+    pub(package) const fn is_intrinsic(self: &Self) bool {
         return (self.flags & FN_INTRINSIC) != 0;
     }
 
     /// Set or clear the FN_* bit `bit`.
-    pub const fn set(self: &mut Self, bit: u8, on: bool) {
+    pub(package) const fn set(self: &mut Self, bit: u8, on: bool) {
         if on {
             self.flags = self.flags | bit;
         } else {
@@ -614,89 +614,89 @@ extend FunctionData {
         }
     }
 }
-pub struct ParameterData {
-    pub name: NodeId,
-    pub ty: NodeId,
-    pub is_mutable: bool,
+pub(package) struct ParameterData {
+    pub(package) name: NodeId,
+    pub(package) ty: NodeId,
+    pub(package) is_mutable: bool,
 }
-pub struct AggregateData {
-    pub name: NodeId,
-    pub generics: NodeList,
-    pub members: NodeList,
-    pub vis: u8,
-    pub is_union: bool,
-    pub is_tuple: bool,
-    pub is_extern: bool,
+pub(package) struct AggregateData {
+    pub(package) name: NodeId,
+    pub(package) generics: NodeList,
+    pub(package) members: NodeList,
+    pub(package) vis: u8,
+    pub(package) is_union: bool,
+    pub(package) is_tuple: bool,
+    pub(package) is_extern: bool,
 }
-pub struct FieldData {
-    pub name: NodeId,
-    pub ty: NodeId,
-    pub value: NodeId,
-    pub vis: u8,
+pub(package) struct FieldData {
+    pub(package) name: NodeId,
+    pub(package) ty: NodeId,
+    pub(package) value: NodeId,
+    pub(package) vis: u8,
 }
-pub struct VariantData {
-    pub name: NodeId,
-    pub payload: NodeList,
-    pub struct_payload: bool,
-    pub value: NodeId,
+pub(package) struct VariantData {
+    pub(package) name: NodeId,
+    pub(package) payload: NodeList,
+    pub(package) struct_payload: bool,
+    pub(package) value: NodeId,
 }
-pub struct InterfaceData {
-    pub name: NodeId,
-    pub generics: NodeList,
-    pub bounds: NodeList,
-    pub items: NodeList,
-    pub vis: u8,
+pub(package) struct InterfaceData {
+    pub(package) name: NodeId,
+    pub(package) generics: NodeList,
+    pub(package) bounds: NodeList,
+    pub(package) items: NodeList,
+    pub(package) vis: u8,
 }
-pub struct ExtendData {
-    pub generics: NodeList,
-    pub interface_type: NodeId,
-    pub target_type: NodeId,
-    pub items: NodeList,
-    pub is_unsafe: bool,
+pub(package) struct ExtendData {
+    pub(package) generics: NodeList,
+    pub(package) interface_type: NodeId,
+    pub(package) target_type: NodeId,
+    pub(package) items: NodeList,
+    pub(package) is_unsafe: bool,
 }
-pub struct TypeAliasData {
-    pub name: NodeId,
-    pub generics: NodeList,
-    pub ty: NodeId,
-    pub vis: u8,
+pub(package) struct TypeAliasData {
+    pub(package) name: NodeId,
+    pub(package) generics: NodeList,
+    pub(package) ty: NodeId,
+    pub(package) vis: u8,
 }
-pub struct ConstData {
-    pub name: NodeId,
-    pub ty: NodeId,
-    pub value: NodeId,
-    pub vis: u8,
-    pub is_extern: bool,
-    pub is_static_mut: bool,
-    pub is_local: bool,
-    pub c_macro: bool,
+pub(package) struct ConstData {
+    pub(package) name: NodeId,
+    pub(package) ty: NodeId,
+    pub(package) value: NodeId,
+    pub(package) vis: u8,
+    pub(package) is_extern: bool,
+    pub(package) is_static_mut: bool,
+    pub(package) is_local: bool,
+    pub(package) c_macro: bool,
 }
-pub struct ExternBlockData {
-    pub abi: NodeId,
-    pub header: NodeId,
-    pub items: NodeList,
+pub(package) struct ExternBlockData {
+    pub(package) abi: NodeId,
+    pub(package) header: NodeId,
+    pub(package) items: NodeList,
 }
-pub struct ImportData {
-    pub path: NodeList,
-    pub alias: NodeId,
-    pub glob: bool,
+pub(package) struct ImportData {
+    pub(package) path: NodeList,
+    pub(package) alias: NodeId,
+    pub(package) glob: bool,
 }
-pub struct GenericParamData {
-    pub name: NodeId,
-    pub bounds: NodeList,
-    pub default_type: NodeId,
-    pub is_const: bool,
-    pub const_type: NodeId,
+pub(package) struct GenericParamData {
+    pub(package) name: NodeId,
+    pub(package) bounds: NodeList,
+    pub(package) default_type: NodeId,
+    pub(package) is_const: bool,
+    pub(package) const_type: NodeId,
     // A LIFETIME param (`<'a>`): `bounds` holds its outlives bounds (`'a: 'b`), `const_type` and
     // `default_type` are NODE_NONE. Lifetimes are ERASED before monomorphization: the parser keeps
     // them in the declaration's separate lifetime list, never among the mono-relevant generics.
-    pub is_lifetime: bool,
+    pub(package) is_lifetime: bool,
 }
-pub struct WherePredicateData {
-    pub ty: NodeId,
-    pub bounds: NodeList,
+pub(package) struct WherePredicateData {
+    pub(package) ty: NodeId,
+    pub(package) bounds: NodeList,
 }
 /// `a` when `c`, else `b`. Both are evaluated.
-pub const fn pick<T: Copy>(c: bool, a: T, b: T) T {
+pub(package) const fn pick<T: Copy>(c: bool, a: T, b: T) T {
     if c {
         return a;
     }
@@ -706,7 +706,7 @@ pub const fn pick<T: Copy>(c: bool, a: T, b: T) T {
 /// The builtin types' surface names. BuiltinType is declared in this module, so the shared name
 /// table lives here too: the typechecker's renderer/lookup delegates to it, and const-eval uses it to
 /// fold builtin-targeted casts demanded before their module is typechecked.
-pub const fn bt_name(b: BuiltinType) str<'static> {
+pub(package) const fn bt_name(b: BuiltinType) str<'static> {
     return switch b {
         BT_BOOL => "bool",
         BT_CHAR => "char",
@@ -730,7 +730,7 @@ pub const fn bt_name(b: BuiltinType) str<'static> {
 }
 
 /// The BuiltinType whose name the span spells, -1 if none.
-pub const fn bt_of_name(src: str, s: tok::Span) i32 {
+pub(package) const fn bt_of_name(src: str, s: tok::Span) i32 {
     let n = (s.end - s.start) as usize;
     for i in 0..BuiltinType::BT_COUNT as i32 {
         let lit = bt_name(i as BuiltinType);
@@ -741,100 +741,100 @@ pub const fn bt_of_name(src: str, s: tok::Span) i32 {
     return -1;
 }
 
-pub struct TypePathData {
-    pub parts: NodeList,
-    pub args: NodeList,
+pub(package) struct TypePathData {
+    pub(package) parts: NodeList,
+    pub(package) args: NodeList,
     // Associated type bindings after the arguments (`Add<i32, Output = T>`), NODE_TYPE_ALIAS nodes;
     // only a generic bound's interface may carry them.
-    pub bindings: NodeList,
+    pub(package) bindings: NodeList,
     // The index of the segment that names the path's declaration, written by the resolver: the
     // segments before it are a module path (`m::T`) or `Self` (`Self::Assoc`), the segments after
     // it name a member of it (`E::V` as a literal's target), which a type position rejects.
-    pub head: u32,
+    pub(package) head: u32,
 }
-pub struct IndirectTypeData {
-    pub ty: NodeId,
-    pub qualifier: TypeQualifier,
+pub(package) struct IndirectTypeData {
+    pub(package) ty: NodeId,
+    pub(package) qualifier: TypeQualifier,
     // The source lifetime annotation on a NODE_REFERENCE_TYPE (`&'a T`) or NODE_SLICE_TYPE (`[]'a T`):
     // a NODE_LIFETIME node, or NODE_NONE when elided. Never set for pointers. Erased from the interned `Ty` -- the region
     // checker reads it from here.
-    pub lifetime: NodeId,
+    pub(package) lifetime: NodeId,
 }
-pub struct ArrayTypeData {
-    pub element: NodeId,
-    pub length: NodeId,
+pub(package) struct ArrayTypeData {
+    pub(package) element: NodeId,
+    pub(package) length: NodeId,
 }
-pub struct FunctionTypeData {
-    pub params: NodeList,
-    pub returns: NodeList,
-    pub is_move: bool,
+pub(package) struct FunctionTypeData {
+    pub(package) params: NodeList,
+    pub(package) returns: NodeList,
+    pub(package) is_move: bool,
 }
 /// `asm("tpl" : outs : ins : clobbers)`, GCC extended assembly passed through to the C compiler.
 /// `outputs`/`inputs` hold FLAT PAIRS -- constraint literal, then its expression -- so an operand needs
 /// no node kind of its own; `clobbers` holds bare string literals.
-pub struct AsmData {
-    pub template: NodeId,
-    pub outputs: NodeList,
-    pub inputs: NodeList,
-    pub clobbers: NodeList,
+pub(package) struct AsmData {
+    pub(package) template: NodeId,
+    pub(package) outputs: NodeList,
+    pub(package) inputs: NodeList,
+    pub(package) clobbers: NodeList,
 }
-pub struct BlockData {
-    pub statements: NodeList,
+pub(package) struct BlockData {
+    pub(package) statements: NodeList,
 }
-pub struct LetData {
-    pub name: NodeId,
-    pub ty: NodeId,
-    pub value: NodeId,
-    pub is_mutable: bool,
+pub(package) struct LetData {
+    pub(package) name: NodeId,
+    pub(package) ty: NodeId,
+    pub(package) value: NodeId,
+    pub(package) is_mutable: bool,
 }
-pub struct SingleData {
-    pub value: NodeId,
+pub(package) struct SingleData {
+    pub(package) value: NodeId,
 }
-pub struct VaOpData {
-    pub op: u8,
-    pub ap: NodeId,
-    pub extra: NodeId,
+pub(package) struct VaOpData {
+    pub(package) op: u8,
+    pub(package) ap: NodeId,
+    pub(package) extra: NodeId,
 }
-pub struct ReturnData {
-    pub values: NodeList,
+pub(package) struct ReturnData {
+    pub(package) values: NodeList,
 }
-pub struct IfData {
-    pub condition: NodeId,
-    pub then_branch: NodeId,
-    pub else_branch: NodeId,
+pub(package) struct IfData {
+    pub(package) condition: NodeId,
+    pub(package) then_branch: NodeId,
+    pub(package) else_branch: NodeId,
 }
-pub struct WhileData {
-    pub condition: NodeId,
-    pub body: NodeId,
-    pub is_do: bool,
-    pub label: tok::Span,
+pub(package) struct WhileData {
+    pub(package) condition: NodeId,
+    pub(package) body: NodeId,
+    pub(package) is_do: bool,
+    pub(package) label: tok::Span,
 }
-pub struct ForData {
-    pub binding: NodeId,
-    pub iterable: NodeId,
-    pub body: NodeId,
-    pub label: tok::Span,
+pub(package) struct ForData {
+    pub(package) binding: NodeId,
+    pub(package) iterable: NodeId,
+    pub(package) body: NodeId,
+    pub(package) label: tok::Span,
     // Set by the checker: the loop iterates an array by value and its elements own (the loop
     // consumes the array, see Lowerer::lower_for_indexed).
-    pub consumes: bool,
+    pub(package) consumes: bool,
 }
-pub struct FlowData {
-    pub value: NodeId,
-    pub label: tok::Span,
+pub(package) struct FlowData {
+    pub(package) value: NodeId,
+    pub(package) label: tok::Span,
 }
-pub struct UnaryData {
-    pub op: tt::TokenType,
-    pub operand: NodeId,
-    pub qualifier: TypeQualifier,
+pub(package) struct UnaryData {
+    pub(package) op: tt::TokenType,
+    pub(package) operand: NodeId,
+    pub(package) qualifier: TypeQualifier,
 }
-pub struct BinaryData {
-    pub op: tt::TokenType,
-    pub left: NodeId,
-    pub right: NodeId,
+pub(package) struct BinaryData {
+    pub(package) op: tt::TokenType,
+    pub(package) left: NodeId,
+    pub(package) right: NodeId,
 }
-pub struct CallData {
-    pub callee: NodeId,
-    pub args: NodeList,
+pub(package) struct CallData {
+    pub(package) callee: NodeId,
+    pub(package) args: NodeList,
 }
 // mut_caps is a u32 mutated-capture bitmask (≤32 captures). u32 (not u64) is deliberate: it leaves
 // ClosureData with no 8-aligned member, so NodeAs stays 4-aligned and Node needs no 8-byte padding.
@@ -842,166 +842,166 @@ pub struct CallData {
 // copy, unless the closure meets a plain `fn(..)` bound, which requires a closure that owns nothing.
 // Then its owning captures are borrowed instead: the mutated ones join mut_caps (an implicit
 // `&mut`), the others ref_caps (an implicit `&`).
-pub struct ClosureData {
-    pub params: NodeList,
-    pub returns: NodeList,
-    pub body: NodeId,
-    pub expr_body: bool,
+pub(package) struct ClosureData {
+    pub(package) params: NodeList,
+    pub(package) returns: NodeList,
+    pub(package) body: NodeId,
+    pub(package) expr_body: bool,
     /// A block body without written results returns a value: its type is the body node's
     /// (`closure_body_ret`).
-    pub ret_infer: bool,
-    pub captures: NodeList,
-    pub mut_caps: u32,
-    pub ref_caps: u32,
-    pub own_mut: u32,
+    pub(package) ret_infer: bool,
+    pub(package) captures: NodeList,
+    pub(package) mut_caps: u32,
+    pub(package) ref_caps: u32,
+    pub(package) own_mut: u32,
 }
-pub struct IndexData {
-    pub object: NodeId,
-    pub index: NodeId,
+pub(package) struct IndexData {
+    pub(package) object: NodeId,
+    pub(package) index: NodeId,
 }
 // `targs`: the turbofish of a method call (`x.m::<T>(..)`), empty otherwise; a path keeps its
 // turbofish in a NODE_GENERIC_SPECIALIZATION around the member.
-pub struct MemberData {
-    pub object: NodeId,
-    pub member: NodeId,
-    pub path: bool,
-    pub targs: NodeList,
+pub(package) struct MemberData {
+    pub(package) object: NodeId,
+    pub(package) member: NodeId,
+    pub(package) path: bool,
+    pub(package) targs: NodeList,
 }
-pub struct CastData {
-    pub expression: NodeId,
-    pub ty: NodeId,
+pub(package) struct CastData {
+    pub(package) expression: NodeId,
+    pub(package) ty: NodeId,
 }
-pub struct SpecializationData {
-    pub expression: NodeId,
-    pub types: NodeList,
+pub(package) struct SpecializationData {
+    pub(package) expression: NodeId,
+    pub(package) types: NodeList,
 }
-pub struct MatchData {
-    pub value: NodeId,
-    pub arms: NodeList,
+pub(package) struct MatchData {
+    pub(package) value: NodeId,
+    pub(package) arms: NodeList,
 }
-pub struct MatchArmData {
-    pub pattern: NodeId,
-    pub guard: NodeId,
-    pub body: NodeId,
+pub(package) struct MatchArmData {
+    pub(package) pattern: NodeId,
+    pub(package) guard: NodeId,
+    pub(package) body: NodeId,
 }
 // One `select` arm, pre-desugar. `binding` is a value-less NODE_LET the parser builds for `v = ch.recv()`
 // (NODE_NONE when the arm binds nothing) -- it exists at RESOLVE time so the body's uses of `v` bind to it,
 // and desugar fills in its value. The operation is stored TAKEN APART (the `.recv()`/`.send()`/`timeout()`
 // call node is dropped at parse time), so no pass has to re-derive it and no synthetic callee ever reaches
 // the resolver; the formatter reprints the surface syntax from the pieces.
-pub struct SelectArmData {
-    pub binding: NodeId,
-    pub op: NodeId, // the channel (recv/send), the duration (timeout), NODE_NONE (default)
-    pub value: NodeId, // the sent expression (send), else NODE_NONE
-    pub body: NodeId,
-    pub kind: SelectArmKind,
+pub(package) struct SelectArmData {
+    pub(package) binding: NodeId,
+    pub(package) op: NodeId, // the channel (recv/send), the duration (timeout), NODE_NONE (default)
+    pub(package) value: NodeId, // the sent expression (send), else NODE_NONE
+    pub(package) body: NodeId,
+    pub(package) kind: SelectArmKind,
 }
-pub struct ArrayLiteralData {
-    pub elements: NodeList,
+pub(package) struct ArrayLiteralData {
+    pub(package) elements: NodeList,
     // `[v; N]`: `elements` holds exactly the value and the count, rather than the elements themselves.
     // A flag rather than a node kind of its own, so every pass that just walks `elements` (the resolver,
     // const-eval) keeps working on both forms unchanged.
-    pub repeat: bool,
+    pub(package) repeat: bool,
 }
-pub struct StructInitializerData {
-    pub ty: NodeId,
-    pub fields: NodeList,
+pub(package) struct StructInitializerData {
+    pub(package) ty: NodeId,
+    pub(package) fields: NodeList,
 }
-pub struct FieldInitializerData {
-    pub name: NodeId,
-    pub value: NodeId,
+pub(package) struct FieldInitializerData {
+    pub(package) name: NodeId,
+    pub(package) value: NodeId,
 }
-pub struct PatternData {
-    pub name: NodeId,
-    pub children: NodeList,
+pub(package) struct PatternData {
+    pub(package) name: NodeId,
+    pub(package) children: NodeList,
 }
-pub struct PatternRangeData {
-    pub start: NodeId,
-    pub end: NodeId,
-    pub inclusive: bool,
+pub(package) struct PatternRangeData {
+    pub(package) start: NodeId,
+    pub(package) end: NodeId,
+    pub(package) inclusive: bool,
 }
 
-pub union NodeAs {
-    pub asm_stmt: AsmData,
-    pub program: ProgramData,
-    pub name: NameData,
-    pub literal: LiteralData,
-    pub function: FunctionData,
-    pub parameter: ParameterData,
-    pub aggregate: AggregateData,
-    pub field: FieldData,
-    pub variant: VariantData,
-    pub interface_def: InterfaceData,
-    pub extend_def: ExtendData,
-    pub type_alias: TypeAliasData,
-    pub const_def: ConstData,
-    pub extern_block: ExternBlockData,
-    pub import_decl: ImportData,
-    pub generic_param: GenericParamData,
-    pub where_predicate: WherePredicateData,
-    pub type_path: TypePathData,
-    pub indirect_type: IndirectTypeData,
-    pub array_type: ArrayTypeData,
-    pub function_type: FunctionTypeData,
-    pub block: BlockData,
-    pub let_stmt: LetData,
-    pub single: SingleData,
-    pub va_op: VaOpData,
-    pub return_stmt: ReturnData,
-    pub if_stmt: IfData,
-    pub while_stmt: WhileData,
-    pub for_stmt: ForData,
-    pub flow: FlowData,
-    pub unary: UnaryData,
-    pub binary: BinaryData,
-    pub call: CallData,
-    pub closure: ClosureData,
-    pub index: IndexData,
-    pub member: MemberData,
-    pub cast: CastData,
-    pub specialization: SpecializationData,
-    pub match_expr: MatchData,
-    pub match_arm: MatchArmData,
-    pub select_arm: SelectArmData,
-    pub array_literal: ArrayLiteralData,
-    pub struct_initializer: StructInitializerData,
-    pub field_initializer: FieldInitializerData,
-    pub pattern: PatternData,
-    pub pattern_range: PatternRangeData,
+pub(package) union NodeAs {
+    pub(package) asm_stmt: AsmData,
+    pub(package) program: ProgramData,
+    pub(package) name: NameData,
+    pub(package) literal: LiteralData,
+    pub(package) function: FunctionData,
+    pub(package) parameter: ParameterData,
+    pub(package) aggregate: AggregateData,
+    pub(package) field: FieldData,
+    pub(package) variant: VariantData,
+    pub(package) interface_def: InterfaceData,
+    pub(package) extend_def: ExtendData,
+    pub(package) type_alias: TypeAliasData,
+    pub(package) const_def: ConstData,
+    pub(package) extern_block: ExternBlockData,
+    pub(package) import_decl: ImportData,
+    pub(package) generic_param: GenericParamData,
+    pub(package) where_predicate: WherePredicateData,
+    pub(package) type_path: TypePathData,
+    pub(package) indirect_type: IndirectTypeData,
+    pub(package) array_type: ArrayTypeData,
+    pub(package) function_type: FunctionTypeData,
+    pub(package) block: BlockData,
+    pub(package) let_stmt: LetData,
+    pub(package) single: SingleData,
+    pub(package) va_op: VaOpData,
+    pub(package) return_stmt: ReturnData,
+    pub(package) if_stmt: IfData,
+    pub(package) while_stmt: WhileData,
+    pub(package) for_stmt: ForData,
+    pub(package) flow: FlowData,
+    pub(package) unary: UnaryData,
+    pub(package) binary: BinaryData,
+    pub(package) call: CallData,
+    pub(package) closure: ClosureData,
+    pub(package) index: IndexData,
+    pub(package) member: MemberData,
+    pub(package) cast: CastData,
+    pub(package) specialization: SpecializationData,
+    pub(package) match_expr: MatchData,
+    pub(package) match_arm: MatchArmData,
+    pub(package) select_arm: SelectArmData,
+    pub(package) array_literal: ArrayLiteralData,
+    pub(package) struct_initializer: StructInitializerData,
+    pub(package) field_initializer: FieldInitializerData,
+    pub(package) pattern: PatternData,
+    pub(package) pattern_range: PatternRangeData,
 }
 
 @derive(Copy)
-pub struct Node {
-    pub kind: NodeKind,
-    pub span: tok::Span,
-    pub as_data: NodeAs,
+pub(package) struct Node {
+    pub(package) kind: NodeKind,
+    pub(package) span: tok::Span,
+    pub(package) as_data: NodeAs,
 }
 
 extend Node {
     /// A reference type node or a borrowed `dyn` (`&'a dyn I`, whose object holds only borrows that
     /// outlive `'a`): its lifetime is `indirect_type.lifetime`, its pointee `indirect_type.ty`.
-    pub const fn is_ref_type(self: &Self) bool {
+    pub(package) const fn is_ref_type(self: &Self) bool {
         return self.kind == NodeKind::NODE_REFERENCE_TYPE || self.kind == NodeKind::NODE_DYN_TYPE && self.as_data.indirect_type.qualifier != TypeQualifier::TYPE_QUAL_NONE;
     }
 
     /// A type node with a lifetime position in `indirect_type.lifetime`: a reference, a borrowed
     /// `dyn` or a slice.
-    pub const fn has_lt_slot(self: &Self) bool {
+    pub(package) const fn has_lt_slot(self: &Self) bool {
         return self.is_ref_type() || self.kind == NodeKind::NODE_SLICE_TYPE;
     }
 }
 
-pub type TypeId = u32;
-pub const TYPE_NONE: TypeId = 0;
+pub(package) type TypeId = u32;
+pub(package) const TYPE_NONE: TypeId = 0;
 /// The type of every construct the checker rejected: seeded right after the builtins, never
 /// equal to TYPE_NONE ("no type yet", "no expectation"). Compatibility and inference accept it
 /// silently, and a type built over it is itself TYPE_ERROR, so one diagnostic stands for one
 /// root error. It exists only in a module whose check reported an error.
-pub const TYPE_ERROR: TypeId = 19;
+pub(package) const TYPE_ERROR: TypeId = 19;
 
 /// Whether instance-table record `it` holds TYPE_ERROR (an instance, dyn or signature over a
 /// rejected type is itself rejected).
-pub const fn rec_has_error(it: &TyInstance) bool {
+pub(package) const fn rec_has_error(it: &TyInstance) bool {
     for j in 0..it.n {
         if unsafe it.args[j] == TYPE_ERROR {
             return true;
@@ -1010,7 +1010,7 @@ pub const fn rec_has_error(it: &TyInstance) bool {
     return false;
 }
 
-pub enum BuiltinType {
+pub(package) enum BuiltinType {
     BT_BOOL,
     BT_CHAR,
     BT_I8,
@@ -1032,7 +1032,7 @@ pub enum BuiltinType {
     BT_COUNT,
 }
 
-pub enum TypeKind {
+pub(package) enum TypeKind {
     TYPE_ERROR,
     TYPE_BUILTIN,
     TYPE_POINTER,
@@ -1079,32 +1079,32 @@ pub enum TypeKind {
 /// these instead of the expressions as WRITTEN is what makes two spellings of one width the same type.
 /// The constant and the coefficients are exact (i128), so a form over a u64 parameter holds u64
 /// constants (`{u64::MAX - N}`); its value is computed exactly and must fit `ty` and then `to`.
-pub struct ConstLin {
-    pub k: i128,
-    pub n: i32,
-    pub p: [DefId; 4],
-    pub c: [i128; 4],
+pub(package) struct ConstLin {
+    pub(package) k: i128,
+    pub(package) n: i32,
+    pub(package) p: [DefId; 4],
+    pub(package) c: [i128; 4],
     /// Floor divisor applied to the WHOLE form, last: value = (k + sum) / div. 0 or 1 = none. What
     /// admits `{(BITS + 7) / 8}` -- the byte count every serialization API is generic over -- into
     /// canonical form; a divided form composes with nothing further (scaling or adding to it would
     /// need distribution floor division does not grant), so every combinator below refuses one.
-    pub div: i128,
+    pub(package) div: i128,
     /// The integer type the form computes in: its parameters' and named constants' types joined by
     /// widening (a literal takes it). Composing a bound form's terms in takes that form's type.
-    pub ty: BuiltinType,
+    pub(package) ty: BuiltinType,
     /// The type of the value where the form stands: the declared type of the parameter it is an
     /// argument of (`ty`, a type `ty` widens to, or, where inference binds a parameter through a
     /// form, a narrower one), `ty` for an array length.
-    pub to: BuiltinType,
+    pub(package) to: BuiltinType,
 }
 
 extend ConstLin {
     /// The empty form (the constant 0) computing in `ty`.
-    pub const fn new(ty: BuiltinType) ConstLin {
+    pub(package) const fn new(ty: BuiltinType) ConstLin {
         return ConstLin { k: i128::zero(), n: 0, div: i128::zero(), ty: ty, to: ty };
     }
 
-    pub const fn div_of(self: &Self) i128 {
+    pub(package) const fn div_of(self: &Self) i128 {
         let one = i128::one();
         if self.div <= one {
             return one;
@@ -1112,7 +1112,7 @@ extend ConstLin {
         return self.div;
     }
 
-    pub const fn is_concrete(self: &Self) bool {
+    pub(package) const fn is_concrete(self: &Self) bool {
         for i in 0..self.n {
             if !unsafe self.c[i as usize].is_zero() {
                 return false;
@@ -1122,12 +1122,12 @@ extend ConstLin {
     }
 
     /// The exact value of a parameter-free form: the constant term through the floor divisor.
-    pub fn value(self: &Self) i128 {
+    pub(package) fn value(self: &Self) i128 {
         return self.floor_of(self.k);
     }
 
     /// `sum` (the constant plus every term at its value) through the floor divisor.
-    pub fn floor_of(self: &Self, sum: i128) i128 {
+    pub(package) fn floor_of(self: &Self, sum: i128) i128 {
         let d = self.div_of();
         if d == i128::one() {
             return sum;
@@ -1137,7 +1137,7 @@ extend ConstLin {
 
     /// The value of the form whose constant and terms sum to `sum`, into `out`: false when it lies
     /// outside `ty` or `to` (usize and isize are 32-bit under `ptr32`).
-    pub fn finish(self: &Self, sum: i128, ptr32: bool, out: &mut i128) bool {
+    pub(package) fn finish(self: &Self, sum: i128, ptr32: bool, out: &mut i128) bool {
         let v = self.floor_of(sum);
         if !bt_holds(self.ty, v, ptr32) || !bt_holds(self.to, v, ptr32) {
             return false;
@@ -1146,7 +1146,7 @@ extend ConstLin {
         return true;
     }
 
-    pub fn add_term(self: &mut Self, d: DefId, coeff: i128) bool {
+    pub(package) fn add_term(self: &mut Self, d: DefId, coeff: i128) bool {
         if coeff.is_zero() {
             return true;
         }
@@ -1179,7 +1179,7 @@ extend ConstLin {
     }
 
     /// Add `f` times this form to `out`; false when a coefficient leaves i128 or a divisor is involved.
-    pub fn scale(self: &Self, f: i128, out: &mut ConstLin) bool {
+    pub(package) fn scale(self: &Self, f: i128, out: &mut ConstLin) bool {
         if self.div_of() != i128::one() || out.div_of() != i128::one() {
             return false; // scaling does not distribute over the floor divisor
         }
@@ -1206,22 +1206,22 @@ extend ConstLin {
 /// node the step was recorded for, the deduplication key, and `owner` the declaration node of the
 /// item whose instantiations bind its parameters. `idx` marks a constant index into an array whose
 /// length is symbolic: `lin` is the length and `div` the index, which must be below it.
-pub struct ConstStep {
-    pub lin: ConstLin,
-    pub div: i128,
-    pub key: NodeId,
-    pub owner: NodeId,
-    pub module: ModuleId, // the module `span` indexes
-    pub span: tok::Span,
-    pub root: bool,
-    pub canon: bool,
-    pub idx: bool,
+pub(package) struct ConstStep {
+    pub(package) lin: ConstLin,
+    pub(package) div: i128,
+    pub(package) key: NodeId,
+    pub(package) owner: NodeId,
+    pub(package) module: ModuleId, // the module `span` indexes
+    pub(package) span: tok::Span,
+    pub(package) root: bool,
+    pub(package) canon: bool,
+    pub(package) idx: bool,
 }
 
 extend ConstStep {
     /// Whether the step holds when its constant and terms sum to `sum` (usize and isize are 32-bit
     /// under `ptr32`).
-    pub fn holds(self: &Self, sum: i128, ptr32: bool) bool {
+    pub(package) fn holds(self: &Self, sum: i128, ptr32: bool) bool {
         if self.idx {
             // A length outside its types is the length's own step.
             let mut n = i128::zero();
@@ -1234,7 +1234,7 @@ extend ConstStep {
         return !sum.is_negative() || sum.rem_euclid(&self.div).is_zero();
     }
 
-    pub const fn same(self: &Self, o: &ConstStep) bool {
+    pub(package) const fn same(self: &Self, o: &ConstStep) bool {
         return self.key == o.key && self.owner == o.owner && self.div == o.div && self.module == o.module && self.span.start == o.span.start && self.span.end == o.span.end && self.root == o.root && self.canon == o.canon && self.idx == o.idx && const_lin_eq(
             &self.lin,
             &o.lin,
@@ -1243,7 +1243,7 @@ extend ConstStep {
 }
 
 /// `*acc + c * x` into `acc`; false when a step leaves i128 (no 64-bit value is that far out).
-pub fn lin_acc(acc: &mut i128, c: i128, x: i128) bool {
+pub(package) fn lin_acc(acc: &mut i128, c: i128, x: i128) bool {
     if let Some(p) = c.checked_mul(&x) {
         if let Some(s) = acc.checked_add(&p) {
             *acc = s;
@@ -1255,7 +1255,7 @@ pub fn lin_acc(acc: &mut i128, c: i128, x: i128) bool {
 
 /// The exact value of two's complement pattern `bits` read as integer type `bt`: zero-extended for an unsigned
 /// type, sign-extended for any other.
-pub const fn cval_exact(bits: i64, bt: BuiltinType) i128 {
+pub(package) const fn cval_exact(bits: i64, bt: BuiltinType) i128 {
     if bt_is_unsigned(bt) {
         let mut r = i128::zero();
         r.set_limb(0, bits as u64);
@@ -1265,12 +1265,12 @@ pub const fn cval_exact(bits: i64, bt: BuiltinType) i128 {
 }
 
 /// The 64-bit two's complement pattern of `v` (a value some 64-bit integer type holds).
-pub const fn cval_bits(v: i128) i64 {
+pub(package) const fn cval_bits(v: i128) i64 {
     return v.limb(0) as i64;
 }
 
 /// Array length `v` as an element count; -1 outside 0..=4294967295.
-pub const fn len_count(v: i128) i64 {
+pub(package) const fn len_count(v: i128) i64 {
     if v.is_negative() || v.limb(1) != 0 || v.limb(0) > 0xFFFFFFFFu64 {
         return -1;
     }
@@ -1278,12 +1278,12 @@ pub const fn len_count(v: i128) i64 {
 }
 
 /// Whether `bt` is an unsigned integer type (`u8` to `usize`).
-pub const fn bt_is_unsigned(bt: BuiltinType) bool {
+pub(package) const fn bt_is_unsigned(bt: BuiltinType) bool {
     return bt as u8 >= BuiltinType::BT_U8 as u8 && bt as u8 <= BuiltinType::BT_USIZE as u8;
 }
 
 /// The width of integer type `bt` in bits (usize and isize 32 under `ptr32`); 0 for any other type.
-pub const fn bt_int_width(bt: BuiltinType, ptr32: bool) u32 {
+pub(package) const fn bt_int_width(bt: BuiltinType, ptr32: bool) u32 {
     return switch bt {
         BT_I8 | BT_U8 => 8,
         BT_I16 | BT_U16 => 16,
@@ -1296,7 +1296,7 @@ pub const fn bt_int_width(bt: BuiltinType, ptr32: bool) u32 {
 
 /// The width in bits of SIMD lane type `bt` (`i8` to `u64` without `isize`/`usize`, `f32`, `f64`);
 /// 0 for any other type.
-pub const fn bt_lane_bits(bt: BuiltinType) u32 {
+pub(package) const fn bt_lane_bits(bt: BuiltinType) u32 {
     return switch bt {
         BT_ISIZE | BT_USIZE => 0,
         BT_F32 => 32,
@@ -1308,7 +1308,7 @@ pub const fn bt_lane_bits(bt: BuiltinType) u32 {
 /// The error for vector type `Simd<T, n>` whose lane type is builtin `bt` (BT_COUNT: not a builtin)
 /// spelled `tname`, or for `Mask<n>` (`mask`), with a suggestion after a line break; empty when the
 /// type is valid: a lane type of `bt_lane_bits`, a power-of-two count from 2 to 64, 512 bits at most.
-pub fn vec_err(mask: bool, bt: BuiltinType, tname: str, n: u64) String {
+pub(package) fn vec_err(mask: bool, bt: BuiltinType, tname: str, n: u64) String {
     let lb = pick(bt == BuiltinType::BT_COUNT, 0u32, bt_lane_bits(bt));
     let pow2 = n >= 2 && n <= 64 && (n & n - 1) == 0;
     if pow2 && (mask || lb != 0 && n * lb as u64 <= 512) {
@@ -1343,7 +1343,7 @@ pub fn vec_err(mask: bool, bt: BuiltinType, tname: str, n: u64) String {
 
 /// Whether integer type `bt` holds `v` (usize and isize are 32-bit under `ptr32`); false for any
 /// other type.
-pub const fn bt_holds(bt: BuiltinType, v: i128, ptr32: bool) bool {
+pub(package) const fn bt_holds(bt: BuiltinType, v: i128, ptr32: bool) bool {
     let w = bt_int_width(bt, ptr32);
     if w == 0 {
         return false;
@@ -1362,7 +1362,7 @@ pub const fn bt_holds(bt: BuiltinType, v: i128, ptr32: bool) bool {
 }
 
 /// The least and the greatest value of integer type `bt` (usize and isize are 32-bit under `ptr32`).
-pub const fn bt_range(bt: BuiltinType, ptr32: bool, lo: &mut i128, hi: &mut i128) {
+pub(package) const fn bt_range(bt: BuiltinType, ptr32: bool, lo: &mut i128, hi: &mut i128) {
     let w = bt_int_width(bt, ptr32) as u64;
     if bt_is_unsigned(bt) {
         let mut m = i128::zero();
@@ -1385,23 +1385,23 @@ pub const fn bt_range(bt: BuiltinType, ptr32: bool, lo: &mut i128, hi: &mut i128
 }
 
 /// How one argument that an extend's target writes binds the extend's generic parameters.
-pub const XA_FIXED: u8 = 0; // names none of them: the instance's argument must be this type
-pub const XA_PARAM: u8 = 1; // a bare parameter: it takes the instance's argument
-pub const XA_FORM: u8 = 2; // `{c * N + k}` of one const parameter N: N = (argument - k) / c, exactly
-pub const XA_BAD: u8 = 3; // anything else: a parameter inside another type, or a form of several
+pub(package) const XA_FIXED: u8 = 0; // names none of them: the instance's argument must be this type
+pub(package) const XA_PARAM: u8 = 1; // a bare parameter: it takes the instance's argument
+pub(package) const XA_FORM: u8 = 2; // `{c * N + k}` of one const parameter N: N = (argument - k) / c, exactly
+pub(package) const XA_BAD: u8 = 3; // anything else: a parameter inside another type, or a form of several
 
 /// One argument of an extend's target: `kind` is an XA_* value, `par` the position of the parameter
 /// a PARAM or FORM argument names among the extend's generics, and `c * par + k` a FORM's value.
-pub struct XArg {
-    pub c: i128,
-    pub k: i128,
-    pub par: u32,
-    pub kind: u8,
+pub(package) struct XArg {
+    pub(package) c: i128,
+    pub(package) k: i128,
+    pub(package) par: u32,
+    pub(package) kind: u8,
 }
 
 /// Classify argument type `t` (read through `a`) of the target of an extend whose generic parameters
 /// are the nodes `gens` of module `m` (listed through `ea`).
-pub fn xarg_of(a: &Ast, t: TypeId, ea: &Ast, m: ModuleId, gens: NodeList) XArg {
+pub(package) fn xarg_of(a: &Ast, t: TypeId, ea: &Ast, m: ModuleId, gens: NodeList) XArg {
     let mut x = XArg { c: i128::one(), k: i128::zero(), par: 0, kind: XA_BAD };
     if a.type_concrete(t) {
         x.kind = XA_FIXED;
@@ -1444,7 +1444,7 @@ pub fn xarg_of(a: &Ast, t: TypeId, ea: &Ast, m: ModuleId, gens: NodeList) XArg {
 
 /// The value of FORM argument `x`'s parameter that makes the form equal `v`, into `out`: false when
 /// no integer does, or when type `bt` does not hold it (usize and isize are 32-bit under `ptr32`).
-pub fn xarg_solve(x: &XArg, v: i128, bt: BuiltinType, ptr32: bool, out: &mut i128) bool {
+pub(package) fn xarg_solve(x: &XArg, v: i128, bt: BuiltinType, ptr32: bool, out: &mut i128) bool {
     let mut d = v;
     if !lin_acc(&mut d, i128::from_i64(-1), x.k) {
         return false;
@@ -1559,7 +1559,7 @@ fn xarg_image(
 /// of `bt1` and a `b` of `bt2`. Each form takes, in the range it covers, exactly the values congruent
 /// to its `k` modulo `|c|`; two such progressions meet in their common range when the Chinese
 /// remainder theorem's least solution there exists.
-pub fn xarg_forms_meet(x1: &XArg, bt1: BuiltinType, x2: &XArg, bt2: BuiltinType, vbt: BuiltinType, ptr32: bool) bool {
+pub(package) fn xarg_forms_meet(x1: &XArg, bt1: BuiltinType, x2: &XArg, bt2: BuiltinType, vbt: BuiltinType, ptr32: bool) bool {
     let mut vl = i128::zero();
     let mut vh = i128::zero();
     bt_range(vbt, ptr32, &mut vl, &mut vh);
@@ -1602,7 +1602,7 @@ pub fn xarg_forms_meet(x1: &XArg, bt1: BuiltinType, x2: &XArg, bt2: BuiltinType,
 /// The form of FORM argument `x`'s parameter (of type `bt`) that makes `x` equal the form `r` of
 /// other parameters, `(r - k) / c`, into `out`: false when `r` has a divisor or a coefficient or its
 /// constant does not divide exactly.
-pub fn xarg_solve_lin(x: &XArg, r: &ConstLin, bt: BuiltinType, out: &mut ConstLin) bool {
+pub(package) fn xarg_solve_lin(x: &XArg, r: &ConstLin, bt: BuiltinType, out: &mut ConstLin) bool {
     *out = ConstLin::new(bt);
     let mut k = r.k;
     if r.div_of() != i128::one() || !lin_acc(&mut k, i128::from_i64(-1), x.k) {
@@ -1623,7 +1623,7 @@ pub fn xarg_solve_lin(x: &XArg, r: &ConstLin, bt: BuiltinType, out: &mut ConstLi
 }
 
 /// The interface of `a` whose items include `member` (an associated type or a method), or NODE_NONE.
-pub fn iface_of_member(a: &Ast, member: NodeId) NodeId {
+pub(package) fn iface_of_member(a: &Ast, member: NodeId) NodeId {
     let items = a.at_const(a.root).as_data.program.items;
     for i in 0..items.len {
         let iid = unsafe a.list(items)[i as usize];
@@ -1643,7 +1643,7 @@ pub fn iface_of_member(a: &Ast, member: NodeId) NodeId {
 /// How many leading arguments of its target's instance type (`n` arguments) extend `ext` constrains
 /// (syntax in `ea`): the ones its target path writes, lifetimes aside, or all `n` when it writes none
 /// (an alias that names an instance).
-pub fn ext_arity(ea: &Ast, ext: NodeId, n: u32) u32 {
+pub(package) fn ext_arity(ea: &Ast, ext: NodeId, n: u32) u32 {
     let tt = ea.at_const(ext).as_data.extend_def.target_type;
     if tt == NODE_NONE || ea.at_const(tt).kind != NodeKind::NODE_TYPE_PATH {
         return 0;
@@ -1665,7 +1665,7 @@ pub fn ext_arity(ea: &Ast, ext: NodeId, n: u32) u32 {
 /// binds its generic parameters positionally: its target type `pat` (read through `a`) is not an
 /// instance, or the arguments it constrains are its parameters, bare and in order. A generic extend
 /// (`ext_blanket`) is not one: its target binds as a whole.
-pub fn ext_is_identity(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: NodeId) bool {
+pub(package) fn ext_is_identity(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: NodeId) bool {
     let mut it = TyInstance {};
     if pat == TYPE_NONE || ext_blanket(a, pat, ea, m, ext) >= 0 {
         return pat == TYPE_NONE;
@@ -1689,7 +1689,7 @@ pub fn ext_is_identity(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: NodeId)
 /// The position among extend `ext`'s generic parameters (module `m`, syntax in `ea`) of the one its
 /// target type `pat` (read through `a`) is: a generic extend (`extend<T: B> T as I`), the conformance
 /// of every type that satisfies the parameter's bounds. -1 for any other target.
-pub fn ext_blanket(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: NodeId) i32 {
+pub(package) fn ext_blanket(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: NodeId) i32 {
     if pat == TYPE_NONE {
         return -1;
     }
@@ -1709,7 +1709,7 @@ pub fn ext_blanket(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: NodeId) i32
 /// `ext_blanket` from the syntax alone: the position of the generic parameter extend `ext` (module
 /// `m`) names as its whole target, read through the resolution (resolve-final), so a reader may ask
 /// before the extend is checked. -1 for any other target.
-pub const fn ext_blanket_syn(ea: &Ast, m: ModuleId, ext: NodeId) i32 {
+pub(package) const fn ext_blanket_syn(ea: &Ast, m: ModuleId, ext: NodeId) i32 {
     let ed = ea.at_const(ext).as_data.extend_def;
     let r = ea.resolution_def(ed.target_type);
     if r.module != m || r.node == NODE_NONE {
@@ -1727,7 +1727,7 @@ pub const fn ext_blanket_syn(ea: &Ast, m: ModuleId, ext: NodeId) i32 {
 /// (read through `a`) does not name, as bits by position: the parameters a conformance's interface
 /// arguments solve (`N` of `extend<const N: usize> f32 as Mul<V<N>>`), and every parameter but the
 /// target of a generic extend. At most 64 parameters.
-pub fn ext_free_params(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: NodeId) u64 {
+pub(package) fn ext_free_params(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: NodeId) u64 {
     let gens = ea.at_const(ext).as_data.extend_def.generics;
     let all = pick(gens.len >= 64, ~0u64, (1u64 << gens.len as u64) - 1);
     let b = ext_blanket(a, pat, ea, m, ext);
@@ -1755,7 +1755,7 @@ pub fn ext_free_params(a: &Ast, pat: TypeId, ea: &Ast, m: ModuleId, ext: NodeId)
 /// extend's arguments, in declaration order, ahead of the member's own: a generic extend
 /// (`ext_blanket`), or one whose target does not name every parameter (`ext_free_params`). Any other
 /// extend's arguments are its receiver instance's.
-pub fn ext_keyed(ea: &Ast, ext: NodeId) bool {
+pub(package) fn ext_keyed(ea: &Ast, ext: NodeId) bool {
     let pat = ea.type_of(ea.at_const(ext).as_data.extend_def.target_type);
     return pat != TYPE_NONE && (ext_blanket(ea, pat, ea, ea.module, ext) >= 0 || ext_free_params(
         ea,
@@ -1770,7 +1770,7 @@ pub fn ext_keyed(ea: &Ast, ext: NodeId) bool {
 /// form `idx`; `params` are bound to `args`, which are types of `dst`. False when the result leaves the
 /// linear set (a parameter bound to something that is not a width) or a bound form's value leaves its
 /// types -- the caller then keeps the form unfolded rather than inventing a value for it.
-pub fn lin_subst(
+pub(package) fn lin_subst(
     dst: &Ast,
     src: &Ast,
     idx: u32,
@@ -1785,7 +1785,7 @@ pub fn lin_subst(
 }
 
 /// `lin_subst` of form value `form`.
-pub fn lin_subst_form(
+pub(package) fn lin_subst_form(
     dst: &Ast,
     form: &ConstLin,
     params: *const DefId,
@@ -1914,67 +1914,67 @@ fn lin_subst_terms(
 /// the interning, structural-key, cross-pool translation, instance-key and layout paths, reported by
 /// the driver at the end of emission. Off, every instrumented path pays one load and one predictable
 /// branch; on, the timed paths add one clock read per outermost call.
-pub static mut TS_ON: bool = false;
+pub(package) static mut TS_ON: bool = false;
 /// SC_TYPE_COLLIDE=1: every type and instance hashes to one bucket, so the tables run on full
 /// equality alone (the validation configuration for the collision path). Off, one predictable branch.
-pub static mut TS_COLLIDE: bool = false;
-pub static mut TS: [u64; TS_COUNT] = [[0] = 0u64];
-pub static mut TS_LAST: [u64; TS_COUNT] = [[0] = 0u64];
-pub static mut TS_DEPTH: u32 = 0; // reentry depth shared by the timed translation paths
-pub const TS_INTERN: usize = 0; // intern_type calls
-pub const TS_INTERN_HIT: usize = 1;
-pub const TS_INTERN_PROBE: usize = 2; // extra probe steps (hash collisions)
-pub const TS_INTERN_REBUILD: usize = 3;
-pub const TS_INST: usize = 4; // intern_instance calls
-pub const TS_INST_HIT: usize = 5;
-pub const TS_INST_PROBE: usize = 6;
-pub const TS_REINTERN: usize = 14; // reintern calls (every level)
-pub const TS_REINTERN_NS: usize = 15;
-pub const TS_XTY: usize = 16; // inliner xty calls (every level)
-pub const TS_XTY_NS: usize = 17;
-pub const TS_XTY_HIT: usize = 18; // inliner translation-map hits
-pub const TS_LOWER: usize = 19; // foreign lower_type_in calls (every level)
-pub const TS_LOWER_HIT: usize = 20; // lower_memo hits
-pub const TS_LOWER_NS: usize = 21;
-pub const TS_LOWER_MEMO_N: usize = 22; // lower_memo entries summed over modules
-pub const TS_IGADD: usize = 23; // instance graph record interns
-pub const TS_IGADD_HIT: usize = 24;
-pub const TS_IGADD_NS: usize = 25;
-pub const TS_IG_BYTES: usize = 26; // instance graph keys, records and index bytes
-pub const TS_LAY: usize = 27; // cacheable layout queries
-pub const TS_LAY_HIT: usize = 28;
-pub const TS_LAY_SVC: usize = 29; // layout services (caches) created
-pub const TS_XM_BYTES: usize = 30; // inliner translation-map bytes
-pub const TS_FNSIG: usize = 31; // typechecker fn_sig calls (call-site signature lowering)
-pub const TS_LAY_RAW: usize = 32; // layouts computed (cache misses and uncacheable queries)
-pub const TS_LAY_NS: usize = 33;
-pub const TS_DECLIN: usize = 34; // foreign decl_type_in calls (field, parameter and const types of other modules)
-pub const TS_REBUILD_N: usize = 35; // pool entries re-hashed by index rebuilds
-pub const TS_LOWER_SIG: usize = 36; // foreign lowerings made at item level (signature work, no enclosing body)
-pub const TS_LAY_INS: usize = 37; // layout cache entries inserted (bytes: entries times the map slot)
-pub const TS_COUNT: usize = 40;
+pub(package) static mut TS_COLLIDE: bool = false;
+pub(package) static mut TS: [u64; TS_COUNT] = [[0] = 0u64];
+pub(package) static mut TS_LAST: [u64; TS_COUNT] = [[0] = 0u64];
+pub(package) static mut TS_DEPTH: u32 = 0; // reentry depth shared by the timed translation paths
+pub(package) const TS_INTERN: usize = 0; // intern_type calls
+pub(package) const TS_INTERN_HIT: usize = 1;
+pub(package) const TS_INTERN_PROBE: usize = 2; // extra probe steps (hash collisions)
+pub(package) const TS_INTERN_REBUILD: usize = 3;
+pub(package) const TS_INST: usize = 4; // intern_instance calls
+pub(package) const TS_INST_HIT: usize = 5;
+pub(package) const TS_INST_PROBE: usize = 6;
+pub(package) const TS_REINTERN: usize = 14; // reintern calls (every level)
+pub(package) const TS_REINTERN_NS: usize = 15;
+pub(package) const TS_XTY: usize = 16; // inliner xty calls (every level)
+pub(package) const TS_XTY_NS: usize = 17;
+pub(package) const TS_XTY_HIT: usize = 18; // inliner translation-map hits
+pub(package) const TS_LOWER: usize = 19; // foreign lower_type_in calls (every level)
+pub(package) const TS_LOWER_HIT: usize = 20; // lower_memo hits
+pub(package) const TS_LOWER_NS: usize = 21;
+pub(package) const TS_LOWER_MEMO_N: usize = 22; // lower_memo entries summed over modules
+pub(package) const TS_IGADD: usize = 23; // instance graph record interns
+pub(package) const TS_IGADD_HIT: usize = 24;
+pub(package) const TS_IGADD_NS: usize = 25;
+pub(package) const TS_IG_BYTES: usize = 26; // instance graph keys, records and index bytes
+pub(package) const TS_LAY: usize = 27; // cacheable layout queries
+pub(package) const TS_LAY_HIT: usize = 28;
+pub(package) const TS_LAY_SVC: usize = 29; // layout services (caches) created
+pub(package) const TS_XM_BYTES: usize = 30; // inliner translation-map bytes
+pub(package) const TS_FNSIG: usize = 31; // typechecker fn_sig calls (call-site signature lowering)
+pub(package) const TS_LAY_RAW: usize = 32; // layouts computed (cache misses and uncacheable queries)
+pub(package) const TS_LAY_NS: usize = 33;
+pub(package) const TS_DECLIN: usize = 34; // foreign decl_type_in calls (field, parameter and const types of other modules)
+pub(package) const TS_REBUILD_N: usize = 35; // pool entries re-hashed by index rebuilds
+pub(package) const TS_LOWER_SIG: usize = 36; // foreign lowerings made at item level (signature work, no enclosing body)
+pub(package) const TS_LAY_INS: usize = 37; // layout cache entries inserted (bytes: entries times the map slot)
+pub(package) const TS_COUNT: usize = 40;
 
 /// Read SC_TYPE_STATS (idempotent).
-pub fn ts_init() {
+pub(package) fn ts_init() {
     unsafe TS_ON = stdlib::getenv("SC_TYPE_STATS") != null;
     unsafe TS_COLLIDE = stdlib::getenv("SC_TYPE_COLLIDE") != null;
 }
 
-pub fn ts_add(i: usize, v: u64) {
+pub(package) fn ts_add(i: usize, v: u64) {
     unsafe TS[i] += v;
 }
 
-pub fn ts_get(i: usize) u64 {
+pub(package) fn ts_get(i: usize) u64 {
     return unsafe TS[i];
 }
 
-pub fn ts_now() u64 {
+pub(package) fn ts_now() u64 {
     return sc_runtime::sc_rt_now_ns();
 }
 
 /// Print the counters' change since the previous phase line (SC_TYPE_STATS): the identity work each
 /// pipeline phase did.
-pub fn ts_phase(label: str) {
+pub(package) fn ts_phase(label: str) {
     if !unsafe TS_ON {
         return;
     }
@@ -2015,7 +2015,7 @@ fn ts_delta(i: usize) u64 {
 
 /// 64-bit FNV-1a of `s`: the compiler's name key. Byte-serial on purpose: the emitter's text scans hash
 /// an identifier byte by byte as they read it, and must meet the keys that whole names hash to.
-pub const fn fnv(s: str) u64 {
+pub(package) const fn fnv(s: str) u64 {
     let mut h: u64 = 0xcbf29ce484222325u64;
     for k in 0..s.len() {
         h = (h ^ s.byte_at(k) as u64).wrapping_mul(0x100000001b3u64);
@@ -2030,14 +2030,14 @@ pub const fn fnv(s: str) u64 {
 /// every input bit reach every output bit, which puts collisions at the 64-bit birthday bound.
 /// The result depends on `h ^ v` only, so `h` must be a running hash: a small tag or bit set passed as
 /// `h` collides with a structured `v` that differs in the same bits. Mix `v` first, then fold the tag in.
-pub const fn skey_mix(h: u64, v: u64) u64 {
+pub(package) const fn skey_mix(h: u64, v: u64) u64 {
     let mut x = (h ^ v).wrapping_mul(1099511628211u64);
     x = (x ^ x >> 30).wrapping_mul(0xBF58476D1CE4E5B9u64);
     x = (x ^ x >> 27).wrapping_mul(0x94D049BB133111EBu64);
     return x ^ x >> 31;
 }
 
-pub const fn const_lin_eq(a: &ConstLin, b: &ConstLin) bool {
+pub(package) const fn const_lin_eq(a: &ConstLin, b: &ConstLin) bool {
     if a.k != b.k || a.div_of() != b.div_of() || a.ty != b.ty || a.to != b.to {
         return false;
     }
@@ -2066,23 +2066,23 @@ pub const fn const_lin_eq(a: &ConstLin, b: &ConstLin) bool {
     return na == nb;
 }
 
-pub struct TyArr {
-    pub elem: TypeId,
+pub(package) struct TyArr {
+    pub(package) elem: TypeId,
     /// The element count, or with `Ty.qualifier == ARR_SYM` the TypeId (in `elem`'s pool) of a
     /// symbolic length: a const generic parameter or a const expression over them.
-    pub len: u32,
+    pub(package) len: u32,
 }
 /// The `Ty.qualifier` of a TYPE_ARRAY whose `arr.len` names a symbolic length type, not a count.
-pub const ARR_SYM: u8 = 1;
-pub struct TyProj {
-    pub owner: TypeId, // the reflected type (may be a generic param); Ty.module is the binder's module
-    pub binder: NodeId, // the NODE_INLINE_FOR the projection belongs to
+pub(package) const ARR_SYM: u8 = 1;
+pub(package) struct TyProj {
+    pub(package) owner: TypeId, // the reflected type (may be a generic param); Ty.module is the binder's module
+    pub(package) binder: NodeId, // the NODE_INLINE_FOR the projection belongs to
 }
 /// The `Ty.qualifier` bits of a TYPE_FUNCTION that is a function-pointer type (`fn(A) R`): its
 /// payload is a signature record (`TyFn.sig`), not a declaration, so two spellings of one signature
 /// are one type and substitution reaches its parameters and result. FN_MOVE marks `move fn(..)`.
-pub const FN_SIG: u8 = 1;
-pub const FN_MOVE: u8 = 2;
+pub(package) const FN_SIG: u8 = 1;
+pub(package) const FN_MOVE: u8 = 2;
 /// The lifetime classes of a function-pointer type (`TyInstance.lts`), one per lifetime position
 /// of its results then its parameters (`Package::lt_walk`; `Ast::sig_lt_class`). 0: every position
 /// has its own lifetime, which an elided result takes from the only input position (Rust's
@@ -2091,45 +2091,45 @@ pub const FN_MOVE: u8 = 2;
 /// LP_GROUPS of each. Else LTS_EXT | count << 8: the signature record holds the canonical classes
 /// after its results and parameters, eight per TYPE_CONST slot (`lts_slots`), position k in byte
 /// k % 8 of slot k / 8, so they take part in the type's identity like its slots.
-pub const LTS_MAX: u32 = 15;
+pub(package) const LTS_MAX: u32 = 15;
 /// The classes of a function type substitution gave a lifetime past the last class (LC_TOO_MANY):
 /// a value of it can be neither called nor converted.
-pub const LTS_WIDE: u64 = 0x10;
-pub const LTS_EXT: u64 = 0x20;
+pub(package) const LTS_WIDE: u64 = 0x10;
+pub(package) const LTS_EXT: u64 = 0x20;
 /// A position's lifetime class, canonical: LC_FREE (its own lifetime, chosen at each call),
 /// LC_STATIC, LC_GROUP + g (the positions of group g share one lifetime chosen at each call: elided
 /// or bound by the type's `for<..>`; at least two positions), or LC_OUTER + g (a lifetime fixed
 /// outside the type: the enclosing item's, or a type argument's). Groups number in first-use order;
 /// LC_TOO_MANY marks a group past the last class.
-pub const LC_FREE: u8 = 0;
-pub const LC_STATIC: u8 = 1;
-pub const LC_GROUP: u8 = 2;
-pub const LC_OUTER: u8 = 128;
-pub const LC_TOO_MANY: u8 = 255;
+pub(package) const LC_FREE: u8 = 0;
+pub(package) const LC_STATIC: u8 = 1;
+pub(package) const LC_GROUP: u8 = 2;
+pub(package) const LC_OUTER: u8 = 128;
+pub(package) const LC_TOO_MANY: u8 = 255;
 /// The packed base of the outer classes, and the groups of each kind a packed type holds.
-pub const LP_OUTER: u8 = 9;
-pub const LP_GROUPS: u8 = 7;
+pub(package) const LP_OUTER: u8 = 9;
+pub(package) const LP_GROUPS: u8 = 7;
 /// The flags of a lifetime position (`Package::lt_walk`): invariant; under a reference (or raw
 /// pointer) of the walked type; behind a reference of it, or a lifetime its declaration holds;
 /// contravariant (unless invariant).
-pub const LTF_INV: u8 = 1;
-pub const LTF_REF: u8 = 2;
-pub const LTF_BEHIND: u8 = 4;
-pub const LTF_CONTRA: u8 = 8;
+pub(package) const LTF_INV: u8 = 1;
+pub(package) const LTF_REF: u8 = 2;
+pub(package) const LTF_BEHIND: u8 = 4;
+pub(package) const LTF_CONTRA: u8 = 8;
 
 /// Variance of a type/lifetime parameter in an aggregate, 2 bits, packed LSB-first per parameter
 /// (lifetime params first, then type params). Drives subtyping: `C<'a> <: C<'b>` requires 'a and 'b
 /// related per C's variance in that slot. BIVARIANT is the lattice bottom (unconstrained); INVARIANT
 /// the top. Bit 0 marks a covariant use and bit 1 a contravariant one, so the join (v_join) is a bitwise
 /// or; composition is v_transform.
-pub const V_BIVARIANT: u32 = 0;
-pub const V_COVARIANT: u32 = 1;
-pub const V_CONTRAVARIANT: u32 = 2;
-pub const V_INVARIANT: u32 = 3;
+pub(package) const V_BIVARIANT: u32 = 0;
+pub(package) const V_COVARIANT: u32 = 1;
+pub(package) const V_CONTRAVARIANT: u32 = 2;
+pub(package) const V_INVARIANT: u32 = 3;
 
 /// The class slots a signature record with lifetime classes `lts` holds after its results and
 /// parameters.
-pub const fn lts_slots(lts: u64) u32 {
+pub(package) const fn lts_slots(lts: u64) u32 {
     if (lts & 255u64) != LTS_EXT {
         return 0;
     }
@@ -2137,13 +2137,13 @@ pub const fn lts_slots(lts: u64) u32 {
 }
 
 /// The slots of signature record `it`: its results, its parameters and its class slots.
-pub const fn rec_len(it: &TyInstance) u32 {
+pub(package) const fn rec_len(it: &TyInstance) u32 {
     return it.module as u32 + it.decl + lts_slots(it.lts);
 }
 
 /// Whether lifetime classes `cls` (`nres` result positions first, canonical) are the default ones:
 /// no `'static`, and the results, if any, share the lifetime of the only input position.
-pub const fn lt_default(cls: &Vector<u8>, nres: u32) bool {
+pub(package) const fn lt_default(cls: &Vector<u8>, nres: u32) bool {
     for k in 0..cls.len() {
         if cls[k] == LC_STATIC || cls[k] >= LC_OUTER || nres == 0 && cls[k] != LC_FREE || nres != 0 && cls[k] != LC_GROUP {
             return false;
@@ -2153,7 +2153,7 @@ pub const fn lt_default(cls: &Vector<u8>, nres: u32) bool {
 }
 
 /// Position `k`'s canonical class in packed lifetime classes `lts`.
-pub const fn lts_class(lts: u64, k: u32) u8 {
+pub(package) const fn lts_class(lts: u64, k: u32) u8 {
     if k >= (lts & 15u64) as u32 {
         return LC_FREE;
     }
@@ -2164,78 +2164,78 @@ pub const fn lts_class(lts: u64, k: u32) u8 {
     return c;
 }
 /// No instance-table record (`Ty::rec`).
-pub const NO_REC: u32 = 0xFFFFFFFF;
+pub(package) const NO_REC: u32 = 0xFFFFFFFF;
 /// A function-pointer type's payload. `decl` overlays `TyAs.decl` and is NODE_NONE, so a reader of
 /// a TYPE_FUNCTION's declaration sees no closure and no function. `sig` is an instance-table record
 /// whose `module` is the result count, `decl` the parameter count and `args` the results then the
 /// parameters; when they are more than eight, the record holds the first seven and its last slot is
 /// the function-pointer type of the rest (no results, the remaining count as parameters).
-pub struct TyFn {
-    pub decl: NodeId,
-    pub sig: u32,
+pub(package) struct TyFn {
+    pub(package) decl: NodeId,
+    pub(package) sig: u32,
 }
-pub union TyAs {
-    pub builtin: BuiltinType,
-    pub elem: TypeId,
-    pub decl: NodeId,
-    pub inst: u32,
-    pub arr: TyArr,
+pub(package) union TyAs {
+    pub(package) builtin: BuiltinType,
+    pub(package) elem: TypeId,
+    pub(package) decl: NodeId,
+    pub(package) inst: u32,
+    pub(package) arr: TyArr,
     /// TYPE_CONST: a const-generic value, the two's complement bits of a value of the integer type
     /// in `Ty.qualifier` (`cval_exact`): the declared type of the parameter it is an argument of.
-    pub value: i64,
-    pub proj: TyProj, // TYPE_FIELD_PROJECTION
-    pub fnp: TyFn, // TYPE_FUNCTION with FN_SIG
+    pub(package) value: i64,
+    pub(package) proj: TyProj, // TYPE_FIELD_PROJECTION
+    pub(package) fnp: TyFn, // TYPE_FUNCTION with FN_SIG
 }
 @derive(Copy)
-pub struct Ty {
-    pub kind: TypeKind,
-    pub qualifier: u8,
-    pub concrete: bool,
-    pub module: ModuleId,
-    pub as_data: TyAs,
+pub(package) struct Ty {
+    pub(package) kind: TypeKind,
+    pub(package) qualifier: u8,
+    pub(package) concrete: bool,
+    pub(package) module: ModuleId,
+    pub(package) as_data: TyAs,
 }
 
 extend Ty {
     /// A TYPE_CONST's integer type.
-    pub const fn cbt(self: &Self) BuiltinType {
+    pub(package) const fn cbt(self: &Self) BuiltinType {
         return self.qualifier as BuiltinType;
     }
 
     /// A TYPE_CONST's exact value.
-    pub const fn cval(self: &Self) i128 {
+    pub(package) const fn cval(self: &Self) i128 {
         return cval_exact(self.as_data.value, self.cbt());
     }
 
     /// A TYPE_ARRAY whose length is symbolic (`[T; N]` inside the generic that declares `N`), or a
     /// TYPE_SIMD or TYPE_MASK, whose length is always a type.
-    pub const fn arr_sym(self: &Self) bool {
+    pub(package) const fn arr_sym(self: &Self) bool {
         return self.qualifier == ARR_SYM && self.arr_like();
     }
 
     /// A TYPE_ARRAY, TYPE_SIMD or TYPE_MASK: an element and a length in `as_data.arr`.
-    pub const fn arr_like(self: &Self) bool {
+    pub(package) const fn arr_like(self: &Self) bool {
         return self.kind == TypeKind::TYPE_ARRAY || self.is_vec();
     }
 
     /// A TYPE_SIMD or TYPE_MASK.
-    pub const fn is_vec(self: &Self) bool {
+    pub(package) const fn is_vec(self: &Self) bool {
         return self.kind == TypeKind::TYPE_SIMD || self.kind == TypeKind::TYPE_MASK;
     }
 
     /// A TYPE_DYN that owns its payload (`Box<dyn I>`): drops free it. `&dyn I` and `&mut dyn I`
     /// borrow theirs. Every ownership predicate asks this.
-    pub const fn dyn_owns(self: &Self) bool {
+    pub(package) const fn dyn_owns(self: &Self) bool {
         return self.kind == TypeKind::TYPE_DYN && self.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8;
     }
 
     /// A function-pointer type: a signature record, no declaration.
-    pub const fn fn_sig(self: &Self) bool {
+    pub(package) const fn fn_sig(self: &Self) bool {
         return self.kind == TypeKind::TYPE_FUNCTION && (self.qualifier & FN_SIG) != 0;
     }
 
     /// The instance-table record this type's payload names, whose `args` are its child types: an
     /// instance's, a dyn's, a function-pointer type's signature. NO_REC for any other type.
-    pub const fn rec(self: &Self) u32 {
+    pub(package) const fn rec(self: &Self) u32 {
         if self.kind == TypeKind::TYPE_INSTANCE || self.kind == TypeKind::TYPE_DYN || self.kind == TypeKind::TYPE_ASSOC {
             return self.as_data.inst;
         }
@@ -2246,7 +2246,7 @@ extend Ty {
     }
 
     /// Point the payload at record `r` (the type must have one: see `rec`).
-    pub const fn set_rec(self: &mut Self, r: u32) {
+    pub(package) const fn set_rec(self: &mut Self, r: u32) {
         if self.fn_sig() {
             self.as_data.fnp.sig = r;
         } else {
@@ -2285,7 +2285,7 @@ extend Ty as Eq {
 
 /// The record of kind `k` (an `arr_like` kind) over `elem` and length type `lt` (`ly`): an array with
 /// a constant length in the u32 range holds the count, every other length stays a type.
-pub const fn array_ty(k: TypeKind, elem: TypeId, lt: TypeId, ly: &Ty) Ty {
+pub(package) const fn array_ty(k: TypeKind, elem: TypeId, lt: TypeId, ly: &Ty) Ty {
     if k != TypeKind::TYPE_ARRAY {
         return Ty { kind: k, qualifier: ARR_SYM, as_data: TyAs { arr: TyArr { elem: elem, len: lt } } };
     }
@@ -2299,50 +2299,50 @@ pub const fn array_ty(k: TypeKind, elem: TypeId, lt: TypeId, ly: &Ty) Ty {
 }
 
 @derive(Copy)
-pub struct TyInstance {
-    pub module: ModuleId,
-    pub decl: NodeId,
-    pub n: u8,
-    pub args: [TypeId; 8],
+pub(package) struct TyInstance {
+    pub(package) module: ModuleId,
+    pub(package) decl: NodeId,
+    pub(package) n: u8,
+    pub(package) args: [TypeId; 8],
     /// A function-pointer type's lifetime classes (`LTS_*`); 0 on every other record.
-    pub lts: u64,
+    pub(package) lts: u64,
 }
 /// One method reference the type checker resolved, with the receiver type it resolved it ON. The
 /// receiver may still mention the enclosing generic's parameters. The unused-item lint reads these
 /// records (`lint_unused_items`). Recorded in the referring module's own Ast so modules can be
 /// checked in parallel.
-pub struct MethodRef {
-    pub owner: NodeId, // the function or method the reference sits in; NODE_NONE at item level
-    pub recv: TypeId,
-    pub callee: DefId,
+pub(package) struct MethodRef {
+    pub(package) owner: NodeId, // the function or method the reference sits in; NODE_NONE at item level
+    pub(package) recv: TypeId,
+    pub(package) callee: DefId,
 }
 
 /// A wide integer literal: one whose value does not fit 64 bits, admitted where the expected type is
 /// the prelude's UInt<N>/Int<N>. The typechecker parses the digits into STORED limbs here (already
 /// two's-complemented and top-masked for a negative or partial width); codegen emits them as the
 /// storage's compound literal. 16 limbs (1024 bits) is the cap -- a wider constant is built from parts.
-pub struct WideLit {
-    pub node: NodeId,
-    pub ty: TypeId,
-    pub limbs: [u64; 16],
+pub(package) struct WideLit {
+    pub(package) node: NodeId,
+    pub(package) ty: TypeId,
+    pub(package) limbs: [u64; 16],
 }
 
 /// A conversion the type checker inserted at an expression: `target::from(expr)`. What lets a library
 /// integer stand where a built-in one is expected -- at an assignment, an argument, an operand or a cast.
 /// `node` names the expression, so the loader can walk these records: a superseded entry (the node was
 /// re-checked) is recognized by `coerce_at` no longer pointing at it.
-pub struct CoerceUse {
-    pub node: NodeId,
-    pub target: TypeId,
-    pub method: DefId,
+pub(package) struct CoerceUse {
+    pub(package) node: NodeId,
+    pub(package) target: TypeId,
+    pub(package) method: DefId,
 }
 
 /// A call of a generic interface's method through a generic bound or an interface's `Self`: `iface`
 /// is `dyn I<args>` over the arguments the bound gives the interface, which name the conformance
 /// every instance of the call dispatches to.
-pub struct BoundCall {
-    pub node: NodeId,
-    pub iface: TypeId,
+pub(package) struct BoundCall {
+    pub(package) node: NodeId,
+    pub(package) iface: TypeId,
 }
 
 // One deferred field-projection bound: prove `iface` for every member of `owner` the reflection loop
@@ -2352,48 +2352,48 @@ pub struct BoundCall {
 // generic interface default method `iface` under `args[0..n]`, in `TypeChecker::dmd_params` order
 // (`Self` first): its own obligations hold only when `Self`'s conformance inherits the default, so
 // they run once `args` are concrete (`Ast.dmd_uses`, where `fnd` is the call that made them so).
-pub struct ProjOb {
-    pub fnd: NodeId,
-    pub owner: TypeId,
-    pub iface: DefId,
-    pub demand: bool,
-    pub n: u8,
-    pub args: [TypeId; 16],
-    pub guard: ObGuard,
-    pub mode: u8,
+pub(package) struct ProjOb {
+    pub(package) fnd: NodeId,
+    pub(package) owner: TypeId,
+    pub(package) iface: DefId,
+    pub(package) demand: bool,
+    pub(package) n: u8,
+    pub(package) args: [TypeId; 16],
+    pub(package) guard: ObGuard,
+    pub(package) mode: u8,
 }
 
 /// The per-copy `if` conditions around a reflection loop's bound check (`chain`, an index plus one
 /// into module `m`'s `Ast.ob_guards`; 0 for none), over loop `binder`. A field whose copy folds one
 /// of them against its branch is never emitted, so it owes the bound nothing.
-pub struct ObGuard {
-    pub m: ModuleId,
-    pub binder: NodeId,
-    pub chain: u32,
+pub(package) struct ObGuard {
+    pub(package) m: ModuleId,
+    pub(package) binder: NodeId,
+    pub(package) chain: u32,
 }
 
 /// One guard condition: the branch the check sits in (`taken`: the then branch) and the enclosing
 /// condition's entry (index plus one; 0 at the loop body).
-pub struct GuardEnt {
-    pub cond: NodeId,
-    pub taken: bool,
-    pub parent: u32,
+pub(package) struct GuardEnt {
+    pub(package) cond: NodeId,
+    pub(package) taken: bool,
+    pub(package) parent: u32,
 }
 
 /// A call of a method whose generic parameters its receiver binds (a generic interface default's
 /// `Self` and the interface's parameters, or a generic extend's parameters): those arguments, in
 /// `TypeChecker::frame_params` order (TYPE_NONE where the call binds none). The obligation discharge
 /// substitutes them with the call's own type arguments (`mono`).
-pub struct FrameUse {
-    pub node: NodeId,
-    pub n: u8,
-    pub args: [TypeId; 8],
+pub(package) struct FrameUse {
+    pub(package) node: NodeId,
+    pub(package) n: u8,
+    pub(package) args: [TypeId; 8],
 }
 
-pub struct MonoUse {
-    pub node: NodeId,
-    pub n: u8,
-    pub args: [TypeId; 8],
+pub(package) struct MonoUse {
+    pub(package) node: NodeId,
+    pub(package) n: u8,
+    pub(package) args: [TypeId; 8],
 }
 
 /// A frozen table the batch driver frees at its last reader: `on` from the release, with the
@@ -2401,23 +2401,23 @@ pub struct MonoUse {
 /// compare `pre` with their snapshot and `post` with the table, so a change on either side of the
 /// release still shows; every later read or write of the freed part is an assertion failure.
 @derive(Persist)
-pub struct Released {
-    pub on: bool,
-    pub pre: u32,
-    pub post: u32,
+pub(package) struct Released {
+    pub(package) on: bool,
+    pub(package) pre: u32,
+    pub(package) post: u32,
 }
-pub struct DynUse {
-    pub node: NodeId,
-    pub src: TypeId,
-    pub dyn_ty: TypeId,
-    pub alloc: TypeId, // Box-erase allocator (TYPE_NONE = Global); its free glue calls A::default()
+pub(package) struct DynUse {
+    pub(package) node: NodeId,
+    pub(package) src: TypeId,
+    pub(package) dyn_ty: TypeId,
+    pub(package) alloc: TypeId, // Box-erase allocator (TYPE_NONE = Global); its free glue calls A::default()
 }
-pub struct DerefUse {
-    pub node: NodeId,
-    pub target: TypeId,
-    pub n: u8,
-    pub recv: [TypeId; 8],
-    pub method: [DefId; 8],
+pub(package) struct DerefUse {
+    pub(package) node: NodeId,
+    pub(package) target: TypeId,
+    pub(package) n: u8,
+    pub(package) recv: [TypeId; 8],
+    pub(package) method: [DefId; 8],
 }
 
 // Field-wise Hash/Eq over the SIGNIFICANT fields (module/decl/n + args[0..n], and lts when set) — deliberately NOT a
@@ -2462,30 +2462,30 @@ extend TyInstance as Eq {
 /// length's Release store, and `len()` reads Acquire. Capacity is fixed at POOL_SLOTS chunks;
 /// exceeding it aborts (a pool that large indicates runaway interning, not a real program). Entries are
 /// plain values (`T: Copy`): the pool copies them in as padding and never drops one.
-pub const POOL_SHIFT: usize = 12;
-pub const POOL_CHUNK: usize = 1usize << 12;
-pub const POOL_SLOTS: usize = 512;
+pub(package) const POOL_SHIFT: usize = 12;
+pub(package) const POOL_CHUNK: usize = 1usize << 12;
+pub(package) const POOL_SLOTS: usize = 512;
 
-pub struct ChunkPool<T: Copy> {
+pub(package) struct ChunkPool<T: Copy> {
     tab: *mut *mut T,
     nchunks: u32,
     n: usize,
 }
 
 extend<T: Copy> ChunkPool<T> {
-    pub const fn new() ChunkPool<T> {
+    pub(package) const fn new() ChunkPool<T> {
         return ChunkPool::<T> { tab: null, nchunks: 0, n: 0 };
     }
 
-    pub fn len(self: &Self) usize {
+    pub(package) fn len(self: &Self) usize {
         return unsafe atomic::load_usize(&self.n, 1);
     }
 
-    pub const fn at(self: &Self, i: usize) &T {
+    pub(package) const fn at(self: &Self, i: usize) &T {
         return unsafe &*(unsafe self.tab[i >> POOL_SHIFT] + (i & POOL_CHUNK - 1));
     }
 
-    pub fn push(self: &mut Self, v: T) {
+    pub(package) fn push(self: &mut Self, v: T) {
         let i = self.n;
         if i >> POOL_SHIFT >= self.nchunks as usize {
             let mut g = Global {};
@@ -2502,17 +2502,17 @@ extend<T: Copy> ChunkPool<T> {
         unsafe atomic::store_usize(&mut self.n, i + 1, 2);
     }
 
-    pub const fn index_mut(self: &mut Self, i: usize) &mut T {
+    pub(package) const fn index_mut(self: &mut Self, i: usize) &mut T {
         return unsafe &mut *(unsafe self.tab[i >> POOL_SHIFT] + (i & POOL_CHUNK - 1));
     }
 
-    pub const fn set(self: &mut Self, i: usize, v: T) {
+    pub(package) const fn set(self: &mut Self, i: usize, v: T) {
         unsafe (unsafe self.tab[i >> POOL_SHIFT])[i & POOL_CHUNK - 1] = v;
     }
 
     /// Pad with copies of `v` until a run of `need` entries fits inside ONE chunk, then return its
     /// start: `list()` hands out raw pointers into a run, so a run must never straddle a chunk boundary.
-    pub fn run_start(self: &mut Self, need: usize, v: T) usize {
+    pub(package) fn run_start(self: &mut Self, need: usize, v: T) usize {
         if need > POOL_CHUNK {
             panic("node list exceeds one arena chunk");
         }
@@ -2525,7 +2525,7 @@ extend<T: Copy> ChunkPool<T> {
     /// Raw pointer to entry `i` (valid through the end of its chunk; entries never move). An
     /// index one past the end of the last chunk answers a stable dummy -- an empty run's start is
     /// never dereferenced.
-    pub const fn ptr_at(self: &Self, i: usize) *const T {
+    pub(package) const fn ptr_at(self: &Self, i: usize) *const T {
         if self.tab == null || i >> POOL_SHIFT >= self.nchunks as usize {
             return self.tab as *const T;
         }
@@ -2533,11 +2533,11 @@ extend<T: Copy> ChunkPool<T> {
     }
 
     /// Reset the length; chunks stay allocated for reuse.
-    pub fn clear(self: &mut Self) {
+    pub(package) fn clear(self: &mut Self) {
         unsafe atomic::store_usize(&mut self.n, 0, 2);
     }
 
-    pub const fn retained(self: &Self) usize {
+    pub(package) const fn retained(self: &Self) usize {
         return self.nchunks as usize * POOL_CHUNK * sizeof(T);
     }
 }
@@ -2567,7 +2567,7 @@ const SV_UNFROZEN: usize = 0xFFFFFFFFFFFFFFFFu64 as usize;
 /// point) so concurrent readers of PRE-EXISTING entries never see a realloc; growth past the pinned
 /// capacity lands in realloc-stable chunks. `thaw()` folds the overflow back into the base once the
 /// frontier joins, so every later stage reads a flat array again.
-pub struct SplitVec<T: Copy> {
+pub(package) struct SplitVec<T: Copy> {
     base: Vector<T>,
     split: usize, // usize MAX when unfrozen
     ovf: ChunkPool<T>,
@@ -2577,11 +2577,11 @@ pub struct SplitVec<T: Copy> {
 }
 
 extend<T: Copy> SplitVec<T> {
-    pub fn new() SplitVec<T> {
+    pub(package) fn new() SplitVec<T> {
         return SplitVec::<T> { base: Vector::<T>::new(), split: SV_UNFROZEN, ovf: ChunkPool::<T>::new(), blen: 0 };
     }
 
-    pub fn len(self: &Self) usize {
+    pub(package) fn len(self: &Self) usize {
         if self.split == SV_UNFROZEN {
             return self.base.len();
         }
@@ -2592,7 +2592,7 @@ extend<T: Copy> SplitVec<T> {
     // `i < blen` implies `i < split`. `at_slow` is cold so that clang does not lay out the frozen
     // branch as the fall-through.
     @always_inline
-    pub const fn at(self: &Self, i: usize) &T {
+    pub(package) const fn at(self: &Self, i: usize) &T {
         if self.split == SV_UNFROZEN {
             if i < self.base.len() {
                 return unsafe &*(self.base.as_ptr() + i);
@@ -2618,14 +2618,14 @@ extend<T: Copy> SplitVec<T> {
         return self.ovf.at(i - self.split);
     }
 
-    pub const fn index_mut(self: &mut Self, i: usize) &mut T {
+    pub(package) const fn index_mut(self: &mut Self, i: usize) &mut T {
         if i < self.split {
             return self.base.index_mut(i);
         }
         return self.ovf.index_mut(i - self.split);
     }
 
-    pub fn set(self: &mut Self, i: usize, v: T) {
+    pub(package) fn set(self: &mut Self, i: usize, v: T) {
         if i < self.split {
             self.base.set(i, v);
         } else {
@@ -2634,7 +2634,7 @@ extend<T: Copy> SplitVec<T> {
     }
 
     @always_inline
-    pub fn push(self: &mut Self, v: T) {
+    pub(package) fn push(self: &mut Self, v: T) {
         if self.split == SV_UNFROZEN {
             self.base.push(v);
         } else if self.base.len() < self.split {
@@ -2645,7 +2645,7 @@ extend<T: Copy> SplitVec<T> {
         }
     }
 
-    pub fn reserve(self: &mut Self, n: usize) {
+    pub(package) fn reserve(self: &mut Self, n: usize) {
         if self.split == SV_UNFROZEN {
             self.base.reserve(n);
         }
@@ -2653,17 +2653,17 @@ extend<T: Copy> SplitVec<T> {
 
     /// The contiguous prefix: entries below `base_len` sit at `base_ptr() + i` (the rest, a frozen
     /// array's spill, through `ptr_at`). A scan reads the prefix without the per-entry split test.
-    pub const fn base_len(self: &Self) usize {
+    pub(package) const fn base_len(self: &Self) usize {
         return self.base.len();
     }
-    pub const fn base_ptr(self: &Self) *const T {
+    pub(package) const fn base_ptr(self: &Self) *const T {
         return self.base.as_ptr();
     }
 
     /// Raw pointer to entry `i`: valid for the base region for the array's life while frozen, and
     /// within one overflow chunk otherwise. UNCHECKED like the flat array it replaces: an empty
     /// list's start sits one past the end and is never dereferenced.
-    pub const fn ptr_at(self: &Self, i: usize) *const T {
+    pub(package) const fn ptr_at(self: &Self, i: usize) *const T {
         if i < self.split {
             return unsafe (self.base.as_ptr() + i);
         }
@@ -2672,7 +2672,7 @@ extend<T: Copy> SplitVec<T> {
 
     /// Pad with copies of `v` so a run of `need` fits contiguously (base region: reserve exactly;
     /// frozen spill: keep the run inside one chunk) and return its start.
-    pub fn run_start(self: &mut Self, need: usize, v: T) usize {
+    pub(package) fn run_start(self: &mut Self, need: usize, v: T) usize {
         if self.split == SV_UNFROZEN || self.base.len() + need <= self.split {
             return self.base.len();
         }
@@ -2685,12 +2685,12 @@ extend<T: Copy> SplitVec<T> {
     }
 
     /// Whether the array is pinned (`freeze`).
-    pub const fn frozen(self: &Self) bool {
+    pub(package) const fn frozen(self: &Self) bool {
         return self.split != SV_UNFROZEN;
     }
 
     /// Pin the base allocation at its CURRENT capacity and route later growth to stable chunks.
-    pub fn freeze(self: &mut Self) {
+    pub(package) fn freeze(self: &mut Self) {
         // Re-pinning a frozen array would move the split under the entries already spilled past it.
         if self.split != SV_UNFROZEN {
             panic("SplitVec::freeze: the array is frozen already");
@@ -2703,7 +2703,7 @@ extend<T: Copy> SplitVec<T> {
     }
 
     /// Fold the overflow back into the flat base (single-threaded; frontier pointers are dead).
-    pub fn thaw(self: &mut Self) {
+    pub(package) fn thaw(self: &mut Self) {
         if self.split == SV_UNFROZEN {
             return;
         }
@@ -2715,11 +2715,11 @@ extend<T: Copy> SplitVec<T> {
         self.split = SV_UNFROZEN;
     }
 
-    pub const fn retained(self: &Self) usize {
+    pub(package) const fn retained(self: &Self) usize {
         return self.base.capacity() * sizeof(T) + self.ovf.retained();
     }
 
-    pub fn clear(self: &mut Self) {
+    pub(package) fn clear(self: &mut Self) {
         self.base.clear();
         self.ovf.clear();
         self.split = SV_UNFROZEN;
@@ -2728,19 +2728,19 @@ extend<T: Copy> SplitVec<T> {
 
 extend<T: Copy + Default> SplitVec<T> {
     /// Unfrozen only: resize the flat base to `n` entries, new ones `T::default()`, in one fill.
-    pub fn resize_default(self: &mut Self, n: usize) {
+    pub(package) fn resize_default(self: &mut Self, n: usize) {
         self.base.resize_default(n);
     }
 
     /// Clear, then hold `n` default entries, unfrozen. One fill of the flat base.
-    pub fn reset_default(self: &mut Self, n: usize) {
+    pub(package) fn reset_default(self: &mut Self, n: usize) {
         self.clear();
         self.base.resize_default(n);
     }
 }
 
 /// `t` after a publication with `map` (final ids and TYPE_NONE pass through).
-pub const fn pub_map1(map: &Vector<TypeId>, t: TypeId) TypeId {
+pub(package) const fn pub_map1(map: &Vector<TypeId>, t: TypeId) TypeId {
     if (t & TYPE_PROV) == 0 {
         return t;
     }
@@ -2759,18 +2759,18 @@ const fn pub_map_ob(map: &Vector<TypeId>, o: &mut ProjOb) {
 /// this bit over its pool index until a publication maps it to a final package id. Final ids stay
 /// below TYPE_MAX; the publication aborts the compile past it. Bit 29: the inference solver packs a
 /// TypeId into a 30-bit term payload under two tag bits (`infer::it_pub`).
-pub const TYPE_PROV: TypeId = 0x20000000;
-pub const TYPE_PROV_MASK: TypeId = 0x1FFFFFFF;
+pub(package) const TYPE_PROV: TypeId = 0x20000000;
+pub(package) const TYPE_PROV_MASK: TypeId = 0x1FFFFFFF;
 
 /// A dense array index for any id: final ids take the even slots, provisional ids the odd ones, so
 /// a memo indexed by type id stays proportional to the ids in use and never grows to `TYPE_PROV`.
-pub const fn ty_dense(t: TypeId) usize {
+pub(package) const fn ty_dense(t: TypeId) usize {
     return (t & TYPE_PROV_MASK) as usize << 1 | (t >> 29 & 1) as usize;
 }
 
 /// A memo of three-state answers (unknown, false, true) packed two bits per slot: the slot index
 /// is a dense type index, so a per-checker memo over the package id range costs a few kilobytes.
-pub const fn memo2_get(v: &Vector<u64>, i: usize) i32 {
+pub(package) const fn memo2_get(v: &Vector<u64>, i: usize) i32 {
     let w = i >> 5;
     if w >= v.len() {
         return -1;
@@ -2778,7 +2778,7 @@ pub const fn memo2_get(v: &Vector<u64>, i: usize) i32 {
     return (v[w] >> (i & 31) as u64 * 2 & 3) as i32 - 1;
 }
 
-pub fn memo2_set(v: &mut Vector<u64>, i: usize, r: bool) {
+pub(package) fn memo2_set(v: &mut Vector<u64>, i: usize, r: bool) {
     let w = i >> 5;
     while v.len() <= w {
         v.push(0);
@@ -2869,7 +2869,7 @@ const fn ix_find<T: Copy + Hash + Eq>(ix: &Vector<u32>, pool: &ChunkPool<T>, v: 
     }
 }
 
-pub const TYPE_MAX: TypeId = 0x1FFFFFF0;
+pub(package) const TYPE_MAX: TypeId = 0x1FFFFFF0;
 
 /// A type pool: the Ty records, the instance and const-expression side tables, and the
 /// open-addressing indexes over them (0xFFFFFFFF = empty slot; the pool entry is the key, so nothing
@@ -2877,33 +2877,33 @@ pub const TYPE_MAX: TypeId = 0x1FFFFFF0;
 /// identity never depends on the hash. One per module holds provisional types; the package's
 /// (`Package.tt`) holds the published ones, `open` while a serial phase may append to it directly.
 @derive(Persist)
-pub struct TypePool {
-    pub tys: ChunkPool<Ty>,
+pub(package) struct TypePool {
+    pub(package) tys: ChunkPool<Ty>,
     tix: Vector<u32>,
     tix_used: u32,
-    pub insts: ChunkPool<TyInstance>,
+    pub(package) insts: ChunkPool<TyInstance>,
     iix: Vector<u32>,
     iix_used: u32,
     /// Canonical forms of const-generic expressions (`{BITS * 2}`), interned by VALUE so two spellings of
     /// the same width are one id -- which is what makes `{(N * 2) * 2}` and `{N * 4}` the same type.
-    pub clins: Vector<ConstLin>,
-    pub open: bool,
+    pub(package) clins: Vector<ConstLin>,
+    pub(package) open: bool,
     /// The prelude `Simd` and `Mask` declarations (`std/simd.spc`): an instance of either interns as
     /// its TYPE_SIMD or TYPE_MASK (`vec_of`). Zero before the prelude loads.
-    pub simd: DefId,
-    pub mask: DefId,
+    pub(package) simd: DefId,
+    pub(package) mask: DefId,
     /// The prelude `simd::Op` and `cpu::Feature` enums: the argument types of `@simd_impl` and
     /// `@target_feature` (`ATTR_EXPR_KINDS`). Node NODE_NONE before the prelude loads.
-    pub simd_op: DefId,
-    pub cpu_feature: DefId,
+    pub(package) simd_op: DefId,
+    pub(package) cpu_feature: DefId,
 }
 
 extend TypePool {
-    pub const fn new() TypePool {
+    pub(package) const fn new() TypePool {
         return TypePool { tys: ChunkPool::<Ty>::new(), insts: ChunkPool::<TyInstance>::new() };
     }
 
-    pub fn free(self: &mut Self) {
+    pub(package) fn free(self: &mut Self) {
         self.tys.free();
         self.tix.free();
         self.insts.free();
@@ -2911,7 +2911,7 @@ extend TypePool {
         self.clins.free();
     }
 
-    pub fn clear(self: &mut Self) {
+    pub(package) fn clear(self: &mut Self) {
         self.tys.clear();
         self.tix.clear();
         self.tix_used = 0;
@@ -2925,7 +2925,7 @@ extend TypePool {
     /// per builtin (`Ast::builtin`), then TYPE_ERROR (kind TYPE_ERROR, qualifier 1). Seeds pass
     /// through ty_canon like every interned entry, or their union tail bytes would be whatever the
     /// C compiler left there and byte-identity dedup would miss them.
-    pub fn seed(self: &mut Self) {
+    pub(package) fn seed(self: &mut Self) {
         let _ = self.insert_ty(Ast::ty_canon(&Ty { kind: TypeKind::TYPE_ERROR, concrete: true }));
         for b in 0..BuiltinType::BT_COUNT as u8 {
             let _ = self.insert_ty(
@@ -2938,31 +2938,31 @@ extend TypePool {
         assert(e == TYPE_ERROR, "TYPE_ERROR follows the builtins");
     }
 
-    pub const fn len(self: &Self) usize {
+    pub(package) const fn len(self: &Self) usize {
         return self.tys.len();
     }
 
-    pub const fn at(self: &Self, i: usize) &Ty {
+    pub(package) const fn at(self: &Self, i: usize) &Ty {
         return self.tys.at(i);
     }
 
-    pub const fn ninst(self: &Self) usize {
+    pub(package) const fn ninst(self: &Self) usize {
         return self.insts.len();
     }
 
-    pub const fn instance(self: &Self, i: usize) &TyInstance {
+    pub(package) const fn instance(self: &Self, i: usize) &TyInstance {
         return self.insts.at(i);
     }
 
-    pub const fn nclin(self: &Self) usize {
+    pub(package) const fn nclin(self: &Self) usize {
         return self.clins.len();
     }
 
-    pub const fn const_lin_at(self: &Self, i: usize) &ConstLin {
+    pub(package) const fn const_lin_at(self: &Self, i: usize) &ConstLin {
         return self.clins.at(i);
     }
 
-    pub const fn retained(self: &Self) usize {
+    pub(package) const fn retained(self: &Self) usize {
         return self.tys.retained() + self.tix.capacity() * 4 + self.insts.retained() + self.iix.capacity() * 4 + self.clins.capacity() * sizeof(ConstLin);
     }
 
@@ -2975,7 +2975,7 @@ extend TypePool {
 
     /// The TYPE_SIMD or TYPE_MASK record an instance of `(module, decl)` over `args` stands for, or a
     /// TYPE_ERROR record when the declaration is neither prelude anchor.
-    pub const fn vec_of(self: &Self, module: ModuleId, decl: NodeId, args: *const TypeId) Ty {
+    pub(package) const fn vec_of(self: &Self, module: ModuleId, decl: NodeId, args: *const TypeId) Ty {
         if decl == NODE_NONE {
             return Ty { kind: TypeKind::TYPE_ERROR };
         }
@@ -2989,12 +2989,12 @@ extend TypePool {
     }
 
     /// The id of canonical `nt` (`concrete` set), or -1. Read-only: safe on a frozen table.
-    pub const fn find_ty(self: &Self, nt: &Ty) i64 {
+    pub(package) const fn find_ty(self: &Self, nt: &Ty) i64 {
         return ix_find(&self.tix, &self.tys, nt);
     }
 
     /// Find or append canonical `nt`.
-    pub fn insert_ty(self: &mut Self, nt: Ty) TypeId {
+    pub(package) fn insert_ty(self: &mut Self, nt: Ty) TypeId {
         self.tix_ready();
         let mut hit = false;
         let i = ix_slot(&self.tix, &self.tys, &nt, &mut hit, TS_INTERN_HIT);
@@ -3009,12 +3009,12 @@ extend TypePool {
     }
 
     /// The index of instance record `it`, or -1. Read-only.
-    pub const fn find_inst(self: &Self, it: &TyInstance) i64 {
+    pub(package) const fn find_inst(self: &Self, it: &TyInstance) i64 {
         return ix_find(&self.iix, &self.insts, it);
     }
 
     /// Find or append instance record `it`; its index.
-    pub fn insert_inst(self: &mut Self, it: &TyInstance) u32 {
+    pub(package) fn insert_inst(self: &mut Self, it: &TyInstance) u32 {
         let _ = ix_ready(&mut self.iix, &mut self.iix_used, &self.insts);
         let mut hit = false;
         let i = ix_slot(&self.iix, &self.insts, it, &mut hit, TS_INST_HIT);
@@ -3029,7 +3029,7 @@ extend TypePool {
     }
 
     /// The index of const-expression form `l`, or -1 (linear: these are rare).
-    pub const fn find_clin(self: &Self, l: &ConstLin) i64 {
+    pub(package) const fn find_clin(self: &Self, l: &ConstLin) i64 {
         for i in 0..self.clins.len() {
             if const_lin_eq(self.clins.at(i), l) {
                 return i as i64;
@@ -3038,7 +3038,7 @@ extend TypePool {
         return -1;
     }
 
-    pub fn insert_clin(self: &mut Self, l: &ConstLin) u32 {
+    pub(package) fn insert_clin(self: &mut Self, l: &ConstLin) u32 {
         let hit = self.find_clin(l);
         if hit >= 0 {
             return hit as u32;
@@ -3076,13 +3076,13 @@ extend TypePool {
 
     /// Intern `t` directly into this table (every child of `t` must already be one of its ids):
     /// the serial stages append final ids this way. Returns the final id.
-    pub fn intern_g(self: &mut Self, t: Ty) TypeId {
+    pub(package) fn intern_g(self: &mut Self, t: Ty) TypeId {
         let mut nt = Ast::ty_canon(&t);
         nt.concrete = self.decide_g(&t);
         return self.insert_ty(nt);
     }
 
-    pub fn intern_instance_g(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
+    pub(package) fn intern_instance_g(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
         let mut m = n;
         if m > 8 {
             m = 8;
@@ -3099,7 +3099,7 @@ extend TypePool {
         return self.intern_g(Ty { kind: TypeKind::TYPE_INSTANCE, module: module, as_data: TyAs { inst: idx } });
     }
 
-    pub fn intern_dyn_g(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8, qual: u8) TypeId {
+    pub(package) fn intern_dyn_g(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8, qual: u8) TypeId {
         if decl == NODE_NONE {
             // A `dyn fn` names its signature only: no instance type stands beside it.
             let mut it = TyInstance { module: module, decl: decl, n: n };
@@ -3119,7 +3119,7 @@ extend TypePool {
     }
 
     /// `Ast::intern_assoc` for this table.
-    pub fn intern_assoc_g(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
+    pub(package) fn intern_assoc_g(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
         let mut it = TyInstance { module: module, decl: decl, n: n };
         for j in 0..n {
             unsafe it.args[j] = unsafe args[j];
@@ -3130,7 +3130,7 @@ extend TypePool {
 
     /// The function-pointer type `qual` of signature record `it` (children already this table's),
     /// canonical as `Ast::intern_sig_rec` makes it.
-    pub fn intern_sig_g(self: &mut Self, it: &TyInstance, qual: u8) TypeId {
+    pub(package) fn intern_sig_g(self: &mut Self, it: &TyInstance, qual: u8) TypeId {
         let r0 = *self.at(it.args[0] as usize);
         if it.module == 1 && r0.kind == TypeKind::TYPE_BUILTIN && r0.as_data.builtin == BuiltinType::BT_VOID {
             let mut ps = Vector::<TypeId>::with_capacity((rec_len(it) - 1) as usize);
@@ -3175,19 +3175,19 @@ extend TypePool {
     }
 
     /// `Ast::intern_array` for this table.
-    pub fn intern_array_g(self: &mut Self, k: TypeKind, elem: TypeId, lt: TypeId) TypeId {
+    pub(package) fn intern_array_g(self: &mut Self, k: TypeKind, elem: TypeId, lt: TypeId) TypeId {
         let ly = *self.at(lt as usize);
         return self.intern_g(array_ty(k, elem, lt, &ly));
     }
 
     /// `Ast::const_value` for this table.
-    pub fn const_value_g(self: &mut Self, bits: i64, bt: BuiltinType) TypeId {
+    pub(package) fn const_value_g(self: &mut Self, bits: i64, bt: BuiltinType) TypeId {
         return self.intern_g(
             Ty { kind: TypeKind::TYPE_CONST, qualifier: bt as u8, module: 0, as_data: TyAs { value: bits } },
         );
     }
 
-    pub fn intern_clin_g(self: &mut Self, l: &ConstLin) TypeId {
+    pub(package) fn intern_clin_g(self: &mut Self, l: &ConstLin) TypeId {
         let ci = self.insert_clin(l);
         return self.intern_g(Ty { kind: TypeKind::TYPE_CONST_EXPR, module: 0, as_data: TyAs { inst: ci } });
     }
@@ -3199,17 +3199,17 @@ extend TypePool {
 /// NODE_BODY. The driver frees the arena once the last consumer of body syntax has run
 /// (`Ast::release_bodies`); an access after that is a bounds abort.
 @derive(Persist)
-pub struct BodyArena {
-    pub nodes: SplitVec<Node>,
-    pub children: SplitVec<u32>,
-    pub types: SplitVec<u32>,
-    pub resolutions: SplitVec<DefId>,
-    pub mono_at: Vector<u32>,
-    pub dyn_at: Vector<u32>,
-    pub deref_at: Vector<u32>,
+pub(package) struct BodyArena {
+    pub(package) nodes: SplitVec<Node>,
+    pub(package) children: SplitVec<u32>,
+    pub(package) types: SplitVec<u32>,
+    pub(package) resolutions: SplitVec<DefId>,
+    pub(package) mono_at: Vector<u32>,
+    pub(package) dyn_at: Vector<u32>,
+    pub(package) deref_at: Vector<u32>,
     /// True once `release_bodies` freed the arena: the module's function nodes still name body
     /// ids, which `valid` rejects; the LSP parses the bodies back from the module's source.
-    pub released: bool,
+    pub(package) released: bool,
 }
 
 extend BodyArena as Free {
@@ -3225,7 +3225,7 @@ extend BodyArena as Free {
 }
 
 extend BodyArena {
-    pub fn new() BodyArena {
+    pub(package) fn new() BodyArena {
         return BodyArena {
             nodes: SplitVec::<Node>::new(),
             children: SplitVec::<u32>::new(),
@@ -3234,7 +3234,7 @@ extend BodyArena {
         };
     }
 
-    pub const fn retained(self: &Self) usize {
+    pub(package) const fn retained(self: &Self) usize {
         return self.nodes.retained() + self.children.retained() + self.types.retained() + self.resolutions.retained() + self.mono_at.capacity() * 4 + self.dyn_at.capacity() * 4 + self.deref_at.capacity() * 4;
     }
 }
@@ -3243,172 +3243,172 @@ extend BodyArena {
 const WL_SPIN: u32 = 4096;
 
 @derive(Persist)
-pub struct Ast {
-    pub nodes: SplitVec<Node>,
+pub(package) struct Ast {
+    pub(package) nodes: SplitVec<Node>,
     /// An identifier of the module names a vector type or the vector module (the lexer's
     /// `vector_name`): the build loads the vector backend file only then.
-    pub names_vectors: bool,
-    pub children: SplitVec<u32>,
+    pub(package) names_vectors: bool,
+    pub(package) children: SplitVec<u32>,
     /// The body arena (ids tagged NODE_BODY) and the sink `add`/`commit` write to: the parser
     /// turns it on for a releasable body, and a later stage that appends nodes sets it to the
     /// arena of the body it works in (`sink_body`).
-    pub b: BodyArena,
-    pub sink_body: bool,
-    pub scratch: Vector<u32>,
+    pub(package) b: BodyArena,
+    pub(package) sink_body: bool,
+    pub(package) scratch: Vector<u32>,
     // Intern serialization for parallel stages: off = single-threaded (no locking). Task-aware
     // (waiters PARK -- a raw mutex here deadlocks under safepoint preemption) and reentrant by
     // task token, because intern_dyn/intern_const_lin nest into intern_type/intern_instance.
-    pub ilock_on: bool,
-    pub ilock_sem: psy::Semaphore,
-    pub ilock_owner: usize,
-    pub ilock_depth: u32,
+    pub(package) ilock_on: bool,
+    pub(package) ilock_sem: psy::Semaphore,
+    pub(package) ilock_owner: usize,
+    pub(package) ilock_depth: u32,
     // The module's write lock in the parallel type check (not reentrant): the module's checker
     // holds it while it checks an item, except inside the constant engine, and the engine takes it
     // before it reads the module (`Package::module_ast_const`), so no read meets a table that grows.
     // `wl_want` counts the engine's waits: the checker hands the lock over at its next statement.
-    pub wl_sem: psy::Semaphore,
-    pub wl_owner: usize,
-    pub wl_want: i32,
+    pub(package) wl_sem: psy::Semaphore,
+    pub(package) wl_owner: usize,
+    pub(package) wl_want: i32,
     // NOTE: a node/module parallel-array split (6 B/entry vs padded 8) was tried and reverted:
     // resolution_def is the compiler's hottest lookup and the second cache line cost ~8 Mcyc of
     // typecheck for a 0.78 MiB saving. Access goes through the accessors below regardless.
-    pub resolutions: SplitVec<DefId>,
+    pub(package) resolutions: SplitVec<DefId>,
     /// The module's type pool: every type under module-local identity (`gt` null: the LSP and
     /// standalone checks), or only the provisional types not yet published to the package table.
-    pub pool: TypePool,
+    pub(package) pool: TypePool,
     /// The package type table (`Package.tt`), null under module-local identity. See `intern_type_i`.
-    pub gt: PoolPtr,
+    pub(package) gt: PoolPtr,
     /// Package identity: every distinct type this module touched, in first-touch order, final ids
     /// once published (provisional TYPE_PROV ids until then); the instance records among them; and
     /// the membership bits of the final ids. What the pool enumeration meant before.
-    pub used: Vector<TypeId>,
-    pub used_inst: Vector<u32>,
-    pub used_bits: Vector<u64>,
+    pub(package) used: Vector<TypeId>,
+    pub(package) used_inst: Vector<u32>,
+    pub(package) used_bits: Vector<u64>,
     /// The provisional types a rolled-back stage created (`used_rollback`), a bit per pool index: the
     /// next intern of one records it as a first touch.
-    pub used_spec: Vector<u64>,
-    pub types: SplitVec<u32>,
-    pub mono: Vector<MonoUse>,
+    pub(package) used_spec: Vector<u64>,
+    pub(package) types: SplitVec<u32>,
+    pub(package) mono: Vector<MonoUse>,
     // Deferred field-projection bound proofs recorded while this module's bodies were checked
     // (owner still symbolic); discharged by callers -- same-module inline, cross-module in the
     // driver's post-typecheck obligation pass.
-    pub proj_obs: Vector<ProjOb>,
+    pub(package) proj_obs: Vector<ProjOb>,
     // Per call node of a same-module callee: the `proj_obs` length when the inline discharge ran
     // the callee's obligations. A callee checked after its caller (one dependency cycle) records
     // more later; the driver's pass runs those.
-    pub ob_seen: Map<u32, u32>,
-    pub frame_uses: Vector<FrameUse>,
+    pub(package) ob_seen: Map<u32, u32>,
+    pub(package) frame_uses: Vector<FrameUse>,
     // Per call node: its `frame_uses` index plus one (a re-checked call records again in place).
-    pub frame_at: Map<u32, u32>,
+    pub(package) frame_at: Map<u32, u32>,
     // The concrete default-method instances this module's calls demand (`ProjOb.demand`), run once
     // every obligation list is complete.
-    pub dmd_uses: Vector<ProjOb>,
-    pub ob_guards: Vector<GuardEnt>,
-    pub mono_at: Vector<u32>,
-    pub method_refs: Vector<MethodRef>,
-    pub wide_lits: Vector<WideLit>,
-    pub coerces: Vector<CoerceUse>,
-    pub coerce_at: Map<u32, u32>,
-    pub bound_calls: Vector<BoundCall>,
-    pub bound_call_at: Map<u32, u32>,
-    pub dyn_uses: Vector<DynUse>,
-    pub dyn_at: Vector<u32>,
-    pub deref_uses: Vector<DerefUse>,
-    pub deref_at: Vector<u32>,
-    pub attrs: Vector<Attr>,
+    pub(package) dmd_uses: Vector<ProjOb>,
+    pub(package) ob_guards: Vector<GuardEnt>,
+    pub(package) mono_at: Vector<u32>,
+    pub(package) method_refs: Vector<MethodRef>,
+    pub(package) wide_lits: Vector<WideLit>,
+    pub(package) coerces: Vector<CoerceUse>,
+    pub(package) coerce_at: Map<u32, u32>,
+    pub(package) bound_calls: Vector<BoundCall>,
+    pub(package) bound_call_at: Map<u32, u32>,
+    pub(package) dyn_uses: Vector<DynUse>,
+    pub(package) dyn_at: Vector<u32>,
+    pub(package) deref_uses: Vector<DerefUse>,
+    pub(package) deref_at: Vector<u32>,
+    pub(package) attrs: Vector<Attr>,
     attr_ix: Map<u64, u32>, // owner << 8 | kind -> its first `attrs` index
     attr_vals: Vector<AttrVal>, // one per constant-expression attribute, by ascending `attr`
-    pub metas: Vector<MetaAttr>,
-    pub lifetime_decls: Vector<LifetimeDecl>,
-    pub lifetime_at: Map<u32, u32>, // owner -> its first `lifetime_decls` index
-    pub member_of: Map<NodeId, NodeId>, // extend or interface member -> its top-level container
-    pub where_bounds: Vector<WhereBound>,
+    pub(package) metas: Vector<MetaAttr>,
+    pub(package) lifetime_decls: Vector<LifetimeDecl>,
+    pub(package) lifetime_at: Map<u32, u32>, // owner -> its first `lifetime_decls` index
+    pub(package) member_of: Map<NodeId, NodeId>, // extend or interface member -> its top-level container
+    pub(package) where_bounds: Vector<WhereBound>,
     /// The functions with type parameters (their own or their extend's) whose bodies hold a
     /// static_assert (the resolver records them): each is evaluated per instance, for a concrete
     /// call (`Interp::defer_inst_assert`) and for every instance the instance graph finds.
-    pub assert_fns: Vector<NodeId>,
+    pub(package) assert_fns: Vector<NodeId>,
     /// The calls of a function that needs CPU features (`FN_FEATURES`), checked against the build's
     /// features once every module is typed.
-    pub feature_calls: Vector<FeatureCall>,
+    pub(package) feature_calls: Vector<FeatureCall>,
     /// The `(feature, f)` tuple rows of functions that need CPU features (`FeatureRow`).
-    pub feature_rows: Vector<FeatureRow>,
+    pub(package) feature_rows: Vector<FeatureRow>,
     /// The `unsafe` markers whose only reason is such a call.
-    pub unsafe_lints: Vector<UnsafeLint>,
+    pub(package) unsafe_lints: Vector<UnsafeLint>,
     /// The module declares a register type (`@value`).
-    pub has_c_value: bool,
+    pub(package) has_c_value: bool,
     /// A field of the module pins its C member name (`@import` on a header type's field).
-    pub has_member_pins: bool,
+    pub(package) has_member_pins: bool,
     // Per call node: the (fmod<<40 | fdecl<<8 | skip) the borrow-check pass replays from typechecking.
-    pub call_info: Map<u32, u64>,
+    pub(package) call_info: Map<u32, u64>,
     /// What a call's arguments make the callee's lifetimes outlive (`TypeChecker::tc_lt_call_export`):
     /// `(span key, sup token, sub token, next)` quadruples, `next` the index + 1 of the call's next
     /// one (0: none); `call_lt_at` maps a call's span key (`start << 32 | end`) to its first + 1.
-    pub call_lts: Vector<u64>,
-    pub call_lt_at: Map<u64, u32>,
+    pub(package) call_lts: Vector<u64>,
+    pub(package) call_lt_at: Map<u64, u32>,
     /// Per operator node: the method the type checker chose, as (module << 32 | node). Two conformances
     /// may provide one operator for different right operands, so the NAME no longer identifies it and
     /// codegen must not resolve it a second time.
-    pub op_method: Map<u32, u64>,
+    pub(package) op_method: Map<u32, u64>,
     /// Per integer constant pattern (a literal-pattern value or a range bound): its value in the
     /// matched type, as two's complement bits. The pattern matrix reads values here, so a named or
     /// associated constant, a limit and every literal spelling take part in coverage.
-    pub pat_vals: Map<u32, u64>,
+    pub(package) pat_vals: Map<u32, u64>,
     /// Resolutions a later stage seeded on identifiers it synthesized (a desugar names its callee
     /// and locals by resolution, never by text); `init_resolutions` re-applies them so a re-resolve
     /// of the retained arena keeps them.
-    pub seeds: Vector<Seed>,
+    pub(package) seeds: Vector<Seed>,
     /// The tables freed at their last reader in a batch build: the body-arena entries of
     /// `call_info` and `mono` with the bodies (`release_body_facts`), `method_refs` and `seeds`
     /// after the checks (`release_checked_tables`).
-    pub call_info_rel: Released,
-    pub mono_rel: Released,
-    pub method_refs_rel: Released,
-    pub seeds_rel: Released,
+    pub(package) call_info_rel: Released,
+    pub(package) mono_rel: Released,
+    pub(package) method_refs_rel: Released,
+    pub(package) seeds_rel: Released,
     /// The distinct type arguments of the body-arena `mono` entries `release_body_facts` freed:
     /// what the emission liveness reads of them.
-    pub mono_live: Vector<TypeId>,
+    pub(package) mono_live: Vector<TypeId>,
     /// What the emitter reads of a closure after its body syntax is released: recorded by the
     /// checker (`record_closure`), the mutable-capture mask finalized by the borrow checker.
-    pub closure_facts: Vector<ClosureFact>,
-    pub cap_facts: Vector<CapFact>,
+    pub(package) closure_facts: Vector<ClosureFact>,
+    pub(package) cap_facts: Vector<CapFact>,
     /// `closure << 32 | lifetime param` for each enclosing function's lifetime a closure's body names
     /// (recorded by the resolver): the closure value holds that region.
-    pub closure_lts: Vector<u64>,
-    pub closure_at: Map<u32, u32>,
+    pub(package) closure_lts: Vector<u64>,
+    pub(package) closure_at: Map<u32, u32>,
     /// `free` methods' touched declarations, `fn << 32 | decl` for every module declaration a
     /// node inside the method's body resolves to (`record_free_touch`): the free-glue emission
     /// completes a `free` that leaves an owning field untouched, after the body syntax is gone.
-    pub free_touched: Vector<u64>,
+    pub(package) free_touched: Vector<u64>,
     /// Per declaration (`dense` index): the last node that resolves to it, built once when the
     /// module's type check closes (`TypeChecker::tc_build_last_use`) for every later checker of
     /// the module (the borrow jobs share it; a checker without it builds its own).
-    pub last_use: Vector<NodeId>,
-    pub root: NodeId,
-    pub module: ModuleId,
+    pub(package) last_use: Vector<NodeId>,
+    pub(package) root: NodeId,
+    pub(package) module: ModuleId,
     /// The sugar-keyword marker kinds the parser built (`SUGAR_*` bits). The loader pulls in each
     /// kind's runtime module from it; zero lets the HIR lowering skip its whole-arena marker scan.
-    pub sugar_marks: u32,
+    pub(package) sugar_marks: u32,
     /// The module arena's length when the HIR lowering started: every node at or past it was
     /// appended by a desugar or a checker rewrite inside the body it extends, so it belongs to
     /// the item under check (the parse-time item ranges do not cover it).
-    pub hir_base: u32,
+    pub(package) hir_base: u32,
     /// In parse order: every `if` whose condition the build constants alone decide, and every
     /// `switch` over PLATFORM, ARCH or ENDIAN whose arms they decide. The platform filter replaces
     /// each by its taken branch (`Package::prune_build_sites`).
-    pub bc_sites: Vector<NodeId>,
-    pub bc_errs: Vector<BcErr>,
+    pub(package) bc_sites: Vector<NodeId>,
+    pub(package) bc_errs: Vector<BcErr>,
     /// Every site the platform filter replaced, in prune order.
-    pub bc_cuts: Vector<BcCut>,
+    pub(package) bc_cuts: Vector<BcCut>,
     /// The source the build settings remove, sorted, none inside another: each gated-out item or member and
     /// each branch of a decided site that is not taken. The language server shows it as inactive.
-    pub bc_dead: Vector<tok::Span>,
+    pub(package) bc_dead: Vector<tok::Span>,
     /// The sorted distinct `str::hash` of every identifier in the removed source text: the removed
     /// code is never resolved, so the lints that count uses treat these names as used.
-    pub bc_names: Vector<u64>,
+    pub(package) bc_names: Vector<u64>,
     /// The steps of this module's written const-generic expressions over generic parameters
     /// (`ConstStep`), each item's published by its check before its Checked state, and their
     /// count: the constant evaluator reads them from other workers (`steps_of`).
-    pub csteps: Vector<ConstStep>,
+    pub(package) csteps: Vector<ConstStep>,
     csteps_n: usize,
 }
 
@@ -3479,12 +3479,12 @@ extend Ast as Free {
 
 extend Ast {
     /// Whether identifier text `name` occurs in code the platform filter removed.
-    pub const fn bc_removed_name(self: &Self, name: str) bool {
+    pub(package) const fn bc_removed_name(self: &Self, name: str) bool {
         return self.bc_names.len() != 0 && self.bc_names.binary_search(&fnv(name)).is_ok();
     }
 
     /// The span branch `b` was written with: a decided site's cut keeps it after the site took its branch's.
-    pub fn written_span(self: &Self, b: NodeId) tok::Span {
+    pub(package) fn written_span(self: &Self, b: NodeId) tok::Span {
         for i in 0..self.bc_cuts.len() {
             if self.bc_cuts[i].node == b {
                 return self.bc_cuts[i].span;
@@ -3494,7 +3494,7 @@ extend Ast {
     }
 
     /// Sort `bc_dead` and drop each span inside an earlier one.
-    pub fn settle_dead(self: &mut Self) {
+    pub(package) fn settle_dead(self: &mut Self) {
         self.bc_dead.sort_by(
             |x: &tok::Span, y: &tok::Span| if x.start != y.start {
                 x.start.cmp(&y.start);
@@ -3514,7 +3514,7 @@ extend Ast {
     }
 
     /// Whether node `id` (source span `sp`) is or holds a site the platform filter replaced.
-    pub const fn bc_cut_at(self: &Self, id: NodeId, sp: tok::Span) bool {
+    pub(package) const fn bc_cut_at(self: &Self, id: NodeId, sp: tok::Span) bool {
         for i in 0..self.bc_cuts.len() {
             let c = self.bc_cuts[i];
             if c.node == id || c.span.start >= sp.start && c.span.end <= sp.end {
@@ -3524,7 +3524,7 @@ extend Ast {
         return false;
     }
 
-    pub fn new(token_count: usize) Ast {
+    pub(package) fn new(token_count: usize) Ast {
         let mut a = Ast {
             nodes: SplitVec::<Node>::new(),
             children: SplitVec::<u32>::new(),
@@ -3546,7 +3546,7 @@ extend Ast {
         return a;
     }
 
-    pub fn add(self: &mut Self, node: Node) NodeId {
+    pub(package) fn add(self: &mut Self, node: Node) NodeId {
         if self.sink_body {
             let id = self.b.nodes.len() as NodeId | NODE_BODY;
             self.b.nodes.push(node);
@@ -3559,22 +3559,22 @@ extend Ast {
 
     /// True when `id` names the body arena.
     @always_inline
-    pub const fn in_body(id: NodeId) bool {
+    pub(package) const fn in_body(id: NodeId) bool {
         return (id & NODE_BODY) != 0;
     }
 
     /// Node count over both arenas; `nth_id` enumerates them (module arena first).
     @always_inline
-    pub const fn nnodes(self: &Self) usize {
+    pub(package) const fn nnodes(self: &Self) usize {
         return self.nodes.len() + self.b.nodes.len();
     }
     @always_inline
-    pub const fn nth_id(self: &Self, k: usize) NodeId {
+    pub(package) const fn nth_id(self: &Self, k: usize) NodeId {
         return Ast::nth_id_n(self.nodes.len(), k);
     }
     /// `nth_id` over a hoisted module-arena count `nb` (a hot scan keeps it in a register).
     @always_inline
-    pub const fn nth_id_n(nb: usize, k: usize) NodeId {
+    pub(package) const fn nth_id_n(nb: usize, k: usize) NodeId {
         if k < nb {
             return k as NodeId;
         }
@@ -3582,7 +3582,7 @@ extend Ast {
     }
     /// The dense index of `id` in the `nth_id` order, for a scan's per-node scratch table.
     @always_inline
-    pub const fn dense(self: &Self, id: NodeId) usize {
+    pub(package) const fn dense(self: &Self, id: NodeId) usize {
         if (id & NODE_BODY) != 0 {
             return self.nodes.len() + (id & NODE_BODY_MASK) as usize;
         }
@@ -3593,7 +3593,7 @@ extend Ast {
     /// wherever that parameter is visible; WHERE_IN / WHERE_OUT for an enclosing extend's or
     /// interface's parameter, which holds only inside the function (closures included), so the answer
     /// depends on `at`.
-    pub fn where_scope(self: &Self, w: usize, gp: NodeId, at: NodeId) u8 {
+    pub(package) fn where_scope(self: &Self, w: usize, gp: NodeId, at: NodeId) u8 {
         let wb = *self.where_bounds.at(w);
         if self.resolution(self.at_const(wb.pred).as_data.where_predicate.ty) != gp {
             return WHERE_NONE;
@@ -3617,7 +3617,7 @@ extend Ast {
 
     /// True when `id` names a node of this module (either arena).
     @always_inline
-    pub const fn valid(self: &Self, id: NodeId) bool {
+    pub(package) const fn valid(self: &Self, id: NodeId) bool {
         if (id & NODE_BODY) != 0 {
             return (id & NODE_BODY_MASK) as usize < self.b.nodes.len();
         }
@@ -3625,25 +3625,25 @@ extend Ast {
     }
 
     /// Pin both arenas' allocations before a parallel stage appends (see SplitVec::freeze).
-    pub fn freeze_nodes(self: &mut Self) {
+    pub(package) fn freeze_nodes(self: &mut Self) {
         self.nodes.freeze();
         self.children.freeze();
         self.b.nodes.freeze();
         self.b.children.freeze();
     }
-    pub fn thaw_nodes(self: &mut Self) {
+    pub(package) fn thaw_nodes(self: &mut Self) {
         self.nodes.thaw();
         self.children.thaw();
         self.b.nodes.thaw();
         self.b.children.thaw();
     }
-    pub fn freeze_resolutions(self: &mut Self) {
+    pub(package) fn freeze_resolutions(self: &mut Self) {
         self.resolutions.freeze();
         self.b.resolutions.freeze();
         self.types.freeze();
         self.b.types.freeze();
     }
-    pub fn thaw_resolutions(self: &mut Self) {
+    pub(package) fn thaw_resolutions(self: &mut Self) {
         self.resolutions.thaw();
         self.b.resolutions.thaw();
         self.types.thaw();
@@ -3653,7 +3653,7 @@ extend Ast {
     /// Free the body arena: the checked release point of body syntax. Every later read of a
     /// NODE_BODY id aborts on bounds. The seeds aimed at body nodes go with it: a parse-back
     /// (`lsp::analysis`) lowers and checks those bodies again, which seeds them again.
-    pub fn release_bodies(self: &mut Self) {
+    pub(package) fn release_bodies(self: &mut Self) {
         self.b.free();
         self.b = BodyArena::new();
         self.b.released = true;
@@ -3671,7 +3671,7 @@ extend Ast {
     /// Free the `call_info` and `mono` entries of body-arena nodes once the body arena is released
     /// (batch builds): no later pass reads a body node. The freed entries' distinct type arguments
     /// stay in `mono_live`, which the emission liveness reads.
-    pub fn release_body_facts(self: &mut Self) {
+    pub(package) fn release_body_facts(self: &mut Self) {
         assert(
             self.b.released && !self.call_info_rel.on && !self.mono_rel.on,
             "body facts release once, after the bodies",
@@ -3715,7 +3715,7 @@ extend Ast {
 
     /// Free `method_refs` (read by the unused-item lint) and `seeds` (read by a re-resolve, which
     /// a batch build never runs after its type check) once the batch driver's checks are done.
-    pub fn release_checked_tables(self: &mut Self) {
+    pub(package) fn release_checked_tables(self: &mut Self) {
         assert(!self.method_refs_rel.on && !self.seeds_rel.on, "the checked tables release once");
         self.method_refs_rel = Released { on: true, pre: self.method_refs.len() as u32, post: 0 };
         self.method_refs = Vector::<MethodRef>::new();
@@ -3724,7 +3724,7 @@ extend Ast {
     }
 
     /// The call target the type checker recorded at call node `n` ((fmod << 40 | fdecl << 8 | skip)).
-    pub fn call_info_of(self: &Self, n: NodeId) Option<u64> {
+    pub(package) fn call_info_of(self: &Self, n: NodeId) Option<u64> {
         assert(!self.call_info_rel.on || !Ast::in_body(n), "call_info of a released body node");
         return switch self.call_info.get(&n) {
             Some(v) => Option::<u64>::Some(*v),
@@ -3732,33 +3732,33 @@ extend Ast {
         };
     }
 
-    pub fn set_call_info(self: &mut Self, n: NodeId, v: u64) {
+    pub(package) fn set_call_info(self: &mut Self, n: NodeId, v: u64) {
         assert(!self.call_info_rel.on, "call_info is released");
         self.call_info.insert(n, v);
     }
 
     /// The method references the type checker recorded (the unused-item lint's input).
-    pub fn method_refs_live(self: &Self) &Vector<MethodRef> {
+    pub(package) fn method_refs_live(self: &Self) &Vector<MethodRef> {
         assert(!self.method_refs_rel.on, "method_refs is released");
         return &self.method_refs;
     }
 
-    pub fn push_method_ref(self: &mut Self, r: MethodRef) {
+    pub(package) fn push_method_ref(self: &mut Self, r: MethodRef) {
         assert(!self.method_refs_rel.on, "method_refs is released");
         self.method_refs.push(r);
     }
 
-    pub const fn mark(self: &Self) u32 {
+    pub(package) const fn mark(self: &Self) u32 {
         return self.scratch.len() as u32;
     }
-    pub fn push(self: &mut Self, id: NodeId) {
+    pub(package) fn push(self: &mut Self, id: NodeId) {
         self.scratch.push(id);
     }
 
     /// Moves the scratch entries pushed since `mark` into `children` and returns their NodeList.
     /// Nested lists work because an inner list commits (draining its scratch tail) first.
     @always_inline
-    pub fn commit(self: &mut Self, mark: u32) NodeList {
+    pub(package) fn commit(self: &mut Self, mark: u32) NodeList {
         let need = self.scratch.len() - mark as usize;
         let list = if self.sink_body {
             let start = self.b.children.run_start(need, 0);
@@ -3777,7 +3777,7 @@ extend Ast {
         return list;
     }
 
-    pub fn init_resolutions(self: &mut Self) {
+    pub(package) fn init_resolutions(self: &mut Self) {
         self.resolutions.reset_default(self.nodes.len());
         self.b.resolutions.reset_default(self.b.nodes.len());
         assert(!self.seeds_rel.on, "seeds is released");
@@ -3790,7 +3790,7 @@ extend Ast {
 
     /// Extend the resolution table to cover nodes added since `init_resolutions`. The HIR lowering builds
     /// nodes after resolve and seeds their resolutions by hand, so it grows the table as it goes.
-    pub fn grow_resolutions(self: &mut Self) {
+    pub(package) fn grow_resolutions(self: &mut Self) {
         while self.resolutions.len() < self.nodes.len() {
             self.resolutions.push(DefId { module: 0, node: NODE_NONE });
         }
@@ -3801,7 +3801,7 @@ extend Ast {
 
     /// Like grow_resolutions, but for nodes built DURING typecheck (the `format` rewrite): the type
     /// side table was sized by init_types, so it must grow in lockstep too.
-    pub fn grow_sidetables(self: &mut Self) {
+    pub(package) fn grow_sidetables(self: &mut Self) {
         self.grow_resolutions();
         while self.types.len() < self.nodes.len() {
             self.types.push(TYPE_NONE);
@@ -3811,7 +3811,7 @@ extend Ast {
         }
     }
 
-    pub fn init_types(self: &mut Self) {
+    pub(package) fn init_types(self: &mut Self) {
         // A parallel stage pinned the arrays: they stay pinned, so the stage's later growth never
         // moves them under a reader on another task.
         let pinned = self.types.frozen();
@@ -3841,7 +3841,7 @@ extend Ast {
 
     // Rewrite a Ty through a zeroed union with only the kind's live arm copied, so equal types are
     // equal BYTES no matter how they were built (the memcmp equality and word-wise hash need it).
-    pub const fn ty_canon(t: &Ty) Ty {
+    pub(package) const fn ty_canon(t: &Ty) Ty {
         let mut c = Ty {
             kind: t.kind,
             qualifier: t.qualifier,
@@ -3864,7 +3864,7 @@ extend Ast {
     }
 
     // The task token for the reentrant intern lock: the running coroutine, or 1 on a plain thread.
-    pub fn itok() usize {
+    pub(package) fn itok() usize {
         let c = (unsafe sc_runtime::sc_rt_tls_get()) as usize;
         if c == 0 {
             return 1;
@@ -3899,18 +3899,18 @@ extend Ast {
     }
 
     /// Take the module's write lock (`wl_sem`) for the running task.
-    pub fn wl_enter(self: &mut Self) {
+    pub(package) fn wl_enter(self: &mut Self) {
         self.wl_sem.acquire_masked();
         unsafe atomic::store_usize(&mut self.wl_owner, Ast::itok(), 0);
     }
 
-    pub fn wl_leave(self: &mut Self) {
+    pub(package) fn wl_leave(self: &mut Self) {
         unsafe atomic::store_usize(&mut self.wl_owner, 0, 0);
         self.wl_sem.release();
     }
 
     /// The engine's take of the write lock: the checker that holds it hands it over (`wl_yield`).
-    pub fn wl_wait(self: &mut Self) {
+    pub(package) fn wl_wait(self: &mut Self) {
         unsafe atomic::add_i32(&mut self.wl_want, 1, 3);
         self.wl_enter();
         unsafe atomic::sub_i32(&mut self.wl_want, 1, 3);
@@ -3919,7 +3919,7 @@ extend Ast {
     /// At a statement of the module's checker: when the engine waits for the write lock, let it take
     /// the lock, then wait for it back. Without the pause the checker would take the lock back before
     /// the woken waiter does.
-    pub fn wl_yield(self: &mut Self) {
+    pub(package) fn wl_yield(self: &mut Self) {
         if unsafe atomic::load_i32(&self.wl_want, 1) == 0 || !self.wl_held() {
             return;
         }
@@ -3934,12 +3934,12 @@ extend Ast {
     }
 
     /// Whether the running task holds the module's write lock.
-    pub fn wl_held(self: &Self) bool {
+    pub(package) fn wl_held(self: &Self) bool {
         return unsafe atomic::load_usize(&self.wl_owner, 0) == Ast::itok();
     }
 
     /// Publish step `s` (the module's checker only; readers on other workers take the intern lock).
-    pub fn publish_step(self: &mut Self, s: ConstStep) {
+    pub(package) fn publish_step(self: &mut Self, s: ConstStep) {
         self.ilock_enter();
         self.csteps.push(s);
         unsafe atomic::store_usize(&mut self.csteps_n, self.csteps.len(), 2);
@@ -3947,7 +3947,7 @@ extend Ast {
     }
 
     /// Drop every published step (a module's check starts over).
-    pub fn clear_steps(self: &mut Self) {
+    pub(package) fn clear_steps(self: &mut Self) {
         self.ilock_enter();
         self.csteps.clear();
         unsafe atomic::store_usize(&mut self.csteps_n, 0, 2);
@@ -3955,7 +3955,7 @@ extend Ast {
     }
 
     /// The published steps of the item declared at `owner`, into `out` (cleared first).
-    pub fn steps_of(self: &mut Self, owner: NodeId, out: &mut Vector<ConstStep>) {
+    pub(package) fn steps_of(self: &mut Self, owner: NodeId, out: &mut Vector<ConstStep>) {
         out.clear();
         if unsafe atomic::load_usize(&self.csteps_n, 1) == 0 {
             return;
@@ -3969,28 +3969,28 @@ extend Ast {
         self.ilock_leave();
     }
 
-    pub fn intern_type(self: &mut Self, t: Ty) TypeId {
+    pub(package) fn intern_type(self: &mut Self, t: Ty) TypeId {
         self.ilock_enter();
         let r = self.intern_type_i(t);
         self.ilock_leave();
         return r;
     }
 
-    pub fn intern_const_lin(self: &mut Self, l: &ConstLin) TypeId {
+    pub(package) fn intern_const_lin(self: &mut Self, l: &ConstLin) TypeId {
         self.ilock_enter();
         let r = self.intern_const_lin_i(l);
         self.ilock_leave();
         return r;
     }
 
-    pub fn intern_instance(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
+    pub(package) fn intern_instance(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
         self.ilock_enter();
         let r = self.intern_instance_i(module, decl, args, n);
         self.ilock_leave();
         return r;
     }
 
-    pub fn intern_dyn(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8, qual: u8) TypeId {
+    pub(package) fn intern_dyn(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8, qual: u8) TypeId {
         self.ilock_enter();
         let r = self.intern_dyn_i(module, decl, args, n, qual);
         self.ilock_leave();
@@ -3998,14 +3998,14 @@ extend Ast {
     }
 
     /// The extent of the `used` records now (`used_rollback`).
-    pub const fn used_mark(self: &Self) u64 {
+    pub(package) const fn used_mark(self: &Self) u64 {
         return self.used.len() as u64 << 32 | self.used_inst.len() as u64;
     }
 
     /// Drop the `used` records added since `mark`: what a speculative stage touched is no use by the
     /// program. A final id leaves the membership bits; a provisional one stays in the pool, and its
     /// next intern records it (`used_spec`).
-    pub fn used_rollback(self: &mut Self, mark: u64) {
+    pub(package) fn used_rollback(self: &mut Self, mark: u64) {
         let n0 = (mark >> 32) as usize;
         for i in n0..self.used.len() {
             let id = self.used[i];
@@ -4126,7 +4126,7 @@ extend Ast {
         return self.intern_type(Ty { kind: TypeKind::TYPE_CONST_EXPR, module: 0, as_data: TyAs { inst: ci } });
     }
 
-    pub const fn const_lin_at(self: &Self, i: u32) &ConstLin {
+    pub(package) const fn const_lin_at(self: &Self, i: u32) &ConstLin {
         if self.gt.p != null && (i & TYPE_PROV) == 0 {
             return unsafe (&*self.gt.p).const_lin_at(i as usize);
         }
@@ -4134,7 +4134,7 @@ extend Ast {
     }
 
     /// Index of the wide-literal record for `id`, -1 when it has none. Linear: wide literals are rare.
-    pub const fn wide_lit_of(self: &Self, id: NodeId) i64 {
+    pub(package) const fn wide_lit_of(self: &Self, id: NodeId) i64 {
         for i in 0..self.wide_lits.len() {
             if self.wide_lits.at(i).node == id {
                 return i as i64;
@@ -4188,7 +4188,7 @@ extend Ast {
     /// The function-pointer type with results `slots[0..nret]`, parameters `slots[nret..nret + np]`
     /// (`move fn(..)` with `is_move`) and lifetime classes `lts`, whose class slots follow
     /// (`lts_encode`). Safety: `slots` must point at `nret + np + lts_slots(lts)` readable TypeIds.
-    pub fn intern_fn_sig(self: &mut Self, slots: *const TypeId, nret: u32, np: u32, is_move: bool, lts: u64) TypeId {
+    pub(package) fn intern_fn_sig(self: &mut Self, slots: *const TypeId, nret: u32, np: u32, is_move: bool, lts: u64) TypeId {
         let q = if is_move {
             FN_SIG | FN_MOVE;
         } else {
@@ -4220,7 +4220,7 @@ extend Ast {
 
     /// The function-pointer type `q` (FN_SIG, maybe FN_MOVE) of signature record `it`. A single
     /// `void` result is no result: `fn(..) void` and `fn(..)` are one type.
-    pub fn intern_sig_rec(self: &mut Self, it: &TyInstance, q: u8) TypeId {
+    pub(package) fn intern_sig_rec(self: &mut Self, it: &TyInstance, q: u8) TypeId {
         if rec_has_error(it) {
             return TYPE_ERROR;
         }
@@ -4249,7 +4249,7 @@ extend Ast {
     }
 
     /// The `dyn fn` type `qual` of function-pointer type `sig`.
-    pub fn intern_dyn_fn(self: &mut Self, sig: TypeId, qual: u8) TypeId {
+    pub(package) fn intern_dyn_fn(self: &mut Self, sig: TypeId, qual: u8) TypeId {
         if sig == TYPE_ERROR {
             return TYPE_ERROR;
         }
@@ -4263,7 +4263,7 @@ extend Ast {
     }
 
     /// The function-pointer type of `dyn fn` type `dy`, TYPE_NONE for an interface's `dyn`.
-    pub const fn dyn_fn_sig(self: &Self, dy: &Ty) TypeId {
+    pub(package) const fn dyn_fn_sig(self: &Self, dy: &Ty) TypeId {
         let it = self.instance(dy.as_data.inst);
         if it.decl != NODE_NONE {
             return TYPE_NONE;
@@ -4272,7 +4272,7 @@ extend Ast {
     }
 
     /// The result count (`ret`) or parameter count of function-pointer type `y`.
-    pub const fn sig_len(self: &Self, y: &Ty, ret: bool) u32 {
+    pub(package) const fn sig_len(self: &Self, y: &Ty, ret: bool) u32 {
         let it = self.instance(y.as_data.fnp.sig);
         if ret {
             return it.module;
@@ -4281,7 +4281,7 @@ extend Ast {
     }
 
     /// Result `i` (`ret`) or parameter `i` of function-pointer type `y`.
-    pub const fn sig_at(self: &Self, y: &Ty, ret: bool, i: u32) TypeId {
+    pub(package) const fn sig_at(self: &Self, y: &Ty, ret: bool, i: u32) TypeId {
         let it = self.instance(y.as_data.fnp.sig);
         if ret {
             return self.rec_slot(it, i);
@@ -4290,7 +4290,7 @@ extend Ast {
     }
 
     /// The lifetime positions function-pointer type `y`'s classes record; 0 for the default ones.
-    pub const fn sig_lt_len(self: &Self, y: &Ty) u32 {
+    pub(package) const fn sig_lt_len(self: &Self, y: &Ty) u32 {
         let lts = self.instance(y.as_data.fnp.sig).lts;
         if (lts & 15u64) != 0 {
             return (lts & 15u64) as u32;
@@ -4302,7 +4302,7 @@ extend Ast {
     }
 
     /// Position `k`'s canonical class in function-pointer type `y`'s classes (`k < sig_lt_len`).
-    pub const fn sig_lt_class(self: &Self, y: &Ty, k: u32) u8 {
+    pub(package) const fn sig_lt_class(self: &Self, y: &Ty, k: u32) u8 {
         let it = self.instance(y.as_data.fnp.sig);
         if (it.lts & 255u64) != LTS_EXT {
             return lts_class(it.lts, k);
@@ -4313,7 +4313,7 @@ extend Ast {
 
     /// Lifetime classes `cls` (canonical, `nres` result positions first) as `TyInstance.lts`; the
     /// class slots an LTS_EXT value needs are appended to `slots`.
-    pub fn lts_encode(self: &mut Self, cls: &Vector<u8>, nres: u32, slots: &mut Vector<TypeId>) u64 {
+    pub(package) fn lts_encode(self: &mut Self, cls: &Vector<u8>, nres: u32, slots: &mut Vector<TypeId>) u64 {
         if lt_default(cls, nres) {
             return 0;
         }
@@ -4349,7 +4349,7 @@ extend Ast {
     }
 
     /// Slot `i` of signature record `it` (results first, then parameters).
-    pub const fn rec_slot(self: &Self, it0: &TyInstance, i: u32) TypeId {
+    pub(package) const fn rec_slot(self: &Self, it0: &TyInstance, i: u32) TypeId {
         let mut it = *it0;
         let mut k = i;
         // A record of more than eight slots continues in its last one, seven slots further on.
@@ -4379,7 +4379,7 @@ extend Ast {
 
     /// The associated type `decl` (an interface's `type Name;`, module `module`) of `args[0]` under the
     /// interface arguments `args[1..n]`: a TYPE_ASSOC. Safety: `args` must point at `n` readable TypeIds.
-    pub fn intern_assoc(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
+    pub(package) fn intern_assoc(self: &mut Self, module: ModuleId, decl: NodeId, args: *const TypeId, n: u8) TypeId {
         let mut it = TyInstance { module: module, decl: decl, n: pick(n > 8, 8, n) };
         for j in 0..it.n {
             unsafe it.args[j] = unsafe args[j];
@@ -4395,11 +4395,11 @@ extend Ast {
     }
 
     /// The interface behind a TYPE_DYN payload (NODE_NONE for a `dyn fn`, see `dyn_fn_sig`).
-    pub const fn dyn_decl_of(self: &Self, dy: &Ty) NodeId {
+    pub(package) const fn dyn_decl_of(self: &Self, dy: &Ty) NodeId {
         return self.instance(dy.as_data.inst).decl;
     }
 
-    pub const fn instance(self: &Self, index: u32) &TyInstance {
+    pub(package) const fn instance(self: &Self, index: u32) &TyInstance {
         if self.gt.p != null && (index & TYPE_PROV) == 0 {
             return unsafe (&*self.gt.p).instance(index as usize);
         }
@@ -4414,7 +4414,7 @@ extend Ast {
     /// Apply a publication: every provisional id this module's tables hold becomes its final id
     /// (`map` by pool index, `imap` for instance records), the `used` list is rewritten and its
     /// membership bits rebuilt, and the pool is cleared.
-    pub fn publish_remap(self: &mut Self, map: &Vector<TypeId>, imap: &Vector<u32>) {
+    pub(package) fn publish_remap(self: &mut Self, map: &Vector<TypeId>, imap: &Vector<u32>) {
         for i in 0..self.types.len() {
             self.types.set(i, pub_map1(map, *self.types.at(i)));
         }
@@ -4499,7 +4499,7 @@ extend Ast {
     }
 
     /// Does any table of this module still hold a provisional id? (Validation after a publication.)
-    pub const fn has_provisional(self: &Self) bool {
+    pub(package) const fn has_provisional(self: &Self) bool {
         for i in 0..self.types.len() {
             if (*self.types.at(i) & TYPE_PROV) != 0 {
                 return true;
@@ -4548,14 +4548,14 @@ extend Ast {
 
     /// The number of types this module can enumerate: its pool (module-local identity) or its
     /// `used` list (package identity); `used_type(i)` names the i-th.
-    pub const fn ntypes(self: &Self) usize {
+    pub(package) const fn ntypes(self: &Self) usize {
         if self.gt.p == null {
             return self.pool.len();
         }
         return self.used.len();
     }
 
-    pub const fn used_type(self: &Self, i: usize) TypeId {
+    pub(package) const fn used_type(self: &Self, i: usize) TypeId {
         if self.gt.p == null {
             return i as TypeId;
         }
@@ -4563,14 +4563,14 @@ extend Ast {
     }
 
     /// The instance records this module can enumerate (same rule), by `used_instance(i)`.
-    pub const fn ninstances(self: &Self) usize {
+    pub(package) const fn ninstances(self: &Self) usize {
         if self.gt.p == null {
             return self.pool.ninst();
         }
         return self.used_inst.len();
     }
 
-    pub const fn used_instance(self: &Self, i: usize) &TyInstance {
+    pub(package) const fn used_instance(self: &Self, i: usize) &TyInstance {
         if self.gt.p == null {
             return self.pool.instance(i);
         }
@@ -4578,7 +4578,7 @@ extend Ast {
     }
 
     /// Is `t` an id this module can resolve (a foreign pool's id is not, under module-local identity)?
-    pub const fn type_valid(self: &Self, t: TypeId) bool {
+    pub(package) const fn type_valid(self: &Self, t: TypeId) bool {
         if self.gt.p == null {
             return t as usize < self.pool.len();
         }
@@ -4590,14 +4590,14 @@ extend Ast {
 
     /// The exclusive id bound the Core IR verifier checks against: the pool length under module-local
     /// identity; unbounded under package identity, where provisional ids carry the tag bit.
-    pub const fn type_bound(self: &Self) usize {
+    pub(package) const fn type_bound(self: &Self) usize {
         if self.gt.p == null {
             return self.pool.len();
         }
         return 0xFFFFFFFF;
     }
 
-    pub const fn instance_valid(self: &Self, i: u32) bool {
+    pub(package) const fn instance_valid(self: &Self, i: u32) bool {
         if self.gt.p == null {
             return i as usize < self.pool.ninst();
         }
@@ -4609,7 +4609,7 @@ extend Ast {
 
     /// A const-generic argument value of integer type `bt` (two's complement `bits`), interned as a
     /// module-independent TYPE_CONST.
-    pub fn const_value(self: &mut Self, bits: i64, bt: BuiltinType) TypeId {
+    pub(package) fn const_value(self: &mut Self, bits: i64, bt: BuiltinType) TypeId {
         return self.intern_type(
             Ty { kind: TypeKind::TYPE_CONST, qualifier: bt as u8, module: 0, as_data: TyAs { value: bits } },
         );
@@ -4617,14 +4617,14 @@ extend Ast {
 
     /// `[elem; lt]` for length type `lt` of this pool: a TYPE_CONST in the u32 range is a count,
     /// any other length stays symbolic.
-    pub fn intern_array(self: &mut Self, k: TypeKind, elem: TypeId, lt: TypeId) TypeId {
+    pub(package) fn intern_array(self: &mut Self, k: TypeKind, elem: TypeId, lt: TypeId) TypeId {
         let ly = *self.type_at(lt);
         return self.intern_type(array_ty(k, elem, lt, &ly));
     }
 
     /// Instance `t` as its record, or vector `t` (arguments `[T, N]`) or mask `t` (`[N]`) as the record
     /// of the prelude instance it stands for; false for any other type.
-    pub const fn targs_of(self: &Self, t: TypeId, out: &mut TyInstance) bool {
+    pub(package) const fn targs_of(self: &Self, t: TypeId, out: &mut TyInstance) bool {
         let y = self.type_at(t);
         if y.kind == TypeKind::TYPE_INSTANCE {
             *out = *self.instance(y.as_data.inst);
@@ -4646,13 +4646,13 @@ extend Ast {
     }
 
     /// The lane count of a TYPE_SIMD or TYPE_MASK `y` of this pool; 0 while it is symbolic.
-    pub const fn lanes(self: &Self, y: &Ty) u64 {
+    pub(package) const fn lanes(self: &Self, y: &Ty) u64 {
         let ly = self.type_at(y.as_data.arr.len);
         return pick(ly.kind == TypeKind::TYPE_CONST, ly.as_data.value as u64, 0);
     }
 
     /// Record a decl's lifetime params (no-op for the overwhelmingly common empty case).
-    pub fn set_lifetimes(self: &mut Self, owner: NodeId, list: NodeList) {
+    pub(package) fn set_lifetimes(self: &mut Self, owner: NodeId, list: NodeList) {
         if list.len == 0 {
             return;
         }
@@ -4662,14 +4662,14 @@ extend Ast {
         self.lifetime_decls.push(LifetimeDecl { owner: owner, list: list });
     }
 
-    pub fn lifetimes_of(self: &Self, owner: NodeId) NodeList {
+    pub(package) fn lifetimes_of(self: &Self, owner: NodeId) NodeList {
         return switch self.lifetime_at.get(&owner) {
             Some(i) => self.lifetime_decls.at((*i) as usize).list,
             None => NodeList { start: 0, len: 0 },
         };
     }
 
-    pub fn add_attr(self: &mut Self, attr: Attr) {
+    pub(package) fn add_attr(self: &mut Self, attr: Attr) {
         let key = attr.owner as u64 << 8 | attr.kind as u64;
         if !self.attr_ix.contains_key(&key) {
             self.attr_ix.insert(key, self.attrs.len() as u32);
@@ -4701,7 +4701,7 @@ extend Ast {
 
     /// `owner`'s attribute of the `i`th constant-expression kind (`ATTR_EXPR_KINDS`) when its
     /// argument is an expression; null otherwise.
-    pub const fn attr_expr_at(self: &Self, owner: NodeId, i: usize) *const Attr {
+    pub(package) const fn attr_expr_at(self: &Self, owner: NodeId, i: usize) *const Attr {
         let ks: Slice<'static, AttrKind> = ATTR_EXPR_KINDS;
         let at = self.attr_of(owner, ks[i]);
         if at != null && unsafe (*at).expr {
@@ -4712,27 +4712,27 @@ extend Ast {
 
     /// The value of `owner`'s constant-expression attribute `kind` (`Attr.expr`); `ok` false
     /// until the owner's type check evaluated it.
-    pub const fn attr_value(self: &Self, owner: NodeId, kind: AttrKind) AttrVal {
+    pub(package) const fn attr_value(self: &Self, owner: NodeId, kind: AttrKind) AttrVal {
         return self.attr_value_of(*self.attr_ix.get(&(owner as u64 << 8 | kind as u64)).unwrap());
     }
 
     /// The value of the constant-expression attribute `attrs[i]`.
-    pub const fn attr_value_of(self: &Self, i: u32) AttrVal {
+    pub(package) const fn attr_value_of(self: &Self, i: u32) AttrVal {
         return self.attr_vals[self.attr_val_ix(i)];
     }
 
     /// Record the evaluated value of `owner`'s constant-expression attribute `kind`.
-    pub fn set_attr_value(self: &mut Self, owner: NodeId, kind: AttrKind, ok: bool, v: u64, w: [u64; 2]) {
+    pub(package) fn set_attr_value(self: &mut Self, owner: NodeId, kind: AttrKind, ok: bool, v: u64, w: [u64; 2]) {
         let i = *self.attr_ix.get(&(owner as u64 << 8 | kind as u64)).unwrap();
         let k = self.attr_val_ix(i);
         self.attr_vals.set(k, AttrVal { attr: i, ok: ok, v: v, w: w });
     }
 
-    pub fn add_meta(self: &mut Self, m: MetaAttr) {
+    pub(package) fn add_meta(self: &mut Self, m: MetaAttr) {
         self.metas.push(m);
     }
 
-    pub const fn type_concrete(self: &Self, t: TypeId) bool {
+    pub(package) const fn type_concrete(self: &Self, t: TypeId) bool {
         return self.type_at(t).concrete;
     }
     // One level, reading the recorded answer for the children, which are interned before their parent.
@@ -4763,7 +4763,7 @@ extend Ast {
     /// Re-interns `src`'s type `t` into THIS Ast, rebuilding element and instance payloads
     /// recursively. A final (published) id names one package-wide record and passes through;
     /// only a provisional id of another module needs the rebuild.
-    pub fn reintern(self: &mut Self, src: &Ast, t: TypeId) TypeId {
+    pub(package) fn reintern(self: &mut Self, src: &Ast, t: TypeId) TypeId {
         if t == TYPE_NONE || self.gt.p != null && (t & TYPE_PROV) == 0 {
             return t; // a published id is the same id in every module
         }
@@ -4852,7 +4852,7 @@ extend Ast {
 
     /// Records the concrete type args a use site instantiates with. `n` is clamped to 8. Safety:
     /// `args` must point at `n` readable TypeIds.
-    pub fn set_type_args(self: &mut Self, node: NodeId, args: *const TypeId, n: u8) {
+    pub(package) fn set_type_args(self: &mut Self, node: NodeId, args: *const TypeId, n: u8) {
         let mut m = n;
         if m > 8 {
             m = 8;
@@ -4875,13 +4875,13 @@ extend Ast {
     }
 
     /// The `mono` slot recorded for `node` plus one, or 0 if none.
-    pub fn mono_slot(self: &Self, node: NodeId) u32 {
+    pub(package) fn mono_slot(self: &Self, node: NodeId) u32 {
         assert(!self.mono_rel.on || !Ast::in_body(node), "mono of a released body node");
         return slot_of(&self.mono_at, &self.b.mono_at, node);
     }
 
     /// The type args recorded for `node`, or null if none.
-    pub fn type_args(self: &Self, node: NodeId) *const MonoUse {
+    pub(package) fn type_args(self: &Self, node: NodeId) *const MonoUse {
         assert(!self.mono_rel.on || !Ast::in_body(node), "mono of a released body node");
         let idx = slot_of(&self.mono_at, &self.b.mono_at, node);
         if idx == 0 {
@@ -4892,36 +4892,36 @@ extend Ast {
 
     /// Record the conversion `node` needs. Last writer wins: a node re-checked against a new expected
     /// type converts to that one.
-    pub fn set_coerce(self: &mut Self, node: NodeId, target: TypeId, method: DefId) {
+    pub(package) fn set_coerce(self: &mut Self, node: NodeId, target: TypeId, method: DefId) {
         self.coerces.push(CoerceUse { node: node, target: target, method: method });
         self.coerce_at.insert(node, self.coerces.len() as u32 - 1);
     }
 
     /// Record the conformance bound call `node` dispatches to (`BoundCall`). Last writer wins.
-    pub fn set_bound_call(self: &mut Self, node: NodeId, iface: TypeId) {
+    pub(package) fn set_bound_call(self: &mut Self, node: NodeId, iface: TypeId) {
         self.bound_calls.push(BoundCall { node: node, iface: iface });
         self.bound_call_at.insert(node, self.bound_calls.len() as u32 - 1);
     }
 
     /// The `dyn I<args>` recorded for bound call `node`, or TYPE_NONE.
-    pub const fn bound_call_of(self: &Self, node: NodeId) TypeId {
+    pub(package) const fn bound_call_of(self: &Self, node: NodeId) TypeId {
         if let Some(i) = self.bound_call_at.get(&node) {
             return self.bound_calls.at((*i) as usize).iface;
         }
         return TYPE_NONE;
     }
 
-    pub const fn coerce_of(self: &Self, node: NodeId) *const CoerceUse {
+    pub(package) const fn coerce_of(self: &Self, node: NodeId) *const CoerceUse {
         if let Some(i) = self.coerce_at.get(&node) {
             return self.coerces.at((*i) as usize);
         }
         return null;
     }
 
-    pub fn add_dyn_use(self: &mut Self, node: NodeId, src: TypeId, dyn_ty: TypeId) {
+    pub(package) fn add_dyn_use(self: &mut Self, node: NodeId, src: TypeId, dyn_ty: TypeId) {
         self.add_dyn_use_alloc(node, src, dyn_ty, TYPE_NONE);
     }
-    pub fn add_dyn_use_alloc(self: &mut Self, node: NodeId, src: TypeId, dyn_ty: TypeId, alloc: TypeId) {
+    pub(package) fn add_dyn_use_alloc(self: &mut Self, node: NodeId, src: TypeId, dyn_ty: TypeId, alloc: TypeId) {
         self.dyn_uses.push(DynUse { node: node, src: src, dyn_ty: dyn_ty, alloc: alloc });
         let v = self.dyn_uses.len() as u32;
         if (node & NODE_BODY) != 0 {
@@ -4935,7 +4935,7 @@ extend Ast {
     }
 
     /// The dyn-erasure recorded at `node`, or null if none.
-    pub const fn dyn_use_at(self: &Self, node: NodeId) *const DynUse {
+    pub(package) const fn dyn_use_at(self: &Self, node: NodeId) *const DynUse {
         let idx = slot_of(&self.dyn_at, &self.b.dyn_at, node);
         if idx == 0 {
             return null;
@@ -4943,7 +4943,7 @@ extend Ast {
         return self.dyn_uses.at((idx - 1) as usize);
     }
 
-    pub fn add_deref_use(self: &mut Self, du: &DerefUse) {
+    pub(package) fn add_deref_use(self: &mut Self, du: &DerefUse) {
         self.deref_uses.push(*du);
         let v = self.deref_uses.len() as u32;
         let node = du.node;
@@ -4958,7 +4958,7 @@ extend Ast {
     }
 
     /// The auto-deref chain recorded at `node`, or null if none.
-    pub const fn deref_use_at(self: &Self, node: NodeId) *const DerefUse {
+    pub(package) const fn deref_use_at(self: &Self, node: NodeId) *const DerefUse {
         let idx = slot_of(&self.deref_at, &self.b.deref_at, node);
         if idx == 0 {
             return null;
@@ -4968,7 +4968,7 @@ extend Ast {
 
     /// The auto-deref chain recorded at `node`, writable (a mutable place use patches method hops
     /// to `deref_mut`), or null if none.
-    pub const fn deref_use_mut(self: &mut Self, node: NodeId) *mut DerefUse {
+    pub(package) const fn deref_use_mut(self: &mut Self, node: NodeId) *mut DerefUse {
         let idx = slot_of(&self.deref_at, &self.b.deref_at, node);
         if idx == 0 {
             return null;
@@ -4979,7 +4979,7 @@ extend Ast {
     // Each accessor selects the arena, then runs one indexed access: the select is a conditional
     // move, and the access inlines once.
     @always_inline
-    pub const fn at(self: &mut Self, id: NodeId) &mut Node {
+    pub(package) const fn at(self: &mut Self, id: NodeId) &mut Node {
         let sv = if (id & NODE_BODY) != 0 {
             &mut self.b.nodes;
         } else {
@@ -4988,7 +4988,7 @@ extend Ast {
         return sv.index_mut((id & NODE_BODY_MASK) as usize);
     }
     @always_inline
-    pub const fn at_const(self: &Self, id: NodeId) &Node {
+    pub(package) const fn at_const(self: &Self, id: NodeId) &Node {
         let sv = if (id & NODE_BODY) != 0 {
             &self.b.nodes;
         } else {
@@ -4997,7 +4997,7 @@ extend Ast {
         return sv.at((id & NODE_BODY_MASK) as usize);
     }
     @always_inline
-    pub const fn list(self: &Self, list: NodeList) *const NodeId {
+    pub(package) const fn list(self: &Self, list: NodeList) *const NodeId {
         let sv = if (list.start & NODE_BODY) != 0 {
             &self.b.children;
         } else {
@@ -5008,7 +5008,7 @@ extend Ast {
     /// Whether the payload enum `decl` stores its tag in one byte: at most 256 variants and no explicit
     /// discriminant, so every tag is its variant's ordinal. Any other payload enum keeps the 4-byte C enum.
     /// The emitter's struct and the layout service both follow this.
-    pub const fn enum_tag_is_byte(self: &Self, decl: NodeId) bool {
+    pub(package) const fn enum_tag_is_byte(self: &Self, decl: NodeId) bool {
         let ms = self.at_const(decl).as_data.aggregate.members;
         let mut n: u32 = 0;
         for i in 0..ms.len {
@@ -5025,16 +5025,16 @@ extend Ast {
     }
     /// Resolves `ref_id` to a decl in THIS module (the DefId is stamped with `self.module`); use
     /// set_resolution_def for a foreign target.
-    pub const fn set_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) {
+    pub(package) const fn set_resolution(self: &mut Self, ref_id: NodeId, decl: NodeId) {
         self.set_resolution_def(ref_id, DefId { module: self.module, node: decl });
     }
     /// The resolved decl node with its module DROPPED -- use resolution_def when the target may
     /// live in another module.
-    pub const fn resolution(self: &Self, ref_id: NodeId) NodeId {
+    pub(package) const fn resolution(self: &Self, ref_id: NodeId) NodeId {
         return self.resolution_def(ref_id).node;
     }
     @always_inline
-    pub const fn resolution_def(self: &Self, ref_id: NodeId) DefId {
+    pub(package) const fn resolution_def(self: &Self, ref_id: NodeId) DefId {
         // synthesized nodes (post-resolve desugars) have no slot: unresolved, not an abort
         let sv = if (ref_id & NODE_BODY) != 0 {
             &self.b.resolutions;
@@ -5048,7 +5048,7 @@ extend Ast {
         return *sv.at(k);
     }
     @always_inline
-    pub const fn set_resolution_def(self: &mut Self, ref_id: NodeId, decl: DefId) {
+    pub(package) const fn set_resolution_def(self: &mut Self, ref_id: NodeId, decl: DefId) {
         let sv = if (ref_id & NODE_BODY) != 0 {
             &mut self.b.resolutions;
         } else {
@@ -5058,7 +5058,7 @@ extend Ast {
     }
     /// Resolve the synthesized identifier `ref_id` for good: the resolver never looks its text up,
     /// and a re-resolve restores the binding (see `seeds`).
-    pub fn seed_resolution(self: &mut Self, ref_id: NodeId, decl: DefId) {
+    pub(package) fn seed_resolution(self: &mut Self, ref_id: NodeId, decl: DefId) {
         assert(!self.seeds_rel.on, "seeds is released");
         self.set_resolution_def(ref_id, decl);
         self.seeds.push(Seed { at: ref_id, def: decl });
@@ -5066,7 +5066,7 @@ extend Ast {
 
     /// Record closure `node`'s emission facts: `entries` holds the captures, then `nparams`
     /// parameter types, then `nrets` return types. A later record replaces the earlier (a re-check).
-    pub fn record_closure(
+    pub(package) fn record_closure(
         self: &mut Self,
         node: NodeId,
         is_closure: bool,
@@ -5108,7 +5108,7 @@ extend Ast {
 
     /// Set closure `node`'s recorded by-`&mut` and by-reference capture bits (the intern lock, as
     /// `record_closure`); false when it records no facts.
-    pub fn set_closure_caps(self: &mut Self, node: NodeId, mut_caps: u64, ref_caps: u64) bool {
+    pub(package) fn set_closure_caps(self: &mut Self, node: NodeId, mut_caps: u64, ref_caps: u64) bool {
         self.ilock_enter();
         let cf = self.closure_fact_mut(node);
         if cf != null {
@@ -5122,7 +5122,7 @@ extend Ast {
     /// The capture types of closure `node` into `tys`, and the captures held by reference (`&mut`
     /// or `&`) as bits in `by_ref`, copied under the intern lock: the reader may run on another
     /// task than the module's checker. False when the closure records no capture.
-    pub fn closure_env(self: &Self, node: NodeId, tys: &mut Vector<TypeId>, by_ref: &mut u64) bool {
+    pub(package) fn closure_env(self: &Self, node: NodeId, tys: &mut Vector<TypeId>, by_ref: &mut u64) bool {
         let me = (self as *const Ast) as *mut Ast;
         unsafe (*me).ilock_enter();
         let cf = self.closure_fact(node);
@@ -5139,7 +5139,7 @@ extend Ast {
     }
 
     /// Record that `free` method `fnid`'s body resolves to module declaration `decl` (once).
-    pub fn record_free_touch(self: &mut Self, fnid: NodeId, decl: NodeId) {
+    pub(package) fn record_free_touch(self: &mut Self, fnid: NodeId, decl: NodeId) {
         let key = fnid as u64 << 32 | decl as u64;
         let mut i = self.free_touched.len();
         while i > 0 && self.free_touched[i - 1] >> 32 == fnid as u64 {
@@ -5151,7 +5151,7 @@ extend Ast {
         self.free_touched.push(key);
     }
     /// True when `free` method `fnid`'s body resolves to `decl`.
-    pub const fn free_touches(self: &Self, fnid: NodeId, decl: NodeId) bool {
+    pub(package) const fn free_touches(self: &Self, fnid: NodeId, decl: NodeId) bool {
         let key = fnid as u64 << 32 | decl as u64;
         for i in 0..self.free_touched.len() {
             if self.free_touched[i] == key {
@@ -5162,7 +5162,7 @@ extend Ast {
     }
 
     /// The recorded facts of closure or function-type node `node`, or null.
-    pub const fn closure_fact(self: &Self, node: NodeId) *const ClosureFact {
+    pub(package) const fn closure_fact(self: &Self, node: NodeId) *const ClosureFact {
         switch self.closure_at.get(&node) {
             Some(i) => {
                 return self.closure_facts.at((*i) as usize);
@@ -5172,7 +5172,7 @@ extend Ast {
             },
         };
     }
-    pub fn closure_fact_mut(self: &mut Self, node: NodeId) *mut ClosureFact {
+    pub(package) fn closure_fact_mut(self: &mut Self, node: NodeId) *mut ClosureFact {
         switch self.closure_at.get(&node) {
             Some(i) => {
                 let k = *i;
@@ -5184,12 +5184,12 @@ extend Ast {
         };
     }
     /// The capture facts of closure `f`, from its first capture.
-    pub const fn caps_of(self: &Self, f: *const ClosureFact) *const CapFact {
+    pub(package) const fn caps_of(self: &Self, f: *const ClosureFact) *const CapFact {
         return self.cap_facts.at((unsafe (&*f).cap_start) as usize);
     }
 
     /// `id` with its `move` and `unsafe` prefixes removed, and its `as` casts too when `casts`.
-    pub const fn peel(self: &Self, id: NodeId, casts: bool) NodeId {
+    pub(package) const fn peel(self: &Self, id: NodeId, casts: bool) NodeId {
         let mut e = id;
         loop {
             let n = self.at_const(e);
@@ -5205,7 +5205,7 @@ extend Ast {
 
     /// The parameter and return lists of signature node `id` (a function, closure or function type) in
     /// `ps` and `rs`; false, leaving both untouched, for any other node.
-    pub const fn sig_lists(self: &Self, id: NodeId, ps: &mut NodeList, rs: &mut NodeList) bool {
+    pub(package) const fn sig_lists(self: &Self, id: NodeId, ps: &mut NodeList, rs: &mut NodeList) bool {
         let n = self.at_const(id);
         if n.kind == NodeKind::NODE_FUNCTION {
             *ps = n.as_data.function.params;
@@ -5224,14 +5224,14 @@ extend Ast {
 
     /// Whether generic argument `id` is a braced const expression (`F<{N * 2}>`, `F<{E::A}>`,
     /// `F<{K}>`). The parser reads every other argument as a type, a lifetime or an integer literal.
-    pub const fn is_const_expr_arg(self: &Self, id: NodeId) bool {
+    pub(package) const fn is_const_expr_arg(self: &Self, id: NodeId) bool {
         let k = self.at_const(id).kind;
         return k != NodeKind::NODE_TYPE_PATH && k != NodeKind::NODE_POINTER_TYPE && k != NodeKind::NODE_REFERENCE_TYPE && k != NodeKind::NODE_SLICE_TYPE && k != NodeKind::NODE_ARRAY_TYPE && k != NodeKind::NODE_FUNCTION_TYPE && k != NodeKind::NODE_DYN_TYPE && k != NodeKind::NODE_TUPLE_TYPE && k != NodeKind::NODE_LIFETIME && k != NodeKind::NODE_LITERAL;
     }
 
     /// The type node of signature slot `slot`: a parameter's declared type (NODE_NONE when it has none),
     /// or `slot` itself (a bare type in a return list).
-    pub const fn slot_type_node(self: &Self, slot: NodeId) NodeId {
+    pub(package) const fn slot_type_node(self: &Self, slot: NodeId) NodeId {
         let n = self.at_const(slot);
         if n.kind == NodeKind::NODE_PARAMETER {
             return n.as_data.parameter.ty;
@@ -5241,7 +5241,7 @@ extend Ast {
 
     /// The declaration type-path node `tn` resolves to: its own resolution, else its last part's
     /// (node NODE_NONE when neither resolves).
-    pub const fn path_def(self: &Self, tn: NodeId) DefId {
+    pub(package) const fn path_def(self: &Self, tn: NodeId) DefId {
         let d = self.resolution_def(tn);
         if d.node != NODE_NONE || self.at_const(tn).kind != NodeKind::NODE_TYPE_PATH {
             return d;
@@ -5254,7 +5254,7 @@ extend Ast {
     }
 
     /// The top-level extend or interface whose item list holds `fnode`; NODE_NONE when none.
-    pub const fn container_of(self: &Self, fnode: NodeId) NodeId {
+    pub(package) const fn container_of(self: &Self, fnode: NodeId) NodeId {
         return switch self.member_of.get(&fnode) {
             Some(c) => *c,
             None => NODE_NONE,
@@ -5262,7 +5262,7 @@ extend Ast {
     }
 
     /// The number of parameters of the extend that holds `fnode`; -1 when no extend holds it.
-    pub const fn extend_arity(self: &Self, fnode: NodeId) i32 {
+    pub(package) const fn extend_arity(self: &Self, fnode: NodeId) i32 {
         let c = self.container_of(fnode);
         if c == NODE_NONE || self.at_const(c).kind != NodeKind::NODE_EXTEND {
             return -1;
@@ -5272,7 +5272,7 @@ extend Ast {
 
     /// Record `container` as the extend or interface of every node in `items`, or forget it
     /// (NODE_NONE) when the platform filter drops the container.
-    pub fn set_members(self: &mut Self, container: NodeId, items: NodeList) {
+    pub(package) fn set_members(self: &mut Self, container: NodeId, items: NodeList) {
         for i in 0..items.len {
             let m = unsafe self.list(items)[i as usize];
             if container == NODE_NONE {
@@ -5284,7 +5284,7 @@ extend Ast {
     }
 
     /// The first attribute of `kind` on `owner`; null when none.
-    pub const fn attr_of(self: &Self, owner: NodeId, kind: AttrKind) *const Attr {
+    pub(package) const fn attr_of(self: &Self, owner: NodeId, kind: AttrKind) *const Attr {
         return switch self.attr_ix.get(&(owner as u64 << 8 | kind as u64)) {
             Some(i) => self.attrs.at((*i) as usize),
             None => null,
@@ -5292,7 +5292,7 @@ extend Ast {
     }
 
     /// The `@unsafe(...)` claims of `owner` (`UNSAFE_*` bits), 0 without one.
-    pub const fn unsafe_claims(self: &Self, owner: NodeId) u32 {
+    pub(package) const fn unsafe_claims(self: &Self, owner: NodeId) u32 {
         let at = self.attr_of(owner, AttrKind::ATTR_UNSAFE);
         return if at == null {
             0u32;
@@ -5303,7 +5303,7 @@ extend Ast {
 
     /// True when enum `decl` has a variant with a payload (it emits as a tagged struct, tagged by
     /// declaration ordinal).
-    pub const fn enum_has_payload(self: &Self, decl: NodeId) bool {
+    pub(package) const fn enum_has_payload(self: &Self, decl: NodeId) bool {
         let ms = self.at_const(decl).as_data.aggregate.members;
         for i in 0..ms.len {
             if self.at_const(unsafe self.list(ms)[i as usize]).as_data.variant.payload.len != 0 {
@@ -5315,7 +5315,7 @@ extend Ast {
 
     /// The type node of aggregate member `mid`: a named member's (NODE_FIELD) declared type, a tuple
     /// member itself (tuple members are bare type nodes), NODE_NONE otherwise.
-    pub const fn member_type_node(self: &Self, mid: NodeId, is_tuple: bool) NodeId {
+    pub(package) const fn member_type_node(self: &Self, mid: NodeId, is_tuple: bool) NodeId {
         let n = self.at_const(mid);
         if n.kind == NodeKind::NODE_FIELD {
             return n.as_data.field.ty;
@@ -5328,7 +5328,7 @@ extend Ast {
     }
 
     /// The type of aggregate member `mid`: its recorded type, else a named member's declared type.
-    pub const fn member_ty(self: &Self, mid: NodeId) TypeId {
+    pub(package) const fn member_ty(self: &Self, mid: NodeId) TypeId {
         let t = self.type_of(mid);
         if t == TYPE_NONE && self.at_const(mid).kind == NodeKind::NODE_FIELD {
             return self.type_of(self.at_const(mid).as_data.field.ty);
@@ -5338,7 +5338,7 @@ extend Ast {
 
     /// The name text of binding declaration `decl` (a let, parameter, loop binding, pattern name
     /// or bare identifier); empty otherwise.
-    pub const fn decl_name_span(self: &Self, decl: NodeId) tok::Span {
+    pub(package) const fn decl_name_span(self: &Self, decl: NodeId) tok::Span {
         let n = self.at_const(decl);
         if n.kind == NodeKind::NODE_LET {
             return self.at_const(n.as_data.let_stmt.name).as_data.name.text;
@@ -5368,7 +5368,7 @@ extend Ast {
     /// Is call `id` spelled `x.free()`: a member call with no path and no arguments whose member is
     /// named `free`? When no method resolves for it, the call is an explicit drop: destruction IS
     /// the call, and there is no callee declaration to run or to pin.
-    pub const fn is_free_call(self: &Self, id: NodeId, src: str) bool {
+    pub(package) const fn is_free_call(self: &Self, id: NodeId, src: str) bool {
         let d = self.at_const(id).as_data.call;
         if d.args.len != 0 {
             return false;
@@ -5385,11 +5385,11 @@ extend Ast {
     }
     /// Builtin TypeIds are fixed by init_types' seeding: pool slot 0 is TYPE_ERROR, then the
     /// builtins in enum order -- hence b + 1.
-    pub const fn builtin(b: BuiltinType) TypeId {
+    pub(package) const fn builtin(b: BuiltinType) TypeId {
         return b as TypeId + 1;
     }
     @always_inline
-    pub const fn set_type(self: &mut Self, n: NodeId, t: TypeId) {
+    pub(package) const fn set_type(self: &mut Self, n: NodeId, t: TypeId) {
         let tv = if (n & NODE_BODY) != 0 {
             &mut self.b.types;
         } else {
@@ -5398,7 +5398,7 @@ extend Ast {
         tv.set((n & NODE_BODY_MASK) as usize, t);
     }
     @always_inline
-    pub const fn type_of(self: &Self, n: NodeId) TypeId {
+    pub(package) const fn type_of(self: &Self, n: NodeId) TypeId {
         // nodes synthesized after init_types (typecheck-time desugars) have no slot yet; the
         // constant engine reads through partially-typed modules and must see "untyped", not a
         // bounds abort
@@ -5413,7 +5413,7 @@ extend Ast {
         }
         return *tv.at(k);
     }
-    pub const fn type_at(self: &Self, t: TypeId) &Ty {
+    pub(package) const fn type_at(self: &Self, t: TypeId) &Ty {
         if self.gt.p != null && (t & TYPE_PROV) == 0 {
             return unsafe (&*self.gt.p).at(t as usize);
         }
@@ -5424,14 +5424,14 @@ extend Ast {
 
     /// Approximate owned bytes (vector CAPACITIES, not lengths): the LSP retention budget's
     /// accounting unit. The map tables are omitted -- small next to the arenas.
-    pub const fn retained_bytes(self: &Self) usize {
+    pub(package) const fn retained_bytes(self: &Self) usize {
         return self.nodes.retained() + self.children.retained() + self.b.retained() + self.scratch.capacity() * 4 + self.resolutions.retained() + self.pool.retained() + self.used.capacity() * 4 + self.used_inst.capacity() * 4 + self.used_bits.capacity() * 8 + self.types.retained() + self.mono.capacity() * sizeof(MonoUse) + self.mono_at.capacity() * 4 + self.dyn_uses.capacity() * sizeof(DynUse) + self.dyn_at.capacity() * 4 + self.deref_uses.capacity() * sizeof(DerefUse) + self.deref_at.capacity() * 4 + self.attrs.capacity() * sizeof(Attr) + self.attr_vals.capacity() * sizeof(AttrVal) + self.metas.capacity() * sizeof(MetaAttr) + self.coerces.capacity() * sizeof(CoerceUse) + self.bound_calls.capacity() * sizeof(BoundCall) + self.method_refs.capacity() * sizeof(MethodRef) + self.wide_lits.capacity() * sizeof(WideLit) + self.proj_obs.capacity() * sizeof(ProjOb) + self.dmd_uses.capacity() * sizeof(ProjOb) + self.frame_uses.capacity() * sizeof(FrameUse) + self.ob_guards.capacity() * sizeof(GuardEnt) + self.lifetime_decls.capacity() * sizeof(LifetimeDecl) + self.where_bounds.capacity() * sizeof(WhereBound) + self.seeds.capacity() * sizeof(Seed) + self.closure_facts.capacity() * sizeof(ClosureFact) + self.cap_facts.capacity() * sizeof(CapFact) + self.closure_lts.capacity() * 8 + self.free_touched.capacity() * 8;
     }
 
     /// Add this module's syntax accounting to `out` (SC_SYNTAX_STATS): the body arena holds the
     /// releasable body syntax; a pinned body (generic, `const fn`, interface default, generic
     /// extend member) and every constant initializer stay in the module arena.
-    pub fn syntax_stats(self: &Self, out: &mut SyntaxStats) {
+    pub(package) fn syntax_stats(self: &Self, out: &mut SyntaxStats) {
         let nodes_cap = self.nodes.retained() + self.b.nodes.retained();
         let children_cap = self.children.retained() + self.b.children.retained();
         let resolutions = self.resolutions.retained() + self.b.resolutions.retained();
@@ -5475,18 +5475,18 @@ extend Ast {
 }
 
 /// Syntax accounting over a package (`Ast::syntax_stats`), bytes are retained capacities.
-pub struct SyntaxStats {
-    pub nodes: usize,
-    pub body_nodes: usize,
-    pub bodies: usize,
-    pub children: usize,
-    pub body_children: usize,
-    pub nodes_cap: usize,
-    pub children_cap: usize,
-    pub resolutions: usize,
-    pub types: usize,
-    pub pool: usize,
-    pub tables: usize, // every other per-module side table
+pub(package) struct SyntaxStats {
+    pub(package) nodes: usize,
+    pub(package) body_nodes: usize,
+    pub(package) bodies: usize,
+    pub(package) children: usize,
+    pub(package) body_children: usize,
+    pub(package) nodes_cap: usize,
+    pub(package) children_cap: usize,
+    pub(package) resolutions: usize,
+    pub(package) types: usize,
+    pub(package) pool: usize,
+    pub(package) tables: usize, // every other per-module side table
 }
 
 // The per-node index slot of `node` in the module (`v`) or body (`vb`) table, 0 when unrecorded.
@@ -5514,7 +5514,7 @@ fn ensure_u32_len(v: &mut Vector<u32>, nodes_len: usize, need: usize) {
 /// The builtin type a numeric literal's suffix names, or BT_COUNT if it has none. On a match,
 /// *sfx_start receives the suffix's start offset. In a hex literal, f32/f64 only
 /// count as a suffix after a 'p' exponent -- otherwise those bytes are hex digits.
-pub const fn ast_numeric_suffix(src: str, start: u32, end: u32, sfx_start: &mut u32) BuiltinType {
+pub(package) const fn ast_numeric_suffix(src: str, start: u32, end: u32, sfx_start: &mut u32) BuiltinType {
     let hex = end - start > 2 && src[start as usize] == b'0' && (src[(start + 1) as usize] | 0x20u8) == b'x';
     let mut hexf = false;
     let mut i = start + 2;
@@ -5541,7 +5541,7 @@ pub const fn ast_numeric_suffix(src: str, start: u32, end: u32, sfx_start: &mut 
 /// The value of float literal text `raw`, decimal or hex (`0x1.8p3`), with `_` separators and an
 /// `f32`/`f64` suffix allowed, rounded once to f32 when `single` (the C compiler rounds an `f`-suffixed
 /// literal once). None when the text is not a float literal.
-pub fn float_literal_value(src: str, raw: tok::Span, single: bool) Option<f64> {
+pub(package) fn float_literal_value(src: str, raw: tok::Span, single: bool) Option<f64> {
     let mut end = raw.end;
     let _ = ast_numeric_suffix(src, raw.start, raw.end, &mut end);
     let mut txt = src.slice(raw.start as usize, end as usize);
@@ -5694,7 +5694,7 @@ const fn hex_float_value(t: str, single: bool) Option<f64> {
 
 /// The value of a decimal integer literal (`_` separators and an integer suffix allowed), -1 for
 /// any other literal text.
-pub const fn bc_decimal(src: str, raw: tok::Span) i64 {
+pub(package) const fn bc_decimal(src: str, raw: tok::Span) i64 {
     let mut end = raw.end;
     let sfx = ast_numeric_suffix(src, raw.start, raw.end, &mut end);
     if sfx == BuiltinType::BT_F32 || sfx == BuiltinType::BT_F64 || end <= raw.start {
@@ -5718,8 +5718,8 @@ pub const fn bc_decimal(src: str, raw: tok::Span) i64 {
 
 /// The package type table an `Ast` reads through (`Ast.gt`). The prelude image does not save the
 /// pointer: the loader binds it again (`Package::bind_types`).
-pub struct PoolPtr {
-    pub p: *mut TypePool,
+pub(package) struct PoolPtr {
+    pub(package) p: *mut TypePool,
 }
 
 extend PoolPtr as Persist {

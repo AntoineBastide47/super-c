@@ -7,37 +7,37 @@ import codegen::obj as ob;
 import lir::ir as ir;
 
 /// The debug sections.
-pub const D_ABBREV: u8 = 0;
-pub const D_INFO: u8 = 1;
-pub const D_LINE: u8 = 2;
-pub const D_RANGES: u8 = 3;
-pub const D_COUNT: u8 = 4;
+pub(package) const D_ABBREV: u8 = 0;
+pub(package) const D_INFO: u8 = 1;
+pub(package) const D_LINE: u8 = 2;
+pub(package) const D_RANGES: u8 = 3;
+pub(package) const D_COUNT: u8 = 4;
 
 /// Fixup kinds: the address of symbol `sym` plus the addend (pointer-sized), or the offset of byte
 /// `addend` of debug section `sym` (4 bytes), which a linker moves as it joins the sections.
-pub const FX_ADDR: u8 = 0;
-pub const FX_SECOFF: u8 = 1;
+pub(package) const FX_ADDR: u8 = 0;
+pub(package) const FX_SECOFF: u8 = 1;
 
 /// A field of debug section `sec` at byte `off` that the format relocates.
-pub struct DFix {
-    pub sec: u8,
-    pub off: u32,
-    pub kind: u8,
-    pub sym: u32,
-    pub addend: i64,
+pub(package) struct DFix {
+    pub(package) sec: u8,
+    pub(package) off: u32,
+    pub(package) kind: u8,
+    pub(package) sym: u32,
+    pub(package) addend: i64,
 }
 
 extend DFix as Copy {}
 
 /// The debug sections' bytes and their fixups. A fixup's field holds zero bytes: the format places the
 /// addend.
-pub struct Dwarf {
-    pub secs: Vector<Vector<u8>>,
-    pub fixes: Vector<DFix>,
+pub(package) struct Dwarf {
+    pub(package) secs: Vector<Vector<u8>>,
+    pub(package) fixes: Vector<DFix>,
 }
 
 /// The names of the debug sections, in `D_*` order.
-pub const NAMES: [str; 4] = [".debug_abbrev", ".debug_info", ".debug_line", ".debug_ranges"];
+pub(package) const NAMES: [str; 4] = [".debug_abbrev", ".debug_info", ".debug_line", ".debug_ranges"];
 
 // Abbreviations: the compile unit, a local subprogram, a global one; each subprogram's form plus 2 without
 // a file and line, for a function without rows.
@@ -180,7 +180,7 @@ const fn patch32(o: &mut Vector<u8>, at: usize, v: u32) {
 extend Dwarf {
     /// The debug information of object `o`'s functions, files named by package `p`, compiled in
     /// directory `comp_dir`, with `ptr`-byte addresses.
-    pub fn of_obj(o: &ob::Obj, p: &ir::Package, comp_dir: str, ptr: u32) Dwarf {
+    pub(package) fn of_obj(o: &ob::Obj, p: &ir::Package, comp_dir: str, ptr: u32) Dwarf {
         let mut names = Vector::<str>::with_capacity(o.funcs.len());
         let mut globals = Vector::<bool>::with_capacity(o.funcs.len());
         for k in 0..o.funcs.len() {
@@ -203,7 +203,7 @@ extend Dwarf {
     /// The debug information of functions `funcs` (the symbol of each is the address fixups' symbol),
     /// their rows in `lines`, named `names`, global where `globals` says, in package files named
     /// `files`, compiled in directory `comp_dir`, with `ptr`-byte addresses.
-    pub fn build(
+    pub(package) fn build(
         funcs: []ob::OFunc,
         lines: []ob::OLine,
         names: []str,
@@ -434,7 +434,7 @@ fn row_op(
 const NONE32: u32 = 0xFFFFFFFF;
 
 /// The paths of package `p`'s files, by file id.
-pub fn file_names(p: &ir::Package) Vector<str> {
+pub(package) fn file_names(p: &ir::Package) Vector<str> {
     let mut v = Vector::<str>::with_capacity(p.files.len());
     for k in 0..p.files.len() {
         v.push(p.spell(p.files[k]));
@@ -446,7 +446,16 @@ pub fn file_names(p: &ir::Package) Vector<str> {
 /// body code unit and a `lines` index of `b` each, a unit `unit` bytes, the body `nbody` units; a row
 /// past the body (a branch the epilogue replaced) starts the epilogue. The prologue takes the first
 /// row's location.
-pub fn rows(o: &mut ob::Obj, b: &ir::Body, sym: u32, size: u32, body: u32, rows: &Vector<u64>, nbody: u32, unit: u32) {
+pub(package) fn rows(
+    o: &mut ob::Obj,
+    b: &ir::Body,
+    sym: u32,
+    size: u32,
+    body: u32,
+    rows: &Vector<u64>,
+    nbody: u32,
+    unit: u32,
+) {
     let start = o.lines.len() as u32;
     for k in 0..rows.len() {
         let w = (rows[k] >> 32) as u32;
@@ -464,15 +473,15 @@ pub fn rows(o: &mut ob::Obj, b: &ir::Body, sym: u32, size: u32, body: u32, rows:
 }
 
 /// The formats `attach` writes into.
-pub const F_MACHO: u8 = 0;
-pub const F_ELF: u8 = 1;
-pub const F_COFF: u8 = 2;
+pub(package) const F_MACHO: u8 = 0;
+pub(package) const F_ELF: u8 = 1;
+pub(package) const F_COFF: u8 = 2;
 
 /// Add `d`'s sections to object `o` of format `fmt`, an address fixup as relocation kind `abs` of the
 /// instruction set. Mach-O keeps the debug sections in its objects (the linker leaves them, `dsymutil`
 /// reads them), so an offset into them needs no relocation; ELF and COFF linkers join them, so it
 /// relocates against a local symbol at the section's start (`ob::R_SECOFF32`).
-pub fn attach(o: &mut ob::Obj, d: &Dwarf, fmt: u8, abs: u8) {
+pub(package) fn attach(o: &mut ob::Obj, d: &Dwarf, fmt: u8, abs: u8) {
     let names: []str = NAMES;
     let mut sec = Vector::<u8>::new();
     let mut start = Vector::<u32>::new();

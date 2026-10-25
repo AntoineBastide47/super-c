@@ -92,63 +92,63 @@ const DYLD_CHAINED_PTR_64_OFFSET: u32 = 6;
 const DYLD_CHAINED_IMPORT_ADDEND: u32 = 2;
 
 /// What a link produces.
-pub const K_EXE: u8 = 0;
-pub const K_DYLIB: u8 = 1;
+pub(package) const K_EXE: u8 = 0;
+pub(package) const K_DYLIB: u8 = 1;
 
 /// A link: the objects, the libraries (`-l` names searched in `dirs`, then the SDK's `usr/lib`;
 /// frameworks searched in `fdirs`, then the SDK's), the SDK root, the output and its kind (a dylib's
 /// install name `install`), and whether to leave out the local symbols and the debug map (`strip`).
-pub struct Opts {
-    pub out: String,
-    pub kind: u8,
-    pub install: String,
-    pub objs: Vector<String>,
-    pub libs: Vector<String>,
-    pub dirs: Vector<String>,
-    pub fworks: Vector<String>,
-    pub fdirs: Vector<String>,
-    pub sdk: String,
-    pub strip: bool,
-    pub jobs: u32, // 1: the signature's page hashes in this thread, else on the task pool
+pub(package) struct Opts {
+    pub(package) out: String,
+    pub(package) kind: u8,
+    pub(package) install: String,
+    pub(package) objs: Vector<String>,
+    pub(package) libs: Vector<String>,
+    pub(package) dirs: Vector<String>,
+    pub(package) fworks: Vector<String>,
+    pub(package) fdirs: Vector<String>,
+    pub(package) sdk: String,
+    pub(package) strip: bool,
+    pub(package) jobs: u32, // 1: the signature's page hashes in this thread, else on the task pool
 }
 
 // An input file: its bytes in the blob, its sections and symbols.
 struct IFile {
-    pub path: u32, // `L.paths` index
-    pub at: usize,
-    pub len: usize,
-    pub sec0: u32,
-    pub nsec: u32,
-    pub sym0: u32,
-    pub nsym: u32,
-    pub debug: bool, // holds DWARF: the debug map names it
+    pub(package) path: u32, // `L.paths` index
+    pub(package) at: usize,
+    pub(package) len: usize,
+    pub(package) sec0: u32,
+    pub(package) nsec: u32,
+    pub(package) sym0: u32,
+    pub(package) nsym: u32,
+    pub(package) debug: bool, // holds DWARF: the debug map names it
 }
 
 // An input section: names (`sn` ids), flags, alignment, the object's address and size, its bytes and
 // relocations in the blob, and where it lands: output section `out` at offset `at`.
 struct ISec {
-    pub file: u32,
-    pub seg: u32,
-    pub sect: u32,
-    pub flags: u32,
-    pub align: u8,
-    pub addr: u64,
-    pub size: u64,
-    pub off: usize,
-    pub reloff: usize,
-    pub nreloc: u32,
-    pub out: u32,
-    pub at: u64,
+    pub(package) file: u32,
+    pub(package) seg: u32,
+    pub(package) sect: u32,
+    pub(package) flags: u32,
+    pub(package) align: u8,
+    pub(package) addr: u64,
+    pub(package) size: u64,
+    pub(package) off: usize,
+    pub(package) reloff: usize,
+    pub(package) nreloc: u32,
+    pub(package) out: u32,
+    pub(package) at: u64,
 }
 
 // An input symbol: its name (`names` id), nlist type, section (1-based in its file, 0 none), desc and value.
 struct ISym {
-    pub name: u32,
-    pub ty: u8,
-    pub sect: u8,
-    pub desc: u16,
-    pub value: u64,
-    pub file: u32,
+    pub(package) name: u32,
+    pub(package) ty: u8,
+    pub(package) sect: u8,
+    pub(package) desc: u16,
+    pub(package) value: u64,
+    pub(package) file: u32,
 }
 
 // A global symbol's state.
@@ -159,76 +159,76 @@ const G_COMMON: u8 = 3; // a tentative definition: `size` bytes aligned to `1 <<
 const G_HEADER: u8 = 4; // the image's own Mach-O header
 
 struct GSym {
-    pub name: u32,
-    pub kind: u8,
-    pub sym: u32,
-    pub lib: u32,
-    pub size: u64,
-    pub align: u8,
-    pub at: u64,
-    pub got: u32,
-    pub stub: u32,
-    pub imp: u32,
-    pub tlv: bool, // exported as a thread-local variable
-    pub weak: bool,
+    pub(package) name: u32,
+    pub(package) kind: u8,
+    pub(package) sym: u32,
+    pub(package) lib: u32,
+    pub(package) size: u64,
+    pub(package) align: u8,
+    pub(package) at: u64,
+    pub(package) got: u32,
+    pub(package) stub: u32,
+    pub(package) imp: u32,
+    pub(package) tlv: bool, // exported as a thread-local variable
+    pub(package) weak: bool,
 }
 
 // An output section: its segment (`SEG_*` or a later index for another segment), names, flags,
 // alignment, its order within the segment, size, address and file offset.
 struct OSec {
-    pub seg: u32,
-    pub segname: u32, // `sn` id
-    pub sect: u32, // `sn` id
-    pub flags: u32,
-    pub align: u8,
-    pub rank: u32,
-    pub size: u64,
-    pub addr: u64,
-    pub off: u64,
+    pub(package) seg: u32,
+    pub(package) segname: u32, // `sn` id
+    pub(package) sect: u32, // `sn` id
+    pub(package) flags: u32,
+    pub(package) align: u8,
+    pub(package) rank: u32,
+    pub(package) size: u64,
+    pub(package) addr: u64,
+    pub(package) off: u64,
 }
 
 // An output segment: its sections `first .. first + n` of the sorted output sections.
 struct OSeg {
-    pub name: String,
-    pub first: u32,
-    pub n: u32,
-    pub addr: u64,
-    pub vmsize: u64,
-    pub off: u64,
-    pub filesize: u64,
-    pub prot: u32,
-    pub flags: u32,
+    pub(package) name: String,
+    pub(package) first: u32,
+    pub(package) n: u32,
+    pub(package) addr: u64,
+    pub(package) vmsize: u64,
+    pub(package) off: u64,
+    pub(package) filesize: u64,
+    pub(package) prot: u32,
+    pub(package) flags: u32,
 }
 
 // A chained fixup: the pointer at image offset `at` gets the image offset `target` (rebase) or import
 // `imp`.
 struct Fix {
-    pub at: u64,
-    pub target: u64,
-    pub imp: u32,
+    pub(package) at: u64,
+    pub(package) target: u64,
+    pub(package) imp: u32,
 }
 
 // An import: a library's symbol plus an addend.
 struct Imp {
-    pub name: u32,
-    pub lib: u32,
-    pub addend: i64,
-    pub weak: bool,
+    pub(package) name: u32,
+    pub(package) lib: u32,
+    pub(package) addend: i64,
+    pub(package) weak: bool,
 }
 
 // A library the image loads: its install name and versions.
 struct Lib {
-    pub install: String,
-    pub cur: u32,
-    pub compat: u32,
+    pub(package) install: String,
+    pub(package) cur: u32,
+    pub(package) compat: u32,
 }
 
 // A compact unwind range: where a function starts (input section `sec` at object address `v`, or image
 // address `v` when `sec` is NONE) and its encoding.
 struct Unw {
-    pub sec: u32,
-    pub v: u64,
-    pub enc: u32,
+    pub(package) sec: u32,
+    pub(package) v: u64,
+    pub(package) enc: u32,
 }
 
 extend IFile as Copy {}
@@ -245,37 +245,37 @@ const SEG_DCONST: u32 = 1;
 const SEG_DATA: u32 = 2;
 
 struct L {
-    pub kind: u8,
-    pub install: String,
-    pub base: u64,
-    pub files: Vector<IFile>,
-    pub paths: Vector<String>,
-    pub secs: Vector<ISec>,
-    pub syms: Vector<ISym>,
-    pub names: nm::Names,
-    pub sn: nm::Names, // segment and section names
-    pub glob: Vector<u32>, // per name id: its `gs` index plus 1 (0: not global)
-    pub gs: Vector<GSym>,
-    pub libs: Vector<Lib>,
-    pub osecs: Vector<OSec>,
-    pub segs: Vector<OSeg>,
-    pub fixes: Vector<Fix>,
-    pub imps: Vector<Imp>,
-    pub got: Vector<u32>, // per slot: its `gs` index
-    pub stubs: Vector<u32>, // per stub: its `gs` index
-    pub unw: Vector<Unw>,
-    pub unw_enc: Vector<u32>, // the distinct encodings: `__unwind_info`'s common table when at most 127
-    pub o_stubs: u32,
-    pub o_got: u32,
-    pub o_unwind: u32,
-    pub o_common: u32,
-    pub tlv_start: u64, // the thread-local template's image offset
-    pub tlv: bool,
-    pub err: String,
+    pub(package) kind: u8,
+    pub(package) install: String,
+    pub(package) base: u64,
+    pub(package) files: Vector<IFile>,
+    pub(package) paths: Vector<String>,
+    pub(package) secs: Vector<ISec>,
+    pub(package) syms: Vector<ISym>,
+    pub(package) names: nm::Names,
+    pub(package) sn: nm::Names, // segment and section names
+    pub(package) glob: Vector<u32>, // per name id: its `gs` index plus 1 (0: not global)
+    pub(package) gs: Vector<GSym>,
+    pub(package) libs: Vector<Lib>,
+    pub(package) osecs: Vector<OSec>,
+    pub(package) segs: Vector<OSeg>,
+    pub(package) fixes: Vector<Fix>,
+    pub(package) imps: Vector<Imp>,
+    pub(package) got: Vector<u32>, // per slot: its `gs` index
+    pub(package) stubs: Vector<u32>, // per stub: its `gs` index
+    pub(package) unw: Vector<Unw>,
+    pub(package) unw_enc: Vector<u32>, // the distinct encodings: `__unwind_info`'s common table when at most 127
+    pub(package) o_stubs: u32,
+    pub(package) o_got: u32,
+    pub(package) o_unwind: u32,
+    pub(package) o_common: u32,
+    pub(package) tlv_start: u64, // the thread-local template's image offset
+    pub(package) tlv: bool,
+    pub(package) err: String,
 }
 
 /// Link `o`. False with the reason in `err` when it fails.
-pub fn link(o: &Opts, err: &mut String) bool {
+pub(package) fn link(o: &Opts, err: &mut String) bool {
     let mut l = L {
         kind: o.kind,
         install: o.install.clone(),
@@ -628,13 +628,13 @@ fn load_libraries(l: &mut L, o: &Opts) bool {
 }
 
 /// What `find_lib` finds.
-pub const LIB_NONE: u8 = 0;
-pub const LIB_SHARED: u8 = 1; // a stub or a dylib
-pub const LIB_ARCHIVE: u8 = 2;
+pub(package) const LIB_NONE: u8 = 0;
+pub(package) const LIB_SHARED: u8 = 1; // a stub or a dylib
+pub(package) const LIB_ARCHIVE: u8 = 2;
 
 /// Library `-l<name>` of link `o`, as ld64 searches: each directory of `dirs`, then the SDK's
 /// `usr/lib`, for `lib<name>.tbd`, `.dylib`, then `.a`; its path into `path`.
-pub fn find_lib(o: &Opts, name: str, path: &mut String) u8 {
+pub(package) fn find_lib(o: &Opts, name: str, path: &mut String) u8 {
     for d in 0..o.dirs.len() + 1 {
         let dir = if d < o.dirs.len() {
             o.dirs[d].clone();
@@ -2075,20 +2075,20 @@ fn file_off(l: &L, at: u64) u64 {
 // A trie node: whether a name ends here (its flags and image offset), its edges `e0 .. e0 + ne` in
 // `TEdge`s, and its offset in the trie.
 struct TNode {
-    pub term: bool,
-    pub flags: u64,
-    pub addr: u64,
-    pub e0: u32,
-    pub ne: u32,
-    pub off: u32,
+    pub(package) term: bool,
+    pub(package) flags: u64,
+    pub(package) addr: u64,
+    pub(package) e0: u32,
+    pub(package) ne: u32,
+    pub(package) off: u32,
 }
 
 // An edge: bytes `a .. b` of name `name` (index into the sorted names), to node `to`.
 struct TEdge {
-    pub name: u32,
-    pub a: u32,
-    pub b: u32,
-    pub to: u32,
+    pub(package) name: u32,
+    pub(package) a: u32,
+    pub(package) b: u32,
+    pub(package) to: u32,
 }
 
 extend TNode as Copy {}
@@ -2205,11 +2205,11 @@ const fn node_size(l: &L, names: &Vector<u32>, nodes: &Vector<TNode>, edges: &Ve
 
 // An output symbol table entry.
 struct OSym {
-    pub name: u32, // offset in the string table
-    pub ty: u8,
-    pub sect: u8,
-    pub desc: u16,
-    pub value: u64,
+    pub(package) name: u32, // offset in the string table
+    pub(package) ty: u8,
+    pub(package) sect: u8,
+    pub(package) desc: u16,
+    pub(package) value: u64,
 }
 
 extend OSym as Copy {}

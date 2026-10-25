@@ -35,7 +35,7 @@ const fn homogeneous(b: &Body, l: u32, ptr: u32) u8 {
 
 /// The layout of signature `sig` of body `b` (`ptr`-byte pointers) under the Apple variant when `apple`;
 /// `vregs` is the package's `vec_regs`.
-pub fn classify(b: &Body, sig: u32, ptr: u32, apple: bool, vregs: u32, out: &mut CallLayout) {
+pub(package) fn classify(b: &Body, sig: u32, ptr: u32, apple: bool, vregs: u32, out: &mut CallLayout) {
     out.locs.truncate(0);
     out.parts.truncate(0);
     let np = b.pool[sig as usize];
@@ -115,7 +115,7 @@ pub fn classify(b: &Body, sig: u32, ptr: u32, apple: bool, vregs: u32, out: &mut
 /// How a variadic argument of machine type `t` passes under the standard convention, which places it
 /// as a fixed one: in vector registers (`vr`) or integer ones, `n` registers holding `es` bytes of the
 /// value each, or a pointer to a copy in one integer register (`byref`).
-pub fn va_place(b: &Body, t: u8, ptr: u32, vregs: u32) (bool, u32, u32, bool) {
+pub(package) fn va_place(b: &Body, t: u8, ptr: u32, vregs: u32) (bool, u32, u32, bool) {
     let mut g: u32 = 0;
     let mut s: u32 = 0;
     let mut a: u32 = 0;

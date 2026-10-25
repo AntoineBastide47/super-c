@@ -15,7 +15,7 @@ import bindgen::ctarget as ct;
 
 /// Archive objects `objs` into static library `out` for target `os`; LINKED, or FAILED with the reason in
 /// `why`.
-pub fn archive(os: i32, out: str, objs: &Vector<String>, why: &mut String) i32 {
+pub(package) fn archive(os: i32, out: str, objs: &Vector<String>, why: &mut String) i32 {
     if !ar::archive(nat::obj_kind(os), out, objs, why) {
         return FAILED;
     }
@@ -23,26 +23,26 @@ pub fn archive(os: i32, out: str, objs: &Vector<String>, why: &mut String) i32 {
 }
 
 /// Outcomes of `link_args`.
-pub const LINKED: i32 = 1;
-pub const NOT_SERVED: i32 = 0;
-pub const FAILED: i32 = -1;
+pub(package) const LINKED: i32 = 1;
+pub(package) const NOT_SERVED: i32 = 0;
+pub(package) const FAILED: i32 = -1;
 
 // What a C compiler's link command asks for.
 struct Cmd {
-    pub out: String,
-    pub objs: Vector<String>,
-    pub libs: Vector<String>,
-    pub dirs: Vector<String>,
-    pub fworks: Vector<String>,
-    pub fdirs: Vector<String>,
-    pub sysroot: String,
-    pub shared: bool,
-    pub install: String,
-    pub strip: bool,
-    pub jobs: u32,
-    pub stack: u64, // the main thread's stack reserve (PE), 0: the default
-    pub wasm_stack: u64, // wasm: the stack's size (`-z stack-size=`), 0: the default
-    pub stack_first: bool, // wasm: the stack before the data
+    pub(package) out: String,
+    pub(package) objs: Vector<String>,
+    pub(package) libs: Vector<String>,
+    pub(package) dirs: Vector<String>,
+    pub(package) fworks: Vector<String>,
+    pub(package) fdirs: Vector<String>,
+    pub(package) sysroot: String,
+    pub(package) shared: bool,
+    pub(package) install: String,
+    pub(package) strip: bool,
+    pub(package) jobs: u32,
+    pub(package) stack: u64, // the main thread's stack reserve (PE), 0: the default
+    pub(package) wasm_stack: u64, // wasm: the stack's size (`-z stack-size=`), 0: the default
+    pub(package) stack_first: bool, // wasm: the stack before the data
 }
 
 /// Link for target `(os, isa)` what link command `args` names (its objects, libraries, flags and output, in
@@ -50,7 +50,7 @@ struct Cmd {
 /// leaving out the local symbols and the debug information when `strip`, with `jobs` workers (1: no task
 /// pool; else the caller shuts the pool down after). LINKED; NOT_SERVED when the target or an argument is
 /// outside what this linker does (`why` names it); FAILED with the reason in `why`.
-pub fn link_args(os: i32, isa: i32, args: &Vector<String>, strip: bool, jobs: u32, why: &mut String) i32 {
+pub(package) fn link_args(os: i32, isa: i32, args: &Vector<String>, strip: bool, jobs: u32, why: &mut String) i32 {
     let fmt = nat::own_linker(os, isa);
     if fmt == nat::LINK_NONE {
         why.push_str("no own linker for the target");

@@ -8,20 +8,20 @@ import target::x64tab as t;
 /// A symbol an instruction names: the relocation kind (`x::R_*`), the name as written, the field's
 /// offset from the instruction's start, and the addend as `x64gen` gives its relocations (relative to
 /// the field: the bytes to the instruction's end subtracted).
-pub struct Fix {
-    pub kind: u8,
-    pub name: String,
-    pub at: u32,
-    pub addend: i64,
+pub(package) struct Fix {
+    pub(package) kind: u8,
+    pub(package) name: String,
+    pub(package) at: u32,
+    pub(package) addend: i64,
 }
 
-pub const FX_NONE: u8 = 0;
+pub(package) const FX_NONE: u8 = 0;
 
 /// No resolved branch target: `assemble`'s `tgt` when the caller knows none.
-pub const NOTGT: i64 = 0x7FFFFFFFFFFFFFFF;
+pub(package) const NOTGT: i64 = 0x7FFFFFFFFFFFFFFF;
 
 extend Fix {
-    pub fn new() Fix {
+    pub(package) fn new() Fix {
         return Fix { kind: FX_NONE, name: String::new(), at: 0, addend: 0 };
     }
 }
@@ -123,8 +123,8 @@ const CC_NAMES: [str<'static>; 16] = [
 
 // Other spellings of the conditions.
 struct Alias {
-    pub name: str<'static>,
-    pub cc: u8,
+    pub(package) name: str<'static>,
+    pub(package) cc: u8,
 }
 
 const CC_ALIASES: [Alias; 14] = [
@@ -145,7 +145,7 @@ const CC_ALIASES: [Alias; 14] = [
 ];
 
 /// The name of condition `c`.
-pub const fn cond_name(c: u8) str<'static> {
+pub(package) const fn cond_name(c: u8) str<'static> {
     let n: []str<'static> = CC_NAMES;
     return n[c as usize];
 }
@@ -252,36 +252,36 @@ const fn unsigned(s: str, i: &mut usize, out: &mut i64) bool {
 struct P {}
 
 extend P {
-    pub const REG: u8 = 1;
-    pub const MEM: u8 = 2; // memory, or a bare expression (a branch target)
-    pub const IMM: u8 = 3;
+    pub(package) const REG: u8 = 1;
+    pub(package) const MEM: u8 = 2; // memory, or a bare expression (a branch target)
+    pub(package) const IMM: u8 = 3;
 }
 
 // Register classes.
 struct C {}
 
 extend C {
-    pub const GP: u8 = 1;
-    pub const X: u8 = 2;
-    pub const Y: u8 = 3;
-    pub const Z: u8 = 4;
-    pub const K: u8 = 5;
+    pub(package) const GP: u8 = 1;
+    pub(package) const X: u8 = 2;
+    pub(package) const Y: u8 = 3;
+    pub(package) const Z: u8 = 4;
+    pub(package) const K: u8 = 5;
 }
 
 // A parsed operand.
 struct Opd {
-    pub p: u8,
-    pub cls: u8,
-    pub size: u8, // a general register's size in bytes
-    pub r: u8,
-    pub star: bool, // `*`: an indirect branch target
-    pub bare: bool, // memory without a parenthesized base: an absolute address or a branch target
-    pub dot: bool, // a bare `.`-relative expression
-    pub sym: bool, // the displacement or target names a symbol (the instruction's `Fix`)
-    pub seg: u8,
-    pub vsib: u8, // the class of a vector index (`C::X` .. `C::Z`), 0 for none
-    pub m: x::Mem,
-    pub v: i64,
+    pub(package) p: u8,
+    pub(package) cls: u8,
+    pub(package) size: u8, // a general register's size in bytes
+    pub(package) r: u8,
+    pub(package) star: bool, // `*`: an indirect branch target
+    pub(package) bare: bool, // memory without a parenthesized base: an absolute address or a branch target
+    pub(package) dot: bool, // a bare `.`-relative expression
+    pub(package) sym: bool, // the displacement or target names a symbol (the instruction's `Fix`)
+    pub(package) seg: u8,
+    pub(package) vsib: u8, // the class of a vector index (`C::X` .. `C::Z`), 0 for none
+    pub(package) m: x::Mem,
+    pub(package) v: i64,
 }
 
 extend Opd as Copy {}
@@ -671,7 +671,7 @@ fn reloc_kind(rel: bool, spec: str, rex: bool) u8 {
 /// Assemble the instruction `text` (AT&T syntax) onto `out`; `tgt` is the offset from the
 /// instruction's start of the branch target it names (`NOTGT` when the caller knows none: the symbol
 /// becomes `fx`). False with `err` set when no row takes it.
-pub fn assemble(text: str, tgt: i64, out: &mut Vector<u8>, fx: &mut Fix, err: &mut String) bool {
+pub(package) fn assemble(text: str, tgt: i64, out: &mut Vector<u8>, fx: &mut Fix, err: &mut String) bool {
     let mut i: usize = 0;
     let mut lock = false;
     let mut d16: u8 = 0;
@@ -998,7 +998,7 @@ fn vec_text(o: &mut String, n: u8, vs: u32) {
 }
 
 /// Disassemble the instruction at `b[at..]` onto `out`: its length, 0 when the table decodes none.
-pub fn disassemble(b: []u8, at: usize, out: &mut String) u32 {
+pub(package) fn disassemble(b: []u8, at: usize, out: &mut String) u32 {
     let mut n = t::Ins::new(0);
     let len = t::decode(b, at, &mut n);
     if len != 0 {
@@ -1008,7 +1008,7 @@ pub fn disassemble(b: []u8, at: usize, out: &mut String) u32 {
 }
 
 /// Print instruction `n` in AT&T syntax.
-pub fn print_ins(n: &t::Ins, o: &mut String) {
+pub(package) fn print_ins(n: &t::Ins, o: &mut String) {
     let rows: []t::Row = t::ROWS;
     let r = rows[n.row as usize];
     if n.lock {

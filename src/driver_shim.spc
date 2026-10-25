@@ -27,21 +27,21 @@ extern "C" "unistd.h" {
 @platform(macos | ios)
 extern "C" "fcntl.h" {
     struct flock {
-        pub l_start: i64,
-        pub l_len: i64,
-        pub l_pid: i32,
-        pub l_type: i16,
-        pub l_whence: i16,
+        pub(package) l_start: i64,
+        pub(package) l_len: i64,
+        pub(package) l_pid: i32,
+        pub(package) l_type: i16,
+        pub(package) l_whence: i16,
     }
 }
 @platform(linux | android)
 extern "C" "fcntl.h" {
     struct flock {
-        pub l_type: i16,
-        pub l_whence: i16,
-        pub l_start: i64,
-        pub l_len: i64,
-        pub l_pid: i32,
+        pub(package) l_type: i16,
+        pub(package) l_whence: i16,
+        pub(package) l_start: i64,
+        pub(package) l_len: i64,
+        pub(package) l_pid: i32,
     }
 }
 @platform(macos | ios | linux | android)
@@ -71,11 +71,11 @@ extern "C" "windows.h" {
     // `Offset` and `OffsetHigh` are the members of an anonymous union that overlays `Pointer`.
     @import("OVERLAPPED")
     struct OVERLAPPED {
-        pub Internal: usize,
-        pub InternalHigh: usize,
-        pub Offset: u32,
-        pub OffsetHigh: u32,
-        pub hEvent: *mut void,
+        pub(package) Internal: usize,
+        pub(package) InternalHigh: usize,
+        pub(package) Offset: u32,
+        pub(package) OffsetHigh: u32,
+        pub(package) hEvent: *mut void,
     }
     fn CreateFileA(
         path: *const char,
@@ -118,7 +118,7 @@ extern "C" "windows.h" {
 
 /// Platform index of the build: 0 windows, 1 macos (and ios), 2 linux, 3 wasm, 5 android (the default
 /// --target).
-pub unsafe const fn sc_host_platform() i32 {
+pub(package) unsafe const fn sc_host_platform() i32 {
     return switch PLATFORM {
         Windows => 0,
         MacOS | IOS => 1,
@@ -129,7 +129,7 @@ pub unsafe const fn sc_host_platform() i32 {
 }
 
 /// Instruction set of the build: 0 x86_64, 1 aarch64, 2 wasm32 (the default --arch).
-pub unsafe const fn sc_host_arch() i32 {
+pub(package) unsafe const fn sc_host_arch() i32 {
     return switch ARCH {
         X86_64 => 0,
         AArch64 => 1,
@@ -146,19 +146,19 @@ static mut ARGV0: *const char = null;
 /// Record the process's argv[0], which must outlive every `argv0_path` call: under WASI, where the
 /// module has no other name, an absolute argv[0] is the path `argv0_path` reports.
 @platform(wasm)
-pub unsafe fn sc_set_argv0(argv0: *const char) {
+pub(package) unsafe fn sc_set_argv0(argv0: *const char) {
     unsafe ARGV0 = argv0;
 }
 /// Record the process's argv[0], which must outlive every `argv0_path` call: under WASI, where the
 /// module has no other name, an absolute argv[0] is the path `argv0_path` reports.
 @platform(!wasm)
-pub unsafe const fn sc_set_argv0(_argv0: *const char) {}
+pub(package) unsafe const fn sc_set_argv0(_argv0: *const char) {}
 
 /// The path of the running module under WASI: an absolute argv[0] names the module file through a
 /// preopened root (`wasmtime run --dir=/ --argv0 <abs path>`); a relative one resolves against the
 /// guest's cwd, not the host's, so it gives the empty string, as does any other target.
 @platform(wasm)
-pub fn argv0_path() String {
+pub(package) fn argv0_path() String {
     let a = unsafe ARGV0;
     if a == null || unsafe a[0] != '/' {
         return String::new();
@@ -169,7 +169,7 @@ pub fn argv0_path() String {
 /// preopened root (`wasmtime run --dir=/ --argv0 <abs path>`); a relative one resolves against the
 /// guest's cwd, not the host's, so it gives the empty string, as does any other target.
 @platform(!wasm)
-pub fn argv0_path() String {
+pub(package) fn argv0_path() String {
     return String::new();
 }
 
@@ -268,7 +268,7 @@ unsafe fn jobserver_load() bool {
 
 /// Create the process-tree jobserver when none exists. Returns 1 when a shared budget is active.
 @platform(windows)
-pub unsafe fn sc_jobserver_init(capacity: i32) i32 {
+pub(package) unsafe fn sc_jobserver_init(capacity: i32) i32 {
     if unsafe jobserver_load() {
         return 1;
     }
@@ -361,7 +361,7 @@ unsafe fn jobserver_load() bool {
 
 /// Create the process-tree jobserver when none exists. Returns 1 when a shared budget is active.
 @platform(macos | ios | linux | android)
-pub unsafe fn sc_jobserver_init(capacity: i32) i32 {
+pub(package) unsafe fn sc_jobserver_init(capacity: i32) i32 {
     if unsafe jobserver_load() {
         return 1;
     }
@@ -426,7 +426,7 @@ unsafe fn jobserver_lock(i: i32, lock: bool) i32 {
 
 /// Create the process-tree jobserver when none exists. Returns 1 when a shared budget is active.
 @platform(wasm)
-pub unsafe fn sc_jobserver_init(_capacity: i32) i32 {
+pub(package) unsafe fn sc_jobserver_init(_capacity: i32) i32 {
     return 0;
 }
 
@@ -479,7 +479,7 @@ unsafe fn jobserver_release() bool {
 }
 
 /// Return all extra worker slots before this process waits on child work.
-pub unsafe fn sc_jobserver_release_claim() {
+pub(package) unsafe fn sc_jobserver_release_claim() {
     while unsafe JS_CLAIMED > 1 {
         if !unsafe jobserver_release() {
             stdlib::abort();
@@ -494,7 +494,7 @@ fn release_claim_at_exit() {
 }
 
 /// Reserve up to `wanted` worker slots, including this process's inherited slot.
-pub unsafe fn sc_jobserver_claim(wanted: i32) i32 {
+pub(package) unsafe fn sc_jobserver_claim(wanted: i32) i32 {
     let want = wanted.max(1);
     if !unsafe jobserver_load() {
         return want;
@@ -543,10 +543,10 @@ fn trace_abort(_sig: i32) {
 /// Install the crash handler that prints a backtrace on SIGABRT: every panic aborts, and would die
 /// silent otherwise. A no-op under WASI, which has neither signals nor a backtrace.
 @platform(!wasm)
-pub unsafe fn sc_trace_install() {
+pub(package) unsafe fn sc_trace_install() {
     unsafe signal::signal(signal::SIGABRT, trace_abort);
 }
 /// Install the crash handler that prints a backtrace on SIGABRT: every panic aborts, and would die
 /// silent otherwise. A no-op under WASI, which has neither signals nor a backtrace.
 @platform(wasm)
-pub unsafe fn sc_trace_install() {}
+pub(package) unsafe fn sc_trace_install() {}

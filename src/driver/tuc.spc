@@ -67,28 +67,28 @@ fn wstr(o: &mut String, s: str) {
 
 /// Bounds-checked little-endian cursor over the loaded cache image. Any overrun latches `ok=false`
 /// and every later read returns zero, so a truncated or corrupt file degrades to a cache miss.
-pub struct Rd {
-    pub sp: *const u8,
-    pub at: usize,
-    pub end: usize,
-    pub ok: bool,
+pub(package) struct Rd {
+    pub(package) sp: *const u8,
+    pub(package) at: usize,
+    pub(package) end: usize,
+    pub(package) ok: bool,
 }
 
 /// The per-TU cache for one build: per-module keys, the previous image, and per-module hit flags.
-pub struct Tuc {
-    pub on: bool,
-    pub hdr: u64,
-    pub keys: Vector<u64>,
-    pub raw: String, // previous cache image ("" = none)
-    pub hit: Vector<bool>,
-    pub soff: Vector<u64>, // payload offset per module in `raw` (past key+len)
-    pub slen: Vector<u64>,
-    pub out: String, // next cache image, assembled section by section in module order
-    pub path: String,
+pub(package) struct Tuc {
+    pub(package) on: bool,
+    pub(package) hdr: u64,
+    pub(package) keys: Vector<u64>,
+    pub(package) raw: String, // previous cache image ("" = none)
+    pub(package) hit: Vector<bool>,
+    pub(package) soff: Vector<u64>, // payload offset per module in `raw` (past key+len)
+    pub(package) slen: Vector<u64>,
+    pub(package) out: String, // next cache image, assembled section by section in module order
+    pub(package) path: String,
     // Scratch of the live section `sec_rec` writes, reused across sections.
-    pub tt: TtRec,
-    pub xs: Vector<u32>,
-    pub sat: Vector<u32>,
+    pub(package) tt: TtRec,
+    pub(package) xs: Vector<u32>,
+    pub(package) sat: Vector<u32>,
 }
 
 fn header_hash(p: &loader::Package, target: i32) u64 {
@@ -186,7 +186,7 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
 /// Fold `p`'s coroutine and cancellation reachability into hash `h0`. It is package-wide: a launched
 /// body in one module decides the safepoints and cancellation probes emitted in modules it never
 /// imports. The language server reads it to see whether a solve changed the answer.
-pub const fn reach_fold(h0: u64, p: &loader::Package) u64 {
+pub(package) const fn reach_fold(h0: u64, p: &loader::Package) u64 {
     let mut h = h0;
     let mut reach = p.co_state as u64 | p.cancel_state as u64 << 8;
     if p.cancel_used {
@@ -302,7 +302,14 @@ fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) 
 /// Open the cache for this build: compute every live module's key, load the previous image from
 /// `gen_root`, mark the modules whose sections still match, and reserve `est` bytes for the next image.
 /// Off when SC_NO_TU_CACHE is set, which also removes an existing image.
-pub fn tuc_setup(p: &loader::Package, live: *const bool, salt: &Vector<u64>, target: i32, gen_root: str, est: usize) Tuc {
+pub(package) fn tuc_setup(
+    p: &loader::Package,
+    live: *const bool,
+    salt: &Vector<u64>,
+    target: i32,
+    gen_root: str,
+    est: usize,
+) Tuc {
     let mut t = Tuc {
         on: false,
         hdr: 0,
@@ -401,19 +408,19 @@ const TT_LIN: u8 = 5;
 
 /// Structural type table under construction for one recorded section: types are written by
 /// structure, never by TypeId, so a replay re-interns them under any pool state.
-pub struct TtRec {
-    pub memo: Map<u64, u64>, // (am << 32 | at) -> table index
-    pub tab: String,
-    pub count: u32,
+pub(package) struct TtRec {
+    pub(package) memo: Map<u64, u64>, // (am << 32 | at) -> table index
+    pub(package) tab: String,
+    pub(package) count: u32,
 }
 
 /// An empty type table.
-pub fn tt_new() TtRec {
+pub(package) fn tt_new() TtRec {
     return TtRec { memo: Map::<u64, u64>::new(), tab: String::new(), count: 0 };
 }
 
 /// Table index for `(am, at)`, appending the entry (children first) on first sight.
-pub fn tt_ref(p: &loader::Package, r: &mut TtRec, am: ModuleId, at: TypeId) u32 {
+pub(package) fn tt_ref(p: &loader::Package, r: &mut TtRec, am: ModuleId, at: TypeId) u32 {
     if at == TYPE_NONE {
         return TT_NONE;
     }
@@ -510,21 +517,21 @@ pub fn tt_ref(p: &loader::Package, r: &mut TtRec, am: ModuleId, at: TypeId) u32 
 }
 
 /// One decoded table entry; fields are tag-specific.
-pub struct TtEnt {
-    pub tag: u8,
-    pub kind: u8,
-    pub qual: u8,
-    pub conc: u8,
-    pub module: u32,
-    pub r0: u32, // elem/owner ref
-    pub aux: u32, // array len / projection binder
-    pub im: u32,
-    pub idecl: u32,
-    pub n: u8,
-    pub argr: [u32; 8],
-    pub lts: u64,
-    pub raw: [u8; 16],
-    pub lin: ConstLin,
+pub(package) struct TtEnt {
+    pub(package) tag: u8,
+    pub(package) kind: u8,
+    pub(package) qual: u8,
+    pub(package) conc: u8,
+    pub(package) module: u32,
+    pub(package) r0: u32, // elem/owner ref
+    pub(package) aux: u32, // array len / projection binder
+    pub(package) im: u32,
+    pub(package) idecl: u32,
+    pub(package) n: u8,
+    pub(package) argr: [u32; 8],
+    pub(package) lts: u64,
+    pub(package) raw: [u8; 16],
+    pub(package) lin: ConstLin,
 }
 
 // Whether child ref `r` of table entry `i` is absent or names an earlier entry.
@@ -533,7 +540,7 @@ const fn tt_earlier(r: u32, i: usize) bool {
 }
 
 /// Intern table entry `idx` (children first) into module `am`'s pool. `cache` keys (idx, am).
-pub fn tt_id(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<u64, u64>, idx: u32, am: ModuleId) TypeId {
+pub(package) fn tt_id(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<u64, u64>, idx: u32, am: ModuleId) TypeId {
     if idx == TT_NONE {
         return TYPE_NONE;
     }
@@ -693,7 +700,7 @@ const fn ev_refs_ok(tab: &Vector<TtEnt>, ev: &mbe::RecEv) bool {
 
 /// Rewrite a decoded event's table refs back to live TypeIds interned into the consuming pools. False,
 /// with nothing rewritten, when a ref is outside the section's table: the section does not match.
-pub fn ev_patch(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<u64, u64>, ev: &mut mbe::RecEv) bool {
+pub(package) fn ev_patch(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<u64, u64>, ev: &mut mbe::RecEv) bool {
     if !ev_refs_ok(tab, ev) {
         return false;
     }
@@ -768,7 +775,7 @@ extend Rd {
         return v;
     }
 
-    pub const fn r32(self: &mut Self) u32 {
+    pub(package) const fn r32(self: &mut Self) u32 {
         if !self.ok || self.at + 4 > self.end {
             self.ok = false;
             return 0;
@@ -805,7 +812,7 @@ extend Rd {
     /// the last event; false when the image is truncated or malformed. The writer puts children first,
     /// so every child ref names an earlier entry: a self or forward ref (a cycle for `tt_id`) is
     /// malformed.
-    pub fn read_table(self: &mut Self, out: &mut Vector<TtEnt>) bool {
+    pub(package) fn read_table(self: &mut Self, out: &mut Vector<TtEnt>) bool {
         let evb = self.r32() as usize;
         let ev = self.at;
         if !self.ok || evb as u64 + 4 > (self.end - ev) as u64 {
@@ -919,7 +926,7 @@ extend Rd {
     }
 
     /// Read one journaled event into `ev` (its vectors are reused); false when the image is truncated.
-    pub fn read_ev(self: &mut Self, ev: &mut mbe::RecEv) bool {
+    pub(package) fn read_ev(self: &mut Self, ev: &mut mbe::RecEv) bool {
         ev.kind = self.r8();
         ev.a = self.r32();
         ev.b = self.r32();
@@ -951,7 +958,7 @@ extend Rd {
 
 extend Tuc {
     /// A reader over module `m`'s section of the previous image; the caller checked `hit[m]`.
-    pub const fn open(self: &Self, m: usize) Rd {
+    pub(package) const fn open(self: &Self, m: usize) Rd {
         return Rd {
             sp: self.raw.as_str().ptr(),
             at: self.soff[m] as usize,
@@ -963,7 +970,14 @@ extend Tuc {
     /// Append module `m`'s live section to the next image: the events `evs[from..]`, chunk texts read
     /// from `bodies` (see `RK_CHUNK`), with every TypeId slot rewritten to an index of the section's
     /// structural type table.
-    pub fn sec_rec(self: &mut Self, p: &loader::Package, m: usize, evs: &Vector<mbe::RecEv>, from: usize, bodies: str) {
+    pub(package) fn sec_rec(
+        self: &mut Self,
+        p: &loader::Package,
+        m: usize,
+        evs: &Vector<mbe::RecEv>,
+        from: usize,
+        bodies: str,
+    ) {
         w64(&mut self.out, self.keys[m]);
         let at = self.out.len();
         w32(&mut self.out, 0); // section length
@@ -999,7 +1013,7 @@ extend Tuc {
     }
 
     /// Carry a hit module's previous section into the next image byte for byte.
-    pub fn sec_keep(self: &mut Self, m: usize) {
+    pub(package) fn sec_keep(self: &mut Self, m: usize) {
         w64(&mut self.out, self.keys[m]);
         w32(&mut self.out, self.slen[m] as u32);
         self.out.push_str(self.raw.as_str().slice(self.soff[m] as usize, (self.soff[m] + self.slen[m]) as usize));
@@ -1007,7 +1021,7 @@ extend Tuc {
 
     /// A module with no cacheable section (it emits nothing, or its replay failed after a hit): an empty
     /// payload never matches on load, so the next build re-emits it live.
-    pub fn sec_void(self: &mut Self, m: usize) {
+    pub(package) fn sec_void(self: &mut Self, m: usize) {
         w64(&mut self.out, self.keys[m] ^ 0x5555555555555555u64);
         w32(&mut self.out, 0);
     }

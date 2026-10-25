@@ -12,39 +12,39 @@ extern "C" {
 
 /// Regions. Nested regions accumulate independently: rendering excludes the declaration planning
 /// it contains, symbol construction is reported within rendering.
-pub const P_GRAPH: usize = 0; // instance graph construction
-pub const P_ACQUIRE: usize = 1; // body acquisition: kept takes and fallback lowerings
-pub const P_RELOWER_REFLECT: usize = 2; // per-instance re-lowering for an unexpanded reflection binder
-pub const P_RELOWER_ZST: usize = 3; // per-signature re-lowering for a zero-size condition
-pub const P_INLINE: usize = 4; // inliner: callee vetting and splicing
-pub const P_DROPS: usize = 5; // move/drop facts, cleanup elaboration, bounds-check elimination
-pub const P_SYM: usize = 6; // symbol and mangled-name construction (within rendering)
-pub const P_DECL: usize = 7; // declaration planning: local analysis and CFG structure
-pub const P_RENDER: usize = 8; // statement and expression rendering (less planning)
-pub const P_ASSEMBLE: usize = 9; // header and TU assembly
-pub const P_PUBLISH: usize = 10; // file publication (less the build engine sink)
-pub const P_SYNC: usize = 11; // build engine sink: compile planning and spawns
-pub const P_COUNT: usize = 17;
+pub(package) const P_GRAPH: usize = 0; // instance graph construction
+pub(package) const P_ACQUIRE: usize = 1; // body acquisition: kept takes and fallback lowerings
+pub(package) const P_RELOWER_REFLECT: usize = 2; // per-instance re-lowering for an unexpanded reflection binder
+pub(package) const P_RELOWER_ZST: usize = 3; // per-signature re-lowering for a zero-size condition
+pub(package) const P_INLINE: usize = 4; // inliner: callee vetting and splicing
+pub(package) const P_DROPS: usize = 5; // move/drop facts, cleanup elaboration, bounds-check elimination
+pub(package) const P_SYM: usize = 6; // symbol and mangled-name construction (within rendering)
+pub(package) const P_DECL: usize = 7; // declaration planning: local analysis and CFG structure
+pub(package) const P_RENDER: usize = 8; // statement and expression rendering (less planning)
+pub(package) const P_ASSEMBLE: usize = 9; // header and TU assembly
+pub(package) const P_PUBLISH: usize = 10; // file publication (less the build engine sink)
+pub(package) const P_SYNC: usize = 11; // build engine sink: compile planning and spawns
+pub(package) const P_COUNT: usize = 17;
 
 /// Repeated-work tallies. The re-lowering rows come in reflection / zero-size pairs: a template
 /// is a generic body whose shared lowering carries the flag, an instance is a demand that reached
 /// that template, a re-lowering is one more lowering of the template under a demand env.
-pub const C_TAKEN: usize = 0; // bodies taken from the keep
-pub const C_LOWERED: usize = 1; // bodies lowered because the keep had none
-pub const C_RELOWER_REFLECT: usize = 2; // instance re-lowerings for a reflection binder
-pub const C_RELOWER_ZST: usize = 3; // instance re-lowerings for a zero-size condition
-pub const C_BODIES: usize = 4; // bodies rendered (seeds and closures)
-pub const C_INSTANCES: usize = 5; // instances rendered
-pub const C_OUT_BYTES: usize = 6; // bytes rendered
-pub const C_TPL_REFLECT: usize = 7; // templates marked for reflection re-lowering
-pub const C_TPL_ZST: usize = 8; // templates marked for zero-size re-lowering
-pub const C_INST_REFLECT: usize = 9; // instances demanded from reflection templates
-pub const C_INST_ZST: usize = 10; // instances demanded from zero-size templates
-pub const C_SAME_REFLECT: usize = 11; // reflection re-lowerings identical (printed IR) to an earlier one of the template
-pub const C_SAME_ZST: usize = 12; // zero-size re-lowerings identical to an earlier one of the template
-pub const C_KEEP_REFLECT: usize = 13; // bytes the retained reflection re-lowerings hold
-pub const C_KEEP_ZST: usize = 14; // bytes the retained zero-size re-lowerings hold
-pub const C_COUNT: usize = 15;
+pub(package) const C_TAKEN: usize = 0; // bodies taken from the keep
+pub(package) const C_LOWERED: usize = 1; // bodies lowered because the keep had none
+pub(package) const C_RELOWER_REFLECT: usize = 2; // instance re-lowerings for a reflection binder
+pub(package) const C_RELOWER_ZST: usize = 3; // instance re-lowerings for a zero-size condition
+pub(package) const C_BODIES: usize = 4; // bodies rendered (seeds and closures)
+pub(package) const C_INSTANCES: usize = 5; // instances rendered
+pub(package) const C_OUT_BYTES: usize = 6; // bytes rendered
+pub(package) const C_TPL_REFLECT: usize = 7; // templates marked for reflection re-lowering
+pub(package) const C_TPL_ZST: usize = 8; // templates marked for zero-size re-lowering
+pub(package) const C_INST_REFLECT: usize = 9; // instances demanded from reflection templates
+pub(package) const C_INST_ZST: usize = 10; // instances demanded from zero-size templates
+pub(package) const C_SAME_REFLECT: usize = 11; // reflection re-lowerings identical (printed IR) to an earlier one of the template
+pub(package) const C_SAME_ZST: usize = 12; // zero-size re-lowerings identical to an earlier one of the template
+pub(package) const C_KEEP_REFLECT: usize = 13; // bytes the retained reflection re-lowerings hold
+pub(package) const C_KEEP_ZST: usize = 14; // bytes the retained zero-size re-lowerings hold
+pub(package) const C_COUNT: usize = 15;
 
 const REGION_NAMES: [str<'static>; 12] = [
     "graph",
@@ -62,29 +62,29 @@ const REGION_NAMES: [str<'static>; 12] = [
 ];
 static_assert(P_COUNT >= 12, "one slot per emission region");
 
-pub struct Probe {
-    pub on: bool,
-    pub mem: bool, // allocation columns are live (the runtime tracker counts)
-    pub ns: Array<u64, P_COUNT>,
-    pub calls: Array<u64, P_COUNT>,
-    pub an: Array<u64, P_COUNT>, // allocation calls
-    pub ab: Array<u64, P_COUNT>, // bytes requested
-    pub c: Array<u64, C_COUNT>,
+pub(package) struct Probe {
+    pub(package) on: bool,
+    pub(package) mem: bool, // allocation columns are live (the runtime tracker counts)
+    pub(package) ns: Array<u64, P_COUNT>,
+    pub(package) calls: Array<u64, P_COUNT>,
+    pub(package) an: Array<u64, P_COUNT>, // allocation calls
+    pub(package) ab: Array<u64, P_COUNT>, // bytes requested
+    pub(package) c: Array<u64, C_COUNT>,
 }
 
 /// A region entry: the clock and the allocation counters at the start.
-pub struct Mark {
-    pub ns: u64,
-    pub an: u64,
-    pub ab: u64,
+pub(package) struct Mark {
+    pub(package) ns: u64,
+    pub(package) an: u64,
+    pub(package) ab: u64,
 }
 
-pub const fn mark_none() Mark {
+pub(package) const fn mark_none() Mark {
     return Mark { ns: 0, an: 0, ab: 0 };
 }
 
 extend Probe {
-    pub fn new(on: bool, mem: bool) Probe {
+    pub(package) fn new(on: bool, mem: bool) Probe {
         return Probe {
             on: on,
             mem: on && mem,
@@ -97,7 +97,7 @@ extend Probe {
     }
 
     /// Enter a region (a no-op mark when off).
-    pub fn start(self: &Self) Mark {
+    pub(package) fn start(self: &Self) Mark {
         if !self.on {
             return mark_none();
         }
@@ -112,7 +112,7 @@ extend Probe {
     }
 
     /// Leave region `k` entered at `m`.
-    pub fn stop(self: &mut Self, k: usize, m: Mark) {
+    pub(package) fn stop(self: &mut Self, k: usize, m: Mark) {
         if !self.on {
             return;
         }
@@ -129,7 +129,7 @@ extend Probe {
 
     /// Leave region `k` entered at `m`, less what an inner region already booked since `m`:
     /// `ns0`/`an0`/`ab0` are that region's totals as read at `m`.
-    pub fn stop_less(self: &mut Self, k: usize, m: Mark, inner: usize, ns0: u64, an0: u64, ab0: u64) {
+    pub(package) fn stop_less(self: &mut Self, k: usize, m: Mark, inner: usize, ns0: u64, an0: u64, ab0: u64) {
         if !self.on {
             return;
         }
@@ -148,14 +148,14 @@ extend Probe {
         }
     }
 
-    pub fn count(self: &mut Self, k: usize, n: u64) {
+    pub(package) fn count(self: &mut Self, k: usize, n: u64) {
         assert(k < C_COUNT);
         self.c[k] += n;
     }
 
     /// Fold `other` (a shard's or a pooled context's probe) into this one. The tallies fold even
     /// when the regions are off: the build record reports the re-lowering counts of every build.
-    pub const fn merge(self: &mut Self, other: &Probe) {
+    pub(package) const fn merge(self: &mut Self, other: &Probe) {
         for k in 0..C_COUNT {
             self.c[k] += other.c[k];
         }
@@ -172,7 +172,7 @@ extend Probe {
 
     /// The region table under `title`: one row per named region (a region past `names` is not
     /// shown), then the total.
-    pub fn report_regions(self: &Self, out: &mut String, title: str, names: []str) {
+    pub(package) fn report_regions(self: &Self, out: &mut String, title: str, names: []str) {
         out.push_str(title);
         for _i in title.len()..22 {
             out.push_byte(b' ');
@@ -206,7 +206,7 @@ extend Probe {
     }
 
     /// The emission report: the region table, then the repeated-work tallies.
-    pub fn report(self: &Self, out: &mut String) {
+    pub(package) fn report(self: &Self, out: &mut String) {
         let names: []str = REGION_NAMES;
         self.report_regions(out, "emit-probe", names);
         out.push_str("  instance discovery and specialization (graph, acquire, re-lowering) ");

@@ -19,7 +19,7 @@ const K_SSEUP: u8 = 3;
 const K_MEM: u8 = 4;
 
 /// Integer argument register `k` (0 to 5): rdi, rsi, rdx, rcx, r8, r9.
-pub const fn gp_arg(k: u32) u8 {
+pub(package) const fn gp_arg(k: u32) u8 {
     return (0x090801020607u64 >> (8 * k) as u64 & 0xFF) as u8;
 }
 
@@ -145,7 +145,7 @@ fn classify_type(b: &Body, pt: u32, ptr: u32, vregs: u32, cls: &mut u64) u32 {
 }
 
 /// The layout of signature `sig` of body `b` (`ptr`-byte pointers, `vregs` the package's `vec_regs`).
-pub fn classify(b: &Body, sig: u32, ptr: u32, vregs: u32, out: &mut CallLayout) {
+pub(package) fn classify(b: &Body, sig: u32, ptr: u32, vregs: u32, out: &mut CallLayout) {
     out.locs.truncate(0);
     out.parts.truncate(0);
     let np = b.pool[sig as usize];
@@ -294,7 +294,7 @@ fn put_parts(
 
 /// The save-area registers a variadic argument of type `t` (a scalar or a vector) takes in `va_arg`: `gp`
 /// integer ones or `vr` vector ones; false when it is read from the stack only.
-pub fn va_regs(t: u8, ptr: u32, vregs: u32, gp: &mut u32, vr: &mut u32) bool {
+pub(package) fn va_regs(t: u8, ptr: u32, vregs: u32, gp: &mut u32, vr: &mut u32) bool {
     let mut cls: u64 = 0;
     let n = type_bytes(t, ptr);
     if n > 16 {

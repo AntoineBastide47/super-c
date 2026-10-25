@@ -17,23 +17,23 @@ import borrowck::dataflow as df;
 import utils::bits as bits;
 
 /// Drop classifications.
-pub const DK_UNCOND: u8 = 0;
-pub const DK_COND: u8 = 1; // reachable with differing init states: one flag guards the free
-pub const DK_FIELD: u8 = 2; // partial move upstream: this entry drops one still-owned sub-place
-pub const DK_OVER: u8 = 3; // assignment overwrites an initialized value: free it first (path = PlaceId)
-pub const DK_OVERC: u8 = 4; // overwrite of a maybe-moved value: the local's flag guards the free
+pub(package) const DK_UNCOND: u8 = 0;
+pub(package) const DK_COND: u8 = 1; // reachable with differing init states: one flag guards the free
+pub(package) const DK_FIELD: u8 = 2; // partial move upstream: this entry drops one still-owned sub-place
+pub(package) const DK_OVER: u8 = 3; // assignment overwrites an initialized value: free it first (path = PlaceId)
+pub(package) const DK_OVERC: u8 = 4; // overwrite of a maybe-moved value: the local's flag guards the free
 
-pub struct DropAt {
-    pub local: u32,
-    pub path: u32, // move path (root for whole-value drops)
-    pub kind: u8,
-    pub stmt: u32, // the storage marker's statement index (body order)
-    pub block: u32,
+pub(package) struct DropAt {
+    pub(package) local: u32,
+    pub(package) path: u32, // move path (root for whole-value drops)
+    pub(package) kind: u8,
+    pub(package) stmt: u32, // the storage marker's statement index (body order)
+    pub(package) block: u32,
     // DK_FIELD of a member no place names (`path` is the root): its projection's `data` and `sub`
     // (a named field's decl, or the positional index) and its declared type.
-    pub fdata: u32,
-    pub fsub: NodeId,
-    pub fty: TypeId,
+    pub(package) fdata: u32,
+    pub(package) fsub: NodeId,
+    pub(package) fty: TypeId,
 }
 
 /// A drop of `local`'s move path `path` at statement `stmt` of `block`.
@@ -51,16 +51,16 @@ const fn drop_at(local: u32, path: u32, kind: u8, stmt: u32, block: u32) DropAt 
 }
 
 /// A MOVE event of a root local's path (stmt 0xFFFFFFFF = at the block's terminator).
-pub struct MoveAt {
-    pub local: u32,
-    pub stmt: u32,
-    pub block: u32,
+pub(package) struct MoveAt {
+    pub(package) local: u32,
+    pub(package) stmt: u32,
+    pub(package) block: u32,
 }
 
-pub struct Schedule {
-    pub drops: Vector<DropAt>,
+pub(package) struct Schedule {
+    pub(package) drops: Vector<DropAt>,
     /// The MOVE events: the rewrite turns them into flag clears so guarded drops test real state.
-    pub moves: Vector<MoveAt>,
+    pub(package) moves: Vector<MoveAt>,
 }
 
 // Overwrite classification of an assignment target: 2 = fully tracked (dataflow decides),
@@ -100,29 +100,29 @@ fn tuple_member_child(ow: &bf::Owner, forest: &mp::MoveForest, root: u32, m: Mod
 
 /// The elaboration's schedule plus every per-body temporary, pooled by the driver: one instance
 /// rebuilds in place per body, so elaboration allocates nothing on the steady state.
-pub struct ElabCtx {
-    pub sched: Schedule,
-    pub mi: Vector<u64>,
-    pub di: Vector<u64>,
-    pub mm: Vector<u64>,
-    pub scratch: Vector<u32>,
-    pub sub: Vector<u32>,
+pub(package) struct ElabCtx {
+    pub(package) sched: Schedule,
+    pub(package) mi: Vector<u64>,
+    pub(package) di: Vector<u64>,
+    pub(package) mm: Vector<u64>,
+    pub(package) scratch: Vector<u32>,
+    pub(package) sub: Vector<u32>,
     // insert_drops scratch (see there).
-    pub ins_cond_l: Vector<u32>,
-    pub ins_cond_f: Vector<u32>,
-    pub ins_clr_at: Vector<u32>,
-    pub ins_clr_fl: Vector<u32>,
-    pub ins_flag: Vector<u32>,
-    pub ins_off: Vector<u32>,
-    pub ins_idx: Vector<u32>,
-    pub ins_fill: Vector<u32>,
+    pub(package) ins_cond_l: Vector<u32>,
+    pub(package) ins_cond_f: Vector<u32>,
+    pub(package) ins_clr_at: Vector<u32>,
+    pub(package) ins_clr_fl: Vector<u32>,
+    pub(package) ins_flag: Vector<u32>,
+    pub(package) ins_off: Vector<u32>,
+    pub(package) ins_idx: Vector<u32>,
+    pub(package) ins_fill: Vector<u32>,
     // The aggregate field lists a partial move's per-field drops enumerate.
-    pub fdecls: Vector<NodeId>,
-    pub ftys: Vector<TypeId>,
+    pub(package) fdecls: Vector<NodeId>,
+    pub(package) ftys: Vector<TypeId>,
 }
 
 extend ElabCtx {
-    pub fn empty() ElabCtx {
+    pub(package) fn empty() ElabCtx {
         return ElabCtx {
             sched: Schedule { drops: Vector::<DropAt>::new(), moves: Vector::<MoveAt>::new() },
             mi: Vector::<u64>::new(),
@@ -144,7 +144,7 @@ extend ElabCtx {
     }
 
     /// Heap bytes the context keeps across bodies (capacity, not length).
-    pub const fn scratch_bytes(self: &Self) u64 {
+    pub(package) const fn scratch_bytes(self: &Self) u64 {
         return (self.sched.drops.capacity() * sizeof(DropAt) + self.sched.moves.capacity() * sizeof(MoveAt) + (self.mi.capacity() + self.di.capacity() + self.mm.capacity()) * 8 + (self.scratch.capacity() + self.sub.capacity() + self.ins_cond_l.capacity() + self.ins_cond_f.capacity() + self.ins_clr_at.capacity() + self.ins_clr_fl.capacity() + self.ins_flag.capacity() + self.ins_off.capacity() + self.ins_idx.capacity() + self.ins_fill.capacity() + self.fdecls.capacity() + self.ftys.capacity()) * 4) as u64;
     }
 }
@@ -154,7 +154,7 @@ extend ElabCtx {
 /// The caller has already answered for the locals' own types, so a whole-local store spelled with
 /// the local's type is skipped; the storage class is tested before the ownership oracle, whose
 /// answer for a generic type is not memoized.
-pub fn assign_may_schedule(ow: &mut bf::Owner, b: &ir::CoreBody) bool {
+pub(package) fn assign_may_schedule(ow: &mut bf::Owner, b: &ir::CoreBody) bool {
     let a = unsafe &*(&*ow.pkg).module_ast_const(b.module);
     for si in 0..b.statements.len() {
         let s = b.statements.at(si);
@@ -174,7 +174,7 @@ pub fn assign_may_schedule(ow: &mut bf::Owner, b: &ir::CoreBody) bool {
 /// Can elaboration schedule any drop for `b`? Every drop frees either a declared owning local at
 /// its storage death or the old value of a store whose destination place owns (through a reference
 /// too), so a body with neither needs no move facts and no elaboration at all.
-pub fn may_schedule(ow: &mut bf::Owner, b: &ir::CoreBody) bool {
+pub(package) fn may_schedule(ow: &mut bf::Owner, b: &ir::CoreBody) bool {
     for l in 0..b.locals.len() {
         let ty = b.locals.at(l).ty;
         if ty != TYPE_NONE && ow.owns(b.owner, b.module, ty) {
@@ -185,7 +185,7 @@ pub fn may_schedule(ow: &mut bf::Owner, b: &ir::CoreBody) bool {
 }
 
 /// Classify every storage-death point of `b` against the move/init solution.
-pub fn elaborate_into(
+pub(package) fn elaborate_into(
     ow: &mut bf::Owner,
     b: &ir::CoreBody,
     forest: &mp::MoveForest,
@@ -582,7 +582,7 @@ fn flag_stmt(b: &mut ir::CoreBody, fl: u32, v: i64, sp: tok::Span) {
 /// Rewrite `b` so every scheduled whole-value drop is an explicit `Drop(place)` terminator: the
 /// marker's block splits there, the drop chains to the remainder, and `args_len` carries the
 /// conditional flag. Statement storage is shared -- split parts reference subranges.
-pub fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveForest) {
+pub(package) fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp::MoveForest) {
     let nb = b.blocks.len();
     // Scratch rides in the context (capacity survives across bodies); every vector is taken here
     // and handed back at the end, the one exit.
@@ -1034,7 +1034,7 @@ fn dv_owned_paths(ow: &mut bf::Owner, b: &ir::CoreBody, forest: &mp::MoveForest)
     return owned;
 }
 
-pub fn verify_drops(ow: &mut bf::Owner, b: &ir::CoreBody) str<'static> {
+pub(package) fn verify_drops(ow: &mut bf::Owner, b: &ir::CoreBody) str<'static> {
     let nl = b.locals.len();
     // A closure's captures are argument locals the body never destroys: the env owns them across
     // every call (see `Lowerer::lower_closure_body`).

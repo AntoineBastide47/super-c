@@ -11,47 +11,47 @@ import codegen::obj as ob;
 import codegen::dwarf as dw;
 
 /// Symbol kinds (the linking conventions' `SYMTAB_*`).
-pub const K_FUNC: u8 = 0;
-pub const K_DATA: u8 = 1;
-pub const K_GLOBAL: u8 = 2;
-pub const K_SECTION: u8 = 3;
-pub const K_TABLE: u8 = 5;
+pub(package) const K_FUNC: u8 = 0;
+pub(package) const K_DATA: u8 = 1;
+pub(package) const K_GLOBAL: u8 = 2;
+pub(package) const K_SECTION: u8 = 3;
+pub(package) const K_TABLE: u8 = 5;
 
 /// Symbol flags (`WASM_SYM_*`).
-pub const F_WEAK: u32 = 1;
-pub const F_LOCAL: u32 = 2;
-pub const F_HIDDEN: u32 = 4;
-pub const F_UNDEFINED: u32 = 0x10;
-pub const F_EXPLICIT_NAME: u32 = 0x40;
-pub const F_NO_STRIP: u32 = 0x80;
+pub(package) const F_WEAK: u32 = 1;
+pub(package) const F_LOCAL: u32 = 2;
+pub(package) const F_HIDDEN: u32 = 4;
+pub(package) const F_UNDEFINED: u32 = 0x10;
+pub(package) const F_EXPLICIT_NAME: u32 = 0x40;
+pub(package) const F_NO_STRIP: u32 = 0x80;
 
 /// Segment flags.
 const SEG_RETAIN: u32 = 4;
 
-pub const NONE: u32 = 0xFFFFFFFF;
+pub(package) const NONE: u32 = 0xFFFFFFFF;
 
 /// A relocation: type `kind` at byte `off` of its body or segment, against symbol `sym` (a type index for
 /// R_TYPE_INDEX_LEB) plus `addend`.
-pub struct WRel {
-    pub kind: u8,
-    pub off: u32,
-    pub sym: u32,
-    pub addend: i32,
+pub(package) struct WRel {
+    pub(package) kind: u8,
+    pub(package) off: u32,
+    pub(package) sym: u32,
+    pub(package) addend: i32,
 }
 
 extend WRel as Copy {}
 
 /// A symbol. A function has its type (`ty`) and, once defined, its body (`def`, into `funcs`); data has
 /// its segment (`def`, into `segs`) and size.
-pub struct WSym {
-    pub name: u32, // `names` id
-    pub kind: u8,
-    pub flags: u32,
-    pub ty: u32,
-    pub def: u32,
-    pub size: u32,
-    pub imod: u32, // an import's module (`names` id), NONE for `env`
-    pub iname: u32, // an import's name (`names` id), NONE for the symbol's
+pub(package) struct WSym {
+    pub(package) name: u32, // `names` id
+    pub(package) kind: u8,
+    pub(package) flags: u32,
+    pub(package) ty: u32,
+    pub(package) def: u32,
+    pub(package) size: u32,
+    pub(package) imod: u32, // an import's module (`names` id), NONE for `env`
+    pub(package) iname: u32, // an import's name (`names` id), NONE for the symbol's
 }
 
 extend WSym as Copy {}
@@ -59,41 +59,41 @@ extend WSym as Copy {}
 /// A function body: its type, its locals past the parameters (one wasm type each), its instructions
 /// (the closing `end` included) and their relocations; with debug information its line rows (offsets
 /// into `code`) and the offset its body starts at past the prologue.
-pub struct WFunc {
-    pub sym: u32,
-    pub locals: Vector<u8>,
-    pub code: Vector<u8>,
-    pub rels: Vector<WRel>,
-    pub lines: Vector<ob::OLine>,
-    pub body: u32,
+pub(package) struct WFunc {
+    pub(package) sym: u32,
+    pub(package) locals: Vector<u8>,
+    pub(package) code: Vector<u8>,
+    pub(package) rels: Vector<WRel>,
+    pub(package) lines: Vector<ob::OLine>,
+    pub(package) body: u32,
 }
 
 /// A data segment: its name, alignment, bytes (`size` of them, the zero-filled ones too) and relocations.
-pub struct WSeg {
-    pub name: String,
-    pub align_log2: u32,
-    pub bytes: Vector<u8>,
-    pub rels: Vector<WRel>,
-    pub retain: bool,
+pub(package) struct WSeg {
+    pub(package) name: String,
+    pub(package) align_log2: u32,
+    pub(package) bytes: Vector<u8>,
+    pub(package) rels: Vector<WRel>,
+    pub(package) retain: bool,
 }
 
 /// The object a wasm code generator fills.
-pub struct WObj {
-    pub names: nm::Names,
-    pub syms: Vector<WSym>,
-    pub types: Vector<Vector<u8>>, // each a function type's encoding (params, then results)
-    pub funcs: Vector<WFunc>,
-    pub segs: Vector<WSeg>,
-    pub simd: bool, // a body uses v128
+pub(package) struct WObj {
+    pub(package) names: nm::Names,
+    pub(package) syms: Vector<WSym>,
+    pub(package) types: Vector<Vector<u8>>, // each a function type's encoding (params, then results)
+    pub(package) funcs: Vector<WFunc>,
+    pub(package) segs: Vector<WSeg>,
+    pub(package) simd: bool, // a body uses v128
     /// With debug information: the package's file paths by file id and the compile directory.
-    pub debug: bool,
-    pub files: Vector<String>,
-    pub comp_dir: String,
+    pub(package) debug: bool,
+    pub(package) files: Vector<String>,
+    pub(package) comp_dir: String,
     sym_of: Vector<u32>, // per name id, its symbol plus 1 (0: none)
 }
 
 extend WObj {
-    pub fn new() WObj {
+    pub(package) fn new() WObj {
         return WObj {
             names: nm::Names::with_capacity(1 << 10, 1 << 6),
             syms: Vector::<WSym>::new(),
@@ -109,7 +109,7 @@ extend WObj {
     }
 
     /// The symbol named `s` of kind `kind`, added undefined on first use.
-    pub fn sym(self: &mut Self, s: str, kind: u8) u32 {
+    pub(package) fn sym(self: &mut Self, s: str, kind: u8) u32 {
         let id = self.names.intern(s);
         while self.sym_of.len() <= id as usize {
             self.sym_of.push(0);
@@ -126,12 +126,12 @@ extend WObj {
     }
 
     /// The name of symbol `k`.
-    pub const fn name_of(self: &Self, k: u32) str {
+    pub(package) const fn name_of(self: &Self, k: u32) str {
         return self.names.spell(self.syms[k as usize].name);
     }
 
     /// The index of function type `enc` (its parameters' and results' encoding), added on first use.
-    pub fn type_index(self: &mut Self, enc: &Vector<u8>) u32 {
+    pub(package) fn type_index(self: &mut Self, enc: &Vector<u8>) u32 {
         for i in 0..self.types.len() {
             if self.types.at(i).as_slice() == enc.as_slice() {
                 return i as u32;
@@ -144,7 +144,7 @@ extend WObj {
     }
 
     /// Define function symbol `k` with body `f`; `flags` its binding and visibility.
-    pub fn define_func(self: &mut Self, k: u32, ty: u32, flags: u32, f: WFunc) {
+    pub(package) fn define_func(self: &mut Self, k: u32, ty: u32, flags: u32, f: WFunc) {
         let s = self.syms.index_mut(k as usize);
         s.ty = ty;
         s.flags = flags;
@@ -153,7 +153,7 @@ extend WObj {
     }
 
     /// Define data symbol `k` as segment `g` of `size` bytes.
-    pub fn define_data(self: &mut Self, k: u32, flags: u32, g: WSeg) {
+    pub(package) fn define_data(self: &mut Self, k: u32, flags: u32, g: WSeg) {
         let s = self.syms.index_mut(k as usize);
         s.flags = flags;
         s.def = self.segs.len() as u32;
@@ -162,7 +162,7 @@ extend WObj {
     }
 
     /// Give undefined function symbol `k` its type, the first call's.
-    pub fn import_type(self: &mut Self, k: u32, ty: u32) {
+    pub(package) fn import_type(self: &mut Self, k: u32, ty: u32) {
         let s = self.syms.index_mut(k as usize);
         if s.ty == NONE {
             s.ty = ty;
@@ -173,14 +173,14 @@ extend WObj {
 // The object's index spaces: functions (imports first), globals, tables, and each symbol's index in its
 // space (NONE for data).
 struct Spaces {
-    pub fidx: Vector<u32>, // per symbol
-    pub nfimports: u32,
-    pub sp_sym: u32,
-    pub table_sym: u32,
+    pub(package) fidx: Vector<u32>, // per symbol
+    pub(package) nfimports: u32,
+    pub(package) sp_sym: u32,
+    pub(package) table_sym: u32,
 }
 
 /// Lay `o` out as an object file into `out`.
-pub fn write(o: &WObj, out: &mut Vector<u8>) {
+pub(package) fn write(o: &WObj, out: &mut Vector<u8>) {
     let mut sp = Spaces { fidx: Vector::<u32>::new(), nfimports: 0, sp_sym: NONE, table_sym: NONE };
     // The function index space: the undefined functions (imports), then the bodies in order.
     for k in 0..o.syms.len() {

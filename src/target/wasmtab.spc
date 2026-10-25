@@ -5,48 +5,48 @@
 // its immediates; it encodes to bytes and decodes back, a relocated field in a padded 5-byte LEB.
 import target::wasm as w;
 
-pub struct Row {
-    pub mn: str<'static>,
-    pub pfx: u8,
-    pub code: u32,
-    pub imm: u8, // `K::*`
-    pub al: u8, // the natural alignment's log2 of a memory access
+pub(package) struct Row {
+    pub(package) mn: str<'static>,
+    pub(package) pfx: u8,
+    pub(package) code: u32,
+    pub(package) imm: u8, // `K::*`
+    pub(package) al: u8, // the natural alignment's log2 of a memory access
 }
 
 extend Row as Copy {}
 
 /// Immediate kinds.
-pub struct K {}
+pub(package) struct K {}
 
 extend K {
-    pub const NONE: u8 = 0;
-    pub const BT: u8 = 1; // a block type: empty or one value type
-    pub const LABEL: u8 = 2; // a branch depth
-    pub const BRTABLE: u8 = 3; // depths, the default last
-    pub const FUNC: u8 = 4; // a function index
-    pub const CALLI: u8 = 5; // a type index and a table index
-    pub const LOCAL: u8 = 6;
-    pub const GLOBAL: u8 = 7;
-    pub const MEM: u8 = 8; // an alignment's log2 and an offset
-    pub const I32: u8 = 9;
-    pub const I64: u8 = 10;
-    pub const F32: u8 = 11; // the bits
-    pub const F64: u8 = 12;
-    pub const MEMIDX: u8 = 13; // memory 0
-    pub const MEMIDX2: u8 = 14; // memories 0 and 0
-    pub const V128: u8 = 15; // 16 bytes
-    pub const SHUF: u8 = 16; // 16 lane indices
-    pub const LANE: u8 = 17;
-    pub const MEMLANE: u8 = 18; // an alignment, an offset and a lane
-    pub const SEG: u8 = 19; // a data segment index
-    pub const SEGMEM: u8 = 20; // a data segment index and memory 0
+    pub(package) const NONE: u8 = 0;
+    pub(package) const BT: u8 = 1; // a block type: empty or one value type
+    pub(package) const LABEL: u8 = 2; // a branch depth
+    pub(package) const BRTABLE: u8 = 3; // depths, the default last
+    pub(package) const FUNC: u8 = 4; // a function index
+    pub(package) const CALLI: u8 = 5; // a type index and a table index
+    pub(package) const LOCAL: u8 = 6;
+    pub(package) const GLOBAL: u8 = 7;
+    pub(package) const MEM: u8 = 8; // an alignment's log2 and an offset
+    pub(package) const I32: u8 = 9;
+    pub(package) const I64: u8 = 10;
+    pub(package) const F32: u8 = 11; // the bits
+    pub(package) const F64: u8 = 12;
+    pub(package) const MEMIDX: u8 = 13; // memory 0
+    pub(package) const MEMIDX2: u8 = 14; // memories 0 and 0
+    pub(package) const V128: u8 = 15; // 16 bytes
+    pub(package) const SHUF: u8 = 16; // 16 lane indices
+    pub(package) const LANE: u8 = 17;
+    pub(package) const MEMLANE: u8 = 18; // an alignment, an offset and a lane
+    pub(package) const SEG: u8 = 19; // a data segment index
+    pub(package) const SEGMEM: u8 = 20; // a data segment index and memory 0
 }
 
 const fn r(mn: str<'static>, pfx: u8, code: u32, imm: u8, al: u8) Row {
     return Row { mn: mn, pfx: pfx, code: code, imm: imm, al: al };
 }
 
-pub const ROWS: [Row; 452] = [
+pub(package) const ROWS: [Row; 452] = [
     r("unreachable", 0x00, 0x0, K::NONE, 0),
     r("nop", 0x00, 0x1, K::NONE, 0),
     r("block", 0x00, 0x2, K::BT, 0),
@@ -507,27 +507,27 @@ pub const ROWS: [Row; 452] = [
 /// bits) or an alignment's log2; `b`: an offset or a table index; `lo` and `hi`: 16 bytes, or a lane in
 /// `lo`; `wide`: the fields in a padded 5-byte LEB (bit 0 `a`, bit 1 `b`); `targets`: `br_table`'s
 /// depths, the default last.
-pub struct Ins {
-    pub row: u32,
-    pub a: i64,
-    pub b: i64,
-    pub lo: u64,
-    pub hi: u64,
-    pub wide: u8,
-    pub targets: Vector<u32>,
+pub(package) struct Ins {
+    pub(package) row: u32,
+    pub(package) a: i64,
+    pub(package) b: i64,
+    pub(package) lo: u64,
+    pub(package) hi: u64,
+    pub(package) wide: u8,
+    pub(package) targets: Vector<u32>,
 }
 
 extend Ins {
-    pub fn new(row: u32) Ins {
+    pub(package) fn new(row: u32) Ins {
         return Ins { row: row, a: 0, b: 0, lo: 0, hi: 0, wide: 0, targets: Vector::<u32>::new() };
     }
 }
 
 /// A field of an encoding: its offset from the instruction's start, its size, whether it is a padded
 /// LEB.
-pub struct Field {
-    pub at: u32,
-    pub wide: bool,
+pub(package) struct Field {
+    pub(package) at: u32,
+    pub(package) wide: bool,
 }
 
 // A 32-bit unsigned field: padded to 5 bytes when `wide`.
@@ -560,13 +560,13 @@ fn s32f(out: &mut Vector<u8>, v: i64, wide: bool) bool {
 }
 
 /// Whether `t` is a block type: empty (0x40) or a value type.
-pub const fn block_type(t: i64) bool {
+pub(package) const fn block_type(t: i64) bool {
     return t == 0x40 || t == w::I32 || t == w::I64 || t == w::F32 || t == w::F64 || t == w::V128 || t == w::FUNCREF;
 }
 
 /// Append the encoding of `n` to `out`; false when an immediate is out of its range. `f` gets the
 /// first relocatable field (an index, a constant, an offset), `f2` the second (a call's table).
-pub fn encode(n: &Ins, out: &mut Vector<u8>, f: &mut Field, f2: &mut Field) bool {
+pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, f: &mut Field, f2: &mut Field) bool {
     let rows: []Row = ROWS;
     let r = rows[n.row as usize];
     let st = out.len();
@@ -686,7 +686,7 @@ pub fn encode(n: &Ins, out: &mut Vector<u8>, f: &mut Field, f2: &mut Field) bool
 }
 
 /// The lane count of a lane instruction's shape (its mnemonic's first part).
-pub const fn lanes(mn: str) u32 {
+pub(package) const fn lanes(mn: str) u32 {
     if mn.starts_with("i8x16") {
         return 16;
     }
@@ -752,7 +752,7 @@ fn get_sleb(b: []u8, p: &mut usize, end: usize, v: &mut i64, padded: &mut bool) 
 /// Decode the instruction at `b[at..end]` into `n`: its length, 0 when no row encodes those bytes. A
 /// padded LEB of 5 bytes sets its `wide` bit; one of another length does not decode (`encode` gives
 /// none).
-pub fn decode(b: []u8, at: usize, end: usize, n: &mut Ins) u32 {
+pub(package) fn decode(b: []u8, at: usize, end: usize, n: &mut Ins) u32 {
     if at >= end {
         return 0;
     }

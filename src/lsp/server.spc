@@ -25,31 +25,31 @@ import lsp::buildtoml as btoml;
 import ast::ast as astn;
 
 /// An open editor document (the overlay source of truth while open).
-pub struct Doc {
-    pub uri: String,
-    pub path: String, // canonical (realpath'd when possible) filesystem path
-    pub txt: String,
-    pub version: i64,
+pub(package) struct Doc {
+    pub(package) uri: String,
+    pub(package) path: String, // canonical (realpath'd when possible) filesystem path
+    pub(package) txt: String,
+    pub(package) version: i64,
 }
 
 /// One compiled unit: the manifest root (build.toml's entry), a per-file root for an open doc outside
 /// the manifest closure, or the workspace-batch root (sweep=true, origin ""): one shared package for
 /// every closed .spc no other package owns, the `super-c lint` one-package recipe. Per-file sweep
 /// roots are rejected: their prelude and closure copies held ~1 GB on this repo.
-pub struct Root {
-    pub ws: String, // canonical workspace folder that owns this root ("" for a per-file root)
-    pub root_file: String,
-    pub root_dir: String,
-    pub alt_dir: String,
-    pub origin: String, // "" for the manifest/batch roots; the file path that spawned a per-file root
-    pub sweep: bool, // the workspace-batch root: rebuilt when its member set changes, else cached
-    pub members: Vector<String>, // batch only: the swept files (relative paths) it lints
-    pub pkg: loader::Package,
-    pub files: Vector<String>, // canonical module file paths, index-aligned with pkg.modules
-    pub diags: Vector<analysis::DiagRec>, // last build's records (codeAction reads the fixes)
-    pub pos: Vector<u32>, // after budget eviction: each diag's LSP range as 4 values (start line/char, end line/char)
-    pub built: bool,
-    pub last_used: u64, // server tick of the last build or input touching this root (LRU eviction order)
+pub(package) struct Root {
+    pub(package) ws: String, // canonical workspace folder that owns this root ("" for a per-file root)
+    pub(package) root_file: String,
+    pub(package) root_dir: String,
+    pub(package) alt_dir: String,
+    pub(package) origin: String, // "" for the manifest/batch roots; the file path that spawned a per-file root
+    pub(package) sweep: bool, // the workspace-batch root: rebuilt when its member set changes, else cached
+    pub(package) members: Vector<String>, // batch only: the swept files (relative paths) it lints
+    pub(package) pkg: loader::Package,
+    pub(package) files: Vector<String>, // canonical module file paths, index-aligned with pkg.modules
+    pub(package) diags: Vector<analysis::DiagRec>, // last build's records (codeAction reads the fixes)
+    pub(package) pos: Vector<u32>, // after budget eviction: each diag's LSP range as 4 values (start line/char, end line/char)
+    pub(package) built: bool,
+    pub(package) last_used: u64, // server tick of the last build or input touching this root (LRU eviction order)
 }
 
 // The probe texts `Server::probe_text` makes.
@@ -57,61 +57,61 @@ const PROBE_VARIANTS: i32 = 3;
 
 /// Whole-process server state: open documents, built roots, negotiated client capabilities and the
 /// per-URI semantic-token history that delta requests diff against.
-pub struct Server {
-    pub docs: Vector<Doc>,
-    pub roots: Vector<Root>, // roots[0] is the primary folder's manifest root when has_manifest
-    pub has_manifest: bool,
-    pub std_dir: String,
-    pub target: i32,
-    pub published: Vector<String>, // URIs whose last publish was non-empty (for clearing)
-    pub ws_root: String, // canonical primary workspace folder ("" before initialize)
-    pub folders: Vector<String>, // every canonical workspace folder (ws_root first)
-    pub out_folders: Vector<String>, // canonical folder per out_skips entry
-    pub out_skips: Vector<String>, // that folder's manifest out-dir name (its sweep skips it)
-    pub swept: Vector<SweptDir>, // the last directory walk of each swept folder
-    pub canceled_tick: Vector<u64>, // sv.tick when each canceled id arrived (staleness purge)
-    pub last_req_tick: u64, // tick of the most recently handled request
-    pub shutdown_seen: bool,
-    pub initialized: bool, // initialize accepted exactly once
-    pub revision: u64, // bumps on every workspace input transaction (open/change/close/disk/config)
-    pub canceled: Vector<String>, // dumped ids of $/cancelRequest notifications not yet consumed
+pub(package) struct Server {
+    pub(package) docs: Vector<Doc>,
+    pub(package) roots: Vector<Root>, // roots[0] is the primary folder's manifest root when has_manifest
+    pub(package) has_manifest: bool,
+    pub(package) std_dir: String,
+    pub(package) target: i32,
+    pub(package) published: Vector<String>, // URIs whose last publish was non-empty (for clearing)
+    pub(package) ws_root: String, // canonical primary workspace folder ("" before initialize)
+    pub(package) folders: Vector<String>, // every canonical workspace folder (ws_root first)
+    pub(package) out_folders: Vector<String>, // canonical folder per out_skips entry
+    pub(package) out_skips: Vector<String>, // that folder's manifest out-dir name (its sweep skips it)
+    pub(package) swept: Vector<SweptDir>, // the last directory walk of each swept folder
+    pub(package) canceled_tick: Vector<u64>, // sv.tick when each canceled id arrived (staleness purge)
+    pub(package) last_req_tick: u64, // tick of the most recently handled request
+    pub(package) shutdown_seen: bool,
+    pub(package) initialized: bool, // initialize accepted exactly once
+    pub(package) revision: u64, // bumps on every workspace input transaction (open/change/close/disk/config)
+    pub(package) canceled: Vector<String>, // dumped ids of $/cancelRequest notifications not yet consumed
     // Messages read ahead of the loop (while folding rapid edits or polling during the borrow
     // round), in arrival order, at most QUEUE_MAX, with each message's kind (Q_*).
-    pub queue: Vector<String>,
-    pub queue_kind: Vector<u8>,
-    pub input_end: bool, // a read ahead met the end of the input (or a framing error): the loop ends
-    pub bc_unpublished: bool, // a stopped borrow round changed records no publish carried yet
+    pub(package) queue: Vector<String>,
+    pub(package) queue_kind: Vector<u8>,
+    pub(package) input_end: bool, // a read ahead met the end of the input (or a framing error): the loop ends
+    pub(package) bc_unpublished: bool, // a stopped borrow round changed records no publish carried yet
     // Negotiated client capabilities, read once at initialize.
-    pub cap_hier_symbols: bool, // hierarchical documentSymbol trees
-    pub cap_doc_changes: bool, // versioned documentChanges workspace edits
-    pub cap_pull_diags: bool, // textDocument/diagnostic pull requests
-    pub cap_delta_tokens: bool, // semanticTokens/full/delta requests
-    pub cap_action_literals: bool, // CodeAction literals (without it, codeAction returns nothing)
-    pub cap_action_resolve: bool, // lazy codeAction/resolve for the `edit` property
-    pub cap_watch_dynreg: bool, // dynamic didChangeWatchedFiles registration
-    pub parent_pid: i64, // initialize.processId (0 = none); polled between messages
-    pub max_results: usize, // per-request result cap (initializationOptions.maxResults)
-    pub budget_mb: i64, // retained-package budget (initializationOptions.budgetMb; 0 = use SC_LSP_BUDGET_MB)
-    pub tick: u64, // request counter driving least-recently-used eviction order
-    pub tok_uris: Vector<String>, // per-URI semantic-token state for delta requests: URI ...
-    pub tok_ids: Vector<u64>, // ... the resultId of the last full response ...
-    pub tok_data: Vector<Vector<u32>>, // ... and its encoded token data
-    pub tok_next: u64, // monotonically increasing semantic-token resultId source
+    pub(package) cap_hier_symbols: bool, // hierarchical documentSymbol trees
+    pub(package) cap_doc_changes: bool, // versioned documentChanges workspace edits
+    pub(package) cap_pull_diags: bool, // textDocument/diagnostic pull requests
+    pub(package) cap_delta_tokens: bool, // semanticTokens/full/delta requests
+    pub(package) cap_action_literals: bool, // CodeAction literals (without it, codeAction returns nothing)
+    pub(package) cap_action_resolve: bool, // lazy codeAction/resolve for the `edit` property
+    pub(package) cap_watch_dynreg: bool, // dynamic didChangeWatchedFiles registration
+    pub(package) parent_pid: i64, // initialize.processId (0 = none); polled between messages
+    pub(package) max_results: usize, // per-request result cap (initializationOptions.maxResults)
+    pub(package) budget_mb: i64, // retained-package budget (initializationOptions.budgetMb; 0 = use SC_LSP_BUDGET_MB)
+    pub(package) tick: u64, // request counter driving least-recently-used eviction order
+    pub(package) tok_uris: Vector<String>, // per-URI semantic-token state for delta requests: URI ...
+    pub(package) tok_ids: Vector<u64>, // ... the resultId of the last full response ...
+    pub(package) tok_data: Vector<Vector<u32>>, // ... and its encoded token data
+    pub(package) tok_next: u64, // monotonically increasing semantic-token resultId source
 }
 
 /// One .spc file a directory walk found: its path as walked (under the folder), its canonical form,
 /// and the import roots `super-c lint` of the workspace analyzes it with (`Server::walk_dir`).
-pub struct SweptFile {
-    pub path: String,
-    pub canon: String,
-    pub root_dir: String,
-    pub alt_dir: String,
+pub(package) struct SweptFile {
+    pub(package) path: String,
+    pub(package) canon: String,
+    pub(package) root_dir: String,
+    pub(package) alt_dir: String,
 }
 
 /// A workspace folder's .spc files from its last directory walk, sorted by `path` (byte order).
-pub struct SweptDir {
-    pub folder: String,
-    pub files: Vector<SweptFile>,
+pub(package) struct SweptDir {
+    pub(package) folder: String,
+    pub(package) files: Vector<SweptFile>,
 }
 
 // Directory levels a workspace walk descends below its folder. Links are never followed, so only
@@ -150,10 +150,10 @@ fn msg_kind(msg: str) u8 {
 // superseded buffer's borrow records are never published; a queued request stops it at the next
 // module (`between`), so the request waits for one module's check at most.
 struct BcStop {
-    pub rd: *mut transport::Reader,
-    pub queue: *mut Vector<String>,
-    pub kind: *mut Vector<u8>,
-    pub end: *mut bool,
+    pub(package) rd: *mut transport::Reader,
+    pub(package) queue: *mut Vector<String>,
+    pub(package) kind: *mut Vector<u8>,
+    pub(package) end: *mut bool,
 }
 
 fn bc_stop(ctx: *mut void, between: bool) bool {
@@ -279,9 +279,9 @@ fn range_json_pos(sl: u32, sc: u32, el: u32, ec: u32) json::JSON {
 // The line starts of one (root, module) source, recomputed only when the module changes: a
 // response that emits many ranges walks each source once, not once per range.
 struct LsMemo {
-    pub r: usize,
-    pub m: u32,
-    pub ls: Vector<u32>,
+    pub(package) r: usize,
+    pub(package) m: u32,
+    pub(package) ls: Vector<u32>,
 }
 
 extend LsMemo {
@@ -301,8 +301,8 @@ extend LsMemo {
 
 // Per-URI accumulator for one publish round.
 struct PubSet {
-    pub uris: Vector<String>,
-    pub arrs: Vector<json::JSON>,
+    pub(package) uris: Vector<String>,
+    pub(package) arrs: Vector<json::JSON>,
 }
 
 extend PubSet {
@@ -331,7 +331,7 @@ extend PubSet {
 /// providers (pull diagnostics, token deltas, lazy code-action resolve) are advertised only when the
 /// CLIENT declared support for them at initialize; response shapes that depend on client capabilities
 /// (hierarchical symbols, versioned document edits) are negotiated and applied per response.
-pub fn capabilities_with(pull: bool, delta: bool, resolve: bool) String {
+pub(package) fn capabilities_with(pull: bool, delta: bool, resolve: bool) String {
     let mut s = String::from_str(
         "{\"capabilities\":{\"positionEncoding\":\"utf-16\",\"textDocumentSync\":{\"openClose\":true,\"change\":2},\"hoverProvider\":true,\"definitionProvider\":true,\"typeDefinitionProvider\":true,\"implementationProvider\":true,\"referencesProvider\":true,\"documentHighlightProvider\":true,\"renameProvider\":{\"prepareProvider\":true},\"documentFormattingProvider\":true,\"callHierarchyProvider\":true,\"typeHierarchyProvider\":true,\"completionProvider\":{\"triggerCharacters\":[\".\",\":\",\"@\",\"'\",\"[\"]},\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\",\"<\"]},\"documentSymbolProvider\":true,\"workspaceSymbolProvider\":true,\"foldingRangeProvider\":true,\"selectionRangeProvider\":true,\"inlayHintProvider\":true",
     );
@@ -384,17 +384,17 @@ const fn is_manifest_path(path: str) bool {
 // A positional request resolved onto a built package: root r, module m, byte span [off, end]
 // (end == off for point requests).
 struct Hit {
-    pub ok: bool,
-    pub r: usize,
-    pub m: usize,
-    pub off: u32,
-    pub end: u32,
+    pub(package) ok: bool,
+    pub(package) r: usize,
+    pub(package) m: usize,
+    pub(package) off: u32,
+    pub(package) end: u32,
 }
 
 // A reference site keyed by its canonical file path, the primary key of the deterministic result order.
 struct KeyedHit {
-    pub path: String,
-    pub h: RefHit,
+    pub(package) path: String,
+    pub(package) h: RefHit,
 }
 
 const fn keyed_hit_cmp(x: &KeyedHit, y: &KeyedHit) i32 {
@@ -410,9 +410,9 @@ const fn keyed_hit_cmp(x: &KeyedHit, y: &KeyedHit) i32 {
 
 // A workspace symbol hit keyed by its canonical file path (`r` is the root that found it).
 struct KeyedSym {
-    pub path: String,
-    pub r: u32,
-    pub sym: feat::WsSym,
+    pub(package) path: String,
+    pub(package) r: u32,
+    pub(package) sym: feat::WsSym,
 }
 
 const fn keyed_sym_cmp(x: &KeyedSym, y: &KeyedSym) i32 {
@@ -425,10 +425,10 @@ const fn keyed_sym_cmp(x: &KeyedSym, y: &KeyedSym) i32 {
 
 // One cross-root reference site: root, module (within that root's package), byte span.
 struct RefHit {
-    pub r: u32,
-    pub m: u32,
-    pub s: u32,
-    pub e: u32,
+    pub(package) r: u32,
+    pub(package) m: u32,
+    pub(package) s: u32,
+    pub(package) e: u32,
 }
 
 // The new name must lex as exactly one identifier (rejects keywords, operators, spaces).
@@ -456,7 +456,7 @@ const fn valid_id(id: &json::JSON) bool {
 
 /// The blocking stdio server loop; returns the process exit code: 0 for a clean shutdown-then-exit,
 /// 1 on EOF (client vanished) or an `exit` without a prior `shutdown`.
-pub fn run(std_dir: str, target: i32) i32 {
+pub(package) fn run(std_dir: str, target: i32) i32 {
     let mut sv = Server { std_dir: String::from_str(std_dir), target: target, max_results: 5000 };
     let fin = stdio::stdin();
     let fout = stdio::stdout();

@@ -3,14 +3,14 @@
 // half, about two probes; the arena grows geometrically and never moves a spelling's offset.
 
 /// An interning table of byte strings.
-pub struct Names {
+pub(package) struct Names {
     strs: String,
     offsets: Vector<u32>, // id `i` spells `strs[offsets[i] .. offsets[i + 1]]`
     table: Vector<u32>, // id + 1 per slot, 0 = empty; a power of two at least twice the count
 }
 
 /// The FNV-1a hash of the `n` bytes at `p`.
-pub const fn hash_bytes(p: *const u8, n: usize) u64 {
+pub(package) const fn hash_bytes(p: *const u8, n: usize) u64 {
     let mut h: u64 = 0xcbf29ce484222325u64;
     let mut i: usize = 0;
     while i < n {
@@ -23,7 +23,7 @@ pub const fn hash_bytes(p: *const u8, n: usize) u64 {
 
 extend Names {
     /// An empty table with room for `bytes` bytes of spellings and `ids` names before it grows.
-    pub fn with_capacity(bytes: usize, ids: usize) Names {
+    pub(package) fn with_capacity(bytes: usize, ids: usize) Names {
         let mut slots: usize = 16;
         while slots < ids {
             slots *= 2;
@@ -40,19 +40,19 @@ extend Names {
     }
 
     /// The number of interned names.
-    pub const fn count(self: &Names) usize {
+    pub(package) const fn count(self: &Names) usize {
         return self.offsets.len() - 1;
     }
 
     /// The spelling of name `id` (below `count`).
-    pub const fn spell(self: &Names, id: u32) str {
+    pub(package) const fn spell(self: &Names, id: u32) str {
         let a = self.offsets[id as usize] as usize;
         let b = self.offsets[id as usize + 1] as usize;
         return self.strs.as_str().slice(a, b);
     }
 
     /// The id of `s`, or -1 when it was never interned.
-    pub const fn find(self: &Names, s: str) i64 {
+    pub(package) const fn find(self: &Names, s: str) i64 {
         let mask = self.table.len() - 1;
         let mut i = hash_bytes(s.ptr(), s.len()) as usize & mask;
         // The table is at most half full, so a probe sequence meets an empty slot.
@@ -69,7 +69,7 @@ extend Names {
     }
 
     /// The id of `s`, interned first when new.
-    pub fn intern(self: &mut Names, s: str) u32 {
+    pub(package) fn intern(self: &mut Names, s: str) u32 {
         let h = hash_bytes(s.ptr(), s.len());
         let mask = self.table.len() - 1;
         let mut i = h as usize & mask;

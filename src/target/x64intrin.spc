@@ -7,7 +7,7 @@
 // `tests/codegen/asm_test.spc` checks each assembles to clang's bytes.
 
 /// The rows, by name: the intrinsic and its instructions.
-pub const ROWS: [(str<'static>, str<'static>); 700] = [
+pub(package) const ROWS: [(str<'static>, str<'static>); 700] = [
     ("_mm256_abs_epi16", "vpabsw %ymm0, %ymm0"),
     ("_mm256_abs_epi32", "vpabsd %ymm0, %ymm0"),
     ("_mm256_abs_epi64", "vpabsq %ymm0, %ymm0"),

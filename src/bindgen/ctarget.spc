@@ -15,29 +15,29 @@ import bindgen::ctarget_headers as hdrs;
 import target::table as tgt;
 
 /// The directory name of the built-in headers in `CTarget.sys_dirs`; `builtin_header` serves its files.
-pub const BUILTIN_DIR: str<'static> = "<super-c>";
+pub(package) const BUILTIN_DIR: str<'static> = "<super-c>";
 
 /// One target's C environment.
-pub struct CTarget {
+pub(package) struct CTarget {
     /// C text: `#define NAME VALUE` for every predefined macro, one per line.
-    pub predefs: String,
+    pub(package) predefs: String,
     /// The true answers of `__has_feature`, `__has_extension`, `__has_attribute`, `__has_c_attribute`,
     /// `__has_builtin` and `__has_declspec_attribute`, keyed `feature:x`, `extension:x`, `attribute:x`,
     /// `c_attribute:x` (`x` may be `scope::name`), `builtin:x`, `declspec_attribute:x`; and of the
     /// `__is_target_*` operators, keyed `target_os:x`, `target_arch:x`, `target_vendor:x`,
     /// `target_environment:x`, `target_variant_os:x`, `target_variant_environment:x`.
-    pub has: Vector<str<'static>>,
+    pub(package) has: Vector<str<'static>>,
     /// System include directories in search order. `BUILTIN_DIR` stands for the built-in headers at the
     /// place the compiler searches its resource directory.
-    pub sys_dirs: Vector<String>,
+    pub(package) sys_dirs: Vector<String>,
     /// Apple framework directories: `<Name/Header.h>` is `<dir>/Name.framework/Headers/Header.h`.
-    pub frameworks: Vector<String>,
+    pub(package) frameworks: Vector<String>,
     /// The names of the built-in headers of the target's instruction set, each under `BUILTIN_DIR`.
-    pub headers: Vector<str<'static>>,
+    pub(package) headers: Vector<str<'static>>,
 }
 
 /// The text of built-in header `name`; empty when there is none.
-pub const fn builtin_header(name: str) str<'static> {
+pub(package) const fn builtin_header(name: str) str<'static> {
     let hs: []hdrs::Header = hdrs::HEADERS;
     for i in 0..hs.len() {
         if hs[i].name == name {
@@ -136,7 +136,7 @@ fn no_sysroot(row: &data::Row, hint: str) bool {
 /// The SDK of an Apple target, found as `xcrun` finds it from the build's toolchain lookup (`objcache::cc_identity`):
 /// $SDKROOT (macOS only), else the SDKs of $DEVELOPER_DIR, the `xcode-select` directory and the Command Line Tools,
 /// in that order. No process runs. The SDK's platform name is the target's (`apple_sdk`).
-pub fn apple_sdk(t: &tgt::Target, out: &mut String) bool {
+pub(package) fn apple_sdk(t: &tgt::Target, out: &mut String) bool {
     // `xcrun --sdk` honors $SDKROOT only for the system it runs on, so does this; "/" counts as unset.
     if tgt::os(t.os).sdk == tgt::SDK_NONE {
         let env = stdlib::get_env("SDKROOT").unwrap_or(String::new());
@@ -274,7 +274,7 @@ fn is_mingw_tree(root: str, dir: str) bool {
 /// The library directories of the mingw-w64 tree of Windows `target` and `arch` (`sysroot`, else the
 /// toolchain's in PATH, as `c_target` finds the headers) into `out`: `<root>/<triple>/lib`, then
 /// `<root>/lib`, those that exist. False when there is no tree.
-pub fn mingw_lib_dirs(target: i32, arch: i32, sysroot: str, out: &mut Vector<String>) bool {
+pub(package) fn mingw_lib_dirs(target: i32, arch: i32, sysroot: str, out: &mut Vector<String>) bool {
     let to = tgt::target_of(target, arch);
     if to.is_none() {
         return false;
@@ -335,7 +335,7 @@ fn wasm_dirs(row: &data::Row, sysroot: str, out: &mut CTarget) bool {
 /// of the toolchain in PATH for Windows; the wasi-sdk of `$WASI_SDK_PATH` or the sysroot of
 /// `$WASI_SYSROOT` for wasm. Returns false, with a message on stderr, for an unknown pair or when no
 /// sysroot exists.
-pub fn c_target(target: i32, arch: i32, sysroot: str, out: &mut CTarget) bool {
+pub(package) fn c_target(target: i32, arch: i32, sysroot: str, out: &mut CTarget) bool {
     let to = tgt::target_of(target, arch);
     if to.is_none() {
         eprintln("super-c: no C environment for target code {} with arch code {}", target, arch);
@@ -485,7 +485,7 @@ fn apply_std(predefs: &mut String, std: str) bool {
 /// word), `-funsigned-char` and `-fsigned-char`. Any other flag is rejected with a message on stderr
 /// and false. The last `-std=` wins and is applied first, before the `-D`, `-U` and char flags, which
 /// apply in order, as clang predefines the dialect before the command line's macros.
-pub fn apply_c_flags(flags: str, out: &mut CTarget) bool {
+pub(package) fn apply_c_flags(flags: str, out: &mut CTarget) bool {
     let mut words = Vector::<String>::new();
     let mut a: usize = 0;
     for i in 0..flags.len() + 1 {
@@ -557,7 +557,7 @@ pub fn apply_c_flags(flags: str, out: &mut CTarget) bool {
 
 extend CTarget {
     /// An empty environment, for `c_target` to fill.
-    pub fn new() CTarget {
+    pub(package) fn new() CTarget {
         return CTarget {
             predefs: String::new(),
             has: Vector::<str<'static>>::new(),

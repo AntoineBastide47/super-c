@@ -7,54 +7,54 @@ import ast::ast as *;
 import lexer::token as tok;
 import lexer::token_type as tt;
 
-pub type BlockId = u32;
-pub type LocalId = u32;
-pub type StmtId = u32;
-pub type PlaceId = u32;
-pub type OperandId = u32;
-pub type RvalueId = u32;
-pub type ProjId = u32;
-pub type ConstId = u32;
-pub const IR_NONE: u32 = 0xFFFFFFFF;
+pub(package) type BlockId = u32;
+pub(package) type LocalId = u32;
+pub(package) type StmtId = u32;
+pub(package) type PlaceId = u32;
+pub(package) type OperandId = u32;
+pub(package) type RvalueId = u32;
+pub(package) type ProjId = u32;
+pub(package) type ConstId = u32;
+pub(package) const IR_NONE: u32 = 0xFFFFFFFF;
 
 /// Local storage classes (LocalDecl.storage).
-pub const LS_ARG: u8 = 0;
-pub const LS_RET: u8 = 1;
-pub const LS_USER: u8 = 2;
-pub const LS_TEMP: u8 = 3;
-pub const LS_STATIC_REF: u8 = 4; // a reference to an item (global/static); base of item places
+pub(package) const LS_ARG: u8 = 0;
+pub(package) const LS_RET: u8 = 1;
+pub(package) const LS_USER: u8 = 2;
+pub(package) const LS_TEMP: u8 = 3;
+pub(package) const LS_STATIC_REF: u8 = 4; // a reference to an item (global/static); base of item places
 /// An inlined callee's declared local (its arg or user binding, decl cleared by the splice):
 /// drop elaboration schedules its storage-death drops exactly as the callee's own would have.
-pub const LS_INL: u8 = 5;
+pub(package) const LS_INL: u8 = 5;
 
 /// The declaration a user local binds (`LocalDecl.dkind`): what the emitter reads of it after
 /// the body syntax is released.
-pub const LK_NONE: u8 = 0;
-pub const LK_LET: u8 = 1;
-pub const LK_FOR: u8 = 3; // `for` / `inline for` binding
-pub const LK_PATTERN: u8 = 4;
+pub(package) const LK_NONE: u8 = 0;
+pub(package) const LK_LET: u8 = 1;
+pub(package) const LK_FOR: u8 = 3; // `for` / `inline for` binding
+pub(package) const LK_PATTERN: u8 = 4;
 
 // The `@derive(Copy)` tags of this file restate the derivation for the bootstrap compiler, which checks a
 // `Copy` bound against written conformances only.
 /// One local slot: argument, return slot, user variable, or compiler temporary.
 @derive(Copy)
-pub struct LocalDecl {
-    pub ty: TypeId,
-    pub storage: u8,
-    pub is_mutable: bool,
-    pub dkind: u8, // an LK_* kind
-    pub span: tok::Span,
-    pub decl: NodeId, // binding decl node for user locals (diagnostic compatibility); NODE_NONE else
+pub(package) struct LocalDecl {
+    pub(package) ty: TypeId,
+    pub(package) storage: u8,
+    pub(package) is_mutable: bool,
+    pub(package) dkind: u8, // an LK_* kind
+    pub(package) span: tok::Span,
+    pub(package) decl: NodeId, // binding decl node for user locals (diagnostic compatibility); NODE_NONE else
     // The binding's name text as (offset from `span.start`, length); 0/0 for a temporary. Packed
     // so the record stays at 32 bytes (the analyses copy it by value).
-    pub name_off: u16,
-    pub name_len: u16,
-    pub item: DefId, // LS_STATIC_REF: the item this local names; {0, NODE_NONE} else
+    pub(package) name_off: u16,
+    pub(package) name_len: u16,
+    pub(package) item: DefId, // LS_STATIC_REF: the item this local names; {0, NODE_NONE} else
 }
 
 extend LocalDecl {
     /// A mutable nameless local of `storage` class with no binding decl and no item.
-    pub const fn anon(ty: TypeId, storage: u8, span: tok::Span) LocalDecl {
+    pub(package) const fn anon(ty: TypeId, storage: u8, span: tok::Span) LocalDecl {
         return LocalDecl {
             ty: ty,
             storage: storage,
@@ -69,7 +69,7 @@ extend LocalDecl {
     }
 
     /// The binding's name text span (empty for a temporary).
-    pub const fn name(self: &Self) tok::Span {
+    pub(package) const fn name(self: &Self) tok::Span {
         return tok::Span {
             start: self.span.start + self.name_off as u32,
             end: self.span.start + self.name_off as u32 + self.name_len as u32,
@@ -80,35 +80,35 @@ extend LocalDecl {
 /// One inline-assembly statement's text (see IN_ASM): the template and, in `CoreBody.asm_spans`
 /// from `cons`, the output constraints, the input constraints, then the clobbers.
 @derive(Copy)
-pub struct AsmRec {
-    pub template: tok::Span, // empty = none
-    pub cons: u32,
-    pub nout: u32,
-    pub nin: u32,
-    pub nclob: u32,
+pub(package) struct AsmRec {
+    pub(package) template: tok::Span, // empty = none
+    pub(package) cons: u32,
+    pub(package) nout: u32,
+    pub(package) nin: u32,
+    pub(package) nclob: u32,
 }
 
 /// Place projections (applied left to right from the base local).
-pub const PJ_DEREF: u8 = 0;
-pub const PJ_FIELD: u8 = 1; // sub = field decl NodeId (data then IR_NONE or the index); positional: data = index
-pub const PJ_INDEX_CONST: u8 = 2; // data = constant index
-pub const PJ_UNION_FIELD: u32 = 0xFFFFFFFE; // PJ_FIELD data marker: union member (fields alias)
-pub const PJ_INDEX_OP: u8 = 3; // data = OperandId of the dynamic index
-pub const PJ_DOWNCAST: u8 = 4; // data = variant index, sub = variant decl NodeId
+pub(package) const PJ_DEREF: u8 = 0;
+pub(package) const PJ_FIELD: u8 = 1; // sub = field decl NodeId (data then IR_NONE or the index); positional: data = index
+pub(package) const PJ_INDEX_CONST: u8 = 2; // data = constant index
+pub(package) const PJ_UNION_FIELD: u32 = 0xFFFFFFFE; // PJ_FIELD data marker: union member (fields alias)
+pub(package) const PJ_INDEX_OP: u8 = 3; // data = OperandId of the dynamic index
+pub(package) const PJ_DOWNCAST: u8 = 4; // data = variant index, sub = variant decl NodeId
 
 @derive(Copy)
-pub struct Projection {
-    pub kind: u8,
-    pub data: u32,
-    pub sub: u32,
-    pub ty: TypeId, // the type AFTER this projection applies
+pub(package) struct Projection {
+    pub(package) kind: u8,
+    pub(package) data: u32,
+    pub(package) sub: u32,
+    pub(package) ty: TypeId, // the type AFTER this projection applies
 }
 
 /// Do field projections `x` and `y` of one struct name different members? Named members compare by
 /// declaration (`data` may or may not carry the index), positional members by index; a named and a
 /// positional projection prove nothing. Union members (`PJ_UNION_FIELD`) share storage: test them
 /// first, as everything below one union member overlaps everything below another.
-pub const fn fields_differ(x: &Projection, y: &Projection) bool {
+pub(package) const fn fields_differ(x: &Projection, y: &Projection) bool {
     if x.sub != NODE_NONE || y.sub != NODE_NONE {
         return x.sub != NODE_NONE && y.sub != NODE_NONE && x.sub != y.sub;
     }
@@ -117,7 +117,7 @@ pub const fn fields_differ(x: &Projection, y: &Projection) bool {
 
 /// The `data` of field projection `pj` with a named member's index dropped, so one member has one
 /// identity whichever form names it.
-pub const fn field_data(pj: &Projection) u32 {
+pub(package) const fn field_data(pj: &Projection) u32 {
     if pj.sub != NODE_NONE && pj.data != PJ_UNION_FIELD {
         return IR_NONE;
     }
@@ -126,61 +126,61 @@ pub const fn field_data(pj: &Projection) u32 {
 
 /// A place: base local plus a projection range (into CoreBody.projections).
 @derive(Copy)
-pub struct Place {
-    pub base: LocalId,
-    pub proj_start: u32,
-    pub proj_len: u32,
-    pub ty: TypeId, // the final projected type
+pub(package) struct Place {
+    pub(package) base: LocalId,
+    pub(package) proj_start: u32,
+    pub(package) proj_len: u32,
+    pub(package) ty: TypeId, // the final projected type
 }
 
 /// Operand kinds.
-pub const OP_COPY: u8 = 0; // data = PlaceId
-pub const OP_MOVE: u8 = 1; // data = PlaceId
-pub const OP_CONST: u8 = 2; // data = ConstId
+pub(package) const OP_COPY: u8 = 0; // data = PlaceId
+pub(package) const OP_MOVE: u8 = 1; // data = PlaceId
+pub(package) const OP_CONST: u8 = 2; // data = ConstId
 
 @derive(Copy)
-pub struct Operand {
-    pub kind: u8,
-    pub data: u32,
-    pub ty: TypeId,
+pub(package) struct Operand {
+    pub(package) kind: u8,
+    pub(package) data: u32,
+    pub(package) ty: TypeId,
 }
 
 /// Constant kinds.
-pub const CK_INT: u8 = 0; // val = bits (sign per ty)
-pub const CK_FLOAT: u8 = 1; // raw span keeps the exact literal spelling
-pub const CK_BOOL: u8 = 2; // val = 0/1
-pub const CK_STR: u8 = 3; // raw span = content
-pub const CK_UNIT: u8 = 4; // no value (void/empty)
-pub const CK_ITEM: u8 = 5; // item = resolved fn/const DefId; val = bound generic arguments (targ_val)
-pub const CK_WIDE: u8 = 6; // val = wide-literal record index in the module Ast
+pub(package) const CK_INT: u8 = 0; // val = bits (sign per ty)
+pub(package) const CK_FLOAT: u8 = 1; // raw span keeps the exact literal spelling
+pub(package) const CK_BOOL: u8 = 2; // val = 0/1
+pub(package) const CK_STR: u8 = 3; // raw span = content
+pub(package) const CK_UNIT: u8 = 4; // no value (void/empty)
+pub(package) const CK_ITEM: u8 = 5; // item = resolved fn/const DefId; val = bound generic arguments (targ_val)
+pub(package) const CK_WIDE: u8 = 6; // val = wide-literal record index in the module Ast
 /// A folded `const fn` call's float: val = its IEEE bits (an `f32`'s in the low 32).
-pub const CK_FBITS: u8 = 7;
+pub(package) const CK_FBITS: u8 = 7;
 /// A folded `const fn` call's `str`: val = start << 32 | length of its bytes in CoreBody.bytes.
-pub const CK_BYTES: u8 = 8;
+pub(package) const CK_BYTES: u8 = 8;
 
 @derive(Copy)
-pub struct Constant {
-    pub kind: u8,
-    pub ty: TypeId,
-    pub val: i64,
-    pub raw: tok::Span,
-    pub item: DefId,
+pub(package) struct Constant {
+    pub(package) kind: u8,
+    pub(package) ty: TypeId,
+    pub(package) val: i64,
+    pub(package) raw: tok::Span,
+    pub(package) item: DefId,
 }
 static_assert(sizeof(Constant) == 32, "Constant stays 32 bytes: CK_ITEM keeps its generic arguments in val");
 
 /// A CK_ITEM `val`: `len` bound generic arguments from `start` in CoreBody.targ_pool.
-pub const fn targ_val(start: u32, len: u32) i64 {
+pub(package) const fn targ_val(start: u32, len: u32) i64 {
     return len as i64 << 32 | start as i64;
 }
 
 extend Constant {
     /// CK_ITEM: the first bound generic argument in CoreBody.targ_pool.
-    pub const fn targ_start(self: &Self) u32 {
+    pub(package) const fn targ_start(self: &Self) u32 {
         return self.val as u32;
     }
 
     /// CK_ITEM: the number of bound generic arguments.
-    pub const fn targ_len(self: &Self) u32 {
+    pub(package) const fn targ_len(self: &Self) u32 {
         return (self.val >> 32) as u32;
     }
 
@@ -188,7 +188,7 @@ extend Constant {
     /// hex, binary, octal, underscores, width suffixes, character literals with escapes, and `null`
     /// (0). A lowered literal's `val` holds the same value. False past u64::MAX or for a malformed
     /// character literal.
-    pub const fn int_value(self: &Self, src: str, out: &mut i64) bool {
+    pub(package) const fn int_value(self: &Self, src: str, out: &mut i64) bool {
         let sp = self.raw;
         if sp.end <= sp.start || sp.end as usize > src.len() {
             *out = self.val;
@@ -277,66 +277,66 @@ extend Constant {
 }
 
 /// Rvalue kinds.
-pub const RV_USE: u8 = 0; // a = OperandId; b = 1 (shared) or 2 (mutable) for an array's slice view, which borrows the array
+pub(package) const RV_USE: u8 = 0; // a = OperandId; b = 1 (shared) or 2 (mutable) for an array's slice view, which borrows the array
 // Borrowck replay tape events (recorded by the Lowerer at the walk's AST sites; consumed by
 // bc_replay): entry = kind << 56 | aux << 32 | node. Synthetic/desugared lowering never records.
-pub const TP_SCOPE_PUSH: u8 = 1;
-pub const TP_SCOPE_POP: u8 = 2;
-pub const TP_NLL: u8 = 3; // node = block, aux = statement index
-pub const TP_MARK_PUSH: u8 = 4;
-pub const TP_MARK_POP: u8 = 5;
-pub const TP_LET: u8 = 6;
-pub const TP_LET_TUPLE: u8 = 7;
-pub const TP_ASSIGN_PRE: u8 = 8;
-pub const TP_ASSIGN_POST: u8 = 9;
-pub const TP_RET_VAL: u8 = 10; // node = value expr, aux = index
-pub const TP_RET_POST: u8 = 11;
-pub const TP_CALL_MARK: u8 = 12;
-pub const TP_CALL: u8 = 13; // aux 1 = dyn free receiver
-pub const TP_REF: u8 = 14;
-pub const TP_CAST_ERASE: u8 = 15; // node = cast expression operand
-pub const TP_SLICE: u8 = 16;
-pub const TP_CLOSURE: u8 = 17;
-pub const TP_FLOW_SAVE: u8 = 19;
-pub const TP_FLOW_ELSE: u8 = 20;
-pub const TP_FLOW_JOIN: u8 = 21;
-pub const TP_LOOP_PUSH: u8 = 22; // aux 1 = for loop
-pub const TP_LOOP_POP: u8 = 23;
-pub const TP_BODY_START: u8 = 24; // aux 1 = always runs; for-loops also record the binding depth
-pub const TP_BODY_END: u8 = 25;
-pub const TP_MATCH_PRE: u8 = 26; // aux 1 = value position
-pub const TP_ARM: u8 = 27; // node = arm, aux = arm index
-pub const TP_ARM_END: u8 = 28;
-pub const TP_MATCH_POST: u8 = 29;
+pub(package) const TP_SCOPE_PUSH: u8 = 1;
+pub(package) const TP_SCOPE_POP: u8 = 2;
+pub(package) const TP_NLL: u8 = 3; // node = block, aux = statement index
+pub(package) const TP_MARK_PUSH: u8 = 4;
+pub(package) const TP_MARK_POP: u8 = 5;
+pub(package) const TP_LET: u8 = 6;
+pub(package) const TP_LET_TUPLE: u8 = 7;
+pub(package) const TP_ASSIGN_PRE: u8 = 8;
+pub(package) const TP_ASSIGN_POST: u8 = 9;
+pub(package) const TP_RET_VAL: u8 = 10; // node = value expr, aux = index
+pub(package) const TP_RET_POST: u8 = 11;
+pub(package) const TP_CALL_MARK: u8 = 12;
+pub(package) const TP_CALL: u8 = 13; // aux 1 = dyn free receiver
+pub(package) const TP_REF: u8 = 14;
+pub(package) const TP_CAST_ERASE: u8 = 15; // node = cast expression operand
+pub(package) const TP_SLICE: u8 = 16;
+pub(package) const TP_CLOSURE: u8 = 17;
+pub(package) const TP_FLOW_SAVE: u8 = 19;
+pub(package) const TP_FLOW_ELSE: u8 = 20;
+pub(package) const TP_FLOW_JOIN: u8 = 21;
+pub(package) const TP_LOOP_PUSH: u8 = 22; // aux 1 = for loop
+pub(package) const TP_LOOP_POP: u8 = 23;
+pub(package) const TP_BODY_START: u8 = 24; // aux 1 = always runs; for-loops also record the binding depth
+pub(package) const TP_BODY_END: u8 = 25;
+pub(package) const TP_MATCH_PRE: u8 = 26; // aux 1 = value position
+pub(package) const TP_ARM: u8 = 27; // node = arm, aux = arm index
+pub(package) const TP_ARM_END: u8 = 28;
+pub(package) const TP_MATCH_POST: u8 = 29;
 /// An argument a FOLDED call consumed: no IR op survives for the analysis, so the replay marks
 /// the move directly with the const-move category loud (the one flow check a fold erases).
-pub const TP_CONST_MOVE: u8 = 30;
+pub(package) const TP_CONST_MOVE: u8 = 30;
 
-pub const RV_REF: u8 = 1; // &place; a = PlaceId, b = 1 when mutable
-pub const RV_ADDR: u8 = 2; // raw address of place; a = PlaceId, b = 1 when *mut
-pub const RV_UNARY: u8 = 3; // a = OperandId, b = token op
-pub const RV_BINARY: u8 = 4; // a/b = OperandIds, c = token op
-pub const RV_CAST: u8 = 5; // a = OperandId, b = CastKind, target = ty
-pub const RV_AGGREGATE: u8 = 6; // a = operand range start, b = len, c = AggKind, item = decl/variant
-pub const RV_REPEAT: u8 = 7; // a = element OperandId, b = count OperandId
-pub const RV_LEN: u8 = 8; // a = PlaceId
-pub const RV_DISCRIMINANT: u8 = 9; // a = PlaceId
-pub const RV_DYN: u8 = 10; // dynamic-interface construction; a = OperandId, b = alloc TypeId
-pub const RV_CLOSURE: u8 = 11; // a = capture operand range start, b = len, item = closure body owner
-pub const RV_INTRINSIC: u8 = 12; // a = operand range start, b = len (IN_SIZEOF/IN_ALIGNOF: the measured TypeId), c = IntrinsicKind
+pub(package) const RV_REF: u8 = 1; // &place; a = PlaceId, b = 1 when mutable
+pub(package) const RV_ADDR: u8 = 2; // raw address of place; a = PlaceId, b = 1 when *mut
+pub(package) const RV_UNARY: u8 = 3; // a = OperandId, b = token op
+pub(package) const RV_BINARY: u8 = 4; // a/b = OperandIds, c = token op
+pub(package) const RV_CAST: u8 = 5; // a = OperandId, b = CastKind, target = ty
+pub(package) const RV_AGGREGATE: u8 = 6; // a = operand range start, b = len, c = AggKind, item = decl/variant
+pub(package) const RV_REPEAT: u8 = 7; // a = element OperandId, b = count OperandId
+pub(package) const RV_LEN: u8 = 8; // a = PlaceId
+pub(package) const RV_DISCRIMINANT: u8 = 9; // a = PlaceId
+pub(package) const RV_DYN: u8 = 10; // dynamic-interface construction; a = OperandId, b = alloc TypeId
+pub(package) const RV_CLOSURE: u8 = 11; // a = capture operand range start, b = len, item = closure body owner
+pub(package) const RV_INTRINSIC: u8 = 12; // a = operand range start, b = len (IN_SIZEOF/IN_ALIGNOF: the measured TypeId), c = IntrinsicKind
 /// Structural view slicing `base[lo..hi]`: a = the container PLACE, b = start OperandId (IR_NONE =
 /// from 0), item.node = end OperandId (IR_NONE = to the container's length), c bit0 = inclusive.
 /// Kept structural so end-openness survives (a materialized Range value cannot express it).
-pub const RV_SLICE: u8 = 13;
+pub(package) const RV_SLICE: u8 = 13;
 /// A named vector operation: a = operand range start, b = len, c = SIMD_* code, target = result
 /// type, item.node = the start of its index list in `simd_aux` (SIMD_SWIZZLE, SIMD_SHUFFLE) or IR_NONE.
 /// Lane-wise operators and casts stay RV_BINARY, RV_UNARY and RV_CAST over vector types.
-pub const RV_SIMD: u8 = 14;
+pub(package) const RV_SIMD: u8 = 14;
 
 /// The live edge of switch block `x` of `b` when it switches on a literal: the index of the case it
 /// takes (`sw_len` for the default edge), IR_NONE otherwise. Every pass that walks the control flow
 /// skips the dead edges.
-pub const fn const_switch_edge(b: &CoreBody, x: u32) u32 {
+pub(package) const fn const_switch_edge(b: &CoreBody, x: u32) u32 {
     let t = b.blocks.at(x as usize).term;
     if t.kind != TM_SWITCH {
         return IR_NONE;
@@ -358,7 +358,7 @@ pub const fn const_switch_edge(b: &CoreBody, x: u32) u32 {
 }
 
 /// True for the rvalue kinds whose operands are the range `a`, `b` long, in `oper_pool`.
-pub const fn has_op_range(rv: &Rvalue) bool {
+pub(package) const fn has_op_range(rv: &Rvalue) bool {
     return rv.kind == RV_AGGREGATE || rv.kind == RV_CLOSURE || rv.kind == RV_SIMD || rv.kind == RV_INTRINSIC && !type_payload(
         rv.c,
     );
@@ -367,146 +367,146 @@ pub const fn has_op_range(rv: &Rvalue) bool {
 /// RV_SIMD operation codes (`Rvalue.c`), indexes of SIMD_OPS. Append-only. One code per lane rule:
 /// the element kind selects the scalar rule, as for RV_BINARY (`MIN` is IEEE minimumNumber on float
 /// lanes, `ABS` clears the sign bit of a float lane).
-pub const SIMD_IOTA: u8 = 0;
-pub const SIMD_CMP_EQ: u8 = 1;
-pub const SIMD_CMP_NE: u8 = 2;
-pub const SIMD_CMP_LT: u8 = 3;
-pub const SIMD_CMP_LE: u8 = 4;
-pub const SIMD_CMP_GT: u8 = 5;
-pub const SIMD_CMP_GE: u8 = 6;
-pub const SIMD_CHOOSE: u8 = 7;
-pub const SIMD_WRAP_ADD: u8 = 8;
-pub const SIMD_WRAP_SUB: u8 = 9;
-pub const SIMD_WRAP_MUL: u8 = 10;
-pub const SIMD_WRAP_NEG: u8 = 11;
-pub const SIMD_WRAP_SHL: u8 = 12;
-pub const SIMD_WRAP_SHR: u8 = 13;
-pub const SIMD_OVF_ADD: u8 = 14;
-pub const SIMD_OVF_SUB: u8 = 15;
-pub const SIMD_OVF_MUL: u8 = 16;
-pub const SIMD_SAT_ADD: u8 = 17;
-pub const SIMD_SAT_SUB: u8 = 18;
-pub const SIMD_MIN: u8 = 19;
-pub const SIMD_MAX: u8 = 20;
-pub const SIMD_ABS: u8 = 21;
-pub const SIMD_WRAP_ABS: u8 = 22;
-pub const SIMD_ABS_DIFF: u8 = 23;
-pub const SIMD_CLZ: u8 = 24;
-pub const SIMD_CTZ: u8 = 25;
-pub const SIMD_POPCNT: u8 = 26;
-pub const SIMD_ROTL: u8 = 27;
-pub const SIMD_ROTR: u8 = 28;
-pub const SIMD_BITREV: u8 = 29;
-pub const SIMD_BSWAP: u8 = 30;
-pub const SIMD_COPYSIGN: u8 = 31;
-pub const SIMD_MINIMUM: u8 = 32;
-pub const SIMD_MAXIMUM: u8 = 33;
-pub const SIMD_SQRT: u8 = 34;
-pub const SIMD_CEIL: u8 = 35;
-pub const SIMD_FLOOR: u8 = 36;
-pub const SIMD_TRUNC: u8 = 37;
-pub const SIMD_ROUND_EVEN: u8 = 38;
-pub const SIMD_FMA: u8 = 39;
-pub const SIMD_IS_NAN: u8 = 40;
-pub const SIMD_IS_INF: u8 = 41;
-pub const SIMD_IS_FINITE: u8 = 42;
-pub const SIMD_IS_NORMAL: u8 = 43;
-pub const SIMD_IS_SUBNORMAL: u8 = 44;
-pub const SIMD_IS_SIGN_NEG: u8 = 45;
-pub const SIMD_CAST_CHANGED: u8 = 46; // (source, cast result): the lanes whose value changed or were NaN
-pub const SIMD_NARROW_CHECKED: u8 = 47;
-pub const SIMD_NARROW_SAT: u8 = 48;
-pub const SIMD_BITCAST: u8 = 49;
-pub const SIMD_LOW_HALF: u8 = 50;
-pub const SIMD_HIGH_HALF: u8 = 51;
-pub const SIMD_CONCAT: u8 = 52;
-pub const SIMD_LOAD: u8 = 53; // (slice, checked start): reads N elements
-pub const SIMD_STORE: u8 = 54; // (slice, checked start, vector): writes N elements
-pub const SIMD_LOAD_RAW: u8 = 55; // (pointer): reads sizeof(T) * N bytes
-pub const SIMD_STORE_RAW: u8 = 56; // (pointer, vector): writes sizeof(T) * N bytes
-pub const SIMD_SWIZZLE: u8 = 57; // (v) and an index list: lane i is v[idx[i]]
-pub const SIMD_SHUFFLE: u8 = 58; // (a, b) and an index list: lane i is (a ++ b)[idx[i]]
-pub const SIMD_SWIZZLE_ZERO: u8 = 59; // (v, idx): lane i is v[idx[i]], or 0 past the lanes
-pub const SIMD_SWIZZLE_OOB: u8 = 60; // (v, idx): the lanes whose index is past the lanes
-pub const SIMD_COMPRESS: u8 = 61; // (m, v, fill)
-pub const SIMD_EXPAND: u8 = 62; // (m, packed, fill)
-pub const SIMD_REDUCE_ADD: u8 = 63;
-pub const SIMD_REDUCE_MUL: u8 = 64;
-pub const SIMD_REDUCE_ADD_ORD: u8 = 65;
-pub const SIMD_REDUCE_MUL_ORD: u8 = 66;
-pub const SIMD_REDUCE_ADD_TREE: u8 = 67;
-pub const SIMD_REDUCE_MUL_TREE: u8 = 68;
-pub const SIMD_REDUCE_ADD_OVF: u8 = 69; // whether the exact sum does not fit the lane type
-pub const SIMD_REDUCE_MUL_OVF: u8 = 70;
-pub const SIMD_REDUCE_MIN: u8 = 71;
-pub const SIMD_REDUCE_MAX: u8 = 72;
-pub const SIMD_REDUCE_MIN_NUM: u8 = 73;
-pub const SIMD_REDUCE_MAX_NUM: u8 = 74;
-pub const SIMD_REDUCE_MINIMUM: u8 = 75;
-pub const SIMD_REDUCE_MAXIMUM: u8 = 76;
-pub const SIMD_REDUCE_AND: u8 = 77;
-pub const SIMD_REDUCE_OR: u8 = 78;
-pub const SIMD_REDUCE_XOR: u8 = 79;
-pub const SIMD_ARG_MIN: u8 = 80; // the lowest lane holding the extreme value
-pub const SIMD_ARG_MAX: u8 = 81;
-pub const SIMD_ARG_MIN_NUM: u8 = 82; // the same over the non-NaN lanes; N when every lane is NaN
-pub const SIMD_ARG_MAX_NUM: u8 = 83;
-pub const SIMD_DOT: u8 = 84; // (a, b): the products in the result type, summed as REDUCE_ADD(_ORD)
-pub const SIMD_LOAD_OR: u8 = 85; // (slice, start, fallback)
-pub const SIMD_LOAD_MASKED: u8 = 86; // (slice, start, m, fallback)
-pub const SIMD_STORE_MASKED: u8 = 87; // (slice, start, m, v)
-pub const SIMD_GATHER: u8 = 88; // (slice, idx, m, fallback)
-pub const SIMD_SCATTER: u8 = 89; // (slice, idx, m, v)
-pub const SIMD_COMPRESS_STORE: u8 = 90; // (slice, start, m, v): the active lane count
-pub const SIMD_GATHER_UNCHECKED: u8 = 91; // (slice, idx, m, fallback): `GATHER` with no index check
-pub const SIMD_GATHER_PTR: u8 = 92; // ([*const T; N], m, fallback)
-pub const SIMD_SCATTER_PTR: u8 = 93; // ([*mut T; N], m, v)
-pub const SIMD_LOAD_MASKED_PTR: u8 = 94; // (pointer, m, fallback)
-pub const SIMD_STORE_MASKED_PTR: u8 = 95; // (pointer, m, v)
+pub(package) const SIMD_IOTA: u8 = 0;
+pub(package) const SIMD_CMP_EQ: u8 = 1;
+pub(package) const SIMD_CMP_NE: u8 = 2;
+pub(package) const SIMD_CMP_LT: u8 = 3;
+pub(package) const SIMD_CMP_LE: u8 = 4;
+pub(package) const SIMD_CMP_GT: u8 = 5;
+pub(package) const SIMD_CMP_GE: u8 = 6;
+pub(package) const SIMD_CHOOSE: u8 = 7;
+pub(package) const SIMD_WRAP_ADD: u8 = 8;
+pub(package) const SIMD_WRAP_SUB: u8 = 9;
+pub(package) const SIMD_WRAP_MUL: u8 = 10;
+pub(package) const SIMD_WRAP_NEG: u8 = 11;
+pub(package) const SIMD_WRAP_SHL: u8 = 12;
+pub(package) const SIMD_WRAP_SHR: u8 = 13;
+pub(package) const SIMD_OVF_ADD: u8 = 14;
+pub(package) const SIMD_OVF_SUB: u8 = 15;
+pub(package) const SIMD_OVF_MUL: u8 = 16;
+pub(package) const SIMD_SAT_ADD: u8 = 17;
+pub(package) const SIMD_SAT_SUB: u8 = 18;
+pub(package) const SIMD_MIN: u8 = 19;
+pub(package) const SIMD_MAX: u8 = 20;
+pub(package) const SIMD_ABS: u8 = 21;
+pub(package) const SIMD_WRAP_ABS: u8 = 22;
+pub(package) const SIMD_ABS_DIFF: u8 = 23;
+pub(package) const SIMD_CLZ: u8 = 24;
+pub(package) const SIMD_CTZ: u8 = 25;
+pub(package) const SIMD_POPCNT: u8 = 26;
+pub(package) const SIMD_ROTL: u8 = 27;
+pub(package) const SIMD_ROTR: u8 = 28;
+pub(package) const SIMD_BITREV: u8 = 29;
+pub(package) const SIMD_BSWAP: u8 = 30;
+pub(package) const SIMD_COPYSIGN: u8 = 31;
+pub(package) const SIMD_MINIMUM: u8 = 32;
+pub(package) const SIMD_MAXIMUM: u8 = 33;
+pub(package) const SIMD_SQRT: u8 = 34;
+pub(package) const SIMD_CEIL: u8 = 35;
+pub(package) const SIMD_FLOOR: u8 = 36;
+pub(package) const SIMD_TRUNC: u8 = 37;
+pub(package) const SIMD_ROUND_EVEN: u8 = 38;
+pub(package) const SIMD_FMA: u8 = 39;
+pub(package) const SIMD_IS_NAN: u8 = 40;
+pub(package) const SIMD_IS_INF: u8 = 41;
+pub(package) const SIMD_IS_FINITE: u8 = 42;
+pub(package) const SIMD_IS_NORMAL: u8 = 43;
+pub(package) const SIMD_IS_SUBNORMAL: u8 = 44;
+pub(package) const SIMD_IS_SIGN_NEG: u8 = 45;
+pub(package) const SIMD_CAST_CHANGED: u8 = 46; // (source, cast result): the lanes whose value changed or were NaN
+pub(package) const SIMD_NARROW_CHECKED: u8 = 47;
+pub(package) const SIMD_NARROW_SAT: u8 = 48;
+pub(package) const SIMD_BITCAST: u8 = 49;
+pub(package) const SIMD_LOW_HALF: u8 = 50;
+pub(package) const SIMD_HIGH_HALF: u8 = 51;
+pub(package) const SIMD_CONCAT: u8 = 52;
+pub(package) const SIMD_LOAD: u8 = 53; // (slice, checked start): reads N elements
+pub(package) const SIMD_STORE: u8 = 54; // (slice, checked start, vector): writes N elements
+pub(package) const SIMD_LOAD_RAW: u8 = 55; // (pointer): reads sizeof(T) * N bytes
+pub(package) const SIMD_STORE_RAW: u8 = 56; // (pointer, vector): writes sizeof(T) * N bytes
+pub(package) const SIMD_SWIZZLE: u8 = 57; // (v) and an index list: lane i is v[idx[i]]
+pub(package) const SIMD_SHUFFLE: u8 = 58; // (a, b) and an index list: lane i is (a ++ b)[idx[i]]
+pub(package) const SIMD_SWIZZLE_ZERO: u8 = 59; // (v, idx): lane i is v[idx[i]], or 0 past the lanes
+pub(package) const SIMD_SWIZZLE_OOB: u8 = 60; // (v, idx): the lanes whose index is past the lanes
+pub(package) const SIMD_COMPRESS: u8 = 61; // (m, v, fill)
+pub(package) const SIMD_EXPAND: u8 = 62; // (m, packed, fill)
+pub(package) const SIMD_REDUCE_ADD: u8 = 63;
+pub(package) const SIMD_REDUCE_MUL: u8 = 64;
+pub(package) const SIMD_REDUCE_ADD_ORD: u8 = 65;
+pub(package) const SIMD_REDUCE_MUL_ORD: u8 = 66;
+pub(package) const SIMD_REDUCE_ADD_TREE: u8 = 67;
+pub(package) const SIMD_REDUCE_MUL_TREE: u8 = 68;
+pub(package) const SIMD_REDUCE_ADD_OVF: u8 = 69; // whether the exact sum does not fit the lane type
+pub(package) const SIMD_REDUCE_MUL_OVF: u8 = 70;
+pub(package) const SIMD_REDUCE_MIN: u8 = 71;
+pub(package) const SIMD_REDUCE_MAX: u8 = 72;
+pub(package) const SIMD_REDUCE_MIN_NUM: u8 = 73;
+pub(package) const SIMD_REDUCE_MAX_NUM: u8 = 74;
+pub(package) const SIMD_REDUCE_MINIMUM: u8 = 75;
+pub(package) const SIMD_REDUCE_MAXIMUM: u8 = 76;
+pub(package) const SIMD_REDUCE_AND: u8 = 77;
+pub(package) const SIMD_REDUCE_OR: u8 = 78;
+pub(package) const SIMD_REDUCE_XOR: u8 = 79;
+pub(package) const SIMD_ARG_MIN: u8 = 80; // the lowest lane holding the extreme value
+pub(package) const SIMD_ARG_MAX: u8 = 81;
+pub(package) const SIMD_ARG_MIN_NUM: u8 = 82; // the same over the non-NaN lanes; N when every lane is NaN
+pub(package) const SIMD_ARG_MAX_NUM: u8 = 83;
+pub(package) const SIMD_DOT: u8 = 84; // (a, b): the products in the result type, summed as REDUCE_ADD(_ORD)
+pub(package) const SIMD_LOAD_OR: u8 = 85; // (slice, start, fallback)
+pub(package) const SIMD_LOAD_MASKED: u8 = 86; // (slice, start, m, fallback)
+pub(package) const SIMD_STORE_MASKED: u8 = 87; // (slice, start, m, v)
+pub(package) const SIMD_GATHER: u8 = 88; // (slice, idx, m, fallback)
+pub(package) const SIMD_SCATTER: u8 = 89; // (slice, idx, m, v)
+pub(package) const SIMD_COMPRESS_STORE: u8 = 90; // (slice, start, m, v): the active lane count
+pub(package) const SIMD_GATHER_UNCHECKED: u8 = 91; // (slice, idx, m, fallback): `GATHER` with no index check
+pub(package) const SIMD_GATHER_PTR: u8 = 92; // ([*const T; N], m, fallback)
+pub(package) const SIMD_SCATTER_PTR: u8 = 93; // ([*mut T; N], m, v)
+pub(package) const SIMD_LOAD_MASKED_PTR: u8 = 94; // (pointer, m, fallback)
+pub(package) const SIMD_STORE_MASKED_PTR: u8 = 95; // (pointer, m, v)
 
 /// SimdOp.rule: how the operands and the result relate (V is operand 0's vector type, N its lanes).
-pub const SR_VEC: u8 = 0; // every operand and the result are V
-pub const SR_MASK: u8 = 1; // every operand is V; the result is Mask<N>
-pub const SR_CHOOSE: u8 = 2; // (Mask<N>, V, V) -> V; V is operand 1's type
-pub const SR_LANES: u8 = 3; // (V) or (V, V) -> a vector of N other lanes
-pub const SR_CHANGED: u8 = 4; // (V, W), W of N lanes -> Mask<N>
-pub const SR_BITCAST: u8 = 5; // V -> a vector of the same size
-pub const SR_HALF: u8 = 6; // V -> N / 2 lanes of V's element
-pub const SR_CONCAT: u8 = 7; // (V, V) -> 2 * N lanes of V's element
-pub const SR_ANY: u8 = 8; // no operand; the result is any vector
-pub const SR_LOAD: u8 = 9; // a slice or pointer of T [, usize start] -> Simd<T, N>
-pub const SR_STORE: u8 = 10; // a slice or pointer of T [, usize start], Simd<T, N> -> unit
-pub const SR_INDEX: u8 = 11; // (V) or (V, V) and an index list of M -> M lanes of V's element
-pub const SR_RT_INDEX: u8 = 12; // (V, M lanes of an unsigned integer) -> M lanes of V's element, or Mask<M>
-pub const SR_MASKED: u8 = 13; // (Mask<N>, V, V) -> V
-pub const SR_REDUCE: u8 = 14; // (V) -> the element (bool for an overflow test, usize for a lane index)
-pub const SR_DOT: u8 = 15; // (V, V) -> a scalar of the same kind, at least as wide as the element
-pub const SR_MLOAD: u8 = 16; // the elements' place, [start or index vector,] [Mask<N>,] V -> V
-pub const SR_MSTORE: u8 = 17; // the elements' place, start or index vector, Mask<N>, V -> unit (usize)
+pub(package) const SR_VEC: u8 = 0; // every operand and the result are V
+pub(package) const SR_MASK: u8 = 1; // every operand is V; the result is Mask<N>
+pub(package) const SR_CHOOSE: u8 = 2; // (Mask<N>, V, V) -> V; V is operand 1's type
+pub(package) const SR_LANES: u8 = 3; // (V) or (V, V) -> a vector of N other lanes
+pub(package) const SR_CHANGED: u8 = 4; // (V, W), W of N lanes -> Mask<N>
+pub(package) const SR_BITCAST: u8 = 5; // V -> a vector of the same size
+pub(package) const SR_HALF: u8 = 6; // V -> N / 2 lanes of V's element
+pub(package) const SR_CONCAT: u8 = 7; // (V, V) -> 2 * N lanes of V's element
+pub(package) const SR_ANY: u8 = 8; // no operand; the result is any vector
+pub(package) const SR_LOAD: u8 = 9; // a slice or pointer of T [, usize start] -> Simd<T, N>
+pub(package) const SR_STORE: u8 = 10; // a slice or pointer of T [, usize start], Simd<T, N> -> unit
+pub(package) const SR_INDEX: u8 = 11; // (V) or (V, V) and an index list of M -> M lanes of V's element
+pub(package) const SR_RT_INDEX: u8 = 12; // (V, M lanes of an unsigned integer) -> M lanes of V's element, or Mask<M>
+pub(package) const SR_MASKED: u8 = 13; // (Mask<N>, V, V) -> V
+pub(package) const SR_REDUCE: u8 = 14; // (V) -> the element (bool for an overflow test, usize for a lane index)
+pub(package) const SR_DOT: u8 = 15; // (V, V) -> a scalar of the same kind, at least as wide as the element
+pub(package) const SR_MLOAD: u8 = 16; // the elements' place, [start or index vector,] [Mask<N>,] V -> V
+pub(package) const SR_MSTORE: u8 = 17; // the elements' place, start or index vector, Mask<N>, V -> unit (usize)
 
 /// SimdOp.elem: the lane types the operation accepts (operand 0's lanes, or the result's for SR_ANY).
-pub const SE_ANY: u8 = 0;
-pub const SE_INT: u8 = 1;
-pub const SE_FLOAT: u8 = 2;
-pub const SE_SIGNED: u8 = 3; // a signed integer or a float
-pub const SE_SINT: u8 = 4; // a signed integer
+pub(package) const SE_ANY: u8 = 0;
+pub(package) const SE_INT: u8 = 1;
+pub(package) const SE_FLOAT: u8 = 2;
+pub(package) const SE_SIGNED: u8 = 3; // a signed integer or a float
+pub(package) const SE_SINT: u8 = 4; // a signed integer
 
 /// SimdOp.effect: the memory the operation touches through operand 0: none, the lanes' elements, or
 /// (masked and gather forms) one element per active lane at a lane-dependent address.
-pub const SM_NONE: u8 = 0;
-pub const SM_READ: u8 = 1;
-pub const SM_WRITE: u8 = 2;
-pub const SM_READ_LANES: u8 = 3;
-pub const SM_WRITE_LANES: u8 = 4;
+pub(package) const SM_NONE: u8 = 0;
+pub(package) const SM_READ: u8 = 1;
+pub(package) const SM_WRITE: u8 = 2;
+pub(package) const SM_READ_LANES: u8 = 3;
+pub(package) const SM_WRITE_LANES: u8 = 4;
 
 /// One RV_SIMD operation: its intrinsic name (`@intrinsic("simd.<name>")`), operand count, type
 /// rule, lane types, and memory effect through operand 0.
-pub struct SimdOp {
-    pub name: str<'static>,
-    pub arity: u8,
-    pub rule: u8,
-    pub elem: u8,
-    pub effect: u8,
+pub(package) struct SimdOp {
+    pub(package) name: str<'static>,
+    pub(package) arity: u8,
+    pub(package) rule: u8,
+    pub(package) elem: u8,
+    pub(package) effect: u8,
 }
 
 const fn sop(name: str<'static>, arity: u8, rule: u8, elem: u8) SimdOp {
@@ -518,9 +518,9 @@ const fn mop(name: str<'static>, arity: u8, rule: u8, effect: u8) SimdOp {
 }
 
 /// The number of RV_SIMD codes.
-pub const SIMD_CODES: usize = 96;
+pub(package) const SIMD_CODES: usize = 96;
 
-pub const SIMD_OPS: [SimdOp; SIMD_CODES] = [
+pub(package) const SIMD_OPS: [SimdOp; SIMD_CODES] = [
     sop("iota", 0, SR_ANY, SE_ANY),
     sop("eq", 2, SR_MASK, SE_ANY),
     sop("ne", 2, SR_MASK, SE_ANY),
@@ -620,31 +620,31 @@ pub const SIMD_OPS: [SimdOp; SIMD_CODES] = [
 ];
 
 /// The SIMD_OPS row of code `c`.
-pub const fn simd_op(c: u8) SimdOp {
+pub(package) const fn simd_op(c: u8) SimdOp {
     let t: []SimdOp = SIMD_OPS;
     return t[c as usize];
 }
 
 /// Lane `i` of the index list at `simd_aux[start..]`: its length, then its lanes four to a word.
-pub const fn aux_lane(b: &CoreBody, start: u32, i: u64) u32 {
+pub(package) const fn aux_lane(b: &CoreBody, start: u32, i: u64) u32 {
     return b.simd_aux[(start as u64 + 1 + i / 4) as usize] >> (i % 4 * 8) as u32 & 0xFF;
 }
 
 /// Whether code `c` writes through operand 0 (`SM_WRITE`, `SM_WRITE_LANES`).
-pub const fn simd_writes(c: u8) bool {
+pub(package) const fn simd_writes(c: u8) bool {
     let e = simd_op(c).effect;
     return e == SM_WRITE || e == SM_WRITE_LANES;
 }
 
 /// What `@intrinsic("simd.<name>")` lowers to (`simd_intrinsic`).
-pub const SI_BINARY: u32 = 1; // RV_BINARY, c = the operator token
-pub const SI_UNARY: u32 = 2; // RV_UNARY, b = the operator token
-pub const SI_CAST: u32 = 3; // RV_CAST, c = the cast kind
-pub const SI_SIMD: u32 = 4; // RV_SIMD, c = the code
-pub const SI_HINT: u32 = 5; // RV_INTRINSIC, c = IN_LIKELY, IN_UNLIKELY, IN_RETURN_ADDRESS, IN_VOLATILE_LOAD or IN_VOLATILE_STORE
+pub(package) const SI_BINARY: u32 = 1; // RV_BINARY, c = the operator token
+pub(package) const SI_UNARY: u32 = 2; // RV_UNARY, b = the operator token
+pub(package) const SI_CAST: u32 = 3; // RV_CAST, c = the cast kind
+pub(package) const SI_SIMD: u32 = 4; // RV_SIMD, c = the code
+pub(package) const SI_HINT: u32 = 5; // RV_INTRINSIC, c = IN_LIKELY, IN_UNLIKELY, IN_RETURN_ADDRESS, IN_VOLATILE_LOAD or IN_VOLATILE_STORE
 
 /// The lowering of `@intrinsic("<name>")`: SI_* << 8 | c, or 0 for an unknown name.
-pub const fn simd_intrinsic(name: str) u32 {
+pub(package) const fn simd_intrinsic(name: str) u32 {
     if name == "float.to_int_unchecked" {
         return SI_CAST << 8 | CAST_UNCHECKED as u32;
     }
@@ -700,29 +700,29 @@ pub const fn simd_intrinsic(name: str) u32 {
 /// lowering planner uses: the comparisons and `choose` over lane masks (a lane of all ones when
 /// true), the conversions between a lane mask and `Mask<N>`, the lane-mask `any` and `all`, and the
 /// shifts by one scalar count already checked to be below the lane width.
-pub const OP_ADD: u32 = 0;
-pub const OP_SUB: u32 = 1;
-pub const OP_MUL: u32 = 2;
-pub const OP_DIV: u32 = 3;
-pub const OP_REM: u32 = 4;
-pub const OP_AND: u32 = 5;
-pub const OP_OR: u32 = 6;
-pub const OP_XOR: u32 = 7;
-pub const OP_SHL: u32 = 8;
-pub const OP_SHR: u32 = 9;
-pub const OP_NEG: u32 = 10;
-pub const OP_NOT: u32 = 11;
-pub const OP_CAST: u32 = 12;
-pub const OP_SIMD: u32 = 13;
-pub const OP_CMP_LANES: u32 = OP_SIMD + SIMD_CODES as u32; // eq, ne, lt, le, gt, ge
-pub const OP_CHOOSE_LANES: u32 = OP_CMP_LANES + 6;
-pub const OP_LANES_TO_MASK: u32 = OP_CHOOSE_LANES + 1;
-pub const OP_MASK_TO_LANES: u32 = OP_CHOOSE_LANES + 2;
-pub const OP_ANY_LANES: u32 = OP_CHOOSE_LANES + 3;
-pub const OP_ALL_LANES: u32 = OP_CHOOSE_LANES + 4;
-pub const OP_SHL_SCALAR: u32 = OP_CHOOSE_LANES + 5;
-pub const OP_SHR_SCALAR: u32 = OP_CHOOSE_LANES + 6;
-pub const OP_COUNT: u32 = OP_CHOOSE_LANES + 7;
+pub(package) const OP_ADD: u32 = 0;
+pub(package) const OP_SUB: u32 = 1;
+pub(package) const OP_MUL: u32 = 2;
+pub(package) const OP_DIV: u32 = 3;
+pub(package) const OP_REM: u32 = 4;
+pub(package) const OP_AND: u32 = 5;
+pub(package) const OP_OR: u32 = 6;
+pub(package) const OP_XOR: u32 = 7;
+pub(package) const OP_SHL: u32 = 8;
+pub(package) const OP_SHR: u32 = 9;
+pub(package) const OP_NEG: u32 = 10;
+pub(package) const OP_NOT: u32 = 11;
+pub(package) const OP_CAST: u32 = 12;
+pub(package) const OP_SIMD: u32 = 13;
+pub(package) const OP_CMP_LANES: u32 = OP_SIMD + SIMD_CODES as u32; // eq, ne, lt, le, gt, ge
+pub(package) const OP_CHOOSE_LANES: u32 = OP_CMP_LANES + 6;
+pub(package) const OP_LANES_TO_MASK: u32 = OP_CHOOSE_LANES + 1;
+pub(package) const OP_MASK_TO_LANES: u32 = OP_CHOOSE_LANES + 2;
+pub(package) const OP_ANY_LANES: u32 = OP_CHOOSE_LANES + 3;
+pub(package) const OP_ALL_LANES: u32 = OP_CHOOSE_LANES + 4;
+pub(package) const OP_SHL_SCALAR: u32 = OP_CHOOSE_LANES + 5;
+pub(package) const OP_SHR_SCALAR: u32 = OP_CHOOSE_LANES + 6;
+pub(package) const OP_COUNT: u32 = OP_CHOOSE_LANES + 7;
 
 const OP_NAMES: [str<'static>; 13] = [
     "add",
@@ -756,7 +756,7 @@ const OP_PLAN_NAMES: [str<'static>; 13] = [
 ];
 
 /// The name of operation `op` (below OP_COUNT): an operator's, a vector operation's, a planner form's.
-pub const fn op_name(op: u32) str<'static> {
+pub(package) const fn op_name(op: u32) str<'static> {
     let ops: []str<'static> = OP_NAMES;
     let pl: []str<'static> = OP_PLAN_NAMES;
     if op < OP_SIMD {
@@ -769,7 +769,7 @@ pub const fn op_name(op: u32) str<'static> {
 }
 
 /// The `std::simd::Op` variant of operation `op`: its name in CamelCase, a comparison prefixed `Cmp`.
-pub const fn op_variant(op: u32) String {
+pub(package) const fn op_variant(op: u32) String {
     let mut out = String::new();
     let n = op_name(op);
     if op >= OP_SIMD + SIMD_CMP_EQ as u32 && op <= OP_SIMD + SIMD_CMP_GE as u32 {
@@ -791,7 +791,7 @@ pub const fn op_variant(op: u32) String {
 /// The run-time and compile-time trap message of a failing lane of rvalue kind `rk`: RV_BINARY with
 /// operator token `op`, RV_UNARY (`-`), or RV_SIMD with code `op`; `second` for the second failure
 /// kind of `/` and `%` (MIN / -1 after a zero divisor). The trap reads `lane <i>: <message>`.
-pub const fn lane_trap_msg(rk: u8, op: u8, second: bool) str<'static> {
+pub(package) const fn lane_trap_msg(rk: u8, op: u8, second: bool) str<'static> {
     if rk != RV_BINARY {
         return pick(
             rk == RV_SIMD && op == SIMD_NARROW_CHECKED,
@@ -817,108 +817,108 @@ pub const fn lane_trap_msg(rk: u8, op: u8, second: bool) str<'static> {
 }
 
 /// Cast kinds (RV_CAST.b).
-pub const CAST_NUMERIC: u8 = 0;
-pub const CAST_COERCE_FROM: u8 = 1; // library `from` conversion; item = selected method
-pub const CAST_SIMD_ARRAY: u8 = 2; // `[T; N]` to `Simd<T, N>` or back: the same lanes (std only)
-pub const CAST_MASK_BITS: u8 = 3; // `Mask<N>` to `u64` or back: lane `i` is bit `i` (std only)
-pub const CAST_UNCHECKED: u8 = 4; // float to integer by truncation, no saturation: the value is not NaN and fits (std's `to_int_unchecked`)
+pub(package) const CAST_NUMERIC: u8 = 0;
+pub(package) const CAST_COERCE_FROM: u8 = 1; // library `from` conversion; item = selected method
+pub(package) const CAST_SIMD_ARRAY: u8 = 2; // `[T; N]` to `Simd<T, N>` or back: the same lanes (std only)
+pub(package) const CAST_MASK_BITS: u8 = 3; // `Mask<N>` to `u64` or back: lane `i` is bit `i` (std only)
+pub(package) const CAST_UNCHECKED: u8 = 4; // float to integer by truncation, no saturation: the value is not NaN and fits (std's `to_int_unchecked`)
 
 /// Aggregate kinds (RV_AGGREGATE.c).
-pub const AGG_STRUCT: u8 = 0;
-pub const AGG_TUPLE: u8 = 1;
-pub const AGG_ARRAY: u8 = 2;
-pub const AGG_VARIANT: u8 = 3; // item = variant decl; c2 = discriminant index
+pub(package) const AGG_STRUCT: u8 = 0;
+pub(package) const AGG_TUPLE: u8 = 1;
+pub(package) const AGG_ARRAY: u8 = 2;
+pub(package) const AGG_VARIANT: u8 = 3; // item = variant decl; c2 = discriminant index
 
 /// Compiler intrinsics that stay explicit operations (RV_INTRINSIC.c). Append-only.
-pub const IN_SIZEOF: u8 = 0;
-pub const IN_ALIGNOF: u8 = 1;
-pub const IN_VA_START: u8 = 2;
-pub const IN_VA_ARG: u8 = 3;
-pub const IN_VA_END: u8 = 4;
-pub const IN_TYPE_INFO: u8 = 5;
-pub const IN_ZEROED: u8 = 6;
-pub const IN_REFLECT: u8 = 7; // angle-3 compatibility: reflection binder/projection forms
+pub(package) const IN_SIZEOF: u8 = 0;
+pub(package) const IN_ALIGNOF: u8 = 1;
+pub(package) const IN_VA_START: u8 = 2;
+pub(package) const IN_VA_ARG: u8 = 3;
+pub(package) const IN_VA_END: u8 = 4;
+pub(package) const IN_TYPE_INFO: u8 = 5;
+pub(package) const IN_ZEROED: u8 = 6;
+pub(package) const IN_REFLECT: u8 = 7; // angle-3 compatibility: reflection binder/projection forms
 // Inline assembly: `item.node` indexes the body's `asms` record (template, constraints and
 // clobbers as source spans); operands are the outputs' places (as copies) then the input values,
 // in source order.
-pub const IN_ASM: u8 = 10;
-pub const IN_SAFEPOINT: u8 = 11; // loop-body preemption marker; printed only for runtime-using programs
-pub const IN_DANGLING: u8 = 12; // non-null aligned no-storage pointer (`dangling::<T>()`; ZST buffers)
-pub const IN_DYN_TID: u8 = 13; // dyn_cast type test: operand = the fat value, target = the queried &T
-pub const IN_DYN_DATA: u8 = 14; // dyn_cast payload: operand = the fat value, target = the result &T
+pub(package) const IN_ASM: u8 = 10;
+pub(package) const IN_SAFEPOINT: u8 = 11; // loop-body preemption marker; printed only for runtime-using programs
+pub(package) const IN_DANGLING: u8 = 12; // non-null aligned no-storage pointer (`dangling::<T>()`; ZST buffers)
+pub(package) const IN_DYN_TID: u8 = 13; // dyn_cast type test: operand = the fat value, target = the queried &T
+pub(package) const IN_DYN_DATA: u8 = 14; // dyn_cast payload: operand = the fat value, target = the result &T
 /// Safe-access checks (bounds-check normalization).
 /// IN_BOUNDS(index, len): panics when index >= len, else returns the unchanged index. The
 /// PROVEN twin has identical language semantics but a BCE proof that the panic edge is
 /// unreachable: the C emitter prints only the index; the interpreter still checks.
-pub const IN_BOUNDS: u8 = 15;
+pub(package) const IN_BOUNDS: u8 = 15;
 /// The `item.node` of an IN_BOUNDS on a vector lane index: its trap names the index and the lane count.
-pub const CHECK_LANES: NodeId = 1;
-pub const IN_BOUNDS_PROVEN: u8 = 16;
+pub(package) const CHECK_LANES: NodeId = 1;
+pub(package) const IN_BOUNDS_PROVEN: u8 = 16;
 /// IN_RANGE_BOUNDS(start, end, len): panics unless start <= end <= len, else returns the
 /// validated exclusive end. Inclusive ranges are decomposed at lowering (IN_BOUNDS(end, len)
 /// proves end < len BEFORE end + 1 is computed), so no inclusive flag exists in the IR.
-pub const IN_RANGE_BOUNDS: u8 = 17;
-pub const IN_RANGE_BOUNDS_PROVEN: u8 = 18;
+pub(package) const IN_RANGE_BOUNDS: u8 = 17;
+pub(package) const IN_RANGE_BOUNDS_PROVEN: u8 = 18;
 /// IN_BOUNDS_GROUP(index, len, width): panics unless index <= len && width <= len - index (the
 /// overflow-safe spelling of `index + width <= len`), else returns the unchanged index. Two
 /// producers: BCE range-check coalescing (one group check at the FIRST access site covers the
 /// accesses index .. index + width - 1, whose own element checks become IN_BOUNDS_PROVEN), and
 /// the lowering of a vector load or store (SIMD_LOAD, SIMD_STORE), whose check is `CHECK_VEC`.
-pub const IN_BOUNDS_GROUP: u8 = 19;
+pub(package) const IN_BOUNDS_GROUP: u8 = 19;
 /// The `item.node` of the IN_BOUNDS_GROUP before a vector load or store: its trap names the start,
 /// the lane count and the length.
-pub const CHECK_VEC: NodeId = 2;
+pub(package) const CHECK_VEC: NodeId = 2;
 /// Combined preemption + cancellation safepoint (i32 result): the emitted hot path is the same
 /// tick decrement as IN_SAFEPOINT; the cold half additionally asks the runtime's cancel hook
 /// whether an unmasked request is pending, ACCEPTS it, and reports 1 -- the following switch then
 /// enters the frame's cancellation ladder. Emitted instead of IN_SAFEPOINT when the body can carry
 /// a cancellation edge.
-pub const IN_SAFEPOINT_C: u8 = 20;
+pub(package) const IN_SAFEPOINT_C: u8 = 20;
 /// Strip-mined counted loop: IN_CHUNK(i, end) with `i < end` returns the exclusive end `lim` of the
 /// chunk that starts at `i`, `i < lim <= end`. A safepoint right before it counted the chunk's first
 /// iteration; the chunk's other `lim - i - 1` iterations fit the tick budget left and are charged
 /// to it here, so the chunk's backedges run without a tick. Where no tick prints, `lim` is `end`.
-pub const IN_CHUNK: u8 = 21;
+pub(package) const IN_CHUNK: u8 = 21;
 /// IN_LIKELY(cond): returns the bool `cond` unchanged; the C emitter tells the C compiler that it
 /// is usually true (the success test of `?`, whose failure path returns early, and `likely`).
-pub const IN_LIKELY: u8 = 22;
+pub(package) const IN_LIKELY: u8 = 22;
 /// IN_BOUNDS_GROUP with a BCE proof that the panic edge is unreachable (a vector access's group
 /// check in a strided loop): the C emitter prints only the index; the interpreter still checks.
-pub const IN_BOUNDS_GROUP_PROVEN: u8 = 23;
+pub(package) const IN_BOUNDS_GROUP_PROVEN: u8 = 23;
 /// IN_UNLIKELY(cond): IN_LIKELY's twin for a condition that is usually false (`unlikely`).
-pub const IN_UNLIKELY: u8 = 24;
+pub(package) const IN_UNLIKELY: u8 = 24;
 /// IN_RETURN_ADDRESS(): the code address the running function returns to (`*const void`), null where
 /// the target has no frame walk (wasm). No compile-time value. Only a `@noinline` function names its
 /// own caller with it (`std::rt::base`'s allocation sites).
-pub const IN_RETURN_ADDRESS: u8 = 25;
+pub(package) const IN_RETURN_ADDRESS: u8 = 25;
 /// IN_VOLATILE_LOAD(p): the value `p` points to, read once (`*(volatile T *)p`); target = T.
 /// IN_VOLATILE_STORE(p, v): writes `v` where `p` points, once; target = void. Neither is pure: no
 /// pass drops one, merges two, or moves one across another, and C keeps each access. The evaluator
 /// runs them as an ordinary load and store.
-pub const IN_VOLATILE_LOAD: u8 = 26;
-pub const IN_VOLATILE_STORE: u8 = 27;
+pub(package) const IN_VOLATILE_LOAD: u8 = 26;
+pub(package) const IN_VOLATILE_STORE: u8 = 27;
 /// IN_GROUP_FITS(index, len, width): the bool `index <= len && width <= len - index`, the
 /// overflow-safe spelling of `index + width <= len`. It never panics: BCE widens the first of a run
 /// of panic guards `root + k < len` to it, and its true edge proves every member guard.
-pub const IN_GROUP_FITS: u8 = 28;
+pub(package) const IN_GROUP_FITS: u8 = 28;
 /// IN_TYPE_NAME: `type_info::<T>().qualified_name` read alone, T in `b`: a `str` constant spelling T,
 /// with the trailing generic arguments that equal their parameter's default dropped (`Vector<i32>`).
-pub const IN_TYPE_NAME: u8 = 29;
+pub(package) const IN_TYPE_NAME: u8 = 29;
 
 /// True for the intrinsics whose `b` is a type, not an operand count: the measuring, describing and
 /// naming intrinsics and `dangling`.
-pub const fn type_payload(c: u8) bool {
+pub(package) const fn type_payload(c: u8) bool {
     return c == IN_SIZEOF || c == IN_ALIGNOF || c == IN_TYPE_INFO || c == IN_DANGLING || c == IN_TYPE_NAME;
 }
 
 /// True for the six safe-access check intrinsics.
-pub const fn is_check(c: u8) bool {
+pub(package) const fn is_check(c: u8) bool {
     return c == IN_BOUNDS || c == IN_BOUNDS_PROVEN || c == IN_BOUNDS_GROUP || c == IN_BOUNDS_GROUP_PROVEN || c == IN_RANGE_BOUNDS || c == IN_RANGE_BOUNDS_PROVEN;
 }
 
 /// Operand count of a check intrinsic: element checks take (index, len); range and group checks
 /// take (start, end, len) / (index, len, width).
-pub const fn check_arity(c: u8) u32 {
+pub(package) const fn check_arity(c: u8) u32 {
     if c == IN_BOUNDS || c == IN_BOUNDS_PROVEN {
         return 2;
     }
@@ -928,63 +928,63 @@ pub const fn check_arity(c: u8) u32 {
 // Field order packs to 24 bytes (kind/c share the item's tail padding); bodies hold one record
 // per expression, so the two byte flags sit last.
 @derive(Copy)
-pub struct Rvalue {
-    pub a: u32,
-    pub b: u32,
-    pub target: TypeId, // result type
-    pub item: DefId, // selected method/decl when the kind carries one
-    pub kind: u8,
-    pub c: u8,
+pub(package) struct Rvalue {
+    pub(package) a: u32,
+    pub(package) b: u32,
+    pub(package) target: TypeId, // result type
+    pub(package) item: DefId, // selected method/decl when the kind carries one
+    pub(package) kind: u8,
+    pub(package) c: u8,
 }
 
 /// An Rvalue that selects no item.
-pub const fn rv(kind: u8, a: u32, b: u32, c: u8, target: TypeId) Rvalue {
+pub(package) const fn rv(kind: u8, a: u32, b: u32, c: u8, target: TypeId) Rvalue {
     return Rvalue { a: a, b: b, target: target, item: DefId { module: 0, node: NODE_NONE }, kind: kind, c: c };
 }
 
 /// Statement kinds.
-pub const ST_ASSIGN: u8 = 0; // place = rvalue
-pub const ST_STORAGE_LIVE: u8 = 1; // a = LocalId
-pub const ST_STORAGE_DEAD: u8 = 2; // a = LocalId
+pub(package) const ST_ASSIGN: u8 = 0; // place = rvalue
+pub(package) const ST_STORAGE_LIVE: u8 = 1; // a = LocalId
+pub(package) const ST_STORAGE_DEAD: u8 = 2; // a = LocalId
 
 @derive(Copy)
-pub struct Statement {
-    pub kind: u8,
-    pub place: PlaceId,
-    pub rvalue: RvalueId,
-    pub a: u32,
-    pub span: tok::Span,
+pub(package) struct Statement {
+    pub(package) kind: u8,
+    pub(package) place: PlaceId,
+    pub(package) rvalue: RvalueId,
+    pub(package) a: u32,
+    pub(package) span: tok::Span,
 }
 
 /// Terminator kinds.
-pub const TM_GOTO: u8 = 0; // t0 = successor
-pub const TM_SWITCH: u8 = 1; // a = discriminant OperandId; values/targets in switch pool; t0 = otherwise
-pub const TM_CALL: u8 = 2; // callee item or fn-value operand; args in operand range; t0 = normal
-pub const TM_RETURN: u8 = 3; // args_len = RET_CANCEL marks a cancellation return (zero-valued, unread)
+pub(package) const TM_GOTO: u8 = 0; // t0 = successor
+pub(package) const TM_SWITCH: u8 = 1; // a = discriminant OperandId; values/targets in switch pool; t0 = otherwise
+pub(package) const TM_CALL: u8 = 2; // callee item or fn-value operand; args in operand range; t0 = normal
+pub(package) const TM_RETURN: u8 = 3; // args_len = RET_CANCEL marks a cancellation return (zero-valued, unread)
 
 /// TM_RETURN.args_len value marking a cancellation-edge return: the frame's cleanup already ran and
 /// the caller (itself unwinding) never reads the value, so the backend spells a zero literal.
-pub const RET_CANCEL: u32 = 1;
-pub const TM_DROP: u8 = 4; // place; t0 = successor
-pub const TM_ASSERT: u8 = 5; // a = condition OperandId; t0 = success
-pub const TM_UNREACHABLE: u8 = 6;
+pub(package) const RET_CANCEL: u32 = 1;
+pub(package) const TM_DROP: u8 = 4; // place; t0 = successor
+pub(package) const TM_ASSERT: u8 = 5; // a = condition OperandId; t0 = success
+pub(package) const TM_UNREACHABLE: u8 = 6;
 
 /// Verified intrinsic calls (Terminator.intr): a TM_CALL of the extern C memory or atomic routine the
 /// kind names, with the routine's arity and a pointer or reference first argument (CI_FENCE takes
 /// none). Analyses read the exact effect from the kind; the call itself stays an ordinary call.
 /// Append-only.
-pub const CI_NONE: u8 = 0;
-pub const CI_MEMCPY: u8 = 1;
-pub const CI_MEMMOVE: u8 = 2;
-pub const CI_MEMSET: u8 = 3;
-pub const CI_ATOMIC_LOAD: u8 = 4; // `__sc_atomic_load_<T>(p, order)`
-pub const CI_ATOMIC_STORE: u8 = 5; // `__sc_atomic_store_<T>(p, v, order)`
-pub const CI_ATOMIC_RMW: u8 = 6; // `__sc_atomic_{swap,add,sub,and,or,xor}_<T>(p, v, order)`
-pub const CI_ATOMIC_CAS: u8 = 7; // `__sc_atomic_cas_<T>(p, expected, desired, weak, success, failure)`
-pub const CI_FENCE: u8 = 8; // `__sc_atomic_fence(order)`
+pub(package) const CI_NONE: u8 = 0;
+pub(package) const CI_MEMCPY: u8 = 1;
+pub(package) const CI_MEMMOVE: u8 = 2;
+pub(package) const CI_MEMSET: u8 = 3;
+pub(package) const CI_ATOMIC_LOAD: u8 = 4; // `__sc_atomic_load_<T>(p, order)`
+pub(package) const CI_ATOMIC_STORE: u8 = 5; // `__sc_atomic_store_<T>(p, v, order)`
+pub(package) const CI_ATOMIC_RMW: u8 = 6; // `__sc_atomic_{swap,add,sub,and,or,xor}_<T>(p, v, order)`
+pub(package) const CI_ATOMIC_CAS: u8 = 7; // `__sc_atomic_cas_<T>(p, expected, desired, weak, success, failure)`
+pub(package) const CI_FENCE: u8 = 8; // `__sc_atomic_fence(order)`
 
 /// The intrinsic kind an extern function named `name` is, or CI_NONE.
-pub const fn ci_of_name(name: str) u8 {
+pub(package) const fn ci_of_name(name: str) u8 {
     if name == "memcpy" {
         return CI_MEMCPY;
     }
@@ -1019,7 +1019,7 @@ pub const fn ci_of_name(name: str) u8 {
 }
 
 /// The argument count of intrinsic kind `k` (0 for CI_NONE).
-pub const fn ci_arity(k: u8) u32 {
+pub(package) const fn ci_arity(k: u8) u32 {
     if k == CI_MEMCPY || k == CI_MEMMOVE || k == CI_MEMSET || k == CI_ATOMIC_STORE || k == CI_ATOMIC_RMW {
         return 3;
     }
@@ -1036,7 +1036,7 @@ pub const fn ci_arity(k: u8) u32 {
 }
 
 /// The printed name of intrinsic kind `k`.
-pub const fn ci_name(k: u8) str<'static> {
+pub(package) const fn ci_name(k: u8) str<'static> {
     if k == CI_MEMCPY {
         return "memcpy";
     }
@@ -1066,33 +1066,33 @@ pub const fn ci_name(k: u8) str<'static> {
 
 // Field order leaves no interior padding: 68 bytes, the three byte fields in the tail.
 @derive(Copy)
-pub struct Terminator {
-    pub a: u32, // per kind (see above)
-    pub args_start: u32, // TM_CALL: argument operand range
-    pub args_len: u32,
-    pub dests_start: u32, // TM_CALL: destination place range (multi-return)
-    pub dests_len: u32,
-    pub sw_start: u32, // TM_SWITCH: (value, target) pair range in switch pool
-    pub sw_len: u32,
-    pub t0: BlockId, // primary successor (goto/normal/success/otherwise)
-    pub targs_start: u32, // TM_CALL: the checker's bound generic arguments (CoreBody.targ_pool)
-    pub targs_len: u32,
-    pub callee: DefId, // TM_CALL resolved target; node == NODE_NONE for fn-value calls (a = operand)
+pub(package) struct Terminator {
+    pub(package) a: u32, // per kind (see above)
+    pub(package) args_start: u32, // TM_CALL: argument operand range
+    pub(package) args_len: u32,
+    pub(package) dests_start: u32, // TM_CALL: destination place range (multi-return)
+    pub(package) dests_len: u32,
+    pub(package) sw_start: u32, // TM_SWITCH: (value, target) pair range in switch pool
+    pub(package) sw_len: u32,
+    pub(package) t0: BlockId, // primary successor (goto/normal/success/otherwise)
+    pub(package) targs_start: u32, // TM_CALL: the checker's bound generic arguments (CoreBody.targ_pool)
+    pub(package) targs_len: u32,
+    pub(package) callee: DefId, // TM_CALL resolved target; node == NODE_NONE for fn-value calls (a = operand)
     // TM_CALL of a generic interface's method through a bound: `dyn I<args>` naming the conformance
     // each instance dispatches to (`BoundCall`); TYPE_NONE otherwise.
-    pub iface: TypeId,
+    pub(package) iface: TypeId,
     // TM_CALL of an interface's associated function through a type parameter (`T::count()`,
     // `Self::make()` in a default body): the implementor, the parameter itself; TYPE_NONE otherwise.
-    pub recv: TypeId,
-    pub span: tok::Span,
-    pub kind: u8,
-    pub is_variadic: bool,
-    pub intr: u8, // TM_CALL: a CI_* verified intrinsic kind, CI_NONE otherwise
+    pub(package) recv: TypeId,
+    pub(package) span: tok::Span,
+    pub(package) kind: u8,
+    pub(package) is_variadic: bool,
+    pub(package) intr: u8, // TM_CALL: a CI_* verified intrinsic kind, CI_NONE otherwise
 }
 static_assert(sizeof(Terminator) == 68, "Terminator stays 68 bytes: intr sits in the tail padding");
 
 /// A terminator of `kind` with no operands and no successor.
-pub const fn term0(kind: u8, sp: tok::Span) Terminator {
+pub(package) const fn term0(kind: u8, sp: tok::Span) Terminator {
     return Terminator {
         kind: kind,
         a: IR_NONE,
@@ -1115,7 +1115,7 @@ pub const fn term0(kind: u8, sp: tok::Span) Terminator {
 }
 
 /// A goto to `to`.
-pub const fn goto_term(to: BlockId, sp: tok::Span) Terminator {
+pub(package) const fn goto_term(to: BlockId, sp: tok::Span) Terminator {
     let mut t = term0(TM_GOTO, sp);
     t.t0 = to;
     return t;
@@ -1123,79 +1123,79 @@ pub const fn goto_term(to: BlockId, sp: tok::Span) Terminator {
 
 /// One basic block: a statement range plus exactly one terminator.
 @derive(Copy)
-pub struct BasicBlock {
-    pub stmt_start: u32,
-    pub stmt_len: u32,
-    pub term: Terminator,
-    pub sealed: bool, // terminator present (the verifier rejects unsealed blocks)
+pub(package) struct BasicBlock {
+    pub(package) stmt_start: u32,
+    pub(package) stmt_len: u32,
+    pub(package) term: Terminator,
+    pub(package) sealed: bool, // terminator present (the verifier rejects unsealed blocks)
 }
 static_assert(sizeof(BasicBlock) == 80, "BasicBlock stays 80 bytes");
 
 /// One lowered body. All ranges index the body-local pools below; nothing points at another body.
-pub struct CoreBody {
-    pub owner: DefId, // the function/const decl this body lowers
-    pub module: ModuleId,
-    pub args: u32,
-    pub returns: u32,
-    pub is_generic: bool, // generic bodies may carry symbolic types (verifier rule 15)
+pub(package) struct CoreBody {
+    pub(package) owner: DefId, // the function/const decl this body lowers
+    pub(package) module: ModuleId,
+    pub(package) args: u32,
+    pub(package) returns: u32,
+    pub(package) is_generic: bool, // generic bodies may carry symbolic types (verifier rule 15)
     /// The body contains an UNEXPANDED reflection binder (`inline for .. in fields(..)` whose
     /// owner stayed symbolic): instances must RE-LOWER with the demand env, never share this body.
-    pub has_reflect: bool,
+    pub(package) has_reflect: bool,
     /// A vector index list names a generic parameter (`SIMD_SWIZZLE`/`SIMD_SHUFFLE` with no
     /// `simd_aux` record): instances re-lower with the demand env as for `has_reflect`, and the
     /// inliner re-lowers the callee under each call's bindings.
-    pub has_lists: bool,
+    pub(package) has_lists: bool,
     /// The body contains an unfolded `sizeof(T) <op> <const>` branch: instances re-lower with the
     /// demand env so the untaken side (a ZST container path or its material twin) never emits.
-    pub has_zst_cond: bool,
+    pub(package) has_zst_cond: bool,
     // Some `let x: T;` declared a local without a value: only then can a use-before-init exist,
     // so bodies without it (and without moves) skip the move/init dataflow outright.
-    pub has_uninit_decl: bool,
+    pub(package) has_uninit_decl: bool,
     /// Drop elaboration ran on this body (`ir::drops`): every scheduled drop is a `TM_DROP`
     /// terminator and the guarded ones read their flag temps. The borrow pass elaborates every
     /// body it keeps; emission elaborates only the bodies it lowers itself.
-    pub elaborated: bool,
+    pub(package) elaborated: bool,
     /// The pre-elaboration size passed the inliner's callee limits (`ir::inline`): the vet reads
     /// this bit so an elaborated callee is judged by the shape the limits were tuned for.
-    pub inline_size_ok: bool,
+    pub(package) inline_size_ok: bool,
     /// The owner is a std decl that runs user code only through bound dispatch
     /// (`Package::co_inst_on`): an instance prints its preemption ticks only when a binding names
     /// a type whose methods can be user code.
-    pub inst_ticks: bool,
+    pub(package) inst_ticks: bool,
     /// The blocks and the chunks the counted-loop lowering added (`chunk_open`: one block per
     /// counted loop; `chunk_close`: two blocks, two statements and two locals per chunk): the
     /// inliner's size gate leaves them out.
-    pub count_blocks: u32,
-    pub chunks: u32,
-    pub locals: Vector<LocalDecl>,
-    pub blocks: Vector<BasicBlock>,
-    pub statements: Vector<Statement>,
-    pub places: Vector<Place>,
-    pub projections: Vector<Projection>,
-    pub operands: Vector<Operand>,
-    pub rvalues: Vector<Rvalue>,
-    pub constants: Vector<Constant>,
-    pub oper_pool: Vector<OperandId>, // argument/aggregate operand ranges
-    pub dest_pool: Vector<PlaceId>, // call destination ranges
-    pub switch_pool: Vector<u64>, // TM_SWITCH pairs: value<<32 | target (values are u32-encoded)
-    pub targ_pool: Vector<TypeId>, // generic-argument ranges for calls and item constants
+    pub(package) count_blocks: u32,
+    pub(package) chunks: u32,
+    pub(package) locals: Vector<LocalDecl>,
+    pub(package) blocks: Vector<BasicBlock>,
+    pub(package) statements: Vector<Statement>,
+    pub(package) places: Vector<Place>,
+    pub(package) projections: Vector<Projection>,
+    pub(package) operands: Vector<Operand>,
+    pub(package) rvalues: Vector<Rvalue>,
+    pub(package) constants: Vector<Constant>,
+    pub(package) oper_pool: Vector<OperandId>, // argument/aggregate operand ranges
+    pub(package) dest_pool: Vector<PlaceId>, // call destination ranges
+    pub(package) switch_pool: Vector<u64>, // TM_SWITCH pairs: value<<32 | target (values are u32-encoded)
+    pub(package) targ_pool: Vector<TypeId>, // generic-argument ranges for calls and item constants
     // Bit per operand: this OP_MOVE is a USER consumption (let/return/argument/aggregate/assign
     // positions the walk's move rules check) -- pattern binds, downcasts, and spills stay unmarked.
-    pub user_moves: Vector<u64>,
-    pub asms: Vector<AsmRec>,
-    pub asm_spans: Vector<tok::Span>,
+    pub(package) user_moves: Vector<u64>,
+    pub(package) asms: Vector<AsmRec>,
+    pub(package) asm_spans: Vector<tok::Span>,
     /// The bytes of the CK_BYTES constants.
-    pub bytes: Vector<u8>,
+    pub(package) bytes: Vector<u8>,
     /// RV_SIMD index lists (`item.node` is the start): the length, then the lane indexes four `u8` per
     /// word, low byte first.
-    pub simd_aux: Vector<u32>,
+    pub(package) simd_aux: Vector<u32>,
     /// The calls the inliner replaced whose callee instance holds a per-instantiation
     /// `static_assert`: the emitter still demands each instance, so the assert still runs.
-    pub demands: Vector<Terminator>,
+    pub(package) demands: Vector<Terminator>,
     /// The blocks whose `TM_GOTO` replaced a call of the body's function to itself (`ir::tailcall`):
     /// the unbounded-recursion check reads each one as that call (`ir::recursion`).
-    pub tail_jumps: Vector<BlockId>,
-    pub entry: BlockId,
+    pub(package) tail_jumps: Vector<BlockId>,
+    pub(package) entry: BlockId,
 }
 
 // An exact-capacity copy of `v` (a kept body never grows).
@@ -1207,13 +1207,13 @@ fn exact<T: Copy>(v: &Vector<T>) Vector<T> {
 
 extend CoreBody {
     /// True when a projection of place `pl` is a deref: the place reaches through a reference.
-    pub const fn place_has_deref(self: &Self, pl: PlaceId) bool {
+    pub(package) const fn place_has_deref(self: &Self, pl: PlaceId) bool {
         return self.deref_past(pl, 0);
     }
 
     /// True when a projection of place `pl` past its first `n` is a deref: a place `n` projections
     /// long on its path holds a reference the place reaches through.
-    pub const fn deref_past(self: &Self, pl: PlaceId, n: u32) bool {
+    pub(package) const fn deref_past(self: &Self, pl: PlaceId, n: u32) bool {
         let p = self.places.at(pl as usize);
         for i in n..p.proj_len {
             if self.projections.at((p.proj_start + i) as usize).kind == PJ_DEREF {
@@ -1226,7 +1226,7 @@ extend CoreBody {
     /// Rewrite every type this body holds through a publication map (`Package::map_type` for the
     /// body's module): locals, places, projections, operands, constants, generic arguments, rvalue
     /// result types and the type payloads of dyn construction and the measuring intrinsics.
-    pub const fn remap_types(self: &mut Self, map: &Vector<TypeId>) {
+    pub(package) const fn remap_types(self: &mut Self, map: &Vector<TypeId>) {
         for i in 0..self.locals.len() {
             let l = self.locals.index_mut(i);
             l.ty = pub_map1(map, l.ty);
@@ -1269,7 +1269,7 @@ extend CoreBody {
         }
     }
 
-    pub fn new(owner: DefId, module: ModuleId) CoreBody {
+    pub(package) fn new(owner: DefId, module: ModuleId) CoreBody {
         return CoreBody {
             owner: owner,
             module: module,
@@ -1310,7 +1310,7 @@ extend CoreBody {
 
     /// Re-seed for a fresh body, keeping every pool's heap capacity so the next lowering refills
     /// instead of reallocating. Callers that reuse one Lowerer across bodies rely on this.
-    pub fn clear(self: &mut Self, owner: DefId, module: ModuleId) {
+    pub(package) fn clear(self: &mut Self, owner: DefId, module: ModuleId) {
         self.owner = owner;
         self.module = module;
         self.args = 0;
@@ -1348,7 +1348,7 @@ extend CoreBody {
     }
 
     /// The bytes the body's pools hold (capacity, slack included).
-    pub const fn retained_bytes(self: &Self) u64 {
+    pub(package) const fn retained_bytes(self: &Self) u64 {
         let mut n = self.locals.capacity() * sizeof(LocalDecl) + self.blocks.capacity() * sizeof(BasicBlock);
         n += self.statements.capacity() * sizeof(Statement) + self.places.capacity() * sizeof(Place);
         n += self.projections.capacity() * sizeof(Projection) + self.operands.capacity() * sizeof(Operand);
@@ -1363,7 +1363,7 @@ extend CoreBody {
     /// An exact-size deep copy: every pool reserves its final length, so a kept body carries no
     /// growth slack and costs one allocation per non-empty pool. The copy leaves out the borrow
     /// pass inputs `has_uninit_decl` and `user_moves`: every reader of them runs before the copy.
-    pub fn compact_from(src: &CoreBody) CoreBody {
+    pub(package) fn compact_from(src: &CoreBody) CoreBody {
         let mut out = CoreBody::new(src.owner, src.module);
         out.args = src.args;
         out.returns = src.returns;
@@ -1400,7 +1400,7 @@ extend CoreBody {
 
     /// Append statement `place = rv`.
     /// Does the body hold a preemption safepoint (plain or combined)?
-    pub const fn has_safepoint(self: &Self) bool {
+    pub(package) const fn has_safepoint(self: &Self) bool {
         for si in 0..self.statements.len() {
             let s = *self.statements.at(si);
             if s.kind == ST_ASSIGN {
@@ -1413,7 +1413,7 @@ extend CoreBody {
         return false;
     }
 
-    pub fn push_assign(self: &mut Self, place: PlaceId, rv: Rvalue, sp: tok::Span) {
+    pub(package) fn push_assign(self: &mut Self, place: PlaceId, rv: Rvalue, sp: tok::Span) {
         self.rvalues.push(rv);
         self.statements.push(
             Statement { kind: ST_ASSIGN, place: place, rvalue: self.rvalues.len() as u32 - 1, a: 0, span: sp },
@@ -1421,23 +1421,23 @@ extend CoreBody {
     }
 
     /// Append `l = rv` through a fresh whole-local place.
-    pub fn assign_local(self: &mut Self, l: LocalId, rv: Rvalue, sp: tok::Span) {
+    pub(package) fn assign_local(self: &mut Self, l: LocalId, rv: Rvalue, sp: tok::Span) {
         self.places.push(Place { base: l, proj_start: 0, proj_len: 0, ty: self.locals.at(l as usize).ty });
         self.push_assign(self.places.len() as u32 - 1, rv, sp);
     }
 
     /// Append `l = op` (RV_USE at the local's type).
-    pub fn assign_local_use(self: &mut Self, l: LocalId, op: OperandId, sp: tok::Span) {
+    pub(package) fn assign_local_use(self: &mut Self, l: LocalId, op: OperandId, sp: tok::Span) {
         self.assign_local(l, rv(RV_USE, op, 0, 0, self.locals.at(l as usize).ty), sp);
     }
 
-    pub fn add_local(self: &mut Self, d: LocalDecl) LocalId {
+    pub(package) fn add_local(self: &mut Self, d: LocalDecl) LocalId {
         self.locals.push(d);
         return self.locals.len() as LocalId - 1;
     }
 
     /// Open a new (unsealed) block; statements append through stmt() until seal().
-    pub fn add_block(self: &mut Self) BlockId {
+    pub(package) fn add_block(self: &mut Self) BlockId {
         self.blocks.push(
             BasicBlock {
                 stmt_start: 0,

@@ -10,34 +10,34 @@ import lir::ir as *;
 import target::wasm as w;
 
 /// How one value passes.
-pub const P_SKIP: u8 = 0; // nothing: an empty aggregate, or no result
-pub const P_DIRECT: u8 = 1; // one wasm value of LIR scalar type `ty`
-pub const P_I128: u8 = 2; // two i64, the low half first
-pub const P_REF: u8 = 3; // a pointer to the bytes (a parameter), or the prepended pointer (the result)
-pub const P_V128: u8 = 4; // one v128
+pub(package) const P_SKIP: u8 = 0; // nothing: an empty aggregate, or no result
+pub(package) const P_DIRECT: u8 = 1; // one wasm value of LIR scalar type `ty`
+pub(package) const P_I128: u8 = 2; // two i64, the low half first
+pub(package) const P_REF: u8 = 3; // a pointer to the bytes (a parameter), or the prepended pointer (the result)
+pub(package) const P_V128: u8 = 4; // one v128
 
 /// The passing of one parameter or the result: its kind, its LIR scalar type (P_DIRECT: the value's, or
 /// an aggregate's leaf), and whether the scalar is an aggregate's leaf (it moves through memory).
-pub struct Pass {
-    pub kind: u8,
-    pub ty: u8,
-    pub leaf: bool,
-    pub sext: bool, // an i8 or i16 that extends signed
+pub(package) struct Pass {
+    pub(package) kind: u8,
+    pub(package) ty: u8,
+    pub(package) leaf: bool,
+    pub(package) sext: bool, // an i8 or i16 that extends signed
 }
 
 extend Pass as Copy {}
 
 /// A signature's passing: per LIR parameter, then the result.
-pub struct WSig {
-    pub params: Vector<Pass>,
-    pub ret: Pass,
-    pub nfixed: u32, // the fixed parameters; the rest are variadic
-    pub variadic: bool,
-    pub unknown: bool, // an aggregate whose leaves its layout does not give
+pub(package) struct WSig {
+    pub(package) params: Vector<Pass>,
+    pub(package) ret: Pass,
+    pub(package) nfixed: u32, // the fixed parameters; the rest are variadic
+    pub(package) variadic: bool,
+    pub(package) unknown: bool, // an aggregate whose leaves its layout does not give
 }
 
 extend WSig {
-    pub fn new() WSig {
+    pub(package) fn new() WSig {
         return WSig {
             params: Vector::<Pass>::new(),
             ret: Pass { kind: P_SKIP, ty: T_NONE, leaf: false, sext: false },
@@ -48,13 +48,13 @@ extend WSig {
     }
 
     /// Whether the result returns through a prepended pointer.
-    pub const fn sret(self: &Self) bool {
+    pub(package) const fn sret(self: &Self) bool {
         return self.ret.kind == P_REF || self.ret.kind == P_I128;
     }
 }
 
 /// The wasm value type of LIR scalar type `t` (pointers are 32-bit).
-pub const fn wtype(t: u8) u8 {
+pub(package) const fn wtype(t: u8) u8 {
     if t == T_I64 {
         return w::I64;
     }
@@ -68,7 +68,7 @@ pub const fn wtype(t: u8) u8 {
 }
 
 /// The passing of signature `sig` of body `b` into `out`.
-pub fn classify(b: &Body, sig: u32, vregs: u32, out: &mut WSig) {
+pub(package) fn classify(b: &Body, sig: u32, vregs: u32, out: &mut WSig) {
     let np = b.pool[sig as usize];
     let nf = b.pool[sig as usize + 1];
     out.params.truncate(0);
@@ -134,7 +134,7 @@ fn pass(b: &Body, pt: u32, vregs: u32, unknown: &mut bool) Pass {
 }
 
 /// The wasm function type of `s` (its parameters, then its results) into `out`.
-pub fn encode(s: &WSig, out: &mut Vector<u8>) {
+pub(package) fn encode(s: &WSig, out: &mut Vector<u8>) {
     out.truncate(0);
     let mut ps = Vector::<u8>::new();
     if s.sret() {
@@ -171,7 +171,7 @@ pub fn encode(s: &WSig, out: &mut Vector<u8>) {
 
 /// The bytes and alignment variadic argument of LIR type `pt` takes in the buffer: a scalar its own (at
 /// least 4), an aggregate passed through a pointer the pointer's.
-pub fn va_slot(b: &Body, pt: u32, vregs: u32) (u32, u32) {
+pub(package) fn va_slot(b: &Body, pt: u32, vregs: u32) (u32, u32) {
     let mut unk = false;
     let p = pass(b, pt, vregs, &mut unk);
     if p.kind == P_DIRECT || p.kind == P_I128 {

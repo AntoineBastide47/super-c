@@ -31,27 +31,27 @@ import stdio;
 import stdlib;
 
 /// The pass that produced a record (`DiagRec.phase`): each phase replaces its own records.
-pub const PH_ANALYSIS: u8 = 0; // parse, resolve, typecheck, feature checks, always-panics, deferred constants
-pub const PH_BORROW: u8 = 1; // the borrow check (`borrowck_pending`)
-pub const PH_UNUSED: u8 = 2; // the package-wide unused-item lint (`lsp_unused_items`)
-pub const PH_RECUR: u8 = 3; // the package-wide unbounded-recursion check (`recur_check`)
+pub(package) const PH_ANALYSIS: u8 = 0; // parse, resolve, typecheck, feature checks, always-panics, deferred constants
+pub(package) const PH_BORROW: u8 = 1; // the borrow check (`borrowck_pending`)
+pub(package) const PH_UNUSED: u8 = 2; // the package-wide unused-item lint (`lsp_unused_items`)
+pub(package) const PH_RECUR: u8 = 3; // the package-wide unbounded-recursion check (`recur_check`)
 
 /// One harvested diagnostic: the cross-pass record the server publishes and codeAction later reads
 /// (the fix fields carry the machine-applicable quick fix, if any).
-pub struct DiagRec {
-    pub module: u32,
-    pub start: u32, // byte span into the module's source
-    pub len: u32,
-    pub severity: u8, // LSP DiagnosticSeverity: 1 = error, 2 = warning
-    pub phase: u8, // PH_*
-    pub msg: String,
+pub(package) struct DiagRec {
+    pub(package) module: u32,
+    pub(package) start: u32, // byte span into the module's source
+    pub(package) len: u32,
+    pub(package) severity: u8, // LSP DiagnosticSeverity: 1 = error, 2 = warning
+    pub(package) phase: u8, // PH_*
+    pub(package) msg: String,
     // machine-applicable fix: -1 = none, else a LintFix kind (0 delete [fix_start, fix_end),
     // 1 insert '_', 2 insert 'const ', 4 replace [fix_start, fix_end) with `fix_text`) surfaced as
     // an LSP quick fix.
-    pub fix_kind: i32,
-    pub fix_start: u32,
-    pub fix_end: u32,
-    pub fix_text: String, // kind-4 payload (replacement text); empty otherwise
+    pub(package) fix_kind: i32,
+    pub(package) fix_start: u32,
+    pub(package) fix_end: u32,
+    pub(package) fix_text: String, // kind-4 payload (replacement text); empty otherwise
 }
 
 // The editor-facing message for one structured record: the message's first line plus one "= note:"
@@ -157,19 +157,19 @@ fn harvest_parse_errors(p: &loader::Package, i: usize, diags: &mut Vector<DiagRe
 }
 
 /// Canonicalize `path` via realpath; a file not on disk yet keeps the given form.
-pub fn canon_path(path: str) String {
+pub(package) fn canon_path(path: str) String {
     return fs::realpath(path).unwrap_or(String::from_str(path));
 }
 
 // The build settings the analysis reads, as the build of the project at `dir` reads them
 // (`lsp_build_settings`).
 struct BuildSettings {
-    pub arch: i32,
-    pub features: cf::CpuFeatureSet,
-    pub profiles: Vector<String>,
-    pub ce_steps: u32,
-    pub ce_mem: u64,
-    pub std_internals: bool,
+    pub(package) arch: i32,
+    pub(package) features: cf::CpuFeatureSet,
+    pub(package) profiles: Vector<String>,
+    pub(package) ce_steps: u32,
+    pub(package) ce_mem: u64,
+    pub(package) std_internals: bool,
 }
 
 // The nearest `build.toml` at or above `dir` (the manifest discovery of a manifest command) gives
@@ -319,7 +319,7 @@ fn record_item_edges(p: &mut loader::Package, i: usize, sps: &Vector<gitems::Spa
 /// the overlay vectors. The returned Package keeps every module's typed Ast: the positional features
 /// (hover/definition/references) query it until the next rebuild. Lint gating: see lsp_lint_wanted;
 /// `lint_dir` is the canonical workspace root when this build is the manifest root's, else "".
-pub fn compile(
+pub(package) fn compile(
     root_file: str,
     root_dir: str,
     alt_dir: str,
@@ -351,7 +351,7 @@ pub fn compile(
 /// every listed file joins the shared closure once, and `lint_set` marks the members so lints (and
 /// the always-panics pass) report exactly them. ONE resident package replaces the per-file sweep
 /// packages, which is what held a full prelude + closure copy per workspace file.
-pub fn compile_batch(
+pub(package) fn compile_batch(
     files: &Vector<String>,
     root_dir: str,
     alt_dir: str,
@@ -412,13 +412,13 @@ pub fn compile_batch(
 // when it must re-analyze, or when the constant engine demands a body of it (`typecheck_set`).
 
 /// Outcome counters for one incremental round: the exit-gate observables (what re-ran and why).
-pub struct RecompileStats {
-    pub reparsed: u32, // changed modules (each reparses whole)
-    pub analyzed: u32, // modules re-resolved + re-typechecked (the affected closure)
-    pub body_only: u32, // changed modules whose edit changed one plain fn body alone (declaration ids stable)
-    pub bodies_back: u32, // modules whose released body syntax the round parsed back
-    pub passes: u32, // extra typecheck passes after the engine demanded a released body
-    pub kept: u32, // importers of a reparsed module whose analysis stood (no touched reference)
+pub(package) struct RecompileStats {
+    pub(package) reparsed: u32, // changed modules (each reparses whole)
+    pub(package) analyzed: u32, // modules re-resolved + re-typechecked (the affected closure)
+    pub(package) body_only: u32, // changed modules whose edit changed one plain fn body alone (declaration ids stable)
+    pub(package) bodies_back: u32, // modules whose released body syntax the round parsed back
+    pub(package) passes: u32, // extra typecheck passes after the engine demanded a released body
+    pub(package) kept: u32, // importers of a reparsed module whose analysis stood (no touched reference)
 }
 
 // One module's import-decl surface, rendered to comparable bytes: path segment texts, alias text,
@@ -639,7 +639,7 @@ const fn ref_lower_bound(v: &Vector<loader::RefEdge>, want: u64) usize {
 
 /// True when module `m`'s recorded references name a declaration of module `dm` with a node in
 /// [lo, hi] (a binary search over the sorted record; false for an unrecorded module).
-pub const fn refers(p: &loader::Package, m: usize, dm: u32, lo: u32, hi: u32) bool {
+pub(package) const fn refers(p: &loader::Package, m: usize, dm: u32, lo: u32, hi: u32) bool {
     if m >= p.def_refs.len() {
         return false;
     }
@@ -943,7 +943,7 @@ fn body_candidate(a: &Ast, ws: u32, we: u32) NodeId {
 /// state was broken): the caller MUST fall back to a full compile; the package may be part-updated.
 /// True: `p` and `diags` (previous round's records in, merged records out) are current. The overlays
 /// are borrowed views (index-aligned file paths and texts): a round copies no document text.
-pub fn recompile(
+pub(package) fn recompile(
     p: &mut loader::Package,
     target: i32,
     root_file: str,
@@ -1506,8 +1506,8 @@ fn drop_phase(nd: &mut Vector<DiagRec>, i: usize, phase: u8) bool {
 // The engine's flush callbacks (`Interp::flush_asserts`, `flush_consts`) record the driver's
 // messages (`emit::flush_assert_text`, `flush_const_text`) at the failing node.
 struct FlushCtx {
-    pub p: *const loader::Package,
-    pub nd: *mut Vector<DiagRec>,
+    pub(package) p: *const loader::Package,
+    pub(package) nd: *mut Vector<DiagRec>,
 }
 
 fn lsp_flush_assert(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char) {
@@ -1613,7 +1613,7 @@ fn release_closed(p: &mut loader::Package, ovk: &Vector<i64>) {
 
 /// Parse back and re-analyze module `i`'s released bodies for a feature that reads closed
 /// documents' bodies (references, call hierarchy). The next analysis round releases them again.
-pub fn ensure_bodies(p: &mut loader::Package, i: usize) {
+pub(package) fn ensure_bodies(p: &mut loader::Package, i: usize) {
     if !p.modules[i].has_ast || !p.modules[i].ast.b.released {
         return;
     }
@@ -1721,10 +1721,10 @@ fn build_final_edges(p: &mut loader::Package) {
 }
 
 /// The outcome of one borrow round (`borrowck_pending`).
-pub struct BcRound {
-    pub canceled: bool, // `stop` ended the round; the checks it did not finish stay owed
-    pub changed: bool, // some module's borrow records changed
-    pub checked: bool, // some module's check finished
+pub(package) struct BcRound {
+    pub(package) canceled: bool, // `stop` ended the round; the checks it did not finish stay owed
+    pub(package) changed: bool, // some module's borrow records changed
+    pub(package) checked: bool, // some module's check finished
 }
 
 // True when module `m` can be borrow checked: it and every module of its import closure are typed
@@ -1807,7 +1807,7 @@ fn parse_back_demanded(p: &mut loader::Package, cirv: &iri::Interp) bool {
 /// lowering adds no cancellation edges (`Package.cancel_state` stays uncomputed): such an edge
 /// is an early return after a call, and the borrow check reports nothing on one; a module with a
 /// `@tail_recurse` function is the exception (`reach_for`).
-pub fn borrowck_pending(
+pub(package) fn borrowck_pending(
     p: &mut loader::Package,
     diags: &mut Vector<DiagRec>,
     ov_files: &Vector<str>,
@@ -2013,7 +2013,7 @@ fn recur_check(p: &mut loader::Package, diags: &mut Vector<DiagRec>) bool {
 }
 
 /// True when the borrow round has a runnable check left: a borrow check, or the recursion check.
-pub fn borrowck_runnable(p: &mut loader::Package, diags: &Vector<DiagRec>) bool {
+pub(package) fn borrowck_runnable(p: &mut loader::Package, diags: &Vector<DiagRec>) bool {
     if p.recur.stale {
         return true;
     }

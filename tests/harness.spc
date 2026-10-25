@@ -36,28 +36,28 @@ extern "C" {
 
 /// Pipeline stages `compile` can stop after (`STAGE_TYPECHECK` includes the borrow check). A failing
 /// compile reports `STAGE_BORROWCK` when only the borrow check failed.
-pub const STAGE_PARSE: i32 = 0;
-pub const STAGE_RESOLVE: i32 = 1;
-pub const STAGE_TYPECHECK: i32 = 2;
-pub const STAGE_BORROWCK: i32 = 3;
+pub(package) const STAGE_PARSE: i32 = 0;
+pub(package) const STAGE_RESOLVE: i32 = 1;
+pub(package) const STAGE_TYPECHECK: i32 = 2;
+pub(package) const STAGE_BORROWCK: i32 = 3;
 
 // A stage result: how many errors the USER module produced, at which stage, and the first message text
 // (copied out before the compiler frees it). `ok()` is the accept/reject verdict the oracle asserts on.
 /// Outcome of an in-process compile: error count and the first message.
-pub struct Compiled {
-    pub errors: usize,
-    pub stage: i32,
-    pub first: [char; 512],
+pub(package) struct Compiled {
+    pub(package) errors: usize,
+    pub(package) stage: i32,
+    pub(package) first: [char; 512],
 }
 
 extend Compiled {
     /// True when no error was reported.
-    pub const fn ok(self: &Self) bool {
+    pub(package) const fn ok(self: &Self) bool {
         return self.errors == 0;
     }
     // Whether the first error message contains `needle` (matched as a substring).
     /// True when the first diagnostic contains `needle`.
-    pub fn msg_has(self: &Self, needle: str) bool {
+    pub(package) fn msg_has(self: &Self, needle: str) bool {
         return cli::contains_str(&self.first[0], needle);
     }
 }
@@ -79,18 +79,18 @@ const fn copy_msg(dst: *mut char, s: &String) {
 /// `compile` of `src` as a module of the standard library (path `std::harness`, a file under the std
 /// root) for instruction set `arch` (loader arch codes, -1 for the host's): the std-only attributes
 /// apply, and the backend table's diagnostics (`build_simd_table`) count as the module's.
-pub fn compile_std(src: str, arch: i32, stop: i32) Compiled {
+pub(package) fn compile_std(src: str, arch: i32, stop: i32) Compiled {
     return compile_in(src, stop, true, arch, false);
 }
 
 /// `compile_std` for the host's instruction set as a `--bootstrap-tags` build sees it.
-pub fn compile_std_bootstrap(src: str, stop: i32) Compiled {
+pub(package) fn compile_std_bootstrap(src: str, stop: i32) Compiled {
     return compile_in(src, stop, true, -1, true);
 }
 
 // Run `src` through the pipeline up to `stop`, reporting the user module (index 0) diagnostics.
 /// Compile `src` in process through stage `stop` (STAGE_*), collecting diagnostics.
-pub fn compile(src: str, stop: i32) Compiled {
+pub(package) fn compile(src: str, stop: i32) Compiled {
     return compile_in(src, stop, false, -1, false);
 }
 
@@ -200,9 +200,9 @@ fn check_from(p: &mut loader::Package, from: usize, stop: i32, as_std: bool, r: 
 // Lex + parse a source standalone (no package/prelude) and hand back the AST for shape inspection.
 // `errors` > 0 means the snippet failed to lex or parse. RAII frees the AST with the result.
 /// A parsed module kept alive for AST inspection (formatter path when trivia is kept).
-pub struct ParsedAst {
-    pub errors: usize,
-    pub ast: Ast,
+pub(package) struct ParsedAst {
+    pub(package) errors: usize,
+    pub(package) ast: Ast,
 }
 
 extend ParsedAst as Free {
@@ -211,14 +211,14 @@ extend ParsedAst as Free {
     }
 }
 
-pub fn parse_ast(src: str) ParsedAst {
+pub(package) fn parse_ast(src: str) ParsedAst {
     return parse_ast_opt(src, true);
 }
 
 // The formatter's parse: `@derive` stays attribute trivia (no synthesized extends), exactly as
 // format_source parses.
 /// Parse `src` keeping comment tokens, as the formatter does.
-pub fn parse_ast_for_fmt(src: str) ParsedAst {
+pub(package) fn parse_ast_for_fmt(src: str) ParsedAst {
     return parse_ast_opt(src, false);
 }
 
@@ -244,7 +244,7 @@ fn parse_ast_opt(src: str, expand_derive: bool) ParsedAst {
 
 // True if `src` fails to lex or parse (the parse-stage rejection oracle).
 /// True when parsing `src` reports an error.
-pub fn parse_has_error(src: str) bool {
+pub(package) fn parse_has_error(src: str) bool {
     let mut s = String::from_str(src);
     let mut lx = lex::Lexer::new(&mut s, "");
     lx.scan_tokens();
@@ -262,14 +262,14 @@ pub fn parse_has_error(src: str) bool {
 // (RAII frees it with the result); span text is looked up against the caller's own source literal,
 // which outlives this call.
 /// A typechecked module kept alive for AST inspection.
-pub struct CompiledAst {
-    pub errors: usize,
-    pub stage: i32,
-    pub ast: Ast,
-    pub pkg: loader::Package, // `ast` reads its types through the package table: the package outlives it
+pub(package) struct CompiledAst {
+    pub(package) errors: usize,
+    pub(package) stage: i32,
+    pub(package) ast: Ast,
+    pub(package) pkg: loader::Package, // `ast` reads its types through the package table: the package outlives it
 }
 
-pub fn compile_ast(src: str, stop: i32) CompiledAst {
+pub(package) fn compile_ast(src: str, stop: i32) CompiledAst {
     let mut p = loader::package_from_source(src, "std", unsafe shim::sc_host_platform());
     if !p.ok {
         return CompiledAst { errors: 1, stage: STAGE_PARSE, ast: Ast::new(0), pkg: p };
@@ -297,7 +297,7 @@ pub fn compile_ast(src: str, stop: i32) CompiledAst {
 // Inspection helpers over a returned AST (mirror tests/test_harness.h's th_* / ast_resolution).
 // The n-th node (0-based) of the given kind, in creation order; NODE_NONE if fewer than n+1 exist.
 /// The `nth` (0-based) node of `kind` in arena order, or NODE_NONE.
-pub fn nth_kind(a: &Ast, kind: NodeKind, nth: usize) NodeId {
+pub(package) fn nth_kind(a: &Ast, kind: NodeKind, nth: usize) NodeId {
     let mut seen: usize = 0;
     let mut k: usize = 1;
     while k < a.nnodes() {
@@ -315,7 +315,7 @@ pub fn nth_kind(a: &Ast, kind: NodeKind, nth: usize) NodeId {
 
 // True if node `id` is a NODE_IDENTIFIER whose source text equals `name` (a NUL-terminated cstring).
 /// True when identifier node `id` spells `name`.
-pub fn ident_is(a: &Ast, src: *const char, id: NodeId, name: *const char) bool {
+pub(package) fn ident_is(a: &Ast, src: *const char, id: NodeId, name: *const char) bool {
     let nd = a.at_const(id);
     if nd.kind != NodeKind::NODE_IDENTIFIER {
         return false;
@@ -351,17 +351,17 @@ fn read_stream(f: *mut stdio::FILE) *mut char {
 // The generated C for the user snippet (module 0's header + .c concatenated), for substring inspection:
 // the analog of tests/test_harness.h's sc_codegen. `code` is owned (call `.free()`).
 /// Outcome of emitting C in process: error count and the generated text.
-pub struct CompiledC {
-    pub errors: usize,
-    pub code: *mut char,
+pub(package) struct CompiledC {
+    pub(package) errors: usize,
+    pub(package) code: *mut char,
 }
 
 extend CompiledC {
-    pub const fn ok(self: &Self) bool {
+    pub(package) const fn ok(self: &Self) bool {
         return self.errors == 0;
     }
     /// True when the emitted C contains `needle`.
-    pub fn code_has(self: &Self, needle: str) bool {
+    pub(package) fn code_has(self: &Self, needle: str) bool {
         if self.code == null {
             return false;
         }
@@ -381,11 +381,11 @@ extend CompiledC as Free {
 // and the instance code, without the prelude's translation units: a needle cannot match a prelude
 // function body. On any pre-codegen error, `errors` is set and `code` is null; codegen-stage
 // diagnostics also set `errors` but the (partial) code is still returned.
-pub fn compile_c(src: str) CompiledC {
+pub(package) fn compile_c(src: str) CompiledC {
     return compile_c_of(src, false, unsafe shim::sc_host_arch());
 }
 /// The text of the C function that `def` opens in `code`, to its closing brace at a line start.
-pub fn c_fn<'a>(code: str<'a>, def: str) str<'a> {
+pub(package) fn c_fn<'a>(code: str<'a>, def: str) str<'a> {
     let at = code.find(def);
     assert(at >= 0, "the function is defined");
     let rest = code.slice(at as usize, code.len());
@@ -394,11 +394,11 @@ pub fn c_fn<'a>(code: str<'a>, def: str) str<'a> {
     return rest.slice(def.len(), end as usize);
 }
 /// Only the user snippet's own translation unit (needle absence must not trip on std code).
-pub fn compile_c_user(src: str) CompiledC {
+pub(package) fn compile_c_user(src: str) CompiledC {
     return compile_c_of(src, true, unsafe shim::sc_host_arch());
 }
 /// `compile_c` for instruction set `arch` (0 x86_64, 1 aarch64): the C a build for it emits, on any host.
-pub fn compile_c_arch(src: str, arch: i32) CompiledC {
+pub(package) fn compile_c_arch(src: str, arch: i32) CompiledC {
     return compile_c_of(src, false, arch);
 }
 fn compile_c_of(src: str, user_only: bool, arch: i32) CompiledC {
@@ -507,10 +507,10 @@ static mut R_SEQ: u64 = 0;
 
 // The captured result of compiling+running a snippet: whether it built, its exit code, and stdout+stderr.
 /// Outcome of compiling and running a snippet: whether it built, its exit code, and captured output.
-pub struct RunResult {
-    pub built: bool,
-    pub exit: i32,
-    pub out: *mut char,
+pub(package) struct RunResult {
+    pub(package) built: bool,
+    pub(package) exit: i32,
+    pub(package) out: *mut char,
 }
 
 extend RunResult {}
@@ -539,19 +539,19 @@ fn rm_dir(dir: str) {
 }
 
 /// Build `src` as a program and run it, capturing stdout.
-pub fn compile_and_run(src: str) RunResult {
+pub(package) fn compile_and_run(src: str) RunResult {
     return compile_and_run_env(src, "");
 }
 
 // As compile_and_run, but with `env` ("VAR=v " assignments, trailing space) prefixed to the run command.
 /// `compile_and_run` with `env` (space-separated NAME=VALUE) applied to the program.
-pub fn compile_and_run_env(src: str, env: str) RunResult {
+pub(package) fn compile_and_run_env(src: str, env: str) RunResult {
     return compile_and_run_in(src, false, env);
 }
 
 /// `compile_and_run` through the C backend: the C emitter's own behavior, the C tree `--emit-c` writes
 /// built by the comparison job's C compiler (`cli::has_cc` first).
-pub fn compile_and_run_c(src: str) RunResult {
+pub(package) fn compile_and_run_c(src: str) RunResult {
     return compile_and_run_in(src, true, "");
 }
 
@@ -660,7 +660,7 @@ fn build_script(dir: str, bin: str, c: bool) bool {
 // Build+run `src` and require it to terminate with exit code `code` (the analog of tests/codegen_run's
 // `sc_run_program(name, src, code, "")`: the program signals its result via `exit(code)`).
 /// Assert that `src` builds and exits with `code`, naming `label` on failure.
-pub fn expect_exit(label: str, src: str, code: i32) {
+pub(package) fn expect_exit(label: str, src: str, code: i32) {
     let r = compile_and_run(src);
     assert(r.built, label);
     if r.exit != code {
@@ -670,7 +670,7 @@ pub fn expect_exit(label: str, src: str, code: i32) {
 }
 
 /// Assert that `src` builds and its run fails with output (stdout and stderr) holding `msg`.
-pub fn expect_trap(label: str, src: str, msg: str) {
+pub(package) fn expect_trap(label: str, src: str, msg: str) {
     let r = compile_and_run(src);
     assert(r.built, label);
     let ok = r.exit != 0 && cli::contains_str(r.out, msg);
@@ -687,7 +687,7 @@ pub fn expect_trap(label: str, src: str, msg: str) {
 /// with another `main`, and every case of a program that does not build (two cases whose C
 /// declarations clash, a case that does not compile), builds alone through `expect_exit` or
 /// `expect_trap`, so a failure still names its case.
-pub struct ExitBatch {
+pub(package) struct ExitBatch {
     labels: Vector<String>,
     srcs: Vector<String>,
     codes: Vector<i32>,
@@ -726,7 +726,7 @@ const fn case_main_of(s: str) (isize, usize, bool) {
 }
 
 extend ExitBatch {
-    pub fn new() ExitBatch {
+    pub(package) fn new() ExitBatch {
         return ExitBatch {
             labels: Vector::<String>::new(),
             srcs: Vector::<String>::new(),
@@ -736,7 +736,7 @@ extend ExitBatch {
     }
 
     /// Add the case `label`: `src` must build and exit with `code`.
-    pub fn add(self: &mut Self, label: str, src: str, code: i32) {
+    pub(package) fn add(self: &mut Self, label: str, src: str, code: i32) {
         self.labels.push(String::from_str(label));
         self.srcs.push(String::from_str(src));
         self.codes.push(code);
@@ -744,7 +744,7 @@ extend ExitBatch {
     }
 
     /// Add the case `label`: `src` must build and its run must fail with output holding `msg`.
-    pub fn add_trap(self: &mut Self, label: str, src: str, msg: str) {
+    pub(package) fn add_trap(self: &mut Self, label: str, src: str, msg: str) {
         self.labels.push(String::from_str(label));
         self.srcs.push(String::from_str(src));
         self.codes.push(0);
@@ -761,7 +761,7 @@ extend ExitBatch {
     }
 
     /// Build the cases and check each one's exit code or trap.
-    pub fn run(self: &Self) {
+    pub(package) fn run(self: &Self) {
         let mut root = String::new();
         let mut batched = Vector::<usize>::new();
         for k in 0..self.srcs.len() {
@@ -871,14 +871,14 @@ extend ExitBatch {
 
 // Require the snippet to compile cleanly AND its generated C to contain `needle`.
 /// Assert that `src` emits C containing `needle`.
-pub fn expect_c(label: str, src: str, needle: str) {
+pub(package) fn expect_c(label: str, src: str, needle: str) {
     let c = compile_c(src);
     assert(c.ok(), label);
     assert(c.code_has(needle), label);
 }
 // Require the snippet to compile cleanly AND its generated C to NOT contain `needle`.
 /// Assert that `src` emits C not containing `needle`.
-pub fn expect_c_absent(label: str, src: str, needle: str) {
+pub(package) fn expect_c_absent(label: str, src: str, needle: str) {
     let c = compile_c(src);
     assert(c.ok(), label);
     assert(!c.code_has(needle), label);
@@ -886,18 +886,18 @@ pub fn expect_c_absent(label: str, src: str, needle: str) {
 
 // expect_ok / expect_err: the accept-vs-reject oracle for semantic tests.
 /// Assert that `src` typechecks without errors.
-pub fn expect_ok(label: str, src: str) {
+pub(package) fn expect_ok(label: str, src: str) {
     let c = compile(src, STAGE_TYPECHECK);
     assert(c.ok(), label);
 }
 /// Assert that `src` resolves without errors.
-pub fn expect_resolve_ok(label: str, src: str) {
+pub(package) fn expect_resolve_ok(label: str, src: str) {
     let c = compile(src, STAGE_RESOLVE);
     assert(c.ok(), label);
 }
 // Reject at the given stage AND require the first message to contain `needle`.
 /// Assert that typechecking `src` reports an error containing `needle`.
-pub fn expect_err_msg(label: str, src: str, needle: str) {
+pub(package) fn expect_err_msg(label: str, src: str, needle: str) {
     let c = compile(src, STAGE_TYPECHECK);
     if !c.msg_has(needle) {
         eprintln("{}: the first error is: {}", label, str::from_cbuf(c.first));
@@ -906,7 +906,7 @@ pub fn expect_err_msg(label: str, src: str, needle: str) {
     assert(c.msg_has(needle), label);
 }
 /// Assert that resolving `src` reports an error containing `needle`.
-pub fn expect_resolve_err_msg(label: str, src: str, needle: str) {
+pub(package) fn expect_resolve_err_msg(label: str, src: str, needle: str) {
     let c = compile(src, STAGE_RESOLVE);
     if !c.msg_has(needle) {
         eprintln("{}: the first error is: {}", label, str::from_cbuf(c.first));
@@ -922,11 +922,11 @@ pub fn expect_resolve_err_msg(label: str, src: str, needle: str) {
 
 /// The build of one differential program: its scratch project, whether it built, the build output,
 /// and whether it is a wasm32 module (run under wasmtime).
-pub struct DiffBuild {
-    pub proj: cli::Proj,
-    pub built: bool,
-    pub diag: String,
-    pub wasm: bool,
+pub(package) struct DiffBuild {
+    pub(package) proj: cli::Proj,
+    pub(package) built: bool,
+    pub(package) diag: String,
+    pub(package) wasm: bool,
 }
 
 // The vector conformance lane, `SC_SIMD_LANE=wasm` (a wasi-sdk in WASI_SDK_PATH, wasmtime on the
@@ -941,7 +941,7 @@ static mut SIMD_LANE: i32 = -1;
 static mut TARGET_LANE: i32 = -1;
 
 /// Whether the target lane is on (`SC_TEST_TARGET=wasm`).
-pub fn target_lane() bool {
+pub(package) fn target_lane() bool {
     if unsafe TARGET_LANE < 0 {
         let e = stdlib::getenv("SC_TEST_TARGET");
         unsafe TARGET_LANE = (e != null && unsafe str::from_cstr(e) == "wasm") as i32;
@@ -950,7 +950,7 @@ pub fn target_lane() bool {
 }
 
 /// Whether the vector conformance lane is on (`SC_SIMD_LANE=wasm`, or the target lane).
-pub fn simd_lane() bool {
+pub(package) fn simd_lane() bool {
     if unsafe SIMD_LANE < 0 {
         let e = stdlib::getenv("SC_SIMD_LANE");
         unsafe SIMD_LANE = (e != null && unsafe str::from_cstr(e) == "wasm" || target_lane()) as i32;
@@ -959,29 +959,29 @@ pub fn simd_lane() bool {
 }
 
 /// One run of a differential program: exit code, stdout and stderr.
-pub struct DiffRun {
-    pub exit: i32,
-    pub out: String,
-    pub err: String,
+pub(package) struct DiffRun {
+    pub(package) exit: i32,
+    pub(package) out: String,
+    pub(package) err: String,
 }
 
 /// Build `src` as main.spc of a scratch project. An option of the form NAME=VALUE sets that
 /// environment variable for the build (`SC_BCE=0`); any other option is one build flag. With `--emit-c`
 /// the build writes the C tree only (`c_link` builds it).
-pub fn diff_build(src: str, opts: []str) DiffBuild {
+pub(package) fn diff_build(src: str, opts: []str) DiffBuild {
     let p = diff_proj();
     p.mkfile("main.spc", src);
     return diff_build_in(p, opts);
 }
 
 /// The scratch project of `diff_build` without its sources (`diff_build_in` writes its build.toml).
-pub fn diff_proj() cli::Proj {
+pub(package) fn diff_proj() cli::Proj {
     return cli::proj_new();
 }
 
 /// `diff_build` of the project `p` of `diff_proj`, its sources written: its `build.toml` (root
 /// `main.spc`) is written here, from `opts`.
-pub fn diff_build_in(p: cli::Proj, opts: []str) DiffBuild {
+pub(package) fn diff_build_in(p: cli::Proj, opts: []str) DiffBuild {
     let mut wasm = simd_lane();
     for o in opts {
         wasm = wasm || o == "--target=wasm";
@@ -1036,7 +1036,7 @@ pub fn diff_build_in(p: cli::Proj, opts: []str) DiffBuild {
 }
 
 /// Assert that the build of `src` fails with a diagnostic containing `needle`, before its C compile.
-pub fn expect_build_err(label: str, src: str, needle: str) {
+pub(package) fn expect_build_err(label: str, src: str, needle: str) {
     let b = diff_build(src, []);
     let ok = !b.built && b.diag.contains(needle) && !b.diag.contains("C compile failed") && !b.diag.contains("internal");
     if !ok {
@@ -1047,7 +1047,7 @@ pub fn expect_build_err(label: str, src: str, needle: str) {
 
 /// `expect_build_err` for every case of `b` (see `cli::Batch`), each program the root of a
 /// `diff_proj` project.
-pub fn expect_build_errs(mut b: cli::Batch) {
+pub(package) fn expect_build_errs(mut b: cli::Batch) {
     assert(b.file.eq_str("main.spc"), "a case alone is the project's root");
     b.forbid("C compile failed");
     b.forbid("internal");
@@ -1068,13 +1068,13 @@ pub fn expect_build_errs(mut b: cli::Batch) {
 
 /// Assert that `src` builds and its run with argument `arg` traps with `msg` on stderr, or exits 0
 /// when `msg` is empty.
-pub fn expect_run(label: str, src: str, arg: str, msg: str) {
+pub(package) fn expect_run(label: str, src: str, arg: str, msg: str) {
     expect_runs(label, src, [arg], [msg]);
 }
 
 /// `expect_run` of `src` for each argument `args[i]` with trap text `msgs[i]`, from one build per
 /// option set: the runs differ only in their argument.
-pub fn expect_runs(label: str, src: str, args: []str, msgs: []str) {
+pub(package) fn expect_runs(label: str, src: str, args: []str, msgs: []str) {
     let b = diff_build(src, []);
     if !b.built {
         eprintln("{}: {}", label, b.diag.as_str());
@@ -1118,7 +1118,7 @@ pub fn expect_runs(label: str, src: str, args: []str, msgs: []str) {
 }
 
 /// Run the program `b` built with `args` (a command-line fragment) and capture its output.
-pub fn diff_run(b: &DiffBuild, args: str) DiffRun {
+pub(package) fn diff_run(b: &DiffBuild, args: str) DiffRun {
     let root = b.proj.dir();
     let mut cmd = String::new();
     if b.wasm {
@@ -1137,7 +1137,7 @@ pub fn diff_run(b: &DiffBuild, args: str) DiffRun {
 
 /// The trap lines of a run's stderr: the runtime's `super-c: ...` and std's `panic: ...` messages.
 /// Backtraces and other diagnostics are not part of the trap text.
-pub fn trap_text(err: str) String {
+pub(package) fn trap_text(err: str) String {
     let mut t = String::new();
     for line in err.lines() {
         if line.starts_with("super-c: ") || line.starts_with("panic: ") {
@@ -1151,7 +1151,7 @@ pub fn trap_text(err: str) String {
 /// Build `src` under `opts_a` and under `opts_b`, run both once per entry of `runs` (each entry is the
 /// command-line arguments of one run), and describe the first difference in exit code, stdout or trap
 /// text. Empty when every run agrees. A build failure is a difference.
-pub fn same_output(src: str, opts_a: []str, opts_b: []str, runs: []str) String {
+pub(package) fn same_output(src: str, opts_a: []str, opts_b: []str, runs: []str) String {
     let mut r = String::new();
     let a = diff_build(src, opts_a);
     if !a.built {
@@ -1168,7 +1168,7 @@ pub fn same_output(src: str, opts_a: []str, opts_b: []str, runs: []str) String {
 
 /// `same_output` over two builds the caller made (both built): run each once per entry of `runs`
 /// and describe the first difference, empty when none.
-pub fn same_runs(a: &DiffBuild, b: &DiffBuild, runs: []str) String {
+pub(package) fn same_runs(a: &DiffBuild, b: &DiffBuild, runs: []str) String {
     let mut r = String::new();
     for args in runs {
         let ra = diff_run(a, args);
@@ -1194,7 +1194,7 @@ pub fn same_runs(a: &DiffBuild, b: &DiffBuild, runs: []str) String {
 
 /// Assert that `src` gives the same exit code, stdout and trap text built with `opts_a` and with
 /// `opts_b` (see `diff_build` for the option forms).
-pub fn expect_same_output(label: str, src: str, opts_a: []str, opts_b: []str) {
+pub(package) fn expect_same_output(label: str, src: str, opts_a: []str, opts_b: []str) {
     let d = same_output(src, opts_a, opts_b, [""]);
     if d.len() != 0 {
         eprintln("{}: {}", label, d.as_str());
@@ -1205,7 +1205,7 @@ pub fn expect_same_output(label: str, src: str, opts_a: []str, opts_b: []str) {
 /// The trap class a compile-time error names for a trap ("arithmetic overflow", "division by zero",
 /// "shift out of range"), or the text from `lane <i>: ` of a vector operation's trap, the same at run
 /// time; empty for any other error.
-pub const fn const_trap_class<'a>(msg: str<'a>) str<'a> {
+pub(package) const fn const_trap_class<'a>(msg: str<'a>) str<'a> {
     let lane = msg.find("lane ");
     if lane >= 0 && lane as usize + 5 < msg.len() && msg.byte_at(lane as usize + 5) >= b'0' && msg.byte_at(
         lane as usize + 5,
@@ -1235,7 +1235,7 @@ pub const fn const_trap_class<'a>(msg: str<'a>) str<'a> {
 /// The trap class of a run-time trap message (`rt_h.spc` arithmetic and index helpers), in the words a constant
 /// reports for the same trap, or the text from `lane <i>: ` of a vector operation's trap; empty for any
 /// other trap.
-pub const fn runtime_trap_class<'a>(trap: str<'a>) str<'a> {
+pub(package) const fn runtime_trap_class<'a>(trap: str<'a>) str<'a> {
     let lane = trap.find("lane ");
     if lane >= 0 && lane as usize + 5 < trap.len() && trap.byte_at(lane as usize + 5) >= b'0' && trap.byte_at(
         lane as usize + 5,
@@ -1377,7 +1377,7 @@ const fn parity_value<'a>(out: str<'a>, tag: str) str<'a> {
 /// (`runtime_trap_class`). Inputs are written `opq::<T>(v)`: the constant calls the identity
 /// `const fn opq`, the run-time copy calls `@noinline fn opr`, which the compiler cannot see
 /// through. The program defines `opq`, `opr` and names starting with `parity_`, `Parity` and `PARITY_`.
-pub fn const_runtime_parity(decls: str, exprs: []str, tys: []str, opts_in: []str) String {
+pub(package) fn const_runtime_parity(decls: str, exprs: []str, tys: []str, opts_in: []str) String {
     assert(exprs.len() == tys.len());
     // On the wasm lane the guest compiler folds the constants, on wasi-libc: the run-time twin is a
     // wasm32 module (run under wasmtime) on the same C library.
@@ -1469,7 +1469,7 @@ fn parity_segments(out: str) Vector<String> {
 }
 
 /// The program `const_runtime_parity` builds first, with every constant.
-pub fn parity_program(decls: str, exprs: []str, tys: []str) String {
+pub(package) fn parity_program(decls: str, exprs: []str, tys: []str) String {
     let mut omit = Vector::<bool>::new();
     for _ in 0..exprs.len() {
         omit.push(false);
@@ -1511,12 +1511,12 @@ const fn asm_label_is(line: str, function: str) bool {
 /// The instruction mnemonics of `function` in assembly text `text`: the first word of each line from
 /// the function's label (`name:` or Mach-O `_name:`) to the end of its body, without directives,
 /// labels and comments. Empty when the label is absent.
-pub fn asm_mnemonics(text: str, function: str) Vector<String> {
+pub(package) fn asm_mnemonics(text: str, function: str) Vector<String> {
     return asm_instructions(text, function, false);
 }
 
 /// `asm_mnemonics`, or with `whole` each instruction's whole text, its operands included.
-pub fn asm_instructions(text: str, function: str, whole: bool) Vector<String> {
+pub(package) fn asm_instructions(text: str, function: str, whole: bool) Vector<String> {
     let mut names = Vector::<String>::new();
     let mut inside = false;
     for raw in text.lines() {
@@ -1563,7 +1563,7 @@ pub fn asm_instructions(text: str, function: str, whole: bool) Vector<String> {
 /// instruction mnemonics: every `contains` entry is a substring of one, no `absent` entry is a substring
 /// of any (`=name`: equal to any; `%reg`: a substring of an instruction's operands, AT&T syntax).
 /// Describes every failed check; empty when all hold. Needs the comparison job's C compiler.
-pub fn asm_check(src: str, opts: []str, function: str, contains: []str, absent: []str) String {
+pub(package) fn asm_check(src: str, opts: []str, function: str, contains: []str, absent: []str) String {
     let mut all = Vector::<str>::new();
     for o in opts {
         all.push(o);
@@ -1584,7 +1584,7 @@ pub fn asm_check(src: str, opts: []str, function: str, contains: []str, absent: 
 /// The assembly of the translation unit of the C tree of build `b` (built with `opts` and `--emit-c`)
 /// that defines C function `function`, into `out`: the tree's `__cflags` plus `-S`. Returns the failure,
 /// empty on success. One unit's text serves every function it defines (`asm_match`).
-pub fn asm_text(b: &DiffBuild, opts: []str, function: str, out: &mut String) String {
+pub(package) fn asm_text(b: &DiffBuild, opts: []str, function: str, out: &mut String) String {
     let mut r = String::new();
     let mut prof = "debug";
     for o in opts {
@@ -1625,7 +1625,7 @@ pub fn asm_text(b: &DiffBuild, opts: []str, function: str, out: &mut String) Str
 
 /// The mnemonic checks of `asm_check` on `function` in assembly text `code`. Describes every failed
 /// check; empty when all hold.
-pub fn asm_match(code: str, function: str, contains: []str, absent: []str) String {
+pub(package) fn asm_match(code: str, function: str, contains: []str, absent: []str) String {
     let mut r = String::new();
     let names = asm_mnemonics(code, function);
     // An entry that starts with `%` matches a register operand (`%ymm`), in AT&T syntax; `a|b` is met by
@@ -1677,7 +1677,7 @@ pub fn asm_match(code: str, function: str, contains: []str, absent: []str) Strin
 }
 
 /// Assert the instruction checks of `asm_check` on `function` of `src` built with `opts`.
-pub fn expect_asm(label: str, src: str, opts: []str, function: str, contains: []str, absent: []str) {
+pub(package) fn expect_asm(label: str, src: str, opts: []str, function: str, contains: []str, absent: []str) {
     let mut wasm = false;
     for o in opts {
         wasm = wasm || o == "--target=wasm";
@@ -1760,15 +1760,15 @@ fn h_borrowck(p: &mut loader::Package, i: usize, cap: usize, out: *mut Compiled,
 
 /// A host prelude package, resolved and type-checked, and the constant engine bound to it. Each
 /// points at the other, so a snapshot stays where it was built.
-pub struct Snap {
-    pub p: loader::Package,
-    pub cir: iri::Interp,
+pub(package) struct Snap {
+    pub(package) p: loader::Package,
+    pub(package) cir: iri::Interp,
 }
 
 /// The suite's global environment: the snapshots, by whether the snippet names a vector (index 1:
 /// the prelude with the vector backend).
-pub struct HarnessEnv {
-    pub snaps: Vector<Box<Snap>>,
+pub(package) struct HarnessEnv {
+    pub(package) snaps: Vector<Box<Snap>>,
 }
 
 /// The snapshots of the global environment, where a compile reaches them: null where none was built.

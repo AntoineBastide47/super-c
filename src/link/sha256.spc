@@ -119,7 +119,7 @@ const fn block(h: &mut [u32; 8], b: []u8, at: usize) {
 }
 
 /// The SHA-256 digest of `data` into `out`.
-pub const fn digest(data: []u8, out: &mut [u8; 32]) {
+pub(package) const fn digest(data: []u8, out: &mut [u8; 32]) {
     let mut h = H0;
     let n = data.len();
     let full = n / 64;

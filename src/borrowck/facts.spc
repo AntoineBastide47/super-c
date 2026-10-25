@@ -11,56 +11,56 @@ import borrowck::move_paths as mp;
 import utils::bits as bits;
 
 /// The absent fact index, place, local, or origin.
-pub const BF_NONE: u32 = 0xFFFFFFFF;
+pub(package) const BF_NONE: u32 = 0xFFFFFFFF;
 
 /// Loan kinds (Loan.kind).
-pub const LK_SHARED: u8 = 0;
-pub const LK_MUT: u8 = 1;
-pub const LK_RESERVED: u8 = 2; // two-phase mutable: reads stay legal until activation
-pub const LK_CAP: u8 = 3; // closure mutable capture: exclusive like LK_MUT; diagnostics name the capture
+pub(package) const LK_SHARED: u8 = 0;
+pub(package) const LK_MUT: u8 = 1;
+pub(package) const LK_RESERVED: u8 = 2; // two-phase mutable: reads stay legal until activation
+pub(package) const LK_CAP: u8 = 3; // closure mutable capture: exclusive like LK_MUT; diagnostics name the capture
 
 /// Access kinds. FREE and CAP invalidate like moves; they exist so diagnostics can name the
 /// operation (an explicit `.free()`, a closure capture) instead of a generic move.
-pub const ACC_READ: u8 = 0;
-pub const ACC_WRITE: u8 = 1;
-pub const ACC_MOVE: u8 = 2;
-pub const ACC_FREE: u8 = 3;
-pub const ACC_CAP: u8 = 4;
-pub const ACC_ACT: u8 = 6; // a reserved (two-phase) loan's exclusivity claim at its activation
+pub(package) const ACC_READ: u8 = 0;
+pub(package) const ACC_WRITE: u8 = 1;
+pub(package) const ACC_MOVE: u8 = 2;
+pub(package) const ACC_FREE: u8 = 3;
+pub(package) const ACC_CAP: u8 = 4;
+pub(package) const ACC_ACT: u8 = 6; // a reserved (two-phase) loan's exclusivity claim at its activation
 
 /// Init/move events (dataflow transfer replays these per block).
-pub const EV_ASSIGN: u8 = 0; // path fully (re)initialized
-pub const EV_MOVE: u8 = 1; // path moved out
-pub const EV_USE: u8 = 2; // path read (init required)
-pub const EV_DEAD: u8 = 3; // local storage ends (path = local root)
-pub const EV_MOVE_CUT: u8 = 4; // moved THROUGH a reference (unsafe ref-take): drops-visible only
+pub(package) const EV_ASSIGN: u8 = 0; // path fully (re)initialized
+pub(package) const EV_MOVE: u8 = 1; // path moved out
+pub(package) const EV_USE: u8 = 2; // path read (init required)
+pub(package) const EV_DEAD: u8 = 3; // local storage ends (path = local root)
+pub(package) const EV_MOVE_CUT: u8 = 4; // moved THROUGH a reference (unsafe ref-take): drops-visible only
 
 /// One borrow the body issues: the borrowed place, its kind, and the point and origin it lives at.
-pub struct Loan {
-    pub through: bool, // the borrowed storage lies behind a reference or a view (`Gen::behind`, or a
+pub(package) struct Loan {
+    pub(package) through: bool, // the borrowed storage lies behind a reference or a view (`Gen::behind`, or a
     // reborrow through a call argument): never this body's storage, so neither its escape nor the
     // death of the place's base local is checked; the reference's own loans carry that.
-    pub pin: bool, // a receiver pin from a carrying call result (a view into the receiver's storage)
-    pub deref: bool, // a reborrow through a call argument: the loan is on the POINTEE of the reference
+    pub(package) pin: bool, // a receiver pin from a carrying call result (a view into the receiver's storage)
+    pub(package) deref: bool, // a reborrow through a call argument: the loan is on the POINTEE of the reference
     // in `place`, so overwriting `place` itself only replaces the reference (it kills the loan).
-    pub level: u8, // the reference level of its origin it is issued at (see SD_KEEP)
-    pub place: ir::PlaceId,
-    pub kind: u8,
-    pub origin: u32,
-    pub issued_at: u32,
-    pub activated_at: u32, // BF_NONE until a reserved loan's first use point is known
-    pub span: tok::Span,
+    pub(package) level: u8, // the reference level of its origin it is issued at (see SD_KEEP)
+    pub(package) place: ir::PlaceId,
+    pub(package) kind: u8,
+    pub(package) origin: u32,
+    pub(package) issued_at: u32,
+    pub(package) activated_at: u32, // BF_NONE until a reserved loan's first use point is known
+    pub(package) span: tok::Span,
 }
 
 /// One access to a place or a whole local at a point, with its ACC_* kind.
-pub struct Access {
-    pub place: ir::PlaceId, // BF_NONE for a whole-local access (storage death)
-    pub local: u32, // BF_NONE for a place access
-    pub kind: u8,
-    pub copy_out: bool, // a call argument read as a borrow-free value: its base is used at `point` only
-    pub def: bool, // a store of the whole local (a `&mut` claim of it is a use: the value survives)
-    pub point: u32,
-    pub span: tok::Span,
+pub(package) struct Access {
+    pub(package) place: ir::PlaceId, // BF_NONE for a whole-local access (storage death)
+    pub(package) local: u32, // BF_NONE for a place access
+    pub(package) kind: u8,
+    pub(package) copy_out: bool, // a call argument read as a borrow-free value: its base is used at `point` only
+    pub(package) def: bool, // a store of the whole local (a `&mut` claim of it is a use: the value survives)
+    pub(package) point: u32,
+    pub(package) span: tok::Span,
 }
 
 /// Subset edge kinds. A loan sits at reference level 0 of an origin when the value holds it
@@ -73,16 +73,16 @@ pub struct Access {
 /// adds one level; SAT places a value behind references of a depth the facts do not know, so every
 /// level saturates. An edge whose depth change is not exact must over-count its references and
 /// under-count its dereferences (`sd_lift`, `sd_sink`).
-pub const SD_DROP: u8 = 3;
-pub const SD_KEEP: u8 = 4; // 0 -> 0, 1 -> 1
-pub const SD_DEREF: u8 = 3; // 0 -> drop, 1 -> 0
-pub const SD_DEREF2: u8 = 15; // 0 -> drop, 1 -> drop
-pub const SD_REF: u8 = 9; // 0 -> 1, 1 -> 2
-pub const SD_SAT: u8 = 10; // 0 -> 2, 1 -> 2
-pub const SD_KEEP_SAT: u8 = 8; // 0 -> 0, 1 -> 2: a flow whose deeper levels the facts do not know
+pub(package) const SD_DROP: u8 = 3;
+pub(package) const SD_KEEP: u8 = 4; // 0 -> 0, 1 -> 1
+pub(package) const SD_DEREF: u8 = 3; // 0 -> drop, 1 -> 0
+pub(package) const SD_DEREF2: u8 = 15; // 0 -> drop, 1 -> drop
+pub(package) const SD_REF: u8 = 9; // 0 -> 1, 1 -> 2
+pub(package) const SD_SAT: u8 = 10; // 0 -> 2, 1 -> 2
+pub(package) const SD_KEEP_SAT: u8 = 8; // 0 -> 0, 1 -> 2: a flow whose deeper levels the facts do not know
 
 /// The level a loan at level `d` (0, 1 or 2) reaches over an edge of kind `e`, or SD_DROP.
-pub const fn sd_level(e: u8, d: u32) u32 {
+pub(package) const fn sd_level(e: u8, d: u32) u32 {
     if d >= 2 {
         return 2;
     }
@@ -90,7 +90,7 @@ pub const fn sd_level(e: u8, d: u32) u32 {
 }
 
 /// Edge `a` followed by edge `b`.
-pub const fn sd_then(a: u8, b: u8) u8 {
+pub(package) const fn sd_then(a: u8, b: u8) u8 {
     let mut r: u8 = 0;
     for d in 0..2u32 {
         let x = sd_level(a, d);
@@ -105,7 +105,7 @@ pub const fn sd_then(a: u8, b: u8) u8 {
 }
 
 /// The edge of a value placed behind `k` references: KEEP, REF, or SAT from two on.
-pub const fn sd_lift(k: u32) u8 {
+pub(package) const fn sd_lift(k: u32) u8 {
     if k == 0 {
         return SD_KEEP;
     }
@@ -116,7 +116,7 @@ pub const fn sd_lift(k: u32) u8 {
 }
 
 /// The edge of a value read from behind `k` references: KEEP, DEREF, or DEREF2 from two on.
-pub const fn sd_sink(k: u32) u8 {
+pub(package) const fn sd_sink(k: u32) u8 {
     if k == 0 {
         return SD_KEEP;
     }
@@ -128,7 +128,7 @@ pub const fn sd_sink(k: u32) u8 {
 
 /// Edge `e` without the `k` levels a store behind `k` references added: a saturated level stays
 /// saturated, and a level below `k` (not lifted by the store) stays at 0.
-pub const fn sd_unlift(e: u8, k: u32) u8 {
+pub(package) const fn sd_unlift(e: u8, k: u32) u8 {
     let mut r: u8 = 0;
     for d in 0..2u32 {
         let x = sd_level(e, d);
@@ -145,7 +145,7 @@ pub const fn sd_unlift(e: u8, k: u32) u8 {
 }
 
 /// Does edge `e` keep level 0 where it is (a copy, or a flow of unknown depth below it)?
-pub const fn sd_keeps(e: u8) bool {
+pub(package) const fn sd_keeps(e: u8) bool {
     return sd_level(e, 0) == 0;
 }
 
@@ -160,51 +160,51 @@ const STATIC_PARAMS_MAX: u32 = 28;
 /// What a call site reads of its callee's signature alone (`Gen::call_sig`), memoized per callee:
 /// call sites re-read the same signatures constantly. A call's own lifetime ties (`call_lt_pairs`)
 /// widen the relation at the site.
-pub struct CallSig {
+pub(package) struct CallSig {
     // 4 | explicit `self` first parameter << 0 | named `free` << 1 | the return has an elided
     // lifetime position << 3; from bit 8, two bits per parameter below STATIC_PARAMS_MAX: the edge
     // its argument takes into `'static` (0 = the type names no `'static`, 1 = the whole value, 2 =
     // what lies behind the parameter's own reference). 0 for a fn-value call.
-    pub fl: u64,
-    pub rel: u64, // the outlives relation (`Owner::callee_rel`)
-    pub rbeh: u64, // the return's tokens behind a reference level (`behind_range`), 0 for no function
-    pub rtok: u64, // the return's lifetime tokens: start << 16 | len in tok_pool
-    pub lts: u64, // bit i: parameter i (below 64) has a lifetime position (`sig_lt`)
+    pub(package) fl: u64,
+    pub(package) rel: u64, // the outlives relation (`Owner::callee_rel`)
+    pub(package) rbeh: u64, // the return's tokens behind a reference level (`behind_range`), 0 for no function
+    pub(package) rtok: u64, // the return's lifetime tokens: start << 16 | len in tok_pool
+    pub(package) lts: u64, // bit i: parameter i (below 64) has a lifetime position (`sig_lt`)
 }
 
 /// An origin subset edge `from: to` established at `point`, of SD_* kind `delta`.
-pub struct SubsetAt {
-    pub from: u32,
-    pub to: u32,
-    pub point: u32,
-    pub delta: u8,
+pub(package) struct SubsetAt {
+    pub(package) from: u32,
+    pub(package) to: u32,
+    pub(package) point: u32,
+    pub(package) delta: u8,
 }
 
 /// A store of origin `from` through the reference whose origin is `via`, at `point`, with the
 /// argument's edge `e` and the edge `te` into a frame-owned container (see `resolve_stores`).
 /// `inner`: the container the store reaches may store the value on through its own references (a
 /// member `member_bounds` marks MB_THROUGH), so the store continues one level from there.
-pub struct StoreVia {
-    pub from: u32,
-    pub via: u32,
-    pub point: u32,
-    pub e: u8,
-    pub te: u8,
-    pub inner: bool,
-    pub more: u8, // reference levels the store passes past the container it reaches (`**p`: one)
+pub(package) struct StoreVia {
+    pub(package) from: u32,
+    pub(package) via: u32,
+    pub(package) point: u32,
+    pub(package) e: u8,
+    pub(package) te: u8,
+    pub(package) inner: bool,
+    pub(package) more: u8, // reference levels the store passes past the container it reaches (`**p`: one)
     // A call through closure `cnode` stores into its captures in `caps` only (`CapTag`); NODE_NONE: all.
-    pub cnode: NodeId,
-    pub caps: u64,
+    pub(package) cnode: NodeId,
+    pub(package) caps: u64,
 }
 
 /// A loan (`loan`) or a copy edge (`from` into `to`, `loan` BF_NONE) that capture `k` of closure
 /// `node` puts into the closure value: a store through the value reaches the capture through it.
-pub struct CapTag {
-    pub loan: u32,
-    pub from: u32,
-    pub to: u32,
-    pub node: NodeId,
-    pub k: u32,
+pub(package) struct CapTag {
+    pub(package) loan: u32,
+    pub(package) from: u32,
+    pub(package) to: u32,
+    pub(package) node: NodeId,
+    pub(package) k: u32,
 }
 
 /// `Owner.interior_memo`'s mark of a declaration whose mask is being computed (a recursive type).
@@ -218,113 +218,113 @@ const MB_THROUGH: u8 = 2;
 /// liveness slot `slot` at `point` of `block`, unless the local is moved out on every path there
 /// (`BodyFacts::drop_use`). `path` is the local's root move path, `access` its storage-death access,
 /// `seen` whether the block defined the slot before the point.
-pub struct DropUse {
-    pub block: u32,
-    pub slot: u32,
-    pub path: u32,
-    pub point: u32,
-    pub access: u32,
-    pub seen: bool,
+pub(package) struct DropUse {
+    pub(package) block: u32,
+    pub(package) slot: u32,
+    pub(package) path: u32,
+    pub(package) point: u32,
+    pub(package) access: u32,
+    pub(package) seen: bool,
 }
 
 /// A loan killed (its storage or reference overwritten) at `point`.
-pub struct KillAt {
-    pub loan: u32,
-    pub point: u32,
+pub(package) struct KillAt {
+    pub(package) loan: u32,
+    pub(package) point: u32,
 }
 
 /// Two arguments of the call at `span` that reach overlapping borrowed storage, at least one of
 /// them mutably: `first` and `second` are their `share` levels (1 shared, 2 mutable), in order.
-pub struct ArgClash {
-    pub span: tok::Span,
-    pub first: u8,
-    pub second: u8,
+pub(package) struct ArgClash {
+    pub(package) span: tok::Span,
+    pub(package) first: u8,
+    pub(package) second: u8,
 }
 
 /// One init/move fact, packed to 16 bytes: replays stream millions of these, so `kind` rides in
 /// `pk`'s top byte over the 24-bit path id (move-path creation checks the id fits).
-pub struct Event {
-    pub pk: u32, // kind << 24 | path; build with `ev()`, read via kind()/path()
-    pub point: u32,
-    pub span: tok::Span,
+pub(package) struct Event {
+    pub(package) pk: u32, // kind << 24 | path; build with `ev()`, read via kind()/path()
+    pub(package) point: u32,
+    pub(package) span: tok::Span,
 }
 
 static_assert(sizeof(Event) == 16, "Event is deliberately packed to a quarter cache line");
 
 /// An init/move event of `kind` on move path `path` (packed into 24 bits) at `point`.
-pub const fn ev(kind: u8, path: u32, point: u32, span: tok::Span) Event {
+pub(package) const fn ev(kind: u8, path: u32, point: u32, span: tok::Span) Event {
     return Event { pk: kind as u32 << 24 | path, point: point, span: span };
 }
 
 extend Event {
     /// The EV_* kind.
-    pub const fn kind(self: &Self) u8 {
+    pub(package) const fn kind(self: &Self) u8 {
         return (self.pk >> 24) as u8;
     }
 
     /// The move path the event is on.
-    pub const fn path(self: &Self) u32 {
+    pub(package) const fn path(self: &Self) u32 {
         return self.pk & 0xFFFFFF;
     }
 }
 
 /// Every fact the loan and move analyses read for one body: points, loans, accesses, origin
 /// subsets, kills, and init/move events, all in Core IR order.
-pub struct BodyFacts {
-    pub npoints: u32,
-    pub nmoves: u32, // move/move-cut events in the body: 0 (with no split-init decl) skips MoveFlow
-    pub block_base: Vector<u32>, // per block: first point (2 per statement + 2 for the terminator)
-    pub norigins: u32,
-    pub nuniversal: u32, // origins [0, nuniversal): 0 = 'static, then per-arg/declared placeholders
-    pub local_origin: Vector<u32>, // per local: its origin, or BF_NONE (type carries no borrow)
-    pub origin_local: Vector<u32>, // per origin: the owning local (BF_NONE for placeholders)
-    pub uni_name: Vector<tok::Span>, // per universal origin: declared lifetime name (empty = elided)
-    pub named: Vector<u64>, // `origin << 32 | universal`: a closure value naming that lifetime holds it
-    pub arg_universal: Vector<u32>, // per local: seeded placeholder, or BF_NONE
-    pub ret_origin: Vector<u32>, // per return slot: placeholder origin
-    pub loans: Vector<Loan>,
-    pub origin_loans: Vector<u32>, // per origin: its newest loan, or BF_NONE; older ones chain by loan_next
-    pub loan_next: Vector<u32>, // per loan: the next older loan of the same origin, or BF_NONE
-    pub subsets: Vector<SubsetAt>,
-    pub accesses: Vector<Access>,
-    pub kills: Vector<KillAt>,
-    pub clashes: Vector<ArgClash>,
-    pub events: Vector<Event>,
-    pub ev_start: Vector<u32>, // per block: first event (+ one sentinel entry at the end)
+pub(package) struct BodyFacts {
+    pub(package) npoints: u32,
+    pub(package) nmoves: u32, // move/move-cut events in the body: 0 (with no split-init decl) skips MoveFlow
+    pub(package) block_base: Vector<u32>, // per block: first point (2 per statement + 2 for the terminator)
+    pub(package) norigins: u32,
+    pub(package) nuniversal: u32, // origins [0, nuniversal): 0 = 'static, then per-arg/declared placeholders
+    pub(package) local_origin: Vector<u32>, // per local: its origin, or BF_NONE (type carries no borrow)
+    pub(package) origin_local: Vector<u32>, // per origin: the owning local (BF_NONE for placeholders)
+    pub(package) uni_name: Vector<tok::Span>, // per universal origin: declared lifetime name (empty = elided)
+    pub(package) named: Vector<u64>, // `origin << 32 | universal`: a closure value naming that lifetime holds it
+    pub(package) arg_universal: Vector<u32>, // per local: seeded placeholder, or BF_NONE
+    pub(package) ret_origin: Vector<u32>, // per return slot: placeholder origin
+    pub(package) loans: Vector<Loan>,
+    pub(package) origin_loans: Vector<u32>, // per origin: its newest loan, or BF_NONE; older ones chain by loan_next
+    pub(package) loan_next: Vector<u32>, // per loan: the next older loan of the same origin, or BF_NONE
+    pub(package) subsets: Vector<SubsetAt>,
+    pub(package) accesses: Vector<Access>,
+    pub(package) kills: Vector<KillAt>,
+    pub(package) clashes: Vector<ArgClash>,
+    pub(package) events: Vector<Event>,
+    pub(package) ev_start: Vector<u32>, // per block: first event (+ one sentinel entry at the end)
     // The state-CHANGING events only (assign/dead/move), same order and block ranges: the move/init
     // fixpoint's silent replays stream these, skipping the read events that dominate the full list.
     // A block with no entry here has an identity transfer even when it is full of reads.
-    pub mev: Vector<Event>,
-    pub mev_start: Vector<u32>,
-    pub rep_blk: Vector<bool>, // per block: any USE/MOVE/MOVE_CUT event (the reporting replay can say something)
-    pub easy_blk: Vector<bool>, // per block: only assign/root-leaf-use events, so a clean entry state cannot error
-    pub easy_use: Vector<u64>, // per block x ewords: root-leaf paths the block USES (easy-block clearance mask)
-    pub freed: Vector<u32>, // move paths consumed by an explicit `.free()` (wording refinement)
-    pub observed: Vector<bool>, // per local: owned carrier whose destruction observes stored borrows
-    pub cuts: Vector<u64>, // origin << 32 | stmt entry: whole-local rebind severs earlier flows there
-    pub ewords: u32, // easy_use row width (ceil(nlocals/64))
+    pub(package) mev: Vector<Event>,
+    pub(package) mev_start: Vector<u32>,
+    pub(package) rep_blk: Vector<bool>, // per block: any USE/MOVE/MOVE_CUT event (the reporting replay can say something)
+    pub(package) easy_blk: Vector<bool>, // per block: only assign/root-leaf-use events, so a clean entry state cannot error
+    pub(package) easy_use: Vector<u64>, // per block x ewords: root-leaf paths the block USES (easy-block clearance mask)
+    pub(package) freed: Vector<u32>, // move paths consumed by an explicit `.free()` (wording refinement)
+    pub(package) observed: Vector<bool>, // per local: owned carrier whose destruction observes stored borrows
+    pub(package) cuts: Vector<u64>, // origin << 32 | stmt entry: whole-local rebind severs earlier flows there
+    pub(package) ewords: u32, // easy_use row width (ceil(nlocals/64))
     // Liveness slots: the locals, then one per closure local whose destruction observes what its
     // owned captures hold (`drop_slot`): its drop origin is live where that destruction is.
-    pub nlive: u32,
-    pub drop_slot: Vector<u32>, // per local: its drop origin's liveness slot, or BF_NONE
-    pub drop_origin: Vector<u32>, // per local: its drop origin, or BF_NONE
-    pub lwords: u32, // liveness row width (ceil(nlive/64))
-    pub luse: Vector<u64>, // per block: liveness slots read before any full definition
-    pub ldef: Vector<u64>, // per block: locals fully defined
-    pub drop_uses: Vector<DropUse>, // the destructions of observed locals, applied by `drop_use`
-    pub dead_free: Vector<u32>, // ascending: storage-death accesses whose local is moved out there
+    pub(package) nlive: u32,
+    pub(package) drop_slot: Vector<u32>, // per local: its drop origin's liveness slot, or BF_NONE
+    pub(package) drop_origin: Vector<u32>, // per local: its drop origin, or BF_NONE
+    pub(package) lwords: u32, // liveness row width (ceil(nlive/64))
+    pub(package) luse: Vector<u64>, // per block: liveness slots read before any full definition
+    pub(package) ldef: Vector<u64>, // per block: locals fully defined
+    pub(package) drop_uses: Vector<DropUse>, // the destructions of observed locals, applied by `drop_use`
+    pub(package) dead_free: Vector<u32>, // ascending: storage-death accesses whose local is moved out there
 }
 
 // One substitution entry for member walks under a generic instance: parameter decl -> the argument
 // as a (module, TypeId) pair in the QUERYING pool, read under the frame `[f0, f1)` of `Owner.subst`
 // that was active where the instance was named (its arguments may name outer parameters).
 struct OwnSubst {
-    pub pmod: ModuleId,
-    pub pdecl: NodeId,
-    pub amod: ModuleId,
-    pub aty: TypeId,
-    pub f0: u32,
-    pub f1: u32,
+    pub(package) pmod: ModuleId,
+    pub(package) pdecl: NodeId,
+    pub(package) amod: ModuleId,
+    pub(package) aty: TypeId,
+    pub(package) f0: u32,
+    pub(package) f1: u32,
 }
 
 // Owner walk bounds: `low` sentinels (see Owner::busy_enter) and the recursion depth cap.
@@ -339,11 +339,11 @@ const COPY_CLOSURE_MAX: usize = 16;
 /// mirrors the emitter's Free verdicts (explicit conformance, bound-filtered generic conformance,
 /// member-derived ownership); `carries` says whether a value of the type can HOLD a tracked borrow
 /// (references, and aggregates/closures embedding them). Raw pointers never count for either.
-pub struct Owner {
-    pub pkg: *const loader::Package,
-    pub slice_mut: DefId, // the prelude's `[]mut T` struct: a value of it passes write access
-    pub slice: DefId, // the prelude's `[]T` struct
-    pub str_def: DefId, // the prelude's `str` struct
+pub(package) struct Owner {
+    pub(package) pkg: *const loader::Package,
+    pub(package) slice_mut: DefId, // the prelude's `[]mut T` struct: a value of it passes write access
+    pub(package) slice: DefId, // the prelude's `[]T` struct
+    pub(package) str_def: DefId, // the prelude's `str` struct
     free_ext: Map<u64, u64>, // (tmod << 32 | tdecl) -> extend (emod << 32 | enode) + 1; absent = none
     ext_built: bool,
     // Owns/carries are pure functions of (mid, ty) on concrete types, and type ids are dense per
@@ -360,47 +360,47 @@ pub struct Owner {
     subst: Vector<OwnSubst>,
     tys: Vector<TypeId>,
     // Per-callee and per-type-node caches: call boundaries re-read the same signatures constantly.
-    pub call_sigs: Map<u64, CallSig>, // (mod << 32 | node) -> its signature summary
-    pub gen_sigs: Map<u64, TypeId>, // generic parameter or closure (mod << 32 | node) -> its function type
-    pub gen_cls: Map<u64, u64>, // closure (mod << 32 | node) -> its classes, start << 16 | len in gen_cls_pool
-    pub gen_cls_pool: Vector<u8>,
+    pub(package) call_sigs: Map<u64, CallSig>, // (mod << 32 | node) -> its signature summary
+    pub(package) gen_sigs: Map<u64, TypeId>, // generic parameter or closure (mod << 32 | node) -> its function type
+    pub(package) gen_cls: Map<u64, u64>, // closure (mod << 32 | node) -> its classes, start << 16 | len in gen_cls_pool
+    pub(package) gen_cls_pool: Vector<u8>,
     // Closure (mod << 32 | node) -> start << 16 | len in cap_reach_pool: per parameter, the captures
     // (bit k) its argument may be stored into (`bc_closure_escape`).
-    pub cap_reach: Map<u64, u64>,
-    pub cap_reach_pool: Vector<u64>,
+    pub(package) cap_reach: Map<u64, u64>,
+    pub(package) cap_reach_pool: Vector<u64>,
     // Closure (mod << 32 | node) -> the captures (bit k) whose contents its destruction may read:
     // the ones it owns whose destruction observes borrows, and what its body stores into them.
-    pub cap_keep: Map<u64, u64>,
+    pub(package) cap_keep: Map<u64, u64>,
     // Closure (mod << 32 | node) -> true when its results hold only what lies behind its
     // by-reference captures: no loan on a capture's own storage, nothing a by-value capture holds
     // (`bc_closure_result`). Absent: unknown.
-    pub res_deep: Map<u64, bool>,
-    pub kinds_memo: Map<u64, u64>, // (mod << 32 | node) -> start << 16 | len into kinds_pool
-    pub kinds_pool: Vector<u8>,
-    pub tok_memo: Map<u64, u64>, // (mod << 32 | type node) -> start << 16 | len into tok_pool
-    pub beh_memo: Map<u64, u64>, // the same key, or a callee's -> its behind-reference tokens in tok_pool
-    pub tok_pool: Vector<u64>,
+    pub(package) res_deep: Map<u64, bool>,
+    pub(package) kinds_memo: Map<u64, u64>, // (mod << 32 | node) -> start << 16 | len into kinds_pool
+    pub(package) kinds_pool: Vector<u8>,
+    pub(package) tok_memo: Map<u64, u64>, // (mod << 32 | type node) -> start << 16 | len into tok_pool
+    pub(package) beh_memo: Map<u64, u64>, // the same key, or a callee's -> its behind-reference tokens in tok_pool
+    pub(package) tok_pool: Vector<u64>,
     rel_memo: Map<u64, u64>, // a function's or declaration's key -> its outlives pairs in rel_pool (see callee_rel)
     rel_pool: Vector<u64>,
     // Gen scratch (capacity survives across bodies).
     sc_assign_sites: Vector<KillSite>,
     sc_seen: Vector<u64>,
     // Per-call and per-body scratch of the fact walk (taken and handed back, capacity kept).
-    pub sc_kinds: Vector<u8>,
-    pub sc_ptyn: Vector<NodeId>,
-    pub sc_tys: Vector<TypeId>,
-    pub sc_lb_start: Vector<u32>,
-    pub sc_lb_flat: Vector<u32>,
-    pub sc_curp: Vector<u32>,
-    pub sc_tok_a: Vector<u64>, // lifetime-token scratch: the outer (parameter/return) side
-    pub sc_tok_b: Vector<u64>, // the inner (argument) side
-    pub sc_tok_r: Vector<u64>, // the return's tokens, read across a call's arguments
-    pub sc_tok_c: Vector<u64>, // a store's walk down a parameter's `&mut` levels (`store_more`)
-    pub sc_stat: Vector<u64>, // the tokens a declaration or a callee's signature makes `'static`
-    pub sc_stores: Vector<StoreVia>, // the walk's stores through reference arguments
-    pub sc_visit: Vector<u64>, // resolve_stores: visited origins (bits)
-    pub sc_ties: Vector<u64>,
-    pub sc_istores: Vector<StoreVia>,
+    pub(package) sc_kinds: Vector<u8>,
+    pub(package) sc_ptyn: Vector<NodeId>,
+    pub(package) sc_tys: Vector<TypeId>,
+    pub(package) sc_lb_start: Vector<u32>,
+    pub(package) sc_lb_flat: Vector<u32>,
+    pub(package) sc_curp: Vector<u32>,
+    pub(package) sc_tok_a: Vector<u64>, // lifetime-token scratch: the outer (parameter/return) side
+    pub(package) sc_tok_b: Vector<u64>, // the inner (argument) side
+    pub(package) sc_tok_r: Vector<u64>, // the return's tokens, read across a call's arguments
+    pub(package) sc_tok_c: Vector<u64>, // a store's walk down a parameter's `&mut` levels (`store_more`)
+    pub(package) sc_stat: Vector<u64>, // the tokens a declaration or a callee's signature makes `'static`
+    pub(package) sc_stores: Vector<StoreVia>, // the walk's stores through reference arguments
+    pub(package) sc_visit: Vector<u64>, // resolve_stores: visited origins (bits)
+    pub(package) sc_ties: Vector<u64>,
+    pub(package) sc_istores: Vector<StoreVia>,
     unsafe_cell: DefId, // the prelude's `UnsafeCell`: what a shared reference may write through
     interior_memo: Map<u64, u64>, // (mod << 32 | decl) -> `interior_mask` (INTERIOR_BUSY while computed)
     cell_memo: Map<u64, bool>, // (mod << 32 | decl) -> `decl_has_cell` (false while computed)
@@ -425,7 +425,7 @@ fn cache_set(arr: &mut Vector<Vector<u64>>, mid: ModuleId, ty: TypeId, r: bool) 
 
 /// Bucket `loans` by their place's base local (counting sort): the loans on local `l` are
 /// `flat[start[l]..start[l + 1]]`, in ascending loan id. `cur` is scratch.
-pub fn bucket_loans_by_base(
+pub(package) fn bucket_loans_by_base(
     b: &ir::CoreBody,
     loans: &Vector<Loan>,
     start: &mut Vector<u32>,
@@ -511,47 +511,47 @@ const fn tokens_meet(a: &Vector<u64>, b: &Vector<u64>) bool {
 /// One statement-order walk of a verified body. Reads happen at a statement's entry point, writes,
 /// loan issues, and kills at its exit point, so an assignment's own read never conflicts with the
 /// loan or kill it produces.
-pub struct Gen {
-    pub ow: *mut Owner,
-    pub b: *const ir::CoreBody,
-    pub mf: *const mp::MoveForest,
-    pub f: BodyFacts,
-    pub assign_sites: Vector<KillSite>, // every overwrite, paired against loans for kills afterwards
-    pub cur_block: u32,
-    pub in_caps: bool, // reading closure-capture operands: owned moves record ACC_CAP
-    pub calling: bool, // reading a callee-position operand: calling borrows the env, never moves it
-    pub plain_copy: bool, // reading an RV_USE operand: a `&mut` place copy consumes the binding
-    pub no_drop: bool, // a flow into a closure value that its destruction never reads (`drop_origin`)
-    pub copy_out: bool, // reading a call argument whose value holds no borrow
-    pub loans: bool, // record origins, loans, accesses, subsets, kills and liveness rows (else moves only)
-    pub seen: Vector<u64>, // per-block first-touch words for luse/ldef construction
-    pub stores: Vector<StoreVia>, // stores through reference arguments, resolved after the walk
+pub(package) struct Gen {
+    pub(package) ow: *mut Owner,
+    pub(package) b: *const ir::CoreBody,
+    pub(package) mf: *const mp::MoveForest,
+    pub(package) f: BodyFacts,
+    pub(package) assign_sites: Vector<KillSite>, // every overwrite, paired against loans for kills afterwards
+    pub(package) cur_block: u32,
+    pub(package) in_caps: bool, // reading closure-capture operands: owned moves record ACC_CAP
+    pub(package) calling: bool, // reading a callee-position operand: calling borrows the env, never moves it
+    pub(package) plain_copy: bool, // reading an RV_USE operand: a `&mut` place copy consumes the binding
+    pub(package) no_drop: bool, // a flow into a closure value that its destruction never reads (`drop_origin`)
+    pub(package) copy_out: bool, // reading a call argument whose value holds no borrow
+    pub(package) loans: bool, // record origins, loans, accesses, subsets, kills and liveness rows (else moves only)
+    pub(package) seen: Vector<u64>, // per-block first-touch words for luse/ldef construction
+    pub(package) stores: Vector<StoreVia>, // stores through reference arguments, resolved after the walk
     // Invariant ties (`a << 32 | b` origins) between values that share an interior type argument
     // (`let tx = ch.sender()`), and the stores into such values (`tx.send(x)`), resolved after the walk.
-    pub ties: Vector<u64>,
-    pub istores: Vector<StoreVia>,
+    pub(package) ties: Vector<u64>,
+    pub(package) istores: Vector<StoreVia>,
     // Per origin: the placeholder of the closure capture the origin belongs to when the closure
     // captures it by reference (its writes land in the enclosing frame's binding), else BF_NONE.
-    pub cap_ph: Vector<u32>,
-    pub cap_tags: Vector<CapTag>, // what each closure creation's captures put into the closure value
-    pub ext: NodeId, // the extend of the callee whose signature the type walks read (`unself`)
-    pub ext_mod: ModuleId,
-    pub rel: u64, // the outlives relation of the callee under walk (`Owner::callee_rel`; 0: none)
+    pub(package) cap_ph: Vector<u32>,
+    pub(package) cap_tags: Vector<CapTag>, // what each closure creation's captures put into the closure value
+    pub(package) ext: NodeId, // the extend of the callee whose signature the type walks read (`unself`)
+    pub(package) ext_mod: ModuleId,
+    pub(package) rel: u64, // the outlives relation of the callee under walk (`Owner::callee_rel`; 0: none)
     // The statement's flows into a destination behind references: subset index << 8 | the edge
     // before the store's lift (`flow_into`, read by `store_through`).
-    pub pre_v: Vector<u64>,
+    pub(package) pre_v: Vector<u64>,
 }
 
 /// One overwrite site for kill pairing: a place, or a whole local from a storage marker.
-pub struct KillSite {
-    pub place: ir::PlaceId, // BF_NONE for a whole-local site
-    pub local: u32, // BF_NONE for a place site
-    pub point: u32,
+pub(package) struct KillSite {
+    pub(package) place: ir::PlaceId, // BF_NONE for a whole-local site
+    pub(package) local: u32, // BF_NONE for a place site
+    pub(package) point: u32,
 }
 
 extend BodyFacts {
     /// Facts with no body and no heap storage; `generate_into` fills them.
-    pub fn empty() BodyFacts {
+    pub(package) fn empty() BodyFacts {
         return BodyFacts {
             npoints: 0,
             nmoves: 0,
@@ -594,13 +594,13 @@ extend BodyFacts {
     }
 
     /// Heap bytes kept across bodies (capacity, not length).
-    pub const fn scratch_bytes(self: &Self) u64 {
+    pub(package) const fn scratch_bytes(self: &Self) u64 {
         return (self.block_base.capacity() * sizeof(u32) + self.local_origin.capacity() * sizeof(u32) + self.origin_local.capacity() * sizeof(u32) + self.uni_name.capacity() * sizeof(tok::Span) + self.named.capacity() * sizeof(u64) + self.arg_universal.capacity() * sizeof(u32) + self.ret_origin.capacity() * sizeof(u32) + self.loans.capacity() * sizeof(Loan) + (self.origin_loans.capacity() + self.loan_next.capacity()) * sizeof(u32) + self.subsets.capacity() * sizeof(SubsetAt) + self.accesses.capacity() * sizeof(Access) + self.kills.capacity() * sizeof(KillAt) + self.clashes.capacity() * sizeof(ArgClash) + self.events.capacity() * sizeof(Event) + self.ev_start.capacity() * sizeof(u32) + self.mev.capacity() * sizeof(Event) + self.mev_start.capacity() * sizeof(u32) + self.rep_blk.capacity() * sizeof(bool) + self.easy_blk.capacity() * sizeof(bool) + self.easy_use.capacity() * sizeof(u64) + self.freed.capacity() * sizeof(u32) + self.observed.capacity() * sizeof(bool) + (self.drop_slot.capacity() + self.drop_origin.capacity()) * sizeof(u32) + self.cuts.capacity() * sizeof(u64) + self.luse.capacity() * sizeof(u64) + self.ldef.capacity() * sizeof(u64) + self.drop_uses.capacity() * sizeof(DropUse) + self.dead_free.capacity() * sizeof(u32)) as u64;
     }
 
     /// Apply destruction `i` (`drop_uses`): when the local may hold a value there (`runs`), its slot
     /// is used at the point; else its storage-death access observes nothing (`dead_free`).
-    pub fn drop_use(self: &mut Self, i: usize, runs: bool) {
+    pub(package) fn drop_use(self: &mut Self, i: usize, runs: bool) {
         let du = *self.drop_uses.at(i);
         if !runs {
             self.dead_free.push(du.access);
@@ -613,7 +613,7 @@ extend BodyFacts {
     }
 
     /// Truncate every vector (keeping heap capacity) and clear scalars, for reuse across bodies.
-    pub fn reset(self: &mut Self) {
+    pub(package) fn reset(self: &mut Self) {
         self.npoints = 0;
         self.nmoves = 0;
         self.norigins = 0;
@@ -5077,7 +5077,7 @@ extend Gen {
 
 /// May accesses of `a` and `b` touch overlapping storage? Same base local, and neither path proves
 /// disjointness (differing fields, variants, or constant indexes) before one ends.
-pub const fn places_conflict(b: &ir::CoreBody, a: ir::PlaceId, c: ir::PlaceId) bool {
+pub(package) const fn places_conflict(b: &ir::CoreBody, a: ir::PlaceId, c: ir::PlaceId) bool {
     let pa = *b.places.at(a as usize);
     let pc = *b.places.at(c as usize);
     if pa.base != pc.base {
@@ -5116,7 +5116,7 @@ pub const fn places_conflict(b: &ir::CoreBody, a: ir::PlaceId, c: ir::PlaceId) b
 
 extend Owner {
     /// An ownership oracle over `pkg` (which must outlive it) with empty memo tables.
-    pub fn new(pkg: *const loader::Package) Owner {
+    pub(package) fn new(pkg: *const loader::Package) Owner {
         let sm = unsafe (&*pkg).prelude_lookup("SliceMut", true);
         let sl = unsafe (&*pkg).prelude_lookup("Slice", true);
         let ss = unsafe (&*pkg).prelude_lookup("str", true);
@@ -5179,7 +5179,7 @@ extend Owner {
     }
 
     /// Module `m`'s frozen AST (types are read through it).
-    pub const fn ast_of(self: &Self, m: ModuleId) &Ast {
+    pub(package) const fn ast_of(self: &Self, m: ModuleId) &Ast {
         return unsafe &*self.p().module_ast_const(m);
     }
 
@@ -5188,7 +5188,7 @@ extend Owner {
         return s;
     }
 
-    pub const fn span_text_is(self: &Self, m: ModuleId, sp: tok::Span, what: str) bool {
+    pub(package) const fn span_text_is(self: &Self, m: ModuleId, sp: tok::Span, what: str) bool {
         let s = self.src_of(m);
         if sp.end <= sp.start || sp.end as usize > s.len() {
             return false;
@@ -5211,7 +5211,7 @@ extend Owner {
     /// Does function `callee` take a `&'static` parameter (or a reference whose lifetime its signature
     /// declares or implies to outlive `'static`)? An implicit autoref passed to one borrows for the
     /// whole program.
-    pub fn takes_static_ref(self: &mut Self, callee: DefId) bool {
+    pub(package) fn takes_static_ref(self: &mut Self, callee: DefId) bool {
         let rel = self.callee_rel(callee);
         let mut stat = replace(&mut self.sc_stat, Vector::<u64>::new());
         self.rel_static(rel, &mut stat);
@@ -5236,7 +5236,7 @@ extend Owner {
 
     /// The token of lifetime node `lt` of module `m`, a use or a declaration: its name's hash with bit
     /// 63 set, 0 when elided (absent or `'_`). Equal names give equal tokens in every module.
-    pub fn lt_tok(self: &Self, m: ModuleId, lt: NodeId) u64 {
+    pub(package) fn lt_tok(self: &Self, m: ModuleId, lt: NodeId) u64 {
         let sp = self.lt_name(self.ast_of(m), lt);
         if sp.end <= sp.start || self.span_text_is(m, sp, "'_") {
             return 0;
@@ -5249,7 +5249,7 @@ extend Owner {
     /// extend's lifetime parameters, its `where` predicates, and the bounds its parameter types and
     /// its extend's target imply through the declarations they name (`S<'x>` of `struct S<'a:
     /// 'static>` gives `'x: 'static`). Memoized: call sites re-read the same signatures.
-    pub fn callee_rel(self: &mut Self, callee: DefId) u64 {
+    pub(package) fn callee_rel(self: &mut Self, callee: DefId) u64 {
         if callee.node == NODE_NONE {
             return 0;
         }
@@ -5269,7 +5269,7 @@ extend Owner {
 
     /// The outlives relation among the lifetime parameters of struct or enum `d`, as `callee_rel`
     /// gives it.
-    pub fn decl_rel(self: &mut Self, d: DefId) u64 {
+    pub(package) fn decl_rel(self: &mut Self, d: DefId) u64 {
         let key = skey_mix(skey_mix(0, d.module as u64 << 32 | d.node as u64), 2);
         switch self.rel_memo.get(&key) {
             Some(v) => {
@@ -5410,7 +5410,7 @@ extend Owner {
     /// outlives one when `up`, else each token one outlives.
     /// Relation `rel` with the (sup, sub) token pairs `extra` added, those of `tc::lt_class_tok`
     /// aside.
-    pub fn rel_extend(self: &mut Self, rel: u64, extra: &Vector<u64>) u64 {
+    pub(package) fn rel_extend(self: &mut Self, rel: u64, extra: &Vector<u64>) u64 {
         let st = (rel >> 16) as usize;
         let n = (rel & 0xFFFF) as usize;
         let start = self.rel_pool.len();
@@ -5427,7 +5427,7 @@ extend Owner {
         return start as u64 << 16 | ((self.rel_pool.len() - start) / 2) as u64;
     }
 
-    pub fn rel_widen(self: &Self, rel: u64, up: bool, toks: &mut Vector<u64>) {
+    pub(package) fn rel_widen(self: &Self, rel: u64, up: bool, toks: &mut Vector<u64>) {
         let st = (rel >> 16) as usize;
         let n = (rel & 0xFFFF) as usize;
         if n == 0 || toks.len() == 0 {
@@ -5454,14 +5454,14 @@ extend Owner {
 
     /// The tokens relation `rel` makes `'static` into `out`: `'static` and each token declared or
     /// implied to outlive it.
-    pub fn rel_static(self: &Self, rel: u64, out: &mut Vector<u64>) {
+    pub(package) fn rel_static(self: &Self, rel: u64, out: &mut Vector<u64>) {
         out.truncate(0);
         out.push(static_tok());
         self.rel_widen(rel, true, out);
     }
 
     /// Does relation `rel` declare a lifetime to outlive another lifetime than `'static`?
-    pub const fn rel_sup_any(self: &Self, rel: u64) bool {
+    pub(package) const fn rel_sup_any(self: &Self, rel: u64) bool {
         let st = (rel >> 16) as usize;
         let stt = static_tok();
         for i in 0..(rel & 0xFFFF) as usize {
@@ -5473,7 +5473,7 @@ extend Owner {
     }
 
     /// Does relation `rel` declare a lifetime of `toks` to outlive another lifetime than `'static`?
-    pub const fn rel_sup_in(self: &Self, rel: u64, toks: &Vector<u64>) bool {
+    pub(package) const fn rel_sup_in(self: &Self, rel: u64, toks: &Vector<u64>) bool {
         let st = (rel >> 16) as usize;
         let stt = static_tok();
         for i in 0..(rel & 0xFFFF) as usize {
@@ -5674,14 +5674,14 @@ extend Owner {
     /// `at`? The body decides which `where` bounds apply to a type parameter.
     /// The captures of closure `node` (module `m`) its destruction may read (`cap_keep`); all when
     /// its body was not analyzed.
-    pub fn cap_keep_of(self: &Self, m: ModuleId, node: NodeId) u64 {
+    pub(package) fn cap_keep_of(self: &Self, m: ModuleId, node: NodeId) u64 {
         return switch self.cap_keep.get(&(m as u64 << 32 | node as u64)) {
             Some(v) => *v,
             None => 0xFFFFFFFFFFFFFFFFu64,
         };
     }
 
-    pub fn owns(self: &mut Self, at: DefId, mid: ModuleId, ty: TypeId) bool {
+    pub(package) fn owns(self: &mut Self, at: DefId, mid: ModuleId, ty: TypeId) bool {
         self.low = BUSY_NONE;
         self.at = at;
         return self.owns_f(mid, ty, 0, 0, 0);
@@ -5914,7 +5914,7 @@ extend Owner {
 
     /// The field declarations and member types of a struct (or struct instance) value; false for
     /// every other shape. Types are the OWNER module's recorded member types (`om`).
-    pub fn agg_fields(
+    pub(package) fn agg_fields(
         self: &mut Self,
         mid: ModuleId,
         ty: TypeId,
@@ -5969,7 +5969,7 @@ extend Owner {
     /// `Free` can read through them: derived destruction frees owned members and never reads a
     /// reference. So a carrying type observes when it has an explicit conformance or a member does
     /// (for an instance: a type argument or a concrete member). Other kinds answer yes.
-    pub fn observes(self: &mut Self, mid: ModuleId, ty: TypeId) bool {
+    pub(package) fn observes(self: &mut Self, mid: ModuleId, ty: TypeId) bool {
         return self.observes_f(mid, ty, 0);
     }
 
@@ -6066,7 +6066,7 @@ extend Owner {
 
     /// Set `forest.covered` for every path of body module `mid` whose struct or tuple type has a
     /// tracked child for each member. Enums, unions and every other kind stay unset.
-    pub fn mark_covered(self: &Self, mid: ModuleId, forest: &mut mp::MoveForest) {
+    pub(package) fn mark_covered(self: &Self, mid: ModuleId, forest: &mut mp::MoveForest) {
         for p in 0..forest.paths.len() {
             let ty = forest.paths.at(p).ty;
             if forest.is_leaf(p as u32) || ty == TYPE_NONE {
@@ -6114,7 +6114,7 @@ extend Owner {
     /// The generic parameters of aggregate `(m, decl)` that reach an `UnsafeCell` through its fields
     /// (directly, behind pointers or references, or as an argument another aggregate keeps interior):
     /// a shared reference to such a value can store values of those parameters. Bit i: parameter i.
-    pub fn interior_mask(self: &mut Self, m: ModuleId, decl: NodeId, depth: u32) u64 {
+    pub(package) fn interior_mask(self: &mut Self, m: ModuleId, decl: NodeId, depth: u32) u64 {
         if decl == NODE_NONE || depth > 6 {
             return 0;
         }
@@ -6148,7 +6148,7 @@ extend Owner {
     /// Does a field or variant payload of declaration `(m, decl)`, through its declared types,
     /// reach an `UnsafeCell` (its own type parameters aside: their arguments decide)? A recursive
     /// type adds no cell by recursing.
-    pub fn decl_has_cell(self: &mut Self, m: ModuleId, decl: NodeId, depth: u32) bool {
+    pub(package) fn decl_has_cell(self: &mut Self, m: ModuleId, decl: NodeId, depth: u32) bool {
         if decl == NODE_NONE {
             return false;
         }
@@ -6311,7 +6311,7 @@ extend Owner {
         return r;
     }
 
-    pub fn carries(self: &mut Self, mid: ModuleId, ty: TypeId) bool {
+    pub(package) fn carries(self: &mut Self, mid: ModuleId, ty: TypeId) bool {
         self.low = BUSY_NONE;
         return self.carries_f(mid, ty, 0);
     }
@@ -6442,7 +6442,7 @@ extend Owner {
     }
 
     /// The facts of body `b` over move forest `mf`, freshly allocated.
-    pub fn generate(self: &mut Self, b: &ir::CoreBody, mf: &mp::MoveForest) BodyFacts {
+    pub(package) fn generate(self: &mut Self, b: &ir::CoreBody, mf: &mp::MoveForest) BodyFacts {
         let mut f = BodyFacts::empty();
         self.generate_into(b, mf, &mut f, true);
         return f;
@@ -6453,7 +6453,13 @@ extend Owner {
     /// With `loans` false only the move/init facts are produced (events, their block ranges and the
     /// easy-block masks): origins, loans, accesses, subsets, kills and the liveness rows stay empty.
     /// That is all drop elaboration reads, and all a body the loan-skip predicate cleared needs.
-    pub fn generate_into(self: &mut Self, b: &ir::CoreBody, mf: &mp::MoveForest, dst: &mut BodyFacts, loans: bool) {
+    pub(package) fn generate_into(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        mf: &mp::MoveForest,
+        dst: &mut BodyFacts,
+        loans: bool,
+    ) {
         dst.reset();
         let mut sites = replace(&mut self.sc_assign_sites, Vector::<KillSite>::new());
         sites.truncate(0);

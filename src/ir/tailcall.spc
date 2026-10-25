@@ -21,43 +21,43 @@ import module::loader as loader;
 import borrowck::facts as bfx;
 
 /// Why a call of the body's function to itself stays a call (`TailMiss.reason`).
-pub const TR_NOT_TAIL: u8 = 1; // the result is not returned as it is
-pub const TR_DROP: u8 = 2; // `local` is dropped after the call returns
-pub const TR_AFTER: u8 = 3; // the statement at `at` runs after the call returns
-pub const TR_INSTANCE: u8 = 4; // the call may reach another instance of the function
-pub const TR_ADJUST: u8 = 5; // argument `arg` has another type than its parameter
-pub const TR_BORROW: u8 = 6; // argument `arg` may hold a borrow of `local`, which the jump overwrites
-pub const TR_ADDRESS: u8 = 7; // a raw address of `local` exists: it could be read after the call
-pub const TR_CANCEL: u8 = 8; // the call can accept a task cancellation: its check runs after it
+pub(package) const TR_NOT_TAIL: u8 = 1; // the result is not returned as it is
+pub(package) const TR_DROP: u8 = 2; // `local` is dropped after the call returns
+pub(package) const TR_AFTER: u8 = 3; // the statement at `at` runs after the call returns
+pub(package) const TR_INSTANCE: u8 = 4; // the call may reach another instance of the function
+pub(package) const TR_ADJUST: u8 = 5; // argument `arg` has another type than its parameter
+pub(package) const TR_BORROW: u8 = 6; // argument `arg` may hold a borrow of `local`, which the jump overwrites
+pub(package) const TR_ADDRESS: u8 = 7; // a raw address of `local` exists: it could be read after the call
+pub(package) const TR_CANCEL: u8 = 8; // the call can accept a task cancellation: its check runs after it
 // The call never runs: an argument diverges (internal, never a miss).
 const TR_DEAD: u8 = 255;
 
 /// A frame local the analysis cannot name (`TailMiss.local`).
-pub const LOCAL_UNKNOWN: u32 = 0xFFFFFFFE;
+pub(package) const LOCAL_UNKNOWN: u32 = 0xFFFFFFFE;
 
 /// One call of the body's function to itself that the pass leaves a call.
-pub struct TailMiss {
-    pub span: tok::Span, // the call
-    pub at: tok::Span, // TR_AFTER, TR_DROP: what runs after the call
-    pub local: u32, // TR_DROP, TR_BORROW, TR_ADDRESS: the local, or LOCAL_UNKNOWN
-    pub arg: u32, // TR_ADJUST, TR_BORROW: the argument index
-    pub reason: u8,
+pub(package) struct TailMiss {
+    pub(package) span: tok::Span, // the call
+    pub(package) at: tok::Span, // TR_AFTER, TR_DROP: what runs after the call
+    pub(package) local: u32, // TR_DROP, TR_BORROW, TR_ADDRESS: the local, or LOCAL_UNKNOWN
+    pub(package) arg: u32, // TR_ADJUST, TR_BORROW: the argument index
+    pub(package) reason: u8,
 }
 
 // The taint of the frame over one body, flow-insensitive: which locals may hold a borrow of frame
 // storage (a local, an argument or a temporary of this call), which locals have their storage
 // borrowed, and whether a raw address of frame storage exists.
 struct Taint {
-    pub on: Vector<bool>,
-    pub src: Vector<u32>, // per tainted local: the frame local it may borrow, or LOCAL_UNKNOWN
-    pub addr: Vector<bool>,
-    pub raw: u32, // the frame local whose raw address exists, LOCAL_UNKNOWN, or IR_NONE: none
+    pub(package) on: Vector<bool>,
+    pub(package) src: Vector<u32>, // per tainted local: the frame local it may borrow, or LOCAL_UNKNOWN
+    pub(package) addr: Vector<bool>,
+    pub(package) raw: u32, // the frame local whose raw address exists, LOCAL_UNKNOWN, or IR_NONE: none
 }
 
 /// Convert every call of `b`'s function to itself that a jump can replace (see the module comment);
 /// every other one that can run is appended to `misses`. The number of calls converted, plus the
 /// calls that never run (an argument diverges).
-pub fn convert(b: &mut ir::CoreBody, ow: &mut bfx::Owner, misses: &mut Vector<TailMiss>) u32 {
+pub(package) fn convert(b: &mut ir::CoreBody, ow: &mut bfx::Owner, misses: &mut Vector<TailMiss>) u32 {
     let mut sites = Vector::<u32>::new();
     for bi in 0..b.blocks.len() {
         let t = b.blocks.at(bi).term;

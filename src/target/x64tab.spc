@@ -7,117 +7,117 @@
 // operands; it encodes to bytes and decodes back.
 import target::x64 as x;
 
-pub struct Row {
-    pub mn: str<'static>,
-    pub op: u32, // 1 to 3 opcode bytes (`0F`, `0F 38`, `0F 3A` escapes included)
-    pub pfx: u8, // a mandatory prefix: 0x66, 0xF2, 0xF3, 0 for none
-    pub dig: u8, // the ModRM.reg digit, or `D_*`
-    pub sz: u8, // the operand sizes it takes: a bit per size (`SB` .. `SQ`), 0 for none
-    pub fl: u8, // `F_*`
-    pub vx: u16, // the VEX or EVEX form (`VEX`, `EVEX` and their fields), 0 for none
-    pub ops: u32, // operand kinds, one byte each from the low byte, 0 ends
+pub(package) struct Row {
+    pub(package) mn: str<'static>,
+    pub(package) op: u32, // 1 to 3 opcode bytes (`0F`, `0F 38`, `0F 3A` escapes included)
+    pub(package) pfx: u8, // a mandatory prefix: 0x66, 0xF2, 0xF3, 0 for none
+    pub(package) dig: u8, // the ModRM.reg digit, or `D_*`
+    pub(package) sz: u8, // the operand sizes it takes: a bit per size (`SB` .. `SQ`), 0 for none
+    pub(package) fl: u8, // `F_*`
+    pub(package) vx: u16, // the VEX or EVEX form (`VEX`, `EVEX` and their fields), 0 for none
+    pub(package) ops: u32, // operand kinds, one byte each from the low byte, 0 ends
 }
 
 extend Row as Copy {}
 
 /// ModRM.reg is an operand (a register kind of the reg field), or there is no ModRM.
-pub const D_REG: u8 = 0x10;
-pub const D_NONE: u8 = 0x20;
+pub(package) const D_REG: u8 = 0x10;
+pub(package) const D_NONE: u8 = 0x20;
 /// A ModRM byte the opcode fixes (`0F 01 D0`): `D_FIX | index into FIXED`.
-pub const D_FIX: u8 = 0x40;
+pub(package) const D_FIX: u8 = 0x40;
 
 /// Operand sizes.
-pub const SB: u8 = 1;
-pub const SW: u8 = 2;
-pub const SL: u8 = 4;
-pub const SQ: u8 = 8;
-pub const SWLQ: u8 = 14;
-pub const SLQ: u8 = 12;
+pub(package) const SB: u8 = 1;
+pub(package) const SW: u8 = 2;
+pub(package) const SL: u8 = 4;
+pub(package) const SQ: u8 = 8;
+pub(package) const SWLQ: u8 = 14;
+pub(package) const SLQ: u8 = 12;
 
 /// Flags.
-pub const F_D64: u8 = 1; // 64 bits by default (push, pop, call, jmp): no REX.W
-pub const F_NOSFX: u8 = 2; // the mnemonic takes no size suffix
-pub const F_CC: u8 = 4; // the condition (the mnemonic's tail) adds to the opcode's low nibble
-pub const F_OR: u8 = 8; // the register adds to the opcode's low 3 bits (`+r`)
-pub const F_LOCK: u8 = 64; // takes a `lock` prefix
+pub(package) const F_D64: u8 = 1; // 64 bits by default (push, pop, call, jmp): no REX.W
+pub(package) const F_NOSFX: u8 = 2; // the mnemonic takes no size suffix
+pub(package) const F_CC: u8 = 4; // the condition (the mnemonic's tail) adds to the opcode's low nibble
+pub(package) const F_OR: u8 = 8; // the register adds to the opcode's low 3 bits (`+r`)
+pub(package) const F_LOCK: u8 = 64; // takes a `lock` prefix
 
 /// The VEX and EVEX forms: the prefix, its W and L fields (the map is the opcode's escape, pp the
 /// mandatory prefix), the EVEX 8-bit displacement's scale, masking, and the other operand orders LLVM
 /// takes for a 2-byte VEX prefix.
-pub const VEX: u16 = 1;
-pub const EVEX: u16 = 2;
-pub const W1: u16 = 4;
+pub(package) const VEX: u16 = 1;
+pub(package) const EVEX: u16 = 2;
+pub(package) const W1: u16 = 4;
 /// The 8-bit displacement's scale (N): the vector length shifted right by 0 to 3 (`N0` .. `N3`), or 1,
 /// 2, 4, 8, 16, 32 bytes (`N4` .. `N9`).
-pub const N1: u16 = 1 << 3;
-pub const N2: u16 = 2 << 3;
-pub const N3: u16 = 3 << 3;
-pub const N4: u16 = 4 << 3;
-pub const N5: u16 = 5 << 3;
-pub const N6: u16 = 6 << 3;
-pub const N7: u16 = 7 << 3;
-pub const N8: u16 = 8 << 3;
-pub const N9: u16 = 9 << 3;
-pub const MK: u16 = 1 << 7; // takes a mask
-pub const MZ: u16 = 1 << 8; // takes zeroing under a mask
-pub const MR: u16 = 1 << 9; // needs a mask
-pub const L1: u16 = 1 << 10; // 256 bits
-pub const L2: u16 = 2 << 10; // 512 bits
+pub(package) const N1: u16 = 1 << 3;
+pub(package) const N2: u16 = 2 << 3;
+pub(package) const N3: u16 = 3 << 3;
+pub(package) const N4: u16 = 4 << 3;
+pub(package) const N5: u16 = 5 << 3;
+pub(package) const N6: u16 = 6 << 3;
+pub(package) const N7: u16 = 7 << 3;
+pub(package) const N8: u16 = 8 << 3;
+pub(package) const N9: u16 = 9 << 3;
+pub(package) const MK: u16 = 1 << 7; // takes a mask
+pub(package) const MZ: u16 = 1 << 8; // takes zeroing under a mask
+pub(package) const MR: u16 = 1 << 9; // needs a mask
+pub(package) const L1: u16 = 1 << 10; // 256 bits
+pub(package) const L2: u16 = 2 << 10; // 512 bits
 /// The two sources (vvvv and ModRM.rm) swap when only rm needs REX.B: a 2-byte VEX prefix; `SWPC` for
 /// a compare whose predicate (`imm & 7`) is 0, 3, 4 or 7 only.
-pub const SWP: u16 = 1 << 12;
-pub const SWPC: u16 = 1 << 13;
+pub(package) const SWP: u16 = 1 << 12;
+pub(package) const SWPC: u16 = 1 << 13;
 /// A register-to-register move the next row also encodes, with the operands in the other ModRM fields:
 /// that row takes it when this one would need the 3-byte VEX prefix and that one not.
-pub const MV: u16 = 1 << 14;
+pub(package) const MV: u16 = 1 << 14;
 
 /// Operand kinds.
-pub struct K {}
+pub(package) struct K {}
 
 extend K {
-    pub const R: u8 = 1; // a general register of the operand size, in ModRM.reg
-    pub const RM: u8 = 2; // a general register of the operand size or memory, in ModRM.rm
-    pub const M: u8 = 3; // memory, in ModRM.rm
-    pub const O: u8 = 4; // a general register of the operand size in the opcode (`+r`)
-    pub const RM8: u8 = 5; // a byte register or memory
-    pub const RM16: u8 = 6;
-    pub const RM32: u8 = 7;
-    pub const R32: u8 = 8; // a 32-bit register in ModRM.reg
-    pub const X: u8 = 9; // an xmm register in ModRM.reg
-    pub const XM: u8 = 10; // an xmm register or memory in ModRM.rm
-    pub const XR: u8 = 11; // an xmm register in ModRM.rm
-    pub const Y: u8 = 12; // a ymm register in ModRM.reg
-    pub const YM: u8 = 13;
-    pub const Z: u8 = 14; // a zmm register in ModRM.reg
-    pub const ZM: u8 = 15;
-    pub const I8: u8 = 16; // an 8-bit immediate
-    pub const IS8: u8 = 17; // an 8-bit immediate sign-extended to the operand size
-    pub const IZ: u8 = 18; // an immediate of the operand size, 32 bits for 64 (sign-extended)
-    pub const I64: u8 = 19; // a 64-bit immediate
-    pub const CL: u8 = 20; // `%cl`
-    pub const ONE: u8 = 21; // `$1`
-    pub const ACC: u8 = 22; // the accumulator of the operand size
-    pub const REL8: u8 = 23; // a branch target
-    pub const REL32: u8 = 24;
-    pub const IND: u8 = 25; // `*` and a 64-bit register or memory: an indirect branch target
-    pub const XV: u8 = 26; // an xmm register in VEX.vvvv
-    pub const YV: u8 = 27;
-    pub const ZV: u8 = 28;
-    pub const YR: u8 = 29; // a ymm register in ModRM.rm
-    pub const ZR: u8 = 30;
-    pub const KR: u8 = 31; // a mask register in ModRM.reg
-    pub const KRM: u8 = 32; // a mask register in ModRM.rm
-    pub const KV: u8 = 33; // a mask register in VEX.vvvv
-    pub const R64: u8 = 34; // a 64-bit register in ModRM.reg
-    pub const RR32: u8 = 35; // a 32-bit register in ModRM.rm
-    pub const RR64: u8 = 36;
-    pub const RM64: u8 = 37; // a 64-bit register or memory
-    pub const XI4: u8 = 38; // an xmm register in the immediate's high 4 bits
-    pub const YI4: u8 = 39;
-    pub const X0: u8 = 40; // `%xmm0`, implied
-    pub const VSX: u8 = 41; // memory with an xmm index (VSIB)
-    pub const VSY: u8 = 42;
-    pub const VSZ: u8 = 43;
+    pub(package) const R: u8 = 1; // a general register of the operand size, in ModRM.reg
+    pub(package) const RM: u8 = 2; // a general register of the operand size or memory, in ModRM.rm
+    pub(package) const M: u8 = 3; // memory, in ModRM.rm
+    pub(package) const O: u8 = 4; // a general register of the operand size in the opcode (`+r`)
+    pub(package) const RM8: u8 = 5; // a byte register or memory
+    pub(package) const RM16: u8 = 6;
+    pub(package) const RM32: u8 = 7;
+    pub(package) const R32: u8 = 8; // a 32-bit register in ModRM.reg
+    pub(package) const X: u8 = 9; // an xmm register in ModRM.reg
+    pub(package) const XM: u8 = 10; // an xmm register or memory in ModRM.rm
+    pub(package) const XR: u8 = 11; // an xmm register in ModRM.rm
+    pub(package) const Y: u8 = 12; // a ymm register in ModRM.reg
+    pub(package) const YM: u8 = 13;
+    pub(package) const Z: u8 = 14; // a zmm register in ModRM.reg
+    pub(package) const ZM: u8 = 15;
+    pub(package) const I8: u8 = 16; // an 8-bit immediate
+    pub(package) const IS8: u8 = 17; // an 8-bit immediate sign-extended to the operand size
+    pub(package) const IZ: u8 = 18; // an immediate of the operand size, 32 bits for 64 (sign-extended)
+    pub(package) const I64: u8 = 19; // a 64-bit immediate
+    pub(package) const CL: u8 = 20; // `%cl`
+    pub(package) const ONE: u8 = 21; // `$1`
+    pub(package) const ACC: u8 = 22; // the accumulator of the operand size
+    pub(package) const REL8: u8 = 23; // a branch target
+    pub(package) const REL32: u8 = 24;
+    pub(package) const IND: u8 = 25; // `*` and a 64-bit register or memory: an indirect branch target
+    pub(package) const XV: u8 = 26; // an xmm register in VEX.vvvv
+    pub(package) const YV: u8 = 27;
+    pub(package) const ZV: u8 = 28;
+    pub(package) const YR: u8 = 29; // a ymm register in ModRM.rm
+    pub(package) const ZR: u8 = 30;
+    pub(package) const KR: u8 = 31; // a mask register in ModRM.reg
+    pub(package) const KRM: u8 = 32; // a mask register in ModRM.rm
+    pub(package) const KV: u8 = 33; // a mask register in VEX.vvvv
+    pub(package) const R64: u8 = 34; // a 64-bit register in ModRM.reg
+    pub(package) const RR32: u8 = 35; // a 32-bit register in ModRM.rm
+    pub(package) const RR64: u8 = 36;
+    pub(package) const RM64: u8 = 37; // a 64-bit register or memory
+    pub(package) const XI4: u8 = 38; // an xmm register in the immediate's high 4 bits
+    pub(package) const YI4: u8 = 39;
+    pub(package) const X0: u8 = 40; // `%xmm0`, implied
+    pub(package) const VSX: u8 = 41; // memory with an xmm index (VSIB)
+    pub(package) const VSY: u8 = 42;
+    pub(package) const VSZ: u8 = 43;
 }
 
 const fn r(mn: str<'static>, op: u32, pfx: u8, dig: u8, sz: u8, fl: u8, ops: u32) Row {
@@ -129,24 +129,24 @@ const fn v(mn: str<'static>, op: u32, pfx: u8, dig: u8, vx: u16, ops: u32) Row {
     return Row { mn: mn, op: op, pfx: pfx, dig: dig, sz: 0, fl: F_NOSFX, vx: vx, ops: ops };
 }
 
-pub const fn k1(a: u8) u32 {
+pub(package) const fn k1(a: u8) u32 {
     return a;
 }
 
-pub const fn k2(a: u8, b: u8) u32 {
+pub(package) const fn k2(a: u8, b: u8) u32 {
     return a as u32 | b as u32 << 8;
 }
 
-pub const fn k3(a: u8, b: u8, c: u8) u32 {
+pub(package) const fn k3(a: u8, b: u8, c: u8) u32 {
     return k2(a, b) | c as u32 << 16;
 }
 
-pub const fn k4(a: u8, b: u8, c: u8, d: u8) u32 {
+pub(package) const fn k4(a: u8, b: u8, c: u8, d: u8) u32 {
     return k3(a, b, c) | d as u32 << 24;
 }
 
 /// Operand kind `i` of `ops`, 0 past the last.
-pub const fn kind_at(ops: u32, i: u32) u8 {
+pub(package) const fn kind_at(ops: u32, i: u32) u8 {
     return (ops >> i * 8 & 0xFF) as u8;
 }
 
@@ -154,7 +154,7 @@ pub const fn kind_at(ops: u32, i: u32) u8 {
 const FIXED: [u8; 6] = [0xD0, 0xF9, 0xF0, 0xE8, 0xF8, 0x00];
 
 /// The fixed ModRM byte of a `D_FIX` row.
-pub const fn fixed_modrm(dig: u8) u8 {
+pub(package) const fn fixed_modrm(dig: u8) u8 {
     let f: []u8 = FIXED;
     return f[(dig & 0xF) as usize];
 }
@@ -162,7 +162,7 @@ pub const fn fixed_modrm(dig: u8) u8 {
 const D: u8 = D_REG;
 const N: u8 = D_NONE;
 
-pub const ROWS: [Row; 1014] = [
+pub(package) const ROWS: [Row; 1014] = [
     r("nop", 0x90, 0, N, 0, F_NOSFX, 0),
     r("add", 0x0, 0, D, SB, F_LOCK, k2(K::RM, K::R)),
     r("add", 0x1, 0, D, SWLQ, F_LOCK, k2(K::RM, K::R)),
@@ -1183,38 +1183,38 @@ pub const ROWS: [Row; 1014] = [
 // ---- Instructions ----
 
 /// No register.
-pub const NOREG: u8 = x::NOREG;
+pub(package) const NOREG: u8 = x::NOREG;
 /// ah, ch, dh, bh: 16 + their encoding (4 to 7). An instruction with a REX prefix cannot name them.
-pub const AH: u8 = 20;
+pub(package) const AH: u8 = 20;
 
 /// An instruction in Intel operand order: its row, operand size (1, 2, 4 or 8 bytes; 0 for a row
 /// without one), condition (`x::CC_*`, for an `F_CC` row), prefixes, the EVEX mask register (0 for
 /// none) and zeroing, a register per operand position (a byte each in `regs`; ACC and CL hold theirs),
 /// the memory operand at position `mem_at` (`NOMEM` for none; a VSIB operand's index is a vector
 /// register), and the immediate or the branch target's offset from the instruction's start.
-pub struct Ins {
-    pub row: u32,
-    pub sz: u8,
-    pub cc: u8,
-    pub lock: bool,
-    pub data16: u8, // 0x66 prefixes past the one the operand size needs (`data16`)
-    pub rexw: bool, // REX.W where the operand size does not need it (`rex64`)
-    pub disp: u8, // a displacement or branch offset of this many bits where another would do: 0 (the shortest), 8 or 32
-    pub seg: u8, // a segment override prefix byte, 0 for none
-    pub kmask: u8,
-    pub zero: bool,
-    pub regs: u32,
-    pub mem_at: u8,
-    pub m: x::Mem,
-    pub imm: i64,
+pub(package) struct Ins {
+    pub(package) row: u32,
+    pub(package) sz: u8,
+    pub(package) cc: u8,
+    pub(package) lock: bool,
+    pub(package) data16: u8, // 0x66 prefixes past the one the operand size needs (`data16`)
+    pub(package) rexw: bool, // REX.W where the operand size does not need it (`rex64`)
+    pub(package) disp: u8, // a displacement or branch offset of this many bits where another would do: 0 (the shortest), 8 or 32
+    pub(package) seg: u8, // a segment override prefix byte, 0 for none
+    pub(package) kmask: u8,
+    pub(package) zero: bool,
+    pub(package) regs: u32,
+    pub(package) mem_at: u8,
+    pub(package) m: x::Mem,
+    pub(package) imm: i64,
 }
 
 extend Ins as Copy {}
 
-pub const NOMEM: u8 = 0xFF;
+pub(package) const NOMEM: u8 = 0xFF;
 
 extend Ins {
-    pub const fn new(row: u32) Ins {
+    pub(package) const fn new(row: u32) Ins {
         return Ins {
             row: row,
             sz: 0,
@@ -1234,33 +1234,33 @@ extend Ins {
     }
 
     /// The register at operand position `i`.
-    pub const fn reg(self: &Self, i: u32) u8 {
+    pub(package) const fn reg(self: &Self, i: u32) u8 {
         return (self.regs >> i * 8 & 0xFF) as u8;
     }
 
-    pub const fn set_reg(self: &mut Self, i: u32, r: u8) {
+    pub(package) const fn set_reg(self: &mut Self, i: u32, r: u8) {
         self.regs = self.regs & ~(0xFFu32 << i * 8) | r as u32 << i * 8;
     }
 }
 
 /// Where an encoding's 32-bit RIP displacement or branch offset lies from the instruction's start
 /// (`NOFIELD` for none), and the instruction's length.
-pub struct Enc {
-    pub field: u32,
-    pub len: u32,
+pub(package) struct Enc {
+    pub(package) field: u32,
+    pub(package) len: u32,
 }
 
-pub const NOFIELD: u32 = 0xFFFFFFFF;
+pub(package) const NOFIELD: u32 = 0xFFFFFFFF;
 
 extend Enc {
-    pub const fn new() Enc {
+    pub(package) const fn new() Enc {
         return Enc { field: NOFIELD, len: 0 };
     }
 }
 
 /// The size in bytes of the general register an operand of kind `k` names at operand size `sz`, 0 for
 /// a kind that names none.
-pub const fn gp_size(k: u8, sz: u8) u8 {
+pub(package) const fn gp_size(k: u8, sz: u8) u8 {
     return switch k {
         K::R | K::RM | K::O | K::ACC => sz,
         K::RM8 | K::CL => 1u8,
@@ -1272,12 +1272,12 @@ pub const fn gp_size(k: u8, sz: u8) u8 {
 }
 
 /// Whether kind `k` is in ModRM.reg.
-pub const fn in_reg(k: u8) bool {
+pub(package) const fn in_reg(k: u8) bool {
     return k == K::R || k == K::R32 || k == K::R64 || k == K::X || k == K::Y || k == K::Z || k == K::KR;
 }
 
 /// Whether kind `k` is in ModRM.rm.
-pub const fn in_rm(k: u8) bool {
+pub(package) const fn in_rm(k: u8) bool {
     return switch k {
         K::RM | K::M | K::RM8 | K::RM16 | K::RM32 | K::RM64 | K::RR32 | K::RR64 | K::XM | K::XR | K::YM | K::YR | K::ZM | K::ZR | K::KRM | K::IND | K::VSX | K::VSY | K::VSZ => true,
         _ => false,
@@ -1285,27 +1285,27 @@ pub const fn in_rm(k: u8) bool {
 }
 
 /// Whether kind `k` is in ModRM.rm and memory only.
-pub const fn mem_only(k: u8) bool {
+pub(package) const fn mem_only(k: u8) bool {
     return k == K::M || k == K::VSX || k == K::VSY || k == K::VSZ;
 }
 
 /// Whether kind `k` is in ModRM.rm and a register only.
-pub const fn reg_only(k: u8) bool {
+pub(package) const fn reg_only(k: u8) bool {
     return k == K::XR || k == K::YR || k == K::ZR || k == K::KRM || k == K::RR32 || k == K::RR64;
 }
 
 /// Whether kind `k` is in VEX.vvvv.
-pub const fn in_vvvv(k: u8) bool {
+pub(package) const fn in_vvvv(k: u8) bool {
     return k == K::XV || k == K::YV || k == K::ZV || k == K::KV;
 }
 
 /// Whether kind `k` names a mask register.
-pub const fn is_kreg(k: u8) bool {
+pub(package) const fn is_kreg(k: u8) bool {
     return k == K::KR || k == K::KRM || k == K::KV;
 }
 
 /// The vector register width in bytes kind `k` names (a VSIB operand's index), 0 for none.
-pub const fn vec_size(k: u8) u32 {
+pub(package) const fn vec_size(k: u8) u32 {
     return switch k {
         K::X | K::XM | K::XR | K::XV | K::XI4 | K::X0 | K::VSX => 16u32,
         K::Y | K::YM | K::YR | K::YV | K::YI4 | K::VSY => 32u32,
@@ -1315,7 +1315,7 @@ pub const fn vec_size(k: u8) u32 {
 }
 
 /// Whether kind `k` is a VSIB memory operand.
-pub const fn is_vsib(k: u8) bool {
+pub(package) const fn is_vsib(k: u8) bool {
     return k == K::VSX || k == K::VSY || k == K::VSZ;
 }
 
@@ -1344,7 +1344,7 @@ const fn swaps_pred(imm: i64) bool {
 }
 
 /// Whether kind `k` is an immediate.
-pub const fn is_imm(k: u8) bool {
+pub(package) const fn is_imm(k: u8) bool {
     return k == K::I8 || k == K::IS8 || k == K::IZ || k == K::I64;
 }
 
@@ -1451,7 +1451,7 @@ fn modrm_mem(out: &mut Vector<u8>, rg: u32, m: x::Mem, n8: i32, disp: u8, vsib: 
 }
 
 /// Append the encoding of `n` to `out`; false when its row does not take its operands.
-pub fn encode(n: &Ins, out: &mut Vector<u8>, e: &mut Enc) bool {
+pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, e: &mut Enc) bool {
     let rows: []Row = ROWS;
     let r = rows[n.row as usize];
     let st = out.len();
@@ -1717,7 +1717,7 @@ const fn get(b: []u8, at: usize, n: u32, signed: bool) i64 {
 
 /// Decode the instruction at `b[at..]` into `n`: its length, 0 when no row encodes those bytes in the
 /// form the assembler gives them.
-pub fn decode(b: []u8, at: usize, n: &mut Ins) u32 {
+pub(package) fn decode(b: []u8, at: usize, n: &mut Ins) u32 {
     let end = if b.len() < at + 15 {
         b.len();
     } else {

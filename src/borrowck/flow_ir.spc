@@ -24,25 +24,25 @@ import utils::errors as diag;
 
 /// Borrow-pass probe regions (SC_BORROW_STATS): lowering, the tape replay, the six analysis
 /// stages, the Free-move rules with the wording, diagnostic emission, and drop elaboration.
-pub const BP_LOWER: usize = 0;
-pub const BP_REPLAY: usize = 1;
-pub const BP_FOREST: usize = 2;
-pub const BP_FACTS: usize = 3;
-pub const BP_CFG: usize = 4;
-pub const BP_LIVE: usize = 5;
-pub const BP_MOVES: usize = 6;
-pub const BP_SOLVER: usize = 7;
-pub const BP_RULES: usize = 8;
-pub const BP_EMIT: usize = 9;
-pub const BP_SETUP: usize = 10; // per-module checker construction and diagnostic finalization
-pub const BP_DECL: usize = 11; // declaration-level lifetime checks and the per-function preludes
+pub(package) const BP_LOWER: usize = 0;
+pub(package) const BP_REPLAY: usize = 1;
+pub(package) const BP_FOREST: usize = 2;
+pub(package) const BP_FACTS: usize = 3;
+pub(package) const BP_CFG: usize = 4;
+pub(package) const BP_LIVE: usize = 5;
+pub(package) const BP_MOVES: usize = 6;
+pub(package) const BP_SOLVER: usize = 7;
+pub(package) const BP_RULES: usize = 8;
+pub(package) const BP_EMIT: usize = 9;
+pub(package) const BP_SETUP: usize = 10; // per-module checker construction and diagnostic finalization
+pub(package) const BP_DECL: usize = 11; // declaration-level lifetime checks and the per-function preludes
 // The package's coroutine and cancellation reachability (once); in the driver's stage, the whole
 // per-module prologue: the module reference rows, the body counts and the scans.
-pub const BP_REACH: usize = 12;
-pub const BP_DROPS: usize = 13; // drop elaboration of the kept bodies (schedule and rewrite)
-pub const BP_PUBLISH: usize = 14; // the type publication before the stage
-pub const BP_KEEP: usize = 15; // the keep: its reservation, the kept copies and their absorption
-pub const BP_TAIL: usize = 16; // tail-call conversion of the kept bodies
+pub(package) const BP_REACH: usize = 12;
+pub(package) const BP_DROPS: usize = 13; // drop elaboration of the kept bodies (schedule and rewrite)
+pub(package) const BP_PUBLISH: usize = 14; // the type publication before the stage
+pub(package) const BP_KEEP: usize = 15; // the keep: its reservation, the kept copies and their absorption
+pub(package) const BP_TAIL: usize = 16; // tail-call conversion of the kept bodies
 const BP_NAMES: [str<'static>; 17] = [
     "lower",
     "replay",
@@ -66,46 +66,46 @@ static_assert(BP_TAIL + 1 == 17, "one name per borrow region");
 static_assert(BP_TAIL < prb::P_COUNT, "the borrow regions fit the probe");
 
 /// Per-body tallies.
-pub const BT_BODIES: usize = 0; // bodies analyzed (closures included)
-pub const BT_BORING: usize = 1; // every stage skipped (stage_skip)
-pub const BT_MV_SKIP: usize = 2; // move/init dataflow skipped
-pub const BT_LV_SKIP: usize = 3; // liveness skipped (no loan)
-pub const BT_CFG_SKIP: usize = 4; // CFG never built
-pub const BT_LOANS: usize = 5;
-pub const BT_PATHS: usize = 6;
-pub const BT_POINTS: usize = 7;
-pub const BT_BLOCKS: usize = 8;
-pub const BT_LOCALS: usize = 9;
-pub const BT_PLACES: usize = 10;
-pub const BT_PROJS: usize = 11;
-pub const BT_STMTS: usize = 12;
-pub const BT_LOAN_SKIP: usize = 13; // loan discovery and dataflow skipped, move facts still generated
-pub const BT_GENERIC_HELD: usize = 14; // the loan skip withheld only because a type is unresolved
-pub const BT_TRIMS: usize = 15; // scratch releases past BC_SCRATCH_BUDGET
-pub const BT_TAPE: usize = 16; // replay tape entries (8 bytes each)
-pub const BT_IR_BYTES: usize = 17; // bytes of the lowered bodies' pools (kept exact-size)
-pub const BT_TY_SLOTS: usize = 18; // type ids a publication remap rewrites in those bodies
-pub const BT_ELAB: usize = 19; // bodies rewritten with drop terminators
-pub const BT_DROPS: usize = 20; // drops scheduled in them
-pub const BT_COUNT: usize = 21;
+pub(package) const BT_BODIES: usize = 0; // bodies analyzed (closures included)
+pub(package) const BT_BORING: usize = 1; // every stage skipped (stage_skip)
+pub(package) const BT_MV_SKIP: usize = 2; // move/init dataflow skipped
+pub(package) const BT_LV_SKIP: usize = 3; // liveness skipped (no loan)
+pub(package) const BT_CFG_SKIP: usize = 4; // CFG never built
+pub(package) const BT_LOANS: usize = 5;
+pub(package) const BT_PATHS: usize = 6;
+pub(package) const BT_POINTS: usize = 7;
+pub(package) const BT_BLOCKS: usize = 8;
+pub(package) const BT_LOCALS: usize = 9;
+pub(package) const BT_PLACES: usize = 10;
+pub(package) const BT_PROJS: usize = 11;
+pub(package) const BT_STMTS: usize = 12;
+pub(package) const BT_LOAN_SKIP: usize = 13; // loan discovery and dataflow skipped, move facts still generated
+pub(package) const BT_GENERIC_HELD: usize = 14; // the loan skip withheld only because a type is unresolved
+pub(package) const BT_TRIMS: usize = 15; // scratch releases past BC_SCRATCH_BUDGET
+pub(package) const BT_TAPE: usize = 16; // replay tape entries (8 bytes each)
+pub(package) const BT_IR_BYTES: usize = 17; // bytes of the lowered bodies' pools (kept exact-size)
+pub(package) const BT_TY_SLOTS: usize = 18; // type ids a publication remap rewrites in those bodies
+pub(package) const BT_ELAB: usize = 19; // bodies rewritten with drop terminators
+pub(package) const BT_DROPS: usize = 20; // drops scheduled in them
+pub(package) const BT_COUNT: usize = 21;
 const TP_KINDS: usize = 32;
 const TOP_N: usize = 8;
 
 /// The probe and its tallies, one per context; task copies fold into the driver's.
-pub struct BcStats {
-    pub pr: prb::Probe,
-    pub t: Array<u64, BT_COUNT>,
-    pub top_ns: Array<u64, TOP_N>, // the slowest bodies' analysis time, descending
-    pub top_id: Array<u64, TOP_N>, // module << 32 | owner node
-    pub top_sz: Array<u64, TOP_N>, // blocks << 32 | points
-    pub tape: Array<u64, TP_KINDS>, // replay tape entries per event kind
-    pub all: bool, // record every body (SC_ITEM_STATS): (id, ns) pairs in `body_ns` and `lower_ns`
-    pub body_ns: Vector<u64>,
-    pub lower_ns: Vector<u64>, // Core IR lowering per body
+pub(package) struct BcStats {
+    pub(package) pr: prb::Probe,
+    pub(package) t: Array<u64, BT_COUNT>,
+    pub(package) top_ns: Array<u64, TOP_N>, // the slowest bodies' analysis time, descending
+    pub(package) top_id: Array<u64, TOP_N>, // module << 32 | owner node
+    pub(package) top_sz: Array<u64, TOP_N>, // blocks << 32 | points
+    pub(package) tape: Array<u64, TP_KINDS>, // replay tape entries per event kind
+    pub(package) all: bool, // record every body (SC_ITEM_STATS): (id, ns) pairs in `body_ns` and `lower_ns`
+    pub(package) body_ns: Vector<u64>,
+    pub(package) lower_ns: Vector<u64>, // Core IR lowering per body
 }
 
 extend BcStats {
-    pub fn new(on: bool, mem: bool) BcStats {
+    pub(package) fn new(on: bool, mem: bool) BcStats {
         return BcStats {
             pr: prb::Probe::new(on, mem),
             t: Array::<u64, BT_COUNT>::new(),
@@ -137,7 +137,7 @@ extend BcStats {
     }
 
     /// Fold a task's stats into this one.
-    pub fn merge(self: &mut Self, o: &BcStats) {
+    pub(package) fn merge(self: &mut Self, o: &BcStats) {
         self.pr.merge(&o.pr);
         for k in 0..BT_COUNT {
             self.t[k] += o.t[k];
@@ -158,7 +158,7 @@ extend BcStats {
 
     /// Tally one lowering's product: its tape entries by kind, its pools' bytes and the type ids a
     /// publication remap would rewrite (`CoreBody::remap_types`).
-    pub const fn tally_ir(self: &mut Self, lw: &irl::Lowerer) {
+    pub(package) const fn tally_ir(self: &mut Self, lw: &irl::Lowerer) {
         let b = &lw.body;
         for i in 0..lw.tape.len() {
             self.tape[(lw.tape[i] >> 56) as usize % TP_KINDS] += 1;
@@ -169,7 +169,7 @@ extend BcStats {
     }
 
     /// The report: regions, tallies, the slowest bodies, and the retained scratch capacity.
-    pub fn report(self: &Self, ctx: &BorrowCtx, out: &mut String) {
+    pub(package) fn report(self: &Self, ctx: &BorrowCtx, out: &mut String) {
         let names: []str = BP_NAMES;
         self.pr.report_regions(out, "borrow-probe", names);
         let t = &self.t;
@@ -239,29 +239,29 @@ extend BcStats {
 }
 
 /// One move/init/borrow diagnostic in source-span form, before wording and dedup.
-pub struct FlowErr {
-    pub start: u32,
-    pub len: u32,
-    pub cat: u8, // dedup category; 10 also selects the borrow-conflict note
-    pub msg: String,
+pub(package) struct FlowErr {
+    pub(package) start: u32,
+    pub(package) len: u32,
+    pub(package) cat: u8, // dedup category; 10 also selects the borrow-conflict note
+    pub(package) msg: String,
 }
 
 /// Nesting stacks for the walk-tape replay (one per strictly-nested event family). Pooled in
 /// BorrowCtx; pre/acc are depth-indexed SLOTS (never popped) so FlowState is copied row-wise
 /// by save/clear instead of whole-struct by push.
-pub struct RepSt {
-    pub bms: Vector<u32>,
-    pub les: Vector<i32>,
-    pub mbm: Vector<u32>,
-    pub pre: Vector<tc::FlowState>,
-    pub acc: Vector<tc::FlowState>,
-    pub seg: Vector<u64>, // start<<32 | nmoved0<<16 | nborrows0
-    pub fdepth: usize,
+pub(package) struct RepSt {
+    pub(package) bms: Vector<u32>,
+    pub(package) les: Vector<i32>,
+    pub(package) mbm: Vector<u32>,
+    pub(package) pre: Vector<tc::FlowState>,
+    pub(package) acc: Vector<tc::FlowState>,
+    pub(package) seg: Vector<u64>, // start<<32 | nmoved0<<16 | nborrows0
+    pub(package) fdepth: usize,
 }
 
 extend RepSt {
     /// Empty reporting state with no heap storage.
-    pub fn new() RepSt {
+    pub(package) fn new() RepSt {
         return RepSt {
             bms: Vector::<u32>::new(),
             les: Vector::<i32>::new(),
@@ -274,7 +274,7 @@ extend RepSt {
     }
 
     /// Clear for the next body, keeping capacity.
-    pub fn reset(self: &mut Self) {
+    pub(package) fn reset(self: &mut Self) {
         self.bms.truncate(0);
         self.les.truncate(0);
         self.mbm.truncate(0);
@@ -317,45 +317,45 @@ const EM_COARSE: u64 = 0xFFFFFFFFFFFFFFFE;
 /// Scratch of the universal-region check (`bc_ir_universal`), kept across bodies. Region 0 is
 /// `'static`; every other region is a lifetime the signature names or an elided input position. A
 /// slot is one lifetime position of an origin's value (`bc_uni_len`).
-pub struct UniSt {
-    pub names: Vector<tok::Span>, // per region: its name, empty for an elided input position
-    pub ol: Vector<u64>, // per region: the regions it is known to outlive
-    pub pos: Vector<u64>, // pairs: an elided input position (type node << 8 | slot), its region
-    pub base: Vector<u32>, // per origin: its first slot
-    pub cnt: Vector<u32>, // per origin: its slot count
-    pub opq: Vector<bool>, // per origin: one slot for the whole value (no local, or positions unknown)
-    pub st: Vector<u64>, // per slot: the regions arrived there
-    pub sk: Vector<u64>, // per slot of a parameter or a return slot: the regions it is declared to hold
-    pub cv: Vector<bool>, // per slot: a parameter's position behind a reference or a view, in caller storage
-    pub gen: Vector<bool>, // per slot: a parameter's or return slot's type parameter position
-    pub vr: Vector<u8>, // per slot of a parameter or return slot: its variance (UA_CO, UA_CONTRA bits >> 17; 0: covariant)
-    pub phl: Vector<u32>, // per universal origin: the parameter local it stands for, or BF_NONE
-    pub emap: Vector<u64>, // per subset edge: EM_*, or its slot pairs (start << 32 | count in `pairs`)
-    pub pairs: Vector<u64>, // source slot << 32 | target slot
-    pub keys: Vector<u64>, // a walk's (key, aux) pairs
-    pub bind: Vector<u64>, // a call's argument positions: (key, aux, slot) triples
-    pub ka: Vector<u64>, // a call's keys per argument and result (`bc_uni_call_keys`)
-    pub kof: Vector<u32>,
-    pub wargs: Vector<TypeId>, // a field walk's declaration arguments (`bc_uni_walk`)
-    pub wdecl: DefId,
-    pub pa: Vector<u32>, // position scratch
-    pub pb: Vector<u32>,
-    pub pc: Vector<u32>,
-    pub toks: Vector<u64>,
-    pub start: Vector<u32>, // per origin (+1): CSR into `edges` of the subset edges leaving it
-    pub edges: Vector<u32>,
-    pub queue: Vector<u32>,
-    pub queued: Vector<bool>,
-    pub first: u32, // the first region of the parameter being walked
-    pub m0: u64, // a signature walk's regions at the value's own level
-    pub m1: u64, // a signature walk's regions behind a reference
-    pub look: bool, // a signature walk looks its regions up: it creates none
-    pub over: bool, // the signature has more than UNI_MAX regions
+pub(package) struct UniSt {
+    pub(package) names: Vector<tok::Span>, // per region: its name, empty for an elided input position
+    pub(package) ol: Vector<u64>, // per region: the regions it is known to outlive
+    pub(package) pos: Vector<u64>, // pairs: an elided input position (type node << 8 | slot), its region
+    pub(package) base: Vector<u32>, // per origin: its first slot
+    pub(package) cnt: Vector<u32>, // per origin: its slot count
+    pub(package) opq: Vector<bool>, // per origin: one slot for the whole value (no local, or positions unknown)
+    pub(package) st: Vector<u64>, // per slot: the regions arrived there
+    pub(package) sk: Vector<u64>, // per slot of a parameter or a return slot: the regions it is declared to hold
+    pub(package) cv: Vector<bool>, // per slot: a parameter's position behind a reference or a view, in caller storage
+    pub(package) gen: Vector<bool>, // per slot: a parameter's or return slot's type parameter position
+    pub(package) vr: Vector<u8>, // per slot of a parameter or return slot: its variance (UA_CO, UA_CONTRA bits >> 17; 0: covariant)
+    pub(package) phl: Vector<u32>, // per universal origin: the parameter local it stands for, or BF_NONE
+    pub(package) emap: Vector<u64>, // per subset edge: EM_*, or its slot pairs (start << 32 | count in `pairs`)
+    pub(package) pairs: Vector<u64>, // source slot << 32 | target slot
+    pub(package) keys: Vector<u64>, // a walk's (key, aux) pairs
+    pub(package) bind: Vector<u64>, // a call's argument positions: (key, aux, slot) triples
+    pub(package) ka: Vector<u64>, // a call's keys per argument and result (`bc_uni_call_keys`)
+    pub(package) kof: Vector<u32>,
+    pub(package) wargs: Vector<TypeId>, // a field walk's declaration arguments (`bc_uni_walk`)
+    pub(package) wdecl: DefId,
+    pub(package) pa: Vector<u32>, // position scratch
+    pub(package) pb: Vector<u32>,
+    pub(package) pc: Vector<u32>,
+    pub(package) toks: Vector<u64>,
+    pub(package) start: Vector<u32>, // per origin (+1): CSR into `edges` of the subset edges leaving it
+    pub(package) edges: Vector<u32>,
+    pub(package) queue: Vector<u32>,
+    pub(package) queued: Vector<bool>,
+    pub(package) first: u32, // the first region of the parameter being walked
+    pub(package) m0: u64, // a signature walk's regions at the value's own level
+    pub(package) m1: u64, // a signature walk's regions behind a reference
+    pub(package) look: bool, // a signature walk looks its regions up: it creates none
+    pub(package) over: bool, // the signature has more than UNI_MAX regions
 }
 
 extend UniSt {
     /// Empty scratch with no heap storage.
-    pub fn new() UniSt {
+    pub(package) fn new() UniSt {
         return UniSt {
             names: Vector::<tok::Span>::new(),
             ol: Vector::<u64>::new(),
@@ -394,7 +394,7 @@ extend UniSt {
     }
 
     /// Heap bytes kept across bodies (capacity, not length).
-    pub const fn scratch_bytes(self: &Self) u64 {
+    pub(package) const fn scratch_bytes(self: &Self) u64 {
         let words = self.ol.capacity() + self.pos.capacity() + self.st.capacity() + self.sk.capacity() + self.emap.capacity() + self.pairs.capacity() + self.keys.capacity() + self.bind.capacity() + self.ka.capacity() + self.toks.capacity();
         let halves = self.kof.capacity() + self.base.capacity() + self.cnt.capacity() + self.phl.capacity() + self.wargs.capacity() + self.pa.capacity() + self.pb.capacity() + self.pc.capacity() + self.start.capacity() + self.edges.capacity() + self.queue.capacity();
         return (self.names.capacity() * sizeof(tok::Span) + words * sizeof(u64) + halves * sizeof(u32) + self.opq.capacity() + self.cv.capacity() + self.gen.capacity() + self.vr.capacity() + self.queued.capacity()) as u64;
@@ -482,49 +482,49 @@ extend UniSt {
 
 /// Reusable owner of the per-body borrow pipeline: one instance is built once per analyze pass and
 /// reset-and-refilled for every body, so vector capacity is kept instead of reallocated 1873+ times.
-pub struct BorrowCtx {
-    pub forest: bmp::MoveForest,
-    pub facts: bfx::BodyFacts,
-    pub cfg: bdf::Cfg,
-    pub liveness: bdf::Liveness,
-    pub moves: bdf::MoveFlow,
-    pub solver: bln::Solver,
-    pub alt: bln::Solver, // validation: the same body solved with the other row representation
-    pub el: ird::ElabCtx,
+pub(package) struct BorrowCtx {
+    pub(package) forest: bmp::MoveForest,
+    pub(package) facts: bfx::BodyFacts,
+    pub(package) cfg: bdf::Cfg,
+    pub(package) liveness: bdf::Liveness,
+    pub(package) moves: bdf::MoveFlow,
+    pub(package) solver: bln::Solver,
+    pub(package) alt: bln::Solver, // validation: the same body solved with the other row representation
+    pub(package) el: ird::ElabCtx,
     /// What `bc_run_stages` left behind for the current body, read by `bc_elaborate`: the feature
     /// bits, and whether the forest and facts, the control-flow graph and the move/init solution
     /// describe this body (a skipped stage leaves the previous body's rows).
-    pub ft: u32,
-    pub built: bool,
-    pub have_cfg: bool,
-    pub have_moves: bool,
-    pub cap_spans: Vector<u32>,
-    pub rep: RepSt,
-    pub escaping: Vector<u32>,
-    pub uni: UniSt,
+    pub(package) ft: u32,
+    pub(package) built: bool,
+    pub(package) have_cfg: bool,
+    pub(package) have_moves: bool,
+    pub(package) cap_spans: Vector<u32>,
+    pub(package) rep: RepSt,
+    pub(package) escaping: Vector<u32>,
+    pub(package) uni: UniSt,
     /// Spent Lowerers recycled across bodies: lower_fn/lower_closure_body re-seed on entry, so a
     /// pooled entry only donates its heap capacity (bc_lw_take retargets it at the current module).
-    pub lower_pool: Vector<irl::Lowerer>,
+    pub(package) lower_pool: Vector<irl::Lowerer>,
     /// Package store the driver hands in (null = discard lowerings): every body that lowers is
     /// adopted here so the backend never lowers it again.
-    pub keep: *mut irl::Keep,
+    pub(package) keep: *mut irl::Keep,
     /// The language server's summarizer (null = none): the body of every function checked is
     /// summarized for the unbounded-recursion check (`ir::recursion`).
-    pub recur: *mut recur::Summarizer,
-    pub st: BcStats,
+    pub(package) recur: *mut recur::Summarizer,
+    pub(package) st: BcStats,
     /// Validation build (SC_BC_VALIDATE): every skipped stage runs and its emptiness is asserted.
-    pub validate: bool,
+    pub(package) validate: bool,
 }
 
 /// Heap the analyses and the elaboration may keep across bodies. One outsized body grows the
 /// scratch past it; the release after that body keeps every later body's retained capacity
 /// bounded by its own needs.
-pub const BC_SCRATCH_BUDGET: u64 = 8u64 << 20;
+pub(package) const BC_SCRATCH_BUDGET: u64 = 8u64 << 20;
 
 extend BorrowCtx {
     /// Heap bytes the analyses, the elaboration and the Lowerer pool keep across bodies (capacity,
     /// not length).
-    pub const fn scratch_bytes(self: &Self) u64 {
+    pub(package) const fn scratch_bytes(self: &Self) u64 {
         let mut pool: u64 = 0;
         for i in 0..self.lower_pool.len() {
             pool += self.lower_pool.at(i).retained_bytes();
@@ -573,7 +573,7 @@ extend BorrowCtx {
     }
 
     /// A context with every analysis empty; the first body allocates.
-    pub fn new() BorrowCtx {
+    pub(package) fn new() BorrowCtx {
         return BorrowCtx {
             forest: bmp::MoveForest::empty(),
             facts: bfx::BodyFacts::empty(),
@@ -617,16 +617,16 @@ fn bc_lw_take(ctx: &mut BorrowCtx, pkg: *const loader::Package, m: ModuleId, own
 /// Typed-IR feature summary of one lowered body. Every bit over-approximates a fact-generation
 /// trigger, read from the locals' types through the ownership oracle and from the operation kinds,
 /// never from source syntax.
-pub const FT_CARRIER: u32 = 1; // a local's type carries a borrow (reference, dyn, capturing closure, a container of one), or is an untyped multi-return temp
-pub const FT_BORROWED_PARAM: u32 = 2; // an argument local carries: the signature takes a borrowed input
-pub const FT_BORROW_OP: u32 = 4; // a reference, address, slice, erasure or closure rvalue, or a call taking a `&'static` parameter (an implicit autoref for it borrows)
-pub const FT_GENERIC: u32 = 8; // a local's type mentions an unresolved type parameter: a possible reference
-pub const FT_OWNED: u32 = 16; // a local's type owns (Free): move and drop tracking
-pub const FT_UNINIT: u32 = 32; // a split-init declaration: init tracking
-pub const FT_UNKNOWN: u32 = 64; // an rvalue kind outside the classified set
+pub(package) const FT_CARRIER: u32 = 1; // a local's type carries a borrow (reference, dyn, capturing closure, a container of one), or is an untyped multi-return temp
+pub(package) const FT_BORROWED_PARAM: u32 = 2; // an argument local carries: the signature takes a borrowed input
+pub(package) const FT_BORROW_OP: u32 = 4; // a reference, address, slice, erasure or closure rvalue, or a call taking a `&'static` parameter (an implicit autoref for it borrows)
+pub(package) const FT_GENERIC: u32 = 8; // a local's type mentions an unresolved type parameter: a possible reference
+pub(package) const FT_OWNED: u32 = 16; // a local's type owns (Free): move and drop tracking
+pub(package) const FT_UNINIT: u32 = 32; // a split-init declaration: init tracking
+pub(package) const FT_UNKNOWN: u32 = 64; // an rvalue kind outside the classified set
 
 /// The feature bits of `body`.
-pub fn body_features(ow: &mut bfx::Owner, body: &ir::CoreBody) u32 {
+pub(package) fn body_features(ow: &mut bfx::Owner, body: &ir::CoreBody) u32 {
     let m = body.module;
     let mut ft: u32 = 0;
     if body.has_uninit_decl {
@@ -677,13 +677,13 @@ pub fn body_features(ow: &mut bfx::Owner, body: &ir::CoreBody) u32 {
 /// May loan discovery and loan dataflow skip? Only when no bit that can produce a loan is set:
 /// every loan the generator records needs a borrow rvalue, a carrying destination, or a closure,
 /// and a borrowed input or an unresolved type could hide one behind a substitution.
-pub const fn loan_skip(ft: u32) bool {
+pub(package) const fn loan_skip(ft: u32) bool {
     return (ft & (FT_CARRIER | FT_BORROWED_PARAM | FT_BORROW_OP | FT_GENERIC | FT_UNKNOWN)) == 0;
 }
 
 /// May every analysis stage skip? The loan skip, plus no owned local (no move or free event can
 /// exist) and no split-init declaration (no uninit read can exist): every stage is a no-op.
-pub const fn stage_skip(ft: u32) bool {
+pub(package) const fn stage_skip(ft: u32) bool {
     return loan_skip(ft) && (ft & (FT_OWNED | FT_UNINIT)) == 0;
 }
 
@@ -692,7 +692,7 @@ pub const fn stage_skip(ft: u32) bool {
 /// Pure over the frozen `body`, the package's read-only ASTs, and the two private accumulators,
 /// so workers may run it concurrently. Under `ctx.validate` the skipped work runs anyway and its
 /// emptiness is asserted.
-pub fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBody) {
+pub(package) fn bc_run_stages(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &ir::CoreBody) {
     let ft = body_features(ow, body);
     let lskip = loan_skip(ft);
     let sskip = stage_skip(ft);
@@ -893,7 +893,7 @@ fn bc_validate_facts(ctx: &BorrowCtx, body: &ir::CoreBody, lv_need: bool, mv_nee
 /// size recorded here. A body without an owning local or an auto-freeing owning store schedules
 /// nothing and is left as it is. `verify`: the checker accepted the body, so validation checks
 /// the elaborated body.
-pub fn bc_elaborate(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &mut ir::CoreBody, verify: bool) {
+pub(package) fn bc_elaborate(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &mut ir::CoreBody, verify: bool) {
     let te = ctx.st.pr.start();
     body.inline_size_ok = inl::callee_size_ok(body, ow.pkg);
     body.elaborated = true;
@@ -928,7 +928,7 @@ pub fn bc_elaborate(ow: &mut bfx::Owner, ctx: &mut BorrowCtx, body: &mut ir::Cor
 
 /// The validation build's checks of one elaborated body: the structural verifier and the
 /// ownership verifier; a failure prints the body and aborts.
-pub fn bc_validate_elaborated(ow: &mut bfx::Owner, body: &ir::CoreBody) {
+pub(package) fn bc_validate_elaborated(ow: &mut bfx::Owner, body: &ir::CoreBody) {
     let mut v = irv::verify(body, ow.ast_of(body.module).type_bound(), ow.pkg);
     if v.len() == 0 {
         v = ird::verify_drops(ow, body);
@@ -1007,7 +1007,7 @@ extend tc::TypeChecker {
     /// Lower `fnid` and its closures; their tapes and facts drive the whole borrow pass.
     /// False = a body did not lower (reported here as an error). Lowerers come from
     /// `ctx.lower_pool` when available (entry re-seeds them), so steady state allocates nothing.
-    pub fn bc_ir_lower(self: &mut Self, fnid: NodeId, ctx: &mut BorrowCtx, bodies: &mut Vector<irl::Lowerer>) bool {
+    pub(package) fn bc_ir_lower(self: &mut Self, fnid: NodeId, ctx: &mut BorrowCtx, bodies: &mut Vector<irl::Lowerer>) bool {
         let pkg = self.package as *const loader::Package;
         let m = self.cur_module();
         let mut lw = bc_lw_take(ctx, pkg, m, fnid);
@@ -1093,7 +1093,7 @@ extend tc::TypeChecker {
 
     /// Analyze the pre-lowered bodies AFTER the walk ran (mut-capture bits are now final), then
     /// elaborate the drops of every body the keep will hold, over the analyses just built.
-    pub fn bc_ir_analyze(
+    pub(package) fn bc_ir_analyze(
         self: &mut Self,
         ow: &mut bfx::Owner,
         bodies: &mut Vector<irl::Lowerer>,
@@ -4912,7 +4912,7 @@ extend tc::TypeChecker {
     }
 
     // Does type node `tyn` of module `m` name lifetime `nm` (a span of `m`'s source)?
-    pub fn bc_names_lt(self: &Self, m: ModuleId, tyn: NodeId, nm: tok::Span, depth: i32) bool {
+    pub(package) fn bc_names_lt(self: &Self, m: ModuleId, tyn: NodeId, nm: tok::Span, depth: i32) bool {
         if tyn == NODE_NONE || depth > 6 {
             return false;
         }
@@ -5289,7 +5289,7 @@ extend tc::TypeChecker {
 
     /// Insert the collected records into the diagnostic stream at their source positions (the walk's
     /// own out-of-order region diags use the same watermark protocol).
-    pub fn bc_ir_emit(self: &mut Self, res: &mut Vector<FlowErr>) {
+    pub(package) fn bc_ir_emit(self: &mut Self, res: &mut Vector<FlowErr>) {
         for i in 0..res.len() {
             let start = res.at(i).start;
             let len = res.at(i).len;

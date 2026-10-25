@@ -3,18 +3,18 @@
 // astral scalar).
 
 /// True for a byte of an identifier: an ASCII letter, digit or '_'.
-pub const fn ident_byte(b: u8) bool {
+pub(package) const fn ident_byte(b: u8) bool {
     return b == b'_' || b >= b'a' && b <= b'z' || b >= b'A' && b <= b'Z' || b >= b'0' && b <= b'9';
 }
 
 /// An LSP position: 0-based line, `character` counted in UTF-16 code units (not bytes).
-pub struct Pos {
-    pub line: u32,
-    pub character: u32,
+pub(package) struct Pos {
+    pub(package) line: u32,
+    pub(package) character: u32,
 }
 
 /// Byte offset of each line start (line 0 starts at 0; a new line after every '\n', '\r\n', or lone '\r').
-pub fn line_starts(src: str) Vector<u32> {
+pub(package) fn line_starts(src: str) Vector<u32> {
     let mut ls = Vector::<u32>::new();
     ls.push(0);
     for i in 0..src.len() {
@@ -26,7 +26,7 @@ pub fn line_starts(src: str) Vector<u32> {
 }
 
 /// UTF-16 code units in src[start..end] (clamped to the source).
-pub const fn utf16_len(src: str, start: u32, end: u32) u32 {
+pub(package) const fn utf16_len(src: str, start: u32, end: u32) u32 {
     let mut e = end as usize;
     if e > src.len() {
         e = src.len();
@@ -57,7 +57,7 @@ pub const fn utf16_len(src: str, start: u32, end: u32) u32 {
 }
 
 /// Byte offset -> LSP position (clamped to the source end).
-pub const fn offset_to_pos(src: str, ls: &Vector<u32>, off: u32) Pos {
+pub(package) const fn offset_to_pos(src: str, ls: &Vector<u32>, off: u32) Pos {
     let mut o = off;
     if o as usize > src.len() {
         o = src.len() as u32;
@@ -78,7 +78,7 @@ pub const fn offset_to_pos(src: str, ls: &Vector<u32>, off: u32) Pos {
 
 /// LSP position -> byte offset. Clamps: an out-of-range line maps to the last line start, an
 /// out-of-range character to the line end. A character landing inside a surrogate pair stops before it.
-pub const fn pos_to_offset(src: str, ls: &Vector<u32>, line: u32, character: u32) u32 {
+pub(package) const fn pos_to_offset(src: str, ls: &Vector<u32>, line: u32, character: u32) u32 {
     let mut li = line as usize;
     if li >= ls.len() {
         li = ls.len() - 1;
@@ -116,7 +116,7 @@ pub const fn pos_to_offset(src: str, ls: &Vector<u32>, line: u32, character: u32
 }
 
 /// `b` with an ASCII upper-case letter made lower-case.
-pub const fn ascii_lower(b: u8) u8 {
+pub(package) const fn ascii_lower(b: u8) u8 {
     if b >= b'A' && b <= b'Z' {
         return b + 32;
     }
@@ -125,7 +125,7 @@ pub const fn ascii_lower(b: u8) u8 {
 
 /// True when `needle` occurs at byte `at` of `hay`, ASCII case ignored. Requires
 /// `at + needle.len() <= hay.len()`.
-pub const fn ci_at(hay: str, at: usize, needle: str) bool {
+pub(package) const fn ci_at(hay: str, at: usize, needle: str) bool {
     for k in 0..needle.len() {
         if ascii_lower(hay[at + k]) != ascii_lower(needle[k]) {
             return false;
@@ -135,7 +135,7 @@ pub const fn ci_at(hay: str, at: usize, needle: str) bool {
 }
 
 /// The value of hex digit `b`, or -1.
-pub const fn hex_val(b: u8) i32 {
+pub(package) const fn hex_val(b: u8) i32 {
     if b >= b'0' && b <= b'9' {
         return b - b'0';
     }
@@ -155,7 +155,7 @@ const fn is_drive_letter(b: u8) bool {
 /// file:// URI -> filesystem path (strips the scheme + authority, percent-decodes). Both Windows drive
 /// spellings are accepted: the well-formed `file:///C:/x` (and its `file:///C%3A/x` encoding, which is
 /// what editors send) and the `file://C:/x` shape, whose drive letter sits where the authority goes.
-pub fn uri_to_path(uri: str) String {
+pub(package) fn uri_to_path(uri: str) String {
     let mut out = String::with_capacity(uri.len());
     let mut i: usize = 0;
     if uri.starts_with("file://") {
@@ -195,7 +195,7 @@ pub fn uri_to_path(uri: str) String {
 }
 
 /// Absolute filesystem path -> file:// URI (unreserved bytes kept, the rest percent-encoded).
-pub fn path_to_uri(path: str) String {
+pub(package) fn path_to_uri(path: str) String {
     let mut out = String::with_capacity(path.len() + 8);
     out.push_str("file://");
     if path.len() != 0 && path[0] != b'/' {

@@ -8,122 +8,122 @@
 /// field: -4 and less), a call through the PLT, the address slot of a symbol in the GOT (relaxable), the
 /// thread-local general-dynamic descriptor, a 64-bit absolute address, and (COFF) a 32-bit offset from
 /// the start of the target's section (a thread-local's offset in the thread's block).
-pub const R_PC32: u8 = 1;
-pub const R_PLT32: u8 = 2;
-pub const R_GOTPCRELX: u8 = 3;
-pub const R_REX_GOTPCRELX: u8 = 4;
-pub const R_TLSGD: u8 = 5;
-pub const R_ABS64: u8 = 6;
-pub const R_SECREL: u8 = 7;
+pub(package) const R_PC32: u8 = 1;
+pub(package) const R_PLT32: u8 = 2;
+pub(package) const R_GOTPCRELX: u8 = 3;
+pub(package) const R_REX_GOTPCRELX: u8 = 4;
+pub(package) const R_TLSGD: u8 = 5;
+pub(package) const R_ABS64: u8 = 6;
+pub(package) const R_SECREL: u8 = 7;
 
-pub const RAX: u8 = 0;
-pub const RCX: u8 = 1;
-pub const RDX: u8 = 2;
-pub const RBX: u8 = 3;
-pub const RSP: u8 = 4;
-pub const RBP: u8 = 5;
-pub const RSI: u8 = 6;
-pub const RDI: u8 = 7;
-pub const R8: u8 = 8;
-pub const R9: u8 = 9;
-pub const R10: u8 = 10;
-pub const R11: u8 = 11;
-pub const R12: u8 = 12;
-pub const R13: u8 = 13;
+pub(package) const RAX: u8 = 0;
+pub(package) const RCX: u8 = 1;
+pub(package) const RDX: u8 = 2;
+pub(package) const RBX: u8 = 3;
+pub(package) const RSP: u8 = 4;
+pub(package) const RBP: u8 = 5;
+pub(package) const RSI: u8 = 6;
+pub(package) const RDI: u8 = 7;
+pub(package) const R8: u8 = 8;
+pub(package) const R9: u8 = 9;
+pub(package) const R10: u8 = 10;
+pub(package) const R11: u8 = 11;
+pub(package) const R12: u8 = 12;
+pub(package) const R13: u8 = 13;
 
 /// No register (a memory operand without an index), and the RIP base.
-pub const NOREG: u8 = 0xFF;
-pub const RIP: u8 = 0xFE;
+pub(package) const NOREG: u8 = 0xFF;
+pub(package) const RIP: u8 = 0xFE;
 
 // Condition codes (the low nibble of Jcc, SETcc, CMOVcc).
-pub const CC_O: u32 = 0;
-pub const CC_NO: u32 = 1;
-pub const CC_B: u32 = 2; // below (CF)
-pub const CC_AE: u32 = 3;
-pub const CC_E: u32 = 4;
-pub const CC_NE: u32 = 5;
-pub const CC_BE: u32 = 6;
-pub const CC_A: u32 = 7;
-pub const CC_S: u32 = 8;
-pub const CC_NS: u32 = 9;
-pub const CC_P: u32 = 10;
-pub const CC_NP: u32 = 11;
-pub const CC_L: u32 = 12;
-pub const CC_GE: u32 = 13;
-pub const CC_LE: u32 = 14;
-pub const CC_G: u32 = 15;
+pub(package) const CC_O: u32 = 0;
+pub(package) const CC_NO: u32 = 1;
+pub(package) const CC_B: u32 = 2; // below (CF)
+pub(package) const CC_AE: u32 = 3;
+pub(package) const CC_E: u32 = 4;
+pub(package) const CC_NE: u32 = 5;
+pub(package) const CC_BE: u32 = 6;
+pub(package) const CC_A: u32 = 7;
+pub(package) const CC_S: u32 = 8;
+pub(package) const CC_NS: u32 = 9;
+pub(package) const CC_P: u32 = 10;
+pub(package) const CC_NP: u32 = 11;
+pub(package) const CC_L: u32 = 12;
+pub(package) const CC_GE: u32 = 13;
+pub(package) const CC_LE: u32 = 14;
+pub(package) const CC_G: u32 = 15;
 
 /// The opposite condition.
-pub const fn invert(cc: u32) u32 {
+pub(package) const fn invert(cc: u32) u32 {
     return cc ^ 1;
 }
 
 // ALU operations of the `00..3F` group: the ModRM reg field of `81 /n` and `83 /n`.
-pub const ADD: u32 = 0;
-pub const OR: u32 = 1;
-pub const ADC: u32 = 2;
-pub const SBB: u32 = 3;
-pub const AND: u32 = 4;
-pub const SUB: u32 = 5;
-pub const XOR: u32 = 6;
-pub const CMP: u32 = 7;
+pub(package) const ADD: u32 = 0;
+pub(package) const OR: u32 = 1;
+pub(package) const ADC: u32 = 2;
+pub(package) const SBB: u32 = 3;
+pub(package) const AND: u32 = 4;
+pub(package) const SUB: u32 = 5;
+pub(package) const XOR: u32 = 6;
+pub(package) const CMP: u32 = 7;
 
 // The `F7` group: the ModRM reg field.
-pub const NOT: u32 = 2;
-pub const NEG: u32 = 3;
-pub const MUL: u32 = 4;
-pub const IMUL1: u32 = 5;
-pub const DIV: u32 = 6;
-pub const IDIV: u32 = 7;
+pub(package) const NOT: u32 = 2;
+pub(package) const NEG: u32 = 3;
+pub(package) const MUL: u32 = 4;
+pub(package) const IMUL1: u32 = 5;
+pub(package) const DIV: u32 = 6;
+pub(package) const IDIV: u32 = 7;
 
 // Shifts: the ModRM reg field of `C1`, `D3`.
-pub const ROL: u32 = 0;
-pub const ROR: u32 = 1;
-pub const SHL: u32 = 4;
-pub const SHR: u32 = 5;
-pub const SAR: u32 = 7;
+pub(package) const ROL: u32 = 0;
+pub(package) const ROR: u32 = 1;
+pub(package) const SHL: u32 = 4;
+pub(package) const SHR: u32 = 5;
+pub(package) const SAR: u32 = 7;
 
 /// A memory operand: `base` + `index` << `scale` + `disp`; `base` RIP for a RIP-relative one.
-pub struct Mem {
-    pub base: u8,
-    pub index: u8,
-    pub scale: u8,
-    pub disp: i32,
+pub(package) struct Mem {
+    pub(package) base: u8,
+    pub(package) index: u8,
+    pub(package) scale: u8,
+    pub(package) disp: i32,
 }
 
 extend Mem as Copy {}
 
 /// `base` + `disp`.
-pub const fn at(base: u8, disp: i32) Mem {
+pub(package) const fn at(base: u8, disp: i32) Mem {
     return Mem { base: base, index: NOREG, scale: 0, disp: disp };
 }
 
 /// `base` + `index` << `scale` + `disp`.
-pub const fn ix(base: u8, index: u8, scale: u8, disp: i32) Mem {
+pub(package) const fn ix(base: u8, index: u8, scale: u8, disp: i32) Mem {
     return Mem { base: base, index: index, scale: scale, disp: disp };
 }
 
 /// RIP-relative, its displacement 0 for a relocation.
-pub const fn rip() Mem {
+pub(package) const fn rip() Mem {
     return Mem { base: RIP, index: NOREG, scale: 0, disp: 0 };
 }
 
 /// The code position of the displacement of the last RIP-relative operand an encoder wrote: the
 /// caller's relocation goes there. Set by every form that takes a `Mem`. `jumps`: the positions of the
 /// 32-bit displacements of the jumps, ascending, for `relax`.
-pub struct Code {
-    pub b: Vector<u8>,
-    pub rip_at: u32,
-    pub jumps: Vector<u32>,
+pub(package) struct Code {
+    pub(package) b: Vector<u8>,
+    pub(package) rip_at: u32,
+    pub(package) jumps: Vector<u32>,
 }
 
 extend Code {
-    pub fn new() Code {
+    pub(package) fn new() Code {
         return Code { b: Vector::<u8>::new(), rip_at: 0, jumps: Vector::<u32>::new() };
     }
 
     /// Empty the code for the next function.
-    pub fn clear(self: &mut Self) {
+    pub(package) fn clear(self: &mut Self) {
         self.b.truncate(0);
         self.jumps.truncate(0);
     }
@@ -131,7 +131,7 @@ extend Code {
     /// Give every jump whose target an 8-bit displacement reaches its 2-byte form, every target and the
     /// positions `at` (none inside a jump) moved with the code. A shorter jump never lengthens another's
     /// distance, so the passes stop once one shortens none: at most one pass per jump, plus one.
-    pub fn relax(self: &mut Self, at: &mut Vector<u32>) {
+    pub(package) fn relax(self: &mut Self, at: &mut Vector<u32>) {
         let nj = self.jumps.len();
         if nj == 0 {
             return;
@@ -229,28 +229,28 @@ extend Code {
         self.jumps.truncate(0);
     }
 
-    pub const fn len(self: &Self) u32 {
+    pub(package) const fn len(self: &Self) u32 {
         return self.b.len() as u32;
     }
 
-    pub fn byte(self: &mut Self, x: u32) {
+    pub(package) fn byte(self: &mut Self, x: u32) {
         self.b.push((x & 0xFF) as u8);
     }
 
-    pub fn d32(self: &mut Self, x: u32) {
+    pub(package) fn d32(self: &mut Self, x: u32) {
         self.byte(x);
         self.byte(x >> 8);
         self.byte(x >> 16);
         self.byte(x >> 24);
     }
 
-    pub fn d64(self: &mut Self, x: u64) {
+    pub(package) fn d64(self: &mut Self, x: u64) {
         self.d32(x as u32);
         self.d32((x >> 32) as u32);
     }
 
     /// Overwrite the 32-bit field at `at` with `x`.
-    pub const fn patch32(self: &mut Self, at: u32, x: u32) {
+    pub(package) const fn patch32(self: &mut Self, at: u32, x: u32) {
         for k in 0..4u32 {
             self.b[(at + k) as usize] = (x >> 8 * k & 0xFF) as u8;
         }
@@ -354,7 +354,7 @@ extend Code {
 
     /// `op reg, rm` (register direct) with mandatory prefix `pfx` (0: none) and REX.W `w`; `byte` when `rm`
     /// is a byte register (`reg` is an opcode digit or a wider register).
-    pub fn rr(self: &mut Self, pfx: u32, op: u32, w: bool, reg: u8, rm: u8, byte: bool) {
+    pub(package) fn rr(self: &mut Self, pfx: u32, op: u32, w: bool, reg: u8, rm: u8, byte: bool) {
         if pfx != 0 {
             self.byte(pfx);
         }
@@ -364,7 +364,7 @@ extend Code {
     }
 
     /// `op reg, [m]` with mandatory prefix `pfx` and REX.W `w`.
-    pub fn rm(self: &mut Self, pfx: u32, op: u32, w: bool, reg: u8, m: Mem, byte: bool) {
+    pub(package) fn rm(self: &mut Self, pfx: u32, op: u32, w: bool, reg: u8, m: Mem, byte: bool) {
         if pfx != 0 {
             self.byte(pfx);
         }
@@ -376,12 +376,12 @@ extend Code {
     // ---- Moves ----
 
     /// `dst` = `src` (`sz` 4 zero-extends, 8 copies all).
-    pub fn mov_rr(self: &mut Self, sz: u32, dst: u8, src: u8) {
+    pub(package) fn mov_rr(self: &mut Self, sz: u32, dst: u8, src: u8) {
         self.rr(0, 0x89, sz == 8, src, dst, false);
     }
 
     /// `dst` = `v`: a 32-bit immediate zero-extends, a negative 32-bit one sign-extends, else 10 bytes.
-    pub fn mov_ri(self: &mut Self, dst: u8, v: u64) {
+    pub(package) fn mov_ri(self: &mut Self, dst: u8, v: u64) {
         if v <= 0xFFFFFFFF {
             if dst >= 8 {
                 self.byte(0x41);
@@ -404,7 +404,7 @@ extend Code {
 
     /// `dst` = the `sz` bytes at `m`, zero-extended (`sx`: sign-extended) to 64 bits; 4 bytes
     /// zero-extend unless `sx`.
-    pub fn load(self: &mut Self, sz: u32, sx: bool, dst: u8, m: Mem) {
+    pub(package) fn load(self: &mut Self, sz: u32, sx: bool, dst: u8, m: Mem) {
         if sz == 1 {
             self.rm(
                 0,
@@ -439,7 +439,7 @@ extend Code {
     }
 
     /// The low `sz` bytes of `src` to `m`.
-    pub fn store(self: &mut Self, sz: u32, src: u8, m: Mem) {
+    pub(package) fn store(self: &mut Self, sz: u32, src: u8, m: Mem) {
         self.osize(sz);
         self.rm(
             0,
@@ -456,7 +456,7 @@ extend Code {
     }
 
     /// `sz` bytes of immediate `v` (sign-extended from 32 bits for 8) to `m`.
-    pub fn store_i(self: &mut Self, sz: u32, v: i32, m: Mem) {
+    pub(package) fn store_i(self: &mut Self, sz: u32, v: i32, m: Mem) {
         self.osize(sz);
         self.rm(
             0,
@@ -481,12 +481,12 @@ extend Code {
     }
 
     /// `dst` = the address of `m`.
-    pub fn lea(self: &mut Self, dst: u8, m: Mem) {
+    pub(package) fn lea(self: &mut Self, dst: u8, m: Mem) {
         self.rm(0, 0x8D, true, dst, m, false);
     }
 
     /// `dst` = `src`'s low `from` bytes (1, 2 or 4) extended to `to` bytes (4 or 8), signed `sx`.
-    pub fn ext(self: &mut Self, from: u32, to: u32, sx: bool, dst: u8, src: u8) {
+    pub(package) fn ext(self: &mut Self, from: u32, to: u32, sx: bool, dst: u8, src: u8) {
         if from == 4 {
             if sx {
                 self.rr(0, 0x63, true, dst, src, false);
@@ -510,7 +510,7 @@ extend Code {
     // ---- Integer operations ----
 
     /// `dst` = `dst` op `src` (`ADD` .. `CMP`).
-    pub fn alu_rr(self: &mut Self, op: u32, sz: u32, dst: u8, src: u8) {
+    pub(package) fn alu_rr(self: &mut Self, op: u32, sz: u32, dst: u8, src: u8) {
         self.osize(sz);
         self.rr_both(
             (op << 3) + if sz == 1 {
@@ -533,7 +533,7 @@ extend Code {
     }
 
     /// `dst` = `dst` op `[m]`.
-    pub fn alu_rm(self: &mut Self, op: u32, sz: u32, dst: u8, m: Mem) {
+    pub(package) fn alu_rm(self: &mut Self, op: u32, sz: u32, dst: u8, m: Mem) {
         self.osize(sz);
         self.rm(
             0,
@@ -550,7 +550,7 @@ extend Code {
     }
 
     /// `dst` = `dst` op `k` (a sign-extended 32-bit immediate; 8 bits when it fits).
-    pub fn alu_ri(self: &mut Self, op: u32, sz: u32, dst: u8, k: i32) {
+    pub(package) fn alu_ri(self: &mut Self, op: u32, sz: u32, dst: u8, k: i32) {
         self.osize(sz);
         // The accumulator has forms without ModRM (`op` * 8 + 4 and + 5).
         if sz == 1 {
@@ -584,7 +584,7 @@ extend Code {
     }
 
     /// `[m]` op= `k` (`CMP` compares).
-    pub fn alu_mi(self: &mut Self, op: u32, sz: u32, m: Mem, k: i32) {
+    pub(package) fn alu_mi(self: &mut Self, op: u32, sz: u32, m: Mem, k: i32) {
         self.osize(sz);
         if sz == 1 {
             self.rm(0, 0x80, false, op as u8, m, false);
@@ -601,7 +601,7 @@ extend Code {
     }
 
     /// The flags of `a` & `b`.
-    pub fn test_rr(self: &mut Self, sz: u32, a: u8, b: u8) {
+    pub(package) fn test_rr(self: &mut Self, sz: u32, a: u8, b: u8) {
         self.osize(sz);
         self.rr_both(
             if sz == 1 {
@@ -616,7 +616,7 @@ extend Code {
     }
 
     /// The flags of `a` & `k` (`sz` 1: the low byte against 8 bits).
-    pub fn test_ri(self: &mut Self, sz: u32, a: u8, k: u32) {
+    pub(package) fn test_ri(self: &mut Self, sz: u32, a: u8, k: u32) {
         // The accumulator has forms without ModRM (A8, A9).
         if sz == 1 {
             if a == RAX {
@@ -639,7 +639,7 @@ extend Code {
     }
 
     /// An `F7` group operation on `r` (`NOT`, `NEG`, `MUL`, `IMUL1`, `DIV`, `IDIV`).
-    pub fn unary(self: &mut Self, op: u32, sz: u32, r: u8) {
+    pub(package) fn unary(self: &mut Self, op: u32, sz: u32, r: u8) {
         self.osize(sz);
         self.rr(
             0,
@@ -656,13 +656,13 @@ extend Code {
     }
 
     /// `dst` = `dst` * `src` (the low `sz` bytes; sz 4 or 8).
-    pub fn imul_rr(self: &mut Self, sz: u32, dst: u8, src: u8) {
+    pub(package) fn imul_rr(self: &mut Self, sz: u32, dst: u8, src: u8) {
         self.osize(sz);
         self.rr(0, 0x0FAF, sz == 8, dst, src, false);
     }
 
     /// `dst` = `src` * `k`.
-    pub fn imul_ri(self: &mut Self, sz: u32, dst: u8, src: u8, k: i32) {
+    pub(package) fn imul_ri(self: &mut Self, sz: u32, dst: u8, src: u8, k: i32) {
         if k >= -128 && k < 128 {
             self.rr(0, 0x6B, sz == 8, dst, src, false);
             self.byte(k as u32);
@@ -673,7 +673,7 @@ extend Code {
     }
 
     /// Shift `r` by cl (`SHL`, `SHR`, `SAR`, `ROL`, `ROR`).
-    pub fn shift_cl(self: &mut Self, op: u32, sz: u32, r: u8) {
+    pub(package) fn shift_cl(self: &mut Self, op: u32, sz: u32, r: u8) {
         self.osize(sz);
         self.rr(
             0,
@@ -690,7 +690,7 @@ extend Code {
     }
 
     /// Shift `r` by `k` (below the width).
-    pub fn shift_ri(self: &mut Self, op: u32, sz: u32, r: u8, k: u32) {
+    pub(package) fn shift_ri(self: &mut Self, op: u32, sz: u32, r: u8, k: u32) {
         self.osize(sz);
         // A shift by 1 has a form without the immediate.
         let one: u32 = if k == 1 {
@@ -716,7 +716,7 @@ extend Code {
     }
 
     /// shld (`left`) or shrd `dst`, `src`, cl: 64 bits.
-    pub fn shd_cl(self: &mut Self, left: bool, dst: u8, src: u8) {
+    pub(package) fn shd_cl(self: &mut Self, left: bool, dst: u8, src: u8) {
         self.rr(
             0,
             if left {
@@ -732,7 +732,7 @@ extend Code {
     }
 
     /// rdx:rax = sign extension of rax (`sz` 8: cqo; 4: cdq).
-    pub fn cqo(self: &mut Self, sz: u32) {
+    pub(package) fn cqo(self: &mut Self, sz: u32) {
         if sz == 8 {
             self.byte(0x48);
         }
@@ -740,17 +740,17 @@ extend Code {
     }
 
     /// `dst`'s low byte = condition `cc` (the rest kept).
-    pub fn setcc(self: &mut Self, cc: u32, dst: u8) {
+    pub(package) fn setcc(self: &mut Self, cc: u32, dst: u8) {
         self.rr(0, 0x0F90 + cc, false, 0, dst, true);
     }
 
     /// `dst` = `src` when condition `cc` holds.
-    pub fn cmov(self: &mut Self, cc: u32, sz: u32, dst: u8, src: u8) {
+    pub(package) fn cmov(self: &mut Self, cc: u32, sz: u32, dst: u8, src: u8) {
         self.rr(0, 0x0F40 + cc, sz == 8, dst, src, false);
     }
 
     /// bsr (`rev`) or bsf `dst`, `src`: the index of the highest (lowest) set bit; ZF when `src` is 0.
-    pub fn bsx(self: &mut Self, rev: bool, sz: u32, dst: u8, src: u8) {
+    pub(package) fn bsx(self: &mut Self, rev: bool, sz: u32, dst: u8, src: u8) {
         self.rr(
             0,
             if rev {
@@ -766,20 +766,20 @@ extend Code {
     }
 
     /// CF = bit `k` (below 64) of `r`.
-    pub fn bt_ri(self: &mut Self, r: u8, k: u32) {
+    pub(package) fn bt_ri(self: &mut Self, r: u8, k: u32) {
         self.rr(0, 0x0FBA, true, 4, r, false);
         self.byte(k);
     }
 
     /// Reverse the bytes of `r` (4 or 8 bytes).
-    pub fn bswap(self: &mut Self, sz: u32, r: u8) {
+    pub(package) fn bswap(self: &mut Self, sz: u32, r: u8) {
         self.rex_rr(sz == 8, 0, r, false, false);
         self.byte(0x0F);
         self.byte(0xC8 + (r as u32 & 7));
     }
 
     /// xchg `r`, `[m]` (locked).
-    pub fn xchg_m(self: &mut Self, sz: u32, r: u8, m: Mem) {
+    pub(package) fn xchg_m(self: &mut Self, sz: u32, r: u8, m: Mem) {
         self.osize(sz);
         self.rm(
             0,
@@ -796,7 +796,7 @@ extend Code {
     }
 
     /// lock xadd `[m]`, `r`.
-    pub fn lock_xadd(self: &mut Self, sz: u32, r: u8, m: Mem) {
+    pub(package) fn lock_xadd(self: &mut Self, sz: u32, r: u8, m: Mem) {
         self.osize(sz);
         self.byte(0xF0);
         self.rm(
@@ -814,7 +814,7 @@ extend Code {
     }
 
     /// lock cmpxchg `[m]`, `r` (compares with rax).
-    pub fn lock_cmpxchg(self: &mut Self, sz: u32, r: u8, m: Mem) {
+    pub(package) fn lock_cmpxchg(self: &mut Self, sz: u32, r: u8, m: Mem) {
         self.osize(sz);
         self.byte(0xF0);
         self.rm(
@@ -831,13 +831,13 @@ extend Code {
         );
     }
 
-    pub fn mfence(self: &mut Self) {
+    pub(package) fn mfence(self: &mut Self) {
         self.byte(0x0F);
         self.byte(0xAE);
         self.byte(0xF0);
     }
 
-    pub fn ud2(self: &mut Self) {
+    pub(package) fn ud2(self: &mut Self) {
         self.byte(0x0F);
         self.byte(0x0B);
     }
@@ -845,7 +845,7 @@ extend Code {
     // ---- Control flow ----
 
     /// A jump of condition `cc` with a 32-bit displacement; the field's position.
-    pub fn jcc32(self: &mut Self, cc: u32) u32 {
+    pub(package) fn jcc32(self: &mut Self, cc: u32) u32 {
         self.byte(0x0F);
         self.byte(0x80 + cc);
         let at = self.len();
@@ -855,7 +855,7 @@ extend Code {
     }
 
     /// A jump of condition `cc` to code position `to` (before it): 2 bytes when it reaches.
-    pub fn jcc_back(self: &mut Self, cc: u32, to: u32) {
+    pub(package) fn jcc_back(self: &mut Self, cc: u32, to: u32) {
         let d = to as i64 - (self.len() as i64 + 2);
         if d >= -128 {
             self.byte(0x70 + cc);
@@ -867,7 +867,7 @@ extend Code {
     }
 
     /// A jump with a 32-bit displacement; the field's position.
-    pub fn jmp32(self: &mut Self) u32 {
+    pub(package) fn jmp32(self: &mut Self) u32 {
         self.byte(0xE9);
         let at = self.len();
         self.jumps.push(at);
@@ -876,12 +876,12 @@ extend Code {
     }
 
     /// Point the 32-bit displacement field at `at` to code position `to`.
-    pub const fn land(self: &mut Self, at: u32, to: u32) {
+    pub(package) const fn land(self: &mut Self, at: u32, to: u32) {
         self.patch32(at, (to as i64 - (at as i64 + 4)) as u32);
     }
 
     /// A call with a 32-bit displacement (for a relocation); the field's position.
-    pub fn call32(self: &mut Self) u32 {
+    pub(package) fn call32(self: &mut Self) u32 {
         self.byte(0xE8);
         let at = self.len();
         self.d32(0);
@@ -889,22 +889,22 @@ extend Code {
     }
 
     /// A call of the address in `r`.
-    pub fn call_r(self: &mut Self, r: u8) {
+    pub(package) fn call_r(self: &mut Self, r: u8) {
         self.rr(0, 0xFF, false, 2, r, false);
     }
 
-    pub fn ret(self: &mut Self) {
+    pub(package) fn ret(self: &mut Self) {
         self.byte(0xC3);
     }
 
-    pub fn push(self: &mut Self, r: u8) {
+    pub(package) fn push(self: &mut Self, r: u8) {
         if r >= 8 {
             self.byte(0x41);
         }
         self.byte(0x50 + (r as u32 & 7));
     }
 
-    pub fn pop(self: &mut Self, r: u8) {
+    pub(package) fn pop(self: &mut Self, r: u8) {
         if r >= 8 {
             self.byte(0x41);
         }
@@ -915,12 +915,12 @@ extend Code {
 
     /// An SSE operation `dst` = `dst` op `src` of mandatory prefix `pfx` (0x66, 0xF2, 0xF3 or 0) and
     /// opcode `op` (`0F xx`).
-    pub fn sse_rr(self: &mut Self, pfx: u32, op: u32, dst: u8, src: u8) {
+    pub(package) fn sse_rr(self: &mut Self, pfx: u32, op: u32, dst: u8, src: u8) {
         self.rr(pfx, op, false, dst, src, false);
     }
 
     /// Load `n` bytes (4, 8 or 16) at `m` into xmm `dst` (the bytes above zeroed).
-    pub fn vload(self: &mut Self, n: u32, dst: u8, m: Mem) {
+    pub(package) fn vload(self: &mut Self, n: u32, dst: u8, m: Mem) {
         if n == 4 {
             self.rm(0xF3, 0x0F10, false, dst, m, false);
         } else if n == 8 {
@@ -931,7 +931,7 @@ extend Code {
     }
 
     /// Store the low `n` bytes (4, 8 or 16) of xmm `src` to `m`.
-    pub fn vstore(self: &mut Self, n: u32, src: u8, m: Mem) {
+    pub(package) fn vstore(self: &mut Self, n: u32, src: u8, m: Mem) {
         if n == 4 {
             self.rm(0xF3, 0x0F11, false, src, m, false);
         } else if n == 8 {
@@ -942,24 +942,24 @@ extend Code {
     }
 
     /// xmm `dst` = xmm `src` (all 16 bytes).
-    pub fn vmov(self: &mut Self, dst: u8, src: u8) {
+    pub(package) fn vmov(self: &mut Self, dst: u8, src: u8) {
         if dst != src {
             self.rr(0, 0x0F28, false, dst, src, false);
         }
     }
 
     /// xmm `dst` = the low `sz` bytes (4 or 8) of `src`, the rest zeroed.
-    pub fn movd_to_x(self: &mut Self, sz: u32, dst: u8, src: u8) {
+    pub(package) fn movd_to_x(self: &mut Self, sz: u32, dst: u8, src: u8) {
         self.rr(0x66, 0x0F6E, sz == 8, dst, src, false);
     }
 
     /// `dst` = the low `sz` bytes (4 or 8) of xmm `src`.
-    pub fn movd_from_x(self: &mut Self, sz: u32, dst: u8, src: u8) {
+    pub(package) fn movd_from_x(self: &mut Self, sz: u32, dst: u8, src: u8) {
         self.rr(0x66, 0x0F7E, sz == 8, src, dst, false);
     }
 
     /// cvtsi2ss or cvtsi2sd (`d`) xmm `dst` = the signed `sz`-byte (4 or 8) integer in `src`.
-    pub fn cvtsi2f(self: &mut Self, d: bool, sz: u32, dst: u8, src: u8) {
+    pub(package) fn cvtsi2f(self: &mut Self, d: bool, sz: u32, dst: u8, src: u8) {
         self.rr(
             if d {
                 0xF2u32;
@@ -976,7 +976,7 @@ extend Code {
 
     /// cvttss2si or cvttsd2si (`d`): `dst` = xmm `src` truncated to a signed `sz`-byte integer
     /// (0x80..0 when out of range or NaN).
-    pub fn cvtf2si(self: &mut Self, d: bool, sz: u32, dst: u8, src: u8) {
+    pub(package) fn cvtf2si(self: &mut Self, d: bool, sz: u32, dst: u8, src: u8) {
         self.rr(
             if d {
                 0xF2u32;
@@ -994,7 +994,7 @@ extend Code {
     // ---- Wide vector moves (the AVX forms the C ABI needs) ----
 
     /// vmovdqu of 32 bytes (VEX.256): ymm `r` from (`load`) or to `m`.
-    pub fn ymov(self: &mut Self, load: bool, r: u8, m: Mem) {
+    pub(package) fn ymov(self: &mut Self, load: bool, r: u8, m: Mem) {
         // Map 0F, prefix F3, L = 1: the two-byte form unless the index or the base needs its REX bit.
         let rb = (~(r as u32) >> 3 & 1) << 7;
         let xb = if m.index != NOREG {
@@ -1027,7 +1027,7 @@ extend Code {
 
     /// vmovdqu64 of 64 bytes (EVEX.512): zmm `r` from (`load`) or to `m`. Its 8-bit displacement counts
     /// in 64-byte units.
-    pub fn zmov(self: &mut Self, load: bool, r: u8, m: Mem) {
+    pub(package) fn zmov(self: &mut Self, load: bool, r: u8, m: Mem) {
         let rr = (~(r as u32) >> 3 & 1) << 7;
         let xx = if m.index != NOREG {
             (~(m.index as u32) >> 3 & 1) << 6;

@@ -5,7 +5,7 @@
 
 /// Whether `super_rt.h` includes header `h` (spelled as an `extern "C"` block names it), so every
 /// generated file sees it already.
-pub fn rt_has_header(h: str) bool {
+pub(package) fn rt_has_header(h: str) bool {
     let mut line = String::from_str("#include <");
     line.push_str(h);
     line.push_str(">\n");
@@ -15,7 +15,7 @@ pub fn rt_has_header(h: str) bool {
 /// Whether `super_rt.h` defines function `name` itself (a helper std binds without a header, as
 /// `sc_ctz64`): the emitted C must not declare it again, since a declaration without `inline` would make
 /// the unit's inline definition an external one.
-pub const fn rt_defines(name: str) bool {
+pub(package) const fn rt_defines(name: str) bool {
     for line in super_rt_h().lines() {
         if line.starts_with("inline ") {
             let open = line.find_byte(b'(');
@@ -31,7 +31,7 @@ pub const fn rt_defines(name: str) bool {
 }
 
 /// The text of `super_rt.h`, without its include guard.
-pub const fn super_rt_h() str<'static> {
+pub(package) const fn super_rt_h() str<'static> {
     return M"(#if __has_include(<assert.h>)
 #include <assert.h>
 #endif

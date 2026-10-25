@@ -12,43 +12,43 @@ import ir::cpu_features as cf;
 /// local symbols and debug information; `opt` is the `opt-level` (whether `lir::opt` runs), `debug`
 /// whether the objects carry debug information; `link_args` reach the linker after the profile's
 /// ldflags (`-Wl,<arg>` each).
-pub struct Profile<'a> {
-    pub name: str<'a>,
-    pub ldflags: Vector<String>,
-    pub link_args: Vector<String>,
-    pub strip: bool,
-    pub opt: i32,
-    pub debug: bool,
+pub(package) struct Profile<'a> {
+    pub(package) name: str<'a>,
+    pub(package) ldflags: Vector<String>,
+    pub(package) link_args: Vector<String>,
+    pub(package) strip: bool,
+    pub(package) opt: i32,
+    pub(package) debug: bool,
     /// `lockdep`: the runtime's lock-order checks are compiled in (the build constant LOCKDEP); SC_LOCK_ORDER
     /// switches their reports on.
-    pub lockdep: bool,
+    pub(package) lockdep: bool,
     /// `overflow-checks`: 1 traps integer overflow, 0 wraps it, -1 follows `opt`.
-    pub overflow_checks: i32,
+    pub(package) overflow_checks: i32,
     /// `target-features`: the CPU features to enable; set (`has_features`), it replaces the build's list.
-    pub target_features: Vector<String>,
-    pub has_features: bool,
+    pub(package) target_features: Vector<String>,
+    pub(package) has_features: bool,
 }
 
 /// `opt-level` values: 0 to 3, OPT_S and OPT_Z (`"s"`, `"z"`); OPT_NONE when the profile names none.
-pub const OPT_NONE: i32 = -1;
-pub const OPT_S: i32 = 4;
-pub const OPT_Z: i32 = 5;
+pub(package) const OPT_NONE: i32 = -1;
+pub(package) const OPT_S: i32 = 4;
+pub(package) const OPT_Z: i32 = 5;
 
 /// One extra binary target: `[bin.NAME] root = "..."` (the top-level `bin`/`root` pair is the
 /// primary binary). `super-c build` builds every target; `--bin=NAME` selects one.
-pub struct BinTarget {
-    pub name: String,
-    pub root: String,
+pub(package) struct BinTarget {
+    pub(package) name: String,
+    pub(package) root: String,
 }
 
 /// One [command.NAME] for `super-c command <name>`: shell lines executed in order, stopping at the
 /// first failure. Built-in subcommand names are reserved: a command can never shadow one.
-pub struct Command<'a> {
-    pub name: str<'a>,
-    pub run: Vector<String>,
-    pub needs_build: bool, // needs-build = true: run a manifest build before the lines
-    pub env_k: Vector<String>, // parallel with env_v: set in the environment every line inherits
-    pub env_v: Vector<String>,
+pub(package) struct Command<'a> {
+    pub(package) name: str<'a>,
+    pub(package) run: Vector<String>,
+    pub(package) needs_build: bool, // needs-build = true: run a manifest build before the lines
+    pub(package) env_k: Vector<String>, // parallel with env_v: set in the environment every line inherits
+    pub(package) env_v: Vector<String>,
 }
 
 /// The validated build.toml. `bin` is where the project's binary is INSTALLED: each profile links its own
@@ -56,43 +56,43 @@ pub struct Command<'a> {
 /// name, so a profile can never quietly stand in for another's artifact.
 /// Ownership: `toml` keeps the parsed items alive; Profile/Command `name` views borrow into their
 /// section strings.
-pub struct Manifest<'a> {
+pub(package) struct Manifest<'a> {
     /// Instruction set `@arch` gates against (a `target::table::ISAS` index), -1 unknown. Defaults to the
     /// host; the driver overwrites it for `--arch=`.
-    pub arch: i32,
+    pub(package) arch: i32,
     /// Platform (a `target::table::OSES` index) the build is for: the host, or `--target=`. Its cross
     /// toolchain, baseline CPU features and their C flag depend on it.
-    pub target: i32,
-    pub toml: Vector<toml::TomlItem>,
-    pub bin: String,
-    pub root: String,
-    pub out_dir: String,
-    pub test_dir: String, // where `super-c test` discovers the suite (default "tests")
-    pub bench_dir: String, // where `super-c bench` discovers '@bench' functions (default "bench")
-    pub ldflags: Vector<String>,
-    pub ldlibs: Vector<String>,
-    pub jobs: u32,
-    pub ce_steps: u32, // const-eval step budget; 0 = the engine default (~2M); CLI --const-eval-steps overrides
-    pub ce_mem: u64, // const-eval memory budget in bytes; 0 = the engine default; CLI --const-eval-memory overrides
-    pub std_internals: bool, // `std_internals`: the project names std's `pub(package)` items (unstable internals)
-    pub default_profile: String,
-    pub profiles: Vector<Profile<'a>>,
-    pub commands: Vector<Command<'a>>,
-    pub bins: Vector<BinTarget>, // extra [bin.NAME] targets (the top-level bin/root pair is first-class)
-    pub lib_name: String, // [lib] name; empty = no library target
-    pub lib_root: String, // [lib] root (default src/lib.spc)
-    pub lib_static: bool, // [lib] type contains "static" (the default when [lib] is present)
-    pub lib_shared: bool, // [lib] type contains "shared"
-    pub shards: Vector<loader::ShardRule>, // [shards] and [instance-shards]: per-module counts
-    pub target_features: Vector<String>, // `target-features`: the CPU features to enable (`--target-feature` names)
-    pub target_cpu: String, // `target-cpu`: an x86-64 level applied before `target-features` (`--target-cpu`)
-    pub simd_width: u32, // `simd-width`: 512 lets the vector planner use 512-bit entries on AVX-512; 0 = 256
-    pub simd_dispatch: String, // `simd-dispatch`: `off`, or the x86-64 levels run-time copies are made for; empty = x86-64-v3 (off at opt-level 0 or 1)
+    pub(package) target: i32,
+    pub(package) toml: Vector<toml::TomlItem>,
+    pub(package) bin: String,
+    pub(package) root: String,
+    pub(package) out_dir: String,
+    pub(package) test_dir: String, // where `super-c test` discovers the suite (default "tests")
+    pub(package) bench_dir: String, // where `super-c bench` discovers '@bench' functions (default "bench")
+    pub(package) ldflags: Vector<String>,
+    pub(package) ldlibs: Vector<String>,
+    pub(package) jobs: u32,
+    pub(package) ce_steps: u32, // const-eval step budget; 0 = the engine default (~2M); CLI --const-eval-steps overrides
+    pub(package) ce_mem: u64, // const-eval memory budget in bytes; 0 = the engine default; CLI --const-eval-memory overrides
+    pub(package) std_internals: bool, // `std_internals`: the project names std's `pub(package)` items (unstable internals)
+    pub(package) default_profile: String,
+    pub(package) profiles: Vector<Profile<'a>>,
+    pub(package) commands: Vector<Command<'a>>,
+    pub(package) bins: Vector<BinTarget>, // extra [bin.NAME] targets (the top-level bin/root pair is first-class)
+    pub(package) lib_name: String, // [lib] name; empty = no library target
+    pub(package) lib_root: String, // [lib] root (default src/lib.spc)
+    pub(package) lib_static: bool, // [lib] type contains "static" (the default when [lib] is present)
+    pub(package) lib_shared: bool, // [lib] type contains "shared"
+    pub(package) shards: Vector<loader::ShardRule>, // [shards] and [instance-shards]: per-module counts
+    pub(package) target_features: Vector<String>, // `target-features`: the CPU features to enable (`--target-feature` names)
+    pub(package) target_cpu: String, // `target-cpu`: an x86-64 level applied before `target-features` (`--target-cpu`)
+    pub(package) simd_width: u32, // `simd-width`: 512 lets the vector planner use 512-bit entries on AVX-512; 0 = 256
+    pub(package) simd_dispatch: String, // `simd-dispatch`: `off`, or the x86-64 levels run-time copies are made for; empty = x86-64-v3 (off at opt-level 0 or 1)
     /// `str_id` of the text `load` read, and the file's mtime from the stat before the read (as
     /// `loader::read_file_mt` gives them): the emit stamp's record of the manifest. Both 0 for a manifest
     /// not read from a file.
-    pub src_id: u64,
-    pub mtime: i64,
+    pub(package) src_id: u64,
+    pub(package) mtime: i64,
 }
 
 // Bootstrap constraint: the release compiler dispatches a generic `Free` call to a named `free`
@@ -137,7 +137,7 @@ extend Profile {
 
     /// Whether integer overflow wraps instead of trapping: `overflow-checks = false`, or without the key
     /// an `opt-level` of 2, 3, "s" or "z".
-    pub const fn arith_wraps(self: &Self) bool {
+    pub(package) const fn arith_wraps(self: &Self) bool {
         if self.overflow_checks >= 0 {
             return self.overflow_checks == 0;
         }
@@ -148,7 +148,7 @@ extend Profile {
 /// A manifest holding nothing but the built-in profiles, for a build with no `build.toml` to read them
 /// from: `super-c release foo.spc` compiles and links in one command and still has to honour the profile
 /// it was asked for. Free it like any other manifest.
-pub fn builtins_only<'a>() Manifest<'a> {
+pub(package) fn builtins_only<'a>() Manifest<'a> {
     let mut m = Manifest::new();
     m.add_builtin_profiles();
     return m;
@@ -208,7 +208,7 @@ const COMMANDS: [str<'static>; 14] = [
 /// The position of subcommand `name` in `Mode` declaration order after MODE_DEFAULT (main dispatches
 /// position k to Mode k + 1); -1 when `name` is no subcommand. The names are reserved, so a
 /// `[command.NAME]` can never shadow one.
-pub const fn subcommand_index(name: str) i32 {
+pub(package) const fn subcommand_index(name: str) i32 {
     let names: []str = COMMANDS;
     for k in 0..names.len() {
         if names[k] == name {
@@ -254,7 +254,7 @@ fn set_bool(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut bool) {
 /// --bootstrap-tags build) skips sections and keys this compiler does not know, so a previous release
 /// can build a source tree whose manifest already uses additions it predates; the compiler it produces
 /// reads the same manifest strictly.
-pub fn load(path: str, bootstrap: bool) Option<Manifest> {
+pub(package) fn load(path: str, bootstrap: bool) Option<Manifest> {
     let mut mt: i64 = 0;
     let src_opt = loader::read_file_mt(path, &mut mt);
     if src_opt.is_none() {
@@ -275,7 +275,7 @@ pub fn load(path: str, bootstrap: bool) Option<Manifest> {
 /// Parse and VALIDATE a manifest, returning the diagnostics alongside it. A non-empty `file` renders and
 /// logs them (what the build wants); an empty one leaves them raw with their spans, for a caller that
 /// formats its own (the language server). The manifest is None when the file is unusable.
-pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a>>, diag::Errors) {
+pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a>>, diag::Errors) {
     let mut errs = diag::Errors::new();
     let items_opt = toml::parse_into(src, &mut errs);
     if items_opt.is_none() {
@@ -619,7 +619,7 @@ extend Manifest {
     }
 
     /// Index of the profile named `name`, or -1 when absent.
-    pub const fn profile_index(self: &Self, name: str) i64 {
+    pub(package) const fn profile_index(self: &Self, name: str) i64 {
         for i in 0..self.profiles.len() {
             if self.profiles.at(i).name == name {
                 return i as i64;
@@ -629,7 +629,7 @@ extend Manifest {
     }
 
     /// Index of the command named `name`, or -1 when absent.
-    pub const fn command_index(self: &Self, name: str) i64 {
+    pub(package) const fn command_index(self: &Self, name: str) i64 {
         for i in 0..self.commands.len() {
             if self.commands.at(i).name == name {
                 return i as i64;

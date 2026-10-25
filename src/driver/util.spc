@@ -19,10 +19,10 @@ import atomic;
 import target::table as tgt;
 
 /// The 64-bit FNV-1a offset basis: the state of an empty hash (std `str::hash` starts from it).
-pub const FNV_BASIS: u64 = 0xcbf29ce484222325u64;
+pub(package) const FNV_BASIS: u64 = 0xcbf29ce484222325u64;
 
 /// 64-bit FNV-1a of `s` continued from state `h`: hashing a then b continues over their concatenation.
-pub const fn fnv_cont(h: u64, s: str) u64 {
+pub(package) const fn fnv_cont(h: u64, s: str) u64 {
     let mut x = h;
     for k in 0..s.len() {
         x = (x ^ s.byte_at(k) as u64).wrapping_mul(0x100000001b3u64);
@@ -39,7 +39,7 @@ static mut G_CID: u64 = 0;
 /// process. The C a compiler emits is a function of the compiler, so the emit stamp and the per-TU cache
 /// key on this, not on the file's path or mtime: a reinstall, a copy or an extracted archive can keep
 /// both while the content changes. 0 when the executable cannot be read (the caller then keeps no cache).
-pub fn compiler_id() u64 {
+pub(package) fn compiler_id() u64 {
     let c = unsafe atomic::load_u64(&G_CID, 0);
     if c != 0 {
         return c;
@@ -55,7 +55,7 @@ pub fn compiler_id() u64 {
 
 /// The running executable's path as the system reports it ('/' separators on Windows; under WASI an
 /// absolute argv[0], `shim::sc_set_argv0`); empty when it does not resolve.
-pub fn exe_path() String {
+pub(package) fn exe_path() String {
     if PLATFORM == Platform::Wasm {
         return shim::argv0_path();
     }
@@ -63,13 +63,13 @@ pub fn exe_path() String {
 }
 
 /// Monotonic milliseconds (never wall clock).
-pub fn ticks_ms() i64 {
+pub(package) fn ticks_ms() i64 {
     return (clock::monotonic_ns() / 1000000) as i64;
 }
 
 /// Modification time of `path` in seconds; 0 when it does not exist (the build engine's staleness
 /// sentinel).
-pub fn file_mtime(path: str) i64 {
+pub(package) fn file_mtime(path: str) i64 {
     if let Ok(m) = fs::stat(path) {
         return mtime_s(m.modified_ns);
     }
@@ -78,7 +78,7 @@ pub fn file_mtime(path: str) i64 {
 
 /// Whether paths `a` and `b` name one physical file (device and file number); false when either does not
 /// exist.
-pub fn same_file(a: str, b: str) bool {
+pub(package) fn same_file(a: str, b: str) bool {
     let ma = fs::stat(a);
     let mb = fs::stat(b);
     if ma.is_err() || mb.is_err() {
@@ -89,7 +89,7 @@ pub fn same_file(a: str, b: str) bool {
 }
 
 /// Nanoseconds `ns` as whole seconds, rounded down as `st_mtime` is.
-pub const fn mtime_s(ns: i64) i64 {
+pub(package) const fn mtime_s(ns: i64) i64 {
     let s = ns / 1000000000;
     if ns % 1000000000 < 0 {
         return s - 1;
@@ -98,7 +98,7 @@ pub const fn mtime_s(ns: i64) i64 {
 }
 
 /// The exit code a finished child stands for: its own, or 1 when a signal ended it.
-pub const fn exit_code(st: process::ExitStatus) i32 {
+pub(package) const fn exit_code(st: process::ExitStatus) i32 {
     return switch st {
         Code(c) => c,
         Signal(_) => 1,
@@ -130,7 +130,7 @@ const fn lanes_end(l: &[u64; 4], tot: u64) u64 {
 
 /// A content hash of the file at `path`: `str_id` of its bytes (a regular file reads in whole 64 KiB
 /// blocks, a multiple of the 32-byte groups); 0 when it cannot be read.
-pub fn file_id(path: str) u64 {
+pub(package) fn file_id(path: str) u64 {
     let f = stdio::fopen(path, "rb");
     if f == null {
         return 0;
@@ -166,7 +166,7 @@ pub fn file_id(path: str) u64 {
 }
 
 /// A content hash of `s` in the scheme of `file_id`, about 1 ms per 10 MB; never 0.
-pub fn str_id(s: str) u64 {
+pub(package) fn str_id(s: str) u64 {
     let mut l = LANES0;
     let mut w = Array::<u64, 4>::new();
     let n = s.len();
@@ -186,13 +186,13 @@ pub fn str_id(s: str) u64 {
 }
 
 /// A 4096-byte path scratch buffer; `PathBuf {}` partial init zero-fills the array.
-pub type PathBuf = Array<char, 4096>;
+pub(package) type PathBuf = Array<char, 4096>;
 /// A small zero-filled C string scratch buffer.
-pub type Buf64 = Array<char, 64>;
+pub(package) type Buf64 = Array<char, 64>;
 
 /// Format `src` into `out` at `width` columns. Returns false on lex/parse errors or a
 /// comment-count mismatch; callers must not use `out` after failure.
-pub fn format_source(src: &String, path: str, width: i32, out: &mut String) bool {
+pub(package) fn format_source(src: &String, path: str, width: i32, out: &mut String) bool {
     let mut vsrc = src.clone();
     let mut lx = lex::Lexer::new(&mut vsrc, path);
     lx.keep_trivia = true;
@@ -233,7 +233,7 @@ pub fn format_source(src: &String, path: str, width: i32, out: &mut String) bool
 }
 
 /// "<gen_dir>/<mod path, '::' -> '/'><ext>" (heap-allocated; caller owns).
-pub fn build_out_path(gen_dir: str, mod_path: str, ext: str) String {
+pub(package) fn build_out_path(gen_dir: str, mod_path: str, ext: str) String {
     let mut out = String::from_str(gen_dir);
     out.push_byte(b'/');
     let n = mod_path.len();
@@ -252,7 +252,7 @@ pub fn build_out_path(gen_dir: str, mod_path: str, ext: str) String {
 }
 
 /// True when `path` names an existing directory.
-pub fn is_dir(path: str) bool {
+pub(package) fn is_dir(path: str) bool {
     if let Ok(m) = fs::stat(path) {
         return m.kind == fs::FileKind::Dir;
     }
@@ -262,7 +262,7 @@ pub fn is_dir(path: str) bool {
 /// Whitespace-split `s` into argv entries: FLAG strings keep their shell-splitting contract
 /// ("-framework Cocoa" is two arguments); paths the engine controls are pushed as single entries and
 /// never split, which is what lets spaces, quotes and non-ASCII bytes pass through.
-pub fn split_args(out: &mut Vector<String>, s: str) {
+pub(package) fn split_args(out: &mut Vector<String>, s: str) {
     let mut a: usize = 0;
     for i in 0..s.len() + 1 {
         let ws = i == s.len() || s[i] == b' ' || s[i] == b'\t';
@@ -278,12 +278,12 @@ pub fn split_args(out: &mut Vector<String>, s: str) {
 /// Spawn `args` and wait, output inherited (or captured when `log` is not empty): the exit code, -1 when
 /// the program does not start or the wait fails. A child a signal ended returns 1 and is named on stderr
 /// with the signal.
-pub fn exec_args(args: &Vector<String>, log: str) i32 {
+pub(package) fn exec_args(args: &Vector<String>, log: str) i32 {
     return exec_at("", args, log);
 }
 
 /// `exec_args` of program `file` (a path; empty: `args[0]` searched in PATH), `args` its argv.
-pub fn exec_at(file: str, args: &Vector<String>, log: str) i32 {
+pub(package) fn exec_at(file: str, args: &Vector<String>, log: str) i32 {
     let c = spawn_at(file, args, log);
     if c.is_none() {
         return -1;
@@ -315,7 +315,7 @@ extern "C" "string.h" {
 }
 
 /// `spawn_args` of program `file` (a path; empty: `args[0]` searched in PATH), `args` its argv.
-pub fn spawn_at(file: str, args: &Vector<String>, log: str) Option<process::Child> {
+pub(package) fn spawn_at(file: str, args: &Vector<String>, log: str) Option<process::Child> {
     let mut argv = Vector::<str>::with_capacity(args.len());
     for i in 0..args.len() {
         argv.push(args.at(i).as_str());
@@ -332,17 +332,17 @@ pub fn spawn_at(file: str, args: &Vector<String>, log: str) Option<process::Chil
 }
 
 /// Append `s` to argv `out` as one argument.
-pub fn push_arg(out: &mut Vector<String>, s: str) {
+pub(package) fn push_arg(out: &mut Vector<String>, s: str) {
     out.push(String::from_str(s));
 }
 
 /// False when the file cannot be opened, or a short write or failed close left it incomplete.
-pub fn write_file(path: str, body: str) bool {
+pub(package) fn write_file(path: str, body: str) bool {
     return write_file_parts(path, body, "");
 }
 
 /// `write_file` of `head` followed by `body`, which stay apart in memory.
-pub fn write_file_parts(path: str, head: str, body: str) bool {
+pub(package) fn write_file_parts(path: str, head: str, body: str) bool {
     let f = stdio::fopen(path, "wb");
     if f == null {
         return false;
@@ -354,7 +354,7 @@ pub fn write_file_parts(path: str, head: str, body: str) bool {
 
 /// Copy file `srcp` to `dstp` (created or truncated); false when either cannot be opened or any read,
 /// write or close fails.
-pub fn copy_file(srcp: str, dstp: str) bool {
+pub(package) fn copy_file(srcp: str, dstp: str) bool {
     let fi = stdio::fopen(srcp, "rb");
     if fi == null {
         return false;
@@ -390,7 +390,7 @@ pub fn copy_file(srcp: str, dstp: str) bool {
 /// The units of emitted tree `root` that its packs include, as paths relative to `root`: they compile
 /// only through them (`driver::emit::pack_plan`: a small program's units in `__sc_unity.c`, a larger
 /// one's small units in `__sc_pack0.c`, `__sc_pack1.c`, ..). Empty when the tree has no pack.
-pub fn unity_members(root: str, out: &mut Set<String>) {
+pub(package) fn unity_members(root: str, out: &mut Set<String>) {
     for k in 0..SHARD_MAX + 1 {
         let up = if k == 0 {
             format("{}/__sc_unity.c", root);
@@ -415,13 +415,13 @@ pub fn unity_members(root: str, out: &mut Set<String>) {
 
 /// The most shards one module may have (a chunk's shard is a `u8`), and the most packs a tree has: a
 /// pack count is a shard count (`driver::emit::shard_policy`).
-pub const SHARD_MAX: u32 = 64;
+pub(package) const SHARD_MAX: u32 = 64;
 
 /// The name a generated file in directory `dir` includes file `abs` by (both real paths): relative when
 /// both lie below the working directory, so a tree that moves with its project (a copy, a worktree,
 /// the gate's tree) emits the same text and keeps its cache keys; else `abs`, which compiles from any
 /// location.
-pub fn include_name(abs: str, dir: str) String {
+pub(package) fn include_name(abs: str, dir: str) String {
     // A real path: `/...`, or `X:/...` on Windows (fs::realpath writes forward slashes there).
     let rooted = abs.starts_with("/") || abs.len() > 2 && abs[1] == b':';
     if !rooted {
@@ -454,12 +454,12 @@ const fn below(p: str, d: str) bool {
 /// write_file through `<path>.tmp` and an atomic rename: an interrupted or failed write leaves `path`
 /// as it was, never torn. False when any step fails. Compile, LTO-probe and stamp records ignore a
 /// failure: an old or missing record only makes the next build redo that work.
-pub fn write_file_atomic(path: str, body: str) bool {
+pub(package) fn write_file_atomic(path: str, body: str) bool {
     return write_file_atomic_parts(path, body, "");
 }
 
 /// `write_file_atomic` of `head` followed by `body` (`write_file_parts`).
-pub fn write_file_atomic_parts(path: str, head: str, body: str) bool {
+pub(package) fn write_file_atomic_parts(path: str, head: str, body: str) bool {
     let mut tmp = String::from_str(path);
     tmp.push_str(".tmp");
     if write_file_parts(tmp.as_str(), head, body) && fs::rename(tmp.as_str(), path).is_ok() {
@@ -471,7 +471,7 @@ pub fn write_file_atomic_parts(path: str, head: str, body: str) bool {
 
 /// The entry names of `dir` in directory order, without "." and ".." (and without any dot-entry
 /// unless `hidden`); None when the directory cannot be opened.
-pub fn list_dir(dir: str, hidden: bool) Option<Vector<String>> {
+pub(package) fn list_dir(dir: str, hidden: bool) Option<Vector<String>> {
     let opened = fs::read_dir(dir);
     if opened.is_err() {
         return Option::<Vector<String>>::None;
@@ -490,7 +490,7 @@ pub fn list_dir(dir: str, hidden: bool) Option<Vector<String>> {
 
 /// Create `path` and any missing parent directories (like `mkdir -p`); existing dirs are ignored.
 /// An existing directory costs one stat: the components are created only when it is missing.
-pub fn mkdir_p(path: str) {
+pub(package) fn mkdir_p(path: str) {
     if path.len() == 0 || is_dir(path) {
         return;
     }
@@ -500,7 +500,7 @@ pub fn mkdir_p(path: str) {
 /// Make file `path` hold exactly `body`, creating missing parent directories: a file that already holds
 /// it is not written, so it keeps its mtime (the build's staleness anchor). 1 when the file was written,
 /// 0 when it already held `body`, -1 when it could not be opened, written or closed in full.
-pub fn publish_file(path: str, body: str) i32 {
+pub(package) fn publish_file(path: str, body: str) i32 {
     let r = fs::publish(path, unsafe Slice::<u8> { ptr: body.ptr(), len: body.len() });
     if r.is_err() {
         return -1;
@@ -512,7 +512,7 @@ pub fn publish_file(path: str, body: str) i32 {
 /// drop any directory left empty. The compiler overwrites build/ in place but must also remove outputs the
 /// program does not produce (a removed module, instance or @test runner); a stale TU would
 /// otherwise linger and break `cc build/**/*.c`. Path comparison is exact ("<dir>/<name>", like build_out_path).
-pub fn prune_orphans(dir: str, keep: &Vector<String>) {
+pub(package) fn prune_orphans(dir: str, keep: &Vector<String>) {
     let mut ks = Set::<str>::new();
     for i in 0..keep.len() {
         ks.insert(keep[i].as_str());
@@ -554,7 +554,7 @@ fn prune_dir(dir: &mut String, keep: &Set<str>) {
 /// The C backend's runtime header shared by every generated file (`emit::rt_h`), published with
 /// `publish_file`: -1, after a message, when it cannot be written in full; else 1 when this build rewrote
 /// it, 0 when it was current.
-pub fn write_super_rt(gen_dir: str) i32 {
+pub(package) fn write_super_rt(gen_dir: str) i32 {
     let mut path = build_out_path(gen_dir, "super_rt", ".h");
     let mut h = String::from_str("#ifndef SUPER_RT_H\n#define SUPER_RT_H\n");
     h.push_str(rth::super_rt_h());
@@ -570,7 +570,7 @@ pub fn write_super_rt(gen_dir: str) i32 {
 /// The NDK's prebuilt LLVM directory (`toolchains/llvm/prebuilt/<host>`), which holds `bin/clang` and
 /// `sysroot`, appended to `out`; $ANDROID_NDK_HOME (or $ANDROID_NDK_ROOT) locates the NDK. False, with
 /// `out` unchanged, when neither is set.
-pub fn ndk_llvm(out: &mut String) bool {
+pub(package) fn ndk_llvm(out: &mut String) bool {
     let mut ndk = stdlib::get_env("ANDROID_NDK_HOME").unwrap_or(String::new());
     if ndk.len() == 0 {
         ndk = stdlib::get_env("ANDROID_NDK_ROOT").unwrap_or(String::new());
@@ -591,7 +591,7 @@ const fn ndk_host_tag() str<'static> {
 
 /// The wasi sysroot appended to `out`: `share/wasi-sysroot` of the wasi-sdk $WASI_SDK_PATH names, else
 /// the bare sysroot $WASI_SYSROOT names. False, with `out` unchanged, when neither is set.
-pub fn wasi_sysroot(out: &mut String) bool {
+pub(package) fn wasi_sysroot(out: &mut String) bool {
     let sdkp = stdlib::get_env("WASI_SDK_PATH").unwrap_or(String::new());
     if sdkp.len() != 0 {
         out.push_string(&sdkp);
@@ -611,7 +611,7 @@ pub fn wasi_sysroot(out: &mut String) bool {
 /// enabled CPU `features` in table order. Nothing here overrides the manifest: these come first,
 /// manifest flags after. Callers split the result on whitespace (`split_args`), so no quoting: a
 /// sysroot path must hold no space.
-pub fn push_sdk_flags(cmd: &mut String, target: i32, arch: i32, features: cf::CpuFeatureSet) {
+pub(package) fn push_sdk_flags(cmd: &mut String, target: i32, arch: i32, features: cf::CpuFeatureSet) {
     push_triple(cmd, target, arch);
     let o = tgt::os(target);
     if o.darwin && o.sdk == tgt::SDK_NONE && arch != unsafe shim::sc_host_arch() {
@@ -631,7 +631,7 @@ pub fn push_sdk_flags(cmd: &mut String, target: i32, arch: i32, features: cf::Cp
 /// `char`, and the defines of `target` (Windows: one API level for every mingw
 /// toolchain; MSYS2 defaults `_WIN32_WINNT` to Windows 10, llvm-mingw to Windows 7, whose headers hide the
 /// Windows 8 functions the runtime calls, GetCurrentThreadStackLimits).
-pub fn push_c_env(cmd: &mut String, target: i32) {
+pub(package) fn push_c_env(cmd: &mut String, target: i32) {
     cmd.push_str("-std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700");
     cmd.push_str(tgt::os(target).c_std);
     cmd.push_str(" -funsigned-char");

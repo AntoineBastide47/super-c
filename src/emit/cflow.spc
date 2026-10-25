@@ -7,29 +7,29 @@
 import ir::core as ir;
 
 /// The absent block, position, or dominator.
-pub const NONE: u32 = 0xFFFFFFFF;
+pub(package) const NONE: u32 = 0xFFFFFFFF;
 
 /// The derived control-flow facts of one body; every vector is indexed by block id (`[n]`).
-pub struct CFlow {
-    pub n: u32,
-    pub entry: u32, // threaded entry block
-    pub thread: Vector<u32>, // [n] final target of a trivial-forward (empty goto) chain from b
-    pub reach: Vector<bool>, // [n] reachable from entry over threaded edges
-    pub rpo: Vector<u32>, // [n] reverse-postorder position, NONE if unreachable
-    pub order: Vector<u32>, // reachable blocks in reverse-postorder (emission order)
-    pub preds: Vector<u32>, // [n] reachable in-edge count
-    pub pred_start: Vector<u32>, // [n+1] CSR offsets into pred_list
-    pub pred_list: Vector<u32>, // reachable predecessors, grouped by target
-    pub idom: Vector<u32>, // [n] immediate dominator: the entry itself for entry, NONE if unreachable
-    pub tin: Vector<u32>, // [n] dominator-tree DFS entry stamp (Euler tour) -> O(1) dominance
-    pub tout: Vector<u32>, // [n] dominator-tree DFS exit stamp
-    pub ipdom: Vector<u32>, // [n+1] immediate post-dominator over the reverse graph (index n = exit)
-    pub is_header: Vector<bool>, // [n] loop header (target of a back edge)
-    pub loop_follow: Vector<u32>, // [n] header -> break target block, NONE if none/infinite
-    pub loop_of: Vector<u32>, // [n] innermost enclosing loop header, NONE if outside all loops
-    pub loop_parent: Vector<u32>, // [n] loop header -> immediately enclosing loop header
-    pub follow: Vector<u32>, // [n] branch block -> its join block, NONE if arms do not rejoin
-    pub reducible: bool, // every retreating edge is a back edge
+pub(package) struct CFlow {
+    pub(package) n: u32,
+    pub(package) entry: u32, // threaded entry block
+    pub(package) thread: Vector<u32>, // [n] final target of a trivial-forward (empty goto) chain from b
+    pub(package) reach: Vector<bool>, // [n] reachable from entry over threaded edges
+    pub(package) rpo: Vector<u32>, // [n] reverse-postorder position, NONE if unreachable
+    pub(package) order: Vector<u32>, // reachable blocks in reverse-postorder (emission order)
+    pub(package) preds: Vector<u32>, // [n] reachable in-edge count
+    pub(package) pred_start: Vector<u32>, // [n+1] CSR offsets into pred_list
+    pub(package) pred_list: Vector<u32>, // reachable predecessors, grouped by target
+    pub(package) idom: Vector<u32>, // [n] immediate dominator: the entry itself for entry, NONE if unreachable
+    pub(package) tin: Vector<u32>, // [n] dominator-tree DFS entry stamp (Euler tour) -> O(1) dominance
+    pub(package) tout: Vector<u32>, // [n] dominator-tree DFS exit stamp
+    pub(package) ipdom: Vector<u32>, // [n+1] immediate post-dominator over the reverse graph (index n = exit)
+    pub(package) is_header: Vector<bool>, // [n] loop header (target of a back edge)
+    pub(package) loop_follow: Vector<u32>, // [n] header -> break target block, NONE if none/infinite
+    pub(package) loop_of: Vector<u32>, // [n] innermost enclosing loop header, NONE if outside all loops
+    pub(package) loop_parent: Vector<u32>, // [n] loop header -> immediately enclosing loop header
+    pub(package) follow: Vector<u32>, // [n] branch block -> its join block, NONE if arms do not rejoin
+    pub(package) reducible: bool, // every retreating edge is a back edge
     // Scratch storage for build_into and its passes, kept across functions so a pooled CFlow
     // rebuilds without allocating (every vector clears and refills in place).
     s_sstart: Vector<u32>, // [n+1] CSR offsets into s_succ
@@ -79,7 +79,7 @@ const fn n_succ(b: &ir::CoreBody, x: u32) u32 {
 /// The live edge of switch block `x` when it switches on a literal (`ir::const_switch_edge`); NONE
 /// otherwise. Removing the dead edges keeps them out of reachability, dominance, loop discovery, and
 /// the final C layout.
-pub const fn const_switch_edge(b: &ir::CoreBody, x: u32) u32 {
+pub(package) const fn const_switch_edge(b: &ir::CoreBody, x: u32) u32 {
     return ir::const_switch_edge(b, x);
 }
 
@@ -112,12 +112,12 @@ fn fill_none(v: &mut Vector<u32>, len: u32) {
 
 extend CFlow {
     /// Threaded k-th successor of x.
-    pub const fn succ(self: &Self, b: &ir::CoreBody, x: u32, k: u32) u32 {
+    pub(package) const fn succ(self: &Self, b: &ir::CoreBody, x: u32, k: u32) u32 {
         return *self.thread.at(raw_succ(b, x, k) as usize);
     }
 
     /// A value with no blocks and no heap storage; `analyze` fills it.
-    pub fn new_empty() CFlow {
+    pub(package) fn new_empty() CFlow {
         return CFlow {
             n: 0,
             entry: 0,
@@ -155,7 +155,7 @@ extend CFlow {
 
     /// Rebuild in place: every vector clears and refills, so a pooled CFlow analyzes function
     /// after function without allocating once its high-water capacity is reached.
-    pub fn build_into(self: &mut Self, b: &ir::CoreBody) {
+    pub(package) fn build_into(self: &mut Self, b: &ir::CoreBody) {
         let n = b.blocks.len() as u32;
         self.n = n;
         self.entry = 0;
@@ -647,7 +647,7 @@ extend CFlow {
     }
 
     /// True when x dominates y: an O(1) interval test over the dominator-tree Euler tour.
-    pub const fn dominates(self: &Self, x: u32, y: u32) bool {
+    pub(package) const fn dominates(self: &Self, x: u32, y: u32) bool {
         if *self.tin.at(y as usize) == NONE || *self.tin.at(x as usize) == NONE {
             return false;
         }

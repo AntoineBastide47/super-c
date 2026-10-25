@@ -15,21 +15,21 @@ import stdlib;
 import ir::core as core;
 
 /// How a run ended (`Outcome.kind`): the interpreter's trap kinds (`ir::interp::IT_TRAP_*`), or one of these.
-pub const EV_OK: u8 = 0;
+pub(package) const EV_OK: u8 = 0;
 /// An extern call or inline assembly the evaluator does not model.
-pub const EV_FFI: u8 = 100;
+pub(package) const EV_FFI: u8 = 100;
 /// An instruction the evaluator cannot run: a malformed body or an unsupported operation.
-pub const EV_ERROR: u8 = 101;
+pub(package) const EV_ERROR: u8 = 101;
 
 /// The end of a run: its kind, the message, the location of the instruction that ended it (a panic, a
 /// trap, the failing access), and a scalar result.
-pub struct Outcome {
-    pub kind: u8,
-    pub msg: String,
-    pub loc: Loc,
+pub(package) struct Outcome {
+    pub(package) kind: u8,
+    pub(package) msg: String,
+    pub(package) loc: Loc,
     /// The location of the outermost frame's instruction when the run ended (the test's statement).
-    pub top: Loc,
-    pub value: u64,
+    pub(package) top: Loc,
+    pub(package) value: u64,
 }
 
 // Object kinds.
@@ -40,39 +40,39 @@ const OB_FUNC: u8 = 3;
 
 // An object: `size` bytes at `base` of its arena (the stack arena for a slot, the heap arena else).
 struct Obj {
-    pub base: u64,
-    pub size: u64,
-    pub kind: u8,
-    pub live: bool,
-    pub sym: u32, // a data or function object's symbol
+    pub(package) base: u64,
+    pub(package) size: u64,
+    pub(package) kind: u8,
+    pub(package) live: bool,
+    pub(package) sym: u32, // a data or function object's symbol
 }
 
 // One call: its body, the next instruction, its values' first word, and where its result goes.
 struct Frame {
-    pub body: u32,
-    pub pc: u32,
-    pub vbase: u32,
-    pub obj0: u32, // the object of its slot 0
-    pub stack_mark: u64, // the stack arena's length at entry
-    pub ret_word: u32, // the caller's word for the result, NONE without one
-    pub ret_ty: u8,
-    pub va: u32, // its variadic arguments' first word in `vargs`
-    pub nva: u32,
-    pub va_ty: u32, // their types' first entry in `vatys`
+    pub(package) body: u32,
+    pub(package) pc: u32,
+    pub(package) vbase: u32,
+    pub(package) obj0: u32, // the object of its slot 0
+    pub(package) stack_mark: u64, // the stack arena's length at entry
+    pub(package) ret_word: u32, // the caller's word for the result, NONE without one
+    pub(package) ret_ty: u8,
+    pub(package) va: u32, // its variadic arguments' first word in `vargs`
+    pub(package) nva: u32,
+    pub(package) va_ty: u32, // their types' first entry in `vatys`
 }
 
 // Per body, the first word of each value: instructions, then block parameters.
 struct Words {
-    pub off: Vector<u32>,
-    pub total: u32,
+    pub(package) off: Vector<u32>,
+    pub(package) total: u32,
 }
 
 /// The evaluator over one package.
-pub struct Eval {
+pub(package) struct Eval {
     pkg: *const Package,
-    pub max_steps: u64,
-    pub max_bytes: u64,
-    pub max_depth: u32,
+    pub(package) max_steps: u64,
+    pub(package) max_bytes: u64,
+    pub(package) max_depth: u32,
     steps: u64,
     objs: Vector<Obj>,
     stack: Vector<u8>,
@@ -97,7 +97,7 @@ extend Obj as Copy {}
 extend Frame as Copy {}
 
 extend Eval {
-    pub fn new(pkg: &Package) Eval {
+    pub(package) fn new(pkg: &Package) Eval {
         let mut e = Eval {
             pkg: pkg,
             max_steps: 50000000,
@@ -150,7 +150,7 @@ extend Eval {
 
     /// Run function symbol `sym` with the scalar arguments `args` (one word each) from the package's
     /// initial memory; the outcome.
-    pub fn run(self: &mut Self, sym: u32, args: []u64) Outcome {
+    pub(package) fn run(self: &mut Self, sym: u32, args: []u64) Outcome {
         self.acct_on = false;
         self.acct_calls = 0;
         self.acct_bytes = 0;
@@ -1583,7 +1583,7 @@ extend Eval {
 }
 
 /// The text of an outcome for a report: its kind, message and location.
-pub fn outcome_text(p: &Package, o: &Outcome, out: &mut String) {
+pub(package) fn outcome_text(p: &Package, o: &Outcome, out: &mut String) {
     out.format_into("kind {} \"{}\"", o.kind, o.msg.as_str());
     if o.loc.line != 0 {
         out.format_into(" at {}:{}:{}", p.spell(p.files[o.loc.file as usize]), o.loc.line, o.loc.col);
@@ -1592,15 +1592,15 @@ pub fn outcome_text(p: &Package, o: &Outcome, out: &mut String) {
 
 // The words a value of type `t` takes.
 /// `int_fold`'s outcomes: the result, or the trap the operation raises.
-pub const FOLD_OK: u8 = 0;
-pub const FOLD_DIV_ZERO: u8 = 1;
-pub const FOLD_OVERFLOW: u8 = 2;
-pub const FOLD_SHIFT: u8 = 3;
+pub(package) const FOLD_OK: u8 = 0;
+pub(package) const FOLD_DIV_ZERO: u8 = 1;
+pub(package) const FOLD_OVERFLOW: u8 = 2;
+pub(package) const FOLD_SHIFT: u8 = 3;
 
 /// Integer operation `op` (`O_ADD` to `O_NOT`; `O_NEG` and `O_NOT` read `x` alone) of a scalar integer
 /// or pointer type `ty` on `x` and `y` into `out`, truncated to the type: the evaluator's arithmetic,
 /// which the optimizer folds with. FOLD_OK, or the trap it raises (and `out` unchanged).
-pub const fn int_fold(op: u8, ty: u8, ptr: u32, x: u64, y: u64, out: &mut u64) u8 {
+pub(package) const fn int_fold(op: u8, ty: u8, ptr: u32, x: u64, y: u64, out: &mut u64) u8 {
     let bits = type_bits(ty, ptr);
     let sx = sign_ext(x, bits);
     let sy = sign_ext(y, bits);
@@ -1682,7 +1682,7 @@ const fn pick_str(c: bool, a: str<'static>, b: str<'static>) str<'static> {
 }
 
 // `x` truncated to its low `bits` bits.
-pub const fn trunc_bits(x: u64, bits: u32) u64 {
+pub(package) const fn trunc_bits(x: u64, bits: u32) u64 {
     if bits >= 64 {
         return x;
     }
@@ -1788,7 +1788,7 @@ const fn icmp128(c: u16, xl: u64, xh: u64, yl: u64, yh: u64) bool {
     return !less;
 }
 
-pub const fn sign_ext(x: u64, bits: u32) i64 {
+pub(package) const fn sign_ext(x: u64, bits: u32) i64 {
     return lprint::sign_extend(x, bits);
 }
 
@@ -1808,7 +1808,7 @@ const fn set_lane(vals: &mut Vector<u64>, w: u32, k: u32, bits: u32, v: u64) {
 
 // Whether `op` (add, subtract, multiply) of the `ty` integers `x` and `y` leaves the type's range.
 /// Whether checked operation `op` (`O_ADDO`, `O_SUBO`, `O_MULO`) of `x` and `y` of type `ty` overflows.
-pub const fn overflows(op: u8, ty: u8, ptr: u32, signed: bool, x: u64, y: u64) bool {
+pub(package) const fn overflows(op: u8, ty: u8, ptr: u32, signed: bool, x: u64, y: u64) bool {
     let bits = type_bits(ty, ptr);
     if signed {
         let a = sign_ext(x, bits);
@@ -1867,7 +1867,7 @@ const fn ov64(op: u8, signed: bool, x: u64, y: u64) bool {
     return o;
 }
 
-pub const fn icmp(c: u16, ty: u8, ptr: u32, x: u64, y: u64) bool {
+pub(package) const fn icmp(c: u16, ty: u8, ptr: u32, x: u64, y: u64) bool {
     let bits = type_bits(ty, ptr);
     let a = sign_ext(x, bits);
     let d = sign_ext(y, bits);
@@ -1942,7 +1942,7 @@ const fn to_f64(ty: u8, w: u64) f64 {
 
 /// A float operation on f32 rounds to f32. A NaN result is the first NaN operand quieted, else the
 /// positive quiet NaN, as LLVM folds it: the host's own NaN (x86's is negative) never shows.
-pub const fn float_op(op: u8, ty: u8, x: u64, y: u64) u64 {
+pub(package) const fn float_op(op: u8, ty: u8, x: u64, y: u64) u64 {
     if ty == T_F32 {
         let a = fl::f32_from_bits(x as u32);
         let c = fl::f32_from_bits(y as u32);
@@ -1994,7 +1994,7 @@ pub const fn float_op(op: u8, ty: u8, x: u64, y: u64) u64 {
 }
 
 // Scalar conversion `op` of `x` from `from` to `to`; false for an unchecked float conversion out of range.
-pub const fn scalar_convert(op: u8, aux: u16, from: u8, to: u8, ptr: u32, x: u64, out: &mut u64) bool {
+pub(package) const fn scalar_convert(op: u8, aux: u16, from: u8, to: u8, ptr: u32, x: u64, out: &mut u64) bool {
     let fb = type_bits(from, ptr);
     let tb = type_bits(to, ptr);
     if op == O_SEXT {
@@ -2105,7 +2105,7 @@ const IC_LANE_PANIC: u8 = 30; // __sc_lane_panic(lane, m)
 
 /// Whether the evaluator runs function `name` as it models it, not its body: the optimizer keeps the
 /// calls of such a function.
-pub const fn modeled(name: str) bool {
+pub(package) const fn modeled(name: str) bool {
     return icode_of(name) != IC_NONE;
 }
 

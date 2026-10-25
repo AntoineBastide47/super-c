@@ -25,54 +25,54 @@ import emit::rt_h as rth;
 import utils::errors as errs;
 
 /// Number of nominal builtin types; sizes Package.builtin_decls. Pinned to BuiltinType::BT_COUNT.
-pub const BT_COUNT_N: usize = BuiltinType::BT_COUNT as usize;
+pub(package) const BT_COUNT_N: usize = BuiltinType::BT_COUNT as usize;
 
 /// One loaded module: its `::`-joined module path (the mangling/lookup key), the file it came from, its
 /// source text and parsed Ast. The Ast is held by value, so `has_ast` records whether lex/parse succeeded.
 @derive(Persist)
-pub struct Module {
-    pub path: String, // "std::string"; the root module is its file stem (owned)
-    pub file: String, // filesystem path the source was read from (owned)
-    pub source: String, // file contents (owned; span offsets index into it)
+pub(package) struct Module {
+    pub(package) path: String, // "std::string"; the root module is its file stem (owned)
+    pub(package) file: String, // filesystem path the source was read from (owned)
+    pub(package) source: String, // file contents (owned; span offsets index into it)
     /// `str_id(source)`: the content this build read, what the emit stamp, the prelude image and the
     /// per-TU cache record for the module.
-    pub src_id: u64,
+    pub(package) src_id: u64,
     /// The file's mtime from the stat taken before the read (`read_file_mt`); 0 when the source is not
     /// a file's.
-    pub mtime: i64,
-    pub ast: Ast, // parsed AST; after hir::lower runs it IS the module's HIR (desugared, resolved)
-    pub has_ast: bool,
-    pub prelude: bool, // part of the auto-imported std prelude
+    pub(package) mtime: i64,
+    pub(package) ast: Ast, // parsed AST; after hir::lower runs it IS the module's HIR (desugared, resolved)
+    pub(package) has_ast: bool,
+    pub(package) prelude: bool, // part of the auto-imported std prelude
     /// The vector backend file (`std/simd/backend/<isa>.spc`): its entries render apart, so the
     /// module emits no unit of its own.
-    pub backend: bool,
+    pub(package) backend: bool,
     /// The import root the file came from (`PKG_*`, or `PKG_VENDOR + k` for the k-th `vendor/<name>`):
     /// what `pub(package)` reaches.
-    pub pkg: u16,
+    pub(package) pkg: u16,
     /// What `pub(module)` reaches: the files whose path is this one or starts with it and `::` (the
     /// declaring file's path minus its last segment, the whole path for a directory index; `std` for the
     /// prelude). Empty: the whole package.
-    pub scope: String,
+    pub(package) scope: String,
     /// A directory imported without an index file: its source glob-imports every `.spc` file in it.
-    pub implicit_index: bool,
+    pub(package) implicit_index: bool,
 }
 
 /// `Module.pkg` values: std (the prelude, the runtime and `std::`), the `ffi/` bindings, the project (its
 /// root, `src/`, `tests/`, `bench/`), then one per `vendor/<name>`.
-pub const PKG_STD: u16 = 0;
-pub const PKG_FFI: u16 = 1;
-pub const PKG_PROJECT: u16 = 2;
-pub const PKG_VENDOR: u16 = 3;
+pub(package) const PKG_STD: u16 = 0;
+pub(package) const PKG_FFI: u16 = 1;
+pub(package) const PKG_PROJECT: u16 = 2;
+pub(package) const PKG_VENDOR: u16 = 3;
 
 /// `lookup`'s asking module for a lookup the compiler makes itself: every exported item answers.
-pub const FROM_ANY: u32 = 0xFFFFFFFF;
+pub(package) const FROM_ANY: u32 = 0xFFFFFFFF;
 
 /// One shard-policy entry: module `module` (its `::` path) emits `tus` module TUs and `insts`
 /// instance shards; a count is a schema, changed only by editing the policy.
-pub struct ShardRule {
-    pub module: String,
-    pub tus: u32,
-    pub insts: u32,
+pub(package) struct ShardRule {
+    pub(package) module: String,
+    pub(package) tus: u32,
+    pub(package) insts: u32,
 }
 
 /// Item readiness states (`ItemSched.state`), monotone per item: a transition only moves up,
@@ -81,11 +81,11 @@ pub struct ShardRule {
 /// visibility is the static schedule rule (`graph::items::visible`); the states serve the
 /// language server's module-order passes, the digest and the tests. An item goes Resolved ->
 /// Checking -> Checked -> IrReady; values 2 and 3 are unused.
-pub const IS_PARSED: u8 = 0;
-pub const IS_RESOLVED: u8 = 1;
-pub const IS_CHECKING: u8 = 4;
-pub const IS_CHECKED: u8 = 5;
-pub const IS_IR_READY: u8 = 6;
+pub(package) const IS_PARSED: u8 = 0;
+pub(package) const IS_RESOLVED: u8 = 1;
+pub(package) const IS_CHECKING: u8 = 4;
+pub(package) const IS_CHECKED: u8 = 5;
+pub(package) const IS_IR_READY: u8 = 6;
 
 /// The item schedule index (`graph::items`): one record per `PkgIndex.items` entry, stored as
 /// parallel arrays indexed by ItemId. `key` is the stable item key (module path, top-level
@@ -97,343 +97,343 @@ pub const IS_IR_READY: u8 = 6;
 /// item in dependency-first order; `state` the readiness state; `by_node` the items of each
 /// module (the `mod_items` ranges) ordered by declaration node for the (module, node) lookup.
 /// The diagnostic owner of an item is its module (`ItemMeta.module`).
-pub struct ItemSched {
-    pub key: Vector<u64>,
-    pub sig_hash: Vector<u64>,
-    pub pre_off: Vector<u32>,
-    pub pre_edges: Vector<u32>,
-    pub fin_off: Vector<u32>,
-    pub fin_edges: Vector<u32>,
-    pub comp: Vector<u32>,
-    pub ncomp: u32,
-    pub state: Vector<u8>,
+pub(package) struct ItemSched {
+    pub(package) key: Vector<u64>,
+    pub(package) sig_hash: Vector<u64>,
+    pub(package) pre_off: Vector<u32>,
+    pub(package) pre_edges: Vector<u32>,
+    pub(package) fin_off: Vector<u32>,
+    pub(package) fin_edges: Vector<u32>,
+    pub(package) comp: Vector<u32>,
+    pub(package) ncomp: u32,
+    pub(package) state: Vector<u8>,
     /// Per item: 1 when every borrow-carrying `return` of the function is a bare parameter (the
     /// modular lifetime check pinned the result's borrows), 0 when not, 2 while unrecorded. The
     /// driver records a module's verdicts right after its type check (`bc_record_ret_attr`); the
     /// borrow pass reads them at every call, so a callee's body syntax can be released before its
     /// callers are analyzed.
-    pub ret_attr: Vector<u8>,
-    pub dyn_edges: Set<u64>, // caller item << 32 | callee item, recorded by the master engine
-    pub by_node: Vector<u32>,
+    pub(package) ret_attr: Vector<u8>,
+    pub(package) dyn_edges: Set<u64>, // caller item << 32 | callee item, recorded by the master engine
+    pub(package) by_node: Vector<u32>,
     /// Per item: the declaration node of the top-level item before it in node order (0 for a
     /// module's first), the exclusive start of the item's own module-arena range; a member
     /// carries its extend's. `body_hi` is a function's body block id (untagged), else 0.
-    pub top_lo: Vector<u32>,
-    pub body_hi: Vector<u32>,
+    pub(package) top_lo: Vector<u32>,
+    pub(package) body_hi: Vector<u32>,
     /// The member names of the builtin extends outside the prelude (`graph::items::builtin_edges`):
     /// the name's 32-bit hash << 32 | the extend item, sorted; `bmask` a bit per first byte and
     /// length class of those names, the prefilter of the scan.
-    pub bnames: Vector<u64>,
-    pub bmask: u64,
+    pub(package) bnames: Vector<u64>,
+    pub(package) bmask: u64,
     /// The component graph (`build`): `cdep` the components each component depends on, `citem`
     /// each component's items ascending. Both CSR by component.
-    pub cdep_off: Vector<u32>,
-    pub cdep: Vector<u32>,
-    pub citem_off: Vector<u32>,
-    pub citem: Vector<u32>,
-    pub built: bool,
+    pub(package) cdep_off: Vector<u32>,
+    pub(package) cdep: Vector<u32>,
+    pub(package) citem_off: Vector<u32>,
+    pub(package) citem: Vector<u32>,
+    pub(package) built: bool,
     /// The final ranges hold the post-typecheck edges (`build_final` after the typecheck frontier,
     /// or `finalize`): what the unused-item lint and the emission liveness read.
-    pub final_edges: bool,
-    pub finalized: bool, // `finalize` ran: final ranges and signature hashes are current
-    pub build_ns: u64, // time of the last `build` (the frontier's per-task edges apart)
-    pub final_ns: u64, // time of `finalize`'s final-edge scan
-    pub hash_ns: u64, // time of `finalize`'s signature hashes
+    pub(package) final_edges: bool,
+    pub(package) finalized: bool, // `finalize` ran: final ranges and signature hashes are current
+    pub(package) build_ns: u64, // time of the last `build` (the frontier's per-task edges apart)
+    pub(package) final_ns: u64, // time of `finalize`'s final-edge scan
+    pub(package) hash_ns: u64, // time of `finalize`'s signature hashes
 }
 
 extend ItemSched {
     /// Approximate owned bytes.
-    pub const fn retained(self: &Self) usize {
+    pub(package) const fn retained(self: &Self) usize {
         return (self.key.capacity() + self.sig_hash.capacity()) * 8 + (self.pre_off.capacity() + self.pre_edges.capacity() + self.fin_off.capacity() + self.fin_edges.capacity() + self.comp.capacity() + self.by_node.capacity() + self.top_lo.capacity() + self.body_hi.capacity() + self.bnames.capacity() * 2 + self.cdep_off.capacity() + self.cdep.capacity() + self.citem_off.capacity() + self.citem.capacity()) * 4 + self.state.capacity() + self.ret_attr.capacity() + self.dyn_edges.len() * 16;
     }
 }
 
 /// The whole compilation: the root module plus every module reachable through `import`. Modules are kept as
 /// separate Asts; cross-module references are DefId{module, node} into this array.
-pub struct Package {
-    pub modules: Vector<Module>,
+pub(package) struct Package {
+    pub(package) modules: Vector<Module>,
     /// The module path index `find` reads: FNV hash of a module path -> the newest module with that
     /// hash, and per module the next older module whose path has the same hash (SYM_NONE ends a
     /// chain). `add_module` is the one place modules join the package, and paths never change.
-    pub mod_index: Map<u64, u32>,
-    pub mod_chain: Vector<u32>,
+    pub(package) mod_index: Map<u64, u32>,
+    pub(package) mod_chain: Vector<u32>,
     /// `std::` paths that name a prelude file loaded before them under its `__std::` path (the batch
     /// `lint` and the LSP load the prelude first), and that module: `find` falls back to them, so an
     /// explicit import gets the prelude module, as `load_prelude` gives a file imported first.
-    pub alias_path: Vector<String>,
-    pub alias_id: Vector<u32>,
+    pub(package) alias_path: Vector<String>,
+    pub(package) alias_id: Vector<u32>,
     /// Instruction set `@arch` items are gated against: 0 x86_64, 1 aarch64, 2 wasm32, -1 unknown.
     /// Defaults to the host the compiler runs on; the driver overwrites it for `--arch=`.
-    pub arch: i32,
+    pub(package) arch: i32,
     /// The resolved CPU features of the build (`--target-feature`, `target-features`): the baseline of
     /// `arch` unless the driver sets them.
-    pub features: cf::CpuFeatureSet,
+    pub(package) features: cf::CpuFeatureSet,
     /// The vector width in bits the planner prefers where AVX-512 is enabled: 256 (the default) or 512.
-    pub simd_width: u32,
+    pub(package) simd_width: u32,
     /// `--simd-dispatch` / `simd-dispatch`: `off`, or the x86-64 levels (comma-separated) each function
     /// with vector code gets a copy for, chosen at run time; empty: `x86-64-v3` (`build::dispatch_for`
     /// sets `off` for a profile at opt-level 0 or 1).
-    pub simd_dispatch: String,
+    pub(package) simd_dispatch: String,
     /// The copies' feature sets: `simd_dispatch`'s levels beyond the build's, closed, by size (the
     /// load computes them). Empty off x86_64 and with `off`.
-    pub simd_levels: Vector<cf::CpuFeatureSet>,
+    pub(package) simd_levels: Vector<cf::CpuFeatureSet>,
     /// The effective features of the `@target_feature` functions, joined (`check_feature_calls`): what
     /// some function of the program may plan with beyond `features`.
-    pub fn_union: cf::CpuFeatureSet,
+    pub(package) fn_union: cf::CpuFeatureSet,
     /// The backend table: every `@simd_impl` entry by key, then by feature count, the largest first
     /// (built once every module is typed; `emit::simd_plan` reads it).
-    pub simd_table: Vector<cf::SimdEntry>,
+    pub(package) simd_table: Vector<cf::SimdEntry>,
     /// The build makes a shared library: its code is position-independent.
-    pub pic: bool,
+    pub(package) pic: bool,
     /// The build's configuration (`bsys::build_cfg`): bit `k - BC_LOCKDEP` holds build constant
     /// `k`, except that the OVERFLOW_CHECKS bit is set where the profile wraps.
-    pub build_cfg: u32,
+    pub(package) build_cfg: u32,
     /// The profile's `opt-level` (`bman::OPT_NONE` when it names none), and whether the objects carry debug
     /// information (`debug`).
-    pub opt: i32,
-    pub debug_info: bool,
+    pub(package) opt: i32,
+    pub(package) debug_info: bool,
     /// `--sysroot`: the target's C library tree (headers and libraries); empty: discovered.
-    pub sysroot: String,
+    pub(package) sysroot: String,
     /// The settings the build-constant module spells and the early prune decides by: a `--test`
     /// build (TEST), the profile name (PROFILE; empty is `debug`), and the profile names a PROFILE
     /// comparison may name (empty: unchecked). The driver sets them before the platform filter.
-    pub test_build: bool,
-    pub profile: String,
-    pub profiles: Vector<String>,
+    pub(package) test_build: bool,
+    pub(package) profile: String,
+    pub(package) profiles: Vector<String>,
     /// The build-constant module (`__std::build`), -1 until the platform filter adds it; the
     /// target platform it spells.
-    pub build_module: i32,
-    pub build_target: i32,
+    pub(package) build_module: i32,
+    pub(package) build_target: i32,
     /// The runtime every program links (`std::rt::base`, loaded with the vector backend); -1 when the
     /// package has no std directory.
-    pub rt_module: i32,
+    pub(package) rt_module: i32,
     /// The test runner a `--test` build links (`std::rt::test`, loaded with the runtime); -1 in any
     /// other build.
-    pub rt_test: i32,
+    pub(package) rt_test: i32,
     /// The C library of a wasm build (`std::rt::libc` and `std::rt::libm`, loaded with the runtime): wasm
     /// has no system C library, and these call WASI directly; -1 for any other target.
-    pub rt_libc: i32,
+    pub(package) rt_libc: i32,
     /// `std::rt::builtins`: the compiler-rt routines the native backends call, for a target whose C library
     /// lacks them (all but Apple's); -1 when not loaded.
-    pub rt_builtins: i32,
-    pub rt_libm: i32,
+    pub(package) rt_builtins: i32,
+    pub(package) rt_libm: i32,
     /// The traps of the native backends' vector code (`std::rt::lanes`), loaded with a vector; -1 else.
-    pub rt_lanes: i32,
+    pub(package) rt_lanes: i32,
     /// The module the package was loaded from, whose top-level `main` is the program entry; -1 when
     /// the package has none (a batch lint, whose listed files `lint_set` marks as roots instead).
-    pub root: i32,
+    pub(package) root: i32,
     /// The user's root module: 0 when the root loads first, the first module after the prelude in a
     /// prelude-first build (`load_user`).
-    pub root_module: u32,
+    pub(package) root_module: u32,
     /// The `--bootstrap-tags` flag the ASTs were loaded under: gating changes item sets while
     /// leaving sources identical, so build caches keyed on sources must include it.
-    pub bootstrap: bool,
-    pub root_dir: String, // source root: the directory of the root file; imports resolve relative to it
-    pub gen_root: String, // where codegen writes the emitted C tree: <build dir>/raw, set by the driver
-    pub c_files: u64, // the `.c` files the emission left under gen_root (`run_package`), for the emit stamp
-    pub std_root: String, // second import search root (parent of std/); empty = none
+    pub(package) bootstrap: bool,
+    pub(package) root_dir: String, // source root: the directory of the root file; imports resolve relative to it
+    pub(package) gen_root: String, // where codegen writes the emitted C tree: <build dir>/raw, set by the driver
+    pub(package) c_files: u64, // the `.c` files the emission left under gen_root (`run_package`), for the emit stamp
+    pub(package) std_root: String, // second import search root (parent of std/); empty = none
     /// The project's manifest sets `std_internals = true`: its files see std's `pub(package)` items.
-    pub std_internals: bool,
+    pub(package) std_internals: bool,
     /// The build emits the manifest's `[lib]` target: the project's exported functions are its API, so
     /// each is emitted whether or not the library calls it (`reach_roots`).
-    pub lib_build: bool,
+    pub(package) lib_build: bool,
     /// The `vendor/<name>` packages in load order: `Module.pkg` is `PKG_VENDOR` plus the index.
-    pub vendors: Vector<String>,
-    pub alt_root: String, // optional search root between the project root and std (manifest src/ dir)
-    pub ok: bool, // false if any read/parse/cycle error was reported during loading
+    pub(package) vendors: Vector<String>,
+    pub(package) alt_root: String, // optional search root between the project root and std (manifest src/ dir)
+    pub(package) ok: bool, // false if any read/parse/cycle error was reported during loading
     /// Builtins as nominal types: a synthetic decl per builtin is injected into the `core` prelude module so
     /// `extend i32 { .. }` resolves and dispatches like any other type. `core_seeded` gates it.
-    pub core_module: ModuleId,
-    pub core_seeded: bool,
-    pub builtin_decls: [NodeId; BT_COUNT_N],
+    pub(package) core_module: ModuleId,
+    pub(package) core_seeded: bool,
+    pub(package) builtin_decls: [NodeId; BT_COUNT_N],
     /// Demand-driven method emission: method_used[module][node] set for every method referenced during
     /// type-checking. Ragged: outer grown to module count, each inner grown to cover the node id.
-    pub method_used: Vector<Vector<bool>>,
+    pub(package) method_used: Vector<Vector<bool>>,
     /// Coroutine-reachability for preemption safepoints: 0 = uncomputed (emit everywhere),
     /// 1 = computed (only bodies inside co_spans need safepoints). co_spans[m] holds start<<32|end
     /// body spans, in marking order, of the functions and closures a coroutine can execute
     /// (`reach_solve`); everything else can never starve a worker, so its loops need no safepoint tick.
-    pub co_state: u8,
-    pub co_spans: Vector<Vector<u64>>,
+    pub(package) co_state: u8,
+    pub(package) co_spans: Vector<Vector<u64>>,
     /// Per module: the decl spans of `co_spans` in std whose bodies run user code only through bound
     /// dispatch, so an instance ticks only when it binds a type that can reach user code (`co_inst_on`).
-    pub co_inst: Vector<Vector<u64>>,
+    pub(package) co_inst: Vector<Vector<u64>>,
     /// The fn values `reach_solve` found (module << 32 | decl node): every closure but a coroutine
     /// entry's, every function named as a value outside std::parallel. The cancellation half reads them
     /// for `cancel_fnv`.
-    pub co_fnv: Vector<u64>,
+    pub(package) co_fnv: Vector<u64>,
     /// Cancellation-edge reachability: 0 = uncomputed (no cancellation checks anywhere), 1 =
     /// computed. cancel_marks[m] holds start<<32|end DECL spans of the functions and closures whose
     /// bodies can reach `runtime::cancel_accept`; a call to one of these from a task-reachable
     /// body is followed by a compiled cancellation check with a cleanup edge.
-    pub cancel_state: u8,
-    pub cancel_marks: Vector<Set<u64>>,
+    pub(package) cancel_state: u8,
+    pub(package) cancel_marks: Vector<Set<u64>>,
     /// Can a call to a fn value nothing pins reach `runtime::cancel_accept` (some fn value of
     /// `co_fnv` can)? Then such a call in a task-reachable body carries a cancellation check too.
-    pub cancel_fnv: bool,
+    pub(package) cancel_fnv: bool,
     /// Does any non-std module request cancellation (runtime::request_cancel, runtime::try_shutdown,
     /// or anything in std::parallel::task)? Combined loop safepoints are emitted only then: a
     /// program that never cancels pays no per-loop ladder, and its shutdown reports a spinning task
     /// as unresponsive instead of reclaiming it.
-    pub cancel_used: bool,
+    pub(package) cancel_used: bool,
     /// Methods resolved with NO receiver in hand: the format helpers the print lowering reaches for,
     /// and anything else the compiler names by decl alone. Nothing says which instance wants them, so
     /// every instance does: (module << 32 | node), exempt from the per-instance demand test.
-    pub always_methods: Set<u64>,
+    pub(package) always_methods: Set<u64>,
     /// The Core IR constant interpreter (a *mut ir::interp::Interp, kept opaque here to avoid a type
     /// cycle); owned by the driver, created after load, set before type-checking. Null in library use.
-    pub cir: *mut void,
+    pub(package) cir: *mut void,
     /// The parallel type check's module write locks are on (`Ast::wl_sem`): the engine lock's
     /// holder (`wl_eng`, its task token) takes a module's lock in `module_ast_const`, and drops the
     /// locks it took (`wl_got`) with the engine lock (`wl_eng_end`).
-    pub wl_on: bool,
-    pub wl_eng: usize,
-    pub wl_got: Vector<u32>,
+    pub(package) wl_on: bool,
+    pub(package) wl_eng: usize,
+    pub(package) wl_got: Vector<u32>,
     /// The emission's inline-candidate store (`ir::inline::InlineStore`), set for the emission's
     /// lifetime by `cemit_package`; null outside it.
-    pub inl_store: *const void,
+    pub(package) inl_store: *const void,
     /// The items of the extern blocks whose header is scoped, as `module << 32 | node`
     /// (`scope_extern_items`); empty outside an emission.
-    pub xscoped: Set<u64>,
+    pub(package) xscoped: Set<u64>,
     /// The values of the integer constants of extern blocks with a header, as `module << 32 | node`, that a
     /// native build reads from the headers (`driver::emit::native_header_facts`); empty otherwise.
-    pub extern_ints: Map<u64, i64>,
+    pub(package) extern_ints: Map<u64, i64>,
     /// The functions of extern blocks that only a C compile defines, as `module << 32 | node`, in a native
     /// build: the instruction set's intrinsics (`Isa.intrinsics`) and a header's `static` functions. Empty
     /// otherwise.
-    pub c_fns: Set<u64>,
+    pub(package) c_fns: Set<u64>,
     /// The scalar class (`bindgen::SC_*`) of the opaque `@layout` types of extern blocks with a header, as
     /// `module << 32 | node`, in a native build: what the calling conventions pass them as.
-    pub opaque_cls: Map<u64, u8>,
+    pub(package) opaque_cls: Map<u64, u8>,
     /// The layout of those of class `bindgen::SC_REC`: `<size> <align>`, then its leaves (`bindgen::c_layout`).
-    pub opaque_lay: Map<u64, String>,
+    pub(package) opaque_lay: Map<u64, String>,
     /// The C header files those facts were read from (`extern_ints`, `c_fns`, `opaque_cls`): inputs of the
     /// emission.
-    pub header_files: Vector<String>,
+    pub(package) header_files: Vector<String>,
     /// Per module, the offsets where its source's lines start, for the locations of LIR
     /// (`driver::emit::lir_lines`); empty in a build that lowers no LIR.
-    pub lines: Vector<Vector<u32>>,
+    pub(package) lines: Vector<Vector<u32>>,
     /// Whether the build writes native objects for its modules (a build whose link takes objects); set by
     /// `driver::emit::run_package`.
-    pub native: bool,
+    pub(package) native: bool,
     /// Whether the LIR bodies go through the optimizer (`lir::opt`): an `opt-level` past 0, or SC_LIR_OPT
     /// is 1; set by `driver::emit::run_package`.
-    pub lir_opt: bool,
+    pub(package) lir_opt: bool,
     /// Compiler-stage parallelism: worker count for the parallel frontiers (0/1 = serial). Set by
     /// the driver from --jobs before run_package; the parallel cc window reads its own copy.
-    pub jobs: u32,
+    pub(package) jobs: u32,
     /// The item schedule index: the readiness states, the component graph the item scheduler
     /// runs, and the visibility rule the constant engine and the checker read (`graph::items`).
     /// Parallel checkers write disjoint items.
-    pub sched: ItemSched,
+    pub(package) sched: ItemSched,
     /// The output shard policy (build.toml `[shards]` / `[instance-shards]`): modules absent
     /// from it emit one TU and one instance shard.
-    pub shard_rules: Vector<ShardRule>,
+    pub(package) shard_rules: Vector<ShardRule>,
     /// The package type table: every published type, one final id each (`Ast::intern_type_i`).
     /// Boxed so the module Asts can hold its address while the package moves. `bind_types` puts
     /// the modules under it; until then (the LSP, standalone checks) they keep module-local pools.
-    pub tt: Box<TypePool>,
+    pub(package) tt: Box<TypePool>,
     /// The map of the last `publish_types`: per module, provisional pool index to final type id.
     /// Read through `map_type`.
-    pub pub_map: Vector<Vector<TypeId>>,
-    pub publications: u32, // batches published so far
+    pub(package) pub_map: Vector<Vector<TypeId>>,
+    pub(package) publications: u32, // batches published so far
     /// Per final id: the publication class that numbered it (0 signature-reachable, 1 body-only of
     /// the first batch, 2 a later batch, 3 interned by the instance graph between checkpoints); the
     /// seeds carry 0.
-    pub tt_class: Vector<u8>,
+    pub(package) tt_class: Vector<u8>,
     /// Cross-module reference bitset: mod_refs[from*mod_refs_w + to/64] bit (to%64) is set iff module `from`
     /// has any resolution into module `to`, in either arena. The borrow stage fills it once
     /// (`mod_refs_row` per module), while every body is live and after the last resolution write (type check); from
     /// then on module_imports is an O(1) query whose answer does not depend on which modules have
     /// released their bodies. `mod_refs_ready` gates it (module_imports falls back to the linear scan
     /// on the paths that never build it).
-    pub mod_refs: Vector<u64>,
-    pub mod_refs_w: usize,
-    pub mod_refs_ready: bool,
+    pub(package) mod_refs: Vector<u64>,
+    pub(package) mod_refs_w: usize,
+    pub(package) mod_refs_ready: bool,
     /// The package declaration index: symbols, ItemMeta records, per-module name maps,
     /// import adjacency, and SCCs. Built once on first use after loading
     /// (top-level decl names and imports are parse-final); `ensure_index` rebuilds it when a module
     /// is appended later (the LSP's batch load). `lookup`/`glob_lookup`/`prelude_lookup` and the
     /// import-closure cache are adapters over it.
-    pub idx: PkgIndex,
+    pub(package) idx: PkgIndex,
     /// Per-module transitive import closure: clo_lists[mid] = [mid, BFS over its imports...],
     /// built lazily on first glob_lookup into `mid` (imports are load-final). Replaces glob_lookup's
     /// per-call seen/queue vectors and per-import path re-joins with a flat cached walk.
-    pub clo_lists: Vector<Vector<ModuleId>>,
-    pub clo_built: Vector<bool>,
+    pub(package) clo_lists: Vector<Vector<ModuleId>>,
+    pub(package) clo_built: Vector<bool>,
     /// Recycled token vector: each module's lexer adopts it (capacity kept), the parser hands it back.
     /// The batch driver frees it once the load is done.
-    pub tok_scratch: Vector<tok::Token>,
+    pub(package) tok_scratch: Vector<tok::Token>,
     /// Import-resolution directory cache: each candidate search directory is scanned once (opendir/
     /// readdir) and its entry names cached, so resolve_import_file answers "does <dir>/<file> exist?" from
     /// memory instead of an fopen probe per candidate. Scales: a directory with N modules imported M times
     /// costs 1 scan, not M*<up to 3> fopens. A listing MISS still falls back to fopen (byte-identical vs the
     /// old path_exists even under case-insensitive filesystems).
-    pub dir_cache: DirCache,
+    pub(package) dir_cache: DirCache,
     /// The user closure `adopt_user` took from a `UserSpec`, which `load_user` replays.
     spec: PUnits,
-    pub lint_warnings: u32, // total lint warnings across modules (the `lint` subcommand exits 1 when > 0)
+    pub(package) lint_warnings: u32, // total lint warnings across modules (the `lint` subcommand exits 1 when > 0)
     /// Batch-lint module mask (`super-c lint` over many files sharing ONE package): when non-empty,
     /// the lint passes report exactly the modules set here instead of the only_mod/prelude filter.
-    pub lint_set: Vector<bool>,
+    pub(package) lint_set: Vector<bool>,
     /// Binary-project lint (`pub` earns nothing in a program nobody links against): when true, public
     /// functions join the unused-item candidates instead of rooting the reachability graph. Set only
     /// for whole-program lints of manifests without a [lib] target (and for script builds).
-    pub lint_pub: bool,
+    pub(package) lint_pub: bool,
     /// In-memory source overlays (the LSP's open editor buffers): a module whose file resolves to
     /// overlay_files[i] loads overlay_texts[i] instead of the on-disk bytes. Parallel vectors, canonical
     /// (realpath'd) absolute paths preferred: overlay_index falls back to a raw compare for files not on
     /// disk yet. Empty outside the LSP.
-    pub overlay_files: Vector<String>,
-    pub overlay_texts: Vector<String>,
+    pub(package) overlay_files: Vector<String>,
+    pub(package) overlay_texts: Vector<String>,
     /// SC_ITEM_STATS (`graph::items`): per-item costs and dynamic evaluation edges recorded by
     /// the serial pipeline for the item-schedule measurement. `icost_on` gates every record;
     /// `icost_tc` holds one (module << 32 | item node, ns) pair per checked item, `icost_bc` one
     /// per borrow-checked body (owner node), `icost_mod` two per module (seed ns, panics ns),
     /// `ctfe_edges` (caller key, callee key) pairs for every body the engine lowered from
     /// syntax while `cur_item` was checking.
-    pub icost_on: bool,
-    pub icost_tc: Vector<u64>,
-    pub icost_rs: Vector<u64>, // per resolved item (module << 32 | item node, ns)
-    pub icost_bc: Vector<u64>,
-    pub icost_lw: Vector<u64>, // per body lowered to Core IR (owner key, ns)
-    pub icost_mod: Vector<u64>,
-    pub ctfe_edges: Vector<u64>,
+    pub(package) icost_on: bool,
+    pub(package) icost_tc: Vector<u64>,
+    pub(package) icost_rs: Vector<u64>, // per resolved item (module << 32 | item node, ns)
+    pub(package) icost_bc: Vector<u64>,
+    pub(package) icost_lw: Vector<u64>, // per body lowered to Core IR (owner key, ns)
+    pub(package) icost_mod: Vector<u64>,
+    pub(package) ctfe_edges: Vector<u64>,
     /// LSP: modules whose body syntax the constant engine read in some analysis round (a fold's
     /// or a `const fn` scan's callee); their bodies stay live when their documents are closed, so
     /// the next round needs no parse-back. Indexed by module; shorter than the module table means
     /// "not held".
-    pub body_hold: Vector<bool>,
+    pub(package) body_hold: Vector<bool>,
     /// LSP: per module, the references its items made to declarations of other items when its
     /// last analysis finished (`RefEdge`, ascending by key): what an edit's dependents and a
     /// reference scan read about a module whose bodies are released. Indexed by module; shorter
     /// than the module table means "unrecorded".
-    pub def_refs: Vector<Vector<RefEdge>>,
+    pub(package) def_refs: Vector<Vector<RefEdge>>,
     /// LSP: per module, the post-typecheck item edges of its last analysis
     /// (`graph::items::module_edges`), keyed by declaration nodes so they survive a rebuild of the
     /// item index: `key` names the target item (`module << 32 | node`), `owner` the declaration
     /// node of the module's item that names it. The unused-item lint reads them while the module's
     /// bodies are released. Indexed by module; shorter than the module table means "unrecorded".
-    pub item_edges: Vector<Vector<RefEdge>>,
+    pub(package) item_edges: Vector<Vector<RefEdge>>,
     /// LSP: per module, the borrow check an analysis still owes it (the module was analyzed again
     /// and its borrow records are not current). Its body syntax stays live until the check ran.
-    pub bc_pending: Vector<bool>,
+    pub(package) bc_pending: Vector<bool>,
     /// LSP: the unbounded-recursion summaries of the borrow-checked modules, per module from its last
     /// borrow round (`ir::recursion::Summaries`).
-    pub recur: recur::Summaries,
+    pub(package) recur: recur::Summaries,
     /// LSP: per module, its reachability scan from its last analysis (`co_scan`; empty when the
     /// coroutine runtime is not loaded or the module was not typed), and whether one changed since
     /// the last `reach_solve` over them.
-    pub reach_scans: Vector<ReachScan>,
-    pub reach_stale: bool,
+    pub(package) reach_scans: Vector<ReachScan>,
+    pub(package) reach_stale: bool,
     /// LSP: the reachability the last solve over `reach_scans` gave (`driver::tuc::reach_fold`).
-    pub reach_key: u64,
+    pub(package) reach_key: u64,
     /// LSP: the constant engine budgets of the build the analysis stands for (build.toml's
     /// `const-eval-steps` and `const-eval-memory`); 0 = the engine default.
-    pub ce_steps: u32,
-    pub ce_mem: u64,
+    pub(package) ce_steps: u32,
+    pub(package) ce_mem: u64,
     /// What the checked prelude stage left for the second one (`driver::emit::check_prelude`).
-    pub carry: PreludeCarry,
+    pub(package) carry: PreludeCarry,
 }
 
 /// The prelude stage's results the second stage's item schedule starts from: the prelude items'
@@ -441,15 +441,15 @@ pub struct Package {
 /// states, result-attributability verdicts and dynamic evaluation edges. `items` 0: no prelude
 /// stage ran (the one-stage pipeline).
 @derive(Persist)
-pub struct PreludeCarry {
-    pub items: u32,
+pub(package) struct PreludeCarry {
+    pub(package) items: u32,
     /// The package runs the prelude stage: its analysis keeps its raw edges here.
-    pub keep: bool,
-    pub rs_edges: Vector<u64>,
-    pub tc_edges: Vector<u64>,
-    pub state: Vector<u8>,
-    pub ret_attr: Vector<u8>,
-    pub dyn_edges: Set<u64>,
+    pub(package) keep: bool,
+    pub(package) rs_edges: Vector<u64>,
+    pub(package) tc_edges: Vector<u64>,
+    pub(package) state: Vector<u8>,
+    pub(package) ret_attr: Vector<u8>,
+    pub(package) dyn_edges: Set<u64>,
 }
 
 extend ItemMeta as Persist {
@@ -499,48 +499,48 @@ extend LookupHit as Persist {
 /// item's ranges hold: a desugar appended past them), with `REF_BODY_EDGE` set when the naming
 /// node sits in the body arena (a call or a use inside a releasable body) rather than in a
 /// signature, a type, a constant or a body the module arena holds.
-pub struct RefEdge {
-    pub key: u64,
-    pub owner: u32,
+pub(package) struct RefEdge {
+    pub(package) key: u64,
+    pub(package) owner: u32,
 }
 
-pub const REF_MODULE_WIDE: u32 = 0x7FFFFFFF;
-pub const REF_BODY_EDGE: u32 = 0x80000000;
+pub(package) const REF_MODULE_WIDE: u32 = 0x7FFFFFFF;
+pub(package) const REF_BODY_EDGE: u32 = 0x80000000;
 
 /// Parallel-table cache of directory listings for import resolution. `state[i]` is what `dir_listing`
 /// gave for `dirs[i]`, `entries[i]` its sorted names; `heads` maps a directory hash to the newest index
 /// with that hash, `next[i]` to the one before it (SYM_NONE ends the chain).
-pub struct DirCache {
-    pub dirs: Vector<String>,
-    pub entries: Vector<Vector<String>>,
-    pub state: Vector<u8>,
-    pub heads: Map<u64, u32>,
-    pub next: Vector<u32>,
+pub(package) struct DirCache {
+    pub(package) dirs: Vector<String>,
+    pub(package) entries: Vector<Vector<String>>,
+    pub(package) state: Vector<u8>,
+    pub(package) heads: Map<u64, u32>,
+    pub(package) next: Vector<u32>,
 }
 
 /// The parse pipeline's result: an Ast plus whether lex/parse succeeded (mirrors the C `Ast*`/NULL return).
-pub struct ParseResult {
-    pub ast: Ast,
-    pub ok: bool,
-    pub tokens: Vector<tok::Token>, // handed back for capacity recycling (Package.tok_scratch)
+pub(package) struct ParseResult {
+    pub(package) ast: Ast,
+    pub(package) ok: bool,
+    pub(package) tokens: Vector<tok::Token>, // handed back for capacity recycling (Package.tok_scratch)
 }
 
 /// A module-qualified declaration hit: the decl's NodeId within module `mid`. `node == NODE_NONE` means miss.
-pub struct LookupHit {
-    pub node: NodeId,
-    pub mid: ModuleId,
+pub(package) struct LookupHit {
+    pub(package) node: NodeId,
+    pub(package) mid: ModuleId,
 }
 
 /// Dense index into PkgIndex.items; assigned in module order then source order, never from hash order.
-pub type ItemId = u32;
-pub const ITEM_NONE: ItemId = 0xFFFFFFFF;
+pub(package) type ItemId = u32;
+pub(package) const ITEM_NONE: ItemId = 0xFFFFFFFF;
 
 /// Dense insertion-order id into the package symbol interner.
-pub type SymbolId = u32;
-pub const SYM_NONE: SymbolId = 0xFFFFFFFF;
+pub(package) type SymbolId = u32;
+pub(package) const SYM_NONE: SymbolId = 0xFFFFFFFF;
 
 /// Item classification in the package declaration index. Append-only: later phases key on the tags.
-pub enum ItemKind {
+pub(package) enum ItemKind {
     IK_FUNCTION,
     IK_STRUCT, // struct or union (`is_union` stays on the node)
     IK_ENUM,
@@ -556,16 +556,16 @@ pub enum ItemKind {
 /// DefId{module, node} identity and C mangling key off it. Signatures and attributes stay
 /// reachable through the node (the Ast side tables are their owner). Fields are ordered widest first,
 /// so the record is 28 bytes with no interior padding.
-pub struct ItemMeta {
-    pub node: NodeId,
-    pub owner: ItemId, // enclosing IK_EXTEND for methods/assoc consts; ITEM_NONE at top level
-    pub name: SymbolId, // SYM_NONE for unnamed declarations (extends)
-    pub start: u32, // name span in the module source (the whole-decl span start for unnamed items)
-    pub len: u32,
-    pub module: ModuleId,
-    pub kind: u8, // ItemKind
-    pub vis: u8, // VIS_*
-    pub is_type: bool, // occupies the type namespace in name lookup
+pub(package) struct ItemMeta {
+    pub(package) node: NodeId,
+    pub(package) owner: ItemId, // enclosing IK_EXTEND for methods/assoc consts; ITEM_NONE at top level
+    pub(package) name: SymbolId, // SYM_NONE for unnamed declarations (extends)
+    pub(package) start: u32, // name span in the module source (the whole-decl span start for unnamed items)
+    pub(package) len: u32,
+    pub(package) module: ModuleId,
+    pub(package) kind: u8, // ItemKind
+    pub(package) vis: u8, // VIS_*
+    pub(package) is_type: bool, // occupies the type namespace in name lookup
 }
 
 static_assert(sizeof(ItemMeta) == 28, "ItemMeta must stay 28 bytes");
@@ -575,27 +575,27 @@ static_assert(sizeof(ItemMeta) == 28, "ItemMeta must stay 28 bytes");
 /// every probe is verified byte-exact, so a 64-bit collision degrades to a short walk, never a wrong
 /// answer. Built in deterministic module and source order by build_index.
 @derive(Persist)
-pub struct SymTab {
-    pub names: Vector<String>,
-    pub index: Map<u64, u32>, // fnv(name) -> first SymbolId with that hash
-    pub chain: Vector<u32>, // SymbolId -> next same-hash SymbolId; SYM_NONE ends the walk
+pub(package) struct SymTab {
+    pub(package) names: Vector<String>,
+    pub(package) index: Map<u64, u32>, // fnv(name) -> first SymbolId with that hash
+    pub(package) chain: Vector<u32>, // SymbolId -> next same-hash SymbolId; SYM_NONE ends the walk
 }
 
 /// One function item's signature record: `start` indexes PkgIndex.sig_types, which holds the `np`
 /// param types then the `nr` return types (owner-pool TypeIds). `generic` marks a generic function,
 /// whose signature types mention its own parameters and substitute per instantiation.
-pub struct ItemSig {
-    pub start: u32,
-    pub np: u16,
-    pub nr: u16,
-    pub generic: bool,
+pub(package) struct ItemSig {
+    pub(package) start: u32,
+    pub(package) np: u16,
+    pub(package) nr: u16,
+    pub(package) generic: bool,
 }
 
 /// Runtime shims the sugar lowering (hir::lower) seeds call resolutions to: free FUNCTIONS in fixed
 /// std modules, so they resolve by (module path, name) rather than through the prelude scan. Resolved
 /// once per index build; an entry whose module is not loaded stays NODE_NONE and the lowering leaves
 /// its marker untouched (the demand-loading of these modules is keyed on the keyword's use).
-pub enum SugarItem {
+pub(package) enum SugarItem {
     SI_SUBMIT, // `launch`
     SI_PAR_RANGE, // `parallel for`
     SI_SEL_NEW,
@@ -660,52 +660,52 @@ const SI_NAMES: [str<'static>; SI_COUNT_N] = [
 /// one ItemMeta per declaration (module order, source order), per-module name maps for O(1) lookup,
 /// the resolved direct-import adjacency, and its strongly connected components.
 @derive(Persist)
-pub struct PkgIndex {
-    pub syms: SymTab,
-    pub items: Vector<ItemMeta>,
-    pub mod_items: Vector<u32>, // modules+1 offsets into `items`
-    pub name_maps: Vector<Map<u64, u32>>, // per module: sym*4 + is_type*2 + exported -> ItemId, first wins
-    pub globs: Vector<ModuleId>, // the modules each module glob-imports, declaration order, per-module dedup
-    pub mod_globs: Vector<u32>, // modules+1 offsets into `globs`
-    pub imports: Vector<ModuleId>, // resolved direct imports, declaration order, per-module dedup
-    pub mod_imports: Vector<u32>, // modules+1 offsets into `imports`
-    pub scc_of: Vector<u32>, // module -> import-graph SCC id (completion order; deterministic)
-    pub sugar_items: Vector<LookupHit>, // SugarItem -> std shim fn (node == NODE_NONE when absent)
-    pub pl_map: Map<u64, u64>, // sym*2 + want_type -> node << 32 | module: every exported top-level prelude name, the first prelude module wins (prelude_lookup)
+pub(package) struct PkgIndex {
+    pub(package) syms: SymTab,
+    pub(package) items: Vector<ItemMeta>,
+    pub(package) mod_items: Vector<u32>, // modules+1 offsets into `items`
+    pub(package) name_maps: Vector<Map<u64, u32>>, // per module: sym*4 + is_type*2 + exported -> ItemId, first wins
+    pub(package) globs: Vector<ModuleId>, // the modules each module glob-imports, declaration order, per-module dedup
+    pub(package) mod_globs: Vector<u32>, // modules+1 offsets into `globs`
+    pub(package) imports: Vector<ModuleId>, // resolved direct imports, declaration order, per-module dedup
+    pub(package) mod_imports: Vector<u32>, // modules+1 offsets into `imports`
+    pub(package) scc_of: Vector<u32>, // module -> import-graph SCC id (completion order; deterministic)
+    pub(package) sugar_items: Vector<LookupHit>, // SugarItem -> std shim fn (node == NODE_NONE when absent)
+    pub(package) pl_map: Map<u64, u64>, // sym*2 + want_type -> node << 32 | module: every exported top-level prelude name, the first prelude module wins (prelude_lookup)
     /// Every top-level prelude declaration's name, public or not: the prelude's bare C symbols.
-    pub pl_names: Set<SymbolId>,
+    pub(package) pl_names: Set<SymbolId>,
     /// The `pl_names` that begin longer prelude C symbols: a type's, an interface's or a generic
     /// function's (`String__new`, `Vector__i32`, `replace__u64`). `Mangler::prelude_stem` reads them.
-    pub pl_stems: Set<SymbolId>,
+    pub(package) pl_stems: Set<SymbolId>,
     /// With one program module besides the runtime, whose symbols take no module prefix: each of its
     /// top-level non-extern names that a top-level prelude declaration also has, so would spell the
     /// prelude's C symbol. The mangler escapes them (`Mangler::ident`). Empty with more user modules.
-    pub shadow: Set<SymbolId>,
+    pub(package) shadow: Set<SymbolId>,
     /// Function-item signatures as package metadata (see ensure_sigs): sig_of keys
     /// skey_mix(module << 32 | fn node) (MIXED: u64 maps hash by identity and structured keys
     /// cluster) to a `sigs` record whose types live in the `sig_types` CSR pool,
     /// params first then returns, as TypeIds in the OWNER module's pool. Filled once from the owners'
     /// typed facts after the whole package is checked; signature queries read this, not the syntax.
-    pub sigs: Vector<ItemSig>,
-    pub sig_types: Vector<TypeId>,
-    pub sig_of: Map<u64, u32>,
-    pub sigs_built: bool,
-    pub built_mods: u32, // module count at build time; a later module append invalidates the index
+    pub(package) sigs: Vector<ItemSig>,
+    pub(package) sig_types: Vector<TypeId>,
+    pub(package) sig_of: Map<u64, u32>,
+    pub(package) sigs_built: bool,
+    pub(package) built_mods: u32, // module count at build time; a later module append invalidates the index
     /// Enum members: skey_mix(module << 32 | member node) -> enum node << 32 | member position.
-    pub variants: Map<u64, u64>,
-    pub exts: Vector<NodeId>, // top-level extend items, module order then item order
-    pub mod_exts: Vector<u32>, // modules+1 offsets into `exts`
+    pub(package) variants: Map<u64, u64>,
+    pub(package) exts: Vector<NodeId>, // top-level extend items, module order then item order
+    pub(package) mod_exts: Vector<u32>, // modules+1 offsets into `exts`
     /// The conformances by interface (see ensure_sigs): module << 32 | extend node of every extend in
     /// `exts` whose interface path resolves, grouped by interface, each group in `exts` order.
     /// `conf_of` maps skey_mix(0, interface module << 32 | node) to its group, start << 32 | end.
-    pub confs: Vector<u64>,
-    pub conf_of: Map<u64, u64>,
+    pub(package) confs: Vector<u64>,
+    pub(package) conf_of: Map<u64, u64>,
 }
 
 extend SymTab {
     /// The SymbolId already interned for `name`, or SYM_NONE. Byte-exact.
     @always_inline
-    pub fn find(self: &Self, name: str) SymbolId {
+    pub(package) fn find(self: &Self, name: str) SymbolId {
         return switch self.index.get(&fnv(name)) {
             Some(h) => {
                 let mut s = *h;
@@ -719,7 +719,7 @@ extend SymTab {
     }
 
     /// Intern `name`, returning its dense SymbolId (existing entries are found byte-exact).
-    pub fn intern(self: &mut Self, name: str) SymbolId {
+    pub(package) fn intern(self: &mut Self, name: str) SymbolId {
         let h = fnv(name);
         let head = switch self.index.get(&h) {
             Some(v) => *v,
@@ -997,29 +997,29 @@ fn fn_bounded(a: &Ast, gm: ModuleId, gp: NodeId) bool {
 // The coroutine-reachability graph of `Package::reach_solve`: every function and closure declaration
 // of the package, per module in span order, and the marking state of the closure over them.
 struct CoGraph {
-    pub start: Vector<u32>, // per module (+ sentinel): its first decl
-    pub span: Vector<u64>, // start << 32 | end
-    pub parent: Vector<u32>, // innermost enclosing decl, or CO_NONE
-    pub lim: Vector<u32>, // one past the last decl of the decl's module
-    pub dmod: Vector<u32>, // the decl's module
-    pub node: Vector<u32>, // the decl's node
-    pub closure: Vector<u8>, // 1 for a closure
-    pub need: Vector<u64>, // bit p: parameter p holds a fn value the body may call (checked at call sites)
-    pub ix: Vector<u32>, // per node of every module (dense order): its decl + 1, or 0
-    pub ix_start: Vector<usize>, // per module (+ sentinel): its first `ix` slot
-    pub nb: Vector<usize>, // per module: the node count of its main arena (the dense offset of its body arena)
-    pub on: Vector<u8>, // the decl runs on a coroutine (marked, or inside a marked decl)
-    pub marked: Vector<u8>, // the decl's span is in the output
-    pub queue: Vector<u32>,
-    pub spans: Vector<Vector<u64>>, // the output, per module
-    pub esc: Vector<u32>, // the fn values: every closure, every function named as a value outside std::parallel
-    pub in_esc: Vector<u8>,
-    pub escaped: bool,
-    pub stdm: Vector<u8>, // per module: 0 user code, 1 std, 2 std::parallel
+    pub(package) start: Vector<u32>, // per module (+ sentinel): its first decl
+    pub(package) span: Vector<u64>, // start << 32 | end
+    pub(package) parent: Vector<u32>, // innermost enclosing decl, or CO_NONE
+    pub(package) lim: Vector<u32>, // one past the last decl of the decl's module
+    pub(package) dmod: Vector<u32>, // the decl's module
+    pub(package) node: Vector<u32>, // the decl's node
+    pub(package) closure: Vector<u8>, // 1 for a closure
+    pub(package) need: Vector<u64>, // bit p: parameter p holds a fn value the body may call (checked at call sites)
+    pub(package) ix: Vector<u32>, // per node of every module (dense order): its decl + 1, or 0
+    pub(package) ix_start: Vector<usize>, // per module (+ sentinel): its first `ix` slot
+    pub(package) nb: Vector<usize>, // per module: the node count of its main arena (the dense offset of its body arena)
+    pub(package) on: Vector<u8>, // the decl runs on a coroutine (marked, or inside a marked decl)
+    pub(package) marked: Vector<u8>, // the decl's span is in the output
+    pub(package) queue: Vector<u32>,
+    pub(package) spans: Vector<Vector<u64>>, // the output, per module
+    pub(package) esc: Vector<u32>, // the fn values: every closure, every function named as a value outside std::parallel
+    pub(package) in_esc: Vector<u8>,
+    pub(package) escaped: bool,
+    pub(package) stdm: Vector<u8>, // per module: 0 user code, 1 std, 2 std::parallel
     // Per decl of std: whether its body can run user code (see `reach_solve`): 0 no, 1 only through
     // bound dispatch (its instances decide), 2 through a fn value or `dyn`.
-    pub ureach: Vector<u8>,
-    pub inst: Vector<Vector<u64>>, // the output's spans whose ticks the emitting instance decides
+    pub(package) ureach: Vector<u8>,
+    pub(package) inst: Vector<Vector<u64>>, // the output's spans whose ticks the emitting instance decides
 }
 
 extend CoGraph {
@@ -1099,55 +1099,55 @@ const fn def_key(d: DefId) u64 {
 }
 
 /// The inputs every module's reachability scan shares (`Package::co_scan`), resolved once.
-pub struct ReachCtx {
-    pub rt: bool, // std::parallel::runtime is loaded: without it nothing launches or cancels
-    pub ent: Vector<u64>, // the coroutine entry APIs (`co_entries`)
-    pub ent_p: Vector<u32>,
-    pub acc: DefId, // runtime::cancel_accept; NODE_NONE: no cancellation analysis
-    pub req: NodeId, // runtime::request_cancel
-    pub tsh: NodeId, // runtime::try_shutdown
-    pub task_mid: i32, // std::parallel::task, or -1
+pub(package) struct ReachCtx {
+    pub(package) rt: bool, // std::parallel::runtime is loaded: without it nothing launches or cancels
+    pub(package) ent: Vector<u64>, // the coroutine entry APIs (`co_entries`)
+    pub(package) ent_p: Vector<u32>,
+    pub(package) acc: DefId, // runtime::cancel_accept; NODE_NONE: no cancellation analysis
+    pub(package) req: NodeId, // runtime::request_cancel
+    pub(package) tsh: NodeId, // runtime::try_shutdown
+    pub(package) task_mid: i32, // std::parallel::task, or -1
 }
 
 /// One module's part of the coroutine and cancellation reachability (`Package::reach_solve`): what
 /// one scan of its nodes finds while its bodies and checked tables are live (`Package::co_scan`). A
 /// target is a declaration key (`module << 32 | node`), so the scan of a module stays valid while the
 /// module and the declarations it names keep their ids; the language server keeps one per module.
-pub struct ReachScan {
-    pub nb: u32, // nodes of the module arena
-    pub nn: u32, // nodes of both arenas
+pub(package) struct ReachScan {
+    pub(package) nb: u32, // nodes of the module arena
+    pub(package) nn: u32, // nodes of both arenas
     // The function and closure declarations, sorted by span start.
-    pub d_span: Vector<u64>, // start << 32 | end
-    pub d_node: Vector<u32>,
-    pub d_parent: Vector<u32>, // the innermost enclosing declaration (an index here), or CO_NONE
-    pub d_clo: Vector<u8>, // 1 for a closure
-    pub d_need: Vector<u64>, // the parameters whose fn value the body calls or hands to std::parallel
+    pub(package) d_span: Vector<u64>, // start << 32 | end
+    pub(package) d_node: Vector<u32>,
+    pub(package) d_parent: Vector<u32>, // the innermost enclosing declaration (an index here), or CO_NONE
+    pub(package) d_clo: Vector<u8>, // 1 for a closure
+    pub(package) d_need: Vector<u64>, // the parameters whose fn value the body calls or hands to std::parallel
     // The coroutine records, in site order: the declaration (an index here), the target (a
     // declaration key, CO_TGT_ESC or CO_TGT_OP), the call site (an index into `s_*`, or CO_NONE),
     // and whether the entry is checked.
-    pub r_decl: Vector<u32>,
-    pub r_tgt: Vector<u64>,
-    pub r_site: Vector<u32>,
-    pub r_chk: Vector<u8>,
+    pub(package) r_decl: Vector<u32>,
+    pub(package) r_tgt: Vector<u64>,
+    pub(package) r_site: Vector<u32>,
+    pub(package) r_chk: Vector<u8>,
     // Per call site: the parameters whose argument no need check accepts, the CO_PAR_BAD and CO_DYN
     // bits, and its run in `prop` (+ sentinel): parameter p << 8 | the caller's parameter q passed
     // for it, by ascending p.
-    pub s_bad: Vector<u64>,
-    pub s_par: Vector<u8>,
-    pub s_prop: Vector<u32>,
-    pub prop: Vector<u16>,
-    pub seeds: Vector<u64>, // the coroutine entry arguments: declaration keys, CO_TGT_ESC when unpinned
-    pub esc: Vector<u64>, // the functions named as values, in site order
+    pub(package) s_bad: Vector<u64>,
+    pub(package) s_par: Vector<u8>,
+    pub(package) s_prop: Vector<u32>,
+    pub(package) prop: Vector<u16>,
+    pub(package) seeds: Vector<u64>, // the coroutine entry arguments: declaration keys, CO_TGT_ESC when unpinned
+    pub(package) esc: Vector<u64>, // the functions named as values, in site order
     // The cancellation records: the declaration spans in node order, and per call the site span and
     // the target key, in node order, then the operator methods and the `Deref` hops.
-    pub c_row: Vector<u64>,
-    pub c_span: Vector<u64>,
-    pub c_tgt: Vector<u64>,
-    pub c_used: bool, // the module requests cancellation (only a module outside std)
+    pub(package) c_row: Vector<u64>,
+    pub(package) c_span: Vector<u64>,
+    pub(package) c_tgt: Vector<u64>,
+    pub(package) c_used: bool, // the module requests cancellation (only a module outside std)
 }
 
 extend ReachScan {
-    pub fn new() ReachScan {
+    pub(package) fn new() ReachScan {
         return ReachScan {
             nb: 0,
             nn: 0,
@@ -1174,7 +1174,7 @@ extend ReachScan {
     }
 
     /// Heap bytes held (capacity).
-    pub const fn retained_bytes(self: &Self) usize {
+    pub(package) const fn retained_bytes(self: &Self) usize {
         return (self.d_span.capacity() + self.d_need.capacity() + self.r_tgt.capacity() + self.s_bad.capacity() + self.seeds.capacity() + self.esc.capacity() + self.c_row.capacity() + self.c_span.capacity() + self.c_tgt.capacity()) * 8 + (self.d_node.capacity() + self.d_parent.capacity() + self.r_decl.capacity() + self.r_site.capacity() + self.s_prop.capacity()) * 4 + self.prop.capacity() * 2 + self.d_clo.capacity() + self.r_chk.capacity() + self.s_par.capacity();
     }
 
@@ -1231,14 +1231,14 @@ fn path_exists(path: str) bool {
 /// Read a whole file into a String padded with lexer::SOURCE_PAD trailing NULs past len (the lexer's
 /// read-ahead sentinel); None when `path` is no regular file (a directory opens on Linux, and its size
 /// reads as the largest offset) or on any I/O error.
-pub fn read_file(path: str) Option<String> {
+pub(package) fn read_file(path: str) Option<String> {
     let mut mt: i64 = 0;
     return read_file_mt(path, &mut mt);
 }
 
 /// `read_file`, and the file's mtime (`dutil::file_mtime`) into `mt` from the fstat taken before the read: a
 /// later edit changes the mtime, so the pair vouches for the content read.
-pub fn read_file_mt(path: str, mt: &mut i64) Option<String> {
+pub(package) fn read_file_mt(path: str, mt: &mut i64) Option<String> {
     let opened = fs::open(path, fs::OpenOptions { read: true });
     if opened.is_err() {
         return Option::<String>::None;
@@ -1271,7 +1271,7 @@ pub fn read_file_mt(path: str, mt: &mut i64) Option<String> {
 /// directory index (`file` is the directory and a '/'), one glob import of `path::<stem>` per `.spc` file
 /// directly in the directory whose stem is an identifier, in name order. Subdirectories stay modules of
 /// their own. `id` takes the identity (`str_id`) of the text read from `file`.
-pub fn read_module(path: str, file: str, mt: &mut i64, id: &mut u64) Option<String> {
+pub(package) fn read_module(path: str, file: str, mt: &mut i64, id: &mut u64) Option<String> {
     if path == "__std::target" {
         // The target table is the source of the build-setting enums: the file serves only releases that
         // predate the table, and its text is what a cache records.
@@ -1345,7 +1345,7 @@ const fn ident_text(s: str) bool {
 }
 
 /// The directory portion of `path` (a view into it, without the trailing slash), or "." when there is none.
-pub const fn dirname_of(path: str) str {
+pub(package) const fn dirname_of(path: str) str {
     let k = path.len() - basename_of(path).len();
     if k == 0 {
         return ".";
@@ -1369,7 +1369,7 @@ fn stem_of(path: str) String {
 }
 
 /// Join an import's path parts with `sep` ("::" for a module path, "/" for a file path).
-pub fn join_parts(ast: &Ast, src: str, parts: NodeList, sep: str) String {
+pub(package) fn join_parts(ast: &Ast, src: str, parts: NodeList, sep: str) String {
     let ids = ast.list(parts);
     let mut out = String::new();
     let mut i: u32 = 0;
@@ -1410,7 +1410,7 @@ fn module_index_path(root_dir: str, ast: &Ast, src: str, parts: NodeList) String
 }
 
 /// Returns a new string containing `a`/`b`
-pub fn join2(a: str, b: str) String {
+pub(package) fn join2(a: str, b: str) String {
     let mut out = String::with_capacity(a.len() + 1 + b.len());
     out.push_str(a);
     out.push_byte(b'/');
@@ -1468,7 +1468,7 @@ extend DirCache {
         *self = d;
     }
     /// Whether `dir` is a directory that lists.
-    pub fn listed(self: &mut Self, dir: str) bool {
+    pub(package) fn listed(self: &mut Self, dir: str) bool {
         let i = self.index_of(dir);
         return self.state[i] == DIR_LISTED;
     }
@@ -1476,7 +1476,7 @@ extend DirCache {
     /// the name not listed) falls back to fopen so the result matches path_exists exactly, incl. case-
     /// insensitive filesystems. A missing directory is authoritative (fopen would fail too), saving the probe;
     /// a directory that exists but does not list asks fopen.
-    pub fn exists(self: &mut Self, path: str) bool {
+    pub(package) fn exists(self: &mut Self, path: str) bool {
         let n = path.len();
         let mut slash: i64 = -1;
         let mut i: usize = 0;
@@ -1532,13 +1532,13 @@ const fn item_span(src: str, n: &Node) tok::Span {
 
 /// `dir_listing` results: the directory listed, does not exist (nothing under it does), or exists but
 /// does not list (no read permission, no descriptor left): only an open of a file under it tells.
-pub const DIR_ABSENT: u8 = 0;
-pub const DIR_LISTED: u8 = 1;
-pub const DIR_UNREAD: u8 = 2;
+pub(package) const DIR_ABSENT: u8 = 0;
+pub(package) const DIR_LISTED: u8 = 1;
+pub(package) const DIR_UNREAD: u8 = 2;
 
 /// The entry names of `dir`, sorted, into `names`, and whether it listed (`DIR_LISTED`, `DIR_ABSENT`,
 /// `DIR_UNREAD`). What `DirCache` answers from, and what the prelude image checks its directories against.
-pub fn dir_listing(dir: str, names: &mut Vector<String>) u8 {
+pub(package) fn dir_listing(dir: str, names: &mut Vector<String>) u8 {
     let opened = fs::read_dir(dir);
     if opened.is_err() {
         if opened.unwrap_err().kind == IoErrorKind::NotFound {
@@ -1618,7 +1618,7 @@ fn resolve_import_file(
 /// Whether every import of the module in file `path` names a file a load rooted at `root_dir` (alt
 /// root `alt_root`, std/ in `std_dir`) finds, as `resolve_import_file` searches; true when the file
 /// does not read, lex or parse (the load reports it).
-pub fn imports_resolve(path: str, root_dir: str, alt_root: str, std_dir: str) bool {
+pub(package) fn imports_resolve(path: str, root_dir: str, alt_root: str, std_dir: str) bool {
     let r = read_file(path);
     if r.is_none() {
         return true;
@@ -1694,7 +1694,7 @@ fn parse_source_q(source: &mut String, file: str, bootstrap_tags: bool, recycled
 /// worker pool costs about as much CPU as the whole serial compile and saves a few milliseconds of
 /// wall time at most (release build, serial vs parallel: 30 KiB 24 vs 23 ms, 118 KiB 30 vs 25 ms,
 /// 472 KiB 57 vs 36 ms).
-pub const PAR_MIN_USER_BYTES: usize = 262144; // 256 KiB
+pub(package) const PAR_MIN_USER_BYTES: usize = 262144; // 256 KiB
 
 // Worker count for parallel module discovery: 1 = the serial reference loader; 0 or >= 2 lets
 // speculative parse tasks run on the coroutine pool. Set by the DRIVER before package_load; the
@@ -1707,7 +1707,7 @@ static mut G_ARCH: i32 = -1;
 static mut G_FEATURES: cf::CpuFeatureSet = cf::CpuFeatureSet { w: [0, 0] };
 
 /// Set the instruction set and features of the packages loaded from now on.
-pub fn set_load_target(arch: i32, features: cf::CpuFeatureSet) {
+pub(package) fn set_load_target(arch: i32, features: cf::CpuFeatureSet) {
     unsafe G_ARCH = arch;
     unsafe G_FEATURES = features;
 }
@@ -1715,7 +1715,7 @@ pub fn set_load_target(arch: i32, features: cf::CpuFeatureSet) {
 /// Set the worker count for parallel module loading (1 = serial; 0 = one per CPU) before the first
 /// load. It is the task pool's worker count too: the load launches the pool's first tasks, and the
 /// analysis that follows runs on the same pool.
-pub fn set_load_jobs(j: u32) {
+pub(package) fn set_load_jobs(j: u32) {
     unsafe G_LOAD_JOBS = j;
     // Compiler tasks recurse deeply (parser, checker); reserve thread-sized task stacks BEFORE the
     // pool's first launch (a later call is ignored), with one worker too: a serial load leaves later
@@ -1729,27 +1729,27 @@ pub fn set_load_jobs(j: u32) {
 // One speculative parse unit: filled by a worker task; imports are collected and resolved by the
 // coordinator as each unit finishes (the dir cache is a serial memo), and ids are assigned afterwards
 // by a serial DFS replay, so module identity is byte-for-byte the recursive loader's.
-pub struct PUnit {
-    pub path: String,
-    pub file: String,
-    pub source: String,
-    pub src_id: u64,
-    pub mtime: i64,
-    pub ast: Ast,
-    pub ok: bool,
-    pub resolved: bool, // `file` is what resolve_import_file gives for `path`
-    pub child_paths: Vector<String>,
-    pub child_files: Vector<String>,
-    pub child_offs: Vector<u32>, // where each import is written (IMPORT_OFF_NONE: a keyword's dependency)
-    pub log: String, // the errors its imports gave (`std_shadowed`), printed when it gets its id
-    pub next: u32, // the previous unit whose path hashes alike, or SYM_NONE
+pub(package) struct PUnit {
+    pub(package) path: String,
+    pub(package) file: String,
+    pub(package) source: String,
+    pub(package) src_id: u64,
+    pub(package) mtime: i64,
+    pub(package) ast: Ast,
+    pub(package) ok: bool,
+    pub(package) resolved: bool, // `file` is what resolve_import_file gives for `path`
+    pub(package) child_paths: Vector<String>,
+    pub(package) child_files: Vector<String>,
+    pub(package) child_offs: Vector<u32>, // where each import is written (IMPORT_OFF_NONE: a keyword's dependency)
+    pub(package) log: String, // the errors its imports gave (`std_shadowed`), printed when it gets its id
+    pub(package) next: u32, // the previous unit whose path hashes alike, or SYM_NONE
 }
 
 // The units of one parallel load, each in a box of its own so a task's unit stays in place while the
 // vector grows, and `heads`: a path hash -> the newest unit with that hash.
-pub struct PUnits {
-    pub units: Vector<Box<PUnit>>,
-    pub heads: Map<u64, u32>,
+pub(package) struct PUnits {
+    pub(package) units: Vector<Box<PUnit>>,
+    pub(package) heads: Map<u64, u32>,
 }
 
 extend PUnits {
@@ -1805,8 +1805,8 @@ extend PUnits {
 
 // The units whose parse tasks finished, in the order they finished, for the discovery's coordinator.
 struct PDone {
-    pub m: psy::Mutex<Vector<u32>>,
-    pub cv: psy::Condvar,
+    pub(package) m: psy::Mutex<Vector<u32>>,
+    pub(package) cv: psy::Condvar,
 }
 
 // One module on the serial loader's depth-first stack: its unloaded imports and the next to load.
@@ -1815,18 +1815,18 @@ struct PDone {
 const IMPORT_OFF_NONE: u32 = 0xFFFFFFFF;
 
 struct LoadFrame {
-    pub owner: i32, // the importing module
-    pub paths: Vector<String>,
-    pub files: Vector<String>,
-    pub offs: Vector<u32>, // where each import is written (IMPORT_OFF_NONE: a keyword's dependency)
-    pub next: usize,
+    pub(package) owner: i32, // the importing module
+    pub(package) paths: Vector<String>,
+    pub(package) files: Vector<String>,
+    pub(package) offs: Vector<u32>, // where each import is written (IMPORT_OFF_NONE: a keyword's dependency)
+    pub(package) next: usize,
 }
 
 struct PParse {
-    pub u: *mut PUnit,
-    pub k: u32,
-    pub tags: bool,
-    pub done: *const PDone,
+    pub(package) u: *mut PUnit,
+    pub(package) k: u32,
+    pub(package) tags: bool,
+    pub(package) done: *const PDone,
 }
 
 // The unit is boxed, so it stays in place for the task's lifetime, and each task owns exactly one unit;
@@ -1835,27 +1835,27 @@ unsafe extend PParse as Send {}
 
 /// A user closure read and parsed while the prelude stage checks (`Package::spec_user`): its units, and
 /// the package it loads against, a copy of the prelude's module table, which holds its dir cache.
-pub struct UserSpec {
-    pub v: Package,
-    pub units: PUnits,
-    pub wg: psy::WaitGroup,
+pub(package) struct UserSpec {
+    pub(package) v: Package,
+    pub(package) units: PUnits,
+    pub(package) wg: psy::WaitGroup,
 }
 
 extend UserSpec {
     /// A spec that loads nothing.
-    pub fn new() Box<UserSpec> {
+    pub(package) fn new() Box<UserSpec> {
         return Box::<UserSpec>::new(UserSpec { v: Package::new(), units: PUnits {}, wg: psy::WaitGroup::new() });
     }
 
     /// Wait for the tasks of the load.
-    pub fn join(self: &Self) {
+    pub(package) fn join(self: &Self) {
         self.wg.wait_masked();
     }
 }
 
 struct SpecTask {
-    pub s: *mut UserSpec,
-    pub target: i32,
+    pub(package) s: *mut UserSpec,
+    pub(package) target: i32,
 }
 
 // The spec is boxed and joined before it drops; until then only the task reaches its package.
@@ -1892,13 +1892,20 @@ fn par_parse_one(t: PParse) {
 
 /// Load `root_file` and, transitively, every module it imports, then append the std prelude found under
 /// `std_dir` (empty skips it). Diagnostics are printed as encountered. Returns a Package (check `.ok`).
-pub fn package_load(root_file: str, std_dir: str, bootstrap_tags: bool, target: i32) Package {
+pub(package) fn package_load(root_file: str, std_dir: str, bootstrap_tags: bool, target: i32) Package {
     return package_load_rooted(root_file, dirname_of(root_file), "", std_dir, bootstrap_tags, target);
 }
 
 /// Like package_load, but imports resolve against an explicit package root instead of the root
 /// file's own directory (`super-c lint <dir>` lints nested package files in their true package).
-pub fn package_load_rooted(root_file: str, root_dir: str, alt_dir: str, std_dir: str, bootstrap_tags: bool, target: i32) Package {
+pub(package) fn package_load_rooted(
+    root_file: str,
+    root_dir: str,
+    alt_dir: str,
+    std_dir: str,
+    bootstrap_tags: bool,
+    target: i32,
+) Package {
     ts_init();
     return package_load_overlaid(
         root_file,
@@ -1914,7 +1921,7 @@ pub fn package_load_rooted(root_file: str, root_dir: str, alt_dir: str, std_dir:
 
 /// Like package_load_rooted, with in-memory source overlays (see Package.overlay_files). Takes ownership
 /// of both parallel vectors.
-pub fn package_load_overlaid(
+pub(package) fn package_load_overlaid(
     root_file: str,
     root_dir: str,
     alt_dir: str,
@@ -1930,13 +1937,13 @@ pub fn package_load_overlaid(
 }
 
 /// The real path of file `path`, or empty when it does not resolve.
-pub fn real_path_of(path: str) String {
+pub(package) fn real_path_of(path: str) String {
     return fs::realpath(path).unwrap_or(String::new());
 }
 
 /// An empty package with its import roots, for a driver that sets the build settings (`arch`,
 /// `test_build`, `profile`) before `load_root`: the prelude's build-constant module spells them.
-pub fn package_new(root_dir: str, alt_dir: str, std_dir: str) Package {
+pub(package) fn package_new(root_dir: str, alt_dir: str, std_dir: str) Package {
     ts_init();
     return package_base(root_dir, alt_dir, std_dir, Vector::<String>::new(), Vector::<String>::new());
 }
@@ -1944,7 +1951,7 @@ pub fn package_new(root_dir: str, alt_dir: str, std_dir: str) Package {
 /// Prelude-only package (import roots set, no root module): the batch `lint` driver and the LSP's
 /// workspace batch load_module each listed file into it afterwards, so every file shares one closure
 /// instead of reloading its own. Takes ownership of the overlay vectors (empty for CLI use).
-pub fn package_load_prelude(
+pub(package) fn package_load_prelude(
     root_dir: str,
     alt_dir: str,
     std_dir: str,
@@ -1956,7 +1963,7 @@ pub fn package_load_prelude(
 }
 
 /// `package_load_prelude` for a test build when `test_build` (the TEST build constant).
-pub fn package_load_prelude_as(
+pub(package) fn package_load_prelude_as(
     root_dir: str,
     alt_dir: str,
     std_dir: str,
@@ -1990,7 +1997,7 @@ fn package_base(root_dir: str, alt_dir: str, std_dir: str, overlay_files: Vector
 /// manifest imports must use: the alt root has no index form), else to the package root, `/` -> `::`.
 /// A root-level index file (<root>/x/x.spc with no <root>/x.spc beside it) collapses to `x`, mirroring
 /// module_index_path, so imports of it dedup against the listed copy.
-pub fn batch_mod_path(file: str, root: str, alt: str) String {
+pub(package) fn batch_mod_path(file: str, root: str, alt: str) String {
     let mut rel = file;
     if rel.len() > 2 && rel.byte_at(0) == b'.' && rel.byte_at(1) == b'/' {
         rel = rel.slice(2, rel.len());
@@ -2041,12 +2048,12 @@ pub fn batch_mod_path(file: str, root: str, alt: str) String {
 /// recursion. The source lexes first, as a real build loads its root before the prelude, so whether it
 /// names a vector decides the vector backend; the module is appended LAST, after the prelude: the user
 /// module is always `p.modules.len() - 1`. Used by tests.
-pub fn package_from_source(src: str, std_dir: str, target: i32) Package {
+pub(package) fn package_from_source(src: str, std_dir: str, target: i32) Package {
     return package_from_source_arch(src, std_dir, target, unsafe shim::sc_host_arch());
 }
 
 /// `package_from_source` for instruction set `arch` (loader arch codes) with its baseline features.
-pub fn package_from_source_arch(src: str, std_dir: str, target: i32, arch: i32) Package {
+pub(package) fn package_from_source_arch(src: str, std_dir: str, target: i32, arch: i32) Package {
     let mut p = prelude_package_arch(std_dir, target, arch, source_names_vectors(src));
     p.add_source_module(src, target);
     return p;
@@ -2054,7 +2061,7 @@ pub fn package_from_source_arch(src: str, std_dir: str, target: i32, arch: i32) 
 
 /// Whether in-memory source `src` names a vector (`Ast.names_vectors`), which decides whether its
 /// prelude loads the vector backend; false when it does not lex.
-pub fn source_names_vectors(src: str) bool {
+pub(package) fn source_names_vectors(src: str) bool {
     let mut source = String::from_str(src);
     let mut lx = lexer::Lexer::new(&mut source, "<harness>");
     lx.scan_tokens();
@@ -2064,7 +2071,7 @@ pub fn source_names_vectors(src: str) bool {
 /// The package `package_from_source_arch` builds before its source module joins: the std prelude for
 /// `target` and instruction set `arch`, with the vector backend when `vectors` (the source names a
 /// vector). `Package::add_source_module` appends the source.
-pub fn prelude_package_arch(std_dir: str, target: i32, arch: i32, vectors: bool) Package {
+pub(package) fn prelude_package_arch(std_dir: str, target: i32, arch: i32, vectors: bool) Package {
     let mut p = package_base(".", "", std_dir, Vector::<String>::new(), Vector::<String>::new());
     p.arch = arch;
     p.features = tgt::baseline(target, arch);
@@ -2103,12 +2110,12 @@ const fn bc_name_byte(c: u8) bool {
 /// the runtime every program links (`std::rt`). Their loops never tick and their calls carry no
 /// cancellation edge of a task: they hold spinlocks, OS locks and signal handlers that a preemption or an
 /// unwind must not cross.
-pub const fn runtime_path(path: str) bool {
+pub(package) const fn runtime_path(path: str) bool {
     return path.starts_with("std::parallel") || path.starts_with("std::rt::") || path == "sc_runtime";
 }
 
 /// The final path component of `path` (a view into it): "dir/std/string.spc" -> "string.spc".
-pub const fn basename_of(path: str) str {
+pub(package) const fn basename_of(path: str) str {
     let mut k = path.len();
     while k > 0 && path[k - 1] != b'/' {
         k -= 1;
@@ -2120,9 +2127,9 @@ pub const fn basename_of(path: str) str {
 /// and the payload words, compared lexicographically (`pub_key_cmp`). Two distinct records never
 /// compare equal: the words hold every field the record's identity has.
 struct PubKey {
-    pub w: [u64; 11],
-    pub idx: u32,
-    pub rec: Ty, // the record with every child final, inserted in key order
+    pub(package) w: [u64; 11],
+    pub(package) idx: u32,
+    pub(package) rec: Ty, // the record with every child final, inserted in key order
 }
 
 const fn pub_key_cmp(a: &PubKey, b: &PubKey) i32 {
@@ -2283,14 +2290,14 @@ fn pub_child(map: &Vector<TypeId>, t: TypeId, i: usize) TypeId {
 }
 
 /// The variance of an aggregate's parameters, for `Package::lt_walk`.
-pub interface SlotVariance {
+pub(package) interface SlotVariance {
     /// The variance (`V_*`) of slot `i` (its lifetime parameters, then its type parameters) of
     /// declaration `d` of module `m`.
     fn slot_variance(self: &mut Self, m: ModuleId, d: NodeId, i: u32) u32;
 }
 
 /// Every slot invariant: for a walk that reads only positions and reference flags.
-pub struct Invariant {}
+pub(package) struct Invariant {}
 
 extend Invariant as SlotVariance {
     fn slot_variance(self: &mut Self, m: ModuleId, d: NodeId, i: u32) u32 {
@@ -2314,19 +2321,19 @@ extend Package {
     /// Whether module `m` is a runtime module: the runtime every program links, a test build's runner, or
     /// wasm's C library. None is a program module: its symbols always take their module prefix, it shadows
     /// no name, its allocations are not tracked, and its extern headers stay out of the forward header.
-    pub const fn is_rt(self: &Self, m: i32) bool {
+    pub(package) const fn is_rt(self: &Self, m: i32) bool {
         return m >= 0 && (m == self.rt_module || m == self.rt_test || m == self.rt_builtins || self.is_libc(m));
     }
 
     /// Whether module `m` is wasm's C library (`std::rt::libc` or `std::rt::libm`): its units compile
     /// alone, with `-fno-builtin` (`libc_unit`).
-    pub const fn is_libc(self: &Self, m: i32) bool {
+    pub(package) const fn is_libc(self: &Self, m: i32) bool {
         return m >= 0 && (m == self.rt_libc || m == self.rt_libm);
     }
 
     /// The number of lifetime parameters declaration `d` of module `m` declares (`a` is the
     /// reading module's tree, whose tables may not be in the module table yet).
-    pub fn decl_nlt(self: &Self, a: &Ast, m: ModuleId, d: NodeId) u32 {
+    pub(package) fn decl_nlt(self: &Self, a: &Ast, m: ModuleId, d: NodeId) u32 {
         if d == NODE_NONE {
             return 0;
         }
@@ -2343,7 +2350,15 @@ extend Package {
     /// A function type (or `dyn fn`) binds its own and holds one per lifetime it takes from outside
     /// it (`sig_outer`). `f` holds the flags inherited from above; `v` gives the variance of an
     /// aggregate's parameters (an interface's are invariant).
-    pub fn lt_walk<V: SlotVariance>(self: &Self, a: &Ast, t: TypeId, f: u8, out: &mut Vector<u8>, depth: u32, v: &mut V) {
+    pub(package) fn lt_walk<V: SlotVariance>(
+        self: &Self,
+        a: &Ast,
+        t: TypeId,
+        f: u8,
+        out: &mut Vector<u8>,
+        depth: u32,
+        v: &mut V,
+    ) {
         if t == TYPE_NONE || depth > 16 {
             return;
         }
@@ -2407,7 +2422,14 @@ extend Package {
 
     /// The variance (`V_*`) of each lifetime function-pointer type `y` takes from outside it, in
     /// class order: how its positions of that class use it (`v` as in `lt_walk`).
-    pub fn sig_outer<V: SlotVariance>(self: &Self, a: &Ast, y: &Ty, out: &mut Vector<u32>, depth: u32, v: &mut V) {
+    pub(package) fn sig_outer<V: SlotVariance>(
+        self: &Self,
+        a: &Ast,
+        y: &Ty,
+        out: &mut Vector<u32>,
+        depth: u32,
+        v: &mut V,
+    ) {
         out.truncate(0);
         let lts = a.instance(y.as_data.fnp.sig).lts;
         if lts == 0 || lts == LTS_WIDE || depth > 16 {
@@ -2440,7 +2462,7 @@ extend Package {
     }
 
     /// The number of lifetime positions of type `t` (`lt_walk`).
-    pub fn lt_count(self: &Self, a: &Ast, t: TypeId) u32 {
+    pub(package) fn lt_count(self: &Self, a: &Ast, t: TypeId) u32 {
         let mut fl = Vector::<u8>::new();
         self.lt_walk(a, t, 0, &mut fl, 0, &mut Invariant {});
         return fl.len() as u32;
@@ -2450,7 +2472,7 @@ extend Package {
     /// its `lts`, or with none every position its own lifetime but elided results, which take the
     /// only input position's. `fl` gets each position's flags (`LTF_*`, relative to its slot; `v`
     /// gives the variance as in `lt_walk`) and `*nres` the result positions.
-    pub fn sig_classes<V: SlotVariance>(
+    pub(package) fn sig_classes<V: SlotVariance>(
         self: &Self,
         a: &Ast,
         y: &Ty,
@@ -2499,7 +2521,7 @@ extend Package {
     /// items (`driver::emit::cemit_extern_includes`): a header `super_rt.h` does not include, or any
     /// header of the runtime module, of a block with a function that needs no CPU feature. Its macros would rename the identifiers of
     /// other files, so the inliner splices no use of its items into another module (`ir::inline`).
-    pub fn extern_header_scoped(self: &Self, m: ModuleId, nid: NodeId) bool {
+    pub(package) fn extern_header_scoped(self: &Self, m: ModuleId, nid: NodeId) bool {
         let a = &self.modules[m as usize].ast;
         let eb = a.at_const(nid).as_data.extern_block;
         if eb.header == NODE_NONE {
@@ -2530,7 +2552,7 @@ extend Package {
 
     /// Fill `xscoped` with the items of every extern block whose header is scoped
     /// (`extern_header_scoped`). The emission calls it before the inliner and the emitter read it.
-    pub fn scope_extern_items(self: &mut Self) {
+    pub(package) fn scope_extern_items(self: &mut Self) {
         let mut set = Set::<u64>::new();
         for m in 0..self.modules.len() {
             if !self.modules[m].has_ast {
@@ -2553,13 +2575,13 @@ extend Package {
     }
 
     /// Whether item `d` is declared in an extern block whose header is scoped (`xscoped`).
-    pub fn extern_item_scoped(self: &Self, d: DefId) bool {
+    pub(package) fn extern_item_scoped(self: &Self, d: DefId) bool {
         return self.xscoped.contains(&(d.module as u64 << 32 | d.node as u64));
     }
 
     /// The CPU features function `f` of module `m` states (`@target_feature`, `@simd_impl`); empty for
     /// another.
-    pub fn fn_features(self: &Self, m: ModuleId, f: NodeId) cf::CpuFeatureSet {
+    pub(package) fn fn_features(self: &Self, m: ModuleId, f: NodeId) cf::CpuFeatureSet {
         let a = &self.modules[m as usize].ast;
         let ks: [AttrKind; 2] = [AttrKind::ATTR_TARGET_FEATURE, AttrKind::ATTR_SIMD_IMPL];
         for k in ks {
@@ -2575,7 +2597,7 @@ extend Package {
 
     /// Whether type `t` of `a` is a function value's type that `FnPtr` admits: a function pointer, or a
     /// named function's type; never a closure's.
-    pub const fn fn_value_type(self: &Self, a: &Ast, t: TypeId) bool {
+    pub(package) const fn fn_value_type(self: &Self, a: &Ast, t: TypeId) bool {
         let y = a.type_at(t);
         return y.kind == TypeKind::TYPE_FUNCTION && (y.fn_sig() || unsafe (*self.module_ast_const(y.module)).at_const(
             y.as_data.decl,
@@ -2584,7 +2606,7 @@ extend Package {
 
     /// The effective features of function `f` of module `m` (NODE_NONE: none): the build's and those
     /// it states, closed under `implies`. On wasm32 features are per build: the build's alone.
-    pub fn fn_set(self: &Self, m: ModuleId, f: NodeId) cf::CpuFeatureSet {
+    pub(package) fn fn_set(self: &Self, m: ModuleId, f: NodeId) cf::CpuFeatureSet {
         if f == NODE_NONE || !tgt::isa(self.arch).fn_features {
             return self.features;
         }
@@ -2593,7 +2615,7 @@ extend Package {
 
     /// The analysis worker count for this loaded package: `jobs` when the user source is large enough
     /// for the parallel frontiers to pay for themselves, else 1 (see PAR_MIN_USER_BYTES).
-    pub const fn analysis_jobs(self: &Self, jobs: u32) u32 {
+    pub(package) const fn analysis_jobs(self: &Self, jobs: u32) u32 {
         if jobs == 1 {
             return 1;
         }
@@ -2613,7 +2635,7 @@ extend Package {
     /// parsed-but-never-resolved and two same-named platform variants collapse to the single active one.
     /// target: 0 windows, 1 macos, 2 linux; Attr.arg is the active-set mask (windows=bit0/macos=bit1/linux=bit2).
     /// It also prunes every module's build-constant sites.
-    pub fn platform_filter(self: &mut Self, target: i32) {
+    pub(package) fn platform_filter(self: &mut Self, target: i32) {
         let n = self.modules.len();
         // The prelude stage filtered its modules.
         for mi in self.root_module as usize..n {
@@ -2623,7 +2645,7 @@ extend Package {
 
     /// A package with this one's search roots and build settings and nothing loaded: the package the
     /// prelude stage checks in (`driver::emit::prelude_stage`).
-    pub fn settings_copy(self: &Self) Package {
+    pub(package) fn settings_copy(self: &Self) Package {
         let mut q = Package::new();
         q.root_dir = self.root_dir.clone();
         q.alt_root = self.alt_root.clone();
@@ -2649,7 +2671,7 @@ extend Package {
     /// The first stage of a driver build: the std prelude under `std_dir` and the build-constant
     /// module, before any user module (`load_user` appends them), so the prelude's module and item
     /// ids are the same in every build with these settings, and its analysis reads nothing else.
-    pub fn load_prelude_stage(self: &mut Self, std_dir: str, bootstrap_tags: bool, target: i32) {
+    pub(package) fn load_prelude_stage(self: &mut Self, std_dir: str, bootstrap_tags: bool, target: i32) {
         self.bootstrap = bootstrap_tags;
         if self.std_missing(std_dir) {
             return;
@@ -2665,7 +2687,7 @@ extend Package {
     /// Start reading and parsing `root_file`'s module closure in tasks, for a package with this one's
     /// settings whose prelude is the one `q` loaded (`load_prelude_stage`), while `q` is checked. Nothing
     /// starts when loading is serial or the root names a loaded module.
-    pub fn spec_user(self: &Self, q: &Package, root_file: str, target: i32) Box<UserSpec> {
+    pub(package) fn spec_user(self: &Self, q: &Package, root_file: str, target: i32) Box<UserSpec> {
         let rp = stem_of(root_file);
         if unsafe G_LOAD_JOBS == 1 || self.overlay_files.len() != 0 || q.find(rp.as_str()) >= 0 {
             return UserSpec::new();
@@ -2699,7 +2721,7 @@ extend Package {
 
     /// Take the user closure of `s` (`spec_user`), started against the prelude this package holds, for
     /// `load_user`. Waits for its tasks.
-    pub fn adopt_user(self: &mut Self, mut s: Box<UserSpec>) {
+    pub(package) fn adopt_user(self: &mut Self, mut s: Box<UserSpec>) {
         s.join();
         if s.units.units.len() == 0 {
             return;
@@ -2719,7 +2741,7 @@ extend Package {
     /// The second stage: append `root_file`'s module closure after the prelude (from `adopt_user` when
     /// it took one), then the vector backend when a module names a vector. Every module joins the
     /// package type table as it loads; `index_append` indexes them once the platform filter has run.
-    pub fn load_user(self: &mut Self, root_file: str, std_dir: str, target: i32) {
+    pub(package) fn load_user(self: &mut Self, root_file: str, std_dir: str, target: i32) {
         self.root_module = self.modules.len() as u32;
         let rp = stem_of(root_file);
         let rf = String::from_str(root_file);
@@ -2745,7 +2767,7 @@ extend Package {
 
     /// Load `root_file` and, transitively, every module it imports, then append the std prelude
     /// under `std_dir` (empty skips it).
-    pub fn load_root(self: &mut Self, root_file: str, std_dir: str, bootstrap_tags: bool, target: i32) {
+    pub(package) fn load_root(self: &mut Self, root_file: str, std_dir: str, bootstrap_tags: bool, target: i32) {
         self.bootstrap = bootstrap_tags;
         if self.std_missing(std_dir) {
             return;
@@ -2828,13 +2850,13 @@ extend Package {
 
     /// Whether module `m` is a root: the module the package was loaded from, or a file a batch lint
     /// lists (each is a program of its own there).
-    pub const fn is_root_module(self: &Self, m: ModuleId) bool {
+    pub(package) const fn is_root_module(self: &Self, m: ModuleId) bool {
         return m as i32 == self.root || m as usize < self.lint_set.len() && self.lint_set[m as usize];
     }
 
     /// Whether function `f` of module `m` is the program entry: a root module's top-level `main`.
     /// Every other function named `main` is an ordinary function.
-    pub fn is_entry(self: &Self, m: ModuleId, f: NodeId) bool {
+    pub(package) fn is_entry(self: &Self, m: ModuleId, f: NodeId) bool {
         if !self.is_root_module(m) {
             return false;
         }
@@ -2853,14 +2875,14 @@ extend Package {
     }
 
     /// Whether module `m` is std's `target.spc`, the declarer of the build-constant enums.
-    pub const fn is_target_module(self: &Self, m: ModuleId) bool {
+    pub(package) const fn is_target_module(self: &Self, m: ModuleId) bool {
         return m as usize < self.modules.len() && self.modules[m as usize].prelude && basename_of(
             self.modules[m as usize].file.as_str(),
         ) == "target.spc";
     }
 
     /// The build profile's name: `profile`, `debug` when the driver named none.
-    pub const fn profile_name<'a>(self: &'a Self) str<'a> {
+    pub(package) const fn profile_name<'a>(self: &'a Self) str<'a> {
         if self.profile.len() == 0 {
             return "debug";
         }
@@ -2869,7 +2891,7 @@ extend Package {
 
     /// The value build constant `k` (not PROFILE) has in this compilation, -1 when unknown: a
     /// platform or instruction set as its variant index, TEST as 0 or 1.
-    pub const fn bc_value(self: &Self, k: i32) i64 {
+    pub(package) const fn bc_value(self: &Self, k: i32) i64 {
         if k == BC_PLATFORM {
             return self.build_target;
         }
@@ -2903,7 +2925,7 @@ extend Package {
 
     /// The index of this compilation's settings in a `@when` truth table: bit `when_var(k)` is the
     /// value of boolean build constant `k`.
-    pub const fn when_index(self: &Self) u32 {
+    pub(package) const fn when_index(self: &Self) u32 {
         let mut w = self.bc_value(BC_TEST) as u32;
         for k in BC_LOCKDEP..BC_OVERFLOW_CHECKS + 1 {
             w = w | self.bc_value(k) as u32 << when_var(k);
@@ -2916,7 +2938,7 @@ extend Package {
     /// none is), a `switch` by the body of the first arm that matches. Sites are in parse order,
     /// so an `else if` is decided before the `if` that holds it. Each replaced site records its
     /// span and the identifiers of its removed text (`Ast.bc_cuts`, `Ast.bc_names`).
-    pub fn prune_build_sites(self: &mut Self, mi: usize) {
+    pub(package) fn prune_build_sites(self: &mut Self, mi: usize) {
         let mut names = Vector::<u64>::new();
         let ns = self.modules[mi].ast.bc_sites.len();
         for i in 0..ns {
@@ -3142,7 +3164,7 @@ extend Package {
 
     /// Filter one module's item list (idempotent): the LSP's incremental rebuild re-filters only the
     /// reparsed module.
-    pub fn platform_filter_module(self: &mut Self, mi: usize, target: i32) {
+    pub(package) fn platform_filter_module(self: &mut Self, mi: usize, target: i32) {
         if self.modules[mi].has_ast {
             self.prune_build_sites(mi);
         }
@@ -3222,7 +3244,7 @@ extend Package {
 
     /// Put every module under the package type table (package identity): each module's pool then
     /// holds only its provisional types, published in batches by `publish_types`.
-    pub fn bind_types(self: &mut Self) {
+    pub(package) fn bind_types(self: &mut Self) {
         if self.tt.deref().len() == 0 {
             self.tt.deref_mut().seed();
             self.tt_class.resize_default(self.tt.deref().len());
@@ -3261,7 +3283,7 @@ extend Package {
     }
 
     /// The final id of `t` as module `m` knew it before the last publication (final ids pass through).
-    pub const fn map_type(self: &Self, m: ModuleId, t: TypeId) TypeId {
+    pub(package) const fn map_type(self: &Self, m: ModuleId, t: TypeId) TypeId {
         if (t & TYPE_PROV) == 0 || m as usize >= self.pub_map.len() {
             return t;
         }
@@ -3314,7 +3336,7 @@ extend Package {
     /// place. Then every module's tables are remapped (`Ast::publish_remap`) and its pool cleared;
     /// the maps stay in `pub_map` for the driver to remap the stores it owns (the constant engine,
     /// the kept lowerings).
-    pub fn publish_types(self: &mut Self) {
+    pub(package) fn publish_types(self: &mut Self) {
         let n = self.modules.len();
         self.ensure_index();
         self.pub_map.clear();
@@ -3544,7 +3566,7 @@ extend Package {
     /// The package type table as text, one line per record (`class kind qualifier module payload`,
     /// children as final ids; `I module decl n args` for an instance record): the identity every
     /// module shares, compared across worker counts and edits by the validation gates.
-    pub fn type_table_dump(self: &Self, out: &mut String) {
+    pub(package) fn type_table_dump(self: &Self, out: &mut String) {
         let g = self.tt.deref();
         for t in 0..g.len() {
             let y = g.at(t);
@@ -3600,7 +3622,7 @@ extend Package {
     }
 
     /// Validation after a publication: no module table may still name a provisional id.
-    pub fn check_published(self: &Self) bool {
+    pub(package) fn check_published(self: &Self) bool {
         for m in 0..self.modules.len() {
             if self.modules.at(m).has_ast && self.modules.at(m).ast.has_provisional() {
                 eprintln("type-validate: module {} still holds a provisional type id after publication", m);
@@ -3611,7 +3633,7 @@ extend Package {
     }
 
     /// An empty package for the host architecture; `load_module` fills it.
-    pub fn new() Package {
+    pub(package) fn new() Package {
         return Package {
             arch: if unsafe G_ARCH < 0 {
                 unsafe shim::sc_host_arch();
@@ -3639,7 +3661,7 @@ extend Package {
 
     /// True when a loop in the body whose span is `osp` (module `m`) can run inside a coroutine
     /// and therefore needs a preemption safepoint at its backedges.
-    pub const fn co_on(self: &Self, m: ModuleId, osp: tok::Span) bool {
+    pub(package) const fn co_on(self: &Self, m: ModuleId, osp: tok::Span) bool {
         if self.co_state != 1 {
             return true;
         }
@@ -3658,7 +3680,7 @@ extend Package {
 
     /// Is the std decl declared exactly at `sp` (module `m`) one whose ticks its instances decide
     /// (`co_inst`)?
-    pub const fn co_inst_on(self: &Self, m: ModuleId, sp: tok::Span) bool {
+    pub(package) const fn co_inst_on(self: &Self, m: ModuleId, sp: tok::Span) bool {
         if m as usize >= self.co_inst.len() {
             return false;
         }
@@ -3674,7 +3696,7 @@ extend Package {
 
     /// The coroutine and cancellation reachability of the whole package from its current syntax: one
     /// scan per module (`co_scan`), then `reach_solve`. Every body must be live.
-    pub fn reach_compute(self: &mut Self) {
+    pub(package) fn reach_compute(self: &mut Self) {
         let cx = self.reach_ctx();
         let mut scans = Vector::<ReachScan>::with_capacity(self.modules.len());
         for m in 0..self.modules.len() {
@@ -3684,7 +3706,7 @@ extend Package {
     }
 
     /// The inputs every module's scan shares (`co_scan`).
-    pub fn reach_ctx(self: &Self) ReachCtx {
+    pub(package) fn reach_ctx(self: &Self) ReachCtx {
         let mut cx = ReachCtx {
             rt: false,
             ent: Vector::<u64>::new(),
@@ -3718,7 +3740,7 @@ extend Package {
     /// Scan module `m` for the reachability (`ReachScan`): its bodies and checked tables must be live.
     /// One pass over its nodes builds the declaration table and keeps, in node order, the sites the
     /// records come from; a second pass over the sites writes the records.
-    pub fn co_scan(self: &Self, m: usize, cx: &ReachCtx) ReachScan {
+    pub(package) fn co_scan(self: &Self, m: usize, cx: &ReachCtx) ReachScan {
         let mut s = ReachScan::new();
         if !cx.rt || !self.modules.at(m).has_ast {
             return s;
@@ -4157,7 +4179,7 @@ extend Package {
     /// site, and a marked conformance method marks the interface methods of its name, whose call
     /// sites a bound or `dyn` dispatch pins. A call to a fn value nothing pins marks nothing: when
     /// some fn value of `co_fnv` is marked (`cancel_fnv`), every such call carries its own check.
-    pub fn reach_solve(self: &mut Self, scans: &Vector<ReachScan>) {
+    pub(package) fn reach_solve(self: &mut Self, scans: &Vector<ReachScan>) {
         let nm = self.modules.len();
         assert(scans.len() == nm, "one reachability scan per module");
         self.co_state = 1;
@@ -4799,7 +4821,7 @@ extend Package {
     /// Can the function or closure declared exactly at `sp` reach the runtime's cancellation
     /// acceptance? False whenever the pass has not run (no coroutine runtime loaded): no
     /// cancellation checks. Exact-span membership: the queried span is always a decl's own span.
-    pub fn cancel_on(self: &Self, m: ModuleId, sp: tok::Span) bool {
+    pub(package) fn cancel_on(self: &Self, m: ModuleId, sp: tok::Span) bool {
         if self.cancel_state != 1 {
             return false;
         }
@@ -4812,7 +4834,7 @@ extend Package {
     /// Read-only view of module `mid`'s Ast for consumers outside the package (the Core IR lowerer). Asts
     /// live IN PLACE in the module table for their whole life: a stage mutates its module's Ast through a
     /// raw pointer into this slot, never by moving it out, so this read is always the live tree.
-    pub const fn module_ast_const(self: &Self, mid: ModuleId) *const Ast {
+    pub(package) const fn module_ast_const(self: &Self, mid: ModuleId) *const Ast {
         if self.wl_on {
             self.wl_take(mid);
         }
@@ -4821,7 +4843,7 @@ extend Package {
 
     /// Module `mid`'s syntax and resolutions without its write lock (`module_ast_const`): what a scan
     /// over every module reads before it picks a candidate; both are frozen in a parallel stage.
-    pub const fn module_syntax(self: &Self, mid: ModuleId) *const Ast {
+    pub(package) const fn module_syntax(self: &Self, mid: ModuleId) *const Ast {
         return &self.modules[mid as usize].ast;
     }
 
@@ -4843,7 +4865,7 @@ extend Package {
     /// Before the running task waits for the engine lock: release the module write lock it holds
     /// as a checker, and return that module (-1 for none). A holder of a write lock never waits
     /// for the engine lock, so the engine's wait for a write lock ends.
-    pub fn wl_eng_begin(self: &mut Self) i64 {
+    pub(package) fn wl_eng_begin(self: &mut Self) i64 {
         let tok = Ast::itok();
         for m in 0..self.modules.len() {
             if unsafe atomic::load_usize(&self.modules[m].ast.wl_owner, 0) == tok {
@@ -4855,12 +4877,12 @@ extend Package {
     }
 
     /// The running task now holds the engine lock: the modules it reads from here on are locked.
-    pub fn wl_eng_hold(self: &mut Self) {
+    pub(package) fn wl_eng_hold(self: &mut Self) {
         unsafe atomic::store_usize(&mut self.wl_eng, Ast::itok(), 0);
     }
 
     /// Before the engine lock's release: drop every write lock the engine took.
-    pub fn wl_eng_end(self: &mut Self) {
+    pub(package) fn wl_eng_end(self: &mut Self) {
         unsafe atomic::store_usize(&mut self.wl_eng, 0, 0);
         for i in 0..self.wl_got.len() {
             self.modules[self.wl_got[i] as usize].ast.wl_leave();
@@ -4870,7 +4892,7 @@ extend Package {
 
     /// Whether interface method `f`'s first parameter is of type `Self` (behind references or
     /// pointers): its argument then names the implementor.
-    pub const fn self_typed_param0(self: &Self, f: DefId) bool {
+    pub(package) const fn self_typed_param0(self: &Self, f: DefId) bool {
         let a = unsafe &*self.module_ast_const(f.module);
         let ps = a.at_const(f.node).as_data.function.params;
         if ps.len == 0 {
@@ -4895,7 +4917,7 @@ extend Package {
     }
 
     /// Whether function `f`'s first parameter is `self` (a method, not an associated function).
-    pub const fn self_first(self: &Self, f: DefId) bool {
+    pub(package) const fn self_first(self: &Self, f: DefId) bool {
         let a = unsafe &*self.module_ast_const(f.module);
         let ps = a.at_const(f.node).as_data.function.params;
         if ps.len == 0 {
@@ -4907,7 +4929,7 @@ extend Package {
 
     /// Approximate owned bytes across the package's retained analyses (the LSP budget's accounting
     /// unit): per-module sources + arenas.
-    pub const fn retained_bytes(self: &Self) usize {
+    pub(package) const fn retained_bytes(self: &Self) usize {
         let mut b: usize = 0;
         for i in 0..self.modules.len() {
             let m = self.modules.at(i);
@@ -4927,7 +4949,7 @@ extend Package {
 
     /// The index record of declaration node `node` in module `m`, or ITEM_NONE when the node is
     /// not a top-level or associated declaration (`by_node` binary search over the module).
-    pub const fn item_of(self: &Self, m: ModuleId, node: NodeId) ItemId {
+    pub(package) const fn item_of(self: &Self, m: ModuleId, node: NodeId) ItemId {
         if !self.sched.built || m as usize + 1 >= self.idx.mod_items.len() {
             return ITEM_NONE;
         }
@@ -4949,13 +4971,13 @@ extend Package {
     }
 
     /// The readiness state of item `it` (acquire: the item's published writes are visible).
-    pub fn item_state_at(self: &Self, it: ItemId) u8 {
+    pub(package) fn item_state_at(self: &Self, it: ItemId) u8 {
         return unsafe atomic::load_u8(unsafe (self.sched.state.as_ptr() + it as usize), 1);
     }
 
     /// The readiness state of declaration `node` of module `m`; IS_PARSED for a node with no
     /// record (an unindexed declaration is never checked as an item).
-    pub fn item_state(self: &Self, m: ModuleId, node: NodeId) u8 {
+    pub(package) fn item_state(self: &Self, m: ModuleId, node: NodeId) u8 {
         let it = self.item_of(m, node);
         if it == ITEM_NONE {
             return IS_PARSED;
@@ -4965,14 +4987,14 @@ extend Package {
 
     /// Move item `it` to state `st` (release: every write before the call is published with the
     /// state). Monotone: a lower state is a programmer error.
-    pub fn set_item_state(self: &mut Self, it: ItemId, st: u8) {
+    pub(package) fn set_item_state(self: &mut Self, it: ItemId, st: u8) {
         let cur = self.item_state_at(it);
         assert(st >= cur, "item readiness states only move up");
         unsafe atomic::store_u8(unsafe (self.sched.state.as_ptr() as *mut u8 + it as usize), st, 2);
     }
 
     /// Record the result-attributability verdict of function `node` of module `m` (`ItemSched.ret_attr`).
-    pub fn set_item_ret_attr(self: &mut Self, m: ModuleId, node: NodeId, v: bool) {
+    pub(package) fn set_item_ret_attr(self: &mut Self, m: ModuleId, node: NodeId, v: bool) {
         let it = self.item_of(m, node);
         if it == ITEM_NONE {
             return;
@@ -4990,7 +5012,7 @@ extend Package {
 
     /// The recorded verdict of function `node` of module `m`: 1 or 0, 2 while unrecorded, -1 when
     /// it is not an item.
-    pub fn item_ret_attr(self: &Self, m: ModuleId, node: NodeId) i32 {
+    pub(package) fn item_ret_attr(self: &Self, m: ModuleId, node: NodeId) i32 {
         let it = self.item_of(m, node);
         if it == ITEM_NONE {
             return 0 - 1;
@@ -5000,7 +5022,7 @@ extend Package {
 
     /// Move item `it` and, for an extend, its member records (the records following it that name
     /// it as owner: a member is checked with its extend) to state `st`.
-    pub fn set_item_state_deep(self: &mut Self, it: ItemId, st: u8) {
+    pub(package) fn set_item_state_deep(self: &mut Self, it: ItemId, st: u8) {
         self.set_item_state(it, st);
         let n = self.idx.items.len();
         for k in it as usize + 1..n {
@@ -5012,7 +5034,7 @@ extend Package {
     }
 
     /// Move every item of module `m` to `st` when it is below (a module-wide transition).
-    pub fn set_module_states(self: &mut Self, m: usize, st: u8) {
+    pub(package) fn set_module_states(self: &mut Self, m: usize, st: u8) {
         if !self.sched.built {
             return;
         }
@@ -5025,7 +5047,7 @@ extend Package {
 
     /// The coordinator's re-analysis reset (the language server checks a module again): every
     /// item of module `m` returns to Resolved. Not a monotone transition; no reader runs meanwhile.
-    pub fn reset_module_states(self: &mut Self, m: usize) {
+    pub(package) fn reset_module_states(self: &mut Self, m: usize) {
         if !self.sched.built {
             return;
         }
@@ -5037,7 +5059,7 @@ extend Package {
     /// Free every module's body arena: the checked release point of releasable body syntax, once
     /// the last consumer of it (the instance graph's static_assert check) has run. Every retained record a later stage
     /// reads (kept Core IR, closure and asm facts) was copied out before.
-    pub fn release_bodies(self: &mut Self) {
+    pub(package) fn release_bodies(self: &mut Self) {
         for i in 0..self.modules.len() {
             if self.modules[i].has_ast {
                 self.modules[i].ast.release_bodies();
@@ -5050,7 +5072,7 @@ extend Package {
 
     /// The enum declaring member `vd` (NODE_NONE when `vd` is no enum member) and `vd`'s position
     /// in it (-1 when none), from the package index.
-    pub const fn variant_enum(self: &Self, vd: DefId, pos: &mut i64) NodeId {
+    pub(package) const fn variant_enum(self: &Self, vd: DefId, pos: &mut i64) NodeId {
         if let Some(v) = self.idx.variants.get(&skey_mix(0, vd.module as u64 << 32 | vd.node as u64)) {
             *pos = (*v & 0xFFFFFFFFu64) as i64;
             return (*v >> 32) as NodeId;
@@ -5060,7 +5082,7 @@ extend Package {
     }
 
     /// Find a module by its `::`-joined path; returns its ModuleId, or -1 if absent.
-    pub fn find(self: &Self, path: str) i32 {
+    pub(package) fn find(self: &Self, path: str) i32 {
         let mut m = switch self.mod_index.get(&fnv(path)) {
             Some(h) => *h,
             None => SYM_NONE,
@@ -5101,7 +5123,7 @@ extend Package {
     /// Append in-memory source `src` as module "main" (file "<harness>"), last, to a package from
     /// `prelude_package_arch`, as `package_from_source_arch` appends it. A source that does not parse
     /// clears `ok`.
-    pub fn add_source_module(self: &mut Self, src: str, target: i32) {
+    pub(package) fn add_source_module(self: &mut Self, src: str, target: i32) {
         let mut source = String::from_str(src);
         let mut parsed = parse_source(&mut source, "<harness>", false, Vector::<tok::Token>::new());
         let ok = parsed.ok;
@@ -5236,7 +5258,7 @@ extend Package {
     /// Whether module `from` (`FROM_ANY`: the compiler itself) sees an item of module `owner` declared with
     /// visibility `vis` (`VIS_*`, `VIS_MODULE` or wider). A module outside the package (the standalone test
     /// Ast) is a project file at the root.
-    pub const fn vis_ok(self: &Self, from: u32, owner: ModuleId, vis: u8) bool {
+    pub(package) const fn vis_ok(self: &Self, from: u32, owner: ModuleId, vis: u8) bool {
         if vis == VIS_PUB || from == owner as u32 || from == FROM_ANY {
             return true;
         }
@@ -5272,7 +5294,7 @@ extend Package {
 
     /// Whether every module that sees an item of module `im` with visibility `iv` also sees an item of
     /// module `tm` with visibility `tv` (`VIS_*`; an item without a modifier is its file's).
-    pub const fn vis_covers(self: &Self, im: ModuleId, iv: u8, tm: ModuleId, tv: u8) bool {
+    pub(package) const fn vis_covers(self: &Self, im: ModuleId, iv: u8, tm: ModuleId, tv: u8) bool {
         if tv == VIS_PUB || im == tm && (tv >= iv || iv < VIS_MODULE) {
             return true;
         }
@@ -5498,7 +5520,7 @@ extend Package {
 
     /// Load `file_path` as module `mod_path` with its whole import closure (parallel when load jobs
     /// are set and no overlays are active). Returns the module's id, or -1 when the root is unreadable.
-    pub fn load_module(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool, target: i32) i32 {
+    pub(package) fn load_module(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool, target: i32) i32 {
         if unsafe G_LOAD_JOBS != 1 && self.overlay_files.len() == 0 {
             return self.load_module_par(mod_path, file_path, bootstrap_tags, target);
         }
@@ -5814,7 +5836,7 @@ extend Package {
     /// explicit `import std::core` loads the same file first under the user's own path and `load_prelude`
     /// then only flags it. Matching the path alone left the builtins un-seeded there, so every
     /// `extend i8 as Ord` in that very file failed its `Eq` superinterface.
-    pub fn seed_core(self: &mut Self) {
+    pub(package) fn seed_core(self: &mut Self) {
         self.core_seeded = false;
         for i in 0..self.modules.len() {
             let is_core = self.modules[i].has_ast && self.modules[i].prelude && basename_of(
@@ -5838,7 +5860,7 @@ extend Package {
     }
 
     /// The synthetic decl node anchoring builtin `b` in the core module, or NODE_NONE if builtins weren't seeded.
-    pub const fn builtin_decl(self: &Self, b: BuiltinType) NodeId {
+    pub(package) const fn builtin_decl(self: &Self, b: BuiltinType) NodeId {
         if self.core_seeded && b as usize < BT_COUNT_N {
             return unsafe self.builtin_decls[b as usize];
         }
@@ -5846,7 +5868,7 @@ extend Package {
     }
 
     /// If (module, node) names a builtin's synthetic core decl, its BuiltinType; else -1.
-    pub const fn builtin_of_decl(self: &Self, module: ModuleId, node: NodeId) i32 {
+    pub(package) const fn builtin_of_decl(self: &Self, module: ModuleId, node: NodeId) i32 {
         if !self.core_seeded || module != self.core_module || node == NODE_NONE {
             return -1;
         }
@@ -5864,7 +5886,15 @@ extend Package {
     /// one, whose arguments match and whose parameters' bounds hold (`ext_bounds_concrete`). The
     /// marker interfaces (`Copy`, `Send`, `Sync`, `Free`, `FnPtr`), a type parameter and a nesting past
     /// the bound answer true: the checker proved the program's bounds, this only chooses.
-    pub fn conf_holds(self: &Self, dm: ModuleId, t: TypeId, iface: DefId, wa: *const TypeId, wn: u32, depth: u32) bool {
+    pub(package) fn conf_holds(
+        self: &Self,
+        dm: ModuleId,
+        t: TypeId,
+        iface: DefId,
+        wa: *const TypeId,
+        wn: u32,
+        depth: u32,
+    ) bool {
         if depth > 8 || t == TYPE_NONE || iface.node == NODE_NONE {
             return true;
         }
@@ -5974,7 +6004,7 @@ extend Package {
 
     /// Whether the bounds of extend `ext`'s parameters (module `em`) hold for their values `la[0..ln]`
     /// (pool `dm`; TYPE_NONE: unbound, not checked), as `conf_holds` decides a bound.
-    pub fn ext_bounds_concrete(
+    pub(package) fn ext_bounds_concrete(
         self: &Self,
         em: ModuleId,
         ext: NodeId,
@@ -6028,7 +6058,7 @@ extend Package {
     /// on its interface path), grounded under the parameters its target solves, into `out` (pool
     /// `dm`). False when no conformance applies. Emission (`Mangler::ground`) and compile-time
     /// evaluation resolve `T::Output` through it; the instance graph mirrors it on final ids.
-    pub fn assoc_norm(self: &Self, dm: ModuleId, ai: &TyInstance, out: &mut TypeId, depth: u32) bool {
+    pub(package) fn assoc_norm(self: &Self, dm: ModuleId, ai: &TyInstance, out: &mut TypeId, depth: u32) bool {
         if depth > 16 {
             return false;
         }
@@ -6139,7 +6169,7 @@ extend Package {
     // The values extend `ext` (module `em`) gives its parameters for instance `it` of its target
     // (arguments concrete types of pool `dm`), as the bindings `lp[i]` -> `la[i]` (pool `dm`), `ln` of
     // them. False when the extend does not apply to the instance.
-    pub fn ext_solve(
+    pub(package) fn ext_solve(
         self: &Self,
         em: ModuleId,
         ext: NodeId,
@@ -6310,7 +6340,7 @@ extend Package {
     /// `(pm, t)` with the parameters `lp[i]` bound to `la[i]` (`ln` of them, concrete types of pool
     /// `dm`), as a concrete type interned into pool `dm`; an associated type grounds through its
     /// conformance (`assoc_norm`). False when another parameter remains.
-    pub fn ground_local(
+    pub(package) fn ground_local(
         self: &Self,
         pm: ModuleId,
         t: TypeId,
@@ -6404,7 +6434,7 @@ extend Package {
     /// The integer type of const generic parameter `gp` of module `m`, from its declared type: the
     /// builtin it names (through type aliases), i32 for an enum (a value is its discriminant), and
     /// BT_COUNT for any other type.
-    pub fn const_param_bt(self: &Self, m: ModuleId, gp: NodeId) BuiltinType {
+    pub(package) fn const_param_bt(self: &Self, m: ModuleId, gp: NodeId) BuiltinType {
         let mut tm = m;
         let mut a = self.module_ast_const(m);
         let mut tn = unsafe (*a).at_const(gp).as_data.generic_param.const_type;
@@ -6448,7 +6478,7 @@ extend Package {
 
     /// The enum type node `tn` of module `m` names, through type aliases; node NODE_NONE for any
     /// other type.
-    pub fn type_enum(self: &Self, m: ModuleId, tn: NodeId) DefId {
+    pub(package) fn type_enum(self: &Self, m: ModuleId, tn: NodeId) DefId {
         let mut a = self.module_ast_const(m);
         let mut t = tn;
         let mut hops: u32 = 0;
@@ -6472,7 +6502,7 @@ extend Package {
     }
 
     /// Record a method DefId as referenced, for demand-driven instance-method emission.
-    pub fn mark_method_used(self: &mut Self, d: DefId) {
+    pub(package) fn mark_method_used(self: &mut Self, d: DefId) {
         if d.node == NODE_NONE {
             return;
         }
@@ -6497,7 +6527,7 @@ extend Package {
     }
 
     /// True when method `d` was marked used (demanded) by any module.
-    pub const fn method_used_get(self: &Self, d: DefId) bool {
+    pub(package) const fn method_used_get(self: &Self, d: DefId) bool {
         if d.node == NODE_NONE {
             return false;
         }
@@ -6519,7 +6549,7 @@ extend Package {
     /// on first lookup after loading; a module appended later (the LSP's batch load) triggers a full
     /// rebuild. Declaration names, spans, and imports are parse-final, so the result stays valid for
     /// the whole pipeline.
-    pub fn build_index(self: &mut Self) {
+    pub(package) fn build_index(self: &mut Self) {
         let n = self.modules.len();
         let mut idx = PkgIndex {};
         idx.built_mods = n as u32;
@@ -6595,7 +6625,7 @@ extend Package {
     /// Index the modules appended since the index was built (`load_user` after a checked prelude),
     /// keeping every existing module's items, symbols and ids: the modules before them import none of
     /// them. The import components, the sugar shims and the signature table are computed again.
-    pub fn index_append(self: &mut Self) {
+    pub(package) fn index_append(self: &mut Self) {
         let n = self.modules.len();
         let from = self.idx.built_mods as usize;
         if from == n {
@@ -6651,7 +6681,7 @@ extend Package {
     }
 
     /// The resolved decl behind a sugar-lowering shim (NODE_NONE DefId when its module is not loaded).
-    pub const fn sugar_item(self: &Self, k: SugarItem) DefId {
+    pub(package) const fn sugar_item(self: &Self, k: SugarItem) DefId {
         let h = self.idx.sugar_items.at(k as usize);
         return DefId { module: h.mid, node: h.node };
     }
@@ -6661,7 +6691,7 @@ extend Package {
     /// the conformances by interface (`PkgIndex.confs`). Runs once, after the whole package is
     /// type-checked (the driver calls it before instance planning); an index rebuild (a module
     /// appended later) clears the tables, and the next call refills them.
-    pub fn ensure_sigs(self: &mut Self) {
+    pub(package) fn ensure_sigs(self: &mut Self) {
         self.ensure_index();
         if self.idx.sigs_built {
             return;
@@ -6748,7 +6778,7 @@ extend Package {
     }
 
     /// The signature metadata for fn decl (m, node), or null when none is recorded.
-    pub const fn item_sig(self: &Self, m: ModuleId, node: NodeId) *const ItemSig {
+    pub(package) const fn item_sig(self: &Self, m: ModuleId, node: NodeId) *const ItemSig {
         if let Some(i) = self.idx.sig_of.get(&skey_mix(0, m as u64 << 32 | node as u64)) {
             return self.idx.sigs.at((*i) as usize);
         }
@@ -6756,12 +6786,12 @@ extend Package {
     }
 
     /// Entry `i` of the signature type pool (see `sigs`).
-    pub const fn sig_type(self: &Self, i: u32) TypeId {
+    pub(package) const fn sig_type(self: &Self, i: u32) TypeId {
         return self.idx.sig_types[i as usize];
     }
 
     /// Build the index if it does not cover the current module set (cheap check; see build_index).
-    pub fn ensure_index(self: &mut Self) {
+    pub(package) fn ensure_index(self: &mut Self) {
         if self.idx.built_mods as usize != self.modules.len() {
             self.build_index();
         }
@@ -6982,7 +7012,7 @@ extend Package {
     /// NodeId within module `mid`'s Ast, or NODE_NONE. O(1): a byte-exact symbol probe plus one name-map
     /// probe into the package declaration index.
     @always_inline
-    pub fn lookup(self: &Self, from: u32, mid: ModuleId, name: str, want_type: bool) NodeId {
+    pub(package) fn lookup(self: &Self, from: u32, mid: ModuleId, name: str, want_type: bool) NodeId {
         if !self.modules[mid as usize].has_ast {
             return NODE_NONE;
         }
@@ -6998,7 +7028,7 @@ extend Package {
     /// `lookup` by the name's interned symbol `s`, for a caller that probes many modules with one
     /// name. The index must cover `mid` (`ensure_index`); a module without an Ast has no entry.
     @always_inline
-    pub fn lookup_sym(self: &Self, from: u32, mid: ModuleId, s: SymbolId, want_type: bool) NodeId {
+    pub(package) fn lookup_sym(self: &Self, from: u32, mid: ModuleId, s: SymbolId, want_type: bool) NodeId {
         let key = s as u64 * 4u64 + if want_type {
             2u64;
         } else {
@@ -7018,7 +7048,7 @@ extend Package {
     /// What `<mid>::<s>` names for module `from`: an item `mid` declares, else the first in import order
     /// that a module `mid` glob-imports declares, or one of that module's imports. An implicit directory
     /// index reaches its files' own items only, and sets `amb` when two of its files declare the name.
-    pub fn qual_lookup(self: &Self, from: u32, mid: ModuleId, s: SymbolId, want_type: bool, amb: &mut bool) LookupHit {
+    pub(package) fn qual_lookup(self: &Self, from: u32, mid: ModuleId, s: SymbolId, want_type: bool, amb: &mut bool) LookupHit {
         let d = self.lookup_sym(from, mid, s, want_type);
         if d != NODE_NONE {
             return LookupHit { node: d, mid: mid };
@@ -7053,19 +7083,19 @@ extend Package {
     }
 
     /// The `VIS_*` of declaration `node` of module `mid`.
-    pub fn decl_vis(self: &Self, mid: ModuleId, node: NodeId) u8 {
+    pub(package) fn decl_vis(self: &Self, mid: ModuleId, node: NodeId) u8 {
         return node_vis(unsafe (*self.module_ast_const(mid)).at_const(node));
     }
 
     /// Like lookup but across every prelude module (the first in module order wins); the hit's `mid`
     /// is the owning module. One probe of the index's prelude name map.
     /// Is declaration `d` the prelude's type or interface `name`? A program's item of that name is not.
-    pub fn is_prelude_item(self: &Self, d: DefId, name: str) bool {
+    pub(package) fn is_prelude_item(self: &Self, d: DefId, name: str) bool {
         let h = self.prelude_lookup(name, true);
         return h.node != NODE_NONE && d.node == h.node && d.module == h.mid;
     }
 
-    pub fn prelude_lookup(self: &Self, name: str, want_type: bool) LookupHit {
+    pub(package) fn prelude_lookup(self: &Self, name: str, want_type: bool) LookupHit {
         let mp = (self as *const Package) as *mut Package;
         unsafe (*mp).ensure_index();
         let s = self.idx.syms.find(name);
@@ -7106,7 +7136,7 @@ extend Package {
     /// `mid`'s cached [mid, transitive imports...] list (built on first use; imports are load-final).
     /// The LSP's incremental rebuild reads it to decide which modules an edit can reach. NOTE: the
     /// implicit prelude is NOT in the list: a prelude edit must be treated as reaching everything.
-    pub fn module_closure(self: &mut Self, mid: ModuleId) *const Vector<ModuleId> {
+    pub(package) fn module_closure(self: &mut Self, mid: ModuleId) *const Vector<ModuleId> {
         self.ensure_closure(mid);
         return self.clo_lists.at(mid as usize);
     }
@@ -7114,7 +7144,7 @@ extend Package {
     /// Lookup extended over `mid`'s transitive imports (imports are public, C-style): searches `mid` itself,
     /// then every module it imports breadth-first in declaration order (the cached closure list). First hit
     /// wins.
-    pub fn glob_lookup(self: &Self, mid: ModuleId, name: str, want_type: bool) LookupHit {
+    pub(package) fn glob_lookup(self: &Self, mid: ModuleId, name: str, want_type: bool) LookupHit {
         if mid as usize >= self.modules.len() {
             return LookupHit { node: NODE_NONE, mid: 0 };
         }
@@ -7133,7 +7163,7 @@ extend Package {
 
     /// The modules `mid` transitively imports (excluding `mid` itself), breadth-first in declaration
     /// order: a BFS over the index import adjacency (identical order to the old per-call AST walk).
-    pub fn import_closure(self: &Self, mid: ModuleId) Vector<ModuleId> {
+    pub(package) fn import_closure(self: &Self, mid: ModuleId) Vector<ModuleId> {
         let n = self.modules.len();
         let mut out = Vector::<ModuleId>::new();
         if mid as usize > n {
@@ -7179,7 +7209,7 @@ extend Package {
     /// Fill row `from` of `mod_refs` (`row`: its `mod_refs_w` words, zero on entry) from the
     /// module's resolutions, both arenas. Call once all resolutions are final and before any body
     /// arena is released; one pass over the module's resolutions, independent of every other row.
-    pub fn mod_refs_row(self: &Self, from: usize, row: []mut u64) {
+    pub(package) fn mod_refs_row(self: &Self, from: usize, row: []mut u64) {
         let n = self.modules.len();
         if !self.modules[from].has_ast {
             return;
@@ -7244,7 +7274,7 @@ extend Package {
 
     /// The module that emits instance `it` seen from module `am`: the first argument type whose
     /// home is a user module or imports the instance's own module, else the instance's module.
-    pub fn instance_home_in(self: &Self, am: ModuleId, it: &TyInstance) ModuleId {
+    pub(package) fn instance_home_in(self: &Self, am: ModuleId, it: &TyInstance) ModuleId {
         for i in 0..it.n {
             let h = self.type_user_home(am, unsafe it.args[i as usize]);
             if h != 0xFFFF as ModuleId && (self.module_is_user(h) || self.module_imports(h, it.module)) {
@@ -7259,7 +7289,7 @@ extend Package {
     /// instance, method-instance and generic-call tables and the callees' declarations; the
     /// generic-call table names body nodes, so the row is computed while `a`'s body syntax is
     /// live.
-    pub fn emit_dep_row(self: &Self, a: usize, out: &mut Vector<ModuleId>) {
+    pub(package) fn emit_dep_row(self: &Self, a: usize, out: &mut Vector<ModuleId>) {
         let n = self.modules.len();
         out.truncate(0);
         if !self.modules[a].has_ast {
@@ -7325,7 +7355,7 @@ extend Package {
     /// Dependency-first module emit order: if module `a` full-monomorphizes a generic owned by `b` (re-homing a
     /// concrete instance to `a` itself), `b` must be emitted first. Kahn topo-sort with a lowest-id tiebreak;
     /// `order` is filled with `modules.len()` entries.
-    pub fn emit_order(self: &Self, order: &mut Vector<ModuleId>) {
+    pub(package) fn emit_order(self: &Self, order: &mut Vector<ModuleId>) {
         let n = self.modules.len();
         if n == 0 {
             return;
@@ -7402,7 +7432,7 @@ extend Package {
     // user's own `std/` folder. Names are sorted for deterministic module ids regardless of readdir order.
     // `user_vectors`: a module the caller loads after the prelude names a vector (`package_from_source_arch`).
     /// Whether a loaded module names a vector (`Ast.names_vectors`; std's own simd.spc aside).
-    pub const fn names_vectors(self: &Self) bool {
+    pub(package) const fn names_vectors(self: &Self) bool {
         for i in 0..self.modules.len() {
             let md = &self.modules[i];
             if md.has_ast && md.ast.names_vectors && !(md.prelude && basename_of(md.file.as_str()) == "simd.spc") {

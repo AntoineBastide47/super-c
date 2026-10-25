@@ -10,58 +10,58 @@ import target::table as tgt;
 
 /// Immutable target data. Every supported target currently shares the flat C data model except for
 /// pointer width; new axes (endianness, aggregate rules) join here, not at call sites.
-pub struct Target {
-    pub ptr: u64, // pointer size == alignment
+pub(package) struct Target {
+    pub(package) ptr: u64, // pointer size == alignment
 }
 
 /// The target record for a package's instruction set (a `target::table::ISAS` index; -1, unknown,
 /// lays out as 64-bit).
-pub const fn target_for(arch: i32) Target {
+pub(package) const fn target_for(arch: i32) Target {
     return Target { ptr: tgt::isa(arch).ptr_bytes };
 }
 
-pub struct Layout {
-    pub ok: bool,
-    pub size: u64,
-    pub align: u64,
+pub(package) struct Layout {
+    pub(package) ok: bool,
+    pub(package) size: u64,
+    pub(package) align: u64,
     /// A failure because a generic parameter had no binding in the env: the query was asked
     /// under an incomplete substitution, as opposed to a type no env can lay out.
-    pub unbound: bool,
+    pub(package) unbound: bool,
     /// A failure because the size exceeds the target's `isize::MAX`: no object can be that large.
-    pub big: bool,
+    pub(package) big: bool,
 }
 
 /// One substitution frame for generic-parameter layout: parameter decls of `pmod` bound to argument
 /// types of `argm`. A lookup that misses this frame continues at `parent`; a bound argument is read
 /// under `penv`, the env it was written in (the emitter's substitution stack hides a binding's own
 /// group from its payload, so the two chains can differ).
-pub struct LayoutEnv {
-    pub parent: *const LayoutEnv,
-    pub penv: *const LayoutEnv,
-    pub pmod: ModuleId,
-    pub params: *const NodeId,
-    pub argm: ModuleId,
-    pub args: [TypeId; 8],
-    pub n: u8,
+pub(package) struct LayoutEnv {
+    pub(package) parent: *const LayoutEnv,
+    pub(package) penv: *const LayoutEnv,
+    pub(package) pmod: ModuleId,
+    pub(package) params: *const NodeId,
+    pub(package) argm: ModuleId,
+    pub(package) args: [TypeId; 8],
+    pub(package) n: u8,
 }
 
 struct LayoutAcc {
-    pub size: u64,
-    pub align: u64,
-    pub packed: bool,
-    pub is_union: bool,
-    pub unbound: bool, // set by acc_field on a failing field (see Layout.unbound)
-    pub big: bool, // set by acc_field on a field too large, or a sum past u64 (see Layout.big)
+    pub(package) size: u64,
+    pub(package) align: u64,
+    pub(package) packed: bool,
+    pub(package) is_union: bool,
+    pub(package) unbound: bool, // set by acc_field on a failing field (see Layout.unbound)
+    pub(package) big: bool, // set by acc_field on a field too large, or a sum past u64 (see Layout.big)
 }
 
 /// A payload-carrying enum's C shape: `{ tag; union payload; }`, with a one-byte tag when
 /// `Ast::enum_tag_is_byte` holds and a 4-byte C enum tag otherwise.
-pub struct EnumLayout {
-    pub unbound: bool, // see Layout.unbound
-    pub ok: bool,
-    pub payload_off: u64, // tag sits at 0
-    pub size: u64,
-    pub align: u64,
+pub(package) struct EnumLayout {
+    pub(package) unbound: bool, // see Layout.unbound
+    pub(package) ok: bool,
+    pub(package) payload_off: u64, // tag sits at 0
+    pub(package) size: u64,
+    pub(package) align: u64,
 }
 
 // Recursion guard. A finite type stays far below it: instance arguments nest at most 256 levels
@@ -72,7 +72,7 @@ pub struct EnumLayout {
 const MAX_DEPTH: i32 = 1024;
 
 /// `v` rounded up to a multiple of `a` (`a` <= 1: `v`).
-pub const fn round_up(v: u64, a: u64) u64 {
+pub(package) const fn round_up(v: u64, a: u64) u64 {
     if a <= 1 {
         return v;
     }
@@ -81,7 +81,7 @@ pub const fn round_up(v: u64, a: u64) u64 {
 
 /// The frame that binds instance `it`'s arguments (types of module `argm`) to the generic
 /// parameters of its declaration in `da`, below `parent`.
-pub fn inst_frame(da: &Ast, it: &TyInstance, argm: ModuleId, parent: *const LayoutEnv) LayoutEnv {
+pub(package) fn inst_frame(da: &Ast, it: &TyInstance, argm: ModuleId, parent: *const LayoutEnv) LayoutEnv {
     let gens = da.at_const(it.decl).as_data.aggregate.generics;
     let mut frame = LayoutEnv { parent: parent, penv: parent, pmod: it.module, params: da.list(gens), argm: argm, n: 0 };
     let mut i: u32 = 0;
@@ -93,19 +93,19 @@ pub fn inst_frame(da: &Ast, it: &TyInstance, argm: ModuleId, parent: *const Layo
     return frame;
 }
 
-pub struct Svc {
-    pub pkg: *const loader::Package,
+pub(package) struct Svc {
+    pub(package) pkg: *const loader::Package,
     cache: Map<u64, Layout>, // (module << 32 | type) -> layout (env-free concrete only)
     active: Vector<u64>, // aggregate instantiations under query (declaration and arguments): cycle mark
     steps: Vector<ConstStep>, // `steps_hold` scratch
     pending: u32, // answers that read a constant-expression attribute not evaluated yet: never cached
     /// The compile-time evaluation this service answers for (null: none). A member of an item the
     /// reader does not see checked (`Interp::visible_node`) is pending.
-    pub ev: *const iri::Interp,
+    pub(package) ev: *const iri::Interp,
 }
 
 extend Svc {
-    pub fn new(pkg: *const loader::Package) Svc {
+    pub(package) fn new(pkg: *const loader::Package) Svc {
         if unsafe TS_ON {
             ts_add(TS_LAY_SVC, 1);
         }
@@ -119,7 +119,7 @@ extend Svc {
 
     /// Drop every cached answer: the keys name type ids of one publication, so a checkpoint that
     /// renumbers them (and restarts every module's provisional ids) invalidates the whole cache.
-    pub fn reset(self: &mut Self) {
+    pub(package) fn reset(self: &mut Self) {
         self.cache.clear();
     }
 
@@ -265,11 +265,11 @@ extend Svc {
 
     /// Size/align of `(m, t)` under the target data model; not-ok = not layoutable (opaque, header
     /// struct or union, unbound generic, recursive by-value cycle).
-    pub fn layout(self: &mut Self, m: ModuleId, t: TypeId) Layout {
+    pub(package) fn layout(self: &mut Self, m: ModuleId, t: TypeId) Layout {
         return self.layout_of(m, t, null, 0);
     }
 
-    pub fn layout_of(self: &mut Self, m: ModuleId, t: TypeId, env: *const LayoutEnv, depth: i32) Layout {
+    pub(package) fn layout_of(self: &mut Self, m: ModuleId, t: TypeId, env: *const LayoutEnv, depth: i32) Layout {
         if depth > MAX_DEPTH || t == TYPE_NONE {
             return Layout { ok: false };
         }
@@ -636,7 +636,7 @@ extend Svc {
     }
 
     /// The byte offset of field decl `fdecl` inside `(m, t)` (structs and struct instances), or -1.
-    pub fn field_offset(self: &mut Self, m: ModuleId, t: TypeId, fdecl: NodeId) i64 {
+    pub(package) fn field_offset(self: &mut Self, m: ModuleId, t: TypeId, fdecl: NodeId) i64 {
         let y = *self.a(m).type_at(t);
         let mut dm: ModuleId = 0;
         let mut dn = NODE_NONE;
@@ -658,13 +658,13 @@ extend Svc {
     }
 
     /// The layout of the struct or union `dn` of module `dm`, which has no generic parameters.
-    pub fn decl_layout(self: &mut Self, dm: ModuleId, dn: NodeId) Layout {
+    pub(package) fn decl_layout(self: &mut Self, dm: ModuleId, dn: NodeId) Layout {
         return self.aggregate_layout(dm, dn, null, 0);
     }
 
     /// The byte offset of field `fdecl` of the struct or union `dn` of module `dm`, which has no
     /// generic parameters; -1 when it has no layout.
-    pub fn decl_field_offset(self: &mut Self, dm: ModuleId, dn: NodeId, fdecl: NodeId) i64 {
+    pub(package) fn decl_field_offset(self: &mut Self, dm: ModuleId, dn: NodeId, fdecl: NodeId) i64 {
         return self.offset_in(dm, dn, null, fdecl);
     }
 
@@ -707,7 +707,7 @@ extend Svc {
     }
 
     /// The C shape of a payload enum `(m, t)`; `ok` false for non-enums or unlayoutable payloads.
-    pub fn enum_layout(self: &mut Self, m: ModuleId, t: TypeId) EnumLayout {
+    pub(package) fn enum_layout(self: &mut Self, m: ModuleId, t: TypeId) EnumLayout {
         let y = *self.a(m).type_at(t);
         if y.kind == TypeKind::TYPE_ENUM {
             return self.enum_shape(y.module, y.as_data.decl, null, 0);

@@ -7,8 +7,8 @@ import target::table as tgt;
 import utils::persist as *;
 
 /// A set of features: bit `i` is row `i` of `CPU_FEATURES`. 128 features at most.
-pub struct CpuFeatureSet {
-    pub w: [u64; 2],
+pub(package) struct CpuFeatureSet {
+    pub(package) w: [u64; 2],
 }
 
 extend CpuFeatureSet as Persist {
@@ -29,25 +29,25 @@ extend CpuFeatureSet as Persist {
 /// variant, its instruction set (a `target::table::ISAS` index), the features it implies (direct;
 /// `implied` closes them), the C compiler flag that enables it (on aarch64 the `-march`/`-mcpu`
 /// extension, `push_c_flags`), and for aarch64 its architecture level (`L_*`). Which builds have it by default is the target table's.
-pub struct CpuFeature {
-    pub name: str<'static>,
-    pub variant: str<'static>,
-    pub arch: i32,
-    pub implies: CpuFeatureSet,
-    pub c_flag: str<'static>,
-    pub level: u8,
+pub(package) struct CpuFeature {
+    pub(package) name: str<'static>,
+    pub(package) variant: str<'static>,
+    pub(package) arch: i32,
+    pub(package) implies: CpuFeatureSet,
+    pub(package) c_flag: str<'static>,
+    pub(package) level: u8,
 }
 
-pub const FEATURE_COUNT: usize = 52;
-pub const F_SIMD128: usize = 0;
-pub const F_RELAXED_SIMD: usize = 1;
-pub const F_SSE2: usize = 2;
-pub const F_NEON: usize = 3;
-pub const F_DOTPROD: usize = 5;
-pub const F_SVE: usize = 14;
-pub const F_SVE2: usize = 15;
-pub const F_AVX: usize = 23;
-pub const F_AVX512F: usize = 31;
+pub(package) const FEATURE_COUNT: usize = 52;
+pub(package) const F_SIMD128: usize = 0;
+pub(package) const F_RELAXED_SIMD: usize = 1;
+pub(package) const F_SSE2: usize = 2;
+pub(package) const F_NEON: usize = 3;
+pub(package) const F_DOTPROD: usize = 5;
+pub(package) const F_SVE: usize = 14;
+pub(package) const F_SVE2: usize = 15;
+pub(package) const F_AVX: usize = 23;
+pub(package) const F_AVX512F: usize = 31;
 
 const NONE: CpuFeatureSet = CpuFeatureSet { w: [0, 0] };
 const NEON: CpuFeatureSet = CpuFeatureSet { w: [8, 0] };
@@ -72,7 +72,7 @@ const fn x(m: u64) CpuFeatureSet {
 }
 
 /// Append-only, in step with `std::cpu::Feature`.
-pub const CPU_FEATURES: [CpuFeature; FEATURE_COUNT] = [
+pub(package) const CPU_FEATURES: [CpuFeature; FEATURE_COUNT] = [
     CpuFeature { name: "simd128", variant: "Simd128", arch: 2, implies: NONE, c_flag: "-msimd128", level: 0 },
     CpuFeature {
         name: "relaxed-simd",
@@ -304,41 +304,41 @@ const fn closure() [CpuFeatureSet; FEATURE_COUNT] {
 const IMPLIED: [CpuFeatureSet; FEATURE_COUNT] = closure();
 
 /// Row `i` of the table.
-pub const fn row(i: usize) CpuFeature {
+pub(package) const fn row(i: usize) CpuFeature {
     let t: []CpuFeature = CPU_FEATURES;
     return t[i];
 }
 
-pub const fn has(s: CpuFeatureSet, i: usize) bool {
+pub(package) const fn has(s: CpuFeatureSet, i: usize) bool {
     return (unsafe s.w[i / 64] >> (i % 64) as u64 & 1) != 0;
 }
 
-pub const fn with(s: CpuFeatureSet, i: usize) CpuFeatureSet {
+pub(package) const fn with(s: CpuFeatureSet, i: usize) CpuFeatureSet {
     let mut r = s;
     unsafe r.w[i / 64] |= 1u64 << (i % 64) as u64;
     return r;
 }
 
-pub const fn join(a: CpuFeatureSet, b: CpuFeatureSet) CpuFeatureSet {
+pub(package) const fn join(a: CpuFeatureSet, b: CpuFeatureSet) CpuFeatureSet {
     return CpuFeatureSet { w: [a.w[0] | b.w[0], a.w[1] | b.w[1]] };
 }
 
 /// Whether `a` holds every feature of `b`.
-pub const fn contains(a: CpuFeatureSet, b: CpuFeatureSet) bool {
+pub(package) const fn contains(a: CpuFeatureSet, b: CpuFeatureSet) bool {
     return (b.w[0] & ~a.w[0]) == 0 && (b.w[1] & ~a.w[1]) == 0;
 }
 
-pub const fn is_empty(s: CpuFeatureSet) bool {
+pub(package) const fn is_empty(s: CpuFeatureSet) bool {
     return (s.w[0] | s.w[1]) == 0;
 }
 
 /// The number of features in `s`.
-pub const fn count(s: CpuFeatureSet) u32 {
+pub(package) const fn count(s: CpuFeatureSet) u32 {
     return (s.w[0].count_ones() + s.w[1].count_ones()) as u32;
 }
 
 /// `s` with every feature its members imply.
-pub const fn close(s: CpuFeatureSet) CpuFeatureSet {
+pub(package) const fn close(s: CpuFeatureSet) CpuFeatureSet {
     let mut r = s;
     for i in 0..FEATURE_COUNT {
         if has(s, i) {
@@ -350,7 +350,7 @@ pub const fn close(s: CpuFeatureSet) CpuFeatureSet {
 
 /// The row named `name`, of instruction set `arch` when one is (`aes` names one on x86_64 and one on
 /// aarch64), or -1.
-pub const fn find(name: str, arch: i32) i32 {
+pub(package) const fn find(name: str, arch: i32) i32 {
     let t: []CpuFeature = CPU_FEATURES;
     let mut r: i32 = -1;
     for i in 0..FEATURE_COUNT {
@@ -365,7 +365,7 @@ pub const fn find(name: str, arch: i32) i32 {
 /// none) to `s` (`--target-cpu`, the `target-cpu` key, a level in a feature list). Another instruction
 /// set skips a level, unless `strict` (the command line); another name is an error. On an error the
 /// diagnostic goes to `err` and the result is false.
-pub fn level(name: str, arch: i32, strict: bool, s: &mut CpuFeatureSet, err: &mut String) bool {
+pub(package) fn level(name: str, arch: i32, strict: bool, s: &mut CpuFeatureSet, err: &mut String) bool {
     let ns: []str<'static> = ["x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4"];
     let xl: []u64 = X_LEVELS;
     for i in 0..ns.len() {
@@ -388,7 +388,7 @@ pub fn level(name: str, arch: i32, strict: bool, s: &mut CpuFeatureSet, err: &mu
 
 /// Whether `spec` is a `--simd-dispatch` / `simd-dispatch` value: `off`, or x86-64 level names
 /// separated by commas; else the diagnostic goes to `err`.
-pub fn dispatch_ok(spec: str, err: &mut String) bool {
+pub(package) fn dispatch_ok(spec: str, err: &mut String) bool {
     if spec == "off" {
         return true;
     }
@@ -421,7 +421,7 @@ const fn isa_name(arch: i32) str<'static> {
 }
 
 /// The row whose `cpu::Feature` variant is `name`, or -1.
-pub const fn find_variant(name: str) i32 {
+pub(package) const fn find_variant(name: str) i32 {
     let t: []CpuFeature = CPU_FEATURES;
     for i in 0..FEATURE_COUNT {
         if t[i].variant == name {
@@ -452,7 +452,7 @@ fn names_of(arch: i32) String {
 /// name, a feature no machine of the target has, the disabling of a baseline feature, or (when
 /// `strict`) a feature of another instruction set puts the diagnostic in `err` and returns false; a
 /// lenient list skips another instruction set's features.
-pub fn apply(spec: str, target: i32, arch: i32, strict: bool, s: &mut CpuFeatureSet, err: &mut String) bool {
+pub(package) fn apply(spec: str, target: i32, arch: i32, strict: bool, s: &mut CpuFeatureSet, err: &mut String) bool {
     let t: []CpuFeature = CPU_FEATURES;
     let aname = isa_name(arch);
     let mut never = NONE;
@@ -523,7 +523,7 @@ pub fn apply(spec: str, target: i32, arch: i32, strict: bool, s: &mut CpuFeature
 /// (macOS: a plain `-march` lowers the tuning) and each extra extension; elsewhere `-march=` the lowest architecture
 /// every feature's `level` allows (`armv8.2-a`, `armv8.1-a` or `armv8-a`), then each enabled extension
 /// that architecture lacks.
-pub fn push_c_flags(s: CpuFeatureSet, target: i32, arch: i32, out: &mut String) {
+pub(package) fn push_c_flags(s: CpuFeatureSet, target: i32, arch: i32, out: &mut String) {
     let t: []CpuFeature = CPU_FEATURES;
     let mut b = NONE;
     let mut mcpu = "";
@@ -589,7 +589,7 @@ pub fn push_c_flags(s: CpuFeatureSet, target: i32, arch: i32, out: &mut String) 
 /// nothing when it lacks none. x86_64: `target("sse4.2,avx,avx2")`, the flags' names. aarch64:
 /// clang adds `+dotprod`; GCC names the architecture level of the build flag for `s` too
 /// (binutils assembles an extension only at its level; `SC_TGT_A64` of the runtime header chooses).
-pub fn push_target_attr(s: CpuFeatureSet, build: CpuFeatureSet, target: i32, out: &mut String) {
+pub(package) fn push_target_attr(s: CpuFeatureSet, build: CpuFeatureSet, target: i32, out: &mut String) {
     let t: []CpuFeature = CPU_FEATURES;
     let mut a64 = false;
     let mut arch: i32 = -1;
@@ -660,9 +660,9 @@ const fn arch_mask(arch: i32) u64 {
 /// T << 16 | R << 24 | N << 32` (`ir::OP_*`, the vector operand's lane builtin `T` and lanes `N`,
 /// the result's lane or scalar builtin `R`, the index lanes' for a run-time index), with the
 /// feature set it needs, closed under `implies`.
-pub struct SimdEntry {
-    pub key: u64,
-    pub fs: CpuFeatureSet,
-    pub module: u16,
-    pub node: u32,
+pub(package) struct SimdEntry {
+    pub(package) key: u64,
+    pub(package) fs: CpuFeatureSet,
+    pub(package) module: u16,
+    pub(package) node: u32,
 }

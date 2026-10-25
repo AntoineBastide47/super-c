@@ -9,35 +9,35 @@
 /// A row: `mn`, the fixed bits, the variant kind (`Q::*`) and the variant values it takes (a bit per
 /// value), the operand kinds (one byte each from the low byte, 0 ends), and an alias condition
 /// (`FL_*`).
-pub struct Row {
-    pub mn: str<'static>,
-    pub bits: u32,
-    pub q: u8,
-    pub qok: u8,
-    pub ops: u64,
-    pub fl: u8,
+pub(package) struct Row {
+    pub(package) mn: str<'static>,
+    pub(package) bits: u32,
+    pub(package) q: u8,
+    pub(package) qok: u8,
+    pub(package) ops: u64,
+    pub(package) fl: u8,
 }
 
 extend Row as Copy {}
 
 /// The operand values one instruction holds, in the order its kinds consume them.
-pub const NV: usize = 8;
+pub(package) const NV: usize = 8;
 
-pub struct Vals {
+pub(package) struct Vals {
     v: [i64; NV],
 }
 
 extend Vals {
-    pub const fn new() Vals {
+    pub(package) const fn new() Vals {
         return Vals { v: [0, 0, 0, 0, 0, 0, 0, 0] };
     }
 
-    pub fn index(self: &Self, i: usize) &i64 {
+    pub(package) fn index(self: &Self, i: usize) &i64 {
         assert(i < NV, "an operand value past the last");
         return unsafe &self.v[i];
     }
 
-    pub fn index_mut(self: &mut Self, i: usize) &mut i64 {
+    pub(package) fn index_mut(self: &mut Self, i: usize) &mut i64 {
         assert(i < NV, "an operand value past the last");
         return unsafe &mut self.v[i];
     }
@@ -46,230 +46,230 @@ extend Vals {
 // ---- Variant kinds ----
 
 /// Variant kinds.
-pub struct Q {}
+pub(package) struct Q {}
 
 extend Q {
-    pub const NONE: u8 = 0;
-    pub const SF: u8 = 1;
-    pub const SFN: u8 = 2;
-    pub const FT: u8 = 3;
-    pub const CVT: u8 = 4;
-    pub const V: u8 = 5;
-    pub const VF: u8 = 6;
-    pub const VB: u8 = 7;
-    pub const Z: u8 = 8;
-    pub const B30: u8 = 9;
-    pub const S22: u8 = 10;
-    pub const FLS: u8 = 11;
-    pub const FP: u8 = 12;
-    pub const ZE: u8 = 13;
+    pub(package) const NONE: u8 = 0;
+    pub(package) const SF: u8 = 1;
+    pub(package) const SFN: u8 = 2;
+    pub(package) const FT: u8 = 3;
+    pub(package) const CVT: u8 = 4;
+    pub(package) const V: u8 = 5;
+    pub(package) const VF: u8 = 6;
+    pub(package) const VB: u8 = 7;
+    pub(package) const Z: u8 = 8;
+    pub(package) const B30: u8 = 9;
+    pub(package) const S22: u8 = 10;
+    pub(package) const FLS: u8 = 11;
+    pub(package) const FP: u8 = 12;
+    pub(package) const ZE: u8 = 13;
 }
 
 // Bit sets of variant values.
-pub const QW: u8 = 1;
-pub const QX: u8 = 2;
-pub const QWX: u8 = 3;
-pub const QSD: u8 = 3; // Q::FT: s and d
-pub const QALL: u8 = 0x0F; // Q::Z: every element
-pub const QV_NO1D: u8 = 0xBF; // Q::V: every arrangement but 1d
-pub const QV_NOD: u8 = 0x3F; // Q::V: no 64-bit lanes
-pub const QVF_ALL: u8 = 0x0B; // Q::VF: 2s 4s 2d
+pub(package) const QW: u8 = 1;
+pub(package) const QX: u8 = 2;
+pub(package) const QWX: u8 = 3;
+pub(package) const QSD: u8 = 3; // Q::FT: s and d
+pub(package) const QALL: u8 = 0x0F; // Q::Z: every element
+pub(package) const QV_NO1D: u8 = 0xBF; // Q::V: every arrangement but 1d
+pub(package) const QV_NOD: u8 = 0x3F; // Q::V: no 64-bit lanes
+pub(package) const QVF_ALL: u8 = 0x0B; // Q::VF: 2s 4s 2d
 
 // ---- Operand kinds ----
 
 /// Register classes: a register kind is `class * 4 + field + 1`, its field `(k - 1) % 4` (bits 0, 5,
 /// 10, 16).
-pub struct C {}
+pub(package) struct C {}
 
 extend C {
-    pub const R: u8 = 0; // w or x by the variant; 31 is the zero register
-    pub const RS: u8 = 1; // w or x by the variant; 31 is sp
-    pub const W: u8 = 2;
-    pub const X: u8 = 3;
-    pub const XS: u8 = 4; // x; 31 is sp
-    pub const F: u8 = 5; // b h s d q by the variant
-    pub const FS: u8 = 6;
-    pub const FD: u8 = 7;
-    pub const FH: u8 = 8;
-    pub const FQ: u8 = 9;
-    pub const FB: u8 = 10;
-    pub const V: u8 = 11; // a vector register with the variant's arrangement
-    pub const Z: u8 = 12; // an SVE register with the variant's element
-    pub const ZB: u8 = 13;
-    pub const ZS: u8 = 14;
-    pub const ZD: u8 = 15;
+    pub(package) const R: u8 = 0; // w or x by the variant; 31 is the zero register
+    pub(package) const RS: u8 = 1; // w or x by the variant; 31 is sp
+    pub(package) const W: u8 = 2;
+    pub(package) const X: u8 = 3;
+    pub(package) const XS: u8 = 4; // x; 31 is sp
+    pub(package) const F: u8 = 5; // b h s d q by the variant
+    pub(package) const FS: u8 = 6;
+    pub(package) const FD: u8 = 7;
+    pub(package) const FH: u8 = 8;
+    pub(package) const FQ: u8 = 9;
+    pub(package) const FB: u8 = 10;
+    pub(package) const V: u8 = 11; // a vector register with the variant's arrangement
+    pub(package) const Z: u8 = 12; // an SVE register with the variant's element
+    pub(package) const ZB: u8 = 13;
+    pub(package) const ZS: u8 = 14;
+    pub(package) const ZD: u8 = 15;
     // A vector register of one fixed arrangement, whatever the variant: the arrangement `class - V8B`
     // (8b 16b 4h 8h 2s 4s 1d 2d).
-    pub const V8B: u8 = 16;
-    pub const V16B: u8 = 17;
-    pub const V4H: u8 = 18;
-    pub const V8H: u8 = 19;
-    pub const V2S: u8 = 20;
-    pub const V4S: u8 = 21;
-    pub const V1D: u8 = 22;
-    pub const V2D: u8 = 23;
+    pub(package) const V8B: u8 = 16;
+    pub(package) const V16B: u8 = 17;
+    pub(package) const V4H: u8 = 18;
+    pub(package) const V8H: u8 = 19;
+    pub(package) const V2S: u8 = 20;
+    pub(package) const V4S: u8 = 21;
+    pub(package) const V1D: u8 = 22;
+    pub(package) const V2D: u8 = 23;
 }
 
 /// Operand kinds: the register kinds 1 to 64 and 161 to 192 (the fixed arrangements), then the special
 /// ones (the comment gives the values each consumes).
-pub struct K {}
+pub(package) struct K {}
 
 extend K {
-    pub const RD: u8 = 1;
-    pub const RN: u8 = 2;
-    pub const RA: u8 = 3;
-    pub const RM: u8 = 4;
-    pub const RDS: u8 = 5;
-    pub const RNS: u8 = 6;
-    pub const WD: u8 = 9;
-    pub const WN: u8 = 10;
-    pub const WA: u8 = 11;
-    pub const WM: u8 = 12;
-    pub const XD: u8 = 13;
-    pub const XN: u8 = 14;
-    pub const XA: u8 = 15;
-    pub const XM: u8 = 16;
-    pub const XDS: u8 = 17;
-    pub const XNS: u8 = 18;
-    pub const XMS: u8 = 20;
-    pub const FD: u8 = 21;
-    pub const FN: u8 = 22;
-    pub const FA: u8 = 23;
-    pub const FM: u8 = 24;
-    pub const SD: u8 = 25;
-    pub const SN: u8 = 26;
-    pub const DD: u8 = 29;
-    pub const DN: u8 = 30;
-    pub const HD: u8 = 33;
-    pub const QD: u8 = 37;
-    pub const QN: u8 = 38;
-    pub const HN: u8 = 34;
-    pub const VD: u8 = 45;
-    pub const VN: u8 = 46;
-    pub const VM: u8 = 48;
-    pub const ZD: u8 = 49;
-    pub const ZN: u8 = 50;
-    pub const ZM: u8 = 52;
-    pub const ZBN: u8 = 54;
-    pub const ZBM: u8 = 56;
-    pub const AIMM: u8 = 70; // imm12 at 10, shift bit 22: (imm, sh)
-    pub const LIMM: u8 = 71; // N:immr:imms at 10: (field)
-    pub const LIMMV: u8 = 72; // `mov` of a bitmask immediate movz and movn cannot make: (field)
-    pub const MOVW: u8 = 73; // imm16 at 5, hw at 21: (imm16, hw)
-    pub const MOVZV: u8 = 74; // `mov` of movz: (value)
-    pub const MOVNV: u8 = 75; // `mov` of movn: (value)
-    pub const IMMR: u8 = 76; // 6 bits at 16
-    pub const IMMS: u8 = 77; // 6 bits at 10
-    pub const SHL: u8 = 78; // `lsl` of ubfm: (shift)
-    pub const SHR: u8 = 79; // `lsr`, `asr` of ubfm, sbfm: (shift)
-    pub const BFX: u8 = 80; // the extract forms: (lsb, width)
-    pub const BFIZ: u8 = 81; // the insert forms: (lsb, width)
-    pub const LSH: u8 = 82; // shift type at 22, amount at 10, any type: (type, amount)
-    pub const ASH: u8 = 83; // as K::LSH without ror
-    pub const EXT: u8 = 84; // extend option at 13, amount at 10: (option, amount)
-    pub const RMX: u8 = 85; // Rm at 16, w or x by the extend option
-    pub const COND: u8 = 86; // at 12
-    pub const CONDI: u8 = 87; // at 12, inverted; not al or nv
-    pub const CONDM: u8 = 88; // at 0, in the mnemonic (`b.eq`)
-    pub const NZCV: u8 = 89; // at 0
-    pub const IMM5: u8 = 90; // at 16
-    pub const IMM16: u8 = 91; // at 5
-    pub const UDF16: u8 = 92; // at 0
-    pub const FPIMM: u8 = 93; // imm8 at 13
-    pub const FZERO: u8 = 94; // `#0.0`, no bits
-    pub const L26: u8 = 95; // a byte offset, words at 0
-    pub const L19: u8 = 96; // a byte offset, words at 5
-    pub const L14: u8 = 97; // a byte offset, words at 5
-    pub const ADR: u8 = 98; // a byte offset: immlo at 29, immhi at 5
-    pub const ADRP: u8 = 99; // a byte offset in pages (a multiple of 4096)
-    pub const TBIT: u8 = 100; // bit 5 at 31, bits 4:0 at 19
-    pub const RTB: u8 = 101; // Rt at 0, w or x by the tested bit
-    pub const MU12: u8 = 102; // [base{, #off}] scaled unsigned: (base, off)
-    pub const MS9: u8 = 103; // [base{, #off}] unscaled: (base, off)
-    pub const MPRE9: u8 = 104; // [base, #off]!: (base, off)
-    pub const MPOST9: u8 = 105; // [base], #off: (base, off)
-    pub const MREG: u8 = 106; // [base, rm{, ext #s}]: (base, rm, option, s)
-    pub const MP7: u8 = 107; // pair [base{, #off}]: (base, off)
-    pub const MPRE7: u8 = 108;
-    pub const MPOST7: u8 = 109;
-    pub const M0: u8 = 110; // [base]: (base)
-    pub const SYSREG: u8 = 111; // o0:op1:CRn:CRm:op2 at 5
-    pub const BARRIER: u8 = 112; // CRm at 8
-    pub const ISB: u8 = 113; // CRm at 8, sy (15) when absent
-    pub const XLR: u8 = 114; // Rn at 5, x30 when absent
-    pub const RNM: u8 = 115; // Rn at 5 and Rm at 16, equal
-    pub const VNM: u8 = 116; // Vn at 5 and Vm at 16, equal
-    pub const FELEM: u8 = 117; // Rd at 0, a scalar of the arrangement's lane size
-    pub const PG: u8 = 118; // Pg at 10 (p0 to p7)
-    pub const PGZ: u8 = 119; // Pg/z at 10
-    pub const PGM: u8 = 120; // Pg/m at 10
-    pub const PMM: u8 = 121; // Pm/m at 13
-    pub const PD: u8 = 122; // Pd.T at 0
-    pub const PND: u8 = 123; // pn8 to pn15 .T at 0
-    pub const PNGZ: u8 = 124; // pn8 to pn15 /z at 10
-    pub const PNG: u8 = 125; // pn8 to pn15 at 10
-    pub const ZL1: u8 = 126; // {zt.T} at 0
-    pub const ZL2: u8 = 127; // {zt.T-zt+1.T}, zt / 2 at 1
-    pub const ZL4: u8 = 128; // {zt.T-zt+3.T}, zt / 4 at 2
-    pub const ZAT: u8 = 129; // za<n>.T at 0
-    pub const ZASL: u8 = 130; // {za<n>h.T[w12+rs, off]}: (tile, vertical, rs, off)
-    pub const ZAARR: u8 = 131; // za[w12+rv, off]: (rv, off), off at 0
-    pub const MZA: u8 = 132; // [base{, #off, mul vl}], off the K::ZAARR one: (base)
-    pub const ZAMASK: u8 = 133; // {za<n>.d, ..} as a tile mask at 0
-    pub const PAT: u8 = 134; // the predicate pattern at 5, all (31) when absent
-    pub const MULVL: u8 = 135; // mul #n, imm4 = n - 1 at 16, 1 when absent
-    pub const SIMM6: u8 = 136; // at 5
-    pub const MSV: u8 = 137; // [base{, #n, mul vl}], simm4 at 16: (base, n)
-    pub const MSVR: u8 = 138; // [base{, rm, lsl #esize}], Rm at 16 (xzr when absent): (base, rm)
-    pub const VLX: u8 = 139; // vlx2 or vlx4 at 13
-    pub const SMSM: u8 = 140; // `sm`, no bits
-    pub const SMZA: u8 = 141; // `za`, no bits
-    pub const ELB: u8 = 143; // Vn.b[i]: Rn at 5, the index in imm5 at 16: (reg, index)
-    pub const ELH: u8 = 144;
-    pub const ELS: u8 = 145;
-    pub const ELD: u8 = 146;
-    pub const EDD: u8 = 147; // Vd.d[i]: Rd at 0, the index in imm5 at 16: (reg, index)
-    pub const EN4D: u8 = 148; // Vn.d[j]: Rn at 5, the index in imm4 at 11: (reg, index)
-    pub const LNB: u8 = 149; // { Vt.b }[i]: Rt at 0, the index in Q:S:size: (reg, index)
-    pub const LNH: u8 = 150;
-    pub const LNS: u8 = 151;
-    pub const LND: u8 = 152;
-    pub const L2B: u8 = 153; // { Vt.16b, .. }: 2, 3 or 4 registers from Rt at 0
-    pub const L3B: u8 = 154;
-    pub const L4B: u8 = 155;
-    pub const T1B: u8 = 156; // { Vn.16b, .. }: 1 to 4 registers from Rn at 5
-    pub const T2B: u8 = 157;
-    pub const T3B: u8 = 158;
-    pub const T4B: u8 = 159;
-    pub const IMM4X: u8 = 160; // at 11
+    pub(package) const RD: u8 = 1;
+    pub(package) const RN: u8 = 2;
+    pub(package) const RA: u8 = 3;
+    pub(package) const RM: u8 = 4;
+    pub(package) const RDS: u8 = 5;
+    pub(package) const RNS: u8 = 6;
+    pub(package) const WD: u8 = 9;
+    pub(package) const WN: u8 = 10;
+    pub(package) const WA: u8 = 11;
+    pub(package) const WM: u8 = 12;
+    pub(package) const XD: u8 = 13;
+    pub(package) const XN: u8 = 14;
+    pub(package) const XA: u8 = 15;
+    pub(package) const XM: u8 = 16;
+    pub(package) const XDS: u8 = 17;
+    pub(package) const XNS: u8 = 18;
+    pub(package) const XMS: u8 = 20;
+    pub(package) const FD: u8 = 21;
+    pub(package) const FN: u8 = 22;
+    pub(package) const FA: u8 = 23;
+    pub(package) const FM: u8 = 24;
+    pub(package) const SD: u8 = 25;
+    pub(package) const SN: u8 = 26;
+    pub(package) const DD: u8 = 29;
+    pub(package) const DN: u8 = 30;
+    pub(package) const HD: u8 = 33;
+    pub(package) const QD: u8 = 37;
+    pub(package) const QN: u8 = 38;
+    pub(package) const HN: u8 = 34;
+    pub(package) const VD: u8 = 45;
+    pub(package) const VN: u8 = 46;
+    pub(package) const VM: u8 = 48;
+    pub(package) const ZD: u8 = 49;
+    pub(package) const ZN: u8 = 50;
+    pub(package) const ZM: u8 = 52;
+    pub(package) const ZBN: u8 = 54;
+    pub(package) const ZBM: u8 = 56;
+    pub(package) const AIMM: u8 = 70; // imm12 at 10, shift bit 22: (imm, sh)
+    pub(package) const LIMM: u8 = 71; // N:immr:imms at 10: (field)
+    pub(package) const LIMMV: u8 = 72; // `mov` of a bitmask immediate movz and movn cannot make: (field)
+    pub(package) const MOVW: u8 = 73; // imm16 at 5, hw at 21: (imm16, hw)
+    pub(package) const MOVZV: u8 = 74; // `mov` of movz: (value)
+    pub(package) const MOVNV: u8 = 75; // `mov` of movn: (value)
+    pub(package) const IMMR: u8 = 76; // 6 bits at 16
+    pub(package) const IMMS: u8 = 77; // 6 bits at 10
+    pub(package) const SHL: u8 = 78; // `lsl` of ubfm: (shift)
+    pub(package) const SHR: u8 = 79; // `lsr`, `asr` of ubfm, sbfm: (shift)
+    pub(package) const BFX: u8 = 80; // the extract forms: (lsb, width)
+    pub(package) const BFIZ: u8 = 81; // the insert forms: (lsb, width)
+    pub(package) const LSH: u8 = 82; // shift type at 22, amount at 10, any type: (type, amount)
+    pub(package) const ASH: u8 = 83; // as K::LSH without ror
+    pub(package) const EXT: u8 = 84; // extend option at 13, amount at 10: (option, amount)
+    pub(package) const RMX: u8 = 85; // Rm at 16, w or x by the extend option
+    pub(package) const COND: u8 = 86; // at 12
+    pub(package) const CONDI: u8 = 87; // at 12, inverted; not al or nv
+    pub(package) const CONDM: u8 = 88; // at 0, in the mnemonic (`b.eq`)
+    pub(package) const NZCV: u8 = 89; // at 0
+    pub(package) const IMM5: u8 = 90; // at 16
+    pub(package) const IMM16: u8 = 91; // at 5
+    pub(package) const UDF16: u8 = 92; // at 0
+    pub(package) const FPIMM: u8 = 93; // imm8 at 13
+    pub(package) const FZERO: u8 = 94; // `#0.0`, no bits
+    pub(package) const L26: u8 = 95; // a byte offset, words at 0
+    pub(package) const L19: u8 = 96; // a byte offset, words at 5
+    pub(package) const L14: u8 = 97; // a byte offset, words at 5
+    pub(package) const ADR: u8 = 98; // a byte offset: immlo at 29, immhi at 5
+    pub(package) const ADRP: u8 = 99; // a byte offset in pages (a multiple of 4096)
+    pub(package) const TBIT: u8 = 100; // bit 5 at 31, bits 4:0 at 19
+    pub(package) const RTB: u8 = 101; // Rt at 0, w or x by the tested bit
+    pub(package) const MU12: u8 = 102; // [base{, #off}] scaled unsigned: (base, off)
+    pub(package) const MS9: u8 = 103; // [base{, #off}] unscaled: (base, off)
+    pub(package) const MPRE9: u8 = 104; // [base, #off]!: (base, off)
+    pub(package) const MPOST9: u8 = 105; // [base], #off: (base, off)
+    pub(package) const MREG: u8 = 106; // [base, rm{, ext #s}]: (base, rm, option, s)
+    pub(package) const MP7: u8 = 107; // pair [base{, #off}]: (base, off)
+    pub(package) const MPRE7: u8 = 108;
+    pub(package) const MPOST7: u8 = 109;
+    pub(package) const M0: u8 = 110; // [base]: (base)
+    pub(package) const SYSREG: u8 = 111; // o0:op1:CRn:CRm:op2 at 5
+    pub(package) const BARRIER: u8 = 112; // CRm at 8
+    pub(package) const ISB: u8 = 113; // CRm at 8, sy (15) when absent
+    pub(package) const XLR: u8 = 114; // Rn at 5, x30 when absent
+    pub(package) const RNM: u8 = 115; // Rn at 5 and Rm at 16, equal
+    pub(package) const VNM: u8 = 116; // Vn at 5 and Vm at 16, equal
+    pub(package) const FELEM: u8 = 117; // Rd at 0, a scalar of the arrangement's lane size
+    pub(package) const PG: u8 = 118; // Pg at 10 (p0 to p7)
+    pub(package) const PGZ: u8 = 119; // Pg/z at 10
+    pub(package) const PGM: u8 = 120; // Pg/m at 10
+    pub(package) const PMM: u8 = 121; // Pm/m at 13
+    pub(package) const PD: u8 = 122; // Pd.T at 0
+    pub(package) const PND: u8 = 123; // pn8 to pn15 .T at 0
+    pub(package) const PNGZ: u8 = 124; // pn8 to pn15 /z at 10
+    pub(package) const PNG: u8 = 125; // pn8 to pn15 at 10
+    pub(package) const ZL1: u8 = 126; // {zt.T} at 0
+    pub(package) const ZL2: u8 = 127; // {zt.T-zt+1.T}, zt / 2 at 1
+    pub(package) const ZL4: u8 = 128; // {zt.T-zt+3.T}, zt / 4 at 2
+    pub(package) const ZAT: u8 = 129; // za<n>.T at 0
+    pub(package) const ZASL: u8 = 130; // {za<n>h.T[w12+rs, off]}: (tile, vertical, rs, off)
+    pub(package) const ZAARR: u8 = 131; // za[w12+rv, off]: (rv, off), off at 0
+    pub(package) const MZA: u8 = 132; // [base{, #off, mul vl}], off the K::ZAARR one: (base)
+    pub(package) const ZAMASK: u8 = 133; // {za<n>.d, ..} as a tile mask at 0
+    pub(package) const PAT: u8 = 134; // the predicate pattern at 5, all (31) when absent
+    pub(package) const MULVL: u8 = 135; // mul #n, imm4 = n - 1 at 16, 1 when absent
+    pub(package) const SIMM6: u8 = 136; // at 5
+    pub(package) const MSV: u8 = 137; // [base{, #n, mul vl}], simm4 at 16: (base, n)
+    pub(package) const MSVR: u8 = 138; // [base{, rm, lsl #esize}], Rm at 16 (xzr when absent): (base, rm)
+    pub(package) const VLX: u8 = 139; // vlx2 or vlx4 at 13
+    pub(package) const SMSM: u8 = 140; // `sm`, no bits
+    pub(package) const SMZA: u8 = 141; // `za`, no bits
+    pub(package) const ELB: u8 = 143; // Vn.b[i]: Rn at 5, the index in imm5 at 16: (reg, index)
+    pub(package) const ELH: u8 = 144;
+    pub(package) const ELS: u8 = 145;
+    pub(package) const ELD: u8 = 146;
+    pub(package) const EDD: u8 = 147; // Vd.d[i]: Rd at 0, the index in imm5 at 16: (reg, index)
+    pub(package) const EN4D: u8 = 148; // Vn.d[j]: Rn at 5, the index in imm4 at 11: (reg, index)
+    pub(package) const LNB: u8 = 149; // { Vt.b }[i]: Rt at 0, the index in Q:S:size: (reg, index)
+    pub(package) const LNH: u8 = 150;
+    pub(package) const LNS: u8 = 151;
+    pub(package) const LND: u8 = 152;
+    pub(package) const L2B: u8 = 153; // { Vt.16b, .. }: 2, 3 or 4 registers from Rt at 0
+    pub(package) const L3B: u8 = 154;
+    pub(package) const L4B: u8 = 155;
+    pub(package) const T1B: u8 = 156; // { Vn.16b, .. }: 1 to 4 registers from Rn at 5
+    pub(package) const T2B: u8 = 157;
+    pub(package) const T3B: u8 = 158;
+    pub(package) const T4B: u8 = 159;
+    pub(package) const IMM4X: u8 = 160; // at 11
     // 161 to 192: the fixed-arrangement registers.
-    pub const V8BD: u8 = 161;
-    pub const V8BN: u8 = 162;
-    pub const V8BM: u8 = 164;
-    pub const V16BD: u8 = 165;
-    pub const V16BN: u8 = 166;
-    pub const V16BA: u8 = 167;
-    pub const V16BM: u8 = 168;
-    pub const V4HD: u8 = 169;
-    pub const V4HN: u8 = 170;
-    pub const V4HM: u8 = 172;
-    pub const V8HD: u8 = 173;
-    pub const V8HN: u8 = 174;
-    pub const V8HM: u8 = 176;
-    pub const V2SD: u8 = 177;
-    pub const V2SN: u8 = 178;
-    pub const V2SM: u8 = 180;
-    pub const V4SD: u8 = 181;
-    pub const V4SN: u8 = 182;
-    pub const V4SM: u8 = 184;
-    pub const V2DD: u8 = 189;
-    pub const V2DN: u8 = 190;
-    pub const V2DM: u8 = 192;
-    pub const SHL8: u8 = 193; // a left shift below 8, 16 or 32 at 16 (immh:immb past the row's)
-    pub const SHL16: u8 = 194;
-    pub const SHL32: u8 = 195;
-    pub const IMM6X: u8 = 196; // at 10
-    pub const COUNT: u8 = 197;
+    pub(package) const V8BD: u8 = 161;
+    pub(package) const V8BN: u8 = 162;
+    pub(package) const V8BM: u8 = 164;
+    pub(package) const V16BD: u8 = 165;
+    pub(package) const V16BN: u8 = 166;
+    pub(package) const V16BA: u8 = 167;
+    pub(package) const V16BM: u8 = 168;
+    pub(package) const V4HD: u8 = 169;
+    pub(package) const V4HN: u8 = 170;
+    pub(package) const V4HM: u8 = 172;
+    pub(package) const V8HD: u8 = 173;
+    pub(package) const V8HN: u8 = 174;
+    pub(package) const V8HM: u8 = 176;
+    pub(package) const V2SD: u8 = 177;
+    pub(package) const V2SN: u8 = 178;
+    pub(package) const V2SM: u8 = 180;
+    pub(package) const V4SD: u8 = 181;
+    pub(package) const V4SN: u8 = 182;
+    pub(package) const V4SM: u8 = 184;
+    pub(package) const V2DD: u8 = 189;
+    pub(package) const V2DN: u8 = 190;
+    pub(package) const V2DM: u8 = 192;
+    pub(package) const SHL8: u8 = 193; // a left shift below 8, 16 or 32 at 16 (immh:immb past the row's)
+    pub(package) const SHL16: u8 = 194;
+    pub(package) const SHL32: u8 = 195;
+    pub(package) const IMM6X: u8 = 196; // at 10
+    pub(package) const COUNT: u8 = 197;
 }
 
 // Register kinds 1 to 64: a class (`(k - 1) / 4`) and a field (`(k - 1) % 4`: bits 0, 5, 10, 16).
@@ -277,7 +277,7 @@ extend K {
 // Special kinds; the comment gives the values each consumes.
 
 // Alias conditions a row adds to its bits and operands.
-pub const FL_SPMOV: u8 = 1; // `mov` to or from sp: Rd or Rn is 31
+pub(package) const FL_SPMOV: u8 = 1; // `mov` to or from sp: Rd or Rn is 31
 
 // ---- Row builders ----
 
@@ -289,34 +289,34 @@ const fn rf(mn: str<'static>, bits: u32, q: u8, qok: u8, ops: u64, fl: u8) Row {
     return Row { mn: mn, bits: bits, q: q, qok: qok, ops: ops, fl: fl };
 }
 
-pub const fn k1(a: u8) u64 {
+pub(package) const fn k1(a: u8) u64 {
     return a;
 }
 
-pub const fn k2(a: u8, b: u8) u64 {
+pub(package) const fn k2(a: u8, b: u8) u64 {
     return a as u64 | b as u64 << 8;
 }
 
-pub const fn k3(a: u8, b: u8, c: u8) u64 {
+pub(package) const fn k3(a: u8, b: u8, c: u8) u64 {
     return k2(a, b) | c as u64 << 16;
 }
 
-pub const fn k4(a: u8, b: u8, c: u8, d: u8) u64 {
+pub(package) const fn k4(a: u8, b: u8, c: u8, d: u8) u64 {
     return k3(a, b, c) | d as u64 << 24;
 }
 
-pub const fn k5(a: u8, b: u8, c: u8, d: u8, e: u8) u64 {
+pub(package) const fn k5(a: u8, b: u8, c: u8, d: u8, e: u8) u64 {
     return k4(a, b, c, d) | e as u64 << 32;
 }
 
 /// Operand kind `i` of `ops`, 0 past the last.
-pub const fn kind_at(ops: u64, i: u32) u8 {
+pub(package) const fn kind_at(ops: u64, i: u32) u8 {
     return (ops >> (i * 8) as u64 & 0xFF) as u8;
 }
 
 // ---- The table ----
 
-pub const ROWS: [Row; 651] = [
+pub(package) const ROWS: [Row; 651] = [
     // Add and subtract, immediate.
     rf("mov", 0x11000000, Q::SF, QWX, k2(K::RDS, K::RNS), FL_SPMOV),
     r("cmp", 0x7100001F, Q::SF, QWX, k2(K::RNS, K::AIMM)),
@@ -1005,7 +1005,7 @@ pub const ROWS: [Row; 651] = [
 // ---- Variants ----
 
 /// The bits variant `q` of kind `qk` sets.
-pub const fn qbits(qk: u8, q: u32) u32 {
+pub(package) const fn qbits(qk: u8, q: u32) u32 {
     return switch qk {
         Q::SF => q << 31,
         Q::SFN => q << 31 | q << 22,
@@ -1075,7 +1075,7 @@ const fn qof(r: Row, w: u32) u32 {
 }
 
 /// The variant of row `r`: its one value when the mnemonic fixes it (`Q::ZE`), else `q`.
-pub const fn fixed_q(r: Row, q: u32) u32 {
+pub(package) const fn fixed_q(r: Row, q: u32) u32 {
     if r.q == Q::ZE {
         return (r.qok as u32).trailing_zeros() as u32;
     }
@@ -1083,7 +1083,7 @@ pub const fn fixed_q(r: Row, q: u32) u32 {
 }
 
 /// Whether variant `q` of kind `qk` names 64-bit general registers.
-pub const fn is64(qk: u8, q: u32) bool {
+pub(package) const fn is64(qk: u8, q: u32) bool {
     return switch qk {
         Q::SF | Q::SFN | Q::B30 | Q::S22 => q == 1,
         Q::CVT => (q & 1) == 1,
@@ -1093,7 +1093,7 @@ pub const fn is64(qk: u8, q: u32) bool {
 
 /// The log2 of the bytes of the float register variant `q` of kind `qk` names: 0 b, 1 h, 2 s, 3 d,
 /// 4 q.
-pub const fn fsize(qk: u8, q: u32) u32 {
+pub(package) const fn fsize(qk: u8, q: u32) u32 {
     let ft = if qk == Q::CVT {
         q >> 1;
     } else {
@@ -1114,12 +1114,12 @@ pub const fn fsize(qk: u8, q: u32) u32 {
 // ---- Operand kinds ----
 
 /// Whether `k` is a register kind (1 to 64, 161 to 192).
-pub const fn is_reg(k: u8) bool {
+pub(package) const fn is_reg(k: u8) bool {
     return k >= 1 && k <= 64 || k >= 161 && k <= 192;
 }
 
 /// The class of register kind `k` (`C_*`).
-pub const fn reg_class(k: u8) u8 {
+pub(package) const fn reg_class(k: u8) u8 {
     if k > 64 {
         return C::V8B + (k - 161) / 4;
     }
@@ -1127,7 +1127,7 @@ pub const fn reg_class(k: u8) u8 {
 }
 
 /// The bit position of register kind `k`'s field.
-pub const fn reg_pos(k: u8) u32 {
+pub(package) const fn reg_pos(k: u8) u32 {
     return switch k - 1 & 3 {
         0 => 0u32,
         1 => 5u32,
@@ -1137,7 +1137,7 @@ pub const fn reg_pos(k: u8) u32 {
 }
 
 /// The values kind `k` consumes.
-pub const fn slots(k: u8) u32 {
+pub(package) const fn slots(k: u8) u32 {
     return switch k {
         K::AIMM | K::MOVW | K::BFX | K::BFIZ | K::LSH | K::ASH | K::EXT | K::MU12 | K::MS9 | K::MPRE9 | K::MPOST9 | K::MP7 | K::MPRE7 | K::MPOST7 | K::ZAARR | K::MSV | K::MSVR | K::ELB | K::ELH | K::ELS | K::ELD | K::EDD | K::EN4D | K::LNB | K::LNH | K::LNS | K::LND => 2u32,
         K::MREG | K::ZASL => 4u32,
@@ -1230,7 +1230,7 @@ const fn kmask(k: u8, q: u32) u32 {
 }
 
 /// The bits a word must match to be row `r`'s.
-pub const fn mask(r: Row) u32 {
+pub(package) const fn mask(r: Row) u32 {
     let q = fixed_q(r, 0);
     let mut m = qmask(r.q);
     for i in 0..6u32 {
@@ -1244,7 +1244,7 @@ pub const fn mask(r: Row) u32 {
 }
 
 /// The log2 of the bytes a load or store word `w` moves.
-pub const fn ldst_scale(w: u32) u32 {
+pub(package) const fn ldst_scale(w: u32) u32 {
     let size = w >> 30;
     if (w >> 26 & 1) != 0 && size == 0 && (w >> 23 & 1) != 0 {
         return 4;
@@ -1262,7 +1262,7 @@ const fn pair_scale(w: u32) u32 {
 
 /// The vectors row `r`'s register list holds (its address immediate counts in them), 1 for a single
 /// one.
-pub const fn group(r: Row) i64 {
+pub(package) const fn group(r: Row) i64 {
     for i in 0..6u32 {
         let k = kind_at(r.ops, i);
         if k == K::ZL2 {
@@ -1288,7 +1288,7 @@ const fn within(v: i64, lo: i64, hi: i64) bool {
 
 /// The value of logical immediate field `nrs` for a 64-bit (`x`) or 32-bit register, None when the
 /// field encodes none.
-pub const fn bitmask_value(nrs: u32, x: bool) Option<u64> {
+pub(package) const fn bitmask_value(nrs: u32, x: bool) Option<u64> {
     let n = nrs >> 12 & 1;
     let immr = nrs >> 6 & 0x3F;
     let imms = nrs & 0x3F;
@@ -1332,7 +1332,7 @@ pub const fn bitmask_value(nrs: u32, x: bool) Option<u64> {
 }
 
 /// The bits of a 64-bit (`x`) or 32-bit register.
-pub const fn wmask(x: bool) u64 {
+pub(package) const fn wmask(x: bool) u64 {
     if x {
         return 0xFFFFFFFFFFFFFFFFu64;
     }
@@ -1341,7 +1341,7 @@ pub const fn wmask(x: bool) u64 {
 
 /// The chunk `hw` with `u == imm16 << 16 * hw` in a 64-bit (`x`) or 32-bit register, 4 when there is
 /// none.
-pub const fn wide_chunk(u: u64, x: bool) u32 {
+pub(package) const fn wide_chunk(u: u64, x: bool) u32 {
     let n: u32 = if x {
         4;
     } else {
@@ -1369,7 +1369,7 @@ const fn imm_bits(v: i64, x: bool) u64 {
 }
 
 /// Encode row `r` with variant `q0` and operand values `v` into `out`; false when a value does not fit.
-pub const fn encode(r: Row, q0: u32, v: &Vals, out: &mut u32) bool {
+pub(package) const fn encode(r: Row, q0: u32, v: &Vals, out: &mut u32) bool {
     let q = fixed_q(r, q0);
     if r.q != Q::NONE && (q >= 8 || (r.qok as u32 >> q & 1) == 0) {
         return false;
@@ -1689,7 +1689,7 @@ pub const fn encode(r: Row, q0: u32, v: &Vals, out: &mut u32) bool {
 }
 
 /// Decode word `w` as row `r` into its variant and operand values; false when it is not the row's.
-pub const fn decode_row(r: Row, w: u32, qo: &mut u32, v: &mut Vals) bool {
+pub(package) const fn decode_row(r: Row, w: u32, qo: &mut u32, v: &mut Vals) bool {
     if (w & mask(r)) != r.bits {
         return false;
     }
@@ -1980,7 +1980,7 @@ pub const fn decode_row(r: Row, w: u32, qo: &mut u32, v: &mut Vals) bool {
 
 /// Decode word `w`: the index of the first row it matches, the variant and the operand values; false
 /// when no row matches.
-pub const fn decode(w: u32, ri: &mut u32, q: &mut u32, v: &mut Vals) bool {
+pub(package) const fn decode(w: u32, ri: &mut u32, q: &mut u32, v: &mut Vals) bool {
     let t: []Row = ROWS;
     for i in 0..t.len() {
         if decode_row(t[i], w, q, v) {

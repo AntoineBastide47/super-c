@@ -11,7 +11,7 @@ import ir::core as core;
 import utils::names as nm;
 
 /// The parse of `text`: the package, or the first error (`line:col: what`) in `err`.
-pub fn parse(text: str, err: &mut String) Option<Package> {
+pub(package) fn parse(text: str, err: &mut String) Option<Package> {
     let mut ps = Parser::new(text);
     return ps.run(err);
 }
@@ -1429,10 +1429,10 @@ extend<'a> Parser<'a> {
 // An operand that names a value printed later: instruction << 2 | field (0 a, 1 b, 2 c), or a pool index;
 // the line and column after the value.
 struct Fix {
-    pub at: u64,
-    pub pool: bool,
-    pub line: u32,
-    pub col: usize,
+    pub(package) at: u64,
+    pub(package) pool: bool,
+    pub(package) line: u32,
+    pub(package) col: usize,
 }
 
 extend Fix as Copy {}
@@ -1462,7 +1462,7 @@ const fn hex_val(c: u8) i64 {
 }
 
 /// The machine type text `w` spells, T_NONE for another word.
-pub const fn type_of_text(w: str) u8 {
+pub(package) const fn type_of_text(w: str) u8 {
     let names: []str = ["none", "i8", "i16", "i32", "i64", "i128", "f32", "f64", "ptr"];
     for k in 1..names.len() {
         if names[k] == w {

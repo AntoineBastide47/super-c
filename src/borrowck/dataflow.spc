@@ -7,36 +7,36 @@ import borrowck::move_paths as mp;
 import borrowck::facts as bf;
 
 /// Move/init error kinds (MoveErr.kind).
-pub const ME_UNINIT: u8 = 0; // read of a never-initialized-on-some-path place
-pub const ME_MOVED: u8 = 1; // read of a maybe-moved place
-pub const ME_DOUBLE_MOVE: u8 = 2; // second move of a maybe-moved place
-pub const ME_PARTIAL: u8 = 3; // whole-value read while a sub-place is moved out
+pub(package) const ME_UNINIT: u8 = 0; // read of a never-initialized-on-some-path place
+pub(package) const ME_MOVED: u8 = 1; // read of a maybe-moved place
+pub(package) const ME_DOUBLE_MOVE: u8 = 2; // second move of a maybe-moved place
+pub(package) const ME_PARTIAL: u8 = 3; // whole-value read while a sub-place is moved out
 
 /// One use-after-move style error: kind, move path, and the offending point and span.
-pub struct MoveErr {
-    pub kind: u8,
-    pub path: u32,
-    pub point: u32,
-    pub span: tok::Span,
+pub(package) struct MoveErr {
+    pub(package) kind: u8,
+    pub(package) path: u32,
+    pub(package) point: u32,
+    pub(package) span: tok::Span,
 }
 
 /// Block successor and predecessor lists of one body in CSR form, plus its RPO.
-pub struct Cfg {
-    pub nblocks: u32,
-    pub succ: Vector<u32>, // flat successor pool
-    pub succ_start: Vector<u32>, // per block (+ sentinel)
-    pub pred: Vector<u32>,
-    pub pred_start: Vector<u32>,
-    pub rpo: Vector<u32>, // reachable blocks in reverse postorder from the entry
-    pub rpo_pos: Vector<u32>, // per block: its index in `rpo` (unreachable: 0xFFFFFFFF)
-    pub acyclic: bool, // no back edge: one forward pass over `rpo` reaches the dataflow fixpoint
+pub(package) struct Cfg {
+    pub(package) nblocks: u32,
+    pub(package) succ: Vector<u32>, // flat successor pool
+    pub(package) succ_start: Vector<u32>, // per block (+ sentinel)
+    pub(package) pred: Vector<u32>,
+    pub(package) pred_start: Vector<u32>,
+    pub(package) rpo: Vector<u32>, // reachable blocks in reverse postorder from the entry
+    pub(package) rpo_pos: Vector<u32>, // per block: its index in `rpo` (unreachable: 0xFFFFFFFF)
+    pub(package) acyclic: bool, // no back edge: one forward pass over `rpo` reaches the dataflow fixpoint
     s_cnt: Vector<u32>, // reused per-block counting scratch for the predecessor inversion
     s_color: Vector<u8>, // reused DFS colors (0 white / 1 grey / 2 black)
     s_stack: Vector<u64>, // reused DFS frames: block << 32 | next successor index
 }
 
 /// The control-flow graph of `b`, freshly allocated, with predecessors built.
-pub fn build_cfg(b: &ir::CoreBody) Cfg {
+pub(package) fn build_cfg(b: &ir::CoreBody) Cfg {
     let mut c = Cfg::empty();
     c.build_into(b);
     c.build_preds();
@@ -45,7 +45,7 @@ pub fn build_cfg(b: &ir::CoreBody) Cfg {
 
 extend Cfg {
     /// A graph with no blocks and no heap storage; `build_into` fills it.
-    pub fn empty() Cfg {
+    pub(package) fn empty() Cfg {
         return Cfg {
             nblocks: 0,
             succ: Vector::<u32>::new(),
@@ -62,12 +62,12 @@ extend Cfg {
     }
 
     /// Heap bytes kept across bodies (capacity, not length).
-    pub const fn scratch_bytes(self: &Self) u64 {
+    pub(package) const fn scratch_bytes(self: &Self) u64 {
         return (self.succ.capacity() * sizeof(u32) + self.succ_start.capacity() * sizeof(u32) + self.pred.capacity() * sizeof(u32) + self.pred_start.capacity() * sizeof(u32) + self.rpo.capacity() * sizeof(u32) + self.rpo_pos.capacity() * sizeof(u32) + self.s_cnt.capacity() * sizeof(u32) + self.s_color.capacity() * sizeof(u8) + self.s_stack.capacity() * sizeof(u64)) as u64;
     }
 
     /// Reset-and-fill in place, keeping vector capacity across bodies (the reusable-context path).
-    pub fn build_into(self: &mut Self, b: &ir::CoreBody) {
+    pub(package) fn build_into(self: &mut Self, b: &ir::CoreBody) {
         let c = self; // keep the body below identical to the by-value builder
         let n = b.blocks.len() as u32;
         c.nblocks = n;
@@ -138,7 +138,7 @@ extend Cfg {
     /// Invert successors into predecessor lists (two passes: counts, then fill). Liveness is the
     /// only consumer, so this runs lazily: zero-loan bodies never pay for it. Idempotent per body:
     /// build_into truncates pred_start, and a filled list is left alone.
-    pub fn build_preds(self: &mut Self) {
+    pub(package) fn build_preds(self: &mut Self) {
         let c = self;
         if c.pred_start.len() != 0 {
             return;
@@ -171,17 +171,17 @@ extend Cfg {
 }
 
 /// Backward local liveness at block boundaries from the generator's use/def summaries.
-pub struct Liveness {
-    pub words: u32,
-    pub live_in: Vector<u64>, // per block * words
-    pub live_out: Vector<u64>,
-    pub pushes: u32, // fixpoint queue pushes, seeds included (asserted within the monotone bound)
+pub(package) struct Liveness {
+    pub(package) words: u32,
+    pub(package) live_in: Vector<u64>, // per block * words
+    pub(package) live_out: Vector<u64>,
+    pub(package) pushes: u32, // fixpoint queue pushes, seeds included (asserted within the monotone bound)
     s_queue: Vector<u32>, // reused work queue / queued-flags for the fixpoint
     s_queued: Vector<bool>,
 }
 
 /// Per-block origin liveness of `f` over `c`, freshly allocated.
-pub fn solve_liveness(f: &bf::BodyFacts, c: &Cfg) Liveness {
+pub(package) fn solve_liveness(f: &bf::BodyFacts, c: &Cfg) Liveness {
     let mut lv = Liveness::empty();
     lv.build_into(f, c);
     return lv;
@@ -189,7 +189,7 @@ pub fn solve_liveness(f: &bf::BodyFacts, c: &Cfg) Liveness {
 
 extend Liveness {
     /// A solution with no rows; `build_into` fills it.
-    pub fn empty() Liveness {
+    pub(package) fn empty() Liveness {
         return Liveness {
             words: 0,
             live_in: Vector::<u64>::new(),
@@ -201,12 +201,12 @@ extend Liveness {
     }
 
     /// Heap bytes kept across bodies (capacity, not length).
-    pub const fn scratch_bytes(self: &Self) u64 {
+    pub(package) const fn scratch_bytes(self: &Self) u64 {
         return (self.live_in.capacity() * sizeof(u64) + self.live_out.capacity() * sizeof(u64) + self.s_queue.capacity() * sizeof(u32) + self.s_queued.capacity() * sizeof(bool)) as u64;
     }
 
     /// Solve in place, keeping row capacity from earlier bodies.
-    pub fn build_into(self: &mut Self, f: &bf::BodyFacts, c: &Cfg) {
+    pub(package) fn build_into(self: &mut Self, f: &bf::BodyFacts, c: &Cfg) {
         let lv = self;
         let w = f.lwords;
         lv.words = w;
@@ -288,14 +288,14 @@ extend Liveness {
 }
 
 /// The move/init dataflow solution of one body: per-block entry states and the errors found.
-pub struct MoveFlow {
-    pub npaths: u32,
-    pub words: u32,
-    pub mi: Vector<u64>, // block-entry maybe-init
-    pub di: Vector<u64>, // block-entry definitely-init
-    pub mm: Vector<u64>, // block-entry maybe-moved
-    pub errs: Vector<MoveErr>,
-    pub pushes: u32, // fixpoint visits: the RPO sweep plus every queue push (asserted within the monotone bound)
+pub(package) struct MoveFlow {
+    pub(package) npaths: u32,
+    pub(package) words: u32,
+    pub(package) mi: Vector<u64>, // block-entry maybe-init
+    pub(package) di: Vector<u64>, // block-entry definitely-init
+    pub(package) mm: Vector<u64>, // block-entry maybe-moved
+    pub(package) errs: Vector<MoveErr>,
+    pub(package) pushes: u32, // fixpoint visits: the RPO sweep plus every queue push (asserted within the monotone bound)
     s_reached: Vector<bool>, // reused per-block reached markers + work queue for the fixpoint
     s_queue: Vector<u32>,
     s_queued: Vector<bool>,
@@ -305,9 +305,9 @@ pub struct MoveFlow {
 }
 
 struct FlowCtx {
-    pub mi: Vector<u64>,
-    pub di: Vector<u64>,
-    pub mm: Vector<u64>,
+    pub(package) mi: Vector<u64>,
+    pub(package) di: Vector<u64>,
+    pub(package) mm: Vector<u64>,
 }
 
 // Unchecked bit ops on a dataflow row. Precondition (held everywhere they are called): `i` is a
@@ -337,7 +337,7 @@ const fn bit_clear(v: &mut Vector<u64>, i: u32) {
 
 /// Apply one init/move event to caller-held state rows (the transfer function, reporting-free).
 /// EV_MOVE_CUT applies as a move.
-pub fn apply_event(
+pub(package) fn apply_event(
     forest: &mp::MoveForest,
     ev: &bf::Event,
     scratch: &mut Vector<u32>,
@@ -465,7 +465,7 @@ extend FlowCtx {
 }
 
 /// The move/init solution of `b`, freshly allocated; `errs` holds every move error.
-pub fn solve_moves(b: &ir::CoreBody, forest: &mp::MoveForest, f: &bf::BodyFacts, c: &Cfg) MoveFlow {
+pub(package) fn solve_moves(b: &ir::CoreBody, forest: &mp::MoveForest, f: &bf::BodyFacts, c: &Cfg) MoveFlow {
     let mut mf = MoveFlow::empty();
     mf.build_into(b, forest, f, c);
     return mf;
@@ -473,7 +473,7 @@ pub fn solve_moves(b: &ir::CoreBody, forest: &mp::MoveForest, f: &bf::BodyFacts,
 
 extend MoveFlow {
     /// A solution with no paths; `build_into` fills it.
-    pub fn empty() MoveFlow {
+    pub(package) fn empty() MoveFlow {
         return MoveFlow {
             npaths: 0,
             words: 0,
@@ -492,7 +492,7 @@ extend MoveFlow {
     }
 
     /// Heap bytes kept across bodies (capacity, not length).
-    pub const fn scratch_bytes(self: &Self) u64 {
+    pub(package) const fn scratch_bytes(self: &Self) u64 {
         return (self.mi.capacity() * sizeof(u64) + self.di.capacity() * sizeof(u64) + self.mm.capacity() * sizeof(u64) + self.errs.capacity() * sizeof(MoveErr) + self.s_reached.capacity() * sizeof(bool) + self.s_queue.capacity() * sizeof(u32) + self.s_queued.capacity() * sizeof(bool) + self.s_scratch.capacity() * sizeof(u32) + self.s_sub.capacity() * sizeof(u32) + (self.s_ctx.mi.capacity() + self.s_ctx.di.capacity() + self.s_ctx.mm.capacity()) * 8) as u64;
     }
 
@@ -500,7 +500,14 @@ extend MoveFlow {
     /// block's state-changing events before the point replay over its entry row. A path holds a value
     /// when a path of its subtree may be initialized and is a leaf or has storage no child tracks
     /// (`MoveForest.covered`): moving every member out one by one empties the whole.
-    pub fn holds_at(self: &mut Self, forest: &mp::MoveForest, f: &bf::BodyFacts, bi: u32, point: u32, path: u32) bool {
+    pub(package) fn holds_at(
+        self: &mut Self,
+        forest: &mp::MoveForest,
+        f: &bf::BodyFacts,
+        bi: u32,
+        point: u32,
+        path: u32,
+    ) bool {
         let w = self.words as usize;
         let base = bi as usize * w;
         for k in 0..w {
@@ -529,7 +536,7 @@ extend MoveFlow {
     }
 
     /// Solve in place, keeping capacity from earlier bodies.
-    pub fn build_into(self: &mut Self, b: &ir::CoreBody, forest: &mp::MoveForest, f: &bf::BodyFacts, c: &Cfg) {
+    pub(package) fn build_into(self: &mut Self, b: &ir::CoreBody, forest: &mp::MoveForest, f: &bf::BodyFacts, c: &Cfg) {
         let mf = self;
         let npaths = forest.paths.len() as u32;
         let mut w = (npaths + 63) / 64;

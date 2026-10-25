@@ -11,10 +11,10 @@ import ast::parser as par;
 import lsp::text as ltext;
 
 /// A definition/reference site: a byte span in `module`'s source.
-pub struct Loc {
-    pub module: u32,
-    pub start: u32,
-    pub end: u32,
+pub(package) struct Loc {
+    pub(package) module: u32,
+    pub(package) start: u32,
+    pub(package) end: u32,
 }
 
 const fn mod_ast(p: &loader::Package, m: usize) *const Ast {
@@ -23,7 +23,7 @@ const fn mod_ast(p: &loader::Package, m: usize) *const Ast {
 
 /// The innermost node whose span contains `off` (ties prefer the later, more specific node). Linear over
 /// the node pool: microseconds at compiler scale.
-pub fn node_at(a: *const Ast, off: u32) NodeId {
+pub(package) fn node_at(a: *const Ast, off: u32) NodeId {
     let mut best: NodeId = NODE_NONE;
     let mut blen: u32 = 0xFFFFFFFF;
     let n = unsafe (*a).nnodes();
@@ -49,7 +49,7 @@ fn node_at_or_before(a: *const Ast, off: u32) NodeId {
 
 /// The declaration's NAME node (whose span is the go-to/rename target); NODE_NONE when the kind has no
 /// distinct name node (callers fall back to the decl span).
-pub const fn decl_name(a: *const Ast, id: NodeId) NodeId {
+pub(package) const fn decl_name(a: *const Ast, id: NodeId) NodeId {
     let n = unsafe (*a).at_const(id);
     if n.kind == NodeKind::NODE_FUNCTION {
         return n.as_data.function.name;
@@ -120,7 +120,7 @@ fn resolved_at(p: &loader::Package, a: *const Ast, off: u32) DefId {
 /// The resolved definition under `off` in module `mi`; DefId{0, NODE_NONE} when nothing resolves. A
 /// cursor ON a declaration's own name resolves to that declaration (so rename/references work from the
 /// definition site too).
-pub fn def_at(p: &loader::Package, mi: usize, off: u32) DefId {
+pub(package) fn def_at(p: &loader::Package, mi: usize, off: u32) DefId {
     let a = mod_ast(p, mi);
     let mut d = resolved_at(p, a, off);
     if d.node == NODE_NONE && off > 0 {
@@ -344,9 +344,9 @@ fn decl_doc(p: &loader::Package, d: DefId) String {
 // One attribute for hover: its spelling after '@' (as `par::known_attributes` gives it, `unsafe`
 // for the `unsafe(..)` forms), its written form and what it does.
 struct AttrDoc {
-    pub name: str<'static>,
-    pub sig: str<'static>,
-    pub doc: str<'static>,
+    pub(package) name: str<'static>,
+    pub(package) sig: str<'static>,
+    pub(package) doc: str<'static>,
 }
 
 const ATTR_DOCS: [AttrDoc; 36] = [
@@ -483,9 +483,9 @@ const ATTR_DOCS: [AttrDoc; 36] = [
 // The compile-time reflection constructs no declaration documents: the intrinsics (std/reflect.spc
 // is their reference) and the members of the `inline for` binders.
 struct ReflectDoc {
-    pub name: str<'static>,
-    pub sig: str<'static>,
-    pub doc: str<'static>,
+    pub(package) name: str<'static>,
+    pub(package) sig: str<'static>,
+    pub(package) doc: str<'static>,
 }
 
 const REFLECT_INTRINSICS: [ReflectDoc; 5] = [
@@ -609,7 +609,7 @@ fn reflect_doc_md(d: &ReflectDoc) String {
 /// documents: an unresolved intrinsic name (`type_info`, `zeroed`, `fields`, `variants`,
 /// `payloads`), or a member of an `inline for` binder (`f.name`, `v.tag`, `f.has_meta`). None
 /// elsewhere.
-pub fn reflect_hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
+pub(package) fn reflect_hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
     let a = mod_ast(p, mi);
     let src = p.modules.at(mi).source.as_str();
     let id = node_at_or_before(a, off);
@@ -669,7 +669,7 @@ pub fn reflect_hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
 
 /// Markdown hover for the attribute name at `off` (the '@' or a byte of the name), None when `off`
 /// is not on a known attribute.
-pub fn attribute_hover(src: str, off: u32) Option<String> {
+pub(package) fn attribute_hover(src: str, off: u32) Option<String> {
     let mut s = off as usize;
     if s < src.len() && src[s] == b'@' {
         s += 1;
@@ -701,7 +701,7 @@ pub fn attribute_hover(src: str, off: u32) Option<String> {
 
 /// Markdown hover for the position: the attribute's documentation, else the expression's rendered
 /// type, then the resolved declaration's head. None when the position carries none of them.
-pub fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
+pub(package) fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
     let ah = attribute_hover(p.modules.at(mi).source.as_str(), off);
     if ah.is_some() {
         return ah;
@@ -769,7 +769,7 @@ pub fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
 
 /// The definition site for the position: the resolved decl's name span (decl span as the fallback).
 /// A build constant has none: the compiler generates its module (hover shows its value).
-pub fn definition(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
+pub(package) fn definition(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
     let d = target_at(p, mi, off);
     if d.node == NODE_NONE || p.modules.at(d.module as usize).file.len() == 0 {
         return Option::<Loc>::None;
@@ -802,12 +802,12 @@ const fn ref_span(a: *const Ast, i: NodeId) tok::Span {
 // Semantic tokens.
 
 /// One classified token: a byte span + the server's legend indexes.
-pub struct Tok {
-    pub start: u32,
-    pub end: u32,
-    pub ty: i32, // legend: 0 namespace, 1 type, 2 enum, 3 enumMember, 4 interface, 5 typeParameter,
+pub(package) struct Tok {
+    pub(package) start: u32,
+    pub(package) end: u32,
+    pub(package) ty: i32, // legend: 0 namespace, 1 type, 2 enum, 3 enumMember, 4 interface, 5 typeParameter,
     // 6 parameter, 7 variable, 8 property, 9 function, 10 method.
-    pub mods: u32, // bit 0 declaration, bit 1 readonly
+    pub(package) mods: u32, // bit 0 declaration, bit 1 readonly
 }
 
 // A method is a function declared inside an `extend` block. The first parameter's SOURCE SPELLING
@@ -815,8 +815,8 @@ pub struct Tok {
 // Per-request cache for method classification: the sorted method ids of each touched module, so
 // semantic tokens pay one item scan per module instead of one per token.
 struct MethodCache {
-    pub mods: Vector<u32>,
-    pub sets: Vector<Vector<NodeId>>,
+    pub(package) mods: Vector<u32>,
+    pub(package) sets: Vector<Vector<NodeId>>,
 }
 
 fn fn_is_method(p: &loader::Package, dm: usize, id: NodeId, mc: &mut MethodCache) bool {
@@ -988,7 +988,7 @@ const fn tok_cmp(a: &Tok, b: &Tok) i32 {
 
 /// Every classifiable token in module `mi`: resolved references (through their name spans) plus each
 /// declaration's own name (with the `declaration` modifier). Sorted by start offset.
-pub fn semantic_tokens(p: &loader::Package, mi: usize) Vector<Tok> {
+pub(package) fn semantic_tokens(p: &loader::Package, mi: usize) Vector<Tok> {
     let a = mod_ast(p, mi);
     let mut out = Vector::<Tok>::new();
     let mut mc = MethodCache { mods: Vector::<u32>::new(), sets: Vector::<Vector<NodeId>>::new() };
@@ -1047,15 +1047,15 @@ pub fn semantic_tokens(p: &loader::Package, mi: usize) Vector<Tok> {
 // Completion.
 
 /// One completion candidate; `kind` is the LSP CompletionItemKind.
-pub struct CompItem {
-    pub label: String,
-    pub kind: i32,
-    pub detail: String,
+pub(package) struct CompItem {
+    pub(package) label: String,
+    pub(package) kind: i32,
+    pub(package) detail: String,
 }
 
 /// For each item, whether it is the first offer of its label (several sources offer the same name, for
 /// example a local that shadows a prelude item: the first offer wins).
-pub fn first_offers(items: &Vector<CompItem>) Vector<bool> {
+pub(package) fn first_offers(items: &Vector<CompItem>) Vector<bool> {
     let mut order = Vector::<u32>::new();
     order.reserve(items.len());
     for i in 0..items.len() {
@@ -1249,7 +1249,7 @@ fn comp_module_publics(p: &loader::Package, req: usize, mm: usize, out: &mut Vec
 /// `.`/`::` (the buffer usually does not parse mid-edit; the probe makes it parse, and the typechecker
 /// still assigns the receiver's type even though the probe itself errors). Offers fields + methods for a
 /// value receiver, variants + methods for an enum path, and public items for a module path.
-pub fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector<CompItem> {
+pub(package) fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector<CompItem> {
     let mut out = Vector::<CompItem>::new();
     let a = mod_ast(p, mi);
     // The enclosing member node whose NAME span contains the probe.
@@ -1340,7 +1340,7 @@ pub fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector<CompItem
 
 /// Keywords + builtin type names alone: the floor every general completion includes, and the
 /// fallback when no build (not even a probe build) parses the buffer.
-pub fn complete_keywords() Vector<CompItem> {
+pub(package) fn complete_keywords() Vector<CompItem> {
     let mut out = Vector::<CompItem>::new();
     let kws = "as do fn if in dyn for let mut new pub case else enum loop move null self Self true type break const defer false union where while extend extern import launch return select static struct switch sizeof unsafe alignof continue interface static_assert";
     let mut it = kws.split(" ");
@@ -1359,7 +1359,7 @@ pub fn complete_keywords() Vector<CompItem> {
 
 /// Whether a top-level item of module `mi` spans byte offset `off`: false between items, and where
 /// the parser dropped a declaration it could not read.
-pub fn item_at(p: &loader::Package, mi: usize, off: u32) bool {
+pub(package) fn item_at(p: &loader::Package, mi: usize, off: u32) bool {
     let a = mod_ast(p, mi);
     let items = unsafe (*a).at_const((*a).root).as_data.program.items;
     for i in 0..items.len {
@@ -1374,7 +1374,7 @@ pub fn item_at(p: &loader::Package, mi: usize, off: u32) bool {
 /// General identifier completion from the last good build: keywords, builtin type names, the module's
 /// own top-level declarations, import aliases, prelude publics, and locals in scope (the enclosing
 /// function's parameters and earlier bindings).
-pub fn complete_general(p: &loader::Package, mi: usize, off: u32) Vector<CompItem> {
+pub(package) fn complete_general(p: &loader::Package, mi: usize, off: u32) Vector<CompItem> {
     let mut out = complete_keywords();
     let a = mod_ast(p, mi);
     if p.modules.at(mi).has_ast {
@@ -1549,7 +1549,7 @@ fn pattern_scope_has(a: *const Ast, pid: NodeId, off: u32) bool {
 // Attribute completion (the parser's inventory is the single source of truth).
 
 /// Every attribute the parser accepts, spelled as typed after `@`.
-pub fn complete_attributes() Vector<CompItem> {
+pub(package) fn complete_attributes() Vector<CompItem> {
     let mut out = Vector::<CompItem>::new();
     let mut names = Vector::<String>::new();
     par::known_attributes(&mut names);
@@ -1560,7 +1560,7 @@ pub fn complete_attributes() Vector<CompItem> {
 }
 
 /// Identifiers valid inside `@platform(...)`.
-pub fn complete_platform_args() Vector<CompItem> {
+pub(package) fn complete_platform_args() Vector<CompItem> {
     let mut out = Vector::<CompItem>::new();
     let names = tgt::axis_names(false);
     for i in 0..names.len() {
@@ -1570,7 +1570,7 @@ pub fn complete_platform_args() Vector<CompItem> {
 }
 
 /// Identifiers valid inside `@arch(...)`.
-pub fn complete_arch_args() Vector<CompItem> {
+pub(package) fn complete_arch_args() Vector<CompItem> {
     let mut out = Vector::<CompItem>::new();
     let names = tgt::axis_names(true);
     for i in 0..names.len() {
@@ -1581,7 +1581,7 @@ pub fn complete_arch_args() Vector<CompItem> {
 
 /// Interface names visible from module `mi` (for `@derive(...)` arguments): the module's own
 /// interfaces plus public interfaces of the prelude and of every imported module.
-pub fn complete_interfaces(p: &loader::Package, mi: usize) Vector<CompItem> {
+pub(package) fn complete_interfaces(p: &loader::Package, mi: usize) Vector<CompItem> {
     let mut out = Vector::<CompItem>::new();
     if !p.modules.at(mi).has_ast {
         return out;
@@ -1644,7 +1644,7 @@ pub fn complete_interfaces(p: &loader::Package, mi: usize) Vector<CompItem> {
 }
 
 /// Module paths for `import` completion: every module the package knows, "::"-joined.
-pub fn complete_import_paths(p: &loader::Package) Vector<CompItem> {
+pub(package) fn complete_import_paths(p: &loader::Package) Vector<CompItem> {
     let mut out = Vector::<CompItem>::new();
     for mm in 0..p.modules.len() {
         let path = p.modules.at(mm).path.as_str();
@@ -1656,7 +1656,7 @@ pub fn complete_import_paths(p: &loader::Package) Vector<CompItem> {
 }
 
 /// Loop labels of the function enclosing `off` (for `'label` completion after a quote).
-pub fn complete_labels(p: &loader::Package, mi: usize, off: u32) Vector<CompItem> {
+pub(package) fn complete_labels(p: &loader::Package, mi: usize, off: u32) Vector<CompItem> {
     let mut out = Vector::<CompItem>::new();
     if !p.modules.at(mi).has_ast {
         return out;
@@ -1694,15 +1694,15 @@ pub fn complete_labels(p: &loader::Package, mi: usize, off: u32) Vector<CompItem
 // definition, implementations, folding, selection ranges, inlay hints.
 
 /// One document symbol; `parent` indexes the owning symbol in the same vector (-1 = top level).
-pub struct Sym {
-    pub name: String,
-    pub detail: String,
-    pub kind: i32, // LSP SymbolKind
-    pub start: u32,
-    pub end: u32,
-    pub sel_start: u32,
-    pub sel_end: u32,
-    pub parent: i32,
+pub(package) struct Sym {
+    pub(package) name: String,
+    pub(package) detail: String,
+    pub(package) kind: i32, // LSP SymbolKind
+    pub(package) start: u32,
+    pub(package) end: u32,
+    pub(package) sel_start: u32,
+    pub(package) sel_end: u32,
+    pub(package) parent: i32,
 }
 
 fn sym_push(
@@ -1744,7 +1744,7 @@ fn sym_push(
 /// The module's symbol tree in source order (functions, types with their fields/variants,
 /// interfaces with their methods, extends with their methods, consts, aliases). `detail` fills each
 /// symbol's signature text; without it `detail` stays empty.
-pub fn document_symbols(p: &loader::Package, mi: usize, detail: bool) Vector<Sym> {
+pub(package) fn document_symbols(p: &loader::Package, mi: usize, detail: bool) Vector<Sym> {
     let mut out = Vector::<Sym>::new();
     if !p.modules.at(mi).has_ast {
         return out;
@@ -1827,12 +1827,12 @@ pub fn document_symbols(p: &loader::Package, mi: usize, detail: bool) Vector<Sym
 }
 
 /// One workspace-symbol hit.
-pub struct WsSym {
-    pub name: String,
-    pub kind: i32,
-    pub module: u32,
-    pub start: u32,
-    pub end: u32,
+pub(package) struct WsSym {
+    pub(package) name: String,
+    pub(package) kind: i32,
+    pub(package) module: u32,
+    pub(package) start: u32,
+    pub(package) end: u32,
 }
 
 // Case-insensitive substring match (an empty query matches everything).
@@ -1853,7 +1853,13 @@ const fn fuzzy_has(name: str, q: str) bool {
 
 /// Top-level declarations (and extend methods) matching `query` in the modules `searched` marks,
 /// bounded by `cap` results.
-pub fn workspace_symbols(p: &loader::Package, query: str, cap: usize, searched: &Vector<bool>, out: &mut Vector<WsSym>) {
+pub(package) fn workspace_symbols(
+    p: &loader::Package,
+    query: str,
+    cap: usize,
+    searched: &Vector<bool>,
+    out: &mut Vector<WsSym>,
+) {
     for mm in 0..p.modules.len() {
         if out.len() >= cap {
             return;
@@ -1877,10 +1883,10 @@ pub fn workspace_symbols(p: &loader::Package, query: str, cap: usize, searched: 
 }
 
 /// Signature help for the innermost call containing `off`.
-pub struct SigInfo {
-    pub label: String,
-    pub params: Vector<String>,
-    pub active: i32,
+pub(package) struct SigInfo {
+    pub(package) label: String,
+    pub(package) params: Vector<String>,
+    pub(package) active: i32,
 }
 
 /// The generic parameters of declaration `n`: empty for a kind without them.
@@ -1959,7 +1965,7 @@ const TARG_SCAN: usize = 1024;
 /// the declaration's head, its generic parameters as written (bounds and defaults included), and
 /// the active one. Read from the text, so a list still being typed is found. None outside one, or
 /// when the name before `<` names no generic declaration.
-pub fn type_args_help(p: &loader::Package, mi: usize, off: u32) Option<SigInfo> {
+pub(package) fn type_args_help(p: &loader::Package, mi: usize, off: u32) Option<SigInfo> {
     let src = p.modules.at(mi).source.as_str();
     if off as usize > src.len() {
         return Option::<SigInfo>::None;
@@ -2046,7 +2052,7 @@ pub fn type_args_help(p: &loader::Package, mi: usize, off: u32) Option<SigInfo> 
 
 /// Signature help for the call enclosing byte offset `off` of module `mi`: the callee's label, its
 /// parameter labels, and the active parameter; None outside a call.
-pub fn signature_help(p: &loader::Package, mi: usize, off: u32) Option<SigInfo> {
+pub(package) fn signature_help(p: &loader::Package, mi: usize, off: u32) Option<SigInfo> {
     let ta = type_args_help(p, mi, off);
     if ta.is_some() {
         return ta;
@@ -2118,7 +2124,7 @@ pub fn signature_help(p: &loader::Package, mi: usize, off: u32) Option<SigInfo> 
 
 /// All same-document reference spans for the symbol under `off` (document highlights): only module
 /// `mi` is scanned.
-pub fn document_highlights(p: &loader::Package, mi: usize, off: u32) Vector<Loc> {
+pub(package) fn document_highlights(p: &loader::Package, mi: usize, off: u32) Vector<Loc> {
     let d = def_at(p, mi, off);
     let mut out = Vector::<Loc>::new();
     if d.node == NODE_NONE {
@@ -2132,7 +2138,7 @@ pub fn document_highlights(p: &loader::Package, mi: usize, off: u32) Vector<Loc>
 }
 
 /// The declaration of the TYPE of the expression under `off` (references and pointers peeled).
-pub fn type_definition(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
+pub(package) fn type_definition(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
     let a = mod_ast(p, mi);
     let id = node_at_or_before(a, off);
     if id == NODE_NONE || !unsafe (*a).valid(id) {
@@ -2192,7 +2198,7 @@ fn owning_interface(p: &loader::Package, im: usize, fnid: NodeId) NodeId {
 
 /// Implementations of the interface (or interface method) under `off`: for an interface, every
 /// conforming `extend ... as I` block's target span; for one of its methods, each conformer's method.
-pub fn implementations(p: &loader::Package, mi: usize, off: u32) Vector<Loc> {
+pub(package) fn implementations(p: &loader::Package, mi: usize, off: u32) Vector<Loc> {
     let mut out = Vector::<Loc>::new();
     let d = target_at(p, mi, off);
     if d.node == NODE_NONE {
@@ -2261,7 +2267,7 @@ pub fn implementations(p: &loader::Package, mi: usize, off: u32) Vector<Loc> {
 }
 
 /// Foldable spans: multi-line item bodies and blocks, plus runs of full-line comments.
-pub fn folding_ranges(p: &loader::Package, mi: usize) Vector<Loc> {
+pub(package) fn folding_ranges(p: &loader::Package, mi: usize) Vector<Loc> {
     let mut out = Vector::<Loc>::new();
     let src = p.modules.at(mi).source.as_str();
     if p.modules.at(mi).has_ast {
@@ -2322,7 +2328,7 @@ pub fn folding_ranges(p: &loader::Package, mi: usize) Vector<Loc> {
 }
 
 /// Enclosing-node spans at `off`, innermost first, deduplicated (selection ranges).
-pub fn selection_ranges(p: &loader::Package, mi: usize, off: u32) Vector<Loc> {
+pub(package) fn selection_ranges(p: &loader::Package, mi: usize, off: u32) Vector<Loc> {
     let mut out = Vector::<Loc>::new();
     if !p.modules.at(mi).has_ast {
         return out;
@@ -2362,13 +2368,13 @@ pub fn selection_ranges(p: &loader::Package, mi: usize, off: u32) Vector<Loc> {
 }
 
 /// One inlay hint: `label` rendered after byte `off`.
-pub struct Hint {
-    pub off: u32,
-    pub label: String,
+pub(package) struct Hint {
+    pub(package) off: u32,
+    pub(package) label: String,
 }
 
 /// Type hints for `let` bindings without a written type in [start, end).
-pub fn inlay_hints(p: &loader::Package, mi: usize, start: u32, end: u32) Vector<Hint> {
+pub(package) fn inlay_hints(p: &loader::Package, mi: usize, start: u32, end: u32) Vector<Hint> {
     let mut out = Vector::<Hint>::new();
     if !p.modules.at(mi).has_ast {
         return out;
@@ -2412,10 +2418,10 @@ pub fn inlay_hints(p: &loader::Package, mi: usize, start: u32, end: u32) Vector<
 // documented temporary adapter. Same-name same-kind decls in ONE file cannot collide at top level.
 
 /// The defining module's FILE (as the loader spelled it), declaration kind, and name text of `d`.
-pub struct SymKey {
-    pub file: String,
-    pub kind: u8,
-    pub name: String,
+pub(package) struct SymKey {
+    pub(package) file: String,
+    pub(package) kind: u8,
+    pub(package) name: String,
 }
 
 // Bootstrap constraint: the release compiler dispatches a generic `Free` call to a named `free`
@@ -2429,7 +2435,7 @@ extend SymKey as Free {
 
 /// The package-independent identity (file, kind, name) of declaration `d`, for cross-package
 /// symbol matching; None for an unresolved or out-of-range def.
-pub fn sym_key(p: &loader::Package, d: DefId) Option<SymKey> {
+pub(package) fn sym_key(p: &loader::Package, d: DefId) Option<SymKey> {
     if d.node == NODE_NONE || d.module as usize >= p.modules.len() {
         return Option::<SymKey>::None;
     }
@@ -2453,7 +2459,7 @@ pub fn sym_key(p: &loader::Package, d: DefId) Option<SymKey> {
 
 /// The declaration in module `mi` matching (kind, name), or NODE_NONE. The span tiebreak keeps the
 /// FIRST (outermost source order) match, which is the declaration itself.
-pub fn find_decl_by_key(p: &loader::Package, mi: usize, kind: u8, name: str) NodeId {
+pub(package) fn find_decl_by_key(p: &loader::Package, mi: usize, kind: u8, name: str) NodeId {
     let a = mod_ast(p, mi);
     let n = unsafe (*a).nnodes();
     for i0 in 1..n {
@@ -2517,7 +2523,7 @@ fn push_decl_name(p: &loader::Package, d: DefId, out: &mut Vector<Loc>) {
 
 /// Every reference to definition `d` across the package (the span-narrowed reference sites, per
 /// module in span order); `include_decl` appends the declaration's own name span.
-pub fn references_of_def(p: &loader::Package, d: DefId, include_decl: bool) Vector<Loc> {
+pub(package) fn references_of_def(p: &loader::Package, d: DefId, include_decl: bool) Vector<Loc> {
     let mut out = Vector::<Loc>::new();
     if d.node == NODE_NONE {
         return out;
@@ -2535,7 +2541,7 @@ pub fn references_of_def(p: &loader::Package, d: DefId, include_decl: bool) Vect
 }
 
 /// The reference (or declaration-name) span AT the cursor, for prepareRename's editable range.
-pub fn cursor_ref_span(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
+pub(package) fn cursor_ref_span(p: &loader::Package, mi: usize, off: u32) Option<Loc> {
     let d = def_at(p, mi, off);
     if d.node == NODE_NONE {
         return Option::<Loc>::None;
@@ -2595,7 +2601,7 @@ fn owning_extend(p: &loader::Package, im: usize, fnid: NodeId) NodeId {
 /// The rename set for `d`: the definition itself plus its interface relations; an interface
 /// method renames its declaration AND every conformer's method; a conformance method renames the
 /// interface declaration and the sibling conformances with it.
-pub fn related_decls(p: &loader::Package, d: DefId, out: &mut Vector<DefId>) {
+pub(package) fn related_decls(p: &loader::Package, d: DefId, out: &mut Vector<DefId>) {
     out.push(d);
     if d.node == NODE_NONE || d.module as usize >= p.modules.len() {
         return;
@@ -2708,7 +2714,7 @@ fn is_top_level(a: *const Ast, iid: NodeId) bool {
 /// Simulates the lookup that matters for each declaration class: top-level items against their
 /// module's item table, fields against their aggregate, methods against the target's method set,
 /// locals and parameters against every binder of the enclosing function.
-pub fn rename_conflict(p: &loader::Package, d: DefId, new_name: str) String {
+pub(package) fn rename_conflict(p: &loader::Package, d: DefId, new_name: str) String {
     if d.node == NODE_NONE || d.module as usize >= p.modules.len() {
         return String::new();
     }
@@ -2855,21 +2861,21 @@ pub fn rename_conflict(p: &loader::Package, d: DefId, new_name: str) String {
 // Call / type hierarchy and code-action queries.
 
 /// The smallest function item whose span contains `off` (NODE_NONE when none does).
-pub fn enclosing_function(p: &loader::Package, mi: usize, off: u32) NodeId {
+pub(package) fn enclosing_function(p: &loader::Package, mi: usize, off: u32) NodeId {
     let fns = body_functions(p, mi);
     return enclosing_in(&fns, off);
 }
 
 /// A function that has a body: its node and span.
-pub struct FnSpan {
-    pub node: NodeId,
-    pub start: u32,
-    pub end: u32,
+pub(package) struct FnSpan {
+    pub(package) node: NodeId,
+    pub(package) start: u32,
+    pub(package) end: u32,
 }
 
 /// Every function of module `mi` that has a body, in node order: one scan of the module serves
 /// many `enclosing_in` lookups.
-pub fn body_functions(p: &loader::Package, mi: usize) Vector<FnSpan> {
+pub(package) fn body_functions(p: &loader::Package, mi: usize) Vector<FnSpan> {
     let mut out = Vector::<FnSpan>::new();
     if !p.modules.at(mi).has_ast {
         return out;
@@ -2888,7 +2894,7 @@ pub fn body_functions(p: &loader::Package, mi: usize) Vector<FnSpan> {
 
 /// The innermost function of `fns` whose span holds `off` (the first in node order on a tie), or
 /// NODE_NONE.
-pub const fn enclosing_in(fns: &Vector<FnSpan>, off: u32) NodeId {
+pub(package) const fn enclosing_in(fns: &Vector<FnSpan>, off: u32) NodeId {
     let mut best = NODE_NONE;
     let mut blen: u32 = 0xFFFFFFFF;
     for k in 0..fns.len() {
@@ -2902,14 +2908,14 @@ pub const fn enclosing_in(fns: &Vector<FnSpan>, off: u32) NodeId {
 }
 
 /// One resolved call site inside a function body.
-pub struct CallSite {
-    pub callee: DefId,
-    pub start: u32,
-    pub end: u32,
+pub(package) struct CallSite {
+    pub(package) callee: DefId,
+    pub(package) start: u32,
+    pub(package) end: u32,
 }
 
 /// Every call inside `fnid`'s span whose callee resolves to a function declaration.
-pub fn calls_in(p: &loader::Package, mi: usize, fnid: NodeId) Vector<CallSite> {
+pub(package) fn calls_in(p: &loader::Package, mi: usize, fnid: NodeId) Vector<CallSite> {
     let mut out = Vector::<CallSite>::new();
     let a = mod_ast(p, mi);
     let fsp = unsafe (*a).at_const(fnid).span;
@@ -2947,7 +2953,7 @@ pub fn calls_in(p: &loader::Package, mi: usize, fnid: NodeId) Vector<CallSite> {
 
 /// Module paths (import spellings) whose PUBLIC top-level declarations contain `name`. Prelude
 /// modules are auto-imported and the requesting module itself is excluded.
-pub fn import_candidates(p: &loader::Package, mi: usize, name: str) Vector<String> {
+pub(package) fn import_candidates(p: &loader::Package, mi: usize, name: str) Vector<String> {
     let mut out = Vector::<String>::new();
     for mm in 0..p.modules.len() {
         if mm == mi || p.modules.at(mm).prelude || !p.modules.at(mm).has_ast {
@@ -2970,7 +2976,7 @@ pub fn import_candidates(p: &loader::Package, mi: usize, name: str) Vector<Strin
 
 /// Byte offset where a new `import ...;` line belongs in module `mi`: right after the last existing
 /// top-level import line, else at the top of the file.
-pub const fn import_insert_at(p: &loader::Package, mi: usize) u32 {
+pub(package) const fn import_insert_at(p: &loader::Package, mi: usize) u32 {
     let src = p.modules.at(mi).source.as_str();
     let mut at: u32 = 0;
     let mut i: usize = 0;
@@ -2992,9 +2998,9 @@ pub const fn import_insert_at(p: &loader::Package, mi: usize) u32 {
 }
 
 /// An insertion produced for a code action: byte offset plus the text.
-pub struct StubIns {
-    pub at: u32,
-    pub text: String,
+pub(package) struct StubIns {
+    pub(package) at: u32,
+    pub(package) text: String,
 }
 
 // Bootstrap constraint: the release compiler dispatches a generic `Free` call to a named `free`
@@ -3007,7 +3013,7 @@ extend StubIns as Free {
 
 /// The stub for interface method `method_name`, inserted before the closing brace of the extend
 /// block containing `off` (the span the missing-method diagnostic points into).
-pub fn iface_stub(p: &loader::Package, mi: usize, off: u32, method_name: str) Option<StubIns> {
+pub(package) fn iface_stub(p: &loader::Package, mi: usize, off: u32, method_name: str) Option<StubIns> {
     let none = Option::<StubIns>::None;
     if !p.modules.at(mi).has_ast {
         return none;
@@ -3073,7 +3079,7 @@ pub fn iface_stub(p: &loader::Package, mi: usize, off: u32, method_name: str) Op
 /// The `extend T as I` relations of `d`. When `up`, `d` is the aggregate and the result holds the
 /// name span of each interface it conforms to; otherwise `d` is the interface and the result holds
 /// the name span of each conforming struct or enum.
-pub fn extend_relations(p: &loader::Package, d: DefId, up: bool) Vector<Loc> {
+pub(package) fn extend_relations(p: &loader::Package, d: DefId, up: bool) Vector<Loc> {
     let mut out = Vector::<Loc>::new();
     for mm in 0..p.modules.len() {
         if !p.modules.at(mm).has_ast {

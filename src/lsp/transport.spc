@@ -25,20 +25,20 @@ const HDR_MAX: usize = 511; // a header line longer than this (without its newli
 
 /// Buffered reads over a stream's descriptor, past the stdio buffer: the bytes not yet parsed
 /// wait in `buf` from `pos`; `pending` answers whether a read would return at once.
-pub struct Reader {
-    pub f: *mut stdio::FILE,
+pub(package) struct Reader {
+    pub(package) f: *mut stdio::FILE,
     buf: Vector<u8>,
     pos: usize,
     eof: bool, // the descriptor reported end of stream or an error: every later read is None
 }
 
 extend Reader {
-    pub fn new(f: *mut stdio::FILE) Reader {
+    pub(package) fn new(f: *mut stdio::FILE) Reader {
         return Reader { f: f, buf: Vector::<u8>::new(), pos: 0, eof: false };
     }
 
     /// True when an unread byte is buffered or the descriptor would hand one over now.
-    pub fn pending(self: &Self) bool {
+    pub(package) fn pending(self: &Self) bool {
         if self.pos < self.buf.len() {
             return true;
         }
@@ -182,7 +182,7 @@ fn charset_ok(v: str) bool {
 /// Read one framed message body from `rd`. None on EOF or malformed framing: missing, duplicate, or
 /// bad Content-Length, an overlong or over-count header line, a non-UTF-8 charset, or a declared
 /// length over the 128 MiB cap.
-pub fn read_message(rd: &mut Reader) Option<String> {
+pub(package) fn read_message(rd: &mut Reader) Option<String> {
     let mut clen: i64 = -1;
     let mut headers: u32 = 0;
     loop {
@@ -222,7 +222,7 @@ pub fn read_message(rd: &mut Reader) Option<String> {
 }
 
 /// Frame and send `body`, then flush.
-pub fn write_message(f: *mut stdio::FILE, body: str) {
+pub(package) fn write_message(f: *mut stdio::FILE, body: str) {
     let mut hdr = String::with_capacity(40);
     hdr.format_into("Content-Length: {}\r\n\r\n", body.len());
     unsafe stdio::fwrite(hdr.as_ptr(), 1, hdr.len(), f);

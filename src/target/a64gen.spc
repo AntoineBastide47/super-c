@@ -70,11 +70,11 @@ const fn bit(r: u8) u64 {
 
 /// Per value: where it is.
 struct Va {
-    pub reg: u8, // NOREG or the register holding it
-    pub home: u8,
-    pub dirty: bool, // the register holds it and the home does not
-    pub clean: bool, // its register's bits above its width are zero (an i8 compare result, say)
-    pub off: i32,
+    pub(package) reg: u8, // NOREG or the register holding it
+    pub(package) home: u8,
+    pub(package) dirty: bool, // the register holds it and the home does not
+    pub(package) clean: bool, // its register's bits above its width are zero (an i8 compare result, say)
+    pub(package) off: i32,
 }
 
 extend Va as Copy {}
@@ -82,10 +82,10 @@ extend Va as Copy {}
 // A relocation of the body's code: word `at` (before the prologue) of kind `kind` against object symbol
 // `sym` plus `addend`.
 struct CRel {
-    pub at: u32,
-    pub kind: u8,
-    pub sym: u32,
-    pub addend: i64,
+    pub(package) at: u32,
+    pub(package) kind: u8,
+    pub(package) sym: u32,
+    pub(package) addend: i64,
 }
 
 extend CRel as Copy {}
@@ -93,16 +93,16 @@ extend CRel as Copy {}
 // A pending condition: the flags hold the result of the instruction before, which a branch or select
 // right after reads instead of a value.
 struct Cond {
-    pub inst: u32, // the instruction whose value (or flag) it stands for, NONE without one
-    pub cc: u32, // the condition code; `cc2` too when not NONE (a float compare of two conditions)
-    pub cc2: u32,
+    pub(package) inst: u32, // the instruction whose value (or flag) it stands for, NONE without one
+    pub(package) cc: u32, // the condition code; `cc2` too when not NONE (a float compare of two conditions)
+    pub(package) cc2: u32,
 }
 
 extend Cond as Copy {}
 
 /// The arm64 generator of one object.
-pub struct Gen {
-    pub err: String, // the first refusal, empty when every body compiled
+pub(package) struct Gen {
+    pub(package) err: String, // the first refusal, empty when every body compiled
     pkg: *const Package,
     o: *mut ob::Obj,
     apple: bool,
@@ -168,11 +168,11 @@ pub struct Gen {
 
 // A move of the parallel-move resolver: `src` to `dst` (locations), `bytes` wide in register file `v`.
 struct Mv {
-    pub src: Lc,
-    pub dst: Lc,
-    pub v: bool,
-    pub bytes: u32,
-    pub done: bool,
+    pub(package) src: Lc,
+    pub(package) dst: Lc,
+    pub(package) v: bool,
+    pub(package) bytes: u32,
+    pub(package) done: bool,
 }
 
 extend Mv as Copy {}
@@ -180,10 +180,10 @@ extend Mv as Copy {}
 // A location: a register, memory at base + off, a value to rematerialize, or an aggregate's bytes at
 // a register base.
 struct Lc {
-    pub kind: u8, // LC_REG, LC_MEM, LC_VAL
-    pub reg: u8, // the register, or the base register of memory
-    pub off: i32,
-    pub val: u32, // LC_VAL: the value index
+    pub(package) kind: u8, // LC_REG, LC_MEM, LC_VAL
+    pub(package) reg: u8, // the register, or the base register of memory
+    pub(package) off: i32,
+    pub(package) val: u32, // LC_VAL: the value index
 }
 
 extend Lc as Copy {}
@@ -193,7 +193,7 @@ const LC_MEM: u8 = 1;
 const LC_VAL: u8 = 2;
 
 extend Gen {
-    pub fn new(pkg: &Package, o: &mut ob::Obj, apple: bool, elf: bool) Gen {
+    pub(package) fn new(pkg: &Package, o: &mut ob::Obj, apple: bool, elf: bool) Gen {
         let mut owner = Vector::<u32>::with_capacity(64);
         for _ in 0..64 {
             owner.push(NONE);
@@ -1182,7 +1182,7 @@ const fn mkind(t: u8, load: bool) u32 {
 extend Gen {
     /// Compile the body of package function symbol `s` into the object. False (with `err`) when the
     /// body uses what the generator does not compile.
-    pub fn func(self: &mut Self, s: u32, local: bool) bool {
+    pub(package) fn func(self: &mut Self, s: u32, local: bool) bool {
         self.local = local;
         let p = unsafe &*self.pkg;
         let ps = p.syms[s as usize];
@@ -3454,9 +3454,9 @@ const fn lp_sext(x: u64, bits: u32) i64 {
 
 // A branch condition: the flags (`cc`), or a register compared with zero (`cbz`, `cbnz`).
 struct Test {
-    pub kind: u8, // T_CC, T_CBZ, T_CBNZ
-    pub cc: u32,
-    pub reg: u32,
+    pub(package) kind: u8, // T_CC, T_CBZ, T_CBNZ
+    pub(package) cc: u32,
+    pub(package) reg: u32,
 }
 
 extend Test as Copy {}
@@ -4503,7 +4503,7 @@ extend Gen {
     }
 
     /// Define package data symbol `s` in the object.
-    pub fn data(self: &mut Self, s: u32, local: bool) bool {
+    pub(package) fn data(self: &mut Self, s: u32, local: bool) bool {
         let p = unsafe &*self.pkg;
         let ps = p.syms[s as usize];
         let d = p.data[ps.def as usize];

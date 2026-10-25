@@ -6,14 +6,14 @@
 
 /// One built-in header: its name, the instruction sets that have it (bit 0 x86_64, bit 1 aarch64,
 /// bit 2 wasm32) and its text.
-pub struct Header {
-    pub name: str<'static>,
-    pub arch: u8,
-    pub text: str<'static>,
+pub(package) struct Header {
+    pub(package) name: str<'static>,
+    pub(package) arch: u8,
+    pub(package) text: str<'static>,
 }
 
 /// Every built-in header, in name order.
-pub const HEADERS: [Header; 37] = [
+pub(package) const HEADERS: [Header; 37] = [
     Header {
         name: "amxintrin.h",
         arch: 1,

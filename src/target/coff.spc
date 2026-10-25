@@ -26,12 +26,12 @@ const CLASS_STATIC: u32 = 3;
 
 // A section of the file: its name, flags, bytes (none for `.bss`), size and relocations.
 struct CSec {
-    pub name: String,
-    pub flags: u32,
-    pub bytes: Vector<u8>,
-    pub size: u64,
-    pub rels: Vector<u8>, // 10-byte entries
-    pub nrel: u32,
+    pub(package) name: String,
+    pub(package) flags: u32,
+    pub(package) bytes: Vector<u8>,
+    pub(package) size: u64,
+    pub(package) rels: Vector<u8>, // 10-byte entries
+    pub(package) nrel: u32,
 }
 
 // The name and flags of object section `k` of `o`.
@@ -117,7 +117,7 @@ fn put_sym(out: &mut Vector<u8>, strs: &mut Vector<u8>, name: str, value: u32, s
 }
 
 /// Write object `o` as a COFF x86-64 object into `out`.
-pub fn write(o: &ob::Obj, out: &mut Vector<u8>) {
+pub(package) fn write(o: &ob::Obj, out: &mut Vector<u8>) {
     // The file's sections: the object's non-empty ones, then `.xdata` and `.pdata` for the frames.
     let mut secs = Vector::<CSec>::new();
     let mut idx = Vector::<u32>::new(); // per object section, its file section number (1-based; 0: absent)

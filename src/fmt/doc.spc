@@ -7,12 +7,12 @@
 // rendering linear. A node is 16 bytes: static texts live in a side table the node indexes.
 
 /// Index into `DocPool.docs`; 0 is the shared Nil.
-pub type DocId = u32;
+pub(package) type DocId = u32;
 
-pub const W_INF: u32 = 0xFFFFFFFFu32; // "contains a hard break": never fits flat
+pub(package) const W_INF: u32 = 0xFFFFFFFFu32; // "contains a hard break": never fits flat
 
 /// Layout intent of one node; the trailing phrases say what `a` and `b` hold.
-pub enum DocKind {
+pub(package) enum DocKind {
     DOC_NIL,
     DOC_TEXT_SPAN, // a: start, b: end (byte slice of the source)
     DOC_TEXT_STR, // a: index of the static text (keywords, punctuation) in `strs`
@@ -27,19 +27,19 @@ pub enum DocKind {
 }
 
 /// One immutable layout node; `w` is the memoized flat width (W_INF when it can never be flat).
-pub struct DocNode {
-    pub kind: u8, // a DocKind
-    pub a: u32,
-    pub b: u32,
-    pub w: u32, // memoized flat width
+pub(package) struct DocNode {
+    pub(package) kind: u8, // a DocKind
+    pub(package) a: u32,
+    pub(package) b: u32,
+    pub(package) w: u32, // memoized flat width
 }
 
 /// Arena of layout nodes for one source; also the renderer.
-pub struct DocPool<'a> {
-    pub docs: Vector<DocNode>,
-    pub kids: Vector<DocId>,
-    pub strs: Vector<str<'a>>, // static texts of DOC_TEXT_STR and DOC_IFBREAK nodes
-    pub src: *const u8, // backing bytes for DOC_TEXT_SPAN
+pub(package) struct DocPool<'a> {
+    pub(package) docs: Vector<DocNode>,
+    pub(package) kids: Vector<DocId>,
+    pub(package) strs: Vector<str<'a>>, // static texts of DOC_TEXT_STR and DOC_IFBREAK nodes
+    pub(package) src: *const u8, // backing bytes for DOC_TEXT_SPAN
 }
 
 // The shared break nodes every pool creates after Nil (id 0).
@@ -49,7 +49,7 @@ const HARDLINE_ID: DocId = 3;
 const BLANKLINE_ID: DocId = 4;
 
 /// Columns added per DOC_INDENT level.
-pub const INDENT_WIDTH: i32 = 4;
+pub(package) const INDENT_WIDTH: i32 = 4;
 
 const fn wadd(x: u32, y: u32) u32 {
     if x == W_INF || y == W_INF {
@@ -59,9 +59,9 @@ const fn wadd(x: u32, y: u32) u32 {
 }
 
 struct Renderer {
-    pub col: i32,
-    pub width: i32,
-    pub out: *mut String,
+    pub(package) col: i32,
+    pub(package) width: i32,
+    pub(package) out: *mut String,
 }
 
 extend Renderer {
@@ -90,7 +90,7 @@ extend Renderer {
 
 extend<'a> DocPool<'a> {
     /// An empty pool over `src`, the byte buffer DOC_TEXT_SPAN nodes slice. `src` must outlive the pool.
-    pub fn new(src: *const u8) DocPool<'a> {
+    pub(package) fn new(src: *const u8) DocPool<'a> {
         let mut p = DocPool {
             docs: Vector::<DocNode>::new(),
             kids: Vector::<DocId>::new(),
@@ -113,7 +113,7 @@ extend<'a> DocPool<'a> {
     }
 
     /// The shared empty node (id 0).
-    pub const fn nil(self: &Self) DocId {
+    pub(package) const fn nil(self: &Self) DocId {
         return 0;
     }
 
@@ -124,50 +124,50 @@ extend<'a> DocPool<'a> {
     }
 
     /// Static text (keywords, punctuation). The str must outlive the pool (string literals do).
-    pub fn txt(self: &mut Self, s: str<'a>) DocId {
+    pub(package) fn txt(self: &mut Self, s: str<'a>) DocId {
         let i = self.intern(s);
         return self.push(DocNode { kind: DocKind::DOC_TEXT_STR as u8, a: i, b: 0, w: s.len() as u32 });
     }
 
     /// A byte range of the source (identifiers, literals, comments).
-    pub fn span(self: &mut Self, start: u32, end: u32) DocId {
+    pub(package) fn span(self: &mut Self, start: u32, end: u32) DocId {
         return self.push(DocNode { kind: DocKind::DOC_TEXT_SPAN as u8, a: start, b: end, w: end - start });
     }
 
     /// A space when flat, a break plus indent when the enclosing group breaks.
-    pub const fn line(self: &Self) DocId {
+    pub(package) const fn line(self: &Self) DocId {
         return LINE_ID;
     }
 
     /// Nothing when flat, a break plus indent when the enclosing group breaks.
-    pub const fn softline(self: &Self) DocId {
+    pub(package) const fn softline(self: &Self) DocId {
         return SOFTLINE_ID;
     }
 
     /// An unconditional break; forces every enclosing group to break.
-    pub const fn hardline(self: &Self) DocId {
+    pub(package) const fn hardline(self: &Self) DocId {
         return HARDLINE_ID;
     }
 
     /// An unconditional break preceded by one empty line; forces every enclosing group to break.
-    pub const fn blankline(self: &Self) DocId {
+    pub(package) const fn blankline(self: &Self) DocId {
         return BLANKLINE_ID;
     }
 
     /// `child` with every break inside it indented one more level.
-    pub fn indent(self: &mut Self, child: DocId) DocId {
+    pub(package) fn indent(self: &mut Self, child: DocId) DocId {
         let w = self.docs.at(child as usize).w;
         return self.push(DocNode { kind: DocKind::DOC_INDENT as u8, a: child, b: 0, w: w });
     }
 
     /// A layout choice point: `child` renders flat when it fits the remaining width, else broken.
-    pub fn group(self: &mut Self, child: DocId) DocId {
+    pub(package) fn group(self: &mut Self, child: DocId) DocId {
         let w = self.docs.at(child as usize).w;
         return self.push(DocNode { kind: DocKind::DOC_GROUP as u8, a: child, b: 0, w: w });
     }
 
     /// `s` when the enclosing group broke; nothing when flat (trailing comma: ifbreak(",")).
-    pub fn ifbreak(self: &mut Self, s: str<'a>) DocId {
+    pub(package) fn ifbreak(self: &mut Self, s: str<'a>) DocId {
         let i = self.intern(s);
         return self.push(DocNode { kind: DocKind::DOC_IFBREAK as u8, a: 0, b: i, w: 0 });
     }
@@ -175,7 +175,7 @@ extend<'a> DocPool<'a> {
     /// Concatenate `parts[from..]` (borrowed; ids are copied out; `from` lets a caller concatenate the tail
     /// of a scratch stack). Children land contiguously in kids. No part is Nil and one part is that part
     /// itself: neither needs a node.
-    pub fn concat(self: &mut Self, parts: &Vector<DocId>, from: usize) DocId {
+    pub(package) fn concat(self: &mut Self, parts: &Vector<DocId>, from: usize) DocId {
         let n = parts.len() - from;
         if n == 0 {
             return self.nil();
@@ -257,7 +257,7 @@ extend<'a> DocPool<'a> {
     }
 
     /// Render `root` into `out` at the given width. The result always ends with exactly one newline.
-    pub fn render(self: &Self, root: DocId, width: i32, out: &mut String) {
+    pub(package) fn render(self: &Self, root: DocId, width: i32, out: &mut String) {
         let mut r = Renderer { col: 0, width: width, out: out };
         self.render_doc(&mut r, root, 0, false);
         // Normalize the tail: strip trailing blank lines/spaces, end with one '\n'.

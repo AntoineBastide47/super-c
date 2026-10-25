@@ -18,61 +18,61 @@ import borrowck::loan_set as ls;
 import utils::bits as bits;
 
 /// Borrow error kinds.
-pub const BE_CONFLICT: u8 = 0; // access invalidates a loan that is still required
-pub const BE_ESCAPE: u8 = 1; // borrow of body-local storage escapes through a placeholder
+pub(package) const BE_CONFLICT: u8 = 0; // access invalidates a loan that is still required
+pub(package) const BE_ESCAPE: u8 = 1; // borrow of body-local storage escapes through a placeholder
 
 /// BorrowErr.acc for a conflict caused by storage death (the borrowed local leaves scope).
-pub const ACC_DEAD: u8 = 5;
+pub(package) const ACC_DEAD: u8 = 5;
 
 /// One borrow error the solver found: its kind, the offending loan, and the point and span of the
 /// invalidating access.
-pub struct BorrowErr {
-    pub kind: u8,
-    pub acc: u8, // BE_CONFLICT: the invalidating access kind (bf::ACC_* or ACC_DEAD)
-    pub loan: u32,
-    pub point: u32,
-    pub span: tok::Span, // the invalidating access (or escape site)
+pub(package) struct BorrowErr {
+    pub(package) kind: u8,
+    pub(package) acc: u8, // BE_CONFLICT: the invalidating access kind (bf::ACC_* or ACC_DEAD)
+    pub(package) loan: u32,
+    pub(package) point: u32,
+    pub(package) span: tok::Span, // the invalidating access (or escape site)
 }
 
 /// The loan solver's state for one body: the in-scope loan matrix, per-point liveness, and the
 /// errors found. Pointers borrow the caller's facts for the solve's duration.
-pub struct Solver {
-    pub b: *const ir::CoreBody,
-    pub f: *const bf::BodyFacts,
-    pub c: *const df::Cfg,
-    pub lv: *const df::Liveness,
-    pub errs: Vector<BorrowErr>,
-    pub flow_pushes: u32, // scope_flow queue pushes, seeds included (asserted within the monotone bound)
-    pub point_block: Vector<u32>, // per point: its block
-    pub sub_by_point: Vector<u32>, // subset indexes sorted by point
-    pub sub_pt_start: Vector<u32>, // per point (+1): range into sub_by_point (entry seeds at 0)
-    pub live_pts: Vector<u64>, // per inference origin: point bitset (word-major, pwords per origin)
-    pub pwords: u32,
-    pub oreach: Vector<u64>, // prepass: per origin, origins reachable over point-stripped subsets
-    pub owords: u32,
-    pub cuts: Vector<u64>, // the facts' rebind cuts (origin << 32 | point), sorted for cut_at
-    pub req_cache: Vector<u64>, // per queried loan: required-point bitset (pwords), or empty
-    pub req_have: Vector<bool>,
-    pub scope: ls::LoanMat, // block-entry loans-in-scope
-    pub kill_keys: Vector<u64>, // sparse: every kill as loan << 32 | point, sorted
-    pub ret_pts: Vector<u32>, // return terminators' entry points, ascending block order
-    pub sparse: bool, // interval and point-list rows instead of dense point bitsets
-    pub lv_start: Vector<u32>, // sparse: per local (+1), CSR into lv_iv
-    pub lv_iv: Vector<u64>, // sparse: live intervals start << 32 | end (inclusive), ascending per local
-    pub rq_range: Vector<u64>, // sparse: per queried loan, range start << 32 | end into rq_pts
-    pub rq_pts: Vector<u32>, // sparse: required points, ascending per loan
-    pub tgt_col: Vector<u32>, // sparse prepass: per origin, its oreach column or BF_NONE
+pub(package) struct Solver {
+    pub(package) b: *const ir::CoreBody,
+    pub(package) f: *const bf::BodyFacts,
+    pub(package) c: *const df::Cfg,
+    pub(package) lv: *const df::Liveness,
+    pub(package) errs: Vector<BorrowErr>,
+    pub(package) flow_pushes: u32, // scope_flow queue pushes, seeds included (asserted within the monotone bound)
+    pub(package) point_block: Vector<u32>, // per point: its block
+    pub(package) sub_by_point: Vector<u32>, // subset indexes sorted by point
+    pub(package) sub_pt_start: Vector<u32>, // per point (+1): range into sub_by_point (entry seeds at 0)
+    pub(package) live_pts: Vector<u64>, // per inference origin: point bitset (word-major, pwords per origin)
+    pub(package) pwords: u32,
+    pub(package) oreach: Vector<u64>, // prepass: per origin, origins reachable over point-stripped subsets
+    pub(package) owords: u32,
+    pub(package) cuts: Vector<u64>, // the facts' rebind cuts (origin << 32 | point), sorted for cut_at
+    pub(package) req_cache: Vector<u64>, // per queried loan: required-point bitset (pwords), or empty
+    pub(package) req_have: Vector<bool>,
+    pub(package) scope: ls::LoanMat, // block-entry loans-in-scope
+    pub(package) kill_keys: Vector<u64>, // sparse: every kill as loan << 32 | point, sorted
+    pub(package) ret_pts: Vector<u32>, // return terminators' entry points, ascending block order
+    pub(package) sparse: bool, // interval and point-list rows instead of dense point bitsets
+    pub(package) lv_start: Vector<u32>, // sparse: per local (+1), CSR into lv_iv
+    pub(package) lv_iv: Vector<u64>, // sparse: live intervals start << 32 | end (inclusive), ascending per local
+    pub(package) rq_range: Vector<u64>, // sparse: per queried loan, range start << 32 | end into rq_pts
+    pub(package) rq_pts: Vector<u32>, // sparse: required points, ascending per loan
+    pub(package) tgt_col: Vector<u32>, // sparse prepass: per origin, its oreach column or BF_NONE
     vt: Vector<u64>, // sparse flood visited set: open addressing, (origin << 32 | point) << 2 | levels
     vt_used: Vector<u32>, // slots set this query, so clearing is O(touched)
     vt_shift: u32, // 64 - log2(vt.len())
-    pub issues_blk: Vector<u32>, // per block: loan issues, generation (= point) order
-    pub issue_start: Vector<u32>,
-    pub kills_blk: Vector<u64>, // per block: kill records (point << 32 | loan), sorted
-    pub kill_start: Vector<u32>,
-    pub visit: Vector<u64>, // flood scratch: (origin, point) visited bits
-    pub visit_dirty: Vector<u32>, // words set in `visit` this query, so clearing is O(touched) not O(vwords)
-    pub work: Vector<u64>, // flood worklist: origin << 32 | point
-    pub succs: Vector<u32>, // reused point-successor scratch for the flood
+    pub(package) issues_blk: Vector<u32>, // per block: loan issues, generation (= point) order
+    pub(package) issue_start: Vector<u32>,
+    pub(package) kills_blk: Vector<u64>, // per block: kill records (point << 32 | loan), sorted
+    pub(package) kill_start: Vector<u32>,
+    pub(package) visit: Vector<u64>, // flood scratch: (origin, point) visited bits
+    pub(package) visit_dirty: Vector<u32>, // words set in `visit` this query, so clearing is O(touched) not O(vwords)
+    pub(package) work: Vector<u64>, // flood worklist: origin << 32 | point
+    pub(package) succs: Vector<u32>, // reused point-successor scratch for the flood
     // Reused per-stage scratch (truncated at each use), so a body allocates none of it after warmup.
     s_cur32: Vector<u32>, // index_points: counting-sort cursors
     s_ic: Vector<u32>, // index_points: per-block issue counts; prepass and conflicts: CSR cursors
@@ -101,7 +101,7 @@ pub struct Solver {
 }
 
 /// Origin x point cells above which a body takes the sparse rows.
-pub const SPARSE_MIN_CELLS: u64 = 1u64 << 20;
+pub(package) const SPARSE_MIN_CELLS: u64 = 1u64 << 20;
 
 // The reference level (0, 1 or 2) a loan at level `d` reaches over a subset edge of kind `delta`,
 // or bf::SD_DROP when the edge drops it (see bf::SD_KEEP).
@@ -115,7 +115,7 @@ const fn flood_node(o: u32, p: u32, d: u32) u64 {
 }
 
 /// Solve body `b` from scratch: the returned solver's `errs` holds every borrow error.
-pub fn solve(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df::Liveness) Solver {
+pub(package) fn solve(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df::Liveness) Solver {
     let mut s = Solver::empty();
     s.build_into(b, f, c, lv);
     return s;
@@ -123,7 +123,7 @@ pub fn solve(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df::Liveness
 
 extend Solver {
     /// A solver with no body attached and no heap storage; `build_into` fills it.
-    pub fn empty() Solver {
+    pub(package) fn empty() Solver {
         return Solver {
             b: null,
             f: null,
@@ -188,12 +188,12 @@ extend Solver {
     }
 
     /// Heap bytes kept across bodies (capacity, not length).
-    pub const fn scratch_bytes(self: &Self) u64 {
+    pub(package) const fn scratch_bytes(self: &Self) u64 {
         return (self.errs.capacity() * sizeof(BorrowErr) + self.point_block.capacity() * sizeof(u32) + self.sub_by_point.capacity() * sizeof(u32) + self.sub_pt_start.capacity() * sizeof(u32) + self.live_pts.capacity() * sizeof(u64) + self.oreach.capacity() * sizeof(u64) + self.cuts.capacity() * sizeof(u64) + self.req_cache.capacity() * sizeof(u64) + self.req_have.capacity() * sizeof(bool) + self.issues_blk.capacity() * sizeof(u32) + self.issue_start.capacity() * sizeof(u32) + self.kills_blk.capacity() * sizeof(u64) + self.kill_start.capacity() * sizeof(u32) + self.visit.capacity() * sizeof(u64) + self.visit_dirty.capacity() * sizeof(u32) + self.work.capacity() * sizeof(u64) + self.succs.capacity() * sizeof(u32) + self.s_cur32.capacity() * sizeof(u32) + self.s_ic.capacity() * sizeof(u32) + self.s_kc.capacity() * sizeof(u32) + self.s_uses.capacity() * sizeof(u64) + self.s_cur64.capacity() * sizeof(u64) + self.s_dset.capacity() * sizeof(u64) + self.s_uset.capacity() * sizeof(u64) + self.s_flow.capacity() * sizeof(u64) + self.s_flow_queued.capacity() * sizeof(bool) + self.s_flow_queue.capacity() * sizeof(u32) + self.s_lo_start.capacity() * sizeof(u32) + self.s_lo_flat.capacity() * sizeof(u32) + self.s_lb_start.capacity() * sizeof(u32) + self.s_lb_flat.capacity() * sizeof(u32) + self.s_omask.capacity() * sizeof(u64) + self.scope.pool.capacity() * 8 + self.kill_keys.capacity() * sizeof(u64) + self.ret_pts.capacity() * sizeof(u32) + self.lv_start.capacity() * sizeof(u32) + self.lv_iv.capacity() * sizeof(u64) + self.rq_range.capacity() * sizeof(u64) + self.rq_pts.capacity() * sizeof(u32) + self.tgt_col.capacity() * sizeof(u32) + self.vt.capacity() * sizeof(u64) + self.vt_used.capacity() * sizeof(u32) + self.s_open.capacity() * sizeof(u32) + self.s_opos.capacity() * sizeof(u32) + self.s_members.capacity() * sizeof(u32) + self.s_flags.capacity() * sizeof(u8) + self.s_touched.capacity() * sizeof(u32) + self.s_ivloc.capacity() * sizeof(u32) + self.s_ivrec.capacity() * sizeof(u64) + self.s_rq.capacity() * sizeof(u32)) as u64;
     }
 
     /// Truncate every vector (keeping heap capacity) and clear scalars and scope, for reuse.
-    pub fn reset(self: &mut Self) {
+    pub(package) fn reset(self: &mut Self) {
         self.pwords = 0;
         self.owords = 0;
         self.errs.truncate(0);
@@ -224,12 +224,12 @@ extend Solver {
 
     /// Solve body `b` in place, keeping this solver's heap capacity from earlier bodies. Bodies above
     /// SPARSE_MIN_CELLS origin-point cells take the sparse rows.
-    pub fn build_into(self: &mut Self, b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df::Liveness) {
+    pub(package) fn build_into(self: &mut Self, b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df::Liveness) {
         self.build_rows(b, f, c, lv, f.norigins as u64 * f.npoints as u64 > SPARSE_MIN_CELLS);
     }
 
     /// Solve body `b` in place with sparse (`sparse`) or dense rows.
-    pub fn build_rows(
+    pub(package) fn build_rows(
         self: &mut Self,
         b: &ir::CoreBody,
         f: &bf::BodyFacts,
@@ -991,13 +991,13 @@ extend Solver {
 
     /// Conservative origin reachability over subsets (the prepass relation).
     /// Production wording uses it to tell a returned borrow from a store-through-out-param escape.
-    pub const fn origin_reaches(self: &Self, from: u32, to: u32) bool {
+    pub(package) const fn origin_reaches(self: &Self, from: u32, to: u32) bool {
         return from == to || self.prereach(from, to);
     }
 
     /// A whole-local rebind at (origin `o`, stmt entry `p`): flows already in `o` end before the
     /// write; a subset ENTERING `o` at `p` lands past it (the incoming value survives its own store).
-    pub const fn cut_at(self: &Self, o: u32, p: u32) bool {
+    pub(package) const fn cut_at(self: &Self, o: u32, p: u32) bool {
         return switch self.cuts.binary_search(&(o as u64 << 32 | p as u64)) {
             Ok(_) => true,
             Err(_) => false,
@@ -1178,7 +1178,7 @@ extend Solver {
 
     /// The row where loan `li` is required: some origin that can hold it is live there. Dense rows
     /// are point bitsets (`req_word`), sparse rows sorted point lists; `req_at` reads either.
-    pub fn required(self: &mut Self, li: u32) usize {
+    pub(package) fn required(self: &mut Self, li: u32) usize {
         let f = unsafe &*self.f;
         if self.req_have.len() == 0 {
             self.req_have.resize_default(f.loans.len());
@@ -1306,7 +1306,7 @@ extend Solver {
     }
 
     /// Is point `p` in the required row `row` (`required`) of either representation?
-    pub const fn req_at(self: &Self, row: usize, p: u32) bool {
+    pub(package) const fn req_at(self: &Self, row: usize, p: u32) bool {
         if self.sparse {
             let r = self.rq_range[row];
             let mut lo = (r >> 32) as usize;
@@ -1325,7 +1325,7 @@ extend Solver {
     }
 
     /// Word `w` of the cached dense required-loan row starting at `row`.
-    pub const fn req_word(self: &Self, row: usize, w: u32) u64 {
+    pub(package) const fn req_word(self: &Self, row: usize, w: u32) u64 {
         return *self.req_cache.at(row + w as usize);
     }
 
@@ -1368,7 +1368,7 @@ extend Solver {
     /// (transfer_block before p) for one loan: its single issue and its kills in the block before
     /// `p` decide, a kill at the issue's own point applying first. At a block's first point the
     /// entry row alone decides.
-    pub const fn in_scope(self: &Self, li: u32, p: u32) bool {
+    pub(package) const fn in_scope(self: &Self, li: u32, p: u32) bool {
         let f = self.fx();
         let bi = self.point_block[p as usize];
         let base = f.block_base[bi as usize];
@@ -1566,7 +1566,7 @@ extend Solver {
     /// the errors in order, every loan's required points, every inference origin's live points, the
     /// prepass columns the sparse rows keep, and the in-scope bit against the block replay at every
     /// access for every loan on its base (the conflicts' candidates).
-    pub fn assert_agrees(self: &mut Self, d: &mut Solver) {
+    pub(package) fn assert_agrees(self: &mut Self, d: &mut Solver) {
         assert(self.sparse && !d.sparse, "one sparse and one dense solve");
         assert(self.errs.len() == d.errs.len(), "sparse and dense rows find as many borrow errors");
         for i in 0..self.errs.len() {
@@ -1655,12 +1655,12 @@ extend Solver {
 
 /// Small, slow, and independent: materializes every (origin, point) node and edge, then answers each
 /// loan query by direct search. Development comparisons only: never part of compilation.
-pub struct RefResult {
-    pub required: Vector<u64>, // per loan: point bitset rows (pwords each)
-    pub pwords: u32,
+pub(package) struct RefResult {
+    pub(package) required: Vector<u64>, // per loan: point bitset rows (pwords each)
+    pub(package) pwords: u32,
 }
 
-pub fn solve_reference(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df::Liveness) RefResult {
+pub(package) fn solve_reference(b: &ir::CoreBody, f: &bf::BodyFacts, c: &df::Cfg, lv: &df::Liveness) RefResult {
     // Rebuild statement-exact origin liveness with the optimized path's own helper, then do the
     // dumbest possible thing: per loan, breadth-first over an explicit edge list.
     let sv = solve(b, f, c, lv);
