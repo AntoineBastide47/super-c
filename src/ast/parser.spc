@@ -11,6 +11,7 @@ import string as cstring;
 import lexer::token as *;
 import lexer::token_type as *;
 import ast::ast as *;
+import target::table as tgt;
 import utils::errors as diag;
 import ir::cpu_features as cf;
 
@@ -2176,11 +2177,13 @@ extend Parser {
         return true;
     }
 
-    // Record an error when identifier `name` is no variant of the enum build constant `k` holds.
+    // Record an error when identifier `name` is no variant of the enum build constant `k` holds. An
+    // unknown platform or instruction set is no error: it names no target of this compiler, so it equals
+    // no setting, and a new target's name needs no release first.
     fn bc_check_variant(self: &mut Self, k: i32, name: NodeId) {
         let sp = self.ast.at_const(name).as_data.name.text;
         let text = self.source.slice(sp.start as usize, sp.end as usize);
-        if bc_variant(k, text) >= 0 {
+        if bc_variant(k, text) >= 0 || k == BC_PLATFORM || k == BC_ARCH {
             return;
         }
         let vs = bc_variants(k);
@@ -3924,7 +3927,7 @@ extend Parser {
             self.errors.emit_span(syntax.namespace.span(), msg);
             return;
         }
-        let names = axis_names(is_arch);
+        let names = tgt::axis_names(is_arch);
         let count = Parser::attr_arg_count(syntax);
         let mut i: usize = 0;
         let mut mask: u32 = 0;
@@ -3938,32 +3941,14 @@ extend Parser {
                 valid = false;
                 break;
             }
+            // An unknown name is no target of this compiler: it adds no bit, so an item it alone admits is
+            // never compiled, and a new target's name needs no release first.
             let p = self.attr_arg(syntax, i);
             let mut bit: u32 = 0;
             for k in 0..names.len() {
                 if self.text_is(p, names[k]) {
                     bit = 1u32 << k as u32;
                 }
-            }
-            if bit == 0 {
-                if is_arch {
-                    self.errors.emit_span(
-                        p.span(),
-                        format(
-                            "unknown architecture '{}'; expected x86_64, aarch64, or wasm32",
-                            diag::span_str(self.source, p.start(), p.end()),
-                        ),
-                    );
-                } else {
-                    self.errors.emit_span(
-                        p.span(),
-                        format(
-                            "unknown platform '{}'; expected windows, macos, linux, wasm, ios, or android",
-                            diag::span_str(self.source, p.start(), p.end()),
-                        ),
-                    );
-                }
-                return;
             }
             // `!x` is every OTHER platform: the complement over the whole set, which grows with it.
             let all = (1u32 << names.len() as u32) - 1;
@@ -3988,12 +3973,9 @@ extend Parser {
                 syntax.name;
             };
             if is_arch {
-                self.errors.emit_span(t.span(), format("expected an architecture name: x86_64, aarch64, or wasm32"));
+                self.errors.emit_span(t.span(), format("expected an architecture name: {}", tgt::axis_list(true)));
             } else {
-                self.errors.emit_span(
-                    t.span(),
-                    format("expected a platform name: windows, macos, linux, wasm, ios, or android"),
-                );
+                self.errors.emit_span(t.span(), format("expected a platform name: {}", tgt::axis_list(false)));
             }
             return;
         }
@@ -4844,7 +4826,7 @@ extend Parser {
                 let nsp = self.ast.at_const(e.as_data.member.member).span;
                 let r = cf::find_variant(diag::span_str(self.source, nsp.start, nsp.end));
                 if r >= 0 && (mask >> cf::row(r as usize).arch as u32 & 1) == 0 {
-                    let an = axis_names(true)[cf::row(r as usize).arch as usize];
+                    let an = tgt::axis_names(true)[cf::row(r as usize).arch as usize];
                     self.errors.emit_span(
                         e.span,
                         format(
@@ -5145,19 +5127,3 @@ const C_ATTR_KINDS: [AttrKind; 16] = [
     AttrKind::ATTR_C_WRITES,
     AttrKind::ATTR_C_LANE_ACCESS,
 ];
-
-/// The identifiers accepted inside `@platform(...)` (negatable with '!'). The index of a name is
-/// its bit in the platform mask.
-const PLATFORM_NAMES: [str<'static>; 6] = ["windows", "macos", "linux", "wasm", "ios", "android"];
-
-/// The identifiers accepted inside `@arch(...)`. The index of a name is its bit in the arch mask.
-const ARCH_NAMES: [str<'static>; 3] = ["x86_64", "aarch64", "wasm32"];
-
-/// The identifiers accepted inside `@arch(...)` (`is_arch`) or `@platform(...)`.
-pub const fn axis_names(is_arch: bool) Slice<'static, str<'static>> {
-    return if is_arch {
-        ARCH_NAMES;
-    } else {
-        PLATFORM_NAMES;
-    };
-}

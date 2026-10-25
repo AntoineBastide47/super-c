@@ -5,6 +5,7 @@
 import lexer::token as tok;
 import ast::ast as *;
 import module::loader as loader;
+import target::table as tgt;
 import typechecker::render as rnd;
 import ast::parser as par;
 import lsp::text as ltext;
@@ -1561,7 +1562,7 @@ pub fn complete_attributes() Vector<CompItem> {
 /// Identifiers valid inside `@platform(...)`.
 pub fn complete_platform_args() Vector<CompItem> {
     let mut out = Vector::<CompItem>::new();
-    let names = par::axis_names(false);
+    let names = tgt::axis_names(false);
     for i in 0..names.len() {
         comp_push(&mut out, names[i], 14, String::from_str("platform"));
     }
@@ -1571,7 +1572,7 @@ pub fn complete_platform_args() Vector<CompItem> {
 /// Identifiers valid inside `@arch(...)`.
 pub fn complete_arch_args() Vector<CompItem> {
     let mut out = Vector::<CompItem>::new();
-    let names = par::axis_names(true);
+    let names = tgt::axis_names(true);
     for i in 0..names.len() {
         comp_push(&mut out, names[i], 14, String::from_str("architecture"));
     }

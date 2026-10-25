@@ -320,7 +320,8 @@ pub fn tuc_setup(p: &loader::Package, live: *const bool, salt: &Vector<u64>, tar
     t.hit.resize_default(n);
     t.soff.resize_default(n);
     t.slen.resize_default(n);
-    if gen_root.len() == 0 || n == 0 {
+    // The LIR check lowers every body as the emitter renders it: a replayed body is not rendered.
+    if gen_root.len() == 0 || n == 0 || stdlib::getenv("SC_LIR") != null {
         return t;
     }
     if stdlib::getenv("SC_NO_TU_CACHE") != null {

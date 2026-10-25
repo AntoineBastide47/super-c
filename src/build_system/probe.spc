@@ -11,6 +11,7 @@ import module::loader as loader;
 import driver::util as *;
 import build_system::objcache as *;
 import ast::parser as par;
+import target::table as tgt;
 
 /// The result of a probe that does not apply to the target or the instruction set.
 pub const NOT_APPLICABLE: str<'static> = "not applicable";
@@ -35,8 +36,8 @@ pub struct Probe {
     pub flags: str<'static>, // extra compiler flags, whitespace-split
     pub forms: str<'static>, // the spellings in preference order, '|'-separated, each in place of `@` in `src`
     pub src: str<'static>,
-    pub archs: str<'static>, // the instruction sets it applies to (`ARCH_NAMES`), space-separated; empty: all
-    pub targets: str<'static>, // the platforms it applies to (`PLATFORM_NAMES`); empty: all
+    /// It applies only where the target table names it (`target::table::probe_applies`); else everywhere.
+    pub scoped: bool,
 }
 
 // The probe table. A probe's index is its bit in a `need` mask.
@@ -48,8 +49,7 @@ const PROBES: [Probe; 23] = [
         flags: "",
         forms: "",
         src: "int f(int a, int b, long long *m) {\n    int s;\n    unsigned u;\n    return __builtin_add_overflow(a, b, &s) | __builtin_sub_overflow(a, b, &u) | __builtin_mul_overflow(a, b, m);\n}\n",
-        archs: "",
-        targets: "",
+        scoped: false,
     },
     Probe {
         id: "fp-contract-off",
@@ -58,8 +58,7 @@ const PROBES: [Probe; 23] = [
         flags: "-ffp-contract=off",
         forms: "",
         src: "double f(double a, double b, double c) {\n    return a * b + c;\n}\n",
-        archs: "",
-        targets: "",
+        scoped: false,
     },
     // Clang ignores an unknown `target` feature, so the function calls an intrinsic that fails to inline
     // unless the spelling really enables the feature.
@@ -70,8 +69,7 @@ const PROBES: [Probe; 23] = [
         flags: "",
         forms: "avx2|arch=haswell",
         src: "#include <immintrin.h>\n__attribute__((target(\"@\"))) __m256i f(__m256i a, __m256i b) {\n    return _mm256_add_epi32(a, b);\n}\n",
-        archs: "x86_64",
-        targets: "",
+        scoped: true,
     },
     Probe {
         id: "target-attr-aarch64",
@@ -80,8 +78,7 @@ const PROBES: [Probe; 23] = [
         flags: "",
         forms: "+i8mm|arch=armv8.6-a|i8mm",
         src: "#include <arm_neon.h>\n__attribute__((target(\"@\"))) int32x4_t f(int32x4_t a, int8x16_t b, int8x16_t c) {\n    return vmmlaq_s32(a, b, c);\n}\n",
-        archs: "aarch64",
-        targets: "",
+        scoped: true,
     },
     Probe {
         id: "march-x86-64-v2",
@@ -90,8 +87,7 @@ const PROBES: [Probe; 23] = [
         flags: "-march=x86-64-v2",
         forms: "",
         src: "int f(int x) {\n    return x + 1;\n}\n",
-        archs: "x86_64",
-        targets: "",
+        scoped: true,
     },
     Probe {
         id: "march-x86-64-v3",
@@ -100,8 +96,7 @@ const PROBES: [Probe; 23] = [
         flags: "-march=x86-64-v3",
         forms: "",
         src: "int f(int x) {\n    return x + 1;\n}\n",
-        archs: "x86_64",
-        targets: "",
+        scoped: true,
     },
     Probe {
         id: "march-x86-64-v4",
@@ -110,8 +105,7 @@ const PROBES: [Probe; 23] = [
         flags: "-march=x86-64-v4",
         forms: "",
         src: "int f(int x) {\n    return x + 1;\n}\n",
-        archs: "x86_64",
-        targets: "",
+        scoped: true,
     },
     Probe {
         id: "wasm-simd128",
@@ -120,8 +114,7 @@ const PROBES: [Probe; 23] = [
         flags: "-msimd128",
         forms: "",
         src: "#include <wasm_simd128.h>\nv128_t f(v128_t a, v128_t b) {\n    return wasm_i32x4_add(a, b);\n}\n",
-        archs: "wasm32",
-        targets: "",
+        scoped: true,
     },
     Probe {
         id: "wasm-relaxed-simd",
@@ -130,8 +123,7 @@ const PROBES: [Probe; 23] = [
         flags: "-msimd128 -mrelaxed-simd",
         forms: "",
         src: "#include <wasm_simd128.h>\nv128_t f(v128_t a, v128_t b, v128_t m) {\n    return wasm_i32x4_relaxed_laneselect(a, b, m);\n}\n",
-        archs: "wasm32",
-        targets: "",
+        scoped: true,
     },
     // GCC sends this to libatomic even with `-mcx16`, and libatomic can fall back to a lock.
     Probe {
@@ -141,8 +133,7 @@ const PROBES: [Probe; 23] = [
         flags: "",
         forms: "",
         src: "unsigned __int128 probe_cas(unsigned __int128 *p, unsigned __int128 e, unsigned __int128 d) {\n    __atomic_compare_exchange_n(p, &e, d, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);\n    return e;\n}\n",
-        archs: "",
-        targets: "",
+        scoped: false,
     },
     Probe {
         id: "thread-local",
@@ -151,8 +142,7 @@ const PROBES: [Probe; 23] = [
         flags: "",
         forms: "",
         src: "_Thread_local int t;\nint f(void) {\n    return t;\n}\n",
-        archs: "",
-        targets: "",
+        scoped: false,
     },
     Probe {
         id: "cpuid-count",
@@ -161,8 +151,7 @@ const PROBES: [Probe; 23] = [
         flags: "",
         forms: "",
         src: "#include <cpuid.h>\nint f(unsigned *r) {\n    return __get_cpuid_count(7, 0, &r[0], &r[1], &r[2], &r[3]);\n}\n",
-        archs: "x86_64",
-        targets: "",
+        scoped: true,
     },
     Probe {
         id: "getauxval",
@@ -171,8 +160,7 @@ const PROBES: [Probe; 23] = [
         flags: "",
         forms: "",
         src: "#include <sys/auxv.h>\nint main(void) {\n    return getauxval(AT_HWCAP) == 0;\n}\n",
-        archs: "aarch64",
-        targets: "linux android",
+        scoped: true,
     },
     Probe {
         id: "at-hwcap2",
@@ -181,8 +169,7 @@ const PROBES: [Probe; 23] = [
         flags: "",
         forms: "AT_HWCAP2",
         src: "#include <sys/auxv.h>\nunsigned long f(void) {\n    return getauxval(@);\n}\n",
-        archs: "aarch64",
-        targets: "linux android",
+        scoped: true,
     },
     Probe {
         id: "at-hwcap3",
@@ -191,8 +178,7 @@ const PROBES: [Probe; 23] = [
         flags: "",
         forms: "AT_HWCAP3",
         src: "#include <sys/auxv.h>\nunsigned long f(void) {\n    return getauxval(@);\n}\n",
-        archs: "aarch64",
-        targets: "linux android",
+        scoped: true,
     },
     // The build's flags carry the aarch64 features' one `-march`/`-mcpu` flag.
     Probe {
@@ -202,10 +188,9 @@ const PROBES: [Probe; 23] = [
         flags: "",
         forms: "",
         src: "#include <arm_neon.h>\nint32x4_t f(int32x4_t a) {\n    return vaddq_s32(a, a);\n}\n",
-        archs: "aarch64",
-        targets: "",
+        scoped: true,
     },
-    Probe { id: "thin-lto", step: "lto", kind: "lto", flags: "", forms: "", src: "", archs: "", targets: "" },
+    Probe { id: "thin-lto", step: "lto", kind: "lto", flags: "", forms: "", src: "", scoped: false },
     // The build's flags carry the x86_64 features' `-march=x86-64-vN` and `-m<feature>` flags.
     Probe {
         id: "x86-features",
@@ -214,8 +199,7 @@ const PROBES: [Probe; 23] = [
         flags: "",
         forms: "",
         src: "#include <immintrin.h>\nint f(int a) {\n    return a + 1;\n}\n",
-        archs: "x86_64",
-        targets: "",
+        scoped: true,
     },
     // Mingw-w64 GCC keeps 32- and 64-byte vectors in a stack it aligns to 16 bytes only and moves them
     // with aligned instructions (GCC PR54412): an AVX function faults. GNU as 2.38+ encodes every aligned
@@ -227,8 +211,7 @@ const PROBES: [Probe; 23] = [
         flags: "-Wa,-muse-unaligned-vector-move",
         forms: "",
         src: "int f(int x) {\n    return x + 1;\n}\n",
-        archs: "x86_64",
-        targets: "windows",
+        scoped: true,
     },
     // Clang's full-LTO compile runs the vectorizers on each unit before the link inlines across units:
     // a function vectorized alone no longer vectorizes in the loop it is inlined into. Under full LTO
@@ -241,8 +224,7 @@ const PROBES: [Probe; 23] = [
         flags: "-fno-vectorize -fno-slp-vectorize",
         forms: "",
         src: "int f(int x) {\n    return x + 1;\n}\n",
-        archs: "",
-        targets: "",
+        scoped: false,
     },
     // Apple's clang driver starts the compiler proper as a second process; this runs it in the driver's.
     // GCC rejects the flag.
@@ -253,8 +235,7 @@ const PROBES: [Probe; 23] = [
         flags: "-fintegrated-cc1",
         forms: "",
         src: "int f(int x) {\n    return x + 1;\n}\n",
-        archs: "",
-        targets: "",
+        scoped: false,
     },
     // A precompiled header without input file times: clang then checks only the sizes of its inputs, and
     // a touched input with unchanged content does not fail the compile. GCC rejects the flag (it checks
@@ -266,8 +247,7 @@ const PROBES: [Probe; 23] = [
         flags: "-Xclang -fno-pch-timestamp",
         forms: "",
         src: "int f(int x) {\n    return x + 1;\n}\n",
-        archs: "",
-        targets: "",
+        scoped: false,
     },
     // The compiler's own support library (128-bit integer division, `long double` arithmetic): a wasm
     // link takes no C library (`std::rt::libc` is one), so it names this archive itself.
@@ -278,8 +258,7 @@ const PROBES: [Probe; 23] = [
         flags: "-print-libgcc-file-name",
         forms: "",
         src: "",
-        archs: "",
-        targets: "wasm",
+        scoped: true,
     },
 ];
 
@@ -331,23 +310,6 @@ const fn nth(s: str, sep: u8, idx: usize) str {
         }
     }
     return s.slice(0, 0);
-}
-
-// Name list `names` (space-separated) is empty or holds `name`.
-const fn names_hold(names: str, name: str) bool {
-    if names.len() == 0 {
-        return true;
-    }
-    for k in 0..names.len() {
-        let w = nth(names, b' ', k);
-        if w.len() == 0 {
-            return false;
-        }
-        if w == name {
-            return true;
-        }
-    }
-    return false;
 }
 
 // The spellings probe `pr` tries: one for a probe without forms.
@@ -428,10 +390,7 @@ extend Probes {
         hex64(fnv_cont(FNV_BASIS, key), &mut p.key);
         for i in 0..table().len() {
             let pr = &table()[i];
-            let applies = names_hold(pr.archs, par::axis_names(true)[arch as usize]) && names_hold(
-                pr.targets,
-                par::axis_names(false)[target as usize],
-            );
+            let applies = !pr.scoped || tgt::probe_applies(pr.id, target, arch);
             p.res.push(
                 if applies {
                     String::new();

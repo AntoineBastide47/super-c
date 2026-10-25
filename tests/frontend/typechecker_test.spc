@@ -5972,12 +5972,14 @@ fn arch_gate(b: &mut h::ExitBatch) {
     b.add("a list gates on any of its architectures", src.as_str(), 0);
 }
 
+// An unknown architecture names no target of the compiler: its item is never compiled, so a new target's
+// name needs no release first.
 @test
 fn arch_gate_rejects() {
-    h::expect_err_msg(
-        "an unknown architecture is rejected",
-        "@arch(sparc)\nfn f() i32 { return 0; }\nfn main() i32 { return 0; }\n",
-        "unknown architecture 'sparc'",
+    h::expect_exit(
+        "an unknown architecture gates its item away",
+        "@arch(sparc)\nfn f() i32 { return no_such_name; }\nfn main() i32 { return 0; }\n",
+        0,
     );
     h::expect_err_msg(
         "the list is required",
@@ -6006,12 +6008,19 @@ fn platform_gate_values(b: &mut h::ExitBatch) {
     );
 }
 
+// An unknown platform names no target of the compiler: its item is never compiled, and its negation
+// admits every platform.
 @test
 fn platform_gate_rejects() {
+    h::expect_exit(
+        "an unknown platform gates its item away",
+        "@platform(solaris)\nfn f() i32 { return no_such_name; }\n@platform(!solaris)\nfn g() i32 { return 0; }\nfn main() i32 { return g(); }\n",
+        0,
+    );
     h::expect_err_msg(
-        "an unknown platform names the whole set",
-        "@platform(solaris)\nfn f() i32 { return 0; }\nfn main() i32 { return 0; }\n",
-        "unknown platform 'solaris'; expected windows, macos, linux, wasm, ios, or android",
+        "a malformed list names the whole set",
+        "@platform(5)\nfn f() i32 { return 0; }\nfn main() i32 { return 0; }\n",
+        "expected a platform name: windows, macos, linux, wasm, ios, or android",
     );
 }
 

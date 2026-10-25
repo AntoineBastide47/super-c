@@ -4,6 +4,7 @@
 // with $CC. test_build_and_run doubles as the `build`
 // subcommand's link step when `out_bin` is set.
 import stdio;
+import target::table as tgt;
 import time;
 import string as cstring;
 import lexer::token as tok;
@@ -13,6 +14,7 @@ import ast::parser as par;
 import fmt::builder as fbld;
 import driver_shim as shim;
 import std::platform::fs;
+import std::platform::env;
 import module::loader as loader;
 import resolver::resolver as resolver;
 import typechecker::typechecker as tc;
@@ -636,17 +638,12 @@ pub fn test_build_and_run(
 ) i32 {
     // A cross target brings its own compiler: $CC on the host would build a host binary while the front end
     // gated items on `--target=`, with no diagnostic.
-    let sdk = target_sdk(target);
     let root = p.gen_root.as_str();
-    let ccs = ocache::direct_cc(resolve_cc(p.cc.as_str(), sdk, p.arch), target, root);
+    let ccs = ocache::direct_cc(resolve_cc(p.cc.as_str(), target, p.arch), target, root);
     // No shell anywhere: the compile is an argv child, so paths pass through verbatim (spaces, quotes,
     // non-ASCII) while flag strings are split on whitespace. The runner is named with an explicit `.exe`
     // on Windows so running it below never depends on the spawn filling the extension in.
-    let exe = if unsafe shim::sc_host_platform() == 0 {
-        ".exe";
-    } else {
-        "";
-    };
+    let exe = tgt::os(unsafe shim::sc_host_platform()).exe_suffix;
     let what = if out_bin.len() != 0 {
         "build";
     } else {
@@ -666,7 +663,7 @@ pub fn test_build_and_run(
     let base = basev.as_str();
     // The cross triple comes first so the profile's flags (empty for a bare build) can override it.
     let mut fl = String::new();
-    push_sdk_flags(&mut fl, target, sdk, p.arch, p.features);
+    push_sdk_flags(&mut fl, target, p.arch, p.features);
     let mut pfl = String::from_str(base);
     pfl.push_str(fl.as_str());
     pfl.push_byte(b' ');
@@ -674,7 +671,7 @@ pub fn test_build_and_run(
     let mut late = String::new();
     // The link-only SDK libs ride along on the command that links.
     let mut ll = String::new();
-    push_sdk_libs(&mut ll, target, sdk);
+    push_sdk_libs(&mut ll, target);
     if !bsys::features_accepted(
         loader::dirname_of(root),
         ccs.as_str(),
@@ -828,6 +825,8 @@ pub fn test_run_runner(topts: *const TestOpts, bin: str) i32 {
         run.push(String::from_str(str::from_cbuf(sb.as_slice())));
     }
     unsafe shim::sc_jobserver_release_claim();
+    // The LIR check covers the bundle this build lowered; a compile a test runs is a build of its own.
+    let _ = unsafe env::unset("SC_LIR");
     let rrc = exec_args(&run, "");
     if rrc < 0 {
         eprintln("super-c: cannot run the test runner '{}'", bin);

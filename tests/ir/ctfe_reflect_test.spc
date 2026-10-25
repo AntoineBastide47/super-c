@@ -392,6 +392,40 @@ fn main() i32 {
     );
 }
 
+// A pointer into a member array moves on through the enclosing object's scalars of its type, as in C
+// memory: past `a` it reaches `b`.
+fn a_pointer_crosses_member_arrays(b: &mut h::ExitBatch) {
+    b.add(
+        "a pointer past a member array",
+        M"(struct Pair {
+    pub a: [f32; 2],
+    pub b: [f32; 2],
+}
+const fn third(p: Pair) f32 {
+    let q = (&p.a[0]) as *const f32;
+    return unsafe *(q + 3);
+}
+const L: f32 = third(Pair { a: [1.0, 2.0], b: [3.0, 4.0] });
+fn main() i32 {
+    if L != 4.0 {
+        return 1;
+    }
+    return 0;
+}
+)",
+        0,
+    );
+}
+
+@test
+fn a_pointer_past_the_enclosing_object_traps() {
+    h::expect_build_err(
+        "a pointer past the last member array",
+        "struct Pair {\n    pub a: [f32; 2],\n    pub b: [f32; 2],\n}\nconst fn fifth(p: Pair) f32 {\n    let q = (&p.a[0]) as *const f32;\n    return unsafe *(q + 4);\n}\nconst L: f32 = fifth(Pair { a: [1.0, 2.0], b: [3.0, 4.0] });\nfn main() i32 { return L as i32; }\n",
+        "out-of-bounds",
+    );
+}
+
 @test
 fn byte_view_of_a_scalar_does_not_fold() {
     // Folding would read the next local (`w`) as byte 1; the evaluator refuses instead.
@@ -462,5 +496,6 @@ fn exit_cases_00() {
     a_lowering_fold_deep_in_a_call_stack_folds_in_either_order(&mut b);
     a_payload_bound_through_a_reference_aliases_the_value(&mut b);
     byte_view_of_a_scalar_copies_its_bytes(&mut b);
+    a_pointer_crosses_member_arrays(&mut b);
     b.run();
 }

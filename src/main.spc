@@ -11,6 +11,7 @@ import std::platform::process;
 import std::parallel::runtime as prt;
 import module::loader as loader;
 import resolver::resolver as resolver;
+import target::table as tgt;
 import typechecker::typechecker as tc;
 import ir::interp as iri;
 import utils::errors as diag;
@@ -922,38 +923,23 @@ extend CommonOpts {
                 self.bad = true;
             }
         } else if arg.starts_with("--target=") {
-            let t = arg[9..];
-            if t == "windows" {
-                self.target = 0;
-            } else if t == "macos" {
-                self.target = 1;
-            } else if t == "linux" {
-                self.target = 2;
-            } else if t == "wasm" {
-                self.target = 3;
-                // Wasm32.
-                self.arch = 2;
-            } else if t == "ios" {
-                self.target = 4;
-                // Aarch64.
-                self.arch = 1;
-            } else if t == "android" {
-                self.target = 5;
-                // Aarch64.
-                self.arch = 1;
-            } else {
+            let t = tgt::axis_index(arg[9..], false);
+            if t < 0 {
                 self.bad = true;
+            } else {
+                self.target = t;
+                // A system with one usual instruction set picks it.
+                let d = tgt::os(t).isa_default;
+                if d >= 0 {
+                    self.arch = d;
+                }
             }
         } else if arg.starts_with("--arch=") {
-            let a2 = arg[7..];
-            if a2 == "x86_64" {
-                self.arch = 0;
-            } else if a2 == "aarch64" {
-                self.arch = 1;
-            } else if a2 == "wasm32" {
-                self.arch = 2;
-            } else {
+            let a2 = tgt::axis_index(arg[7..], true);
+            if a2 < 0 {
                 self.bad = true;
+            } else {
+                self.arch = a2;
             }
         } else if arg.starts_with("--target-feature=") {
             if self.target_features.len() != 0 {
@@ -1630,7 +1616,7 @@ fn main(argv: Vector<str>) i32 {
     let std_dir = exe_std_dir(arg0);
     // `--target-cpu` names a level of the build's instruction set.
     let mut cerr = String::new();
-    let mut cpu_set = cf::baseline(co.target, co.arch);
+    let mut cpu_set = tgt::baseline(co.target, co.arch);
     if !cf::level(co.target_cpu.as_str(), co.arch, true, &mut cpu_set, &mut cerr) {
         eprintln("error: {}", cerr.as_str());
         return 1;
@@ -1659,8 +1645,6 @@ fn main(argv: Vector<str>) i32 {
         if !bsys::check_features(&man, co.target_features.as_str()) {
             return 1;
         }
-        // The engine's toolchain: the profile flags, and so the memory checker, match its own.
-        man.sdk = target_sdk(co.target);
         if bo.sanitizers {
             man.add_sanitizers();
         }
@@ -1724,8 +1708,6 @@ fn main(argv: Vector<str>) i32 {
             if !bsys::check_features(&man, co.target_features.as_str()) {
                 return 1;
             }
-            // --target=ios|android|wasm picks the cross toolchain.
-            man.sdk = target_sdk(co.target);
             let cx = bsys::BuildCtx {
                 jobs: jobs,
                 std_dir: std_dir.as_str(),
@@ -1796,8 +1778,8 @@ fn main(argv: Vector<str>) i32 {
         eprintln("error: --bin, --lib, --transpiler and --print-probes need build.toml; '{}' builds alone", file);
         return 1;
     }
-    let pflags = bsys::profile_flags(bo.profile, co.target, target_sdk(co.target), false, bo.sanitizers);
-    let pcflags = bsys::profile_flags(bo.profile, co.target, target_sdk(co.target), true, bo.sanitizers);
+    let pflags = bsys::profile_flags(bo.profile, co.target, false, bo.sanitizers);
+    let pcflags = bsys::profile_flags(bo.profile, co.target, true, bo.sanitizers);
     let rc = run_file(
         file,
         std_dir.as_str(),

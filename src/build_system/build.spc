@@ -12,6 +12,7 @@
 // -MMD/-c/-o are assumed, so MSVC's cl.exe is out of contract and has no /showIncludes lane.
 import stdio;
 import stdlib;
+import target::table as tgt;
 import time;
 import driver_shim as shim;
 import std::platform::cpu;
@@ -723,12 +724,12 @@ fn render_cmd(args: &Vector<String>) String {
 // `--sanitizers` flags `-fsanitize*` would fail the link on Windows: there they are dropped instead
 // (SC_LEAK_CHECK, being self-hosted, still covers leaks, double frees and a realloc of a freed pointer
 // there; no other use after free).
-fn push_profile(cmd: &mut String, flags: &Vector<String>, target: i32, sdk: i32) {
+fn push_profile(cmd: &mut String, flags: &Vector<String>, target: i32) {
     for i in 0..flags.len() {
         let f = flags.at(i).as_str();
         // Mingw ships no libasan/libubsan, and neither do the iOS, Android or wasm toolchains as used
         // here: the sanitizer flags would fail the link, so they are dropped (SC_LEAK_CHECK still works).
-        if (target == 0 || sdk != 0) && f.starts_with("-fsanitize") {
+        if !tgt::os(target).sanitizers && f.starts_with("-fsanitize") {
             continue;
         }
         cmd.push_byte(b' ');
@@ -739,7 +740,7 @@ fn push_profile(cmd: &mut String, flags: &Vector<String>, target: i32, sdk: i32)
 // The profile's `opt-level` flag, then its flag array (`push_profile`), so an explicit `-O` in the
 // array still wins; `wl` renders each `link-args` entry through the driver. The compile side of a
 // profile without overflow checks defines SC_ARITH_WRAP (super_rt.h's arithmetic helpers).
-fn push_profile_side(cmd: &mut String, prof: &mf::Profile, flags: &Vector<String>, wl: bool, target: i32, sdk: i32) {
+fn push_profile_side(cmd: &mut String, prof: &mf::Profile, flags: &Vector<String>, wl: bool, target: i32) {
     let of = mf::opt_flag(prof.opt);
     if of.len() != 0 {
         cmd.push_byte(b' ');
@@ -748,7 +749,7 @@ fn push_profile_side(cmd: &mut String, prof: &mf::Profile, flags: &Vector<String
     if !wl && prof.arith_wraps() {
         cmd.push_str(" -DSC_ARITH_WRAP");
     }
-    push_profile(cmd, flags, target, sdk);
+    push_profile(cmd, flags, target);
     if wl {
         for i in 0..prof.link_args.len() {
             cmd.push_str(" -Wl,");
@@ -773,7 +774,7 @@ pub fn profile_names(m: &mf::Manifest) Vector<String> {
 /// plain build rather than failing; `sanitizers` (`--sanitizers`) adds the sanitizer flags to any build,
 /// a build without a profile included. `target` drops what that target cannot honour, exactly as a
 /// manifest build does.
-pub fn profile_flags(name: str, target: i32, sdk: i32, compile_only: bool, sanitizers: bool) String {
+pub fn profile_flags(name: str, target: i32, compile_only: bool, sanitizers: bool) String {
     let mut out = String::new();
     let m = mf::builtins_only();
     let pi = if name.len() == 0 {
@@ -783,10 +784,10 @@ pub fn profile_flags(name: str, target: i32, sdk: i32, compile_only: bool, sanit
     };
     if pi >= 0 {
         let prof = m.profiles.at(pi as usize);
-        push_profile_side(&mut out, prof, &prof.cflags, false, target, sdk);
+        push_profile_side(&mut out, prof, &prof.cflags, false, target);
         if !compile_only {
-            push_profile_side(&mut out, prof, &prof.ldflags, true, target, sdk);
-            // A macOS or iOS link strips after it (`profile_strip`).
+            push_profile_side(&mut out, prof, &prof.ldflags, true, target);
+            // A Mach-O link strips after it (`profile_strip`).
             if prof.strip && strips_at_link(target) {
                 out.push_str(" -Wl,--strip-all");
             }
@@ -812,7 +813,7 @@ pub fn profile_flags(name: str, target: i32, sdk: i32, compile_only: bool, sanit
         if !compile_only {
             split_args(&mut sf, mf::SANITIZER_LDFLAGS);
         }
-        push_profile(&mut out, &sf, target, sdk);
+        push_profile(&mut out, &sf, target);
     }
     return out;
 }
@@ -1078,40 +1079,31 @@ const fn cache_key(cobj: str) str {
 }
 
 /// Platform artifact name for a library target: static -> lib<name>.a everywhere (mingw uses ar
-/// archives too); shared -> <name>.dll (windows) / lib<name>.dylib (macos) / lib<name>.so (linux).
+/// archives too); shared -> the target's shared-library prefix and suffix around the name.
 pub fn lib_file(name: str, shared: bool, target: i32) String {
     let mut s = String::new();
-    if shared && target == 0 {
+    let o = tgt::os(target);
+    if shared {
+        s.push_str(o.shared_prefix);
         s.push_str(name);
-        s.push_str(".dll");
+        s.push_str(o.shared_suffix);
         return s;
     }
     s.push_str("lib");
     s.push_str(name);
-    if !shared {
-        s.push_str(".a");
-    } else if is_darwin(target) {
-        s.push_str(".dylib");
-    } else {
-        s.push_str(".so");
-    }
+    s.push_str(".a");
     return s;
 }
 
-/// MacOS and iOS are one platform family for artifact shape (Mach-O, .dylib), even though they are
-/// separate `@platform` values.
-pub const fn is_darwin(target: i32) bool {
-    return target == 1 || target == 4;
-}
-
-/// The name a linked binary must have on `target`: Windows executables carry `.exe`, and nothing
-/// supplies it for us: the engine links to `<bin>.tmp` and renames, so the C compiler never sees a name
+/// The name a linked binary must have on `target`: its executable suffix (Windows: `.exe`), which nothing
+/// supplies for us: the engine links to `<bin>.tmp` and renames, so the C compiler never sees a name
 /// without an extension to append one to. An extensionless PE cannot even be started: CreateProcess appends
 /// `.exe` to a name that has none and then fails to find it. `pub` because the driver names binaries too.
 pub fn exe_name(base: str, target: i32) String {
     let mut s = String::from_str(base);
-    if target == 0 && !base.ends_with(".exe") {
-        s.push_str(".exe");
+    let sfx = tgt::os(target).exe_suffix;
+    if !base.ends_with(sfx) {
+        s.push_str(sfx);
     }
     return s;
 }
@@ -1179,6 +1171,7 @@ struct CcStream {
     pub cc_tail: String, // " <cstd> <cflags> <profile cflags> -MMD -c [-flto=..]" (also the object-cache key text)
     pub ldbase: String, // " <sdk flags and libs> <ldflags> <profile ldflags>": the fixed part of the link line
     pub target: i32,
+    pub arch: i32,
     pub lto_req: i32, // the profile's `lto` mode (SC_LTO overrides it)
     pub lto: i32, // the mode in use once ensure_cc ran: lto_req, or LTO_AUTO for a rejected ThinLTO request
     pub lto_cache: bool, // the link line names a ThinLTO cache directory
@@ -1281,7 +1274,7 @@ extend CcStream {
         self.lto_resolve();
         // Each enabled feature's flag passed its probe: a rejected one fails the build here, before any
         // compile, and every result used joins the command fingerprint.
-        if !features_pass(&mut self.probes, self.feats, self.target, self.cc_raw.as_str()) {
+        if !features_pass(&mut self.probes, self.feats, self.target, self.arch, self.cc_raw.as_str()) {
             self.ret = 1;
             self.feat_bad = true;
         }
@@ -1446,7 +1439,7 @@ extend CcStream {
                     let cache = loader::join2(dir.as_str(), "cache");
                     // Apple ld first on Darwin; elsewhere lld, then the gold and bfd plugin.
                     for k in 0..3 {
-                        let f: i32 = if is_darwin(self.target) {
+                        let f: i32 = if tgt::os(self.target).darwin {
                             k + 1;
                         } else {
                             (k + 1) % 3 + 1;
@@ -2381,7 +2374,7 @@ pub const fn dispatch_for<'a>(m: &mf::Manifest, prof: str, spec: str<'a>) str<'a
 /// instruction set applies to another build) and the command line's list `cli` (strict) against the
 /// instruction set `m.arch`; false after printing the first error.
 pub fn check_features(m: &mf::Manifest, cli: str) bool {
-    let mut s = cf::baseline(m.target, m.arch);
+    let mut s = tgt::baseline(m.target, m.arch);
     let mut err = String::new();
     let mut ok = cf::level(m.target_cpu.as_str(), m.arch, false, &mut s, &mut err);
     for i in 0..m.target_features.len() {
@@ -2460,7 +2453,7 @@ pub const fn build_cfg(fl: str) u32 {
 /// the build's `target-cpu` level, then the profile's `target-features` (else the build's), then the command line's list `cli`, closed
 /// under `implies`. The lists passed `check_features`.
 pub fn features_for(m: &mf::Manifest, prof_name: str, cli: str) cf::CpuFeatureSet {
-    let mut s = cf::baseline(m.target, m.arch);
+    let mut s = tgt::baseline(m.target, m.arch);
     let mut err = String::new();
     let _ = cf::level(m.target_cpu.as_str(), m.arch, false, &mut s, &mut err);
     let pi = m.profile_index(prof_name);
@@ -2511,14 +2504,7 @@ fn emit_closure(
     if pi >= 0 {
         let mut fl = String::new();
         push_all(&mut fl, &m.cflags);
-        push_profile_side(
-            &mut fl,
-            m.profiles.at(pi as usize),
-            &m.profiles.at(pi as usize).cflags,
-            false,
-            cx.target,
-            m.sdk,
-        );
+        push_profile_side(&mut fl, m.profiles.at(pi as usize), &m.profiles.at(pi as usize).cflags, false, cx.target);
         p.mem_check = mem_checker(fl.as_str());
         p.build_cfg = build_cfg(fl.as_str());
     }
@@ -2615,8 +2601,8 @@ fn run_transpiler(m: &mf::Manifest, prof_name: str, root: str, sub: str, cx: &Bu
     args.push(format("--manifest-dir={}", cwd.unwrap().as_str()));
     args.push(format("--out-dir={}", m.out_dir.as_str()));
     args.push(format("--profile={}", prof_name));
-    args.push(format("--target={}", par::axis_names(false)[cx.target as usize]));
-    args.push(format("--arch={}", par::axis_names(true)[m.arch as usize]));
+    args.push(format("--target={}", tgt::os(cx.target).name));
+    args.push(format("--arch={}", tgt::isa(m.arch).name));
     if cx.target_features.len() != 0 {
         args.push(format("--target-feature={}", cx.target_features));
     }
@@ -2741,7 +2727,8 @@ pub fn transpile_step(
     let stamp_path = loader::join2(pdir.as_str(), ".emit_stamp");
     let mut stamp_new = stamp_path.clone();
     stamp_new.push_str(".new");
-    let cache_on = stdlib::getenv("SC_NO_EMIT_CACHE") == null;
+    // The LIR check needs every body emitted.
+    let cache_on = stdlib::getenv("SC_NO_EMIT_CACHE") == null && stdlib::getenv("SC_LIR") == null;
     let external = cx.transpiler.len() != 0;
     // The emitting compiler's identity, read before the emission: the tree it emits is its function.
     let cid = if !cache_on {
@@ -2788,10 +2775,10 @@ pub fn transpile_step(
     return Transpiled { rc: rc, skipped: false, cid: cid, gen_files: Vector::<String>::new() };
 }
 
-// Whether every probe of a feature of `feats` (the build's beyond the baseline of platform `target`)
-// accepted its flag (each result is marked used); prints the rejection of each that did not, naming
-// the C compiler `cc`, the flag and the features it checks.
-fn features_pass(probes: &mut pr::Probes, feats: cf::CpuFeatureSet, target: i32, cc: str) bool {
+// Whether every probe of a feature of `feats` (the build's beyond the baseline of platform `target`, on
+// instruction set `arch`) accepted its flag (each result is marked used); prints the rejection of each
+// that did not, naming the C compiler `cc`, the flag and the features it checks.
+fn features_pass(probes: &mut pr::Probes, feats: cf::CpuFeatureSet, target: i32, arch: i32, cc: str) bool {
     let mut bad: u64 = 0;
     for i in 0..cf::FEATURE_COUNT {
         let k = pr::index_of(cf::row(i).probe);
@@ -2814,7 +2801,7 @@ fn features_pass(probes: &mut pr::Probes, feats: cf::CpuFeatureSet, target: i32,
             }
         }
         let mut fl = String::new();
-        cf::push_c_flags(sub, target, &mut fl);
+        cf::push_c_flags(sub, target, arch, &mut fl);
         eprintln(
             "build: the C compiler '{}' rejects '{}': target feature {} needs a compiler that supports it",
             cc,
@@ -2840,8 +2827,8 @@ pub fn features_accepted(
     late: &mut String,
     ld: &mut String,
 ) bool {
-    let feats = cf::beyond_baseline(all, target);
-    let need = feature_probes(feats) | uvm_need(target, arch) | novec_need(lto) | rtlib_need(target);
+    let feats = tgt::beyond_baseline(all, target);
+    let need = feature_probes(feats) | uvm_need(target, arch) | novec_need(lto) | rtlib_need(target, arch);
     if need == 0 {
         return true;
     }
@@ -2855,7 +2842,7 @@ pub fn features_accepted(
     let mut probes = pr::Probes::start(pdir, key.as_str(), pargv, "", target, arch, need);
     let ver = cc_version(cc, pdir);
     probes.settle(&ver);
-    let ok = features_pass(&mut probes, feats, target, cc);
+    let ok = features_pass(&mut probes, feats, target, arch, cc);
     let _ = push_novec(&mut probes, lto, late);
     let _ = push_uvm(&mut probes, more);
     push_rtlib(&mut probes, target, ld);
@@ -2863,16 +2850,16 @@ pub fn features_accepted(
     return ok;
 }
 
-// The compiler support library probe's bit on wasm, whose link takes no C library, else 0.
-const fn rtlib_need(target: i32) u64 {
-    return pick(target == 3, 1u64 << pr::RTLIB as u64, 0);
+// The compiler support library probe's bit where it applies (wasm, whose link takes no C library), else 0.
+const fn rtlib_need(target: i32, arch: i32) u64 {
+    return pick(tgt::probe_applies("rtlib", target, arch), 1u64 << pr::RTLIB as u64, 0);
 }
 
 // Append a wasm link's library flags to `out`: no C library or start files (`std::rt::libc` provides the C
 // library and the entry point), then the compiler's support library when its probe found it (the result
 // joins the command fingerprint).
 fn push_rtlib(probes: &mut pr::Probes, target: i32, out: &mut String) {
-    if target != 3 {
+    if !tgt::os(target).own_libc {
         return;
     }
     out.push_str(" -nostdlib");
@@ -2908,7 +2895,7 @@ fn push_novec(probes: &mut pr::Probes, lto: i32, out: &mut String) bool {
 // The unaligned-vector-move probe's bit where it applies (Windows x86_64), else 0: elsewhere a build
 // needs no probe record for it.
 const fn uvm_need(target: i32, arch: i32) u64 {
-    return pick(target == 0 && arch == 0, 1u64 << pr::UVM as u64, 0);
+    return pick(tgt::probe_applies("unaligned-vector-move", target, arch), 1u64 << pr::UVM as u64, 0);
 }
 
 // Append the unaligned-vector-move flag to `out` when its probe accepted it (the result joins the
@@ -2983,30 +2970,30 @@ fn cc_stream(
     pending: String,
     cache: String,
 ) CcStream {
-    let cc_raw = direct_cc(resolve_cc(m.cc.as_str(), m.sdk, m.arch), m.target, pdir.as_str());
+    let cc_raw = direct_cc(resolve_cc(m.cc.as_str(), m.target, m.arch), m.target, pdir.as_str());
     let mut flags = String::new();
     flags.push_byte(b' ');
     push_c_base(&mut flags, m.cstd.as_str(), m.target);
-    if m.lib_shared && cx.target != 0 {
+    if m.lib_shared && tgt::obj_of(cx.target).pic {
         // Shared-library objects need it; harmless for the exe targets.
         flags.push_str(" -fPIC");
     }
     // The cross triple and the CPU features' flags come first; manifest flags can override.
     let feats = features_for(m, prof.name, cx.target_features);
-    push_sdk_flags(&mut flags, m.target, m.sdk, m.arch, feats);
+    push_sdk_flags(&mut flags, m.target, m.arch, feats);
     push_all(&mut flags, &m.cflags);
-    push_profile_side(&mut flags, prof, &prof.cflags, false, cx.target, m.sdk);
+    push_profile_side(&mut flags, prof, &prof.cflags, false, cx.target);
     let mut tail = flags.clone();
     tail.push_str(" -MMD -c");
     // The fixed part of the link line, once: the link, the toolchain probes and their record key share it.
     let mut ldbase = String::new();
-    push_sdk_flags(&mut ldbase, m.target, m.sdk, m.arch, feats);
-    push_sdk_libs(&mut ldbase, m.target, m.sdk);
+    push_sdk_flags(&mut ldbase, m.target, m.arch, feats);
+    push_sdk_libs(&mut ldbase, m.target);
     if prof.strip && strips_at_link(m.target) {
         ldbase.push_str(" -Wl,--strip-all");
     }
     push_all(&mut ldbase, &m.ldflags);
-    push_profile_side(&mut ldbase, prof, &prof.ldflags, true, cx.target, m.sdk);
+    push_profile_side(&mut ldbase, prof, &prof.ldflags, true, cx.target);
     // `cc --version` costs a process round-trip: the line recorded for this compiler serves when its
     // identity is unchanged (`ccver_recorded`); else a background argv child (no shell, on
     // every platform) resolves it while the transpile runs, and ensure_cc collects it at first use.
@@ -3017,7 +3004,7 @@ fn cc_stream(
     // word, so no fingerprint changes. CreateProcess searches its own directories first: Windows keeps
     // that search.
     let mut cc_file = String::new();
-    if ccpath.as_str().starts_with("/") && unsafe shim::sc_host_platform() != 0 {
+    if ccpath.as_str().starts_with("/") && PLATFORM != Platform::Windows {
         cc_file.push_string(&ccpath);
     }
     let ccver_path = loader::join2(pdir.as_str(), ".ccver");
@@ -3053,9 +3040,9 @@ fn cc_stream(
         ldbase.as_str(),
         cx.target,
         m.arch,
-        need | feature_probes(cf::beyond_baseline(feats, cx.target)) | uvm_need(cx.target, m.arch) | novec_need(lto_req) | rtlib_need(
-            cx.target,
-        ),
+        need | feature_probes(tgt::beyond_baseline(feats, cx.target)) | uvm_need(cx.target, m.arch) | novec_need(
+            lto_req,
+        ) | rtlib_need(cx.target, m.arch),
     );
     // The compile argv runs from the process working directory; record it for compile_commands.json.
     let ccdb_dir = fs::realpath(".").unwrap_or(String::from_str("."));
@@ -3073,9 +3060,10 @@ fn cc_stream(
         cc_file: cc_file,
         cc_tail: tail,
         ldbase: ldbase,
-        feats: cf::beyond_baseline(feats, cx.target),
+        feats: tgt::beyond_baseline(feats, cx.target),
         feat_bad: false,
         target: cx.target,
+        arch: m.arch,
         lto_req: lto_req,
         lto: lto_req,
         lto_cache: false,
@@ -3424,16 +3412,15 @@ fn engine_build_i(
                 largs = cc_link;
                 if link_kind == 2 {
                     push_arg(&mut largs, "-shared");
-                    if cx.target != 0 {
+                    if tgt::obj_of(cx.target).pic {
                         push_arg(&mut largs, "-fPIC");
                     }
                     // The library's own name, not the temporary it links to: a program that links it
                     // records this name and loads the library through it.
                     let leaf = loader::basename_of(bin);
-                    if is_darwin(cx.target) {
-                        largs.push(format("-Wl,-install_name,@rpath/{}", leaf));
-                    } else if cx.target == 2 || cx.target == 5 {
-                        largs.push(format("-Wl,-soname,{}", leaf));
+                    let so = tgt::obj_of(cx.target).soname;
+                    if so.len() != 0 {
+                        largs.push(format("{}{}", so, leaf));
                     }
                 }
                 push_arg(&mut largs, "-o");
@@ -3593,7 +3580,7 @@ pub fn manifest_print_probes(m: &mf::Manifest, profile: str, cx: &BuildCtx) i32 
     );
     stream.ensure_cc();
     println("compiler: {}", stream.ccver.as_str());
-    println("target: {} {}", par::axis_names(false)[cx.target as usize], par::axis_names(true)[m.arch as usize]);
+    println("target: {} {}", tgt::os(cx.target).name, tgt::isa(m.arch).name);
     for i in 0..pr::table().len() {
         let mut line = String::from_str(pr::table()[i].id);
         while line.len() < 24 {
@@ -3607,9 +3594,9 @@ pub fn manifest_print_probes(m: &mf::Manifest, profile: str, cx: &BuildCtx) i32 
 
 // Whether a stripped build strips at link (`-Wl,--strip-all`): every linker but Apple's can, which
 // saves the `strip` process and a rewrite of the binary; the host `strip` cannot read the Android and
-// wasm linkers' (lld) output either. A macOS or iOS binary runs `strip`: ld64 has no full strip.
+// wasm linkers' (lld) output either. A Mach-O binary runs `strip`: ld64 has no full strip.
 pub const fn strips_at_link(target: i32) bool {
-    return target != 1 && target != 4;
+    return tgt::obj_of(target).strip_at_link;
 }
 
 /// The link record of binary path `bin` in out-dir `out_dir`, without its `.cmd` extension (also the
@@ -3643,7 +3630,7 @@ pub fn archiver(cc: str, target: i32) String {
     }
     let name = prog.slice(b, prog.len());
     let g = name.find("-gcc");
-    if target == host || host == 1 && target == 4 || !name.contains("clang") && g < 0 {
+    if target == host || tgt::os(host).darwin && tgt::os(target).darwin || !name.contains("clang") && g < 0 {
         return String::from_str("ar");
     }
     let mut out = String::from_str(prog.slice(0, b));
@@ -3663,7 +3650,7 @@ const WIN_CMDLINE_MAX: usize = 8192;
 
 /// The longest command line `fit_cmdline` leaves as it is on this host.
 pub const fn cmdline_max() usize {
-    if unsafe shim::sc_host_platform() == 0 {
+    if PLATFORM == Platform::Windows {
         return WIN_CMDLINE_MAX;
     }
     return usize::MAX;

@@ -10,6 +10,7 @@ import std::parallel::sync as psy;
 import std::parallel::runtime as prt;
 import lexer::token as tok;
 import lexer::token_type as tt;
+import target::table as tgt;
 import utils::persist as *;
 
 pub type NodeId = u32;
@@ -215,10 +216,8 @@ pub const fn when_var(k: i32) u32 {
     };
 }
 
-/// The variants of std's `Platform`, `Arch` and `Endian`, in declaration order: the index of a
-/// `Platform` or `Arch` variant is its bit in the `@platform` or `@arch` mask.
-const PLATFORM_VARIANTS: [str<'static>; 6] = ["Windows", "MacOS", "Linux", "Wasm", "IOS", "Android"];
-const ARCH_VARIANTS: [str<'static>; 3] = ["X86_64", "AArch64", "Wasm32"];
+/// The variants of std's `Endian`, in declaration order. `Platform` and `Arch` take theirs from the
+/// target table, where the index of a variant is its bit in the `@platform` or `@arch` mask.
 const ENDIAN_VARIANTS: [str<'static>; 2] = ["Little", "Big"];
 
 /// The build constant `s` names (a `BC_*` index), -1 for any other text.
@@ -254,11 +253,8 @@ pub const fn bc_enum(k: i32) str<'static> {
 
 /// The variants of the enum build constant `k` (PLATFORM, ARCH or ENDIAN) holds.
 pub const fn bc_variants(k: i32) Slice<'static, str<'static>> {
-    if k == BC_PLATFORM {
-        return PLATFORM_VARIANTS;
-    }
-    if k == BC_ARCH {
-        return ARCH_VARIANTS;
+    if k == BC_PLATFORM || k == BC_ARCH {
+        return tgt::axis_variants(k == BC_ARCH);
     }
     return ENDIAN_VARIANTS;
 }

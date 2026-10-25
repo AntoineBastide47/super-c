@@ -11,23 +11,24 @@ import build_system::build as bsys;
 import ir::layout as lay;
 import ir::cpu_features as cf;
 import driver_shim as shim;
+import target::table as tgt;
 import tests::cli_harness as cli;
 
 @test
 fn sdk_cc_selects_a_toolchain_per_sdk() {
     // iOS: xcrun-selected clang.
     let mut ios = String::new();
-    util::sdk_cc(1, 1, &mut ios);
+    util::sdk_cc(4, 1, &mut ios);
     assert(ios.as_str().contains("xcrun"), "ios uses xcrun clang");
     assert(ios.as_str().contains("iphoneos"), "ios names the iphoneos sdk");
     // The x86_64 iOS target is the simulator and takes the simulator SDK.
     let mut sim = String::new();
-    util::sdk_cc(1, 0, &mut sim);
+    util::sdk_cc(4, 0, &mut sim);
     assert(sim.as_str().contains("iphonesimulator"), "the iOS simulator names its own sdk");
     // Android: the NDK prebuilt clang, located from ANDROID_NDK_HOME (covers the host-tag path).
     let _env1 = cli::set_env("ANDROID_NDK_HOME", "/opt/ndk");
     let mut andr = String::new();
-    util::sdk_cc(2, 1, &mut andr);
+    util::sdk_cc(5, 1, &mut andr);
     assert(andr.as_str().contains("/opt/ndk"), "android roots at the NDK home");
     assert(andr.as_str().contains("prebuilt/"), "android uses the prebuilt toolchain");
     assert(andr.as_str().contains("bin/clang"), "android ends at clang");
@@ -42,14 +43,14 @@ fn sdk_cc_selects_a_toolchain_per_sdk() {
 fn sdk_flags_carry_the_triple() {
     // Each SDK contributes its own leading flags; the iOS triple carries the TLS-capable floor.
     let mut ios = String::new();
-    util::push_sdk_flags(&mut ios, 4, 1, 1, cf::baseline(4, 1));
+    util::push_sdk_flags(&mut ios, 4, 1, tgt::baseline(4, 1));
     assert(ios.as_str().contains("-target"), "ios sdk flags include a target triple");
     let mut wasm = String::new();
-    util::push_sdk_flags(&mut wasm, 3, 3, 2, cf::baseline(3, 2));
+    util::push_sdk_flags(&mut wasm, 3, 2, tgt::baseline(3, 2));
     assert(!wasm.as_str().contains("-msimd128"), "wasm32 has no feature by default");
     // The features' flags follow the triple, in table order.
     let mut rel = String::new();
-    util::push_sdk_flags(&mut rel, 3, 3, 2, cf::close(cf::with(cf::baseline(3, 2), cf::F_RELAXED_SIMD)));
+    util::push_sdk_flags(&mut rel, 3, 2, cf::close(cf::with(tgt::baseline(3, 2), cf::F_RELAXED_SIMD)));
     assert(rel.as_str().ends_with(" -msimd128 -mrelaxed-simd"), "relaxed-simd implies simd128");
 }
 
@@ -58,7 +59,7 @@ fn wasi_sysroot_is_one_unquoted_argument() {
     // The flag string is split on whitespace into argv, so a quote would reach the compiler verbatim.
     let _env3 = cli::set_env("WASI_SDK_PATH", "/opt/wasi");
     let mut fl = String::new();
-    util::push_sdk_flags(&mut fl, 3, 3, 2, cf::baseline(3, 2));
+    util::push_sdk_flags(&mut fl, 3, 2, tgt::baseline(3, 2));
     let mut args = Vector::<String>::new();
     util::split_args(&mut args, fl.as_str());
     let mut found = false;
@@ -75,14 +76,14 @@ fn wasi_sysroot_is_one_unquoted_argument() {
 @test
 fn links_with_the_native_stack_size() {
     let mut ld = String::new();
-    util::push_sdk_libs(&mut ld, 3, 3);
+    util::push_sdk_libs(&mut ld, 3);
     assert(ld.as_str().contains(" -Wl,-z,stack-size=8388608 "), "an 8 MiB wasm stack");
     assert(ld.as_str().contains(" -Wl,--stack-first"), "the stack below static data");
     let mut lw = String::new();
-    util::push_sdk_libs(&mut lw, 0, 0);
+    util::push_sdk_libs(&mut lw, 0);
     assert(lw.as_str() == " -Wl,--stack,8388608", "an 8 MiB Windows reserve");
     let mut ll = String::new();
-    util::push_sdk_libs(&mut ll, 2, 0);
+    util::push_sdk_libs(&mut ll, 2);
     assert(ll.len() == 0, "Linux keeps its own 8 MiB default");
 }
 

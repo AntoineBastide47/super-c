@@ -456,6 +456,17 @@ compiler's `cc -E` and `cc -E -dM` under the host's own search list (`-nostdinc`
 `-iframework`): tokens, origins, line numbers and the macro set must be equal, over synthetic
 sources and the system and framework headers the host has.
 
+### The LIR check
+
+`check.sh` runs the suite under `SC_LIR=1`, and the release workflow's first test shard of each
+target sets it: the compiler under test and the test bundle both lower every body to LIR and fail
+the build on a verifier error, a text round trip that differs, or a test whose LIR evaluator run
+disagrees with CTFE (super-c-compiler-internals, "LIR"). The test binary runs without it, so the
+compiles inside tests are plain. `tests/codegen/lir_test.spc` covers the tool calls, the verifier, the
+parser, and the evaluator on a tool-built body and on vector operations. To find a disagreement,
+rebuild one test file under `SC_LIR=1 SC_LIR_STATS=1 super-c test --quiet --filter=<file>`, then
+use `SC_LIR_RUN=<test symbol>` and `SC_LIR_TRACE=1`.
+
 ### Families of cases in few compiler runs
 
 Each run of the compiler under test loads and checks std again, so a test with many small programs

@@ -1,0 +1,7899 @@
+// Core IR to LIR. The C emitter calls `body` after it renders a function or closure body, with its
+// substitutions still bound, so the lowering reads every type, layout and symbol the C path read.
+// A scalar local whose address the body never takes becomes SSA values (Braun et al., "Simple and
+// Efficient Construction of Static Single Assignment Form", CC 2013, with the whole CFG known: a
+// phi is a parameter of its block, and the trivial ones go at the end); any other local is a stack
+// slot, or the memory a parameter or the result points at. Checks become branches to one cold
+// `panic` block per message and location. Aggregates pass as pointers to copies the callee owns,
+// an aggregate result through a pointer the caller passes last.
+import lir::ir as *;
+import ast::ast as *;
+import emit::cemit as cbe;
+import emit::mangle as mbe;
+import ir::core as irc;
+import ir::interp as iri;
+import ir::layout as lay;
+import lexer::token as tok;
+import lexer::token_type as tt;
+import module::loader as loader;
+import target::table as tgt;
+import utils::names as nm;
+import std::float as fl;
+import lir::verify as lv;
+import lir::print as lp;
+import lir::parse as lparse;
+import lir::eval as le;
+import stdlib;
+import ir::print as irp;
+import typechecker::render as rnd;
+
+// Value classes of a type.
+const VC_ZST: u8 = 0; // no storage: unit, void, never, zero-sized
+const VC_SCALAR: u8 = 1;
+const VC_MEM: u8 = 2;
+
+// A type as the lowering sees it.
+struct TyI {
+    pub cls: u8,
+    pub mty: u8, // the machine type of a scalar
+    pub size: u32,
+    pub align: u32,
+}
+
+extend TyI as Copy {}
+
+// Local kinds.
+const LK_VAR: u8 = 0; // SSA variable `var`
+const LK_MEM: u8 = 1; // memory at `addr` (a slot address, a parameter, the result pointer)
+const LK_ZST: u8 = 2;
+const LK_STATIC: u8 = 3; // an item's storage: `addr` filled on first use
+const LK_CAP: u8 = 4; // a closure capture: env field `var` (its offset); by pointer when `byref`
+
+struct LInfo {
+    pub kind: u8,
+    pub byref: bool,
+    pub ti: TyI,
+    pub var: u32,
+    pub addr: Value,
+}
+
+extend LInfo as Copy {}
+
+// A phi: a parameter of core block `blk` for variable `var`; its operands, one per predecessor
+// of `blk`, from `ops` in `phi_ops`.
+struct Phi {
+    pub blk: u32,
+    pub var: u32,
+    pub ty: u8,
+    pub ops: u32,
+    pub nops: u32,
+    pub repl: Value, // the value it is replaced by, VNONE while live
+}
+
+extend Phi as Copy {}
+
+// A draft edge: to LIR block `to`; from core block `src` into core block `dst` (NONE for an edge
+// inside one core block's chain or into a panic block).
+struct DEdge {
+    pub to: u32,
+    pub src: u32,
+    pub dst: u32,
+}
+
+extend DEdge as Copy {}
+
+// The draft value of phi `k`.
+const PHI_TAG: u32 = 0x40000000;
+
+/// A body the lowering refused: its symbol and the reason.
+pub struct LFail {
+    pub sym: String,
+    pub why: str<'static>,
+}
+
+/// A test function lowered: its symbol and its declaration, for the CTFE comparison.
+pub struct LTest {
+    pub sym: String,
+    pub m: ModuleId,
+    pub node: NodeId,
+}
+
+/// How CTFE ended test `(m, node)`: its trap kind (`ir::interp::IT_TRAP_*`), the message, and the
+/// line and column of the test's statement that trapped.
+pub struct CtfeRes {
+    pub m: ModuleId,
+    pub node: NodeId,
+    pub kind: u8,
+    pub msg: str<'static>,
+    pub line: u32,
+    pub col: u32,
+    pub ffi: bool, // the run stopped at an extern function CTFE does not model
+    pub panics: bool, // `@test(should_panic)`
+}
+
+extend CtfeRes as Copy {}
+
+/// Run each test `(m, node)` of `tests` under CTFE, before the function syntax is released.
+pub fn probe_tests(pk: *const loader::Package, tests: &Vector<u64>, panics: &Vector<bool>) Vector<CtfeRes> {
+    let mut out = Vector::<CtfeRes>::with_capacity(tests.len());
+    if tests.len() == 0 {
+        return out;
+    }
+    let mut it = iri::interp_new(pk);
+    for i in 0..tests.len() {
+        let m = (tests[i] >> 32) as ModuleId;
+        let n = tests[i] as NodeId;
+        let k = it.probe_test(m, n);
+        let mut r = CtfeRes { m: m, node: n, kind: k, msg: it.trap, line: 0, col: 0, ffi: it.ffi, panics: panics[i] };
+        if k != iri::IT_TRAP_NONE {
+            line_col(unsafe (*pk).modules.at(m as usize).source.as_str(), it.trap_span.start, &mut r.line, &mut r.col);
+        }
+        out.push(r);
+    }
+    return out;
+}
+
+/// The lowering of one emitter's bodies into its package.
+pub struct Lower {
+    pub pkg: Package,
+    pub fails: Vector<LFail>,
+    pub tests: Vector<LTest>,
+    /// The CTFE outcome of each test (`probe_tests`) the check compares the evaluator's with.
+    pub ctfe: Vector<CtfeRes>,
+    /// The build wraps on integer overflow (a profile without overflow checks).
+    pub wrap: bool,
+    /// Bodies lowered and refused.
+    pub nbodies: u64,
+    err: str<'static>,
+    dump: String, // `SC_LIR_DUMP`: the body (or refusal reason) whose refusal prints its Core IR
+    dbg: bool, // lowering the body `dump` names: report where it fails
+    // ---- per body ----
+    m: ModuleId,
+    file: u32,
+    b: Body,
+    li: Vector<LInfo>,
+    tcache: Map<u64, TyI>, // the classes of concrete types
+    bm: ModuleId, // the module of the body being lowered: the pool grounded member types go to
+    fl_depth: u32, // the nesting of `fields_layout`
+    pmty: u8, // `arg_mode`: the machine type of the parameter's scalar type, T_NONE when unknown
+    binds: Vector<mbe::MSub>, // scratch: a generic callee's bindings
+    td: Tidy, // scratch of `tidy`
+    lays: Map<u64, u32>, // the body's layout records by content hash
+    var_ty: Vector<u8>,
+    spc: u32, // the safepoint counter's variable, NONE without one
+    defs: Map<u64, Value>,
+    phis: Vector<Phi>,
+    phi_ops: Vector<Value>,
+    lblk: Vector<u32>, // per core block: its LIR block, NONE when unreachable
+    npred: Vector<u32>, // per core block (and the virtual entry): predecessor range in `preds`
+    preds: Vector<u32>,
+    edges: Vector<DEdge>,
+    cur: u32, // the core block being lowered (`virt` in the entry block)
+    virt: u32,
+    panics: Map<u64, u32>,
+    pan_list: Vector<u64>, // block << 32 | message, with the location in `pan_loc`
+    pan_loc: Vector<u32>,
+    sym_map: Map<u32, u32>,
+    zeros: Map<u32, Value>, // per type: its zero in the entry block
+    loc: u32, // the location of the statement being lowered
+    ret_ptr: Value, // the result memory of an aggregate or multi-value result
+    env: Value, // a closure's env pointer
+    noret: bool,
+    scratch: Vector<u32>,
+    sbuf: String,
+    lines: Vector<Vector<u32>>, // per module, the line starts of its source, filled on first use
+    escaped: Vector<bool>, // per local: its address escapes
+    order: Vector<u32>, // the reachable core blocks in reverse postorder
+    temps_free: Vector<u64>, // free temporary slots: size << 40 | align_log2 << 32 | slot
+    temps_used: Vector<u64>, // the ones the current statement holds
+    ret_off: Vector<u32>, // per result of a multi-value body: its offset in the result memory
+    str_len: u64, // the length of the string `str_data` placed last
+    hint: TyI, // the type an untyped constant operand takes: its destination's
+    upack: Map<u32, u64>, // per untyped local a call fills: its layout << 32 | its offsets in `uoffs`
+    uoffs: Vector<u32>,
+}
+
+extend Lower {
+    pub fn new(ptr_bytes: u32, wrap: bool) Lower {
+        return Lower {
+            pkg: Package::new(ptr_bytes),
+            fails: Vector::<LFail>::new(),
+            tests: Vector::<LTest>::new(),
+            ctfe: Vector::<CtfeRes>::new(),
+            wrap: wrap,
+            nbodies: 0,
+            err: "",
+            dump: stdlib::get_env("SC_LIR_DUMP").unwrap_or(String::new()),
+            dbg: false,
+            m: 0,
+            file: 0,
+            b: Body::new(),
+            li: Vector::<LInfo>::new(),
+            tcache: Map::<u64, TyI>::new(),
+            bm: 0,
+            fl_depth: 0,
+            pmty: T_NONE,
+            binds: Vector::<mbe::MSub>::new(),
+            td: Tidy::new(),
+            lays: Map::<u64, u32>::new(),
+            var_ty: Vector::<u8>::new(),
+            spc: NONE,
+            defs: Map::<u64, Value>::new(),
+            phis: Vector::<Phi>::new(),
+            phi_ops: Vector::<Value>::new(),
+            lblk: Vector::<u32>::new(),
+            npred: Vector::<u32>::new(),
+            preds: Vector::<u32>::new(),
+            edges: Vector::<DEdge>::new(),
+            cur: 0,
+            virt: 0,
+            panics: Map::<u64, u32>::new(),
+            pan_list: Vector::<u64>::new(),
+            pan_loc: Vector::<u32>::new(),
+            sym_map: Map::<u32, u32>::new(),
+            zeros: Map::<u32, Value>::new(),
+            loc: 0,
+            ret_ptr: VNONE,
+            env: VNONE,
+            noret: false,
+            scratch: Vector::<u32>::new(),
+            sbuf: String::new(),
+            lines: Vector::<Vector<u32>>::new(),
+            escaped: Vector::<bool>::new(),
+            order: Vector::<u32>::new(),
+            temps_free: Vector::<u64>::new(),
+            temps_used: Vector::<u64>::new(),
+            ret_off: Vector::<u32>::new(),
+            str_len: 0,
+            hint: TyI { cls: VC_ZST, mty: T_NONE, size: 0, align: 1 },
+            upack: Map::<u32, u64>::new(),
+            uoffs: Vector::<u32>::new(),
+        };
+    }
+
+    // The package and a module's syntax: the emitter only reads them, so they outlive its borrows.
+    const fn p(c: &cbe::CEmit) &'static loader::Package {
+        return unsafe &*c.pkg;
+    }
+
+    const fn ast(c: &cbe::CEmit, m: ModuleId) &'static Ast {
+        return unsafe &*(*c.pkg).module_ast_const(m);
+    }
+
+    const fn ptr_int(self: &Self) u8 {
+        return ast::pick(self.pkg.ptr_bytes == 8, T_I64, T_I32);
+    }
+
+    fn fail(self: &mut Self, why: str<'static>) bool {
+        if self.err.len() == 0 {
+            self.err = why;
+        }
+        return false;
+    }
+
+    // ---- Types ----
+
+    // The type `(m, t)` under the active substitutions.
+    fn ty(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, t: TypeId, out: &mut TyI) bool {
+        if t == TYPE_NONE {
+            *out = TyI { cls: VC_ZST, mty: T_NONE, size: 0, align: 1 };
+            return true;
+        }
+        let key = m as u64 << 32 | t as u64;
+        switch self.tcache.get(&key) {
+            Some(v) => {
+                *out = *v;
+                return true;
+            },
+            None => {},
+        };
+        if !self.ty_raw(c, m, t, out) {
+            return false;
+        }
+        // A type naming a parameter means what the bindings in place make it.
+        if Lower::ast(c, m).type_concrete(t) {
+            self.tcache.insert(key, *out);
+        }
+        return true;
+    }
+
+    fn ty_raw(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, t: TypeId, out: &mut TyI) bool {
+        let mut rm = m;
+        let mut rt = t;
+        if !c.mg.resolve(m, t, &mut rm, &mut rt) {
+            rm = m;
+            rt = t;
+        }
+        let y = *Lower::ast(c, rm).type_at(rt);
+        let pb = self.pkg.ptr_bytes;
+        let ptr = TyI { cls: VC_SCALAR, mty: T_PTR, size: pb, align: pb };
+        if y.kind == TypeKind::TYPE_BUILTIN {
+            let bt = y.as_data.builtin;
+            *out = if bt == BuiltinType::BT_VOID {
+                TyI { cls: VC_ZST, mty: T_NONE, size: 0, align: 1 };
+            } else if bt == BuiltinType::BT_C32 {
+                TyI { cls: VC_MEM, mty: T_NONE, size: 8, align: 4 };
+            } else if bt == BuiltinType::BT_C64 {
+                TyI { cls: VC_MEM, mty: T_NONE, size: 16, align: 8 };
+            } else if bt == BuiltinType::BT_VALIST {
+                let vb = tgt::callconv_of(Lower::p(c).build_target, Lower::p(c).arch).va_list_bytes as u32;
+                TyI { cls: VC_MEM, mty: T_NONE, size: vb, align: pb };
+            } else {
+                let mt = self.builtin_mty(bt);
+                TyI { cls: VC_SCALAR, mty: mt, size: type_bytes(mt, pb), align: type_bytes(mt, pb) };
+            };
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_NEVER {
+            *out = TyI { cls: VC_ZST, mty: T_NONE, size: 0, align: 1 };
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE {
+            *out = ptr;
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_DYN || y.kind == TypeKind::TYPE_SLICE {
+            *out = TyI { cls: VC_MEM, mty: T_NONE, size: 2 * pb, align: pb };
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_FUNCTION {
+            let mut tys = Vector::<TypeId>::new();
+            let mut by_ref: u64 = 0;
+            if !y.fn_sig() && Lower::ast(c, y.module).closure_env(y.as_data.decl, &mut tys, &mut by_ref) {
+                return self.mem_ty(c, rm, rt, out);
+            }
+            *out = ptr;
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_SIMD || y.kind == TypeKind::TYPE_MASK {
+            let n = c.mg.arr_len(rm, &y);
+            if n < 1 {
+                return self.fail("vector-lanes");
+            }
+            if y.kind == TypeKind::TYPE_MASK {
+                let mt = if n <= 8 {
+                    T_I8;
+                } else if n <= 16 {
+                    T_I16;
+                } else if n <= 32 {
+                    T_I32;
+                } else {
+                    T_I64;
+                };
+                *out = TyI { cls: VC_SCALAR, mty: mt, size: type_bytes(mt, pb), align: type_bytes(mt, pb) };
+                return true;
+            }
+            let mut el = TyI { cls: 0 };
+            if !self.ty(c, rm, y.as_data.arr.elem, &mut el) || el.cls != VC_SCALAR || el.mty == T_PTR || is_vec(el.mty) {
+                return self.fail("vector-lane-type");
+            }
+            let vt = vec_type(el.mty, n as u32);
+            let lo = c.mg.layout_sub(rm, rt);
+            if vt == T_NONE || !lo.ok {
+                return self.fail("vector-type");
+            }
+            *out = TyI { cls: VC_SCALAR, mty: vt, size: lo.size as u32, align: lo.align as u32 };
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_ENUM && !Lower::ast(c, y.module).enum_has_payload(y.as_data.decl) {
+            *out = TyI { cls: VC_SCALAR, mty: T_I32, size: 4, align: 4 };
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *Lower::ast(c, rm).instance(y.as_data.inst);
+            let da = Lower::ast(c, it.module);
+            if da.at_const(it.decl).kind == NodeKind::NODE_ENUM && !da.enum_has_payload(it.decl) {
+                *out = TyI { cls: VC_SCALAR, mty: T_I32, size: 4, align: 4 };
+                return true;
+            }
+        }
+        if y.kind == TypeKind::TYPE_ARRAY || y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_INSTANCE || y.kind == TypeKind::TYPE_OPAQUE {
+            return self.mem_ty(c, rm, rt, out);
+        }
+        self.debug_ty(c, "type", rm, rt);
+        return self.fail("type");
+    }
+
+    fn mem_ty(self: &mut Self, c: &mut cbe::CEmit, rm: ModuleId, rt: TypeId, out: &mut TyI) bool {
+        let mut lo = c.mg.layout_sub(rm, rt);
+        let y = *Lower::ast(c, rm).type_at(rt);
+        let fun = y.kind == TypeKind::TYPE_FUNCTION;
+        if !lo.ok && y.kind == TypeKind::TYPE_ARRAY && !lo.big {
+            // The layout engine sizes no `dyn` element: the element's class, repeated.
+            let n = c.mg.arr_len(rm, &y);
+            let mut ei = TyI { cls: 0 };
+            if n < 0 || !self.ty(c, rm, y.as_data.arr.elem, &mut ei) {
+                return false;
+            }
+            lo = lay::Layout { ok: true, size: n as u64 * ei.size as u64, align: ei.align };
+        } else if !lo.ok && (!lo.unbound || fun) && !lo.big {
+            // The layout engine sizes no `void` member (C erases one), nor a closure environment
+            // capturing a parameter: the members' own layout.
+            lo = self.fields_layout(c, rm, rt);
+        }
+        if !lo.ok || lo.size > 0x7FFFFFFF {
+            self.debug_ty(c, "layout", rm, rt);
+            return self.fail("layout");
+        }
+        if lo.size == 0 {
+            *out = TyI { cls: VC_ZST, mty: T_NONE, size: 0, align: lo.align as u32 };
+            return true;
+        }
+        *out = TyI { cls: VC_MEM, mty: T_NONE, size: lo.size as u32, align: lo.align as u32 };
+        return true;
+    }
+
+    const fn builtin_mty(self: &Self, bt: BuiltinType) u8 {
+        if bt == BuiltinType::BT_BOOL || bt == BuiltinType::BT_CHAR || bt == BuiltinType::BT_I8 || bt == BuiltinType::BT_U8 {
+            return T_I8;
+        }
+        if bt == BuiltinType::BT_I16 || bt == BuiltinType::BT_U16 {
+            return T_I16;
+        }
+        if bt == BuiltinType::BT_I32 || bt == BuiltinType::BT_U32 {
+            return T_I32;
+        }
+        if bt == BuiltinType::BT_I64 || bt == BuiltinType::BT_U64 {
+            return T_I64;
+        }
+        if bt == BuiltinType::BT_ISIZE || bt == BuiltinType::BT_USIZE {
+            return self.ptr_int();
+        }
+        if bt == BuiltinType::BT_F32 {
+            return T_F32;
+        }
+        return T_F64;
+    }
+
+    // The resolved type `(m, t)`.
+    fn resolved(c: &cbe::CEmit, m: ModuleId, t: TypeId, rm: &mut ModuleId, rt: &mut TypeId) Ty {
+        *rm = m;
+        *rt = t;
+        if !c.mg.resolve(m, t, rm, rt) {
+            *rm = m;
+            *rt = t;
+        }
+        return *Lower::ast(c, *rm).type_at(*rt);
+    }
+
+    // Whether `(m, t)` is a signed integer (an integer vector's lanes, a char not).
+    fn signed(c: &cbe::CEmit, m: ModuleId, t: TypeId) bool {
+        let mut rm = m;
+        let mut rt = t;
+        let mut y = Lower::resolved(c, m, t, &mut rm, &mut rt);
+        if y.kind == TypeKind::TYPE_SIMD {
+            y = Lower::resolved(c, rm, y.as_data.arr.elem, &mut rm, &mut rt);
+        }
+        if y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_INSTANCE {
+            return true; // a C enum is an int
+        }
+        if y.kind != TypeKind::TYPE_BUILTIN {
+            return false;
+        }
+        let bt = y.as_data.builtin;
+        return bt == BuiltinType::BT_I8 || bt == BuiltinType::BT_I16 || bt == BuiltinType::BT_I32 || bt == BuiltinType::BT_I64 || bt == BuiltinType::BT_ISIZE;
+    }
+
+    // The builtin of `(m, t)`, BT_VOID for another kind.
+    fn builtin(c: &cbe::CEmit, m: ModuleId, t: TypeId) BuiltinType {
+        if t == TYPE_NONE {
+            return BuiltinType::BT_VOID;
+        }
+        let mut rm = m;
+        let mut rt = t;
+        let y = Lower::resolved(c, m, t, &mut rm, &mut rt);
+        if y.kind != TypeKind::TYPE_BUILTIN {
+            return BuiltinType::BT_VOID;
+        }
+        return y.as_data.builtin;
+    }
+
+    // The name of the aggregate declaration of resolved `(rm, rt)` (an instance's generic one), "" else.
+    fn agg_name(c: &cbe::CEmit, rm: ModuleId, rt: TypeId) str<'static> {
+        let y = *Lower::ast(c, rm).type_at(rt);
+        let mut dm = rm;
+        let mut dn = NODE_NONE;
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            dm = y.module;
+            dn = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *Lower::ast(c, rm).instance(y.as_data.inst);
+            dm = it.module;
+            dn = it.decl;
+        } else {
+            return "";
+        }
+        let a = Lower::ast(c, dm);
+        let n = a.at_const(dn);
+        if n.kind != NodeKind::NODE_STRUCT && n.kind != NodeKind::NODE_ENUM {
+            return "";
+        }
+        let sp = a.at_const(n.as_data.aggregate.name).as_data.name.text;
+        return Lower::p(c).modules.at(dm as usize).source.as_str().slice(sp.start as usize, sp.end as usize);
+    }
+
+    // The layout record of memory type `ti` of `(m, t)` in the body's pool: its size, alignment and,
+    // up to 64 bytes, its scalar leaves.
+    fn layout_of(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, t: TypeId, ti: TyI) u32 {
+        let mut leaves = Vector::<(u32, u8)>::new();
+        if ti.size <= 64 {
+            let _ = self.leaves(c, m, t, 0, &mut leaves, 0);
+            if leaves.len() > 16 {
+                leaves.truncate(0);
+            }
+        }
+        return self.layout(ti.size, log2(ti.align), &leaves);
+    }
+
+    // The body's layout record of `size` bytes aligned to `1 << al_log2` with `leaves`: one record per
+    // distinct layout.
+    fn layout(self: &mut Self, size: u32, al_log2: u32, leaves: &Vector<(u32, u8)>) u32 {
+        let mut h = size as u64 << 8 | al_log2 as u64;
+        for k in 0..leaves.len() {
+            h = (h ^ (leaves[k].0 as u64 << 8 | leaves[k].1 as u64)).wrapping_mul(0x100000001B3u64);
+        }
+        if let Some(at) = self.lays.get(&h) {
+            let l = (*at) as usize;
+            let mut same = self.b.pool[l] == size && self.b.pool[l + 1] == al_log2 && self.b.pool[l + 2] as usize == leaves.len();
+            for k in 0..leaves.len() {
+                same = same && self.b.pool[l + 3 + 2 * k] == leaves[k].0 && self.b.pool[l + 4 + 2 * k] == leaves[k].1 as u32;
+            }
+            if same {
+                return *at;
+            }
+        }
+        let at = self.b.layout(size, al_log2, leaves[0..leaves.len()]);
+        if !self.lays.contains_key(&h) {
+            self.lays.insert(h, at);
+        }
+        return at;
+    }
+
+    // The scalar leaves of `(m, t)` at byte `off` into `out` (struct fields, array elements, every
+    // variant of an enum and member of a union, overlapping); false past 16 leaves.
+    fn leaves(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        m: ModuleId,
+        t: TypeId,
+        off: u32,
+        out: &mut Vector<(u32, u8)>,
+        depth: u32,
+    ) bool {
+        if out.len() > 16 || depth > 8 {
+            return false;
+        }
+        let mut ti = TyI { cls: 0 };
+        if !self.ty(c, m, t, &mut ti) {
+            return false;
+        }
+        if ti.cls == VC_ZST {
+            return true;
+        }
+        if ti.cls == VC_SCALAR {
+            out.push((off, ti.mty));
+            return true;
+        }
+        let mut rm = m;
+        let mut rt = t;
+        let y = Lower::resolved(c, m, t, &mut rm, &mut rt);
+        if y.kind == TypeKind::TYPE_BUILTIN {
+            // c32, c64: two floats; va_list: pointers.
+            let bt = y.as_data.builtin;
+            let ft = ast::pick(bt == BuiltinType::BT_C32, T_F32, T_F64);
+            if bt == BuiltinType::BT_C32 || bt == BuiltinType::BT_C64 {
+                out.push((off, ft));
+                out.push((off + ti.size / 2, ft));
+                return true;
+            }
+            for k in 0..ti.size / self.pkg.ptr_bytes {
+                out.push((off + k * self.pkg.ptr_bytes, T_PTR));
+            }
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_DYN || y.kind == TypeKind::TYPE_SLICE {
+            out.push((off, T_PTR));
+            out.push((off + self.pkg.ptr_bytes, ast::pick(y.kind == TypeKind::TYPE_DYN, T_PTR, self.ptr_int())));
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_ARRAY {
+            let n = c.mg.arr_len(rm, &y);
+            let mut el = TyI { cls: 0 };
+            if n < 0 || !self.ty(c, rm, y.as_data.arr.elem, &mut el) || el.size == 0 {
+                return el.size == 0 && n >= 0;
+            }
+            for k in 0..n as u32 {
+                if !self.leaves(c, rm, y.as_data.arr.elem, off + k * el.size, out, depth + 1) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        // Structs, unions, tuples, enums with payloads and closure envs: each member at its offset.
+        let mut fl = Vector::<FieldAt>::new();
+        if !self.fields_of(c, rm, rt, &mut fl) {
+            return false;
+        }
+        for k in 0..fl.len() {
+            let f = fl[k];
+            if !self.leaves(c, f.m, f.t, off + f.off, out, depth + 1) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // ---- Members ----
+
+    // Every member of aggregate `(rm, rt)` with its offset and type: a struct's or union's fields, a
+    // tuple's members, a closure env's captures, an enum's tag then every variant's payload members.
+    fn fields_of(self: &mut Self, c: &mut cbe::CEmit, rm0: ModuleId, rt0: TypeId, out: &mut Vector<FieldAt>) bool {
+        // Grounded first: an instance's arguments may read the bindings in place (`Float<{E + 2}, ..>`
+        // inside `Float<E, ..>`'s instance), which binding the instance's own parameters would shadow.
+        let (rm, rt) = self.grounded(c, rm0, rt0);
+        let y = *Lower::ast(c, rm).type_at(rt);
+        if y.kind == TypeKind::TYPE_FUNCTION {
+            let a = Lower::ast(c, y.module);
+            let cf = a.closure_fact(y.as_data.decl);
+            if cf == null {
+                return false;
+            }
+            let mut off: u32 = 0;
+            for k in 0..unsafe (&*cf).ncaps {
+                let ct = unsafe a.caps_of(cf)[k as usize].ty;
+                let mut ti = TyI { cls: 0 };
+                if !self.ty(c, y.module, ct, &mut ti) {
+                    return false;
+                }
+                if ti.cls == VC_ZST {
+                    continue;
+                }
+                let byref = ((unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps) >> k as u64 & 1) != 0;
+                let sz = ast::pick(byref, self.pkg.ptr_bytes, ti.size);
+                let al = ast::pick(byref, self.pkg.ptr_bytes, ti.align);
+                off = round_up(off, al);
+                out.push(
+                    FieldAt {
+                        m: y.module,
+                        t: ast::pick(byref, TYPE_NONE, ct),
+                        off: off,
+                        idx: k,
+                        node: NODE_NONE,
+                        variant: NODE_NONE,
+                    },
+                );
+                off += sz;
+            }
+            return true;
+        }
+        let mut dm = rm;
+        let mut dn = NODE_NONE;
+        let mut nb: usize = 0;
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            dm = y.module;
+            dn = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *Lower::ast(c, rm).instance(y.as_data.inst);
+            dm = it.module;
+            dn = it.decl;
+            nb = c.mg.push_generics(dm, Lower::ast(c, dm).at_const(dn).as_data.aggregate.generics, rm, &it);
+        } else {
+            return false;
+        }
+        let ok = self.decl_fields(c, dm, dn, out);
+        c.mg.pop_subs(nb);
+        return ok;
+    }
+
+    // `fields_of` for declaration `(dm, dn)`, its generic parameters bound.
+    fn decl_fields(self: &mut Self, c: &mut cbe::CEmit, dm: ModuleId, dn: NodeId, out: &mut Vector<FieldAt>) bool {
+        let a = Lower::ast(c, dm);
+        let n = a.at_const(dn);
+        let ms = n.as_data.aggregate.members;
+        if n.kind == NodeKind::NODE_ENUM {
+            if !a.enum_has_payload(dn) {
+                return false;
+            }
+            let tag_t = ast::pick(a.enum_tag_is_byte(dn), T_I8, T_I32);
+            out.push(
+                FieldAt {
+                    m: dm,
+                    t: TYPE_NONE,
+                    off: 0,
+                    idx: 0xFFFFFFFF,
+                    node: NODE_NONE,
+                    mty: tag_t,
+                    variant: NODE_NONE,
+                },
+            );
+            let mut el = EnumL { ok: false };
+            if !self.enum_shape(c, dm, dn, &mut el) {
+                return false;
+            }
+            for i in 0..ms.len {
+                let vid = unsafe a.list(ms)[i as usize];
+                let pl = a.at_const(vid).as_data.variant.payload;
+                let mut off: u32 = 0;
+                for k in 0..pl.len {
+                    let pid = unsafe a.list(pl)[k as usize];
+                    let mt = a.member_ty(pid);
+                    let mut ti = TyI { cls: 0 };
+                    if mt == TYPE_NONE || !self.ty(c, dm, mt, &mut ti) {
+                        return self.fail("payload-type");
+                    }
+                    off = round_up(off, ti.align);
+                    let (gm, gt) = self.grounded(c, dm, mt);
+                    out.push(FieldAt { m: gm, t: gt, off: el.payload_off + off, idx: k, node: pid, variant: vid });
+                    off += ti.size;
+                }
+            }
+            return true;
+        }
+        let is_union = n.as_data.aggregate.is_union;
+        let is_tuple = n.as_data.aggregate.is_tuple;
+        let packed = a.attr_of(dn, AttrKind::ATTR_PACKED) != null;
+        let mut off: u32 = 0;
+        let mut idx: u32 = 0;
+        for i in 0..ms.len {
+            let fid = unsafe a.list(ms)[i as usize];
+            if !is_tuple && a.at_const(fid).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            let mt = a.member_ty(fid);
+            let mut ti = TyI { cls: 0 };
+            if mt == TYPE_NONE || !self.ty(c, dm, mt, &mut ti) {
+                return self.fail("field-type");
+            }
+            let al = ast::pick(packed, 1u32, ti.align);
+            if !is_union {
+                off = round_up(off, al);
+            }
+            let (gm, gt) = self.grounded(c, dm, mt);
+            out.push(
+                FieldAt {
+                    m: gm,
+                    t: gt,
+                    off: ast::pick(is_union, 0u32, off),
+                    idx: idx,
+                    node: fid,
+                    packed: packed,
+                    variant: NODE_NONE,
+                },
+            );
+            if !is_union {
+                off += ti.size;
+            }
+            idx += 1;
+        }
+        return true;
+    }
+
+    // The shape of payload enum `(dm, dn)` (its generic parameters bound).
+    fn enum_shape(self: &mut Self, c: &mut cbe::CEmit, dm: ModuleId, dn: NodeId, out: &mut EnumL) bool {
+        let a = Lower::ast(c, dm);
+        let ms = a.at_const(dn).as_data.aggregate.members;
+        let mut usize9: u32 = 0;
+        let mut ualign: u32 = 1;
+        for i in 0..ms.len {
+            let pl = a.at_const(unsafe a.list(ms)[i as usize]).as_data.variant.payload;
+            let mut off: u32 = 0;
+            let mut al: u32 = 1;
+            for k in 0..pl.len {
+                let mt = a.member_ty(unsafe a.list(pl)[k as usize]);
+                let mut ti = TyI { cls: 0 };
+                if mt == TYPE_NONE || !self.ty(c, dm, mt, &mut ti) {
+                    return self.fail("payload-type");
+                }
+                off = round_up(off, ti.align) + ti.size;
+                al = ast::pick(ti.align > al, ti.align, al);
+            }
+            off = round_up(off, al);
+            usize9 = ast::pick(off > usize9, off, usize9);
+            ualign = ast::pick(al > ualign, al, ualign);
+        }
+        let tag: u32 = ast::pick(a.enum_tag_is_byte(dn), 1u32, 4u32);
+        out.ok = true;
+        out.payload_off = round_up(tag, ualign);
+        out.tag = ast::pick(tag == 1, T_I8, T_I32);
+        out.align = ast::pick(ualign > tag, ualign, tag);
+        out.size = round_up(out.payload_off + usize9, out.align);
+        return true;
+    }
+
+    // The offset and type of member `pj` (a PJ_FIELD) of aggregate `(rm, rt)`, after a downcast to
+    // `variant` (NODE_NONE: none).
+    fn member(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        rm: ModuleId,
+        rt: TypeId,
+        pj: irc::Projection,
+        variant: NodeId,
+        out: &mut FieldAt,
+    ) bool {
+        let mut fl = Vector::<FieldAt>::new();
+        if !self.fields_of(c, rm, rt, &mut fl) {
+            if self.dbg {
+                eprint("member-of: kind {} err {}\n", Lower::ast(c, rm).type_at(rt).kind as u32, self.err);
+            }
+            return self.fail("member-of");
+        }
+        for k in 0..fl.len() {
+            let f = fl[k];
+            if f.idx == 0xFFFFFFFF {
+                continue;
+            }
+            if variant != NODE_NONE && f.variant != variant {
+                continue;
+            }
+            if variant == NODE_NONE && f.variant != NODE_NONE {
+                continue;
+            }
+            let hit = if pj.sub != NODE_NONE && pj.data != irc::PJ_UNION_FIELD {
+                f.node == pj.sub || f.node == NODE_NONE && f.idx == pj.data;
+            } else if pj.data == irc::PJ_UNION_FIELD {
+                f.node == pj.sub;
+            } else {
+                f.idx == pj.data;
+            };
+            if hit {
+                *out = f;
+                return true;
+            }
+        }
+        return self.fail("member");
+    }
+
+    // The offset and machine type of a field named `name` of aggregate `(rm, rt)` (`ptr`, `len`,
+    // `data`, `cap`); false when it has none.
+    fn named_field(self: &mut Self, c: &mut cbe::CEmit, rm: ModuleId, rt: TypeId, name: str, out: &mut FieldAt) bool {
+        let mut fl = Vector::<FieldAt>::new();
+        let y = *Lower::ast(c, rm).type_at(rt);
+        if y.kind == TypeKind::TYPE_DYN || y.kind == TypeKind::TYPE_SLICE {
+            let second = name == "len" || name == "vt";
+            *out = FieldAt {
+                m: rm,
+                t: TYPE_NONE,
+                off: ast::pick(second, self.pkg.ptr_bytes, 0u32),
+                mty: ast::pick(name == "len", self.ptr_int(), T_PTR),
+                variant: NODE_NONE,
+                node: NODE_NONE,
+            };
+            return name == "ptr" || name == "len" || name == "data" || name == "vt";
+        }
+        if !self.fields_of(c, rm, rt, &mut fl) {
+            return false;
+        }
+        let mut dm = rm;
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            dm = Lower::ast(c, rm).instance(y.as_data.inst).module;
+        } else if y.kind == TypeKind::TYPE_STRUCT {
+            dm = y.module;
+        }
+        let a = Lower::ast(c, dm);
+        let src = Lower::p(c).modules.at(dm as usize).source.as_str();
+        for k in 0..fl.len() {
+            let f = fl[k];
+            if f.node == NODE_NONE || a.at_const(f.node).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            let sp = a.at_const(a.at_const(f.node).as_data.field.name).as_data.name.text;
+            if src.slice(sp.start as usize, sp.end as usize) == name {
+                *out = f;
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
+// A member of an aggregate: its type `(m, t)` (TYPE_NONE: a tag or pointer of machine type `mty`),
+// its byte offset, its index, its declaration node and, in an enum, its variant.
+struct FieldAt {
+    pub m: ModuleId,
+    pub t: TypeId,
+    pub off: u32,
+    pub idx: u32,
+    pub node: NodeId,
+    pub variant: NodeId,
+    pub mty: u8,
+    pub packed: bool,
+}
+
+extend FieldAt as Copy {}
+
+struct EnumL {
+    pub ok: bool,
+    pub payload_off: u32,
+    pub tag: u8,
+    pub size: u32,
+    pub align: u32,
+}
+
+/// `v` rounded up to a multiple of `a`.
+pub const fn round_up(v: u32, a: u32) u32 {
+    if a <= 1 {
+        return v;
+    }
+    return (v + a - 1) / a * a;
+}
+
+/// The log2 of power of two `a`.
+pub const fn log2(a: u32) u32 {
+    let mut n: u32 = 0;
+    while n < 31 && 1u32 << n < a {
+        n += 1;
+    }
+    return n;
+}
+
+// A place: SSA variable `var`, memory at `addr`, a value `val` (a folded constant), or no storage.
+const PR_VAR: u8 = 0;
+const PR_MEM: u8 = 1;
+const PR_VAL: u8 = 2;
+const PR_ZST: u8 = 3;
+
+struct PlaceRef {
+    pub kind: u8,
+    pub var: u32,
+    pub addr: Value,
+    pub m: ModuleId,
+    pub t: TypeId,
+    pub ti: TyI,
+    pub packed: bool,
+}
+
+extend PlaceRef as Copy {}
+
+extend Lower {
+    // ---- Building ----
+
+    fn inst(self: &mut Self, op: u8, ty: u8, aux: u16, a: u32, b: u32, c: u32) Value {
+        return self.b.emit(Inst { op: op, ty: ty, aux: aux, a: a, b: b, c: c }, self.loc);
+    }
+
+    fn iconst(self: &mut Self, ty: u8, v: u64) Value {
+        let bits = type_bits(ty, self.pkg.ptr_bytes);
+        let u = if bits >= 64 {
+            v;
+        } else {
+            v & (1u64 << bits as u64) - 1;
+        };
+        return self.inst(O_ICONST, ty, 0, u as u32, (u >> 32) as u32, VNONE);
+    }
+
+    fn fconst(self: &mut Self, ty: u8, bits: u64) Value {
+        return self.inst(O_FCONST, ty, 0, bits as u32, (bits >> 32) as u32, VNONE);
+    }
+
+    fn load(self: &mut Self, ty: u8, addr: Value, off: u32, packed: bool) Value {
+        let al = ast::pick(packed, 0u16, log2(type_align(ty, self.pkg.ptr_bytes)) as u16);
+        return self.inst(O_LOAD, ty, al, addr, VNONE, off);
+    }
+
+    fn store(self: &mut Self, v: Value, addr: Value, off: u32, packed: bool) {
+        let ty = self.vty(v);
+        let al = ast::pick(packed, 0u16, log2(type_align(ty, self.pkg.ptr_bytes)) as u16);
+        let _ = self.inst(O_STORE, T_NONE, al, addr, v, off);
+    }
+
+    fn ptradd(self: &mut Self, base: Value, ix: Value, scale: u32, off: u32) Value {
+        if ix == VNONE && off == 0 {
+            return base;
+        }
+        if ix != VNONE && scale == 0 {
+            return self.ptradd(base, VNONE, 0, off);
+        }
+        if ix != VNONE && scale > 65535 {
+            let s = self.iconst(self.ptr_int(), scale);
+            let k = self.arith(O_MUL, ix, s);
+            return self.inst(O_PTRADD, T_PTR, 1, base, k, off);
+        }
+        return self.inst(O_PTRADD, T_PTR, scale as u16, base, ix, off);
+    }
+
+    fn arith(self: &mut Self, op: u8, x: Value, y: Value) Value {
+        return self.inst(op, self.vty(x), 0, x, y, VNONE);
+    }
+
+    fn icmp(self: &mut Self, cond: u16, x: Value, y: Value) Value {
+        return self.inst(O_ICMP, T_I8, cond, x, y, VNONE);
+    }
+
+    // Copy a value of memory type `ti` from `src` to `dst` in units of its alignment (8 bytes at most),
+    // each load (`load_side`) or each store volatile: one access per unit, in order.
+    fn volatile_copy(self: &mut Self, dst: Value, src: Value, ti: TyI, load_side: bool) {
+        let mut u: u32 = 8;
+        while u > ti.align || ti.size % u != 0 {
+            u = u / 2;
+        }
+        let ty = ast::pick(u == 8, T_I64, ast::pick(u == 4, T_I32, ast::pick(u == 2, T_I16, T_I8)));
+        let al = log2(u) as u16;
+        let lv = ast::pick(load_side, MEM_VOLATILE, 0u16);
+        let sv = MEM_VOLATILE - lv;
+        for i in 0..ti.size / u {
+            let x = self.inst(O_LOAD, ty, al | lv, src, VNONE, i * u);
+            let _ = self.inst(O_STORE, T_NONE, al | sv, dst, x, i * u);
+        }
+    }
+
+    // IN_VOLATILE_STORE(p, v): `v` written where `p` points with volatile accesses. A zero-sized value
+    // has no bytes to write.
+    fn volatile_store(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, rv: irc::Rvalue) bool {
+        let vop = b.oper_pool[(rv.a + 1) as usize];
+        let mut vi = TyI { cls: 0 };
+        if !self.ty(c, b.module, Lower::op_ty(b, vop), &mut vi) {
+            return false;
+        }
+        if vi.cls == VC_ZST {
+            return true;
+        }
+        let a = self.operand(c, b, b.oper_pool[rv.a as usize]);
+        if a == VNONE {
+            return false;
+        }
+        if vi.cls == VC_MEM {
+            let src = self.operand_addr(c, b, vop, vi);
+            if src == VNONE {
+                return false;
+            }
+            self.volatile_copy(a, src, vi, false);
+            return true;
+        }
+        let v = self.operand(c, b, vop);
+        if v == VNONE {
+            return false;
+        }
+        let al = log2(type_align(vi.mty, self.pkg.ptr_bytes)) as u16;
+        let _ = self.inst(O_STORE, T_NONE, al | MEM_VOLATILE, a, v, 0);
+        return true;
+    }
+
+    fn memcpy(self: &mut Self, dst: Value, src: Value, n: u32) {
+        if n == 0 || dst == src {
+            return;
+        }
+        let k = self.iconst(self.ptr_int(), n);
+        let _ = self.inst(O_MEMCPY, T_NONE, MEM_OVERLAP, dst, src, k);
+    }
+
+    fn memset0(self: &mut Self, dst: Value, n: u32) {
+        if n == 0 {
+            return;
+        }
+        let z = self.iconst(T_I8, 0);
+        let k = self.iconst(self.ptr_int(), n);
+        let _ = self.inst(O_MEMSET, T_NONE, 0, dst, z, k);
+    }
+
+    // The type of draft value `v`.
+    fn vty(self: &Self, v: Value) u8 {
+        if (v & VPARAM) != 0 && (v & PHI_TAG) != 0 {
+            return self.phis[(v & ~(VPARAM | PHI_TAG)) as usize].ty;
+        }
+        return self.b.type_of(v);
+    }
+
+    // Convert integer `v` to integer type `to`: sign or zero extend (`signed`), or truncate.
+    fn int_to(self: &mut Self, v: Value, to: u8, signed: bool) Value {
+        let from = self.vty(v);
+        if from == to {
+            return v;
+        }
+        if from == T_PTR || to == T_PTR {
+            let op = ast::pick(from == T_PTR, O_PTRTOINT, O_INTTOPTR);
+            let mid = ast::pick(from == T_PTR, self.ptr_int(), self.ptr_int());
+            if from == T_PTR {
+                let x = self.inst(O_PTRTOINT, mid, 0, v, VNONE, VNONE);
+                return self.int_to(x, to, signed);
+            }
+            let x = self.int_to(v, mid, signed);
+            return self.inst(op, T_PTR, 0, x, VNONE, VNONE);
+        }
+        let fb = type_bits(from, self.pkg.ptr_bytes);
+        let tb = type_bits(to, self.pkg.ptr_bytes);
+        if tb < fb {
+            return self.inst(O_TRUNC, to, 0, v, VNONE, VNONE);
+        }
+        if tb == fb {
+            return self.inst(O_BITCAST, to, 0, v, VNONE, VNONE);
+        }
+        return self.inst(ast::pick(signed, O_SEXT, O_ZEXT), to, 0, v, VNONE, VNONE);
+    }
+
+    // A new LIR block of no parameters.
+    fn block(self: &mut Self) u32 {
+        let none: []u8 = [];
+        return self.b.add_block(none);
+    }
+
+    fn edge(self: &mut Self, to: u32, src: u32, dst: u32) u32 {
+        self.edges.push(DEdge { to: to, src: src, dst: dst });
+        return self.edges.len() as u32 - 1;
+    }
+
+    // Continue in a new block after a branch to `other` taken when `cond` is not 0 (`taken`) or 0.
+    fn split(self: &mut Self, cond: Value, other: u32, taken: bool) {
+        let next = self.block();
+        let eo = self.edge(other, NONE, NONE);
+        let en = self.edge(next, NONE, NONE);
+        let _ = if taken {
+            self.inst(O_BR, T_NONE, 0, cond, eo, en);
+        } else {
+            self.inst(O_BR, T_NONE, 0, cond, en, eo);
+        };
+        self.b.begin(next);
+    }
+
+    // Trap with `msg` when `fail` is not 0.
+    fn check(self: &mut Self, fail: Value, msg: str) {
+        let pb = self.panic_block(msg);
+        self.split(fail, pb, true);
+    }
+
+    // The cold block that panics with `msg` at the current location: one per message and location.
+    fn panic_block(self: &mut Self, msg: str) u32 {
+        let mid = self.pkg.add_message(msg);
+        let key = mid as u64 << 32 | self.loc as u64;
+        switch self.panics.get(&key) {
+            Some(k) => {
+                return *k;
+            },
+            None => {},
+        };
+        let k = self.block();
+        self.b.blocks.index_mut(k as usize).flags = BLOCK_COLD;
+        self.panics.insert(key, k);
+        self.pan_list.push(k as u64 << 32 | mid as u64);
+        self.pan_loc.push(self.loc);
+        return k;
+    }
+
+    // The body's number of the package symbol named `name`, made a function or data symbol when new.
+    fn sym(self: &mut Self, name: str, kind: u8) u32 {
+        let s = self.pkg.symbol(name, kind);
+        return self.sym_of(s);
+    }
+
+    // The body's number of package symbol `s`.
+    fn sym_of(self: &mut Self, s: u32) u32 {
+        switch self.sym_map.get(&s) {
+            Some(k) => {
+                return *k;
+            },
+            None => {},
+        };
+        self.b.syms.push(s);
+        let k = self.b.syms.len() as u32 - 1;
+        self.sym_map.insert(s, k);
+        return k;
+    }
+
+    fn symaddr(self: &mut Self, name: str, kind: u8) Value {
+        let k = self.sym(name, kind);
+        return self.inst(O_SYMADDR, T_PTR, 0, k, 0, VNONE);
+    }
+
+    // A call of `name` with `args` of types `tys` (each a type code or AGG | layout) and result `ret`.
+    fn call_sym(self: &mut Self, name: str, args: []Value, tys: []u32, ret: u32) Value {
+        let sg = self.b.signature(tys, tys.len() as u32, false, ret);
+        let at = self.b.pool_list(args);
+        let k = self.sym(name, SK_FUNC);
+        let rty = ast::pick((ret & AGG) != 0, T_NONE, ret as u8);
+        return self.inst(O_CALL, rty, args.len() as u16, k, sg, at);
+    }
+
+    // The zero of type `ty`: the entry block's for a variable's type, else one here.
+    fn zero(self: &mut Self, ty: u8) Value {
+        switch self.zeros.get(&(ty as u32)) {
+            Some(v) => {
+                return *v;
+            },
+            None => {},
+        };
+        return self.zero_here(ty);
+    }
+
+    fn fail_v(self: &mut Self, why: str<'static>) Value {
+        let _ = self.fail(why);
+        return VNONE;
+    }
+
+    // ---- SSA variables ----
+
+    const fn dkey(blk: u32, var: u32) u64 {
+        return blk as u64 << 32 | var as u64;
+    }
+
+    fn write_var(self: &mut Self, var: u32, v: Value) {
+        self.defs.insert(Lower::dkey(self.cur, var), v);
+    }
+
+    // The value of `var` at the end of core block `blk` (at the current point when it is the block
+    // being lowered): its last write, else through a single predecessor, else a phi.
+    fn read_var(self: &mut Self, var: u32, blk: u32) Value {
+        self.scratch.truncate(0);
+        let mut k = blk;
+        let mut v = VNONE;
+        // A chain of single predecessors visits each block at most once.
+        for _ in 0..self.lblk.len() + 2 {
+            switch self.defs.get(&Lower::dkey(k, var)) {
+                Some(x) => {
+                    v = *x;
+                    break;
+                },
+                None => {},
+            };
+            if k == self.virt {
+                v = self.zero(self.var_ty[var as usize]);
+                break;
+            }
+            let p0 = self.npred[k as usize];
+            let np = self.npred[k as usize + 1] - p0;
+            if np == 1 {
+                self.scratch.push(k);
+                k = self.preds[p0 as usize];
+                continue;
+            }
+            if np == 0 {
+                v = self.zero(self.var_ty[var as usize]);
+                break;
+            }
+            self.phis.push(Phi { blk: k, var: var, ty: self.var_ty[var as usize], ops: 0, nops: 0, repl: VNONE });
+            v = VPARAM | PHI_TAG | self.phis.len() as u32 - 1;
+            self.defs.insert(Lower::dkey(k, var), v);
+            break;
+        }
+        for i in 0..self.scratch.len() {
+            self.defs.insert(Lower::dkey(self.scratch[i], var), v);
+        }
+        return v;
+    }
+
+    // `v` after the phis replaced so far.
+    fn find(self: &Self, v: Value) Value {
+        let mut x = v;
+        // Each step follows a replacement made earlier: at most one per phi.
+        for _ in 0..self.phis.len() + 1 {
+            if (x & VPARAM) == 0 || (x & PHI_TAG) == 0 || x == VNONE {
+                return x;
+            }
+            let r = self.phis[(x & ~(VPARAM | PHI_TAG)) as usize].repl;
+            if r == VNONE {
+                return x;
+            }
+            x = r;
+        }
+        return x;
+    }
+}
+
+// How a call argument passes (`arg_mode`), the adjustments the C emitter makes at a call.
+const AM_VAL: u8 = 0;
+const AM_DEREF: u8 = 1; // the parameter takes the value the reference operand points at
+const AM_REF: u8 = 2; // the parameter takes the operand's address
+const AM_BOX: u8 = 3; // a Box operand passes its payload pointer
+const AM_BOXREF: u8 = 4; // a reference to a Box passes the Box's payload pointer
+const AM_F64: u8 = 5; // an f32 operand widens to the f64 parameter
+const AM_WIDE: u8 = 6; // a wide literal into a scalar parameter passes its low limb
+const AM_ZST_REF: u8 = 7; // a zero-sized operand by reference: the sentinel
+const AM_VARARG: u8 = 8; // past a variadic callee's parameters: C's default promotions
+
+extend Lower {
+    /// Lower `b`, the body of symbol `name`: a closure's when `cnode` names its node in module `cm`.
+    /// A refusal goes to `fails`.
+    pub fn body(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        b: &irc::CoreBody,
+        name: str,
+        cm: ModuleId,
+        cnode: NodeId,
+        noret: bool,
+    ) bool {
+        self.nbodies += 1;
+        if self.pkg.find_symbol(name) != NONE && self.pkg.syms[self.pkg.find_symbol(name) as usize].def != NONE {
+            return true; // an emission of a body already lowered
+        }
+        let cd = c.collect_demand;
+        let ro = c.mg.rec_on;
+        c.collect_demand = false;
+        c.mg.rec_on = false;
+        self.err = "";
+        self.dbg = self.dump.len() != 0 && self.dump.as_str() == name;
+        let ok = self.body_i(c, b, name, cm, cnode, noret);
+        c.collect_demand = cd;
+        c.mg.rec_on = ro;
+        if !ok {
+            self.fails.push(LFail { sym: String::from_str(name), why: self.err });
+            if self.dbg || self.dump.len() != 0 && self.dump.as_str() == self.err {
+                eprint("lir: refused {}: {}\n{}", name, self.err, irp::print_body(b).as_str());
+            }
+            return false;
+        }
+        self.tidy();
+        let s = self.pkg.symbol(name, SK_FUNC);
+        let _ = self.pkg.define(s, &self.b);
+        // A test without parameters runs in the CTFE comparison.
+        let oa = Lower::ast(c, b.owner.module);
+        if cnode == NODE_NONE && b.owner.node != NODE_NONE && b.args == 0 && oa.attr_of(
+            b.owner.node,
+            AttrKind::ATTR_TEST,
+        ) != null {
+            self.tests.push(LTest { sym: String::from_str(name), m: b.owner.module, node: b.owner.node });
+        }
+        return true;
+    }
+
+    fn reset(self: &mut Self, m: ModuleId) {
+        self.m = m;
+        self.b.clear();
+        self.li.truncate(0);
+        self.tcache.clear();
+        self.var_ty.truncate(0);
+        self.spc = NONE;
+        self.defs.clear();
+        self.phis.truncate(0);
+        self.phi_ops.truncate(0);
+        self.lblk.truncate(0);
+        self.npred.truncate(0);
+        self.preds.truncate(0);
+        self.edges.truncate(0);
+        self.panics.clear();
+        self.pan_list.truncate(0);
+        self.pan_loc.truncate(0);
+        self.sym_map.clear();
+        self.zeros.clear();
+        self.lays.clear();
+        self.loc = 0;
+        self.ret_ptr = VNONE;
+        self.env = VNONE;
+        self.temps_free.truncate(0);
+        self.temps_used.truncate(0);
+        self.upack.clear();
+        self.uoffs.truncate(0);
+    }
+
+    fn body_i(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        b: &irc::CoreBody,
+        name: str,
+        cm: ModuleId,
+        cnode: NodeId,
+        noret: bool,
+    ) bool {
+        self.reset(b.module);
+        self.bm = b.module;
+        self.noret = noret;
+        let pk = Lower::p(c);
+        self.file = self.pkg.add_file(pk.modules.at(b.module as usize).file.as_str());
+        let oa = Lower::ast(c, b.owner.module);
+        if cnode == NODE_NONE && b.owner.node != NODE_NONE && (oa.unsafe_claims(b.owner.node) & UNSAFE_NAKED) != 0 {
+            return self.fail("asm"); // a naked function is assembly
+        }
+        for si in 0..b.statements.len() {
+            let s = b.statements[si];
+            if s.kind == irc::ST_ASSIGN {
+                let rv = b.rvalues[s.rvalue as usize];
+                if rv.kind == irc::RV_INTRINSIC && rv.c == irc::IN_ASM {
+                    return self.fail("asm");
+                }
+            }
+        }
+        // Captures: the trailing argument locals of a closure body, read through its env.
+        let mut ncaps: u32 = 0;
+        let mut nparams = b.args;
+        let mut byref_caps: u64 = 0;
+        if cnode != NODE_NONE {
+            let cf = Lower::ast(c, cm).closure_fact(cnode);
+            if cf == null {
+                return self.fail("closure-fact");
+            }
+            ncaps = unsafe (&*cf).ncaps;
+            nparams = unsafe (&*cf).nparams;
+            byref_caps = unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps;
+            if b.args != nparams + ncaps {
+                return self.fail("closure-args");
+            }
+        }
+        let cap_base = b.returns + nparams;
+        // Which locals need memory (a projection other than through a pointer, an address taken), and
+        // which have their address escape (then no result is written straight into them).
+        let n = b.locals.len();
+        let mut mem = Vector::<bool>::new();
+        mem.resize_default(n);
+        self.escaped.truncate(0);
+        self.escaped.resize_default(n);
+        if !self.scan(c, b, &mut mem) || !self.untyped(c, b) {
+            return false;
+        }
+        for l in 0..n {
+            let d = b.locals[l];
+            let mut info = LInfo { kind: LK_MEM, byref: false, ti: TyI { cls: VC_ZST }, var: NONE, addr: VNONE };
+            if d.storage == irc::LS_STATIC_REF {
+                info.kind = LK_STATIC;
+                if !self.ty(c, b.module, d.ty, &mut info.ti) {
+                    return false;
+                }
+            } else if ncaps != 0 && l as u32 >= cap_base && l as u32 < cap_base + ncaps {
+                info.kind = LK_CAP;
+                info.byref = (byref_caps >> (l as u32 - cap_base) as u64 & 1) != 0;
+                if !self.ty(c, b.module, d.ty, &mut info.ti) {
+                    return false;
+                }
+            } else if d.ty == TYPE_NONE && self.upack.contains_key(&(l as u32)) {
+                // An untyped local a call of several results fills: the results' memory.
+                let lt = *self.upack.get(&(l as u32)).unwrap() >> 32;
+                info.ti = TyI {
+                    cls: VC_MEM,
+                    mty: T_NONE,
+                    size: self.b.pool[lt as usize],
+                    align: 1u32 << self.b.pool[lt as usize + 1],
+                };
+            } else {
+                if !self.ty(c, b.module, d.ty, &mut info.ti) {
+                    if self.dbg {
+                        eprint("lir-debug local {} of {}\n", l, b.locals.len());
+                    }
+                    return false;
+                }
+                if info.ti.cls == VC_ZST {
+                    info.kind = LK_ZST;
+                } else if info.ti.cls == VC_SCALAR && !mem[l] && !(b.returns > 1 && l as u32 < b.returns) {
+                    info.kind = LK_VAR;
+                    info.var = self.var_ty.len() as u32;
+                    self.var_ty.push(info.ti.mty);
+                }
+            }
+            self.li.push(info);
+        }
+        if !self.cfg(b) {
+            return false;
+        }
+        if !self.entry(c, b, ncaps, nparams, cap_base, cnode == NODE_NONE && self.variadic(c, b)) {
+            return false;
+        }
+        for k in 0..self.order.len() {
+            let blk = self.order[k];
+            self.cur = blk;
+            self.b.begin(self.lblk[blk as usize]);
+            if !self.lower_block(c, b, blk) {
+                return false;
+            }
+        }
+        return self.finish(name);
+    }
+
+    // Whether `b` is a function defined with a variadic tail.
+    fn variadic(self: &Self, c: &cbe::CEmit, b: &irc::CoreBody) bool {
+        if b.owner.node == NODE_NONE {
+            return false;
+        }
+        let on = Lower::ast(c, b.owner.module).at_const(b.owner.node);
+        return on.kind == NodeKind::NODE_FUNCTION && on.as_data.function.is_variadic();
+    }
+
+    // Mark in `mem` the locals that need memory and in `escaped` those whose address escapes.
+    fn scan(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, mem: &mut Vector<bool>) bool {
+        for p in 0..b.places.len() {
+            let pl = b.places[p];
+            if pl.proj_len == 0 {
+                continue;
+            }
+            let first = b.projections[pl.proj_start as usize];
+            if first.kind == irc::PJ_DEREF {
+                continue;
+            }
+            // A field or an index through a pointer local reads the pointer.
+            let mut ti = TyI { cls: 0 };
+            if !self.ty(c, b.module, b.locals[pl.base as usize].ty, &mut ti) {
+                return false;
+            }
+            if !(ti.cls == VC_SCALAR && ti.mty == T_PTR) {
+                mem[pl.base as usize] = true;
+            }
+        }
+        for si in 0..b.statements.len() {
+            let s = b.statements[si];
+            if s.kind != irc::ST_ASSIGN {
+                continue;
+            }
+            let rv = b.rvalues[s.rvalue as usize];
+            if rv.kind == irc::RV_REF || rv.kind == irc::RV_ADDR || rv.kind == irc::RV_SLICE {
+                self.take_addr(b, rv.a, mem);
+            } else if rv.kind == irc::RV_CLOSURE && rv.b != 0 {
+                let cf = Lower::ast(c, rv.item.module).closure_fact(rv.item.node);
+                if cf == null {
+                    return self.fail("closure-fact");
+                }
+                let by = unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps;
+                for i in 0..rv.b {
+                    let op = b.operands[b.oper_pool[(rv.a + i) as usize] as usize];
+                    if (by >> i as u64 & 1) != 0 && op.kind != irc::OP_CONST {
+                        self.take_addr(b, op.data, mem);
+                    }
+                }
+            } else if rv.kind == irc::RV_INTRINSIC && (rv.c == irc::IN_VA_START || rv.c == irc::IN_VA_END) {
+                self.take_addr(b, s.place, mem);
+            }
+        }
+        for bi in 0..b.blocks.len() {
+            let t = b.blocks[bi].term;
+            if t.kind != irc::TM_CALL || t.callee.node == NODE_NONE {
+                continue;
+            }
+            for i in 0..t.args_len {
+                let opid = b.oper_pool[(t.args_start + i) as usize];
+                let op = b.operands[opid as usize];
+                if op.kind == irc::OP_CONST {
+                    continue;
+                }
+                // An interface method resolves to its implementation at the call: either reference rule.
+                let am = self.arg_mode(c, b, t.callee, i, opid);
+                if am == AM_REF {
+                    self.take_addr(b, op.data, mem);
+                }
+            }
+        }
+        return true;
+    }
+
+    fn take_addr(self: &mut Self, b: &irc::CoreBody, pid: u32, mem: &mut Vector<bool>) {
+        let pl = b.places[pid as usize];
+        if pl.proj_len == 0 || b.projections[pl.proj_start as usize].kind != irc::PJ_DEREF {
+            mem[pl.base as usize] = true;
+            self.escaped[pl.base as usize] = true;
+        }
+    }
+
+    // The reachable core blocks in reverse postorder (`order`), their LIR blocks and predecessors.
+    fn cfg(self: &mut Self, b: &irc::CoreBody) bool {
+        let nb = b.blocks.len();
+        self.virt = nb as u32;
+        self.lblk.resize_default(nb);
+        for k in 0..nb {
+            self.lblk[k] = NONE;
+        }
+        // The entry block: the signature's parameters, then a jump into the core entry.
+        let sig_tys = Vector::<u8>::new();
+        let _ = sig_tys;
+        self.order.truncate(0);
+        let mut post = Vector::<u32>::new();
+        let mut stack = Vector::<u64>::new();
+        let mut seen = Vector::<bool>::new();
+        seen.resize_default(nb);
+        seen[b.entry as usize] = true;
+        stack.push(b.entry as u64 << 32);
+        let mut succ = Vector::<u32>::new();
+        // Each block enters once and each edge is taken once.
+        while stack.len() != 0 {
+            let top = stack.len() - 1;
+            let blk = (stack[top] >> 32) as u32;
+            let next = stack[top] as u32;
+            Lower::succs(b, blk, &mut succ);
+            if next as usize < succ.len() {
+                stack[top] = blk as u64 << 32 | (next + 1) as u64;
+                let s = succ[next as usize];
+                if s as usize >= nb {
+                    return self.fail("successor");
+                }
+                if !seen[s as usize] {
+                    seen[s as usize] = true;
+                    stack.push(s as u64 << 32);
+                }
+                continue;
+            }
+            post.push(blk);
+            stack.truncate(top);
+        }
+        for k in 0..post.len() {
+            self.order.push(post[post.len() - 1 - k]);
+        }
+        // Predecessors, each once, by block; the virtual entry block precedes the core entry.
+        let mut pairs = Vector::<u64>::new();
+        pairs.push(b.entry as u64 << 32 | self.virt as u64);
+        for k in 0..self.order.len() {
+            let blk = self.order[k];
+            Lower::succs(b, blk, &mut succ);
+            for j in 0..succ.len() {
+                pairs.push(succ[j] as u64 << 32 | blk as u64);
+            }
+        }
+        pairs.sort();
+        self.npred.resize_default(nb + 2);
+        let mut j: usize = 0;
+        for k in 0..nb + 2 {
+            self.npred[k] = self.preds.len() as u32;
+            while j < pairs.len() && (pairs[j] >> 32) as usize == k {
+                let pr = pairs[j] as u32;
+                if self.preds.len() as u32 == self.npred[k] || self.preds[self.preds.len() - 1] != pr {
+                    self.preds.push(pr);
+                }
+                j += 1;
+            }
+        }
+        return true;
+    }
+
+    // The successors of core block `blk`.
+    fn succs(b: &irc::CoreBody, blk: u32, out: &mut Vector<u32>) {
+        out.truncate(0);
+        let t = b.blocks[blk as usize].term;
+        if t.kind == irc::TM_SWITCH {
+            for k in 0..t.sw_len {
+                out.push(b.switch_pool[(t.sw_start + k) as usize] as u32);
+            }
+        }
+        if t.kind != irc::TM_RETURN && t.kind != irc::TM_UNREACHABLE && t.t0 != irc::IR_NONE {
+            out.push(t.t0);
+        }
+    }
+}
+
+extend Lower {
+    // The signature, the entry block and the storage of every local in memory.
+    fn entry(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        b: &irc::CoreBody,
+        ncaps: u32,
+        nparams: u32,
+        cap_base: u32,
+        variadic: bool,
+    ) bool {
+        let mut ptys = Vector::<u32>::new();
+        let mut etys = Vector::<u8>::new();
+        let mut pl = Vector::<u32>::new();
+        if ncaps != 0 {
+            ptys.push(T_PTR);
+            etys.push(T_PTR);
+            pl.push(NONE);
+        }
+        for i in 0..nparams {
+            let l = b.returns + i;
+            let info = self.li[l as usize];
+            if info.ti.cls == VC_ZST {
+                continue;
+            }
+            if info.ti.cls == VC_SCALAR {
+                ptys.push(info.ti.mty);
+                etys.push(info.ti.mty);
+            } else {
+                ptys.push(AGG | self.layout_of(c, b.module, b.locals[l as usize].ty, info.ti));
+                etys.push(T_PTR);
+            }
+            pl.push(l);
+        }
+        let mut ret = T_NONE as u32;
+        if b.returns == 1 {
+            let info = self.li[0];
+            if info.ti.cls == VC_SCALAR {
+                ret = info.ti.mty;
+            } else if info.ti.cls == VC_MEM {
+                ret = AGG | self.layout_of(c, b.module, b.locals[0].ty, info.ti);
+            }
+        } else if b.returns > 1 {
+            let mut tys = Vector::<TypeId>::new();
+            for r in 0..b.returns {
+                tys.push(b.locals[r as usize].ty);
+            }
+            let lt = self.pack(c, b.module, &tys);
+            if lt == NONE && self.err.len() != 0 {
+                return false;
+            }
+            if lt != NONE {
+                ret = AGG | lt;
+            }
+        }
+        if (ret & AGG) != 0 {
+            etys.push(T_PTR);
+        }
+        self.b.sig = self.b.signature(ptys[0..ptys.len()], ptys.len() as u32, variadic, ret);
+        let b0 = self.b.add_block(etys[0..etys.len()]);
+        for k in 0..self.order.len() {
+            self.lblk[self.order[k] as usize] = self.block();
+        }
+        self.b.begin(b0);
+        self.cur = self.virt;
+        // One zero per variable type, for a read before any write.
+        for v in 0..self.var_ty.len() + 2 {
+            let t = if v < self.var_ty.len() {
+                self.var_ty[v];
+            } else if v == self.var_ty.len() {
+                T_I32;
+            } else {
+                self.ptr_int();
+            };
+            if self.zeros.contains_key(&(t as u32)) {
+                continue;
+            }
+            let z = if is_vec(t) {
+                let w = self.b.words.len() as u32;
+                let nw = (type_bytes(t, self.pkg.ptr_bytes) + 7) / 8;
+                for _ in 0..nw {
+                    self.b.words.push(0);
+                }
+                self.inst(O_WCONST, t, 0, w, nw, VNONE);
+            } else if is_float(t) {
+                self.fconst(t, 0);
+            } else {
+                self.iconst(t, 0);
+            };
+            self.zeros.insert(t, z);
+        }
+        for k in 0..pl.len() {
+            let v = self.b.param(b0, k as u32);
+            let l = pl[k];
+            if l == NONE {
+                self.env = v;
+                continue;
+            }
+            let info = self.li[l as usize];
+            if info.kind == LK_VAR {
+                self.write_var(info.var, v);
+            } else if info.ti.cls == VC_SCALAR {
+                let a = self.new_slot(info.ti);
+                self.li.index_mut(l as usize).addr = a;
+                self.store(v, a, 0, false);
+            } else {
+                self.li.index_mut(l as usize).addr = v;
+            }
+        }
+        if (ret & AGG) != 0 {
+            self.ret_ptr = self.b.param(b0, pl.len() as u32);
+        }
+        for l in 0..self.li.len() {
+            let info = self.li[l];
+            if info.kind != LK_MEM || info.addr != VNONE {
+                continue;
+            }
+            let a = if l as u32 < b.returns && b.returns == 1 {
+                self.ret_ptr;
+            } else if l as u32 < b.returns {
+                self.ptradd(self.ret_ptr, VNONE, 0, self.ret_off[l]);
+            } else {
+                self.new_slot(info.ti);
+            };
+            self.li.index_mut(l).addr = a;
+        }
+        if c.ticks_on(b) {
+            self.spc = self.var_ty.len() as u32;
+            self.var_ty.push(T_I32);
+            let n = self.iconst(T_I32, 2048);
+            self.write_var(self.spc, n);
+        }
+        let e = self.edge(self.lblk[b.entry as usize], self.virt, b.entry);
+        let _ = self.inst(O_JMP, T_NONE, 0, e, VNONE, VNONE);
+        let _ = cap_base;
+        return true;
+    }
+
+    // A slot for type `ti`, addressed in the entry block.
+    fn new_slot(self: &mut Self, ti: TyI) Value {
+        let s = self.b.slot(ast::pick(ti.size == 0, 1u32, ti.size), log2(ti.align) as u8);
+        return self.inst(O_SLOTADDR, T_PTR, 0, s, VNONE, VNONE);
+    }
+
+    // A temporary slot of `ti` for the statement being lowered; its address is computed here.
+    fn temp(self: &mut Self, ti: TyI) Value {
+        let key = ti.size as u64 << 40 | log2(ti.align) as u64 << 32;
+        let mut s = NONE;
+        for k in 0..self.temps_free.len() {
+            if (self.temps_free[k] & 0xFFFFFFFF00000000) == key {
+                s = self.temps_free[k] as u32;
+                self.temps_free.swap_remove(k);
+                break;
+            }
+        }
+        if s == NONE {
+            s = self.b.slot(ast::pick(ti.size == 0, 1u32, ti.size), log2(ti.align) as u8);
+        }
+        self.temps_used.push(key | s as u64);
+        return self.inst(O_SLOTADDR, T_PTR, 0, s, VNONE, VNONE);
+    }
+
+    fn release_temps(self: &mut Self) {
+        for k in 0..self.temps_used.len() {
+            self.temps_free.push(self.temps_used[k]);
+        }
+        self.temps_used.truncate(0);
+    }
+
+    // The result memory of results `tys`: its layout in the pool, the offsets in `ret_off`; NONE when
+    // every result is zero-sized.
+    fn pack(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, tys: &Vector<TypeId>) u32 {
+        self.ret_off.truncate(0);
+        let mut off: u32 = 0;
+        let mut al: u32 = 1;
+        let mut any = false;
+        let mut leaves = Vector::<(u32, u8)>::new();
+        for r in 0..tys.len() {
+            let mut ti = TyI { cls: 0 };
+            if !self.ty(c, m, tys[r], &mut ti) {
+                return NONE;
+            }
+            if ti.cls == VC_ZST {
+                self.ret_off.push(0);
+                continue;
+            }
+            any = true;
+            off = round_up(off, ti.align);
+            self.ret_off.push(off);
+            let _ = self.leaves(c, m, tys[r], off, &mut leaves, 0);
+            off += ti.size;
+            al = ast::pick(ti.align > al, ti.align, al);
+        }
+        if !any {
+            return NONE;
+        }
+        let size = round_up(off, al);
+        if size > 64 || leaves.len() > 16 {
+            leaves.truncate(0);
+        }
+        return self.layout(size, log2(al), &leaves);
+    }
+
+    // ---- Locations ----
+
+    // The location of byte `pos` of the body's source.
+    fn loc_at(self: &mut Self, c: &cbe::CEmit, pos: u32) u32 {
+        let src = Lower::p(c).modules.at(self.m as usize).source.as_str();
+        if pos as usize >= src.len() {
+            return 0;
+        }
+        let m = self.m as usize;
+        if m >= self.lines.len() {
+            self.lines.resize_default(Lower::p(c).modules.len());
+        }
+        if self.lines[m].len() == 0 {
+            let ls = self.lines.index_mut(m);
+            ls.push(0);
+            for k in 0..src.len() {
+                if src.byte_at(k) == b'\n' {
+                    ls.push(k as u32 + 1);
+                }
+            }
+        }
+        // The last line start at or before `pos`.
+        let ls = &self.lines[m];
+        let mut lo: usize = 0;
+        let mut hi = ls.len();
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            if ls[mid] <= pos {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let col = pos - ls[lo] + 1;
+        return self.b.loc(Loc { file: self.file, line: lo as u32 + 1, col: col });
+    }
+
+    // ---- Places ----
+
+    // Where place `pid` lives, its projections applied.
+    fn place(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, pid: u32, out: &mut PlaceRef) bool {
+        let pl = b.places[pid as usize];
+        let l = pl.base;
+        let info = self.li[l as usize];
+        let mut cur = PlaceRef {
+            kind: PR_MEM,
+            var: NONE,
+            addr: VNONE,
+            m: b.module,
+            t: b.locals[l as usize].ty,
+            ti: info.ti,
+            packed: false,
+        };
+        // A pointer value standing for the place it points at (a pointer variable, a folded constant).
+        let mut ptr_val = VNONE;
+        if info.kind == LK_VAR {
+            if pl.proj_len == 0 {
+                cur.kind = PR_VAR;
+                cur.var = info.var;
+                *out = cur;
+                return true;
+            }
+            ptr_val = self.read_var(info.var, self.cur);
+        } else if info.kind == LK_MEM {
+            cur.addr = info.addr;
+        } else if info.kind == LK_ZST {
+            cur.kind = PR_ZST;
+            cur.addr = self.sentinel(c, b.module, b.locals[l as usize].ty);
+        } else if info.kind == LK_STATIC {
+            let mut v = VNONE;
+            if !self.static_ref(c, b, l, &mut v, &mut cur.addr) {
+                return false;
+            }
+            if v != VNONE {
+                if pl.proj_len == 0 {
+                    cur.kind = PR_VAL;
+                    cur.addr = v;
+                    *out = cur;
+                    return true;
+                }
+                ptr_val = v;
+            }
+            if info.ti.cls == VC_ZST {
+                cur.kind = PR_ZST;
+                cur.addr = self.sentinel(c, b.module, b.locals[l as usize].ty);
+            }
+        } else {
+            // A capture: its env field, or the binding that field points at.
+            let k = l - (b.returns + b.args - self.ncaps(b));
+            let fa = self.cap_off(c, b, k);
+            if fa == NONE {
+                return self.fail("capture");
+            }
+            cur.addr = self.ptradd(self.env, VNONE, 0, fa);
+            if info.byref {
+                cur.addr = self.load(T_PTR, cur.addr, 0, false);
+            }
+            if info.ti.cls == VC_ZST {
+                cur.kind = PR_ZST;
+                cur.addr = self.sentinel(c, b.module, b.locals[l as usize].ty);
+            }
+        }
+        let mut variant = NODE_NONE;
+        let mut vbase: u32 = 0;
+        for i in 0..pl.proj_len {
+            let pj = b.projections[(pl.proj_start + i) as usize];
+            if i == 0 && cur.t == TYPE_NONE && self.upack.contains_key(&l) {
+                // A result of an untyped local's call.
+                let o0 = (*self.upack.get(&l).unwrap() & 0xFFFFFFFF) as u32;
+                if pj.kind != irc::PJ_FIELD {
+                    return self.fail("untyped-projection");
+                }
+                cur.addr = self.ptradd(cur.addr, VNONE, 0, self.uoffs[(o0 + pj.data) as usize]);
+                cur.t = pj.ty;
+                if !self.ty(c, b.module, pj.ty, &mut cur.ti) {
+                    return false;
+                }
+                continue;
+            }
+            if pj.kind == irc::PJ_DEREF {
+                cur.addr = if ptr_val != VNONE {
+                    ptr_val;
+                } else {
+                    self.load(T_PTR, cur.addr, 0, cur.packed);
+                };
+                ptr_val = VNONE;
+                cur.packed = false;
+                variant = NODE_NONE;
+            } else if pj.kind == irc::PJ_FIELD || pj.kind == irc::PJ_DOWNCAST {
+                let mut rm = cur.m;
+                let mut rt = cur.t;
+                // A member access dereferences the pointers in front of the aggregate.
+                for _ in 0..4 {
+                    let y = Lower::resolved(c, cur.m, cur.t, &mut rm, &mut rt);
+                    if y.kind != TypeKind::TYPE_POINTER && y.kind != TypeKind::TYPE_REFERENCE {
+                        break;
+                    }
+                    cur.addr = if ptr_val != VNONE {
+                        ptr_val;
+                    } else {
+                        self.load(T_PTR, cur.addr, 0, cur.packed);
+                    };
+                    ptr_val = VNONE;
+                    cur.packed = false;
+                    cur.m = rm;
+                    cur.t = y.as_data.elem;
+                }
+                if ptr_val != VNONE {
+                    return self.fail("place-pointer");
+                }
+                let _ = Lower::resolved(c, cur.m, cur.t, &mut rm, &mut rt);
+                if pj.kind == irc::PJ_DOWNCAST {
+                    let mut el = EnumL { ok: false };
+                    if !self.enum_of(c, rm, rt, &mut el) {
+                        return self.fail("downcast");
+                    }
+                    variant = pj.sub;
+                    vbase = el.payload_off;
+                    cur.addr = self.ptradd(cur.addr, VNONE, 0, el.payload_off);
+                    // The payload keeps the enum's type until its member is named.
+                } else {
+                    let mut f = FieldAt {
+                        m: 0,
+                        t: TYPE_NONE,
+                        off: 0,
+                        idx: 0,
+                        node: NODE_NONE,
+                        variant: NODE_NONE,
+                        mty: T_NONE,
+                        packed: false,
+                    };
+                    if !self.member(c, rm, rt, pj, variant, &mut f) {
+                        return false;
+                    }
+                    let mut off = f.off;
+                    if variant != NODE_NONE {
+                        off -= vbase;
+                    }
+                    cur.addr = self.ptradd(cur.addr, VNONE, 0, off);
+                    cur.packed = cur.packed || f.packed;
+                    variant = NODE_NONE;
+                }
+            } else {
+                // An index: through references to the container, into its element storage.
+                let mut rm = cur.m;
+                let mut rt = cur.t;
+                let mut y = Lower::resolved(c, cur.m, cur.t, &mut rm, &mut rt);
+                for _ in 0..4 {
+                    if y.kind != TypeKind::TYPE_REFERENCE {
+                        break;
+                    }
+                    let mut em = rm;
+                    let mut et = y.as_data.elem;
+                    let ey = Lower::resolved(c, rm, y.as_data.elem, &mut em, &mut et);
+                    let mut hop = ey.kind == TypeKind::TYPE_ARRAY || ey.kind == TypeKind::TYPE_SIMD;
+                    if ey.kind == TypeKind::TYPE_INSTANCE {
+                        let nm = Lower::agg_name(c, em, et);
+                        hop = nm == "Array" || nm == "Vector" || nm == "Slice" || nm == "SliceMut";
+                    }
+                    if !hop {
+                        break;
+                    }
+                    cur.addr = if ptr_val != VNONE {
+                        ptr_val;
+                    } else {
+                        self.load(T_PTR, cur.addr, 0, cur.packed);
+                    };
+                    ptr_val = VNONE;
+                    cur.packed = false;
+                    rm = em;
+                    rt = et;
+                    y = ey;
+                }
+                let mut base = VNONE;
+                if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE {
+                    base = if ptr_val != VNONE {
+                        ptr_val;
+                    } else {
+                        self.load(T_PTR, cur.addr, 0, cur.packed);
+                    };
+                } else if ptr_val != VNONE {
+                    return self.fail("index-pointer");
+                } else if y.kind == TypeKind::TYPE_ARRAY || y.kind == TypeKind::TYPE_SIMD {
+                    base = cur.addr;
+                } else {
+                    let nm = Lower::agg_name(c, rm, rt);
+                    let fname = ast::pick(nm == "Array", "data", "ptr");
+                    let mut f = FieldAt {
+                        m: 0,
+                        t: TYPE_NONE,
+                        off: 0,
+                        idx: 0,
+                        node: NODE_NONE,
+                        variant: NODE_NONE,
+                        mty: T_NONE,
+                        packed: false,
+                    };
+                    if !self.named_field(c, rm, rt, fname, &mut f) {
+                        return self.fail("index-storage");
+                    }
+                    base = if nm == "Array" {
+                        self.ptradd(cur.addr, VNONE, 0, f.off);
+                    } else {
+                        self.load(T_PTR, cur.addr, f.off, cur.packed);
+                    };
+                }
+                ptr_val = VNONE;
+                let mut eti = TyI { cls: 0 };
+                if !self.ty(c, b.module, pj.ty, &mut eti) {
+                    return false;
+                }
+                let ix = if pj.kind == irc::PJ_INDEX_CONST {
+                    self.iconst(self.ptr_int(), pj.data);
+                } else {
+                    let v = self.operand(c, b, pj.data);
+                    self.int_to(v, self.ptr_int(), false);
+                };
+                cur.addr = self.ptradd(base, ix, eti.size, 0);
+                cur.packed = false;
+                variant = NODE_NONE;
+            }
+            cur.m = b.module;
+            cur.t = pj.ty;
+            if pj.kind != irc::PJ_DOWNCAST {
+                if !self.ty(c, b.module, pj.ty, &mut cur.ti) {
+                    return false;
+                }
+            }
+        }
+        if ptr_val != VNONE {
+            return self.fail("place-value");
+        }
+        cur.kind = ast::pick(cur.ti.cls == VC_ZST, PR_ZST, PR_MEM);
+        if cur.kind == PR_ZST && pl.proj_len != 0 && !self.zst_place_kept(c, b, pl) {
+            cur.addr = self.sentinel(c, b.module, pl.ty);
+        }
+        *out = cur;
+        return true;
+    }
+
+    // Whether zero-sized place `pl` keeps its own address instead of the sentinel, as C's references do:
+    // `*p` is the pointer, and a field of a sized struct (a flexible array member) sits at its offset.
+    fn zst_place_kept(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, pl: irc::Place) bool {
+        let last = b.projections[(pl.proj_start + pl.proj_len - 1) as usize];
+        if last.kind == irc::PJ_DEREF {
+            return true;
+        }
+        if last.kind != irc::PJ_FIELD {
+            return false;
+        }
+        let mut fm = b.module;
+        let mut ft = last.ty;
+        let fy = Lower::resolved(c, b.module, last.ty, &mut fm, &mut ft);
+        if fy.kind == TypeKind::TYPE_BUILTIN && fy.as_data.builtin == BuiltinType::BT_VOID {
+            return false;
+        }
+        let ownt = if pl.proj_len > 1 {
+            b.projections[(pl.proj_start + pl.proj_len - 2) as usize].ty;
+        } else {
+            b.locals[pl.base as usize].ty;
+        };
+        let mut om = b.module;
+        let mut ot = ownt;
+        let oy = Lower::resolved(c, b.module, ownt, &mut om, &mut ot);
+        let mut ostruct = oy.kind == TypeKind::TYPE_STRUCT;
+        if oy.kind == TypeKind::TYPE_INSTANCE {
+            let oi = *Lower::ast(c, om).instance(oy.as_data.inst);
+            ostruct = Lower::ast(c, oi.module).at_const(oi.decl).kind == NodeKind::NODE_STRUCT;
+        }
+        let mut oti = TyI { cls: 0 };
+        return ostruct && self.ty(c, b.module, ownt, &mut oti) && oti.cls != VC_ZST;
+    }
+
+    // The number of captures of the body being lowered (0 outside a closure).
+    const fn ncaps(self: &Self, b: &irc::CoreBody) u32 {
+        let mut n: u32 = 0;
+        for l in 0..self.li.len() {
+            if self.li[l].kind == LK_CAP {
+                n += 1;
+            }
+        }
+        let _ = b;
+        return n;
+    }
+
+    // The env offset of capture `k`, NONE when it has no storage.
+    fn cap_off(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, k: u32) u32 {
+        let mut off: u32 = 0;
+        let base = b.returns + b.args - self.ncaps(b);
+        for i in 0..k + 1 {
+            let info = self.li[(base + i) as usize];
+            if info.ti.cls == VC_ZST {
+                if i == k {
+                    return NONE;
+                }
+                continue;
+            }
+            let sz = ast::pick(info.byref, self.pkg.ptr_bytes, info.ti.size);
+            let al = ast::pick(info.byref, self.pkg.ptr_bytes, info.ti.align);
+            off = round_up(off, al);
+            if i == k {
+                return off;
+            }
+            off += sz;
+        }
+        let _ = c;
+        return NONE;
+    }
+
+    // The shape of payload enum `(rm, rt)`.
+    fn enum_of(self: &mut Self, c: &mut cbe::CEmit, rm: ModuleId, rt: TypeId, out: &mut EnumL) bool {
+        let y = *Lower::ast(c, rm).type_at(rt);
+        if y.kind == TypeKind::TYPE_ENUM {
+            return self.enum_shape(c, y.module, y.as_data.decl, out);
+        }
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let it = *Lower::ast(c, rm).instance(y.as_data.inst);
+        let nb = c.mg.push_generics(
+            it.module,
+            Lower::ast(c, it.module).at_const(it.decl).as_data.aggregate.generics,
+            rm,
+            &it,
+        );
+        let ok = Lower::ast(c, it.module).at_const(it.decl).kind == NodeKind::NODE_ENUM && self.enum_shape(
+            c,
+            it.module,
+            it.decl,
+            out,
+        );
+        c.mg.pop_subs(nb);
+        return ok;
+    }
+
+    // The address of the aligned sentinel standing for a zero-sized value of `(m, t)`.
+    fn sentinel(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, t: TypeId) Value {
+        let mut rm = m;
+        let mut rt = t;
+        let _ = Lower::resolved(c, m, t, &mut rm, &mut rt);
+        let lo = c.mg.layout_sub(rm, rt);
+        let al: u64 = ast::pick(lo.ok && lo.align > 1, lo.align, 1u64);
+        let s = self.sentinel_sym(al);
+        let k = self.sym_of(s);
+        return self.inst(O_SYMADDR, T_PTR, 0, k, 0, VNONE);
+    }
+
+    // The sentinel byte `__sc_zst_<align>` every zero-sized reference of that alignment addresses.
+    fn sentinel_sym(self: &mut Self, al: u64) u32 {
+        self.sbuf.clear();
+        self.sbuf.push_str("__sc_zst_");
+        self.sbuf.push_u64(al);
+        let s = self.pkg.symbol(self.sbuf.as_str(), SK_DATA);
+        if self.pkg.syms[s as usize].def == NONE {
+            let none: []u8 = [];
+            let nr: []Reloc = [];
+            let _ = self.pkg.add_data(s, 1, log2(al as u32) as u8, false, none, nr);
+        }
+        return s;
+    }
+
+    // A static or constant item's storage `addr`, or its folded value `val` (a const parameter).
+    fn static_ref(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, l: u32, val: &mut Value, addr: &mut Value) bool {
+        let d = b.locals[l as usize];
+        let item = d.item;
+        let mut cv: i64 = 0;
+        let mut bt = BuiltinType::BT_COUNT;
+        if c.mg.fold_param(item.module, item.node, &mut cv, &mut bt) {
+            let mt = self.builtin_mty(bt);
+            *val = self.iconst(mt, cv as u64);
+            return true;
+        }
+        let mut sym = String::new();
+        if item.node == NODE_NONE || !c.mg.const_sym(item.module, item.node, &mut sym) {
+            return self.fail("static-sym");
+        }
+        if c.is_tls(item) {
+            let k = self.sym(sym.as_str(), SK_TLS);
+            *addr = self.inst(O_SYMADDR, T_PTR, 0, k, 0, VNONE);
+            return true;
+        }
+        *addr = self.symaddr(sym.as_str(), SK_DATA);
+        return true;
+    }
+
+    // The value of scalar place `p`.
+    fn read(self: &mut Self, p: PlaceRef) Value {
+        if p.kind == PR_VAR {
+            return self.read_var(p.var, self.cur);
+        }
+        if p.kind == PR_VAL {
+            return p.addr;
+        }
+        if p.kind == PR_ZST || p.ti.cls != VC_SCALAR {
+            return self.fail_v("read");
+        }
+        return self.load(p.ti.mty, p.addr, 0, p.packed);
+    }
+
+    fn write(self: &mut Self, p: PlaceRef, v: Value) bool {
+        if p.kind == PR_VAR {
+            self.write_var(p.var, v);
+            return true;
+        }
+        if p.kind == PR_ZST {
+            return true;
+        }
+        if p.kind != PR_MEM {
+            return self.fail("write");
+        }
+        self.store(v, p.addr, 0, p.packed);
+        return true;
+    }
+
+    // The address of place `pid`.
+    fn place_addr(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, pid: u32) Value {
+        let mut p = PlaceRef { kind: 0 };
+        if !self.place(c, b, pid, &mut p) {
+            return VNONE;
+        }
+        if p.kind == PR_MEM || p.kind == PR_ZST {
+            return p.addr;
+        }
+        return self.fail_v("address-of-value");
+    }
+}
+
+extend Lower {
+    // ---- Operands ----
+
+    // The type of operand `opid` (a copy without one has its place's).
+    const fn op_ty(b: &irc::CoreBody, opid: u32) TypeId {
+        let op = b.operands[opid as usize];
+        if op.ty == TYPE_NONE && op.kind != irc::OP_CONST {
+            return b.places[op.data as usize].ty;
+        }
+        return op.ty;
+    }
+
+    // The value of scalar operand `opid`; VNONE for a zero-sized one.
+    fn operand(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, opid: u32) Value {
+        let op = b.operands[opid as usize];
+        if op.kind == irc::OP_CONST {
+            let mut ti = self.hint;
+            let ct = b.constants[op.data as usize].ty;
+            let t0 = ast::pick(ct != TYPE_NONE, ct, op.ty);
+            if t0 != TYPE_NONE && !self.ty(c, b.module, t0, &mut ti) {
+                return VNONE;
+            }
+            return self.constant(c, b, op.data, ti);
+        }
+        let mut p = PlaceRef { kind: 0 };
+        if !self.place(c, b, op.data, &mut p) {
+            return VNONE;
+        }
+        if p.kind == PR_ZST {
+            return VNONE;
+        }
+        return self.read(p);
+    }
+
+    // The address of operand `opid` held in memory: its place, or a temporary holding the constant.
+    fn operand_addr(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, opid: u32, ti: TyI) Value {
+        let op = b.operands[opid as usize];
+        if op.kind != irc::OP_CONST {
+            let mut p = PlaceRef { kind: 0 };
+            if !self.place(c, b, op.data, &mut p) {
+                return VNONE;
+            }
+            if p.kind == PR_MEM || p.kind == PR_ZST {
+                return p.addr;
+            }
+            // A scalar place standing for memory of its size (a vector read as its array).
+            let v = self.read(p);
+            let t = self.temp(ti);
+            self.store(v, t, 0, false);
+            return t;
+        }
+        let t = self.temp(ti);
+        if !self.const_into(c, b, op.data, t, ti) {
+            return VNONE;
+        }
+        return t;
+    }
+
+    // Store operand `opid` of type `ti` into memory at `dst`.
+    fn operand_into(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, opid: u32, dst: Value, ti: TyI) bool {
+        if ti.cls == VC_ZST {
+            return true;
+        }
+        let op = b.operands[opid as usize];
+        self.hint = ti;
+        if ti.cls == VC_SCALAR {
+            let v = self.operand(c, b, opid);
+            if v == VNONE {
+                return self.fail("operand");
+            }
+            // C's implicit conversion at the store.
+            let ot = Lower::op_ty(b, opid);
+            let fv = self.fit(v, ti.mty, ot != TYPE_NONE && Lower::signed(c, b.module, ot));
+            self.store(fv, dst, 0, false);
+            return true;
+        }
+        if op.kind == irc::OP_CONST {
+            return self.const_into(c, b, op.data, dst, ti);
+        }
+        let a = self.operand_addr(c, b, opid, ti);
+        if a == VNONE {
+            return false;
+        }
+        self.memcpy(dst, a, ti.size);
+        return true;
+    }
+
+    // ---- Constants ----
+
+    // The source a constant's span indexes: an inlined constant's own module's.
+    fn const_src(c: &cbe::CEmit, b: &irc::CoreBody, k: &irc::Constant) str<'static> {
+        let m = ast::pick(k.item.node != NODE_NONE, k.item.module, b.module);
+        return Lower::p(c).modules.at(m as usize).source.as_str();
+    }
+
+    // Scalar constant `cid` of type `ti`.
+    fn constant(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, cid: u32, ti: TyI) Value {
+        let k = b.constants[cid as usize];
+        if k.kind == irc::CK_UNIT || ti.cls == VC_ZST {
+            return VNONE;
+        }
+        if ti.cls != VC_SCALAR {
+            return self.fail_v("constant-memory");
+        }
+        let mt = ti.mty;
+        if k.kind == irc::CK_INT || k.kind == irc::CK_BOOL {
+            let mut v: i64 = k.val;
+            if k.kind == irc::CK_INT && !k.int_value(Lower::const_src(c, b, &k), &mut v) {
+                return self.fail_v("int-constant");
+            }
+            if is_float(mt) {
+                let f = v as f64;
+                return self.fconst(mt, ast::pick(mt == T_F32, fl::f32_bits(f as f32), fl::f64_bits(f)));
+            }
+            if is_vec(mt) {
+                return self.fail_v("vector-int-constant");
+            }
+            return self.iconst(mt, v as u64);
+        }
+        if k.kind == irc::CK_FLOAT {
+            let src = Lower::const_src(c, b, &k);
+            if k.raw.end <= k.raw.start || k.raw.end as usize > src.len() {
+                return self.fail_v("float-constant");
+            }
+            let r = float_literal_value(src, k.raw, mt == T_F32);
+            if r.is_none() || !is_float(mt) {
+                return self.fail_v("float-constant");
+            }
+            let f = r.unwrap();
+            return self.fconst(mt, ast::pick(mt == T_F32, fl::f32_bits(f as f32), fl::f64_bits(f)));
+        }
+        if k.kind == irc::CK_STR {
+            // A C-string context: the bytes' address.
+            return self.str_data(c, b, &k);
+        }
+        if k.kind == irc::CK_ITEM {
+            let ia = Lower::ast(c, k.item.module);
+            if k.targ_len() != 0 && ia.at_const(k.item.node).kind == NodeKind::NODE_CONST {
+                let a = self.assoc_addr(c, b, &k);
+                if a == VNONE {
+                    return VNONE;
+                }
+                return self.load(mt, a, 0, false);
+            }
+            self.sbuf.clear();
+            let mut s = String::new();
+            if !c.callee_sym(
+                b,
+                k.item,
+                k.targ_start(),
+                k.targ_len(),
+                TYPE_NONE,
+                TYPE_NONE,
+                TYPE_NONE,
+                TYPE_NONE,
+                &mut s,
+            ) {
+                return self.fail_v("item-sym");
+            }
+            return self.symaddr(s.as_str(), SK_FUNC);
+        }
+        return self.fail_v("constant");
+    }
+
+    // The address of an associated constant's static.
+    fn assoc_addr(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, k: &irc::Constant) Value {
+        let mut s = String::new();
+        if !c.assoc_const_ref(b, k, &mut s) {
+            return self.fail_v("assoc-const");
+        }
+        return self.symaddr(s.as_str(), SK_DATA);
+    }
+
+    // The read-only data holding string constant `k`'s bytes and a terminating 0: its address.
+    fn str_data(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, k: &irc::Constant) Value {
+        let src = Lower::const_src(c, b, k);
+        if k.raw.end as usize > src.len() || k.raw.end < k.raw.start {
+            return self.fail_v("string-constant");
+        }
+        let mut bytes = String::new();
+        let mut tmp = String::new();
+        cbe::str_const_bytes(src.slice(k.raw.start as usize, k.raw.end as usize), k.val, &mut tmp, &mut bytes);
+        self.str_len = bytes.len() as u64;
+        let s = self.rodata(&mut bytes);
+        let kk = self.sym_of(s);
+        return self.inst(O_SYMADDR, T_PTR, 0, kk, 0, VNONE);
+    }
+
+    // The read-only data symbol `.str.<hash>.<size>` of `bytes` and a NUL (appended), one per content.
+    fn rodata(self: &mut Self, bytes: &mut String) u32 {
+        bytes.push_byte(0);
+        self.sbuf.clear();
+        self.sbuf.push_str(".str.");
+        self.sbuf.push_hex(nm::hash_bytes(bytes.as_ptr(), bytes.len()), false);
+        self.sbuf.push_byte(b'.');
+        self.sbuf.push_u64(bytes.len() as u64);
+        let s = self.pkg.symbol(self.sbuf.as_str(), SK_DATA);
+        if self.pkg.syms[s as usize].def == NONE {
+            let nr: []Reloc = [];
+            let _ = self.pkg.add_data(
+                s,
+                bytes.len() as u32,
+                0,
+                true,
+                unsafe Slice::<u8> { ptr: bytes.as_ptr(), len: bytes.len() },
+                nr,
+            );
+        }
+        return s;
+    }
+
+    // Store constant `cid` of memory type `ti` at `dst`.
+    fn const_into(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, cid: u32, dst: Value, ti: TyI) bool {
+        let k = b.constants[cid as usize];
+        if ti.cls == VC_ZST || k.kind == irc::CK_UNIT {
+            return true;
+        }
+        if ti.cls == VC_SCALAR {
+            let v = self.constant(c, b, cid, ti);
+            if v == VNONE {
+                return false;
+            }
+            self.store(v, dst, 0, false);
+            return true;
+        }
+        if k.kind == irc::CK_INT || k.kind == irc::CK_FLOAT {
+            // An integer constant of an aggregate type is its zero; a number of a complex type is its
+            // real part.
+            self.memset0(dst, ti.size);
+            let kb = Lower::builtin(c, b.module, k.ty);
+            let cplx = kb == BuiltinType::BT_C32 || kb == BuiltinType::BT_C64 || k.ty == TYPE_NONE && k.kind == irc::CK_FLOAT;
+            if cplx && (ti.size == 8 && ti.align == 4 || ti.size == 16 && ti.align == 8) {
+                let ft = ast::pick(ti.size == 8, T_F32, T_F64);
+                let fv = self.constant(c, b, cid, TyI { cls: VC_SCALAR, mty: ft, size: ti.size / 2, align: ti.align });
+                if fv == VNONE {
+                    return false;
+                }
+                self.store(fv, dst, 0, false);
+            }
+            return true;
+        }
+        if k.kind == irc::CK_STR {
+            // A `str` view or a slice: the bytes' address and their length.
+            let p = self.str_data(c, b, &k);
+            if p == VNONE {
+                return false;
+            }
+            let n = self.iconst(self.ptr_int(), self.str_len);
+            self.store(p, dst, 0, false);
+            self.store(n, dst, self.pkg.ptr_bytes, false);
+            return true;
+        }
+        if k.kind == irc::CK_WIDE {
+            let w = *Lower::ast(c, b.module).wide_lits.at(k.val as usize);
+            for i in 0..ti.size / 8 {
+                let lw = if i < 16 {
+                    unsafe w.limbs[i as usize];
+                } else {
+                    0u64;
+                };
+                let v = self.iconst(T_I64, lw);
+                self.store(v, dst, i * 8, false);
+            }
+            return true;
+        }
+        if k.kind == irc::CK_ITEM {
+            let a = self.assoc_addr(c, b, &k);
+            if a == VNONE {
+                return false;
+            }
+            self.memcpy(dst, a, ti.size);
+            return true;
+        }
+        return self.fail("constant-into");
+    }
+}
+
+extend Lower {
+    // ---- Scalar rvalues ----
+
+    // The value of rvalue `rid`, of scalar type `ti`.
+    fn rvalue(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, rid: u32, ti: TyI) Value {
+        let rv = b.rvalues[rid as usize];
+        if rv.kind == irc::RV_USE {
+            return self.operand(c, b, rv.a);
+        }
+        if rv.kind == irc::RV_REF || rv.kind == irc::RV_ADDR {
+            return self.place_addr(c, b, rv.a);
+        }
+        if rv.kind == irc::RV_CAST {
+            return self.cast(c, b, rv, ti);
+        }
+        if rv.kind == irc::RV_UNARY {
+            return self.unary(c, b, rv, ti);
+        }
+        if rv.kind == irc::RV_BINARY {
+            return self.binary(c, b, rv, ti);
+        }
+        if rv.kind == irc::RV_LEN {
+            return self.len(c, b, rv.a, ti);
+        }
+        if rv.kind == irc::RV_DISCRIMINANT {
+            return self.discriminant(c, b, rv.a, ti);
+        }
+        if rv.kind == irc::RV_INTRINSIC {
+            return self.intrinsic(c, b, rv, ti);
+        }
+        if rv.kind == irc::RV_AGGREGATE && rv.c == irc::AGG_VARIANT {
+            // A variant of an enum without payloads: its discriminant.
+            let mut d: i64 = 0;
+            if !self.variant_value(c, rv.item.module, rv.item.node, &mut d) {
+                return VNONE;
+            }
+            return self.iconst(ti.mty, d as u64);
+        }
+        if rv.kind == irc::RV_CLOSURE && rv.b == 0 {
+            let mut s = String::new();
+            c.mg.closure_sym(rv.item.module, rv.item.node, &mut s);
+            return self.symaddr(s.as_str(), SK_FUNC);
+        }
+        if rv.kind == irc::RV_SIMD {
+            return self.simd(c, b, rv, ti, VNONE);
+        }
+        return self.fail_v("rvalue");
+    }
+
+    // The discriminant of enum variant `vd` (module `vm`): its explicit value, else one past the one
+    // before it.
+    fn variant_value(self: &mut Self, c: &mut cbe::CEmit, vm: ModuleId, vd: NodeId, out: &mut i64) bool {
+        let pk = Lower::p(c);
+        let mut pos: i64 = 0;
+        let en = pk.variant_enum(DefId { module: vm, node: vd }, &mut pos);
+        if pk.cir == null {
+            return self.fail("variant");
+        }
+        let a = Lower::ast(c, vm);
+        let mut ms = NodeList { start: 0, len: 0 };
+        if en == NODE_NONE {
+            // An extern enum's variant (the header checks assert its value): its enum in an extern block.
+            ms = Lower::extern_enum_members(a, vd);
+            if ms.len == 0 {
+                return self.fail("variant");
+            }
+        } else {
+            ms = a.at_const(en).as_data.aggregate.members;
+        }
+        let mut cur: i64 = -1;
+        let it = pk.cir as *mut iri::Interp;
+        for k in 0..ms.len {
+            let mid = unsafe a.list(ms)[k as usize];
+            if !unsafe (*it).discr(vm, mid, cur, &mut cur) {
+                return self.fail("discriminant");
+            }
+            if mid == vd {
+                *out = cur;
+                return true;
+            }
+        }
+        return self.fail("variant");
+    }
+
+    // A numeric conversion (with the language's saturating float to integer), a mask's bits, a
+    // vector's array, or a conversion method's call.
+    fn cast(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, rv: irc::Rvalue, ti: TyI) Value {
+        if rv.b == irc::CAST_COERCE_FROM {
+            return self.coerce(c, b, rv, VNONE, ti);
+        }
+        let ft0 = Lower::op_ty(b, rv.a);
+        let ft = ast::pick(ft0 == TYPE_NONE, rv.target, ft0);
+        let mut fi = TyI { cls: 0 };
+        if !self.ty(c, b.module, ft, &mut fi) {
+            return VNONE;
+        }
+        self.hint = fi;
+        if rv.b == irc::CAST_SIMD_ARRAY {
+            // An array to its vector: the same bytes, aligned as the array.
+            let a = self.operand_addr(c, b, rv.a, fi);
+            if a == VNONE {
+                return VNONE;
+            }
+            return self.inst(O_LOAD, ti.mty, log2(fi.align) as u16, a, VNONE, 0);
+        }
+        let v = self.operand(c, b, rv.a);
+        if v == VNONE || fi.cls != VC_SCALAR {
+            return self.fail_v("cast-operand");
+        }
+        let from = fi.mty;
+        let to = ti.mty;
+        let fs = Lower::signed(c, b.module, ft);
+        let ts = Lower::signed(c, b.module, rv.target);
+        if is_vec(from) || is_vec(to) {
+            let flags = ast::pick(fs, VOP_SIGNED, 0) | ast::pick(ts, VOP_DSIGNED, 0) | ast::pick(
+                rv.b == irc::CAST_UNCHECKED,
+                VOP_UNCHECKED,
+                0,
+            );
+            return self.vop(irc::OP_CAST as u16 | flags, to, [v], VNONE);
+        }
+        if rv.b == irc::CAST_MASK_BITS {
+            return self.int_to(v, to, false);
+        }
+        return self.convert(v, from, to, fs, ts, rv.b == irc::CAST_UNCHECKED);
+    }
+
+    // Scalar `v` of type `from` (signed `fs`) as type `to` (signed `ts`).
+    fn convert(self: &mut Self, v: Value, from: u8, to: u8, fs: bool, ts: bool, unchecked: bool) Value {
+        if from == to {
+            return v;
+        }
+        if is_float(from) && is_float(to) {
+            return self.inst(ast::pick(to == T_F64, O_FPEXT, O_FPTRUNC), to, 0, v, VNONE, VNONE);
+        }
+        if is_float(from) {
+            let it = ast::pick(to == T_PTR, self.ptr_int(), to);
+            let r = self.inst(
+                ast::pick(ts, O_FPTOSI, O_FPTOUI),
+                it,
+                ast::pick(unchecked, CV_UNCHECKED, 0),
+                v,
+                VNONE,
+                VNONE,
+            );
+            return self.int_to(r, to, ts);
+        }
+        if is_float(to) {
+            let mut x = v;
+            if from == T_PTR {
+                x = self.int_to(v, self.ptr_int(), false);
+            }
+            return self.inst(ast::pick(fs, O_SITOFP, O_UITOFP), to, 0, x, VNONE, VNONE);
+        }
+        return self.int_to(v, to, fs);
+    }
+
+    // `-x`, `!x`, `~x`: checked negation unless the build wraps.
+    fn unary(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, rv: irc::Rvalue, ti: TyI) Value {
+        let t = (rv.b as u8) as tt::TokenType;
+        let mut x = self.operand(c, b, rv.a);
+        if x == VNONE {
+            return self.fail_v("unary-operand");
+        }
+        let at = Lower::op_ty(b, rv.a);
+        let mut rm = b.module;
+        let mut rt = at;
+        let y = Lower::resolved(c, b.module, at, &mut rm, &mut rt);
+        if y.kind == TypeKind::TYPE_REFERENCE {
+            let mut ei = TyI { cls: 0 };
+            if !self.ty(c, rm, y.as_data.elem, &mut ei) {
+                return VNONE;
+            }
+            x = self.load(ei.mty, x, 0, false);
+        }
+        let ty = self.vty(x);
+        let mut tyy = Lower::resolved(c, b.module, rv.target, &mut rm, &mut rt);
+        if tyy.kind == TypeKind::TYPE_MASK {
+            // A mask's `!`: its lane bits flipped, the bits above them kept 0.
+            let n = c.mg.arr_len(rm, &tyy) as u64;
+            let ones = self.iconst(ty, ~0u64 >> 64 - n);
+            return self.arith(O_XOR, x, ones);
+        }
+        let signed = Lower::signed(c, b.module, at);
+        if t == tt::TokenType::Minus {
+            if is_float(ty) || is_vec(ty) && is_float(lane_type(ty)) {
+                return self.inst(O_FNEG, ty, 0, x, VNONE, VNONE);
+            }
+            if is_vec(ty) {
+                let z = self.zero(ty);
+                if !self.wrap && signed {
+                    let m = self.vop(
+                        (irc::OP_SIMD + irc::SIMD_OVF_SUB as u32) as u16 | VOP_SIGNED,
+                        self.mask_of(ty),
+                        [z, x],
+                        VNONE,
+                    );
+                    self.lane_check(m, "attempt to negate with overflow");
+                }
+                return self.arith(O_SUB, z, x);
+            }
+            let z = self.zero(ty);
+            if !self.wrap && signed {
+                let o = self.inst(O_SUBO, ty, OV_SIGNED, z, x, VNONE);
+                self.check(VFLAG | o, "attempt to negate with overflow");
+                return o;
+            }
+            return self.arith(O_SUB, z, x);
+        }
+        if t == tt::TokenType::Bang && !is_vec(ty) && Lower::builtin(c, b.module, at) == BuiltinType::BT_BOOL {
+            let one = self.iconst(T_I8, 1);
+            return self.arith(O_XOR, x, one);
+        }
+        if t == tt::TokenType::Bang || t == tt::TokenType::Tilde {
+            return self.inst(O_NOT, ty, 0, x, VNONE, VNONE);
+        }
+        let _ = tyy;
+        tyy = y;
+        let _ = tyy;
+        let _ = ti;
+        return self.fail_v("unary");
+    }
+
+    // The mask type of vector type `vt`: an integer of one bit per lane.
+    const fn mask_of(self: &Self, vt: u8) u8 {
+        let n = lanes(vt);
+        if n <= 8 {
+            return T_I8;
+        }
+        if n <= 16 {
+            return T_I16;
+        }
+        if n <= 32 {
+            return T_I32;
+        }
+        return T_I64;
+    }
+
+    // Trap with `msg` when lane mask `m` has a bit set.
+    fn lane_check(self: &mut Self, m: Value, msg: str) {
+        let z = self.zero(self.vty(m));
+        let f = self.icmp(C_NE, m, z);
+        self.check(f, msg);
+    }
+
+    // A vector operation `op` (an `irc::OP_*` code with VOP flags) on `args`, of result type `ty`;
+    // `lanes` an index list in the pool or VNONE.
+    fn vop(self: &mut Self, op: u16, ty: u8, args: []Value, lanes: u32) Value {
+        let at = self.b.pool_list(args);
+        return self.inst(O_VOP, ty, op, at, args.len() as u32, lanes);
+    }
+
+    // The operand `opid` of a binary operator as a value: a reference operand reads its referent.
+    fn bin_operand(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        b: &irc::CoreBody,
+        opid: u32,
+        rm: &mut ModuleId,
+        rt: &mut TypeId,
+    ) Value {
+        let t = Lower::op_ty(b, opid);
+        let y = Lower::resolved(c, b.module, t, rm, rt);
+        let v = self.operand(c, b, opid);
+        if v == VNONE {
+            return VNONE;
+        }
+        if y.kind == TypeKind::TYPE_REFERENCE {
+            let em = *rm;
+            let mut ei = TyI { cls: 0 };
+            let _ = Lower::resolved(c, em, y.as_data.elem, rm, rt);
+            if !self.ty(c, *rm, *rt, &mut ei) {
+                return VNONE;
+            }
+            if ei.cls != VC_SCALAR {
+                return v; // an aggregate referent stays addressed
+            }
+            return self.load(ei.mty, v, 0, false);
+        }
+        return v;
+    }
+}
+
+extend Lower {
+    // A binary operator: the language's meaning on integers (overflow, zero divisors, shift counts),
+    // floats, pointers, `str`, vectors, and an aggregate's operator method.
+    fn binary(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, rv: irc::Rvalue, ti: TyI) Value {
+        let t = rv.c as tt::TokenType;
+        let mut am = b.module;
+        let mut at = TYPE_NONE;
+        let ay = Lower::resolved(c, b.module, Lower::op_ty(b, rv.a), &mut am, &mut at);
+        let aref = ay.kind == TypeKind::TYPE_REFERENCE;
+        if aref {
+            let _ = Lower::resolved(c, am, ay.as_data.elem, &mut am, &mut at);
+        }
+        let cmp = t == tt::TokenType::EqualEqual || t == tt::TokenType::BangEqual || t == tt::TokenType::LessThan || t == tt::TokenType::LessThanEqual || t == tt::TokenType::GreaterThan || t == tt::TokenType::GreaterThanEqual;
+        let mut ai = TyI { cls: 0 };
+        if !self.ty(c, am, at, &mut ai) {
+            return VNONE;
+        }
+        if (t == tt::TokenType::EqualEqual || t == tt::TokenType::BangEqual) && Lower::agg_name(c, am, at) == "str" && Lower::ast(
+            c,
+            am,
+        ).type_at(at).kind == TypeKind::TYPE_STRUCT {
+            let r = self.str_eq(c, b, rv);
+            if r == VNONE || t == tt::TokenType::EqualEqual {
+                return r;
+            }
+            let one = self.iconst(T_I8, 1);
+            return self.arith(O_XOR, r, one);
+        }
+        if ai.cls == VC_MEM && c.op_dispatch_agg(am, at) && (cmp || t.op_method().len() != 0) {
+            return self.agg_op(c, b, rv, am, at, aref, ti, VNONE);
+        }
+        let mut bm = b.module;
+        let mut bt = TYPE_NONE;
+        let mut x = self.bin_operand(c, b, rv.a, &mut am, &mut at);
+        let mut y = self.bin_operand(c, b, rv.b, &mut bm, &mut bt);
+        if x == VNONE || y == VNONE {
+            return self.fail_v("binary-operand");
+        }
+        let tx = self.vty(x);
+        if is_vec(tx) {
+            return self.vec_binary(c, b, rv, x, y, ti, Lower::signed(c, am, at));
+        }
+        let ya = *Lower::ast(c, am).type_at(at);
+        if ya.kind == TypeKind::TYPE_POINTER && (t == tt::TokenType::Plus || t == tt::TokenType::Minus) {
+            return self.ptr_arith(c, am, ya, t, x, y, bm, bt, ti);
+        }
+        let sa = Lower::signed(c, am, at);
+        let sb = Lower::signed(c, bm, bt);
+        if cmp {
+            return self.compare(t, x, y, sa, sb);
+        }
+        let shift = t == tt::TokenType::LeftShift || t == tt::TokenType::RightShift;
+        if shift {
+            return self.shift(c, b, rv, t, x, y, sa, sb);
+        }
+        // Every other operator computes at the result's type.
+        let ct = ti.mty;
+        if is_float(ct) {
+            x = self.convert(x, self.vty(x), ct, sa, sa, false);
+            y = self.convert(y, self.vty(y), ct, sb, sb, false);
+            if t == tt::TokenType::Percent {
+                let tys: []u32 = [ct as u32, ct as u32];
+                let args: []Value = [x, y];
+                return self.call_sym(ast::pick(ct == T_F32, "fmodf", "fmod"), args, tys, ct);
+            }
+            let op = switch t {
+                Plus => O_FADD,
+                Minus => O_FSUB,
+                Star => O_FMUL,
+                Slash => O_FDIV,
+                _ => 0u8,
+            };
+            if op == 0 {
+                return self.fail_v("float-operator");
+            }
+            return self.arith(op, x, y);
+        }
+        x = self.int_to(x, ct, sa);
+        y = self.int_to(y, ct, sb);
+        let rb = Lower::builtin(c, b.module, rv.target);
+        let signed = ast::pick(rb != BuiltinType::BT_VOID, Lower::signed(c, b.module, rv.target), sa);
+        let checked = rb != BuiltinType::BT_VOID && rb != BuiltinType::BT_BOOL && rb != BuiltinType::BT_CHAR;
+        if t == tt::TokenType::Plus || t == tt::TokenType::Minus || t == tt::TokenType::Star {
+            let op = ast::pick(t == tt::TokenType::Plus, O_ADD, ast::pick(t == tt::TokenType::Minus, O_SUB, O_MUL));
+            if checked && !self.wrap {
+                let oo = ast::pick(
+                    t == tt::TokenType::Plus,
+                    O_ADDO,
+                    ast::pick(t == tt::TokenType::Minus, O_SUBO, O_MULO),
+                );
+                let o = self.inst(oo, ct, ast::pick(signed, OV_SIGNED, 0), x, y, VNONE);
+                self.check(
+                    VFLAG | o,
+                    ast::pick(
+                        t == tt::TokenType::Plus,
+                        "attempt to add with overflow",
+                        ast::pick(
+                            t == tt::TokenType::Minus,
+                            "attempt to subtract with overflow",
+                            "attempt to multiply with overflow",
+                        ),
+                    ),
+                );
+                return o;
+            }
+            return self.arith(op, x, y);
+        }
+        if t == tt::TokenType::Slash || t == tt::TokenType::Percent {
+            let div = t == tt::TokenType::Slash;
+            let mut cv: i64 = 0;
+            let known = self.const_int(c, b, rv.b, &mut cv) && cv != 0 && !(signed && cv == -1);
+            if !known && checked {
+                let z = self.zero(ct);
+                let f = self.icmp(C_EQ, y, z);
+                self.check(
+                    f,
+                    ast::pick(
+                        div,
+                        "attempt to divide by zero",
+                        "attempt to calculate the remainder with a divisor of zero",
+                    ),
+                );
+                if signed {
+                    let bits = type_bits(ct, self.pkg.ptr_bytes);
+                    let mn = self.iconst(ct, 1u64 << (bits - 1) as u64);
+                    let m1 = self.iconst(ct, 0xFFFFFFFFFFFFFFFF);
+                    let fx = self.icmp(C_EQ, x, mn);
+                    let fy = self.icmp(C_EQ, y, m1);
+                    let f2 = self.arith(O_AND, fx, fy);
+                    self.check(
+                        f2,
+                        ast::pick(
+                            div,
+                            "attempt to divide with overflow",
+                            "attempt to calculate the remainder with overflow",
+                        ),
+                    );
+                }
+            }
+            let op = if div {
+                ast::pick(signed, O_SDIV, O_UDIV);
+            } else {
+                ast::pick(signed, O_SREM, O_UREM);
+            };
+            return self.arith(op, x, y);
+        }
+        let op = switch t {
+            Ampersand => O_AND,
+            AmpersandAmpersand => O_AND,
+            Pipe => O_OR,
+            PipePipe => O_OR,
+            Caret => O_XOR,
+            _ => 0u8,
+        };
+        if op == 0 {
+            return self.fail_v("operator");
+        }
+        return self.arith(op, x, y);
+    }
+
+    // The value of integer constant operand `opid` into `out`; false for another operand.
+    fn const_int(self: &Self, c: &cbe::CEmit, b: &irc::CoreBody, opid: u32, out: &mut i64) bool {
+        let op = b.operands[opid as usize];
+        if op.kind != irc::OP_CONST {
+            return false;
+        }
+        let k = b.constants[op.data as usize];
+        return k.kind == irc::CK_INT && k.int_value(Lower::const_src(c, b, &k), out);
+    }
+
+    // A comparison of two scalars: at the wider integer type, signed when that one is.
+    fn compare(self: &mut Self, t: tt::TokenType, x0: Value, y0: Value, sa: bool, sb: bool) Value {
+        let mut x = x0;
+        let mut y = y0;
+        let tx = self.vty(x);
+        let ty = self.vty(y);
+        if is_float(tx) || is_float(ty) {
+            let ft = ast::pick(tx == T_F64 || ty == T_F64, T_F64, T_F32);
+            x = self.convert(x, tx, ft, sa, sa, false);
+            y = self.convert(y, ty, ft, sb, sb, false);
+            let cond = switch t {
+                EqualEqual => C_OEQ,
+                BangEqual => C_UNE,
+                LessThan => C_OLT,
+                LessThanEqual => C_OLE,
+                GreaterThan => C_OGT,
+                _ => C_OGE,
+            };
+            return self.inst(O_FCMP, T_I8, cond, x, y, VNONE);
+        }
+        let mut signed = sa && sb;
+        if tx == T_PTR || ty == T_PTR {
+            x = self.int_to(x, T_PTR, false);
+            y = self.int_to(y, T_PTR, false);
+            signed = false;
+        } else if tx != ty {
+            let pb = self.pkg.ptr_bytes;
+            let wide = ast::pick(type_bits(tx, pb) >= type_bits(ty, pb), tx, ty);
+            signed = ast::pick(type_bits(tx, pb) == type_bits(ty, pb), sa && sb, ast::pick(wide == tx, sa, sb));
+            x = self.int_to(x, wide, sa);
+            y = self.int_to(y, wide, sb);
+        }
+        let cond = switch t {
+            EqualEqual => C_EQ,
+            BangEqual => C_NE,
+            LessThan => ast::pick(signed, C_SLT, C_ULT),
+            LessThanEqual => ast::pick(signed, C_SLE, C_ULE),
+            GreaterThan => ast::pick(signed, C_SGT, C_UGT),
+            _ => ast::pick(signed, C_SGE, C_UGE),
+        };
+        return self.icmp(cond, x, y);
+    }
+
+    // `x << y`, `x >> y`: a count at or past the width traps in every build; the count converts to
+    // the shifted type.
+    fn shift(
+        self: &mut Self,
+        c: &cbe::CEmit,
+        b: &irc::CoreBody,
+        rv: irc::Rvalue,
+        t: tt::TokenType,
+        x: Value,
+        y0: Value,
+        sa: bool,
+        sb: bool,
+    ) Value {
+        let tx = self.vty(x);
+        let bits = type_bits(tx, self.pkg.ptr_bytes);
+        let mut cv: i64 = 0;
+        let known = self.const_int(c, b, rv.b, &mut cv) && cv >= 0 && cv < bits as i64;
+        if !known {
+            let c64 = self.int_to(y0, T_I64, sb);
+            let lim = self.iconst(T_I64, bits);
+            let f = self.icmp(C_UGE, c64, lim);
+            self.check(
+                f,
+                ast::pick(
+                    t == tt::TokenType::LeftShift,
+                    "attempt to shift left with overflow",
+                    "attempt to shift right with overflow",
+                ),
+            );
+        }
+        let y = self.int_to(y0, tx, false);
+        if t == tt::TokenType::LeftShift {
+            return self.arith(O_SHL, x, y);
+        }
+        return self.arith(ast::pick(sa, O_ASHR, O_LSHR), x, y);
+    }
+
+    // Pointer plus or minus an integer, or the distance between two pointers, in elements.
+    fn ptr_arith(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        am: ModuleId,
+        ya: Ty,
+        t: tt::TokenType,
+        x: Value,
+        y: Value,
+        bm: ModuleId,
+        bt: TypeId,
+        ti: TyI,
+    ) Value {
+        let mut ei = TyI { cls: 0 };
+        if !self.ty(c, am, ya.as_data.elem, &mut ei) {
+            return VNONE;
+        }
+        let yb = *Lower::ast(c, bm).type_at(bt);
+        if yb.kind == TypeKind::TYPE_POINTER {
+            if ei.size == 0 {
+                let none: []Value = [];
+                let nt: []u32 = [];
+                let _ = self.call_sym("__sc_zst_ptrdiff", none, nt, T_NONE);
+                return self.iconst(ti.mty, 0);
+            }
+            let pi = self.ptr_int();
+            let xi = self.inst(O_PTRTOINT, pi, 0, x, VNONE, VNONE);
+            let yi = self.inst(O_PTRTOINT, pi, 0, y, VNONE, VNONE);
+            let d = self.arith(O_SUB, xi, yi);
+            let sz = self.iconst(pi, ei.size);
+            let q = self.arith(O_SDIV, d, sz);
+            return self.int_to(q, ti.mty, true);
+        }
+        if ei.size == 0 {
+            return x;
+        }
+        let mut ix = self.int_to(y, self.ptr_int(), Lower::signed(c, bm, bt));
+        if t == tt::TokenType::Minus {
+            let z = self.zero(self.ptr_int());
+            ix = self.arith(O_SUB, z, ix);
+        }
+        return self.ptradd(x, ix, ei.size, 0);
+    }
+
+    // `a == b` on two `str` values: equal lengths and equal bytes.
+    fn str_eq(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, rv: irc::Rvalue) Value {
+        let mut pa = [VNONE, VNONE];
+        for k in 0..2 {
+            let opid = ast::pick(k == 0, rv.a, rv.b);
+            let mut rm = b.module;
+            let mut rt = TYPE_NONE;
+            let y = Lower::resolved(c, b.module, Lower::op_ty(b, opid), &mut rm, &mut rt);
+            let ti = TyI { cls: VC_MEM, mty: T_NONE, size: 2 * self.pkg.ptr_bytes, align: self.pkg.ptr_bytes };
+            let v = if y.kind == TypeKind::TYPE_REFERENCE {
+                self.operand(c, b, opid);
+            } else {
+                self.operand_addr(c, b, opid, ti);
+            };
+            if v == VNONE {
+                return VNONE;
+            }
+            unsafe pa[k] = v;
+        }
+        let pi = self.ptr_int();
+        let la = self.load(pi, pa[0], self.pkg.ptr_bytes, false);
+        let lb = self.load(pi, pa[1], self.pkg.ptr_bytes, false);
+        let same = self.icmp(C_EQ, la, lb);
+        let z = self.zero(pi);
+        let n = self.inst(O_SELECT, pi, 0, same, la, z);
+        let p0 = self.load(T_PTR, pa[0], 0, false);
+        let p1 = self.load(T_PTR, pa[1], 0, false);
+        let args: []Value = [p0, p1, n];
+        let tys: []u32 = [T_PTR as u32, T_PTR as u32, pi as u32];
+        let r = self.call_sym("memcmp", args, tys, T_I32);
+        let z32 = self.zero(T_I32);
+        let e = self.icmp(C_EQ, r, z32);
+        return self.arith(O_AND, same, e);
+    }
+
+    // An operator on aggregates through the type's method: `eq` for `==` and `!=`, `cmp` for an
+    // ordering, else the operator's (`add` for `+`). The result goes to `dst` when in memory.
+    fn agg_op(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        b: &irc::CoreBody,
+        rv: irc::Rvalue,
+        am: ModuleId,
+        at: TypeId,
+        _aref: bool,
+        ti: TyI,
+        dst: Value,
+    ) Value {
+        let t = rv.c as tt::TokenType;
+        let eq = t == tt::TokenType::EqualEqual || t == tt::TokenType::BangEqual;
+        let ord = !eq && (t == tt::TokenType::LessThan || t == tt::TokenType::LessThanEqual || t == tt::TokenType::GreaterThan || t == tt::TokenType::GreaterThanEqual);
+        let mn = if eq {
+            "eq";
+        } else if ord {
+            "cmp";
+        } else {
+            t.op_method();
+        };
+        let mut s = String::new();
+        if !c.agg_op_sym(am, at, mn, &mut s) {
+            return self.fail_v("agg-op-sym");
+        }
+        let mut args = [VNONE, VNONE];
+        let mut tys = [T_PTR as u32, T_PTR as u32];
+        for k in 0..2 {
+            let opid = ast::pick(k == 0, rv.a, rv.b);
+            let mut rm = b.module;
+            let mut rt = TYPE_NONE;
+            let y = Lower::resolved(c, b.module, Lower::op_ty(b, opid), &mut rm, &mut rt);
+            let mut oi = TyI { cls: 0 };
+            if !self.ty(c, rm, rt, &mut oi) {
+                return VNONE;
+            }
+            let isref = y.kind == TypeKind::TYPE_REFERENCE;
+            let agg = y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_INSTANCE;
+            // The left operand and an aggregate or compared right one by address; a scalar right
+            // operand of an arithmetic operator by value.
+            let v = if isref && (k == 0 || eq || ord || agg) {
+                self.operand(c, b, opid);
+            } else if k == 0 || eq || ord || agg {
+                self.operand_addr(c, b, opid, oi);
+            } else if isref {
+                let p = self.operand(c, b, opid);
+                let mut ei = TyI { cls: 0 };
+                if !self.ty(c, rm, y.as_data.elem, &mut ei) {
+                    return VNONE;
+                }
+                self.load(ei.mty, p, 0, false);
+            } else {
+                self.operand(c, b, opid);
+            };
+            if v == VNONE {
+                return self.fail_v("agg-op-operand");
+            }
+            unsafe args[k] = v;
+            unsafe tys[k] = self.vty(v);
+        }
+        if eq {
+            let r = self.call_sym(s.as_str(), args, tys, T_I8);
+            if t == tt::TokenType::EqualEqual {
+                return r;
+            }
+            let one = self.iconst(T_I8, 1);
+            return self.arith(O_XOR, r, one);
+        }
+        if ord {
+            let r = self.call_sym(s.as_str(), args, tys, T_I32);
+            let z = self.zero(T_I32);
+            return self.compare(t, r, z, true, true);
+        }
+        if ti.cls == VC_SCALAR {
+            return self.call_sym(s.as_str(), args, tys, ti.mty);
+        }
+        let lt = self.layout_of(c, b.module, rv.target, ti);
+        let all: []Value = [args[0], args[1], dst];
+        let atys: []u32 = [tys[0], tys[1], T_PTR as u32];
+        let sg = self.b.signature(atys[0..2], 2, false, AGG | lt);
+        let ap = self.b.pool_list(all);
+        let k = self.sym(s.as_str(), SK_FUNC);
+        let _ = self.inst(O_CALL, T_NONE, 3, k, sg, ap);
+        return dst;
+    }
+
+    // A binary operator on vectors: lane by lane, with the scalar rules' traps per lane.
+    fn vec_binary(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        b: &irc::CoreBody,
+        rv: irc::Rvalue,
+        x: Value,
+        y: Value,
+        ti: TyI,
+        signed: bool,
+    ) Value {
+        let t = rv.c as tt::TokenType;
+        let vt = self.vty(x);
+        let flt = is_float(lane_type(vt));
+        let sg = ast::pick(signed, VOP_SIGNED, 0);
+        let mt = self.mask_of(vt);
+        if t == tt::TokenType::EqualEqual || t == tt::TokenType::BangEqual {
+            let m = self.vop((irc::OP_SIMD + irc::SIMD_CMP_EQ as u32) as u16 | sg, mt, [x, y], VNONE);
+            let all = self.iconst(mt, ~0u64 >> (64 - lanes(vt)) as u64);
+            return self.icmp(ast::pick(t == tt::TokenType::EqualEqual, C_EQ, C_NE), m, all);
+        }
+        if t == tt::TokenType::LeftShift || t == tt::TokenType::RightShift {
+            let bits = type_bits(lane_type(vt), 8);
+            if !is_vec(self.vty(y)) {
+                let c64 = self.int_to(y, T_I64, false);
+                let lim = self.iconst(T_I64, bits);
+                let f = self.icmp(C_UGE, c64, lim);
+                self.check(
+                    f,
+                    ast::pick(
+                        t == tt::TokenType::LeftShift,
+                        "attempt to shift left with overflow",
+                        "attempt to shift right with overflow",
+                    ),
+                );
+                let cnt = self.int_to(y, lane_type(vt), false);
+                return self.vop(
+                    ast::pick(t == tt::TokenType::LeftShift, irc::OP_SHL_SCALAR, irc::OP_SHR_SCALAR) as u16 | sg,
+                    vt,
+                    [x, cnt],
+                    VNONE,
+                );
+            }
+            let lim = self.splat(vt, bits);
+            let m = self.vop((irc::OP_SIMD + irc::SIMD_CMP_GE as u32) as u16, mt, [y, lim], VNONE);
+            self.lane_check(
+                m,
+                ast::pick(
+                    t == tt::TokenType::LeftShift,
+                    "attempt to shift left with overflow",
+                    "attempt to shift right with overflow",
+                ),
+            );
+            return self.arith(ast::pick(t == tt::TokenType::LeftShift, O_SHL, ast::pick(signed, O_ASHR, O_LSHR)), x, y);
+        }
+        if flt {
+            let op = switch t {
+                Plus => O_FADD,
+                Minus => O_FSUB,
+                Star => O_FMUL,
+                Slash => O_FDIV,
+                _ => 0u8,
+            };
+            if op != 0 {
+                return self.arith(op, x, y);
+            }
+            if t == tt::TokenType::Percent {
+                return self.vop(irc::OP_REM as u16, vt, [x, y], VNONE);
+            }
+            return self.fail_v("vector-float-operator");
+        }
+        if t == tt::TokenType::Plus || t == tt::TokenType::Minus || t == tt::TokenType::Star {
+            if !self.wrap {
+                let code = ast::pick(
+                    t == tt::TokenType::Plus,
+                    irc::SIMD_OVF_ADD,
+                    ast::pick(t == tt::TokenType::Minus, irc::SIMD_OVF_SUB, irc::SIMD_OVF_MUL),
+                );
+                let m = self.vop((irc::OP_SIMD + code as u32) as u16 | sg, mt, [x, y], VNONE);
+                self.lane_check(
+                    m,
+                    ast::pick(
+                        t == tt::TokenType::Plus,
+                        "attempt to add with overflow",
+                        ast::pick(
+                            t == tt::TokenType::Minus,
+                            "attempt to subtract with overflow",
+                            "attempt to multiply with overflow",
+                        ),
+                    ),
+                );
+            }
+            return self.arith(
+                ast::pick(t == tt::TokenType::Plus, O_ADD, ast::pick(t == tt::TokenType::Minus, O_SUB, O_MUL)),
+                x,
+                y,
+            );
+        }
+        if t == tt::TokenType::Slash || t == tt::TokenType::Percent {
+            let div = t == tt::TokenType::Slash;
+            let z = self.zero(vt);
+            let m = self.vop((irc::OP_SIMD + irc::SIMD_CMP_EQ as u32) as u16, mt, [y, z], VNONE);
+            self.lane_check(
+                m,
+                ast::pick(div, "attempt to divide by zero", "attempt to calculate the remainder with a divisor of zero"),
+            );
+            if signed {
+                let bits = type_bits(lane_type(vt), 8);
+                let mn = self.splat(vt, 1u64 << (bits - 1) as u64);
+                let m1 = self.splat(vt, 0xFFFFFFFFFFFFFFFF);
+                let fx = self.vop((irc::OP_SIMD + irc::SIMD_CMP_EQ as u32) as u16, mt, [x, mn], VNONE);
+                let fy = self.vop((irc::OP_SIMD + irc::SIMD_CMP_EQ as u32) as u16, mt, [y, m1], VNONE);
+                let f = self.arith(O_AND, fx, fy);
+                self.lane_check(
+                    f,
+                    ast::pick(
+                        div,
+                        "attempt to divide with overflow",
+                        "attempt to calculate the remainder with overflow",
+                    ),
+                );
+            }
+            let op = if div {
+                ast::pick(signed, O_SDIV, O_UDIV);
+            } else {
+                ast::pick(signed, O_SREM, O_UREM);
+            };
+            return self.arith(op, x, y);
+        }
+        let op = switch t {
+            Ampersand => O_AND,
+            Pipe => O_OR,
+            Caret => O_XOR,
+            _ => 0u8,
+        };
+        if op == 0 {
+            return self.fail_v("vector-operator");
+        }
+        let _ = ti;
+        let _ = c;
+        let _ = b;
+        return self.arith(op, x, y);
+    }
+
+    // Vector type `vt` with every lane `v` (the lane's low bits).
+    fn splat(self: &mut Self, vt: u8, v: u64) Value {
+        let lb = type_bits(lane_type(vt), 8);
+        let n = lanes(vt);
+        let nw = (n * lb + 63) / 64;
+        let w = self.b.words.len() as u32;
+        for _ in 0..nw {
+            self.b.words.push(0);
+        }
+        let mut lv = v;
+        if lb < 64 {
+            lv &= (1u64 << lb as u64) - 1;
+        }
+        for k in 0..n {
+            let bit = (k * lb) as u64;
+            let at = (w as u64 + bit / 64) as usize;
+            self.b.words[at] = self.b.words[at] | lv << bit % 64;
+        }
+        return self.inst(O_WCONST, vt, 0, w, nw, VNONE);
+    }
+}
+
+extend Lower {
+    // The zero of type `t` here (not shared through the entry block).
+    fn zero_here(self: &mut Self, t: u8) Value {
+        if is_vec(t) {
+            return self.splat(t, 0);
+        }
+        if is_float(t) {
+            return self.fconst(t, 0);
+        }
+        return self.iconst(t, 0);
+    }
+
+    // `len` of place `pid`: an array's or a vector's count, a view's or a container's length field.
+    fn len(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, pid: u32, ti: TyI) Value {
+        let pl = b.places[pid as usize];
+        let mut rm = b.module;
+        let mut rt = TYPE_NONE;
+        let y = Lower::resolved(c, b.module, pl.ty, &mut rm, &mut rt);
+        if y.kind == TypeKind::TYPE_ARRAY || y.kind == TypeKind::TYPE_SIMD {
+            let n = c.mg.arr_len(rm, &y);
+            if n < 0 {
+                return self.fail_v("len-array");
+            }
+            return self.iconst(ti.mty, n as u64);
+        }
+        let nm = Lower::agg_name(c, rm, rt);
+        let mut f = FieldAt {
+            m: 0,
+            t: TYPE_NONE,
+            off: 0,
+            idx: 0,
+            node: NODE_NONE,
+            variant: NODE_NONE,
+            mty: T_NONE,
+            packed: false,
+        };
+        if nm == "Array" {
+            if !self.named_field(c, rm, rt, "data", &mut f) {
+                return self.fail_v("len-array-field");
+            }
+            let mut fm = f.m;
+            let mut ft = TYPE_NONE;
+            let fy = Lower::resolved(c, f.m, f.t, &mut fm, &mut ft);
+            return self.iconst(ti.mty, c.mg.arr_len(fm, &fy) as u64);
+        }
+        if nm != "Slice" && nm != "SliceMut" && nm != "Vector" && nm != "String" && nm != "str" {
+            return self.fail_v("len");
+        }
+        let mut p = PlaceRef { kind: 0 };
+        if !self.place(c, b, pid, &mut p) || p.kind != PR_MEM {
+            return self.fail_v("len-place");
+        }
+        if !self.named_field(c, rm, rt, "len", &mut f) {
+            return self.fail_v("len-field");
+        }
+        return self.load(ti.mty, p.addr, f.off, p.packed);
+    }
+
+    // The discriminant of the enum at place `pid` (behind its references).
+    fn discriminant(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, pid: u32, ti: TyI) Value {
+        let pl = b.places[pid as usize];
+        let mut p = PlaceRef { kind: 0 };
+        if !self.place(c, b, pid, &mut p) {
+            return VNONE;
+        }
+        let mut rm = b.module;
+        let mut rt = TYPE_NONE;
+        let mut y = Lower::resolved(c, b.module, pl.ty, &mut rm, &mut rt);
+        let mut v = VNONE;
+        let mut addr = p.addr;
+        let mut val = p.kind != PR_MEM;
+        if val {
+            v = self.read(p);
+        }
+        for _ in 0..4 {
+            if y.kind != TypeKind::TYPE_REFERENCE && y.kind != TypeKind::TYPE_POINTER {
+                break;
+            }
+            addr = if val {
+                v;
+            } else {
+                self.load(T_PTR, addr, 0, false);
+            };
+            val = false;
+            y = Lower::resolved(c, rm, y.as_data.elem, &mut rm, &mut rt);
+        }
+        let mut ei = TyI { cls: 0 };
+        if !self.ty(c, rm, rt, &mut ei) {
+            return VNONE;
+        }
+        if ei.cls == VC_SCALAR {
+            let x = if val {
+                v;
+            } else {
+                self.load(ei.mty, addr, 0, false);
+            };
+            return self.int_to(x, ti.mty, true);
+        }
+        let mut el = EnumL { ok: false };
+        if val || !self.enum_of(c, rm, rt, &mut el) {
+            return self.fail_v("discriminant");
+        }
+        let tag = self.load(el.tag, addr, 0, false);
+        return self.int_to(tag, ti.mty, el.tag != T_I8);
+    }
+
+    // A compiler intrinsic of scalar result `ti`.
+    fn intrinsic(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, rv: irc::Rvalue, ti: TyI) Value {
+        let k = rv.c;
+        if k == irc::IN_SIZEOF || k == irc::IN_ALIGNOF {
+            let mut x = TyI { cls: 0 };
+            if !self.ty(c, b.module, rv.b, &mut x) {
+                return VNONE;
+            }
+            let v = if k == irc::IN_SIZEOF {
+                x.size;
+            } else {
+                ast::pick(x.align == 0, 1u32, x.align);
+            };
+            return self.iconst(ti.mty, v);
+        }
+        if k == irc::IN_TYPE_INFO {
+            let mut rm = b.module;
+            let mut rt = TYPE_NONE;
+            let _ = Lower::resolved(c, b.module, rv.b, &mut rm, &mut rt);
+            let a = self.type_info(c, rm, rt);
+            if a == VNONE {
+                return VNONE;
+            }
+            return self.load(ti.mty, a, 0, false);
+        }
+        if k == irc::IN_DANGLING {
+            return self.sentinel(c, b.module, rv.b);
+        }
+        if k == irc::IN_ZEROED {
+            return self.zero_here(ti.mty);
+        }
+        if k == irc::IN_VOLATILE_LOAD {
+            let a = self.operand(c, b, b.oper_pool[rv.a as usize]);
+            if a == VNONE {
+                return VNONE;
+            }
+            let al = log2(type_align(ti.mty, self.pkg.ptr_bytes)) as u16;
+            return self.inst(O_LOAD, ti.mty, al | MEM_VOLATILE, a, VNONE, 0);
+        }
+        if k == irc::IN_VA_ARG {
+            let ap = self.place_addr_op(c, b, b.oper_pool[rv.a as usize]);
+            if ap == VNONE {
+                return VNONE;
+            }
+            // A variadic argument arrives promoted: a float as a double, a narrow integer as an int.
+            let mt = ti.mty;
+            if mt == T_F32 {
+                let d = self.inst(O_VAARG, T_F64, 0, ap, VNONE, VNONE);
+                return self.inst(O_FPTRUNC, T_F32, 0, d, VNONE, VNONE);
+            }
+            if mt == T_I8 || mt == T_I16 {
+                let d = self.inst(O_VAARG, T_I32, 0, ap, VNONE, VNONE);
+                return self.inst(O_TRUNC, mt, 0, d, VNONE, VNONE);
+            }
+            return self.inst(O_VAARG, mt, 0, ap, VNONE, VNONE);
+        }
+        if k == irc::IN_DYN_TID || k == irc::IN_DYN_DATA {
+            let opid = b.oper_pool[rv.a as usize];
+            let fat = TyI { cls: VC_MEM, mty: T_NONE, size: 2 * self.pkg.ptr_bytes, align: self.pkg.ptr_bytes };
+            let fa = self.operand_addr(c, b, opid, fat);
+            if fa == VNONE {
+                return VNONE;
+            }
+            if k == irc::IN_DYN_DATA {
+                return self.load(T_PTR, fa, 0, false);
+            }
+            // The table's `tid` names the erased type: equal to the queried type's spelling.
+            let mut rm = b.module;
+            let mut rt = TYPE_NONE;
+            let y = Lower::resolved(c, b.module, rv.target, &mut rm, &mut rt);
+            if y.kind != TypeKind::TYPE_REFERENCE {
+                return self.fail_v("dyn-tid");
+            }
+            let mut sp = String::new();
+            if !c.mg.type_m(rm, y.as_data.elem, &mut sp) {
+                return self.fail_v("dyn-tid");
+            }
+            let vt = self.load(T_PTR, fa, self.pkg.ptr_bytes, false);
+            let tid = self.load(T_PTR, vt, self.pkg.ptr_bytes, false);
+            let lit = self.cstr(sp.as_str());
+            let args: []Value = [tid, lit];
+            let tys: []u32 = [T_PTR as u32, T_PTR as u32];
+            let r = self.call_sym("strcmp", args, tys, T_I32);
+            let z = self.zero(T_I32);
+            return self.icmp(C_EQ, r, z);
+        }
+        let n = check_args(k);
+        let mut v = [VNONE, VNONE, VNONE];
+        for i in 0..n {
+            let x = self.operand(c, b, b.oper_pool[(rv.a + i) as usize]);
+            if x == VNONE {
+                return self.fail_v("intrinsic-operand");
+            }
+            unsafe v[i as usize] = if k == irc::IN_LIKELY || k == irc::IN_UNLIKELY {
+                x;
+            } else {
+                self.int_to(x, self.ptr_int(), false);
+            };
+        }
+        if k == irc::IN_BOUNDS {
+            let f = self.icmp(C_UGE, v[0], v[1]);
+            self.check(f, "index out of bounds");
+            return self.int_to(v[0], ti.mty, false);
+        }
+        if k == irc::IN_BOUNDS_PROVEN || k == irc::IN_BOUNDS_GROUP_PROVEN {
+            return self.int_to(v[0], ti.mty, false);
+        }
+        if k == irc::IN_GROUP_FITS {
+            // `index <= len && width <= len - index`: the room is read only where it does not wrap.
+            let f1 = self.icmp(C_ULE, v[0], v[1]);
+            let room = self.arith(O_SUB, v[1], v[0]);
+            let f2 = self.icmp(C_ULE, v[2], room);
+            return self.arith(O_AND, f1, f2);
+        }
+        if k == irc::IN_BOUNDS_GROUP {
+            let f1 = self.icmp(C_UGT, v[0], v[1]);
+            let room = self.arith(O_SUB, v[1], v[0]);
+            let f2 = self.icmp(C_UGT, v[2], room);
+            let f = self.arith(O_OR, f1, f2);
+            self.check(f, "index out of bounds");
+            return self.int_to(v[0], ti.mty, false);
+        }
+        if k == irc::IN_RANGE_BOUNDS {
+            let f1 = self.icmp(C_UGT, v[0], v[1]);
+            let f2 = self.icmp(C_UGT, v[1], v[2]);
+            let f = self.arith(O_OR, f1, f2);
+            self.check(f, "range out of bounds");
+            return self.int_to(v[1], ti.mty, false);
+        }
+        if k == irc::IN_RANGE_BOUNDS_PROVEN {
+            return self.int_to(v[1], ti.mty, false);
+        }
+        if k == irc::IN_LIKELY || k == irc::IN_UNLIKELY {
+            return v[0];
+        }
+        if k == irc::IN_RETURN_ADDRESS {
+            if tgt::isa(Lower::p(c).arch).return_address {
+                return self.inst(O_RETADDR, T_PTR, 0, VNONE, VNONE, VNONE);
+            }
+            return self.iconst(T_PTR, 0);
+        }
+        if k == irc::IN_CHUNK {
+            // The chunk's end: the loop's end where no tick prints, else as far as the tick budget
+            // left reaches, which the chunk's other iterations are charged.
+            if self.spc == NONE {
+                return self.int_to(v[1], ti.mty, false);
+            }
+            let i = self.int_to(v[0], T_I64, false);
+            let e = self.int_to(v[1], T_I64, false);
+            let d = self.arith(O_SUB, e, i);
+            let bud = self.read_var(self.spc, self.cur);
+            let b64 = self.int_to(bud, T_I64, true);
+            let over = self.icmp(C_UGT, d, b64);
+            let nn = self.inst(O_SELECT, T_I64, 0, over, b64, d);
+            let one = self.iconst(T_I64, 1);
+            let used = self.arith(O_SUB, nn, one);
+            let u32v = self.int_to(used, T_I32, false);
+            let left = self.arith(O_SUB, bud, u32v);
+            self.write_var(self.spc, left);
+            let r = self.arith(O_ADD, i, nn);
+            return self.int_to(r, ti.mty, false);
+        }
+        return self.fail_v("intrinsic");
+    }
+
+    // The address of the place of operand `opid` (a copy or a move).
+    fn place_addr_op(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, opid: u32) Value {
+        let op = b.operands[opid as usize];
+        if op.kind == irc::OP_CONST {
+            return self.fail_v("place-operand");
+        }
+        return self.place_addr(c, b, op.data);
+    }
+
+    // The address of read-only C string `s` and its terminating 0.
+    fn cstr(self: &mut Self, s: str) Value {
+        let mut bytes = String::from_str(s);
+        let sy = self.rodata(&mut bytes);
+        let k = self.sym_of(sy);
+        return self.inst(O_SYMADDR, T_PTR, 0, k, 0, VNONE);
+    }
+
+    // A vector operation (`RV_SIMD`): its operands as values (a view or an array in memory by its
+    // address), its index list in the pool. A store has no result; `dst` takes a memory result.
+    fn simd(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, rv: irc::Rvalue, ti: TyI, dst: Value) Value {
+        let mut args = Vector::<Value>::new();
+        let mut signed = false;
+        for i in 0..rv.b {
+            let opid = b.oper_pool[(rv.a + i) as usize];
+            let t = Lower::op_ty(b, opid);
+            let mut oi = TyI { cls: 0 };
+            if !self.ty(c, b.module, t, &mut oi) {
+                return VNONE;
+            }
+            if i == 0 {
+                signed = Lower::signed(c, b.module, t);
+            }
+            let v = if oi.cls == VC_MEM {
+                self.operand_addr(c, b, opid, oi);
+            } else {
+                self.operand(c, b, opid);
+            };
+            if v == VNONE {
+                return self.fail_v("simd-operand");
+            }
+            args.push(v);
+        }
+        if rv.b == 0 {
+            signed = Lower::signed(c, b.module, rv.target);
+        }
+        let mut lanes = VNONE;
+        if (rv.c == irc::SIMD_SWIZZLE || rv.c == irc::SIMD_SHUFFLE) && rv.item.node != irc::IR_NONE {
+            let n = b.simd_aux[rv.item.node as usize];
+            lanes = self.b.pool.len() as u32;
+            self.b.pool.push(n);
+            for k in 0..n {
+                self.b.pool.push(irc::aux_lane(b, rv.item.node, k));
+            }
+        } else if rv.c == irc::SIMD_SWIZZLE || rv.c == irc::SIMD_SHUFFLE {
+            return self.fail_v("simd-lanes");
+        }
+        // The second lane type: the result's, or for `cast_changed` its cast result operand's.
+        let wt = if rv.c == irc::SIMD_CAST_CHANGED && rv.b > 1 {
+            Lower::op_ty(b, b.oper_pool[(rv.a + 1) as usize]);
+        } else {
+            rv.target;
+        };
+        let dsg = wt != TYPE_NONE && Lower::signed(c, b.module, wt);
+        let code = (irc::OP_SIMD + rv.c as u32) as u16 | ast::pick(signed, VOP_SIGNED, 0) | ast::pick(
+            dsg,
+            VOP_DSIGNED,
+            0,
+        );
+        let rt = ast::pick(ti.cls == VC_SCALAR, ti.mty, T_NONE);
+        if ti.cls == VC_MEM {
+            args.push(dst);
+        }
+        return self.vop(code, rt, args[0..args.len()], lanes);
+    }
+}
+
+// The operand count of check intrinsic `k`, and of the one-operand hints.
+const fn check_args(k: u8) u32 {
+    if k == irc::IN_LIKELY || k == irc::IN_UNLIKELY {
+        return 1;
+    }
+    if k == irc::IN_BOUNDS || k == irc::IN_BOUNDS_PROVEN || k == irc::IN_CHUNK {
+        return 2;
+    }
+    if irc::is_check(k) || k == irc::IN_GROUP_FITS {
+        return 3;
+    }
+    return 0;
+}
+
+extend Lower {
+    // ---- Memory rvalues ----
+
+    // Rvalue `rid` of memory type `ti`, built at `dst`.
+    fn rvalue_into(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        b: &irc::CoreBody,
+        rid: u32,
+        dst: Value,
+        ti: TyI,
+        place_ty: TypeId,
+    ) bool {
+        let rv = b.rvalues[rid as usize];
+        if rv.kind == irc::RV_USE {
+            if rv.target != TYPE_NONE && self.arr_view(c, b, rv.a, rv.target, dst) {
+                return true;
+            }
+            if self.err.len() != 0 {
+                return false;
+            }
+            return self.operand_into(c, b, rv.a, dst, ti);
+        }
+        if rv.kind == irc::RV_AGGREGATE {
+            return self.aggregate(c, b, rv, dst, ti, place_ty);
+        }
+        if rv.kind == irc::RV_REPEAT {
+            return self.repeat(c, b, rv, dst, place_ty);
+        }
+        if rv.kind == irc::RV_SLICE {
+            return self.slice(c, b, rv, dst, place_ty);
+        }
+        if rv.kind == irc::RV_CLOSURE {
+            return self.closure_env(c, b, rv, dst);
+        }
+        if rv.kind == irc::RV_DYN {
+            return self.dyn_value(c, b, rv, dst);
+        }
+        if rv.kind == irc::RV_CAST && rv.b == irc::CAST_COERCE_FROM {
+            return self.coerce(c, b, rv, dst, ti) != VNONE || self.err.len() == 0;
+        }
+        if rv.kind == irc::RV_CAST && rv.b != irc::CAST_SIMD_ARRAY {
+            // C casts an aggregate only to its own type: a copy.
+            return self.operand_into(c, b, rv.a, dst, ti);
+        }
+        if rv.kind == irc::RV_CAST && rv.b == irc::CAST_SIMD_ARRAY {
+            // A vector to its array: the same bytes, aligned as the array.
+            let v = self.operand(c, b, rv.a);
+            if v == VNONE {
+                return self.fail("simd-array");
+            }
+            let _ = self.inst(O_STORE, T_NONE, log2(ti.align) as u16, dst, v, 0);
+            return true;
+        }
+        if rv.kind == irc::RV_BINARY {
+            let mut am = b.module;
+            let mut at = TYPE_NONE;
+            let ay = Lower::resolved(c, b.module, Lower::op_ty(b, rv.a), &mut am, &mut at);
+            let aref = ay.kind == TypeKind::TYPE_REFERENCE;
+            if aref {
+                let _ = Lower::resolved(c, am, ay.as_data.elem, &mut am, &mut at);
+            }
+            return self.agg_op(c, b, rv, am, at, aref, ti, dst) != VNONE;
+        }
+        if rv.kind == irc::RV_INTRINSIC && rv.c == irc::IN_ZEROED {
+            self.memset0(dst, ti.size);
+            return true;
+        }
+        if rv.kind == irc::RV_INTRINSIC && rv.c == irc::IN_VOLATILE_LOAD {
+            let a = self.operand(c, b, b.oper_pool[rv.a as usize]);
+            if a == VNONE {
+                return false;
+            }
+            self.volatile_copy(dst, a, ti, true);
+            return true;
+        }
+        if rv.kind == irc::RV_INTRINSIC && rv.c == irc::IN_TYPE_NAME {
+            // The instance's spelling, as a `str` constant.
+            if rv.b == TYPE_NONE {
+                return self.fail("type-name");
+            }
+            let mut rm = b.module;
+            let mut rt = TYPE_NONE;
+            let _ = Lower::resolved(c, b.module, rv.b, &mut rm, &mut rt);
+            let mut nm = String::new();
+            rnd::render_qualified_name(c.pkg, Lower::p(c).module_ast_const(rm), rt, &mut nm);
+            let n = self.iconst(self.ptr_int(), nm.len() as u64);
+            let s = self.cstr(nm.as_str());
+            self.store(s, dst, 0, false);
+            self.store(n, dst, self.pkg.ptr_bytes, false);
+            return true;
+        }
+        if rv.kind == irc::RV_INTRINSIC && rv.c == irc::IN_TYPE_INFO {
+            // The descriptor's value.
+            let mut rm = b.module;
+            let mut rt = TYPE_NONE;
+            let _ = Lower::resolved(c, b.module, rv.b, &mut rm, &mut rt);
+            let a = self.type_info(c, rm, rt);
+            if a == VNONE {
+                return false;
+            }
+            self.memcpy(dst, a, ti.size);
+            return true;
+        }
+        if rv.kind == irc::RV_SIMD {
+            return self.simd(c, b, rv, ti, dst) != VNONE || self.err.len() == 0;
+        }
+        return self.fail("rvalue-memory");
+    }
+
+    // An array operand used as a slice view: `{ &array, N }`; false when `opid` is no array or `want`
+    // no view.
+    fn arr_view(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, opid: u32, want: TypeId, dst: Value) bool {
+        let op = b.operands[opid as usize];
+        if op.kind == irc::OP_CONST {
+            return false;
+        }
+        let mut rm = b.module;
+        let mut rt = TYPE_NONE;
+        let y = Lower::resolved(c, b.module, op.ty, &mut rm, &mut rt);
+        if y.kind != TypeKind::TYPE_ARRAY {
+            return false;
+        }
+        let n = c.mg.arr_len(rm, &y);
+        let mut wm = b.module;
+        let mut wt = TYPE_NONE;
+        let wy = Lower::resolved(c, b.module, want, &mut wm, &mut wt);
+        let nm = Lower::agg_name(c, wm, wt);
+        if wy.kind != TypeKind::TYPE_INSTANCE || nm != "Slice" && nm != "SliceMut" || n < 0 {
+            return false;
+        }
+        let a = self.place_addr(c, b, op.data);
+        if a == VNONE {
+            return false;
+        }
+        let len = self.iconst(self.ptr_int(), n as u64);
+        self.store(a, dst, 0, false);
+        self.store(len, dst, self.pkg.ptr_bytes, false);
+        return true;
+    }
+
+    // A struct, tuple, payload-carrying variant or array literal at `dst`.
+    fn aggregate(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        b: &irc::CoreBody,
+        rv: irc::Rvalue,
+        dst: Value,
+        ti: TyI,
+        place_ty: TypeId,
+    ) bool {
+        let mut rm = b.module;
+        let mut rt = TYPE_NONE;
+        let ty = Lower::resolved(c, b.module, rv.target, &mut rm, &mut rt);
+        if rv.c == irc::AGG_ARRAY {
+            // An array literal coerced to a view: the elements in a slot of their own, then the view.
+            let mut pm = b.module;
+            let mut pt = TYPE_NONE;
+            let py = Lower::resolved(c, b.module, place_ty, &mut pm, &mut pt);
+            let pn = Lower::agg_name(c, pm, pt);
+            let view = py.kind == TypeKind::TYPE_INSTANCE && (pn == "Slice" || pn == "SliceMut");
+            let mut ei = TyI { cls: 0 };
+            let et = if view {
+                Lower::ast(c, pm).instance(py.as_data.inst).args[0];
+            } else if ty.kind == TypeKind::TYPE_ARRAY {
+                ty.as_data.arr.elem;
+            } else {
+                TYPE_NONE;
+            };
+            let em = ast::pick(view, pm, rm);
+            if et == TYPE_NONE || !self.ty(c, em, et, &mut ei) {
+                return self.fail("array-literal");
+            }
+            let base = if view {
+                let at = TyI {
+                    cls: VC_MEM,
+                    mty: T_NONE,
+                    size: ast::pick(ei.size * rv.b == 0, 1u32, ei.size * rv.b),
+                    align: ei.align,
+                };
+                self.new_slot(at);
+            } else {
+                dst;
+            };
+            let mut holes = false;
+            for i in 0..rv.b {
+                holes = holes || b.oper_pool[(rv.a + i) as usize] == irc::IR_NONE;
+            }
+            if holes {
+                self.memset0(base, ei.size * rv.b);
+            }
+            for i in 0..rv.b {
+                let opid = b.oper_pool[(rv.a + i) as usize];
+                if opid == irc::IR_NONE {
+                    continue;
+                }
+                let ea = self.ptradd(base, VNONE, 0, i * ei.size);
+                if !self.operand_into(c, b, opid, ea, ei) {
+                    return false;
+                }
+            }
+            if view {
+                let len = self.iconst(self.ptr_int(), rv.b);
+                self.store(base, dst, 0, false);
+                self.store(len, dst, self.pkg.ptr_bytes, false);
+            }
+            return true;
+        }
+        let mut fl = Vector::<FieldAt>::new();
+        if !self.fields_of(c, rm, rt, &mut fl) {
+            return self.fail("aggregate-fields");
+        }
+        if rv.c == irc::AGG_VARIANT {
+            let mut d: i64 = 0;
+            let mut el = EnumL { ok: false };
+            if !self.variant_value(c, rv.item.module, rv.item.node, &mut d) || !self.enum_of(c, rm, rt, &mut el) {
+                return false;
+            }
+            let tag = self.iconst(el.tag, d as u64);
+            self.store(tag, dst, 0, false);
+            let mut k: u32 = 0;
+            for j in 0..fl.len() {
+                let f = fl[j];
+                if f.variant != rv.item.node || f.idx == 0xFFFFFFFF {
+                    continue;
+                }
+                if k >= rv.b {
+                    break;
+                }
+                let opid = b.oper_pool[(rv.a + k) as usize];
+                k += 1;
+                if opid == irc::IR_NONE {
+                    continue;
+                }
+                let mut fi = TyI { cls: 0 };
+                if !self.ty(c, f.m, f.t, &mut fi) {
+                    return false;
+                }
+                let fa = self.ptradd(dst, VNONE, 0, f.off);
+                if !self.operand_into(c, b, opid, fa, fi) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        // Struct and tuple members in declaration order; an omitted member is 0.
+        let mut holes = rv.b != fl.len() as u32;
+        for i in 0..rv.b {
+            holes = holes || b.oper_pool[(rv.a + i) as usize] == irc::IR_NONE;
+        }
+        if holes {
+            self.memset0(dst, ti.size);
+        }
+        for i in 0..rv.b {
+            let opid = b.oper_pool[(rv.a + i) as usize];
+            if opid == irc::IR_NONE || i as usize >= fl.len() {
+                continue;
+            }
+            let f = fl[i as usize];
+            let mut fi = TyI { cls: 0 };
+            if !self.ty(c, f.m, f.t, &mut fi) {
+                return false;
+            }
+            let fa = self.ptradd(dst, VNONE, 0, f.off);
+            if fi.cls == VC_SCALAR && f.packed {
+                let v = self.operand(c, b, opid);
+                if v == VNONE {
+                    return self.fail("aggregate-member");
+                }
+                self.store(v, fa, 0, true);
+                continue;
+            }
+            if !self.operand_into(c, b, opid, fa, fi) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // `[v; n]` at `dst`: a fill of zero bytes, unrolled stores up to 16 elements, else a loop.
+    fn repeat(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, rv: irc::Rvalue, dst: Value, place_ty: TypeId) bool {
+        // The element type is the array's: the operand converts to it.
+        let mut rm = b.module;
+        let mut rt = TYPE_NONE;
+        let y = Lower::resolved(c, b.module, place_ty, &mut rm, &mut rt);
+        let mut n: i64 = -1;
+        if !self.const_int(c, b, rv.b, &mut n) || n < 0 {
+            n = ast::pick(y.kind == TypeKind::TYPE_ARRAY, c.mg.arr_len(rm, &y), -1);
+        }
+        if n < 0 {
+            return self.fail("repeat-count");
+        }
+        let mut em = b.module;
+        let mut et = Lower::op_ty(b, rv.a);
+        if y.kind == TypeKind::TYPE_ARRAY {
+            em = rm;
+            et = y.as_data.arr.elem;
+        }
+        let mut ei = TyI { cls: 0 };
+        if !self.ty(c, em, et, &mut ei) {
+            return false;
+        }
+        if ei.cls == VC_ZST || n == 0 {
+            return true;
+        }
+        let mut z: i64 = 1;
+        if ei.cls == VC_SCALAR && !is_float(ei.mty) && self.const_int(c, b, rv.a, &mut z) && z == 0 {
+            self.memset0(dst, ei.size * n as u32);
+            return true;
+        }
+        if n <= 16 {
+            for i in 0..n as u32 {
+                let ea = self.ptradd(dst, VNONE, 0, i * ei.size);
+                if !self.operand_into(c, b, rv.a, ea, ei) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        // The first element, then a loop copying it into the others (a counter in memory).
+        if !self.operand_into(c, b, rv.a, dst, ei) {
+            return false;
+        }
+        let pi = self.ptr_int();
+        let cnt = self.temp(TyI { cls: VC_SCALAR, mty: pi, size: self.pkg.ptr_bytes, align: self.pkg.ptr_bytes });
+        let one = self.iconst(pi, 1);
+        self.store(one, cnt, 0, false);
+        let head = self.block();
+        let body = self.block();
+        let done = self.block();
+        let eh = self.edge(head, NONE, NONE);
+        let _ = self.inst(O_JMP, T_NONE, 0, eh, VNONE, VNONE);
+        self.b.begin(head);
+        let i = self.load(pi, cnt, 0, false);
+        let lim = self.iconst(pi, n as u64);
+        let more = self.icmp(C_ULT, i, lim);
+        let eb = self.edge(body, NONE, NONE);
+        let ed = self.edge(done, NONE, NONE);
+        let _ = self.inst(O_BR, T_NONE, 0, more, eb, ed);
+        self.b.begin(body);
+        let i2 = self.load(pi, cnt, 0, false);
+        let ea = self.ptradd(dst, i2, ei.size, 0);
+        if ei.cls == VC_SCALAR {
+            let v = self.load(ei.mty, dst, 0, false);
+            self.store(v, ea, 0, false);
+        } else {
+            self.memcpy(ea, dst, ei.size);
+        }
+        let one2 = self.iconst(pi, 1);
+        let nx = self.arith(O_ADD, i2, one2);
+        self.store(nx, cnt, 0, false);
+        let eh2 = self.edge(head, NONE, NONE);
+        let _ = self.inst(O_JMP, T_NONE, 0, eh2, VNONE, VNONE);
+        self.b.begin(done);
+        return true;
+    }
+
+    // A view of part of a place: `{ storage + start, end - start }`, its end the place's length when
+    // absent.
+    fn slice(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, rv: irc::Rvalue, dst: Value, place_ty: TypeId) bool {
+        let bpl = b.places[rv.a as usize];
+        let mut rm = b.module;
+        let mut rt = TYPE_NONE;
+        let by = Lower::resolved(c, b.module, bpl.ty, &mut rm, &mut rt);
+        let nm = Lower::agg_name(c, rm, rt);
+        let mut p = PlaceRef { kind: 0 };
+        if !self.place(c, b, rv.a, &mut p) || p.kind != PR_MEM && p.kind != PR_ZST {
+            return self.fail("slice-base");
+        }
+        let pi = self.ptr_int();
+        let mut ptr = p.addr;
+        let mut len = VNONE;
+        let mut et = TYPE_NONE;
+        let mut em = rm;
+        let mut f = FieldAt {
+            m: 0,
+            t: TYPE_NONE,
+            off: 0,
+            idx: 0,
+            node: NODE_NONE,
+            variant: NODE_NONE,
+            mty: T_NONE,
+            packed: false,
+        };
+        if by.kind == TypeKind::TYPE_ARRAY {
+            len = self.iconst(pi, c.mg.arr_len(rm, &by) as u64);
+            et = by.as_data.arr.elem;
+        } else if nm == "Array" {
+            if !self.named_field(c, rm, rt, "data", &mut f) {
+                return self.fail("slice-array");
+            }
+            ptr = self.ptradd(p.addr, VNONE, 0, f.off);
+            let mut fm = f.m;
+            let mut ft = TYPE_NONE;
+            let fy = Lower::resolved(c, f.m, f.t, &mut fm, &mut ft);
+            len = self.iconst(pi, c.mg.arr_len(fm, &fy) as u64);
+            et = fy.as_data.arr.elem;
+            em = fm;
+        } else {
+            if !self.named_field(c, rm, rt, "ptr", &mut f) {
+                return self.fail("slice-ptr");
+            }
+            ptr = self.load(T_PTR, p.addr, f.off, false);
+            let mut fm = f.m;
+            let mut ft = TYPE_NONE;
+            let fy = Lower::resolved(c, f.m, f.t, &mut fm, &mut ft);
+            et = fy.as_data.elem;
+            em = fm;
+            if nm == "str" {
+                et = TYPE_NONE;
+            }
+            if !self.named_field(c, rm, rt, "len", &mut f) {
+                return self.fail("slice-len");
+            }
+            len = self.load(pi, p.addr, f.off, false);
+        }
+        // The view's element type names the element where the base's field names a parameter.
+        let mut vm = b.module;
+        let mut vt = TYPE_NONE;
+        let vy = Lower::resolved(c, b.module, place_ty, &mut vm, &mut vt);
+        if et != TYPE_NONE && vy.kind == TypeKind::TYPE_INSTANCE {
+            et = Lower::ast(c, vm).instance(vy.as_data.inst).args[0];
+            em = vm;
+        }
+        let mut esz: u32 = 1;
+        if et != TYPE_NONE {
+            let mut ei = TyI { cls: 0 };
+            if !self.ty(c, em, et, &mut ei) {
+                return false;
+            }
+            esz = ei.size;
+        }
+        let mut start = VNONE;
+        if rv.b != irc::IR_NONE {
+            let s = self.operand(c, b, rv.b);
+            start = self.int_to(s, pi, false);
+            ptr = self.ptradd(ptr, start, esz, 0);
+        }
+        if rv.item.node != irc::IR_NONE {
+            let e = self.operand(c, b, rv.item.node);
+            len = self.int_to(e, pi, false);
+        }
+        if start != VNONE {
+            len = self.arith(O_SUB, len, start);
+        }
+        self.store(ptr, dst, 0, false);
+        self.store(len, dst, self.pkg.ptr_bytes, false);
+        return true;
+    }
+
+    // A closure's env at `dst`: each capture's value, or the address of a captured binding the body
+    // mutates or borrows.
+    fn closure_env(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, rv: irc::Rvalue, dst: Value) bool {
+        let a = Lower::ast(c, rv.item.module);
+        let cf = a.closure_fact(rv.item.node);
+        if cf == null || unsafe (&*cf).ncaps != rv.b {
+            return self.fail("closure-caps");
+        }
+        let by = unsafe (&*cf).mut_caps | unsafe (&*cf).ref_caps;
+        let mut off: u32 = 0;
+        let mut any = false;
+        for i in 0..rv.b {
+            let opid = b.oper_pool[(rv.a + i) as usize];
+            let mut oi = TyI { cls: 0 };
+            if !self.ty(c, b.module, Lower::op_ty(b, opid), &mut oi) {
+                return false;
+            }
+            if oi.cls == VC_ZST {
+                continue;
+            }
+            any = true;
+            let byref = (by >> i as u64 & 1) != 0;
+            let sz = ast::pick(byref, self.pkg.ptr_bytes, oi.size);
+            let al = ast::pick(byref, self.pkg.ptr_bytes, oi.align);
+            off = round_up(off, al);
+            let fa = self.ptradd(dst, VNONE, 0, off);
+            if byref {
+                let pa = self.place_addr_op(c, b, opid);
+                if pa == VNONE {
+                    return false;
+                }
+                self.store(pa, fa, 0, false);
+            } else if !self.operand_into(c, b, opid, fa, oi) {
+                return false;
+            }
+            off += sz;
+        }
+        if !any {
+            let z = self.iconst(T_I8, 0);
+            self.store(z, dst, 0, false);
+        }
+        return true;
+    }
+
+    // A dyn value at `dst`: the data pointer and the table of the erased type's conformance.
+    fn dyn_value(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, rv: irc::Rvalue, dst: Value) bool {
+        let ot = Lower::op_ty(b, rv.a);
+        let mut om = b.module;
+        let mut ott = TYPE_NONE;
+        let oy = Lower::resolved(c, b.module, ot, &mut om, &mut ott);
+        let mut dm = b.module;
+        let mut dt = TYPE_NONE;
+        let _ = Lower::resolved(c, b.module, rv.target, &mut dm, &mut dt);
+        let mut pair = String::new();
+        let pb = self.pkg.ptr_bytes;
+        if oy.kind == TypeKind::TYPE_DYN {
+            // An upcast: the data pointer stays; the table is the superinterface's the source's names.
+            let fat = TyI { cls: VC_MEM, mty: T_NONE, size: 2 * pb, align: pb };
+            let fa = self.operand_addr(c, b, rv.a, fat);
+            if fa == VNONE {
+                return false;
+            }
+            let slot = c.super_slot(om, ott, dm, dt);
+            if slot == NONE {
+                return self.fail("dyn-upcast");
+            }
+            let d = self.load(T_PTR, fa, 0, false);
+            let vt = self.load(T_PTR, fa, pb, false);
+            let sv = self.load(T_PTR, vt, slot * pb, false);
+            self.store(d, dst, 0, false);
+            self.store(sv, dst, pb, false);
+            return true;
+        }
+        if oy.kind == TypeKind::TYPE_REFERENCE || oy.kind == TypeKind::TYPE_POINTER {
+            let mut em = om;
+            let mut et = TYPE_NONE;
+            let _ = Lower::resolved(c, om, oy.as_data.elem, &mut em, &mut et);
+            if !c.dyn_pair(dm, dt, em, et, false, 0, TYPE_NONE, &mut pair) {
+                return self.fail("dyn-pair");
+            }
+            let d = self.operand(c, b, rv.a);
+            pair.push_str("__vtbl");
+            let vt = self.symaddr(pair.as_str(), SK_DATA);
+            self.store(d, dst, 0, false);
+            self.store(vt, dst, pb, false);
+            return true;
+        }
+        if oy.kind == TypeKind::TYPE_FUNCTION {
+            // A closure erased to `dyn fn`: its env moves to the heap.
+            let mut ei = TyI { cls: 0 };
+            if !self.ty(c, om, ott, &mut ei) || !c.dyn_pair(dm, dt, om, ott, true, 0, TYPE_NONE, &mut pair) {
+                return self.fail("dyn-closure");
+            }
+            let pa = self.sentinel1();
+            let sz = self.iconst(self.ptr_int(), ast::pick(ei.size == 0, 1u32, ei.size));
+            let al = self.iconst(self.ptr_int(), ast::pick(ei.align == 0, 1u32, ei.align));
+            let args: []Value = [pa, sz, al];
+            let tys: []u32 = [T_PTR as u32, self.ptr_int() as u32, self.ptr_int() as u32];
+            let p = self.call_sym("Global__alloc", args, tys, T_PTR);
+            if !self.operand_into(c, b, rv.a, p, ei) {
+                return false;
+            }
+            pair.push_str("__vtbl");
+            let vt = self.symaddr(pair.as_str(), SK_DATA);
+            self.store(p, dst, 0, false);
+            self.store(vt, dst, pb, false);
+            return true;
+        }
+        // An owned Box: its payload pointer moves into the dyn value.
+        if oy.kind == TypeKind::TYPE_INSTANCE && Lower::agg_name(c, om, ott) == "Box" {
+            let it = *Lower::ast(c, om).instance(oy.as_data.inst);
+            let mut em = om;
+            let mut et = TYPE_NONE;
+            let _ = Lower::resolved(c, om, it.args[0], &mut em, &mut et);
+            let mut alm = b.module;
+            let mut alt = rv.b;
+            if alt != TYPE_NONE {
+                let _ = Lower::resolved(c, b.module, rv.b, &mut alm, &mut alt);
+                if c.mg.is_global(alm, alt) {
+                    alt = TYPE_NONE;
+                }
+            }
+            if !c.dyn_pair(dm, dt, em, et, true, alm, alt, &mut pair) {
+                return self.fail("dyn-pair");
+            }
+            let mut oi = TyI { cls: 0 };
+            if !self.ty(c, om, ott, &mut oi) {
+                return false;
+            }
+            let ba = self.operand_addr(c, b, rv.a, oi);
+            let mut f = FieldAt {
+                m: 0,
+                t: TYPE_NONE,
+                off: 0,
+                idx: 0,
+                node: NODE_NONE,
+                variant: NODE_NONE,
+                mty: T_NONE,
+                packed: false,
+            };
+            if ba == VNONE || !self.named_field(c, om, ott, "ptr", &mut f) {
+                return self.fail("dyn-box");
+            }
+            let d = self.load(T_PTR, ba, f.off, false);
+            pair.push_str("__vtbl");
+            let vt = self.symaddr(pair.as_str(), SK_DATA);
+            self.store(d, dst, 0, false);
+            self.store(vt, dst, pb, false);
+            return true;
+        }
+        return self.fail("dyn-owned");
+    }
+
+    // The 1-aligned sentinel's address (the `Global` allocator's receiver).
+    fn sentinel1(self: &mut Self) Value {
+        let s = self.pkg.symbol("__sc_zst_1", SK_DATA);
+        if self.pkg.syms[s as usize].def == NONE {
+            let none: []u8 = [];
+            let nr: []Reloc = [];
+            let _ = self.pkg.add_data(s, 1, 0, false, none, nr);
+        }
+        return self.symaddr("__sc_zst_1", SK_DATA);
+    }
+
+    // A conversion method's call on operand `rv.a`: its result, or at `dst` in memory.
+    fn coerce(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, rv: irc::Rvalue, dst: Value, ti: TyI) Value {
+        let cvr = Lower::op_ty(b, rv.a);
+        let ga = Lower::ast(c, rv.item.module);
+        let own = ga.at_const(rv.item.node).kind == NodeKind::NODE_FUNCTION && ga.at_const(rv.item.node).as_data.function.generics.len != 0;
+        let mut s = String::new();
+        let ok = if own {
+            c.conv_sym(b, rv.item, cvr, rv.target, &mut s);
+        } else {
+            c.callee_sym(b, rv.item, 0, 0, cvr, rv.target, TYPE_NONE, TYPE_NONE, &mut s);
+        };
+        if !ok {
+            return self.fail_v("coerce-sym");
+        }
+        let mut args = Vector::<Value>::new();
+        let mut tys = Vector::<u32>::new();
+        if !self.call_arg(c, b, rv.item, rv.item, 0, rv.a, &mut args, &mut tys) {
+            return VNONE;
+        }
+        return self.emit_call(s.as_str(), VNONE, &args, &tys, tys.len() as u32, false, ti, c, b.module, rv.target, dst);
+    }
+}
+
+extend Lower {
+    // ---- Calls ----
+
+    // How argument `i` (operand `opid`) of a call of `callee` passes: the adjustments the C emitter
+    // makes from the parameter's declared type.
+    // The callee's parameter type reads its instance's bindings (`bind_callee`); the argument's type
+    // reads the caller's, which those would shadow.
+    fn arg_mode(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, callee: DefId, i: u32, opid: u32) u8 {
+        self.pmty = T_NONE;
+        if callee.node == NODE_NONE {
+            return AM_VAL;
+        }
+        let fa = Lower::ast(c, callee.module);
+        let fnn = fa.at_const(callee.node);
+        if fnn.kind != NodeKind::NODE_FUNCTION {
+            return AM_VAL;
+        }
+        let ps = fnn.as_data.function.params;
+        if i >= ps.len {
+            return ast::pick(fnn.as_data.function.is_variadic(), AM_VARARG, AM_VAL);
+        }
+        let pn = fa.at_const(unsafe fa.list(ps)[i as usize]);
+        if pn.kind != NodeKind::NODE_PARAMETER || pn.as_data.parameter.ty == NODE_NONE {
+            return AM_VAL;
+        }
+        let mut pty = fa.type_of(pn.as_data.parameter.ty);
+        let mut pm = callee.module;
+        if pty == TYPE_NONE {
+            return AM_VAL;
+        }
+        let pk0 = fa.type_at(pty).kind;
+        if pk0 == TypeKind::TYPE_GENERIC || pk0 == TypeKind::TYPE_ASSOC {
+            // A generic parameter decides by its bound type; an unbound one decides nothing.
+            let mut xm = callee.module;
+            let mut xt = pty;
+            self.push_binds(c);
+            let grounded = c.mg.resolve(callee.module, pty, &mut xm, &mut xt);
+            c.mg.pop_subs(self.binds.len());
+            let xk = Lower::ast(c, xm).type_at(xt).kind;
+            if !grounded || xk == TypeKind::TYPE_GENERIC || xk == TypeKind::TYPE_ASSOC {
+                return AM_VAL;
+            }
+            pty = xt;
+            pm = xm;
+        }
+        let py = *Lower::ast(c, pm).type_at(pty);
+        let aty = Lower::op_ty(b, opid);
+        {
+            // The prototype's type: C converts a scalar argument to it.
+            let mut pi = TyI { cls: 0 };
+            let e0 = self.err;
+            self.push_binds(c);
+            if self.ty(c, pm, pty, &mut pi) && pi.cls == VC_SCALAR {
+                self.pmty = pi.mty;
+            }
+            c.mg.pop_subs(self.binds.len());
+            self.err = e0;
+        }
+        if py.kind != TypeKind::TYPE_REFERENCE && py.kind != TypeKind::TYPE_POINTER {
+            if py.kind == TypeKind::TYPE_BUILTIN {
+                if py.as_data.builtin == BuiltinType::BT_F64 && Lower::builtin(c, b.module, aty) == BuiltinType::BT_F32 {
+                    return AM_F64;
+                }
+                let op = b.operands[opid as usize];
+                if op.kind == irc::OP_CONST && b.constants[op.data as usize].kind == irc::CK_WIDE {
+                    return AM_WIDE;
+                }
+            }
+            let mut rm = b.module;
+            let mut rt = TYPE_NONE;
+            if aty != TYPE_NONE && Lower::resolved(c, b.module, aty, &mut rm, &mut rt).kind == TypeKind::TYPE_REFERENCE {
+                return AM_DEREF;
+            }
+            return AM_VAL;
+        }
+        if py.kind != TypeKind::TYPE_REFERENCE {
+            return AM_VAL;
+        }
+        let mut param_box = false;
+        let pe = py.as_data.elem;
+        let pa = Lower::ast(c, pm);
+        if pe != TYPE_NONE && pa.type_at(pe).kind == TypeKind::TYPE_GENERIC {
+            param_box = true;
+        } else if pe != TYPE_NONE && pa.type_at(pe).kind == TypeKind::TYPE_INSTANCE {
+            let pit = *pa.instance(pa.type_at(pe).as_data.inst);
+            let pn2 = Lower::ast(c, pit.module).at_const(pit.decl);
+            param_box = (pn2.kind == NodeKind::NODE_STRUCT || pn2.kind == NodeKind::NODE_ENUM) && Lower::decl_name(
+                c,
+                pit.module,
+                pit.decl,
+            ) == "Box";
+        }
+        let mut rm = b.module;
+        let mut rt = TYPE_NONE;
+        let mut ay = Lower::resolved(c, b.module, aty, &mut rm, &mut rt);
+        let mut through = false;
+        if ay.kind == TypeKind::TYPE_REFERENCE || ay.kind == TypeKind::TYPE_POINTER {
+            let mut em = rm;
+            let mut et = TYPE_NONE;
+            if !c.mg.resolve(rm, ay.as_data.elem, &mut em, &mut et) {
+                return AM_VAL;
+            }
+            let ey = *Lower::ast(c, em).type_at(et);
+            if ey.kind != TypeKind::TYPE_INSTANCE {
+                return AM_VAL;
+            }
+            rm = em;
+            rt = et;
+            ay = ey;
+            through = true;
+        }
+        if ay.kind == TypeKind::TYPE_INSTANCE && !param_box && Lower::agg_name(c, rm, rt) == "Box" {
+            return ast::pick(through, AM_BOXREF, AM_BOX);
+        }
+        if through {
+            return AM_VAL;
+        }
+        let mut ti = TyI { cls: 0 };
+        if !self.ty(c, b.module, aty, &mut ti) {
+            return AM_VAL;
+        }
+        if ti.cls == VC_ZST && aty != TYPE_NONE && Lower::builtin(c, b.module, aty) != BuiltinType::BT_VOID && ay.kind != TypeKind::TYPE_NEVER {
+            return AM_ZST_REF;
+        }
+        return AM_REF;
+    }
+
+    // The name of declaration `(m, d)`.
+    fn decl_name(c: &cbe::CEmit, m: ModuleId, d: NodeId) str<'static> {
+        let a = Lower::ast(c, m);
+        let sp = a.at_const(a.at_const(d).as_data.aggregate.name).as_data.name.text;
+        return Lower::p(c).modules.at(m as usize).source.as_str().slice(sp.start as usize, sp.end as usize);
+    }
+
+    // Argument `i` (operand `opid`) of a call of `callee` (`pcallee` the declaration its parameters
+    // come from): its value and type into `args` and `tys`; nothing for a zero-sized value. An
+    // aggregate passes as the address of a copy the callee owns.
+    fn call_arg(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        b: &irc::CoreBody,
+        callee: DefId,
+        pcallee: DefId,
+        i: u32,
+        opid: u32,
+        args: &mut Vector<Value>,
+        tys: &mut Vector<u32>,
+    ) bool {
+        let _ = callee;
+        let am = self.arg_mode(c, b, pcallee, i, opid);
+        let aty = Lower::op_ty(b, opid);
+        let mut ti = TyI { cls: 0 };
+        if !self.ty(c, b.module, aty, &mut ti) {
+            return false;
+        }
+        if aty == TYPE_NONE && self.pmty != T_NONE {
+            // An untyped argument (`null`) is of its parameter's type.
+            let n = type_bytes(self.pmty, self.pkg.ptr_bytes);
+            ti = TyI { cls: VC_SCALAR, mty: self.pmty, size: n, align: n };
+        }
+        let mut v = VNONE;
+        let mut t: u32 = 0;
+        if am == AM_REF || am == AM_ZST_REF {
+            let op = b.operands[opid as usize];
+            if am == AM_ZST_REF {
+                v = self.sentinel(c, b.module, aty);
+            } else if op.kind == irc::OP_CONST || ti.cls != VC_MEM {
+                let p = PlaceRef { kind: 0 };
+                let _ = p;
+                v = self.operand_addr(c, b, opid, ti);
+            } else {
+                v = self.place_addr(c, b, op.data);
+            }
+            t = T_PTR;
+        } else if am == AM_BOX || am == AM_BOXREF {
+            let mut rm = b.module;
+            let mut rt = TYPE_NONE;
+            let mut y = Lower::resolved(c, b.module, aty, &mut rm, &mut rt);
+            let ba = if am == AM_BOXREF {
+                let p = self.operand(c, b, opid);
+                y = Lower::resolved(c, rm, y.as_data.elem, &mut rm, &mut rt);
+                p;
+            } else {
+                self.operand_addr(c, b, opid, ti);
+            };
+            let mut f = FieldAt {
+                m: 0,
+                t: TYPE_NONE,
+                off: 0,
+                idx: 0,
+                node: NODE_NONE,
+                variant: NODE_NONE,
+                mty: T_NONE,
+                packed: false,
+            };
+            if ba == VNONE || !self.named_field(c, rm, rt, "ptr", &mut f) {
+                return self.fail("box-arg");
+            }
+            let _ = y;
+            v = self.load(T_PTR, ba, f.off, false);
+            t = T_PTR;
+        } else if am == AM_DEREF {
+            let p = self.operand(c, b, opid);
+            let mut rm = b.module;
+            let mut rt = TYPE_NONE;
+            let y = Lower::resolved(c, b.module, aty, &mut rm, &mut rt);
+            let mut ei = TyI { cls: 0 };
+            if p == VNONE || !self.ty(c, rm, y.as_data.elem, &mut ei) {
+                return self.fail("deref-arg");
+            }
+            if ei.cls == VC_ZST {
+                return true;
+            }
+            if ei.cls == VC_SCALAR {
+                v = self.load(ei.mty, p, 0, false);
+                t = ei.mty;
+            } else {
+                v = self.temp(ei);
+                self.memcpy(v, p, ei.size);
+                t = AGG | self.layout_of(c, rm, y.as_data.elem, ei);
+            }
+        } else if am == AM_WIDE {
+            let k = b.constants[b.operands[opid as usize].data as usize];
+            let w = *Lower::ast(c, b.module).wide_lits.at(k.val as usize);
+            v = self.iconst(T_I64, w.limbs[0]);
+            t = T_I64;
+        } else {
+            if ti.cls == VC_ZST {
+                return true;
+            }
+            if ti.cls == VC_SCALAR {
+                self.hint = ti;
+                v = self.operand(c, b, opid);
+                t = ti.mty;
+                if am == AM_VAL && self.pmty != T_NONE && self.pmty != t && v != VNONE {
+                    v = self.fit(v, self.pmty, aty != TYPE_NONE && Lower::signed(c, b.module, aty));
+                    t = self.pmty;
+                }
+                if am == AM_F64 {
+                    v = self.inst(O_FPEXT, T_F64, 0, v, VNONE, VNONE);
+                    t = T_F64;
+                } else if am == AM_VARARG && (ti.mty == T_F32 || ti.mty == T_I8 || ti.mty == T_I16) {
+                    // C's default argument promotions.
+                    if ti.mty == T_F32 {
+                        v = self.inst(O_FPEXT, T_F64, 0, v, VNONE, VNONE);
+                        t = T_F64;
+                    } else {
+                        v = self.int_to(v, T_I32, Lower::signed(c, b.module, aty));
+                        t = T_I32;
+                    }
+                }
+            } else {
+                // A copy the callee owns; a moved local's own memory when its address never escapes.
+                let op = b.operands[opid as usize];
+                let pl = if op.kind == irc::OP_CONST {
+                    irc::Place { base: 0, proj_start: 0, proj_len: 1, ty: TYPE_NONE };
+                } else {
+                    b.places[op.data as usize];
+                };
+                if op.kind == irc::OP_MOVE && pl.proj_len == 0 && self.li[pl.base as usize].kind == LK_MEM && !self.escaped[pl.base as usize] && pl.base >= b.returns + b.args {
+                    v = self.li[pl.base as usize].addr;
+                } else {
+                    v = self.temp(ti);
+                    if !self.operand_into(c, b, opid, v, ti) {
+                        return false;
+                    }
+                }
+                t = AGG | self.layout_of(c, b.module, aty, ti);
+            }
+        }
+        if v == VNONE {
+            return self.fail("argument");
+        }
+        args.push(v);
+        tys.push(t);
+        return true;
+    }
+
+    // A call of `name` (or of function value `fv`) with `args` of types `tys`, the first `nfixed`
+    // fixed; its result of type `ti` (`(m, t)`), in memory at `dst` (a temporary when VNONE).
+    fn emit_call(
+        self: &mut Self,
+        name: str,
+        fv: Value,
+        args: &Vector<Value>,
+        tys: &Vector<u32>,
+        nfixed: u32,
+        variadic: bool,
+        ti: TyI,
+        c: &mut cbe::CEmit,
+        m: ModuleId,
+        t: TypeId,
+        dst: Value,
+    ) Value {
+        let mut ret = T_NONE as u32;
+        let mut all = Vector::<Value>::with_capacity(args.len() + 1);
+        all.extend_copy(args);
+        let mut out = VNONE;
+        if ti.cls == VC_SCALAR {
+            ret = ti.mty;
+        } else if ti.cls == VC_MEM {
+            out = dst;
+            if out == VNONE {
+                out = self.temp(ti);
+            }
+            ret = AGG | self.layout_of(c, m, t, ti);
+            all.push(out);
+        }
+        let sg = self.b.signature(tys[0..tys.len()], nfixed, variadic, ret);
+        let at = self.b.pool_list(all[0..all.len()]);
+        let rty = ast::pick(ti.cls == VC_SCALAR, ti.mty, T_NONE);
+        let r = if fv != VNONE {
+            self.inst(O_CALLIND, rty, all.len() as u16, fv, sg, at);
+        } else {
+            let k = self.sym(name, SK_FUNC);
+            self.inst(O_CALL, rty, all.len() as u16, k, sg, at);
+        };
+        return ast::pick(ti.cls == VC_SCALAR, r, out);
+    }
+}
+
+extend Lower {
+    // ---- Blocks and statements ----
+
+    fn lower_block(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, blk: u32) bool {
+        let bb = b.blocks[blk as usize];
+        for k in 0..bb.stmt_len {
+            let s = b.statements[(bb.stmt_start + k) as usize];
+            self.loc = self.loc_at(c, s.span.start);
+            if !self.stmt(c, b, s) {
+                if self.dbg {
+                    eprint("lir-debug at bb{} statement {}\n", blk, k);
+                }
+                return false;
+            }
+            self.release_temps();
+        }
+        self.loc = self.loc_at(c, bb.term.span.start);
+        let ok = self.term(c, b, blk, bb.term);
+        self.release_temps();
+        if !ok && self.dbg {
+            eprint("lir-debug at bb{} terminator\n", blk);
+        }
+        return ok;
+    }
+
+    fn stmt(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, s: irc::Statement) bool {
+        if s.kind != irc::ST_ASSIGN {
+            return true;
+        }
+        let rv = b.rvalues[s.rvalue as usize];
+        if rv.kind == irc::RV_INTRINSIC {
+            if rv.c == irc::IN_SAFEPOINT {
+                self.tick(false);
+                return true;
+            }
+            if rv.c == irc::IN_SAFEPOINT_C {
+                let r = self.tick(true);
+                let mut p = PlaceRef { kind: 0 };
+                return self.place(c, b, s.place, &mut p) && self.write(p, r);
+            }
+            if rv.c == irc::IN_VOLATILE_STORE {
+                return self.volatile_store(c, b, rv);
+            }
+            if rv.c == irc::IN_VA_START || rv.c == irc::IN_VA_END {
+                let a = self.place_addr(c, b, s.place);
+                if a == VNONE {
+                    return false;
+                }
+                let _ = self.inst(ast::pick(rv.c == irc::IN_VA_START, O_VASTART, O_VAEND), T_NONE, 0, a, VNONE, VNONE);
+                return true;
+            }
+        }
+        let pty = b.places[s.place as usize].ty;
+        let mut ti = TyI { cls: 0 };
+        if pty == TYPE_NONE {
+            // A place of an untyped local: the type its walk ends at.
+            let mut p = PlaceRef { kind: 0 };
+            if !self.place(c, b, s.place, &mut p) || b.locals[b.places[s.place as usize].base as usize].ty != TYPE_NONE {
+                return self.fail("untyped-place");
+            }
+            ti = p.ti;
+        } else if !self.ty(c, b.module, pty, &mut ti) {
+            return false;
+        }
+        if ti.cls == VC_ZST {
+            // A vector store has no value but its effect.
+            if rv.kind == irc::RV_SIMD && irc::simd_op(rv.c).effect != irc::SM_NONE {
+                return self.simd(c, b, rv, ti, VNONE) != VNONE || self.err.len() == 0;
+            }
+            return true;
+        }
+        if rv.kind == irc::RV_USE {
+            let op = b.operands[rv.a as usize];
+            if op.kind == irc::OP_CONST && b.constants[op.data as usize].kind == irc::CK_UNIT {
+                return true;
+            }
+            if op.kind != irc::OP_CONST && op.ty != TYPE_NONE {
+                let mut rm = b.module;
+                let mut rt = TYPE_NONE;
+                if Lower::resolved(c, b.module, op.ty, &mut rm, &mut rt).kind == TypeKind::TYPE_NEVER {
+                    return true;
+                }
+            }
+        }
+        if ti.cls == VC_SCALAR {
+            self.hint = ti;
+            let mut v = self.rvalue(c, b, s.rvalue, ti);
+            if v == VNONE {
+                return self.fail("rvalue-value");
+            }
+            // C's implicit conversion at the assignment.
+            let st = if rv.kind == irc::RV_USE {
+                Lower::op_ty(b, rv.a);
+            } else {
+                rv.target;
+            };
+            v = self.fit(v, ti.mty, st != TYPE_NONE && Lower::signed(c, b.module, st));
+            let mut p = PlaceRef { kind: 0 };
+            return self.place(c, b, s.place, &mut p) && self.write(p, v);
+        }
+        let mut p = PlaceRef { kind: 0 };
+        if !self.place(c, b, s.place, &mut p) {
+            return false;
+        }
+        if p.kind != PR_MEM {
+            return self.fail("memory-place");
+        }
+        // Built in place unless the rvalue may read the destination.
+        if self.direct(b, s.place, s.rvalue) {
+            return self.rvalue_into(c, b, s.rvalue, p.addr, ti, pty);
+        }
+        let t = self.temp(ti);
+        if !self.rvalue_into(c, b, s.rvalue, t, ti, pty) {
+            return false;
+        }
+        self.memcpy(p.addr, t, ti.size);
+        return true;
+    }
+
+    // Whether rvalue `rid` can build straight into place `pid`: a whole local whose address never
+    // escapes and that no operand reads.
+    fn direct(self: &Self, b: &irc::CoreBody, pid: u32, rid: u32) bool {
+        let pl = b.places[pid as usize];
+        if pl.proj_len != 0 || self.escaped[pl.base as usize] || self.li[pl.base as usize].kind != LK_MEM {
+            return false;
+        }
+        let rv = b.rvalues[rid as usize];
+        if rv.kind == irc::RV_USE {
+            return true; // a copy, overlapping or not
+        }
+        let mut lo: u32 = 0;
+        let mut n: u32 = 0;
+        if rv.kind == irc::RV_AGGREGATE || rv.kind == irc::RV_CLOSURE {
+            lo = rv.a;
+            n = rv.b;
+        } else if rv.kind == irc::RV_REPEAT || rv.kind == irc::RV_CAST || rv.kind == irc::RV_DYN {
+            return !Lower::reads(b, rv.a, pl.base);
+        } else if rv.kind == irc::RV_SLICE {
+            return b.places[rv.a as usize].base != pl.base;
+        } else if rv.kind == irc::RV_BINARY {
+            return !Lower::reads(b, rv.a, pl.base) && !Lower::reads(b, rv.b, pl.base);
+        }
+        for i in 0..n {
+            let opid = b.oper_pool[(lo + i) as usize];
+            if opid != irc::IR_NONE && Lower::reads(b, opid, pl.base) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Whether operand `opid` reads local `l`.
+    const fn reads(b: &irc::CoreBody, opid: u32, l: u32) bool {
+        let op = b.operands[opid as usize];
+        return op.kind != irc::OP_CONST && b.places[op.data as usize].base == l;
+    }
+
+    // A preemption tick: the counter goes down, and at 0 the runtime's check runs and resets it; the
+    // combined form also asks for a pending cancellation (its result). The counter and the result
+    // pass the cold path through memory.
+    fn tick(self: &mut Self, cancel: bool) Value {
+        if self.spc == NONE {
+            return self.iconst(T_I32, 0);
+        }
+        let i32t = TyI { cls: VC_SCALAR, mty: T_I32, size: 4, align: 4 };
+        let n = self.read_var(self.spc, self.cur);
+        let one = self.iconst(T_I32, 1);
+        let m = self.arith(O_SUB, n, one);
+        let ts = self.temp(i32t);
+        self.store(m, ts, 0, false);
+        let r = self.temp(i32t);
+        let z = self.zero(T_I32);
+        self.store(z, r, 0, false);
+        let hit = self.icmp(C_EQ, m, z);
+        let cold = self.block();
+        self.b.blocks.index_mut(cold as usize).flags = BLOCK_COLD;
+        let join = self.block();
+        let ec = self.edge(cold, NONE, NONE);
+        let ej = self.edge(join, NONE, NONE);
+        let _ = self.inst(O_BR, T_NONE, 0, hit, ec, ej);
+        self.b.begin(cold);
+        let none: []Value = [];
+        let nt: []u32 = [];
+        let reset = self.call_sym("__sc_preempt_check", none, nt, T_I32);
+        self.store(reset, ts, 0, false);
+        if cancel {
+            let cr = self.call_sym("__sc_cancel_tick", none, nt, T_I32);
+            self.store(cr, r, 0, false);
+        }
+        let ej2 = self.edge(join, NONE, NONE);
+        let _ = self.inst(O_JMP, T_NONE, 0, ej2, VNONE, VNONE);
+        self.b.begin(join);
+        let cur = self.load(T_I32, ts, 0, false);
+        self.write_var(self.spc, cur);
+        return self.load(T_I32, r, 0, false);
+    }
+}
+
+extend Lower {
+    // ---- Terminators ----
+
+    fn goto(self: &mut Self, to: u32) {
+        let e = self.edge(self.lblk[to as usize], self.cur, to);
+        let _ = self.inst(O_JMP, T_NONE, 0, e, VNONE, VNONE);
+    }
+
+    fn term(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, blk: u32, t: irc::Terminator) bool {
+        let k = t.kind;
+        if k == irc::TM_GOTO {
+            self.goto(t.t0);
+            return true;
+        }
+        if k == irc::TM_SWITCH {
+            return self.switch_term(c, b, t);
+        }
+        if k == irc::TM_CALL {
+            return self.call_term(c, b, t);
+        }
+        if k == irc::TM_RETURN {
+            return self.ret(c, b, t);
+        }
+        if k == irc::TM_DROP {
+            if !self.drop_term(c, b, t) {
+                return false;
+            }
+            self.goto(t.t0);
+            return true;
+        }
+        if k == irc::TM_ASSERT {
+            return self.assert_term(c, b, t);
+        }
+        if k == irc::TM_UNREACHABLE {
+            self.abort();
+            return true;
+        }
+        let _ = blk;
+        return self.fail("terminator");
+    }
+
+    // `abort()`: the end of a path that cannot be reached, or of a function that does not return.
+    fn abort(self: &mut Self) {
+        let none: []Value = [];
+        let nt: []u32 = [];
+        let _ = self.call_sym("abort", none, nt, T_NONE);
+        let _ = self.inst(O_UNREACHABLE, T_NONE, 0, VNONE, VNONE, VNONE);
+    }
+
+    fn switch_term(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, t: irc::Terminator) bool {
+        let mut v = self.operand(c, b, t.a);
+        if v == VNONE {
+            return self.fail("switch-operand");
+        }
+        if self.vty(v) == T_PTR {
+            v = self.int_to(v, self.ptr_int(), false);
+        }
+        let ty = b.operands[t.a as usize].ty;
+        let signed = ty != TYPE_NONE && Lower::signed(c, b.module, ty);
+        let w0 = self.b.words.len() as u32;
+        let mut es = Vector::<u32>::new();
+        for k in 0..t.sw_len {
+            let pr = b.switch_pool[(t.sw_start + k) as usize];
+            let mut cv = (pr >> 32) as i64;
+            if cv >= 2147483648 && signed {
+                cv -= 4294967296;
+            }
+            self.b.words.push(cv as u64);
+            let to = pr as u32;
+            es.push(self.edge(self.lblk[to as usize], self.cur, to));
+        }
+        es.push(self.edge(self.lblk[t.t0 as usize], self.cur, t.t0));
+        let el = self.b.pool_list(es[0..es.len()]);
+        let _ = self.inst(O_SWITCH, T_NONE, t.sw_len as u16, v, w0, el);
+        return true;
+    }
+
+    fn ret(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, t: irc::Terminator) bool {
+        if self.noret && t.args_len != irc::RET_CANCEL {
+            self.abort();
+            return true;
+        }
+        if b.returns != 1 || self.li[0].ti.cls != VC_SCALAR {
+            let _ = self.inst(O_RET, T_NONE, 0, VNONE, VNONE, VNONE);
+            return true;
+        }
+        if t.args_len == irc::RET_CANCEL {
+            // A cancellation return: the caller, unwinding too, never reads the value.
+            let z = self.zero(self.li[0].ti.mty);
+            let _ = self.inst(O_RET, T_NONE, 0, z, VNONE, VNONE);
+            return true;
+        }
+        let info = self.li[0];
+        let v = if info.kind == LK_VAR {
+            self.read_var(info.var, self.cur);
+        } else {
+            self.load(info.ti.mty, info.addr, 0, false);
+        };
+        let _ = c;
+        let _ = self.inst(O_RET, T_NONE, 0, v, VNONE, VNONE);
+        return true;
+    }
+
+    // `assert`: on failure, the runtime's report of the assertion's text and location.
+    fn assert_term(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, t: irc::Terminator) bool {
+        let cond = self.operand(c, b, t.a);
+        if cond == VNONE {
+            return self.fail("assert-operand");
+        }
+        let fail = self.block();
+        self.b.blocks.index_mut(fail as usize).flags = BLOCK_COLD;
+        let eo = self.edge(self.lblk[t.t0 as usize], self.cur, t.t0);
+        let ef = self.edge(fail, NONE, NONE);
+        let _ = self.inst(O_BR, T_NONE, 0, cond, eo, ef);
+        self.b.begin(fail);
+        let pk = Lower::p(c);
+        let src = pk.modules.at(b.module as usize).source.as_str();
+        let mut head = String::from_str("assertion failed: `");
+        let msg = t.args_len == 1;
+        if t.args_len == 4 {
+            let l = b.constants[b.operands[b.oper_pool[(t.args_start + 2) as usize] as usize].data as usize];
+            let r = b.constants[b.operands[b.oper_pool[(t.args_start + 3) as usize] as usize].data as usize];
+            push_src(src.slice(l.raw.start as usize, l.raw.end as usize), &mut head);
+            head.push_str(ast::pick(t.sw_len == 2, " == ", " != "));
+            push_src(src.slice(r.raw.start as usize, r.raw.end as usize), &mut head);
+        } else {
+            push_src(src.slice(t.span.start as usize, t.span.end as usize), &mut head);
+        }
+        head.push_str(ast::pick(msg, "`: ", "`"));
+        let mut tail = String::from_str("\n  at ");
+        tail.push_str(pk.modules.at(b.module as usize).file.as_str());
+        tail.push_str(":");
+        tail.push_u64(self.b.lines[self.loc as usize].line);
+        tail.push_str("\n");
+        let hp = self.cstr(head.as_str());
+        let tp = self.cstr(tail.as_str());
+        let mut mp = self.iconst(T_PTR, 0);
+        let mut ml = self.zero(self.ptr_int());
+        if msg {
+            let strt = TyI { cls: VC_MEM, mty: T_NONE, size: 2 * self.pkg.ptr_bytes, align: self.pkg.ptr_bytes };
+            let sa = self.operand_addr(c, b, b.oper_pool[t.args_start as usize], strt);
+            if sa == VNONE {
+                return false;
+            }
+            mp = self.load(T_PTR, sa, 0, false);
+            ml = self.load(self.ptr_int(), sa, self.pkg.ptr_bytes, false);
+        }
+        let args: []Value = [hp, mp, ml, tp];
+        let tys: []u32 = [T_PTR as u32, T_PTR as u32, self.ptr_int() as u32, T_PTR as u32];
+        let _ = self.call_sym("__sc_assert_fail", args, tys, T_NONE);
+        let _ = self.inst(O_UNREACHABLE, T_NONE, 0, VNONE, VNONE, VNONE);
+        return true;
+    }
+
+    // A scheduled drop: the free glue of the value at the place (its flag first, when guarded), a dyn
+    // value's table entry, each element of an array.
+    fn drop_term(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, t: irc::Terminator) bool {
+        let pl = b.places[t.a as usize];
+        let mut rm = b.module;
+        let mut rt = TYPE_NONE;
+        let y = Lower::resolved(c, b.module, pl.ty, &mut rm, &mut rt);
+        let is_ptr = y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE;
+        let mut em = rm;
+        let mut et = rt;
+        if is_ptr && !c.mg.resolve(rm, y.as_data.elem, &mut em, &mut et) {
+            return true;
+        }
+        if is_ptr && !c.is_destructible(em, et) {
+            return true;
+        }
+        if !is_ptr && y.kind != TypeKind::TYPE_DYN && !c.is_destructible(rm, rt) {
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_BUILTIN {
+            return true;
+        }
+        let mut join = NONE;
+        if t.args_len == 1 {
+            // A drop guarded by its move flag.
+            let fl = self.li[t.args_start as usize];
+            let f = if fl.kind == LK_VAR {
+                self.read_var(fl.var, self.cur);
+            } else {
+                self.load(T_I8, fl.addr, 0, false);
+            };
+            let body = self.block();
+            join = self.block();
+            let eb = self.edge(body, NONE, NONE);
+            let ej = self.edge(join, NONE, NONE);
+            let _ = self.inst(O_BR, T_NONE, 0, f, eb, ej);
+            self.b.begin(body);
+        }
+        let mut ok = true;
+        if is_ptr {
+            let p = self.place_addr_or_value(c, b, t.a);
+            ok = p != VNONE && self.drop_at(c, em, et, p, 0);
+        } else {
+            let mut p = PlaceRef { kind: 0 };
+            ok = self.place(c, b, t.a, &mut p) && self.drop_at(c, rm, rt, p.addr, 0);
+        }
+        if !ok {
+            return false;
+        }
+        if join != NONE {
+            let ej = self.edge(join, NONE, NONE);
+            let _ = self.inst(O_JMP, T_NONE, 0, ej, VNONE, VNONE);
+            self.b.begin(join);
+        }
+        return true;
+    }
+
+    // The value of pointer place `pid`.
+    fn place_addr_or_value(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, pid: u32) Value {
+        let mut p = PlaceRef { kind: 0 };
+        if !self.place(c, b, pid, &mut p) {
+            return VNONE;
+        }
+        return self.read(p);
+    }
+
+    // Free the value of resolved type `(rm, rt)` at `addr`.
+    fn drop_at(self: &mut Self, c: &mut cbe::CEmit, rm: ModuleId, rt: TypeId, addr: Value, depth: u32) bool {
+        let y = *Lower::ast(c, rm).type_at(rt);
+        let pb = self.pkg.ptr_bytes;
+        if y.kind == TypeKind::TYPE_DYN {
+            let d = self.load(T_PTR, addr, 0, false);
+            let vt = self.load(T_PTR, addr, pb, false);
+            let fp = self.load(T_PTR, vt, 0, false);
+            let tys: []u32 = [T_PTR as u32];
+            let sg = self.b.signature(tys, 1, false, T_NONE);
+            let args: []Value = [d];
+            let at = self.b.pool_list(args);
+            let _ = self.inst(O_CALLIND, T_NONE, 1, fp, sg, at);
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_ARRAY {
+            let mut em = rm;
+            let mut et = TYPE_NONE;
+            if !c.mg.resolve(rm, y.as_data.arr.elem, &mut em, &mut et) || depth > 8 {
+                return self.fail("drop-array");
+            }
+            let n = c.mg.arr_len(rm, &y);
+            let mut ei = TyI { cls: 0 };
+            if n < 0 || !self.ty(c, em, et, &mut ei) {
+                return self.fail("drop-array");
+            }
+            // One element at a time, the counter in memory.
+            let pi = self.ptr_int();
+            let cnt = self.temp(TyI { cls: VC_SCALAR, mty: pi, size: pb, align: pb });
+            let z = self.zero(pi);
+            self.store(z, cnt, 0, false);
+            let head = self.block();
+            let body = self.block();
+            let done = self.block();
+            let eh = self.edge(head, NONE, NONE);
+            let _ = self.inst(O_JMP, T_NONE, 0, eh, VNONE, VNONE);
+            self.b.begin(head);
+            let i = self.load(pi, cnt, 0, false);
+            let lim = self.iconst(pi, n as u64);
+            let more = self.icmp(C_ULT, i, lim);
+            let eb = self.edge(body, NONE, NONE);
+            let ed = self.edge(done, NONE, NONE);
+            let _ = self.inst(O_BR, T_NONE, 0, more, eb, ed);
+            self.b.begin(body);
+            let i2 = self.load(pi, cnt, 0, false);
+            let ea = self.ptradd(addr, i2, ei.size, 0);
+            if !self.drop_at(c, em, et, ea, depth + 1) {
+                return false;
+            }
+            let i3 = self.load(pi, cnt, 0, false);
+            let one = self.iconst(pi, 1);
+            let nx = self.arith(O_ADD, i3, one);
+            self.store(nx, cnt, 0, false);
+            let eh2 = self.edge(head, NONE, NONE);
+            let _ = self.inst(O_JMP, T_NONE, 0, eh2, VNONE, VNONE);
+            self.b.begin(done);
+            return true;
+        }
+        let mut fs = String::new();
+        let user = c.user_free_covers(rm, rt);
+        if !c.mg.free_target(rm, rt, user, &mut fs) {
+            return self.fail("drop-target");
+        }
+        let a = if c.mg.is_zst(rm, rt) {
+            self.sentinel(c, rm, rt);
+        } else {
+            addr;
+        };
+        let args: []Value = [a];
+        let tys: []u32 = [T_PTR as u32];
+        let _ = self.call_sym(fs.as_str(), args, tys, T_NONE);
+        return true;
+    }
+}
+
+// Append source text `t` of an assertion, cut at the C path's limit on a character boundary.
+fn push_src(t: str, out: &mut String) {
+    let mut n = t.len();
+    if n > cbe::ASSERT_SRC_MAX {
+        n = cbe::ASSERT_SRC_MAX;
+        while n > 0 && (t.byte_at(n) & 0xC0) == 0x80 {
+            n -= 1;
+        }
+    }
+    out.push_str(t.slice(0, n));
+}
+
+extend Lower {
+    // A call: a verified intrinsic as its LIR operation; a dyn receiver or a `dyn fn` through its
+    // table; a capturing closure with its env first; a function value indirectly; else the symbol.
+    fn call_term(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, t: irc::Terminator) bool {
+        if t.intr != irc::CI_NONE {
+            if !self.intrinsic_call(c, b, t) {
+                return false;
+            }
+            self.after_call(t);
+            return true;
+        }
+        let mut args = Vector::<Value>::new();
+        let mut tys = Vector::<u32>::new();
+        let mut name = String::new();
+        let mut fv = VNONE;
+        let mut first: u32 = 0;
+        let mut pcallee = t.callee;
+        let mut nfixed = NONE;
+        let mut variadic = t.is_variadic;
+        let pb = self.pkg.ptr_bytes;
+        let fat = TyI { cls: VC_MEM, mty: T_NONE, size: 2 * pb, align: pb };
+        if t.callee.node == NODE_NONE {
+            let ct = b.operands[t.a as usize].ty;
+            let mut cm = b.module;
+            let mut ctt = TYPE_NONE;
+            let cy = Lower::resolved(c, b.module, ct, &mut cm, &mut ctt);
+            if cy.kind == TypeKind::TYPE_DYN {
+                let fa = self.operand_addr(c, b, t.a, fat);
+                if fa == VNONE {
+                    return false;
+                }
+                let d = self.load(T_PTR, fa, 0, false);
+                let vt = self.load(T_PTR, fa, pb, false);
+                fv = self.load(T_PTR, vt, pb, false);
+                args.push(d);
+                tys.push(T_PTR);
+            } else if cy.kind == TypeKind::TYPE_FUNCTION && !cy.fn_sig() && Lower::closure_caps(c, cy) != 0 {
+                c.mg.closure_sym(cy.module, cy.as_data.decl, &mut name);
+                let mut ei = TyI { cls: 0 };
+                if !self.ty(c, cm, ctt, &mut ei) {
+                    return false;
+                }
+                let ea = self.operand_addr(c, b, t.a, ei);
+                if ea == VNONE {
+                    return false;
+                }
+                args.push(ea);
+                tys.push(T_PTR);
+            } else {
+                fv = self.operand(c, b, t.a);
+                if fv == VNONE {
+                    return self.fail("callee-value");
+                }
+            }
+        } else {
+            let mut om = b.module;
+            let mut ot = TYPE_NONE;
+            let mut stars: u32 = 0;
+            let recv = c.dyn_recv_of(b, &t, &mut om, &mut ot, &mut stars);
+            if recv != irc::IR_NONE {
+                // The receiver's data pointer takes `self`; the method comes from the table.
+                let mut fa = VNONE;
+                if stars == 0 {
+                    fa = self.operand_addr(c, b, recv, fat);
+                } else {
+                    fa = self.operand(c, b, recv);
+                    for _ in 1..stars {
+                        fa = self.load(T_PTR, fa, 0, false);
+                    }
+                }
+                let slot = c.vt_slot(om, ot, t.callee);
+                if fa == VNONE || slot == NONE {
+                    return self.fail("dyn-call");
+                }
+                let d = self.load(T_PTR, fa, 0, false);
+                let vt = self.load(T_PTR, fa, pb, false);
+                fv = self.load(T_PTR, vt, slot * pb, false);
+                args.push(d);
+                tys.push(T_PTR);
+                first = 1;
+            } else {
+                if !c.term_callee_sym(b, &t, true, &mut name) {
+                    return self.fail("callee-sym");
+                }
+                if c.mg.in_interface(t.callee.module, t.callee.node) != NODE_NONE && c.mg.last_method_def.node != NODE_NONE {
+                    pcallee = c.mg.last_method_def;
+                }
+            }
+            let fd = Lower::ast(c, pcallee.module).at_const(pcallee.node);
+            if fd.kind == NodeKind::NODE_FUNCTION && fd.as_data.function.is_variadic() {
+                variadic = true;
+            }
+        }
+        // A generic callee's parameter types read the bindings of its instance (`arg_mode`); the
+        // arguments read the caller's.
+        self.bind_callee(c, b, &t);
+        for i in first..t.args_len {
+            let opid = b.oper_pool[(t.args_start + i) as usize];
+            if variadic && nfixed == NONE && t.callee.node != NODE_NONE {
+                let fd = Lower::ast(c, pcallee.module).at_const(pcallee.node);
+                if fd.kind == NodeKind::NODE_FUNCTION && i >= fd.as_data.function.params.len {
+                    nfixed = args.len() as u32;
+                }
+            }
+            if !self.call_arg(c, b, t.callee, pcallee, i, opid, &mut args, &mut tys) {
+                self.binds.clear();
+                return false;
+            }
+        }
+        self.binds.clear();
+        if nfixed == NONE {
+            nfixed = args.len() as u32;
+        }
+        // The result: one value or memory, or a pack of several.
+        let mut ti = TyI { cls: VC_ZST, mty: T_NONE, size: 0, align: 1 };
+        let mut dty = TYPE_NONE;
+        let mut dst = VNONE;
+        let mut dplace = PlaceRef { kind: PR_ZST };
+        if t.dests_len == 1 {
+            let dp = b.dest_pool[t.dests_start as usize];
+            dty = b.places[dp as usize].ty;
+            let ub = b.places[dp as usize].base;
+            if b.locals[ub as usize].ty == TYPE_NONE && b.places[dp as usize].proj_len == 0 && self.upack.contains_key(
+                &ub,
+            ) {
+                // Several results into an untyped local: its memory takes them.
+                let lt = (*self.upack.get(&ub).unwrap() >> 32) as u32;
+                let sg = self.b.signature(tys[0..tys.len()], nfixed, variadic, AGG | lt);
+                args.push(self.li[ub as usize].addr);
+                let at = self.b.pool_list(args[0..args.len()]);
+                let _ = if fv != VNONE {
+                    self.inst(O_CALLIND, T_NONE, args.len() as u16, fv, sg, at);
+                } else {
+                    let k = self.sym(name.as_str(), SK_FUNC);
+                    self.inst(O_CALL, T_NONE, args.len() as u16, k, sg, at);
+                };
+                self.after_call(t);
+                return true;
+            }
+            if dty == TYPE_NONE {
+                return self.fail("untyped-dest");
+            }
+            if !self.ty(c, b.module, dty, &mut ti) {
+                return false;
+            }
+            if ti.cls == VC_MEM {
+                if !self.place(c, b, dp, &mut dplace) {
+                    return false;
+                }
+                let pl = b.places[dp as usize];
+                if pl.proj_len == 0 && !self.escaped[pl.base as usize] && self.li[pl.base as usize].kind == LK_MEM && !Lower::moved_arg(
+                    b,
+                    &t,
+                    pl.base,
+                ) {
+                    dst = dplace.addr;
+                }
+            }
+        } else if t.dests_len > 1 {
+            let mut rtys = Vector::<TypeId>::new();
+            for r in 0..t.dests_len {
+                rtys.push(b.places[b.dest_pool[(t.dests_start + r) as usize] as usize].ty);
+            }
+            let saved = replace(&mut self.ret_off, Vector::<u32>::new());
+            let lt = self.pack(c, b.module, &rtys);
+            let offs = replace(&mut self.ret_off, saved);
+            if lt == NONE {
+                if self.err.len() != 0 {
+                    return false;
+                }
+            } else {
+                let pti = TyI {
+                    cls: VC_MEM,
+                    mty: T_NONE,
+                    size: self.b.pool[lt as usize],
+                    align: 1u32 << self.b.pool[lt as usize + 1],
+                };
+                let tmp = self.temp(pti);
+                args.push(tmp);
+                let sg = self.b.signature(tys[0..tys.len()], nfixed, variadic, AGG | lt);
+                let at = self.b.pool_list(args[0..args.len()]);
+                let _ = if fv != VNONE {
+                    self.inst(O_CALLIND, T_NONE, args.len() as u16, fv, sg, at);
+                } else {
+                    let k = self.sym(name.as_str(), SK_FUNC);
+                    self.inst(O_CALL, T_NONE, args.len() as u16, k, sg, at);
+                };
+                for r in 0..t.dests_len {
+                    let dp = b.dest_pool[(t.dests_start + r) as usize];
+                    let mut ri = TyI { cls: 0 };
+                    if !self.ty(c, b.module, rtys[r as usize], &mut ri) {
+                        return false;
+                    }
+                    if ri.cls == VC_ZST {
+                        continue;
+                    }
+                    let mut p = PlaceRef { kind: 0 };
+                    if !self.place(c, b, dp, &mut p) {
+                        return false;
+                    }
+                    if ri.cls == VC_SCALAR {
+                        let v = self.load(ri.mty, tmp, offs[r as usize], false);
+                        if !self.write(p, v) {
+                            return false;
+                        }
+                    } else {
+                        let src = self.ptradd(tmp, VNONE, 0, offs[r as usize]);
+                        self.memcpy(p.addr, src, ri.size);
+                    }
+                }
+                self.after_call(t);
+                return true;
+            }
+        }
+        let r = self.emit_call(name.as_str(), fv, &args, &tys, nfixed, variadic, ti, c, b.module, dty, dst);
+        if t.dests_len == 1 && ti.cls == VC_SCALAR {
+            let mut p = PlaceRef { kind: 0 };
+            if !self.place(c, b, b.dest_pool[t.dests_start as usize], &mut p) || !self.write(p, r) {
+                return false;
+            }
+        } else if t.dests_len == 1 && ti.cls == VC_MEM && r != dst {
+            self.memcpy(dplace.addr, r, ti.size);
+        }
+        self.after_call(t);
+        return true;
+    }
+
+    // Continue after a call: to its successor, or nowhere when it does not return.
+    fn after_call(self: &mut Self, t: irc::Terminator) {
+        if t.t0 == irc::IR_NONE {
+            let _ = self.inst(O_UNREACHABLE, T_NONE, 0, VNONE, VNONE, VNONE);
+            return;
+        }
+        self.goto(t.t0);
+    }
+
+    // Whether call `t` moves local `l` as an argument (its memory then passes to the callee).
+    const fn moved_arg(b: &irc::CoreBody, t: &irc::Terminator, l: u32) bool {
+        for i in 0..t.args_len {
+            let op = b.operands[b.oper_pool[(t.args_start + i) as usize] as usize];
+            if op.kind != irc::OP_CONST && b.places[op.data as usize].base == l {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The capture count of closure type `y`.
+    fn closure_caps(c: &cbe::CEmit, y: Ty) u32 {
+        let cf = Lower::ast(c, y.module).closure_fact(y.as_data.decl);
+        if cf == null {
+            return 0;
+        }
+        return unsafe (&*cf).ncaps;
+    }
+
+    // A verified intrinsic call: memory copy and fill, atomics and fences.
+    fn intrinsic_call(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, t: irc::Terminator) bool {
+        let k = t.intr;
+        let mut v = Vector::<Value>::new();
+        for i in 0..t.args_len {
+            let x = self.operand(c, b, b.oper_pool[(t.args_start + i) as usize]);
+            if x == VNONE {
+                return self.fail("intrinsic-argument");
+            }
+            v.push(x);
+        }
+        let mut res = VNONE;
+        if k == irc::CI_MEMCPY || k == irc::CI_MEMMOVE {
+            let n = self.int_to(v[2], self.ptr_int(), false);
+            let _ = self.inst(O_MEMCPY, T_NONE, ast::pick(k == irc::CI_MEMMOVE, MEM_OVERLAP, 0), v[0], v[1], n);
+            res = v[0];
+        } else if k == irc::CI_MEMSET {
+            let n = self.int_to(v[2], self.ptr_int(), false);
+            let byte = self.int_to(v[1], T_I8, false);
+            let _ = self.inst(O_MEMSET, T_NONE, 0, v[0], byte, n);
+            res = v[0];
+        } else if k == irc::CI_FENCE {
+            return self.with_order(c, b, t, &v, 0, NONE);
+        } else if k == irc::CI_ATOMIC_LOAD {
+            return self.with_order(c, b, t, &v, 1, NONE);
+        } else if k == irc::CI_ATOMIC_STORE || k == irc::CI_ATOMIC_RMW {
+            return self.with_order(c, b, t, &v, 2, NONE);
+        } else if k == irc::CI_ATOMIC_CAS {
+            return self.with_order(c, b, t, &v, 4, 5);
+        } else {
+            return self.fail("intrinsic-call");
+        }
+        if t.dests_len == 1 && res != VNONE {
+            let mut p = PlaceRef { kind: 0 };
+            let mut ti = TyI { cls: 0 };
+            let dp = b.dest_pool[t.dests_start as usize];
+            if !self.ty(c, b.module, b.places[dp as usize].ty, &mut ti) {
+                return false;
+            }
+            if ti.cls == VC_SCALAR {
+                return self.place(c, b, dp, &mut p) && self.write(p, res);
+            }
+        }
+        return true;
+    }
+
+    // An atomic operation whose order is argument `oi` (and failure order `fi` for a compare and
+    // exchange): constant orders lower to the operation; others to a switch over the five orders,
+    // an invalid one trapping as the runtime does.
+    fn with_order(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        b: &irc::CoreBody,
+        t: irc::Terminator,
+        v: &Vector<Value>,
+        oi: u32,
+        fi: u32,
+    ) bool {
+        let mut so: i64 = 0;
+        let mut fo: i64 = 0;
+        let sk = self.const_int(c, b, b.oper_pool[(t.args_start + oi) as usize], &mut so);
+        let fk = fi == NONE || self.const_int(c, b, b.oper_pool[(t.args_start + fi) as usize], &mut fo);
+        let mut dti = TyI { cls: VC_ZST, mty: T_NONE, size: 0, align: 1 };
+        if t.dests_len == 1 && !self.ty(
+            c,
+            b.module,
+            b.places[b.dest_pool[t.dests_start as usize] as usize].ty,
+            &mut dti,
+        ) {
+            return false;
+        }
+        let mut rslot = VNONE;
+        if dti.cls == VC_SCALAR {
+            rslot = self.temp(dti);
+        }
+        if sk && fk {
+            if !self.atomic(c, b, t, v, so, fo, rslot, dti.mty) {
+                return false;
+            }
+        } else {
+            // Each order, the failure order taken as strong as the success one's strongest legal.
+            let done = self.block();
+            let mut es = Vector::<u32>::new();
+            let mut bl = Vector::<u32>::new();
+            let w0 = self.b.words.len() as u32;
+            for o in 0..5u64 {
+                let k = self.block();
+                bl.push(k);
+                es.push(self.edge(k, NONE, NONE));
+                self.b.words.push(o);
+            }
+            let bad = self.panic_block("invalid memory order");
+            es.push(self.edge(bad, NONE, NONE));
+            let el = self.b.pool_list(es[0..es.len()]);
+            let ov = self.int_to(v[oi as usize], T_I32, false);
+            let _ = self.inst(O_SWITCH, T_NONE, 5, ov, w0, el);
+            for o in 0..5 {
+                self.b.begin(bl[o as usize]);
+                let f = ast::pick(fi == NONE, 0i64, ast::pick(o == 4, 4i64, ast::pick(o == 0 || o == 2, 0i64, 1i64)));
+                if !self.atomic(c, b, t, v, o, ast::pick(fk, fo, f), rslot, dti.mty) {
+                    return false;
+                }
+                let ed = self.edge(done, NONE, NONE);
+                let _ = self.inst(O_JMP, T_NONE, 0, ed, VNONE, VNONE);
+            }
+            self.b.begin(done);
+        }
+        if rslot != VNONE {
+            let r = self.load(dti.mty, rslot, 0, false);
+            let mut p = PlaceRef { kind: 0 };
+            return self.place(c, b, b.dest_pool[t.dests_start as usize], &mut p) && self.write(p, r);
+        }
+        return true;
+    }
+
+    // One atomic operation with orders `so` and `fo`; its result into `rslot`.
+    fn atomic(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        b: &irc::CoreBody,
+        t: irc::Terminator,
+        v: &Vector<Value>,
+        so: i64,
+        fo: i64,
+        rslot: Value,
+        rty: u8,
+    ) bool {
+        let k = t.intr;
+        let valid = if k == irc::CI_ATOMIC_LOAD {
+            so == 0 || so == 1 || so == 4;
+        } else if k == irc::CI_ATOMIC_STORE {
+            so == 0 || so == 2 || so == 4;
+        } else {
+            so >= 0 && so <= 4 && (fo == 0 || fo == 1 || fo == 4);
+        };
+        if !valid {
+            // The runtime traps an order the operation cannot take.
+            let one = self.iconst(T_I8, 1);
+            self.check(one, "invalid memory order");
+            let _ = c;
+            return true;
+        }
+        let o = so as u16;
+        let mut r = VNONE;
+        if k == irc::CI_FENCE {
+            let _ = self.inst(O_FENCE, T_NONE, o, VNONE, VNONE, VNONE);
+        } else if k == irc::CI_ATOMIC_LOAD {
+            r = self.inst(O_ALOAD, rty, o, v[0], VNONE, 0);
+        } else if k == irc::CI_ATOMIC_STORE {
+            let _ = self.inst(O_ASTORE, T_NONE, o, v[0], v[1], 0);
+        } else if k == irc::CI_ATOMIC_RMW {
+            let mut s = String::new();
+            let _ = c.term_callee_sym(b, &t, false, &mut s);
+            let nm = s.as_str();
+            let op = if nm.contains("_swap_") {
+                RMW_XCHG;
+            } else if nm.contains("_add_") {
+                RMW_ADD;
+            } else if nm.contains("_sub_") {
+                RMW_SUB;
+            } else if nm.contains("_and_") {
+                RMW_AND;
+            } else if nm.contains("_or_") {
+                RMW_OR;
+            } else {
+                RMW_XOR;
+            };
+            r = self.inst(O_ARMW, self.vty(v[1]), o | op << 4, v[0], v[1], 0);
+        } else {
+            let mut wk: i64 = 0;
+            let weak = self.const_int(c, b, b.oper_pool[(t.args_start + 3) as usize], &mut wk) && wk != 0;
+            r = self.inst(O_ACAS, T_I8, o | fo as u16 << 3 | ast::pick(weak, ACAS_WEAK, 0), v[0], v[1], v[2]);
+        }
+        if rslot != VNONE && r != VNONE {
+            self.store(r, rslot, 0, false);
+        }
+        return true;
+    }
+}
+
+extend Lower {
+    // ---- Finishing ----
+
+    // The phis' operands, the trivial phis replaced, the panic blocks, the block parameters and the
+    // edges with their arguments: the draft becomes the body.
+    fn finish(self: &mut Self, name: str) bool {
+        let _ = name;
+        // Each phi's operand per predecessor, read at that predecessor's end; a read may add phis.
+        let mut k: usize = 0;
+        while k < self.phis.len() {
+            let ph = self.phis[k];
+            let p0 = self.npred[ph.blk as usize];
+            let p1 = self.npred[ph.blk as usize + 1];
+            let ops = self.phi_ops.len() as u32;
+            for q in p0..p1 {
+                self.phi_ops.push(VNONE);
+            }
+            for q in p0..p1 {
+                let v = self.read_var(ph.var, self.preds[q as usize]);
+                self.phi_ops[(ops + q - p0) as usize] = v;
+            }
+            self.phis.index_mut(k).ops = ops;
+            self.phis.index_mut(k).nops = p1 - p0;
+            k += 1;
+        }
+        // A phi whose operands are one value (or itself) is that value; repeat until none changes.
+        let mut changed = true;
+        for _ in 0..self.phis.len() + 1 {
+            if !changed {
+                break;
+            }
+            changed = false;
+            for i in 0..self.phis.len() {
+                let ph = self.phis[i];
+                if ph.repl != VNONE {
+                    continue;
+                }
+                let me = VPARAM | PHI_TAG | i as u32;
+                let mut same = VNONE;
+                let mut trivial = true;
+                for q in 0..ph.nops {
+                    let v = self.find(self.phi_ops[(ph.ops + q) as usize]);
+                    if v == me || v == same {
+                        continue;
+                    }
+                    if same != VNONE {
+                        trivial = false;
+                        break;
+                    }
+                    same = v;
+                }
+                if trivial {
+                    if same == VNONE {
+                        same = self.zero(ph.ty);
+                    }
+                    self.phis.index_mut(i).repl = same;
+                    changed = true;
+                }
+            }
+        }
+        // The panic blocks.
+        for i in 0..self.pan_list.len() {
+            let e = self.pan_list[i];
+            self.b.begin((e >> 32) as u32);
+            self.loc = self.pan_loc[i];
+            let m = self.b.ref_msg(e as u32);
+            let _ = self.inst(O_PANIC, T_NONE, 0, m, VNONE, VNONE);
+        }
+        // Block parameters: the entry's, then each core block's live phis.
+        let np0 = self.b.blocks[0].param_len as u32;
+        let mut pidx = Vector::<u32>::new();
+        pidx.resize_default(self.phis.len());
+        let mut byblk = Vector::<u64>::new();
+        for i in 0..self.phis.len() {
+            if self.phis[i].repl == VNONE {
+                byblk.push(self.phis[i].blk as u64 << 32 | i as u64);
+            }
+        }
+        byblk.sort();
+        self.b.params.truncate(np0 as usize);
+        let mut j: usize = 0;
+        for blk in 0..self.lblk.len() {
+            let lb = self.lblk[blk];
+            let st = self.b.params.len() as u32;
+            while j < byblk.len() && (byblk[j] >> 32) as usize == blk {
+                let i = byblk[j] as u32;
+                pidx[i as usize] = self.b.params.len() as u32;
+                self.b.params.push(self.phis[i as usize].ty);
+                j += 1;
+            }
+            if lb != NONE {
+                let bk = self.b.blocks.index_mut(lb as usize);
+                bk.param_start = st;
+                bk.param_len = (self.b.params.len() as u32 - st) as u16;
+            }
+        }
+        for bi in 1..self.b.blocks.len() {
+            let bk = self.b.blocks[bi];
+            if bk.param_len == 0 {
+                self.b.blocks.index_mut(bi).param_start = 0;
+            }
+        }
+        if self.b.params.len() > 0x3FFFFFFF {
+            return self.fail("parameters");
+        }
+        // Operands: a phi's value becomes its parameter (or its replacement's).
+        for i in 0..self.b.insts.len() {
+            let t = self.b.insts[i];
+            let f = op_info(t.op).form;
+            let a = self.fin(t.a, &pidx, lv::operand_a(f));
+            let bb = self.fin(t.b, &pidx, lv::operand_b(f));
+            let cc = self.fin(t.c, &pidx, lv::operand_c(f));
+            let ins = self.b.insts.index_mut(i);
+            ins.a = a;
+            ins.b = bb;
+            ins.c = cc;
+            if f == F_CALL || f == F_CALLIND {
+                for q in 0..t.aux as u32 {
+                    let at = (t.c + q) as usize;
+                    self.b.pool[at] = self.fin(self.b.pool[at], &pidx, true);
+                }
+            } else if f == F_VOP {
+                for q in 0..t.b {
+                    let at = (t.a + q) as usize;
+                    self.b.pool[at] = self.fin(self.b.pool[at], &pidx, true);
+                }
+            }
+        }
+        // Edges: each passes its target's phis their values at the end of its source.
+        let mut args = Vector::<Value>::new();
+        for i in 0..self.b.insts.len() {
+            let t = self.b.insts[i];
+            if t.op == O_JMP {
+                let e = self.real_edge(t.a, &pidx, &byblk, &mut args);
+                self.b.insts.index_mut(i).a = e;
+            } else if t.op == O_BR {
+                let e1 = self.real_edge(t.b, &pidx, &byblk, &mut args);
+                let e2 = self.real_edge(t.c, &pidx, &byblk, &mut args);
+                self.b.insts.index_mut(i).b = e1;
+                self.b.insts.index_mut(i).c = e2;
+            } else if t.op == O_SWITCH {
+                for q in 0..t.aux as u32 + 1 {
+                    let at = (t.c + q) as usize;
+                    let e = self.real_edge(self.b.pool[at], &pidx, &byblk, &mut args);
+                    self.b.pool[at] = e;
+                }
+            }
+        }
+        return self.err.len() == 0;
+    }
+
+    // Draft value `v` as a body value; `is_value` false leaves a field that holds no value.
+    fn fin(self: &Self, v: Value, pidx: &Vector<u32>, is_value: bool) Value {
+        if !is_value || v == VNONE {
+            return v;
+        }
+        let x = self.find(v);
+        if (x & VPARAM) != 0 && (x & PHI_TAG) != 0 {
+            return VPARAM | pidx[(x & ~(VPARAM | PHI_TAG)) as usize];
+        }
+        return x;
+    }
+
+    // Draft edge `d` in the pool, with the argument of each live phi of its target.
+    fn real_edge(self: &mut Self, d: u32, pidx: &Vector<u32>, byblk: &Vector<u64>, args: &mut Vector<Value>) u32 {
+        let de = self.edges[d as usize];
+        args.truncate(0);
+        if de.dst != NONE {
+            // The live phis of `dst` are a run of `byblk`.
+            let mut lo: usize = 0;
+            let mut hi = byblk.len();
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                if byblk[mid] >> 32 < de.dst as u64 {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            while lo < byblk.len() && (byblk[lo] >> 32) as u32 == de.dst {
+                let ph = self.phis[(byblk[lo] as u32) as usize];
+                let p0 = self.npred[de.dst as usize];
+                let mut v = VNONE;
+                for q in 0..ph.nops {
+                    if self.preds[(p0 + q) as usize] == de.src {
+                        v = self.phi_ops[(ph.ops + q) as usize];
+                    }
+                }
+                args.push(self.fin(v, pidx, true));
+                lo += 1;
+            }
+        }
+        return self.b.edge(de.to, args[0..args.len()]);
+    }
+}
+
+extend Lower {
+    /// Move `other`'s bodies, data and refusals into this lowering.
+    pub fn absorb(self: &mut Self, other: &mut Lower) {
+        let _ = self.pkg.absorb(&other.pkg);
+        for i in 0..other.fails.len() {
+            self.fails.push(LFail { sym: other.fails[i].sym.clone(), why: other.fails[i].why });
+        }
+        self.nbodies += other.nbodies;
+        for i in 0..other.tests.len() {
+            let t = &other.tests[i];
+            self.tests.push(LTest { sym: t.sym.clone(), m: t.m, node: t.node });
+        }
+        other.tests.clear();
+        other.pkg = Package::new(other.pkg.ptr_bytes);
+        other.fails.truncate(0);
+        other.nbodies = 0;
+    }
+
+    /// The step 4 checks over the merged package, reported on stderr: every body lowered, every
+    /// body verified, and print, parse and print giving the same text. True when all hold.
+    pub fn check_all(self: &mut Self, pk: *const loader::Package, text: &mut String) bool {
+        // A body with inline assembly stays on the C path by design.
+        let mut nasm: u64 = 0;
+        for i in 0..self.fails.len() {
+            if self.fails[i].why == "asm" {
+                nasm += 1;
+            }
+        }
+        let mut ok = self.fails.len() as u64 == nasm;
+        let mut v = lv::Verifier::new();
+        let mut nbad: u64 = 0;
+        for i in 0..self.pkg.syms.len() {
+            let s = self.pkg.syms[i];
+            if s.def == NONE || s.kind != SK_FUNC {
+                continue;
+            }
+            if !v.check(&self.pkg, self.pkg.spell(s.name), &self.pkg.bodies[s.def as usize]) || !v.check_calls(
+                &self.pkg,
+                self.pkg.spell(s.name),
+                &self.pkg.bodies[s.def as usize],
+            ) {
+                if nbad < 20 {
+                    eprint("lir: verify: {}\n", v.err.as_str());
+                }
+                if nbad < 3 && stdlib::getenv("SC_LIR_DUMP") != null {
+                    let mut t = String::new();
+                    lp::print_body(&self.pkg, self.pkg.spell(s.name), &self.pkg.bodies[s.def as usize], &mut t);
+                    eprint("{}", t.as_str());
+                }
+                nbad += 1;
+            }
+        }
+        let mut t1 = String::new();
+        lp::print_package(&self.pkg, &mut t1);
+        let mut err = String::new();
+        let q = lparse::parse(t1.as_str(), &mut err);
+        let mut rt_ok = q.is_some();
+        if !rt_ok {
+            eprint("lir: parse: {}\n", err.as_str());
+        } else {
+            let p2 = q.unwrap();
+            let mut t2 = String::new();
+            lp::print_package(&p2, &mut t2);
+            rt_ok = t1.as_str() == t2.as_str();
+            if !rt_ok {
+                eprint("lir: print, parse and print differ\n");
+            }
+            for i in 0..p2.syms.len() {
+                let s = p2.syms[i];
+                if s.def != NONE && s.kind == SK_FUNC && !v.check(&p2, p2.spell(s.name), &p2.bodies[s.def as usize]) {
+                    eprint("lir: verify after parse: {}\n", v.err.as_str());
+                    rt_ok = false;
+                    break;
+                }
+            }
+        }
+        // The refusals, by reason.
+        let mut why = Vector::<str<'static>>::new();
+        let mut cnt = Vector::<u64>::new();
+        for i in 0..self.fails.len() {
+            let w = self.fails[i].why;
+            if w == "asm" {
+                continue;
+            }
+            let mut k = why.len();
+            for j in 0..why.len() {
+                if why[j] == w {
+                    k = j;
+                }
+            }
+            if k == why.len() {
+                why.push(w);
+                cnt.push(0);
+                eprint("lir: refused {}: {}\n", self.fails[i].sym.as_str(), w);
+            }
+            cnt[k] += 1;
+        }
+        for j in 0..why.len() {
+            eprint("lir: {} bodies refused: {}\n", cnt[j], why[j]);
+        }
+        let ctfe_ok = self.ctfe_agrees(pk);
+        if let Some(rn) = stdlib::get_env("SC_LIR_RUN") {
+            // A debugging aid: one function run in the evaluator.
+            let mut ev = le::Eval::new(&self.pkg);
+            let o = ev.run(self.pkg.find_symbol(rn.as_str()), []);
+            let mut lt = String::new();
+            le::outcome_text(&self.pkg, &o, &mut lt);
+            eprint("lir: run {}: {} value {}\n", rn.as_str(), lt.as_str(), o.value);
+        }
+        ok = ok && nbad == 0 && rt_ok && ctfe_ok;
+        if ok && stdlib::getenv("SC_LIR_STATS") == null {
+            *text = t1;
+            return true;
+        }
+        eprint(
+            "lir: {} bodies emitted, {} lowered, {} with inline assembly kept in C, {} refused, {} fail the verifier, text {} bytes, round trip {}\n",
+            self.nbodies,
+            self.pkg.bodies.len(),
+            nasm,
+            self.fails.len() as u64 - nasm,
+            nbad,
+            t1.len(),
+            ast::pick(rt_ok, "ok", "FAILED"),
+        );
+        *text = t1;
+        return ok;
+    }
+}
+
+extend Lower {
+    // Scalar `v` converted to type `to` as C converts at an assignment (`signed`: its source type is).
+    fn fit(self: &mut Self, v: Value, to: u8, signed: bool) Value {
+        let from = self.vty(v);
+        if from == to || is_vec(from) || is_vec(to) {
+            return v;
+        }
+        if (v & (VPARAM | VFLAG)) == 0 && is_int(from) && is_int(to) && self.b.insts[v as usize].op == O_ICONST {
+            // A constant converts here.
+            let k = self.b.insts[v as usize];
+            let mut x = k.a as u64 | k.b as u64 << 32;
+            let fb = type_bits(from, self.pkg.ptr_bytes);
+            if signed && fb < 64 && (x >> (fb - 1) as u64 & 1) != 0 {
+                x |= ~0u64 << fb as u64;
+            }
+            if v as usize + 1 != self.b.insts.len() {
+                return self.iconst(to, x);
+            }
+            // The constant was made for this use: retype it in place.
+            let tb = type_bits(to, self.pkg.ptr_bytes);
+            if tb < 64 {
+                x &= (1u64 << tb as u64) - 1;
+            }
+            let ins = self.b.insts.index_mut(v as usize);
+            ins.ty = to;
+            ins.a = x as u32;
+            ins.b = (x >> 32) as u32;
+            return v;
+        }
+        return self.convert(v, from, to, signed, signed, false);
+    }
+}
+
+extend Lower {
+    // The untyped locals a call of several results fills, and their copies, with the results' layout
+    // and offsets. The results' types come from the body's projections of them where they name every
+    // result, else from the callee's signature with its own arguments bound.
+    fn untyped(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody) bool {
+        let n = b.locals.len();
+        // Each untyped local's call destination: itself for one, its source's for a copy.
+        let mut root = Vector::<u32>::new();
+        let mut any = false;
+        for bi in 0..b.blocks.len() {
+            let t = b.blocks[bi].term;
+            if t.kind != irc::TM_CALL || t.dests_len != 1 {
+                continue;
+            }
+            let dp = b.places[b.dest_pool[t.dests_start as usize] as usize];
+            if dp.proj_len == 0 && b.locals[dp.base as usize].ty == TYPE_NONE {
+                if !any {
+                    root.reserve(n);
+                    for _ in 0..n {
+                        root.push(NONE);
+                    }
+                    any = true;
+                }
+                root[dp.base as usize] = dp.base;
+            }
+        }
+        if !any {
+            return true;
+        }
+        let mut grew = true;
+        for _ in 0..n {
+            if !grew {
+                break;
+            }
+            grew = false;
+            for si in 0..b.statements.len() {
+                let st = b.statements[si];
+                if st.kind != irc::ST_ASSIGN {
+                    continue;
+                }
+                let dp = b.places[st.place as usize];
+                let rv = b.rvalues[st.rvalue as usize];
+                if dp.proj_len != 0 || root[dp.base as usize] != NONE || b.locals[dp.base as usize].ty != TYPE_NONE || rv.kind != irc::RV_USE {
+                    continue;
+                }
+                let op = b.operands[rv.a as usize];
+                if op.kind != irc::OP_CONST && b.places[op.data as usize].proj_len == 0 && root[b.places[op.data as usize].base as usize] != NONE {
+                    root[dp.base as usize] = root[b.places[op.data as usize].base as usize];
+                    grew = true;
+                }
+            }
+        }
+        // The projections' result types, per destination and result.
+        let mut seen = Map::<u64, TypeId>::new();
+        for pi in 0..b.places.len() {
+            let pl = b.places[pi];
+            if pl.proj_len == 0 || root[pl.base as usize] == NONE {
+                continue;
+            }
+            let pj = b.projections[pl.proj_start as usize];
+            if pj.kind == irc::PJ_FIELD && pj.ty != TYPE_NONE {
+                seen.insert(root[pl.base as usize] as u64 << 32 | pj.data as u64, pj.ty);
+            }
+        }
+        for bi in 0..b.blocks.len() {
+            let t = b.blocks[bi].term;
+            if t.kind != irc::TM_CALL || t.dests_len != 1 {
+                continue;
+            }
+            let l = b.places[b.dest_pool[t.dests_start as usize] as usize].base;
+            if root[l as usize] != l || self.upack.contains_key(&l) {
+                continue;
+            }
+            let mut tys = Vector::<TypeId>::new();
+            let mut tm = b.module;
+            let mut nb: usize = 0;
+            if t.callee.node != NODE_NONE {
+                let fa = Lower::ast(c, t.callee.module);
+                let fd = fa.at_const(t.callee.node).as_data.function;
+                let rs = fd.returns;
+                for k in 0..rs.len {
+                    tys.push(fa.type_of(unsafe fa.list(rs)[k as usize]));
+                }
+                tm = t.callee.module;
+                // A generic callee's own arguments are the call's trailing ones.
+                let own = fd.generics.len;
+                let tn = ast::pick(own < t.targs_len, own, t.targs_len);
+                for k in 0..tn {
+                    let at = b.targ_pool[(t.targs_start + t.targs_len - tn + k) as usize];
+                    c.mg.push_sub(tm, unsafe fa.list(fd.generics)[(own - tn + k) as usize], b.module, at);
+                }
+                nb = tn as usize;
+            } else {
+                let mut rm = b.module;
+                let mut rt = TYPE_NONE;
+                let y = Lower::resolved(c, b.module, b.operands[t.a as usize].ty, &mut rm, &mut rt);
+                let a = Lower::ast(c, rm);
+                for k in 0..a.sig_len(&y, true) {
+                    tys.push(a.sig_at(&y, true, k));
+                }
+                tm = rm;
+            }
+            let mut all = true;
+            for k in 0..tys.len() {
+                all = all && seen.contains_key(&(l as u64 << 32 | k as u64));
+            }
+            if all {
+                c.mg.pop_subs(nb);
+                nb = 0;
+                tm = b.module;
+                for k in 0..tys.len() {
+                    tys[k] = *seen.get(&(l as u64 << 32 | k as u64)).unwrap();
+                }
+            }
+            let lt = self.pack(c, tm, &tys);
+            c.mg.pop_subs(nb);
+            if lt == NONE {
+                return self.fail("untyped-results");
+            }
+            let e = lt as u64 << 32 | self.uoffs.len() as u64;
+            for k in 0..self.ret_off.len() {
+                self.uoffs.push(self.ret_off[k]);
+            }
+            for x in 0..n {
+                if root[x] == l {
+                    self.upack.insert(x as u32, e);
+                }
+            }
+        }
+        return true;
+    }
+}
+
+extend Lower {
+    // Under `SC_LIR_DEBUG`, the type a refusal names.
+    fn debug_ty(self: &Self, c: &mut cbe::CEmit, why: str, m: ModuleId, t: TypeId) {
+        if !self.dbg || self.err.len() != 0 {
+            return;
+        }
+        let mut sp = String::new();
+        let _ = c.mg.type_m(m, t, &mut sp);
+        let y = *Lower::ast(c, m).type_at(t);
+        let mut rm = m;
+        let mut rt = t;
+        let rs = c.mg.resolve(m, t, &mut rm, &mut rt);
+        let lo = c.mg.layout_sub(m, t);
+        eprint(
+            "lir-debug {}: m{} t{} kind {} `{}` resolve {} -> m{} t{} layout ok {} unbound {} nsubs {}\n",
+            why,
+            m,
+            t,
+            y.kind as u32,
+            sp.as_str(),
+            rs,
+            rm,
+            rt,
+            lo.ok,
+            lo.unbound,
+            c.mg.subs.len(),
+        );
+        if y.kind == TypeKind::TYPE_ARRAY {
+            let ey = *Lower::ast(c, m).type_at(y.as_data.arr.elem);
+            eprint("lir-debug   elem kind {} len {}\n", ey.kind as u32, c.mg.arr_len(m, &y));
+        }
+    }
+}
+
+extend Lower {
+    // Member type `(m, t)` with the bindings in place substituted (into the body's module), so it
+    // keeps its meaning after they are popped; itself when it names no parameter or cannot ground.
+    fn grounded(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, t: TypeId) (ModuleId, TypeId) {
+        if Lower::ast(c, m).type_concrete(t) {
+            return m, t;
+        }
+        let mut g = TYPE_NONE;
+        if c.mg.ground(m, t, self.bm, &mut g) {
+            return self.bm, g;
+        }
+        return m, t;
+    }
+}
+
+extend Lower {
+    // The address of the type descriptor of `(rm, rt)`.
+    fn type_info(self: &mut Self, c: &mut cbe::CEmit, rm: ModuleId, rt: TypeId) Value {
+        let mut s = String::from_str("__sc_ti__");
+        if !c.mg.type_m(rm, rt, &mut s) {
+            return self.fail_v("type-info");
+        }
+        return self.symaddr(s.as_str(), SK_DATA);
+    }
+}
+
+extend Lower {
+    // The layout of aggregate `(rm, rt)` from its members' offsets and classes, a `void` one empty.
+    fn fields_layout(self: &mut Self, c: &mut cbe::CEmit, rm: ModuleId, rt: TypeId) lay::Layout {
+        let y = *Lower::ast(c, rm).type_at(rt);
+        let mut dm = y.module;
+        let mut dn = NODE_NONE;
+        if y.kind == TypeKind::TYPE_STRUCT {
+            dn = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *Lower::ast(c, rm).instance(y.as_data.inst);
+            dm = it.module;
+            dn = it.decl;
+        }
+        if y.kind != TypeKind::TYPE_FUNCTION && (dn == NODE_NONE || Lower::ast(c, dm).attr_of(dn, AttrKind::ATTR_ALIGN) != null) {
+            return lay::Layout { ok: false };
+        }
+        // The engine refuses a type that grows through its members for its depth: each level would
+        // retry every member. The cases this serves nest a few levels.
+        if self.fl_depth >= 8 {
+            return lay::Layout { ok: false };
+        }
+        let mut fl = Vector::<FieldAt>::new();
+        self.fl_depth += 1;
+        let ok = self.fields_of(c, rm, rt, &mut fl);
+        self.fl_depth -= 1;
+        if !ok {
+            return lay::Layout { ok: false };
+        }
+        let mut size: u64 = 0;
+        let mut al: u64 = 1;
+        for k in 0..fl.len() {
+            let f = fl[k];
+            let mut ti = TyI {
+                cls: VC_SCALAR,
+                mty: f.mty,
+                size: type_bytes(f.mty, self.pkg.ptr_bytes),
+                align: type_bytes(f.mty, self.pkg.ptr_bytes),
+            };
+            let tok = f.t == TYPE_NONE || self.ty(c, f.m, f.t, &mut ti);
+            if !tok {
+                return lay::Layout { ok: false };
+            }
+            let end = f.off as u64 + ti.size as u64;
+            if end > size {
+                size = end;
+            }
+            if !f.packed && ti.align as u64 > al {
+                al = ti.align;
+            }
+        }
+        return lay::Layout { ok: true, size: round_up(size as u32, al as u32), align: al };
+    }
+}
+
+extend Lower {
+    // The members of the extern enum of variant `vd`, empty when no extern block declares it.
+    fn extern_enum_members(a: &Ast, vd: NodeId) NodeList {
+        let its = a.at_const(a.root).as_data.program.items;
+        for i in 0..its.len {
+            let n = a.at_const(unsafe a.list(its)[i as usize]);
+            if n.kind != NodeKind::NODE_EXTERN_BLOCK {
+                continue;
+            }
+            let inner = n.as_data.extern_block.items;
+            for j in 0..inner.len {
+                let e = a.at_const(unsafe a.list(inner)[j as usize]);
+                if e.kind != NodeKind::NODE_ENUM {
+                    continue;
+                }
+                let ms = e.as_data.aggregate.members;
+                for k in 0..ms.len {
+                    if unsafe a.list(ms)[k as usize] == vd {
+                        return ms;
+                    }
+                }
+            }
+        }
+        return NodeList { start: 0, len: 0 };
+    }
+}
+
+extend Lower {
+    // Run every test CTFE ran to its end (no call it cannot run, no budget) under the evaluator: it
+    // must end alike, returning, or trapping with the same class of trap at the same statement of the
+    // test. A mismatch is reported; true when none.
+    fn ctfe_agrees(self: &mut Self, pk: *const loader::Package) bool {
+        let _ = pk;
+        if self.ctfe.len() == 0 {
+            return true;
+        }
+        let mut by = Map::<u64, u32>::new();
+        for i in 0..self.tests.len() {
+            by.insert(self.tests[i].m as u64 << 32 | self.tests[i].node as u64, i as u32);
+        }
+        let mut ev = le::Eval::new(&self.pkg);
+        let mut ran: u64 = 0;
+        let mut alone: u64 = 0;
+        let mut bad: u64 = 0;
+        let mut bad_c: u64 = 0;
+        let mut ffi: u64 = 0;
+        let mut budget: u64 = 0;
+        let stats = stdlib::getenv("SC_LIR_STATS") != null;
+        for i in 0..self.ctfe.len() {
+            let r = self.ctfe[i];
+            let k = r.kind;
+            let ti = by.get(&(r.m as u64 << 32 | r.node as u64));
+            if r.ffi || ti.is_none() {
+                // An FFI call, or a test whose body the emission did not lower.
+                ffi += 1;
+                continue;
+            }
+            let t = &self.tests[(*ti.unwrap()) as usize];
+            let s = self.pkg.find_symbol(t.sym.as_str());
+            let o = ev.run(s, []);
+            let lk = trap_class(&o);
+            let ctfe_ran = !(k == iri::IT_TRAP_UNSUPPORTED || k == iri::IT_TRAP_BUDGET_STEPS || k == iri::IT_TRAP_BUDGET_MEMORY || k == iri::IT_TRAP_BUDGET_DEPTH || k == iri::IT_TRAP_CYCLE || k == iri::IT_TRAP_TOO_LARGE);
+            if o.kind == le::EV_FFI {
+                ffi += 1;
+                if stats {
+                    eprint("lir: ctfe: {}: the evaluator calls FFI: {}\n", t.sym.as_str(), o.msg.as_str());
+                }
+                continue;
+            }
+            if lk == iri::IT_TRAP_BUDGET_STEPS || lk == iri::IT_TRAP_BUDGET_MEMORY || lk == iri::IT_TRAP_BUDGET_DEPTH || !ctfe_ran && k != iri::IT_TRAP_UNSUPPORTED {
+                budget += 1;
+                continue;
+            }
+            // CTFE's run is the oracle; where CTFE cannot finish a run that makes no FFI call, the
+            // test's own expectation is: it passes, or with `should_panic` it traps.
+            let same = if ctfe_ran {
+                lk == k && (k == iri::IT_TRAP_NONE || o.top.line == r.line && o.top.col == r.col);
+            } else {
+                lk == iri::IT_TRAP_NONE != r.panics;
+            };
+            if ctfe_ran {
+                ran += 1;
+            } else {
+                alone += 1;
+            }
+            if same {
+                continue;
+            }
+            bad += 1;
+            if ctfe_ran {
+                bad_c += 1;
+            }
+            if bad <= 20 || stats {
+                let mut lt = String::new();
+                le::outcome_text(&self.pkg, &o, &mut lt);
+                if ctfe_ran {
+                    eprint(
+                        "lir: ctfe: {}: CTFE kind {} \"{}\" at {}:{}, the evaluator {} (test statement {}:{})\n",
+                        t.sym.as_str(),
+                        k,
+                        r.msg,
+                        r.line,
+                        r.col,
+                        lt.as_str(),
+                        o.top.line,
+                        o.top.col,
+                    );
+                } else {
+                    eprint(
+                        "lir: ctfe: {}: the test {}, the evaluator {} (test statement {}:{})\n",
+                        t.sym.as_str(),
+                        ast::pick(r.panics, "panics", "passes"),
+                        lt.as_str(),
+                        o.top.line,
+                        o.top.col,
+                    );
+                }
+            }
+        }
+        if bad != 0 || stats {
+            eprint(
+                "lir: ctfe: {} tests: {} compared with CTFE ({} disagree), {} CTFE does not finish checked against their expectation ({} fail it), {} call FFI, {} past a budget\n",
+                self.ctfe.len(),
+                ran,
+                bad_c,
+                alone,
+                bad - bad_c,
+                ffi,
+                budget,
+            );
+        }
+        return bad == 0;
+    }
+}
+
+// The interpreter's trap kind of evaluator outcome `o`: a lowered check's panic is the trap the
+// interpreter raises for it.
+fn trap_class(o: &le::Outcome) u8 {
+    if o.kind == le::EV_OK {
+        return iri::IT_TRAP_NONE;
+    }
+    if o.kind != iri::IT_TRAP_PANIC {
+        return o.kind;
+    }
+    let m = o.msg.as_str();
+    if m.starts_with("attempt to shift") {
+        return iri::IT_TRAP_UB_SHIFT;
+    }
+    if m == "attempt to divide by zero" || m == "attempt to calculate the remainder with a divisor of zero" {
+        return iri::IT_TRAP_UB_DIV_ZERO;
+    }
+    if m.starts_with("attempt to ") && m.ends_with(" with overflow") {
+        return iri::IT_TRAP_UB_OVERFLOW;
+    }
+    if m == "index out of bounds" || m == "range out of bounds" {
+        return iri::IT_TRAP_UB_OOB;
+    }
+    return iri::IT_TRAP_PANIC;
+}
+
+// The 1-based line and column of byte `pos` of `src`.
+fn line_col(src: str, pos: u32, line: &mut u32, col: &mut u32) {
+    let mut l: u32 = 1;
+    let mut st: usize = 0;
+    let end = if pos as usize > src.len() {
+        src.len();
+    } else {
+        pos as usize;
+    };
+    for k in 0..end {
+        if src.byte_at(k) == b'\n' {
+            l += 1;
+            st = k + 1;
+        }
+    }
+    *line = l;
+    *col = (end - st) as u32 + 1;
+}
+
+// ---- Static data ----
+
+// One static object being rendered: its bytes and relocations.
+struct DataBuf {
+    pub bytes: Vector<u8>,
+    pub relocs: Vector<Reloc>,
+}
+
+extend Lower {
+    /// Define constant or static `name` of type `(em, ty)` with CTFE value `v` as package data:
+    /// read-only `ro`, thread-local `tls`, aligned to at least `align`. A value CTFE gives no static
+    /// form refuses the definition (reported by the check).
+    pub fn static_value(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        cev: &mut iri::Interp,
+        name: str,
+        em: ModuleId,
+        ty: TypeId,
+        v: iri::IVal,
+        ro: bool,
+        tls: bool,
+        align: u64,
+    ) {
+        self.err = "";
+        self.bm = em;
+        let mut ti = TyI { cls: 0 };
+        if !self.ty(c, em, ty, &mut ti) {
+            self.data_fail(name);
+            return;
+        }
+        let mut d = DataBuf { bytes: Vector::<u8>::new(), relocs: Vector::<Reloc>::new() };
+        d.bytes.resize_default(ti.size as usize);
+        if self.dump.len() != 0 && self.dump.as_str() == name {
+            eprint("lir: data {}: value kind {}\n", name, v.kind);
+        }
+        if v.kind == iri::IV_OBJ {
+            let sr = cev.capture(v, true);
+            if !sr.ok {
+                self.data_fail(name);
+                return;
+            }
+            self.static_group(c, cev, name, sr.root, ro, tls, align);
+            return;
+        }
+        if v.kind == iri::IV_INT || v.kind == iri::IV_BOOL {
+            put_le(&mut d.bytes, 0, v.i as u64, ti.size);
+        } else if v.kind == iri::IV_FLOAT {
+            let bits = if ti.mty == T_F32 {
+                fl::f32_bits(v.f as f32) as u64;
+            } else {
+                fl::f64_bits(v.f);
+            };
+            put_le(&mut d.bytes, 0, bits, ti.size);
+        } else if v.kind == iri::IV_STR {
+            // A `str` view of the literal's bytes: the span indexes its own module's source.
+            let src = Lower::p(c).modules.at(v.tm as usize).source.as_str();
+            let a0 = (v.i >> 32) as usize;
+            let b0 = (v.i & 0xFFFFFFFF) as usize;
+            if b0 > src.len() || a0 >= b0 || ti.size != 2 * self.pkg.ptr_bytes {
+                self.data_fail(name);
+                return;
+            }
+            let mut tmp = String::new();
+            let mut bytes = String::new();
+            cbe::str_const_bytes(src.slice(a0, b0), v.f as i64, &mut tmp, &mut bytes);
+            let n = bytes.len() as u64;
+            let s = self.rodata(&mut bytes);
+            d.relocs.push(Reloc { offset: 0, sym: s, addend: 0 });
+            put_le(&mut d.bytes, self.pkg.ptr_bytes, n, self.pkg.ptr_bytes);
+        } else if !(v.kind == iri::IV_PTR && v.i == 0) {
+            self.data_fail(name);
+            return;
+        }
+        self.data_define(name, ti, ro, tls, align, &d);
+    }
+
+    /// Define constant `name` of type `(em, ty)` as zero bytes.
+    pub fn static_zero(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        name: str,
+        em: ModuleId,
+        ty: TypeId,
+        ro: bool,
+        tls: bool,
+        align: u64,
+    ) {
+        self.err = "";
+        let mut ti = TyI { cls: 0 };
+        if !self.ty(c, em, ty, &mut ti) {
+            self.data_fail(name);
+            return;
+        }
+        let d = DataBuf { bytes: Vector::<u8>::new(), relocs: Vector::<Reloc>::new() };
+        self.data_define(name, ti, ro, tls, align, &d);
+    }
+
+    /// Define static object group `root` of `cev` (a constant's, a type descriptor's) as `name` and
+    /// its auxiliaries `name__ct<k>` (read-only), as the C path names them.
+    pub fn static_group(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        cev: &iri::Interp,
+        name: str,
+        root: u32,
+        ro: bool,
+        tls: bool,
+        align: u64,
+    ) {
+        self.err = "";
+        let groupn = unsafe (*cev.static_at(root)).groupn;
+        for gi in root..root + groupn {
+            let g = cev.static_at(gi);
+            if gi != root && (unsafe (*g).parent != iri::S_NO_PARENT || unsafe (*g).inode != NODE_NONE) {
+                continue;
+            }
+            let mut ti = TyI { cls: 0 };
+            if !self.obj_ty(c, cev, gi, &mut ti) {
+                self.data_fail(name);
+                return;
+            }
+            if gi != root && ti.size == 0 {
+                continue; // a zero-sized object's references name the sentinel
+            }
+            let mut d = DataBuf { bytes: Vector::<u8>::new(), relocs: Vector::<Reloc>::new() };
+            d.bytes.resize_default(ti.size as usize);
+            if !self.write_obj(c, cev, name, gi, 0, &mut d) {
+                self.data_fail(name);
+                return;
+            }
+            let mut sn = String::from_str(name);
+            if gi != root {
+                sn.format_into("__ct{}", unsafe (*g).ord - 1);
+            }
+            self.data_define(
+                sn.as_str(),
+                ti,
+                gi != root || ro,
+                gi == root && tls,
+                ast::pick(gi == root, align, 1u64),
+                &d,
+            );
+        }
+    }
+
+    // The data symbol `name` of class `ti` with `d`'s bytes and relocations.
+    fn data_define(self: &mut Self, name: str, ti: TyI, ro: bool, tls: bool, align: u64, d: &DataBuf) {
+        let s = self.pkg.symbol(name, ast::pick(tls, SK_TLS, SK_DATA));
+        if self.pkg.syms[s as usize].def != NONE {
+            return; // defined by an emission another emitter repeated
+        }
+        let mut al = ast::pick(ti.align == 0, 1u64, ti.align);
+        if align > al {
+            al = align;
+        }
+        let mut n = d.bytes.len();
+        while n > 0 && d.bytes[n - 1] == 0 {
+            n -= 1;
+        }
+        if !self.pkg.add_data(s, ti.size, log2(al as u32) as u8, ro, d.bytes[0..n], d.relocs[0..d.relocs.len()]) {
+            self.data_fail(name);
+        }
+    }
+
+    fn data_fail(self: &mut Self, name: str) {
+        if self.dump.len() != 0 && self.dump.as_str() == name {
+            eprint("lir: data {} refused: {}\n", name, self.err);
+        }
+        self.fails.push(
+            LFail { sym: String::from_str(name), why: ast::pick(self.err.len() == 0, "static-data", self.err) },
+        );
+    }
+
+    // The class of standalone or embedded static object `gi`.
+    fn obj_ty(self: &mut Self, c: &mut cbe::CEmit, cev: &iri::Interp, gi: u32, out: &mut TyI) bool {
+        let g = cev.static_at(gi);
+        let shape = unsafe (*g).shape;
+        if unsafe (*g).vt != TYPE_NONE {
+            return self.ty(c, unsafe (*g).vm, unsafe (*g).vt, out);
+        }
+        if shape == iri::SS_HEAP || shape == iri::SS_ARRAY || shape == iri::SS_CELL {
+            if !self.ty(c, unsafe (*g).etm, unsafe (*g).ety, out) {
+                return false;
+            }
+            if shape != iri::SS_CELL {
+                let n = ast::pick(unsafe (*g).n == 0, 1u32, unsafe (*g).n);
+                *out = TyI { cls: VC_MEM, mty: T_NONE, size: out.size * n, align: out.align };
+            }
+            return true;
+        }
+        let nb = self.push_obj_args(c, g);
+        let ok = self.decl_ty(c, unsafe (*g).dm, unsafe (*g).dn, out);
+        c.mg.pop_subs(nb);
+        return ok;
+    }
+
+    // Bind the generic parameters of static object `g`'s aggregate to its recorded arguments.
+    fn push_obj_args(self: &mut Self, c: &mut cbe::CEmit, g: *const iri::StaticObj) usize {
+        let dm = unsafe (*g).dm;
+        let a = Lower::ast(c, dm);
+        let gens = a.at_const(unsafe (*g).dn).as_data.aggregate.generics;
+        let mut nb: usize = 0;
+        for i in 0..gens.len {
+            if i as u8 >= unsafe (*g).nargs {
+                break;
+            }
+            c.mg.push_sub(dm, unsafe a.list(gens)[i as usize], unsafe (*g).am[i as usize], unsafe (*g).at[i as usize]);
+            nb += 1;
+        }
+        return nb;
+    }
+
+    // The class of aggregate declaration `(dm, dn)` under the bindings in place.
+    fn decl_ty(self: &mut Self, c: &mut cbe::CEmit, dm: ModuleId, dn: NodeId, out: &mut TyI) bool {
+        let a = Lower::ast(c, dm);
+        if a.at_const(dn).kind == NodeKind::NODE_ENUM {
+            if !a.enum_has_payload(dn) {
+                let tb = ast::pick(a.enum_tag_is_byte(dn), 1u32, 4u32);
+                *out = TyI { cls: VC_MEM, mty: T_NONE, size: tb, align: tb };
+                return true;
+            }
+            let mut el = EnumL { ok: false };
+            if !self.enum_shape(c, dm, dn, &mut el) {
+                return false;
+            }
+            *out = TyI { cls: VC_MEM, mty: T_NONE, size: el.size, align: el.align };
+            return true;
+        }
+        let mut fl = Vector::<FieldAt>::new();
+        if !self.decl_fields(c, dm, dn, &mut fl) {
+            return false;
+        }
+        let mut size: u32 = 0;
+        let mut al: u32 = 1;
+        for k in 0..fl.len() {
+            let f = fl[k];
+            let mut ti = TyI { cls: 0 };
+            if !self.ty(c, f.m, f.t, &mut ti) {
+                return false;
+            }
+            if f.off + ti.size > size {
+                size = f.off + ti.size;
+            }
+            if !f.packed && ti.align > al {
+                al = ti.align;
+            }
+        }
+        let at = a.attr_of(dn, AttrKind::ATTR_ALIGN);
+        if at != null {
+            let mut v = (unsafe (*at).arg) as u64;
+            if unsafe (*at).expr {
+                let av = a.attr_value(dn, AttrKind::ATTR_ALIGN);
+                if !av.ok {
+                    return self.fail("align");
+                }
+                v = av.v;
+            }
+            if v as u32 > al {
+                al = v as u32;
+            }
+        }
+        *out = TyI { cls: VC_MEM, mty: T_NONE, size: round_up(size, al), align: al };
+        return true;
+    }
+
+    // Write static object `gi` at offset `off` of `d`.
+    fn write_obj(self: &mut Self, c: &mut cbe::CEmit, cev: &iri::Interp, name: str, gi: u32, off: u32, d: &mut DataBuf) bool {
+        let g = cev.static_at(gi);
+        let shape = unsafe (*g).shape;
+        let nslots = (unsafe (*g).slots.len()) as u32;
+        if shape == iri::SS_CELL {
+            return nslots == 0 || self.write_slot(c, cev, name, gi, 0, off, unsafe (*g).etm, unsafe (*g).ety, d);
+        }
+        if shape == iri::SS_ARRAY || shape == iri::SS_HEAP {
+            let mut ei = TyI { cls: 0 };
+            if !self.ty(c, unsafe (*g).etm, unsafe (*g).ety, &mut ei) {
+                return false;
+            }
+            for k in 0..nslots {
+                if !self.write_slot(c, cev, name, gi, k, off + k * ei.size, unsafe (*g).etm, unsafe (*g).ety, d) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        let nb = self.push_obj_args(c, g);
+        let ok = self.write_agg(c, cev, name, gi, off, d);
+        c.mg.pop_subs(nb);
+        return ok;
+    }
+
+    // `write_obj` for a struct, union or enum object, its arguments bound.
+    fn write_agg(self: &mut Self, c: &mut cbe::CEmit, cev: &iri::Interp, name: str, gi: u32, off: u32, d: &mut DataBuf) bool {
+        let g = cev.static_at(gi);
+        let dm = unsafe (*g).dm;
+        let dn = unsafe (*g).dn;
+        let a = Lower::ast(c, dm);
+        let nslots = (unsafe (*g).slots.len()) as u32;
+        if unsafe (*g).shape == iri::SS_ENUM {
+            let ms = a.at_const(dn).as_data.aggregate.members;
+            let ord = unsafe (*g).slots.at(0).i;
+            if ord < 0 || ord as u32 >= ms.len {
+                return true; // C writes `{0}`
+            }
+            let vid = unsafe a.list(ms)[ord as usize];
+            let mut dv: i64 = 0;
+            if !self.variant_value(c, dm, vid, &mut dv) {
+                return false;
+            }
+            if !a.enum_has_payload(dn) {
+                put_le(&mut d.bytes, off, dv as u64, ast::pick(a.enum_tag_is_byte(dn), 1u32, 4u32));
+                return true;
+            }
+            let mut fl = Vector::<FieldAt>::new();
+            if !self.decl_fields(c, dm, dn, &mut fl) {
+                return false;
+            }
+            for i in 0..fl.len() {
+                let f = fl[i];
+                if f.idx == 0xFFFFFFFF {
+                    put_le(&mut d.bytes, off + f.off, dv as u64, type_bytes(f.mty, self.pkg.ptr_bytes));
+                } else if f.variant == vid && f.idx + 1 < nslots {
+                    if !self.write_slot(c, cev, name, gi, f.idx + 1, off + f.off, f.m, f.t, d) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+        let mut fl = Vector::<FieldAt>::new();
+        if !self.decl_fields(c, dm, dn, &mut fl) {
+            return false;
+        }
+        let uact = unsafe (*g).uactive;
+        for i in 0..fl.len() {
+            let f = fl[i];
+            if f.idx >= nslots || uact >= 0 && f.idx != uact as u32 {
+                continue;
+            }
+            if !self.write_slot(c, cev, name, gi, f.idx, off + f.off, f.m, f.t, d) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Write slot `k` of static object `gi`, of type `(m, t)`, at offset `off` of `d`.
+    fn write_slot(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        cev: &iri::Interp,
+        name: str,
+        gi: u32,
+        k: u32,
+        off: u32,
+        m: ModuleId,
+        t: TypeId,
+        d: &mut DataBuf,
+    ) bool {
+        let g = cev.static_at(gi);
+        let sl = *unsafe (*g).slots.at(k as usize);
+        if sl.kind == iri::SK_ZERO || sl.kind == iri::SK_NULL {
+            return true;
+        }
+        if sl.kind == iri::SK_AGG {
+            return self.write_obj(c, cev, name, sl.child(), off, d);
+        }
+        if sl.kind == iri::SK_REL {
+            for ri in 0..unsafe (*g).rels.len() {
+                let r = *unsafe (*g).rels.at(ri);
+                if r.slot == k {
+                    return self.data_reloc(c, cev, name, r, off, d);
+                }
+            }
+            return true;
+        }
+        let mut ti = TyI { cls: 0 };
+        if !self.ty(c, m, t, &mut ti) || ti.cls != VC_SCALAR {
+            return self.fail("static-slot");
+        }
+        let bits = if sl.kind == iri::SK_FLOAT && ti.mty == T_F32 {
+            fl::f32_bits(sl.f() as f32) as u64;
+        } else {
+            sl.i as u64;
+        };
+        put_le(&mut d.bytes, off, bits, ti.size);
+        return true;
+    }
+
+    // The relocation of slot `r` at offset `off` of `d`: a function, the sentinel of a zero-sized
+    // object, an item's storage, or a place in an object of the group.
+    fn data_reloc(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        cev: &iri::Interp,
+        name: str,
+        r: iri::SRel,
+        off: u32,
+        d: &mut DataBuf,
+    ) bool {
+        let mut sn = String::new();
+        if r.kind == iri::SREL_FN {
+            let tgt = c.mg.method_target(r.fm, r.fnode);
+            if !c.mg.fn_sym(r.fm, r.fnode, tgt, &mut sn) {
+                return self.fail("static-fn");
+            }
+            d.relocs.push(Reloc { offset: off, sym: self.pkg.symbol(sn.as_str(), SK_FUNC), addend: 0 });
+            return true;
+        }
+        let t = cev.static_at(r.target);
+        let mut ti = TyI { cls: 0 };
+        if !self.obj_ty(c, cev, r.target, &mut ti) {
+            return false;
+        }
+        if unsafe (*t).ety != TYPE_NONE && ti.size == 0 && unsafe (*t).inode == NODE_NONE {
+            let lo = c.mg.layout_sub(unsafe (*t).etm, unsafe (*t).ety);
+            let al: u64 = ast::pick(lo.ok && lo.align > 1, lo.align, 1u64);
+            d.relocs.push(Reloc { offset: off, sym: self.sentinel_sym(al), addend: 0 });
+            return true;
+        }
+        // The place: an element or a field of the target, inside its standalone owner.
+        let mut add: u32 = 0;
+        if r.toff != 0 && !self.slot_off(c, cev, r.target, r.toff, &mut add) {
+            return false;
+        }
+        let mut o = r.target;
+        for _ in 0..1024 {
+            let og = cev.static_at(o);
+            if unsafe (*og).parent == iri::S_NO_PARENT || unsafe (*og).inode != NODE_NONE {
+                break;
+            }
+            let mut so: u32 = 0;
+            if !self.slot_off(c, cev, unsafe (*og).parent, unsafe (*og).pslot, &mut so) {
+                return false;
+            }
+            add += so;
+            o = unsafe (*og).parent;
+        }
+        let og = cev.static_at(o);
+        if unsafe (*og).inode != NODE_NONE {
+            if !c.mg.const_sym(unsafe (*og).im, unsafe (*og).inode, &mut sn) {
+                return self.fail("static-item");
+            }
+        } else {
+            sn.push_str(name);
+            if unsafe (*og).ord != 0 {
+                sn.format_into("__ct{}", unsafe (*og).ord - 1);
+            }
+        }
+        d.relocs.push(Reloc { offset: off, sym: self.pkg.symbol(sn.as_str(), SK_DATA), addend: add });
+        return true;
+    }
+
+    // The offset of slot `k` inside static object `gi`.
+    fn slot_off(self: &mut Self, c: &mut cbe::CEmit, cev: &iri::Interp, gi: u32, k: u32, out: &mut u32) bool {
+        let g = cev.static_at(gi);
+        let shape = unsafe (*g).shape;
+        if shape == iri::SS_CELL {
+            *out = 0;
+            return true;
+        }
+        if shape == iri::SS_ARRAY || shape == iri::SS_HEAP {
+            let mut ei = TyI { cls: 0 };
+            if !self.ty(c, unsafe (*g).etm, unsafe (*g).ety, &mut ei) {
+                return false;
+            }
+            *out = k * ei.size;
+            return true;
+        }
+        let nb = self.push_obj_args(c, g);
+        let mut fl = Vector::<FieldAt>::new();
+        let ok = self.decl_fields(c, unsafe (*g).dm, unsafe (*g).dn, &mut fl);
+        c.mg.pop_subs(nb);
+        if !ok {
+            return false;
+        }
+        let mut variant = NODE_NONE;
+        let mut idx = k;
+        if shape == iri::SS_ENUM {
+            let a = Lower::ast(c, unsafe (*g).dm);
+            let ms = a.at_const(unsafe (*g).dn).as_data.aggregate.members;
+            variant = unsafe a.list(ms)[(unsafe (*g).slots.at(0).i) as usize];
+            idx = k - 1;
+        }
+        for i in 0..fl.len() {
+            if fl[i].idx == idx && fl[i].variant == variant {
+                *out = fl[i].off;
+                return true;
+            }
+        }
+        return self.fail("static-place");
+    }
+}
+
+// `v`'s low `n` bytes, little-endian, at `off` of `b`.
+fn put_le(b: &mut Vector<u8>, off: u32, v: u64, n: u32) {
+    for i in 0..n {
+        if i < 8 {
+            b[(off + i) as usize] = (v >> (8 * i) as u64) as u8;
+        }
+    }
+}
+
+extend Lower {
+    /// Define array-literal constant `name` of type `(em, ty)` from its elements `els` (module `cm`'s
+    /// literals and struct initializers), as the C path renders it: an array, a vector's lanes, or a
+    /// view of the data array `name__data`.
+    pub fn static_elems(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        cev: &mut iri::Interp,
+        name: str,
+        em: ModuleId,
+        ty: TypeId,
+        cm: ModuleId,
+        els: NodeList,
+        ro: bool,
+        tls: bool,
+        align: u64,
+    ) {
+        self.err = "";
+        self.bm = em;
+        let mut rm = em;
+        let mut rt = TYPE_NONE;
+        let y = Lower::resolved(c, em, ty, &mut rm, &mut rt);
+        let mut ti = TyI { cls: 0 };
+        if !self.ty(c, em, ty, &mut ti) {
+            self.data_fail(name);
+            return;
+        }
+        let a = Lower::ast(c, cm);
+        let mut view = false;
+        let erm = rm;
+        let mut ert = TYPE_NONE;
+        if y.kind == TypeKind::TYPE_INSTANCE && Lower::ast(c, rm).instance(y.as_data.inst).n > 0 && y.kind != TypeKind::TYPE_SIMD {
+            view = true;
+            ert = Lower::ast(c, rm).instance(y.as_data.inst).args[0];
+        } else if y.kind == TypeKind::TYPE_ARRAY {
+            ert = y.as_data.arr.elem;
+        } else if y.kind == TypeKind::TYPE_SIMD {
+            ert = y.as_data.elem;
+        }
+        let mut ei = TyI { cls: 0 };
+        if ert == TYPE_NONE || !self.ty(c, erm, ert, &mut ei) {
+            self.data_fail(name);
+            return;
+        }
+        let mut d = DataBuf { bytes: Vector::<u8>::new(), relocs: Vector::<Reloc>::new() };
+        d.bytes.resize_default((ei.size * els.len) as usize);
+        for k in 0..els.len {
+            if !self.write_elem(c, cev, cm, unsafe a.list(els)[k as usize], k * ei.size, erm, ert, &mut d) {
+                self.data_fail(name);
+                return;
+            }
+        }
+        if !view {
+            if d.bytes.len() < ti.size as usize {
+                d.bytes.resize_default(ti.size as usize);
+            }
+            self.data_define(name, ti, ro, tls, align, &d);
+            return;
+        }
+        // The view: the data array, or the aligned sentinel for none.
+        let mut v = DataBuf { bytes: Vector::<u8>::new(), relocs: Vector::<Reloc>::new() };
+        v.bytes.resize_default(ti.size as usize);
+        let ds = if els.len == 0 {
+            self.sentinel_sym(ast::pick(ei.align > 1, ei.align, 1u64));
+        } else {
+            let mut dn = String::from_str(name);
+            dn.push_str("__data");
+            self.data_define(
+                dn.as_str(),
+                TyI { cls: VC_MEM, mty: T_NONE, size: ei.size * els.len, align: ei.align },
+                true,
+                false,
+                0,
+                &d,
+            );
+            self.pkg.symbol(dn.as_str(), SK_DATA);
+        };
+        v.relocs.push(Reloc { offset: 0, sym: ds, addend: 0 });
+        put_le(&mut v.bytes, self.pkg.ptr_bytes, els.len, self.pkg.ptr_bytes);
+        self.data_define(name, ti, ro, tls, align, &v);
+    }
+
+    // Write element `eid` (module `cm`) of type `(m, t)` at offset `off` of `d`: a literal (its CTFE
+    // value; a string as a view of its bytes) or a struct initializer, member by member.
+    fn write_elem(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        cev: &mut iri::Interp,
+        cm: ModuleId,
+        eid: NodeId,
+        off: u32,
+        m: ModuleId,
+        t: TypeId,
+        d: &mut DataBuf,
+    ) bool {
+        let a = Lower::ast(c, cm);
+        let n = a.at_const(eid);
+        let mut ti = TyI { cls: 0 };
+        if !self.ty(c, m, t, &mut ti) {
+            return false;
+        }
+        if n.kind == NodeKind::NODE_STRUCT_INITIALIZER {
+            let mut rm = m;
+            let mut rt = TYPE_NONE;
+            let _ = Lower::resolved(c, m, t, &mut rm, &mut rt);
+            let mut fl = Vector::<FieldAt>::new();
+            if !self.fields_of(c, rm, rt, &mut fl) {
+                return false;
+            }
+            let fls = n.as_data.struct_initializer.fields;
+            for i in 0..fls.len {
+                let fi = unsafe a.list(fls)[i as usize];
+                let fd = a.resolution_def(a.at_const(fi).as_data.field_initializer.name);
+                let mut hit = false;
+                for k in 0..fl.len() {
+                    if fl[k].node == fd.node {
+                        hit = true;
+                        if !self.write_elem(
+                            c,
+                            cev,
+                            cm,
+                            a.at_const(fi).as_data.field_initializer.value,
+                            off + fl[k].off,
+                            fl[k].m,
+                            fl[k].t,
+                            d,
+                        ) {
+                            return false;
+                        }
+                    }
+                }
+                if !hit {
+                    return self.fail("static-field");
+                }
+            }
+            return true;
+        }
+        if n.kind != NodeKind::NODE_LITERAL {
+            return self.fail("static-element");
+        }
+        let tk = n.as_data.literal.token_type;
+        if tk == tt::TokenType::StringLiteral || tk == tt::TokenType::ByteStringLiteral || tk == tt::TokenType::MatchertextLiteral {
+            if ti.size != 2 * self.pkg.ptr_bytes {
+                return self.fail("static-string");
+            }
+            let rsp = n.as_data.literal.raw;
+            let src = Lower::p(c).modules.at(cm as usize).source.as_str();
+            let mut tmp = String::new();
+            let mut bytes = String::new();
+            cbe::str_const_bytes(src.slice(rsp.start as usize, rsp.end as usize), tk as i64, &mut tmp, &mut bytes);
+            let len = bytes.len() as u64;
+            let s = self.rodata(&mut bytes);
+            d.relocs.push(Reloc { offset: off, sym: s, addend: 0 });
+            put_le(&mut d.bytes, off + self.pkg.ptr_bytes, len, self.pkg.ptr_bytes);
+            return true;
+        }
+        if tk == tt::TokenType::Null {
+            return true;
+        }
+        let v = cev.eval(cm, eid);
+        if ti.cls != VC_SCALAR {
+            return self.fail("static-literal");
+        }
+        let bits = if v.kind == iri::IV_FLOAT && ti.mty == T_F32 {
+            fl::f32_bits(v.f as f32) as u64;
+        } else if v.kind == iri::IV_FLOAT {
+            fl::f64_bits(v.f);
+        } else if v.kind == iri::IV_INT || v.kind == iri::IV_BOOL {
+            v.i as u64;
+        } else {
+            return self.fail("static-literal");
+        };
+        put_le(&mut d.bytes, off, bits, ti.size);
+        return true;
+    }
+}
+
+extend Lower {
+    fn push_binds(self: &Self, c: &mut cbe::CEmit) {
+        for k in 0..self.binds.len() {
+            c.mg.push_msub(self.binds[k]);
+        }
+    }
+
+    // `binds`: the bindings of the instance generic call `t` calls (`CEmit::callee_binds`) past the
+    // active ones; empty for a concrete callee.
+    fn bind_callee(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, t: &irc::Terminator) {
+        self.binds.clear();
+        let cl = t.callee;
+        if cl.node == NODE_NONE {
+            return;
+        }
+        let fd = Lower::ast(c, cl.module).at_const(cl.node);
+        if fd.kind != NodeKind::NODE_FUNCTION || fd.as_data.function.generics.len == 0 && !c.mg.in_generic_extend(
+            cl.module,
+            cl.node,
+        ) && !c.mg.in_keyed_extend(cl.module, cl.node) {
+            return;
+        }
+        c.callee_binds(b, t, &mut self.binds);
+        let base = c.mg.subs.len();
+        // Keep the callee's own: the active ones lead the copy.
+        let mut k: usize = 0;
+        while base + k < self.binds.len() {
+            self.binds[k] = self.binds[base + k];
+            k += 1;
+        }
+        self.binds.truncate(k);
+    }
+}
+
+// ---- Tidying ----
+
+// The scratch of `Lower::tidy`, kept across bodies.
+struct Tidy {
+    pub bmap: Vector<u32>, // a block's new index; NONE when unreached
+    pub fwd: Vector<u32>, // the edge a block's lone live `jmp` takes (NONE for any other), then its predecessor count, then the block merged after it
+    pub jp: Vector<u32>, // the predecessor a block merges into; NONE when it stays
+    pub psub: Vector<Value>, // a merged block's parameter: the value its predecessor passes; VNONE for others
+    pub puse: Vector<u32>, // the live uses of each parameter
+    pub hoisted: Vector<bool>, // a live constant, defined once at the entry
+    pub consts: Vector<u32>, // the constants the entry defines, by instruction
+    pub ckey: Map<u64, u32>, // a constant's key: its first instruction
+    pub imap: Vector<u32>, // an instruction's new index; NONE when dropped
+    pub pmap: Vector<u32>, // a parameter's new index
+    pub work: Vector<u32>,
+    pub uses: Vector<Value>,
+    pub done: Vector<bool>, // a pool edge already renumbered
+    pub insts: Vector<Inst>,
+    pub locs: Vector<u32>,
+    pub params: Vector<u8>,
+    pub blocks: Vector<Block>,
+}
+
+extend Tidy {
+    fn new() Tidy {
+        return Tidy {
+            bmap: Vector::<u32>::new(),
+            fwd: Vector::<u32>::new(),
+            jp: Vector::<u32>::new(),
+            psub: Vector::<Value>::new(),
+            puse: Vector::<u32>::new(),
+            hoisted: Vector::<bool>::new(),
+            consts: Vector::<u32>::new(),
+            ckey: Map::<u64, u32>::new(),
+            imap: Vector::<u32>::new(),
+            pmap: Vector::<u32>::new(),
+            work: Vector::<u32>::new(),
+            uses: Vector::<Value>::new(),
+            done: Vector::<bool>::new(),
+            insts: Vector::<Inst>::new(),
+            locs: Vector::<u32>::new(),
+            params: Vector::<u8>::new(),
+            blocks: Vector::<Block>::new(),
+        };
+    }
+}
+
+// Whether instruction `t` has no effect but its value: dropped when nothing uses it.
+const fn pure_inst(t: Inst) bool {
+    let op = t.op;
+    return op >= O_ICONST && op <= O_MUL || op >= O_AND && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_RETADDR || op == O_LOAD && (t.aux & MEM_VOLATILE) == 0;
+}
+
+// The values instruction `t` of `b` uses into `out`: its operands, a call's arguments, a vector
+// operation's operands and each edge's arguments.
+fn inst_uses(b: &Body, t: Inst, out: &mut Vector<Value>) {
+    out.truncate(0);
+    let f = op_info(t.op).form;
+    if lv::operand_a(f) && t.a != VNONE {
+        out.push(t.a);
+    }
+    if lv::operand_b(f) && t.b != VNONE {
+        out.push(t.b);
+    }
+    if lv::operand_c(f) && t.c != VNONE {
+        out.push(t.c);
+    }
+    if f == F_CALL || f == F_CALLIND {
+        for k in 0..t.aux as u32 {
+            out.push(b.pool[(t.c + k) as usize]);
+        }
+    } else if f == F_VOP {
+        for k in 0..t.b {
+            out.push(b.pool[(t.a + k) as usize]);
+        }
+    }
+    for k in 0..term_edges(t) {
+        let e = term_edge(b, t, k);
+        for x in 0..b.edge_nargs(e) {
+            out.push(b.edge_arg(e, x));
+        }
+    }
+}
+
+// The number of edges terminator `t` takes (0 for any other instruction).
+const fn term_edges(t: Inst) u32 {
+    if t.op == O_JMP {
+        return 1;
+    }
+    if t.op == O_BR {
+        return 2;
+    }
+    if t.op == O_SWITCH {
+        return t.aux as u32 + 1;
+    }
+    return 0;
+}
+
+// Edge `k` of terminator `t` of `b`.
+const fn term_edge(b: &Body, t: Inst, k: u32) u32 {
+    if t.op == O_JMP {
+        return t.a;
+    }
+    if t.op == O_BR {
+        return ast::pick(k == 0, t.b, t.c);
+    }
+    return b.switch_edge(t, k);
+}
+
+extend Lower {
+    // Compact the finished body: drop the pure instructions nothing uses, send each edge to a block
+    // that only jumps on to that jump's target, drop the blocks the entry no longer reaches, and
+    // renumber what is left in block order. Every step is linear in the body.
+    fn tidy(self: &mut Self) {
+        let nb = self.b.blocks.len();
+        let ni = self.b.insts.len();
+        self.fold_conversions();
+        self.tidy_reach();
+        // Liveness: the instructions with an effect in a reached block, then what they use.
+        fill_u32(&mut self.td.imap, ni, NONE);
+        self.td.work.truncate(0);
+        for k in 0..nb {
+            if self.td.bmap[k] == NONE {
+                continue;
+            }
+            let bk = self.b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                if !pure_inst(self.b.insts[i as usize]) {
+                    self.td.imap[i as usize] = 0;
+                    self.td.work.push(i);
+                }
+            }
+        }
+        fill_u32(&mut self.td.puse, self.b.params.len(), 0);
+        while self.td.work.len() != 0 {
+            let i = self.td.work.pop().unwrap();
+            inst_uses(&self.b, self.b.insts[i as usize], &mut self.td.uses);
+            for u in 0..self.td.uses.len() {
+                let v = self.td.uses[u];
+                let d = v & ~VFLAG;
+                if (v & VPARAM) != 0 {
+                    self.td.puse[(v & ~VPARAM) as usize] += 1;
+                } else if self.td.imap[d as usize] == NONE {
+                    self.td.imap[d as usize] = 0;
+                    self.td.work.push(d);
+                }
+            }
+        }
+        // Threading: a reached block whose one live instruction is a `jmp` forwards: one of no
+        // parameter, or one that passes its parameters on in order.
+        fill_u32(&mut self.td.fwd, nb, NONE);
+        let mut any = false;
+        for k in 1..nb {
+            let bk = self.b.blocks[k];
+            if self.td.bmap[k] == NONE {
+                continue;
+            }
+            let end = bk.start + bk.len - 1;
+            let j = self.b.insts[end as usize];
+            let mut only = j.op == O_JMP && (bk.param_len == 0 || self.b.edge_nargs(j.a) == bk.param_len as u32);
+            // Each parameter is used by the `jmp` alone: the edges that bypass the block pass it on.
+            for q in 0..bk.param_len as u32 {
+                only = only && self.b.edge_arg(j.a, q) == (VPARAM | bk.param_start + q) && self.td.puse[(bk.param_start + q) as usize] == 1;
+            }
+            for i in bk.start..end {
+                only = only && self.td.imap[i as usize] == NONE;
+            }
+            if only {
+                self.td.fwd[k] = self.b.insts[end as usize].a;
+                any = true;
+            }
+        }
+        if any {
+            for k in 0..nb {
+                if self.td.bmap[k] == NONE {
+                    continue;
+                }
+                let bk = self.b.blocks[k];
+                let ti = (bk.start + bk.len - 1) as usize;
+                let t = self.b.insts[ti];
+                if t.op == O_JMP {
+                    self.b.insts.index_mut(ti).a = self.thread(t.a, nb);
+                } else if t.op == O_BR {
+                    let e1 = self.thread(t.b, nb);
+                    let e2 = self.thread(t.c, nb);
+                    self.b.insts.index_mut(ti).b = e1;
+                    self.b.insts.index_mut(ti).c = e2;
+                } else if t.op == O_SWITCH {
+                    for q in 0..t.aux as u32 + 1 {
+                        let e = self.thread(self.b.switch_edge(t, q), nb);
+                        self.b.pool[(t.c + q) as usize] = e;
+                    }
+                }
+            }
+            self.tidy_reach();
+        }
+        // Merging: a block of no parameter whose one predecessor `jmp`s to it continues that block.
+        let _ = self.tidy_merges();
+        // Renumber: the constants, one of each, first; then the blocks left (a run of merged blocks
+        // as one), their parameters and live instructions in block order.
+        let mut n = self.hoist_constants();
+        let mut np: u32 = 0;
+        fill_u32(&mut self.td.pmap, self.b.params.len(), NONE);
+        for k in 0..nb {
+            if self.td.bmap[k] == NONE {
+                continue;
+            }
+            let bk = self.b.blocks[k];
+            for q in 0..bk.param_len as u32 {
+                self.td.pmap[(bk.param_start + q) as usize] = np;
+                np += 1;
+            }
+            let mut cur = k as u32;
+            for _ in 0..nb {
+                let nx = self.td.fwd[cur as usize];
+                let ck = self.b.blocks[cur as usize];
+                for i in ck.start..ck.start + ck.len - ast::pick(nx != NONE, 1u32, 0) {
+                    if self.td.imap[i as usize] != NONE && !self.td.hoisted[i as usize] {
+                        self.td.imap[i as usize] = n;
+                        n += 1;
+                    }
+                }
+                if nx == NONE {
+                    break;
+                }
+                cur = nx;
+            }
+        }
+        self.td.insts.truncate(0);
+        self.td.locs.truncate(0);
+        self.td.params.truncate(0);
+        self.td.blocks.truncate(0);
+        fill_bool(&mut self.td.done, self.b.pool.len(), false);
+        for k in 0..nb {
+            if self.td.bmap[k] == NONE {
+                continue;
+            }
+            let bk = self.b.blocks[k];
+            let start = self.td.insts.len() as u32;
+            let ps = self.td.params.len() as u32;
+            for q in 0..bk.param_len as u32 {
+                self.td.params.push(self.b.params[(bk.param_start + q) as usize]);
+            }
+            if k == 0 {
+                for q in 0..self.td.consts.len() {
+                    self.td.insts.push(self.b.insts[self.td.consts[q] as usize]);
+                    self.td.locs.push(0);
+                }
+            }
+            let mut cur = k as u32;
+            for _ in 0..nb {
+                let nx = self.td.fwd[cur as usize];
+                let ck = self.b.blocks[cur as usize];
+                for i in ck.start..ck.start + ck.len - ast::pick(nx != NONE, 1u32, 0) {
+                    if self.td.imap[i as usize] != NONE && !self.td.hoisted[i as usize] {
+                        let t = self.renumber(self.b.insts[i as usize]);
+                        self.td.insts.push(t);
+                        self.td.locs.push(self.b.locs[i as usize]);
+                    }
+                }
+                if nx == NONE {
+                    break;
+                }
+                cur = nx;
+            }
+            self.td.blocks.push(
+                Block {
+                    start: start,
+                    len: self.td.insts.len() as u32 - start,
+                    param_start: ast::pick(bk.param_len == 0, 0u32, ps),
+                    param_len: bk.param_len,
+                    flags: bk.flags,
+                },
+            );
+        }
+        self.td.insts = replace(&mut self.b.insts, replace(&mut self.td.insts, Vector::<Inst>::new()));
+        self.td.locs = replace(&mut self.b.locs, replace(&mut self.td.locs, Vector::<u32>::new()));
+        self.td.params = replace(&mut self.b.params, replace(&mut self.td.params, Vector::<u8>::new()));
+        self.td.blocks = replace(&mut self.b.blocks, replace(&mut self.td.blocks, Vector::<Block>::new()));
+        self.td.blocks.truncate(0);
+    }
+
+    // `jp`: for each reached block of no parameter, but the entry, whose one predecessor reaches it
+    // by a `jmp` and has its flags, that predecessor; NONE for the others, which `bmap` renumbers.
+    // `fwd`: the block merged after each block; NONE when none is. The number of merged blocks.
+    fn tidy_merges(self: &mut Self) u32 {
+        let nb = self.b.blocks.len();
+        fill_u32(&mut self.td.fwd, nb, 0);
+        fill_u32(&mut self.td.jp, nb, NONE);
+        for k in 0..nb {
+            if self.td.bmap[k] == NONE {
+                continue;
+            }
+            let bk = self.b.blocks[k];
+            let t = self.b.insts[(bk.start + bk.len - 1) as usize];
+            for q in 0..term_edges(t) {
+                let to = self.b.edge_target(term_edge(&self.b, t, q)) as usize;
+                self.td.fwd[to] += 1;
+                if t.op == O_JMP {
+                    self.td.jp[to] = k as u32;
+                }
+            }
+        }
+        let mut m: u32 = 0;
+        self.td.jp[0] = NONE;
+        for k in 1..nb {
+            let bk = self.b.blocks[k];
+            let p = self.td.jp[k];
+            if p == NONE || self.td.fwd[k] != 1 || self.b.blocks[p as usize].flags != bk.flags {
+                self.td.jp[k] = NONE;
+            } else {
+                m += 1;
+            }
+        }
+        fill_u32(&mut self.td.psub, self.b.params.len(), VNONE);
+        if m == 0 {
+            fill_u32(&mut self.td.fwd, nb, NONE);
+            return 0;
+        }
+        // A merged block's parameters are the values its predecessor's `jmp` passes.
+        for k in 1..nb {
+            let p = self.td.jp[k];
+            let bk = self.b.blocks[k];
+            if p == NONE || bk.param_len == 0 {
+                continue;
+            }
+            let pb = self.b.blocks[p as usize];
+            let e = self.b.insts[(pb.start + pb.len - 1) as usize].a;
+            for q in 0..bk.param_len as u32 {
+                self.td.psub[(bk.param_start + q) as usize] = self.b.edge_arg(e, q);
+            }
+        }
+        // `fwd`: the block merged after each, read before renumbering rewrites the edges.
+        for k in 0..nb {
+            self.td.fwd[k] = self.chain_next(k as u32);
+        }
+        let mut n: u32 = 0;
+        for k in 0..nb {
+            if self.td.bmap[k] != NONE && self.td.jp[k] == NONE {
+                self.td.bmap[k] = n;
+                n += 1;
+            } else {
+                self.td.bmap[k] = NONE;
+            }
+        }
+        return m;
+    }
+
+    // The block merged after block `k` (its `jmp`'s target); NONE when none is.
+    const fn chain_next(self: &Self, k: u32) u32 {
+        let bk = self.b.blocks[k as usize];
+        let t = self.b.insts[(bk.start + bk.len - 1) as usize];
+        if t.op != O_JMP {
+            return NONE;
+        }
+        let to = self.b.edge_target(t.a);
+        return ast::pick(self.td.jp[to as usize] != NONE, to, NONE);
+    }
+
+    // Number the live constants of the reached blocks from 0, one per value (an operation, a type
+    // and an immediate): `consts` lists the first of each, `hoisted` marks them all, and `imap`
+    // sends each to its first. The entry defines them: it dominates every use. The count.
+    fn hoist_constants(self: &mut Self) u32 {
+        let nb = self.b.blocks.len();
+        fill_bool(&mut self.td.hoisted, self.b.insts.len(), false);
+        self.td.consts.truncate(0);
+        self.td.ckey.clear();
+        for k in 0..nb {
+            if self.td.bmap[k] == NONE && self.td.jp[k] == NONE {
+                continue;
+            }
+            let bk = self.b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                let t = self.b.insts[i as usize];
+                if self.td.imap[i as usize] == NONE || t.op != O_ICONST && t.op != O_FCONST && t.op != O_SYMADDR && t.op != O_SLOTADDR {
+                    continue;
+                }
+                self.td.hoisted[i as usize] = true;
+                let key = (t.op as u64 << 56 | t.ty as u64 << 48 | t.b as u64).wrapping_mul(0x9E3779B97F4A7C15u64) ^ t.a as u64;
+                let mut at = NONE;
+                if let Some(f) = self.td.ckey.get(&key) {
+                    let r = self.b.insts[(*f) as usize];
+                    if r.op == t.op && r.ty == t.ty && r.aux == t.aux && r.a == t.a && r.b == t.b {
+                        at = *f;
+                    }
+                }
+                if at != NONE {
+                    self.td.imap[i as usize] = self.td.imap[at as usize];
+                    continue;
+                }
+                if !self.td.ckey.contains_key(&key) {
+                    self.td.ckey.insert(key, i);
+                }
+                self.td.imap[i as usize] = self.td.consts.len() as u32;
+                self.td.consts.push(i);
+            }
+        }
+        return self.td.consts.len() as u32;
+    }
+
+    // Rewrite each integer conversion of an integer constant to the constant it makes.
+    fn fold_conversions(self: &mut Self) {
+        let ptr = self.pkg.ptr_bytes;
+        for i in 0..self.b.insts.len() {
+            let t = self.b.insts[i];
+            if t.op != O_SEXT && t.op != O_ZEXT && t.op != O_TRUNC || (t.a & (VPARAM | VFLAG)) != 0 || !is_int(t.ty) || t.ty == T_I128 {
+                continue;
+            }
+            let x = self.b.insts[t.a as usize];
+            if x.op != O_ICONST || x.ty == T_I128 {
+                continue;
+            }
+            let v = x.b as u64 << 32 | x.a as u64;
+            let u = if t.op == O_SEXT {
+                lp::sign_extend(v, type_bits(x.ty, ptr)) as u64;
+            } else {
+                v;
+            };
+            let tb = type_bits(t.ty, ptr);
+            let r = if tb >= 64 {
+                u;
+            } else {
+                u & (1u64 << tb as u64) - 1;
+            };
+            let ins = self.b.insts.index_mut(i);
+            ins.op = O_ICONST;
+            ins.aux = 0;
+            ins.a = r as u32;
+            ins.b = (r >> 32) as u32;
+            ins.c = VNONE;
+        }
+    }
+
+    // `bmap`: each block the entry reaches, numbered in block order; NONE for the others.
+    fn tidy_reach(self: &mut Self) {
+        let nb = self.b.blocks.len();
+        fill_u32(&mut self.td.bmap, nb, NONE);
+        self.td.work.truncate(0);
+        self.td.bmap[0] = 0;
+        self.td.work.push(0);
+        // Each block enters the stack once.
+        while self.td.work.len() != 0 {
+            let k = self.td.work.pop().unwrap();
+            let bk = self.b.blocks[k as usize];
+            let t = self.b.insts[(bk.start + bk.len - 1) as usize];
+            for q in 0..term_edges(t) {
+                let to = self.b.edge_target(term_edge(&self.b, t, q));
+                if self.td.bmap[to as usize] == NONE {
+                    self.td.bmap[to as usize] = 0;
+                    self.td.work.push(to);
+                }
+            }
+        }
+        let mut n: u32 = 0;
+        for k in 0..nb {
+            if self.td.bmap[k] != NONE {
+                self.td.bmap[k] = n;
+                n += 1;
+            }
+        }
+    }
+
+    // Edge `e` past the blocks that only jump: a block of no parameter by its `jmp`'s edge, one that
+    // passes its parameters on by retargeting `e` (every edge to it passes them alike). At most `nb`
+    // steps, so a loop of such blocks stops.
+    fn thread(self: &mut Self, e: u32, nb: usize) u32 {
+        let mut x = e;
+        for _ in 0..nb {
+            let t = self.b.edge_target(x) as usize;
+            let f = self.td.fwd[t];
+            if f == NONE || f == x {
+                break;
+            }
+            if self.b.blocks[t].param_len == 0 {
+                x = f;
+            } else {
+                self.b.pool[x as usize] = self.b.edge_target(f);
+            }
+        }
+        return x;
+    }
+
+    // Value `v` renumbered (a merged block's parameter as the value its predecessor passes).
+    const fn renum(self: &Self, v0: Value) Value {
+        let mut v = v0;
+        for _ in 0..self.td.psub.len() {
+            if v == VNONE || (v & VPARAM) == 0 || self.td.psub[(v & ~VPARAM) as usize] == VNONE {
+                break;
+            }
+            v = self.td.psub[(v & ~VPARAM) as usize];
+        }
+        if v == VNONE {
+            return v;
+        }
+        if (v & VPARAM) != 0 {
+            return VPARAM | self.td.pmap[(v & ~VPARAM) as usize];
+        }
+        return v & VFLAG | self.td.imap[(v & ~VFLAG) as usize];
+    }
+
+    // Instruction `t` with its values, edges and their arguments renumbered (a pool list in place;
+    // an edge two terminators share, once).
+    fn renumber(self: &mut Self, t0: Inst) Inst {
+        let mut t = t0;
+        let f = op_info(t.op).form;
+        if lv::operand_a(f) {
+            t.a = self.renum(t.a);
+        }
+        if lv::operand_b(f) {
+            t.b = self.renum(t.b);
+        }
+        if lv::operand_c(f) {
+            t.c = self.renum(t.c);
+        }
+        if f == F_CALL || f == F_CALLIND {
+            for k in 0..t.aux as u32 {
+                let at = (t.c + k) as usize;
+                self.b.pool[at] = self.renum(self.b.pool[at]);
+            }
+        } else if f == F_VOP {
+            for k in 0..t.b {
+                let at = (t.a + k) as usize;
+                self.b.pool[at] = self.renum(self.b.pool[at]);
+            }
+        }
+        for k in 0..term_edges(t) {
+            let e = term_edge(&self.b, t, k);
+            if self.td.done[e as usize] {
+                continue;
+            }
+            self.td.done[e as usize] = true;
+            self.b.pool[e as usize] = self.td.bmap[self.b.pool[e as usize] as usize];
+            for x in 0..self.b.edge_nargs(e) {
+                let at = (e + 2 + x) as usize;
+                self.b.pool[at] = self.renum(self.b.pool[at]);
+            }
+        }
+        return t;
+    }
+}
+
+// `v` as `n` copies of `x`, its buffer reused.
+fn fill_u32(v: &mut Vector<u32>, n: usize, x: u32) {
+    v.truncate(0);
+    v.reserve(n);
+    for _ in 0..n {
+        v.push(x);
+    }
+}
+
+fn fill_bool(v: &mut Vector<bool>, n: usize, x: bool) {
+    v.truncate(0);
+    v.reserve(n);
+    for _ in 0..n {
+        v.push(x);
+    }
+}
+
+extend Lower {
+    /// Lower derived destructor `sym` of resolved type `(rm, rt)`, under the bindings its use recorded:
+    /// `void sym(T *self)` frees each destructible member in order, an enum's under its variant's tag
+    /// and a closure env's owned captures. A refusal goes to `fails`.
+    pub fn glue(self: &mut Self, c: &mut cbe::CEmit, rm: ModuleId, rt: TypeId, sym: str) bool {
+        self.nbodies += 1;
+        let s0 = self.pkg.find_symbol(sym);
+        if s0 != NONE && self.pkg.syms[s0 as usize].def != NONE {
+            return true;
+        }
+        let cd = c.collect_demand;
+        let ro = c.mg.rec_on;
+        c.collect_demand = false;
+        c.mg.rec_on = false;
+        self.err = "";
+        self.reset(rm);
+        self.bm = rm;
+        self.noret = false;
+        self.file = self.pkg.add_file(Lower::p(c).modules.at(rm as usize).file.as_str());
+        let ok = self.glue_i(c, rm, rt) && self.finish(sym);
+        c.collect_demand = cd;
+        c.mg.rec_on = ro;
+        if !ok {
+            self.fails.push(LFail { sym: String::from_str(sym), why: self.err });
+            return false;
+        }
+        self.tidy();
+        let s = self.pkg.symbol(sym, SK_FUNC);
+        let _ = self.pkg.define(s, &self.b);
+        return true;
+    }
+
+    fn glue_i(self: &mut Self, c: &mut cbe::CEmit, rm: ModuleId, rt: TypeId) bool {
+        let tys: []u32 = [T_PTR as u32];
+        self.b.sig = self.b.signature(tys, 1, false, T_NONE);
+        let pt: []u8 = [T_PTR];
+        let b0 = self.b.add_block(pt);
+        self.b.begin(b0);
+        let me = self.b.param(b0, 0);
+        let mut fl = Vector::<FieldAt>::new();
+        let y = *Lower::ast(c, rm).type_at(rt);
+        let decl = if y.kind == TypeKind::TYPE_ENUM {
+            y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            Lower::ast(c, rm).instance(y.as_data.inst).decl;
+        } else {
+            NODE_NONE;
+        };
+        let dm = if y.kind == TypeKind::TYPE_INSTANCE {
+            Lower::ast(c, rm).instance(y.as_data.inst).module;
+        } else {
+            y.module;
+        };
+        let is_enum = decl != NODE_NONE && Lower::ast(c, dm).at_const(decl).kind == NodeKind::NODE_ENUM;
+        if is_enum && !Lower::ast(c, dm).enum_has_payload(decl) || y.kind != TypeKind::TYPE_FUNCTION && y.kind != TypeKind::TYPE_STRUCT && y.kind != TypeKind::TYPE_ENUM && y.kind != TypeKind::TYPE_INSTANCE {
+            let _ = self.inst(O_RET, T_NONE, 0, VNONE, VNONE, VNONE);
+            return true;
+        }
+        if !self.fields_of(c, rm, rt, &mut fl) {
+            return self.fail("glue-fields");
+        }
+        let mut el = EnumL { ok: false };
+        let mut tag = VNONE;
+        if is_enum {
+            if !self.enum_of(c, rm, rt, &mut el) {
+                return self.fail("glue-enum");
+            }
+            tag = self.load(el.tag, me, 0, false);
+        }
+        // Each member in order; an enum's run of one variant's members behind its tag test.
+        let mut k: usize = 0;
+        for _ in 0..fl.len() {
+            if k >= fl.len() {
+                break;
+            }
+            let v = fl[k].variant;
+            let mut end = k + 1;
+            while end < fl.len() && fl[end].variant == v {
+                end += 1;
+            }
+            let mut any = false;
+            for j in k..end {
+                any = any || self.glue_member(c, fl[j], VNONE, true);
+            }
+            if any {
+                let mut skip = NONE;
+                if is_enum && v != NODE_NONE {
+                    let mut d: i64 = 0;
+                    if !self.variant_value(c, dm, v, &mut d) {
+                        return false;
+                    }
+                    let dv = self.iconst(el.tag, d as u64);
+                    let hit = self.icmp(C_EQ, tag, dv);
+                    let body = self.block();
+                    skip = self.block();
+                    let eb = self.edge(body, NONE, NONE);
+                    let es = self.edge(skip, NONE, NONE);
+                    let _ = self.inst(O_BR, T_NONE, 0, hit, eb, es);
+                    self.b.begin(body);
+                }
+                for j in k..end {
+                    let _ = self.glue_member(c, fl[j], me, false);
+                    if self.err.len() != 0 {
+                        return false;
+                    }
+                }
+                if skip != NONE {
+                    let es = self.edge(skip, NONE, NONE);
+                    let _ = self.inst(O_JMP, T_NONE, 0, es, VNONE, VNONE);
+                    self.b.begin(skip);
+                }
+            }
+            k = end;
+        }
+        let _ = self.inst(O_RET, T_NONE, 0, VNONE, VNONE, VNONE);
+        return true;
+    }
+
+    // Whether member `f` (not an enum's tag, not a capture by reference) needs a free; with `probe`
+    // false, free it in the object at `me`.
+    fn glue_member(self: &mut Self, c: &mut cbe::CEmit, f: FieldAt, me: Value, probe: bool) bool {
+        if f.t == TYPE_NONE || f.idx == 0xFFFFFFFF {
+            return false;
+        }
+        let mut frm = f.m;
+        let mut frt = f.t;
+        if !c.mg.resolve(f.m, f.t, &mut frm, &mut frt) || !c.is_destructible(frm, frt) {
+            return false;
+        }
+        if probe {
+            return true;
+        }
+        let at = self.ptradd(me, VNONE, 0, f.off);
+        return self.drop_at(c, frm, frt, at, 0);
+    }
+}

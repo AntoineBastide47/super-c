@@ -748,18 +748,23 @@ const OP_PLAN_NAMES: [str<'static>; 13] = [
     "shr_scalar",
 ];
 
+/// The name of operation `op` (below OP_COUNT): an operator's, a vector operation's, a planner form's.
+pub const fn op_name(op: u32) str<'static> {
+    let ops: []str<'static> = OP_NAMES;
+    let pl: []str<'static> = OP_PLAN_NAMES;
+    if op < OP_SIMD {
+        return ops[op as usize];
+    }
+    if op < OP_CMP_LANES {
+        return simd_op((op - OP_SIMD) as u8).name;
+    }
+    return pl[(op - OP_CMP_LANES) as usize];
+}
+
 /// The `std::simd::Op` variant of operation `op`: its name in CamelCase, a comparison prefixed `Cmp`.
 pub const fn op_variant(op: u32) String {
     let mut out = String::new();
-    let ops: []str = OP_NAMES;
-    let pl: []str = OP_PLAN_NAMES;
-    let n = if op < OP_SIMD {
-        ops[op as usize];
-    } else if op < OP_CMP_LANES {
-        simd_op((op - OP_SIMD) as u8).name;
-    } else {
-        pl[(op - OP_CMP_LANES) as usize];
-    };
+    let n = op_name(op);
     if op >= OP_SIMD + SIMD_CMP_EQ as u32 && op <= OP_SIMD + SIMD_CMP_GE as u32 {
         out.push_str("Cmp");
     }

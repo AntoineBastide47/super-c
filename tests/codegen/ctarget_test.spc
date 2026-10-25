@@ -12,6 +12,7 @@ import driver::util as dutil;
 import module::loader as loader;
 import bindgen::ctarget as ct;
 import bindgen::ctarget_data as data;
+import target::table as tgt;
 import tests::cli_harness as cli;
 import tests::codegen::ctarget_universe as univ;
 
@@ -173,21 +174,29 @@ const fn row_at(i: usize) data::Row {
     return rows[i];
 }
 
-// A scratch sysroot for row `row` holding every directory its target looks in; the root of the tree.
-fn fake_root(p: &cli::Proj, row: data::Row) String {
+const fn target_at(i: usize) tgt::Target {
+    let t: []tgt::Target = tgt::TARGETS;
+    return t[i];
+}
+
+// A scratch sysroot for C environment row `ri` (and target row) holding every directory its target looks
+// in; the root of the tree.
+fn fake_root(p: &cli::Proj, ri: usize) String {
+    let row = row_at(ri);
+    let sr = tgt::os(target_at(ri).os).sysroot;
     let root = format("{}/root", p.dir());
-    if row.target == 1 || row.target == 4 {
+    if sr == tgt::SYSROOT_APPLE {
         p.mkfile("root/usr/include/.keep", "");
         p.mkfile("root/usr/local/include/.keep", "");
         p.mkfile("root/System/Library/Frameworks/.keep", "");
         p.mkfile("root/System/Library/SubFrameworks/.keep", "");
         p.mkfile("root/Library/Frameworks/.keep", "");
-    } else if row.target == 2 || row.target == 5 {
+    } else if sr == tgt::SYSROOT_LINUX || sr == tgt::SYSROOT_ANDROID {
         p.mkfile("root/usr/local/include/.keep", "");
         p.mkfile(format("root/usr/include/{}/.keep", row.dir).as_str(), "");
         p.mkfile("root/include/.keep", "");
         p.mkfile("root/usr/include/.keep", "");
-    } else if row.target == 0 {
+    } else if sr == tgt::SYSROOT_MINGW {
         p.mkfile(format("root/{}/include/_mingw.h", row.dir).as_str(), "");
         p.mkfile(format("root/{}/usr/include/.keep", row.dir).as_str(), "");
         p.mkfile("root/include/.keep", "");
@@ -210,9 +219,9 @@ fn dirs_of(t: &ct::CTarget) String {
 // The environment of (`target`, `arch`) over a scratch sysroot.
 fn table_of(target: i32, arch: i32, t: &mut ct::CTarget) {
     let tmp = cli::proj_new();
-    let ri = data::find_row(target, arch);
+    let ri = tgt::find(target, arch);
     assert(ri >= 0, "the pair has a row");
-    let root = fake_root(&tmp, row_at(ri as usize));
+    let root = fake_root(&tmp, ri as usize);
     assert(ct::c_target(target, arch, root.as_str(), t), row_at(ri as usize).triple);
 }
 
@@ -222,14 +231,14 @@ fn system_dirs_follow_the_compiler_order() {
     let root = format("{}/root", p.dir());
     let r = root.as_str();
     let mut t = ct::CTarget::new();
-    let _ = fake_root(&p, row_at(data::find_row(1, 1) as usize));
+    let _ = fake_root(&p, tgt::find(1, 1) as usize);
     assert(ct::c_target(1, 1, r, &mut t), "macos");
     assert_eq(dirs_of(&t).as_str(), format("{}/usr/local/include\n<super-c>\n{}/usr/include\n", r, r).as_str());
     assert_eq(t.frameworks.len(), 3usize);
     assert_eq(t.frameworks[0].as_str(), format("{}/System/Library/Frameworks", r).as_str());
     assert(ct::c_target(4, 0, r, &mut t), "ios");
     assert_eq(dirs_of(&t).as_str(), format("{}/usr/local/include\n<super-c>\n{}/usr/include\n", r, r).as_str());
-    let _ = fake_root(&p, row_at(data::find_row(2, 0) as usize));
+    let _ = fake_root(&p, tgt::find(2, 0) as usize);
     assert(ct::c_target(2, 0, r, &mut t), "linux");
     assert_eq(
         dirs_of(&t).as_str(),
@@ -242,7 +251,7 @@ fn system_dirs_follow_the_compiler_order() {
         ).as_str(),
     );
     assert_eq(t.frameworks.len(), 0usize);
-    let _ = fake_root(&p, row_at(data::find_row(5, 1) as usize));
+    let _ = fake_root(&p, tgt::find(5, 1) as usize);
     assert(ct::c_target(5, 1, format("{}/", r).as_str(), &mut t), "android, trailing slash");
     assert_eq(
         dirs_of(&t).as_str(),
@@ -254,13 +263,13 @@ fn system_dirs_follow_the_compiler_order() {
             r,
         ).as_str(),
     );
-    let _ = fake_root(&p, row_at(data::find_row(0, 0) as usize));
+    let _ = fake_root(&p, tgt::find(0, 0) as usize);
     assert(ct::c_target(0, 0, r, &mut t), "windows");
     assert_eq(
         dirs_of(&t).as_str(),
         format("<super-c>\n{}/x86_64-w64-mingw32/include\n{}/x86_64-w64-mingw32/usr/include\n{}/include\n", r, r, r).as_str(),
     );
-    let _ = fake_root(&p, row_at(data::find_row(3, 2) as usize));
+    let _ = fake_root(&p, tgt::find(3, 2) as usize);
     assert(ct::c_target(3, 2, r, &mut t), "wasm");
     assert_eq(dirs_of(&t).as_str(), format("<super-c>\n{}/include/wasm32-wasip1\n{}/include\n", r, r).as_str());
 }
@@ -271,7 +280,7 @@ fn every_pair_has_an_environment() {
     assert_eq(rows.len(), 11usize);
     for i in 0..rows.len() {
         let mut t = ct::CTarget::new();
-        table_of(rows[i].target, rows[i].arch, &mut t);
+        table_of(target_at(i).os, target_at(i).isa, &mut t);
         let builtin = String::from_str(ct::BUILTIN_DIR);
         assert(t.sys_dirs.contains(&builtin), rows[i].triple);
         assert(t.predefs.as_str().contains("#define __clang_major__ "), "the version macros");
@@ -433,10 +442,13 @@ fn c_flags_equal_the_reference_compiler() {
     let mut fails: usize = 0;
     for i in 0..rows.len() {
         let mut base = ct::CTarget::new();
-        table_of(rows[i].target, rows[i].arch, &mut base);
+        table_of(target_at(i).os, target_at(i).isa, &mut base);
         // Every dialect on one row of each kind (the type widths, the strict-mode names and the bit width
         // of the target differ between these); a few on the others, to keep the clang runs few.
-        let all = rows[i].target == 1 && rows[i].arch == 1 || rows[i].target == 2 && rows[i].arch == 0 || rows[i].target == 0 && rows[i].arch == 0 || rows[i].target == 3;
+        let all = i == tgt::find(1, 1) as usize || i == tgt::find(2, 0) as usize || i == tgt::find(0, 0) as usize || i == tgt::find(
+            3,
+            2,
+        ) as usize;
         for k in 0..stds.len() {
             if !all && stds[k] != "c89" && stds[k] != "c11" && stds[k] != "gnu23" {
                 continue;
@@ -487,7 +499,7 @@ fn predefined_macros_equal_the_reference_compiler() {
     let mut fails: usize = 0;
     for i in 0..rows.len() {
         let mut t = ct::CTarget::new();
-        table_of(rows[i].target, rows[i].arch, &mut t);
+        table_of(target_at(i).os, target_at(i).isa, &mut t);
         let mut theirs = String::new();
         let cmd = format(
             "{} {} --target={}{} -dM -E -x c /dev/null",
@@ -579,7 +591,7 @@ fn has_answers_equal_the_reference_compiler() {
     let mut taken = Map::<String, bool>::new();
     for i in 0..rows.len() {
         let mut t = ct::CTarget::new();
-        table_of(rows[i].target, rows[i].arch, &mut t);
+        table_of(target_at(i).os, target_at(i).isa, &mut t);
         let mut it = t.predefs.as_str().lines();
         while let Some(line) = it.next() {
             let body = line.slice(8, line.len());
@@ -608,7 +620,7 @@ fn has_answers_equal_the_reference_compiler() {
         assert_eq(run(cmd.as_str(), work.as_str(), &mut out), 0);
         let truth = answers(out.as_str());
         let mut mine = ct::CTarget::new();
-        table_of(rows[i].target, rows[i].arch, &mut mine);
+        table_of(target_at(i).os, target_at(i).isa, &mut mine);
         let mut have = Map::<String, bool>::new();
         for k in 0..mine.has.len() {
             let key = String::from_str(mine.has[k]);

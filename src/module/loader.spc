@@ -18,6 +18,7 @@ import graph::items as gitems;
 import ir::layout as lay;
 import ir::cpu_features as cf;
 import ir::recursion as recur;
+import target::table as tgt;
 import utils::persist as *;
 import driver::util as dutil;
 import emit::rt_h as rth;
@@ -1237,10 +1238,24 @@ pub fn read_file_mt(path: str, mt: &mut i64) Option<String> {
 /// The source of module `path` read from `file`: the file's text (`read_file_mt`), or for an implicit
 /// directory index (`file` is the directory and a '/'), one glob import of `path::<stem>` per `.spc` file
 /// directly in the directory whose stem is an identifier, in name order. Subdirectories stay modules of
-/// their own.
-pub fn read_module(path: str, file: str, mt: &mut i64) Option<String> {
+/// their own. `id` takes the identity (`str_id`) of the text read from `file`.
+pub fn read_module(path: str, file: str, mt: &mut i64, id: &mut u64) Option<String> {
+    if path == "__std::target" {
+        // The target table is the source of the build-setting enums: the file serves only releases that
+        // predate the table, and its text is what a cache records.
+        let disk = read_file_mt(file, mt);
+        if disk.is_none() {
+            return disk;
+        }
+        *id = dutil::str_id(disk.unwrap().as_str());
+        return Option::<String>::Some(target_module_source());
+    }
     if !file.ends_with("/") {
-        return read_file_mt(file, mt);
+        let t = read_file_mt(file, mt);
+        if let Some(x) = &t {
+            *id = dutil::str_id(x.as_str());
+        }
+        return t;
     }
     let mut names = Vector::<String>::new();
     if dir_listing(file.slice(0, file.len() - 1), &mut names) != DIR_LISTED {
@@ -1258,8 +1273,31 @@ pub fn read_module(path: str, file: str, mt: &mut i64) Option<String> {
         out.push_str(n.slice(0, n.len() - 4));
         out.push_str(" as *;\n");
     }
+    *id = dutil::str_id(out.as_str());
     out.pad_nul(lexer::SOURCE_PAD);
     return Option::<String>::Some(out);
+}
+
+// The source of std's `target` module: `Platform` and `Arch` with one variant per name of the target
+// table's `@platform` and `@arch` axes, in mask-bit order, and `Endian`.
+fn target_module_source() String {
+    let mut out = String::from_str(
+        "// The build-setting enums, built by the compiler from its target table. The compiler defines the\n// constants `PLATFORM: Platform`, `ARCH: Arch` and `ENDIAN: Endian` from its flags; the variant order is\n// the bit order of `@platform` and `@arch`.\n\n/// An operating system target: the names `@platform(...)` accepts.\npub enum Platform {\n",
+    );
+    for is_isa in [false, true] {
+        if is_isa {
+            out.push_str("}\n\n/// An instruction set: the names `@arch(...)` accepts.\npub enum Arch {\n");
+        }
+        let vs = tgt::axis_variants(is_isa);
+        for i in 0..vs.len() {
+            out.push_str("    ");
+            out.push_str(vs[i]);
+            out.push_str(",\n");
+        }
+    }
+    out.push_str("}\n\n/// The byte order of the target.\npub enum Endian {\n    Little,\n    Big,\n}\n");
+    out.pad_nul(lexer::SOURCE_PAD);
+    return out;
 }
 
 // Whether `s` spells an identifier: a letter or '_', then letters, digits and '_'.
@@ -1801,10 +1839,9 @@ fn par_parse_task(t: PParse) {
 
 fn par_parse_one(t: PParse) {
     let u = unsafe &mut *t.u;
-    switch read_module(u.path.as_str(), u.file.as_str(), &mut u.mtime) {
+    switch read_module(u.path.as_str(), u.file.as_str(), &mut u.mtime, &mut u.src_id) {
         Some(sx) => {
             u.source = sx;
-            u.src_id = dutil::str_id(u.source.as_str());
         },
         None => {
             u.ok = false;
@@ -1997,7 +2034,7 @@ pub fn source_names_vectors(src: str) bool {
 pub fn prelude_package_arch(std_dir: str, target: i32, arch: i32, vectors: bool) Package {
     let mut p = package_base(".", "", std_dir, Vector::<String>::new(), Vector::<String>::new());
     p.arch = arch;
-    p.features = cf::baseline(target, arch);
+    p.features = tgt::baseline(target, arch);
     p.load_prelude(std_dir, target, vectors);
     p.seed_core();
     p.bind_types();
@@ -2532,7 +2569,7 @@ extend Package {
     /// The effective features of function `f` of module `m` (NODE_NONE: none): the build's and those
     /// it states, closed under `implies`. On wasm32 features are per build: the build's alone.
     pub fn fn_set(self: &Self, m: ModuleId, f: NodeId) cf::CpuFeatureSet {
-        if f == NODE_NONE || self.arch == 2 {
+        if f == NODE_NONE || !tgt::isa(self.arch).fn_features {
             return self.features;
         }
         return cf::close(cf::join(self.features, self.fn_features(m, f)));
@@ -2833,14 +2870,15 @@ extend Package {
         if k == BC_POINTER_WIDTH {
             return if self.arch < 0 {
                 -1;
-            } else if self.arch == 2 {
-                32;
             } else {
-                64;
+                tgt::isa(self.arch).ptr_bytes as i64 * 8;
             };
         }
         return if k == BC_ENDIAN {
-            0;
+            switch tgt::target_of(self.build_target, self.arch) {
+                Some(t) => t.big_endian as i64,
+                None => 0,
+            };
         } else {
             -1;
         };
@@ -3564,7 +3602,7 @@ extend Package {
                 unsafe G_ARCH;
             },
             features: if unsafe G_ARCH < 0 {
-                cf::baseline(unsafe shim::sc_host_platform(), unsafe shim::sc_host_arch());
+                tgt::baseline(unsafe shim::sc_host_platform(), unsafe shim::sc_host_arch());
             } else {
                 unsafe G_FEATURES;
             },
@@ -5694,6 +5732,7 @@ extend Package {
     fn parse_module(self: &mut Self, mod_path: str, file_path: str, from: i32, off: u32, bootstrap_tags: bool) i32 {
         let mut source = String::new();
         let mut mt: i64 = 0;
+        let mut sid: u64 = 0;
         let ovi = self.overlay_index(file_path);
         if ovi >= 0 {
             // Clone + pad exactly like read_file (the lexer relies on the read-ahead NUL sentinel).
@@ -5701,9 +5740,10 @@ extend Package {
             let mut s = String::with_capacity(t.len() + lexer::SOURCE_PAD);
             s.push_str(t.as_str());
             s.pad_nul(lexer::SOURCE_PAD);
+            sid = dutil::str_id(s.as_str());
             source = s;
         } else {
-            switch read_module(mod_path, file_path, &mut mt) {
+            switch read_module(mod_path, file_path, &mut mt, &mut sid) {
                 Some(s) => {
                     source = s;
                 },
@@ -5725,7 +5765,6 @@ extend Package {
             };
         }
 
-        let sid = dutil::str_id(source.as_str());
         let mut tsc = replace(&mut self.tok_scratch, Vector::<tok::Token>::new());
         tsc.clear();
         let mut parsed = parse_source(&mut source, file_path, bootstrap_tags, tsc);
@@ -7357,7 +7396,7 @@ extend Package {
     // The copies' feature sets (`simd_levels`) of `simd_dispatch` over the build's features.
     fn simd_levels_compute(self: &mut Self) {
         self.simd_levels.clear();
-        if self.arch != 0 || cf::is_empty(self.features) || self.simd_dispatch.as_str() == "off" {
+        if !tgt::isa(self.arch).levels || cf::is_empty(self.features) || self.simd_dispatch.as_str() == "off" {
             return;
         }
         let spec = if self.simd_dispatch.len() == 0 {
@@ -7519,7 +7558,7 @@ extend Package {
             self.rt_test = self.load_module("std::rt::test", tf.as_str(), self.bootstrap, target);
         }
         // wasm has no system C library: these implement the subset the program uses, over WASI.
-        if target == 3 && self.rt_libc < 0 {
+        if tgt::os(target).own_libc && self.rt_libc < 0 {
             let cf = join2(std_dir, "rt/libc.spc");
             let mf = join2(std_dir, "rt/libm.spc");
             if dutil::file_mtime(cf.as_str()) != 0 && dutil::file_mtime(mf.as_str()) != 0 {
@@ -7527,9 +7566,8 @@ extend Package {
                 self.rt_libm = self.load_module("std::rt::libm", mf.as_str(), self.bootstrap, target);
             }
         }
-        let backends: [str<'static>; 3] = ["x86_64", "aarch64", "wasm"];
-        if self.arch >= 0 && self.arch < 3 && !cf::is_empty(self.features) && (user_vectors || self.names_vectors()) {
-            let bn = unsafe backends[self.arch as usize];
+        let bn = tgt::isa(self.arch).simd_backend;
+        if bn.len() != 0 && !cf::is_empty(self.features) && (user_vectors || self.names_vectors()) {
             let bf = join2(std_dir, format("simd/backend/{}.spc", bn).as_str());
             if dutil::file_mtime(bf.as_str()) != 0 {
                 let id = self.load_module(

@@ -1318,19 +1318,9 @@ fn diagnostics_by_message() {
         "expected a platform name: windows, macos, linux, wasm, ios, or android",
     );
     h::expect_err_msg(
-        "unknown platform",
-        "@platform(foo)\nfn f() {}\nfn main() i32 { return 0; }\n",
-        "unknown platform 'foo'",
-    );
-    h::expect_err_msg(
         "arch name",
         "@arch(5)\nfn f() {}\nfn main() i32 { return 0; }\n",
         "expected an architecture name: x86_64, aarch64, or wasm32",
-    );
-    h::expect_err_msg(
-        "unknown arch",
-        "@arch(foo)\nfn f() {}\nfn main() i32 { return 0; }\n",
-        "unknown architecture 'foo'",
     );
     h::expect_err_msg(
         "attribute after dot",
