@@ -389,7 +389,7 @@ extend<T: Scalar> Mat<T, 4, 4> {
 extend<T: Scalar, const C: usize, const R: usize> Mat<T, C, R> as Index<Vec<T, R>, []Vec<T, R>> {
     pub fn index(self: &Mat<T, C, R>, i: usize) &Vec<T, R> {
         if i >= C {
-            panic_parts("Mat<T, C, R>", "[i]: index out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[i]: index out of bounds");
         }
         return &unsafe self.c[i];
     }
@@ -402,7 +402,7 @@ extend<T: Scalar, const C: usize, const R: usize> Mat<T, C, R> as Index<Vec<T, R
 extend<T: Scalar, const C: usize, const R: usize> Mat<T, C, R> as IndexMut<Vec<T, R>, []mut Vec<T, R>> {
     pub fn index_mut(self: &mut Mat<T, C, R>, i: usize) &mut Vec<T, R> {
         if i >= C {
-            panic_parts("Mat<T, C, R>", "[i]: index out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[i]: index out of bounds");
         }
         return &mut unsafe self.c[i];
     }

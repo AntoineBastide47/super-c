@@ -597,9 +597,11 @@ moves like its element and frees nothing. An array has no `==` or ordering ("doe
 ## Compile-Time Evaluation
 
 Always on, in constant contexts: `const` and `static` initializers (local constants too),
-array lengths, const generic arguments, `static_assert`, enum discriminants and `type_info`.
-`panic_parts(head, tail)` panics with `head` then `tail` without allocating, so a message can name a
-type (`panic_parts("Vector<T, A>", "[i]: index out of bounds")`).
+array lengths, const generic arguments, `static_assert`, enum discriminants, `type_info` and
+`type_info::<T>().qualified_name` (`T` spelled with its trailing defaulted arguments dropped:
+`Vector<i32>`; read alone it folds to a string constant and builds no descriptor). `panic_parts(head,
+tail)` panics with `head` then `tail` without allocating, so a message can name a type
+(`panic_parts(type_info::<Self>().qualified_name, "[i]: index out of bounds")`).
 A failed evaluation there is an error, and a local constant's initializer cannot read a
 variable. A constant context can call any function. Outside one, every call runs at run
 time, `const fn` calls with known arguments included. `const fn` adds a declaration check

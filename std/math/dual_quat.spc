@@ -175,7 +175,7 @@ extend<T: Float> DualQuat<T> as Index<Quat<T>, []Quat<T>> {
         return switch i {
             0 => &self.real,
             1 => &self.dual,
-            _ => panic_parts("DualQuat<T>", "[i]: index out of bounds"),
+            _ => panic_parts(type_info::<Self>().qualified_name, "[i]: index out of bounds"),
         };
     }
     pub fn index_range(self: &DualQuat<T>, r: Range<usize>) []Quat<T> {
@@ -185,7 +185,7 @@ extend<T: Float> DualQuat<T> as Index<Quat<T>, []Quat<T>> {
             r.end;
         };
         if r.start > hi || hi > 2 {
-            panic_parts("DualQuat<T>", "[a..b]: range out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         return unsafe Slice::<Quat<T>> { ptr: (&self.real) as *const Quat<T> + r.start, len: hi - r.start };
     }
@@ -196,7 +196,7 @@ extend<T: Float> DualQuat<T> as IndexMut<Quat<T>, []mut Quat<T>> {
         return switch i {
             0 => &mut self.real,
             1 => &mut self.dual,
-            _ => panic_parts("DualQuat<T>", "[i]: index out of bounds"),
+            _ => panic_parts(type_info::<Self>().qualified_name, "[i]: index out of bounds"),
         };
     }
     pub fn index_range_mut(self: &mut DualQuat<T>, r: Range<usize>) []mut Quat<T> {
@@ -206,7 +206,7 @@ extend<T: Float> DualQuat<T> as IndexMut<Quat<T>, []mut Quat<T>> {
             r.end;
         };
         if r.start > hi || hi > 2 {
-            panic_parts("DualQuat<T>", "[a..b]: range out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         return unsafe SliceMut::<Quat<T>> { ptr: (&mut self.real) as *mut Quat<T> + r.start, len: hi - r.start };
     }

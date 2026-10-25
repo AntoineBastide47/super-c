@@ -350,13 +350,13 @@ extend<T, const N: usize> StaticVector<T, N> {
 extend<T, const N: usize> StaticVector<T, N> as Index<T, []T> {
     pub const fn index(self: &StaticVector<T, N>, i: usize) &T {
         if i >= self.len {
-            panic_parts("StaticVector<T, N>", "[i]: index out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[i]: index out of bounds");
         }
         return &unsafe self.data[i];
     }
     pub const fn index_range(self: &StaticVector<T, N>, r: Range<usize>) []T {
         if r.inclusive && r.end >= self.len {
-            panic_parts("StaticVector<T, N>", "[a..b]: range out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         let hi = if r.inclusive {
             r.end + 1;
@@ -364,7 +364,7 @@ extend<T, const N: usize> StaticVector<T, N> as Index<T, []T> {
             r.end;
         };
         if r.start > hi || hi > self.len {
-            panic_parts("StaticVector<T, N>", "[a..b]: range out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         return unsafe Slice::<T> { ptr: self.as_ptr() + r.start, len: hi - r.start };
     }
@@ -376,13 +376,13 @@ extend<T, const N: usize> StaticVector<T, N> as Index<T, []T> {
 extend<T, const N: usize> StaticVector<T, N> as IndexMut<T, []mut T> {
     pub const fn index_mut(self: &mut StaticVector<T, N>, i: usize) &mut T {
         if i >= self.len {
-            panic_parts("StaticVector<T, N>", "[i]: index out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[i]: index out of bounds");
         }
         return &mut unsafe self.data[i];
     }
     pub const fn index_range_mut(self: &mut StaticVector<T, N>, r: Range<usize>) []mut T {
         if r.inclusive && r.end >= self.len {
-            panic_parts("StaticVector<T, N>", "[a..b]: range out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         let hi = if r.inclusive {
             r.end + 1;
@@ -391,7 +391,7 @@ extend<T, const N: usize> StaticVector<T, N> as IndexMut<T, []mut T> {
         };
         let p = (&mut unsafe self.data[0]) as *mut T;
         if r.start > hi || hi > self.len {
-            panic_parts("StaticVector<T, N>", "[a..b]: range out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         return unsafe SliceMut::<T> { ptr: p + r.start, len: hi - r.start };
     }

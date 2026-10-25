@@ -1231,12 +1231,27 @@ fn a_harness_run_fails_on_a_leak_without_the_gate() {
     assert_eq(r.exit, 23);
 }
 
+// `type_info::<T>().qualified_name` spells an instance's type with the trailing arguments that equal their parameter's
+// default dropped, at run time per instance and folded in a constant.
+@test
+fn qualified_name_spells_each_instance() {
+    let r = h::compile_and_run(
+        "struct P {\n    pub x: i32,\n}\n@derive(Copy)\nstruct Arena {}\nextend Arena as Allocator {\n    pub unsafe fn alloc(self: &mut Self, size: usize, align: usize) *mut void {\n        return unsafe Global {}.alloc(size, align);\n    }\n    pub unsafe fn realloc(self: &mut Self, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void {\n        return unsafe Global {}.realloc(ptr, old_size, new_size, align);\n    }\n    pub unsafe fn dealloc(self: &mut Self, ptr: *mut void, size: usize, align: usize) {\n        unsafe Global {}.dealloc(ptr, size, align);\n    }\n}\nfn show<T>() {\n    println(\"{}\", type_info::<T>().qualified_name);\n}\nconst K: str = type_info::<Vector<P>>().qualified_name;\nfn main() i32 {\n    show::<Vector<i32>>();\n    show::<Vector<Vector<str>>>();\n    show::<Vector<i32, Arena>>();\n    show::<Array<P, 4>>();\n    show::<String>();\n    show::<[i64; 3]>();\n    show::<&mut Vector<u8>>();\n    let t = type_info::<Vector<P>>();\n    println(\"{} {}\", t.name, t.qualified_name);\n    println(\"{}\", K);\n    return 0;\n}\n",
+    );
+    assert(r.built, "qualified_name builds");
+    assert_eq(r.exit, 0);
+    assert_eq(
+        unsafe str::from_cstr(r.out),
+        "Vector<i32>\nVector<Vector<str>>\nVector<i32, Arena>\nArray<P, 4>\nString\n[i64; 3]\n&mut Vector<u8>\nVector Vector<P>\nVector<P>\n",
+    );
+}
+
 // `panic_parts(head, tail)` panics with `head` then `tail`, at run time and at compile time.
 @test
 fn panic_parts_joins_its_message() {
     h::expect_trap(
         "a run-time panic_parts",
-        "fn main(argv: Vector<str>) i32 {\n    if argv.len() > 0 {\n        panic_parts(\"Vector<u8>\", \"[i]: tail\");\n    }\n    return 0;\n}\n",
+        "fn main(argv: Vector<str>) i32 {\n    if argv.len() > 0 {\n        panic_parts(type_info::<Vector<u8>>().qualified_name, \"[i]: tail\");\n    }\n    return 0;\n}\n",
         "panic: Vector<u8>[i]: tail",
     );
     h::expect_build_err(

@@ -571,13 +571,13 @@ extend<'a, T> VecIter<'a, T> as DoubleEndedIterator<&'a T> {
 extend<T, A: Allocator> Vector<T, A> as Index<T, []T> {
     pub const fn index(self: &Vector<T, A>, i: usize) &T {
         if i >= self.len {
-            panic_parts("Vector<T, A>", "[i]: index out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[i]: index out of bounds");
         }
         return &unsafe self.ptr[i];
     }
     pub const fn index_range(self: &Vector<T, A>, r: Range<usize>) []T {
         if r.inclusive && r.end >= self.len {
-            panic_parts("Vector<T, A>", "[a..b]: range out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         let hi = if r.inclusive {
             r.end + 1;
@@ -585,7 +585,7 @@ extend<T, A: Allocator> Vector<T, A> as Index<T, []T> {
             r.end;
         };
         if r.start > hi || hi > self.len {
-            panic_parts("Vector<T, A>", "[a..b]: range out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         return unsafe Slice::<T> { ptr: self.ptr + r.start, len: hi - r.start };
     }
@@ -597,13 +597,13 @@ extend<T, A: Allocator> Vector<T, A> as Index<T, []T> {
 extend<T, A: Allocator> Vector<T, A> as IndexMut<T, []mut T> {
     pub const fn index_mut(self: &mut Vector<T, A>, i: usize) &mut T {
         if i >= self.len {
-            panic_parts("Vector<T, A>", "[i]: index out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[i]: index out of bounds");
         }
         return &mut unsafe self.ptr[i];
     }
     pub const fn index_range_mut(self: &mut Vector<T, A>, r: Range<usize>) []mut T {
         if r.inclusive && r.end >= self.len {
-            panic_parts("Vector<T, A>", "[a..b]: range out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         let hi = if r.inclusive {
             r.end + 1;
@@ -611,7 +611,7 @@ extend<T, A: Allocator> Vector<T, A> as IndexMut<T, []mut T> {
             r.end;
         };
         if r.start > hi || hi > self.len {
-            panic_parts("Vector<T, A>", "[a..b]: range out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         return unsafe SliceMut::<T> { ptr: self.ptr + r.start, len: hi - r.start };
     }

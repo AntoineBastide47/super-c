@@ -314,13 +314,13 @@ extend str as Default {
 extend str as Index<u8, str> {
     pub const fn index<'a>(self: &str<'a>, i: usize) &'a u8 {
         if i >= self.len() {
-            panic_parts("str", "[i]: index out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[i]: index out of bounds");
         }
         return &unsafe self.ptr[i];
     }
     pub const fn index_range<'a>(self: &str<'a>, r: Range<usize>) str<'a> {
         if r.inclusive && r.end >= self.len() {
-            panic_parts("str", "[a..b]: range out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         let hi = if r.inclusive {
             r.end + 1;
@@ -328,7 +328,7 @@ extend str as Index<u8, str> {
             r.end;
         };
         if r.start > hi || hi > self.len() {
-            panic_parts("str", "[a..b]: range out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         return self.slice(r.start, hi);
     }

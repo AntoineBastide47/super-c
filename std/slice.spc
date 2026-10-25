@@ -169,7 +169,7 @@ extend<T> SliceMut<T> {
 extend<T> Slice<T> as Index<T, []T> {
     pub const fn index<'a>(self: &Slice<'a, T>, i: usize) &'a T {
         if i >= self.len {
-            panic_parts("Slice<T>", "[i]: index out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[i]: index out of bounds");
         }
         return &unsafe self.ptr[i];
     }
@@ -179,17 +179,17 @@ extend<T> Slice<T> as Index<T, []T> {
         // check. One comparison per guard: the bounds-check pass removes each it proves.
         let hi = if r.inclusive {
             if r.end >= self.len {
-                panic_parts("Slice<T>", "[a..b]: range out of bounds");
+                panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
             }
             r.end + 1;
         } else {
             r.end;
         };
         if hi > self.len {
-            panic_parts("Slice<T>", "[a..b]: range out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         if r.start > hi {
-            panic_parts("Slice<T>", "[a..b]: range out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         return unsafe Slice::<T> { ptr: self.ptr + r.start, len: hi - r.start };
     }
@@ -198,7 +198,7 @@ extend<T> Slice<T> as Index<T, []T> {
 extend<T> SliceMut<T> as Index<T, []T> {
     pub const fn index(self: &SliceMut<T>, i: usize) &T {
         if i >= self.len {
-            panic_parts("SliceMut<T>", "[i]: index out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[i]: index out of bounds");
         }
         return &unsafe self.ptr[i];
     }
@@ -208,17 +208,17 @@ extend<T> SliceMut<T> as Index<T, []T> {
         // check. One comparison per guard: the bounds-check pass removes each it proves.
         let hi = if r.inclusive {
             if r.end >= self.len {
-                panic_parts("SliceMut<T>", "[a..b]: range out of bounds");
+                panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
             }
             r.end + 1;
         } else {
             r.end;
         };
         if hi > self.len {
-            panic_parts("SliceMut<T>", "[a..b]: range out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         if r.start > hi {
-            panic_parts("SliceMut<T>", "[a..b]: range out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         return unsafe Slice::<T> { ptr: self.ptr + r.start, len: hi - r.start };
     }
@@ -227,7 +227,7 @@ extend<T> SliceMut<T> as Index<T, []T> {
 extend<T> SliceMut<T> as IndexMut<T, []mut T> {
     pub const fn index_mut(self: &mut SliceMut<T>, i: usize) &mut T {
         if i >= self.len {
-            panic_parts("SliceMut<T>", "[i]: index out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[i]: index out of bounds");
         }
         return &mut unsafe self.ptr[i];
     }
@@ -237,17 +237,17 @@ extend<T> SliceMut<T> as IndexMut<T, []mut T> {
         // check. One comparison per guard: the bounds-check pass removes each it proves.
         let hi = if r.inclusive {
             if r.end >= self.len {
-                panic_parts("SliceMut<T>", "[a..b]: range out of bounds");
+                panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
             }
             r.end + 1;
         } else {
             r.end;
         };
         if hi > self.len {
-            panic_parts("SliceMut<T>", "[a..b]: range out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         if r.start > hi {
-            panic_parts("SliceMut<T>", "[a..b]: range out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[a..b]: range out of bounds");
         }
         return unsafe SliceMut::<T> { ptr: self.ptr + r.start, len: hi - r.start };
     }

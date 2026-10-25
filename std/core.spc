@@ -133,8 +133,8 @@ pub fn panic(msg: str) {
 }
 
 /// `panic` with the message `head` then `tail`, built without allocating: a panic site whose
-/// message names a type passes the name as `head` (`panic_parts("Vector<T, A>", "[i]: index out of
-/// bounds")`).
+/// message names a type passes its qualified name as `head`
+/// (`panic_parts(type_info::<Self>().qualified_name, "[i]: index out of bounds")`).
 @noreturn
 @cold
 @no_const
@@ -7476,6 +7476,10 @@ extend MethodInfo {
 pub struct TypeInfo {
     /// The type's name: a builtin's spelling or the declaration's name ("" for an anonymous kind).
     pub name: str<'static>,
+    /// The type as Super-C spells it, with the trailing generic arguments that equal their parameter's
+    /// default dropped (`Vector<i32>`, `Vector<i32, Arena>`). Read alone, it folds to a string constant
+    /// and builds no descriptor.
+    pub qualified_name: str<'static>,
     /// What sort of type it is.
     pub kind: TypeTag,
     /// The tag of the pointee, element or lane type (`Void` for another kind).

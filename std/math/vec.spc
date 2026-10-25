@@ -333,7 +333,7 @@ extend<T: Elem> Vec<T, 4> {
 extend<T: Elem, const N: usize> Vec<T, N> as Index<T, []T> {
     pub fn index(self: &Vec<T, N>, i: usize) &T {
         if i >= N {
-            panic_parts("Vec<T, N>", "[i]: index out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[i]: index out of bounds");
         }
         return &unsafe self.e[i];
     }
@@ -359,7 +359,7 @@ const fn range_bounds(r: Range<usize>, n: usize, name: str) (usize, usize) {
 extend<T: Elem, const N: usize> Vec<T, N> as IndexMut<T, []mut T> {
     pub fn index_mut(self: &mut Vec<T, N>, i: usize) &mut T {
         if i >= N {
-            panic_parts("Vec<T, N>", "[i]: index out of bounds");
+            panic_parts(type_info::<Self>().qualified_name, "[i]: index out of bounds");
         }
         return &mut unsafe self.e[i];
     }
