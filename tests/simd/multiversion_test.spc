@@ -130,6 +130,19 @@ fn feature_functions_keep_their_calls() {
         a.contains("SC_TGT_A64(\"+rdm+i8mm+crc+lse\", \"arch=armv8.2-a+i8mm\")))) int32_t mm("),
         "the aarch64 target",
     );
+    // An SME set has a third spelling, without the SME features, for GCC 13, which has no SME.
+    p.mkfile(
+        "main.spc",
+        "import std::cpu;\n@arch(aarch64)\n@target_feature([cpu::Feature::Sme2])\nfn sm(a: i32) i32 {\n    return a;\n}\nfn main() i32 {\n    return unsafe sm(0);\n}\n",
+    );
+    assert(p.compile_flags("--arch=aarch64 --target=linux", "main.spc").ok(), "aarch64 SME");
+    let s = cli::read_text(format("{}/build/debug/raw/main.c", p.dir()).as_str());
+    assert(
+        s.contains(
+            "SC_TGT_A64_SME(\"+rdm+crc+lse+sme+sme2\", \"arch=armv8.2-a+sme+sme2\", \"arch=armv8.1-a\")))) int32_t sm(",
+        ),
+        "the aarch64 SME target",
+    );
 }
 
 // A feature function's call of a function with vector code runs a copy of it compiled with the caller's

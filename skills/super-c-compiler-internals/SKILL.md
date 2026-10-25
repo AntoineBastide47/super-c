@@ -1035,20 +1035,20 @@ A native build compiles each module's LIR to a machine object in place of its C 
 | `src/codegen/obj.spc` | The format-neutral object: sections, symbols, relocations |
 | `src/codegen/abi.spc` | The calling conventions' shared records: `Part`, `ALoc`, `CallLayout` |
 | `src/target/a64.spc` | The arm64 encoder, one function per instruction form |
-| `src/target/a64gen.spc` | One code generation pass per body: greedy registers, values live past their block in stack slots, callee-saved registers for loop values, far-branch retry |
-| `src/target/aapcs64.spc` | AAPCS64 with Apple's variant |
+| `src/target/a64gen.spc` | One code generation pass per body: greedy registers, values live past their block in stack slots, callee-saved registers for loop values, far-branch retry. For ELF (`Gen.elf`): TLS descriptors, a shared object's global symbols through the GOT, each frame's `.eh_frame` rules; under the standard convention a variadic body saves x0..x7 and q0..q7 for its `va_list` |
+| `src/target/aapcs64.spc` | AAPCS64 and Apple's variant; `va_place` places a variadic argument of the standard one |
 | `src/target/macho.spc` | The Mach-O object writer, thread-locals included |
 | `src/target/x64.spc` | The x86-64 encoder; `Code::relax` gives each jump that reaches its 2-byte form |
 | `src/target/x64gen.spc` | `a64gen`'s design on x86-64 at the SSE2 baseline, for System V or Microsoft x64 (`Gen.win`): shift counts in cl and divisions in rdx:rax vacated per instruction, a callee-saved register when an instruction needs more than the caller-saved ones |
 | `src/target/sysv.spc` | The System V eightbyte classification, from the layout leaves |
 | `src/target/win64.spc` | The Microsoft x64 classification, as mingw-w64 gcc applies it |
-| `src/target/elf.spc` | The ELF object writer: `.eh_frame` against section symbols, `.note.GNU-stack`, thread-locals |
+| `src/target/elf.spc` | The ELF object writer for x86-64 and arm64: `.eh_frame` against section symbols, `.note.GNU-stack`, thread-locals; an arm64 page offset's type follows its instruction's access size |
 | `src/target/coff.spc` | The COFF object writer: `.pdata` and `.xdata` from the frames' UNWIND_INFO |
 | `src/target/wasm.spc` | The wasm instruction encoder: LEB128 forms (padded 5-byte fields where a relocation writes), value types, opcodes |
 | `src/target/wasmabi.spc` | The basic C ABI of wasm32 (BasicCABI.md): scalars as wasm values, i128 as two i64, a one-leaf aggregate as its scalar, other aggregates and i128 results through pointers, variadic arguments in a caller's buffer |
 | `src/target/wasmobj.spc` | The relocatable wasm object `wasm-ld` links (Linking.md): types, imports, functions, data segments, the `linking` symbol table, relocations |
 | `src/target/wasmgen.spc` | One LIR body into one wasm function: scalars in locals shared by live range, i128 and vectors in frame homes, the frame below `__stack_pointer`, Ramsey's structured control flow from an explicit task stack, dense switches as `br_table`, vector operations lane by lane as the evaluator defines them. A C `main` with two parameters is `__main_argc_argv`, as wasi-libc's start calls it |
-| `src/target/native.spc` | The entry: `supported` (macOS arm64, Linux x86-64, Windows x86-64, wasm32-wasip1), `object` |
+| `src/target/native.spc` | The entry: `supported` (macOS arm64, Linux x86-64, Linux arm64, Windows x86-64, wasm32-wasip1), `object` |
 
 `driver::emit` decides `Package.native`: a linking build with unoptimized C flags and no sanitizer
 on a supported target, or what `SC_NATIVE` says. `native_header_facts` reads the constants of the

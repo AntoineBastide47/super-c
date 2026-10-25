@@ -1,6 +1,7 @@
 // The native backends' entry: an object of LIR functions and data for a target. The supported targets
-// are macOS arm64 (arm64, Apple AAPCS64, Mach-O), Linux x86-64 (x86-64, System V, ELF), Windows x86-64
-// (x86-64, Microsoft x64, COFF) and wasm32-wasip1 (the basic C ABI, a relocatable wasm object).
+// are macOS arm64 (arm64, Apple AAPCS64, Mach-O), Linux x86-64 (x86-64, System V, ELF), Linux arm64
+// (arm64, AAPCS64, ELF), Windows x86-64 (x86-64, Microsoft x64, COFF) and wasm32-wasip1 (the basic C
+// ABI, a relocatable wasm object).
 import lir::ir as *;
 import codegen::obj as ob;
 import target::a64gen as gen;
@@ -14,7 +15,7 @@ import target::wasmobj as wobj;
 
 /// Whether a native backend compiles for operating system `os` on instruction set `isa`.
 pub const fn supported(os: i32, isa: i32) bool {
-    return apple_arm64(os, isa) || linux_x64(os, isa) || windows_x64(os, isa) || wasm32(os, isa);
+    return apple_arm64(os, isa) || linux_x64(os, isa) || linux_arm64(os, isa) || windows_x64(os, isa) || wasm32(os, isa);
 }
 
 const fn apple_arm64(os: i32, isa: i32) bool {
@@ -27,6 +28,10 @@ const fn linux_x64(os: i32, isa: i32) bool {
 
 const fn windows_x64(os: i32, isa: i32) bool {
     return tgt::os(os).name == "windows" && tgt::isa(isa).name == "x86_64";
+}
+
+const fn linux_arm64(os: i32, isa: i32) bool {
+    return tgt::os(os).name == "linux" && tgt::callconv_of(os, isa).name == "aapcs64" && tgt::obj_of(os).name == "elf";
 }
 
 const fn wasm32(os: i32, isa: i32) bool {
@@ -48,12 +53,13 @@ pub fn object(p: &Package, os: i32, isa: i32, funcs: []u32, datas: []u32, out: &
     }
     let win = windows_x64(os, isa);
     let x64 = win || linux_x64(os, isa);
-    if !x64 && !apple_arm64(os, isa) {
+    let apple = apple_arm64(os, isa);
+    if !x64 && !apple && !linux_arm64(os, isa) {
         err.push_str("no native backend for this target");
         return false;
     }
     let mut o = ob::Obj::new();
-    let mut ga = gen::Gen::new(p, &mut o, true);
+    let mut ga = gen::Gen::new(p, &mut o, apple, !apple);
     let mut gx = xgen::Gen::new(p, &mut o, win);
     let mut g = Backend { a: &mut ga, x: &mut gx, x64: x64 };
     for i in 0..funcs.len() {
@@ -100,8 +106,8 @@ pub fn object(p: &Package, os: i32, isa: i32, funcs: []u32, datas: []u32, out: &
         coff::write(&o, out);
         return true;
     }
-    if x64 {
-        elf::write(&o, out);
+    if !apple {
+        elf::write(&o, !x64, out);
         return true;
     }
     // A named section the format does not know goes through C, whose compiler reports it.

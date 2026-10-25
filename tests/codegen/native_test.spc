@@ -358,7 +358,7 @@ b0(v0: i64, v1: i64, v2: i32, v3: ptr):
 }
 
 // Variadic calls both ways: LIR calls a C function that reads an int, a long long, a double and an int,
-// and C calls a LIR function that reads them.
+// and C calls a LIR function that reads them. A `va_list` slot holds the largest one (AAPCS64's 32 bytes).
 @test
 fn variadic_calls_run() {
     let lir = M"(lir ptr 8
@@ -377,7 +377,7 @@ b0:
   ret v5
 fn @lsum
   sig (i32, ...) -> i64
-  slot s0 size 8 align 3
+  slot s0 size 32 align 3
 b0(v0: i32):
   v1 = slotaddr s0
   vastart v1
@@ -397,6 +397,75 @@ b0(v0: i32):
   ret v13
 )";
     let drv = "#include <stdarg.h>\n#include <stdint.h>\nint64_t call_mix(void);\nint64_t lsum(int, ...);\nint64_t mix(int n, ...) {\n  va_list ap;\n  va_start(ap, n);\n  int a = va_arg(ap, int);\n  long long b = va_arg(ap, long long);\n  double c = va_arg(ap, double);\n  int d = va_arg(ap, int);\n  va_end(ap);\n  return n * (a + b + (long long)c + d);\n}\nint main(void) {\n  int64_t want = 3 * (-7 + ((int64_t)1 << 40) + 2 + 40);\n  if (call_mix() != want) return 1;\n  if (lsum(3, -7, (long long)1 << 40, 2.5, 40) != want) return 2;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Variadic arguments past the argument registers: nine integers and nine floats, then an `__int128`, which
+// the stack holds at 16-byte alignment (Apple and wasm keep every variadic argument in memory).
+@test
+fn variadic_arguments_past_the_registers_run() {
+    let lir = M"(lir ptr 8
+sym @lmany fn global
+fn @lmany
+  sig (i32, ...) -> i64
+  slot s0 size 32 align 3
+b0(v0: i32):
+  v1 = slotaddr s0
+  vastart v1
+  v2 = vaarg.i64 v1
+  v3 = vaarg.i64 v1
+  v4 = vaarg.i64 v1
+  v5 = vaarg.i64 v1
+  v6 = vaarg.i64 v1
+  v7 = vaarg.i64 v1
+  v8 = vaarg.i64 v1
+  v9 = vaarg.i64 v1
+  v10 = vaarg.i64 v1
+  v11 = vaarg.f64 v1
+  v12 = vaarg.f64 v1
+  v13 = vaarg.f64 v1
+  v14 = vaarg.f64 v1
+  v15 = vaarg.f64 v1
+  v16 = vaarg.f64 v1
+  v17 = vaarg.f64 v1
+  v18 = vaarg.f64 v1
+  v19 = vaarg.f64 v1
+  v20 = vaarg.i128 v1
+  vaend v1
+  v21 = add.i64 v2, v3
+  v22 = add.i64 v21, v4
+  v23 = add.i64 v22, v5
+  v24 = add.i64 v23, v6
+  v25 = add.i64 v24, v7
+  v26 = add.i64 v25, v8
+  v27 = add.i64 v26, v9
+  v28 = add.i64 v27, v10
+  v29 = fptosi.i64 v11
+  v30 = add.i64 v28, v29
+  v31 = fptosi.i64 v12
+  v32 = add.i64 v30, v31
+  v33 = fptosi.i64 v13
+  v34 = add.i64 v32, v33
+  v35 = fptosi.i64 v14
+  v36 = add.i64 v34, v35
+  v37 = fptosi.i64 v15
+  v38 = add.i64 v36, v37
+  v39 = fptosi.i64 v16
+  v40 = add.i64 v38, v39
+  v41 = fptosi.i64 v17
+  v42 = add.i64 v40, v41
+  v43 = fptosi.i64 v18
+  v44 = add.i64 v42, v43
+  v45 = fptosi.i64 v19
+  v46 = add.i64 v44, v45
+  v47 = trunc.i64 v20
+  v48 = add.i64 v46, v47
+  v49 = sext.i64 v0
+  v50 = mul.i64 v48, v49
+  ret v50
+)";
+    let drv = "#include <stdint.h>\nint64_t lmany(int, ...);\nint main(void) {\n  __int128 w = (__int128)1 << 70 | 33;\n  int64_t r = lmany(2, 1LL, 2LL, 3LL, 4LL, 5LL, 6LL, 7LL, 8LL, 9LL, 0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, w);\n  return r == 2 * (45 + 36 + 33) ? 0 : 1;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
 }

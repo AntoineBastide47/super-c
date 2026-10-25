@@ -154,6 +154,17 @@ pub fn cc_name() *const char {
     return "cc".ptr() as *const char;
 }
 
+/// Whether the C compiler (`cc_name`) is clang: its `--version` says so.
+pub fn cc_is_clang() bool {
+    let out = format("{}/cc_version_{}.txt", tmp_dir().as_str(), process::pid().unwrap_or(1));
+    let mut cmd = format("\"{}\" --version", unsafe str::from_cstr(cc_name()));
+    let mut outp = out.clone();
+    let ok = run_with(cmd.cstr(), null, outp.cstr(), null, "") == 0;
+    let t = read_text(out.as_str());
+    let _ = fs::unlink(out.as_str());
+    return ok && t.contains("clang");
+}
+
 // The C standard the harness compiles emitted trees with. mingw hides POSIX prototypes behind
 // `__STRICT_ANSI__` under a strict `-std=c11`, so the Windows leg asks for the GNU dialect instead.
 /// The C standard the harness compiles with (c11, or gnu11 on Windows).

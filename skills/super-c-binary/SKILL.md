@@ -15,9 +15,9 @@ allowed-tools: Bash Read
 
 Super-C is a self-hosting compiler that transpiles `.spc` source to readable C11,
 then invokes a gcc-style C driver (cc/clang/gcc; mingw on Windows; MSVC's cl.exe is out
-of contract) to produce a native binary. On macOS arm64, Linux x86-64 and Windows x86-64, a linking
-build with unoptimized C flags (the debug profile, a script build) and no sanitizer compiles each
-module to a Mach-O, ELF or COFF object itself and uses C only for the modules it cannot compile; the build prints `native: N of M modules through C`
+of contract) to produce a native binary. On macOS arm64, Linux x86-64, Linux arm64, Windows x86-64 and
+wasm32, a linking build with unoptimized C flags (the debug profile, a script build) and no sanitizer
+compiles each module to a Mach-O, ELF, COFF or wasm object itself and uses C only for the modules it cannot compile; the build prints `native: N of M modules through C`
 when N is not 0 (`SC_NATIVE` overrides the choice). A Windows x86-64 build whose assembler takes
 `-Wa,-muse-unaligned-vector-move` (GNU as 2.38+; the `unaligned-vector-move` probe) passes it
 to every compile and the link: mingw GCC moves 32- and 64-byte stack vectors with aligned
@@ -861,7 +861,9 @@ On AVX-512 the vector planner prefers 256-bit entries: `--simd-width=512` or the
 `simd-width = 512` lets it use 512-bit ones (the width is part of the emit stamp). A function's
 `@target_feature` adds its features to the build's set for that function and the functions with
 vector code it calls: its C definition carries `__attribute__((target("...")))` of the features
-beyond the build's (aarch64: clang's `+ext` form, GCC's `arch=armv8.N-a+ext` form), the planner
+beyond the build's (aarch64: clang's `+ext` form, GCC's `arch=armv8.N-a+ext` form; with SME features
+`SC_TGT_A64_SME` adds `+sve2` for GCC 15, which compiles SME only with it, and drops them for GCC 13,
+which has none), the planner
 serves its vector operations from the entries that set holds, and, when the set holds entries the
 build's does not, a call of a function with vector code that states no features runs a copy of it
 compiled with the same set (`<symbol>__fs<hex>`,
@@ -925,7 +927,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `SC_LTO` | Override the profile's `lto` mode: `none`, `full`, `auto`, `thin` |
 | `SC_NO_LTO_CACHE` | Link ThinLTO without the linker cache |
 | `SC_NO_EMIT_CACHE` | Disable the emit stamp |
-| `SC_NATIVE` | The native backend's module choice (super-c-compiler-internals, "Native backend"): `0` C only, `1` every module, else a comma-separated list of module paths. Unset, a linking build with unoptimized C flags and no sanitizer takes every module where the target has a native backend (macOS arm64, Linux x86-64, Windows x86-64, wasm32-wasip1). It is part of the emit stamp's compiler identity and of the native record's key |
+| `SC_NATIVE` | The native backend's module choice (super-c-compiler-internals, "Native backend"): `0` C only, `1` every module, else a comma-separated list of module paths. Unset, a linking build with unoptimized C flags and no sanitizer takes every module where the target has a native backend (macOS arm64, Linux x86-64, Linux arm64, Windows x86-64, wasm32-wasip1). It is part of the emit stamp's compiler identity and of the native record's key |
 | `SC_NATIVE_STATS` | Print, per module, `native` or `through C: <reason>`, then the native and C module counts and the native phase's ms |
 | `SC_NO_TU_CACHE` | Disable per-TU journal/replay cache |
 | `SC_BUILD_MEM_BUDGET` | Cap the estimated bytes in flight across the parallel jobs of the type check, the borrow check and the emission (`64M`, `2G`); a job above the whole budget runs alone; a value that is not digits plus one optional K/M/G suffix, or that overflows, is a fatal error |

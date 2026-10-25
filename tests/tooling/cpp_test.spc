@@ -1724,6 +1724,12 @@ fn predefs_and_command_line() {
     assert_eq(got.as_str(), "1 3 4 1 + 3 + 4 unsigned_char plain_char_unsigned");
     let signed = run_config("#if '\\xff' < 0\nplain_char_signed\n#endif\n", "", "", []);
     assert_eq(signed.as_str(), "plain_char_signed");
+    // A wide character constant has `wchar_t`'s type: glibc's `__WCHAR_MIN` tests `L'\0' - 1 > 0`.
+    let wide = "#if L'\\0' - 1 > 0\nwchar_unsigned\n#else\nwchar_signed\n#endif\n";
+    let wu = run_config(wide, "#define __WCHAR_UNSIGNED__ 1\n", "", []);
+    assert_eq(wu.as_str(), "wchar_unsigned");
+    let ws = run_config(wide, "", "", []);
+    assert_eq(ws.as_str(), "wchar_signed");
 }
 
 @test

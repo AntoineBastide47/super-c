@@ -5,7 +5,8 @@
 # without its self-host fixpoint (the release workflow keeps it), and the native backend against the C
 # pipeline on macOS, Linux and Windows (`speed`, ci/speed.sh), with the release's transpile counts.
 # Each platform builds its compiler once (`*-compile`) and runs its test shards in parallel on it (three
-# on Windows, the slowest runner, two elsewhere). It restores the release workflow's caches and saves none.
+# on Windows, the slowest runner, two elsewhere); Linux arm64 builds its compiler on the arm64 runner from
+# one the x86-64 runner cross-builds. It restores the release workflow's caches and saves none.
 name: Debug
 on:
   workflow_dispatch
@@ -201,6 +202,72 @@ jobs:
           rc=$?
           kill "$wd" 2>/dev/null || true
           exit "$rc"
+
+  # Linux arm64, the native arm64 backend's ELF target. No release ships a Linux arm64 compiler yet:
+  # the x86-64 runner cross-builds one through C with GCC's aarch64 cross compiler, and the arm64
+  # runner builds the compiler with it in two stages, the second through the native backend. Both run
+  # Ubuntu 26.04: one glibc, and a clang that knows the FP8 types of the bundled `arm_neon.h`.
+  linux-arm64-compile:
+    name: linux arm64 compile
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: linux
+          sha: ${{ github.sha }}
+
+      - uses: ./.github/actions/bootstrap
+        with:
+          target: linux
+
+      - name: Cross-build an arm64 compiler through C
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags
+          SC_NATIVE=0 ./super-c build --target=linux --arch=aarch64 --cc=aarch64-linux-gnu-gcc --out-dir=build-a64 -o super-c-a64
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: compiler-linux-arm64-boot
+          path: super-c-a64
+          if-no-files-found: error
+          retention-days: 1
+
+  linux-arm64:
+    needs: linux-arm64-compile
+    name: linux arm64 (tests ${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test_shard: ["1/2", "2/2"]
+    runs-on: ubuntu-26.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: linux-arm64
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-linux-arm64-boot
+
+      - name: Build the compiler natively
+        run: |
+          set -eu
+          chmod +x super-c-a64
+          SC_LEAK_CHECK=fatal ./super-c-a64 build --bootstrap-tags -o stage1-super-c
+          SC_LEAK_CHECK=fatal ./stage1-super-c build
+          rm -f stage1-super-c super-c-a64
+          test -x ./super-c
+
+      - name: Run the test suite
+        run: SC_LEAK_CHECK=fatal timeout 1500 ./super-c test --sanitizers --test-shard=${{ matrix.test_shard }}
 
   wasm-compile:
     name: wasm compile

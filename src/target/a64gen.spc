@@ -91,6 +91,9 @@ pub struct Gen {
     pkg: *const Package,
     o: *mut ob::Obj,
     apple: bool,
+    // An ELF object: a shared object's global symbols through the GOT, thread-locals through TLS
+    // descriptors, the frames' unwind rules for `.eh_frame`.
+    elf: bool,
     ptr: u32,
     vregs: u32, // the package's `vec_regs`
     // ---- per body ----
@@ -122,6 +125,9 @@ pub struct Gen {
     free_slots: Vector<u64>, // size << 32 | offset of a released spill slot
     max_align: u32,
     sret_off: i64, // the slot of x8 for a vector result in memory, -1 when none
+    // The register save area of a variadic body under the standard convention (x0..x7 at its start,
+    // then q0..q7), NONE when none.
+    va_save: u32,
     // Labels.
     blk_at: Vector<u32>, // per block, its first word, NONE before it is compiled
     fix: Vector<u64>, // word << 32 | block: a branch to patch
@@ -168,7 +174,7 @@ const LC_MEM: u8 = 1;
 const LC_VAL: u8 = 2;
 
 extend Gen {
-    pub fn new(pkg: &Package, o: &mut ob::Obj, apple: bool) Gen {
+    pub fn new(pkg: &Package, o: &mut ob::Obj, apple: bool, elf: bool) Gen {
         let mut owner = Vector::<u32>::with_capacity(64);
         for _ in 0..64 {
             owner.push(NONE);
@@ -178,6 +184,7 @@ extend Gen {
             pkg: pkg,
             o: o,
             apple: apple,
+            elf: elf,
             ptr: pkg.ptr_bytes,
             vregs: pkg.vec_regs,
             bp: null,
@@ -207,6 +214,7 @@ extend Gen {
             free_slots: Vector::<u64>::new(),
             max_align: 16,
             sret_off: -1,
+            va_save: NONE,
             blk_at: Vector::<u32>::new(),
             fix: Vector::<u64>::new(),
             far: false,
@@ -735,7 +743,7 @@ extend Gen {
         }
         let p = unsafe &*self.pkg;
         let ps = p.syms[self.b().syms[it.a as usize] as usize];
-        if ps.kind != SK_DATA || ps.ext || ps.def == NONE {
+        if ps.kind != SK_DATA || ps.ext || ps.def == NONE || self.got_global(ps) {
             return false;
         }
         let k = (it.b as i32) as i64 + off;
@@ -865,6 +873,24 @@ extend Gen {
         let os = self.osym_of(s);
         let p = unsafe &*self.pkg;
         let ps = p.syms[self.b().syms[s as usize] as usize];
+        if ps.kind == SK_TLS && self.elf {
+            // The TLS descriptor's function returns the variable's offset from the thread pointer in x0
+            // and keeps every other register but x30; x16 holds the function, x17 the thread pointer.
+            // The reference is thread-local too, also to a variable another object defines.
+            self.obj().syms.index_mut(os as usize).flags |= ob::SF_TLS;
+            self.reloc(a::R_TLSDESC_PAGE21, os, 0);
+            self.emit(a::adr(true, 0, 0));
+            self.reloc(a::R_TLSDESC_LD64, os, 0);
+            self.emit(a::ldst_uimm(a::M_X, true, a::IP0, 0, 0));
+            self.reloc(a::R_TLSDESC_ADD, os, 0);
+            self.emit(a::add_imm(true, 0, 0, 0));
+            self.reloc(a::R_TLSDESC_CALL, os, 0);
+            self.emit(a::blr(a::IP0));
+            self.emit(a::mrs_tp(a::IP1));
+            self.emit(a::addsub_reg(true, 0, false, r, a::IP1, 0, 0, 0));
+            self.add_imm_any(r, addend);
+            return;
+        }
         if ps.kind == SK_TLS {
             // The descriptor's getter returns the address in x0 and keeps every other register but x16,
             // x17 and x30.
@@ -880,7 +906,7 @@ extend Gen {
             self.add_imm_any(r, addend);
             return;
         }
-        if ps.ext {
+        if ps.ext || self.got_global(ps) {
             // Maybe in a shared library: through its address slot.
             self.reloc(a::R_GOT_PAGE21, os, 0);
             self.emit(a::adr(true, r, 0));
@@ -893,6 +919,12 @@ extend Gen {
         self.emit(a::adr(true, r, 0));
         self.reloc(a::R_PAGEOFF12, os, addend);
         self.emit(a::add_imm(true, r, r, 0));
+    }
+
+    // Whether package symbol `ps` is a global one an ELF shared object reaches through the GOT: another
+    // object may interpose it.
+    const fn got_global(self: &Self, ps: Sym) bool {
+        return self.elf && unsafe (*self.pkg).pic && ps.linkage == SL_GLOBAL;
     }
 
     // `r` += `k` (any constant).
@@ -1059,6 +1091,13 @@ extend Gen {
             self.slot_off[k] = at;
             at += sl.size;
         }
+        self.va_save = NONE;
+        if !self.apple && (b.pool[b.sig as usize + 1] & SIG_VARIADIC) != 0 {
+            // x0..x7 (64 bytes), then q0..q7 (128 bytes).
+            at = at + 15 & ~15u32;
+            self.va_save = at;
+            at += 192;
+        }
         self.spill_base = at + 15 & ~15u32;
         self.spill_top = 0;
     }
@@ -1093,6 +1132,15 @@ extend Gen {
         cc::classify(b, b.sig, self.ptr, self.apple, self.vregs, &mut self.self_lay);
         if self.self_lay.unknown {
             return self.refuse("the signature passes an aggregate whose C class is unknown");
+        }
+        if self.va_save != NONE {
+            // The argument registers the fixed parameters leave, where `va_arg` reads them.
+            for r in self.self_lay.named_gp as u32..8 {
+                self.mem(a::M_X, false, r as u8, a::SP, self.va_save + 8 * r);
+            }
+            for r in self.self_lay.named_vr as u32..8 {
+                self.mem(a::M_VQ, false, V0 + r as u8, a::SP, self.va_save + 64 + 16 * r);
+            }
         }
         let np = b.pool[b.sig as usize];
         let ni = b.insts.len() as u32;
@@ -1847,6 +1895,18 @@ extend Gen {
             let ra = self.reg(t.a);
             self.add_off(a::IP0 as u8, a::FP, 16 + (self.self_lay.named_bytes + 7 & ~7u32) as i64);
             self.mem(a::M_X, false, a::IP0 as u8, ra, 0);
+            if self.va_save != NONE {
+                // The standard `va_list`: the stack position, the ends of the two save areas, and the
+                // negative offsets of the first variadic register in each.
+                self.add_off(a::IP0 as u8, a::SP, self.va_save + 64);
+                self.mem(a::M_X, false, a::IP0 as u8, ra, 8);
+                self.add_off(a::IP0 as u8, a::SP, self.va_save + 192);
+                self.mem(a::M_X, false, a::IP0 as u8, ra, 16);
+                self.mov_imm(a::IP0 as u8, (-8 * (8 - self.self_lay.named_gp as i64)) as u64, false);
+                self.mem(a::M_W, false, a::IP0 as u8, ra, 24);
+                self.mov_imm(a::IP0 as u8, (-16 * (8 - self.self_lay.named_vr as i64)) as u64, false);
+                self.mem(a::M_W, false, a::IP0 as u8, ra, 28);
+            }
             return true;
         }
         if op == O_VAARG {
@@ -2886,16 +2946,22 @@ extend Gen {
         return true;
     }
 
-    // `va_arg`: the next variadic argument from the `va_list` (a pointer) at `t.a`, 8-byte slots.
+    // `va_arg`: the next variadic argument from the `va_list` at `t.a`. Apple's is a pointer to 8-byte
+    // stack slots; the standard one reads the save areas while their registers last, then the stack.
     fn va_arg(self: &mut Self, i: u32, t: Inst) bool {
         let ra = self.reg(t.a) as u32;
         let ty = t.ty;
         let ap = self.tmp(false);
-        self.mem(a::M_X, true, ap, ra, 0);
         let sz = type_bytes(ty, self.ptr);
-        if type_align(ty, self.ptr) == 16 {
-            self.emit(a::add_imm(true, ap, ap, 15));
-            self.emit(a::logic_imm(true, 0, ap, ap, a::logical_imm(~15u64, true)));
+        let al16 = type_align(ty, self.ptr) == 16;
+        if self.apple {
+            self.mem(a::M_X, true, ap, ra, 0);
+            if al16 {
+                self.emit(a::add_imm(true, ap, ap, 15));
+                self.emit(a::logic_imm(true, 0, ap, ap, a::logical_imm(~15u64, true)));
+            }
+        } else {
+            self.va_std_addr(ty, ra, ap);
         }
         if Gen::in_mem(ty) {
             let d = self.mdef(i);
@@ -2904,9 +2970,83 @@ extend Gen {
             let rd = self.def(i);
             self.mem(mkind(ty, true), true, rd, ap, 0);
         }
-        self.emit(a::add_imm(true, ap, ap, sz + 7 & ~7u32));
-        self.mem(a::M_X, false, ap, ra, 0);
+        if self.apple {
+            self.emit(a::add_imm(true, ap, ap, sz + 7 & ~7u32));
+            self.mem(a::M_X, false, ap, ra, 0);
+        }
         return true;
+    }
+
+    // `ap` = the address of the next variadic argument of type `ty` in the standard `va_list` at `ra`
+    // ({stack, gr_top, vr_top, gr_offs, vr_offs}), which moves past it.
+    fn va_std_addr(self: &mut Self, ty: u8, ra: u32, ap: u8) {
+        let sz = type_bytes(ty, self.ptr);
+        let (vr, n, es, byref) = cc::va_place(self.b(), ty, self.ptr, self.vregs);
+        let off = self.tmp(false);
+        let field: u32 = if vr {
+            28;
+        } else {
+            24;
+        };
+        let step = if vr {
+            16 * n;
+        } else {
+            8 * n;
+        };
+        // From the save area while the offset stays at most 0 past the argument.
+        self.mem(a::M_SW, true, off, ra, field);
+        let w_stack = self.code.len() as u32;
+        self.emit(a::tbz(false, off, 63, 0));
+        if !vr && type_align(ty, self.ptr) == 16 {
+            self.emit(a::add_imm(true, off, off, 15));
+            self.emit(a::logic_imm(true, 0, off, off, a::logical_imm(~15u64, true)));
+        }
+        self.emit(a::add_imm(true, ap, off, step));
+        self.mem(a::M_W, false, ap, ra, field);
+        self.emit(a::cmp_imm(true, ap, 0));
+        let w_over = self.code.len() as u32;
+        self.emit(a::bcond(a::GT, 0));
+        self.mem(
+            a::M_X,
+            true,
+            ap,
+            ra,
+            if vr {
+                16i64;
+            } else {
+                8i64;
+            },
+        );
+        self.emit(a::addsub_reg(true, 0, false, ap, ap, off, 0, 0));
+        if vr && n > 1 {
+            // One element per 16-byte register slot: gather them into a slot.
+            let g = self.slot_alloc(sz, 16);
+            for k in 0..n {
+                self.copy_mem(a::SP, g + k * es, ap, 16 * k, es);
+            }
+            self.add_off(ap, a::SP, g);
+        }
+        let w_done = self.code.len() as u32;
+        self.emit(a::b(0));
+        // From the stack: 8-byte slots, 16-aligned for a 16-byte alignment.
+        self.here(w_stack);
+        self.here(w_over);
+        self.mem(a::M_X, true, ap, ra, 0);
+        if type_align(ty, self.ptr) == 16 && !byref {
+            self.emit(a::add_imm(true, ap, ap, 15));
+            self.emit(a::logic_imm(true, 0, ap, ap, a::logical_imm(~15u64, true)));
+        }
+        let used = if byref {
+            8;
+        } else {
+            sz + 7 & ~7u32;
+        };
+        self.emit(a::add_imm(true, off, ap, used));
+        self.mem(a::M_X, false, off, ra, 0);
+        self.here(w_done);
+        if byref {
+            self.mem(a::M_X, true, ap, ap, 0);
+        }
     }
 
     // Atomic loads, stores, read-modify-writes, compare-and-swaps and fences (LSE).
@@ -3799,6 +3939,9 @@ extend Gen {
             let r = self.rels[q];
             o.reloc(sec, r.kind, at as u32 + (pl + r.at) * 4, r.sym, r.addend);
         }
+        if self.elf {
+            frame_rules(o, k2, size, &xs, &vs);
+        }
         return true;
     }
 
@@ -3862,6 +4005,41 @@ extend Gen {
         }
         return true;
     }
+}
+
+// The unwind rules of function `sym` (`size` bytes) for `.eh_frame`, after the prologue's `stp x29, x30,
+// [sp, #-16]!` (the CFA is sp + 16, x29 at CFA - 16, x30 at CFA - 8), `mov x29, sp` (the CFA is x29 +
+// 16) and the pushes of callee-saved registers `xs` and `vs` (pairs, 16 bytes each, below x29). The
+// common entry's code alignment is 4 bytes and its data alignment -8.
+fn frame_rules(o: &mut ob::Obj, sym: u32, size: u32, xs: &Vector<u32>, vs: &Vector<u32>) {
+    let c0 = o.cfi.len() as u32;
+    o.cfi.push(0x40 | 1);
+    o.cfi.push(0x0E);
+    o.cfi.push(16);
+    o.cfi.push(0x80 | a::FP as u8);
+    o.cfi.push(2);
+    o.cfi.push(0x80 | a::LR as u8);
+    o.cfi.push(1);
+    o.cfi.push(0x40 | 1);
+    o.cfi.push(0x0D);
+    o.cfi.push(a::FP as u8);
+    let xpairs = (xs.len() as u32 + 1) / 2;
+    let npush = xpairs + (vs.len() as u32 + 1) / 2;
+    if npush != 0 {
+        o.cfi.push(0x40 | npush as u8);
+        // Push q stores its first register at CFA - 32 - 16 q, its second 8 bytes above.
+        for k in 0..xs.len() as u32 {
+            o.cfi.push(0x80 | xs[k as usize] as u8);
+            o.cfi.push((4 + 2 * (k / 2) - (k & 1)) as u8);
+        }
+        for k in 0..vs.len() as u32 {
+            // DW_CFA_offset_extended: the DWARF numbers of v0..v31 are 64..95.
+            o.cfi.push(0x05);
+            o.cfi.push((64 + vs[k as usize]) as u8);
+            o.cfi.push((4 + 2 * (xpairs + k / 2) - (k & 1)) as u8);
+        }
+    }
+    o.frames.push(ob::OFrame { sym: sym, size: size, cfi_at: c0, cfi_len: o.cfi.len() as u32 - c0 });
 }
 
 // Append `ws` to code section `sec` as little-endian words.

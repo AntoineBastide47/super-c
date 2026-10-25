@@ -1,9 +1,10 @@
-// The ELF relocatable object writer for x86-64: the header, a section per non-empty object section kind
-// and per named section, `.eh_frame` with one common entry and a frame entry per function, `.rela`
-// sections, the symbol table (locals first) and the string tables. A thread-local variable is an STT_TLS
-// symbol in `.tdata` or `.tbss`. `.note.GNU-stack` marks the stack non-executable.
+// The ELF relocatable object writer for x86-64 and arm64: the header, a section per non-empty object
+// section kind and per named section, `.eh_frame` with one common entry and a frame entry per function,
+// `.rela` sections, the symbol table (locals first) and the string tables. A thread-local variable is an
+// STT_TLS symbol in `.tdata` or `.tbss`. `.note.GNU-stack` marks the stack non-executable.
 import codegen::obj as ob;
 import target::x64 as x;
+import target::a64 as a;
 
 const SHT_PROGBITS: u32 = 1;
 const SHT_SYMTAB: u32 = 2;
@@ -38,10 +39,32 @@ const R_X86_64_TLSGD: u32 = 19;
 const R_X86_64_GOTPCRELX: u32 = 41;
 const R_X86_64_REX_GOTPCRELX: u32 = 42;
 
+const R_AARCH64_ABS64: u32 = 257;
+const R_AARCH64_PREL32: u32 = 261;
+const R_AARCH64_ADR_PREL_PG_HI21: u32 = 275;
+const R_AARCH64_ADD_ABS_LO12_NC: u32 = 277;
+const R_AARCH64_LDST8_ABS_LO12_NC: u32 = 278;
+const R_AARCH64_JUMP26: u32 = 282;
+const R_AARCH64_CALL26: u32 = 283;
+const R_AARCH64_LDST16_ABS_LO12_NC: u32 = 284;
+const R_AARCH64_LDST32_ABS_LO12_NC: u32 = 285;
+const R_AARCH64_LDST64_ABS_LO12_NC: u32 = 286;
+const R_AARCH64_LDST128_ABS_LO12_NC: u32 = 299;
+const R_AARCH64_ADR_GOT_PAGE: u32 = 311;
+const R_AARCH64_LD64_GOT_LO12_NC: u32 = 312;
+const R_AARCH64_TLSDESC_ADR_PAGE21: u32 = 562;
+const R_AARCH64_TLSDESC_LD64_LO12: u32 = 563;
+const R_AARCH64_TLSDESC_ADD_LO12: u32 = 564;
+const R_AARCH64_TLSDESC_CALL: u32 = 569;
+
 // The `.eh_frame` common entry: version 1, "zR" (0x7A 0x52), code alignment 1, data alignment -8, return address
 // register 16 (rip), FDE pointers PC-relative signed 4 bytes; at a function's first byte the CFA is rsp + 8
 // and the return address at CFA - 8. 24 bytes with its length.
 const CIE: [u8; 24] = [20, 0, 0, 0, 0, 0, 0, 0, 1, 0x7A, 0x52, 0, 1, 0x78, 16, 1, 0x1B, 0x0C, 7, 8, 0x90, 1, 0, 0];
+
+// arm64's: code alignment 4, data alignment -8, return address register 30 (x30); at a function's first
+// instruction the CFA is sp + 0. 24 bytes with its length.
+const CIE_A64: [u8; 24] = [20, 0, 0, 0, 0, 0, 0, 0, 1, 0x7A, 0x52, 0, 4, 0x78, 30, 1, 0x1B, 0x0C, 31, 0, 0, 0, 0, 0];
 
 // Append `s` and a NUL to string table `t`; its offset.
 fn add_str(t: &mut Vector<u8>, s: str) u32 {
@@ -124,6 +147,68 @@ const fn rel_type(k: u8) u32 {
     return R_X86_64_64;
 }
 
+// The arm64 ELF type of relocation kind `k` on instruction `insn`: a branch's from B or BL, a page
+// offset's from the instruction (ADD, or a load or store of its access size), as Mach-O's linker infers it.
+const fn rel_type_a64(k: u8, insn: u32) u32 {
+    if k == a::R_BRANCH26 {
+        return if insn >> 31 != 0 {
+            R_AARCH64_CALL26;
+        } else {
+            R_AARCH64_JUMP26;
+        };
+    }
+    if k == a::R_PAGE21 {
+        return R_AARCH64_ADR_PREL_PG_HI21;
+    }
+    if k == a::R_PAGEOFF12 {
+        if (insn & 0x1F000000) == 0x11000000 {
+            return R_AARCH64_ADD_ABS_LO12_NC;
+        }
+        // A load or store (unsigned offset): bits 31:30 the size, bit 26 a vector register, a 128-bit one
+        // size 0 with opc 2 or 3.
+        let size = insn >> 30;
+        if (insn >> 26 & 1) != 0 && size == 0 && (insn >> 23 & 1) != 0 {
+            return R_AARCH64_LDST128_ABS_LO12_NC;
+        }
+        return if size == 0 {
+            R_AARCH64_LDST8_ABS_LO12_NC;
+        } else if size == 1 {
+            R_AARCH64_LDST16_ABS_LO12_NC;
+        } else if size == 2 {
+            R_AARCH64_LDST32_ABS_LO12_NC;
+        } else {
+            R_AARCH64_LDST64_ABS_LO12_NC;
+        };
+    }
+    if k == a::R_GOT_PAGE21 {
+        return R_AARCH64_ADR_GOT_PAGE;
+    }
+    if k == a::R_GOT_PAGEOFF12 {
+        return R_AARCH64_LD64_GOT_LO12_NC;
+    }
+    if k == a::R_TLSDESC_PAGE21 {
+        return R_AARCH64_TLSDESC_ADR_PAGE21;
+    }
+    if k == a::R_TLSDESC_LD64 {
+        return R_AARCH64_TLSDESC_LD64_LO12;
+    }
+    if k == a::R_TLSDESC_ADD {
+        return R_AARCH64_TLSDESC_ADD_LO12;
+    }
+    if k == a::R_TLSDESC_CALL {
+        return R_AARCH64_TLSDESC_CALL;
+    }
+    assert(k == a::R_ABS64, "elf: an arm64 relocation kind ELF has no type for");
+    return R_AARCH64_ABS64;
+}
+
+// The word at byte `off` of section `k` of `o`.
+fn word_at(o: &ob::Obj, k: u8, off: u32) u32 {
+    let b = &o.secs[k as usize].bytes;
+    let i = off as usize;
+    return b[i] as u32 | b[i + 1] as u32 << 8 | b[i + 2] as u32 << 16 | b[i + 3] as u32 << 24;
+}
+
 // One section header.
 struct Shdr {
     pub name: u32,
@@ -139,8 +224,8 @@ struct Shdr {
 
 extend Shdr as Copy {}
 
-/// Write object `o` as an ELF x86-64 relocatable object into `out`.
-pub fn write(o: &ob::Obj, out: &mut Vector<u8>) {
+/// Write object `o` as an ELF relocatable object for arm64 (`a64`) or x86-64 into `out`.
+pub fn write(o: &ob::Obj, a64: bool, out: &mut Vector<u8>) {
     let mut shstr = Vector::<u8>::new();
     shstr.push(0);
     let mut hdrs = Vector::<Shdr>::new();
@@ -213,7 +298,11 @@ pub fn write(o: &ob::Obj, out: &mut Vector<u8>) {
             body.push(0);
         }
         let start = body.len();
-        let cie: []u8 = CIE;
+        let cie: []u8 = if a64 {
+            CIE_A64;
+        } else {
+            CIE;
+        };
         for j in 0..cie.len() {
             body.push(cie[j]);
         }
@@ -241,7 +330,11 @@ pub fn write(o: &ob::Obj, out: &mut Vector<u8>) {
         hdrs.push(
             Shdr {
                 name: add_str(&mut shstr, ".eh_frame"),
-                ty: SHT_X86_64_UNWIND,
+                ty: if a64 {
+                    SHT_PROGBITS;
+                } else {
+                    SHT_X86_64_UNWIND;
+                },
                 flags: SHF_ALLOC,
                 off: start as u64,
                 size: (body.len() - start) as u64,
@@ -337,8 +430,13 @@ pub fn write(o: &ob::Obj, out: &mut Vector<u8>) {
             if x.sec as usize != k {
                 continue;
             }
+            let ty = if a64 {
+                rel_type_a64(x.kind, word_at(o, x.sec, x.off));
+            } else {
+                rel_type(x.kind);
+            };
             ob::w64(&mut body, x.off);
-            ob::w64(&mut body, symix[x.sym as usize] as u64 << 32 | rel_type(x.kind) as u64);
+            ob::w64(&mut body, symix[x.sym as usize] as u64 << 32 | ty as u64);
             ob::w64(&mut body, x.addend as u64);
             n += 1;
         }
@@ -373,7 +471,12 @@ pub fn write(o: &ob::Obj, out: &mut Vector<u8>) {
             let x = eh_rels[r];
             let y = o.syms[x.sym as usize];
             ob::w64(&mut body, x.off);
-            ob::w64(&mut body, secsym[y.sec as usize] as u64 << 32 | R_X86_64_PC32 as u64);
+            let pc32 = if a64 {
+                R_AARCH64_PREL32;
+            } else {
+                R_X86_64_PC32;
+            };
+            ob::w64(&mut body, secsym[y.sec as usize] as u64 << 32 | pc32 as u64);
             ob::w64(&mut body, y.off);
         }
         hdrs.push(
@@ -454,7 +557,14 @@ pub fn write(o: &ob::Obj, out: &mut Vector<u8>) {
     ob::w64(out, 0x00010102464C457F);
     ob::w64(out, 0);
     ob::w16(out, 1);
-    ob::w16(out, 62);
+    ob::w16(
+        out,
+        if a64 {
+            183;
+        } else {
+            62;
+        },
+    );
     ob::w32(out, 1);
     ob::w64(out, 0);
     ob::w64(out, 0);

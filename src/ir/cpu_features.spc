@@ -867,8 +867,35 @@ pub fn push_target_attr(s: CpuFeatureSet, build: CpuFeatureSet, target: i32, out
         out.format_into("target(\"{}\")", names.as_str());
         return;
     }
+    let sa = CpuFeatureSet { w: [s.w[0] & arch_mask(arch), s.w[1]] };
     let mut g = String::new();
-    push_c_flags(CpuFeatureSet { w: [s.w[0] & arch_mask(arch), s.w[1]] }, target, arch, &mut g);
+    let sme = find("sme", arch);
+    if sme >= 0 && has(sa, sme as usize) {
+        // GCC 13 has no SME: its form (`g13`) leaves the SME features out, as std's SME kernels are
+        // assembly and the attribute only lets the C compiler use the features. `SC_TGT_A64_SME` adds
+        // the SVE2 that GCC 15 requires beside SME.
+        push_c_flags(sa, target, arch, &mut g);
+        let mut rest = sa;
+        for i in 0..FEATURE_COUNT {
+            if has(unsafe IMPLIED[i], sme as usize) {
+                unsafe rest.w[i / 64] &= ~(1u64 << (i % 64) as u64);
+            }
+        }
+        let mut g13 = String::new();
+        push_c_flags(rest, target, arch, &mut g13);
+        out.format_into(
+            "target(SC_TGT_A64_SME(\"{}\", \"{}\", \"{}\"))",
+            names.as_str(),
+            g.as_str().slice(3, g.len()),
+            if g13.len() == 0 {
+                "arch=armv8-a";
+            } else {
+                g13.as_str().slice(3, g13.len());
+            },
+        );
+        return;
+    }
+    push_c_flags(sa, target, arch, &mut g);
     out.format_into("target(SC_TGT_A64(\"{}\", \"{}\"))", names.as_str(), g.as_str().slice(3, g.len()));
 }
 

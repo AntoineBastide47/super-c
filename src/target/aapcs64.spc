@@ -53,6 +53,8 @@ pub fn classify(b: &Body, sig: u32, ptr: u32, apple: bool, vregs: u32, out: &mut
         let variadic = k >= nfixed;
         if variadic && k == nfixed {
             out.named_bytes = nsaa;
+            out.named_gp = ngrn as u8;
+            out.named_vr = nsrn as u8;
         }
         let mut loc = none();
         loc.p0 = out.parts.len() as u32;
@@ -86,6 +88,8 @@ pub fn classify(b: &Body, sig: u32, ptr: u32, apple: bool, vregs: u32, out: &mut
     }
     if nfixed == np {
         out.named_bytes = nsaa;
+        out.named_gp = ngrn as u8;
+        out.named_vr = nsrn as u8;
     }
     out.stack_bytes = align_up(nsaa, 16);
     // The result.
@@ -106,6 +110,28 @@ pub fn classify(b: &Body, sig: u32, ptr: u32, apple: bool, vregs: u32, out: &mut
         r.ext = 0;
     }
     out.ret = r;
+}
+
+/// How a variadic argument of machine type `t` passes under the standard convention, which places it
+/// as a fixed one: in vector registers (`vr`) or integer ones, `n` registers holding `es` bytes of the
+/// value each, or a pointer to a copy in one integer register (`byref`).
+pub fn va_place(b: &Body, t: u8, ptr: u32, vregs: u32) (bool, u32, u32, bool) {
+    let mut g: u32 = 0;
+    let mut s: u32 = 0;
+    let mut a: u32 = 0;
+    let mut loc = none();
+    let mut parts = Vector::<Part>::new();
+    place(b, t, ptr, false, vregs, &mut g, &mut s, &mut a, &mut loc, &mut parts);
+    if loc.kind == L_REF_REG {
+        return false, 1, 8, true;
+    }
+    let p = parts[0];
+    let es: u32 = if p.v {
+        p.size;
+    } else {
+        8;
+    };
+    return p.v, loc.n, es, false;
 }
 
 // The fixed-parameter count of a signature's second word.

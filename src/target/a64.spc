@@ -11,6 +11,10 @@ pub const R_GOT_PAGEOFF12: u8 = 5; // the LDR of that slot
 pub const R_TLV_PAGE21: u8 = 6; // ADRP of the page of a thread-local variable's descriptor
 pub const R_TLV_PAGEOFF12: u8 = 7; // the LDR of the descriptor's address
 pub const R_ABS64: u8 = 8; // a 64-bit address in data
+pub const R_TLSDESC_PAGE21: u8 = 9; // ADRP of the page of a thread-local variable's ELF descriptor
+pub const R_TLSDESC_LD64: u8 = 10; // the LDR of the descriptor's function
+pub const R_TLSDESC_ADD: u8 = 11; // the ADD of the descriptor's page offset
+pub const R_TLSDESC_CALL: u8 = 12; // the BLR of the descriptor's function
 
 /// The zero register (or sp in the forms that read it).
 pub const ZR: u32 = 31;
@@ -413,6 +417,11 @@ pub const fn tbz(nz: bool, rt: u32, bit: u32, off: i32) u32 {
 
 pub const fn blr(rn: u32) u32 {
     return 0xD63F0000 | rn << 5;
+}
+
+/// MRS of TPIDR_EL0, the thread pointer, into `rt`.
+pub const fn mrs_tp(rt: u32) u32 {
+    return 0xD53BD040 | rt;
 }
 
 pub const RET: u32 = 0xD65F03C0;

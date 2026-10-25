@@ -77,6 +77,7 @@ const ID_POP_MACRO: u32 = 285;
 const ID_CHAR_UNSIGNED: u32 = 286;
 const ID_DIGRAPH_HASH: u32 = 287;
 const ID_DIGRAPH_HASHHASH: u32 = 288;
+const ID_WCHAR_UNSIGNED: u32 = 289;
 
 const FIXED: []str = [
     "...",
@@ -112,6 +113,7 @@ const FIXED: []str = [
     "__CHAR_UNSIGNED__",
     "%:",
     "%:%:",
+    "__WCHAR_UNSIGNED__",
 ];
 
 // Macro kinds. A built-in's `param_count` holds its `B_*` code.
@@ -3437,6 +3439,11 @@ extend Pp {
         }
         if wide == 0 && count == 1 {
             *out = Val { v: (((value as u8) as i8) as i64) as u64, u: false };
+            return "";
+        }
+        // `L'..'` has the type of `wchar_t`: unsigned where the target says so (aarch64 Linux, Windows).
+        if wide == 1 && self.macro_index(ID_WCHAR_UNSIGNED) != 0 {
+            *out = Val { v: value & 0xFFFFFFFFu64, u: true };
             return "";
         }
         if wide == 0 || wide == 1 {

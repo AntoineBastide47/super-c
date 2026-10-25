@@ -41,8 +41,8 @@ pub struct CallLayout {
     pub ret: ALoc,
     pub stack_bytes: u32, // the stack argument area, rounded up to 16
     pub named_bytes: u32, // the stack bytes of the fixed parameters (the variadic ones follow, 8-aligned)
-    pub named_gp: u8, // SysV: the integer registers the fixed parameters take (`va_start`)
-    pub named_vr: u8, // SysV: the vector registers the fixed parameters take
+    pub named_gp: u8, // SysV, AAPCS64: the integer registers the fixed parameters take (`va_start`)
+    pub named_vr: u8, // SysV, AAPCS64: the vector registers the fixed parameters take
     pub vr_used: u8, // SysV: the vector registers every argument takes (`al` at a variadic call)
     pub unknown: bool, // a parameter or the result is an aggregate whose class its layout does not give
 }

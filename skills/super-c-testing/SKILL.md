@@ -259,7 +259,10 @@ In both workflows, each platform builds its compiler once (`compile`, `windows-c
 slowest runner, two elsewhere). The build has two stages: the latest release builds stage 1 through
 C, and stage 1 builds the tested compiler at the default profile, natively; `wasm-compile` builds
 `super-c.wasm` the same way (the native wasm backend), and `wasm-package` ships a release build of
-it, as `package` ships a release build of the native binary. Every CI suite runs `super-c test --sanitizers`: the compiler under
+it, as `package` ships a release build of the native binary. No release ships a Linux arm64
+compiler yet: the debug workflow's `linux-arm64-compile` cross-builds one through C on the x86-64 runner
+(GCC's aarch64 cross compiler), and `linux-arm64` builds the compiler with it in two stages on the
+arm64 runner and runs the suite there. Every CI suite runs `super-c test --sanitizers`: the compiler under
 test and the runner build with ASan and UBSan there (no-op on Windows), while a local run stays
 without them for speed. In the release workflow (macOS, Linux and Windows in one matrix)
 the correctness gate (`ci/gate.sh --core`), the x86-64 levels and the `ctarget` job (Linux: the C environment tables
@@ -481,8 +484,8 @@ rebuild one test file under `SC_LIR=1 SC_LIR_EVAL=1 SC_LIR_STATS=1 super-c test 
 wasm32 (`run_wasm`: `ptr 8` becomes `ptr 4`, the wasi-sdk's clang links, wasmtime runs), builds programs whose modules mix C and native
 code (`SC_NATIVE=<module>`, C values of `@layout` types and enums with payloads included), and checks
 that two builds give byte-identical objects. A CLI test that reads the emitted C, a C unit or a C
-object of a debug build sets `cli::set_env("SC_NATIVE", "0")`: on macOS arm64, Linux x86-64 and
-Windows x86-64 that build compiles natively and writes no C. `ci/gate.sh` checks that one
+object of a debug build sets `cli::set_env("SC_NATIVE", "0")`: on macOS arm64, Linux x86-64, Linux
+arm64, Windows x86-64 and wasm32 that build compiles natively and writes no C. `ci/gate.sh` checks that one
 worker and every core build byte-identical native objects.
 
 ### Families of cases in few compiler runs

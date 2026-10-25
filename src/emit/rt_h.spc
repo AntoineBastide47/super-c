@@ -172,6 +172,17 @@ _Noreturn void __sc_trap_order(void);
 #else
 #define SC_TGT_A64(c, g) g
 #endif
+/* The same for a function with SME features: GCC 15 compiles SME only with SVE2 enabled, GCC 13 has no
+   SME (`g13` leaves the SME features out). */
+#ifdef __clang__
+#define SC_TGT_A64_SME(c, g, g13) c
+#elif __GNUC__ >= 15
+#define SC_TGT_A64_SME(c, g, g13) g "+sve2"
+#elif __GNUC__ >= 14
+#define SC_TGT_A64_SME(c, g, g13) g
+#else
+#define SC_TGT_A64_SME(c, g, g13) g13
+#endif
 /* A static in a named section (`@unsafe(link_section)`) is the section's entry: clang's AddressSanitizer
    would pad it with a redzone, which in an init array is an entry with no target, a link error. GCC does
    not instrument such a static and rejects the attribute on a variable. */
