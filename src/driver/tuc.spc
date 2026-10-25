@@ -99,8 +99,8 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
     }
     let mut h = fnv_mix(FNV_BASIS, cid);
     h = fnv_mix(h, TUC_VER);
-    // Emission-mode switches change the C a body renders to: a record written under one mode
-    // must never replay under another.
+    // Emission-mode switches change the C a body renders to or its checks: a record written under one
+    // mode must never replay under another.
     for i in 0..inl::EMIT_MODE_ENV_N {
         let e = stdlib::get_env(inl::emit_mode_env(i));
         if e.is_some() {
@@ -321,8 +321,8 @@ pub fn tuc_setup(p: &loader::Package, live: *const bool, salt: &Vector<u64>, tar
     t.hit.resize_default(n);
     t.soff.resize_default(n);
     t.slen.resize_default(n);
-    // The LIR check lowers every body as the emitter renders it: a replayed body is not rendered.
-    if gen_root.len() == 0 || n == 0 || stdlib::getenv("SC_LIR") != null {
+    // The evaluator check runs every test's body as the emitter lowers it: a replayed body is not rendered.
+    if gen_root.len() == 0 || n == 0 || stdlib::getenv("SC_LIR_EVAL") != null {
         return t;
     }
     if stdlib::getenv("SC_NO_TU_CACHE") != null {

@@ -63,10 +63,11 @@ pub const IJ_GENERIC: u8 = 6; // unbound generic parameter or untranslatable typ
 pub const IJ_ARITY: u8 = 7; // variadic call or argument/destination count mismatch
 pub const IJ_COUNT: usize = 8;
 
-/// Emission-mode env switches: every setting that changes the C a body renders to. Build stamps
-/// and TU-cache keys read the list by index, so a new switch joins here once and every consumer
-/// follows; the order is part of the recorded keys.
-pub const EMIT_MODE_ENV_N: usize = 4;
+/// Emission-mode env switches: every setting that changes the C a body renders to, and the LIR check
+/// (`SC_LIR`), which a replayed module passed when its record was written. Build stamps and TU-cache
+/// keys read the list by index, so a new switch joins here once and every consumer follows; the order
+/// is part of the recorded keys.
+pub const EMIT_MODE_ENV_N: usize = 5;
 
 pub fn emit_mode_env(i: usize) str<'static> {
     if i == 0 {
@@ -78,8 +79,11 @@ pub fn emit_mode_env(i: usize) str<'static> {
     if i == 2 {
         return "SC_BCE_DISABLE";
     }
-    assert(i == 3);
-    return "SC_SIMD_SCALAR";
+    if i == 3 {
+        return "SC_SIMD_SCALAR";
+    }
+    assert(i == 4);
+    return "SC_LIR";
 }
 
 const MAX_CALLEE_STMTS: usize = 40;

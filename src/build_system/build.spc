@@ -2100,8 +2100,8 @@ fn stamp_opt_line(
     // The std tree (`SC_STD_DIR` can move it): its files are inputs recorded by path below.
     out.push_str("\t");
     out.push_str(std_dir);
-    // Emission-mode switches change the emitted C, and SC_UNITY_MAX its units: a stamp written under
-    // one mode must not satisfy a build under another.
+    // Emission-mode switches change the emitted C or its checks, and SC_UNITY_MAX its units: a stamp
+    // written under one mode must not satisfy a build under another.
     out.push_str("\t");
     for i in 0..inl::EMIT_MODE_ENV_N {
         stamp_push_env(out, inl::emit_mode_env(i));
@@ -2767,8 +2767,8 @@ pub fn transpile_step(
     let stamp_path = loader::join2(pdir.as_str(), ".emit_stamp");
     let mut stamp_new = stamp_path.clone();
     stamp_new.push_str(".new");
-    // The LIR check needs every body emitted.
-    let cache_on = stdlib::getenv("SC_NO_EMIT_CACHE") == null && stdlib::getenv("SC_LIR") == null;
+    // The evaluator check needs every body emitted.
+    let cache_on = stdlib::getenv("SC_NO_EMIT_CACHE") == null && stdlib::getenv("SC_LIR_EVAL") == null;
     let external = cx.transpiler.len() != 0;
     // The emitting compiler's identity, read before the emission: the tree it emits is its function, and
     // of the backend selection (SC_NATIVE).
@@ -3276,6 +3276,10 @@ fn engine_build_i(
     rm_rf(loader::join2(pdir.as_str(), "gen").as_str());
     mkdir_p(obj.as_str());
     let jobs = build_jobs(m, cx);
+    // The evaluator check of a test build is part of the emission: nothing compiles or links.
+    if topts != null && unsafe (*topts).enabled && lir_eval_check() {
+        return transpile_step(m, prof_name, root, root_dir, alt, sub, jobs, cx, topts, null).rc;
+    }
     let stats = bst::last();
     if stats != null {
         let g = unsafe &mut *stats;
@@ -4259,6 +4263,11 @@ pub fn manifest_run_bin(m: &mf::Manifest, profile: str, bin_override: str, sel_b
     return exec_args(&ra, "");
 }
 
+// The evaluator check of a test build: `SC_LIR` and `SC_LIR_EVAL` (`run_package`).
+fn lir_eval_check() bool {
+    return stdlib::getenv("SC_LIR") != null && stdlib::getenv("SC_LIR_EVAL") != null;
+}
+
 /// `super-c test`: build the project, then discover <test-dir>/**/*.spc (default tests/), synthesize
 /// an aggregating root, and run the @test pipeline on it (SUPERC points at the fresh binary).
 pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *const TestOpts) i32 {
@@ -4272,8 +4281,12 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
     // the suite would replace whatever the manifest's binary currently is (a release artifact, say). With
     // no `--profile`, the binary takes the `test` profile (no sanitizers), in a tree of its own beside the
     // runner's <out-dir>/test.
+    // The evaluator check only emits the suite: the project's binary is not built and no test runs.
+    let check = lir_eval_check();
     let mut binp = String::new();
-    let rc = if profile.len() == 0 {
+    let rc = if check {
+        0;
+    } else if profile.len() == 0 {
         let leaf = exe_name(loader::basename_of(m.bin.as_str()), cx.target);
         target_build(m, "test", m.root.as_str(), "-bin", leaf.as_str(), 0, &nolint, &mut binp);
     } else {
@@ -4363,7 +4376,7 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
         0,
         topts,
     );
-    if brc != 0 {
+    if brc != 0 || check {
         return brc;
     }
     // The suite's recorded durations balance the shards: `--test-durations`, else

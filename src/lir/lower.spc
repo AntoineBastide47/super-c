@@ -21,12 +21,12 @@ import utils::names as nm;
 import std::float as fl;
 import lir::verify as lv;
 import lir::print as lp;
-import lir::parse as lparse;
 import lir::eval as le;
 import stdlib;
 import ir::print as irp;
 import bindgen::bindgen as bg;
 import typechecker::render as rnd;
+import std::parallel::sync as psync;
 
 // Value classes of a type.
 const VC_ZST: u8 = 0; // no storage: unit, void, never, zero-sized
@@ -99,6 +99,11 @@ pub struct LTest {
     pub node: NodeId,
 }
 
+// The step budgets of the evaluator check: CTFE's per test (`probe_tests`) and the evaluator's
+// (`ctfe_agrees`). The evaluator takes up to 1.4x CTFE's steps for a run both finish.
+const CTFE_PROBE_STEPS: u32 = 1 << 18;
+const EVAL_STEPS: u64 = 1 << 21;
+
 /// How CTFE ended test `(m, node)`: its trap kind (`ir::interp::IT_TRAP_*`), the message, and the
 /// line and column of the test's statement that trapped.
 pub struct CtfeRes {
@@ -119,6 +124,11 @@ pub fn probe_tests(pk: *const loader::Package, tests: &Vector<u64>, panics: &Vec
         return out;
     }
     let mut it = iri::interp_new(pk);
+    // Every module is typed: the conformance and method lookups memoize, as the emission's do.
+    it.all_typed = true;
+    // Of the math and std tests CTFE finishes in its default budget, 18 of 626 take more steps; a run to
+    // that budget costs 8x more.
+    it.max_steps = CTFE_PROBE_STEPS;
     for i in 0..tests.len() {
         let m = (tests[i] >> 32) as ModuleId;
         let n = tests[i] as NodeId;
@@ -6767,9 +6777,10 @@ extend Lower {
         other.nbodies = 0;
     }
 
-    /// The `SC_LIR` checks over the merged package, reported on stderr: every body lowered, every
-    /// body verified, and print, parse and print giving the same text. True when all hold.
-    pub fn check_all(self: &mut Self, pk: *const loader::Package, text: &mut String) bool {
+    /// The `SC_LIR` checks over the merged package, reported on stderr: every body lowered and every
+    /// body verified, and under `SC_LIR_EVAL` each test's evaluator run agrees with CTFE (`ctfe_agrees`).
+    /// True when all hold.
+    pub fn check_all(self: &mut Self, pk: *const loader::Package) bool {
         // A body with inline assembly stays on the C path by design.
         let mut nasm: u64 = 0;
         for i in 0..self.fails.len() {
@@ -6799,30 +6810,6 @@ extend Lower {
                     eprint("{}", t.as_str());
                 }
                 nbad += 1;
-            }
-        }
-        let mut t1 = String::new();
-        lp::print_package(&self.pkg, &mut t1);
-        let mut err = String::new();
-        let q = lparse::parse(t1.as_str(), &mut err);
-        let mut rt_ok = q.is_some();
-        if !rt_ok {
-            eprint("lir: parse: {}\n", err.as_str());
-        } else {
-            let p2 = q.unwrap();
-            let mut t2 = String::new();
-            lp::print_package(&p2, &mut t2);
-            rt_ok = t1.as_str() == t2.as_str();
-            if !rt_ok {
-                eprint("lir: print, parse and print differ\n");
-            }
-            for i in 0..p2.syms.len() {
-                let s = p2.syms[i];
-                if s.def != NONE && s.kind == SK_FUNC && !v.check(&p2, p2.spell(s.name), &p2.bodies[s.def as usize]) {
-                    eprint("lir: verify after parse: {}\n", v.err.as_str());
-                    rt_ok = false;
-                    break;
-                }
             }
         }
         // The refusals, by reason.
@@ -6858,22 +6845,18 @@ extend Lower {
             le::outcome_text(&self.pkg, &o, &mut lt);
             eprint("lir: run {}: {} value {}\n", rn.as_str(), lt.as_str(), o.value);
         }
-        ok = ok && nbad == 0 && rt_ok && ctfe_ok;
+        ok = ok && nbad == 0 && ctfe_ok;
         if ok && stdlib::getenv("SC_LIR_STATS") == null {
-            *text = t1;
             return true;
         }
         eprint(
-            "lir: {} bodies emitted, {} lowered, {} with inline assembly kept in C, {} refused, {} fail the verifier, text {} bytes, round trip {}\n",
+            "lir: {} bodies emitted, {} lowered, {} with inline assembly kept in C, {} refused, {} fail the verifier\n",
             self.nbodies,
             self.pkg.bodies.len(),
             nasm,
             self.fails.len() as u64 - nasm,
             nbad,
-            t1.len(),
-            ast::pick(rt_ok, "ok", "FAILED"),
         );
-        *text = t1;
         return ok;
     }
 }
@@ -7213,11 +7196,11 @@ extend Lower {
 }
 
 extend Lower {
-    // Run every test CTFE ran to its end (no call it cannot run, no budget) under the evaluator: it
-    // must end alike, returning, or trapping with the same class of trap at the same statement of the
-    // test. A mismatch is reported; true when none.
+    // Run the tests under the evaluator, spread over workers with an evaluator each. A test CTFE ran to
+    // its end (no call it cannot run, no budget) must end alike: returning, or trapping with the same
+    // class of trap at the same statement of the test. A test CTFE does not support must end as the
+    // test expects. A test past a budget is not compared. A mismatch is reported; true when none.
     fn ctfe_agrees(self: &mut Self, pk: *const loader::Package) bool {
-        let _ = pk;
         if self.ctfe.len() == 0 {
             return true;
         }
@@ -7225,7 +7208,50 @@ extend Lower {
         for i in 0..self.tests.len() {
             by.insert(self.tests[i].m as u64 << 32 | self.tests[i].node as u64, i as u32);
         }
-        let mut ev = le::Eval::new(&self.pkg);
+        // The runs: the symbols of the tests to run, and per entry of `ctfe` its test, NONE for a test that
+        // does not run (an FFI call, a body the emission did not lower, CTFE past a budget).
+        let n = self.ctfe.len();
+        let mut syms = Vector::<u32>::with_capacity(n);
+        let mut test_of = Vector::<u32>::with_capacity(n);
+        for i in 0..n {
+            let r = self.ctfe.at(i);
+            let ti = by.get(&(r.m as u64 << 32 | r.node as u64));
+            if r.ffi || ti.is_none() || ctfe_budget(r.kind) {
+                test_of.push(NONE);
+            } else {
+                test_of.push(*ti.unwrap());
+                syms.push(self.pkg.find_symbol(self.tests[(*ti.unwrap()) as usize].sym.as_str()));
+            }
+        }
+        let nr = syms.len();
+        let jobs = (unsafe (*pk).jobs) as usize;
+        let nw = if jobs < 2 || nr < 2 {
+            1usize;
+        } else if jobs < nr {
+            jobs;
+        } else {
+            nr;
+        };
+        // Worker w runs w, w + nw, ...: long tests cluster by file.
+        let mut outs = Vector::<Vector<le::Outcome>>::with_capacity(nw);
+        for _ in 0..nw {
+            outs.push(Vector::<le::Outcome>::new());
+        }
+        if nw == 1 {
+            eval_task(EvalTask { pkg: &self.pkg, syms: &syms, w: 0, nw: 1, outs: outs.index_mut(0) });
+        } else {
+            let wg = psync::WaitGroup::new();
+            for w in 0..nw {
+                wg.add(1);
+                let t = EvalTask { pkg: &self.pkg, syms: &syms, w: w, nw: nw, outs: outs.index_mut(w) };
+                let wgc = wg.clone();
+                launch || {
+                    eval_task(t);
+                    wgc.done();
+                };
+            }
+            wg.wait_masked();
+        }
         let mut ran: u64 = 0;
         let mut alone: u64 = 0;
         let mut bad: u64 = 0;
@@ -7233,20 +7259,23 @@ extend Lower {
         let mut ffi: u64 = 0;
         let mut budget: u64 = 0;
         let stats = stdlib::getenv("SC_LIR_STATS") != null;
-        for i in 0..self.ctfe.len() {
+        let mut j: usize = 0;
+        for i in 0..n {
             let r = self.ctfe.at(i);
             let k = r.kind;
-            let ti = by.get(&(r.m as u64 << 32 | r.node as u64));
-            if r.ffi || ti.is_none() {
-                // An FFI call, or a test whose body the emission did not lower.
-                ffi += 1;
+            if test_of[i] == NONE {
+                if ctfe_budget(k) {
+                    budget += 1;
+                } else {
+                    ffi += 1;
+                }
                 continue;
             }
-            let t = &self.tests[(*ti.unwrap()) as usize];
-            let s = self.pkg.find_symbol(t.sym.as_str());
-            let o = ev.run(s, []);
-            let lk = trap_class(&o);
-            let ctfe_ran = !(k == iri::IT_TRAP_UNSUPPORTED || k == iri::IT_TRAP_BUDGET_STEPS || k == iri::IT_TRAP_BUDGET_MEMORY || k == iri::IT_TRAP_BUDGET_DEPTH || k == iri::IT_TRAP_CYCLE || k == iri::IT_TRAP_TOO_LARGE);
+            let t = &self.tests[test_of[i] as usize];
+            let o = outs.at(j % nw).at(j / nw);
+            j += 1;
+            let lk = trap_class(o);
+            let ctfe_ran = k != iri::IT_TRAP_UNSUPPORTED;
             if o.kind == le::EV_FFI {
                 ffi += 1;
                 if stats {
@@ -7254,12 +7283,12 @@ extend Lower {
                 }
                 continue;
             }
-            if lk == iri::IT_TRAP_BUDGET_STEPS || lk == iri::IT_TRAP_BUDGET_MEMORY || lk == iri::IT_TRAP_BUDGET_DEPTH || !ctfe_ran && k != iri::IT_TRAP_UNSUPPORTED {
+            if lk == iri::IT_TRAP_BUDGET_STEPS || lk == iri::IT_TRAP_BUDGET_MEMORY || lk == iri::IT_TRAP_BUDGET_DEPTH {
                 budget += 1;
                 continue;
             }
-            // CTFE's run is the oracle; where CTFE cannot finish a run that makes no FFI call, the
-            // test's own expectation is: it passes, or with `should_panic` it traps.
+            // CTFE's run is the oracle; where CTFE does not run a test that makes no FFI call, the test's
+            // own expectation is: it passes, or with `should_panic` it traps.
             let same = if ctfe_ran {
                 lk == k && (k == iri::IT_TRAP_NONE || o.top.line == r.line && o.top.col == r.col);
             } else {
@@ -7279,7 +7308,7 @@ extend Lower {
             }
             if bad <= 20 || stats {
                 let mut lt = String::new();
-                le::outcome_text(&self.pkg, &o, &mut lt);
+                le::outcome_text(&self.pkg, o, &mut lt);
                 if ctfe_ran {
                     eprint(
                         "lir: ctfe: {}: CTFE kind {} \"{}\" at {}:{}, the evaluator {} (test statement {}:{})\n",
@@ -7317,6 +7346,39 @@ extend Lower {
             );
         }
         return bad == 0;
+    }
+}
+
+// Whether CTFE trap kind `k` ends a run at a budget: steps, memory, depth, an evaluation cycle, a value
+// too large.
+const fn ctfe_budget(k: u8) bool {
+    return k == iri::IT_TRAP_BUDGET_STEPS || k == iri::IT_TRAP_BUDGET_MEMORY || k == iri::IT_TRAP_BUDGET_DEPTH || k == iri::IT_TRAP_CYCLE || k == iri::IT_TRAP_TOO_LARGE;
+}
+
+// One worker of `ctfe_agrees`: the tests `w`, `w + nw`, ... of `syms`, each run's outcome pushed to
+// `outs` in that order.
+struct EvalTask {
+    pub pkg: *const Package,
+    pub syms: *const Vector<u32>,
+    pub w: usize,
+    pub nw: usize,
+    pub outs: *mut Vector<le::Outcome>,
+}
+
+extend EvalTask as Copy {}
+
+// Each task reads the package and the symbols, which outlive the tasks, and writes its own outcomes.
+unsafe extend EvalTask as Send {}
+
+fn eval_task(t: EvalTask) {
+    let syms = unsafe &*t.syms;
+    let outs = unsafe &mut *t.outs;
+    let mut ev = le::Eval::new(unsafe &*t.pkg);
+    ev.max_steps = EVAL_STEPS;
+    let mut i = t.w;
+    while i < syms.len() {
+        outs.push(ev.run(syms[i], []));
+        i += t.nw;
     }
 }
 

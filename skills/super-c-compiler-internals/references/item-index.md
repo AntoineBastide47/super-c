@@ -225,7 +225,9 @@ The engine reads another module's checked state only through the rule: a checked
 `tof`, a body through `body_of`. A conformance search (`keyed_conf`, `rt_blanket_confs`,
 `conf_by_args`, `conf_ext_of`) finds its candidates from the syntax (the interface's and the
 target's resolutions, `ext_blanket_syn`) and refuses the evaluation on a candidate the reader
-cannot see (`ext_readable`), so no answer stands on an unchecked header.
+cannot see (`ext_readable`), so no answer stands on an unchecked header. Once every module is
+typed (`all_typed`), `iface_exts` takes the candidates from a per-interface index of the extends,
+built once in module and item order; before, from a scan of every module's items.
 
 Visibility makes the values deterministic; the module write lock (`Ast::wl_sem`) makes the reads
 safe while the module's checker grows the same tables for its later items (the type pool, the

@@ -975,6 +975,11 @@ pub struct Interp {
     pub method_memo: Map<MKey, u64>, // find_method results (module << 32 | node) once every module is typed
     pub conf_memo: Map<MKey, u64>, // conf_ext_scan results per (interface, declaration) once every module is typed: start << 32 | count in `conf_pool`
     pub conf_pool: Vector<DefId>,
+    // Every extend with an interface and a target, per interface (module << 32 | node), in module and
+    // item order: start << 32 | count in `ext_pool`. Built once every module is typed (`iface_exts`).
+    pub ext_ix: Map<u64, u64>,
+    pub ext_pool: Vector<DefId>,
+    pub ext_built: bool,
     pub call_memo: CallMemo,
     pub item_memo: Map<u64, IVal>, // referenced-const values (scalar only), keyed module << 32 | node
     pub item_active: Vector<u64>, // consts being evaluated right now: a re-entry is a cycle
@@ -1127,6 +1132,9 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         method_memo: Map::<MKey, u64>::new(),
         conf_memo: Map::<MKey, u64>::new(),
         conf_pool: Vector::<DefId>::new(),
+        ext_ix: Map::<u64, u64>::new(),
+        ext_pool: Vector::<DefId>::new(),
+        ext_built: false,
         call_memo: CallMemo::new(),
         item_memo: Map::<u64, IVal>::new(),
         item_active: Vector::<u64>::new(),
@@ -2537,64 +2545,49 @@ extend Interp {
             let ba = unsafe &*self.p().module_ast_const(b.module);
             di = *ba.instance(ba.type_at(iface).as_data.inst);
         }
-        for xm in 0..self.p().modules.len() {
+        let mut cands = Vector::<DefId>::new();
+        self.iface_exts(ifd, &mut cands);
+        for ci0 in 0..cands.len() {
+            let xm = cands.at(ci0).module as usize;
+            let iid = cands.at(ci0).node;
             let xa = unsafe &*self.p().module_syntax(xm as ModuleId);
-            if xa.nodes.len() == 0 {
+            let ed = xa.at_const(iid).as_data.extend_def;
+            let bp = ext_blanket_syn(xa, xm as ModuleId, iid);
+            if bp < 0 {
                 continue;
             }
-            let items = xa.at_const(xa.root).as_data.program.items;
-            for i in 0..items.len {
-                let iid = unsafe xa.list(items)[i as usize];
-                if xa.at_const(iid).kind != NodeKind::NODE_EXTEND {
-                    continue;
+            if !self.ext_readable(xm as ModuleId, iid) {
+                return none;
+            }
+            let mut list = Vector::<ISub>::new();
+            if !self.subst_add(&mut list, xm as ModuleId, unsafe xa.list(ed.generics)[bp as usize], sm, st) {
+                continue;
+            }
+            let dt = xa.type_of(ed.interface_type);
+            let mut ok = true;
+            if iface != TYPE_NONE && dt != TYPE_NONE {
+                let ci = *xa.instance(xa.type_at(dt).as_data.inst);
+                ok = ci.n == di.n;
+                for k in 0..ci.n {
+                    let mut wm: ModuleId = 0;
+                    let mut wt = TYPE_NONE;
+                    ok = ok && self.rty(b.module, unsafe di.args[k as usize], &mut wm, &mut wt) && self.iunify(
+                        xm as ModuleId,
+                        unsafe ci.args[k as usize],
+                        wm,
+                        wt,
+                        xm as ModuleId,
+                        ed.generics,
+                        &mut list,
+                        0,
+                    );
                 }
-                let ed = xa.at_const(iid).as_data.extend_def;
-                if ed.interface_type == NODE_NONE || ed.target_type == NODE_NONE {
-                    continue;
+            }
+            if ok && list.len() as u32 == ed.generics.len && self.isub_bounds_hold(xm as ModuleId, iid, &list, b.module) {
+                for q in 0..list.len() {
+                    obinds.push(*list.at(q));
                 }
-                let ir0 = xa.resolution_def(ed.interface_type);
-                let bp = ext_blanket_syn(xa, xm as ModuleId, iid);
-                if ir0.module != ifd.module || ir0.node != ifd.node || bp < 0 {
-                    continue;
-                }
-                if !self.ext_readable(xm as ModuleId, iid) {
-                    return none;
-                }
-                let mut list = Vector::<ISub>::new();
-                if !self.subst_add(&mut list, xm as ModuleId, unsafe xa.list(ed.generics)[bp as usize], sm, st) {
-                    continue;
-                }
-                let dt = xa.type_of(ed.interface_type);
-                let mut ok = true;
-                if iface != TYPE_NONE && dt != TYPE_NONE {
-                    let ci = *xa.instance(xa.type_at(dt).as_data.inst);
-                    ok = ci.n == di.n;
-                    for k in 0..ci.n {
-                        let mut wm: ModuleId = 0;
-                        let mut wt = TYPE_NONE;
-                        ok = ok && self.rty(b.module, unsafe di.args[k as usize], &mut wm, &mut wt) && self.iunify(
-                            xm as ModuleId,
-                            unsafe ci.args[k as usize],
-                            wm,
-                            wt,
-                            xm as ModuleId,
-                            ed.generics,
-                            &mut list,
-                            0,
-                        );
-                    }
-                }
-                if ok && list.len() as u32 == ed.generics.len && self.isub_bounds_hold(
-                    xm as ModuleId,
-                    iid,
-                    &list,
-                    b.module,
-                ) {
-                    for q in 0..list.len() {
-                        obinds.push(*list.at(q));
-                    }
-                    return DefId { module: xm as ModuleId, node: iid };
-                }
+                return DefId { module: xm as ModuleId, node: iid };
             }
         }
         return none;
@@ -8773,64 +8766,57 @@ extend Interp {
                 return false;
             }
         }
-        for xm in 0..self.p().modules.len() {
+        let mut cands = Vector::<DefId>::new();
+        self.iface_exts(DefId { module: di.module, node: di.decl }, &mut cands);
+        for ci0 in 0..cands.len() {
+            let xm = cands.at(ci0).module as usize;
+            let iid = cands.at(ci0).node;
             let xa = unsafe &*self.p().module_syntax(xm as ModuleId);
-            if xa.nodes.len() == 0 {
+            let ed = xa.at_const(iid).as_data.extend_def;
+            let tg = xa.resolution_def(ed.target_type);
+            if tg.module != rdm || tg.node != rdn {
                 continue;
             }
-            let items = xa.at_const(xa.root).as_data.program.items;
-            for i in 0..items.len {
-                let iid = unsafe xa.list(items)[i as usize];
-                let ed = xa.at_const(iid).as_data.extend_def;
-                if xa.at_const(iid).kind != NodeKind::NODE_EXTEND || ed.interface_type == NODE_NONE || ed.target_type == NODE_NONE {
-                    continue;
+            if !self.ext_readable(xm as ModuleId, iid) {
+                return false;
+            }
+            let mut list = Vector::<ISub>::new();
+            if !self.bind_extend(&mut list, xm as ModuleId, iid, rn, ram, rat) {
+                continue; // the extend does not apply to this instance
+            }
+            // The conformance's whole argument list, defaults included, as the checker recorded it
+            // on the interface path (`dyn I<args>`).
+            let dt = xa.type_of(ed.interface_type);
+            if dt == TYPE_NONE {
+                return false;
+            }
+            let ci = *xa.instance(xa.type_at(dt).as_data.inst);
+            if ci.n != di.n {
+                continue;
+            }
+            // The conformance's arguments match the bound's, binding the extend's parameters
+            // its target does not name.
+            let mut same = true;
+            for k in 0..ci.n {
+                if same && !self.iunify(
+                    xm as ModuleId,
+                    unsafe ci.args[k as usize],
+                    unsafe wm[k as usize],
+                    unsafe wt[k as usize],
+                    xm as ModuleId,
+                    ed.generics,
+                    &mut list,
+                    0,
+                ) {
+                    same = false;
                 }
-                let ir0 = xa.resolution_def(ed.interface_type);
-                let tg = xa.resolution_def(ed.target_type);
-                if ir0.module != di.module || ir0.node != di.decl || tg.module != rdm || tg.node != rdn {
-                    continue;
+            }
+            if same && self.isub_bounds_hold(xm as ModuleId, iid, &list, b.module) {
+                *out = DefId { module: xm as ModuleId, node: iid };
+                for q in 0..list.len() {
+                    obinds.push(*list.at(q));
                 }
-                if !self.ext_readable(xm as ModuleId, iid) {
-                    return false;
-                }
-                let mut list = Vector::<ISub>::new();
-                if !self.bind_extend(&mut list, xm as ModuleId, iid, rn, ram, rat) {
-                    continue; // the extend does not apply to this instance
-                }
-                // The conformance's whole argument list, defaults included, as the checker recorded it
-                // on the interface path (`dyn I<args>`).
-                let dt = xa.type_of(ed.interface_type);
-                if dt == TYPE_NONE {
-                    return false;
-                }
-                let ci = *xa.instance(xa.type_at(dt).as_data.inst);
-                if ci.n != di.n {
-                    continue;
-                }
-                // The conformance's arguments match the bound's, binding the extend's parameters
-                // its target does not name.
-                let mut same = true;
-                for k in 0..ci.n {
-                    if same && !self.iunify(
-                        xm as ModuleId,
-                        unsafe ci.args[k as usize],
-                        unsafe wm[k as usize],
-                        unsafe wt[k as usize],
-                        xm as ModuleId,
-                        ed.generics,
-                        &mut list,
-                        0,
-                    ) {
-                        same = false;
-                    }
-                }
-                if same && self.isub_bounds_hold(xm as ModuleId, iid, &list, b.module) {
-                    *out = DefId { module: xm as ModuleId, node: iid };
-                    for q in 0..list.len() {
-                        obinds.push(*list.at(q));
-                    }
-                    return true;
-                }
+                return true;
             }
         }
         return false;
@@ -9224,7 +9210,78 @@ extend Interp {
 
     // Every extend conforming declaration `(rdm, rdn)` (builtin `rb` for node NODE_NONE) to `iface`,
     // in module and item order, into `out`.
-    fn conf_ext_scan(self: &Self, rdm: ModuleId, rdn: NodeId, rb: BuiltinType, iface: DefId, out: &mut Vector<DefId>) {
+    fn conf_ext_scan(
+        self: &mut Self,
+        rdm: ModuleId,
+        rdn: NodeId,
+        rb: BuiltinType,
+        iface: DefId,
+        out: &mut Vector<DefId>,
+    ) {
+        let mut cands = Vector::<DefId>::new();
+        self.iface_exts(iface, &mut cands);
+        for i in 0..cands.len() {
+            let c = *cands.at(i);
+            let a = unsafe &*self.p().module_syntax(c.module);
+            let ed = a.at_const(c.node).as_data.extend_def;
+            let mut hit = false;
+            if rdn != NODE_NONE {
+                let tg = a.resolution_def(ed.target_type);
+                hit = tg.module == rdm && tg.node == rdn;
+            } else {
+                let tt = self.tof(c.module, a, ed.target_type);
+                hit = tt != TYPE_NONE && a.type_at(tt).kind == TypeKind::TYPE_BUILTIN && a.type_at(tt).as_data.builtin == rb;
+            }
+            if hit {
+                out.push(c);
+            }
+        }
+    }
+
+    // Every extend with an interface and a target whose interface is `iface`, in module and item order,
+    // into `out`: from the index once every module is typed, else from a scan of the modules' items.
+    fn iface_exts(self: &mut Self, iface: DefId, out: &mut Vector<DefId>) {
+        let key = iface.module as u64 << 32 | iface.node as u64;
+        if !self.all_typed {
+            self.ext_scan(key, out);
+            return;
+        }
+        if !self.ext_built {
+            self.ext_built = true;
+            let mut all = Vector::<DefId>::new();
+            self.ext_scan(0xFFFFFFFFFFFFFFFFu64, &mut all);
+            // Grouped per interface, each group in scan order: a stable sort by the interface's key.
+            let mut keyed = Vector::<u128>::with_capacity(all.len());
+            for i in 0..all.len() {
+                let c = *all.at(i);
+                let a = unsafe &*self.p().module_syntax(c.module);
+                let r = a.resolution_def(a.at_const(c.node).as_data.extend_def.interface_type);
+                keyed.push((r.module as u64 << 32 | r.node as u64) as u128 << 32 | i as u64);
+            }
+            keyed.sort();
+            for k in 0..keyed.len() {
+                let ik = (keyed[k] >> 32) as u64;
+                let c = *all.at((keyed[k] & 0xFFFFFFFF) as usize);
+                let at = self.ext_pool.len() as u64;
+                let v = switch self.ext_ix.get(&ik) {
+                    Some(x) => *x + 1,
+                    None => at << 32 | 1,
+                };
+                self.ext_ix.insert(ik, v);
+                self.ext_pool.push(c);
+            }
+        }
+        if let Some(v) = self.ext_ix.get(&key) {
+            let start = (*v >> 32) as usize;
+            for i in start..start + (*v & 0xFFFFFFFFu64) as usize {
+                out.push(*self.ext_pool.at(i));
+            }
+        }
+    }
+
+    // Every extend with an interface and a target whose interface's key is `key` (all of them for
+    // u64::MAX), in module and item order, into `out`.
+    fn ext_scan(self: &Self, key: u64, out: &mut Vector<DefId>) {
         for mi in 0..self.p().modules.len() {
             let mm = mi as ModuleId;
             let a = unsafe &*self.p().module_syntax(mm);
@@ -9242,18 +9299,7 @@ extend Interp {
                     continue;
                 }
                 let ir = a.resolution_def(ed.interface_type);
-                if ir.module != iface.module || ir.node != iface.node {
-                    continue;
-                }
-                let mut hit = false;
-                if rdn != NODE_NONE {
-                    let tg = a.resolution_def(ed.target_type);
-                    hit = tg.module == rdm && tg.node == rdn;
-                } else {
-                    let tt = self.tof(mm, a, ed.target_type);
-                    hit = tt != TYPE_NONE && a.type_at(tt).kind == TypeKind::TYPE_BUILTIN && a.type_at(tt).as_data.builtin == rb;
-                }
-                if hit {
+                if key == 0xFFFFFFFFFFFFFFFFu64 || (ir.module as u64 << 32 | ir.node as u64) == key {
                     out.push(DefId { module: mm, node: iid });
                 }
             }

@@ -1087,12 +1087,16 @@ The registry unit stays C: it includes the scoped headers so the C compiler chec
 declarations. The vector bounds-check helpers live in `std/rt/lanes.spc`, loaded only when a
 program names a vector type.
 
-`check_all` (end of `cemit_package`, under `SC_LIR`) verifies every body, round-trips the text,
-and in a test build runs each test without fixture arguments in the evaluator: against the CTFE
-run (`lw::probe_tests`, before the body syntax is released; trap kind and location must match),
-or, where CTFE cannot finish without an FFI call, against the test's expectation (it passes, or
-with `should_panic` it traps). A test that calls FFI (CTFE's `Interp.ffi`, or the evaluator's
-`EV_FFI`) or passes a budget is not compared. Inline-assembly and naked bodies stay in C.
+`check_all` (end of `cemit_package`, under `SC_LIR`) verifies every body the build rendered (the
+per-TU cache keys on `SC_LIR`, so a replayed module passed it before), and under `SC_LIR_EVAL` in a
+test build runs each test without fixture arguments in the evaluator, the tests spread over
+`--jobs` workers with an evaluator each: against the CTFE run (`lw::probe_tests`, before the body
+syntax is released, 1<<18 steps; trap kind and location must match), or, where CTFE stops at a
+construct it does not support, against the test's expectation (it passes, or with `should_panic` it
+traps). A test that calls FFI (CTFE's `Interp.ffi`, or the evaluator's `EV_FFI`) or passes a budget
+(CTFE's, or the evaluator's 1<<21 steps) is not compared. The test build then ends: `run_package`
+returns after the emission, and `manifest_test` builds no project binary and runs no test.
+Inline-assembly and naked bodies stay in C.
 
 ## Emission Buffers and Probes
 

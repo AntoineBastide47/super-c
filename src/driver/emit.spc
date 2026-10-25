@@ -37,6 +37,7 @@ import ir::cpu_features as cf;
 import emit::cemit as cbe;
 import lir::lower as lw;
 import lir::ir as lir_ir;
+import lir::print as lprint;
 import target::native as nat;
 import bindgen::bindgen as bg;
 import bindgen::ctarget as ct;
@@ -4711,9 +4712,9 @@ pub fn cemit_package(
         eprint("cemit-stage inst-asserts: {} ms, {} instances\n", t9 - tt0, ian);
         tt0 = t9;
     }
-    // The LIR check compares each test's CTFE run with the evaluator's: CTFE reads the syntax.
+    // SC_LIR_EVAL compares each test's CTFE run with the evaluator's: CTFE reads the syntax.
     let mut ctfe = Vector::<lw::CtfeRes>::new();
-    if testing && stdlib::getenv("SC_LIR") != null {
+    if testing && stdlib::getenv("SC_LIR") != null && stdlib::getenv("SC_LIR_EVAL") != null {
         let mut ts = Vector::<u64>::new();
         let mut sp = Vector::<bool>::new();
         for i in 0..tplan.cases.len() {
@@ -6237,16 +6238,17 @@ pub fn cemit_package(
     }
     prd.merge(&dow.pr);
     prd.merge(&cem.pr);
-    // The LIR check of a build that emitted every body (a refused one fails the build already).
+    // The LIR check of the bodies this build rendered (a refused one fails the build already). A module
+    // the per-TU cache replayed passed it in the build that recorded it: SC_LIR is part of the key.
     if cem.lir.is_some() && p.ok && cem.refused.len() == 0 && stdlib::getenv("SC_LIR") != null {
         let mut l = replace(&mut cem.lir, Option::<Box<lw::Lower>>::None).unwrap();
-        let mut text = String::new();
-        if !l.deref_mut().check_all(p, &mut text) {
+        if !l.deref_mut().check_all(p) {
             p.ok = false;
         }
-        let tp = stdlib::get_env("SC_LIR_TEXT");
-        if tp.is_some() {
-            let _ = write_file(tp.unwrap().as_str(), text.as_str());
+        if let Some(tp) = stdlib::get_env("SC_LIR_TEXT") {
+            let mut text = String::new();
+            lprint::print_package(&l.deref().pkg, &mut text);
+            let _ = write_file(tp.as_str(), text.as_str());
         }
         cem.lir_put(l);
     }
@@ -14217,6 +14219,11 @@ pub fn run_package(
             }
         }
         err = true;
+    }
+    // The evaluator check (`SC_LIR_EVAL`) of a test build ran in the emission: nothing is written, compiled
+    // or run.
+    if testing && stdlib::getenv("SC_LIR") != null && stdlib::getenv("SC_LIR_EVAL") != null {
+        return pick(err, 1, 0);
     }
     // A failed emission leaves instances out: the C compiler must not see the units that call them.
     let osink = if !err {

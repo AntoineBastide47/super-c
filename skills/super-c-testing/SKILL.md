@@ -459,13 +459,17 @@ sources and the system and framework headers the host has.
 ### The LIR check
 
 `check.sh` runs the suite under `SC_LIR=1`, and the release workflow's first test shard of each
-target sets it: the compiler under test and the test bundle both lower every body to LIR and fail
-the build on a verifier error, a text round trip that differs, or a test whose LIR evaluator run
-disagrees with CTFE (super-c-compiler-internals, "LIR"). The test binary runs without it, so the
-compiles inside tests are plain. `tests/codegen/lir_test.spc` covers the tool calls, the verifier, the
-parser, and the evaluator on a tool-built body and on vector operations. To find a disagreement,
-rebuild one test file under `SC_LIR=1 SC_LIR_STATS=1 super-c test --quiet --filter=<file>`, then
-use `SC_LIR_RUN=<test symbol>` and `SC_LIR_TRACE=1`.
+target sets it: the compiler under test and the test bundle lower every body they render to LIR and
+fail the build on a verifier error (super-c-compiler-internals, "LIR"). The per-TU cache keys on it,
+so a warm run checks only the modules it renders. The test binary runs without it, so the compiles
+inside tests are plain. `tests/codegen/lir_test.spc` covers the tool calls, the verifier, the parser,
+the evaluator on a tool-built body and on vector operations, and the text form: a package with every
+opcode, condition, read-modify-write operation and machine type reads back to the same bytes.
+`tests/codegen/lir_eval_test.spc` runs `super-c test` under `SC_LIR_EVAL` over the math and std
+tests: the evaluator must agree with CTFE, and at least three quarters of the tests must run under
+it; the math build's LIR text must read back to the same bytes and verify. To find a disagreement,
+rebuild one test file under `SC_LIR=1 SC_LIR_EVAL=1 SC_LIR_STATS=1 super-c test --quiet
+--filter=<file>`, then use `SC_LIR_RUN=<test symbol>` and `SC_LIR_TRACE=1`.
 
 ### The native backend
 

@@ -25,9 +25,9 @@ done
 
 # 3) Full test suite with the current compiler (built first if stale), leak-gated: every process in
 # the run (compiler, harness, spawned servers, compiled fixtures) exits nonzero on leaks/double frees.
-# SC_LIR checks both builds (the compiler under test and the suite) with LIR: every body lowers, passes
-# the verifier and reads back from its text, and the evaluator agrees with CTFE on each test; the C is
-# the same.
+# SC_LIR checks both builds (the compiler under test and the suite) with LIR: every body lowers and
+# passes the verifier (a module the per-TU cache replays passed it when recorded); the C is the same.
+# The evaluator and the text form have their own tests (tests/codegen/lir_eval_test.spc, lir_test.spc).
 printf 'check: tests\n'
 if ! SC_LEAK_CHECK=fatal SC_LIR=1 ./super-c test --quiet; then
     printf 'check: FAILED -- test failures above\n' >&2
