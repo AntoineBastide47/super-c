@@ -84,14 +84,14 @@ fn walk_files(dir: str, base_len: usize, out: &mut Vector<String>) {
     }
 }
 
-// `walk_files` over a generated tree: a `.c` or `.h` name there is a file, so only other names cost
-// a stat (the tree holds one definition header per type).
+// `walk_files` over a generated tree: a `.c`, `.h` or `.o` name there is a file, so only other names
+// cost a stat (the tree holds one definition header per type).
 fn walk_gen_files(dir: str, base_len: usize, out: &mut Vector<String>) {
     let names = list_dir(dir, false).unwrap_or(Vector::<String>::new());
     for i in 0..names.len() {
         let nm = names.at(i).as_str();
         let p = loader::join2(dir, nm);
-        if !nm.ends_with(".c") && !nm.ends_with(".h") && is_dir(p.as_str()) {
+        if !nm.ends_with(".c") && !nm.ends_with(".h") && !nm.ends_with(".o") && is_dir(p.as_str()) {
             walk_gen_files(p.as_str(), base_len, out);
         } else {
             let full = p.as_str();
@@ -1479,6 +1479,18 @@ extend CcStream {
         if changed {
             self.rewritten.insert(String::from_str(rel));
         }
+        if kind == 3 {
+            // A native object: linked as it is. A new one relinks, as a compiled object does.
+            if changed && !self.marked {
+                self.marked = true;
+                if !write_file(self.pending.as_str(), "") {
+                    eprintln("build: cannot write '{}'", self.pending.as_str());
+                    self.ret = 1;
+                }
+            }
+            self.objs.push(String::from_str(path));
+            return;
+        }
         if kind != 1 {
             if text.len() != 0 && self.cache.len() != 0 {
                 let mut key = String::new();
@@ -2154,6 +2166,15 @@ fn stamp_write(
             stamp_line(&mut out, "in\t", md.mtime as u64, md.src_id, md.file.as_str());
         }
     }
+    // A native build reads C headers' constants into its objects.
+    for i in 0..p.header_files.len() {
+        let hp = p.header_files.at(i).as_str();
+        let h = file_id(hp);
+        if h == 0 {
+            return;
+        }
+        stamp_line(&mut out, "in\t", file_mtime(hp) as u64, h, hp);
+    }
     // Every directory import resolution listed, and the prelude's: a new `.spc` file there can shadow an
     // import (a root file beside an alt-root or std module) or join the prelude without changing any
     // input recorded above.
@@ -2491,65 +2512,84 @@ fn emit_closure(
     } else {
         StampLoad { t0: 0, std_mt: 0, std_h: 0 };
     };
-    loader::set_load_jobs(jobs);
-    let tl0 = ticks_ms();
-    // The build settings the prelude's build constants spell (`@arch` gates on the instruction
-    // set too), set before the load.
-    let mut p = loader::package_new(root_dir, alt, cx.std_dir);
-    p.arch = m.arch;
-    p.features = features_for(m, prof_name, cx.target_features);
-    p.simd_width = simd_width(m, cx);
-    p.simd_dispatch = String::from_str(dispatch_for(m, prof_name, simd_dispatch(m, cx)));
-    let pi = m.profile_index(prof_name);
-    if pi >= 0 {
-        let mut fl = String::new();
-        push_all(&mut fl, &m.cflags);
-        push_profile_side(&mut fl, m.profiles.at(pi as usize), &m.profiles.at(pi as usize).cflags, false, cx.target);
-        p.mem_check = mem_checker(fl.as_str());
-        p.build_cfg = build_cfg(fl.as_str());
-    }
-    p.test_build = topts != null && unsafe (*topts).enabled;
-    p.profile = String::from_str(prof_name);
-    p.profiles = profile_names(m);
-    p.bootstrap = cx.bootstrap_tags;
-    let pkg = (&mut p) as *mut loader::Package;
-    let mut cirv = iri::interp_master(pkg, cx.ce_steps, cx.ce_mem);
-    let cdir = object_cache_dir(project_name(m));
-    if prelude_stage(&mut p, &mut cirv, cx.std_dir, root, cx.target, jobs, cx.ce_steps, cx.ce_mem, cdir.as_str()) {
-        // After the prelude stage, which may swap in a saved prelude package.
-        p.std_internals = m.std_internals;
-        p.lib_build = m.lib_name.len() != 0 && root == m.lib_root.as_str();
-        p.load_user(root, cx.std_dir, cx.target);
-    }
-    bst::mark(bst::B_LOAD);
-    if stdlib::getenv("SC_CEMIT_STATS") != null {
-        eprintln("phase load: {} ms", ticks_ms() - tl0);
-    }
-    loader::set_load_jobs(1);
-    if !p.ok {
-        if jobs != 1 {
-            prt::shutdown(); // parallel loading started the pool
+    // The modules whose bodies render though the native backend may take them: each run gets the names
+    // every earlier one returned with RC_NATIVE_RETRY. A run names only modules that did not render, so
+    // the runs end within one per module.
+    let mut retry = Vector::<String>::new();
+    let mut rc: i32 = 1;
+    loop {
+        loader::set_load_jobs(jobs);
+        let tl0 = ticks_ms();
+        // The build settings the prelude's build constants spell (`@arch` gates on the instruction
+        // set too), set before the load.
+        let mut p = loader::package_new(root_dir, alt, cx.std_dir);
+        p.arch = m.arch;
+        p.features = features_for(m, prof_name, cx.target_features);
+        p.simd_width = simd_width(m, cx);
+        p.simd_dispatch = String::from_str(dispatch_for(m, prof_name, simd_dispatch(m, cx)));
+        let pi = m.profile_index(prof_name);
+        if pi >= 0 {
+            let mut fl = String::new();
+            push_all(&mut fl, &m.cflags);
+            push_profile_side(&mut fl, m.profiles.at(pi as usize), &m.profiles.at(pi as usize).cflags, false, cx.target);
+            p.mem_check = mem_checker(fl.as_str());
+            p.build_cfg = build_cfg(fl.as_str());
+            p.cflags = m.cstd.clone();
+            p.cflags.push_string(&fl);
         }
-        return 1;
-    }
-    p.gen_root = String::from_str(srcgen);
-    for i in 0..m.shards.len() {
-        p.shard_rules.push(
-            loader::ShardRule {
-                module: m.shards.at(i).module.clone(),
-                tus: m.shards.at(i).tus,
-                insts: m.shards.at(i).insts,
-            },
-        );
-    }
-    p.jobs = p.analysis_jobs(jobs);
-    if p.jobs == 1 && jobs != 1 {
-        prt::shutdown(); // parallel loading may have started the pool
-    }
-    p.cir = &mut cirv;
-    let rc = run_package(&mut p, topts, "", cx.target, cx.lint, "", "", sink);
-    if rc == 0 && cid != 0 {
-        stamp_write(stamp, &p, m, cx.std_dir, root_dir, cx.target, cx.bootstrap_tags, cx.lint, p.c_files, cid, &sl);
+        p.pic = m.lib_shared && tgt::obj_of(cx.target).pic;
+        p.test_build = topts != null && unsafe (*topts).enabled;
+        p.profile = String::from_str(prof_name);
+        p.profiles = profile_names(m);
+        p.bootstrap = cx.bootstrap_tags;
+        let pkg = (&mut p) as *mut loader::Package;
+        let mut cirv = iri::interp_master(pkg, cx.ce_steps, cx.ce_mem);
+        let cdir = object_cache_dir(project_name(m));
+        if prelude_stage(&mut p, &mut cirv, cx.std_dir, root, cx.target, jobs, cx.ce_steps, cx.ce_mem, cdir.as_str()) {
+            // After the prelude stage, which may swap in a saved prelude package.
+            p.std_internals = m.std_internals;
+            p.lib_build = m.lib_name.len() != 0 && root == m.lib_root.as_str();
+            p.load_user(root, cx.std_dir, cx.target);
+        }
+        bst::mark(bst::B_LOAD);
+        if stdlib::getenv("SC_CEMIT_STATS") != null {
+            eprintln("phase load: {} ms", ticks_ms() - tl0);
+        }
+        loader::set_load_jobs(1);
+        if !p.ok {
+            if jobs != 1 {
+                prt::shutdown(); // parallel loading started the pool
+            }
+            return 1;
+        }
+        p.gen_root = String::from_str(srcgen);
+        for i in 0..m.shards.len() {
+            p.shard_rules.push(
+                loader::ShardRule {
+                    module: m.shards.at(i).module.clone(),
+                    tus: m.shards.at(i).tus,
+                    insts: m.shards.at(i).insts,
+                },
+            );
+        }
+        p.jobs = p.analysis_jobs(jobs);
+        if p.jobs == 1 && jobs != 1 {
+            prt::shutdown(); // parallel loading may have started the pool
+        }
+        p.cir = &mut cirv;
+        p.nat_retry = retry.clone();
+        rc = run_package(&mut p, topts, "", cx.target, cx.lint, "", "", sink);
+        if rc == RC_NATIVE_RETRY {
+            while let Some(x) = p.nat_retry.pop() {
+                retry.push(x);
+            }
+            assert(retry.len() <= p.modules.len(), "native: each run renders a module no earlier one did");
+            continue;
+        }
+        if rc == 0 && cid != 0 {
+            stamp_write(stamp, &p, m, cx.std_dir, root_dir, cx.target, cx.bootstrap_tags, cx.lint, p.c_files, cid, &sl);
+        }
+        break;
     }
     // The stamp record is the last output of the emission; the package's teardown that follows
     // belongs to the sync phase.
@@ -2730,13 +2770,14 @@ pub fn transpile_step(
     // The LIR check needs every body emitted.
     let cache_on = stdlib::getenv("SC_NO_EMIT_CACHE") == null && stdlib::getenv("SC_LIR") == null;
     let external = cx.transpiler.len() != 0;
-    // The emitting compiler's identity, read before the emission: the tree it emits is its function.
+    // The emitting compiler's identity, read before the emission: the tree it emits is its function, and
+    // of the backend selection (SC_NATIVE).
     let cid = if !cache_on {
         0 as u64;
     } else if external {
         transpiler_id(cx.transpiler);
     } else {
-        compiler_id();
+        compiler_id() ^ fnv_cont(FNV_BASIS, stdlib::get_env("SC_NATIVE").unwrap_or(String::from_str("-")).as_str());
     };
     let mut gen_files = Vector::<String>::new();
     let skipped = cache_on && stamp_fresh(
@@ -3339,6 +3380,10 @@ fn engine_build_i(
                 let rel = rels.at(i).as_str();
                 if rel.ends_with(".c") && !included.contains(rels.at(i)) {
                     stream.plan_c(rel, "");
+                } else if rel.ends_with(".o") {
+                    // A native object the emission wrote.
+                    let op = loader::join2(gen.as_str(), rel);
+                    stream.on_file(op.as_str(), "", 3, false);
                 }
             }
         }
@@ -3453,12 +3498,18 @@ fn engine_build_i(
             let mut need = bmt == 0 || file_mtime(stream.pending.as_str()) != 0;
             // An object's time is its `.cmd` record's (see `obj_stale`): another tree's use of a
             // shared cache entry refreshes the object's own mtime.
+            // A native object has no record: its own time.
             for i in 0..objs.len() {
                 if !need {
                     let o = objs.at(i).as_str();
                     let mut cp = String::from_str(o.slice(0, o.len() - 2));
                     cp.push_str(".cmd");
-                    need = file_mtime(cp.as_str()) > bmt;
+                    let ct = file_mtime(cp.as_str());
+                    need = if ct != 0 {
+                        ct > bmt;
+                    } else {
+                        file_mtime(o) > bmt;
+                    };
                 }
             }
             if !need {

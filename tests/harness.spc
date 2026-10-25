@@ -547,6 +547,16 @@ pub fn compile_and_run(src: str) RunResult {
 // As compile_and_run, but with `env` ("VAR=v " assignments, trailing space) prefixed to the run command.
 /// `compile_and_run` with `env` (space-separated NAME=VALUE) applied to the program.
 pub fn compile_and_run_env(src: str, env: str) RunResult {
+    return compile_and_run_in(src, "", env);
+}
+
+/// `compile_and_run` through the C backend: the C emitter's own behavior.
+pub fn compile_and_run_c(src: str) RunResult {
+    return compile_and_run_in(src, "SC_NATIVE=0 ", "");
+}
+
+// `compile_and_run` with `benv` applied to the build and `env` to the program.
+fn compile_and_run_in(src: str, benv: str, env: str) RunResult {
     let mut r = RunResult { built: false, exit: -1, out: null };
     let dir = scratch_dir();
     if dir.len() == 0 {
@@ -558,7 +568,7 @@ pub fn compile_and_run_env(src: str, env: str) RunResult {
         return r;
     }
     let bin = format("{}/prog{}", d, unsafe str::from_cstr(cli::binext()));
-    if !build_script(d, bin.as_str()) {
+    if !build_script(d, bin.as_str(), benv) {
         rm_dir(d);
         return r;
     } // did not build
@@ -604,7 +614,7 @@ fn write_text(path: str, text: str) bool {
 }
 
 // Build `<dir>/main.spc` as a script into `bin` with the compiler under test; whether it built.
-fn build_script(dir: str, bin: str) bool {
+fn build_script(dir: str, bin: str, env: str) bool {
     let mut cmd = format(
         "\"{}\" build {} \"{}/main.spc\" -o \"{}\"",
         cli::superc_path(),
@@ -612,7 +622,7 @@ fn build_script(dir: str, bin: str) bool {
         dir,
         bin,
     );
-    return cli::run_with(cmd.cstr(), null, null, null, "") == 0;
+    return cli::run_with(cmd.cstr(), null, null, null, env) == 0;
 }
 
 // Build+run `src` and require it to terminate with exit code `code` (the analog of tests/codegen_run's
@@ -781,7 +791,7 @@ extend ExitBatch {
         root.push_string(&body);
         assert(write_text(format("{}/main.spc", d).as_str(), root.as_str()), "harness: cannot write the batch root");
         let bin = format("{}/prog{}", d, unsafe str::from_cstr(cli::binext()));
-        if !build_script(d, bin.as_str()) {
+        if !build_script(d, bin.as_str(), "") {
             rm_dir(dir.as_str());
             for i in 0..batched.len() {
                 self.alone(batched[i]);

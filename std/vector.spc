@@ -135,7 +135,11 @@ extend<T, A: Allocator> Vector<T, A> {
 
     /// Appends `value`, taking ownership of it; amortised O(1).
     pub const fn push(self: &mut Vector<T, A>, value: T) {
-        self.reserve(1);
+        // Only a full vector grows (a zero-sized `T`'s first push sets the capacity to the maximum, so
+        // `reserve` then sees only the length overflow).
+        if self.len == self.cap {
+            self.reserve(1);
+        }
         unsafe self.ptr[self.len] = value;
         self.len = self.len + 1;
     }

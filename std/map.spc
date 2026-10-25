@@ -284,20 +284,49 @@ extend<K: Hash + Eq, V, A: Allocator, S: BuildHasher> Map<K, V, A, S> {
     }
 
     /// Drop every entry (deep-freeing keys and values) but KEEP the table storage for reuse: a
-    /// cleared map re-fills without touching the allocator.
+    /// cleared map re-fills without touching the allocator. Storage more than 8 times larger than the
+    /// entries (an earlier fill grew it) is released instead, so a clear costs O(entries) amortized: a
+    /// map that keeps its size never grows past 3 times its entries.
     pub fn clear(self: &mut Map<K, V, A, S>) {
+        // An empty map has every slot unused (`remove` shifts entries back, leaving no tombstones).
+        if self.len == 0 {
+            return;
+        }
+        let mut left = self.len;
         for i in 0..self.cap {
             if unsafe self.used[i] != 0 {
                 // No-op if K isn't Free.
                 unsafe self.keys[i].free();
                 // No-op if V isn't Free.
                 unsafe self.vals[i].free();
+                left -= 1;
+                if left == 0 {
+                    break;
+                }
             }
         }
-        if self.cap > 0 {
+        if self.cap > 64 && self.cap > 8 * self.len {
+            self.release();
+        } else {
             unsafe memset(self.used, 0, self.cap);
         }
         self.len = 0;
+    }
+
+    // Return the table storage to the allocator: the map holds no entry, and grows again from empty.
+    fn release(self: &mut Map<K, V, A, S>) {
+        if sizeof(K) != 0 {
+            unsafe self.alloc.dealloc(self.keys, self.cap * sizeof(K), alignof(K));
+        }
+        if sizeof(V) != 0 {
+            unsafe self.alloc.dealloc(self.vals, self.cap * sizeof(V), alignof(V));
+        }
+        unsafe self.alloc.dealloc(self.used, self.cap, alignof(u8));
+        self.keys = null;
+        self.vals = null;
+        self.used = null;
+        self.len = 0;
+        self.cap = 0;
     }
 
     /// Insert or overwrite `key` -> `value`. On overwrite the existing key is kept; the duplicate key and the
@@ -508,18 +537,7 @@ extend<K: Hash + Eq, V, A: Allocator, S: BuildHasher> Map<K, V, A, S> as Free {
                 unsafe self.vals[i].free();
             }
         }
-        if sizeof(K) != 0 {
-            unsafe self.alloc.dealloc(self.keys, self.cap * sizeof(K), alignof(K));
-        }
-        if sizeof(V) != 0 {
-            unsafe self.alloc.dealloc(self.vals, self.cap * sizeof(V), alignof(V));
-        }
-        unsafe self.alloc.dealloc(self.used, self.cap, alignof(u8));
-        self.keys = null;
-        self.vals = null;
-        self.used = null;
-        self.len = 0;
-        self.cap = 0;
+        self.release();
     }
 }
 

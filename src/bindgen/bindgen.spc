@@ -386,6 +386,10 @@ struct Collected {
     /// Object-like macros of the `-dM` dump: name -> offsets of the replacement text in the dump
     /// (start << 32 | end). Built once, so a lookup does not rescan the dump.
     pub macros: Map<String, u64>,
+    /// The `static` functions of every origin: no object exports them.
+    pub statics: Set<String>,
+    pub alias_ix: Map<String, u32>, // per alias name, its index in `aliases`
+    pub opaque_set: Set<String>, // the names in `opaques`
 }
 
 // Vendor noise that carries no meaning for a binding. `__attribute__`, `__declspec` and `asm` take a
@@ -459,6 +463,13 @@ const fn int_literal(t: str) i64 {
     if n > 2 && t.byte_at(0) == b'0' && (t.byte_at(1) == b'x' || t.byte_at(1) == b'X') {
         base = 16;
         i = 2;
+    } else if n > 2 && t.byte_at(0) == b'0' && (t.byte_at(1) == b'b' || t.byte_at(1) == b'B') {
+        base = 2;
+        i = 2;
+    } else if n > 1 && t.byte_at(0) == b'0' {
+        // C reads a leading 0 as octal.
+        base = 8;
+        i = 1;
     }
     let mut v: i64 = 0;
     let mut any = false;
@@ -524,10 +535,18 @@ fn same_origin(a: str, want: str, extra: &Vector<String>) bool {
 }
 
 // Preprocess `header` under the C environment `env`, with the `-I` directories `incs` searched before the
-// system ones: the `cc -E` text into `text` and the `cc -E -dM` dump into `dump`. False after an error, which
-// the preprocessor reports on stderr.
-fn preprocess(env: &ct::CTarget, header: str, incs: &Vector<String>, text: &mut String, dump: &mut String) bool {
-    let mut files = Vector::<cpp::VFile>::new();
+// system ones and the in-memory files `files`: the `cc -E` text into `text` and the `cc -E -dM` dump into
+// `dump`. False after an error, which the preprocessor reports on stderr.
+fn preprocess(
+    env: &ct::CTarget,
+    header: str,
+    incs: &Vector<String>,
+    mut files: Vector<cpp::VFile>,
+    text: &mut String,
+    dump: &mut String,
+    read: &mut Vector<String>,
+    quiet: bool,
+) bool {
     for i in 0..env.headers.len() {
         files.push(
             cpp::VFile {
@@ -552,11 +571,132 @@ fn preprocess(env: &ct::CTarget, header: str, incs: &Vector<String>, text: &mut 
             has: has,
         },
     );
-    if !pp.preprocess(header, text) {
+    pp.quiet = quiet;
+    let ok = pp.preprocess(header, text);
+    *read = replace(&mut pp.disk_paths, Vector::<String>::new());
+    if !ok {
         return false;
     }
     pp.dump_macros(dump);
     return true;
+}
+
+/// The C environment of target `target` and `arch` with the C flags `flags` (`ct::apply_c_flags`) into
+/// `env`; false when the target has none or a flag does not apply.
+pub fn header_env(target: i32, arch: i32, flags: str, env: &mut ct::CTarget) bool {
+    return ct::c_target(target, arch, "", env) && ct::apply_c_flags(flags, env);
+}
+
+/// The facts of C header `header` (an `#include` operand: `<name>` or `"path"`) under C environment
+/// `env` (`header_env`) that a native build reads: the
+/// values of the integer constants `names` it defines (macros, which may name enumerators and other
+/// macros, or enumerators), `vals[k]` holding the value of `names[k]` when `oks[k]`, and whether each of
+/// the functions `fns` is `static` there (`statics[k]`): no object exports it. `read` takes the files the
+/// preprocessor read. False when the header does not preprocess.
+pub fn header_facts(
+    env: &ct::CTarget,
+    header: str,
+    names: []str,
+    vals: &mut Vector<i64>,
+    oks: &mut Vector<bool>,
+    fns: []str,
+    statics: &mut Vector<bool>,
+    types: []str,
+    classes: &mut Vector<u8>,
+    read: &mut Vector<String>,
+) bool {
+    let path = "/__sc_header_ints.c";
+    let mut files = Vector::<cpp::VFile>::new();
+    files.push(cpp::VFile { path: String::from_str(path), text: format("#include {}\n", header) });
+    let mut text = String::new();
+    let mut dump = String::new();
+    let none = Vector::<String>::new();
+    if !preprocess(env, path, &none, files, &mut text, &mut dump, read, true) {
+        return false;
+    }
+    let mut c = Collected {
+        aliases: Vector::<Alias>::new(),
+        fns: Vector::<FnDecl>::new(),
+        opaques: Vector::<String>::new(),
+        records: Vector::<Record>::new(),
+        enums: Vector::<EnumDef>::new(),
+        consts: Vector::<ConstDef>::new(),
+        globals: Vector::<ConstDef>::new(),
+        widths: Widths { short_b: 2, int_b: 4, long_b: 8, llong_b: 8 },
+        cur_mine: false,
+        pending_agg: -1,
+        pending_is_enum: false,
+        saw_extern: false,
+        skipped: 0,
+        macros: Map::<String, u64>::new(),
+        statics: Set::<String>::new(),
+        alias_ix: Map::<String, u32>::new(),
+        opaque_set: Set::<String>::new(),
+    };
+    c.index_macros(dump.as_str());
+    c.widths = read_widths(&c, dump.as_str());
+    let mut lx = Lexer::new(text.as_str());
+    lx.parse_unit(&mut c, path, &none, dump.as_str());
+    for k in 0..names.len() {
+        // The value's 64 bits: an unsigned 64-bit constant past i64 keeps its bits.
+        let v = ce_cv(names[k], &c, null, dump.as_str(), 0);
+        oks.push(v.is_some());
+        vals.push(
+            if v.is_some() {
+                cv_pat(v.unwrap()) as i64;
+            } else {
+                0;
+            },
+        );
+    }
+    for k in 0..fns.len() {
+        let key = String::from_str(fns[k]);
+        statics.push(c.statics.contains(&key));
+    }
+    for k in 0..types.len() {
+        classes.push(scalar_class(&c, types[k]));
+    }
+    return true;
+}
+
+/// `scalar_class`: typedef `name` is not a scalar (a record, `long double`, unknown).
+pub const SC_NONE: u8 = b'0';
+/// `scalar_class`: an integer or a pointer.
+pub const SC_INT: u8 = b'i';
+/// `scalar_class`: a `float`.
+pub const SC_F32: u8 = b'f';
+/// `scalar_class`: a `double`.
+pub const SC_F64: u8 = b'd';
+
+// The scalar class of typedef `name` (`SC_*`) through its chain of typedefs.
+fn scalar_class(c: &Collected, name: str) u8 {
+    let mut n = name;
+    // Each step follows one typedef; a chain is shorter than the alias table.
+    for _ in 0..c.aliases.len() + 1 {
+        let ai = c.alias_of(n);
+        if ai < 0 {
+            return SC_NONE;
+        }
+        let al = &c.aliases[ai as usize];
+        let sub = al.sub.as_str();
+        if !al.ok || al.opaque {
+            return SC_NONE;
+        }
+        if sub.starts_with("*") || sub.starts_with("fn(") {
+            return SC_INT;
+        }
+        let k = switch sub {
+            "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" | "char" | "bool" => SC_INT,
+            "f32" => SC_F32,
+            "f64" => SC_F64,
+            _ => 0u8,
+        };
+        if k != 0 {
+            return k;
+        }
+        n = sub;
+    }
+    return SC_NONE;
 }
 
 // One line of `text` starting at `i`, without its terminator.
@@ -570,37 +710,28 @@ const fn line_at<'a>(text: str<'a>, i: usize, end: &mut usize) str<'a> {
     return text.slice(i, e);
 }
 
-// `__SIZEOF_*__` is what the target reports, so `long` maps to what it will be.
-const fn read_widths(text: str) Widths {
-    let mut w = Widths { short_b: 2, int_b: 4, long_b: 8, llong_b: 8 };
-    let n = text.len();
-    let mut i: usize = 0;
-    while i < n {
-        let mut e: usize = 0;
-        let line = line_at(text, i, &mut e);
-        let v = macro_int(line);
-        if v > 0 {
-            if line_defines(line, "__SIZEOF_SHORT__") {
-                w.short_b = v;
-            } else if line_defines(line, "__SIZEOF_INT__") {
-                w.int_b = v;
-            } else if line_defines(line, "__SIZEOF_LONG__") {
-                w.long_b = v;
-            } else if line_defines(line, "__SIZEOF_LONG_LONG__") {
-                w.llong_b = v;
-            }
-        }
-        i = e + 1;
-    }
-    return w;
+// `__SIZEOF_*__` is what the target reports, so `long` maps to what it will be: from the macros
+// `index_macros` read.
+fn read_widths(c: &Collected, dump: str) Widths {
+    return Widths {
+        short_b: size_macro(c, dump, "__SIZEOF_SHORT__", 2),
+        int_b: size_macro(c, dump, "__SIZEOF_INT__", 4),
+        long_b: size_macro(c, dump, "__SIZEOF_LONG__", 8),
+        llong_b: size_macro(c, dump, "__SIZEOF_LONG_LONG__", 8),
+    };
 }
 
-const fn line_defines(line: str, name: str) bool {
-    if !line.starts_with("#define ") {
-        return false;
+// The value of size macro `name`, else `dflt`.
+fn size_macro(c: &Collected, dump: str, name: str, dflt: i32) i32 {
+    let mut v = String::new();
+    if !c.macro_value(dump, name, &mut v) {
+        return dflt;
     }
-    let rest = line[8..];
-    return rest.starts_with(name) && rest.len() > name.len() && rest.byte_at(name.len()) == b' ';
+    let b = macro_int(v.as_str());
+    if b <= 0 {
+        return dflt;
+    }
+    return b;
 }
 
 const fn macro_int(line: str) i32 {
@@ -627,57 +758,168 @@ const fn macro_int(line: str) i32 {
 }
 
 // C constant expressions
-// Enumerators and object-like macros are rarely bare literals: `(1 << 8)`, `A | B`, `SOME_OTHER_MACRO`;
-// and dropping every one of those loses most of a library's constants (91 of them in curl.h alone). This is
-// the integer subset of C's constant expressions: enough for the shapes headers use, and it
-// REFUSES anything else rather than guessing, because a constant that is subtly wrong is worse than absent.
+// Enumerators and object-like macros are rarely bare literals: `(1 << 8)`, `A | B`, `SOME_OTHER_MACRO`,
+// `((__uint64_t)1 << 63) - 1`; and dropping every one of those loses most of a library's constants (91 of
+// them in curl.h alone). This is the integer subset of C's constant expressions, with C's types: each
+// value carries its type after the integer promotions, literals take the type C gives them, operands
+// meet in the usual arithmetic conversions, and unsigned results wrap. It REFUSES anything else, and
+// every operation whose result C leaves undefined (a signed overflow, a shift by the width or more),
+// rather than guessing, because a constant that is subtly wrong is worse than absent.
 
 struct CExpr<'a> {
     pub lx: Lexer<'a>,
     pub ok: bool,
 }
 
+// A value of a C integer constant expression: its bits `v` in a type `bits` wide (32 or 64, after the
+// integer promotions; the bits above zero), unsigned when `uns`.
+struct CV {
+    pub v: u64,
+    pub bits: u32,
+    pub uns: bool,
+}
+
 const CE_DEPTH: i32 = 8;
+const U64_MAX: u64 = 0xFFFFFFFFFFFFFFFF;
+
+// The bits of a type `bits` wide.
+const fn mask(bits: u32) u64 {
+    return U64_MAX >> 64 - bits;
+}
+
+// The signed value of the bits `v` of a type `bits` wide.
+const fn sext(v: u64, bits: u32) i64 {
+    return (v << 64 - bits) as i64 >> 64 - bits;
+}
+
+// An `int` of value `v`.
+const fn cv_int(v: i64) CV {
+    return CV { v: v as u64 & mask(32), bits: 32, uns: false };
+}
+
+// The value of `x` in 64-bit two's complement.
+const fn cv_pat(x: CV) u64 {
+    if x.uns {
+        return x.v;
+    }
+    return sext(x.v, x.bits) as u64;
+}
+
+// Whether the type `bits` wide, unsigned when `uns`, holds the value of `x`.
+const fn cv_fits(x: CV, bits: u32, uns: bool) bool {
+    if !x.uns && sext(x.v, x.bits) < 0 {
+        return !uns && sext(x.v, x.bits) >= sext(~(mask(bits) >> 1), 64);
+    }
+    return x.v <= mask(bits) >> (!uns) as u32;
+}
+
+// The integer type a scalar binding names: `bits` wide (8 to 64), unsigned when `uns`; `ptr_bits` for
+// `usize` and `isize`. False for any other type.
+const fn int_ty(sub: str, ptr_bits: u32, bits: &mut u32, uns: &mut bool) bool {
+    let b: u32 = switch sub {
+        "i8" | "u8" => 8,
+        "i16" | "u16" => 16,
+        "i32" | "u32" => 32,
+        "i64" | "u64" => 64,
+        "isize" | "usize" => ptr_bits,
+        _ => 0,
+    };
+    *bits = b;
+    *uns = sub.len() != 0 && sub.byte_at(0) == b'u';
+    return b != 0;
+}
+
+// The value and type of integer literal `t` under the target's widths `w`: the first type of C's list
+// for its base and suffix that holds it. None when no type does, or `t` is no integer literal.
+fn lit_cv(t: str, w: &Widths) Option<CV> {
+    let n = t.len();
+    let mut i: usize = 0;
+    let mut base: u64 = 10;
+    if n > 2 && t.byte_at(0) == b'0' && (t.byte_at(1) == b'x' || t.byte_at(1) == b'X') {
+        base = 16;
+        i = 2;
+    } else if n > 2 && t.byte_at(0) == b'0' && (t.byte_at(1) == b'b' || t.byte_at(1) == b'B') {
+        base = 2;
+        i = 2;
+    } else if t.byte_at(0) == b'0' {
+        // C reads a leading 0 as octal; the 0 is its first digit.
+        base = 8;
+    }
+    let mut v: u64 = 0;
+    let mut any = false;
+    while i < n {
+        let ch = t.byte_at(i);
+        let mut d: u64 = 16;
+        if is_digit(ch) {
+            d = ch - b'0';
+        } else if base == 16 && ch >= b'a' && ch <= b'f' {
+            d = ch - b'a' + 10;
+        } else if base == 16 && ch >= b'A' && ch <= b'F' {
+            d = ch - b'A' + 10;
+        } else {
+            break;
+        }
+        if d >= base || v > (U64_MAX - d) / base {
+            return Option::<CV>::None;
+        }
+        v = v * base + d;
+        any = true;
+        i += 1;
+    }
+    // The suffix: `u`, and `l` or `ll`, in either order and case.
+    let mut us: u32 = 0;
+    let mut ls: u32 = 0;
+    while i < n {
+        let ch = t.byte_at(i);
+        if ch == b'u' || ch == b'U' {
+            us += 1;
+        } else if ch == b'l' || ch == b'L' {
+            ls += 1;
+        } else {
+            return Option::<CV>::None;
+        }
+        i += 1;
+    }
+    if !any || us > 1 || ls > 2 {
+        return Option::<CV>::None;
+    }
+    // C's list: int, long and long long from the suffix's length on, each signed unless `u`, and, for
+    // a hex, octal or binary literal, followed by its unsigned type.
+    for k in ls..3 {
+        let wb = if k == 0 {
+            w.int_b;
+        } else if k == 1 {
+            w.long_b;
+        } else {
+            w.llong_b;
+        } as u32 * 8;
+        if us == 0 && v <= mask(wb) >> 1 {
+            return Option::<CV>::Some(CV { v: v, bits: wb, uns: false });
+        }
+        if (us == 1 || base != 10) && v <= mask(wb) {
+            return Option::<CV>::Some(CV { v: v, bits: wb, uns: true });
+        }
+    }
+    return Option::<CV>::None;
+}
 
 extend CExpr {
-    // One name: an enumerator of the enum being built, a constant already collected, any enum's value, or
-    // another macro: resolved recursively, since headers define constants in terms of each other.
-    fn ex_ident(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32, name: str) i64 {
-        if e != null {
-            let ed: &EnumDef = unsafe &*e;
-            let v = ed.val_of(name);
-            if v.is_some() {
-                return v.unwrap();
-            }
+    // Value `x` converted to the type `bits` wide, unsigned when `uns`: modulo 2^bits for an unsigned
+    // type; refused when a signed type does not hold it.
+    fn to_ty(self: &mut Self, x: CV, bits: u32, uns: bool) CV {
+        if !uns && !cv_fits(x, bits, false) {
+            self.ok = false;
         }
-        for i in 0..c.consts.len() {
-            if c.consts[i].name.as_str() == name {
-                let lit = int_literal(c.consts[i].value.as_str());
-                if lit >= 0 {
-                    return lit;
-                }
-            }
+        return CV { v: cv_pat(x) & mask(bits), bits: bits, uns: uns };
+    }
+
+    // `x` after a cast to the type `bits` wide, unsigned when `uns`, then the integer promotions.
+    fn cast(self: &mut Self, x: CV, bits: u32, uns: bool) CV {
+        let r = self.to_ty(x, bits, uns);
+        if bits < 32 {
+            return CV { v: cv_pat(r) & mask(32), bits: 32, uns: false };
         }
-        for i in 0..c.enums.len() {
-            let v = c.enums.at(i).val_of(name);
-            if v.is_some() {
-                return v.unwrap();
-            }
-        }
-        if depth < CE_DEPTH {
-            let mut raw = String::new();
-            let got = c.macro_value(dump, name, &mut raw);
-            if got && raw.len() != 0 {
-                let v = ce_eval(raw.as_str(), c, e, dump, depth + 1);
-                if v.is_some() {
-                    return v.unwrap();
-                }
-                self.ok = false;
-                return 0;
-            }
-        }
-        self.ok = false;
-        return 0;
+        return r;
     }
 
     // Signed arithmetic traps on overflow; a result outside i64 makes the expression unknown instead.
@@ -719,61 +961,286 @@ extend CExpr {
         return a * b;
     }
 
-    fn ex_primary(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+    // The usual arithmetic conversions of `a` and `b`, then `op` on their values: the result in the common
+    // type, which an unsigned result wraps into and a signed one must fit.
+    fn arith(self: &mut Self, a: CV, b: CV, op: u8) CV {
+        let mut bits = if a.bits > b.bits {
+            a.bits;
+        } else {
+            b.bits;
+        };
+        let mut uns = a.uns;
+        if a.uns != b.uns {
+            // The unsigned type when it is at least as wide, else the wider signed one, which holds it.
+            let (ub, sb) = if a.uns {
+                (a.bits, b.bits);
+            } else {
+                (b.bits, a.bits);
+            };
+            uns = ub >= sb;
+            if !uns {
+                bits = sb;
+            }
+        }
+        let x = self.to_ty(a, bits, uns).v;
+        let y = self.to_ty(b, bits, uns).v;
+        if (op == b'/' || op == b'%') && y == 0 {
+            self.ok = false;
+            return cv_int(0);
+        }
+        if op == b'&' || op == b'^' || op == b'|' {
+            let r = switch op {
+                b'&' => x & y,
+                b'^' => x ^ y,
+                _ => x | y,
+            };
+            return CV { v: r, bits: bits, uns: uns };
+        }
+        if uns {
+            let r = switch op {
+                b'+' => x.wrapping_add(y),
+                b'-' => x.wrapping_sub(y),
+                b'*' => x.wrapping_mul(y),
+                b'/' => x / y,
+                _ => x % y,
+            };
+            return CV { v: r & mask(bits), bits: bits, uns: true };
+        }
+        let sx = sext(x, bits);
+        let sy = sext(y, bits);
+        if (op == b'/' || op == b'%') && sx == I64_MIN && sy == -1 {
+            self.ok = false;
+            return cv_int(0);
+        }
+        let r = switch op {
+            b'+' => self.add_checked(sx, sy),
+            b'-' => self.sub_checked(sx, sy),
+            b'*' => self.mul_checked(sx, sy),
+            b'/' => sx / sy,
+            _ => sx % sy,
+        };
+        let out = CV { v: r as u64, bits: 64, uns: false };
+        if !cv_fits(out, bits, false) {
+            self.ok = false;
+        }
+        return CV { v: r as u64 & mask(bits), bits: bits, uns: false };
+    }
+
+    // `a << s` (`left`) or `a >> s`, of `a`'s type. A count outside the width is refused; a left shift of
+    // a signed value must keep every bit inside the unsigned type of its width (the sign bit takes the
+    // last, as every C compiler does).
+    fn shift(self: &mut Self, a: CV, s: CV, left: bool) CV {
+        if !s.uns && sext(s.v, s.bits) < 0 || cv_pat(s) >= a.bits as u64 {
+            self.ok = false;
+            return cv_int(0);
+        }
+        let n = cv_pat(s) as u32;
+        if !left {
+            if a.uns {
+                return CV { v: a.v >> n, bits: a.bits, uns: true };
+            }
+            return CV { v: (sext(a.v, a.bits) >> n) as u64 & mask(a.bits), bits: a.bits, uns: false };
+        }
+        if !a.uns && (sext(a.v, a.bits) < 0 || a.v > mask(a.bits) >> n) {
+            self.ok = false;
+            return cv_int(0);
+        }
+        return CV { v: a.v << n & mask(a.bits), bits: a.bits, uns: a.uns };
+    }
+
+    // A cast's type name after its `(`: an integer type `bits` wide (8 to 64), unsigned when `uns`, or a
+    // pointer (`T *`, or a typedef of one: an unsigned integer of the pointer's width), and the cursor past
+    // the `)`. False, with the cursor unmoved, for anything else.
+    fn cast_type(self: &mut Self, c: &Collected, dump: str, bits: &mut u32, uns: &mut bool) bool {
+        let (p0, s0, e0, k0) = (self.lx.pos, self.lx.start, self.lx.end, self.lx.kind);
+        let mut longs: u32 = 0;
+        let mut shorts: u32 = 0;
+        let mut chars: u32 = 0;
+        let mut words: u32 = 0;
+        let mut sign: u32 = 0; // 1 signed, 2 unsigned
+        let mut named = String::new();
+        let mut ok = true;
+        while ok && self.lx.kind == TK_IDENT {
+            let t = self.lx.text();
+            if t == "long" {
+                longs += 1;
+            } else if t == "short" {
+                shorts += 1;
+            } else if t == "char" {
+                chars += 1;
+            } else if t == "signed" || t == "__signed__" {
+                sign = 1;
+            } else if t == "unsigned" {
+                sign = 2;
+            } else if t != "int" && t != "const" && t != "volatile" {
+                ok = named.len() == 0;
+                named.push_str(t);
+            }
+            words += 1;
+            self.lx.advance();
+        }
+        let mut stars: u32 = 0;
+        // Each step takes one `*` of the type: the cast's text bounds them.
+        while ok && self.lx.at_punct(b'*') {
+            stars += 1;
+            self.lx.advance();
+        }
+        ok = ok && words != 0 && self.lx.at_punct(b')');
+        let mut pr = String::new();
+        let pb = if c.macro_value(dump, "__SIZEOF_POINTER__", &mut pr) {
+            int_literal(pr.as_str()) as u32 * 8;
+        } else {
+            0;
+        };
+        let ai = c.alias_of(named.as_str());
+        let ptr_alias = ai >= 0 && c.aliases.at(ai as usize).ok && (c.aliases.at(ai as usize).sub.as_str().starts_with(
+            "*",
+        ) || c.aliases.at(ai as usize).sub.as_str().starts_with("fn("));
+        if ok && (stars != 0 || named.len() != 0 && ptr_alias) {
+            ok = pb != 0;
+            *bits = pb;
+            *uns = true;
+        } else if ok && named.len() != 0 {
+            // A typedef alone: a fixed-width name, or one the header maps to an integer.
+            let mut sub = String::new();
+            if !wellknown(named.as_str(), &mut sub) {
+                if ai >= 0 && !c.aliases.at(ai as usize).opaque && c.aliases.at(ai as usize).ok {
+                    sub.push_string(&c.aliases.at(ai as usize).sub);
+                }
+            }
+            ok = longs + shorts + chars + sign == 0 && int_ty(sub.as_str(), pb, bits, uns);
+        } else if ok {
+            // Plain `char` has the target's signedness: only an explicit sign is modelled.
+            ok = chars == 0 || sign != 0 && chars == 1 && longs + shorts == 0;
+            *uns = sign == 2;
+            *bits = if chars != 0 {
+                8u32;
+            } else if shorts != 0 {
+                c.widths.short_b as u32 * 8;
+            } else if longs == 1 {
+                c.widths.long_b as u32 * 8;
+            } else if longs > 1 {
+                c.widths.llong_b as u32 * 8;
+            } else {
+                c.widths.int_b as u32 * 8;
+            };
+        }
+        if ok {
+            self.lx.advance();
+            return true;
+        }
+        self.lx.pos = p0;
+        self.lx.start = s0;
+        self.lx.end = e0;
+        self.lx.kind = k0;
+        return false;
+    }
+
+    // One name: an enumerator of the enum being built, a constant already collected, any enum's value, or
+    // another macro: resolved recursively, since headers define constants in terms of each other. An
+    // enumerator is an `int` when it fits one.
+    fn ex_ident(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32, name: str) CV {
+        if e != null {
+            let ed: &EnumDef = unsafe &*e;
+            let v = ed.val_of(name);
+            if v.is_some() {
+                return CExpr::enum_cv(v.unwrap());
+            }
+        }
+        for i in 0..c.consts.len() {
+            if c.consts[i].name.as_str() == name {
+                let lit = int_literal(c.consts[i].value.as_str());
+                let mut bits: u32 = 0;
+                let mut uns = false;
+                if lit >= 0 && int_ty(c.consts[i].ty.as_str(), 64, &mut bits, &mut uns) {
+                    return self.cast(CV { v: lit as u64, bits: 64, uns: false }, bits, uns);
+                }
+            }
+        }
+        for i in 0..c.enums.len() {
+            let v = c.enums.at(i).val_of(name);
+            if v.is_some() {
+                return CExpr::enum_cv(v.unwrap());
+            }
+        }
+        if depth < CE_DEPTH {
+            let mut raw = String::new();
+            let got = c.macro_value(dump, name, &mut raw);
+            if got && raw.len() != 0 {
+                let v = ce_cv(raw.as_str(), c, e, dump, depth + 1);
+                if v.is_some() {
+                    return v.unwrap();
+                }
+            }
+        }
+        self.ok = false;
+        return cv_int(0);
+    }
+
+    const fn enum_cv(v: i64) CV {
+        let x = CV { v: v as u64, bits: 64, uns: false };
+        if cv_fits(x, 32, false) {
+            return cv_int(v);
+        }
+        return x;
+    }
+
+    fn ex_primary(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) CV {
         if self.lx.kind == TK_EOF {
             self.ok = false;
-            return 0;
+            return cv_int(0);
         }
         if self.lx.at_punct(b'(') {
             self.lx.advance();
+            let mut bits: u32 = 0;
+            let mut uns = false;
+            if self.cast_type(c, dump, &mut bits, &mut uns) {
+                let x = self.ex_unary(c, e, dump, depth);
+                return self.cast(x, bits, uns);
+            }
             let v = self.ex_or(c, e, dump, depth);
             if !self.lx.at_punct(b')') {
                 self.ok = false;
-                return 0;
+                return cv_int(0);
             }
             self.lx.advance();
             return v;
         }
         if self.lx.kind == TK_NUM {
-            let v = int_literal(self.lx.text());
+            let v = lit_cv(self.lx.text(), &c.widths);
             self.lx.advance();
-            if v < 0 {
+            if v.is_none() {
                 self.ok = false;
-                return 0;
+                return cv_int(0);
             }
-            return v;
+            return v.unwrap();
         }
         if self.lx.kind == TK_STR && self.lx.text().byte_at(0) == b'\'' {
-            // A character constant is an integer; only the plain one-byte form is modelled.
+            // A character constant is an `int`; only the plain one-byte form is modelled.
             let t = self.lx.text();
             self.lx.advance();
             if t.len() == 3 {
-                return t.byte_at(1);
+                return cv_int(t.byte_at(1));
             }
             self.ok = false;
-            return 0;
+            return cv_int(0);
         }
         if self.lx.kind == TK_IDENT {
             let nm = String::from_str(self.lx.text());
             self.lx.advance();
-            // A cast (`(int)c`) or a call reaches here as an identifier followed by something unexpected;
-            // both are refused by the caller when the expression does not end cleanly.
-            let v = self.ex_ident(c, e, dump, depth, nm.as_str());
-            return v;
+            // A call reaches here as an identifier followed by something unexpected; the caller refuses it
+            // when the expression does not end cleanly.
+            return self.ex_ident(c, e, dump, depth, nm.as_str());
         }
         self.ok = false;
-        return 0;
+        return cv_int(0);
     }
 
-    fn ex_unary(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+    fn ex_unary(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) CV {
         if self.lx.at_punct(b'-') {
             self.lx.advance();
-            let v = self.ex_unary(c, e, dump, depth);
-            if v == I64_MIN {
-                self.ok = false;
-                return 0;
-            }
-            return 0 - v;
+            let x = self.ex_unary(c, e, dump, depth);
+            return self.arith(CV { v: 0, bits: x.bits, uns: x.uns }, x, b'-');
         }
         if self.lx.at_punct(b'+') {
             self.lx.advance();
@@ -781,147 +1248,119 @@ extend CExpr {
         }
         if self.lx.at_punct(b'~') {
             self.lx.advance();
-            // ~v == -1 - v, which cannot overflow.
-            return -1 - self.ex_unary(c, e, dump, depth);
+            let x = self.ex_unary(c, e, dump, depth);
+            return CV { v: ~x.v & mask(x.bits), bits: x.bits, uns: x.uns };
         }
         if self.lx.at_punct(b'!') {
             self.lx.advance();
-            if self.ex_unary(c, e, dump, depth) == 0 {
-                return 1;
+            let x = self.ex_unary(c, e, dump, depth);
+            if x.v == 0 {
+                return cv_int(1);
             }
-            return 0;
+            return cv_int(0);
         }
         return self.ex_primary(c, e, dump, depth);
     }
 
-    fn ex_mul(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+    fn ex_mul(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) CV {
         let mut v = self.ex_unary(c, e, dump, depth);
-        loop {
-            if self.lx.at_punct(b'*') {
-                self.lx.advance();
-                let r = self.ex_unary(c, e, dump, depth);
-                v = self.mul_checked(v, r);
-            } else if self.lx.at_punct(b'/') || self.lx.at_punct(b'%') {
-                let div = self.lx.at_punct(b'/');
-                self.lx.advance();
-                let d = self.ex_unary(c, e, dump, depth);
-                if d == 0 || v == I64_MIN && d == -1 {
-                    self.ok = false;
-                    return 0;
-                }
-                v = if div {
-                    v / d;
-                } else {
-                    v % d;
-                };
-            } else {
-                return v;
-            }
+        while self.lx.at_punct(b'*') || self.lx.at_punct(b'/') || self.lx.at_punct(b'%') {
+            let op = self.lx.text().byte_at(0);
+            self.lx.advance();
+            let r = self.ex_unary(c, e, dump, depth);
+            v = self.arith(v, r, op);
         }
+        return v;
     }
 
-    fn ex_add(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+    fn ex_add(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) CV {
         let mut v = self.ex_mul(c, e, dump, depth);
-        loop {
-            if self.lx.at_punct(b'+') {
-                self.lx.advance();
-                let r = self.ex_mul(c, e, dump, depth);
-                v = self.add_checked(v, r);
-            } else if self.lx.at_punct(b'-') {
-                self.lx.advance();
-                let r = self.ex_mul(c, e, dump, depth);
-                v = self.sub_checked(v, r);
-            } else {
-                return v;
-            }
+        while self.lx.at_punct(b'+') || self.lx.at_punct(b'-') {
+            let op = self.lx.text().byte_at(0);
+            self.lx.advance();
+            let r = self.ex_mul(c, e, dump, depth);
+            v = self.arith(v, r, op);
         }
+        return v;
     }
 
-    fn ex_shift(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+    fn ex_shift(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) CV {
         let mut v = self.ex_add(c, e, dump, depth);
-        loop {
-            // The scanner emits punctuation one byte at a time, so `<<` is two `<` in a row.
-            if self.lx.at_punct(b'<') {
-                self.lx.advance();
-                if !self.lx.at_punct(b'<') {
-                    self.ok = false;
-                    return 0;
-                }
-                self.lx.advance();
-                let sh = self.ex_add(c, e, dump, depth);
-                // A shift that drops value bits is refused, not truncated.
-                if sh < 0 || sh > 62 || v > I64_MAX >> sh || v < I64_MIN >> sh {
-                    self.ok = false;
-                    return 0;
-                }
-                v = v << sh;
-            } else if self.lx.at_punct(b'>') {
-                self.lx.advance();
-                if !self.lx.at_punct(b'>') {
-                    self.ok = false;
-                    return 0;
-                }
-                self.lx.advance();
-                let sh = self.ex_add(c, e, dump, depth);
-                if sh < 0 || sh > 62 {
-                    self.ok = false;
-                    return 0;
-                }
-                v = v >> sh;
-            } else {
+        // The scanner emits punctuation one byte at a time, so `<<` is two `<` in a row.
+        while self.lx.at_punct(b'<') || self.lx.at_punct(b'>') {
+            let left = self.lx.at_punct(b'<');
+            self.lx.advance();
+            if left && !self.lx.at_punct(b'<') || !left && !self.lx.at_punct(b'>') {
+                self.ok = false;
                 return v;
             }
+            self.lx.advance();
+            let sh = self.ex_add(c, e, dump, depth);
+            v = self.shift(v, sh, left);
         }
+        return v;
     }
 
-    fn ex_and(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+    fn ex_and(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) CV {
         let mut v = self.ex_shift(c, e, dump, depth);
         while self.lx.at_punct(b'&') {
             self.lx.advance();
             if self.lx.at_punct(b'&') {
                 // `&&` is a logical operator, not a constant this models.
                 self.ok = false;
-                return 0;
+                return v;
             }
-            v = v & self.ex_shift(c, e, dump, depth);
+            let r = self.ex_shift(c, e, dump, depth);
+            v = self.arith(v, r, b'&');
         }
         return v;
     }
 
-    fn ex_xor(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+    fn ex_xor(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) CV {
         let mut v = self.ex_and(c, e, dump, depth);
         while self.lx.at_punct(b'^') {
             self.lx.advance();
-            v = v ^ self.ex_and(c, e, dump, depth);
+            let r = self.ex_and(c, e, dump, depth);
+            v = self.arith(v, r, b'^');
         }
         return v;
     }
 
-    fn ex_or(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) i64 {
+    fn ex_or(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) CV {
         let mut v = self.ex_xor(c, e, dump, depth);
         while self.lx.at_punct(b'|') {
             self.lx.advance();
             if self.lx.at_punct(b'|') {
                 self.ok = false;
-                return 0;
+                return v;
             }
-            v = v | self.ex_xor(c, e, dump, depth);
+            let r = self.ex_xor(c, e, dump, depth);
+            v = self.arith(v, r, b'|');
         }
         return v;
     }
 }
 
-// The value of a C integer constant expression, or `ok = false` when any part of it is outside this
+// The value and type of a C integer constant expression, or None when any part of it is outside this
 // subset. `e` (may be null) is an enum under construction, whose earlier enumerators are in scope.
-fn ce_eval(text: str, c: &Collected, e: *const EnumDef, dump: str, depth: i32) Option<i64> {
+fn ce_cv(text: str, c: &Collected, e: *const EnumDef, dump: str, depth: i32) Option<CV> {
     if text.len() == 0 || depth > CE_DEPTH {
-        return Option::<i64>::None;
+        return Option::<CV>::None;
     }
     let mut x = CExpr::<'_> { lx: Lexer::new(text), ok: true };
     let v = x.ex_or(c, e, dump, depth);
-    // Trailing tokens mean the text was never a constant expression: a cast, a call, a comma.
+    // Trailing tokens mean the text was never a constant expression: a call, a comma.
     if x.ok && x.lx.kind == TK_EOF {
-        return Option::<i64>::Some(v);
+        return Option::<CV>::Some(v);
+    }
+    return Option::<CV>::None;
+}
+
+// `ce_cv`'s value when an i64 holds it.
+fn ce_eval(text: str, c: &Collected, e: *const EnumDef, dump: str, depth: i32) Option<i64> {
+    let r = ce_cv(text, c, e, dump, depth);
+    if r.is_some() && cv_fits(r.unwrap(), 64, false) {
+        return Option::<i64>::Some(cv_pat(r.unwrap()) as i64);
     }
     return Option::<i64>::None;
 }
@@ -1048,54 +1487,28 @@ fn macro_const(name: str, raw: str, c: &Collected, dump: str, out: &mut ConstDef
         out.value.push_str(body.slice(0, k));
         return true;
     }
-    let iv = int_literal(body);
-    if iv < 0 {
-        // Not a literal: `(1 << 8)`, `A | B`, or a name standing for another macro. The evaluator settles
-        // whether it is a constant at all, and refuses when any part of it is outside C's integer subset.
-        let evo = ce_eval(v, c, null, dump, 0);
-        if evo.is_none() {
-            return false;
-        }
-        let ev = evo.unwrap();
-        out.name.push_str(name);
-        out.ty.push_str(
-            if ev > 0x7FFFFFFF || ev < 0 - 0x80000000 {
-                "i64";
-            } else {
-                "i32";
-            },
-        );
-        out.value.format_into("{}", ev);
-        return true;
+    // A literal, or an expression: `(1 << 8)`, `A | B`, a name standing for another macro. The evaluator
+    // settles whether it is a constant at all, and refuses when any part of it is outside C's integer
+    // subset. A value outside i64 is left out.
+    let r = ce_cv(v, c, null, dump, 0);
+    if r.is_none() || !cv_fits(r.unwrap(), 64, false) {
+        return false;
     }
-    // Unsigned only when C says so; the width is the smallest that holds the value, as a literal would be.
-    let mut uns = false;
-    for i in 0..body.len() {
-        if body.byte_at(i) == b'u' || body.byte_at(i) == b'U' {
-            uns = true;
-        }
-    }
+    let x = r.unwrap();
+    let iv = cv_pat(x) as i64;
     out.name.push_str(name);
-    if uns {
-        out.ty.push_str(
-            if iv > 0xFFFFFFFF {
-                "u64";
-            } else {
-                "u32";
-            },
-        );
-    } else {
-        out.ty.push_str(
-            if iv > 0x7FFFFFFF {
-                "i64";
-            } else {
-                "i32";
-            },
-        );
-    }
-    if neg {
-        out.value.push_byte(b'-');
-    }
+    // Unsigned only when C says so; the width is the smallest that holds the value.
+    out.ty.push_str(
+        if x.uns && iv > 0xFFFFFFFF {
+            "u64";
+        } else if x.uns {
+            "u32";
+        } else if cv_fits(x, 32, false) {
+            "i32";
+        } else {
+            "i64";
+        },
+    );
     out.value.format_into("{}", iv);
     return true;
 }
@@ -1155,16 +1568,20 @@ fn run_one(
         saw_extern: false,
         skipped: 0,
         macros: Map::<String, u64>::new(),
+        statics: Set::<String>::new(),
+        alias_ix: Map::<String, u32>::new(),
+        opaque_set: Set::<String>::new(),
     };
 
     let mut text = String::new();
     let mut mdump = String::new();
-    if !preprocess(env, hdr.as_str(), incs, &mut text, &mut mdump) {
+    let mut read = Vector::<String>::new();
+    if !preprocess(env, hdr.as_str(), incs, Vector::<cpp::VFile>::new(), &mut text, &mut mdump, &mut read, false) {
         eprintln("super-c: the preprocessor failed on '{}'", header);
         return 1;
     }
-    c.widths = read_widths(mdump.as_str());
     c.index_macros(mdump.as_str());
+    c.widths = read_widths(&c, mdump.as_str());
     let mut lx = Lexer::new(text.as_str());
     lx.parse_unit(&mut c, hdr.as_str(), froms, mdump.as_str());
     c.collect_consts(hdr.as_str(), mdump.as_str());
@@ -2017,6 +2434,9 @@ extend Lexer {
     // Walk the whole preprocessed unit. Every typedef is recorded (the target's signatures are spelled with
     // them, wherever they were declared); only declarations whose origin file is `want` are emitted.
     fn parse_unit(self: &mut Self, c: &mut Collected, want: str, extra: &Vector<String>, dump: str) {
+        // The origin test stats files, so it runs once per run of declarations from one file.
+        let mut here = String::new();
+        let mut mine = false;
         loop {
             self.skip_noise();
             if self.kind == TK_EOF {
@@ -2035,8 +2455,11 @@ extend Lexer {
                 self.advance();
                 continue;
             }
-            let here = String::from_str(self.file.as_str());
-            let mine = same_origin(here.as_str(), want, extra);
+            if here.as_str() != self.file.as_str() {
+                here.clear();
+                here.push_str(self.file.as_str());
+                mine = same_origin(here.as_str(), want, extra);
+            }
             // Published for parse_specs: a struct or enum BODY is parsed from inside the specifier, which is
             // where its origin has to be known: only the target header's own records are emitted.
             c.cur_mine = mine;
@@ -2074,6 +2497,9 @@ extend Lexer {
                 }
                 if nm.len() != 0 && td {
                     c.record_typedef(nm.as_str(), &ty, isfn);
+                }
+                if nm.len() != 0 && isfn && st {
+                    c.statics.insert(String::from_str(nm.as_str()));
                 }
                 // `extern int errno;` and friends: a global the library exports. Bound by what C itself
                 // declares: a const-qualified binding becomes an extern `const` (readable), anything else a
@@ -2118,12 +2544,16 @@ extend Lexer {
 
 extend Collected {
     const fn alias_of(self: &Collected, name: str) i32 {
-        for i in 0..self.aliases.len() {
-            if self.aliases[i].name.as_str() == name {
-                return i as i32;
-            }
-        }
-        return -1;
+        let key = String::from_str(name);
+        return switch self.alias_ix.get(&key) {
+            Some(i) => (*i) as i32,
+            None => -1,
+        };
+    }
+
+    fn push_alias(self: &mut Collected, a: Alias) {
+        self.alias_ix.insert(a.name.clone(), self.aliases.len() as u32);
+        self.aliases.push(a);
     }
 
     // Index the object-like macros of the `-dM` dump (`#define NAME <text>`); the first definition of
@@ -2171,12 +2601,11 @@ extend Collected {
     }
 
     fn note_opaque(self: &mut Collected, name: str) {
-        for i in 0..self.opaques.len() {
-            if self.opaques[i].as_str() == name {
-                return;
-            }
+        let key = String::from_str(name);
+        if !self.opaque_set.contains(&key) {
+            self.opaques.push(key.clone());
+            self.opaque_set.insert(key);
         }
-        self.opaques.push(String::from_str(name));
     }
 
     const fn record_of(self: &Self, tag: str) i32 {
@@ -2204,7 +2633,7 @@ extend Collected {
             if pend_enum && idx < self.enums.len() && self.enums[idx].tag.len() == 0 {
                 self.enums[idx].tag.push_str(name);
                 self.enums[idx].tagless = true;
-                self.aliases.push(
+                self.push_alias(
                     Alias { name: String::from_str(name), sub: String::from_str(name), opaque: true, ok: true },
                 );
                 return;
@@ -2212,7 +2641,7 @@ extend Collected {
             if !pend_enum && idx < self.records.len() && self.records[idx].tag.len() == 0 {
                 self.records[idx].tag.push_str(name);
                 self.records[idx].tagless = true;
-                self.aliases.push(
+                self.push_alias(
                     Alias { name: String::from_str(name), sub: String::from_str(name), opaque: true, ok: true },
                 );
                 return;
@@ -2221,7 +2650,7 @@ extend Collected {
         let mut sub = String::new();
         ty.render(&mut sub);
         let opaque = ty.ptr == 0 && ty.fnsig.len() == 0 && sub.as_str() == name;
-        self.aliases.push(Alias { name: String::from_str(name), sub: sub, opaque: opaque, ok: ty.ok || opaque });
+        self.push_alias(Alias { name: String::from_str(name), sub: sub, opaque: opaque, ok: ty.ok || opaque });
     }
 
     // Only the opaque tags the emitted signatures, record fields and globals mention: a header pulls in
@@ -2407,12 +2836,8 @@ extend Collected {
         if self.record_emitted(name) || self.enum_emitted(name) {
             return false;
         }
-        for i in 0..self.opaques.len() {
-            if self.opaques[i].as_str() == name {
-                return true;
-            }
-        }
-        return false;
+        let key = String::from_str(name);
+        return self.opaque_set.contains(&key);
     }
 
     fn emit(self: &Self, spelling: str, link: str, out: &mut String) {

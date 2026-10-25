@@ -275,6 +275,15 @@ extend Verifier {
         if op == O_NEG || op == O_NOT {
             return self.need(name, b, i, int_like(t.ty) && ta == t.ty, "an integer operand of the result's type");
         }
+        if op == O_CLZ || op == O_CTZ || op == O_POPCNT {
+            return self.need(
+                name,
+                b,
+                i,
+                is_int(t.ty) && t.ty != T_I128 && ta == t.ty,
+                "an integer operand of the result's type, up to 64 bits",
+            );
+        }
         if op == O_ADDO || op == O_SUBO || op == O_MULO {
             return self.need(
                 name,
@@ -480,7 +489,18 @@ extend Verifier {
             return self.need(name, b, i, ta == want && t.a == VNONE == (want == T_NONE), "the signature's result");
         }
         if op == O_PANIC {
-            return self.need(name, b, i, t.a as usize < b.msgs.len(), "a message of the body");
+            let tb = if t.b == VNONE {
+                T_I64;
+            } else {
+                b.type_of(t.b);
+            };
+            return self.need(name, b, i, t.a as usize < b.msgs.len(), "a message of the body") && self.need(
+                name,
+                b,
+                i,
+                !is_vec(tb) && !is_float(tb) && type_bits(tb, 8) <= 64 && tb != T_PTR,
+                "an integer lane mask",
+            );
         }
         return self.need(name, b, i, op == O_UNREACHABLE, "a known opcode");
     }
@@ -588,9 +608,13 @@ extend Verifier {
                 return false;
             }
         }
-        // No result: a vector operation that writes memory, through operand 0 or at its last.
+        // The operations the lowering makes: a lane conversion, a float remainder, a shift by one count,
+        // or a SIMD operation. No result: one that writes memory, through operand 0 or at its last.
         let code = (t.aux & VOP_CODE) as u32;
-        return code < core::OP_COUNT && (t.ty != T_NONE || code >= core::OP_SIMD && code < core::OP_CMP_LANES && t.b != 0);
+        let simd = code >= core::OP_SIMD && code < core::OP_CMP_LANES;
+        let float_rem = code == core::OP_REM && t.b == 2 && is_vec(t.ty) && is_float(lane_type(t.ty));
+        let known = simd || float_rem || code == core::OP_CAST || code == core::OP_SHL_SCALAR || code == core::OP_SHR_SCALAR;
+        return known && (t.ty != T_NONE || simd && t.b != 0);
     }
 
     // Edge `e` leaves instruction `i`: its target is a block and its arguments are the target's
@@ -848,14 +872,36 @@ extend Verifier {
     }
 }
 
+// Per form, whether its operand `a` (bit 1) or `b` (bit 2) is a value; a byte indexes the 256 entries.
+const OPS: [u8; 256] = operand_bits();
+
+const fn operand_bits() [u8; 256] {
+    let mut t = [0u8; 256];
+    let a: [u8; 12] = [F_UN, F_BIN, F_CMP, F_OVF, F_TRI, F_PTRADD, F_LOAD, F_STORE, F_CALLIND, F_BR, F_SWITCH, F_RET];
+    let b: [u8; 7] = [F_BIN, F_CMP, F_OVF, F_TRI, F_PTRADD, F_STORE, F_PANIC];
+    for f in a {
+        // A form stays below the 256 entries.
+        unsafe {
+            t[f as usize] |= 1;
+        }
+    }
+    for f in b {
+        // A form stays below the 256 entries.
+        unsafe {
+            t[f as usize] |= 2;
+        }
+    }
+    return t;
+}
+
 /// Whether operand `a` of form `f` is a value.
 pub const fn operand_a(f: u8) bool {
-    return f == F_UN || f == F_BIN || f == F_CMP || f == F_OVF || f == F_TRI || f == F_PTRADD || f == F_LOAD || f == F_STORE || f == F_CALLIND || f == F_BR || f == F_SWITCH || f == F_RET;
+    return (unsafe OPS[f as usize] & 1) != 0;
 }
 
 /// Whether operand `b` of form `f` is a value (VNONE allowed where optional).
 pub const fn operand_b(f: u8) bool {
-    return f == F_BIN || f == F_CMP || f == F_OVF || f == F_TRI || f == F_PTRADD || f == F_STORE;
+    return (unsafe OPS[f as usize] & 2) != 0;
 }
 
 /// Whether operand `c` of form `f` is a value.
@@ -912,7 +958,9 @@ const fn sig_valid(b: &Body, s: u32, ptr: u32) bool {
             }
         } else if k == np && pt == T_NONE as u32 {
             continue;
-        } else if pt > 255 || !type_ok(pt as u8) {
+        } else if (pt & SIG_SEXT) != 0 && pt != (SIG_SEXT | T_I8 as u32) && pt != (SIG_SEXT | T_I16 as u32) || (pt & ~SIG_SEXT) > 255 || !type_ok(
+            pt as u8,
+        ) {
             return false;
         }
     }

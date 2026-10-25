@@ -5493,10 +5493,15 @@ fn bindings_avoid_generated_spellings(b: &mut h::ExitBatch) {
 
 // <tgmath.h>, which every unit includes, makes `sin` type-generic: an `f32` argument of an `f64` C
 // parameter still calls `sin`, not `sinf`.
-fn f32_argument_widens_before_a_c_call(b: &mut h::ExitBatch) {
+fn f32_argument_widens_before_a_call(b: &mut h::ExitBatch) {
     b.add(
         "an f32 argument of a C math function",
         "extern \"C\" \"math.h\" { fn sin(x: f64) f64; }\nfn main() i32 { let x = 1.1f32; let w = x as f64; return (unsafe sin(x) != unsafe sin(w)) as i32; }\n",
+        0,
+    ); // Through a function pointer the parameter's type converts it as well.
+    b.add(
+        "an f32 argument through a function pointer",
+        "fn id(x: f64) f64 { return x; }\nfn main() i32 { let g: fn(f64) f64 = id; let x = 2.5f32; return (g(x) != 2.5) as i32; }\n",
         0,
     );
 }
@@ -5513,8 +5518,32 @@ fn exit_cases_08() {
     array_param_cases(&mut b);
     dyn_erasure_in_aggregate_literals(&mut b);
     bindings_avoid_generated_spellings(&mut b);
-    f32_argument_widens_before_a_c_call(&mut b);
+    f32_argument_widens_before_a_call(&mut b);
     b.run();
+}
+
+// A failed `assert_eq` or `assert_ne` prints both operands, through either backend: an unsigned literal
+// above i64::MAX keeps its value (it is no constant zero), and a float prints as C's `%g`.
+@test
+fn assert_eq_prints_its_operands() {
+    const WIDE: str = "fn main() i32 {\n    assert_eq(9223372036854775808u64, 3u64);\n    return 0;\n}\n";
+    const FLOAT: str = "fn main() i32 {\n    let s = \"ab\";\n    assert_eq(s, \"ab\");\n    let x: f32 = 1.5;\n    assert_ne(x, 1.5);\n    return 0;\n}\n";
+    for c in [false, true] {
+        let w = if c {
+            h::compile_and_run_c(WIDE);
+        } else {
+            h::compile_and_run(WIDE);
+        };
+        assert(w.built && w.exit != 0, "the wide assertion fails");
+        assert(cli::contains_str(w.out, "  left:  9223372036854775808\n  right: 3\n"), "the wide operands");
+        let f = if c {
+            h::compile_and_run_c(FLOAT);
+        } else {
+            h::compile_and_run(FLOAT);
+        };
+        assert(f.built && f.exit != 0, "the float assertion fails");
+        assert(cli::contains_str(f.out, "`x != 1.5`\n  left:  1.5\n  right: 1.5\n"), "the float operands");
+    }
 }
 
 // An integer literal keeps its value in every spelling where an inlined callee passes it on: a `u8`

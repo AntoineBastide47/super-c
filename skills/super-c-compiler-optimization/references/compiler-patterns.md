@@ -117,7 +117,9 @@ self.sx_coal.clear();
 self.sx_name.clear(); // frees each String, keeps the Vector's capacity across functions
 ```
 
-The Vectors grow to their high-water mark and stay there.
+The Vectors grow to their high-water mark and stay there. A `Map` does not: a clear walks the
+whole table, so `Map::clear` releases storage more than 8 times its entries (one large body would
+otherwise make every later clear pay its size), and a map that keeps its size keeps its storage.
 
 ## Fixed-Array Replacement
 

@@ -532,7 +532,7 @@ pub fn publish_file(path: str, body: str) i32 {
     return r.unwrap() as i32;
 }
 
-/// Recursively delete every .c/.h under `dir` that is NOT in the keep-list (the files this run wrote), then
+/// Recursively delete every .c/.h/.o under `dir` that is NOT in the keep-list (the files this run wrote), then
 /// drop any directory left empty. The compiler overwrites build/ in place but must also remove outputs the
 /// program does not produce (a removed module, instance or @test runner); a stale TU would
 /// otherwise linger and break `cc build/**/*.c`. Path comparison is exact ("<dir>/<name>", like build_out_path).
@@ -555,9 +555,9 @@ fn prune_dir(dir: &mut String, keep: &Set<str>) {
     let base = dir.len();
     // Bounded by the entries of the directory; a read error ends the walk, as the end does.
     while let Some(Ok(e)) = d.next() {
-        // Only generated .c/.h translation units are ours to prune. Such a name is a file (a module
-        // directory name has no dot), so only other names cost a stat.
-        let unit = e.name.ends_with(".c") || e.name.ends_with(".h");
+        // Only generated .c/.h translation units and native objects are ours to prune. Such a name is a
+        // file (a module directory name has no dot), so only other names cost a stat.
+        let unit = e.name.ends_with(".c") || e.name.ends_with(".h") || e.name.ends_with(".o");
         dir.push_byte(b'/');
         dir.push_str(e.name);
         if !unit {

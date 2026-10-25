@@ -220,7 +220,7 @@ allocator = "The leak tracker's tables are pages from the operating system; noth
 thread_safety = "Safe from every thread; its signal handlers call only async-signal-safe functions."
 blocking = "Never blocks."
 errors = "A trap (a panic, a failed assertion, an integer overflow, a stack overflow) prints its report to stderr and aborts the process."
-platform_ffi = ["base", "test", "libc", "libm"]
+platform_ffi = ["base", "test", "libc", "libm", "lanes"]
 
 [package.time]
 tier = 3

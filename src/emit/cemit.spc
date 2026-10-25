@@ -16,10 +16,11 @@ import module::loader as loader;
 import emit::simd_plan as sp;
 import ir::cpu_features as cf;
 import ir::inline as inl;
-import emit::rt_h as rth;
-import typechecker::render as rnd;
 import target::table as tgt;
 import lir::lower as lw;
+import target::native as nat;
+import emit::rt_h as rth;
+import typechecker::render as rnd;
 
 /// Nesting bound for the recursive renderers (operands through inlined temporaries, structured
 /// control flow through regions): clang's default bracket depth, past which the C would not
@@ -57,6 +58,11 @@ const INLINE_CHAIN_MAX: u32 = 64;
 /// prototype.
 const RT_DEFINED_KEY: u64 = 0x5bd1e9955bd1e995;
 
+// The key of an interface and a type that conforms to it (`CEmit::conf_ix`).
+const fn conf_key(im: ModuleId, inode: NodeId, tm: ModuleId, tnode: NodeId) u64 {
+    return (im as u64 << 32 | inode as u64).wrapping_mul(0x9E3779B97F4A7C15u64) ^ (tm as u64 << 32 | tnode as u64);
+}
+
 /// A body the backend refused to emit: its module, a source span inside it (the function's or
 /// closure's own span when it has a return slot or parameter) and the first reason.
 pub struct Refusal {
@@ -70,37 +76,71 @@ pub struct Refusal {
 pub const BK_C: u8 = 1;
 pub const BK_LIR: u8 = 2;
 
-/// The backends of each module of `pk`: the C renderer for every module, and LIR beside it for the
-/// modules `SC_LIR` names: `1` every module, else a comma-separated list of module paths
-/// (`lir::lower,std::string`). Until a native backend exists, LIR is a check of the C path's bodies
-/// (`Lower::check_all`); the C renderer stays on.
+/// The backends of each module of `pk`: LIR for every module of a native build (`native_on`) and for the
+/// modules `SC_LIR` names (`in_list`), which the LIR check covers (`Lower::check_all`); the C renderer
+/// for every module but those of a native build whose bodies render no C (`Package.nat_render`). Their
+/// declarations still render.
 pub fn backends_of(pk: &loader::Package) Vector<u8> {
     let n = pk.modules.len();
     let mut out = Vector::<u8>::with_capacity(n);
+    let all = native_on(pk);
     let sel = stdlib::get_env("SC_LIR").unwrap_or(String::new());
-    let all = sel.as_str() == "1";
     for i in 0..n {
-        let mut on = all;
-        if !all && sel.len() != 0 {
-            let path = pk.modules.at(i).path.as_str();
-            let mut rest = sel.as_str();
-            for _ in 0..rest.len() + 1 {
-                let c = rest.find_byte(b',');
-                let item = if c < 0 {
-                    rest;
-                } else {
-                    rest.slice(0, c as usize);
-                };
-                on = on || item == path;
-                if c < 0 {
-                    break;
-                }
-                rest = rest.slice(c as usize + 1, rest.len());
-            }
-        }
-        out.push(BK_C | ast::pick(on, BK_LIR, 0u8));
+        let on = all || in_list(sel.as_str(), pk.modules.at(i).path.as_str());
+        let c = !all || pk.nat_render[i];
+        out.push(ast::pick(c, BK_C, 0u8) | ast::pick(on, BK_LIR, 0u8));
     }
     return out;
+}
+
+/// Whether module `path` is in `sel`: `1` names every module, else a comma-separated list of module paths
+/// (`lir::lower,std::string`).
+pub fn in_list(sel: str, path: str) bool {
+    if sel == "1" {
+        return true;
+    }
+    let mut rest = sel;
+    for _ in 0..sel.len() + 1 {
+        if rest.len() == 0 {
+            return false;
+        }
+        let c = rest.find_byte(b',');
+        let item = if c < 0 {
+            rest;
+        } else {
+            rest.slice(0, c as usize);
+        };
+        if item == path {
+            return true;
+        }
+        if c < 0 {
+            return false;
+        }
+        rest = rest.slice(c as usize + 1, rest.len());
+    }
+    return false;
+}
+
+/// Whether this build compiles modules with a native backend (C where one cannot): `SC_NATIVE` names
+/// them (`in_list`) on a target a native backend serves. Every module then lowers to LIR.
+pub fn native_on(pk: &loader::Package) bool {
+    return pk.native;
+}
+
+// The LIR of the dyn table `CEmit::dyn_pair_tabs` builds for unit `unit`: `ok` while its unit lowers to
+// LIR and every slot so far has LIR; its slots' symbols in table order, each a function or (`data`) a
+// table.
+struct DynLir {
+    pub unit: ModuleId,
+    pub ok: bool,
+    pub slots: Vector<String>,
+    pub data: Vector<bool>,
+}
+
+extend DynLir {
+    fn new(unit: ModuleId, ok: bool) DynLir {
+        return DynLir { unit: unit, ok: ok, slots: Vector::<String>::new(), data: Vector::<bool>::new() };
+    }
 }
 
 /// The body emitter: per-TU output buffers, the mangler, the dedup gates every demand kind goes
@@ -158,8 +198,15 @@ pub struct CEmit {
     /// each operation without a native entry.
     pub simd_on: bool,
     /// The bodies this emitter writes keep the struct ABI for `[]mut T` parameters (`split_abi`):
-    /// vector-backend entries, whose callers spell their signatures.
+    /// vector-backend entries, whose callers spell their signatures, and every body of a native build,
+    /// whose objects define that ABI only.
     pub no_split: bool,
+    /// The last body rendered no C (`backends_of`): its module is `skipped_mod`; `lir_claim` reads both.
+    skipped: bool,
+    /// Every body renders, whatever its module's backends: C text no native object replaces (a vector
+    /// backend entry's header).
+    pub render_all: bool,
+    skipped_mod: ModuleId,
     /// Forwarded call texts spelled so far: a call argument whose spelling grew it repeats a call
     /// when spelled twice.
     fwd_spelled: u64,
@@ -188,6 +235,8 @@ pub struct CEmit {
     ml_cf: *const cfl::CFlow,
     pub blk_defs: String,
     pub blk_seen: Set<u64>,
+    /// The wrappers spelled while a lowering held the LIR (`lir_put` lowers them).
+    blk_due: Vector<DefId>,
     /// Block-wrapper prototypes, one per `sh_blk_k` row (ends in `sh_blk_e2`).
     pub blk_protos: String,
     pub uses_tasks: u8,
@@ -315,6 +364,13 @@ pub struct CEmit {
     // (see callee_sym_i).
     sym_memo: Map<u64, u64>,
     sym_memo_ctx: i64,
+    /// The extends that make a type conform to an interface (`conf_for_args`), by `conf_key` of the
+    /// interface and the target, each `module << 32 | extend` in module and item order; built for
+    /// `conf_mods` modules.
+    conf_ix: Map<u64, Vector<u64>>,
+    conf_mods: usize,
+    /// The build's features with what they imply (`cf::close`).
+    build_fs: cf::CpuFeatureSet,
     sym_pool: String,
     sym_off: Vector<u32>,
     sym_len: Vector<u32>,
@@ -405,6 +461,10 @@ pub struct CEmit {
     /// Owner module of every dyn table (`sh_dyt_k` row): the receiver type's module, else the
     /// interface's. Block wrappers are keyed by their callee's DefId (`sh_blk_k >> 32`).
     pub dyt_own: Vector<ModuleId>,
+    /// The table symbol of every dyn table (`sh_dyt_k` row).
+    pub dyt_sym: Vector<String>,
+    // The LIR of the dyn table `dyn_pair_tabs` builds.
+    dyl: DynLir,
     /// Header dependencies bodies added: a `_ret` typedef in module `hdr_k`'s prototype header
     /// names the result carrier whose C name has FNV `hdr_h` (see `Mangler::ret_pack`).
     pub hdr_k: Vector<ModuleId>,
@@ -474,9 +534,16 @@ extend CEmit {
             any = any || (backends[i] & BK_LIR) != 0;
         }
         let lir = if any {
-            Option::<Box<lw::Lower>>::Some(
-                Box::new(lw::Lower::new(lay::target_for(pk.arch).ptr as u32, pk.bc_value(BC_OVERFLOW_CHECKS) == 0)),
+            let mut l = Box::new(
+                lw::Lower::new(lay::target_for(pk.arch).ptr as u32, pk.bc_value(BC_OVERFLOW_CHECKS) == 0),
             );
+            if !simd_on {
+                l.pkg.vec_regs = 0;
+            } else {
+                l.pkg.vec_regs = mg.vec_reg_bytes as u32;
+            }
+            l.pkg.pic = pk.pic;
+            Option::<Box<lw::Lower>>::Some(l);
         } else {
             Option::<Box<lw::Lower>>::None;
         };
@@ -487,7 +554,10 @@ extend CEmit {
             snap_out: null,
             simd_on: simd_on,
             vec_prog: pk.names_vectors(),
-            no_split: false,
+            no_split: native_on(pk),
+            skipped: false,
+            skipped_mod: 0,
+            render_all: false,
             fwd_spelled: 0,
             simd_trace: stdlib::env_is("SC_SIMD_TRACE", "1"),
             fs: pk.features,
@@ -515,6 +585,7 @@ extend CEmit {
             fn_attrs: String::new(),
             blk_defs: String::new(),
             blk_seen: Set::<u64>::new(),
+            blk_due: Vector::<DefId>::new(),
             blk_protos: String::new(),
             uses_tasks: 0,
             stat_seen: Set::<u64>::new(),
@@ -570,6 +641,9 @@ extend CEmit {
             line_off: Vector::<u64>::new(),
             sym_memo: Map::<u64, u64>::new(),
             sym_memo_ctx: -2,
+            conf_ix: Map::<u64, Vector<u64>>::new(),
+            conf_mods: 0,
+            build_fs: cf::close(pk.features),
             sym_pool: String::new(),
             sym_off: Vector::<u32>::new(),
             sym_len: Vector::<u32>::new(),
@@ -623,6 +697,8 @@ extend CEmit {
             aux_own: Vector::<ModuleId>::new(),
             stat_end: Vector::<u32>::new(),
             dyt_own: Vector::<ModuleId>::new(),
+            dyt_sym: Vector::<String>::new(),
+            dyl: DynLir::new(0, false),
             hdr_k: Vector::<ModuleId>::new(),
             hdr_h: Vector::<u64>::new(),
             tid_start: Vector::<u32>::new(),
@@ -905,12 +981,77 @@ extend CEmit {
         }
         let mut hit = none;
         let mut napply: u32 = 0;
-        for xm in 0..self.p().modules.len() {
+        if self.conf_mods != self.p().modules.len() {
+            self.index_confs();
+        }
+        let key = conf_key(iit.module, iit.decl, rit.module, rit.decl);
+        let nx = switch self.conf_ix.get(&key) {
+            Some(v) => v.len(),
+            None => 0,
+        };
+        for xi in 0..nx {
+            let e = self.conf_ix.get(&key).unwrap()[xi];
+            let em = (e >> 32) as ModuleId;
+            let iid = e as NodeId;
+            let da = self.p().module_ast_const(em);
+            let ed = unsafe (*da).at_const(iid).as_data.extend_def;
+            let ir0 = unsafe (*da).resolution_def(ed.interface_type);
+            let tg = unsafe (*da).resolution_def(ed.target_type);
+            if ir0.module != iit.module || ir0.node != iit.decl || tg.module != rit.module || tg.node != rit.decl {
+                continue;
+            }
+            if rit.n != 0 && !self.mg.ext_applies_inst(em, iid, rm, &rit) {
+                continue;
+            }
+            napply += 1;
+            if hit.node != NODE_NONE {
+                continue;
+            }
+            let mut snap = mbe::subs_copy(&self.mg.subs);
+            let base = snap.len();
+            if rit.n != 0 {
+                self.bind_recv(&mut snap, em, iid, rm, &rit);
+            }
+            for k in base..snap.len() {
+                self.mg.push_msub(snap[k]);
+            }
+            // The conformance's whole argument list, defaults included, as the checker recorded it
+            // on the interface path (`dyn I<args>`).
+            let dt = unsafe (*da).type_of(ed.interface_type);
+            let mut same = dt != TYPE_NONE;
+            if same {
+                let di = *unsafe (*da).instance(unsafe (*da).type_at(dt).as_data.inst);
+                same = di.n == iit.n;
+                let mut k: u8 = 0;
+                while same && k < di.n {
+                    let mut g1 = TYPE_NONE;
+                    let mut g2 = TYPE_NONE;
+                    same = self.mg.ground(em, unsafe di.args[k as usize], pm, &mut g1) && self.mg.ground(
+                        pm,
+                        unsafe iit.args[k as usize],
+                        pm,
+                        &mut g2,
+                    ) && g1 == g2;
+                    k += 1;
+                }
+            }
+            self.mg.pop_subs(snap.len() - base);
+            if same {
+                hit = DefId { module: em, node: iid };
+            }
+        }
+        return pick(napply > 1, hit, none);
+    }
+
+    // `conf_ix`: every extend of the package that names an interface by path, by `conf_key`.
+    fn index_confs(self: &mut Self) {
+        self.conf_ix.clear();
+        self.conf_mods = self.p().modules.len();
+        for xm in 0..self.conf_mods {
             if !self.p().modules.at(xm).has_ast {
                 continue;
             }
-            let em = xm as ModuleId;
-            let da = self.p().module_ast_const(em);
+            let da = self.p().module_ast_const(xm as ModuleId);
             let items = unsafe (*da).at_const((*da).root).as_data.program.items;
             for i in 0..items.len {
                 let iid = unsafe (*da).list(items)[i as usize];
@@ -923,51 +1064,10 @@ extend CEmit {
                 }
                 let ir0 = unsafe (*da).resolution_def(ed.interface_type);
                 let tg = unsafe (*da).resolution_def(ed.target_type);
-                if ir0.module != iit.module || ir0.node != iit.decl || tg.module != rit.module || tg.node != rit.decl {
-                    continue;
-                }
-                if rit.n != 0 && !self.mg.ext_applies_inst(em, iid, rm, &rit) {
-                    continue;
-                }
-                napply += 1;
-                if hit.node != NODE_NONE {
-                    continue;
-                }
-                let mut snap = mbe::subs_copy(&self.mg.subs);
-                let base = snap.len();
-                if rit.n != 0 {
-                    self.bind_recv(&mut snap, em, iid, rm, &rit);
-                }
-                for k in base..snap.len() {
-                    self.mg.push_msub(snap[k]);
-                }
-                // The conformance's whole argument list, defaults included, as the checker recorded it
-                // on the interface path (`dyn I<args>`).
-                let dt = unsafe (*da).type_of(ed.interface_type);
-                let mut same = dt != TYPE_NONE;
-                if same {
-                    let di = *unsafe (*da).instance(unsafe (*da).type_at(dt).as_data.inst);
-                    same = di.n == iit.n;
-                    let mut k: u8 = 0;
-                    while same && k < di.n {
-                        let mut g1 = TYPE_NONE;
-                        let mut g2 = TYPE_NONE;
-                        same = self.mg.ground(em, unsafe di.args[k as usize], pm, &mut g1) && self.mg.ground(
-                            pm,
-                            unsafe iit.args[k as usize],
-                            pm,
-                            &mut g2,
-                        ) && g1 == g2;
-                        k += 1;
-                    }
-                }
-                self.mg.pop_subs(snap.len() - base);
-                if same {
-                    hit = DefId { module: em, node: iid };
-                }
+                let key = conf_key(ir0.module, ir0.node, tg.module, tg.node);
+                self.conf_ix.entry(key).or_default().push(xm as u64 << 32 | iid as u64);
             }
         }
-        return pick(napply > 1, hit, none);
     }
 
     // Bind the receiver instance `it` (args in module `am`) to the generics of extend `ext` (declared
@@ -1635,6 +1735,11 @@ extend CEmit {
         return self.close_body(b, mark, ok);
     }
 
+    /// Whether module `m`'s bodies render to C (`backends_of`).
+    pub fn renders(self: &Self, m: ModuleId) bool {
+        return (self.backends[m as usize] & BK_C) != 0;
+    }
+
     // Whether LIR lowers what module `m` emits (a `@emit_macro` template is C text only).
     fn lir_on(self: &Self, m: ModuleId) bool {
         return self.lir.is_some() && !self.mg.macro_on && (self.backends[m as usize] & BK_LIR) != 0;
@@ -1645,7 +1750,61 @@ extend CEmit {
     fn lir_body(self: &mut Self, b: &ir::CoreBody, name: str, cm: ModuleId, cnode: NodeId, noret: bool) {
         let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
         let _ = l.deref_mut().body(self, b, name, cm, cnode, noret);
-        self.lir = Option::<Box<lw::Lower>>::Some(l);
+        self.lir_put(l);
+    }
+
+    /// The LIR of a user `free`'s wrapper `sym` for the type `ty` of module `m`: it calls the user body `fb`,
+    /// then frees the members `fields` that body leaves.
+    pub fn lir_free_wrapper(self: &mut Self, m: ModuleId, ty: TypeId, sym: str, fb: str, fields: []NodeId) {
+        if !self.lir_on(m) {
+            return;
+        }
+        let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
+        let _ = l.deref_mut().glue(self, m, ty, sym, fb, fields);
+        self.lir_put(l);
+    }
+
+    /// The LIR of a test's wrapper (`emit_test_wrapper`).
+    pub fn lir_test_wrapper(self: &mut Self, tm: ModuleId, func: NodeId, wants: u8, fx_init: NodeId, fx_free: NodeId) {
+        if !self.lir_on(tm) {
+            return;
+        }
+        let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
+        let _ = l.deref_mut().test_wrapper(self, tm, func, wants, fx_init, fx_free);
+        self.lir_put(l);
+    }
+
+    /// The LIR of the global test env hooks (`emit_test_genv`).
+    pub fn lir_test_genv(self: &mut Self, gm: ModuleId, ginit: NodeId, gfree: NodeId) {
+        if !self.lir_on(gm) {
+            return;
+        }
+        let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
+        let _ = l.deref_mut().test_genv(self, gm, ginit, gfree);
+        self.lir_put(l);
+    }
+
+    /// The LIR of the C entry `main` of main module `m`.
+    pub fn lir_main_wrapper(self: &mut Self, m: ModuleId, argv: bool) {
+        if !self.lir_on(m) {
+            return;
+        }
+        let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
+        let _ = l.deref_mut().main_wrapper(self, m, argv);
+        self.lir_put(l);
+    }
+
+    /// The chunk `what` just rendered landed in a TU of module `unit`: the bodies LIR lowered for it are
+    /// its, `own` when the chunk is of the module's own items (its TU, not its instance TU).
+    pub fn lir_claim(self: &mut Self, unit: u32, what: str, own: bool) {
+        if let Some(l) = &mut self.lir {
+            // A body that rendered no C, taken by a unit whose C compiles: its module renders after all.
+            if self.skipped && (unit as usize >= self.backends.len() || (self.backends[unit as usize] & BK_C) != 0) {
+                l.retry.push(self.skipped_mod);
+            }
+            l.claim(unit, what, own);
+        }
+        self.skipped = false;
     }
 
     /// Move `other`'s LIR into this emitter's.
@@ -2053,7 +2212,7 @@ extend CEmit {
     // function with a body, not extern, variadic, `@blocking` (its wrapper keeps the struct ABI) or a
     // vector-backend entry. Otherwise the call keeps the struct ABI, which every definition provides.
     fn split_callee(self: &mut Self, callee: DefId) bool {
-        if self.mg.macro_on || callee.node == NODE_NONE || self.blocking_callee(callee) {
+        if self.no_split || self.mg.macro_on || callee.node == NODE_NONE || self.blocking_callee(callee) {
             return false;
         }
         let mut c = callee;
@@ -2535,6 +2694,12 @@ extend CEmit {
         for l in 0..n {
             self.sx_coal.push(l as u32);
         }
+        // A body that renders no C spells its signature alone, which needs the names, not the analysis
+        // of how the body uses its locals.
+        if !self.render_all && !self.renders(b.module) {
+            self.name_locals(b);
+            return;
+        }
         let mut refs = self.uget();
         let mut defs = self.uget();
         let mut coal_root = self.bget();
@@ -2684,6 +2849,38 @@ extend CEmit {
             }
             self.sx_coal.set(l, r);
         }
+        self.name_locals(b);
+
+        // Liveness for declaration + dead-store removal: a local needs a declaration when it is read
+        // (a taken address counts) or written by something that must land in it (a call result or a
+        // side-effecting rvalue). Neither -> dead: no declaration, and its pure stores are dropped.
+        self.sx_used.clear();
+        for l in 0..n {
+            self.sx_used.push(*reads.at(l) != 0 || *hardw.at(l));
+        }
+        self.sx_addr.clear();
+        self.sx_addr.resize_default(n);
+        for i in 0..b.statements.len() {
+            let st = *b.statements.at(i);
+            if st.kind == ir::ST_ASSIGN {
+                let rv = *b.rvalues.at(st.rvalue as usize);
+                if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR {
+                    self.sx_addr.set(b.places.at(rv.a as usize).base as usize, true);
+                }
+            }
+        }
+
+        self.compute_inline(b, &coal_root);
+        self.uput(refs);
+        self.uput(defs);
+        self.uput(reads);
+        self.bput(coal_root);
+        self.bput(hardw);
+    }
+
+    // The C names of `b`'s locals after coalescing (`lspell`).
+    fn name_locals(self: &mut Self, b: &ir::CoreBody) {
+        let n = b.locals.len();
         // Every C ordinary-namespace identifier the body references is reserved: a local that reused
         // one would hide it and silently change what a later use means. Collected: the typedef names
         // of every local type, every enum-variant constant the body constructs, and the source names
@@ -2725,9 +2922,12 @@ extend CEmit {
                 self.reserve_item(c.item.module, c.item.node);
             }
         }
+        // A body that renders no C names its locals for its signature alone, where a parameter that
+        // shares a callee's name hides nothing.
+        let calls = self.render_all || self.renders(b.module);
         for bi in 0..b.blocks.len() {
             let t = b.blocks.at(bi).term;
-            if t.kind == ir::TM_CALL && t.callee.node != NODE_NONE {
+            if calls && t.kind == ir::TM_CALL && t.callee.node != NODE_NONE {
                 // Reserve the EXACT emitted call symbol: the mangled name a generic/method/interface
                 // /cross-module call spells (e.g. `id__i32`), which a source name alone misses.
                 let mh = if t.targs_len == 0 {
@@ -2797,32 +2997,6 @@ extend CEmit {
             self.sx_nm_off.push(start as u32);
             self.sx_nm_len.push((self.sx_nm_pool.len() - start) as u32);
         }
-
-        // Liveness for declaration + dead-store removal: a local needs a declaration when it is read
-        // (a taken address counts) or written by something that must land in it (a call result or a
-        // side-effecting rvalue). Neither -> dead: no declaration, and its pure stores are dropped.
-        self.sx_used.clear();
-        for l in 0..n {
-            self.sx_used.push(*reads.at(l) != 0 || *hardw.at(l));
-        }
-        self.sx_addr.clear();
-        self.sx_addr.resize_default(n);
-        for i in 0..b.statements.len() {
-            let st = *b.statements.at(i);
-            if st.kind == ir::ST_ASSIGN {
-                let rv = *b.rvalues.at(st.rvalue as usize);
-                if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR {
-                    self.sx_addr.set(b.places.at(rv.a as usize).base as usize, true);
-                }
-            }
-        }
-
-        self.compute_inline(b, &coal_root);
-        self.uput(refs);
-        self.uput(defs);
-        self.uput(reads);
-        self.bput(coal_root);
-        self.bput(hardw);
     }
 
     /// Append the C spelling of local `l` for the body most recently emitted through `emit_fn`: its
@@ -5605,6 +5779,13 @@ extend CEmit {
 
     // Locals, labels, blocks and the closing brace, shared by plain functions and closures.
     fn emit_body_core(self: &mut Self, b: &ir::CoreBody) bool {
+        if !self.render_all && !self.renders(b.module) {
+            // The module's native object needs no C body; `lir_claim` checks the unit that takes it.
+            self.skipped = true;
+            self.skipped_mod = b.module;
+            return true;
+        }
+        self.skipped = false;
         if self.cf_ext != null {
             return self.emit_body_core_cf(b, unsafe &*self.cf_ext);
         }
@@ -12830,6 +13011,76 @@ extend CEmit {
         }
     }
 
+    /// Queue the definition of const or static `item` (symbol `sym`, type `ty` of module `em`) that a LIR
+    /// body addresses, as a C reference does (`stat_demand`): C may fold the reads it makes. A zero-sized
+    /// item has no storage.
+    pub fn lir_stat_need(self: &mut Self, em: ModuleId, item: DefId, ty: TypeId, sym: str) bool {
+        if !self.p().native || self.mg.is_zst(em, ty) {
+            return true;
+        }
+        let h = self.stat_key(fnv(sym), item);
+        // Journaled as the renderer's reference is: a replayed module's statics are its lowering's too.
+        if self.mg.rec_on && self.mg.rec_dup_once(h ^ 8) {
+            let mut ev = mbe::RecEv::blank(mbe::RK_STAT);
+            ev.h = h;
+            ev.a = em;
+            ev.b = item.module;
+            ev.c = item.node;
+            ev.d = ty;
+            ev.s1.push_str(sym);
+            self.mg.rec.push(ev);
+        }
+        let none = Vector::<mbe::MSub>::new();
+        return self.stat_demand(h, em, item, ty, sym, &none);
+    }
+
+    /// Append the symbol of the type descriptor of `(rm, rt)` to `dst`, and queue its definition once:
+    /// a body's reference, rendered or lowered. False when the type has no spelling.
+    pub fn ti_need(self: &mut Self, rm: ModuleId, rt: TypeId, dst: &mut String) bool {
+        let mut sym = self.sget();
+        sym.push_str("__sc_ti__");
+        if !self.mg.type_m(rm, rt, &mut sym) {
+            self.sput(sym);
+            return false;
+        }
+        // The descriptor is declared by the type's owner module (`core` for builtins).
+        let od9 = self.mg.owner_dep(rm, rt);
+        self.mg.mark_used(
+            if od9 >= 0 {
+                od9 as ModuleId;
+            } else {
+                self.p().core_module;
+            },
+        );
+        let h = fnv(sym.as_str());
+        let fresh = !self.ti_seen.contains(&h);
+        if self.mg.rec_on && self.mg.rec_dup_once(h ^ 12) {
+            let mut ev = mbe::RecEv::blank(mbe::RK_TI);
+            ev.a = rm;
+            ev.b = rt;
+            self.mg.rec.push(ev);
+        }
+        if fresh {
+            self.ti_seen.insert(h);
+            self.ti_reqs.push(
+                StatRef {
+                    em: rm,
+                    def: DefId { module: 0, node: NODE_NONE },
+                    sym: sym.clone(),
+                    ty: rt,
+                    args: Vector::<mbe::MSub>::new(),
+                },
+            );
+            if self.sh_on {
+                self.sh_ti_k.push(h);
+                self.sh_ti_v.push(self.ti_reqs.len() as u32);
+            }
+        }
+        dst.push_string(&sym);
+        self.sput(sym);
+        return true;
+    }
+
     // Queue the definition and the `extern` declaration of const or static `item` (symbol `sym`, its
     // hash `h`, type `ty` of module `em`, generic extend instance `args`) once; an extern-block
     // static's backing header declares it. False when its type has no C spelling.
@@ -14293,7 +14544,7 @@ extend CEmit {
                 };
                 let ctx0 = self.mg.mark_ctx;
                 self.mg.mark_ctx = mbe::CTX_INST | own9 as i64;
-                ok9 = ok9 && self.dyn_pair_tabs(pm, dt, &y, srm, srt, own, am, at, pair, &stem, &src, h, own9);
+                ok9 = ok9 && self.dyn_pair_tabs(pm, dt, srm, srt, own, am, at, pair, &stem, &src, h, own9);
                 self.mg.mark_ctx = ctx0;
             }
         }
@@ -14306,7 +14557,6 @@ extend CEmit {
         self: &mut Self,
         pm: ModuleId,
         dt: TypeId,
-        y: &Ty,
         srm: ModuleId,
         srt: TypeId,
         own: bool,
@@ -14320,6 +14570,29 @@ extend CEmit {
     ) bool {
         let sy = *unsafe (*self.p().module_ast_const(srm)).type_at(srt);
         let is_clos = sy.kind == TypeKind::TYPE_FUNCTION;
+        let saved = replace(&mut self.dyl, DynLir::new(own9, self.lir_on(own9)));
+        let ok = self.dyn_pair_tabs_in(pm, dt, srm, srt, own, am, at, pair, stem, src, h, own9, is_clos);
+        self.dyl = saved;
+        return ok;
+    }
+
+    fn dyn_pair_tabs_in(
+        self: &mut Self,
+        pm: ModuleId,
+        dt: TypeId,
+        srm: ModuleId,
+        srt: TypeId,
+        own: bool,
+        am: ModuleId,
+        at: TypeId,
+        pair: &mut String,
+        stem: &String,
+        src: &String,
+        h: u64,
+        own9: ModuleId,
+        is_clos: bool,
+    ) bool {
+        let y = *unsafe (*self.p().module_ast_const(pm)).type_at(dt);
         let mut srcc = String::new();
         let mut ok = self.mg.ctype(srm, srt, "", &mut srcc);
         let a = self.p().module_ast_const(pm);
@@ -14394,6 +14667,9 @@ extend CEmit {
                 slots.push_str(", &");
                 slots.push_string(&sp);
                 slots.push_str("__vtbl");
+                sp.push_str("__vtbl");
+                self.dyl.slots.push(sp);
+                self.dyl.data.push(true);
             }
         }
         let mut fslot = String::from_str("0");
@@ -14449,6 +14725,11 @@ extend CEmit {
             tabs.push_str("), _Alignof(");
             tabs.push_string(&srcc);
             tabs.push_str("));\n}\n");
+            if ok && self.dyl.ok {
+                let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
+                self.dyl.ok = l.deref_mut().dyn_free(self, srm, srt, am, at, fslot.as_str(), own9);
+                self.lir_put(l);
+            }
         }
         if ok {
             tabs.push_str("const ");
@@ -14469,12 +14750,34 @@ extend CEmit {
             self.sh_dyt_e.push(self.dyn_tabs.len() as u32);
             self.sh_dyt_e2.push(self.dyn_decls.len() as u32);
             self.dyt_own.push(own9);
+            let mut vt = pair.clone();
+            vt.push_str("__vtbl");
+            if self.dyl.ok {
+                let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
+                let fs = if own {
+                    fslot.as_str();
+                } else {
+                    "";
+                };
+                let named = unsafe (*self.p().module_ast_const(pm)).instance(y.as_data.inst).decl != NODE_NONE;
+                let _ = l.deref_mut().dyn_table(
+                    vt.as_str(),
+                    fs,
+                    named,
+                    src.as_str(),
+                    &self.dyl.slots,
+                    &self.dyl.data,
+                    own9,
+                );
+                self.lir_put(l);
+            }
+            self.dyt_sym.push(vt);
         }
         return ok;
     }
 
     // The declared single return type of `fnid` (pool `m`), or TYPE_NONE.
-    const fn fn_ret_ty(self: &Self, m: ModuleId, fnid: NodeId) TypeId {
+    pub const fn fn_ret_ty(self: &Self, m: ModuleId, fnid: NodeId) TypeId {
         let a = self.p().module_ast_const(m);
         let rs = unsafe (*a).at_const(fnid).as_data.function.returns;
         if rs.len != 1 {
@@ -14723,6 +15026,8 @@ extend CEmit {
                 head.push_str("return ");
             }
             let mut env = true;
+            let t0 = head.len();
+            let mut t1 = t0;
             let sa = self.p().module_ast_const(sy.module);
             if sy.kind == TypeKind::TYPE_FUNCTION && unsafe (*sa).closure_fact(sy.as_data.decl) == null {
                 // A function item: its value names this one function, so no env is read.
@@ -14732,12 +15037,14 @@ extend CEmit {
                     self.mg.method_target(sy.module, sy.as_data.decl),
                     &mut head,
                 );
+                t1 = head.len();
                 head.push_str("(");
                 env = false;
             } else if sy.kind == TypeKind::TYPE_FUNCTION {
                 let mut cs = String::new();
                 self.mg.closure_sym(sy.module, sy.as_data.decl, &mut cs);
                 head.push_string(&cs);
+                t1 = head.len();
                 head.push_str("(");
                 // A closure without captures has no env: its value names this one function.
                 env = unsafe (&*(*self.p().module_ast_const(sy.module)).closure_fact(sy.as_data.decl)).ncaps != 0;
@@ -14761,9 +15068,26 @@ extend CEmit {
                     want,
                     &mut head,
                 );
+                t1 = head.len();
                 head.push_str("((");
                 head.push_str(srcc);
                 head.push_str(" *)__self");
+                // The method takes `self` by reference: the table's data pointer.
+                let ma = self.p().module_ast_const(dm);
+                let fp = unsafe (*ma).at_const(mid).as_data.function.params;
+                let k0 = unsafe (*ma).type_at(unsafe (*ma).type_of(unsafe (*ma).list(fp)[0])).kind;
+                self.dyl.ok = self.dyl.ok && (k0 == TypeKind::TYPE_REFERENCE || k0 == TypeKind::TYPE_POINTER);
+            }
+            if ok && self.dyl.ok {
+                let mut ts = String::from_str(pair);
+                ts.push_str("__");
+                ts.push_str(name);
+                let tg = String::from_str(head.as_str().slice(t0, t1));
+                let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
+                self.dyl.ok = l.deref_mut().dyn_thunk(self, dm, ps, rs, ts.as_str(), tg.as_str(), env, self.dyl.unit);
+                self.lir_put(l);
+                self.dyl.slots.push(ts);
+                self.dyl.data.push(false);
             }
             for i in 0..ps.len() {
                 if self.mg.is_zst(dm, ps[i]) {
@@ -14995,11 +15319,12 @@ extend CEmit {
         let op = *b.operands.at(opid as usize);
         if op.kind == ir::OP_CONST {
             let c = *b.constants.at(op.data as usize);
-            if c.kind == ir::CK_INT || c.kind == ir::CK_BOOL {
+            if c.kind == ir::CK_BOOL {
                 *out = c.val;
                 return true;
             }
-            return false;
+            // A literal's value is its spelling's (`int_value`).
+            return c.kind == ir::CK_INT && c.int_value(self.const_src(b, &c), out);
         }
         if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
             return false;
@@ -15454,6 +15779,37 @@ extend CEmit {
         return ok;
     }
 
+    // The LIR of extern fn `d`'s wrapper; the module's C instance unit defines one LIR cannot.
+    fn blk_lir(self: &mut Self, d: DefId) {
+        let ctx0 = self.mg.mark_ctx;
+        self.mg.mark_ctx = mbe::CTX_INST | d.module as i64;
+        let mut nm = String::new();
+        let _ = self.mg.fn_sym(d.module, d.node, DefId { module: 0, node: NODE_NONE }, &mut nm);
+        let mut full = String::new();
+        self.blk_name(d, &mut full);
+        self.mg.mark_ctx = ctx0;
+        let blocking = self.blocking_callee(d);
+        let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
+        if !l.deref_mut().blk_wrapper(self, d, full.as_str(), nm.as_str(), blocking) {
+            l.conly.push(d.module);
+            l.conly_why.push(format("the wrapper `{}` has no LIR", full.as_str()));
+        }
+        self.lir = Option::<Box<lw::Lower>>::Some(l);
+    }
+
+    // Give the LIR back after a lowering, then lower the wrappers that lowering spelled (`blk_due`).
+    pub fn lir_put(self: &mut Self, l: Box<lw::Lower>) {
+        self.lir = Option::<Box<lw::Lower>>::Some(l);
+        let mut i: usize = 0;
+        // A wrapper's lowering may spell another wrapper: each is spelled once (`blk_seen`).
+        while i < self.blk_due.len() {
+            let d = self.blk_due[i];
+            i += 1;
+            self.blk_lir(d);
+        }
+        self.blk_due.truncate(0);
+    }
+
     // The name of the `@blocking` wrapper of extern fn `d`: `__sc_blk_` and `blk_stem`.
     fn blk_name(self: &mut Self, d: DefId, out: &mut String) {
         out.push_str("__sc_blk_");
@@ -15620,6 +15976,12 @@ extend CEmit {
             self.blk_defs.push_str("}\n");
         } else if !self.copy_thunk_def(d, &wn, nm.as_str(), &rty, &wrap_params, rt, is_void) {
             return false;
+        }
+        if self.lir_on(d.module) {
+            self.blk_lir(d);
+        } else if !self.mg.macro_on && (self.backends[d.module as usize] & BK_LIR) != 0 {
+            // A call a lowering spells: the LIR is out until that lowering ends.
+            self.blk_due.push(d);
         }
         // Cross-TU call sites see the wrapper through the shared protos.
         let pm = self.blk_protos.len();
@@ -15842,7 +16204,7 @@ extend CEmit {
     fn clone_set(self: &Self, callee: DefId) cf::CpuFeatureSet {
         let none = cf::CpuFeatureSet { w: [0, 0] };
         let p = self.p();
-        let build = cf::close(p.features);
+        let build = self.build_fs;
         if callee.node == NODE_NONE || p.inl_store == null || cf::contains(build, self.fs) {
             return none;
         }
@@ -17177,48 +17539,7 @@ extend CEmit {
                 let mut rm = b.module;
                 let mut rt = rv.b;
                 self.rty(b, rv.b, &mut rm, &mut rt);
-                let mut sym = self.sget();
-                sym.push_str("__sc_ti__");
-                if !self.mg.type_m(rm, rt, &mut sym) {
-                    self.sput(sym);
-                    return self.fail("type-info");
-                }
-                // The descriptor is declared by the type's owner module (`core` for builtins).
-                let od9 = self.mg.owner_dep(rm, rt);
-                self.mg.mark_used(
-                    if od9 >= 0 {
-                        od9 as ModuleId;
-                    } else {
-                        self.p().core_module;
-                    },
-                );
-                let h = fnv(sym.as_str());
-                let fresh = !self.ti_seen.contains(&h);
-                if self.mg.rec_on && self.mg.rec_dup_once(h ^ 12) {
-                    let mut ev = mbe::RecEv::blank(mbe::RK_TI);
-                    ev.a = rm;
-                    ev.b = rt;
-                    self.mg.rec.push(ev);
-                }
-                if fresh {
-                    self.ti_seen.insert(h);
-                    self.ti_reqs.push(
-                        StatRef {
-                            em: rm,
-                            def: DefId { module: 0, node: NODE_NONE },
-                            sym: sym.clone(),
-                            ty: rt,
-                            args: Vector::<mbe::MSub>::new(),
-                        },
-                    );
-                    if self.sh_on {
-                        self.sh_ti_k.push(h);
-                        self.sh_ti_v.push(self.ti_reqs.len() as u32);
-                    }
-                }
-                dst.push_string(&sym);
-                self.sput(sym);
-                return true;
+                return self.ti_need(rm, rt, dst) || self.fail("type-info");
             }
             if k == ir::IN_DANGLING as u32 {
                 if rv.b == TYPE_NONE {
@@ -17976,7 +18297,7 @@ extend CEmit {
 
     // Record a destructor use: derived `__free__d` symbols join the glue worklist; user `free`
     // methods on instances join the demand queue (their bodies emit like any method instance).
-    fn note_free(self: &mut Self, rm: ModuleId, rt: TypeId, sym: str) {
+    pub fn note_free(self: &mut Self, rm: ModuleId, rt: TypeId, sym: str) {
         let h = fnv(sym);
         let fresh = !self.glue_seen.contains(&h);
         if !fresh && !self.mg.rec_on {
@@ -18332,8 +18653,9 @@ extend CEmit {
         if ok0x && self.lir_on(self.glue.at(idx).em) {
             let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
             let sym = self.glue.at(idx).sym.clone();
-            let _ = l.deref_mut().glue(self, self.glue.at(idx).em, self.glue.at(idx).ty, sym.as_str());
-            self.lir = Option::<Box<lw::Lower>>::Some(l);
+            let none: []NodeId = [];
+            let _ = l.deref_mut().glue(self, self.glue.at(idx).em, self.glue.at(idx).ty, sym.as_str(), "", none);
+            self.lir_put(l);
         }
         self.mg.pop_subs(gn0);
         return ok0x;

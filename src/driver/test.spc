@@ -631,6 +631,7 @@ pub fn test_build_and_run(
     p: &loader::Package,
     topts: *const TestOpts,
     units: &Vector<String>,
+    nobjs: &Vector<String>,
     out_bin: str,
     cflags: str,
     ccflags: str,
@@ -729,6 +730,9 @@ pub fn test_build_and_run(
         for i in 0..units.len() {
             args.push(units.at(i).clone());
         }
+    }
+    for i in 0..nobjs.len() {
+        args.push(nobjs.at(i).clone());
     }
     let n = args.len() - first;
     let ldpath = build_out_path(root, "__ldflags", "");

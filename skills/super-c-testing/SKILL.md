@@ -467,6 +467,16 @@ parser, and the evaluator on a tool-built body and on vector operations. To find
 rebuild one test file under `SC_LIR=1 SC_LIR_STATS=1 super-c test --quiet --filter=<file>`, then
 use `SC_LIR_RUN=<test symbol>` and `SC_LIR_TRACE=1`.
 
+### The native backend
+
+`tests/codegen/native_test.spc` compiles LIR text to an object, links it with a C driver and runs it
+(`run_native`; `SC_NATIVE_KEEP=1` keeps the files), builds programs whose modules mix C and native
+code (`SC_NATIVE=<module>`, C values of `@layout` types and enums with payloads included), and checks
+that two builds give byte-identical objects. A CLI test that reads the emitted C, a C unit or a C
+object of a debug build sets `cli::set_env("SC_NATIVE", "0")`: on macOS arm64, Linux x86-64 and
+Windows x86-64 that build compiles natively and writes no C. `ci/gate.sh` checks that one
+worker and every core build byte-identical native objects.
+
 ### Families of cases in few compiler runs
 
 Each run of the compiler under test loads and checks std again, so a test with many small programs

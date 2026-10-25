@@ -32035,8 +32035,12 @@ extend TypeChecker {
             NODE_RETURN => {
                 self.check_return(id);
             },
-            NODE_DEFER => {
-                let _dv = self.check_expr(unsafe (*a).at_const(id).as_data.single.value);
+            NODE_DEFER | NODE_EXPRESSION_STATEMENT => {
+                // A deferred call drops its results as a statement does.
+                let v = unsafe (*a).at_const(id).as_data.single.value;
+                let mok = replace(&mut self.icx.mret_ok, self.unsafe_core(v));
+                let _es = self.check_expr(v);
+                self.icx.mret_ok = mok;
             },
             NODE_ASM => {
                 self.tc_check_asm(id);
@@ -32049,12 +32053,6 @@ extend TypeChecker {
             },
             NODE_FOR | NODE_INLINE_FOR => {
                 self.tc_check_for(id);
-            },
-            NODE_EXPRESSION_STATEMENT => {
-                let v = unsafe (*a).at_const(id).as_data.single.value;
-                let mok = replace(&mut self.icx.mret_ok, self.unsafe_core(v));
-                let _es = self.check_expr(v);
-                self.icx.mret_ok = mok;
             },
             NODE_BREAK | NODE_CONTINUE => {
                 let lb = unsafe (*a).at_const(id).as_data.flow.label;

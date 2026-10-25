@@ -1396,6 +1396,21 @@ fn tuples() {
         "annotated multi-value binding with its types",
         "fn two() (i16, i16) { return 1, 2; }\nfn f() i16 { let (c, d): (i16, i16) = two(); return c + d; }\n",
     );
+    // Several results are not a value: they bind by destructuring, forward by `return`, or drop.
+    h::expect_ok(
+        "several results bind, forward and drop",
+        "fn two() (i16, i16) { return 1, 2; }\nfn fwd() (i16, i16) { return two(); }\nfn f() i16 { two(); defer two(); let (c, d) = unsafe two(); return c + d; }\n",
+    );
+    h::expect_err_msg(
+        "several results bound to one name",
+        "fn two() (i16, i16) { return 1, 2; }\nfn f() i16 { let x = two(); return x.0; }\n",
+        "a call with several results is not a value",
+    );
+    h::expect_err_msg(
+        "several results as a branch value",
+        "fn two() (i16, i16) { return 1, 2; }\nfn f(c: bool) i16 { let (a, b) = if c { two(); } else { (1i16, 2i16); }; return a + b; }\n",
+        "a call with several results is not a value",
+    );
 }
 
 @test

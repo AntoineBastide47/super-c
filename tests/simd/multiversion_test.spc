@@ -173,6 +173,7 @@ fn feature_functions_compile_their_vector_callees_with_their_features() {
 // script without `--profile` (no level set) none at all.
 @test
 fn vector_functions_choose_their_copy_at_run_time() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",

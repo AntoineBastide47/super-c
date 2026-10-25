@@ -6,6 +6,10 @@ import module::loader as loader;
 import utils::names as nm;
 import std::platform::fs;
 
+extern "C" {
+    fn memchr(s: *const void, c: i32, n: usize) *mut void;
+}
+
 const NONE: u32 = 0xFFFFFFFFu32;
 const INCLUDE_DEPTH_MAX: usize = 200;
 const COND_DEPTH_MAX: usize = 1024;
@@ -290,16 +294,72 @@ struct Val {
     pub u: bool,
 }
 
+// The class bits of each byte, for the lexer: one load per byte instead of a chain of compares.
+const B_SPACE: u8 = 1; // horizontal space, a vertical tab, a form feed, a carriage return, a NUL
+const B_START: u8 = 2; // starts an identifier
+const B_DIGIT: u8 = 4;
+const B_CMT: u8 = 8; // ends a run of a block comment's text: `*` or a newline
+const CLS: [u8; 256] = classes();
+
+const fn classes() [u8; 256] {
+    let mut t = [0u8; 256];
+    for i in 0..256usize {
+        let c = i as u8;
+        let mut k: u8 = 0;
+        if c == b' ' || c == b'\t' || c == b'\r' || c == 0x0b || c == 0x0c || c == 0 {
+            k = B_SPACE;
+        } else if c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c == b'_' || c == b'$' || c >= 0x80 {
+            k = B_START;
+        } else if c >= b'0' && c <= b'9' {
+            k = B_DIGIT;
+        }
+        if c == b'*' || c == b'\n' {
+            k |= B_CMT;
+        }
+        // `i` stays below the 256 entries.
+        unsafe {
+            t[i] = k;
+        }
+    }
+    return t;
+}
+
+// The end of the run from `i` of bytes with a class bit of `bits`: the first other offset, or `n`. A
+// counted loop with no call runs strip-mined.
+fn run_end(p: *const u8, i: usize, n: usize, bits: u8) usize {
+    for k in i..n {
+        if (unsafe CLS[(unsafe p[k]) as usize] & bits) == 0 {
+            return k;
+        }
+    }
+    return n;
+}
+
+// The end of the run from `i` of bytes with no class bit of `bits`, or `n`.
+fn run_end_not(p: *const u8, i: usize, n: usize, bits: u8) usize {
+    for k in i..n {
+        if (unsafe CLS[(unsafe p[k]) as usize] & bits) != 0 {
+            return k;
+        }
+    }
+    return n;
+}
+
+// The CLS entry of `c`: a byte indexes the 256 entries in bounds.
+const fn cls(c: u8) u8 {
+    return unsafe CLS[c as usize];
+}
+
 const fn is_id_start(c: u8) bool {
-    return c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c == b'_' || c == b'$' || c >= 0x80;
+    return (cls(c) & B_START) != 0;
 }
 
 const fn is_digit(c: u8) bool {
-    return c >= b'0' && c <= b'9';
+    return (cls(c) & B_DIGIT) != 0;
 }
 
 const fn is_id_body(c: u8) bool {
-    return is_id_start(c) || is_digit(c);
+    return (cls(c) & (B_START | B_DIGIT)) != 0;
 }
 
 const fn is_punct_byte(c: u8) bool {
@@ -443,14 +503,18 @@ const fn punct_len(p: *const u8, i: usize) usize {
 }
 
 // The first offset at or after `i` of a backslash that ends a physical line, or `n`.
-const fn find_splice(p: *const u8, i: usize, n: usize) usize {
+fn find_splice(p: *const u8, i: usize, n: usize) usize {
     let mut j = i;
+    // Each step passes one backslash: at most `n - i` steps.
     while j < n {
-        if unsafe p[j] == b'\\' {
-            let d = unsafe p[j + 1];
-            if d == b'\n' || d == b'\r' && unsafe p[j + 2] == b'\n' {
-                return j;
-            }
+        let f = (unsafe memchr(p + j, b'\\', n - j)) as *const u8;
+        if f == null {
+            return n;
+        }
+        j = f as usize - p as usize;
+        let d = unsafe p[j + 1];
+        if d == b'\n' || d == b'\r' && unsafe p[j + 2] == b'\n' {
+            return j;
         }
         j += 1;
     }
@@ -736,9 +800,9 @@ fn lex(names: &mut nm::Names, p: *const u8, n: usize, cuts: &Vector<u32>, toks: 
     }
     while i < n {
         let c = unsafe p[i];
-        if c == b' ' || c == b'\t' || c == b'\r' || c == 0x0b || c == 0x0c {
+        if (cls(c) & B_SPACE) != 0 {
+            i = run_end(p, i + 1, n, B_SPACE);
             spc = true;
-            i += 1;
             continue;
         }
         if c == b'\n' {
@@ -748,14 +812,14 @@ fn lex(names: &mut nm::Names, p: *const u8, n: usize, cuts: &Vector<u32>, toks: 
             i += 1;
             continue;
         }
-        if c == 0 {
-            spc = true;
-            i += 1;
-            continue;
-        }
         if c == b'/' && unsafe p[i + 1] == b'*' {
             let mut j = i + 2;
-            while j < n && !(unsafe p[j] == b'*' && unsafe p[j + 1] == b'/') {
+            // Each step passes a run of text and one `*` or newline: at most `n - i` steps.
+            loop {
+                j = run_end_not(p, j, n, B_CMT);
+                if j >= n || unsafe p[j] == b'*' && unsafe p[j + 1] == b'/' {
+                    break;
+                }
                 if unsafe p[j] == b'\n' {
                     line += 1;
                 }
@@ -769,11 +833,12 @@ fn lex(names: &mut nm::Names, p: *const u8, n: usize, cuts: &Vector<u32>, toks: 
             continue;
         }
         if c == b'/' && unsafe p[i + 1] == b'/' {
-            let mut j = i + 2;
-            while j < n && unsafe p[j] != b'\n' {
-                j += 1;
-            }
-            i = j;
+            let f = (unsafe memchr(p + i, b'\n', n - i)) as *const u8;
+            i = if f == null {
+                n;
+            } else {
+                f as usize - p as usize;
+            };
             spc = true;
             continue;
         }
@@ -784,9 +849,8 @@ fn lex(names: &mut nm::Names, p: *const u8, n: usize, cuts: &Vector<u32>, toks: 
         let mut e = i + 1;
         let mut kind = K_PUNCT;
         if is_id_start(c) {
-            while is_id_body(unsafe p[e]) {
-                e += 1;
-            }
+            // The padding zero after the text ends an identifier at `n` at most.
+            e = run_end(p, e, n, B_START | B_DIGIT);
             kind = K_IDENT;
             let q = unsafe p[e];
             if (q == b'"' || q == b'\'') && is_string_prefix(unsafe (p + i), e - i) {
@@ -865,14 +929,16 @@ const fn is_hashhash(t: Tok) bool {
     return t.kind == K_PUNCT && (t.id == ID_HASHHASH || t.id == ID_DIGRAPH_HASHHASH);
 }
 
-fn report(err: &mut String, file: str, line: u32, msg: str) {
+fn report(err: &mut String, file: str, line: u32, msg: str, quiet: bool) {
     err.clear();
     err.push_str(file);
     err.push_byte(b':');
     err.push_u64(line);
     err.push_str(": ");
     err.push_str(msg);
-    err.eprintln();
+    if !quiet {
+        err.eprintln();
+    }
 }
 
 // Append the strings of `src` to `dst`, in order, without copying them.
@@ -1003,6 +1069,10 @@ pub struct Pp {
     counter: u64,
     error_line: u32,
     failed: bool,
+    /// The paths of the files read from disk, in the order of the first read.
+    pub disk_paths: Vector<String>,
+    /// Errors are kept in `err`, not printed.
+    pub quiet: bool,
     primed: bool,
     in_args: bool,
     queried_seen: Set<String>,
@@ -1087,6 +1157,8 @@ extend Pp {
             counter: 0,
             error_line: 0,
             failed: false,
+            disk_paths: Vector::<String>::new(),
+            quiet: false,
             primed: false,
             in_args: false,
             queried_seen: Set::<String>::new(),
@@ -1118,7 +1190,7 @@ extend Pp {
             return;
         }
         self.failed = true;
-        report(&mut self.err, self.name.as_str(), self.error_line, msg);
+        report(&mut self.err, self.name.as_str(), self.error_line, msg, self.quiet);
     }
 
     fn take_vec(self: &mut Pp) Vector<Tok> {
@@ -1161,7 +1233,7 @@ extend Pp {
         if error_line != 0 {
             self.toks.truncate(start);
             self.failed = true;
-            report(&mut self.err, path, error_line, "unterminated /* comment");
+            report(&mut self.err, path, error_line, "unterminated /* comment", self.quiet);
             return Option::<u32>::None;
         }
         let end = self.toks.len();
@@ -1267,10 +1339,11 @@ extend Pp {
                 disk = t;
             } else {
                 self.failed = true;
-                report(&mut self.err, path, 0, "cannot read file");
+                report(&mut self.err, path, 0, "cannot read file", self.quiet);
                 return Option::<u32>::None;
             }
             disk.pad_nul(TEXT_PAD);
+            self.disk_paths.push(String::from_str(path));
             found = self.add_file(disk.as_str(), path);
         }
         if let Some(f) = found {
@@ -1495,7 +1568,7 @@ extend Pp {
             self.run_file(main.unwrap(), first.as_str(), NONE, NONE, out);
         } else if !self.failed {
             self.failed = true;
-            report(&mut self.err, path, 0, "cannot open file");
+            report(&mut self.err, path, 0, "cannot open file", self.quiet);
         }
         if !self.at_bol {
             out.push_byte(b'\n');
