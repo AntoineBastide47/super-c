@@ -5030,7 +5030,20 @@ extend Lower {
         if oy.kind == TypeKind::TYPE_REFERENCE || oy.kind == TypeKind::TYPE_POINTER {
             let mut em = om;
             let mut et = TYPE_NONE;
-            let _ = Lower::resolved(c, om, oy.as_data.elem, &mut em, &mut et);
+            let ey = Lower::resolved(c, om, oy.as_data.elem, &mut em, &mut et);
+            if ey.kind == TypeKind::TYPE_DYN {
+                // A borrow of an owned dyn value of the same interface (`&Box<dyn I>` as `&dyn I`): its
+                // data and table.
+                let p = self.operand(c, b, rv.a);
+                if p == VNONE {
+                    return false;
+                }
+                let d = self.load(T_PTR, p, 0, false);
+                let vt = self.load(T_PTR, p, pb, false);
+                self.store(d, dst, 0, false);
+                self.store(vt, dst, pb, false);
+                return true;
+            }
             if !c.dyn_pair(dm, dt, em, et, false, 0, TYPE_NONE, &mut pair) {
                 return self.fail("dyn-pair");
             }
@@ -9944,6 +9957,11 @@ extend Lower {
         let mut ti = TyI { cls: 0 };
         if !self.ty(c, sm, st, &mut ti) || c.is_destructible(rm, rt) && !self.drop_at(c, rm, rt, p, 0) {
             return false;
+        }
+        if ti.size == 0 {
+            // A zero-sized value occupies no bytes: its box holds the sentinel, which was never allocated.
+            let _ = self.inst(O_RET, T_NONE, 0, VNONE, VNONE, VNONE);
+            return true;
         }
         let pi = self.ptr_int();
         let sz = self.iconst(pi, ti.size);

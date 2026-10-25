@@ -5157,8 +5157,9 @@ fn main() i32 {
 }
 
 // Programs the checker accepts compile: an `Option<Box<dyn fn>>` frees its payload through the
-// vtable's drop slot, a field reached through `&mut &mut H` dereferences twice, and an argument of
-// an associated type that is a reference passes the reference.
+// vtable's drop slot, a field reached through `&mut &mut H` dereferences twice, an argument of
+// an associated type that is a reference passes the reference, and a borrow of a `Box<dyn I>` (a
+// local or a field) passes as `&dyn I` and `&mut dyn I` with the box's data and table.
 fn dyn_drop_double_deref_and_assoc_arguments(b: &mut h::ExitBatch) {
     b.add(
         "an Option<Box<dyn fn>> drop",
@@ -5173,6 +5174,11 @@ fn dyn_drop_double_deref_and_assoc_arguments(b: &mut h::ExitBatch) {
     b.add(
         "a reference argument of an associated type",
         "interface Producer { type Output; }\nstruct P {}\nextend P as Producer { type Output = &'static Box<i32>; }\nfn take<T: Producer>(x: T::Output) i32 { let _ = x; return 52; }\nfn main() i32 {\n    let v = Box::<i32>::new(52);\n    let r: &Box<i32> = &v;\n    return take::<P>(r) - 52;\n}\n",
+        0,
+    );
+    b.add(
+        "a borrowed Box<dyn I> as &dyn I and &mut dyn I",
+        "interface C { fn get(self: &Self) i32; fn bump(self: &mut Self); }\nstruct N { pub v: i32 }\nextend N as C {\n    pub fn get(self: &Self) i32 { return self.v; }\n    pub fn bump(self: &mut Self) { self.v += 10; }\n}\nstruct H { pub c: Box<dyn C> }\nfn read(c: &dyn C) i32 { return c.get(); }\nfn bump(c: &mut dyn C) { c.bump(); }\nfn main() i32 {\n    let mut b: Box<dyn C> = Box::new(N { v: 1 });\n    bump(&mut b);\n    let mut h = H { c: Box::new(N { v: 2 }) };\n    bump(&mut h.c);\n    return read(&b) + read(&h.c) - 23;\n}\n",
         0,
     );
 }
@@ -5918,5 +5924,16 @@ fn f(t: (i64, u8)) i64 { return t.0 + t.1 as i64; }
         "an array cast to a slice",
         "fn main() i32 { let a = [1, 2]; let s = a as []i32; return s[1]; }\n",
         "invalid cast from '[i32; 2]'",
+    );
+}
+
+// A boxed zero-sized value erased to `Box<dyn I>` holds the sentinel, which was never allocated: dropping
+// the box runs the value's `free` and frees nothing.
+@test
+fn boxed_zero_sized_dyn_values_drop_without_freeing() {
+    h::expect_exit(
+        "a boxed zero-sized dyn value",
+        "interface I {\n    fn f(self: &Self) i32;\n}\n\nstruct Z {}\n\nextend Z as I {\n    pub fn f(self: &Self) i32 {\n        return 1;\n    }\n}\n\nstruct W {}\n\nstatic mut FREED: i32 = 0;\n\nextend W as I {\n    pub fn f(self: &Self) i32 {\n        return 2;\n    }\n}\n\nextend W as Free {\n    pub fn free(self: &mut Self) {\n        unsafe FREED = unsafe FREED + 1;\n    }\n}\n\nfn main() i32 {\n    let mut v = Vector::<Box<dyn I>>::new();\n    v.push(Box::new(Z {}));\n    v.push(Box::new(W {}));\n    let s = v[0].f() + v[1].f();\n    v.clear();\n    return s - 3 + unsafe FREED - 1;\n}\n",
+        0,
     );
 }

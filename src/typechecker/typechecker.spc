@@ -19959,10 +19959,15 @@ extend<'a> TypeChecker<'a> {
                 }
                 continue;
             }
-            if rm.kind == NodeKind::NODE_FUNCTION && rm.as_data.function.body == NODE_NONE {
+            // A required method must be defined; a defined one, also an override of a default body,
+            // must match the interface's signature.
+            if rm.kind == NodeKind::NODE_FUNCTION {
                 let rn = unsafe (*ia).at_const(rm.as_data.function.name).as_data.name.text;
                 let hm = self.find_extend_item_named(extnode, rn, iface.module);
                 let reqdef = DefId { module: iface.module, node: rid };
+                if hm == NODE_NONE && rm.as_data.function.body != NODE_NONE {
+                    continue;
+                }
                 if hm == NODE_NONE {
                     let at = unsafe (*self.cur_ast()).at_const(
                         unsafe (*self.cur_ast()).at_const(extnode).as_data.extend_def.interface_type,

@@ -491,7 +491,9 @@ this interface only with other arguments". With several conformances (`extend P 
 arguments, and a default body it inherits is instantiated under those arguments.
 
 A container element dispatches directly: `v.at(i).area()` (a method call on
-`&Box<dyn I>`) goes through the vtable, as does the explicit `(*v.at(i)).area()`.
+`&Box<dyn I>`) goes through the vtable, as does the explicit `(*v.at(i)).area()`. A borrow of a
+`Box<dyn I>` passes as `&dyn I` (and `&mut` of one as `&mut dyn I`): the borrowed value has the
+box's data and table, and the box keeps its payload.
 
 A superinterface's methods are in the vtable too, under the arguments the hierarchy gives it: for
 `interface B: A<i32>`, `b.get()` on a `&dyn B` runs the `A<i32>` conformance's `get` (or the default

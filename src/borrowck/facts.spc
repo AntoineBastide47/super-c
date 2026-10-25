@@ -4475,8 +4475,10 @@ extend Gen {
                                 continue;
                             }
                             let mut tie = i == 0 && recv;
-                            if !tie && relide && nborrowing == 1 && i == bidx {
-                                // Elision: the single borrowing input feeds the return.
+                            if !tie && relide && relided && nborrowing == 1 && i == bidx {
+                                // Elision: the single borrowing input feeds the return's elided
+                                // positions. A return without one holds only `'static` borrows: an
+                                // owned `dyn` in a signature (`Box<dyn I>`, a field of one) is.
                                 tie = true;
                             }
                             let mut by_tok = false;

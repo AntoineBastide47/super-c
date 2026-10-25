@@ -14779,40 +14779,45 @@ extend CEmit {
                     tabs.push_str(" *)__self);\n");
                 }
             }
-            tabs.push_str("    ");
-            if at == TYPE_NONE {
-                tabs.push_str("Global__dealloc(");
-                self.push_global_arg(&mut tabs);
-            } else if ok {
-                // The allocator the box was made with, rebuilt by its `Default` (the fat value
-                // carries no allocator state; the checker requires `Default`).
-                let mut ds = String::new();
-                ok = self.mg.method_by_name(am, at, "default", &mut ds) && self.mg.method_by_name(
-                    am,
-                    at,
-                    "dealloc",
-                    &mut tabs,
-                );
-                tabs.push_str("(");
-                if self.mg.is_zst(am, at) {
+            if self.mg.is_zst(srm, srt) {
+                // A zero-sized value occupies no bytes: its box holds the sentinel, which was never allocated.
+                tabs.push_str("    (void)__self;\n}\n");
+            } else {
+                tabs.push_str("    ");
+                if at == TYPE_NONE {
+                    tabs.push_str("Global__dealloc(");
+                    self.push_global_arg(&mut tabs);
+                } else if ok {
+                    // The allocator the box was made with, rebuilt by its `Default` (the fat value
+                    // carries no allocator state; the checker requires `Default`).
+                    let mut ds = String::new();
+                    ok = self.mg.method_by_name(am, at, "default", &mut ds) && self.mg.method_by_name(
+                        am,
+                        at,
+                        "dealloc",
+                        &mut tabs,
+                    );
                     tabs.push_str("(");
-                    tabs.push_string(&ds);
-                    tabs.push_str("(), ");
-                    ok = ok && self.zst_sentinel_ref(am, at, &mut tabs);
-                    tabs.push_str(")");
-                } else {
-                    tabs.push_str("&(");
-                    ok = ok && self.mg.ctype(am, at, "[1]", &mut tabs);
-                    tabs.push_str("){ ");
-                    tabs.push_string(&ds);
-                    tabs.push_str("() }[0]");
+                    if self.mg.is_zst(am, at) {
+                        tabs.push_str("(");
+                        tabs.push_string(&ds);
+                        tabs.push_str("(), ");
+                        ok = ok && self.zst_sentinel_ref(am, at, &mut tabs);
+                        tabs.push_str(")");
+                    } else {
+                        tabs.push_str("&(");
+                        ok = ok && self.mg.ctype(am, at, "[1]", &mut tabs);
+                        tabs.push_str("){ ");
+                        tabs.push_string(&ds);
+                        tabs.push_str("() }[0]");
+                    }
                 }
+                tabs.push_str(", __self, sizeof(");
+                tabs.push_string(&srcc);
+                tabs.push_str("), _Alignof(");
+                tabs.push_string(&srcc);
+                tabs.push_str("));\n}\n");
             }
-            tabs.push_str(", __self, sizeof(");
-            tabs.push_string(&srcc);
-            tabs.push_str("), _Alignof(");
-            tabs.push_string(&srcc);
-            tabs.push_str("));\n}\n");
             if ok && self.dyl.ok {
                 let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
                 self.dyl.ok = l.deref_mut().dyn_free(self, srm, srt, am, at, fslot.as_str(), own9);
@@ -17867,6 +17872,16 @@ extend CEmit {
                 let mut et = oy.as_data.elem;
                 if !self.mg.resolve(om, oy.as_data.elem, &mut em, &mut et) {
                     ok = self.fail("dyn-src");
+                }
+                if ok && unsafe (*self.p().module_ast_const(em)).type_at(et).kind == TypeKind::TYPE_DYN {
+                    // A borrow of an owned dyn value of the same interface (`&Box<dyn I>` as `&dyn I`): its
+                    // data and table, which every dyn type of the interface spells alike.
+                    dst.push_str("(*(");
+                    ok = self.emit_operand(b, rv.a, dst);
+                    dst.push_str("))");
+                    self.sput(tc);
+                    self.sput(pair);
+                    return ok;
                 }
                 if ok {
                     ok = self.dyn_pair(dm, dt, em, et, false, 0, TYPE_NONE, &mut pair);
