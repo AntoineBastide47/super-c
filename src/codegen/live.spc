@@ -388,10 +388,94 @@ extend Live {
                 }
             }
         }
+        self.cold_entries(b, &mut kept);
         // One more use, which no instruction makes: a kept value lives to the end of its last block.
         for x in 0..n {
             if kept[x] {
                 self.uses[x] += 1;
+            }
+        }
+    }
+}
+
+extend Live {
+    // A cold block that branches into the body runs inside the ranges of the values live at its target,
+    // though the layout puts it last: each value whose range holds the position of such a target lives to
+    // the cold block too, and is kept (its last use does not end it). A range max over the targets'
+    // positions (a sparse table of `best`: per position, the last cold block with an edge into it) finds
+    // the extension of each value.
+    fn cold_entries(self: &mut Self, b: &Body, kept: &mut Vector<bool>) {
+        let np = self.order.len();
+        let mut best = Vector::<u32>::new();
+        fill(&mut best, np, 0);
+        let mut any = false;
+        for p in 0..np {
+            let bk = b.blocks[self.order[p] as usize];
+            if (bk.flags & BLOCK_COLD) == 0 {
+                continue;
+            }
+            b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], &mut self.succ);
+            for e in 0..self.succ.len() {
+                let q = self.pos[b.edge_target(self.succ[e]) as usize] as usize;
+                if best[q] < p as u32 {
+                    best[q] = p as u32;
+                    any = true;
+                }
+            }
+        }
+        if !any {
+            return;
+        }
+        // Level j holds the maxima of the 2^j positions from each position.
+        let mut levels: usize = 1;
+        while 1usize << levels <= np {
+            levels += 1;
+        }
+        let mut sp = Vector::<u32>::with_capacity(levels * np);
+        sp.extend_copy(&best);
+        for j in 1..levels {
+            let h = 1usize << j - 1;
+            for i in 0..np {
+                let a = sp[(j - 1) * np + i];
+                let c = if i + h < np {
+                    sp[(j - 1) * np + i + h];
+                } else {
+                    0u32;
+                };
+                sp.push(
+                    if a > c {
+                        a;
+                    } else {
+                        c;
+                    },
+                );
+            }
+        }
+        for x in 0..self.end.len() {
+            let d = self.def_blk[x];
+            if d == NONE || self.pos[d as usize] == NONE {
+                continue;
+            }
+            let lo = self.pos[d as usize] as usize;
+            // Each step moves the end to a later cold block: at most one step per cold block.
+            loop {
+                let hi = self.end[x] as usize;
+                let mut j: usize = 0;
+                while 2usize << j <= hi - lo + 1 {
+                    j += 1;
+                }
+                let a = sp[j * np + lo];
+                let c = sp[j * np + hi + 1 - (1usize << j)];
+                let e = if a > c {
+                    a;
+                } else {
+                    c;
+                };
+                if e <= self.end[x] {
+                    break;
+                }
+                self.end[x] = e;
+                kept[x] = true;
             }
         }
     }
@@ -475,8 +559,8 @@ pub const fn edge_of(b: &Body, t: Inst, k: u32) u32 {
     return b.switch_edge(t, k);
 }
 
-// `v` as `n` copies of `x`, its buffer reused.
-fn fill(v: &mut Vector<u32>, n: usize, x: u32) {
+/// `v` as `n` copies of `x`, its buffer reused.
+pub fn fill(v: &mut Vector<u32>, n: usize, x: u32) {
     v.truncate(0);
     v.resize_default(n);
     if x != 0 {

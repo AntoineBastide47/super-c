@@ -276,7 +276,10 @@ return". The
 interpreter also models the runtime's bit helpers (`sc_ctz64`, `sc_clz64`, `sc_popcount64`, the
 wrapping `sc_w*64` and `sc_mulo_*64`), evaluates an f32 libm function as the f32 function the
 program links (`libm1f`, `libm2f`: `acosf` for an f32 `acos`, never the f64 result narrowed), so a
-constant equals the run-time call bit for bit where the compiler and the program use one libm, and folds the cancellation probe
+constant equals the run-time call bit for bit where the compiler and the program use one libm. Where
+the target's C library comes from std (wasm: `Package::rt_libm`), an extern call whose C symbol (its
+`@import` string, else its name) `std::rt::libm` exports runs that function's body instead
+(`libm_def`), so a cross build's constant equals the program's call too. It folds the cancellation probe
 (`SI_CANCEL_PROBE`) to 0, as it folds `IN_SAFEPOINT_C` (no task exists at compile time; see the
 concurrency skill). An integer loop step renders as `for (..; i++)` (or `i--`)
 only when it cannot overflow (`CEmit::step_bounded`): the header tests `i < e` (`i > e` for `--`)

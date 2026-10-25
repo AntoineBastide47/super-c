@@ -5969,8 +5969,12 @@ fn owning_constants() {
 // `@arch` is `@platform`'s sibling on the instruction-set axis: it gates items on the ISA being built
 // for, defaulting to the host and overridable with `--arch=`.
 fn arch_gate(b: &mut h::ExitBatch) {
-    // The host's instruction set (loader codes: 0 x86_64, 1 aarch64, 2 wasm32).
-    let host = unsafe shim::sc_host_arch();
+    // The programs' instruction set (loader codes: 0 x86_64, 1 aarch64, 2 wasm32): wasm32 on the target lane.
+    let host = if h::target_lane() {
+        2;
+    } else {
+        unsafe shim::sc_host_arch();
+    };
     let names: []str = ["x86_64", "aarch64", "wasm32"];
     b.add(
         "only the matching architecture's item survives",
@@ -6046,15 +6050,20 @@ fn platform_gate_rejects() {
 fn gated_static_assert() {
     let mut b = h::ExitBatch::new();
     // `wasm` on both axes: no host the suite runs on is ever wasm, so these two stay gated away wherever
-    // the test itself is built.
+    // the test itself is built; the target lane's programs are wasm32, where Windows and x86_64 do.
+    let (os, isa) = if h::target_lane() {
+        ("windows", "x86_64");
+    } else {
+        ("wasm", "wasm32");
+    };
     b.add(
         "an assert for another platform does not fire here",
-        "@platform(wasm)\nstatic_assert(sizeof(usize) == 2, \"gated away off wasm\");\nfn main() i32 { return 0; }\n",
+        format("@platform({})\nstatic_assert(sizeof(usize) == 2, \"gated away\");\nfn main() i32 {{ return 0; }}\n", os).as_str(),
         0,
     );
     b.add(
         "an assert for another architecture does not fire here",
-        "@arch(wasm32)\nstatic_assert(sizeof(usize) == 2, \"gated away off wasm32\");\nfn main() i32 { return 0; }\n",
+        format("@arch({})\nstatic_assert(sizeof(usize) == 2, \"gated away\");\nfn main() i32 {{ return 0; }}\n", isa).as_str(),
         0,
     );
     h::expect_err_msg(
@@ -6193,6 +6202,17 @@ fn array_literals_adopt_the_element_type() {
         "narrowing between suffixed elements is still a mismatch",
         "fn main() i32 {\n    let vs = [1i32, 0u64];\n    return (unsafe vs[1]) as i32;\n}\n",
         "mismatched types",
+    );
+    // An element is computed in the element type, as a scalar initializer is: no wider sum truncated.
+    h::expect_build_err(
+        "an element's arithmetic overflows in the element type",
+        "fn main() i32 {\n    let vs: [u8; 2] = [200 + 100, 0];\n    return vs[0] as i32;\n}\n",
+        "arithmetic overflow",
+    );
+    h::expect_build_err(
+        "an element's shift is checked against the element type",
+        "fn main() i32 {\n    let vs: [u32; 1] = [1 << 32];\n    return vs[0] as i32;\n}\n",
+        "shift out of range",
     );
     b.run();
 }
@@ -6539,7 +6559,7 @@ fn branch_types_unify_literals_and_divergence() {
     let mut b = h::ExitBatch::new();
     b.add(
         "switch literal arms adopt the typed arm",
-        "fn f(k: i32, n: usize) usize { let a = switch k { 0 => 0, 1 => n, 2 => { 7; }, _ => { return 9; }, }; let b = switch k { 1 => n, _ => 0, }; static_assert(sizeof(a) == 8, \"usize\"); return a + b; }\nfn main() i32 { return (f(1, 3) + f(0, 3) + f(2, 3) + f(5, 3)) as i32 - 22; }\n",
+        "fn f(k: i32, n: usize) usize { let a = switch k { 0 => 0, 1 => n, 2 => { 7; }, _ => { return 9; }, }; let b = switch k { 1 => n, _ => 0, }; static_assert(sizeof(a) == sizeof(usize), \"usize\"); return a + b; }\nfn main() i32 { return (f(1, 3) + f(0, 3) + f(2, 3) + f(5, 3)) as i32 - 22; }\n",
         0,
     );
     b.add(

@@ -980,6 +980,10 @@ pub struct Interp {
     pub ext_ix: Map<u64, u64>,
     pub ext_pool: Vector<DefId>,
     pub ext_built: bool,
+    // `std::rt::libm`'s exports (a target whose C library comes from std): the symbol's hash -> its
+    // function. Built on first use (`libm_def`).
+    pub libm_ix: Map<u64, u32>,
+    pub libm_built: bool,
     pub call_memo: CallMemo,
     pub item_memo: Map<u64, IVal>, // referenced-const values (scalar only), keyed module << 32 | node
     pub item_active: Vector<u64>, // consts being evaluated right now: a re-entry is a cycle
@@ -1135,6 +1139,8 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         ext_ix: Map::<u64, u64>::new(),
         ext_pool: Vector::<DefId>::new(),
         ext_built: false,
+        libm_ix: Map::<u64, u32>::new(),
+        libm_built: false,
         call_memo: CallMemo::new(),
         item_memo: Map::<u64, IVal>::new(),
         item_active: Vector::<u64>::new(),
@@ -3786,7 +3792,14 @@ extend Interp {
             }
         }
         if is_extern {
-            return self.intercept(b, env, t, fm, fnode, args);
+            // On a target whose C library is std's (wasm), a libm call runs the function the program
+            // links, so the constant equals the call's run-time value bit for bit.
+            let ld = self.libm_def(fm, fnode);
+            if ld == NODE_NONE {
+                return self.intercept(b, env, t, fm, fnode, args);
+            }
+            fm = self.p().rt_libm as ModuleId;
+            fnode = ld;
         }
         let probe = self.p().sugar_item(loader::SugarItem::SI_CANCEL_PROBE);
         if !closure && fnode == probe.node && fm == probe.module {
@@ -4172,6 +4185,50 @@ extend Interp {
         return !self.failed;
     }
 
+    // The C symbol of extern function `fnode` of module `fm`: its `@import` string, else its name.
+    const fn c_sym(self: &Self, fm: ModuleId, fnode: NodeId) tok::Span {
+        let da = unsafe &*self.p().module_ast_const(fm);
+        let pin = da.attr_of(fnode, AttrKind::ATTR_IMPORT);
+        if pin != null {
+            return unsafe (*pin).str_span;
+        }
+        return da.at_const(da.at_const(fnode).as_data.function.name).as_data.name.text;
+    }
+
+    // The function `std::rt::libm` exports as the C symbol of extern `fnode` of module `fm`; NODE_NONE
+    // when the package has no such module (its target's C library is the system's) or it exports none.
+    fn libm_def(self: &mut Self, fm: ModuleId, fnode: NodeId) NodeId {
+        let lm = self.p().rt_libm;
+        if lm < 0 {
+            return NODE_NONE;
+        }
+        let la = unsafe &*self.p().module_ast_const(lm as ModuleId);
+        let ls = self.src_of(lm as ModuleId);
+        if !self.libm_built {
+            self.libm_built = true;
+            for i in 0..la.attrs.len() {
+                let at = la.attrs.at(i);
+                if at.kind == AttrKind::ATTR_EXPORT as u8 && la.at_const(at.owner).kind == NodeKind::NODE_FUNCTION {
+                    self.libm_ix.insert(fnv(ls.slice(at.str_span.start as usize, at.str_span.end as usize)), at.owner);
+                }
+            }
+        }
+        let cs = self.c_sym(fm, fnode);
+        let sym = self.src_of(fm).slice(cs.start as usize, cs.end as usize);
+        let d = switch self.libm_ix.get(&fnv(sym)) {
+            Some(n) => *n,
+            None => NODE_NONE,
+        };
+        if d == NODE_NONE {
+            return NODE_NONE;
+        }
+        let es = unsafe (*la.attr_of(d, AttrKind::ATTR_EXPORT)).str_span;
+        if ls.slice(es.start as usize, es.end as usize) != sym {
+            return NODE_NONE; // another symbol of the same hash
+        }
+        return d;
+    }
+
     // The libm name extern `nm` of module `fm` spells: a trailing `f` selects the f32 narrowing
     // (`f32suf`) and is stripped; "" when the name cannot be a libm name.
     const fn libm_name<'a>(self: &Self, fm: ModuleId, nm: tok::Span, f32suf: &mut bool) str<'a> {
@@ -4397,7 +4454,7 @@ extend Interp {
             out = iv_int(b.module, rt, r as i64);
         } else {
             let mut f32suf = false;
-            let name = self.libm_name(fm, nm, &mut f32suf);
+            let name = self.libm_name(fm, self.c_sym(fm, fnode), &mut f32suf);
             if name.len() == 0 || nargs < 1 || nargs > 3 {
                 self.ffi = true;
                 return self.fail();

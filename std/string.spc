@@ -44,7 +44,8 @@ extern "C" {
     fn fwrite(p: *const void, size: usize, n: usize, f: *mut FILE) usize;
 }
 
-// The standard output streams: `stdout` and `stderr` are macros over a per-target C object.
+// The standard output streams: `stdout` and `stderr` are macros over a per-target C object. wasm's C
+// library defines no such object: its streams come from `sc_stdio_stream` (`std::rt::libc`).
 @platform(macos | ios)
 extern "C" "stdio.h" {
     @import("__stdoutp")
@@ -52,25 +53,37 @@ extern "C" "stdio.h" {
     @import("__stderrp")
     static mut c_stderr: *mut FILE;
 }
-@platform(linux | android | wasm)
+@platform(linux | android)
 extern "C" "stdio.h" {
     @import("stdout")
     static mut c_stdout: *mut FILE;
     @import("stderr")
     static mut c_stderr: *mut FILE;
 }
+@platform(wasm)
+extern "C" {
+    fn sc_stdio_stream(fd: i32) *mut FILE;
+}
 @platform(windows)
 extern "C" "stdio.h" {
     fn __acrt_iob_func(i: u32) *mut FILE;
 }
 
-@platform(!windows)
+@platform(macos | ios | linux | android)
 fn std_out() *mut FILE {
     return unsafe c_stdout;
 }
-@platform(!windows)
+@platform(macos | ios | linux | android)
 fn std_err() *mut FILE {
     return unsafe c_stderr;
+}
+@platform(wasm)
+fn std_out() *mut FILE {
+    return unsafe sc_stdio_stream(1);
+}
+@platform(wasm)
+fn std_err() *mut FILE {
+    return unsafe sc_stdio_stream(2);
 }
 @platform(windows)
 fn std_out() *mut FILE {

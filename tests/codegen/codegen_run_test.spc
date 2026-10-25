@@ -213,15 +213,15 @@ fn matchertext() {
     // placeholders; interp segments keep doubled braces (they are matchers, not escapes).
     run_exit(
         "matchertext literals and interpolation",
-        "fn main() i32 {\n    let a = M\"(ab\"cd)\";\n    let b = M[]\"(v=[10 + 4] q=[a.len() as i32])\";\n    let mut r = 0;\n    if a.len() == 5 { r += 1; }\n    if a[2] == 34u8 { r += 2; }\n    if b.as_str() == \"v=14 q=5\" { r += 4; }\n    if M\"[mix {a} (b)]\" == \"mix {a} (b)\" { r += 8; }\n    let f = format(M\"(x={} {{lit}})\", 9);\n    if f.as_str() == \"x=9 {lit}\" { r += 16; }\n    const K: str = M\"(k)\";\n    if K == \"k\" { r += 32; }\n    let g = M[]\"(brace {{x}} [1])\";\n    if g.as_str() == \"brace {{x}} 1\" { r += 64; }\n    unsafe exit(r);\n}\n",
-        127,
+        "fn main() i32 {\n    let a = M\"(ab\"cd)\";\n    let b = M[]\"(v=[10 + 4] q=[a.len() as i32])\";\n    let mut r = 0;\n    if a.len() == 5 { r += 1; }\n    if a[2] == 34u8 { r += 2; }\n    if b.as_str() == \"v=14 q=5\" { r += 4; }\n    if M\"[mix {a} (b)]\" == \"mix {a} (b)\" { r += 8; }\n    let f = format(M\"(x={} {{lit}})\", 9);\n    if f.as_str() == \"x=9 {lit}\" { r += 16; }\n    const K: str = M\"(k)\";\n    if K == \"k\" { r += 32; }\n    let g = M[]\"(brace {{x}} [1])\";\n    if g.as_str() == \"brace {{x}} 1\" { r += 64; }\n    return r - 127;\n}\n",
+        0,
     );
     // The runtime hole guard: a spliced value must itself be matchertext; compliant values
     // (matched matchers) pass, a breakout value panics; format() args stay unchecked.
     run_exit(
         "matchertext hole guard accepts compliant values",
-        "fn main() i32 { let ok = \"(a) [b] {c}\"; let s = M{}\"(v={ok})\"; let f = format(\"{}\", \"loose (\"); let mut r = s.len() as i32; if f.len() == 7 { r += 1; } unsafe exit(r); }\n",
-        14,
+        "fn main() i32 { let ok = \"(a) [b] {c}\"; let s = M{}\"(v={ok})\"; let f = format(\"{}\", \"loose (\"); let mut r = s.len() as i32; if f.len() == 7 { r += 1; } return r - 14; }\n",
+        0,
     );
     let bad = h::compile_and_run(
         "fn main() i32 { let evil = \"Eve(\"; let s = M{}\"(Hi {evil})\"; return s.len() as i32; }\n",
@@ -497,8 +497,8 @@ fn local_constants_of_one_name(b: &mut h::ExitBatch) {
     exit_case(
         b,
         "local constants of one name",
-        "fn a() str<'static> { const S: str = \"first\"; return S; }\nfn b() str<'static> { const S: str = \"second!\"; return S; }\nfn c() i32 { const N: i32 = 1; return N; }\nfn d() i32 { const N: i32 = 2; return N; }\nfn main() i32 { unsafe exit((a().len() as i32) * 10 + (b().len() as i32) + c() * 20 + d() * 40); }\n",
-        157,
+        "fn a() str<'static> { const S: str = \"first\"; return S; }\nfn b() str<'static> { const S: str = \"second!\"; return S; }\nfn c() i32 { const N: i32 = 1; return N; }\nfn d() i32 { const N: i32 = 2; return N; }\nfn main() i32 { unsafe exit((a().len() as i32) * 10 + (b().len() as i32) + c() * 20 + d() * 40 - 157); }\n",
+        0,
     );
 }
 
@@ -2834,7 +2834,7 @@ fn main() i32 {
     if d.n() != 18446744073709551615 || i.n() != -9223372036854775807 - 1 || k.n() != 7 || k2.n() != 14 {
         return 1;
     }
-    if f.n() != 1 || g.n() != 0 || off::<isize::MAX>(0) != 9223372036854775807 || off::<isize::MIN>(1) != -9223372036854775807 {
+    if f.n() != 1 || g.n() != 0 || off::<isize::MAX>(0) != isize::MAX || off::<isize::MIN>(1) != isize::MIN + 1 {
         return 2;
     }
     return d.x + i.x + k.x + k2.x + f.x + g.x - 21;
@@ -3287,6 +3287,9 @@ fn main() i32 { return A + B + C + run(M::<3> { x: 0 }) - 68; }
 // (`W`'s `mul` can accept a cancellation, which marks every interface `mul`): no task exists at
 // compile time, so the probe reports none.
 fn constant_through_a_cancellation_check(b: &mut h::ExitBatch) {
+    if h::target_lane() {
+        return; // WASI has no threads for the runtime
+    }
     b.add(
         "quad<V> under a cancellation probe",
         M"(import std::parallel::runtime as rt;

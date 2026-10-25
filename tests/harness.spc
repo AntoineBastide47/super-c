@@ -567,13 +567,13 @@ fn compile_and_run_in(src: str, benv: str, env: str) RunResult {
         rm_dir(d);
         return r;
     }
-    let bin = format("{}/prog{}", d, unsafe str::from_cstr(cli::binext()));
+    let bin = prog_path(d);
     if !build_script(d, bin.as_str(), benv) {
         rm_dir(d);
         return r;
     } // did not build
     r.built = true;
-    let mut run = format("\"{}\"", bin.as_str());
+    let mut run = prog_cmd(d, bin.as_str(), "");
     let mut outp = format("{}/out", d);
     r.exit = cli::run_with(run.cstr(), null, outp.cstr(), null, env);
     r.out = slurp(outp.cstr());
@@ -613,12 +613,35 @@ fn write_text(path: str, text: str) bool {
     return true;
 }
 
-// Build `<dir>/main.spc` as a script into `bin` with the compiler under test; whether it built.
+// The path of the program built in scratch directory `d`: a wasm32 module on the target lane.
+fn prog_path(d: str) String {
+    if target_lane() {
+        return format("{}/prog.wasm", d);
+    }
+    return format("{}/prog{}", d, unsafe str::from_cstr(cli::binext()));
+}
+
+// The command that runs program `bin` of scratch directory `d` with `args`: under wasmtime on the target
+// lane, with the environment and `d`.
+fn prog_cmd(d: str, bin: str, args: str) String {
+    if target_lane() {
+        return format("wasmtime run -S inherit-env --dir=\"{}\" \"{}\" {}", d, bin, args);
+    }
+    return format("\"{}\" {}", bin, args);
+}
+
+// Build `<dir>/main.spc` as a script into `bin` with the compiler under test (for wasm32 on the target
+// lane); whether it built.
 fn build_script(dir: str, bin: str, env: str) bool {
     let mut cmd = format(
-        "\"{}\" build {} \"{}/main.spc\" -o \"{}\"",
+        "\"{}\" build {}{} \"{}/main.spc\" -o \"{}\"",
         cli::superc_path(),
         unsafe str::from_cstr(cli::cstd_flag()),
+        if target_lane() {
+            " --target=wasm";
+        } else {
+            "";
+        },
         dir,
         bin,
     );
@@ -790,7 +813,7 @@ extend ExitBatch {
         body.push_str("    return 255;\n}\n");
         root.push_string(&body);
         assert(write_text(format("{}/main.spc", d).as_str(), root.as_str()), "harness: cannot write the batch root");
-        let bin = format("{}/prog{}", d, unsafe str::from_cstr(cli::binext()));
+        let bin = prog_path(d);
         if !build_script(d, bin.as_str(), "") {
             rm_dir(dir.as_str());
             for i in 0..batched.len() {
@@ -802,7 +825,7 @@ extend ExitBatch {
         let mut exits = Vector::<i32>::new();
         let mut outs = Vector::<String>::new();
         for i in 0..batched.len() {
-            let mut run = format("\"{}\" {}", bin.as_str(), i);
+            let mut run = prog_cmd(d, bin.as_str(), format("{}", i).as_str());
             exits.push(cli::run_with(run.cstr(), null, outp.cstr(), null, ""));
             outs.push(cli::read_text(outp.as_str()));
         }
@@ -903,11 +926,26 @@ pub struct DiffBuild {
 // runner forks one process per test, so the cache is never shared.
 static mut SIMD_LANE: i32 = -1;
 
-/// Whether the vector conformance lane is on (`SC_SIMD_LANE=wasm`).
+// The target lane, `SC_TEST_TARGET=wasm` (a wasi-sdk in WASI_SDK_PATH, wasmtime on the PATH): the
+// vector lane over the whole suite, so every program the harness builds (`compile_and_run` too) is a
+// wasm32 module run under wasmtime: at the default profile through the native backend, or through C
+// under `SC_NATIVE=0`. -1 until read.
+static mut TARGET_LANE: i32 = -1;
+
+/// Whether the target lane is on (`SC_TEST_TARGET=wasm`).
+pub fn target_lane() bool {
+    if unsafe TARGET_LANE < 0 {
+        let e = stdlib::getenv("SC_TEST_TARGET");
+        unsafe TARGET_LANE = (e != null && unsafe str::from_cstr(e) == "wasm") as i32;
+    }
+    return unsafe TARGET_LANE == 1;
+}
+
+/// Whether the vector conformance lane is on (`SC_SIMD_LANE=wasm`, or the target lane).
 pub fn simd_lane() bool {
     if unsafe SIMD_LANE < 0 {
         let e = stdlib::getenv("SC_SIMD_LANE");
-        unsafe SIMD_LANE = (e != null && unsafe str::from_cstr(e) == "wasm") as i32;
+        unsafe SIMD_LANE = (e != null && unsafe str::from_cstr(e) == "wasm" || target_lane()) as i32;
     }
     return unsafe SIMD_LANE == 1;
 }

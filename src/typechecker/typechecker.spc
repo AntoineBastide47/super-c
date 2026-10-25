@@ -29793,6 +29793,12 @@ extend TypeChecker {
             }
             return we;
         }
+        let wy = *self.type_at(we);
+        if wy.kind == TypeKind::TYPE_BUILTIN && (bt_is_int(wy.as_data.builtin) || bt_is_float(wy.as_data.builtin)) {
+            // A number is computed in the slot's type, as `let x: u8 = 200 + 100` is: `[200 + 100]` for
+            // `[u8; 1]` overflows rather than truncating an i32 sum.
+            return self.check_expr_w(eid, we);
+        }
         return self.check_expr(eid);
     }
 

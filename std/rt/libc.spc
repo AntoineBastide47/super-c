@@ -1945,6 +1945,42 @@ pub const fn llabs(x: i64) i64 {
     };
 }
 
+extern "C" "stdlib.h" {
+    @import("div_t")
+    pub struct div_t {
+        pub quot: i32,
+        pub rem: i32,
+    }
+    @import("ldiv_t")
+    pub struct ldiv_t {
+        pub quot: isize,
+        pub rem: isize,
+    }
+    @import("lldiv_t")
+    pub struct lldiv_t {
+        pub quot: i64,
+        pub rem: i64,
+    }
+}
+
+/// The quotient of `n / d` truncated toward zero, and its remainder.
+@export("div")
+pub const fn div(n: i32, d: i32) div_t {
+    return div_t { quot: n / d, rem: n % d };
+}
+
+/// `div` of `long`s.
+@export("ldiv")
+pub const fn ldiv(n: isize, d: isize) ldiv_t {
+    return ldiv_t { quot: n / d, rem: n % d };
+}
+
+/// `div` of `long long`s.
+@export("lldiv")
+pub const fn lldiv(n: i64, d: i64) lldiv_t {
+    return lldiv_t { quot: n / d, rem: n % d };
+}
+
 // musl's generator: a 64-bit linear congruential state, its top 31 bits per value.
 static mut RAND_SEED: u64 = 0;
 
@@ -3177,6 +3213,18 @@ pub fn write(fd: i32, buf: *const void, n: usize) isize {
 /// Move the offset of `fd`; the new offset, or -1 with errno (ESPIPE where it cannot seek).
 @export("lseek")
 pub fn lseek(fd: i32, offset: i64, whence: i32) i64 {
+    return seek(fd, offset, whence);
+}
+
+/// The offset of `fd`, or -1 with errno: the header's `lseek` macro calls it for `lseek(fd, 0, SEEK_CUR)`
+/// with constant arguments.
+@export("__wasilibc_tell")
+pub fn wasilibc_tell(fd: i32) i64 {
+    return seek(fd, 0, 1);
+}
+
+// `lseek`, under a name no header macro rewrites.
+fn seek(fd: i32, offset: i64, whence: i32) i64 {
     let mut at: u64 = 0;
     let e = unsafe sc_wasi_fd_seek(fd, offset, whence as u8, &mut at);
     if e != 0 {

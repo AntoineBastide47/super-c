@@ -164,6 +164,9 @@ fn zero_sized_result() {
 // A program whose first `fail` operation fails spawns a thread over an owning capture: the spawn releases
 // the capture, then the process ends with its panic. A child process, so the panic's text is checked.
 fn spawn_failure(fail: str) {
+    if h::target_lane() {
+        return; // WASI has no threads: a spawn there ends the process at once
+    }
     let r = h::compile_and_run(
         format(
             "import sc_runtime;\nimport std::parallel::thread as thread;\nstruct T {{ pub n: i32 }}\nextend T as Free {{\n    pub fn free(self: &mut T) {{ eprintln(\"released\"); }}\n}}\nfn main() i32 {{\n    let t = T {{ n: 4 }};\n    unsafe sc_runtime::sc_rt_fail_arm(sc_runtime::{}, 1);\n    let _h = thread::spawn(|| t.n);\n    return 0;\n}}\n",

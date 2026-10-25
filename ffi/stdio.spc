@@ -79,7 +79,8 @@ extern "C" {
     pub fn fscanf(stream: *mut FILE, fmt: *const char, ...) i32;
 }
 
-// The standard streams: `stdin`, `stdout` and `stderr` are macros over a per-target C object.
+// The standard streams: `stdin`, `stdout` and `stderr` are macros over a per-target C object. wasm's C
+// library defines no such object: its streams come from `sc_stdio_stream` (`std::rt::libc`).
 @platform(macos | ios)
 extern "C" "stdio.h" {
     @import("__stdinp")
@@ -89,7 +90,7 @@ extern "C" "stdio.h" {
     @import("__stderrp")
     static mut c_stderr: *mut FILE;
 }
-@platform(linux | android | wasm)
+@platform(linux | android)
 extern "C" "stdio.h" {
     @import("stdin")
     static mut c_stdin: *mut FILE;
@@ -97,6 +98,11 @@ extern "C" "stdio.h" {
     static mut c_stdout: *mut FILE;
     @import("stderr")
     static mut c_stderr: *mut FILE;
+}
+@platform(wasm)
+extern "C" {
+    /// The standard stream `fd`: 0 stdin, 1 stdout, 2 stderr.
+    fn sc_stdio_stream(fd: i32) *mut FILE;
 }
 @platform(windows)
 extern "C" "stdio.h" {
@@ -183,19 +189,34 @@ pub fn fopen(path: str, mode: str) *mut FILE {
 }
 
 /// The C stdin stream.
-@platform(!windows)
+@platform(macos | ios | linux | android)
 pub fn stdin() *mut FILE {
     return unsafe c_stdin;
 }
 /// The C stdout stream.
-@platform(!windows)
+@platform(macos | ios | linux | android)
 pub fn stdout() *mut FILE {
     return unsafe c_stdout;
 }
 /// The C stderr stream.
-@platform(!windows)
+@platform(macos | ios | linux | android)
 pub fn stderr() *mut FILE {
     return unsafe c_stderr;
+}
+/// The C stdin stream.
+@platform(wasm)
+pub fn stdin() *mut FILE {
+    return unsafe sc_stdio_stream(0);
+}
+/// The C stdout stream.
+@platform(wasm)
+pub fn stdout() *mut FILE {
+    return unsafe sc_stdio_stream(1);
+}
+/// The C stderr stream.
+@platform(wasm)
+pub fn stderr() *mut FILE {
+    return unsafe sc_stdio_stream(2);
 }
 /// The C stdin stream.
 @platform(windows)

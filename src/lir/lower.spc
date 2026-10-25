@@ -4109,10 +4109,10 @@ extend Lower {
         if k == irc::IN_BOUNDS {
             let f = self.icmp(C_UGE, v[0], v[1]);
             if rv.item.node == irc::CHECK_LANES {
-                // A vector's lane index: the trap names the index and the lane count.
-                let pi = self.ptr_int() as u32;
-                let tys: [u32; 2] = [pi, pi];
-                self.trap_call(f, "__sc_index_bounds", v[0..2], tys[0..2]);
+                // A vector's lane index: the trap names the index and the lane count (`u64` parameters).
+                let tys: [u32; 2] = [T_I64 as u32, T_I64 as u32];
+                let args: [Value; 2] = [self.int_to(v[0], T_I64, false), self.int_to(v[1], T_I64, false)];
+                self.trap_call(f, "__sc_index_bounds", args[0..2], tys[0..2]);
             } else {
                 self.check(f, "index out of bounds");
             }
@@ -4134,10 +4134,13 @@ extend Lower {
             let f2 = self.icmp(C_UGT, v[2], room);
             let f = self.arith(O_OR, f1, f2);
             if rv.item.node == irc::CHECK_VEC {
-                // A vector load or store: the trap names the lanes, the start and the length.
-                let pi = self.ptr_int() as u32;
-                let tys: [u32; 3] = [pi, pi, pi];
-                let args: [Value; 3] = [v[2], v[0], v[1]];
+                // A vector load or store: the trap names the lanes, the start and the length (`u64` parameters).
+                let tys: [u32; 3] = [T_I64 as u32, T_I64 as u32, T_I64 as u32];
+                let args: [Value; 3] = [
+                    self.int_to(v[2], T_I64, false),
+                    self.int_to(v[0], T_I64, false),
+                    self.int_to(v[1], T_I64, false),
+                ];
                 self.trap_call(f, "__sc_vec_bounds", args[0..3], tys[0..3]);
             } else {
                 self.check(f, "index out of bounds");
@@ -4934,14 +4937,27 @@ extend Lower {
                 pm = self.ind_m;
                 pty = ia.sig_at(&iy, false, i);
             } else if iy.kind == TypeKind::TYPE_FUNCTION {
-                // A closure: its declaration's facts hold its parameter types.
+                // A closure: its declaration's facts hold its parameter types; a named function's value:
+                // its declaration's parameters, as a direct call reads them.
                 let da = Lower::ast(c, iy.module);
                 let cf = da.closure_fact(iy.as_data.decl);
-                if cf == null || i >= unsafe (*cf).nparams {
-                    return AM_VAL;
+                if cf != null {
+                    if i >= unsafe (*cf).nparams {
+                        return AM_VAL;
+                    }
+                    pty = da.cap_facts[(unsafe (*cf).cap_start + unsafe (*cf).ncaps + i) as usize].ty;
+                } else {
+                    let fnn = da.at_const(iy.as_data.decl);
+                    if fnn.kind != NodeKind::NODE_FUNCTION || i >= fnn.as_data.function.params.len {
+                        return AM_VAL;
+                    }
+                    let pn = da.at_const(unsafe da.list(fnn.as_data.function.params)[i as usize]);
+                    if pn.kind != NodeKind::NODE_PARAMETER || pn.as_data.parameter.ty == NODE_NONE {
+                        return AM_VAL;
+                    }
+                    pty = da.type_of(pn.as_data.parameter.ty);
                 }
                 pm = iy.module;
-                pty = da.cap_facts[(unsafe (*cf).cap_start + unsafe (*cf).ncaps + i) as usize].ty;
             } else {
                 return AM_VAL;
             }

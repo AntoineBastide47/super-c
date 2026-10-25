@@ -114,6 +114,22 @@ fn parity_float_literals() {
 // narrowed to f32 is one step off the f32 function's on the macOS libm.
 @test
 fn parity_f32_libm() {
+    f32_libm_parity([]);
+}
+
+// A wasm32 build folds through the function it links, `std::rt::libm`, not the compiler's own libm, whose
+// results differ from it by a step for most of these inputs. The lanes check it on their own.
+@test
+fn parity_f32_libm_on_wasm() {
+    let sdk = stdlib::getenv("WASI_SDK_PATH");
+    if sdk == null || unsafe *sdk == 0 as char || h::simd_lane() || cli::on_wasm() {
+        return;
+    }
+    f32_libm_parity(["--target=wasm"]);
+}
+
+// `parity_f32_libm` built with `opts`.
+fn f32_libm_parity(opts: []str) {
     let d = h::const_runtime_parity(
         "",
         [
@@ -170,7 +186,7 @@ fn parity_f32_libm() {
             "f32",
             "f32",
         ],
-        [],
+        opts,
     );
     assert(d.len() == 0, d.as_str());
 }

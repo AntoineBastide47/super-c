@@ -40,6 +40,9 @@ fn main() i32 {
 )";
 
 fn each_thread_has_its_own_object(b: &mut h::ExitBatch) {
+    if h::target_lane() {
+        return; // WASI has no threads
+    }
     b.add("each thread has its own thread-local objects", THREADS, 0);
 }
 

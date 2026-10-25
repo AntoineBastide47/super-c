@@ -518,7 +518,8 @@ reference-counted (recycled within `CACHE_BUDGET` bytes), a cancellation abandon
 task's side without stopping the body, and whichever side ends with the value destroys
 it exactly once; the task unwinds from the call as from any cancelled wait. From a plain
 thread every form blocks for the value; from a pool thread (a body that calls again) the
-body runs in place, so a saturated pool never waits on itself. Bounds: at most
+body runs in place, so a saturated pool never waits on itself. wasm has no pool (one thread):
+every form runs in place there. Bounds: at most
 `MAX_THREADS` threads exist, creation reservations included (reserve under the lock,
 create outside it, publish the handle before the thread takes work); at most
 `MAX_PENDING` accepted calls wait for a thread, past which a coroutine parks for

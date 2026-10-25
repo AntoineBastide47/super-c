@@ -4,7 +4,7 @@ name: Release
 # a GitHub Release with one archive per platform.
 #
 # resolve -> compile -> test shards, levels, gate, ctarget (Linux) -> package -> release
-#            wasm-compile -> wasm-checks, wasm-test -> wasm-package ----------------^
+#            wasm-compile -> wasm-checks, wasm-test, wasm-target -> wasm-package ---^
 #
 # `commit` is what keeps a run of untagged commits from being all-or-nothing. Left empty the tag lands on the
 # head of whatever branch this was dispatched from, so a single broken commit at the tip drags every good one
@@ -673,6 +673,36 @@ jobs:
           role: checks
           sha: ${{ needs.resolve.outputs.sha }}
 
+  # The target lane: the native compiler runs the suite, and every program a test builds is a wasm32
+  # module run under wasmtime, through the native wasm backend at the default profile.
+  wasm-target:
+    needs: [resolve, wasm-compile]
+    if: github.actor == github.repository_owner
+    name: wasm target (${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test_shard: ["1/2", "2/2"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          sha: ${{ needs.resolve.outputs.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: Run the test suite with wasm32 programs
+        run: |
+          chmod +x ./super-c
+          SC_TEST_TARGET=wasm SC_LEAK_CHECK=fatal ./super-c test --sanitizers --quiet --test-timeout=900 --test-shard=${{ matrix.test_shard }}
+
   wasm-test:
     needs: [resolve, wasm-compile]
     if: github.actor == github.repository_owner
@@ -806,9 +836,10 @@ jobs:
           path: ~/.super-c/cache
           key: objcache-${{ matrix.target }}-${{ needs.resolve.outputs.sha }}
 
-  # The wasm compiler ships only after both shards and its checks passed with it.
+  # The wasm compiler ships only after both shards and its checks passed with it, and the native
+  # compiler's wasm32 programs passed the suite.
   wasm-package:
-    needs: [resolve, wasm-test, wasm-checks]
+    needs: [resolve, wasm-test, wasm-checks, wasm-target]
     if: github.actor == github.repository_owner
     name: wasm package
     runs-on: ubuntu-latest

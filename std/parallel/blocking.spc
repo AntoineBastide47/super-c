@@ -223,6 +223,7 @@ fn build_pool() *mut Pool {
 // The pool, started on first use; null while a shutdown is closing it. Same init state machine as the
 // scheduler's: `G_POOL` is ordered by `G_STATE`, which the compiler cannot see: the CAS winner publishes the
 // pointer and THEN releases state 2, and every reader acquires state 2 first.
+@platform(!wasm)
 fn ensure_pool() *mut Pool {
     unsafe {
         let sp = (&mut G_STATE) as *mut i32;
@@ -256,6 +257,12 @@ fn ensure_pool() *mut Pool {
             sc_runtime::sc_rt_thread_yield();
         }
     }
+}
+
+// No pool on wasm: its one thread cannot run a pool thread, so every call runs on the caller's thread.
+@platform(wasm)
+fn ensure_pool() *mut Pool {
+    return null;
 }
 
 // Normal process exit (`atexit`): release the pool as `try_shutdown` does, so a program that returns

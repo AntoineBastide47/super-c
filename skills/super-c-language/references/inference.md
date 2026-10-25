@@ -154,8 +154,9 @@ error; write the instance (`Option::<T>::None`). A struct-payload variant litera
 struct literal does; the type arguments follow the enum name (`Sh::<i16>::Pt { .. }`), and
 `Sh::Pt::<i16> { .. }` or `Option::Some::<i32>(1)` is an error. An array literal passes its expected element
 type (from an annotation or an array or slice parameter) to such constructors, to closures,
-to nested array literals, and to generic functions named as values (`[twice, id]` for
-`[fn(i32) i32; 2]`). A generic function named as a value takes its arguments from a turbofish
+to nested array literals, to numeric elements, which compute in it as a `let`'s initializer does
+(`[200 + 100]` for `[u8; 1]` is an overflow, not a truncated `i32` sum), and to generic functions
+named as values (`[twice, id]` for `[fn(i32) i32; 2]`). A generic function named as a value takes its arguments from a turbofish
 (`id::<i32>`, a value with no annotation) or from the expected function-pointer type (an
 annotation, a parameter, a struct field, an array element). Elements with no type of their
 own (`null`) take the other elements' type or the expected element type (`[null, null]` as

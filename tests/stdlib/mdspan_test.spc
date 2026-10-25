@@ -299,7 +299,7 @@ fn zero_extents_have_no_elements() {
     assert(same(row.extents(), [0]));
     assert(row.is_empty());
     // A zero extent after large ones keeps the count at 0 without an overflow.
-    let big = md::MdSpan::<usize, 3>::row_major(data[0..0], [1 << 40, 1 << 40, 0]).unwrap();
+    let big = md::MdSpan::<usize, 3>::row_major(data[0..0], [usize::MAX / 2, 3, 0]).unwrap();
     assert_eq(big.size(), 0);
     let m = md::MdSpan::<usize, 1>::col_major(data[0..], [0]).unwrap();
     assert(m.is_empty());
@@ -317,11 +317,11 @@ fn validation_failures() {
     assert_eq(far.unwrap_err(), md::MdSpanError::TooShort { required: 13, len: 12 });
     let over = md::MdSpanError::Overflow;
     // The extent product overflows.
-    assert_eq(md::MdSpan::<usize, 2>::row_major(data[0..], [1 << 32, 1 << 32]).unwrap_err(), over);
+    assert_eq(md::MdSpan::<usize, 2>::row_major(data[0..], [usize::MAX / 2, 3]).unwrap_err(), over);
     assert_eq(md::MdSpan::<usize, 2>::col_major(data[0..], [usize::MAX, 2]).unwrap_err(), over);
-    assert_eq(md::MdSpan::<usize, 2>::strided(data[0..], [1 << 33, 1 << 33], [0, 0]).unwrap_err(), over);
+    assert_eq(md::MdSpan::<usize, 2>::strided(data[0..], [usize::MAX / 3, 4], [0, 0]).unwrap_err(), over);
     // A stride product overflows although another extent is 0.
-    assert_eq(md::MdSpan::<usize, 3>::row_major(data[0..0], [0, 1 << 40, 1 << 40]).unwrap_err(), over);
+    assert_eq(md::MdSpan::<usize, 3>::row_major(data[0..0], [0, usize::MAX / 2, 3]).unwrap_err(), over);
     // The largest offset overflows, or the required span size does not fit.
     assert_eq(md::MdSpan::<usize, 2>::strided(data[0..], [2, 2], [usize::MAX, 1]).unwrap_err(), over);
     assert_eq(md::MdSpan::<usize, 2>::strided(data[0..], [3, 1], [usize::MAX, 1]).unwrap_err(), over);

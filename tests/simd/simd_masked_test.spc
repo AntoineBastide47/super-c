@@ -144,9 +144,14 @@ fn pick3(ok: bool) i32 {
     return 4;
 }
 )";
-    let b = h::diff_build(src, []);
-    assert(b.built, b.diag.as_str());
     let lane = h::simd_lane();
+    // The lane's check reads the emitted C: its build goes through C.
+    let b = if lane {
+        h::diff_build(src, ["SC_NATIVE=0"]);
+    } else {
+        h::diff_build(src, []);
+    };
+    assert(b.built, b.diag.as_str());
     if lane {
         let mut mc = String::from_str(b.proj.dir());
         mc.push_str("/build/debug/raw/main.c");

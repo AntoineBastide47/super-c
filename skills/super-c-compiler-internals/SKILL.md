@@ -1030,7 +1030,8 @@ A native build compiles each module's LIR to a machine object in place of its C 
 
 | File | Content |
 |------|---------|
-| `src/codegen/live.spc` | The analysis pass (TPDE): block layout in reverse postorder with each loop contiguous and cold blocks last, loop nesting, each value's live range and use count |
+| `src/codegen/live.spc` | The analysis pass (TPDE): block layout in reverse postorder with each loop contiguous and cold blocks last, loop nesting, each value's live range and use count. A cold block laid out after a loop that branches back into it runs inside the loop: each value live at its target lives to the cold block's position and is kept (`cold_entries`) |
+| `src/codegen/structure.spc` | What structured control flow needs (Ramsey, "Beyond Relooper"): reverse postorder, immediate dominators, forward in-edges, loop headers, dominator-tree children |
 | `src/codegen/obj.spc` | The format-neutral object: sections, symbols, relocations |
 | `src/codegen/abi.spc` | The calling conventions' shared records: `Part`, `ALoc`, `CallLayout` |
 | `src/target/a64.spc` | The arm64 encoder, one function per instruction form |
@@ -1043,7 +1044,11 @@ A native build compiles each module's LIR to a machine object in place of its C 
 | `src/target/win64.spc` | The Microsoft x64 classification, as mingw-w64 gcc applies it |
 | `src/target/elf.spc` | The ELF object writer: `.eh_frame` against section symbols, `.note.GNU-stack`, thread-locals |
 | `src/target/coff.spc` | The COFF object writer: `.pdata` and `.xdata` from the frames' UNWIND_INFO |
-| `src/target/native.spc` | The entry: `supported`, `object` |
+| `src/target/wasm.spc` | The wasm instruction encoder: LEB128 forms (padded 5-byte fields where a relocation writes), value types, opcodes |
+| `src/target/wasmabi.spc` | The basic C ABI of wasm32 (BasicCABI.md): scalars as wasm values, i128 as two i64, a one-leaf aggregate as its scalar, other aggregates and i128 results through pointers, variadic arguments in a caller's buffer |
+| `src/target/wasmobj.spc` | The relocatable wasm object `wasm-ld` links (Linking.md): types, imports, functions, data segments, the `linking` symbol table, relocations |
+| `src/target/wasmgen.spc` | One LIR body into one wasm function: scalars in locals shared by live range, i128 and vectors in frame homes, the frame below `__stack_pointer`, Ramsey's structured control flow from an explicit task stack, dense switches as `br_table`, vector operations lane by lane as the evaluator defines them. A C `main` with two parameters is `__main_argc_argv`, as wasi-libc's start calls it |
+| `src/target/native.spc` | The entry: `supported` (macOS arm64, Linux x86-64, Windows x86-64, wasm32-wasip1), `object` |
 
 `driver::emit` decides `Package.native`: a linking build with unoptimized C flags and no sanitizer
 on a supported target, or what `SC_NATIVE` says. `native_header_facts` reads the constants of the

@@ -280,6 +280,9 @@ fn main() i32 {
 )";
 
 fn naked_function_runs(b: &mut h::ExitBatch) {
+    if h::target_lane() {
+        return; // the function has an aarch64 and an x86_64 form only
+    }
     b.add("a naked function runs", NAKED, 0);
 }
 

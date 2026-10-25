@@ -256,7 +256,10 @@ joins its arguments with spaces and quotes nothing; `abort()` is fail-fast (exit
 runner: edit the `windows` job in `.github/workflows/debug.yml`, which runs on dispatch only.
 In both workflows, each platform builds its compiler once (`compile`, `windows-compile`,
 `wasm-compile`: an artifact) and runs its test shards in parallel on it (three on Windows, the
-slowest runner, two elsewhere). Every CI suite runs `super-c test --sanitizers`: the compiler under
+slowest runner, two elsewhere). The build has two stages: the latest release builds stage 1 through
+C, and stage 1 builds the tested compiler at the default profile, natively; `wasm-compile` builds
+`super-c.wasm` the same way (the native wasm backend), and `wasm-package` ships a release build of
+it, as `package` ships a release build of the native binary. Every CI suite runs `super-c test --sanitizers`: the compiler under
 test and the runner build with ASan and UBSan there (no-op on Windows), while a local run stays
 without them for speed. In the release workflow (macOS, Linux and Windows in one matrix)
 the correctness gate (`ci/gate.sh --core`), the x86-64 levels and the `ctarget` job (Linux: the C environment tables
@@ -474,7 +477,8 @@ rebuild one test file under `SC_LIR=1 SC_LIR_EVAL=1 SC_LIR_STATS=1 super-c test 
 ### The native backend
 
 `tests/codegen/native_test.spc` compiles LIR text to an object, links it with a C driver and runs it
-(`run_native`; `SC_NATIVE_KEEP=1` keeps the files), builds programs whose modules mix C and native
+(`run_native`; `SC_NATIVE_KEEP=1` keeps the files), and with `WASI_SDK_PATH` set does the same for
+wasm32 (`run_wasm`: `ptr 8` becomes `ptr 4`, the wasi-sdk's clang links, wasmtime runs), builds programs whose modules mix C and native
 code (`SC_NATIVE=<module>`, C values of `@layout` types and enums with payloads included), and checks
 that two builds give byte-identical objects. A CLI test that reads the emitted C, a C unit or a C
 object of a debug build sets `cli::set_env("SC_NATIVE", "0")`: on macOS arm64, Linux x86-64 and
@@ -527,8 +531,9 @@ times slower. On the wasm lane each build
 passes `--transpiler=$SUPERC`, so the transpile step and its constant evaluation run in the wasm
 compiler under wasmtime; the C compile and the program stay native, except under
 `const_runtime_parity`: there the program builds `--target=wasm` (wasi-sdk) and runs under wasmtime,
-so the folded constants and their run-time twins call one C library, `std::rt::libm` (a libm call
-folds through the compiler's own C library, which is that module in the wasm compiler).
+so the folded constants and their run-time twins call one C library, `std::rt::libm` (a wasm build's
+libm call folds through that module's body on any host). `parity_f32_libm_on_wasm` checks it from a
+native compiler when `WASI_SDK_PATH` is set.
 
 - `same_output(src, opts_a, opts_b, runs)` runs both builds once per entry of `runs` (the
   command-line arguments of one run) and returns the first difference, empty when none. The trap
@@ -577,6 +582,15 @@ guard page is the end of linear memory (`sbrk`), the trap-before-write check rea
 threads). The release workflow's `wasm-checks` job (beside the wasm test shards) runs
 `SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=simd_`,
 then the same with `--filter=gen_vector_seeds`.
+
+`SC_TEST_TARGET=wasm` (`h::target_lane()`) is the vector lane over the whole suite: `simd_lane()` is
+true under it, and `compile_and_run` (with `expect_exit`, `expect_trap` and `ExitBatch`) also builds a
+wasm32 module, run with `wasmtime run -S inherit-env`. At the default profile every such program goes
+through the native wasm backend. A case that needs what WASI lacks (threads, a host instruction
+set) returns early under `h::target_lane()` (a `@blocking` call runs inline on wasm, so it needs none); an exit status must
+stay below 126 (wasmtime rejects larger ones), and a program that ends with `exit` while it holds a
+`String` longer than 11 bytes leaks on wasm32 (its inline capacity) where it does not on a 64-bit host.
+The release workflow's `wasm-target` job runs it in two shards.
 
 On an aarch64 host every build calls the Neon entries (`neon` is the baseline), so without the
 lane `expect_run` builds again with `SC_SIMD_SCALAR=1` and requires the same output, the entry
