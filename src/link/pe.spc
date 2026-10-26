@@ -11,7 +11,9 @@
 // mingw-w64's import libraries also carry a few C functions the C runtime DLLs do not export: the ones
 // that are its exports under another name (`RENAMES`), and the ones the static part of its C library
 // implements, which the Super-C runtime defines as `__sc_ucrt_<name>` (`std::rt::builtins`).
+import link::ar;
 import link::util as lu;
+import target::native as nat;
 import utils::names as nm;
 import std::platform::fs;
 import stdlib;
@@ -36,6 +38,7 @@ const SCN_IDATA: u32 = 0x40;
 const SCN_UDATA: u32 = 0x80;
 const SCN_LNK_INFO: u32 = 0x200;
 const SCN_LNK_REMOVE: u32 = 0x800;
+const SCN_LNK_COMDAT: u32 = 0x1000;
 const SCN_NRELOC_OVFL: u32 = 0x01000000;
 const SCN_DISCARDABLE: u32 = 0x02000000;
 const SCN_EXEC: u32 = 0x20000000;
@@ -53,6 +56,8 @@ const REL_SECREL: u32 = 11;
 
 const CLASS_EXTERNAL: u8 = 2;
 const CLASS_STATIC: u8 = 3;
+const CLASS_WEAK: u8 = 105; // a weak external: its auxiliary record names the default
+const SEL_ASSOCIATIVE: u8 = 5; // a COMDAT section kept or dropped with another
 const CLASS_AUX: u8 = 0xFF; // an auxiliary record's slot
 
 // lld's preferred addresses of an executable and of a DLL.
@@ -112,6 +117,7 @@ struct ISec {
     pub nreloc: u32,
     pub out: u32,
     pub at: u64,
+    pub assoc: u32, // an associative COMDAT section's section, else NONE
 }
 
 // An input symbol (an auxiliary record keeps its slot, so symbol table indices stay direct).
@@ -143,6 +149,7 @@ struct GSym {
     pub strong: bool, // an object references it undefined
     pub need: bool, // an import the image imports
     pub slot: u32, // an import's index in `imports`
+    pub wdef: u32, // a weak external's default (an input symbol) while no object defines it, else NONE
 }
 
 // An output section.
@@ -258,17 +265,34 @@ pub fn link(o: &Opts, err: &mut String) bool {
 }
 
 fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
+    // The archives, positional and the `-l` static libraries, give the members the objects need.
+    let mut ars = ar::Archives::new();
     for i in 0..o.objs.len() {
-        if !read_object(l, o.objs[i].as_str(), blob) {
+        let p = o.objs[i].as_str();
+        if ar::is_archive(p) {
+            if !ars.add(nat::OBJ_COFF, p, &mut l.err) {
+                return false;
+            }
+        } else if !read_object(l, p, blob) {
             return false;
         }
     }
-    let b = blob.as_slice();
+    for i in 0..o.libs.len() {
+        let mut path = String::new();
+        if static_lib(o, o.libs[i].as_str(), &mut path) && !ars.add(nat::OBJ_COFF, path.as_str(), &mut l.err) {
+            return false;
+        }
+    }
     let main = global(l, l.names.intern("main"));
     l.gs.index_mut(main as usize).strong = !l.shared;
-    if !resolve_objects(l) || !resolve_imports(l, o) || !finish_symbols(l, main) {
+    if !resolve_objects(l, 0) || !take_members(l, &mut ars, blob) {
         return false;
     }
+    bind_weak(l);
+    if !resolve_imports(l, o) || !finish_symbols(l, main) || !no_dtors(l) {
+        return false;
+    }
+    let b = blob.as_slice();
     layout(l, o);
     let mut img = Vector::<u8>::new();
     img.resize_default(file_end(l) as usize);
@@ -303,6 +327,11 @@ fn read_object(l: &mut L, path: str, blob: &mut Vector<u8>) bool {
         l.err.format_into("cannot read '{}'", path);
         return false;
     }
+    return parse_object(l, path, at, blob);
+}
+
+// Enter the object at `at` of `blob` (named `path` in messages).
+fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
     let b = blob.as_slice();
     if b.len() - at < 20 || lu::r16(b, at) != 0x8664 || lu::r16(b, at + 16) != 0 {
         l.err.format_into("'{}' is not an x86-64 COFF object", path);
@@ -358,6 +387,7 @@ fn read_object(l: &mut L, path: str, blob: &mut Vector<u8>) bool {
                 nreloc: nrel,
                 out: NONE,
                 at: 0,
+                assoc: NONE,
             },
         );
     }
@@ -372,10 +402,25 @@ fn read_object(l: &mut L, path: str, blob: &mut Vector<u8>) bool {
             short_name(b, e);
         };
         let naux = b[e + 17] as usize;
+        // A COMDAT section's definition (its section symbol's auxiliary record): the selection, and an
+        // associative one's section.
+        let sec = lu::r16(b, e + 12) as i16;
+        if b[e + 16] == CLASS_STATIC && naux != 0 && sec > 0 && sec as usize <= nsec {
+            let s = (sec0 + sec as u32 - 1) as usize;
+            let a = e + 18;
+            if (l.secs[s].flags & SCN_LNK_COMDAT) != 0 && b[a + 14] == SEL_ASSOCIATIVE && lu::r16(b, a + 12) != 0 {
+                l.secs.index_mut(s).assoc = sec0 + lu::r16(b, a + 12) - 1;
+            }
+        }
         l.syms.push(
             ISym {
                 name: l.names.intern(name),
-                value: lu::r32(b, e + 8),
+                // A weak external's: its default's index (its auxiliary record's first word).
+                value: if b[e + 16] == CLASS_WEAK && naux != 0 {
+                    lu::r32(b, e + 18);
+                } else {
+                    lu::r32(b, e + 8);
+                },
                 sec: lu::r16(b, e + 12) as i16,
                 class: b[e + 16],
                 file: fi,
@@ -419,6 +464,7 @@ fn global(l: &mut L, id: u32) u32 {
                 strong: false,
                 need: false,
                 slot: NONE,
+                wdef: NONE,
             },
         );
         l.glob[id as usize] = l.gs.len() as u32;
@@ -429,19 +475,32 @@ fn global(l: &mut L, id: u32) u32 {
 // The global an input symbol names (NONE: a local one).
 fn gof(l: &L, k: u32) u32 {
     let y = l.syms[k as usize];
-    if y.class != CLASS_EXTERNAL {
+    if y.class != CLASS_EXTERNAL && y.class != CLASS_WEAK {
         return NONE;
     }
     return l.glob[y.name as usize] - 1;
 }
 
-// Enter every object's external symbols: one definition each; a tentative one (no section, a size) takes
-// the largest size.
-fn resolve_objects(l: &mut L) bool {
-    for f in 0..l.files.len() {
+// Enter the external symbols of the objects from file `from` on: one definition each, but a COMDAT
+// section that defines a defined name is dropped (with its associative sections); a tentative one (no
+// section, a size) takes the largest size; a weak external keeps its default until an object defines it.
+fn resolve_objects(l: &mut L, from: usize) bool {
+    for f in from..l.files.len() {
         let fl = l.files[f];
-        for k in fl.sym0..fl.sym0 + fl.nsym {
+        let mut k = fl.sym0;
+        // Each step enters one symbol.
+        while k < fl.sym0 + fl.nsym {
             let y = l.syms[k as usize];
+            k += 1;
+            if y.class == CLASS_WEAK {
+                // `value`: the default's index in the object.
+                let g = global(l, y.name);
+                let tag = y.value;
+                if l.gs[g as usize].kind == G_UNDEF && l.gs[g as usize].wdef == NONE {
+                    l.gs.index_mut(g as usize).wdef = fl.sym0 + tag;
+                }
+                continue;
+            }
             if y.class != CLASS_EXTERNAL {
                 continue;
             }
@@ -466,6 +525,10 @@ fn resolve_objects(l: &mut L) bool {
                 l.gs[g as usize] = gy;
                 continue;
             }
+            if gy.kind == G_DEF && y.sec > 0 && (l.secs[(fl.sec0 + y.sec as u32 - 1) as usize].flags & SCN_LNK_COMDAT) != 0 {
+                drop_section(l, fl.sec0 + y.sec as u32 - 1);
+                continue;
+            }
             if gy.kind == G_DEF {
                 let prev = l.syms[gy.sym as usize];
                 l.err.format_into(
@@ -477,19 +540,93 @@ fn resolve_objects(l: &mut L) bool {
                 return false;
             }
             gy.kind = G_DEF;
-            gy.sym = k;
+            gy.sym = k - 1;
+            gy.wdef = NONE;
             l.gs[g as usize] = gy;
         }
     }
     return true;
 }
 
+// GCC's destructor tables (`.dtors`), which the entry does not run: an error, not a destructor left out.
+fn no_dtors(l: &mut L) bool {
+    for s in 0..l.secs.len() {
+        let sc = l.secs[s];
+        if sc.size != 0 && (sc.flags & SCN_LNK_REMOVE) == 0 && l.sn.spell(sc.name).starts_with(".dtors") {
+            l.err.format_into(
+                "'{}': a destructor (`.dtors`), which this linker does not run",
+                l.paths[l.files[sc.file as usize].path as usize].as_str(),
+            );
+            return false;
+        }
+    }
+    return true;
+}
+
+// Drop input section `s` and the associative sections that follow it.
+fn drop_section(l: &mut L, s: u32) {
+    l.secs.index_mut(s as usize).flags |= SCN_LNK_REMOVE;
+    let f = l.secs[s as usize].file;
+    for i in s as usize + 1..l.secs.len() {
+        if l.secs[i].file != f {
+            break;
+        }
+        if l.secs[i].assoc == s {
+            drop_section(l, i as u32);
+        }
+    }
+}
+
+// Each global still undefined that an archive member defines: take the member, enter its symbols, until
+// no member defines a global still needed.
+fn take_members(l: &mut L, ars: &mut ar::Archives, blob: &mut Vector<u8>) bool {
+    let mut more = ars.paths.len() != 0;
+    // Each pass takes at least one member, or ends.
+    while more {
+        more = false;
+        for g in 0..l.gs.len() {
+            let gy = l.gs[g];
+            if gy.kind != G_UNDEF || !gy.strong || gy.wdef != NONE {
+                continue;
+            }
+            let am = ars.find(l.names.spell(gy.name));
+            if am.is_none() {
+                continue;
+            }
+            let m = am.unwrap();
+            ars.take(m);
+            let at = blob.len();
+            blob.extend_from_slice(ars.bytes(m));
+            let f0 = l.files.len();
+            if !parse_object(l, ars.name(m).as_str(), at, blob) || !resolve_objects(l, f0) {
+                return false;
+            }
+            more = true;
+        }
+    }
+    return true;
+}
+
+// A weak external no object defines: its default.
+fn bind_weak(l: &mut L) {
+    for g in 0..l.gs.len() {
+        let gy = l.gs[g];
+        if gy.kind == G_UNDEF && gy.wdef != NONE {
+            let m = l.gs.index_mut(g);
+            m.kind = G_DEF;
+            m.sym = gy.wdef;
+        }
+    }
+}
+
 // ---- DLLs -----------------------------------------------------------------------------------------------
 
-// The DLL `-l<name>` names: the API set behind mingw-w64's `synchronization` library, none for `m` (the
-// C runtime DLL holds the math functions), else `<name>.dll`.
-fn dll_of(name: str, out: &mut String) bool {
-    if name == "m" {
+// The DLL `-l<name>` of link `o` names: none for a static library (`static_lib`) or `m` (the C runtime
+// DLL holds the math functions), the API set behind mingw-w64's `synchronization` library, else
+// `<name>.dll`.
+fn dll_of(o: &Opts, name: str, out: &mut String) bool {
+    let mut path = String::new();
+    if name == "m" || static_lib(o, name, &mut path) {
         return false;
     }
     if name == "synchronization" {
@@ -537,7 +674,7 @@ pub fn has_dlls(o: &Opts, why: &mut String) bool {
     let mut want = Vector::<String>::new();
     for i in 0..o.libs.len() {
         let mut d = String::new();
-        if dll_of(o.libs[i].as_str(), &mut d) {
+        if dll_of(o, o.libs[i].as_str(), &mut d) {
             want.push(d);
         }
     }
@@ -552,6 +689,34 @@ pub fn has_dlls(o: &Opts, why: &mut String) bool {
         }
     }
     return true;
+}
+
+/// Whether `-l<name>` of link `o` is a static library: `lib<name>.a`, `<name>.lib` or `lib<name>.lib` in a
+/// `-L` directory (GNU ld's order, import libraries `lib<name>.dll.a` left out) that holds an object; its
+/// path into `path`. An import library stands for its DLL.
+pub fn static_lib(o: &Opts, name: str, path: &mut String) bool {
+    const FORMS: [](str, str) = [("lib", ".a"), ("", ".lib"), ("lib", ".lib")];
+    for i in 0..o.dirs.len() {
+        for f in 0..FORMS.len() {
+            let p = format("{}/{}{}{}", o.dirs[i].as_str(), FORMS[f].0, name, FORMS[f].1);
+            if !is_file(p.as_str()) {
+                continue;
+            }
+            let d = lu::read(p.as_str());
+            if d.is_none() {
+                continue;
+            }
+            let data = d.unwrap();
+            let mut ms = Vector::<ar::Member>::new();
+            let mut syms = Vector::<(str, u32)>::new();
+            let mut why = String::new();
+            if ar::read(nat::OBJ_COFF, data.as_slice(), &mut ms, &mut syms, &mut why) && ms.len() != 0 {
+                path.push_string(&p);
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 fn is_file(p: str) bool {
@@ -615,7 +780,7 @@ fn resolve_imports(l: &mut L, o: &Opts) bool {
     let mut dlls = Vector::<String>::new();
     for i in 0..o.libs.len() {
         let mut d = String::new();
-        if dll_of(o.libs[i].as_str(), &mut d) {
+        if dll_of(o, o.libs[i].as_str(), &mut d) {
             dlls.push(d);
         }
     }
@@ -903,7 +1068,7 @@ fn layout(l: &mut L, o: &Opts) {
         if o.strip && n.starts_with(".debug_") {
             continue;
         }
-        keyed.push((String::from_str(n), s as u32));
+        keyed.push((init_key(n), s as u32));
     }
     keyed.sort();
     let mut xc_first = true;
@@ -1031,6 +1196,28 @@ fn layout(l: &mut L, o: &Opts) {
             off += os.raw;
         }
     }
+}
+
+// The layout key of input section `n`: its name, but GCC's constructor tables join the initializers
+// (`.CRT$XC*`), which the entry runs in order: `.ctors.<65535 - priority>` by priority, `.ctors` (the
+// default priority) after them, as mingw-w64's `__do_global_ctors` runs them.
+fn init_key(n: str) String {
+    if n == ".ctors" {
+        return String::from_str(".CRT$XCU");
+    }
+    if n.starts_with(".ctors.") && n.len() == 12 {
+        let mut v: u32 = 0;
+        for i in 7..12usize {
+            v = v * 10 + (n.byte_at(i) - b'0') as u32;
+        }
+        let mut k = String::from_str(".CRT$XCT");
+        let p = 65535 - v.min(65535);
+        for d in [10000u32, 1000, 100, 10, 1] {
+            k.push_byte(b'0' + (p / d % 10) as u8);
+        }
+        return k;
+    }
+    return String::from_str(n);
 }
 
 fn remap(keep: &Vector<u32>, o: u32) u32 {

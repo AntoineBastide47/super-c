@@ -1,6 +1,6 @@
 // The link step: the link record's name, the archiver of a static library, the response file of a long
-// Windows command line (pure builders, called directly on every host), and the strip and spawn paths
-// of a real link.
+// Windows command line (pure builders, called directly on every host), the strip and spawn paths of a
+// real link, and a C static library the own linker links.
 import stdlib;
 import build_system::build as bsys;
 import driver_shim as shim;
@@ -130,4 +130,112 @@ fn a_compiler_path_match_that_cannot_start_falls_back_to_the_search() {
     let path = stdlib::get_env("PATH").unwrap_or(String::new());
     let _path = cli::set_env("PATH", format("{}/shadow:{}", root, path.as_str()).as_str());
     assert_eq(cli::superc_in(root, "run --cc=cc").exit, 5);
+}
+
+// A C static library of two members (the program needs one): functions, data, a function-pointer table,
+// a thread-local, a constructor, a weak definition, a switch table, a float constant and C library calls.
+const AR_LIB_A: str = M"(#include <stdlib.h>
+#include <string.h>
+long long lib_counter = 5;
+static int ctor_ran;
+__attribute__((constructor)) static void init(void) { ctor_ran = 42; }
+int lib_ctor_ran(void) { return ctor_ran; }
+static int sq(int x) { return x * x; }
+static int tw(int x) { return 2 * x; }
+static int (*const table[])(int) = { sq, tw, sq };
+int lib_sum_table(int n) { int s = 0; for (int i = 0; i < 3; i++) s += table[i](n); return s; }
+const char *lib_name(void) { return "archive member"; }
+_Thread_local int tls_v = 10;
+int lib_tls_bump(void) { return ++tls_v; }
+__attribute__((weak)) int lib_weak(void) { return 7; }
+int lib_switch(int k) {
+    switch (k) { case 0: return 11; case 1: return 22; case 2: return 33; case 3: return 44; case 4: return 55; case 5: return 66; default: return -1; }
+}
+double lib_scale(double x) { return x * 2.5 + 0.125; }
+int lib_heap(int n) { char *p = malloc(n + 1); memset(p, 'x', n); p[n] = 0; int r = (int)strlen(p); free(p); return r; }
+)";
+
+const AR_LIB_B: str = M"(int lib_add(int a, int b) { return a + b; }
+int unused_member_fn(void) { return 1; }
+)";
+
+// The program: each check that fails sets its bit of the exit code.
+const AR_MAIN: str = M"(extern "C" {
+    fn lib_add(a: i32, b: i32) i32;
+    fn lib_sum_table(n: i32) i32;
+    fn lib_name() *const char;
+    fn lib_tls_bump() i32;
+    fn lib_ctor_ran() i32;
+    fn lib_weak() i32;
+    fn lib_switch(k: i32) i32;
+    fn lib_scale(x: f64) f64;
+    fn lib_heap(n: i32) i32;
+    static mut lib_counter: i64;
+}
+
+fn main() i32 {
+    let mut bad = 0;
+    if unsafe lib_add(2, 3) != 5 { bad += 1; }
+    if unsafe lib_sum_table(3) != 24 { bad += 2; }
+    if unsafe str::from_cstr(lib_name()) != "archive member" { bad += 4; }
+    if unsafe lib_tls_bump() != 11 || unsafe lib_tls_bump() != 12 { bad += 8; }
+    if unsafe lib_ctor_ran() != 42 { bad += 16; }
+    if unsafe lib_weak() != 7 { bad += 32; }
+    if unsafe lib_switch(3) != 44 || unsafe lib_switch(9) != -1 { bad += 64; }
+    if unsafe lib_scale(2.0) != 5.125 { bad += 128; }
+    if unsafe lib_heap(17) != 17 || unsafe lib_counter != 5 { bad += 256; }
+    return bad;
+}
+)";
+
+// The C compiler builds the library and its archiver archives it, for the host and, with a wasi-sdk, for
+// wasm32 (run by wasmtime); the own linker links the program (SC_LINK=own: a link it does not serve
+// fails), taking only the member the program needs.
+@test
+fn a_c_static_library_links_with_the_own_linker() {
+    if !cli::has_cc() {
+        return; // the C compiler builds the library
+    }
+    let p = cli::proj_new();
+    p.mkfile("a.c", AR_LIB_A);
+    p.mkfile("b.c", AR_LIB_B);
+    assert(p.c_lib("demo", "a.c b.c"), "the C compiler builds the library");
+    let mut m = format("@link(\"-L{} -ldemo\")\n", p.dir());
+    m.push_str(AR_MAIN);
+    p.mkfile("main.spc", m.as_str());
+    let r = cli::superc_env_in(p.dir(), "SC_LINK", "own", "build main.spc -o bin");
+    assert(r.ok(), "the own linker links the library");
+    assert_eq(p.run_bin(), 0);
+    let sdk = stdlib::get_env("WASI_SDK_PATH").unwrap_or(String::new());
+    if sdk.len() == 0 || cli::on_wasm() {
+        return;
+    }
+    let w = format("{}/wasm", p.dir());
+    for c in ["a", "b"] {
+        let mut cmd = format(
+            "\"{}/bin/clang\" --target=wasm32-wasip1 -O2 -c \"{}/{}.c\" -o \"{}/{}.o\"",
+            sdk.as_str(),
+            p.dir(),
+            c,
+            p.dir(),
+            c,
+        );
+        assert(cli::run_with(cmd.cstr(), null, null, null, "") == 0, "clang compiles the member for wasm32");
+    }
+    dutil::mkdir_p(w.as_str());
+    let mut arc = format(
+        "\"{}/bin/llvm-ar\" rcs \"{}/libdemo.a\" \"{}/a.o\" \"{}/b.o\"",
+        sdk.as_str(),
+        w.as_str(),
+        p.dir(),
+        p.dir(),
+    );
+    assert(cli::run_with(arc.cstr(), null, null, null, "") == 0, "llvm-ar archives them");
+    let mut wm = format("@link(\"-L{} -ldemo\")\n", w.as_str());
+    wm.push_str(AR_MAIN);
+    p.mkfile("main.spc", wm.as_str());
+    let rw = cli::superc_env_in(p.dir(), "SC_LINK", "own", "build main.spc --target=wasm -o bin.wasm");
+    assert(rw.ok(), "the own linker links the wasm32 library");
+    let mut run = format("wasmtime run \"{}/bin.wasm\"", p.dir());
+    assert_eq(cli::run_with(run.cstr(), null, null, null, ""), 0);
 }

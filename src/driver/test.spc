@@ -875,6 +875,10 @@ pub fn test_build_and_run(
     let ldpath = build_out_path(root, "__ldflags", "");
     push_ldflags(&mut args, ldpath.as_str());
     let strip = bsys::profile_strip(p.profile.as_str(), target);
+    if ncobj != 0 && lk::required() {
+        eprintln("super-c: {} failed: SC_LINK=own, and an object compiled through C", what);
+        return 1;
+    }
     if ncobj == 0 && lk::enabled() || no_cc {
         let mut why = String::new();
         let lr = lk::link_args(target, p.arch, &args, strip, p.jobs, &mut why);
@@ -890,6 +894,14 @@ pub fn test_build_and_run(
                 "super-c: {} failed: the C compiler '{}' is not installed, and the own linker does not serve this link: {}",
                 what,
                 ccs.as_str(),
+                why.as_str(),
+            );
+            return 1;
+        }
+        if lr == lk::NOT_SERVED && lk::required() {
+            eprintln(
+                "super-c: {} failed: SC_LINK=own, and the own linker does not serve this link: {}",
+                what,
                 why.as_str(),
             );
             return 1;

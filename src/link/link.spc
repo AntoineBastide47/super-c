@@ -2,12 +2,15 @@
 // taking the C compiler's link command as its input so a build has one link command either way. It
 // serves a target once its format's linker exists; a command with a flag it does not know (a sanitizer,
 // LTO, a linker option) stays with the C compiler until step 17 removes it.
+import std::platform::fs;
+import std::platform::process;
 import stdlib;
 import link::macho as lm;
 import link::elf as le;
 import link::pe;
 import link::wasm as lw;
 import link::ar;
+import link::util as lu;
 import target::table as tgt;
 import target::native as nat;
 import bindgen::ctarget as ct;
@@ -15,6 +18,11 @@ import bindgen::ctarget as ct;
 /// Whether a link may take the own linker: unless SC_LINK=cc, which keeps every link with the C compiler.
 pub fn enabled() bool {
     return stdlib::get_env("SC_LINK").unwrap_or(String::new()).as_str() != "cc";
+}
+
+/// Whether every link must take the own linker (SC_LINK=own): one it does not serve fails.
+pub fn required() bool {
+    return stdlib::get_env("SC_LINK").unwrap_or(String::new()).as_str() == "own";
 }
 
 /// Archive objects `objs` into static library `out` for target `os`; LINKED, or FAILED with the reason in
@@ -47,6 +55,7 @@ struct Cmd {
     pub stack: u64, // the main thread's stack reserve (PE), 0: the default
     pub wasm_stack: u64, // wasm: the stack's size (`-z stack-size=`), 0: the default
     pub stack_first: bool, // wasm: the stack before the data
+    pub cc: Vector<String>, // the C compiler and its target flags (`cc_runtime`)
 }
 
 /// Link for target `(os, isa)` what the C compiler's link command `args` names (its objects, libraries
@@ -75,6 +84,7 @@ pub fn link_args(os: i32, isa: i32, args: &Vector<String>, strip: bool, jobs: u3
         stack: 0,
         wasm_stack: 0,
         stack_first: false,
+        cc: Vector::<String>::new(),
     };
     let r = parse(args, &mut c, why);
     if r != LINKED {
@@ -98,6 +108,14 @@ pub fn link_args(os: i32, isa: i32, args: &Vector<String>, strip: bool, jobs: u3
 
 fn parse(args: &Vector<String>, c: &mut Cmd, why: &mut String) i32 {
     let n = args.len();
+    if n != 0 {
+        c.cc.push(args[0].clone());
+    }
+    for k in 1..n {
+        if args[k].as_str().starts_with("--target=") || args[k].as_str().starts_with("--sysroot=") {
+            c.cc.push(args[k].clone());
+        }
+    }
     let mut i: usize = 0;
     // Each step consumes one argument, or a flag and its value.
     while i < n {
@@ -109,11 +127,9 @@ fn parse(args: &Vector<String>, c: &mut Cmd, why: &mut String) i32 {
             "";
         };
         if !a.starts_with("-") {
-            if a.ends_with(".o") {
+            if a.ends_with(".o") || a.ends_with(".obj") || ar::is_archive(a) {
                 c.objs.push(String::from_str(a));
-            } else if a.ends_with(".a") || a.ends_with(".dylib") || a.ends_with(".tbd") || a.ends_with(".so") || a.ends_with(
-                ".c",
-            ) {
+            } else if a.ends_with(".dylib") || a.ends_with(".tbd") || a.ends_with(".so") || a.ends_with(".c") {
                 why.format_into("input '{}'", a);
                 return NOT_SERVED;
             }
@@ -224,13 +240,13 @@ fn macho(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
             return FAILED;
         }
     }
-    // A static library is a third-party archive (step 15): the C compiler's linker reads it.
+    let mut stat = false;
     for i in 0..o.libs.len() {
-        let mut path = String::new();
-        if lm::find_lib(&o, o.libs[i].as_str(), &mut path) == lm::LIB_ARCHIVE {
-            why.format_into("static library '{}'", path.as_str());
-            return NOT_SERVED;
-        }
+        let mut p = String::new();
+        stat = stat || lm::find_lib(&o, o.libs[i].as_str(), &mut p) == lm::LIB_ARCHIVE;
+    }
+    if stat || has_archive(&o.objs) {
+        cc_runtime(&c.cc, nat::OBJ_MACHO, o.out.as_str(), &mut o.objs);
     }
     if !lm::link(&o, why) {
         return FAILED;
@@ -254,7 +270,7 @@ fn elf(os: i32, isa: i32, c: &mut Cmd, a64: bool, why: &mut String) i32 {
         }
         soname.push_str(p.slice(i, p.len()));
     }
-    let o = le::Opts {
+    let mut o = le::Opts {
         out: replace(&mut c.out, String::new()),
         kind: if c.shared {
             le::K_SHARED;
@@ -269,17 +285,72 @@ fn elf(os: i32, isa: i32, c: &mut Cmd, a64: bool, why: &mut String) i32 {
         a64: a64,
         strip: c.strip,
     };
+    let mut stat = false;
     for i in 0..o.libs.len() {
-        let mut path = String::new();
-        if le::find(&o, o.libs[i].as_str(), &mut path) == le::LIB_ARCHIVE {
-            why.format_into("static library '{}'", path.as_str());
-            return NOT_SERVED;
-        }
+        let mut p = String::new();
+        stat = stat || le::find(&o, o.libs[i].as_str(), &mut p) == le::LIB_ARCHIVE;
+    }
+    if stat || has_archive(&o.objs) {
+        cc_runtime(&c.cc, nat::OBJ_ELF, o.out.as_str(), &mut o.objs);
     }
     if !le::link(&o, why) {
         return FAILED;
     }
     return LINKED;
+}
+
+fn has_archive(objs: &Vector<String>) bool {
+    for i in 0..objs.len() {
+        if ar::is_archive(objs[i].as_str()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The C compiler's runtime archives, which its driver links with every program it links: compiler-rt's
+// builtins or libgcc.a, and libgcc_eh.a, the unwinder `-static-libgcc` takes. A static library the C
+// compiler built may call them (`__cpu_model`, `_Unwind_Backtrace`); as archives they give only the
+// members a link needs. `cc` (the compiler and its target flags) answers for its target; none when it
+// cannot (not installed), nor an archive without an object of format `fmt`. Each answer passes through
+// the file `<out>.ccrt`.
+fn cc_runtime(cc: &Vector<String>, fmt: u8, out: str, objs: &mut Vector<String>) {
+    if cc.len() == 0 {
+        return;
+    }
+    let tmp = format("{}.ccrt", out);
+    let qs: [str; 2] = ["-print-libgcc-file-name", "-print-file-name=libgcc_eh.a"];
+    for q in qs {
+        let mut argv = Vector::<str>::new();
+        for k in 0..cc.len() {
+            argv.push(cc[k].as_str());
+        }
+        argv.push(q);
+        let mut cmd = process::Command::new(argv[0..argv.len()]);
+        cmd.stdout = process::Redirect::Path(tmp.as_str());
+        cmd.stderr = process::Redirect::Null;
+        let started = process::spawn(cmd);
+        if started.is_err() {
+            return;
+        }
+        let mut child = started.unwrap();
+        let _ = child.wait();
+        let text = lu::read(tmp.as_str());
+        let _ = fs::unlink(tmp.as_str());
+        if text.is_none() {
+            continue;
+        }
+        let t = text.unwrap();
+        let mut e: usize = 0;
+        while e < t.len() && t[e] != b'\n' && t[e] != b'\r' {
+            e += 1;
+        }
+        let p = String::from_str(unsafe str::from_raw(t.as_ptr(), e));
+        let abs = p.as_str().starts_with("/") || p.len() > 2 && p.as_str().byte_at(1) == b':';
+        if abs && ar::is_archive(p.as_str()) && ar::holds_objects(fmt, p.as_str()) {
+            objs.push(p);
+        }
+    }
 }
 
 // The C library's parts on wasm, which `std::rt::libc` is: a link that names them needs nothing more.
@@ -296,23 +367,37 @@ fn wasm(c: &mut Cmd, why: &mut String) i32 {
             return true;
         },
     );
-    if c.shared || c.libs.len() != 0 {
-        why.push_str(
-            if c.shared {
-                "a shared library";
-            } else {
-                "a library";
-            },
-        );
+    if c.shared {
+        why.push_str("a shared library");
         return NOT_SERVED;
     }
-    let o = lw::Opts {
+    // Each other library: `lib<name>.a` in a `-L` directory.
+    let mut libs = Vector::<String>::new();
+    for i in 0..c.libs.len() {
+        let mut found = false;
+        for d in 0..c.dirs.len() {
+            let p = format("{}/lib{}.a", c.dirs[d].as_str(), c.libs[i].as_str());
+            if !found && fs::stat(p.as_str()).is_ok() {
+                libs.push(p);
+                found = true;
+            }
+        }
+        if !found {
+            why.format_into("library '-l{}'", c.libs[i].as_str());
+            return NOT_SERVED;
+        }
+    }
+    let mut o = lw::Opts {
         out: replace(&mut c.out, String::new()),
         objs: replace(&mut c.objs, Vector::<String>::new()),
+        libs: libs,
         stack: c.wasm_stack,
         stack_first: c.stack_first,
         strip: c.strip,
     };
+    if o.libs.len() != 0 || has_archive(&o.objs) {
+        cc_runtime(&c.cc, nat::OBJ_WASM, o.out.as_str(), &mut o.objs);
+    }
     if !lw::link(&o, why) {
         return FAILED;
     }
@@ -320,7 +405,7 @@ fn wasm(c: &mut Cmd, why: &mut String) i32 {
 }
 
 fn coff(c: &mut Cmd, why: &mut String) i32 {
-    let o = pe::Opts {
+    let mut o = pe::Opts {
         out: replace(&mut c.out, String::new()),
         shared: c.shared,
         objs: replace(&mut c.objs, Vector::<String>::new()),
@@ -332,6 +417,14 @@ fn coff(c: &mut Cmd, why: &mut String) i32 {
     // The system's DLLs: on a Windows host, or in a directory the command names.
     if !pe::has_dlls(&o, why) {
         return NOT_SERVED;
+    }
+    let mut stat = false;
+    for i in 0..o.libs.len() {
+        let mut p = String::new();
+        stat = stat || pe::static_lib(&o, o.libs[i].as_str(), &mut p);
+    }
+    if stat || has_archive(&o.objs) {
+        cc_runtime(&c.cc, nat::OBJ_COFF, o.out.as_str(), &mut o.objs);
     }
     if !pe::link(&o, why) {
         return FAILED;

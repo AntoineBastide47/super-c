@@ -501,6 +501,9 @@ or needs a C module (a header's `static` function) starts with
 up, so the test calls the C compiler through `cli::cc_name()`, never as a literal `cc`. A part of a
 test that needs it takes the same condition. Run a lane locally with `CC=/nonexistent/cc ./super-c
 test`; only an image without a C compiler finds a literal `cc`.
+`tests/codegen/link_test.spc` `a_c_static_library_links_with_the_own_linker` builds a C library with
+the C compiler and its archiver (and, with `WASI_SDK_PATH`, for wasm32) and links it with `SC_LINK=own`:
+the one place the C compiler makes an input of the own linker.
 `tests/codegen/debug_info_test.spc` builds a program with and without debug information for every native
 target: the code and data sections match, an llvm-dwarfdump (on the path, beside clang, the wasi-sdk's or
 Xcode's) verifies the line tables; gdb (Linux) or lldb (macOS, where it may run a program) stops in a

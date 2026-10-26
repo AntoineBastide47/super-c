@@ -22,6 +22,7 @@ pub const R_TYPE_INDEX_LEB: u8 = 6;
 pub const R_GLOBAL_INDEX_LEB: u8 = 7;
 pub const R_FUNCTION_OFFSET_I32: u8 = 8;
 pub const R_SECTION_OFFSET_I32: u8 = 9;
+pub const R_GLOBAL_INDEX_I32: u8 = 13;
 pub const R_TABLE_NUMBER_LEB: u8 = 20;
 
 /// Whether relocation type `k` carries an addend.
