@@ -33,6 +33,8 @@ pub(package) struct Opts {
     pub(package) a64: bool,
     pub(package) strip: bool,
     pub(package) soname: String,
+    /// A shared library's exports: None, every default-visibility global; else the globals named.
+    pub(package) exports: Option<Set<String>>,
 }
 
 const SHT_PROGBITS: u32 = 1;
@@ -1597,7 +1599,10 @@ fn dyn_tables(l: &mut L, o: &Opts) {
     let mut strsz: u64 = 1 + o.soname.len() as u64 + 1;
     for g in 0..l.gs.len() {
         let gy = l.gs[g];
-        if gy.kind == G_SHARED && gy.used || l.shared && exported(l, g as u32) {
+        if gy.kind == G_SHARED && gy.used || l.shared && exported(l, g as u32) && lu::listed(
+            &o.exports,
+            l.names.spell(gy.name),
+        ) {
             l.dyns.push(g as u32);
             l.gs.index_mut(g).dynix = l.dyns.len() as u32;
             strsz += l.names.spell(gy.name).len() as u64 + 1;

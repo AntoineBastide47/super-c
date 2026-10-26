@@ -17,6 +17,9 @@ import ir::cpu_features as cf;
 import bindgen::ctarget_data as ctd;
 import atomic;
 import target::table as tgt;
+import utils::errors as diag;
+import utils::diag_codes as dc;
+import build_system::ext as ext;
 
 /// The 64-bit FNV-1a offset basis: the state of an empty hash (std `str::hash` starts from it).
 pub(package) const FNV_BASIS: u64 = 0xcbf29ce484222325u64;
@@ -77,8 +80,11 @@ pub(package) fn file_mtime(path: str) i64 {
 }
 
 /// Whether paths `a` and `b` name one physical file (device and file number); false when either does not
-/// exist.
+/// exist. Under a loader file source (`loader::set_files`) the paths are its names: equal names are one file.
 pub(package) fn same_file(a: str, b: str) bool {
+    if loader::files_set() {
+        return a == b;
+    }
     let ma = fs::stat(a);
     let mb = fs::stat(b);
     if ma.is_err() || mb.is_err() {
@@ -193,12 +199,24 @@ pub(package) type Buf64 = Array<char, 64>;
 /// Format `src` into `out` at `width` columns. Returns false on lex/parse errors or a
 /// comment-count mismatch; callers must not use `out` after failure.
 pub(package) fn format_source(src: &String, path: str, width: i32, out: &mut String) bool {
+    let mut errs = diag::Errors::new();
+    if format_quiet(src, path, width, out, &mut errs) {
+        return true;
+    }
+    errs.finalize(src.as_str(), path);
+    errs.log();
+    return false;
+}
+
+/// `format_source` with the lexer and parser errors, and the formatter's own refusal, recorded in `errs`
+/// against `src` instead of printed.
+pub(package) fn format_quiet(src: &String, path: str, width: i32, out: &mut String, errs: &mut diag::Errors) bool {
     let mut vsrc = src.clone();
     let mut lx = lex::Lexer::new(&mut vsrc, path);
     lx.keep_trivia = true;
     lx.scan_tokens();
     if lx.has_errors() {
-        lx.log_errors();
+        errs.append(&mut lx.errors);
         return false;
     }
     let toks = lx.take_tokens();
@@ -219,14 +237,19 @@ pub(package) fn format_source(src: &String, path: str, width: i32, out: &mut Str
     ps.expand_derive = false;
     ps.build_ast();
     if ps.has_errors() {
-        ps.errors.log();
+        errs.append(&mut ps.errors);
         return false;
     }
     let ast = ps.take_ast();
     let emitted = fbld::format_program(&ast, src.as_str(), width, out);
     if emitted != ncomments {
         // Either direction is a formatter defect: a dropped comment or a comment printed twice.
-        eprintln("fmt: internal error: '{}' has {} comments but would print {}; refusing", path, ncomments, emitted);
+        errs.emit(
+            dc::FMT_INTERNAL_ERROR_HAS_COMMENTS_BUT,
+            0,
+            0,
+            format("fmt: internal error: '{}' has {} comments but would print {}; refusing", path, ncomments, emitted),
+        );
         return false;
     }
     return true;
@@ -314,8 +337,21 @@ extern "C" "string.h" {
     fn strsignal(sig: i32) *mut char;
 }
 
+/// Whether the compiler may start program `prog` now (`build_system::ext::may_start_process`); prints why
+/// not when it may not.
+pub(package) fn process_allowed(prog: str) bool {
+    if ext::may_start_process() {
+        return true;
+    }
+    eprintln("build: '{}' would run as a process, which this request does not allow", prog);
+    return false;
+}
+
 /// `spawn_args` of program `file` (a path; empty: `args[0]` searched in PATH), `args` its argv.
 pub(package) fn spawn_at(file: str, args: &Vector<String>, log: str) Option<process::Child> {
+    if !process_allowed(args.at(0).as_str()) {
+        return Option::<process::Child>::None;
+    }
     let mut argv = Vector::<str>::with_capacity(args.len());
     for i in 0..args.len() {
         argv.push(args.at(i).as_str());

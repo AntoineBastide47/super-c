@@ -60,6 +60,51 @@ pub fn tcp_connect(host: str, port: i32) Result<i32, IoError> {
     return fd_result(unsafe sc_io::sc_tcp_connect(h.cstr(), port), IoOp::Connect);
 }
 
+/// A blocking Unix-domain stream socket listening at file `path`, `backlog` pending connections at most.
+/// The socket file takes the process's file-creation mask: create it in an owner-only directory.
+@platform(macos | ios | linux | android)
+pub fn unix_listen(path: str, backlog: i32) Result<i32, IoError> {
+    return fd_result(unsafe sc_io::sc_unix_listen(path.ptr(), path.len(), backlog), IoOp::Bind);
+}
+
+/// One connection of blocking Unix-domain socket `fd`, waiting for it; the connection is blocking.
+@platform(macos | ios | linux | android)
+pub fn unix_accept(fd: i32) Result<i32, IoError> {
+    // Bounded by the signals that interrupt the call.
+    loop {
+        let c = unsafe sc_io::sc_unix_accept(fd);
+        if c >= 0 {
+            return Result::<i32, IoError>::Ok(c);
+        }
+        let e = last(IoOp::Accept);
+        if e.kind != IoErrorKind::Interrupted {
+            return Result::<i32, IoError>::Err(e);
+        }
+    }
+}
+
+/// A blocking Unix-domain stream socket connected to file `path`.
+@platform(macos | ios | linux | android)
+pub fn unix_connect(path: str) Result<i32, IoError> {
+    return fd_result(unsafe sc_io::sc_unix_connect(path.ptr(), path.len()), IoOp::Connect);
+}
+
+/// The user ID of the process at the other end of connected Unix-domain socket `fd`.
+@platform(macos | ios | linux | android)
+pub fn peer_uid(fd: i32) Result<u32, IoError> {
+    let mut u: u32 = 0;
+    if unsafe sc_io::sc_peer_uid(fd, &mut u) != 0 {
+        return Result::<u32, IoError>::Err(last(IoOp::Other));
+    }
+    return Result::<u32, IoError>::Ok(u);
+}
+
+/// The real user ID of this process.
+@platform(macos | ios | linux | android)
+pub fn uid() u32 {
+    return sc_io::sc_uid();
+}
+
 /// How the connect of socket `fd` ended, once it is writable: Ok when it connected.
 pub fn connect_result(fd: i32) Result<Unit, IoError> {
     let r = unsafe sc_io::sc_tcp_connect_result(fd);

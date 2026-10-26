@@ -262,8 +262,9 @@ fn exec(basecmd: *const char, outpath: *const char) CliResult {
     return exec_env(basecmd, outpath, "");
 }
 
-// `exec`, with `env` ("NAME=VALUE" pairs, space separated) applied to the child only.
-fn exec_env(basecmd: *const char, outpath: *const char, env: str) CliResult {
+/// Run command `basecmd` with its output in `outpath` and `env` ("NAME=VALUE" pairs, space separated)
+/// applied to the child only.
+pub fn exec_env(basecmd: *const char, outpath: *const char, env: str) CliResult {
     let rc = run_with(basecmd, null, outpath, null, env);
     let mut r = CliResult { exit: rc, out: null };
     r.out = slurp(outpath);
@@ -906,8 +907,8 @@ pub fn copy_std(root: str) {
     copy_tree(ffi.as_str(), d.as_str());
 }
 
-// Copy the files and directories under `src` to `dst`.
-fn copy_tree(src: str, dst: str) {
+/// Copy the files and directories under `src` to `dst`.
+pub fn copy_tree(src: str, dst: str) {
     dutil::mkdir_p(dst);
     let names = dutil::list_dir(src, false).unwrap();
     for i in 0..names.len() {

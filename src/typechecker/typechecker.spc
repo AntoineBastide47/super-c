@@ -21,6 +21,7 @@ import utils::errors as diag;
 import ir::cpu_features as cf;
 import ast::parser as par;
 import typechecker::render as *;
+import utils::diag_codes as dc;
 
 /// Alias-chain hops before a cycle is reported.
 pub(package) const TYPE_ALIAS_MAX_DEPTH: u32 = 64;
@@ -1758,7 +1759,11 @@ extend<'a> TypeChecker<'a> {
             return;
         }
         if unsafe self.loop_stack[le as usize].saw_value && unsafe self.loop_stack[le as usize].saw_bare {
-            self.errors.emit_span(sp, format("every 'break' in a value-yielding 'loop' must carry a value"));
+            self.errors.emit_span(
+                dc::EVERY_BREAK_VALUE_YIELDING_LOOP_MUST,
+                sp,
+                format("every 'break' in a value-yielding 'loop' must carry a value"),
+            );
         }
         self.nloops = le as u32;
     }
@@ -1793,7 +1798,11 @@ extend<'a> TypeChecker<'a> {
         if self.icx.current_fn != NODE_NONE && self.tc_is_test_fn(self.cur_module(), self.icx.current_fn) {
             return;
         }
-        self.errors.emit_span(sp, format("a '@test' function can only be called from other test functions"));
+        self.errors.emit_span(
+            dc::TEST_FUNCTION_CAN_ONLY_CALLED_OTHER,
+            sp,
+            format("a '@test' function can only be called from other test functions"),
+        );
         self.errors.note(
             format("test functions are not compiled outside 'super-c --test'; move shared logic into a plain function"),
         );
@@ -2069,6 +2078,7 @@ extend<'a> TypeChecker<'a> {
             let cd = unsafe (*self.cur_ast()).at_const(self.ct_item).as_data.const_def;
             let nsp = self.name_span(cd.name);
             self.errors.emit_span(
+                dc::CANNOT_EVALUATED_COMPILE_TIME,
                 sp,
                 format(
                     "{} '{}' cannot be evaluated at compile time: {}",
@@ -2080,10 +2090,14 @@ extend<'a> TypeChecker<'a> {
             return;
         }
         if self.ct_ctx.len() != 0 {
-            self.errors.emit_span(sp, format("{}: {}", self.ct_ctx, why));
+            self.errors.emit_span(dc::CONST_EVAL_FAILED, sp, format("{}: {}", self.ct_ctx, why));
             return;
         }
-        self.errors.emit_span(sp, format("this operation is undefined behavior when executed: {}", why));
+        self.errors.emit_span(
+            dc::OPERATION_UNDEFINED_BEHAVIOR_WHEN_EXECUTED,
+            sp,
+            format("this operation is undefined behavior when executed: {}", why),
+        );
         if generic {
             self.errors.note(format("its operands do not depend on a type parameter: every instantiation traps"));
         }
@@ -2109,9 +2123,9 @@ extend<'a> TypeChecker<'a> {
         let csp = unsafe (*a).at_const(cond).span;
         let nsp = unsafe (*a).at_const(id).span;
         if val {
-            self.errors.warn_span(csp, format("condition is always true"));
+            self.errors.warn_span(dc::CONDITION_ALWAYS_TRUE, csp, format("condition is always true"));
         } else {
-            self.errors.warn_span(csp, format("condition is always false"));
+            self.errors.warn_span(dc::CONDITION_ALWAYS_FALSE, csp, format("condition is always false"));
         }
         if is_while {
             let w = unsafe (*a).at_const(id).as_data.while_stmt;
@@ -2124,7 +2138,7 @@ extend<'a> TypeChecker<'a> {
             }
             if !val {
                 let bsp = unsafe (*a).at_const(w.body).span;
-                self.errors.warn_span(bsp, format("unreachable loop body"));
+                self.errors.warn_span(dc::UNREACHABLE_LOOP_BODY, bsp, format("unreachable loop body"));
             }
             return;
         }
@@ -2145,7 +2159,7 @@ extend<'a> TypeChecker<'a> {
         }
         if dead != NODE_NONE {
             let dsp = unsafe (*a).at_const(dead).span;
-            self.errors.warn_span(dsp, format("unreachable branch"));
+            self.errors.warn_span(dc::UNREACHABLE_BRANCH, dsp, format("unreachable branch"));
         }
     }
 
@@ -2218,9 +2232,14 @@ extend<'a> TypeChecker<'a> {
             return;
         }
         if what.len() == 0 {
-            self.errors.emit_span(sp, format("this closure can reach the end of its body without returning a value"));
+            self.errors.emit_span(
+                dc::CLOSURE_CAN_REACH_END_BODY_WITHOUT,
+                sp,
+                format("this closure can reach the end of its body without returning a value"),
+            );
         } else {
             self.errors.emit_span(
+                dc::CAN_REACH_END_BODY_WITHOUT_RETURNING,
                 sp,
                 format(
                     "{} '{}' can reach the end of its body without returning a value",
@@ -2287,7 +2306,11 @@ extend<'a> TypeChecker<'a> {
             }
             known.push_str(pk.profiles.at(i).as_str());
         }
-        self.errors.emit_span(raw, format("unknown profile '{}'; this build knows {}", name, known.as_str()));
+        self.errors.emit_span(
+            dc::UNKNOWN_PROFILE_BUILD_KNOWS,
+            raw,
+            format("unknown profile '{}'; this build knows {}", name, known.as_str()),
+        );
     }
 
     // The profile literals of a `PROFILE == "x"` comparison or of the arms of `switch PROFILE`.
@@ -2310,7 +2333,7 @@ extend<'a> TypeChecker<'a> {
 
     @cold
     fn err_unsafe(self: &mut Self, sp: tok::Span, what: str) {
-        self.errors.emit_span(sp, format("{} requires an 'unsafe' block", what));
+        self.errors.emit_span(dc::REQUIRES_UNSAFE_BLOCK, sp, format("{} requires an 'unsafe' block", what));
         self.errors.note(format("{}", "wrap the operation in 'unsafe { ... }' or prefix the expression with 'unsafe'"));
     }
     fn tc_attr(self: &Self, m: ModuleId, owner: NodeId, kind: AttrKind) *const Attr {
@@ -2412,6 +2435,7 @@ extend<'a> TypeChecker<'a> {
         if fnd.is_variadic() {
             let sp = self.name_span(fnd.name);
             self.errors.emit_span(
+                dc::UNSAFE_SAFE_EXTERN_FUNCTION_CANNOT_VARIADIC,
                 sp,
                 format("an '@unsafe(safe)' extern function cannot be variadic: its variadic arguments are unchecked"),
             );
@@ -2424,6 +2448,7 @@ extend<'a> TypeChecker<'a> {
             let pt = self.resolve_type(unsafe (*a).at_const(pid).as_data.parameter.ty);
             if self.tc_ty_has_raw_ptr(pt, 0) {
                 self.errors.emit_span(
+                    dc::UNSAFE_SAFE_EXTERN_FUNCTION_CANNOT_TAKE,
                     unsafe (*a).at_const(pid).span,
                     format(
                         "an '@unsafe(safe)' extern function cannot take a raw pointer: only 'unsafe' code can vouch for its target",
@@ -2436,6 +2461,7 @@ extend<'a> TypeChecker<'a> {
             let rt = self.resolve_type(unsafe (*a).slot_type_node(rid));
             if self.tc_ty_borrows(rt, 0) {
                 self.errors.emit_span(
+                    dc::UNSAFE_SAFE_EXTERN_FUNCTION_CANNOT_RETURN,
                     unsafe (*a).at_const(rid).span,
                     format("an '@unsafe(safe)' extern function cannot return a borrow: its lifetime is unknown"),
                 );
@@ -2453,6 +2479,7 @@ extend<'a> TypeChecker<'a> {
         let pk = unsafe &*self.package;
         if !tgt::isa(pk.arch).naked {
             self.errors.emit_span(
+                dc::UNSAFE_NAKED_NOT_SUPPORTED_FUNCTION_THERE,
                 sp,
                 format(
                     "'@unsafe(naked)' is not supported on {}: a function there has no prologue or epilogue to omit",
@@ -2476,6 +2503,7 @@ extend<'a> TypeChecker<'a> {
             ext,
         ).as_data.extend_def.generics.len != 0 {
             self.errors.emit_span(
+                dc::UNSAFE_NAKED_FUNCTION_CANNOT_GENERIC_INTERFACE,
                 sp,
                 format(
                     "a '@unsafe(naked)' function cannot be generic or an interface method: its assembly is written for one signature",
@@ -2484,6 +2512,7 @@ extend<'a> TypeChecker<'a> {
         }
         if fnd.is_const() {
             self.errors.emit_span(
+                dc::UNSAFE_NAKED_FUNCTION_CANNOT_CONST_FN,
                 sp,
                 format(
                     "a '@unsafe(naked)' function cannot be a 'const fn': compile-time evaluation cannot run assembly",
@@ -2496,6 +2525,7 @@ extend<'a> TypeChecker<'a> {
             AttrKind::ATTR_ALWAYS_INLINE,
         ) != null {
             self.errors.emit_span(
+                dc::UNSAFE_NAKED_FUNCTION_CANNOT_INLINED_ASSEMBLY,
                 sp,
                 format("a '@unsafe(naked)' function cannot be inlined: its assembly returns from the function itself"),
             );
@@ -2522,6 +2552,7 @@ extend<'a> TypeChecker<'a> {
             let scalar = y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin as u32 <= BuiltinType::BT_F64 as u32 || ret && (y.kind == TypeKind::TYPE_NEVER || y.kind == TypeKind::TYPE_BUILTIN && y.as_data.builtin == BuiltinType::BT_VOID);
             if t != TYPE_ERROR && (!scalar || ret && fnd.returns.len > 1) {
                 self.errors.emit_span(
+                    dc::UNSAFE_NAKED_FUNCTION_TAKES_RETURNS_ONLY,
                     unsafe (*a).at_const(nid).span,
                     format(
                         "a '@unsafe(naked)' function takes and returns only integers, floats, 'bool', 'char' and raw pointers: its assembly sees their C calling convention",
@@ -2533,6 +2564,7 @@ extend<'a> TypeChecker<'a> {
         let ss = body.as_data.block.statements;
         if body.kind != NodeKind::NODE_BLOCK || ss.len == 0 {
             self.errors.emit_span(
+                dc::UNSAFE_NAKED_FUNCTION_NEEDS_BODY_ASM,
                 sp,
                 format("a '@unsafe(naked)' function needs a body of 'asm' statements: they are its whole machine code"),
             );
@@ -2542,6 +2574,7 @@ extend<'a> TypeChecker<'a> {
             let st = unsafe (*a).at_const(unsafe (*a).list(ss)[i as usize]);
             if st.kind != NodeKind::NODE_ASM {
                 self.errors.emit_span(
+                    dc::BODY_UNSAFE_NAKED_FUNCTION_HOLDS_ONLY,
                     st.span,
                     format(
                         "the body of a '@unsafe(naked)' function holds only 'asm(\"...\");' statements: no code sets up a frame for anything else",
@@ -2549,6 +2582,7 @@ extend<'a> TypeChecker<'a> {
                 );
             } else if st.as_data.asm_stmt.outputs.len != 0 || st.as_data.asm_stmt.inputs.len != 0 || st.as_data.asm_stmt.clobbers.len != 0 {
                 self.errors.emit_span(
+                    dc::ASM_STATEMENT_UNSAFE_NAKED_FUNCTION_TAKES,
                     st.span,
                     format(
                         "an 'asm' statement in a '@unsafe(naked)' function takes no operands or clobbers: it reads the parameters where the calling convention puts them",
@@ -2614,7 +2648,7 @@ extend<'a> TypeChecker<'a> {
             why = "a Mach-O section is 'segment,section', each part 1 to 16 bytes (e.g. \"__DATA,__mydata\")";
         }
         if why.len() != 0 {
-            self.errors.emit_span(sp, format("invalid link section \"{}\": {}", name, why));
+            self.errors.emit_span(dc::INVALID_LINK_SECTION, sp, format("invalid link section \"{}\": {}", name, why));
         }
     }
 
@@ -2638,6 +2672,7 @@ extend<'a> TypeChecker<'a> {
         }
         let tb = self.type_str(ty);
         self.errors.emit_span(
+            dc::NO_FIELD,
             name,
             format("no field '{}' on '{}'", diag::span_str(self.source, name.start, name.end), tb.as_str()),
         );
@@ -2664,10 +2699,18 @@ extend<'a> TypeChecker<'a> {
         let ty = self.type_str(c);
         let sp = unsafe (*self.cur_ast()).at_const(cond).span;
         if self.type_at(self.strip(c)).is_vec() {
-            self.errors.emit_span(sp, format("a mask is not a `bool`; use `.any()` or `.all()`"));
+            self.errors.emit_span(
+                dc::MASK_NOT_BOOL_USE_ANY_ALL,
+                sp,
+                format("a mask is not a `bool`; use `.any()` or `.all()`"),
+            );
             return false;
         }
-        self.errors.emit_span(sp, format("{} condition must be 'bool', found '{}'", what, ty.as_str()));
+        self.errors.emit_span(
+            dc::CONDITION_MUST_BOOL_FOUND,
+            sp,
+            format("{} condition must be 'bool', found '{}'", what, ty.as_str()),
+        );
         return false;
     }
 
@@ -3267,6 +3310,7 @@ extend<'a> TypeChecker<'a> {
             let tn = self.type_str(target);
             let sp = unsafe (*a).at_const(unsafe (*a).slot_type_node(p0)).span;
             self.errors.emit_span(
+                dc::SELF_PARAMETER_MUST_REFERENCE_RAW_POINTER,
                 sp,
                 format("a 'self' parameter must be '{}', a reference to it or a raw pointer to it", tn.as_str()),
             );
@@ -3289,6 +3333,7 @@ extend<'a> TypeChecker<'a> {
             let tsp = unsafe (*a).at_const(ed.target_type).span;
             if ed.interface_type == NODE_NONE {
                 self.errors.emit_span(
+                    dc::EXTEND_WHOSE_TARGET_ONE_GENERIC_PARAMETERS,
                     tsp,
                     format("an extend whose target is one of its generic parameters must be a conformance"),
                 );
@@ -3296,7 +3341,11 @@ extend<'a> TypeChecker<'a> {
                 return;
             }
             if self.is_free_iface(unsafe (*a).resolution_def(ed.interface_type)) {
-                self.errors.emit_span(tsp, format("'Free' cannot be implemented for every type that satisfies a bound"));
+                self.errors.emit_span(
+                    dc::FREE_CANNOT_IMPLEMENTED_EVERY_TYPE_SATISFIES,
+                    tsp,
+                    format("'Free' cannot be implemented for every type that satisfies a bound"),
+                );
                 return;
             }
             self.tc_check_free_params(id, free);
@@ -3328,6 +3377,7 @@ extend<'a> TypeChecker<'a> {
             if x.kind == XA_BAD {
                 bad = true;
                 self.errors.emit_span(
+                    dc::EXTEND_S_TARGET_ARGUMENT_MUST_ONE,
                     sp,
                     format(
                         "an extend's target argument must be one of its generic parameters, a const form `c * N + k` of one, or a type that names none of them",
@@ -3338,6 +3388,7 @@ extend<'a> TypeChecker<'a> {
                     let gn = unsafe (*a).at_const(unsafe (*a).list(ed.generics)[x.par as usize]).as_data.generic_param.name;
                     let gs = unsafe (*a).at_const(gn).as_data.name.text;
                     self.errors.emit_span(
+                        dc::GENERIC_PARAMETER_APPEARS_TWO_ARGUMENTS_EXTEND,
                         sp,
                         format(
                             "the generic parameter '{}' appears in two arguments of the extend's target",
@@ -3354,6 +3405,7 @@ extend<'a> TypeChecker<'a> {
         }
         if ed.interface_type != NODE_NONE && self.is_free_iface(unsafe (*a).resolution_def(ed.interface_type)) {
             self.errors.emit_span(
+                dc::FREE_IMPLEMENTED_EVERY_INSTANCE_TYPE_WRITE,
                 unsafe (*a).at_const(ed.target_type).span,
                 format(
                     "'Free' is implemented for every instance of a type: write the target with the extend's parameters in order",
@@ -3389,6 +3441,7 @@ extend<'a> TypeChecker<'a> {
             let gs = unsafe (*a).at_const(unsafe (*a).at_const(gid).as_data.generic_param.name).as_data.name.text;
             if ed.interface_type == NODE_NONE {
                 self.errors.emit_span(
+                    dc::GENERIC_PARAMETER_EXTEND_DOES_NOT_APPEAR,
                     gs,
                     format(
                         "the generic parameter '{}' of this extend does not appear in its target",
@@ -3399,6 +3452,7 @@ extend<'a> TypeChecker<'a> {
                 continue;
             }
             self.errors.emit_span(
+                dc::GENERIC_PARAMETER_EXTEND_APPEARS_NEITHER_TARGET,
                 gs,
                 format(
                     "the generic parameter '{}' of this extend appears neither in its target nor in its interface's arguments",
@@ -3415,7 +3469,11 @@ extend<'a> TypeChecker<'a> {
     fn err_lit_range(self: &mut Self, node: NodeId, ty: TypeId) {
         let tn = self.type_str(ty);
         let sp = unsafe (*self.cur_ast()).at_const(node).span;
-        self.errors.emit_span(sp, format("integer literal is out of range for '{}'", tn.as_str()));
+        self.errors.emit_span(
+            dc::INTEGER_LITERAL_OUT_RANGE,
+            sp,
+            format("integer literal is out of range for '{}'", tn.as_str()),
+        );
     }
 
     // A negation `node` of unsigned type `ty`: no unsigned value has one.
@@ -3423,7 +3481,11 @@ extend<'a> TypeChecker<'a> {
     fn err_neg_unsigned(self: &mut Self, node: NodeId, ty: TypeId) {
         let tn = self.type_str(ty);
         let sp = unsafe (*self.cur_ast()).at_const(node).span;
-        self.errors.emit_span(sp, format("cannot apply unary operator '-' to type '{}'", tn.as_str()));
+        self.errors.emit_span(
+            dc::CANNOT_APPLY_UNARY_OPERATOR_TYPE,
+            sp,
+            format("cannot apply unary operator '-' to type '{}'", tn.as_str()),
+        );
     }
 
     // An unpinned literal operand, or literal-only arithmetic of kind `k` (`2 * 3`), takes the other
@@ -3920,7 +3982,7 @@ extend<'a> TypeChecker<'a> {
             "float constant expression";
         };
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
-        self.errors.emit_span(sp, format("{} is out of range for '{}'", what, tn.as_str()));
+        self.errors.emit_span(dc::OUT_RANGE, sp, format("{} is out of range for '{}'", what, tn.as_str()));
         return t;
     }
 
@@ -3956,7 +4018,11 @@ extend<'a> TypeChecker<'a> {
             }
         }
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
-        self.errors.emit_span(sp, format("integer constant expression does not fit in 'i32', 'i64' or 'u64'"));
+        self.errors.emit_span(
+            dc::INTEGER_CONSTANT_EXPRESSION_DOES_NOT_FIT,
+            sp,
+            format("integer constant expression does not fit in 'i32', 'i64' or 'u64'"),
+        );
         let t = Ast::builtin(BuiltinType::BT_I64);
         let _ = self.tc_lit_set_int(id, t, false, false, true);
         return t;
@@ -4004,7 +4070,11 @@ extend<'a> TypeChecker<'a> {
                 what = String::from_str("this closure");
             }
             let x = self.tc_type_text(exs, 0, NODE_NONE);
-            self.errors.emit_span(sp, format("mismatched types: the lifetimes of {} do not fit 'dyn {}'", what, x));
+            self.errors.emit_span(
+                dc::MISMATCHED_TYPES_LIFETIMES_DO_NOT_FIT,
+                sp,
+                format("mismatched types: the lifetimes of {} do not fit 'dyn {}'", what, x),
+            );
             self.note_outer_lts(&what, &x);
             return;
         }
@@ -4019,7 +4089,11 @@ extend<'a> TypeChecker<'a> {
                 ).as_data.name.text;
                 what = format("function '{}'", self.mod_src(fy.module).slice(nm.start as usize, nm.end as usize));
             }
-            self.errors.emit_span(sp, format("mismatched types: the lifetimes of {} do not fit '{}'", what, e));
+            self.errors.emit_span(
+                dc::MISMATCHED_TYPES_LIFETIMES_DO_NOT_FIT,
+                sp,
+                format("mismatched types: the lifetimes of {} do not fit '{}'", what, e),
+            );
             self.errors.note(
                 format(
                     "each lifetime a function value needs ('static, or one shared by several positions) must be one the function type gives those positions",
@@ -4030,6 +4104,7 @@ extend<'a> TypeChecker<'a> {
         }
         if self.type_at(expected).fn_sig() && self.fn_is_capturing(found) {
             self.errors.emit_span(
+                dc::MISMATCHED_TYPES_CAPTURING_CLOSURE_NOT_FUNCTION,
                 sp,
                 format(
                     "mismatched types: a capturing closure is not a function pointer '{}'; use '&dyn fn', 'Box<dyn fn>' or a generic 'F: fn(..)' parameter",
@@ -4038,7 +4113,11 @@ extend<'a> TypeChecker<'a> {
             );
             return;
         }
-        self.errors.emit_span(sp, format("mismatched types: expected '{}', found '{}'", e, f));
+        self.errors.emit_span(
+            dc::MISMATCHED_TYPES_EXPECTED_FOUND,
+            sp,
+            format("mismatched types: expected '{}', found '{}'", e, f),
+        );
         self.note_outer_lts(&e, &f);
     }
 
@@ -4944,6 +5023,7 @@ extend<'a> TypeChecker<'a> {
             unsafe (*self.mod_ast(d.module)).at_const(d.node).as_data.function.name,
         ).as_data.name.text;
         self.errors.emit_span(
+            dc::CANNOT_USED_VALUE_FUNCTION_TYPE_CANNOT,
             unsafe (*self.cur_ast()).at_const(node).span,
             format(
                 "'{}' cannot be used as a value: a function type cannot show how its signature relates lifetimes",
@@ -7389,6 +7469,7 @@ extend<'a> TypeChecker<'a> {
         }
         if w.bad != NODE_NONE {
             self.errors.emit_span(
+                dc::FUNCTION_TYPE_CANNOT_NAME_LIFETIME_HERE,
                 unsafe (*a).at_const(w.bad).span,
                 format(
                     "a function type cannot name a lifetime here: only a reference, a slice or a borrowed 'dyn' has a lifetime it tracks",
@@ -7402,6 +7483,7 @@ extend<'a> TypeChecker<'a> {
         }
         if elided_res && total != nres + 1 {
             self.errors.emit_span(
+                dc::MISSING_LIFETIME_SPECIFIER_FUNCTION_TYPE_S,
                 unsafe (*a).at_const(id).span,
                 format(
                     "missing lifetime specifier: this function type's result borrows, but which input it borrows from cannot be inferred",
@@ -7423,6 +7505,7 @@ extend<'a> TypeChecker<'a> {
         );
         if w.cls.contains(&LC_TOO_MANY) {
             self.errors.emit_span(
+                dc::FUNCTION_TYPE_HAS_MOST_LIFETIMES_CHOOSES,
                 unsafe (*a).at_const(id).span,
                 format(
                     "a function type has at most {} lifetimes it chooses at each call and {} it takes from outside",
@@ -8312,6 +8395,7 @@ extend<'a> TypeChecker<'a> {
         if self.lin_mis != NODE_NONE {
             if local {
                 self.errors.emit_span(
+                    dc::MISMATCHED_TYPES_EXPECTED_FOUND,
                     unsafe (*a).at_const(self.lin_mis).span,
                     format(
                         "mismatched types: expected '{}', found '{}'",
@@ -8335,6 +8419,7 @@ extend<'a> TypeChecker<'a> {
             if lf.node != id && !bt_holds(ty, lf.v, self.tc_ptr32()) {
                 if local {
                     self.errors.emit_span(
+                        dc::INTEGER_LITERAL_OUT_RANGE,
                         unsafe (*a).at_const(lf.node).span,
                         format("integer literal is out of range for '{}'", bt_name(ty)),
                     );
@@ -8345,6 +8430,7 @@ extend<'a> TypeChecker<'a> {
         if self.lin_shift >= bt_int_width(ty, self.tc_ptr32()) as i64 {
             if local {
                 self.errors.emit_span(
+                    dc::SHIFT_COUNT_OUT_RANGE,
                     unsafe (*a).at_const(id).span,
                     format("shift count {} is out of range for '{}'", self.lin_shift, bt_name(ty)),
                 );
@@ -8354,6 +8440,7 @@ extend<'a> TypeChecker<'a> {
         if want != BuiltinType::BT_COUNT && ty != want && !bt_widens(ty, want) {
             if local {
                 self.errors.emit_span(
+                    dc::MISMATCHED_TYPES_EXPECTED_FOUND,
                     unsafe (*a).at_const(id).span,
                     format("mismatched types: expected '{}', found '{}'", bt_name(want), bt_name(ty)),
                 );
@@ -8370,6 +8457,7 @@ extend<'a> TypeChecker<'a> {
                 if local {
                     let sp = paren_span(self.mod_src(m), unsafe (*a).at_const(st.node).span);
                     self.errors.emit_span(
+                        dc::CONST_EXPRESSION_OVERFLOWS,
                         sp,
                         format(
                             "const expression {{{}}} overflows {}",
@@ -8774,12 +8862,14 @@ extend<'a> TypeChecker<'a> {
             let newy = *self.type_at(cf.later);
             if oldy.kind == TypeKind::TYPE_CONST && newy.kind == TypeKind::TYPE_CONST {
                 self.errors.emit_span(
+                    dc::CONFLICTING_CONST_GENERIC_ARGUMENTS_INFERRED_BOTH,
                     sp,
                     format("conflicting const generic arguments: inferred both {} and {}", oldy.cval(), newy.cval()),
                 );
             } else if oldy.kind == TypeKind::TYPE_CONST && newy.kind == TypeKind::TYPE_BUILTIN {
                 // `tc_slot_const`: a value outside the parameter's type.
                 self.errors.emit_span(
+                    dc::CONST_GENERIC_ARGUMENT_OUT_RANGE,
                     sp,
                     format(
                         "const generic argument {} is out of range for '{}'",
@@ -8788,7 +8878,11 @@ extend<'a> TypeChecker<'a> {
                     ),
                 );
             } else {
-                self.errors.emit_span(sp, format("conflicting const generic arguments for this call"));
+                self.errors.emit_span(
+                    dc::CONFLICTING_CONST_GENERIC_ARGUMENTS_CALL,
+                    sp,
+                    format("conflicting const generic arguments for this call"),
+                );
             }
         }
         self.icx.sv.cconflicts.truncate(self.icx.sv.sess.cconflicts as usize);
@@ -8801,6 +8895,7 @@ extend<'a> TypeChecker<'a> {
             let first = self.type_str(cf.first);
             let later = self.type_str(cf.later);
             self.errors.emit_span(
+                dc::MISMATCHED_TYPES_GENERIC_PARAMETER_WAS_CONSTRAINED,
                 sp,
                 format(
                     "mismatched types: generic parameter was constrained to both '{}' and '{}'",
@@ -8834,7 +8929,7 @@ extend<'a> TypeChecker<'a> {
             }
             if self.alias_depth >= TYPE_ALIAS_MAX_DEPTH {
                 let sp = unsafe (*a).at_const(decl).span;
-                self.errors.emit_span(sp, format("type alias is cyclic"));
+                self.errors.emit_span(dc::TYPE_ALIAS_CYCLIC, sp, format("type alias is cyclic"));
                 return TYPE_ERROR;
             }
             self.alias_depth = self.alias_depth + 1;
@@ -9267,6 +9362,7 @@ extend<'a> TypeChecker<'a> {
         }
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
         self.errors.emit_span(
+            dc::CONSTANT_CANNOT_READ_VARIABLE_VALUE_EXISTS,
             sp,
             format(
                 "a constant cannot read the variable '{}': its value exists only at run time",
@@ -9406,11 +9502,16 @@ extend<'a> TypeChecker<'a> {
         let pname = diag::span_str(self.mod_src(d.module), gn.start, gn.end);
         let sp = unsafe (*self.mod_ast(m)).at_const(aid).span;
         if is_const {
-            self.errors.emit_span(sp, format("expected a type for generic parameter '{}', found a constant", pname));
+            self.errors.emit_span(
+                dc::EXPECTED_TYPE_GENERIC_PARAMETER_FOUND_CONSTANT,
+                sp,
+                format("expected a type for generic parameter '{}', found a constant", pname),
+            );
             return TYPE_ERROR;
         }
         let ty = self.type_str(t);
         self.errors.emit_span(
+            dc::EXPECTED_CONSTANT_CONST_PARAMETER_FOUND_TYPE,
             sp,
             format("expected a constant for const parameter '{}', found type '{}'", pname, ty.as_str()),
         );
@@ -9731,6 +9832,7 @@ extend<'a> TypeChecker<'a> {
                 return false;
             }
             self.errors.emit_span(
+                dc::NO_TYPE,
                 next,
                 format(
                     "no type '{}' in '{}'",
@@ -9745,6 +9847,7 @@ extend<'a> TypeChecker<'a> {
         }
         if v.node != NODE_NONE {
             self.errors.emit_span(
+                dc::EXPECTED_TYPE_FOUND,
                 tok::Span { start: start, end: ms.end },
                 format(
                     "expected a type, found {} '{}'",
@@ -9756,6 +9859,7 @@ extend<'a> TypeChecker<'a> {
         }
         let en = lit && hd.node != NODE_NONE && unsafe (*self.mod_ast(hd.module)).at_const(hd.node).kind == NodeKind::NODE_ENUM;
         self.errors.emit_span(
+            dc::UNKNOWN_TYPE_OR_VARIANT,
             ms,
             format(
                 "no {} '{}' {} '{}'",
@@ -9813,6 +9917,7 @@ extend<'a> TypeChecker<'a> {
             let bad = self.name_span(unsafe (*a).list(tp.parts)[at as usize]);
             let en = v.node == NODE_NONE && hd.node != NODE_NONE && unsafe (*self.mod_ast(hd.module)).at_const(hd.node).kind == NodeKind::NODE_ENUM;
             self.errors.emit_span(
+                dc::NO,
                 bad,
                 format(
                     "no {} '{}' on '{}'",
@@ -9884,6 +9989,7 @@ extend<'a> TypeChecker<'a> {
                 format("integer");
             };
             self.errors.emit_span(
+                dc::MISMATCHED_TYPES_EXPECTED_FOUND,
                 unsafe (*self.mod_ast(m)).at_const(aid).span,
                 format("mismatched types: expected '{}', found '{}'", wn.as_str(), hn.as_str()),
             );
@@ -9957,6 +10063,7 @@ extend<'a> TypeChecker<'a> {
             let y = *self.type_at(t);
             if y.kind == TypeKind::TYPE_CONST {
                 self.errors.emit_span(
+                    dc::CONST_GENERIC_ARGUMENT_OUT_RANGE,
                     sp,
                     format("const generic argument {} is out of range for '{}'", y.cval(), bt_name(want)),
                 );
@@ -9967,6 +10074,7 @@ extend<'a> TypeChecker<'a> {
                     unsafe (*self.cur_ast()).const_lin_at(y.as_data.inst).ty;
                 };
                 self.errors.emit_span(
+                    dc::MISMATCHED_TYPES_EXPECTED_FOUND,
                     sp,
                     format("mismatched types: expected '{}', found '{}'", bt_name(want), bt_name(have)),
                 );
@@ -9994,6 +10102,7 @@ extend<'a> TypeChecker<'a> {
     @cold
     fn err_assoc_const_args(self: &mut Self, at: tok::Span, nm: str, cs: &Defs8, n: usize) {
         self.errors.emit_span(
+            dc::CANNOT_INFER_GENERIC_ARGUMENTS_ASSOCIATED_CONSTANT,
             at,
             format("cannot infer the generic arguments of associated constant '{}'; give explicit type arguments", nm),
         );
@@ -10053,6 +10162,7 @@ extend<'a> TypeChecker<'a> {
                     let vn = unsafe (*self.mod_ast(m)).at_const(an.as_data.member.member).as_data.name.text;
                     let en = self.tc_decl_name(ed);
                     self.errors.emit_span(
+                        dc::NO_VARIANT,
                         vn,
                         format(
                             "no variant '{}' on '{}'",
@@ -10084,6 +10194,7 @@ extend<'a> TypeChecker<'a> {
                     an.as_data.member.object,
                 ).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
                     self.errors.emit_span(
+                        dc::NO_ASSOCIATED_CONSTANT,
                         vn,
                         format(
                             "no associated constant '{}' on '{}'",
@@ -10119,17 +10230,30 @@ extend<'a> TypeChecker<'a> {
         let sp = unsafe (*self.mod_ast(m)).at_const(aid).span;
         if self.lin_ovf {
             if bt_is_int(want) {
-                self.errors.emit_span(sp, format("const generic argument overflows '{}'", bt_name(want)));
+                self.errors.emit_span(
+                    dc::CONST_GENERIC_ARGUMENT_OVERFLOWS,
+                    sp,
+                    format("const generic argument overflows '{}'", bt_name(want)),
+                );
             } else {
-                self.errors.emit_span(sp, format("const generic argument overflows"));
+                self.errors.emit_span(
+                    dc::CONST_GENERIC_ARGUMENT_OVERFLOWS,
+                    sp,
+                    format("const generic argument overflows"),
+                );
             }
         } else if ceptr != null && unsafe (*ceptr).trap_get().len() != 0 {
             self.errors.emit_span(
+                dc::CONST_GENERIC_ARGUMENT_MUST_CONSTANT_INTEGER,
                 sp,
                 format("const generic argument must be a constant integer: {}", unsafe (*ceptr).trap_detail()),
             );
         } else {
-            self.errors.emit_span(sp, format("const generic argument must be a constant integer"));
+            self.errors.emit_span(
+                dc::CONST_GENERIC_ARGUMENT_MUST_CONSTANT_INTEGER,
+                sp,
+                format("const generic argument must be a constant integer"),
+            );
         }
         return TYPE_ERROR;
     }
@@ -10145,6 +10269,7 @@ extend<'a> TypeChecker<'a> {
         if !bt_holds(bt, v, self.tc_ptr32()) {
             if m == self.cur_module() {
                 self.errors.emit_span(
+                    dc::CONST_GENERIC_ARGUMENT_OUT_RANGE,
                     unsafe (*self.mod_ast(m)).at_const(aid).span,
                     format("const generic argument {} is out of range for '{}'", v, bt_name(bt)),
                 );
@@ -10206,20 +10331,40 @@ extend<'a> TypeChecker<'a> {
         let sp = unsafe (*self.mod_ast(m)).at_const(lenNode).span;
         if unsafe (*ceptr).trap_get().len() != 0 {
             self.reported.insert(key);
-            self.errors.emit_span(sp, format("array length cannot be evaluated: {}", unsafe (*ceptr).trap_detail()));
+            self.errors.emit_span(
+                dc::ARRAY_LENGTH_CANNOT_EVALUATED,
+                sp,
+                format("array length cannot be evaluated: {}", unsafe (*ceptr).trap_detail()),
+            );
         } else if lv.kind == iri::IV_INT && lv.i > 0xFFFFFFFFi64 {
             self.reported.insert(key);
-            self.errors.emit_span(sp, format("array length {} exceeds the maximum of 4294967295", lv.i));
+            self.errors.emit_span(
+                dc::ARRAY_LENGTH_EXCEEDS_MAXIMUM_4294967295,
+                sp,
+                format("array length {} exceeds the maximum of 4294967295", lv.i),
+            );
         } else if lv.kind != iri::IV_NONE {
             self.reported.insert(key);
-            self.errors.emit_span(sp, format("array length must be a non-negative constant expression"));
+            self.errors.emit_span(
+                dc::ARRAY_LENGTH_MUST_NON_NEGATIVE_CONSTANT,
+                sp,
+                format("array length must be a non-negative constant expression"),
+            );
         } else if self.tc_len_names_param(m, lenNode, 0) {
             // `N * N`, `N % 2`: no canonical form, so no instance could fold it.
             self.reported.insert(key);
-            self.errors.emit_span(sp, format("array length must be a linear expression over const generic parameters"));
+            self.errors.emit_span(
+                dc::ARRAY_LENGTH_MUST_LINEAR_EXPRESSION_OVER,
+                sp,
+                format("array length must be a linear expression over const generic parameters"),
+            );
         } else if !self.tc_mentions_generic(m, lenNode, 0) {
             self.reported.insert(key);
-            self.errors.emit_span(sp, format("array length must be a constant expression"));
+            self.errors.emit_span(
+                dc::ARRAY_LENGTH_MUST_CONSTANT_EXPRESSION,
+                sp,
+                format("array length must be a constant expression"),
+            );
         }
         return TYPE_ERROR;
     }
@@ -10431,7 +10576,7 @@ extend<'a> TypeChecker<'a> {
             unsafe (*self.cur_ast()).lanes(&y),
         );
         if msg.len() != 0 {
-            self.errors.emit_span_note(unsafe (*self.cur_ast()).at_const(id).span, msg);
+            self.errors.emit_span_note(dc::INVALID_VECTOR_TYPE, unsafe (*self.cur_ast()).at_const(id).span, msg);
         }
     }
 
@@ -10476,7 +10621,7 @@ extend<'a> TypeChecker<'a> {
             } else {
                 format("`{}` has no stable C ABI; pass `u64` and convert with `from_bits`/`to_bits`", vb.as_str());
             };
-            self.errors.emit_span(unsafe (*a).at_const(n).span, msg);
+            self.errors.emit_span(dc::INVALID_VECTOR_TYPE, unsafe (*a).at_const(n).span, msg);
         }
     }
 
@@ -10515,10 +10660,18 @@ extend<'a> TypeChecker<'a> {
         let at = self.tc_attr(self.cur_module(), id, AttrKind::ATTR_INTRINSIC);
         let sp = unsafe (*at).str_span;
         if !self.tc_in_std() {
-            self.errors.emit_span(sp, format("'@intrinsic' is reserved for the standard library"));
+            self.errors.emit_span(
+                dc::INTRINSIC_RESERVED_STANDARD_LIBRARY,
+                sp,
+                format("'@intrinsic' is reserved for the standard library"),
+            );
         }
         if ir::simd_intrinsic(diag::span_str(self.source, sp.start, sp.end)) == 0 && !unsafe (*self.package).bootstrap {
-            self.errors.emit_span(sp, format("unknown intrinsic '{}'", diag::span_str(self.source, sp.start, sp.end)));
+            self.errors.emit_span(
+                dc::UNKNOWN_INTRINSIC,
+                sp,
+                format("unknown intrinsic '{}'", diag::span_str(self.source, sp.start, sp.end)),
+            );
         }
     }
 
@@ -10542,6 +10695,7 @@ extend<'a> TypeChecker<'a> {
         self.eng_hold(false);
         if st == 2 {
             self.errors.emit_span(
+                dc::INDEX_LIST_CANNOT_EVALUATED,
                 sp,
                 format("the index list of `{}` cannot be evaluated: {}", name, unsafe (*ceptr).trap_detail()),
             );
@@ -10552,7 +10706,11 @@ extend<'a> TypeChecker<'a> {
             // reads a run-time value too.
             let names = self.tc_list_names(ln);
             if (names & 1) != 0 || (names & 2) == 0 {
-                self.errors.emit_span(sp, format("the index list of `{}` must be a compile-time constant", name));
+                self.errors.emit_span(
+                    dc::INDEX_LIST_MUST_COMPILE_TIME_CONSTANT,
+                    sp,
+                    format("the index list of `{}` must be a compile-time constant", name),
+                );
             }
             return;
         }
@@ -10564,7 +10722,7 @@ extend<'a> TypeChecker<'a> {
             let tb = self.type_str(vy.as_data.arr.elem);
             let msg = vec_err(false, e.as_data.builtin, tb.as_str(), lst.len() as u64);
             if msg.len() != 0 {
-                self.errors.emit_span(sp, msg);
+                self.errors.emit_span(dc::INVALID_VECTOR_TYPE, sp, msg);
                 return;
             }
         }
@@ -10572,6 +10730,7 @@ extend<'a> TypeChecker<'a> {
         for i in 0..lst.len() {
             if n != 0 && lst[i] >= n {
                 self.errors.emit_span(
+                    dc::INDEX_LIST_NAMES_LANE_POSITION_PAST,
                     sp,
                     format(
                         "the index list of `{}` names lane {} at position {}, past the {} lanes of its operands",
@@ -10650,6 +10809,7 @@ extend<'a> TypeChecker<'a> {
         let k = self.tc_list_op(d.module, d.node);
         if k != 0 {
             self.errors.emit_span(
+                dc::TAKES_CONSTANT_INDEX_LIST_CANNOT_NAMED,
                 unsafe (*self.cur_ast()).at_const(node).span,
                 format("`{}` takes a constant index list and cannot be named as a value", ir::simd_op(k as u8).name),
             );
@@ -10686,12 +10846,16 @@ extend<'a> TypeChecker<'a> {
         let vb = self.type_str(pick(s.is_vec(), src, dst));
         if storage {
             let hint = pick(v.kind == TypeKind::TYPE_SIMD, "`from_array` or `to_array`", "`from_bits` or `to_bits`");
-            self.errors.emit_span(sp, format("only `std` casts `{}` to or from its storage; use {}", vb.as_str(), hint));
+            self.errors.emit_span(
+                dc::ONLY_STD_CASTS_STORAGE_USE,
+                sp,
+                format("only `std` casts `{}` to or from its storage; use {}", vb.as_str(), hint),
+            );
             return;
         }
         let sb = self.type_str(src);
         let db = self.type_str(dst);
-        self.errors.emit_span(sp, format("invalid cast from '{}' to '{}'", sb.as_str(), db.as_str()));
+        self.errors.emit_span(dc::INVALID_CAST, sp, format("invalid cast from '{}' to '{}'", sb.as_str(), db.as_str()));
     }
     // The type generic alias `d` names at type path `id` of module `m`: the alias body with each
     // parameter replaced by its argument. The body lowers with its own parameters as generics, so
@@ -10753,6 +10917,7 @@ extend<'a> TypeChecker<'a> {
                 if m == self.cur_module() && self.st_capture == 0 {
                     let an = self.tc_decl_name_of(d);
                     self.errors.emit_span(
+                        dc::CONST_EXPRESSION_ALIAS_HAS_NO_LINEAR,
                         unsafe (*self.cur_ast()).at_const(id).span,
                         format(
                             "const expression {{{}}} of alias '{}' has no linear form for these arguments",
@@ -10824,6 +10989,7 @@ extend<'a> TypeChecker<'a> {
         let sp = unsafe (*self.cur_ast()).at_const(uid).span;
         if s.canon {
             self.errors.emit_span(
+                dc::CONST_GENERIC_ARGUMENT_OUT_RANGE,
                 sp,
                 format("const generic argument {} is out of range for '{}'", s.lin.value(), bt_name(s.lin.ty)),
             );
@@ -10832,9 +10998,14 @@ extend<'a> TypeChecker<'a> {
         let text = self.mod_src(s.module).slice(s.span.start as usize, s.span.end as usize);
         if s.div.is_zero() {
             let bt = pick(bt_holds(s.lin.ty, s.lin.value(), self.tc_ptr32()), s.lin.to, s.lin.ty);
-            self.errors.emit_span(sp, format("const expression {{{}}} overflows {}", text, bt_name(bt)));
+            self.errors.emit_span(
+                dc::CONST_EXPRESSION_OVERFLOWS,
+                sp,
+                format("const expression {{{}}} overflows {}", text, bt_name(bt)),
+            );
         } else {
             self.errors.emit_span(
+                dc::CONST_EXPRESSION_TRUNCATES_NEGATIVE_QUOTIENT_CONST,
                 sp,
                 format(
                     "const expression {{{}}} truncates the negative quotient {} / {}: a const-generic division needs a dividend that is not negative or a divisor that divides it",
@@ -10935,6 +11106,7 @@ extend<'a> TypeChecker<'a> {
         };
         let want = pick(n > total, total, need);
         self.errors.emit_span(
+            dc::TAKES_GENERIC_ARGUMENT_BUT_SUPPLIED,
             unsafe (*a).at_const(pick(extra != NODE_NONE, extra, at)).span,
             format(
                 "'{}' takes {}{} generic argument{} but {} {} supplied",
@@ -10955,7 +11127,11 @@ extend<'a> TypeChecker<'a> {
         let args = unsafe (*a).at_const(id).as_data.type_path.args;
         if args.len > 8 {
             let sp = unsafe (*a).at_const(id).span;
-            self.errors.emit_span(sp, format("too many generic arguments ({}; the maximum is 8)", args.len));
+            self.errors.emit_span(
+                dc::TOO_MANY_GENERIC_ARGUMENTS_MAXIMUM_8,
+                sp,
+                format("too many generic arguments ({}; the maximum is 8)", args.len),
+            );
         }
         let mut tn: u8 = 0;
         let mut i: u32 = 0;
@@ -11171,7 +11347,11 @@ extend<'a> TypeChecker<'a> {
                         result = self.resolve_dyn_node(unsafe (*a).list(args)[0], TypeQualifier::TYPE_QUAL_NONE);
                     } else {
                         let sp = unsafe (*a).at_const(id).span;
-                        self.errors.emit_span(sp, format("a bare 'dyn' type can only be the generic argument of 'Box'"));
+                        self.errors.emit_span(
+                            dc::BARE_DYN_TYPE_CAN_ONLY_GENERIC,
+                            sp,
+                            format("a bare 'dyn' type can only be the generic argument of 'Box'"),
+                        );
                     }
                     unsafe (*self.cur_ast()).set_type(id, result);
                     return result;
@@ -11191,6 +11371,7 @@ extend<'a> TypeChecker<'a> {
                 let tbs = unsafe (*a).at_const(id).as_data.type_path.bindings;
                 if tbs.len != 0 && Ast::in_body(id) && self.tc_report_once(id) {
                     self.errors.emit_span(
+                        dc::ASSOCIATED_TYPE_BINDING_ONLY_ALLOWED_GENERIC,
                         unsafe (*a).at_const(unsafe (*a).list(tbs)[0]).span,
                         format("an associated type binding is only allowed in a generic bound"),
                     );
@@ -11250,6 +11431,7 @@ extend<'a> TypeChecker<'a> {
                             ) {
                                 let isp = self.name_span(unsafe (*a).list(parts)[0]);
                                 self.errors.emit_span(
+                                    dc::INTERFACE_NOT_TYPE_USE_DYN_BOX,
                                     isp,
                                     format(
                                         "an interface is not a type; use '&dyn {}', 'Box<dyn {}>', or a generic bound",
@@ -11282,7 +11464,11 @@ extend<'a> TypeChecker<'a> {
                 let elems = unsafe (*a).at_const(id).as_data.array_literal.elements;
                 if elems.len > 4 {
                     let sp = unsafe (*a).at_const(id).span;
-                    self.errors.emit_span(sp, format("tuple arity is limited to 4 elements"));
+                    self.errors.emit_span(
+                        dc::TUPLE_ARITY_LIMITED_4_ELEMENTS,
+                        sp,
+                        format("tuple arity is limited to 4 elements"),
+                    );
                 } else {
                     let mut targs = Tys8 {};
                     for i in 0..elems.len {
@@ -11329,7 +11515,11 @@ extend<'a> TypeChecker<'a> {
                 let q = unsafe (*a).at_const(id).as_data.indirect_type.qualifier;
                 if q == TypeQualifier::TYPE_QUAL_NONE {
                     let sp = unsafe (*a).at_const(id).span;
-                    self.errors.emit_span(sp, format("a 'dyn' type must be '&dyn I', '&mut dyn I', or 'Box<dyn I>'"));
+                    self.errors.emit_span(
+                        dc::DYN_TYPE_MUST_DYN_I_MUT,
+                        sp,
+                        format("a 'dyn' type must be '&dyn I', '&mut dyn I', or 'Box<dyn I>'"),
+                    );
                 } else {
                     result = self.resolve_dyn_node(id, q);
                 }
@@ -11369,6 +11559,7 @@ extend<'a> TypeChecker<'a> {
         }
         let tb = self.type_str(t);
         self.errors.emit_span(
+            dc::OPAQUE_C_TYPE_NO_LAYOUT_VALUE,
             unsafe (*self.cur_ast()).at_const(id).span,
             format("'{}' is an opaque C type with no layout: a value of it needs one", tb.as_str()),
         );
@@ -11412,6 +11603,7 @@ extend<'a> TypeChecker<'a> {
             if qual == TypeQualifier::TYPE_QUAL_MUT {
                 let sp = unsafe (*a).at_const(id).span;
                 self.errors.emit_span(
+                    dc::DYN_FN_ALWAYS_CALLED_THROUGH_SHARED,
                     sp,
                     format("a 'dyn fn' is always called through a shared view; write '&dyn fn(..) ..'"),
                 );
@@ -11427,7 +11619,7 @@ extend<'a> TypeChecker<'a> {
         }
         let sp = unsafe (*a).at_const(id).span;
         if d.node == NODE_NONE || unsafe (*self.mod_ast(d.module)).at_const(d.node).kind != NodeKind::NODE_INTERFACE {
-            self.errors.emit_span(sp, format("'dyn' requires an interface"));
+            self.errors.emit_span(dc::DYN_REQUIRES_INTERFACE, sp, format("'dyn' requires an interface"));
         } else {
             // `dyn I<T, ..>`: lower the type-path arguments and check the count against the
             // interface's generic parameters (zero args for a plain interface).
@@ -11436,7 +11628,11 @@ extend<'a> TypeChecker<'a> {
             let mut na = Tys8 {};
             let nn = self.tc_path_args(self.cur_module(), inner, d, &mut na[0]);
             if targs.len != ig.len {
-                self.errors.emit_span(sp, format("interface expects {} type argument(s), got {}", ig.len, targs.len));
+                self.errors.emit_span(
+                    dc::INTERFACE_EXPECTS_TYPE_ARGUMENT_S_GOT,
+                    sp,
+                    format("interface expects {} type argument(s), got {}", ig.len, targs.len),
+                );
             } else if self.dyn_compatible(d, sp) {
                 result = unsafe (*self.cur_ast()).intern_dyn(d.module, d.node, &na[0], nn, qual as u8);
             }
@@ -11763,6 +11959,7 @@ extend<'a> TypeChecker<'a> {
         }
         let inm = unsafe (*ia).at_const(idn.name).as_data.name.text;
         self.errors.emit_span(
+            dc::INTERFACE_NOT_DYN_COMPATIBLE,
             at,
             format("interface '{}' is not dyn-compatible: {}", diag::span_str(isrc, inm.start, inm.end), why),
         );
@@ -12922,6 +13119,7 @@ extend<'a> TypeChecker<'a> {
             let isp = unsafe (*ia).at_const(unsafe (*ia).at_const(iface).as_data.interface_def.name).as_data.name.text;
             let tb = self.type_str(recv);
             self.errors.emit_span(
+                dc::AMBIGUOUS_CALL_CONFORMS_SEVERAL_ARGUMENTS_FIT,
                 name,
                 format(
                     "ambiguous call to '{}': '{}' conforms to '{}' with several arguments that fit",
@@ -13098,6 +13296,7 @@ extend<'a> TypeChecker<'a> {
             let ina = self.mod_ast(iface.module);
             let isp = unsafe (*ina).at_const(unsafe (*ina).at_const(iface.node).as_data.interface_def.name).as_data.name.text;
             self.errors.emit_span(
+                dc::AMBIGUOUS_CALL_CONFORMS_SEVERAL_ARGUMENTS_FIT,
                 mname,
                 format(
                     "ambiguous call to '{}': '{}' conforms to '{}' with several arguments that fit",
@@ -13627,7 +13826,11 @@ extend<'a> TypeChecker<'a> {
         } else {
             self.source.slice(name.start as usize, name.end as usize);
         };
-        self.errors.emit_span(name, format("ambiguous call: two candidates for '{}' fit equally well", nm));
+        self.errors.emit_span(
+            dc::AMBIGUOUS_CALL_TWO_CANDIDATES_FIT_EQUALLY,
+            name,
+            format("ambiguous call: two candidates for '{}' fit equally well", nm),
+        );
         self.note_decl_site("the first candidate is declared here", a1);
         self.note_decl_site("the second candidate is declared here", a2);
         self.errors.note(format("qualify the call or adjust an argument so one candidate is a strictly better fit"));
@@ -13712,6 +13915,7 @@ extend<'a> TypeChecker<'a> {
             self.source.slice(name.start as usize, name.end as usize);
         };
         self.errors.emit_span(
+            dc::CANDIDATE_LIMIT_WAS_EXCEEDED_QUALIFY_CALL,
             name,
             format("the candidate limit ({}) for '{}' was exceeded; qualify the call explicitly", TC_MAX_CANDIDATES, nm),
         );
@@ -14469,6 +14673,7 @@ extend<'a> TypeChecker<'a> {
             if found != TYPE_NONE && found != t {
                 let pb = self.type_str(pty);
                 self.errors.emit_span(
+                    dc::AMBIGUOUS_ASSOCIATED_TYPE_SEVERAL_BOUNDS_DECLARE,
                     sp,
                     format("ambiguous associated type '{}': several bounds of '{}' declare it", name, pb.as_str()),
                 );
@@ -14529,6 +14734,7 @@ extend<'a> TypeChecker<'a> {
             let b0 = unsafe (*a).list(bs)[0];
             if !bounds.contains(&(id - 1)) {
                 self.errors.emit_span(
+                    dc::ASSOCIATED_TYPE_BINDING_ONLY_ALLOWED_GENERIC,
                     unsafe (*a).at_const(b0).span,
                     format("an associated type binding is only allowed in a generic bound"),
                 );
@@ -14547,10 +14753,15 @@ extend<'a> TypeChecker<'a> {
                     dup = dup || spans_eq2(self.source, pk, self.source, nt);
                 }
                 if dup {
-                    self.errors.emit_span(nt, format("associated type '{}' is bound twice", nm));
+                    self.errors.emit_span(
+                        dc::ASSOCIATED_TYPE_BOUND_TWICE,
+                        nt,
+                        format("associated type '{}' is bound twice", nm),
+                    );
                 } else if bi.node != NODE_NONE && self.tc_find_assoc_decl(bi, nm, 0).node == NODE_NONE {
                     let isp = self.name_span(unsafe (*a).list(n.as_data.type_path.parts)[0]);
                     self.errors.emit_span(
+                        dc::NO_ASSOCIATED_TYPE,
                         nt,
                         format("no associated type '{}' in '{}'", nm, diag::span_str(self.source, isp.start, isp.end)),
                     );
@@ -14580,6 +14791,7 @@ extend<'a> TypeChecker<'a> {
                     unsafe (*a).list(bn.as_data.type_path.parts)[bn.as_data.type_path.parts.len - 1],
                 );
                 self.errors.emit_span(
+                    dc::NOT_INTERFACE_BOUND_NAMES_INTERFACE_FN,
                     sp,
                     format(
                         "'{}' is not an interface: a bound names an interface or a 'fn' type",
@@ -14884,7 +15096,11 @@ extend<'a> TypeChecker<'a> {
             let t = self.tc_param_assoc(d.module, d.node, self.mod_src(m).slice(nt.start as usize, nt.end as usize), sp);
             if t == TYPE_NONE {
                 if m == self.cur_module() && self.tc_report_once(id) {
-                    self.errors.emit_span(nt, format("no associated type by this name in scope"));
+                    self.errors.emit_span(
+                        dc::NO_ASSOCIATED_TYPE_NAME_SCOPE,
+                        nt,
+                        format("no associated type by this name in scope"),
+                    );
                 }
                 return TYPE_ERROR;
             }
@@ -15560,6 +15776,7 @@ extend<'a> TypeChecker<'a> {
             let on2 = self.type_str(up.owner);
             let sp2 = unsafe (*self.cur_ast()).at_const(site).span;
             self.errors.emit_span(
+                dc::DOES_NOT_SATISFY_BOUND_CALLEE_S,
                 sp2,
                 format(
                     "a {} of '{}' does not satisfy a bound the callee's reflection loop requires",
@@ -15596,6 +15813,7 @@ extend<'a> TypeChecker<'a> {
             // many distinct bounds; without the limit the driver's passes would never end.
             let sp3 = unsafe (*self.cur_ast()).at_const(site).span;
             self.errors.emit_span(
+                dc::CALL_HANDS_MORE_THAN_REFLECTION_BOUNDS,
                 sp3,
                 format(
                     "this call hands more than {} reflection bounds up to its callers: a generic function reaches itself with a growing type argument",
@@ -15913,6 +16131,7 @@ extend<'a> TypeChecker<'a> {
             let sp = unsafe (*self.cur_ast()).at_const(itype).span;
             let psp = unsafe (*a).at_const(pit).span;
             self.errors.emit_span(
+                dc::DUPLICATE_CONFORMANCE_MODULE_ALSO_DECLARES_CONFORMANCE,
                 sp,
                 format(
                     "duplicate conformance: module '{}' also declares this conformance for the type",
@@ -15942,6 +16161,7 @@ extend<'a> TypeChecker<'a> {
         let on2 = self.type_str(owner);
         let sp2 = unsafe (*self.cur_ast()).at_const(itype).span;
         self.errors.emit_span(
+            dc::DOES_NOT_SATISFY_BOUND_REQUIRED_INTERFACE,
             sp2,
             format(
                 "a {} of '{}' does not satisfy a bound required by the interface's default method '{}'",
@@ -16808,7 +17028,11 @@ extend<'a> TypeChecker<'a> {
             }
         }
         if bad {
-            self.errors.emit_span(sp, format("the name '{}' is reserved for the symbols the compiler generates", t));
+            self.errors.emit_span(
+                dc::NAME_RESERVED_SYMBOLS_COMPILER_GENERATES,
+                sp,
+                format("the name '{}' is reserved for the symbols the compiler generates", t),
+            );
             self.errors.note(
                 format(
                     "a name may not contain '__' after its leading underscores, start with '__sc', or, for a type, start with 'ptr_', 'ptrm_', 'slice_', 'arr<N>', 'fn<N>' or 'dyn_'",
@@ -16874,6 +17098,7 @@ extend<'a> TypeChecker<'a> {
         }
         let tn = self.type_str(ty);
         self.errors.emit_span(
+            dc::TYPE_TOO_LARGE_TARGET_NO_OBJECT,
             sp,
             format("the type '{}' is too large for the target: no object may exceed isize::MAX bytes", tn.as_str()),
         );
@@ -16895,6 +17120,7 @@ extend<'a> TypeChecker<'a> {
             return;
         }
         self.errors.emit_span(
+            dc::FIELD_PACKED_STRUCT_CANNOT_NEED_FREE,
             unsafe (*self.cur_ast()).at_const(tyn).span,
             format("a field of a '@packed' struct cannot need a 'free': its drop would take a misaligned reference"),
         );
@@ -16902,6 +17128,7 @@ extend<'a> TypeChecker<'a> {
 
     fn err_packed_ref(self: &mut Self, sp: tok::Span) {
         self.errors.emit_span(
+            dc::CANNOT_BORROW_FIELD_PACKED_STRUCT_REFERENCE,
             sp,
             format("cannot borrow a field of a '@packed' struct: the reference may be misaligned"),
         );
@@ -16988,6 +17215,7 @@ extend<'a> TypeChecker<'a> {
             return;
         }
         self.errors.emit_span(
+            dc::UNION_HAS_OWNING_FIELDS_BUT_NO,
             sname,
             format(
                 "union '{}' has owning fields ('{}') but no 'free': unions never free implicitly",
@@ -17465,6 +17693,7 @@ extend<'a> TypeChecker<'a> {
         let ma = self.mod_ast(md.module);
         let mn = unsafe (*ma).at_const(unsafe (*ma).at_const(md.node).as_data.function.name).as_data.name.text;
         self.errors.emit_span(
+            dc::CANNOT_CALL_UNSATISFIED_INTERFACE_BOUNDS,
             at,
             format(
                 "cannot call '{}::{}': unsatisfied interface bounds",
@@ -17669,6 +17898,7 @@ extend<'a> TypeChecker<'a> {
         let sn = self.type_str(src);
         let dn = self.type_str(dyn_ty);
         self.errors.emit_span(
+            dc::CANNOT_ERASE_CONFORMS_INTERFACE_ONLY_OTHER,
             sp,
             format(
                 "cannot erase '{}' to '{}': '{}' conforms to this interface only with other arguments",
@@ -17793,7 +18023,11 @@ extend<'a> TypeChecker<'a> {
             if probe {
                 return false;
             }
-            self.errors.emit_span(sp, format("cannot erase a generic type parameter to 'dyn'"));
+            self.errors.emit_span(
+                dc::CANNOT_ERASE_GENERIC_TYPE_PARAMETER_DYN,
+                sp,
+                format("cannot erase a generic type parameter to 'dyn'"),
+            );
             return true;
         }
         let mut tmod: ModuleId = 0;
@@ -17849,6 +18083,7 @@ extend<'a> TypeChecker<'a> {
                 }
                 let tn = self.type_str(src);
                 self.errors.emit_span(
+                    dc::CANNOT_ERASE_DYN_METHOD_HAS_NO,
                     sp,
                     format("cannot erase '{}' to 'dyn': method '{}' has no emittable implementation", tn.as_str(), nm),
                 );
@@ -17946,6 +18181,7 @@ extend<'a> TypeChecker<'a> {
         let d = self.type_str(expected);
         let sp = unsafe (*a).at_const(nid).span;
         self.errors.warn_span(
+            dc::UNNECESSARY_CAST_CONVERTS_IMPLICITLY_HERE,
             sp,
             format("unnecessary cast: '{}' converts to '{}' implicitly here", f.as_str(), d.as_str()),
         );
@@ -18106,7 +18342,7 @@ extend<'a> TypeChecker<'a> {
         let s = self.type_str(src);
         let d = self.type_str(dst);
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
-        self.errors.emit_span(sp, format("invalid cast from '{}' to '{}'", s.as_str(), d.as_str()));
+        self.errors.emit_span(dc::INVALID_CAST, sp, format("invalid cast from '{}' to '{}'", s.as_str(), d.as_str()));
         return true;
     }
 
@@ -18302,6 +18538,7 @@ extend<'a> TypeChecker<'a> {
                 }
                 if bad {
                     self.errors.emit_span(
+                        dc::ARRAY_LITERAL_HAS_ELEMENTS_BUT_EXPECTED,
                         an.span,
                         format(
                             "array literal has {} elements but the expected type has length {}",
@@ -18340,6 +18577,7 @@ extend<'a> TypeChecker<'a> {
             if !fits && !probe && ex.as_data.arr.elem == ac.as_data.arr.elem && !ac.arr_sym() && n != 0 {
                 let sp = unsafe (*self.cur_ast()).at_const(node).span;
                 self.errors.emit_span(
+                    dc::ARRAY_LITERAL_HAS_ELEMENTS_BUT_VECTOR,
                     sp,
                     format("array literal has {} elements but the vector has {} lanes", ac.as_data.arr.len, n),
                 );
@@ -18444,6 +18682,7 @@ extend<'a> TypeChecker<'a> {
                             return false;
                         }
                         self.errors.emit_span(
+                            dc::RUNTIME_FN_POINTER_CANNOT_ERASE_DYN,
                             sp,
                             format("a runtime 'fn(..)' pointer cannot erase to 'dyn fn'; wrap it in a closure"),
                         );
@@ -18458,6 +18697,7 @@ extend<'a> TypeChecker<'a> {
                             return false;
                         }
                         self.errors.emit_span(
+                            dc::CLOSURE_WRITES_CAPTURED_VALUES_CANNOT_VIEWED,
                             sp,
                             format(
                                 "a closure that writes its captured values cannot be viewed as '&dyn fn': a shared view cannot write them",
@@ -18494,6 +18734,7 @@ extend<'a> TypeChecker<'a> {
                                 return false;
                             }
                             self.errors.emit_span(
+                                dc::BOX_ALLOCATOR_MUST_IMPLEMENT_DEFAULT_ERASED,
                                 sp,
                                 format(
                                     "the Box allocator must implement 'Default' to be erased to 'Box<dyn I>' (its state is not carried)",
@@ -18520,6 +18761,7 @@ extend<'a> TypeChecker<'a> {
                         return false;
                     }
                     self.errors.emit_span(
+                        dc::RUNTIME_FN_POINTER_CANNOT_ERASE_DYN,
                         sp,
                         format("a runtime 'fn(..)' pointer cannot erase to 'dyn fn'; wrap it in a closure"),
                     );
@@ -18533,6 +18775,7 @@ extend<'a> TypeChecker<'a> {
                         return false;
                     }
                     self.errors.emit_span(
+                        dc::CAPTURING_CLOSURE_MUST_BORROWED_VIEW_DYN,
                         sp,
                         format("a capturing closure must be borrowed to view it as '&dyn fn': write '&f'"),
                     );
@@ -18664,7 +18907,11 @@ extend<'a> TypeChecker<'a> {
                 }
                 let tn = self.type_str(expected);
                 let sp = unsafe (*self.cur_ast()).at_const(node).span;
-                self.errors.emit_span(sp, format("float literal is out of range for '{}'", tn.as_str()));
+                self.errors.emit_span(
+                    dc::FLOAT_LITERAL_OUT_RANGE,
+                    sp,
+                    format("float literal is out of range for '{}'", tn.as_str()),
+                );
                 return true;
             }
             // Record the CONTEXT's type on the literal, exactly as the integer branch does. The emitted C
@@ -18716,7 +18963,7 @@ extend<'a> TypeChecker<'a> {
         let end_ok = !has_end || end == TYPE_NONE || self.is_int(end);
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
         if !start_ok || !end_ok {
-            self.errors.emit_span(sp, format("range bounds must be integers"));
+            self.errors.emit_span(dc::RANGE_BOUNDS_MUST_INTEGERS, sp, format("range bounds must be integers"));
             return TYPE_NONE;
         }
         if !has_start {
@@ -18767,6 +19014,7 @@ extend<'a> TypeChecker<'a> {
             AttrKind::ATTR_THREAD_LOCAL,
         ) != null {
             self.errors.emit_span(
+                dc::THREAD_LOCAL_HAS_ONE_OBJECT_PER,
                 unsafe (*self.cur_ast()).at_const(id).span,
                 format("a thread-local has one object per thread: a constant or 'static mut' initializer cannot use it"),
             );
@@ -18829,6 +19077,7 @@ extend<'a> TypeChecker<'a> {
             ) != NODE_NONE {
                 let sp = unsafe (*a).at_const(ai).span;
                 self.errors.emit_span(
+                    dc::NEEDS_CPU_FEATURES_NO_VALUE_CLOSURE,
                     sp,
                     format(
                         "`{}` needs CPU features: it is no value of a closure bound (`F: fn(..)`); pass a function pointer `fn(..)` instead",
@@ -19885,6 +20134,7 @@ extend<'a> TypeChecker<'a> {
                 if !self.tc_iface_declares_fn(iface, nsp) {
                     let isp = unsafe (*ia).at_const(unsafe (*ia).at_const(iface.node).as_data.interface_def.name).as_data.name.text;
                     self.errors.emit_span(
+                        dc::NOT_MEMBER_INTERFACE_DEFINE_PLAIN_EXTEND,
                         unsafe (*self.cur_ast()).at_const(mn.as_data.function.name).span,
                         format(
                             "'{}' is not a member of interface '{}': define it in a plain 'extend' of the type",
@@ -19920,6 +20170,7 @@ extend<'a> TypeChecker<'a> {
                         "an enum";
                     };
                     self.errors.emit_span(
+                        dc::WHICH_DEFAULT_DOES_NOT_SUPPORT,
                         at,
                         format("'{}' is {}, which the default '{}' does not support", tn.as_str(), kind, reflect_m),
                     );
@@ -19937,6 +20188,7 @@ extend<'a> TypeChecker<'a> {
                 ).span;
                 if hm == NODE_NONE {
                     self.errors.emit_span(
+                        dc::MISSING_ASSOCIATED_TYPE_REQUIRED_INTERFACE,
                         at,
                         format(
                             "missing associated type '{}' required by this interface",
@@ -19953,6 +20205,7 @@ extend<'a> TypeChecker<'a> {
                     if want_lt != have_lt || want_g != have_g {
                         let hat = unsafe (*self.cur_ast()).at_const(hm).span;
                         self.errors.emit_span(
+                            dc::ASSOCIATED_TYPE_DOES_NOT_MATCH_INTERFACE,
                             hat,
                             format(
                                 "associated type '{}' does not match the interface: it declares {} lifetime and {} type parameter(s)",
@@ -19979,6 +20232,7 @@ extend<'a> TypeChecker<'a> {
                         unsafe (*self.cur_ast()).at_const(extnode).as_data.extend_def.interface_type,
                     ).span;
                     self.errors.emit_span(
+                        dc::MISSING_METHOD_REQUIRED_INTERFACE,
                         at,
                         format(
                             "missing method '{}' required by this interface",
@@ -19988,6 +20242,7 @@ extend<'a> TypeChecker<'a> {
                 } else if !self.extend_method_signature_matches(reqdef, hm, extnode, subp, suba, nsub) {
                     let at = unsafe (*self.cur_ast()).at_const(hm).span;
                     self.errors.emit_span(
+                        dc::METHOD_DOES_NOT_MATCH_INTERFACE_SIGNATURE,
                         at,
                         format(
                             "method '{}' does not match interface signature",
@@ -20013,7 +20268,11 @@ extend<'a> TypeChecker<'a> {
                 let at = unsafe (*self.cur_ast()).at_const(
                     unsafe (*self.cur_ast()).at_const(extnode).as_data.extend_def.interface_type,
                 ).span;
-                self.errors.emit_span(at, format("type does not satisfy required superinterface"));
+                self.errors.emit_span(
+                    dc::TYPE_DOES_NOT_SATISFY_REQUIRED_SUPERINTERFACE,
+                    at,
+                    format("type does not satisfy required superinterface"),
+                );
             }
         }
     }
@@ -20031,7 +20290,11 @@ extend<'a> TypeChecker<'a> {
         } else {
             "a member is not 'Copy'";
         };
-        self.errors.emit_span(sp, format("'Copy' cannot be declared for '{}': {}", ty.as_str(), why));
+        self.errors.emit_span(
+            dc::COPY_CANNOT_DECLARED,
+            sp,
+            format("'Copy' cannot be declared for '{}': {}", ty.as_str(), why),
+        );
     }
     // `Send`, `Sync` and `Zeroable` are the conformances the compiler cannot verify. Every other interface is
     // checked against its requirements; `Send` and `Sync` are DERIVED structurally, and writing one by hand
@@ -20057,7 +20320,11 @@ extend<'a> TypeChecker<'a> {
         } else {
             "Sync";
         };
-        self.errors.emit_span(sp, format("asserting '{}' requires 'unsafe extend'", name));
+        self.errors.emit_span(
+            dc::ASSERTING_REQUIRES_UNSAFE_EXTEND,
+            sp,
+            format("asserting '{}' requires 'unsafe extend'", name),
+        );
         self.errors.note(
             format(
                 "{}",
@@ -20089,10 +20356,14 @@ extend<'a> TypeChecker<'a> {
             } else {
                 "is not declared 'unsafe fn' by this interface, so a caller through the bound makes no promise";
             };
-            self.errors.emit_span(at, format("method '{}' {}", name, what));
+            self.errors.emit_span(dc::METHOD_QUALIFIER_MISMATCH, at, format("method '{}' {}", name, what));
         }
         if rf.is_const() && !hf.is_const() {
-            self.errors.emit_span(at, format("method '{}' is declared 'const fn' by this interface", name));
+            self.errors.emit_span(
+                dc::METHOD_DECLARED_CONST_FN_INTERFACE,
+                at,
+                format("method '{}' is declared 'const fn' by this interface", name),
+            );
         }
     }
 
@@ -20318,6 +20589,7 @@ extend<'a> TypeChecker<'a> {
             if first != NODE_NONE {
                 let tsp = unsafe (*self.cur_ast()).at_const(ed.target_type).span;
                 self.errors.emit_span(
+                    dc::DUPLICATE_DEFINITION,
                     nm,
                     format(
                         "duplicate definition of '{}' for '{}'",
@@ -20427,6 +20699,7 @@ extend<'a> TypeChecker<'a> {
                 }
                 let tsp = unsafe (*self.cur_ast()).at_const(ed.target_type).span;
                 self.errors.emit_span(
+                    dc::DUPLICATE_DEFINITION_MODULE_ALSO_DEFINES,
                     nm,
                     format(
                         "duplicate definition of '{}' for '{}': module '{}' also defines it",
@@ -20494,6 +20767,7 @@ extend<'a> TypeChecker<'a> {
             let sp = unsafe (*self.cur_ast()).at_const(itn).span;
             let tb = self.type_str(suba[0]);
             self.errors.emit_span(
+                dc::TYPE_EXTERN_C_BLOCK_CANNOT_IMPLEMENT,
                 sp,
                 format("'{}' is a type of an 'extern \"C\"' block: it cannot implement 'Free'", tb.as_str()),
             );
@@ -20511,6 +20785,7 @@ extend<'a> TypeChecker<'a> {
             let itype = unsafe (*self.cur_ast()).at_const(id).as_data.extend_def.interface_type;
             let isp = unsafe (*self.cur_ast()).at_const(itype).span;
             self.errors.emit_span(
+                dc::ONLY_SIMD_LANE_TYPES_STD_IMPLEMENT,
                 isp,
                 format(
                     "only the SIMD lane types in `std` implement `{}`",
@@ -20552,6 +20827,7 @@ extend<'a> TypeChecker<'a> {
             if same {
                 let sp = unsafe (*self.cur_ast()).at_const(itype).span;
                 self.errors.emit_span(
+                    dc::DUPLICATE_CONFORMANCE_TYPE_ALREADY_DECLARES,
                     sp,
                     format(
                         "duplicate conformance: the type already declares 'as {}'",
@@ -20626,6 +20902,7 @@ extend<'a> TypeChecker<'a> {
                 unsafe (*self.cur_ast()).at_const(id).as_data.extend_def.interface_type,
             ).span;
             self.errors.emit_span(
+                dc::CONFLICTING_CONFORMANCES_GENERIC_CONFORMANCE_ALSO_APPLIES,
                 sp,
                 format(
                     "conflicting conformances to '{}': a generic conformance also applies to this type",
@@ -20928,7 +21205,12 @@ extend TypeChecker {
                     // known once every module is typed (`lint_feature_unsafe`).
                     unsafe (*self.cur_ast()).unsafe_lints.push(UnsafeLint { start: usp.start, fix_end: fe });
                 } else {
-                    self.errors.warn(usp.start, 6, format("unnecessary 'unsafe': nothing inside requires it"));
+                    self.errors.warn(
+                        dc::UNNECESSARY_UNSAFE_NOTHING_INSIDE_REQUIRES,
+                        usp.start,
+                        6,
+                        format("unnecessary 'unsafe': nothing inside requires it"),
+                    );
                     if fe != 0 {
                         self.errors.fix(usp.start, fe, 0);
                     }
@@ -20945,6 +21227,7 @@ extend TypeChecker {
                 if !self.tc_lanes_are(opnd, "SimdSigned") {
                     let ty = self.type_str(opnd);
                     self.errors.emit_span(
+                        dc::CANNOT_APPLY_UNARY_OPERATOR_TYPE_LANES,
                         sp,
                         format("cannot apply unary operator '-' to type '{}' (its lanes have no sign)", ty.as_str()),
                     );
@@ -20956,7 +21239,11 @@ extend TypeChecker {
                 return ov;
             }
             if !untyped(opnd) && !self.is_numeric(opnd) {
-                self.errors.emit_span(sp, format("unary '-' requires a numeric operand"));
+                self.errors.emit_span(
+                    dc::UNARY_REQUIRES_NUMERIC_OPERAND,
+                    sp,
+                    format("unary '-' requires a numeric operand"),
+                );
                 return TYPE_ERROR;
             } else if !untyped(opnd) && bt_is_uint(self.bt_of(opnd)) {
                 self.err_neg_unsigned(id, opnd);
@@ -20975,7 +21262,11 @@ extend TypeChecker {
                 return ov;
             }
             if !untyped(opnd) && !self.is_bool(opnd) {
-                self.errors.emit_span(sp, format("unary '!' requires a 'bool' operand"));
+                self.errors.emit_span(
+                    dc::UNARY_REQUIRES_BOOL_OPERAND,
+                    sp,
+                    format("unary '!' requires a 'bool' operand"),
+                );
             }
             return Ast::builtin(BuiltinType::BT_BOOL);
         }
@@ -20985,7 +21276,11 @@ extend TypeChecker {
                 return ov;
             }
             if !untyped(opnd) && !self.is_int(opnd) {
-                self.errors.emit_span(sp, format("unary '~' requires an integer operand"));
+                self.errors.emit_span(
+                    dc::UNARY_REQUIRES_INTEGER_OPERAND,
+                    sp,
+                    format("unary '~' requires an integer operand"),
+                );
                 return TYPE_ERROR;
             }
             return opnd;
@@ -20994,7 +21289,11 @@ extend TypeChecker {
             // Lint: `*&x` (any mutability) yields the place/value x itself; both tokens cancel.
             if self.lint && unsafe (*a).at_const(operand).kind == NodeKind::NODE_UNARY && unsafe (*a).at_const(operand).as_data.unary.op == TokenType::Ampersand {
                 let usp = unsafe (*a).at_const(id).span;
-                self.errors.warn_span(usp, format("unnecessary '*&': the expression can be used directly"));
+                self.errors.warn_span(
+                    dc::UNNECESSARY_EXPRESSION_CAN_USED_DIRECTLY,
+                    usp,
+                    format("unnecessary '*&': the expression can be used directly"),
+                );
                 self.tc_lint_pair_fix(
                     usp.start,
                     unsafe (*a).at_const(unsafe (*a).at_const(operand).as_data.unary.operand).span.start,
@@ -21017,7 +21316,7 @@ extend TypeChecker {
                 self.tc_record_deref(id, self.strip(opnd), dm, dt);
                 return dt;
             }
-            self.errors.emit_span(sp, format("cannot dereference a non-pointer"));
+            self.errors.emit_span(dc::CANNOT_DEREFERENCE_NON_POINTER, sp, format("cannot dereference a non-pointer"));
             return TYPE_NONE;
         }
         if op == TokenType::Ampersand {
@@ -21034,7 +21333,11 @@ extend TypeChecker {
                 let it = unsafe (*a).type_of(inner);
                 if it != TYPE_NONE && self.type_at(it).kind == TypeKind::TYPE_REFERENCE && self.type_at(it).qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 {
                     let usp = unsafe (*a).at_const(id).span;
-                    self.errors.warn_span(usp, format("unnecessary '&*': the reference can be used directly"));
+                    self.errors.warn_span(
+                        dc::UNNECESSARY_REFERENCE_CAN_USED_DIRECTLY,
+                        usp,
+                        format("unnecessary '&*': the reference can be used directly"),
+                    );
                     self.tc_lint_pair_fix(usp.start, unsafe (*a).at_const(inner).span.start);
                 }
             }
@@ -21043,7 +21346,11 @@ extend TypeChecker {
             let onk = unsafe (*a).at_const(opw).kind;
             if mut2 && self.is_place(operand) && !self.is_assignable(operand) {
                 let osp = unsafe (*a).at_const(operand).span;
-                self.errors.emit_span(osp, format("cannot take '&mut' of an immutable binding (bind it with 'mut')"));
+                self.errors.emit_span(
+                    dc::CANNOT_TAKE_MUT_IMMUTABLE_BINDING_BIND,
+                    osp,
+                    format("cannot take '&mut' of an immutable binding (bind it with 'mut')"),
+                );
             }
             if self.tc_packed_misaligned(operand, 0) {
                 self.err_packed_ref(unsafe (*a).at_const(operand).span);
@@ -21057,6 +21364,7 @@ extend TypeChecker {
             if !self.is_place(opw) && !untyped(opnd) && self.type_at(opnd).kind != TypeKind::TYPE_BUILTIN && (onk == NodeKind::NODE_CALL || onk == NodeKind::NODE_IF || onk == NodeKind::NODE_MATCH || onk == NodeKind::NODE_BLOCK || onk == NodeKind::NODE_BINARY || onk == NodeKind::NODE_ASSIGNMENT || onk == NodeKind::NODE_CAST) {
                 let osp = unsafe (*a).at_const(opw).span;
                 self.errors.emit_span(
+                    dc::CANNOT_TAKE_ADDRESS_TEMPORARY_VALUE_BIND,
                     osp,
                     format("cannot take the address of a temporary value; bind it to a 'let' first"),
                 );
@@ -21078,7 +21386,11 @@ extend TypeChecker {
                 nres = self.prelude_instance_args_hit(os, self.ph_result, &mut oa[0], 2);
             }
             if nopt < 0 && nres < 0 {
-                self.errors.emit_span(sp, format("'?' requires an Option or Result operand"));
+                self.errors.emit_span(
+                    dc::REQUIRES_OPTION_RESULT_OPERAND,
+                    sp,
+                    format("'?' requires an Option or Result operand"),
+                );
                 self.errors.note(format("the operand must be an Option<T> or Result<T, E> value"));
                 return TYPE_NONE;
             }
@@ -21093,13 +21405,21 @@ extend TypeChecker {
             }
             if nopt >= 0 {
                 if self.prelude_instance_args_hit(frs, self.ph_option, &mut fa[0], 2) < 0 {
-                    self.errors.emit_span(sp, format("'?' on an Option requires the function to return an Option"));
+                    self.errors.emit_span(
+                        dc::OPTION_REQUIRES_FUNCTION_RETURN_OPTION,
+                        sp,
+                        format("'?' on an Option requires the function to return an Option"),
+                    );
                     self.errors.note(format("change the function return type or handle None explicitly"));
                 }
                 return oa[0];
             }
             if self.prelude_instance_args_hit(frs, self.ph_result, &mut fa[0], 2) < 0 {
-                self.errors.emit_span(sp, format("'?' on a Result requires the function to return a Result"));
+                self.errors.emit_span(
+                    dc::RESULT_REQUIRES_FUNCTION_RETURN_RESULT,
+                    sp,
+                    format("'?' on a Result requires the function to return a Result"),
+                );
                 self.errors.note(format("the function must return Result<_, E> with the same error type"));
             } else if oa[1] != fa[1] {
                 let conv = self.tc_find_from_for(fa[1], oa[1]);
@@ -21109,6 +21429,7 @@ extend TypeChecker {
                     let a1 = self.type_str(oa[1]);
                     let a2 = self.type_str(fa[1]);
                     self.errors.emit_span(
+                        dc::ERROR_TYPE_DOES_NOT_MATCH_FUNCTION,
                         sp,
                         format(
                             "'?' error type '{}' does not match the function's error type '{}'",
@@ -21156,7 +21477,7 @@ extend TypeChecker {
             if require_int {
                 w = "integer";
             }
-            self.errors.emit_span(sp, format("operator requires {} operands", w));
+            self.errors.emit_span(dc::OPERATOR_REQUIRES_OPERANDS, sp, format("operator requires {} operands", w));
             if self.type_at(self.strip(r)).kind == TypeKind::TYPE_SIMD {
                 self.errors.note(format("the left operand is the vector type or its lane type"));
             }
@@ -21211,7 +21532,7 @@ extend TypeChecker {
             if minus && l == r {
                 return Ast::builtin(BuiltinType::BT_ISIZE);
             }
-            self.errors.emit_span(sp, format("invalid pointer arithmetic"));
+            self.errors.emit_span(dc::INVALID_POINTER_ARITHMETIC, sp, format("invalid pointer arithmetic"));
             return TYPE_NONE;
         }
         if lp && self.is_int(r) {
@@ -21220,7 +21541,11 @@ extend TypeChecker {
         if rp && !minus && self.is_int(l) {
             return r;
         }
-        self.errors.emit_span(sp, format("pointer arithmetic requires an integer offset"));
+        self.errors.emit_span(
+            dc::POINTER_ARITHMETIC_REQUIRES_INTEGER_OFFSET,
+            sp,
+            format("pointer arithmetic requires an integer offset"),
+        );
         return TYPE_NONE;
     }
 
@@ -21261,6 +21586,7 @@ extend TypeChecker {
                 let sp = unsafe (*self.cur_ast()).at_const(id).span;
                 let ty = self.type_str(ls);
                 self.errors.emit_span(
+                    dc::TYPE_PARAMETER_HAS_NO_METHOD_OPERATOR,
                     sp,
                     format(
                         "type parameter '{}' has no '{}' method for this operator (add a bound that provides it)",
@@ -21317,7 +21643,11 @@ extend TypeChecker {
             if md.node == NODE_NONE {
                 let sp = unsafe (*self.cur_ast()).at_const(id).span;
                 let ty = self.type_str(ls);
-                self.errors.emit_span(sp, format("'{}' has no '{}' method for this operator", ty.as_str(), m));
+                self.errors.emit_span(
+                    dc::HAS_NO_METHOD_OPERATOR,
+                    sp,
+                    format("'{}' has no '{}' method for this operator", ty.as_str(), m),
+                );
                 *out = TYPE_NONE;
             } else {
                 if !self.method_extend_bounds_hold(ls, md) {
@@ -21384,6 +21714,7 @@ extend TypeChecker {
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
         if hits > 1 {
             self.errors.emit_span(
+                dc::LITERAL_S_TYPE_AMBIGUOUS_TYPES_PROVIDE,
                 sp,
                 format("the literal's type is ambiguous: {} types provide '{}' for this right operand", hits, m),
             );
@@ -21771,6 +22102,7 @@ extend TypeChecker {
             if !self.tc_bound_op(id, os, name, NODE_NONE, out) {
                 let ty = self.type_str(os);
                 self.errors.emit_span(
+                    dc::TYPE_PARAMETER_HAS_NO_METHOD_OPERATOR,
                     sp,
                     format(
                         "type parameter '{}' has no '{}' method for this operator (add a bound that provides it)",
@@ -21805,7 +22137,11 @@ extend TypeChecker {
             }
             if md.node == NODE_NONE {
                 let ty = self.type_str(os);
-                self.errors.emit_span(sp, format("type '{}' has no '{}' method for this operator", ty.as_str(), name));
+                self.errors.emit_span(
+                    dc::TYPE_HAS_NO_METHOD_OPERATOR,
+                    sp,
+                    format("type '{}' has no '{}' method for this operator", ty.as_str(), name),
+                );
                 *out = TYPE_NONE;
                 return true;
             }
@@ -21951,7 +22287,11 @@ extend TypeChecker {
             let lb = untyped(l) || self.is_bool(l) || self.type_at(l).kind == TypeKind::TYPE_NEVER;
             let rb = untyped(r) || self.is_bool(r) || self.type_at(r).kind == TypeKind::TYPE_NEVER;
             if !lb || !rb {
-                self.errors.emit_span(sp, format("logical operator requires 'bool' operands"));
+                self.errors.emit_span(
+                    dc::LOGICAL_OPERATOR_REQUIRES_BOOL_OPERANDS,
+                    sp,
+                    format("logical operator requires 'bool' operands"),
+                );
             }
             return Ast::builtin(BuiltinType::BT_BOOL);
         }
@@ -21968,6 +22308,7 @@ extend TypeChecker {
             if rk == TypeKind::TYPE_STRUCT || rk == TypeKind::TYPE_INSTANCE {
                 let ty = self.type_str(rs);
                 self.errors.emit_span(
+                    dc::CANNOT_COMPARE_NULL_VALUE_NOT_POINTER,
                     sp,
                     format("cannot compare '{}' with 'null' (it is a value, not a pointer)", ty.as_str()),
                 );
@@ -21988,6 +22329,7 @@ extend TypeChecker {
         let rptr = rstrip != TYPE_NONE && self.type_at(rstrip).kind == TypeKind::TYPE_POINTER;
         if lptr != rptr && (lptr && r != rstrip || rptr && l != ls) {
             self.errors.emit_span(
+                dc::CANNOT_COMPARE_RAW_POINTER_REFERENCE_POINTERS,
                 sp,
                 format(
                     "cannot compare a raw pointer with a reference (pointers compare by address, references by value)",
@@ -22014,6 +22356,7 @@ extend TypeChecker {
             // compares arrays by address.
             let ty = self.type_str(ls);
             self.errors.emit_span(
+                dc::DOES_NOT_IMPLEMENT_COMPARE,
                 sp,
                 format(
                     "`{}` does not implement `{}`; compare {}",
@@ -22038,6 +22381,7 @@ extend TypeChecker {
                 if !ls_enum && rnn.kind == NodeKind::NODE_LITERAL && rnn.as_data.literal.token_type == TokenType::Null {
                     let ty = self.type_str(ls);
                     self.errors.emit_span(
+                        dc::CANNOT_COMPARE_NULL_VALUE_NOT_POINTER,
                         sp,
                         format("cannot compare '{}' with 'null' (it is a value, not a pointer)", ty.as_str()),
                     );
@@ -22059,6 +22403,7 @@ extend TypeChecker {
                         iface = "Ord";
                     }
                     self.errors.emit_span(
+                        dc::HAS_NO_METHOD_OPERATOR_IMPLEMENT,
                         sp,
                         format("'{}' has no '{}' method for this operator (implement {})", ty.as_str(), mm, iface),
                     );
@@ -22095,6 +22440,7 @@ extend TypeChecker {
                     iface = "Ord";
                 }
                 self.errors.emit_span(
+                    dc::TYPE_PARAMETER_HAS_NO_METHOD_OPERATOR,
                     sp,
                     format("type parameter has no '{}' method for this operator (add a `{}` bound)", mm, iface),
                 );
@@ -22168,7 +22514,11 @@ extend TypeChecker {
         let inst = self.aggregate_of(enum_ty, &mut amod, &mut adecl, &mut gp, &mut ga, &mut gn);
         if args.len != payload.len {
             let s2 = plural(payload.len);
-            self.errors.emit_span(sp, format("variant expects {} argument{}, found {}", payload.len, s2, args.len));
+            self.errors.emit_span(
+                dc::VARIANT_EXPECTS_ARGUMENT_FOUND,
+                sp,
+                format("variant expects {} argument{}, found {}", payload.len, s2, args.len),
+            );
         } else {
             for k in 0..args.len {
                 let pid = unsafe (*va).list(payload)[k as usize];
@@ -22347,6 +22697,7 @@ extend TypeChecker {
             } else {
                 let gsp = unsafe (*ea).at_const(unsafe (*ea).at_const(gid).as_data.generic_param.name).as_data.name.text;
                 self.errors.emit_span(
+                    dc::CANNOT_INFER_GENERIC_ARGUMENT_STRUCT_LITERAL,
                     sp,
                     format(
                         "cannot infer the generic argument '{}' of this struct literal; give it an expected type or explicit type arguments",
@@ -22843,7 +23194,11 @@ extend TypeChecker {
         };
         let prec_seen = prec_e > prec_s;
         if prec_seen && !(b == BuiltinType::BT_F32 || b == BuiltinType::BT_F64) {
-            self.errors.emit_span(asp, format("{}", "`{:.N}` precision requires a float argument"));
+            self.errors.emit_span(
+                dc::PRECISION_REQUIRES_FLOAT_ARGUMENT,
+                asp,
+                format("{}", "`{:.N}` precision requires a float argument"),
+            );
             return false;
         }
         let signed = b as u8 >= BuiltinType::BT_I8 as u8 && b as u8 <= BuiltinType::BT_ISIZE as u8;
@@ -22902,7 +23257,11 @@ extend TypeChecker {
                 };
             }
             if shim.len() == 0 {
-                self.errors.emit_span(asp, format("{}", "`{:x}`/`{:X}`/`{:b}` formats require an integer argument"));
+                self.errors.emit_span(
+                    dc::FORMATS_REQUIRE_INTEGER_ARGUMENT,
+                    asp,
+                    format("{}", "`{:x}`/`{:X}`/`{:b}` formats require an integer argument"),
+                );
                 return false;
             }
         } else if prec_seen {
@@ -23019,7 +23378,11 @@ extend TypeChecker {
     }
 
     fn tc_fmt_unformattable(self: &mut Self, asp: tok::Span) bool {
-        self.errors.emit_span(asp, format("{}", "argument is not directly formattable (call its .fmt())"));
+        self.errors.emit_span(
+            dc::ARGUMENT_NOT_DIRECTLY_FORMATTABLE_CALL_FMT,
+            asp,
+            format("{}", "argument is not directly formattable (call its .fmt())"),
+        );
         self.errors.note(format("implement Format for this type or pass a value that already formats directly"));
         return false;
     }
@@ -23053,7 +23416,11 @@ extend TypeChecker {
             }
         }
         if !ok_lit {
-            self.errors.emit_span(sp, format("format string must be a string literal"));
+            self.errors.emit_span(
+                dc::FORMAT_STRING_MUST_STRING_LITERAL,
+                sp,
+                format("format string must be a string literal"),
+            );
             self.errors.note(format("format strings are parsed at compile time so placeholders can be checked"));
             return sret;
         }
@@ -23154,7 +23521,11 @@ extend TypeChecker {
                         self.tc_fmt_push(letf, kw, "sugar_fmt_str", sl, NODE_NONE);
                     }
                     if ai >= args.len {
-                        self.errors.emit_span(sp, format("{}", "more `{}` placeholders than arguments"));
+                        self.errors.emit_span(
+                            dc::MORE_PLACEHOLDERS_THAN_ARGUMENTS,
+                            sp,
+                            format("{}", "more `{}` placeholders than arguments"),
+                        );
                         self.errors.note(
                             format(
                                 "{}",
@@ -23191,7 +23562,11 @@ extend TypeChecker {
             i = i + 1;
         }
         if !bad && ai < args.len {
-            self.errors.emit_span(sp, format("{}", "more arguments than `{}` placeholders"));
+            self.errors.emit_span(
+                dc::MORE_ARGUMENTS_THAN_PLACEHOLDERS,
+                sp,
+                format("{}", "more arguments than `{}` placeholders"),
+            );
             self.errors.note(format("{}", "remove the extra argument or add a matching '{}' placeholder"));
             bad = true;
         }
@@ -23308,7 +23683,11 @@ extend TypeChecker {
         let sp = unsafe (*a).at_const(id).span;
         if kind == 1 {
             if args.len < 1 || args.len > 2 {
-                self.errors.emit_span(sp, format("'assert' takes a condition and an optional str message"));
+                self.errors.emit_span(
+                    dc::ASSERT_TAKES_CONDITION_OPTIONAL_STR_MESSAGE,
+                    sp,
+                    format("'assert' takes a condition and an optional str message"),
+                );
                 for i in 0..args.len {
                     self.check_expr(unsafe (*a).list(args)[i as usize]);
                 }
@@ -23316,12 +23695,12 @@ extend TypeChecker {
             }
             let ct = self.check_expr(unsafe (*a).list(args)[0]);
             if !untyped(ct) && !self.is_bool(ct) {
-                self.errors.emit_span(sp, format("'assert' condition must be 'bool'"));
+                self.errors.emit_span(dc::ASSERT_CONDITION_MUST_BOOL, sp, format("'assert' condition must be 'bool'"));
             }
             if args.len == 2 {
                 let mt = self.check_expr(unsafe (*a).list(args)[1]);
                 if !untyped(mt) && self.strip(mt) != self.prelude_str_type() {
-                    self.errors.emit_span(sp, format("'assert' message must be a 'str'"));
+                    self.errors.emit_span(dc::ASSERT_MESSAGE_MUST_STR, sp, format("'assert' message must be a 'str'"));
                 }
             }
             return Ast::builtin(BuiltinType::BT_VOID);
@@ -23331,7 +23710,7 @@ extend TypeChecker {
             nm = "assert_ne";
         }
         if args.len != 2 {
-            self.errors.emit_span(sp, format("'{}' takes exactly two arguments", nm));
+            self.errors.emit_span(dc::TAKES_EXACTLY_TWO_ARGUMENTS, sp, format("'{}' takes exactly two arguments", nm));
             for i in 0..args.len {
                 self.check_expr(unsafe (*a).list(args)[i as usize]);
             }
@@ -23379,7 +23758,11 @@ extend TypeChecker {
         }
         if !comparable {
             let ty = self.type_str(lt);
-            self.errors.emit_span(sp, format("'{}' cannot compare values of type '{}'", nm, ty.as_str()));
+            self.errors.emit_span(
+                dc::CANNOT_COMPARE_VALUES_TYPE,
+                sp,
+                format("'{}' cannot compare values of type '{}'", nm, ty.as_str()),
+            );
             self.errors.note(format("implement 'Eq' (an 'eq' method) for the type, or compare a field/element instead"));
         }
         return Ast::builtin(BuiltinType::BT_VOID);
@@ -23896,6 +24279,7 @@ extend TypeChecker {
                 unsafe (*self.mod_ast(iface.module)).at_const(iface.node).as_data.interface_def.name,
             ).as_data.name.text;
             self.errors.emit_span(
+                dc::CANNOT_INFER_CONFORMS_SEVERAL_ARGUMENTS,
                 sp,
                 format(
                     "cannot infer '{}': '{}' conforms to '{}' with several arguments",
@@ -23949,6 +24333,7 @@ extend TypeChecker {
         let ga2 = self.mod_ast(gmod);
         let nsp = unsafe (*ga2).at_const(unsafe (*ga2).at_const(gid).as_data.generic_param.name).as_data.name.text;
         self.errors.emit_span(
+            dc::CANNOT_INFER_GENERIC_ARGUMENT_CALL_ADD,
             sp,
             format(
                 "cannot infer the generic argument '{}' for this call; add an explicit argument",
@@ -23996,6 +24381,7 @@ extend TypeChecker {
         let f = unsafe (*self.mod_ast(m)).at_const(field);
         if f.kind == NodeKind::NODE_FIELD && !self.field_seen(m, owner, f.as_data.field.vis) {
             self.errors.emit_span(
+                dc::INACCESSIBLE_FIELD,
                 at,
                 format(
                     "field '{}' is {}",
@@ -24093,6 +24479,7 @@ extend TypeChecker {
                                 if self.icx.closure_depth > *cb {
                                     let csp3 = unsafe (*a).at_const(id).span;
                                     self.errors.emit_span(
+                                        dc::CLOSURE_CANNOT_CAPTURE_FIELD_BINDER_TYPE,
                                         csp3,
                                         format("a closure cannot capture the field binder (its type differs per field)"),
                                     );
@@ -24110,6 +24497,7 @@ extend TypeChecker {
                         if !lit_ok {
                             let sp4 = unsafe (*a).at_const(id).span;
                             self.errors.emit_span(
+                                dc::BINDER_METADATA_READ_TAKES_EXACTLY_ONE,
                                 sp4,
                                 format("a binder metadata read takes exactly one string literal key"),
                             );
@@ -24238,6 +24626,7 @@ extend TypeChecker {
         ) || span_is(self.source, unsafe (*a).at_const(callee_id).as_data.name.text, "payloads")) {
             let fsp2 = unsafe (*a).at_const(id).span;
             self.errors.emit_span(
+                dc::FIELDS_V_VARIANTS_E_ONLY_VALID,
                 fsp2,
                 format("fields(&v)/variants(&e) are only valid as the iterable of an 'inline for'"),
             );
@@ -24304,7 +24693,11 @@ extend TypeChecker {
                 } else {
                     "no values";
                 };
-                self.errors.emit_span(sp2, format("{} takes exactly one type argument and {}", intr, what));
+                self.errors.emit_span(
+                    dc::TAKES_EXACTLY_ONE_TYPE_ARGUMENT,
+                    sp2,
+                    format("{} takes exactly one type argument and {}", intr, what),
+                );
                 return TYPE_NONE;
             }
             if intr == "dyn_cast" {
@@ -24317,7 +24710,11 @@ extend TypeChecker {
                 if ay.kind != TypeKind::TYPE_DYN || ay.qualifier == TypeQualifier::TYPE_QUAL_NONE as u8 || self.tc_dyn_fn_sig(
                     &ay,
                 ) != TYPE_NONE {
-                    self.errors.emit_span(sp2, format("dyn_cast expects a '&dyn I' or '&mut dyn I' value"));
+                    self.errors.emit_span(
+                        dc::DYN_CAST_EXPECTS_DYN_I_MUT_DYN,
+                        sp2,
+                        format("dyn_cast expects a '&dyn I' or '&mut dyn I' value"),
+                    );
                     return TYPE_NONE;
                 }
                 let mut rq = TypeQualifier::TYPE_QUAL_CONST as u8;
@@ -24339,6 +24736,7 @@ extend TypeChecker {
             if intr == "zeroed" {
                 if self.tc_needs_unsafe() {
                     self.errors.emit_span(
+                        dc::ZEROED_REQUIRES_UNSAFE_CONTEXT_ALL_ZERO,
                         sp2,
                         format(
                             "'zeroed' requires an unsafe context (all-zero bytes are not a valid value of every type)",
@@ -24369,6 +24767,7 @@ extend TypeChecker {
                         AttrKind::ATTR_LAYOUT,
                     ) != null {
                         self.errors.emit_span(
+                            dc::TYPE_INFO_CANNOT_DESCRIBE_OPAQUE_TYPE_MEMBERS,
                             sp2,
                             format("type_info cannot describe an opaque type: its members are C's"),
                         );
@@ -24377,7 +24776,11 @@ extend TypeChecker {
                 }
                 let th = unsafe (*self.package).prelude_lookup("TypeInfo", true);
                 if th.node == NODE_NONE {
-                    self.errors.emit_span(sp2, format("type_info requires the std prelude"));
+                    self.errors.emit_span(
+                        dc::TYPE_INFO_REQUIRES_STD_PRELUDE,
+                        sp2,
+                        format("type_info requires the std prelude"),
+                    );
                     return TYPE_NONE;
                 }
                 unsafe (*self.cur_ast()).set_type_args(id, &tt, 1);
@@ -24482,6 +24885,7 @@ extend TypeChecker {
         }
         if writes && (shared || self.tc_place_shared(callee_id)) {
             self.errors.emit_span(
+                dc::CANNOT_CALL_CLOSURE_THROUGH_SHARED_REFERENCE,
                 sp,
                 format("cannot call this closure through a shared reference: it may write its captured values"),
             );
@@ -24496,6 +24900,7 @@ extend TypeChecker {
         }
         if ct.fn_sig() && self.tc_lts_wide(&ct) {
             self.errors.emit_span(
+                dc::FUNCTION_VALUE_CANNOT_CALLED_SUBSTITUTION_GAVE,
                 sp,
                 format(
                     "this function value cannot be called: substitution gave its type more lifetimes than a function type can show",
@@ -24531,6 +24936,7 @@ extend TypeChecker {
                     if args.len != members.len {
                         let s2 = plural(members.len);
                         self.errors.emit_span(
+                            dc::TUPLE_STRUCT_TAKES_ELEMENT_GOT,
                             sp,
                             format("tuple struct takes {} element{}, got {}", members.len, s2, args.len),
                         );
@@ -24549,13 +24955,14 @@ extend TypeChecker {
             }
         }
         if ct.kind != TypeKind::TYPE_FUNCTION {
-            self.errors.emit_span(sp, format("called value is not a function"));
+            self.errors.emit_span(dc::CALLED_VALUE_NOT_FUNCTION, sp, format("called value is not a function"));
             return TYPE_NONE;
         }
         if ct.fn_sig() {
             let fts = self.tc_call_targs(callee_id);
             if fts.len != 0 {
                 self.errors.emit_span(
+                    dc::FUNCTION_POINTER_TAKES_NO_GENERIC_ARGUMENTS,
                     unsafe (*a).at_const(unsafe (*a).list(fts)[0]).span,
                     format("a function pointer takes no generic arguments"),
                 );
@@ -24671,7 +25078,11 @@ extend TypeChecker {
         if args.len != np {
             let sp = unsafe (*a).at_const(id).span;
             let s2 = plural(np);
-            self.errors.emit_span(sp, format("expected {} argument{}, found {}", np, s2, args.len));
+            self.errors.emit_span(
+                dc::EXPECTED_ARGUMENT_FOUND,
+                sp,
+                format("expected {} argument{}, found {}", np, s2, args.len),
+            );
         } else {
             let none = Defs8 {};
             let nonet = Tys8 {};
@@ -24704,6 +25115,7 @@ extend TypeChecker {
                     if pt != at && at != TYPE_NONE && self.fn_is_capturing(at) {
                         let asp = unsafe (*a).at_const(aid).span;
                         self.errors.emit_span(
+                            dc::CAPTURING_CLOSURE_CANNOT_PASSED_BARE_FN,
                             asp,
                             format("a capturing closure cannot be passed as a bare 'fn' pointer"),
                         );
@@ -24748,6 +25160,7 @@ extend TypeChecker {
         self.icx.mret_call = id;
         if self.icx.mret_ok != id {
             self.errors.emit_span(
+                dc::CALL_SEVERAL_RESULTS_NOT_VALUE_BIND,
                 unsafe (*self.cur_ast()).at_const(id).span,
                 format("a call with several results is not a value: bind them with `let (a, b) = ..`"),
             );
@@ -25214,6 +25627,7 @@ extend TypeChecker {
         let tas = self.tc_call_targs(callee_id);
         if tas.len != 0 && !named {
             self.errors.emit_span(
+                dc::CLOSURE_TAKES_NO_GENERIC_ARGUMENTS,
                 unsafe (*a).at_const(unsafe (*a).list(tas)[0]).span,
                 format("a closure takes no generic arguments"),
             );
@@ -25370,6 +25784,7 @@ extend TypeChecker {
                 }
                 if bad {
                     self.errors.emit_span(
+                        dc::CLOSURE_DECLARED_INSIDE_GENERIC_FUNCTION_CANNOT,
                         sp,
                         format(
                             "a closure declared inside a generic function cannot be passed to another generic function; call it directly, or take the callback as a plain 'fn' pointer type",
@@ -25531,9 +25946,17 @@ extend TypeChecker {
         if bad {
             let s2 = plural(expected);
             if variadic {
-                self.errors.emit_span(sp, format("expected at least {} argument{}, found {}", expected, s2, args.len));
+                self.errors.emit_span(
+                    dc::EXPECTED_LEAST_ARGUMENT_FOUND,
+                    sp,
+                    format("expected at least {} argument{}, found {}", expected, s2, args.len),
+                );
             } else {
-                self.errors.emit_span(sp, format("expected {} argument{}, found {}", expected, s2, args.len));
+                self.errors.emit_span(
+                    dc::EXPECTED_ARGUMENT_FOUND,
+                    sp,
+                    format("expected {} argument{}, found {}", expected, s2, args.len),
+                );
             }
         } else {
             // The callee is known now: an argument is checked against the written type its context
@@ -25571,6 +25994,7 @@ extend TypeChecker {
                     if pt != at && at != TYPE_NONE && self.fn_is_capturing(at) {
                         let asp = unsafe (*a).at_const(aid).span;
                         self.errors.emit_span(
+                            dc::CAPTURING_CLOSURE_CANNOT_PASSED_BARE_FN,
                             asp,
                             format("a capturing closure cannot be passed as a bare 'fn' pointer"),
                         );
@@ -25644,6 +26068,7 @@ extend TypeChecker {
                 );
                 if is_dyn && rvt.qualifier == TypeQualifier::TYPE_QUAL_CONST as u8 {
                     self.errors.emit_span(
+                        dc::CANNOT_CALL_MUT_SELF_METHOD_THROUGH,
                         rsp,
                         format("cannot call a '&mut self' method through '&dyn' (use '&mut dyn')"),
                     );
@@ -25651,6 +26076,7 @@ extend TypeChecker {
                     recv,
                 ) {
                     self.errors.emit_span(
+                        dc::CANNOT_CALL_MUT_SELF_METHOD_IMMUTABLE,
                         rsp,
                         format("cannot call a '&mut self' method on an immutable binding (bind it with 'mut')"),
                     );
@@ -25873,7 +26299,11 @@ extend TypeChecker {
                     } else {
                         String::from_str(diag::span_str(self.mod_src(fmod), bsp.start, bsp.end));
                     };
-                    self.errors.emit_span(sp, format("type '{}' does not satisfy bound '{}'", tn.as_str(), bs.as_str()));
+                    self.errors.emit_span(
+                        dc::TYPE_DOES_NOT_SATISFY_BOUND,
+                        sp,
+                        format("type '{}' does not satisfy bound '{}'", tn.as_str(), bs.as_str()),
+                    );
                     // Notes attach to the error emitted last: name the failing field(s).
                     let bi = unsafe (*fa).resolution_def(bid);
                     self.tc_note_blanket_conf(bi);
@@ -25947,7 +26377,11 @@ extend TypeChecker {
                         continue;
                     }
                     let tn = self.type_str(wt);
-                    self.errors.emit_span(sp, format("type '{}' does not satisfy a where-clause bound", tn.as_str()));
+                    self.errors.emit_span(
+                        dc::TYPE_DOES_NOT_SATISFY_WHERE_CLAUSE,
+                        sp,
+                        format("type '{}' does not satisfy a where-clause bound", tn.as_str()),
+                    );
                 }
             }
         }
@@ -26195,7 +26629,11 @@ extend TypeChecker {
             // borrowed from a local outlives the program.
             if self.tc_bounds_have_static(it.module, pb) && self.tc_may_borrow(ga[g as usize], 0) {
                 let tn = self.type_str(ga[g as usize]);
-                self.errors.emit_span(sp, format("type '{}' does not satisfy bound ''static'", tn.as_str()));
+                self.errors.emit_span(
+                    dc::TYPE_DOES_NOT_SATISFY_BOUND_STATIC,
+                    sp,
+                    format("type '{}' does not satisfy bound ''static'", tn.as_str()),
+                );
                 self.errors.note(format("the parameter is declared `: 'static`, so its argument cannot hold a borrow"));
                 if !self.tc_carries_borrow(ga[g as usize]) {
                     self.errors.note(
@@ -26237,7 +26675,11 @@ extend TypeChecker {
                     continue;
                 }
                 let tn = self.type_str(arg);
-                self.errors.emit_span(sp, format("type '{}' does not satisfy bound '{}'", tn.as_str(), bs));
+                self.errors.emit_span(
+                    dc::TYPE_DOES_NOT_SATISFY_BOUND,
+                    sp,
+                    format("type '{}' does not satisfy bound '{}'", tn.as_str(), bs),
+                );
                 self.tc_note_blanket_conf(bi);
             }
         }
@@ -26312,6 +26754,7 @@ extend TypeChecker {
     fn err_bind_miss(self: &mut Self, at: tok::Span, ty: TypeId, what: String) {
         let tn = self.type_str(ty);
         self.errors.emit_span(
+            dc::TYPE_DOES_NOT_SATISFY,
             at,
             format("type '{}' does not satisfy {}: {}", tn.as_str(), what.as_str(), self.bind_miss.as_str()),
         );
@@ -26321,6 +26764,7 @@ extend TypeChecker {
     fn err_bound_other_args(self: &mut Self, at: tok::Span, ty: TypeId, what: String, m: ModuleId, sp: tok::Span) {
         let tn = self.type_str(ty);
         self.errors.emit_span(
+            dc::TYPE_DOES_NOT_SATISFY_CONFORMS_INTERFACE,
             at,
             format(
                 "type '{}' does not satisfy {}: '{}' conforms to this interface only with other arguments",
@@ -26449,6 +26893,7 @@ extend TypeChecker {
         if obj == TYPE_NONE && self.icx.mret_call == obj_node {
             // Several results are not a tuple (the language skill): nothing to take a member of.
             self.errors.emit_span(
+                dc::CALL_SEVERAL_RESULTS_HAS_NO_MEMBERS,
                 unsafe (*self.cur_ast()).at_const(id).span,
                 format("a call with several results has no members: bind them with `let (a, b) = ..`"),
             );
@@ -26497,6 +26942,7 @@ extend TypeChecker {
             "";
         };
         self.errors.emit_span(
+            dc::NO_AUTO_DEREFERENCE_THROUGH_RAW_POINTER,
             sp,
             format(
                 "no auto-dereference through a raw pointer: write '(*{}).{}{}' inside 'unsafe'",
@@ -26523,6 +26969,7 @@ extend TypeChecker {
                         if self.icx.closure_depth > *cb {
                             let csp2 = unsafe (*a).at_const(id).span;
                             self.errors.emit_span(
+                                dc::CLOSURE_CANNOT_CAPTURE_FIELD_BINDER_TYPE,
                                 csp2,
                                 format("a closure cannot capture the field binder (its type differs per field)"),
                             );
@@ -26559,7 +27006,11 @@ extend TypeChecker {
             if !vmode && span_is(self.source, name, "other") {
                 if self.tc_binder_nsubj(blid) != 2 {
                     let osp = unsafe (*a).at_const(id).span;
-                    self.errors.emit_span(osp, format("'.other' requires a two-subject loop: write fields(&a, &b)"));
+                    self.errors.emit_span(
+                        dc::OTHER_REQUIRES_TWO_SUBJECT_LOOP_WRITE,
+                        osp,
+                        format("'.other' requires a two-subject loop: write fields(&a, &b)"),
+                    );
                     return TYPE_NONE;
                 }
                 // Value's own type: one projection per binder, so generic callees unify.
@@ -26569,6 +27020,7 @@ extend TypeChecker {
                 if self.tc_binder_nsubj(blid) != 2 {
                     let osp = unsafe (*a).at_const(id).span;
                     self.errors.emit_span(
+                        dc::OTHER_ACTIVE_REQUIRES_TWO_SUBJECT_LOOP_WRITE,
                         osp,
                         format("'.other_active' requires a two-subject loop: write variants(&a, &b)"),
                     );
@@ -26598,6 +27050,7 @@ extend TypeChecker {
             let sp0 = unsafe (*a).at_const(id).span;
             if vmode {
                 self.errors.emit_span(
+                    dc::VARIANT_BINDER_HAS_NAME_INDEX_TAG,
                     sp0,
                     format(
                         "a variant binder has '.name', '.index', '.tag', '.payload', '.is_active', '.value', and '.other_active' (two subjects) -- nothing else",
@@ -26605,6 +27058,7 @@ extend TypeChecker {
                 );
             } else {
                 self.errors.emit_span(
+                    dc::FIELD_BINDER_HAS_NAME_INDEX_VALUE,
                     sp0,
                     format(
                         "a field binder has '.name', '.index', '.value', '.offset', '.size', '.kind', and '.other' (two subjects) -- nothing else",
@@ -26639,7 +27093,11 @@ extend TypeChecker {
                         k = k + 1;
                     }
                     if idx >= bd0.as_data.aggregate.members.len {
-                        self.errors.emit_span(name, format("tuple struct has no element {}", idx));
+                        self.errors.emit_span(
+                            dc::TUPLE_STRUCT_HAS_NO_ELEMENT,
+                            name,
+                            format("tuple struct has no element {}", idx),
+                        );
                         return TYPE_NONE;
                     }
                     let tnode = unsafe (*self.mod_ast(bmod)).list(bd0.as_data.aggregate.members)[idx as usize];
@@ -26673,7 +27131,7 @@ extend TypeChecker {
             }
             if fhit != NODE_NONE && self.type_at(base).is_vec() {
                 let tb = self.type_str(base);
-                self.errors.emit_span(name, format("`{}` has no fields", tb.as_str()));
+                self.errors.emit_span(dc::HAS_NO_FIELDS, name, format("`{}` has no fields", tb.as_str()));
                 return TYPE_NONE;
             }
             if fhit != NODE_NONE {
@@ -26819,6 +27277,7 @@ extend TypeChecker {
                 }
                 if cyc {
                     self.errors.emit_span(
+                        dc::CYCLIC_DEREF_CHAIN_WHILE_RESOLVING,
                         name,
                         format(
                             "cyclic deref chain while resolving '{}'",
@@ -26868,7 +27327,11 @@ extend TypeChecker {
                 if mhit.node != NODE_NONE {
                     let sk = self.method_self_kind(mhit);
                     if sk == 0 && tty.kind != TypeKind::TYPE_BUILTIN {
-                        self.errors.emit_span(name, format("cannot call a by-value 'self' method through auto-deref"));
+                        self.errors.emit_span(
+                            dc::CANNOT_CALL_VALUE_SELF_METHOD_THROUGH,
+                            name,
+                            format("cannot call a by-value 'self' method through auto-deref"),
+                        );
                         return TYPE_NONE;
                     }
                     du.target = target;
@@ -26878,6 +27341,7 @@ extend TypeChecker {
                         if bad != TYPE_NONE {
                             let tn = self.type_str(bad);
                             self.errors.emit_span(
+                                dc::CANNOT_CALL_MUT_SELF_METHOD_THROUGH,
                                 name,
                                 format(
                                     "cannot call a '&mut self' method through '{}': it has 'deref' but no 'deref_mut'",
@@ -26918,6 +27382,7 @@ extend TypeChecker {
         }
         let ty = self.type_str(base);
         self.errors.emit_span(
+            dc::NO_FIELD_METHOD,
             name,
             format("no field or method '{}' on '{}'", diag::span_str(self.source, name.start, name.end), ty.as_str()),
         );
@@ -26987,6 +27452,7 @@ extend TypeChecker {
         let fnm = unsafe (*fa).at_const(f.name).as_data.name.text;
         let s2 = plural(f.generics.len);
         self.errors.emit_span(
+            dc::TAKES_GENERIC_ARGUMENT_BUT_SUPPLIED,
             unsafe (*a).at_const(extra).span,
             format(
                 "'{}' takes {} generic argument{} but {} {} supplied",
@@ -27006,6 +27472,7 @@ extend TypeChecker {
         let a = self.cur_ast();
         let fsp = self.name_span(mem);
         self.errors.emit_span(
+            dc::FIELD_TAKES_NO_GENERIC_ARGUMENTS,
             unsafe (*a).at_const(unsafe (*a).list(tas)[0]).span,
             format("field '{}' takes no generic arguments", diag::span_str(self.source, fsp.start, fsp.end)),
         );
@@ -27231,9 +27698,17 @@ extend TypeChecker {
         if bdecl == NODE_NONE || bd_kind != NodeKind::NODE_STRUCT && bd_kind != NodeKind::NODE_ENUM {
             let sp = unsafe (*a).at_const(id).span;
             if bdecl != NODE_NONE && bd_kind == NodeKind::NODE_INTERFACE {
-                self.errors.emit_span(sp, format("cannot infer the implementing type for this interface call"));
+                self.errors.emit_span(
+                    dc::CANNOT_INFER_IMPLEMENTING_TYPE_INTERFACE_CALL,
+                    sp,
+                    format("cannot infer the implementing type for this interface call"),
+                );
             } else {
-                self.errors.emit_span(sp, format("'::' base must be a struct or enum type"));
+                self.errors.emit_span(
+                    dc::BASE_MUST_STRUCT_ENUM_TYPE,
+                    sp,
+                    format("'::' base must be a struct or enum type"),
+                );
             }
             return TYPE_NONE;
         }
@@ -27261,6 +27736,7 @@ extend TypeChecker {
                     let gsp = unsafe (*ba).at_const(gnm).as_data.name.text;
                     let sp = unsafe (*a).at_const(id).span;
                     self.errors.emit_span(
+                        dc::CANNOT_INFER_GENERIC_ARGUMENT_VARIANT_GIVE,
                         sp,
                         format(
                             "cannot infer the generic argument '{}' of this variant; give it an expected type or explicit type arguments",
@@ -27395,6 +27871,7 @@ extend TypeChecker {
             let en = self.tc_ext_args(ac.module, ext, &ga[0], gn, &mut ea[0]);
             if en < 0 {
                 self.errors.emit_span(
+                    dc::NO_ASSOCIATED_METHOD_CONSTANT_TYPE,
                     mname,
                     format(
                         "no associated method or constant '{}' on this type",
@@ -27406,6 +27883,7 @@ extend TypeChecker {
             if !self.ext_bounds_hold(ac.module, ext, &ea[0], en, 0) {
                 let ty = self.type_str(inst_ty);
                 self.errors.emit_span(
+                    dc::CANNOT_USE_UNSATISFIED_INTERFACE_BOUNDS,
                     mname,
                     format(
                         "cannot use '{}::{}': unsatisfied interface bounds",
@@ -27428,6 +27906,7 @@ extend TypeChecker {
             kindw = "variant, method, or constant";
         }
         self.errors.emit_span(
+            dc::NO_TYPE,
             mname,
             format("no {} '{}' on this type", kindw, diag::span_str(self.source, mname.start, mname.end)),
         );
@@ -27490,6 +27969,7 @@ extend TypeChecker {
             let sp = unsafe (*a).at_const(stn).span;
             let ts = self.type_str(sty);
             self.errors.emit_span(
+                dc::STRUCT_LITERAL_NEEDS_STRUCT_UNION_ENUM,
                 sp,
                 format(
                     "a struct literal needs a struct, a union or an enum variant; '{}' is '{}'",
@@ -27620,6 +28100,7 @@ extend TypeChecker {
                 let pn = unsafe (*a).at_const(unsafe (*a).list(fields)[j as usize]).as_data.field_initializer.name;
                 if unsafe (*a).resolution_def(pn).node == field {
                     self.errors.emit_span(
+                        dc::FIELD_INITIALIZED_TWICE,
                         fname,
                         format("field '{}' is initialized twice", diag::span_str(self.source, fname.start, fname.end)),
                     );
@@ -27694,6 +28175,7 @@ extend TypeChecker {
             }
             let nm = unsafe (*da).at_const(mn.as_data.field.name).as_data.name.text;
             self.errors.emit_span(
+                dc::MISSING_FIELD_OMITTED_FIELD_ZERO_FILLED,
                 unsafe (*a).at_const(id).span,
                 format(
                     "missing field '{}': an omitted field is zero-filled, and zero is not a valid value of its type here",
@@ -27850,6 +28332,7 @@ extend TypeChecker {
     // arguments belong to the enum.
     fn err_variant_targs(self: &mut Self, sp: tok::Span, en: tok::Span, vn: tok::Span) {
         self.errors.emit_span(
+            dc::TYPE_ARGUMENTS_GENERIC_ENUM_FOLLOW_ENUM,
             sp,
             format(
                 "type arguments of a generic enum follow the enum name: write '{}::<..>::{}'",
@@ -28056,7 +28539,11 @@ extend TypeChecker {
                             return;
                         }
                         let s2 = plural(nmiss);
-                        self.errors.emit_span(sp2, format("switch is not exhaustive: missing {} variant{}", nmiss, s2));
+                        self.errors.emit_span(
+                            dc::SWITCH_NOT_EXHAUSTIVE_MISSING_VARIANT,
+                            sp2,
+                            format("switch is not exhaustive: missing {} variant{}", nmiss, s2),
+                        );
                         self.errors.note(format("match every variant or add a '_' arm"));
                         return;
                     }
@@ -28068,7 +28555,7 @@ extend TypeChecker {
                     if !missing {
                         return;
                     }
-                    self.errors.emit_span(sp2, format("switch is not exhaustive"));
+                    self.errors.emit_span(dc::SWITCH_NOT_EXHAUSTIVE, sp2, format("switch is not exhaustive"));
                     self.errors.note(format("add a '_' arm to cover the remaining values"));
                     return;
                 }
@@ -28078,6 +28565,7 @@ extend TypeChecker {
         // instead of assumed exhaustive.
         let sp3 = unsafe (*a).at_const(unsafe (*a).at_const(id).as_data.match_expr.value).span;
         self.errors.emit_span(
+            dc::SWITCH_EXHAUSTIVENESS_CANNOT_CHECKED_PATTERNS_EXCEED,
             sp3,
             format("switch exhaustiveness cannot be checked: its patterns exceed the analysis budget"),
         );
@@ -28095,7 +28583,11 @@ extend TypeChecker {
             let arm = unsafe (*a).at_const(unsafe (*a).list(arms)[i as usize]).as_data.match_arm;
             if i != 0 && !cx.arm_reachable(arm.pattern, i) {
                 let psp = unsafe (*a).at_const(arm.pattern).span;
-                self.errors.warn_span(psp, format("unreachable arm: a previous arm matches every value"));
+                self.errors.warn_span(
+                    dc::UNREACHABLE_ARM_PREVIOUS_ARM_MATCHES_EVERY,
+                    psp,
+                    format("unreachable arm: a previous arm matches every value"),
+                );
                 return;
             }
             if arm.guard == NODE_NONE {
@@ -28164,11 +28656,12 @@ extend TypeChecker {
             let mut res = TYPE_NONE;
             if !self.is_assignable(bd.left) {
                 let sp = unsafe (*a).at_const(bd.left).span;
-                self.errors.emit_span(sp, format("cannot assign to this expression"));
+                self.errors.emit_span(dc::CANNOT_ASSIGN_EXPRESSION, sp, format("cannot assign to this expression"));
             } else if !self.tc_bound_op(id, ls, m, bd.right, &mut res) {
                 let sp = unsafe (*a).at_const(id).span;
                 let ty = self.type_str(ls);
                 self.errors.emit_span(
+                    dc::TYPE_PARAMETER_HAS_NO_METHOD_OPERATOR,
                     sp,
                     format(
                         "type parameter '{}' has no '{}' method for this operator (add a bound that provides it)",
@@ -28181,6 +28674,7 @@ extend TypeChecker {
                 let rb = self.type_str(res);
                 let tb = self.type_str(ls);
                 self.errors.emit_span(
+                    dc::MISMATCHED_TYPES_OPERATOR_S_RESULT_NOT,
                     sp,
                     format("mismatched types: the operator's result '{}' is not '{}'", rb.as_str(), tb.as_str()),
                 );
@@ -28194,7 +28688,11 @@ extend TypeChecker {
             let mut out = TYPE_NONE;
             let _ = self.check_arith_overload(id, l, 0, &mut out);
             if !self.is_assignable(bd.left) {
-                self.errors.emit_span(unsafe (*a).at_const(bd.left).span, format("cannot assign to this expression"));
+                self.errors.emit_span(
+                    dc::CANNOT_ASSIGN_EXPRESSION,
+                    unsafe (*a).at_const(bd.left).span,
+                    format("cannot assign to this expression"),
+                );
             }
             return l;
         }
@@ -28205,11 +28703,16 @@ extend TypeChecker {
             let mut out = TYPE_NONE;
             let _ = self.check_arith_overload(id, l, 0, &mut out);
             if !self.is_assignable(bd.left) {
-                self.errors.emit_span(unsafe (*a).at_const(bd.left).span, format("cannot assign to this expression"));
+                self.errors.emit_span(
+                    dc::CANNOT_ASSIGN_EXPRESSION,
+                    unsafe (*a).at_const(bd.left).span,
+                    format("cannot assign to this expression"),
+                );
             } else if out != TYPE_NONE && self.strip(out) != ls {
                 let rb = self.type_str(out);
                 let tb = self.type_str(ls);
                 self.errors.emit_span(
+                    dc::MISMATCHED_TYPES_OPERATOR_S_RESULT_NOT,
                     unsafe (*a).at_const(id).span,
                     format("mismatched types: the operator's result '{}' is not '{}'", rb.as_str(), tb.as_str()),
                 );
@@ -28223,7 +28726,7 @@ extend TypeChecker {
         self.check_expr_w(bd.right, pick(pt != TYPE_NONE, pt, l));
         if !self.is_assignable(bd.left) {
             let sp = unsafe (*a).at_const(bd.left).span;
-            self.errors.emit_span(sp, format("cannot assign to this expression"));
+            self.errors.emit_span(dc::CANNOT_ASSIGN_EXPRESSION, sp, format("cannot assign to this expression"));
         } else if pt != TYPE_NONE {
             if !self.operand_fits_param(pt, bd.right) {
                 self.err_mismatch(bd.right, pt);
@@ -28325,6 +28828,7 @@ extend TypeChecker {
             } else {
                 let psp = unsafe (*a).at_const(pid).span;
                 self.errors.emit_span(
+                    dc::CLOSURE_PARAMETER_NEEDS_TYPE_ANNOTATION_NO,
                     psp,
                     format("closure parameter needs a type annotation (no expected function type supplies one)"),
                 );
@@ -28338,7 +28842,11 @@ extend TypeChecker {
         }
         if self.icx.nclos >= 8 {
             let sp = unsafe (*a).at_const(id).span;
-            self.errors.emit_span(sp, format("closures nested too deeply (max 8)"));
+            self.errors.emit_span(
+                dc::CLOSURES_NESTED_TOO_DEEPLY_MAX_8,
+                sp,
+                format("closures nested too deeply (max 8)"),
+            );
             return TYPE_NONE;
         }
         let cn = self.icx.nclos;
@@ -28388,6 +28896,7 @@ extend TypeChecker {
                 unsafe (*self.cur_ast()).at(id).as_data.closure.ret_infer = true;
                 if self.errors.errors.len() == ne && !self.stmt_diverges(cd.body, 0) {
                     self.errors.emit_span(
+                        dc::CLOSURE_CAN_REACH_END_BODY_WITHOUT,
                         hsp,
                         format("this closure can reach the end of its body without returning a value"),
                     );
@@ -28493,7 +29002,11 @@ extend TypeChecker {
                     let md = self.find_method_cstr(om, od, "index_range");
                     if md.node == NODE_NONE {
                         let ty = self.type_str(self.strip(obj));
-                        self.errors.emit_span(sp, format("'{}' has no 'index_range' method for '[..]'", ty.as_str()));
+                        self.errors.emit_span(
+                            dc::HAS_NO_INDEX_RANGE_METHOD,
+                            sp,
+                            format("'{}' has no 'index_range' method for '[..]'", ty.as_str()),
+                        );
                     } else if !self.method_extend_bounds_hold(self.strip(obj), md) {
                         self.err_method_extend_bounds(sp, self.strip(obj), md);
                     } else {
@@ -28510,6 +29023,7 @@ extend TypeChecker {
                             ) || self.tc_method_ret(recv, ln) != ut {
                                 let ty = self.type_str(recv);
                                 self.errors.emit_span(
+                                    dc::OPEN_ENDED_RANGE_INDEX_NEEDS_LEN,
                                     sp,
                                     format(
                                         "an open-ended range index needs a 'len' method returning 'usize' on '{}' to supply the end",
@@ -28533,7 +29047,7 @@ extend TypeChecker {
                 }
             } else if !untyped(obj) {
                 let sp = unsafe (*a).at_const(obj_n).span;
-                self.errors.emit_span(sp, format("cannot slice this expression"));
+                self.errors.emit_span(dc::CANNOT_SLICE_EXPRESSION, sp, format("cannot slice this expression"));
             }
             let bstart = unsafe (*a).at_const(index_n).as_data.pattern_range.start;
             let bend = unsafe (*a).at_const(index_n).as_data.pattern_range.end;
@@ -28553,14 +29067,14 @@ extend TypeChecker {
                 let bt = self.check_expr(bstart);
                 if !untyped(bt) && !self.is_int(bt) && unsafe (*a).at_const(bstart).kind != NodeKind::NODE_LITERAL {
                     let sp = unsafe (*a).at_const(bstart).span;
-                    self.errors.emit_span(sp, format("range bound must be an integer"));
+                    self.errors.emit_span(dc::RANGE_BOUND_MUST_INTEGER, sp, format("range bound must be an integer"));
                 }
             }
             if bend != NODE_NONE {
                 let bt = self.check_expr(bend);
                 if !untyped(bt) && !self.is_int(bt) && unsafe (*a).at_const(bend).kind != NodeKind::NODE_LITERAL {
                     let sp = unsafe (*a).at_const(bend).span;
-                    self.errors.emit_span(sp, format("range bound must be an integer"));
+                    self.errors.emit_span(dc::RANGE_BOUND_MUST_INTEGER, sp, format("range bound must be an integer"));
                 }
             }
             // Slicing a raw `[T; N]` follows the raw-array indexing rule: every written bound must
@@ -28584,6 +29098,7 @@ extend TypeChecker {
                 let sp = unsafe (*a).at_const(id).span;
                 if proven && (lo < 0 || lo > hi || hi > n) {
                     self.errors.emit_span(
+                        dc::RANGE_OUT_BOUNDS_ARRAY_LENGTH,
                         sp,
                         format("range [{}, {}) is out of bounds for an array of length {}", lo, hi, n),
                     );
@@ -28617,7 +29132,11 @@ extend TypeChecker {
                 let md = self.find_method_cstr(om, od, "index");
                 if md.node == NODE_NONE {
                     let ty = self.type_str(self.strip(obj));
-                    self.errors.emit_span(sp, format("'{}' has no 'index' method for '[]'", ty.as_str()));
+                    self.errors.emit_span(
+                        dc::HAS_NO_INDEX_METHOD,
+                        sp,
+                        format("'{}' has no 'index' method for '[]'", ty.as_str()),
+                    );
                 } else if !self.method_extend_bounds_hold(self.strip(obj), md) {
                     self.err_method_extend_bounds(sp, self.strip(obj), md);
                 } else {
@@ -28638,7 +29157,11 @@ extend TypeChecker {
                 if self.tc_fold_int(index_n, &mut v) {
                     if v < 0 || n != 0 && v >= n {
                         let sp = unsafe (*a).at_const(id).span;
-                        self.errors.emit_span(sp, format("index {} is out of bounds for a vector of {} lanes", v, n));
+                        self.errors.emit_span(
+                            dc::INDEX_OUT_BOUNDS_VECTOR_LANES,
+                            sp,
+                            format("index {} is out of bounds for a vector of {} lanes", v, n),
+                        );
                     } else if n == 0 {
                         self.tc_index_step(id, ot.as_data.arr.len, v);
                     }
@@ -28646,7 +29169,11 @@ extend TypeChecker {
                 result = ot.as_data.arr.elem;
             } else if ot.kind == TypeKind::TYPE_MASK {
                 let sp = unsafe (*a).at_const(id).span;
-                self.errors.emit_span(sp, format("a mask lane is not a place; use `get` or `set`"));
+                self.errors.emit_span(
+                    dc::MASK_LANE_NOT_PLACE_USE_GET,
+                    sp,
+                    format("a mask lane is not a place; use `get` or `set`"),
+                );
             } else if ot.kind == TypeKind::TYPE_ARRAY || ot.kind == TypeKind::TYPE_POINTER {
                 if ot.kind == TypeKind::TYPE_POINTER && self.tc_needs_unsafe() {
                     self.err_unsafe(unsafe (*a).at_const(obj_n).span, "indexing a raw pointer");
@@ -28663,9 +29190,14 @@ extend TypeChecker {
                     if konst && (v < 0 || !ot.arr_sym() && v >= n) {
                         let sp = unsafe (*a).at_const(id).span;
                         if ot.arr_sym() {
-                            self.errors.emit_span(sp, format("index {} is out of bounds for an array", v));
+                            self.errors.emit_span(
+                                dc::INDEX_OUT_BOUNDS_ARRAY,
+                                sp,
+                                format("index {} is out of bounds for an array", v),
+                            );
                         } else {
                             self.errors.emit_span(
+                                dc::INDEX_OUT_BOUNDS_ARRAY_LENGTH,
                                 sp,
                                 format("index {} is out of bounds for an array of length {}", v, n),
                             );
@@ -28697,6 +29229,7 @@ extend TypeChecker {
                     let sp = unsafe (*a).at_const(obj_n).span;
                     let ty = self.type_str(obj);
                     self.errors.emit_span(
+                        dc::TYPE_PARAMETER_HAS_NO_INDEX_METHOD,
                         sp,
                         format(
                             "type parameter '{}' has no 'index' method for '[]' (add a bound that provides it)",
@@ -28709,14 +29242,14 @@ extend TypeChecker {
                 }
             } else {
                 let sp = unsafe (*a).at_const(obj_n).span;
-                self.errors.emit_span(sp, format("cannot index this expression"));
+                self.errors.emit_span(dc::CANNOT_INDEX_EXPRESSION, sp, format("cannot index this expression"));
             }
         }
         // An integer literal adapts to the index type; any other literal is no index.
         let int_lit = unsafe (*a).at_const(index_n).kind == NodeKind::NODE_LITERAL && unsafe (*a).at_const(index_n).as_data.literal.token_type == TokenType::IntegerLiteral;
         if !overloaded && !untyped(idx) && !self.is_int(idx) && !int_lit {
             let sp = unsafe (*a).at_const(index_n).span;
-            self.errors.emit_span(sp, format("index must be an integer"));
+            self.errors.emit_span(dc::INDEX_MUST_INTEGER, sp, format("index must be an integer"));
         }
         return result;
     }
@@ -28736,7 +29269,7 @@ extend TypeChecker {
             let g = self.check_expr(arm.guard);
             if arm.guard != NODE_NONE && !untyped(g) && !self.is_bool(g) {
                 let sp = unsafe (*a).at_const(arm.guard).span;
-                self.errors.emit_span(sp, format("match guard must be 'bool'"));
+                self.errors.emit_span(dc::MATCH_GUARD_MUST_BOOL, sp, format("match guard must be 'bool'"));
             }
             let mut body = self.check_expr_w(arm.body, expected);
             if expected != TYPE_NONE {
@@ -29005,6 +29538,7 @@ extend TypeChecker {
                     } else if mk == NodeKind::NODE_FUNCTION {
                         let nsp = self.name_span(mn);
                         self.errors.emit_span(
+                            dc::METHOD_NOT_VALUE_CALL,
                             nsp,
                             format(
                                 "'{}' is a method, not a value: call it with '()'",
@@ -29032,7 +29566,11 @@ extend TypeChecker {
                     unsafe (*a).at_const(id).as_data.cast.expression,
                 ).kind != NodeKind::NODE_LITERAL {
                     let csp = unsafe (*a).at_const(id).span;
-                    self.errors.warn_span(csp, format("unnecessary cast: the expression already has this type"));
+                    self.errors.warn_span(
+                        dc::UNNECESSARY_CAST_EXPRESSION_ALREADY_HAS_TYPE,
+                        csp,
+                        format("unnecessary cast: the expression already has this type"),
+                    );
                     self.tc_cast_drop_fix(id);
                 }
                 if src != TYPE_NONE && dst != TYPE_NONE && self.type_at(src).kind == TypeKind::TYPE_POINTER && self.type_at(
@@ -29041,7 +29579,11 @@ extend TypeChecker {
                     // Materializing a reference from a raw pointer asserts validity: unsafe territory.
                     if self.tc_needs_unsafe() {
                         let sp = unsafe (*a).at_const(id).span;
-                        self.errors.emit_span(sp, format("casting a raw pointer to a reference requires 'unsafe'"));
+                        self.errors.emit_span(
+                            dc::CASTING_RAW_POINTER_REFERENCE_REQUIRES_UNSAFE,
+                            sp,
+                            format("casting a raw pointer to a reference requires 'unsafe'"),
+                        );
                     }
                 }
                 if src != TYPE_NONE && dst != TYPE_NONE && self.type_at(src).kind == TypeKind::TYPE_BUILTIN && self.type_at(
@@ -29049,6 +29591,7 @@ extend TypeChecker {
                 ).kind == TypeKind::TYPE_REFERENCE {
                     let sp = unsafe (*a).at_const(id).span;
                     self.errors.emit_span(
+                        dc::REFERENCE_NEVER_COMES_NUMBER_CAST_RAW,
                         sp,
                         format(
                             "a reference never comes from a number; cast to a raw pointer and dereference it inside 'unsafe'",
@@ -29065,6 +29608,7 @@ extend TypeChecker {
                 ).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 && !self.in_unsafe_cell() {
                     let sp = unsafe (*a).at_const(id).span;
                     self.errors.emit_span(
+                        dc::CANNOT_CAST_IMMUTABLE_REFERENCE_MUT_POINTER,
                         sp,
                         format(
                             "cannot cast an immutable reference to a '*mut' pointer; use '&mut', or 'UnsafeCell' for interior mutability",
@@ -29085,6 +29629,7 @@ extend TypeChecker {
                     own.as_data.elem = self.type_at(src).as_data.elem;
                     let ot = unsafe (*self.cur_ast()).intern_type(own);
                     self.errors.emit_span(
+                        dc::REFERENCE_CASTS_ONLY_POINTER_CAST_FIRST,
                         sp,
                         format(
                             "a reference to '{}' casts only to a pointer to '{}': cast to '{}' first, then to '{}'",
@@ -29152,7 +29697,11 @@ extend TypeChecker {
                         let s = self.type_str(src);
                         let d = self.type_str(dst);
                         let sp = unsafe (*a).at_const(id).span;
-                        self.errors.emit_span(sp, format("invalid cast from '{}' to '{}'", s.as_str(), d.as_str()));
+                        self.errors.emit_span(
+                            dc::INVALID_CAST,
+                            sp,
+                            format("invalid cast from '{}' to '{}'", s.as_str(), d.as_str()),
+                        );
                         if array_view {
                             self.errors.note(format("an array converts to a slice implicitly; drop the cast"));
                         }
@@ -29171,7 +29720,11 @@ extend TypeChecker {
                     let vt = unsafe (*a).type_of(d.node);
                     if vt == TYPE_NONE {
                         let vsp = unsafe (*a).at_const(v).span;
-                        self.errors.emit_span(vsp, format("cannot take the size of this value here"));
+                        self.errors.emit_span(
+                            dc::CANNOT_TAKE_SIZE_VALUE_HERE,
+                            vsp,
+                            format("cannot take the size of this value here"),
+                        );
                     }
                     unsafe (*self.cur_ast()).set_type(v, vt);
                 } else {
@@ -29188,7 +29741,11 @@ extend TypeChecker {
                     if !(ay.kind == TypeKind::TYPE_BUILTIN && ay.as_data.builtin == BuiltinType::BT_VALIST) {
                         let sp = unsafe (*a).at_const(vo.ap).span;
                         let ty = self.type_str(apt);
-                        self.errors.emit_span(sp, format("expected a 'va_list', found '{}'", ty.as_str()));
+                        self.errors.emit_span(
+                            dc::EXPECTED_VA_LIST_FOUND,
+                            sp,
+                            format("expected a 'va_list', found '{}'", ty.as_str()),
+                        );
                     }
                 }
                 if vo.op == VA_ARG {
@@ -29222,6 +29779,7 @@ extend TypeChecker {
                     if types.len > 8 {
                         let sp = unsafe (*a).at_const(id).span;
                         self.errors.emit_span(
+                            dc::TOO_MANY_GENERIC_ARGUMENTS_MAXIMUM_8,
                             sp,
                             format("too many generic arguments ({}; the maximum is 8)", types.len),
                         );
@@ -29351,7 +29909,11 @@ extend TypeChecker {
                 }
                 if unsafe (*a).at_const(id).as_data.pattern_range.start == NODE_NONE || unsafe (*a).at_const(id).as_data.pattern_range.end == NODE_NONE {
                     let sp = unsafe (*a).at_const(id).span;
-                    self.errors.emit_span(sp, format("a range value needs both a start and an end"));
+                    self.errors.emit_span(
+                        dc::RANGE_VALUE_NEEDS_BOTH_START_END,
+                        sp,
+                        format("a range value needs both a start and an end"),
+                    );
                 } else {
                     result = pick(elem != TYPE_NONE, self.prelude_range_type(elem), TYPE_NONE);
                 }
@@ -29362,7 +29924,11 @@ extend TypeChecker {
         // to mean, so a bare `f` (stored, returned, passed) is rejected here, where its use is.
         if nk == NodeKind::NODE_IDENTIFIER && result != TYPE_NONE && self.type_at(result).kind == TypeKind::TYPE_FIELD_PROJECTION && !self.icx.proj_obj_ok {
             let bsp2 = unsafe (*a).at_const(id).span;
-            self.errors.emit_span(bsp2, format("the field binder is only used through '.name', '.index', or '.value'"));
+            self.errors.emit_span(
+                dc::FIELD_BINDER_ONLY_USED_THROUGH_NAME,
+                bsp2,
+                format("the field binder is only used through '.name', '.index', or '.value'"),
+            );
         }
         // An expression left without a type because its check, or a sub-expression's, was rejected
         // has the error type: its users accept it silently instead of reporting the same root again.
@@ -29516,6 +30082,7 @@ extend TypeChecker {
             if carry != 0 {
                 if nl == 16 {
                     self.errors.emit_span(
+                        dc::INTEGER_LITERAL_TOO_LARGE_1024_BITS,
                         sp,
                         format("integer literal is too large: 1024 bits is the widest a literal reaches"),
                     );
@@ -29591,7 +30158,11 @@ extend TypeChecker {
             top < limit;
         };
         if !in_range {
-            self.errors.emit_span(sp, format("integer literal does not fit the expected type's {} bits", bits));
+            self.errors.emit_span(
+                dc::INTEGER_LITERAL_DOES_NOT_FIT_EXPECTED,
+                sp,
+                format("integer literal does not fit the expected type's {} bits", bits),
+            );
             return true;
         }
         if neg {
@@ -29658,6 +30229,7 @@ extend TypeChecker {
                 if k > lr.start && k < lr.end && (src2[(k - 1) as usize] == b'i' || src2[(k - 1) as usize] == b'u') && k - 1 > lr.start {
                     let sp2 = unsafe (*a).at_const(id).span;
                     self.errors.emit_span(
+                        dc::NO_INTEGER_TYPE_LITERAL_S_SUFFIX,
                         sp2,
                         format("no integer type is this literal's suffix: widths run from 1 to 1024"),
                     );
@@ -29681,12 +30253,20 @@ extend TypeChecker {
                 }
             }
             if overflow {
-                self.errors.emit_span(sp, format("integer literal is too large to fit in a 64-bit integer"));
+                self.errors.emit_span(
+                    dc::INTEGER_LITERAL_TOO_LARGE_FIT_64,
+                    sp,
+                    format("integer literal is too large to fit in a 64-bit integer"),
+                );
             } else if sb != BuiltinType::BT_COUNT && bt_int_max(sb, self.tc_ptr32()) != 0 && acc > bt_int_max(
                 sb,
                 self.tc_ptr32(),
             ) {
-                self.errors.emit_span(sp, format("integer literal does not fit in its suffixed type"));
+                self.errors.emit_span(
+                    dc::INTEGER_LITERAL_DOES_NOT_FIT_SUFFIXED,
+                    sp,
+                    format("integer literal does not fit in its suffixed type"),
+                );
             } else if sb == BuiltinType::BT_COUNT && acc > 0x7FFFFFFFu64 {
                 // An unsuffixed literal past i32 takes the first type that holds it, as in C.
                 result = Ast::builtin(pick(acc > 0x7FFFFFFFFFFFFFFFu64, BuiltinType::BT_U64, BuiltinType::BT_I64));
@@ -29703,9 +30283,17 @@ extend TypeChecker {
             let inf = known && v - v != 0.0;
             let sp = unsafe (*a).at_const(id).span;
             if sb != BuiltinType::BT_COUNT && (inf || big && sb == BuiltinType::BT_F32) {
-                self.errors.emit_span(sp, format("float literal does not fit in its suffixed type"));
+                self.errors.emit_span(
+                    dc::FLOAT_LITERAL_DOES_NOT_FIT_SUFFIXED,
+                    sp,
+                    format("float literal does not fit in its suffixed type"),
+                );
             } else if sb == BuiltinType::BT_COUNT && inf {
-                self.errors.emit_span(sp, format("float literal is out of range for 'f64'"));
+                self.errors.emit_span(
+                    dc::FLOAT_LITERAL_OUT_RANGE_F64,
+                    sp,
+                    format("float literal is out of range for 'f64'"),
+                );
             }
             if sb == BuiltinType::BT_F64 || sb == BuiltinType::BT_COUNT && big {
                 return Ast::builtin(BuiltinType::BT_F64);
@@ -29716,6 +30304,7 @@ extend TypeChecker {
             if tok::char_literal_value(self.source, lr).unwrap_or(0) > 0xFF {
                 let sp = unsafe (*a).at_const(id).span;
                 self.errors.emit_span(
+                    dc::CHARACTER_LITERAL_DOES_NOT_FIT_CHAR,
                     sp,
                     format("character literal does not fit in 'char' (one byte); use a string or an integer"),
                 );
@@ -29884,7 +30473,11 @@ extend TypeChecker {
                 );
             }
             let sp = unsafe (*a).at_const(id).span;
-            self.errors.emit_span(sp, format("cannot infer the element type of an empty array literal"));
+            self.errors.emit_span(
+                dc::CANNOT_INFER_ELEMENT_TYPE_EMPTY_ARRAY,
+                sp,
+                format("cannot infer the element type of an empty array literal"),
+            );
             return TYPE_NONE;
         }
         let mut elem = TYPE_NONE;
@@ -29905,7 +30498,11 @@ extend TypeChecker {
                     let iy = *self.type_at(it);
                     if !(iy.kind == TypeKind::TYPE_BUILTIN && (bt_is_int(iy.as_data.builtin) || iy.as_data.builtin == BuiltinType::BT_CHAR)) {
                         let sp = unsafe (*a).at_const(el.as_data.field_initializer.name).span;
-                        self.errors.emit_span(sp, format("array designator index must be an integer"));
+                        self.errors.emit_span(
+                            dc::ARRAY_DESIGNATOR_INDEX_MUST_INTEGER,
+                            sp,
+                            format("array designator index must be an integer"),
+                        );
                     } else {
                         let ceptr = self.cir();
                         self.ev_err = false;
@@ -29913,6 +30510,7 @@ extend TypeChecker {
                             let sp = unsafe (*a).at_const(el.as_data.field_initializer.name).span;
                             if unsafe (*ceptr).trap_get().len() != 0 {
                                 self.errors.emit_span(
+                                    dc::ARRAY_DESIGNATOR_INDEX_MUST_CONSTANT_EXPRESSION,
                                     sp,
                                     format(
                                         "array designator index must be a constant expression: {}",
@@ -29921,6 +30519,7 @@ extend TypeChecker {
                                 );
                             } else {
                                 self.errors.emit_span(
+                                    dc::ARRAY_DESIGNATOR_INDEX_MUST_CONSTANT_EXPRESSION,
                                     sp,
                                     format("array designator index must be a constant expression"),
                                 );
@@ -29952,6 +30551,7 @@ extend TypeChecker {
         if elem == TYPE_NONE && self.tc_all_null(elements) {
             let sp = unsafe (*a).at_const(id).span;
             self.errors.emit_span(
+                dc::CANNOT_INFER_ELEMENT_TYPE_ARRAY_LITERAL,
                 sp,
                 format("cannot infer the element type of an array literal of 'null'; annotate the pointer type"),
             );
@@ -29981,6 +30581,7 @@ extend TypeChecker {
                 if ey.kind == TypeKind::TYPE_ARRAY && my.kind == TypeKind::TYPE_ARRAY && !ey.arr_sym() && !my.arr_sym() && ey.as_data.arr.len != my.as_data.arr.len {
                     // An array of arrays stores its elements inline, so they must all have one length.
                     self.errors.emit_span(
+                        dc::ARRAY_LITERAL_ELEMENT_HAS_LENGTH_BUT,
                         unsafe (*a).at_const(mis).span,
                         format(
                             "array literal element has length {}, but the first element has length {}",
@@ -29997,6 +30598,7 @@ extend TypeChecker {
             let ext = self.tc_array_lit_extent(id, &mut sparse);
             if ext > 0xFFFFFFFFi64 {
                 self.errors.emit_span(
+                    dc::ARRAY_LITERAL_EXTENT_EXCEEDS_MAXIMUM_ARRAY,
                     unsafe (*a).at_const(id).span,
                     format("array literal extent exceeds the maximum array length 4294967295"),
                 );
@@ -30135,7 +30737,11 @@ extend TypeChecker {
         if cnt != TYPE_NONE {
             let cy = *self.type_at(cnt);
             if !(cy.kind == TypeKind::TYPE_BUILTIN && bt_is_int(cy.as_data.builtin)) {
-                self.errors.emit_span(sp, format("an array repeat count must be an integer"));
+                self.errors.emit_span(
+                    dc::ARRAY_REPEAT_COUNT_MUST_INTEGER,
+                    sp,
+                    format("an array repeat count must be an integer"),
+                );
                 return TYPE_NONE;
             }
         }
@@ -30161,16 +30767,22 @@ extend TypeChecker {
         if n < 0 && slen == TYPE_NONE {
             if ceptr != null && unsafe (*ceptr).trap_get().len() != 0 {
                 self.errors.emit_span(
+                    dc::ARRAY_REPEAT_COUNT_CANNOT_EVALUATED,
                     sp,
                     format("an array repeat count cannot be evaluated: {}", unsafe (*ceptr).trap_detail()),
                 );
             } else {
-                self.errors.emit_span(sp, format("an array repeat count must be a constant expression"));
+                self.errors.emit_span(
+                    dc::ARRAY_REPEAT_COUNT_MUST_CONSTANT_EXPRESSION,
+                    sp,
+                    format("an array repeat count must be a constant expression"),
+                );
             }
             return TYPE_NONE;
         }
         if n > 0xFFFFFFFFi64 {
             self.errors.emit_span(
+                dc::ARRAY_REPEAT_COUNT_EXCEEDS_MAXIMUM_ARRAY,
                 sp,
                 format("an array repeat count of {} exceeds the maximum array length 4294967295", n),
             );
@@ -30185,12 +30797,14 @@ extend TypeChecker {
             let vsp = unsafe (*a).at_const(vid).span;
             if self.tc_type_is_free(elem) {
                 self.errors.emit_span(
+                    dc::ARRAY_REPEAT_NEEDS_VALUE_CAN_COPIED,
                     vsp,
                     format("an array repeat needs a value that can be copied; this one owns resources"),
                 );
             } else {
                 let tb = self.type_str(elem);
                 self.errors.emit_span(
+                    dc::ARRAY_REPEAT_NEEDS_VALUE_CAN_COPIED,
                     vsp,
                     format("an array repeat needs a value that can be copied; '{}' is not 'Copy'", tb.as_str()),
                 );
@@ -30274,7 +30888,11 @@ extend TypeChecker {
         self.ct_dead -= (dead == 1) as u32;
         if ifd.else_branch == NODE_NONE {
             let sp = unsafe (*a).at_const(id).span;
-            self.errors.emit_span(sp, format("an 'if' used as a value must have an 'else' branch"));
+            self.errors.emit_span(
+                dc::IF_USED_VALUE_MUST_HAVE_ELSE,
+                sp,
+                format("an 'if' used as a value must have an 'else' branch"),
+            );
             return TYPE_NONE;
         }
         self.ct_dead += (dead == 2) as u32;
@@ -30329,7 +30947,11 @@ extend TypeChecker {
         let elems = unsafe (*a).at_const(id).as_data.array_literal.elements;
         if elems.len > 4 {
             let sp = unsafe (*a).at_const(id).span;
-            self.errors.emit_span(sp, format("tuple arity is limited to 4 elements"));
+            self.errors.emit_span(
+                dc::TUPLE_ARITY_LIMITED_4_ELEMENTS,
+                sp,
+                format("tuple arity is limited to 4 elements"),
+            );
             return TYPE_NONE;
         }
         // Each element is checked against the element type its context's written tuple type gives.
@@ -30441,6 +31063,7 @@ extend TypeChecker {
             if !same {
                 let sp = unsafe (*a).at_const(tyn).span;
                 self.errors.emit_span(
+                    dc::ANNOTATION_MULTI_VALUE_CALL_S_BINDINGS,
                     sp,
                     format("the annotation of a multi-value call's bindings must name its result types"),
                 );
@@ -30489,7 +31112,11 @@ extend TypeChecker {
         }
         if !ok && !stashed && tn < 0 {
             let sp = unsafe (*a).at_const(id).span;
-            self.errors.emit_span(sp, format("a tuple binding requires a multi-value function call or a tuple value"));
+            self.errors.emit_span(
+                dc::TUPLE_BINDING_REQUIRES_MULTI_VALUE_FUNCTION,
+                sp,
+                format("a tuple binding requires a multi-value function call or a tuple value"),
+            );
             return;
         }
         let nret = pick(stashed, self.icx.mret_total, pick(tn >= 0, tn as u32, returns.len));
@@ -30498,6 +31125,7 @@ extend TypeChecker {
             let s1 = plural(names.len);
             let s2 = plural(nret);
             self.errors.emit_span(
+                dc::EXPECTED_BINDING_CALL_RETURNS_VALUE,
                 sp,
                 format("expected {} binding{}, the call returns {} value{}", names.len, s1, nret, s2),
             );
@@ -30578,6 +31206,7 @@ extend TypeChecker {
                     let rb = self.type_str(rt);
                     let cb = self.type_str(ct);
                     self.errors.emit_span(
+                        dc::RESULT_FORWARDED_CALL_FUNCTION_RETURNS_THERE,
                         sp,
                         format(
                             "result {} of the forwarded call is '{}', the function returns '{}' there",
@@ -30596,7 +31225,11 @@ extend TypeChecker {
         if values.len != expected {
             let sp = unsafe (*a).at_const(id).span;
             let s2 = plural(expected);
-            self.errors.emit_span(sp, format("expected {} return value{}, found {}", expected, s2, values.len));
+            self.errors.emit_span(
+                dc::EXPECTED_RETURN_VALUE_FOUND,
+                sp,
+                format("expected {} return value{}, found {}", expected, s2, values.len),
+            );
             self.lt_env.truncate(fm);
             return;
         }
@@ -30621,7 +31254,11 @@ extend TypeChecker {
         let a = self.cur_ast();
         if values.len != 1 {
             let sp = unsafe (*a).at_const(id).span;
-            self.errors.emit_span(sp, format("expected 1 return value, found {}", values.len));
+            self.errors.emit_span(
+                dc::EXPECTED_1_RETURN_VALUE_FOUND,
+                sp,
+                format("expected 1 return value, found {}", values.len),
+            );
             for i in 0..values.len {
                 let _ = self.check_expr(unsafe (*a).list(values)[i as usize]);
             }
@@ -30744,6 +31381,7 @@ extend TypeChecker {
             let cd = unsafe (*self.cur_ast()).at_const(id).as_data.const_def;
             let sp = self.name_span(cd.name);
             self.errors.emit_span(
+                dc::CANNOT_EVALUATED_COMPILE_TIME,
                 sp,
                 format(
                     "{} '{}' cannot be evaluated at compile time: {}",
@@ -30824,6 +31462,7 @@ extend TypeChecker {
             }
             if pi == ps.len {
                 self.errors.emit_span(
+                    dc::NOT_PARAMETER_FUNCTION,
                     sp,
                     format("'{}' is not a parameter of this function", diag::span_str(self.source, sp.start, sp.end)),
                 );
@@ -30833,6 +31472,7 @@ extend TypeChecker {
             let writes = kind == AttrKind::ATTR_C_WRITES;
             if y.kind != TypeKind::TYPE_POINTER || writes && y.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 {
                 self.errors.emit_span(
+                    dc::PARAMETER_MUST_POINTER,
                     sp,
                     format(
                         "parameter '{}' of '@{}' must be a {} pointer",
@@ -30856,6 +31496,7 @@ extend TypeChecker {
             };
             if !self.tc_bytes_ok(e, ptr, 0) {
                 self.errors.emit_span(
+                    dc::BYTE_COUNT_USIZE_CONSTANT_EXPRESSION_OVER,
                     sp,
                     format(
                         "the byte count is a 'usize' constant or an expression over the function's other 'usize' parameters",
@@ -30889,6 +31530,7 @@ extend TypeChecker {
             if !ok {
                 let tb = self.type_str(t);
                 self.errors.emit_span(
+                    dc::EXPECTED_NONEMPTY_LIST_CPU_FEATURE_VALUES,
                     sp,
                     format(
                         "expected a nonempty list of 'cpu::Feature' values, e.g. '[cpu::Feature::Simd128]', found '{}'",
@@ -30903,7 +31545,11 @@ extend TypeChecker {
             let st = unsafe (*ceptr).eval_list(self.cur_module(), e, &mut lst);
             self.eng_hold(false);
             if st != 0 {
-                self.errors.emit_span(sp, format("attribute argument cannot be evaluated at compile time"));
+                self.errors.emit_span(
+                    dc::ATTRIBUTE_ARGUMENT_CANNOT_EVALUATED_COMPILE_TIME,
+                    sp,
+                    format("attribute argument cannot be evaluated at compile time"),
+                );
                 return false;
             }
             for j in 0..lst.len() {
@@ -31012,7 +31658,11 @@ extend TypeChecker {
                 "it does not fold to a constant";
             };
             let sp = unsafe (*self.cur_ast()).at_const(arg).span;
-            self.errors.emit_span(sp, format("attribute argument cannot be evaluated at compile time: {}", why));
+            self.errors.emit_span(
+                dc::ATTRIBUTE_ARGUMENT_CANNOT_EVALUATED_COMPILE_TIME,
+                sp,
+                format("attribute argument cannot be evaluated at compile time: {}", why),
+            );
         }
         self.eng_hold(false);
         return v.kind == iri::IV_INT;
@@ -31023,11 +31673,12 @@ extend TypeChecker {
     fn tc_attr_value(self: &mut Self, owner: NodeId, kind: AttrKind, arg: NodeId, v: &mut u64, w: &[u64; 2]) bool {
         let sp = unsafe (*self.cur_ast()).at_const(arg).span;
         if kind == AttrKind::ATTR_ALIGN && !c_align_ok(*v) {
-            self.errors.emit_span(sp, c_align_error(*v));
+            self.errors.emit_span(dc::INVALID_ALIGNMENT, sp, c_align_error(*v));
             return false;
         }
         if (kind == AttrKind::ATTR_C_VALUE || kind == AttrKind::ATTR_LAYOUT) && (*v == 0 || !c_align_ok(w[0]) || *v % w[0] != 0) {
             self.errors.emit_span(
+                dc::NEEDS_NONZERO_SIZE_MULTIPLE_ALIGNMENT_POWER,
                 sp,
                 format(
                     "'@{}' needs a nonzero size that is a multiple of the alignment, a power of two; found ({}, {})",
@@ -31039,7 +31690,11 @@ extend TypeChecker {
             return false;
         }
         if kind == AttrKind::ATTR_LAYOUT && self.tc_attr(self.cur_module(), owner, AttrKind::ATTR_C_VALUE) != null {
-            self.errors.emit_span(sp, format("a register type ('@value') states its layout: it takes no '@layout'"));
+            self.errors.emit_span(
+                dc::REGISTER_TYPE_VALUE_STATES_LAYOUT_TAKES,
+                sp,
+                format("a register type ('@value') states its layout: it takes no '@layout'"),
+            );
             return false;
         }
         if (kind == AttrKind::ATTR_C_READS || kind == AttrKind::ATTR_C_WRITES) && self.tc_attr(
@@ -31047,7 +31702,11 @@ extend TypeChecker {
             owner,
             AttrKind::ATTR_C_LANE_ACCESS,
         ) != null {
-            self.errors.emit_span(sp, format("'@lane_access' states no range: it takes no '@reads' or '@writes'"));
+            self.errors.emit_span(
+                dc::LANE_ACCESS_STATES_NO_RANGE_TAKES_NO,
+                sp,
+                format("'@lane_access' states no range: it takes no '@reads' or '@writes'"),
+            );
             return false;
         }
         if kind != AttrKind::ATTR_TARGET_FEATURE && kind != AttrKind::ATTR_SIMD_IMPL {
@@ -31055,11 +31714,16 @@ extend TypeChecker {
         }
         let fs = cf::CpuFeatureSet { w: *w };
         if kind == AttrKind::ATTR_SIMD_IMPL && !self.tc_in_std() {
-            self.errors.emit_span(sp, format("'@simd_impl' is reserved for the standard library"));
+            self.errors.emit_span(
+                dc::SIMD_IMPL_RESERVED_STANDARD_LIBRARY,
+                sp,
+                format("'@simd_impl' is reserved for the standard library"),
+            );
             return false;
         }
         if kind == AttrKind::ATTR_SIMD_IMPL && cf::has(fs, cf::F_RELAXED_SIMD) {
             self.errors.emit_span(
+                dc::SIMD_IMPL_ENTRY_CANNOT_NEED_RELAXED_SIMD,
                 sp,
                 format("a '@simd_impl' entry cannot need 'relaxed-simd': its results differ between engines"),
             );
@@ -31077,6 +31741,7 @@ extend TypeChecker {
         let in_ext = ext != NODE_NONE && unsafe (*a).at_const(ext).kind == NodeKind::NODE_EXTEND;
         if in_ext && unsafe (*a).at_const(ext).as_data.extend_def.interface_type != NODE_NONE {
             self.errors.emit_span(
+                dc::METHOD_CONFORMANCE_EXTEND_T_I_CANNOT,
                 sp,
                 format(
                     "a method of a conformance ('extend T as I') cannot need CPU features: a call through a bound does not name it",
@@ -31099,6 +31764,7 @@ extend TypeChecker {
             if cf::has(fs, i) && (mask >> cf::row(i).arch as u32 & 1) == 0 {
                 let an = par::axis_names(true)[cf::row(i).arch as usize];
                 self.errors.emit_span(
+                    dc::FEATURE_BELONGS_FUNCTION_NEEDS_ARCH,
                     sp,
                     format("feature '{}' belongs to {}: the function needs '@arch({})'", cf::row(i).name, an, an),
                 );
@@ -31194,6 +31860,7 @@ extend TypeChecker {
         if !self.tc_c_field_type(ft) {
             let tb = self.type_str(ft);
             self.errors.emit_span(
+                dc::FIELD_HAS_TYPE_WHICH_HAS_NO,
                 sp,
                 format("field '{}' of '{}' has type '{}', which has no C equivalent", fname, sname, tb.as_str()),
             );
@@ -31214,6 +31881,7 @@ extend TypeChecker {
         }
         let tb = self.type_str(t);
         self.errors.emit_span(
+            dc::REGISTER_TYPE_STORE_THROUGH_SIMD_T,
             unsafe (*self.cur_ast()).at_const(id).span,
             format("`{}` is a register type; store it through `Simd<T, N>`", tb.as_str()),
         );
@@ -31488,6 +32156,7 @@ extend TypeChecker {
             let sp = unsafe (*a).at_const(owner).span;
             let nm = ir::op_variant(op);
             self.errors.emit_span(
+                dc::SIMD_OP_DOES_NOT_APPLY_LANES,
                 sp,
                 format("'simd::Op::{}' does not apply to lanes of '{}'", nm.as_str(), bt_name(v.bt)),
             );
@@ -31497,9 +32166,14 @@ extend TypeChecker {
             let sp = unsafe (*a).at_const(owner).span;
             let nm = ir::op_variant(op);
             if want.len() == 0 {
-                self.errors.emit_span(sp, format("'simd::Op::{}' has no '@simd_impl' form", nm.as_str()));
+                self.errors.emit_span(
+                    dc::SIMD_OP_HAS_NO_SIMD_IMPL_FORM,
+                    sp,
+                    format("'simd::Op::{}' has no '@simd_impl' form", nm.as_str()),
+                );
             } else {
                 self.errors.emit_span(
+                    dc::SIMD_IMPL_SIMD_OP_ENTRY_HAS_SIGNATURE,
                     sp,
                     format("a '@simd_impl(simd::Op::{}, ..)' entry has the signature `fn{}`", nm.as_str(), want),
                 );
@@ -31535,7 +32209,11 @@ extend TypeChecker {
             } else {
                 "it does not fold to a constant";
             };
-            self.errors.emit_span(sp, format("enum discriminant cannot be evaluated at compile time: {}", why));
+            self.errors.emit_span(
+                dc::ENUM_DISCRIMINANT_CANNOT_EVALUATED_COMPILE_TIME,
+                sp,
+                format("enum discriminant cannot be evaluated at compile time: {}", why),
+            );
         }
         self.eng_hold(false);
     }
@@ -31570,6 +32248,7 @@ extend TypeChecker {
             let nsp = unsafe (*a).at_const(unsafe (*a).at_const(vid).as_data.variant.name).span;
             if cur < -2147483648 || cur > 2147483647 {
                 self.errors.emit_span(
+                    dc::ENUM_DISCRIMINANT_OUTSIDE_I32_RANGE_C,
                     nsp,
                     format("enum discriminant {} is outside the i32 range of a C enum constant", cur),
                 );
@@ -31579,6 +32258,7 @@ extend TypeChecker {
                 Some(prev) => {
                     let psp = unsafe (*a).at_const(unsafe (*a).at_const(*prev).as_data.variant.name).span;
                     self.errors.emit_span(
+                        dc::DUPLICATE_ENUM_DISCRIMINANT_VARIANT_ALREADY_HAS,
                         nsp,
                         format(
                             "duplicate enum discriminant {}: variant '{}' already has it",
@@ -31616,6 +32296,7 @@ extend TypeChecker {
                 if !self.is_assignable(e) {
                     let esp = unsafe (*self.cur_ast()).at_const(e).span;
                     self.errors.emit_span(
+                        dc::ASM_OUTPUT_MUST_ASSIGNABLE_PLACE_ASSEMBLY,
                         esp,
                         format("an asm output must be an assignable place (the assembly writes it)"),
                     );
@@ -31646,7 +32327,7 @@ extend TypeChecker {
         let lit = n.kind == NodeKind::NODE_LITERAL && (n.as_data.literal.token_type == TokenType::StringLiteral || n.as_data.literal.token_type == TokenType::MatchertextLiteral);
         if !lit {
             let sp = n.span;
-            self.errors.emit_span(sp, format("{} must be a string literal", what));
+            self.errors.emit_span(dc::MUST_STRING_LITERAL, sp, format("{} must be a string literal", what));
         }
     }
 
@@ -31675,11 +32356,12 @@ extend TypeChecker {
         self.ev_err = false;
         let v = self.ev(self.cur_module(), left);
         if v.kind == iri::IV_BOOL && v.i == 0 {
-            self.errors.emit_span(sp, format("static assertion failed"));
+            self.errors.emit_span(dc::STATIC_ASSERTION_FAILED, sp, format("static assertion failed"));
         } else if v.kind == iri::IV_NONE && !self.ev_err {
             let trap = unsafe (*ceptr).trap_get();
             if trap.len() != 0 {
                 self.errors.emit_span(
+                    dc::STATIC_ASSERTION_CANNOT_EVALUATED,
                     sp,
                     format("static assertion cannot be evaluated: {}", unsafe (*ceptr).trap_detail()),
                 );
@@ -31775,7 +32457,11 @@ extend TypeChecker {
         let refutable = cx.overflow || cx.wildcard_useful();
         if refutable || cx.overflow {
             let sp = unsafe (*a).at_const(pat).span;
-            self.errors.emit_span(sp, format("a 'for' pattern must match every element"));
+            self.errors.emit_span(
+                dc::PATTERN_MUST_MATCH_EVERY_ELEMENT,
+                sp,
+                format("a 'for' pattern must match every element"),
+            );
             self.errors.note(format("bind the element and use 'switch' or 'if let' in the body"));
         }
     }
@@ -31825,13 +32511,18 @@ extend TypeChecker {
                     }
                     if !pok {
                         self.errors.emit_span(
+                            dc::PAYLOADS_TAKES_VARIANTS_BINDER_ITSELF_INLINE,
                             fsp,
                             format("payloads takes the variants binder itself: 'inline for p in payloads(v)'"),
                         );
                         owner = TYPE_NONE;
                     }
                 } else if fargs.len != 1 && fargs.len != 2 {
-                    self.errors.emit_span(fsp, format("fields takes one or two reference arguments"));
+                    self.errors.emit_span(
+                        dc::FIELDS_TAKES_ONE_TWO_REFERENCE_ARGUMENTS,
+                        fsp,
+                        format("fields takes one or two reference arguments"),
+                    );
                 } else {
                     let av = self.check_expr(unsafe (*a).list(fargs)[0]);
                     let ay = *self.type_at(av);
@@ -31840,7 +32531,11 @@ extend TypeChecker {
                         // Fields(&mut v): every f.value is a mutable place.
                         pq = ay.qualifier;
                     } else if !untyped(av) {
-                        self.errors.emit_span(fsp, format("fields borrows its subject: write fields(&v)"));
+                        self.errors.emit_span(
+                            dc::FIELDS_BORROWS_SUBJECT_WRITE_FIELDS_V,
+                            fsp,
+                            format("fields borrows its subject: write fields(&v)"),
+                        );
                     }
                     // fields(&a, &b): a PAIRED loop; `.other` projects b's same field. The second
                     // subject is read-only and must be the same type, or the pairing means nothing.
@@ -31849,6 +32544,7 @@ extend TypeChecker {
                         let by = *self.type_at(bv);
                         if bv != TYPE_ERROR && (by.kind != TypeKind::TYPE_REFERENCE || by.as_data.elem != owner) {
                             self.errors.emit_span(
+                                dc::SECOND_SUBJECT_MUST_REFERENCE_SAME_TYPE,
                                 fsp,
                                 format("the second subject must be a reference to the same type as the first"),
                             );
@@ -31861,6 +32557,7 @@ extend TypeChecker {
                     if is_vars {
                         if ok2.kind != TypeKind::TYPE_ENUM && ok2.kind != TypeKind::TYPE_INSTANCE && ok2.kind != TypeKind::TYPE_GENERIC {
                             self.errors.emit_span(
+                                dc::VARIANTS_ITERATES_ENUM_PAYLOAD_VARIANTS_TYPE,
                                 fsp,
                                 format(
                                     "variants iterates an enum with payload variants (or a type parameter standing for one)",
@@ -31870,6 +32567,7 @@ extend TypeChecker {
                         }
                     } else if ok2.kind != TypeKind::TYPE_STRUCT && ok2.kind != TypeKind::TYPE_INSTANCE && ok2.kind != TypeKind::TYPE_GENERIC {
                         self.errors.emit_span(
+                            dc::FIELDS_ITERATES_STRUCT_TUPLE_UNION_TYPE,
                             fsp,
                             format("fields iterates a struct, tuple, or union (or a type parameter standing for one)"),
                         );
@@ -31905,7 +32603,11 @@ extend TypeChecker {
             iter,
         ).as_data.pattern_range.start == NODE_NONE || unsafe (*a).at_const(iter).as_data.pattern_range.end == NODE_NONE) {
             let sp = unsafe (*a).at_const(iter).span;
-            self.errors.emit_span(sp, format("'inline for' iterates a closed constant range ('a..b' or 'a..=b')"));
+            self.errors.emit_span(
+                dc::INLINE_ITERATES_CLOSED_CONSTANT_RANGE_B,
+                sp,
+                format("'inline for' iterates a closed constant range ('a..b' or 'a..=b')"),
+            );
         }
         let mut elem = TYPE_NONE;
         if unsafe (*a).at_const(iter).kind == NodeKind::NODE_RANGE {
@@ -31935,6 +32637,7 @@ extend TypeChecker {
             if elem == TYPE_NONE && it != TYPE_NONE {
                 let sp = unsafe (*self.cur_ast()).at_const(iter).span;
                 self.errors.emit_span(
+                    dc::CANNOT_ITERATE_OVER_VALUE_NEED_ARRAY,
                     sp,
                     format("cannot iterate over this value (need an array, slice, range, or an Iterator)"),
                 );
@@ -31971,7 +32674,7 @@ extend TypeChecker {
                     // expression of type `!`) never executes. static_asserts are compile-time: exempt.
                     if diverged && sk != NodeKind::NODE_STATIC_ASSERT {
                         let ssp = unsafe (*a).at_const(sid).span;
-                        self.errors.warn_span(ssp, format("unreachable statement"));
+                        self.errors.warn_span(dc::UNREACHABLE_STATEMENT, ssp, format("unreachable statement"));
                         // Once per block.
                         diverged = false;
                     }
@@ -32021,6 +32724,7 @@ extend TypeChecker {
                     if !untyped(binding) && !self.type_at(binding).fn_sig() && self.tc_generic_fn_named(value).node != NODE_NONE {
                         let sp = unsafe (*a).at_const(value).span;
                         self.errors.emit_span(
+                            dc::CANNOT_INFER_TYPE_GENERIC_FUNCTION_USED,
                             sp,
                             format(
                                 "cannot infer the type of a generic function used as a value; annotate the binding with its signature, e.g. 'let f: fn(i32) i32 = ..'",
@@ -32031,6 +32735,7 @@ extend TypeChecker {
                 } else {
                     let sp = self.name_span(nm);
                     self.errors.emit_span(
+                        dc::CANNOT_INFER_TYPE,
                         sp,
                         format("cannot infer type of '{}'", diag::span_str(self.source, sp.start, sp.end)),
                     );
@@ -32047,6 +32752,7 @@ extend TypeChecker {
                     if bk != TypeKind::TYPE_POINTER && bk != TypeKind::TYPE_REFERENCE && self.tc_type_is_free(binding) {
                         let sp = self.name_span(nm);
                         self.errors.emit_span(
+                            dc::FREE_TYPED_BINDING_MUST_INITIALIZED_WHEN,
                             sp,
                             format("a Free-typed binding must be initialized when declared (it is freed at scope exit)"),
                         );
@@ -32087,6 +32793,7 @@ extend TypeChecker {
                     let sp = unsafe (*a).at_const(id).span;
                     if lb.end > lb.start {
                         self.errors.emit_span(
+                            dc::NO_ENCLOSING_LOOP_LABELED,
                             sp,
                             format("no enclosing loop is labeled {}", diag::span_str(self.source, lb.start, lb.end)),
                         );
@@ -32095,7 +32802,7 @@ extend TypeChecker {
                         if nk == NodeKind::NODE_BREAK {
                             w = "break";
                         }
-                        self.errors.emit_span(sp, format("'{}' outside of a loop", w));
+                        self.errors.emit_span(dc::OUTSIDE_LOOP, sp, format("'{}' outside of a loop", w));
                     }
                     let fv = unsafe (*a).at_const(id).as_data.flow.value;
                     if fv != NODE_NONE {
@@ -32109,6 +32816,7 @@ extend TypeChecker {
                 if unsafe (*self.cur_ast()).at_const(unsafe self.loop_stack[le as usize].node).kind == NodeKind::NODE_INLINE_FOR {
                     let sp2 = unsafe (*self.cur_ast()).at_const(id).span;
                     self.errors.emit_span(
+                        dc::BREAK_CONTINUE_CANNOT_TARGET_INLINE_BODY,
                         sp2,
                         format("'break' and 'continue' cannot target an 'inline for' (its body is unrolled)"),
                     );
@@ -32124,7 +32832,11 @@ extend TypeChecker {
                 let vt = self.check_expr_w(fv, unsafe self.loop_stack[le as usize].break_ty);
                 let sp = unsafe (*self.cur_ast()).at_const(id).span;
                 if !unsafe self.loop_stack[le as usize].value_loop {
-                    self.errors.emit_span(sp, format("'break' can only carry a value inside a 'loop' expression"));
+                    self.errors.emit_span(
+                        dc::BREAK_CAN_ONLY_CARRY_VALUE_INSIDE,
+                        sp,
+                        format("'break' can only carry a value inside a 'loop' expression"),
+                    );
                 } else if unsafe self.loop_stack[le as usize].break_ty == TYPE_NONE {
                     unsafe self.loop_stack[le as usize].break_ty = vt;
                 } else if !self.compatible(unsafe self.loop_stack[le as usize].break_ty, fv) {
@@ -32163,6 +32875,7 @@ extend TypeChecker {
                 0,
             ) {
                 self.errors.emit_span(
+                    dc::CANNOT_MOVE_PART_OUT_VALUE_WHOSE,
                     unsafe (*self.cur_ast()).at_const(id).span,
                     format(
                         "cannot move a part out of a value whose type implements Free: its 'free' would not run; bind by reference or move the whole value",
@@ -32256,6 +32969,7 @@ extend TypeChecker {
             ).kind == NodeKind::NODE_PATTERN_NAME {
                 let nsp = self.name_span(nameId);
                 self.errors.emit_span(
+                    dc::DUPLICATE_DEFINITION,
                     nsp,
                     format("duplicate definition of '{}'", diag::span_str(self.source, nsp.start, nsp.end)),
                 );
@@ -32370,6 +33084,7 @@ extend TypeChecker {
                 if decl == NODE_NONE {
                     let ty = self.type_str(base);
                     self.errors.emit_span(
+                        dc::PATTERN_EXPECTS_ENUM_BUT_VALUE_HAS,
                         vname,
                         format(
                             "pattern '{}(..)' expects an enum, but the value has type '{}'",
@@ -32384,6 +33099,7 @@ extend TypeChecker {
                     } else {
                         let ty = self.type_str(base);
                         self.errors.emit_span(
+                            dc::NO_VARIANT,
                             vname,
                             format(
                                 "no variant '{}' on '{}'",
@@ -32456,6 +33172,7 @@ extend TypeChecker {
             if vp.node != NODE_NONE && unsafe (*self.mod_ast(vp.module)).at_const(vp.node).kind == NodeKind::NODE_VARIANT {
                 let vs = self.name_span(en.as_data.member.member);
                 self.errors.emit_span(
+                    dc::PATTERN_NAMES_VARIANT_WITHOUT_ENUM_WRITE,
                     tok::Span { start: en.span.start, end: vs.start },
                     format(
                         "a pattern names a variant without its enum: write '{}', not '{}'",
@@ -32484,6 +33201,7 @@ extend TypeChecker {
             let dn = unsafe (*self.mod_ast(d.module)).at_const(d.node);
             if d.node == NODE_NONE || dn.kind != NodeKind::NODE_CONST || dn.as_data.const_def.is_static_mut || dn.as_data.const_def.is_extern {
                 self.errors.emit_span(
+                    dc::PATTERN_VALUE_MUST_CONSTANT_NOT_ONE,
                     en.span,
                     format(
                         "a pattern value must be a constant: '{}' is not one",
@@ -32557,6 +33275,7 @@ extend TypeChecker {
         if !untyped(base) && tn != children.len as i32 {
             let ty = self.type_str(base);
             self.errors.emit_span(
+                dc::TUPLE_PATTERN_ELEMENTS_CANNOT_MATCH_VALUE,
                 unsafe (*self.cur_ast()).at_const(id).span,
                 format("a tuple pattern with {} elements cannot match a value of type '{}'", children.len, ty.as_str()),
             );
@@ -32701,6 +33420,7 @@ extend TypeChecker {
                 if fnd.is_variadic() && self.tc_attr(self.cur_module(), id, AttrKind::ATTR_BLOCKING) != null {
                     let sp = self.name_span(fnd.name);
                     self.errors.emit_span(
+                        dc::BLOCKING_CANNOT_APPLY_VARIADIC_FUNCTION_ARGUMENTS,
                         sp,
                         format(
                             "'@blocking' cannot apply to a variadic function: its arguments cannot be forwarded to the blocking pool",
@@ -32710,6 +33430,7 @@ extend TypeChecker {
                 if fnd.is_variadic() && !fnd.is_extern() && params.len == 0 {
                     let sp = self.name_span(fnd.name);
                     self.errors.emit_span(
+                        dc::VARIADIC_FUNCTION_NEEDS_LEAST_ONE_FIXED,
                         sp,
                         format("a variadic function needs at least one fixed parameter before '...'"),
                     );
@@ -32735,6 +33456,7 @@ extend TypeChecker {
                         if lo9.ok && lo9.size == 0 {
                             let sp9 = self.name_span(fnd.name);
                             self.errors.emit_span(
+                                dc::EXTERN_C_FUNCTION_CANNOT_TAKE_ZERO,
                                 sp9,
                                 format(
                                     "an extern \"C\" function cannot take a zero-sized type by value (C has no representation for it); pass a pointer or a positive-size wrapper",
@@ -32751,6 +33473,7 @@ extend TypeChecker {
                         if lo9.ok && lo9.size == 0 {
                             let sp9 = self.name_span(fnd.name);
                             self.errors.emit_span(
+                                dc::EXTERN_C_FUNCTION_CANNOT_RETURN_ZERO,
                                 sp9,
                                 format(
                                     "an extern \"C\" function cannot return a zero-sized type by value (C has no representation for it); return a pointer or a positive-size wrapper",
@@ -32773,6 +33496,7 @@ extend TypeChecker {
                     if !self.tc_main_params_ok(params) || rets.len != 1 || rt != Ast::builtin(BuiltinType::BT_I32) {
                         let sp = self.name_span(fnd.name);
                         self.errors.emit_span(
+                            dc::MAIN_MUST_DECLARED_FN_MAIN_I32,
                             sp,
                             format("'main' must be declared 'fn main() i32' or 'fn main(argv: Vector<str>) i32'"),
                         );
@@ -32800,6 +33524,7 @@ extend TypeChecker {
                     if ncsite != NODE_NONE {
                         let sp = unsafe (*self.cur_ast()).at_const(ncsite).span;
                         self.errors.emit_span(
+                            dc::CONST_FN_SIGNATURE_CANNOT_USE_NO_CONST,
                             sp,
                             format(
                                 "a 'const fn' signature cannot use a '@no_const' type: no such value can exist at compile time",
@@ -32883,6 +33608,7 @@ extend TypeChecker {
                             why = unsafe (*r).why;
                         }
                         self.errors.emit(
+                            dc::FUNCTION_DECLARED_BUT,
                             cstart,
                             cend - cstart,
                             format(
@@ -32954,7 +33680,11 @@ extend TypeChecker {
                                 self.ct_ctx = cx0;
                                 if vt != TYPE_NONE && !self.is_int(vt) {
                                     let sp = unsafe (*self.cur_ast()).at_const(mn.as_data.variant.value).span;
-                                    self.errors.emit_span(sp, format("enum discriminant must be an integer"));
+                                    self.errors.emit_span(
+                                        dc::ENUM_DISCRIMINANT_MUST_INTEGER,
+                                        sp,
+                                        format("enum discriminant must be an integer"),
+                                    );
                                 } else if vt != TYPE_NONE && self.ct_n == ct0 {
                                     self.tc_discriminant(mn.as_data.variant.value);
                                 }
@@ -32993,6 +33723,7 @@ extend TypeChecker {
                 if held == 1 {
                     let sp = unsafe (*self.cur_ast()).at_const(id).span;
                     self.errors.emit_span(
+                        dc::TYPE_EMBEDS_ITSELF_VALUE_SO_WOULD,
                         sp,
                         format("this type embeds itself by value, so it would have infinite size"),
                     );
@@ -33000,6 +33731,7 @@ extend TypeChecker {
                 } else if held == -1 {
                     let sp = unsafe (*self.cur_ast()).at_const(id).span;
                     self.errors.emit_span(
+                        dc::TYPE_HOLDS_MORE_THAN_NESTED_AGGREGATES,
                         sp,
                         format("this type holds more than {} nested aggregates by value", BYVAL_MAX_DEPTH),
                     );
@@ -33023,6 +33755,7 @@ extend TypeChecker {
                 )).at_const(td.node).as_data.type_alias.generics.len > 0 {
                     let sp = unsafe (*a).at_const(tgt).span;
                     self.errors.emit_span(
+                        dc::GENERIC_TYPE_ALIAS_CANNOT_EXTENDED_EXTEND,
                         sp,
                         format("a generic type alias cannot be extended; extend the aliased type"),
                     );
@@ -33071,6 +33804,7 @@ extend TypeChecker {
         self.tc_no_reg(cd.ty, declared);
         if cd.c_macro && declared != TYPE_ERROR && !self.is_int(declared) && !self.is_bool(declared) {
             self.errors.emit_span(
+                dc::CONSTANT_EXTERN_C_BLOCK_VALUE_INTEGER,
                 unsafe (*self.cur_ast()).at_const(cd.ty).span,
                 format(
                     "a constant of an 'extern \"C\"' block with a value is an integer or a 'bool': the build checks it against the header",
@@ -33091,7 +33825,11 @@ extend TypeChecker {
             if bad != TYPE_NONE {
                 let sp = self.name_span(cd.name);
                 let tn = self.type_str(bad);
-                self.errors.emit_span(sp, format("a constant cannot use the stateful allocator '{}'", tn.as_str()));
+                self.errors.emit_span(
+                    dc::CONSTANT_CANNOT_USE_STATEFUL_ALLOCATOR,
+                    sp,
+                    format("a constant cannot use the stateful allocator '{}'", tn.as_str()),
+                );
                 self.errors.note(
                     format(
                         "a constant's storage is static data that no allocator provided, so allocator state beside it describes memory that does not exist; use a zero-sized allocator",
@@ -33108,6 +33846,7 @@ extend TypeChecker {
             let sp = self.name_span(cd.name);
             let tn = self.type_str(declared);
             self.errors.emit_span(
+                dc::CONSTANT_TYPE_HOLDS_UNSAFECELL_BUT_NOT,
                 sp,
                 format(
                     "a constant of type '{}' holds an 'UnsafeCell' but is not 'Sync': every task shares it",
@@ -33151,7 +33890,11 @@ extend TypeChecker {
             declared,
         ) {
             let sp = unsafe (*self.cur_ast()).at_const(id).span;
-            self.errors.emit_span(sp, format("a 'static mut' cannot hold an owning (Free) type"));
+            self.errors.emit_span(
+                dc::STATIC_MUT_CANNOT_HOLD_OWNING_FREE,
+                sp,
+                format("a 'static mut' cannot hold an owning (Free) type"),
+            );
             self.errors.note(format("no scope ever frees a global; store a scalar/view or manage the value locally"));
         }
     }
@@ -33276,6 +34019,7 @@ extend TypeChecker {
             te = te - 1;
         }
         self.errors.warn(
+            dc::UNNECESSARY_DEREF_AUTO_DEREFS_RECEIVER_SO,
             lp,
             rpe - lp,
             format("unnecessary deref: '.' auto-derefs the receiver, so '(*...)' is redundant"),
@@ -33379,6 +34123,7 @@ extend TypeChecker {
                     self.source.slice(sp.start as usize, sp.end as usize),
                 ) {
                     self.errors.warn_span(
+                        dc::DOES_NOT_NEED_MUTABLE,
                         sp,
                         format("'{}' does not need to be mutable", diag::span_str(self.source, sp.start, sp.end)),
                     );
@@ -33400,7 +34145,10 @@ extend TypeChecker {
         for i in 0..items.len {
             let it9 = unsafe (*self.cur_ast()).list(items)[i as usize];
             let rec = unsafe (*self.package).item_of(m, it9);
-            if rec != loader::ITEM_NONE {
+            if loader::poll_stop() {
+                // An API request stopped the analysis: the package is dropped, so the items left
+                // keep no records.
+            } else if rec != loader::ITEM_NONE {
                 self.check_one(it9, unsafe (*self.package).sched.top_lo[rec as usize]);
             } else if unsafe (*self.cur_ast()).at_const(it9).kind == NodeKind::NODE_EXTERN_BLOCK {
                 // The block's declarations are items of their own, which the driver's schedule

@@ -3392,6 +3392,8 @@ pub(package) struct Ast {
     /// appended by a desugar or a checker rewrite inside the body it extends, so it belongs to
     /// the item under check (the parse-time item ranges do not cover it).
     pub(package) hir_base: u32,
+    /// The body arena's length when the HIR lowering started: `hir_base` for the bodies.
+    pub(package) hir_body: u32,
     /// In parse order: every `if` whose condition the build constants alone decide, and every
     /// `switch` over PLATFORM, ARCH or ENDIAN whose arms they decide. The platform filter replaces
     /// each by its taken branch (`Package::prune_build_sites`).

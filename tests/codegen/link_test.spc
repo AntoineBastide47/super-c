@@ -1,5 +1,5 @@
-// The link step: the link record's name, a C static library the own linker links, and the import
-// libraries a Windows link takes for their DLLs.
+// The link step: the link record's name, a C static library the own linker links, the import libraries a
+// Windows link takes for their DLLs, and a shared library's export list.
 import stdlib;
 import build_system::build as bsys;
 import driver::util as dutil;
@@ -9,6 +9,8 @@ import target::assembler as asmr;
 import target::coff as coff;
 import link::pe;
 import std::platform::fs;
+import std::platform::dylib;
+import target::table as tgt;
 
 @test
 fn link_record_names_fit_and_differ() {
@@ -205,8 +207,36 @@ fn an_archive_with_imports_stands_for_its_dll() {
         dirs: dirs,
         strip: false,
         stack: 0,
+        exports: Option::<Set<String>>::None,
     };
     let mut path = String::new();
     assert(!pe::static_lib(&opts, "x", &mut path), "an archive with an import is an import library");
     assert(pe::static_lib(&opts, "y", &mut path), "an archive of objects alone is a static library");
+}
+
+// Whether the shared library `x` the project in `dir` builds into `build/debug-lib` defines `name` for a
+// program that loads it.
+fn lib_defines(dir: str, name: str) bool {
+    let lib = format("{}/build/debug-lib/{}", dir, bsys::lib_file("x", true, tgt::host_os()).as_str());
+    let l = (unsafe dylib::open(lib.as_str())).unwrap();
+    return (unsafe l.symbol(name)).is_ok();
+}
+
+// A shared library exports every global by default, and its `@export` symbols alone with `exports = "c"`.
+@platform(!wasm)
+@test(timeout = 300)
+fn a_c_export_list_keeps_the_export_symbols_alone() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "lib.spc",
+        "@export(\"x_api\")\npub fn api() i32 {\n    return helper() + 1;\n}\n\npub fn helper() i32 {\n    return 41;\n}\n",
+    );
+    let toml = "[lib]\nname = \"x\"\nroot = \"lib.spc\"\ntype = [\"shared\"]\n";
+    p.mkfile("build.toml", toml);
+    assert(cli::superc_in(p.dir(), "build --lib").ok(), "the library builds");
+    assert(lib_defines(p.dir(), "x_api") && lib_defines(p.dir(), "helper"), "every global is exported");
+    p.mkfile("build.toml", format("{}exports = \"c\"\n", toml).as_str());
+    assert(cli::superc_in(p.dir(), "build --lib").ok(), "the library builds again");
+    assert(lib_defines(p.dir(), "x_api"), "the export symbol is exported");
+    assert(!lib_defines(p.dir(), "helper"), "the other globals are not");
 }

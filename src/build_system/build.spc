@@ -32,6 +32,7 @@ import ast::parser as par;
 import ir::cpu_features as cf;
 import lsp::json as json;
 import link::link as lk;
+import build_system::ext as ext;
 
 // A failed child's captured output is replayed up to this many bytes; the file keeps the rest.
 const LOG_LIMIT: usize = 65536;
@@ -587,7 +588,8 @@ fn stamp_opt_line(
         stamp_push_env(out, inl::emit_mode_env(i));
     }
     stamp_push_env(out, "SC_UNITY_MAX");
-    out.push_str("\n");
+    // The steps and hooks: a stamp of other extensions must not skip their stages.
+    out.format_into("\text {}\n", ext::id());
 }
 
 fn stamp_push_env(out: &mut String, name: str) {
@@ -988,7 +990,10 @@ fn emit_closure(
         prt::shutdown(); // parallel loading may have started the pool
     }
     p.cir = &mut cirv;
-    let rc = run_package(&mut p, topts, "", cx.target, cx.lint, sink);
+    let mut rc = run_package(&mut p, topts, "", cx.target, cx.lint, sink);
+    if rc == 0 && p.lib_build && !write_exports(&p, srcgen) {
+        rc = 1;
+    }
     if rc == 0 && cid != 0 {
         stamp_write(stamp, &p, m, cx.std_dir, root_dir, cx.target, cx.bootstrap_tags, cx.lint, p.c_files, cid, &sl);
     }
@@ -996,6 +1001,84 @@ fn emit_closure(
     // belongs to the sync phase.
     bst::mark(bst::B_PUBLISH);
     return rc;
+}
+
+// Write `<gen>/__sc_exports`: the `@export` symbol of every program declaration of `p`, one per line in
+// module order, which the link of a library with `exports = "c"` keeps alone. The standard library's
+// exports are runtime hooks, not the library's interface. False when the file does not write.
+fn write_exports(p: &loader::Package, gen: str) bool {
+    let mut out = String::new();
+    for m in 0..p.modules.len() {
+        let md = &p.modules[m];
+        if !md.has_ast || md.prelude || md.path.as_str().starts_with("std::") {
+            continue;
+        }
+        let a = &p.modules[m].ast;
+        let src = p.modules[m].source.as_str();
+        for i in 0..a.attrs.len() {
+            let at = a.attrs.at(i);
+            if at.kind == AttrKind::ATTR_EXPORT as u8 && at.str_span.end > at.str_span.start {
+                out.push_str(src.slice(at.str_span.start as usize, at.str_span.end as usize));
+                out.push_byte(b'\n');
+            }
+        }
+    }
+    let path = loader::join2(gen, "__sc_exports");
+    if !write_file(path.as_str(), out.as_str()) {
+        eprintln("build: cannot write '{}'", path.as_str());
+        return false;
+    }
+    return true;
+}
+
+// The link flags that keep the symbols of `<gen>/__sc_exports` alone in a shared library for `target`: a
+// list file `<pdir>/exports.*` written for the linker. False when a file does not read or write.
+fn export_flags(gen: str, pdir: str, target: i32, out: &mut Vector<String>) bool {
+    let names = switch loader::read_file(loader::join2(gen, "__sc_exports").as_str()) {
+        Some(t) => t,
+        None => {
+            eprintln("build: the library's export list is missing; build it again");
+            return false;
+        },
+    };
+    let fmt = tgt::obj_of(target).name;
+    let mut list = String::new();
+    let path = loader::join2(
+        pdir,
+        if fmt == "macho" {
+            "exports.txt";
+        } else if fmt == "coff" {
+            "exports.def";
+        } else {
+            "exports.map";
+        },
+    );
+    if fmt == "macho" {
+        for line in names.as_str().lines() {
+            list.format_into("_{}\n", line);
+        }
+        out.push(format("-Wl,-exported_symbols_list,{}", path.as_str()));
+    } else if fmt == "coff" {
+        list.push_str("EXPORTS\n");
+        for line in names.as_str().lines() {
+            list.format_into("    {}\n", line);
+        }
+        out.push(path.clone());
+    } else if fmt == "elf" {
+        list.push_str("{\n  global:\n");
+        for line in names.as_str().lines() {
+            list.format_into("    {};\n", line);
+        }
+        list.push_str("  local: *;\n};\n");
+        out.push(format("-Wl,--version-script={}", path.as_str()));
+    } else {
+        return true;
+    }
+    if !write_file(path.as_str(), list.as_str()) {
+        eprintln("build: cannot write '{}'", path.as_str());
+        return false;
+    }
+    return true;
 }
 
 // The identity of the external transpiler `cmd` for the emit stamp: its words, and the content of each
@@ -1112,6 +1195,18 @@ pub(package) fn manifest_emit(m: &mf::Manifest, profile: str, root: str, sub: st
     let pdir = loader::join2(m.out_dir.as_str(), sub);
     let srcgen = loader::join2(pdir.as_str(), "raw");
     let stamp = loader::join2(pdir.as_str(), ".emit_stamp.new");
+    // The engine that runs this emission ran the steps: its stamp and cache keys hold their identity.
+    let cur = ext::Current {
+        profile: String::from_str(prof_name),
+        dir: pdir.clone(),
+        os: cx.target,
+        isa: m.arch,
+        id: ext_id(m),
+    };
+    ext::begin(&cur);
+    defer {
+        ext::end();
+    }
     let mut log = RewriteLog { root_len: srcgen.len(), text: String::new() };
     let mut sink = EmitSink { ctx: (&mut log) as *mut RewriteLog, notify: log_rewritten };
     let rc = emit_closure(
@@ -1394,14 +1489,251 @@ pub(package) fn cpu_count() u32 {
     return cpu::count().unwrap_or(1) as u32;
 }
 
+/// The extension identity of the builds of `m`: its steps' configurations and the installed hooks' identity
+/// (`build_system::ext`); 0 without either. Part of the per-TU cache key and the emit stamp, so output of other
+/// steps or hooks never replays.
+pub(package) fn ext_id(m: &mf::Manifest) u64 {
+    let h = ext::hooks();
+    if m.steps.len() == 0 && h == null {
+        return 0;
+    }
+    let mut t = String::new();
+    for i in 0..m.steps.len() {
+        let st = &m.steps[i];
+        t.format_into("step\t{}\t{}\n", st.name.as_str(), st.cache);
+        let lists: [&Vector<String>; 4] = [&st.argv, &st.inputs, &st.outputs, &st.env];
+        for l in lists {
+            for k in 0..l.len() {
+                t.format_into("\t{}\n", l[k].as_str());
+            }
+            t.push_str("-\n");
+        }
+    }
+    if h != null {
+        t.format_into("hooks\t{}\n", unsafe (*h).id);
+    }
+    return str_id(t.as_str()) | 1;
+}
+
+// `path` without leading `./`.
+fn plain_path(path: str) str {
+    let mut p = path;
+    while p.starts_with("./") {
+        p = p.slice(2, p.len());
+    }
+    return p;
+}
+
+// Whether `path` names a regular file.
+fn is_file(path: str) bool {
+    return switch fs::stat(path) {
+        Ok(md) => md.kind == fs::FileKind::File,
+        Err(_) => false,
+    };
+}
+
+// The content hash of file `path` into `out` as hex; false when it cannot be read.
+fn push_file_hash(path: str, out: &mut String) bool {
+    return switch loader::read_file(path) {
+        Some(t) => {
+            hex64(str_id(t.as_str()), out);
+            true;
+        },
+        None => false,
+    };
+}
+
+// The record of step `st` before it runs: its argv, its program's path, size and time, the values of its
+// environment variables and its inputs' hashes; the program into `prog`. False after printing why the step
+// cannot run: its program is missing, an input is missing, or its argv names a project file it does not
+// declare (an input it would read untracked).
+fn step_record(st: &mf::Step, prog: &mut String, rec: &mut String) bool {
+    let nm = st.name.as_str();
+    for k in 0..st.argv.len() {
+        let a = st.argv[k].as_str();
+        let mut c = a;
+        let eq = a.find("=");
+        if a.starts_with("-") && eq > 0 {
+            c = a.slice(eq as usize + 1, a.len());
+        }
+        let f = plain_path(c);
+        if (k == 0 || f.len() != 0 && c.byte_at(0) != b'-') && mf::project_path(f) && is_file(f) {
+            let fs0 = String::from_str(f);
+            if !st.inputs.contains(&fs0) && !st.outputs.contains(&fs0) {
+                eprintln("build: [step.{}] names the project file '{}' in its argv but not in 'inputs'", nm, f);
+                return false;
+            }
+        }
+        rec.format_into("a\t{}\n", a);
+    }
+    let a0 = st.argv[0].as_str();
+    if a0.contains("/") {
+        prog.push_str(a0);
+    } else if which_path(a0, prog) == 0 {
+        eprintln("build: [step.{}]: the program '{}' is not in PATH", nm, a0);
+        return false;
+    }
+    switch fs::stat(prog.as_str()) {
+        Ok(md) => {
+            rec.format_into("prog\t{}\t{}\t{}\n", prog.as_str(), md.size, md.modified_ns);
+        },
+        Err(_) => {
+            eprintln("build: [step.{}]: the program '{}' does not exist", nm, prog.as_str());
+            return false;
+        },
+    };
+    for k in 0..st.env.len() {
+        let key = st.env[k].as_str();
+        switch stdlib::get_env(key) {
+            Some(v) => rec.format_into("env\t{}={}\n", key, v.as_str()),
+            None => rec.format_into("env\t{}\n", key),
+        };
+    }
+    for k in 0..st.inputs.len() {
+        let f = plain_path(st.inputs[k].as_str());
+        rec.format_into("in\t{}\t", f);
+        if !is_file(f) || !push_file_hash(f, rec) {
+            eprintln("build: [step.{}]: the input '{}' does not exist", nm, f);
+            return false;
+        }
+        rec.push_str("\n");
+    }
+    return true;
+}
+
+// `rec` followed by the hashes of the outputs of `st`; false when one is missing.
+fn step_outputs(st: &mf::Step, rec: &String, out: &mut String) bool {
+    out.push_string(rec);
+    for k in 0..st.outputs.len() {
+        let f = plain_path(st.outputs[k].as_str());
+        out.format_into("out\t{}\t", f);
+        if !is_file(f) || !push_file_hash(f, out) {
+            return false;
+        }
+        out.push_str("\n");
+    }
+    return true;
+}
+
+/// Whether step `i` of `m` is current: cached, and its record matches its configuration, program,
+/// environment, inputs and outputs. Reads only.
+pub(package) fn step_current(m: &mf::Manifest, i: usize) bool {
+    let st = &m.steps[i];
+    let mut prog = String::new();
+    let mut rec = String::new();
+    let mut now = String::new();
+    let rpath = loader::join2(loader::join2(m.out_dir.as_str(), ".steps").as_str(), st.name.as_str());
+    return st.cache && step_record(st, &mut prog, &mut rec) && step_outputs(st, &rec, &mut now) && file_eq(
+        rpath.as_str(),
+        now.as_str(),
+    );
+}
+
+/// Run the steps of `m` (`[step.NAME]`) whose record (`<out-dir>/.steps/<name>`) does not match their
+/// configuration, program, environment, inputs and outputs, or that set `cache = false`; in declaration
+/// order, without a shell, in the project directory, with only the variables their `env` names. Their
+/// names join `ran`. 1 after printing why a step cannot run, failed, or did not write an output.
+pub(package) fn run_steps(m: &mf::Manifest, ran: &mut Vector<String>) i32 {
+    if m.steps.len() == 0 {
+        return 0;
+    }
+    let rdir = loader::join2(m.out_dir.as_str(), ".steps");
+    mkdir_p(rdir.as_str());
+    // Builds of two profiles run the same steps over the same files: one at a time.
+    let lk = lock_file(loader::join2(rdir.as_str(), ".lock").as_str(), TREE_LOCK_WAIT_MS);
+    if !lk.held() {
+        eprintln("build: cannot lock '{}'", rdir.as_str());
+        return 1;
+    }
+    for i in 0..m.steps.len() {
+        let st = &m.steps[i];
+        let nm = st.name.as_str();
+        let mut prog = String::new();
+        let mut rec = String::new();
+        if !step_record(st, &mut prog, &mut rec) {
+            return 1;
+        }
+        let rpath = loader::join2(rdir.as_str(), nm);
+        if st.cache {
+            let mut now = String::new();
+            if step_outputs(st, &rec, &mut now) && file_eq(rpath.as_str(), now.as_str()) {
+                continue;
+            }
+        }
+        let _ = fs::unlink(rpath.as_str());
+        let mut envs = Vector::<String>::with_capacity(st.env.len());
+        for k in 0..st.env.len() {
+            if let Some(v) = stdlib::get_env(st.env[k].as_str()) {
+                envs.push(format("{}={}", st.env[k].as_str(), v.as_str()));
+            }
+        }
+        let mut ev = Vector::<str>::with_capacity(envs.len());
+        for k in 0..envs.len() {
+            ev.push(envs[k].as_str());
+        }
+        let mut av = Vector::<str>::with_capacity(st.argv.len());
+        for k in 0..st.argv.len() {
+            av.push(st.argv[k].as_str());
+        }
+        if !process_allowed(prog.as_str()) {
+            return 1;
+        }
+        let mut cmd = process::Command::new(av.as_slice());
+        cmd.program = Option::<str>::Some(prog.as_str());
+        cmd.env = Option::<Slice<str>>::Some(ev.as_slice());
+        let rc = wait_code(process::spawn(cmd));
+        if rc != 0 {
+            eprintln("build: [step.{}] failed (exit {})", nm, rc);
+            return 1;
+        }
+        let mut done = String::new();
+        if !step_outputs(st, &rec, &mut done) {
+            for k in 0..st.outputs.len() {
+                if !is_file(plain_path(st.outputs[k].as_str())) {
+                    eprintln("build: [step.{}] did not write '{}'", nm, st.outputs[k].as_str());
+                }
+            }
+            return 1;
+        }
+        if !write_file_atomic(rpath.as_str(), done.as_str()) {
+            eprintln("build: cannot write '{}'; the step runs again next build", rpath.as_str());
+        }
+        ran.push(st.name.clone());
+    }
+    return 0;
+}
+
+// Run the hooks of engine stage `stage` (STAGE_BEFORE_ANALYSIS, STAGE_AFTER_ARTIFACTS) of build `cur`;
+// `arts`: the files the build produced. False when a hook reported an error.
+fn engine_stage(stage: u32, cur: &ext::Current, arts: *const Vector<String>) bool {
+    let h = ext::hooks();
+    if h == null {
+        return true;
+    }
+    let d = ext::StageData {
+        stage: stage,
+        profile: &cur.profile,
+        dir: &cur.dir,
+        os: cur.os,
+        isa: cur.isa,
+        pkg: null,
+        prog: null,
+        artifacts: arts,
+    };
+    return unsafe (*h).run((*h).ctx, &d);
+}
+
 // The native objects a build's emission writes (`EmitSink` kind 3), how many of them it rewrote, and the
-// link's `.pending` marker, written at the first new one.
+// link's `.pending` marker, written at the first new one. With `record` (an API request collects the build,
+// `ext::report`), each object as a unit.
 struct NatSink {
     pub(package) objs: Vector<String>,
     pub(package) fresh: usize,
     pub(package) pending: String,
     pub(package) marked: bool,
     pub(package) ret: i32,
+    pub(package) record: bool,
+    pub(package) units: Vector<ext::CompileUnit>,
 }
 
 fn nat_notify(ctx: *mut void, path: str, _text: str, kind: i32, changed: bool) {
@@ -1409,13 +1741,21 @@ fn nat_notify(ctx: *mut void, path: str, _text: str, kind: i32, changed: bool) {
     if kind != 3 {
         return;
     }
-    if changed {
-        s.mark();
-    }
-    s.objs.push(String::from_str(path));
+    s.add(path, changed);
 }
 
 extend NatSink {
+    // Object `path` of the link, new (`changed`) or not.
+    fn add(self: &mut Self, path: str, changed: bool) {
+        if changed {
+            self.mark();
+        }
+        self.objs.push(String::from_str(path));
+        if self.record {
+            self.units.push(ext::CompileUnit { object: String::from_str(path), compiled: changed });
+        }
+    }
+
     // A new object: the binary links again, also after an interrupted build.
     fn mark(self: &mut Self) {
         self.fresh += 1;
@@ -1501,6 +1841,25 @@ fn engine_build_i(
     bst::mark(bst::B_START);
     let pdir = loader::join2(m.out_dir.as_str(), sub);
     let gen = loader::join2(pdir.as_str(), "raw");
+    let cur = ext::Current {
+        profile: String::from_str(prof_name),
+        dir: pdir.clone(),
+        os: cx.target,
+        isa: m.arch,
+        id: ext_id(m),
+    };
+    ext::begin(&cur);
+    defer {
+        ext::end();
+    }
+    if ext::hooks() != null && cx.transpiler.len() != 0 {
+        eprintln("build: the hooks run in this compiler's own transpile, which --transpiler replaces");
+        return 1;
+    }
+    let mut steps_ran = Vector::<String>::new();
+    if run_steps(m, &mut steps_ran) != 0 || !engine_stage(ext::STAGE_BEFORE_ANALYSIS, &cur, null) {
+        return 1;
+    }
     let jobs = build_jobs(m, cx);
     // The evaluator check of a test build is part of the emission: nothing links.
     if topts != null && unsafe (*topts).enabled && lir_eval_check() {
@@ -1518,7 +1877,15 @@ fn engine_build_i(
     fppath.push_str(".cmd");
     let mut pending = fppath.clone();
     pending.push_str(".pending");
-    let mut ns = NatSink { objs: Vector::<String>::new(), fresh: 0, pending: pending, marked: false, ret: 0 };
+    let mut ns = NatSink {
+        objs: Vector::<String>::new(),
+        fresh: 0,
+        pending: pending,
+        marked: false,
+        ret: 0,
+        record: ext::report() != null,
+        units: Vector::<ext::CompileUnit>::new(),
+    };
     let mut sink = EmitSink { ctx: (&mut ns) as *mut NatSink, notify: nat_notify };
     bst::mark(bst::B_SETUP);
 
@@ -1565,16 +1932,17 @@ fn engine_build_i(
         }
         for i in 0..rels.len() {
             if rels.at(i).as_str().ends_with(".o") {
-                if all_new || rewritten.contains(rels.at(i)) {
-                    ns.mark();
-                }
-                ns.objs.push(loader::join2(gen.as_str(), rels.at(i).as_str()));
+                ns.add(
+                    loader::join2(gen.as_str(), rels.at(i).as_str()).as_str(),
+                    all_new || rewritten.contains(rels.at(i)),
+                );
             }
         }
     }
     let mut ret = ns.ret;
     let mut linked = false;
     let mut t_link = t_transpile;
+    let mut link_argv = Vector::<String>::new();
     if ret == 0 {
         // The link list is sorted, so its order never depends on the emission's: the link record holds
         // the whole command.
@@ -1590,7 +1958,10 @@ fn engine_build_i(
             mkdir_p(tmp_dir.as_str());
             tmp = loader::join2(tmp_dir.as_str(), loader::basename_of(bin));
         }
-        let largs = link_args(m, prof, cx, gen.as_str(), link_kind, tmp.as_str(), loader::basename_of(bin), objs);
+        let mut largs = link_args(m, prof, cx, gen.as_str(), link_kind, tmp.as_str(), loader::basename_of(bin), objs);
+        if link_kind == 2 && m.lib_exports_c && !export_flags(gen.as_str(), pdir.as_str(), cx.target, &mut largs) {
+            return 1;
+        }
         let strip = prof.strip && link_kind == 0;
         let mut fp = render_cmd(&largs);
         if link_kind == 1 {
@@ -1613,6 +1984,9 @@ fn engine_build_i(
         }
         if need {
             linked = true;
+            if ns.record {
+                link_argv = largs.clone();
+            }
             let _ = fs::unlink(tmp.as_str());
             let mut why = String::new();
             let r = if link_kind == 1 {
@@ -1653,6 +2027,28 @@ fn engine_build_i(
         if ret == 0 {
             sweep(m, time::now(), false);
         }
+    }
+    if ret == 0 {
+        let mut arts = Vector::<String>::with_capacity(1);
+        arts.push(String::from_str(bin));
+        if !engine_stage(ext::STAGE_AFTER_ARTIFACTS, &cur, &arts) {
+            ret = 1;
+        }
+    }
+    let rp = ext::report();
+    if rp != null {
+        unsafe (*rp).targets.push(
+            ext::TargetReport {
+                artifact: String::from_str(bin),
+                emitted: !skip_emit,
+                units: replace(&mut ns.units, Vector::<ext::CompileUnit>::new()),
+                link: link_argv,
+                linked: linked,
+                steps_run: steps_ran,
+                transpile_ms: t_transpile - t0,
+                link_ms: t_link - t_transpile,
+            },
+        );
     }
     if stats != null {
         unsafe (*stats).linked = linked;
@@ -1838,6 +2234,28 @@ pub(package) fn manifest_build_all(m: &mf::Manifest, profile: str, sel_bin: str,
         return 1;
     }
     return 0;
+}
+
+/// The files `manifest_build_all` makes of `m` at profile `prof_name` for `target`, in its build order: the
+/// library's static and shared files, the primary binary in its profile directory, each [bin.NAME].
+pub(package) fn artifact_paths(m: &mf::Manifest, prof_name: str, target: i32, out: &mut Vector<String>) {
+    if m.lib_name.len() != 0 {
+        let dir = loader::join2(m.out_dir.as_str(), format("{}-lib", prof_name).as_str());
+        for kind in 1..3 {
+            let shared = kind == 2;
+            if shared && m.lib_shared || !shared && m.lib_static {
+                out.push(loader::join2(dir.as_str(), lib_file(m.lib_name.as_str(), shared, target).as_str()));
+            }
+        }
+    }
+    if m.bin.len() != 0 {
+        out.push(profile_bin(m, prof_name, target));
+    }
+    for i in 0..m.bins.len() {
+        let bt = m.bins.at(i);
+        let dir = loader::join2(m.out_dir.as_str(), format("{}-bin-{}", prof_name, bt.name.as_str()).as_str());
+        out.push(loader::join2(dir.as_str(), exe_name(bt.name.as_str(), target).as_str()));
+    }
 }
 
 /// Scaffold a project in `dir` named `name` (cargo new/init): build.toml, src/main.spc, .gitignore,
@@ -2710,6 +3128,116 @@ pub(package) fn manifest_bench(m: &mf::Manifest, profile: str, no_run: bool, fil
     return exec_args(&ra, "");
 }
 
+/// `super-c lint`, `build` or `run` of a project whose manifest lists analyzers or hooks (`[tools]`): build a
+/// compiler from the vendored compiler (`tools_compiler`), the analyzer modules and the hook modules, then run
+/// it with `args` and `SC_TOOLS_RUN=1`. That compiler installs the hooks (`api::build::install`) for its
+/// builds, lints as this one does and runs the analyzers after (`api::cli::run` with its tools hook). The engine
+/// builds it, so an unchanged project relinks nothing; it reads std from `cx.std_dir`.
+pub(package) fn manifest_tools(m: &mf::Manifest, args: Slice<str>, cx: &BuildCtx) i32 {
+    if PLATFORM == Platform::Wasm {
+        eprintln("tools: the tool compiler runs as a process, which WASI does not have");
+        return 1;
+    }
+    let mut cpath = String::new();
+    push_module_path(&mut cpath, m.tools_compiler.as_str());
+    let mut root = String::new();
+    root.format_into("import {}::src::api::cli as compiler;\n", cpath.as_str());
+    if m.tools.len() != 0 {
+        root.format_into("import {}::src::api::analysis as an;\n", cpath.as_str());
+    }
+    if m.hooks.len() != 0 {
+        root.format_into("import {}::src::api::build as bld;\n", cpath.as_str());
+    }
+    let nt = m.tools.len();
+    for k in 0..nt + m.hooks.len() {
+        let t = if k < nt {
+            m.tools.at(k).as_str();
+        } else {
+            m.hooks.at(k - nt).as_str();
+        };
+        if !t.ends_with(".spc") || file_mtime(t) == 0 {
+            eprintln("tools: [tools] module '{}' is no .spc file of the project", t);
+            return 1;
+        }
+        let mut mp = String::new();
+        push_module_path(&mut mp, t.slice(0, t.len() - 4));
+        root.format_into("import {} as t{};\n", mp.as_str(), k);
+    }
+    if nt != 0 {
+        root.push_str("\n// The project's analyzers, after the compiler's own lint.\nfn tools(std_dir: str) i32 {\n");
+        root.push_str("    let mut list = Vector::<Box<dyn an::Analyzer>>::new();\n");
+        for k in 0..nt {
+            root.format_into(
+                "    let mut v{} = t{}::analyzers();\n    v{}.reverse();\n    while let Some(a) = v{}.pop() {{\n        list.push(a);\n    }}\n",
+                k,
+                k,
+                k,
+                k,
+            );
+        }
+        root.push_str("    return an::lint_tools(std_dir, \".\", list);\n}\n");
+    }
+    root.push_str("\nfn main(args: Vector<str>) i32 {\n");
+    if m.hooks.len() != 0 {
+        // The project's hooks, installed while the compiler runs.
+        root.push_str("    let mut hooks = Vector::<Box<dyn bld::Hook>>::new();\n");
+        for k in nt..nt + m.hooks.len() {
+            root.format_into(
+                "    let mut v{} = t{}::hooks();\n    v{}.reverse();\n    while let Some(h) = v{}.pop() {{\n        hooks.push(h);\n    }}\n",
+                k,
+                k,
+                k,
+                k,
+            );
+        }
+        root.push_str(
+            "    let _installed = switch bld::install(hooks) {\n        Ok(i) => i,\n        Err(e) => {\n            eprintln(\"error: {}\", e.message.as_str());\n            return 1;\n        },\n    };\n",
+        );
+    }
+    if nt != 0 {
+        root.push_str("    let rc = compiler::run(args, Option::<compiler::LintTools>::Some(tools));\n");
+    } else {
+        root.push_str("    let rc = compiler::run(args, Option::<compiler::LintTools>::None);\n");
+    }
+    // `_installed` uninstalls the hooks when main returns.
+    root.push_str("    return rc;\n}\n");
+    mkdir_p(m.out_dir.as_str());
+    let genp = loader::join2(m.out_dir.as_str(), "tools_root.spc");
+    if !write_file(genp.as_str(), root.as_str()) {
+        eprintln("tools: cannot write '{}'", genp.as_str());
+        return 1;
+    }
+    let mut nolint = *cx;
+    nolint.lint = false;
+    let leaf = exe_name("tools-super-c", cx.target);
+    let bin = loader::join2(m.out_dir.as_str(), leaf.as_str());
+    let rc = engine_build(
+        m,
+        "debug",
+        genp.as_str(),
+        ".",
+        loader::dirname_of(m.root.as_str()),
+        "tools",
+        bin.as_str(),
+        &nolint,
+        0,
+        null,
+    );
+    if rc != 0 {
+        return rc;
+    }
+    if unsafe env::set("SC_TOOLS_RUN", "1").is_err() || unsafe env::set("SC_STD_DIR", cx.std_dir).is_err() {
+        eprintln("tools: cannot set the tool compiler's environment");
+        return 1;
+    }
+    let mut ra = Vector::<String>::with_capacity(args.len());
+    ra.push(bin.clone());
+    for i in 1..args.len() {
+        ra.push(String::from_str(args[i]));
+    }
+    return exec_args(&ra, "");
+}
+
 /// `super-c command <name>`: run a manifest command, building first when it asks for it. Lines run in
 /// order; the first nonzero exit stops and is returned.
 pub(package) fn manifest_run(m: &mf::Manifest, name: str, profile: str, cx: &BuildCtx) i32 {
@@ -2749,6 +3277,9 @@ pub(package) fn manifest_run(m: &mf::Manifest, name: str, profile: str, cx: &Bui
 /// double quotes and no operators. Never `system()`: on Windows that is cmd.exe, which drops the outer
 /// quotes of its `/c` line and then splits the program name at the first '/'.
 pub(package) fn run_line(line: str) i32 {
+    if !process_allowed(line) {
+        return -1;
+    }
     let sh: [str; 3] = ["sh", "-c", line];
     let none: [str; 0] = [];
     let mut cmd = if PLATFORM == Platform::Windows {

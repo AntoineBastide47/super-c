@@ -1038,6 +1038,270 @@ extend Package {
         return true;
     }
 
+    // ---- Parts: a unit's LIR in the per-TU cache ----
+
+    /// Append to `out` function symbols `roots`, defined, with every definition without a unit they reach
+    /// (read-only data, sentinels) and the symbols those name, as `read_part` reads them back: the LIR of a
+    /// module's own items, which a cached emission of the module restores.
+    pub(package) fn write_part(self: &Self, roots: []u32, out: &mut String) {
+        // The part's symbols in discovery order (their part index), and the ones it defines: a worklist
+        // that each symbol joins once.
+        let mut at = Map::<u32, u32>::new();
+        let mut list = Vector::<u32>::new();
+        let mut defs = Vector::<u32>::new();
+        for i in 0..roots.len() {
+            self.part_add(roots[i], true, &mut at, &mut list, &mut defs);
+        }
+        let mut files = Map::<u32, u32>::new();
+        let mut flist = Vector::<u32>::new();
+        let mut msgs = Map::<u32, u32>::new();
+        let mut mlist = Vector::<u32>::new();
+        let mut k: usize = 0;
+        while k < defs.len() {
+            let y = self.syms[defs[k] as usize];
+            if y.kind == SK_FUNC {
+                let b = &self.bodies[y.def as usize];
+                for j in 0..b.syms.len() {
+                    let s = b.syms[j];
+                    let y2 = self.syms[s as usize];
+                    self.part_add(s, y2.def != NONE && y2.unit == NONE, &mut at, &mut list, &mut defs);
+                }
+                for j in 1..b.lines.len() {
+                    part_id(b.lines[j].file, &mut files, &mut flist);
+                }
+                for j in 0..b.msgs.len() {
+                    part_id(b.msgs[j], &mut msgs, &mut mlist);
+                }
+            } else {
+                let d = self.data[y.def as usize];
+                for j in 0..d.nrelocs {
+                    let s = self.relocs[(d.relocs + j) as usize].sym;
+                    let y2 = self.syms[s as usize];
+                    self.part_add(s, y2.def != NONE && y2.unit == NONE, &mut at, &mut list, &mut defs);
+                }
+            }
+            k += 1;
+        }
+        pw32(out, list.len() as u32);
+        for i in 0..list.len() {
+            let y = self.syms[list[i] as usize];
+            pstr(out, self.spell(y.name));
+            out.push_byte(y.kind);
+            out.push_byte(y.linkage);
+            out.push_byte(
+                ast::pick(y.used, 1u8, 0u8) | ast::pick(y.noinline, 2u8, 0u8) | ast::pick(y.own, 4u8, 0u8) | ast::pick(
+                    y.ext,
+                    8u8,
+                    0u8,
+                ),
+            );
+            pw32(out, y.unit);
+            pstr(
+                out,
+                if y.sect == NONE {
+                    "";
+                } else {
+                    self.spell(y.sect);
+                },
+            );
+        }
+        pw32(out, flist.len() as u32);
+        for i in 0..flist.len() {
+            pstr(out, self.spell(self.files[flist[i] as usize]));
+        }
+        pw32(out, mlist.len() as u32);
+        for i in 0..mlist.len() {
+            pstr(out, self.spell(self.msgs[mlist[i] as usize]));
+        }
+        pw32(out, defs.len() as u32);
+        for i in 0..defs.len() {
+            let y = self.syms[defs[i] as usize];
+            pw32(out, *at.get(&defs[i]).unwrap());
+            if y.kind == SK_FUNC {
+                self.part_body(&self.bodies[y.def as usize], &at, &files, &msgs, out);
+            } else {
+                let d = self.data[y.def as usize];
+                pw32(out, d.size);
+                out.push_byte(d.align_log2);
+                out.push_byte(ast::pick(d.readonly, 1u8, 0u8));
+                pw32(out, d.nbytes);
+                for j in 0..d.nbytes {
+                    out.push_byte(self.bytes[(d.bytes + j) as usize]);
+                }
+                pw32(out, d.nrelocs);
+                for j in 0..d.nrelocs {
+                    let r = self.relocs[(d.relocs + j) as usize];
+                    pw32(out, r.offset);
+                    pw32(out, *at.get(&r.sym).unwrap());
+                    pw64(out, r.addend as u64);
+                }
+            }
+        }
+    }
+
+    // Symbol `s` into the part (`write_part`), with its definition when `def`.
+    fn part_add(self: &Self, s: u32, def: bool, at: &mut Map<u32, u32>, list: &mut Vector<u32>, defs: &mut Vector<u32>) {
+        if at.contains_key(&s) {
+            return;
+        }
+        at.insert(s, list.len() as u32);
+        list.push(s);
+        if def {
+            defs.push(s);
+        }
+    }
+
+    // Body `b` of a part, its symbols, files and messages as part indices.
+    fn part_body(
+        self: &Self,
+        b: &Body,
+        at: &Map<u32, u32>,
+        files: &Map<u32, u32>,
+        msgs: &Map<u32, u32>,
+        out: &mut String,
+    ) {
+        pw32(out, b.insts.len() as u32);
+        for i in 0..b.insts.len() {
+            let t = b.insts[i];
+            out.push_byte(t.op);
+            out.push_byte(t.ty);
+            pw32(out, t.aux);
+            pw32(out, t.a);
+            pw32(out, t.b);
+            pw32(out, t.c);
+        }
+        pvec32(out, &b.locs);
+        pw32(out, b.blocks.len() as u32);
+        for i in 0..b.blocks.len() {
+            let k = b.blocks[i];
+            pw32(out, k.start);
+            pw32(out, k.len);
+            pw32(out, k.param_start);
+            pw32(out, k.param_len);
+            pw32(out, k.flags);
+        }
+        pw32(out, b.params.len() as u32);
+        for i in 0..b.params.len() {
+            out.push_byte(b.params[i]);
+        }
+        pvec32(out, &b.pool);
+        pw32(out, b.words.len() as u32);
+        for i in 0..b.words.len() {
+            pw64(out, b.words[i]);
+        }
+        pw32(out, b.slots.len() as u32);
+        for i in 0..b.slots.len() {
+            pw32(out, b.slots[i].size);
+            out.push_byte(b.slots[i].align_log2);
+        }
+        pw32(out, b.syms.len() as u32);
+        for i in 0..b.syms.len() {
+            pw32(out, *at.get(&b.syms[i]).unwrap());
+        }
+        pw32(out, b.msgs.len() as u32);
+        for i in 0..b.msgs.len() {
+            pw32(out, *msgs.get(&b.msgs[i]).unwrap());
+        }
+        // Entry 0 is "no location".
+        pw32(out, b.lines.len() as u32);
+        for i in 1..b.lines.len() {
+            let l = b.lines[i];
+            pw32(out, *files.get(&l.file).unwrap());
+            pw32(out, l.line);
+            pw32(out, l.col);
+        }
+        pvec32(out, &b.inl);
+        pw32(out, b.sig);
+        out.push_byte(ast::pick(b.naked, 1u8, 0u8));
+    }
+
+    /// The package of part `bytes` (`write_part`) for a data model of `ptr_bytes`-byte pointers, None when
+    /// the bytes do not read as one.
+    pub(package) fn read_part(bytes: str, ptr_bytes: u32) Option<Package> {
+        let mut r = PartRd { b: bytes, at: 0, ok: true };
+        let mut p = Package::new(ptr_bytes);
+        let mut name = String::new();
+        let n = r.r32();
+        for _ in 0..n {
+            name.clear();
+            r.rstr(&mut name);
+            let kind = r.r8();
+            let linkage = r.r8();
+            let fl = r.r8();
+            let unit = r.r32();
+            let s = p.add_symbol(name.as_str(), kind, linkage);
+            name.clear();
+            r.rstr(&mut name);
+            if !r.ok || s == NONE {
+                return Option::<Package>::None;
+            }
+            if name.len() != 0 {
+                p.set_section(s, name.as_str());
+            }
+            let y = p.syms.index_mut(s as usize);
+            y.unit = unit;
+            y.used = (fl & 1) != 0;
+            y.noinline = (fl & 2) != 0;
+            y.own = (fl & 4) != 0;
+            y.ext = (fl & 8) != 0;
+        }
+        let nf = r.r32();
+        for _ in 0..nf {
+            name.clear();
+            r.rstr(&mut name);
+            let _ = p.add_file(name.as_str());
+        }
+        let nm = r.r32();
+        for _ in 0..nm {
+            name.clear();
+            r.rstr(&mut name);
+            let _ = p.add_message(name.as_str());
+        }
+        let nd = r.r32();
+        let mut b = Body::new();
+        for _ in 0..nd {
+            let s = r.r32();
+            if !r.ok || s as usize >= p.syms.len() {
+                return Option::<Package>::None;
+            }
+            if p.syms[s as usize].kind == SK_FUNC {
+                if !r.body(&mut b) || !p.define(s, &b) {
+                    return Option::<Package>::None;
+                }
+                continue;
+            }
+            let size = r.r32();
+            let al = r.r8();
+            let ro = r.r8() != 0;
+            let nb = r.r32();
+            let mut init = Vector::<u8>::new();
+            for _ in 0..ast::pick(r.ok && nb <= size, nb, 0u32) {
+                init.push(r.r8());
+            }
+            let nr = r.r32();
+            let mut rs = Vector::<Reloc>::new();
+            for _ in 0..ast::pick(r.ok && nr <= size, nr, 0u32) {
+                let off = r.r32();
+                let rsym = r.r32();
+                rs.push(Reloc { offset: off, sym: rsym, addend: r.r64() as i64 });
+            }
+            if !r.ok || init.len() != nb as usize || rs.len() != nr as usize || !p.add_data(
+                s,
+                size,
+                al,
+                ro,
+                init.as_slice(),
+                rs.as_slice(),
+            ) {
+                return Option::<Package>::None;
+            }
+        }
+        if !r.ok || r.at != r.b.len() {
+            return Option::<Package>::None;
+        }
+        return Option::<Package>::Some(p);
+    }
+
     /// Data definition `d`'s initial bytes.
     pub(package) const fn data_bytes(self: &Self, d: &DataDef) Slice<u8> {
         return self.bytes[d.bytes as usize..(d.bytes + d.nbytes) as usize];
@@ -1109,5 +1373,155 @@ extend Package {
             }
         }
         return true;
+    }
+}
+
+// The part index of id `v` (a file or a message), added at the end of `list` when new.
+fn part_id(v: u32, ids: &mut Map<u32, u32>, list: &mut Vector<u32>) {
+    if !ids.contains_key(&v) {
+        ids.insert(v, list.len() as u32);
+        list.push(v);
+    }
+}
+
+// A part's numbers are LEB128: most are small.
+fn pw32(o: &mut String, v: u32) {
+    pw64(o, v);
+}
+
+fn pw64(o: &mut String, v: u64) {
+    let mut x = v;
+    // At most 10 bytes: 7 bits each.
+    for _ in 0..10 {
+        if x < 0x80 {
+            o.push_byte(x as u8);
+            return;
+        }
+        o.push_byte(x as u8 & 0x7F | 0x80);
+        x = x >> 7;
+    }
+}
+
+fn pstr(o: &mut String, s: str) {
+    pw32(o, s.len() as u32);
+    o.push_str(s);
+}
+
+fn pvec32(o: &mut String, v: &Vector<u32>) {
+    pw32(o, v.len() as u32);
+    for i in 0..v.len() {
+        pw32(o, v[i]);
+    }
+}
+
+// A reader of a part (`Package::read_part`): `ok` goes false at the first read past the end.
+struct PartRd<'a> {
+    pub(package) b: str<'a>,
+    pub(package) at: usize,
+    pub(package) ok: bool,
+}
+
+extend<'a> PartRd<'a> {
+    const fn r8(self: &mut Self) u8 {
+        if !self.ok || self.at >= self.b.len() {
+            self.ok = false;
+            return 0;
+        }
+        self.at += 1;
+        return self.b.byte_at(self.at - 1);
+    }
+
+    const fn r32(self: &mut Self) u32 {
+        let v = self.r64();
+        if v > 0xFFFFFFFF {
+            self.ok = false;
+        }
+        return v as u32;
+    }
+
+    const fn r64(self: &mut Self) u64 {
+        let mut v: u64 = 0;
+        for k in 0..10u64 {
+            let c = self.r8();
+            v |= (c & 0x7F) as u64 << 7 * k;
+            if (c & 0x80) == 0 {
+                return v;
+            }
+        }
+        self.ok = false;
+        return 0;
+    }
+
+    fn rstr(self: &mut Self, out: &mut String) {
+        let n = self.r32() as usize;
+        if !self.ok || n > self.b.len() - self.at {
+            self.ok = false;
+            return;
+        }
+        out.push_str(self.b.slice(self.at, self.at + n));
+        self.at += n;
+    }
+
+    // `n` words into `v` (cleared); every count is bounded by the bytes left.
+    fn rvec32(self: &mut Self, v: &mut Vector<u32>) {
+        v.truncate(0);
+        let n = self.r32();
+        for _ in 0..ast::pick(self.ok && n as usize <= self.b.len() - self.at, n, 0u32) {
+            v.push(self.r32());
+        }
+    }
+
+    // A body (`Package::part_body`) into `b`, cleared first; false when it does not read.
+    fn body(self: &mut Self, b: &mut Body) bool {
+        b.clear();
+        let left = self.b.len() - self.at;
+        let ni = self.r32();
+        for _ in 0..ast::pick(ni as usize <= left, ni, 0u32) {
+            let op = self.r8();
+            let ty = self.r8();
+            let aux = self.r32() as u16;
+            let a = self.r32();
+            let bb = self.r32();
+            b.insts.push(Inst { op: op, ty: ty, aux: aux, a: a, b: bb, c: self.r32() });
+        }
+        self.rvec32(&mut b.locs);
+        let nb = self.r32();
+        for _ in 0..ast::pick(nb as usize <= left, nb, 0u32) {
+            let start = self.r32();
+            let len = self.r32();
+            let ps = self.r32();
+            let pl = self.r32() as u16;
+            b.blocks.push(Block { start: start, len: len, param_start: ps, param_len: pl, flags: self.r32() as u16 });
+        }
+        let np = self.r32();
+        for _ in 0..ast::pick(np as usize <= left, np, 0u32) {
+            b.params.push(self.r8());
+        }
+        self.rvec32(&mut b.pool);
+        let nw = self.r32();
+        for _ in 0..ast::pick(nw as usize <= left, nw, 0u32) {
+            b.words.push(self.r64());
+        }
+        let ns = self.r32();
+        for _ in 0..ast::pick(ns as usize <= left, ns, 0u32) {
+            let size = self.r32();
+            b.slots.push(Slot { size: size, align_log2: self.r8() });
+        }
+        self.rvec32(&mut b.syms);
+        self.rvec32(&mut b.msgs);
+        let nl = self.r32();
+        for _ in 1..ast::pick(nl as usize <= left && nl != 0, nl, 1u32) {
+            let file = self.r32();
+            let line = self.r32();
+            b.lines.push(Loc { file: file, line: line, col: self.r32() });
+        }
+        self.rvec32(&mut b.inl);
+        b.sig = self.r32();
+        b.naked = self.r8() != 0;
+        return self.ok && b.insts.len() == ni as usize && b.blocks.len() == nb as usize && b.lines.len() == ast::pick(
+            nl == 0,
+            1u32,
+            nl,
+        ) as usize;
     }
 }

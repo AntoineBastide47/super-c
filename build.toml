@@ -1,6 +1,8 @@
 bin = "super-c"
 root = "src/main.spc"
 std_internals = true
+# The SDK examples build once a client vendors the compiler (tests/api/api_sdk_test.spc builds them so).
+lint-exclude = ["docs/compiler-api/examples"]
 
 [command.bootstrap]
 run = [

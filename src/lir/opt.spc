@@ -1527,8 +1527,9 @@ extend Opt {
 /// (`lir::inline`), then goes through `Opt::run`. A body's level is one more than its callees' that
 /// may inline (0 without any; a call back into a body the walk is inside does not count), and the
 /// bodies of one level go in parallel, reading the lower levels'. A body of a unit `sealed` marks (by
-/// unit) inlines into bodies of its unit only.
-pub(package) fn optimize(pk: &mut Package, jobs: u32, sealed: &Vector<bool>) {
+/// unit) inlines into bodies of its unit only. A body `done` marks (by body; none past its end) is
+/// optimized already: the others read it, and it stays as it is.
+pub(package) fn optimize(pk: &mut Package, jobs: u32, sealed: &Vector<bool>, done: &Vector<bool>) {
     let mut bodies = replace(&mut pk.bodies, Vector::<Body>::new());
     {
         let p: &Package = pk;
@@ -1583,14 +1584,14 @@ pub(package) fn optimize(pk: &mut Package, jobs: u32, sealed: &Vector<bool>) {
             let part = byl.index_range_mut(at[l] as usize..at[l + 1] as usize);
             let okr: &Vector<bool> = &ok;
             if jobs < 2 || part.len() < 64 {
-                level_bodies(p, base, okr, ur, part);
+                level_bodies(p, base, okr, ur, done, part);
             } else {
                 // 16 bodies per task: the scratch grows once per task.
                 parallel::chunks_mut(
                     part,
                     16,
                     |c: []mut u32| {
-                        level_bodies(p, base, okr, ur, c);
+                        level_bodies(p, base, okr, ur, done, c);
                     },
                 );
             }
@@ -1606,10 +1607,13 @@ pub(package) fn optimize(pk: &mut Package, jobs: u32, sealed: &Vector<bool>) {
 // Each body `is` lists of the bodies at `base`: the callees `ok` marks inlined (`unit`: as
 // `Inliner::run` takes it), then optimized, with one scratch. Each task writes its own bodies and reads
 // the lower levels', which no task writes.
-fn level_bodies(p: &Package, base: usize, ok: &Vector<bool>, unit: &Vector<u32>, is: []mut u32) {
+fn level_bodies(p: &Package, base: usize, ok: &Vector<bool>, unit: &Vector<u32>, done: &Vector<bool>, is: []mut u32) {
     let mut il = il::Inliner::new();
     let mut o = Opt::new();
     for j in 0..is.len() {
+        if is[j] as usize < done.len() && done[is[j] as usize] {
+            continue;
+        }
         let b = unsafe &mut *(base as *mut Body + is[j] as usize);
         let inlined = il.run(p, base as *const Body, ok, unit, is[j], b);
         let _ = o.run(p, b, inlined);

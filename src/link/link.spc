@@ -9,6 +9,7 @@ import link::pe;
 import link::wasm as lw;
 import link::ar;
 import link::util as lu;
+import module::loader as loader;
 import target::table as tgt;
 import target::native as nat;
 import bindgen::ctarget as ct;
@@ -43,6 +44,9 @@ struct Cmd {
     pub(package) stack: u64, // the main thread's stack reserve (PE), 0: the default
     pub(package) wasm_stack: u64, // wasm: the stack's size (`-z stack-size=`), 0: the default
     pub(package) stack_first: bool, // wasm: the stack before the data
+    /// A shared library's export list (`-Wl,-exported_symbols_list,`, `-Wl,--version-script=`, a `.def`
+    /// input): the globals it exports, as the image spells them; None: every default-visibility global.
+    pub(package) exports: Option<Set<String>>,
 }
 
 /// Link for target `(os, isa)` what link command `args` names (its objects, libraries, flags and output, in
@@ -71,6 +75,7 @@ pub(package) fn link_args(os: i32, isa: i32, args: &Vector<String>, strip: bool,
         stack: 0,
         wasm_stack: 0,
         stack_first: false,
+        exports: Option::<Set<String>>::None,
     };
     let r = parse(args, &mut c, why);
     if r != LINKED {
@@ -104,6 +109,12 @@ fn parse(args: &Vector<String>, c: &mut Cmd, why: &mut String) i32 {
         } else {
             "";
         };
+        if !a.starts_with("-") && a.ends_with(".def") {
+            if !read_exports(a, 2, c, why) {
+                return NOT_SERVED;
+            }
+            continue;
+        }
         if !a.starts_with("-") {
             if !a.ends_with(".o") && !a.ends_with(".obj") && !ar::is_archive(a) {
                 why.format_into("input '{}'", a);
@@ -164,6 +175,14 @@ fn parse(args: &Vector<String>, c: &mut Cmd, why: &mut String) i32 {
             }
         } else if a == "-Wl,--stack-first" {
             c.stack_first = true;
+        } else if a.starts_with("-Wl,-exported_symbols_list,") {
+            if !read_exports(a.slice(27, a.len()), 0, c, why) {
+                return NOT_SERVED;
+            }
+        } else if a.starts_with("-Wl,--version-script=") {
+            if !read_exports(a.slice(21, a.len()), 1, c, why) {
+                return NOT_SERVED;
+            }
         } else if a == "-Wl,--strip-all" {
             c.strip = true;
         } else if a.starts_with("-Wl,-O") && a.len() == 7 && a.byte_at(6) >= b'0' && a.byte_at(6) <= b'9' {
@@ -178,6 +197,56 @@ fn parse(args: &Vector<String>, c: &mut Cmd, why: &mut String) i32 {
         return NOT_SERVED;
     }
     return LINKED;
+}
+
+// Read export list `path` into `c.exports`: `form` 0 a Mach-O list (a name per line), 1 a version script
+// whose `global:` names the exports and whose `local:` is `*`, 2 a module-definition file of `EXPORTS` and a
+// name per line. False with `why` set when the file does not read or has another form.
+fn read_exports(path: str, form: u8, c: &mut Cmd, why: &mut String) bool {
+    let text = switch loader::read_file(path) {
+        Some(t) => t,
+        None => {
+            why.format_into("export list '{}' does not read", path);
+            return false;
+        },
+    };
+    let mut names = Set::<String>::new();
+    // The version script's part: 0 before `global:`, 1 its names, 2 after `local:`.
+    let mut part: u8 = 0;
+    let mut ok = true;
+    for raw in text.as_str().lines() {
+        let line = raw.trim();
+        if line.len() == 0 {
+            continue;
+        }
+        if form == 0 {
+            names.insert(String::from_str(line));
+        } else if form == 2 {
+            if part == 0 {
+                ok = ok && line == "EXPORTS";
+                part = 1;
+            } else {
+                names.insert(String::from_str(line));
+            }
+        } else if line == "{" || line == "};" {
+            ok = ok && line == "{" == (part == 0);
+        } else if line == "global:" {
+            ok = ok && part == 0;
+            part = 1;
+        } else if line == "local: *;" {
+            ok = ok && part == 1;
+            part = 2;
+        } else {
+            ok = ok && part == 1 && line.ends_with(";") && line.len() > 1;
+            names.insert(String::from_str(line.slice(0, line.len() - 1)));
+        }
+    }
+    if !ok || form == 1 && part != 2 {
+        why.format_into("export list '{}'", path);
+        return false;
+    }
+    c.exports = Option::<Set<String>>::Some(names);
+    return true;
 }
 
 fn macho(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
@@ -197,6 +266,7 @@ fn macho(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
         sdk: replace(&mut c.sysroot, String::new()),
         strip: c.strip,
         jobs: c.jobs,
+        exports: replace(&mut c.exports, Option::<Set<String>>::None),
     };
     if o.kind == lm::K_DYLIB && o.install.len() == 0 {
         o.install = o.out.clone();
@@ -244,6 +314,7 @@ fn elf(os: i32, isa: i32, c: &mut Cmd, a64: bool, why: &mut String) i32 {
         sysroot: replace(&mut c.sysroot, String::new()),
         a64: a64,
         strip: c.strip,
+        exports: replace(&mut c.exports, Option::<Set<String>>::None),
     };
     if !le::link(&o, why) {
         return FAILED;
@@ -311,6 +382,7 @@ fn coff(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
         dirs: replace(&mut c.dirs, Vector::<String>::new()),
         strip: c.strip,
         stack: c.stack,
+        exports: replace(&mut c.exports, Option::<Set<String>>::None),
     };
     // The system's DLLs: on a Windows host, or in a directory the command names.
     if !pe::has_dlls(&o, why) {

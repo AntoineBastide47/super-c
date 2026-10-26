@@ -157,3 +157,14 @@ pub(package) const fn cstr<'a>(b: Slice<'a, u8>, at: usize) str<'a> {
 pub(package) const fn align_up(v: u64, a: u64) u64 {
     return v + a - 1 & ~(a - 1);
 }
+
+/// Whether export list `exports` (None: every global) names `name`.
+pub(package) fn listed(exports: &Option<Set<String>>, name: str) bool {
+    return switch exports {
+        Some(s) => {
+            let k = String::from_str(name);
+            s.contains(&k);
+        },
+        None => true,
+    };
+}

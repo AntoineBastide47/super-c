@@ -15,7 +15,7 @@ fn optimized(text: str) (Package, Package) {
     let before = q.unwrap();
     let mut after = lparse::parse(text, &mut err).unwrap();
     let none = Vector::<bool>::new();
-    lopt::optimize(&mut after, 1, &none);
+    lopt::optimize(&mut after, 1, &none, &none);
     let mut v = verify::Verifier::new();
     for i in 0..after.syms.len() {
         let s = after.syms[i];
@@ -307,7 +307,8 @@ b0(v0: i32):
     let mut sealed = Vector::<bool>::new();
     sealed.push(false);
     sealed.push(true);
-    lopt::optimize(&mut p, 1, &sealed);
+    let none = Vector::<bool>::new();
+    lopt::optimize(&mut p, 1, &sealed, &none);
     assert(!text_of(&p, "same").contains("@leaf"), "a body of the same unit inlines it");
     assert(text_of(&p, "other").contains("call @leaf"), "a body of another unit calls it");
 }

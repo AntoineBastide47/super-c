@@ -118,6 +118,11 @@ fn whole_project_lint_roots_a_nested_project_at_its_manifest() {
     p.mkfile("tools/t/util.spc", "pub fn u() i32 {\n    let unused = 1;\n    return 0;\n}\n");
     let w = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint");
     assert(w.exit != 0 && w.out_shows("unused variable 'unused'"), "the nested project is linted");
+    // `lint-exclude` skips a directory, the nested projects in it included.
+    let toml = cli::read_text(format("{}/build.toml", root).as_str());
+    p.mkfile("build.toml", format("lint-exclude = [\"tools\"]\n{}", toml.as_str()).as_str());
+    let x = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint");
+    assert(x.ok() && !x.out_has("unused variable"), "the excluded directory is not linted");
 }
 
 @test

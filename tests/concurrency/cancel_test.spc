@@ -222,6 +222,45 @@ fn edge_in_an_argument_never_reads_poison(fx: &mut Base) {
     assert_eq(frees(), 2);
 }
 
+// The owning result of a call that parks in `edge_helper`.
+fn payload_after(rx: &chan::Receiver<i64>) Payload {
+    return Payload { n: edge_helper(rx) };
+}
+
+// Cancel a task parked in a callee that returns an owning value into a `let`: the callee returns through
+// its ladder, so the result is poison. The caller's edge neither reads nor frees it.
+@test
+fn a_poisoned_owning_result_is_never_freed(fx: &mut Base) {
+    rt::set_worker_count(2);
+    let kch = chan::Channel::<rt::TaskKey>::bounded(1);
+    let ktx = kch.sender();
+    let krx = kch.receiver();
+    let ch = chan::Channel::<i64>::bounded(1);
+    let rx = ch.receiver();
+    let _tx_keep = ch.sender();
+    let wg = sync::WaitGroup::new();
+    wg.add(1);
+    let w = wg.clone();
+    launch || {
+        defer finish(&w);
+        let _ = ktx.send(rt::current_key());
+        let held = Payload { n: 1 };
+        let p = payload_after(&rx);
+        after_mark();
+        let _ = p.n + held.n;
+    };
+    let key = krx.recv().unwrap();
+    assert(ph::wait_parked(key), "the task parks");
+    assert(rt::request_cancel(key, rt::CR_USER), "the task is live");
+    assert(wg.wait_timeout(time::Duration::from_secs(5)), "the cancelled task finishes");
+    rt::shutdown();
+    assert_eq(cancelled(fx), 1);
+    assert_eq(unwounds(), 1);
+    assert_eq(afters(), 0);
+    // The helper's local and the task's `held`, once each; never the poison.
+    assert_eq(frees(), 2);
+}
+
 // Cancel a task parked in a method called on a call-result receiver, as a plain-let initializer or
 // as an expression statement: the edge after the call frees the receiver temporary exactly once.
 fn receiver_edge(fx: &mut Base, as_let: bool) {

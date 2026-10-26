@@ -18,6 +18,9 @@ import module::loader as loader;
 import std::platform::fs;
 import driver::util as *;
 import stdlib;
+import build_system::ext as ext;
+import lir::ir as lir;
+import target::native as nat;
 
 const TUC_MAGIC: u32 = 0x53435455; // "UTCS" little-endian spells SCTU on disk
 const TUC_VER: u32 = 13;
@@ -85,6 +88,16 @@ pub(package) struct Tuc {
     pub(package) slen: Vector<u64>,
     pub(package) out: String, // next cache image, assembled section by section in module order
     pub(package) path: String,
+    /// A later stage reads the bodies of other modules (the optimizer's inliner, the wasm backend): a module
+    /// replays only with its own items' LIR from the LIR image (`.tu_lir`), as the build that recorded it
+    /// left them, optimized. Per module, its part in `lraw` (length 0: none) and whether this build kept it.
+    pub(package) need_lir: bool,
+    pub(package) lraw: String,
+    pub(package) loff: Vector<u64>,
+    pub(package) llen: Vector<u64>,
+    pub(package) kept: Vector<bool>,
+    pub(package) lout: String,
+    pub(package) lpath: String,
     // Scratch of the live section `sec_rec` writes, reused across sections.
     pub(package) tt: TtRec,
     pub(package) xs: Vector<u32>,
@@ -109,6 +122,8 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
         }
     }
     h = fnv_mix(h, target as u64 ^ p.arch as u64 << 8);
+    // The project's steps and the installed hooks (`build::ext_id`).
+    h = fnv_mix(h, ext::id());
     // The CPU features and the backend table decide the vector entries a body
     // calls: every entry's key, features and name.
     h = fnv_mix(fnv_mix(fnv_mix(h, p.features.w[0]), p.features.w[1]), p.simd_width);
@@ -320,6 +335,13 @@ pub(package) fn tuc_setup(
         slen: Vector::<u64>::new(),
         out: String::new(),
         path: String::new(),
+        need_lir: false,
+        lraw: String::new(),
+        loff: Vector::<u64>::new(),
+        llen: Vector::<u64>::new(),
+        kept: Vector::<bool>::new(),
+        lout: String::new(),
+        lpath: String::new(),
         tt: tt_new(),
         xs: Vector::<u32>::new(),
         sat: Vector::<u32>::new(),
@@ -328,8 +350,13 @@ pub(package) fn tuc_setup(
     t.hit.resize_default(n);
     t.soff.resize_default(n);
     t.slen.resize_default(n);
-    // The evaluator check runs every test's body as the emitter lowers it: a replayed body is not rendered.
-    if gen_root.len() == 0 || n == 0 || stdlib::getenv("SC_LIR_EVAL") != null {
+    t.loff.resize_default(n);
+    t.llen.resize_default(n);
+    t.kept.resize_default(n);
+    // The evaluator check runs every test's body as the emitter lowers it, and a build that asks for the
+    // LIR text (`lir_out`) or whose hooks read the LIR (`ext::reads_ir`) needs every body: a replayed body is
+    // not rendered.
+    if gen_root.len() == 0 || n == 0 || p.lir_out != null || ext::reads_ir() || stdlib::getenv("SC_LIR_EVAL") != null {
         return t;
     }
     if stdlib::getenv("SC_NO_TU_CACHE") != null {
@@ -337,6 +364,9 @@ pub(package) fn tuc_setup(
         // the tree would otherwise hold a cache this build did not produce.
         let mut old = String::from_str(gen_root);
         old.push_str("/.tu_cache");
+        let _ = fs::unlink(old.as_str());
+        old.truncate(old.len() - 6);
+        old.push_str("lir");
         let _ = fs::unlink(old.as_str());
         return t;
     }
@@ -352,6 +382,11 @@ pub(package) fn tuc_setup(
     t.path.push_str(gen_root);
     t.path.push_str("/.tu_cache");
     t.on = true;
+    t.need_lir = p.native && (p.lir_opt || nat::obj_kind(target) == nat::OBJ_WASM);
+    if t.need_lir {
+        t.lpath.push_str(gen_root);
+        t.lpath.push_str("/.tu_lir");
+    }
     // The next image starts now; sections append in module order as the seed loop runs.
     t.out.reserve(est);
     w32(&mut t.out, TUC_MAGIC);
@@ -386,6 +421,12 @@ pub(package) fn tuc_setup(
         for m in 0..n {
             // Trailing garbage: distrust the whole image.
             t.hit.set(m, false);
+        }
+    }
+    if t.need_lir {
+        t.lir_read(n);
+        for m in 0..n {
+            t.hit.set(m, t.hit[m] && t.llen[m] != 0);
         }
     }
     return t;
@@ -1017,6 +1058,75 @@ extend Tuc {
         w64(&mut self.out, self.keys[m]);
         w32(&mut self.out, self.slen[m] as u32);
         self.out.push_str(self.raw.as_str().slice(self.soff[m] as usize, (self.soff[m] + self.slen[m]) as usize));
+    }
+
+    // Read the previous LIR image: the parts whose key is the module's. The same header as the image's.
+    fn lir_read(self: &mut Self, n: usize) {
+        self.lraw = loader::read_file(self.lpath.as_str()).unwrap_or(String::new());
+        let mut r = Rd { sp: self.lraw.as_str().ptr(), at: 0, end: self.lraw.len(), ok: true };
+        if r.r32() != TUC_MAGIC || r.r32() != TUC_VER || r.r64() != self.hdr || r.r32() as usize != n {
+            return;
+        }
+        for m in 0..n {
+            let key = r.r64();
+            let ln = r.r32() as u64;
+            if !r.ok || r.at as u64 + ln > r.end as u64 {
+                for k in 0..n {
+                    self.llen.set(k, 0);
+                }
+                return;
+            }
+            if key == self.keys[m] {
+                self.loff.set(m, r.at as u64);
+                self.llen.set(m, ln);
+            }
+            r.at += ln as usize;
+        }
+    }
+
+    /// Module `m`'s LIR part in the previous image (`lir::Package::write_part`); the caller checked `hit[m]`.
+    pub(package) const fn lir_part(self: &Self, m: usize) str {
+        return self.lraw.as_str().slice(self.loff[m] as usize, (self.loff[m] + self.llen[m]) as usize);
+    }
+
+    /// Module `m` replayed with its part: the next image carries it byte for byte.
+    pub(package) fn lir_keep(self: &mut Self, m: usize) {
+        if self.need_lir {
+            self.kept.set(m, true);
+        }
+    }
+
+    /// The next LIR image from package `pk` as the later stages read it: per module, its kept part, else the
+    /// part of its own functions (`lir::Package::write_part`).
+    pub(package) fn lir_write(self: &mut Self, pk: &lir::Package) {
+        let n = self.keys.len();
+        let mut own = Vector::<Vector<u32>>::new();
+        own.resize_default(n);
+        for s in 0..pk.syms.len() {
+            let y = pk.syms[s];
+            if y.kind == lir::SK_FUNC && y.def != lir::NONE && y.own && y.unit as usize < n {
+                own.index_mut(y.unit as usize).push(s as u32);
+            }
+        }
+        self.lout.truncate(0);
+        w32(&mut self.lout, TUC_MAGIC);
+        w32(&mut self.lout, TUC_VER);
+        w64(&mut self.lout, self.hdr);
+        w32(&mut self.lout, n as u32);
+        for m in 0..n {
+            w64(&mut self.lout, self.keys[m]);
+            if self.kept[m] {
+                w32(&mut self.lout, self.llen[m] as u32);
+                self.lout.push_str(
+                    self.lraw.as_str().slice(self.loff[m] as usize, (self.loff[m] + self.llen[m]) as usize),
+                );
+                continue;
+            }
+            let at = self.lout.len();
+            w32(&mut self.lout, 0);
+            pk.write_part(own[m].as_slice(), &mut self.lout);
+            p32(&mut self.lout, at, (self.lout.len() - at - 4) as u32);
+        }
     }
 
     /// A module with no cacheable section (it emits nothing, or its replay failed after a hit): an empty

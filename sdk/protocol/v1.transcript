@@ -1,0 +1,36 @@
+# Protocol v1 transcript: each request line (`> `) is followed by the server's exact reply (`< `).
+# A server of protocol major 1 answers these requests with these replies; `super-c tool-server` must.
+> {"id":1,"method":"hello","params":{"protocol_versions":[1],"required":["session","syntax","navigation","refactoring"]}}
+< {"id":1,"result":{"server":"super-c tool-server","api_version":1,"protocol":1,"capabilities":["session","syntax","navigation","refactoring"],"limits":{"max_frame":1048576,"max_workspaces":2}}}
+> {"id":2,"method":"open_workspace","params":{"kind":"file","path":"/virtual/app/main.spc","files":{"/virtual/app/main.spc":"fn twice(x: i32) i32 {\n    return x + x;\n}\n\nfn main() i32 {\n    let b: bool = 3;\n    return twice(2) - twice(2);\n}\n"}}}
+< {"id":2,"result":{"workspace":1,"revision":0}}
+> {"id":3,"method":"commit","params":{"workspace":1}}
+< {"id":3,"result":{"revision":0}}
+> {"id":4,"method":"query","params":{"workspace":1,"revision":0,"capability":"session","method":"diagnostics","arguments":{}}}
+< {"id":4,"result":{"items":[{"file":"/virtual/app/main.spc","start":68,"end":69,"severity":2,"code":"unused_binding","message":"unused variable 'b'"},{"file":"/virtual/app/main.spc","start":78,"end":79,"severity":1,"code":"mismatched_types_expected_found","message":"mismatched types: expected 'bool', found 'i32'"}],"next_cursor":-1}}
+> {"id":5,"method":"query","params":{"workspace":1,"revision":0,"capability":"navigation","method":"symbol_at","arguments":{"file":"/virtual/app/main.spc","offset":92}}}
+< {"id":5,"result":{"symbol":{"name":"twice","kind":"Function","signature":"fn twice(x: i32) i32","file":"/virtual/app/main.spc","start":3,"end":8}}}
+> {"id":6,"method":"query","params":{"workspace":1,"revision":0,"capability":"navigation","method":"references","arguments":{"file":"/virtual/app/main.spc","offset":92,"include_declaration":true}}}
+< {"id":6,"result":{"items":[{"file":"/virtual/app/main.spc","start":3,"end":8},{"file":"/virtual/app/main.spc","start":92,"end":97},{"file":"/virtual/app/main.spc","start":103,"end":108}],"next_cursor":-1}}
+> {"id":7,"method":"query","params":{"workspace":1,"revision":0,"capability":"navigation","method":"outline","arguments":{"file":"/virtual/app/main.spc"}}}
+< {"id":7,"result":{"items":[{"name":"twice","kind":"Function","detail":"fn twice(x: i32) i32","start":0,"end":42,"name_start":3,"name_end":8,"parent":-1},{"name":"main","kind":"Function","detail":"fn main() i32","start":44,"end":114,"name_start":47,"name_end":51,"parent":-1}],"next_cursor":-1}}
+> {"id":8,"method":"query","params":{"workspace":1,"revision":0,"capability":"syntax","method":"format","arguments":{"file":"/virtual/app/main.spc"}}}
+< {"id":8,"result":{"text":"fn twice(x: i32) i32 {\n    return x + x;\n}\n\nfn main() i32 {\n    let b: bool = 3;\n    return twice(2) - twice(2);\n}\n"}}
+> {"id":9,"method":"set_file_text","params":{"workspace":1,"file":"/virtual/app/main.spc","text":"fn twice(x: i32) i32 {\n    return x + x;\n}\n\nfn main() i32 {\n    let b: i32 = 3;\n    return twice(2) - twice(2);\n}\n"}}
+< {"id":9,"result":{"revision":1,"version":0}}
+> {"id":10,"method":"query","params":{"workspace":1,"revision":0,"capability":"session","method":"diagnostics","arguments":{}}}
+< {"id":10,"error":{"code":"stale_handle","message":"the revision is not the workspace's current one"}}
+> {"id":11,"method":"query","params":{"workspace":1,"revision":1,"capability":"session","method":"diagnostics","arguments":{}}}
+< {"id":11,"error":{"code":"not_checked","message":"the workspace has no analysis of this revision: commit first"}}
+> {"id":12,"method":"commit","params":{"workspace":1}}
+< {"id":12,"result":{"revision":1}}
+> {"id":13,"method":"query","params":{"workspace":1,"revision":1,"capability":"session","method":"diagnostics","arguments":{}}}
+< {"id":13,"result":{"items":[{"file":"/virtual/app/main.spc","start":68,"end":69,"severity":2,"code":"unused_binding","message":"unused variable 'b'"}],"next_cursor":-1}}
+> {"id":14,"method":"query","params":{"workspace":1,"revision":1,"capability":"refactoring","method":"rename","arguments":{"file":"/virtual/app/main.spc","offset":92,"new_name":"double"}}}
+< {"id":14,"result":{"items":[{"file":"/virtual/app/main.spc","start":3,"end":8,"text":"double"},{"file":"/virtual/app/main.spc","start":91,"end":96,"text":"double"},{"file":"/virtual/app/main.spc","start":102,"end":107,"text":"double"}],"next_cursor":-1}}
+> {"id":15,"method":"query","params":{"workspace":1,"revision":1,"capability":"navigation","method":"teleport","arguments":{}}}
+< {"id":15,"error":{"code":"protocol_failed","message":"unknown query 'navigation.teleport'"}}
+> {"id":16,"method":"close_workspace","params":{"workspace":1}}
+< {"id":16,"result":{}}
+> {"id":17,"method":"close_workspace","params":{"workspace":1}}
+< {"id":17,"error":{"code":"wrong_workspace","message":"no open workspace has this id"}}

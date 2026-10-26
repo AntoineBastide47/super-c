@@ -183,6 +183,11 @@ fn charset_ok(v: str) bool {
 /// bad Content-Length, an overlong or over-count header line, a non-UTF-8 charset, or a declared
 /// length over the 128 MiB cap.
 pub(package) fn read_message(rd: &mut Reader) Option<String> {
+    return read_message_max(rd, 128 * 1024 * 1024);
+}
+
+/// `read_message` with a cap of `max` body bytes, checked before the body is allocated.
+pub(package) fn read_message_max(rd: &mut Reader, max: usize) Option<String> {
     let mut clen: i64 = -1;
     let mut headers: u32 = 0;
     loop {
@@ -215,7 +220,7 @@ pub(package) fn read_message(rd: &mut Reader) Option<String> {
             }
         }
     }
-    if clen < 0 || clen > 128 * 1024 * 1024 {
+    if clen < 0 || clen as u64 > max as u64 {
         return Option::<String>::None;
     }
     return rd.body(clen as usize);

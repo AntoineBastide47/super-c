@@ -159,6 +159,12 @@ pub(package) struct Lower {
     pub(package) tests: Vector<LTest>,
     /// The function symbols lowered since the last `claim`.
     pend: Vector<u32>,
+    /// The bodies since the last `claim` that were lowered already (a cached module's LIR holds them).
+    pend_known: u32,
+    /// The function symbols a cached module's LIR restored (`load_part`): optimized already.
+    pub(package) loaded: Vector<u32>,
+    /// The restored ones not lowered again since (`body`).
+    relower: Set<u32>,
     pend_c: str<'static>, // what in them no object defines (a C header's constant, an intrinsic), else empty
     pend_name: String, // the C name `pend_c` is about
     fails_seen: usize, // `fails` at the last claim
@@ -240,6 +246,9 @@ extend Lower {
             fails: Vector::<LFail>::new(),
             tests: Vector::<LTest>::new(),
             pend: Vector::<u32>::new(),
+            pend_known: 0,
+            loaded: Vector::<u32>::new(),
+            relower: Set::<u32>::new(),
             pend_c: "",
             pend_name: String::new(),
             fails_seen: 0,
@@ -1670,8 +1679,15 @@ extend Lower {
         noret: bool,
     ) bool {
         self.nbodies += 1;
-        if self.pkg.find_symbol(name) != NONE && self.pkg.syms[self.pkg.find_symbol(name) as usize].def != NONE {
-            return true; // an emission of a body already lowered
+        let s0 = self.pkg.find_symbol(name);
+        let known = s0 != NONE && self.pkg.syms[s0 as usize].def != NONE;
+        if known {
+            self.pend_known += 1;
+            // A body a cached module's LIR restored lowers once more, for what its lowering demands; its LIR
+            // stays the restored one.
+            if !self.relower.remove(&s0) {
+                return true; // an emission of a body already lowered
+            }
         }
         let cd = c.collect_demand;
         let ro = c.mg.rec_on;
@@ -1685,6 +1701,9 @@ extend Lower {
         let ok = self.body_i(c, b, name, cm, cnode, noret);
         c.collect_demand = cd;
         c.mg.rec_on = ro;
+        if known {
+            return true;
+        }
         if !ok {
             self.fails.push(LFail { sym: String::from_str(name), why: self.err });
             if self.dbg || self.dump.len() != 0 && self.dump.as_str() == self.err {
@@ -7083,7 +7102,7 @@ extend Lower {
     /// unit's, its `own` ones when the chunk is of the module's own items. A chunk with none (C text the
     /// lowering does not see, or a refused body) or one that needs C (`pend_c`) puts the unit on C.
     pub(package) fn claim(self: &mut Self, unit: u32, what: str, own: bool) {
-        if self.pend.len() == 0 || self.pend_c.len() != 0 {
+        if self.pend.len() == 0 && self.pend_known == 0 || self.pend_c.len() != 0 {
             self.conly.push(unit);
             let mut why = String::new();
             if self.pend_c.len() != 0 && self.pend.len() != 0 {
@@ -7100,6 +7119,7 @@ extend Lower {
             self.conly_why.push(why);
         }
         self.fails_seen = self.fails.len();
+        self.pend_known = 0;
         self.pend_c = "";
         for i in 0..self.pend.len() {
             let y = self.pkg.syms.index_mut(self.pend[i] as usize);
@@ -7133,6 +7153,20 @@ extend Lower {
         }
         if a.attr_of(n, AttrKind::ATTR_NOINLINE) != null {
             self.pkg.syms.index_mut(s as usize).noinline = true;
+        }
+    }
+
+    /// Part `p` of a cached module (`Package::read_part`: its own items' LIR, as the build that recorded it
+    /// left them) into the package, its functions in `loaded`.
+    pub(package) fn load_part(self: &mut Self, p: &Package) {
+        let _ = self.pkg.absorb(p);
+        for s in 0..p.syms.len() {
+            let y = p.syms[s];
+            if y.kind == SK_FUNC && y.def != NONE {
+                let k = self.pkg.find_symbol(p.spell(y.name));
+                self.loaded.push(k);
+                let _ = self.relower.insert(k);
+            }
         }
     }
 

@@ -1504,6 +1504,10 @@ extend Interp {
             self.it_trap(IT_TRAP_BUDGET_STEPS, "const-eval step budget exceeded");
             return false;
         }
+        if (self.ticks & 0xFFFF) == 0 && loader::stop_now() {
+            self.it_trap(IT_TRAP_BUDGET_STEPS, "the API request that runs the evaluation stopped it");
+            return false;
+        }
         return true;
     }
 

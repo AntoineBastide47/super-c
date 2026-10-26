@@ -298,3 +298,76 @@ fn manifest_bootstrap_skips_unknown() {
     assert(m2.is_none());
     assert_eq(errs2.errors.at(0).msg.as_str(), "'bin' expects a string");
 }
+
+// `[lib] exports` selects the shared library's exported symbols: "all" (the default) or "c".
+@test
+fn manifest_lib_exports() {
+    let (d, _) = manifest::parse_check("[lib]\nname = \"x\"\ntype = [\"shared\"]\n", "", false);
+    assert(!d.unwrap().lib_exports_c, "the default exports every symbol");
+    let (c, _) = manifest::parse_check("[lib]\nname = \"x\"\ntype = [\"shared\"]\nexports = \"c\"\n", "", false);
+    assert(c.unwrap().lib_exports_c, "exports = c");
+    manifest_err(
+        "exports",
+        "[lib]\nname = \"x\"\nexports = \"some\"\n",
+        "[lib] exports takes \"all\" or \"c\", got 'some'",
+    );
+}
+
+// `[step.NAME]` sections in declaration order, `cache` true by default, and `[tools] hooks`; a step without an
+// argv or outputs, a path outside the project, a file two steps write, and a read of a later step's output are
+// errors.
+@test
+fn manifest_steps_and_hooks() {
+    let (m, _) = manifest::parse_check(
+        "bin = \"a\"\nroot = \"m.spc\"\n[tools]\nhooks = [\"t/h.spc\"]\n[step.b]\nargv = [\"gen\", \"x\"]\ninputs = [\"x\"]\noutputs = [\"y\"]\nenv = [\"LANG\"]\n[step.a]\nargv = [\"gen\"]\noutputs = [\"z\"]\ncache = false\n",
+        "",
+        false,
+    );
+    let man = m.unwrap();
+    assert_eq(man.hooks.len(), 1usize);
+    assert_eq(man.steps.len(), 2usize);
+    assert(man.steps[0].name.as_str() == "b" && man.steps[0].cache && man.steps[0].env.len() == 1, "step b");
+    assert(man.steps[1].name.as_str() == "a" && !man.steps[1].cache, "step a");
+    manifest_err(
+        "no argv",
+        "bin = \"a\"\nroot = \"m.spc\"\n[step.s]\noutputs = [\"y\"]\n",
+        "[step.s] needs an 'argv' that names its program",
+    );
+    manifest_err(
+        "no outputs",
+        "bin = \"a\"\nroot = \"m.spc\"\n[step.s]\nargv = [\"g\"]\n",
+        "[step.s] needs 'outputs': the files it writes",
+    );
+    manifest_err(
+        "outside",
+        "bin = \"a\"\nroot = \"m.spc\"\n[step.s]\nargv = [\"g\"]\noutputs = [\"../y\"]\n",
+        "[step.s]: '../y' is not a path inside the project",
+    );
+    manifest_err(
+        "two writers",
+        "bin = \"a\"\nroot = \"m.spc\"\n[step.s]\nargv = [\"g\"]\noutputs = [\"y\"]\n[step.t]\nargv = [\"g\"]\noutputs = [\"y\"]\n",
+        "[step.s] and [step.t] both write 'y'",
+    );
+    manifest_err(
+        "later output",
+        "bin = \"a\"\nroot = \"m.spc\"\n[step.s]\nargv = [\"g\"]\ninputs = [\"y\"]\noutputs = [\"x\"]\n[step.t]\nargv = [\"g\"]\noutputs = [\"y\"]\n",
+        "[step.s] reads 'y', which [step.t] writes: a step reads only what earlier steps write",
+    );
+    manifest_err(
+        "unknown key",
+        "bin = \"a\"\nroot = \"m.spc\"\n[step.s]\nrun = [\"g\"]\n",
+        "unknown [step.s] key 'run'",
+    );
+}
+
+// `lint-exclude` lists project directories; a path outside the project is an error.
+@test
+fn manifest_lint_exclude() {
+    let (m, _) = manifest::parse_check("bin = \"a\"\nroot = \"m.spc\"\nlint-exclude = [\"docs/examples\"]\n", "", false);
+    assert_eq(m.unwrap().lint_exclude.len(), 1usize);
+    manifest_err(
+        "outside",
+        "bin = \"a\"\nroot = \"m.spc\"\nlint-exclude = [\"/abs\"]\n",
+        "'lint-exclude': '/abs' is not a path inside the project",
+    );
+}
