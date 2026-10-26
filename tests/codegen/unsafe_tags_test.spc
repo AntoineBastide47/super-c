@@ -61,6 +61,9 @@ const fn line_has(text: str, a: str, b: str) bool {
 // it through the section.
 @test
 fn link_section_places_symbols() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("main.spc", SECTIONS);
     let r = p.compile("main.spc");
@@ -134,6 +137,9 @@ pub fn count() i32 {
 
 @test
 fn an_init_array_entry_runs_before_main() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     if cli::on_wasm() {
         return;
     }

@@ -423,6 +423,9 @@ fn header_type_declaration_errors() {
 // constant, and a wrong opaque layout.
 @test
 fn header_type_wrong_declaration_fails_the_c_compile() {
+    if !cli::has_cc() {
+        return; // the C compile checks the declaration
+    }
     let src = "extern \"C\" \"time.h\" {\n    struct tm { pub tm_sec: *mut void }\n}\nextern \"C\" \"stdlib.h\" {\n    @import(\"div_t\")\n    struct div_t { pub rem: i32, pub quot: i32 }\n    @import(\"ldiv_t\")\n    struct ldiv_t { pub quot: i64 }\n    @import(\"lldiv_t\")\n    struct lldiv_t { pub quot: f64, pub rem: i64 }\n    const EXIT_FAILURE: i32 = 2;\n}\nextern \"C\" \"wchar.h\" {\n    @layout(2, 2)\n    type mbstate_t;\n}\nfn main() i32 {\n    let t = unsafe zeroed::<tm>();\n    let d = unsafe zeroed::<div_t>();\n    let l = unsafe zeroed::<ldiv_t>();\n    let q = unsafe zeroed::<lldiv_t>();\n    let s = unsafe zeroed::<mbstate_t>();\n    let ss = s;\n    return d.rem + l.quot as i32 + q.quot as i32 + (t.tm_sec == null) as i32 + EXIT_FAILURE + sizeof(mbstate_t) as i32;\n}\n";
     let b = h::diff_build(src, []);
     let d = b.diag.as_str();
@@ -443,6 +446,9 @@ fn header_type_wrong_declaration_fails_the_c_compile() {
 // holds the message, which the C compiler prints with the error.
 @test
 fn header_type_missing_from_its_header() {
+    if !cli::has_cc() {
+        return; // the C compile checks the declaration
+    }
     let src = "extern \"C\" \"stdio.h\" {\n    pub struct pt { pub x: i32, pub y: i32 }\n}\nfn main() i32 {\n    let p = pt { x: 1, y: 2 };\n    return p.x + p.y - 3;\n}\n";
     let b = h::diff_build(src, ["--jobs=1"]);
     let d = b.diag.as_str();
@@ -480,6 +486,9 @@ const ENUM_H: str = "#ifndef LIB_H\n#define LIB_H\nenum color { RED, GREEN = 5, 
 // value through C, as a parameter and as a member of a header struct, under the strict warning set.
 @test
 fn header_enum_tag_and_typedef() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("lib.h", ENUM_H);
     p.mkfile(
@@ -524,6 +533,9 @@ fn header_enum_tag_and_typedef() {
 // first error of the C compile is at the type's completeness check, whose line holds the message.
 @test
 fn header_enum_wrong_spelling() {
+    if !cli::has_cc() {
+        return; // the C compile checks the declaration
+    }
     let p = h::diff_proj();
     p.mkfile("lib.h", ENUM_H);
     p.mkfile(
@@ -548,6 +560,9 @@ fn header_enum_wrong_spelling() {
 // compile stops at the first enumerator whose value differs, with a message that names it.
 @test
 fn header_enum_wrong_value() {
+    if !cli::has_cc() {
+        return; // the C compile checks the declaration
+    }
     let p = h::diff_proj();
     p.mkfile("lib.h", ENUM_H);
     p.mkfile(
@@ -680,6 +695,9 @@ const STAT: str = M"(extern "C" "sys/stat.h" {
 // C library's.
 @test
 fn header_type_reads_stat_of_a_file() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("data.bin", "hello");
     let mut path = String::new();
@@ -720,6 +738,9 @@ fn header_type_reads_stat_of_a_file() {
 // Super-C reads it, under the strict warning set.
 @test
 fn header_type_local_header_round_trip() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "lib.h",
@@ -790,6 +811,9 @@ fn extern_void_pointer_argument_spells_the_conversion() {
 // binding unit compiles outside the unity build, whose later members would see the macros too.
 @test
 fn header_macros_stay_in_the_units_that_use_the_header() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("lib.h", "#ifndef LIB_H\n#define LIB_H\n#define near\n#define far\nint twice(int x);\n#endif\n");
@@ -834,6 +858,9 @@ fn header_macros_stay_in_the_units_that_use_the_header() {
 // header first: `<ws2tcpip.h>` must come before `<windows.h>`, which `a.h` and `b.h` model.
 @test
 fn header_order_of_a_module_holds_across_modules() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("a.h", "#ifndef A_H\n#define A_H\n#ifdef B_H\n#error a.h after b.h\n#endif\nint a_one(void);\n#endif\n");
     p.mkfile("b.h", "#ifndef B_H\n#define B_H\nint b_two(void);\nint b_three(void);\n#endif\n");

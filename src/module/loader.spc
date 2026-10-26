@@ -186,6 +186,7 @@ pub struct Package {
     /// The build runs under a memory checker (an address, memory or thread sanitizer in its C flags):
     /// the planner keeps the checked lane loop of every masked or gather access.
     pub mem_check: bool,
+    pub cc_found: bool, // the engine that runs this transpile found the C compiler (`--cc-found`)
     /// The build makes a shared library: its code is position-independent (the C compile's `-fPIC`).
     pub pic: bool,
     /// The C compile's configuration (`bsys::build_cfg`): bit `k - BC_THREAD_SANITIZER` holds build
@@ -210,6 +211,9 @@ pub struct Package {
     /// The C library of a wasm build (`std::rt::libc` and `std::rt::libm`, loaded with the runtime): wasm
     /// has no system C library, and these call WASI directly; -1 for any other target.
     pub rt_libc: i32,
+    /// `std::rt::builtins`: the compiler-rt routines the native backends call, for a target whose C library
+    /// lacks them (all but Apple's); -1 when not loaded.
+    pub rt_builtins: i32,
     pub rt_libm: i32,
     /// The traps of the native backends' vector code (`std::rt::lanes`), loaded with a vector; -1 else.
     pub rt_lanes: i32,
@@ -1719,10 +1723,11 @@ pub fn set_load_target(arch: i32, features: cf::CpuFeatureSet) {
 /// analysis that follows runs on the same pool.
 pub fn set_load_jobs(j: u32) {
     unsafe G_LOAD_JOBS = j;
+    // Compiler tasks recurse deeply (parser, checker); reserve thread-sized task stacks BEFORE the
+    // pool's first launch (a later call is ignored), with one worker too: a serial load leaves later
+    // phases to start the pool.
+    prt::set_stack_size(8usize << 20);
     if j != 1 {
-        // Compiler tasks recurse deeply (parser, checker); reserve thread-sized task stacks
-        // BEFORE the pool's first launch (a later call is ignored), as the worker count.
-        prt::set_stack_size(8usize << 20);
         prt::set_worker_count(j as usize);
     }
 }
@@ -2333,7 +2338,7 @@ extend Package {
     /// wasm's C library. None is a program module: its symbols always take their module prefix, it shadows
     /// no name, its allocations are not tracked, and its extern headers stay out of the forward header.
     pub const fn is_rt(self: &Self, m: i32) bool {
-        return m >= 0 && (m == self.rt_module || m == self.rt_test || self.is_libc(m));
+        return m >= 0 && (m == self.rt_module || m == self.rt_test || m == self.rt_builtins || self.is_libc(m));
     }
 
     /// Whether module `m` is wasm's C library (`std::rt::libc` or `std::rt::libm`): its units compile
@@ -3646,6 +3651,7 @@ extend Package {
             rt_module: -1,
             rt_test: -1,
             rt_libc: -1,
+            rt_builtins: -1,
             rt_libm: -1,
             rt_lanes: -1,
             root: -1,
@@ -7593,6 +7599,11 @@ extend Package {
         let tf = join2(std_dir, "rt/test.spc");
         if self.test_build && self.rt_test < 0 && dutil::file_mtime(tf.as_str()) != 0 {
             self.rt_test = self.load_module("std::rt::test", tf.as_str(), self.bootstrap, target);
+        }
+        // The 128-bit routines the native code calls, where only the C toolchain's archives hold them.
+        let bf0 = join2(std_dir, "rt/builtins.spc");
+        if !tgt::os(target).darwin && self.rt_builtins < 0 && dutil::file_mtime(bf0.as_str()) != 0 {
+            self.rt_builtins = self.load_module("std::rt::builtins", bf0.as_str(), self.bootstrap, target);
         }
         // wasm has no system C library: these implement the subset the program uses, over WASI.
         if tgt::os(target).own_libc && self.rt_libc < 0 {

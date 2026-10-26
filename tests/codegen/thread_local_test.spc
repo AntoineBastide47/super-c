@@ -1,5 +1,6 @@
 // `@thread_local` gives a `static mut` one object per OS thread. Each use reaches the object through an
 // accessor the C compiler cannot fold across calls, since a coroutine may resume on another thread.
+import tests::cli_harness as cli;
 import tests::harness as h;
 
 // Each thread starts from the initializer and changes only its own object.
@@ -42,6 +43,9 @@ fn main() i32 {
 fn each_thread_has_its_own_object(b: &mut h::ExitBatch) {
     if h::target_lane() {
         return; // WASI has no threads
+    }
+    if PLATFORM == Platform::Windows && !cli::has_cc() {
+        return; // POSIX threads on Windows are mingw-w64's winpthreads, a C toolchain library
     }
     b.add("each thread has its own thread-local objects", THREADS, 0);
 }

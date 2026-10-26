@@ -63,8 +63,8 @@ const fn bit(r: u8) u64 {
 // The Microsoft x64 UNWIND_INFO of a prologue of `pl` bytes into `out`: `push rbp` (1 byte; the `mov rbp,
 // rsp` after it changes nothing the unwinder restores), the pushes of `regs` ending at `push_at`, the
 // allocation of `local` bytes ending at `alloc_end`, and the saves of xmm `xregs` at rsp + `xsave` +
-// 16 j ending at `xsave_at`. No frame register: the body keeps rsp where the prologue leaves it. The
-// codes run backwards through the prologue.
+// 16 j ending at `xsave_at`; with frame register `fp` (NOREG: none), its copy of rsp ending at `fp_at`,
+// after which the prologue aligns rsp. The codes run backwards through the prologue.
 fn win_unwind(
     out: &mut Vector<u8>,
     pl: u32,
@@ -75,8 +75,15 @@ fn win_unwind(
     xsave_at: &Vector<u32>,
     xregs: &Vector<u8>,
     xsave: u32,
+    fp: u8,
+    fp_at: u32,
 ) {
     let mut codes = Vector::<u8>::new();
+    // The frame register (NOREG: none) holds rsp after the allocation: UWOP_SET_FPREG, offset 0.
+    if fp != NOREG {
+        codes.push(fp_at as u8);
+        codes.push(3);
+    }
     let mut j = xregs.len();
     while j > 0 {
         j -= 1;
@@ -121,7 +128,13 @@ fn win_unwind(
     out.push(1);
     out.push(pl as u8);
     out.push(n as u8);
-    out.push(0);
+    out.push(
+        if fp != NOREG {
+            fp;
+        } else {
+            0u8;
+        },
+    );
     for q in 0..codes.len() {
         out.push(codes[q]);
     }
@@ -4027,10 +4040,17 @@ extend Gen {
         return true;
     }
 
-    // `rt_call128` under Microsoft x64: an i128 passes as a pointer to a copy and returns in xmm0; a
-    // float takes the vector register of its position, any other value the integer one.
+    // `rt_call128` under Microsoft x64: an i128 passes as a pointer to a copy; a float takes the vector
+    // register of its position, any other value the integer one. An i128 result comes back through a
+    // pointer in the first position, from the runtime's `__sc_<name>` (`std::rt::builtins`): compiler-rt's
+    // own returns it in xmm0, which no Super-C function can.
     fn rt_call128_win(self: &mut Self, i: u32, name: str, xa: Value, ya: Value) bool {
-        let mut k: u32 = 0;
+        let wide = self.b().insts[i as usize].ty == T_I128;
+        let mut k: u32 = if wide {
+            1;
+        } else {
+            0;
+        };
         for q in 0..2 {
             let v = if q == 0 {
                 xa;
@@ -4053,12 +4073,13 @@ extend Gen {
             }
             k += 1;
         }
-        self.call_sym(name);
         let ty = self.b().insts[i as usize].ty;
-        if ty == T_I128 {
+        if wide {
             let d = self.mdef(i) as i32;
-            self.c.vstore(16, 0, x::at(x::RSP, d));
+            self.c.lea(w64::gp_arg(0), x::at(x::RSP, d));
+            self.call_sym(format("__sc_{}", name.slice(2, name.len())).as_str());
         } else {
+            self.call_sym(name);
             self.result_in(
                 i,
                 if Gen::is_v(ty) {
@@ -4316,9 +4337,21 @@ extend Gen {
         if self.err.len() != 0 {
             return false;
         }
+        // Microsoft x64 unwinds an rsp the prologue moves by constants only, or one a frame register gives
+        // back: an over-aligned frame keeps the allocated frame's bottom in a callee-saved register the body
+        // leaves alone (the unwind information's frame register), then aligns rsp.
+        let mut fp: u8 = NOREG;
         if self.win && self.max_align > 16 {
-            // Microsoft x64 unwinds an rsp the prologue sets to a constant distance only.
-            return self.refuse("a frame aligned past 16 bytes on Windows");
+            let free: [u8; 7] = [3, 6, 7, 12, 13, 14, 15];
+            for r in free {
+                if fp == NOREG && (self.csr & bit(r)) == 0 {
+                    fp = r;
+                }
+            }
+            if fp == NOREG {
+                return self.refuse("a frame aligned past 16 bytes on Windows that uses every callee-saved register");
+            }
+            self.csr |= bit(fp);
         }
         let mut regs = Vector::<u8>::new();
         for r in 0..16u32 {
@@ -4372,13 +4405,18 @@ extend Gen {
             pro.alu_ri(x::SUB, 8, x::RSP, left as i32);
         }
         let alloc_end = pro.len();
-        if self.max_align > 16 {
-            pro.alu_ri(x::AND, 8, x::RSP, -(self.max_align as i32));
-        }
         let mut xsave_at = Vector::<u32>::with_capacity(xregs.len());
         for j in 0..xregs.len() {
             pro.vstore(16, xregs[j], x::at(x::RSP, (xsave + 16 * j as u32) as i32));
             xsave_at.push(pro.len());
+        }
+        let mut fp_at: u32 = 0;
+        if fp != NOREG {
+            pro.mov_rr(8, fp, x::RSP);
+            fp_at = pro.len();
+        }
+        if self.max_align > 16 {
+            pro.alu_ri(x::AND, 8, x::RSP, -(self.max_align as i32));
         }
         let pl = pro.len();
         if self.win && pl > 255 {
@@ -4386,12 +4424,15 @@ extend Gen {
         }
         let body_n = self.c.len();
         // The epilogue: under Microsoft x64 the vector registers back, then the form its unwinder knows
-        // (`add rsp`, the pops, `ret`).
+        // (`add rsp`, or `lea rsp` from the frame register, the pops, `ret`).
         if self.win {
+            let base = ast_pick(fp != NOREG, fp, x::RSP);
             for j in 0..xregs.len() {
-                self.c.vload(16, xregs[j], x::at(x::RSP, (xsave + 16 * j as u32) as i32));
+                self.c.vload(16, xregs[j], x::at(base, (xsave + 16 * j as u32) as i32));
             }
-            if local != 0 {
+            if fp != NOREG {
+                self.c.lea(x::RSP, x::at(fp, local as i32));
+            } else if local != 0 {
                 self.c.alu_ri(x::ADD, 8, x::RSP, local as i32);
             }
             let mut k = regs.len();
@@ -4474,7 +4515,7 @@ extend Gen {
         }
         let c0 = o.cfi.len() as u32;
         if self.win {
-            win_unwind(&mut o.cfi, pl, &push_at, &regs, alloc_end, local, &xsave_at, &xregs, xsave);
+            win_unwind(&mut o.cfi, pl, &push_at, &regs, alloc_end, local, &xsave_at, &xregs, xsave, fp, fp_at);
             o.frames.push(ob::OFrame { sym: k2, size: size, cfi_at: c0, cfi_len: o.cfi.len() as u32 - c0 });
             return true;
         }
@@ -6774,7 +6815,9 @@ extend Gen {
         let mut imm = Vector::<i64>::new();
         let mut plus = Vector::<bool>::new();
         let mut ties = Vector::<u32>::new();
+        let mut early = Vector::<bool>::new();
         let mut taken: u64 = clob;
+        let mut in_named: u64 = 0;
         // The named registers first.
         for k in 0..n {
             let con = if k < no {
@@ -6791,6 +6834,7 @@ extend Gen {
             let mut c: u8 = 0xFF;
             let mut rg: u8 = NOREG;
             let mut pl = false;
+            let mut ec = false;
             let mut tie: u32 = NONE;
             for j in 0..con.len() {
                 let ch = con.byte_at(j);
@@ -6805,6 +6849,8 @@ extend Gen {
                 };
                 if ch == b'+' {
                     pl = true;
+                } else if ch == b'&' {
+                    ec = true;
                 } else if named != NOREG {
                     c = AK_GP;
                     rg = named;
@@ -6833,11 +6879,23 @@ extend Gen {
             if c == AK_FP && !is_float(ty) || k < no && c == AK_IMM || c == AK_GP && is_float(ty) {
                 return self.refuse("an asm operand of the wrong class for its type");
             }
+            // An input naming the register of an output that is neither early-clobber nor read shares it, as a
+            // matching input does: it is read before the output is written (GCC's rule).
+            if rg != NOREG && tie == NONE && k >= no && (taken & ~clob & bit(rg)) != 0 && (in_named & bit(rg)) == 0 {
+                for j in 0..no {
+                    if reg[j as usize] == rg && !early[j as usize] && !plus[j as usize] {
+                        tie = j;
+                    }
+                }
+            }
             if rg != NOREG && tie == NONE {
                 if (taken & bit(rg)) != 0 {
                     return self.refuse("two asm operands name one register, or a clobbered one");
                 }
                 taken |= bit(rg);
+                if k >= no {
+                    in_named |= bit(rg);
+                }
             }
             let mut kv: u64 = 0;
             if c == AK_IMM && !self.const_of(v, &mut kv) {
@@ -6849,6 +6907,7 @@ extend Gen {
             imm.push(kv as i64);
             plus.push(pl);
             ties.push(tie);
+            early.push(ec);
         }
         // Then the free caller-saved ones: not the scratch registers r10, r11 and the vector two. A
         // matching input takes its output's, which comes first.

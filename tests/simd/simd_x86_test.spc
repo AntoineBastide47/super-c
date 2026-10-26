@@ -300,6 +300,9 @@ extend Kernels {
 // `--simd-width=512`) in an `x86-64-v4` one; a baseline function names no AVX register.
 @test
 fn operations_lower_to_their_instructions() {
+    if !cli::has_cc() {
+        return; // it reads the C compiler's assembly
+    }
     if !x86_host() {
         return;
     }

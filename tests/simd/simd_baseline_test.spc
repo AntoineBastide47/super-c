@@ -7,6 +7,9 @@ import std::platform::fs;
 
 @test(timeout = 300)
 fn simd_baseline_kernels_match_the_scalar_loops() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let arch = if ARCH == Arch::AArch64 {
         "aarch64";
     } else {

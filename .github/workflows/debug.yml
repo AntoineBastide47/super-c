@@ -2,8 +2,9 @@
 # content, run on demand from the Actions tab. Edit the job for the next investigation; do not remove
 # the file. Current probe: the Windows test suite (quiet run, failures replay streams straight into
 # the job log), a verbose Linux run with a stuck-program watchdog, plus the release workflow's wasm leg
-# without its self-host fixpoint (the release workflow keeps it), and the native backend against the C
-# pipeline on macOS, Linux and Windows (`speed`, ci/speed.sh), with the release's transpile counts.
+# without its self-host fixpoint (the release workflow keeps it), the native backend against the C
+# pipeline on macOS, Linux and Windows (`speed`, ci/speed.sh), with the release's transpile counts, and
+# the suite with no C compiler and no linker on every target (`*-nocc`).
 # Each platform builds its compiler once (`*-compile`) and runs its test shards in parallel on it (three
 # on Windows, the slowest runner, two elsewhere); Linux arm64 builds its compiler on the arm64 runner from
 # one the x86-64 runner cross-builds. It restores the release workflow's caches and saves none.
@@ -108,6 +109,13 @@ jobs:
           cstd=${SC_CSTD:+--cstd=$SC_CSTD}
           dur=tests/durations/windows.tsv; [ -f "$dur" ] || dur=tests/durations.tsv # shard balance (test-durations.yml)
           SC_LEAK_CHECK=fatal timeout 1200 "./super-c${BINEXT:-}" test --sanitizers --test-shard=${{ matrix.test_shard }} --test-durations="$dur" ${cstd:+"$cstd"}
+
+      - name: Defender's detections
+        if: failure()
+        shell: powershell
+        run: |
+          Get-MpThreatDetection | Format-List
+          Get-MpThreat | Format-List
 
   linux-compile:
     name: linux compile
@@ -346,6 +354,229 @@ jobs:
           chmod +x ./super-c
           dur=tests/durations/wasm.tsv; [ -f "$dur" ] || dur=tests/durations.tsv # shard balance (test-durations.yml)
           SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --sanitizers --test-shard=${{ matrix.test_shard }} --test-durations="$dur"
+
+  # No C compiler and no linker: the native backends and the own linkers build the compiler with the
+  # compile job's one and run the suite with it; a test that compiles C itself returns early
+  # (`cli::has_cc`). Linux runs in an image with the C library's headers alone (`libc6-dev`, where the
+  # header facts come from) and git (the vendor tests); macOS and Windows leave their preinstalled C
+  # tools unused through a CC that names no file.
+  linux-nocc:
+    needs: linux-compile
+    name: linux no cc (tests ${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test_shard: ["1/2", "2/2"]
+    runs-on: ubuntu-latest
+    container: ubuntu:26.04
+    steps:
+      - name: Install the C headers and git, no compiler or linker
+        run: |
+          set -eu
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libc6-dev git ca-certificates
+          for t in cc gcc clang ld; do
+            if command -v "$t"; then exit 1; fi
+          done
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-linux
+
+      - name: Build the compiler with itself
+        run: |
+          set -eu
+          chmod +x super-c
+          mv super-c super-c-boot
+          SC_LEAK_CHECK=fatal ./super-c-boot build
+          test -x ./super-c
+
+      - name: Run the test suite
+        run: SC_NATIVE_LOG="$RUNNER_TEMP/native.log" SC_LEAK_CHECK=fatal timeout 1500 ./super-c test --test-shard=${{ matrix.test_shard }}
+
+      - name: The modules that went through C
+        if: failure()
+        run: cat "$RUNNER_TEMP/native.log" || true
+
+  linux-arm64-nocc:
+    needs: linux-arm64-compile
+    name: linux arm64 no cc (tests ${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test_shard: ["1/2", "2/2"]
+    runs-on: ubuntu-26.04-arm
+    container: ubuntu:26.04
+    steps:
+      - name: Install the C headers and git, no compiler or linker
+        run: |
+          set -eu
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libc6-dev git ca-certificates
+          for t in cc gcc clang ld; do
+            if command -v "$t"; then exit 1; fi
+          done
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-linux-arm64-boot
+
+      - name: Build the compiler with itself
+        run: |
+          set -eu
+          chmod +x super-c-a64
+          mv super-c-a64 super-c-boot
+          SC_LEAK_CHECK=fatal ./super-c-boot build
+          test -x ./super-c
+
+      - name: Run the test suite
+        run: SC_NATIVE_LOG="$RUNNER_TEMP/native.log" SC_LEAK_CHECK=fatal timeout 1500 ./super-c test --test-shard=${{ matrix.test_shard }}
+
+      - name: The modules that went through C
+        if: failure()
+        run: cat "$RUNNER_TEMP/native.log" || true
+
+  macos-nocc:
+    name: macos no cc (tests ${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test_shard: ["1/2", "2/2"]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: macos
+          sha: ${{ github.sha }}
+
+      - uses: ./.github/actions/bootstrap
+        with:
+          target: macos
+
+      - name: Build the compiler through C, then with itself without it
+        run: |
+          set -eu
+          SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags -o super-c-cc
+          CC=/nonexistent/cc SC_LEAK_CHECK=fatal ./super-c-cc build
+          rm -f super-c-cc
+          test -x ./super-c
+
+      # macOS has no `timeout`: the job's own limit bounds the run.
+      - name: Run the test suite
+        timeout-minutes: 30
+        env:
+          CC: /nonexistent/cc
+        run: SC_NATIVE_LOG="$RUNNER_TEMP/native.log" SC_LEAK_CHECK=fatal ./super-c test --test-shard=${{ matrix.test_shard }}
+
+      - name: The modules that went through C
+        if: failure()
+        run: cat "$RUNNER_TEMP/native.log" || true
+
+  windows-nocc:
+    needs: windows-compile
+    name: windows no cc (tests ${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test_shard: ["1/3", "2/3", "3/3"]
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      CC: C:/nonexistent/cc.exe
+      BINEXT: .exe
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Exclude work dirs from Defender
+        shell: powershell
+        run: |
+          Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
+          Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP"
+          Add-MpPreference -ExclusionProcess "super-c.exe"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-windows
+
+      - name: Build the compiler with itself
+        run: |
+          set -eu
+          mv super-c.exe super-c-boot.exe
+          SC_LEAK_CHECK=fatal ./super-c-boot.exe build
+          test -x ./super-c.exe
+
+      - name: Run the test suite
+        run: SC_NATIVE_LOG="$RUNNER_TEMP/native.log" SC_LEAK_CHECK=fatal timeout 1500 ./super-c.exe test --test-shard=${{ matrix.test_shard }}
+
+      - name: The modules that went through C
+        if: failure()
+        run: cat "$RUNNER_TEMP/native.log" || true
+
+      - name: Defender's detections
+        if: failure()
+        shell: powershell
+        run: |
+          Get-MpThreatDetection | Format-List
+          Get-MpThreat | Format-List
+
+  # The wasm leg without the wasi-sdk: its sysroot (headers and C library, no compiler) for the header
+  # facts and wasmtime to run the compiler.
+  wasm-nocc:
+    needs: linux-compile
+    name: wasm no cc (tests ${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test_shard: ["1/2", "2/2"]
+    runs-on: ubuntu-latest
+    container: ubuntu:26.04
+    steps:
+      - name: Install the C headers, git, the WASI sysroot and wasmtime, no compiler or linker
+        run: |
+          set -eu
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libc6-dev git ca-certificates curl xz-utils
+          curl -sSfL -o /tmp/wasi-sysroot.tar.gz \
+            https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sysroot-25.0.tar.gz
+          mkdir -p /opt/wasi-sysroot
+          tar -xzf /tmp/wasi-sysroot.tar.gz -C /opt/wasi-sysroot --strip-components=1
+          curl -sSfL -o /tmp/wasmtime.tar.xz \
+            https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.2/wasmtime-v49.0.2-x86_64-linux.tar.xz
+          tar -xJf /tmp/wasmtime.tar.xz -C /usr/local/bin --strip-components=1 wasmtime-v49.0.2-x86_64-linux/wasmtime
+          wasmtime --version
+          echo "WASI_SYSROOT=/opt/wasi-sysroot" >> "$GITHUB_ENV"
+          for t in cc gcc clang ld; do
+            if command -v "$t"; then exit 1; fi
+          done
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-linux
+
+      - name: Build the native compiler with itself, then the wasm compiler
+        run: |
+          set -eu
+          chmod +x super-c
+          mv super-c super-c-boot
+          SC_LEAK_CHECK=fatal ./super-c-boot build
+          ./super-c build --target=wasm --profile=release -o super-c.wasm
+
+      - name: Run the test suite against the wasm compiler
+        run: SC_NATIVE_LOG="$RUNNER_TEMP/native.log" SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal timeout 1500 ./super-c test --test-shard=${{ matrix.test_shard }}
+
+      - name: The modules that went through C
+        if: failure()
+        run: cat "$RUNNER_TEMP/native.log" || true
 
   # The native backend against the C pipeline on each platform (ci/speed.sh): cold self-builds, the
   # speed of the compiler each pipeline produces, and the transpile count of each.

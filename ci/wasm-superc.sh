@@ -39,4 +39,8 @@ while IFS='=' read -r k v; do
 done <<EOF
 $(env)
 EOF
-exec wasmtime run --dir=/ --argv0 "$WASM" $ENVF -- "$WASM" "$@" $PIN
+# The guest finds the C compiler and the target's C headers as the host compiler does: through PATH, CC
+# and the WASI variables, passed whole (each may hold spaces).
+exec wasmtime run --dir=/ --argv0 "$WASM" $ENVF --env "PATH=$PATH" ${CC:+--env "CC=$CC"} \
+  ${WASI_SDK_PATH:+--env "WASI_SDK_PATH=$WASI_SDK_PATH"} ${WASI_SYSROOT:+--env "WASI_SYSROOT=$WASI_SYSROOT"} \
+  -- "$WASM" "$@" $PIN

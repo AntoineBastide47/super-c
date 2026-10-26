@@ -177,6 +177,9 @@ fn fn_body<'a>(c: str<'a>, name: str) str<'a> {
 // lane loops fails.
 @test
 fn operations_lower_to_their_instructions() {
+    if !cli::has_cc() {
+        return; // it reads the C compiler's assembly
+    }
     if !aarch64_host() {
         return;
     }
@@ -399,6 +402,9 @@ fn neon_memory_bindings_state_their_range() {
 // `avx2`, so on either instruction set one of them can be present).
 @test
 fn detection_reports_the_machine() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("pre.h", "int pre_dotprod(void);\nint pre_avx2(void);\n");
     p.mkfile(
@@ -440,6 +446,9 @@ fn main() i32 {
 // `main`, so they race on the published answer and on fresh OS queries, not on the first detection.
 @test
 fn concurrent_queries_agree_without_a_race() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     if cli::on_windows() || cli::on_wasm() || h::simd_lane() {
         return;
     }

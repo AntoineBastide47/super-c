@@ -61,6 +61,9 @@ fn gen_math_seed_3() {
 // program to the one overflowing case.
 @test
 fn gen_finds_planted_defect() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the planted defect is a C flag: the C backend's
     let mut m = scalar::scalar_model(4, 2);
     let mut plant = String::from_str("--cstd=");

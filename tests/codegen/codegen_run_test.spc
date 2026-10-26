@@ -5012,6 +5012,9 @@ fn memmove_overlap_both_directions(b: &mut h::ExitBatch) {
 // `Self` in a generic extend of another module is the instance it is called through.
 @test
 fn a_foreign_generic_self_result_is_the_instance() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "w.spc",
@@ -5532,6 +5535,9 @@ fn assert_eq_prints_its_operands() {
     const WIDE: str = "fn main() i32 {\n    assert_eq(9223372036854775808u64, 3u64);\n    return 0;\n}\n";
     const FLOAT: str = "fn main() i32 {\n    let s = \"ab\";\n    assert_eq(s, \"ab\");\n    let x: f32 = 1.5;\n    assert_ne(x, 1.5);\n    return 0;\n}\n";
     for c in [false, true] {
+        if c && !cli::has_cc() {
+            break;
+        }
         let w = if c {
             h::compile_and_run_c(WIDE);
         } else {

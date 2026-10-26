@@ -311,6 +311,9 @@ const fn pick_lane(lane: bool) usize {
 // WASI has no threads: there one half runs first, and the other half must hold its zeros.
 @test
 fn disjoint_masked_stores_do_not_race() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     if h::simd_lane() {
         h::expect_run(
             "disjoint masked stores",
@@ -381,6 +384,9 @@ fn main() i32 {
 // -Wall -Wextra -Werror, then run.
 @test
 fn every_form_compiles_under_strict_warnings() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",

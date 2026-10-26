@@ -180,6 +180,7 @@ pub struct Pool {
 
 // --- the pool -----------------------------------------------------------------------------------------.
 
+@platform(!wasm)
 fn build_pool() *mut Pool {
     let mut g = Global {};
     let p = (unsafe g.alloc(sizeof(Pool), alignof(Pool))) as *mut Pool;
@@ -267,6 +268,7 @@ fn ensure_pool() *mut Pool {
 
 // Normal process exit (`atexit`): release the pool as `try_shutdown` does, so a program that returns
 // from main without calling `shutdown` leaves no pool behind. Outstanding work keeps it, as there.
+@platform(!wasm)
 fn exit_release() {
     if !on_pool_thread() {
         let _ = try_shutdown(SHUTDOWN_GRACE_NS);

@@ -130,7 +130,8 @@ fn compile_run(em: &cb::CEmit, main_body: str) i32 {
     // -pedantic-errors: the emitted output is portable C11, no GNU extensions (ZST storage is
     // elided, so even zero-sized types spell portably).
     let mut cmd = format(
-        "cc -std=c11 -pedantic-errors -Wall -Werror -funsigned-char -ffp-contract=off -I{} -o {}/probe {}/probe.c",
+        "\"{}\" -std=c11 -pedantic-errors -Wall -Werror -funsigned-char -ffp-contract=off -I{} -o {}/probe {}/probe.c",
+        unsafe str::from_cstr(cli::cc_name()),
         rt.as_str(),
         root,
         root,
@@ -142,6 +143,9 @@ fn compile_run(em: &cb::CEmit, main_body: str) i32 {
 
 @test
 fn arithmetic_and_branches_behave() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = typed_package(
         "pub fn collatz_steps(n0: u64) u64 { let mut n = n0; let mut steps: u64 = 0; while n != 1 { if n % 2 == 0 { n = n / 2; } else { n = 3 * n + 1; } steps += 1; } return steps; }\npub fn mix(a: i32, b: i32) i32 { let mut acc = a * 3 - b; acc = acc ^ (b << 2); if acc < 0 { acc = -acc; } return acc % 251; }\nfn main() i32 { return 0; }",
     );
@@ -160,6 +164,9 @@ fn arithmetic_and_branches_behave() {
 
 @test
 fn calls_and_recursion_behave() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = typed_package(
         "pub fn gcd(a: u64, b: u64) u64 { if b == 0 { return a; } return gcd(b, a % b); }\npub fn lcm(a: u64, b: u64) u64 { return a / gcd(a, b) * b; }\nfn main() i32 { return 0; }",
     );

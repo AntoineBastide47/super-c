@@ -154,6 +154,13 @@ pub fn cc_name() *const char {
     return "cc".ptr() as *const char;
 }
 
+/// Whether the C compiler (`cc_name`) is installed. A test that compiles C itself or forces the C path
+/// returns early without it: the lane with no C compiler runs the rest.
+pub fn has_cc() bool {
+    let mut path = String::new();
+    return ocache::which_path(unsafe str::from_cstr(cc_name()), &mut path) != 0;
+}
+
 /// Whether the C compiler (`cc_name`) is clang: its `--version` says so.
 pub fn cc_is_clang() bool {
     let out = format("{}/cc_version_{}.txt", tmp_dir().as_str(), process::pid().unwrap_or(1));
@@ -296,11 +303,33 @@ pub fn run_with(cmd: *const char, in_path: *const char, out_path: *const char, e
     c.stderr = redirect_of(err_path, process::Redirect::Stdout);
     let started = process::spawn(c);
     if started.is_err() {
+        eprint("cannot start {}: OS error {}\n", line, started.unwrap_err().code);
+        // A quoted program path: what its directory holds.
+        if line.starts_with("\"") {
+            let e = line.slice(1, line.len()).find_byte(b'"');
+            let prog = line.slice(1, 1 + e as usize);
+            let mut d = prog.len();
+            while d > 0 && prog.byte_at(d - 1) != b'/' {
+                d -= 1;
+            }
+            let dir = prog.slice(0, d);
+            let names = dutil::list_dir(dir, true).unwrap_or(Vector::<String>::new());
+            eprint("{} holds:", dir);
+            for i in 0..names.len() {
+                eprint(" {}", names[i].as_str());
+            }
+            eprint("\n");
+        }
         return -1;
     }
     let mut child = started.unwrap();
-    return switch child.wait() {
-        Ok(Code(code)) => code,
+    let w = child.wait();
+    if w.is_err() {
+        eprint("cannot wait for {}: OS error {}\n", line, w.unwrap_err().code);
+        return -1;
+    }
+    return switch w.unwrap() {
+        Code(code) => code,
         _ => -1,
     };
 }

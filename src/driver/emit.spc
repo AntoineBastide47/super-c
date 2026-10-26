@@ -43,6 +43,7 @@ import target::native as nat;
 import bindgen::bindgen as bg;
 import bindgen::ctarget as ct;
 import build_system::manifest as bman;
+import build_system::objcache as ocache;
 import emit::cflow as cfl;
 import emit::probe as prb;
 import emit::mangle as mbe;
@@ -1798,6 +1799,8 @@ pub struct CemitOut {
     /// The registry TU (ZST sentinels, reflection registry) and its sorted root symbols.
     pub registry_c: String,
     pub reg_inputs: String,
+    /// The alignments of the ZST sentinels the registry defines, ascending.
+    pub zst: Vector<u64>,
     pub have_main: bool,
     pub main_mod: u64,
     pub main_argv: bool,
@@ -1847,6 +1850,7 @@ extend CemitOut {
             inst_heads: Vector::<Vector<String>>::new(),
             registry_c: String::new(),
             reg_inputs: String::new(),
+            zst: Vector::<u64>::new(),
             have_main: false,
             main_mod: 0,
             main_argv: false,
@@ -9095,6 +9099,11 @@ fn cemit_assemble(
     {
         let mut rg = String::new();
         rg.push_string(&cem.sent_defs);
+        let mut zi = cem.sent_seen.iter();
+        while let Some(a) = zi.next() {
+            o.zst.push(*a);
+        }
+        o.zst.sort();
         if reg_names.len() != 0 {
             let mut ord = Vector::<u32>::with_capacity(reg_names.len());
             for i in 0..reg_names.len() {
@@ -14036,7 +14045,8 @@ pub fn run_package(
     let mut tp0 = ticks_ms();
     // Only a link takes the native objects (a build system's, a script's or the test runner's): an
     // emission alone writes C. An unoptimized build without sanitizers takes them where the target has a
-    // native backend; SC_NATIVE overrides: 0 for none, 1 for every module, else a list of modules.
+    // native backend, and so does any build where the C compiler is not installed; SC_NATIVE overrides:
+    // 0 for none, 1 for every module, else a list of modules.
     let links = sink != null || out_bin.len() != 0 || topts != null && unsafe (*topts).enabled;
     let sel = stdlib::get_env("SC_NATIVE");
     let fl = if p.cflags.len() != 0 {
@@ -14047,7 +14057,7 @@ pub fn run_package(
     let wanted = if sel.is_some() {
         sel.unwrap().as_str() != "0";
     } else {
-        bman::unoptimized(fl) && (p.build_cfg & 3) == 0 && !p.mem_check;
+        bman::unoptimized(fl) && (p.build_cfg & 3) == 0 && !p.mem_check || !cc_installed(p, target);
     };
     p.native = links && wanted && nat::supported(target, p.arch);
     syntax_stats_report(p, "parse");
@@ -14400,6 +14410,8 @@ pub fn run_package(
     let mut nat_mod = Vector::<bool>::new(); // per module, native
     let mut nat_rec = Map::<String, u64>::new();
     let nat_rp = build_out_path(root, NAT_RECORD, "");
+    // Every module compiled natively: the registry is a native object too, and no C object links.
+    let mut nat_all = false;
     if co.lir.is_some() && !err {
         // The record of the objects an earlier build left, for the modules the emission cache replayed.
         if co.tuc_keys.len() != 0 {
@@ -14431,6 +14443,7 @@ pub fn run_package(
             }
         }
         iq = iq2;
+        nat_all = lm.len() == 0 && iq.len() == 0;
         co.lir = Option::<Box<lw::Lower>>::None;
     }
     let tw0 = ticks_ms();
@@ -14717,6 +14730,22 @@ pub fn run_package(
                 err = true;
             }
         }
+        if nat_all && !err {
+            let mut bytes = Vector::<u8>::new();
+            let mut op = build_out_path(root, NAT_REGISTRY, ".o");
+            if native_registry(p, &co.zst, co.reg_inputs.as_str(), &mut bytes) && publish_out(
+                osink,
+                &mut co.pr,
+                &mut op,
+                unsafe str::from_raw(bytes.as_ptr(), bytes.len()),
+                3,
+            ) {
+                nat_paths.push(op.clone());
+                keep.push(op);
+            } else {
+                err = true;
+            }
+        }
         // Every module, with whether it has an own object or went through C.
         if co.tuc_keys.len() != 0 && nat_mod.len() != 0 {
             let mut has = Vector::<bool>::new();
@@ -14876,6 +14905,101 @@ fn native_test_main(p: &loader::Package, plan: &TestPlan, out: &mut Vector<u8>) 
     };
     if !ok {
         eprintln("super-c: the test runner's entry does not compile natively: {}", err.as_str());
+    }
+    return ok;
+}
+
+/// The native registry object's name in the tree: a build that links it links no C registry object.
+pub const NAT_REGISTRY: str = "__sc_registry_n";
+
+/// Whether the C compiler package `p` builds `target` with is installed: as the engine that runs this
+/// transpile found it (`--cc-found`), else `resolve_cc`, then the search the spawn makes.
+pub fn cc_installed(p: &loader::Package, target: i32) bool {
+    let mut path = String::new();
+    return p.cc_found || ocache::which_path(resolve_cc(p.cc.as_str(), target, p.arch).as_str(), &mut path) != 0;
+}
+
+// The registry of a build whose modules are all native, as an object of the target: the ZST sentinels
+// of alignments `zst`, and with reflection roots `roots` (space-separated, sorted) their table and the
+// constructor that registers it, as the C registry has them.
+fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut Vector<u8>) bool {
+    let ptr = lay::target_for(p.arch).ptr as u32;
+    let int = if ptr == 4 {
+        "i32";
+    } else {
+        "i64";
+    };
+    let al: u32 = if ptr == 4 {
+        2;
+    } else {
+        3;
+    };
+    let mut t = String::new();
+    t.format_into("lir ptr {}\n", ptr);
+    for i in 0..zst.len() {
+        t.format_into("sym @__sc_zst_{} data global\n", zst[i]);
+    }
+    let mut names = Vector::<str>::new();
+    let mut a: usize = 0;
+    for i in 0..roots.len() + 1 {
+        if i == roots.len() || roots.byte_at(i) == b' ' {
+            if i > a {
+                names.push(roots.slice(a, i));
+            }
+            a = i + 1;
+        }
+    }
+    if names.len() != 0 {
+        let f = tgt::obj_of(p.build_target).name;
+        let sec = if f == "macho" {
+            "__DATA,__mod_init_func,mod_init_funcs";
+        } else if f == "coff" {
+            ".CRT$XCU";
+        } else {
+            ".init_array";
+        };
+        for i in 0..names.len() {
+            t.format_into("sym @{} data global ext\n", names[i]);
+        }
+        t.push_str("sym @__sc_reflect_register fn global ext\nsym @__sc_reflect_roots data local\n");
+        t.format_into("sym @__sc_reflect_init fn local\nsym @__sc_reflect_ctor data local used section \"{}\"\n", sec);
+        t.push_str("fn @__sc_reflect_init\n  sig () -> void\nb0:\n  v0 = symaddr @__sc_reflect_roots\n");
+        t.format_into("  v1 = iconst.{} {}\n", int, names.len());
+        t.format_into("  call @__sc_reflect_register(v0, v1) : (ptr, {}) -> void\n  ret\n", int);
+        t.format_into("data @__sc_reflect_roots size {} align {} ro", names.len() as u32 * ptr, al);
+        for i in 0..names.len() {
+            t.format_into(" reloc {} @{}", i as u32 * ptr, names[i]);
+        }
+        t.format_into("\ndata @__sc_reflect_ctor size {} align {} reloc 0 @__sc_reflect_init\n", ptr, al);
+    }
+    for i in 0..zst.len() {
+        let mut lg: u32 = 0;
+        while 1u64 << lg as u64 < zst[i] {
+            lg += 1;
+        }
+        t.format_into("data @__sc_zst_{} size 1 align {}\n", zst[i], lg);
+    }
+    let mut err = String::new();
+    let mut ok = false;
+    switch lparse::parse(t.as_str(), &mut err) {
+        Some(pk) => {
+            let mut fs = Vector::<u32>::new();
+            let mut ds = Vector::<u32>::new();
+            for i in 0..pk.syms.len() {
+                if pk.syms[i].def != lir_ir::NONE {
+                    if pk.syms[i].kind == lir_ir::SK_FUNC {
+                        fs.push(i as u32);
+                    } else {
+                        ds.push(i as u32);
+                    }
+                }
+            }
+            ok = nat::object(&pk, p.build_target, p.arch, fs[0..fs.len()], ds[0..ds.len()], "", out, &mut err);
+        },
+        None => {},
+    };
+    if !ok {
+        eprintln("super-c: the registry does not compile natively: {}", err.as_str());
     }
     return ok;
 }

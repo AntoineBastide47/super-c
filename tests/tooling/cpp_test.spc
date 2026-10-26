@@ -720,6 +720,9 @@ fn host_headers(p: &cli::Proj, host: &Host, names: []str) Vector<String> {
 // The six headers the bindgen use cases name, and the portable ones that the host has besides.
 @test(timeout = 120)
 fn host_system_headers() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     let host = host_info(&p);
     if host.cc.len() == 0 {
@@ -753,6 +756,9 @@ fn host_framework_headers() {
 
 @test(timeout = 300)
 fn host_more_system_headers() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     let host = host_info(&p);
     if host.cc.len() == 0 {
@@ -1165,6 +1171,9 @@ fn oracle_conditionals() {
 
 @test(timeout = 60)
 fn oracle_includes() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let src = lines(
         [
             "#include \"local.h\"",

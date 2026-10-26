@@ -133,10 +133,10 @@ fn no_sysroot(row: &data::Row, hint: str) bool {
     return false;
 }
 
-// The SDK of an Apple target, found as `xcrun` finds it from the build's toolchain lookup (`objcache::cc_identity`):
-// $SDKROOT (macOS only), else the SDKs of $DEVELOPER_DIR, the `xcode-select` directory and the Command Line Tools,
-// in that order. No process runs. The SDK's platform name is the target's (`apple_sdk`).
-fn apple_sdk(t: &tgt::Target, out: &mut String) bool {
+/// The SDK of an Apple target, found as `xcrun` finds it from the build's toolchain lookup (`objcache::cc_identity`):
+/// $SDKROOT (macOS only), else the SDKs of $DEVELOPER_DIR, the `xcode-select` directory and the Command Line Tools,
+/// in that order. No process runs. The SDK's platform name is the target's (`apple_sdk`).
+pub fn apple_sdk(t: &tgt::Target, out: &mut String) bool {
     // `xcrun --sdk` honors $SDKROOT only for the system it runs on, so does this; "/" counts as unset.
     if tgt::os(t.os).sdk == tgt::SDK_NONE {
         let env = stdlib::get_env("SDKROOT").unwrap_or(String::new());
@@ -200,12 +200,11 @@ fn elf_dirs(root: str, dir: str, out: &mut Vector<String>) {
 
 fn linux_dirs(t: &tgt::Target, row: &data::Row, sysroot: str, out: &mut CTarget) bool {
     if sysroot.len() == 0 {
-        // The running system serves its own architecture; another one only through a multiarch
-        // directory that holds that architecture's headers.
+        // The running system serves its own architecture; another one, or a compiler under a WASI runtime
+        // on Linux, only through a multiarch directory that holds the target's headers.
         let multiarch = format("/usr/include/{}", row.dir);
-        let ok = unsafe shim::sc_host_platform() == t.os as i32 && is_dir("/usr/include") && (unsafe shim::sc_host_arch() == t.isa as i32 || is_dir(
-            multiarch.as_str(),
-        ));
+        let native = unsafe shim::sc_host_platform() == t.os as i32 && unsafe shim::sc_host_arch() == t.isa as i32;
+        let ok = is_dir("/usr/include") && (native || is_dir(multiarch.as_str()));
         if !ok {
             return no_sysroot(row, "pass the sysroot");
         }

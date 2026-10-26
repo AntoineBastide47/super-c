@@ -483,6 +483,9 @@ fn main(args: Vector<str>) i32 {
 
 @test
 fn generic_code_runs_over_three_lane_types() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -535,6 +538,9 @@ fn a_program_without_vectors_gets_no_vector_c() {
 
 @test
 fn a_vector_constant_is_static_data() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",

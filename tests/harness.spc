@@ -988,6 +988,9 @@ pub fn diff_build_in(p: cli::Proj, opts: []str) DiffBuild {
         "build.toml",
         if wasm {
             "bin = \"prog\"\nroot = \"main.spc\"\n\n[profile.ubsan]\nopt-level = 1\n";
+        } else if !cli::has_cc() {
+            // No C compiler, so no sanitizer runtime: the native build's own checks only.
+            "bin = \"prog\"\nroot = \"main.spc\"\n\n[profile.ubsan]\nopt-level = 0\n";
         } else if unsafe shim::sc_host_arch() == 1 {
             "bin = \"prog\"\nroot = \"main.spc\"\n\n[profile.ubsan]\nopt-level = 1\ncflags = [\"-fsanitize=undefined\"]\nldflags = [\"-fsanitize=undefined\"]\n";
         } else {

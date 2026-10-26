@@ -17,7 +17,7 @@ fn run_native(text: str, driver: str) i32 {
     if !nat::supported(tgt::host_os(), tgt::host_isa()) {
         return 0;
     }
-    return run_lir(text, driver, tgt::host_os(), tgt::host_isa(), "cc", "");
+    return run_lir(text, driver, tgt::host_os(), tgt::host_isa(), unsafe str::from_cstr(cli::cc_name()), "");
 }
 
 // `run_native` for wasm32, its pointers 4 bytes in place of the text's 8: the wasi-sdk's clang links,
@@ -104,6 +104,9 @@ fn run_lir(text: str, driver: str, os: i32, isa: i32, cc: str, runner: str) i32 
 
 @test
 fn arithmetic_and_a_loop_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
     let lir = "lir ptr 8\nsym @sum_to fn global\nsym @mid fn global\nfn @sum_to\n  sig (i32) -> i64\nb0(v0: i32):\n  v1 = iconst.i64 0\n  v2 = iconst.i32 0\n  v3 = iconst.i32 1\n  jmp b1(v2, v1)\nb1(v4: i32, v5: i64):\n  v6 = icmp.ult v4, v0\n  br v6, b3, b2\nb2:\n  ret v5\nb3:\n  v7 = zext.i64 v4\n  v8 = add.i64 v5, v7\n  v9 = add.i32 v4, v3\n  jmp b1(v9, v8)\nfn @mid\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2, v3 = addo.s.i64 v0, v1\n  br v3, b2, b1\nb1:\n  v4 = iconst.i64 2\n  v5 = sdiv.i64 v2, v4\n  ret v5\nb2:\n  v6 = iconst.i64 -1\n  ret v6\n";
     let drv = "#include <stdint.h>\nint64_t sum_to(int32_t);\nint64_t mid(int64_t, int64_t);\nint main(void) {\n  if (sum_to(10) != 45) return 1;\n  if (mid(10, 31) != 20) return 2;\n  if (mid(INT64_MAX, 1) != -1) return 3;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
@@ -112,8 +115,13 @@ fn arithmetic_and_a_loop_run() {
 
 @test
 fn wide_integers_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
     let lir = "lir ptr 8\nsym @div fn global\nsym @mul fn global\nsym @shr fn global\nfn @div\n  sig (i64, i64, i64, ptr) -> i64\nb0(v0: i64, v1: i64, v2: i64, v3: ptr):\n  v4 = zext.i128 v0\n  v5 = wconst.i128 0x40, 0x0\n  v6 = shl.i128 v4, v5\n  v7 = zext.i128 v1\n  v8 = or.i128 v6, v7\n  v9 = zext.i128 v2\n  v10 = urem.i128 v8, v9\n  v11 = trunc.i64 v10\n  store v11, v3 align 3\n  v12 = udiv.i128 v8, v9\n  v13 = trunc.i64 v12\n  ret v13\nfn @mul\n  sig (i64, i64, ptr) -> i64\nb0(v0: i64, v1: i64, v2: ptr):\n  v3 = zext.i128 v0\n  v4 = zext.i128 v1\n  v5 = mul.i128 v3, v4\n  v6 = wconst.i128 0x40, 0x0\n  v7 = lshr.i128 v5, v6\n  v8 = trunc.i64 v7\n  store v8, v2 align 3\n  v9 = trunc.i64 v5\n  ret v9\nfn @shr\n  sig (i64, i64, i32) -> i64\nb0(v0: i64, v1: i64, v2: i32):\n  v3 = sext.i128 v1\n  v4 = wconst.i128 0x40, 0x0\n  v5 = shl.i128 v3, v4\n  v6 = zext.i128 v0\n  v7 = or.i128 v5, v6\n  v8 = zext.i128 v2\n  v9 = ashr.i128 v7, v8\n  v10 = trunc.i64 v9\n  ret v10\n";
-    let drv = "#include <stdint.h>\nint64_t div(int64_t, int64_t, int64_t, int64_t *);\nint64_t mul(int64_t, int64_t, int64_t *);\nint64_t shr(int64_t, int64_t, int32_t);\nint main(void) {\n  int64_t r = 0;\n  if (div(3, 5, 7, &r) != (int64_t)(((unsigned __int128)3 << 64 | 5) / 7) || r != (int64_t)(((unsigned __int128)3 << 64 | 5) % 7)) return 1;\n  int64_t h = 0;\n  if (mul(-1, -1, &h) != 1 || h != -2) return 2;\n  if (shr(0, -2, 65) != -1 || shr(0, 4, 1) != 0 || shr(0, 4, 64) != 4 || shr(8, 0, 3) != 1) return 3;\n  return 0;\n}\n";
+    // Microsoft x64 code divides through the runtime's `__sc_<name>` (`std::rt::builtins`), which a C
+    // driver alone does not link: the driver defines them.
+    let drv = "#include <stdint.h>\n#ifdef _WIN32\ntypedef unsigned __int128 u128;\nvoid __sc_udivti3(u128 *o, const u128 *a, const u128 *b) { *o = *a / *b; }\nvoid __sc_umodti3(u128 *o, const u128 *a, const u128 *b) { *o = *a % *b; }\n#endif\nint64_t div(int64_t, int64_t, int64_t, int64_t *);\nint64_t mul(int64_t, int64_t, int64_t *);\nint64_t shr(int64_t, int64_t, int32_t);\nint main(void) {\n  int64_t r = 0;\n  if (div(3, 5, 7, &r) != (int64_t)(((unsigned __int128)3 << 64 | 5) / 7) || r != (int64_t)(((unsigned __int128)3 << 64 | 5) % 7)) return 1;\n  int64_t h = 0;\n  if (mul(-1, -1, &h) != 1 || h != -2) return 2;\n  if (shr(0, -2, 65) != -1 || shr(0, 4, 1) != 0 || shr(0, 4, 64) != 4 || shr(8, 0, 3) != 1) return 3;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
 }
@@ -122,6 +130,9 @@ fn wide_integers_run() {
 // here its last use is the checked increment in the back edge's own block.
 @test
 fn loop_parameters_keep_their_homes() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
     let lir = "lir ptr 8\nsym @id fn global\nsym @f fn global\nfn @f\n  sig (ptr, i64) -> i64\nb0(v0: ptr, v1: i64):\n  v2 = iconst.i64 0\n  v3 = iconst.i64 1\n  jmp b1(v2, v2, v0)\nb1(v4: i64, v5: i64, v6: ptr):\n  v7 = icmp.ult v4, v1\n  br v7, b2, b3\nb2:\n  v8 = load.i64 v6 align 3\n  v9 = call.i64 @id(v8) : (i64) -> i64\n  v10 = add.i64 v5, v9\n  v11 = ptradd v6+8\n  v12, v13 = addo.u.i64 v4, v3\n  br v13, b4, b1(v12, v10, v11)\nb3:\n  ret v5\nb4: cold\n  panic \"attempt to add with overflow\"\n";
     let drv = "#include <stdint.h>\nint64_t f(const int64_t *, int64_t);\nint64_t id(int64_t x) { return x; }\nvoid __sc_panic(const char *m) { (void)m; __builtin_trap(); }\nint main(void) {\n  int64_t a[4] = {1, 2, 3, 4};\n  return f(a, 4) == 10 ? 0 : 1;\n}\n";
     assert_eq(run_native(lir, drv), 0);
@@ -132,6 +143,9 @@ fn loop_parameters_keep_their_homes() {
 // later value of that block takes no register or slot of theirs.
 @test
 fn loop_kept_values_keep_their_homes() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
     let lir = "lir ptr 8\nsym @id fn global\nsym @f fn global\nfn @f\n  sig (ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64) -> i64\nb0(v0: ptr, v1: ptr, v2: ptr, v3: ptr, v4: ptr, v5: ptr, v6: ptr, v7: ptr, v8: i64):\n  v9 = iconst.i64 0\n  v10 = iconst.i64 1\n  jmp b1(v9, v9)\nb1(v11: i64, v12: i64):\n  v13 = icmp.ult v11, v8\n  br v13, b2, b3\nb2:\n  v14 = load.i64 v0 align 3\n  v15 = load.i64 v1 align 3\n  v16 = load.i64 v2 align 3\n  v17 = load.i64 v3 align 3\n  v18 = load.i64 v4 align 3\n  v19 = load.i64 v5 align 3\n  v20 = load.i64 v6 align 3\n  v21 = load.i64 v7 align 3\n  v22 = add.i64 v14, v15\n  v23 = add.i64 v22, v16\n  v24 = add.i64 v23, v17\n  v25 = add.i64 v24, v18\n  v26 = add.i64 v25, v19\n  v27 = add.i64 v26, v20\n  v28 = add.i64 v27, v21\n  v29 = add.i64 v12, v28\n  v30 = call.i64 @id(v29) : (i64) -> i64\n  v31 = call.i64 @id(v11) : (i64) -> i64\n  v32 = add.i64 v31, v10\n  jmp b1(v32, v30)\nb3:\n  ret v12\n";
     let drv = "#include <stdint.h>\nint64_t f(const int64_t *, const int64_t *, const int64_t *, const int64_t *, const int64_t *, const int64_t *, const int64_t *, const int64_t *, int64_t);\nint64_t id(int64_t x) { return x; }\nint main(void) {\n  int64_t a[8] = {1, 2, 3, 4, 5, 6, 7, 8};\n  return f(a, a + 1, a + 2, a + 3, a + 4, a + 5, a + 6, a + 7, 3) == 108 ? 0 : 1;\n}\n";
     assert_eq(run_native(lir, drv), 0);
@@ -141,6 +155,9 @@ fn loop_kept_values_keep_their_homes() {
 // A frame of exactly 4 KiB (the slot and two spills): the stack pointer moves by all of it.
 @test
 fn a_page_sized_frame_runs() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
     let lir = "lir ptr 8\nsym @id fn global\nsym @g fn global\nfn @g\n  sig (i64) -> i64\n  slot s0 size 4080 align 3\nb0(v0: i64):\n  v1 = slotaddr s0\n  v2 = ptradd v1+8\n  store v0, v1 align 3\n  store v0, v2 align 3\n  v3 = call.i64 @id(v0) : (i64) -> i64\n  v4 = load.i64 v2 align 3\n  v5 = add.i64 v3, v4\n  ret v5\n";
     let drv = "#include <stdint.h>\nint64_t g(int64_t);\nint64_t id(int64_t x) { return x; }\nint main(void) { return g(21) == 42 ? 0 : 1; }\n";
     assert_eq(run_native(lir, drv), 0);
@@ -150,6 +167,9 @@ fn a_page_sized_frame_runs() {
 // Float constants that fit the 8-bit immediate of `fmov`.
 @test
 fn float_immediates_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
     let lir = "lir ptr 8\nsym @kd fn global\nsym @kf fn global\nfn @kd\n  sig () -> f64\nb0:\n  v0 = fconst.f64 0x3ff0000000000000\n  v1 = fconst.f64 0x4000000000000000\n  v2 = fconst.f64 0xc028000000000000\n  v3 = fconst.f64 0x3fc0000000000000\n  v4 = fadd.f64 v0, v1\n  v5 = fadd.f64 v4, v2\n  v6 = fadd.f64 v5, v3\n  ret v6\nfn @kf\n  sig () -> f32\nb0:\n  v0 = fconst.f32 0x3f800000\n  v1 = fconst.f32 0x40000000\n  v2 = fconst.f32 0x3f000000\n  v3 = fconst.f32 0xc1f80000\n  v4 = fadd.f32 v0, v1\n  v5 = fadd.f32 v4, v2\n  v6 = fadd.f32 v5, v3\n  ret v6\n";
     let drv = "double kd(void);\nfloat kf(void);\nint main(void) { return kd() == -8.875 && kf() == -27.5f ? 0 : 1; }\n";
     assert_eq(run_native(lir, drv), 0);
@@ -160,6 +180,9 @@ fn float_immediates_run() {
 // the cold block last: the call's result there takes no home of the counter's.
 @test
 fn a_cold_block_inside_a_loop_keeps_the_loop_values() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
     let lir = M"(lir ptr 8
 sym @poll fn global
 sym @count fn global
@@ -197,6 +220,9 @@ b5:
 // fit 32 bits, and one that drives a loop.
 @test
 fn switches_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
     let lir = M"(lir ptr 8
 sym @dense fn global
 sym @sparse fn global
@@ -285,6 +311,9 @@ b6:
 // i128 comparisons on the halves, and shifts by 0, 64 and 127.
 @test
 fn wide_integer_compares_and_shifts_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
     let lir = M"(lir ptr 8
 sym @cmp fn global
 sym @shifts fn global
@@ -361,6 +390,9 @@ b0(v0: i64, v1: i64, v2: i32, v3: ptr):
 // and C calls a LIR function that reads them. A `va_list` slot holds the largest one (AAPCS64's 32 bytes).
 @test
 fn variadic_calls_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
     let lir = M"(lir ptr 8
 sym @mix fn global ext
 sym @call_mix fn global
@@ -405,6 +437,9 @@ b0(v0: i32):
 // the stack holds at 16-byte alignment (Apple and wasm keep every variadic argument in memory).
 @test
 fn variadic_arguments_past_the_registers_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
     let lir = M"(lir ptr 8
 sym @lmany fn global
 fn @lmany
@@ -473,6 +508,9 @@ b0(v0: i32):
 // Function addresses in data (relocations) and indirect calls through them.
 @test
 fn indirect_calls_through_data_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
     let lir = M"(lir ptr 8
 sym @twice fn local
 sym @thrice fn local
@@ -515,6 +553,9 @@ data @tab size 16 align 3 ro reloc 0 @twice reloc 8 @thrice
 // Aggregates by value both ways: one of two scalars, and one of a single double.
 @test
 fn aggregates_cross_the_c_abi() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
     let lir = M"(lir ptr 8
 sym @swap fn global
 sym @half fn global
@@ -563,6 +604,9 @@ b0(v0: i64):
 // Float to integer conversions saturate, NaN to 0, as the evaluator defines them.
 @test
 fn float_to_integer_conversions_saturate() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
     let lir = M"(lir ptr 8
 sym @conv fn global
 fn @conv
@@ -591,6 +635,9 @@ b0(v0: f64, v1: ptr):
 // clang return one differently without AVX.
 @test
 fn wide_vectors_cross_the_c_abi() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
     let lir = "lir ptr 8\nsym @tw fn global\nfn @tw\n  sig (v8f32) -> v8f32\nb0(v0: v8f32):\n  v1 = fadd.v8f32 v0, v0\n  ret v1\n";
     let drv = "typedef struct { _Alignas(32) float l[8]; } v8;\nv8 tw(v8);\nint main(void) {\n  v8 a = {{1, 2, 3, 4, 5, 6, 7, 8}};\n  v8 r = tw(a);\n  for (int i = 0; i < 8; i++) if (r.l[i] != 2 * a.l[i]) return 1;\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
@@ -643,6 +690,9 @@ fn main() i32 {
 
 @test
 fn c_and_native_modules_call_each_other() {
+    if !cli::has_cc() {
+        return; // C and native modules mix
+    }
     if !nat::supported(tgt::host_os(), tgt::host_isa()) {
         return;
     }
@@ -664,6 +714,9 @@ fn c_and_native_modules_call_each_other() {
 // header's pointer constants (a cast to `void *`, and to a typedef of a pointer) are read too.
 @test
 fn header_scalars_cross_the_c_abi() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     if !nat::supported(tgt::host_os(), tgt::host_isa()) {
         return;
     }
@@ -695,6 +748,9 @@ fn header_scalars_cross_the_c_abi() {
 // (a homogeneous aggregate on arm64), memory past 16 bytes, a union, a nested struct with an array.
 @test
 fn header_structs_cross_the_c_abi() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     if !nat::supported(tgt::host_os(), tgt::host_isa()) {
         return;
     }
@@ -727,6 +783,9 @@ fn header_structs_cross_the_c_abi() {
 // its size alone, so no class is unknown there.
 @test
 fn a_module_the_backend_refuses_goes_through_c() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     if !nat::supported(tgt::host_os(), tgt::host_isa()) || PLATFORM == Platform::Windows {
         return;
     }
@@ -788,6 +847,9 @@ fn main() i32 {
 
 @test
 fn vectors_cross_between_c_and_native_modules() {
+    if !cli::has_cc() {
+        return; // C and native modules mix
+    }
     if !nat::supported(tgt::host_os(), tgt::host_isa()) {
         return;
     }
@@ -812,6 +874,9 @@ fn vectors_cross_between_c_and_native_modules() {
 // a second run, and a rebuild replays the modules that rendered none with what they demanded.
 @test
 fn header_edits_reach_native_objects() {
+    if !cli::has_cc() {
+        return; // a header's `static` function compiles through C
+    }
     if !nat::supported(tgt::host_os(), tgt::host_isa()) {
         return;
     }

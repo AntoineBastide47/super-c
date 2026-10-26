@@ -95,6 +95,8 @@ fn a_failed_strip_installs_nothing() {
     assert(cli::run_quiet(cmd.cstr()) == 0, "chmod");
     let path = stdlib::get_env("PATH").unwrap_or(String::new());
     let _path = cli::set_env("PATH", format("{}/bin:{}", root, path.as_str()).as_str());
+    // The C backend: the stub compiler's link, which the own linker would replace.
+    let _nat = cli::set_env("SC_NATIVE", "0");
     let build = format("build --cc={}/cc.sh", root);
     let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", build.as_str());
     assert(!r.ok() && r.out_has("strip failed (exit 3)"), "the failed strip fails the build");
@@ -114,6 +116,9 @@ fn a_failed_strip_installs_nothing() {
 // (a file without the execute bit) falls back to the search, which skips it.
 @test
 fn a_compiler_path_match_that_cannot_start_falls_back_to_the_search() {
+    if !cli::has_cc() {
+        return; // it names the C compiler
+    }
     if cli::on_wasm() || cli::on_windows() {
         return;
     }

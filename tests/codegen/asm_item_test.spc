@@ -67,6 +67,9 @@ fn main() i32 {
 
 @test
 fn module_level_asm_defines_symbols() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     if cli::on_wasm() {
         return;
     }

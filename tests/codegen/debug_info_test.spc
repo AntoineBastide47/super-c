@@ -262,14 +262,17 @@ fn line_tables_verify_and_leave_the_code_unchanged() {
         let mut objs = Vector::<String>::new();
         objects(format("{}/d{}/debug/raw", p.dir(), t).as_str(), "", &mut objs);
         assert(objs.len() > 1, "the debug build writes native objects");
+        // The registry's sentinels are zero-filled: some object has bytes.
+        let mut any = false;
         for k in 0..objs.len() {
             let with = read_bytes(format("{}/d{}/debug/raw{}", p.dir(), t, objs.at(k).as_str()).as_str());
             let without = read_bytes(format("{}/n{}/nog/raw{}", p.dir(), t, objs.at(k).as_str()).as_str());
             assert(with.len() >= without.len(), "debug information takes nothing away");
             let iw = image_bytes(&with);
-            assert(iw.len() != 0, "the object's sections read");
+            any = any || iw.len() != 0;
             assert(iw.as_slice() == image_bytes(&without).as_slice(), "the code and data are the same bytes");
         }
+        assert(any, "the objects' sections read");
         if dd.len() == 0 {
             continue;
         }
@@ -412,6 +415,9 @@ void driver_end(void) {
 
 @test
 fn unwinding_restores_callee_saved_registers() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     if !nat::supported(tgt::host_os(), tgt::host_isa()) || cli::on_wasm() || PLATFORM == Platform::Windows {
         return;
     }

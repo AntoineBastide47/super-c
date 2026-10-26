@@ -8765,6 +8765,9 @@ fn reflection_bounds_over_enum_payloads() {
 // copies a per-copy condition skips, which owe nothing.
 @test
 fn generic_defaults_and_enum_payloads_accepted() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = dig_proj();
     p.mkfile(
         "main.spc",

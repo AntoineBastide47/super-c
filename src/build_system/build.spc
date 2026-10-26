@@ -34,6 +34,7 @@ import build_system::probe as pr;
 import ast::parser as par;
 import ir::cpu_features as cf;
 import lsp::json as json;
+import link::link as lk;
 
 // A failed child's captured output is replayed up to this many bytes; the file keeps the rest.
 const LOG_LIMIT: usize = 65536;
@@ -1167,6 +1168,7 @@ struct CcStream {
     pub aobj: String, // `obj` as an absolute path (`dep_portable`)
     pub pdir: String,
     pub cc_raw: String, // the compiler named by the manifest, $CC or the default
+    pub no_cc: bool, // `cc_raw` is not installed: the build takes native objects and the own linker only
     pub cc_file: String, // the path every compile and link spawn runs (`cc_stream`); empty: PATH-searched
     pub cc_tail: String, // " <cstd> <cflags> <profile cflags> -MMD -c [-flto=..]" (also the object-cache key text)
     pub ldbase: String, // " <sdk flags and libs> <ldflags> <profile ldflags>": the fixed part of the link line
@@ -1255,6 +1257,10 @@ extend CcStream {
         }
         self.cc_ready = true;
         split_args(&mut self.cc_args, self.cc_raw.as_str());
+        if self.no_cc {
+            self.ccver.push_str("none");
+            return;
+        }
         let mut have_ver = self.ccver.len() != 0;
         if !have_ver && self.probe_ver.is_some() {
             let mut c = self.probe_ver.take().unwrap();
@@ -1527,7 +1533,7 @@ extend CcStream {
     /// per unit. Both probes run here, once per probe record.
     pub fn start_pch(self: &mut Self, text: str) {
         self.ensure_cc();
-        if self.feat_bad || self.pch != PCH_OFF {
+        if self.feat_bad || self.no_cc || self.pch != PCH_OFF {
             return;
         }
         self.pch = PCH_FAIL;
@@ -1649,6 +1655,19 @@ extend CcStream {
     pub fn plan_c(self: &mut Self, rel: str, text: str) {
         self.ensure_cc();
         if self.feat_bad {
+            return;
+        }
+        if self.no_cc {
+            // The C registry beside the native one only checks the extern declarations against their
+            // headers: a build without a C compiler leaves the check out. Any other unit needs one.
+            if rel != "__sc_registry.c" && self.ret == 0 {
+                eprintln(
+                    "build: '{}' compiles through C, and the C compiler '{}' is not installed",
+                    rel,
+                    self.cc_raw.as_str(),
+                );
+                self.ret = 1;
+            }
             return;
         }
         // wasm's C library compiles with other flags than the precompiled header's.
@@ -2362,6 +2381,9 @@ pub struct BuildCtx<'a> {
     pub simd_width: u32,
     /// `--simd-dispatch`: `off` or x86-64 levels; empty = the manifest's `simd-dispatch`.
     pub simd_dispatch: str<'a>,
+    /// `--cc-found` (the transpile form): the engine that runs it found the C compiler, which a
+    /// transpiler under a WASI runtime cannot see.
+    pub cc_found: bool,
 }
 
 /// The vector width the build's planner prefers on AVX-512: `--simd-width`, else `simd-width`, else 256.
@@ -2565,6 +2587,7 @@ fn emit_closure(
         }
         p.gen_root = String::from_str(srcgen);
         p.cc = m.cc.clone();
+        p.cc_found = cx.cc_found;
         for i in 0..m.shards.len() {
             p.shard_rules.push(
                 loader::ShardRule {
@@ -2668,6 +2691,10 @@ fn run_transpiler(m: &mf::Manifest, prof_name: str, root: str, sub: str, cx: &Bu
     }
     if cid != 0 {
         args.push(format("--emit-id={}", cid));
+    }
+    let mut ccpath = String::new();
+    if which_path(resolve_cc(m.cc.as_str(), cx.target, m.arch).as_str(), &mut ccpath) != 0 {
+        push_arg(&mut args, "--cc-found");
     }
     let rc = exec_args(&args, "");
     if rc != 0 {
@@ -3070,9 +3097,10 @@ fn cc_stream(
         cc_file.push_string(&ccpath);
     }
     let ccver_path = loader::join2(pdir.as_str(), ".ccver");
+    let no_cc = ccmt == 0;
     let ccver0 = ccver_recorded(cc_raw.as_str());
     let mut probe_ver = Option::<process::Child>::None;
-    if ccver0.is_none() {
+    if ccver0.is_none() && !no_cc {
         let mut va = Vector::<String>::new();
         split_args(&mut va, cc_raw.as_str());
         push_arg(&mut va, "--version");
@@ -3102,9 +3130,13 @@ fn cc_stream(
         ldbase.as_str(),
         cx.target,
         m.arch,
-        need | feature_probes(tgt::beyond_baseline(feats, cx.target)) | uvm_need(cx.target, m.arch) | novec_need(
-            lto_req,
-        ) | rtlib_need(cx.target, m.arch) | repro_need(cx.target, m.arch),
+        pick(
+            no_cc,
+            0,
+            need | feature_probes(tgt::beyond_baseline(feats, cx.target)) | uvm_need(cx.target, m.arch) | novec_need(
+                lto_req,
+            ) | rtlib_need(cx.target, m.arch) | repro_need(cx.target, m.arch),
+        ),
     );
     // The compile argv runs from the process working directory; record it for compile_commands.json.
     let ccdb_dir = fs::realpath(".").unwrap_or(String::from_str("."));
@@ -3119,6 +3151,7 @@ fn cc_stream(
         },
         pdir: pdir.clone(),
         cc_raw: cc_raw,
+        no_cc: no_cc,
         cc_file: cc_file,
         cc_tail: tail,
         ldbase: ldbase,
@@ -3444,6 +3477,25 @@ fn engine_build_i(
         // the link fingerprint embeds the full command.
         let mut objs = replace(&mut stream.objs, Vector::<String>::new());
         objs.sort();
+        // With the native registry the C one compiled for its checks of the extern blocks only; with no
+        // other C object the own linker may link.
+        let mut nreg = false;
+        for i in 0..objs.len() {
+            nreg = nreg || loader::basename_of(objs[i].as_str()) == "__sc_registry_n.o";
+        }
+        let mut all_nat = true;
+        if nreg {
+            let mut kept = Vector::<String>::with_capacity(objs.len());
+            for i in 0..objs.len() {
+                if loader::basename_of(objs[i].as_str()) != "__sc_registry.o" {
+                    all_nat = all_nat && objs[i].as_str().starts_with(gen.as_str());
+                    kept.push(objs[i].clone());
+                }
+            }
+            objs = kept;
+        } else {
+            all_nat = false;
+        }
         t_compile = ticks_ms();
         t_link = t_compile;
         bst::mark(bst::B_COMPILE);
@@ -3465,6 +3517,13 @@ fn engine_build_i(
             let bmt = file_mtime(bin);
             let mut tmp = String::from_str(bin);
             tmp.push_str(".tmp");
+            // A shared library records its file's name (a DLL's export directory names itself so): it
+            // links under that name, in a directory of its own.
+            let tmp_dir = tmp.clone();
+            if link_kind == 2 {
+                mkdir_p(tmp_dir.as_str());
+                tmp = loader::join2(tmp_dir.as_str(), loader::basename_of(bin));
+            }
             let mut largs = Vector::<String>::new();
             let mut lfile = String::new();
             let first: usize; // the index of the first object
@@ -3516,6 +3575,11 @@ fn engine_build_i(
             fp.push_str(" | ");
             let lrendered = render_cmd(&largs);
             fp.push_string(&lrendered);
+            // Whether the own linker may take the link: switching linkers links again.
+            let own_ok = link_kind != 1 && all_nat && lk::enabled();
+            if own_ok {
+                fp.push_str(" +own-link");
+            }
             push_used(&mut fp, &stream.probes.used);
             if prof.strip {
                 fp.push_str(" +strip");
@@ -3551,10 +3615,48 @@ fn engine_build_i(
                 // `ar rcs` updates an existing archive, so a temp an interrupted link left behind would
                 // keep the objects of deleted modules.
                 let _ = fs::unlink(tmp.as_str());
+                // The own linker, where it serves the link; else the C compiler's.
+                let mut own = lk::NOT_SERVED;
+                let mut why = String::new();
+                // A static library: the own archiver unless SC_LINK=cc keeps the toolchain's.
+                if link_kind == 1 && (lk::enabled() || stream.no_cc) {
+                    own = lk::archive(m.target, tmp.as_str(), &objs, &mut why);
+                    if own == lk::FAILED {
+                        eprintln("build: archive failed: {}", why.as_str());
+                        ret = 1;
+                    }
+                } else if own_ok {
+                    own = lk::link_args(m.target, m.arch, &largs, prof.strip && link_kind == 0, jobs, &mut why);
+                    if jobs != 1 {
+                        prt::shutdown(); // the link may have started the pool
+                    }
+                    if own == lk::FAILED {
+                        eprintln("build: link failed: {}", why.as_str());
+                        ret = 1;
+                    }
+                }
+                if own == lk::NOT_SERVED && stream.no_cc {
+                    if !own_ok {
+                        why.push_str("an object compiled through C");
+                    }
+                    eprintln(
+                        "build: link failed: the C compiler '{}' is not installed, and the own linker does not serve this link: {}",
+                        stream.cc_raw.as_str(),
+                        why.as_str(),
+                    );
+                    own = lk::FAILED;
+                    ret = 1;
+                }
                 let mut rsp = lrec.clone();
                 rsp.push_str(".rsp");
-                let fit = fit_cmdline(&mut largs, first, objs.len(), rsp.as_str(), cmdline_max());
-                let lrc = if fit < 0 {
+                let fit = if own != lk::NOT_SERVED {
+                    0;
+                } else {
+                    fit_cmdline(&mut largs, first, objs.len(), rsp.as_str(), cmdline_max());
+                };
+                let lrc = if own != lk::NOT_SERVED {
+                    0;
+                } else if fit < 0 {
                     -1;
                 } else {
                     exec_at(lfile.as_str(), &largs, "");
@@ -3565,7 +3667,7 @@ fn engine_build_i(
                 if lrc != 0 {
                     eprintln("build: link failed (exit {}): {}", lrc, lrendered.as_str());
                     ret = 1;
-                } else if prof.strip && link_kind == 0 && !strips_at_link(m.target) {
+                } else if own == lk::NOT_SERVED && prof.strip && link_kind == 0 && !strips_at_link(m.target) {
                     // The temp is stripped, so no unstripped binary is ever installed, and a failed
                     // strip leaves the previous binary and its record: the next build links again.
                     let mut st = Vector::<String>::new();
@@ -3580,6 +3682,9 @@ fn engine_build_i(
                 if ret == 0 {
                     if fs::rename(tmp.as_str(), bin).is_err() {
                         eprintln("build: cannot move '{}' into place", bin);
+                        ret = 1;
+                    } else if link_kind == 2 && fs::rmdir(tmp_dir.as_str()).is_err() {
+                        eprintln("build: cannot remove '{}'", tmp_dir.as_str());
                         ret = 1;
                     } else if write_file_atomic(fppath.as_str(), fp.as_str()) {
                         // The pending marker goes only once the link record holds this link: without

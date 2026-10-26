@@ -23,6 +23,9 @@ fn backend() str<'static> {
 }
 
 fn part(k: usize) {
+    if !cli::has_cc() {
+        return; // the entries build through C
+    }
     if backend().len() == 0 {
         return;
     }
@@ -119,6 +122,9 @@ fn entries_part_15() {
 
 @test
 fn memory_and_mask_test_entries() {
+    if !cli::has_cc() {
+        return; // the entries build through C
+    }
     if backend().len() == 0 {
         return;
     }

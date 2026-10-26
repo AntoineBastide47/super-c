@@ -1011,7 +1011,7 @@ pool, slots, symbols, messages and one location entry per instruction.
 | `verify.spc` | `Verifier::check`: dominance, block-parameter arity and types, machine types, slot accesses inside the slot and aligned as slot and offset allow, layout leaves inside their size, reducibility. `check_calls`: each direct call takes its callee's signature |
 | `print.spc`, `parse.spc` | The text form; print, parse and print gives the same bytes |
 | `eval.spc` | The evaluator: byte-addressed memory with the target's data model; models the C heap, memory routines, traps, the runtime's arithmetic and bit-count primitives, libm and `std::testing::bench_sys`'s allocation accounting; stops with `EV_FFI` at any other external function |
-| `lower.spc` | Core IR to LIR (`Lower::body`, `Lower::glue` for derived destructors, static data): blocks lower in reverse postorder; a block whose one predecessor ended in a `jmp` to it continues that LIR block (`join_last`); a variable read in a merge block takes the value at its immediate dominator when no block between them in that order is a loop header or writes it (`through_idom`), else a phi; then `tidy` (drops unused pure values, threads jumps through blocks that only jump, merges single-predecessor blocks, hoists and deduplicates constants into the entry, deduplicates layout records); `check_all` |
+| `lower.spc` | Core IR to LIR (`Lower::body`, `Lower::glue` for derived destructors, static data): blocks lower in reverse postorder; a block whose one predecessor ended in a `jmp` to it continues that LIR block (`join_last`); a variable read in a merge block takes the value at its immediate dominator when no block between them in that order is a loop header or writes it (`through_idom`), else a phi; then `tidy` (drops unused pure values, threads jumps through blocks that only jump, merges single-predecessor blocks, hoists and deduplicates constants into the entry, deduplicates layout records; then `forward_slots`: a slot filled in one block and copied whole into another slot as its last use becomes that slot when nothing touches the destination in between, and a second pass drops the copy; then unused slots go); `check_all` |
 
 The backend switch is per module: `cbe::backends_of` gives each module BK_C, plus BK_LIR for the
 modules `SC_LIR` names, or for every module in a native build (`Package.native`). The C renderer
@@ -1054,10 +1054,18 @@ A native build compiles each module's LIR to a machine object in place of its C 
 | `src/target/wasmabi.spc` | The basic C ABI of wasm32 (BasicCABI.md): scalars as wasm values, i128 as two i64, a one-leaf aggregate as its scalar, other aggregates and i128 results through pointers, variadic arguments in a caller's buffer |
 | `src/target/wasmobj.spc` | The relocatable wasm object `wasm-ld` links (Linking.md): types, imports, functions, data segments, the `linking` symbol table, relocations; with debug information `.debug_*` custom sections whose addresses are offsets from a body's entry (`R_WASM_FUNCTION_OFFSET_I32`, section symbols for `R_WASM_SECTION_OFFSET_I32`), as clang writes them |
 | `src/target/wasmgen.spc` | One LIR body into one wasm function: scalars in locals shared by live range, i128 and vectors in frame homes, the frame below `__stack_pointer`, Ramsey's structured control flow from an explicit task stack, dense switches as `br_table`, vector operations lane by lane as the evaluator defines them. A C `main` with two parameters is `__main_argc_argv`, as wasi-libc's start calls it |
-| `src/target/native.spc` | The entry: `supported` (macOS arm64, Linux x86-64, Linux arm64, Windows x86-64, wasm32-wasip1), `object` |
+| `src/target/native.spc` | The entry: `supported` (macOS arm64, Linux x86-64, Linux arm64, Windows x86-64, wasm32-wasip1), `object`, `own_linker` (the own linker's format for a target), `obj_kind` |
+| `src/link/link.spc` | The own linker's entry: `link_args` reads the C compiler's link command (objects, `-l`, `-L`, `-o`, `-shared`, the known `-Wl,` options) and routes it to a format's linker, or answers NOT_SERVED with the reason (a flag or input it does not know); `archive` |
+| `src/link/macho.spc` | Mach-O arm64 executables and dylibs: `.tbd` stubs (`tbd.spc`) and dylibs, chained fixups, `__unwind_info`, the exports trie, the debug map, an ad-hoc signature (`sha256.spc`, pages hashed in parallel; the UUID is the hash of the page hashes) |
+| `src/link/elf.spc` | ELF executables and shared libraries for x86-64 and arm64: glibc's `.so` and linker scripts read for symbols and versions, PLT and GOT (BIND_NOW), TLS relaxed to local-exec (executable) or initial-exec (shared library), `.eh_frame_hdr`, a `_start` that calls `__libc_start_main@GLIBC_2.34` |
+| `src/link/pe.spc` | PE executables and DLLs for x86-64: DLL exports read from `-L` directories or the system directory, the UCRT with mingw-w64's renames, an entry that configures the C runtime and runs `.CRT$XC*`, the TLS directory, base relocations, `.pdata`, an export directory for a DLL |
+| `src/link/wasm.spc` | wasm32 WASI command modules from relocatable objects: WASI imports, the table, `__wasm_call_ctors`, the stack placement, the name and debug sections |
+| `src/link/ar.spc` | The archiver: BSD layout with a sorted `__.SYMDEF` for Mach-O, System V layout for the others, deterministic |
+| `std/rt/builtins.spc` | compiler-rt's 128-bit routines for the targets whose C library lacks them (Linux, Windows, wasm), in each target's calling convention |
 
 `driver::emit` decides `Package.native`: a linking build with unoptimized C flags and no sanitizer
-on a supported target, or what `SC_NATIVE` says. `native_header_facts` reads the constants of the
+on a supported target, any linking build when the C compiler is not installed (`cc_installed`), or what
+`SC_NATIVE` says. `native_header_facts` reads the constants of the
 scoped C headers with the own preprocessor (in parallel, cached in `__sc_hfacts` by file size and
 mtime; its first line names its format), and the scalar class of each `@layout` opaque type through
 its typedefs (`Package.opaque_cls`, `bindgen::scalar_class`). Lowering gives such a type that LIR
@@ -1123,7 +1131,7 @@ lowering stops before its later calls, and a splice the native build makes is a 
 may name more; each names only modules that did not render, so the runs end within one per module.
 The last run's record keeps them on C for the next builds.
 The registry unit stays C: it includes the scoped headers so the C compiler checks the extern
-declarations. The vector bounds-check helpers live in `std/rt/lanes.spc`, loaded only when a
+declarations. Without an installed C compiler it is left out and only the native registry links. The vector bounds-check helpers live in `std/rt/lanes.spc`, loaded only when a
 program names a vector type.
 
 `check_all` (end of `cemit_package`, under `SC_LIR`) verifies every body the build rendered (the
