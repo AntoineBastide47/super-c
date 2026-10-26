@@ -19,6 +19,7 @@
 import lir::ir as *;
 import codegen::live as lv;
 import codegen::obj as ob;
+import codegen::dwarf as dw;
 import codegen::abi as ab;
 import target::x64 as x;
 import target::sysv as cc;
@@ -195,6 +196,7 @@ pub struct Gen {
     tmps: u64, // registers the current instruction took as temporaries
     fixed_busy: u64,
     csr: u64, // callee-saved registers the body uses
+    rows: Vector<u64>, // with debug information, per change of location: its code byte << 32 | its `lines` index
     rr: u32, // the eviction cursor
     pos: u32, // the layout position of the block being compiled
     cur: u32, // the instruction being compiled
@@ -305,6 +307,7 @@ extend Gen {
             tmps: 0,
             fixed_busy: 0,
             csr: 0,
+            rows: Vector::<u64>::new(),
             rr: 0,
             pos: 0,
             cur: 0,
@@ -1201,6 +1204,7 @@ extend Gen {
         self.tmps = 0;
         self.fixed_busy = 0;
         self.csr = 0;
+        self.rows.truncate(0);
         self.rr = 0;
         self.cond = Cond { inst: NONE, cc: 0 };
         let nq = self.lv.order.len();
@@ -1444,7 +1448,11 @@ extend Gen {
             }
         }
         let bk = b.blocks[k as usize];
+        let dbg = unsafe (*self.pkg).debug;
         for i in bk.start..bk.start + bk.len {
+            if dbg {
+                self.row(b.locs[i as usize]);
+            }
             self.begin_inst(i);
             if !self.inst(i) {
                 return false;
@@ -1459,6 +1467,20 @@ extend Gen {
             }
         }
         return true;
+    }
+
+    // A line row at the next code byte for location `loc` (a `lines` index) when it differs from the last.
+    fn row(self: &mut Self, loc: u32) {
+        let n = self.rows.len();
+        if loc == 0 || n != 0 && (self.rows[n - 1] & 0xFFFFFFFF) as u32 == loc {
+            return;
+        }
+        let at = self.c.len() as u64 << 32;
+        if n != 0 && self.rows[n - 1] >> 32 == at >> 32 {
+            self.rows[n - 1] = at | loc as u64;
+            return;
+        }
+        self.rows.push(at | loc as u64);
     }
 
     // Whether the block at position `q` keeps the register state: its only predecessor is the block
@@ -3789,8 +3811,9 @@ extend Gen {
             let v = b.pool[(t.c + k) as usize];
             let pt = b.pool[(sig + 3 + k) as usize];
             let vty = self.vt(v);
-            if loc.n == 2 && !self.lay.parts[loc.p0 as usize + 1].v && self.lay.parts[loc.p0 as usize].v {
-                // A variadic float (Microsoft x64): its vector register, then its bits in the integer one.
+            if (pt & AGG) == 0 && loc.n == 2 && !self.lay.parts[loc.p0 as usize + 1].v && self.lay.parts[loc.p0 as usize].v {
+                // A variadic float (Microsoft x64): its vector register, then its bits in the integer one. (An
+                // aggregate's float and integer halves under System V are two parts too.)
                 let pv = self.lay.parts[loc.p0 as usize];
                 if !moved[k as usize] {
                     self.materialize(v, V0 + pv.reg);
@@ -4399,14 +4422,24 @@ extend Gen {
             self.c.land(self.epi[q], body_n);
         }
         // Every jump that reaches in 2 bytes takes them; the relocations move with the code.
-        let mut ats = Vector::<u32>::with_capacity(self.rels.len());
+        // The line rows and the epilogue's start move with them.
+        let mut ats = Vector::<u32>::with_capacity(self.rels.len() + self.rows.len() + 1);
         for q in 0..self.rels.len() {
             ats.push(self.rels[q].at);
         }
+        for q in 0..self.rows.len() {
+            ats.push(ast_min((self.rows[q] >> 32) as u32, body_n));
+        }
+        ats.push(body_n);
         self.c.relax(&mut ats);
         for q in 0..self.rels.len() {
             self.rels.index_mut(q).at = ats[q];
         }
+        let nr = self.rels.len();
+        for q in 0..self.rows.len() {
+            self.rows[q] = ats[nr + q] as u64 << 32 | self.rows[q] & 0xFFFFFFFF;
+        }
+        let body_end = ats[ats.len() - 1];
         // Into the object.
         let p = unsafe &*self.pkg;
         let ps = p.syms[s as usize];
@@ -4435,6 +4468,9 @@ extend Gen {
         for q in 0..self.rels.len() {
             let r = self.rels[q];
             o.reloc(sec, r.kind, at as u32 + pl + r.at, r.sym, r.addend);
+        }
+        if p.debug {
+            dw::rows(o, self.b(), k2, size, pl, &self.rows, body_end, 1);
         }
         let c0 = o.cfi.len() as u32;
         if self.win {

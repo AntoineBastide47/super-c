@@ -15,8 +15,10 @@ pub const S_BSS: u8 = 6; // zero-filled: no bytes
 pub const S_TBSS: u8 = 7; // thread-local zero-filled
 pub const S_COUNT: u8 = 8;
 pub const NOSEC: u8 = 255;
-/// The most sections an object holds: the kinds, then the named ones (`named`).
+/// The most sections an object holds: the kinds, then the named ones (`named`), then the ones the format
+/// writers add (`own_section`: unwind and debug information).
 pub const S_MAX: u8 = 240;
+const S_OWN: u8 = 8;
 
 /// A section: its bytes (none for the zero-filled kinds), its size and alignment. A named section (past
 /// the kinds) carries its format's spelling and whether it holds code.
@@ -53,15 +55,40 @@ pub struct ORel {
     pub addend: i64,
 }
 
-/// The unwind rules of one function, for a format that carries them (ELF's `.eh_frame`): the function
-/// symbol, its code size, and its DWARF call frame instructions, `cfi_len` bytes at `cfi_at` of
-/// `Obj.cfi` (after the format's common entry, which states the rules at the function's first byte).
+/// The unwind rules of one function: the function symbol, its code size, its DWARF call frame
+/// instructions, `cfi_len` bytes at `cfi_at` of `Obj.cfi` (after the format's common entry, which states
+/// the rules at the function's first byte) for ELF's `.eh_frame`, and its compact unwind encoding for
+/// Mach-O's `__compact_unwind`.
 pub struct OFrame {
     pub sym: u32,
     pub size: u32,
     pub cfi_at: u32,
     pub cfi_len: u32,
+    pub compact: u32,
 }
+
+/// A row of a function's line table: from byte `off` of the function its code comes from line `line`,
+/// column `col` of package file `file` (`lir::ir::Package.files`).
+pub struct OLine {
+    pub off: u32,
+    pub file: u32,
+    pub line: u32,
+    pub col: u32,
+}
+
+/// A function the debug information describes: its symbol, its code size, its line rows
+/// `Obj.lines[start .. start + n]`, and the byte its body starts at past the prologue.
+pub struct OFunc {
+    pub sym: u32,
+    pub size: u32,
+    pub start: u32,
+    pub n: u32,
+    pub body: u32,
+}
+
+/// A 32-bit offset into the section that defines the symbol (a debug section's start), plus the addend:
+/// the format resolves it (Mach-O), or relocates it against the section (ELF, COFF).
+pub const R_SECOFF32: u8 = 200;
 
 /// Append the low 16 bits of `v` to `o`, little-endian.
 pub fn w16(o: &mut Vector<u8>, v: u32) {
@@ -84,6 +111,8 @@ pub fn w64(o: &mut Vector<u8>, v: u64) {
 extend OSym as Copy {}
 extend ORel as Copy {}
 extend OFrame as Copy {}
+extend OLine as Copy {}
+extend OFunc as Copy {}
 
 pub struct Obj {
     pub secs: Vector<Section>,
@@ -91,6 +120,8 @@ pub struct Obj {
     pub rels: Vector<ORel>,
     pub frames: Vector<OFrame>,
     pub cfi: Vector<u8>,
+    pub lines: Vector<OLine>,
+    pub funcs: Vector<OFunc>, // with debug information, every function
     pub names: nm::Names,
     sym_of: Vector<u32>, // per name id, its symbol plus 1 (0: none)
 }
@@ -103,6 +134,8 @@ extend Obj {
             rels: Vector::<ORel>::new(),
             frames: Vector::<OFrame>::new(),
             cfi: Vector::<u8>::new(),
+            lines: Vector::<OLine>::new(),
+            funcs: Vector::<OFunc>::new(),
             names: nm::Names::with_capacity(1 << 12, 1 << 8),
             sym_of: Vector::<u32>::new(),
         };
@@ -115,15 +148,27 @@ extend Obj {
     }
 
     /// The named section `spec` (its format's spelling), added when new; holding `code` when a function
-    /// goes there. NOSEC when the object holds S_MAX sections already.
+    /// goes there. NOSEC when the object holds S_MAX - S_OWN sections already.
     pub fn named(self: &mut Self, spec: str, code: bool) u8 {
+        return self.named_in(spec, code, S_MAX - S_OWN);
+    }
+
+    /// A data section `spec` a format writer adds (unwind or debug information), from the room `named`
+    /// leaves: at most S_OWN of them.
+    pub fn own_section(self: &mut Self, spec: str) u8 {
+        let s = self.named_in(spec, false, S_MAX);
+        assert(s != NOSEC, "obj: more sections of the writers' own than S_OWN");
+        return s;
+    }
+
+    fn named_in(self: &mut Self, spec: str, code: bool, max: u8) u8 {
         for k in S_COUNT as usize..self.secs.len() {
             if self.secs[k].name.as_str() == spec {
                 self.secs.index_mut(k).code = self.secs[k].code || code;
                 return k as u8;
             }
         }
-        if self.secs.len() >= S_MAX as usize {
+        if self.secs.len() >= max as usize {
             return NOSEC;
         }
         self.secs.push(

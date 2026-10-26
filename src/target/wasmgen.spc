@@ -16,6 +16,7 @@ import codegen::live as lv;
 import codegen::structure as st;
 import target::wasm as w;
 import target::wasmobj as wo;
+import codegen::obj as ob;
 import target::wasmabi as wa;
 import ir::core as core;
 import target::assembler as asmr;
@@ -73,6 +74,8 @@ pub struct Gen {
     sh: st::Shape,
     c: w::Code,
     rels: Vector<wo::WRel>,
+    rows: Vector<u64>, // with debug information, per change of location: its code byte << 32 | its `lines` index
+    body_at: u32, // where the body starts past the prologue
     me: wa::WSig, // the body's own signature
     cs: wa::WSig, // a call's
     enc: Vector<u8>,
@@ -175,6 +178,8 @@ extend Gen {
             sh: st::Shape::new(),
             c: w::Code::new(),
             rels: Vector::<wo::WRel>::new(),
+            rows: Vector::<u64>::new(),
+            body_at: 0,
             me: wa::WSig::new(),
             cs: wa::WSig::new(),
             enc: Vector::<u8>::new(),
@@ -405,6 +410,7 @@ extend Gen {
         lv::fill(&mut self.osym, b.syms.len(), NONE);
         self.c.clear();
         self.rels.truncate(0);
+        self.rows.truncate(0);
         self.locals.truncate(0);
         self.labels.truncate(0);
         self.tasks.truncate(0);
@@ -431,6 +437,7 @@ extend Gen {
             return false;
         }
         self.prologue();
+        self.body_at = self.c.bytes.len() as u32;
         self.tasks.push(Task { kind: TK_TREE, a: 0, b: 0, x: 0 });
         // Each task emits code once; the tasks a node pushes are bounded by its edges and children.
         while self.tasks.len() != 0 {
@@ -989,7 +996,19 @@ extend Gen {
             locals: Vector::<u8>::with_capacity(self.locals.len()),
             code: Vector::<u8>::with_capacity(self.c.bytes.len()),
             rels: Vector::<wo::WRel>::with_capacity(self.rels.len()),
+            lines: Vector::<ob::OLine>::with_capacity(self.rows.len()),
+            body: self.body_at,
         };
+        // The rows, the first from the function's start: the prologue takes its location.
+        for q in 0..self.rows.len() {
+            let l = self.b().lines[(self.rows[q] & 0xFFFFFFFF) as usize];
+            let off = if q == 0 {
+                0u32;
+            } else {
+                (self.rows[q] >> 32) as u32;
+            };
+            f.lines.push(ob::OLine { off: off, file: l.file, line: l.line, col: l.col });
+        }
         f.locals.extend_copy(&self.locals);
         f.code.extend_copy(&self.c.bytes);
         f.rels.extend_copy(&self.rels);
@@ -2695,16 +2714,37 @@ extend Gen {
     // The instructions of block `x`, then its terminator.
     fn block_code(self: &mut Self, x: u32) bool {
         let blk = self.b().blocks[x as usize];
+        let dbg = self.p().debug;
         for i in blk.start..blk.start + blk.len - 1 {
+            if dbg {
+                self.row(self.b().locs[i as usize]);
+            }
             if !self.inst(i) {
                 return false;
             }
             self.end_inst();
         }
         let ti = blk.start + blk.len - 1;
+        if dbg {
+            self.row(self.b().locs[ti as usize]);
+        }
         let ok = self.terminator(x, ti);
         self.end_inst();
         return ok;
+    }
+
+    // A line row at the next code byte for location `loc` (a `lines` index) when it differs from the last.
+    fn row(self: &mut Self, loc: u32) {
+        let n = self.rows.len();
+        if loc == 0 || n != 0 && (self.rows[n - 1] & 0xFFFFFFFF) as u32 == loc {
+            return;
+        }
+        let at = self.c.bytes.len() as u64 << 32;
+        if n != 0 && self.rows[n - 1] >> 32 == at >> 32 {
+            self.rows[n - 1] = at | loc as u64;
+            return;
+        }
+        self.rows.push(at | loc as u64);
     }
 
     // Edge `e` of block `s`: the target's parameters, then a `br`, or the target's code inline.
@@ -5597,6 +5637,7 @@ extend Gen {
     fn naked(self: &mut Self, s: u32) bool {
         self.c.clear();
         self.rels.truncate(0);
+        self.rows.truncate(0);
         self.locals.truncate(0);
         let b = self.b();
         for i in 0..b.insts.len() {

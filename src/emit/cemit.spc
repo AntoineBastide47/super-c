@@ -5,6 +5,7 @@
 // Types and symbols come from the frozen mangler (emit::mangle): the emitter reads only Core IR
 // and pools, never resolving, inferring, or interning. Unsupported bodies refuse with a reason.
 import ast::ast as *;
+import std::platform::process;
 import emit::mangle as mbe;
 import emit::cflow as cfl;
 import emit::probe as prb;
@@ -88,6 +89,20 @@ struct DynDue {
     pub src: String,
     pub h: u64,
     pub own9: ModuleId,
+}
+
+/// Whether C flags `fl` ask for debug information: their last `-g` form is not `-g0`, as the C compiler
+/// reads them.
+pub fn debug_flag(fl: str) bool {
+    let mut on = false;
+    let mut it = fl.split(" ");
+    // Each step takes one word of `fl`.
+    while let Some(w) = it.next() {
+        if w.starts_with("-g") {
+            on = w != "-g0";
+        }
+    }
+    return on;
 }
 
 /// A module's backend bits: the C renderer emits its C; LIR lowers its bodies.
@@ -563,6 +578,12 @@ extend CEmit {
                 l.pkg.vec_regs = mg.vec_reg_bytes as u32;
             }
             l.pkg.pic = pk.pic;
+            // Debug information as the C compile's `-g` asks, relative to this process's directory, the
+            // C compiles' own.
+            l.pkg.debug = debug_flag(pk.cflags.as_str());
+            if l.pkg.debug {
+                l.pkg.comp_dir = process::current_dir().unwrap_or(String::new());
+            }
             Option::<Box<lw::Lower>>::Some(l);
         } else {
             Option::<Box<lw::Lower>>::None;

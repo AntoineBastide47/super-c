@@ -850,6 +850,10 @@ pub struct Package {
     /// Position-independent code for a shared library: a reference to a global symbol goes through the
     /// global offset table, as the symbol may resolve outside the library.
     pub pic: bool,
+    /// The objects carry debug information: line tables from the locations of the bodies, their file
+    /// names relative to directory `comp_dir`.
+    pub debug: bool,
+    pub comp_dir: String,
     pub names: nm::Names, // file paths, symbol names and messages
     pub files: Vector<u32>, // file id -> name id
     pub syms: Vector<Sym>,
@@ -871,6 +875,8 @@ extend Package {
             ptr_bytes: ptr_bytes,
             vec_regs: 16,
             pic: false,
+            debug: false,
+            comp_dir: String::new(),
             names: nm::Names::with_capacity(1 << 14, 1 << 10),
             files: Vector::<u32>::new(),
             syms: Vector::<Sym>::new(),

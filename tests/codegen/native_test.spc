@@ -722,11 +722,12 @@ fn header_structs_cross_the_c_abi() {
 }
 
 // A call the native backend refuses after its module lowered (a C struct by value whose bitfield leaves
-// its class unknown) sends the module through C: the build renders its C in a second run. A rebuild that changes only `main`
-// replays the std modules, which rendered no C.
+// its class unknown) sends the module through C: the build renders its C in a second run. A rebuild that
+// changes only `main` replays the std modules, which rendered no C. Microsoft x64 passes an aggregate by
+// its size alone, so no class is unknown there.
 @test
 fn a_module_the_backend_refuses_goes_through_c() {
-    if !nat::supported(tgt::host_os(), tgt::host_isa()) {
+    if !nat::supported(tgt::host_os(), tgt::host_isa()) || PLATFORM == Platform::Windows {
         return;
     }
     let p = cli::proj_new();

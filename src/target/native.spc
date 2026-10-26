@@ -4,6 +4,9 @@
 // ABI, a relocatable wasm object).
 import lir::ir as *;
 import codegen::obj as ob;
+import codegen::dwarf as dw;
+import target::x64 as x;
+import target::a64 as a;
 import target::a64gen as gen;
 import target::x64gen as xgen;
 import target::macho as mo;
@@ -135,6 +138,17 @@ pub fn object(
             return false;
         }
     }
+    if p.debug && o.funcs.len() != 0 {
+        let d = dw::Dwarf::of_obj(&o, p, p.comp_dir.as_str(), p.ptr_bytes);
+        let fmt = if apple {
+            dw::F_MACHO;
+        } else if win {
+            dw::F_COFF;
+        } else {
+            dw::F_ELF;
+        };
+        dw::attach(&mut o, &d, fmt, ast_pick(x64, x::R_ABS64, a::R_ABS64));
+    }
     if win {
         coff::write(&o, out);
         return true;
@@ -154,6 +168,14 @@ pub fn object(
     }
     mo::write(&mut o, out);
     return true;
+}
+
+const fn ast_pick(c: bool, t: u8, f: u8) u8 {
+    return if c {
+        t;
+    } else {
+        f;
+    };
 }
 
 // The generator of the target: the arm64 one, or the x86-64 one (`x64`). Both share the object.
@@ -190,6 +212,13 @@ extend Backend {
 // `object` for wasm32: the code generator fills a wasm object, local copies included.
 fn wasm_object(p: &Package, funcs: []u32, datas: []u32, text: str, out: &mut Vector<u8>, err: &mut String) bool {
     let mut o = wobj::WObj::new();
+    if p.debug {
+        o.debug = true;
+        o.comp_dir = p.comp_dir.clone();
+        for k in 0..p.files.len() {
+            o.files.push(String::from_str(p.spell(p.files[k])));
+        }
+    }
     let mut g = wgen::Gen::new(p, &mut o);
     for i in 0..funcs.len() {
         if !g.func(funcs[i], false) {

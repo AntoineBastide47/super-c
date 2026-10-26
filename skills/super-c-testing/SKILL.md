@@ -487,6 +487,15 @@ that two builds give byte-identical objects. A CLI test that reads the emitted C
 object of a debug build sets `cli::set_env("SC_NATIVE", "0")`: on macOS arm64, Linux x86-64, Linux
 arm64, Windows x86-64 and wasm32 that build compiles natively and writes no C. `ci/gate.sh` checks that one
 worker and every core build byte-identical native objects.
+`tests/codegen/asm_test.spc` compares encodings with clang's only (`llvm_cc`: the C compiler when it is
+clang, else `clang` on the path, else the comparison skips): GNU as picks other valid encodings. A
+failing `wasm_libc_test` comparison names its first differing line.
+`tests/codegen/debug_info_test.spc` builds a program with and without debug information for every native
+target: the code and data sections match, an llvm-dwarfdump (on the path, beside clang, the wasi-sdk's or
+Xcode's) verifies the line tables; gdb (Linux) or lldb (macOS, where it may run a program) stops in a
+native function and backtraces its callers, else the test says it skipped; a C driver unwinds from a
+native frame to its own and reads back the callee-saved registers it set (libunwind's cursor on macOS,
+`_Unwind_Backtrace` elsewhere).
 
 ### Families of cases in few compiler runs
 

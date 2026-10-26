@@ -7,11 +7,14 @@
 // type index for R_TYPE_INDEX_LEB) and its offset in the body or segment that holds it.
 import target::wasm as w;
 import utils::names as nm;
+import codegen::obj as ob;
+import codegen::dwarf as dw;
 
 /// Symbol kinds (the linking conventions' `SYMTAB_*`).
 pub const K_FUNC: u8 = 0;
 pub const K_DATA: u8 = 1;
 pub const K_GLOBAL: u8 = 2;
+pub const K_SECTION: u8 = 3;
 pub const K_TABLE: u8 = 5;
 
 /// Symbol flags (`WASM_SYM_*`).
@@ -54,12 +57,15 @@ pub struct WSym {
 extend WSym as Copy {}
 
 /// A function body: its type, its locals past the parameters (one wasm type each), its instructions
-/// (the closing `end` included) and their relocations.
+/// (the closing `end` included) and their relocations; with debug information its line rows (offsets
+/// into `code`) and the offset its body starts at past the prologue.
 pub struct WFunc {
     pub sym: u32,
     pub locals: Vector<u8>,
     pub code: Vector<u8>,
     pub rels: Vector<WRel>,
+    pub lines: Vector<ob::OLine>,
+    pub body: u32,
 }
 
 /// A data segment: its name, alignment, bytes (`size` of them, the zero-filled ones too) and relocations.
@@ -79,6 +85,10 @@ pub struct WObj {
     pub funcs: Vector<WFunc>,
     pub segs: Vector<WSeg>,
     pub simd: bool, // a body uses v128
+    /// With debug information: the package's file paths by file id and the compile directory.
+    pub debug: bool,
+    pub files: Vector<String>,
+    pub comp_dir: String,
     sym_of: Vector<u32>, // per name id, its symbol plus 1 (0: none)
 }
 
@@ -91,6 +101,9 @@ extend WObj {
             funcs: Vector::<WFunc>::new(),
             segs: Vector::<WSeg>::new(),
             simd: false,
+            debug: false,
+            files: Vector::<String>::new(),
+            comp_dir: String::new(),
             sym_of: Vector::<u32>::new(),
         };
     }
@@ -259,8 +272,13 @@ pub fn write(o: &WObj, out: &mut Vector<u8>) {
     let mut code_rels = Vector::<WRel>::new();
     w::uleb(&mut sec, o.funcs.len() as u64);
     let mut head = Vector::<u8>::new();
+    // Per body, where its entry starts in the section's contents and its instructions start in the entry.
+    let mut entry = Vector::<u32>::with_capacity(o.funcs.len());
+    let mut inst_at = Vector::<u32>::with_capacity(o.funcs.len());
+    let mut body_size = Vector::<u32>::with_capacity(o.funcs.len());
     for i in 0..o.funcs.len() {
         let f = o.funcs.at(i);
+        entry.push(sec.len() as u32);
         head.truncate(0);
         let mut runs: u32 = 0;
         let mut j: usize = 0;
@@ -283,9 +301,11 @@ pub fn write(o: &WObj, out: &mut Vector<u8>) {
             head.push(f.locals[j]);
             j = e;
         }
+        body_size.push((head.len() + f.code.len()) as u32);
         w::uleb(&mut sec, (head.len() + f.code.len()) as u64);
         sec.extend_copy(&head);
         let base = sec.len() as u32;
+        inst_at.push(base - entry[i]);
         let at0 = sec.len();
         sec.extend_copy(&f.code);
         for q in 0..f.rels.len() {
@@ -320,11 +340,38 @@ pub fn write(o: &WObj, out: &mut Vector<u8>) {
         addr += g.bytes.len() as u32;
     }
     let data_index = put_section(out, 11, &mut sec, &mut nsec);
+    // Debug information: the sections, each with a section symbol after the object's symbols.
+    let mut dbg_index = Vector::<u32>::new();
+    let mut dbg_rels = Vector::<Vector<WRel>>::new();
+    if o.debug {
+        let mut d = debug_info(o, &inst_at, &body_size);
+        let names: []str = dw::NAMES;
+        for k in 0..dw::D_COUNT as usize {
+            dbg_rels.push(Vector::<WRel>::new());
+        }
+        for x in 0..d.fixes.len() {
+            let f = d.fixes[x];
+            let b = d.secs.index_mut(f.sec as usize);
+            // The field holds the object's own value: a function's entry offset, or the section offset.
+            let (kind, sym, v) = if f.kind == dw::FX_ADDR {
+                (w::R_FUNCTION_OFFSET_I32, f.sym, entry[o.syms[f.sym as usize].def as usize] as i64 + f.addend);
+            } else {
+                (w::R_SECTION_OFFSET_I32, o.syms.len() as u32 + f.sym, f.addend);
+            };
+            for j in 0..4u32 {
+                b[(f.off + j) as usize] = (v as u64 >> (8 * j) as u64 & 0xFF) as u8;
+            }
+            dbg_rels.index_mut(f.sec as usize).push(WRel { kind: kind, off: f.off, sym: sym, addend: f.addend as i32 });
+        }
+        for k in 0..dw::D_COUNT as usize {
+            dbg_index.push(put_custom(out, names[k], d.secs.at(k), &mut nsec));
+        }
+    }
     // linking: the symbol table, then the segment info.
     let mut lk = Vector::<u8>::new();
     w::uleb(&mut lk, 2);
     let mut sub = Vector::<u8>::new();
-    w::uleb(&mut sub, o.syms.len() as u64);
+    w::uleb(&mut sub, (o.syms.len() + dbg_index.len()) as u64);
     for k in 0..o.syms.len() {
         let s = o.syms[k];
         sub.push(s.kind);
@@ -357,6 +404,11 @@ pub fn write(o: &WObj, out: &mut Vector<u8>) {
             w::name(&mut sub, o.name_of(k as u32));
         }
     }
+    for k in 0..dbg_index.len() {
+        sub.push(K_SECTION);
+        w::uleb(&mut sub, F_LOCAL);
+        w::uleb(&mut sub, dbg_index[k]);
+    }
     lk.push(8);
     w::uleb(&mut lk, sub.len() as u64);
     lk.extend_copy(&sub);
@@ -373,15 +425,22 @@ pub fn write(o: &WObj, out: &mut Vector<u8>) {
         w::uleb(&mut lk, sub.len() as u64);
         lk.extend_copy(&sub);
     }
-    put_custom(out, "linking", &lk);
-    // The relocations of the code and of the data.
+    let _ = put_custom(out, "linking", &lk, &mut nsec);
+    // The relocations of the code, of the data and of the debug sections.
     if code_rels.len() != 0 {
         let rc = rel_section(code_index, &code_rels);
-        put_custom(out, "reloc.CODE", &rc);
+        let _ = put_custom(out, "reloc.CODE", &rc, &mut nsec);
     }
     if data_rels.len() != 0 {
         let rd = rel_section(data_index, &data_rels);
-        put_custom(out, "reloc.DATA", &rd);
+        let _ = put_custom(out, "reloc.DATA", &rd, &mut nsec);
+    }
+    let names: []str = dw::NAMES;
+    for k in 0..dbg_index.len() {
+        if dbg_rels.at(k).len() != 0 {
+            let rs = rel_section(dbg_index[k], dbg_rels.at(k));
+            let _ = put_custom(out, format("reloc.{}", names[k]).as_str(), &rs, &mut nsec);
+        }
     }
     // The features the code uses.
     let mut tf = Vector::<u8>::new();
@@ -399,7 +458,51 @@ pub fn write(o: &WObj, out: &mut Vector<u8>) {
         tf.push(b'+');
         w::name(&mut tf, feats[i]);
     }
-    put_custom(out, "target_features", &tf);
+    let _ = put_custom(out, "target_features", &tf, &mut nsec);
+}
+
+// The DWARF of `o`'s bodies: an address is an offset from a body's entry (its size field), where body
+// `i`'s instructions start `inst_at[i]` bytes later; its range is the size its field states
+// (`body_size[i]`), as clang states it. A row before the instructions (the entry's locals) takes the
+// first row's location.
+fn debug_info(o: &WObj, inst_at: &Vector<u32>, body_size: &Vector<u32>) dw::Dwarf {
+    let mut funcs = Vector::<ob::OFunc>::new();
+    let mut lines = Vector::<ob::OLine>::new();
+    let mut names = Vector::<str>::new();
+    let mut globals = Vector::<bool>::new();
+    for i in 0..o.funcs.len() {
+        let f = o.funcs.at(i);
+        let start = lines.len() as u32;
+        for r in 0..f.lines.len() {
+            let mut l = f.lines[r];
+            l.off = inst_at[i] + l.off;
+            lines.push(l);
+        }
+        funcs.push(
+            ob::OFunc {
+                sym: f.sym,
+                size: body_size[i],
+                start: start,
+                n: f.lines.len() as u32,
+                body: inst_at[i] + f.body,
+            },
+        );
+        names.push(o.name_of(f.sym));
+        globals.push((o.syms[f.sym as usize].flags & F_LOCAL) == 0);
+    }
+    let mut files = Vector::<str>::with_capacity(o.files.len());
+    for k in 0..o.files.len() {
+        files.push(o.files.at(k).as_str());
+    }
+    return dw::Dwarf::build(
+        funcs.as_slice(),
+        lines.as_slice(),
+        names.as_slice(),
+        globals.as_slice(),
+        files.as_slice(),
+        o.comp_dir.as_str(),
+        4,
+    );
 }
 
 const fn ast_pick32(c: bool, a: u32, b: u32) u32 {
@@ -430,14 +533,16 @@ fn put_section(out: &mut Vector<u8>, id: u8, sec: &mut Vector<u8>, n: &mut u32) 
     return *n - 1;
 }
 
-// Append custom section `name` with contents `body` to `out`.
-fn put_custom(out: &mut Vector<u8>, name: str, body: &Vector<u8>) {
+// Append custom section `name` with contents `body` to `out`; its index in the module (`n` counts them).
+fn put_custom(out: &mut Vector<u8>, name: str, body: &Vector<u8>, n: &mut u32) u32 {
     let mut c = Vector::<u8>::new();
     w::name(&mut c, name);
     c.extend_copy(body);
     out.push(0);
     w::uleb(out, c.len() as u64);
     out.extend_copy(&c);
+    *n += 1;
+    return *n - 1;
 }
 
 // The contents of a `reloc.*` section for section `index`.

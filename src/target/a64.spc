@@ -332,16 +332,6 @@ pub const fn ldst_unscaled(m: u32, load: bool, rt: u32, rn: u32, off: i32) u32 {
     return mbits(m, load) | (off as u32 & 0x1FF) << 12 | rn << 5 | rt;
 }
 
-/// LDR/STR with writeback: pre-index (`pre`, the address is rn + off, then rn takes it) or post-index (rn,
-/// then rn += off).
-pub const fn ldst_idx(m: u32, load: bool, pre: bool, rt: u32, rn: u32, off: i32) u32 {
-    return ldst_unscaled(m, load, rt, rn, off) | if pre {
-        0xC00u32;
-    } else {
-        0x400u32;
-    };
-}
-
 /// LDR/STR (register): the address is rn + rm (64-bit), shifted by the size when `scaled`.
 pub const fn ldst_reg(m: u32, load: bool, rt: u32, rn: u32, rm: u32, scaled: bool) u32 {
     let s = if scaled {
