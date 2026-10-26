@@ -297,8 +297,49 @@ panic-guard folding and widening).
   `narrow_below`, so a byte indexes a 256-element array unguarded) and `fold_proved`'s (a value is at
   most itself; zero is at most any unsigned value). The
   interval solver runs for a body with a guard too (`want_ints`): it tracks the operands of a
-  comparison with a field read in place (`field_read`) beside the checks' operands. A switch on a
+  comparison with a field read in place (`field_read`) beside the checks' operands, and a guard
+  against a constant of 2 or more (an inlined `Array::index`) seeds it (`Facts::gmark`). A switch on a
   constant takes one edge (`ir::const_switch_edge`, shared with `CFlow`), so facts flow only there.
+  Only a branch with a panic on one side is proved (`doomed_panic`, found once per body for the
+  targets of two-way branches); an equality guard folds where one side is below the other
+  (`eq_always`).
+- **Fact flow.** A block with one forward predecessor takes its predecessor's facts; a join takes the
+  facts its immediate dominator holds on exit (`out_start`; every local written on the way has a
+  fresh version there, so each still holds), with no meet. A branch adds its condition on each edge
+  (`cond_facts`): an order and its negation, `a == b` as two `<=` facts, a disequality as a strict
+  bound (`0 < x` for an unsigned `x != 0`, `a < b` where `a <= b` holds), `!c` as `c` with the other
+  value; an assertion gives its condition on success, and a short-circuit join (`and_join`) the right
+  side's on its `&&` true edge or `||` false edge. A side read in place, with no local, makes a fact
+  over the place (`Fact.ip`, `pvals`) that a later read of it at the same generations takes on
+  (`place_read`). A length side may be a constant (`lconst`). At a join of a branch on `a < b`, a
+  local each side copies, `a` on the true side and `b` on the false one, is their minimum
+  (`phi_facts`: `l <= a`, `l <= b`; swapped, their maximum), by the copies' source keys the walk
+  recorded (`cp1`, `cp2`).
+- **Values.** Besides copies and usize affine steps, a key resolves a constant assignment
+  (`constof`), an in-place usize step `x = x + c` to the version before plus `c` (such a key may
+  name an older version), an unsigned cast into an unsigned type at least as wide as its source
+  (`widen_cast`), an integer field read of a place an earlier read took at the same generations
+  (`reads`, following the value through copies and moves), and a numeric cast of a value an earlier
+  cast to the same type took (`casts`; where that local died, its facts carry over,
+  `rename_facts`).
+- **Bounded values and proofs.** Over unsigned values, `a % n < n`, `a / c <= a` and `a >> c <= a`
+  (strict for `a >= 1`), `a & m <= a, m`. A fact proves a check over the same two values at other
+  offsets where no sum wraps (`offset_lt`, `nowrap`: a lower bound of at least `-off` for a negative
+  offset, a strict upper fact for `+1`; `lower_of` takes constant lower bounds, by value or place,
+  `0 < x` for a strict bound by an unsigned value, and the solved interval), so `xs[len - 1]` after
+  `len > 0` and `xs[i - 1]` after `1 <= i` prove in every profile. Constants bridge an index bound and
+  a length bound (`const_lt`: `i < 10`, `20 < len`), and `c <= len` proves a constant index below `c`.
+- **Loop counters** (`iv_scan`, `iv_facts`). At a loop header, before its writes are bumped, an
+  unsigned local whose one write in the loop is `l = l + 1` (or `l - 1`, directly or through a
+  temporary) outside every nested loop, with an exit test outside them that compares it with a
+  constant, a local the loop leaves, or a place it reads each iteration and leaves, keeps at the
+  header: `entry <= l` and, where the entry value meets it, `l <= y` (a test after the step: `l < y`)
+  for a step up; `l <= entry` for a step down. The test's staying edge, of one predecessor, keeps the
+  counter below the bound (`stay_rel`); before the step it dominates the step and the step every back
+  edge, after it the step dominates the test and the staying edge every back edge. A local every
+  write in the loop bounds by one value the loop leaves (`x % n`, `x & m`) keeps `l < n` (`l <= m`)
+  where its entry value does (a ring index). No candidate is assumed: each fact follows from the
+  loop's shape and the entry facts in the one walk.
 - **Guard widening** (`try_widen`). An unproven guard `index < len` whose survivor leads, through
   single-predecessor blocks of statements that write no memory and cannot panic (`widen_step`, the
   arithmetic `try_coalesce` crosses too), to guards `root + k < len` over the same root, the same length
@@ -331,7 +372,8 @@ panic-guard folding and widening).
   for everything the loop's blocks can write (a summary per block, made once per body from single
   definitions and the same transparency rules), so one version names one value on every path.
 - **Escapes.** The escape set (raw addresses, mutable borrows stored or used past derefs, copies
-  and calls, references cast to raw pointers) comes from one scan of the body before the walk,
+  and calls, references cast to raw pointers, a closure's captures) comes from one scan of the body
+  before the walk; a call or drop through a raw pointer is never transparent (`raw_target`). It is
   resolved through single definitions; an unresolved one disables call transparency for the body.
   BCE walks each body once, in reverse postorder up to the last block with a check or a
   fold candidate: no fact flows backward, so the blocks after it change no result.
