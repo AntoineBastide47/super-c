@@ -11,6 +11,7 @@ const SCN_CODE: u32 = 0x20;
 const SCN_DATA: u32 = 0x40;
 const SCN_BSS: u32 = 0x80;
 const SCN_NRELOC_OVFL: u32 = 0x01000000;
+const SCN_DISCARDABLE: u32 = 0x02000000;
 const SCN_EXEC: u32 = 0x20000000;
 const SCN_READ: u32 = 0x40000000;
 const SCN_WRITE: u32 = 0x80000000;
@@ -40,6 +41,10 @@ fn sec_info(o: &ob::Obj, k: u8, name: &mut String) u32 {
         name.push_str(o.secs[k as usize].name.as_str());
         if o.secs[k as usize].code {
             return SCN_CODE | SCN_EXEC | SCN_READ | al;
+        }
+        if name.as_str().starts_with(".debug_") {
+            // Debug information: no part of the image.
+            return SCN_DATA | SCN_DISCARDABLE | SCN_READ | al;
         }
         return SCN_DATA | SCN_READ | SCN_WRITE | al;
     }
@@ -181,7 +186,7 @@ pub fn write(o: &ob::Obj, out: &mut Vector<u8>) {
         let ty = if rl.kind == x::R_ABS64 {
             add_field(&mut secs.index_mut(s).bytes, rl.off, 8, rl.addend as u64);
             REL_ADDR64;
-        } else if rl.kind == x::R_SECREL {
+        } else if rl.kind == x::R_SECREL || rl.kind == ob::R_SECOFF32 {
             add_field(&mut secs.index_mut(s).bytes, rl.off, 4, rl.addend as u64);
             REL_SECREL;
         } else {

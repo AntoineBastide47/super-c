@@ -191,6 +191,27 @@ fn sec_names<'a>(o: &'a ob::Obj, k: u8, sect: &mut str<'a>, seg: &mut str<'a>) u
 
 /// Write object `o` as a Mach-O arm64 object into `out`.
 pub fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
+    // The functions' compact unwind entries, which the linker turns into `__unwind_info`: each one's
+    // address, size and encoding, no personality and no language data.
+    if o.frames.len() != 0 {
+        let cu = o.own_section("__LD,__compact_unwind,regular,debug");
+        let _ = o.align(cu, 3);
+        for f in 0..o.frames.len() {
+            let fr = o.frames[f];
+            if fr.compact == 0 {
+                continue;
+            }
+            let at = o.secs[cu as usize].bytes.len() as u32;
+            let mut e = Vector::<u8>::with_capacity(32);
+            ob::w64(&mut e, 0);
+            ob::w32(&mut e, fr.size);
+            ob::w32(&mut e, fr.compact);
+            ob::w64(&mut e, 0);
+            ob::w64(&mut e, 0);
+            o.put(cu, e.as_slice());
+            o.reloc(cu, a::R_ABS64, at, fr.sym, 0);
+        }
+    }
     // Thread-local variables: the descriptors section, the variable symbols moved onto it, their values
     // under new local symbols.
     let mut tv = Vector::<u8>::new();
@@ -281,6 +302,26 @@ pub fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
         }
     }
     let data_start = (hdr + cmds) as u64 + fal - 1 & ~(fal - 1);
+    // An address in a debug section holds the object's own address of its target and relocates against
+    // the target's section, as `dsymutil` maps it.
+    let mut dbg = Vector::<bool>::new();
+    dbg.resize_default(ns);
+    for k in ob::S_COUNT as usize..ns {
+        dbg[k] = o.secs[k].name.as_str().starts_with("__DWARF,");
+    }
+    for r in 0..o.rels.len() {
+        let x = o.rels[r];
+        if !dbg[x.sec as usize] {
+            continue;
+        }
+        let y = o.syms[x.sym as usize];
+        assert(x.kind == a::R_ABS64 && y.sec != ob::NOSEC, "macho: a debug address of a function of the object");
+        let v = addr[(secno[y.sec as usize] - 1) as usize] + y.off + x.addend as u64;
+        let b = o.secs.index_mut(x.sec as usize);
+        for j in 0..8u32 {
+            b.bytes[(x.off + j) as usize] = (v >> (8 * j) as u64 & 0xFF) as u8;
+        }
+    }
     let mut filesz: u64 = 0;
     for i in 0..kinds.len() {
         let k = kinds[i];
@@ -336,8 +377,19 @@ pub fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
             }
         } else {
             for r in 0..o.rels.len() {
-                if o.rels[r].sec == k {
-                    put_rel(&mut relbytes, o.rels[r], &symix);
+                let x = o.rels[r];
+                if x.sec != k {
+                    continue;
+                }
+                if dbg[k as usize] {
+                    // Against the section: its number, not extern.
+                    ob::w32(&mut relbytes, x.off);
+                    ob::w32(
+                        &mut relbytes,
+                        secno[o.syms[x.sym as usize].sec as usize] as u32 | 3u32 << 25 | RT_UNSIGNED << 28,
+                    );
+                } else {
+                    put_rel(&mut relbytes, x, &symix);
                 }
             }
         }

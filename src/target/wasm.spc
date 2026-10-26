@@ -20,11 +20,13 @@ pub const R_MEMORY_ADDR_SLEB: u8 = 4;
 pub const R_MEMORY_ADDR_I32: u8 = 5;
 pub const R_TYPE_INDEX_LEB: u8 = 6;
 pub const R_GLOBAL_INDEX_LEB: u8 = 7;
+pub const R_FUNCTION_OFFSET_I32: u8 = 8;
+pub const R_SECTION_OFFSET_I32: u8 = 9;
 pub const R_TABLE_NUMBER_LEB: u8 = 20;
 
 /// Whether relocation type `k` carries an addend.
 pub const fn has_addend(k: u8) bool {
-    return k == R_MEMORY_ADDR_LEB || k == R_MEMORY_ADDR_SLEB || k == R_MEMORY_ADDR_I32;
+    return k == R_MEMORY_ADDR_LEB || k == R_MEMORY_ADDR_SLEB || k == R_MEMORY_ADDR_I32 || k == R_FUNCTION_OFFSET_I32 || k == R_SECTION_OFFSET_I32;
 }
 
 // Control.

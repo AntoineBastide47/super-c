@@ -185,8 +185,10 @@ pointer-sized handle takes `@layout(sizeof(usize), sizeof(usize))` (`pthread::pt
 type is then a value like any other: a field of a header struct,
 an array element, a static, `sizeof` at compile time. A register type takes no `@layout` ("a
 register type ('@value') states its layout: it takes no '@layout'"). The native backend passes such
-a value as the scalar the header's typedef names (an integer or pointer, `float`, `double`); a
-module that passes one of any other C type by value goes through C.
+a value as the scalar the header's typedef names (an integer or pointer, `float`, `double`), and a
+struct or union of scalars as the C compiler does, from the header's members when their layout is the
+declared one; a module that passes one of any other C type by value (a bitfield, a `packed` member)
+goes through C, except on Windows x64, which passes every aggregate by its size.
 
 ### Register types: `@value(size, align)`
 

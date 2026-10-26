@@ -17,6 +17,7 @@
 import lir::ir as *;
 import codegen::live as lv;
 import codegen::obj as ob;
+import codegen::dwarf as dw;
 import target::a64 as a;
 import target::aapcs64 as cc;
 import codegen::abi as ab;
@@ -110,6 +111,7 @@ pub struct Gen {
     tmps: u64, // registers the current instruction took as temporaries
     fixed_busy: u64,
     csr: u64, // callee-saved registers the body uses
+    rows: Vector<u64>, // with debug information, per change of location: its code word << 32 | its `lines` index
     rr: u32, // the eviction cursor
     pos: u32, // the layout position of the block being compiled
     cur: u32, // the instruction being compiled
@@ -201,6 +203,7 @@ extend Gen {
             tmps: 0,
             fixed_busy: 0,
             csr: 0,
+            rows: Vector::<u64>::new(),
             rr: 0,
             pos: 0,
             cur: 0,
@@ -1037,6 +1040,7 @@ extend Gen {
         self.tmps = 0;
         self.fixed_busy = 0;
         self.csr = 0;
+        self.rows.truncate(0);
         self.rr = 0;
         self.cond = Cond { inst: NONE, cc: 0, cc2: NONE };
         let nq = self.lv.order.len();
@@ -1289,7 +1293,11 @@ extend Gen {
             }
         }
         let bk = b.blocks[k as usize];
+        let dbg = unsafe (*self.pkg).debug;
         for i in bk.start..bk.start + bk.len {
+            if dbg {
+                self.row(b.locs[i as usize]);
+            }
             self.begin_inst(i);
             if !self.inst(i) {
                 return false;
@@ -1304,6 +1312,20 @@ extend Gen {
             }
         }
         return true;
+    }
+
+    // A line row at the next code word for location `loc` (a `lines` index) when it differs from the last.
+    fn row(self: &mut Self, loc: u32) {
+        let n = self.rows.len();
+        if loc == 0 || n != 0 && (self.rows[n - 1] & 0xFFFFFFFF) as u32 == loc {
+            return;
+        }
+        let at = self.code.len() as u64 << 32;
+        if n != 0 && self.rows[n - 1] >> 32 == at >> 32 {
+            self.rows[n - 1] = at | loc as u64;
+            return;
+        }
+        self.rows.push(at | loc as u64);
     }
 
     // Whether the block at position `q` keeps the register state: its only predecessor is the block
@@ -3929,37 +3951,32 @@ extend Gen {
         let mut pro = Vector::<u32>::new();
         pro.push(a::ldstp(a::M_X, false, 3, a::FP, a::LR, a::SP, -16));
         pro.push(a::add_imm(true, a::FP, a::SP, 0));
+        // The callee-saved registers in the pairs compact unwind names (x19/x20 to x27/x28, d8/d9 to
+        // d14/d15), both of a pair when the body uses one: each pair below the last, its lower register 8
+        // bytes higher (x19 at x29 - 8), as libunwind reads a frame. `xs` and `vs` hold each pair's lower
+        // register.
         let mut xs = Vector::<u32>::new();
         let mut vs = Vector::<u32>::new();
-        for r in 0..64u32 {
-            if (self.csr & bit(r as u8)) != 0 {
-                if r < 32 {
-                    xs.push(r);
-                } else {
-                    vs.push(r - 32);
-                }
+        let mut enc: u32 = 0x04000000;
+        for q in 0..5u32 {
+            if (self.csr >> (19 + 2 * q) as u64 & 3) != 0 {
+                xs.push(19 + 2 * q);
+                enc |= 1u32 << q;
             }
         }
-        // Pairs, and an odd last register alone in its 16 bytes.
-        let mut k: usize = 0;
-        while k < xs.len() {
-            if k + 1 < xs.len() {
-                pro.push(a::ldstp(a::M_X, false, 3, xs[k], xs[k + 1], a::SP, -16));
-            } else {
-                pro.push(a::ldst_idx(a::M_X, false, true, xs[k], a::SP, -16));
+        for q in 0..4u32 {
+            if (self.csr >> (40 + 2 * q) as u64 & 3) != 0 {
+                vs.push(8 + 2 * q);
+                enc |= 0x100u32 << q;
             }
-            k += 2;
         }
-        k = 0;
-        while k < vs.len() {
-            if k + 1 < vs.len() {
-                pro.push(a::ldstp(a::M_VD, false, 3, vs[k], vs[k + 1], a::SP, -16));
-            } else {
-                pro.push(a::ldst_idx(a::M_VD, false, true, vs[k], a::SP, -16));
-            }
-            k += 2;
+        for k in 0..xs.len() {
+            pro.push(a::ldstp(a::M_X, false, 3, xs[k] + 1, xs[k], a::SP, -16));
         }
-        let csr_bytes = 16 * ((xs.len() as u32 + 1) / 2 + (vs.len() as u32 + 1) / 2);
+        for k in 0..vs.len() {
+            pro.push(a::ldstp(a::M_VD, false, 3, vs[k] + 1, vs[k], a::SP, -16));
+        }
+        let csr_bytes = 16 * (xs.len() + vs.len()) as u32;
         // The locals, a page at a time past 4 KiB so each guard page is touched.
         let mut left = local;
         while left >= 4096 {
@@ -3984,23 +4001,15 @@ extend Gen {
         } else {
             epi.push(a::mov_sp(a::SP, a::FP));
         }
-        let vpairs = (vs.len() + 1) / 2;
-        for q in 0..vpairs {
-            let kk = 2 * (vpairs - 1 - q);
-            if kk + 1 < vs.len() {
-                epi.push(a::ldstp(a::M_VD, true, 1, vs[kk], vs[kk + 1], a::SP, 16));
-            } else {
-                epi.push(a::ldst_idx(a::M_VD, true, false, vs[kk], a::SP, 16));
-            }
+        let mut k = vs.len();
+        while k > 0 {
+            k -= 1;
+            epi.push(a::ldstp(a::M_VD, true, 1, vs[k] + 1, vs[k], a::SP, 16));
         }
-        let xpairs = (xs.len() + 1) / 2;
-        for q in 0..xpairs {
-            let kk = 2 * (xpairs - 1 - q);
-            if kk + 1 < xs.len() {
-                epi.push(a::ldstp(a::M_X, true, 1, xs[kk], xs[kk + 1], a::SP, 16));
-            } else {
-                epi.push(a::ldst_idx(a::M_X, true, false, xs[kk], a::SP, 16));
-            }
+        k = xs.len();
+        while k > 0 {
+            k -= 1;
+            epi.push(a::ldstp(a::M_X, true, 1, xs[k] + 1, xs[k], a::SP, 16));
         }
         epi.push(a::ldstp(a::M_X, true, 1, a::FP, a::LR, a::SP, 16));
         epi.push(a::RET);
@@ -4051,6 +4060,11 @@ extend Gen {
         }
         if self.elf {
             frame_rules(o, k2, size, &xs, &vs);
+        } else {
+            o.frames.push(ob::OFrame { sym: k2, size: size, cfi_at: 0, cfi_len: 0, compact: enc });
+        }
+        if p.debug {
+            dw::rows(o, self.b(), k2, size, pl * 4, &self.rows, body_n, 4);
         }
         return true;
     }
@@ -4167,8 +4181,9 @@ extend Gen {
 
 // The unwind rules of function `sym` (`size` bytes) for `.eh_frame`, after the prologue's `stp x29, x30,
 // [sp, #-16]!` (the CFA is sp + 16, x29 at CFA - 16, x30 at CFA - 8), `mov x29, sp` (the CFA is x29 +
-// 16) and the pushes of callee-saved registers `xs` and `vs` (pairs, 16 bytes each, below x29). The
-// common entry's code alignment is 4 bytes and its data alignment -8.
+// 16) and the pushes of the callee-saved pairs whose lower registers are `xs` and `vs` (16 bytes each
+// below x29, the lower register 8 bytes higher). The common entry's code alignment is 4 bytes and its
+// data alignment -8.
 fn frame_rules(o: &mut ob::Obj, sym: u32, size: u32, xs: &Vector<u32>, vs: &Vector<u32>) {
     let c0 = o.cfi.len() as u32;
     o.cfi.push(0x40 | 1);
@@ -4181,23 +4196,28 @@ fn frame_rules(o: &mut ob::Obj, sym: u32, size: u32, xs: &Vector<u32>, vs: &Vect
     o.cfi.push(0x40 | 1);
     o.cfi.push(0x0D);
     o.cfi.push(a::FP as u8);
-    let xpairs = (xs.len() as u32 + 1) / 2;
-    let npush = xpairs + (vs.len() as u32 + 1) / 2;
+    let nx = xs.len() as u32;
+    let npush = nx + vs.len() as u32;
     if npush != 0 {
         o.cfi.push(0x40 | npush as u8);
-        // Push q stores its first register at CFA - 32 - 16 q, its second 8 bytes above.
-        for k in 0..xs.len() as u32 {
+        // Pair q stores its lower register at CFA - 24 - 16 q, its upper one 8 bytes below.
+        for k in 0..nx {
             o.cfi.push(0x80 | xs[k as usize] as u8);
-            o.cfi.push((4 + 2 * (k / 2) - (k & 1)) as u8);
+            o.cfi.push((3 + 2 * k) as u8);
+            o.cfi.push(0x80 | (xs[k as usize] + 1) as u8);
+            o.cfi.push((4 + 2 * k) as u8);
         }
         for k in 0..vs.len() as u32 {
             // DW_CFA_offset_extended: the DWARF numbers of v0..v31 are 64..95.
             o.cfi.push(0x05);
             o.cfi.push((64 + vs[k as usize]) as u8);
-            o.cfi.push((4 + 2 * (xpairs + k / 2) - (k & 1)) as u8);
+            o.cfi.push((3 + 2 * (nx + k)) as u8);
+            o.cfi.push(0x05);
+            o.cfi.push((65 + vs[k as usize]) as u8);
+            o.cfi.push((4 + 2 * (nx + k)) as u8);
         }
     }
-    o.frames.push(ob::OFrame { sym: sym, size: size, cfi_at: c0, cfi_len: o.cfi.len() as u32 - c0 });
+    o.frames.push(ob::OFrame { sym: sym, size: size, cfi_at: c0, cfi_len: o.cfi.len() as u32 - c0, compact: 0 });
 }
 
 // Append `ws` to code section `sec` as little-endian words.

@@ -11565,11 +11565,14 @@ fn nat_trust(p: &loader::Package, t: &mut tuc::Tuc) {
 }
 
 // The key of module `m`'s own object: its emission cache key (`keys`) and what the native code reads
-// beyond the C text: the build configuration, the CPU features, the C headers' constants and the functions
-// only C defines.
+// beyond the C text: the build configuration, the CPU features, the C headers' constants, the functions
+// only C defines, and with debug information the directory its file names are relative to.
 fn nat_key(p: &loader::Package, keys: &Vector<u64>, m: usize) u64 {
     let mut h = keys[m] ^ p.build_cfg as u64 << 40 ^ p.features.w[0].wrapping_mul(0x9E3779B97F4A7C15) ^ p.features.w[1];
     h = h ^ p.build_target as u64 << 8 ^ p.arch as u64 ^ p.pic as u64 << 7;
+    if cbe::debug_flag(p.cflags.as_str()) {
+        h = h ^ (fnv(process::current_dir().unwrap_or(String::new()).as_str()) | 1).wrapping_mul(0xC4CEB9FE1A85EC53);
+    }
     // The modules SC_NATIVE names.
     h = h ^ fnv(stdlib::get_env("SC_NATIVE").unwrap_or(String::from_str("1")).as_str()).wrapping_mul(0xFF51AFD7ED558CCD);
     let mut ci = p.c_fns.iter();

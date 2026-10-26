@@ -34,6 +34,7 @@ const STT_TLS: u32 = 6;
 const STV_HIDDEN: u8 = 2;
 
 const R_X86_64_64: u32 = 1;
+const R_X86_64_32: u32 = 10;
 const R_X86_64_PC32: u32 = 2;
 const R_X86_64_PLT32: u32 = 4;
 const R_X86_64_TLSGD: u32 = 19;
@@ -41,6 +42,7 @@ const R_X86_64_GOTPCRELX: u32 = 41;
 const R_X86_64_REX_GOTPCRELX: u32 = 42;
 
 const R_AARCH64_ABS64: u32 = 257;
+const R_AARCH64_ABS32: u32 = 258;
 const R_AARCH64_PREL32: u32 = 261;
 const R_AARCH64_ADR_PREL_PG_HI21: u32 = 275;
 const R_AARCH64_ADD_ABS_LO12_NC: u32 = 277;
@@ -85,6 +87,10 @@ fn sec_info<'a>(o: &'a ob::Obj, k: u8, name: &mut str<'a>, ty: &mut u32) u64 {
         *name = s.name.as_str();
         if s.code {
             return SHF_ALLOC | SHF_EXECINSTR;
+        }
+        if name.starts_with(".debug_") {
+            // Debug information: no part of the image.
+            return 0;
         }
         if *name == ".init_array" {
             *ty = SHT_INIT_ARRAY;
@@ -438,7 +444,14 @@ pub fn write(o: &ob::Obj, a64: bool, out: &mut Vector<u8>) {
             if x.sec as usize != k {
                 continue;
             }
-            let ty = if a64 {
+            let abs32 = if a64 {
+                R_AARCH64_ABS32;
+            } else {
+                R_X86_64_32;
+            };
+            let ty = if x.kind == ob::R_SECOFF32 {
+                abs32;
+            } else if a64 {
                 rel_type_a64(x.kind, word_at(o, x.sec, x.off));
             } else {
                 rel_type(x.kind);

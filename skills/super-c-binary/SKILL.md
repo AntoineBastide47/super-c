@@ -18,7 +18,8 @@ then invokes a gcc-style C driver (cc/clang/gcc; mingw on Windows; MSVC's cl.exe
 of contract) to produce a native binary. On macOS arm64, Linux x86-64, Linux arm64, Windows x86-64 and
 wasm32, a linking build with unoptimized C flags (the debug profile, a script build) and no sanitizer
 compiles each module to a Mach-O, ELF, COFF or wasm object itself and uses C only for the modules it cannot compile; the build prints `native: N of M modules through C`
-when N is not 0 (`SC_NATIVE` overrides the choice). A Windows x86-64 build whose assembler takes
+when N is not 0 (`SC_NATIVE` overrides the choice). Those objects carry DWARF line tables when the C
+flags ask for debug information (`-g`, as the debug profile does), and unwind data always. A Windows x86-64 build whose assembler takes
 `-Wa,-muse-unaligned-vector-move` (GNU as 2.38+; the `unaligned-vector-move` probe) passes it
 to every compile and the link: mingw GCC moves 32- and 64-byte stack vectors with aligned
 instructions on a 16-byte-aligned stack (GCC PR54412), and AVX code faults without it. The single binary `super-c` drives every stage
