@@ -575,6 +575,12 @@ check at the binding. The bindings in `ffi/immintrin.spc` and `ffi/arm_neon.spc`
 functions unsafe; a safe wrapper takes the operand as a const parameter and checks its range with
 `static_assert` (`std::simd::x86::clmul::<IMM>`, `std::simd::aarch64::xar::<N>`).
 
+A native build expands the intrinsics of `ffi/arm_neon.spc`, `ffi/immintrin.spc` and
+`ffi/wasm_simd128.spc` in place of their calls, no C compile involved (super-c-compiler-internals,
+"Native backend"). The immediate operand must then be a constant after constant folding; a call
+whose immediate is not sends its module through C. A binding added to those files needs its
+template: regenerate the tables with `scripts/intrin/`.
+
 - `safe`: a call needs no `unsafe`. The declaration is rejected when a safe call
   could hand C an unchecked value: a variadic function, a parameter that is or names a raw
   pointer (through a reference, slice, array or generic argument), or a returned borrow

@@ -780,6 +780,25 @@ struct TiCx {
     pub mesz: u64,
 }
 
+/// A scalar of a folded value (`eval_leaves`): an integer, a `bool`, a float's f64 bits, or a
+/// `str`'s bytes (start << 32 | length).
+pub struct Leaf {
+    pub kind: u8,
+    pub v: i64,
+}
+
+pub const LF_INT: u8 = 0;
+pub const LF_BOOL: u8 = 1;
+pub const LF_FLOAT: u8 = 2;
+pub const LF_BYTES: u8 = 3;
+/// The most leaves a folded call's value has: a larger one costs more code than the call.
+pub const FOLD_LEAVES: usize = 256;
+
+pub struct FoldRow {
+    pub leaves: Vector<Leaf>,
+    pub bytes: Vector<u8>,
+}
+
 pub struct DeclView {
     pub p: i32,
     pub l: i32,
@@ -1004,12 +1023,15 @@ pub struct Interp {
     pub sub_base: usize,
     pub view_memo: Map<u64, DeclView>, // (m << 32 | decl) -> decl_view
     pub lane_memo: Map<u64, u32>, // an index list's key hash -> its row in `lane_rows` (`lane_row`)
+    pub fold_memo: Map<u64, i64>, // a folded call's module << 32 | node -> its row in `fold_rows`, -1 for none
+    pub fold_rows: Vector<FoldRow>,
     pub lane_rows: Vector<LaneRow>,
     pub lane_envs: Vector<irl::LSub>, // the `LaneRow` substitutions
     pub lane_pool: Vector<u64>, // the `LaneRow` lists
     pub statics: Vector<StaticObj>, // captured static data groups, appended per constant
     pub all_typed: bool, // silent const-fn failures promote to definite traps only once true
     pub record_folds: bool, // failed folds with promotable traps record into fold_errs
+    pub record_pause: u32, // >0 suppresses recording (a `const fn` call's speculative fold)
     pub trap_in_constfn: bool,
     // Engine serialization for parallel stages: off = single-threaded. Task-aware (waiters PARK --
     // a raw mutex here deadlocks under safepoint preemption) and reentrant by task token -- the
@@ -1161,12 +1183,15 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
         sub_base: 0,
         view_memo: Map::<u64, DeclView>::new(),
         lane_memo: Map::<u64, u32>::new(),
+        fold_memo: Map::<u64, i64>::new(),
+        fold_rows: Vector::<FoldRow>::new(),
         lane_rows: Vector::<LaneRow>::new(),
         lane_envs: Vector::<irl::LSub>::new(),
         lane_pool: Vector::<u64>::new(),
         statics: Vector::<StaticObj>::new(),
         all_typed: false,
         record_folds: false,
+        record_pause: 0,
         trap_in_constfn: false,
         elock_on: false,
         cur_item: loader::ITEM_NONE,
@@ -5495,36 +5520,30 @@ extend Interp {
                 endpos -= hashes;
             }
         }
-        let mut bytes = Vector::<u8>::new();
+        if endpos - i > 4096 {
+            return self.bail();
+        }
+        // The text, a doubled template brace as one, then its escapes decoded.
+        let mut text = String::new();
         while i < endpos {
-            if bytes.len() >= 4096 {
-                return self.bail();
-            }
-            let mut c = src.byte_at(i as usize);
+            let c = src.byte_at(i as usize);
             i += 1;
             if seg && ttk != TokenType::MatchertextLiteral && (c == 123 || c == 125) && i < endpos && src.byte_at(
                 i as usize,
             ) == c {
-                i += 1; // doubled template brace: one byte survives
-            }
-            if !raw && c == 92 && i < endpos {
-                let e = src.byte_at(i as usize);
                 i += 1;
-                if e == 110 {
-                    c = 10;
-                } else if e == 116 {
-                    c = 9;
-                } else if e == 114 {
-                    c = 13;
-                } else if e == 48 {
-                    c = 0;
-                } else if e == 92 || e == 34 || e == 39 {
-                    c = e;
-                } else {
-                    return self.bail();
-                }
             }
-            bytes.push(c);
+            text.push_byte(c);
+        }
+        let mut dec = String::new();
+        if raw {
+            dec.push_string(&text);
+        } else {
+            tok::str_decode(text.as_str(), &mut dec);
+        }
+        let mut bytes = Vector::<u8>::with_capacity(dec.len());
+        for k in 0..dec.len() {
+            bytes.push(dec.as_str().byte_at(k));
         }
         return self.str_object(m, v.ty, &mut bytes);
     }
@@ -6318,6 +6337,19 @@ extend Interp {
                 Some(v) => iv_float(b.module, c.ty, v),
                 None => self.bail(),
             };
+        }
+        if c.kind == ir::CK_FBITS {
+            let mut tb = BuiltinType::BT_F64;
+            let _ = self.bt_of(b.module, c.ty, &mut tb);
+            // `bits_lane`: an f32 NaN keeps its bits.
+            return Interp::bits_lane(c.val as u64, tb, b.module, c.ty, self.pw());
+        }
+        if c.kind == ir::CK_BYTES {
+            let mut bytes = Vector::<u8>::new();
+            for k in 0..c.val & 0xFFFFFFFF {
+                bytes.push(b.bytes[((c.val >> 32) + k) as usize]);
+            }
+            return self.str_object(b.module, c.ty, &mut bytes);
         }
         if c.kind == ir::CK_STR {
             let sp = c.raw;
@@ -10870,6 +10902,135 @@ extend Interp {
         return r;
     }
 
+    /// Is THIS task inside one of its own engine evaluations? A lowering the engine drives must not
+    /// fold a call again (the live evaluation's state would be overwritten); another task's live
+    /// evaluation is NOT a reason to skip (the facade serializes on entry), or folds would depend on
+    /// scheduling.
+    pub fn folding_self(self: &Self) bool {
+        if self.elock_on && unsafe atomic::load_usize(&self.elock_owner, 0) != Interp::etok() {
+            return false;
+        }
+        return self.in_run != 0 || self.ev_depth != 0;
+    }
+
+    /// Suppress fold-error recording across a speculative evaluation (a `const fn` call's fold, which
+    /// leaves the call to run when it fails): a method so the counter update serializes with the engine
+    /// under parallel stages.
+    pub fn pause_folds(self: &mut Self) {
+        self.eng_enter();
+        self.record_pause += 1;
+        self.eng_leave();
+    }
+
+    pub fn resume_folds(self: &mut Self) {
+        self.eng_enter();
+        self.record_pause -= 1;
+        self.eng_leave();
+    }
+
+    /// The value of expression `id` of module `m`, evaluated as a constant is, as its scalar leaves in
+    /// depth-first member order (a `str` is one LF_BYTES leaf over `bytes`): false when it does not
+    /// evaluate or holds anything else (a pointer, a function, a payload enum, a union, a heap block),
+    /// or more than FOLD_LEAVES leaves. The caller is in none of its own evaluations (`folding_self`).
+    /// A result is kept: every lowering pass of a body asks for it again.
+    pub fn eval_leaves(self: &mut Self, m: ModuleId, id: NodeId, out: &mut Vector<Leaf>, bytes: &mut Vector<u8>) bool {
+        self.eng_enter();
+        let key = m as u64 << 32 | id as u64;
+        switch self.fold_memo.get(&key) {
+            Some(i) => {
+                let ok = *i >= 0;
+                if ok {
+                    let r = self.fold_rows.at((*i) as usize);
+                    out.extend_copy(&r.leaves);
+                    bytes.extend_copy(&r.bytes);
+                }
+                self.eng_leave();
+                return ok;
+            },
+            None => {},
+        };
+        self.eval_reset();
+        self.ev_depth += 1;
+        self.ndepth += 1;
+        let v = self.run_root(m, id);
+        self.ndepth -= 1;
+        self.ev_depth -= 1;
+        let mut r = FoldRow { leaves: Vector::<Leaf>::new(), bytes: Vector::<u8>::new() };
+        let ok = !self.failed && !self.deferred && self.flatten(v, 0, &mut r);
+        self.failed = false;
+        if ok {
+            out.extend_copy(&r.leaves);
+            bytes.extend_copy(&r.bytes);
+            self.fold_memo.insert(key, self.fold_rows.len() as i64);
+            self.fold_rows.push(r);
+        } else if !self.deferred {
+            self.fold_memo.insert(key, -1);
+        }
+        self.eng_leave();
+        return ok;
+    }
+
+    /// The declaration ordinal of the variant of enum `dn` of module `m` whose discriminant is `tag`;
+    /// -1 when none has it.
+    pub fn variant_of(self: &mut Self, m: ModuleId, dn: NodeId, tag: i64) i64 {
+        self.eng_enter();
+        let r = self.variant_ordinal(m, dn, tag);
+        self.failed = false;
+        self.eng_leave();
+        return r;
+    }
+
+    // Append the leaves of value `v` (nested `depth` objects deep) to `r`.
+    fn flatten(self: &mut Self, v: IVal, depth: u32, r: &mut FoldRow) bool {
+        if r.leaves.len() >= FOLD_LEAVES || depth > 16 {
+            return false;
+        }
+        if v.kind == IV_INT || v.kind == IV_BOOL {
+            r.leaves.push(Leaf { kind: pick(v.kind == IV_INT, LF_INT, LF_BOOL), v: v.i });
+            return true;
+        }
+        if v.kind == IV_FLOAT {
+            // An f32 NaN made from bits (`lane_bits`) widens without quieting: its payload past the
+            // f64 quiet bit's place.
+            let b = if v.f != v.f && v.i >> 32 == 1 {
+                let w = v.i as u64 & 0xFFFFFFFF;
+                w >> 31 << 63 | 0x7FFu64 << 52 | (w & 0x7FFFFF) << 29;
+            } else {
+                v.f.to_bits();
+            };
+            r.leaves.push(Leaf { kind: LF_FLOAT, v: b as i64 });
+            return true;
+        }
+        if v.kind != IV_STR && v.kind != IV_OBJ {
+            return false;
+        }
+        let op = self.obj_ptr(v.i as u32);
+        if v.kind == IV_STR || op != null && unsafe (*op).dn != NODE_NONE && self.decl_view(
+            unsafe (*op).dm,
+            unsafe (*op).dn,
+        ).kind == 1 {
+            let at = r.bytes.len();
+            if !self.str_bytes(v, &mut r.bytes) {
+                return false;
+            }
+            r.leaves.push(Leaf { kind: LF_BYTES, v: at as i64 << 32 | (r.bytes.len() - at) as i64 });
+            return true;
+        }
+        if op == null {
+            return false;
+        }
+        let o = unsafe &*op;
+        if o.dead != 0 || o.is_enum != 0 || o.heap != 0 || o.clos != 0 || o.item != 0 || o.frame != 0 || o.uactive >= 0 {
+            return false;
+        }
+        for k in 0..o.slots.len() {
+            if !self.flatten(*unsafe (*op).slots.at(k), depth + 1, r) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     // Lower and run root `id` of module `m`: a CONST DECL evaluates its initializer (the
     // established evaluator's `ev` did the same); anything else is a bare expression. IV_NONE
     // when lowering fails.
@@ -10972,7 +11133,7 @@ extend Interp {
             },
             None => {},
         };
-        if top && self.record_folds && v.kind == IV_NONE && (it_trap_is_ub(self.trap_kind) || self.trap_in_constfn) {
+        if top && self.record_folds && self.record_pause == 0 && v.kind == IV_NONE && (it_trap_is_ub(self.trap_kind) || self.trap_in_constfn) {
             self.record_fold_err(m, id);
         }
         // scalar success stores the value; non-scalar success stores the positive fact; failure
@@ -11547,7 +11708,7 @@ extend Interp {
             v = self.cell_of(v, v.tm, v.ty);
         }
         if v.kind != IV_OBJ {
-            if self.record_folds && v.kind == IV_NONE && (it_trap_is_ub(self.trap_kind) || self.trap_in_constfn) {
+            if self.record_folds && self.record_pause == 0 && v.kind == IV_NONE && (it_trap_is_ub(self.trap_kind) || self.trap_in_constfn) {
                 self.record_fold_err(m, id);
             }
             if self.trap.len() != 0 {

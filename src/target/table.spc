@@ -405,6 +405,7 @@ const fn a64(t: Target, features: str<'static>) Target {
 const fn apple(t: Target, sdk: str<'static>) Target {
     let mut r = t;
     r.apple_sdk = sdk;
+    r.probes = "reproducible-link";
     if r.isa == ISA_A64 {
         r.long_double_bits = 64;
         r.red_zone = 128;

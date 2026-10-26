@@ -603,9 +603,13 @@ array lengths, const generic arguments, `static_assert`, enum discriminants, `ty
 tail)` panics with `head` then `tail` without allocating, so a message can name a type
 (`panic_parts(type_info::<Self>().qualified_name, "[i]: index out of bounds")`).
 A failed evaluation there is an error, and a local constant's initializer cannot read a
-variable. A constant context can call any function. Outside one, every call runs at run
-time, `const fn` calls with known arguments included. `const fn` adds a declaration check
-that rejects a function certain to fail at compile time.
+variable. A constant context can call any function. Outside one, a `const fn` call whose
+arguments are constant (literals, constants, `sizeof`, operators, aggregates and `const fn`
+calls over them) runs at compile time and its value replaces it, when the value is an integer,
+`bool`, `char`, float, `str`, bare enum, or a struct, tuple struct or array of them (at most
+256 scalars). A call whose evaluation fails runs at run time, without an error; every other
+call runs at run time. `const fn` adds a declaration check that rejects a function certain to
+fail at compile time.
 
 ```superc
 const fn table_size(bits: u32) usize { return (1u32 << bits) as usize; }

@@ -12,6 +12,7 @@ import target::coff as coff;
 import target::table as tgt;
 import target::wasmgen as wgen;
 import target::wasmobj as wobj;
+import target::assembler as asmr;
 
 /// Whether a native backend compiles for operating system `os` on instruction set `isa`.
 pub const fn supported(os: i32, isa: i32) bool {
@@ -38,18 +39,30 @@ const fn wasm32(os: i32, isa: i32) bool {
     return tgt::obj_of(os).name == "wasm" && tgt::isa(isa).name == "wasm32";
 }
 
-/// Whether the backend for `(os, isa)` defines and reaches thread-local variables (Windows: the C
-/// compiler's model, emutls before gcc 16, is not followed yet).
-pub const fn tls_native(os: i32, isa: i32) bool {
-    return !windows_x64(os, isa);
+/// Whether the backend for `(os, isa)` assembles module-level assembly.
+pub const fn asm_native(os: i32, isa: i32) bool {
+    return apple_arm64(os, isa) || linux_arm64(os, isa) || linux_x64(os, isa) || windows_x64(os, isa) || wasm32(os, isa);
 }
 
 /// Write into `out` an object for `(os, isa)` that defines function symbols `funcs` and data symbols
-/// `datas` of package `p`. False, with the function and the reason in `err`, when a body is outside what
-/// the backend compiles.
-pub fn object(p: &Package, os: i32, isa: i32, funcs: []u32, datas: []u32, out: &mut Vector<u8>, err: &mut String) bool {
+/// `datas` of package `p`, and module-level assembly `text` (`asm_native`). False, with the function and
+/// the reason in `err`, when a body is outside what the backend compiles.
+pub fn object(
+    p: &Package,
+    os: i32,
+    isa: i32,
+    funcs: []u32,
+    datas: []u32,
+    text: str,
+    out: &mut Vector<u8>,
+    err: &mut String,
+) bool {
+    if text.len() != 0 && !asm_native(os, isa) {
+        err.push_str("module-level assembly");
+        return false;
+    }
     if wasm32(os, isa) {
-        return wasm_object(p, funcs, datas, out, err);
+        return wasm_object(p, funcs, datas, text, out, err);
     }
     let win = windows_x64(os, isa);
     let x64 = win || linux_x64(os, isa);
@@ -99,6 +112,26 @@ pub fn object(p: &Package, os: i32, isa: i32, funcs: []u32, datas: []u32, out: &
             }
         } else if !g.data(s, true) {
             err.format_into("{}: {}", nm.as_str(), g.why());
+            return false;
+        }
+    }
+    if text.len() != 0 {
+        let mut asr = asmr::Asm::new(
+            if x64 {
+                asmr::ISA_X64;
+            } else {
+                asmr::ISA_A64;
+            },
+            if apple {
+                asmr::FMT_MACHO;
+            } else if win {
+                asmr::FMT_COFF;
+            } else {
+                asmr::FMT_ELF;
+            },
+        );
+        if !asr.module(&mut o, text) {
+            err.format_into("module-level assembly: {}", asr.err.as_str());
             return false;
         }
     }
@@ -155,7 +188,7 @@ extend Backend {
 }
 
 // `object` for wasm32: the code generator fills a wasm object, local copies included.
-fn wasm_object(p: &Package, funcs: []u32, datas: []u32, out: &mut Vector<u8>, err: &mut String) bool {
+fn wasm_object(p: &Package, funcs: []u32, datas: []u32, text: str, out: &mut Vector<u8>, err: &mut String) bool {
     let mut o = wobj::WObj::new();
     let mut g = wgen::Gen::new(p, &mut o);
     for i in 0..funcs.len() {
@@ -195,6 +228,13 @@ fn wasm_object(p: &Package, funcs: []u32, datas: []u32, out: &mut Vector<u8>, er
         };
         if !ok {
             err.format_into("{}: {}", nm.as_str(), g.err.as_str());
+            return false;
+        }
+    }
+    if text.len() != 0 {
+        let mut e = String::new();
+        if !asmr::wasm_module(&mut o, text, &mut e) {
+            err.format_into("module-level assembly: {}", e.as_str());
             return false;
         }
     }

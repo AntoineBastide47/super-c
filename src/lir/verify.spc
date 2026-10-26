@@ -437,6 +437,9 @@ extend Verifier {
         if op == O_CALL || op == O_CALLIND {
             return self.call_ok(name, b, i);
         }
+        if op == O_ASM {
+            return self.asm_ok(name, b, i);
+        }
         if op == O_VOP {
             return self.need(
                 name,
@@ -524,6 +527,47 @@ extend Verifier {
     fn slot_access(self: &mut Self, name: str, b: &Body, i: u32, s1: u64, off: i64, size: u32) bool {
         let sz = b.slots[(s1 - 1) as usize].size as i64;
         return self.need(name, b, i, off >= 0 && off + size as i64 <= sz, "an access inside its slot");
+    }
+
+    // An asm's record lies in the pool, each text is a body message, an output has an address and a
+    // scalar type, an input a scalar value.
+    fn asm_ok(self: &mut Self, name: str, b: &Body, i: u32) bool {
+        let t = b.insts[i as usize];
+        let r = t.c as u64;
+        let np = b.pool.len() as u64;
+        if t.ty != T_NONE || r + 4 > np || t.a as u64 + t.b as u64 > np {
+            return self.fail_at(name, b, i, "no result, and a record and values of the pool");
+        }
+        let no = asm_nout(b, t.c);
+        let ni = asm_nin(b, t.c);
+        let nc = asm_nclob(b, t.c);
+        if no as u64 + ni as u64 != t.b as u64 || r + 4 + 2 * no as u64 + ni as u64 + nc as u64 > np {
+            return self.fail_at(name, b, i, "a value per output and input, and the record's texts in the pool");
+        }
+        let nm = b.msgs.len() as u32;
+        if asm_template(b, t.c) >= nm {
+            return self.fail_at(name, b, i, "a template message");
+        }
+        for k in 0..no {
+            let ty = asm_out_ty(b, t.c, k);
+            if asm_out_con(b, t.c, k) >= nm || self.vty(b, b.pool[(t.a + k) as usize]) != T_PTR || !(is_int(ty) && ty != T_I128 || is_float(
+                ty,
+            ) || ty == T_PTR) {
+                return self.fail_at(name, b, i, "an output's constraint, its address and a scalar type");
+            }
+        }
+        for k in 0..ni {
+            let ty = self.vty(b, b.pool[(t.a + no + k) as usize]);
+            if asm_in_con(b, t.c, k) >= nm || !(is_int(ty) && ty != T_I128 || is_float(ty) || ty == T_PTR) {
+                return self.fail_at(name, b, i, "an input's constraint and a scalar value");
+            }
+        }
+        for k in 0..nc {
+            if asm_clob(b, t.c, k) >= nm {
+                return self.fail_at(name, b, i, "a clobber message");
+            }
+        }
+        return true;
     }
 
     fn call_ok(self: &mut Self, name: str, b: &Body, i: u32) bool {
@@ -840,7 +884,7 @@ extend Verifier {
                     return false;
                 }
             }
-        } else if f == F_VOP {
+        } else if f == F_VOP || f == F_ASM {
             for k in 0..t.b {
                 if !self.use_ok(blk, i, b.pool[(t.a + k) as usize], true) {
                     return false;

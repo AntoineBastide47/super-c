@@ -6,13 +6,15 @@
 
 /// Relocation kinds (`codegen::obj::ORel.kind`): a 32-bit PC-relative field (its addend counts from the
 /// field: -4 and less), a call through the PLT, the address slot of a symbol in the GOT (relaxable), the
-/// thread-local general-dynamic descriptor, and a 64-bit absolute address.
+/// thread-local general-dynamic descriptor, a 64-bit absolute address, and (COFF) a 32-bit offset from
+/// the start of the target's section (a thread-local's offset in the thread's block).
 pub const R_PC32: u8 = 1;
 pub const R_PLT32: u8 = 2;
 pub const R_GOTPCRELX: u8 = 3;
 pub const R_REX_GOTPCRELX: u8 = 4;
 pub const R_TLSGD: u8 = 5;
 pub const R_ABS64: u8 = 6;
+pub const R_SECREL: u8 = 7;
 
 pub const RAX: u8 = 0;
 pub const RCX: u8 = 1;
@@ -550,8 +552,13 @@ extend Code {
     /// `dst` = `dst` op `k` (a sign-extended 32-bit immediate; 8 bits when it fits).
     pub fn alu_ri(self: &mut Self, op: u32, sz: u32, dst: u8, k: i32) {
         self.osize(sz);
+        // The accumulator has forms without ModRM (`op` * 8 + 4 and + 5).
         if sz == 1 {
-            self.rr(0, 0x80, false, op as u8, dst, true);
+            if dst == RAX {
+                self.byte(op * 8 + 4);
+            } else {
+                self.rr(0, 0x80, false, op as u8, dst, true);
+            }
             self.byte(k as u32);
             return;
         }
@@ -560,7 +567,14 @@ extend Code {
             self.byte(k as u32);
             return;
         }
-        self.rr(0, 0x81, sz == 8, op as u8, dst, false);
+        if dst == RAX {
+            if sz == 8 {
+                self.byte(0x48);
+            }
+            self.byte(op * 8 + 5);
+        } else {
+            self.rr(0, 0x81, sz == 8, op as u8, dst, false);
+        }
         if sz == 2 {
             self.byte(k as u32);
             self.byte(k as u32 >> 8);
@@ -603,12 +617,24 @@ extend Code {
 
     /// The flags of `a` & `k` (`sz` 1: the low byte against 8 bits).
     pub fn test_ri(self: &mut Self, sz: u32, a: u8, k: u32) {
+        // The accumulator has forms without ModRM (A8, A9).
         if sz == 1 {
-            self.rr(0, 0xF6, false, 0, a, true);
+            if a == RAX {
+                self.byte(0xA8);
+            } else {
+                self.rr(0, 0xF6, false, 0, a, true);
+            }
             self.byte(k);
             return;
         }
-        self.rr(0, 0xF7, sz == 8, 0, a, false);
+        if a == RAX {
+            if sz == 8 {
+                self.byte(0x48);
+            }
+            self.byte(0xA9);
+        } else {
+            self.rr(0, 0xF7, sz == 8, 0, a, false);
+        }
         self.d32(k);
     }
 
@@ -666,19 +692,27 @@ extend Code {
     /// Shift `r` by `k` (below the width).
     pub fn shift_ri(self: &mut Self, op: u32, sz: u32, r: u8, k: u32) {
         self.osize(sz);
+        // A shift by 1 has a form without the immediate.
+        let one: u32 = if k == 1 {
+            0x10;
+        } else {
+            0;
+        };
         self.rr(
             0,
             if sz == 1 {
-                0xC0u32;
+                0xC0u32 + one;
             } else {
-                0xC1u32;
+                0xC1u32 + one;
             },
             sz == 8,
             op as u8,
             r,
             sz == 1,
         );
-        self.byte(k);
+        if k != 1 {
+            self.byte(k);
+        }
     }
 
     /// shld (`left`) or shrd `dst`, `src`, cl: 64 bits.
@@ -763,8 +797,8 @@ extend Code {
 
     /// lock xadd `[m]`, `r`.
     pub fn lock_xadd(self: &mut Self, sz: u32, r: u8, m: Mem) {
-        self.byte(0xF0);
         self.osize(sz);
+        self.byte(0xF0);
         self.rm(
             0,
             if sz == 1 {
@@ -781,8 +815,8 @@ extend Code {
 
     /// lock cmpxchg `[m]`, `r` (compares with rax).
     pub fn lock_cmpxchg(self: &mut Self, sz: u32, r: u8, m: Mem) {
-        self.byte(0xF0);
         self.osize(sz);
+        self.byte(0xF0);
         self.rm(
             0,
             if sz == 1 {
@@ -961,7 +995,7 @@ extend Code {
 
     /// vmovdqu of 32 bytes (VEX.256): ymm `r` from (`load`) or to `m`.
     pub fn ymov(self: &mut Self, load: bool, r: u8, m: Mem) {
-        // VEX three-byte form: map 0F, prefix F3, L = 1.
+        // Map 0F, prefix F3, L = 1: the two-byte form unless the index or the base needs its REX bit.
         let rb = (~(r as u32) >> 3 & 1) << 7;
         let xb = if m.index != NOREG {
             (~(m.index as u32) >> 3 & 1) << 6;
@@ -973,9 +1007,14 @@ extend Code {
         } else {
             1u32 << 5;
         };
-        self.byte(0xC4);
-        self.byte(rb | xb | bb | 1);
-        self.byte(0x78 | 4 | 2);
+        if (xb | bb) == 0x60 {
+            self.byte(0xC5);
+            self.byte(rb | 0x78 | 4 | 2);
+        } else {
+            self.byte(0xC4);
+            self.byte(rb | xb | bb | 1);
+            self.byte(0x78 | 4 | 2);
+        }
         self.byte(
             if load {
                 0x6Fu32;

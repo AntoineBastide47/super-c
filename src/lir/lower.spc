@@ -17,6 +17,7 @@ import lexer::token as tok;
 import lexer::token_type as tt;
 import module::loader as loader;
 import target::table as tgt;
+import target::intrin as intrin;
 import utils::names as nm;
 import std::float as fl;
 import lir::verify as lv;
@@ -460,16 +461,32 @@ extend Lower {
                 bg::SC_NONE;
             };
             let n = out.size;
+            // A vector (`arm_neon.h`'s `int8x16_t`, `immintrin.h`'s `__m256`) of 2 or more lanes.
+            let el = switch cl {
+                bg::SC_V8 => T_I8,
+                bg::SC_V16 => T_I16,
+                bg::SC_V32 => T_I32,
+                bg::SC_V64 => T_I64,
+                bg::SC_VF32 => T_F32,
+                bg::SC_VF64 => T_F64,
+                _ => T_NONE,
+            };
+            let eb = ast::pick(el == T_NONE, 0u32, type_bytes(el, pb));
             let mt = if cl == bg::SC_INT && n <= 8 && (n & n - 1) == 0 {
                 ast::pick(n == 8, T_I64, ast::pick(n == 4, T_I32, ast::pick(n == 2, T_I16, T_I8)));
             } else if cl == bg::SC_F32 && n == 4 {
                 T_F32;
             } else if cl == bg::SC_F64 && n == 8 {
                 T_F64;
+            } else if eb != 0 && n >= 2 * eb && n / eb <= 64 && (n & n - 1) == 0 {
+                vec_type(el, n / eb);
             } else {
                 T_NONE;
             };
-            if mt != T_NONE && out.align == n {
+            if mt != T_NONE && is_vec(mt) {
+                // A register type's own alignment (`@value`): a vector lives in memory between uses.
+                *out = TyI { cls: VC_SCALAR, mty: mt, size: n, align: out.align };
+            } else if mt != T_NONE && out.align == n {
                 *out = TyI { cls: VC_SCALAR, mty: mt, size: n, align: n };
             }
             return true;
@@ -723,6 +740,17 @@ extend Lower {
                 if !self.leaves(c, rm, y.as_data.arr.elem, off + k * el.size, out, depth + 1) {
                     return false;
                 }
+            }
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_OPAQUE {
+            // A C register tuple (`bindgen::SC_VTUPLE`): its 128-bit vectors.
+            let k = Lower::p(c).opaque_cls.get(&(y.module as u64 << 32 | y.as_data.decl as u64));
+            if k.is_none() || *k.unwrap() != bg::SC_VTUPLE || ti.size % 16 != 0 {
+                return false;
+            }
+            for q in 0..ti.size / 16 {
+                out.push((off + 16 * q, vec_type(T_I8, 16)));
             }
             return true;
         }
@@ -1194,6 +1222,97 @@ extend Lower {
 
     // IN_VOLATILE_STORE(p, v): `v` written where `p` points with volatile accesses. A zero-sized value
     // has no bytes to write.
+    // Inline assembly (`O_ASM`): each output goes through its place's address, or a temporary slot
+    // for a value local (written back after); each input is its value. The texts become messages.
+    fn asm_stmt(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, rv: irc::Rvalue) bool {
+        let src = Lower::p(c).modules.at(rv.item.module as usize).source.as_str();
+        let d = b.asms[rv.item.node as usize];
+        let rec = self.b.pool.len() as u32;
+        let mut t = String::new();
+        if d.template.end > d.template.start {
+            cbe::asm_bytes(src.slice(d.template.start as usize, d.template.end as usize), &mut t);
+        }
+        let tm = self.b.ref_msg(self.pkg.add_message(t.as_str()));
+        self.b.pool.push(tm);
+        self.b.pool.push(d.nout);
+        self.b.pool.push(d.nin);
+        self.b.pool.push(d.nclob);
+        for k in 0..d.nout + d.nin + d.nclob {
+            let cs = b.asm_spans[(d.cons + k) as usize];
+            let mut s = String::new();
+            cbe::asm_bytes(src.slice(cs.start as usize, cs.end as usize), &mut s);
+            let m = self.b.ref_msg(self.pkg.add_message(s.as_str()));
+            if k == d.nout {
+                // The output types come after the output constraints: their slots, filled below.
+                for _ in 0..d.nout {
+                    self.b.pool.push(0);
+                }
+            }
+            self.b.pool.push(m);
+        }
+        if d.nin + d.nclob == 0 {
+            for _ in 0..d.nout {
+                self.b.pool.push(0);
+            }
+        }
+        let mut vals = Vector::<Value>::new();
+        let mut backs = Vector::<(PlaceRef, Value, u8)>::new();
+        for k in 0..d.nout {
+            let op = b.operands[b.oper_pool[(rv.a + k) as usize] as usize];
+            if op.kind != irc::OP_COPY && op.kind != irc::OP_MOVE {
+                return self.fail("asm-out");
+            }
+            let mut p = PlaceRef { kind: 0 };
+            if !self.place(c, b, op.data, &mut p) {
+                return false;
+            }
+            if p.kind == PR_ZST || p.ti.cls != VC_SCALAR || p.ti.mty == T_I128 || is_vec(p.ti.mty) {
+                return self.fail("asm-out-type");
+            }
+            self.b.pool[(rec + 4 + d.nout + k) as usize] = p.ti.mty;
+            if p.kind == PR_MEM && !p.packed {
+                vals.push(p.addr);
+                continue;
+            }
+            let a = self.new_slot(p.ti);
+            let cs = b.asm_spans[(d.cons + k) as usize];
+            if src.slice(cs.start as usize, cs.end as usize).contains("+") {
+                let cur = self.read(p);
+                if cur == VNONE {
+                    return false;
+                }
+                self.store(cur, a, 0, false);
+            }
+            vals.push(a);
+            backs.push((p, a, p.ti.mty));
+        }
+        for k in 0..d.nin {
+            let opid = b.oper_pool[(rv.a + d.nout + k) as usize];
+            let mut vi = TyI { cls: 0 };
+            if !self.ty(c, b.module, Lower::op_ty(b, opid), &mut vi) {
+                return false;
+            }
+            if vi.cls != VC_SCALAR || vi.mty == T_I128 || is_vec(vi.mty) {
+                return self.fail("asm-in-type");
+            }
+            let v = self.operand(c, b, opid);
+            if v == VNONE {
+                return false;
+            }
+            vals.push(v);
+        }
+        let at = self.b.pool_list(vals[0..vals.len()]);
+        let _ = self.inst(O_ASM, T_NONE, 0, at, vals.len() as u32, rec);
+        for k in 0..backs.len() {
+            let (p, a, ty) = backs[k];
+            let v = self.load(ty, a, 0, false);
+            if !self.write(p, v) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     fn volatile_store(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, rv: irc::Rvalue) bool {
         let vop = b.oper_pool[(rv.a + 1) as usize];
         let mut vi = TyI { cls: 0 };
@@ -1602,18 +1721,8 @@ extend Lower {
         let pk = Lower::p(c);
         self.file = self.pkg.add_file(pk.modules.at(b.module as usize).file.as_str());
         let oa = Lower::ast(c, b.owner.module);
-        if cnode == NODE_NONE && b.owner.node != NODE_NONE && (oa.unsafe_claims(b.owner.node) & UNSAFE_NAKED) != 0 {
-            return self.fail("asm"); // a naked function is assembly
-        }
-        for si in 0..b.statements.len() {
-            let s = b.statements[si];
-            if s.kind == irc::ST_ASSIGN {
-                let rv = b.rvalues[s.rvalue as usize];
-                if rv.kind == irc::RV_INTRINSIC && rv.c == irc::IN_ASM {
-                    return self.fail("asm");
-                }
-            }
-        }
+        // A naked function's code is its assembly: the generators read its `O_ASM`s alone.
+        self.b.naked = cnode == NODE_NONE && b.owner.node != NODE_NONE && (oa.unsafe_claims(b.owner.node) & UNSAFE_NAKED) != 0;
         // Captures: the trailing argument locals of a closure body, read through its env.
         let mut ncaps: u32 = 0;
         let mut nparams = b.args;
@@ -2815,7 +2924,13 @@ extend Lower {
             let f = r.unwrap();
             return self.fconst(mt, ast::pick(mt == T_F32, fl::f32_bits(f as f32), fl::f64_bits(f)));
         }
-        if k.kind == irc::CK_STR {
+        if k.kind == irc::CK_FBITS {
+            if !is_float(mt) {
+                return self.fail_v("float-constant");
+            }
+            return self.fconst(mt, k.val as u64);
+        }
+        if k.kind == irc::CK_STR || k.kind == irc::CK_BYTES {
             // A C-string context: the bytes' address.
             return self.str_data(c, b, &k);
         }
@@ -2864,13 +2979,20 @@ extend Lower {
 
     // The read-only data holding string constant `k`'s bytes and a terminating 0: its address.
     fn str_data(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, k: &irc::Constant) Value {
-        let src = Lower::const_src(c, b, k);
-        if k.raw.end as usize > src.len() || k.raw.end < k.raw.start {
-            return self.fail_v("string-constant");
-        }
         let mut bytes = String::new();
-        let mut tmp = String::new();
-        cbe::str_const_bytes(src.slice(k.raw.start as usize, k.raw.end as usize), k.val, &mut tmp, &mut bytes);
+        if k.kind == irc::CK_BYTES {
+            // A folded `const fn` call's: the body holds them.
+            for q in 0..k.val & 0xFFFFFFFF {
+                bytes.push_byte(b.bytes[((k.val >> 32) + q) as usize]);
+            }
+        } else {
+            let src = Lower::const_src(c, b, k);
+            if k.raw.end as usize > src.len() || k.raw.end < k.raw.start {
+                return self.fail_v("string-constant");
+            }
+            let mut tmp = String::new();
+            cbe::str_const_bytes(src.slice(k.raw.start as usize, k.raw.end as usize), k.val, &mut tmp, &mut bytes);
+        }
         self.str_len = bytes.len() as u64;
         let s = self.rodata(&mut bytes);
         let kk = self.sym_of(s);
@@ -2930,7 +3052,7 @@ extend Lower {
             }
             return true;
         }
-        if k.kind == irc::CK_STR {
+        if k.kind == irc::CK_STR || k.kind == irc::CK_BYTES {
             // A `str` view or a slice: the bytes' address and their length.
             let p = self.str_data(c, b, &k);
             if p == VNONE {
@@ -5334,6 +5456,9 @@ extend Lower {
             if rv.c == irc::IN_VOLATILE_STORE {
                 return self.volatile_store(c, b, rv);
             }
+            if rv.c == irc::IN_ASM {
+                return self.asm_stmt(c, b, rv);
+            }
             if rv.c == irc::IN_VA_START || rv.c == irc::IN_VA_END {
                 let a = self.place_addr(c, b, s.place);
                 if a == VNONE {
@@ -5969,7 +6094,11 @@ extend Lower {
                 if !c.term_callee_sym(b, &t, true, &mut name) {
                     return self.fail("callee-sym");
                 }
-                if Lower::p(c).c_fns.contains(&(t.callee.module as u64 << 32 | t.callee.node as u64)) {
+                // An intrinsic the backend expands is a call of its name (`target::intrin`).
+                if Lower::p(c).c_fns.contains(&(t.callee.module as u64 << 32 | t.callee.node as u64)) && intrin::find(
+                    tgt::isa(Lower::p(c).arch).name,
+                    name.as_str(),
+                ).len() == 0 {
                     self.pend_c = "calls a function only a C compile defines (an intrinsic, a header's `static` one)";
                 }
                 if c.mg.in_interface(t.callee.module, t.callee.node) != NODE_NONE && c.mg.last_method_def.node != NODE_NONE {
@@ -6625,7 +6754,7 @@ extend Lower {
                     let at = (t.c + q) as usize;
                     self.b.pool[at] = self.fin(self.b.pool[at], &pidx, true);
                 }
-            } else if f == F_VOP {
+            } else if f == F_VOP || f == F_ASM {
                 for q in 0..t.b {
                     let at = (t.a + q) as usize;
                     self.b.pool[at] = self.fin(self.b.pool[at], &pidx, true);
@@ -8310,7 +8439,7 @@ fn inst_uses(b: &Body, t: Inst, out: &mut Vector<Value>) {
         for k in 0..t.aux as u32 {
             out.push(b.pool[(t.c + k) as usize]);
         }
-    } else if f == F_VOP {
+    } else if f == F_VOP || f == F_ASM {
         for k in 0..t.b {
             out.push(b.pool[(t.a + k) as usize]);
         }
@@ -8768,7 +8897,7 @@ extend Lower {
                 let at = (t.c + k) as usize;
                 self.b.pool[at] = self.renum(self.b.pool[at]);
             }
-        } else if f == F_VOP {
+        } else if f == F_VOP || f == F_ASM {
             for k in 0..t.b {
                 let at = (t.a + k) as usize;
                 self.b.pool[at] = self.renum(self.b.pool[at]);

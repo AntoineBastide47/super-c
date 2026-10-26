@@ -32,6 +32,7 @@ pub struct CoreBody {
     pub switch_pool: Vector<u64>,      // TM_SWITCH pairs: value<<32 | target
     pub targ_pool: Vector<TypeId>,     // generic-argument ranges
     pub user_moves: Vector<u64>,       // bit per operand: OP_MOVE is a USER consumption
+    pub bytes: Vector<u8>,             // CK_BYTES contents
     pub simd_aux: Vector<u32>,         // RV_SIMD index lists: the length, then u8 lanes four to a word
     pub demands: Vector<Terminator>,   // inlined calls whose instance the emitter still demands
     pub entry: BlockId,
@@ -106,7 +107,17 @@ Each `Projection` carries the type **after** it applies.
 `Constant` kinds: `CK_INT`, `CK_FLOAT` (raw span keeps the literal spelling), `CK_BOOL`,
 `CK_STR`, `CK_UNIT`, `CK_ITEM` (resolved DefId + bound generic args in `targ_pool`; the range is packed into
 `val`, read with `targ_start()`/`targ_len()`),
-`CK_WIDE` (wide-literal record index), `CK_ERROR` (error recovery).
+`CK_WIDE` (wide-literal record index), `CK_ERROR` (error recovery), `CK_FBITS` (a float's IEEE
+bits in `val`, an `f32`'s in the low 32) and `CK_BYTES` (a `str`: `val` = start << 32 | length in
+`bytes`). The last two come only from a folded `const fn` call.
+
+A call of a `const fn` in a non-generic body whose arguments pass `maybe_const` lowers to its
+value (`fold_call`): `Interp::eval_leaves` runs it and flattens the result into scalar leaves in
+member order, and `fold_value` rebuilds them along the result type as constants, unit variants
+and `RV_AGGREGATE`s (`foldable_ty`: integers, `bool`, `char`, floats, `str`, bare enums, and
+non-union structs, tuple structs and arrays of them, at most `FOLD_LEAVES` = 256 leaves). A
+failed evaluation records no error (`pause_folds`) and leaves the call. The fold runs only where
+`record_folds` is set and never inside the evaluator's own lowering (`folding_self`).
 
 ## Rvalues
 
@@ -350,11 +361,12 @@ Events: `TP_SCOPE_PUSH/POP`, `TP_NLL` (non-lexical borrow end point), `TP_MARK_P
 `TP_LET`, `TP_LET_TUPLE`, `TP_ASSIGN_PRE/POST`, `TP_RET_VAL`, `TP_RET_POST`,
 `TP_CALL_MARK`, `TP_CALL`, `TP_REF`, `TP_CAST_ERASE`, `TP_SLICE`, `TP_CLOSURE`,
 `TP_FLOW_SAVE/ELSE/JOIN`, `TP_LOOP_PUSH/POP`, `TP_BODY_START/END`, `TP_MATCH_PRE`,
-`TP_ARM`, `TP_ARM_END` and `TP_MATCH_POST`.
+`TP_ARM`, `TP_ARM_END`, `TP_MATCH_POST` and `TP_CONST_MOVE` (an argument a folded call takes by
+value: the replay applies the const-move rule, since no `OP_MOVE` remains).
 
 There are no `TP_BORROW`/`TP_MOVE`/`TP_DROP` events: borrows and moves are ordinary IR
 operands (`RV_REF`, `OP_MOVE`); the tape carries the *walk structure* the flow helpers
-need.
+need, and `TP_CONST_MOVE` only the move a fold erased.
 
 ## Lowering Contract (`src/ir/lower.spc`)
 

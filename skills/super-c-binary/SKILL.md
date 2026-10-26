@@ -711,6 +711,7 @@ never version text.
 | `integrated-cc1` | all | `-fintegrated-cc1` accepted (clang; gcc rejects it) |
 | `pch-no-timestamp` | all | `-Xclang -fno-pch-timestamp` accepted (clang; gcc rejects it) |
 | `rtlib` | wasm32 | the path of the compiler's builtins library (`-print-libgcc-file-name`: compiler-rt's `libclang_rt.builtins-wasm32.a`) |
+| `reproducible-link` | macOS and iOS | `-Wl,-reproducible` links (Apple ld of Xcode 14.3 and later) |
 
 The results of one profile directory live in one record, `<out-dir>/<profile>/.probes`:
 its first line holds the schema, a hash of the compiler path and mtime, the whole compiler
@@ -729,7 +730,9 @@ the flag), under full LTO (`lto = "full"` or `"auto"`, a ThinLTO request that fa
 included) `no-prelink-vectorize` (accepted: every compile takes the flags after the profile's `-O`
 flag, so clang vectorizes at the link, after it inlines across units: a function vectorized alone in
 its unit no longer vectorizes in the loop it is inlined into), on wasm `rtlib` (every link takes
-`-nostdlib <path>`: wasm links its own C library, Wasm C library below), for a tree compiled through the precompiled
+`-nostdlib <path>`: wasm links its own C library, Wasm C library below), on Apple targets
+`reproducible-link` (accepted: every link takes the flag; without it Apple ld can order the symbol
+stubs differently in two links of the same objects), for a tree compiled through the precompiled
 header `integrated-cc1` and `pch-no-timestamp` (accepted: the flags join those commands, which the
 fingerprints hold, not ` | probes`), and the probe of each CPU feature it enables that has one (`wasm-simd128`,
 `wasm-relaxed-simd`, `aarch64-features`, `x86-features`); a rejected feature probe fails the build before any
@@ -929,6 +932,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `SC_NO_EMIT_CACHE` | Disable the emit stamp |
 | `SC_NATIVE` | The native backend's module choice (super-c-compiler-internals, "Native backend"): `0` C only, `1` every module, else a comma-separated list of module paths. Unset, a linking build with unoptimized C flags and no sanitizer takes every module where the target has a native backend (macOS arm64, Linux x86-64, Linux arm64, Windows x86-64, wasm32-wasip1). It is part of the emit stamp's compiler identity and of the native record's key |
 | `SC_NATIVE_STATS` | Print, per module, `native` or `through C: <reason>`, then the native and C module counts and the native phase's ms |
+| `SC_NATIVE_LOG` | A file each build appends `<module>: <reason> (<tree>)` to for every module its last run sends through C: a whole test suite's fallbacks in one list |
 | `SC_NO_TU_CACHE` | Disable per-TU journal/replay cache |
 | `SC_BUILD_MEM_BUDGET` | Cap the estimated bytes in flight across the parallel jobs of the type check, the borrow check and the emission (`64M`, `2G`); a job above the whole budget runs alone; a value that is not digits plus one optional K/M/G suffix, or that overflows, is a fatal error |
 | `SC_TYPE_STATS` | Print the type identity counters per phase and at the end of emission: interning hits and probe steps, foreign lowerings, instance-graph interns, layout cache traffic, the bytes the package type table and the module pools retain, the publication census, and per publication the kept bodies remapped and the time it took (`type-identity.md` in the internals skill) |

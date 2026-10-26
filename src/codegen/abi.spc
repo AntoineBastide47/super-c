@@ -76,3 +76,92 @@ pub fn unknown_class(b: &Body, pt: u32) bool {
 pub const fn none() ALoc {
     return ALoc { kind: L_NONE, n: 0, p0: 0, off: 0, size: 0, ext: 0 };
 }
+
+/// The layout of a call of an intrinsic of signature `sig` (`target::intrin`): its rows' instructions take
+/// the arguments in order, a vector or float in the next vector register (a struct of vectors in as many),
+/// an integer or pointer in the next of `gp`, and give a vector or float result in vector register 0,
+/// an integer one in `ret_gp`, whatever the platform's convention.
+pub fn intrinsic_layout(b: &Body, sig: u32, ptr: u32, gp: []u8, ret_gp: u8, out: &mut CallLayout) {
+    out.locs.truncate(0);
+    out.parts.truncate(0);
+    out.unknown = false;
+    out.stack_bytes = 0;
+    let np = b.pool[sig as usize];
+    let mut ng: u32 = 0;
+    let mut nv: u32 = 0;
+    for k in 0..np {
+        let pt = b.pool[(sig + 3 + k) as usize];
+        let mut loc = none();
+        loc.kind = L_REG;
+        loc.p0 = out.parts.len() as u32;
+        if (pt & AGG) != 0 {
+            let l = (pt & ~AGG) as usize;
+            let nl = b.pool[l + 2];
+            for q in 0..nl {
+                let lt = b.pool[l + 4 + 2 * q as usize] as u8;
+                out.parts.push(
+                    Part {
+                        reg: nv as u8,
+                        v: true,
+                        size: type_bytes(lt, ptr) as u8,
+                        off: b.pool[l + 3 + 2 * q as usize],
+                    },
+                );
+                nv += 1;
+            }
+            out.unknown = out.unknown || nl == 0;
+            loc.n = nl as u8;
+        } else {
+            let t = pt as u8;
+            let v = is_vec(t) || is_float(t);
+            let r = if v {
+                nv as u8;
+            } else {
+                gp[ng as usize];
+            };
+            out.parts.push(Part { reg: r, v: v, size: type_bytes(t, ptr) as u8, off: 0 });
+            if v {
+                nv += 1;
+            } else {
+                ng += 1;
+            }
+            loc.n = 1;
+        }
+        out.locs.push(loc);
+    }
+    let rt = b.pool[sig as usize + 2];
+    out.ret = none();
+    if (rt & AGG) != 0 {
+        // A struct of vectors: vector registers 0 and on.
+        let l = (rt & ~AGG) as usize;
+        let nl = b.pool[l + 2];
+        out.ret.kind = L_REG;
+        out.ret.n = nl as u8;
+        out.ret.p0 = out.parts.len() as u32;
+        for q in 0..nl {
+            let lt = b.pool[l + 4 + 2 * q as usize] as u8;
+            out.parts.push(
+                Part { reg: q as u8, v: true, size: type_bytes(lt, ptr) as u8, off: b.pool[l + 3 + 2 * q as usize] },
+            );
+        }
+        out.unknown = out.unknown || nl == 0;
+    } else if rt != T_NONE as u32 {
+        let t = rt as u8;
+        let v = is_vec(t) || is_float(t);
+        out.ret.kind = L_REG;
+        out.ret.n = 1;
+        out.ret.p0 = out.parts.len() as u32;
+        out.parts.push(
+            Part {
+                reg: if v {
+                    0;
+                } else {
+                    ret_gp;
+                },
+                v: v,
+                size: type_bytes(t, ptr) as u8,
+                off: 0,
+            },
+        );
+    }
+}

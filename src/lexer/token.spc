@@ -171,3 +171,77 @@ pub const fn char_literal_value(src: str, sp: Span) Option<i64> {
     }
     return Option::<i64>::Some(v);
 }
+
+const fn hexv(b: u8) u32 {
+    if b >= 48 && b <= 57 {
+        return b - 48;
+    }
+    if b >= 97 && b <= 102 {
+        return b - 97 + 10;
+    }
+    if b >= 65 && b <= 70 {
+        return b - 65 + 10;
+    }
+    return 0;
+}
+
+// Codepoint `cp` as UTF-8.
+fn push_utf8(cp: u32, dst: &mut String) {
+    if cp < 0x80 {
+        dst.push_byte(cp as u8);
+    } else if cp < 0x800 {
+        dst.push_byte((0xC0 | cp >> 6) as u8);
+        dst.push_byte((0x80 | cp & 0x3F) as u8);
+    } else if cp < 0x10000 {
+        dst.push_byte((0xE0 | cp >> 12) as u8);
+        dst.push_byte((0x80 | cp >> 6 & 0x3F) as u8);
+        dst.push_byte((0x80 | cp & 0x3F) as u8);
+    } else {
+        dst.push_byte((0xF0 | cp >> 18) as u8);
+        dst.push_byte((0x80 | cp >> 12 & 0x3F) as u8);
+        dst.push_byte((0x80 | cp >> 6 & 0x3F) as u8);
+        dst.push_byte((0x80 | cp & 0x3F) as u8);
+    }
+}
+
+/// The bytes of a Super-C quoted or byte-string body (escapes intact) onto `dst`: each escape decodes
+/// to its byte(s) (`\xNN` is EXACTLY two hex digits, `\u{H..}` a codepoint as UTF-8).
+pub fn str_decode(raw: str, dst: &mut String) {
+    let mut i: usize = 0;
+    while i < raw.len() {
+        let b = raw.byte_at(i);
+        if b != 92 || i + 1 >= raw.len() {
+            dst.push_byte(b);
+            i += 1;
+            continue;
+        }
+        let e = raw.byte_at(i + 1);
+        i += 2;
+        if e == b'n' {
+            dst.push_byte(10);
+        } else if e == b'r' {
+            dst.push_byte(13);
+        } else if e == b't' {
+            dst.push_byte(9);
+        } else if e == b'0' {
+            dst.push_byte(0);
+        } else if e == b'x' && i + 1 < raw.len() {
+            dst.push_byte((hexv(raw.byte_at(i)) << 4 | hexv(raw.byte_at(i + 1))) as u8);
+            i += 2;
+        } else if e == b'u' && i < raw.len() && raw.byte_at(i) == b'{' {
+            i += 1;
+            let mut cp: u32 = 0;
+            while i < raw.len() && raw.byte_at(i) != b'}' {
+                cp = cp << 4 | hexv(raw.byte_at(i));
+                i += 1;
+            }
+            if i < raw.len() {
+                i += 1;
+            }
+            push_utf8(cp, dst);
+        } else {
+            // `\\`, `\"`, `\'`: the escaped byte itself.
+            dst.push_byte(e);
+        }
+    }
+}

@@ -22,6 +22,8 @@ import target::aapcs64 as cc;
 import codegen::abi as ab;
 import ir::core as core;
 import std::float as fl;
+import target::assembler as asmr;
+import target::intrin as intrin;
 
 const NOREG: u8 = 0xFF;
 const V0: u8 = 32; // register number of v0: x registers are 0..31
@@ -103,6 +105,7 @@ pub struct Gen {
     code: Vector<u32>,
     owner: Vector<u32>, // per register number, the value index it holds, NONE
     held: u64, // a bit per register whose `owner` is a value
+    clob: u64, // the caller-saved registers the current call writes: all, or an intrinsic's
     lock: u64, // registers the current instruction reads or writes
     tmps: u64, // registers the current instruction took as temporaries
     fixed_busy: u64,
@@ -193,6 +196,7 @@ extend Gen {
             code: Vector::<u32>::new(),
             owner: owner,
             held: 0,
+            clob: ~0u64,
             lock: 0,
             tmps: 0,
             fixed_busy: 0,
@@ -341,12 +345,22 @@ extend Gen {
         if va.home == H_FIXED {
             return;
         }
-        if va.dirty && self.live_on(x) {
+        if va.dirty && (self.live_on(x) || self.read_now(x)) {
             self.spill(x);
         }
         self.va.index_mut(x as usize).reg = NOREG;
         self.va.index_mut(x as usize).dirty = false;
         self.set_owner(r, NONE);
+    }
+
+    // Whether the current instruction reads value `x`.
+    const fn read_now(self: &Self, x: u32) bool {
+        for k in 0..self.uses.len() {
+            if self.vx(self.uses[k]) == x {
+                return true;
+            }
+        }
+        return false;
     }
 
     // Whether value `x` is used after the current instruction.
@@ -1037,6 +1051,9 @@ extend Gen {
                 self.hdr_at[q + 1];
             };
         }
+        if b.naked {
+            return self.naked(s);
+        }
         self.frame_layout();
         self.bucket_ends();
         if self.err.len() != 0 || !self.entry() {
@@ -1067,7 +1084,7 @@ extend Gen {
         for k in 0..b.insts.len() {
             let t = b.insts[k];
             if t.op == O_CALL || t.op == O_CALLIND {
-                cc::classify(b, t.b, self.ptr, self.apple, self.vregs, &mut self.lay);
+                self.call_layout(t);
                 if self.lay.unknown {
                     let _ = self.refuse("a call passes an aggregate whose C class is unknown");
                 }
@@ -1911,6 +1928,9 @@ extend Gen {
         }
         if op == O_VAARG {
             return self.va_arg(i, t);
+        }
+        if op == O_ASM {
+            return self.asm_inst(i, t);
         }
         if op == O_VAEND {
             return true;
@@ -3192,6 +3212,7 @@ extend Gen {
     // its home, and those registers hold nothing after.
     fn spill_for_call(self: &mut Self) {
         let none = Vector::<u32>::new();
+        self.clob = ~0u64;
         self.spill_around_call(&none);
         self.forget_caller_saved();
     }
@@ -3200,7 +3221,7 @@ extend Gen {
     // reads is in its home, and only the values `keep` (the register arguments' sources) keep their
     // registers, until `forget_caller_saved`.
     fn spill_around_call(self: &mut Self, keep: &Vector<u32>) {
-        let mut m = self.held & ~(XFIX | vfix());
+        let mut m = self.held & ~(XFIX | vfix()) & self.clob;
         // Each step clears one register's bit: at most 64 steps.
         while m != 0 {
             let r = m.trailing_zeros() as u8;
@@ -3232,7 +3253,7 @@ extend Gen {
 
     // After a call's arguments are in place: the caller-saved registers hold no value.
     fn forget_caller_saved(self: &mut Self) {
-        let mut m = self.held & ~(XFIX | vfix());
+        let mut m = self.held & ~(XFIX | vfix()) & self.clob;
         // Each step clears one register's bit: at most 64 steps.
         while m != 0 {
             let r = m.trailing_zeros() as u8;
@@ -3252,7 +3273,43 @@ extend Gen {
         let sig = t.b;
         let np = b.pool[sig as usize];
         let rt = b.pool[sig as usize + 2];
-        cc::classify(b, sig, self.ptr, self.apple, self.vregs, &mut self.lay);
+        self.call_layout(t);
+        self.clob = ~0u64;
+        let tpl = if t.op == O_CALL {
+            self.intrinsic(t.a);
+        } else {
+            "";
+        };
+        if tpl.len() != 0 {
+            // An intrinsic writes the registers it names and its arguments' and result's: the others
+            // keep their values.
+            self.clob = 0;
+            for q in 0..self.lay.parts.len() {
+                let pa = self.lay.parts[q];
+                self.clob |= 1u64 << (pa.reg + if pa.v {
+                    V0;
+                } else {
+                    0;
+                }) as u64;
+            }
+            let mut j: usize = 0;
+            while j < tpl.len() {
+                let st = j;
+                while j < tpl.len() && (tpl.byte_at(j) >= b'a' && tpl.byte_at(j) <= b'z' || tpl.byte_at(j) >= b'0' && tpl.byte_at(
+                    j,
+                ) <= b'9') {
+                    j += 1;
+                }
+                if j > st {
+                    let r = clobber_reg(tpl.slice(st, j));
+                    if r != NOREG {
+                        self.clob |= 1u64 << r as u64;
+                    }
+                } else {
+                    j += 1;
+                }
+            }
+        }
         // The scalar register arguments in registers stay there: one parallel move takes them to the
         // argument registers. A value the call also reads otherwise (an aggregate's address, the callee,
         // the result's address) is read from its home after the move, which may take its register.
@@ -3403,9 +3460,31 @@ extend Gen {
             }
         }
         if t.op == O_CALL {
-            let os = self.osym_of(t.a);
-            self.reloc(a::R_BRANCH26, os, 0);
-            self.emit(a::bl(0));
+            if tpl.len() != 0 {
+                // An intrinsic: its instructions in place of the call, over the same registers.
+                let mut imm = Vector::<i64>::with_capacity(np as usize);
+                let mut known = Vector::<bool>::with_capacity(np as usize);
+                for k in 0..np {
+                    let mut u: u64 = 0;
+                    known.push(self.const_of(b.pool[(t.c + k) as usize], &mut u));
+                    imm.push(u as i64);
+                }
+                let mut text = String::new();
+                if !intrin::expand(tpl, imm[0..imm.len()], known[0..known.len()], &mut text) {
+                    return self.refuse("an intrinsic's immediate argument of no constant value");
+                }
+                let mut rels = Vector::<asmr::InlRel>::new();
+                let mut e = String::new();
+                if !asmr::Asm::inline_a64(text.as_str(), self.apple, &mut self.code, &mut rels, &mut e) {
+                    self.err.format_into("intrinsic: {}", e.as_str());
+                    return false;
+                }
+                assert(rels.len() == 0, "a64: an intrinsic's instructions name no symbol");
+            } else {
+                let os = self.osym_of(t.a);
+                self.reloc(a::R_BRANCH26, os, 0);
+                self.emit(a::bl(0));
+            }
         } else {
             self.materialize(t.a, a::IP0 as u8);
             self.emit(a::blr(a::IP0));
@@ -3447,6 +3526,37 @@ extend Gen {
             self.bind(x, r);
         }
         return true;
+    }
+
+    // The argument and result locations of call `t` (`lay`): an intrinsic's (`abi::intrinsic_layout`),
+    // else the convention's.
+    fn call_layout(self: &mut Self, t: Inst) {
+        let b = self.b();
+        if t.op == O_CALL && self.intrinsic(t.a).len() != 0 {
+            let gp: [u8; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+            ab::intrinsic_layout(b, t.b, self.ptr, gp[0..8], 0, &mut self.lay);
+            return;
+        }
+        cc::classify(b, t.b, self.ptr, self.apple, self.vregs, &mut self.lay);
+    }
+
+    // The instructions of the intrinsic body symbol `s` names (`target::intrin`); empty for another
+    // function.
+    fn intrinsic(self: &Self, s: u32) str<'static> {
+        let p = unsafe &*self.pkg;
+        let ps = p.syms[self.b().syms[s as usize] as usize];
+        if ps.def != NONE {
+            return "";
+        }
+        let nm = p.spell(ps.name);
+        return intrin::find(
+            "aarch64",
+            if nm.starts_with("__sc_x_") {
+                nm.slice(7, nm.len());
+            } else {
+                nm;
+            },
+        );
     }
 
     // Register `r` = the pointer argument passing value `v` by reference: an aggregate's pointer, or the
@@ -3941,6 +4051,54 @@ extend Gen {
         }
         if self.elf {
             frame_rules(o, k2, size, &xs, &vs);
+        }
+        return true;
+    }
+
+    // A naked function: its templates' code alone.
+    fn naked(self: &mut Self, s: u32) bool {
+        let b = self.b();
+        for i in 0..b.insts.len() {
+            if b.insts[i].op != O_ASM {
+                continue;
+            }
+            let mut rels = Vector::<asmr::InlRel>::new();
+            let mut e = String::new();
+            let tpl = String::from_str(self.msg_text(asm_template(b, b.insts[i].c)));
+            if !asmr::Asm::inline_a64(tpl.as_str(), self.apple, &mut self.code, &mut rels, &mut e) {
+                self.err.format_into("inline assembly: {}", e.as_str());
+                return false;
+            }
+            for k in 0..rels.len() {
+                let sym = self.obj().sym(rels[k].name.as_str());
+                self.rels.push(CRel { at: rels[k].at, kind: rels[k].kind, sym: sym, addend: rels[k].addend });
+            }
+        }
+        let p = unsafe &*self.pkg;
+        let ps = p.syms[s as usize];
+        let o = self.obj();
+        let k2 = o.sym(p.spell(ps.name));
+        let sec = if ps.sect != NONE {
+            o.named(p.spell(ps.sect), true);
+        } else {
+            ob::S_TEXT;
+        };
+        if sec == ob::NOSEC {
+            return self.refuse("too many sections");
+        }
+        let mut fl = ob::SF_FUNC | if ps.linkage == SL_GLOBAL && !self.local {
+            ob::SF_GLOBAL;
+        } else {
+            0;
+        };
+        if ps.used {
+            fl |= ob::SF_USED;
+        }
+        let at = o.define(k2, sec, 2, self.code.len() as u64 * 4, fl);
+        put_words(o, sec, &self.code);
+        for q in 0..self.rels.len() {
+            let r = self.rels[q];
+            o.reloc(sec, r.kind, at as u32 + r.at * 4, r.sym, r.addend);
         }
         return true;
     }
@@ -6025,4 +6183,329 @@ extend Gen {
             self.st_lane(x, d, k, lt, true);
         }
     }
+}
+
+extend Gen {
+    // The text of body message `m`.
+    fn msg_text(self: &Self, m: u32) str {
+        let p = unsafe &*self.pkg;
+        return p.spell(p.msgs[self.b().msgs[m as usize] as usize]);
+    }
+
+    // Inline assembly (`O_ASM`), as GCC compiles it: the operands take the free ones of x0..x15 and
+    // v0..v7, v16..v29 in order, past the clobbered ones (a memory operand the register of its address,
+    // a matching input its output's); a value in one of those or in a clobbered register goes to its
+    // home first, the others stay. The template's operand references name the registers, and each
+    // output register goes to its address after. A clobbered callee-saved register is saved by the
+    // prologue and, when it holds a value, around the statement.
+    fn asm_inst(self: &mut Self, i: u32, t: Inst) bool {
+        let b = self.b();
+        let r = t.c;
+        let no = asm_nout(b, r);
+        let ni = asm_nin(b, r);
+        let n = no + ni;
+        // Per operand: its class (`AK_*`), register, type and immediate.
+        let mut cls = Vector::<u8>::new();
+        let mut reg = Vector::<u8>::new();
+        let mut tys = Vector::<u8>::new();
+        let mut imm = Vector::<i64>::new();
+        let mut plus = Vector::<bool>::new();
+        let mut clob: u64 = 0;
+        for k in 0..asm_nclob(b, r) {
+            let cr = clobber_reg(self.msg_text(asm_clob(b, r, k)));
+            if cr != NOREG {
+                clob |= bit(cr);
+            }
+        }
+        let mut taken = clob;
+        for k in 0..n {
+            let con = if k < no {
+                self.msg_text(asm_out_con(b, r, k));
+            } else {
+                self.msg_text(asm_in_con(b, r, k - no));
+            };
+            let v = b.pool[(t.a + k) as usize];
+            let ty = if k < no {
+                asm_out_ty(b, r, k);
+            } else {
+                self.vt(v);
+            };
+            let mut c: u8 = 0xFF;
+            let mut pl = false;
+            let mut tie: u32 = NONE;
+            for j in 0..con.len() {
+                let ch = con.byte_at(j);
+                if ch == b'+' {
+                    pl = true;
+                } else if ch == b'r' {
+                    c = AK_GP;
+                } else if ch == b'w' {
+                    c = AK_FP;
+                } else if ch == b'm' || ch == b'Q' {
+                    c = AK_MEM;
+                } else if ch == b'i' || ch == b'n' || ch >= b'I' && ch <= b'N' {
+                    c = AK_IMM;
+                } else if ch >= b'0' && ch <= b'9' && k >= no {
+                    tie = ch - b'0';
+                }
+            }
+            if tie != NONE {
+                if tie >= no || cls[tie as usize] == AK_MEM {
+                    return self.refuse("an asm input matches no register output");
+                }
+                c = cls[tie as usize];
+            }
+            if c == 0xFF {
+                return self.refuse("an asm constraint this generator does not take");
+            }
+            if c == AK_FP && !is_float(ty) || k < no && c == AK_IMM {
+                return self.refuse("an asm operand of the wrong class for its type");
+            }
+            let mut rg: u8 = NOREG;
+            if tie != NONE {
+                rg = reg[tie as usize];
+            } else if c != AK_IMM {
+                let free = if c == AK_FP {
+                    valloc();
+                } else {
+                    XALLOC;
+                } & ~taken;
+                if free == 0 {
+                    return self.refuse("an asm with more register operands than the free registers");
+                }
+                rg = free.trailing_zeros() as u8;
+                taken |= bit(rg);
+            }
+            let mut kv: u64 = 0;
+            if c == AK_IMM && !self.const_of(v, &mut kv) {
+                return self.refuse("an asm immediate operand of no constant value");
+            }
+            cls.push(c);
+            reg.push(rg);
+            tys.push(ty);
+            imm.push(kv as i64);
+            plus.push(pl);
+        }
+        // The registers the statement writes: the caller-saved ones free, the callee-saved ones kept.
+        let mut ev = taken & (XALLOC | valloc());
+        // Each step clears one register's bit: at most 64 steps.
+        while ev != 0 {
+            let er = ev.trailing_zeros() as u8;
+            ev &= ev - 1;
+            self.evict(er);
+        }
+        let keep = taken & (XFIX | vfix());
+        self.csr |= keep;
+        // A callee-saved register that holds a value is saved to a slot of its own around the statement.
+        let mut saved = Vector::<(u8, i64)>::new();
+        let mut m = keep & self.held;
+        // Each step clears one register's bit: at most 64 steps.
+        while m != 0 {
+            let cr = m.trailing_zeros() as u8;
+            m &= m - 1;
+            let off = self.slot_alloc(16, 16) as i64;
+            self.mem(
+                if cr >= V0 {
+                    a::M_VQ;
+                } else {
+                    a::M_X;
+                },
+                false,
+                cr,
+                a::SP,
+                off,
+            );
+            saved.push((cr, off));
+        }
+        // The operands into their registers: inputs, a `+` output's value, a memory operand's address.
+        let mut mem_slots = Vector::<i64>::new();
+        for k in 0..n {
+            let v = b.pool[(t.a + k) as usize];
+            let c = cls[k as usize];
+            let rg = reg[k as usize];
+            if k < no {
+                if c == AK_MEM {
+                    self.materialize(v, rg);
+                } else if plus[k as usize] {
+                    self.materialize(v, a::IP0 as u8);
+                    self.mem(mkind(tys[k as usize], true), true, rg, a::IP0, 0);
+                }
+                continue;
+            }
+            if c == AK_MEM {
+                let off = self.slot_alloc(16, 16) as i64;
+                let tr = if is_float(tys[k as usize]) {
+                    V0 + 31;
+                } else {
+                    a::IP0 as u8;
+                };
+                self.materialize(v, tr);
+                self.mem(mkind(tys[k as usize], false), false, tr, a::SP, off);
+                self.add_off(rg, a::SP, off);
+                mem_slots.push(off);
+            } else if c != AK_IMM {
+                self.materialize(v, rg);
+            }
+        }
+        // The template with its operand references named.
+        let tpl = self.msg_text(asm_template(b, r));
+        let mut text = String::new();
+        let mut j: usize = 0;
+        while j < tpl.len() {
+            let ch = tpl.byte_at(j);
+            j += 1;
+            if ch != b'%' || j >= tpl.len() {
+                text.push_byte(ch);
+                continue;
+            }
+            let c2 = tpl.byte_at(j);
+            if c2 == b'%' {
+                text.push_byte(b'%');
+                j += 1;
+                continue;
+            }
+            if c2 == b'=' {
+                text.push_u64(i);
+                j += 1;
+                continue;
+            }
+            let mut md: u8 = 0;
+            if c2 >= b'a' && c2 <= b'z' {
+                md = c2;
+                j += 1;
+            }
+            let st = j;
+            let mut k: u32 = 0;
+            while j < tpl.len() && tpl.byte_at(j) >= b'0' && tpl.byte_at(j) <= b'9' {
+                k = k * 10 + (tpl.byte_at(j) - b'0') as u32;
+                j += 1;
+            }
+            if j == st || k >= n {
+                return self.refuse("an asm template names an operand it does not have");
+            }
+            if !asm_operand_text(&mut text, cls[k as usize], reg[k as usize], tys[k as usize], imm[k as usize], md) {
+                return self.refuse("an asm operand modifier this generator does not take");
+            }
+        }
+        let mut rels = Vector::<asmr::InlRel>::new();
+        let mut e = String::new();
+        if !asmr::Asm::inline_a64(text.as_str(), self.apple, &mut self.code, &mut rels, &mut e) {
+            self.err.format_into("inline assembly: {}", e.as_str());
+            return false;
+        }
+        for k in 0..rels.len() {
+            let s = self.obj().sym(rels[k].name.as_str());
+            self.rels.push(CRel { at: rels[k].at, kind: rels[k].kind, sym: s, addend: rels[k].addend });
+        }
+        for k in 0..saved.len() {
+            let (cr, off) = saved[k];
+            self.mem(
+                if cr >= V0 {
+                    a::M_VQ;
+                } else {
+                    a::M_X;
+                },
+                true,
+                cr,
+                a::SP,
+                off,
+            );
+            self.free_slots.push(16u64 << 32 | (off as u32) as u64);
+        }
+        for k in 0..mem_slots.len() {
+            self.free_slots.push(16u64 << 32 | (mem_slots[k] as u32) as u64);
+        }
+        // The outputs to their addresses.
+        for k in 0..no {
+            if cls[k as usize] == AK_MEM {
+                continue;
+            }
+            self.materialize(b.pool[(t.a + k) as usize], a::IP0 as u8);
+            self.mem(mkind(tys[k as usize], false), false, reg[k as usize], a::IP0, 0);
+        }
+        return true;
+    }
+}
+
+// Inline assembly operand classes.
+const AK_GP: u8 = 0; // an x or w register
+const AK_FP: u8 = 1; // a v register as a float scalar
+const AK_MEM: u8 = 2; // memory at the address an x register holds
+const AK_IMM: u8 = 3; // an immediate
+
+// Name operand register `rg` of class `c` and type `ty` into `o`, under modifier `md` (0: none; `w`,
+// `x`, `b`, `h`, `s`, `d`, `q`); false for a modifier the class does not take.
+fn asm_operand_text(o: &mut String, c: u8, rg: u8, ty: u8, k: i64, md: u8) bool {
+    if c == AK_IMM {
+        if md != 0 && md != b'c' {
+            return false;
+        }
+        o.push_i64(k);
+        return true;
+    }
+    if c == AK_MEM {
+        o.format_into("[x{}]", rg);
+        return md == 0;
+    }
+    if c == AK_GP {
+        let wide = if md == 0 {
+            ty == T_I64 || ty == T_PTR;
+        } else {
+            md == b'x';
+        };
+        if md != 0 && md != b'w' && md != b'x' {
+            return false;
+        }
+        o.format_into(
+            "{}{}",
+            if wide {
+                "x";
+            } else {
+                "w";
+            },
+            rg,
+        );
+        return true;
+    }
+    let l = if md != 0 {
+        md;
+    } else if ty == T_F64 {
+        b'd';
+    } else {
+        b's';
+    };
+    if l != b'b' && l != b'h' && l != b's' && l != b'd' && l != b'q' && l != b'v' {
+        return false;
+    }
+    o.push_byte(l);
+    o.push_u64(rg - V0);
+    return true;
+}
+
+// The register a clobber names (`x19`, `w19`, `d8`, `v8`, `q8`, `lr`), NOREG for none (`memory`, `cc`).
+fn clobber_reg(s: str) u8 {
+    if s.len() < 2 {
+        return NOREG;
+    }
+    if s == "lr" {
+        return 30;
+    }
+    if s == "fp" {
+        return 29;
+    }
+    let n = switch s.slice(1, s.len()).parse_u32() {
+        Some(x) => x,
+        None => 99u32,
+    };
+    if n > 31 {
+        return NOREG;
+    }
+    let c = s.byte_at(0);
+    if c == b'x' || c == b'w' {
+        return n as u8;
+    }
+    if c == b'v' || c == b'd' || c == b's' || c == b'q' || c == b'b' || c == b'h' || c == b'z' {
+        return V0 + n as u8;
+    }
+    return NOREG;
 }

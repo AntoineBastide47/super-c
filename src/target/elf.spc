@@ -31,6 +31,7 @@ const STT_OBJECT: u32 = 1;
 const STT_FUNC: u32 = 2;
 const STT_SECTION: u32 = 3;
 const STT_TLS: u32 = 6;
+const STV_HIDDEN: u8 = 2;
 
 const R_X86_64_64: u32 = 1;
 const R_X86_64_PC32: u32 = 2;
@@ -144,6 +145,7 @@ const fn rel_type(k: u8) u32 {
     if k == x::R_TLSGD {
         return R_X86_64_TLSGD;
     }
+    assert(k == x::R_ABS64, "elf: a relocation kind COFF alone takes");
     return R_X86_64_64;
 }
 
@@ -401,7 +403,13 @@ pub fn write(o: &ob::Obj, a64: bool, out: &mut Vector<u8>) {
                 STB_LOCAL;
             };
             syms.push((bind << 4 | ty) as u8);
-            syms.push(0);
+            syms.push(
+                if (y.flags & ob::SF_HIDDEN) != 0 {
+                    STV_HIDDEN;
+                } else {
+                    0u8;
+                },
+            );
             ob::w16(
                 &mut syms,
                 if y.sec == ob::NOSEC {

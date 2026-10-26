@@ -551,21 +551,8 @@ pub fn write_test_main(p: &mut loader::Package, plan: &TestPlan, fresh: &mut boo
     }
     o.push_str("\nstatic const char *const SC_NAMES[] = {\n");
     for ci in 0..plan.cases.len() {
-        let tc = plan.cases[ci];
-        let a = p.module_ast_const(tc.mod);
-        let nmnode = unsafe (*a).at_const(tc.func).as_data.function.name;
-        let nm = unsafe (*a).at_const(nmnode).as_data.name.text;
         o.push_str("  \"");
-        o.push_str(p.modules[tc.mod as usize].path.as_str());
-        o.push_str("::");
-        if tc.suite.node != NODE_NONE {
-            let sa = p.module_ast_const(tc.suite.module);
-            let snmn = unsafe (*sa).at_const(tc.suite.node).as_data.aggregate.name;
-            let snm = unsafe (*sa).at_const(snmn).as_data.name.text;
-            o.push_str(p.modules[tc.suite.module as usize].source.as_str().slice(snm.start as usize, snm.end as usize));
-            o.push_str("::");
-        }
-        o.push_str(p.modules[tc.mod as usize].source.as_str().slice(nm.start as usize, nm.end as usize));
+        test_case_name(p, plan.cases[ci], &mut o);
         o.push_str("\",\n");
     }
     o.push_str("};\nstatic void (*const SC_FNS[])(void *) = {\n");
@@ -600,6 +587,119 @@ pub fn write_test_main(p: &mut loader::Package, plan: &TestPlan, fresh: &mut boo
     }
     *fresh = rc == 1;
     return Option::<String>::Some(path);
+}
+
+/// The test runner's entry of `plan` as LIR text for a target of `ptr`-byte pointers (a native build's
+/// `__test_main.o`): what `write_test_main` writes as C, the table and `main`, with the global-env hooks
+/// `sc_genv_init` and `sc_genv_free` (stubs when absent).
+pub fn test_main_lir(p: &loader::Package, plan: &TestPlan, ptr: u32, out: &mut String) {
+    let n = plan.cases.len();
+    let genv = plan.genv_init != NODE_NONE;
+    out.format_into("lir ptr {}\nsym @main fn global\nsym @sc_test_main fn global ext\n", ptr);
+    out.push_str("sym @sc_genv_init fn local\nsym @sc_genv_free fn local\n");
+    if ptr == 4 {
+        out.push_str("sym @sc_test_sigs fn local\n");
+    }
+    if genv {
+        out.push_str("sym @__sc_test_genv_init fn global ext\nsym @__sc_test_genv_free fn global ext\n");
+    }
+    for ci in 0..n {
+        let tc = plan.cases[ci];
+        out.format_into("sym @__sc_test_w_{}_{} fn global ext\nsym @.tn{} data local\n", tc.mod as u32, tc.func, ci);
+    }
+    out.push_str(
+        "sym @SC_NAMES data local\nsym @SC_FNS data local\nsym @SC_PANICS data local\nsym @SC_TIMEOUTS data local\n",
+    );
+    out.push_str("fn @main\n  sig (i32, ptr) -> i32\nb0(v0: i32, v1: ptr):\n");
+    out.format_into("  v2 = iconst.i32 {}\n", n);
+    out.push_str(
+        "  v3 = symaddr @SC_NAMES\n  v4 = symaddr @SC_FNS\n  v5 = symaddr @SC_PANICS\n  v6 = symaddr @SC_TIMEOUTS\n",
+    );
+    out.push_str("  v7 = symaddr @sc_genv_init\n  v8 = symaddr @sc_genv_free\n");
+    out.push_str(
+        "  v9 = call.i32 @sc_test_main(v0, v1, v2, v3, v4, v5, v6, v7, v8) : (i32, ptr, i32, ptr, ptr, ptr, ptr, ptr, ptr) -> i32\n  ret v9\n",
+    );
+    out.push_str("fn @sc_genv_init\n  sig () -> ptr\nb0:\n");
+    if genv {
+        out.push_str("  v0 = call.ptr @__sc_test_genv_init() : () -> ptr\n");
+    } else {
+        out.push_str("  v0 = iconst.ptr 0\n");
+    }
+    out.push_str("  ret v0\nfn @sc_genv_free\n  sig (ptr) -> void\nb0(v0: ptr):\n");
+    if genv {
+        out.push_str("  call @__sc_test_genv_free(v0) : (ptr) -> void\n");
+    }
+    out.push_str("  ret\n");
+    if ptr == 4 {
+        // wasm imports a function whose address the table takes with its type, which LIR shows only at a
+        // call: a body that no code calls shows the wrappers'.
+        out.push_str("fn @sc_test_sigs\n  sig (ptr) -> void\nb0(v0: ptr):\n");
+        for ci in 0..n {
+            let tc = plan.cases[ci];
+            out.format_into("  call @__sc_test_w_{}_{}(v0) : (ptr) -> void\n", tc.mod as u32, tc.func);
+        }
+        out.push_str("  ret\n");
+    }
+    // The display names, NUL-terminated, then the tables.
+    let mut nm = String::new();
+    for ci in 0..n {
+        nm.clear();
+        test_case_name(p, plan.cases[ci], &mut nm);
+        out.format_into("data @.tn{} size {} align 0 ro bytes ", ci, nm.len() + 1);
+        for k in 0..nm.len() {
+            push_hex2(out, nm.as_str().byte_at(k));
+        }
+        out.push_str("00\n");
+    }
+    let al = if ptr == 4 {
+        2;
+    } else {
+        3;
+    };
+    out.format_into("data @SC_NAMES size {} align {} ro", n as u32 * ptr, al);
+    for ci in 0..n {
+        out.format_into(" reloc {} @.tn{}", ci as u32 * ptr, ci);
+    }
+    out.format_into("\ndata @SC_FNS size {} align {} ro", n as u32 * ptr, al);
+    for ci in 0..n {
+        let tc = plan.cases[ci];
+        out.format_into(" reloc {} @__sc_test_w_{}_{}", ci as u32 * ptr, tc.mod as u32, tc.func);
+    }
+    out.format_into("\ndata @SC_PANICS size {} align 0 ro bytes ", n);
+    for ci in 0..n {
+        push_hex2(out, plan.cases[ci].should_panic as u8);
+    }
+    out.format_into("\ndata @SC_TIMEOUTS size {} align 2 ro bytes ", 4 * n);
+    for ci in 0..n {
+        let t = plan.cases[ci].timeout;
+        for k in 0..4u32 {
+            push_hex2(out, (t >> 8 * k & 0xFF) as u8);
+        }
+    }
+    out.push_str("\n");
+}
+
+// `b` as two lowercase hex digits.
+fn push_hex2(out: &mut String, b: u8) {
+    out.push_byte("0123456789abcdef"[(b >> 4) as usize]);
+    out.push_byte("0123456789abcdef"[(b & 15) as usize]);
+}
+
+// The display name of test `tc`: `module::fn` or `module::Type::method`.
+fn test_case_name(p: &loader::Package, tc: TestCase, out: &mut String) {
+    let a = p.module_ast_const(tc.mod);
+    let nmnode = unsafe (*a).at_const(tc.func).as_data.function.name;
+    let nm = unsafe (*a).at_const(nmnode).as_data.name.text;
+    out.push_str(p.modules[tc.mod as usize].path.as_str());
+    out.push_str("::");
+    if tc.suite.node != NODE_NONE {
+        let sa = p.module_ast_const(tc.suite.module);
+        let snmn = unsafe (*sa).at_const(tc.suite.node).as_data.aggregate.name;
+        let snm = unsafe (*sa).at_const(snmn).as_data.name.text;
+        out.push_str(p.modules[tc.suite.module as usize].source.as_str().slice(snm.start as usize, snm.end as usize));
+        out.push_str("::");
+    }
+    out.push_str(p.modules[tc.mod as usize].source.as_str().slice(nm.start as usize, nm.end as usize));
 }
 
 /// Append the `@link` flags of the `__ldflags` file `path` (one flag string per line, split on

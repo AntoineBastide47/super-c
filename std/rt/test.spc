@@ -105,11 +105,22 @@ extern "C" {
     static mut environ: *mut *mut char;
 }
 
+// The environment's entries.
+@platform(!windows)
+fn env_block() *mut *mut char {
+    return unsafe environ;
+}
+
 @platform(windows)
 extern "C" "stdlib.h" {
-    // The C runtime's environment block, a macro over its accessor.
-    @import("_environ")
-    static mut environ: *mut *mut char;
+    // The C runtime's environment block: `_environ` is a macro over this accessor.
+    fn __p__environ() *mut *mut *mut char;
+}
+
+// The environment's entries.
+@platform(windows)
+fn env_block() *mut *mut char {
+    return unsafe *__p__environ();
 }
 
 extern "C" "stdio.h" {
@@ -744,7 +755,7 @@ fn run_in_process(t: &Table, o: &Opts, sel: &Vector<usize>, genv: *mut void, r: 
 // The environment's entries, copied.
 fn env_snapshot() Vector<String> {
     let mut v = Vector::<String>::new();
-    let e = unsafe environ;
+    let e = env_block();
     let mut i: usize = 0;
     while unsafe e[i] != null {
         v.push(unsafe String::from_cstr(e[i]));
@@ -759,7 +770,7 @@ fn env_restore(snap: &Vector<String>) {
     // Unsetting a variable compacts the environment, so the index advances only past kept entries.
     let mut i: usize = 0;
     loop {
-        let e = unsafe environ;
+        let e = env_block();
         let p = unsafe e[i];
         if p == null {
             break;

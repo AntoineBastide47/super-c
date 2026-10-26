@@ -1,7 +1,9 @@
 // The COFF object writer for x86-64 (Windows): the header, a section per non-empty object section kind
 // and per named section, `.xdata` with each function's UNWIND_INFO and `.pdata` with its function table
 // entry, the relocations (implicit addends, in the section bytes), the symbol table (a section symbol per
-// section, then the object's symbols) and the string table. A thread-local variable never reaches it.
+// section, then the object's symbols) and the string table. Thread-local variables, all with their bytes,
+// go to `.tls$`, which the linker merges into the image's `.tls` (native TLS, as clang and gcc 16
+// built with it place them).
 import codegen::obj as ob;
 import target::x64 as x;
 
@@ -16,6 +18,7 @@ const SCN_WRITE: u32 = 0x80000000;
 const REL_ADDR64: u32 = 1;
 const REL_ADDR32NB: u32 = 3;
 const REL_REL32: u32 = 4;
+const REL_SECREL: u32 = 11;
 
 const CLASS_EXTERNAL: u32 = 2;
 const CLASS_STATIC: u32 = 3;
@@ -52,7 +55,11 @@ fn sec_info(o: &ob::Obj, k: u8, name: &mut String) u32 {
         name.push_str(".data");
         return SCN_DATA | SCN_READ | SCN_WRITE | al;
     }
-    assert(k == ob::S_BSS, "coff: a thread-local section on Windows");
+    if k == ob::S_TDATA {
+        name.push_str(".tls$");
+        return SCN_DATA | SCN_READ | SCN_WRITE | al;
+    }
+    assert(k == ob::S_BSS, "coff: a thread-local section without bytes");
     name.push_str(".bss");
     return SCN_BSS | SCN_READ | SCN_WRITE | al;
 }
@@ -174,6 +181,9 @@ pub fn write(o: &ob::Obj, out: &mut Vector<u8>) {
         let ty = if rl.kind == x::R_ABS64 {
             add_field(&mut secs.index_mut(s).bytes, rl.off, 8, rl.addend as u64);
             REL_ADDR64;
+        } else if rl.kind == x::R_SECREL {
+            add_field(&mut secs.index_mut(s).bytes, rl.off, 4, rl.addend as u64);
+            REL_SECREL;
         } else {
             assert(rl.kind == x::R_PC32 || rl.kind == x::R_PLT32, "coff: a relocation kind ELF alone takes");
             // REL32 is relative to the field's end: the addend's 4 bytes back.

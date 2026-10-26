@@ -1296,6 +1296,7 @@ extend CcStream {
             self.ldbase.push_string(&uvm);
         }
         push_rtlib(&mut self.probes, self.target, &mut self.ldbase);
+        push_repro(&mut self.probes, &mut self.ldbase);
         self.prefix_args = clone_args(&self.cc_args);
         split_args(&mut self.prefix_args, self.cc_tail.as_str());
         if self.cache.len() != 0 {
@@ -2563,6 +2564,7 @@ fn emit_closure(
             return 1;
         }
         p.gen_root = String::from_str(srcgen);
+        p.cc = m.cc.clone();
         for i in 0..m.shards.len() {
             p.shard_rules.push(
                 loader::ShardRule {
@@ -2869,7 +2871,10 @@ pub fn features_accepted(
     ld: &mut String,
 ) bool {
     let feats = tgt::beyond_baseline(all, target);
-    let need = feature_probes(feats) | uvm_need(target, arch) | novec_need(lto) | rtlib_need(target, arch);
+    let need = feature_probes(feats) | uvm_need(target, arch) | novec_need(lto) | rtlib_need(target, arch) | repro_need(
+        target,
+        arch,
+    );
     if need == 0 {
         return true;
     }
@@ -2887,6 +2892,7 @@ pub fn features_accepted(
     let _ = push_novec(&mut probes, lto, late);
     let _ = push_uvm(&mut probes, more);
     push_rtlib(&mut probes, target, ld);
+    push_repro(&mut probes, ld);
     probes.save();
     return ok;
 }
@@ -2910,6 +2916,21 @@ fn push_rtlib(probes: &mut pr::Probes, target: i32, out: &mut String) {
     probes.mark_used(pr::RTLIB);
     out.push_byte(b' ');
     out.push_string(probes.res.at(pr::RTLIB));
+}
+
+// The reproducible-link probe's bit where it applies (Apple ld), else 0.
+const fn repro_need(target: i32, arch: i32) u64 {
+    return pick(tgt::probe_applies("reproducible-link", target, arch), 1u64 << pr::REPRO as u64, 0);
+}
+
+// Append the link flag of byte-identical output to `out` when its probe accepted it.
+fn push_repro(probes: &mut pr::Probes, out: &mut String) {
+    if probes.res.at(pr::REPRO).as_str() != "accepted" {
+        return;
+    }
+    probes.mark_used(pr::REPRO);
+    out.push_byte(b' ');
+    out.push_str(pr::table()[pr::REPRO].flags);
 }
 
 // The no-prelink-vectorize probe's bit for an LTO mode that can compile as full LTO (`full`, `auto`,
@@ -3083,7 +3104,7 @@ fn cc_stream(
         m.arch,
         need | feature_probes(tgt::beyond_baseline(feats, cx.target)) | uvm_need(cx.target, m.arch) | novec_need(
             lto_req,
-        ) | rtlib_need(cx.target, m.arch),
+        ) | rtlib_need(cx.target, m.arch) | repro_need(cx.target, m.arch),
     );
     // The compile argv runs from the process working directory; record it for compile_commands.json.
     let ccdb_dir = fs::realpath(".").unwrap_or(String::from_str("."));

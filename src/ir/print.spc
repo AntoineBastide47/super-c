@@ -65,10 +65,13 @@ fn p_operand(out: &mut String, b: &ir::CoreBody, op: ir::OperandId) {
         if c.kind == ir::CK_INT || c.kind == ir::CK_BOOL {
             out.push_str("const ");
             out.push_u64(c.val as u64);
-        } else if c.kind == ir::CK_STR {
+        } else if c.kind == ir::CK_STR || c.kind == ir::CK_BYTES {
             out.push_str("const str");
         } else if c.kind == ir::CK_FLOAT {
             out.push_str("const float");
+        } else if c.kind == ir::CK_FBITS {
+            out.push_str("const float 0x");
+            out.push_hex(c.val as u64, false);
         } else if c.kind == ir::CK_ITEM {
             out.push_str("item m");
             out.push_u64(c.item.module);

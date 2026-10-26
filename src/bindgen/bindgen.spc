@@ -42,6 +42,9 @@ struct Lexer<'a> {
     pub start: usize,
     pub end: usize,
     pub file: String, // the `# <line> "<file>"` most recently passed
+    /// The vector attribute the declaration being read carries: its bytes (`vector_size`), minus its
+    /// lanes (`neon_vector_type`, `ext_vector_type`), 0 for none.
+    pub vec: i64,
 }
 
 const fn is_id_start(c: u8) bool {
@@ -58,7 +61,7 @@ const fn is_digit(c: u8) bool {
 
 extend<'a> Lexer<'a> {
     fn new(src: str<'a>) Lexer<'a> {
-        let mut lx = Lexer::<'a> { src: src, pos: 0, kind: TK_EOF, start: 0, end: 0, file: String::new() };
+        let mut lx = Lexer::<'a> { src: src, pos: 0, kind: TK_EOF, start: 0, end: 0, file: String::new(), vec: 0 };
         lx.advance();
         return lx;
     }
@@ -581,10 +584,11 @@ fn preprocess(
     return true;
 }
 
-/// The C environment of target `target` and `arch` with the C flags `flags` (`ct::apply_c_flags`) into
-/// `env`; false when the target has none or a flag does not apply.
-pub fn header_env(target: i32, arch: i32, flags: str, env: &mut ct::CTarget) bool {
-    return ct::c_target(target, arch, "", env) && ct::apply_c_flags(flags, env);
+/// The C environment of target `target` and `arch` under `sysroot` (`ct::c_target`; empty: discover it)
+/// with the C flags `flags` (`ct::apply_c_flags`) into `env`; false when the target has none or a flag
+/// does not apply.
+pub fn header_env(target: i32, arch: i32, sysroot: str, flags: str, env: &mut ct::CTarget) bool {
+    return ct::c_target(target, arch, sysroot, env) && ct::apply_c_flags(flags, env);
 }
 
 /// The facts of C header `header` (an `#include` operand: `<name>` or `"path"`) under C environment
@@ -606,14 +610,27 @@ pub fn header_facts(
     read: &mut Vector<String>,
 ) bool {
     let path = "/__sc_header_ints.c";
+    // After the header, each name the preprocessor expands, function-like macros included (mingw-w64
+    // spells `ERROR_LOCK_VIOLATION` as `__MSABI_LONG(33)`): a marker, then a separator before each.
+    let mut probe = format("#include {}\n{}\n", header, HF_BEGIN);
+    for k in 0..names.len() {
+        probe.format_into("{} {}\n", HF_SEP, names[k]);
+    }
     let mut files = Vector::<cpp::VFile>::new();
-    files.push(cpp::VFile { path: String::from_str(path), text: format("#include {}\n", header) });
-    let mut text = String::new();
+    files.push(cpp::VFile { path: String::from_str(path), text: probe });
+    let mut out = String::new();
     let mut dump = String::new();
     let none = Vector::<String>::new();
-    if !preprocess(env, path, &none, files, &mut text, &mut dump, read, true) {
+    if !preprocess(env, path, &none, files, &mut out, &mut dump, read, true) {
         return false;
     }
+    let all = out.as_str();
+    let mark = all.find(HF_BEGIN);
+    if mark < 0 {
+        return false;
+    }
+    let text = String::from_str(all.slice(0, mark as usize));
+    let mut tail = all.slice(mark as usize + HF_BEGIN.len(), all.len());
     let mut c = Collected {
         aliases: Vector::<Alias>::new(),
         fns: Vector::<FnDecl>::new(),
@@ -637,9 +654,34 @@ pub fn header_facts(
     c.widths = read_widths(&c, dump.as_str());
     let mut lx = Lexer::new(text.as_str());
     lx.parse_unit(&mut c, path, &none, dump.as_str());
+    let mut ex = String::new();
     for k in 0..names.len() {
+        // The name's expansion: up to the next separator, its line markers dropped.
+        let at = tail.find(HF_SEP);
+        if at < 0 {
+            return false;
+        }
+        tail = tail.slice(at as usize + HF_SEP.len(), tail.len());
+        let end = tail.find(HF_SEP);
+        let seg = if end < 0 {
+            tail;
+        } else {
+            tail.slice(0, end as usize);
+        };
+        ex.clear();
+        let mut a: usize = 0;
+        for b in 0..seg.len() + 1 {
+            if b == seg.len() || seg.byte_at(b) == b'\n' {
+                let ln = seg.slice(a, b);
+                if !ln.trim().starts_with("#") {
+                    ex.push_str(ln);
+                    ex.push_byte(b' ');
+                }
+                a = b + 1;
+            }
+        }
         // The value's 64 bits: an unsigned 64-bit constant past i64 keeps its bits.
-        let v = ce_cv(names[k], &c, null, dump.as_str(), 0);
+        let v = ce_cv(ex.as_str().trim(), &c, null, dump.as_str(), 0);
         oks.push(v.is_some());
         vals.push(
             if v.is_some() {
@@ -659,6 +701,10 @@ pub fn header_facts(
     return true;
 }
 
+// The markers `header_facts` writes after the header: the start of the names, and before each name.
+const HF_BEGIN: str = "__sc_hf_begin";
+const HF_SEP: str = "__sc_hf_sep";
+
 /// `scalar_class`: typedef `name` is not a scalar (a record, `long double`, unknown).
 pub const SC_NONE: u8 = b'0';
 /// `scalar_class`: an integer or a pointer.
@@ -667,6 +713,71 @@ pub const SC_INT: u8 = b'i';
 pub const SC_F32: u8 = b'f';
 /// `scalar_class`: a `double`.
 pub const SC_F64: u8 = b'd';
+/// `scalar_class`: a vector of 8-, 16-, 32- or 64-bit integers, of `float`s or of `double`s.
+pub const SC_V8: u8 = b'B';
+pub const SC_V16: u8 = b'H';
+pub const SC_V32: u8 = b'W';
+pub const SC_V64: u8 = b'Q';
+pub const SC_VF32: u8 = b'F';
+pub const SC_VF64: u8 = b'D';
+/// `scalar_class`: a struct of 128-bit vectors only (`arm_neon.h`'s `uint8x16x2_t`), which a calling
+/// convention passes as that many vectors.
+pub const SC_VTUPLE: u8 = b'T';
+
+// The bytes of vector type `name` (`record_vector`'s `i8x16`) through its typedefs; 0 for another type.
+fn vec_bytes(c: &Collected, name: str) u32 {
+    let mut n = name;
+    for _ in 0..c.aliases.len() + 1 {
+        let x = n.find("x");
+        if x > 0 && x as usize + 1 < n.len() && is_digit(n.byte_at(x as usize + 1)) {
+            let lanes = int_literal(n.slice(x as usize + 1, n.len()));
+            let eb: i64 = switch n.slice(0, x as usize) {
+                "i8" | "u8" => 1,
+                "i16" | "u16" => 2,
+                "i32" | "u32" | "f32" => 4,
+                "i64" | "u64" | "f64" => 8,
+                _ => 0,
+            };
+            return if lanes > 0 {
+                (lanes * eb) as u32;
+            } else {
+                0;
+            };
+        }
+        let ai = c.alias_of(n);
+        if ai < 0 || c.aliases[ai as usize].opaque {
+            return 0;
+        }
+        n = c.aliases[ai as usize].sub.as_str();
+    }
+    return 0;
+}
+
+// Whether struct `tag` holds 128-bit vectors only: fields of such a vector, or one array of them.
+fn vec_tuple(c: &Collected, tag: str) bool {
+    let ri = c.record_of(tag);
+    if ri < 0 {
+        return false;
+    }
+    let r = &c.records[ri as usize];
+    if r.is_union || r.fields.len() == 0 {
+        return false;
+    }
+    for k in 0..r.fields.len() {
+        let mut t = r.fields[k].ty.as_str();
+        if t.starts_with("[") {
+            let semi = t.find(";");
+            if semi < 0 {
+                return false;
+            }
+            t = t.slice(1, semi as usize);
+        }
+        if vec_bytes(c, t) != 16 {
+            return false;
+        }
+    }
+    return true;
+}
 
 // The scalar class of typedef `name` (`SC_*`) through its chain of typedefs.
 fn scalar_class(c: &Collected, name: str) u8 {
@@ -679,11 +790,30 @@ fn scalar_class(c: &Collected, name: str) u8 {
         }
         let al = &c.aliases[ai as usize];
         let sub = al.sub.as_str();
+        if al.opaque && al.ok && vec_tuple(c, sub) {
+            return SC_VTUPLE;
+        }
         if !al.ok || al.opaque {
             return SC_NONE;
         }
         if sub.starts_with("*") || sub.starts_with("fn(") {
             return SC_INT;
+        }
+        // A vector (`record_vector`): its lane type, `x`, its lane count.
+        let x = sub.find("x");
+        if x > 0 && x as usize + 1 < sub.len() && is_digit(sub.byte_at(x as usize + 1)) {
+            let v = switch sub.slice(0, x as usize) {
+                "i8" | "u8" => SC_V8,
+                "i16" | "u16" => SC_V16,
+                "i32" | "u32" => SC_V32,
+                "i64" | "u64" => SC_V64,
+                "f32" => SC_VF32,
+                "f64" => SC_VF64,
+                _ => 0u8,
+            };
+            if v != 0 {
+                return v;
+            }
         }
         let k = switch sub {
             "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" | "char" | "bool" => SC_INT,
@@ -1831,8 +1961,13 @@ extend Lexer {
             }
             let t = self.text();
             if noise_call(t) {
+                let attr = t == "__attribute__" || t == "__attribute";
                 self.advance();
-                self.skip_group(b'(', b')');
+                if attr {
+                    self.skip_attr();
+                } else {
+                    self.skip_group(b'(', b')');
+                }
                 continue;
             }
             if noise_word(t) {
@@ -1840,6 +1975,52 @@ extend Lexer {
                 continue;
             }
             return;
+        }
+    }
+
+    // Skip an `__attribute__((..))` group, noting a vector attribute in `vec`.
+    fn skip_attr(self: &mut Self) {
+        if !self.at_punct(b'(') {
+            return;
+        }
+        let mut depth: i32 = 0;
+        loop {
+            if self.kind == TK_EOF {
+                return;
+            }
+            if self.at_punct(b'(') {
+                depth = depth + 1;
+            } else if self.at_punct(b')') {
+                depth = depth - 1;
+                if depth == 0 {
+                    self.advance();
+                    return;
+                }
+            } else if self.kind == TK_IDENT {
+                let t = self.text();
+                let bytes = t == "vector_size" || t == "__vector_size__";
+                let lanes = t == "neon_vector_type" || t == "__neon_vector_type__" || t == "neon_polyvector_type" || t == "ext_vector_type";
+                if bytes || lanes {
+                    self.advance();
+                    if self.at_punct(b'(') {
+                        self.advance();
+                        if self.kind == TK_NUM {
+                            let n = int_literal(self.text());
+                            if n > 0 {
+                                self.vec = if bytes {
+                                    n;
+                                } else {
+                                    -n;
+                                };
+                            }
+                        }
+                        // The argument's `(`: the loop sees it next to its `)`.
+                        depth = depth + 1;
+                    }
+                    continue;
+                }
+            }
+            self.advance();
         }
     }
 
@@ -2465,6 +2646,7 @@ extend Lexer {
             c.cur_mine = mine;
             c.pending_agg = -1;
             c.saw_extern = false;
+            self.vec = 0;
             let mut td = false;
             let mut bc = false;
             let mut st = false;
@@ -2495,7 +2677,9 @@ extend Lexer {
                         keep = false;
                     }
                 }
-                if nm.len() != 0 && td {
+                if nm.len() != 0 && td && self.vec != 0 && ty.ptr == 0 && !isfn {
+                    c.record_vector(nm.as_str(), &ty, self.vec);
+                } else if nm.len() != 0 && td {
                     c.record_typedef(nm.as_str(), &ty, isfn);
                 }
                 if nm.len() != 0 && isfn && st {
@@ -2619,6 +2803,48 @@ extend Collected {
 
     // A typedef of a pointer-to-struct or of a struct tag keeps its own NAME as an opaque type; anything else
     // resolves to the Super-C type it stands for.
+    // A vector typedef: its lane type (`ty`, through its typedefs) and `vec` (`Lexer.vec`) give the
+    // portable vector type it maps to (`i8x16`, `f32x4`), unknown when the lanes are not a scalar.
+    fn record_vector(self: &mut Self, name: str, ty: &CType, vec: i64) {
+        if self.alias_of(name) >= 0 {
+            return;
+        }
+        let mut el = String::new();
+        ty.render(&mut el);
+        // Each step follows one typedef; a chain is shorter than the alias table.
+        for _ in 0..self.aliases.len() + 1 {
+            let ai = self.alias_of(el.as_str());
+            if ai < 0 || self.aliases[ai as usize].opaque {
+                break;
+            }
+            el = self.aliases[ai as usize].sub.clone();
+        }
+        let e = if el.as_str() == "c_char" {
+            "i8";
+        } else {
+            el.as_str();
+        };
+        let eb: i64 = switch e {
+            "i8" | "u8" => 1,
+            "i16" | "u16" => 2,
+            "i32" | "u32" | "f32" => 4,
+            "i64" | "u64" | "f64" => 8,
+            _ => 0,
+        };
+        let lanes = if vec > 0 && eb != 0 {
+            vec / eb;
+        } else {
+            -vec;
+        };
+        let ok = eb != 0 && lanes >= 1 && (lanes & lanes - 1) == 0;
+        let sub = if ok {
+            format("{}x{}", e, lanes);
+        } else {
+            String::from_str("?");
+        };
+        self.push_alias(Alias { name: String::from_str(name), sub: sub, opaque: false, ok: ok });
+    }
+
     fn record_typedef(self: &mut Self, name: str, ty: &CType, is_fn: bool) {
         let pend = self.pending_agg;
         let pend_enum = self.pending_is_enum;

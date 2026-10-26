@@ -18,6 +18,9 @@ import target::wasm as w;
 import target::wasmobj as wo;
 import target::wasmabi as wa;
 import ir::core as core;
+import target::assembler as asmr;
+import target::wasmasm as wasm_asm;
+import target::intrin as intrin;
 
 // The local and home classes: the four scalar wasm types, then v128.
 const CL_I32: u32 = 0;
@@ -395,6 +398,9 @@ extend Gen {
         wa::classify(b, b.sig, self.vregs, &mut self.me);
         if self.me.unknown {
             return self.refuse("the signature passes an aggregate whose C class is unknown");
+        }
+        if b.naked {
+            return self.naked(s);
         }
         lv::fill(&mut self.osym, b.syms.len(), NONE);
         self.c.clear();
@@ -1351,6 +1357,9 @@ extend Gen {
         }
         if op == O_FENCE || op == O_VAEND {
             return true;
+        }
+        if op == O_ASM {
+            return self.asm_inst(t);
         }
         if op == O_MEMCPY || op == O_MEMSET {
             self.get(t.a);
@@ -3036,10 +3045,136 @@ extend Gen {
 // ---- Calls ----
 
 extend Gen {
+    // The instructions of the intrinsic body symbol `s` names (`target::intrin`); empty for another
+    // function.
+    fn intrinsic(self: &Self, s: u32) str<'static> {
+        let p = self.p();
+        let ps = p.syms[self.b().syms[s as usize] as usize];
+        if ps.def != NONE {
+            return "";
+        }
+        let nm = p.spell(ps.name);
+        return intrin::find(
+            "wasm32",
+            if nm.starts_with("__sc_x_") {
+                nm.slice(7, nm.len());
+            } else {
+                nm;
+            },
+        );
+    }
+
+    // Whether `v` is an integer constant: its bits in `out`.
+    const fn const_of(self: &Self, v: Value, out: &mut u64) bool {
+        if (v & (VPARAM | VFLAG)) != 0 {
+            return false;
+        }
+        let t = self.b().insts[v as usize];
+        if t.op != O_ICONST {
+            return false;
+        }
+        *out = t.b as u64 << 32 | t.a as u64;
+        return true;
+    }
+
+    // Intrinsic `tpl` in place of call `t`, its arguments on the operand stack: its instructions, with
+    // `local.get k` argument `k`. Arguments in order the instructions take as they are; else they go to
+    // locals first.
+    fn intrinsic_call(self: &mut Self, t: Inst, tpl: str) bool {
+        let b = self.b();
+        let np = b.pool[t.b as usize];
+        let mut imm = Vector::<i64>::with_capacity(np as usize);
+        let mut known = Vector::<bool>::with_capacity(np as usize);
+        for k in 0..np {
+            let mut u: u64 = 0;
+            known.push(self.const_of(b.pool[(t.c + k) as usize], &mut u));
+            imm.push(u as i64);
+        }
+        let mut text = String::new();
+        if !intrin::expand(tpl, imm[0..imm.len()], known[0..known.len()], &mut text) {
+            return self.refuse("an intrinsic's immediate argument of no constant value");
+        }
+        let mut lines = Vector::<str>::new();
+        let mut it = text.as_str().split("\n");
+        loop {
+            switch it.next() {
+                Some(l) => lines.push(l),
+                None => {
+                    break;
+                },
+            };
+        }
+        // The arguments on the stack: those the instructions read.
+        let mut args = Vector::<u32>::new();
+        for k in 0..np {
+            if reads_arg(tpl, k) {
+                args.push(k);
+            }
+        }
+        let mut lead: usize = 0;
+        while lead < lines.len() && lead < args.len() && lines[lead] == format("local.get {}", args[lead]).as_str() {
+            lead += 1;
+        }
+        let mut rest = false;
+        for q in lead..lines.len() {
+            rest = rest || lines[q].starts_with("local.");
+        }
+        let mut body = String::new();
+        if lead == args.len() && !rest {
+            for q in lead..lines.len() {
+                body.push_str(lines[q]);
+                body.push_byte(b'\n');
+            }
+        } else {
+            let mut tmps = Vector::<u32>::new();
+            lv::fill(&mut tmps, np as usize, NONE);
+            for q in 0..args.len() {
+                let k = args[q];
+                tmps[k as usize] = self.tmp(wa::wtype(self.cs.params[k as usize].ty));
+            }
+            let mut q = args.len();
+            while q > 0 {
+                q -= 1;
+                self.c.local(w::LOCAL_SET, tmps[args[q] as usize]);
+            }
+            for q in 0..lines.len() {
+                let l = lines[q];
+                if l.starts_with("local.get ") {
+                    let n = l.slice(10, l.len()).parse_i64().unwrap_or(-1);
+                    assert(
+                        n >= 0 && n < np as i64 && tmps[n as usize] != NONE,
+                        "wasm: an intrinsic reads its arguments alone",
+                    );
+                    body.format_into("local.get {}\n", tmps[n as usize]);
+                } else {
+                    body.push_str(l);
+                    body.push_byte(b'\n');
+                }
+            }
+        }
+        self.obj().simd = true;
+        return self.asm_text(body.as_str());
+    }
+
     fn call(self: &mut Self, i: u32, t: Inst) bool {
         let b = self.b();
         let sig = t.b;
-        wa::classify(b, sig, self.vregs, &mut self.cs);
+        let tpl = if t.op == O_CALL {
+            self.intrinsic(t.a);
+        } else {
+            "";
+        };
+        // An intrinsic takes its vectors as v128 values.
+        wa::classify(
+            b,
+            sig,
+            if tpl.len() != 0 {
+                16u32;
+            } else {
+                self.vregs;
+            },
+            &mut self.cs,
+        );
         let np = b.pool[sig as usize];
         let rt = b.pool[sig as usize + 2];
         // The call area: copies of memory values passed by reference, then the variadic buffer.
@@ -3136,6 +3271,9 @@ extend Gen {
         for k in 0..self.cs.nfixed {
             let pa = self.cs.params[k as usize];
             let v = b.pool[(t.c + k) as usize];
+            if tpl.len() != 0 && !reads_arg(tpl, k) {
+                continue; // an intrinsic's immediate
+            }
             if pa.kind == wa::P_DIRECT && !pa.leaf {
                 self.get(v);
                 if pa.sext {
@@ -3179,12 +3317,18 @@ extend Gen {
                 }
             }
         }
-        wa::encode(&self.cs, &mut self.enc);
-        let ty = self.obj().type_index(&self.enc);
-        if t.op == O_CALL {
+        if tpl.len() != 0 {
+            if !self.intrinsic_call(t, tpl) {
+                return false;
+            }
+        } else if t.op == O_CALL {
+            wa::encode(&self.cs, &mut self.enc);
+            let ty = self.obj().type_index(&self.enc);
             let k = self.osym_of(t.a);
             self.call_sym(k, ty);
         } else {
+            wa::encode(&self.cs, &mut self.enc);
+            let ty = self.obj().type_index(&self.enc);
             self.get(t.a);
             if self.table_sym == NONE {
                 self.table_sym = self.obj().sym("__indirect_function_table", wo::K_TABLE);
@@ -3217,6 +3361,22 @@ extend Gen {
             self.c.memarg(4, h);
         }
         return true;
+    }
+}
+
+// Whether intrinsic template `tpl` reads argument `k` (a line `local.get k`).
+fn reads_arg(tpl: str, k: u32) bool {
+    let mut it = tpl.split("\n");
+    loop {
+        let l = switch it.next() {
+            Some(x) => x,
+            None => {
+                return false;
+            },
+        };
+        if l.starts_with("local.get ") && l.slice(10, l.len()).parse_i64().unwrap_or(-1) == k as i64 {
+            return true;
+        }
     }
 }
 
@@ -5378,5 +5538,77 @@ extend Gen {
             self.c.local(w::LOCAL_SET, x);
             self.st_lane(x, d, k, lt, true);
         }
+    }
+}
+
+// ---- Inline assembly ----
+
+extend Gen {
+    // The text of body message `m`.
+    fn msg_text(self: &Self, m: u32) str {
+        let p = self.p();
+        return p.spell(p.msgs[self.b().msgs[m as usize] as usize]);
+    }
+
+    // Inline assembly (`O_ASM`) without operands: its instructions in place, which leave the operand
+    // stack as they find it. A template that names operands has no form here.
+    fn asm_inst(self: &mut Self, t: Inst) bool {
+        let b = self.b();
+        if asm_nout(b, t.c) + asm_nin(b, t.c) != 0 {
+            return self.refuse("inline assembly with operands on wasm");
+        }
+        let tpl = String::from_str(self.msg_text(asm_template(b, t.c)));
+        return self.asm_text(tpl.as_str());
+    }
+
+    // Assemble template `text` onto the code, its symbols as relocations.
+    fn asm_text(self: &mut Self, text: str) bool {
+        let mut sts = Vector::<asmr::Stmt>::new();
+        asmr::statements(text, true, &mut sts);
+        let none = Vector::<asmr::WasmType>::new();
+        for k in 0..sts.len() {
+            let body = sts[k].body.as_str();
+            if sts[k].labels.len() != 0 || body.len() != 0 && body.byte_at(0) == b'.' {
+                return self.refuse("inline assembly with a label or a directive on wasm");
+            }
+            if body.len() == 0 {
+                continue;
+            }
+            let at = self.c.len();
+            let mut fx = Vector::<wasm_asm::Fix>::new();
+            let mut e = String::new();
+            if !wasm_asm::assemble(body, &mut self.c.bytes, &mut fx, &mut e) {
+                self.err.format_into("inline assembly: {}", e.as_str());
+                return false;
+            }
+            for q in 0..fx.len() {
+                let mut rel = wo::WRel { kind: 0, off: 0, sym: 0, addend: 0 };
+                if !asmr::wasm_reloc(self.obj(), &fx[q], at + fx[q].at, &none, &mut rel, &mut e) {
+                    self.err.format_into("inline assembly: {}", e.as_str());
+                    return false;
+                }
+                self.rels.push(rel);
+            }
+        }
+        return true;
+    }
+
+    // A naked function: its templates' code alone, then the body's `end`.
+    fn naked(self: &mut Self, s: u32) bool {
+        self.c.clear();
+        self.rels.truncate(0);
+        self.locals.truncate(0);
+        let b = self.b();
+        for i in 0..b.insts.len() {
+            if b.insts[i].op != O_ASM {
+                continue;
+            }
+            let tpl = String::from_str(self.msg_text(asm_template(b, b.insts[i].c)));
+            if !self.asm_text(tpl.as_str()) {
+                return false;
+            }
+        }
+        self.c.op(w::END);
+        return self.finish(s);
     }
 }

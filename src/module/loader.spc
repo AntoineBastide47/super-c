@@ -225,7 +225,7 @@ pub struct Package {
     pub root_dir: String, // source root: the directory of the root file; imports resolve relative to it
     pub gen_root: String, // where codegen writes the emitted C tree: <build dir>/raw, set by the driver
     pub c_files: u64, // the `.c` files the emission left under gen_root (`run_package`), for the emit stamp
-    pub cc: String, // the C compiler the command line named for a bare build; empty = resolve as usual
+    pub cc: String, // the C compiler the command line or manifest named; empty = resolve as usual
     pub cstd: String, // the base C flags the command line named for a bare build (`--cstd`); empty = the default
     pub std_root: String, // second import search root (parent of std/); empty = none
     /// The project's manifest sets `std_internals = true`: its files see std's `pub(package)` items.

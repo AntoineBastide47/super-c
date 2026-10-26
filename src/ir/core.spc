@@ -153,6 +153,10 @@ pub const CK_STR: u8 = 3; // raw span = content
 pub const CK_UNIT: u8 = 4; // no value (void/empty)
 pub const CK_ITEM: u8 = 5; // item = resolved fn/const DefId; val = bound generic arguments (targ_val)
 pub const CK_WIDE: u8 = 6; // val = wide-literal record index in the module Ast
+/// A folded `const fn` call's float: val = its IEEE bits (an `f32`'s in the low 32).
+pub const CK_FBITS: u8 = 7;
+/// A folded `const fn` call's `str`: val = start << 32 | length of its bytes in CoreBody.bytes.
+pub const CK_BYTES: u8 = 8;
 
 @derive(Copy)
 pub struct Constant {
@@ -304,6 +308,9 @@ pub const TP_MATCH_PRE: u8 = 26; // aux 1 = value position
 pub const TP_ARM: u8 = 27; // node = arm, aux = arm index
 pub const TP_ARM_END: u8 = 28;
 pub const TP_MATCH_POST: u8 = 29;
+/// An argument a FOLDED call consumed: no IR op survives for the analysis, so the replay marks
+/// the move directly with the const-move category loud (the one flow check a fold erases).
+pub const TP_CONST_MOVE: u8 = 30;
 
 pub const RV_REF: u8 = 1; // &place; a = PlaceId, b = 1 when mutable
 pub const RV_ADDR: u8 = 2; // raw address of place; a = PlaceId, b = 1 when *mut
@@ -1177,6 +1184,8 @@ pub struct CoreBody {
     pub user_moves: Vector<u64>,
     pub asms: Vector<AsmRec>,
     pub asm_spans: Vector<tok::Span>,
+    /// The bytes of the CK_BYTES constants.
+    pub bytes: Vector<u8>,
     /// RV_SIMD index lists (`item.node` is the start): the length, then the lane indexes four `u8` per
     /// word, low byte first.
     pub simd_aux: Vector<u32>,
@@ -1291,6 +1300,7 @@ extend CoreBody {
             user_moves: Vector::<u64>::new(),
             asms: Vector::<AsmRec>::new(),
             asm_spans: Vector::<tok::Span>::new(),
+            bytes: Vector::<u8>::new(),
             simd_aux: Vector::<u32>::new(),
             demands: Vector::<Terminator>::new(),
             tail_jumps: Vector::<BlockId>::new(),
@@ -1330,6 +1340,7 @@ extend CoreBody {
         self.user_moves.truncate(0);
         self.asms.truncate(0);
         self.asm_spans.truncate(0);
+        self.bytes.truncate(0);
         self.simd_aux.truncate(0);
         self.demands.truncate(0);
         self.tail_jumps.truncate(0);
@@ -1345,7 +1356,7 @@ extend CoreBody {
         n += (self.oper_pool.capacity() + self.dest_pool.capacity() + self.targ_pool.capacity() + self.simd_aux.capacity() + self.tail_jumps.capacity()) * 4;
         n += (self.switch_pool.capacity() + self.user_moves.capacity()) * 8;
         n += self.asms.capacity() * sizeof(AsmRec) + self.asm_spans.capacity() * sizeof(tok::Span);
-        n += self.demands.capacity() * sizeof(Terminator);
+        n += self.demands.capacity() * sizeof(Terminator) + self.bytes.capacity();
         return n as u64;
     }
 
@@ -1380,6 +1391,7 @@ extend CoreBody {
         out.targ_pool = exact(&src.targ_pool);
         out.asms = exact(&src.asms);
         out.asm_spans = exact(&src.asm_spans);
+        out.bytes = exact(&src.bytes);
         out.simd_aux = exact(&src.simd_aux);
         out.demands = exact(&src.demands);
         out.tail_jumps = exact(&src.tail_jumps);

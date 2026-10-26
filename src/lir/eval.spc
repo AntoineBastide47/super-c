@@ -16,7 +16,7 @@ import ir::core as core;
 
 /// How a run ended (`Outcome.kind`): the interpreter's trap kinds (`ir::interp::IT_TRAP_*`), or one of these.
 pub const EV_OK: u8 = 0;
-/// An extern call the evaluator does not model.
+/// An extern call or inline assembly the evaluator does not model.
 pub const EV_FFI: u8 = 100;
 /// An instruction the evaluator cannot run: a malformed body or an unsupported operation.
 pub const EV_ERROR: u8 = 101;
@@ -578,6 +578,15 @@ extend Eval {
         }
         if op == O_RETADDR {
             return self.stop(iri::IT_TRAP_UNSUPPORTED, "a return address has no evaluated value");
+        }
+        if op == O_ASM {
+            // An empty template without outputs runs nothing (a compiler barrier); other machine code the
+            // evaluator does not model, as an extern call.
+            let pk = unsafe &*self.pkg;
+            if asm_nout(b, t.c) == 0 && pk.spell(pk.msgs[b.msgs[asm_template(b, t.c) as usize] as usize]).trim().len() == 0 {
+                return true;
+            }
+            return self.stop(EV_FFI, "inline assembly");
         }
         if op == O_CALL || op == O_CALLIND {
             return self.call(&f, b, t, dst);
