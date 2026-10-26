@@ -316,6 +316,9 @@ pub struct Package {
     /// Whether the build writes native objects for its modules (`SC_NATIVE` on a target the native backend
     /// supports, in a build whose link takes objects); set by `driver::emit::run_package`.
     pub native: bool,
+    /// Whether the LIR bodies go through the optimizer (`lir::opt`): the build's C flags optimize, or
+    /// SC_LIR_OPT is 1; set by `driver::emit::run_package`.
+    pub lir_opt: bool,
     /// Per module, in a native build: its function bodies render to C (`cemit::backends_of`). The others
     /// render no body: their native objects need none.
     pub nat_render: Vector<bool>,

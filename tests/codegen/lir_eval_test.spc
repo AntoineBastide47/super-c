@@ -8,11 +8,18 @@ import lir::print as lprint;
 import lir::parse as lparse;
 
 // The evaluator check over the tests whose name holds `filter`, built in scratch project `p` (the LIR
-// text into `<p>/pkg.lir` when `text`). Its tally: the tests, those compared with CTFE, those that
+// text into `<p>/pkg.lir` when `text`; optimized, `lir::opt`, when `opt`). Its tally: the tests, those compared with CTFE, those that
 // disagree, those CTFE does not finish checked against their expectation, those that fail it, those
 // that call FFI and those past a budget.
-fn eval_check(p: &cli::Proj, filter: str, text: bool) Vector<u64> {
+fn eval_check(p: &cli::Proj, filter: str, text: bool, opt: bool) Vector<u64> {
     let mut env = String::from_str("SC_LIR=1 SC_LIR_EVAL=1 SC_LIR_STATS=1");
+    env.push_str(
+        if opt {
+            " SC_LIR_OPT=1";
+        } else {
+            " SC_LIR_OPT=0";
+        },
+    );
     if text {
         env.format_into(" SC_LIR_TEXT={}/pkg.lir", p.dir());
     }
@@ -58,9 +65,13 @@ fn the_evaluator_agrees_with_ctfe_on_the_math_tests() {
         return;
     }
     let p = cli::proj_new();
-    let _ = eval_check(&p, "tests::math::", true);
-    // The build's LIR: it parses, each body verifies and takes its callees' signatures, and it prints
-    // back to the same text.
+    read_back(&p, false);
+}
+
+// The math tests' check (`eval_check`), optimized or not; then the build's LIR text parses, each body
+// verifies and takes its callees' signatures, and it prints back to the same text.
+fn read_back(p: &cli::Proj, opt: bool) {
+    let _ = eval_check(p, "tests::math::", true, opt);
     let text = cli::read_text(format("{}/pkg.lir", p.dir()).as_str());
     let mut err = String::new();
     let q = lparse::parse(text.as_str(), &mut err);
@@ -85,5 +96,16 @@ fn the_evaluator_agrees_with_ctfe_on_the_std_tests() {
         return;
     }
     let p = cli::proj_new();
-    let _ = eval_check(&p, "tests::stdlib::", false);
+    let _ = eval_check(&p, "tests::stdlib::", false, false);
+}
+
+// The optimizer (`lir::opt`, the inliner first) keeps the evaluator's results: the optimized LIR of the
+// math tests agrees with CTFE and reads back from its text (inlined call sites, `noinline`).
+@test(timeout = 300)
+fn the_optimized_lir_agrees_with_ctfe_on_the_math_tests() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    read_back(&p, true);
 }

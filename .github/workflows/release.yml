@@ -660,12 +660,12 @@ jobs:
           cd "$w"
           gen() {
             "$GITHUB_WORKSPACE/super-c" build --target=wasm --profile=release \
-              --transpiler="wasmtime run --dir=/ --argv0 $w/$1 -- $w/$1" -o "$2"
+              --transpiler="wasmtime run --dir=/ --env WASI_SDK_PATH=$WASI_SDK_PATH --argv0 $w/$1 -- $w/$1" -o "$2"
           }
           gen gen1.wasm gen2.wasm
           cp -R build/release/raw /tmp/wasm-gen1
           gen gen2.wasm gen3.wasm
-          diff -r --exclude=.tu_cache /tmp/wasm-gen1 build/release/raw
+          diff -r --exclude=.tu_cache --exclude=__sc_hfacts /tmp/wasm-gen1 build/release/raw
 
       - uses: ./.github/actions/cache-save
         with:

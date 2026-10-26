@@ -89,9 +89,12 @@ fn zeroize_of_a_dead_buffer_survives_release() {
     r.show();
     assert(r.ok(), "the program builds at the release profile");
     assert_eq(p.run_bin(), 6);
-    // Without a C compiler the build is native: no C to read.
+    // The C backend's emission keeps the volatile stores too.
     if cli::has_cc() {
-        let c = cli::read_text(format("{}/build/release/raw/std/mem/volatile.c", root).as_str());
+        let _c = cli::set_env("SC_NATIVE", "0");
+        let rc = cli::superc_in(root, "build --profile=release --out-dir=cbuild -o cbuild/cbin");
+        assert(rc.ok(), "the program builds through C at the release profile");
+        let c = cli::read_text(format("{}/cbuild/release/raw/std/mem/volatile.c", root).as_str());
         assert(c.as_str().contains("(*(uint8_t volatile *)("), "the emitted C keeps the volatile byte stores");
         assert(c.as_str().contains("(*(size_t volatile *)("), "the emitted C keeps the volatile word stores");
     }

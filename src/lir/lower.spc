@@ -4301,10 +4301,9 @@ extend Lower {
             return self.arith(O_AND, f1, f2);
         }
         if k == irc::IN_BOUNDS_GROUP {
+            // `index > len`, then `width > len - index` where it does not wrap: one branch each, to one
+            // failure block.
             let f1 = self.icmp(C_UGT, v[0], v[1]);
-            let room = self.arith(O_SUB, v[1], v[0]);
-            let f2 = self.icmp(C_UGT, v[2], room);
-            let f = self.arith(O_OR, f1, f2);
             if rv.item.node == irc::CHECK_VEC {
                 // A vector load or store: the trap names the lanes, the start and the length (`u64` parameters).
                 let tys: [u32; 3] = [T_I64 as u32, T_I64 as u32, T_I64 as u32];
@@ -4313,17 +4312,36 @@ extend Lower {
                     self.int_to(v[0], T_I64, false),
                     self.int_to(v[1], T_I64, false),
                 ];
-                self.trap_call(f, "__sc_vec_bounds", args[0..3], tys[0..3]);
+                let pb = self.cold_block();
+                let b2 = self.block();
+                let e1 = self.edge(pb, NONE, NONE);
+                let e2 = self.edge(b2, NONE, NONE);
+                let _ = self.inst(O_BR, T_NONE, 0, f1, e1, e2);
+                self.b.begin(pb);
+                let _ = self.call_sym("__sc_vec_bounds", args[0..3], tys[0..3], T_NONE);
+                let _ = self.inst(O_UNREACHABLE, T_NONE, 0, VNONE, VNONE, VNONE);
+                self.b.begin(b2);
+                let room = self.arith(O_SUB, v[1], v[0]);
+                let f2 = self.icmp(C_UGT, v[2], room);
+                let next = self.block();
+                let e3 = self.edge(pb, NONE, NONE);
+                let e4 = self.edge(next, NONE, NONE);
+                let _ = self.inst(O_BR, T_NONE, 0, f2, e3, e4);
+                self.b.begin(next);
             } else {
-                self.check(f, "index out of bounds");
+                self.check(f1, "index out of bounds");
+                let room = self.arith(O_SUB, v[1], v[0]);
+                let f2 = self.icmp(C_UGT, v[2], room);
+                self.check(f2, "index out of bounds");
             }
             return self.int_to(v[0], ti.mty, false);
         }
         if k == irc::IN_RANGE_BOUNDS {
+            // One branch per bound, to one panic block.
             let f1 = self.icmp(C_UGT, v[0], v[1]);
+            self.check(f1, "range out of bounds");
             let f2 = self.icmp(C_UGT, v[1], v[2]);
-            let f = self.arith(O_OR, f1, f2);
-            self.check(f, "range out of bounds");
+            self.check(f2, "range out of bounds");
             return self.int_to(v[1], ti.mty, false);
         }
         if k == irc::IN_RANGE_BOUNDS_PROVEN {
@@ -4379,11 +4397,23 @@ extend Lower {
         return self.inst(O_SYMADDR, T_PTR, 0, k, 0, VNONE);
     }
 
+    // The address of a vector of type `vt` at element `start` of the slice view at `view`; pointer `view`
+    // itself when `raw`.
+    fn vaddr(self: &mut Self, view: Value, start: Value, vt: u8, raw: bool) Value {
+        if raw {
+            return view;
+        }
+        let p = self.load(T_PTR, view, 0, false);
+        return self.ptradd(p, start, type_bytes(lane_type(vt), self.pkg.ptr_bytes), 0);
+    }
+
     // A vector operation (`RV_SIMD`): its operands as values (a view or an array in memory by its
     // address), its index list in the pool. A store has no result; `dst` takes a memory result.
     fn simd(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, rv: irc::Rvalue, ti: TyI, dst: Value) Value {
         let mut args = Vector::<Value>::new();
         let mut signed = false;
+        let mut mem_arg = false;
+        let mut last_mem = false;
         for i in 0..rv.b {
             let opid = b.oper_pool[(rv.a + i) as usize];
             let t = Lower::op_ty(b, opid);
@@ -4394,6 +4424,8 @@ extend Lower {
             if i == 0 {
                 signed = Lower::signed(c, b.module, t);
             }
+            mem_arg = mem_arg || oi.cls == VC_MEM;
+            last_mem = oi.cls == VC_MEM;
             let v = if oi.cls == VC_MEM {
                 self.operand_addr(c, b, opid, oi);
             } else {
@@ -4431,6 +4463,29 @@ extend Lower {
             0,
         );
         let rt = ast::pick(ti.cls == VC_SCALAR, ti.mty, T_NONE);
+        // A load or store of a whole vector (its bounds checked before): the slice's pointer, then a plain
+        // access of no alignment, which the optimizer forwards and hoists like any other.
+        let raw = rv.c == irc::SIMD_LOAD_RAW || rv.c == irc::SIMD_STORE_RAW;
+        if (rv.c == irc::SIMD_LOAD || rv.c == irc::SIMD_LOAD_RAW) && ti.cls == VC_SCALAR && is_vec(ti.mty) {
+            let st = ast::pick(raw, VNONE, args[args.len() - 1]);
+            return self.load(ti.mty, self.vaddr(args[0], st, ti.mty, raw), 0, true);
+        }
+        if (rv.c == irc::SIMD_STORE || raw) && !last_mem {
+            let v = args[args.len() - 1];
+            let st = ast::pick(raw, VNONE, args[1]);
+            let (a, o) = self.fold_addr(self.vaddr(args[0], st, self.vty(v), raw), 0);
+            return self.inst(O_STORE, T_NONE, 0, a, v, o);
+        }
+        // An operation one backend entry computes whole calls it (`CEmit::lir_simd_entry`): its intrinsics
+        // in place of the lane loop, which the inliner then splices.
+        let mut ename = String::new();
+        if ti.cls == VC_SCALAR && !mem_arg && c.lir_simd_entry(b, &rv, &mut ename) {
+            let mut tys = Vector::<u32>::with_capacity(args.len());
+            for i in 0..args.len() {
+                tys.push(self.vty(args[i]));
+            }
+            return self.call_sym(ename.as_str(), args[0..args.len()], tys[0..tys.len()], ti.mty);
+        }
         if ti.cls == VC_MEM {
             args.push(dst);
         }
@@ -6145,10 +6200,11 @@ extend Lower {
                     return self.fail("callee-sym");
                 }
                 // An intrinsic the backend expands is a call of its name (`target::intrin`).
-                if Lower::p(c).c_fns.contains(&(t.callee.module as u64 << 32 | t.callee.node as u64)) && intrin::find(
-                    tgt::isa(Lower::p(c).arch).name,
+                let isa = tgt::isa(Lower::p(c).arch).name;
+                if Lower::p(c).c_fns.contains(&(t.callee.module as u64 << 32 | t.callee.node as u64)) && !intrin::has(
+                    isa,
                     name.as_str(),
-                ).len() == 0 {
+                ) && intrin::lane_form(isa, name.as_str()) == 0 {
                     self.pend_c = "calls a function only a C compile defines (an intrinsic, a header's `static` one)";
                     self.pend_name = name.clone();
                 }
@@ -6290,8 +6346,15 @@ extend Lower {
             }
         }
         let mut r = VNONE;
-        if fv != VNONE || !self.rt_prim(name.as_str(), &args, &mut r) {
-            r = self.emit_call(name.as_str(), fv, &args, &tys, nfixed, variadic, ti, c, b.module, dty, dst);
+        let nm = name.as_str();
+        if fv != VNONE || !self.rt_prim(nm, &args, &mut r) && !self.mem_intrin(c, nm, &args, &tys, ti, &mut r) && !self.lanes_intrin(
+            c,
+            nm,
+            &args,
+            ti,
+            &mut r,
+        ) {
+            r = self.emit_call(nm, fv, &args, &tys, nfixed, variadic, ti, c, b.module, dty, dst);
         }
         if t.dests_len == 1 && ti.cls == VC_SCALAR {
             let mut p = PlaceRef { kind: 0 };
@@ -6302,6 +6365,120 @@ extend Lower {
             self.memcpy(dplace.addr, r, ti.size);
         }
         self.after_call(t);
+        return true;
+    }
+
+    // An intrinsic that only loads or stores one vector (`intrin::mem_form`) as that load or store, with
+    // no alignment; one of no instruction as its argument's bytes (a bitcast, else through a slot: a low
+    // part, or a wider value whose other bytes are zero; an argument through memory, `tys` its signature
+    // type, is read from its bytes): true, with the value in `out` (VNONE for a store), when `name` is one.
+    fn mem_intrin(
+        self: &mut Self,
+        c: &cbe::CEmit,
+        name: str,
+        a: &Vector<Value>,
+        tys: &Vector<u32>,
+        ti: TyI,
+        out: &mut Value,
+    ) bool {
+        *out = VNONE;
+        let isa = tgt::isa(Lower::p(c).arch).name;
+        if !intrin::has(isa, name) {
+            return false;
+        }
+        if intrin::find(isa, name).len() == 0 && a.len() == 1 && ti.cls == VC_SCALAR && (tys[0] & AGG) != 0 {
+            // The argument's address: its low bytes, the rest of a wider result zero.
+            let asz = self.b.pool[(tys[0] & ~AGG) as usize];
+            let tb = type_bytes(ti.mty, self.pkg.ptr_bytes);
+            if tb <= asz {
+                *out = self.load(ti.mty, a[0], 0, false);
+            } else {
+                let s = self.temp(TyI { cls: VC_MEM, mty: T_NONE, size: tb, align: 16 });
+                self.store(self.zero(ti.mty), s, 0, false);
+                self.memcpy(s, a[0], asz);
+                *out = self.load(ti.mty, s, 0, false);
+            }
+            return true;
+        }
+        if intrin::find(isa, name).len() == 0 && a.len() == 1 && ti.cls == VC_SCALAR {
+            let from = self.vty(a[0]);
+            let fb = type_bytes(from, self.pkg.ptr_bytes);
+            let tb = type_bytes(ti.mty, self.pkg.ptr_bytes);
+            if from == ti.mty {
+                *out = a[0];
+            } else if fb == tb {
+                *out = self.inst(O_BITCAST, ti.mty, 0, a[0], VNONE, VNONE);
+            } else {
+                let big = ast::pick(fb > tb, from, ti.mty);
+                let s = self.temp(
+                    TyI { cls: VC_MEM, mty: T_NONE, size: type_bytes(big, self.pkg.ptr_bytes), align: 16 },
+                );
+                if tb > fb {
+                    self.store(self.zero(ti.mty), s, 0, false);
+                }
+                self.store(a[0], s, 0, false);
+                *out = self.load(ti.mty, s, 0, false);
+            }
+            return true;
+        }
+        let f = intrin::mem_form(name);
+        if f == intrin::MF_LOAD && a.len() == 1 && ti.cls == VC_SCALAR && is_vec(ti.mty) {
+            *out = self.load(ti.mty, a[0], 0, true);
+            return true;
+        }
+        if f == intrin::MF_STORE && a.len() == 2 && is_vec(self.vty(a[1])) {
+            self.store(a[1], a[0], 0, true);
+            return true;
+        }
+        return false;
+    }
+
+    // An x86 vector of the lanes its scalar arguments give (`intrin::lane_form`): one of constant lanes
+    // loaded from read-only data, as a C compiler does, else stored lane by lane and loaded. True, with the
+    // vector in `out`, when `name` is one.
+    fn lanes_intrin(self: &mut Self, c: &cbe::CEmit, name: str, a: &Vector<Value>, ti: TyI, out: &mut Value) bool {
+        if ti.cls != VC_SCALAR || !is_vec(ti.mty) {
+            return false;
+        }
+        let lb = intrin::lane_form(tgt::isa(Lower::p(c).arch).name, name);
+        let n = a.len();
+        if lb == 0 || n as u32 * lb != ti.size {
+            return false;
+        }
+        let lt = switch lb {
+            1 => T_I8,
+            2 => T_I16,
+            4 => T_I32,
+            _ => T_I64,
+        };
+        let mut konst = true;
+        for k in 0..n {
+            konst = konst && (a[k] & (VPARAM | VFLAG)) == 0 && self.b.insts[a[k] as usize].op == O_ICONST;
+        }
+        if konst {
+            let mut bytes = String::new();
+            for j in 0..n {
+                let d = self.b.insts[a[j] as usize];
+                let u = d.b as u64 << 32 | d.a as u64;
+                for q in 0..lb {
+                    bytes.push_byte((u >> 8 * q) as u8);
+                }
+            }
+            let s = self.rodata(&mut bytes);
+            let k = self.sym_of(s);
+            let at = self.inst(O_SYMADDR, T_PTR, 0, k, 0, VNONE);
+            *out = self.load(ti.mty, at, 0, true);
+            return true;
+        }
+        let s = self.temp(TyI { cls: VC_MEM, mty: T_NONE, size: ti.size, align: ti.align });
+        for j in 0..n {
+            let mut v = a[j];
+            if self.vty(v) != lt {
+                v = self.inst(O_TRUNC, lt, 0, v, VNONE, VNONE);
+            }
+            self.store(v, s, j as u32 * lb, false);
+        }
+        *out = self.load(ti.mty, s, 0, false);
         return true;
     }
 
@@ -6935,6 +7112,9 @@ extend Lower {
             self.pkg.set_section(s, spec);
         } else if a.attr_of(n, AttrKind::ATTR_USED) != null {
             self.pkg.syms.index_mut(s as usize).used = true;
+        }
+        if a.attr_of(n, AttrKind::ATTR_NOINLINE) != null {
+            self.pkg.syms.index_mut(s as usize).noinline = true;
         }
     }
 

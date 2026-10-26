@@ -1468,7 +1468,7 @@ extend tc::TypeChecker {
                 let ca = self.mod_ast(bl.item.module);
                 if unsafe (*ca).at_const(bl.item.node).kind == NodeKind::NODE_CONST {
                     let cd = unsafe (*ca).at_const(bl.item.node).as_data.const_def;
-                    if !cd.is_static_mut && !cd.is_extern && self.tc_type_is_free(pl.ty) {
+                    if !cd.is_static_mut && !cd.is_extern && self.tc_value_owns(pl.ty) {
                         self.bc_ir_push(
                             out,
                             seen,
@@ -1480,7 +1480,7 @@ extend tc::TypeChecker {
                 }
                 return;
             }
-            if pl.base >= cap_lo && pl.base < cap_hi && self.tc_type_is_free(pl.ty) {
+            if pl.base >= cap_lo && pl.base < cap_hi && self.tc_value_owns(pl.ty) {
                 self.bc_ir_push(
                     out,
                     seen,
@@ -1491,8 +1491,9 @@ extend tc::TypeChecker {
             }
             return;
         }
-        // The walk's own predicate (memoized), so generic bodies answer exactly as the walk does.
-        if !self.tc_type_is_free(pl.ty) {
+        // The walk's own predicate (memoized), so generic bodies answer exactly as the walk does. A
+        // pointer or a reference owns nothing: moving one copies a handle.
+        if !self.tc_value_owns(pl.ty) {
             return;
         }
         // The statement span CONTAINS any unsafe-expression span inside it, so licensing is by
@@ -1541,12 +1542,6 @@ extend tc::TypeChecker {
         }
         if bk == TypeKind::TYPE_POINTER {
             // Raw pointers are the unsafe world's escape hatch.
-            return;
-        }
-        // Pointer-typed fields are HANDLES (raw pointers are borrows by rule): copying one out of
-        // borrowed or owned content escapes no ownership.
-        let mk = self.type_at(pl.ty).kind;
-        if mk == TypeKind::TYPE_POINTER || mk == TypeKind::TYPE_REFERENCE {
             return;
         }
         let has_deref = body.place_has_deref(op.data);

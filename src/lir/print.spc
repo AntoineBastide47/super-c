@@ -42,6 +42,9 @@ pub fn print_package(p: &Package, out: &mut String) {
         if s.used {
             out.push_str(" used");
         }
+        if s.noinline {
+            out.push_str(" noinline");
+        }
         if s.ext {
             out.push_str(" ext");
         }
@@ -499,13 +502,24 @@ extend Printer {
         }
         let l = b.lines[b.locs[i as usize] as usize];
         if l.line != 0 {
-            if l.file == self.file {
-                out.format_into(" !{}:{}", l.line, l.col);
-            } else {
-                out.format_into(" !f{}:{}:{}", l.file, l.line, l.col);
+            out.push_str(" !");
+            self.loc(l, out);
+            // The call it was inlined from.
+            if b.inl.len() != 0 && b.inl[i as usize] != 0 {
+                out.push_byte(b'@');
+                self.loc(b.lines[b.inl[i as usize] as usize], out);
             }
         }
         out.push_byte(b'\n');
+    }
+
+    // Location `l`: its file when not the body's, its line and column.
+    fn loc(self: &Self, l: Loc, out: &mut String) {
+        if l.file == self.file {
+            out.format_into("{}:{}", l.line, l.col);
+        } else {
+            out.format_into("f{}:{}:{}", l.file, l.line, l.col);
+        }
     }
 
     // The alignment and volatility of a load or store, the order of an atomic one.

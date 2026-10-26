@@ -145,7 +145,9 @@ def body_lines(asm):
             if st.startswith('.'):
                 out.append('!' + st)
                 continue
-            if st in ('ret', 'retq'):
+            # The wrapper's `vzeroupper` before its return: inline, it would clear the vectors live across
+            # the call.
+            if st in ('ret', 'retq', 'vzeroupper'):
                 continue
             out.append(canon(stack_args(re.sub(r'\s+', ' ', st))))
         else:

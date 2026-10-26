@@ -51,7 +51,8 @@ runs:
         chmod +x "./super-c$x" "./super-c-boot$x"
 
         # Both counts compilers sit two levels under the checkout, so both find this commit's std and ffi.
-        "./super-c$x" build --profile=counts --cc="$cc" ${cstd:+"$cstd"} -o "build/counts/super-c-counts$x"
+        # The counters are the C compiler's: both counted builds go through C.
+        SC_NATIVE=0 "./super-c$x" build --profile=counts --cc="$cc" ${cstd:+"$cstd"} -o "build/counts/super-c-counts$x"
         git fetch -q --depth=1 origin "refs/tags/$BASE_TAG:refs/tags/$BASE_TAG"
         base="$RUNNER_TEMP/counts-base"
         rm -rf "$base" && mkdir -p "$base"
@@ -61,7 +62,7 @@ runs:
           { echo; awk '/^\[/ { p = ($0 == "[profile.counts]") } p' build.toml; } >> "$base/build.toml"
         fi
         cp "super-c-boot$x" "$base/"
-        ( cd "$base" && "./super-c-boot$x" build --profile=counts --cc="$cc" ${cstd:+"$cstd"} -o "build/counts/super-c-counts$x" )
+        ( cd "$base" && SC_NATIVE=0 "./super-c-boot$x" build --profile=counts --cc="$cc" ${cstd:+"$cstd"} -o "build/counts/super-c-counts$x" )
         mkdir -p build/counts-base
         cp "$base/build/counts/super-c-counts$x" "build/counts-base/super-c-counts$x"
 

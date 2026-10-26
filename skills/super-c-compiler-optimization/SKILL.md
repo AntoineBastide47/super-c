@@ -9,7 +9,7 @@ allowed-tools: Bash Read
 ## Agent checklist
 
 - Profile the release or bench binary before selecting a target.
-- Check the LTO profile before keeping a micro-optimization.
+- Check the build's optimizer (native `lir::opt`, or C with LTO) before keeping a micro-optimization.
 - Measure the serial benchmark in interleaved A/B runs.
 - Verify byte-identical self-hosting output after structural changes.
 
@@ -26,13 +26,17 @@ Before any optimization work, understand these non-negotiable constraints:
    diff. A non-empty diff is a semantic regression. See
    [fixpoint.md](references/fixpoint.md) for the verification protocol.
 
-2. **LTO gate.** Gate LTO first. Do not keep a micro-optimization that LTO already
-   performs: at `-O3` with LTO (the `release` and `bench` profiles use `lto = "auto"`,
-   which Clang runs as full LTO, see the binary skill), Clang inlines hot calls across
-   modules, CSEs `strlen` of literals, and lowers fixed-size `memcmp` to branchless
-   compares. Under opt-in ThinLTO (`lto = "thin"`) cross-module inlining is import-based,
-   so a hot cross-module call is not always inlined. Check the LTO profile
-   checkpoint before implementing. If a target shows ~0 samples under LTO, the
+2. **Optimizer gate.** Know which optimizer built the binary, and do not keep a
+   micro-optimization it already performs. The `release` and `bench` profiles build
+   natively: the LIR optimizer (`lir::opt`, super-c-compiler-internals, "LIR") inlines
+   small bodies across modules, numbers values, forwards loads and stores, promotes the
+   loads of private memory one store writes, moves invariant code out of loops and folds
+   constants and branches; it does not lower fixed-size `memcmp` or forward copies
+   between slots. With `SC_NATIVE=0` they build through C at `-O3` with LTO (`lto =
+   "auto"`, which Clang runs as full LTO, see the binary skill): Clang inlines hot calls
+   across modules, CSEs `strlen` of literals, and lowers fixed-size `memcmp` to
+   branchless compares; under opt-in ThinLTO (`lto = "thin"`) cross-module inlining is
+   import-based. If a target shows ~0 samples under the build's optimizer, the
    optimization will not produce a corpus-level win.
 
 3. **Benchmark protocol.** Measure with `super-c bench --filter=self_transpile`
@@ -503,8 +507,9 @@ Revert changes that:
 - **"The benchmark is too small to show a difference."** The self-transpile benchmark
   corpus is the ground truth. Inspect its current size from `bench/` before judging a
   corpus-scale result.
-- **"LTO will fix it."** Check. Run the LTO profile. If LTO already optimizes the site,
-  your change is dead weight.
+- **"The optimizer will fix it."** Check. Profile the build the change targets (native
+  release, or `SC_NATIVE=0` with LTO). If its optimizer already optimizes the site, your
+  change is dead weight.
 - **"I'll add parallelism to make it faster."** Serial optimization first. The serial
   reference pipeline must be fast on its own.
 - **"Allocations don't matter, the allocator is fast."** Every allocation is a cache

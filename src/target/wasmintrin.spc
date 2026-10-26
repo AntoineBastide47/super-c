@@ -4,7 +4,7 @@
 // `tests/codegen/asm_test.spc` checks each assembles to clang's bytes.
 
 /// The rows, by name: the intrinsic and its instructions.
-pub const ROWS: [(str<'static>, str<'static>); 224] = [
+pub const ROWS: [(str<'static>, str<'static>); 226] = [
     ("wasm_f32x4_abs", "local.get 0\nf32x4.abs"),
     ("wasm_f32x4_add", "local.get 0\nlocal.get 1\nf32x4.add"),
     ("wasm_f32x4_ceil", "local.get 0\nf32x4.ceil"),
@@ -87,6 +87,10 @@ pub const ROWS: [(str<'static>, str<'static>); 224] = [
     ("wasm_i16x8_q15mulr_sat", "local.get 0\nlocal.get 1\ni16x8.q15mulr_sat_s"),
     ("wasm_i16x8_shl", "local.get 0\nlocal.get 1\ni16x8.shl"),
     ("wasm_i16x8_shr", "local.get 0\nlocal.get 1\ni16x8.shr_s"),
+    (
+        "wasm_i16x8_shuffle",
+        "local.get 0\nlocal.get 1\ni8x16.shuffle @(2*2+0), @(2*2+1), @(3*2+0), @(3*2+1), @(4*2+0), @(4*2+1), @(5*2+0), @(5*2+1), @(6*2+0), @(6*2+1), @(7*2+0), @(7*2+1), @(8*2+0), @(8*2+1), @(9*2+0), @(9*2+1)"
+    ),
     ("wasm_i16x8_splat", "local.get 0\ni16x8.splat"),
     ("wasm_i16x8_sub", "local.get 0\nlocal.get 1\ni16x8.sub"),
     ("wasm_i16x8_sub_sat", "local.get 0\nlocal.get 1\ni16x8.sub_sat_s"),
@@ -170,6 +174,10 @@ pub const ROWS: [(str<'static>, str<'static>); 224] = [
     ("wasm_i8x16_relaxed_swizzle", "local.get 0\nlocal.get 1\ni8x16.relaxed_swizzle"),
     ("wasm_i8x16_shl", "local.get 0\nlocal.get 1\ni8x16.shl"),
     ("wasm_i8x16_shr", "local.get 0\nlocal.get 1\ni8x16.shr_s"),
+    (
+        "wasm_i8x16_shuffle",
+        "local.get 0\nlocal.get 1\ni8x16.shuffle @2, @3, @4, @5, @6, @7, @8, @9, @10, @11, @12, @13, @14, @15, @16, @17"
+    ),
     ("wasm_i8x16_sub", "local.get 0\nlocal.get 1\ni8x16.sub"),
     ("wasm_i8x16_sub_sat", "local.get 0\nlocal.get 1\ni8x16.sub_sat_s"),
     ("wasm_i8x16_swizzle", "local.get 0\nlocal.get 1\ni8x16.swizzle"),
@@ -241,7 +249,7 @@ pub const ROWS: [(str<'static>, str<'static>); 224] = [
 ];
 
 /// Per row: the wasm signature of a function of the intrinsic's arguments and result.
-pub const SIGS: [str<'static>; 224] = [
+pub const SIGS: [str<'static>; 226] = [
     "(v128) -> (v128)",
     "(v128, v128) -> (v128)",
     "(v128) -> (v128)",
@@ -324,6 +332,7 @@ pub const SIGS: [str<'static>; 224] = [
     "(v128, v128) -> (v128)",
     "(v128, i32) -> (v128)",
     "(v128, i32) -> (v128)",
+    "(v128, v128, i32, i32, i32, i32, i32, i32, i32, i32) -> (v128)",
     "(i32) -> (v128)",
     "(v128, v128) -> (v128)",
     "(v128, v128) -> (v128)",
@@ -398,6 +407,7 @@ pub const SIGS: [str<'static>; 224] = [
     "(v128, v128) -> (v128)",
     "(v128, i32) -> (v128)",
     "(v128, i32) -> (v128)",
+    "(v128, v128, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32) -> (v128)",
     "(v128, v128) -> (v128)",
     "(v128, v128) -> (v128)",
     "(v128, v128) -> (v128)",

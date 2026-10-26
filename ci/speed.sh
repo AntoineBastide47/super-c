@@ -90,7 +90,8 @@ row "compiler binary bytes" "$(size_of "build/speed-native/sc$x")" "$(size_of "b
 # The transpile count of each pipeline, by a counted build of the compiler under test.
 if [ -n "${CC_COUNTS:-}" ] && [ -n "${PROFDATA:-}" ]; then
   py=$(command -v python3 || command -v python)
-  "./super-c$x" build --profile=counts --cc="$CC_COUNTS" ${cstd:+"$cstd"} -o "build/counts/super-c-counts$x" > "$w/counts-build.txt" 2>&1 || {
+  # The counters are the C compiler's: the counted build goes through C.
+  SC_NATIVE=0 "./super-c$x" build --profile=counts --cc="$CC_COUNTS" ${cstd:+"$cstd"} -o "build/counts/super-c-counts$x" > "$w/counts-build.txt" 2>&1 || {
     cat "$w/counts-build.txt"
     echo "::error::the counted compiler did not build"
     exit 1

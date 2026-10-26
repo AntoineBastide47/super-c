@@ -506,8 +506,10 @@ fn macho_syms<'a>(b: Slice<'a, u8>, out: &mut Vector<str<'a>>) bool {
             for k in 0..n {
                 let e = so + 16 * k;
                 let ty = b[e + 4];
-                // External, not private, defined (in a section or absolute), no debug entry.
-                if (ty & 0xE0) == 0 && (ty & 0x01) != 0 && (ty & 0x10) == 0 && (ty & 0x0E) != 0 {
+                // External, not private, defined (in a section or absolute) or common (undefined with a
+                // size), no debug entry.
+                let common = (ty & 0x0E) == 0 && lu::r64(b, e + 8) != 0;
+                if (ty & 0xE0) == 0 && (ty & 0x01) != 0 && (ty & 0x10) == 0 && ((ty & 0x0E) != 0 || common) {
                     out.push(lu::cstr(b, st + lu::r32(b, e) as usize));
                 }
             }
@@ -564,7 +566,8 @@ fn coff_syms<'a>(b: Slice<'a, u8>, out: &mut Vector<str<'a>>) bool {
     while k < nsym {
         let e = symtab + 18 * k;
         let sec = lu::r16(b, e + 12) as i16;
-        if b[e + 16] == 2 && sec != 0 || b[e + 16] == 105 {
+        // A common definition (no section, a size) counts, as GNU ld and LLD take its member.
+        if b[e + 16] == 2 && (sec != 0 || lu::r32(b, e + 8) != 0) || b[e + 16] == 105 {
             if lu::r32(b, e) == 0 {
                 out.push(lu::cstr(b, strtab + lu::r32(b, e + 4) as usize));
             } else {

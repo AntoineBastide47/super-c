@@ -512,6 +512,8 @@ pub struct Sym {
     pub sect: u32,
     /// The linker keeps it though nothing refers to it (`@used`, a named section).
     pub used: bool,
+    /// A function the optimizer never inlines (`@noinline`).
+    pub noinline: bool,
     /// Defined by its unit's own items, not added by the build (an instance, glue, data): a cached
     /// emission of the unit holds it. The text form does not carry it.
     pub own: bool,
@@ -566,6 +568,9 @@ pub struct Body {
     pub syms: Vector<u32>,
     pub msgs: Vector<u32>,
     pub lines: Vector<Loc>, // entry 0 is "no location"
+    /// Per instruction, the `lines` index of the call in this body it was inlined from (the outermost
+    /// one), 0 for the body's own instruction; empty when nothing was inlined.
+    pub inl: Vector<u32>,
     pub sig: u32, // the body's own signature (pool); NONE until set
     /// A naked function (`@unsafe(naked)`): its machine code is its `O_ASM` templates alone, in order,
     /// without a prologue or an epilogue.
@@ -601,6 +606,7 @@ extend Body {
             syms: Vector::<u32>::new(),
             msgs: Vector::<u32>::new(),
             lines: Vector::<Loc>::new(),
+            inl: Vector::<u32>::new(),
             sig: NONE,
             naked: false,
             cur: 0,
@@ -621,6 +627,7 @@ extend Body {
         self.syms.truncate(0);
         self.msgs.truncate(0);
         self.lines.truncate(1);
+        self.inl.truncate(0);
         self.sig = NONE;
         self.naked = false;
         self.cur = 0;
@@ -639,6 +646,7 @@ extend Body {
             syms: exact(&self.syms),
             msgs: exact(&self.msgs),
             lines: exact(&self.lines),
+            inl: exact(&self.inl),
             sig: self.sig,
             naked: self.naked,
             cur: 0,
@@ -942,6 +950,7 @@ extend Package {
                 unit: NONE,
                 sect: NONE,
                 used: false,
+                noinline: false,
                 own: false,
                 ext: false,
             },
@@ -1061,6 +1070,7 @@ extend Package {
             self.syms.index_mut(s as usize).linkage = os.linkage;
             self.syms.index_mut(s as usize).unit = os.unit;
             self.syms.index_mut(s as usize).used = os.used;
+            self.syms.index_mut(s as usize).noinline = os.noinline;
             self.syms.index_mut(s as usize).own = os.own;
             if os.sect != NONE {
                 self.syms.index_mut(s as usize).sect = self.name(other.spell(os.sect));

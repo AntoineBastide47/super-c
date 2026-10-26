@@ -39,6 +39,7 @@ import lir::lower as lw;
 import lir::ir as lir_ir;
 import lir::print as lprint;
 import lir::parse as lparse;
+import lir::opt as lopt;
 import target::native as nat;
 import bindgen::bindgen as bg;
 import bindgen::ctarget as ct;
@@ -6250,6 +6251,18 @@ pub fn cemit_package(
     }
     prd.merge(&dow.pr);
     prd.merge(&cem.pr);
+    // An optimizing build optimizes the finished LIR: every constant's data is defined by now.
+    if p.lir_opt && p.ok && cem.lir.is_some() {
+        let mut l = replace(&mut cem.lir, Option::<Box<lw::Lower>>::None).unwrap();
+        // A module's own assembly may give its symbols what a reference elsewhere cannot carry (a wasm
+        // import module): its bodies stay in its object.
+        let mut sealed = Vector::<bool>::with_capacity(p.modules.len());
+        for m in 0..p.modules.len() {
+            sealed.push(module_has_asm(p, m));
+        }
+        lopt::optimize(&mut l.deref_mut().pkg, p.jobs, &sealed);
+        cem.lir_put(l);
+    }
     // The LIR check of the bodies this build rendered (a refused one fails the build already). A module
     // the per-TU cache replayed passed it in the build that recorded it: SC_LIR is part of the key.
     if cem.lir.is_some() && p.ok && cem.refused.len() == 0 && stdlib::getenv("SC_LIR") != null {
@@ -11573,8 +11586,9 @@ fn nat_trust(p: &loader::Package, t: &mut tuc::Tuc) {
     }
 }
 
-// The key of module `m`'s own object: its emission cache key (`keys`) and what the native code reads
-// beyond the C text: the build configuration, the CPU features, the C headers' constants, the functions
+// The key of module `m`'s own object: its emission cache key (`keys`, which covers the bodies the LIR
+// inliner can copy: its imports') and what the native code reads beyond the C text: the build
+// configuration, the CPU features, the LIR optimizer's switches, the C headers' constants, the functions
 // only C defines, and with debug information the directory its file names are relative to.
 fn nat_key(p: &loader::Package, keys: &Vector<u64>, m: usize) u64 {
     let mut h = keys[m] ^ p.build_cfg as u64 << 40 ^ p.features.w[0].wrapping_mul(0x9E3779B97F4A7C15) ^ p.features.w[1];
@@ -11582,8 +11596,14 @@ fn nat_key(p: &loader::Package, keys: &Vector<u64>, m: usize) u64 {
     if cbe::debug_flag(p.cflags.as_str()) {
         h = h ^ (fnv(process::current_dir().unwrap_or(String::new()).as_str()) | 1).wrapping_mul(0xC4CEB9FE1A85EC53);
     }
-    // The modules SC_NATIVE names.
+    // The modules SC_NATIVE names, and whether the LIR optimizer runs, inlines and promotes.
     h = h ^ fnv(stdlib::get_env("SC_NATIVE").unwrap_or(String::from_str("1")).as_str()).wrapping_mul(0xFF51AFD7ED558CCD);
+    h = h ^ p.lir_opt as u64 << 47 ^ fnv(stdlib::get_env("SC_LIR_INLINE").unwrap_or(String::from_str("1")).as_str()).wrapping_mul(
+        0x94D049BB133111EB,
+    );
+    h = h ^ fnv(stdlib::get_env("SC_LIR_PROMOTE").unwrap_or(String::from_str("1")).as_str()).wrapping_mul(
+        0xD6E8FEB86659FD93,
+    );
     let mut ci = p.c_fns.iter();
     loop {
         switch ci.next() {
@@ -14044,9 +14064,9 @@ pub fn run_package(
     let tstat = stdlib::getenv("SC_CEMIT_STATS") != null;
     let mut tp0 = ticks_ms();
     // Only a link takes the native objects (a build system's, a script's or the test runner's): an
-    // emission alone writes C. An unoptimized build without sanitizers takes them where the target has a
-    // native backend, and so does any build where the C compiler is not installed; SC_NATIVE overrides:
-    // 0 for none, 1 for every module, else a list of modules.
+    // emission alone writes C. A build without sanitizers takes them where the target has a native
+    // backend (an optimizing one through `lir::opt`), and so does any build where the C compiler is not
+    // installed; SC_NATIVE overrides: 0 for none, 1 for every module, else a list of modules.
     let links = sink != null || out_bin.len() != 0 || topts != null && unsafe (*topts).enabled;
     let sel = stdlib::get_env("SC_NATIVE");
     let fl = if p.cflags.len() != 0 {
@@ -14057,9 +14077,15 @@ pub fn run_package(
     let wanted = if sel.is_some() {
         sel.unwrap().as_str() != "0";
     } else {
-        bman::unoptimized(fl) && (p.build_cfg & 3) == 0 && !p.mem_check || !cc_installed(p, target);
+        (p.build_cfg & 3) == 0 && !p.mem_check || !cc_installed(p, target);
     };
     p.native = links && wanted && nat::supported(target, p.arch);
+    let so = stdlib::get_env("SC_LIR_OPT");
+    p.lir_opt = if so.is_some() {
+        so.unwrap().as_str() == "1";
+    } else {
+        !bman::unoptimized(fl);
+    };
     syntax_stats_report(p, "parse");
     p.platform_filter(target);
     // No module parses after the load: the token recycling buffer has no next user.
