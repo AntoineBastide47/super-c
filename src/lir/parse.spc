@@ -294,30 +294,51 @@ extend<'a> Parser<'a> {
 
     // The end of the line: an optional location, then nothing but a comment.
     fn line_end_loc(self: &mut Self, loc: &mut Loc) bool {
+        let mut site = Loc { file: 0, line: 0, col: 0 };
+        return self.line_end_site(loc, &mut site, false);
+    }
+
+    // `line_end_loc`, where an instruction's location may name the call it was inlined from after an '@'
+    // (`site`, when `inst`).
+    fn line_end_site(self: &mut Self, loc: &mut Loc, site: &mut Loc, inst: bool) bool {
         self.skip_spaces();
         if self.peek() == b'!' {
             self.at += 1;
-            let mut f = self.file;
-            if self.peek() == b'f' {
-                if !self.numbered(b'f', &mut f) || !self.expect(b':', "expected ':' after the file") {
-                    return false;
-                }
-                if f as usize >= self.pkg.files.len() {
-                    return self.fail("no such file");
-                }
-            }
-            let mut l: u32 = 0;
-            let mut c: u32 = 0;
-            if !self.uint(&mut l) || !self.expect(b':', "expected ':' between line and column") || !self.uint(&mut c) {
+            if !self.loc_text(loc) {
                 return false;
             }
-            if l == 0 {
-                return self.fail("a line is 1 or more");
+            if inst && self.peek() == b'@' {
+                self.at += 1;
+                if !self.loc_text(site) {
+                    return false;
+                }
             }
-            *loc = Loc { file: f, line: l, col: c };
         }
         self.skip_spaces();
         return self.peek() == 0 || self.fail("unexpected text at the end of the line");
+    }
+
+    // A location: an optional file and ':', then a line and a column.
+    fn loc_text(self: &mut Self, loc: &mut Loc) bool {
+        let mut f = self.file;
+        if self.peek() == b'f' {
+            if !self.numbered(b'f', &mut f) || !self.expect(b':', "expected ':' after the file") {
+                return false;
+            }
+            if f as usize >= self.pkg.files.len() {
+                return self.fail("no such file");
+            }
+        }
+        let mut l: u32 = 0;
+        let mut c: u32 = 0;
+        if !self.uint(&mut l) || !self.expect(b':', "expected ':' between line and column") || !self.uint(&mut c) {
+            return false;
+        }
+        if l == 0 {
+            return self.fail("a line is 1 or more");
+        }
+        *loc = Loc { file: f, line: l, col: c };
+        return true;
     }
 
     fn package(self: &mut Self) bool {
@@ -396,6 +417,7 @@ extend<'a> Parser<'a> {
                 return self.fail("the symbol is declared twice");
             }
             self.pkg.syms.index_mut(s as usize).used = self.keyword("used");
+            self.pkg.syms.index_mut(s as usize).noinline = self.keyword("noinline");
             self.pkg.syms.index_mut(s as usize).ext = self.keyword("ext");
             if self.keyword("section") {
                 let mut sp = String::new();
@@ -990,10 +1012,17 @@ extend<'a> Parser<'a> {
             return false;
         }
         let mut loc = Loc { file: 0, line: 0, col: 0 };
-        if !self.line_end_loc(&mut loc) {
+        let mut site = Loc { file: 0, line: 0, col: 0 };
+        if !self.line_end_site(&mut loc, &mut site, true) {
             return false;
         }
         let v = self.body.emit(t, self.body.loc(loc));
+        // The inline sites: one per instruction from the first one on, the earlier ones 0.
+        if site.line != 0 || self.body.inl.len() != 0 {
+            let sl = self.body.loc(site);
+            self.body.inl.resize_default(v as usize);
+            self.body.inl.push(sl);
+        }
         if num != NONE && !self.define_value(num, v) {
             return false;
         }

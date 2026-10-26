@@ -294,6 +294,7 @@ fn asm_host_function() {
     if !cli::has_cc() {
         return; // it reads the C compiler's assembly
     }
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     // One build serves the three checks (`asm_check` is `diff_build`, `asm_text` and `asm_match`).
     let b = h::diff_build(MULW, ["--profile=release"]);
     assert(b.built, b.diag.as_str());

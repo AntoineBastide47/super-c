@@ -16,17 +16,20 @@ allowed-tools: Bash Read
 Super-C is a self-hosting compiler that transpiles `.spc` source to readable C11,
 then invokes a gcc-style C driver (cc/clang/gcc; mingw on Windows; MSVC's cl.exe is out
 of contract) to produce a native binary. On macOS arm64, Linux x86-64, Linux arm64, Windows x86-64 and
-wasm32, a linking build with unoptimized C flags (the debug profile, a script build) and no sanitizer
-compiles each module to a Mach-O, ELF, COFF or wasm object itself and uses C only for the modules it cannot compile; the build prints `native: N of M modules through C`
-when N is not 0 (`SC_NATIVE` overrides the choice). Those objects carry DWARF line tables when the C
+wasm32, a linking build with no sanitizer compiles each module to a Mach-O, ELF, COFF or wasm object
+itself and uses C only for the modules it cannot compile; the build prints `native: N of M modules through C`
+when N is not 0 (`SC_NATIVE` overrides the choice). A build whose C flags optimize (the release and
+bench profiles) runs the LIR optimizer first: inlining, value numbering, load and store forwarding, loop
+invariant motion, constant and branch folding (`SC_LIR_OPT` overrides the choice). Those objects carry DWARF line tables when the C
 flags ask for debug information (`-g`, as the debug profile does), and unwind data always. A link whose
 objects are all native takes the own linker (`src/link/`): Mach-O executables and dylibs on arm64
 (chained fixups, ad-hoc signature), ELF executables and shared libraries on x86-64 and arm64 (glibc
 2.34 or later), PE executables and DLLs on x86-64 (the UCRT), and wasm32 modules; the own archiver
 writes every static library. Each own linker also links static libraries (`.a`, `.lib`, positional or
 `-l<name>` from a `-L` directory) a C compiler built: it takes a member for each symbol still undefined,
-as LLD does. A link command with a flag the own linker does not serve (a sanitizer, `-flto`, an unknown
-linker option, a third-party shared library) stays with the C compiler; `SC_LINK=cc` keeps every link
+as LLD does. A link command with a flag the own linker does not serve (a sanitizer, an unknown linker
+option, a third-party shared library), or with `-flto` and an LLVM bitcode object or a static library,
+stays with the C compiler; `SC_LINK=cc` keeps every link
 there, and `SC_LINK=own` fails a link the own linker does not serve.
 When the C compiler is not installed, every build compiles natively, skips the toolchain probes and
 the precompiled header, drops `-flto`, and fails with the reason when a module or a link needs C (a
@@ -944,7 +947,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `SC_LTO` | Override the profile's `lto` mode: `none`, `full`, `auto`, `thin` |
 | `SC_NO_LTO_CACHE` | Link ThinLTO without the linker cache |
 | `SC_NO_EMIT_CACHE` | Disable the emit stamp |
-| `SC_NATIVE` | The native backend's module choice (super-c-compiler-internals, "Native backend"): `0` C only, `1` every module, else a comma-separated list of module paths. Unset, a linking build with unoptimized C flags and no sanitizer, or any linking build when the C compiler is not installed, takes every module where the target has a native backend (macOS arm64, Linux x86-64, Linux arm64, Windows x86-64, wasm32-wasip1). It is part of the emit stamp's compiler identity and of the native record's key |
+| `SC_NATIVE` | The native backend's module choice (super-c-compiler-internals, "Native backend"): `0` C only, `1` every module, else a comma-separated list of module paths. Unset, a linking build with no sanitizer, or any linking build when the C compiler is not installed, takes every module where the target has a native backend (macOS arm64, Linux x86-64, Linux arm64, Windows x86-64, wasm32-wasip1). It is part of the emit stamp's compiler identity and of the native record's key |
 | `SC_LINK` | `cc` keeps every link and archive with the C toolchain; `own` fails a link the own linker does not serve (or whose objects are not all native); unset, a link whose objects are all native takes the own linker where it serves the command |
 | `SC_NATIVE_STATS` | Print, per module, `native` or `through C: <reason>`, then the native and C module counts and the native phase's ms |
 | `SC_NATIVE_LOG` | A file each build appends `<module>: <reason> (<os> <arch> <tree>)` to for every module its last run sends through C: a whole test suite's fallbacks in one list |
@@ -975,6 +978,9 @@ the build's set included: a program can choose code at run time, never a result.
 | `SC_SIMD_SCALAR` | `1`: the vector planner uses no `@simd_impl` entry; every vector operation keeps its lane loop (the entry differential oracle) |
 | `SC_SIMD_TRACE` | Print each vector operation for which `simd_plan` finds no single entry (`simd: no native entry for <Op> on <T>xN: chunks` or `the lane loop`) |
 | `SC_LIR` | The LIR check (super-c-compiler-internals, "LIR"): `1` lowers every module's bodies to LIR beside the C, a comma-separated list of module paths (`lir::lower,std::string`) only those modules'. At the end of the emission the build fails when a body it rendered fails the verifier. The emitted C is the same. The value is part of the emit stamp and of the per-TU cache keys, so a replayed module passed the check when its record was written. `super-c test` unsets it for the test binary. `check.sh` runs the suite under `SC_LIR=1` |
+| `SC_LIR_OPT` | `1` runs the LIR optimizer (`lir::opt`, super-c-compiler-internals, "LIR") on a native build's bodies, `0` does not; unset, a build whose C flags optimize runs it. Part of the emit stamp and of the native record's key |
+| `SC_LIR_INLINE` | `0`: the LIR optimizer inlines no call (a debugging aid). Part of the emit stamp and of the native record's key |
+| `SC_LIR_PROMOTE` | `0`: the LIR optimizer promotes no slot to values and merges no slot copy (`lir::promote`, a debugging aid). Part of the emit stamp and of the native record's key |
 | `SC_LIR_EVAL` | With `SC_LIR` in `super-c test`: run each test under CTFE (`lw::probe_tests`) and in the LIR evaluator, and fail when they end differently. The command ends after the suite's emission: it builds no project binary, compiles and links nothing, and runs no test. The emit stamp and the per-TU cache are off: every test body lowers. `tests/codegen/lir_eval_test.spc` runs it over the math and std tests |
 | `SC_LIR_STATS` | With `SC_LIR`: print the body counts, and under `SC_LIR_EVAL` the CTFE comparison tally (compared, checked against the test's expectation, FFI, past a budget), even when the check passes |
 | `SC_LIR_TEXT` | With `SC_LIR`: path; write the LIR text form of the bodies the build rendered |

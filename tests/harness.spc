@@ -1585,6 +1585,7 @@ pub fn asm_instructions(text: str, function: str, whole: bool) Vector<String> {
 /// `absent` entry is a substring of any (`=name`: equal to any; `%reg`: a substring of an instruction's
 /// operands, AT&T syntax). Describes every failed check; empty when all hold.
 pub fn asm_check(src: str, opts: []str, function: str, contains: []str, absent: []str) String {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units
     let b = diff_build(src, opts);
     if !b.built {
         return format("the program does not build:\n{}", b.diag.as_str());

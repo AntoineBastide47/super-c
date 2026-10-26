@@ -483,9 +483,12 @@ rebuild one test file under `SC_LIR=1 SC_LIR_EVAL=1 SC_LIR_STATS=1 super-c test 
 (`run_native`; `SC_NATIVE_KEEP=1` keeps the files), and with `WASI_SDK_PATH` set does the same for
 wasm32 (`run_wasm`: `ptr 8` becomes `ptr 4`, the wasi-sdk's clang links, wasmtime runs), builds programs whose modules mix C and native
 code (`SC_NATIVE=<module>`, C values of `@layout` types and enums with payloads included), and checks
-that two builds give byte-identical objects. A CLI test that reads the emitted C, a C unit or a C
-object of a debug build sets `cli::set_env("SC_NATIVE", "0")`: on macOS arm64, Linux x86-64, Linux
-arm64, Windows x86-64 and wasm32 that build compiles natively and writes no C. `ci/gate.sh` checks that one
+that two builds give byte-identical objects. A CLI test that reads the emitted C, a C unit, a C
+object or the C compiler's assembly of a build without a sanitizer (the debug and release profiles
+alike) sets `cli::set_env("SC_NATIVE", "0")`: on macOS arm64, Linux x86-64, Linux arm64, Windows
+x86-64 and wasm32 that build compiles natively and writes no C. `tests/codegen/lir_opt_test.spc`
+optimizes LIR text and checks each transform's place and the evaluator's results before and after;
+`lir_eval_test` runs the math tests' optimized LIR against CTFE (`SC_LIR_OPT=1`). `ci/gate.sh` checks that one
 worker and every core build byte-identical native objects.
 `tests/codegen/asm_test.spc` compares encodings with clang's only (`llvm_cc`: the C compiler when it is
 clang, else `clang` on the path, else the comparison skips): GNU as picks other valid encodings. A

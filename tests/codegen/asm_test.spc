@@ -1663,3 +1663,31 @@ fn x64_intrinsics_match_the_c_compiler() {
     assert_eq(bad, 0);
     x64_oracle(&text, &bytes, &ends);
 }
+
+// The vector registers a template names and writes, and its renaming (`intrin::vnames`, `vwrites`,
+// `vrename`), which the backends use to read an argument where its register holds it.
+@test
+fn template_registers_read_written_and_renamed() {
+    let a = "fmla v0.4s, v2.4s, v1.4s\nfmov w0, s0";
+    assert(intrin::vnames(true, a, 2) && !intrin::vnames(true, a, 3), "arm64 names");
+    assert(intrin::vwrites(true, a, 0) && !intrin::vwrites(true, a, 1) && !intrin::vwrites(true, a, 2), "arm64 writes");
+    assert(intrin::vwrites(true, "ldp q1, q2, [x0]", 2), "a load writes every operand");
+    assert(intrin::vwrites(true, "ld1 { v3.s }[1], [x0]", 3), "a register list");
+    assert(!intrin::vnames(true, "b.ne 1f\nadd x1, x1, #0x1b", 1), "no register in a branch or an immediate");
+    let tbl = "tbl v0.16b, { v0.16b, v1.16b }, v2.16b";
+    let listed = intrin::vlisted(tbl, 0) && intrin::vlisted(tbl, 1);
+    assert(listed && !intrin::vlisted(tbl, 2), "a register list keeps its registers");
+    let mut o = String::new();
+    let f: []u32 = [1, 0];
+    let t: []u32 = [17, 5];
+    intrin::vrename(true, a, f, t, &mut o);
+    assert_eq(o.as_str(), "fmla v5.4s, v2.4s, v17.4s\nfmov w0, s5");
+    let x = "vpcmpd $2, %ymm1, %ymm0, %k0\naddps %xmm1, %xmm0";
+    assert(intrin::vwrites(false, x, 0) && !intrin::vwrites(false, x, 1), "x86-64 writes the last operand");
+    assert(intrin::vwrites(false, "vpgatherdd %xmm2, (%rdi,%xmm1,4), %xmm0", 2), "a gather writes its mask");
+    let mut o2 = String::new();
+    let f2: []u32 = [1];
+    let t2: []u32 = [12];
+    intrin::vrename(false, x, f2, t2, &mut o2);
+    assert_eq(o2.as_str(), "vpcmpd $2, %ymm12, %ymm0, %k0\naddps %xmm12, %xmm0");
+}

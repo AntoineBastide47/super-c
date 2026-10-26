@@ -203,7 +203,7 @@ extend Eval {
             self.out.msg.push_str(msg);
             if self.frames.len() != 0 {
                 self.out.loc = self.frame_loc(self.frames.len() - 1);
-                self.out.top = self.frame_loc(0);
+                self.out.top = self.frame_site(0);
             }
         }
         return false;
@@ -221,6 +221,22 @@ extend Eval {
             return b.lines[b.locs[i as usize] as usize];
         }
         return Loc { file: 0, line: 0, col: 0 };
+    }
+
+    // The location of frame `fi`'s current statement: its instruction's, or the call that instruction was
+    // inlined from.
+    fn frame_site(self: &Self, fi: usize) Loc {
+        let f = self.frames[fi];
+        let b = &(unsafe &*self.pkg).bodies[f.body as usize];
+        let i = if f.pc != 0 {
+            f.pc - 1;
+        } else {
+            0u32;
+        };
+        if i as usize < b.inl.len() && b.inl[i as usize] != 0 {
+            return b.lines[b.inl[i as usize] as usize];
+        }
+        return self.frame_loc(fi);
     }
 
     // The value words of body `bi`.
@@ -770,61 +786,18 @@ extend Eval {
     }
 
     fn int_op(self: &mut Self, op: u8, ty: u8, x: u64, y: u64, dst: u32) bool {
-        let ptr = (unsafe &*self.pkg).ptr_bytes;
-        let bits = type_bits(ty, ptr);
-        let sx = sign_ext(x, bits);
-        let sy = sign_ext(y, bits);
         let mut r: u64 = 0;
-        if op == O_ADD {
-            r = x.wrapping_add(y);
-        } else if op == O_SUB {
-            r = x.wrapping_sub(y);
-        } else if op == O_MUL {
-            r = x.wrapping_mul(y);
-        } else if op == O_SDIV || op == O_SREM {
-            if sy == 0 {
-                return self.stop(iri::IT_TRAP_UB_DIV_ZERO, "division by zero");
-            }
-            if sy == -1 && sx == sign_ext(1u64 << (bits - 1) as u64, bits) {
-                return self.stop(iri::IT_TRAP_UB_OVERFLOW, "arithmetic overflow");
-            }
-            r = if op == O_SDIV {
-                (sx / sy) as u64;
-            } else {
-                (sx % sy) as u64;
-            };
-        } else if op == O_UDIV || op == O_UREM {
-            if y == 0 {
-                return self.stop(iri::IT_TRAP_UB_DIV_ZERO, "division by zero");
-            }
-            r = if op == O_UDIV {
-                x / y;
-            } else {
-                x % y;
-            };
-        } else if op == O_AND {
-            r = x & y;
-        } else if op == O_OR {
-            r = x | y;
-        } else if op == O_XOR {
-            r = x ^ y;
-        } else if op == O_SHL || op == O_LSHR || op == O_ASHR {
-            if y >= bits as u64 {
-                return self.stop(iri::IT_TRAP_UB_SHIFT, "shift out of range");
-            }
-            if op == O_SHL {
-                r = x << y;
-            } else if op == O_LSHR {
-                r = x >> y;
-            } else {
-                r = (sx >> y as i64) as u64;
-            }
-        } else if op == O_NEG {
-            r = 0u64.wrapping_sub(x);
-        } else {
-            r = ~x;
+        let trap = int_fold(op, ty, (unsafe &*self.pkg).ptr_bytes, x, y, &mut r);
+        if trap == FOLD_DIV_ZERO {
+            return self.stop(iri::IT_TRAP_UB_DIV_ZERO, "division by zero");
         }
-        self.vals[dst as usize] = trunc_bits(r, bits);
+        if trap == FOLD_OVERFLOW {
+            return self.stop(iri::IT_TRAP_UB_OVERFLOW, "arithmetic overflow");
+        }
+        if trap == FOLD_SHIFT {
+            return self.stop(iri::IT_TRAP_UB_SHIFT, "shift out of range");
+        }
+        self.vals[dst as usize] = r;
         return true;
     }
 
@@ -1618,6 +1591,73 @@ pub fn outcome_text(p: &Package, o: &Outcome, out: &mut String) {
 }
 
 // The words a value of type `t` takes.
+/// `int_fold`'s outcomes: the result, or the trap the operation raises.
+pub const FOLD_OK: u8 = 0;
+pub const FOLD_DIV_ZERO: u8 = 1;
+pub const FOLD_OVERFLOW: u8 = 2;
+pub const FOLD_SHIFT: u8 = 3;
+
+/// Integer operation `op` (`O_ADD` to `O_NOT`; `O_NEG` and `O_NOT` read `x` alone) of a scalar integer
+/// or pointer type `ty` on `x` and `y` into `out`, truncated to the type: the evaluator's arithmetic,
+/// which the optimizer folds with. FOLD_OK, or the trap it raises (and `out` unchanged).
+pub const fn int_fold(op: u8, ty: u8, ptr: u32, x: u64, y: u64, out: &mut u64) u8 {
+    let bits = type_bits(ty, ptr);
+    let sx = sign_ext(x, bits);
+    let sy = sign_ext(y, bits);
+    let mut r: u64 = 0;
+    if op == O_ADD {
+        r = x.wrapping_add(y);
+    } else if op == O_SUB {
+        r = x.wrapping_sub(y);
+    } else if op == O_MUL {
+        r = x.wrapping_mul(y);
+    } else if op == O_SDIV || op == O_SREM {
+        if sy == 0 {
+            return FOLD_DIV_ZERO;
+        }
+        if sy == -1 && sx == sign_ext(1u64 << (bits - 1) as u64, bits) {
+            return FOLD_OVERFLOW;
+        }
+        r = if op == O_SDIV {
+            (sx / sy) as u64;
+        } else {
+            (sx % sy) as u64;
+        };
+    } else if op == O_UDIV || op == O_UREM {
+        if y == 0 {
+            return FOLD_DIV_ZERO;
+        }
+        r = if op == O_UDIV {
+            x / y;
+        } else {
+            x % y;
+        };
+    } else if op == O_AND {
+        r = x & y;
+    } else if op == O_OR {
+        r = x | y;
+    } else if op == O_XOR {
+        r = x ^ y;
+    } else if op == O_SHL || op == O_LSHR || op == O_ASHR {
+        if y >= bits as u64 {
+            return FOLD_SHIFT;
+        }
+        if op == O_SHL {
+            r = x << y;
+        } else if op == O_LSHR {
+            r = x >> y;
+        } else {
+            r = (sx >> y as i64) as u64;
+        }
+    } else if op == O_NEG {
+        r = 0u64.wrapping_sub(x);
+    } else {
+        r = ~x;
+    }
+    *out = trunc_bits(r, bits);
+    return FOLD_OK;
+}
+
 const fn value_words(t: u8, ptr: u32) u32 {
     if t == T_NONE {
         return 0;
@@ -1642,7 +1682,7 @@ const fn pick_str(c: bool, a: str<'static>, b: str<'static>) str<'static> {
 }
 
 // `x` truncated to its low `bits` bits.
-const fn trunc_bits(x: u64, bits: u32) u64 {
+pub const fn trunc_bits(x: u64, bits: u32) u64 {
     if bits >= 64 {
         return x;
     }
@@ -1748,7 +1788,7 @@ const fn icmp128(c: u16, xl: u64, xh: u64, yl: u64, yh: u64) bool {
     return !less;
 }
 
-const fn sign_ext(x: u64, bits: u32) i64 {
+pub const fn sign_ext(x: u64, bits: u32) i64 {
     return lprint::sign_extend(x, bits);
 }
 
@@ -1767,7 +1807,8 @@ fn set_lane(vals: &mut Vector<u64>, w: u32, k: u32, bits: u32, v: u64) {
 }
 
 // Whether `op` (add, subtract, multiply) of the `ty` integers `x` and `y` leaves the type's range.
-const fn overflows(op: u8, ty: u8, ptr: u32, signed: bool, x: u64, y: u64) bool {
+/// Whether checked operation `op` (`O_ADDO`, `O_SUBO`, `O_MULO`) of `x` and `y` of type `ty` overflows.
+pub const fn overflows(op: u8, ty: u8, ptr: u32, signed: bool, x: u64, y: u64) bool {
     let bits = type_bits(ty, ptr);
     if signed {
         let a = sign_ext(x, bits);
@@ -1826,7 +1867,7 @@ const fn ov64(op: u8, signed: bool, x: u64, y: u64) bool {
     return o;
 }
 
-const fn icmp(c: u16, ty: u8, ptr: u32, x: u64, y: u64) bool {
+pub const fn icmp(c: u16, ty: u8, ptr: u32, x: u64, y: u64) bool {
     let bits = type_bits(ty, ptr);
     let a = sign_ext(x, bits);
     let d = sign_ext(y, bits);
@@ -1953,7 +1994,7 @@ pub const fn float_op(op: u8, ty: u8, x: u64, y: u64) u64 {
 }
 
 // Scalar conversion `op` of `x` from `from` to `to`; false for an unchecked float conversion out of range.
-const fn scalar_convert(op: u8, aux: u16, from: u8, to: u8, ptr: u32, x: u64, out: &mut u64) bool {
+pub const fn scalar_convert(op: u8, aux: u16, from: u8, to: u8, ptr: u32, x: u64, out: &mut u64) bool {
     let fb = type_bits(from, ptr);
     let tb = type_bits(to, ptr);
     if op == O_SEXT {
@@ -2061,6 +2102,12 @@ const IC_INDEX_BOUNDS: u8 = 27; // __sc_index_bounds(i, n)
 const IC_VEC_BOUNDS: u8 = 28; // __sc_vec_bounds(w, i, n)
 const IC_LANE_BOUNDS: u8 = 29; // __sc_lane_bounds(lane, x, n, start)
 const IC_LANE_PANIC: u8 = 30; // __sc_lane_panic(lane, m)
+
+/// Whether the evaluator runs function `name` as it models it, not its body: the optimizer keeps the
+/// calls of such a function.
+pub fn modeled(name: str) bool {
+    return icode_of(name) != IC_NONE;
+}
 
 // The routine function symbol `name` names (`__sc_x_<c name>` is a C library name's alias).
 fn icode_of(name0: str) u8 {

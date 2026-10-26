@@ -3,12 +3,36 @@
 // code generation pass reads to allocate registers in one pass.
 //
 // Layout: reverse postorder, each loop contiguous (a block's key is the list of its loop headers'
-// positions, then its own, compared in order), cold blocks last. A value's range is the layout positions
-// from its definition's block to `end`: its last use, or the last block of the outermost loop that holds
-// a use but not the definition (the value must survive the back edge). The CFG is reducible (the verifier
-// checks it), so an edge to a block not later in reverse postorder is a back edge.
+// positions, then its own, compared in order), a loop's cold blocks after its warm ones, the other cold
+// blocks last. A value's range is the layout positions from its definition's block to `end`: its last
+// use, or the last block of the outermost loop that holds a use but not the definition (the value must
+// survive the back edge). The CFG is reducible (the verifier checks it), so an edge to a block not later
+// in reverse postorder is a back edge.
 import lir::ir as *;
 import lir::verify as lv;
+
+/// `Live::plan`'s homes per value: no register for the whole range, a callee-saved one, a caller-saved one.
+pub const HOME_NONE: u8 = 0;
+pub const HOME_CALLEE: u8 = 1;
+pub const HOME_SCRATCH: u8 = 2;
+/// `Live::plan`'s request per value: it may take a callee-saved register, a caller-saved one; it is of the
+/// vector file (else the general one).
+pub const WANT_CALLEE: u8 = 1;
+pub const WANT_SCRATCH: u8 = 2;
+pub const WANT_V: u8 = 4;
+
+/// The registers `Live::plan` gives out at once per file (`x`: general, `v`: vector): callee-saved,
+/// caller-saved, and both together.
+pub struct Caps {
+    pub xc: u32,
+    pub xs: u32,
+    pub xj: u32,
+    pub vc: u32,
+    pub vs: u32,
+    pub vj: u32,
+}
+
+extend Caps as Copy {}
 
 /// The analysis of one body. Values index `insts` first, then `params`, then the overflow flags that have
 /// a use (`flag_of`).
@@ -22,7 +46,27 @@ pub struct Live {
     pub def_blk: Vector<u32>, // per value, its block
     pub end: Vector<u32>, // per value, the last layout position it is live in
     pub uses: Vector<u32>, // per value, its use count, one more when a loop keeps it past its last use
+    pub last: Vector<u32>, // per value, the highest instruction index that uses it (0: none)
     pub flag_of: Map<u32, u32>, // an instruction with a used flag -> the flag's value index
+    pub home: Vector<u8>, // per value, its HOME_* (`plan`)
+    /// The largest access a scaled index addresses (the target's, 0: none); per instruction, whether the
+    /// load or store takes its address `ptradd`'s operands (`fold`), and whether the `ptradd` emits nothing
+    /// for that (`pfold`; `uses_at`).
+    pub fold_max: u32,
+    pub fold: Vector<bool>,
+    pub pfold: Vector<bool>,
+    // `plan`'s scratch: per layout position its first instruction's ordinal; per block its frequency; per
+    // value its range's first and last ordinals, its weight and its uses by instructions and edges; the
+    // candidates by start, the values holding a register, and the count per file and home.
+    base: Vector<u32>,
+    freq: Vector<u64>,
+    start: Vector<u32>,
+    stop: Vector<u32>,
+    wt: Vector<u64>,
+    au: Vector<u32>,
+    cand: Vector<u64>,
+    act: Vector<u32>,
+    cnt: Vector<u32>,
     rpo: Vector<u32>, // per block, its reverse postorder number (NONE: unreachable)
     succ: Vector<u32>,
     stack: Vector<u32>,
@@ -42,7 +86,21 @@ extend Live {
             def_blk: Vector::<u32>::new(),
             end: Vector::<u32>::new(),
             uses: Vector::<u32>::new(),
+            last: Vector::<u32>::new(),
             flag_of: Map::<u32, u32>::new(),
+            home: Vector::<u8>::new(),
+            fold_max: 0,
+            fold: Vector::<bool>::new(),
+            pfold: Vector::<bool>::new(),
+            base: Vector::<u32>::new(),
+            freq: Vector::<u64>::new(),
+            start: Vector::<u32>::new(),
+            stop: Vector::<u32>::new(),
+            wt: Vector::<u64>::new(),
+            au: Vector::<u32>::new(),
+            cand: Vector::<u64>::new(),
+            act: Vector::<u32>::new(),
+            cnt: Vector::<u32>::new(),
             rpo: Vector::<u32>::new(),
             succ: Vector::<u32>::new(),
             stack: Vector::<u32>::new(),
@@ -84,7 +142,83 @@ extend Live {
         self.reverse_postorder(b);
         self.loops(b);
         self.layout(b);
+        self.folds(b);
         self.ranges(b);
+    }
+
+    // `fold`: a load or store of no offset whose address is a `ptradd` with an index, no offset, a scale
+    // of 1 or the access's size (up to `fold_max`) and this one use, takes the `ptradd`'s operands as its
+    // address (`ldr x0, [x1, x2, lsl #3]`, `mov (%rax,%rcx,8), %rdx`): they live to the access.
+    fn folds(self: &mut Self, b: &Body) {
+        let ni = b.insts.len();
+        self.fold.truncate(0);
+        self.fold.resize_default(ni);
+        self.pfold.truncate(0);
+        self.pfold.resize_default(ni);
+        if self.fold_max == 0 {
+            return;
+        }
+        // The use count of each `ptradd` with an index.
+        fill(&mut self.work, ni, 0);
+        for i in 0..ni {
+            each_use(b, b.insts[i], &mut self.succ);
+            for u in 0..self.succ.len() {
+                let v = self.succ[u];
+                if (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == O_PTRADD {
+                    self.work[v as usize] += 1;
+                }
+            }
+        }
+        for i in 0..ni {
+            let t = b.insts[i];
+            if t.op != O_LOAD && t.op != O_STORE || (t.aux & MEM_VOLATILE) != 0 || t.c != 0 || (t.a & (VPARAM | VFLAG)) != 0 {
+                continue;
+            }
+            let p = b.insts[t.a as usize];
+            let ty = if t.op == O_LOAD {
+                t.ty;
+            } else {
+                b.type_of(t.b);
+            };
+            let n = type_bytes(ty, 8); // the targets that fold have 8-byte pointers
+            let sc = p.aux as u32;
+            // A vector of 8 or 16 bytes lives in a register; another is memory.
+            let reg = !is_vec(ty) && ty != T_I128 || n == 8 || n == 16;
+            self.fold[i] = p.op == O_PTRADD && p.b != VNONE && p.c == 0 && self.work[t.a as usize] == 1 && reg && (sc == 1 || sc == n && n <= self.fold_max);
+            if self.fold[i] {
+                self.pfold[t.a as usize] = true;
+            }
+        }
+    }
+
+    // `uses_at` into `succ`.
+    fn uses_into(self: &mut Self, b: &Body, i: u32) {
+        let mut out = replace(&mut self.succ, Vector::<u32>::new());
+        self.uses_at(b, i, &mut out);
+        self.succ = out;
+    }
+
+    /// The values instruction `i` of `b` uses, as `each_use` gives them but for the folded addresses
+    /// (`fold`): a load or store that folds one uses its `ptradd`'s operands, which uses none.
+    pub fn uses_at(self: &Self, b: &Body, i: u32, out: &mut Vector<Value>) {
+        if self.pfold[i as usize] {
+            out.truncate(0);
+            return;
+        }
+        let t = b.insts[i as usize];
+        each_use(b, t, out);
+        if !self.fold[i as usize] {
+            return;
+        }
+        for u in 0..out.len() {
+            if out[u] == t.a {
+                out.swap_remove(u);
+                break;
+            }
+        }
+        let p = b.insts[t.a as usize];
+        out.push(p.a);
+        out.push(p.b);
     }
 
     // `rpo`: the reverse postorder number of each block the entry reaches, by an explicit-stack DFS
@@ -279,6 +413,10 @@ extend Live {
             placed[k as usize] = true;
             self.order.push(k);
         }
+        // The cold blocks in reverse postorder: one of a loop with a warm header right after the loop's last
+        // warm block (the loop stays contiguous, and the values live at a block it enters live no
+        // further), the others last.
+        self.loop_ends();
         self.keys.truncate(0);
         for k in 0..nb {
             if self.rpo[k] != NONE && (b.blocks[k].flags & BLOCK_COLD) != 0 {
@@ -286,13 +424,40 @@ extend Live {
             }
         }
         self.keys.sort();
-        for i in 0..self.keys.len() {
-            self.order.push(self.keys[i] as u32);
+        let mut tail = Vector::<u64>::new();
+        for j in 0..self.keys.len() {
+            let h = self.inner[(self.keys[j] as u32) as usize];
+            if h != NONE && (b.blocks[h as usize].flags & BLOCK_COLD) == 0 {
+                tail.push(self.lend[h as usize] as u64 << 32 | j as u64);
+            }
         }
+        tail.sort();
+        let warm = self.order.len();
+        let mut out = Vector::<u32>::with_capacity(warm + self.keys.len());
+        let mut t: usize = 0;
+        for i in 0..warm {
+            out.push(self.order[i]);
+            while t < tail.len() && (tail[t] >> 32) as usize == i {
+                out.push(self.keys[(tail[t] as u32) as usize] as u32);
+                t += 1;
+            }
+        }
+        for j in 0..self.keys.len() {
+            let h = self.inner[(self.keys[j] as u32) as usize];
+            if h == NONE || (b.blocks[h as usize].flags & BLOCK_COLD) != 0 {
+                out.push(self.keys[j] as u32);
+            }
+        }
+        self.order = out;
         for i in 0..self.order.len() {
             self.pos[self.order[i] as usize] = i as u32;
         }
-        // Each loop's last block.
+        fill(&mut self.lend, nb, 0);
+        self.loop_ends();
+    }
+
+    // `lend`: each loop's last block in `order`.
+    fn loop_ends(self: &mut Self) {
         for i in 0..self.order.len() {
             let k = self.order[i];
             let mut h = self.inner[k as usize];
@@ -330,6 +495,7 @@ extend Live {
         fill(&mut self.def_blk, n, NONE);
         fill(&mut self.end, n, 0);
         fill(&mut self.uses, n, 0);
+        fill(&mut self.last, n, 0);
         for k in 0..b.blocks.len() {
             let bk = b.blocks[k];
             for i in bk.start..bk.start + bk.len {
@@ -354,10 +520,13 @@ extend Live {
             let k = self.order[p];
             let bk = b.blocks[k as usize];
             for i in bk.start..bk.start + bk.len {
-                each_use(b, b.insts[i as usize], &mut self.succ);
+                self.uses_into(b, i);
                 for u in 0..self.succ.len() {
                     let x = self.vix(b, self.succ[u]);
                     self.uses[x as usize] += 1;
+                    if i > self.last[x as usize] {
+                        self.last[x as usize] = i;
+                    }
                     let mut e = p as u32;
                     // A use in a loop the definition is outside of keeps the value to the loop's end.
                     let dp = self.pos[self.def_blk[x as usize] as usize];
@@ -399,6 +568,198 @@ extend Live {
 }
 
 extend Live {
+    /// Plan which values hold one register for their whole range (`home`): the ones `want` (WANT_* per
+    /// value) asks one for, by a linear scan over the layout in the order the ranges start (Poletto and
+    /// Sarkar's); when a file's registers are taken, the active value of least weight (the frequency of
+    /// its definition and uses: 8 per loop level up to 5, 0 in a cold block) gives its register up to a
+    /// heavier one. A range runs from its definition (a parameter's: the first edge into it) to its last
+    /// use (a kept value's, a parameter's or a flag's: the end of its last block). After `run`, before the
+    /// generator counts the uses down.
+    pub fn plan(self: &mut Self, b: &Body, want: &Vector<u8>, caps: Caps) {
+        let n = self.end.len();
+        let ni = b.insts.len();
+        let nv = ni + b.params.len();
+        let np = self.order.len();
+        self.home.truncate(0);
+        self.home.resize_default(n);
+        fill(&mut self.base, np + 1, 0);
+        for p in 0..np {
+            self.base[p + 1] = self.base[p] + b.blocks[self.order[p] as usize].len;
+        }
+        self.freq.truncate(0);
+        self.freq.resize_default(b.blocks.len());
+        for p in 0..np {
+            let k = self.order[p] as usize;
+            if (b.blocks[k].flags & BLOCK_COLD) != 0 {
+                continue;
+            }
+            let mut f: u64 = 1;
+            let mut h = self.inner[k];
+            // Each step leaves one loop, at most 5.
+            for _ in 0..5 {
+                if h == NONE {
+                    break;
+                }
+                f *= 8;
+                h = self.parent[h as usize];
+            }
+            self.freq[k] = f;
+        }
+        fill(&mut self.start, n, NONE);
+        fill(&mut self.stop, n, 0);
+        fill(&mut self.au, n, 0);
+        self.wt.truncate(0);
+        self.wt.resize_default(n);
+        for p in 0..np {
+            let k = self.order[p];
+            let bk = b.blocks[k as usize];
+            let f = self.freq[k as usize];
+            for q in 0..bk.param_len as u32 {
+                let x = ni + (bk.param_start + q) as usize;
+                if self.base[p] < self.start[x] {
+                    self.start[x] = self.base[p];
+                }
+            }
+            for i in bk.start..bk.start + bk.len {
+                self.start[i as usize] = self.base[p] + i - bk.start;
+                self.wt[i as usize] += f;
+                self.uses_into(b, i);
+                for u in 0..self.succ.len() {
+                    let x = self.vix(b, self.succ[u]) as usize;
+                    self.wt[x] += f;
+                    self.au[x] += 1;
+                }
+            }
+            // The terminator's edges write their targets' parameters.
+            let o = self.base[p + 1] - 1;
+            each_edge_param(b, b.insts[(bk.start + bk.len - 1) as usize], &mut self.succ);
+            for q in 0..self.succ.len() {
+                let x = self.succ[q] as usize;
+                self.wt[x] += f;
+                self.au[x] += 1;
+                if o < self.start[x] {
+                    self.start[x] = o;
+                }
+            }
+        }
+        for x in 0..n {
+            let d = self.def_blk[x];
+            if d == NONE || self.pos[d as usize] == NONE {
+                self.start[x] = NONE;
+                continue;
+            }
+            if x >= nv {
+                self.start[x] = self.base[self.pos[d as usize] as usize];
+            }
+            let e = self.end[x] as usize;
+            let l = self.last[x];
+            self.stop[x] = if x < ni && self.au[x] != 0 && self.uses[x] == self.au[x] && self.pos[self.def_blk[l as usize] as usize] == e as u32 {
+                self.base[e] + l - b.blocks[self.def_blk[l as usize] as usize].start;
+            } else {
+                self.base[e + 1] - 1;
+            };
+        }
+        self.cand.truncate(0);
+        for x in 0..n {
+            if (want[x] & (WANT_CALLEE | WANT_SCRATCH)) != 0 && self.start[x] != NONE && self.au[x] != 0 {
+                self.cand.push(self.start[x] as u64 << 32 | x as u64);
+            }
+        }
+        self.cand.sort();
+        self.act.truncate(0);
+        fill(&mut self.cnt, 4, 0);
+        for c in 0..self.cand.len() {
+            let x = (self.cand[c] & 0xFFFFFFFF) as u32;
+            let s = (self.cand[c] >> 32) as u32;
+            // The ranges that ended before this one starts give their registers back.
+            let mut j: usize = 0;
+            while j < self.act.len() {
+                let a = self.act[j];
+                if self.stop[a as usize] < s {
+                    self.leave(j, want);
+                } else {
+                    j += 1;
+                }
+            }
+            let mut h = self.fits(x, want, caps, NONE);
+            if h == HOME_NONE {
+                // The lightest value of the file that holds a register this one could take.
+                let mut v: usize = NONE as usize;
+                for j in 0..self.act.len() {
+                    let a = self.act[j];
+                    if (want[a as usize] & WANT_V) != (want[x as usize] & WANT_V) || self.wt[a as usize] >= self.wt[x as usize] {
+                        continue;
+                    }
+                    if v != NONE as usize && self.wt[a as usize] >= self.wt[self.act[v] as usize] {
+                        continue;
+                    }
+                    if self.fits(x, want, caps, a) != HOME_NONE {
+                        v = j;
+                    }
+                }
+                if v != NONE as usize {
+                    let a = self.act[v];
+                    self.leave(v, want);
+                    self.home[a as usize] = HOME_NONE;
+                    h = self.fits(x, want, caps, NONE);
+                }
+            }
+            if h != HOME_NONE {
+                self.home[x as usize] = h;
+                self.cnt[Live::slot(want[x as usize], h)] += 1;
+                self.act.push(x);
+            }
+        }
+    }
+
+    // The home value `x` takes with `want`'s request among the registers taken (`cnt`), those of value
+    // `without` given back: a caller-saved one first; HOME_NONE when its file has none to give.
+    const fn fits(self: &Self, x: u32, want: &Vector<u8>, caps: Caps, without: u32) u8 {
+        let w = want[x as usize];
+        let vf = (w & WANT_V) != 0;
+        let mut c = self.cnt[Live::slot(w, HOME_CALLEE)];
+        let mut s = self.cnt[Live::slot(w, HOME_SCRATCH)];
+        if without != NONE {
+            if self.home[without as usize] == HOME_CALLEE {
+                c -= 1;
+            } else {
+                s -= 1;
+            }
+        }
+        let (cc, sc, jc) = if vf {
+            (caps.vc, caps.vs, caps.vj);
+        } else {
+            (caps.xc, caps.xs, caps.xj);
+        };
+        if c + s >= jc {
+            return HOME_NONE;
+        }
+        if (w & WANT_SCRATCH) != 0 && s < sc {
+            return HOME_SCRATCH;
+        }
+        if (w & WANT_CALLEE) != 0 && c < cc {
+            return HOME_CALLEE;
+        }
+        return HOME_NONE;
+    }
+
+    // `cnt`'s entry of the file of request `w` and home `h`.
+    const fn slot(w: u8, h: u8) usize {
+        return ((w & WANT_V) != 0) as usize * 2 + (h - 1) as usize;
+    }
+
+    // Value `act[j]` leaves the registers: its home's count goes down.
+    fn leave(self: &mut Self, j: usize, want: &Vector<u8>) {
+        let a = self.act[j];
+        let h = self.home[a as usize];
+        if h != HOME_NONE {
+            self.cnt[Live::slot(want[a as usize], h)] -= 1;
+        }
+        let last = self.act.len() - 1;
+        self.act[j] = self.act[last];
+        self.act.truncate(last);
+    }
+
     // A cold block that branches into the body runs inside the ranges of the values live at its target,
     // though the layout puts it last: each value whose range holds the position of such a target lives to
     // the cold block too, and is kept (its last use does not end it). A range max over the targets'

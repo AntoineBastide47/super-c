@@ -61,11 +61,12 @@ same_tree() {
 }
 
 step "fixpoint: gen1 vs gen2"
-( cd "$tree" && SC_LEAK_CHECK=fatal "./super-c$x" build --profile=test ${cstd:+"$cstd"} >/dev/null )
+# The generations emit C (`SC_NATIVE=0`): the test profile optimizes, which builds natively otherwise.
+( cd "$tree" && SC_NATIVE=0 SC_LEAK_CHECK=fatal "./super-c$x" build --profile=test ${cstd:+"$cstd"} >/dev/null )
 mv "$tree/build/test/raw" "$tmp/gen1-raw"
 mv "$tree/build/test/super-c$x" "$tree/gen1-super-c$x"
 rm -rf "$tree/build"
-( cd "$tree" && SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 "./gen1-super-c$x" build --profile=test ${cstd:+"$cstd"} >/dev/null )
+( cd "$tree" && SC_NATIVE=0 SC_LEAK_CHECK=fatal SC_BC_VALIDATE=1 SC_TYPE_VALIDATE=1 "./gen1-super-c$x" build --profile=test ${cstd:+"$cstd"} >/dev/null )
 same_tree "$tmp/gen1-raw" "$tree/build/test/raw" || fail "gen1 and gen2 emitted different C (above)"
 # Generation two is compiled and run: every build below is its own.
 mv "$tree/build/test/super-c$x" "$tree/gen2-super-c$x"

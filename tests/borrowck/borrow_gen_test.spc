@@ -1390,6 +1390,36 @@ fn closure_values_called_through_bounds() {
     );
 }
 
+// A shared reference a closure captures copies: passing it on moves nothing out of the closure, also
+// when the closure owns a value of its own (the free rule asks whether the operand owns).
+@test
+fn a_captured_reference_passes_on_beside_an_owned_local() {
+    let pre = "struct Pk { pub v: Vector<u32> }\nstruct O { pub sc: Vector<u32> }\nextend O { fn run(self: &mut Self, p: &Pk) { self.sc.push(p.v.len() as u32); } }\nfn take(o: &mut O, p: &Pk) { o.sc.push(p.v.len() as u32); }\nfn look(p: &Pk) u32 { return p.v.len() as u32; }\nfn call<F: fn()>(f: F) { f(); }\n";
+    let cases: [](str, str) = [
+        ("a method's argument", "let mut o = O { sc: Vector::<u32>::new() }; o.run(p); assert(o.sc.len() == 1, \"k\");"),
+        ("a function's argument", "let mut o = O { sc: Vector::<u32>::new() }; take(&mut o, p);"),
+        (
+            "another call's argument",
+            "let o = O { sc: Vector::<u32>::new() }; let n = look(p); assert(n == 0 && o.sc.len() == 0, \"n\");"
+        ),
+        (
+            "an argument before the owned local",
+            "let n = look(p); let o = O { sc: Vector::<u32>::new() }; assert(n == 0 && o.sc.len() == 0, \"n\");"
+        ),
+    ];
+    for i in 0..cases.len() {
+        let (label, body) = cases[i];
+        h::expect_ok(
+            label,
+            format(
+                "{}fn f(p: &Pk) {{ call(|| {{ {} }}); }}\nfn main() i32 {{ let pk = Pk {{ v: Vector::<u32>::new() }}; f(&pk); return 0; }}\n",
+                pre,
+                body,
+            ).as_str(),
+        );
+    }
+}
+
 // A call through a closure value tied by a function-type bound keeps what the closure's results can
 // hold (`Owner::res_deep`): a closure returning what a by-reference capture holds does not keep the
 // capture's own storage borrowed; one returning a reference into a capture, or a by-value capture,

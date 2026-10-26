@@ -180,6 +180,7 @@ fn operations_lower_to_their_instructions() {
     if !cli::has_cc() {
         return; // it reads the C compiler's assembly
     }
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     if !aarch64_host() {
         return;
     }

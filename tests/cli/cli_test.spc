@@ -377,6 +377,7 @@ fn inlined_self_comparison_folds() {
     if !cli::has_cc() {
         return; // it reads the emitted C
     }
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
     p.mkfile(
@@ -11981,6 +11982,7 @@ fn main() i32 {
 // PROFILE folds after type checking: each profile emits only its branch, into its own tree.
 @test
 fn build_constant_profile_selects_the_branch() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     if !cli::has_cc() {
         return; // the C compiler builds it
     }
@@ -12031,6 +12033,7 @@ const BC_CONFIG: str = M"(fn main() i32 {
 // and the wrapping `release` profile. Each build emits only its branches.
 @test
 fn build_constants_follow_the_c_flags() {
+    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     if !cli::has_cc() {
         return; // the C compiler builds it
     }

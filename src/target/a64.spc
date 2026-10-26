@@ -291,6 +291,11 @@ pub const M_VS: u32 = 9;
 pub const M_VD: u32 = 10;
 pub const M_VQ: u32 = 11;
 
+/// `mov vd, vn` of a whole vector register (`orr vd, vn, vn`): its 16 bytes (`q`), else its low 8.
+pub const fn vmov(q: bool, d: u32, n: u32) u32 {
+    return 0x0EA01C00 | on(q, 1u32 << 30) | n << 16 | n << 5 | d;
+}
+
 /// The log2 of the bytes access `m` moves.
 pub const fn msize(m: u32) u32 {
     if m <= M_X {

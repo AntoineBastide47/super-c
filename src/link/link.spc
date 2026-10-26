@@ -5,6 +5,7 @@
 import std::platform::fs;
 import std::platform::process;
 import stdlib;
+import stdio;
 import link::macho as lm;
 import link::elf as le;
 import link::pe;
@@ -117,6 +118,7 @@ fn parse(args: &Vector<String>, c: &mut Cmd, why: &mut String) i32 {
         }
     }
     let mut i: usize = 0;
+    let mut lto = false;
     // Each step consumes one argument, or a flag and its value.
     while i < n {
         let a = args[i].as_str();
@@ -194,6 +196,9 @@ fn parse(args: &Vector<String>, c: &mut Cmd, why: &mut String) i32 {
             // wasm's: no C library or start files (`std::rt::libc` is both).
         } else if a == "-Wl,--strip-all" {
             c.strip = true;
+        } else if a.starts_with("-flto") {
+            // Link-time optimization: a C compile's bitcode objects need the C toolchain's link.
+            lto = true;
         } else if a == "-Wl,-reproducible" {
             // Always: the output is a function of the inputs.
         } else if a.starts_with("-Wl,-O") && a.len() == 7 && a.byte_at(6) >= b'0' && a.byte_at(6) <= b'9' {
@@ -209,7 +214,26 @@ fn parse(args: &Vector<String>, c: &mut Cmd, why: &mut String) i32 {
         why.push_str("no output or no object");
         return NOT_SERVED;
     }
+    for k in 0..c.objs.len() {
+        let o = c.objs[k].as_str();
+        if lto && (ar::is_archive(o) || bitcode(o)) {
+            why.format_into("link-time optimization of '{}'", o);
+            return NOT_SERVED;
+        }
+    }
     return LINKED;
+}
+
+// Whether file `path` is an LLVM bitcode object (its magic, bare or in the wrapper header).
+fn bitcode(path: str) bool {
+    let f = stdio::fopen(path, "rb");
+    if f == null {
+        return false;
+    }
+    let mut m: [u8; 4] = [0, 0, 0, 0];
+    let n = unsafe stdio::fread(((&mut m[0]) as *mut u8) as *mut char, 1, 4, f);
+    unsafe stdio::fclose(f);
+    return n == 4 && (m[0] == b'B' && m[1] == b'C' && m[2] == 0xC0 && m[3] == 0xDE || m[0] == 0xDE && m[1] == 0xC0 && m[2] == 0x17 && m[3] == 0x0B);
 }
 
 fn macho(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {

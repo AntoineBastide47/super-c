@@ -725,6 +725,13 @@ extend Gen {
             let blk = b.blocks[k as usize];
             for i in blk.start..blk.start + blk.len {
                 let t = b.insts[i as usize];
+                // A memory result takes its home before its operands free theirs: a lowering may write
+                // the result's lanes before it reads every operand lane (a gather's fallback lanes).
+                let own = need[i as usize] && start[i as usize] == end[i as usize];
+                let early = own && in_mem(t.ty);
+                if early {
+                    self.take(i);
+                }
                 lv::each_use(b, t, &mut self.uses);
                 for u in 0..self.uses.len() {
                     let v = self.uses[u];
@@ -740,8 +747,10 @@ extend Gen {
                         self.release(x);
                     }
                 }
-                if need[i as usize] && start[i as usize] == end[i as usize] {
-                    self.take(i);
+                if own {
+                    if !early {
+                        self.take(i);
+                    }
                     if self.lv.uses[i as usize] == 0 {
                         self.release(i);
                     }

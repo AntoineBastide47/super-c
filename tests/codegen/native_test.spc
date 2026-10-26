@@ -10,6 +10,7 @@ import std::platform::fs;
 import std::platform::process;
 import stdio;
 import stdlib;
+import module::loader;
 
 // Compile LIR `text` natively on the host, link it with C `driver` and run it; the exit code, or -1 when
 // a step failed (the failure on stderr). 0 on a host without a native backend.
@@ -1057,4 +1058,140 @@ fn inline_assembly_compiles_natively() {
     assert(r.ok(), "the program builds");
     assert(!r.out_has("main through C"), "main compiles natively");
     assert_eq(p.run_bin(), 0);
+}
+
+// Whether the LIR optimizer runs is part of what a project's emission and a module's object are a
+// function of: a build that turns it on compiles again rather than taking the last build's tree and
+// objects, and one that turns it off again gives the first build's bytes.
+@test
+fn a_build_that_switches_the_optimizer_compiles_again() {
+    if !nat::supported(tgt::host_os(), tgt::host_isa()) {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"bin\"\nroot = \"main.spc\"\n");
+    p.mkfile(
+        "main.spc",
+        "fn main(args: Vector<str>) i32 {\n    let mut s: usize = 0;\n    for i in 0..args.len() {\n        s += i * 3;\n    }\n    return s as i32;\n}\n",
+    );
+    let mut bins = Vector::<String>::new();
+    for opt in ["0", "1", "0"] {
+        let r = cli::superc_env_in(p.dir(), "SC_LIR_OPT", opt, "build");
+        if !r.ok() {
+            r.show();
+        }
+        assert(r.ok(), "the program builds");
+        assert_eq(p.run_bin(), 0);
+        bins.push(
+            loader::read_file(format("{}/bin{}", p.dir(), unsafe str::from_cstr(cli::binext())).as_str()).unwrap(),
+        );
+    }
+    assert(bins[0].as_str() != bins[1].as_str(), "the optimized build compiles again");
+    assert(bins[0].as_str() == bins[2].as_str(), "the unoptimized build gives its bytes again");
+}
+
+// A load or store whose address is a `ptradd` with an index and no other use reads the index in its
+// own address (`Live::fold`): every access width, scaled by its size or by 1, and a vector.
+@test
+fn indexed_accesses_fold_their_address() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @ld8 fn global
+sym @ld16 fn global
+sym @ld32 fn global
+sym @ld64 fn global
+sym @ldf fn global
+sym @ldb fn global
+sym @st32 fn global
+sym @cpv fn global
+fn @ld8
+  sig (ptr, i64) -> i8
+b0(v0: ptr, v1: i64):
+  v2 = ptradd v0, v1 * 1
+  v3 = load.i8 v2 align 0
+  ret v3
+fn @ld16
+  sig (ptr, i64) -> i16
+b0(v0: ptr, v1: i64):
+  v2 = ptradd v0, v1 * 2
+  v3 = load.i16 v2 align 1
+  ret v3
+fn @ld32
+  sig (ptr, i64) -> i32
+b0(v0: ptr, v1: i64):
+  v2 = ptradd v0, v1 * 4
+  v3 = load.i32 v2 align 2
+  ret v3
+fn @ld64
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = ptradd v0, v1 * 8
+  v3 = iconst.i64 1
+  v4 = add.i64 v1, v3
+  v5 = load.i64 v2 align 3
+  v6 = add.i64 v5, v4
+  ret v6
+fn @ldf
+  sig (ptr, i64) -> f64
+b0(v0: ptr, v1: i64):
+  v2 = ptradd v0, v1 * 8
+  v3 = load.f64 v2 align 3
+  ret v3
+fn @ldb
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = ptradd v0, v1 * 1
+  v3 = load.i64 v2 align 0
+  ret v3
+fn @st32
+  sig (ptr, i64, i32) -> void
+b0(v0: ptr, v1: i64, v2: i32):
+  v3 = ptradd v0, v1 * 4
+  store v2, v3 align 2
+  ret
+fn @cpv
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = ptradd v1, v2 * 16
+  v4 = load.v4i32 v3 align 2
+  v5 = ptradd v0, v2 * 16
+  store v4, v5 align 2
+  ret
+)";
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+int8_t ld8(const void *, int64_t);
+int16_t ld16(const void *, int64_t);
+int32_t ld32(const void *, int64_t);
+int64_t ld64(const void *, int64_t);
+double ldf(const void *, int64_t);
+int64_t ldb(const void *, int64_t);
+void st32(void *, int64_t, int32_t);
+void cpv(void *, const void *, int64_t);
+int main(void) {
+  int8_t b[4] = {1, 2, 3, 4};
+  int16_t h[4] = {10, 20, 30, 40};
+  int32_t w[4] = {100, -200, 300, 400};
+  int64_t q[4] = {1000, -2000, 3000, 4000};
+  double d[4] = {0.5, 1.5, 2.5, 3.5};
+  unsigned char raw[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+  int32_t v[8] = {1, 2, 3, 4, 5, 6, 7, 8}, o[8] = {0};
+  if (ld8(b, 1) != 2) return 1;
+  if (ld16(h, 2) != 30) return 2;
+  if (ld32(w, 1) != -200) return 3;
+  if (ld64(q, 3) != 4004) return 4;
+  if (ldf(d, 2) != 2.5) return 5;
+  int64_t x;
+  memcpy(&x, raw + 3, 8);
+  if (ldb(raw, 3) != x) return 6;
+  st32(w, 3, -7);
+  if (w[3] != -7 || w[2] != 300) return 7;
+  cpv(o, v, 1);
+  if (o[4] != 5 || o[7] != 8 || o[0] != 0) return 8;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
 }

@@ -2800,13 +2800,17 @@ pub fn transpile_step(
     let cache_on = stdlib::getenv("SC_NO_EMIT_CACHE") == null && stdlib::getenv("SC_LIR_EVAL") == null;
     let external = cx.transpiler.len() != 0;
     // The emitting compiler's identity, read before the emission: the tree it emits is its function, and
-    // of the backend selection (SC_NATIVE).
+    // of the backend selection and the LIR optimizer's (SC_NATIVE, SC_LIR_OPT, SC_LIR_INLINE, SC_LIR_PROMOTE).
     let cid = if !cache_on {
         0 as u64;
     } else if external {
         transpiler_id(cx.transpiler);
     } else {
-        compiler_id() ^ fnv_cont(FNV_BASIS, stdlib::get_env("SC_NATIVE").unwrap_or(String::from_str("-")).as_str());
+        let mut sel = String::new();
+        for v in ["SC_NATIVE", "SC_LIR_OPT", "SC_LIR_INLINE", "SC_LIR_PROMOTE"] {
+            sel.format_into("{}|", stdlib::get_env(v).unwrap_or(String::from_str("-")).as_str());
+        }
+        compiler_id() ^ fnv_cont(FNV_BASIS, sel.as_str());
     };
     let mut gen_files = Vector::<String>::new();
     let skipped = cache_on && stamp_fresh(

@@ -9996,6 +9996,61 @@ extend CEmit {
         self.mg.need_name(fnv(out.as_str().slice(st, out.len())), true);
     }
 
+    /// The symbol of the `@simd_impl` entry that computes lane-wise or reducing vector operation `rv` of
+    /// `b` whole under the current features (`simd_plan`'s PF_NATIVE), into `out`: the native lowering
+    /// calls it in place of its lane loop, as the C path does. False for an operation that traps (the
+    /// lane loop checks its lanes first), a mask result, operands of other shapes, or another plan.
+    pub fn lir_simd_entry(self: &mut Self, b: &ir::CoreBody, rv: &ir::Rvalue, out: &mut String) bool {
+        let c = rv.c;
+        if !self.simd_on || rv.kind != ir::RV_SIMD || rv.b == 0 {
+            return false;
+        }
+        let rule = ir::simd_op(c).rule;
+        if rule != ir::SR_VEC && rule != ir::SR_LANES && rule != ir::SR_REDUCE {
+            return false;
+        }
+        let mut n: i64 = 0;
+        let mut bt = BuiltinType::BT_VOID;
+        if !self.vec_ty(b, b.operands.at(b.oper_pool[rv.a as usize] as usize).ty, &mut n, &mut bt) {
+            return false;
+        }
+        for i in 1..rv.b {
+            let mut n2: i64 = 0;
+            let mut bt2 = BuiltinType::BT_VOID;
+            if !self.vec_ty(b, b.operands.at(b.oper_pool[(rv.a + i) as usize] as usize).ty, &mut n2, &mut bt2) || n2 != n || bt2 != bt {
+                return false;
+            }
+        }
+        let mut r = bt;
+        if rule != ir::SR_VEC {
+            let mut rm = b.module;
+            let mut rt = rv.target;
+            self.rty(b, rv.target, &mut rm, &mut rt);
+            let ry = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
+            if ry.kind == TypeKind::TYPE_BUILTIN {
+                r = ry.as_data.builtin;
+            } else {
+                let mut rn: i64 = 0;
+                if !self.vec_ty(b, rv.target, &mut rn, &mut r) {
+                    return false;
+                }
+            }
+        }
+        if vec_simd_tpl(c, bt, r).contains("__sc_f0") {
+            return false;
+        }
+        let fl = bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64;
+        let op = ir::OP_SIMD + pick(c == ir::SIMD_ABS && !fl, ir::SIMD_WRAP_ABS, c) as u32;
+        let pl = self.vplan_quiet(op, bt, r, n);
+        if pl.form != sp::PF_NATIVE {
+            return false;
+        }
+        let en = *self.p().simd_table.at(pl.entry as usize);
+        out.push_str("__sc_si_");
+        let tg = self.mg.method_target(en.module, en.node);
+        return self.mg.fn_sym(en.module, en.node, tg, out);
+    }
+
     // Whether a vector of `2 * hb` bytes and its halves of `hb` bytes are whole 16-byte chunks: the
     // vector names its chunks (`Mangler::vec_chunked`), and a half is one chunk or names its own. A
     // merged operand (`fused`) is a lane value, not a vector.
