@@ -301,6 +301,8 @@ pub struct Package {
     /// The scalar class (`bindgen::SC_*`) of the opaque `@layout` types of extern blocks with a header, as
     /// `module << 32 | node`, in a native build: what the calling conventions pass them as.
     pub opaque_cls: Map<u64, u8>,
+    /// The layout of those of class `bindgen::SC_REC`: `<size> <align>`, then its leaves (`bindgen::c_layout`).
+    pub opaque_lay: Map<u64, String>,
     /// The C header files those facts were read from (`extern_ints`, `c_fns`, `opaque_cls`): inputs of the
     /// emission.
     pub header_files: Vector<String>,

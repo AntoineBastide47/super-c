@@ -160,6 +160,7 @@ pub struct Lower {
     /// The function symbols lowered since the last `claim`.
     pend: Vector<u32>,
     pend_c: str<'static>, // what in them only C compiles (a C header's constant, an intrinsic), else empty
+    pend_name: String, // the C name `pend_c` is about
     fails_seen: usize, // `fails` at the last claim
     /// The units a C chunk without a LIR body landed in, which compile through C, and why.
     pub conly: Vector<u32>,
@@ -230,7 +231,7 @@ pub struct Lower {
     ret_off: Vector<u32>, // per result of a multi-value body: its offset in the result memory
     str_len: u64, // the length of the string `str_data` placed last
     hint: TyI, // the type an untyped constant operand takes: its destination's
-    upack: Map<u32, u64>, // per untyped local a call fills: its layout << 32 | its offsets in `uoffs`
+    upack: Map<u32, u64>, // per untyped local a call fills: its layout (NONE: zero-sized) << 32 | its offsets in `uoffs`
     uoffs: Vector<u32>,
 }
 
@@ -242,6 +243,7 @@ extend Lower {
             tests: Vector::<LTest>::new(),
             pend: Vector::<u32>::new(),
             pend_c: "",
+            pend_name: String::new(),
             fails_seen: 0,
             conly: Vector::<u32>::new(),
             conly_why: Vector::<String>::new(),
@@ -683,6 +685,35 @@ extend Lower {
         return at;
     }
 
+    // The leaves of a C record of layout `lay` (`bindgen::SC_REC`) at byte `off` into `out`, when the
+    // header's size and alignment are the declared ones `ti`; false past 16 leaves.
+    fn rec_leaves(lay: str, ti: TyI, off: u32, out: &mut Vector<(u32, u8)>) bool {
+        let mut it = lay.split(" ");
+        let size = it.next().unwrap_or("").parse_u64().unwrap_or(0);
+        let align = it.next().unwrap_or("").parse_u64().unwrap_or(0);
+        if size != ti.size as u64 || align != ti.align as u64 {
+            return false;
+        }
+        // Each step takes one leaf of at most 17.
+        while let Some(w) = it.next() {
+            if out.len() > 16 {
+                return false;
+            }
+            let at = w.slice(0, w.len() - 1).parse_u64().unwrap_or(0) as u32;
+            let mty = switch w.byte_at(w.len() - 1) {
+                b'b' => T_I8,
+                b'h' => T_I16,
+                b'w' => T_I32,
+                b'q' => T_I64,
+                b'f' => T_F32,
+                b'd' => T_F64,
+                _ => T_PTR,
+            };
+            out.push((off + at, mty));
+        }
+        return out.len() <= 16;
+    }
+
     // The scalar leaves of `(m, t)` at byte `off` into `out` (struct fields, array elements, every
     // variant of an enum and member of a union, overlapping); false past 16 leaves.
     fn leaves(
@@ -744,8 +775,12 @@ extend Lower {
             return true;
         }
         if y.kind == TypeKind::TYPE_OPAQUE {
+            let key = y.module as u64 << 32 | y.as_data.decl as u64;
+            let k = Lower::p(c).opaque_cls.get(&key);
+            if k.is_some() && *k.unwrap() == bg::SC_REC {
+                return Lower::rec_leaves(Lower::p(c).opaque_lay.get(&key).unwrap().as_str(), ti, off, out);
+            }
             // A C register tuple (`bindgen::SC_VTUPLE`): its 128-bit vectors.
-            let k = Lower::p(c).opaque_cls.get(&(y.module as u64 << 32 | y.as_data.decl as u64));
             if k.is_none() || *k.unwrap() != bg::SC_VTUPLE || ti.size % 16 != 0 {
                 return false;
             }
@@ -1766,13 +1801,18 @@ extend Lower {
                 }
             } else if d.ty == TYPE_NONE && self.upack.contains_key(&(l as u32)) {
                 // An untyped local a call of several results fills: the results' memory.
-                let lt = *self.upack.get(&(l as u32)).unwrap() >> 32;
-                info.ti = TyI {
-                    cls: VC_MEM,
-                    mty: T_NONE,
-                    size: self.b.pool[lt as usize],
-                    align: 1u32 << self.b.pool[lt as usize + 1],
-                };
+                let lt = (*self.upack.get(&(l as u32)).unwrap() >> 32) as u32;
+                if lt == NONE {
+                    info.kind = LK_ZST;
+                    info.ti = TyI { cls: VC_ZST, mty: T_NONE, size: 0, align: 1 };
+                } else {
+                    info.ti = TyI {
+                        cls: VC_MEM,
+                        mty: T_NONE,
+                        size: self.b.pool[lt as usize],
+                        align: 1u32 << self.b.pool[lt as usize + 1],
+                    };
+                }
             } else {
                 if !self.ty(c, b.module, d.ty, &mut info.ti) {
                     if self.dbg {
@@ -2734,6 +2774,7 @@ extend Lower {
                 }
             }
             self.pend_c = "reads a C header's constant";
+            self.pend_name = sym.clone();
         }
         // Its storage, which C may not have needed.
         if !c.lir_stat_need(b.module, item, d.ty, sym.as_str()) {
@@ -6109,6 +6150,7 @@ extend Lower {
                     name.as_str(),
                 ).len() == 0 {
                     self.pend_c = "calls a function only a C compile defines (an intrinsic, a header's `static` one)";
+                    self.pend_name = name.clone();
                 }
                 if c.mg.in_interface(t.callee.module, t.callee.node) != NODE_NONE && c.mg.last_method_def.node != NODE_NONE {
                     pcallee = c.mg.last_method_def;
@@ -6153,10 +6195,13 @@ extend Lower {
             if b.locals[ub as usize].ty == TYPE_NONE && b.places[dp as usize].proj_len == 0 && self.upack.contains_key(
                 &ub,
             ) {
-                // Several results into an untyped local: its memory takes them.
+                // Several results into an untyped local: its memory takes them; zero-sized ones return
+                // nothing.
                 let lt = (*self.upack.get(&ub).unwrap() >> 32) as u32;
-                let sg = self.b.signature(tys[0..tys.len()], nfixed, variadic, AGG | lt);
-                args.push(self.li[ub as usize].addr);
+                let sg = self.b.signature(tys[0..tys.len()], nfixed, variadic, ast::pick(lt == NONE, T_NONE, AGG | lt));
+                if lt != NONE {
+                    args.push(self.li[ub as usize].addr);
+                }
                 let at = self.b.pool_list(args[0..args.len()]);
                 let _ = if fv != VNONE {
                     self.inst(O_CALLIND, T_NONE, args.len() as u16, fv, sg, at);
@@ -6848,9 +6893,9 @@ extend Lower {
             let mut why = String::new();
             if self.pend_c.len() != 0 && self.pend.len() != 0 {
                 let nm = self.pkg.spell(self.pkg.syms[self.pend[0] as usize].name);
-                why.format_into("{} `{}` {}", what, nm, self.pend_c);
+                why.format_into("{} `{}` {}: `{}`", what, nm, self.pend_c, self.pend_name.as_str());
             } else if self.pend_c.len() != 0 {
-                why.format_into("{} {}", what, self.pend_c);
+                why.format_into("{} {}: `{}`", what, self.pend_c, self.pend_name.as_str());
             } else if self.fails.len() > self.fails_seen {
                 let f = self.fails.at(self.fails.len() - 1);
                 why.format_into("{} `{}` refused: {}", what, f.sym.as_str(), f.why);
@@ -7191,9 +7236,10 @@ extend Lower {
             }
             let lt = self.pack(c, tm, &tys);
             c.mg.pop_subs(nb);
-            if lt == NONE {
+            if lt == NONE && self.err.len() != 0 {
                 return self.fail("untyped-results");
             }
+            // NONE: every result is zero-sized.
             let e = lt as u64 << 32 | self.uoffs.len() as u64;
             for k in 0..self.ret_off.len() {
                 self.uoffs.push(self.ret_off[k]);

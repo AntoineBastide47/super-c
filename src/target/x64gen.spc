@@ -3789,8 +3789,9 @@ extend Gen {
             let v = b.pool[(t.c + k) as usize];
             let pt = b.pool[(sig + 3 + k) as usize];
             let vty = self.vt(v);
-            if loc.n == 2 && !self.lay.parts[loc.p0 as usize + 1].v && self.lay.parts[loc.p0 as usize].v {
-                // A variadic float (Microsoft x64): its vector register, then its bits in the integer one.
+            if (pt & AGG) == 0 && loc.n == 2 && !self.lay.parts[loc.p0 as usize + 1].v && self.lay.parts[loc.p0 as usize].v {
+                // A variadic float (Microsoft x64): its vector register, then its bits in the integer one. (An
+                // aggregate's float and integer halves under System V are two parts too.)
                 let pv = self.lay.parts[loc.p0 as usize];
                 if !moved[k as usize] {
                     self.materialize(v, V0 + pv.reg);

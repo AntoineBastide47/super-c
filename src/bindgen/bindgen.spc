@@ -45,6 +45,8 @@ struct Lexer<'a> {
     /// The vector attribute the declaration being read carries: its bytes (`vector_size`), minus its
     /// lanes (`neon_vector_type`, `ext_vector_type`), 0 for none.
     pub vec: i64,
+    pub lay_attr: bool, // a `packed` or `aligned` attribute passed since the record body being read began
+    pub packs: bool, // a `#pragma pack` passed: no record's layout follows from its members alone
 }
 
 const fn is_id_start(c: u8) bool {
@@ -61,7 +63,17 @@ const fn is_digit(c: u8) bool {
 
 extend<'a> Lexer<'a> {
     fn new(src: str<'a>) Lexer<'a> {
-        let mut lx = Lexer::<'a> { src: src, pos: 0, kind: TK_EOF, start: 0, end: 0, file: String::new(), vec: 0 };
+        let mut lx = Lexer::<'a> {
+            src: src,
+            pos: 0,
+            kind: TK_EOF,
+            start: 0,
+            end: 0,
+            file: String::new(),
+            vec: 0,
+            lay_attr: false,
+            packs: false,
+        };
         lx.advance();
         return lx;
     }
@@ -99,9 +111,12 @@ extend<'a> Lexer<'a> {
                 self.file.push_str(self.src.slice(fs, i));
             }
         }
+        let at = self.pos;
         while self.pos < n && self.src.byte_at(self.pos) != b'\n' {
             self.pos = self.pos + 1;
         }
+        let line = self.src.slice(at, self.pos);
+        self.packs = self.packs || line.find("pragma") >= 0 && line.find("pack") >= 0;
     }
 
     fn advance(self: &mut Lexer<'a>) {
@@ -284,6 +299,7 @@ struct Widths {
     pub int_b: i32,
     pub long_b: i32,
     pub llong_b: i32,
+    pub ptr_b: i32,
 }
 
 fn int_name(bytes: i32, signed: bool, out: &mut String) {
@@ -334,6 +350,7 @@ struct Field {
 // Super-C form (a bitfield, an anonymous member, a flexible array, an unmodelled type): such a record
 // falls back to the opaque `pub type`, which keeps every member out of reach instead of binding some.
 // `tagless`: the body had no tag, so `tag` is the typedef that names it (`typedef struct { .. } Foo;`).
+// `attr`: a `packed` or `aligned` attribute or a `#pragma pack` may move its members (`c_layout`).
 struct Record {
     pub tag: String,
     pub fields: Vector<Field>,
@@ -341,6 +358,7 @@ struct Record {
     pub ok: bool,
     pub mine: bool,
     pub tagless: bool,
+    pub attr: bool,
 }
 
 struct EnumVal {
@@ -607,6 +625,7 @@ pub fn header_facts(
     statics: &mut Vector<bool>,
     types: []str,
     classes: &mut Vector<u8>,
+    layouts: &mut Vector<String>,
     read: &mut Vector<String>,
 ) bool {
     let path = "/__sc_header_ints.c";
@@ -639,7 +658,7 @@ pub fn header_facts(
         enums: Vector::<EnumDef>::new(),
         consts: Vector::<ConstDef>::new(),
         globals: Vector::<ConstDef>::new(),
-        widths: Widths { short_b: 2, int_b: 4, long_b: 8, llong_b: 8 },
+        widths: Widths { short_b: 2, int_b: 4, long_b: 8, llong_b: 8, ptr_b: 8 },
         cur_mine: false,
         pending_agg: -1,
         pending_is_enum: false,
@@ -695,10 +714,163 @@ pub fn header_facts(
         let key = String::from_str(fns[k]);
         statics.push(c.statics.contains(&key));
     }
+    let mut lv = Vector::<(u32, u8)>::new();
     for k in 0..types.len() {
-        classes.push(scalar_class(&c, types[k]));
+        let mut cl = scalar_class(&c, types[k]);
+        let mut lay = String::new();
+        lv.truncate(0);
+        let mut size: u32 = 0;
+        let mut align: u32 = 0;
+        if cl == SC_NONE && c_layout(&c, types[k], 0, &mut lv, &mut size, &mut align) {
+            cl = SC_REC;
+            lay.format_into("{} {}", size, align);
+            for q in 0..lv.len() {
+                lay.format_into(" {}{}", lv[q].0, lv[q].1 as char);
+            }
+        }
+        classes.push(cl);
+        layouts.push(lay);
     }
     return true;
+}
+
+// The layout of C type `ty` (a rendered member type, a typedef or a record's tag): its size, its alignment
+// and its scalar leaves at their offsets (`b` `h` `w` `q` integers of 1 to 8 bytes, `f` and `d` floats,
+// `p` pointers), at most 17: past 16 a calling convention passes it in memory. False when a member's
+// layout does not follow from its type alone (a vector, `long double`, an attribute, an unknown name).
+fn c_layout(c: &Collected, ty: str, depth: u32, out: &mut Vector<(u32, u8)>, size: &mut u32, align: &mut u32) bool {
+    if depth > 8 {
+        return false;
+    }
+    let pb = c.widths.ptr_b as u32;
+    if ty.starts_with("*") || ty.starts_with("fn(") {
+        *size = pb;
+        *align = pb;
+        out.push((0, b'p'));
+        return true;
+    }
+    if ty.starts_with("[") && ty.ends_with("]") {
+        // `[T; N]`: N elements of T, the last `;` the outer extent's.
+        let mut semi: isize = -1;
+        for i in 1..ty.len() {
+            if ty.byte_at(i) == b';' {
+                semi = i as isize;
+            }
+        }
+        if semi < 0 || semi as usize + 2 >= ty.len() {
+            return false;
+        }
+        let n = int_literal(ty.slice(semi as usize + 2, ty.len() - 1));
+        let mut el = Vector::<(u32, u8)>::new();
+        let mut es: u32 = 0;
+        if n <= 0 || !c_layout(c, ty.slice(1, semi as usize), depth + 1, &mut el, &mut es, align) {
+            return false;
+        }
+        *size = es * n as u32;
+        // Each element adds at least one leaf: at most 17 steps.
+        let mut k: u32 = 0;
+        while k < n as u32 && out.len() <= 16 {
+            for q in 0..el.len() {
+                out.push((k * es + el[q].0, el[q].1));
+            }
+            k += 1;
+        }
+        return true;
+    }
+    let (sz, code) = switch ty {
+        "i8" | "u8" | "bool" | "char" => (1u32, b'b'),
+        "i16" | "u16" => (2u32, b'h'),
+        "i32" | "u32" => (4u32, b'w'),
+        "i64" | "u64" => (8u32, b'q'),
+        "isize" | "usize" => (
+            pb,
+            if pb == 8 {
+                b'q';
+            } else {
+                b'w';
+            }
+        ),
+        "f32" => (4u32, b'f'),
+        "f64" => (8u32, b'd'),
+        _ => (0u32, 0u8),
+    };
+    if sz != 0 {
+        *size = sz;
+        *align = sz;
+        out.push((0, code));
+        return true;
+    }
+    let ri = c.record_of(ty);
+    if ri >= 0 {
+        let r = &c.records[ri as usize];
+        if !r.ok || r.attr {
+            return false;
+        }
+        let mut at: u32 = 0;
+        let mut al: u32 = 1;
+        let mut fl = Vector::<(u32, u8)>::new();
+        for k in 0..r.fields.len() {
+            fl.truncate(0);
+            let mut fs: u32 = 0;
+            let mut fa: u32 = 0;
+            if !c_layout(c, r.fields[k].ty.as_str(), depth + 1, &mut fl, &mut fs, &mut fa) {
+                return false;
+            }
+            let o = if r.is_union {
+                0u32;
+            } else {
+                at + fa - 1 & ~(fa - 1);
+            };
+            for q in 0..fl.len() {
+                if out.len() <= 16 {
+                    out.push((o + fl[q].0, fl[q].1));
+                }
+            }
+            at = if r.is_union {
+                ast_max(at, fs);
+            } else {
+                o + fs;
+            };
+            al = ast_max(al, fa);
+        }
+        *size = at + al - 1 & ~(al - 1);
+        *align = al;
+        return true;
+    }
+    for e in 0..c.enums.len() {
+        let ed = &c.enums[e];
+        if ed.tag.as_str() == ty {
+            // An enum whose values fit an `int` is one (C11 6.7.2.2).
+            let mut fits = ed.ok;
+            for q in 0..ed.vals.len() {
+                fits = fits && ed.vals[q].value >= -2147483648 && ed.vals[q].value <= 2147483647;
+            }
+            if !fits {
+                return false;
+            }
+            *size = 4;
+            *align = 4;
+            out.push((0, b'w'));
+            return true;
+        }
+    }
+    let ai = c.alias_of(ty);
+    if ai < 0 {
+        return false;
+    }
+    let al = &c.aliases[ai as usize];
+    if !al.ok || al.sub.len() == 0 || al.sub.as_str() == ty {
+        return false;
+    }
+    return c_layout(c, al.sub.as_str(), depth + 1, out, size, align);
+}
+
+const fn ast_max(a: u32, b: u32) u32 {
+    return if a > b {
+        a;
+    } else {
+        b;
+    };
 }
 
 // The markers `header_facts` writes after the header: the start of the names, and before each name.
@@ -723,6 +895,9 @@ pub const SC_VF64: u8 = b'D';
 /// `scalar_class`: a struct of 128-bit vectors only (`arm_neon.h`'s `uint8x16x2_t`), which a calling
 /// convention passes as that many vectors.
 pub const SC_VTUPLE: u8 = b'T';
+/// A struct or union of scalars: `header_facts` gives its layout as `<size> <align>` and its leaves, each
+/// ` <offset><code>` (`c_layout`).
+pub const SC_REC: u8 = b'R';
 
 // The bytes of vector type `name` (`record_vector`'s `i8x16`) through its typedefs; 0 for another type.
 fn vec_bytes(c: &Collected, name: str) u32 {
@@ -848,6 +1023,7 @@ fn read_widths(c: &Collected, dump: str) Widths {
         int_b: size_macro(c, dump, "__SIZEOF_INT__", 4),
         long_b: size_macro(c, dump, "__SIZEOF_LONG__", 8),
         llong_b: size_macro(c, dump, "__SIZEOF_LONG_LONG__", 8),
+        ptr_b: size_macro(c, dump, "__SIZEOF_POINTER__", 8),
     };
 }
 
@@ -1691,7 +1867,7 @@ fn run_one(
         enums: Vector::<EnumDef>::new(),
         consts: Vector::<ConstDef>::new(),
         globals: Vector::<ConstDef>::new(),
-        widths: Widths { short_b: 2, int_b: 4, long_b: 8, llong_b: 8 },
+        widths: Widths { short_b: 2, int_b: 4, long_b: 8, llong_b: 8, ptr_b: 8 },
         cur_mine: false,
         pending_agg: -1,
         pending_is_enum: false,
@@ -1998,6 +2174,7 @@ extend Lexer {
                 }
             } else if self.kind == TK_IDENT {
                 let t = self.text();
+                self.lay_attr = self.lay_attr || t == "packed" || t == "__packed__" || t == "aligned" || t == "__aligned__";
                 let bytes = t == "vector_size" || t == "__vector_size__";
                 let lanes = t == "neon_vector_type" || t == "__neon_vector_type__" || t == "neon_polyvector_type" || t == "ext_vector_type";
                 if bytes || lanes {
@@ -2123,6 +2300,8 @@ extend Lexer {
             ok: true, // a nameless body is named by the typedef that follows; emission re-checks the tag
             mine: c.cur_mine,
         };
+        let la0 = self.lay_attr;
+        self.lay_attr = false;
         // '{'. A nested body is consumed by parse_specs, so the first '}' seen here closes this one.
         self.advance();
         loop {
@@ -2206,6 +2385,10 @@ extend Lexer {
         if r.fields.len() == 0 {
             r.ok = false;
         }
+        // An attribute after the body (`} __attribute__((packed)) T;`) changes the size or the
+        // alignment, which `c_layout`'s reader compares with the declared ones.
+        r.attr = self.lay_attr || self.packs;
+        self.lay_attr = la0 || self.lay_attr;
         c.records.push(r);
     }
 
