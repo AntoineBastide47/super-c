@@ -1081,6 +1081,9 @@ fn arch_gated_uses_keep_imports() {
 // and the program runs.
 @test
 fn byte_views_of_aggregates_are_no_provable_fault() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let srcs: [str; 2] = [
         "fn main() i32 {\n    let mut buf: [[u8; 32]; 2] = [[0; 32], [0; 32]];\n    let base = &mut buf as *mut [[u8; 32]; 2] as *mut u8;\n    for i in 0usize..32 {\n        unsafe *(base + 8 + i) = 1;\n    }\n    return buf[1][0] as i32 - 1;\n}\n",
         "fn main() i32 {\n    let mut v = Simd::<u8, 64>::splat(0);\n    let base = &mut v as *mut Simd<u8, 64> as *mut u8;\n    unsafe *(base + 40) = 7;\n    return v[40] as i32 - 7;\n}\n",

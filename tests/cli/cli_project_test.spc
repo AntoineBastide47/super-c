@@ -226,6 +226,9 @@ fn a_cross_linked_release_strips_at_link() {
 // `-arch`, so the executable's Mach-O header names that CPU (x86_64 0x01000007, arm64 0x0100000C).
 @test
 fn a_macos_build_for_the_other_arch_targets_it() {
+    if !cli::has_cc() {
+        return; // macOS x86-64 has no native backend
+    }
     if PLATFORM != Platform::MacOS {
         return;
     }

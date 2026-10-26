@@ -42,6 +42,54 @@ const fn wasm32(os: i32, isa: i32) bool {
     return tgt::obj_of(os).name == "wasm" && tgt::isa(isa).name == "wasm32";
 }
 
+/// The own linker's format for `(os, isa)` (`link::link`): none, Mach-O arm64, ELF x86-64, ELF arm64, PE
+/// x86-64 or wasm32.
+pub const LINK_NONE: u8 = 0;
+pub const LINK_MACHO: u8 = 1;
+pub const LINK_ELF_X64: u8 = 2;
+pub const LINK_ELF_A64: u8 = 3;
+pub const LINK_PE: u8 = 4;
+pub const LINK_WASM: u8 = 5;
+
+/// The object format of OS `os` (`target::table::ObjFormat`), as the archiver reads objects.
+pub const OBJ_MACHO: u8 = 0;
+pub const OBJ_ELF: u8 = 1;
+pub const OBJ_COFF: u8 = 2;
+pub const OBJ_WASM: u8 = 3;
+
+pub const fn obj_kind(os: i32) u8 {
+    let f = tgt::obj_of(os).name;
+    if f == "macho" {
+        return OBJ_MACHO;
+    }
+    if f == "coff" {
+        return OBJ_COFF;
+    }
+    if f == "wasm" {
+        return OBJ_WASM;
+    }
+    return OBJ_ELF;
+}
+
+pub const fn own_linker(os: i32, isa: i32) u8 {
+    if apple_arm64(os, isa) && tgt::os(os).sdk == tgt::SDK_NONE {
+        return LINK_MACHO;
+    }
+    if linux_x64(os, isa) {
+        return LINK_ELF_X64;
+    }
+    if linux_arm64(os, isa) {
+        return LINK_ELF_A64;
+    }
+    if windows_x64(os, isa) {
+        return LINK_PE;
+    }
+    if wasm32(os, isa) {
+        return LINK_WASM;
+    }
+    return LINK_NONE;
+}
+
 /// Whether the backend for `(os, isa)` assembles module-level assembly.
 pub const fn asm_native(os: i32, isa: i32) bool {
     return apple_arm64(os, isa) || linux_arm64(os, isa) || linux_x64(os, isa) || windows_x64(os, isa) || wasm32(os, isa);

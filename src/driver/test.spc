@@ -23,6 +23,8 @@ import driver::util as *;
 import build_system::objcache as ocache;
 import build_system::build as bsys;
 import build_system::manifest as bman;
+import link::link as lk;
+import std::parallel::runtime as prt;
 
 /// --test run options, forwarded to the generated runner.
 pub struct TestOpts {
@@ -773,7 +775,10 @@ pub fn test_build_and_run(
     // The link-only SDK libs ride along on the command that links.
     let mut ll = String::new();
     push_sdk_libs(&mut ll, target);
-    if !bsys::features_accepted(
+    // Without a C compiler the program links from native objects alone, through the own linker.
+    let mut ccpath = String::new();
+    let no_cc = ocache::which_path(ccs.as_str(), &mut ccpath) == 0;
+    if !no_cc && !bsys::features_accepted(
         loader::dirname_of(root),
         ccs.as_str(),
         pfl.as_str(),
@@ -791,7 +796,19 @@ pub fn test_build_and_run(
     split_args(&mut args, ccs.as_str());
     let croot = ocache::object_cache_dir("");
     let mut objs = Vector::<String>::new();
-    if croot.len() != 0 {
+    if no_cc {
+        // The C registry beside the native one only checks the extern declarations: left out.
+        for i in 0..units.len() {
+            if loader::basename_of(units[i].as_str()) != "__sc_registry.c" {
+                eprintln(
+                    "super-c: '{}' compiles through C, and the C compiler '{}' is not installed",
+                    units[i].as_str(),
+                    ccs.as_str(),
+                );
+                return 1;
+            }
+        }
+    } else if croot.len() != 0 {
         let mut ccv = Vector::<String>::new();
         split_args(&mut ccv, ccs.as_str());
         let mut cfv = Vector::<String>::new();
@@ -811,10 +828,19 @@ pub fn test_build_and_run(
     split_args(&mut args, cflags);
     split_args(&mut args, late.as_str());
     split_args(&mut args, ll.as_str());
+    if no_cc {
+        // No C unit compiles: link-time optimization has no input.
+        args.retain(
+            fn(a: &String) bool {
+                return !a.starts_with("-flto");
+            },
+        );
+    }
     args.push(String::from_str("-o"));
     let mut outp = String::new();
     if out_bin.len() != 0 {
-        outp.push_str(out_bin);
+        // The target's executable suffix, which GCC's MinGW driver appends itself but no linker of ours.
+        outp = bsys::exe_name(out_bin, target);
     } else {
         outp.push_str(root);
         outp.push_str("/__tests");
@@ -822,13 +848,24 @@ pub fn test_build_and_run(
     }
     args.push(outp.clone());
     let first = args.len();
-    if croot.len() != 0 {
-        for i in 0..objs.len() {
-            args.push(objs.at(i).clone());
-        }
+    // With the native registry the C one compiles for its checks of the extern blocks only.
+    let mut nreg = false;
+    for i in 0..nobjs.len() {
+        nreg = nreg || loader::basename_of(nobjs[i].as_str()) == "__sc_registry_n.o";
+    }
+    let mut ncobj: usize = 0;
+    let cin = if no_cc {
+        objs.as_slice();
+    } else if croot.len() != 0 {
+        objs.as_slice();
     } else {
-        for i in 0..units.len() {
-            args.push(units.at(i).clone());
+        units.as_slice();
+    };
+    for i in 0..cin.len() {
+        let b = loader::basename_of(cin[i].as_str());
+        if !nreg || b != "__sc_registry.o" && b != "__sc_registry.c" {
+            args.push(cin[i].clone());
+            ncobj += 1;
         }
     }
     for i in 0..nobjs.len() {
@@ -837,6 +874,34 @@ pub fn test_build_and_run(
     let n = args.len() - first;
     let ldpath = build_out_path(root, "__ldflags", "");
     push_ldflags(&mut args, ldpath.as_str());
+    let strip = bsys::profile_strip(p.profile.as_str(), target);
+    if ncobj == 0 && lk::enabled() || no_cc {
+        let mut why = String::new();
+        let lr = lk::link_args(target, p.arch, &args, strip, p.jobs, &mut why);
+        if p.jobs != 1 {
+            prt::shutdown(); // the link may have started the pool
+        }
+        if lr == lk::FAILED {
+            eprintln("super-c: {} failed: {}", what, why.as_str());
+            return 1;
+        }
+        if lr == lk::NOT_SERVED && no_cc {
+            eprintln(
+                "super-c: {} failed: the C compiler '{}' is not installed, and the own linker does not serve this link: {}",
+                what,
+                ccs.as_str(),
+                why.as_str(),
+            );
+            return 1;
+        }
+        if lr == lk::LINKED {
+            bsys::sweep(null, time::now(), false);
+            if out_bin.len() != 0 {
+                return 0;
+            }
+            return test_run_runner(topts, outp.as_str());
+        }
+    }
     let rsp = loader::join2(root, "__link.rsp");
     let fit = bsys::fit_cmdline(&mut args, first, n, rsp.as_str(), bsys::cmdline_max());
     let brc = if fit < 0 {
@@ -851,7 +916,7 @@ pub fn test_build_and_run(
         eprintln("super-c: {} failed ({})", what, ccs.as_str());
         return 1;
     }
-    if bsys::profile_strip(p.profile.as_str(), target) {
+    if strip {
         let mut st = Vector::<String>::new();
         st.push(String::from_str("strip"));
         st.push(outp.clone());

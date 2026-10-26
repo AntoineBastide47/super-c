@@ -28,6 +28,9 @@ struct Cmd {
 // Disjoint extends in two modules each define the name.
 @test
 fn duplicate_items_across_modules() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     let root = p.dir();
     p.mkfile(
@@ -82,6 +85,9 @@ fn duplicate_items_across_modules() {
 // (ZST storage elision removed the last GNU empty-struct dependency).
 @test
 fn language_demo_emits_valid_c() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     assert(p.copyfile("main.spc", "examples/language_demo.spc"), "language demo is present");
     let compile = p.compile("main.spc");
@@ -99,6 +105,9 @@ fn language_demo_emits_valid_c() {
 // (tests/ir/zst_test.spc has the semantics).
 @test
 fn zero_length_arrays_emit_valid_c() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -216,6 +225,9 @@ fn main() i32 {
 
 @test
 fn type_limit_comparisons_emit_valid_c() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("main.spc", LIMIT_CMPS);
     assert(p.compile("main.spc").ok());
@@ -280,6 +292,9 @@ fn main() i32 {
 // file-scope constants decode their escapes and matchertext delimiter chains like body constants.
 @test
 fn long_string_constants_emit_valid_c() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     // Each marker's unit source text, repeated past 4095 decoded bytes.
     let mut big = String::new();
     rep(&mut big, M"(ab\x41\u{e9}\n\"\\)", 600);
@@ -318,6 +333,9 @@ fn rep(dst: &mut String, unit: str, n: usize) {
 // literals reach C in hex with the same value, underscores and u64::MAX included.
 @test
 fn octal_and_binary_literals_emit_c11() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -335,6 +353,9 @@ fn octal_and_binary_literals_emit_c11() {
 // `x >> 64` undefined) and traps, and a hex divisor stays a C operator.
 @test
 fn hex_shift_counts_reach_the_checked_helper() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("hex.spc", "fn f(x: u64) u64 {\n    return x >> 0x40;\n}\nfn main() i32 {\n    return f(1) as i32;\n}\n");
     p.expect_fail("hex.spc", "error: this operation is undefined behavior when executed: shift out of range\n--> ");
@@ -353,6 +374,9 @@ fn hex_shift_counts_reach_the_checked_helper() {
 // folds where it is spelled, so C never sees `x > x` (a -Wtautological-compare warning).
 @test
 fn inlined_self_comparison_folds() {
+    if !cli::has_cc() {
+        return; // it reads the emitted C
+    }
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
     p.mkfile(
@@ -387,6 +411,9 @@ fn a_single_file_release_build_is_stripped() {
 // success test of `?` reaches C as a likely branch, at run time and in constant evaluation alike.
 @test
 fn mut_refs_restrict_and_question_success_is_likely() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -459,6 +486,9 @@ fn main(args: Vector<str>) i32 {
 
 @test
 fn mut_views_split_into_restrict_pointers() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("main.spc", SPLIT_VIEWS);
     assert(p.compile("main.spc").ok(), "the program compiles");
@@ -525,6 +555,9 @@ fn main() i32 {
 
 @test
 fn pattern_literals_take_the_scrutinee_type() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("main.spc", PAT_LITS);
     assert(p.compile("main.spc").ok(), "the program compiles");
@@ -558,6 +591,9 @@ fn pattern_literals_take_the_scrutinee_type() {
 // and match. Drives the multi-file build/ tree (subdirs) through cc + run.
 @test
 fn cross_module_enum() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "lib/lib.spc",
@@ -588,6 +624,9 @@ fn main() i32 { let c = lib::lib::red(); let b = lib::lib::Box::Filled(20);
 // _Static_asserts landing in the C and PASSING under -Werror.
 @test
 fn const_eval_flag() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -641,6 +680,9 @@ fn main() i32 {
 
 @test
 fn inline_for_and_parallel_for() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -694,6 +736,9 @@ fn main() i32 {
 
 @test
 fn reflection_tail() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -864,6 +909,9 @@ fn main() i32 { let w = W::<i32> { v: 1, n: Option::<Box<W<W<i32>>>>::None }; re
 
 @test
 fn reflect_enum_variants() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -896,6 +944,9 @@ fn main() i32 {
 
 @test
 fn reflect_derives() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -936,6 +987,9 @@ fn main() i32 {
 
 @test
 fn derive_and_interface_defaults() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "lib.spc",
@@ -1030,6 +1084,9 @@ fn derived_bound_checks_foreign_tuple_members() {
 // it nests one level deeper.
 @test
 fn generic_alias_across_modules() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "lib.spc",
@@ -1069,6 +1126,9 @@ fn main() i32 {
 
 @test
 fn format_args_via_conformance() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("lib.spc", M"(@derive(Format, Hash)
 pub struct Point { pub x: i32, pub y: i32, }
@@ -1123,6 +1183,9 @@ fn main() i32 {
 
 @test
 fn reflect_metadata() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     // Instance-symbol assertions pin the NON-inlined emission.
     let _env1 = cli::set_env("SC_INLINE", "0");
     let p = cli::proj_new();
@@ -1208,6 +1271,9 @@ fn main() i32 {
 
 @test
 fn std_reflection_defaults() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("lib.spc", M"(@derive(Eq, Hash, Format)
 pub struct Key { pub a: i32, pub b: u8, }
@@ -1271,6 +1337,9 @@ fn main() i32 {
 
 @test
 fn paired_reflection_and_construction() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -1368,6 +1437,9 @@ fn main() i32 {
 
 @test
 fn fields_projection_extended() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "lib.spc",
@@ -1430,6 +1502,9 @@ fn main() i32 {
 
 @test
 fn fields_projection_serializer() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _env2 = cli::set_env("SC_INLINE", "0");
     let p = cli::proj_new();
     p.mkfile(
@@ -1468,6 +1543,9 @@ fn main() i32 {
 
 @test
 fn type_info_reflection() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -1573,6 +1651,9 @@ fn main(argv: Vector<str>) i32 {
 
 @test
 fn const_fn_calls_fold() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _env = cli::set_env("SC_INLINE", "0");
     let p = cli::proj_new();
     p.mkfile("main.spc", CONST_FOLD);
@@ -1626,6 +1707,9 @@ fn const_fn_calls_fold() {
 // plain functions outside them, and the step budget.
 @test
 fn ctfe() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _env3 = cli::set_env("SC_INLINE", "0");
     let p = cli::proj_new();
     p.mkfile(
@@ -1853,6 +1937,9 @@ fn main() i32 { return D; }
 // Also: an assert may precede its callee (deferred re-check) and a would-be trap reports its reason.
 @test
 fn ctfe_memory() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -1941,6 +2028,9 @@ fn main() i32 { return 0; }
 // payload variants + struct patterns, &CONST, interface DEFAULT bodies, and Map/Set.
 @test
 fn ctfe_gaps() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -2013,6 +2103,9 @@ fn main() i32 { return g1(20) - 42 + g2() - 62 + g3(6, 7) - 82 + g4() - 42 + g5(
 // borrow-check error: the source is legal).
 @test
 fn raii_cond_move_reassign() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -2033,6 +2126,9 @@ fn raii_cond_move_reassign() {
 // place out), so no double-free.
 @test
 fn raii_drop_on_field_assign() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -2093,6 +2189,9 @@ fn validation_skips_rejected_bodies() {
 // A tuple struct's untouched owning members get the same wrapper glue, spelled positionally `_i`.
 @test
 fn raii_free_glue_tuple_fields() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -2112,6 +2211,9 @@ fn raii_free_glue_tuple_fields() {
 // Wrapper form). Complete impls emit without a wrapper; raw-pointer fields are borrows and exempt.
 @test
 fn raii_free_glue_untouched_fields() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -2132,6 +2234,9 @@ fn raii_free_glue_untouched_fields() {
 // data instead of a call, and moving an owning one out is rejected.
 @test
 fn local_const_lifecycle() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -2178,6 +2283,9 @@ fn local_const_lifecycle() {
 // and freed, with nothing else pulling the allocator in.
 @test
 fn dyn_fn_box_roundtrip() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -2199,6 +2307,9 @@ fn dyn_fn_box_roundtrip() {
 // disabled runs print nothing.
 @test
 fn leak_tracker() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -2298,6 +2409,9 @@ fn leak_sites_name_the_allocating_function() {
 // point, and a removed root leaves the table (runtime lookup counts the survivors).
 @test
 fn reflect_registry_add_remove() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     let two = "@reflect(entity)\nstruct Zeta { pub a: i32 }\n@reflect(entity)\nstruct Alpha { pub b: i32 }\nextern \"C\" {\n    fn __sc_reflect_types(n: *mut usize) *const *const void;\n}\nfn main() i32 {\n    let mut n: usize = 0;\n    let _ = unsafe __sc_reflect_types(&mut n);\n    let z = Zeta { a: 1 };\n    let al = Alpha { b: 2 };\n    return n as i32 + z.a + al.b - 5;\n}\n";
     p.mkfile("main.spc", two);
@@ -2329,6 +2443,9 @@ fn reflect_registry_add_remove() {
 // explicit Free types (replace() is the take idiom).
 @test
 fn auto_derive_free() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -2357,6 +2474,9 @@ fn auto_derive_free() {
 
 @test
 fn auto_derive_free_in_generic_drop() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "owned.spc",
@@ -2407,6 +2527,9 @@ fn main() i32 {
 // construction, and a local extension method on an imported type.
 @test
 fn module_features() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "lib/lib.spc",
@@ -2438,6 +2561,9 @@ fn main() i32 {
 // modules (both through the owning module's functions and directly by path).
 @test
 fn cross_module_static_mut() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("state.spc", M"(pub static mut hits: i64 = 0;
 pub fn record() { unsafe hits += 1; }
@@ -2464,6 +2590,9 @@ fn main() i32 {
 // to the addressing module's constant data.
 @test
 fn cross_module_constant_reference() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("tbl.spc", M"(pub const T: [i32; 3] = [4, 5, 6];
 pub const U: i32 = 9;
@@ -2577,6 +2706,9 @@ fn test_timeout_dumps_child_processes() {
 // suites (fixture-as-self), should_panic, fork isolation, filtering, sharding, and --test-no-fork.
 @test
 fn test_pipeline() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let claimed = unsafe shim::sc_jobserver_claim(1000000);
     assert(claimed >= 1, "a test process keeps its implicit worker slot");
     assert(claimed < 1000000, "the inherited process-tree budget bounds a nested claim");
@@ -2759,6 +2891,9 @@ fn env_guards_restore_the_environment() {
 // nothing. A value in double quotes holds spaces.
 @test
 fn an_env_that_does_not_apply_whole_starts_nothing() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let mut cmd = format("{} --version", unsafe str::from_cstr(cli::cc_name()));
     assert_eq(cli::run_with(cmd.cstr(), null, null, null, "SC_P1=1 SC_P2=2 SC_P3=3 SC_P4=4 SC_P5=5 SC_P6=6 SC_P7=7"), 0);
     assert_eq(
@@ -2809,6 +2944,9 @@ fn main() i32 { return 0; }
 
 @test
 fn cross_module_generic_by_value() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "opt/opt.spc",
@@ -2848,6 +2986,9 @@ fn main() i32 {
 // dispatches through the subst (T -> Bar) to the concrete Bar__clone.
 @test
 fn cross_module_generic_bound_dispatch() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "bx/bx.spc",
@@ -2881,6 +3022,9 @@ fn main() i32 {
 // instances stay full-monomorphized; a plain-C consumer can instantiate the template; rejected on non-generics.
 @test
 fn emit_macro_export() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "emac.spc",
@@ -2940,6 +3084,9 @@ int main(void) { Pair__CT p = { .a = { 5 }, .b = { 9 } };
 // bound must not be specialized (its body would call an unprovided method); only the unbounded block emits.
 @test
 fn per_extend_bound_filtering() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "pibf.spc",
@@ -2963,6 +3110,9 @@ fn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 5 } }; unsafe exit(w.raw()
 // stored allocator (a multi-file regression: warning-clean without a sentinel `RawAlloc: Default`).
 @test
 fn string_non_default_allocator() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -2996,6 +3146,9 @@ fn main() i32 {
 // private functions may be omitted or explicitly marked unused.
 @test
 fn warning_clean_unused_emission() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -3025,6 +3178,9 @@ fn main() i32 { let s = S { x: 20 }; let w = Wrap::<i32> { v: 22 }; unsafe exit(
 // accounted for.
 @test
 fn threads_and_atomics() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -3253,6 +3409,9 @@ fn main() i32 {
 // preemption the first task never yields, the second never runs, and the flag never flips.
 @test
 fn preemption_yields_a_spinning_task() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -3334,6 +3493,9 @@ fn main() i32 {
 // whose destructor is synthesized resolves to no declaration: it is a drop, not a fn-value call.
 @test
 fn explicit_drop_in_a_task_keeps_safepoints_scoped() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -3501,6 +3663,9 @@ fn run_preempted(src: str) {
 // child is preempted like a launched task.
 @test
 fn task_group_child_is_preempted() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     run_preempted(
         M"(import stdlib;
 import std::iter as iter;
@@ -3551,6 +3716,9 @@ fn main() i32 {
 // ... and a compute-bound group child stops at its combined safepoint when the group cancels.
 @test
 fn task_group_cancel_stops_a_compute_bound_child() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     run_preempted(
         M"(import stdlib;
 import std::iter as iter;
@@ -3604,6 +3772,9 @@ fn main() i32 {
 // the launched body that passes it.
 @test
 fn std_callback_by_name_is_preempted() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     run_preempted(
         M"(import stdlib;
 import std::iter as iter;
@@ -3659,6 +3830,9 @@ fn main() i32 {
 // the interface method's name).
 @test
 fn bound_dispatched_next_is_preempted() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     run_preempted(
         M"(import stdlib;
 import std::iter as iter;
@@ -3724,6 +3898,9 @@ fn main() i32 {
 // no loop of its own, so the loop in `iter::for_each` is the only place the task can yield.
 @test
 fn std_loop_driving_user_code_is_preempted() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     run_preempted(
         M"(import stdlib;
 import std::iter as iter;
@@ -3876,6 +4053,9 @@ fn main() i32 {
 // closure.
 @test
 fn fn_values_handed_to_std_parallel_or_stored_are_reached() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -3953,6 +4133,9 @@ fn main() i32 {
 // A user `free` that std's drop of a container runs is reached.
 @test
 fn free_run_by_std_is_preempted() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     run_preempted(
         M"(import stdlib;
 import std::iter as iter;
@@ -4013,6 +4196,9 @@ fn main() i32 {
 // A loop in value position gets its tick like a statement loop.
 @test
 fn value_loop_is_preempted() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     run_preempted(
         M"(import stdlib;
 import std::iter as iter;
@@ -4085,6 +4271,9 @@ fn gen_followed_by(p: &cli::Proj, rel: str, a: str, b: str) bool {
 // the tick per iteration.
 @test
 fn counted_loop_ticks_once_per_chunk() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -4308,6 +4497,9 @@ fn main() i32 {
 // clean.
 @test
 fn blocking_call_frees_the_worker() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -4377,6 +4569,9 @@ fn main() i32 {
 // pass rather than die, so all three are checked against the same recursion.
 @test
 fn stack_overflow_is_reported() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -4492,6 +4687,9 @@ fn main() i32 {
 // crashes, not overflows, and must not say otherwise.
 @test
 fn thread_stack_overflow_is_reported() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -4595,6 +4793,9 @@ fn main() i32 {
 // versus finished, and a panic inside a task names it instead of only saying the process died.
 @test
 fn task_diagnostics() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -4685,6 +4886,9 @@ fn main() i32 {
 // both sides parking on the reactor.
 @test
 fn reactor_udp_and_typed_errors() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -4815,6 +5019,9 @@ fn main() i32 {
 // are a hundred parked coroutines and a registration each. Exact counts on both ends, leak-checked.
 @test
 fn reactor_many_connections() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -4922,6 +5129,9 @@ fn main() i32 {
 // emitted C is checked for the wrapper too.
 @test
 fn blocking_attribute() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("gate.h", "int gate_wait(void);\nvoid gate_open(void);\n");
     p.mkfile(
@@ -5011,6 +5221,9 @@ fn main() i32 {
 // released at normal exit, so the leak gate finds nothing (a `@blocking` extern and `call`).
 @test
 fn blocking_pool_released_at_exit() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -5045,6 +5258,9 @@ fn main() i32 {
 // them, and the build compiles it alone (no object of its members), beside the runtime.
 @test
 fn small_program_compiles_as_one_unit() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
@@ -5071,6 +5287,9 @@ fn small_program_compiles_as_one_unit() {
 // edit of one member compiles its pack again, and nothing else.
 @test
 fn small_units_compile_in_packs() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "1"); // over the limit: no `__sc_unity.c`
     let p = cli::proj_new();
@@ -5102,6 +5321,9 @@ fn small_units_compile_in_packs() {
 // text.
 @test
 fn edited_header_recompiles_its_units() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     let p = cli::proj_new();
@@ -5125,6 +5347,9 @@ fn edited_header_recompiles_its_units() {
 // unchanged header does not try again.
 @test
 fn units_parse_the_header_a_compiler_cannot_precompile() {
+    if !cli::has_cc() {
+        return; // a C compiler wrapper builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     if cli::on_windows() || cli::on_wasm() {
         return; // the compiler is a shell script
@@ -5153,6 +5378,9 @@ fn units_parse_the_header_a_compiler_cannot_precompile() {
 // their module, so the program links (one name for both was a duplicate symbol).
 @test
 fn blocking_wrappers_of_one_function_in_two_modules() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "other.spc",
@@ -5203,6 +5431,9 @@ fn main() i32 {
 // the most aggressive strict-aliasing diagnostics.
 @test
 fn array_pointers_are_strict_c() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -5283,6 +5514,9 @@ fn main() i32 {
 // Over a deliberately uneven per-index cost, every index must still be visited exactly once.
 @test
 fn data_parallel_guided_schedule() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -5345,6 +5579,9 @@ fn main() i32 {
 // order. Not asserted: that two DIFFERENT seeds disagree; nothing promises a given seed pair diverges.
 @test
 fn deterministic_replay() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -5448,6 +5685,9 @@ fn main() i32 {
 // leaks: neither the un-sent remainder nor the payloads still buffered when the channel is freed.
 @test
 fn channel_batch_send_recv() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -5521,6 +5761,9 @@ fn main() i32 {
 // receiver. Leak-checked.
 @test
 fn channel_parking_oversubscribed() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -5592,6 +5835,9 @@ fn main() i32 {
 // time then confirms the sleep really slept, and the plain-thread path (no coroutine) sleeps outright.
 @test
 fn coroutine_sleep_and_timers() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -5657,6 +5903,9 @@ fn main() i32 {
 // read/write guards taken from coroutines and a timed acquire that expires and then succeeds. Leak-checked.
 @test
 fn task_aware_locks() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -5765,6 +6014,9 @@ fn main() i32 {
 // waiting forever. Leak-checked, so the grown slot array and every payload are accounted for.
 @test
 fn channel_unbounded_and_timeouts() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -5850,6 +6102,9 @@ fn main() i32 {
 // yields and a shared mutex; the exact counter proves no wakeup was lost or double-spent. Leak-checked.
 @test
 fn timed_wait_deadline_races() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -5923,6 +6178,9 @@ fn main() i32 {
 // the value is sent only once the runtime shows the task parked in its select. Leak-checked.
 @test
 fn select_waits_on_several_channels() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -6090,6 +6348,9 @@ fn main() i32 {
 // busy channel from starving a quiet one (declaration order would return arm 0 every time). Leak-checked.
 @test
 fn select_arms_and_fairness() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -6227,6 +6488,9 @@ fn main() i32 {
 // coroutine. Leak-checked.
 @test
 fn select_keyword() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -6426,6 +6690,9 @@ fn main() i32 {
 // shape whenever a program touches only part of it, which a plain `Selector::new()` does.
 @test
 fn partial_module_use_after_foreign_expansion() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -6453,6 +6720,9 @@ fn main() i32 {
 // no-ops. Leak-checked.
 @test
 fn data_parallel_api() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -6566,6 +6836,9 @@ fn main() i32 {
 // the body, so the env, its initializer and the body agree.
 @test
 fn data_parallel_borrowed_capture_in_stored_closure() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -6601,6 +6874,9 @@ fn main() i32 {
 // whose C type is a vector register) size and align it as C does.
 @test
 fn data_parallel_closure_with_wide_captures() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -6637,6 +6913,9 @@ fn main() i32 {
 // through `sections`, whose two sections are two chunks (one per claim), not one inline run.
 @test
 fn data_parallel_wakes_a_second_worker() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -6745,6 +7024,9 @@ fn main() i32 {
 // IMMUTABLE binding whose value is still changed through `get()`.
 @test
 fn interior_mutability_via_unsafe_cell() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let bad = cli::proj_new();
     bad.mkfile(
         "main.spc",
@@ -6769,6 +7051,9 @@ fn interior_mutability_via_unsafe_cell() {
 // A trivial app should not dump the whole std prelude tree (Vector/Map/String not written).
 @test
 fn prelude_output_is_demand_driven() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("main.spc", "extern \"C\" { fn exit(code: i32) void; }\nfn main() i32 { unsafe exit(42); return 0; }\n");
     let r = p.compile("main.spc");
@@ -6785,6 +7070,9 @@ fn prelude_output_is_demand_driven() {
 // Outer<Bar> contains Inner<Bar> by value; both must be re-homed and emitted in dependency order.
 @test
 fn cross_module_nested_rehomed_instance() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "lib/lib.spc",
@@ -6815,6 +7103,9 @@ fn main() i32 {
 // the bound resolves across the import, the extend satisfies it, and the bounded call dispatches.
 @test
 fn cross_module_interface() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("shapes.spc", "pub interface Area { fn area(self: *mut Self) i32; }\n");
     p.mkfile(
@@ -6838,6 +7129,9 @@ fn main() i32 { let mut q = Sq { s: 6 }; unsafe exit(total(&mut q)); return 0; }
 // in another module; both modules erase; the foreign default's synthesized tag exports for the user TU.
 @test
 fn cross_module_dyn() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "shapes.spc",
@@ -6884,6 +7178,9 @@ fn main() i32 {
 // extern binding with its real unmangled C symbol, and a thin wrapper: compiled -Werror + linked -lm.
 @test
 fn ffi_bindings() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -6995,6 +7292,9 @@ fn main(args: Vector<str>) i32 {
 // unlink and rmdir.
 @test
 fn ffi_posix_bindings() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -7048,6 +7348,9 @@ fn main() i32 {
 // (module mangling keeps them distinct), and a module named like a C stdlib header (string).
 @test
 fn module_imports() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("string.spc", "pub fn tag() i32 { return 10; }\n");
     p.mkfile("math.spc", "pub fn tag() i32 { return 20; }\n");
@@ -7120,6 +7423,9 @@ fn import_resolves_under_an_unlistable_directory() {
 // and the root calls each.
 @test
 fn non_root_main_is_ordinary() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "other.spc",
@@ -7142,6 +7448,9 @@ fn non_root_main_is_ordinary() {
 // module keeps its full path, take one more `_` after the prefix's first segment.
 @test
 fn module_prefixes_stay_apart_from_prelude_symbols() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("str.spc", "@noinline\npub fn len(x: i32) i32 {\n    return x;\n}\n");
     p.mkfile("Vector/i32.spc", "@noinline\npub fn push(x: i32) i32 {\n    return x + 1;\n}\n");
@@ -7160,6 +7469,9 @@ fn module_prefixes_stay_apart_from_prelude_symbols() {
 // parameter types are provisional ids of THAT module's pool, which the lowering must read there.
 @test
 fn constant_calls_another_modules_by_reference_operators() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "y.spc",
@@ -7178,6 +7490,9 @@ fn constant_calls_another_modules_by_reference_operators() {
 // `String` (a prelude type) come from the imported module.
 @test
 fn glob_import_shadows_prelude() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("geom.spc", "pub struct String { pub n: i32 }\npub fn dot(a: i32, b: i32) i32 { return a * b; }\n");
     p.mkfile(
@@ -7203,6 +7518,9 @@ fn main() i32 {
 // `as` alias still names the module.
 @test
 fn glob_imported_type_wins_over_module_qualifier() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "m/qq.spc",
@@ -7232,6 +7550,9 @@ fn main() i32 {
 // past it.
 @test
 fn glob_import_searches_each_closure_in_order() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("c.spc", "pub fn pick() i32 { return 3; }\n");
     p.mkfile("a.spc", "import c;\npub fn from_a() i32 { return c::pick(); }\n");
@@ -7258,6 +7579,9 @@ fn main() i32 {
 // through `@link`); @link lands in build/__ldflags; removing the block prunes its flag;
 @test
 fn external_c_sources() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("helper.h", "int helper_add(int a, int b);\n");
     p.mkfile("helper.c", "#include \"helper.h\"\nint helper_add(int a, int b) { return a + b; }\n");
@@ -7314,6 +7638,9 @@ fn external_c_sources() {
 // local named like that extern, declared before the call, takes another C name.
 @test
 fn extern_prototypes_see_complete_types() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     // A header-declared C function that takes `int a[4]` and writes through it: a `[i32; 4]` argument is a
     // value, so the call hands it a copy (also when the function is named as a value), and an array read
@@ -7441,6 +7768,9 @@ fn main() i32 {
 // conformances elsewhere (type's home, a local extension of an imported type, and a builtin target `i32`).
 @test
 fn cross_module_defaults() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "shapes.spc",
@@ -7493,6 +7823,9 @@ fn main() i32 {
 // A value type conforming to a prelude interface must NOT pull the interface module's header (no cycle).
 @test
 fn format_conformances() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "fmt.spc",
@@ -7519,6 +7852,9 @@ fn format_conformances() {
 // a mutual BY-VALUE embedding is the one impossible shape (infinite size) and gets its own diagnostic.
 @test
 fn module_cycles() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "a.spc",
@@ -7629,6 +7965,9 @@ fn qual_fails(b: &mut cli::Batch, body: str, want: str, at: str) {
 // segment are errors at the segment; a module-qualified path in a type position names a type.
 @test
 fn module_qualified_const_arguments() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("m.spc", QUAL_MOD);
     p.mkfile(
@@ -7791,6 +8130,9 @@ fn error_exit_code() {
 // function keeps its defined runtime behavior.
 @test
 fn ctfe_reinterpret_is_not_folded() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     // A pointer-cast type pun (`*((&x) as *const f64 as *const u64)`) has no compile-time byte
     // representation to read through: the evaluator must LEAVE it to runtime, not substitute the
     // unconverted value. The literal also carries its context's type, so the fold that does happen
@@ -7910,6 +8252,9 @@ fn call_free_constant_failures() {
 // instead of evaluating the chain behind it again.
 @test
 fn deep_aggregate_constant_chain() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let mut src = String::from_str("struct S { pub x: i64 }\nconst S0: S = S { x: 0 };\n");
     for i in 1..3000 {
         src.push_str(format("const S{}: S = S {{ x: S{}.x + 1 }};\n", i, i - 1).as_str());
@@ -7927,6 +8272,9 @@ fn deep_aggregate_constant_chain() {
 // A discriminant naming a variant of an enum in another module folds to its value there.
 @test
 fn enum_discriminant_across_modules() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("lib/codes.spc", "pub const BASE: i32 = 40;\npub enum Code { Low = BASE, High }\n");
     p.mkfile(
@@ -8032,6 +8380,9 @@ fn main(argv: Vector<str>) i32 { if is_even(argv.len() as u32 * 2) { return 0; }
 // and cross-module const-fn initializers work.
 @test
 fn mandatory_consts() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     // Two programs import stdlib, which the in-process compile does not load: one build for the three.
     let mut b = cli::Batch::new("", "");
@@ -8157,6 +8508,9 @@ fn local_consts_run(b: &mut h::ExitBatch) {
 // can disprove.
 @test
 fn unsafe_extern_attributes() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "ok.spc",
@@ -8261,6 +8615,9 @@ fn main(argv: Vector<str>) i32 {
 // C string at compile time as at run time: its storage ends in a NUL and `char` views its bytes.
 @test
 fn ffi_bindings_carry_unsafe_claims() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -8295,6 +8652,9 @@ fn main() i32 {
 // cyclic heap graphs land as deterministic static C data (with relocations) and behave at runtime.
 @test
 fn materialized_consts() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "mat.spc",
@@ -8412,6 +8772,9 @@ fn main() i32 {
 // runtime (plain call), for arithmetic- and branch-heavy bodies.
 @test
 fn ctfe_differential() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "diff.spc",
@@ -8447,6 +8810,9 @@ fn main(argv: Vector<str>) i32 {
 // explicitly; core is the one whose own body depends on the seeding.
 @test
 fn explicit_std_module_import() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -8466,6 +8832,9 @@ fn explicit_std_module_import() {
 // unless the include set follows the owner's.
 @test
 fn generic_body_reaches_its_own_module() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "lib.spc",
@@ -8484,6 +8853,9 @@ fn generic_body_reaches_its_own_module() {
 // yet. That is not the program's fault, and the diagnostic belonged to the owner's file anyway.
 @test
 fn imported_const_sized_array() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "lib.spc",
@@ -8506,6 +8878,9 @@ fn imported_const_sized_array() {
 // back.
 @test
 fn bindgen_generates_callable_bindings() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "lib.h",
@@ -8558,6 +8933,9 @@ fn bindgen_generates_callable_bindings() {
 // and BY VALUE, reads an enumerator back through C, and compares a generated const.
 @test
 fn bindgen_generates_records_enums_and_consts() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "lib.h",
@@ -8766,6 +9144,9 @@ fn bindgen_constants_follow_c_types() {
 // expressions, so refusing them was refusing most of the library's surface.
 @test
 fn bindgen_expressions_anonymous_types_and_globals() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "lib.h",
@@ -8824,6 +9205,9 @@ fn bindgen_expressions_anonymous_types_and_globals() {
 // checked end to end by running a program through two of them.
 @test
 fn vendor_copies_and_imports_resolve() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("dep/geo.spc", "pub fn area(w: i32, h: i32) i32 { return w * h; }\n");
     p.mkfile("dep/util/more.spc", "pub fn twice(x: i32) i32 { return x * 2; }\n");
@@ -8866,6 +9250,9 @@ fn vendor_copies_and_imports_resolve() {
 // project's history, and a nested repository would shadow it from the outer one.
 @test
 fn vendor_clones_git_and_strips_the_repository() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("srcrepo/lib.spc", "pub fn seven() i32 { return 7; }\n");
     let root = p.dir();
@@ -9047,6 +9434,9 @@ fn git_ok(root: str, dir: str, args: str) i32 {
 // name: the emitted C reads and writes the library's own symbol.
 @test
 fn extern_static_mut_binds_a_writable_global() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("g.h", "extern int counter;\n");
     p.mkfile("g.c", "#include \"g.h\"\nint counter = 1;\n");
@@ -9077,6 +9467,9 @@ fn extern_static_mut_binds_a_writable_global() {
 // units that use it declare it, as a header-less function gets its prototype.
 @test
 fn headerless_extern_static_mut_is_declared() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     // def.c, linked beside the program, defines the statics; the header declares nothing.
     p.mkfile("def.h", "");
@@ -9099,6 +9492,9 @@ fn headerless_extern_static_mut_is_declared() {
 // program, supplies the definitions, and the program mutates the bound global through it.
 @test
 fn bindgen_globals_and_cflag() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "lib.h",
@@ -9158,6 +9554,9 @@ fn bindgen_globals_and_cflag() {
 // must parse and link.
 @test
 fn bindgen_escapes_keyword_names() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "lib.h",
@@ -9269,6 +9668,11 @@ fn bindgen_reads_the_project_cstd() {
 // build, SC_NO_CACHE must ignore it, and a wiped cache must repopulate.
 @test
 fn global_object_cache_round_trip() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
+    // The C backend: a native build links no cached object (the registry's compiles for its checks).
+    let _nat = cli::set_env("SC_NATIVE", "0");
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    println(\"cache\");\n    return 0;\n}\n");
@@ -9302,6 +9706,9 @@ fn global_object_cache_round_trip() {
 // installs its own entries, and `cc` again reuses its first ones.
 @test
 fn the_object_cache_keys_on_the_compiler_command() {
+    if !cli::has_cc() {
+        return; // the object cache holds the C compiler's objects
+    }
     if cli::on_wasm() || cli::on_windows() {
         return;
     }
@@ -9412,6 +9819,9 @@ fn cache_version(p: &cli::Proj, v: i32) {
 // older one compiles again once the shared `script` namespace no longer holds it either.
 @test
 fn object_cache_keeps_four_generations() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
@@ -9457,6 +9867,9 @@ fn object_cache_keeps_four_generations() {
 // the objects are dated into the future, so only the rewrite record can find them stale.
 @test
 fn rewritten_header_restales_units() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     if cli::on_windows() || cli::on_wasm() {
@@ -9497,6 +9910,9 @@ fn rewritten_header_restales_units() {
 // sweep.
 @test
 fn object_cache_sweep() {
+    if !cli::has_cc() {
+        return; // the object cache holds the C compiler's objects
+    }
     if cli::on_windows() || cli::on_wasm() {
         return; // `find` and `touch -t` need a POSIX host
     }
@@ -9588,6 +10004,9 @@ fn rec_key(rec_path: str) String {
 // object, its namespace's entry and the shared `script` namespace's entry.
 @test
 fn object_cache_links_one_copy() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     let p = cli::proj_new();
@@ -9611,6 +10030,9 @@ fn object_cache_links_one_copy() {
 // bytes (a compiler that writes its output in place would rewrite the entry through the shared name).
 @test
 fn object_cache_entry_survives_a_recompile() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     let p = cli::proj_new();
@@ -9638,6 +10060,9 @@ fn object_cache_entry_survives_a_recompile() {
 // includes nor relinks an unchanged binary.
 @test
 fn object_cache_entry_use_dates_no_object() {
+    if !cli::has_cc() {
+        return; // the object cache holds the C compiler's objects
+    }
     if cli::on_windows() || cli::on_wasm() {
         return; // `find` and `touch -t` need a POSIX host
     }
@@ -9672,6 +10097,9 @@ fn object_cache_entry_use_dates_no_object() {
 // build's own tree stays. A fresh stamp skips the sweep.
 @test
 fn project_sweep_removes_idle_outputs() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     if cli::on_windows() || cli::on_wasm() {
@@ -9737,6 +10165,9 @@ fn project_sweep_keeps_the_tree_of_a_root_beside_the_manifest() {
 // project's cache root instead, not another project's; `--cache` is no longer a flag.
 @test
 fn clean_sweeps_and_full_removes() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     if cli::on_windows() || cli::on_wasm() {
@@ -9778,6 +10209,9 @@ fn clean_sweeps_and_full_removes() {
 // dependency list names its own header (relative to its project), not the first tree's.
 @test
 fn object_cache_shares_moved_trees() {
+    if !cli::has_cc() {
+        return; // a header's `static` function compiles through C
+    }
     let p = cli::proj_new();
     let root = p.dir();
     for t in 0..2 {
@@ -9828,6 +10262,9 @@ fn object_cache_shares_moved_trees() {
 // binary runs.
 @test
 fn object_cache_shares_identical_units_across_trees() {
+    if !cli::has_cc() {
+        return; // the object cache holds the C compiler's objects
+    }
     let p = cli::proj_new();
     let root = p.dir();
     for d in ["a", "b"] {
@@ -9986,6 +10423,9 @@ pub fn one_call(b: &mut bench::Bencher) {
 // no other program built from it has.
 @test
 fn bench_runner_names_no_benchmark_as_a_fn_value() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
@@ -10058,6 +10498,9 @@ fn test_filter_builds_only_matching_files() {
 // ordinary code and its template diagnostics are compile errors of the checker, not of codegen.
 @test
 fn format_desugar_and_fold() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -10104,6 +10547,9 @@ fn main() i32 {
 // only: a descriptor cannot invoke.
 @test
 fn method_reflection() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -10146,6 +10592,9 @@ fn main() i32 {
 // compile error naming the offending type argument.
 @test
 fn ctfe_zeroed_and_body_asserts() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -10216,6 +10665,9 @@ fn main() i32 {
 // copies, so a generic touched only under an untaken guard is never instantiated.
 @test
 fn tagless_variants_and_meta_elision() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _env5 = cli::set_env("SC_INLINE", "0");
     let p = cli::proj_new();
     p.mkfile(
@@ -10328,6 +10780,9 @@ fn build_paths_with_spaces() {
 // invalidates every object through the command fingerprint, again without touching the generated C.
 @test
 fn build_staleness_gates() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     let p = cli::proj_new();
@@ -10388,6 +10843,9 @@ fn build_staleness_gates() {
 // and its object, and the shared forward header carries no type declaration.
 @test
 fn build_type_edit_stays_local() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     let p = cli::proj_new();
@@ -10443,6 +10901,9 @@ fn build_type_edit_stays_local() {
 // again prunes that header and drops it from the manifest.
 @test
 fn build_new_type_recompiles_no_user() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     let p = cli::proj_new();
@@ -10494,6 +10955,9 @@ fn build_new_type_recompiles_no_user() {
 // uses another type of the same module keep their objects.
 @test
 fn build_field_edit_recompiles_users() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     let p = cli::proj_new();
@@ -10582,6 +11046,9 @@ fn build_array_elements_include_definitions() {
 // header, so a type edit in util leaves the unit untouched.
 @test
 fn build_symbol_segment_includes_no_type() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     let p = cli::proj_new();
@@ -10618,6 +11085,9 @@ fn build_symbol_segment_includes_no_type() {
 // process. SC_LTO overrides the mode and is a fingerprint input: changing it relinks.
 @test
 fn build_lto_modes() {
+    if !cli::has_cc() {
+        return; // link-time optimization is the C compiler's
+    }
     let p = cli::proj_new();
     p.mkfile(
         "build.toml",
@@ -10687,6 +11157,9 @@ const fn lto_line(s: str, idx: usize) str {
 // the automatic mode, with the measured reason in the record and the build statistics.
 @test
 fn build_lto_probe_fallback() {
+    if !cli::has_cc() {
+        return; // a C compiler wrapper builds it
+    }
     if cli::on_windows() {
         return; // a shebang wrapper needs a POSIX host
     }
@@ -10737,6 +11210,9 @@ fn build_lto_probe_fallback() {
 // result from the record without probing: the record keeps its mtime.
 @test
 fn build_print_probes() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
@@ -10927,6 +11403,9 @@ fn build_relinks_after_failed_link_in_same_second() {
 // publishes and links it once the file is writable again.
 @test
 fn build_publication_failure_keeps_artifact() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
@@ -10954,6 +11433,9 @@ fn build_publication_failure_keeps_artifact() {
 // file as it is, so the tooling does not reload it.
 @test
 fn build_compile_commands_json() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
@@ -10988,6 +11470,9 @@ fn build_compile_commands_json() {
 // adds AddressSanitizer and UndefinedBehaviorSanitizer to the C build where the target has them.
 @test
 fn sanitizers_flag_adds_the_sanitizers() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 3;\n}\n");
@@ -11221,6 +11706,9 @@ fn jobs_file(root: str, tag: str, rel: str) String {
 // every core asked it again in the instance shard, and the shard included headers it never used.
 @test
 fn worker_count_keeps_instance_shard_includes() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
@@ -11297,6 +11785,9 @@ fn rm_rf_does_not_follow_a_directory_link() {
 // checker, the lowering and the formatter walk the chain without a stack frame per operator.
 @test
 fn operator_chain_at_the_parser_limit_compiles() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     let mut src = String::from_str("fn f(x: i32, b: bool) i32 {\n    let s = x");
     for _ in 1..4096 {
@@ -11368,6 +11859,9 @@ fn main() i32 {
 // resolution: the removed branches call `@platform` items of other targets, which do not exist there.
 @test
 fn build_constants_prune_other_platforms() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("main.spc", BC_PRUNE);
     assert(p.compile_flags("--target=windows", "main.spc").ok(), "windows transpiles");
@@ -11398,6 +11892,9 @@ fn build_constants_prune_other_platforms() {
 // TEST is true only in a `--test` build.
 @test
 fn build_constant_test_follows_the_test_flag() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -11484,6 +11981,9 @@ fn main() i32 {
 // PROFILE folds after type checking: each profile emits only its branch, into its own tree.
 @test
 fn build_constant_profile_selects_the_branch() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile("main.spc", BC_PROFILE);
     assert(p.compile("main.spc").ok());
@@ -11531,6 +12031,9 @@ const BC_CONFIG: str = M"(fn main() i32 {
 // and the wrapping `release` profile. Each build emits only its branches.
 @test
 fn build_constants_follow_the_c_flags() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     if cli::on_wasm() {
         return;
     }
@@ -12210,6 +12713,9 @@ fn main() i32 {
 // overlapping ranges match in arm order. The C compiles under -pedantic-errors and -Wtype-limits.
 @test
 fn qualified_constants_emit_valid_c() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -12514,6 +13020,9 @@ fn script_run(dir: str) i32 {
 // it does not share with the first, and both programs run.
 @test
 fn script_builds_share_cached_objects() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let _unit = cli::set_env("SC_UNITY_MAX", "0"); // per-unit objects
     if cli::on_wasm() {

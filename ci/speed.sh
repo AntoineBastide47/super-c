@@ -73,7 +73,7 @@ done
 # nothing, so the build ends at the binary it never made).
 transpile() {
   rm -rf "$w/tree"
-  env SC_NATIVE=0 "$1" build --jobs=1 --cc=true --out-dir="$w/tree"
+  env SC_NATIVE=0 SC_LINK=cc "$1" build --jobs=1 --cc=true --out-dir="$w/tree"
 }
 tn=$(best transpile "build/speed-native/sc$x")
 grep -q "cannot move" "$w/out.txt" || { cat "$w/out.txt"; echo "::error::the native-built compiler's transpile failed"; exit 1; }
@@ -99,8 +99,10 @@ if [ -n "${CC_COUNTS:-}" ] && [ -n "${PROFDATA:-}" ]; then
     local raw="$w/raw-$1"
     rm -rf "$raw" "$w/ctree"
     mkdir -p "$raw"
-    env SC_NATIVE="$2" LLVM_PROFILE_FILE="$raw/%p.profraw" "./build/counts/super-c-counts$x" build --profile=debug --jobs=1 --cc=true --bootstrap-tags --out-dir="$w/ctree" > "$w/count-$1.txt" 2>&1 || true
-    grep -q "cannot move" "$w/count-$1.txt" || { cat "$w/count-$1.txt"; echo "::error::the counted transpile ($1) failed"; exit 1; }
+    # SC_LINK=cc keeps the link with `true`, which makes nothing: the count is the transpile's.
+    env SC_NATIVE="$2" SC_LINK=cc LLVM_PROFILE_FILE="$raw/%p.profraw" "./build/counts/super-c-counts$x" build --profile=debug --jobs=1 --cc=true --bootstrap-tags --out-dir="$w/ctree" > "$w/count-$1.txt" 2>&1 || true
+    # To stderr: the caller captures stdout.
+    grep -q "cannot move" "$w/count-$1.txt" || { cat "$w/count-$1.txt" >&2; echo "::error::the counted transpile ($1) failed" >&2; exit 1; }
     "$PROFDATA" merge -o "$w/$1.profdata" "$raw"/*.profraw
     "$PROFDATA" merge --text -o "$w/$1.txt" "$w/$1.profdata"
     "$py" -I .github/actions/transpile-counts/counts.py summarize "$w/$1.txt" "$w/$1.tsv" "$1" "$CC_COUNTS"

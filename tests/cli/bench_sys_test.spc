@@ -186,6 +186,9 @@ fn summary_percentiles() {
 // program that imports bench_sys starts, runs a task, and counts nothing.
 @test
 fn a_sanitized_build_leaves_the_allocator_to_the_sanitizer() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     if cli::on_windows() || cli::on_wasm() {
         return; // no thread sanitizer build on these targets
     }

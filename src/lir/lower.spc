@@ -8439,6 +8439,17 @@ struct Tidy {
     pub locs: Vector<u32>,
     pub params: Vector<u8>,
     pub blocks: Vector<Block>,
+    // Slot forwarding (`forward_slots`).
+    pub kill: Vector<bool>, // a copy forwarding dropped
+    pub smap: Vector<u32>, // an instruction's slot when it is a `slotaddr`, else NONE; then a slot's new index
+    pub srep: Vector<u32>, // the slot a slot became (itself when it stays)
+    pub snuse: Vector<u32>, // a slot's uses
+    pub sseen: Vector<u32>, // its uses before the instruction at hand
+    pub sblk: Vector<u32>, // the block of all its uses; NONE before the first, MULTI for several
+    pub sfirst: Vector<u32>, // its first use
+    pub slast: Vector<u32>, // its last use so far, and that use's block
+    pub slastb: Vector<u32>,
+    pub sesc: Vector<bool>, // its address goes beyond a load, a store, a copy or a fill of it
 }
 
 extend Tidy {
@@ -8461,8 +8472,32 @@ extend Tidy {
             locs: Vector::<u32>::new(),
             params: Vector::<u8>::new(),
             blocks: Vector::<Block>::new(),
+            kill: Vector::<bool>::new(),
+            smap: Vector::<u32>::new(),
+            srep: Vector::<u32>::new(),
+            snuse: Vector::<u32>::new(),
+            sseen: Vector::<u32>::new(),
+            sblk: Vector::<u32>::new(),
+            sfirst: Vector::<u32>::new(),
+            slast: Vector::<u32>::new(),
+            slastb: Vector::<u32>::new(),
+            sesc: Vector::<bool>::new(),
         };
     }
+}
+
+const MULTI: u32 = 0xFFFFFFFE;
+
+// Whether value `u`, a slot's address, is only the address instruction `t` reads or writes through:
+// a load's or a store's address, a copy's destination or source, a fill's destination.
+const fn slot_access(t: Inst, u: Value) bool {
+    if t.op == O_LOAD {
+        return true;
+    }
+    if t.op == O_STORE || t.op == O_MEMSET {
+        return t.a == u && t.b != u && t.c != u;
+    }
+    return t.op == O_MEMCPY && t.c != u;
 }
 
 // The signature code of scalar machine type `t`: an `i8` or `i16` of a signed type with SIG_SEXT.
@@ -8536,7 +8571,17 @@ extend Lower {
     // Compact the finished body: drop the pure instructions nothing uses, send each edge to a block
     // that only jumps on to that jump's target, drop the blocks the entry no longer reaches, and
     // renumber what is left in block order. Every step is linear in the body.
+    // The tidy body, then slot forwarding over its merged blocks, which a second pass applies.
     fn tidy(self: &mut Self) {
+        fill_bool(&mut self.td.kill, self.b.insts.len(), false);
+        self.tidy_pass();
+        if self.forward_slots() {
+            self.tidy_pass();
+        }
+        self.drop_unused_slots();
+    }
+
+    fn tidy_pass(self: &mut Self) {
         let nb = self.b.blocks.len();
         let ni = self.b.insts.len();
         self.fold_conversions();
@@ -8550,7 +8595,7 @@ extend Lower {
             }
             let bk = self.b.blocks[k];
             for i in bk.start..bk.start + bk.len {
-                if !pure_inst(self.b.insts[i as usize]) {
+                if !pure_inst(self.b.insts[i as usize]) && !self.td.kill[i as usize] {
                     self.td.imap[i as usize] = 0;
                     self.td.work.push(i);
                 }
@@ -8705,6 +8750,188 @@ extend Lower {
         self.td.params = replace(&mut self.b.params, replace(&mut self.td.params, Vector::<u8>::new()));
         self.td.blocks = replace(&mut self.b.blocks, replace(&mut self.td.blocks, Vector::<Block>::new()));
         self.td.blocks.truncate(0);
+    }
+
+    // Copy forwarding: a slot S whose uses are all in one block, each a load, a store, a copy or a fill
+    // through its address, and whose last use copies it whole into slot D, becomes D, and the copy goes,
+    // when nothing uses D between S's first use and the copy and, when D's address goes further,
+    // nothing there reads or writes memory through another address. A value built in temporaries and
+    // moved into its variable then fills the variable's slot alone. Whether a copy went.
+    fn forward_slots(self: &mut Self) bool {
+        let ni = self.b.insts.len();
+        let ns = self.b.slots.len();
+        fill_bool(&mut self.td.kill, ni, false);
+        if ns < 2 {
+            return false;
+        }
+        fill_u32(&mut self.td.smap, ni, NONE);
+        for i in 0..ni {
+            if self.b.insts[i].op == O_SLOTADDR {
+                self.td.smap[i] = self.b.insts[i].a;
+            }
+        }
+        fill_u32(&mut self.td.snuse, ns, 0);
+        fill_u32(&mut self.td.sblk, ns, NONE);
+        fill_bool(&mut self.td.sesc, ns, false);
+        // A tidy pass ran: every block is reached.
+        let nb = self.b.blocks.len();
+        for k in 0..nb {
+            let bk = self.b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                let t = self.b.insts[i as usize];
+                inst_uses(&self.b, t, &mut self.td.uses);
+                for q in 0..self.td.uses.len() {
+                    let u = self.td.uses[q];
+                    if !self.is_slot_addr(u) {
+                        continue;
+                    }
+                    let sl = self.td.smap[u as usize] as usize;
+                    self.td.snuse[sl] += 1;
+                    self.td.sblk[sl] = ast::pick(
+                        self.td.sblk[sl] == NONE || self.td.sblk[sl] == k as u32,
+                        k as u32,
+                        MULTI,
+                    );
+                    if !slot_access(t, u) {
+                        self.td.sesc[sl] = true;
+                    }
+                }
+            }
+        }
+        fill_u32(&mut self.td.srep, ns, 0);
+        for sl in 0..ns {
+            self.td.srep[sl] = sl as u32;
+        }
+        fill_u32(&mut self.td.sseen, ns, 0);
+        fill_u32(&mut self.td.sfirst, ns, NONE);
+        fill_u32(&mut self.td.slast, ns, NONE);
+        fill_u32(&mut self.td.slastb, ns, NONE);
+        let mut any = false;
+        for k in 0..nb {
+            let bk = self.b.blocks[k];
+            // The last instruction of the block that may reach memory through an unknown address.
+            let mut opaque = NONE;
+            for i in bk.start..bk.start + bk.len {
+                let t = self.b.insts[i as usize];
+                if t.op == O_MEMCPY && self.forward_copy(t, i, k as u32, opaque) {
+                    any = true;
+                    continue;
+                }
+                inst_uses(&self.b, t, &mut self.td.uses);
+                for q in 0..self.td.uses.len() {
+                    let u = self.td.uses[q];
+                    if !self.is_slot_addr(u) {
+                        continue;
+                    }
+                    let sl = self.slot_rep(self.td.smap[u as usize]) as usize;
+                    self.td.sseen[sl] += 1;
+                    if self.td.sfirst[sl] == NONE {
+                        self.td.sfirst[sl] = i;
+                    }
+                    self.td.slast[sl] = i;
+                    self.td.slastb[sl] = k as u32;
+                }
+                let mem = t.op == O_LOAD || t.op == O_STORE || t.op == O_MEMSET || t.op == O_MEMCPY;
+                let through_slots = mem && self.is_slot_addr(t.a) && (t.op != O_MEMCPY || self.is_slot_addr(t.b));
+                if mem && !through_slots || !mem && !pure_inst(t) {
+                    opaque = i;
+                }
+            }
+        }
+        if !any {
+            return false;
+        }
+        for i in 0..ni {
+            if self.b.insts[i].op == O_SLOTADDR {
+                let r = self.slot_rep(self.b.insts[i].a);
+                self.b.insts.index_mut(i).a = r;
+            }
+        }
+        return true;
+    }
+
+    // `forward_copy` of copy `t`, instruction `i` of block `k`, whose last instruction that may reach
+    // memory through an unknown address is `opaque`: whether it forwarded the source slot into the
+    // destination slot and dropped the copy.
+    fn forward_copy(self: &mut Self, t: Inst, i: u32, k: u32, opaque: u32) bool {
+        if !self.is_slot_addr(t.a) || !self.is_slot_addr(t.b) || (t.c & (VPARAM | VFLAG)) != 0 {
+            return false;
+        }
+        let ct = self.b.insts[t.c as usize];
+        if ct.op != O_ICONST {
+            return false;
+        }
+        let n = ct.a as u64 | ct.b as u64 << 32;
+        let d = self.slot_rep(self.td.smap[t.a as usize]) as usize;
+        let sl = self.slot_rep(self.td.smap[t.b as usize]) as usize;
+        let first = ast::pick(self.td.sfirst[sl] == NONE, i, self.td.sfirst[sl]);
+        let ok = sl != d && !self.td.sesc[sl] && self.td.sblk[sl] == k && self.td.sseen[sl] + 1 == self.td.snuse[sl] && self.b.slots[sl].size as u64 == n && self.b.slots[d].size as u64 == n && !(self.td.slastb[d] == k && self.td.slast[d] >= first) && (!self.td.sesc[d] || opaque == NONE || opaque < first);
+        if !ok {
+            return false;
+        }
+        self.td.kill[i as usize] = true;
+        self.td.srep[sl] = d as u32;
+        self.td.snuse[d] = self.td.snuse[d] + self.td.snuse[sl] - 2;
+        self.td.sseen[d] = self.td.sseen[d] + self.td.sseen[sl];
+        self.td.sblk[d] = ast::pick(self.td.sblk[d] == NONE || self.td.sblk[d] == k, k, MULTI);
+        if self.td.sfirst[d] == NONE || self.td.sfirst[sl] < self.td.sfirst[d] {
+            self.td.sfirst[d] = self.td.sfirst[sl];
+        }
+        if self.td.slast[sl] != NONE {
+            self.td.slast[d] = self.td.slast[sl];
+            self.td.slastb[d] = k;
+        }
+        let al = self.b.slots[sl].align_log2;
+        if al > self.b.slots[d].align_log2 {
+            self.b.slots.index_mut(d).align_log2 = al;
+        }
+        return true;
+    }
+
+    // Whether value `v` is a slot's address (`forward_slots`).
+    fn is_slot_addr(self: &Self, v: Value) bool {
+        return (v & (VPARAM | VFLAG)) == 0 && self.td.smap[v as usize] != NONE;
+    }
+
+    // The slot slot `s` became (`forward_slots`).
+    fn slot_rep(self: &Self, s: u32) u32 {
+        let mut r = s;
+        for _ in 0..self.td.srep.len() {
+            if self.td.srep[r as usize] == r {
+                return r;
+            }
+            r = self.td.srep[r as usize];
+        }
+        panic("a slot forwarding chain is acyclic");
+    }
+
+    // Drop the slots no instruction takes the address of, and renumber the others in order.
+    fn drop_unused_slots(self: &mut Self) {
+        let ns = self.b.slots.len();
+        fill_u32(&mut self.td.smap, ns, NONE);
+        for i in 0..self.b.insts.len() {
+            if self.b.insts[i].op == O_SLOTADDR {
+                self.td.smap[self.b.insts[i].a as usize] = 0;
+            }
+        }
+        let mut n: u32 = 0;
+        for sl in 0..ns {
+            if self.td.smap[sl] != NONE {
+                self.td.smap[sl] = n;
+                self.b.slots.set(n as usize, self.b.slots[sl]);
+                n += 1;
+            }
+        }
+        if n as usize == ns {
+            return;
+        }
+        self.b.slots.truncate(n as usize);
+        for i in 0..self.b.insts.len() {
+            if self.b.insts[i].op == O_SLOTADDR {
+                let to = self.td.smap[self.b.insts[i].a as usize];
+                self.b.insts.index_mut(i).a = to;
+            }
+        }
     }
 
     // `jp`: for each reached block of no parameter, but the entry, whose one predecessor reaches it

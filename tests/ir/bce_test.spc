@@ -883,6 +883,9 @@ extend VecProgs {
 // or after the slice's owner shrinks, the check stays.
 @test
 fn vector_access_group_checks() {
+    if !cli::has_cc() {
+        return; // it reads the emitted C
+    }
     let mut vp = VecProgs::new();
     let STRIDED: str = "import std::simd;\nfn sum(s: []i32, d: []mut i32) i32 {\n    let n = s.len() - s.len() % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < n {\n        let v = simd::load::<i32, 4>(s, i);\n        acc = acc.wrapping_add(v);\n        i += 4;\n    }\n    return acc[0] + acc[3] + d.len() as i32;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let mut d = [0; 4];\n    return sum(v[0..v.len()], d) - 18;\n}\n";
     vp.add("the strided load is proven", STRIDED, false, "");

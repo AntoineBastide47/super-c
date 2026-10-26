@@ -150,6 +150,9 @@ fn static_and_shared_library_build() {
 // the path of the kept log; a later successful compile of the same unit removes the log.
 @test
 fn failed_c_compile_reports_status_and_keeps_the_log() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
@@ -198,6 +201,9 @@ fn same_second_edit_recompiles() {
 // not the unchanged one), and a transpiler that leaves none counts its whole tree as rewritten.
 @test
 fn rewritten_unit_recompiles_under_a_later_record() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     if cli::on_windows() || cli::on_wasm() {
         return; // `find`, `touch -t` and the `sh` transpiler need a POSIX host
@@ -276,6 +282,9 @@ fn shard_parts(dir: str) i32 {
 // full Windows CI shard, so it takes the long timeout.
 @test(timeout = 300)
 fn shard_counts_follow_emitted_size() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");

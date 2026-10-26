@@ -10,6 +10,9 @@ import tests::cli_harness as cli;
 // code names them, and the `@used` static carries C `used`.
 @test
 fn used_and_exported_data_is_defined() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",

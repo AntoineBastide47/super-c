@@ -244,6 +244,9 @@ fn parity_mixed_cases() {
 // exists to find: the constant traps, the run time wraps.
 @test
 fn parity_reports_missing_runtime_check() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the planted defect is a C flag: the C backend's
     let mut cstd = String::from_str("--cstd=");
     cstd.push_str(unsafe str::from_cstr(cli::cstd()));
@@ -288,6 +291,9 @@ const MULW: str = "@noinline\nfn mulw(a: u64, b: u64) u64 {\n    return a.wrappi
 
 @test
 fn asm_host_function() {
+    if !cli::has_cc() {
+        return; // it reads the C compiler's assembly
+    }
     // One build serves the three checks (`asm_check` is `diff_build`, `asm_text` and `asm_match`).
     let b = h::diff_build(MULW, ["--profile=release"]);
     assert(b.built, b.diag.as_str());

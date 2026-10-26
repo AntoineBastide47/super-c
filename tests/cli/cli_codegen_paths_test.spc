@@ -45,6 +45,9 @@ fn test_build_with_a_global_fixture() {
 
 @test
 fn long_statement_else_if_chain_builds() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     // A 300-arm `else if` chain whose arms fall through and whose tests need statements first (the
     // inlined call) nests one region per arm past the renderer's nesting bound: the body takes the
     // flat goto layout and builds.

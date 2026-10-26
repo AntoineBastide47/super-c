@@ -63,6 +63,21 @@ extern "C" "stdlib.h" {
     fn c_qsort(base: *mut void, n: usize, size: usize, cmp: fn(*const void, *const void) i32);
 }
 
+// glibc keeps `atexit` in its static `libc_nonshared.a`, which only its C toolchain links; the own linker
+// links the shared C library alone. The runtime defines it as that archive does: a handler of this image
+// (`__dso_handle`, which the C toolchain's start files or the own linker define).
+@platform(linux)
+extern "C" {
+    fn __cxa_atexit(f: fn(), arg: *mut void, dso: *mut void) i32;
+    static mut __dso_handle: u8;
+}
+
+@platform(linux)
+@export("atexit")
+fn own_atexit(f: fn()) i32 {
+    return unsafe __cxa_atexit(f, null, &mut __dso_handle);
+}
+
 extern "C" "stdio.h" {
     @import("fflush")
     fn c_fflush(f: *mut void) i32;

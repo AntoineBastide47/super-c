@@ -93,6 +93,9 @@ fn closure_bounds_reject_feature_functions() {
 // baseline caller, and inlines a function without features.
 @test
 fn feature_functions_keep_their_calls() {
+    if !cli::has_cc() {
+        return; // it reads the emitted C
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -150,6 +153,9 @@ fn feature_functions_keep_their_calls() {
 // original elsewhere. A function without vector code keeps its one copy.
 @test
 fn feature_functions_compile_their_vector_callees_with_their_features() {
+    if !cli::has_cc() {
+        return; // it reads the emitted C
+    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -456,6 +462,9 @@ fn dispatch_run(flags: str, key: str, val: str) String {
 // with no race report when two threads make the first call; the same under link-time optimization.
 @test
 fn dispatch_chooses_once_in_table_order() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let a = unsafe shim::sc_host_arch();
     if cli::on_windows() || cli::on_wasm() || h::simd_lane() || a > 1 {
         return;
@@ -484,6 +493,9 @@ fn dispatch_chooses_once_in_table_order() {
 // x86-64 a plain load) and the indirect call, with no fence; the first call is an outlined direct call.
 @test
 fn dispatch_needs_no_fence() {
+    if !cli::has_cc() {
+        return; // it reads the C compiler's assembly
+    }
     // Each unit alone, as a large program builds: in one unit the C compiler sees the target and may
     // turn the indirect call into a compare and a branch.
     let _unit = cli::set_env("SC_UNITY_MAX", "0");

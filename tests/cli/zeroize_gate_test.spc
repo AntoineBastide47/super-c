@@ -89,9 +89,12 @@ fn zeroize_of_a_dead_buffer_survives_release() {
     r.show();
     assert(r.ok(), "the program builds at the release profile");
     assert_eq(p.run_bin(), 6);
-    let c = cli::read_text(format("{}/build/release/raw/std/mem/volatile.c", root).as_str());
-    assert(c.as_str().contains("(*(uint8_t volatile *)("), "the emitted C keeps the volatile byte stores");
-    assert(c.as_str().contains("(*(size_t volatile *)("), "the emitted C keeps the volatile word stores");
+    // Without a C compiler the build is native: no C to read.
+    if cli::has_cc() {
+        let c = cli::read_text(format("{}/build/release/raw/std/mem/volatile.c", root).as_str());
+        assert(c.as_str().contains("(*(uint8_t volatile *)("), "the emitted C keeps the volatile byte stores");
+        assert(c.as_str().contains("(*(size_t volatile *)("), "the emitted C keeps the volatile word stores");
+    }
     let bin = format("{}/bin{}", root, unsafe str::from_cstr(cli::binext()));
     let mut cmd = if unsafe shim::sc_host_platform() == 1 {
         format("otool -tv \"{}\"", bin.as_str());

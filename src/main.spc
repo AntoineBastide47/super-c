@@ -945,10 +945,18 @@ extend CommonOpts {
                 self.bad = true;
             } else {
                 self.target = t;
-                // A system with one usual instruction set picks it.
+                // A system with one usual instruction set picks it; another one keeps the host's, or takes
+                // its first one where the host's is not one of its (a wasm-hosted compiler for Windows).
                 let d = tgt::os(t).isa_default;
                 if d >= 0 {
                     self.arch = d;
+                } else if tgt::target_of(t, self.arch).is_none() {
+                    for i in 0..tgt::axis_names(true).len() as i32 {
+                        if tgt::target_of(t, i).is_some() {
+                            self.arch = i;
+                            break;
+                        }
+                    }
                 }
             }
         } else if arg.starts_with("--arch=") {
@@ -1176,6 +1184,7 @@ fn main(argv: Vector<str>) i32 {
     let mut emit_sub = ""; // script: --emit-sub=SUB, the transpile form an engine's --transpiler runs
     let mut manifest_dir = ""; // transpile form: --manifest-dir=DIR, the project directory
     let mut emit_id: u64 = 0; // transpile form: --emit-id=N, the identity its emit stamp records
+    let mut cc_found = false; // transpile form: --cc-found, the engine found the C compiler
 
     let mode = if argc > 1 {
         subcommand(argv[1]);
@@ -1239,6 +1248,8 @@ fn main(argv: Vector<str>) i32 {
                 } else if arg.starts_with("--emit-id=") {
                     emit_id = arg[10..].parse_u64().unwrap_or(0);
                     co.bad = co.bad || emit_id == 0;
+                } else if arg == "--cc-found" {
+                    cc_found = true;
                 } else if arg.starts_with("--profile=") || arg.starts_with("--out-dir=") {
                     let _ = bo.build_flag(&mut co, arg);
                 } else if parse_test_flag(arg, &mut topts, &mut co.bad) {} else if arg.starts_with("--") || file.len() != 0 {
@@ -1688,6 +1699,7 @@ fn main(argv: Vector<str>) i32 {
             target_features: co.target_features.as_str(),
             simd_width: co.simd_width,
             simd_dispatch: co.simd_dispatch.as_str(),
+            cc_found: cc_found,
         };
         return bsys::manifest_emit(&man, bo.profile, file, emit_sub, &cx, emit_id);
     }
@@ -1746,6 +1758,7 @@ fn main(argv: Vector<str>) i32 {
                 target_features: co.target_features.as_str(),
                 simd_width: co.simd_width,
                 simd_dispatch: co.simd_dispatch.as_str(),
+                cc_found: false,
             };
             if bo.out_dir.len() != 0 {
                 man.out_dir = String::from_str(bo.out_dir);

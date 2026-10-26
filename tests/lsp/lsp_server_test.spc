@@ -703,6 +703,9 @@ fn lsp_rename_workspace_relative() {
 // module is typechecked. Compile a two-module project with the same shape end-to-end.
 @test
 fn cross_module_enum_cast_array_len() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let p = cli::proj_new();
     p.mkfile(
         "lib.spc",

@@ -4871,6 +4871,8 @@ extend Gen {
         let z = self.tmp(false);
         let wr = self.tmp(false);
         let traps = !fl && sg && c == core::SIMD_ABS || c == core::SIMD_NARROW_CHECKED;
+        // The bit rules read a lane's own bits: zero-extended whatever its sign.
+        let bitop = c >= core::SIMD_CLZ && c <= core::SIMD_BSWAP;
         let fr = if traps {
             self.tmp(false);
         } else {
@@ -4912,11 +4914,11 @@ extend Gen {
                 self.float_rule(c, k, ops, tys, lt, mk, d, x, y, wr, fa, fb, fc);
                 continue;
             }
-            self.ld_lane(x, ops[0], k, lt, sg, false);
+            self.ld_lane(x, ops[0], k, lt, sg && !bitop, false);
             if scalar1 {
                 self.emit(a::mov_reg(true, y, s1));
             } else if tys[1] != T_NONE {
-                self.ld_lane(y, ops[1], k, lane_type(tys[1]), sg, false);
+                self.ld_lane(y, ops[1], k, lane_type(tys[1]), sg && !bitop, false);
             }
             if c >= core::SIMD_CMP_EQ && c <= core::SIMD_CMP_GE {
                 self.emit(a::addsub_reg(true, 1, true, a::ZR, x, y, 0, 0));

@@ -277,6 +277,9 @@ fn emit_stamp_keys_on_the_compiler_content() {
 // diagnostics. `phase load` prints only when the build transpiles.
 @test
 fn external_transpiler_builds_and_keys_the_emit_stamp() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
@@ -345,6 +348,9 @@ fn emit_stamp_records_the_text_the_build_read() {
 // unchanged object stays fresh instead of recompiling on every build.
 @test
 fn escaped_space_dependency_keeps_the_object_fresh() {
+    if !cli::has_cc() {
+        return; // a header's `static` function compiles through C
+    }
     if cli::on_wasm() {
         return;
     }
@@ -367,6 +373,9 @@ fn escaped_space_dependency_keeps_the_object_fresh() {
 // profile's directory.
 @test
 fn manifest_profile_is_a_build_constant() {
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     if cli::on_wasm() {
         return;

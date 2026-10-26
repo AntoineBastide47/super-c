@@ -490,6 +490,17 @@ worker and every core build byte-identical native objects.
 `tests/codegen/asm_test.spc` compares encodings with clang's only (`llvm_cc`: the C compiler when it is
 clang, else `clang` on the path, else the comparison skips): GNU as picks other valid encodings. A
 failing `wasm_libc_test` comparison names its first differing line.
+
+The suite also runs with no C compiler and no linker (the `*-nocc` jobs of `debug.yml`: Linux in an
+image with only the C library's headers, macOS and Windows with `CC` naming no file, wasm with only a
+WASI sysroot). There every build compiles natively and links with the own linker. A test that compiles
+C itself (`cc_build`, `c_lib`, a C driver, a C compiler wrapper), reads the emitted C or the C
+compiler's assembly, forces the C path (`SC_NATIVE=0`, a sanitizer, `--profile=race`, `SC_LINK=cc`),
+or needs a C module (a header's `static` function) starts with
+`if !cli::has_cc() { return; // <what needs the C compiler> }`; `cli::has_cc` looks `cli::cc_name()`
+up, so the test calls the C compiler through `cli::cc_name()`, never as a literal `cc`. A part of a
+test that needs it takes the same condition. Run a lane locally with `CC=/nonexistent/cc ./super-c
+test`; only an image without a C compiler finds a literal `cc`.
 `tests/codegen/debug_info_test.spc` builds a program with and without debug information for every native
 target: the code and data sections match, an llvm-dwarfdump (on the path, beside clang, the wasi-sdk's or
 Xcode's) verifies the line tables; gdb (Linux) or lldb (macOS, where it may run a program) stops in a
