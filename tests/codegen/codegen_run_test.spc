@@ -2525,6 +2525,30 @@ fn main() i32 {
     );
 }
 
+// A tuple element of a narrower number than the tuple's written type keeps its own type: an element or
+// field place reads its storage, and the tuple's field holds the widened value.
+fn tuple_elements_widen_from_their_places(b: &mut h::ExitBatch) {
+    b.add(
+        "narrow places widen into a tuple",
+        M"(struct S { pub a: i16, pub b: f32 }
+@noinline
+fn at(k: usize) usize { return k; }
+fn main() i32 {
+    let ia: [i16; 4] = [300, -32768, 32767, -5];
+    let fa: [f32; 2] = [1.5, -2.25];
+    let s = S { a: -7, b: 0.5 };
+    let k = at(1);
+    let (x, y): (i32, i64) = unsafe (ia[k], s.a);
+    let t: (f64, f64, i32) = unsafe (fa[k - 1], s.b, ia[k + 2]);
+    if x != -32768 || y != -7 { return 1; }
+    if t.0 != 1.5 || t.1 != 0.5 || t.2 != -5 { return 2; }
+    return 0;
+}
+)",
+        0,
+    );
+}
+
 // `Box::new(closure)` erases to `Box<dyn fn(..)>` as a boxed value erases to `Box<dyn I>`: the payload
 // pointer moves into the fat value and the table frees the captures once. A function item erases to
 // `dyn fn` too, owned or borrowed.
@@ -5254,6 +5278,7 @@ fn exit_cases_04() {
     let mut b = h::ExitBatch::new();
     function_types_substitute_structurally(&mut b);
     function_items_in_tuples_and_fields(&mut b);
+    tuple_elements_widen_from_their_places(&mut b);
     boxed_closures_erase_to_dyn_fn(&mut b);
     widened_operands_compute_at_the_result_width(&mut b);
     const_generic_values_in_constant_evaluation(&mut b);

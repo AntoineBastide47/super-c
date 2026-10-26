@@ -19,6 +19,7 @@ pub const F_WEAK: u32 = 1;
 pub const F_LOCAL: u32 = 2;
 pub const F_HIDDEN: u32 = 4;
 pub const F_UNDEFINED: u32 = 0x10;
+pub const F_EXPLICIT_NAME: u32 = 0x40;
 pub const F_NO_STRIP: u32 = 0x80;
 
 /// Segment flags.
@@ -46,6 +47,8 @@ pub struct WSym {
     pub ty: u32,
     pub def: u32,
     pub size: u32,
+    pub imod: u32, // an import's module (`names` id), NONE for `env`
+    pub iname: u32, // an import's name (`names` id), NONE for the symbol's
 }
 
 extend WSym as Copy {}
@@ -102,7 +105,9 @@ extend WObj {
             return self.sym_of[id as usize] - 1;
         }
         let k = self.syms.len() as u32;
-        self.syms.push(WSym { name: id, kind: kind, flags: F_UNDEFINED, ty: NONE, def: NONE, size: 0 });
+        self.syms.push(
+            WSym { name: id, kind: kind, flags: F_UNDEFINED, ty: NONE, def: NONE, size: 0, imod: NONE, iname: NONE },
+        );
         self.sym_of[id as usize] = k + 1;
         return k;
     }
@@ -219,8 +224,22 @@ pub fn write(o: &WObj, out: &mut Vector<u8>) {
     for k in 0..o.syms.len() {
         let s = o.syms[k];
         if s.kind == K_FUNC && s.def == NONE {
-            w::name(&mut sec, "env");
-            w::name(&mut sec, o.name_of(k as u32));
+            w::name(
+                &mut sec,
+                if s.imod != NONE {
+                    o.names.spell(s.imod);
+                } else {
+                    "env";
+                },
+            );
+            w::name(
+                &mut sec,
+                if s.iname != NONE {
+                    o.names.spell(s.iname);
+                } else {
+                    o.name_of(k as u32);
+                },
+            );
             sec.push(0);
             w::uleb(&mut sec, s.ty);
         }
@@ -309,7 +328,16 @@ pub fn write(o: &WObj, out: &mut Vector<u8>) {
     for k in 0..o.syms.len() {
         let s = o.syms[k];
         sub.push(s.kind);
-        w::uleb(&mut sub, s.flags);
+        // An import of another name than the symbol's names the symbol too.
+        let explicit = s.kind == K_FUNC && s.def == NONE && s.iname != NONE;
+        w::uleb(
+            &mut sub,
+            if explicit {
+                s.flags | F_EXPLICIT_NAME;
+            } else {
+                s.flags;
+            },
+        );
         if s.kind == K_DATA {
             w::name(&mut sub, o.name_of(k as u32));
             if s.def != NONE {
@@ -325,7 +353,7 @@ pub fn write(o: &WObj, out: &mut Vector<u8>) {
             0u32;
         };
         w::uleb(&mut sub, idx);
-        if s.def != NONE {
+        if s.def != NONE || explicit {
             w::name(&mut sub, o.name_of(k as u32));
         }
     }

@@ -173,6 +173,7 @@ file f1 "lib/\"q\"\x09.spc"
 sym @ints fn global
 sym @floats fn local
 sym @memory fn global
+sym @bare fn global
 sym @atomics fn global
 sym @calls fn global
 sym @va fn global
@@ -292,6 +293,13 @@ b0(v0: ptr, v1: i64):
   v11 = slotaddr s1
   store v6, v11+3 align 0
   v12 = load.i16 v9-2 align 1
+  asm "ldr %0, %2; add %0, %0, %1" out["=r" i64] in["r", "m"] clobber["memory", "x9"] (v2, v1, v0)
+  ret
+fn @bare
+  naked
+  sig () -> void
+b0:
+  asm "ret" out[] in[] clobber[] ()
   ret
 fn @atomics
   sig (ptr, i32) -> i32

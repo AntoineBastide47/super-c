@@ -30341,8 +30341,12 @@ extend TypeChecker {
             }
             if i as i32 < wn && et != wargs[i as usize] && self.compatible(wargs[i as usize], eid) {
                 targs[i as usize] = wargs[i as usize];
-                // An erased element keeps its own type: lowering wraps it from the recorded erasure.
-                if unsafe (*self.cur_ast()).dyn_use_at(eid) == null {
+                // An erased element keeps its own type: lowering wraps it from the recorded erasure. A
+                // number keeps it too: a place (`a[i]`, `s.f`) is of its storage type, and the store into
+                // the field converts the value.
+                let (eb, wb) = (self.bt_of(et), self.bt_of(wargs[i as usize]));
+                let num = (bt_is_int(eb) || bt_is_float(eb)) && (bt_is_int(wb) || bt_is_float(wb));
+                if !num && unsafe (*self.cur_ast()).dyn_use_at(eid) == null {
                     unsafe (*self.cur_ast()).set_type(eid, wargs[i as usize]);
                 }
             }

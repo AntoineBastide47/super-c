@@ -72,7 +72,7 @@ fn run_lir(text: str, driver: str, os: i32, isa: i32, cc: str, runner: str) i32 
         }
     }
     let mut obj = Vector::<u8>::new();
-    if !nat::object(&p, os, isa, fs_[0..fs_.len()], ds[0..ds.len()], &mut obj, &mut err) {
+    if !nat::object(&p, os, isa, fs_[0..fs_.len()], ds[0..ds.len()], "", &mut obj, &mut err) {
         eprint("native: {}\n", err.as_str());
         return -1;
     }
@@ -865,4 +865,99 @@ fn native_objects_are_identical_across_builds() {
     for k in 0..first.len() {
         assert(again.at(k).as_str() == first.at(k).as_str(), "the cached build writes the same bytes");
     }
+}
+
+// Inline assembly compiles natively: register, immediate, memory and matching operands, a `+` operand,
+// named registers (x86-64), a loop on a local label, `%=`, and a clobbered callee-saved register while
+// a loop keeps a value in one.
+const INLINE_ASM: str<'static> = M"(@arch(aarch64)
+fn work(x: i64, y: i64) i64 {
+    let mut a: i64 = 0;
+    let mut b: i64 = x;
+    let mut m: i64 = 0;
+    let mut s: i64 = 0;
+    let mut n: i64 = 3;
+    let mut acc: i64 = 0;
+    let mut w: i32 = 0;
+    let mut c: i64 = 0;
+    unsafe {
+        asm("add %0, %1, %2" : "=r"(a) : "r"(x), "r"(y));
+        asm("add %0, %1, %2" : "=r"(c) : "r"(x * 3), "r"(y + 1));
+        asm("add %0, %0, #%1" : "+r"(b) : "i"(5));
+        asm("ldr %0, %1" : "=r"(m) : "m"(y));
+        asm("str %1, %0" : "=m"(s) : "r"(a));
+        asm("1:\n add %1, %1, #2\n subs %0, %0, #1\n b.ne 1b" : "+r"(n), "+r"(acc) :  : "cc");
+        asm("add %w0, %w0, #1 // %=" : "=r"(w) : "0"(41));
+        asm("mov x19, #0\n mov x20, #0" :  :  : "x19", "x20", "d8");
+    }
+    return a + b + m + s + acc + w as i64 + c;
+}
+
+@arch(x86_64)
+fn work(x: i64, y: i64) i64 {
+    let mut a: i64 = 0;
+    let mut b: i64 = x;
+    let mut m: i64 = 0;
+    let mut s: i64 = 0;
+    let mut n: i64 = 3;
+    let mut acc: i64 = 0;
+    let mut w: i32 = 0;
+    let mut hi: i64 = 0;
+    let mut c: i64 = 0;
+    unsafe {
+        asm("leaq (%1,%2), %0" : "=r"(a) : "r"(x), "r"(y));
+        asm("leaq (%1,%2), %0" : "=r"(c) : "r"(x * 3), "r"(y + 1));
+        asm("addq %1, %0" : "+r"(b) : "i"(5));
+        asm("movq %1, %0" : "=r"(m) : "m"(y));
+        asm("movq %1, %0" : "=m"(s) : "r"(a));
+        asm("1:\n addq $2, %1\n decq %0\n jne 1b" : "+r"(n), "+r"(acc) :  : "cc");
+        asm("addl $1, %k0 # %=" : "=r"(w) : "0"(41));
+        asm("movq %%rax, %%rdx" : "=d"(hi) : "a"(x));
+        asm("xorl %%ebx, %%ebx\n xorl %%r12d, %%r12d" :  :  : "rbx", "r12");
+    }
+    return a + b + m + s + acc + w as i64 + hi - x + c;
+}
+
+@arch(wasm32)
+fn work(x: i64, y: i64) i64 {
+    return 6 * x + 3 * y + 64;
+}
+
+fn main() i32 {
+    let mut t: i64 = 0;
+    let mut i: i64 = 0;
+    // The loop keeps `t` and `i` in callee-saved registers across the clobbers.
+    while i < 4 {
+        t += work(i, 10);
+        i += 1;
+    }
+    // 6x + 3y + 64 per call: 6 * 6 + 4 * 94.
+    return (t - 412) as i32;
+}
+)";
+
+@test
+fn inline_assembly_compiles_natively() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("main.spc", INLINE_ASM);
+    // The x86-64 forms compile for both of its targets; the link needs their C toolchains.
+    for os in ["linux", "windows"] {
+        let r = cli::superc_env_in(
+            p.dir(),
+            "SC_NATIVE_STATS",
+            "1",
+            format("build --target={} --arch=x86_64 main.spc -o bin", os).as_str(),
+        );
+        assert(r.out_has("main native") && !r.out_has("main through C"), "main compiles natively for x86-64");
+    }
+    if !nat::supported(tgt::host_os(), tgt::host_isa()) || !nat::asm_native(tgt::host_os(), tgt::host_isa()) {
+        return;
+    }
+    let r = cli::superc_env_in(p.dir(), "SC_NATIVE_STATS", "1", "build main.spc -o bin");
+    assert(r.ok(), "the program builds");
+    assert(!r.out_has("main through C"), "main compiles natively");
+    assert_eq(p.run_bin(), 0);
 }

@@ -2032,7 +2032,9 @@ extend tc::TypeChecker {
             let k = (e >> 56) as u8;
             let aux = (e >> 32 & 0xFFFFFFu64) as u32;
             let node = (e & 0xFFFFFFFFu64) as NodeId;
-            if k == ir::TP_MARK_PUSH || k == ir::TP_CALL_MARK {
+            if k == ir::TP_CONST_MOVE {
+                self.tc_mark_move(node);
+            } else if k == ir::TP_MARK_PUSH || k == ir::TP_CALL_MARK {
                 st.bms.push(self.borrow_mark());
             } else if k == ir::TP_MARK_POP {
                 self.borrow_release_to(rep_bm(st));

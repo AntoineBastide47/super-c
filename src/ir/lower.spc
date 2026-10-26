@@ -5378,6 +5378,13 @@ extend Lowerer {
                 target = DefId { module: 0, node: NODE_NONE };
             }
         }
+        // A `const fn` call with constant arguments runs at compile time: its value replaces it.
+        if target.node != NODE_NONE {
+            let fo = self.fold_call(id, target, ty, sp);
+            if fo != ir::IR_NONE {
+                return fo;
+            }
+        }
         // `type_info::<T>()` / `zeroed::<T>()`: compiler intrinsics, not resolved functions.
         if target.node == NODE_NONE && self.is_intrinsic_callee(d.callee, "type_info") {
             // the subject type rides in `b` so the backend can name the exported descriptor
@@ -7705,6 +7712,321 @@ extend Lowerer {
             guard += 1;
         }
         return ty;
+    }
+
+    // ---- Compile-time calls ----
+
+    // The value of call `id` of `const fn` `target` (result type `ty`) when its arguments are constant
+    // (`maybe_const`) and it evaluates at compile time: a constant operand of an integer, `bool`,
+    // `char`, float, `str` or bare enum, or an aggregate of them (`fold_value`). IR_NONE leaves the
+    // call to run: a generic body, a run-time argument, a trap, another result type, a lowering the
+    // evaluator drives for its own run, or no evaluator (lint).
+    fn fold_call(self: &mut Self, id: NodeId, target: DefId, ty: TypeId, sp: tok::Span) ir::OperandId {
+        let pk = unsafe &*self.pkg;
+        if self.body.is_generic || ty == TYPE_NONE || pk.cir == null || self.decl_kind(target) != NodeKind::NODE_FUNCTION {
+            return ir::IR_NONE;
+        }
+        let cev = unsafe &mut *(pk.cir as *mut iri::Interp);
+        if !cev.record_folds || cev.folding_self() {
+            return ir::IR_NONE;
+        }
+        let fa = unsafe &*pk.module_ast_const(target.module);
+        let fd = fa.at_const(target.node).as_data.function;
+        if !fd.is_const() || fd.is_extern() || fd.body == NODE_NONE || !self.foldable_ty(ty, 0) || !self.maybe_const(id) {
+            return ir::IR_NONE;
+        }
+        // A failed evaluation is no error: the call runs as written.
+        let mut leaves = Vector::<iri::Leaf>::new();
+        let at = self.body.bytes.len();
+        cev.pause_folds();
+        let ok = cev.eval_leaves(self.module, id, &mut leaves, &mut self.body.bytes);
+        cev.resume_folds();
+        let mut k: usize = 0;
+        // The constants keep the call's position but no spelling: an empty span renders `val`.
+        let op = if ok {
+            self.fold_value(ty, &leaves, at, &mut k, tok::Span { start: sp.start, end: sp.start });
+        } else {
+            ir::IR_NONE;
+        };
+        if op == ir::IR_NONE || k != leaves.len() {
+            self.body.bytes.truncate(at);
+            return ir::IR_NONE;
+        }
+        // The replay still sees the call boundary, and each by-value argument's consumption is
+        // marked explicitly: no IR op survives to carry it.
+        let d = self.f.node(id).as_data.call;
+        let recv = self.f.node(d.callee).kind == NodeKind::NODE_MEMBER && !self.f.node(d.callee).as_data.member.path && fd.params.len == d.args.len + 1;
+        self.tp(ir::TP_CALL_MARK, 0, id);
+        if recv && !self.by_ref_param(target, 0) {
+            self.tp(ir::TP_CONST_MOVE, 0, self.f.node(d.callee).as_data.member.object);
+        }
+        for i in 0..d.args.len {
+            let pi = if recv {
+                i + 1;
+            } else {
+                i;
+            };
+            if !self.by_ref_param(target, pi as usize) {
+                self.tp(ir::TP_CONST_MOVE, 0, unsafe self.f.list(d.args)[i as usize]);
+            }
+        }
+        self.tp(ir::TP_CALL, 0, id);
+        return op;
+    }
+
+    // Whether a value of type `ty` (nested `depth` aggregates deep) folds to constants: an integer,
+    // `bool`, `char`, float, `str`, bare enum, or an array or a struct of them.
+    fn foldable_ty(self: &mut Self, ty: TypeId, depth: u32) bool {
+        if ty == TYPE_NONE || depth > 16 {
+            return false;
+        }
+        let y = *self.f.ty(ty);
+        if y.kind == TypeKind::TYPE_BUILTIN {
+            let bt = y.as_data.builtin;
+            return bt != BuiltinType::BT_VOID && bt != BuiltinType::BT_VALIST && bt != BuiltinType::BT_C32 && bt != BuiltinType::BT_C64;
+        }
+        if y.kind == TypeKind::TYPE_ENUM {
+            let ea = unsafe &*(&*self.pkg).module_ast_const(y.module);
+            return !ea.enum_has_payload(y.as_data.decl);
+        }
+        if y.kind == TypeKind::TYPE_ARRAY {
+            return y.as_data.arr.len != 0 && self.foldable_ty(y.as_data.arr.elem, depth + 1);
+        }
+        if y.kind != TypeKind::TYPE_STRUCT && y.kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        if y.kind == TypeKind::TYPE_STRUCT && vd_is(self.view_decls().v_str, y.as_data.decl, y.module) {
+            return true;
+        }
+        let mut dm: ModuleId = 0;
+        let dn = self.proj_owner_decl(ty, &mut dm);
+        let da = unsafe &*(&*self.pkg).module_ast_const(dm);
+        if dn == NODE_NONE || da.at_const(dn).kind != NodeKind::NODE_STRUCT || da.at_const(dn).as_data.aggregate.is_union {
+            return false;
+        }
+        let ms = da.at_const(dn).as_data.aggregate.members;
+        if ms.len == 0 {
+            return false;
+        }
+        for i in 0..ms.len {
+            if !da.at_const(dn).as_data.aggregate.is_tuple && da.at_const(unsafe da.list(ms)[i as usize]).kind != NodeKind::NODE_FIELD {
+                return false;
+            }
+            if !self.foldable_ty(self.proj_field_ty(ty, i), depth + 1) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The operand of a folded value of type `ty` (`foldable_ty`) from `leaves[*k..]`, whose `str`
+    // bytes start at `at` in the body's pool; it advances `*k` past them. IR_NONE when they do not
+    // match the type.
+    fn fold_value(self: &mut Self, ty: TypeId, leaves: &Vector<iri::Leaf>, at: usize, k: &mut usize, sp: tok::Span) ir::OperandId {
+        let y = *self.f.ty(ty);
+        if y.kind == TypeKind::TYPE_BUILTIN || y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_STRUCT && vd_is(
+            self.view_decls().v_str,
+            y.as_data.decl,
+            y.module,
+        ) {
+            if *k >= leaves.len() {
+                return ir::IR_NONE;
+            }
+            let l = leaves[*k];
+            *k += 1;
+            if y.kind == TypeKind::TYPE_STRUCT {
+                return if l.kind == iri::LF_BYTES {
+                    self.kop(ir::CK_BYTES, ty, l.v + (at as i64 << 32), sp);
+                } else {
+                    ir::IR_NONE;
+                };
+            }
+            if y.kind == TypeKind::TYPE_ENUM {
+                return self.fold_variant(ty, l, sp);
+            }
+            let bt = y.as_data.builtin;
+            if bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64 {
+                if l.kind != iri::LF_FLOAT {
+                    return ir::IR_NONE;
+                }
+                // An f32 NaN narrows by its bits: a conversion would quiet a signaling one.
+                let u = l.v as u64;
+                let bits = if bt != BuiltinType::BT_F32 {
+                    l.v;
+                } else if (u >> 52 & 0x7FF) == 0x7FF && (u & 0xFFFFFFFFFFFFF) != 0 {
+                    (u >> 63 << 31 | 0xFFu64 << 23 | u >> 29 & 0x7FFFFF) as i64;
+                } else {
+                    (f64::from_bits(u) as f32).to_bits() as i64;
+                };
+                return self.kop(ir::CK_FBITS, ty, bits, sp);
+            }
+            if l.kind != pick(bt == BuiltinType::BT_BOOL, iri::LF_BOOL, iri::LF_INT) {
+                return ir::IR_NONE;
+            }
+            return self.kop(pick(bt == BuiltinType::BT_BOOL, ir::CK_BOOL, ir::CK_INT), ty, l.v, sp);
+        }
+        let mut argv = self.avget();
+        let mut agg = ir::AGG_ARRAY;
+        let mut item = DefId { module: 0, node: NODE_NONE };
+        if y.kind == TypeKind::TYPE_ARRAY {
+            for _i in 0..y.as_data.arr.len {
+                argv.push(self.fold_value(y.as_data.arr.elem, leaves, at, k, sp));
+            }
+        } else {
+            let mut dm: ModuleId = 0;
+            let dn = self.proj_owner_decl(ty, &mut dm);
+            let ag = (unsafe &*(&*self.pkg).module_ast_const(dm)).at_const(dn).as_data.aggregate;
+            agg = pick(ag.is_tuple, ir::AGG_TUPLE, ir::AGG_STRUCT);
+            item = DefId { module: dm, node: dn };
+            for i in 0..ag.members.len {
+                argv.push(self.fold_value(self.proj_field_ty(ty, i), leaves, at, k, sp));
+            }
+        }
+        let mut op = ir::IR_NONE;
+        if !argv.contains(&ir::IR_NONE) {
+            op = self.finish_aggregate(agg, item, &argv, ty, sp, ir::IR_NONE);
+        }
+        self.avput(argv);
+        return op;
+    }
+
+    // The unit variant of bare enum `ty` whose value leaf `l` holds; IR_NONE when none has it.
+    fn fold_variant(self: &mut Self, ty: TypeId, l: iri::Leaf, sp: tok::Span) ir::OperandId {
+        let y = *self.f.ty(ty);
+        if l.kind != iri::LF_INT {
+            return ir::IR_NONE;
+        }
+        let ord = (unsafe &mut *((&*self.pkg).cir as *mut iri::Interp)).variant_of(y.module, y.as_data.decl, l.v);
+        if ord < 0 {
+            return ir::IR_NONE;
+        }
+        let ea = unsafe &*(&*self.pkg).module_ast_const(y.module);
+        let vd = DefId {
+            module: y.module,
+            node: unsafe ea.list(ea.at_const(y.as_data.decl).as_data.aggregate.members)[ord as usize],
+        };
+        let argv = self.avget();
+        let op = self.finish_aggregate(ir::AGG_VARIANT, vd, &argv, ty, sp, ir::IR_NONE);
+        self.avput(argv);
+        return op;
+    }
+
+    // Whether parameter `pi` of function `target` is a reference or a pointer: its argument is
+    // borrowed (an implicit autoref included), not moved.
+    fn by_ref_param(self: &Self, target: DefId, pi: usize) bool {
+        let fa = unsafe &*(&*self.pkg).module_ast_const(target.module);
+        let ps = fa.at_const(target.node).as_data.function.params;
+        if pi >= ps.len as usize {
+            return false;
+        }
+        let pt = fa.type_of(unsafe fa.list(ps)[pi]);
+        if pt == TYPE_NONE {
+            return false;
+        }
+        let pk = fa.type_at(pt).kind;
+        return pk == TypeKind::TYPE_REFERENCE || pk == TypeKind::TYPE_POINTER;
+    }
+
+    // Whether expression `id` looks constant, the gate of a compile-time call (anything else makes an
+    // evaluation pure waste): literals, `sizeof`, `alignof`, constants, functions and variants named,
+    // and operators, casts, indexes, field reads, aggregates and `const fn` calls over them.
+    fn maybe_const(self: &Self, id: NodeId) bool {
+        if id == NODE_NONE {
+            return true;
+        }
+        let n = *self.f.node(id);
+        let k = n.kind;
+        if k == NodeKind::NODE_LITERAL || k == NodeKind::NODE_SIZEOF || k == NodeKind::NODE_ALIGNOF {
+            return true;
+        }
+        if k == NodeKind::NODE_BINARY {
+            // A left-nested chain is walked with a loop, so the depth does not grow with its length.
+            let mut l = id;
+            while self.f.node(l).kind == NodeKind::NODE_BINARY {
+                if !self.maybe_const(self.f.node(l).as_data.binary.right) {
+                    return false;
+                }
+                l = self.f.node(l).as_data.binary.left;
+            }
+            return self.maybe_const(l);
+        }
+        if k == NodeKind::NODE_UNARY {
+            return self.maybe_const(n.as_data.unary.operand);
+        }
+        if k == NodeKind::NODE_CAST {
+            return self.maybe_const(n.as_data.cast.expression);
+        }
+        if k == NodeKind::NODE_INDEX {
+            return self.maybe_const(n.as_data.index.object) && self.maybe_const(n.as_data.index.index);
+        }
+        if k == NodeKind::NODE_ARRAY_LITERAL || k == NodeKind::NODE_TUPLE {
+            for i in 0..n.as_data.array_literal.elements.len {
+                if !self.maybe_const(unsafe self.f.list(n.as_data.array_literal.elements)[i as usize]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if k == NodeKind::NODE_STRUCT_INITIALIZER {
+            for i in 0..n.as_data.struct_initializer.fields.len {
+                let fi = unsafe self.f.list(n.as_data.struct_initializer.fields)[i as usize];
+                if !self.maybe_const(self.f.node(fi).as_data.field_initializer.value) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if k == NodeKind::NODE_CALL {
+            let c = n.as_data.call;
+            // A `const fn` (a method's receiver too), a variant or a tuple struct.
+            let ck = self.f.node(c.callee).kind;
+            if ck == NodeKind::NODE_MEMBER && !self.f.node(c.callee).as_data.member.path {
+                if !self.maybe_const(self.f.node(c.callee).as_data.member.object) {
+                    return false;
+                }
+            } else if !self.maybe_const(c.callee) {
+                return false;
+            }
+            let mut t = self.path_res(c.callee);
+            switch self.f.call_info(id) {
+                Some(v) => {
+                    t = DefId { module: ci_module(v), node: ci_decl(v) };
+                },
+                None => {},
+            };
+            if t.node == NODE_NONE {
+                return false;
+            }
+            let tk = self.decl_kind(t);
+            if tk == NodeKind::NODE_FUNCTION && !(unsafe &*(&*self.pkg).module_ast_const(t.module)).at_const(t.node).as_data.function.is_const() || tk != NodeKind::NODE_FUNCTION && tk != NodeKind::NODE_VARIANT && tk != NodeKind::NODE_STRUCT {
+                return false;
+            }
+            for i in 0..c.args.len {
+                if !self.maybe_const(unsafe self.f.list(c.args)[i as usize]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if k == NodeKind::NODE_MEMBER && !n.as_data.member.path {
+            return self.maybe_const(n.as_data.member.object);
+        }
+        if k == NodeKind::NODE_IDENTIFIER || k == NodeKind::NODE_MEMBER || k == NodeKind::NODE_TYPE_PATH || k == NodeKind::NODE_GENERIC_SPECIALIZATION {
+            let d = self.path_res(id);
+            if d.node == NODE_NONE {
+                return false;
+            }
+            let dk = self.decl_kind(d);
+            if dk == NodeKind::NODE_FUNCTION || dk == NodeKind::NODE_VARIANT {
+                return true;
+            }
+            if dk == NodeKind::NODE_CONST {
+                let cd = (unsafe &*(&*self.pkg).module_ast_const(d.module)).at_const(d.node).as_data.const_def;
+                return cd.value != NODE_NONE && !cd.is_static_mut;
+            }
+            return false;
+        }
+        return false;
     }
 
     /// The prelude view decls, resolved on first use and cached for the Lowerer's lifetime.

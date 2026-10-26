@@ -41,7 +41,7 @@ pub struct Probe {
 }
 
 // The probe table. A probe's index is its bit in a `need` mask.
-const PROBES: [Probe; 23] = [
+const PROBES: [Probe; 24] = [
     Probe {
         id: "add-overflow",
         step: "compile",
@@ -260,6 +260,17 @@ const PROBES: [Probe; 23] = [
         src: "",
         scoped: true,
     },
+    // Apple ld's byte-identical output: by default two links of the same objects can order the
+    // symbol stubs differently. Older Apple ld (Xcode 13) rejects the flag.
+    Probe {
+        id: "reproducible-link",
+        step: "link",
+        kind: "accept",
+        flags: "-Wl,-reproducible",
+        forms: "",
+        src: "int main(void) {\n    return 0;\n}\n",
+        scoped: true,
+    },
 ];
 
 /// The probe table.
@@ -293,8 +304,11 @@ pub const PCH_NO_TIME: usize = 21;
 /// The compiler support library probe's index.
 pub const RTLIB: usize = 22;
 
+/// The reproducible-link probe's index.
+pub const REPRO: usize = 23;
+
 /// The `need` mask of every probe.
-pub const ALL: u64 = (1u64 << 23) - 1;
+pub const ALL: u64 = (1u64 << 24) - 1;
 
 // Field `idx` of `s` split at byte `sep`; the last field runs to the end, and a missing one is empty.
 const fn nth(s: str, sep: u8, idx: usize) str {

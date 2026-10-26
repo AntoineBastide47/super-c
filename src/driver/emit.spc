@@ -38,6 +38,7 @@ import emit::cemit as cbe;
 import lir::lower as lw;
 import lir::ir as lir_ir;
 import lir::print as lprint;
+import lir::parse as lparse;
 import target::native as nat;
 import bindgen::bindgen as bg;
 import bindgen::ctarget as ct;
@@ -283,18 +284,25 @@ fn module_has_asm(p: &loader::Package, m: usize) bool {
     return false;
 }
 
-// Whether module `m` declares a thread-local variable.
-fn module_has_tls(p: &loader::Package, m: usize) bool {
+// The text of module `m`'s module-level assembly the platform filter kept, its statements in source
+// order (one unit, as the C path's).
+fn module_asm(p: &loader::Package, m: usize) String {
+    let mut out = String::new();
     if !p.modules[m].has_ast || p.modules[m].backend {
-        return false;
+        return out;
     }
     let a = unsafe &*p.module_ast_const(m as ModuleId);
-    for i in 0..a.nodes.len() {
-        if a.at_const(i as NodeId).kind == NodeKind::NODE_CONST && a.attr_of(i as NodeId, AttrKind::ATTR_THREAD_LOCAL) != null {
-            return true;
+    let its = a.at_const(a.root).as_data.program.items;
+    for i in 0..its.len {
+        let n = a.at_const(unsafe a.list(its)[i as usize]);
+        if n.kind != NodeKind::NODE_ASM {
+            continue;
         }
+        let sp = a.at_const(n.as_data.asm_stmt.template).as_data.literal.raw;
+        cbe::asm_bytes(p.modules[m].source.as_str().slice(sp.start as usize, sp.end as usize), &mut out);
+        out.push_byte(b'\n');
     }
-    return false;
+    return out;
 }
 
 fn compute_emit_live(p: &loader::Package) Vector<bool> {
@@ -10910,11 +10918,6 @@ const fn word_in(list: str, w: str) bool {
     return false;
 }
 
-// The C facts of every extern block with a header a native build's objects need, each header preprocessed
-// once under the target's C environment: the values of its integer constants (`Package.extern_ints`), and
-// its functions that only a C compile defines (`Package.c_fns`): every one of an intrinsics header, else
-// the header's `static` ones. A constant the header does not define as an integer stays without one, and
-// the modules that read it go through C.
 // Every module's line starts (`Package.lines`), which the parallel LIR lowerings share.
 fn lir_lines(p: &mut loader::Package) {
     p.lines.truncate(0);
@@ -10936,6 +10939,11 @@ fn lir_lines(p: &mut loader::Package) {
     }
 }
 
+// The C facts of every extern block with a header a native build's objects need, each header preprocessed
+// once under the target's C environment: the values of its integer constants (`Package.extern_ints`), and
+// its functions that only a C compile defines (`Package.c_fns`): every one of an intrinsics header, else
+// the header's `static` ones. A constant the header does not define as an integer stays without one, and
+// the modules that read it go through C. Without a C environment (no sysroot) a header has no facts.
 fn native_header_facts(p: &mut loader::Package) {
     let intr = tgt::isa(p.arch).intrinsics;
     let mut heads = Map::<String, u32>::new();
@@ -10967,15 +10975,9 @@ fn native_header_facts(p: &mut loader::Package) {
                 continue;
             }
             let htxt = src.slice((hs.start + 1) as usize, (hs.end - 1) as usize);
-            if word_in(intr, htxt) {
-                for j in 0..eb.items.len {
-                    let fid = unsafe a.list(eb.items)[j as usize];
-                    if a.at_const(fid).kind == NodeKind::NODE_FUNCTION {
-                        p.c_fns.insert(m as u64 << 32 | fid as u64);
-                    }
-                }
-                continue;
-            }
+            // An intrinsics header's functions are the C compiler's (`target::intrin` expands them); its
+            // register types are scanned as any header's.
+            let intrinsics = word_in(intr, htxt);
             // The include operand: the header beside the module's file when it is there, as the C
             // units include it, else the name on the search path.
             let mut h = format("<{}>", htxt);
@@ -11016,16 +11018,20 @@ fn native_header_facts(p: &mut loader::Package) {
             for j in 0..eb.items.len {
                 let sid = unsafe a.list(eb.items)[j as usize];
                 let sn = a.at_const(sid);
+                if sn.kind == NodeKind::NODE_FUNCTION && intrinsics {
+                    p.c_fns.insert(m as u64 << 32 | sid as u64);
+                    continue;
+                }
                 if sn.kind == NodeKind::NODE_FUNCTION {
                     let fs = a.at_const(sn.as_data.function.name).as_data.name.text;
                     fnames.index_mut(hi as usize).push(String::from_str(src.slice(fs.start as usize, fs.end as usize)));
                     fkeys.index_mut(hi as usize).push(m as u64 << 32 | sid as u64);
                     continue;
                 }
-                if sn.kind == NodeKind::NODE_TYPE_ALIAS && sn.as_data.type_alias.ty == NODE_NONE && a.attr_of(
+                if sn.kind == NodeKind::NODE_TYPE_ALIAS && sn.as_data.type_alias.ty == NODE_NONE && (a.attr_of(
                     sid,
                     AttrKind::ATTR_LAYOUT,
-                ) != null {
+                ) != null || a.attr_of(sid, AttrKind::ATTR_C_VALUE) != null) {
                     let ts = a.at_const(sn.as_data.type_alias.name).as_data.name.text;
                     tnames.index_mut(hi as usize).push(String::from_str(src.slice(ts.start as usize, ts.end as usize)));
                     tkeys.index_mut(hi as usize).push(m as u64 << 32 | sid as u64);
@@ -11055,11 +11061,26 @@ fn native_header_facts(p: &mut loader::Package) {
         p.build_target,
     );
     let mut words = Vector::<String>::new();
+    split_args(&mut words, p.cc.as_str());
+    let ncc = words.len();
     split_args(&mut words, all.as_str());
     let mut flags = String::new();
+    // The sysroot the C compiler's command or flags name: the headers its compile reads.
+    let mut sysroot = String::new();
     let mut w: usize = 0;
     while w < words.len() {
         let x = words[w].as_str();
+        if x.starts_with("--sysroot=") {
+            sysroot = String::from_str(x.slice(10, x.len()));
+        } else if (x == "--sysroot" || x == "-isysroot") && w + 1 < words.len() {
+            sysroot = words[w + 1].clone();
+            w += 2;
+            continue;
+        }
+        if w < ncc {
+            w += 1;
+            continue;
+        }
         let two = (x == "-D" || x == "-U") && w + 1 < words.len();
         if x.starts_with("-std=") || x.starts_with("-D") || x.starts_with("-U") || x == "-funsigned-char" || x == "-fsigned-char" {
             flags.push_str(x);
@@ -11088,6 +11109,7 @@ fn native_header_facts(p: &mut loader::Package) {
         let mut t = HfTask {
             target: p.build_target,
             arch: p.arch,
+            sysroot: &sysroot,
             flags: &flags,
             env: null,
             header: hnames.at(k),
@@ -11114,7 +11136,7 @@ fn native_header_facts(p: &mut loader::Package) {
     }
     // One C environment for every scan: each would build the same.
     let mut env = ct::CTarget::new();
-    if miss != 0 && bg::header_env(p.build_target, p.arch, flags.as_str(), &mut env) {
+    if miss != 0 && bg::header_env(p.build_target, p.arch, sysroot.as_str(), flags.as_str(), &mut env) {
         for q in 0..tasks.len() {
             tasks.index_mut(q).env = &env;
         }
@@ -11145,6 +11167,11 @@ fn native_header_facts(p: &mut loader::Package) {
     for q in 0..tasks.len() {
         let t = tasks.index_mut(q);
         let k = t.k as usize;
+        if !t.hit && t.env == null {
+            // No C environment for the target (no sysroot): a C compile reads no header either, so the
+            // functions are the library's exports. Nothing is recorded: a sysroot may appear.
+            continue;
+        }
         hf_write(&mut rec, t);
         for j in 0..t.read.len() {
             if !p.header_files.contains(&t.read[j]) {
@@ -11189,6 +11216,7 @@ const HF_RECORD: str = "__sc_hfacts";
 struct HfTask {
     pub target: i32,
     pub arch: i32,
+    pub sysroot: *const String,
     pub flags: *const String,
     pub env: *const ct::CTarget, // the C environment the scan runs under, null when none applies
     pub header: *const String,
@@ -11250,6 +11278,7 @@ fn hf_run(t: &mut HfTask) {
 // The key of `t`'s scan: the target, the flags, the header and the names it asks for.
 fn hf_key(t: &HfTask) u64 {
     let mut h = t.target as u64 << 32 ^ t.arch as u64;
+    h = (h ^ fnv(unsafe (*t.sysroot).as_str())).wrapping_mul(0x100000001B3);
     h = (h ^ fnv(unsafe (*t.flags).as_str())).wrapping_mul(0x100000001B3);
     h = (h ^ fnv(unsafe (*t.header).as_str())).wrapping_mul(0x100000001B3);
     let names = unsafe &*t.names;
@@ -11406,6 +11435,7 @@ struct NatTask {
     pub isa: i32,
     pub fs: *const Vector<u32>,
     pub ds: *const Vector<u32>,
+    pub text: *const String,
     pub bytes: *mut Vector<u8>,
     pub why: *mut String,
     pub ok: *mut bool,
@@ -11423,6 +11453,7 @@ fn nat_task(t: NatTask) {
         t.isa,
         fs[0..fs.len()],
         ds[0..ds.len()],
+        unsafe (*t.text).as_str(),
         unsafe &mut *t.bytes,
         unsafe &mut *t.why,
     );
@@ -11433,12 +11464,11 @@ fn nat_task(t: NatTask) {
 pub const RC_NATIVE_RETRY: i32 = 75;
 
 // Which modules render their bodies to C in a native build (`Package.nat_render`): those the native backend
-// does not take whatever their code (not named by SC_NATIVE, module-level assembly, a thread-local where
-// the backend has none), the ones the caller names (`nat_retry`), and the ones an earlier build of this
+// does not take whatever their code (not named by SC_NATIVE, module-level assembly where the backend
+// has no assembler), the ones the caller names (`nat_retry`), and the ones an earlier build of this
 // tree sent through C (`NAT_C` in its record).
 fn native_render(p: &mut loader::Package) {
     let n = p.modules.len();
-    let tls = nat::tls_native(p.build_target, p.arch);
     let sel = stdlib::get_env("SC_NATIVE").unwrap_or(String::from_str("1"));
     let rec = if p.gen_root.len() != 0 {
         nat_record(build_out_path(p.gen_root.as_str(), NAT_RECORD, "").as_str());
@@ -11448,7 +11478,10 @@ fn native_render(p: &mut loader::Package) {
     p.nat_render.truncate(0);
     for m in 0..n {
         let path = &p.modules[m].path;
-        let mut r = !cbe::in_list(sel.as_str(), path.as_str()) || module_has_asm(p, m) || !tls && module_has_tls(p, m);
+        let mut r = !cbe::in_list(sel.as_str(), path.as_str()) || module_has_asm(p, m) && !nat::asm_native(
+            p.build_target,
+            p.arch,
+        );
         if let Some(v) = rec.get(path) {
             r = r || (*v & NAT_C) != 0;
         }
@@ -11636,6 +11669,8 @@ fn native_plan(
         }
     }
     let stats = stdlib::getenv("SC_NATIVE_STATS") != null;
+    let log = stdlib::get_env("SC_NATIVE_LOG").unwrap_or(String::new());
+    let mut logged = String::new();
     let sel = stdlib::get_env("SC_NATIVE").unwrap_or(String::from_str("1"));
     // Each unit's reason to go through C, else its parts, compiled in parallel; a replayed unit's own
     // part is its recorded object.
@@ -11648,6 +11683,8 @@ fn native_plan(
     whys.resize_default(2 * n);
     oks.resize_default(2 * n);
     let mut todo = Vector::<u64>::new();
+    let mut texts = Vector::<String>::new();
+    texts.resize_default(2 * n);
     for m in 0..n {
         if !*unit.at(m) {
             continue;
@@ -11658,8 +11695,11 @@ fn native_plan(
             continue;
         }
         if module_has_asm(p, m) {
-            why.push_str("module-level assembly");
-            continue;
+            if !nat::asm_native(p.build_target, p.arch) {
+                why.push_str("module-level assembly");
+                continue;
+            }
+            texts.set(2 * m, module_asm(p, m));
         }
         if conly[m] != 0 {
             why.push_string(l.conly_why.at(conly[m] as usize - 1));
@@ -11681,7 +11721,7 @@ fn native_plan(
                 olds.set(m, old.unwrap());
             }
             oks.set(2 * m, true);
-        } else if funcs.at(2 * m).len() + datas.at(2 * m).len() != 0 {
+        } else if funcs.at(2 * m).len() + datas.at(2 * m).len() + texts.at(2 * m).len() != 0 {
             todo.push(0xFFFFFFFFu64 - funcs.at(2 * m).len() as u64 << 32 | (2 * m) as u64);
         } else {
             oks.set(2 * m, true);
@@ -11704,6 +11744,7 @@ fn native_plan(
             isa: p.arch,
             fs: funcs.at(q),
             ds: datas.at(q),
+            text: texts.at(q),
             bytes: bytes.index_mut(q),
             why: whys.index_mut(q),
             ok: oks.index_mut(q),
@@ -11749,13 +11790,16 @@ fn native_plan(
         if !p.nat_render[m] {
             retry.push(p.modules[m].path.clone());
         }
+        let w = if whys.at(2 * m).len() != 0 {
+            whys.at(2 * m).as_str();
+        } else {
+            whys.at(2 * m + 1).as_str();
+        };
         if stats {
-            let w = if whys.at(2 * m).len() != 0 {
-                whys.at(2 * m).as_str();
-            } else {
-                whys.at(2 * m + 1).as_str();
-            };
             eprint("native: {} through C: {}\n", p.modules[m].path.as_str(), w);
+        }
+        if log.len() != 0 {
+            logged.format_into("{}: {} ({})\n", p.modules[m].path.as_str(), w, p.gen_root.as_str());
         }
     }
     for k in 0..l.retry.len() {
@@ -11767,6 +11811,15 @@ fn native_plan(
     if retry.len() != 0 {
         // The build runs again: its count is the next run's.
         return;
+    }
+    if logged.len() != 0 {
+        // SC_NATIVE_LOG names a file each build appends its modules through C to, one line each with
+        // the build's tree: a test suite's builds in one list.
+        let f = stdio::fopen(log.as_str(), "ab");
+        if f != null {
+            unsafe stdio::fwrite(logged.as_str().ptr(), 1, logged.len(), f);
+            unsafe stdio::fclose(f);
+        }
     }
     if stats {
         eprint("native: {} modules native, {} through C, {} ms\n", nn, nc, ticks_ms() - t0);
@@ -14709,19 +14762,40 @@ pub fn run_package(
             rc = 1;
         } else {
             let mut rnew = false;
-            switch write_test_main(p, &plan, &mut rnew) {
-                Some(runner) => {
-                    sink_notify(sink, &mut opr, runner.as_str(), "", 1, rnew);
-                    cunits.push(runner.clone());
-                    keep.push(runner);
+            if cbe::native_on(p) {
+                // The runner's entry is an object too.
+                let mut op = build_out_path(root, "__test_main", ".o");
+                let mut bytes = Vector::<u8>::new();
+                if native_test_main(p, &plan, &mut bytes) && publish_out(
+                    sink,
+                    &mut opr,
+                    &mut op,
+                    unsafe str::from_raw(bytes.as_ptr(), bytes.len()),
+                    3,
+                ) {
+                    nat_paths.push(op.clone());
+                    keep.push(op);
                     if sink == null {
                         rc = test_build_and_run(p, topts, &cunits, &nat_paths, "", cflags, ccflags, target);
                     }
-                },
-                None => {
+                } else {
                     rc = 1;
-                },
-            };
+                }
+            } else {
+                switch write_test_main(p, &plan, &mut rnew) {
+                    Some(runner) => {
+                        sink_notify(sink, &mut opr, runner.as_str(), "", 1, rnew);
+                        cunits.push(runner.clone());
+                        keep.push(runner);
+                        if sink == null {
+                            rc = test_build_and_run(p, topts, &cunits, &nat_paths, "", cflags, ccflags, target);
+                        }
+                    },
+                    None => {
+                        rc = 1;
+                    },
+                };
+            }
         }
     }
     // `keep` names every file the tree holds: its `.c` files are the emit stamp's unit count.
@@ -14736,6 +14810,36 @@ pub fn run_package(
     // sanctioned mutation; see ast::facts).
     let _ = facts_verify(p, &wms, "codegen");
     return rc;
+}
+
+// The object of the test runner's entry of `plan` (`test_main_lir`) for the build's target, into
+// `out`; false, after a message, when it does not compile.
+fn native_test_main(p: &loader::Package, plan: &TestPlan, out: &mut Vector<u8>) bool {
+    let mut text = String::new();
+    test_main_lir(p, plan, lay::target_for(p.arch).ptr as u32, &mut text);
+    let mut err = String::new();
+    let mut ok = false;
+    switch lparse::parse(text.as_str(), &mut err) {
+        Some(pk) => {
+            let mut fs = Vector::<u32>::new();
+            let mut ds = Vector::<u32>::new();
+            for i in 0..pk.syms.len() {
+                if pk.syms[i].def != lir_ir::NONE {
+                    if pk.syms[i].kind == lir_ir::SK_FUNC {
+                        fs.push(i as u32);
+                    } else {
+                        ds.push(i as u32);
+                    }
+                }
+            }
+            ok = nat::object(&pk, p.build_target, p.arch, fs[0..fs.len()], ds[0..ds.len()], "", out, &mut err);
+        },
+        None => {},
+    };
+    if !ok {
+        eprintln("super-c: the test runner's entry does not compile natively: {}", err.as_str());
+    }
+    return ok;
 }
 
 /// The measured cost of one runtime task (launch, run, join; 0.7 to 1.0 us over 20k empty tasks

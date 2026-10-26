@@ -12,6 +12,7 @@ import ir::interp as iri;
 import ir::layout as lay;
 import ir::core as ir;
 import lexer::token_type as tt;
+import lexer::token as tok;
 import module::loader as loader;
 import emit::simd_plan as sp;
 import ir::cpu_features as cf;
@@ -12513,7 +12514,11 @@ extend CEmit {
             push_c_float_lit(srcf.slice(c.raw.start as usize, c.raw.end as usize), self.is_f32(b, c.ty), dst);
             return true;
         }
-        if c.kind == ir::CK_STR {
+        if c.kind == ir::CK_FBITS {
+            push_c_float_bits(c.val as u64, self.is_f32(b, c.ty), dst);
+            return true;
+        }
+        if c.kind == ir::CK_STR || c.kind == ir::CK_BYTES {
             let mut lit = self.sget();
             let ok = self.emit_str_const(b, cid, &mut lit, dst);
             self.sput(lit);
@@ -12582,12 +12587,19 @@ extend CEmit {
     // bytes the name of the body-scope static array holding them (long_lit).
     fn emit_str_const(self: &mut Self, b: &ir::CoreBody, cid: u32, lit: &mut String, dst: &mut String) bool {
         let c = *b.constants.at(cid as usize);
-        // Reflection `name` constants span a FOREIGN module's source (item marks it).
-        let src = self.const_src(b, &c);
         let mut bytes = self.sget();
-        let mut tmp = self.sget();
-        str_const_bytes(src.slice(c.raw.start as usize, c.raw.end as usize), c.val, &mut tmp, &mut bytes);
-        self.sput(tmp);
+        if c.kind == ir::CK_BYTES {
+            // A folded `const fn` call's: the body holds them.
+            for k in 0..c.val & 0xFFFFFFFF {
+                bytes.push_byte(b.bytes[((c.val >> 32) + k) as usize]);
+            }
+        } else {
+            // Reflection `name` constants span a FOREIGN module's source (item marks it).
+            let src = self.const_src(b, &c);
+            let mut tmp = self.sget();
+            str_const_bytes(src.slice(c.raw.start as usize, c.raw.end as usize), c.val, &mut tmp, &mut bytes);
+            self.sput(tmp);
+        }
         let mut ok = true;
         if bytes.len() > STR_LIT_MAX {
             ok = self.long_lit(cid, bytes.as_str(), lit);
@@ -19668,7 +19680,7 @@ pub fn str_const_bytes(raw: str, form: i64, tmp: &mut String, out: &mut String) 
         r = tmp.as_str();
     }
     if tk == tt::TokenType::StringLiteral as i64 || tk == tt::TokenType::ByteStringLiteral as i64 {
-        sc_str_decode(r, out);
+        tok::str_decode(r, out);
     } else {
         out.push_str(r);
     }
@@ -19682,6 +19694,80 @@ const fn mt_pair(o: u8, c: u8) bool {
 /// Float literal text `txt` as a C literal: the exact spelling without `_` separators, the language
 /// width suffix mapped to C's. An unsuffixed literal typed f32 (`single`) gets C's `f`, so the C
 /// compiler rounds it once from the text, as compile-time evaluation does.
+/// The C spelling of float bits `v` (an `f32`'s in the low 32 when `single`): an exact hexadecimal
+/// literal, or the builtins of an infinity and a NaN (its payload kept).
+pub fn push_c_float_bits(v: u64, single: bool, dst: &mut String) {
+    let mb: u32 = if single {
+        23;
+    } else {
+        52;
+    };
+    let eb: u32 = if single {
+        8;
+    } else {
+        11;
+    };
+    let sfx = if single {
+        "f";
+    } else {
+        "";
+    };
+    let neg = (v >> mb + eb & 1) != 0;
+    let ef = (v >> mb & (1u64 << eb) - 1) as i64;
+    let m = v & (1u64 << mb) - 1;
+    dst.push_str(
+        if neg {
+            "(-";
+        } else {
+            "(";
+        },
+    );
+    if ef == (1i64 << eb) - 1 {
+        if m == 0 {
+            dst.format_into("__builtin_inf{}()", sfx);
+        } else {
+            // The quiet bit clear: a signaling NaN.
+            dst.format_into("__builtin_nan{}{}(\"0x", pick((m >> mb - 1 & 1) == 0, "s", ""), sfx);
+            dst.push_hex(m & (1u64 << mb - 1) - 1, false);
+            dst.push_str("\")");
+        }
+    } else {
+        // 0x<lead>.<fraction>p<exponent>: the fraction is the mantissa bits padded to whole digits.
+        let digits = (mb + 3) / 4;
+        dst.push_str(
+            if ef == 0 {
+                "0x0.";
+            } else {
+                "0x1.";
+            },
+        );
+        let f = m << digits * 4 - mb;
+        let mut k = digits;
+        while k > 0 {
+            k -= 1;
+            let d = (f >> 4 * k & 0xF) as u8;
+            dst.push_byte(
+                if d < 10 {
+                    b'0' + d;
+                } else {
+                    b'a' + d - 10;
+                },
+            );
+        }
+        let bias: i64 = (1i64 << eb - 1) - 1;
+        dst.format_into(
+            "p{}{}",
+            if ef == 0 {
+                1 - bias;
+            } else {
+                ef - bias;
+            },
+            sfx,
+        );
+    }
+    dst.push_str(")");
+}
+
 pub fn push_c_float_lit(txt: str, single: bool, dst: &mut String) {
     let n = txt.len();
     let mut t = txt;
@@ -19813,6 +19899,17 @@ pub fn push_c_asm_str(raw: str, dst: &mut String) {
     dst.push_str("\"");
 }
 
+/// The bytes of asm template literal `raw` (a string or a matchertext literal), appended to `dst`.
+pub fn asm_bytes(raw: str, dst: &mut String) {
+    let tk = if raw.len() != 0 && raw.byte_at(0) == b'M' {
+        tt::TokenType::MatchertextLiteral;
+    } else {
+        tt::TokenType::StringLiteral;
+    };
+    let mut tmp = String::new();
+    str_const_bytes(raw, tk as i64, &mut tmp, dst);
+}
+
 pub fn push_c_escaped(txt: str, dst: &mut String) {
     for i in 0..txt.len() {
         push_c_escaped_byte(txt.byte_at(i), dst);
@@ -19838,80 +19935,6 @@ fn push_c_escaped_byte(b: u8, dst: &mut String) {
         dst.push_byte(48 + (b >> 6 & 7));
         dst.push_byte(48 + (b >> 3 & 7));
         dst.push_byte(48 + (b & 7));
-    }
-}
-
-const fn hexv(b: u8) u32 {
-    if b >= 48 && b <= 57 {
-        return b - 48;
-    }
-    if b >= 97 && b <= 102 {
-        return b - 97 + 10;
-    }
-    if b >= 65 && b <= 70 {
-        return b - 65 + 10;
-    }
-    return 0;
-}
-
-// Codepoint `cp` as UTF-8.
-fn push_utf8(cp: u32, dst: &mut String) {
-    if cp < 0x80 {
-        dst.push_byte(cp as u8);
-    } else if cp < 0x800 {
-        dst.push_byte((0xC0 | cp >> 6) as u8);
-        dst.push_byte((0x80 | cp & 0x3F) as u8);
-    } else if cp < 0x10000 {
-        dst.push_byte((0xE0 | cp >> 12) as u8);
-        dst.push_byte((0x80 | cp >> 6 & 0x3F) as u8);
-        dst.push_byte((0x80 | cp & 0x3F) as u8);
-    } else {
-        dst.push_byte((0xF0 | cp >> 18) as u8);
-        dst.push_byte((0x80 | cp >> 12 & 0x3F) as u8);
-        dst.push_byte((0x80 | cp >> 6 & 0x3F) as u8);
-        dst.push_byte((0x80 | cp & 0x3F) as u8);
-    }
-}
-
-// The bytes of a Super-C quoted/byte-string body (escapes intact): each escape decodes to its
-// byte(s) (`\xNN` is EXACTLY two hex digits, `\u{H..}` a codepoint as UTF-8).
-fn sc_str_decode(raw: str, dst: &mut String) {
-    let mut i: usize = 0;
-    while i < raw.len() {
-        let b = raw.byte_at(i);
-        if b != 92 || i + 1 >= raw.len() {
-            dst.push_byte(b);
-            i += 1;
-            continue;
-        }
-        let e = raw.byte_at(i + 1);
-        i += 2;
-        if e == b'n' {
-            dst.push_byte(10);
-        } else if e == b'r' {
-            dst.push_byte(13);
-        } else if e == b't' {
-            dst.push_byte(9);
-        } else if e == b'0' {
-            dst.push_byte(0);
-        } else if e == b'x' && i + 1 < raw.len() {
-            dst.push_byte((hexv(raw.byte_at(i)) << 4 | hexv(raw.byte_at(i + 1))) as u8);
-            i += 2;
-        } else if e == b'u' && i < raw.len() && raw.byte_at(i) == b'{' {
-            i += 1;
-            let mut cp: u32 = 0;
-            while i < raw.len() && raw.byte_at(i) != b'}' {
-                cp = cp << 4 | hexv(raw.byte_at(i));
-                i += 1;
-            }
-            if i < raw.len() {
-                i += 1;
-            }
-            push_utf8(cp, dst);
-        } else {
-            // `\\`, `\"`, `\'`: the escaped byte itself.
-            dst.push_byte(e);
-        }
     }
 }
 

@@ -2992,6 +2992,14 @@ fn splice(
         if c.kind == ir::CK_ITEM && c.targ_len() != 0 {
             c.val = ir::targ_val(c.targ_start() + tg0, c.targ_len());
         }
+        if c.kind == ir::CK_BYTES {
+            // The bytes move to the caller's pool.
+            let at = b.bytes.len() as i64;
+            for q in 0..c.val & 0xFFFFFFFF {
+                b.bytes.push(k.bytes[((c.val >> 32) + q) as usize]);
+            }
+            c.val = at << 32 | c.val & 0xFFFFFFFF;
+        }
         if c.kind == ir::CK_STR || c.kind == ir::CK_FLOAT || c.kind == ir::CK_INT {
             // the spelling spans a FOREIGN module's source; item marks it (established CK_STR
             // convention, extended to CK_FLOAT and CK_INT in the emitter, which spells an integer

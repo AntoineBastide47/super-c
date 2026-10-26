@@ -117,6 +117,9 @@ extend Printer {
         if self.file != NONE {
             out.format_into("  file f{}\n", self.file);
         }
+        if b.naked {
+            out.push_str("  naked\n");
+        }
         for k in 0..self.lay.len() {
             let l = self.lay[k];
             out.format_into("  layout l{} size {} align {} [", k, b.pool[l as usize], b.pool[l as usize + 1]);
@@ -405,6 +408,42 @@ extend Printer {
             }
             out.push_str(") : ");
             self.sig(b, t.b, out);
+        } else if f == F_ASM {
+            // `"template" out["=r" i64, ..] in["r", ..] clobber["memory", ..] (values)`.
+            let r = t.c;
+            out.push_byte(b' ');
+            push_quoted(p.spell(p.msgs[b.msgs[asm_template(b, r) as usize] as usize]), out);
+            out.push_str(" out[");
+            for k in 0..asm_nout(b, r) {
+                if k != 0 {
+                    out.push_str(", ");
+                }
+                push_quoted(p.spell(p.msgs[b.msgs[asm_out_con(b, r, k) as usize] as usize]), out);
+                out.push_byte(b' ');
+                push_type(asm_out_ty(b, r, k), out);
+            }
+            out.push_str("] in[");
+            for k in 0..asm_nin(b, r) {
+                if k != 0 {
+                    out.push_str(", ");
+                }
+                push_quoted(p.spell(p.msgs[b.msgs[asm_in_con(b, r, k) as usize] as usize]), out);
+            }
+            out.push_str("] clobber[");
+            for k in 0..asm_nclob(b, r) {
+                if k != 0 {
+                    out.push_str(", ");
+                }
+                push_quoted(p.spell(p.msgs[b.msgs[asm_clob(b, r, k) as usize] as usize]), out);
+            }
+            out.push_str("] (");
+            for k in 0..t.b {
+                if k != 0 {
+                    out.push_str(", ");
+                }
+                self.val(b.pool[(t.a + k) as usize], out);
+            }
+            out.push_byte(b')');
         } else if f == F_VOP {
             out.push_str(" (");
             for k in 0..t.b {

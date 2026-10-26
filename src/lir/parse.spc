@@ -496,6 +496,10 @@ extend<'a> Parser<'a> {
             if w == "layout" {
                 return self.layout_line();
             }
+            if w == "naked" {
+                self.body.naked = true;
+                return self.line_end_loc(&mut loc);
+            }
             if w == "sig" {
                 let mut sg: u32 = 0;
                 if !self.signature(&mut sg) {
@@ -520,7 +524,7 @@ extend<'a> Parser<'a> {
                 let _ = self.body.slot(size, al as u8);
                 return self.line_end_loc(&mut loc);
             }
-            return self.fail("expected 'file', 'layout', 'sig', 'slot' or a block");
+            return self.fail("expected 'file', 'layout', 'naked', 'sig', 'slot' or a block");
         }
         self.at = save;
         return self.inst_line();
@@ -1148,6 +1152,9 @@ extend<'a> Parser<'a> {
             t.aux = n as u16;
             return self.expect(b':', "expected ':' and the call's signature") && self.signature(&mut t.b);
         }
+        if f == F_ASM {
+            return self.asm_operands(t);
+        }
         if f == F_VOP {
             if !self.expect(b'(', "expected '('") {
                 return false;
@@ -1252,6 +1259,98 @@ extend<'a> Parser<'a> {
         }
         if op == O_FENCE {
             return self.order(&mut t.aux);
+        }
+        return true;
+    }
+
+    // A quoted text as a body message into the pool.
+    fn pool_msg(self: &mut Self) bool {
+        let mut m = String::new();
+        if !self.quoted(&mut m) {
+            return false;
+        }
+        let k = self.body.ref_msg(self.pkg.add_message(m.as_str()));
+        self.body.pool.push(k);
+        return true;
+    }
+
+    // `asm "template" out["c" type, ..] in["c", ..] clobber["c", ..] (values)` (`F_ASM`).
+    fn asm_operands(self: &mut Self, t: &mut Inst) bool {
+        let r = self.body.pool.len() as u32;
+        t.c = r;
+        if !self.pool_msg() {
+            return false;
+        }
+        for _ in 0..3 {
+            self.body.pool.push(0);
+        }
+        // The outputs: their constraints, then their types after them.
+        let mut tys = Vector::<u32>::new();
+        if !self.expect_word("out", "expected 'out'") || !self.expect(b'[', "expected '['") {
+            return false;
+        }
+        if !self.eat(b']') {
+            loop {
+                let mut ty: u8 = 0;
+                if !self.pool_msg() || !self.ty(&mut ty) {
+                    return false;
+                }
+                tys.push(ty);
+                if self.eat(b']') {
+                    break;
+                }
+                if !self.expect(b',', "expected ',' or ']'") {
+                    return false;
+                }
+            }
+        }
+        for k in 0..tys.len() {
+            self.body.pool.push(tys[k]);
+        }
+        self.body.pool[(r + 1) as usize] = tys.len() as u32;
+        let names: [str; 2] = ["in", "clobber"];
+        for w in 0..2usize {
+            if !self.expect_word(unsafe names[w], "expected 'in' or 'clobber'") || !self.expect(b'[', "expected '['") {
+                return false;
+            }
+            let mut n: u32 = 0;
+            if !self.eat(b']') {
+                loop {
+                    if !self.pool_msg() {
+                        return false;
+                    }
+                    n += 1;
+                    if self.eat(b']') {
+                        break;
+                    }
+                    if !self.expect(b',', "expected ',' or ']'") {
+                        return false;
+                    }
+                }
+            }
+            self.body.pool[(r + 2 + w as u32) as usize] = n;
+        }
+        if !self.expect(b'(', "expected '('") {
+            return false;
+        }
+        t.a = self.body.pool.len() as u32;
+        t.b = 0;
+        if !self.eat(b')') {
+            loop {
+                if !self.pool_value() {
+                    return false;
+                }
+                t.b += 1;
+                if self.eat(b')') {
+                    break;
+                }
+                if !self.expect(b',', "expected ',' or ')'") {
+                    return false;
+                }
+            }
+        }
+        if t.b != self.body.pool[(r + 1) as usize] + self.body.pool[(r + 2) as usize] {
+            return self.fail("an asm takes one value per output and input");
         }
         return true;
     }

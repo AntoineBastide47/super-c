@@ -1521,8 +1521,109 @@ enum Shape { Dot, Line(i32, i32), }
     assert(rr.out_shows("tag7=Blue"), "variant_by_tag reverses a declared value");
 }
 
-// Compile-time evaluation in constant contexts (recursion, loops, switch, floats), run-time calls
-// outside them, and the step budget.
+// A `const fn` call whose arguments are constant runs at compile time and its value replaces it: an
+// integer, a `bool`, a float, a `str`, a bare enum, or a struct, tuple struct or array of them
+// (nested calls and a method of a literal too); a call whose evaluation fails stays a run-time call,
+// and a folded call still may not move an owning constant.
+const CONST_FOLD: str = M"(const fn square(x: i64) i64 { return x * x; }
+const fn greet(n: u32) str<'static> { return if n > 1 { "many\t\u{e9}"; } else { "one"; }; }
+const fn half(x: f64) f64 { return x / 2.0; }
+const fn third(x: f32) f32 { return x / 3.0; }
+const fn tri(n: u64) u64 { let mut s: u64 = 0; for i in 0..n + 1 { s += i; } return s; }
+const fn even(n: u32) bool { return n % 2 == 0; }
+const fn div(a: i32, b: i32) i32 { return a / b; }
+fn add(a: i64, b: i64) i64 { return a + b; }
+struct P { pub x: i32, pub y: f64, pub name: str<'static> }
+struct Pair(u8, bool);
+enum Color { Red = 3, Green = 7, Blue }
+struct Wrap<T> { pub v: T, pub n: [u16; 3] }
+const fn make(k: i32) P { return P { x: k * 2, y: 0.5, name: "pt" }; }
+const fn pair() Pair { return Pair(9, true); }
+const fn color(n: i32) Color { return if n > 0 { Color::Green; } else { Color::Blue; }; }
+const fn table() [u32; 4] { let mut t: [u32; 4] = [0; 4]; for i in 0..4 { unsafe t[i] = (i * i) as u32; } return t; }
+const fn wrap() Wrap<i64> { return Wrap::<i64> { v: -5, n: [1, 2, 3] }; }
+fn main(argv: Vector<str>) i32 {
+    let p = make(21);
+    let q = pair();
+    let c = color(1);
+    let tb = table();
+    let wr = wrap();
+    if p.x != 42 || p.y != 0.5 || p.name.len() != 2 || q.0 != 9 || !q.1 || c != Color::Green || color(-1) != Color::Blue || tb[3] != 9 || wr.v != -5 || wr.n[2] != 3 {
+        return 3;
+    }
+    let x = square(12);
+    let g = greet(3);
+    let h = half(5.0);
+    let t = tri(100);
+    let w = add(square(3), 4);
+    let n = "abcd".len();
+    if x != 144 || g.len() != 7 || h != 2.5 || third(1.0) != 1.0f32 / 3.0f32 || t != 5050 || w != 13 || n != 4 || !even(10) {
+        return 1;
+    }
+    // Run-time arguments keep the call; a trapping evaluation keeps it too.
+    if square(argv.len() as i64) != 1 {
+        return 2;
+    }
+    if argv.len() > 5 {
+        return div(1, 0);
+    }
+    return 0;
+}
+)";
+
+@test
+fn const_fn_calls_fold() {
+    let _env = cli::set_env("SC_INLINE", "0");
+    let p = cli::proj_new();
+    p.mkfile("main.spc", CONST_FOLD);
+    let r = p.compile("main.spc");
+    assert(r.ok(), "the program compiles");
+    assert(p.gen_has("main.c", "int64_t x = 144LL;"), "an integer result folds");
+    assert(p.gen_has("main.c", M"("many\t\303\251")"), "a str result folds to its bytes");
+    assert(p.gen_has("main.c", "double h = (0x1.4000000000000p1);"), "a float result folds to its exact bits");
+    assert(p.gen_has("main.c", "uint64_t t = 5050ULL;"), "a loop folds");
+    assert(p.gen_has("main.c", "add(9LL, 4LL)"), "an argument folds inside a run-time call");
+    assert(p.gen_has("main.c", "size_t n = 4ULL;"), "a method of a literal folds");
+    assert(p.gen_has("main.c", "square("), "a run-time argument keeps the call");
+    assert(p.gen_has("main.c", "div_(1LL, 0LL)"), "a trapping evaluation keeps the call");
+    assert(
+        p.gen_has("main.c", "P p = (P){ .x = 42LL, .y = (0x1.0000000000000p-1), .name = (str){ (const uint8_t *)\"pt\""),
+        "a struct result folds",
+    );
+    assert(p.gen_has("main.c", "Pair q = (Pair){ ._0 = 9U, ._1 = true };"), "a tuple struct result folds");
+    assert(p.gen_has("main.c", "Color c = Color_Green;"), "an enum result folds to its variant");
+    assert(p.gen_has("main.c", "uint32_t tb[4] = { 0U, 1U, 4U, 9U };"), "an array result folds");
+    assert(p.gen_has("main.c", "(Wrap__i64){ .v = -5LL }"), "a generic struct result folds");
+    assert(p.cc_build("").ok(), "the C compiler builds it");
+    assert_eq(p.run_bin(), 0);
+    // The native backend folds the same calls.
+    let nb = cli::superc_in(p.dir(), "build main.spc -o bin");
+    assert(nb.ok(), "the native build");
+    assert_eq(p.run_bin(), 0);
+    // A signaling NaN result keeps its bits, in C and natively.
+    p.mkfile(
+        "main.spc",
+        "import std::mem::ptr;\nconst fn snan32() f32 { return ptr::bit_cast::<f32, u32>(0x7F800123); }\nconst fn snan64() f64 { return ptr::bit_cast::<f64, u64>(0x7FF0000000000123); }\nfn main() i32 {\n    let s32 = snan32();\n    let s64 = snan64();\n    return (ptr::bit_cast::<u32, f32>(s32) != 0x7F800123 || ptr::bit_cast::<u64, f64>(s64) != 0x7FF0000000000123) as i32;\n}\n",
+    );
+    assert(p.compile("main.spc").ok() && p.gen_has("main.c", "__builtin_nans"), "a signaling NaN in C");
+    assert(p.cc_build("").ok(), "the C compiler builds it");
+    assert_eq(p.run_bin(), 0);
+    assert(cli::superc_in(p.dir(), "build main.spc -o bin").ok(), "the native build");
+    assert_eq(p.run_bin(), 0);
+    // A folded call's argument is still consumed: an owning constant moves into none.
+    p.mkfile(
+        "main.spc",
+        "const S: String = String::from_str(\"ab\");\nconst fn size(s: String) usize { return s.len(); }\nfn main() i32 { return size(S) as i32; }\n",
+    );
+    let m = p.compile("main.spc");
+    assert(
+        m.exit != 0 && m.out_has("cannot move a value out of a 'const' binding"),
+        "the move out of the constant is an error",
+    );
+}
+
+// Compile-time evaluation in constant contexts (recursion, loops, switch, floats), run-time calls of
+// plain functions outside them, and the step budget.
 @test
 fn ctfe() {
     let _env3 = cli::set_env("SC_INLINE", "0");
@@ -1557,7 +1658,7 @@ fn main() i32 {
     assert(p.gen_has("main.c", M"(_Static_assert(true, "ctfe"))"), "fib(20) ran at compile time");
     assert(p.gen_has("main.c", M"(_Static_assert(true, "loops fold"))"), "collatz(27) ran at compile time");
     assert(p.gen_has("main.c", M"(_Static_assert(true, "floats fold"))"), "float CTFE ran at compile time");
-    assert(p.gen_has("main.c", "fib(10"), "a call outside a constant context runs at run time");
+    assert(p.gen_has("main.c", "fib(10"), "a plain function's call outside a constant context runs at run time");
     let cc = p.cc_build("");
     assert(cc.ok());
     assert_eq(p.run_bin(), 8);
@@ -2049,11 +2150,11 @@ fn local_const_lifecycle() {
     assert(lk.ok());
 
     // A GLOBAL owning const is materialized the same way (buffer included) and never freed: its own
-    // project, built and run under the fatal gate.
+    // project, built and run under the fatal gate. A non-const function reads it (`V.len()` folds).
     let q = cli::proj_new();
     q.mkfile(
         "g.spc",
-        "fn mk() Vector<u32> {\n    let mut v = Vector::<u32>::new();\n    v.push(1u32);\n    return v;\n}\n\nconst V: Vector<u32> = mk();\n\nfn main() i32 {\n    return (V.len() - 1) as i32;\n}\n",
+        "fn mk() Vector<u32> {\n    let mut v = Vector::<u32>::new();\n    v.push(1u32);\n    return v;\n}\n\nconst V: Vector<u32> = mk();\n\nfn first(v: &Vector<u32>) u32 {\n    return *v.at(0);\n}\n\nfn main() i32 {\n    return (first(&V) - 1) as i32;\n}\n",
     );
     let g = q.compile("g.spc");
     assert(g.ok());
@@ -7857,8 +7958,8 @@ fn duplicate_unknown_attribute_under_bootstrap_tags() {
     assert(p2.compile_flags("--bootstrap-tags", "two.spc").exit == 0, "distinct unknown attributes accepted");
 }
 
-// const fn: definition-site validation (direct and transitive disqualifiers), a call outside a
-// constant context runs at run time, and legal recursion between const fns.
+// const fn: definition-site validation (direct and transitive disqualifiers), a call with known
+// arguments folds, and legal recursion between const fns.
 @test
 fn const_fn_semantics() {
     // The programs import stdlib, which the in-process compile does not load: a build.
@@ -7901,9 +8002,9 @@ fn main() i32 { unsafe exit(probe()); return 0; }
 )",
         0,
     );
-    // A `const fn` call with known arguments outside a constant context is a run-time call.
+    // A `const fn` call with known arguments outside a constant context folds to its value.
     b.add(
-        "a const fn call outside a constant context runs",
+        "a const fn call with known arguments folds",
         M"(const fn spin(n: u64) u64 {
     let mut s: u64 = 0;
     let mut i: u64 = 0;
@@ -10667,6 +10768,11 @@ fn build_print_probes() {
             assert(a64 == (res != probe::NOT_APPLICABLE), "an AArch64 probe applies on AArch64 alone");
         } else if id.starts_with("wasm-") {
             assert(res == probe::NOT_APPLICABLE, "a native host is not wasm32");
+        } else if id == "reproducible-link" {
+            assert(
+                tl.starts_with("target: macos ") == (res != probe::NOT_APPLICABLE),
+                "Apple ld's flag applies on macOS alone",
+            );
         }
     }
     assert(lto_line(s, t.len() + 2).len() == 0, "nothing follows the table");

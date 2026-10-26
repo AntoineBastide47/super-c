@@ -33,6 +33,7 @@ pub const SF_GLOBAL: u8 = 1;
 pub const SF_FUNC: u8 = 2;
 pub const SF_TLS: u8 = 4; // a thread-local variable: its section holds its initial value
 pub const SF_USED: u8 = 8; // the linker keeps it though nothing refers to it
+pub const SF_HIDDEN: u8 = 16; // a global symbol the linked image does not export
 
 /// A symbol: defined in section `sec` at `off` (NOSEC: another object defines it).
 pub struct OSym {

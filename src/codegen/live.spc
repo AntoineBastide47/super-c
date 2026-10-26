@@ -499,7 +499,7 @@ pub fn each_use(b: &Body, t: Inst, out: &mut Vector<Value>) {
         for k in 0..t.aux as u32 {
             out.push(b.pool[(t.c + k) as usize]);
         }
-    } else if f == F_VOP {
+    } else if f == F_VOP || f == F_ASM {
         for k in 0..t.b {
             out.push(b.pool[(t.a + k) as usize]);
         }

@@ -138,6 +138,7 @@ pub const F_SWITCH: u8 = 17; // a = value, b = first case (words), c = edge list
 pub const F_RET: u8 = 18; // a = value or VNONE
 pub const F_PANIC: u8 = 19; // a = body message, b = a lane mask or VNONE: `lane <its lowest set bit>: ` leads the message
 pub const F_OVF: u8 = 20; // aux = OV_SIGNED or 0, a, b = values; two results: the wrapped value, then its flag
+pub const F_ASM: u8 = 21; // a = values (pool), b = count, c = the statement's record (pool, `asm_*`)
 
 pub const O_ICONST: u8 = 1;
 pub const O_FCONST: u8 = 2;
@@ -209,7 +210,12 @@ pub const O_UNREACHABLE: u8 = 66;
 pub const O_CLZ: u8 = 67;
 pub const O_CTZ: u8 = 68;
 pub const O_POPCNT: u8 = 69;
-pub const OP_COUNT: u8 = 70;
+/// Inline assembly: the outputs' addresses then the inputs' values; the record at `c` holds the
+/// template, the output, input and clobber counts, the output constraints, the output types, the input
+/// constraints and the clobbers (text as body messages). Each output is stored to its address after
+/// the instructions run (read from it first for a `+` constraint).
+pub const O_ASM: u8 = 70;
+pub const OP_COUNT: u8 = 71;
 
 /// One opcode: its text name and its operand form.
 pub struct OpInfo {
@@ -217,7 +223,7 @@ pub struct OpInfo {
     pub form: u8,
 }
 
-pub const OPS: [OpInfo; 70] = [
+pub const OPS: [OpInfo; 71] = [
     OpInfo { name: "", form: F_NONE },
     OpInfo { name: "iconst", form: F_IMM },
     OpInfo { name: "fconst", form: F_IMM },
@@ -288,7 +294,45 @@ pub const OPS: [OpInfo; 70] = [
     OpInfo { name: "clz", form: F_UN },
     OpInfo { name: "ctz", form: F_UN },
     OpInfo { name: "popcnt", form: F_UN },
+    OpInfo { name: "asm", form: F_ASM },
 ];
+
+/// An `O_ASM` record at pool index `r` of `b`: its output, input and clobber counts.
+pub const fn asm_nout(b: &Body, r: u32) u32 {
+    return b.pool[(r + 1) as usize];
+}
+
+pub const fn asm_nin(b: &Body, r: u32) u32 {
+    return b.pool[(r + 2) as usize];
+}
+
+pub const fn asm_nclob(b: &Body, r: u32) u32 {
+    return b.pool[(r + 3) as usize];
+}
+
+/// The template's body message.
+pub const fn asm_template(b: &Body, r: u32) u32 {
+    return b.pool[r as usize];
+}
+
+/// Output `k`'s constraint message and machine type.
+pub const fn asm_out_con(b: &Body, r: u32, k: u32) u32 {
+    return b.pool[(r + 4 + k) as usize];
+}
+
+pub const fn asm_out_ty(b: &Body, r: u32, k: u32) u8 {
+    return b.pool[(r + 4 + asm_nout(b, r) + k) as usize] as u8;
+}
+
+/// Input `k`'s constraint message.
+pub const fn asm_in_con(b: &Body, r: u32, k: u32) u32 {
+    return b.pool[(r + 4 + 2 * asm_nout(b, r) + k) as usize];
+}
+
+/// Clobber `k`'s message.
+pub const fn asm_clob(b: &Body, r: u32, k: u32) u32 {
+    return b.pool[(r + 4 + 2 * asm_nout(b, r) + asm_nin(b, r) + k) as usize];
+}
 
 /// The row of opcode `op`.
 pub const fn op_info(op: u8) OpInfo {
@@ -523,6 +567,9 @@ pub struct Body {
     pub msgs: Vector<u32>,
     pub lines: Vector<Loc>, // entry 0 is "no location"
     pub sig: u32, // the body's own signature (pool); NONE until set
+    /// A naked function (`@unsafe(naked)`): its machine code is its `O_ASM` templates alone, in order,
+    /// without a prologue or an epilogue.
+    pub naked: bool,
     cur: u32, // the block `emit` appends to
 }
 
@@ -555,6 +602,7 @@ extend Body {
             msgs: Vector::<u32>::new(),
             lines: Vector::<Loc>::new(),
             sig: NONE,
+            naked: false,
             cur: 0,
         };
         b.lines.push(Loc { file: 0, line: 0, col: 0 });
@@ -574,6 +622,7 @@ extend Body {
         self.msgs.truncate(0);
         self.lines.truncate(1);
         self.sig = NONE;
+        self.naked = false;
         self.cur = 0;
     }
 
@@ -591,6 +640,7 @@ extend Body {
             msgs: exact(&self.msgs),
             lines: exact(&self.lines),
             sig: self.sig,
+            naked: self.naked,
             cur: 0,
         };
     }

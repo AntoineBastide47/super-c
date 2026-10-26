@@ -29,6 +29,7 @@ const S_ATTR_PURE_INSTRUCTIONS: u32 = 0x80000000;
 pub const NONE32: u32 = 0xFFFFFFFF;
 const N_EXT: u8 = 1;
 const N_SECT: u8 = 0xE;
+const N_PEXT: u8 = 0x10;
 const N_NO_DEAD_STRIP: u32 = 0x20;
 
 // The section types and attributes a `segment,section,type,attributes` name spells, as the assembler
@@ -262,11 +263,12 @@ pub fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
     let hdr: u32 = 32;
     let seg_sz: u32 = 72 + 80 * nsect;
     let cmds: u32 = seg_sz + 24 + 24 + 80;
+    // A section's file offset is the segment's plus its address, so the segment starts at the largest
+    // alignment of a section with bytes.
     let mut addr = Vector::<u64>::new();
     let mut foff = Vector::<u32>::new();
     let mut va: u64 = 0;
-    let mut fo: u64 = hdr + cmds;
-    let mut filesz: u64 = 0;
+    let mut fal: u64 = 1;
     for i in 0..kinds.len() {
         let k = kinds[i];
         let (size, al) = sec_size(o, &tv, k);
@@ -274,16 +276,22 @@ pub fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
         va = va + a - 1 & ~(a - 1);
         addr.push(va);
         va += size;
+        if !zerofill(o, k) && a > fal {
+            fal = a;
+        }
+    }
+    let data_start = (hdr + cmds) as u64 + fal - 1 & ~(fal - 1);
+    let mut filesz: u64 = 0;
+    for i in 0..kinds.len() {
+        let k = kinds[i];
         if zerofill(o, k) {
             foff.push(0);
         } else {
-            fo = fo + a - 1 & ~(a - 1);
-            foff.push(fo as u32);
-            fo += size;
-            filesz = fo - (hdr + cmds) as u64;
+            let (size, _al) = sec_size(o, &tv, k);
+            foff.push((data_start + addr[i]) as u32);
+            filesz = addr[i] + size;
         }
     }
-    let data_start = (hdr + cmds) as u64;
     // Relocations per section, then the symbol table and the strings.
     let mut rel_off = Vector::<u32>::new();
     let mut rel_n = Vector::<u32>::new();
@@ -360,6 +368,10 @@ pub fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
             nl.push(
                 N_SECT | if (y.flags & ob::SF_GLOBAL) != 0 {
                     N_EXT;
+                } else {
+                    0;
+                } | if (y.flags & ob::SF_HIDDEN) != 0 {
+                    N_PEXT;
                 } else {
                     0;
                 },
