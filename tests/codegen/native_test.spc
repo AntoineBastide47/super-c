@@ -690,8 +690,39 @@ fn header_scalars_cross_the_c_abi() {
     assert_eq(p.run_bin(), 0);
 }
 
-// A call the native backend refuses after its module lowered (a C type of unknown class by value) sends
-// the module through C: the build renders its C in a second run. A rebuild that changes only `main`
+// Header structs and unions of `@layout` types pass by value as the C compiler passes them, from native
+// code: the header's members give their leaves (`bindgen::c_layout`): a double and an integer, three floats
+// (a homogeneous aggregate on arm64), memory past 16 bytes, a union, a nested struct with an array.
+@test
+fn header_structs_cross_the_c_abi() {
+    if !nat::supported(tgt::host_os(), tgt::host_isa()) {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile(
+        "h.h",
+        "typedef struct { double a; long long b; } pair;\ntypedef struct { float x, y, z; } v3;\ntypedef struct { int a[6]; } big;\ntypedef union { double d; long long i; } num;\ntypedef struct { pair p; float f[2]; } nest;\npair mkp(double a, long long b);\ndouble sump(pair p);\nv3 mk3(float x, float y, float z);\nfloat dot3(v3 a, v3 b);\nbig mkb(int k);\nint sumb(big g);\nnum mku(long long i);\nlong long getu(num u);\nnest mkn(double a, long long b, float f);\ndouble sumn(nest n);\n",
+    );
+    p.mkfile(
+        "h.c",
+        "#include \"h.h\"\npair mkp(double a, long long b) { pair p = { a, b }; return p; }\ndouble sump(pair p) { return p.a + (double)p.b; }\nv3 mk3(float x, float y, float z) { v3 v = { x, y, z }; return v; }\nfloat dot3(v3 a, v3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }\nbig mkb(int k) { big g; for (int i = 0; i < 6; i++) g.a[i] = k + i; return g; }\nint sumb(big g) { int s = 0; for (int i = 0; i < 6; i++) s += g.a[i]; return s; }\nnum mku(long long i) { num u; u.i = i; return u; }\nlong long getu(num u) { return u.i; }\nnest mkn(double a, long long b, float f) { nest n = { { a, b }, { f, 2 * f } }; return n; }\ndouble sumn(nest n) { return n.p.a + (double)n.p.b + n.f[0] + n.f[1]; }\n",
+    );
+    assert(p.c_lib("hr", "h.c"), "the C library builds");
+    p.mkfile(
+        "main.spc",
+        format(
+            "@link(\"-L{} -lhr\")\nextern \"C\" \"h.h\" {{\n    @layout(16, 8)\n    type pair;\n    @layout(12, 4)\n    type v3;\n    @layout(24, 4)\n    type big;\n    @layout(8, 8)\n    type num;\n    @layout(24, 8)\n    type nest;\n    fn mkp(a: f64, b: i64) pair;\n    fn sump(p: pair) f64;\n    fn mk3(x: f32, y: f32, z: f32) v3;\n    fn dot3(a: v3, b: v3) f32;\n    fn mkb(k: i32) big;\n    fn sumb(g: big) i32;\n    fn mku(i: i64) num;\n    fn getu(u: num) i64;\n    fn mkn(a: f64, b: i64, f: f32) nest;\n    fn sumn(n: nest) f64;\n}}\n\nfn main() i32 {{\n    if unsafe sump(unsafe mkp(1.5, 2)) != 3.5 {{\n        return 1;\n    }}\n    if unsafe dot3(unsafe mk3(1.0, 2.0, 3.0), unsafe mk3(4.0, 5.0, 6.0)) != 32.0 {{\n        return 2;\n    }}\n    if unsafe sumb(unsafe mkb(3)) != 33 {{\n        return 3;\n    }}\n    if unsafe getu(unsafe mku(41)) != 41 {{\n        return 4;\n    }}\n    if unsafe sumn(unsafe mkn(1.5, 2, 0.25)) != 4.25 {{\n        return 5;\n    }}\n    return 0;\n}}\n",
+            p.dir(),
+        ).as_str(),
+    );
+    let r = cli::superc_env_in(p.dir(), "SC_NATIVE_STATS", "1", "build main.spc -o bin");
+    assert(r.ok(), "the program builds");
+    assert(!r.out_has("main through C"), "main compiles natively");
+    assert_eq(p.run_bin(), 0);
+}
+
+// A call the native backend refuses after its module lowered (a C struct by value whose bitfield leaves
+// its class unknown) sends the module through C: the build renders its C in a second run. A rebuild that changes only `main`
 // replays the std modules, which rendered no C.
 @test
 fn a_module_the_backend_refuses_goes_through_c() {
@@ -699,7 +730,7 @@ fn a_module_the_backend_refuses_goes_through_c() {
         return;
     }
     let p = cli::proj_new();
-    p.mkfile("h.h", "typedef struct { double a; long b; } pair;\ndouble sum(pair p);\n");
+    p.mkfile("h.h", "typedef struct { double a; long long b : 40; long long c : 24; } pair;\ndouble sum(pair p);\n");
     p.mkfile("h.c", "#include \"h.h\"\ndouble sum(pair p) { return p.a + (double)p.b + 7; }\n");
     assert(p.c_lib("hp", "h.c"), "the C library builds");
     p.mkfile("main.spc", pair_main(p.dir(), "").as_str());

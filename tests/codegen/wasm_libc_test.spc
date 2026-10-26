@@ -788,6 +788,19 @@ fn compare(program: str, reference: str, cflags: []str, wasmtime: []str, input: 
     let got = ph::read_text(s.at("prog.out").as_str());
     let want = ph::read_text(s.at("ref.wasm.out").as_str());
     assert(got.len() > min, "the program prints every line");
+    if !got.eq_str(want.as_str()) {
+        // The first line that differs, with its number.
+        let mut gl = got.as_str().lines();
+        let mut wl = want.as_str().lines();
+        for n in 1..got.len() + want.len() + 2 {
+            let g = gl.next();
+            let w = wl.next();
+            if g != w {
+                eprint("line {}: ours '{}', wasi-libc's '{}'\n", n, g.unwrap_or("<end>"), w.unwrap_or("<end>"));
+                break;
+            }
+        }
+    }
     assert(got.eq_str(want.as_str()), "the outputs match");
     return s;
 }

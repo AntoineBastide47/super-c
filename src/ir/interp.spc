@@ -8323,6 +8323,16 @@ extend Interp {
         } else {
             return self.bail();
         }
+        if v != v {
+            // The first NaN operand quieted, else the positive quiet NaN (`lir::eval::float_op`).
+            v = if a != a {
+                f64_from_bits(f64_bits(a) | 0x8000000000000);
+            } else if c != c {
+                f64_from_bits(f64_bits(c) | 0x8000000000000);
+            } else {
+                f64_from_bits(0x7FF8000000000000);
+            };
+        }
         if tb == BuiltinType::BT_F32 {
             v = v as f32;
         }

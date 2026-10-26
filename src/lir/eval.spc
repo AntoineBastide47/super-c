@@ -1899,8 +1899,9 @@ const fn to_f64(ty: u8, w: u64) f64 {
     return fl::f64_from_bits(w);
 }
 
-// A float operation on f32 rounds to f32.
-const fn float_op(op: u8, ty: u8, x: u64, y: u64) u64 {
+/// A float operation on f32 rounds to f32. A NaN result is the first NaN operand quieted, else the
+/// positive quiet NaN, as LLVM folds it: the host's own NaN (x86's is negative) never shows.
+pub const fn float_op(op: u8, ty: u8, x: u64, y: u64) u64 {
     if ty == T_F32 {
         let a = fl::f32_from_bits(x as u32);
         let c = fl::f32_from_bits(y as u32);
@@ -1915,7 +1916,16 @@ const fn float_op(op: u8, ty: u8, x: u64, y: u64) u64 {
         } else {
             -a;
         };
-        return fl::f32_bits(r);
+        if r == r || op == O_FNEG {
+            return fl::f32_bits(r);
+        }
+        if a != a {
+            return x | 0x400000;
+        }
+        if c != c {
+            return y | 0x400000;
+        }
+        return 0x7FC00000;
     }
     let a = fl::f64_from_bits(x);
     let c = fl::f64_from_bits(y);
@@ -1930,7 +1940,16 @@ const fn float_op(op: u8, ty: u8, x: u64, y: u64) u64 {
     } else {
         -a;
     };
-    return fl::f64_bits(r);
+    if r == r || op == O_FNEG {
+        return fl::f64_bits(r);
+    }
+    if a != a {
+        return x | 0x8000000000000;
+    }
+    if c != c {
+        return y | 0x8000000000000;
+    }
+    return 0x7FF8000000000000;
 }
 
 // Scalar conversion `op` of `x` from `from` to `to`; false for an unchecked float conversion out of range.

@@ -10918,11 +10918,6 @@ const fn word_in(list: str, w: str) bool {
     return false;
 }
 
-// The C facts of every extern block with a header a native build's objects need, each header preprocessed
-// once under the target's C environment: the values of its integer constants (`Package.extern_ints`), and
-// its functions that only a C compile defines (`Package.c_fns`): every one of an intrinsics header, else
-// the header's `static` ones. A constant the header does not define as an integer stays without one, and
-// the modules that read it go through C.
 // Every module's line starts (`Package.lines`), which the parallel LIR lowerings share.
 fn lir_lines(p: &mut loader::Package) {
     p.lines.truncate(0);
@@ -10944,6 +10939,11 @@ fn lir_lines(p: &mut loader::Package) {
     }
 }
 
+// The C facts of every extern block with a header a native build's objects need, each header preprocessed
+// once under the target's C environment: the values of its integer constants (`Package.extern_ints`), and
+// its functions that only a C compile defines (`Package.c_fns`): every one of an intrinsics header, else
+// the header's `static` ones. A constant the header does not define as an integer stays without one, and
+// the modules that read it go through C. Without a C environment (no sysroot) a header has no facts.
 fn native_header_facts(p: &mut loader::Package) {
     let intr = tgt::isa(p.arch).intrinsics;
     let mut heads = Map::<String, u32>::new();
@@ -11100,7 +11100,13 @@ fn native_header_facts(p: &mut loader::Package) {
     } else {
         String::new();
     };
-    let old = loader::read_file(cpath.as_str()).unwrap_or(String::new());
+    let read = loader::read_file(cpath.as_str()).unwrap_or(String::new());
+    // A record of another format has no entry for this one.
+    let old = if read.as_str().starts_with(HF_FORMAT) {
+        read.as_str().slice(HF_FORMAT.len(), read.len());
+    } else {
+        "";
+    };
     let mut tasks = Vector::<HfTask>::new();
     for k in 0..hnames.len() {
         if names.at(k).len() + fnames.at(k).len() + tnames.at(k).len() == 0 {
@@ -11122,12 +11128,13 @@ fn native_header_facts(p: &mut loader::Package) {
             oks: Vector::<bool>::new(),
             sts: Vector::<bool>::new(),
             cls: Vector::<u8>::new(),
+            lays: Vector::<String>::new(),
             read: Vector::<String>::new(),
             ok: false,
             hit: false,
         };
         t.key = hf_key(&t);
-        t.hit = hf_find(old.as_str(), &mut t);
+        t.hit = hf_find(old, &mut t);
         tasks.push(t);
     }
     let mut miss: usize = 0;
@@ -11163,10 +11170,15 @@ fn native_header_facts(p: &mut loader::Package) {
             }
         }
     }
-    let mut rec = String::new();
+    let mut rec = String::from_str(HF_FORMAT);
     for q in 0..tasks.len() {
         let t = tasks.index_mut(q);
         let k = t.k as usize;
+        if !t.hit && t.env == null {
+            // No C environment for the target (no sysroot): a C compile reads no header either, so the
+            // functions are the library's exports. Nothing is recorded: a sysroot may appear.
+            continue;
+        }
         hf_write(&mut rec, t);
         for j in 0..t.read.len() {
             if !p.header_files.contains(&t.read[j]) {
@@ -11192,9 +11204,12 @@ fn native_header_facts(p: &mut loader::Package) {
         }
         for j in 0..t.cls.len() {
             p.opaque_cls.insert(tkeys.at(k)[j], t.cls[j]);
+            if t.cls[j] == bg::SC_REC {
+                p.opaque_lay.insert(tkeys.at(k)[j], t.lays.at(j).clone());
+            }
         }
     }
-    if cpath.len() != 0 && rec.as_str() != old.as_str() {
+    if cpath.len() != 0 && rec.as_str() != read.as_str() {
         let _ = write_file_atomic(cpath.as_str(), rec.as_str());
     }
 }
@@ -11202,6 +11217,8 @@ fn native_header_facts(p: &mut loader::Package) {
 /// The record of a native build's header scan (`native_header_facts`): per scanned header, its key, the
 /// files the scan read with their sizes and modification times, and the facts.
 const HF_RECORD: str = "__sc_hfacts";
+// The first line of `HF_RECORD`: its format.
+const HF_FORMAT: str = "hfacts 2\n";
 
 // One header's scan (`bg::header_facts`) for `native_header_facts`: under the build's target and C
 // flags, header `header`'s constants `names`, functions `fnames` and opaque types `tnames` (the `k`-th
@@ -11224,6 +11241,7 @@ struct HfTask {
     pub oks: Vector<bool>,
     pub sts: Vector<bool>,
     pub cls: Vector<u8>,
+    pub lays: Vector<String>,
     pub read: Vector<String>,
     pub ok: bool,
     pub hit: bool,
@@ -11266,6 +11284,7 @@ fn hf_run(t: &mut HfTask) {
         &mut t.sts,
         ts9[0..ts9.len()],
         &mut t.cls,
+        &mut t.lays,
         &mut t.read,
     );
 }
@@ -11294,8 +11313,8 @@ fn hf_key(t: &HfTask) u64 {
 }
 
 // `t`'s record line (`HF_RECORD`): `<key> <ok> <files> <constants>`, then per file `<size> <mtime> <path>`,
-// per constant `<0|1> <value>`, the `static` flags as one line of `0` and `1`, and the types' classes as
-// one line of their `bindgen::SC_*` bytes.
+// per constant `<0|1> <value>`, the `static` flags as one line of `0` and `1`, the types' classes as
+// one line of their `bindgen::SC_*` bytes, and per type its layout (`bindgen::SC_REC`'s, else empty).
 fn hf_write(out: &mut String, t: &HfTask) {
     out.format_into("{} {} {} {}\n", t.key, t.ok as u32, t.read.len(), t.vals.len());
     for j in 0..t.read.len() {
@@ -11319,6 +11338,10 @@ fn hf_write(out: &mut String, t: &HfTask) {
         out.push_byte(t.cls[j]);
     }
     out.push_byte(b'\n');
+    for j in 0..t.lays.len() {
+        out.push_string(t.lays.at(j));
+        out.push_byte(b'\n');
+    }
 }
 
 // File `path`'s size and modification time in nanoseconds; zeros when it is gone.
@@ -11344,8 +11367,12 @@ fn hf_find(rec: str, t: &mut HfTask) bool {
         let nr = hf_word(&mut line).parse_u64().unwrap_or(0) as usize;
         let nv = hf_word(&mut line).parse_u64().unwrap_or(0) as usize;
         if key != t.key {
-            // Another header's entry: its files, constants, flags and classes.
-            for _ in 0..nr + nv + 2 {
+            // Another header's entry: its files, constants, flags and classes, then a layout per class.
+            for _ in 0..nr + nv + 1 {
+                let _ = hf_line(&mut rest);
+            }
+            let ncl = hf_line(&mut rest).len();
+            for _ in 0..ncl {
                 let _ = hf_line(&mut rest);
             }
             continue;
@@ -11372,6 +11399,7 @@ fn hf_find(rec: str, t: &mut HfTask) bool {
         }
         for j in 0..cl.len() {
             t.cls.push(cl.byte_at(j));
+            t.lays.push(String::from_str(hf_line(&mut rest)));
         }
         if !same {
             t.read.truncate(0);
@@ -11379,6 +11407,7 @@ fn hf_find(rec: str, t: &mut HfTask) bool {
             t.vals.truncate(0);
             t.sts.truncate(0);
             t.cls.truncate(0);
+            t.lays.truncate(0);
             return false;
         }
         t.ok = ok;
@@ -11554,12 +11583,16 @@ fn nat_key(p: &loader::Package, keys: &Vector<u64>, m: usize) u64 {
             },
         };
     }
-    // Order-free sums over the opaque types' classes and the constants.
+    // Order-free sums over the opaque types' classes and layouts and the constants.
     let mut ot = p.opaque_cls.keys();
     loop {
         switch ot.next() {
             Some(k) => {
-                h = h ^ (k.wrapping_mul(0xD6E8FEB86659FD93) ^ (*p.opaque_cls.get(k).unwrap()) as u64).wrapping_mul(
+                let lay = switch p.opaque_lay.get(k) {
+                    Some(l) => fnv(l.as_str()),
+                    None => 0,
+                };
+                h = h ^ (k.wrapping_mul(0xD6E8FEB86659FD93) ^ (*p.opaque_cls.get(k).unwrap()) as u64 ^ lay).wrapping_mul(
                     0x100000001B3,
                 );
             },
@@ -11794,7 +11827,14 @@ fn native_plan(
             eprint("native: {} through C: {}\n", p.modules[m].path.as_str(), w);
         }
         if log.len() != 0 {
-            logged.format_into("{}: {} ({})\n", p.modules[m].path.as_str(), w, p.gen_root.as_str());
+            logged.format_into(
+                "{}: {} ({} {} {})\n",
+                p.modules[m].path.as_str(),
+                w,
+                tgt::os(p.build_target).name,
+                tgt::isa(p.arch).name,
+                p.gen_root.as_str(),
+            );
         }
     }
     for k in 0..l.retry.len() {

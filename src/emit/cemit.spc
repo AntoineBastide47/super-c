@@ -73,6 +73,23 @@ pub struct Refusal {
     pub why: str<'static>,
 }
 
+// A dyn table `dyn_pair` demanded while a body's LIR lowering held the lowering: `dyn_pair_tabs`'s
+// arguments.
+struct DynDue {
+    pub pm: ModuleId,
+    pub dt: TypeId,
+    pub srm: ModuleId,
+    pub srt: TypeId,
+    pub own: bool,
+    pub am: ModuleId,
+    pub at: TypeId,
+    pub pair: String,
+    pub stem: String,
+    pub src: String,
+    pub h: u64,
+    pub own9: ModuleId,
+}
+
 /// A module's backend bits: the C renderer emits its C; LIR lowers its bodies.
 pub const BK_C: u8 = 1;
 pub const BK_LIR: u8 = 2;
@@ -238,6 +255,8 @@ pub struct CEmit {
     pub blk_seen: Set<u64>,
     /// The wrappers spelled while a lowering held the LIR (`lir_put` lowers them).
     blk_due: Vector<DefId>,
+    dyn_due: Vector<DynDue>, // the dyn tables a body's LIR lowering demanded, emitted when it ends
+    dyn_flushing: bool,
     /// Block-wrapper prototypes, one per `sh_blk_k` row (ends in `sh_blk_e2`).
     pub blk_protos: String,
     pub uses_tasks: u8,
@@ -587,6 +606,8 @@ extend CEmit {
             blk_defs: String::new(),
             blk_seen: Set::<u64>::new(),
             blk_due: Vector::<DefId>::new(),
+            dyn_due: Vector::<DynDue>::new(),
+            dyn_flushing: false,
             blk_protos: String::new(),
             uses_tasks: 0,
             stat_seen: Set::<u64>::new(),
@@ -14554,10 +14575,30 @@ extend CEmit {
                 } else {
                     unsafe (*self.p().module_ast_const(pm)).instance(y.as_data.inst).module;
                 };
-                let ctx0 = self.mg.mark_ctx;
-                self.mg.mark_ctx = mbe::CTX_INST | own9 as i64;
-                ok9 = ok9 && self.dyn_pair_tabs(pm, dt, srm, srt, own, am, at, pair, &stem, &src, h, own9);
-                self.mg.mark_ctx = ctx0;
+                if self.lir.is_none() && !self.mg.macro_on && (self.backends[own9 as usize] & BK_LIR) != 0 {
+                    // A body's LIR lowering demands it: its LIR waits for the lowering (`lir_put`).
+                    self.dyn_due.push(
+                        DynDue {
+                            pm: pm,
+                            dt: dt,
+                            srm: srm,
+                            srt: srt,
+                            own: own,
+                            am: am,
+                            at: at,
+                            pair: pair.clone(),
+                            stem: stem.clone(),
+                            src: src.clone(),
+                            h: h,
+                            own9: own9,
+                        },
+                    );
+                } else {
+                    let ctx0 = self.mg.mark_ctx;
+                    self.mg.mark_ctx = mbe::CTX_INST | own9 as i64;
+                    ok9 = ok9 && self.dyn_pair_tabs(pm, dt, srm, srt, own, am, at, pair, &stem, &src, h, own9);
+                    self.mg.mark_ctx = ctx0;
+                }
             }
         }
         self.sput(src);
@@ -15820,6 +15861,27 @@ extend CEmit {
             self.blk_lir(d);
         }
         self.blk_due.truncate(0);
+        if self.dyn_flushing {
+            return;
+        }
+        // The dyn tables the lowering demanded; a table's thunks may demand more, each once
+        // (`dyn_tab_seen`).
+        self.dyn_flushing = true;
+        let mut k: usize = 0;
+        while k < self.dyn_due.len() {
+            let d = self.dyn_due.at(k);
+            let mut pair = d.pair.clone();
+            let stem = d.stem.clone();
+            let src = d.src.clone();
+            let own9 = d.own9;
+            let ctx0 = self.mg.mark_ctx;
+            self.mg.mark_ctx = mbe::CTX_INST | own9 as i64;
+            let _ = self.dyn_pair_tabs(d.pm, d.dt, d.srm, d.srt, d.own, d.am, d.at, &mut pair, &stem, &src, d.h, own9);
+            k += 1;
+            self.mg.mark_ctx = ctx0;
+        }
+        self.dyn_due.truncate(0);
+        self.dyn_flushing = false;
     }
 
     // The name of the `@blocking` wrapper of extern fn `d`: `__sc_blk_` and `blk_stem`.

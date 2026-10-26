@@ -386,8 +386,27 @@ fn coff_section(o: &Vector<u8>, name: str) Vector<u8> {
     return out;
 }
 
-// Assemble `src` with the C compiler and `flags`: the code section's bytes, empty when it does not
-// assemble (its error on stderr).
+// The clang the encodings are compared with: the C compiler when it is clang, else `clang` when it runs,
+// else empty. The tables take LLVM's choices among equal encodings (`xchg`'s operand order, the VEX
+// operand swaps); GNU as takes others.
+fn llvm_cc() String {
+    if cli::cc_is_clang() {
+        return String::from_str(unsafe str::from_cstr(cli::cc_name()));
+    }
+    let out = format("{}/clang_version_{}.txt", cli::tmp_dir().as_str(), process::pid().unwrap_or(1));
+    let mut cmd = String::from_str("clang --version");
+    let mut outp = out.clone();
+    let ok = cli::run_with(cmd.cstr(), null, outp.cstr(), null, "") == 0;
+    let _ = fs::unlink(out.as_str());
+    return if ok {
+        String::from_str("clang");
+    } else {
+        String::new();
+    };
+}
+
+// Assemble `src` with clang (`llvm_cc`) and `flags`: the code section's bytes, empty when there is no
+// clang or it does not assemble (its error on stderr).
 fn cc_assemble(src: str, flags: str) Vector<u8> {
     let mut xdata = Vector::<u8>::new();
     return cc_assemble_xdata(src, flags, &mut xdata);
@@ -395,6 +414,10 @@ fn cc_assemble(src: str, flags: str) Vector<u8> {
 
 // `cc_assemble`, and the `.xdata` section of a COFF object into `xdata`.
 fn cc_assemble_xdata(src: str, flags: str, xdata: &mut Vector<u8>) Vector<u8> {
+    let cc = llvm_cc();
+    if cc.len() == 0 {
+        return Vector::<u8>::new();
+    }
     let dir = format("{}/asm_test_{}", cli::tmp_dir().as_str(), process::pid().unwrap_or(1));
     let _ = fs::mkdir_all(dir.as_str());
     let sp = format("{}/t.s", dir.as_str());
@@ -402,13 +425,7 @@ fn cc_assemble_xdata(src: str, flags: str, xdata: &mut Vector<u8>) Vector<u8> {
     let f = stdio::fopen(sp.as_str(), "wb");
     unsafe stdio::fwrite(src.ptr(), 1, src.len(), f);
     unsafe stdio::fclose(f);
-    let mut cmd = format(
-        "\"{}\" -c {} \"{}\" -o \"{}\"",
-        unsafe str::from_cstr(cli::cc_name()),
-        flags,
-        sp.as_str(),
-        op.as_str(),
-    );
+    let mut cmd = format("\"{}\" -c {} \"{}\" -o \"{}\"", cc.as_str(), flags, sp.as_str(), op.as_str());
     let mut out = Vector::<u8>::new();
     if cli::run_with(cmd.cstr(), null, null, null, "") == 0 {
         let o = read_bytes(op.as_str());
@@ -425,7 +442,7 @@ fn a64_oracle(text: &String, words: &Vector<u32>) {
     src.push_string(text);
     let got = cc_assemble(src.as_str(), "-march=armv9-a+sme2+sme-f64f64+aes+sha2+sha3+crc+rdm+dotprod+i8mm");
     if got.len() == 0 {
-        println("skipped: the C compiler does not assemble arm64 with SME2");
+        println("skipped: no clang assembles arm64 with SME2");
         return;
     }
     assert_eq(got.len(), words.len() * 4);
@@ -839,7 +856,7 @@ fn x64_oracle(text: &String, bytes: &Vector<u8>, ends: &Vector<u32>) {
     };
     let got = cc_assemble(src.as_str(), flags);
     if got.len() == 0 {
-        println("skipped: the C compiler does not assemble x86-64");
+        println("skipped: no clang assembles x86-64");
         return;
     }
     let mut lines = text.split("\n");
@@ -875,7 +892,7 @@ fn x64_oracle(text: &String, bytes: &Vector<u8>, ends: &Vector<u32>) {
                     theirs.push(got[k]);
                 }
             }
-            eprint("'{}': ours {}, the C compiler's {}\n", line, bhex(&ours).as_str(), bhex(&theirs).as_str());
+            eprint("'{}': ours {}, clang's {}\n", line, bhex(&ours).as_str(), bhex(&theirs).as_str());
             bad += 1;
             if bad > 40 || l == 0 {
                 break;
@@ -989,12 +1006,12 @@ fn module_block(what: str, text: str, isa: u8, fmt: u8, triple: str) bool {
     let mut xdata = Vector::<u8>::new();
     let got = cc_assemble_xdata(text, format("--target={}", triple).as_str(), &mut xdata);
     if got.len() == 0 {
-        println("skipped: the C compiler does not assemble for {}", triple);
+        println("skipped: no clang assembles for {}", triple);
         return true;
     }
     if fmt == asmr::FMT_COFF && o.cfi.as_slice() != xdata.as_slice() {
         eprint(
-            "{} for {}: our unwind data {} differs from the C compiler's {}\n",
+            "{} for {}: our unwind data {} differs from clang's {}\n",
             what,
             triple,
             bhex(&o.cfi).as_str(),

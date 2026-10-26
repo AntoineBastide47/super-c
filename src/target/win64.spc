@@ -34,10 +34,8 @@ pub fn classify(b: &Body, sig: u32, ptr: u32, out: &mut CallLayout) {
     out.locs.truncate(0);
     out.parts.truncate(0);
     let np = b.pool[sig as usize];
-    out.unknown = unknown_class(b, b.pool[sig as usize + 2]);
-    for k in 0..np {
-        out.unknown = out.unknown || unknown_class(b, b.pool[(sig + 3 + k) as usize]);
-    }
+    // An aggregate passes by its size alone: its leaves never matter.
+    out.unknown = false;
     let fixed = b.pool[sig as usize + 1];
     let nfixed = if (fixed & SIG_VARIADIC) != 0 {
         fixed & ~SIG_VARIADIC;
