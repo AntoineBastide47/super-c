@@ -5,8 +5,10 @@
 // constructors (`.init_array` segments) run from the linker's `__wasm_call_ctors`. Function pointers are
 // slots of the module's one table. The module carries a name section and the debug sections unless
 // stripped.
+import link::ar;
 import link::util as lu;
 import utils::names as nm;
+import target::native as nat;
 import target::wasm as w;
 
 const NONE: u32 = 0xFFFFFFFF;
@@ -15,7 +17,8 @@ const NONE: u32 = 0xFFFFFFFF;
 /// the debug sections.
 pub struct Opts {
     pub out: String,
-    pub objs: Vector<String>,
+    pub objs: Vector<String>, // objects and archives
+    pub libs: Vector<String>, // the `-l` archives' paths
     pub stack: u64, // 0: wasm-ld's 64 KiB
     pub stack_first: bool,
     pub strip: bool,
@@ -148,6 +151,7 @@ struct L {
     pub table: Vector<u32>, // the table's functions (output indices) from slot 1
     pub slot_of: Map<u32, u32>, // output function index -> its table slot
     pub ctors: Vector<u32>, // output function indices `__wasm_call_ctors` calls
+    pub inits: Vector<(u32, u32)>, // the init functions: (priority, input symbol)
     pub ctor_fn: u32, // `__wasm_call_ctors`'s output index
     pub ctor_ty: u32,
     pub nfuncs: u32, // imports plus bodies plus the ctor function
@@ -179,6 +183,7 @@ pub fn link(o: &Opts, err: &mut String) bool {
         table: Vector::<u32>::new(),
         slot_of: Map::<u32, u32>::new(),
         ctors: Vector::<u32>::new(),
+        inits: Vector::<(u32, u32)>::new(),
         ctor_fn: NONE,
         ctor_ty: NONE,
         nfuncs: 0,
@@ -198,13 +203,28 @@ pub fn link(o: &Opts, err: &mut String) bool {
 }
 
 fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
+    // The archives, positional and the `-l` ones, give the members the objects need.
+    let mut ars = ar::Archives::new();
     for i in 0..o.objs.len() {
-        if !read_object(l, o.objs[i].as_str(), blob) {
+        let p = o.objs[i].as_str();
+        if ar::is_archive(p) {
+            if !ars.add(nat::OBJ_WASM, p, &mut l.err) {
+                return false;
+            }
+        } else if !read_object(l, p, blob) {
             return false;
         }
     }
+    for i in 0..o.libs.len() {
+        if !ars.add(nat::OBJ_WASM, o.libs[i].as_str(), &mut l.err) {
+            return false;
+        }
+    }
+    if !enter(l, 0) || !take_members(l, &mut ars, blob) || !resolve(l) {
+        return false;
+    }
     let b = blob.as_slice();
-    if !resolve(l) || !assign_functions(l, b) {
+    if !assign_functions(l, b) {
         return false;
     }
     layout_memory(l, o);
@@ -265,6 +285,11 @@ fn read_object(l: &mut L, path: str, blob: &mut Vector<u8>) bool {
         l.err.format_into("cannot read '{}'", path);
         return false;
     }
+    return parse_object(l, path, at, blob);
+}
+
+// Enter the object at `at` of `blob` (named `path` in messages).
+fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
     let b = blob.as_slice();
     let end = b.len();
     if end - at < 8 || lu::r32(b, at) != 0x6D736100 || lu::r32(b, at + 4) != 1 {
@@ -453,8 +478,13 @@ fn read_object(l: &mut L, path: str, blob: &mut Vector<u8>) bool {
                 sg.align = al;
             }
         } else if sub == 6 {
-            l.err.format_into("'{}': init functions in the linking section", path);
-            return false;
+            // The init functions (C constructors): a priority and a function symbol each.
+            let n = lu::read_uleb(b, &mut q);
+            for _ in 0..n {
+                let prio = lu::read_uleb(b, &mut q) as u32;
+                let k = lu::read_uleb(b, &mut q) as u32;
+                l.inits.push((prio, f.sym0 + k));
+            }
         }
         q = send;
     }
@@ -486,10 +516,11 @@ fn gof(l: &L, k: u32) u32 {
     return l.glob[y.name as usize] - 1;
 }
 
-// Enter the symbols: a strong definition beats a weak one, two strong ones are an error; an undefined
-// function with a module other than `env` is an import of that module (a WASI call).
-fn resolve(l: &mut L) bool {
-    for fi in 0..l.files.len() {
+// Enter the symbols of the objects from file `from` on: a strong definition beats a weak one, two strong
+// ones are an error; an undefined function with a module other than `env` is an import of that module (a
+// WASI call).
+fn enter(l: &mut L, from: usize) bool {
+    for fi in from..l.files.len() {
         let f = l.files[fi];
         for k in f.sym0..f.sym0 + f.nsym {
             let y = l.syms[k as usize];
@@ -533,6 +564,41 @@ fn resolve(l: &mut L) bool {
             l.gs[g as usize] = gy;
         }
     }
+    return true;
+}
+
+// Each global still undefined and strongly referenced that an archive member defines: take the member,
+// enter its symbols, until no member defines a global still needed.
+fn take_members(l: &mut L, ars: &mut ar::Archives, blob: &mut Vector<u8>) bool {
+    let mut more = ars.paths.len() != 0;
+    // Each pass takes at least one member, or ends.
+    while more {
+        more = false;
+        for g in 0..l.gs.len() {
+            let gy = l.gs[g];
+            if gy.kind != G_UNDEF || !gy.strong {
+                continue;
+            }
+            let am = ars.find(l.names.spell(gy.name));
+            if am.is_none() {
+                continue;
+            }
+            let m = am.unwrap();
+            ars.take(m);
+            let at = blob.len();
+            blob.extend_from_slice(ars.bytes(m));
+            let f0 = l.files.len();
+            if !parse_object(l, ars.name(m).as_str(), at, blob) || !enter(l, f0) {
+                return false;
+            }
+            more = true;
+        }
+    }
+    return true;
+}
+
+// The linker's own symbols, then every strong reference must be defined.
+fn resolve(l: &mut L) bool {
     // The linker's own: the start of the heap, the end of the data, the constructors' caller; the stack
     // pointer and the table are the module's.
     let mut missing = String::new();
@@ -543,7 +609,7 @@ fn resolve(l: &mut L) bool {
             continue;
         }
         let s = l.names.spell(gy.name);
-        if s == "__heap_base" || s == "__data_end" || s == "__wasm_call_ctors" || s == "__stack_pointer" || s == "__indirect_function_table" || s == "__dso_handle" {
+        if s == "__heap_base" || s == "__data_end" || s == "__wasm_call_ctors" || s == "__stack_pointer" || s == "__indirect_function_table" || s == "__dso_handle" || s == "__tls_base" {
             l.gs.index_mut(g).kind = G_SYNTH;
             continue;
         }
@@ -629,6 +695,16 @@ fn assign_functions(l: &mut L, b: []u8) bool {
                 }
             }
         }
+    }
+    // Then the init functions by priority, each priority's in input order.
+    let mut inits = Vector::<(u32, u32, u32)>::new();
+    for i in 0..l.inits.len() {
+        inits.push((l.inits[i].0, i as u32, l.inits[i].1));
+    }
+    inits.sort();
+    for i in 0..inits.len() {
+        let fx = func_index(l, inits[i].2);
+        l.ctors.push(fx);
     }
     return true;
 }
@@ -810,17 +886,23 @@ fn apply_rels(l: &mut L, f: IFile, b: []u8, sc: ISec, out: &mut Vector<u8>, mode
             put_uleb5(out, p, fx);
         } else if ty == w::R_TYPE_INDEX_LEB {
             put_uleb5(out, p, l.ftypes[(f.type0 + k) as usize]);
-        } else if ty == w::R_GLOBAL_INDEX_LEB {
-            // The module's one global.
-            if l.names.spell(l.syms[(f.sym0 + k) as usize].name) != "__stack_pointer" {
-                l.err.format_into(
-                    "'{}': global '{}'",
-                    l.paths[f.path as usize].as_str(),
-                    l.names.spell(l.syms[(f.sym0 + k) as usize].name),
-                );
+        } else if ty == w::R_GLOBAL_INDEX_LEB || ty == w::R_GLOBAL_INDEX_I32 {
+            // The module's globals: the stack pointer, then the thread-local block's base (`tls_base`).
+            let gn = l.names.spell(l.syms[(f.sym0 + k) as usize].name);
+            if gn != "__stack_pointer" && gn != "__tls_base" {
+                l.err.format_into("'{}': global '{}'", l.paths[f.path as usize].as_str(), gn);
                 return false;
             }
-            put_uleb5(out, p, 0);
+            let gx: u32 = if gn == "__tls_base" {
+                1;
+            } else {
+                0;
+            };
+            if ty == w::R_GLOBAL_INDEX_LEB {
+                put_uleb5(out, p, gx);
+            } else {
+                lu::p32(out, p, gx);
+            }
         } else if ty == w::R_TABLE_NUMBER_LEB {
             put_uleb5(out, p, 0);
         } else if ty == w::R_TABLE_INDEX_SLEB || ty == w::R_TABLE_INDEX_I32 {
@@ -1050,14 +1132,38 @@ fn write_module(l: &mut L, o: &Opts, b: []u8, m: &mut Vector<u8>) bool {
     s.push(0);
     w::uleb(&mut s, (l.heap_base as u64 + 65535) / 65536);
     section(m, 5, &s);
-    // The stack pointer.
+    // The stack pointer; then, when an object names it, `__tls_base`: the thread-local data's start (the
+    // first `.tdata` segment's, as wasm-ld defines it without shared memory), immutable.
+    let tb = l.names.find("__tls_base");
+    let tls = tb >= 0 && tb as usize < l.glob.len() && l.glob[tb as usize] != 0;
     s.truncate(0);
-    w::uleb(&mut s, 1);
+    w::uleb(
+        &mut s,
+        if tls {
+            2u64;
+        } else {
+            1u64;
+        },
+    );
     s.push(w::I32);
     s.push(1);
     s.push(w::I32_CONST);
     w::sleb(&mut s, l.sp);
     s.push(w::END);
+    if tls {
+        let mut at: u32 = 0;
+        for i in 0..l.segs.len() {
+            let sg = l.segs[i];
+            if sg.addr != NONE && l.names.spell(sg.name).starts_with(".tdata") && (at == 0 || sg.addr < at) {
+                at = sg.addr;
+            }
+        }
+        s.push(w::I32);
+        s.push(0);
+        s.push(w::I32_CONST);
+        w::sleb(&mut s, at);
+        s.push(w::END);
+    }
     section(m, 6, &s);
     s.truncate(0);
     w::uleb(&mut s, 2);

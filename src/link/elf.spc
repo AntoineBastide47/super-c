@@ -9,6 +9,8 @@
 // `.eh_frame` with its binary search table, the symbol table, the debug sections with their
 // relocations applied, and the section headers.
 import link::util as lu;
+import link::ar;
+import target::native as nat;
 import utils::names as nm;
 import std::platform::fs;
 
@@ -146,6 +148,17 @@ const A_LDST64_ABS_LO12_NC: u32 = 286;
 const A_LDST128_ABS_LO12_NC: u32 = 299;
 const A_ADR_GOT_PAGE: u32 = 311;
 const A_LD64_GOT_LO12_NC: u32 = 312;
+const A_TLSIE_ADR_GOTTPREL_PAGE21: u32 = 541;
+const A_TLSIE_LD64_GOTTPREL_LO12_NC: u32 = 542;
+const A_TLSLE_MOVW_TPREL_G2: u32 = 544;
+const A_TLSLE_MOVW_TPREL_G0_NC: u32 = 548;
+const A_TLSLE_ADD_TPREL_HI12: u32 = 549;
+const A_TLSLE_ADD_TPREL_LO12: u32 = 550;
+const A_TLSLE_ADD_TPREL_LO12_NC: u32 = 551;
+const A_TLSLE_LDST8_TPREL_LO12: u32 = 552;
+const A_TLSLE_LDST64_TPREL_LO12_NC: u32 = 559;
+const A_TLSLE_LDST128_TPREL_LO12: u32 = 570;
+const A_TLSLE_LDST128_TPREL_LO12_NC: u32 = 571;
 const A_TLSDESC_ADR_PAGE21: u32 = 562;
 const A_TLSDESC_LD64_LO12: u32 = 563;
 const A_TLSDESC_ADD_LO12: u32 = 564;
@@ -375,12 +388,22 @@ pub fn link(o: &Opts, err: &mut String) bool {
 }
 
 fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
+    // The archives, positional and of the libraries, take part before the shared libraries.
+    let mut ars = ar::Archives::new();
     for i in 0..o.objs.len() {
-        if !read_object(l, o.objs[i].as_str(), blob) {
+        let p = o.objs[i].as_str();
+        if ar::is_archive(p) {
+            if !ars.add(nat::OBJ_ELF, p, &mut l.err) {
+                return false;
+            }
+        } else if !read_object(l, p, blob) {
             return false;
         }
     }
-    let b = blob.as_slice();
+    let mut sos = Vector::<String>::new();
+    if !lib_files(l, o, &mut sos, &mut ars) {
+        return false;
+    }
     // An executable's entry references `main` and glibc's start routine.
     let mut main = NONE;
     let mut lsm = NONE;
@@ -390,11 +413,12 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
         l.gs.index_mut(main as usize).used = true;
         l.gs.index_mut(lsm as usize).used = true;
     }
-    if !resolve_objects(l) {
+    if !resolve_objects(l, 0) || !take_members(l, &mut ars, blob) {
         return false;
     }
+    let b = blob.as_slice();
     mark_used(l, b);
-    if !load_libraries(l, o) || !finish_symbols(l) || !l.shared && !check_glibc(l, lsm) {
+    if !load_libraries(l, &sos) || !finish_symbols(l) || !l.shared && !check_glibc(l, lsm) {
         return false;
     }
     if !scan(l, b, lsm) {
@@ -428,6 +452,41 @@ fn read_object(l: &mut L, path: str, blob: &mut Vector<u8>) bool {
         l.err.format_into("cannot read '{}'", path);
         return false;
     }
+    return parse_object(l, path, at, blob);
+}
+
+// The static libraries' members the link needs: each one that defines a global a strong reference
+// leaves undefined, its own references in turn, until none is left (a pass takes at least one member,
+// so the passes are at most the members).
+fn take_members(l: &mut L, ars: &mut ar::Archives, blob: &mut Vector<u8>) bool {
+    let mut more = ars.paths.len() != 0;
+    while more {
+        more = false;
+        for g in 0..l.gs.len() {
+            let gy = l.gs[g];
+            if gy.kind != G_UNDEF || !gy.strong {
+                continue;
+            }
+            let am = ars.find(l.names.spell(gy.name));
+            if am.is_none() {
+                continue;
+            }
+            let m = am.unwrap();
+            ars.take(m);
+            let at = blob.len();
+            blob.extend_from_slice(ars.bytes(m));
+            let f0 = l.files.len();
+            if !parse_object(l, ars.name(m).as_str(), at, blob) || !resolve_objects(l, f0) {
+                return false;
+            }
+            more = true;
+        }
+    }
+    return true;
+}
+
+// Record the sections and symbols of the object at `at` of the blob, named `path`.
+fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
     let b = blob.as_slice();
     let mach: u32 = if l.a64 {
         183;
@@ -547,8 +606,8 @@ const fn type_of(y: ISym) u8 {
 
 // Enter every object's global symbols: a strong definition beats a weak one, two strong ones are an
 // error; a tentative one takes the largest size.
-fn resolve_objects(l: &mut L) bool {
-    for f in 0..l.files.len() {
+fn resolve_objects(l: &mut L, from: usize) bool {
+    for f in from..l.files.len() {
         let fl = l.files[f];
         for k in fl.sym0..fl.sym0 + fl.nsym {
             let y = l.syms[k as usize];
@@ -600,22 +659,48 @@ fn resolve_objects(l: &mut L) bool {
 
 // ---- libraries ------------------------------------------------------------------------------------------
 
-// Each `-l` library, then libc, searched in `dirs` and the system's directories: `lib<name>.so` (a GNU ld
-// script names the real file), else the newest `lib<name>.so.<N>`.
-fn load_libraries(l: &mut L, o: &Opts) bool {
+// The shared libraries `lib_files` found, in order; each one's exports bind the globals still undefined.
+fn load_libraries(l: &mut L, sos: &Vector<String>) bool {
+    for i in 0..sos.len() {
+        if !load_so(l, sos[i].as_str()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The files of each `-l` library of link `o`, then of libc: shared libraries into `sos`, static ones into
+// `ars`. A GNU ld script gives each file it names (its `AS_NEEDED` ones too: a library no symbol binds to
+// gets no DT_NEEDED anyway).
+fn lib_files(l: &mut L, o: &Opts, sos: &mut Vector<String>, ars: &mut ar::Archives) bool {
     let mut names = Vector::<String>::new();
     for i in 0..o.libs.len() {
         names.push(o.libs[i].clone());
     }
     names.push(String::from_str("c"));
+    let mut files = Vector::<String>::new();
     for i in 0..names.len() {
         let mut path = String::new();
-        if !find_lib(l, o, names[i].as_str(), &mut path) {
+        let kind = find(o, names[i].as_str(), &mut path);
+        if kind == LIB_NONE {
             l.err.format_into("library not found: -l{}", names[i].as_str());
             return false;
         }
-        if !load_so(l, path.as_str()) {
-            return false;
+        files.truncate(0);
+        if kind == LIB_SHARED && !script_files(o, path.as_str(), &mut files) {
+            files.push(path);
+        } else if kind == LIB_ARCHIVE {
+            files.push(path);
+        }
+        for k in 0..files.len() {
+            let f = files[k].as_str();
+            if ar::is_archive(f) {
+                if !ars.add(nat::OBJ_ELF, f, &mut l.err) {
+                    return false;
+                }
+            } else {
+                sos.push(files[k].clone());
+            }
         }
     }
     return true;
@@ -627,7 +712,7 @@ pub const LIB_SHARED: u8 = 1;
 pub const LIB_ARCHIVE: u8 = 2;
 
 /// Library `-l<name>` of link `o`, as glibc's linker searches: each directory of `dirs`, then the system's,
-/// for `lib<name>.so` (a GNU ld script's shared library), `lib<name>.so.<N>`, then `lib<name>.a`; its
+/// for `lib<name>.so` (a shared library or a GNU ld script), `lib<name>.so.<N>`, then `lib<name>.a`; its
 /// path into `path`.
 pub fn find(o: &Opts, name: str, path: &mut String) u8 {
     let sys: []str = if o.a64 {
@@ -645,9 +730,6 @@ pub fn find(o: &Opts, name: str, path: &mut String) u8 {
     for d in 0..dirs.len() {
         let so = format("{}/lib{}.so", dirs[d].as_str(), name);
         if is_file(so.as_str()) {
-            if script_target(so.as_str(), path) {
-                return LIB_SHARED;
-            }
             path.clear();
             path.push_string(&so);
             return LIB_SHARED;
@@ -666,11 +748,6 @@ pub fn find(o: &Opts, name: str, path: &mut String) u8 {
         }
     }
     return LIB_NONE;
-}
-
-fn find_lib(l: &L, o: &Opts, name: str, path: &mut String) bool {
-    let _ = l;
-    return find(o, name, path) == LIB_SHARED;
 }
 
 fn is_file(p: str) bool {
@@ -712,9 +789,9 @@ fn newest_version(dir: str, name: str) String {
     return best;
 }
 
-// The shared library a GNU ld script at `path` names (its first `.so` member of GROUP or INPUT), into
-// `out`; false when the file is an ELF file or names none.
-fn script_target(path: str, out: &mut String) bool {
+// The files GNU ld script `path` names into `out` (each absolute word ending in `.so`, `.so.<N>` or `.a`),
+// under the sysroot of link `o` when the script is; false when `path` is an ELF file, not a script.
+fn script_files(o: &Opts, path: str, out: &mut Vector<String>) bool {
     let data = lu::read(path);
     if data.is_none() {
         return false;
@@ -723,25 +800,32 @@ fn script_target(path: str, out: &mut String) bool {
     if d.len() >= 4 && lu::r32(d.as_slice(), 0) == 0x464C457F {
         return false;
     }
+    let root = if o.sysroot.len() != 0 && path.starts_with(o.sysroot.as_str()) {
+        o.sysroot.as_str();
+    } else {
+        "";
+    };
     let t = unsafe str::from_raw(d.as_ptr(), d.len());
     let mut i: usize = 0;
-    // Each step consumes one word; a word is a path when it starts with '/'.
+    // Each step consumes one word.
     while i < t.len() {
-        while i < t.len() && (t.byte_at(i) == b' ' || t.byte_at(i) == b'\n' || t.byte_at(i) == b'(' || t.byte_at(i) == b')') {
+        while i < t.len() && is_script_space(t.byte_at(i)) {
             i += 1;
         }
         let s = i;
-        while i < t.len() && t.byte_at(i) != b' ' && t.byte_at(i) != b'\n' && t.byte_at(i) != b'(' && t.byte_at(i) != b')' {
+        while i < t.len() && !is_script_space(t.byte_at(i)) {
             i += 1;
         }
         let w = t.slice(s, i);
-        if w.starts_with("/") && (w.ends_with(".so") || w.contains(".so.")) && !w.contains("ld-linux") {
-            out.clear();
-            out.push_str(w);
-            return true;
+        if w.starts_with("/") && (w.ends_with(".so") || w.contains(".so.") || w.ends_with(".a")) {
+            out.push(format("{}{}", root, w));
         }
     }
-    return false;
+    return out.len() != 0;
+}
+
+const fn is_script_space(c: u8) bool {
+    return c == b' ' || c == b'\n' || c == b'\t' || c == b'(' || c == b')';
 }
 
 // Load shared library `path`: its soname, its version definitions and its exported symbols; each export
@@ -1122,7 +1206,7 @@ fn scan(l: &mut L, b: []u8, lsm: u32) bool {
 
 // Whether relocation `ty` starts a thread-local sequence a shared library relaxes to initial-exec.
 fn tls_ie(l: &L, ty: u32) bool {
-    return l.shared && (ty == X_TLSGD && !l.a64 || ty == A_TLSDESC_ADR_PAGE21 && l.a64);
+    return l.shared && (ty == X_TLSGD && !l.a64 || (ty == A_TLSDESC_ADR_PAGE21 || ty == A_TLSIE_ADR_GOTTPREL_PAGE21) && l.a64);
 }
 
 // The key of thread-local symbol `k` (global `g`, or NONE for a local one).
@@ -1907,6 +1991,71 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
     }
     if r.ty == A_TLSDESC_ADD_LO12 || r.ty == A_TLSDESC_CALL {
         lu::p32(img, p, 0xD503201F);
+        return true;
+    }
+    // Initial-exec: the GOT slot of the offset in a shared library; in an executable the offset itself
+    // (movz xN, #hi16, lsl #16; movk xN, #lo16), as LLD relaxes it.
+    let rd = insn & 0x1F;
+    if r.ty == A_TLSIE_ADR_GOTTPREL_PAGE21 && l.shared {
+        let slot = tls_got_addr(l, k);
+        let d = ((slot & ~0xFFFu64).wrapping_sub(pa & ~0xFFFu64) as i64 >> 12) as u32;
+        lu::p32(img, p, 0x90000000 | rd | (d & 3) << 29 | (d >> 2 & 0x7FFFF) << 5);
+        return true;
+    }
+    if r.ty == A_TLSIE_LD64_GOTTPREL_LO12_NC && l.shared {
+        let slot = tls_got_addr(l, k);
+        lu::p32(img, p, insn & 0xFFC003FF | ((slot & 0xFFF) >> 3) as u32 << 10);
+        return true;
+    }
+    // Local-exec: the thread pointer offset itself.
+    let tp = tpoff(l, sv).wrapping_add(r.addend) as u64;
+    let le = r.ty >= A_TLSLE_MOVW_TPREL_G2 && r.ty <= A_TLSLE_LDST64_TPREL_LO12_NC || r.ty == A_TLSLE_LDST128_TPREL_LO12 || r.ty == A_TLSLE_LDST128_TPREL_LO12_NC;
+    if (r.ty == A_TLSIE_ADR_GOTTPREL_PAGE21 || r.ty == A_TLSIE_LD64_GOTTPREL_LO12_NC || le) && l.shared {
+        l.err.format_into("'{}': a local-exec thread-local access in a shared library", path);
+        return false;
+    }
+    if r.ty == A_TLSIE_ADR_GOTTPREL_PAGE21 || r.ty == A_TLSIE_LD64_GOTTPREL_LO12_NC || r.ty == A_TLSLE_ADD_TPREL_HI12 {
+        if tp >= 1u64 << 24 && r.ty == A_TLSLE_ADD_TPREL_HI12 || tp >= 1u64 << 32 {
+            l.err.format_into("'{}': thread-locals beyond the reach of their access", path);
+            return false;
+        }
+    }
+    if r.ty == A_TLSIE_ADR_GOTTPREL_PAGE21 {
+        lu::p32(img, p, 0xD2A00000 | rd | (tp >> 16 & 0xFFFF) as u32 << 5);
+        return true;
+    }
+    if r.ty == A_TLSIE_LD64_GOTTPREL_LO12_NC {
+        lu::p32(img, p, 0xF2800000 | rd | (tp & 0xFFFF) as u32 << 5);
+        return true;
+    }
+    if r.ty >= A_TLSLE_MOVW_TPREL_G2 && r.ty <= A_TLSLE_MOVW_TPREL_G0_NC {
+        // G2, G1, G1_NC, G0, G0_NC: the 16 bits at 32, 16, 16, 0, 0.
+        let sh: u64 = if r.ty == A_TLSLE_MOVW_TPREL_G2 {
+            32;
+        } else if r.ty < A_TLSLE_MOVW_TPREL_G0_NC - 1 {
+            16;
+        } else {
+            0;
+        };
+        lu::p32(img, p, insn & 0xFFE0001F | (tp >> sh & 0xFFFF) as u32 << 5);
+        return true;
+    }
+    if r.ty == A_TLSLE_ADD_TPREL_HI12 {
+        lu::p32(img, p, insn & 0xFFC003FF | (tp >> 12 & 0xFFF) as u32 << 10);
+        return true;
+    }
+    if r.ty == A_TLSLE_ADD_TPREL_LO12 || r.ty == A_TLSLE_ADD_TPREL_LO12_NC {
+        lu::p32(img, p, insn & 0xFFC003FF | (tp & 0xFFF) as u32 << 10);
+        return true;
+    }
+    if le {
+        // LDST8, 16, 32, 64 (each with its NC form), then LDST128: the low 12 bits scaled by the access.
+        let sh: u32 = if r.ty >= A_TLSLE_LDST128_TPREL_LO12 {
+            4;
+        } else {
+            (r.ty - A_TLSLE_LDST8_TPREL_LO12) / 2;
+        };
+        lu::p32(img, p, insn & 0xFFC003FF | (tp & 0xFFF) as u32 >> sh << 10);
         return true;
     }
     l.err.format_into("'{}': arm64 relocation type {} is not supported", path, r.ty);

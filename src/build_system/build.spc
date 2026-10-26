@@ -3635,15 +3635,22 @@ fn engine_build_i(
                         ret = 1;
                     }
                 }
-                if own == lk::NOT_SERVED && stream.no_cc {
+                if own == lk::NOT_SERVED && (stream.no_cc || lk::required()) {
                     if !own_ok {
                         why.push_str("an object compiled through C");
                     }
-                    eprintln(
-                        "build: link failed: the C compiler '{}' is not installed, and the own linker does not serve this link: {}",
-                        stream.cc_raw.as_str(),
-                        why.as_str(),
-                    );
+                    if stream.no_cc {
+                        eprintln(
+                            "build: link failed: the C compiler '{}' is not installed, and the own linker does not serve this link: {}",
+                            stream.cc_raw.as_str(),
+                            why.as_str(),
+                        );
+                    } else {
+                        eprintln(
+                            "build: link failed: SC_LINK=own, and the own linker does not serve this link: {}",
+                            why.as_str(),
+                        );
+                    }
                     own = lk::FAILED;
                     ret = 1;
                 }

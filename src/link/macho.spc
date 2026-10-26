@@ -6,7 +6,9 @@
 // it), the exports trie, the function starts and an ad-hoc linker signature, which arm64 macOS needs to
 // run the code. Output is a function of the inputs alone: no timestamps.
 import link::util as lu;
+import link::ar;
 import link::tbd;
+import target::native as nat;
 import link::sha256 as sha;
 import utils::names as nm;
 import std::platform::fs;
@@ -316,8 +318,24 @@ pub fn link(o: &Opts, err: &mut String) bool {
 }
 
 fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
+    let mut ars = ar::Archives::new();
     for i in 0..o.objs.len() {
-        if !read_object(l, o.objs[i].as_str(), blob) {
+        let p = o.objs[i].as_str();
+        if ar::is_archive(p) {
+            if !ars.add(nat::OBJ_MACHO, p, &mut l.err) {
+                return false;
+            }
+        } else if !read_object(l, p, blob) {
+            return false;
+        }
+    }
+    for i in 0..o.libs.len() {
+        let mut path = String::new();
+        if find_lib(o, o.libs[i].as_str(), &mut path) == LIB_ARCHIVE && !ars.add(
+            nat::OBJ_MACHO,
+            path.as_str(),
+            &mut l.err,
+        ) {
             return false;
         }
     }
@@ -325,8 +343,11 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     if o.kind == K_EXE {
         let _ = global(l, l.names.intern("__mh_execute_header"));
     }
+    if !resolve_objects(l, 0) || !take_members(l, &mut ars, blob) {
+        return false;
+    }
     let b = blob.as_slice();
-    if !resolve_objects(l, b) || !load_libraries(l, o) || !finish_symbols(l) || !scan_relocations(l, b) {
+    if !load_libraries(l, o) || !finish_symbols(l) || !scan_relocations(l, b) {
         return false;
     }
     if !layout(l, b) {
@@ -358,6 +379,40 @@ fn read_object(l: &mut L, path: str, blob: &mut Vector<u8>) bool {
         l.err.format_into("cannot read '{}'", path);
         return false;
     }
+    return parse_object(l, path, at, blob);
+}
+
+// The static libraries' members the link needs: each one that defines a global still undefined, its
+// own undefined globals in turn, until none is left (a pass takes at least one member, so the passes are
+// at most the members).
+fn take_members(l: &mut L, ars: &mut ar::Archives, blob: &mut Vector<u8>) bool {
+    let mut more = ars.paths.len() != 0;
+    while more {
+        more = false;
+        for g in 0..l.gs.len() {
+            if l.gs[g].kind != G_UNDEF {
+                continue;
+            }
+            let am = ars.find(l.names.spell(l.gs[g].name));
+            if am.is_none() {
+                continue;
+            }
+            let m = am.unwrap();
+            ars.take(m);
+            let at = blob.len();
+            blob.extend_from_slice(ars.bytes(m));
+            let s0 = l.syms.len();
+            if !parse_object(l, ars.name(m).as_str(), at, blob) || !resolve_objects(l, s0) {
+                return false;
+            }
+            more = true;
+        }
+    }
+    return true;
+}
+
+// Record the sections and symbols of the object at `at` of the blob, named `path`.
+fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
     let b = blob.as_slice();
     let n = b.len() - at;
     if n < 32 || lu::r32(b, at) != MH_MAGIC_64 || lu::r32(b, at + 4) != CPU_ARM64 || lu::r32(b, at + 12) != MH_OBJECT {
@@ -466,10 +521,10 @@ fn global(l: &mut L, id: u32) u32 {
     return l.glob[id as usize] - 1;
 }
 
-// Enter every object's external symbols into the global table: a definition, a tentative one (the
+// Enter the external symbols from `from` on into the global table: a definition, a tentative one (the
 // largest size wins) or a reference. Two strong definitions of a name are an error.
-fn resolve_objects(l: &mut L, b: []u8) bool {
-    for k in 0..l.syms.len() {
+fn resolve_objects(l: &mut L, from: usize) bool {
+    for k in from..l.syms.len() {
         let y = l.syms[k];
         if (y.ty & N_STAB) != 0 || (y.ty & N_EXT) == 0 {
             continue;
@@ -510,7 +565,6 @@ fn resolve_objects(l: &mut L, b: []u8) bool {
         }
         l.gs[g as usize] = gy;
     }
-    let _ = b;
     return true;
 }
 
@@ -524,8 +578,8 @@ fn sec_type(l: &L, f: u32, sect: u8) u32 {
 // The stub targets an arm64 macOS image links against: Apple's system stubs list only arm64e.
 const WANT: [str; 2] = ["arm64-macos", "arm64e-macos"];
 
-// Load libSystem, then each `-l` library and framework in order; each one's exports resolve the undefined
-// globals not yet resolved.
+// Load libSystem, then each `-l` shared library and framework in order; each one's exports resolve the
+// undefined globals not yet resolved.
 fn load_libraries(l: &mut L, o: &Opts) bool {
     let sys = format("{}/usr/lib/libSystem.tbd", o.sdk.as_str());
     if !load_file(l, o, sys.as_str()) {
@@ -534,10 +588,11 @@ fn load_libraries(l: &mut L, o: &Opts) bool {
     for i in 0..o.libs.len() {
         let name = o.libs[i].as_str();
         let mut found = String::new();
-        if find_lib(o, name, &mut found) != LIB_SHARED {
-            found.clear();
+        let kind = find_lib(o, name, &mut found);
+        if kind == LIB_ARCHIVE {
+            continue; // `take_members` read it
         }
-        if found.len() == 0 {
+        if kind != LIB_SHARED {
             l.err.format_into("library not found: -l{}", name);
             return false;
         }

@@ -110,7 +110,10 @@ link through `@link` (Link flags below). A `.c` file beside a backing header is 
 `bench/simd_baseline` is the example: `kernels.sh` archives its hand-written C kernels into
 `build/simd_baseline/<arch>/libsimd_baseline.a`, and `kernels.spc` links it with
 `@link("-Lbuild/simd_baseline/<arch> -lsimd_baseline")`. A C file compiled apart from the engine and
-linked with the generated code needs `-funsigned-char` (below).
+linked with the generated code needs `-funsigned-char` (below). The own linker links such a static
+library on every native target, with the installed C compiler's runtime archives after it (libgcc.a and
+libgcc_eh.a, or compiler-rt's builtins: `__cpu_model`, `_Unwind_Backtrace`), as the C driver does. Without
+a C compiler, a library that needs them names them in `@link`.
 
 `ffi/sc_cpu.spc` is the example of per-OS bindings behind one interface, with no C file: the CPU
 feature detector selects its query with `@platform` and `@arch` (`sysctlbyname` on Apple, `getauxval`
