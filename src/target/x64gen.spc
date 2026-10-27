@@ -273,6 +273,7 @@ pub struct Gen {
     // pointer `x::IN`, rsp plus the frame's size.
     fb: u8,
     sret_off: i64, // the slot of rdi for a result in memory, -1 when none
+    canary: i64, // the stack canary's slot above the LIR slots, -1 when none
     save_off: i64, // a variadic body's register save area, -1 when none
     // Labels.
     blk_at: Vector<u32>, // per block, its first byte, NONE before it is compiled
@@ -404,6 +405,7 @@ extend Gen {
             max_align: 16,
             fb: x::RBP,
             sret_off: -1,
+            canary: -1,
             save_off: -1,
             blk_at: Vector::<u32>::new(),
             fix: Vector::<u64>::new(),
@@ -1612,6 +1614,13 @@ extend Gen {
             self.slot_off[k] = at;
             at += sl.size;
         }
+        // The canary between the slots and the spills and saved registers above them.
+        self.canary = -1;
+        if protected(unsafe (*self.pkg).protect, b) {
+            at = at + 7 & ~7u32;
+            self.canary = at;
+            at += 8;
+        }
         self.spill_base = at + 15 & ~15u32;
         self.spill_top = 0;
     }
@@ -1643,6 +1652,10 @@ extend Gen {
     // The entry block's parameters where the calling convention passes them.
     fn entry(self: &mut Self) {
         let b = self.b();
+        if self.canary >= 0 {
+            self.guard(S1);
+            self.c.store(8, S1, x::at(x::RSP, self.canary as i32));
+        }
         classify(self.win, b, b.sig, self.ptr, self.vregs, &mut self.self_lay);
         if self.self_lay.unknown {
             let _ = self.refuse("the signature passes an aggregate whose C class is unknown");
@@ -4897,6 +4910,26 @@ extend Gen {
         self.reloc_rip(x::R_PC32, os, 0);
     }
 
+    // The stack guard's value into `r`: System V's in the thread block at %fs:0x28, Microsoft x64's (mingw-w64)
+    // in `__stack_chk_guard` through the object's address slot.
+    fn guard(self: &mut Self, r: u8) {
+        if !self.win {
+            // mov r, qword fs:[0x28]: an absolute 32-bit address in the fs segment.
+            self.c.byte(0x64);
+            self.c.byte(0x48 | (r as u32 >> 3 & 1) << 2);
+            self.c.byte(0x8B);
+            self.c.byte((r as u32 & 7) << 3 | 4);
+            self.c.byte(0x25);
+            self.c.d32(0x28);
+            return;
+        }
+        let os = self.obj().sym("__stack_chk_guard");
+        let rp = self.refptr(os);
+        self.c.rm(0, 0x8B, true, r, x::rip(), false);
+        self.reloc_rip(x::R_PC32, rp, 0);
+        self.c.load(8, false, r, x::at(r, 0));
+    }
+
     // A call of `__sc_panic` with C string `text`.
     fn panic_text(self: &mut Self, text: str) {
         self.cstr_addr(self.arg(0), text);
@@ -5016,6 +5049,14 @@ extend Gen {
             return self.refuse("a prologue past 255 bytes on Windows");
         }
         let body_n = self.c.len();
+        // The canary's check: on a mismatch `__stack_chk_fail`, which does not return.
+        if self.canary >= 0 {
+            self.guard(S0);
+            self.c.rm(0, 0x33, true, S0, x::at(x::RSP, self.canary as i32), false);
+            self.c.byte(0x74);
+            self.c.byte(5);
+            self.call_sym("__stack_chk_fail");
+        }
         // The epilogue: under Microsoft x64 the vector registers back, then the form its unwinder knows
         // (`add rsp`, or `lea rsp` from the frame register, the pops, `ret`).
         if self.win {

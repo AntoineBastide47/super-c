@@ -55,15 +55,26 @@ pub const CG_UNSWITCH: u64 = 16;
 /// Copy a loop without its bounds checks, entered when one test before it proves them all
 /// (`-fversion-loops-for-bounds`, after GCC's `-fversion-loops-for-strides`).
 pub const CG_VERSION_LOOPS: u64 = 32;
+/// A canary between a function's stack memory and its saved registers, checked before it returns:
+/// in the functions with a stack slot of at least 8 bytes (`-fstack-protector`), with any stack slot
+/// (`-fstack-protector-strong`), or in all (`-fstack-protector-all`). One at a time: setting one clears
+/// the others, and `-fno-stack-protector` clears them all.
+pub const CG_PROTECT: u64 = 64;
+pub const CG_PROTECT_STRONG: u64 = 128;
+pub const CG_PROTECT_ALL: u64 = 256;
+const CG_PROTECTS: u64 = CG_PROTECT | CG_PROTECT_STRONG | CG_PROTECT_ALL;
 
 // The flags by name.
-const CG_NAMES: [(str<'static>, u64); 6] = [
+const CG_NAMES: [(str<'static>, u64); 9] = [
     ("omit-frame-pointer", CG_OMIT_FRAME_POINTER),
     ("inline", CG_INLINE),
     ("inline-functions", CG_INLINE_FUNCTIONS),
     ("unroll-loops", CG_UNROLL),
     ("unswitch-loops", CG_UNSWITCH),
     ("version-loops-for-bounds", CG_VERSION_LOOPS),
+    ("stack-protector", CG_PROTECT),
+    ("stack-protector-strong", CG_PROTECT_STRONG),
+    ("stack-protector-all", CG_PROTECT_ALL),
 ];
 
 // The bit flag `name` names: 0 for none.
@@ -77,14 +88,20 @@ fn cg_bit(name: str) u64 {
     return 0;
 }
 
-// Bits `b` into `on` (`set`) or `off`, out of the other.
+// Bit `b` into `on` (`set`) or `off`, out of the other; a stack protector's bit sets the others of its
+// group off, and clearing one clears the group.
 fn cg_put(b: u64, set: bool, on: &mut u64, off: &mut u64) {
-    if set {
-        *on |= b;
-        *off &= ~b;
+    let g = if (b & CG_PROTECTS) != 0 {
+        CG_PROTECTS;
     } else {
-        *off |= b;
-        *on &= ~b;
+        b;
+    };
+    if set {
+        *on = *on & ~g | b;
+        *off = *off & ~b | g & ~b;
+    } else {
+        *off |= g;
+        *on &= ~g;
     }
 }
 
@@ -140,11 +157,15 @@ pub fn cg_spell(opt: i32, on: u64, off: u64, out: &mut String) {
     }
     let names: [](str, u64) = CG_NAMES;
     for k in 0..names.len() {
-        if (on & names[k].1) != 0 {
+        let b = names[k].1;
+        if (on & b) != 0 {
             out.format_into(" -f{}", names[k].0);
-        } else if (off & names[k].1) != 0 {
+        } else if (off & b) != 0 && (b & CG_PROTECTS) == 0 {
             out.format_into(" -fno-{}", names[k].0);
         }
+    }
+    if (off & CG_PROTECTS) != 0 && (on & CG_PROTECTS) == 0 {
+        out.push_str(" -fno-stack-protector");
     }
 }
 

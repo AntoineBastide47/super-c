@@ -524,6 +524,26 @@ pub struct Sym {
 
 pub const NONE: u32 = 0xFFFFFFFF;
 
+/// `Package.protect`: no body has a stack canary, the bodies with a slot of at least 8 bytes, with any
+/// slot, every body.
+pub const PROTECT_NONE: u8 = 0;
+pub const PROTECT_LARGE: u8 = 1;
+pub const PROTECT_SLOTS: u8 = 2;
+pub const PROTECT_ALL: u8 = 3;
+
+/// Whether body `b` of a package whose `protect` is `p` has a stack canary.
+pub fn protected(p: u8, b: &Body) bool {
+    if p == PROTECT_ALL {
+        return true;
+    }
+    for k in 0..b.slots.len() {
+        if p == PROTECT_SLOTS || p == PROTECT_LARGE && b.slots[k].size >= 8 {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// Initialized data: `size` bytes aligned to `1 << align_log2`, the first `nbytes` from `bytes`
 /// (`Package.bytes`), the rest zero, then `nrelocs` relocations from `relocs`.
 pub struct DataDef {
@@ -875,6 +895,8 @@ pub struct Package {
     pub comp_dir: String,
     /// Bodies address their frames through the stack pointer, without a frame pointer, where they can.
     pub omit_fp: bool,
+    /// The bodies with a stack canary (`PROTECT_*`).
+    pub protect: u8,
     pub names: nm::Names, // file paths, symbol names and messages
     pub files: Vector<u32>, // file id -> name id
     pub syms: Vector<Sym>,
@@ -899,6 +921,7 @@ extend Package {
             debug: false,
             comp_dir: String::new(),
             omit_fp: false,
+            protect: PROTECT_NONE,
             names: nm::Names::with_capacity(1 << 14, 1 << 10),
             files: Vector::<u32>::new(),
             syms: Vector::<Sym>::new(),

@@ -100,6 +100,7 @@ pub struct Gen {
     va_local: u32, // the variadic buffer's pointer (NONE: not variadic)
     sret_local: u32, // the result's prepended pointer (NONE: none)
     res_slot: u32, // the frame offset of an aggregate result passed as one scalar (NONE)
+    canary: u32, // the frame offset of the stack canary above the LIR slots (NONE)
     labels: Vector<Label>,
     tasks: Vector<Task>,
     mk_at: Vector<u32>, // per block, its merge children's start in `mk` (ascending reverse postorder)
@@ -204,6 +205,7 @@ extend Gen {
             va_local: NONE,
             sret_local: NONE,
             res_slot: NONE,
+            canary: NONE,
             labels: Vector::<Label>::new(),
             tasks: Vector::<Task>::new(),
             mk_at: Vector::<u32>::new(),
@@ -498,6 +500,13 @@ extend Gen {
             at = at + al - 1 & ~(al - 1);
             self.slot_off[k] = at;
             at += sl.size;
+        }
+        // The canary between the slots and the frame memory above them.
+        self.canary = NONE;
+        if protected(self.p().protect, b) {
+            at = at + 3 & ~3u32;
+            self.canary = at;
+            at += 4;
         }
         // The entry's spills: a parameter or result passed as one scalar of an aggregate.
         let np = b.pool[b.sig as usize];
@@ -889,6 +898,11 @@ extend Gen {
             self.c.local(w::LOCAL_TEE, self.fp);
             self.sp_access(true);
         }
+        if self.canary != NONE {
+            self.c.local(w::LOCAL_GET, self.fp);
+            self.guard();
+            self.store_op(T_I32, self.canary);
+        }
         let ni = b.insts.len() as u32;
         let e0 = b.blocks[0].param_start;
         let np = b.pool[b.sig as usize];
@@ -967,10 +981,29 @@ extend Gen {
         }
     }
 
-    // Restore the stack pointer before a return.
+    // The value of `__stack_chk_guard` on the operand stack.
+    fn guard(self: &mut Self) {
+        let k = self.obj().sym("__stack_chk_guard", wo::K_DATA);
+        self.data_addr(k, 0);
+        self.load_op(T_I32, 0);
+    }
+
+    // Check the canary, then restore the stack pointer before a return: on a mismatch
+    // `__stack_chk_fail`, which does not return.
     fn epilogue(self: &mut Self) {
         if self.fp == NONE {
             return;
+        }
+        if self.canary != NONE {
+            self.c.local(w::LOCAL_GET, self.fp);
+            self.load_op(T_I32, self.canary);
+            self.guard();
+            self.c.op(w::I32_NE);
+            self.c.op(w::IF);
+            self.c.op(w::BLOCK_EMPTY);
+            self.call_rt("__stack_chk_fail", [], []);
+            self.c.op(w::UNREACHABLE);
+            self.c.op(w::END);
         }
         if self.osp != NONE {
             self.c.local(w::LOCAL_GET, self.osp);

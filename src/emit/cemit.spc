@@ -20,6 +20,7 @@ import ir::cpu_features as cf;
 import ir::inline as inl;
 import target::table as tgt;
 import lir::lower as lw;
+import lir::ir as lir_ir;
 import target::native as nat;
 import emit::rt_h as rth;
 import typechecker::render as rnd;
@@ -561,6 +562,15 @@ extend CEmit {
             }
             l.pkg.pic = pk.pic;
             l.pkg.omit_fp = (pk.cg & bman::CG_OMIT_FRAME_POINTER) != 0;
+            l.pkg.protect = if (pk.cg & bman::CG_PROTECT_ALL) != 0 {
+                lir_ir::PROTECT_ALL;
+            } else if (pk.cg & bman::CG_PROTECT_STRONG) != 0 {
+                lir_ir::PROTECT_SLOTS;
+            } else if (pk.cg & bman::CG_PROTECT) != 0 {
+                lir_ir::PROTECT_LARGE;
+            } else {
+                lir_ir::PROTECT_NONE;
+            };
             // Debug information as the profile asks, relative to this process's directory.
             l.pkg.debug = pk.debug_info;
             if l.pkg.debug {
