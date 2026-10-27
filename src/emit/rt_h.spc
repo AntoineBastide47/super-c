@@ -363,6 +363,58 @@ inline uint64_t sc_wmul64(uint64_t sc_a, uint64_t sc_b) { return sc_a * sc_b; }
 inline uint64_t sc_wshl64(uint64_t sc_a, uint32_t sc_n) { return sc_a << sc_n; }
 inline uint64_t sc_wshr64(uint64_t sc_a, uint32_t sc_n) { return sc_a >> sc_n; }
 inline int64_t sc_wsar64(int64_t sc_a, uint32_t sc_n) { return sc_a >> sc_n; }
+/* The processor operations (`lir::ir::SYS_*`) std and the runtime bind without a header, as the
+   native backends expand them. */
+inline void sc_sys_barrier(void) { __asm__ volatile("" ::: "memory"); }
+inline void sc_sys_keep(void *sc_p) { __asm__ volatile("" : : "r"(sc_p) : "memory"); }
+#if defined(__x86_64__)
+inline void sc_sys_spin(void) { __asm__ volatile("pause" ::: "memory"); }
+inline uint64_t sc_sys_cycles(void) {
+  uint32_t sc_lo, sc_hi;
+  __asm__ volatile("rdtsc" : "=a"(sc_lo), "=d"(sc_hi));
+  return (uint64_t)sc_hi << 32 | sc_lo;
+}
+inline void sc_sys_fp_save(void *sc_p) { __asm__ volatile("stmxcsr (%0)\n\tfnstcw 4(%0)" : : "r"(sc_p) : "memory"); }
+inline uint64_t sc_sys_gs_load(uint64_t sc_o) {
+  uint64_t sc_v;
+  __asm__ volatile("movq %%gs:(%1), %0" : "=r"(sc_v) : "r"(sc_o));
+  return sc_v;
+}
+inline void sc_sys_gs_store(uint64_t sc_o, uint64_t sc_v) { __asm__ volatile("movq %0, %%gs:(%1)" : : "r"(sc_v), "r"(sc_o) : "memory"); }
+inline void sc_sys_cpuid(uint32_t *sc_r, uint32_t sc_l, uint32_t sc_s) {
+  __asm__ volatile("cpuid" : "=a"(sc_r[0]), "=b"(sc_r[1]), "=c"(sc_r[2]), "=d"(sc_r[3]) : "a"(sc_l), "c"(sc_s) : "memory");
+}
+inline uint64_t sc_sys_xgetbv(uint32_t sc_x) {
+  uint32_t sc_lo, sc_hi;
+  __asm__ volatile("xgetbv" : "=a"(sc_lo), "=d"(sc_hi) : "c"(sc_x));
+  return (uint64_t)sc_hi << 32 | sc_lo;
+}
+#define SC_RT_SYS_NAMES SC_RT_X(sc_sys_spin) SC_RT_X(sc_sys_cycles) SC_RT_X(sc_sys_fp_save) SC_RT_X(sc_sys_gs_load) \
+SC_RT_X(sc_sys_gs_store) SC_RT_X(sc_sys_cpuid) SC_RT_X(sc_sys_xgetbv)
+#elif defined(__aarch64__)
+/* `isb`, not `yield`: `yield` is a no-op on Apple cores. */
+inline void sc_sys_spin(void) { __asm__ volatile("isb" ::: "memory"); }
+inline uint64_t sc_sys_cycles(void) {
+  uint64_t sc_v;
+  __asm__ volatile("mrs %0, cntvct_el0" : "=r"(sc_v));
+  return sc_v;
+}
+inline void sc_sys_fp_save(void *sc_p) {
+  uint64_t sc_v;
+  __asm__ volatile("mrs %0, fpcr" : "=r"(sc_v));
+  *(uint64_t *)sc_p = sc_v;
+}
+inline uint64_t sc_sys_svl(void) {
+  uint64_t sc_v;
+  __asm__ volatile(".arch_extension sme\n\trdsvl %0, #1" : "=r"(sc_v));
+  return sc_v;
+}
+#define SC_RT_SYS_NAMES SC_RT_X(sc_sys_spin) SC_RT_X(sc_sys_cycles) SC_RT_X(sc_sys_fp_save) SC_RT_X(sc_sys_svl)
+#else
+/* wasm has no spin instruction: a compiler barrier. */
+inline void sc_sys_spin(void) { __asm__ volatile("" ::: "memory"); }
+#define SC_RT_SYS_NAMES SC_RT_X(sc_sys_spin)
+#endif
 inline bool sc_mulo_u64(uint64_t sc_a, uint64_t sc_b) { uint64_t sc_r; return __builtin_mul_overflow(sc_a, sc_b, &sc_r); }
 inline bool sc_mulo_i64(int64_t sc_a, int64_t sc_b) { int64_t sc_r; return __builtin_mul_overflow(sc_a, sc_b, &sc_r); }
 /* Native 128-bit fast path for std's UInt<128>/Int<128> (see int.spc). Where the C compiler building
@@ -526,6 +578,7 @@ SC_RT_X(sc_popcount64) SC_RT_X(sc_bitrev64) SC_RT_X(sc_wadd64) SC_RT_X(sc_wsub64
 SC_RT_X(sc_wshr64) SC_RT_X(sc_wsar64) SC_RT_X(sc_mulo_u64) SC_RT_X(sc_mulo_i64) SC_RT_X(sc_has_i128) SC_RT_X(sc_i128_add) \
 SC_RT_X(sc_i128_sub) SC_RT_X(sc_i128_mul) SC_RT_X(sc_i128_divmod) SC_RT_X(sc_mul64) SC_RT_X(sc_div128by64) \
 SC_RT_X(sc_int_overflow) SC_RT_X(sc_int_div_zero) SC_RT_X(sc_int_div_overflow) SC_RT_X(sc_has_f128) \
-SC_RT_X(sc_f128_add) SC_RT_X(sc_f128_mul) SC_RT_X(sc_f128_div) SC_RT_F128_CODEC
+SC_RT_X(sc_f128_add) SC_RT_X(sc_f128_mul) SC_RT_X(sc_f128_div) SC_RT_F128_CODEC SC_RT_X(sc_sys_barrier) \
+SC_RT_X(sc_sys_keep) SC_RT_SYS_NAMES
 )";
 }

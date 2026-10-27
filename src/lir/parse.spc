@@ -975,6 +975,18 @@ extend<'a> Parser<'a> {
         } else if (op == O_FPTOSI || op == O_FPTOUI) && pi < self.parts.len() && self.parts[pi] == "unchecked" {
             t.aux = CV_UNCHECKED;
             pi += 1;
+        } else if op == O_SYS {
+            let mut found = false;
+            for s in 0..SYS_COUNT {
+                if !found && pi < self.parts.len() && sys_name(s) == self.parts[pi] {
+                    t.aux = s;
+                    found = true;
+                }
+            }
+            if !found {
+                return self.fail("unknown system operation");
+            }
+            pi += 1;
         } else if op == O_VOP {
             let mut found = false;
             if pi < self.parts.len() {
@@ -1106,6 +1118,27 @@ extend<'a> Parser<'a> {
         }
         if f == F_BIN || f == F_CMP || f == F_OVF {
             return self.inst_value(0, &mut t.a) && self.expect(b',', "expected ','") && self.inst_value(1, &mut t.b);
+        }
+        if f == F_SYS {
+            // The operands `sys_arity` gives, comma-separated.
+            let n = sys_arity(t.aux);
+            for k in 0..n {
+                if k != 0 && !self.expect(b',', "expected ','") {
+                    return false;
+                }
+                let mut v: Value = VNONE;
+                if !self.inst_value(k, &mut v) {
+                    return false;
+                }
+                if k == 0 {
+                    t.a = v;
+                } else if k == 1 {
+                    t.b = v;
+                } else {
+                    t.c = v;
+                }
+            }
+            return true;
         }
         if f == F_TRI {
             if !self.inst_value(0, &mut t.a) || !self.expect(b',', "expected ','") || !self.inst_value(1, &mut t.b) || !self.expect(

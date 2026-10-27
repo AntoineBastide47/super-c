@@ -2340,10 +2340,10 @@ const fn header_read(b: &Body, t: Inst, v: Value) bool {
 }
 
 // Whether `t` may write memory or order memory accesses: a store, a copy, a fill, an atomic or a fence,
-// a call, inline assembly, a vector operation or a variadic access.
+// a call, inline assembly, a system operation, a vector operation or a variadic access.
 const fn writes_memory(t: Inst) bool {
     let op = t.op;
-    return op == O_STORE || op == O_MEMCPY || op == O_MEMSET || op >= O_ALOAD && op <= O_FENCE || op == O_CALL || op == O_CALLIND || op == O_ASM || op >= O_VOP && op <= O_VAEND;
+    return op == O_STORE || op == O_MEMCPY || op == O_MEMSET || op >= O_ALOAD && op <= O_FENCE || op == O_CALL || op == O_CALLIND || op == O_ASM || op == O_SYS || op >= O_VOP && op <= O_VAEND;
 }
 
 // Alias classes (`Opt::classes`): no parameter's referent, exclusive parameter k's (CL_NOALIAS + k), any.

@@ -6533,6 +6533,56 @@ extend Lower {
         return true;
     }
 
+    // A processor or runtime primitive `sc_sys_<name>` (`O_SYS`): its operation over arguments `a`, the
+    // value in `out` (VNONE for none). False when `name` names none.
+    fn sys_prim(self: &mut Self, name: str, a: &Vector<Value>, out: &mut Value) bool {
+        let s = name.slice(7, name.len());
+        let code = if s == "spin" {
+            SYS_SPIN;
+        } else if s == "barrier" {
+            SYS_BARRIER;
+        } else if s == "keep" {
+            SYS_KEEP;
+        } else if s == "cycles" {
+            SYS_CYCLES;
+        } else if s == "fp_save" {
+            SYS_FPSAVE;
+        } else if s == "gs_load" {
+            SYS_GSLOAD;
+        } else if s == "gs_store" {
+            SYS_GSSTORE;
+        } else if s == "cpuid" {
+            SYS_CPUID;
+        } else if s == "xgetbv" {
+            SYS_XGETBV;
+        } else if s == "svl" {
+            SYS_SVL;
+        } else if s == "ctx_swap" {
+            SYS_CTXSWAP;
+        } else if s == "ctx_entry" {
+            SYS_CTXENTRY;
+        } else {
+            SYS_COUNT;
+        };
+        if code == SYS_COUNT || a.len() != sys_arity(code) as usize {
+            return false;
+        }
+        let ty = if code == SYS_CYCLES || code == SYS_GSLOAD || code == SYS_XGETBV || code == SYS_SVL {
+            T_I64;
+        } else {
+            T_NONE;
+        };
+        let mut ops: [Value; 3] = [VNONE, VNONE, VNONE];
+        for k in 0..a.len() {
+            unsafe ops[k] = a[k];
+        }
+        let v = self.inst(O_SYS, ty, code, ops[0], ops[1], ops[2]);
+        if ty != T_NONE {
+            *out = v;
+        }
+        return true;
+    }
+
     // A primitive of the C runtime (`super_rt.h`: `std::core`'s bit counts and wrapping arithmetic over 64
     // bits, `std::int`'s 128-bit limb operations and traps, `std::float`'s binary128 probe) as operations:
     // true, with the value in `out` (VNONE for none), when `name` is one.
@@ -6542,6 +6592,9 @@ extend Lower {
             return false;
         }
         let n = a.len();
+        if name.starts_with("sc_sys_") {
+            return self.sys_prim(name, a, out);
+        }
         if n == 0 {
             if name == "sc_has_i128" || name == "sc_has_f128" {
                 // The native backends have 128-bit integers and no binary128 floats (Apple's C compilers on

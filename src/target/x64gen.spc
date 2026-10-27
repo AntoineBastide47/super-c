@@ -2440,6 +2440,9 @@ extend Gen {
         if op == O_VAARG {
             return self.va_arg(i, t);
         }
+        if op == O_SYS {
+            return self.sys(i, t);
+        }
         if op == O_ASM {
             return self.asm_inst(i, t);
         }
@@ -7555,6 +7558,83 @@ extend Gen {
             self.rels.push(CRel { at: rels[k].at, kind: rels[k].kind, sym: s, addend: rels[k].addend });
         }
         return true;
+    }
+
+    // System operation `t` (`i`, `O_SYS`): the instructions the inline assembly it replaces held. The
+    // ones that write fixed registers take rax, rcx and rdx as a division does; CPUID's rbx, which may be
+    // a callee-saved home, goes through r11.
+    fn sys(self: &mut Self, i: u32, t: Inst) bool {
+        let s = t.aux;
+        if s == SYS_BARRIER || s == SYS_KEEP {
+            return true;
+        }
+        if s == SYS_SPIN {
+            self.c.byte(0xF3);
+            self.c.byte(0x90); // pause
+            return true;
+        }
+        if s == SYS_CYCLES || s == SYS_XGETBV {
+            if s == SYS_XGETBV {
+                self.vacate(x::RCX);
+                let ra = self.reg(t.a);
+                self.c.mov_rr(4, x::RCX, ra);
+            }
+            self.vacate(x::RAX);
+            self.vacate(x::RDX);
+            self.c.byte(0x0F);
+            if s == SYS_CYCLES {
+                self.c.byte(0x31); // rdtsc
+            } else {
+                self.c.byte(0x01);
+                self.c.byte(0xD0); // xgetbv
+            }
+            self.c.shift_ri(x::SHL, 8, x::RDX, 32);
+            self.c.alu_rr(x::OR, 8, x::RDX, x::RAX);
+            self.result_in(i, x::RDX);
+            return true;
+        }
+        if s == SYS_FPSAVE {
+            let ra = self.reg(t.a);
+            self.c.rm(0, 0x0FAE, false, 3, x::at(ra, 0), false); // stmxcsr (ra)
+            self.c.rm(0, 0xD9, false, 7, x::at(ra, 4), false); // fnstcw 4(ra)
+            return true;
+        }
+        if s == SYS_GSLOAD {
+            let ra = self.reg(t.a);
+            let rd = self.def(i);
+            self.c.rm(0x65, 0x8B, true, rd, x::at(ra, 0), false); // mov %gs:(ra), rd
+            return true;
+        }
+        if s == SYS_GSSTORE {
+            let ra = self.reg(t.a);
+            let rb = self.reg(t.b);
+            self.c.rm(0x65, 0x89, true, rb, x::at(ra, 0), false); // mov rb, %gs:(ra)
+            return true;
+        }
+        if s == SYS_CPUID {
+            self.vacate(x::RAX);
+            self.vacate(x::RCX);
+            self.vacate(x::RDX);
+            let rb = self.reg(t.b);
+            let rc = self.reg(t.c);
+            let mut ra = self.reg(t.a);
+            if ra == x::RBX {
+                self.c.mov_rr(8, S0, ra);
+                ra = S0;
+            }
+            self.c.mov_rr(4, x::RAX, rb);
+            self.c.mov_rr(4, x::RCX, rc);
+            self.c.mov_rr(8, S1, x::RBX);
+            self.c.byte(0x0F);
+            self.c.byte(0xA2); // cpuid
+            self.c.rm(0, 0x89, false, x::RAX, x::at(ra, 0), false);
+            self.c.rm(0, 0x89, false, x::RBX, x::at(ra, 4), false);
+            self.c.rm(0, 0x89, false, x::RCX, x::at(ra, 8), false);
+            self.c.rm(0, 0x89, false, x::RDX, x::at(ra, 12), false);
+            self.c.mov_rr(8, x::RBX, S1);
+            return true;
+        }
+        return self.refuse("a system operation of another processor");
     }
 
     // Inline assembly (`O_ASM`), as GCC compiles it: an operand of a named register (`a`, `b`, `c`,

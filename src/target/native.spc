@@ -16,6 +16,7 @@ import target::table as tgt;
 import target::wasmgen as wgen;
 import target::wasmobj as wobj;
 import target::assembler as asmr;
+import target::ctxswitch as ctxs;
 
 /// Whether a native backend compiles for operating system `os` on instruction set `isa`.
 pub const fn supported(os: i32, isa: i32) bool {
@@ -90,6 +91,24 @@ pub const fn own_linker(os: i32, isa: i32) u8 {
     return LINK_NONE;
 }
 
+const NONE16: u16 = 0xFFFF;
+
+// The context operation (`SYS_CTXSWAP`, `SYS_CTXENTRY`) whose naked function package function `s` is, or
+// NONE16.
+fn ctx_op(p: &Package, s: u32) u16 {
+    let b = &p.bodies[p.syms[s as usize].def as usize];
+    if !b.naked {
+        return NONE16;
+    }
+    for i in 0..b.insts.len() {
+        let t = b.insts[i];
+        if t.op == O_SYS && (t.aux == SYS_CTXSWAP || t.aux == SYS_CTXENTRY) {
+            return t.aux;
+        }
+    }
+    return NONE16;
+}
+
 /// Whether the backend for `(os, isa)` assembles module-level assembly.
 pub const fn asm_native(os: i32, isa: i32) bool {
     return apple_arm64(os, isa) || linux_arm64(os, isa) || linux_x64(os, isa) || windows_x64(os, isa) || wasm32(os, isa);
@@ -126,7 +145,25 @@ pub fn object(
     let mut ga = gen::Gen::new(p, &mut o, apple, !apple);
     let mut gx = xgen::Gen::new(p, &mut o, win);
     let mut g = Backend { a: &mut ga, x: &mut gx, x64: x64 };
+    let fmt = if apple {
+        asmr::FMT_MACHO;
+    } else if win {
+        asmr::FMT_COFF;
+    } else {
+        asmr::FMT_ELF;
+    };
+    // The context switch and its entry are their target's assembly (`target::ctxswitch`), after the
+    // module-level assembly, as the runtime held them.
+    let mut all = String::from_str(text);
     for i in 0..funcs.len() {
+        let op = ctx_op(p, funcs[i]);
+        if op != NONE16 {
+            if all.len() != 0 && !all.as_str().ends_with("\n") {
+                all.push_byte(b'\n');
+            }
+            ctxs::text(op, isa, fmt, p.spell(p.syms[funcs[i] as usize].name), &mut all);
+            continue;
+        }
         if !g.func(funcs[i], false) {
             err.format_into("{}: {}", p.spell(p.syms[funcs[i] as usize].name), g.why());
             return false;
@@ -166,22 +203,16 @@ pub fn object(
             return false;
         }
     }
-    if text.len() != 0 {
+    if all.len() != 0 {
         let mut asr = asmr::Asm::new(
             if x64 {
                 asmr::ISA_X64;
             } else {
                 asmr::ISA_A64;
             },
-            if apple {
-                asmr::FMT_MACHO;
-            } else if win {
-                asmr::FMT_COFF;
-            } else {
-                asmr::FMT_ELF;
-            },
+            fmt,
         );
-        if !asr.module(&mut o, text) {
+        if !asr.module(&mut o, all.as_str()) {
             err.format_into("module-level assembly: {}", asr.err.as_str());
             return false;
         }

@@ -608,6 +608,14 @@ extend Eval {
         if op == O_RETADDR {
             return self.stop(iri::IT_TRAP_UNSUPPORTED, "a return address has no evaluated value");
         }
+        if op == O_SYS {
+            // A spin hint and the barriers change no value; the processor's other operations the evaluator
+            // does not model, as an extern call.
+            if t.aux == SYS_SPIN || t.aux == SYS_BARRIER || t.aux == SYS_KEEP {
+                return true;
+            }
+            return self.stop(EV_FFI, "a system operation");
+        }
         if op == O_ASM {
             // An empty template without outputs runs nothing (a compiler barrier); other machine code the
             // evaluator does not model, as an extern call.
