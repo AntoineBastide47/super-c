@@ -336,11 +336,25 @@ pub fn apply_profile(m: &mf::Manifest, name: str, p: &mut loader::Package) {
     let prof = m.profiles.at(pi as usize);
     p.opt = prof.opt;
     p.debug_info = prof.debug;
+    p.cg_on = prof.cg_on;
+    p.cg_off = prof.cg_off;
     p.build_cfg = pick(prof.arith_wraps(), 1u32 << (ast::BC_OVERFLOW_CHECKS - ast::BC_THREAD_SANITIZER) as u32, 0u32) | pick(
         prof.lockdep,
         1u32 << (ast::BC_LOCKDEP - ast::BC_THREAD_SANITIZER) as u32,
         0u32,
     );
+}
+
+/// The command line's `-O<level>` (`opt`; OPT_NONE: none) and `-f` flags (`on`, `off`) over a build
+/// without a profile, as a profile with them sets it (`apply_profile`).
+pub fn apply_flags(opt: i32, on: u64, off: u64, p: &mut loader::Package) {
+    if opt != mf::OPT_NONE {
+        let wrap = 1u32 << (ast::BC_OVERFLOW_CHECKS - ast::BC_THREAD_SANITIZER) as u32;
+        p.opt = opt;
+        p.build_cfg = p.build_cfg & ~wrap | pick(mf::wraps(-1, opt), wrap, 0u32);
+    }
+    p.cg_on = on;
+    p.cg_off = off;
 }
 
 /// Whether built-in profile `name` strips the binaries it links (a build without a manifest).
@@ -1056,6 +1070,14 @@ fn run_transpiler(m: &mf::Manifest, prof_name: str, root: str, sub: str, cx: &Bu
     args.push(format("--manifest-dir={}", cwd.unwrap().as_str()));
     args.push(format("--out-dir={}", m.out_dir.as_str()));
     args.push(format("--profile={}", prof_name));
+    // The level and flags the command line set over the profile.
+    let pi = m.profile_index(prof_name);
+    if pi >= 0 {
+        let prof = m.profiles.at(pi as usize);
+        let mut fl = String::new();
+        mf::cg_spell(prof.opt, prof.cg_on, prof.cg_off, &mut fl);
+        split_args(&mut args, fl.as_str());
+    }
     args.push(format("--target={}", tgt::os(cx.target).name));
     args.push(format("--arch={}", tgt::isa(m.arch).name));
     if cx.target_features.len() != 0 {

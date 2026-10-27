@@ -11,11 +11,25 @@ import lir::ir as *;
 import lir::eval as le;
 import lir::verify as lv;
 
-/// A callee inlines when it holds at most INLINE_WARM instructions outside cold blocks and INLINE_ALL in
-/// all; a caller takes no more callees past CALLER_MAX instructions.
-pub const INLINE_WARM: u32 = 40;
-pub const INLINE_ALL: u32 = 160;
+/// A caller takes no more callees past CALLER_MAX instructions.
 pub const CALLER_MAX: u32 = 8000;
+
+/// The inline budgets: a callee inlines when it holds at most `warm` instructions outside cold blocks and
+/// `all` in all. `optimize`'s levels: none, the callees no bigger than their calls (`SHRINK`), and past
+/// them by optimization level (the LLVM and GCC thresholds of the step 18 survey: for size a fifth of the
+/// speed one, at the highest level half again).
+pub struct Budget {
+    pub warm: u32,
+    pub all: u32,
+}
+
+extend Budget as Copy {}
+
+pub const NONE_INLINES: Budget = Budget { warm: 0, all: 0 };
+pub const SHRINK: Budget = Budget { warm: 8, all: 24 };
+pub const SIZE: Budget = Budget { warm: 12, all: 48 };
+pub const SPEED: Budget = Budget { warm: 40, all: 160 };
+pub const FAST: Budget = Budget { warm: 60, all: 240 };
 
 /// Whether body `b` of function symbol `s` of `pk` may be copied into a caller: not `@noinline`, naked,
 /// variadic or a routine the evaluator models; no inline assembly, variadic access, return address or
@@ -43,15 +57,15 @@ pub fn shape_ok(pk: &Package, s: u32, b: &Body) bool {
     return true;
 }
 
-/// Whether body `b` is small enough to inline.
-pub fn small(b: &Body) bool {
+/// Whether body `b` fits budget `bu`.
+pub fn small(b: &Body, bu: Budget) bool {
     let mut warm: u32 = 0;
     for k in 0..b.blocks.len() {
         if (b.blocks[k].flags & BLOCK_COLD) == 0 {
             warm += b.blocks[k].len;
         }
     }
-    return warm <= INLINE_WARM && b.insts.len() as u32 <= INLINE_ALL;
+    return warm <= bu.warm && b.insts.len() as u32 <= bu.all;
 }
 
 // A call to inline: its instruction, the callee's body and the bases of the copy's blocks, values and

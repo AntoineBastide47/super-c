@@ -143,6 +143,9 @@ pub struct Gen {
     spill_top: u32,
     free_slots: Vector<u64>, // size << 32 | offset of a released spill slot
     max_align: u32,
+    // Without a frame pointer, nothing reaches the caller's frame through x29: the body keeps no frame
+    // record when its code calls nothing (`finish`).
+    frameless: bool,
     sret_off: i64, // the slot of x8 for a vector result in memory, -1 when none
     // The register save area of a variadic body under the standard convention (x0..x7 at its start,
     // then q0..q7), NONE when none.
@@ -236,6 +239,7 @@ extend Gen {
             spill_top: 0,
             free_slots: Vector::<u64>::new(),
             max_align: 16,
+            frameless: false,
             sret_off: -1,
             va_save: NONE,
             blk_at: Vector::<u32>::new(),
@@ -1227,6 +1231,17 @@ extend Gen {
         self.plan_homes();
         if self.err.len() != 0 || !self.entry() {
             return false;
+        }
+        // A stack parameter, the return address, the variadic arguments and an over-aligned frame are
+        // reached through x29; inline assembly may name it.
+        self.frameless = unsafe (*self.pkg).omit_fp && self.max_align <= 16;
+        for k in 0..self.self_lay.locs.len() {
+            let kd = self.self_lay.locs[k].kind;
+            self.frameless = self.frameless && kd != ab::L_STACK && kd != ab::L_REF_STACK;
+        }
+        for k in 0..b.insts.len() {
+            let op = b.insts[k].op;
+            self.frameless = self.frameless && op != O_RETADDR && op != O_VASTART && op != O_ASM;
         }
         for q in 0..self.lv.order.len() {
             if !self.block(q as u32) {
@@ -4334,15 +4349,28 @@ extend Gen {
             local = local + self.max_align - 1 & ~(self.max_align - 1);
         }
         let mut pro = Vector::<u32>::new();
-        pro.push(a::ldstp(a::M_X, false, 3, a::FP, a::LR, a::SP, -16));
-        pro.push(a::add_imm(true, a::FP, a::SP, 0));
+        // A leaf body keeps its return address in x30: no frame record, and its frame from sp. The
+        // compact unwind encoding's frameless form holds frames up to 65520 bytes.
+        let mut leaf = self.frameless && local <= 32768;
+        for q in 0..self.code.len() {
+            let w = self.code[q];
+            leaf = leaf && (w & 0xFC000000) != 0x94000000 && (w & 0xFFFFFC1F) != 0xD63F0000;
+        }
+        if !leaf {
+            pro.push(a::ldstp(a::M_X, false, 3, a::FP, a::LR, a::SP, -16));
+            pro.push(a::add_imm(true, a::FP, a::SP, 0));
+        }
         // The callee-saved registers in the pairs compact unwind names (x19/x20 to x27/x28, d8/d9 to
         // d14/d15), both of a pair when the body uses one: each pair below the last, its lower register 8
         // bytes higher (x19 at x29 - 8), as libunwind reads a frame. `xs` and `vs` hold each pair's lower
         // register.
         let mut xs = Vector::<u32>::new();
         let mut vs = Vector::<u32>::new();
-        let mut enc: u32 = 0x04000000;
+        let mut enc: u32 = if leaf {
+            0x02000000;
+        } else {
+            0x04000000;
+        };
         for q in 0..5u32 {
             if (self.csr >> (19 + 2 * q) as u64 & 3) != 0 {
                 xs.push(19 + 2 * q);
@@ -4362,6 +4390,9 @@ extend Gen {
             pro.push(a::ldstp(a::M_VD, false, 3, vs[k] + 1, vs[k], a::SP, -16));
         }
         let csr_bytes = 16 * (xs.len() + vs.len()) as u32;
+        if leaf {
+            enc |= (csr_bytes + local) / 16 << 12;
+        }
         // The locals, a page at a time past 4 KiB so each guard page is touched.
         let mut left = local;
         while left >= 4096 {
@@ -4381,7 +4412,16 @@ extend Gen {
         let body_n = self.code.len() as u32;
         // The epilogue.
         let mut epi = Vector::<u32>::new();
-        if csr_bytes != 0 {
+        if leaf {
+            let mut back = local;
+            while back > 4095 {
+                epi.push(a::add_imm(true, a::SP, a::SP, 4095));
+                back -= 4095;
+            }
+            if back != 0 {
+                epi.push(a::add_imm(true, a::SP, a::SP, back));
+            }
+        } else if csr_bytes != 0 {
             epi.push(a::sub_imm(true, a::SP, a::FP, csr_bytes));
         } else {
             epi.push(a::mov_sp(a::SP, a::FP));
@@ -4396,7 +4436,9 @@ extend Gen {
             k -= 1;
             epi.push(a::ldstp(a::M_X, true, 1, xs[k] + 1, xs[k], a::SP, 16));
         }
-        epi.push(a::ldstp(a::M_X, true, 1, a::FP, a::LR, a::SP, 16));
+        if !leaf {
+            epi.push(a::ldstp(a::M_X, true, 1, a::FP, a::LR, a::SP, 16));
+        }
         epi.push(a::RET);
         // Branches.
         for q in 0..self.fix.len() {
@@ -4443,7 +4485,9 @@ extend Gen {
             let r = self.rels[q];
             o.reloc(sec, r.kind, at as u32 + (pl + r.at) * 4, r.sym, r.addend);
         }
-        if self.elf {
+        if self.elf && leaf {
+            leaf_rules(o, k2, size, &xs, &vs, pl, local);
+        } else if self.elf {
             frame_rules(o, k2, size, &xs, &vs);
         } else {
             o.frames.push(ob::OFrame { sym: k2, size: size, cfi_at: 0, cfi_len: 0, compact: enc });
@@ -4601,6 +4645,45 @@ fn frame_rules(o: &mut ob::Obj, sym: u32, size: u32, xs: &Vector<u32>, vs: &Vect
             o.cfi.push((65 + vs[k as usize]) as u8);
             o.cfi.push((4 + 2 * (nx + k)) as u8);
         }
+    }
+    o.frames.push(ob::OFrame { sym: sym, size: size, cfi_at: c0, cfi_len: o.cfi.len() as u32 - c0, compact: 0 });
+}
+
+// The unwind rules of leaf function `sym` (`size` bytes, a prologue of `pl` words) for `.eh_frame`: the
+// return address stays in x30; the CFA is sp plus 16 after each push of the callee-saved pairs whose
+// lower registers are `xs` and `vs` (the lower register at the pair's top, its upper one 8 bytes below),
+// then plus the `local` bytes the prologue's end has allocated.
+fn leaf_rules(o: &mut ob::Obj, sym: u32, size: u32, xs: &Vector<u32>, vs: &Vector<u32>, pl: u32, local: u32) {
+    let c0 = o.cfi.len() as u32;
+    let nx = xs.len() as u32;
+    let npush = nx + vs.len() as u32;
+    for k in 0..npush {
+        // One word per push; the pairs' DWARF numbers: x registers as they are, v0..v31 at 64..95.
+        o.cfi.push(0x40 | 1);
+        o.cfi.push(0x0E);
+        dw::uleb(&mut o.cfi, 16 * (k + 1));
+        let lo = if k < nx {
+            xs[k as usize];
+        } else {
+            64 + vs[(k - nx) as usize];
+        };
+        o.cfi.push(0x05);
+        dw::uleb(&mut o.cfi, lo);
+        dw::uleb(&mut o.cfi, 2 * k + 1);
+        o.cfi.push(0x05);
+        dw::uleb(&mut o.cfi, lo + 1);
+        dw::uleb(&mut o.cfi, 2 * k + 2);
+    }
+    if local != 0 {
+        let d = pl - npush;
+        if d < 64 {
+            o.cfi.push((0x40 | d) as u8);
+        } else {
+            o.cfi.push(0x02);
+            o.cfi.push(d as u8);
+        }
+        o.cfi.push(0x0E);
+        dw::uleb(&mut o.cfi, 16 * npush + local);
     }
     o.frames.push(ob::OFrame { sym: sym, size: size, cfi_at: c0, cfi_len: o.cfi.len() as u32 - c0, compact: 0 });
 }

@@ -45,6 +45,7 @@ fn run_file(
     out_dir: str,
     sysroot: str,
     profile: str,
+    co: &CommonOpts,
 ) i32 {
     loader::set_load_jobs(jobs);
     let tl0 = ticks_ms();
@@ -53,9 +54,13 @@ fn run_file(
     p.arch = arch;
     p.features = features;
     p.simd_width = pick(simd_width != 0, simd_width, 256);
-    let bi = bman::builtins_only();
+    let mut bi = bman::builtins_only();
+    bi.override_profiles(co.opt, co.cg_on, co.cg_off);
     p.simd_dispatch = String::from_str(bsys::dispatch_for(&bi, profile, simd_dispatch));
     bsys::apply_profile(&bi, profile, &mut p);
+    if profile.len() == 0 {
+        bsys::apply_flags(co.opt, co.cg_on, co.cg_off, &mut p);
+    }
     p.sysroot = String::from_str(sysroot);
     p.test_build = unsafe (*topts).enabled;
     p.profile = String::from_str(profile);
@@ -890,6 +895,9 @@ struct CommonOpts {
     pub target_cpu: String, // --target-cpu=L: an x86-64 level before every feature list (the last flag wins)
     pub simd_width: u32, // --simd-width=256|512 (0: the manifest's)
     pub simd_dispatch: String, // --simd-dispatch=off|<x86-64 levels> (empty: the manifest's)
+    pub opt: i32, // -O0..-O3, -Os, -Oz over the profile's opt-level (OPT_NONE: the profile's)
+    pub cg_on: u64, // -f<flag>: the code-generation flags (bman::CG_*) set over the profile's
+    pub cg_off: u64, // -fno-<flag>: the ones cleared
 }
 
 extend CommonOpts {
@@ -947,6 +955,8 @@ extend CommonOpts {
             self.target_features.push_str(arg[17..]);
         } else if arg.starts_with("--target-cpu=") {
             self.target_cpu = String::from_str(arg[13..]);
+        } else if arg.starts_with("-march=") {
+            self.target_cpu = String::from_str(arg[7..]);
         } else if arg.starts_with("--simd-width=") {
             self.simd_width = pick(arg[13..] == "512", 512u32, pick(arg[13..] == "256", 256u32, 0));
             self.bad = self.bad || self.simd_width == 0;
@@ -961,7 +971,9 @@ extend CommonOpts {
             self.bootstrap_tags = true;
         } else if arg == "--no-lint" {
             self.lint = false;
-        } else {
+        } else if bman::opt_flag(arg) != bman::OPT_NONE {
+            self.opt = bman::opt_flag(arg);
+        } else if !bman::cg_flag(arg, &mut self.cg_on, &mut self.cg_off) {
             return false;
         }
         return true;
@@ -1093,9 +1105,13 @@ OPTIONS:
     --arch=A               instruction set: x86_64|aarch64|wasm32 (default: the target's)
     --target-feature=L     CPU features: +name enables, -name disables (wasm32: simd128, relaxed-simd)
     --target-cpu=C         x86_64 level whose features come first: x86-64, x86-64-v2, x86-64-v3, x86-64-v4
+    -march=C               the same as --target-cpu=C
     --simd-width=W         vector width the planner prefers on AVX-512: 256 (default) or 512
     --simd-dispatch=L      x86_64: run-time copies of the functions with vector code for levels L
                            (comma-separated x86-64-v2..v4; default x86-64-v3 at opt-level 2 or more), or off
+    -O0 .. -O3, -Os, -Oz   optimization level, over the profile's opt-level
+    -f<flag>, -fno-<flag>  code generation, over the level's defaults and the profile's keys:
+                           omit-frame-pointer, inline, inline-functions
     --const-eval-steps=N   compile-time evaluation step budget
     --const-eval-memory=B  compile-time evaluation memory budget (B, or NK/NM/NG)
     --no-lint              disable the on-by-default lints during a build
@@ -1182,6 +1198,7 @@ fn main(argv: Vector<str>) i32 {
         bootstrap_tags: false,
         lint: true,
         bad: false,
+        opt: bman::OPT_NONE,
     };
     let mut bo = BuildOpts { profile: "", out_dir: "", sysroot: "", jobs: 0, bin_sel: "", lib_sel: false };
 
@@ -1612,6 +1629,7 @@ fn main(argv: Vector<str>) i32 {
         let mut man = mo.unwrap();
         man.arch = co.arch;
         man.target = co.target;
+        man.override_profiles(co.opt, co.cg_on, co.cg_off);
         if co.target_cpu.len() != 0 {
             man.target_cpu = co.target_cpu.clone();
         }
@@ -1670,6 +1688,7 @@ fn main(argv: Vector<str>) i32 {
             // --arch= (else the host) is the axis `@arch` gates on.
             man.arch = co.arch;
             man.target = co.target;
+            man.override_profiles(co.opt, co.cg_on, co.cg_off);
             if co.target_cpu.len() != 0 {
                 man.target_cpu = co.target_cpu.clone();
             }
@@ -1759,6 +1778,7 @@ fn main(argv: Vector<str>) i32 {
         bo.out_dir,
         bo.sysroot,
         bo.profile,
+        &co,
     );
     return rc;
 }

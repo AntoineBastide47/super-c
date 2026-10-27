@@ -135,7 +135,7 @@ const LINE_RANGE: u32 = 14;
 const OPCODE_BASE: u32 = 13;
 const STD_LENGTHS: [u8; 12] = [0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1];
 
-fn uleb(o: &mut Vector<u8>, v0: u64) {
+pub fn uleb(o: &mut Vector<u8>, v0: u64) {
     let mut v = v0;
     // Seven bits a byte: at most 10 bytes.
     for _ in 0..10 {

@@ -862,6 +862,8 @@ pub struct Package {
     /// names relative to directory `comp_dir`.
     pub debug: bool,
     pub comp_dir: String,
+    /// Bodies address their frames through the stack pointer, without a frame pointer, where they can.
+    pub omit_fp: bool,
     pub names: nm::Names, // file paths, symbol names and messages
     pub files: Vector<u32>, // file id -> name id
     pub syms: Vector<Sym>,
@@ -885,6 +887,7 @@ extend Package {
             pic: false,
             debug: false,
             comp_dir: String::new(),
+            omit_fp: false,
             names: nm::Names::with_capacity(1 << 14, 1 << 10),
             files: Vector::<u32>::new(),
             syms: Vector::<Sym>::new(),

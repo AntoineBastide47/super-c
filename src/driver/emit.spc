@@ -40,6 +40,7 @@ import lir::ir as lir_ir;
 import lir::print as lprint;
 import lir::parse as lparse;
 import lir::opt as lopt;
+import lir::inline as il;
 import target::native as nat;
 import bindgen::bindgen as bg;
 import bindgen::ctarget as ct;
@@ -6255,7 +6256,7 @@ pub fn cemit_package(
         for m in 0..p.modules.len() {
             sealed.push(module_has_asm(p, m));
         }
-        lopt::optimize(&mut l.deref_mut().pkg, p.jobs, &sealed);
+        lopt::optimize(&mut l.deref_mut().pkg, p.jobs, &sealed, inline_budget(p.opt, p.cg));
         cem.lir_put(l);
     }
     // The LIR check of the bodies this build rendered (a refused one fails the build already). A module
@@ -12365,6 +12366,23 @@ fn nat_trust(p: &loader::Package, t: &mut tuc::Tuc) {
     }
 }
 
+// The inline budget of `opt-level` `opt` and code-generation flags `cg`.
+fn inline_budget(opt: i32, cg: u64) il::Budget {
+    if (cg & bman::CG_INLINE) == 0 {
+        return il::NONE_INLINES;
+    }
+    if (cg & bman::CG_INLINE_FUNCTIONS) == 0 {
+        return il::SHRINK;
+    }
+    return if opt == bman::OPT_S || opt == bman::OPT_Z {
+        il::SIZE;
+    } else if opt == 3 {
+        il::FAST;
+    } else {
+        il::SPEED;
+    };
+}
+
 // The key of module `m`'s own object: its emission cache key (`keys`, which covers the bodies the LIR
 // inliner can copy: its imports') and what the native code reads beyond the C text: the build
 // configuration, the CPU features, the LIR optimizer's switches, the C headers' constants, the functions
@@ -12375,7 +12393,8 @@ fn nat_key(p: &loader::Package, keys: &Vector<u64>, m: usize) u64 {
     if p.debug_info {
         h = h ^ (fnv(process::current_dir().unwrap_or(String::new()).as_str()) | 1).wrapping_mul(0xC4CEB9FE1A85EC53);
     }
-    // Whether the LIR optimizer runs, inlines and promotes.
+    // The level and code-generation flags, and whether the LIR optimizer runs, inlines and promotes.
+    h = h ^ (p.opt as u64 & 0xFF) << 48 ^ p.cg.wrapping_mul(0xFF51AFD7ED558CCD);
     h = h ^ p.lir_opt as u64 << 47 ^ fnv(stdlib::get_env("SC_LIR_INLINE").unwrap_or(String::from_str("1")).as_str()).wrapping_mul(
         0x94D049BB133111EB,
     );
@@ -14807,6 +14826,7 @@ pub fn run_package(
     } else {
         p.opt > 0;
     };
+    p.cg = bman::cg_effective(p.opt, p.cg_on, p.cg_off);
     syntax_stats_report(p, "parse");
     p.platform_filter(target);
     // No module parses after the load: the token recycling buffer has no next user.

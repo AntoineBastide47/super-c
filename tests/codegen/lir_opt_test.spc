@@ -6,6 +6,7 @@ import lir::print as lprint;
 import lir::parse as lparse;
 import lir::eval as leval;
 import lir::opt as lopt;
+import lir::inline as il;
 
 // Package text `text` read, then optimized: each body verifies before and after.
 fn optimized(text: str) (Package, Package) {
@@ -15,7 +16,7 @@ fn optimized(text: str) (Package, Package) {
     let before = q.unwrap();
     let mut after = lparse::parse(text, &mut err).unwrap();
     let none = Vector::<bool>::new();
-    lopt::optimize(&mut after, 1, &none);
+    lopt::optimize(&mut after, 1, &none, il::SPEED);
     let mut v = verify::Verifier::new();
     for i in 0..after.syms.len() {
         let s = after.syms[i];
@@ -307,7 +308,7 @@ b0(v0: i32):
     let mut sealed = Vector::<bool>::new();
     sealed.push(false);
     sealed.push(true);
-    lopt::optimize(&mut p, 1, &sealed);
+    lopt::optimize(&mut p, 1, &sealed, il::SPEED);
     assert(!text_of(&p, "same").contains("@leaf"), "a body of the same unit inlines it");
     assert(text_of(&p, "other").contains("call @leaf"), "a body of another unit calls it");
 }

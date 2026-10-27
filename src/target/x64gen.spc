@@ -73,14 +73,32 @@ const fn bit(r: u8) u64 {
     return 1u64 << r as u64;
 }
 
+// The DWARF numbers of the general registers: rax, rdx, rcx, rbx, rsi, rdi, rbp, rsp, then r8..r15.
+const DWARF_REG: [u8; 16] = [0, 2, 1, 3, 7, 6, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15];
+
+// DW_CFA_advance_loc by `d` code bytes, in the shortest form.
+fn cfa_advance(out: &mut Vector<u8>, d: u32) {
+    if d < 64 {
+        out.push((0x40 | d) as u8);
+    } else if d < 256 {
+        out.push(0x02);
+        out.push(d as u8);
+    } else {
+        out.push(0x03);
+        out.push(d as u8);
+        out.push((d >> 8) as u8);
+    }
+}
+
 // The Microsoft x64 UNWIND_INFO of a prologue of `pl` bytes into `out`: `push rbp` (1 byte; the `mov rbp,
-// rsp` after it changes nothing the unwinder restores), the pushes of `regs` ending at `push_at`, the
+// rsp` after it changes nothing the unwinder restores) when `fpush`, the pushes of `regs` ending at `push_at`, the
 // allocation of `local` bytes ending at `alloc_end`, and the saves of xmm `xregs` at rsp + `xsave` +
 // 16 j ending at `xsave_at`; with frame register `fp` (NOREG: none), its copy of rsp ending at `fp_at`,
 // after which the prologue aligns rsp. The codes run backwards through the prologue.
 fn win_unwind(
     out: &mut Vector<u8>,
     pl: u32,
+    fpush: bool,
     push_at: &Vector<u32>,
     regs: &Vector<u8>,
     alloc_end: u32,
@@ -135,8 +153,10 @@ fn win_unwind(
         codes.push(push_at[k] as u8);
         codes.push(regs[k] << 4);
     }
-    codes.push(1);
-    codes.push(5 << 4);
+    if fpush {
+        codes.push(1);
+        codes.push(5 << 4);
+    }
     let n = codes.len() / 2;
     out.push(1);
     out.push(pl as u8);
@@ -248,6 +268,9 @@ pub struct Gen {
     spill_top: u32,
     free_slots: Vector<u64>, // size << 32 | offset of a released spill slot
     max_align: u32,
+    // The base of the incoming frame (the stack arguments, the return address): rbp, or without a frame
+    // pointer `x::IN`, rsp plus the frame's size.
+    fb: u8,
     sret_off: i64, // the slot of rdi for a result in memory, -1 when none
     save_off: i64, // a variadic body's register save area, -1 when none
     // Labels.
@@ -377,6 +400,7 @@ extend Gen {
             spill_top: 0,
             free_slots: Vector::<u64>::new(),
             max_align: 16,
+            fb: x::RBP,
             sret_off: -1,
             save_off: -1,
             blk_at: Vector::<u32>::new(),
@@ -940,7 +964,7 @@ extend Gen {
         if va.home == H_SLOT {
             self.ld(t, r, x::at(x::RSP, va.off));
         } else if va.home == H_ARG {
-            self.ld(t, r, x::at(x::RBP, va.off));
+            self.ld(t, r, x::at(self.fb, va.off));
         } else {
             assert(false, "x64gen: a value with no register and no home");
         }
@@ -961,7 +985,7 @@ extend Gen {
                     if va.home == H_SPADDR {
                         x::RSP;
                     } else {
-                        x::RBP;
+                        self.fb;
                     },
                     va.off,
                 ),
@@ -980,7 +1004,7 @@ extend Gen {
                     if va.home == H_SLOT {
                         x::RSP;
                     } else {
-                        x::RBP;
+                        self.fb;
                     },
                     va.off,
                 ),
@@ -1448,6 +1472,22 @@ extend Gen {
             return self.naked(s);
         }
         self.frame_layout();
+        // Without a frame pointer rbp holds values; a frame aligned past 16 bytes or inline assembly, which
+        // may name rbp, keeps it.
+        let mut omit = p.omit_fp && self.max_align <= 16;
+        for k in 0..b.insts.len() {
+            omit = omit && b.insts[k].op != O_ASM;
+        }
+        self.fb = ast_pick(omit, x::IN, x::RBP);
+        self.xfix = if self.win {
+            XFIX_WIN;
+        } else {
+            XFIX_SYSV;
+        } | if omit {
+            bit(x::RBP);
+        } else {
+            0;
+        };
         self.bucket_ends();
         self.call_tables();
         self.plan_homes();
@@ -1540,7 +1580,7 @@ extend Gen {
         if (b.pool[b.sig as usize + 1] & SIG_VARIADIC) != 0 && self.win {
             // The four argument registers into their home area, which the stack arguments continue.
             for k in 0..4u32 {
-                self.c.store(8, w64::gp_arg(k), x::at(x::RBP, 16 + 8 * k as i32));
+                self.c.store(8, w64::gp_arg(k), x::at(self.fb, 16 + 8 * k as i32));
             }
         } else if (b.pool[b.sig as usize + 1] & SIG_VARIADIC) != 0 {
             // The register save area `va_arg` reads: the six integer argument registers, then xmm0..xmm7.
@@ -1591,7 +1631,7 @@ extend Gen {
                     self.va.index_mut(x as usize).off = (16 + loc.off) as i32;
                     continue;
                 } else {
-                    self.c.load(8, false, S1, x::at(x::RBP, 16 + loc.off as i32));
+                    self.c.load(8, false, S1, x::at(self.fb, 16 + loc.off as i32));
                 }
                 if agg {
                     self.entry_reg(x, r);
@@ -1820,7 +1860,7 @@ extend Gen {
             return Lc { kind: LC_MEM, reg: x::RSP, off: va.off, val: x };
         }
         if va.home == H_ARG {
-            return Lc { kind: LC_MEM, reg: x::RBP, off: va.off, val: x };
+            return Lc { kind: LC_MEM, reg: self.fb, off: va.off, val: x };
         }
         return Lc { kind: LC_VAL, reg: 0, off: 0, val: x };
     }
@@ -2282,7 +2322,7 @@ extend Gen {
         }
         if op == O_RETADDR {
             let rd = self.def(i);
-            self.c.load(8, false, rd, x::at(x::RBP, 8));
+            self.c.load(8, false, rd, x::at(self.fb, 8));
             return true;
         }
         if op == O_CALL || op == O_CALLIND {
@@ -2345,7 +2385,7 @@ extend Gen {
         self.spill(self.vx(v));
         let va = self.va[self.vx(v) as usize];
         if va.home == H_ARG {
-            return x::RBP, va.off;
+            return self.fb, va.off;
         }
         assert(va.home == H_SLOT, "x64gen: a memory value without a slot");
         return x::RSP, va.off;
@@ -2359,7 +2399,7 @@ extend Gen {
             return x::RSP, va.off as i64 + off;
         }
         if va.home == H_FPADDR {
-            return x::RBP, va.off as i64 + off;
+            return self.fb, va.off as i64 + off;
         }
         if va.home == H_REMAT && va.reg == NOREG {
             let it = self.b().insts[v as usize];
@@ -3581,7 +3621,7 @@ extend Gen {
         let ra = self.reg(t.a);
         if self.win {
             // The address of the first variadic argument's position.
-            self.c.lea(S0, x::at(x::RBP, 16 + self.self_lay.named_bytes as i32));
+            self.c.lea(S0, x::at(self.fb, 16 + self.self_lay.named_bytes as i32));
             self.c.store(8, S0, x::at(ra, 0));
             return;
         }
@@ -3590,7 +3630,7 @@ extend Gen {
         let ov = 16 + (self.self_lay.named_bytes + 7 & ~7u32) as i32;
         self.c.store_i(4, gp, x::at(ra, 0));
         self.c.store_i(4, fp, x::at(ra, 4));
-        self.c.lea(S0, x::at(x::RBP, ov));
+        self.c.lea(S0, x::at(self.fb, ov));
         self.c.store(8, S0, x::at(ra, 8));
         self.c.lea(S0, x::at(x::RSP, self.save_off as i32));
         self.c.store(8, S0, x::at(ra, 16));
@@ -4374,7 +4414,7 @@ extend Gen {
             let va = self.va[self.vx(v) as usize];
             sz = self.b().pool[(pt & ~AGG) as usize];
             if va.home == H_SPADDR || va.home == H_FPADDR {
-                base = ast_pick(va.home == H_SPADDR, x::RSP, x::RBP);
+                base = ast_pick(va.home == H_SPADDR, x::RSP, self.fb);
                 off = va.off;
             } else if va.home == H_REMAT && va.reg == NOREG && self.b().insts[v as usize].op == O_SLOTADDR {
                 base = x::RSP;
@@ -4835,17 +4875,24 @@ extend Gen {
             }
         }
         let npush = regs.len() as u32;
-        // rsp is 16-aligned after `push rbp`; the pushes and the locals keep it so. The vector registers'
-        // save area tops the locals, 16-aligned.
+        let omit = self.fb == x::IN;
+        // The call left rsp 8 past a multiple of 16; `push rbp` (with a frame pointer), the pushes and the
+        // locals end on one. The vector registers' save area tops the locals, 16-aligned.
         let mut local = self.spill_base + self.spill_top + 15 & ~15u32;
         let xsave = local;
         local += 16 * xregs.len() as u32;
-        if npush % 2 != 0 {
+        if npush % 2 != 0 != omit {
             local += 8;
         }
+        if omit {
+            // The incoming frame's operands from rsp: rbp would sit 8 below the return address.
+            self.c.rebase((8 * npush + local) as i32 - 8);
+        }
         let mut pro = x::Code::new();
-        pro.push(x::RBP);
-        pro.mov_rr(8, x::RBP, x::RSP);
+        if !omit {
+            pro.push(x::RBP);
+            pro.mov_rr(8, x::RBP, x::RSP);
+        }
         let mut push_at = Vector::<u32>::with_capacity(regs.len());
         for k in 0..regs.len() {
             pro.push(regs[k]);
@@ -4908,7 +4955,18 @@ extend Gen {
                 k -= 1;
                 self.c.pop(regs[k]);
             }
-            self.c.pop(x::RBP);
+            if !omit {
+                self.c.pop(x::RBP);
+            }
+        } else if omit {
+            if local != 0 {
+                self.c.alu_ri(x::ADD, 8, x::RSP, local as i32);
+            }
+            let mut k = regs.len();
+            while k > 0 {
+                k -= 1;
+                self.c.pop(regs[k]);
+            }
         } else if npush != 0 {
             self.c.lea(x::RSP, x::at(x::RBP, -8 * npush as i32));
             let mut k = regs.len();
@@ -4983,7 +5041,28 @@ extend Gen {
         }
         let c0 = o.cfi.len() as u32;
         if self.win {
-            win_unwind(&mut o.cfi, pl, &push_at, &regs, alloc_end, local, &xsave_at, &xregs, xsave, fp, fp_at);
+            win_unwind(&mut o.cfi, pl, !omit, &push_at, &regs, alloc_end, local, &xsave_at, &xregs, xsave, fp, fp_at);
+            o.frames.push(ob::OFrame { sym: k2, size: size, cfi_at: c0, cfi_len: o.cfi.len() as u32 - c0 });
+            return true;
+        }
+        if omit {
+            // The CFA from rsp: 8 more past each push, with the register at its new bottom, then past the
+            // allocation.
+            let dr: []u8 = DWARF_REG;
+            let mut was: u32 = 0;
+            for k in 0..regs.len() {
+                cfa_advance(&mut o.cfi, push_at[k] - was);
+                was = push_at[k];
+                o.cfi.push(0x0E);
+                o.cfi.push((16 + 8 * k) as u8);
+                o.cfi.push(0x80 | dr[regs[k] as usize]);
+                o.cfi.push((2 + k) as u8);
+            }
+            if local != 0 {
+                cfa_advance(&mut o.cfi, alloc_end - was);
+                o.cfi.push(0x0E);
+                dw::uleb(&mut o.cfi, 8 + 8 * npush + local);
+            }
             o.frames.push(ob::OFrame { sym: k2, size: size, cfi_at: c0, cfi_len: o.cfi.len() as u32 - c0 });
             return true;
         }

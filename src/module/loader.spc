@@ -192,6 +192,11 @@ pub struct Package {
     /// information (`debug`).
     pub opt: i32,
     pub debug_info: bool,
+    /// The code-generation flags (`bman::CG_*`) the profile sets and clears, and the set the build runs
+    /// with (`bman::cg_effective`; set by `driver::emit::run_package`).
+    pub cg_on: u64,
+    pub cg_off: u64,
+    pub cg: u64,
     /// `--sysroot`: the target's C library tree (headers and libraries); empty: discovered.
     pub sysroot: String,
     /// The settings the build-constant module spells and the early prune decides by: a `--test`
@@ -2636,6 +2641,8 @@ extend Package {
         q.build_cfg = self.build_cfg;
         q.opt = self.opt;
         q.debug_info = self.debug_info;
+        q.cg_on = self.cg_on;
+        q.cg_off = self.cg_off;
         q.sysroot = self.sysroot.clone();
         q.test_build = self.test_build;
         q.profile = self.profile.clone();

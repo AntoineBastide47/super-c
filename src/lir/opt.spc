@@ -1523,12 +1523,12 @@ extend Opt {
     }
 }
 
-/// Optimize every body of `pk` on up to `jobs` threads: callees first, each body inlines the small ones
-/// (`lir::inline`), then goes through `Opt::run`. A body's level is one more than its callees' that
-/// may inline (0 without any; a call back into a body the walk is inside does not count), and the
+/// Optimize every body of `pk` on up to `jobs` threads: callees first, each body inlines the ones that
+/// fit budget `bu` (`lir::inline`), then goes through `Opt::run`. A body's level is one more than its
+/// callees' that may inline (0 without any; a call back into a body the walk is inside does not count), and the
 /// bodies of one level go in parallel, reading the lower levels'. A body of a unit `sealed` marks (by
 /// unit) inlines into bodies of its unit only.
-pub fn optimize(pk: &mut Package, jobs: u32, sealed: &Vector<bool>) {
+pub fn optimize(pk: &mut Package, jobs: u32, sealed: &Vector<bool>, bu: il::Budget) {
     let mut bodies = replace(&mut pk.bodies, Vector::<Body>::new());
     {
         let p: &Package = pk;
@@ -1596,7 +1596,7 @@ pub fn optimize(pk: &mut Package, jobs: u32, sealed: &Vector<bool>) {
             }
             for j in at[l]..at[l + 1] {
                 let i = byl[j as usize] as usize;
-                ok[i] = inline && shape[i] && il::small(&bodies[i]);
+                ok[i] = inline && shape[i] && il::small(&bodies[i], bu);
             }
         }
     }
