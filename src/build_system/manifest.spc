@@ -27,12 +27,127 @@ pub struct Profile<'a> {
     /// `target-features`: the CPU features to enable; set (`has_features`), it replaces the build's list.
     pub target_features: Vector<String>,
     pub has_features: bool,
+    /// The code-generation flags (`CG_*`) the profile turns on and off; the rest follow `opt`.
+    pub cg_on: u64,
+    pub cg_off: u64,
 }
 
 /// `opt-level` values: 0 to 3, OPT_S and OPT_Z (`"s"`, `"z"`); OPT_NONE when the profile names none.
 pub const OPT_NONE: i32 = -1;
 pub const OPT_S: i32 = 4;
 pub const OPT_Z: i32 = 5;
+
+/// The code-generation flags (GCC's and clang's `-f<name>` and `-fno-<name>`, and a profile's `<name> =
+/// true|false`): bits of the set a build runs with (`cg_effective`).
+/// Omit the frame pointer: functions address their frames through the stack pointer.
+pub const CG_OMIT_FRAME_POINTER: u64 = 1;
+/// Inline calls (`-fno-inline`: none).
+pub const CG_INLINE: u64 = 2;
+/// Inline calls past the ones that shrink the code (`-finline-functions`).
+pub const CG_INLINE_FUNCTIONS: u64 = 4;
+
+// The flags by name.
+const CG_NAMES: [(str<'static>, u64); 3] = [
+    ("omit-frame-pointer", CG_OMIT_FRAME_POINTER),
+    ("inline", CG_INLINE),
+    ("inline-functions", CG_INLINE_FUNCTIONS),
+];
+
+// The bit flag `name` names: 0 for none.
+fn cg_bit(name: str) u64 {
+    let names: [](str, u64) = CG_NAMES;
+    for k in 0..names.len() {
+        if names[k].0 == name {
+            return names[k].1;
+        }
+    }
+    return 0;
+}
+
+// Bits `b` into `on` (`set`) or `off`, out of the other.
+fn cg_put(b: u64, set: bool, on: &mut u64, off: &mut u64) {
+    if set {
+        *on |= b;
+        *off &= ~b;
+    } else {
+        *off |= b;
+        *on &= ~b;
+    }
+}
+
+/// Command-line flag `arg` (`-f<name>`, `-fno-<name>`) into `on` or `off`: false when it names no flag.
+pub fn cg_flag(arg: str, on: &mut u64, off: &mut u64) bool {
+    let neg = arg.starts_with("-fno-");
+    if !neg && !arg.starts_with("-f") {
+        return false;
+    }
+    let b = cg_bit(
+        arg.slice(
+            if neg {
+                5;
+            } else {
+                2;
+            },
+            arg.len(),
+        ),
+    );
+    if b != 0 {
+        cg_put(b, !neg, on, off);
+    }
+    return b != 0;
+}
+
+/// Command-line flag `arg` (`-O0` to `-O3`, `-Os`, `-Oz`) as an `opt-level`: OPT_NONE when it is none.
+pub fn opt_flag(arg: str) i32 {
+    if arg.len() != 3 || !arg.starts_with("-O") {
+        return OPT_NONE;
+    }
+    let c = arg[2];
+    if c >= b'0' && c <= b'3' {
+        return c - b'0';
+    }
+    return if c == b's' {
+        OPT_S;
+    } else if c == b'z' {
+        OPT_Z;
+    } else {
+        OPT_NONE;
+    };
+}
+
+/// The flags of `on` and `off` as command-line flags (`opt`: `-O<level>` first, unless OPT_NONE), each
+/// after a space.
+pub fn cg_spell(opt: i32, on: u64, off: u64, out: &mut String) {
+    if opt == OPT_S {
+        out.push_str(" -Os");
+    } else if opt == OPT_Z {
+        out.push_str(" -Oz");
+    } else if opt != OPT_NONE {
+        out.format_into(" -O{}", opt);
+    }
+    let names: [](str, u64) = CG_NAMES;
+    for k in 0..names.len() {
+        if (on & names[k].1) != 0 {
+            out.format_into(" -f{}", names[k].0);
+        } else if (off & names[k].1) != 0 {
+            out.format_into(" -fno-{}", names[k].0);
+        }
+    }
+}
+
+/// The flags a build at `opt-level` `opt` runs with: the level's defaults, then `on` set and `off`
+/// cleared. At every level but 0 the frame pointer goes (on arm64 from leaf functions only, as Apple's
+/// ABI allows) and calls inline; past the ones that shrink the code at 2, 3 and "s".
+pub const fn cg_effective(opt: i32, on: u64, off: u64) u64 {
+    let mut f: u64 = 0;
+    if opt > 0 {
+        f |= CG_OMIT_FRAME_POINTER | CG_INLINE;
+    }
+    if opt >= 2 && opt != OPT_Z {
+        f |= CG_INLINE_FUNCTIONS;
+    }
+    return (f | on) & ~off;
+}
 
 /// One extra binary target: `[bin.NAME] root = "..."` (the top-level `bin`/`root` pair is the
 /// primary binary). `super-c build` builds every target; `--bin=NAME` selects one.
@@ -132,17 +247,24 @@ extend Profile {
             overflow_checks: -1,
             target_features: Vector::<String>::new(),
             has_features: false,
+            cg_on: 0,
+            cg_off: 0,
         };
     }
 
-    /// Whether integer overflow wraps instead of trapping: `overflow-checks = false`, or without the key
-    /// an `opt-level` of 2, 3, "s" or "z".
+    /// Whether integer overflow wraps instead of trapping (`wraps`).
     pub const fn arith_wraps(self: &Self) bool {
-        if self.overflow_checks >= 0 {
-            return self.overflow_checks == 0;
-        }
-        return self.opt >= 2;
+        return wraps(self.overflow_checks, self.opt);
     }
+}
+
+/// Whether integer overflow wraps instead of trapping: `overflow-checks` (`checks`) false, or without the
+/// key (-1) an `opt-level` (`opt`) of 2, 3, "s" or "z".
+pub const fn wraps(checks: i32, opt: i32) bool {
+    if checks >= 0 {
+        return checks == 0;
+    }
+    return opt >= 2;
 }
 
 /// A manifest holding nothing but the built-in profiles, for a build with no `build.toml` to read them
@@ -401,6 +523,10 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
                 let mut on = false;
                 set_bool(it, &mut errs, &mut on);
                 p.overflow_checks = on as i32;
+            } else if cg_bit(key) != 0 {
+                let mut on = false;
+                set_bool(it, &mut errs, &mut on);
+                cg_put(cg_bit(key), on, &mut p.cg_on, &mut p.cg_off);
             } else {
                 unknown(&mut errs, bootstrap, it.at, key.len() as u32, format("unknown profile key '{}'", key));
             }
@@ -626,6 +752,19 @@ extend Manifest {
             }
         }
         return -1;
+    }
+
+    /// The command line's `-O<level>` (`opt`; OPT_NONE: none) and `-f` flags (`on`, `off`) over every
+    /// profile: whichever the build selects runs with them.
+    pub fn override_profiles(self: &mut Self, opt: i32, on: u64, off: u64) {
+        for i in 0..self.profiles.len() {
+            let p = &mut self.profiles[i];
+            if opt != OPT_NONE {
+                p.opt = opt;
+            }
+            p.cg_on = p.cg_on & ~off | on;
+            p.cg_off = p.cg_off & ~on | off;
+        }
     }
 
     /// Index of the command named `name`, or -1 when absent.

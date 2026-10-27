@@ -23,6 +23,7 @@ import lir::lower as lw;
 import target::native as nat;
 import emit::rt_h as rth;
 import typechecker::render as rnd;
+import build_system::manifest as bman;
 
 /// Nesting bound for the recursive renderers (operands through inlined temporaries, structured
 /// control flow through regions): clang's default bracket depth, past which the C would not
@@ -559,6 +560,7 @@ extend CEmit {
                 l.pkg.vec_regs = mg.vec_reg_bytes as u32;
             }
             l.pkg.pic = pk.pic;
+            l.pkg.omit_fp = (pk.cg & bman::CG_OMIT_FRAME_POINTER) != 0;
             // Debug information as the profile asks, relative to this process's directory.
             l.pkg.debug = pk.debug_info;
             if l.pkg.debug {

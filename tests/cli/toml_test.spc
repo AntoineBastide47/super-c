@@ -283,6 +283,55 @@ fn manifest_profile_overflow_checks() {
     }
 }
 
+// The code-generation flags: each level's defaults (`cg_effective`), a profile's keys and the command
+// line's `-f` and `-fno-` flags over them, the last one winning, and `-O` over every profile's level.
+@test
+fn code_generation_flags_follow_the_level_then_the_profile_then_the_command_line() {
+    let fp = manifest::CG_OMIT_FRAME_POINTER;
+    let inl = manifest::CG_INLINE;
+    let fun = manifest::CG_INLINE_FUNCTIONS;
+    assert_eq(manifest::cg_effective(0, 0, 0), 0u64);
+    assert_eq(manifest::cg_effective(1, 0, 0), fp | inl);
+    assert_eq(manifest::cg_effective(2, 0, 0), fp | inl | fun);
+    assert_eq(manifest::cg_effective(3, 0, 0), fp | inl | fun);
+    assert_eq(manifest::cg_effective(manifest::OPT_S, 0, 0), fp | inl | fun);
+    assert_eq(manifest::cg_effective(manifest::OPT_Z, 0, 0), fp | inl);
+    let (m, errs) = manifest::parse_check(
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.release]\nomit-frame-pointer = false\n[profile.small]\nopt-level = \"s\"\ninline-functions = false\n",
+        "",
+        false,
+    );
+    assert_eq(errs.errors.len(), 0);
+    let mut mm = m.unwrap();
+    let rel = mm.profiles.at(mm.profile_index("release") as usize);
+    assert_eq(manifest::cg_effective(rel.opt, rel.cg_on, rel.cg_off), inl | fun);
+    let sm = mm.profiles.at(mm.profile_index("small") as usize);
+    assert_eq(manifest::cg_effective(sm.opt, sm.cg_on, sm.cg_off), fp | inl);
+    let mut on: u64 = 0;
+    let mut off: u64 = 0;
+    assert(manifest::cg_flag("-fomit-frame-pointer", &mut on, &mut off), "-f");
+    assert(manifest::cg_flag("-fno-inline", &mut on, &mut off), "-fno-");
+    assert(manifest::cg_flag("-fno-omit-frame-pointer", &mut on, &mut off), "the last wins");
+    assert(!manifest::cg_flag("-fno-such-flag", &mut on, &mut off), "an unknown flag");
+    assert(!manifest::cg_flag("-O2", &mut on, &mut off), "a level is no flag");
+    assert_eq(on, 0u64);
+    assert_eq(off, fp | inl);
+    assert_eq(manifest::opt_flag("-O3"), 3);
+    assert_eq(manifest::opt_flag("-Oz"), manifest::OPT_Z);
+    assert_eq(manifest::opt_flag("-O4"), manifest::OPT_NONE);
+    mm.override_profiles(1, manifest::CG_INLINE_FUNCTIONS, manifest::CG_INLINE);
+    let rel2 = mm.profiles.at(mm.profile_index("release") as usize);
+    assert_eq(manifest::cg_effective(rel2.opt, rel2.cg_on, rel2.cg_off), fun);
+    let mut spelled = String::new();
+    manifest::cg_spell(rel2.opt, rel2.cg_on, rel2.cg_off, &mut spelled);
+    assert(spelled.as_str() == " -O1 -fno-omit-frame-pointer -fno-inline -finline-functions", spelled.as_str());
+    manifest_err(
+        "codegen flag bool",
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.debug]\ninline = 1\n",
+        "'inline' expects true or false",
+    );
+}
+
 // A --bootstrap-tags build reads a manifest written for a newer compiler: sections and keys outside
 // the schema are skipped, everything else is still validated.
 @test

@@ -34,6 +34,9 @@ pub const R13: u8 = 13;
 /// No register (a memory operand without an index), and the RIP base.
 pub const NOREG: u8 = 0xFF;
 pub const RIP: u8 = 0xFE;
+/// The incoming frame as a base: rsp plus a distance the frame's size gives once known. Its operands encode
+/// as rsp + a 32-bit displacement, whose positions `Code.in_at` lists for `Code::rebase`.
+pub const IN: u8 = 0xF4;
 
 // Condition codes (the low nibble of Jcc, SETcc, CMOVcc).
 pub const CC_O: u32 = 0;
@@ -110,22 +113,41 @@ pub const fn rip() Mem {
 
 /// The code position of the displacement of the last RIP-relative operand an encoder wrote: the
 /// caller's relocation goes there. Set by every form that takes a `Mem`. `jumps`: the positions of the
-/// 32-bit displacements of the jumps, ascending, for `relax`.
+/// 32-bit displacements of the jumps, ascending, for `relax`; `in_at`: the positions of the displacements of
+/// the operands based on `IN`.
 pub struct Code {
     pub b: Vector<u8>,
     pub rip_at: u32,
     pub jumps: Vector<u32>,
+    pub in_at: Vector<u32>,
 }
 
 extend Code {
     pub fn new() Code {
-        return Code { b: Vector::<u8>::new(), rip_at: 0, jumps: Vector::<u32>::new() };
+        return Code { b: Vector::<u8>::new(), rip_at: 0, jumps: Vector::<u32>::new(), in_at: Vector::<u32>::new() };
     }
 
     /// Empty the code for the next function.
     pub fn clear(self: &mut Self) {
         self.b.truncate(0);
         self.jumps.truncate(0);
+        self.in_at.truncate(0);
+    }
+
+    /// Add `d` to the displacement of every operand based on `IN`: the distance from rsp to the incoming
+    /// frame, once the frame's size is known.
+    pub fn rebase(self: &mut Self, d: i32) {
+        for k in 0..self.in_at.len() {
+            let at = self.in_at[k] as usize;
+            let mut v: u32 = 0;
+            for q in 0..4usize {
+                v |= self.b[at + q] as u32 << 8 * q as u32;
+            }
+            v = (v as i32 + d) as u32;
+            for q in 0..4usize {
+                self.b[at + q] = (v >> 8 * q as u32) as u8;
+            }
+        }
     }
 
     /// Give every jump whose target an 8-bit displacement reaches its 2-byte form, every target and the
@@ -320,6 +342,19 @@ extend Code {
         if m.base == RIP {
             self.byte(rg | 5);
             self.rip_at = self.len();
+            self.d32(m.disp as u32);
+            return;
+        }
+        if m.base == IN {
+            // rsp with a SIB byte and a 32-bit displacement, which `rebase` adjusts.
+            let idx = if m.index == NOREG {
+                4u32;
+            } else {
+                m.index as u32 & 7;
+            };
+            self.byte(2 << 6 | rg | 4);
+            self.byte(m.scale as u32 << 6 | idx << 3 | 4);
+            self.in_at.push(self.len());
             self.d32(m.disp as u32);
             return;
         }
