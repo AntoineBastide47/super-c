@@ -418,21 +418,43 @@ fn header_type_declaration_errors() {
     );
 }
 
-// A wrong declaration fails the C compile with the check's message, on every target: a pointer for an
-// int, two fields out of the header's order, a missing member, a float for an integer, a wrong
-// constant, and a wrong opaque layout.
+// A wrong declaration fails the build with the check's message, on every target: a pointer for an int,
+// two fields out of the header's order, a missing member, a float for an integer, a wrong constant, and a
+// wrong opaque layout. The native build checks them against the header; the emitted C's compile checks
+// them too.
+const WRONG_DECLS: str = "extern \"C\" \"time.h\" {\n    struct tm { pub tm_sec: *mut void }\n}\nextern \"C\" \"stdlib.h\" {\n    @import(\"div_t\")\n    struct div_t { pub rem: i32, pub quot: i32 }\n    @import(\"ldiv_t\")\n    struct ldiv_t { pub quot: i64 }\n    @import(\"lldiv_t\")\n    struct lldiv_t { pub quot: f64, pub rem: i64 }\n    const EXIT_FAILURE: i32 = 2;\n}\nextern \"C\" \"wchar.h\" {\n    @layout(2, 2)\n    type mbstate_t;\n}\nfn main() i32 {\n    let t = unsafe zeroed::<tm>();\n    let d = unsafe zeroed::<div_t>();\n    let l = unsafe zeroed::<ldiv_t>();\n    let q = unsafe zeroed::<lldiv_t>();\n    let s = unsafe zeroed::<mbstate_t>();\n    let ss = s;\n    return d.rem + l.quot as i32 + q.quot as i32 + (t.tm_sec == null) as i32 + EXIT_FAILURE + sizeof(mbstate_t) as i32;\n}\n";
+
+@test
+fn header_type_wrong_declaration_fails_the_build() {
+    let b = h::diff_build(WRONG_DECLS, []);
+    let d = b.diag.as_str();
+    if b.built || !d.contains("field 'tm.tm_sec' must be a pointer in C") {
+        eprintln("{}", d);
+    }
+    assert(!b.built, "the build fails");
+    assert(
+        d.contains("field 'tm.tm_sec' must be a pointer in C, but \"time.h\" declares a signed integer of 4 bytes"),
+        "a pointer for an int",
+    );
+    assert(d.contains("field 'div_t.rem' must sit at byte 0 in C, but \"stdlib.h\" puts it at byte 4"), "the order");
+    assert(d.contains("'ldiv_t' must have 8 bytes aligned to 8 in C, but \"stdlib.h\" gives "), "a missing member");
+    assert(
+        d.contains("field 'lldiv_t.quot' must be a double in C, but \"stdlib.h\" declares a signed integer of 8 bytes"),
+        "a float for an integer",
+    );
+    assert(d.contains("constant 'EXIT_FAILURE' must be 2 in C, but \"stdlib.h\" gives 1"), "a wrong constant");
+    assert(
+        d.contains("'mbstate_t' must have 2 bytes aligned to 2 in C ('@layout'), but \"wchar.h\" gives "),
+        "a wrong opaque layout",
+    );
+}
+
 @test
 fn header_type_wrong_declaration_fails_the_c_compile() {
     if !cli::has_cc() {
         return; // the C compile checks the declaration
     }
-    let src = "extern \"C\" \"time.h\" {\n    struct tm { pub tm_sec: *mut void }\n}\nextern \"C\" \"stdlib.h\" {\n    @import(\"div_t\")\n    struct div_t { pub rem: i32, pub quot: i32 }\n    @import(\"ldiv_t\")\n    struct ldiv_t { pub quot: i64 }\n    @import(\"lldiv_t\")\n    struct lldiv_t { pub quot: f64, pub rem: i64 }\n    const EXIT_FAILURE: i32 = 2;\n}\nextern \"C\" \"wchar.h\" {\n    @layout(2, 2)\n    type mbstate_t;\n}\nfn main() i32 {\n    let t = unsafe zeroed::<tm>();\n    let d = unsafe zeroed::<div_t>();\n    let l = unsafe zeroed::<ldiv_t>();\n    let q = unsafe zeroed::<lldiv_t>();\n    let s = unsafe zeroed::<mbstate_t>();\n    let ss = s;\n    return d.rem + l.quot as i32 + q.quot as i32 + (t.tm_sec == null) as i32 + EXIT_FAILURE + sizeof(mbstate_t) as i32;\n}\n";
-    let b = h::diff_build(src, []);
-    let d = b.diag.as_str();
-    if b.built || !d.contains("super-c: field 'tm.tm_sec' must be a pointer in C") {
-        eprintln("{}", d);
-    }
-    assert(!b.built, "the C compile fails");
+    let d = emitted_c_errors(h::diff_build(WRONG_DECLS, ["--emit-c"]));
     assert(d.contains("super-c: field 'tm.tm_sec' must be a pointer in C"), "a pointer for an int");
     assert(d.contains("super-c: field 'div_t.rem' must sit at byte 0 in C"), "the order");
     assert(d.contains("super-c: 'ldiv_t' must have 8 bytes aligned to 8 in C"), "a missing member");
@@ -441,23 +463,41 @@ fn header_type_wrong_declaration_fails_the_c_compile() {
     assert(d.contains("super-c: 'mbstate_t' must have 2 bytes aligned to 2 in C"), "a wrong opaque layout");
 }
 
-// A header that does not define the declared type: Super-C cannot see into the header, so the C
-// compile stops at the type's completeness check, the first use of the type in every unit. Its line
-// holds the message, which the C compiler prints with the error.
+// The C compiler's errors on the tree `b` emitted (`--emit-c`), compiled and linked by the comparison job's
+// C compiler (`cli::cc_tree_link`); it must fail.
+fn emitted_c_errors(b: h::DiffBuild) String {
+    assert(b.built, "the C emits");
+    let dir = b.proj.dir();
+    let log = format("{}/.cc", dir);
+    let rc = cli::cc_tree_link(
+        format("{}/build/debug/raw", dir).as_str(),
+        format("{}/prog{}", dir, unsafe str::from_cstr(cli::binext())).as_str(),
+        "",
+        log.as_str(),
+    );
+    assert(rc != 0, "the C compile fails");
+    return cli::read_text(log.as_str());
+}
+
+// A header that does not define the declared type fails the build at the type, and the emitted C's compile
+// at the type's completeness check, the first use of the type in every unit, whose line holds the message.
+const MISSING: str = "extern \"C\" \"stdio.h\" {\n    pub struct pt { pub x: i32, pub y: i32 }\n}\nfn main() i32 {\n    let p = pt { x: 1, y: 2 };\n    return p.x + p.y - 3;\n}\n";
+
 @test
 fn header_type_missing_from_its_header() {
+    let b = h::diff_build(MISSING, ["--jobs=1"]);
+    if b.built || !b.diag.contains("'pt' must be a complete C type, but \"stdio.h\" does not define it") {
+        eprintln("{}", b.diag.as_str());
+    }
+    assert(!b.built, "the build fails");
+    assert(b.diag.contains("'pt' must be a complete C type, but \"stdio.h\" does not define it"), "the type is missing");
     if !cli::has_cc() {
         return; // the C compile checks the declaration
     }
-    let src = "extern \"C\" \"stdio.h\" {\n    pub struct pt { pub x: i32, pub y: i32 }\n}\nfn main() i32 {\n    let p = pt { x: 1, y: 2 };\n    return p.x + p.y - 3;\n}\n";
-    let b = h::diff_build(src, ["--jobs=1"]);
-    let d = b.diag.as_str();
+    let e = emitted_c_errors(h::diff_build(MISSING, ["--jobs=1", "--emit-c"]));
+    let d = e.as_str();
     let first = d.find("error:");
     let msg = d.find("super-c: 'pt' must be a complete C type");
-    if b.built || first < 0 || msg < first {
-        eprintln("{}", d);
-    }
-    assert(!b.built, "the C compile fails");
     assert(first >= 0, "the C compile reports an error");
     assert(msg > first, "the completeness check's message follows the first error");
     let next = d.slice(first as usize + 6, d.len()).find("error:");
@@ -529,52 +569,137 @@ fn header_enum_tag_and_typedef() {
     assert_eq(p.run_bin(), 0);
 }
 
-// A typedef'd enum declared without its pin spells `enum size_kind`, which C does not define: the
-// first error of the C compile is at the type's completeness check, whose line holds the message.
+// A typedef'd enum declared without its pin spells `enum size_kind`, which C does not define: the build
+// fails at the type, and the emitted C's compile at the type's completeness check, whose line holds the
+// message.
 @test
 fn header_enum_wrong_spelling() {
+    let src = "extern \"C\" \"lib.h\" {\n    enum size_kind { SMALL, LARGE }\n}\n\nfn main() i32 {\n    let k = size_kind::LARGE;\n    return k as i32 - 1;\n}\n";
+    let p = h::diff_proj();
+    p.mkfile("lib.h", ENUM_H);
+    p.mkfile("main.spc", src);
+    let b = h::diff_build_in(p, ["--jobs=1"]);
+    if b.built || !b.diag.contains("'size_kind' must be a complete C type, but \"lib.h\" does not define it") {
+        eprintln("{}", b.diag.as_str());
+    }
+    assert(!b.built, "the build fails");
+    assert(
+        b.diag.contains("'size_kind' must be a complete C type, but \"lib.h\" does not define it"),
+        "the tag is missing",
+    );
     if !cli::has_cc() {
         return; // the C compile checks the declaration
     }
-    let p = h::diff_proj();
-    p.mkfile("lib.h", ENUM_H);
-    p.mkfile(
-        "main.spc",
-        "extern \"C\" \"lib.h\" {\n    enum size_kind { SMALL, LARGE }\n}\n\nfn main() i32 {\n    let k = size_kind::LARGE;\n    return k as i32 - 1;\n}\n",
-    );
-    let b = h::diff_build_in(p, ["--jobs=1"]);
-    let d = b.diag.as_str();
+    let q = h::diff_proj();
+    q.mkfile("lib.h", ENUM_H);
+    q.mkfile("main.spc", src);
+    let e = emitted_c_errors(h::diff_build_in(q, ["--jobs=1", "--emit-c"]));
+    let d = e.as_str();
     let first = d.find("error:");
     let msg = d.find("super-c: 'size_kind' must be a complete C type");
-    if b.built || first < 0 || msg < first {
-        eprintln("{}", d);
-    }
-    assert(!b.built, "the C compile fails");
     assert(first >= 0, "the C compile reports an error");
     assert(msg > first, "the completeness check's message follows the first error");
     let next = d.slice(first as usize + 6, d.len()).find("error:");
     assert(next < 0 || msg < first + 6 + next, "the first error shows the completeness check");
 }
 
-// An extern enum that skips an enumerator gives the ones after it values the header does not: the C
-// compile stops at the first enumerator whose value differs, with a message that names it.
+// The header's layout rules the build checks declarations against: `#pragma pack`, `packed`, bitfields
+// sharing a storage unit, an anonymous union member, a flexible array member, and a member a macro names
+// through a path (`v_alias`: `u_.v`).
+const LAYOUT_H: str = "#ifndef LAY_H\n#define LAY_H\n#pragma pack(push, 2)\nstruct pk { char c; int i; };\n#pragma pack(pop)\nstruct __attribute__((packed)) pp { char c; int i; };\nstruct bf { unsigned a : 3; unsigned b : 7; int c; };\nstruct an { int k; union { int x; float y; }; char tail[]; };\nstruct hd { int n; union { long long v; } u_; };\n#define v_alias u_.v\n#endif\n";
+
+@test
+fn header_layout_rules_are_checked() {
+    let p = h::diff_proj();
+    p.mkfile("lay.h", LAYOUT_H);
+    p.mkfile(
+        "main.spc",
+        "extern \"C\" \"lay.h\" {\n    @packed\n    struct pp { pub c: char, pub i: i32 }\n    @layout(8, 4)\n    type bf;\n    struct an { pub k: i32, pub x: i32, pub tail: [char; 0] }\n    struct hd { pub n: i32, @import(\"v_alias\") pub v: i64 }\n}\n\nfn main() i32 {\n    return (sizeof(pp) + sizeof(bf) + sizeof(an) + sizeof(hd)) as i32 - 37;\n}\n",
+    );
+    let b = h::diff_build_in(p, []);
+    if !b.built {
+        eprintln("{}", b.diag.as_str());
+    }
+    assert(b.built, "the declarations match the header");
+    let q = h::diff_proj();
+    q.mkfile("lay.h", LAYOUT_H);
+    q.mkfile(
+        "main.spc",
+        "extern \"C\" \"lay.h\" {\n    struct pk { pub c: char, pub i: i32 }\n    @layout(4, 4)\n    type bf;\n}\n\nfn main() i32 {\n    return (sizeof(pk) + sizeof(bf)) as i32 - 12;\n}\n",
+    );
+    let w = h::diff_build_in(q, []);
+    let d = w.diag.as_str();
+    if w.built {
+        eprintln("{}", d);
+    }
+    assert(!w.built, "the build fails");
+    assert(
+        d.contains("field 'pk.i' must sit at byte 4 in C, but \"lay.h\" puts it at byte 2"),
+        "the pack moves the member",
+    );
+    assert(
+        d.contains("'bf' must have 4 bytes aligned to 4 in C ('@layout'), but \"lay.h\" gives 8 bytes aligned to 4"),
+        "the bitfields share a unit",
+    );
+}
+
+// A native call passes each argument as the declaration gives it, with no C conversion: a declaration
+// whose parameter or result does not pass as the header's, whose parameter count differs, or that is
+// variadic where the header's is not, fails the build at the parameter or the function.
+@test
+fn header_prototypes_are_checked() {
+    let p = h::diff_proj();
+    p.mkfile(
+        "pr.h",
+        "#ifndef PR_H\n#define PR_H\nint f(long long a, double b);\nvoid g(int x, ...);\ndouble h(void);\nint k(int a, int b);\nint ok(unsigned a, char *s);\n#endif\n",
+    );
+    p.mkfile(
+        "main.spc",
+        "extern \"C\" \"pr.h\" {\n    fn f(a: i32, b: f64) i32;\n    fn g(x: i32);\n    fn h() f32;\n    fn k(a: i32) i32;\n    fn ok(a: i32, s: *mut char) i32;\n}\n\nfn main() i32 {\n    unsafe g(1);\n    return unsafe f(1, 2.0) + unsafe h() as i32 + unsafe k(1) + unsafe ok(1, null);\n}\n",
+    );
+    let b = h::diff_build_in(p, []);
+    let d = b.diag.as_str();
+    if b.built {
+        eprintln("{}", d);
+    }
+    assert(!b.built, "the build fails");
+    assert(
+        d.contains(
+            "parameter 1 of 'f' must be a signed integer of 4 bytes in C, but \"pr.h\" declares a signed integer of 8 bytes",
+        ),
+        "a narrower parameter",
+    );
+    assert(d.contains("'g' must not be variadic in C, but \"pr.h\" declares it variadic"), "a variadic function");
+    assert(d.contains("the result of 'h' must be a float in C, but \"pr.h\" declares a double"), "another result");
+    assert(d.contains("'k' must take 1 parameter in C, but \"pr.h\" declares 2"), "a parameter count");
+    assert(!d.contains("'ok'"), "a parameter of the other signedness passes alike");
+}
+
+// An extern enum that skips an enumerator gives the ones after it values the header does not: the build
+// fails at the first enumerator whose value differs, and so does the emitted C's compile, with a message
+// that names it.
 @test
 fn header_enum_wrong_value() {
+    let src = "extern \"C\" \"lib.h\" {\n    enum color { RED, BLUE }\n}\n\nfn main() i32 {\n    let c = color::BLUE;\n    return c as i32 - 1;\n}\n";
+    let p = h::diff_proj();
+    p.mkfile("lib.h", ENUM_H);
+    p.mkfile("main.spc", src);
+    let b = h::diff_build_in(p, ["--jobs=1"]);
+    let want = "'color::BLUE' must be 1 in C, but \"lib.h\" gives 6";
+    if b.built || !b.diag.contains(want) {
+        eprintln("{}", b.diag.as_str());
+    }
+    assert(!b.built, "the build fails");
+    assert(b.diag.contains(want), "the check names the enumerator and its value");
+    assert(!b.diag.contains("'color::RED'"), "an enumerator of the header's value passes");
     if !cli::has_cc() {
         return; // the C compile checks the declaration
     }
-    let p = h::diff_proj();
-    p.mkfile("lib.h", ENUM_H);
-    p.mkfile(
-        "main.spc",
-        "extern \"C\" \"lib.h\" {\n    enum color { RED, BLUE }\n}\n\nfn main() i32 {\n    let c = color::BLUE;\n    return c as i32 - 1;\n}\n",
-    );
-    let b = h::diff_build_in(p, ["--jobs=1"]);
-    let d = b.diag.as_str();
-    if b.built || d.find("super-c: 'color::BLUE' must be 1 in C") < 0 {
-        eprintln("{}", d);
-    }
-    assert(!b.built, "the C compile fails");
+    let q = h::diff_proj();
+    q.mkfile("lib.h", ENUM_H);
+    q.mkfile("main.spc", src);
+    let e = emitted_c_errors(h::diff_build_in(q, ["--jobs=1", "--emit-c"]));
+    let d = e.as_str();
     assert(d.find("super-c: 'color::BLUE' must be 1 in C") >= 0, "the check names the enumerator and its value");
     assert(d.find("'color::RED'") < 0, "an enumerator of the header's value passes");
 }
@@ -814,7 +939,6 @@ fn header_macros_stay_in_the_units_that_use_the_header() {
     if !cli::has_cc() {
         return; // the C compiler builds it
     }
-    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("lib.h", "#ifndef LIB_H\n#define LIB_H\n#define near\n#define far\nint twice(int x);\n#endif\n");
     p.mkfile("lib.c", "#include \"lib.h\"\nint twice(int x) { return 2 * x; }\n");
@@ -842,15 +966,16 @@ fn header_macros_stay_in_the_units_that_use_the_header() {
     assert(p.gen_has("bind.c", "__sc_t/__scx"), "the binding unit includes the header");
     assert(!p.gen_has("other.c", "__sc_t/__scx"), "a parameter named like the function brings no header");
     assert(!p.gen_has("main.c", "__sc_t/__scx"), "the other unit includes no header");
-    // The build's own C compile: the units of a small program compile as one, but the binding's.
+    // The build's C tree: the units of a small program compile as one, but the binding's.
     p.mkfile("build.toml", "bin = \"bin\"\nroot = \"main.spc\"\n");
-    let b = cli::superc_in(p.dir(), "build -o bin");
+    let b = cli::superc_in(p.dir(), "build --emit-c");
     if !b.ok() {
         eprintln("{}", b.text());
     }
-    assert(b.ok(), "the build compiles and links");
+    assert(b.ok(), "the build writes its C");
     assert(p.gen_has("__sc_unity.c", "main.c"), "the other units are in the unity build");
     assert(!p.gen_has("__sc_unity.c", "bind.c"), "the binding unit compiles alone");
+    assert(p.cc_build_plain("").ok(), "the C compiler builds the tree");
     assert_eq(p.run_bin(), 0);
 }
 

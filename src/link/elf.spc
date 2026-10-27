@@ -790,7 +790,8 @@ fn newest_version(dir: str, name: str) String {
 }
 
 // The files GNU ld script `path` names into `out` (each absolute word ending in `.so`, `.so.<N>` or `.a`),
-// under the sysroot of link `o` when the script is; false when `path` is an ELF file, not a script.
+// under the sysroot of link `o` when the script is and the file is there (a cross C library's scripts name
+// their files by full path); false when `path` is an ELF file, not a script.
 fn script_files(o: &Opts, path: str, out: &mut Vector<String>) bool {
     let data = lu::read(path);
     if data.is_none() {
@@ -818,7 +819,12 @@ fn script_files(o: &Opts, path: str, out: &mut Vector<String>) bool {
         }
         let w = t.slice(s, i);
         if w.starts_with("/") && (w.ends_with(".so") || w.contains(".so.") || w.ends_with(".a")) {
-            out.push(format("{}{}", root, w));
+            let f = format("{}{}", root, w);
+            if root.len() != 0 && !is_file(f.as_str()) {
+                out.push(String::from_str(w));
+            } else {
+                out.push(f);
+            }
         }
     }
     return out.len() != 0;

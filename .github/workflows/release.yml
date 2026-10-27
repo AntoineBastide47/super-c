@@ -3,7 +3,7 @@ name: Release
 # Owner-only, manual-trigger release: builds the `super-c` binary for macOS, Linux and Windows and publishes
 # a GitHub Release with one archive per platform.
 #
-# resolve -> compile -> test shards, levels, gate, ctarget (Linux) -> package -> release
+# resolve -> compile -> test shards, levels, gate, compare (Linux) -> package -> release
 #            wasm-compile -> wasm-checks, wasm-test, wasm-target -> wasm-package ---^
 #
 # `commit` is what keeps a run of untagged commits from being all-or-nothing. Left empty the tag lands on the
@@ -66,7 +66,7 @@ jobs:
   #
   #   compile --+--> test 1/N .. N/N -----------+
   #             +--> levels (Linux, Windows) ---+--> package -----------------------+--> release
-  #             +--> gate ----------------------+                                   |
+  #             +--> gate, compare -------------+                                   |
   #             +--> counts --> transpile counts --> counts approval (when held) ---+
   #
   # Caches: only this workflow on main saves (the toolchain action restores, `cache-save` saves last), so
@@ -122,8 +122,7 @@ jobs:
         run: |
           set -eu
           bin="super-c${BINEXT:-}"
-          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${cstd:+"$cstd"}
+          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${SC_BOOT_CSTD:+"$SC_BOOT_CSTD"}
           # Compatibility with a bootstrap older than the `.exe` naming fix: it links the manifest's `bin`
           # verbatim, so on Windows it produces an extensionless PE that nothing can launch. Drop this once
           # a release has shipped with the fix.
@@ -201,7 +200,8 @@ jobs:
       # The suite with the binary `compile` produced, so a failure is a failure of this code, not of the
       # bootstrap. Leak-gated: every process in the run exits nonzero if it leaks or double-frees. `test`
       # rebuilds the project first and so relinks `super-c` while `super-c` is the process running: see
-      # sc_rename for why that is allowed even on Windows.
+      # sc_rename for why that is allowed even on Windows. No C compiler takes part: the tests that compile
+      # C run in the comparison job.
       - uses: ./.github/actions/test-durations
 
       - name: Run the test suite
@@ -209,12 +209,11 @@ jobs:
           set -eu
           bin="super-c${BINEXT:-}"
           chmod +x "./$bin"
-          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
           dur=tests/durations/${{ matrix.target }}.tsv; [ -f "$dur" ] || dur=tests/durations.tsv # shard balance (test-durations.yml)
           # The first shard of each target also checks both builds with LIR (check.sh's SC_LIR); the C is the same.
           if [ "${{ matrix.cache_shard }}" = 1 ]; then export SC_LIR=1; fi
-          SC_LEAK_CHECK=fatal "./$bin" test --sanitizers --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur" \
-            --test-record-durations="durations-${{ matrix.target }}-${{ matrix.cache_shard }}.tsv" ${cstd:+"$cstd"}
+          SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur" \
+            --test-record-durations="durations-${{ matrix.target }}-${{ matrix.cache_shard }}.tsv"
 
       # The times this shard measured, for the `durations` job (kept even when the suite fails).
       - uses: actions/upload-artifact@v7
@@ -280,8 +279,7 @@ jobs:
           set -eu
           bin="super-c${BINEXT:-}"
           chmod +x "./$bin"
-          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          SC_LEAK_CHECK=fatal "./$bin" test --sanitizers --quiet --test-timeout=900 --filter=simd_ ${cstd:+"$cstd"}
+          SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-timeout=900 --filter=simd_
 
   # The correctness gate beside the shards: it needs only the compiler, not their results.
   gate:
@@ -319,7 +317,8 @@ jobs:
           name: compiler-${{ matrix.target }}
 
       # ci/gate.sh without its check.sh step, which `compile` and `test` replace: the two-generation
-      # fixpoint, the worker-count identity under each task-delay seed, and the strict C warnings.
+      # fixpoint, the worker-count identity under each task-delay seed, and the readability of the emitted
+      # C (its strict C warnings run in the comparison job).
       - name: Run the correctness gate
         run: |
           chmod +x "./super-c${BINEXT:-}"
@@ -331,14 +330,19 @@ jobs:
           role: gate
           sha: ${{ needs.resolve.outputs.sha }}
 
-  # The C environment tables of bindgen (src/bindgen/ctarget_data.spc) equal what clang of the pinned major
-  # release answers. The test shards skip those tests (no such clang on the runner); here a missing clang
-  # fails them. A job of its own, beside the gate: it needs only the compiler `compile` built, and the
-  # clang install stays off the gate's path.
-  ctarget:
+  # The comparison job, the only one with a C compiler: the suite with clang 22 as the C compiler of the
+  # tests that compile C (`SC_TEST_CC`: the C oracles, the C libraries tests link, the emitted C's
+  # builds), bindgen's C environment tables (src/bindgen/ctarget_data.spc) against what that pinned clang
+  # answers (a missing one fails them), and on the first shard the correctness gate with the strict C
+  # warnings of the emitted C. Beside the gate: it needs only the compiler `compile` built.
+  compare:
     needs: [resolve, compile]
     if: github.actor == github.repository_owner
-    name: C environment tables (linux)
+    name: compare (linux, ${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test_shard: ["1/2", "2/2"]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -351,7 +355,7 @@ jobs:
       - uses: ./.github/actions/toolchain
         with:
           target: linux
-          role: ctarget
+          role: compare
           save: true
           sha: ${{ needs.resolve.outputs.sha }}
 
@@ -373,16 +377,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang-22
 
-      - name: Check the tables against clang 22
+      - name: Run the test suite with clang 22
         run: |
           set -eu
           chmod +x ./super-c
-          SC_CTARGET_CLANG=clang-22 SC_CTARGET_REQUIRE=1 SC_LEAK_CHECK=fatal ./super-c test --sanitizers --quiet --filter=ctarget
+          SC_TEST_CC=clang-22 SC_CTARGET_CLANG=clang-22 SC_CTARGET_REQUIRE=1 SC_LEAK_CHECK=fatal ./super-c test --quiet --test-shard=${{ matrix.test_shard }}
+
+      - name: Run the correctness gate with the strict C warnings
+        if: matrix.test_shard == '1/2'
+        run: SC_TEST_CC=clang-22 sh ci/gate.sh --core
 
       - uses: ./.github/actions/cache-save
         with:
           target: linux
-          role: ctarget
+          role: compare
           sha: ${{ needs.resolve.outputs.sha }}
 
   # The transpile work count beside the shards (.github/actions/transpile-counts): this commit's compiler
@@ -477,7 +485,7 @@ jobs:
 
   # The release binary, built by the compiler the suite and the gate passed with.
   package:
-    needs: [resolve, compile, test, levels, gate, ctarget]
+    needs: [resolve, compile, test, levels, gate, compare]
     if: github.actor == github.repository_owner
     name: package (${{ matrix.target }})
     strategy:
@@ -514,8 +522,7 @@ jobs:
           set -eu
           bin="super-c${BINEXT:-}"
           chmod +x "./$bin"
-          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          SC_LEAK_CHECK=fatal "./$bin" release ${cstd:+"$cstd"}
+          SC_LEAK_CHECK=fatal "./$bin" release
           test -x "./$bin"
           if [ "${{ runner.os }}" != Windows ]; then file "./$bin"; fi
 
@@ -527,8 +534,7 @@ jobs:
           set -eu
           bin="super-c${BINEXT:-}"
           smoke="smoke${BINEXT:-}"
-          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          "./$bin" build ci/parallel_smoke.spc -o "$smoke" ${cstd:+"$cstd"}
+          "./$bin" build ci/parallel_smoke.spc -o "$smoke"
           SC_LEAK_CHECK=fatal "./$smoke"
 
       - name: Package
@@ -563,10 +569,9 @@ jobs:
 
   # --- wasm ------------------------------------------------------------------------------------------
   # The compiler cross-built to wasm32-wasip1 and put through the SAME suite: every transpile-class
-  # invocation runs inside wasmtime (via ci/wasm-superc.sh), the emitted C compiles with the host cc,
-  # and the test binaries run natively. WASI has no processes, so the engine's cc and the test runner
-  # stay native; the split lives in the wrapper. The self-hosting fixpoint under wasmtime is the
-  # exactness oracle on top.
+  # invocation runs inside wasmtime (via ci/wasm-superc.sh), and the test binaries run natively. WASI has
+  # no processes, so the engine's link and the test runner stay native; the split lives in the wrapper.
+  # The self-hosting fixpoint under wasmtime is the exactness oracle on top.
   wasm-compile:
     needs: resolve
     if: github.actor == github.repository_owner
@@ -590,7 +595,7 @@ jobs:
       - name: Build the native compiler
         run: SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags
 
-      # The build engine cross-compiles with the wasi-sdk (sysroot, emulation libraries, stack size).
+      # The native wasm backend and linker, over the wasi-sdk's sysroot (headers and C library).
       - name: Build the wasm compiler
         run: ./super-c build --target=wasm --profile=release -o super-c.wasm
 
@@ -639,17 +644,19 @@ jobs:
       # without the feature or the scalar model.
       - name: Vector tests on wasm32 with simd128
         run: |
-          SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --sanitizers --quiet --test-timeout=900 --filter=simd_
-          SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --sanitizers --quiet --test-timeout=900 --filter=gen_vector_seeds
+          SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=simd_
+          SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=gen_vector_seeds
 
       # The self-hosting fixpoint, on wasm: the build engine builds gen2 from the whole compiler with gen1
       # (the artifact) as its transpiler under wasmtime, then gen3 with gen2 as its transpiler, and
-      # gen2's emission must be byte-identical to gen1's. WASI has no processes, so the native engine
-      # runs the transpile step through `--transpiler` and compiles and links with its own wasm target
-      # flags. Emission is path-dependent (hashes mix path strings), so both emit from the SAME project
-      # copy. (No byte-diff against the native binary: instance homing follows hash orders that differ
-      # between 32- and 64-bit hosts.) The copy carries each transpiler: std/ffi resolve beside the
-      # module, and the engine passes absolute paths because wasmtime's guest cwd is "/".
+      # gen2's objects must be byte-identical to gen1's. WASI has no processes, so the native engine
+      # runs the transpile step through `--transpiler` and links with its own wasm linker. The objects
+      # are path-dependent (hashes mix path strings), so both build from the SAME project copy. (No
+      # byte-diff against the native binary: instance homing follows hash orders that differ between 32-
+      # and 64-bit hosts.) The copy carries each transpiler: std/ffi resolve beside the module, and the
+      # engine passes absolute paths because wasmtime's guest cwd is "/". The guest reads the target's C
+      # headers through WASI_SDK_PATH, which wasmtime passes only when told. The caches differ by design: the
+      # per-unit one and the header scan's record, keyed by the compiler that wrote it.
       - name: Self-host fixpoint under wasmtime
         run: |
           set -eu
@@ -660,12 +667,12 @@ jobs:
           cd "$w"
           gen() {
             "$GITHUB_WORKSPACE/super-c" build --target=wasm --profile=release \
-              --transpiler="wasmtime run --dir=/ --argv0 $w/$1 -- $w/$1" -o "$2"
+              --transpiler="wasmtime run --dir=/ --env WASI_SDK_PATH=$WASI_SDK_PATH --argv0 $w/$1 -- $w/$1" -o "$2"
           }
           gen gen1.wasm gen2.wasm
           cp -R build/release/raw /tmp/wasm-gen1
           gen gen2.wasm gen3.wasm
-          diff -r --exclude=.tu_cache /tmp/wasm-gen1 build/release/raw
+          diff -r --exclude=.tu_cache --exclude=__sc_hfacts /tmp/wasm-gen1 build/release/raw
 
       - uses: ./.github/actions/cache-save
         with:
@@ -701,7 +708,7 @@ jobs:
       - name: Run the test suite with wasm32 programs
         run: |
           chmod +x ./super-c
-          SC_TEST_TARGET=wasm SC_LEAK_CHECK=fatal ./super-c test --sanitizers --quiet --test-timeout=900 --test-shard=${{ matrix.test_shard }}
+          SC_TEST_TARGET=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --test-shard=${{ matrix.test_shard }}
 
   wasm-test:
     needs: [resolve, wasm-compile]
@@ -737,7 +744,7 @@ jobs:
         run: |
           chmod +x ./super-c
           dur=tests/durations/wasm.tsv; [ -f "$dur" ] || dur=tests/durations.tsv # shard balance (test-durations.yml)
-          SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --sanitizers --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur" \
+          SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur" \
             --test-record-durations="durations-wasm-${{ matrix.cache_shard }}.tsv"
 
       - uses: actions/upload-artifact@v7

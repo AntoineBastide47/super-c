@@ -271,6 +271,29 @@ fn is_mingw_tree(root: str, dir: str) bool {
     return false;
 }
 
+/// The library directories of the mingw-w64 tree of Windows `target` and `arch` (`sysroot`, else the
+/// toolchain's in PATH, as `c_target` finds the headers) into `out`: `<root>/<triple>/lib`, then
+/// `<root>/lib`, those that exist. False when there is no tree.
+pub fn mingw_lib_dirs(target: i32, arch: i32, sysroot: str, out: &mut Vector<String>) bool {
+    let to = tgt::target_of(target, arch);
+    if to.is_none() {
+        return false;
+    }
+    let rows: []data::Row = data::ROWS;
+    let row = &rows[to.unwrap().cenv as usize];
+    let mut root = String::from_str(sysroot);
+    if sysroot.len() == 0 && !mingw_root(row.dir, &mut root) || !is_mingw_tree(root.as_str(), row.dir) {
+        return false;
+    }
+    let base = trim_slashes(root.as_str());
+    for d in [format("{}/{}/lib", base, row.dir), format("{}/lib", base)] {
+        if is_dir(d.as_str()) {
+            out.push(d);
+        }
+    }
+    return true;
+}
+
 fn windows_dirs(row: &data::Row, sysroot: str, out: &mut CTarget) bool {
     let mut root = String::from_str(sysroot);
     if sysroot.len() == 0 && !mingw_root(row.dir, &mut root) {

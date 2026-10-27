@@ -191,89 +191,30 @@ fn bin_with_output_links_the_named_target() {
     assert(!l.ok() && l.out_has("-o names one binary; --lib builds the library targets"), "--lib with -o");
 }
 
-// A release cross-linked for another platform's object format strips at link: the host `strip`
-// cannot read the binary. A stub C compiler records the link line.
-@test
-fn a_cross_linked_release_strips_at_link() {
-    if cli::on_wasm() || cli::on_windows() {
-        return;
-    }
-    let p = cli::proj_new();
-    p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
-    p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
-    p.mkfile(
-        "cc.sh",
-        "#!/bin/sh\no=\"\"; prev=\"\"\nfor a in \"$@\"; do [ \"$prev\" = -o ] && o=\"$a\"; prev=\"$a\"; done\necho \"$@\" >> cc.log\n[ -n \"$o\" ] && : > \"$o\"\nexit 0\n",
-    );
-    let root = p.dir();
-    let mut cmd = String::new();
-    cmd.format_into("chmod +x \"{}/cc.sh\"", root);
-    assert(cli::run_quiet(cmd.cstr()) == 0, "chmod");
-    // Another platform than the host: Linux from macOS, Windows from Linux.
-    let target = if PLATFORM == Platform::Linux {
-        "windows";
-    } else {
-        "linux";
-    };
-    let mut b = String::new();
-    b.format_into("release --target={} --arch=x86_64 --cc={}/cc.sh", target, root);
-    let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", b.as_str());
-    assert(r.ok() && !r.out_has("strip failed"), "the release links without the host strip");
-    assert(cli::read_text(format("{}/cc.log", root).as_str()).contains("-Wl,--strip-all"), "the link strips");
-}
-
-// On macOS, `--arch` of the instruction set the host does not run builds for it: the host `cc` gets
-// `-arch`, so the executable's Mach-O header names that CPU (x86_64 0x01000007, arm64 0x0100000C).
+// On macOS, `--arch` of the instruction set the host does not run builds for it: an arm64 executable's
+// Mach-O header names its CPU (0x0100000C); x86-64 macOS has no native backend, so its build is an error
+// that names `--emit-c`.
 @test
 fn a_macos_build_for_the_other_arch_targets_it() {
-    if !cli::has_cc() {
-        return; // macOS x86-64 has no native backend
-    }
     if PLATFORM != Platform::MacOS {
         return;
     }
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
     p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
-    // The other instruction set: its option and the low byte of its Mach-O CPU type.
-    let (opt, cpu) = if unsafe shim::sc_host_arch() == 1 {
-        ("build --arch=x86_64 -o app", 0x07u8);
-    } else {
-        ("build --arch=aarch64 -o app", 0x0Cu8);
-    };
-    let r = cli::superc_env_in(p.dir(), "SC_NO_CACHE", "1", opt);
+    if unsafe shim::sc_host_arch() == 1 {
+        let r = cli::superc_in(p.dir(), "build --arch=x86_64 -o app");
+        assert(
+            !r.ok() && r.out_has("no native backend for macos on x86_64: `--emit-c` writes the program's C"),
+            "no x86-64 build",
+        );
+        return;
+    }
+    let r = cli::superc_in(p.dir(), "build --arch=aarch64 -o app");
     assert(r.ok(), "the build for the other instruction set links");
     let bin = loader::read_file(format("{}/app", p.dir()).as_str()).unwrap();
     let b = bin.as_str();
-    assert(b.len() >= 8 && b.byte_at(4) == cpu && b.byte_at(7) == 0x01u8, "its Mach-O CPU type");
-}
-
-// The probe record's key holds the C compiler's whole command: its arguments select a target too, so
-// a record of `cc.sh` does not answer for `cc.sh --ok`. The stub rejects the AVX2 flag without `--ok`.
-@test
-fn the_probe_record_keys_on_the_compiler_command() {
-    if cli::on_wasm() || cli::on_windows() {
-        return;
-    }
-    let p = cli::proj_new();
-    p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
-    p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
-    p.mkfile(
-        "cc.sh",
-        "#!/bin/sh\nok=\"\"; avx=\"\"; o=\"\"; prev=\"\"\nfor a in \"$@\"; do [ \"$a\" = --ok ] && ok=1; [ \"$a\" = -mavx2 ] && avx=1; [ \"$prev\" = -o ] && o=\"$a\"; prev=\"$a\"; done\n[ -n \"$avx\" ] && [ -z \"$ok\" ] && exit 1\n[ -n \"$o\" ] && : > \"$o\"\nexit 0\n",
-    );
-    let root = p.dir();
-    let mut cmd = String::new();
-    cmd.format_into("chmod +x \"{}/cc.sh\"", root);
-    assert(cli::run_quiet(cmd.cstr()) == 0, "chmod");
-    let mut a = String::new();
-    a.format_into("build --target=linux --arch=x86_64 --target-feature=avx2 --cc={}/cc.sh", root);
-    let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", a.as_str());
-    assert(!r.ok() && r.out_has("rejects"), "the stub rejects the flag");
-    let mut b = String::new();
-    b.format_into("build --target=linux --arch=x86_64 --target-feature=avx2 \"--cc={}/cc.sh --ok\"", root);
-    let r2 = cli::superc_env_in(root, "SC_NO_CACHE", "1", b.as_str());
-    assert(r2.ok() && !r2.out_has("rejects"), "another command probes again");
+    assert(b.len() >= 8 && b.byte_at(4) == 0x0Cu8 && b.byte_at(7) == 0x01u8, "its Mach-O CPU type");
 }
 
 // `SC_STD_DIR` names the std tree in place of the one beside the compiler: `super-c test` sets it for

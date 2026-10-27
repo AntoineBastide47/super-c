@@ -37,3 +37,7 @@ for s in $srcs; do
 done
 rm -f "$out/libsimd_baseline.a"
 $ar rcs "$out/libsimd_baseline.a" $objs
+# The x86-64 kernels call the C compiler's runtime (`__builtin_cpu_supports`): kernels.spc links it.
+if [ $arch = x86_64 ]; then
+    cp "$($cc -print-libgcc-file-name)" "$out/libsimd_baseline_rt.a"
+fi

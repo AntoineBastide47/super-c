@@ -1,5 +1,5 @@
 // build.toml schema: maps parsed TOML items onto the Build manifest, applies defaults (built-in
-// debug/release/bench/test/race profiles), and validates. Unknown sections/keys are hard errors so typos
+// debug/release/bench/test profiles), and validates. Unknown sections/keys are hard errors so typos
 // never silently no-op.
 import driver_shim as shim;
 import build_system::toml as toml;
@@ -8,131 +8,34 @@ import utils::errors as diag;
 import driver::util as dutil;
 import ir::cpu_features as cf;
 
-/// One [profile.NAME]: per-profile cflags/ldflags appended after the manifest-level ones; `strip`
-/// runs strip on the freshly linked binary; `opt` is the `opt-level` (OPT_FLAGS: the flag arrays say
-/// it all) and `lto` the link-time optimization mode, both added by the engine to the compile and
-/// the link lines ahead of the profile's flags; `link_args` reach the linker through the driver
-/// (`-Wl,<arg>` each), after the profile's ldflags.
+/// One [profile.NAME]: per-profile ldflags appended after the manifest-level ones; `strip` links without
+/// local symbols and debug information; `opt` is the `opt-level` (whether `lir::opt` runs), `debug`
+/// whether the objects carry debug information; `link_args` reach the linker after the profile's
+/// ldflags (`-Wl,<arg>` each).
 pub struct Profile<'a> {
     pub name: str<'a>,
-    pub cflags: Vector<String>,
     pub ldflags: Vector<String>,
     pub link_args: Vector<String>,
     pub strip: bool,
     pub opt: i32,
-    pub lto: i32,
-    /// `overflow-checks`: 1 traps integer overflow, 0 wraps it (`-DSC_ARITH_WRAP`), -1 follows `opt`.
+    pub debug: bool,
+    /// `lockdep`: the runtime's lock-order checks are compiled in (the build constant LOCKDEP); SC_LOCK_ORDER
+    /// switches their reports on.
+    pub lockdep: bool,
+    /// `overflow-checks`: 1 traps integer overflow, 0 wraps it, -1 follows `opt`.
     pub overflow_checks: i32,
     /// `target-features`: the CPU features to enable; set (`has_features`), it replaces the build's list.
     pub target_features: Vector<String>,
     pub has_features: bool,
 }
 
-/// The base C flags of a build whose manifest or command line names none (`cstd`, `--cstd`).
+/// The C dialect and POSIX level the extern blocks' headers are read under (`--emit-c`'s units too).
 pub const DEFAULT_CSTD: str<'static> = "-std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700";
 
-/// `opt-level` values: OPT_FLAGS adds nothing; 0 to 3 are `-O0` to `-O3`; OPT_S and OPT_Z are
-/// `-Os` and `-Oz`.
-pub const OPT_FLAGS: i32 = -1;
+/// `opt-level` values: 0 to 3, OPT_S and OPT_Z (`"s"`, `"z"`); OPT_NONE when the profile names none.
+pub const OPT_NONE: i32 = -1;
 pub const OPT_S: i32 = 4;
 pub const OPT_Z: i32 = 5;
-
-/// Whether C flags `fl` compile without optimization: their last `-O` flag is `-O0`, or they have none.
-pub const fn unoptimized(fl: str) bool {
-    let mut zero = true;
-    let mut rest = fl;
-    for _ in 0..fl.len() + 1 {
-        let at = rest.find("-O");
-        if at < 0 {
-            break;
-        }
-        let i = at as usize;
-        if i == 0 || rest.byte_at(i - 1) == b' ' {
-            zero = i + 3 <= rest.len() && rest.byte_at(i + 2) == b'0' && (i + 3 == rest.len() || rest.byte_at(i + 3) == b' ');
-        }
-        rest = rest.slice(i + 2, rest.len());
-    }
-    return zero;
-}
-
-/// The compiler flag of `opt`; empty for OPT_FLAGS.
-pub const fn opt_flag(opt: i32) str<'static> {
-    return if opt == 0 {
-        "-O0";
-    } else if opt == 1 {
-        "-O1";
-    } else if opt == 2 {
-        "-O2";
-    } else if opt == 3 {
-        "-O3";
-    } else if opt == OPT_S {
-        "-Os";
-    } else if opt == OPT_Z {
-        "-Oz";
-    } else {
-        "";
-    };
-}
-
-/// `lto` modes. LTO_FLAGS adds nothing (a `-flto*` in the flag arrays passes through verbatim); the
-/// others add their `-flto` form to every compile and to the link. LTO_THIN is a request: the build
-/// engine probes the toolchain once per profile directory and falls back to LTO_AUTO with the
-/// measured reason when the compiler or the linker rejects ThinLTO (`build::CcStream::lto_resolve`).
-/// The built-in optimized profiles use LTO_AUTO (see `add_builtin_profiles`).
-pub const LTO_FLAGS: i32 = 0;
-pub const LTO_NONE: i32 = 1;
-pub const LTO_FULL: i32 = 2;
-pub const LTO_AUTO: i32 = 3;
-pub const LTO_THIN: i32 = 4;
-
-/// The compile flags `--sanitizers` adds to every profile: AddressSanitizer and
-/// UndefinedBehaviorSanitizer, with frame pointers for their stack traces.
-pub const SANITIZER_CFLAGS: str = "-fsanitize=address -fsanitize=undefined -fsanitize-recover=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer";
-/// The link flags `--sanitizers` adds: the two sanitizer runtimes.
-pub const SANITIZER_LDFLAGS: str = "-fsanitize=address -fsanitize=undefined";
-
-/// The mode named `s`, or -1.
-pub const fn lto_parse(s: str) i32 {
-    return if s == "none" {
-        LTO_NONE;
-    } else if s == "full" {
-        LTO_FULL;
-    } else if s == "auto" {
-        LTO_AUTO;
-    } else if s == "thin" {
-        LTO_THIN;
-    } else {
-        -1;
-    };
-}
-
-/// The compiler flag of `mode`; empty for LTO_FLAGS and LTO_NONE.
-pub const fn lto_flag(mode: i32) str<'static> {
-    return if mode == LTO_FULL {
-        "-flto";
-    } else if mode == LTO_AUTO {
-        "-flto=auto";
-    } else if mode == LTO_THIN {
-        "-flto=thin";
-    } else {
-        "";
-    };
-}
-
-/// The name of `mode`, the inverse of `lto_parse` ("flags" for LTO_FLAGS).
-pub const fn lto_name(mode: i32) str<'static> {
-    return if mode == LTO_NONE {
-        "none";
-    } else if mode == LTO_FULL {
-        "full";
-    } else if mode == LTO_AUTO {
-        "auto";
-    } else if mode == LTO_THIN {
-        "thin";
-    } else {
-        "flags";
-    };
-}
 
 /// One extra binary target: `[bin.NAME] root = "..."` (the top-level `bin`/`root` pair is the
 /// primary binary). `super-c build` builds every target; `--bin=NAME` selects one.
@@ -169,15 +72,11 @@ pub struct Manifest<'a> {
     pub out_dir: String,
     pub test_dir: String, // where `super-c test` discovers the suite (default "tests")
     pub bench_dir: String, // where `super-c bench` discovers '@bench' functions (default "bench")
-    pub cc: String,
-    pub cstd: String,
-    pub cflags: Vector<String>,
     pub ldflags: Vector<String>,
     pub ldlibs: Vector<String>,
     pub jobs: u32,
     pub ce_steps: u32, // const-eval step budget; 0 = the engine default (~2M); CLI --const-eval-steps overrides
     pub ce_mem: u64, // const-eval memory budget in bytes; 0 = the engine default; CLI --const-eval-memory overrides
-    pub cache_size: u64, // `cache-size`: the bytes the project's object trees keep in the build cache (`objcache::trim_objects`)
     pub std_internals: bool, // `std_internals`: the project names std's `pub(package)` items (unstable internals)
     pub default_profile: String,
     pub profiles: Vector<Profile<'a>>,
@@ -209,9 +108,6 @@ extend Manifest as Free {
         self.out_dir.free();
         self.test_dir.free();
         self.bench_dir.free();
-        self.cc.free();
-        self.cstd.free();
-        self.cflags.free();
         self.ldflags.free();
         self.ldlibs.free();
         self.default_profile.free();
@@ -230,12 +126,12 @@ extend Profile {
     fn new(name: str) Self {
         return Profile {
             name: name,
-            cflags: Vector::<String>::new(),
             ldflags: Vector::<String>::new(),
             link_args: Vector::<String>::new(),
             strip: false,
-            opt: OPT_FLAGS,
-            lto: LTO_FLAGS,
+            opt: OPT_NONE,
+            debug: false,
+            lockdep: false,
             overflow_checks: -1,
             target_features: Vector::<String>::new(),
             has_features: false,
@@ -348,35 +244,6 @@ fn set_u32(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut u32) {
     *dst = it.val.i as u32;
 }
 
-/// The default `cache-size`: 2 GiB.
-pub const CACHE_SIZE_DEFAULT: u64 = 2 << 30;
-
-/// The bytes size `s` names: digits, then `B`, `KiB`, `MiB` or `GiB` (no unit: bytes); None when it is
-/// malformed or does not fit 64 bits.
-pub const fn parse_size(s: str) Option<u64> {
-    let mut d: usize = 0;
-    while d < s.len() && s[d] >= b'0' && s[d] <= b'9' {
-        d += 1;
-    }
-    let n = s.slice(0, d).parse_u64();
-    let unit = s.slice(d, s.len());
-    let shift: u64 = if unit == "" || unit == "B" {
-        0;
-    } else if unit == "KiB" {
-        10;
-    } else if unit == "MiB" {
-        20;
-    } else if unit == "GiB" {
-        30;
-    } else {
-        return Option::<u64>::None;
-    };
-    if d == 0 || n.is_none() || shift != 0 && n.unwrap() >> 64 - shift != 0 {
-        return Option::<u64>::None;
-    }
-    return Option::<u64>::Some(n.unwrap() << shift);
-}
-
 fn set_bool(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut bool) {
     if it.val.kind != toml::TV_BOOL {
         errs.emit(it.at, it.key.len() as u32, format("'{}' expects true or false", it.key.as_str()));
@@ -385,7 +252,7 @@ fn set_bool(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut bool) {
     *dst = it.val.b;
 }
 
-/// Load and validate <path>, applying defaults (out-dir "build", cstd c11+POSIX, default-profile
+/// Load and validate <path>, applying defaults (out-dir "build", default-profile
 /// "debug", built-in profiles). Prints its own diagnostics; None on any error. `bootstrap` (the
 /// --bootstrap-tags build) skips sections and keys this compiler does not know, so a previous release
 /// can build a source tree whose manifest already uses additions it predates; the compiler it produces
@@ -450,12 +317,6 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
                 set_str(it, &mut errs, &mut m.test_dir);
             } else if key == "bench-dir" {
                 set_str(it, &mut errs, &mut m.bench_dir);
-            } else if key == "cc" {
-                set_str(it, &mut errs, &mut m.cc);
-            } else if key == "cstd" {
-                set_str(it, &mut errs, &mut m.cstd);
-            } else if key == "cflags" {
-                take_arr(it, &mut errs, &mut m.cflags);
             } else if key == "ldflags" {
                 take_arr(it, &mut errs, &mut m.ldflags);
             } else if key == "ldlibs" {
@@ -478,23 +339,6 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
                 }
             } else if key == "std_internals" {
                 set_bool(it, &mut errs, &mut m.std_internals);
-            } else if key == "cache-size" {
-                let v = if it.val.kind == toml::TV_INT && it.val.i >= 0 {
-                    Option::<u64>::Some(it.val.i as u64);
-                } else if it.val.kind == toml::TV_STR {
-                    parse_size(it.val.s.as_str());
-                } else {
-                    Option::<u64>::None;
-                };
-                if v.is_none() {
-                    errs.emit(
-                        it.at,
-                        key.len() as u32,
-                        format("'cache-size' expects a byte count or a size such as \"250MiB\" or \"2GiB\""),
-                    );
-                } else {
-                    m.cache_size = v.unwrap();
-                }
             } else if key == "default-profile" {
                 set_str(it, &mut errs, &mut m.default_profile);
             } else if key == "target-features" {
@@ -523,9 +367,7 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
                 pi = m.profiles.len() as i64 - 1;
             }
             let p = &mut m.profiles[pi as usize];
-            if key == "cflags" {
-                take_arr(it, &mut errs, &mut p.cflags);
-            } else if key == "ldflags" {
+            if key == "ldflags" {
                 take_arr(it, &mut errs, &mut p.ldflags);
             } else if key == "link-args" {
                 take_arr(it, &mut errs, &mut p.link_args);
@@ -551,6 +393,10 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
                 }
             } else if key == "strip" {
                 set_bool(it, &mut errs, &mut p.strip);
+            } else if key == "debug" {
+                set_bool(it, &mut errs, &mut p.debug);
+            } else if key == "lockdep" {
+                set_bool(it, &mut errs, &mut p.lockdep);
             } else if key == "target-features" {
                 take_arr(it, &mut errs, &mut p.target_features);
                 p.has_features = true;
@@ -558,17 +404,6 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
                 let mut on = false;
                 set_bool(it, &mut errs, &mut on);
                 p.overflow_checks = on as i32;
-            } else if key == "lto" {
-                let mode = if it.val.kind == toml::TV_STR {
-                    lto_parse(it.val.s.as_str());
-                } else {
-                    -1;
-                };
-                if mode < 0 {
-                    errs.emit(it.at, key.len() as u32, format("'lto' expects \"none\", \"full\", \"auto\" or \"thin\""));
-                } else {
-                    p.lto = mode;
-                }
             } else {
                 unknown(&mut errs, bootstrap, it.at, key.len() as u32, format("unknown profile key '{}'", key));
             }
@@ -702,9 +537,6 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
     }
     norm_conv_dir(&mut m.test_dir, "test-dir", &mut errs);
     norm_conv_dir(&mut m.bench_dir, "bench-dir", &mut errs);
-    if m.cstd.len() == 0 {
-        m.cstd.push_str(DEFAULT_CSTD);
-    }
     if m.default_profile.len() == 0 {
         m.default_profile.push_str("debug");
     }
@@ -766,15 +598,11 @@ extend Manifest {
             out_dir: String::new(),
             test_dir: String::new(),
             bench_dir: String::new(),
-            cc: String::new(),
-            cstd: String::new(),
-            cflags: Vector::<String>::new(),
             ldflags: Vector::<String>::new(),
             ldlibs: Vector::<String>::new(),
             jobs: 0,
             ce_steps: 0,
             ce_mem: 0,
-            cache_size: CACHE_SIZE_DEFAULT,
             default_profile: String::new(),
             profiles: Vector::<Profile>::new(),
             commands: Vector::<Command>::new(),
@@ -791,14 +619,6 @@ extend Manifest {
             src_id: 0,
             mtime: 0,
         };
-    }
-
-    /// `--sanitizers`: add the sanitizer flags to every profile, after its own.
-    pub fn add_sanitizers(self: &mut Self) {
-        for i in 0..self.profiles.len() {
-            dutil::split_args(&mut self.profiles[i].cflags, SANITIZER_CFLAGS);
-            dutil::split_args(&mut self.profiles[i].ldflags, SANITIZER_LDFLAGS);
-        }
     }
 
     /// Index of the profile named `name`, or -1 when absent.
@@ -822,64 +642,33 @@ extend Manifest {
     }
 
     // The profiles available out of the box. A [profile.NAME] section with the same name starts from
-    // these values: a key it sets replaces the built-in's (`cflags` the whole array), the rest stay.
+    // these values: a key it sets replaces the built-in's, the rest stay.
     fn add_builtin_profiles(self: &mut Self) {
-        // The default: unoptimized, with debug info and frame pointers. `--sanitizers` adds the
-        // memory checkers to any profile.
+        // The default: unoptimized, with debug information.
         {
             let mut p = Profile::new("debug");
-            dutil::split_args(&mut p.cflags, "-g -fno-omit-frame-pointer");
             p.opt = 0;
+            p.debug = true;
             self.profiles.push(p);
         }
         {
             let mut p = Profile::new("release");
-            // No section GC: LTO already drops what nothing references (`-dead_strip` takes 256 more
-            // bytes off the compiler's 5.79 MB on macOS), and the LTO code generation at the link does
-            // not take a compile's `-ffunction-sections -fdata-sections` (the binary is the same).
-            dutil::split_args(&mut p.cflags, "-DNDEBUG -finline-functions -fomit-frame-pointer -fPIE");
-            dutil::split_args(&mut p.link_args, "-O2");
             p.strip = true;
             p.opt = 3;
-            // Full LTO: ThinLTO relinks in 1.9 s instead of about 40 s here, but costs the compiler 3 to
-            // 5% runtime and 24% size, past the gates set for a default (binary skill, "Link-time
-            // optimization"); `lto = "thin"` or SC_LTO=thin opts a build in.
-            p.lto = LTO_AUTO;
             self.profiles.push(p);
         }
         {
+            // Optimization parity with `release`: the bench should measure the compiler users run. The
+            // debug information stays so profiles remain readable.
             let mut p = Profile::new("bench");
-            // Optimization parity with `release` (-O3 -DNDEBUG): the bench should measure the compiler
-            // users run. -g and frame pointers stay so samply profiles remain readable.
-            dutil::split_args(&mut p.cflags, "-DNDEBUG -g -fno-omit-frame-pointer");
             p.opt = 3;
-            p.lto = LTO_AUTO;
+            p.debug = true;
             self.profiles.push(p);
         }
         {
             // The `super-c test` runner, and the compiler under test when no `--profile` is given. The
-            // harness drives thousands of compiles, and -O1 runs them two to four times cheaper than an
-            // unoptimized build with every assert kept. No sanitizers: ASan and UBSan cost about 12 times
-            // the instructions of a compile.
+            // harness drives thousands of compiles, which an optimized build runs cheaper.
             let mut p = Profile::new("test");
-            p.opt = 1;
-            self.profiles.push(p);
-        }
-        // ThreadSanitizer. Its own profile and NEVER part of `release`: TSan costs 5-15x runtime and several
-        // times the memory, and it needs its runtime linked in. No LTO: it defeats the instrumentation the
-        // tool relies on. This is also what turns on the coroutine fiber annotations in `ffi/sc_runtime.spc`, without
-        // which every coroutine that migrates between workers reports as a race against itself.
-        //
-        // `-fno-inline` is not tidiness, it is what makes a report TRUE. At plain -O1 this reports one race per
-        // run, on a closure's exit path, and the SAME source is clean at -O0 and clean at `-O1 -fno-inline`:
-        // across five runs each. Inlining changes no memory operation and no lock, so a report that appears and
-        // disappears with it is attribution, not a race: the allocation it blames is inlined into `worker_main`
-        // from a callee, and the write it blames is inlined into a wrapper from the closure body. Losing the
-        // inlining is the price of a report worth acting on.
-        {
-            let mut p = Profile::new("race");
-            dutil::split_args(&mut p.cflags, "-fno-inline -g -fsanitize=thread -fno-omit-frame-pointer -DSC_LOCKDEP");
-            dutil::split_args(&mut p.ldflags, "-fsanitize=thread");
             p.opt = 1;
             self.profiles.push(p);
         }

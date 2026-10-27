@@ -25,26 +25,18 @@ struct Key {
     pub doc: str<'static>,
 }
 
-const KEYS: [Key; 35] = [
+const KEYS: [Key; 31] = [
     Key { sec: "", name: "bin", doc: "name of the binary this project builds" },
     Key { sec: "", name: "root", doc: "entry source file (default: src/main.spc)" },
     Key { sec: "", name: "out-dir", doc: "directory for build output (default: build)" },
     Key { sec: "", name: "test-dir", doc: "directory scanned for @test files (default: tests)" },
     Key { sec: "", name: "bench-dir", doc: "directory scanned for @bench files (default: bench)" },
-    Key { sec: "", name: "cc", doc: "C compiler to invoke (else $CC, else cc)" },
-    Key { sec: "", name: "cstd", doc: "C standard passed to the C compiler" },
-    Key { sec: "", name: "cflags", doc: "extra C compiler flags, as an array of strings" },
     Key { sec: "", name: "ldflags", doc: "extra linker flags, as an array of strings" },
     Key { sec: "", name: "ldlibs", doc: "libraries to link, as an array of strings" },
-    Key { sec: "", name: "jobs", doc: "parallel C compile jobs (default: one per core)" },
+    Key { sec: "", name: "jobs", doc: "build workers (default: one per core)" },
     Key { sec: "", name: "const-eval-steps", doc: "compile-time evaluation step budget" },
     Key { sec: "", name: "const-eval-memory", doc: "compile-time evaluation memory budget (B, or NK/NM/NG)" },
     Key { sec: "", name: "default-profile", doc: "profile used when none is named" },
-    Key {
-        sec: "",
-        name: "cache-size",
-        doc: "bytes the project's build cache keeps: a byte count or B/KiB/MiB/GiB (default 2GiB)",
-    },
     Key { sec: "", name: "std_internals", doc: "name std's unstable pub(package) internals (std::platform)" },
     Key { sec: "", name: "target-features", doc: "CPU features to enable, e.g. [\"simd128\"] (default: none)" },
     Key {
@@ -61,13 +53,13 @@ const KEYS: [Key; 35] = [
     Key {
         sec: "profile.",
         name: "opt-level",
-        doc: "0, 1, 2, 3, \"s\" or \"z\": -O<level> on every compile and the link",
+        doc: "0, 1, 2, 3, \"s\" or \"z\": the optimization level of the code and the emitted C",
     },
-    Key { sec: "profile.", name: "cflags", doc: "C compiler flags for this profile" },
     Key { sec: "profile.", name: "ldflags", doc: "linker flags for this profile" },
     Key { sec: "profile.", name: "link-args", doc: "linker arguments, each passed as -Wl,<entry>" },
     Key { sec: "profile.", name: "strip", doc: "strip the linked binary (bool)" },
-    Key { sec: "profile.", name: "lto", doc: "link-time optimization: none, full, auto or thin" },
+    Key { sec: "profile.", name: "debug", doc: "emit debug information (bool)" },
+    Key { sec: "profile.", name: "lockdep", doc: "check the lock order of every mutex at run time (bool)" },
     Key { sec: "profile.", name: "overflow-checks", doc: "trap signed overflow (bool; default: opt-level < 2)" },
     Key { sec: "profile.", name: "target-features", doc: "CPU features for this profile; replaces the build's list" },
     Key { sec: "command.", name: "run", doc: "the command line to run, as an array of strings" },

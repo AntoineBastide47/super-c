@@ -1,7 +1,7 @@
-// Cancellation race exerciser for the ThreadSanitizer lane (see check.sh). Hammers every pairwise race
+// Cancellation race exerciser for check.sh's concurrency step. Hammers every pairwise race
 // the reclamation design must survive: notify against cancel, timeout against cancel, blocking completion
 // against cancel, cancellation during every park phase (by cancelling at random points around parks),
-// group cancellation fan-outs, and shutdown against spawn. Any TSan report is a real happens-before hole.
+// group cancellation fan-outs, and shutdown against spawn. A failed count or a hang is a real hole.
 
 import std::parallel::runtime as rt;
 import std::parallel::sync as sync;
@@ -108,7 +108,7 @@ fn group_storm(rounds: i64) {
 // Membership schedules: two sources per task with either one cancelling, a source dropped while its
 // members live, the same source bound twice, members completing while the sweep runs, and a block reused
 // right after its member completed. Every record must leave its source exactly once and touch no freed
-// state: under ASan this is the use-after-free check, under TSan the ordering check.
+// state.
 fn membership_storm(rounds: i64) {
     for i in 0..rounds {
         let (sa, ta) = task::CancelSource::new();

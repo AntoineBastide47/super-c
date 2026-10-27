@@ -22,8 +22,8 @@ fn inline_splices_a_void_callee() {
 }
 
 // One build with every report switch on. SC_BUILD_STATS names a sink for one JSON object per engine build:
-// every phase of the partition, the streamed C compile span, and the cache switches ("-" is stderr, which
-// the harness captures). SC_BCE_STATS, SC_INLINE_STATS and SC_CEMIT_STATS print their own lines.
+// every phase of the partition, the objects, and the cache switches ("-" is stderr, which the harness
+// captures). SC_BCE_STATS, SC_INLINE_STATS and SC_CEMIT_STATS print their own lines.
 @test
 fn stats_switches_report_in_one_build() {
     let p = cli::proj_new();
@@ -35,15 +35,14 @@ fn stats_switches_report_in_one_build() {
     assert(r.out_has("bce total"), "the bounds-check stats line is printed");
     assert(r.out_has("inline considered"), "the inliner stats line is printed");
     assert(r.out_has("cemit-stage write:"), "a cemit stage timing is printed");
-    assert(r.out_shows("{\"v\":1,\"ok\":true,\"profile\":\"debug\""), "the record opens with its version and outcome");
-    assert(r.out_has("\"ms\":{\"setup\":"), "the phase partition starts at the compile-side setup");
+    assert(r.out_shows("{\"v\":2,\"ok\":true,\"profile\":\"debug\""), "the record opens with its version and outcome");
+    assert(r.out_has("\"ms\":{\"setup\":"), "the phase partition starts at the setup");
     assert(r.out_has(",\"stamp\":"), "the stamp check is a phase of its own after the setup");
     assert(r.out_has(",\"link\":"), "and ends at the link");
     assert(r.out_has(",\"total\":"), "the total is reported");
-    assert(r.out_has("\"cc\":{\"jobs\":"), "the streamed C compile is reported apart from the partition");
     assert(r.out_has("\"mem\":{\"on\":false"), "memory tracking is off without SC_BUILD_MEM");
     assert(r.out_has("\"emit_cache\":true"), "the cache switches are recorded");
-    assert(r.out_has("\"lto\":\"flags\",\"lto_reason\":\"\""), "the debug profile leaves LTO to its flag arrays");
+    assert(!r.out_has("\"units\":0,") && !r.out_has("\"stale\":0,"), "a cold build writes every object the link takes");
 }
 
 // The borrow pass frees each analysis slot once no job will lease it again, except under the borrow

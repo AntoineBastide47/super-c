@@ -1,8 +1,8 @@
 // The lock's interleavings, forced rather than waited for. Every window this program opens is nanoseconds
 // wide in ordinary running, so each one is held open on purpose with the lock's hook points
 // (`sync::HOOK_*`, armed through `rt::sched_hook_arm` and compiled in only when `RT_HOOKS` in
-// std/parallel/runtime.spc is true) and then driven hard enough that the other side lands inside it. Run
-// under `--profile=race`: a report here is a real happens-before hole, and a hang is a lost wake.
+// std/parallel/runtime.spc is true) and then driven hard enough that the other side lands inside it. A
+// failed check here is a real hole, and a hang is a lost wake.
 //
 // Eight shapes, in order: a release that lands before its waiter has enqueued, a release that lands while
 // the waiter is parked, a cancellation that claims a waiter the unlock has already chosen, an acquirer
@@ -11,7 +11,7 @@
 // instant its last unlock is observed, and plain threads with coroutines through the barging window.
 //
 // Every round is BOUNDED and every wait has a deadline: a shape that stops making progress fails the
-// program rather than hanging it, because a hang under a sanitizer looks the same as a slow machine.
+// program rather than hanging it, because a hang looks the same as a slow machine.
 
 import stdio;
 import stdlib;

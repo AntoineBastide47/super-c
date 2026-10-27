@@ -386,10 +386,13 @@ fn coff_section(o: &Vector<u8>, name: str) Vector<u8> {
     return out;
 }
 
-// The clang the encodings are compared with: the C compiler when it is clang, else `clang` when it runs,
-// else empty. The tables take LLVM's choices among equal encodings (`xchg`'s operand order, the VEX
-// operand swaps); GNU as takes others.
+// The clang the encodings are compared with, in the comparison job only (`cli::has_cc`): the C compiler
+// when it is clang, else `clang` when it runs, else empty. The tables take LLVM's choices among equal
+// encodings (`xchg`'s operand order, the VEX operand swaps); GNU as takes others.
 fn llvm_cc() String {
+    if !cli::has_cc() {
+        return String::new();
+    }
     if cli::cc_is_clang() {
         return String::from_str(unsafe str::from_cstr(cli::cc_name()));
     }
@@ -912,8 +915,12 @@ fn x64_oracle(text: &String, bytes: &Vector<u8>, ends: &Vector<u32>) {
 fn x64_generated(os: str) {
     let p = cli::proj_new();
     p.mkfile("main.spc", CORPUS);
-    // The link needs the target's C toolchain; the objects come first.
-    let _ = p.run_raw(format("build --target={} --arch=x86_64 \"{}/main.spc\"", os, p.dir()).as_str());
+    // The link needs the target's C library; the objects come first. The header facts need its headers: a
+    // runner without them has no objects to check.
+    let r = p.run_raw(format("build --target={} --arch=x86_64 \"{}/main.spc\"", os, p.dir()).as_str());
+    if r.out_has("no sysroot found") {
+        return;
+    }
     let mut objs = Vector::<String>::new();
     obj_files(format("{}/build/debug/raw", p.dir()).as_str(), &mut objs);
     assert(objs.len() > 5, "the build's objects");
@@ -1589,14 +1596,14 @@ fn a64_intrinsics_match_the_c_compiler() {
 // it to the C compiler's bytes.
 @test
 fn wasm_intrinsics_match_the_c_compiler() {
-    let imm: [i64; 8] = [1; 8];
-    let known: [bool; 8] = [true; 8];
+    let imm: [i64; 18] = [1; 18];
+    let known: [bool; 18] = [true; 18];
     let rows: [](str, str) = wasmi::ROWS;
     let sigs: []str = wasmi::SIGS;
     let mut text = String::new();
     for i in 0..rows.len() {
         let mut t = String::new();
-        assert(intrin::expand(rows[i].1, imm[0..8], known[0..8], &mut t), rows[i].0);
+        assert(intrin::expand(rows[i].1, imm[0..18], known[0..18], &mut t), rows[i].0);
         text.format_into(
             ".functype f{} {}\n.globl f{}\n.type f{},@function\nf{}:\n.functype f{} {}\n{}\nend_function\n",
             i,
@@ -1662,6 +1669,22 @@ fn x64_intrinsics_match_the_c_compiler() {
     }
     assert_eq(bad, 0);
     x64_oracle(&text, &bytes, &ends);
+}
+
+// A row's constant arguments by index, of one digit or more, and their multiples (`intrin::expand`).
+@test
+fn row_immediates_expand_by_index() {
+    let imm: [i64; 18] = [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48, 51];
+    let known: [bool; 18] = [true; 18];
+    let mut t = String::new();
+    assert(
+        intrin::expand("i8x16.shuffle @2, @12, @(17*2+1), @(3*4-2)", imm[0..18], known[0..18], &mut t),
+        "the row expands",
+    );
+    assert_eq(t.as_str(), "i8x16.shuffle 6, 36, 103, 34");
+    let unknown: [bool; 18] = [false; 18];
+    let mut u = String::new();
+    assert(!intrin::expand("@12", imm[0..18], unknown[0..18], &mut u), "an argument of no constant value");
 }
 
 // The vector registers a template names and writes, and its renaming (`intrin::vnames`, `vwrites`,

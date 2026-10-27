@@ -21,7 +21,7 @@ extern "C" {
 /// Phase boundaries in pipeline order: phase `k` runs from boundary `k - 1` to boundary `k`, so
 /// the phases partition the build and their sum is the total by construction.
 pub const B_START: usize = 0;
-pub const B_SETUP: usize = 1; // compile-side setup: output directories, C compiler probe, compile stream
+pub const B_SETUP: usize = 1; // the profile, the jobs and the link record's paths
 pub const B_STAMP: usize = 2; // emit-stamp check
 pub const B_LOAD: usize = 3; // load, lex, parse
 pub const B_RESOLVE: usize = 4;
@@ -33,9 +33,8 @@ pub const B_PLAN: usize = 9; // instance discovery and C planning
 pub const B_RENDER: usize = 10; // C rendering
 pub const B_PUBLISH: usize = 11; // files written, per-TU cache, orphan prune, emit stamp record
 pub const B_SYNC: usize = 12; // external transpiler record and stamp install
-pub const B_COMPILE: usize = 13; // external C compilation drained
-pub const B_LINK: usize = 14;
-pub const B_COUNT: usize = 15;
+pub const B_LINK: usize = 13;
+pub const B_COUNT: usize = 14;
 
 // Memory boundaries, as indexes into the samples: frontend, borrow analysis, C plan, C output
 // published, build complete. Epoch `k` covers the allocations made before memory boundary `k`.
@@ -53,17 +52,10 @@ pub struct BuildStats {
     pub alloc_n: Array<u64, MEM_N>,
     pub alloc_bytes: Array<u64, MEM_N>,
     pub live: Array<u64, LIVE_N>, // per boundary, per epoch: count, bytes
-    pub cc_first_ns: u64,
-    pub cc_last_ns: u64,
-    pub cc_busy_ns: u64,
-    pub cc_jobs: u64,
-    pub cc_version: String,
-    pub lto: String, // the LTO mode the link used ("thin+cache", "thin", "auto", "full", "none", "flags")
-    pub lto_reason: String, // why a ThinLTO request or its linker cache was rejected; empty otherwise
     pub skip_emit: bool,
     pub jobs: u32,
-    pub total_c: usize,
-    pub stale_n: usize,
+    pub total_c: usize, // the objects the link takes
+    pub stale_n: usize, // the objects this build wrote
     pub linked: bool,
     pub rc: i32,
     pub profile: String,
@@ -131,13 +123,6 @@ pub fn begin() {
         alloc_n: Array::<u64, MEM_N>::new(),
         alloc_bytes: Array::<u64, MEM_N>::new(),
         live: Array::<u64, LIVE_N>::new(),
-        cc_first_ns: 0,
-        cc_last_ns: 0,
-        cc_busy_ns: 0,
-        cc_jobs: 0,
-        cc_version: String::new(),
-        lto: String::new(),
-        lto_reason: String::new(),
         skip_emit: false,
         jobs: 0,
         total_c: 0,
@@ -216,23 +201,6 @@ fn sample(g: *mut BuildStats, k: usize) {
     }
 }
 
-/// One external C compile job ran from `start_ns` to `end_ns`.
-pub fn cc_job(start_ns: u64, end_ns: u64) {
-    let g = unsafe G_STATS;
-    if g == null {
-        return;
-    }
-    assert(end_ns >= start_ns);
-    if unsafe (*g).cc_jobs == 0 || start_ns < unsafe (*g).cc_first_ns {
-        unsafe (*g).cc_first_ns = start_ns;
-    }
-    if end_ns > unsafe (*g).cc_last_ns {
-        unsafe (*g).cc_last_ns = end_ns;
-    }
-    unsafe (*g).cc_busy_ns += end_ns - start_ns;
-    unsafe (*g).cc_jobs += 1;
-}
-
 /// The emission's per-instance re-lowering counts, by reason (from the merged emission probe).
 pub fn relower(reflect: u64, zst: u64) {
     let g = unsafe G_STATS;
@@ -277,7 +245,7 @@ pub fn finish(rc: i32) {
 }
 
 /// The name of the phase that ends at boundary `k + 1`.
-pub const PHASE_NAMES: [str<'static>; 14] = [
+pub const PHASE_NAMES: [str<'static>; 13] = [
     "setup",
     "stamp",
     "load",
@@ -290,10 +258,9 @@ pub const PHASE_NAMES: [str<'static>; 14] = [
     "render",
     "publish",
     "sync",
-    "compile",
     "link",
 ];
-static_assert(B_COUNT == 15, "one phase name per boundary after the start");
+static_assert(B_COUNT == 14, "one phase name per boundary after the start");
 const MEM_NAMES: [str<'static>; 5] = ["frontend", "borrowck", "plan", "publish", "build"];
 static_assert(MEM_N == 5, "one name per memory boundary");
 
@@ -313,23 +280,11 @@ fn push_bool(out: &mut String, v: bool) {
     }
 }
 
-/// The part of the streamed C compile that ran while emission was still in progress.
-pub const fn cc_overlap_ns(g: &BuildStats) u64 {
-    let pub_ns = g.t[B_PUBLISH];
-    if g.cc_jobs == 0 || g.cc_first_ns >= pub_ns {
-        return 0;
-    }
-    if g.cc_last_ns < pub_ns {
-        return g.cc_last_ns - g.cc_first_ns;
-    }
-    return pub_ns - g.cc_first_ns;
-}
-
 /// The record as one JSON object (no trailing newline). Every "ms" entry is a phase of the
-/// partition and `total` is their sum; the streamed C compile that overlapped emission is reported
-/// under `cc` and is never part of `total`.
+/// partition and `total` is their sum; `units` counts the objects the link takes, `stale` the ones this
+/// build wrote.
 pub fn json(g: &BuildStats, out: &mut String) {
-    out.push_str("{\"v\":1,\"ok\":");
+    out.push_str("{\"v\":2,\"ok\":");
     push_bool(out, g.rc == 0);
     out.push_str(",\"profile\":");
     ljson::dump_escaped(g.profile.as_str(), out);
@@ -345,16 +300,8 @@ pub fn json(g: &BuildStats, out: &mut String) {
     out.push_u64(g.stale_n as u64);
     out.push_str(",\"linked\":");
     push_bool(out, g.linked);
-    out.push_str(",\"cc_version\":");
-    ljson::dump_escaped(g.cc_version.as_str(), out);
-    out.push_str(",\"lto\":");
-    ljson::dump_escaped(g.lto.as_str(), out);
-    out.push_str(",\"lto_reason\":");
-    ljson::dump_escaped(g.lto_reason.as_str(), out);
     out.push_str(",\"emit_cache\":");
     push_bool(out, stdlib::getenv("SC_NO_EMIT_CACHE") == null);
-    out.push_str(",\"object_cache\":");
-    push_bool(out, stdlib::getenv("SC_NO_CACHE") == null);
     out.push_str(",\"tu_cache\":");
     push_bool(out, stdlib::getenv("SC_NO_TU_CACHE") == null);
     out.push_str(",\"ms\":{");
@@ -368,14 +315,6 @@ pub fn json(g: &BuildStats, out: &mut String) {
     }
     out.push_str(",\"total\":");
     push_ms(out, g.t[B_LINK] - g.t[B_START]);
-    out.push_str("},\"cc\":{\"jobs\":");
-    out.push_u64(g.cc_jobs);
-    out.push_str(",\"span_ms\":");
-    push_ms(out, g.cc_last_ns - g.cc_first_ns);
-    out.push_str(",\"busy_ms\":");
-    push_ms(out, g.cc_busy_ns);
-    out.push_str(",\"overlap_ms\":");
-    push_ms(out, cc_overlap_ns(g));
     out.push_str("},\"relower\":{\"reflect\":");
     out.push_u64(g.relower_reflect);
     out.push_str(",\"zst\":");

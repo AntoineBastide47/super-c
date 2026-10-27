@@ -1,11 +1,14 @@
-// The link step: the link record's name, the archiver of a static library, the response file of a long
-// Windows command line (pure builders, called directly on every host), the strip and spawn paths of a
-// real link, and a C static library the own linker links.
+// The link step: the link record's name, a C static library the own linker links, and the import
+// libraries a Windows link takes for their DLLs.
 import stdlib;
 import build_system::build as bsys;
-import driver_shim as shim;
 import driver::util as dutil;
 import tests::cli_harness as cli;
+import codegen::obj as ob;
+import target::assembler as asmr;
+import target::coff as coff;
+import link::pe;
+import std::platform::fs;
 
 @test
 fn link_record_names_fit_and_differ() {
@@ -21,115 +24,6 @@ fn link_record_names_fit_and_differ() {
     let b = bsys::link_record("out", "a_b/c");
     assert(a.as_str() != b.as_str(), "paths that flatten alike have their own records");
     assert(a.as_str() == bsys::link_record("out", "a/b_c").as_str(), "one path has one record");
-}
-
-@test
-fn a_cross_static_library_uses_the_target_archiver() {
-    // wasm and Android are never the host.
-    assert(bsys::archiver("/opt/wasi/bin/clang", 3).as_str() == "/opt/wasi/bin/llvm-ar", "the wasi-sdk's llvm-ar");
-    assert(
-        bsys::archiver("/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/clang", 5).as_str() == "/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar",
-        "the NDK's llvm-ar",
-    );
-    assert(bsys::archiver("clang -target wasm32", 3).as_str() == "llvm-ar", "a clang from PATH: llvm-ar from PATH");
-    let foreign = if PLATFORM == Platform::Windows {
-        2;
-    } else {
-        0;
-    };
-    assert(
-        bsys::archiver("/opt/x/bin/x86_64-w64-mingw32-gcc-posix", foreign).as_str() == "/opt/x/bin/x86_64-w64-mingw32-ar",
-        "a cross gcc's own ar",
-    );
-    let host = unsafe shim::sc_host_platform();
-    assert(bsys::archiver("/opt/x/bin/clang", host).as_str() == "ar", "the host's format: the host ar");
-    if host == 1 {
-        assert(bsys::archiver("xcrun --sdk iphoneos clang", 4).as_str() == "ar", "iOS objects are Mach-O");
-    }
-}
-
-@test
-fn a_long_command_line_moves_its_objects_into_a_response_file() {
-    let p = cli::proj_new();
-    let rsp = format("{}/link.rsp", p.dir());
-    let mut args = Vector::<String>::new();
-    let words: [str; 6] = ["gcc", "-o", "app.tmp", "obj\\a b.o", "obj/c.o", "-lm"];
-    for w in words {
-        args.push(String::from_str(w));
-    }
-    assert_eq(bsys::fit_cmdline(&mut args, 3, 2, rsp.as_str(), 1000), 0);
-    assert(args.len() == 6, "a line that fits stays as it is");
-    assert(cli::read_text(rsp.as_str()).len() == 0, "and writes no response file");
-    assert_eq(bsys::fit_cmdline(&mut args, 3, 2, rsp.as_str(), 40), 1);
-    assert(args.len() == 5, "the objects leave the line");
-    assert(args[2].as_str() == "app.tmp", "the arguments before the objects stay");
-    assert(args[4].as_str() == "-lm", "and so do the ones after them");
-    assert(args[3].as_str() == format("@{}", rsp.as_str()).as_str(), "the response file takes the objects' place");
-    assert(
-        cli::read_text(rsp.as_str()).as_str() == "\"obj/a b.o\"\n\"obj/c.o\"\n",
-        "one quoted object per line, with forward slashes",
-    );
-    let bad = format("{}/missing/link.rsp", p.dir());
-    assert_eq(bsys::fit_cmdline(&mut args, 0, 1, bad.as_str(), 1), -1);
-}
-
-// A stripped macOS binary runs the host `strip` on the linked temp (the other targets strip at link):
-// a failed strip installs nothing and records no link, so the next build links and strips again. Stubs
-// stand for the C compiler (it writes empty outputs) and `strip`.
-@test
-fn a_failed_strip_installs_nothing() {
-    if PLATFORM != Platform::MacOS {
-        return;
-    }
-    let p = cli::proj_new();
-    p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n\n[profile.debug]\nstrip = true\n");
-    p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
-    p.mkfile(
-        "cc.sh",
-        "#!/bin/sh\no=\"\"; prev=\"\"\nfor a in \"$@\"; do [ \"$prev\" = -o ] && o=\"$a\"; prev=\"$a\"; done\n[ -n \"$o\" ] && : > \"$o\"\nexit 0\n",
-    );
-    p.mkfile("bin/strip", "#!/bin/sh\nexit 3\n");
-    let root = p.dir();
-    let mut cmd = String::new();
-    cmd.format_into("chmod +x \"{}/cc.sh\" \"{}/bin/strip\"", root, root);
-    assert(cli::run_quiet(cmd.cstr()) == 0, "chmod");
-    let path = stdlib::get_env("PATH").unwrap_or(String::new());
-    let _path = cli::set_env("PATH", format("{}/bin:{}", root, path.as_str()).as_str());
-    // The C backend: the stub compiler's link, which the own linker would replace.
-    let _nat = cli::set_env("SC_NATIVE", "0");
-    let build = format("build --cc={}/cc.sh", root);
-    let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", build.as_str());
-    assert(!r.ok() && r.out_has("strip failed (exit 3)"), "the failed strip fails the build");
-    let bin = format("{}/build/debug/app", root);
-    assert(dutil::file_mtime(bin.as_str()) == 0, "nothing is installed");
-    let mut rec = bsys::link_record(format("{}/build", root).as_str(), "build/debug/app");
-    rec.push_str(".cmd");
-    assert(dutil::file_mtime(rec.as_str()) == 0, "no link is recorded");
-    p.mkfile("bin/strip", "#!/bin/sh\nexit 0\n");
-    let r2 = cli::superc_env_in(root, "SC_NO_CACHE", "1", build.as_str());
-    assert(r2.ok(), "the next build links and strips");
-    assert(dutil::file_mtime(bin.as_str()) != 0, "and installs the binary");
-    assert(dutil::file_mtime(rec.as_str()) != 0, "and records the link");
-}
-
-// The compiles and the link start the compiler PATH names by its path; a PATH match that cannot start
-// (a file without the execute bit) falls back to the search, which skips it.
-@test
-fn a_compiler_path_match_that_cannot_start_falls_back_to_the_search() {
-    if !cli::has_cc() {
-        return; // it names the C compiler
-    }
-    if cli::on_wasm() || cli::on_windows() {
-        return;
-    }
-    let p = cli::proj_new();
-    p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
-    p.mkfile("main.spc", "fn main() i32 {\n    return 5;\n}\n");
-    p.mkfile("shadow/cc", "not a program\n");
-    let root = p.dir();
-    let path = stdlib::get_env("PATH").unwrap_or(String::new());
-    let _path = cli::set_env("PATH", format("{}/shadow:{}", root, path.as_str()).as_str());
-    assert_eq(cli::superc_in(root, "run --cc=cc").exit, 5);
 }
 
 // A C static library of two members (the program needs one): functions, data, a function-pointer table,
@@ -189,8 +83,7 @@ fn main() i32 {
 )";
 
 // The C compiler builds the library and its archiver archives it, for the host and, with a wasi-sdk, for
-// wasm32 (run by wasmtime); the own linker links the program (SC_LINK=own: a link it does not serve
-// fails), taking only the member the program needs.
+// wasm32 (run by wasmtime); the own linker links the program, taking only the member the program needs.
 @test
 fn a_c_static_library_links_with_the_own_linker() {
     if !cli::has_cc() {
@@ -203,7 +96,7 @@ fn a_c_static_library_links_with_the_own_linker() {
     let mut m = format("@link(\"-L{} -ldemo\")\n", p.dir());
     m.push_str(AR_MAIN);
     p.mkfile("main.spc", m.as_str());
-    let r = cli::superc_env_in(p.dir(), "SC_LINK", "own", "build main.spc -o bin");
+    let r = cli::superc_in(p.dir(), "build main.spc -o bin");
     assert(r.ok(), "the own linker links the library");
     assert_eq(p.run_bin(), 0);
     let sdk = stdlib::get_env("WASI_SDK_PATH").unwrap_or(String::new());
@@ -234,8 +127,86 @@ fn a_c_static_library_links_with_the_own_linker() {
     let mut wm = format("@link(\"-L{} -ldemo\")\n", w.as_str());
     wm.push_str(AR_MAIN);
     p.mkfile("main.spc", wm.as_str());
-    let rw = cli::superc_env_in(p.dir(), "SC_LINK", "own", "build main.spc --target=wasm -o bin.wasm");
+    let rw = cli::superc_in(p.dir(), "build main.spc --target=wasm -o bin.wasm");
     assert(rw.ok(), "the own linker links the wasm32 library");
     let mut run = format("wasmtime run \"{}/bin.wasm\"", p.dir());
     assert_eq(cli::run_with(run.cstr(), null, null, null, ""), 0);
+}
+
+// An archive of `members` (name, bytes) in the System V layout.
+fn ar_of(members: [](str, Vector<u8>)) Vector<u8> {
+    let mut out = Vector::<u8>::new();
+    for c in "!<arch>\n".bytes() {
+        out.push(c);
+    }
+    for i in 0..members.len() {
+        let name = members[i].0;
+        let bytes = &members[i].1;
+        let head = format("{}/", name);
+        let mut h = format("{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n", head.as_str(), 0, 0, 0, 644, bytes.len());
+        for c in h.as_str().bytes() {
+            out.push(c);
+        }
+        for k in 0..bytes.len() {
+            out.push(bytes[k]);
+        }
+        if bytes.len() % 2 != 0 {
+            out.push(b'\n');
+        }
+        h.clear();
+    }
+    return out;
+}
+
+// mingw-w64's import libraries (`libws2_32.a`) hold objects beside their imports (short import objects, or
+// GNU dlltool's objects of `.idata$` sections): `-l` takes such a library for its DLL, not as a static one.
+@test
+fn an_archive_with_imports_stands_for_its_dll() {
+    let mut o = ob::Obj::new();
+    let mut a = asmr::Asm::new(asmr::ISA_X64, asmr::FMT_COFF);
+    assert(a.module(&mut o, ".globl helper\nhelper:\nret\n"), "the object assembles");
+    let mut obj = Vector::<u8>::new();
+    coff::write(&o, &mut obj);
+    // A short import object of `f` from `x.dll`: signatures 0 and 0xFFFF, version 0, machine x86-64, time,
+    // the size of the names, ordinal or hint, type code by name, then the names.
+    let names = "f\0x.dll\0";
+    let mut imp: Vector<u8> = Vector::<u8>::new();
+    for v in [0u16, 0xFFFF, 0, 0x8664] {
+        imp.push(v as u8);
+        imp.push((v >> 8) as u8);
+    }
+    for _ in 0..4 {
+        imp.push(0);
+    }
+    imp.push(names.len() as u8);
+    for _ in 0..3 {
+        imp.push(0);
+    }
+    for v in [0u16, 0x4] {
+        imp.push(v as u8);
+        imp.push((v >> 8) as u8);
+    }
+    for c in names.bytes() {
+        imp.push(c);
+    }
+    let p = cli::proj_new();
+    let dir = p.dir();
+    let lib_a = ar_of([("helper.o", obj.clone()), ("f.o", imp)]);
+    let lib_b = ar_of([("helper.o", obj)]);
+    assert(fs::publish(format("{}/libx.a", dir).as_str(), lib_a.as_slice()).is_ok(), "the import library");
+    assert(fs::publish(format("{}/liby.a", dir).as_str(), lib_b.as_slice()).is_ok(), "the static library");
+    let mut dirs = Vector::<String>::new();
+    dirs.push(String::from_str(dir));
+    let opts = pe::Opts {
+        out: String::new(),
+        shared: false,
+        objs: Vector::<String>::new(),
+        libs: Vector::<String>::new(),
+        dirs: dirs,
+        strip: false,
+        stack: 0,
+    };
+    let mut path = String::new();
+    assert(!pe::static_lib(&opts, "x", &mut path), "an archive with an import is an import library");
+    assert(pe::static_lib(&opts, "y", &mut path), "an archive of objects alone is a static library");
 }

@@ -289,9 +289,6 @@ fn naked_function_runs(b: &mut h::ExitBatch) {
     if h::target_lane() {
         return; // the function has an aarch64 and an x86_64 form only
     }
-    if unsafe shim::sc_host_arch() == 1 && !cli::cc_is_clang() {
-        return; // GCC has no naked functions on aarch64 (the C guard of `naked_function_is_its_assembly`)
-    }
     b.add("a naked function runs", NAKED, 0);
 }
 

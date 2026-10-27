@@ -145,17 +145,13 @@ fn pick3(ok: bool) i32 {
 }
 )";
     let lane = h::simd_lane();
-    // The lane's check reads the emitted C: its build goes through C.
-    let b = if lane {
-        h::diff_build(src, ["SC_NATIVE=0"]);
-    } else {
-        h::diff_build(src, []);
-    };
+    let b = h::diff_build(src, []);
     assert(b.built, b.diag.as_str());
+    // The lane's check reads the emitted C.
     if lane {
-        let mut mc = String::from_str(b.proj.dir());
-        mc.push_str("/build/debug/raw/main.c");
-        let c = cli::read_text(mc.as_str());
+        let cb = h::diff_build(src, ["--emit-c"]);
+        assert(cb.built, cb.diag.as_str());
+        let c = cli::read_text(format("{}/build/debug/raw/main.c", cb.proj.dir()).as_str());
         // The store's own range check is the statement just before it: the last check before the store
         // ends the only `;` between them (the scatter paths' checks sit earlier, statements away).
         let t = c.as_str();
@@ -254,7 +250,7 @@ const fn raw(m: u64) i32 {
     let mut tys: [str; 16] = ["i32"; 16];
     tys[14] = "usize";
     tys[15] = "usize";
-    let d = h::const_runtime_parity(decls, exprs, tys, ["--profile=ubsan"]);
+    let d = h::const_runtime_parity(decls, exprs, tys, []);
     if d.len() != 0 {
         eprintln("{}", d.as_str());
     }
@@ -307,13 +303,11 @@ const fn pick_lane(lane: bool) usize {
 }
 
 // Two threads store to the two halves of one slice through masked stores and scatters whose inactive
-// lanes cover the other half: no lane outside its mask is written, so the race profile reports nothing.
-// WASI has no threads: there one half runs first, and the other half must hold its zeros.
+// lanes cover the other half: no lane outside its mask is written, so each half ends with its own
+// thread's last values. WASI has no threads: there one half runs first, and the other half must hold its
+// zeros.
 @test
-fn disjoint_masked_stores_do_not_race() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
+fn disjoint_masked_stores_keep_their_halves() {
     if h::simd_lane() {
         h::expect_run(
             "disjoint masked stores",
@@ -371,13 +365,13 @@ fn main() i32 {
     return unsafe A[0] + unsafe A[7] - 796;
 }
 )";
-    let b = h::diff_build(src, ["--profile=race"]);
+    let b = h::diff_build(src, []);
     assert(b.built, b.diag.as_str());
     let r = h::diff_run(&b, "");
-    if r.exit != 0 || r.err.contains("ThreadSanitizer") {
+    if r.exit != 0 {
         eprintln("exit {}: {}", r.exit, r.err.as_str());
     }
-    assert(r.exit == 0 && !r.err.contains("ThreadSanitizer"), "no race between disjoint masked stores");
+    assert(r.exit == 0, "each half holds its own thread's stores");
 }
 
 // Every rearranging, reducing and memory form over integer and float lanes, emitted and compiled with

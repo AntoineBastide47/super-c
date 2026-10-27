@@ -583,7 +583,6 @@ pub const FN_CONST: u8 = 8; // `const fn`: must evaluate at compile time when it
 pub const FN_UNSAFE: u8 = 16; // `unsafe fn`: calls require an unsafe context (like extern "C" fns)
 pub const FN_INTRINSIC: u8 = 32; // `@intrinsic("name")`: a call lowers to the operation it names; the body is an empty block in its place
 pub const FN_FEATURES: u8 = 64; // `@target_feature` or `@simd_impl`: a call needs the build to have the features
-pub const FN_LANE_ACCESS: u8 = 128; // `@lane_access`: memory in active lanes at lane-dependent addresses
 
 extend FunctionData {
     pub const fn is_extern(self: &Self) bool {
@@ -3339,8 +3338,6 @@ pub struct Ast {
     pub feature_rows: Vector<FeatureRow>,
     /// The `unsafe` markers whose only reason is such a call.
     pub unsafe_lints: Vector<UnsafeLint>,
-    /// The functions that call a `@lane_access` binding.
-    pub lane_callers: Vector<NodeId>,
     /// The module declares a register type (`@value`).
     pub has_c_value: bool,
     /// A field of the module pins its C member name (`@import` on a header type's field).
@@ -3463,7 +3460,6 @@ extend Ast as Free {
         self.where_bounds.free();
         self.assert_fns.free();
         self.feature_calls.free();
-        self.lane_callers.free();
         self.unsafe_lints.free();
         self.call_info.free();
         self.call_lts.free();

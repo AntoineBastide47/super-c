@@ -1,6 +1,5 @@
-# The SIMD baselines of every CI platform's C compiler: the kernel parity test, then
-# bench/simd_baseline/record.sh, whose baseline.tsv and probes.tsv each job uploads. Run on demand
-# from the Actions tab.
+# The SIMD baselines of every CI platform: the kernel parity test, then bench/simd_baseline/record.sh,
+# whose baseline.tsv each job uploads. Run on demand from the Actions tab.
 name: SIMD
 on: workflow_dispatch
 permissions:
@@ -47,26 +46,24 @@ jobs:
       - name: Build the compiler
         run: |
           set -eu
-          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${cstd:+"$cstd"}
+          "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${SC_BOOT_CSTD:+"$SC_BOOT_CSTD"}
           [ -f "./super-c${BINEXT:-}" ] || mv ./super-c "./super-c${BINEXT:-}"
 
       # The wasm test runner is native: the benchmark's own parity check covers SIMD128.
       - name: Check the kernels and record the baselines
         run: |
           set -eu
-          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
           if [ "${{ matrix.target }}" = wasm ]; then
             sh bench/simd_baseline/record.sh --target=wasm
           else
-            "./super-c${BINEXT:-}" test --sanitizers --quiet --filter=simd_baseline ${cstd:+"$cstd"}
-            sh bench/simd_baseline/record.sh ${cstd:+"$cstd"}
+            SC_TEST_CC=${CC:-cc} "./super-c${BINEXT:-}" test --quiet --filter=simd_baseline
+            sh bench/simd_baseline/record.sh
             # x86_64: the portable kernels at AVX2 and, where the runner has it, AVX-512, each against
             # the hand-written kernels of its level (the arithmetic ones within 10%).
             if [ "${{ matrix.target }}" != macos ]; then
-              sh bench/simd_baseline/record.sh --target-cpu=x86-64-v3 ${cstd:+"$cstd"}
+              sh bench/simd_baseline/record.sh --target-cpu=x86-64-v3
               if grep -qw avx512bw /proc/cpuinfo 2>/dev/null; then
-                sh bench/simd_baseline/record.sh --target-cpu=x86-64-v4 ${cstd:+"$cstd"}
+                sh bench/simd_baseline/record.sh --target-cpu=x86-64-v4
               fi
             fi
           fi

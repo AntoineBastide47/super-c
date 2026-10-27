@@ -1,13 +1,14 @@
 # The permanent probe lane: whatever currently needs proving on a real runner lives here as the job
 # content, run on demand from the Actions tab. Edit the job for the next investigation; do not remove
-# the file. Current probe: the Windows test suite (quiet run, failures replay streams straight into
-# the job log), a verbose Linux run with a stuck-program watchdog, plus the release workflow's wasm leg
-# without its self-host fixpoint (the release workflow keeps it), the native backend against the C
-# pipeline on macOS, Linux and Windows (`speed`, ci/speed.sh), with the release's transpile counts, and
-# the suite with no C compiler and no linker on every target (`*-nocc`).
-# Each platform builds its compiler once (`*-compile`) and runs its test shards in parallel on it (three
-# on Windows, the slowest runner, two elsewhere); Linux arm64 builds its compiler on the arm64 runner from
-# one the x86-64 runner cross-builds. It restores the release workflow's caches and saves none.
+# the file. Current probe: every check of the release workflow before its packaging (the test shards
+# with no C compiler, the x86-64 levels, the correctness gate, the comparison job with clang-22 as the
+# C oracle and bindgen's C environment tables, the wasm compiler's checks, target lane and suite), the
+# suite with no C compiler and no linker on every target (`*-nocc`), and the native backend against the
+# emitted C built by clang on macOS, Linux and Windows (`speed`, ci/speed.sh), with the release's
+# transpile counts.
+# Each platform builds its compiler once (`compile`) from the latest release's; Linux arm64's is
+# cross-built on the x86-64 runner against the arm64 C library (`libc6-dev-arm64-cross`). It restores the
+# release workflow's caches and saves none.
 name: Debug
 on:
   workflow_dispatch
@@ -18,9 +19,21 @@ concurrency:
   group: debug-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  windows-compile:
-    name: windows compile
-    runs-on: windows-latest
+  # --- macOS, Linux and Windows -----------------------------------------------------------------------
+  compile:
+    name: compile (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: macos
+          - os: ubuntu-latest
+            target: linux
+          - os: windows-latest
+            target: windows
+    runs-on: ${{ matrix.os }}
+    # Every step in bash, so the shared steps behave identically on the Windows runner (Git Bash).
     defaults:
       run:
         shell: bash
@@ -29,44 +42,70 @@ jobs:
 
       - uses: ./.github/actions/toolchain
         with:
-          target: windows
+          target: ${{ matrix.target }}
           sha: ${{ github.sha }}
-          cstd: -std=gnu11 -D_POSIX_C_SOURCE=200809L -g1
+
+      - name: Clean release outputs
+        run: rm -rf build src/build ci/build super-c super-c.exe* super-c-boot* smoke*
 
       - uses: ./.github/actions/bootstrap
         with:
-          target: windows
+          target: ${{ matrix.target }}
 
       - name: Build the compiler
         run: |
           set -eu
-          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${cstd:+"$cstd"}
           bin="super-c${BINEXT:-}"
+          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${SC_BOOT_CSTD:+"$SC_BOOT_CSTD"}
+          # Compatibility with a bootstrap older than the `.exe` naming fix: it links the manifest's `bin`
+          # verbatim, so on Windows it produces an extensionless PE that nothing can launch. Drop this once
+          # a release has shipped with the fix.
           [ -f "./$bin" ] || mv "./super-c" "./$bin"
           test -x "./$bin"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: compiler-windows
-          path: super-c.exe
+          name: compiler-${{ matrix.target }}
+          path: super-c${{ env.BINEXT }}
           if-no-files-found: error
           retention-days: 1
 
-  windows:
-    needs: windows-compile
-    name: windows (tests ${{ matrix.test_shard }})
+  test:
+    needs: compile
+    name: test (${{ matrix.target }}, ${{ matrix.test_shard }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - test_shard: "1/3"
+          - os: macos-latest
+            target: macos
+            test_shard: "1/2"
             cache_shard: 1
-          - test_shard: "2/3"
+          - os: macos-latest
+            target: macos
+            test_shard: "2/2"
             cache_shard: 2
-          - test_shard: "3/3"
+          - os: ubuntu-latest
+            target: linux
+            test_shard: "1/2"
+            cache_shard: 1
+          - os: ubuntu-latest
+            target: linux
+            test_shard: "2/2"
+            cache_shard: 2
+          - os: windows-latest
+            target: windows
+            test_shard: "1/3"
+            cache_shard: 1
+          - os: windows-latest
+            target: windows
+            test_shard: "2/3"
+            cache_shard: 2
+          - os: windows-latest
+            target: windows
+            test_shard: "3/3"
             cache_shard: 3
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
@@ -75,208 +114,175 @@ jobs:
 
       - uses: ./.github/actions/toolchain
         with:
-          target: windows
-          sha: ${{ github.sha }}
-          cstd: -std=gnu11 -D_POSIX_C_SOURCE=200809L -g1
-
-      - name: Exclude work dirs from Defender
-        shell: powershell
-        run: |
-          Add-MpPreference -ExclusionPath "$env:GITHUB_WORKSPACE"
-          Add-MpPreference -ExclusionPath "$env:RUNNER_TEMP"
-          Add-MpPreference -ExclusionProcess "gcc.exe"
-          Add-MpPreference -ExclusionProcess "ld.exe"
-          Add-MpPreference -ExclusionProcess "super-c.exe"
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: compiler-windows
-
-      # The io idle-descriptor test alone and in-process first, so its own progress lines reach the job
-      # log live and a hang stops at the timeout with the last line telling where it stopped.
-      - name: Probe the io idle-descriptor test (in-process, bounded)
-        run: |
-          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          for i in 1 2 3; do
-            echo "### probe $i"
-            SC_LEAK_CHECK=fatal timeout 180 "./super-c${BINEXT:-}" test --sanitizers --test-no-fork --filter=idle_descriptors_do_not_delay ${cstd:+"$cstd"} || echo "### probe $i exit $?"
-          done
-
-      - uses: ./.github/actions/test-durations
-
-      - name: Run the test suite (leak-gated, bounded)
-        run: |
-          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          dur=tests/durations/windows.tsv; [ -f "$dur" ] || dur=tests/durations.tsv # shard balance (test-durations.yml)
-          SC_LEAK_CHECK=fatal timeout 1200 "./super-c${BINEXT:-}" test --sanitizers --test-shard=${{ matrix.test_shard }} --test-durations="$dur" ${cstd:+"$cstd"}
-
-      - name: Defender's detections
-        if: failure()
-        shell: powershell
-        run: |
-          Get-MpThreatDetection | Format-List
-          Get-MpThreat | Format-List
-
-  linux-compile:
-    name: linux compile
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: ./.github/actions/toolchain
-        with:
-          target: linux
-          sha: ${{ github.sha }}
-
-      - uses: ./.github/actions/bootstrap
-        with:
-          target: linux
-
-      - name: Build the compiler
-        run: SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: compiler-linux
-          path: super-c
-          if-no-files-found: error
-          retention-days: 1
-
-  # Linux, verbose, with a watchdog: a compiled test program alive for over a minute is named (its
-  # project's main.spc and every thread's kernel wait channel) and killed so the run finishes.
-  linux:
-    needs: linux-compile
-    name: linux (tests ${{ matrix.test_shard }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - test_shard: "1/2"
-            cache_shard: 1
-          - test_shard: "2/2"
-            cache_shard: 2
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: ./.github/actions/toolchain
-        with:
-          target: linux
+          target: ${{ matrix.target }}
           sha: ${{ github.sha }}
 
       - uses: actions/download-artifact@v8
         with:
-          name: compiler-linux
+          name: compiler-${{ matrix.target }}
 
-      - name: Make the compiler executable
-        run: chmod +x ./super-c
-
+      # The suite with the binary `compile` produced, so a failure is a failure of this code, not of the
+      # bootstrap. Leak-gated: every process in the run exits nonzero if it leaks or double-frees. `test`
+      # rebuilds the project first and so relinks `super-c` while `super-c` is the process running: see
+      # sc_rename for why that is allowed even on Windows. No C compiler takes part: the tests that compile
+      # C run in the comparison job.
       - uses: ./.github/actions/test-durations
 
-      - name: Run the test suite (verbose, watchdog)
-        run: |
-          set -u
-          (
-            while true; do
-              for p in $(pgrep -x bin); do
-                et=$(ps -o etimes= -p "$p" 2>/dev/null | tr -d ' '); [ -z "$et" ] && continue
-                if [ "$et" -gt 60 ]; then
-                  # The program, the shell that ran it and the test process above that: state, threads
-                  # and kernel wait channels of each, so a hang in the caller shows as well as one in
-                  # the program. `readlink -f /proc/$p/exe` names the project the program came from.
-                  echo "### STUCK bin pid=$p etime=$et exe=$(readlink -f "/proc/$p/exe" 2>/dev/null)"
-                  q=$p
-                  for lvl in program shell test; do
-                    [ -d "/proc/$q" ] || break
-                    echo "### $lvl pid=$q $(grep -E '^(Name|State|PPid):' "/proc/$q/status" 2>/dev/null | tr '\n' ' ')"
-                    for t in /proc/$q/task/*; do
-                      echo "  $(basename "$t") $(cut -d' ' -f3 "$t/stat" 2>/dev/null) $(cat "$t/wchan" 2>/dev/null)"
-                      sudo cat "$t/stack" 2>/dev/null | head -8 | sed 's/^/    /'
-                    done
-                    q=$(awk '/^PPid:/ { print $2 }' "/proc/$q/status" 2>/dev/null)
-                  done
-                  kill -9 "$p" 2>/dev/null || echo "### kill -9 $p failed: $?"
-                fi
-              done
-              sleep 10
-            done
-          ) &
-          wd=$!
-          dur=tests/durations/linux.tsv; [ -f "$dur" ] || dur=tests/durations.tsv # shard balance (test-durations.yml)
-          SC_LEAK_CHECK=fatal timeout 1500 ./super-c test --sanitizers --test-shard=${{ matrix.test_shard }} --test-durations="$dur"
-          rc=$?
-          kill "$wd" 2>/dev/null || true
-          exit "$rc"
-
-  # Linux arm64, the native arm64 backend's ELF target. No release ships a Linux arm64 compiler yet:
-  # the x86-64 runner cross-builds one through C with GCC's aarch64 cross compiler, and the arm64
-  # runner builds the compiler with it in two stages, the second through the native backend. Both run
-  # Ubuntu 26.04: one glibc, and a clang that knows the FP8 types of the bundled `arm_neon.h`.
-  linux-arm64-compile:
-    name: linux arm64 compile
-    runs-on: ubuntu-26.04
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: ./.github/actions/toolchain
-        with:
-          target: linux
-          sha: ${{ github.sha }}
-
-      - uses: ./.github/actions/bootstrap
-        with:
-          target: linux
-
-      - name: Cross-build an arm64 compiler through C
+      - name: Run the test suite
         run: |
           set -eu
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags
-          SC_NATIVE=0 ./super-c build --target=linux --arch=aarch64 --cc=aarch64-linux-gnu-gcc --out-dir=build-a64 -o super-c-a64
+          bin="super-c${BINEXT:-}"
+          chmod +x "./$bin"
+          dur=tests/durations/${{ matrix.target }}.tsv; [ -f "$dur" ] || dur=tests/durations.tsv # shard balance (test-durations.yml)
+          # The first shard of each target also checks both builds with LIR (check.sh's SC_LIR); the C is the same.
+          if [ "${{ matrix.cache_shard }}" = 1 ]; then export SC_LIR=1; fi
+          SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur"
 
-      - uses: actions/upload-artifact@v7
+  # The x86-64 levels beside the shards: every vector test at each level, each entry model run checking
+  # the entries the baseline run does not reach. No job runs x86-64-v4: a hosted runner's CPU is not
+  # selectable, so AVX-512 is not certain. The platform cache serves the compiler's rebuild; a level's
+  # -march keys its own compiles apart, so the job saves no cache.
+  levels:
+    needs: compile
+    name: levels (${{ matrix.target }}, ${{ matrix.level }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux
+            level: x86-64-v2
+          - os: ubuntu-latest
+            target: linux
+            level: x86-64-v3
+          - os: windows-latest
+            target: windows
+            level: x86-64-v2
+          - os: windows-latest
+            target: windows
+            level: x86-64-v3
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
         with:
-          name: compiler-linux-arm64-boot
-          path: super-c-a64
-          if-no-files-found: error
-          retention-days: 1
+          target: ${{ matrix.target }}
+          sha: ${{ github.sha }}
 
-  linux-arm64:
-    needs: linux-arm64-compile
-    name: linux arm64 (tests ${{ matrix.test_shard }})
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-${{ matrix.target }}
+
+      - name: Vector tests at ${{ matrix.level }}
+        env:
+          SC_SIMD_FEATURES: ${{ matrix.level }}
+        run: |
+          set -eu
+          bin="super-c${BINEXT:-}"
+          chmod +x "./$bin"
+          SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-timeout=900 --filter=simd_
+
+  # The correctness gate beside the shards: it needs only the compiler, not their results.
+  gate:
+    needs: compile
+    name: gate (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: macos
+          - os: ubuntu-latest
+            target: linux
+          - os: windows-latest
+            target: windows
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: ${{ matrix.target }}
+          role: gate
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-${{ matrix.target }}
+
+      # ci/gate.sh without its check.sh step, which `compile` and `test` replace: the two-generation
+      # fixpoint, the worker-count identity under each task-delay seed, and the readability of the emitted
+      # C (its strict C warnings run in the comparison job).
+      - name: Run the correctness gate
+        run: |
+          chmod +x "./super-c${BINEXT:-}"
+          sh ci/gate.sh --core
+
+  # The comparison job, the only one with a C compiler: the suite with clang 22 as the C compiler of the
+  # tests that compile C (`SC_TEST_CC`: the C oracles, the C libraries tests link, the emitted C's
+  # builds), bindgen's C environment tables (src/bindgen/ctarget_data.spc) against what that pinned clang
+  # answers (a missing one fails them), and on the first shard the correctness gate with the strict C
+  # warnings of the emitted C. Beside the gate: it needs only the compiler `compile` built.
+  compare:
+    needs: compile
+    name: compare (linux, ${{ matrix.test_shard }})
     strategy:
       fail-fast: false
       matrix:
         test_shard: ["1/2", "2/2"]
-    runs-on: ubuntu-26.04-arm
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
 
       - uses: ./.github/actions/toolchain
         with:
-          target: linux-arm64
+          target: linux
+          role: compare
           sha: ${{ github.sha }}
 
       - uses: actions/download-artifact@v8
         with:
-          name: compiler-linux-arm64-boot
+          name: compiler-linux
 
-      - name: Build the compiler natively
+      # clang-22 from apt.llvm.org: the repository key is checked against its published fingerprint
+      # (key id AF4F7421) before apt trusts it, and only the compiler package is installed.
+      - name: Install clang 22
         run: |
           set -eu
-          chmod +x super-c-a64
-          SC_LEAK_CHECK=fatal ./super-c-a64 build --bootstrap-tags -o stage1-super-c
-          SC_LEAK_CHECK=fatal ./stage1-super-c build
-          rm -f stage1-super-c super-c-a64
-          test -x ./super-c
+          curl -fsSL -o llvm-snapshot.gpg.key https://apt.llvm.org/llvm-snapshot.gpg.key
+          fpr=$(gpg --show-keys --with-colons llvm-snapshot.gpg.key | awk -F: '/^fpr/ { print $10; exit }')
+          [ "$fpr" = 6084F3CF814B57C1CF12EFD515CF4D18AF4F7421 ] || { echo "unexpected apt.llvm.org key $fpr" >&2; exit 1; }
+          sudo gpg --dearmor -o /usr/share/keyrings/apt-llvm.gpg llvm-snapshot.gpg.key
+          codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+          echo "deb [signed-by=/usr/share/keyrings/apt-llvm.gpg] http://apt.llvm.org/$codename/ llvm-toolchain-$codename-22 main" | sudo tee /etc/apt/sources.list.d/llvm-22.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-22
 
-      - name: Run the test suite
-        run: SC_LEAK_CHECK=fatal timeout 1500 ./super-c test --sanitizers --test-shard=${{ matrix.test_shard }}
+      - name: Run the test suite with clang 22
+        run: |
+          set -eu
+          chmod +x ./super-c
+          SC_TEST_CC=clang-22 SC_CTARGET_CLANG=clang-22 SC_CTARGET_REQUIRE=1 SC_LEAK_CHECK=fatal ./super-c test --quiet --test-shard=${{ matrix.test_shard }}
 
+      - name: Run the correctness gate with the strict C warnings
+        if: matrix.test_shard == '1/2'
+        run: SC_TEST_CC=clang-22 sh ci/gate.sh --core
+
+  # --- wasm ------------------------------------------------------------------------------------------
+  # The compiler cross-built to wasm32-wasip1 and put through the SAME suite: every transpile-class
+  # invocation runs inside wasmtime (via ci/wasm-superc.sh), and the test binaries run natively. WASI has
+  # no processes, so the engine's link and the test runner stay native; the split lives in the wrapper.
+  # The self-hosting fixpoint under wasmtime is the exactness oracle on top.
   wasm-compile:
     name: wasm compile
     runs-on: ubuntu-latest
@@ -295,7 +301,7 @@ jobs:
       - name: Build the native compiler
         run: SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags
 
-      # The build engine cross-compiles with the wasi-sdk (sysroot, emulation libraries, stack size).
+      # The native wasm backend and linker, over the wasi-sdk's sysroot (headers and C library).
       - name: Build the wasm compiler
         run: ./super-c build --target=wasm --profile=release -o super-c.wasm
 
@@ -308,24 +314,92 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-      - name: Package
+  # The wasm compiler's own checks, beside its test shards: they need only the two compilers.
+  wasm-checks:
+    needs: wasm-compile
+    name: wasm checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          role: checks
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: Make the native compiler executable
+        run: chmod +x ./super-c
+
+      # The vector conformance lane: every vector test program, and the vector generator model's fixed
+      # seeds, build for wasm32 with +simd128, run under wasmtime, and match the same program built
+      # without the feature or the scalar model.
+      - name: Vector tests on wasm32 with simd128
+        run: |
+          SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=simd_
+          SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=gen_vector_seeds
+
+      # The self-hosting fixpoint, on wasm: the build engine builds gen2 from the whole compiler with gen1
+      # (the artifact) as its transpiler under wasmtime, then gen3 with gen2 as its transpiler, and
+      # gen2's objects must be byte-identical to gen1's. WASI has no processes, so the native engine
+      # runs the transpile step through `--transpiler` and links with its own wasm linker. The objects
+      # are path-dependent (hashes mix path strings), so both build from the SAME project copy. (No
+      # byte-diff against the native binary: instance homing follows hash orders that differ between 32-
+      # and 64-bit hosts.) The copy carries each transpiler: std/ffi resolve beside the module, and the
+      # engine passes absolute paths because wasmtime's guest cwd is "/". The guest reads the target's C
+      # headers through WASI_SDK_PATH, which wasmtime passes only when told. The caches differ by design: the
+      # per-unit one and the header scan's record, keyed by the compiler that wrote it.
+      - name: Self-host fixpoint under wasmtime
         run: |
           set -eu
-          name="super-c-wasm32-wasip1"
-          mkdir -p "dist/${name}"
-          cp super-c.wasm "dist/${name}/"
-          cp -R std ffi "dist/${name}/"
-          tar -C dist -czf "${name}.tar.gz" "${name}"
+          w=/tmp/wwasm
+          mkdir -p "$w"
+          cp -R src std ffi build.toml "$w/" && rm -rf "$w/src/build"
+          cp super-c.wasm "$w/gen1.wasm"
+          cd "$w"
+          gen() {
+            "$GITHUB_WORKSPACE/super-c" build --target=wasm --profile=release \
+              --transpiler="wasmtime run --dir=/ --env WASI_SDK_PATH=$WASI_SDK_PATH --argv0 $w/$1 -- $w/$1" -o "$2"
+          }
+          gen gen1.wasm gen2.wasm
+          cp -R build/release/raw /tmp/wasm-gen1
+          gen gen2.wasm gen3.wasm
+          diff -r --exclude=.tu_cache --exclude=__sc_hfacts /tmp/wasm-gen1 build/release/raw
 
-      - uses: actions/upload-artifact@v7
-        with:
-          name: wasm
-          path: super-c-wasm32-wasip1.tar.gz
-          if-no-files-found: error
-
-  wasm:
+  # The target lane: the native compiler runs the suite, and every program a test builds is a wasm32
+  # module run under wasmtime, through the native wasm backend at the default profile.
+  wasm-target:
     needs: wasm-compile
-    name: wasm (tests ${{ matrix.test_shard }})
+    name: wasm target (${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test_shard: ["1/2", "2/2"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: Run the test suite with wasm32 programs
+        run: |
+          chmod +x ./super-c
+          SC_TEST_TARGET=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --test-shard=${{ matrix.test_shard }}
+
+  wasm-test:
+    needs: wasm-compile
+    name: wasm test (${{ matrix.test_shard }})
     strategy:
       fail-fast: false
       matrix:
@@ -353,15 +427,48 @@ jobs:
         run: |
           chmod +x ./super-c
           dur=tests/durations/wasm.tsv; [ -f "$dur" ] || dur=tests/durations.tsv # shard balance (test-durations.yml)
-          SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --sanitizers --test-shard=${{ matrix.test_shard }} --test-durations="$dur"
+          SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur"
+
+  # Linux arm64, the native arm64 backend's ELF target. No release ships a Linux arm64 compiler yet:
+  # the x86-64 runner cross-builds one natively against the arm64 C library (headers and libraries, no
+  # compiler), and the arm64 runner builds the compiler with it. Both run Ubuntu 26.04: one glibc.
+  linux-arm64-compile:
+    name: linux arm64 compile
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: linux
+          sha: ${{ github.sha }}
+
+      - uses: ./.github/actions/bootstrap
+        with:
+          target: linux
+
+      - name: Cross-build an arm64 compiler
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y libc6-dev-arm64-cross
+          SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags
+          SC_LEAK_CHECK=fatal ./super-c build --target=linux --arch=aarch64 --sysroot=/usr/aarch64-linux-gnu --out-dir=build-a64 -o super-c-a64
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: compiler-linux-arm64-boot
+          path: super-c-a64
+          if-no-files-found: error
+          retention-days: 1
 
   # No C compiler and no linker: the native backends and the own linkers build the compiler with the
   # compile job's one and run the suite with it; a test that compiles C itself returns early
-  # (`cli::has_cc`). Linux runs in an image with the C library's headers alone (`libc6-dev`, where the
-  # header facts come from) and git (the vendor tests); macOS and Windows leave their preinstalled C
-  # tools unused through a CC that names no file.
+  # (`cli::has_cc`: no `SC_TEST_CC`). Linux runs in an image with the C library's headers alone
+  # (`libc6-dev`, where the header facts come from) and git (the vendor tests); macOS and Windows leave
+  # their preinstalled C tools unused.
   linux-nocc:
-    needs: linux-compile
+    needs: compile
     name: linux no cc (tests ${{ matrix.test_shard }})
     strategy:
       fail-fast: false
@@ -394,11 +501,7 @@ jobs:
           test -x ./super-c
 
       - name: Run the test suite
-        run: SC_NATIVE_LOG="$RUNNER_TEMP/native.log" SC_LEAK_CHECK=fatal timeout 1500 ./super-c test --test-shard=${{ matrix.test_shard }}
-
-      - name: The modules that went through C
-        if: failure()
-        run: cat "$RUNNER_TEMP/native.log" || true
+        run: SC_LEAK_CHECK=fatal timeout 1500 ./super-c test --test-shard=${{ matrix.test_shard }}
 
   linux-arm64-nocc:
     needs: linux-arm64-compile
@@ -434,13 +537,10 @@ jobs:
           test -x ./super-c
 
       - name: Run the test suite
-        run: SC_NATIVE_LOG="$RUNNER_TEMP/native.log" SC_LEAK_CHECK=fatal timeout 1500 ./super-c test --test-shard=${{ matrix.test_shard }}
-
-      - name: The modules that went through C
-        if: failure()
-        run: cat "$RUNNER_TEMP/native.log" || true
+        run: SC_LEAK_CHECK=fatal timeout 1500 ./super-c test --test-shard=${{ matrix.test_shard }}
 
   macos-nocc:
+    needs: compile
     name: macos no cc (tests ${{ matrix.test_shard }})
     strategy:
       fail-fast: false
@@ -450,36 +550,25 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: ./.github/actions/toolchain
+      - uses: actions/download-artifact@v8
         with:
-          target: macos
-          sha: ${{ github.sha }}
+          name: compiler-macos
 
-      - uses: ./.github/actions/bootstrap
-        with:
-          target: macos
-
-      - name: Build the compiler through C, then with itself without it
+      - name: Build the compiler with itself
         run: |
           set -eu
-          SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags -o super-c-cc
-          CC=/nonexistent/cc SC_LEAK_CHECK=fatal ./super-c-cc build
-          rm -f super-c-cc
+          chmod +x super-c
+          mv super-c super-c-boot
+          SC_LEAK_CHECK=fatal ./super-c-boot build
           test -x ./super-c
 
       # macOS has no `timeout`: the job's own limit bounds the run.
       - name: Run the test suite
         timeout-minutes: 30
-        env:
-          CC: /nonexistent/cc
-        run: SC_NATIVE_LOG="$RUNNER_TEMP/native.log" SC_LEAK_CHECK=fatal ./super-c test --test-shard=${{ matrix.test_shard }}
-
-      - name: The modules that went through C
-        if: failure()
-        run: cat "$RUNNER_TEMP/native.log" || true
+        run: SC_LEAK_CHECK=fatal ./super-c test --test-shard=${{ matrix.test_shard }}
 
   windows-nocc:
-    needs: windows-compile
+    needs: compile
     name: windows no cc (tests ${{ matrix.test_shard }})
     strategy:
       fail-fast: false
@@ -490,7 +579,6 @@ jobs:
       run:
         shell: bash
     env:
-      CC: C:/nonexistent/cc.exe
       BINEXT: .exe
     steps:
       - uses: actions/checkout@v7
@@ -514,11 +602,7 @@ jobs:
           test -x ./super-c.exe
 
       - name: Run the test suite
-        run: SC_NATIVE_LOG="$RUNNER_TEMP/native.log" SC_LEAK_CHECK=fatal timeout 1500 ./super-c.exe test --test-shard=${{ matrix.test_shard }}
-
-      - name: The modules that went through C
-        if: failure()
-        run: cat "$RUNNER_TEMP/native.log" || true
+        run: SC_LEAK_CHECK=fatal timeout 1500 ./super-c.exe test --test-shard=${{ matrix.test_shard }}
 
       - name: Defender's detections
         if: failure()
@@ -530,7 +614,7 @@ jobs:
   # The wasm leg without the wasi-sdk: its sysroot (headers and C library, no compiler) for the header
   # facts and wasmtime to run the compiler.
   wasm-nocc:
-    needs: linux-compile
+    needs: compile
     name: wasm no cc (tests ${{ matrix.test_shard }})
     strategy:
       fail-fast: false
@@ -572,14 +656,10 @@ jobs:
           ./super-c build --target=wasm --profile=release -o super-c.wasm
 
       - name: Run the test suite against the wasm compiler
-        run: SC_NATIVE_LOG="$RUNNER_TEMP/native.log" SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal timeout 1500 ./super-c test --test-shard=${{ matrix.test_shard }}
+        run: SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal timeout 1500 ./super-c test --test-shard=${{ matrix.test_shard }}
 
-      - name: The modules that went through C
-        if: failure()
-        run: cat "$RUNNER_TEMP/native.log" || true
-
-  # The native backend against the C pipeline on each platform (ci/speed.sh): cold self-builds, the
-  # speed of the compiler each pipeline produces, and the transpile count of each.
+  # The native backend against the emitted C built by clang on each platform (ci/speed.sh): cold
+  # self-builds, the speed of the compiler each produces, and the transpile count of each.
   speed:
     name: speed (${{ matrix.target }})
     strategy:
@@ -627,13 +707,12 @@ jobs:
       - name: Build the compiler
         run: |
           set -eu
-          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${cstd:+"$cstd"}
+          "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${SC_BOOT_CSTD:+"$SC_BOOT_CSTD"}
           bin="super-c${BINEXT:-}"
           [ -f "./$bin" ] || mv "./super-c" "./$bin"
           test -x "./$bin"
 
-      - name: Compare the native backend with the C pipeline
+      - name: Compare the native backend with the emitted C
         run: |
           set -eu
           case "$RUNNER_OS" in

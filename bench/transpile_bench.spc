@@ -224,18 +224,13 @@ fn real_build(js: &mut String) bool {
     let g = unsafe &*gp;
     js.push_str(",\"build\":");
     bst::json(g, js);
-    let overlap_ms = bst::cc_overlap_ns(g) as f64 / 1000000.0;
     unsafe stdio::printf(
-        "  build (debug, jobs=%u, cold): setup %.1f ms | transpile %.1f ms | sync %.1f ms | compile %.1f ms after emit (streamed span %.1f ms, busy %.1f ms, overlap %.1f ms) | link %.1f ms | total %.1f ms\n".ptr() as *const char,
+        "  build (debug, jobs=%u, cold): setup %.1f ms | transpile %.1f ms | sync %.1f ms | link %.1f ms | total %.1f ms\n".ptr() as *const char,
         g.jobs,
         build_ms(g, bst::B_START, bst::B_SETUP),
         build_ms(g, bst::B_SETUP, bst::B_PUBLISH),
         build_ms(g, bst::B_PUBLISH, bst::B_SYNC),
-        build_ms(g, bst::B_SYNC, bst::B_COMPILE),
-        (g.cc_last_ns - g.cc_first_ns) as f64 / 1000000.0,
-        g.cc_busy_ns as f64 / 1000000.0,
-        overlap_ms,
-        build_ms(g, bst::B_COMPILE, bst::B_LINK),
+        build_ms(g, bst::B_SYNC, bst::B_LINK),
         build_ms(g, bst::B_START, bst::B_LINK),
     );
     // The whole partition, one entry per engine phase (wall ms).
@@ -251,11 +246,9 @@ fn real_build(js: &mut String) bool {
     }
     unsafe stdio::printf(" ms\n".ptr() as *const char);
     unsafe stdio::printf(
-        "    %zu C units, %zu compiled, %.*s, object cache off, emit cache off, peak RSS %.1f MiB\n".ptr() as *const char,
+        "    %zu objects, %zu written, emit cache off, peak RSS %.1f MiB\n".ptr() as *const char,
         g.total_c,
         g.stale_n,
-        g.cc_version.len() as i32,
-        g.cc_version.as_str().ptr() as *const char,
         g.rss[4] as f64 / 1048576.0,
     );
     bst::release();

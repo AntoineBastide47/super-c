@@ -1,8 +1,8 @@
 // Tests of bindgen's C environment (`src/bindgen/ctarget.spc`). The tables are checked against the
 // reference compiler: clang of the pinned major release (`ctarget_data::PINNED_VERSION`). The macro and
-// `__has_*` tests run where $SC_CTARGET_CLANG, $CC, `clang` or `cc` (in that order) is such a clang, and
-// pass without checking elsewhere; with SC_CTARGET_REQUIRE=1 a missing oracle fails them (CI sets it), as
-// does the test of the built-in headers' values. The built-in headers parse with any clang; the directory,
+// `__has_*` tests run where $SC_CTARGET_CLANG or the comparison job's $SC_TEST_CC (in that order) is such a
+// clang, and pass without checking elsewhere; with SC_CTARGET_REQUIRE=1 a missing oracle fails them (the
+// comparison job sets it), as does the test of the built-in headers' values. The built-in headers parse with any clang; the directory,
 // ABI and discovery tests need no compiler.
 import stdlib;
 import driver_shim as shim;
@@ -56,14 +56,12 @@ const fn pinned_major() str<'static> {
 fn find_oracle() Oracle {
     let mut o = Oracle { clang: String::new(), pinned: false, debian: false };
     let mut cands = Vector::<String>::new();
-    for name in ["SC_CTARGET_CLANG", "CC"] {
+    for name in ["SC_CTARGET_CLANG", "SC_TEST_CC"] {
         let v = stdlib::get_env(name).unwrap_or(String::new());
         if v.len() != 0 {
             cands.push(v);
         }
     }
-    cands.push(String::from_str("clang"));
-    cands.push(String::from_str("cc"));
     let mut work = cli::tmp_dir();
     work.format_into("/super-c-ctarget-oracle-{}", process::pid().unwrap_or(1));
     let want = format("#define __clang_major__ {}\n", pinned_major());

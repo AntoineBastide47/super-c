@@ -1,7 +1,7 @@
 // Direct unit tests of the cross-compilation helpers. A real `--target=ios/android/wasm` build needs
 // the target SDK (not present or stable in every lane), but these functions are pure string/record
-// builders, so calling them directly covers the SDK-cc selection, the NDK host tag, the per-target
-// SDK flags, the library-artifact naming, and the pointer-width target record on every platform.
+// builders, so calling them directly covers the per-target SDK flags, the library-artifact naming, and
+// the pointer-width target record on every platform.
 import driver::util as util;
 import driver::taskctl as tctl;
 import driver::tuc as tuc;
@@ -13,31 +13,6 @@ import ir::cpu_features as cf;
 import driver_shim as shim;
 import target::table as tgt;
 import tests::cli_harness as cli;
-
-@test
-fn sdk_cc_selects_a_toolchain_per_sdk() {
-    // iOS: xcrun-selected clang.
-    let mut ios = String::new();
-    util::sdk_cc(4, 1, &mut ios);
-    assert(ios.as_str().contains("xcrun"), "ios uses xcrun clang");
-    assert(ios.as_str().contains("iphoneos"), "ios names the iphoneos sdk");
-    // The x86_64 iOS target is the simulator and takes the simulator SDK.
-    let mut sim = String::new();
-    util::sdk_cc(4, 0, &mut sim);
-    assert(sim.as_str().contains("iphonesimulator"), "the iOS simulator names its own sdk");
-    // Android: the NDK prebuilt clang, located from ANDROID_NDK_HOME (covers the host-tag path).
-    let _env1 = cli::set_env("ANDROID_NDK_HOME", "/opt/ndk");
-    let mut andr = String::new();
-    util::sdk_cc(5, 1, &mut andr);
-    assert(andr.as_str().contains("/opt/ndk"), "android roots at the NDK home");
-    assert(andr.as_str().contains("prebuilt/"), "android uses the prebuilt toolchain");
-    assert(andr.as_str().contains("bin/clang"), "android ends at clang");
-    // Wasm: wasi-sdk clang when WASI_SDK_PATH is set, else plain clang.
-    let _env2 = cli::set_env("WASI_SDK_PATH", "/opt/wasi");
-    let mut w = String::new();
-    util::sdk_cc(3, 2, &mut w);
-    assert(w.as_str().contains("/opt/wasi"), "wasm uses the wasi-sdk clang");
-}
 
 @test
 fn sdk_flags_carry_the_triple() {
@@ -75,16 +50,11 @@ fn wasi_sysroot_is_one_unquoted_argument() {
 // of Linux and macOS: every wasm and Windows link asks for 8 MiB, wasm's placed first so an overflow traps.
 @test
 fn links_with_the_native_stack_size() {
-    let mut ld = String::new();
-    util::push_sdk_libs(&mut ld, 3);
-    assert(ld.as_str().contains(" -Wl,-z,stack-size=8388608 "), "an 8 MiB wasm stack");
-    assert(ld.as_str().contains(" -Wl,--stack-first"), "the stack below static data");
-    let mut lw = String::new();
-    util::push_sdk_libs(&mut lw, 0);
-    assert(lw.as_str() == " -Wl,--stack,8388608", "an 8 MiB Windows reserve");
-    let mut ll = String::new();
-    util::push_sdk_libs(&mut ll, 2);
-    assert(ll.len() == 0, "Linux keeps its own 8 MiB default");
+    let ld = tgt::os(3).exe_link;
+    assert(ld.contains(" -Wl,-z,stack-size=8388608 "), "an 8 MiB wasm stack");
+    assert(ld.contains(" -Wl,--stack-first"), "the stack below static data");
+    assert(tgt::os(0).exe_link == " -Wl,--stack,8388608", "an 8 MiB Windows reserve");
+    assert(tgt::os(2).exe_link.len() == 0, "Linux keeps its own 8 MiB default");
 }
 
 @test

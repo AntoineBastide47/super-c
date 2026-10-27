@@ -34,33 +34,31 @@ if ! SC_LEAK_CHECK=fatal SC_LIR=1 ./super-c test --quiet; then
     exit 1
 fi
 
-# 3b) ThreadSanitizer over the concurrency substrate. The `race` profile is the ONLY thing that builds with
-# -fsanitize=thread (release never does) and it is what turns on the coroutine fiber annotations, without
-# which a migrating coroutine reports as a race against itself. A report here is a real happens-before hole
-# in the runtime, so any output at all fails the check.
-printf 'check: thread sanitizer (race profile)\n'
-racelog=$(mktemp)
+# 3b) The concurrency exercisers, one after the other: each checks its counts and bounds its waits, so a
+# lost wake or a broken count fails it with a nonzero exit.
+printf 'check: concurrency exercisers\n'
+runlog=$(mktemp)
 for prog in parallel_smoke race_hunt cancel_hunt queue_hunt io_hunt blocking_hunt mutex_hunt; do
-    if ! ./super-c build "ci/$prog.spc" -o ./tsan-smoke --profile=race >/dev/null 2>&1; then
-        rm -f "$racelog" ./tsan-smoke
-        printf 'check: FAILED -- could not build ci/%s.spc under the race profile\n' "$prog" >&2
+    if ! ./super-c build "ci/$prog.spc" -o ./hunt-bin >/dev/null 2>&1; then
+        rm -f "$runlog" ./hunt-bin
+        printf 'check: FAILED -- could not build ci/%s.spc\n' "$prog" >&2
         exit 1
     fi
     rc=0
-    TSAN_OPTIONS="halt_on_error=0" ./tsan-smoke >/dev/null 2>"$racelog" || rc=$?
-    if [ "$rc" -ne 0 ] || grep -q 'ThreadSanitizer' "$racelog"; then
-        printf 'check: FAILED -- ci/%s.spc under ThreadSanitizer (exit %s):\n' "$prog" "$rc" >&2
-        cat "$racelog" >&2
-        rm -f "$racelog" ./tsan-smoke
+    ./hunt-bin >/dev/null 2>"$runlog" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf 'check: FAILED -- ci/%s.spc (exit %s):\n' "$prog" "$rc" >&2
+        cat "$runlog" >&2
+        rm -f "$runlog" ./hunt-bin
         exit 1
     fi
 done
-rm -f "$racelog" ./tsan-smoke
+rm -f "$runlog" ./hunt-bin
 
 # 4) Bootstrap from the latest release binary; any failure fails the check.
 # Stage 0: the release binary builds current source via the legacy `build <root> -o` path (works
-# even for a pre-build-system release). Stage 0 then rebuilds itself through the engine --
-# two generations from current source, the same guarantee the Makefile's SELF-BUILD gave.
+# even for a pre-build-system release; a release older than the native backend needs its C compiler
+# here). Stage 0 then rebuilds itself through the engine: two generations from current source.
 printf 'check: bootstrap rebuild from the latest release\n'
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -84,11 +82,11 @@ if ! SC_LEAK_CHECK=fatal ./stage0-super-c build --profile=test --out-dir=build/b
 fi
 rm -f stage0-super-c
 
-# 5) The correctness gate's own checks over the rebuilt compiler (ci/gate.sh --core, under a minute on a
-# warm object cache): the two-generation fixpoint under the validation
-# switches, the one-worker and every-core identity under each task-delay seed (emitted C, type table,
-# item index digest, diagnostics), and the strict C warnings and readability of every unit. The full gate
-# runs them itself, so it skips this step.
+# 5) The correctness gate's own checks over the rebuilt compiler (ci/gate.sh --core): the two-generation
+# fixpoint of the binaries under the validation switches, the one-worker and every-core identity under
+# each task-delay seed (emitted C, type table, item index digest, diagnostics, native objects), and the
+# readability of the emitted C (its strict C warnings with SC_TEST_CC). The full gate runs them itself, so
+# it skips this step.
 if [ -z "${SC_GATE_OUTER:-}" ]; then
     printf 'check: correctness gate core (ci/gate.sh --core)\n'
     if ! sh ci/gate.sh --core; then

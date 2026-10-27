@@ -393,8 +393,8 @@ fn simd_math_lowerings_fast_f64() {
 // The hash program of class `m` and lane type `t` gives `all` under the native and the scalar lowering.
 fn lowerings_agree(m: str, t: str, all: str) {
     let src = hash_program(m, t);
-    let a = h::diff_build(src.as_str(), ["--profile=ubsan", "--jobs=1"]);
-    let b = h::diff_build(src.as_str(), ["--profile=ubsan", "--jobs=1", "SC_SIMD_SCALAR=1"]);
+    let a = h::diff_build(src.as_str(), ["--jobs=1"]);
+    let b = h::diff_build(src.as_str(), ["--jobs=1", "SC_SIMD_SCALAR=1"]);
     if !a.built || !b.built {
         eprintln("{}{}", a.diag.as_str(), b.diag.as_str());
     }

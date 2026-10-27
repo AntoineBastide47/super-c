@@ -287,12 +287,10 @@ pub const SYNTH_PL: u32 = 0x80000000u32;
 /// largest 2,100), so the bodies that follow grow each table about twice instead of eight times.
 pub const TABLE_MIN: usize = 1024;
 
-// Fixed bounds: the exposed scalars a heap write kills, the escaped roots, pending mutable borrows,
-// the loop-header scan work, the integer facts a block-entry state keeps, the entry-state pool and
+// Fixed bounds: the exposed scalars a heap write kills, the escaped roots, the loop-header scan work, the integer facts a block-entry state keeps, the entry-state pool and
 // the solver's block visits.
 const EXPOSED_MAX: usize = 64;
 const ESC_MAX: usize = 16;
-const PEND_MAX: usize = 8;
 const IWIDTH_MAX: usize = 64;
 const IPOOL_MAX: usize = 65536;
 const PKILL_MAX: usize = 256;

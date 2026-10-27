@@ -8,7 +8,7 @@
 // build's level (`portable`, `portable-avx2`, `portable-avx512`: `--target-cpu`), and a `simd_gap` row
 // reports its time over the hand-written kernel of that level (SSE2 for a baseline build): an arithmetic
 // kernel more than 10% slower fails the run (`ARITH`). record.sh turns a run into the rows of
-// baseline.tsv and probes.tsv. The `dispatch_*` benchmarks measure `detect::dispatch`.
+// baseline.tsv. The `dispatch_*` benchmarks measure `detect::dispatch`.
 import std::cpu;
 import std::cpu::detect as detect;
 import std::float as fl;
@@ -109,8 +109,10 @@ const PORTED: [usize; 11] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 // x86_64 each runs within 10% of the hand-written kernel of the build's level, or the benchmark fails.
 const ARITH: [usize; 4] = [0, 2, 4, 10];
 
+// The x86-64 kernels test the CPU with `__builtin_cpu_supports`, whose `__cpu_model` the C compiler's
+// runtime archive defines: kernels.sh copies it beside the library, which no link adds implicitly.
 @arch(x86_64)
-@link("-Lbuild/simd_baseline/x86_64 -lsimd_baseline")
+@link("-Lbuild/simd_baseline/x86_64 -lsimd_baseline -lsimd_baseline_rt")
 extern "C" "sse2.h" {
     fn sb_sse2() *const void;
 }

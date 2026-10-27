@@ -72,7 +72,12 @@ pub fn expand(text: str, imm: []i64, known: []bool, out: &mut String) bool {
             if star < 0 {
                 return false;
             }
-            k = (e.byte_at(0) - b'0') as usize;
+            k = (switch e.slice(0, star as usize).parse_i64() {
+                Some(v) => v as usize,
+                None => {
+                    return false;
+                },
+            });
             let rest = e.slice(star as usize + 1, e.len());
             // The sign of `b` is the last `+` or `-` past `a`'s own sign.
             let mut s = rest.len();
@@ -101,8 +106,11 @@ pub fn expand(text: str, imm: []i64, known: []bool, out: &mut String) bool {
             });
             i += end as usize + 1;
         } else {
-            k = (text.byte_at(i + 1) - b'0') as usize;
-            i += 2;
+            i += 1;
+            while i < text.len() && text.byte_at(i) >= b'0' && text.byte_at(i) <= b'9' {
+                k = k * 10 + (text.byte_at(i) - b'0') as usize;
+                i += 1;
+            }
         }
         if k >= imm.len() || !known[k] {
             return false;
@@ -286,6 +294,28 @@ const fn word_byte(c: u8) bool {
 pub const MF_NONE: u8 = 0;
 pub const MF_LOAD: u8 = 1;
 pub const MF_STORE: u8 = 2;
+
+/// The lane bytes of an x86 vector its scalar arguments give, the first the lowest lane, for a `setr`
+/// intrinsic of more arguments than the templates' registers (`_mm_setr_epi8`, `_mm256_setr_epi16`: no
+/// row covers one); 0 for another name or instruction set `isa`.
+pub fn lane_form(isa: str, name: str) u32 {
+    if isa != "x86_64" {
+        return 0;
+    }
+    let pre: []str = ["_mm_setr_", "_mm256_setr_", "_mm512_setr_"];
+    for p in 0..pre.len() {
+        if name.starts_with(pre[p]) {
+            return switch name.slice(pre[p].len(), name.len()) {
+                "epi8" => 1,
+                "epi16" => 2,
+                "epi32" => 4,
+                "epi64x" => 8,
+                _ => 0,
+            };
+        }
+    }
+    return 0;
+}
 
 /// Whether intrinsic `name` only loads or stores one whole vector at its pointer argument, of any
 /// alignment (`vld1q_f32`, `_mm_loadu_ps`, `_mm256_store_si256`, `wasm_v128_load`): the lowering makes it

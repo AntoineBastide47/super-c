@@ -3,15 +3,31 @@
 // without blocking its worker. Unstable, internal to std and the compiler.
 import sc_runtime;
 
+// WASI's `clockid_t` is a pointer, whose value `std::rt::libc`'s `clock_gettime` reads as the WASI clock id
+// plus one.
+@platform(wasm)
+type clockid = usize;
+@platform(macos | ios | linux | android)
+type clockid = i32;
+
 @platform(!windows)
 extern "C" "time.h" {
     struct timespec {
         pub tv_sec: i64,
         pub tv_nsec: isize,
     }
-    fn clock_gettime(clock: i32, ts: *mut timespec) i32;
+    fn clock_gettime(clock: clockid, ts: *mut timespec) i32;
+}
+
+@platform(macos | ios | linux | android)
+extern "C" "time.h" {
     const CLOCK_REALTIME: i32;
 }
+
+// The header's `CLOCK_REALTIME` on WASI is the address of a `const` object; the runtime spells it as the
+// WASI realtime clock's id (0) plus one, as for C (`src/emit/rt_h.spc`).
+@platform(wasm)
+const CLOCK_REALTIME: clockid = 1;
 
 @platform(windows)
 extern "C" "windows.h" {

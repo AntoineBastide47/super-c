@@ -3,8 +3,7 @@
 // (a split plan), with that model's boundary inputs; and one program of the loads, stores and mask
 // tests the model has no operation for. The oracle builds each program twice, planned and with the
 // planner forced to lane loops (SC_SIMD_SCALAR=1), and requires the same value or trap per case, and
-// a call of every entry in the planned C. The builds go through C (SC_NATIVE=0): the entries are the C
-// backend's, and a native module renders no C.
+// a call of every entry in the planned C, which a second pair of builds writes (`--emit-c`).
 import target::table as tgt;
 import tests::gen::driver as gen;
 import tests::gen::vector as vec;
@@ -606,10 +605,18 @@ pub fn check(text: str, k: usize, parts: usize, per: u64) String {
         }
         let n = part.len();
         let src = vec::program(&part, &omit);
-        let a = h::diff_build(src.as_str(), ["--profile=ubsan", "SC_NATIVE=0"]);
-        let b = h::diff_build(src.as_str(), ["--profile=ubsan", "SC_NATIVE=0", "SC_SIMD_SCALAR=1"]);
-        if !a.built || !b.built {
-            r.format_into("the program does not build:\n{}{}", a.diag.as_str(), b.diag.as_str());
+        let a = h::diff_build(src.as_str(), []);
+        let b = h::diff_build(src.as_str(), ["SC_SIMD_SCALAR=1"]);
+        let ac = h::diff_build(src.as_str(), ["--emit-c"]);
+        let bc = h::diff_build(src.as_str(), ["--emit-c", "SC_SIMD_SCALAR=1"]);
+        if !a.built || !b.built || !ac.built || !bc.built {
+            r.format_into(
+                "the program does not build:\n{}{}{}{}",
+                a.diag.as_str(),
+                b.diag.as_str(),
+                ac.diag.as_str(),
+                bc.diag.as_str(),
+            );
             return r;
         }
         let mut va = Vector::<String>::new();
@@ -632,8 +639,8 @@ pub fn check(text: str, k: usize, parts: usize, per: u64) String {
                 );
             }
         }
-        seen.push_str(emitted_c(&a, "ubsan").as_str());
-        if emitted_c(&b, "ubsan").contains("__sc_si_") {
+        seen.push_str(emitted_c(&ac, "debug").as_str());
+        if emitted_c(&bc, "debug").contains("__sc_si_") {
             r.push_str("a lane-loop build calls an entry\n");
         }
     }
@@ -649,14 +656,15 @@ pub fn check(text: str, k: usize, parts: usize, per: u64) String {
 /// one program, the same output planned and with lane loops, and a call of each entry.
 pub fn check_memory(text: str) String {
     let src = memory_program();
-    let m = h::diff_build(src.as_str(), ["--profile=ubsan", "SC_NATIVE=0"]);
-    let s = h::diff_build(src.as_str(), ["--profile=ubsan", "SC_NATIVE=0", "SC_SIMD_SCALAR=1"]);
-    let mut r = if m.built && s.built {
+    let m = h::diff_build(src.as_str(), []);
+    let s = h::diff_build(src.as_str(), ["SC_SIMD_SCALAR=1"]);
+    let mc = h::diff_build(src.as_str(), ["--emit-c"]);
+    let mut r = if m.built && s.built && mc.built {
         h::same_runs(&m, &s, ["", "x"]);
     } else {
-        format("the program does not build:\n{}{}", m.diag.as_str(), s.diag.as_str());
+        format("the program does not build:\n{}{}{}", m.diag.as_str(), s.diag.as_str(), mc.diag.as_str());
     };
-    let c = emitted_c(&m, "ubsan");
+    let c = emitted_c(&mc, "debug");
     let es = entries(text);
     let run = run_features(true);
     for k in 0..es.len() {

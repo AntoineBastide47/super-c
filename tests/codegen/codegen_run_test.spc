@@ -1515,6 +1515,17 @@ fn const_generic_array_length_inferred(b: &mut h::ExitBatch) {
     );
 }
 
+// A narrower number in a wider tuple slot keeps its own type and converts at the store, as in an array
+// or a field: an element, a field, a dereference and a call result.
+@test
+fn tuple_slots_widen_their_numbers() {
+    h::expect_exit(
+        "tuple slots widen",
+        "struct P {\n    pub x: i16,\n}\n\nfn g(k: i16) i16 {\n    return -5 * k;\n}\n\nfn main(args: Vector<str>) i32 {\n    let k = args.len() as i16;\n    let ia: [i16; 4] = [300, -32768, 32767, -5 * k];\n    let i = args.len() + 2;\n    let v = ia[0..4];\n    let p = P { x: -7 * k };\n    let r = &p.x as *const i16;\n    let a: (i32, i64) = unsafe (ia[i], ia[i - 1]);\n    let b: (i32, i64) = (v[i], v[1]);\n    let c: (i32, i64) = (p.x, unsafe *r);\n    let d: (i32, i64) = (g(k), g(k + 1));\n    if a.0 != -5 || a.1 != 32767 || b.0 != -5 || b.1 != -32768 || c.0 != -7 || c.1 != -7 || d.0 != -5 || d.1 != -10 {\n        return 1;\n    }\n    return 0;\n}\n",
+        0,
+    );
+}
+
 @test
 fn tuple_structs_byte_strings_and_slice_for() {
     let mut b = h::ExitBatch::new();

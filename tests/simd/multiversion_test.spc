@@ -93,10 +93,6 @@ fn closure_bounds_reject_feature_functions() {
 // baseline caller, and inlines a function without features.
 @test
 fn feature_functions_keep_their_calls() {
-    if !cli::has_cc() {
-        return; // it reads the emitted C
-    }
-    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -105,10 +101,9 @@ fn feature_functions_keep_their_calls() {
             V3,
         ).as_str(),
     );
-    // The C alone: a C compiler for another instruction set rejects the x86 target attribute.
     let root = p.dir();
     let _ = p.run_raw(
-        format("build \"{}/main.spc\" -o \"{}/app\" --profile=release --arch=x86_64 --target=linux", root, root).as_str(),
+        format("build \"{}/main.spc\" --emit-c --profile=release --arch=x86_64 --target=linux", root).as_str(),
     );
     let c = cli::read_text(format("{}/build/release/raw/main.c", p.dir()).as_str());
     assert(
@@ -154,10 +149,6 @@ fn feature_functions_keep_their_calls() {
 // original elsewhere. A function without vector code keeps its one copy.
 @test
 fn feature_functions_compile_their_vector_callees_with_their_features() {
-    if !cli::has_cc() {
-        return; // it reads the emitted C
-    }
-    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -165,11 +156,7 @@ fn feature_functions_compile_their_vector_callees_with_their_features() {
     );
     let root = p.dir();
     let _ = p.run_raw(
-        format(
-            "build \"{}/main.spc\" -o \"{}/app\" --profile=release --arch=x86_64 --target=linux --jobs=1",
-            root,
-            root,
-        ).as_str(),
+        format("build \"{}/main.spc\" --emit-c --profile=release --arch=x86_64 --target=linux --jobs=1", root).as_str(),
     );
     let c = cli::read_text(format("{}/build/release/raw/main.c", root).as_str());
     let i = cli::read_text(format("{}/build/release/raw/main__inst.c", root).as_str());
@@ -194,7 +181,6 @@ fn feature_functions_compile_their_vector_callees_with_their_features() {
 // script without `--profile` (no level set) none at all.
 @test
 fn vector_functions_choose_their_copy_at_run_time() {
-    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -215,7 +201,7 @@ fn vector_functions_choose_their_copy_at_run_time() {
     ];
     for i in 0..7 {
         bsys::rm_rf(format("{}/build", root).as_str());
-        let _ = p.run_raw(format("build \"{}/main.spc\" -o \"{}/app\" {}", root, root, unsafe flags[i]).as_str());
+        let _ = p.run_raw(format("build \"{}/main.spc\" --emit-c {}", root, unsafe flags[i]).as_str());
         let raw = format("{}/build/{}/raw", root, unsafe profs[i]);
         let mut t = cli::read_text(format("{}/main.c", raw).as_str());
         t.push_str(cli::read_text(format("{}/main__inst.c", raw).as_str()).as_str());
@@ -415,18 +401,12 @@ fn main() i32 {
 }
 )";
 
-// `DISPATCH` built with `flags`, and with the build's environment variable `key` set to `val` when
-// `key` is not empty: its project, and whether it built.
-fn dispatch_build(flags: str, key: str, val: str) (cli::Proj, bool) {
+// `DISPATCH` built with `flags`: its project, and whether it built.
+fn dispatch_build(flags: str) (cli::Proj, bool) {
     let p = cli::proj_new();
     p.mkfile("main.spc", DISPATCH);
     let root = p.dir();
-    let args = format("build \"{}/main.spc\" -o \"{}/app\" {}", root, root, flags);
-    let b = if key.len() == 0 {
-        p.run_raw(args.as_str());
-    } else {
-        cli::superc_env_in(root, key, val, args.as_str());
-    };
+    let b = p.run_raw(format("build \"{}/main.spc\" -o \"{}/app\" {}", root, root, flags).as_str());
     if !b.ok() {
         b.show();
     }
@@ -446,33 +426,29 @@ fn dispatch_exec(p: &cli::Proj, built: bool, env: str) String {
     let mut err = format("{}/.err", root);
     let rc = cli::run_with(cmd.cstr(), null, out.cstr(), err.cstr(), env);
     let e = cli::read_text(err.as_str());
-    if rc != 0 || e.contains("ThreadSanitizer") {
+    if rc != 0 {
         eprintln("[{}]: exit {}: {}", env, rc, e.as_str());
         return String::from_str("fail");
     }
     return cli::read_text(out.as_str());
 }
 
-// Build `DISPATCH` with `flags` (and the build variable `key`=`val`) and run it once: its output,
-// "fail" when it fails.
-fn dispatch_run(flags: str, key: str, val: str) String {
-    let (p, built) = dispatch_build(flags, key, val);
+// Build `DISPATCH` with `flags` and run it once: its output, "fail" when it fails.
+fn dispatch_run(flags: str) String {
+    let (p, built) = dispatch_build(flags);
     return dispatch_exec(&p, built, "");
 }
 
-// The first table entry whose feature the machine has, else the fallback; one choice per process,
-// with no race report when two threads make the first call; the same under link-time optimization.
+// The first table entry whose feature the machine has, else the fallback; one choice per process, also
+// when two threads make the first call; the same in a release build.
 @test
 fn dispatch_chooses_once_in_table_order() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let a = unsafe shim::sc_host_arch();
     if cli::on_windows() || cli::on_wasm() || h::simd_lane() || a > 1 {
         return;
     }
     // One build: the masked features (`SC_CPU_OFF`) act on its runs.
-    let (p, built) = dispatch_build("", "", "");
+    let (p, built) = dispatch_build("");
     let all = dispatch_exec(&p, built, "");
     assert(all.as_str() != "fail", "the machine's choice");
     // The masked features: the build's own set stays.
@@ -485,10 +461,7 @@ fn dispatch_chooses_once_in_table_order() {
     let off = dispatch_exec(&p, built, format("SC_CPU_OFF={}", 1u64 << hi).as_str());
     assert(off.as_str() != "fail", "the run without the first entry's feature");
     assert(off.as_str() != "2", "the next entry");
-    assert(dispatch_run("--profile=race", "", "").as_str() == all.as_str(), "no race");
-    assert(dispatch_run("--profile=release", "", "").as_str() == all.as_str(), "lto");
-    // `SC_LTO` is a variable of the build, not of the run.
-    assert(dispatch_run("--profile=release", "SC_LTO", "thin").as_str() == all.as_str(), "thin lto");
+    assert(dispatch_run("--profile=release").as_str() == all.as_str(), "release");
 }
 
 // The steady state of a dispatching call inlines: one acquire load (aarch64 `ldar` or `ldapr`; on
@@ -498,7 +471,6 @@ fn dispatch_needs_no_fence() {
     if !cli::has_cc() {
         return; // it reads the C compiler's assembly
     }
-    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     // Each unit alone, as a large program builds: in one unit the C compiler sees the target and may
     // turn the indirect call into a compare and a branch.
     let _unit = cli::set_env("SC_UNITY_MAX", "0");

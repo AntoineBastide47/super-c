@@ -777,19 +777,18 @@ fn interval_widening_terminates_on_nested_loops(b: &mut h::ExitBatch) {
     b.add("nested behavior", SRC, 0);
 }
 
-// Project program `src` (it imports std::simd) calls the vector range check in its C when `present`,
-// and its run exits 0, or traps with `trap` when that is not empty.
+// Project program `src` (it imports std::simd) calls the vector range check in its C (`--emit-c`) when
+// `present`, and its run exits 0, or traps with `trap` when that is not empty.
 fn vec_check(label: str, src: str, present: bool, trap: str) {
-    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units
-    let b = h::diff_build(src, []);
-    assert(b.built, label);
-    let mut path = String::from_str(b.proj.dir());
-    path.push_str("/build/debug/raw/main.c");
-    let c = cli::read_text(path.as_str());
+    let cb = h::diff_build(src, ["--emit-c"]);
+    assert(cb.built, label);
+    let c = cli::read_text(format("{}/build/debug/raw/main.c", cb.proj.dir()).as_str());
     assert(c.len() != 0, label);
     assert(c.contains("__sc_bounds_vec(") == present, label);
     // a proven vector access leaves no element check either
     assert(present || !c.contains("__sc_bounds("), label);
+    let b = h::diff_build(src, []);
+    assert(b.built, label);
     let r = h::diff_run(&b, "");
     let ok = if trap.len() == 0 {
         r.exit == 0;
@@ -802,9 +801,10 @@ fn vec_check(label: str, src: str, present: bool, trap: str) {
     assert(ok, label);
 }
 
-// `vec_check` for several programs in one project build: case k is module `case_k` (`case_module`)
-// under `case_root`, its C is `build/debug/raw/case_k.c`, and each case runs in its own process. On the
-// vector conformance lane (a wasm32 run) or when the build fails, each case builds alone.
+// `vec_check` for several programs in one project, built twice: case k is module `case_k`
+// (`case_module`) under `case_root`, its C (`--emit-c`) is `build/debug/raw/case_k.c`, and each case runs
+// in its own process. On the vector conformance lane (a wasm32 run) or when a build fails, each case
+// builds alone.
 struct VecProgs {
     labels: Vector<String>,
     srcs: Vector<String>,
@@ -842,16 +842,21 @@ extend VecProgs {
             return;
         }
         let p = h::diff_proj();
+        let q = h::diff_proj();
         for k in 0..self.srcs.len() {
-            p.mkfile(format("case_{}.spc", k).as_str(), case_module(self.srcs.at(k).as_str()).as_str());
+            let m = case_module(self.srcs.at(k).as_str());
+            p.mkfile(format("case_{}.spc", k).as_str(), m.as_str());
+            q.mkfile(format("case_{}.spc", k).as_str(), m.as_str());
         }
         p.mkfile("main.spc", case_root(self.srcs.len()).as_str());
-        let b = h::diff_build_in(p, []);
+        q.mkfile("main.spc", case_root(self.srcs.len()).as_str());
+        let cb = h::diff_build_in(p, ["--emit-c"]);
+        let b = h::diff_build_in(q, []);
         let root = b.proj.dir();
         for k in 0..self.srcs.len() {
             let label = self.labels.at(k).as_str();
-            let c = cli::read_text(format("{}/build/debug/raw/case_{}.c", root, k).as_str());
-            if !b.built || !c.contains("case_main(") {
+            let c = cli::read_text(format("{}/build/debug/raw/case_{}.c", cb.proj.dir(), k).as_str());
+            if !cb.built || !b.built || !c.contains("case_main(") {
                 eprintln("--- case {} builds alone", k);
                 vec_check(label, self.srcs.at(k).as_str(), *self.present.at(k), self.traps.at(k).as_str());
                 continue;
@@ -883,9 +888,6 @@ extend VecProgs {
 // or after the slice's owner shrinks, the check stays.
 @test
 fn vector_access_group_checks() {
-    if !cli::has_cc() {
-        return; // it reads the emitted C
-    }
     let mut vp = VecProgs::new();
     let STRIDED: str = "import std::simd;\nfn sum(s: []i32, d: []mut i32) i32 {\n    let n = s.len() - s.len() % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < n {\n        let v = simd::load::<i32, 4>(s, i);\n        acc = acc.wrapping_add(v);\n        i += 4;\n    }\n    return acc[0] + acc[3] + d.len() as i32;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let mut d = [0; 4];\n    return sum(v[0..v.len()], d) - 18;\n}\n";
     vp.add("the strided load is proven", STRIDED, false, "");

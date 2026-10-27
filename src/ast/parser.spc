@@ -4756,9 +4756,6 @@ extend Parser {
             if fnk && (attr.kind == AttrKind::ATTR_TARGET_FEATURE as u8 || attr.kind == AttrKind::ATTR_SIMD_IMPL as u8) {
                 self.ast.at(owner).as_data.function.set(FN_FEATURES, true);
             }
-            if fnk && attr.kind == AttrKind::ATTR_C_LANE_ACCESS as u8 {
-                self.ast.at(owner).as_data.function.set(FN_LANE_ACCESS, true);
-            }
             if attr.kind == AttrKind::ATTR_INTRINSIC as u8 && (owner == NODE_NONE || self.ast.at_const(owner).kind != NodeKind::NODE_FUNCTION || !self.ast.at_const(
                 owner,
             ).as_data.function.is_intrinsic()) {

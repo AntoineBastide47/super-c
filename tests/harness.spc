@@ -19,7 +19,6 @@ import borrowck::flow_ir as bfi;
 import driver_shim as shim;
 import std::platform::fs;
 import std::platform::process;
-import lsp::json as json;
 import tests::cli_harness as cli;
 import driver::util as dutil;
 
@@ -547,16 +546,17 @@ pub fn compile_and_run(src: str) RunResult {
 // As compile_and_run, but with `env` ("VAR=v " assignments, trailing space) prefixed to the run command.
 /// `compile_and_run` with `env` (space-separated NAME=VALUE) applied to the program.
 pub fn compile_and_run_env(src: str, env: str) RunResult {
-    return compile_and_run_in(src, "", env);
+    return compile_and_run_in(src, false, env);
 }
 
-/// `compile_and_run` through the C backend: the C emitter's own behavior.
+/// `compile_and_run` through the C backend: the C emitter's own behavior, the C tree `--emit-c` writes
+/// built by the comparison job's C compiler (`cli::has_cc` first).
 pub fn compile_and_run_c(src: str) RunResult {
-    return compile_and_run_in(src, "SC_NATIVE=0 ", "");
+    return compile_and_run_in(src, true, "");
 }
 
-// `compile_and_run` with `benv` applied to the build and `env` to the program.
-fn compile_and_run_in(src: str, benv: str, env: str) RunResult {
+// `compile_and_run`, through the C backend when `c`, with `env` applied to the program.
+fn compile_and_run_in(src: str, c: bool, env: str) RunResult {
     let mut r = RunResult { built: false, exit: -1, out: null };
     let dir = scratch_dir();
     if dir.len() == 0 {
@@ -568,7 +568,7 @@ fn compile_and_run_in(src: str, benv: str, env: str) RunResult {
         return r;
     }
     let bin = prog_path(d);
-    if !build_script(d, bin.as_str(), benv) {
+    if !build_script(d, bin.as_str(), c) {
         rm_dir(d);
         return r;
     } // did not build
@@ -631,21 +631,30 @@ fn prog_cmd(d: str, bin: str, args: str) String {
 }
 
 // Build `<dir>/main.spc` as a script into `bin` with the compiler under test (for wasm32 on the target
-// lane); whether it built.
-fn build_script(dir: str, bin: str, env: str) bool {
+// lane), through its C tree and the C compiler when `c`; whether it built.
+fn build_script(dir: str, bin: str, c: bool) bool {
     let mut cmd = format(
-        "\"{}\" build {}{} \"{}/main.spc\" -o \"{}\"",
+        "\"{}\" build{} \"{}/main.spc\"",
         cli::superc_path(),
-        unsafe str::from_cstr(cli::cstd_flag()),
         if target_lane() {
             " --target=wasm";
         } else {
             "";
         },
         dir,
-        bin,
     );
-    return cli::run_with(cmd.cstr(), null, null, null, env) == 0;
+    if !c {
+        cmd.format_into(" -o \"{}\"", bin);
+        return cli::run_with(cmd.cstr(), null, null, null, "") == 0;
+    }
+    // Not `<dir>/out`: the run writes its output there.
+    cmd.format_into(" --emit-c \"--out-dir={}/build\"", dir);
+    return cli::run_with(cmd.cstr(), null, null, null, "") == 0 && cli::cc_tree_link(
+        format("{}/build/debug/raw", dir).as_str(),
+        bin,
+        "",
+        format("{}/.cc", dir).as_str(),
+    ) == 0;
 }
 
 // Build+run `src` and require it to terminate with exit code `code` (the analog of tests/codegen_run's
@@ -814,7 +823,7 @@ extend ExitBatch {
         root.push_string(&body);
         assert(write_text(format("{}/main.spc", d).as_str(), root.as_str()), "harness: cannot write the batch root");
         let bin = prog_path(d);
-        if !build_script(d, bin.as_str(), "") {
+        if !build_script(d, bin.as_str(), false) {
             rm_dir(dir.as_str());
             for i in 0..batched.len() {
                 self.alone(batched[i]);
@@ -926,10 +935,9 @@ pub struct DiffBuild {
 // runner forks one process per test, so the cache is never shared.
 static mut SIMD_LANE: i32 = -1;
 
-// The target lane, `SC_TEST_TARGET=wasm` (a wasi-sdk in WASI_SDK_PATH, wasmtime on the PATH): the
-// vector lane over the whole suite, so every program the harness builds (`compile_and_run` too) is a
-// wasm32 module run under wasmtime: at the default profile through the native backend, or through C
-// under `SC_NATIVE=0`. -1 until read.
+// The target lane, `SC_TEST_TARGET=wasm` (wasmtime on the PATH): the vector lane over the whole suite,
+// so every program the harness builds (`compile_and_run` too) is a wasm32 module run under wasmtime.
+// -1 until read.
 static mut TARGET_LANE: i32 = -1;
 
 /// Whether the target lane is on (`SC_TEST_TARGET=wasm`).
@@ -958,10 +966,8 @@ pub struct DiffRun {
 }
 
 /// Build `src` as main.spc of a scratch project. An option of the form NAME=VALUE sets that
-/// environment variable for the build (`SC_BCE=0`); any other option is one build flag. The project
-/// defines `--profile=ubsan`, unoptimized with UndefinedBehaviorSanitizer only, for a large program
-/// run many times: UBSan checks its arithmetic without AddressSanitizer's start-up, which makes each
-/// run several times slower.
+/// environment variable for the build (`SC_BCE=0`); any other option is one build flag. With `--emit-c`
+/// the build writes the C tree only (`c_link` builds it).
 pub fn diff_build(src: str, opts: []str) DiffBuild {
     let p = diff_proj();
     p.mkfile("main.spc", src);
@@ -980,23 +986,11 @@ pub fn diff_build_in(p: cli::Proj, opts: []str) DiffBuild {
     for o in opts {
         wasm = wasm || o == "--target=wasm";
     }
-    // wasm32 has no UndefinedBehaviorSanitizer runtime, and a large unoptimized function can pass
-    // the engines' limit of locals: the lane's `ubsan` profile optimizes lightly. On aarch64, whose
-    // builds call the Neon entries, it optimizes as lightly too: the C compiler's folds are part of
-    // what an entry must survive (an arithmetic step that quiets a signaling NaN folds away).
-    p.mkfile(
-        "build.toml",
-        if wasm {
-            "bin = \"prog\"\nroot = \"main.spc\"\n\n[profile.ubsan]\nopt-level = 1\n";
-        } else if !cli::has_cc() {
-            // No C compiler, so no sanitizer runtime: the native build's own checks only.
-            "bin = \"prog\"\nroot = \"main.spc\"\n\n[profile.ubsan]\nopt-level = 0\n";
-        } else if unsafe shim::sc_host_arch() == 1 {
-            "bin = \"prog\"\nroot = \"main.spc\"\n\n[profile.ubsan]\nopt-level = 1\ncflags = [\"-fsanitize=undefined\"]\nldflags = [\"-fsanitize=undefined\"]\n";
-        } else {
-            "bin = \"prog\"\nroot = \"main.spc\"\n\n[profile.ubsan]\nopt-level = 0\ncflags = [\"-fsanitize=undefined\"]\nldflags = [\"-fsanitize=undefined\"]\n";
-        },
-    );
+    p.mkfile("build.toml", "bin = \"prog\"\nroot = \"main.spc\"\n");
+    let mut c = false;
+    for o in opts {
+        c = c || o == "--emit-c";
+    }
     let exe = cli::superc_path(); // resolved before the chdir below
     let mut cmd = String::new();
     cmd.format_into("\"{}\" build", exe);
@@ -1028,7 +1022,9 @@ pub fn diff_build_in(p: cli::Proj, opts: []str) DiffBuild {
     if cli::on_wasm() {
         cmd.format_into(" \"--transpiler={}\"", exe);
     }
-    cmd.format_into(" -o prog{}", unsafe str::from_cstr(cli::binext()));
+    if !c {
+        cmd.format_into(" -o prog{}", unsafe str::from_cstr(cli::binext()));
+    }
     let mut outp = String::new();
     outp.format_into("{}/.build", p.dir());
     // The engine reads build.toml from its working directory.
@@ -1579,14 +1575,18 @@ pub fn asm_instructions(text: str, function: str, whole: bool) Vector<String> {
     return names;
 }
 
-/// Build `src` with `opts` (`diff_build` forms), compile the translation unit that defines C function
-/// `function` with the build's own C command plus `-S` (without `-c`, `-MMD` and LTO, which would
-/// print IR), and check its instruction mnemonics: every `contains` entry is a substring of one, no
-/// `absent` entry is a substring of any (`=name`: equal to any; `%reg`: a substring of an instruction's
-/// operands, AT&T syntax). Describes every failed check; empty when all hold.
+/// Build the C tree of `src` with `opts` (`diff_build` forms, `--emit-c` added), compile the translation
+/// unit that defines C function `function` with the tree's flags plus `-S` (`asm_text`), and check its
+/// instruction mnemonics: every `contains` entry is a substring of one, no `absent` entry is a substring
+/// of any (`=name`: equal to any; `%reg`: a substring of an instruction's operands, AT&T syntax).
+/// Describes every failed check; empty when all hold. Needs the comparison job's C compiler.
 pub fn asm_check(src: str, opts: []str, function: str, contains: []str, absent: []str) String {
-    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units
-    let b = diff_build(src, opts);
+    let mut all = Vector::<str>::new();
+    for o in opts {
+        all.push(o);
+    }
+    all.push("--emit-c");
+    let b = diff_build(src, all[0..all.len()]);
     if !b.built {
         return format("the program does not build:\n{}", b.diag.as_str());
     }
@@ -1598,9 +1598,9 @@ pub fn asm_check(src: str, opts: []str, function: str, contains: []str, absent: 
     return asm_match(code.as_str(), function, contains, absent);
 }
 
-/// The assembly of the translation unit of build `b` (built with `opts`) that defines C function
-/// `function`, into `out`: the unit's own C command plus `-S`, as `asm_check` describes. Returns the
-/// failure, empty on success. One unit's text serves every function it defines (`asm_match`).
+/// The assembly of the translation unit of the C tree of build `b` (built with `opts` and `--emit-c`)
+/// that defines C function `function`, into `out`: the tree's `__cflags` plus `-S`. Returns the failure,
+/// empty on success. One unit's text serves every function it defines (`asm_match`).
 pub fn asm_text(b: &DiffBuild, opts: []str, function: str, out: &mut String) String {
     let mut r = String::new();
     let mut prof = "debug";
@@ -1610,65 +1610,28 @@ pub fn asm_text(b: &DiffBuild, opts: []str, function: str, out: &mut String) Str
         }
     }
     let root = b.proj.dir();
-    let mut dbp = String::new();
-    dbp.format_into("{}/build/{}/compile_commands.json", root, prof);
-    let text = cli::read_text(dbp.as_str());
-    let parsed = json::parse(text.as_str());
-    if parsed.is_err() {
-        r.format_into("cannot read {}", dbp.as_str());
-        return r;
+    let raw = format("{}/build/{}/raw", root, prof);
+    let mut unit = String::new();
+    for u in cli::read_text(format("{}/__units", raw.as_str()).as_str()).as_str().lines() {
+        if c_defines(format("{}/{}", raw.as_str(), u).as_str(), function) {
+            unit = format("{}/{}", raw.as_str(), u);
+            break;
+        }
     }
-    let db = parsed.unwrap();
-    let mut cmd = String::new();
-    let mut dir = String::new();
-    let mut asmp = String::new();
-    asmp.format_into("{}/function.s", root);
-    for i in 0..db.size() {
-        let row = db.at(i);
-        let file = row.value_str("file");
-        let mut path = String::new();
-        if !file.starts_with("/") && !(file.len() > 1 && file.byte_at(1) == b':') {
-            path.push_str(row.value_str("directory"));
-            path.push_byte(b'/');
-        }
-        path.push_str(file);
-        if !c_defines(path.as_str(), function) {
-            continue;
-        }
-        dir.push_str(row.value_str("directory"));
-        let args = row.at_key("arguments");
-        let mut skip_next = false;
-        for j in 0..args.size() {
-            let a = args.at(j).get_str();
-            if skip_next {
-                skip_next = false;
-                continue;
-            }
-            if a == "-o" {
-                skip_next = true;
-                continue;
-            }
-            if a == "-c" || a == "-MMD" || a.starts_with("-flto") {
-                continue;
-            }
-            if cmd.len() != 0 {
-                cmd.push_byte(b' ');
-            }
-            cmd.format_into("\"{}\"", a);
-        }
-        cmd.format_into(" -S -o \"{}\"", asmp.as_str());
-        break;
-    }
-    if cmd.len() == 0 {
+    if unit.len() == 0 {
         r.format_into("no translation unit defines '{}'", function);
         return r;
     }
-    let mut outp = String::new();
-    outp.format_into("{}/.asm", root);
-    let mut rc = -1;
-    if process::set_current_dir(dir.as_str()).is_ok() {
-        rc = cli::run_with(cmd.cstr(), null, outp.cstr(), null, "");
-    }
+    let asmp = format("{}/function.s", root);
+    let mut cmd = format(
+        "\"{}\" {} -S \"{}\" -o \"{}\"",
+        unsafe str::from_cstr(cli::cc_name()),
+        cli::read_text(format("{}/__cflags", raw.as_str()).as_str()).as_str().trim(),
+        unit.as_str(),
+        asmp.as_str(),
+    );
+    let mut outp = format("{}/.asm", root);
+    let rc = cli::run_with(cmd.cstr(), null, outp.cstr(), null, "");
     if rc != 0 {
         r.format_into("'{}' failed:\n{}", cmd.as_str(), cli::read_text(outp.as_str()).as_str());
         return r;

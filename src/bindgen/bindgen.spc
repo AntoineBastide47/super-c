@@ -46,7 +46,19 @@ struct Lexer<'a> {
     /// lanes (`neon_vector_type`, `ext_vector_type`), 0 for none.
     pub vec: i64,
     pub lay_attr: bool, // a `packed` or `aligned` attribute passed since the record body being read began
-    pub packs: bool, // a `#pragma pack` passed: no record's layout follows from its members alone
+    /// The `packed` and `aligned(N)` attributes passed since `parse_specs` reset them, and whether one of
+    /// another form (`aligned` without a value) passed: a record's own attributes (`apply_attrs`).
+    pub a_packed: bool,
+    pub a_align: u32,
+    pub a_unknown: bool,
+    /// The packing of the records after the `#pragma pack` lines passed (`pragma_pack`): the value as written
+    /// (empty: none), the values `push` saved, and whether a line of another form passed (no record's
+    /// layout then follows from its members alone).
+    pub pack: String,
+    pub pack_stack: Vector<String>,
+    pub pack_unknown: bool,
+    pub rec_depth: u32, // the record bodies being read
+    pub anon_n: u32, // the nameless records defined in a member so far (`parse_specs`)
 }
 
 const fn is_id_start(c: u8) bool {
@@ -72,7 +84,14 @@ extend<'a> Lexer<'a> {
             file: String::new(),
             vec: 0,
             lay_attr: false,
-            packs: false,
+            a_packed: false,
+            a_align: 0,
+            a_unknown: false,
+            pack: String::new(),
+            pack_stack: Vector::<String>::new(),
+            pack_unknown: false,
+            rec_depth: 0,
+            anon_n: 0,
         };
         lx.advance();
         return lx;
@@ -116,7 +135,47 @@ extend<'a> Lexer<'a> {
             self.pos = self.pos + 1;
         }
         let line = self.src.slice(at, self.pos);
-        self.packs = self.packs || line.find("pragma") >= 0 && line.find("pack") >= 0;
+        if line.find("pragma") >= 0 && line.find("pack") >= 0 {
+            self.pragma_pack(line);
+        }
+    }
+
+    // A `#pragma pack` line: `pack(N)`, `pack()`, `pack(push[, N])` and `pack(pop[, N])` set the packing of
+    // the records after it, as GCC and clang do (N may be a macro: `parse_record_body` evaluates it); a
+    // line of another form makes `pack_unknown`.
+    fn pragma_pack(self: &mut Lexer<'a>, line: str) {
+        let o = line.find_byte(b'(');
+        let e = line.find_byte(b')');
+        if o < 0 || e < o {
+            self.pack_unknown = true;
+            return;
+        }
+        let args = line.slice(o as usize + 1, e as usize);
+        if args.trim().len() == 0 {
+            self.pack.clear();
+            return;
+        }
+        let mut a: usize = 0;
+        for i in 0..args.len() + 1 {
+            if i < args.len() && args.byte_at(i) != b',' {
+                continue;
+            }
+            let w = args.slice(a, i).trim();
+            a = i + 1;
+            if w == "push" {
+                // A nesting deeper than any header's is not modelled.
+                if self.pack_stack.len() >= 64 {
+                    self.pack_unknown = true;
+                    return;
+                }
+                self.pack_stack.push(self.pack.clone());
+            } else if w == "pop" {
+                self.pack = self.pack_stack.pop().unwrap_or(String::new());
+            } else if w.len() != 0 && w != "show" {
+                self.pack.clear();
+                self.pack.push_str(w);
+            }
+        }
     }
 
     fn advance(self: &mut Lexer<'a>) {
@@ -344,6 +403,7 @@ struct Alias {
 struct Field {
     pub name: String, // the C member's name
     pub ty: String,
+    pub bits: i32, // a bitfield's width, -1 for another member
 }
 
 // A struct or union DEFINED in the target header. `ok` is false as soon as one member has no faithful
@@ -359,6 +419,11 @@ struct Record {
     pub mine: bool,
     pub tagless: bool,
     pub attr: bool,
+    pub pack: u32, // the `#pragma pack` value its members' alignment is capped at, 0 for none
+    pub anon: bool, // an anonymous struct or union member: a field named "" (`find_member`)
+    pub bitf: bool, // a bitfield member
+    pub packed: bool, // `__attribute__((packed))`: every member aligned to 1
+    pub aligned: u32, // `__attribute__((aligned(N)))`: the alignment at least, 0 for none
 }
 
 struct EnumVal {
@@ -409,6 +474,12 @@ struct Collected {
     pub macros: Map<String, u64>,
     /// The `static` functions of every origin: no object exports them.
     pub statics: Set<String>,
+    /// The target lays bitfields out the Microsoft way (`rec_layout`): Windows.
+    pub ms_bitfields: bool,
+    /// For `header_facts`: every function declaration of every origin, the first of each name (`proto_ix`).
+    pub all_protos: bool,
+    pub protos: Vector<FnDecl>,
+    pub proto_ix: Map<String, u32>,
     pub alias_ix: Map<String, u32>, // per alias name, its index in `aliases`
     pub opaque_set: Set<String>, // the names in `opaques`
 }
@@ -609,29 +680,42 @@ pub fn header_env(target: i32, arch: i32, sysroot: str, flags: str, env: &mut ct
     return ct::c_target(target, arch, sysroot, env) && ct::apply_c_flags(flags, env);
 }
 
-/// The facts of C header `header` (an `#include` operand: `<name>` or `"path"`) under C environment
+/// The facts of the C headers whose `#include` lines are `pre` (in a C unit's order) under C environment
 /// `env` (`header_env`) that a native build reads: the
 /// values of the integer constants `names` it defines (macros, which may name enumerators and other
-/// macros, or enumerators), `vals[k]` holding the value of `names[k]` when `oks[k]`, and whether each of
-/// the functions `fns` is `static` there (`statics[k]`): no object exports it. `read` takes the files the
-/// preprocessor read. False when the header does not preprocess.
+/// macros, or enumerators), `vals[k]` holding the value of `names[k]` when `oks[k]`, whether each of the
+/// functions `fns` is `static` there (`statics[k]`: no object exports it) and its prototype (`sigs[k]`:
+/// `f` or `v` (variadic), then the result's shape and each parameter's (`c_shape`; `-` for `void`), space
+/// separated; empty when the headers declare none). Per type of `types`, its
+/// scalar class (`classes`), a record's layout (`layouts`, `c_layout`), and its size and alignment
+/// (`sizes`: size << 32 | alignment, 0 when they do not follow from the header). Per aggregate of `aggs`
+/// (a C type as a declaration names it: `struct tm`, `union u`, `enum color` or a typedef, then
+/// `|<member>` per member it names), its facts (`afacts`, `agg_facts`), and per type of `shape_of`, its
+/// shape (`shapes`, `c_shape`). `read` takes the
+/// files the preprocessor read. False when the header does not preprocess.
 pub fn header_facts(
     env: &ct::CTarget,
-    header: str,
+    pre: str,
     names: []str,
     vals: &mut Vector<i64>,
     oks: &mut Vector<bool>,
     fns: []str,
     statics: &mut Vector<bool>,
+    sigs: &mut Vector<String>,
     types: []str,
     classes: &mut Vector<u8>,
     layouts: &mut Vector<String>,
+    sizes: &mut Vector<u64>,
+    aggs: []str,
+    afacts: &mut Vector<String>,
+    shape_of: []str,
+    shapes: &mut Vector<String>,
     read: &mut Vector<String>,
 ) bool {
     let path = "/__sc_header_ints.c";
     // After the header, each name the preprocessor expands, function-like macros included (mingw-w64
     // spells `ERROR_LOCK_VIOLATION` as `__MSABI_LONG(33)`): a marker, then a separator before each.
-    let mut probe = format("#include {}\n{}\n", header, HF_BEGIN);
+    let mut probe = format("{}{}\n", pre, HF_BEGIN);
     for k in 0..names.len() {
         probe.format_into("{} {}\n", HF_SEP, names[k]);
     }
@@ -668,9 +752,16 @@ pub fn header_facts(
         statics: Set::<String>::new(),
         alias_ix: Map::<String, u32>::new(),
         opaque_set: Set::<String>::new(),
+        ms_bitfields: false,
+        all_protos: false,
+        protos: Vector::<FnDecl>::new(),
+        proto_ix: Map::<String, u32>::new(),
     };
     c.index_macros(dump.as_str());
     c.widths = read_widths(&c, dump.as_str());
+    let win = String::from_str("_WIN32");
+    c.ms_bitfields = c.macros.contains_key(&win);
+    c.all_protos = true;
     let mut lx = Lexer::new(text.as_str());
     lx.parse_unit(&mut c, path, &none, dump.as_str());
     let mut ex = String::new();
@@ -713,6 +804,17 @@ pub fn header_facts(
     for k in 0..fns.len() {
         let key = String::from_str(fns[k]);
         statics.push(c.statics.contains(&key));
+        let mut sg = String::new();
+        if let Some(i) = c.proto_ix.get(&key) {
+            let f = &c.protos[(*i) as usize];
+            sg.push_str(pick(f.variadic, "v ", "f "));
+            c_shape(&c, f.ret.as_str(), &mut sg);
+            for q in 0..f.params.len() {
+                sg.push_byte(b' ');
+                c_shape(&c, f.params[q].ty.as_str(), &mut sg);
+            }
+        }
+        sigs.push(sg);
     }
     let mut lv = Vector::<(u32, u8)>::new();
     for k in 0..types.len() {
@@ -721,7 +823,7 @@ pub fn header_facts(
         lv.truncate(0);
         let mut size: u32 = 0;
         let mut align: u32 = 0;
-        if cl == SC_NONE && c_layout(&c, types[k], 0, &mut lv, &mut size, &mut align) {
+        if cl == SC_NONE && c_layout(&c, types[k], 0, false, &mut lv, &mut size, &mut align) {
             cl = SC_REC;
             lay.format_into("{} {}", size, align);
             for q in 0..lv.len() {
@@ -730,15 +832,487 @@ pub fn header_facts(
         }
         classes.push(cl);
         layouts.push(lay);
+        lv.truncate(0);
+        sizes.push(
+            if c_layout(&c, types[k], 0, true, &mut lv, &mut size, &mut align) {
+                size as u64 << 32 | align as u64;
+            } else {
+                0;
+            },
+        );
+    }
+    for k in 0..aggs.len() {
+        let mut f = String::new();
+        agg_facts(&c, dump.as_str(), aggs[k], &mut f);
+        afacts.push(f);
+    }
+    for k in 0..shape_of.len() {
+        let mut f = String::new();
+        c_shape(&c, shape_of[k], &mut f);
+        shapes.push(f);
     }
     return true;
 }
 
+// The facts of aggregate query `query` (`header_facts`'s `aggs`: a C type, then `|<member>` per member
+// the declaration names) into `out`: for a struct or union `R <size> <align>` and per member the header
+// has ` <member>=<offset>=<shape>` (`member_at`, `c_shape`); for an enum `E` and per enumerator
+// ` <name>=<value>`; `?` when the header defines it but its layout or values do not follow (a bitfield,
+// an anonymous member, a layout attribute, a value that is no constant); empty when the header does not
+// define it.
+fn agg_facts(c: &Collected, dump: str, query: str, out: &mut String) {
+    let bar = query.find_byte(b'|');
+    let cty = if bar < 0 {
+        query;
+    } else {
+        query.slice(0, bar as usize);
+    };
+    let tagged = cty.starts_with("struct ") || cty.starts_with("union ") || cty.starts_with("enum ");
+    let name = if tagged {
+        cty.slice(cty.find_byte(b' ') as usize + 1, cty.len());
+    } else {
+        cty;
+    };
+    let mut ri: i32 = -1;
+    let mut ei: i32 = -1;
+    if tagged {
+        if cty.starts_with("enum ") {
+            ei = enum_index(c, name, false);
+        } else {
+            ri = record_index(c, name, false);
+        }
+    } else {
+        // A typedef: through its chain to a typedef'd tagless body, or to a tag after the first step. Each
+        // step follows one typedef; a chain is shorter than the alias table.
+        let mut t = name;
+        for step in 0..c.aliases.len() + 1 {
+            ri = record_index(c, t, true);
+            ei = enum_index(c, t, true);
+            if step != 0 && ri < 0 && ei < 0 {
+                ri = record_index(c, t, false);
+                ei = enum_index(c, t, false);
+            }
+            if ri >= 0 || ei >= 0 {
+                break;
+            }
+            let ai = c.alias_of(t);
+            if ai < 0 {
+                break;
+            }
+            let al = &c.aliases[ai as usize];
+            if !al.ok || al.sub.len() == 0 || al.sub.as_str() == t {
+                ri = record_index(c, t, false);
+                ei = enum_index(c, t, false);
+                break;
+            }
+            t = al.sub.as_str();
+        }
+    }
+    if ei >= 0 {
+        let ed = &c.enums[ei as usize];
+        if !ed.ok {
+            out.push_str("?");
+            return;
+        }
+        out.push_str("E");
+        for q in 0..ed.vals.len() {
+            out.format_into(" {}={}", ed.vals[q].name.as_str(), ed.vals[q].value);
+        }
+        return;
+    }
+    if ri < 0 {
+        return;
+    }
+    let mut size: u32 = 0;
+    let mut align: u32 = 0;
+    let mut lv = Vector::<(u32, u8)>::new();
+    let r = &c.records[ri as usize];
+    if !r.ok || r.attr || !c_layout(c, r.tag.as_str(), 0, true, &mut lv, &mut size, &mut align) {
+        out.push_str("?");
+        return;
+    }
+    out.format_into("R {} {}", size, align);
+    let mut rest = if bar < 0 {
+        "";
+    } else {
+        query.slice(bar as usize + 1, query.len());
+    };
+    let mut sh = String::new();
+    for _ in 0..query.len() {
+        if rest.len() == 0 {
+            break;
+        }
+        let e = rest.find_byte(b'|');
+        let m = if e < 0 {
+            rest;
+        } else {
+            rest.slice(0, e as usize);
+        };
+        rest = if e < 0 {
+            "";
+        } else {
+            rest.slice(e as usize + 1, rest.len());
+        };
+        sh.clear();
+        let mut off: u32 = 0;
+        if member_at(c, dump, ri, m, &mut off, &mut sh) {
+            out.format_into(" {}={}={}", m, off, sh.as_str());
+        }
+    }
+}
+
+// The offset and shape (`c_shape`) of member `name` of record `ri`: one of its own or of its anonymous
+// members (`find_member`), or the path of members a macro of that name expands to (`sa_handler`:
+// `__sigaction_u.__sa_handler`). False when it has none.
+fn member_at(c: &Collected, dump: str, ri: i32, name: str, off: &mut u32, shape: &mut String) bool {
+    let mut path = String::new();
+    let mut rec = ri;
+    let mut at: u32 = 0;
+    let mut ty = String::new();
+    let mut o: u32 = 0;
+    if !find_member(c, ri, name, 0, &mut o, &mut ty) && !c.macro_value(dump, name, &mut path) {
+        return false;
+    }
+    if path.len() == 0 {
+        path.push_str(name);
+    }
+    let p = path.as_str().trim();
+    let mut a: usize = 0;
+    for i in 0..p.len() + 1 {
+        if i < p.len() && p.byte_at(i) != b'.' {
+            continue;
+        }
+        let seg = p.slice(a, i).trim();
+        a = i + 1;
+        ty.clear();
+        if rec < 0 || !find_member(c, rec, seg, 0, &mut o, &mut ty) {
+            return false;
+        }
+        at += o;
+        if i == p.len() {
+            *off = at;
+            c_shape(c, ty.as_str(), shape);
+            return true;
+        }
+        rec = record_of_type(c, ty.as_str());
+    }
+    return false;
+}
+
+// Member `name` of record `ri`, one of its own or of an anonymous member's at most 8 levels down: its
+// offset into `off` and its rendered type into `ty`. False when it has none or a layout does not follow.
+fn find_member(c: &Collected, ri: i32, name: str, depth: u32, off: &mut u32, ty: &mut String) bool {
+    let r = &c.records[ri as usize];
+    let mut offs = Vector::<u32>::new();
+    if depth > 8 || !field_offsets(c, ri, &mut offs) {
+        return false;
+    }
+    for k in 0..r.fields.len() {
+        if r.fields[k].name.as_str() == name {
+            *off = offs[k];
+            ty.push_string(&r.fields[k].ty);
+            return true;
+        }
+    }
+    for k in 0..r.fields.len() {
+        if r.fields[k].name.len() != 0 || r.fields[k].bits >= 0 {
+            continue;
+        }
+        let sub = c.record_of(r.fields[k].ty.as_str());
+        let mut o: u32 = 0;
+        if sub >= 0 && find_member(c, sub, name, depth + 1, &mut o, ty) {
+            *off = offs[k] + o;
+            return true;
+        }
+    }
+    return false;
+}
+
+// The offset of each member of record `ri` into `out` (`rec_layout`); false when a member's layout does
+// not follow.
+fn field_offsets(c: &Collected, ri: i32, out: &mut Vector<u32>) bool {
+    let mut lv = Vector::<(u32, u8)>::new();
+    let mut size: u32 = 0;
+    let mut align: u32 = 0;
+    return rec_layout(c, &c.records[ri as usize], 0, true, &mut lv, out, &mut size, &mut align);
+}
+
+// The layout of record `r` (`c_layout`'s record case): its size and alignment, each member's offset into
+// `offs` (a bitfield's: the first byte it uses) and its scalar leaves into `out`, at most 17 (a bitfield's
+// storage unit is one integer leaf). A `#pragma pack` caps a member's alignment, `packed` makes it 1, and
+// `aligned` raises the record's. Bitfields share storage units as GCC and clang lay them out: the
+// Microsoft way on Windows (`-mms-bitfields`, mingw's default: a run of one declared size shares a unit of
+// that size), else the System V way (a bitfield crosses no boundary of its type's alignment, and only a
+// named one aligns the record). False when a member's layout does not follow.
+fn rec_layout(
+    c: &Collected,
+    r: &Record,
+    depth: u32,
+    vec: bool,
+    out: &mut Vector<(u32, u8)>,
+    offs: &mut Vector<u32>,
+    size: &mut u32,
+    align: &mut u32,
+) bool {
+    if !r.ok || r.attr {
+        return false;
+    }
+    let mut at: u32 = 0; // the bytes the members use so far
+    let mut bits: u32 = 0; // System V: the bits the members use so far
+    let mut unit: u32 = 0; // Microsoft: the open bitfield unit's size, 0 when none is open
+    let mut used: u32 = 0; // Microsoft: the bits it uses
+    let mut al: u32 = 1;
+    let mut fl = Vector::<(u32, u8)>::new();
+    for k in 0..r.fields.len() {
+        fl.truncate(0);
+        let mut fs: u32 = 0;
+        let mut fa: u32 = 0;
+        if !c_layout(c, r.fields[k].ty.as_str(), depth + 1, vec, &mut fl, &mut fs, &mut fa) {
+            return false;
+        }
+        if r.packed {
+            fa = 1;
+        } else if r.pack != 0 && fa > r.pack {
+            fa = r.pack;
+        }
+        let w = r.fields[k].bits;
+        if w >= 0 {
+            let wb = w as u32;
+            if fs == 0 || fs > 8 || wb > fs * 8 {
+                return false;
+            }
+            let code = switch fs {
+                1 => b'b',
+                2 => b'h',
+                4 => b'w',
+                _ => b'q',
+            };
+            if r.is_union {
+                offs.push(0);
+                at = ast_max(at, fs);
+                al = ast_max(al, pick(c.ms_bitfields || r.fields[k].name.len() != 0, fa, 1u32));
+                continue;
+            }
+            if c.ms_bitfields {
+                if wb == 0 {
+                    unit = 0;
+                    offs.push(at);
+                    continue;
+                }
+                if unit != fs || used + wb > fs * 8 {
+                    let o = at + fa - 1 & ~(fa - 1);
+                    if out.len() <= 16 {
+                        out.push((o, code));
+                    }
+                    at = o + fs;
+                    unit = fs;
+                    used = 0;
+                }
+                offs.push(at - fs + used / 8);
+                used += wb;
+                al = ast_max(al, fa);
+                continue;
+            }
+            let mut b = ast_max(bits, at * 8);
+            let ub = fa * 8;
+            if wb == 0 {
+                b = b + ub - 1 & ~(ub - 1);
+            } else if !r.packed && b / ub != (b + wb - 1) / ub {
+                b = b + ub - 1 & ~(ub - 1);
+            }
+            offs.push(b / 8);
+            if wb != 0 && out.len() <= 16 {
+                out.push((b / 8 & ~(fs - 1), code));
+            }
+            bits = b + wb;
+            at = (bits + 7) / 8;
+            if wb != 0 && r.fields[k].name.len() != 0 {
+                al = ast_max(al, fa);
+            }
+            continue;
+        }
+        unit = 0;
+        let o = if r.is_union {
+            0u32;
+        } else {
+            at + fa - 1 & ~(fa - 1);
+        };
+        for q in 0..fl.len() {
+            if out.len() <= 16 {
+                out.push((o + fl[q].0, fl[q].1));
+            }
+        }
+        offs.push(o);
+        at = if r.is_union {
+            ast_max(at, fs);
+        } else {
+            o + fs;
+        };
+        bits = at * 8;
+        al = ast_max(al, fa);
+    }
+    al = ast_max(al, r.aligned);
+    *size = at + al - 1 & ~(al - 1);
+    *align = al;
+    return true;
+}
+
+// Whether record `r`'s `#pragma pack` lowers a member's alignment (`mingw`'s `pack(push, 8)` moves no
+// member of 8 bytes or less), or a member's layout does not follow.
+fn pack_moves(c: &Collected, r: &Record) bool {
+    let mut lv = Vector::<(u32, u8)>::new();
+    for k in 0..r.fields.len() {
+        lv.truncate(0);
+        let mut fs: u32 = 0;
+        let mut fa: u32 = 0;
+        if !c_layout(c, r.fields[k].ty.as_str(), 0, true, &mut lv, &mut fs, &mut fa) || fa > r.pack {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The record a rendered type (a tag or a typedef) names through its typedefs; -1 when it names none.
+fn record_of_type(c: &Collected, ty: str) i32 {
+    let mut t = ty;
+    for _ in 0..c.aliases.len() + 1 {
+        let ri = c.record_of(t);
+        if ri >= 0 {
+            return ri;
+        }
+        let ai = c.alias_of(t);
+        if ai < 0 || !c.aliases[ai as usize].ok || c.aliases[ai as usize].sub.as_str() == t {
+            return -1;
+        }
+        t = c.aliases[ai as usize].sub.as_str();
+    }
+    return -1;
+}
+
+// The record whose tag is `tag`, a typedef'd tagless one when `tagless`; -1 when there is none.
+const fn record_index(c: &Collected, tag: str, tagless: bool) i32 {
+    for i in 0..c.records.len() {
+        if c.records[i].tag.as_str() == tag && c.records[i].tagless == tagless {
+            return i as i32;
+        }
+    }
+    return -1;
+}
+
+// The enum whose tag is `tag`, a typedef'd tagless one when `tagless`; -1 when there is none.
+const fn enum_index(c: &Collected, tag: str, tagless: bool) i32 {
+    for i in 0..c.enums.len() {
+        if c.enums[i].tag.as_str() == tag && c.enums[i].tagless == tagless {
+            return i as i32;
+        }
+    }
+    return -1;
+}
+
+// The shape of C type `ty` (a rendered type, a typedef, a tag, or `struct`, `union` or `enum` and a tag)
+// through its typedefs, appended to `out`: `p` a pointer, `c` a plain `char`, `b` a `_Bool`, `s<n>` and
+// `u<n>` a signed and an unsigned integer of n bytes (an enum: `s4`), `f4` a `float`, `f8` a `double`,
+// `v<n>` a vector of n bytes, `r:<tag>` a struct or union, `[<n>]` and the element's shape an array of n
+// elements; `?` when it does not follow from the header.
+fn c_shape(c: &Collected, ty: str, out: &mut String) {
+    let pb = c.widths.ptr_b as u32;
+    let mut t = ty;
+    // Each step strips an array or follows a typedef: at most one per alias and per array level.
+    for _ in 0..c.aliases.len() + 64 {
+        if t.starts_with("*") || t.starts_with("fn(") {
+            out.push_str("p");
+            return;
+        }
+        if t.starts_with("[") && t.ends_with("]") {
+            // `[T; N]`, the last `;` the outer extent's.
+            let mut semi: isize = -1;
+            for i in 1..t.len() {
+                if t.byte_at(i) == b';' {
+                    semi = i as isize;
+                }
+            }
+            if semi < 0 || semi as usize + 2 >= t.len() {
+                out.push_str("?");
+                return;
+            }
+            out.format_into("[{}]", int_literal(t.slice(semi as usize + 2, t.len() - 1)));
+            t = t.slice(1, semi as usize);
+            continue;
+        }
+        let leaf = switch t {
+            "i8" => "s1",
+            "i16" => "s2",
+            "i32" => "s4",
+            "i64" => "s8",
+            "u8" => "u1",
+            "u16" => "u2",
+            "u32" => "u4",
+            "u64" => "u8",
+            "isize" => pick(pb == 8, "s8", "s4"),
+            "usize" => pick(pb == 8, "u8", "u4"),
+            "char" => "c",
+            "bool" => "b",
+            "f32" => "f4",
+            "f64" => "f8",
+            "void" => "-",
+            _ => "",
+        };
+        if leaf.len() != 0 {
+            out.push_str(leaf);
+            return;
+        }
+        if t.starts_with("struct ") || t.starts_with("union ") {
+            let tag = t.slice(t.find_byte(b' ') as usize + 1, t.len());
+            if record_index(c, tag, false) >= 0 {
+                out.format_into("r:{}", tag);
+            } else {
+                out.push_str("?");
+            }
+            return;
+        }
+        if t.starts_with("enum ") {
+            out.push_str(pick(enum_index(c, t.slice(5, t.len()), false) >= 0, "s4", "?"));
+            return;
+        }
+        let ai = c.alias_of(t);
+        if ai >= 0 && c.aliases[ai as usize].ok && c.aliases[ai as usize].sub.len() != 0 && c.aliases[ai as usize].sub.as_str() != t {
+            t = c.aliases[ai as usize].sub.as_str();
+            continue;
+        }
+        if ai >= 0 && !c.aliases[ai as usize].ok {
+            out.push_str("?");
+            return;
+        }
+        if c.record_of(t) >= 0 {
+            out.format_into("r:{}", t);
+            return;
+        }
+        let mut en = false;
+        for e in 0..c.enums.len() {
+            en = en || c.enums[e].tag.as_str() == t;
+        }
+        if en {
+            out.push_str("s4");
+            return;
+        }
+        let vb = vec_bytes(c, t);
+        if vb != 0 {
+            out.format_into("v{}", vb);
+        } else {
+            out.push_str("?");
+        }
+        return;
+    }
+    out.push_str("?");
+}
+
 // The layout of C type `ty` (a rendered member type, a typedef or a record's tag): its size, its alignment
 // and its scalar leaves at their offsets (`b` `h` `w` `q` integers of 1 to 8 bytes, `f` and `d` floats,
-// `p` pointers), at most 17: past 16 a calling convention passes it in memory. False when a member's
-// layout does not follow from its type alone (a vector, `long double`, an attribute, an unknown name).
-fn c_layout(c: &Collected, ty: str, depth: u32, out: &mut Vector<(u32, u8)>, size: &mut u32, align: &mut u32) bool {
+// `p` pointers), at most 17: past 16 a calling convention passes it in memory. With `vec`, a vector
+// (`f32x4`, which `vector_size` aligns to its size) counts too, as a leaf `v`: the size only. False when
+// a member's layout does not follow from its type alone (a vector without `vec`, `long double`, an
+// attribute, an unknown name).
+fn c_layout(c: &Collected, ty: str, depth: u32, vec: bool, out: &mut Vector<(u32, u8)>, size: &mut u32, align: &mut u32) bool {
     if depth > 8 {
         return false;
     }
@@ -760,10 +1334,11 @@ fn c_layout(c: &Collected, ty: str, depth: u32, out: &mut Vector<(u32, u8)>, siz
         if semi < 0 || semi as usize + 2 >= ty.len() {
             return false;
         }
+        // A length of 0 is a flexible array member: no bytes, its element's alignment.
         let n = int_literal(ty.slice(semi as usize + 2, ty.len() - 1));
         let mut el = Vector::<(u32, u8)>::new();
         let mut es: u32 = 0;
-        if n <= 0 || !c_layout(c, ty.slice(1, semi as usize), depth + 1, &mut el, &mut es, align) {
+        if n < 0 || !c_layout(c, ty.slice(1, semi as usize), depth + 1, vec, &mut el, &mut es, align) {
             return false;
         }
         *size = es * n as u32;
@@ -800,42 +1375,17 @@ fn c_layout(c: &Collected, ty: str, depth: u32, out: &mut Vector<(u32, u8)>, siz
         out.push((0, code));
         return true;
     }
+    let vb = vec_bytes(c, ty);
+    if vec && vb != 0 {
+        *size = vb;
+        *align = vb;
+        out.push((0, b'v'));
+        return true;
+    }
     let ri = c.record_of(ty);
     if ri >= 0 {
-        let r = &c.records[ri as usize];
-        if !r.ok || r.attr {
-            return false;
-        }
-        let mut at: u32 = 0;
-        let mut al: u32 = 1;
-        let mut fl = Vector::<(u32, u8)>::new();
-        for k in 0..r.fields.len() {
-            fl.truncate(0);
-            let mut fs: u32 = 0;
-            let mut fa: u32 = 0;
-            if !c_layout(c, r.fields[k].ty.as_str(), depth + 1, &mut fl, &mut fs, &mut fa) {
-                return false;
-            }
-            let o = if r.is_union {
-                0u32;
-            } else {
-                at + fa - 1 & ~(fa - 1);
-            };
-            for q in 0..fl.len() {
-                if out.len() <= 16 {
-                    out.push((o + fl[q].0, fl[q].1));
-                }
-            }
-            at = if r.is_union {
-                ast_max(at, fs);
-            } else {
-                o + fs;
-            };
-            al = ast_max(al, fa);
-        }
-        *size = at + al - 1 & ~(al - 1);
-        *align = al;
-        return true;
+        let mut offs = Vector::<u32>::new();
+        return rec_layout(c, &c.records[ri as usize], depth, vec, out, &mut offs, size, align);
     }
     for e in 0..c.enums.len() {
         let ed = &c.enums[e];
@@ -862,7 +1412,7 @@ fn c_layout(c: &Collected, ty: str, depth: u32, out: &mut Vector<(u32, u8)>, siz
     if !al.ok || al.sub.len() == 0 || al.sub.as_str() == ty {
         return false;
     }
-    return c_layout(c, al.sub.as_str(), depth + 1, out, size, align);
+    return c_layout(c, al.sub.as_str(), depth + 1, vec, out, size, align);
 }
 
 const fn ast_max(a: u32, b: u32) u32 {
@@ -1542,7 +2092,58 @@ extend CExpr {
         return cv_int(0);
     }
 
+    // The size of the type named after `sizeof (`, and the cursor past its `)`: an integer or pointer type
+    // (`cast_type`), or a record or typedef whose layout follows from the header (`c_layout`). 0 for
+    // anything else.
+    fn sizeof_type(self: &mut Self, c: &Collected, dump: str) u64 {
+        let mut bits: u32 = 0;
+        let mut uns = false;
+        if self.cast_type(c, dump, &mut bits, &mut uns) {
+            return bits as u64 / 8;
+        }
+        if self.lx.kind == TK_IDENT && (self.lx.text() == "struct" || self.lx.text() == "union") {
+            self.lx.advance();
+        }
+        if self.lx.kind != TK_IDENT {
+            return 0;
+        }
+        let name = String::from_str(self.lx.text());
+        self.lx.advance();
+        if !self.lx.at_punct(b')') {
+            return 0;
+        }
+        self.lx.advance();
+        let ai = c.alias_of(name.as_str());
+        let ty = if ai >= 0 && c.aliases.at(ai as usize).ok && !c.aliases.at(ai as usize).opaque {
+            c.aliases.at(ai as usize).sub.as_str();
+        } else {
+            name.as_str();
+        };
+        let mut lv = Vector::<(u32, u8)>::new();
+        let mut size: u32 = 0;
+        let mut align: u32 = 0;
+        if !c_layout(c, ty, 0, true, &mut lv, &mut size, &mut align) {
+            return 0;
+        }
+        return size;
+    }
+
     fn ex_unary(self: &mut Self, c: &Collected, e: *const EnumDef, dump: str, depth: i32) CV {
+        if self.lx.kind == TK_IDENT && self.lx.text() == "sizeof" {
+            // `sizeof (type)`, a `size_t`.
+            self.lx.advance();
+            let n = if self.lx.at_punct(b'(') {
+                self.lx.advance();
+                self.sizeof_type(c, dump);
+            } else {
+                0;
+            };
+            if n == 0 {
+                self.ok = false;
+                return cv_int(0);
+            }
+            return CV { v: n, bits: c.widths.ptr_b as u32 * 8, uns: true };
+        }
         if self.lx.at_punct(b'-') {
             self.lx.advance();
             let x = self.ex_unary(c, e, dump, depth);
@@ -1877,6 +2478,10 @@ fn run_one(
         statics: Set::<String>::new(),
         alias_ix: Map::<String, u32>::new(),
         opaque_set: Set::<String>::new(),
+        ms_bitfields: false,
+        all_protos: false,
+        protos: Vector::<FnDecl>::new(),
+        proto_ix: Map::<String, u32>::new(),
     };
 
     let mut text = String::new();
@@ -1888,6 +2493,8 @@ fn run_one(
     }
     c.index_macros(mdump.as_str());
     c.widths = read_widths(&c, mdump.as_str());
+    let win = String::from_str("_WIN32");
+    c.ms_bitfields = c.macros.contains_key(&win);
     let mut lx = Lexer::new(text.as_str());
     lx.parse_unit(&mut c, hdr.as_str(), froms, mdump.as_str());
     c.collect_consts(hdr.as_str(), mdump.as_str());
@@ -2175,6 +2782,29 @@ extend Lexer {
             } else if self.kind == TK_IDENT {
                 let t = self.text();
                 self.lay_attr = self.lay_attr || t == "packed" || t == "__packed__" || t == "aligned" || t == "__aligned__";
+                self.a_packed = self.a_packed || t == "packed" || t == "__packed__";
+                if t == "aligned" || t == "__aligned__" {
+                    self.advance();
+                    if !self.at_punct(b'(') {
+                        // The target's largest alignment: not modelled.
+                        self.a_unknown = true;
+                        continue;
+                    }
+                    self.advance();
+                    let n = if self.kind == TK_NUM {
+                        int_literal(self.text());
+                    } else {
+                        -1i64;
+                    };
+                    if n <= 0 {
+                        self.a_unknown = true;
+                    } else if n as u32 > self.a_align {
+                        self.a_align = n as u32;
+                    }
+                    // The argument's `(`: the loop sees it next to its `)`.
+                    depth = depth + 1;
+                    continue;
+                }
                 let bytes = t == "vector_size" || t == "__vector_size__";
                 let lanes = t == "neon_vector_type" || t == "__neon_vector_type__" || t == "neon_polyvector_type" || t == "ext_vector_type";
                 if bytes || lanes {
@@ -2302,6 +2932,7 @@ extend Lexer {
         };
         let la0 = self.lay_attr;
         self.lay_attr = false;
+        self.rec_depth += 1;
         // '{'. A nested body is consumed by parse_specs, so the first '}' seen here closes this one.
         self.advance();
         loop {
@@ -2345,26 +2976,44 @@ extend Lexer {
                 );
 
                 if self.at_punct(b':') {
-                    // A bitfield: its width is not a field type.
-                    r.ok = false;
+                    // A bitfield (`rec_layout`): an integer type and a width, a name or none (padding).
+                    r.bitf = true;
                     self.advance();
+                    let w = if self.kind == TK_NUM {
+                        int_literal(self.text());
+                    } else {
+                        -1i64;
+                    };
                     if self.kind == TK_NUM {
                         self.advance();
                     }
-                }
-                if nm.len() == 0 || isfn || !ty.ok || adim == -2 {
-                    // An anonymous member, a function member, or an extent with no constant.
+                    if w < 0 || w > 64 || isfn || !ty.ok || adim != -1 || ty.ptr != 0 {
+                        r.ok = false;
+                    } else {
+                        r.fields.push(
+                            Field { name: String::from_str(nm.as_str()), ty: ty.base.clone(), bits: w as i32 },
+                        );
+                    }
+                } else if nm.len() == 0 && !isfn && ty.ok && adim == -1 && ty.ptr == 0 && ty.base.as_str().starts_with(
+                    "__sc_anon_",
+                ) {
+                    // An anonymous struct or union member: its members are the record's (`find_member`).
+                    r.fields.push(Field { name: String::new(), ty: ty.base.clone(), bits: -1 });
+                    r.anon = true;
+                } else if nm.len() == 0 || isfn || !ty.ok || adim == -2 {
+                    // A nameless member of another type, a function member, or an extent with no constant.
                     r.ok = false;
                 } else {
                     let mut rt = String::new();
-                    if adim >= 0 {
+                    if adim >= 0 || adim == -3 {
+                        // A flexible array member (`d_name[]`) is Super-C's array of length 0.
                         rt.push_byte(b'[');
                         ty.render(&mut rt);
-                        rt.format_into("; {}]", adim);
+                        rt.format_into("; {}]", pick(adim == -3, 0i64, adim));
                     } else {
                         ty.render(&mut rt);
                     }
-                    r.fields.push(Field { name: String::from_str(nm.as_str()), ty: rt });
+                    r.fields.push(Field { name: String::from_str(nm.as_str()), ty: rt, bits: -1 });
                 }
                 self.skip_noise();
                 if self.at_punct(b',') {
@@ -2387,8 +3036,23 @@ extend Lexer {
         }
         // An attribute after the body (`} __attribute__((packed)) T;`) changes the size or the
         // alignment, which `c_layout`'s reader compares with the declared ones.
-        r.attr = self.lay_attr || self.packs;
+        r.attr = self.lay_attr || self.pack_unknown;
+        if self.pack.len() != 0 {
+            // A power of two up to 16, as GCC and clang take it; else the layout does not follow.
+            let v = ce_cv(self.pack.as_str(), c, null, dump, 0);
+            let n = if v.is_some() {
+                cv_pat(v.unwrap());
+            } else {
+                0u64;
+            };
+            if n == 0 || n > 16 || (n & n - 1) != 0 {
+                r.attr = true;
+            } else {
+                r.pack = n as u32;
+            }
+        }
         self.lay_attr = la0 || self.lay_attr;
+        self.rec_depth -= 1;
         c.records.push(r);
     }
 
@@ -2466,19 +3130,47 @@ extend Lexer {
                 let is_enum = t == "enum";
                 let is_union = t == "union";
                 self.advance();
+                self.a_packed = false;
+                self.a_align = 0;
+                self.a_unknown = false;
                 self.skip_noise();
                 let mut tag = String::new();
                 if self.kind == TK_IDENT {
                     tag.push_str(self.text());
                     self.advance();
+                    self.skip_noise();
                 }
+                // The attributes before the body (`struct __attribute__((packed)) s {`).
+                let lead = (self.a_packed, self.a_align, self.a_unknown);
                 let mut defined = false;
                 if self.at_punct(b'{') {
                     defined = true;
+                    // A nameless record that types a member (`union { .. } u;`) gets a name of its own, so the
+                    // member's type and the outer record's layout follow. No module declares it (`mine` is
+                    // false), so a module keeps the outer record opaque (`demote_opaque_holders`).
+                    let anon = !is_enum && tag.len() == 0 && self.rec_depth != 0;
+                    if anon {
+                        tag.format_into("__sc_anon_{}", self.anon_n);
+                        self.anon_n += 1;
+                    }
                     if is_enum {
                         self.parse_enum_body(c, tag.as_str(), dump);
                     } else {
                         self.parse_record_body(c, tag.as_str(), is_union, dump);
+                        // And the attributes after it (`} __attribute__((packed));`).
+                        self.a_packed = lead.0;
+                        self.a_align = lead.1;
+                        self.a_unknown = lead.2;
+                        self.skip_noise();
+                        let last = c.records.len() - 1;
+                        let r = c.records.index_mut(last);
+                        r.packed = self.a_packed;
+                        r.aligned = self.a_align;
+                        r.attr = r.attr || self.a_unknown;
+                    }
+                    if anon {
+                        let last = c.records.len() - 1;
+                        c.records.index_mut(last).mine = false;
                     }
                 }
                 if is_enum {
@@ -2706,20 +3398,30 @@ extend Lexer {
                 continue;
             }
             self.advance();
-            let mut n: i64 = -2; // no extent, or one this tool cannot evaluate
-            if self.kind == TK_NUM {
-                n = int_literal(self.text());
-                if n < 0 {
-                    n = -2;
+            // The extent: a constant expression (`ce_eval`), up to the `]` that closes it; -3 when there is
+            // none (a flexible array member), -2 when this tool cannot evaluate it.
+            let s0 = self.start;
+            let mut nest: u32 = 0;
+            while self.kind != TK_EOF && (nest != 0 || !self.at_punct(b']')) {
+                if self.at_punct(b'[') {
+                    nest += 1;
+                } else if self.at_punct(b']') {
+                    nest -= 1;
                 }
                 self.advance();
             }
-            if !self.at_punct(b']') {
-                n = -2;
-                while self.kind != TK_EOF && !self.at_punct(b']') {
-                    self.advance();
-                }
-            }
+            let v = if self.kind == TK_EOF {
+                -1i64;
+            } else if self.start == s0 {
+                -3i64;
+            } else {
+                ce_eval(self.src.slice(s0, self.start), c, null, dump, 0).unwrap_or(-1);
+            };
+            let n = if v < 0 && v != -3 {
+                -2i64;
+            } else {
+                v;
+            };
             if self.at_punct(b']') {
                 self.advance();
             }
@@ -2871,13 +3573,29 @@ extend Lexer {
                 // `extern int errno;` and friends: a global the library exports. Bound by what C itself
                 // declares: a const-qualified binding becomes an extern `const` (readable), anything else a
                 // `static mut`, whose accesses carry the ordinary static-mut unsafe rules across the FFI.
-                if !keep && !td && !st && !isfn && mine && ty.ok && c.saw_extern && nm.len() != 0 && adim < 0 {
+                if !keep && !td && !st && !isfn && mine && ty.ok && c.saw_extern && nm.len() != 0 && adim == -1 {
                     let mut vt = String::new();
                     ty.render(&mut vt);
                     let wr = ty.fnsig.len() != 0 || !ty.qual_at(ty.ptr);
                     c.globals.push(
                         ConstDef { name: String::from_str(nm.as_str()), ty: vt, value: String::new(), mutable: wr },
                     );
+                }
+                let key = String::from_str(nm.as_str());
+                if c.all_protos && isfn && !td && nm.len() != 0 && !c.proto_ix.contains_key(&key) {
+                    let mut ret = String::new();
+                    if ty.ok {
+                        ty.render(&mut ret);
+                    } else {
+                        ret.push_str("?");
+                    }
+                    // Only the types: a prototype check reads no parameter name.
+                    let mut tys = Vector::<Param>::with_capacity(ps.len());
+                    for q in 0..ps.len() {
+                        tys.push(Param { name: String::new(), ty: ps[q].ty.clone() });
+                    }
+                    c.proto_ix.insert(key, c.protos.len() as u32);
+                    c.protos.push(FnDecl { name: String::from_str(nm.as_str()), params: tys, ret: ret, variadic: va });
                 }
                 if keep {
                     let mut ret = String::new();
@@ -3213,6 +3931,18 @@ extend Collected {
     }
 
     fn demote_records(self: &mut Self) {
+        // A `#pragma pack` below a member's alignment or a layout attribute moves members where a Super-C
+        // struct does not put them, and Super-C has no anonymous member and no bitfield.
+        let mut drop = Vector::<usize>::new();
+        for i in 0..self.records.len() {
+            let r = &self.records[i];
+            if r.attr || r.anon || r.bitf || r.packed || r.aligned != 0 || r.pack != 0 && pack_moves(self, r) {
+                drop.push(i);
+            }
+        }
+        for i in 0..drop.len() {
+            self.records.index_mut(drop[i]).ok = false;
+        }
         for _ in 0..self.records.len() + 1 {
             let mut changed = false;
             for i in 0..self.records.len() {

@@ -5,12 +5,14 @@
 // are runtime values only (usable as flag arguments like `open(p, O_RDONLY | O_CREAT)`), not Super-C
 // constant expressions.
 
+import stdlib;
+
 extern "C" "fcntl.h" {
     /// Open `path` with O_* flags (mode as the variadic third argument when creating); the descriptor, or
     /// -1 and errno.
     pub fn open(path: *const char, flags: i32, ...) i32;
     /// Create or truncate `path` for writing; the descriptor, or -1 and errno.
-    pub fn creat(path: *const char, mode: u32) i32;
+    pub fn creat(path: *const char, mode: stdlib::mode_t) i32;
     /// Descriptor control (F_* command with an optional argument); -1 and errno on failure.
     pub fn fcntl(fd: i32, cmd: i32, ...) i32;
 

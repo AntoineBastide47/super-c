@@ -18,7 +18,6 @@ struct Row {
     pub t: BuiltinType,
     pub n: u64,
     pub fs: cf::CpuFeatureSet,
-    pub lanes: bool,
 }
 
 // One case: the plan's arguments, then the expected form, chunk lanes and count, and the nodes of the
@@ -28,7 +27,6 @@ struct Case {
     pub t: BuiltinType,
     pub n: u64,
     pub fs: cf::CpuFeatureSet,
-    pub checked: bool,
     pub form: u8,
     pub chunk: u64,
     pub chunks: u64,
@@ -49,12 +47,12 @@ const ROWS: [Row; 10] = [
     Row { op: simd(ir::SIMD_REDUCE_ADD_TREE), t: F, n: 4, fs: SIMD },
     Row { op: simd(ir::SIMD_REDUCE_ADD_ORD), t: F, n: 4, fs: SIMD },
     Row { op: simd(ir::SIMD_CONCAT), t: F, n: 4, fs: SIMD },
-    Row { op: simd(ir::SIMD_LOAD_MASKED), t: I, n: 4, fs: SIMD, lanes: true }, // a lane access
+    Row { op: simd(ir::SIMD_LOAD_MASKED), t: I, n: 4, fs: SIMD }, // a lane access
     Row { op: simd(ir::SIMD_REDUCE_MUL_TREE), t: F, n: 4, fs: SIMD }, // combined by the Mul entries
     Row { op: simd(ir::SIMD_REDUCE_MIN), t: I, n: 4, fs: SIMD }, // no Min entry combines it
 ];
 
-const CASES: [Case; 16] = [
+const CASES: [Case; 15] = [
     Case { op: ir::OP_ADD, t: F, n: 4, fs: SIMD, form: sp::PF_NATIVE, chunk: 4, chunks: 1, entry: 1 },
     Case { op: ir::OP_ADD, t: F, n: 8, fs: SIMD, form: sp::PF_NATIVE, chunk: 8, chunks: 1, entry: 2 },
     Case { op: ir::OP_ADD, t: F, n: 16, fs: SIMD, form: sp::PF_SPLIT, chunk: 8, chunks: 2, entry: 2 },
@@ -91,18 +89,8 @@ const CASES: [Case; 16] = [
     Case { op: simd(ir::SIMD_REDUCE_ADD_ORD), t: F, n: 8, fs: SIMD, form: sp::PF_SCALAR, chunk: 8, chunks: 1 },
     Case { op: simd(ir::SIMD_CONCAT), t: F, n: 8, fs: SIMD, form: sp::PF_SCALAR, chunk: 8, chunks: 1 },
     Case { op: simd(ir::SIMD_REDUCE_MIN), t: I, n: 8, fs: SIMD, form: sp::PF_SCALAR, chunk: 8, chunks: 1 },
-    // A memory checker keeps the checked lane loop of a lane access.
+    // A lane access takes its entry.
     Case { op: simd(ir::SIMD_LOAD_MASKED), t: I, n: 4, fs: SIMD, form: sp::PF_NATIVE, chunk: 4, chunks: 1, entry: 8 },
-    Case {
-        op: simd(ir::SIMD_LOAD_MASKED),
-        t: I,
-        n: 4,
-        fs: SIMD,
-        checked: true,
-        form: sp::PF_SCALAR,
-        chunk: 4,
-        chunks: 1,
-    },
 ];
 
 fn table() Vector<cf::SimdEntry> {
@@ -111,7 +99,7 @@ fn table() Vector<cf::SimdEntry> {
     for k in 0..rows.len() {
         let r = rows[k];
         let key = r.op as u64 | r.t as u64 << 16 | r.t as u64 << 24 | r.n << 32;
-        t.push(cf::SimdEntry { key: key, fs: r.fs, module: 0, node: k as u32 + 1, lanes: r.lanes });
+        t.push(cf::SimdEntry { key: key, fs: r.fs, module: 0, node: k as u32 + 1 });
     }
     t.sort_by(sp::entry_cmp);
     return t;
@@ -131,8 +119,8 @@ fn plans_match_the_table() {
     let cases: []Case = CASES;
     for k in 0..cases.len() {
         let c = cases[k];
-        let pl = sp::plan(&t, c.fs, c.checked, c.op, c.t, c.t, c.n, 256);
-        let again = sp::plan(&t, c.fs, c.checked, c.op, c.t, c.t, c.n, 256);
+        let pl = sp::plan(&t, c.fs, c.op, c.t, c.t, c.n, 256);
+        let again = sp::plan(&t, c.fs, c.op, c.t, c.t, c.n, 256);
         let comb = node_of(&t, &pl, true);
         let ok = pl.form == c.form && pl.chunk_lanes == c.chunk && pl.chunks == c.chunks && node_of(&t, &pl, false) == c.entry && comb == c.combine;
         if !ok {
@@ -159,10 +147,10 @@ fn plans_match_the_table() {
 fn the_result_type_selects_the_entry() {
     let mut t = Vector::<cf::SimdEntry>::new();
     let key = ir::OP_CAST as u64 | F as u64 << 16 | I as u64 << 24 | 4u64 << 32;
-    t.push(cf::SimdEntry { key: key, fs: SIMD, module: 0, node: 1, lanes: false });
-    assert(sp::plan(&t, SIMD, false, ir::OP_CAST, F, I, 4, 256).form == sp::PF_NATIVE, "f32 to i32");
-    assert(sp::plan(&t, SIMD, false, ir::OP_CAST, F, BuiltinType::BT_U32, 4, 256).form == sp::PF_SCALAR, "f32 to u32");
-    assert(sp::plan(&t, SIMD, false, ir::OP_CAST, F, I, 8, 256).form == sp::PF_SPLIT, "eight lanes in two chunks");
+    t.push(cf::SimdEntry { key: key, fs: SIMD, module: 0, node: 1 });
+    assert(sp::plan(&t, SIMD, ir::OP_CAST, F, I, 4, 256).form == sp::PF_NATIVE, "f32 to i32");
+    assert(sp::plan(&t, SIMD, ir::OP_CAST, F, BuiltinType::BT_U32, 4, 256).form == sp::PF_SCALAR, "f32 to u32");
+    assert(sp::plan(&t, SIMD, ir::OP_CAST, F, I, 8, 256).form == sp::PF_SPLIT, "eight lanes in two chunks");
 }
 
 // On AVX-512 the planner prefers 256-bit entries: a lane-wise operation over 512 bits splits into
@@ -174,14 +162,14 @@ fn the_preferred_width_splits_what_splits() {
     let mut t = Vector::<cf::SimdEntry>::new();
     let add = ir::OP_ADD as u64 | F as u64 << 16 | F as u64 << 24;
     let cmp = simd(ir::SIMD_COMPRESS) as u64 | I as u64 << 16 | I as u64 << 24 | 16u64 << 32;
-    t.push(cf::SimdEntry { key: add | 8u64 << 32, fs: z, module: 0, node: 1, lanes: false });
-    t.push(cf::SimdEntry { key: add | 16u64 << 32, fs: z, module: 0, node: 2, lanes: false });
-    t.push(cf::SimdEntry { key: cmp, fs: z, module: 0, node: 3, lanes: false });
+    t.push(cf::SimdEntry { key: add | 8u64 << 32, fs: z, module: 0, node: 1 });
+    t.push(cf::SimdEntry { key: add | 16u64 << 32, fs: z, module: 0, node: 2 });
+    t.push(cf::SimdEntry { key: cmp, fs: z, module: 0, node: 3 });
     t.sort_by(sp::entry_cmp);
-    let s = sp::plan(&t, z, false, ir::OP_ADD, F, F, 16, 256);
+    let s = sp::plan(&t, z, ir::OP_ADD, F, F, 16, 256);
     assert(s.form == sp::PF_SPLIT && s.chunk_lanes == 8, "two 256-bit chunks");
-    assert(sp::plan(&t, z, false, ir::OP_ADD, F, F, 16, 512).form == sp::PF_NATIVE, "512 bits");
-    let c = sp::plan(&t, z, false, simd(ir::SIMD_COMPRESS), I, I, 16, 256);
+    assert(sp::plan(&t, z, ir::OP_ADD, F, F, 16, 512).form == sp::PF_NATIVE, "512 bits");
+    let c = sp::plan(&t, z, simd(ir::SIMD_COMPRESS), I, I, 16, 256);
     assert(c.form == sp::PF_NATIVE && t.at(c.entry as usize).node == 3, "no split: the 512-bit entry");
 }
 
@@ -193,10 +181,10 @@ fn a_gather_counts_its_index_width() {
     let a2 = cf::close(cf::with(NONE, cf::find_variant("Avx2") as usize));
     let mut t = Vector::<cf::SimdEntry>::new();
     let key = simd(ir::SIMD_GATHER) as u64 | F as u64 << 16 | BuiltinType::BT_U32 as u64 << 24 | 8u64 << 32;
-    t.push(cf::SimdEntry { key: key, fs: z, module: 0, node: 1, lanes: false });
-    t.push(cf::SimdEntry { key: key, fs: a2, module: 0, node: 2, lanes: false });
+    t.push(cf::SimdEntry { key: key, fs: z, module: 0, node: 1 });
+    t.push(cf::SimdEntry { key: key, fs: a2, module: 0, node: 2 });
     t.sort_by(sp::entry_cmp);
     let g = simd(ir::SIMD_GATHER);
-    assert(t.at(sp::find(&t, z, false, g, F, BuiltinType::BT_U32, 8, 256) as usize).node == 2, "the AVX2 gather");
-    assert(t.at(sp::find(&t, z, false, g, F, BuiltinType::BT_U32, 8, 512) as usize).node == 1, "the AVX-512 gather");
+    assert(t.at(sp::find(&t, z, g, F, BuiltinType::BT_U32, 8, 256) as usize).node == 2, "the AVX2 gather");
+    assert(t.at(sp::find(&t, z, g, F, BuiltinType::BT_U32, 8, 512) as usize).node == 1, "the AVX-512 gather");
 }

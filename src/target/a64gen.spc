@@ -3812,15 +3812,21 @@ extend Gen {
                 } else if Gen::in_mem(vty) {
                     let (base, off) = self.mloc(v);
                     for q in 0..loc.n as u32 {
-                        let pa = self.lay.parts[(loc.p0 + q) as usize];
+                        let mut pa = self.lay.parts[(loc.p0 + q) as usize];
+                        // The template's result register renamed (`rmov`): its argument goes to the new name.
+                        if pa.v && pa.reg as u32 == rmov {
+                            pa.reg = rres - V0;
+                        }
                         self.load_part(pa, base, off + pa.off as i64);
                     }
                 } else {
                     let pa = self.lay.parts[loc.p0 as usize];
-                    let r = pa.reg + if pa.v {
-                        V0;
+                    let r = if pa.v && pa.reg as u32 == rmov {
+                        rres;
+                    } else if pa.v {
+                        pa.reg + V0;
                     } else {
-                        0;
+                        pa.reg;
                     };
                     if loc.ext != 0 {
                         self.materialize_ext(v, r, loc.ext == 2, type_bits(vty, self.ptr));

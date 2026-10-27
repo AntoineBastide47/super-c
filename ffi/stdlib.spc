@@ -14,6 +14,12 @@ pub type c_long = isize;
 pub type c_ulong = u32;
 @platform(!windows)
 pub type c_ulong = usize;
+/// POSIX `mode_t`: 16 bits on Apple's systems, 32 on the others (Windows has none: `filesystem::mkdir`
+/// ignores the mode there).
+@platform(macos | ios)
+pub type mode_t = u16;
+@platform(windows | linux | android | wasm)
+pub type mode_t = u32;
 
 extern "C" {
     /// Allocation. Sizes in bytes; all may return null on failure.

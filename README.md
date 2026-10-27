@@ -1,12 +1,14 @@
 # Super-C
 
-Super-C is a small, statically typed systems language that **compiles to readable C**.
+Super-C is a small, statically typed systems language that **compiles to native code and to
+readable C**.
 
 It takes features I like from other languages (automatic cleanup, memory safety, coroutines,
 code that runs at compile time, portable vector code) and keeps C's portability and performance.
-The compiler turns your program into ordinary C11, and Clang or GCC (mingw-w64 GCC on Windows)
-turns that into a native binary or a WebAssembly module. The compiler is written in Super-C and
-compiles itself.
+The compiler turns your program into a native binary or a WebAssembly module with its own code
+generators (x86-64, AArch64, wasm32) and its own linkers, with no C compiler or linker. It also
+writes the program as ordinary C11 (`--emit-c`) for any C compiler to build. The compiler is written
+in Super-C and compiles itself.
 
 ## Pipeline
 
@@ -23,9 +25,13 @@ Super-C source (.spc)
     -> program checks   (unbounded recursion, functions that always panic, lints)
     -> instance graph   (finds each generic instance the program uses: one copy per type)
     -> Core IR passes   (per function: inlining, then bounds-check elimination)
-    -> C emitter        (readable C11; maps vector operations to the target's CPU features)
-    -> cc / clang / gcc (incremental and parallel, with a precompiled header)
+    -> LIR              (a low-level IR per function; above opt-level 0 its optimizer and inliner)
+    -> code generators  (x86-64, AArch64 and wasm32 objects, with line tables and unwind data)
+    -> linkers          (Mach-O, ELF, PE/COFF and wasm; incremental and parallel)
     -> native binary or WebAssembly module
+
+    -> C emitter        (with `--emit-c`, in place of the objects: readable C11 that maps vector
+                         operations to the target's CPU features)
 ```
 
 ## Installation
@@ -50,11 +56,14 @@ wasmtime the current folder and the unpacked folder `D`, and name the module's a
 wasmtime run --dir=. --dir="$D" --argv0 "$D/super-c.wasm" "$D/super-c.wasm" lint app.spc
 ```
 
-WASI cannot start processes, so this build can write C, format and lint; commands that run the C
-compiler need the native binary.
+WASI cannot start processes, so this build can write C, format and lint; the commands that start
+processes (`build`, `run`, `test`, `bench`) need the native binary.
 
-Super-C needs a gcc-style C compiler: Clang or GCC, and mingw-w64 GCC on Windows. MSVC is not
-supported. The compiler uses `--cc=`, else the `cc` key of `build.toml`, else `$CC`, else `cc`.
+Super-C needs no C compiler and no linker. It reads the target's C headers for the declarations of
+`extern "C"` blocks and links against the target's C library: the system's on Linux (`libc6-dev` on
+Debian and Ubuntu), the Xcode or Command Line Tools SDK on macOS and iOS, the mingw-w64 tree in PATH
+on Windows, the NDK for Android, and the wasi-sdk or a WASI sysroot for wasm. `--sysroot=` names
+that tree when it is somewhere else (another architecture's C library on Linux, for example).
 It finds `std/` and `ffi/` next to its own binary or up to two folders above it; set `SC_STD_DIR`
 when you move the binary away from them.
 
@@ -79,9 +88,9 @@ git is available.
 ## Building and testing
 
 ```sh
-super-c build                     # debug build (-O0, debug info, frame pointers)
-super-c build --sanitizers        # debug build with ASan and UBSan
-super-c release                   # optimized build (-O3, link-time optimization)
+super-c build                     # debug build (opt-level 0, debug info)
+super-c release                   # optimized build (opt-level 3, stripped)
+super-c build --emit-c            # write the program's C into build/debug/raw/, build nothing
 super-c run                       # build the project, then run it
 super-c test                      # run the tests (in tests/)
 super-c bench                     # run the benchmarks (in bench/)
@@ -94,25 +103,19 @@ file (`root`). Project commands search upward for the nearest `build.toml`, and 
 builds the project in `DIR`. The binary goes to `build/<profile>/<bin>`. From that, `super-c build`
 gives you:
 
-* build profiles: `debug` (the default), `release`, `bench`, `test` (`-O1`), `race`
-  (ThreadSanitizer), and any you define;
-* `--sanitizers` on any build: AddressSanitizer and UndefinedBehaviorSanitizer (not for Windows,
-  iOS, Android or wasm);
-* incremental, parallel C compilation that only rebuilds what changed. Small programs compile as
-  one C file; larger ones compile in packs that share a precompiled header;
-* a `compile_commands.json` for C tools;
+* build profiles: `debug` (the default), `release`, `bench`, `test` (opt-level 1), and any you
+  define;
+* incremental, parallel builds that only compile again the modules that changed;
 * the `tests/` and `bench/` folder conventions.
 
 Two builds of the same profile folder do not run at the same time: the second one waits.
 
-Useful flags: `--profile=`, `--jobs=`, `--out-dir=`, `--cstd=`, `--cc=`, `--bin=`, `--lib`, `-o`.
-`--cstd=` replaces the base C flags (default `-std=c11 -D_POSIX_C_SOURCE=200809L
--D_XOPEN_SOURCE=700`).
+Useful flags: `--profile=`, `--jobs=`, `--out-dir=`, `--bin=`, `--lib`, `--emit-c`, `--sysroot=`,
+`-o`.
 
-`--jobs=N` sets how many workers the whole build uses, both inside the compiler (parsing, type
-checking, borrow checking, C generation) and for the C compiler processes. Nested `super-c`
-processes share these slots. The default is one per CPU. `--jobs=1` runs everything serially and
-gives byte-identical output.
+`--jobs=N` sets how many workers the whole build uses (parsing, type checking, borrow checking, code
+generation, linking). Nested `super-c` processes share these slots. The default is one per CPU.
+`--jobs=1` runs everything serially and gives byte-identical output.
 
 `build.toml` can also declare:
 
@@ -120,11 +123,10 @@ gives byte-identical output.
   `super-c command NAME` (built-in command names are reserved);
 * libraries in a `[lib]` section (`type = ["static", "shared"]`);
 * extra binaries in `[bin.NAME]` sections;
-* profiles in `[profile.NAME]` sections, new or changing a built-in one: `opt-level`, `cflags`,
-  `ldflags`, `link-args`, `strip`, `lto`, `overflow-checks`, `target-features`;
-* top-level settings: `cc`, `cstd`, `cflags`, `ldflags`, `ldlibs`, `out-dir`, `test-dir`,
-  `bench-dir`, `jobs`, `default-profile`, `const-eval-steps`, `const-eval-memory`, and the CPU
-  keys below.
+* profiles in `[profile.NAME]` sections, new or changing a built-in one: `opt-level`, `debug`,
+  `strip`, `ldflags`, `link-args`, `lockdep`, `overflow-checks`, `target-features`;
+* top-level settings: `ldflags`, `ldlibs`, `out-dir`, `test-dir`, `bench-dir`, `jobs`,
+  `default-profile`, `const-eval-steps`, `const-eval-memory`, and the CPU keys below.
 
 ### Targets and CPU features
 
@@ -133,11 +135,10 @@ super-c build --target=wasm                        # windows | macos | linux | i
 super-c build --target=linux --arch=aarch64        # x86_64 | aarch64 | wasm32
 super-c build --target-feature=+i8mm,-sve          # enable or disable CPU features of the arch
 super-c release --target-cpu=x86-64-v3             # x86_64 level: x86-64, x86-64-v2, -v3, -v4
-super-c build --print-probes                       # show what the C toolchain accepts; builds nothing
 ```
 
-* wasm uses the wasi-sdk (`WASI_SDK_PATH`, or `WASI_SYSROOT`), Android uses the NDK
-  (`ANDROID_NDK_HOME` or `ANDROID_NDK_ROOT`), and iOS uses Xcode (`xcrun`).
+* wasm finds its C library in the wasi-sdk (`WASI_SDK_PATH`) or a WASI sysroot (`WASI_SYSROOT`),
+  Android in the NDK (`ANDROID_NDK_HOME` or `ANDROID_NDK_ROOT`), and iOS in Xcode.
 * wasm32 vector code needs `--target-feature=+simd128` (and `+relaxed-simd` for those instructions).
 * On x86_64, a build at optimization level 2 or more also makes a copy of each function with vector
   code for `x86-64-v3` and picks the copy at run time. `--simd-dispatch=` selects the levels
@@ -165,7 +166,7 @@ super-c build --print-probes                       # show what the C toolchain a
   (`--ref=` pins a branch, tag or commit; `--force` replaces it). Import it as
   `vendor::NAME::module`.
 * `super-c bindgen header.h -o out.spc`: makes an `extern "C"` module from a C header (`--link=`,
-  `--header=`, `-I`, `--from=`, `--cflag=`, `--cc=`). A folder input recurses and needs `-o` to name
+  `--header=`, `-I`, `--from=`, `--cflag=`). A folder input recurses and needs `-o` to name
   an output folder. Generate the bindings again for each target.
 
 ## Language tour
@@ -760,7 +761,8 @@ fn os_name() str<'static> { return "windows"; }
 * `@platform(windows|macos|linux|wasm|ios|android)` and `@arch(x86_64|aarch64|wasm32)` work on
   items and on the members of an `extend` or an `extern` block. `|` is a union, `!x` the complement.
 * `@when(C)` gates an item, a member or an import on the build flags `TEST`, `THREAD_SANITIZER`,
-  `ADDRESS_SANITIZER`, `LOCKDEP` and `OVERFLOW_CHECKS`, with `!`, `&&`, `||` and parentheses.
+  `ADDRESS_SANITIZER` (false in every build: no build has a sanitizer), `LOCKDEP` and
+  `OVERFLOW_CHECKS`, with `!`, `&&`, `||` and parentheses.
 * The build constants (`PLATFORM`, `ARCH`, `TEST`, `PROFILE`, ...) work in any expression, and an
   `if` on them keeps only the branch that is taken.
 
@@ -779,15 +781,16 @@ as they are. Every call to them needs `unsafe`, unless the binding is marked `@u
 opaque `type` must name a real C type that an included header defines; `@layout(size, align)`
 gives it a size and alignment.
 
-`extern "C" "header.h" { .. }` also includes that header in the generated C. If the header is next
-to your `.spc` file, the compiler fixes the include path for you; otherwise it is included as
-written.
+`extern "C" "header.h" { .. }` reads that header for the facts the compiler checks (see below), and
+the emitted C includes it. If the header is next to your `.spc` file, the compiler fixes the include
+path for you; otherwise it is found as written, on the target's include path.
 
-C source files come along automatically. If `native.h` sits next to the `.spc` file, its `native.c`
-is found and compiled too:
+A C library comes prebuilt: build it with any C compiler and link it with `@link`:
 
 ```superc
-extern "C" "native.h" {      // native.c next to it is compiled into the build
+@link("-Lbuild/native")
+@link("native")
+extern "C" "native.h" {      // libnative.a, built from native.c by a C compiler
     fn native_mix(a: i32, b: i32) i32;
     @import("pt") pub struct pt { pub x: i32, pub y: i32 }   // a struct the header defines
     pub const NATIVE_MAX: i32 = 7;                           // a constant the header defines
@@ -795,7 +798,8 @@ extern "C" "native.h" {      // native.c next to it is compiled into the build
 ```
 
 * A `struct`, `union` or `enum` in such a block names the header's C type. List every member in
-  the header's order; the C compile checks each size, offset and constant value.
+  the header's order; the compiler checks each size, offset and constant value against the header,
+  and each function's parameters and result against its C prototype.
 * `@unsafe(const)` on a binding lets constants call it.
 * `@blocking` on a binding runs its calls on a separate thread pool (see Concurrency).
 * `String::cstr()`, `unsafe str::from_cstr(p)` and `str::from_cbuf(buf)` convert C strings.
@@ -873,7 +877,7 @@ fn gcd(a: u64, b: u64) u64 {
 
 fn check(err: i32) i32 {
     unsafe { CALLS += 1; }
-    if unlikely(err != 0) { return -1; }   // branch hint for the C compiler
+    if unlikely(err != 0) { return -1; }   // branch hint: the cold path goes out of line
     return gcd(48, 18) as i32;              // 6
 }
 ```
@@ -1030,8 +1034,8 @@ static_assert(sizeof(Header) == 8, "Header must stay 8 bytes");
   any type that has a size.
 * Array indexes in initializers and array lengths may be any constant expression. A length that
   is not constant is a clear error.
-* Every struct layout the compiler computes is double-checked in the C output with
-  `_Static_assert(sizeof(T) == N, ...)`, so the real C compiler confirms it on the real target.
+* Every struct layout the compiler computes is double-checked in the emitted C with
+  `_Static_assert(sizeof(T) == N, ...)`, so a C compiler that builds it confirms it on the target.
 * Evaluation covers loops, recursion, structs, arrays, enums, generics, floating point (including
   math functions) and heap memory: a function that builds a `Vector` can run at compile time.
 * A failed evaluation explains why (for example `division by zero` or `use after free`) and shows
@@ -1147,13 +1151,13 @@ fn main() i32 {
   cleanup, and aborts if one does not respond; `runtime::try_shutdown(..)` returns a
   `ShutdownResult` instead. Call `blocking::shutdown()` and `io::shutdown()` first when you use
   them.
-* **Race detection**: `--profile=race` builds with ThreadSanitizer and checks lock order
-  (`SC_LOCK_ORDER`). `runtime::set_deterministic(seed)` and `SC_SCHED_SEED` replay a schedule.
+* **Lock order**: a profile with `lockdep = true` checks at run time that every thread takes the
+  mutexes in one order. `runtime::set_deterministic(seed)` and `SC_SCHED_SEED` replay a schedule.
 
 ## Generated output
 
 `super-c app.spc` writes the C for `app.spc` into `build/debug/raw/` next to the source.
-`super-c build` and `super-c release` write `build/<profile>/raw/`.
+`super-c build --emit-c` and `super-c release --emit-c` write `build/<profile>/raw/`.
 
 ```text
 build/debug/raw/
@@ -1168,19 +1172,20 @@ build/debug/raw/
   __sc_registry.c             # reflection table, when needed
   __sc_unity.c                # small program: includes every unit, compiled as one unit
   __sc_pack<k>.c              # larger program: groups of small units, compiled as one unit each
+  __units                     # the files to compile, one per line
+  __cflags                    # the flags of each compile: dialect, target, optimization level
   __ldflags                   # link flags, one per line
   __sc_shards  __sc_manifest  # split counts for the next build, and the list of outputs
 ```
 
 Includes are relative, so the folder builds with no `-I` flags. `__sc_unity.c` and
-`__sc_pack<k>.c` include other units: compile them or their members, not both. The generated C
-needs `-funsigned-char`, and `-ffp-contract=off` keeps floating-point results equal to the values
-computed at compile time:
+`__sc_pack<k>.c` include other units, so `__units` names them in place of their members. The flags
+in `__cflags` include `-funsigned-char`, and `-ffp-contract=off` keeps floating-point results equal
+to the values computed at compile time:
 
 ```sh
-cc -std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -funsigned-char -ffp-contract=off \
-  $(find build/debug/raw -name '*.c' ! -name '__sc_unity.c' ! -name '__sc_pack*.c') \
-  $(cat build/debug/raw/__ldflags) -o app
+cd build/debug/raw
+cc $(cat __cflags) $(cat __units) $(cat __ldflags) -o app
 ```
 
 With a single module, the C names stay plain (no module prefix).
@@ -1194,7 +1199,6 @@ None is needed for normal use.
 | Variable | Effect |
 | --- | --- |
 | `SC_STD_DIR` | the `std/` folder to use (`ffi/` is found next to it) |
-| `CC` | the C compiler, when neither `--cc=` nor `build.toml` names one |
 | `WASI_SDK_PATH`, `WASI_SYSROOT` | the wasi-sdk or WASI sysroot for `--target=wasm` |
 | `ANDROID_NDK_HOME`, `ANDROID_NDK_ROOT` | the Android NDK for `--target=android` |
 
@@ -1204,12 +1208,10 @@ None is needed for normal use.
 | --- | --- |
 | `SC_CACHE_DIR` | where the shared build cache lives (default `~/.super-c/cache`) |
 | `SC_NO_CACHE` | turn off the build cache |
-| `SC_NO_EMIT_CACHE` | always regenerate the C, even when no source changed |
-| `SC_NO_TU_CACHE` | turn off the per-file C cache |
-| `SC_BUILD_MEM_BUDGET` | limit the memory that type checking, borrow checking and C generation may use in parallel (`64M`, `2G`; unset means no limit) |
-| `SC_LTO` | link-time optimization for one build: `none`, `full`, `auto` or `thin` |
-| `SC_NO_LTO_CACHE` | ThinLTO without the linker cache |
-| `SC_UNITY_MAX` | the largest program that compiles as one C file (`0`: compile each unit alone) |
+| `SC_NO_EMIT_CACHE` | always compile every module again, even when no source changed |
+| `SC_NO_TU_CACHE` | turn off the per-file output cache |
+| `SC_BUILD_MEM_BUDGET` | limit the memory that type checking, borrow checking and code generation may use in parallel (`64M`, `2G`; unset means no limit) |
+| `SC_UNITY_MAX` | the largest program whose emitted C is one file (`0`: each unit alone) |
 | `SC_TIMINGS` | print how long each build phase takes |
 | `SC_BUILD_STATS` | append one JSON record per build to this file (`-`: stderr) |
 

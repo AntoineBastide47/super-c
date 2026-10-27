@@ -51,6 +51,20 @@ const fn line_of<'a>(c: str<'a>, needle: str) str<'a> {
     return c.slice(st, k as usize + needle.len());
 }
 
+// A `setr` intrinsic of more arguments than the templates' registers puts its first argument in the
+// lowest lane, of variable lanes and of constant ones.
+@test
+fn setr_lanes_run_in_order() {
+    if !x86_host() {
+        return;
+    }
+    h::expect_exit(
+        "setr lanes",
+        "import immintrin;\n\n@arch(x86_64)\nfn lanes(v: immintrin::__m128i) [u8; 16] {\n    let mut b: [u8; 16] = [0; 16];\n    unsafe immintrin::_mm_storeu_si128((&mut b) as *mut [u8; 16] as *mut immintrin::__m128i_u, v);\n    return b;\n}\n\nfn main(args: Vector<str>) i32 {\n    let n = args.len() as i8;\n    let vb = lanes(immintrin::_mm_setr_epi8(n, n + 1, n + 2, n + 3, n + 4, n + 5, n + 6, n + 7, n + 8, n + 9, n + 10, n + 11, n + 12, n + 13, n + 14, n + 15));\n    let cb = lanes(immintrin::_mm_setr_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));\n    let v: []u8 = vb[0..16];\n    let c: []u8 = cb[0..16];\n    for k in 0..16usize {\n        if v[k] != k as u8 + 1 || c[k] != k as u8 {\n            return k as i32 + 1;\n        }\n    }\n    return 0;\n}\n",
+        0,
+    );
+}
+
 // A function with `@target_feature(cpu::X86_64_V3)` in a baseline build uses the AVX entries and is
 // compiled for AVX2; a baseline function of the same build splits the same operation into SSE chunks.
 @test
@@ -186,7 +200,7 @@ fn a_wide_vector_is_one_c_vector_where_the_build_has_its_register() {
     assert(!v4.contains(" c["), "AVX-512F: no chunks");
 }
 
-const RELEASE: [str; 1] = ["--profile=release"];
+const RELEASE: [str; 2] = ["--profile=release", "--emit-c"];
 
 const fn pick<T>(c: bool, a: T, b: T) T {
     if c {
@@ -303,7 +317,6 @@ fn operations_lower_to_their_instructions() {
     if !cli::has_cc() {
         return; // it reads the C compiler's assembly
     }
-    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     if !x86_host() {
         return;
     }
@@ -372,8 +385,11 @@ fn operations_lower_to_their_instructions() {
     );
     ks.add(
         "a stored comparison chooses through a mask register",
-        format("{}fn k(a: i32x8, b: i32x8) i32x8 {{\n    let m = a.less_than(b);\n    return m.choose(a, b);\n}}\n", v4).as_str(),
-        ["vpcmpd", "%k"],
+        format(
+            "{}fn k(a: i32x8, b: i32x8, c: i32x8) i32x8 {{\n    let m = a.less_than(b);\n    return m.choose(c, b);\n}}\n",
+            v4,
+        ).as_str(),
+        ["vpcmp", "%k"],
         [],
     );
     if base {
@@ -387,7 +403,7 @@ fn operations_lower_to_their_instructions() {
     ks.add(
         "a comparison into a mask register",
         format("{}fn k(a: i32x8, b: i32x8) u64 {{\n    return a.less_than(b).to_bits();\n}}\n", v4).as_str(),
-        ["vpcmpd", "%k", "kmov"],
+        ["vpcmp", "%k", "kmov"],
         ["vpmovmskb", "vmovmskps"],
     );
     ks.run();

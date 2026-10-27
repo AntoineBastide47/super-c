@@ -64,8 +64,8 @@ const RELEASE: [str; 3] = ["--profile=release", "--target=wasm", "--target-featu
 
 @test
 fn operations_lower_to_their_instructions() {
-    if !have_sdk() {
-        return;
+    if !have_sdk() || !cli::has_cc() {
+        return; // the C compiler assembles the emitted C
     }
     let ops: []str = RELEASE;
     h::expect_asm(
@@ -331,8 +331,8 @@ fn a_gather_reads_its_indices_before_its_fallback_lanes_land() {
         return;
     }
     let src = "import std::simd;\n@noinline\nfn opq(x: u32) u32 {\n    return x;\n}\nfn ga(i: u32, m: u64) i32 {\n    let a = [1, 2, 3, 4, 5, 6];\n    let ix = Simd::<u32, 4>::from_array([5, i, 0, i + 1]);\n    let v = simd::gather(a, ix, Mask::<4>::from_bits_truncate(m), Simd::<i32, 4>::splat(0));\n    return v[1];\n}\nfn main() i32 {\n    return (ga(opq(4), 0xF) != 5) as i32;\n}\n";
-    // The `ubsan` profile of a wasm build optimizes lightly (`diff_build`): `ga` stays a function.
-    let b = h::diff_build(src, ["--profile=ubsan", "--target=wasm"]);
+    // The `test` profile optimizes lightly (`opt-level` 1): `ga` stays a function.
+    let b = h::diff_build(src, ["--profile=test", "--target=wasm"]);
     assert(b.built, b.diag.as_str());
     let r = h::diff_run(&b, "");
     assert(r.exit == 0, r.err.as_str());

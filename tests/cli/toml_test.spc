@@ -42,13 +42,13 @@ fn toml_scalars() {
 @test
 fn toml_sections_arrays_tables() {
     let items = parse_ok(
-        "[profile.release]\ncflags = [\n    \"-O3\",\n    \"-DNDEBUG\",\n]\nstrip = true\n[command.test]\nenv = { SUPERC = \"./super-c\", CC = \"cc\" }\nrun = [\"a\", \"b\"]\n",
+        "[profile.release]\nldflags = [\n    \"-L/opt\",\n    \"-lz\",\n]\nstrip = true\n[command.test]\nenv = { SUPERC = \"./super-c\", CC = \"cc\" }\nrun = [\"a\", \"b\"]\n",
     );
-    let c = find(&items, "profile.release", "cflags");
+    let c = find(&items, "profile.release", "ldflags");
     assert(c >= 0);
     assert(items.at(c as usize).val.kind == toml::TV_ARR);
     assert_eq(items.at(c as usize).val.arr.len(), 2 as usize);
-    assert(items.at(c as usize).val.arr.at(1).as_str() == "-DNDEBUG");
+    assert(items.at(c as usize).val.arr.at(1).as_str() == "-lz");
     let e = find(&items, "command.test", "env");
     assert(e >= 0);
     assert(items.at(e as usize).val.kind == toml::TV_TBL);
@@ -96,28 +96,6 @@ fn toml_error_messages() {
     toml_err("integer above i64", "jobs = 9223372036854775808\n", "integer out of range");
 }
 
-// `cache-size` takes a byte count or a size with a binary unit; the default is 2 GiB.
-@test
-fn manifest_cache_size() {
-    let (d, _) = manifest::parse_check("bin = \"a\"\nroot = \"m.spc\"\n", "", false);
-    assert_eq(d.unwrap().cache_size, 2u64 << 30);
-    let (m, _) = manifest::parse_check("bin = \"a\"\nroot = \"m.spc\"\ncache-size = \"250MiB\"\n", "", false);
-    assert_eq(m.unwrap().cache_size, 250u64 << 20);
-    let (b, _) = manifest::parse_check("bin = \"a\"\nroot = \"m.spc\"\ncache-size = 4096\n", "", false);
-    assert_eq(b.unwrap().cache_size, 4096u64);
-    assert_eq(manifest::parse_size("15GiB").unwrap(), 15u64 << 30);
-    assert_eq(manifest::parse_size("7KiB").unwrap(), 7u64 << 10);
-    assert_eq(manifest::parse_size("12B").unwrap(), 12u64);
-    assert(manifest::parse_size("2GB").is_none(), "a decimal unit");
-    assert(manifest::parse_size("GiB").is_none(), "no digits");
-    assert(manifest::parse_size("17179869184GiB").is_none(), "past 64 bits");
-    manifest_err(
-        "cache-size",
-        "bin = \"a\"\nroot = \"m.spc\"\ncache-size = \"2 GiB\"\n",
-        "'cache-size' expects a byte count or a size such as \"250MiB\" or \"2GiB\"",
-    );
-}
-
 @test
 fn manifest_validation_messages() {
     manifest_err(
@@ -143,9 +121,16 @@ fn manifest_validation_messages() {
     );
     manifest_err("bin string", "bin = 5\nroot = \"m.spc\"\n", "'bin' expects a string");
     manifest_err(
-        "cflags array",
-        "bin = \"a\"\nroot = \"m.spc\"\ncflags = \"x\"\n",
-        "'cflags' expects an array of strings",
+        "ldflags array",
+        "bin = \"a\"\nroot = \"m.spc\"\nldflags = \"x\"\n",
+        "'ldflags' expects an array of strings",
+    );
+    // The C compile's keys are gone with it.
+    manifest_err("cflags", "bin = \"a\"\nroot = \"m.spc\"\ncflags = [\"-O2\"]\n", "unknown key 'cflags'");
+    manifest_err(
+        "profile cflags",
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.debug]\ncflags = [\"-O2\"]\n",
+        "unknown profile key 'cflags'",
     );
     manifest_err(
         "strip bool",
@@ -168,9 +153,9 @@ fn manifest_validation_messages() {
         "'link-args' expects an array of strings",
     );
     manifest_err(
-        "lto mode",
-        "bin = \"a\"\nroot = \"m.spc\"\n[profile.debug]\nlto = \"fat\"\n",
-        "'lto' expects \"none\", \"full\", \"auto\" or \"thin\"",
+        "debug bool",
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.debug]\ndebug = 1\n",
+        "'debug' expects true or false",
     );
     manifest_err(
         "absolute test-dir",
@@ -235,38 +220,23 @@ fn manifest_validation_messages() {
     manifest_err("unknown key", "bin = \"a\"\nroot = \"m.spc\"\nvendor-dir = \"v\"\n", "unknown key 'vendor-dir'");
 }
 
-// `lto` names the link-time optimization mode of a profile; a built-in profile keeps its own default
-// (automatic LTO for `release`), and a profile without the key leaves the flag arrays in charge.
+// `debug` puts debug information in the objects: the built-in `debug` and `bench` profiles have it, and a
+// section naming a built-in overrides only the keys it sets.
 @test
-fn manifest_profile_lto_mode() {
+fn manifest_profile_debug_info() {
     let (m, errs) = manifest::parse_check(
-        "bin = \"a\"\nroot = \"m.spc\"\n[profile.fast]\ncflags = [\"-O2\"]\nlto = \"full\"\n[profile.plain]\ncflags = [\"-O1\"]\n",
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.release]\ndebug = true\n[profile.plain]\nopt-level = 1\n",
         "",
         false,
     );
     assert_eq(errs.errors.len(), 0);
     let mm = m.unwrap();
-    assert_eq(mm.profiles.at(mm.profile_index("fast") as usize).lto, manifest::LTO_FULL);
-    assert_eq(mm.profiles.at(mm.profile_index("plain") as usize).lto, manifest::LTO_FLAGS);
-    assert_eq(mm.profiles.at(mm.profile_index("release") as usize).lto, manifest::LTO_AUTO);
-    assert_eq(mm.profiles.at(mm.profile_index("debug") as usize).lto, manifest::LTO_FLAGS);
-    assert_eq(manifest::lto_parse("thin"), manifest::LTO_THIN);
-    // A section naming a built-in overrides only the keys it sets: `release` keeps its flags and strip.
-    let (m2, errs2) = manifest::parse_check(
-        "bin = \"a\"\nroot = \"m.spc\"\n[profile.release]\nlto = \"thin\"\n[profile.debug]\ncflags = [\"-O1\"]\n",
-        "",
-        false,
-    );
-    assert_eq(errs2.errors.len(), 0);
-    let mm2 = m2.unwrap();
-    let rel = mm2.profiles.at(mm2.profile_index("release") as usize);
-    assert_eq(rel.lto, manifest::LTO_THIN);
-    assert(rel.strip && rel.cflags.len() > 1 && rel.link_args.len() == 1, "release keeps its built-in flags and strip");
-    let dbg = mm2.profiles.at(mm2.profile_index("debug") as usize);
-    assert(dbg.cflags.len() == 1 && dbg.opt == 0, "debug's cflags are replaced, its opt-level kept");
-    assert_eq(manifest::lto_parse("x"), -1);
-    assert_eq(manifest::lto_flag(manifest::LTO_AUTO), "-flto=auto");
-    assert_eq(manifest::lto_flag(manifest::LTO_NONE), "");
+    let rel = mm.profiles.at(mm.profile_index("release") as usize);
+    assert(rel.debug && rel.strip && rel.opt == 3, "release keeps its level and strip");
+    assert(!mm.profiles.at(mm.profile_index("plain") as usize).debug, "a new profile has none");
+    assert(mm.profiles.at(mm.profile_index("debug") as usize).debug, "debug");
+    assert(mm.profiles.at(mm.profile_index("bench") as usize).debug, "bench");
+    assert(!mm.profiles.at(mm.profile_index("test") as usize).debug, "test");
 }
 
 // `opt-level` takes Cargo's values and `link-args` the linker's own arguments; the built-in profiles
@@ -286,12 +256,10 @@ fn manifest_profile_opt_level_and_link_args() {
         rel.link_args.len() == 2 && rel.link_args.at(0).as_str() == "-dead_strip",
         "link-args replace the built-in list",
     );
-    assert(rel.strip && rel.cflags.len() > 1, "the rest of release stays");
+    assert(rel.strip, "the rest of release stays");
     assert_eq(mm.profiles.at(mm.profile_index("small") as usize).opt, manifest::OPT_Z);
     assert_eq(mm.profiles.at(mm.profile_index("two") as usize).opt, 2);
     assert_eq(mm.profiles.at(mm.profile_index("debug") as usize).opt, 0);
-    assert_eq(manifest::opt_flag(manifest::OPT_S), "-Os");
-    assert_eq(manifest::opt_flag(manifest::OPT_FLAGS), "");
 }
 
 // Signed overflow traps at opt-level 0 and 1 and wraps at 2 and above; `overflow-checks` overrides the
@@ -299,7 +267,7 @@ fn manifest_profile_opt_level_and_link_args() {
 @test
 fn manifest_profile_overflow_checks() {
     let (m, errs) = manifest::parse_check(
-        "bin = \"a\"\nroot = \"m.spc\"\n[profile.release]\noverflow-checks = true\n[profile.fast]\nopt-level = \"s\"\n[profile.plain]\ncflags = [\"-O3\"]\n[profile.debug]\nstrip = true\n[profile.lax]\nopt-level = 0\noverflow-checks = false\n",
+        "bin = \"a\"\nroot = \"m.spc\"\n[profile.release]\noverflow-checks = true\n[profile.fast]\nopt-level = \"s\"\n[profile.plain]\nstrip = true\n[profile.debug]\nstrip = true\n[profile.lax]\nopt-level = 0\noverflow-checks = false\n",
         "",
         false,
     );
@@ -309,7 +277,7 @@ fn manifest_profile_overflow_checks() {
     for name in wraps {
         assert(mm.profiles.at(mm.profile_index(name) as usize).arith_wraps(), name);
     }
-    let checks: [str; 5] = ["release", "plain", "debug", "test", "race"];
+    let checks: [str; 4] = ["release", "plain", "debug", "test"];
     for name in checks {
         assert(!mm.profiles.at(mm.profile_index(name) as usize).arith_wraps(), name);
     }

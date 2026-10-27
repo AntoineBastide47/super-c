@@ -271,16 +271,12 @@ fn emit_stamp_keys_on_the_compiler_content() {
 }
 
 // `--transpiler` runs the transpile step through another command (here the compiler under test itself)
-// and the engine compiles and links its tree: the program runs, the tree equals the one the engine's own
+// and the engine links its objects: the program runs, the tree equals the one the engine's own
 // frontend writes, and the emit stamp keys on the transpiler, so an unchanged build skips the transpile
 // and a switch between transpilers transpiles again. A failing transpiler fails the build with its
 // diagnostics. `phase load` prints only when the build transpiles.
 @test
 fn external_transpiler_builds_and_keys_the_emit_stamp() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
-    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "import lib;\n\nfn main() i32 {\n    return lib::v();\n}\n");
@@ -296,9 +292,9 @@ fn external_transpiler_builds_and_keys_the_emit_stamp() {
     assert(same.ok() && !same.out_has("phase load"), "the same transpiler skips the transpile");
     // The engine's own frontend emits the same tree, and it is another emitter for the stamp.
     assert(cli::superc_env_in(root, E, "1", "build --out-dir=int -o app").ok(), "the frontend build");
-    let own = cli::read_text(format("{}/int/debug/raw/lib.c", root).as_str());
+    let own = cli::read_text(format("{}/int/debug/raw/lib.o", root).as_str());
     assert(own.len() != 0, "the frontend wrote the tree");
-    assert(own.as_str() == cli::read_text(format("{}/ext/debug/raw/lib.c", root).as_str()).as_str(), "same tree");
+    assert(own.as_str() == cli::read_text(format("{}/ext/debug/raw/lib.o", root).as_str()).as_str(), "same tree");
     let back = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", "build --out-dir=ext -o app");
     assert(back.ok() && back.out_has("phase load"), "the frontend does not reuse the transpiler's tree");
     let again = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", ext.as_str());
@@ -344,39 +340,10 @@ fn emit_stamp_records_the_text_the_build_read() {
     assert(!same.out_has("phase load"), "an unchanged project skips the transpile");
 }
 
-// A dependency path with a space is escaped as `\ ` in the compiler's .d file; read as written, an
-// unchanged object stays fresh instead of recompiling on every build.
-@test
-fn escaped_space_dependency_keeps_the_object_fresh() {
-    if !cli::has_cc() {
-        return; // a header's `static` function compiles through C
-    }
-    if cli::on_wasm() {
-        return;
-    }
-    let p = cli::proj_new();
-    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
-    p.mkfile("src/my dir/native.h", "static inline int native_one(void) { return 7; }\n");
-    p.mkfile(
-        "src/main.spc",
-        "extern \"C\" \"my dir/native.h\" {\n    fn native_one() i32;\n}\n\nfn main() i32 {\n    return unsafe native_one();\n}\n",
-    );
-    let root = p.dir();
-    // Without the object cache, so every stale unit really compiles and is counted.
-    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "first build");
-    let r = cli::superc_env_in(root, "SC_NO_CACHE", "1 SC_TIMINGS=1", "build");
-    assert(r.ok(), "second build");
-    assert(r.out_has("(0/"), "no unit is stale after an unchanged build");
-}
-
-// A manifest's own profile is a name PROFILE may be compared with, and its generated C lands in that
+// A manifest's own profile is a name PROFILE may be compared with, and its objects land in that
 // profile's directory.
 @test
 fn manifest_profile_is_a_build_constant() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
-    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     if cli::on_wasm() {
         return;
     }
@@ -394,6 +361,6 @@ fn manifest_profile_is_a_build_constant() {
     assert(r.ok(), "the fast profile takes the fast branch");
     let mut raw = String::from_str(root);
     raw.push_str("/out/fast/raw");
-    assert_eq(cli::dir_count_suffix(raw.as_str(), "main.c"), 1);
+    assert_eq(cli::dir_count_suffix(raw.as_str(), "main.o"), 1);
     assert_eq(cli::superc_env_in(root, E, "1", "run").exit, 1);
 }

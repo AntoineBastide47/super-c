@@ -165,8 +165,6 @@ pub struct Lower {
     /// The units a C chunk without a LIR body landed in, which compile through C, and why.
     pub conly: Vector<u32>,
     pub conly_why: Vector<String>,
-    /// The modules a body of which rendered no C though a unit whose C compiles took it (`CEmit::lir_claim`).
-    pub retry: Vector<u32>,
     /// The CTFE outcome of each test (`probe_tests`) the check compares the evaluator's with.
     pub ctfe: Vector<CtfeRes>,
     /// The build wraps on integer overflow (a profile without overflow checks).
@@ -247,7 +245,6 @@ extend Lower {
             fails_seen: 0,
             conly: Vector::<u32>::new(),
             conly_why: Vector::<String>::new(),
-            retry: Vector::<u32>::new(),
             ctfe: Vector::<CtfeRes>::new(),
             wrap: wrap,
             nbodies: 0,
@@ -6200,12 +6197,21 @@ extend Lower {
                     return self.fail("callee-sym");
                 }
                 // An intrinsic the backend expands is a call of its name (`target::intrin`).
+                let isa = tgt::isa(Lower::p(c).arch).name;
                 if Lower::p(c).c_fns.contains(&(t.callee.module as u64 << 32 | t.callee.node as u64)) && !intrin::has(
-                    tgt::isa(Lower::p(c).arch).name,
+                    isa,
                     name.as_str(),
-                ) {
-                    self.pend_c = "calls a function only a C compile defines (an intrinsic, a header's `static` one)";
-                    self.pend_name = name.clone();
+                ) && intrin::lane_form(isa, name.as_str()) == 0 {
+                    // Named as the extern block declares it.
+                    let ca = Lower::ast(c, t.callee.module);
+                    let nm = ca.at_const(ca.at_const(t.callee.node).as_data.function.name).as_data.name.text;
+                    self.pend_c = "calls a function no object defines (a C header's `static` function, or an intrinsic the native backend lacks)";
+                    self.pend_name = String::from_str(
+                        Lower::p(c).modules.at(t.callee.module as usize).source.as_str().slice(
+                            nm.start as usize,
+                            nm.end as usize,
+                        ),
+                    );
                 }
                 if c.mg.in_interface(t.callee.module, t.callee.node) != NODE_NONE && c.mg.last_method_def.node != NODE_NONE {
                     pcallee = c.mg.last_method_def;
@@ -6346,7 +6352,13 @@ extend Lower {
         }
         let mut r = VNONE;
         let nm = name.as_str();
-        if fv != VNONE || !self.rt_prim(nm, &args, &mut r) && !self.mem_intrin(c, nm, &args, ti, &mut r) {
+        if fv != VNONE || !self.rt_prim(nm, &args, &mut r) && !self.mem_intrin(c, nm, &args, ti, &mut r) && !self.lanes_intrin(
+            c,
+            nm,
+            &args,
+            ti,
+            &mut r,
+        ) {
             r = self.emit_call(nm, fv, &args, &tys, nfixed, variadic, ti, c, b.module, dty, dst);
         }
         if t.dests_len == 1 && ti.cls == VC_SCALAR {
@@ -6402,6 +6414,55 @@ extend Lower {
             return true;
         }
         return false;
+    }
+
+    // An x86 vector of the lanes its scalar arguments give (`intrin::lane_form`): one of constant lanes
+    // loaded from read-only data, as a C compiler does, else stored lane by lane and loaded. True, with the
+    // vector in `out`, when `name` is one.
+    fn lanes_intrin(self: &mut Self, c: &cbe::CEmit, name: str, a: &Vector<Value>, ti: TyI, out: &mut Value) bool {
+        if ti.cls != VC_SCALAR || !is_vec(ti.mty) {
+            return false;
+        }
+        let lb = intrin::lane_form(tgt::isa(Lower::p(c).arch).name, name);
+        let n = a.len();
+        if lb == 0 || n as u32 * lb != ti.size {
+            return false;
+        }
+        let lt = switch lb {
+            1 => T_I8,
+            2 => T_I16,
+            4 => T_I32,
+            _ => T_I64,
+        };
+        let mut konst = true;
+        for k in 0..n {
+            konst = konst && (a[k] & (VPARAM | VFLAG)) == 0 && self.b.insts[a[k] as usize].op == O_ICONST;
+        }
+        if konst {
+            let mut bytes = String::new();
+            for j in 0..n {
+                let d = self.b.insts[a[j] as usize];
+                let u = d.b as u64 << 32 | d.a as u64;
+                for q in 0..lb {
+                    bytes.push_byte((u >> 8 * q) as u8);
+                }
+            }
+            let s = self.rodata(&mut bytes);
+            let k = self.sym_of(s);
+            let at = self.inst(O_SYMADDR, T_PTR, 0, k, 0, VNONE);
+            *out = self.load(ti.mty, at, 0, true);
+            return true;
+        }
+        let s = self.temp(TyI { cls: VC_MEM, mty: T_NONE, size: ti.size, align: ti.align });
+        for j in 0..n {
+            let mut v = a[j];
+            if self.vty(v) != lt {
+                v = self.inst(O_TRUNC, lt, 0, v, VNONE, VNONE);
+            }
+            self.store(v, s, j as u32 * lb, false);
+        }
+        *out = self.load(ti.mty, s, 0, false);
+        return true;
     }
 
     // A primitive of the C runtime (`super_rt.h`: `std::core`'s bit counts and wrapping arithmetic over 64
@@ -7051,6 +7112,13 @@ extend Lower {
         self.conly_why.push(format("`{}` has no LIR", name));
     }
 
+    /// Whether a body lowered since the last claim needs what no object defines (`pend_c`), cleared.
+    pub fn take_pend_c(self: &mut Self) bool {
+        let r = self.pend_c.len() != 0;
+        self.pend_c = "";
+        return r;
+    }
+
     /// Move `other`'s bodies, data and refusals into this lowering.
     pub fn absorb(self: &mut Self, other: &mut Lower) {
         let _ = self.pkg.absorb(&other.pkg);
@@ -7060,10 +7128,6 @@ extend Lower {
         }
         other.conly.truncate(0);
         other.conly_why.truncate(0);
-        for i in 0..other.retry.len() {
-            self.retry.push(other.retry[i]);
-        }
-        other.retry.truncate(0);
         for i in 0..other.fails.len() {
             self.fails.push(LFail { sym: other.fails[i].sym.clone(), why: other.fails[i].why });
         }

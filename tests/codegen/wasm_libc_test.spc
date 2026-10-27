@@ -5,8 +5,9 @@
 // qsort; the Super-C program's debug binary holds no wasi-libc function (its name section names none). The
 // second pair: the scanf family over strings, files and stdin, setlocale and localeconv with UTF-8
 // characters, the broken-down time functions, signal and raise, sbrk beside malloc, creat, setvbuf, environ,
-// pthread_self and pthread_exit. The test needs a wasi-sdk in WASI_SDK_PATH and wasmtime on the PATH, as the
-// wasm lane sets them; without the SDK it returns early.
+// pthread_self and pthread_exit. The test needs a wasi-sdk in WASI_SDK_PATH, wasmtime on the PATH, and a C
+// compiler in SC_TEST_CC (the wasi-sdk's clang is a C oracle: the comparison job runs it); without them it
+// returns early.
 
 import std::platform::env;
 import std::platform::fs;
@@ -728,6 +729,14 @@ fn run(argv: []str, dir: str, out: str, input: str) bool {
     return true;
 }
 
+// Whether the run has the wasi-sdk and names a C compiler (`SC_TEST_CC`): the comparison job.
+@platform(macos | linux)
+fn have_oracle() bool {
+    return env::get("WASI_SDK_PATH").unwrap().unwrap_or(String::new()).len() != 0 && env::get("SC_TEST_CC").unwrap().unwrap_or(
+        String::new(),
+    ).len() != 0;
+}
+
 // Build `program` (`prog`) with the compiler under test and `reference` (`ref.wasm`) with the wasi-sdk's clang
 // and `cflags` in a scratch directory, run both under wasmtime with `wasmtime` before the module and `input`
 // (when not empty) on stdin, and assert they print the same bytes, more than `min` of them. The scratch.
@@ -808,7 +817,7 @@ fn compare(program: str, reference: str, cflags: []str, wasmtime: []str, input: 
 @platform(macos | linux)
 @test(timeout = 600)
 fn wasm_libc_matches_wasi_libc() {
-    if env::get("WASI_SDK_PATH").unwrap().unwrap_or(String::new()).len() == 0 {
+    if !have_oracle() {
         return;
     }
     let none: [str; 0] = [];
@@ -1803,7 +1812,7 @@ int main(void) {
 @platform(macos | linux)
 @test(timeout = 600)
 fn wasm_libc_io_time_locale_and_signals_match_wasi_libc() {
-    if env::get("WASI_SDK_PATH").unwrap().unwrap_or(String::new()).len() == 0 {
+    if !have_oracle() {
         return;
     }
     let cflags: [str; 2] = ["-D_WASI_EMULATED_SIGNAL", "-lwasi-emulated-signal"];

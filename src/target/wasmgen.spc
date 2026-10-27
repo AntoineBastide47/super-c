@@ -3179,7 +3179,15 @@ extend Gen {
             lv::fill(&mut tmps, np as usize, NONE);
             for q in 0..args.len() {
                 let k = args[q];
-                tmps[k as usize] = self.tmp(wa::wtype(self.cs.params[k as usize].ty));
+                // A vector on the stack is a v128 (`wtype` gives a vector's by-reference form).
+                let pa = self.cs.params[k as usize];
+                tmps[k as usize] = self.tmp(
+                    if pa.kind == wa::P_V128 {
+                        w::V128;
+                    } else {
+                        wa::wtype(pa.ty);
+                    },
+                );
             }
             let mut q = args.len();
             while q > 0 {
