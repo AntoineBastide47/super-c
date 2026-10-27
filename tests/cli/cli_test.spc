@@ -3349,10 +3349,6 @@ fn main() i32 {
     assert(p.gen_has("main.c", "int32_t __sc_spc = "), "the function-local preemption tick is declared");
     // The substrate's spin, park and signal-handler loops hold locks a preemption must not cross.
     assert(!p.gen_has("sc_runtime.c", "__sc_spc"), "the runtime substrate never ticks");
-    if !cli::on_wasm() {
-        // The context switch names its trampoline as a value: the extern still gets its declaration.
-        assert(p.gen_has("__sc_fwd.h", "extern void sc_ctx_entry(void);"), "a header-less extern named as a value");
-    }
     let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
@@ -9020,23 +9016,25 @@ fn extern_static_mut_binds_a_writable_global() {
 }
 
 // A `static mut` of a header-less extern block (a thread-local one too) has no header to declare it: the
-// units that use it declare it, as a header-less function gets its prototype.
+// units that use it declare it, as a header-less function gets its prototype, also one only named as a
+// value.
 @test
 fn headerless_extern_static_mut_is_declared() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
-    // def.c, linked beside the program, defines the statics; the header declares nothing.
+    // def.c, linked beside the program, defines the statics and the function; the header declares nothing.
     p.mkfile("def.h", "");
-    p.mkfile("def.c", "int hl_counter = 41;\n_Thread_local int hl_tls = 1;\n");
+    p.mkfile("def.c", "int hl_counter = 41;\n_Thread_local int hl_tls = 1;\nvoid hl_fn(void) {}\n");
     p.mkfile(
         "main.spc",
-        "extern \"C\" \"def.h\" {}\nextern \"C\" {\n    static mut hl_counter: i32;\n    @thread_local\n    static mut hl_tls: i32;\n}\nfn main() i32 {\n    unsafe hl_counter = unsafe hl_counter + 1;\n    unsafe hl_tls = unsafe hl_tls + 2;\n    return unsafe hl_counter + unsafe hl_tls - 45;\n}\n",
+        "extern \"C\" \"def.h\" {}\nextern \"C\" {\n    static mut hl_counter: i32;\n    @thread_local\n    static mut hl_tls: i32;\n    fn hl_fn();\n}\nfn main() i32 {\n    let f: fn() = unsafe hl_fn;\n    f();\n    unsafe hl_counter = unsafe hl_counter + 1;\n    unsafe hl_tls = unsafe hl_tls + 2;\n    return unsafe hl_counter + unsafe hl_tls - 45;\n}\n",
     );
     let r = p.compile("main.spc");
     assert(r.ok(), "the program compiles");
     assert(p.gen_has("main.c", "extern int32_t hl_counter;"), "the unit declares the static");
+    assert(p.gen_has("__sc_fwd.h", "extern void hl_fn(void);"), "a header-less function named as a value");
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
     let cc = p.cc_build_with("", "def.c");
     assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 0);

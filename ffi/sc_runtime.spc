@@ -169,50 +169,25 @@ pub fn sc_rt_widx_get() i32 {
 
 // ---- spin hint, cycle counter, spinlock -------------------------------------------------------------
 
-/// One spin hint: what a worker runs between look-again attempts before it parks. It stays runnable.
-/// `pause` stops the pipeline speculating past the loop.
-@arch(x86_64)
-pub fn sc_rt_cpu_relax() {
-    unsafe {
-        asm("pause" :  :  : "memory");
-    }
-}
-/// One spin hint: what a worker runs between look-again attempts before it parks. It stays runnable.
-/// `isb`, not `yield`: `yield` is a no-op on Apple cores, so the loop would poll the line many times more.
-@arch(aarch64)
-pub fn sc_rt_cpu_relax() {
-    unsafe {
-        asm("isb" :  :  : "memory");
-    }
-}
-/// One spin hint: a compiler barrier, as wasm has no spin instruction.
-@arch(wasm32)
-pub fn sc_rt_cpu_relax() {
-    unsafe {
-        asm("" :  :  : "memory");
-    }
+// Processor operations (`lir::ir::SYS_*`): each backend expands them for its target.
+extern "C" {
+    fn sc_sys_spin();
+    fn sc_sys_cycles() u64;
 }
 
-/// A cheap monotone cycle counter for the scheduler's compile-gated statistics (rdtsc). Not comparable
-/// across cores or machines: only differences on one thread mean anything.
-@arch(x86_64)
-pub fn sc_rt_cycles() u64 {
-    let mut lo: u32 = 0;
-    let mut hi: u32 = 0;
-    unsafe {
-        asm("rdtsc" : "=a"(lo), "=d"(hi));
-    }
-    return hi as u64 << 32 | lo as u64;
+/// One spin hint: what a worker runs between look-again attempts before it parks. It stays runnable.
+/// `pause` (x86-64) stops the pipeline speculating past the loop; `isb` (arm64), not `yield`, which is a
+/// no-op on Apple cores, so the loop would poll the line many times more; wasm has no spin instruction,
+/// so a compiler barrier.
+pub fn sc_rt_cpu_relax() {
+    unsafe sc_sys_spin();
 }
-/// A cheap monotone cycle counter for the scheduler's compile-gated statistics (cntvct). Not comparable
-/// across cores or machines: only differences on one thread mean anything.
-@arch(aarch64)
+
+/// A cheap monotone cycle counter for the scheduler's compile-gated statistics (rdtsc, cntvct). Not
+/// comparable across cores or machines: only differences on one thread mean anything.
+@arch(!wasm32)
 pub fn sc_rt_cycles() u64 {
-    let mut v: u64 = 0;
-    unsafe {
-        asm("mrs %0, cntvct_el0" : "=r"(v));
-    }
-    return v;
+    return unsafe sc_sys_cycles();
 }
 /// A cheap monotone counter for the scheduler's compile-gated statistics: the monotonic clock.
 @arch(wasm32)
@@ -1603,22 +1578,24 @@ const TEB_STACK_LIMIT: usize = 0x10;
 @platform(windows)
 const TEB_DEALLOC: usize = 0x1478;
 
+// The gs segment's words (`lir::ir::SYS_GSLOAD`, `SYS_GSSTORE`).
+@platform(windows)
+@arch(x86_64)
+extern "C" {
+    fn sc_sys_gs_load(off: usize) usize;
+    fn sc_sys_gs_store(off: usize, v: usize);
+}
+
 @platform(windows)
 @arch(x86_64)
 fn teb_read(off: usize) usize {
-    let mut v: usize = 0;
-    unsafe {
-        asm("movq %%gs:(%1), %0" : "=r"(v) : "r"(off));
-    }
-    return v;
+    return unsafe sc_sys_gs_load(off);
 }
 
 @platform(windows)
 @arch(x86_64)
 fn teb_write(off: usize, v: usize) {
-    unsafe {
-        asm("movq %0, %%gs:(%1)" :  : "r"(v), "r"(off) : "memory");
-    }
+    unsafe sc_sys_gs_store(off, v);
 }
 
 // Where a stack's committed region starts, given its usable low end and size.
@@ -2167,387 +2144,46 @@ pub unsafe fn sc_rt_ctx_free(ctx: *mut void) {
 // argument into the first argument register and calls the coroutine body, which switches away instead
 // of returning; a return traps. Not shadow-stack safe: the first resume returns to a forged address, so a
 // build with user-space CET needs -fcf-protection=none.
+// The instructions, their unwind directives and the frame layouts per target are `target::ctxswitch`'s.
 
-// System V x86-64: 48 bytes of registers, 8 for MXCSR and the x87 control word, then the return address
-// `ret` consumes. sp+64 (where the trampoline starts) is 16-aligned, as a `call` needs.
-@platform(macos | ios)
-@arch(x86_64)
-asm(M"(.text
-.globl _sc_ctx_swap
-.private_extern _sc_ctx_swap
-.p2align 4
-_sc_ctx_swap:
-  .cfi_startproc
-  pushq %rbp
-  .cfi_adjust_cfa_offset 8
-  .cfi_offset %rbp, -16
-  pushq %rbx
-  .cfi_adjust_cfa_offset 8
-  .cfi_offset %rbx, -24
-  pushq %r12
-  .cfi_adjust_cfa_offset 8
-  .cfi_offset %r12, -32
-  pushq %r13
-  .cfi_adjust_cfa_offset 8
-  .cfi_offset %r13, -40
-  pushq %r14
-  .cfi_adjust_cfa_offset 8
-  .cfi_offset %r14, -48
-  pushq %r15
-  .cfi_adjust_cfa_offset 8
-  .cfi_offset %r15, -56
-  subq  $8, %rsp
-  .cfi_adjust_cfa_offset 8
-  stmxcsr (%rsp)
-  fnstcw  4(%rsp)
-  movq  %rsp, (%rdi)
-  movq  %rsi, %rsp
-  ldmxcsr (%rsp)
-  fldcw   4(%rsp)
-  addq  $8, %rsp
-  .cfi_adjust_cfa_offset -8
-  popq  %r15
-  .cfi_adjust_cfa_offset -8
-  .cfi_restore %r15
-  popq  %r14
-  .cfi_adjust_cfa_offset -8
-  .cfi_restore %r14
-  popq  %r13
-  .cfi_adjust_cfa_offset -8
-  .cfi_restore %r13
-  popq  %r12
-  .cfi_adjust_cfa_offset -8
-  .cfi_restore %r12
-  popq  %rbx
-  .cfi_adjust_cfa_offset -8
-  .cfi_restore %rbx
-  popq  %rbp
-  .cfi_adjust_cfa_offset -8
-  .cfi_restore %rbp
-  ret
-  .cfi_endproc
-.globl _sc_ctx_entry
-.private_extern _sc_ctx_entry
-.p2align 4
-_sc_ctx_entry:
-  .cfi_startproc
-  .cfi_undefined %rip
-  movq  %r13, %rdi
-  callq *%r12
-  ud2
-  .cfi_endproc
-)");
-
-@platform(linux | android)
-@arch(x86_64)
-asm(M"(.text
-.globl sc_ctx_swap
-.hidden sc_ctx_swap
-.p2align 4
-sc_ctx_swap:
-  .cfi_startproc
-  pushq %rbp
-  .cfi_adjust_cfa_offset 8
-  .cfi_offset %rbp, -16
-  pushq %rbx
-  .cfi_adjust_cfa_offset 8
-  .cfi_offset %rbx, -24
-  pushq %r12
-  .cfi_adjust_cfa_offset 8
-  .cfi_offset %r12, -32
-  pushq %r13
-  .cfi_adjust_cfa_offset 8
-  .cfi_offset %r13, -40
-  pushq %r14
-  .cfi_adjust_cfa_offset 8
-  .cfi_offset %r14, -48
-  pushq %r15
-  .cfi_adjust_cfa_offset 8
-  .cfi_offset %r15, -56
-  subq  $8, %rsp
-  .cfi_adjust_cfa_offset 8
-  stmxcsr (%rsp)
-  fnstcw  4(%rsp)
-  movq  %rsp, (%rdi)
-  movq  %rsi, %rsp
-  ldmxcsr (%rsp)
-  fldcw   4(%rsp)
-  addq  $8, %rsp
-  .cfi_adjust_cfa_offset -8
-  popq  %r15
-  .cfi_adjust_cfa_offset -8
-  .cfi_restore %r15
-  popq  %r14
-  .cfi_adjust_cfa_offset -8
-  .cfi_restore %r14
-  popq  %r13
-  .cfi_adjust_cfa_offset -8
-  .cfi_restore %r13
-  popq  %r12
-  .cfi_adjust_cfa_offset -8
-  .cfi_restore %r12
-  popq  %rbx
-  .cfi_adjust_cfa_offset -8
-  .cfi_restore %rbx
-  popq  %rbp
-  .cfi_adjust_cfa_offset -8
-  .cfi_restore %rbp
-  ret
-  .cfi_endproc
-.globl sc_ctx_entry
-.hidden sc_ctx_entry
-.p2align 4
-sc_ctx_entry:
-  .cfi_startproc
-  .cfi_undefined %rip
-  movq  %r13, %rdi
-  callq *%r12
-  ud2
-  .cfi_endproc
-)");
-
-// AArch64: x19-x28, fp, lr and d8-d15 (the callee-saved set), then FPCR; 176 bytes keep sp 16-aligned.
-// sp cannot be a store operand, so it goes through a caller-saved scratch register.
-@platform(macos | ios)
-@arch(aarch64)
-asm(M"(.text
-.globl _sc_ctx_swap
-.private_extern _sc_ctx_swap
-.p2align 4
-_sc_ctx_swap:
-  .cfi_startproc
-  sub  sp, sp, #176
-  .cfi_def_cfa_offset 176
-  stp  x19, x20, [sp, #0]
-  stp  x21, x22, [sp, #16]
-  stp  x23, x24, [sp, #32]
-  stp  x25, x26, [sp, #48]
-  stp  x27, x28, [sp, #64]
-  stp  x29, x30, [sp, #80]
-  .cfi_offset x19, -176
-  .cfi_offset x20, -168
-  .cfi_offset x21, -160
-  .cfi_offset x22, -152
-  .cfi_offset x23, -144
-  .cfi_offset x24, -136
-  .cfi_offset x25, -128
-  .cfi_offset x26, -120
-  .cfi_offset x27, -112
-  .cfi_offset x28, -104
-  .cfi_offset x29,  -96
-  .cfi_offset x30,  -88
-  stp  d8,  d9,  [sp, #96]
-  stp  d10, d11, [sp, #112]
-  stp  d12, d13, [sp, #128]
-  stp  d14, d15, [sp, #144]
-  mrs  x2, fpcr
-  str  x2, [sp, #160]
-  mov  x2, sp
-  str  x2, [x0]
-  mov  sp, x1
-  ldr  x2, [sp, #160]
-  msr  fpcr, x2
-  ldp  x19, x20, [sp, #0]
-  ldp  x21, x22, [sp, #16]
-  ldp  x23, x24, [sp, #32]
-  ldp  x25, x26, [sp, #48]
-  ldp  x27, x28, [sp, #64]
-  ldp  x29, x30, [sp, #80]
-  ldp  d8,  d9,  [sp, #96]
-  ldp  d10, d11, [sp, #112]
-  ldp  d12, d13, [sp, #128]
-  ldp  d14, d15, [sp, #144]
-  add  sp, sp, #176
-  .cfi_def_cfa_offset 0
-  ret
-  .cfi_endproc
-.globl _sc_ctx_entry
-.private_extern _sc_ctx_entry
-.p2align 4
-_sc_ctx_entry:
-  .cfi_startproc
-  .cfi_undefined x30
-  mov  x0, x20
-  blr  x19
-  brk  #0
-  .cfi_endproc
-)");
-
-@platform(linux | android)
-@arch(aarch64)
-asm(M"(.text
-.globl sc_ctx_swap
-.hidden sc_ctx_swap
-.p2align 4
-sc_ctx_swap:
-  .cfi_startproc
-  sub  sp, sp, #176
-  .cfi_def_cfa_offset 176
-  stp  x19, x20, [sp, #0]
-  stp  x21, x22, [sp, #16]
-  stp  x23, x24, [sp, #32]
-  stp  x25, x26, [sp, #48]
-  stp  x27, x28, [sp, #64]
-  stp  x29, x30, [sp, #80]
-  .cfi_offset x19, -176
-  .cfi_offset x20, -168
-  .cfi_offset x21, -160
-  .cfi_offset x22, -152
-  .cfi_offset x23, -144
-  .cfi_offset x24, -136
-  .cfi_offset x25, -128
-  .cfi_offset x26, -120
-  .cfi_offset x27, -112
-  .cfi_offset x28, -104
-  .cfi_offset x29,  -96
-  .cfi_offset x30,  -88
-  stp  d8,  d9,  [sp, #96]
-  stp  d10, d11, [sp, #112]
-  stp  d12, d13, [sp, #128]
-  stp  d14, d15, [sp, #144]
-  mrs  x2, fpcr
-  str  x2, [sp, #160]
-  mov  x2, sp
-  str  x2, [x0]
-  mov  sp, x1
-  ldr  x2, [sp, #160]
-  msr  fpcr, x2
-  ldp  x19, x20, [sp, #0]
-  ldp  x21, x22, [sp, #16]
-  ldp  x23, x24, [sp, #32]
-  ldp  x25, x26, [sp, #48]
-  ldp  x27, x28, [sp, #64]
-  ldp  x29, x30, [sp, #80]
-  ldp  d8,  d9,  [sp, #96]
-  ldp  d10, d11, [sp, #112]
-  ldp  d12, d13, [sp, #128]
-  ldp  d14, d15, [sp, #144]
-  add  sp, sp, #176
-  .cfi_def_cfa_offset 0
-  ret
-  .cfi_endproc
-.globl sc_ctx_entry
-.hidden sc_ctx_entry
-.p2align 4
-sc_ctx_entry:
-  .cfi_startproc
-  .cfi_undefined x30
-  mov  x0, x20
-  blr  x19
-  brk  #0
-  .cfi_endproc
-)");
-
-// Windows x64 saves more than System V: eight GPRs, xmm6-xmm15 (callee-saved here) and four TEB fields
-// (StackBase, StackLimit, DeallocationStack, GuaranteedStackBytes). __chkstk probes and the SEH unwinder
-// read the running thread's stack bounds from the TEB, so a coroutine that left them pointing at the
-// worker's stack would fault in the first function with a large frame, and the kernel reads the stack
-// guarantee from it when the stack overflows. The frame: 160 bytes of xmm, 64 of GPRs, 24 of TEB fields,
-// 16 of MXCSR, the x87 control word and the guarantee; sp stays 16-aligned (movaps needs it) and the
-// return address `ret` consumes sits above it at +264. The entry provides the 32-byte shadow space the
-// Win64 caller owes its callee.
-@platform(windows)
-@arch(x86_64)
-asm(M"(.text
-.seh_proc sc_ctx_swap
-.globl sc_ctx_swap
-.p2align 4
-sc_ctx_swap:
-  subq $264, %rsp
-  .seh_stackalloc 264
-  movaps %xmm6,    0(%rsp)
-  movaps %xmm7,   16(%rsp)
-  movaps %xmm8,   32(%rsp)
-  movaps %xmm9,   48(%rsp)
-  movaps %xmm10,  64(%rsp)
-  movaps %xmm11,  80(%rsp)
-  movaps %xmm12,  96(%rsp)
-  movaps %xmm13, 112(%rsp)
-  movaps %xmm14, 128(%rsp)
-  movaps %xmm15, 144(%rsp)
-  .seh_savexmm %xmm6, 0
-  .seh_savexmm %xmm7, 16
-  .seh_savexmm %xmm8, 32
-  .seh_savexmm %xmm9, 48
-  .seh_savexmm %xmm10, 64
-  .seh_savexmm %xmm11, 80
-  .seh_savexmm %xmm12, 96
-  .seh_savexmm %xmm13, 112
-  .seh_savexmm %xmm14, 128
-  .seh_savexmm %xmm15, 144
-  movq %rbx, 160(%rsp)
-  .seh_savereg %rbx, 160
-  movq %rbp, 168(%rsp)
-  .seh_savereg %rbp, 168
-  movq %rdi, 176(%rsp)
-  .seh_savereg %rdi, 176
-  movq %rsi, 184(%rsp)
-  .seh_savereg %rsi, 184
-  movq %r12, 192(%rsp)
-  .seh_savereg %r12, 192
-  movq %r13, 200(%rsp)
-  .seh_savereg %r13, 200
-  movq %r14, 208(%rsp)
-  .seh_savereg %r14, 208
-  movq %r15, 216(%rsp)
-  .seh_savereg %r15, 216
-  .seh_endprologue
-  movq %gs:0x08, %rax
-  movq %rax, 224(%rsp)
-  movq %gs:0x10, %rax
-  movq %rax, 232(%rsp)
-  movq %gs:0x1478, %rax
-  movq %rax, 240(%rsp)
-  stmxcsr 248(%rsp)
-  fnstcw  252(%rsp)
-  movl %gs:0x1748, %eax
-  movl %eax, 256(%rsp)
-  movq %rsp, (%rcx)
-  movq %rdx, %rsp
-  ldmxcsr 248(%rsp)
-  fldcw   252(%rsp)
-  movl 256(%rsp), %eax
-  movl %eax, %gs:0x1748
-  movq 224(%rsp), %rax
-  movq %rax, %gs:0x08
-  movq 232(%rsp), %rax
-  movq %rax, %gs:0x10
-  movq 240(%rsp), %rax
-  movq %rax, %gs:0x1478
-  movaps    0(%rsp), %xmm6
-  movaps   16(%rsp), %xmm7
-  movaps   32(%rsp), %xmm8
-  movaps   48(%rsp), %xmm9
-  movaps   64(%rsp), %xmm10
-  movaps   80(%rsp), %xmm11
-  movaps   96(%rsp), %xmm12
-  movaps  112(%rsp), %xmm13
-  movaps  128(%rsp), %xmm14
-  movaps  144(%rsp), %xmm15
-  movq 160(%rsp), %rbx
-  movq 168(%rsp), %rbp
-  movq 176(%rsp), %rdi
-  movq 184(%rsp), %rsi
-  movq 192(%rsp), %r12
-  movq 200(%rsp), %r13
-  movq 208(%rsp), %r14
-  movq 216(%rsp), %r15
-  addq $264, %rsp
-  ret
-  .seh_endproc
-.globl sc_ctx_entry
-.p2align 4
-sc_ctx_entry:
-  movq %r13, %rcx
-  subq $32, %rsp
-  callq *%r12
-  ud2
-)");
-
+// The whole of the switch and of its entry (`lir::ir::SYS_CTXSWAP`, `SYS_CTXENTRY`).
 @platform(!wasm)
 extern "C" {
+    fn sc_sys_ctx_swap(save_sp: *mut *mut void, to_sp: *mut void);
+    fn sc_sys_ctx_entry();
+}
+
+@platform(macos | ios | linux | android)
+@unsafe(naked)
+unsafe fn sc_ctx_swap(save_sp: *mut *mut void, to_sp: *mut void) {
+    unsafe sc_sys_ctx_swap(save_sp, to_sp);
+}
+
+@platform(macos | ios | linux | android)
+@unsafe(naked)
+fn sc_ctx_entry() {
+    unsafe sc_sys_ctx_entry();
+}
+
+@platform(windows)
+@arch(x86_64)
+@unsafe(naked)
+unsafe fn sc_ctx_swap(save_sp: *mut *mut void, to_sp: *mut void) {
+    unsafe sc_sys_ctx_swap(save_sp, to_sp);
+}
+
+@platform(windows)
+@arch(x86_64)
+@unsafe(naked)
+fn sc_ctx_entry() {
+    unsafe sc_sys_ctx_entry();
+}
+
+// Windows on arm64 switches fibers: `sc_rt_ctx_switch` returns before this call, which nothing defines.
+@platform(windows)
+@arch(aarch64)
+extern "C" {
     fn sc_ctx_swap(save_sp: *mut *mut void, to_sp: *mut void);
-    fn sc_ctx_entry();
 }
 
 // A context: the stack pointer of its saved frame (null until the first switch away fills it in).
@@ -2613,21 +2249,23 @@ union CodeBits {
 // A forged frame must carry a LEGAL floating-point control word: zero unmasks every SSE exception on
 // x86-64, so the first inexact multiply of a fresh coroutine would trap. Seed it from the thread that arms
 // the context, the state that thread would have handed over anyway.
+// The floating-point control state stored at `slot` (`lir::ir::SYS_FPSAVE`); `p` read and escaped by a
+// compiler barrier (`SYS_KEEP`).
+@platform(!wasm)
+extern "C" {
+    fn sc_sys_fp_save(slot: *mut void);
+    fn sc_sys_keep(p: *mut void);
+}
+
 @platform(!wasm)
 @arch(x86_64)
 fn save_fpctl(slot: *mut void) {
-    unsafe {
-        asm("stmxcsr (%0)\n\tfnstcw 4(%0)" :  : "r"(slot) : "memory");
-    }
+    unsafe sc_sys_fp_save(slot);
 }
 @platform(macos | ios | linux | android)
 @arch(aarch64)
 fn save_fpctl(slot: *mut void) {
-    let mut fpcr: u64 = 0;
-    unsafe {
-        asm("mrs %0, fpcr" : "=r"(fpcr));
-        *(slot as *mut u64) = fpcr;
-    }
+    unsafe sc_sys_fp_save(slot);
 }
 
 /// Make an empty context for the current thread's root: its state is captured on the first switch away.
@@ -2701,13 +2339,11 @@ pub unsafe fn sc_rt_ctx_init(ctx: *mut void, stack: *mut void, size: usize, entr
         unsafe f[i] = null;
     }
     let body = CodeBits { entry: entry };
-    let tramp = CodeBits { tramp: unsafe sc_ctx_entry };
+    let tramp = CodeBits { tramp: sc_ctx_entry };
     forge(f, body.p, arg, tramp.p);
-    // The ONLY reader of this frame is the assembly, which the C compiler cannot see: under LTO it would
-    // otherwise delete these stores as dead, and the coroutine would resume into a frame of zeros.
-    unsafe {
-        asm("" :  : "r"(f) : "memory");
-    }
+    // The ONLY reader of this frame is the switch, which the optimizer cannot see: it would otherwise
+    // delete these stores as dead, and the coroutine would resume into a frame of zeros.
+    unsafe sc_sys_keep(f);
     unsafe (*c).sp = f;
 }
 
@@ -2725,7 +2361,7 @@ pub unsafe fn sc_rt_ctx_init(ctx: *mut void, stack: *mut void, size: usize, entr
         unsafe f[i] = null;
     }
     let body = CodeBits { entry: entry };
-    let tramp = CodeBits { tramp: unsafe sc_ctx_entry };
+    let tramp = CodeBits { tramp: sc_ctx_entry };
     save_fpctl(unsafe (f + 31)); // MXCSR + x87 control word
     unsafe f[24] = body.p; // r12
     unsafe f[25] = arg; // r13
@@ -2734,11 +2370,9 @@ pub unsafe fn sc_rt_ctx_init(ctx: *mut void, stack: *mut void, size: usize, entr
     unsafe f[30] = (base - pg) as *mut void; // DeallocationStack: the reservation, guard page included
     unsafe f[32] = STK_GUARANTEE as *mut void; // GuaranteedStackBytes, read as its low 4 bytes
     unsafe f[33] = tramp.p; // the return address of the trailing `ret`
-    // The ONLY reader of this frame is the assembly, which the C compiler cannot see: under LTO it would
-    // otherwise delete these stores as dead.
-    unsafe {
-        asm("" :  : "r"(f) : "memory");
-    }
+    // The ONLY reader of this frame is the switch, which the optimizer cannot see: it would otherwise
+    // delete these stores as dead.
+    unsafe sc_sys_keep(f);
     unsafe (*(ctx as *mut Ctx)).sp = f;
 }
 

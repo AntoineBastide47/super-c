@@ -182,12 +182,7 @@ fn query() u64 {
     r[6] = b24;
     let mut xcr0: u64 = 0;
     if (r[0] >> 27 & 1) != 0 {
-        let mut lo: u32 = 0;
-        let mut hi: u32 = 0;
-        unsafe {
-            asm("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0u32));
-        }
-        xcr0 = hi as u64 << 32 | lo as u64;
+        xcr0 = unsafe sc_sys_xgetbv(0);
     }
     return unsafe sc_cpu_x86_decide(&r[0], xcr0, os_zmm());
 }
@@ -208,16 +203,18 @@ fn cpuid(leaf: u32, sub: u32) (u32, u32, u32, u32) {
     return cpuid_raw(leaf, sub);
 }
 
+// CPUID and XGETBV (`lir::ir::SYS_CPUID`, `SYS_XGETBV`).
+@arch(x86_64)
+extern "C" {
+    fn sc_sys_cpuid(out: *mut u32, leaf: u32, sub: u32);
+    fn sc_sys_xgetbv(xcr: u32) u64;
+}
+
 @arch(x86_64)
 fn cpuid_raw(leaf: u32, sub: u32) (u32, u32, u32, u32) {
-    let mut a: u32 = 0;
-    let mut b: u32 = 0;
-    let mut c: u32 = 0;
-    let mut d: u32 = 0;
-    unsafe {
-        asm("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(leaf), "c"(sub));
-    }
-    return a, b, c, d;
+    let mut r: [u32; 4] = [0, 0, 0, 0];
+    unsafe sc_sys_cpuid(&mut r[0], leaf, sub);
+    return r[0], r[1], r[2], r[3];
 }
 
 @platform(macos | ios)

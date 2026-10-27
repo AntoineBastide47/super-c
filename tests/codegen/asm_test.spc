@@ -1200,7 +1200,7 @@ fn module_assembly_matches_the_c_compiler() {
     if cli::on_wasm() {
         return;
     }
-    assert_eq(module_blocks("ffi/sc_runtime.spc") + module_blocks("ffi/sc_sme.spc") + ctx_blocks(), 0);
+    assert_eq(module_blocks("ffi/sc_sme.spc") + ctx_blocks(), 0);
 }
 
 // ---- wasm ----

@@ -1132,20 +1132,23 @@ pub unsafe fn sc_bs_flush() {
 // The barrier's cell: written and read only next to a compiler memory barrier.
 static mut SINK_CELL: u64 = 0;
 
+// A compiler memory barrier (`lir::ir::SYS_BARRIER`).
+extern "C" {
+    fn sc_sys_barrier();
+}
+
 /// Store `v` where the compiler must assume it is read: the computation producing `v` cannot be deleted or
 /// folded across this call, however hard link-time optimization tries.
 pub unsafe fn sc_bs_sink(v: u64) {
     unsafe {
         SINK_CELL = v;
-        asm("" :  :  : "memory");
+        sc_sys_barrier();
     }
 }
 
 /// The last value `sc_bs_sink` stored, read from memory: how a test proves the store happened.
 pub unsafe fn sc_bs_sunk() u64 {
-    unsafe {
-        asm("" :  :  : "memory");
-    }
+    unsafe sc_sys_barrier();
     return unsafe SINK_CELL;
 }
 

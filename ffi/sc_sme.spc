@@ -217,17 +217,19 @@ unsafe const fn widen(d: *mut f32, s: *const u64, len: usize, bf: bool) {
     }
 }
 
+// RDSVL (`lir::ir::SYS_SVL`).
+@platform(macos | ios | linux | android)
+@arch(aarch64)
+extern "C" {
+    fn sc_sys_svl() u64;
+}
+
 // The streaming vector length in bytes (RDSVL), which the kernels' panels are sized by.
 @platform(macos | ios | linux | android)
 @arch(aarch64)
-asm(M"(.text
-.arch_extension sme2
-.arch_extension sme-f64f64
-.p2align 4
-_sc_sme_svl:
-sc_sme_svl:
-rdsvl x0, #1
-ret)");
+fn sc_sme_svl() u64 {
+    return unsafe sc_sys_svl();
+}
 
 // The kernels below share one entry and one exit. Entry: save x19 to x28 and d8 to d15 (SMSTART and
 // SMSTOP zero the vector registers); commit a caller's dormant ZA state, as a function with a new ZA
@@ -790,9 +792,7 @@ ret)");
 // carries both labels and the object format's directives below make its own one global and hidden.
 @platform(macos | ios)
 @arch(aarch64)
-asm(M"(.globl _sc_sme_svl
-.private_extern _sc_sme_svl
-.globl _sc_sme_f32_za
+asm(M"(.globl _sc_sme_f32_za
 .private_extern _sc_sme_f32_za
 .globl _sc_sme_f64_za
 .private_extern _sc_sme_f64_za
@@ -802,10 +802,7 @@ asm(M"(.globl _sc_sme_svl
 
 @platform(linux | android)
 @arch(aarch64)
-asm(M"(.globl sc_sme_svl
-.hidden sc_sme_svl
-.type sc_sme_svl, %function
-.globl sc_sme_f32_za
+asm(M"(.globl sc_sme_f32_za
 .hidden sc_sme_f32_za
 .type sc_sme_f32_za, %function
 .globl sc_sme_f64_za
@@ -819,7 +816,6 @@ asm(M"(.globl sc_sme_svl
 @platform(macos | ios | linux | android)
 @arch(aarch64)
 extern "C" {
-    fn sc_sme_svl() u64;
     fn sc_sme_f32_za(
         c: *mut f32,
         a: *const f32,
