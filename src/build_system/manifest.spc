@@ -48,12 +48,22 @@ pub const CG_OMIT_FRAME_POINTER: u64 = 1;
 pub const CG_INLINE: u64 = 2;
 /// Inline calls past the ones that shrink the code (`-finline-functions`).
 pub const CG_INLINE_FUNCTIONS: u64 = 4;
+/// Unroll loops whose trip count is known (`-funroll-loops`).
+pub const CG_UNROLL: u64 = 8;
+/// Copy a loop for each side of a branch on a value it does not change (`-funswitch-loops`).
+pub const CG_UNSWITCH: u64 = 16;
+/// Copy a loop without its bounds checks, entered when one test before it proves them all
+/// (`-fversion-loops-for-bounds`, after GCC's `-fversion-loops-for-strides`).
+pub const CG_VERSION_LOOPS: u64 = 32;
 
 // The flags by name.
-const CG_NAMES: [(str<'static>, u64); 3] = [
+const CG_NAMES: [(str<'static>, u64); 6] = [
     ("omit-frame-pointer", CG_OMIT_FRAME_POINTER),
     ("inline", CG_INLINE),
     ("inline-functions", CG_INLINE_FUNCTIONS),
+    ("unroll-loops", CG_UNROLL),
+    ("unswitch-loops", CG_UNSWITCH),
+    ("version-loops-for-bounds", CG_VERSION_LOOPS),
 ];
 
 // The bit flag `name` names: 0 for none.
@@ -140,7 +150,8 @@ pub fn cg_spell(opt: i32, on: u64, off: u64, out: &mut String) {
 
 /// The flags a build at `opt-level` `opt` runs with: the level's defaults, then `on` set and `off`
 /// cleared. At every level but 0 the frame pointer goes (on arm64 from leaf functions only, as Apple's
-/// ABI allows) and calls inline; past the ones that shrink the code at 2, 3 and "s".
+/// ABI allows) and calls inline; past the ones that shrink the code at 2, 3 and "s"; loops unroll at 2
+/// and 3, unswitch and version on their bounds checks at 3.
 pub const fn cg_effective(opt: i32, on: u64, off: u64) u64 {
     let mut f: u64 = 0;
     if opt > 0 {
@@ -148,6 +159,12 @@ pub const fn cg_effective(opt: i32, on: u64, off: u64) u64 {
     }
     if opt >= 2 && opt != OPT_Z {
         f |= CG_INLINE_FUNCTIONS;
+    }
+    if opt == 2 || opt == 3 {
+        f |= CG_UNROLL;
+    }
+    if opt == 3 {
+        f |= CG_UNSWITCH | CG_VERSION_LOOPS;
     }
     return (f | on) & ~off;
 }

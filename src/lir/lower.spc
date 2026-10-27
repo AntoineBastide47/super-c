@@ -2115,6 +2115,33 @@ extend Lower {
 }
 
 extend Lower {
+    // `Body.refs` of parameter local `l`: a reference's referent bytes, exclusive (REF_NOALIAS) for a
+    // `&mut` the body does not rebind, which the language makes the only path to them during the call;
+    // 0 for any other parameter or a referent of no known size.
+    fn ref_of(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, l: u32) u32 {
+        let mut rm = b.module;
+        let mut rt = b.locals[l as usize].ty;
+        let y = Lower::resolved(c, b.module, rt, &mut rm, &mut rt);
+        if y.kind != TypeKind::TYPE_REFERENCE {
+            return 0;
+        }
+        let e = self.err;
+        let mut ei = TyI { cls: 0 };
+        if !self.ty(c, rm, y.as_data.elem, &mut ei) {
+            self.err = e;
+            return 0;
+        }
+        if ei.cls == VC_ZST || ei.size == 0 || ei.size > REF_BYTES {
+            return 0;
+        }
+        let excl = y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 && !b.locals[l as usize].is_mutable;
+        return ei.size | if excl {
+            REF_NOALIAS;
+        } else {
+            0u32;
+        };
+    }
+
     // The signature, the entry block and the storage of every local in memory.
     fn entry(
         self: &mut Self,
@@ -2128,10 +2155,13 @@ extend Lower {
         let mut ptys = Vector::<u32>::new();
         let mut etys = Vector::<u8>::new();
         let mut pl = Vector::<u32>::new();
+        self.b.refs.truncate(0);
+        let mut any_ref = false;
         if ncaps != 0 {
             ptys.push(T_PTR);
             etys.push(T_PTR);
             pl.push(NONE);
+            self.b.refs.push(0);
         }
         for i in 0..nparams {
             let l = b.returns + i;
@@ -2139,14 +2169,21 @@ extend Lower {
             if info.ti.cls == VC_ZST {
                 continue;
             }
+            let mut r: u32 = 0;
             if info.ti.cls == VC_SCALAR {
                 ptys.push(sig_code(info.ti.mty, Lower::signed(c, b.module, b.locals[l as usize].ty)));
                 etys.push(info.ti.mty);
+                r = self.ref_of(c, b, l);
             } else {
                 ptys.push(self.param_sig(c, b.module, b.locals[l as usize].ty, info.ti));
                 etys.push(T_PTR);
             }
+            self.b.refs.push(r);
+            any_ref = any_ref || r != 0;
             pl.push(l);
+        }
+        if !any_ref {
+            self.b.refs.truncate(0);
         }
         let mut ret = T_NONE as u32;
         if b.returns == 1 {

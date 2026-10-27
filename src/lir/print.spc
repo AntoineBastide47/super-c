@@ -138,6 +138,16 @@ extend Printer {
         out.push_str("  sig ");
         self.sig(b, b.sig, out);
         out.push_byte(b'\n');
+        for k in 0..b.refs.len() {
+            let r = b.refs[k];
+            if r != 0 {
+                out.format_into("  ref p{} {}", k, r & REF_BYTES);
+                if (r & REF_NOALIAS) != 0 {
+                    out.push_str(" noalias");
+                }
+                out.push_byte(b'\n');
+            }
+        }
         for k in 0..b.slots.len() {
             out.format_into("  slot s{} size {} align {}\n", k, b.slots[k].size, b.slots[k].align_log2);
         }

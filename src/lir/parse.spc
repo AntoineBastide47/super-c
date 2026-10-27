@@ -530,6 +530,22 @@ extend<'a> Parser<'a> {
                 self.body.sig = sg;
                 return self.line_end_loc(&mut loc);
             }
+            if w == "ref" {
+                // `ref p<k> <bytes> [noalias]`: what signature parameter k points to.
+                let mut k: u32 = 0;
+                let mut n: u32 = 0;
+                if !self.numbered(b'p', &mut k) || !self.uint(&mut n) || n > REF_BYTES || k >= 65536 {
+                    return self.fail("expected 'ref p<parameter> <bytes>'");
+                }
+                if self.keyword("noalias") {
+                    n |= REF_NOALIAS;
+                }
+                if self.body.refs.len() <= k as usize {
+                    self.body.refs.resize_default(k as usize + 1);
+                }
+                self.body.refs.set(k as usize, n);
+                return self.line_end_loc(&mut loc);
+            }
             if w == "slot" {
                 let mut k: u32 = 0;
                 let mut size: u32 = 0;
@@ -546,7 +562,7 @@ extend<'a> Parser<'a> {
                 let _ = self.body.slot(size, al as u8);
                 return self.line_end_loc(&mut loc);
             }
-            return self.fail("expected 'file', 'layout', 'naked', 'sig', 'slot' or a block");
+            return self.fail("expected 'file', 'layout', 'naked', 'ref', 'sig', 'slot' or a block");
         }
         self.at = save;
         return self.inst_line();

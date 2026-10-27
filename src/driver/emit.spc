@@ -41,6 +41,7 @@ import lir::print as lprint;
 import lir::parse as lparse;
 import lir::opt as lopt;
 import lir::inline as il;
+import lir::loops as lu;
 import target::native as nat;
 import bindgen::bindgen as bg;
 import bindgen::ctarget as ct;
@@ -6256,7 +6257,12 @@ pub fn cemit_package(
         for m in 0..p.modules.len() {
             sealed.push(module_has_asm(p, m));
         }
-        lopt::optimize(&mut l.deref_mut().pkg, p.jobs, &sealed, inline_budget(p.opt, p.cg));
+        lopt::optimize(
+            &mut l.deref_mut().pkg,
+            p.jobs,
+            &sealed,
+            lopt::Config { inline: inline_budget(p.opt, p.cg), loops: loop_budgets(p.opt, p.cg) },
+        );
         cem.lir_put(l);
     }
     // The LIR check of the bodies this build rendered (a refused one fails the build already). A module
@@ -12380,6 +12386,32 @@ fn inline_budget(opt: i32, cg: u64) il::Budget {
         il::FAST;
     } else {
         il::SPEED;
+    };
+}
+
+// The loop transforms' budgets at `opt-level` `opt` with code-generation flags `cg` (the step 18 survey):
+// a fully unrolled loop's copies take up to GCC's complete peeling limit (200 instructions) at 3, a third
+// of it at the other levels; a loop versions on its bounds checks up to the same 200, and unswitches up to
+// GCC's and LLVM's 50.
+fn loop_budgets(opt: i32, cg: u64) lu::Budgets {
+    return lu::Budgets {
+        peel: if (cg & bman::CG_UNROLL) == 0 {
+            0u32;
+        } else if opt == 3 {
+            200u32;
+        } else {
+            64u32;
+        },
+        version: if (cg & bman::CG_VERSION_LOOPS) != 0 {
+            200u32;
+        } else {
+            0u32;
+        },
+        unswitch: if (cg & bman::CG_UNSWITCH) != 0 {
+            50u32;
+        } else {
+            0u32;
+        },
     };
 }
 

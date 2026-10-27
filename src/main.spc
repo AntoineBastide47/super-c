@@ -1111,7 +1111,8 @@ OPTIONS:
                            (comma-separated x86-64-v2..v4; default x86-64-v3 at opt-level 2 or more), or off
     -O0 .. -O3, -Os, -Oz   optimization level, over the profile's opt-level
     -f<flag>, -fno-<flag>  code generation, over the level's defaults and the profile's keys:
-                           omit-frame-pointer, inline, inline-functions
+                           omit-frame-pointer, inline, inline-functions, unroll-loops, unswitch-loops,
+                           version-loops-for-bounds
     --const-eval-steps=N   compile-time evaluation step budget
     --const-eval-memory=B  compile-time evaluation memory budget (B, or NK/NM/NG)
     --no-lint              disable the on-by-default lints during a build

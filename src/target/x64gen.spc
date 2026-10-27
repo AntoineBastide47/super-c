@@ -252,6 +252,7 @@ pub struct Gen {
     dying: Vector<u32>, // values whose register frees after the current instruction
     wparams: Vector<u32>, // the parameters the current terminator's edges write
     want: Vector<u8>, // per value, its request to `Live::plan`
+    lconst: Vector<bool>, // per instruction, a float constant a loop uses (`Live::loop_fconsts`)
     ends: Vector<u32>, // values by the position their range ends at (CSR, `ends_at`)
     ends_at: Vector<u32>,
     cpre: Vector<u32>, // per instruction index, the calls that return before it (`call_tables`)
@@ -385,6 +386,7 @@ extend Gen {
             dying: Vector::<u32>::new(),
             wparams: Vector::<u32>::new(),
             want: Vector::<u8>::new(),
+            lconst: Vector::<bool>::new(),
             ends: Vector::<u32>::new(),
             ends_at: Vector::<u32>::new(),
             cpre: Vector::<u32>::new(),
@@ -704,6 +706,17 @@ extend Gen {
         let x = self.vx(v);
         let xa = self.vx(a);
         let t = self.vt(v);
+        let sr = self.step_reg(v);
+        if sr != NOREG {
+            // The parameter keeps the register, which its release frees.
+            self.lock |= bit(sr);
+            let w = self.va.index_mut(x as usize);
+            w.reg = sr;
+            w.dirty = false;
+            w.clean = false;
+            self.move_reg(t, sr, ra);
+            return sr;
+        }
         let fixed = self.va[x as usize].home == H_FIXED || self.fix_class(x) != FIX_NONE;
         if !fixed && ((self.xalloc | self.valloc) & bit(ra)) != 0 && Gen::is_v(t) == ra >= V0 {
             let own = self.owner[ra as usize];
@@ -722,6 +735,39 @@ extend Gen {
         let rd = self.def(v);
         self.move_reg(t, rd, ra);
         return rd;
+    }
+
+    // The fixed register of the parameter the jump ending instruction `v`'s block passes `v` alone to,
+    // when nothing reads that parameter after `v`'s first operand (a loop counter's step): `v` defined
+    // there makes the edge's move vanish. NOREG when not.
+    fn step_reg(self: &Self, v: Value) u8 {
+        if (v & (VPARAM | VFLAG)) != 0 || self.lv.uses[v as usize] != 1 || self.va[v as usize].home != H_NONE {
+            return NOREG;
+        }
+        let b = self.b();
+        let k = self.lv.def_blk[v as usize];
+        let bk = b.blocks[k as usize];
+        let tm = b.insts[(bk.start + bk.len - 1) as usize];
+        if self.lv.pos[k as usize] != self.pos || tm.op != O_JMP {
+            return NOREG;
+        }
+        let tb = b.blocks[b.edge_target(tm.a) as usize];
+        let mut pv = VNONE;
+        for q in 0..b.edge_nargs(tm.a) {
+            if b.edge_arg(tm.a, q) == v {
+                pv = VPARAM | tb.param_start + q;
+            }
+        }
+        if pv == VNONE {
+            return NOREG;
+        }
+        let px = self.vx(pv);
+        // A field that is no operand may equal the parameter only by chance: then no hint, still correct.
+        let t = b.insts[v as usize];
+        if self.va[px as usize].home != H_FIXED || self.lv.last[px as usize] > v || self.lv.end[px as usize] > self.pos || t.b == pv || t.c == pv {
+            return NOREG;
+        }
+        return self.va[px as usize].reg;
     }
 
     // The register home `fix_class` gives value index `x` of file `vr`, taken (`prefer`, a register `x`
@@ -774,12 +820,13 @@ extend Gen {
                 }
             }
         }
+        self.lv.loop_fconsts(b, &mut self.lconst);
         self.want.truncate(0);
         for x in 0..n {
             let t = self.xty(x as u32);
             let d = self.lv.def_blk[x];
             let mut w: u8 = 0;
-            if !Gen::in_mem(t) && d != NONE && self.lv.pos[d as usize] != NONE && !(x < ni && self.remat_inst(x as u32)) {
+            if !Gen::in_mem(t) && d != NONE && self.lv.pos[d as usize] != NONE && !(x < ni && self.remat_inst(x as u32) && !self.lconst[x]) {
                 let past = self.lv.end[x] > self.lv.pos[d as usize] || x >= ni && x < nv;
                 let cross = x < nv && self.crosses_call(x as u32, Gen::is_v(t));
                 if Gen::is_v(t) {
@@ -802,6 +849,11 @@ extend Gen {
             &self.want,
             lv::Caps { xc: self.xfix.count_ones() as u32, xs: self.xscr_cap, xj: most as u32, vc: 0, vs: 4, vj: 4 },
         );
+        for x in 0..ni {
+            if self.lconst[x] && self.fix_class(x as u32) != FIX_NONE {
+                self.va.index_mut(x).home = H_NONE;
+            }
+        }
     }
 
     // Whether a call that returns (`clobbers`) runs while value index `x` (an instruction's or a
@@ -835,7 +887,27 @@ extend Gen {
         return pre[(bk.start + bk.len) as usize] > pre[from as usize] || pos[e as usize + 1] > pos[dp as usize + 1];
     }
 
-    // `cpre` and `cpos`: the calls that return (`clobbers`, not followed by `unreachable`)
+    // Whether no value outlives call `i` for a use: its block ends in `unreachable` and no later instruction
+    // of it reads a value but one recomputed at each use (a panic's message, then `abort`).
+    fn dead_end(self: &mut Self, i: usize) bool {
+        let b = self.b();
+        let bk = b.blocks[self.lv.def_blk[i] as usize];
+        let end = (bk.start + bk.len - 1) as usize;
+        if b.insts[end].op != O_UNREACHABLE {
+            return false;
+        }
+        for j in i + 1..end {
+            lv::each_use(b, b.insts[j], &mut self.uses);
+            for u in 0..self.uses.len() {
+                if !self.remat_inst(self.uses[u]) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    // `cpre` and `cpos`: the calls that return to a use (`clobbers`, not `dead_end`)
     // before each instruction index, and the blocks holding one before each layout position; `vpre` and
     // `vpos` the same without the intrinsics, whose templates write xmm0 to xmm3 and their arguments'
     // registers, no vector scratch home.
@@ -846,7 +918,7 @@ extend Gen {
         fill32(&mut self.vpre, ni + 1, 0);
         for i in 0..ni {
             let t = b.insts[i];
-            if Gen::clobbers(b, t) && b.insts[i + 1].op != O_UNREACHABLE {
+            if Gen::clobbers(b, t) && !self.dead_end(i) {
                 self.cpre[i + 1] = 1;
                 self.vpre[i + 1] = (!(t.op == O_CALL && self.intrinsic(t.a).len() != 0)) as u32;
             }
@@ -1500,6 +1572,7 @@ extend Gen {
                 return false;
             }
         }
+        assert(self.fixed_busy == 0, "x64gen: a register home outlives its value");
         return self.finish(s);
     }
 
@@ -2242,6 +2315,11 @@ extend Gen {
         let t = self.b().insts[i as usize];
         let op = t.op;
         if self.va[i as usize].home == H_REMAT {
+            return true;
+        }
+        if op == O_FCONST {
+            let r = self.def(i);
+            self.fconst(r, t.ty == T_F64, t.b as u64 << 32 | t.a as u64);
             return true;
         }
         if op == O_WCONST {
