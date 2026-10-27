@@ -7282,10 +7282,12 @@ extend<T> UnsafeCell<T> {
     }
 }
 
-// The overlapping-storage cell `forget` moves its value into: unions never run destructors, so the
-// payload is deliberately abandoned. Generic so no per-type cells are needed.
-union ForgetCell<T> {
-    pub some: T,
+/// Storage for a `T` that may hold no value (C++ raw storage, Rust's `MaybeUninit`): a union runs no
+/// destructor, so a value written into `value` is never freed with the storage. Start empty with
+/// `Uninit::<T> { none: 0 }`, write every part through raw pointers (a raw store frees nothing), then
+/// move the value out with `unsafe u.value`. `forget` moves its value in and abandons it.
+pub union Uninit<T> {
+    pub value: T,
     pub none: u8,
 }
 
@@ -7294,8 +7296,8 @@ union ForgetCell<T> {
 /// (SC_LEAK_CHECK) still reports the abandoned allocations, which is the point: every intentional
 /// leak stays visible and greppable instead of being laundered through raw pointers.
 pub const fn forget<T>(value: T) {
-    let cell = ForgetCell::<T> { some: value };
-    let _ = (&cell) as *const ForgetCell<T>;
+    let cell = Uninit::<T> { value: value };
+    let _ = (&cell) as *const Uninit<T>;
 }
 
 /// Non-null, `T`-aligned pointer backed by NO storage: the canonical element pointer for

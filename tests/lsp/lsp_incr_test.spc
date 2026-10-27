@@ -978,7 +978,7 @@ fn probe_decl(p: &loader::Package, mid: usize, needle: str) NodeId {
         if n.kind != NodeKind::NODE_FUNCTION {
             continue;
         }
-        let nm = n.as_data.function.name;
+        let nm = a.ext(i).function.name;
         let sp = a.at_const(nm).as_data.name.text;
         if src.slice(sp.start as usize, sp.end as usize) == needle {
             return i;

@@ -5,6 +5,7 @@
 // frozen subset are counted and skipped, never guessed.
 import ast::ast as *;
 import emit::mangle as mbe;
+import ir::layout as lay;
 import ir::interp as iri;
 import graph::instances as ig;
 import module::loader as loader;
@@ -107,7 +108,7 @@ extend TuEmit {
         }
         let inst = *unsafe (*aa).instance(y.as_data.inst);
         let da = self.p().module_ast_const(it.m);
-        let gens = unsafe (*da).at_const(it.decl).as_data.aggregate.generics;
+        let gens = unsafe (*da).ext(it.decl).aggregate.generics;
         if gens.len as u8 > inst.n {
             return -1;
         }
@@ -117,11 +118,7 @@ extend TuEmit {
     // The mangled C type name of the item (instance names come from the anchor).
     fn item_name(self: &mut Self, it: &AggItem, out: &mut String) bool {
         if it.aty == TYPE_NONE {
-            self.mg.qualified(
-                it.m,
-                unsafe (*self.p().module_ast_const(it.m)).at_const(it.decl).as_data.aggregate.name,
-                out,
-            );
+            self.mg.qualified(it.m, unsafe (*self.p().module_ast_const(it.m)).ext_name(it.decl), out);
             return true;
         }
         return self.mg.type_name(it.amod, it.aty, out);
@@ -343,14 +340,13 @@ extend TuEmit {
 
     fn struct_body(self: &mut Self, it: &AggItem, nm: str, body: &mut String) bool {
         let da = self.p().module_ast_const(it.m);
-        let n = unsafe (*da).at_const(it.decl);
-        if n.as_data.aggregate.is_extern {
+        if unsafe (*da).ext(it.decl).aggregate.is_extern {
             // Extern aggregates are defined by their backing C header.
             return true;
         }
-        let is_union = n.as_data.aggregate.is_union;
-        let is_tuple = n.as_data.aggregate.is_tuple;
-        let ms = n.as_data.aggregate.members;
+        let is_union = unsafe (*da).ext(it.decl).aggregate.is_union;
+        let is_tuple = unsafe (*da).ext(it.decl).aggregate.is_tuple;
+        let ms = unsafe (*da).ext(it.decl).aggregate.members;
         let la = self.layout_attrs(it.m, it.decl);
         let packed = (la & 1) != 0;
         let align_attr = la >> 1;
@@ -477,7 +473,7 @@ extend TuEmit {
         force_align: &mut u64,
     ) bool {
         let da = self.p().module_ast_const(it.m);
-        let ms = unsafe (*da).at_const(it.decl).as_data.aggregate.members;
+        let ms = unsafe (*da).ext(it.decl).aggregate.members;
         let mut soff: u64 = 0; // semantic running offset (all fields)
         let mut moff: u64 = 0; // natural C offset (stored fields only)
         let mut samax: u64 = 1;
@@ -564,16 +560,15 @@ extend TuEmit {
 
     fn enum_body(self: &mut Self, it: &AggItem, nm: str, body: &mut String) bool {
         let da = self.p().module_ast_const(it.m);
-        let n = unsafe (*da).at_const(it.decl);
-        if n.as_data.aggregate.is_extern {
+        if unsafe (*da).ext(it.decl).aggregate.is_extern {
             return true;
         }
-        let ms = n.as_data.aggregate.members;
+        let ms = unsafe (*da).ext(it.decl).aggregate.members;
         let has_payload = unsafe (*da).enum_has_payload(it.decl);
         // The tag enum (or the whole payload-less enum) belongs to the GENERIC declaration and is
         // shared by every instance: guard it and spell it from the decl, not the anchor.
         let mut q = String::new();
-        self.mg.qualified(it.m, n.as_data.aggregate.name, &mut q);
+        self.mg.qualified(it.m, unsafe (*da).ext_name(it.decl), &mut q);
         body.push_str(mbe::if_s(has_payload, "#ifndef SUPER_ENUMTAG_", "#ifndef SUPER_ENUM_"));
         body.push_string(&q);
         body.push_str("\n");
@@ -616,12 +611,18 @@ extend TuEmit {
         }
         body.push_str("struct ");
         body.push_str(nm);
-        body.push_str(" {\n  ");
-        if unsafe (*da).enum_tag_is_byte(it.decl) {
-            body.push_str("uint8_t tag;\n");
-        } else {
-            body.push_string(&q);
-            body.push_str("Tag tag;\n");
+        body.push_str(" {\n");
+        // A niche enum keeps its discriminant in its payload: no tag member.
+        let mut ns = NODE_NONE;
+        let mut nn = NODE_NONE;
+        if self.mg.niche(it.m, it.decl, &mut ns, &mut nn) == lay::NK_NONE {
+            if unsafe (*da).enum_tag_is_byte(it.decl) {
+                body.push_str("  uint8_t tag;\n");
+            } else {
+                body.push_str("  ");
+                body.push_string(&q);
+                body.push_str("Tag tag;\n");
+            }
         }
         // The payload union is buffered: when EVERY variant payload is zero-sized the union has no
         // members, and an empty union is not C; the enum then defines as `{ Tag tag; }` alone.
@@ -703,7 +704,7 @@ extend TuEmit {
     fn emit_fwd_named(self: &mut Self, m: ModuleId, decl: NodeId, nm: str) {
         let da = self.p().module_ast_const(m);
         let n = unsafe (*da).at_const(decl);
-        if n.as_data.aggregate.is_extern {
+        if unsafe (*da).ext(decl).aggregate.is_extern {
             return;
         }
         let fk = fnv(nm);
@@ -720,7 +721,11 @@ extend TuEmit {
                 return;
             }
         }
-        let kw = mbe::if_s(n.kind != NodeKind::NODE_ENUM && n.as_data.aggregate.is_union, "union", "struct");
+        let kw = mbe::if_s(
+            n.kind != NodeKind::NODE_ENUM && unsafe (*da).ext(decl).aggregate.is_union,
+            "union",
+            "struct",
+        );
         self.fwd2.push_str("typedef ");
         self.fwd2.push_str(kw);
         self.fwd2.push_str(" ");
@@ -759,7 +764,7 @@ extend TuEmit {
         if st != 0 {
             return st != 1;
         }
-        let gens = unsafe (*self.p().module_ast_const(inst.module)).at_const(inst.decl).as_data.aggregate.generics;
+        let gens = unsafe (*self.p().module_ast_const(inst.module)).ext(inst.decl).aggregate.generics;
         if gens.len as u8 > inst.n {
             self.skipped += 1;
             return true;

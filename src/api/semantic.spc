@@ -108,6 +108,11 @@ extend<'s> Symbol<'s> {
         return ast_of(self.p(), self.d.module).at_const(self.d.node);
     }
 
+    // The payload the declaration's node keeps outside itself (`ast::Ast::ext`).
+    fn node_ext(self: &Self) &'s ast::NodeExt {
+        return ast_of(self.p(), self.d.module).ext(self.d.node);
+    }
+
     /// Its name; empty for a declaration without one.
     pub fn name(self: &Self) str<'s> {
         let nm = feat::decl_name(ast_of(self.p(), self.d.module), self.d.node);
@@ -130,7 +135,7 @@ extend<'s> Symbol<'s> {
             } else {
                 SymbolKind::Function;
             },
-            NODE_STRUCT => if n.as_data.aggregate.is_union {
+            NODE_STRUCT => if self.node_ext().aggregate.is_union {
                 SymbolKind::Union;
             } else {
                 SymbolKind::Struct;
@@ -236,10 +241,10 @@ fn owner_text(p: &loader::Package, d: DefId) String {
         if e.kind != NodeKind::NODE_EXTEND {
             return String::new();
         }
-        let ts = a.at_const(e.as_data.extend_def.target_type).span;
+        let ts = a.at_const(a.ext(p.idx.items[ow as usize].node).extend_def.target_type).span;
         let mut out = String::from_str(src.slice(ts.start as usize, ts.end as usize));
-        if e.as_data.extend_def.interface_type != NODE_NONE {
-            let is = a.at_const(e.as_data.extend_def.interface_type).span;
+        if a.ext(p.idx.items[ow as usize].node).extend_def.interface_type != NODE_NONE {
+            let is = a.at_const(a.ext(p.idx.items[ow as usize].node).extend_def.interface_type).span;
             out.push_str(" as ");
             out.push_str(src.slice(is.start as usize, is.end as usize));
         }
@@ -257,10 +262,10 @@ fn owner_text(p: &loader::Package, d: DefId) String {
         if n.kind != NodeKind::NODE_STRUCT && n.kind != NodeKind::NODE_ENUM {
             continue;
         }
-        let ms = n.as_data.aggregate.members;
+        let ms = a.ext(p.idx.items[j as usize].node).aggregate.members;
         for i in 0..ms.len {
             if unsafe a.list(ms)[i as usize] == d.node {
-                return String::from_str(name_text(p, d.module, n.as_data.aggregate.name));
+                return String::from_str(name_text(p, d.module, a.ext_name(p.idx.items[j as usize].node)));
             }
         }
     }
@@ -292,7 +297,7 @@ pub fn resolve<'s>(s: &'s ses::Session, key: &SymbolKey) Option<Symbol<'s>> {
             // A member: its type by name, then the member by name.
             let n = a.at_const(node);
             if (n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM) && sy.name() == key.owner.as_str() {
-                let ms = n.as_data.aggregate.members;
+                let ms = a.ext(node).aggregate.members;
                 for i in 0..ms.len {
                     let md = Symbol { s: s, d: DefId { module: m as ModuleId, node: unsafe a.list(ms)[i as usize] } };
                     if md.kind() == key.kind && md.name() == key.name.as_str() {

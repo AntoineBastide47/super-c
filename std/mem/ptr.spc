@@ -27,9 +27,9 @@ union BitCast<T: Copy, U: Copy> {
 /// The `T` stored at `p`, which may be unaligned. The result is a bitwise copy and owns what the bytes
 /// own. Safety: `p` addresses `sizeof(T)` readable bytes that hold a valid `T`.
 pub unsafe fn read_unaligned<T>(p: *const u8) T {
-    let mut v = unsafe zeroed::<T>();
-    unsafe memcpy((&mut v) as *mut T, p, sizeof(T));
-    return v;
+    let mut v = Uninit::<T> { none: 0 };
+    unsafe memcpy((&mut v) as *mut Uninit<T>, p, sizeof(T));
+    return unsafe v.value;
 }
 
 /// Store `v` at `p`, which may be unaligned. Takes ownership of `v` and frees nothing at `p`.

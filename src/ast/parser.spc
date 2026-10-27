@@ -208,6 +208,18 @@ extend Parser {
         return self.mk(kind, Span::new(start, self.previous_end()), data);
     }
 
+    /// `mk` for a kind that keeps its payload outside the node (`NodeExt`).
+    @always_inline
+    fn mk_ext(self: &mut Self, kind: NodeKind, span: Span, data: NodeExt) NodeId {
+        return self.ast.add_ext(kind, span, data);
+    }
+
+    /// `fin` for a kind that keeps its payload outside the node (`NodeExt`).
+    @always_inline
+    fn fin_ext(self: &mut Self, kind: NodeKind, start: u32, data: NodeExt) NodeId {
+        return self.mk_ext(kind, Span::new(start, self.previous_end()), data);
+    }
+
     pub(package) const fn node_span(self: &Self, id: NodeId) Span {
         if id == NODE_NONE {
             return Span::empty();
@@ -427,11 +439,11 @@ extend Parser {
             // `Name = Type` after the arguments: an associated type binding (`Add<i32, Output = T>`),
             // decided at the `=` a type never continues with.
             let an = *self.ast.at_const(arg);
-            if an.kind == NodeKind::NODE_TYPE_PATH && an.as_data.type_path.parts.len == 1 && an.as_data.type_path.args.len == 0 && self.check(
-                TokenType::Equal,
-            ) {
+            if an.kind == NodeKind::NODE_TYPE_PATH && self.ast.at_const(arg).as_data.type_path.parts.len == 1 && self.ast.at_const(
+                arg,
+            ).as_data.type_path.args.len == 0 && self.check(TokenType::Equal) {
                 self.advance();
-                let name = unsafe self.ast.list(an.as_data.type_path.parts)[0];
+                let name = unsafe self.ast.list(self.ast.at_const(arg).as_data.type_path.parts)[0];
                 let ty = self.parse_type();
                 let b = self.fin(
                     NodeKind::NODE_TYPE_ALIAS,
@@ -540,11 +552,15 @@ extend Parser {
             NodeList { start: 0, len: 0 };
         };
         let bindings = self.take_bindings(b0);
-        return self.fin(
+        let id = self.fin(
             NodeKind::NODE_TYPE_PATH,
             start,
-            NodeAs { type_path: TypePathData { parts: parts, args: args, bindings: bindings } },
+            NodeAs { type_path: TypePathData { parts: parts, args: args } },
         );
+        if bindings.len != 0 {
+            self.ast.path_bindings.insert(id, bindings);
+        }
+        return id;
     }
 
     pub(package) fn parse_type_path(self: &mut Self) NodeId {
@@ -769,10 +785,10 @@ extend Parser {
             let lstart = self.previous_end();
             let lt = self.parse_lifetime();
             self.ast.push(
-                self.fin(
+                self.fin_ext(
                     NodeKind::NODE_GENERIC_PARAM,
                     lstart,
-                    NodeAs { generic_param: GenericParamData { name: lt, is_lifetime: true } },
+                    NodeExt { generic_param: GenericParamData { name: lt, is_lifetime: true } },
                 ),
             );
             if !self.match(TokenType::Comma) {
@@ -841,10 +857,10 @@ extend Parser {
                 lbounds = self.parse_lifetime_bounds();
             }
             self.ast.push(
-                self.fin(
+                self.fin_ext(
                     NodeKind::NODE_GENERIC_PARAM,
                     start,
-                    NodeAs { generic_param: GenericParamData { name: lt, bounds: lbounds, is_lifetime: true } },
+                    NodeExt { generic_param: GenericParamData { name: lt, bounds: lbounds, is_lifetime: true } },
                 ),
             );
             if !self.match(TokenType::Comma) {
@@ -878,10 +894,10 @@ extend Parser {
                 NODE_NONE;
             };
             self.ast.push(
-                self.fin(
+                self.fin_ext(
                     NodeKind::NODE_GENERIC_PARAM,
                     start,
-                    NodeAs {
+                    NodeExt {
                         generic_param: GenericParamData {
                             name: name,
                             bounds: bounds,
@@ -1079,7 +1095,7 @@ extend Parser {
         }
         self.ast.sink_body = outer_sink;
         self.nrets = outer_nrets;
-        let __decl = self.mk(
+        let __decl = self.mk_ext(
             NodeKind::NODE_FUNCTION,
             Span::new(
                 start,
@@ -1089,7 +1105,7 @@ extend Parser {
                     self.previous_end();
                 },
             ),
-            NodeAs {
+            NodeExt {
                 function: FunctionData {
                     name: name,
                     generics: generics,
@@ -1218,10 +1234,12 @@ extend Parser {
             members = self.parse_fields();
             self.expect(TokenType::RightBrace, "'}'");
         }
-        let decl = self.fin(
+        let decl = self.fin_ext(
             NodeKind::NODE_STRUCT,
             start,
-            NodeAs { aggregate: AggregateData { name: name, generics: generics, members: members, is_tuple: is_tuple } },
+            NodeExt {
+                aggregate: AggregateData { name: name, generics: generics, members: members, is_tuple: is_tuple },
+            },
         );
         self.ast.set_lifetimes(decl, lifetimes);
         return decl;
@@ -1282,10 +1300,10 @@ extend Parser {
         }
         let variants = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
-        let __decl = self.fin(
+        let __decl = self.fin_ext(
             NodeKind::NODE_ENUM,
             start,
-            NodeAs { aggregate: AggregateData { name: name, generics: generics, members: variants } },
+            NodeExt { aggregate: AggregateData { name: name, generics: generics, members: variants } },
         );
         self.ast.set_lifetimes(__decl, lifetimes);
         return __decl;
@@ -1340,7 +1358,7 @@ extend Parser {
         if self.check(TokenType::Extend) {
             let e = self.parse_extend();
             if e != NODE_NONE {
-                self.ast.at(e).as_data.extend_def.is_unsafe = true;
+                self.ast.ext_mut(e).extend_def.is_unsafe = true;
                 self.ast.at(e).span.start = start;
             }
             return e;
@@ -1356,8 +1374,8 @@ extend Parser {
     // A function after its `const`/`unsafe` qualifiers, which start at `start`.
     fn parse_qualified_fn(self: &mut Self, start: u32, is_const: bool, is_unsafe: bool) NodeId {
         let f = self.parse_function(true, is_const);
-        self.ast.at(f).as_data.function.set(FN_CONST, is_const);
-        self.ast.at(f).as_data.function.set(FN_UNSAFE, is_unsafe);
+        self.ast.ext_mut(f).function.set(FN_CONST, is_const);
+        self.ast.ext_mut(f).function.set(FN_UNSAFE, is_unsafe);
         self.ast.at(f).span.start = start;
         return f;
     }
@@ -1453,7 +1471,7 @@ extend Parser {
         while !self.check(TokenType::RightBrace) && !self.at_end() {
             if self.check(TokenType::Fn) {
                 let f = self.parse_function(false, true);
-                if self.ast.at_const(f).as_data.function.body == NODE_NONE {
+                if self.ast.ext(f).function.body == NODE_NONE {
                     self.expect(TokenType::Semicolon, "';'");
                 }
                 self.ast.push(f);
@@ -1469,12 +1487,12 @@ extend Parser {
                     self.error_here("expected 'fn' or 'const fn' after 'unsafe' in an interface");
                 } else {
                     let f = self.parse_function(false, true);
-                    self.ast.at(f).as_data.function.set(FN_UNSAFE, true);
+                    self.ast.ext_mut(f).function.set(FN_UNSAFE, true);
                     if uconst {
-                        self.ast.at(f).as_data.function.set(FN_CONST, true);
+                        self.ast.ext_mut(f).function.set(FN_CONST, true);
                     }
                     self.ast.at(f).span.start = ustart;
-                    if self.ast.at_const(f).as_data.function.body == NODE_NONE {
+                    if self.ast.ext(f).function.body == NODE_NONE {
                         self.expect(TokenType::Semicolon, "';'");
                     }
                     self.ast.push(f);
@@ -1486,9 +1504,9 @@ extend Parser {
                     self.error_here("expected 'fn' after 'const' in an interface");
                 } else {
                     let f = self.parse_function(false, true);
-                    self.ast.at(f).as_data.function.set(FN_CONST, true);
+                    self.ast.ext_mut(f).function.set(FN_CONST, true);
                     self.ast.at(f).span.start = cstart;
-                    if self.ast.at_const(f).as_data.function.body == NODE_NONE {
+                    if self.ast.ext(f).function.body == NODE_NONE {
                         self.expect(TokenType::Semicolon, "';'");
                     }
                     self.ast.push(f);
@@ -1504,10 +1522,10 @@ extend Parser {
         self.pin_scope = outer_pin;
         let items = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
-        let __decl = self.fin(
+        let __decl = self.fin_ext(
             NodeKind::NODE_INTERFACE,
             start,
-            NodeAs { interface_def: InterfaceData { name: name, generics: generics, bounds: bounds, items: items } },
+            NodeExt { interface_def: InterfaceData { name: name, generics: generics, bounds: bounds, items: items } },
         );
         self.ast.set_lifetimes(__decl, lifetimes);
         self.ast.set_members(__decl, items);
@@ -1535,14 +1553,14 @@ extend Parser {
             let vis = self.parse_vis(false);
             if self.check(TokenType::Fn) {
                 let f = self.parse_function(true, false);
-                self.ast.at(f).as_data.function.vis = vis;
+                self.ast.ext_mut(f).function.vis = vis;
                 self.reject_method_bench(&attrs, f);
                 self.add_attrs_to(&mut attrs, f);
                 self.ast.push(f);
             } else if self.check(TokenType::Unsafe) {
                 let f = self.parse_unsafe_fn();
                 if f != NODE_NONE {
-                    self.ast.at(f).as_data.function.vis = vis;
+                    self.ast.ext_mut(f).function.vis = vis;
                     self.reject_method_bench(&attrs, f);
                     self.add_attrs_to(&mut attrs, f);
                     self.ast.push(f);
@@ -1554,7 +1572,7 @@ extend Parser {
                 let cn = self.parse_const_or_fn();
                 if cn != NODE_NONE {
                     if self.ast.at_const(cn).kind == NodeKind::NODE_FUNCTION {
-                        self.ast.at(cn).as_data.function.vis = vis;
+                        self.ast.ext_mut(cn).function.vis = vis;
                         self.reject_method_bench(&attrs, cn);
                         self.add_attrs_to(&mut attrs, cn);
                     } else {
@@ -1577,10 +1595,10 @@ extend Parser {
         let items = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
         // parse_unsafe_fn sets is_unsafe when an `unsafe` preceded this.
-        let __decl = self.fin(
+        let __decl = self.fin_ext(
             NodeKind::NODE_EXTEND,
             start,
-            NodeAs {
+            NodeExt {
                 extend_def: ExtendData {
                     generics: generics,
                     interface_type: interface_type,
@@ -1647,7 +1665,7 @@ extend Parser {
                 for i in 0..attrs.len() {
                     modeled = modeled || attrs[i].kind == AttrKind::ATTR_UNSAFE as u8 && (attrs[i].arg & UNSAFE_CONST) != 0;
                 }
-                let has_body = self.ast.at_const(f).as_data.function.body != NODE_NONE;
+                let has_body = self.ast.ext(f).function.body != NODE_NONE;
                 if has_body && !modeled {
                     let sp = self.node_span(f);
                     self.errors.emit_span(
@@ -1666,8 +1684,8 @@ extend Parser {
                         ),
                     );
                 }
-                self.ast.at(f).as_data.function.vis = vis;
-                self.ast.at(f).as_data.function.set(FN_EXTERN, true);
+                self.ast.ext_mut(f).function.vis = vis;
+                self.ast.ext_mut(f).function.set(FN_EXTERN, true);
                 self.add_attrs_to(&mut attrs, f);
                 if !has_body {
                     self.expect(TokenType::Semicolon, "';'");
@@ -1678,8 +1696,8 @@ extend Parser {
                 // `@import` pin), this only names its constants.
                 let ed = self.parse_enum();
                 if ed != NODE_NONE {
-                    self.ast.at(ed).as_data.aggregate.vis = vis;
-                    self.ast.at(ed).as_data.aggregate.is_extern = true;
+                    self.ast.ext_mut(ed).aggregate.vis = vis;
+                    self.ast.ext_mut(ed).aggregate.is_extern = true;
                     self.add_attrs_to(&mut attrs, ed);
                     self.need_header(header, ed, "an enum");
                     self.ast.push(ed);
@@ -1691,8 +1709,8 @@ extend Parser {
                 let is_union = self.check(TokenType::Union);
                 let sd = self.parse_struct(); // one shape; `union` only sets the flag below
                 if sd != NODE_NONE {
-                    self.ast.at(sd).as_data.aggregate.is_union = is_union;
-                    if self.ast.at_const(sd).as_data.aggregate.generics.len != 0 {
+                    self.ast.ext_mut(sd).aggregate.is_union = is_union;
+                    if self.ast.ext(sd).aggregate.generics.len != 0 {
                         let sp = self.node_span(sd);
                         self.errors.emit_span(
                             dc::EXTERN_TYPE_CANNOT_GENERIC_C_HAS,
@@ -1700,8 +1718,8 @@ extend Parser {
                             format("an extern type cannot be generic: C has no such declaration to match"),
                         );
                     }
-                    self.ast.at(sd).as_data.aggregate.vis = vis;
-                    self.ast.at(sd).as_data.aggregate.is_extern = true;
+                    self.ast.ext_mut(sd).aggregate.vis = vis;
+                    self.ast.ext_mut(sd).aggregate.is_extern = true;
                     self.add_attrs_to(&mut attrs, sd);
                     self.need_header(header, sd, pick(is_union, "a union", "a struct"));
                     self.ast.push(sd);
@@ -1797,7 +1815,7 @@ extend Parser {
             // A module-level `asm` is basic assembly: its template alone, emitted at file scope.
             self.reject_derive_here();
             let id = self.parse_asm();
-            let d = self.ast.at_const(id).as_data.asm_stmt;
+            let d = self.ast.ext(id).asm_stmt;
             if d.outputs.len != 0 || d.inputs.len != 0 || d.clobbers.len != 0 {
                 self.errors.emit_span(
                     dc::MODULE_LEVEL_ASM_TAKES_ONLY_TEMPLATE,
@@ -1838,30 +1856,30 @@ extend Parser {
         switch self.peek_type() {
             Fn => {
                 id = self.parse_function(true, false);
-                self.ast.at(id).as_data.function.vis = vis;
+                self.ast.ext_mut(id).function.vis = vis;
             },
             Unsafe => {
                 id = self.parse_unsafe_fn();
                 if id != NODE_NONE {
-                    self.ast.at(id).as_data.function.vis = vis;
+                    self.ast.ext_mut(id).function.vis = vis;
                 }
             },
             Struct => {
                 id = self.parse_struct();
-                self.ast.at(id).as_data.aggregate.vis = vis;
+                self.ast.ext_mut(id).aggregate.vis = vis;
             },
             Union => {
                 id = self.parse_struct();
-                self.ast.at(id).as_data.aggregate.vis = vis;
-                self.ast.at(id).as_data.aggregate.is_union = true;
+                self.ast.ext_mut(id).aggregate.vis = vis;
+                self.ast.ext_mut(id).aggregate.is_union = true;
             },
             Enum => {
                 id = self.parse_enum();
-                self.ast.at(id).as_data.aggregate.vis = vis;
+                self.ast.ext_mut(id).aggregate.vis = vis;
             },
             Interface => {
                 id = self.parse_interface();
-                self.ast.at(id).as_data.interface_def.vis = vis;
+                self.ast.ext_mut(id).interface_def.vis = vis;
             },
             Extend => {
                 id = self.parse_extend();
@@ -1874,7 +1892,7 @@ extend Parser {
                 id = self.parse_const_or_fn();
                 if id != NODE_NONE {
                     if self.ast.at_const(id).kind == NodeKind::NODE_FUNCTION {
-                        self.ast.at(id).as_data.function.vis = vis;
+                        self.ast.ext_mut(id).function.vis = vis;
                     } else {
                         self.ast.at(id).as_data.const_def.vis = vis;
                     }
@@ -1944,7 +1962,7 @@ extend Parser {
             self.reject_derive_here();
             return;
         }
-        let agg = self.ast.at_const(decl).as_data.aggregate;
+        let agg = self.ast.ext(decl).aggregate;
         let nsp = self.ast.at_const(agg.name).as_data.name.text;
         // Copied out first: node building below grows the arenas a `list` pointer indexes into.
         let mut gid_copy = Vector::<NodeId>::new();
@@ -1955,12 +1973,12 @@ extend Parser {
         for l in 0..lts.len {
             let lid = unsafe self.ast.list(lts)[l as usize];
             lid_copy.push(lid);
-            lsp_copy.push(self.ast.at_const(self.ast.at_const(lid).as_data.generic_param.name).as_data.name.text);
+            lsp_copy.push(self.ast.at_const(self.ast.ext_name(lid)).as_data.name.text);
         }
         for g in 0..agg.generics.len {
             let gid = unsafe self.ast.list(agg.generics)[g as usize];
             gid_copy.push(gid);
-            gsp_copy.push(self.ast.at_const(self.ast.at_const(gid).as_data.generic_param.name).as_data.name.text);
+            gsp_copy.push(self.ast.at_const(self.ast.ext_name(gid)).as_data.name.text);
         }
         for i in 0..self.derive_ifaces.len() {
             let iface = *self.derive_ifaces.at(i);
@@ -1987,10 +2005,10 @@ extend Parser {
                 self.ast.push(gid_copy[g]);
             }
             let egen = self.ast.commit(gmark);
-            let ext = self.mk(
+            let ext = self.mk_ext(
                 NodeKind::NODE_EXTEND,
                 Span::new(self.derive_start, self.derive_end),
-                NodeAs { extend_def: ExtendData { generics: egen, interface_type: iface, target_type: target } },
+                NodeExt { extend_def: ExtendData { generics: egen, interface_type: iface, target_type: target } },
             );
             let lmark = self.ast.mark();
             for l in 0..lid_copy.len() {
@@ -2636,10 +2654,10 @@ extend Parser {
             }
             let returns = self.parse_function_returns();
             let body = self.parse_closure_block();
-            return self.fin(
+            return self.fin_ext(
                 NodeKind::NODE_CLOSURE,
                 start,
-                NodeAs { closure: ClosureData { params: params, returns: returns, body: body } },
+                NodeExt { closure: ClosureData { params: params, returns: returns, body: body } },
             );
         }
         if self.check(TokenType::Pipe) || self.check(TokenType::PipePipe) {
@@ -2676,10 +2694,10 @@ extend Parser {
             } else {
                 self.parse_expression();
             };
-            return self.fin(
+            return self.fin_ext(
                 NodeKind::NODE_CLOSURE,
                 start,
-                NodeAs { closure: ClosureData { params: params, body: body, expr_body: !is_block } },
+                NodeExt { closure: ClosureData { params: params, body: body, expr_body: !is_block } },
             );
         }
         return self.error_skip("expected expression");
@@ -3352,16 +3370,16 @@ extend Parser {
                         ),
                     );
                     let params = self.ast.commit(pmark);
-                    body = self.mk(
+                    body = self.mk_ext(
                         NodeKind::NODE_CLOSURE,
                         Span::new(start, self.node_span(body).end),
-                        NodeAs { closure: ClosureData { params: params, body: body } },
+                        NodeExt { closure: ClosureData { params: params, body: body } },
                     );
                 }
-                result = self.mk(
+                result = self.mk_ext(
                     kind,
                     Span::new(start, self.node_span(body).end),
-                    NodeAs { for_stmt: ForData { binding: binding, iterable: iterable, body: body, label: label } },
+                    NodeExt { for_stmt: ForData { binding: binding, iterable: iterable, body: body, label: label } },
                 );
             },
             _ => {
@@ -4181,10 +4199,10 @@ extend Parser {
         }
         self.expect(TokenType::RightParen, "')'");
         self.expect(TokenType::Semicolon, "';'");
-        return self.fin(
+        return self.fin_ext(
             NodeKind::NODE_ASM,
             start,
-            NodeAs { asm_stmt: AsmData { template: template, outputs: outs, inputs: ins, clobbers: clob } },
+            NodeExt { asm_stmt: AsmData { template: template, outputs: outs, inputs: ins, clobbers: clob } },
         );
     }
 
@@ -4769,8 +4787,8 @@ extend Parser {
                 let ok = owner != NODE_NONE;
                 let isfn = ok && self.ast.at_const(owner).kind == NodeKind::NODE_FUNCTION;
                 // FN_EXTERN is set only on a function declared in an extern block.
-                let in_extern = isfn && self.ast.at_const(owner).as_data.function.is_extern();
-                let def = isfn && !in_extern && self.ast.at_const(owner).as_data.function.body != NODE_NONE;
+                let in_extern = isfn && self.ast.ext(owner).function.is_extern();
+                let def = isfn && !in_extern && self.ast.ext(owner).function.body != NODE_NONE;
                 let stat = ok && self.ast.at_const(owner).kind == NodeKind::NODE_CONST && self.ast.at_const(owner).as_data.const_def.is_static_mut && !self.ast.at_const(
                     owner,
                 ).as_data.const_def.is_extern;
@@ -4794,7 +4812,7 @@ extend Parser {
                 }
             }
             let fnk = owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_FUNCTION;
-            if attr.kind == AttrKind::ATTR_NO_CONST as u8 && fnk && self.ast.at_const(owner).as_data.function.is_const() {
+            if attr.kind == AttrKind::ATTR_NO_CONST as u8 && fnk && self.ast.ext(owner).function.is_const() {
                 self.errors.emit_span(
                     dc::NO_CONST_FUNCTION_CANNOT_CONST_FN,
                     self.node_span(owner),
@@ -4805,7 +4823,7 @@ extend Parser {
                 pick(fnk, "", "may only be applied to a function");
             } else if attr.kind == AttrKind::ATTR_TAIL_RECURSE as u8 {
                 pick(
-                    fnk && self.ast.at_const(owner).as_data.function.body != NODE_NONE,
+                    fnk && self.ast.ext(owner).function.body != NODE_NONE,
                     "",
                     "may only be applied to a function with a body",
                 );
@@ -4836,7 +4854,7 @@ extend Parser {
                 );
             } else if attr.kind == AttrKind::ATTR_C_READS as u8 || attr.kind == AttrKind::ATTR_C_WRITES as u8 || attr.kind == AttrKind::ATTR_C_LANE_ACCESS as u8 {
                 pick(
-                    fnk && (self.ast.at_const(owner).as_data.function.is_extern() || self.ast.at_const(owner).as_data.function.is_intrinsic()),
+                    fnk && (self.ast.ext(owner).function.is_extern() || self.ast.ext(owner).function.is_intrinsic()),
                     "",
                     "may only be applied to a function in an 'extern \"C\"' block or an '@intrinsic' function",
                 );
@@ -4874,11 +4892,11 @@ extend Parser {
                 continue;
             }
             if fnk && (attr.kind == AttrKind::ATTR_TARGET_FEATURE as u8 || attr.kind == AttrKind::ATTR_SIMD_IMPL as u8) {
-                self.ast.at(owner).as_data.function.set(FN_FEATURES, true);
+                self.ast.ext_mut(owner).function.set(FN_FEATURES, true);
             }
-            if attr.kind == AttrKind::ATTR_INTRINSIC as u8 && (owner == NODE_NONE || self.ast.at_const(owner).kind != NodeKind::NODE_FUNCTION || !self.ast.at_const(
+            if attr.kind == AttrKind::ATTR_INTRINSIC as u8 && (owner == NODE_NONE || self.ast.at_const(owner).kind != NodeKind::NODE_FUNCTION || !self.ast.ext(
                 owner,
-            ).as_data.function.is_intrinsic()) {
+            ).function.is_intrinsic()) {
                 self.errors.emit_span(
                     dc::INTRINSIC_MAY_ONLY_APPLIED_FUNCTION_OUTSIDE,
                     self.node_span(owner),
@@ -4893,7 +4911,7 @@ extend Parser {
             self.check_feature_gate(owner, ~0u32);
         } else if owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_EXTEND {
             let g = self.ast.attr_of(owner, AttrKind::ATTR_ARCH);
-            let its = self.ast.at_const(owner).as_data.extend_def.items;
+            let its = self.ast.ext(owner).extend_def.items;
             for i in 0..pick(g != null, its.len, 0) {
                 let f = unsafe self.ast.list(its)[i as usize];
                 if self.ast.at_const(f).kind == NodeKind::NODE_FUNCTION {
@@ -5008,8 +5026,10 @@ extend Parser {
             if owner != NODE_NONE {
                 let d = self.ast.at_const(owner);
                 sp = d.span;
-                valid_test = d.kind == NodeKind::NODE_FUNCTION && d.as_data.function.generics.len == 0;
-                generic_aggregate = (d.kind == NodeKind::NODE_STRUCT || d.kind == NodeKind::NODE_ENUM) && d.as_data.aggregate.generics.len != 0;
+                valid_test = d.kind == NodeKind::NODE_FUNCTION && self.ast.ext(owner).function.generics.len == 0;
+                generic_aggregate = (d.kind == NodeKind::NODE_STRUCT || d.kind == NodeKind::NODE_ENUM) && self.ast.ext(
+                    owner,
+                ).aggregate.generics.len != 0;
             }
             if attr.kind == AttrKind::ATTR_BENCH as u8 && !valid_test {
                 self.errors.emit_span(
@@ -5017,7 +5037,7 @@ extend Parser {
                     sp,
                     format("'@bench' may only be applied to a non-generic function"),
                 );
-            } else if attr.kind == AttrKind::ATTR_BENCH as u8 && self.ast.at_const(owner).as_data.function.is_unsafe() {
+            } else if attr.kind == AttrKind::ATTR_BENCH as u8 && self.ast.ext(owner).function.is_unsafe() {
                 // The generated runner names it as a value, which an `unsafe fn` cannot be without `unsafe`.
                 self.errors.emit_span(
                     dc::BENCH_MAY_NOT_APPLIED_UNSAFE_FN,

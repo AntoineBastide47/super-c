@@ -107,6 +107,11 @@ extend Builder {
         return *unsafe (*self.ast).at_const(id);
     }
 
+    // The payload node `id` keeps outside itself (`Ast::ext`).
+    const fn ext(self: &Self, id: NodeId) NodeExt {
+        return *unsafe (*self.ast).ext(id);
+    }
+
     const fn list_at(self: &Self, l: NodeList, i: u32) NodeId {
         return unsafe (*self.ast).list(l)[i as usize];
     }
@@ -716,7 +721,7 @@ extend Builder {
         let v = self.st.len();
         switch n.kind {
             NODE_TYPE_PATH => {
-                self.b_type_path(n.as_data.type_path, false);
+                self.b_type_path(self.nd(id).as_data.type_path, unsafe (*self.ast).type_bindings(id), false);
             },
             NODE_POINTER_TYPE => {
                 if n.as_data.indirect_type.qualifier == TypeQualifier::TYPE_QUAL_MUT {
@@ -839,8 +844,7 @@ extend Builder {
     }
 
     fn b_generic_param(self: &mut Self, id: NodeId) d::DocId {
-        let n = self.nd(id);
-        let g = n.as_data.generic_param;
+        let g = self.ext(id).generic_param;
         let v = self.st.len();
         if g.is_const {
             self.st.push(self.p.txt("const "));
@@ -1129,7 +1133,7 @@ extend Builder {
                 self.b_turbofish(n.as_data.specialization.types);
             },
             NODE_CLOSURE => {
-                let c = n.as_data.closure;
+                let c = self.ext(id).closure;
                 let ps = self.st.len();
                 self.b_each(c.params, 3);
                 // `|..|` has no return-type slot; only the `fn(..) T { .. }` spelling does. Both parse to this
@@ -1286,13 +1290,13 @@ extend Builder {
             return self.b_type(id);
         }
         let v = self.st.len();
-        self.b_type_path(n.as_data.type_path, true);
+        self.b_type_path(self.nd(id).as_data.type_path, unsafe (*self.ast).type_bindings(id), true);
         return self.cat(v);
     }
 
     // Push type path `tp`: its parts joined by `::`, then its generic arguments, after a `::` when
     // `turbofish`; a turbofish follows the part written before it (`Q::<i16>::V { .. }`).
-    fn b_type_path(self: &mut Self, tp: TypePathData, turbofish: bool) {
+    fn b_type_path(self: &mut Self, tp: TypePathData, binds: NodeList, turbofish: bool) {
         let mut split = tp.parts.len;
         if turbofish && tp.args.len != 0 && tp.parts.len > 1 {
             let a0 = self.nd(self.list_at(tp.args, 0)).span.start;
@@ -1307,8 +1311,8 @@ extend Builder {
             }
             self.st.push(self.node_text(self.list_at(tp.parts, i)));
         }
-        if tp.args.len != 0 || tp.bindings.len != 0 {
-            self.b_type_args(tp, turbofish);
+        if tp.args.len != 0 || binds.len != 0 {
+            self.b_type_args(tp, binds, turbofish);
         }
         for i in split..tp.parts.len {
             self.st.push(self.p.txt("::"));
@@ -1317,7 +1321,7 @@ extend Builder {
     }
 
     // Push the generic arguments of `tp` (see `b_type_path`).
-    fn b_type_args(self: &mut Self, tp: TypePathData, turbofish: bool) {
+    fn b_type_args(self: &mut Self, tp: TypePathData, binds: NodeList, turbofish: bool) {
         if turbofish {
             self.st.push(self.p.txt("::"));
         }
@@ -1333,8 +1337,8 @@ extend Builder {
             }
         }
         // Associated type bindings follow the arguments: `Add<i32, Output = T>`.
-        for i in 0..tp.bindings.len {
-            let bn = self.nd(self.list_at(tp.bindings, i)).as_data.type_alias;
+        for i in 0..binds.len {
+            let bn = self.nd(self.list_at(binds, i)).as_data.type_alias;
             let v = self.st.len();
             self.st.push(self.node_text(bn.name));
             self.st.push(self.p.txt(" = "));
@@ -1542,7 +1546,7 @@ extend Builder {
                 self.st.push(self.p.txt(";"));
             },
             NODE_ASM => {
-                let d = n.as_data.asm_stmt;
+                let d = self.ext(id).asm_stmt;
                 self.st.push(self.p.txt("asm("));
                 self.st.push(self.b_expr(d.template));
                 if d.outputs.len != 0 || d.inputs.len != 0 || d.clobbers.len != 0 {
@@ -1612,7 +1616,7 @@ extend Builder {
                 }
             },
             NODE_FOR | NODE_INLINE_FOR => {
-                let f = n.as_data.for_stmt;
+                let f = self.ext(id).for_stmt;
                 if f.label.end > f.label.start {
                     self.st.push(self.span_doc(f.label));
                     self.st.push(self.p.txt(": "));
@@ -1629,13 +1633,13 @@ extend Builder {
             },
             NODE_PARALLEL_FOR => {
                 // The marker's body is the closure the parser wrapped the block in; print the block.
-                let f = n.as_data.for_stmt;
+                let f = self.ext(id).for_stmt;
                 self.st.push(self.p.txt("parallel for "));
                 self.st.push(self.node_text(f.binding));
                 self.st.push(self.p.txt(" in "));
                 self.st.push(self.b_cond(f.iterable));
                 self.st.push(self.p.txt(" "));
-                self.st.push(self.b_block(self.nd(f.body).as_data.closure.body));
+                self.st.push(self.b_block(self.ext(f.body).closure.body));
             },
             NODE_EXPRESSION_STATEMENT => {
                 let e = n.as_data.single.value;
@@ -1894,7 +1898,7 @@ extend Builder {
         let v = self.st.len();
         switch n.kind {
             NODE_FUNCTION => {
-                let f = n.as_data.function;
+                let f = self.ext(id).function;
                 if f.vis != VIS_PRIVATE {
                     self.st.push(self.p.txt(vis_text(f.vis)));
                 }
@@ -1960,7 +1964,7 @@ extend Builder {
                 }
             },
             NODE_STRUCT | NODE_ENUM => {
-                let a = n.as_data.aggregate;
+                let a = self.ext(id).aggregate;
                 if a.vis != VIS_PRIVATE {
                     self.st.push(self.p.txt(vis_text(a.vis)));
                 }
@@ -2002,7 +2006,7 @@ extend Builder {
                 }
             },
             NODE_INTERFACE => {
-                let itf = n.as_data.interface_def;
+                let itf = self.ext(id).interface_def;
                 if itf.vis != VIS_PRIVATE {
                     self.st.push(self.p.txt(vis_text(itf.vis)));
                 }
@@ -2017,7 +2021,7 @@ extend Builder {
                 self.st.push(self.b_item_body(itf.items, n.span));
             },
             NODE_EXTEND => {
-                let e = n.as_data.extend_def;
+                let e = self.ext(id).extend_def;
                 if e.is_unsafe {
                     self.st.push(self.p.txt("unsafe "));
                 }

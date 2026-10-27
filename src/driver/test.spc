@@ -105,7 +105,7 @@ const fn test_type_decl(p: &loader::Package, am: ModuleId, tnode: NodeId) DefId 
     }
     let da = p.module_ast_const(d.module);
     let dk = unsafe (*da).at_const(d.node).kind;
-    let gen = unsafe (*da).at_const(d.node).as_data.aggregate.generics;
+    let gen = unsafe (*da).ext(d.node).aggregate.generics;
     if dk != NodeKind::NODE_STRUCT && dk != NodeKind::NODE_ENUM || gen.len != 0 {
         return none;
     }
@@ -115,7 +115,7 @@ const fn test_type_decl(p: &loader::Package, am: ModuleId, tnode: NodeId) DefId 
 // A function's single return type node (unwrapping a named return), or NODE_NONE.
 const fn test_fn_ret_node(p: &loader::Package, am: ModuleId, fnode: NodeId) NodeId {
     let a = p.module_ast_const(am);
-    let rets = unsafe (*a).at_const(fnode).as_data.function.returns;
+    let rets = unsafe (*a).ext(fnode).function.returns;
     if rets.len != 1 {
         return NODE_NONE;
     }
@@ -124,7 +124,7 @@ const fn test_fn_ret_node(p: &loader::Package, am: ModuleId, fnode: NodeId) Node
 
 const fn test_fn_returns_nothing(p: &loader::Package, am: ModuleId, src: *const char, fnode: NodeId) bool {
     let a = p.module_ast_const(am);
-    let rets = unsafe (*a).at_const(fnode).as_data.function.returns;
+    let rets = unsafe (*a).ext(fnode).function.returns;
     if rets.len == 0 {
         return true;
     }
@@ -193,7 +193,7 @@ fn test_item_owners(p: &loader::Package) Map<u64, u64> {
             let iid = unsafe ids[i as usize];
             owners.insert(skey_mix(0, m as u64 << 32 | iid as u64), NODE_NONE);
             if unsafe (*a).at_const(iid).kind == NodeKind::NODE_EXTEND {
-                let ed = unsafe (*a).at_const(iid).as_data.extend_def;
+                let ed = unsafe (*a).ext(iid).extend_def;
                 let mids = unsafe (*a).list(ed.items);
                 for j in 0..ed.items.len {
                     owners.insert(skey_mix(0, m as u64 << 32 | (unsafe mids[j as usize]) as u64), iid);
@@ -217,7 +217,7 @@ fn test_owner(owners: &Map<u64, u64>, m: ModuleId, fnode: NodeId) i64 {
 // struct or enum) or when `global` marks a '(global)' fixture item there.
 fn test_suite_type(p: &mut loader::Package, m: ModuleId, ext: NodeId, sp: tok::Span, global: bool) DefId {
     let none = DefId { module: 0, node: NODE_NONE };
-    let ed = unsafe (*p.module_ast_const(m)).at_const(ext).as_data.extend_def;
+    let ed = unsafe (*p.module_ast_const(m)).ext(ext).extend_def;
     if ed.interface_type != NODE_NONE || ed.generics.len != 0 {
         test_err(p, m, sp, "test attributes are only allowed on methods of a non-generic inherent 'extend'");
         return none;
@@ -236,7 +236,7 @@ fn test_suite_type(p: &mut loader::Package, m: ModuleId, ext: NodeId, sp: tok::S
 // Whether `fnode` has the teardown shape `fn(&mut <want>)` returning nothing.
 fn test_free_sig(p: &loader::Package, m: ModuleId, src: *const char, fnode: NodeId, want: DefId) bool {
     let a = p.module_ast_const(m);
-    let params = unsafe (*a).at_const(fnode).as_data.function.params;
+    let params = unsafe (*a).ext(fnode).function.params;
     if params.len != 1 || !test_fn_returns_nothing(p, m, src, fnode) {
         return false;
     }
@@ -279,7 +279,7 @@ pub(package) fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                 }
             }
             if at.kind == AttrKind::ATTR_TEST_INIT as u8 {
-                let plen = unsafe (*p.module_ast_const(m as ModuleId)).at_const(at.owner).as_data.function.params.len;
+                let plen = unsafe (*p.module_ast_const(m as ModuleId)).ext(at.owner).function.params.len;
                 if plen != 0 {
                     test_err(p, m as ModuleId, sp, "'@test_init' takes no parameters");
                     continue;
@@ -460,7 +460,7 @@ pub(package) fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
                 test_err(p, m as ModuleId, sp, "'main' cannot be a '@test' (it is replaced by the test runner)");
                 continue;
             }
-            let params = unsafe (*p.module_ast_const(m as ModuleId)).at_const(at.owner).as_data.function.params;
+            let params = unsafe (*p.module_ast_const(m as ModuleId)).ext(at.owner).function.params;
             if params.len > 2 {
                 test_err(
                     p,
@@ -639,13 +639,13 @@ fn push_hex2(out: &mut String, b: u8) {
 // The display name of test `tc`: `module::fn` or `module::Type::method`.
 fn test_case_name(p: &loader::Package, tc: TestCase, out: &mut String) {
     let a = p.module_ast_const(tc.mod);
-    let nmnode = unsafe (*a).at_const(tc.func).as_data.function.name;
+    let nmnode = unsafe (*a).ext_name(tc.func);
     let nm = unsafe (*a).at_const(nmnode).as_data.name.text;
     out.push_str(p.modules[tc.mod as usize].path.as_str());
     out.push_str("::");
     if tc.suite.node != NODE_NONE {
         let sa = p.module_ast_const(tc.suite.module);
-        let snmn = unsafe (*sa).at_const(tc.suite.node).as_data.aggregate.name;
+        let snmn = unsafe (*sa).ext_name(tc.suite.node);
         let snm = unsafe (*sa).at_const(snmn).as_data.name.text;
         out.push_str(p.modules[tc.suite.module as usize].source.as_str().slice(snm.start as usize, snm.end as usize));
         out.push_str("::");

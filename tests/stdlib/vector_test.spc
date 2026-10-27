@@ -240,13 +240,6 @@ fn box_map_borrows() {
     assert(is_long(b.get(), "boxed"), "the box still owns its value");
 }
 
-// A zeroed Box (the seed the reflection constructors fill) owns nothing, so releasing it is a no-op.
-@test
-fn zeroed_box_releases_nothing() {
-    let z = unsafe zeroed::<Box<String>>();
-    assert(z.as_ptr() == null, "zeroed");
-}
-
 // Float formatting writes into the string's own spare capacity, so a long result is never cut short.
 @test
 fn float_formatting_is_not_truncated() {

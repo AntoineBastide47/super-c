@@ -455,7 +455,7 @@ extend ChangeSignature as Refactoring {
         {
             let a = &s.package().modules[d.module as usize].ast;
             let src = src_of(s, d.module as usize);
-            let ps = a.at_const(d.node).as_data.function.params;
+            let ps = a.ext(d.node).function.params;
             for i in 0..ps.len {
                 let pid = unsafe a.list(ps)[i as usize];
                 let sp = a.at_const(pid).span;
@@ -593,7 +593,7 @@ fn conformance_at(p: &loader::Package, m: usize, off: u32) (NodeId, DefId) {
     if ext == NODE_NONE {
         return NODE_NONE, DefId { module: 0, node: NODE_NONE };
     }
-    let it = a.at_const(ext).as_data.extend_def.interface_type;
+    let it = a.ext(ext).extend_def.interface_type;
     if it == NODE_NONE || !a.valid(it) {
         return NODE_NONE, DefId { module: 0, node: NODE_NONE };
     }
@@ -609,24 +609,24 @@ fn missing_methods(p: &loader::Package, m: usize, ext: NodeId, idf: DefId) Vecto
     let a = &p.modules[m].ast;
     let src = p.modules[m].source.as_str();
     let mut have = Vector::<String>::new();
-    let es = a.at_const(ext).as_data.extend_def.items;
+    let es = a.ext(ext).extend_def.items;
     for i in 0..es.len {
         let f = a.at_const(unsafe a.list(es)[i as usize]);
         if f.kind == NodeKind::NODE_FUNCTION {
-            let sp = a.at_const(f.as_data.function.name).span;
+            let sp = a.at_const(a.ext_name(unsafe a.list(es)[i as usize])).span;
             have.push(String::from_str(src.slice(sp.start as usize, sp.end as usize)));
         }
     }
     let ia = &p.modules[idf.module as usize].ast;
     let isrc = p.modules[idf.module as usize].source.as_str();
     let mut out = Vector::<String>::new();
-    let ms = ia.at_const(idf.node).as_data.interface_def.items;
+    let ms = ia.ext(idf.node).interface_def.items;
     for i in 0..ms.len {
         let f = ia.at_const(unsafe ia.list(ms)[i as usize]);
-        if f.kind != NodeKind::NODE_FUNCTION || f.as_data.function.body != NODE_NONE {
+        if f.kind != NodeKind::NODE_FUNCTION || ia.ext(unsafe ia.list(ms)[i as usize]).function.body != NODE_NONE {
             continue;
         }
-        let sp = ia.at_const(f.as_data.function.name).span;
+        let sp = ia.at_const(ia.ext_name(unsafe ia.list(ms)[i as usize])).span;
         let name = String::from_str(isrc.slice(sp.start as usize, sp.end as usize));
         if !have.contains(&name) {
             out.push(name);

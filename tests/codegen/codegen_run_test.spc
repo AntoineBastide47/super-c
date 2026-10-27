@@ -492,6 +492,87 @@ fn main() i32 {
     h::expect_c("a zero-sized payload takes no initializer", SRC, "Option__Z OZ = { .tag = Option_Some };");
 }
 
+// A two-variant enum whose one payload is a reference or a `Box` of a value that is not `dyn` keeps
+// its discriminant in the payload's pointer word (null is the variant without payload): it has no
+// tag and the size of the payload. Every read and write agrees on it in the native backend and in C:
+// construction, matching through references and in generic code, drop, constants and `zeroed`.
+@test
+fn niche_enums() {
+    const SRC: str = M"(interface Shape { fn area(self: &Self) i32; }
+struct Sq { pub s: i32 }
+extend Sq as Shape { fn area(self: &Self) i32 { return self.s * self.s; } }
+struct Node { pub v: i32 }
+enum Rev<T> { Empty, Full(T) }
+enum Named<T> { Has { r: T }, Not }
+const K: i32 = 5;
+const NR: Option<&i32> = Option::None;
+const SR: Option<&i32> = Option::Some(&K);
+fn first(v: &Vector<Node>) Option<&Node> {
+    if v.len() == 0 { return Option::None; }
+    return Option::Some(&v[0]);
+}
+fn count<T>(os: &[Option<T>; 3]) i32 {
+    return os[0].is_some() as i32 + os[1].is_some() as i32 + os[2].is_some() as i32;
+}
+fn main() i32 {
+    let x = 7;
+    let n = Node { v: 4 };
+    let mut m = Node { v: 1 };
+    let a: Option<&i32> = Option::Some(&x);
+    let mut b: Option<&mut Node> = Option::Some(&mut m);
+    let c: Option<Box<Node>> = Option::Some(Box::<Node>::new(Node { v: 3 }));
+    let d: Rev<&Node> = Rev::Full(&n);
+    let e: Named<&Node> = Named::Has { r: &n };
+    let f: Option<i64> = Option::Some(9);
+    let g: Option<Box<dyn Shape>> = Option::Some(Box::<Sq>::new(Sq { s: 3 }));
+    static_assert(sizeof(a) == sizeof(usize), "Option<&T> is a pointer");
+    static_assert(sizeof(b) == sizeof(usize), "Option<&mut T> is a pointer");
+    static_assert(sizeof(c) == sizeof(usize), "Option<Box<T>> is a pointer");
+    static_assert(sizeof(d) == sizeof(usize), "a user enum with the variant without payload first");
+    static_assert(sizeof(e) == sizeof(usize), "a struct payload");
+    static_assert(sizeof(f) == 16, "an integer payload keeps its tag");
+    let mut s = 0;
+    if let Some(p) = a { s += *p; }
+    if let Some(r) = b { r.v += 10; }
+    s += m.v;
+    b = Option::None;
+    if b.is_none() { s += 100; }
+    if let Some(bx) = &c { s += bx.v; }
+    if let Full(r) = d { s += r.v; }
+    if let Has { r } = e { s += r.v * 10; }
+    if let Some(v) = f { s += v as i32; }
+    if let Some(sh) = &g { s += sh.area(); }
+    let bd: Box<dyn Shape> = Box::<Sq>::new(Sq { s: 1 });
+    if sizeof(g) > sizeof(bd) { s += 30000; } // a box of a dyn value keeps its tag
+    let mut v = Vector::<Node>::new();
+    if first(&v).is_none() { s += 1000; }
+    v.push(Node { v: 2 });
+    if let Some(r) = first(&v) { s += r.v; }
+    let arr: [Option<&i32>; 3] = [Option::None, Option::Some(&x), Option::Some(&K)];
+    s += count(&arr) * 10000;
+    if NR.is_none() { s += 100000; }
+    if let Some(k) = SR { s += *k; }
+    let z = unsafe zeroed::<Option<&Node>>();
+    if z.is_none() { s += 1000000; }
+    let pa = &a;
+    if pa.is_some() { s += 2000000; }
+    return s - (7 + 11 + 100 + 3 + 4 + 40 + 9 + 9 + 1000 + 2 + 20000 + 30000 + 100000 + 5 + 1000000 + 2000000);
+}
+)";
+    let r = h::compile_and_run(SRC);
+    assert(r.built && r.exit == 0, "niche enums through the native backend");
+    if cli::has_cc() {
+        let rc = h::compile_and_run_c(SRC);
+        assert(rc.built && rc.exit == 0, "niche enums through C");
+    }
+    h::expect_c(
+        "a niche enum has no tag",
+        SRC,
+        "struct Option__ptr_i32 {\n  union {\n    struct { const int32_t *_0; } Some;\n  } payload;\n};",
+    );
+    h::expect_c("a niche constant", SRC, "Option__ptr_i32 NR = {0};");
+}
+
 // Constants local to different bodies may share a name: each has its own C symbol.
 fn local_constants_of_one_name(b: &mut h::ExitBatch) {
     exit_case(

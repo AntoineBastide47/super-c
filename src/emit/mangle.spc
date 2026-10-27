@@ -402,6 +402,7 @@ pub(package) struct Mangler {
     /// symbols always take its prefix (`modpfx`).
     pub(package) mangle: bool,
     ph_global: loader::LookupHit,
+    ph_box: loader::LookupHit, // the prelude `Box` (`niche`)
     // Per-module short-prefix verdicts (1 = short), a pure function of the package's module path
     // list, so every TU agrees: `short_ok` points into `short_own` (filled on first use) or into
     // the table of the mangler `share_short` took it from, which outlives this one.
@@ -721,6 +722,7 @@ extend Mangler {
             pkg: pkg,
             mangle: user_mods > 1,
             ph_global: p.prelude_lookup("Global", true),
+            ph_box: p.prelude_lookup("Box", true),
             short_own: Vector::<u8>::new(),
             short_ok: null,
             subs: Vector::<MSub>::new(),
@@ -801,13 +803,13 @@ extend Mangler {
                 let iid = unsafe (*a).list(items)[i as usize];
                 let k = unsafe (*a).at_const(iid).kind;
                 if k == NodeKind::NODE_EXTEND {
-                    let ms = unsafe (*a).at_const(iid).as_data.extend_def.items;
+                    let ms = unsafe (*a).ext(iid).extend_def.items;
                     for j in 0..ms.len {
                         let mid = unsafe (*a).list(ms)[j as usize];
                         self.own_idx.insert(skey_mix(0, m as u64 << 32 | mid as u64), iid as u64 << 32);
                     }
                 } else if k == NodeKind::NODE_INTERFACE {
-                    let ms = unsafe (*a).at_const(iid).as_data.interface_def.items;
+                    let ms = unsafe (*a).ext(iid).interface_def.items;
                     for j in 0..ms.len {
                         let mid = unsafe (*a).list(ms)[j as usize];
                         self.own_idx.insert(skey_mix(0, m as u64 << 32 | mid as u64), iid);
@@ -1668,8 +1670,7 @@ extend Mangler {
 
     // `def_key` of the non-generic aggregate `decl` of module `m` (0 for an extern one).
     fn decl_key(self: &mut Self, m: ModuleId, decl: NodeId) u64 {
-        let dn = *unsafe (*self.p().module_ast_const(m)).at_const(decl);
-        if dn.as_data.aggregate.is_extern {
+        if unsafe (*self.p().module_ast_const(m)).ext(decl).aggregate.is_extern {
             return 0;
         }
         let key = 1u64 << 63 | m as u64 << 32 | decl as u64;
@@ -1680,7 +1681,7 @@ extend Mangler {
                 self.no_edges = true;
                 let mut nm = replace(&mut self.tn_buf, String::new());
                 nm.clear();
-                self.qualified(m, dn.as_data.aggregate.name, &mut nm);
+                self.qualified(m, unsafe (*self.p().module_ast_const(m)).ext_name(decl), &mut nm);
                 self.no_edges = ne;
                 let h9 = fnv(nm.as_str());
                 self.tn_buf = nm;
@@ -1953,7 +1954,7 @@ extend Mangler {
             return true;
         }
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
-            let nm = unsafe (*self.p().module_ast_const(y.module)).at_const(y.as_data.decl).as_data.aggregate.name;
+            let nm = unsafe (*self.p().module_ast_const(y.module)).ext_name(y.as_data.decl);
             self.qualified(y.module, nm, out);
             return true;
         }
@@ -2035,11 +2036,7 @@ extend Mangler {
                 return true;
             }
             if cf == null && unsafe (*self.p().module_ast_const(y.module)).at_const(y.as_data.decl).kind == NodeKind::NODE_FUNCTION {
-                self.qualified(
-                    y.module,
-                    unsafe (*self.p().module_ast_const(y.module)).at_const(y.as_data.decl).as_data.function.name,
-                    out,
-                );
+                self.qualified(y.module, unsafe (*self.p().module_ast_const(y.module)).ext_name(y.as_data.decl), out);
                 return true;
             }
             out.push_str("fnt");
@@ -2084,10 +2081,9 @@ extend Mangler {
                 push_i128_limbs(out, &unsafe l.c[i as usize]);
                 out.push_str("_P");
                 let pa = self.p().module_ast_const(unsafe l.p[i as usize].module);
-                let pn = unsafe (*pa).at_const(unsafe l.p[i as usize].node);
                 self.ident(
                     unsafe l.p[i as usize].module,
-                    unsafe (*pa).at_const(pn.as_data.generic_param.name).as_data.name.text,
+                    unsafe (*pa).at_const(unsafe (*pa).ext_name(unsafe l.p[i as usize].node)).as_data.name.text,
                     out,
                 );
             }
@@ -2149,8 +2145,7 @@ extend Mangler {
     // The source name of the generic-param decl behind an unresolved TYPE_GENERIC.
     fn generic_param_name(self: &mut Self, y: &Ty, out: &mut String) {
         let da = self.p().module_ast_const(y.module);
-        let pn = unsafe (*da).at_const(y.as_data.decl);
-        self.ident(y.module, unsafe (*da).at_const(pn.as_data.generic_param.name).as_data.name.text, out);
+        self.ident(y.module, unsafe (*da).at_const(unsafe (*da).ext_name(y.as_data.decl)).as_data.name.text, out);
     }
 
     /// True when argument `i` of an instance of aggregate `(dm, dn)`, resolved to `(am, at)`, is the
@@ -2159,11 +2154,11 @@ extend Mangler {
     pub(package) const fn is_default_arg(self: &Self, dm: ModuleId, dn: NodeId, i: u32, am: ModuleId, at: TypeId) bool {
         let y = *unsafe (*self.p().module_ast_const(am)).type_at(at);
         let da = self.p().module_ast_const(dm);
-        let gens = unsafe (*da).at_const(dn).as_data.aggregate.generics;
+        let gens = unsafe (*da).ext(dn).aggregate.generics;
         if y.kind != TypeKind::TYPE_STRUCT || i >= gens.len {
             return false;
         }
-        let d = unsafe (*da).at_const(unsafe (*da).list(gens)[i as usize]).as_data.generic_param.default_type;
+        let d = unsafe (*da).ext(unsafe (*da).list(gens)[i as usize]).generic_param.default_type;
         if d == NODE_NONE {
             return false;
         }
@@ -2195,7 +2190,7 @@ extend Mangler {
             return self.type_m(pm, it.args[0], out);
         }
         let da = self.p().module_ast_const(it.module);
-        self.qualified(it.module, unsafe (*da).at_const(it.decl).as_data.interface_def.name, out);
+        self.qualified(it.module, unsafe (*da).ext_name(it.decl), out);
         return self.args_m(pm, &it, it.n, out);
     }
 
@@ -2383,21 +2378,21 @@ extend Mangler {
             for i in 0..items.len {
                 let iid = unsafe (*a).list(items)[i as usize];
                 let it = unsafe (*a).at_const(iid);
-                if it.kind != NodeKind::NODE_EXTEND || it.as_data.extend_def.target_type == NODE_NONE {
+                if it.kind != NodeKind::NODE_EXTEND || unsafe (*a).ext(iid).extend_def.target_type == NODE_NONE {
                     continue;
                 }
                 let tg = self.ext_target(m, iid);
                 if tg.module != tmod || tg.node != tdecl {
                     continue;
                 }
-                let ms = it.as_data.extend_def.items;
+                let ms = unsafe (*a).ext(iid).extend_def.items;
                 for j in 0..ms.len {
                     let mid = unsafe (*a).list(ms)[j as usize];
                     let mn = unsafe (*a).at_const(mid);
                     if mn.kind != NodeKind::NODE_FUNCTION {
                         continue;
                     }
-                    let s2 = unsafe (*a).at_const(mn.as_data.function.name).as_data.name.text;
+                    let s2 = unsafe (*a).at_const(unsafe (*a).ext_name(mid)).as_data.name.text;
                     if msrc.slice(s2.start as usize, s2.end as usize) == ntxt {
                         n += 1;
                     }
@@ -2417,11 +2412,11 @@ extend Mangler {
         if ext == NODE_NONE {
             return true;
         }
-        let ity = unsafe (*a).at_const(ext).as_data.extend_def.interface_type;
+        let ity = unsafe (*a).ext(ext).extend_def.interface_type;
         if ity == NODE_NONE {
             return true;
         }
-        let name = unsafe (*a).at_const(unsafe (*a).at_const(fnode).as_data.function.name).as_data.name.text;
+        let name = unsafe (*a).at_const(unsafe (*a).ext_name(fnode)).as_data.name.text;
         let src = self.p().modules.at(fm as usize).source.as_str();
         let ntxt = src.slice(name.start as usize, name.end as usize);
         if ntxt == "from" || ntxt == "try_from" {
@@ -2436,7 +2431,7 @@ extend Mangler {
             return true;
         }
         out.push_str("__");
-        let inm = unsafe (*self.p().module_ast_const(tr.module)).at_const(tr.node).as_data.interface_def.name;
+        let inm = unsafe (*self.p().module_ast_const(tr.module)).ext_name(tr.node);
         self.ident(tr.module, unsafe (*self.p().module_ast_const(tr.module)).at_const(inm).as_data.name.text, out);
         if unsafe (*a).at_const(ity).kind != NodeKind::NODE_TYPE_PATH {
             return true;
@@ -2492,13 +2487,13 @@ extend Mangler {
 
     pub(package) fn fn_sym(self: &mut Self, fm: ModuleId, fnode: NodeId, target: DefId, out: &mut String) bool {
         let st = out.len();
-        if !unsafe (*self.p().module_ast_const(fm)).at_const(fnode).as_data.function.is_extern() {
+        if !unsafe (*self.p().module_ast_const(fm)).ext(fnode).function.is_extern() {
             self.fn_ref(fm, fnode);
         }
         if self.sym_override(fm, fnode, out) {
             // An `@export` function is still its module's: the spelling unit needs that module's
             // prototype header, as for a prefixed symbol.
-            if !unsafe (*self.p().module_ast_const(fm)).at_const(fnode).as_data.function.is_extern() {
+            if !unsafe (*self.p().module_ast_const(fm)).ext(fnode).function.is_extern() {
                 self.spell_edge(fm);
             } else if !self.tracked_alloc(fm, out, st) {
                 x_alias(self.p(), DefId { module: fm, node: fnode }, out, st);
@@ -2506,8 +2501,8 @@ extend Mangler {
             return true;
         }
         let a = self.p().module_ast_const(fm);
-        let fname = unsafe (*a).at_const(unsafe (*a).at_const(fnode).as_data.function.name).as_data.name.text;
-        if unsafe (*a).at_const(fnode).as_data.function.is_extern() {
+        let fname = unsafe (*a).at_const(unsafe (*a).ext_name(fnode)).as_data.name.text;
+        if unsafe (*a).ext(fnode).function.is_extern() {
             // An extern function IS its C symbol: never prefixed, never suffixed.
             self.c_ident(fm, fname, out);
             if !self.tracked_alloc(fm, out, st) {
@@ -2529,10 +2524,11 @@ extend Mangler {
                 out.push_str(bt_name(bb as BuiltinType));
             } else if !self.spec_inst_name(fm, fnode, target, out) {
                 let dn = unsafe (*self.p().module_ast_const(target.module)).at_const(target.node);
-                let mut nm = dn.as_data.aggregate.name;
-                if dn.kind == NodeKind::NODE_TYPE_ALIAS {
-                    nm = dn.as_data.type_alias.name;
-                }
+                let nm = if dn.kind == NodeKind::NODE_TYPE_ALIAS {
+                    dn.as_data.type_alias.name;
+                } else {
+                    unsafe (*self.p().module_ast_const(target.module)).ext_name(target.node);
+                };
                 self.ident(
                     target.module,
                     unsafe (*self.p().module_ast_const(target.module)).at_const(nm).as_data.name.text,
@@ -2545,7 +2541,7 @@ extend Mangler {
         if bare {
             self.lib_escape(out, st);
         }
-        let params = unsafe (*a).at_const(fnode).as_data.function.params;
+        let params = unsafe (*a).ext(fnode).function.params;
         let is_conv = ftxt == "from" || ftxt == "try_from";
         if is_conv && target.node != NODE_NONE && params.len != 0 {
             if self.overload_count(fm, target.module, target.node, fm, fname) < 2 {
@@ -2590,7 +2586,7 @@ extend Mangler {
             return false;
         }
         let a = self.p().module_ast_const(fm);
-        let ed = unsafe (*a).at_const(ext).as_data.extend_def;
+        let ed = unsafe (*a).ext(ext).extend_def;
         let pat = unsafe (*a).type_of(ed.target_type);
         if ed.generics.len != 0 || pat == TYPE_NONE || unsafe (*a).type_at(pat).kind != TypeKind::TYPE_INSTANCE {
             return false;
@@ -2616,7 +2612,7 @@ extend Mangler {
     /// the type it stands for, as every receiver and call does; `node == NODE_NONE` when unresolved.
     pub(package) fn ext_target(self: &Self, m: ModuleId, ext: NodeId) DefId {
         let a = self.p().module_ast_const(m);
-        let tn = unsafe (*a).at_const(ext).as_data.extend_def.target_type;
+        let tn = unsafe (*a).ext(ext).extend_def.target_type;
         if tn == NODE_NONE {
             return DefId { module: m, node: NODE_NONE };
         }
@@ -2682,7 +2678,7 @@ extend Mangler {
             let a = self.p().module_ast_const(m as ModuleId);
             for i in x.mod_exts[m]..x.mod_exts[m + 1] {
                 let e = x.exts[i as usize];
-                let ed = unsafe (*a).at_const(e).as_data.extend_def;
+                let ed = unsafe (*a).ext(e).extend_def;
                 if ed.interface_type == NODE_NONE || !ext_keyed(unsafe &*a, e) {
                     continue;
                 }
@@ -2704,7 +2700,7 @@ extend Mangler {
             let a = self.p().module_ast_const(m as ModuleId);
             for i in x.mod_exts[m]..x.mod_exts[m + 1] {
                 let e = x.exts[i as usize];
-                let ed = unsafe (*a).at_const(e).as_data.extend_def;
+                let ed = unsafe (*a).ext(e).extend_def;
                 if ed.interface_type == NODE_NONE {
                     continue;
                 }
@@ -2726,7 +2722,7 @@ extend Mangler {
     pub(package) fn keyed_sym(self: &mut Self, m: ModuleId, fnode: NodeId, out: &mut String) bool {
         let ext = (self.owner_of(m, fnode) >> 32) as NodeId;
         let a = self.p().module_ast_const(m);
-        let ed = unsafe (*a).at_const(ext).as_data.extend_def;
+        let ed = unsafe (*a).ext(ext).extend_def;
         let pat = unsafe (*a).type_of(ed.target_type);
         if ext_blanket(unsafe &*a, pat, unsafe &*a, m, ext) < 0 {
             let outer = self.pat_params;
@@ -2741,11 +2737,7 @@ extend Mangler {
         }
         self.modpfx(m, out);
         let ia = self.p().module_ast_const(tr.module);
-        self.ident(
-            tr.module,
-            unsafe (*ia).at_const(unsafe (*ia).at_const(tr.node).as_data.interface_def.name).as_data.name.text,
-            out,
-        );
+        self.ident(tr.module, unsafe (*ia).at_const(unsafe (*ia).ext_name(tr.node)).as_data.name.text, out);
         let mut ord: u32 = 0;
         let x = &self.p().idx;
         for i in x.mod_exts[m as usize]..x.mod_exts[m as usize + 1] {
@@ -2753,7 +2745,7 @@ extend Mangler {
             if e == ext {
                 break;
             }
-            let ee = unsafe (*a).at_const(e).as_data.extend_def;
+            let ee = unsafe (*a).ext(e).extend_def;
             let ep = unsafe (*a).type_of(ee.target_type);
             let er = if ee.interface_type != NODE_NONE {
                 unsafe (*a).resolution_def(ee.interface_type);
@@ -2769,7 +2761,7 @@ extend Mangler {
             out.push_str(format("{}", ord).as_str());
         }
         out.push_str("__");
-        self.ident(m, unsafe (*a).at_const(unsafe (*a).at_const(fnode).as_data.function.name).as_data.name.text, out);
+        self.ident(m, unsafe (*a).at_const(unsafe (*a).ext_name(fnode)).as_data.name.text, out);
         return true;
     }
 
@@ -2819,10 +2811,11 @@ extend Mangler {
             // A specialized extend (`extend P<u8>`) names its instance, as its methods do: disjoint
             // extends may each define the constant.
             let dn = unsafe (*self.p().module_ast_const(tgt.module)).at_const(tgt.node);
-            let mut nm = dn.as_data.aggregate.name;
-            if dn.kind == NodeKind::NODE_TYPE_ALIAS {
-                nm = dn.as_data.type_alias.name;
-            }
+            let nm = if dn.kind == NodeKind::NODE_TYPE_ALIAS {
+                dn.as_data.type_alias.name;
+            } else {
+                unsafe (*self.p().module_ast_const(tgt.module)).ext_name(tgt.node);
+            };
             self.ident(tgt.module, unsafe (*self.p().module_ast_const(tgt.module)).at_const(nm).as_data.name.text, out);
         }
         out.push_str("__");
@@ -2859,11 +2852,7 @@ extend Mangler {
     pub(package) fn inst_method(self: &mut Self, md: DefId, out: &mut String) bool {
         out.push_str("__");
         let a = self.p().module_ast_const(md.module);
-        self.ident(
-            md.module,
-            unsafe (*a).at_const(unsafe (*a).at_const(md.node).as_data.function.name).as_data.name.text,
-            out,
-        );
+        self.ident(md.module, unsafe (*a).at_const(unsafe (*a).ext_name(md.node)).as_data.name.text, out);
         let outer = self.pat_params;
         self.pat_params = true;
         let ok = self.iface_suffix(md.module, md.node, out);
@@ -2884,7 +2873,7 @@ extend Mangler {
     ) bool {
         let ea = self.p().module_ast_const(em);
         let esrc = self.p().modules.at(em as usize).source.as_str();
-        let ms = unsafe (*ea).at_const(ext).as_data.extend_def.items;
+        let ms = unsafe (*ea).ext(ext).extend_def.items;
         let mut md = DefId { module: 0, node: NODE_NONE };
         for j in 0..ms.len {
             let mid = unsafe (*ea).list(ms)[j as usize];
@@ -2892,7 +2881,7 @@ extend Mangler {
             if mn.kind != NodeKind::NODE_FUNCTION {
                 continue;
             }
-            let s2 = unsafe (*ea).at_const(mn.as_data.function.name).as_data.name.text;
+            let s2 = unsafe (*ea).at_const(unsafe (*ea).ext_name(mid)).as_data.name.text;
             if esrc.slice(s2.start as usize, s2.end as usize) == mname {
                 md = DefId { module: em, node: mid };
                 break;
@@ -2904,7 +2893,7 @@ extend Mangler {
         self.last_method_def = md;
         let mut it = TyInstance {};
         // A generic extend's method emits per receiver instance; a concrete extend's has its own symbol.
-        if unsafe (*ea).at_const(ext).as_data.extend_def.generics.len != 0 && unsafe (*self.p().module_ast_const(rm)).targs_of(
+        if unsafe (*ea).ext(ext).extend_def.generics.len != 0 && unsafe (*self.p().module_ast_const(rm)).targs_of(
             rt,
             &mut it,
         ) {
@@ -3042,14 +3031,14 @@ extend Mangler {
     fn ext_method(self: &Self, em: ModuleId, ext: NodeId, mname: str) NodeId {
         let da = self.p().module_ast_const(em);
         let src = self.p().modules.at(em as usize).source.as_str();
-        let ms = unsafe (*da).at_const(ext).as_data.extend_def.items;
+        let ms = unsafe (*da).ext(ext).extend_def.items;
         for j in 0..ms.len {
             let mid = unsafe (*da).list(ms)[j as usize];
             let mn = unsafe (*da).at_const(mid);
             if mn.kind != NodeKind::NODE_FUNCTION {
                 continue;
             }
-            let sp = unsafe (*da).at_const(mn.as_data.function.name).as_data.name.text;
+            let sp = unsafe (*da).at_const(unsafe (*da).ext_name(mid)).as_data.name.text;
             if src.slice(sp.start as usize, sp.end as usize) == mname {
                 return mid;
             }
@@ -3090,8 +3079,11 @@ extend Mangler {
             let items = unsafe (*da).at_const((*da).root).as_data.program.items;
             for i in 0..items.len {
                 let iid = unsafe (*da).list(items)[i as usize];
-                let ed = unsafe (*da).at_const(iid).as_data.extend_def;
-                if unsafe (*da).at_const(iid).kind != NodeKind::NODE_EXTEND || ed.interface_type == NODE_NONE {
+                if unsafe (*da).at_const(iid).kind != NodeKind::NODE_EXTEND {
+                    continue;
+                }
+                let ed = unsafe (*da).ext(iid).extend_def;
+                if ed.interface_type == NODE_NONE {
                     continue;
                 }
                 let ir = unsafe (*da).resolution_def(ed.interface_type);
@@ -3108,7 +3100,7 @@ extend Mangler {
                 // (`V<T: Int, N>` is not `V<bool, 2>`'s); only a bound-free one answers every instance.
                 let mut bounded = false;
                 for g in 0..ed.generics.len {
-                    bounded = bounded || unsafe (*da).at_const(unsafe (*da).list(ed.generics)[g as usize]).as_data.generic_param.bounds.len != 0;
+                    bounded = bounded || unsafe (*da).ext(unsafe (*da).list(ed.generics)[g as usize]).generic_param.bounds.len != 0;
                 }
                 if bounded {
                     let mut lp: [DefId; 8] = [[0] = DefId { module: 0, node: NODE_NONE }];
@@ -3139,13 +3131,13 @@ extend Mangler {
     /// through the substitution stack): every argument its target constrains matches (`xarg_of`).
     pub(package) fn ext_applies_inst(self: &mut Self, em: ModuleId, ext: NodeId, rm: ModuleId, it: &TyInstance) bool {
         let ea = self.p().module_ast_const(em);
-        let pat = unsafe (*ea).type_of(unsafe (*ea).at_const(ext).as_data.extend_def.target_type);
+        let pat = unsafe (*ea).type_of(unsafe (*ea).ext(ext).extend_def.target_type);
         if ext_is_identity(unsafe &*ea, pat, unsafe &*ea, em, ext) {
             return true;
         }
         let mut pi = TyInstance {};
         let _ = unsafe (*ea).targs_of(pat, &mut pi);
-        let gens = unsafe (*ea).at_const(ext).as_data.extend_def.generics;
+        let gens = unsafe (*ea).ext(ext).extend_def.generics;
         let np = ext_arity(unsafe &*ea, ext, pi.n);
         if np > it.n {
             return false;
@@ -3203,21 +3195,21 @@ extend Mangler {
         for i in 0..items.len {
             let iid = unsafe (*da).list(items)[i as usize];
             let itn = unsafe (*da).at_const(iid);
-            if itn.kind != NodeKind::NODE_EXTEND || itn.as_data.extend_def.target_type == NODE_NONE {
+            if itn.kind != NodeKind::NODE_EXTEND || unsafe (*da).ext(iid).extend_def.target_type == NODE_NONE {
                 continue;
             }
             let tg = self.ext_target(dm, iid);
             if tg.module != dm || tg.node != dd {
                 continue;
             }
-            let ms = itn.as_data.extend_def.items;
+            let ms = unsafe (*da).ext(iid).extend_def.items;
             for j in 0..ms.len {
                 let mid = unsafe (*da).list(ms)[j as usize];
                 let mn = unsafe (*da).at_const(mid);
                 if mn.kind != NodeKind::NODE_FUNCTION {
                     continue;
                 }
-                let s2 = unsafe (*da).at_const(mn.as_data.function.name).as_data.name.text;
+                let s2 = unsafe (*da).at_const(unsafe (*da).ext_name(mid)).as_data.name.text;
                 if dsrc.slice(s2.start as usize, s2.end as usize) == "free" {
                     *ext = iid;
                     return mid;
@@ -3294,13 +3286,13 @@ extend Mangler {
         let a = self.p().module_ast_const(m);
         let src = self.p().modules.at(m as usize).source.as_str();
         let vs = unsafe (*a).at_const(unsafe (*a).at_const(variant).as_data.variant.name).as_data.name.text;
-        if unsafe (*a).at_const(decl).as_data.aggregate.is_extern {
+        if unsafe (*a).ext(decl).aggregate.is_extern {
             let st = out.len();
             out.push_str(src.slice(vs.start as usize, vs.end as usize));
             x_alias(self.p(), DefId { module: m, node: decl }, out, st);
             return;
         }
-        if self.tn_on && unsafe (*a).at_const(decl).as_data.aggregate.generics.len == 0 {
+        if self.tn_on && unsafe (*a).ext(decl).aggregate.generics.len == 0 {
             // The constant is an enumerator of the enum's definition.
             let h = self.decl_key(m, decl);
             if h != 0 {
@@ -3309,7 +3301,7 @@ extend Mangler {
         }
         let start = out.len();
         self.modpfx(m, out);
-        let es = unsafe (*a).at_const(unsafe (*a).at_const(decl).as_data.aggregate.name).as_data.name.text;
+        let es = unsafe (*a).at_const(unsafe (*a).ext_name(decl)).as_data.name.text;
         let en = src.slice(es.start as usize, es.end as usize);
         out.push_str(en);
         if self.shadows(m) && escaped_stem(en, |w: str| self.shadowed(w)) {
@@ -3322,6 +3314,235 @@ extend Mangler {
             out.push_str("_");
         }
         self.lib_escape(out, start);
+    }
+
+    /// The niche kind (`lay::niche_kind`) of payload enum `(m, decl)` under the substitution stack, with its
+    /// `some` and `none` variants; NK_NONE when the enum keeps its tag.
+    pub(package) fn niche(self: &Self, m: ModuleId, decl: NodeId, some: &mut NodeId, none: &mut NodeId) u8 {
+        let a = unsafe &*self.p().module_ast_const(m);
+        if !a.niche_shape(decl, some, none) {
+            return lay::NK_NONE;
+        }
+        let pty = a.member_ty(unsafe a.list(a.at_const(*some).as_data.variant.payload)[0]);
+        let mut rm = m;
+        let mut rt = TYPE_NONE;
+        if pty == TYPE_NONE || !self.resolve(m, pty, &mut rm, &mut rt) {
+            return lay::NK_NONE;
+        }
+        let ra = unsafe &*self.p().module_ast_const(rm);
+        let k = lay::niche_kind(ra, self.ph_box, rt);
+        if k == lay::NK_BOX {
+            let it = *ra.instance(ra.type_at(rt).as_data.inst);
+            let mut vm = rm;
+            let mut vt = TYPE_NONE;
+            if !self.resolve(rm, it.args[0], &mut vm, &mut vt) || unsafe (*self.p().module_ast_const(vm)).type_at(vt).kind == TypeKind::TYPE_DYN {
+                return lay::NK_NONE;
+            }
+        }
+        return k;
+    }
+
+    /// `niche` for enum type `(rm, rt)`, with its declaration in `dm`/`dn`: an instance's arguments
+    /// bind its declaration's parameters, read in place (no substitution push).
+    pub(package) fn niche_ty(
+        self: &Self,
+        rm: ModuleId,
+        rt: TypeId,
+        dm: &mut ModuleId,
+        dn: &mut NodeId,
+        some: &mut NodeId,
+        none: &mut NodeId,
+    ) u8 {
+        let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
+        let mut it = TyInstance { n: 0 };
+        if y.kind == TypeKind::TYPE_ENUM {
+            *dm = y.module;
+            *dn = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            it = *unsafe (*self.p().module_ast_const(rm)).instance(y.as_data.inst);
+            *dm = it.module;
+            *dn = it.decl;
+        } else {
+            return lay::NK_NONE;
+        }
+        let a = unsafe &*self.p().module_ast_const(*dm);
+        if !a.niche_shape(*dn, some, none) {
+            return lay::NK_NONE;
+        }
+        let mut pm: ModuleId = 0;
+        let mut pt = TYPE_NONE;
+        if !self.inst_arg(
+            *dm,
+            *dn,
+            &it,
+            rm,
+            a.member_ty(unsafe a.list(a.at_const(*some).as_data.variant.payload)[0]),
+            &mut pm,
+            &mut pt,
+        ) {
+            return lay::NK_NONE;
+        }
+        let pa = unsafe &*self.p().module_ast_const(pm);
+        let k = lay::niche_kind(pa, self.ph_box, pt);
+        if k == lay::NK_BOX {
+            let bi = *pa.instance(pa.type_at(pt).as_data.inst);
+            let mut vm: ModuleId = 0;
+            let mut vt = TYPE_NONE;
+            // A box written in the declaration names its parameters; one from an argument is resolved.
+            let ok = if pm == *dm {
+                self.inst_arg(*dm, *dn, &it, rm, bi.args[0], &mut vm, &mut vt);
+            } else {
+                self.resolve(pm, bi.args[0], &mut vm, &mut vt);
+            };
+            if !ok || unsafe (*self.p().module_ast_const(vm)).type_at(vt).kind == TypeKind::TYPE_DYN {
+                return lay::NK_NONE;
+            }
+        }
+        return k;
+    }
+
+    // Member type `t` (pool `dm`) of declaration `(dm, dn)` in its instance `it` (types of `am`;
+    // `it.n` 0: no instance), resolved: a parameter of the declaration reads its argument.
+    fn inst_arg(
+        self: &Self,
+        dm: ModuleId,
+        dn: NodeId,
+        it: &TyInstance,
+        am: ModuleId,
+        t: TypeId,
+        rm: &mut ModuleId,
+        rt: &mut TypeId,
+    ) bool {
+        if t == TYPE_NONE {
+            return false;
+        }
+        let a = unsafe &*self.p().module_ast_const(dm);
+        let y = *a.type_at(t);
+        if y.kind == TypeKind::TYPE_GENERIC && y.module == dm {
+            let gens = a.ext(dn).aggregate.generics;
+            for i in 0..gens.len {
+                if i as u8 >= it.n {
+                    break;
+                }
+                if unsafe a.list(gens)[i as usize] == y.as_data.decl {
+                    return self.resolve(am, unsafe it.args[i as usize], rm, rt);
+                }
+            }
+        }
+        return self.resolve(dm, t, rm, rt);
+    }
+
+    /// Whether a value of `t` (pool `m`) holds a std `Box` in its own bytes under the substitution
+    /// stack: it is one, or a field, tuple member, array element or variant payload holds one by
+    /// value (the checker's `tc_holds_box` for a concrete type). Such a value has no all-zero form.
+    pub(package) fn holds_box(self: &mut Self, m: ModuleId, t: TypeId, depth: u32) bool {
+        let mut rm = m;
+        let mut rt = t;
+        if t == TYPE_NONE || depth > 64 || !self.resolve(m, t, &mut rm, &mut rt) {
+            return false;
+        }
+        let ra = unsafe &*self.p().module_ast_const(rm);
+        let y = *ra.type_at(rt);
+        if y.kind == TypeKind::TYPE_ARRAY {
+            return self.holds_box(rm, y.as_data.arr.elem, depth + 1);
+        }
+        let mut it = TyInstance { n: 0 };
+        let mut dm: ModuleId = 0;
+        let mut dn = NODE_NONE;
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            dm = y.module;
+            dn = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            it = *ra.instance(y.as_data.inst);
+            if it.module == self.ph_box.mid && it.decl == self.ph_box.node {
+                return true;
+            }
+            dm = it.module;
+            dn = it.decl;
+        } else {
+            return false;
+        }
+        let da = unsafe &*self.p().module_ast_const(dm);
+        let n = da.at_const(dn);
+        if n.kind != NodeKind::NODE_STRUCT && n.kind != NodeKind::NODE_ENUM || n.kind == NodeKind::NODE_STRUCT && da.ext(
+            dn,
+        ).aggregate.is_union {
+            return false;
+        }
+        let mut nb: usize = 0;
+        if it.n != 0 {
+            nb = self.push_generics(dm, da.ext(dn).aggregate.generics, rm, &it);
+        }
+        let is_tuple = da.ext(dn).aggregate.is_tuple;
+        let ms = da.ext(dn).aggregate.members;
+        let mut hit = false;
+        for i in 0..ms.len {
+            let mid = unsafe da.list(ms)[i as usize];
+            let mk = da.at_const(mid).kind;
+            if n.kind == NodeKind::NODE_STRUCT && (mk == NodeKind::NODE_FIELD || is_tuple) {
+                hit = hit || self.holds_box(dm, da.member_ty(mid), depth + 1);
+            } else if n.kind == NodeKind::NODE_ENUM && mk == NodeKind::NODE_VARIANT {
+                let pl = da.at_const(mid).as_data.variant.payload;
+                for j in 0..pl.len {
+                    hit = hit || self.holds_box(dm, da.member_ty(unsafe da.list(pl)[j as usize]), depth + 1);
+                }
+            }
+        }
+        self.pop_subs(nb);
+        return hit;
+    }
+
+    /// The C member path from a value of niche enum `(m, decl)` to its niche word, after `sep` (`.` or
+    /// `->`): `payload.<some>.<member>`, then the box's pointer field for NK_BOX.
+    pub(package) fn niche_path(self: &mut Self, m: ModuleId, some: NodeId, kind: u8, sep: str, out: &mut String) {
+        let a = unsafe &*self.p().module_ast_const(m);
+        let vd = a.at_const(some).as_data.variant;
+        out.push_str(sep);
+        out.push_str("payload.");
+        self.ident(m, a.at_const(vd.name).as_data.name.text, out);
+        let pid = unsafe a.list(vd.payload)[0];
+        if vd.struct_payload && a.at_const(pid).kind == NodeKind::NODE_FIELD {
+            out.push_str(".");
+            self.ident(m, a.at_const(a.at_const(pid).as_data.field.name).as_data.name.text, out);
+        } else {
+            out.push_str("._0");
+        }
+        if kind != lay::NK_BOX {
+            return;
+        }
+        let ba = unsafe &*self.p().module_ast_const(self.ph_box.mid);
+        let ms = ba.ext(self.ph_box.node).aggregate.members;
+        for i in 0..ms.len {
+            let fid = unsafe ba.list(ms)[i as usize];
+            if ba.at_const(fid).kind == NodeKind::NODE_FIELD {
+                out.push_str(".");
+                self.field_ident(self.ph_box.mid, fid, out);
+                return;
+            }
+        }
+    }
+
+    /// `(<v><path> != 0 ? <some> : <none>)`: the discriminant of value `v` of niche enum `(m, decl)`
+    /// (`niche` kind `k`; `arrow`: `v` points at the value).
+    pub(package) fn niche_discr(
+        self: &mut Self,
+        m: ModuleId,
+        decl: NodeId,
+        some: NodeId,
+        none: NodeId,
+        k: u8,
+        v: str,
+        arrow: bool,
+        out: &mut String,
+    ) {
+        out.push_str("(");
+        out.push_str(v);
+        self.niche_path(m, some, k, if_s(arrow, "->", "."), out);
+        out.push_str(" != 0 ? ");
+        self.enum_tag(m, decl, some, out);
+        out.push_str(" : ");
+        self.enum_tag(m, decl, none, out);
+        out.push_str(")");
     }
 
     // `<base><sep><decl>` where the separator is empty for an empty or `[`-leading declarator.
@@ -3392,8 +3613,7 @@ extend Mangler {
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             // Base spellings go straight into `out`, then the declarator follows (join_decl with an
             // empty base): no temporary per spelling on this path.
-            let dn = unsafe (*self.p().module_ast_const(y.module)).at_const(y.as_data.decl);
-            if dn.as_data.aggregate.is_extern {
+            if unsafe (*self.p().module_ast_const(y.module)).ext(y.as_data.decl).aggregate.is_extern {
                 // A header struct, union or enum is its C tag (`struct stat`, `enum color`);
                 // `@import("pthread_attr_t")` pins a typedef name.
                 let st = out.len();
@@ -3401,18 +3621,26 @@ extend Mangler {
                     if y.kind == TypeKind::TYPE_ENUM {
                         out.push_str("enum ");
                     } else {
-                        out.push_str(if_s(dn.as_data.aggregate.is_union, "union ", "struct "));
+                        out.push_str(
+                            if_s(
+                                unsafe (*self.p().module_ast_const(y.module)).ext(y.as_data.decl).aggregate.is_union,
+                                "union ",
+                                "struct ",
+                            ),
+                        );
                     }
                     self.c_ident(
                         y.module,
-                        unsafe (*self.p().module_ast_const(y.module)).at_const(dn.as_data.aggregate.name).as_data.name.text,
+                        unsafe (*self.p().module_ast_const(y.module)).at_const(
+                            unsafe (*self.p().module_ast_const(y.module)).ext_name(y.as_data.decl),
+                        ).as_data.name.text,
                         out,
                     );
                 }
                 x_alias(self.p(), DefId { module: y.module, node: y.as_data.decl }, out, st);
             } else {
                 let st = out.len();
-                self.qualified(y.module, dn.as_data.aggregate.name, out);
+                self.qualified(y.module, unsafe (*self.p().module_ast_const(y.module)).ext_name(y.as_data.decl), out);
                 if self.tn_on && !self.no_edges && !self.tn_recent(pm, t, self.ptr_depth == 0, 0) {
                     self.need_name(fnv(out.as_str().slice(st, out.len())), self.ptr_depth == 0);
                 }
@@ -4046,7 +4274,7 @@ extend Mangler {
             return false;
         }
         let da = self.p().module_ast_const(y.module);
-        if unsafe (*da).at_const(y.as_data.decl).as_data.aggregate.is_extern {
+        if unsafe (*da).ext(y.as_data.decl).aggregate.is_extern {
             return false;
         }
         return y.kind == TypeKind::TYPE_STRUCT || unsafe (*da).enum_has_payload(y.as_data.decl);
@@ -4112,7 +4340,7 @@ extend Mangler {
 
     fn inst_name_i(self: &mut Self, pm: ModuleId, it: &TyInstance, out: &mut String) bool {
         let base9 = out.len();
-        let nm = unsafe (*self.p().module_ast_const(it.module)).at_const(it.decl).as_data.aggregate.name;
+        let nm = unsafe (*self.p().module_ast_const(it.module)).ext_name(it.decl);
         self.qualified(it.module, nm, out);
         let mut ne = it.n;
         while ne > 0 {

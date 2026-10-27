@@ -136,7 +136,7 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
     for i in 0..p.simd_table.len() {
         let e = *p.simd_table.at(i);
         let a = unsafe &*p.module_ast_const(e.module);
-        let nm = a.at_const(a.at_const(e.node).as_data.function.name).as_data.name.text;
+        let nm = a.at_const(a.ext_name(e.node)).as_data.name.text;
         h = fnv_mix(fnv_mix(h, e.key), e.fs.w[0] ^ e.fs.w[1] << 1);
         h = fnv_cont(h, p.modules[e.module as usize].source.as_str().slice(nm.start as usize, nm.end as usize));
     }
@@ -163,15 +163,15 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
                 continue;
             }
             h = fnv_mix(h, i as u64 ^ 0xE0);
-            h = fnv_mix(h, (n.as_data.extend_def.interface_type != NODE_NONE) as u64);
-            let tg = a.resolution_def(n.as_data.extend_def.target_type);
+            h = fnv_mix(h, (a.ext(nid).extend_def.interface_type != NODE_NONE) as u64);
+            let tg = a.resolution_def(a.ext(nid).extend_def.target_type);
             h = fnv_mix(h, tg.module);
             if tg.node != NODE_NONE {
                 let da = unsafe &*p.module_ast_const(tg.module);
                 let dn = da.at_const(tg.node);
                 if dn.kind == NodeKind::NODE_STRUCT || dn.kind == NodeKind::NODE_ENUM {
                     {
-                        let sp9 = da.at_const(dn.as_data.aggregate.name).as_data.name.text;
+                        let sp9 = da.at_const(da.ext_name(tg.node)).as_data.name.text;
                         h = fnv_cont(
                             h,
                             p.modules[tg.module as usize].source.as_str().slice(sp9.start as usize, sp9.end as usize),
@@ -182,13 +182,13 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
                     h = fnv_mix(h, tg.node);
                 }
             }
-            let ms = n.as_data.extend_def.items;
+            let ms = a.ext(nid).extend_def.items;
             for j in 0..ms.len {
                 let mid = unsafe a.list(ms)[j as usize];
                 let mn = a.at_const(mid);
                 if mn.kind == NodeKind::NODE_FUNCTION {
                     {
-                        let sp9 = a.at_const(mn.as_data.function.name).as_data.name.text;
+                        let sp9 = a.at_const(a.ext_name(mid)).as_data.name.text;
                         h = fnv_cont(h, p.modules[i].source.as_str().slice(sp9.start as usize, sp9.end as usize));
                     }
                 }

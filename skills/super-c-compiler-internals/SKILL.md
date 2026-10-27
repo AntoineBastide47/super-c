@@ -122,11 +122,18 @@ back on demand (`BodyArena.released`, `Interp.body_missing`); the model, the rel
 and the owned records the later passes read instead are in
 [syntax-ownership.md](references/syntax-ownership.md).
 
-A node's payload is the `NodeAs` union (`src/ast/ast.spc`). Check the node kind before you
-read a member. A wrong-variant read returns heap-dependent bytes: it passed on macOS and
-Linux and failed only on Windows, in LSP completion, constant evaluation and `dyn fn`
-handling. Measure `sizeof(Node)` before you add a field to `FunctionData` or any other
-`NodeAs` member; rare data such as lifetime lists goes to an `Ast` side table.
+A node's payload is the `NodeAs` union (`src/ast/ast.spc`), at most 20 bytes, so a node is 32
+bytes. The kinds with a larger payload (asm, function, struct and enum, interface, extend,
+generic parameter, the three `for` forms, closure: `ext_kind`) keep it in the `ext` table of
+the node's arena (`NodeExt`); the node holds its index and, for a declaration, a copy of its
+name (`ExtRef`). Read the payload with `Ast::ext(id)`, the name with `Ast::ext_name(id)`, write
+with `Ast::ext_mut(id)`, and create such a node with `Ast::add_ext` (the parser's
+`mk_ext`/`fin_ext`). All three panic on a node of another kind: test the kind first, also
+before a `pick`, which evaluates both values. A wrong-variant read of an inline payload returns
+heap-dependent bytes, which passed on macOS and Linux and failed only on Windows, in LSP
+completion, constant evaluation and `dyn fn` handling. Keep every `NodeAs` member at 20 bytes
+or less (`static_assert(sizeof(Node) == 32)`); a larger payload joins `NodeExt`, and rare data
+goes to an `Ast` side table (a type path's associated type bindings: `Ast::type_bindings`).
 
 ### ItemId
 

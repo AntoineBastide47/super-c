@@ -390,6 +390,11 @@ extend<'t> Node<'t> {
         return self.t.ast.at_const(self.t.nodes[self.i as usize]);
     }
 
+    // The payload the node keeps outside itself (`ast::Ast::ext`).
+    fn ast_ext(self: &Self) &'t ast::NodeExt {
+        return self.t.ast.ext(self.t.nodes[self.i as usize]);
+    }
+
     /// What it is.
     pub fn kind(self: &Self) SyntaxKind {
         return kind_of(self.ast_node().kind);
@@ -443,12 +448,12 @@ extend<'t> Node<'t> {
     pub fn name(self: &Self) Option<Node<'t>> {
         let n = self.ast_node();
         let id = switch n.kind {
-            NODE_FUNCTION => n.as_data.function.name,
-            NODE_STRUCT | NODE_ENUM => n.as_data.aggregate.name,
+            NODE_FUNCTION => self.ast_ext().function.name,
+            NODE_STRUCT | NODE_ENUM => self.ast_ext().aggregate.name,
             NODE_PARAMETER => n.as_data.parameter.name,
             NODE_FIELD => n.as_data.field.name,
             NODE_VARIANT => n.as_data.variant.name,
-            NODE_INTERFACE => n.as_data.interface_def.name,
+            NODE_INTERFACE => self.ast_ext().interface_def.name,
             NODE_TYPE_ALIAS => n.as_data.type_alias.name,
             NODE_CONST => n.as_data.const_def.name,
             NODE_LET => n.as_data.let_stmt.name,
@@ -524,22 +529,22 @@ extend<'t> FnSyntax<'t> {
 
     /// The generic parameters, lifetimes first as written.
     pub fn generics(self: &Self) NodeIter<'t> {
-        return self.n.list(self.n.ast_node().as_data.function.generics);
+        return self.n.list(self.n.ast_ext().function.generics);
     }
 
     /// The parameters (`Parameter` nodes; `name()` and `ty()` read them).
     pub fn params(self: &Self) NodeIter<'t> {
-        return self.n.list(self.n.ast_node().as_data.function.params);
+        return self.n.list(self.n.ast_ext().function.params);
     }
 
     /// The result types: none for `void`, several for a result list.
     pub fn returns(self: &Self) NodeIter<'t> {
-        return self.n.list(self.n.ast_node().as_data.function.returns);
+        return self.n.list(self.n.ast_ext().function.returns);
     }
 
     /// The body block; None for a declaration without one.
     pub fn body(self: &Self) Option<Node<'t>> {
-        return self.n.t.view(self.n.ast_node().as_data.function.body);
+        return self.n.t.view(self.n.ast_ext().function.body);
     }
 }
 
@@ -573,11 +578,11 @@ extend<'t> AggregateSyntax<'t> {
 
     /// The fields of a struct or union, the variants of an enum.
     pub fn members(self: &Self) NodeIter<'t> {
-        return self.n.list(self.n.ast_node().as_data.aggregate.members);
+        return self.n.list(self.n.ast_ext().aggregate.members);
     }
 
     pub fn is_union(self: &Self) bool {
-        return self.n.ast_node().as_data.aggregate.is_union;
+        return self.n.ast_ext().aggregate.is_union;
     }
 }
 

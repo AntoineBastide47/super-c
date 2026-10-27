@@ -212,7 +212,7 @@ fn lower_parallel_for(ast: &mut Ast, package: *const loader::Package, id: NodeId
     if f.node == NODE_NONE {
         return;
     }
-    let fr = ast.at_const(id).as_data.for_stmt;
+    let fr = ast.ext(id).for_stmt;
     let span = ast.at_const(id).span;
     let kw = tok::Span::new(span.start, span.start + 8); // the `parallel` keyword's own text
     let call = call_shim(ast, f, kw, fr.iterable, fr.body);

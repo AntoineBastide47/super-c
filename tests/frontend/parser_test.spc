@@ -19,6 +19,13 @@ const fn item(a: &Ast, i: u32) &Node {
     return a.at_const(unsafe ids[i as usize]);
 }
 
+// The payload top-level item `i` keeps outside its node (`Ast::ext`).
+const fn item_ext(a: &Ast, i: u32) &NodeExt {
+    let items = a.at_const(a.root).as_data.program.items;
+    let ids = a.list(items);
+    return a.ext(unsafe ids[i as usize]);
+}
+
 @test
 fn items_and_types() {
     let src = "struct Pair<T> { left: T, right: T, }\nenum Result<T, E> { Ok(T), Err { error: E }, }\ntype Callback = fn(*const u8, []u8, [u8; 16]) (int, Error);\nconst LIMIT: usize = 16;\nextern \"C\" { type CFile; fn fclose(file: *mut CFile) int; }\n";
@@ -49,14 +56,14 @@ fn associated_new_name() {
     let c = h::parse_ast(src);
     assert(c.errors == 0, "associated new name parses");
     assert(item(&c.ast, 1).kind == NodeKind::NODE_EXTEND, "associated new name: item 1 should be an extension");
-    let ext_items = item(&c.ast, 1).as_data.extend_def.items;
+    let ext_items = item_ext(&c.ast, 1).extend_def.items;
     let ids = c.ast.list(ext_items);
     let method_id = unsafe ids[0];
     assert(
         c.ast.at_const(method_id).kind == NodeKind::NODE_FUNCTION,
         "associated new name: extension item should be a function",
     );
-    let name_id = c.ast.at_const(method_id).as_data.function.name;
+    let name_id = c.ast.ext(method_id).function.name;
     assert(
         h::ident_is(&c.ast, src.ptr() as *const char, name_id, "new".ptr() as *const char),
         "associated new name: method should be named new",
@@ -69,14 +76,14 @@ fn functions_and_expressions() {
     let c = h::parse_ast(src);
     assert(c.errors == 0, "functions and expressions parses");
     assert(item(&c.ast, 0).kind == NodeKind::NODE_FUNCTION, "functions and expressions: expected function");
-    assert(item(&c.ast, 0).as_data.function.generics.len == 1, "functions and expressions: expected one generic");
-    assert(item(&c.ast, 0).as_data.function.params.len == 2, "functions and expressions: expected two parameters");
-    assert(item(&c.ast, 0).as_data.function.returns.len == 1, "functions and expressions: expected one return");
+    assert(item_ext(&c.ast, 0).function.generics.len == 1, "functions and expressions: expected one generic");
+    assert(item_ext(&c.ast, 0).function.params.len == 2, "functions and expressions: expected two parameters");
+    assert(item_ext(&c.ast, 0).function.returns.len == 1, "functions and expressions: expected one return");
     assert(
-        item(&c.ast, 0).as_data.function.where_clause.len == 1,
+        item_ext(&c.ast, 0).function.where_clause.len == 1,
         "functions and expressions: expected one where predicate",
     );
-    let body_id = item(&c.ast, 0).as_data.function.body;
+    let body_id = item_ext(&c.ast, 0).function.body;
     assert(c.ast.at_const(body_id).kind == NodeKind::NODE_BLOCK, "functions and expressions: expected function block");
     assert(
         c.ast.at_const(body_id).as_data.block.statements.len == 6,
@@ -105,9 +112,9 @@ fn unsafe_extend() {
     let c = h::parse_ast(src);
     assert(c.errors == 0, "unsafe extend parses");
     assert(item(&c.ast, 0).kind == NodeKind::NODE_EXTEND, "expected an extend");
-    assert(item(&c.ast, 0).as_data.extend_def.is_unsafe, "expected the extend to be marked unsafe");
-    assert(!item(&c.ast, 1).as_data.extend_def.is_unsafe, "a plain extend stays unmarked");
-    assert(item(&c.ast, 2).as_data.function.is_unsafe(), "unsafe fn still parses after the new branch");
+    assert(item_ext(&c.ast, 0).extend_def.is_unsafe, "expected the extend to be marked unsafe");
+    assert(!item_ext(&c.ast, 1).extend_def.is_unsafe, "a plain extend stays unmarked");
+    assert(item_ext(&c.ast, 2).function.is_unsafe(), "unsafe fn still parses after the new branch");
     let bad = h::parse_ast("unsafe struct S {}\n");
     assert(bad.errors > 0, "unsafe on a non-fn, non-extend item is rejected");
 }
@@ -120,24 +127,12 @@ fn grouped_parameters_and_returns() {
     let root = c.ast.root;
     assert(c.ast.at_const(root).as_data.program.items.len == 5, "grouped parameters and returns: expected 5 functions");
 
-    assert(
-        item(&c.ast, 0).as_data.function.params.len == 4,
-        "grouped parameters and returns: expected 4 slice parameters",
-    );
-    assert(
-        item(&c.ast, 0).as_data.function.returns.len == 1,
-        "grouped parameters and returns: expected one slice return",
-    );
+    assert(item_ext(&c.ast, 0).function.params.len == 4, "grouped parameters and returns: expected 4 slice parameters");
+    assert(item_ext(&c.ast, 0).function.returns.len == 1, "grouped parameters and returns: expected one slice return");
 
-    assert(
-        item(&c.ast, 1).as_data.function.params.len == 2,
-        "grouped parameters and returns: expected 2 divmod parameters",
-    );
-    assert(
-        item(&c.ast, 1).as_data.function.returns.len == 2,
-        "grouped parameters and returns: expected 2 divmod returns",
-    );
-    let divmod_body_id = item(&c.ast, 1).as_data.function.body;
+    assert(item_ext(&c.ast, 1).function.params.len == 2, "grouped parameters and returns: expected 2 divmod parameters");
+    assert(item_ext(&c.ast, 1).function.returns.len == 2, "grouped parameters and returns: expected 2 divmod returns");
+    let divmod_body_id = item_ext(&c.ast, 1).function.body;
     let dbstmts = c.ast.at_const(divmod_body_id).as_data.block.statements;
     let dstmts = c.ast.list(dbstmts);
     let ret_id = unsafe dstmts[0];
@@ -150,20 +145,17 @@ fn grouped_parameters_and_returns() {
         "grouped parameters and returns: expected 2 return values",
     );
 
-    assert(
-        item(&c.ast, 2).as_data.function.returns.len == 2,
-        "grouped parameters and returns: expected 2 named returns",
-    );
-    let open_rets = item(&c.ast, 2).as_data.function.returns;
+    assert(item_ext(&c.ast, 2).function.returns.len == 2, "grouped parameters and returns: expected 2 named returns");
+    let open_rets = item_ext(&c.ast, 2).function.returns;
     let open_returns = c.ast.list(open_rets);
     let or0 = unsafe open_returns[0];
     let or1 = unsafe open_returns[1];
     assert(c.ast.at_const(or0).kind == NodeKind::NODE_PARAMETER, "expected named return parameter");
     assert(c.ast.at_const(or1).kind == NodeKind::NODE_PARAMETER, "expected named return parameter");
 
-    assert(item(&c.ast, 3).as_data.function.returns.len == 0, "grouped parameters and returns: expected no log return");
+    assert(item_ext(&c.ast, 3).function.returns.len == 0, "grouped parameters and returns: expected no log return");
 
-    let risky_body_id = item(&c.ast, 4).as_data.function.body;
+    let risky_body_id = item_ext(&c.ast, 4).function.body;
     assert(
         c.ast.at_const(risky_body_id).as_data.block.statements.len == 2,
         "grouped parameters and returns: expected 2 unsafe statements",
@@ -176,7 +168,7 @@ fn precedence() {
     {
         let c = h::parse_ast("fn f() i32 { return 1 + 2 * 3; }\n");
         assert(c.errors == 0, "precedence parses");
-        let body_id = item(&c.ast, 0).as_data.function.body;
+        let body_id = item_ext(&c.ast, 0).function.body;
         let bstmts = c.ast.at_const(body_id).as_data.block.statements;
         let stmts = c.ast.list(bstmts);
         let ret_id = unsafe stmts[0];
@@ -195,7 +187,7 @@ fn precedence() {
     {
         let c = h::parse_ast("fn f() i32 { return 1 - 2 - 3; }\n");
         assert(c.errors == 0, "associativity parses");
-        let body_id = item(&c.ast, 0).as_data.function.body;
+        let body_id = item_ext(&c.ast, 0).function.body;
         let bstmts = c.ast.at_const(body_id).as_data.block.statements;
         let stmts = c.ast.list(bstmts);
         let ret_id = unsafe stmts[0];
@@ -245,7 +237,10 @@ fn bare_instance_constant_argument() {
         "its qualifier is the written instance",
     );
     let w = c.ast.at_const(unsafe c.ast.list(tp.args)[1]);
-    assert(w.kind == NodeKind::NODE_TYPE_PATH && w.as_data.type_path.args.len == 1, "W<u8> stays a type");
+    assert(
+        w.kind == NodeKind::NODE_TYPE_PATH && c.ast.at_const(unsafe c.ast.list(tp.args)[1]).as_data.type_path.args.len == 1,
+        "W<u8> stays a type",
+    );
     assert(h::parse_has_error("type A = F<W::<u8>>;\n"), "a turbofish needs the constant's name after it");
 }
 
@@ -386,8 +381,8 @@ fn closures() {
         let let_id = h::nth_kind(&c.ast, NodeKind::NODE_LET, 0);
         let clo_id = c.ast.at_const(let_id).as_data.let_stmt.value;
         assert(c.ast.at_const(clo_id).kind == NodeKind::NODE_CLOSURE, "`|x| e` parses to a closure");
-        assert(c.ast.at_const(clo_id).as_data.closure.expr_body, "compact closure has an expression body");
-        assert(c.ast.at_const(clo_id).as_data.closure.params.len == 1, "the closure has one parameter");
+        assert(c.ast.ext(clo_id).closure.expr_body, "compact closure has an expression body");
+        assert(c.ast.ext(clo_id).closure.params.len == 1, "the closure has one parameter");
     }
     // Anonymous `fn(..) Ret { .. }` -> a NODE_CLOSURE with a block body and an explicit return type.
     {
@@ -396,8 +391,8 @@ fn closures() {
         let let_id = h::nth_kind(&c.ast, NodeKind::NODE_LET, 0);
         let clo_id = c.ast.at_const(let_id).as_data.let_stmt.value;
         assert(c.ast.at_const(clo_id).kind == NodeKind::NODE_CLOSURE, "`fn(..) .. {}` parses to a closure");
-        assert(!c.ast.at_const(clo_id).as_data.closure.expr_body, "anonymous fn has a block body");
-        assert(c.ast.at_const(clo_id).as_data.closure.returns.len == 1, "anonymous fn keeps its explicit return type");
+        assert(!c.ast.ext(clo_id).closure.expr_body, "anonymous fn has a block body");
+        assert(c.ast.ext(clo_id).closure.returns.len == 1, "anonymous fn keeps its explicit return type");
     }
     // Infix `|` is still bitwise-or, not a closure.
     {
@@ -411,7 +406,7 @@ fn closures() {
         let c = h::parse_ast("fn apply<F: fn(i32) i32 + Eq>(x: i32, f: F) i32 { return f(x); }\n");
         assert(c.errors == 0, "fn-type bound parses");
         let gp_id = h::nth_kind(&c.ast, NodeKind::NODE_GENERIC_PARAM, 0);
-        let bounds = c.ast.at_const(gp_id).as_data.generic_param.bounds;
+        let bounds = c.ast.ext(gp_id).generic_param.bounds;
         assert(bounds.len == 2, "both bounds collected");
         let bids = c.ast.list(bounds);
         let b0 = unsafe bids[0];
@@ -439,7 +434,7 @@ fn closures() {
         let c = h::parse_ast("fn run<F: fn move(i32) i32>(x: i32, f: F) i32 { return f(x); }\n");
         assert(c.errors == 0, "fn move bound parses");
         let gp_id = h::nth_kind(&c.ast, NodeKind::NODE_GENERIC_PARAM, 0);
-        let gbounds = c.ast.at_const(gp_id).as_data.generic_param.bounds;
+        let gbounds = c.ast.ext(gp_id).generic_param.bounds;
         let gbids = c.ast.list(gbounds);
         let gb0 = unsafe gbids[0];
         assert(
@@ -493,7 +488,7 @@ fn bare_conditions_and_ranges() {
     let src = "fn f() {\n  if x { }\n  while y { }\n  for i in 0..10 { }\n  for i in 1..=5 { }\n  for i in ..4 { }\n  for i in 6.. { }\n}\n";
     let c = h::parse_ast(src);
     assert(c.errors == 0, "bare conditions and ranges parses");
-    let body_id = item(&c.ast, 0).as_data.function.body;
+    let body_id = item_ext(&c.ast, 0).function.body;
     let bstmts = c.ast.at_const(body_id).as_data.block.statements;
     let stmts = c.ast.list(bstmts);
     assert(bstmts.len == 6, "bare conditions: expected 6 statements");
@@ -503,7 +498,7 @@ fn bare_conditions_and_ranges() {
     assert(c.ast.at_const(s1).kind == NodeKind::NODE_WHILE, "bare 'while' parses to NODE_WHILE");
 
     let s2 = unsafe stmts[2];
-    let it2 = c.ast.at_const(s2).as_data.for_stmt.iterable;
+    let it2 = c.ast.ext(s2).for_stmt.iterable;
     assert(c.ast.at_const(it2).kind == NodeKind::NODE_RANGE, "0..10 iterable is NODE_RANGE");
     assert(
         c.ast.at_const(it2).as_data.pattern_range.start != NODE_NONE && c.ast.at_const(it2).as_data.pattern_range.end != NODE_NONE && !c.ast.at_const(
@@ -512,16 +507,16 @@ fn bare_conditions_and_ranges() {
         "0..10 is an exclusive range with both bounds",
     );
     let s3 = unsafe stmts[3];
-    let it3 = c.ast.at_const(s3).as_data.for_stmt.iterable;
+    let it3 = c.ast.ext(s3).for_stmt.iterable;
     assert(c.ast.at_const(it3).as_data.pattern_range.inclusive, "1..=5 is inclusive");
     let s4 = unsafe stmts[4];
-    let it4 = c.ast.at_const(s4).as_data.for_stmt.iterable;
+    let it4 = c.ast.ext(s4).for_stmt.iterable;
     assert(
         c.ast.at_const(it4).as_data.pattern_range.start == NODE_NONE && c.ast.at_const(it4).as_data.pattern_range.end != NODE_NONE,
         "..4 has no start",
     );
     let s5 = unsafe stmts[5];
-    let it5 = c.ast.at_const(s5).as_data.for_stmt.iterable;
+    let it5 = c.ast.ext(s5).for_stmt.iterable;
     assert(
         c.ast.at_const(it5).as_data.pattern_range.start != NODE_NONE && c.ast.at_const(it5).as_data.pattern_range.end == NODE_NONE,
         "6.. has no end",
@@ -536,7 +531,7 @@ fn bare_conditions_and_ranges() {
 fn question_operator_parse() {
     let c = h::parse_ast("fn f() { let x = g()?; }\n");
     assert(c.errors == 0, "question operator parses");
-    let body_id = item(&c.ast, 0).as_data.function.body;
+    let body_id = item_ext(&c.ast, 0).function.body;
     let bstmts = c.ast.at_const(body_id).as_data.block.statements;
     let stmts = c.ast.list(bstmts);
     let let_id = unsafe stmts[0];
@@ -555,7 +550,7 @@ fn range_value_expression() {
     let src = "fn f() {\n  let a = 1..5;\n  let b = 0..=9;\n}\n";
     let c = h::parse_ast(src);
     assert(c.errors == 0, "range value expression parses");
-    let body_id = item(&c.ast, 0).as_data.function.body;
+    let body_id = item_ext(&c.ast, 0).function.body;
     let bstmts = c.ast.at_const(body_id).as_data.block.statements;
     let stmts = c.ast.list(bstmts);
     let s0 = unsafe stmts[0];
@@ -580,7 +575,7 @@ fn switch_pattern_ranges() {
     let src = "fn f(n: i32) i32 {\n  return switch n {\n    10..20 => 1,\n    20..=30 => 2,\n    ..5 => 3,\n    99.. => 4,\n    _ => 0,\n  };\n}\n";
     let c = h::parse_ast(src);
     assert(c.errors == 0, "switch pattern ranges parses");
-    let body_id = item(&c.ast, 0).as_data.function.body;
+    let body_id = item_ext(&c.ast, 0).function.body;
     let bstmts = c.ast.at_const(body_id).as_data.block.statements;
     let bs = c.ast.list(bstmts);
     let ret_id = unsafe bs[0];
@@ -637,29 +632,29 @@ fn pub_modifiers() {
     let c = h::parse_ast(src);
     assert(c.errors == 0, "pub modifiers parses");
     assert(
-        item(&c.ast, 0).kind == NodeKind::NODE_STRUCT && item(&c.ast, 0).as_data.aggregate.vis == VIS_PUB,
+        item(&c.ast, 0).kind == NodeKind::NODE_STRUCT && item_ext(&c.ast, 0).aggregate.vis == VIS_PUB,
         "pub struct is public",
     );
-    let members = item(&c.ast, 0).as_data.aggregate.members;
+    let members = item_ext(&c.ast, 0).aggregate.members;
     let fields = c.ast.list(members);
     let f0 = unsafe fields[0];
     let f1 = unsafe fields[1];
     assert(c.ast.at_const(f0).as_data.field.vis == VIS_PUB, "pub field x is public");
     assert(c.ast.at_const(f1).as_data.field.vis == VIS_PRIVATE, "non-pub field y is private");
-    let ext_items = item(&c.ast, 1).as_data.extend_def.items;
+    let ext_items = item_ext(&c.ast, 1).extend_def.items;
     let methods = c.ast.list(ext_items);
     let m0 = unsafe methods[0];
     let m1 = unsafe methods[1];
-    assert(c.ast.at_const(m0).as_data.function.vis == VIS_PUB, "pub method is public");
-    assert(c.ast.at_const(m1).as_data.function.vis == VIS_PRIVATE, "non-pub method is private");
-    assert(item(&c.ast, 2).as_data.function.vis == VIS_PUB, "pub fn is public");
-    assert(item(&c.ast, 3).as_data.function.vis == VIS_PRIVATE, "non-pub fn is private");
+    assert(c.ast.ext(m0).function.vis == VIS_PUB, "pub method is public");
+    assert(c.ast.ext(m1).function.vis == VIS_PRIVATE, "non-pub method is private");
+    assert(item_ext(&c.ast, 2).function.vis == VIS_PUB, "pub fn is public");
+    assert(item_ext(&c.ast, 3).function.vis == VIS_PRIVATE, "non-pub fn is private");
     assert(
-        item(&c.ast, 4).kind == NodeKind::NODE_ENUM && item(&c.ast, 4).as_data.aggregate.vis == VIS_PUB,
+        item(&c.ast, 4).kind == NodeKind::NODE_ENUM && item_ext(&c.ast, 4).aggregate.vis == VIS_PUB,
         "pub enum is public",
     );
     assert(
-        item(&c.ast, 5).kind == NodeKind::NODE_ENUM && item(&c.ast, 5).as_data.aggregate.vis == VIS_PRIVATE,
+        item(&c.ast, 5).kind == NodeKind::NODE_ENUM && item_ext(&c.ast, 5).aggregate.vis == VIS_PRIVATE,
         "non-pub enum is private",
     );
     assert(
@@ -687,14 +682,14 @@ fn visibility_levels() {
     let src = "pub(module) struct S { pub(file) a: i32, pub(package) b: i32 }\npub(package) fn f() {}\npub(module) const K: i32 = 1;\npub(package) type T = i32;\npub(module) interface I {}\n";
     let c = h::parse_ast(src);
     assert(c.errors == 0, "visibility levels parse");
-    assert(item(&c.ast, 0).as_data.aggregate.vis == VIS_MODULE, "pub(module) struct");
-    let fields = c.ast.list(item(&c.ast, 0).as_data.aggregate.members);
+    assert(item_ext(&c.ast, 0).aggregate.vis == VIS_MODULE, "pub(module) struct");
+    let fields = c.ast.list(item_ext(&c.ast, 0).aggregate.members);
     assert(c.ast.at_const(unsafe fields[0]).as_data.field.vis == VIS_FILE, "pub(file) field");
     assert(c.ast.at_const(unsafe fields[1]).as_data.field.vis == VIS_PACKAGE, "pub(package) field");
-    assert(item(&c.ast, 1).as_data.function.vis == VIS_PACKAGE, "pub(package) fn");
+    assert(item_ext(&c.ast, 1).function.vis == VIS_PACKAGE, "pub(package) fn");
     assert(item(&c.ast, 2).as_data.const_def.vis == VIS_MODULE, "pub(module) const");
     assert(item(&c.ast, 3).as_data.type_alias.vis == VIS_PACKAGE, "pub(package) type");
-    assert(item(&c.ast, 4).as_data.interface_def.vis == VIS_MODULE, "pub(module) interface");
+    assert(item_ext(&c.ast, 4).interface_def.vis == VIS_MODULE, "pub(module) interface");
     assert(h::parse_has_error("pub(file) fn f() {}\n"), "pub(file) on an item is rejected");
     // A tuple type after `pub` is no modifier.
     let t = h::parse_ast("struct W { pub x: (i32, i32) }\n");
@@ -709,9 +704,9 @@ fn unions() {
         let c = h::parse_ast("pub union Bits { pub i: u32, bytes: [u8; 4], }\n");
         assert(c.errors == 0, "union decl parses");
         assert(item(&c.ast, 0).kind == NodeKind::NODE_STRUCT, "union parses as a NODE_STRUCT");
-        assert(item(&c.ast, 0).as_data.aggregate.is_union, "union is flagged is_union");
-        assert(item(&c.ast, 0).as_data.aggregate.vis == VIS_PUB, "pub union is public");
-        let members = item(&c.ast, 0).as_data.aggregate.members;
+        assert(item_ext(&c.ast, 0).aggregate.is_union, "union is flagged is_union");
+        assert(item_ext(&c.ast, 0).aggregate.vis == VIS_PUB, "pub union is public");
+        let members = item_ext(&c.ast, 0).aggregate.members;
         let fields = c.ast.list(members);
         let f0 = unsafe fields[0];
         let f1 = unsafe fields[1];
@@ -722,7 +717,7 @@ fn unions() {
     {
         let c = h::parse_ast("struct S { x: i32, }\n");
         assert(c.errors == 0, "struct not union parses");
-        assert(!item(&c.ast, 0).as_data.aggregate.is_union, "a struct is not is_union");
+        assert(!item_ext(&c.ast, 0).aggregate.is_union, "a struct is not is_union");
     }
 }
 
@@ -999,11 +994,11 @@ fn derive_attribute() {
     assert(item(&c.ast, 0).kind == NodeKind::NODE_EXTEND, "first synthesized extend");
     assert(item(&c.ast, 1).kind == NodeKind::NODE_EXTEND, "second synthesized extend");
     assert(item(&c.ast, 2).kind == NodeKind::NODE_STRUCT, "declaration follows its conformances");
-    assert(item(&c.ast, 0).as_data.extend_def.items.len == 0, "synthesized conformance is empty");
+    assert(item_ext(&c.ast, 0).extend_def.items.len == 0, "synthesized conformance is empty");
     {
         let g = h::parse_ast("@derive(Pretty)\nstruct Pair<A: Format, B> { a: A, b: B, }\n");
         assert(g.errors == 0, "@derive on a generic struct parses");
-        assert(item(&g.ast, 0).as_data.extend_def.generics.len == 2, "extend inherits both type parameters");
+        assert(item_ext(&g.ast, 0).extend_def.generics.len == 2, "extend inherits both type parameters");
     }
     assert(h::parse_has_error("@derive(Format)\nfn m() {}\n"), "@derive on a fn rejected");
     assert(h::parse_has_error("@derive()\nstruct S { x: i32, }\n"), "empty @derive list rejected");
@@ -1072,8 +1067,8 @@ fn bug_regressions() {
         let mut parts: u32 = 0;
         for n in 0..c.ast.nnodes() {
             let nd = c.ast.at_const(c.ast.nth_id(n));
-            if nd.kind == NodeKind::NODE_TYPE_PATH && nd.as_data.type_path.parts.len > parts {
-                parts = nd.as_data.type_path.parts.len;
+            if nd.kind == NodeKind::NODE_TYPE_PATH && c.ast.at_const(c.ast.nth_id(n)).as_data.type_path.parts.len > parts {
+                parts = c.ast.at_const(c.ast.nth_id(n)).as_data.type_path.parts.len;
             }
         }
         assert_eq(parts, 18);
@@ -1140,12 +1135,11 @@ fn lifetimes() {
     assert(c.ast.at_const(c.ast.root).as_data.program.items.len == 4, "lifetimes: expected 4 items");
 
     // Struct Ref<'a>: the lifetime lands in `lifetimes`, NOT in `generics`.
-    let agg = item(&c.ast, 0).as_data.aggregate;
+    let agg = item_ext(&c.ast, 0).aggregate;
     let agg_lts = c.ast.lifetimes_of(item_id(&c.ast, 0));
     assert(agg_lts.len == 1, "struct lifetime param recorded");
     assert(agg.generics.len == 0, "struct lifetime is NOT a generic param (erasure is structural)");
-    let ltp = c.ast.at_const(unsafe c.ast.list(agg_lts)[0]);
-    assert(ltp.as_data.generic_param.is_lifetime, "param flagged is_lifetime");
+    assert(c.ast.ext(unsafe c.ast.list(agg_lts)[0]).generic_param.is_lifetime, "param flagged is_lifetime");
 
     // The field's `&'a i32` carries the annotation on the reference type node.
     let fields = agg.members;
@@ -1154,21 +1148,20 @@ fn lifetimes() {
     assert(c.ast.at_const(fty).as_data.indirect_type.lifetime != NODE_NONE, "&'a T records its lifetime");
 
     // fn borrow<'a>(..) -> &'a i32
-    let f1 = item(&c.ast, 1).as_data.function;
+    let f1 = item_ext(&c.ast, 1).function;
     assert(c.ast.lifetimes_of(item_id(&c.ast, 1)).len == 1, "fn lifetime param recorded");
     assert(f1.generics.len == 0, "fn lifetime is not a generic param");
 
     // fn two<'a, 'b: 'a, T>: two lifetimes (one with an outlives bound) + one real type param
-    let f2 = item(&c.ast, 2).as_data.function;
+    let f2 = item_ext(&c.ast, 2).function;
     let f2_lts = c.ast.lifetimes_of(item_id(&c.ast, 2));
     assert(f2_lts.len == 2, "two lifetime params");
     assert(f2.generics.len == 1, "T stays the only generic param");
-    let lt_b = c.ast.at_const(unsafe c.ast.list(f2_lts)[1]);
-    assert(lt_b.as_data.generic_param.bounds.len == 1, "'b: 'a outlives bound recorded");
+    assert(c.ast.ext(unsafe c.ast.list(f2_lts)[1]).generic_param.bounds.len == 1, "'b: 'a outlives bound recorded");
     assert(f2.where_clause.len == 1, "where T: 'a recorded");
 
     // An elided reference keeps lifetime == NODE_NONE.
-    let f3 = item(&c.ast, 3).as_data.function;
+    let f3 = item_ext(&c.ast, 3).function;
     let p0 = c.ast.at_const(unsafe c.ast.list(f3.params)[0]).as_data.parameter.ty;
     assert(c.ast.at_const(p0).as_data.indirect_type.lifetime == NODE_NONE, "elided reference has no lifetime");
 
@@ -1188,7 +1181,7 @@ fn lifetimes() {
 fn slice_lifetimes() {
     let c = h::parse_ast("fn f<'a>(x: []'a u8, y: []'a mut u8, z: []u8) []'static str<'static> { return z; }\n");
     assert(c.errors == 0, "slice lifetimes parse");
-    let fnd = item(&c.ast, 0).as_data.function;
+    let fnd = item_ext(&c.ast, 0).function;
     let x = c.ast.at_const(c.ast.at_const(unsafe c.ast.list(fnd.params)[0]).as_data.parameter.ty);
     assert(x.kind == NodeKind::NODE_SLICE_TYPE, "`[]'a T` is a slice type");
     assert(x.as_data.indirect_type.lifetime != NODE_NONE, "`[]'a T` records its lifetime");
@@ -1211,16 +1204,16 @@ fn hrtb_and_gat() {
     assert(c.errors == 0, "for<'a> and type Item<'a> parse");
 
     // The bound's lifetimes hang off the BOUND node, not the enclosing function.
-    let fnd = item(&c.ast, 0).as_data.function;
-    let gp = c.ast.at_const(unsafe c.ast.list(fnd.generics)[0]).as_data.generic_param;
+    let fnd = item_ext(&c.ast, 0).function;
+    let gp = c.ast.ext(unsafe c.ast.list(fnd.generics)[0]).generic_param;
     let bound = unsafe c.ast.list(gp.bounds)[0];
     let hr = c.ast.lifetimes_of(bound);
     assert(hr.len == 1, "higher-ranked lifetime recorded on the bound");
-    assert(c.ast.at_const(unsafe c.ast.list(hr)[0]).as_data.generic_param.is_lifetime, "hrtb param flagged is_lifetime");
+    assert(c.ast.ext(unsafe c.ast.list(hr)[0]).generic_param.is_lifetime, "hrtb param flagged is_lifetime");
     assert(c.ast.lifetimes_of(item_id(&c.ast, 0)).len == 0, "the function itself declares no lifetime");
 
     // The associated type carries its own lifetime param.
-    let items = item(&c.ast, 1).as_data.interface_def.items;
+    let items = item_ext(&c.ast, 1).interface_def.items;
     let assoc = unsafe c.ast.list(items)[0];
     assert(c.ast.at_const(assoc).kind == NodeKind::NODE_TYPE_ALIAS, "assoc type is a type alias");
     assert(c.ast.lifetimes_of(assoc).len == 1, "GAT lifetime param recorded");

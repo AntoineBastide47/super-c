@@ -406,15 +406,15 @@ fn member_count(ow: &bf::Owner, mid: ModuleId, ty: TypeId) i64 {
     }
     let oa = ow.ast_of(om);
     let dn = *oa.at_const(od);
-    if dn.kind != NodeKind::NODE_STRUCT || dn.as_data.aggregate.is_union {
+    if dn.kind != NodeKind::NODE_STRUCT || oa.ext(od).aggregate.is_union {
         return 0 - 1;
     }
-    if dn.as_data.aggregate.is_tuple {
-        return dn.as_data.aggregate.members.len;
+    if oa.ext(od).aggregate.is_tuple {
+        return oa.ext(od).aggregate.members.len;
     }
     let mut n: i64 = 0;
-    for i in 0..dn.as_data.aggregate.members.len {
-        if oa.at_const(unsafe oa.list(dn.as_data.aggregate.members)[i as usize]).kind == NodeKind::NODE_FIELD {
+    for i in 0..oa.ext(od).aggregate.members.len {
+        if oa.at_const(unsafe oa.list(oa.ext(od).aggregate.members)[i as usize]).kind == NodeKind::NODE_FIELD {
             n += 1;
         }
     }
@@ -1042,7 +1042,7 @@ pub(package) fn verify_drops(ow: &mut bf::Owner, b: &ir::CoreBody) str<'static> 
     let mut cap_hi: u32 = 0;
     let oa = unsafe &*(&*ow.pkg).module_ast_const(b.owner.module);
     if b.owner.node != NODE_NONE && oa.at_const(b.owner.node).kind == NodeKind::NODE_CLOSURE {
-        cap_lo = b.returns + oa.at_const(b.owner.node).as_data.closure.params.len;
+        cap_lo = b.returns + oa.ext(b.owner.node).closure.params.len;
         cap_hi = b.returns + b.args;
     }
     let mut tracked = Vector::<bool>::new();

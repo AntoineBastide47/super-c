@@ -523,6 +523,13 @@ result list returns one carrier struct (`__sc_ret<n>__<types>`, `__sc_reta__<arr
 ## Enums
 
 Payload-less enums lower to C `enum`. Payload-bearing enums lower to tagged unions.
+
+A niche enum keeps its discriminant in its payload and has no tag: an enum of exactly two
+variants without explicit discriminants, one without payload and one with a single payload
+that is a reference (`&T`, `&mut T`) or a std `Box` of a value that is not `dyn`, neither of
+which is ever null. A null pointer in the payload is the variant without payload, so
+`Option<&T>` and `Option<Box<T>>` are the size of a pointer, and the all-zero value is that
+variant. A function pointer is no niche: C may pass a null one.
 A payload-less variant may take an explicit discriminant, a constant expression that may
 name constants and other enums' variants; a variant without one takes the previous
 discriminant plus one. The discriminant is the tag in memory and in the C tag enum, and

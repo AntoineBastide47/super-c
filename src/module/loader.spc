@@ -845,7 +845,7 @@ const CO_NO_SITE: u64 = 0xFFFFFFFFFFFFFFFFu64;
 
 // The name of function `n`, as written.
 const fn fn_name<'s>(a: &Ast, src: str<'s>, n: NodeId) str<'s> {
-    let sp = a.at_const(a.at_const(n).as_data.function.name).as_data.name.text;
+    let sp = a.at_const(a.ext_name(n)).as_data.name.text;
     return src.slice(sp.start as usize, sp.end as usize);
 }
 
@@ -878,9 +878,9 @@ fn named_decl(a: &Ast, n: NodeId) DefId {
 fn param_index(a: &Ast, d: NodeId, p: NodeId) i64 {
     let dn = a.at_const(d);
     let ps = if dn.kind == NodeKind::NODE_FUNCTION {
-        dn.as_data.function.params;
+        a.ext(d).function.params;
     } else {
-        dn.as_data.closure.params;
+        a.ext(d).closure.params;
     };
     for i in 0..ps.len {
         if unsafe a.list(ps)[i as usize] == p {
@@ -987,7 +987,7 @@ fn fn_bounded(a: &Ast, gm: ModuleId, gp: NodeId) bool {
     if gm != a.module || a.at_const(gp).kind != NodeKind::NODE_GENERIC_PARAM {
         return true;
     }
-    let bs = a.at_const(gp).as_data.generic_param.bounds;
+    let bs = a.ext(gp).generic_param.bounds;
     for i in 0..bs.len {
         if a.at_const(unsafe a.list(bs)[i as usize]).kind == NodeKind::NODE_FUNCTION_TYPE {
             return true;
@@ -1640,9 +1640,10 @@ extend DirCache {
         return path_exists(path);
     }
 }
-/// The source of item `n` with its visibility modifier, which its span starts after.
-const fn item_span(src: str, n: &Node) tok::Span {
-    let v = node_vis(n);
+/// The source of item `id` of `a` with its visibility modifier, which its span starts after.
+const fn item_span(src: str, a: &Ast, id: NodeId) tok::Span {
+    let n = a.at_const(id);
+    let v = node_vis(a, id);
     let mut i = n.span.start as usize;
     while i > 0 && (src.byte_at(i - 1) == b' ' || src.byte_at(i - 1) == b'\t') {
         i -= 1;
@@ -3086,7 +3087,7 @@ extend Package {
             return false;
         }
         let a = &self.modules[m as usize].ast;
-        let nm = a.at_const(a.at_const(f).as_data.function.name).as_data.name.text;
+        let nm = a.at_const(a.ext_name(f)).as_data.name.text;
         if self.modules[m as usize].source.as_str().slice(nm.start as usize, nm.end as usize) != "main" {
             return false;
         }
@@ -3433,7 +3434,11 @@ extend Package {
                 let n = *m.ast.at_const(id);
                 let is_ext = n.kind == NodeKind::NODE_EXTEND;
                 if is_ext || n.kind == NodeKind::NODE_EXTERN_BLOCK {
-                    let its = pick(is_ext, n.as_data.extend_def.items, n.as_data.extern_block.items);
+                    let its = if is_ext {
+                        m.ast.ext(id).extend_def.items;
+                    } else {
+                        n.as_data.extern_block.items;
+                    };
                     let mut kept: u32 = 0;
                     for k in 0..its.len {
                         let mid = unsafe m.ast.list(its)[k as usize];
@@ -3442,12 +3447,12 @@ extend Package {
                             kept = kept + 1;
                         } else {
                             let _ = m.ast.member_of.remove(&mid);
-                            let msp = item_span(m.source.as_str(), m.ast.at_const(mid));
+                            let msp = item_span(m.source.as_str(), &m.ast, mid);
                             m.ast.bc_dead.push(msp);
                         }
                     }
                     if is_ext {
-                        m.ast.at(id).as_data.extend_def.items.len = kept;
+                        m.ast.ext_mut(id).extend_def.items.len = kept;
                     } else {
                         m.ast.at(id).as_data.extern_block.items.len = kept;
                     }
@@ -3455,11 +3460,11 @@ extend Package {
             } else {
                 // A dropped container's members no longer have one.
                 let n = *m.ast.at_const(id);
-                m.ast.bc_dead.push(item_span(m.source.as_str(), &n));
+                m.ast.bc_dead.push(item_span(m.source.as_str(), &m.ast, id));
                 if n.kind == NodeKind::NODE_EXTEND {
-                    m.ast.set_members(NODE_NONE, n.as_data.extend_def.items);
+                    m.ast.set_members(NODE_NONE, m.ast.ext(id).extend_def.items);
                 } else if n.kind == NodeKind::NODE_INTERFACE {
-                    m.ast.set_members(NODE_NONE, n.as_data.interface_def.items);
+                    m.ast.set_members(NODE_NONE, m.ast.ext(id).interface_def.items);
                 }
             }
         }
@@ -3498,7 +3503,7 @@ extend Package {
             let id = unsafe a.list(items)[i as usize];
             let n = a.at_const(id);
             if n.kind == kind {
-                let sp = a.at_const(n.as_data.aggregate.name).as_data.name.text;
+                let sp = a.at_const(a.ext_name(id)).as_data.name.text;
                 if self.modules[m as usize].source.as_str().slice(sp.start as usize, sp.end as usize) == name {
                     return DefId { module: m, node: id };
                 }
@@ -3679,7 +3684,7 @@ extend Package {
                 if !a.valid(it.node) || a.at_const(it.node).kind != NodeKind::NODE_FUNCTION || a.gt.p == null {
                     continue;
                 }
-                let fd = a.at_const(it.node).as_data.function;
+                let fd = a.ext(it.node).function;
                 for pi in 0..fd.params.len + fd.returns.len {
                     let nd = if pi < fd.params.len {
                         unsafe a.list(fd.params)[pi as usize];
@@ -4202,9 +4207,9 @@ extend Package {
                 // conversion names one too. Not in callee position (tested above): a function, not
                 // the declaration's own name.
                 let r = a.resolution_def(ni);
-                if r.node != NODE_NONE && self.decl_kind(m, r) == NodeKind::NODE_FUNCTION && !(r.module == m as ModuleId && a.at_const(
+                if r.node != NODE_NONE && self.decl_kind(m, r) == NodeKind::NODE_FUNCTION && !(r.module == m as ModuleId && a.ext_name(
                     r.node,
-                ).as_data.function.name == ni) {
+                ) == ni) {
                     t = r;
                     s.esc.push(def_key(r));
                 }
@@ -4986,14 +4991,14 @@ extend Package {
             for i in 0..items.len {
                 let it = unsafe a.list(items)[i as usize];
                 let n = a.at_const(it);
-                if n.kind != NodeKind::NODE_EXTEND || n.as_data.extend_def.interface_type != NODE_NONE {
+                if n.kind != NodeKind::NODE_EXTEND || a.ext(it).extend_def.interface_type != NODE_NONE {
                     continue;
                 }
-                let tr = a.resolution_def(n.as_data.extend_def.target_type);
+                let tr = a.resolution_def(a.ext(it).extend_def.target_type);
                 if tr.node != ty.node || tr.module != mid {
                     continue;
                 }
-                let ms = n.as_data.extend_def.items;
+                let ms = a.ext(it).extend_def.items;
                 for j in 0..ms.len {
                     let f = unsafe a.list(ms)[j as usize];
                     if a.at_const(f).kind == NodeKind::NODE_FUNCTION && fn_name(a, src, f) == unsafe CO_ENTRY_FN[e] {
@@ -5018,9 +5023,9 @@ extend Package {
                 let mut ms = NodeList {};
                 let mut conf = false;
                 if n.kind == NodeKind::NODE_INTERFACE {
-                    ms = n.as_data.interface_def.items;
-                } else if n.kind == NodeKind::NODE_EXTEND && n.as_data.extend_def.interface_type != NODE_NONE {
-                    ms = n.as_data.extend_def.items;
+                    ms = a.ext(unsafe a.list(items)[i as usize]).interface_def.items;
+                } else if n.kind == NodeKind::NODE_EXTEND && a.ext(unsafe a.list(items)[i as usize]).extend_def.interface_type != NODE_NONE {
+                    ms = a.ext(unsafe a.list(items)[i as usize]).extend_def.items;
                     conf = true;
                 } else {
                     continue;
@@ -5119,7 +5124,7 @@ extend Package {
     /// pointers): its argument then names the implementor.
     pub(package) const fn self_typed_param0(self: &Self, f: DefId) bool {
         let a = unsafe &*self.module_ast_const(f.module);
-        let ps = a.at_const(f.node).as_data.function.params;
+        let ps = a.ext(f.node).function.params;
         if ps.len == 0 {
             return false;
         }
@@ -5144,7 +5149,7 @@ extend Package {
     /// Whether function `f`'s first parameter is `self` (a method, not an associated function).
     pub(package) const fn self_first(self: &Self, f: DefId) bool {
         let a = unsafe &*self.module_ast_const(f.module);
-        let ps = a.at_const(f.node).as_data.function.params;
+        let ps = a.ext(f.node).function.params;
         if ps.len == 0 {
             return false;
         }
@@ -6136,11 +6141,10 @@ extend Package {
             ) == "core.spc";
             if is_core {
                 for b in 0..BT_COUNT_N {
-                    let id = self.modules[i].ast.add(
-                        Node {
-                            kind: NodeKind::NODE_STRUCT,
-                            as_data: NodeAs { aggregate: AggregateData { name: NODE_NONE, vis: VIS_PUB } },
-                        },
+                    let id = self.modules[i].ast.add_ext(
+                        NodeKind::NODE_STRUCT,
+                        tok::Span::empty(),
+                        NodeExt { aggregate: AggregateData { name: NODE_NONE, vis: VIS_PUB } },
                     );
                     unsafe self.builtin_decls[b] = id;
                 }
@@ -6250,7 +6254,7 @@ extend Package {
                 let em = (rows[x] >> 32) as ModuleId;
                 let ext = rows[x] as NodeId;
                 let ea = self.module_ast_const(em);
-                let ed = unsafe (*ea).at_const(ext).as_data.extend_def;
+                let ed = unsafe (*ea).ext(ext).extend_def;
                 if ed.generics.len > 8 {
                     continue;
                 }
@@ -6307,17 +6311,17 @@ extend Package {
         depth: u32,
     ) bool {
         let ea = self.module_ast_const(em);
-        let gens = unsafe (*ea).at_const(ext).as_data.extend_def.generics;
+        let gens = unsafe (*ea).ext(ext).extend_def.generics;
         let da = self.module_ast_const(dm) as *mut Ast;
         let mut g: u32 = 0;
         while g < gens.len && g < ln {
             let v = unsafe la[g as usize];
-            let gp = unsafe (*ea).at_const(unsafe (*ea).list(gens)[g as usize]);
+            let gp = unsafe (*ea).list(gens)[g as usize];
             g += 1;
-            if v == TYPE_NONE || gp.as_data.generic_param.is_const {
+            if v == TYPE_NONE || unsafe (*ea).ext(gp).generic_param.is_const {
                 continue;
             }
-            let bs = gp.as_data.generic_param.bounds;
+            let bs = unsafe (*ea).ext(gp).generic_param.bounds;
             for b in 0..bs.len {
                 let bid = unsafe (*ea).list(bs)[b as usize];
                 let bi = unsafe (*ea).resolution_def(bid);
@@ -6392,7 +6396,7 @@ extend Package {
                     if unsafe (*ea).at_const(ext).kind != NodeKind::NODE_EXTEND {
                         continue;
                     }
-                    let ed = unsafe (*ea).at_const(ext).as_data.extend_def;
+                    let ed = unsafe (*ea).ext(ext).extend_def;
                     if ed.interface_type == NODE_NONE {
                         continue;
                     }
@@ -6473,7 +6477,7 @@ extend Package {
     ) bool {
         let ea = self.module_ast_const(em);
         let da = self.module_ast_const(dm) as *mut Ast;
-        let gens = unsafe (*ea).at_const(ext).as_data.extend_def.generics;
+        let gens = unsafe (*ea).ext(ext).extend_def.generics;
         if gens.len > 8 {
             return false;
         }
@@ -6482,7 +6486,7 @@ extend Package {
             unsafe lp[i as usize] = DefId { module: em, node: unsafe (*ea).list(gens)[i as usize] };
             unsafe la[i as usize] = TYPE_NONE;
         }
-        let pat = unsafe (*ea).type_of(unsafe (*ea).at_const(ext).as_data.extend_def.target_type);
+        let pat = unsafe (*ea).type_of(unsafe (*ea).ext(ext).extend_def.target_type);
         let free = ext_free_params(unsafe &*ea, pat, unsafe &*ea, em, ext);
         if ext_is_identity(unsafe &*ea, pat, unsafe &*ea, em, ext) {
             for i in 0..gens.len {
@@ -6729,15 +6733,15 @@ extend Package {
     pub(package) fn const_param_bt(self: &Self, m: ModuleId, gp: NodeId) BuiltinType {
         let mut tm = m;
         let mut a = self.module_ast_const(m);
-        let mut tn = unsafe (*a).at_const(gp).as_data.generic_param.const_type;
+        let mut tn = unsafe (*a).ext(gp).generic_param.const_type;
         let mut hops: u32 = 0;
         while tn != NODE_NONE && hops < 8 {
             let d = unsafe (*a).resolution_def(tn);
             if d.node == NODE_NONE {
                 // A builtin type name resolves to nothing: it is known by its spelling.
                 let n = unsafe (*a).at_const(tn);
-                let sp = if n.kind == NodeKind::NODE_TYPE_PATH && n.as_data.type_path.parts.len == 1 {
-                    unsafe (*a).at_const(unsafe (*a).list(n.as_data.type_path.parts)[0]).as_data.name.text;
+                let sp = if n.kind == NodeKind::NODE_TYPE_PATH && unsafe (*a).at_const(tn).as_data.type_path.parts.len == 1 {
+                    unsafe (*a).at_const(unsafe (*a).list(unsafe (*a).at_const(tn).as_data.type_path.parts)[0]).as_data.name.text;
                 } else if n.kind == NodeKind::NODE_IDENTIFIER {
                     n.as_data.name.text;
                 } else {
@@ -6879,9 +6883,9 @@ extend Package {
                     continue;
                 }
                 idx.pl_names.insert(im.name);
-                if im.is_type || im.kind == ItemKind::IK_FUNCTION as u8 && unsafe (*self.module_ast_const(m as ModuleId)).at_const(
+                if im.is_type || im.kind == ItemKind::IK_FUNCTION as u8 && unsafe (*self.module_ast_const(m as ModuleId)).ext(
                     im.node,
-                ).as_data.function.generics.len != 0 {
+                ).function.generics.len != 0 {
                     idx.pl_stems.insert(im.name);
                 }
                 if !vis_exported(im.vis) {
@@ -7000,7 +7004,7 @@ extend Package {
             if !a.valid(it.node) || a.at_const(it.node).kind != NodeKind::NODE_FUNCTION {
                 continue;
             }
-            let fd = a.at_const(it.node).as_data.function;
+            let fd = a.ext(it.node).function;
             let start = self.idx.sig_types.len() as u32;
             for pi in 0..fd.params.len {
                 self.idx.sig_types.push(a.type_of(unsafe a.list(fd.params)[pi as usize]));
@@ -7062,7 +7066,7 @@ extend Package {
     // NONE for a plain extend.
     fn ext_iface(self: &Self, row: u64) DefId {
         let a = self.module_ast_const((row >> 32) as ModuleId);
-        let ip = unsafe (*a).at_const(row as NodeId).as_data.extend_def.interface_type;
+        let ip = unsafe (*a).ext(row as NodeId).extend_def.interface_type;
         if ip == NODE_NONE {
             return DefId { module: 0, node: NODE_NONE };
         }
@@ -7102,8 +7106,8 @@ extend Package {
         let mut kind = ItemKind::IK_STRUCT;
         switch n.kind {
             NODE_STRUCT | NODE_ENUM => {
-                name_node = n.as_data.aggregate.name;
-                vis = n.as_data.aggregate.vis;
+                name_node = ast.ext_name(node);
+                vis = ast.ext(node).aggregate.vis;
                 if n.kind == NodeKind::NODE_ENUM {
                     kind = ItemKind::IK_ENUM;
                 }
@@ -7114,13 +7118,13 @@ extend Package {
                 kind = ItemKind::IK_TYPE_ALIAS;
             },
             NODE_INTERFACE => {
-                name_node = n.as_data.interface_def.name;
-                vis = n.as_data.interface_def.vis;
+                name_node = ast.ext_name(node);
+                vis = ast.ext(node).interface_def.vis;
                 kind = ItemKind::IK_INTERFACE;
             },
             NODE_FUNCTION => {
-                name_node = n.as_data.function.name;
-                vis = n.as_data.function.vis;
+                name_node = ast.ext_name(node);
+                vis = ast.ext(node).function.vis;
                 is_type = false;
                 kind = if owner == ITEM_NONE {
                     ItemKind::IK_FUNCTION;
@@ -7203,8 +7207,8 @@ extend Package {
             // An extern item IS its C symbol.
             let d = ast.at_const(im.node);
             let ext = switch d.kind {
-                NODE_FUNCTION => d.as_data.function.is_extern(),
-                NODE_STRUCT | NODE_ENUM => d.as_data.aggregate.is_extern,
+                NODE_FUNCTION => ast.ext(im.node).function.is_extern(),
+                NODE_STRUCT | NODE_ENUM => ast.ext(im.node).aggregate.is_extern,
                 NODE_CONST => d.as_data.const_def.is_extern,
                 _ => false,
             };
@@ -7278,7 +7282,7 @@ extend Package {
                     },
                 );
                 // Only methods and associated consts: an extend-body type alias is not indexed.
-                let inner = n.as_data.extend_def.items;
+                let inner = ast.ext(nid).extend_def.items;
                 for j in 0..inner.len {
                     let iid = unsafe ast.list(inner)[j as usize];
                     let ik = ast.at_const(iid).kind;
@@ -7289,7 +7293,7 @@ extend Package {
             } else {
                 self.index_decl(idx, mid, srcp, nid, ITEM_NONE);
                 if n.kind == NodeKind::NODE_ENUM {
-                    let ms = n.as_data.aggregate.members;
+                    let ms = ast.ext(nid).aggregate.members;
                     for k in 0..ms.len {
                         let vk = mid as u64 << 32 | (unsafe ast.list(ms)[k as usize]) as u64;
                         idx.variants.insert(skey_mix(0, vk), nid as u64 << 32 | k as u64);
@@ -7376,7 +7380,7 @@ extend Package {
 
     /// The `VIS_*` of declaration `node` of module `mid`.
     pub(package) fn decl_vis(self: &Self, mid: ModuleId, node: NodeId) u8 {
-        return node_vis(unsafe (*self.module_ast_const(mid)).at_const(node));
+        return node_vis(unsafe &*self.module_ast_const(mid), node);
     }
 
     /// Like lookup but across every prelude module (the first in module order wins); the hit's `mid`

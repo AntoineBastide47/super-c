@@ -433,7 +433,7 @@ pub interface IndexMut<T, S> {
     fn index_range_mut(self: &mut Self, r: Range<usize>) S;
 }
 
-/// A value with every field defaulted through its own `Default`, built over a `zeroed` seed like
+/// A value with every field defaulted through its own `Default`, written into an empty `Uninit` like
 /// `reflect_clone`. Enums and unions refuse for the same reasons. Lives HERE rather than in
 /// `reflect`: `Default`'s default body must name it in `::<Self>` position, which resolves only
 /// same-module (the prelude still exposes it unqualified everywhere).
@@ -441,13 +441,15 @@ pub fn reflect_default<T>() T {
     if type_info::<T>().kind == TypeTag::Enum || type_info::<T>().kind == TypeTag::Union {
         panic("a derived 'default' covers structs and tuples; write it by hand for an enum or union");
     }
-    let mut out = unsafe zeroed::<T>();
-    inline for f in fields(&mut out) {
+    let mut out = Uninit::<T> { none: 0 };
+    inline for f in fields(&mut unsafe out.value) {
         reflect_default_field(&mut f.value);
     }
-    return out;
+    return unsafe out.value;
 }
 
+// Write the default into field `dst`, which holds no value yet: a raw store frees nothing.
 fn reflect_default_field<V: Default>(dst: &mut V) {
-    *dst = V::default();
+    let p = dst as *mut V;
+    unsafe *p = V::default();
 }

@@ -745,7 +745,7 @@ extend InstGraph {
             }
             let row = *self.exts.at(ri as usize);
             let ea = unsafe &*p.module_ast_const(row.emod);
-            let ed = ea.at_const(row.enode).as_data.extend_def;
+            let ed = ea.ext(row.enode).extend_def;
             if ed.interface_type == NODE_NONE {
                 continue;
             }
@@ -940,7 +940,7 @@ extend InstGraph {
             }
             let pd = unsafe l.p[i as usize];
             let pa = unsafe &*p.module_ast_const(pd.module);
-            let ns = pa.at_const(pa.at_const(pd.node).as_data.generic_param.name).as_data.name.text;
+            let ns = pa.at_const(pa.ext_name(pd.node)).as_data.name.text;
             let name = p.modules.at(pd.module as usize).source.as_str().slice(ns.start as usize, ns.end as usize);
             if terms != 0 {
                 form.push_str(pick(c.is_negative(), " - ", " + "));
@@ -1202,11 +1202,11 @@ extend InstGraph {
         }
         // Bind the declaration's parameters to the argument VALUES (all a length reads).
         let mut inner = self.take_frame();
-        let gs = dn.as_data.aggregate.generics;
+        let gs = da.ext(it.decl).aggregate.generics;
         let mut ai: u32 = 0;
         for g in 0..gs.len {
             let gp = unsafe da.list(gs)[g as usize];
-            if da.at_const(gp).as_data.generic_param.is_lifetime || ai >= it.n as u32 {
+            if da.ext(gp).generic_param.is_lifetime || ai >= it.n as u32 {
                 continue;
             }
             let mut key = ArgKey { ty: TYPE_NONE, val: 0, has_val: false, bt: BuiltinType::BT_COUNT };
@@ -1223,9 +1223,8 @@ extend InstGraph {
     // `check_ty` over the member types (fields and variant payloads) of aggregate `decl` in `a`;
     // `span` receives the member that holds the length.
     fn check_decl(self: &mut Self, a: &Ast, decl: NodeId, frame: &Vector<Subst>, depth: i32, span: &mut tok::Span) bool {
-        let n = a.at_const(decl);
-        let is_tuple = n.as_data.aggregate.is_tuple;
-        let ms = n.as_data.aggregate.members;
+        let is_tuple = a.ext(decl).aggregate.is_tuple;
+        let ms = a.ext(decl).aggregate.members;
         for i in 0..ms.len {
             let mid = unsafe a.list(ms)[i as usize];
             let mk = a.at_const(mid).kind;
@@ -1339,7 +1338,7 @@ extend InstGraph {
             return false;
         }
         let ga = unsafe &*p.module_ast_const(y.module);
-        if fn_ptr_bound(p, ga, ga.at_const(y.as_data.decl).as_data.generic_param.bounds, h, 0) {
+        if fn_ptr_bound(p, ga, ga.ext(y.as_data.decl).generic_param.bounds, h, 0) {
             return true;
         }
         let at = pick(y.module == a.module, owner, NODE_NONE);
@@ -1426,7 +1425,7 @@ extend InstGraph {
         if rd.kind != NodeKind::NODE_FUNCTION {
             return tok::Span { start: 0, end: 0 };
         }
-        let rs = ra.at_const(rd.as_data.function.name).as_data.name.text;
+        let rs = ra.at_const(ra.ext_name(r.def.node)).as_data.name.text;
         let rname = p.modules.at(r.def.module as usize).source.as_str().slice(rs.start as usize, rs.end as usize);
         for i in 0..b.blocks.len() {
             let t = b.blocks.at(i).term;
@@ -1436,7 +1435,7 @@ extend InstGraph {
                 continue;
             }
             let ca = unsafe &*p.module_ast_const(t.callee.module);
-            let cs = ca.at_const(ca.at_const(t.callee.node).as_data.function.name).as_data.name.text;
+            let cs = ca.at_const(ca.ext_name(t.callee.node)).as_data.name.text;
             if p.modules.at(t.callee.module as usize).source.as_str().slice(cs.start as usize, cs.end as usize) == rname {
                 return t.span;
             }
@@ -1838,7 +1837,7 @@ extend InstGraph {
             }
             if !self.shapes.at(ri as usize).keyed {
                 // A concrete conformance's vtable holds its methods and the defaults it inherits.
-                if ea.at_const(row.enode).as_data.extend_def.generics.len == 0 {
+                if ea.ext(row.enode).extend_def.generics.len == 0 {
                     self.edge_vtable(ri, ir);
                 }
                 continue;
@@ -1847,10 +1846,10 @@ extend InstGraph {
             if !self.conf_bind(ri, sk, &keys, want, &mut ef) {
                 continue;
             }
-            let ed = ea.at_const(row.enode).as_data.extend_def;
+            let ed = ea.ext(row.enode).extend_def;
             for j in 0..ed.items.len {
                 let hid = unsafe ea.list(ed.items)[j as usize];
-                if ea.at_const(hid).kind != NodeKind::NODE_FUNCTION || ea.at_const(hid).as_data.function.generics.len != 0 {
+                if ea.at_const(hid).kind != NodeKind::NODE_FUNCTION || ea.ext(hid).function.generics.len != 0 {
                     continue;
                 }
                 self.argbuf.truncate(0);
@@ -1940,7 +1939,7 @@ extend InstGraph {
     fn note_iface_call(self: &mut Self, a: &Ast, t: &ir::Terminator, b: &ir::CoreBody, frame: &Vector<Subst>) bool {
         let p = unsafe &*self.pkg;
         let ca = unsafe &*p.module_ast_const(t.callee.module);
-        let fg = ca.at_const(t.callee.node).as_data.function.generics;
+        let fg = ca.ext(t.callee.node).function.generics;
         if t.targs_len < fg.len {
             return false;
         }
@@ -1993,7 +1992,7 @@ extend InstGraph {
             d = DefId { module: p.core_module, node: p.builtin_decl(ry.as_data.builtin) };
         }
         let want = pick(t.iface != TYPE_NONE, self.subst_intern(a, t.iface, frame, 0), TYPE_NONE);
-        let mn = ca.at_const(ca.at_const(t.callee.node).as_data.function.name).as_data.name.text;
+        let mn = ca.at_const(ca.ext_name(t.callee.node)).as_data.name.text;
         let mname = p.modules.at(t.callee.module as usize).source.as_str().slice(mn.start as usize, mn.end as usize);
         // The conformances by target, then the generic ones.
         let mut r = self.ext_first(d);
@@ -2010,7 +2009,7 @@ extend InstGraph {
             }
             let row = *self.exts.at(ri as usize);
             let ea = unsafe &*p.module_ast_const(row.emod);
-            let ed = ea.at_const(row.enode).as_data.extend_def;
+            let ed = ea.ext(row.enode).extend_def;
             let ir = self.ext_interface(ea, row.enode);
             if ir.module != t.callee.module || ir.node != inode {
                 continue;
@@ -2039,7 +2038,7 @@ extend InstGraph {
                 if hn.kind != NodeKind::NODE_FUNCTION {
                     continue;
                 }
-                let hs = ea.at_const(hn.as_data.function.name).as_data.name.text;
+                let hs = ea.at_const(ea.ext_name(hid)).as_data.name.text;
                 if esrc.slice(hs.start as usize, hs.end as usize) != mname {
                     continue;
                 }
@@ -2068,7 +2067,7 @@ extend InstGraph {
                 let _ = self.add(pick(generic, IG_METHOD, IG_FN), DefId { module: row.emod, node: hid }, &mut fresh);
                 return true;
             }
-            if ca.at_const(t.callee.node).as_data.function.body == NODE_NONE {
+            if ca.ext(t.callee.node).function.body == NODE_NONE {
                 return true;
             }
             // The inherited default body: the interface method's record, keyed by `Self`, the
@@ -2077,7 +2076,7 @@ extend InstGraph {
             ef.push(Subst { pmod: t.callee.module, pdecl: inode, key: rk });
             if dt != TYPE_NONE {
                 let di = *ea.instance(ea.type_at(dt).as_data.inst);
-                let igens = ca.at_const(inode).as_data.interface_def.generics;
+                let igens = ca.ext(inode).interface_def.generics;
                 let mut g: u32 = 0;
                 while g < igens.len && g < di.n as u32 {
                     let at = unsafe di.args[g as usize];
@@ -2219,7 +2218,7 @@ extend InstGraph {
             }
             let a = unsafe &*(&*self.pkg).module_ast_const(md.module);
             // A demanded method with own generics pairs only through explicit (instance, targs).
-            if a.at_const(md.node).as_data.function.generics.len != 0 {
+            if a.ext(md.node).function.generics.len != 0 {
                 continue;
             }
             let row = *self.exts.at(x as usize);
@@ -2252,7 +2251,7 @@ extend InstGraph {
             let row = *self.exts.at(x);
             let a = unsafe &*p.module_ast_const(row.emod);
             let src = p.modules.at(row.emod as usize).source.as_str();
-            let ed = a.at_const(row.enode).as_data.extend_def;
+            let ed = a.ext(row.enode).extend_def;
             // An interface-conforming extend emits EVERY bodied method per instance (so a demanded
             // interface method's override is always demanded); the method_used gate applies only
             // to plain extends.
@@ -2260,10 +2259,10 @@ extend InstGraph {
             for j in 0..ed.items.len {
                 let iid = unsafe a.list(ed.items)[j as usize];
                 let it = a.at_const(iid);
-                if it.kind != NodeKind::NODE_FUNCTION || it.as_data.function.body == NODE_NONE {
+                if it.kind != NodeKind::NODE_FUNCTION || a.ext(iid).function.body == NODE_NONE {
                     continue;
                 }
-                let nsp = a.at_const(it.as_data.function.name).as_data.name.text;
+                let nsp = a.at_const(a.ext_name(iid)).as_data.name.text;
                 if conforming || src.slice(nsp.start as usize, nsp.end as usize) == "free" {
                     let dk = skey_mix(0, row.emod as u64 << 32 | iid as u64);
                     if !dseen.contains(&dk) {
@@ -2275,7 +2274,7 @@ extend InstGraph {
         }
         for i in 0..dm.len() {
             let d = *dm.at(i);
-            if self.enclosing_row(d) != IG_NONE && (unsafe &*p.module_ast_const(d.module)).at_const(d.node).as_data.function.generics.len == 0 {
+            if self.enclosing_row(d) != IG_NONE && (unsafe &*p.module_ast_const(d.module)).ext(d.node).function.generics.len == 0 {
                 self.dm_static.push(d);
             }
         }
@@ -2338,7 +2337,7 @@ extend InstGraph {
         for x in 0..self.exts.len() {
             let row = *self.exts.at(x);
             let a = unsafe &*(&*self.pkg).module_ast_const(row.emod);
-            let ed = a.at_const(row.enode).as_data.extend_def;
+            let ed = a.ext(row.enode).extend_def;
             let iface = self.ext_interface(a, row.enode);
             if iface.node == NODE_NONE {
                 continue;
@@ -2350,14 +2349,14 @@ extend InstGraph {
             // Default-bodied interface methods the extend does NOT override.
             let src = unsafe (&*self.pkg).modules.at(row.emod as usize).source.as_str();
             let isrc = unsafe (&*self.pkg).modules.at(iface.module as usize).source.as_str();
-            let ims = ia.at_const(iface.node).as_data.interface_def.items;
+            let ims = ia.ext(iface.node).interface_def.items;
             for j in 0..ims.len {
                 let imid = unsafe ia.list(ims)[j as usize];
                 let imf = ia.at_const(imid);
-                if imf.kind != NodeKind::NODE_FUNCTION || imf.as_data.function.body == NODE_NONE {
+                if imf.kind != NodeKind::NODE_FUNCTION || ia.ext(imid).function.body == NODE_NONE {
                     continue;
                 }
-                let insp = ia.at_const(imf.as_data.function.name).as_data.name.text;
+                let insp = ia.at_const(ia.ext_name(imid)).as_data.name.text;
                 let iname = isrc.slice(insp.start as usize, insp.end as usize);
                 let mut overridden = false;
                 for k in 0..ed.items.len {
@@ -2366,7 +2365,7 @@ extend InstGraph {
                     if on.kind != NodeKind::NODE_FUNCTION {
                         continue;
                     }
-                    let osp = a.at_const(on.as_data.function.name).as_data.name.text;
+                    let osp = a.at_const(a.ext_name(oid)).as_data.name.text;
                     if src.slice(osp.start as usize, osp.end as usize) == iname {
                         overridden = true;
                         break;
@@ -2395,7 +2394,7 @@ extend InstGraph {
         let row = *self.exts.at(x as usize);
         let da = unsafe &*(&*self.pkg).module_ast_const(row.dmod);
         let dn = da.at_const(row.ddecl);
-        let generic = (dn.kind == NodeKind::NODE_STRUCT || dn.kind == NodeKind::NODE_ENUM) && dn.as_data.aggregate.generics.len != 0;
+        let generic = (dn.kind == NodeKind::NODE_STRUCT || dn.kind == NodeKind::NODE_ENUM) && da.ext(row.ddecl).aggregate.generics.len != 0;
         if !generic {
             if !self.dwalked.contains(&ck) {
                 self.dwalked.insert(ck);
@@ -2460,7 +2459,7 @@ extend InstGraph {
         let row = *self.exts.at(x as usize);
         let a = unsafe &*(&*self.pkg).module_ast_const(row.emod);
         let ia = unsafe &*(&*self.pkg).module_ast_const(iface.module);
-        let ed = a.at_const(row.enode).as_data.extend_def;
+        let ed = a.ext(row.enode).extend_def;
         let _ = self.bind_ext_keys(x, &self.keys, start, n, frame);
         let mut pat = a.type_of(ed.target_type);
         if pat == TYPE_NONE && rec == IG_NONE {
@@ -2471,7 +2470,7 @@ extend InstGraph {
             return;
         }
         let sk = self.argkey_subst(a, pat, frame);
-        let igens = ia.at_const(iface.node).as_data.interface_def.generics;
+        let igens = ia.ext(iface.node).interface_def.generics;
         if a.at_const(ed.interface_type).kind == NodeKind::NODE_TYPE_PATH {
             let targs = a.at_const(ed.interface_type).as_data.type_path.args;
             for g in 0..targs.len {
@@ -2509,7 +2508,7 @@ extend InstGraph {
         self.step_fault = false;
         self.check_steps(row.emod, row.enode, frame);
         self.check_steps(iface.module, imid, frame);
-        if !self.step_fault && ia.at_const(imid).as_data.function.body != NODE_NONE {
+        if !self.step_fault && ia.ext(imid).function.body != NODE_NONE {
             self.seed_body(iface.module, imid, ia, frame);
         }
         self.cur_rec = cur0;
@@ -2584,7 +2583,7 @@ extend InstGraph {
         if da.at_const(r.def.node).kind != NodeKind::NODE_FUNCTION {
             return;
         }
-        let fd = da.at_const(r.def.node).as_data.function;
+        let fd = da.ext(r.def.node).function;
         let mut frame = self.take_frame();
         self.bind_generics(da, fd.generics, &r, 0, &mut frame);
         self.check_steps(r.def.module, r.def.node, &frame);
@@ -2596,7 +2595,7 @@ extend InstGraph {
 
     // The declaration an extend targets (the path node's resolution, else its last part's).
     const fn ext_target(self: &Self, a: &Ast, ext: NodeId) DefId {
-        let tt = a.at_const(ext).as_data.extend_def.target_type;
+        let tt = a.ext(ext).extend_def.target_type;
         if tt == NODE_NONE {
             return DefId { module: 0, node: NODE_NONE };
         }
@@ -2608,12 +2607,11 @@ extend InstGraph {
     // types are written over the declaration's params, so the record's keys bind them positionally.
     fn expand_fields(self: &mut Self, r: &InstRec) {
         let a = unsafe &*(&*self.pkg).module_ast_const(r.def.module);
-        let n = a.at_const(r.def.node);
         let mut frame = self.take_frame();
-        self.bind_generics(a, n.as_data.aggregate.generics, r, 0, &mut frame);
+        self.bind_generics(a, a.ext(r.def.node).aggregate.generics, r, 0, &mut frame);
         self.check_steps(r.def.module, r.def.node, &frame);
-        let is_tuple = n.as_data.aggregate.is_tuple;
-        let ms = n.as_data.aggregate.members;
+        let is_tuple = a.ext(r.def.node).aggregate.is_tuple;
+        let ms = a.ext(r.def.node).aggregate.members;
         for i in 0..ms.len {
             let mid = unsafe a.list(ms)[i as usize];
             let mk = a.at_const(mid).kind;
@@ -2667,7 +2665,7 @@ extend InstGraph {
 
     // The interface an extend conforms to, resolved (module-qualified); node NODE_NONE when plain.
     const fn ext_interface(self: &Self, a: &Ast, ext: NodeId) DefId {
-        let it = a.at_const(ext).as_data.extend_def.interface_type;
+        let it = a.ext(ext).extend_def.interface_type;
         if it == NODE_NONE {
             return DefId { module: 0, node: NODE_NONE };
         }
@@ -2708,8 +2706,8 @@ extend InstGraph {
 
     // Read extend `ext` of `a` (the row `exts` just took) into its `ExtShape` and `XSlot`s.
     fn push_shape(self: &mut Self, a: &Ast, ext: NodeId) {
-        let pat = a.type_of(a.at_const(ext).as_data.extend_def.target_type);
-        let gens = a.at_const(ext).as_data.extend_def.generics;
+        let pat = a.type_of(a.ext(ext).extend_def.target_type);
+        let gens = a.ext(ext).extend_def.generics;
         let mut pi = TyInstance {};
         let mut sh = ExtShape {
             ident: ext_is_identity(a, pat, a, a.module, ext),
@@ -2725,7 +2723,7 @@ extend InstGraph {
         // Signatures come from the package item metadata (params then returns, owner-pool TypeIds),
         // not from re-walking the item's syntax; non-function items record none, and generic methods
         // substitute per explicit (instance, targs) pair.
-        let items = a.at_const(ext).as_data.extend_def.items;
+        let items = a.ext(ext).extend_def.items;
         for j in 0..items.len {
             let iid = unsafe a.list(items)[j as usize];
             let sg = (unsafe &*self.pkg).item_sig(a.module, iid);
@@ -2768,7 +2766,7 @@ extend InstGraph {
             // The keys are the extend's arguments, in order, then the member's own.
             let row = *self.exts.at(x as usize);
             let ea = unsafe &*(&*self.pkg).module_ast_const(row.emod);
-            let gens = ea.at_const(row.enode).as_data.extend_def.generics;
+            let gens = ea.ext(row.enode).extend_def.generics;
             for j in 0..gens.len {
                 if j < n {
                     frame.push(
@@ -2828,7 +2826,7 @@ extend InstGraph {
         let sh = *self.shapes.at(x as usize);
         let row = *self.exts.at(x as usize);
         let ea = unsafe &*(&*self.pkg).module_ast_const(row.emod);
-        let ed = ea.at_const(row.enode).as_data.extend_def;
+        let ed = ea.ext(row.enode).extend_def;
         if !sh.keyed {
             if !self.ext_applies(x, keys, 0, keys.len() as u32) {
                 return false;
@@ -2865,7 +2863,7 @@ extend InstGraph {
     fn frame_bounds_hold(self: &Self, x: u32, frame: &Vector<Subst>) bool {
         let row = *self.exts.at(x as usize);
         let ea = unsafe &*(&*self.pkg).module_ast_const(row.emod);
-        let gens = ea.at_const(row.enode).as_data.extend_def.generics;
+        let gens = ea.ext(row.enode).extend_def.generics;
         if gens.len > 8 {
             return true;
         }
@@ -3030,7 +3028,7 @@ extend InstGraph {
         let mut ai = pos;
         for g in 0..gs.len {
             let gp = unsafe a.list(gs)[g as usize];
-            if a.at_const(gp).as_data.generic_param.is_lifetime {
+            if a.ext(gp).generic_param.is_lifetime {
                 continue;
             }
             if ai < r.args_len {
@@ -3055,10 +3053,10 @@ extend InstGraph {
     // conformance's interface arguments, then the method's own parameters.
     fn bind_default(self: &Self, r: &InstRec, inode: NodeId, frame: &mut Vector<Subst>) {
         let a = unsafe &*(&*self.pkg).module_ast_const(r.def.module);
-        let fg = a.at_const(r.def.node).as_data.function.generics;
+        let fg = a.ext(r.def.node).function.generics;
         assert(r.args_len > fg.len, "a default method record keys Self and the method's parameters");
         let ni = r.args_len - 1 - fg.len;
-        let igens = a.at_const(inode).as_data.interface_def.generics;
+        let igens = a.ext(inode).interface_def.generics;
         frame.push(Subst { pmod: r.def.module, pdecl: inode, key: *self.keys.at(r.args_start as usize) });
         for g in 0..ni {
             frame.push(
@@ -3099,7 +3097,7 @@ extend InstGraph {
             return IG_NONE;
         }
         let a = unsafe &*(&*self.pkg).module_ast_const(d.module);
-        if a.at_const(self.exts.at(x as usize).enode).as_data.extend_def.generics.len == 0 {
+        if a.ext(self.exts.at(x as usize).enode).extend_def.generics.len == 0 {
             return IG_NONE;
         }
         return x;
@@ -3116,7 +3114,7 @@ extend InstGraph {
         let ext = self.exts.at(x as usize).enode;
         let mut frame = self.take_frame();
         let pos = self.bind_ext_keys(x, &self.keys, r.args_start, r.args_len, &mut frame);
-        let fd = a.at_const(r.def.node).as_data.function;
+        let fd = a.ext(r.def.node).function;
         self.bind_generics(a, fd.generics, r, pos, &mut frame);
         self.check_steps(r.def.module, r.def.node, &frame);
         self.check_steps(r.def.module, ext, &frame);
@@ -3396,7 +3394,7 @@ extend InstGraph {
             if x != IG_NONE {
                 pos = self.bind_ext_keys(x, &self.keys, r.args_start, r.args_len, &mut frame);
             }
-            self.bind_generics(a, a.at_const(r.def.node).as_data.function.generics, &r, pos, &mut frame);
+            self.bind_generics(a, a.ext(r.def.node).function.generics, &r, pos, &mut frame);
         }
         for i in 0..frame.len() {
             prm.push(frame.at(i).pdecl);
@@ -3417,14 +3415,14 @@ extend InstGraph {
             return;
         }
         let isrc = p.modules.at(iface.module as usize).source.as_str();
-        let ims = ia.at_const(iface.node).as_data.interface_def.items;
+        let ims = ia.ext(iface.node).interface_def.items;
         for j in 0..ims.len {
             let imid = unsafe ia.list(ims)[j as usize];
             let imf = ia.at_const(imid);
             if imf.kind != NodeKind::NODE_FUNCTION {
                 continue;
             }
-            let isp = ia.at_const(imf.as_data.function.name).as_data.name.text;
+            let isp = ia.at_const(ia.ext_name(imid)).as_data.name.text;
             self.edge_conf(x, isrc.slice(isp.start as usize, isp.end as usize), imid);
         }
     }
@@ -3445,7 +3443,7 @@ extend InstGraph {
             r = *self.ext_next.at(x as usize);
             let row = *self.exts.at(x as usize);
             let ea = unsafe &*p.module_ast_const(row.emod);
-            if ea.at_const(row.enode).as_data.extend_def.generics.len != 0 {
+            if ea.ext(row.enode).extend_def.generics.len != 0 {
                 continue;
             }
             let iface = self.ext_interface(ea, row.enode);
@@ -3457,14 +3455,14 @@ extend InstGraph {
                 continue;
             }
             let isrc = p.modules.at(iface.module as usize).source.as_str();
-            let ims = ia.at_const(iface.node).as_data.interface_def.items;
+            let ims = ia.ext(iface.node).interface_def.items;
             for j in 0..ims.len {
                 let imid = unsafe ia.list(ims)[j as usize];
                 let imf = ia.at_const(imid);
-                if imf.kind != NodeKind::NODE_FUNCTION || imf.as_data.function.body == NODE_NONE {
+                if imf.kind != NodeKind::NODE_FUNCTION || ia.ext(imid).function.body == NODE_NONE {
                     continue;
                 }
-                let isp = ia.at_const(imf.as_data.function.name).as_data.name.text;
+                let isp = ia.at_const(ia.ext_name(imid)).as_data.name.text;
                 if isrc.slice(isp.start as usize, isp.end as usize) == name {
                     self.edge(U_DEF | x as u64 << 32 | imid as u64);
                     return;
@@ -3515,14 +3513,14 @@ extend InstGraph {
         let p = unsafe &*self.pkg;
         let ea = unsafe &*p.module_ast_const(row.emod);
         let esrc = p.modules.at(row.emod as usize).source.as_str();
-        let items = ea.at_const(row.enode).as_data.extend_def.items;
+        let items = ea.ext(row.enode).extend_def.items;
         for j in 0..items.len {
             let hid = unsafe ea.list(items)[j as usize];
             let hn = ea.at_const(hid);
             if hn.kind != NodeKind::NODE_FUNCTION {
                 continue;
             }
-            let hs = ea.at_const(hn.as_data.function.name).as_data.name.text;
+            let hs = ea.at_const(ea.ext_name(hid)).as_data.name.text;
             if esrc.slice(hs.start as usize, hs.end as usize) == mname {
                 self.edge_fn(DefId { module: row.emod, node: hid });
                 return;
@@ -3546,12 +3544,12 @@ extend InstGraph {
         if dn.kind != NodeKind::NODE_STRUCT && dn.kind != NodeKind::NODE_ENUM {
             return;
         }
-        let ms = dn.as_data.aggregate.members;
+        let ms = da.ext(d.node).aggregate.members;
         for i in 0..ms.len {
             let mid = unsafe da.list(ms)[i as usize];
             let mk = da.at_const(mid).kind;
-            if mk == NodeKind::NODE_FIELD || dn.as_data.aggregate.is_tuple {
-                let tn = da.member_type_node(mid, dn.as_data.aggregate.is_tuple);
+            if mk == NodeKind::NODE_FIELD || da.ext(d.node).aggregate.is_tuple {
+                let tn = da.member_type_node(mid, da.ext(d.node).aggregate.is_tuple);
                 let mut t = da.type_of(mid);
                 if t == TYPE_NONE && tn != NODE_NONE {
                     t = da.type_of(tn);
@@ -3650,18 +3648,18 @@ extend InstGraph {
             let row = *self.exts.at(r as usize);
             r = *self.ext_next.at(r as usize);
             let ea = unsafe &*p.module_ast_const(row.emod);
-            if ea.at_const(row.enode).as_data.extend_def.generics.len != 0 {
+            if ea.ext(row.enode).extend_def.generics.len != 0 {
                 continue;
             }
             let esrc = p.modules.at(row.emod as usize).source.as_str();
-            let items = ea.at_const(row.enode).as_data.extend_def.items;
+            let items = ea.ext(row.enode).extend_def.items;
             for j in 0..items.len {
                 let hid = unsafe ea.list(items)[j as usize];
                 let hn = ea.at_const(hid);
                 if hn.kind != NodeKind::NODE_FUNCTION {
                     continue;
                 }
-                let hs = ea.at_const(hn.as_data.function.name).as_data.name.text;
+                let hs = ea.at_const(ea.ext_name(hid)).as_data.name.text;
                 if esrc.slice(hs.start as usize, hs.end as usize) == name {
                     return DefId { module: row.emod, node: hid };
                 }
@@ -3689,7 +3687,7 @@ extend InstGraph {
             for i in 0..items.len {
                 let nid = unsafe a.list(items)[i as usize];
                 if a.at_const(nid).kind == NodeKind::NODE_INTERFACE {
-                    let ms = a.at_const(nid).as_data.interface_def.items;
+                    let ms = a.ext(nid).interface_def.items;
                     for j in 0..ms.len {
                         let mid = unsafe a.list(ms)[j as usize];
                         let key = skey_mix(0, m as u64 << 32 | mid as u64);
@@ -3708,7 +3706,7 @@ extend InstGraph {
                     let x = self.exts.len() as u64;
                     self.exts.push(ExtRow { dmod: d.module, ddecl: d.node, emod: m as ModuleId, enode: nid });
                     self.push_shape(a, nid);
-                    let ms = a.at_const(nid).as_data.extend_def.items;
+                    let ms = a.ext(nid).extend_def.items;
                     for j in 0..ms.len {
                         let mid = unsafe a.list(ms)[j as usize];
                         self.ext_of.insert(skey_mix(0, m as u64 << 32 | mid as u64), x);
@@ -3767,27 +3765,27 @@ extend InstGraph {
                 let nid = unsafe a.list(items)[i as usize];
                 let n = a.at_const(nid);
                 if n.kind == NodeKind::NODE_FUNCTION {
-                    if n.as_data.function.generics.len == 0 && !n.as_data.function.is_extern() && n.as_data.function.body != NODE_NONE {
+                    if a.ext(nid).function.generics.len == 0 && !a.ext(nid).function.is_extern() && a.ext(nid).function.body != NODE_NONE {
                         let u0 = self.enter(U_FN | m as u64 << 32 | nid as u64);
                         self.seed_body(m as ModuleId, nid, a, &empty);
                         self.cur_unit = u0;
                     }
                 } else if n.kind == NodeKind::NODE_EXTEND {
-                    if n.as_data.extend_def.generics.len != 0 {
+                    if a.ext(nid).extend_def.generics.len != 0 {
                         // Generic-extend methods run under their instances' frames.
                         continue;
                     }
-                    let inner = n.as_data.extend_def.items;
+                    let inner = a.ext(nid).extend_def.items;
                     for j in 0..inner.len {
                         let iid = unsafe a.list(inner)[j as usize];
                         let it = a.at_const(iid);
-                        if it.kind == NodeKind::NODE_FUNCTION && it.as_data.function.body != NODE_NONE && it.as_data.function.generics.len == 0 {
+                        if it.kind == NodeKind::NODE_FUNCTION && a.ext(iid).function.body != NODE_NONE && a.ext(iid).function.generics.len == 0 {
                             let u0 = self.enter(U_FN | m as u64 << 32 | iid as u64);
                             self.seed_body(m as ModuleId, iid, a, &empty);
                             self.cur_unit = u0;
                         }
                     }
-                } else if (n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM) && n.as_data.aggregate.generics.len == 0 {
+                } else if (n.kind == NodeKind::NODE_STRUCT || n.kind == NodeKind::NODE_ENUM) && a.ext(nid).aggregate.generics.len == 0 {
                     // A concrete aggregate is emitted whether or not a body names it, and with it
                     // the instances its members hold.
                     self.check_members(a, nid);
@@ -4008,7 +4006,7 @@ fn fn_ptr_bound(p: &loader::Package, a: &Ast, bs: NodeList, h: loader::LookupHit
         }
         let ia = unsafe &*p.module_ast_const(r.module);
         let n = ia.at_const(r.node);
-        if n.kind == NodeKind::NODE_INTERFACE && fn_ptr_bound(p, ia, n.as_data.interface_def.bounds, h, depth + 1) {
+        if n.kind == NodeKind::NODE_INTERFACE && fn_ptr_bound(p, ia, ia.ext(r.node).interface_def.bounds, h, depth + 1) {
             return true;
         }
     }

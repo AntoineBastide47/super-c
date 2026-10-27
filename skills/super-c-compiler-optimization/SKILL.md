@@ -176,9 +176,10 @@ bytes.
 **Why compaction:** Decompacting (a shift or mask to recover a field) is cheaper than
 the cache miss a larger struct causes. The compiler already uses this: `Token` is a
 packed `u64`, not a struct: bits 0–31 start offset, 32–55 length, 56–63 kind
-(`src/lexer/token.spc`). `Node` is kept dense (currently 56 bytes, align 4; the
-generated C carries `_Static_assert(sizeof(ast__Node) == 56 && _Alignof(ast__Node) == 4)`
-so any drift is a build error).
+(`src/lexer/token.spc`). `Node` is kept dense (currently 32 bytes, align 4: the payloads
+larger than 20 bytes live in the arena's `NodeExt` table; the generated C carries
+`_Static_assert(sizeof(ast__Node) == 32 && _Alignof(ast__Node) == 4)` so any drift is a
+build error).
 
 **How to compact:**
 

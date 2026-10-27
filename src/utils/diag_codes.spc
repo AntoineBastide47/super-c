@@ -519,9 +519,11 @@ pub(package) const RETURN_OUTLIVES: u16 = 512;
 pub(package) const REGION_ERROR: u16 = 513;
 pub(package) const CANNOT_OPEN_MODULE: u16 = 514;
 pub(package) const EXTERN_DECLARATION_DISAGREES_WITH_C_HEADER: u16 = 515;
+pub(package) const CANNOT_FREE_BOX_THROUGH_REFERENCE: u16 = 516;
+pub(package) const ZEROED_BOX_HAS_NO_ZERO_VALUE: u16 = 517;
 
 /// The number of codes, `NONE` included.
-pub(package) const COUNT: u16 = 516;
+pub(package) const COUNT: u16 = 518;
 
 /// The stable name of `code` (`mismatched_types_expected_found`), empty for `NONE` or an unknown code.
 pub(package) const fn name(code: u16) str<'static> {
@@ -1041,6 +1043,8 @@ pub(package) const fn name(code: u16) str<'static> {
         513 => "region_error",
         514 => "cannot_open_module",
         515 => "extern_declaration_disagrees_with_c_header",
+        516 => "cannot_free_box_through_reference",
+        517 => "zeroed_box_has_no_zero_value",
         _ => "",
     };
 }

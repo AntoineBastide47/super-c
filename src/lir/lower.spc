@@ -620,7 +620,7 @@ extend Lower {
         if n.kind != NodeKind::NODE_STRUCT && n.kind != NodeKind::NODE_ENUM {
             return "";
         }
-        let sp = a.at_const(n.as_data.aggregate.name).as_data.name.text;
+        let sp = a.at_const(a.ext_name(dn)).as_data.name.text;
         return Lower::p(c).modules.at(dm as usize).source.as_str().slice(sp.start as usize, sp.end as usize);
     }
 
@@ -890,7 +890,7 @@ extend Lower {
             let it = *Lower::ast(c, rm).instance(y.as_data.inst);
             dm = it.module;
             dn = it.decl;
-            nb = c.mg.push_generics(dm, Lower::ast(c, dm).at_const(dn).as_data.aggregate.generics, rm, &it);
+            nb = c.mg.push_generics(dm, Lower::ast(c, dm).ext(dn).aggregate.generics, rm, &it);
         } else {
             return false;
         }
@@ -903,26 +903,28 @@ extend Lower {
     fn decl_fields(self: &mut Self, c: &mut cbe::CEmit, dm: ModuleId, dn: NodeId, out: &mut Vector<FieldAt>) bool {
         let a = Lower::ast(c, dm);
         let n = a.at_const(dn);
-        let ms = n.as_data.aggregate.members;
+        let ms = a.ext(dn).aggregate.members;
         if n.kind == NodeKind::NODE_ENUM {
             if !a.enum_has_payload(dn) {
                 return false;
             }
-            let tag_t = ast::pick(a.enum_tag_is_byte(dn), T_I8, T_I32);
-            out.push(
-                FieldAt {
-                    m: dm,
-                    t: TYPE_NONE,
-                    off: 0,
-                    idx: 0xFFFFFFFF,
-                    node: NODE_NONE,
-                    mty: tag_t,
-                    variant: NODE_NONE,
-                },
-            );
             let mut el = EnumL { ok: false };
             if !self.enum_shape(c, dm, dn, &mut el) {
                 return false;
+            }
+            if el.niche == lay::NK_NONE {
+                let tag_t = ast::pick(a.enum_tag_is_byte(dn), T_I8, T_I32);
+                out.push(
+                    FieldAt {
+                        m: dm,
+                        t: TYPE_NONE,
+                        off: 0,
+                        idx: 0xFFFFFFFF,
+                        node: NODE_NONE,
+                        mty: tag_t,
+                        variant: NODE_NONE,
+                    },
+                );
             }
             for i in 0..ms.len {
                 let vid = unsafe a.list(ms)[i as usize];
@@ -943,8 +945,8 @@ extend Lower {
             }
             return true;
         }
-        let is_union = n.as_data.aggregate.is_union;
-        let is_tuple = n.as_data.aggregate.is_tuple;
+        let is_union = a.ext(dn).aggregate.is_union;
+        let is_tuple = a.ext(dn).aggregate.is_tuple;
         let packed = a.attr_of(dn, AttrKind::ATTR_PACKED) != null;
         let mut off: u32 = 0;
         let mut idx: u32 = 0;
@@ -985,7 +987,29 @@ extend Lower {
     // The shape of payload enum `(dm, dn)` (its generic parameters bound).
     fn enum_shape(self: &mut Self, c: &mut cbe::CEmit, dm: ModuleId, dn: NodeId, out: &mut EnumL) bool {
         let a = Lower::ast(c, dm);
-        let ms = a.at_const(dn).as_data.aggregate.members;
+        let ms = a.ext(dn).aggregate.members;
+        let mut ns = NODE_NONE;
+        let mut nn = NODE_NONE;
+        let nk = c.mg.niche(dm, dn, &mut ns, &mut nn);
+        if nk != lay::NK_NONE {
+            let mt = a.member_ty(unsafe a.list(a.at_const(ns).as_data.variant.payload)[0]);
+            let mut ti = TyI { cls: 0 };
+            if !self.ty(c, dm, mt, &mut ti) {
+                return self.fail("payload-type");
+            }
+            *out = EnumL {
+                ok: true,
+                payload_off: 0,
+                tag: T_NONE,
+                size: round_up(ti.size, ti.align),
+                align: ti.align,
+                niche: nk,
+                some: ns,
+                none: nn,
+                vm: dm,
+            };
+            return true;
+        }
         let mut usize9: u32 = 0;
         let mut ualign: u32 = 1;
         for i in 0..ms.len {
@@ -1122,6 +1146,12 @@ struct EnumL {
     pub(package) tag: u8,
     pub(package) size: u32,
     pub(package) align: u32,
+    /// The niche kind (`lay::niche_kind`): no tag, a null first pointer word of the payload is
+    /// `none`; `some` and `none` are the two variants.
+    pub(package) niche: u8,
+    pub(package) some: NodeId,
+    pub(package) none: NodeId,
+    pub(package) vm: ModuleId, // the module of `some` and `none`
 }
 
 /// `v` rounded up to a multiple of `a`.
@@ -1903,7 +1933,7 @@ extend Lower {
             return false;
         }
         let on = Lower::ast(c, b.owner.module).at_const(b.owner.node);
-        return on.kind == NodeKind::NODE_FUNCTION && on.as_data.function.is_variadic();
+        return on.kind == NodeKind::NODE_FUNCTION && Lower::ast(c, b.owner.module).ext(b.owner.node).function.is_variadic();
     }
 
     // Mark in `mem` the locals that need memory and in `escaped` those whose address escapes.
@@ -2716,12 +2746,7 @@ extend Lower {
             return false;
         }
         let it = *Lower::ast(c, rm).instance(y.as_data.inst);
-        let nb = c.mg.push_generics(
-            it.module,
-            Lower::ast(c, it.module).at_const(it.decl).as_data.aggregate.generics,
-            rm,
-            &it,
-        );
+        let nb = c.mg.push_generics(it.module, Lower::ast(c, it.module).ext(it.decl).aggregate.generics, rm, &it);
         let ok = Lower::ast(c, it.module).at_const(it.decl).kind == NodeKind::NODE_ENUM && self.enum_shape(
             c,
             it.module,
@@ -3017,7 +3042,7 @@ extend Lower {
             }
             let v = self.symaddr(s.as_str(), SK_FUNC);
             let fnn = ia.at_const(k.item.node);
-            if fnn.kind == NodeKind::NODE_FUNCTION && fnn.as_data.function.is_extern() {
+            if fnn.kind == NodeKind::NODE_FUNCTION && ia.ext(k.item.node).function.is_extern() {
                 self.mark_ext(s.as_str());
             }
             return v;
@@ -3212,7 +3237,7 @@ extend Lower {
                 return self.fail("variant");
             }
         } else {
-            ms = a.at_const(en).as_data.aggregate.members;
+            ms = a.ext(en).aggregate.members;
         }
         let mut cur: i64 = -1;
         let it = pk.cir as *mut iri::Interp;
@@ -3436,6 +3461,20 @@ extend Lower {
         self.b.begin(pb);
         let _ = self.call_sym(name, args, tys, T_NONE);
         let _ = self.inst(O_UNREACHABLE, T_NONE, 0, VNONE, VNONE, VNONE);
+        self.b.begin(next);
+    }
+
+    // A panic with `msg` here; the code after it is unreachable.
+    fn panic_now(self: &mut Self, msg: str) {
+        let pb = self.cold_block();
+        let next = self.block();
+        let ep = self.edge(pb, NONE, NONE);
+        let en = self.edge(next, NONE, NONE);
+        let yes = self.iconst(T_I8, 1);
+        let _ = self.inst(O_BR, T_NONE, 0, yes, ep, en);
+        self.b.begin(pb);
+        let mid = self.b.ref_msg(self.pkg.add_message(msg));
+        let _ = self.inst(O_PANIC, T_NONE, 0, mid, VNONE, VNONE);
         self.b.begin(next);
     }
 
@@ -4191,6 +4230,20 @@ extend Lower {
         if val || !self.enum_of(c, rm, rt, &mut el) {
             return self.fail_v("discriminant");
         }
+        if el.niche != lay::NK_NONE {
+            // The payload's first pointer word: null is `none`.
+            let mut ds: i64 = 0;
+            let mut dn: i64 = 0;
+            if !self.variant_value(c, el.vm, el.some, &mut ds) || !self.variant_value(c, el.vm, el.none, &mut dn) {
+                return VNONE;
+            }
+            let w = self.load(self.ptr_int(), addr, 0, false);
+            let z = self.iconst(self.ptr_int(), 0);
+            let set = self.icmp(C_NE, w, z);
+            let vs = self.iconst(ti.mty, ds as u64);
+            let vn = self.iconst(ti.mty, dn as u64);
+            return self.inst(O_SELECT, ti.mty, 0, set, vs, vn);
+        }
         let tag = self.load(el.tag, addr, 0, false);
         return self.int_to(tag, ti.mty, el.tag != T_I8);
     }
@@ -4224,6 +4277,9 @@ extend Lower {
             return self.sentinel(c, b.module, rv.b);
         }
         if k == irc::IN_ZEROED {
+            if c.mg.holds_box(b.module, rv.target, 0) {
+                self.panic_now(cbe::ZEROED_BOX_MSG);
+            }
             return self.zero_here(ti.mty);
         }
         if k == irc::IN_VOLATILE_LOAD {
@@ -4588,6 +4644,10 @@ extend Lower {
             return self.agg_op(c, b, rv, am, at, aref, ti, dst) != VNONE;
         }
         if rv.kind == irc::RV_INTRINSIC && rv.c == irc::IN_ZEROED {
+            if c.mg.holds_box(b.module, rv.target, 0) {
+                // A value that holds a Box has no all-zero form: the instance panics.
+                self.panic_now(cbe::ZEROED_BOX_MSG);
+            }
             self.memset0(dst, ti.size);
             return true;
         }
@@ -4741,8 +4801,15 @@ extend Lower {
             if !self.variant_value(c, rv.item.module, rv.item.node, &mut d) || !self.enum_of(c, rm, rt, &mut el) {
                 return false;
             }
-            let tag = self.iconst(el.tag, d as u64);
-            self.store(tag, dst, 0, false);
+            if el.niche != lay::NK_NONE && rv.item.node != el.some {
+                // A niche enum has no tag: `none` is the all-zero value.
+                self.memset0(dst, el.size);
+                return true;
+            }
+            if el.niche == lay::NK_NONE {
+                let tag = self.iconst(el.tag, d as u64);
+                self.store(tag, dst, 0, false);
+            }
             let mut k: u32 = 0;
             for j in 0..fl.len() {
                 let f = fl[j];
@@ -5149,7 +5216,7 @@ extend Lower {
     fn coerce(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, rv: irc::Rvalue, dst: Value, ti: TyI) Value {
         let cvr = Lower::op_ty(b, rv.a);
         let ga = Lower::ast(c, rv.item.module);
-        let own = ga.at_const(rv.item.node).kind == NodeKind::NODE_FUNCTION && ga.at_const(rv.item.node).as_data.function.generics.len != 0;
+        let own = ga.at_const(rv.item.node).kind == NodeKind::NODE_FUNCTION && ga.ext(rv.item.node).function.generics.len != 0;
         let mut s = String::new();
         let ok = if own {
             c.conv_sym(b, rv.item, cvr, rv.target, &mut s);
@@ -5204,10 +5271,10 @@ extend Lower {
                     pty = da.cap_facts[(unsafe (*cf).cap_start + unsafe (*cf).ncaps + i) as usize].ty;
                 } else {
                     let fnn = da.at_const(iy.as_data.decl);
-                    if fnn.kind != NodeKind::NODE_FUNCTION || i >= fnn.as_data.function.params.len {
+                    if fnn.kind != NodeKind::NODE_FUNCTION || i >= da.ext(iy.as_data.decl).function.params.len {
                         return AM_VAL;
                     }
-                    let pn = da.at_const(unsafe da.list(fnn.as_data.function.params)[i as usize]);
+                    let pn = da.at_const(unsafe da.list(da.ext(iy.as_data.decl).function.params)[i as usize]);
                     if pn.kind != NodeKind::NODE_PARAMETER || pn.as_data.parameter.ty == NODE_NONE {
                         return AM_VAL;
                     }
@@ -5223,9 +5290,9 @@ extend Lower {
             if fnn.kind != NodeKind::NODE_FUNCTION {
                 return AM_VAL;
             }
-            let ps = fnn.as_data.function.params;
+            let ps = fa.ext(callee.node).function.params;
             if i >= ps.len {
-                return ast::pick(fnn.as_data.function.is_variadic(), AM_VARARG, AM_VAL);
+                return ast::pick(fa.ext(callee.node).function.is_variadic(), AM_VARARG, AM_VAL);
             }
             let pn = fa.at_const(unsafe fa.list(ps)[i as usize]);
             if pn.kind != NodeKind::NODE_PARAMETER || pn.as_data.parameter.ty == NODE_NONE {
@@ -5345,7 +5412,7 @@ extend Lower {
     // The name of declaration `(m, d)`.
     fn decl_name(c: &cbe::CEmit, m: ModuleId, d: NodeId) str<'static> {
         let a = Lower::ast(c, m);
-        let sp = a.at_const(a.at_const(d).as_data.aggregate.name).as_data.name.text;
+        let sp = a.at_const(a.ext_name(d)).as_data.name.text;
         return Lower::p(c).modules.at(m as usize).source.as_str().slice(sp.start as usize, sp.end as usize);
     }
 
@@ -5987,6 +6054,12 @@ extend Lower {
         let mut rt = TYPE_NONE;
         let y = Lower::resolved(c, b.module, pl.ty, &mut rm, &mut rt);
         let is_ptr = y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE;
+        let uk = Lower::ast(c, b.module).type_at(pl.ty).kind;
+        if is_ptr && uk != TypeKind::TYPE_POINTER && uk != TypeKind::TYPE_REFERENCE {
+            // A generic value that is a reference in this instance owns nothing (the C emitter's
+            // `drop_emits_nothing`); a drop through a place typed as a pointer frees the pointee.
+            return true;
+        }
         let mut em = rm;
         let mut et = rt;
         if is_ptr && !c.mg.resolve(rm, y.as_data.elem, &mut em, &mut et) {
@@ -6236,7 +6309,7 @@ extend Lower {
                 ) && intrin::lane_form(isa, name.as_str()) == 0 {
                     // Named as the extern block declares it.
                     let ca = Lower::ast(c, t.callee.module);
-                    let nm = ca.at_const(ca.at_const(t.callee.node).as_data.function.name).as_data.name.text;
+                    let nm = ca.at_const(ca.ext_name(t.callee.node)).as_data.name.text;
                     self.pend_c = "calls a function no object defines (a C header's `static` function, or an intrinsic the native backend lacks)";
                     self.pend_name = String::from_str(
                         Lower::p(c).modules.at(t.callee.module as usize).source.as_str().slice(
@@ -6250,7 +6323,7 @@ extend Lower {
                 }
             }
             let fd = Lower::ast(c, pcallee.module).at_const(pcallee.node);
-            if fd.kind == NodeKind::NODE_FUNCTION && fd.as_data.function.is_variadic() {
+            if fd.kind == NodeKind::NODE_FUNCTION && Lower::ast(c, pcallee.module).ext(pcallee.node).function.is_variadic() {
                 variadic = true;
             }
         }
@@ -6261,7 +6334,7 @@ extend Lower {
             let opid = b.oper_pool[(t.args_start + i) as usize];
             if variadic && nfixed == NONE && t.callee.node != NODE_NONE {
                 let fd = Lower::ast(c, pcallee.module).at_const(pcallee.node);
-                if fd.kind == NodeKind::NODE_FUNCTION && i >= fd.as_data.function.params.len {
+                if fd.kind == NodeKind::NODE_FUNCTION && i >= Lower::ast(c, pcallee.module).ext(pcallee.node).function.params.len {
                     nfixed = args.len() as u32;
                 }
             }
@@ -7406,7 +7479,7 @@ extend Lower {
             let mut nb: usize = 0;
             if t.callee.node != NODE_NONE {
                 let fa = Lower::ast(c, t.callee.module);
-                let fd = fa.at_const(t.callee.node).as_data.function;
+                let fd = fa.ext(t.callee.node).function;
                 let rs = fd.returns;
                 for k in 0..rs.len {
                     tys.push(fa.type_of(unsafe fa.list(rs)[k as usize]));
@@ -7445,7 +7518,7 @@ extend Lower {
                     tm = y.module;
                 } else if item {
                     // A function item: its declaration's results.
-                    let rs = da.at_const(y.as_data.decl).as_data.function.returns;
+                    let rs = da.ext(y.as_data.decl).function.returns;
                     for k in 0..rs.len {
                         tys.push(da.type_of(unsafe da.list(rs)[k as usize]));
                     }
@@ -7618,7 +7691,7 @@ extend Lower {
                 if e.kind != NodeKind::NODE_ENUM {
                     continue;
                 }
-                let ms = e.as_data.aggregate.members;
+                let ms = a.ext(unsafe a.list(inner)[j as usize]).aggregate.members;
                 for k in 0..ms.len {
                     if unsafe a.list(ms)[k as usize] == vd {
                         return ms;
@@ -8110,7 +8183,7 @@ extend Lower {
     fn push_obj_args(self: &mut Self, c: &mut cbe::CEmit, g: *const iri::StaticObj) usize {
         let dm = unsafe (*g).dm;
         let a = Lower::ast(c, dm);
-        let gens = a.at_const(unsafe (*g).dn).as_data.aggregate.generics;
+        let gens = a.ext(unsafe (*g).dn).aggregate.generics;
         let mut nb: usize = 0;
         for i in 0..gens.len {
             if i as u8 >= unsafe (*g).nargs {
@@ -8209,7 +8282,7 @@ extend Lower {
         let a = Lower::ast(c, dm);
         let nslots = (unsafe (*g).slots.len()) as u32;
         if unsafe (*g).shape == iri::SS_ENUM {
-            let ms = a.at_const(dn).as_data.aggregate.members;
+            let ms = a.ext(dn).aggregate.members;
             let ord = unsafe (*g).slots.at(0).i;
             if ord < 0 || ord as u32 >= ms.len {
                 return true; // C writes `{0}`
@@ -8419,7 +8492,7 @@ extend Lower {
         let mut idx = k;
         if unsafe (*g).shape == iri::SS_ENUM {
             let a = Lower::ast(c, unsafe (*g).dm);
-            let ms = a.at_const(unsafe (*g).dn).as_data.aggregate.members;
+            let ms = a.ext(unsafe (*g).dn).aggregate.members;
             variant = unsafe a.list(ms)[(unsafe (*g).slots.at(0).i) as usize];
             idx = k - 1;
         }
@@ -8635,7 +8708,7 @@ extend Lower {
             return;
         }
         let fd = Lower::ast(c, cl.module).at_const(cl.node);
-        if fd.kind != NodeKind::NODE_FUNCTION || fd.as_data.function.generics.len == 0 && !c.mg.in_generic_extend(
+        if fd.kind != NodeKind::NODE_FUNCTION || Lower::ast(c, cl.module).ext(cl.node).function.generics.len == 0 && !c.mg.in_generic_extend(
             cl.module,
             cl.node,
         ) && !c.mg.in_keyed_extend(cl.module, cl.node) {
@@ -9631,7 +9704,7 @@ extend Lower {
         }
         let m = d.module;
         let a = Lower::ast(c, m);
-        let f = a.at_const(d.node).as_data.function;
+        let f = a.ext(d.node).function;
         // The parameters' and the result's types, and the env's layout: each argument, then the result.
         let mut pts = Vector::<TypeId>::new();
         let mut tis = Vector::<TyI>::new();
@@ -10311,7 +10384,14 @@ extend Lower {
             if !self.enum_of(c, rm, rt, &mut el) {
                 return self.fail("glue-enum");
             }
-            tag = self.load(el.tag, me, 0, false);
+            if el.niche != lay::NK_NONE {
+                // Only `some` has members: it holds when the payload's pointer word is not null.
+                let w = self.load(self.ptr_int(), me, 0, false);
+                let z = self.iconst(self.ptr_int(), 0);
+                tag = self.icmp(C_NE, w, z);
+            } else {
+                tag = self.load(el.tag, me, 0, false);
+            }
         }
         // Each member in order; an enum's run of one variant's members behind its tag test.
         let mut k: usize = 0;
@@ -10331,12 +10411,15 @@ extend Lower {
             if any {
                 let mut skip = NONE;
                 if is_enum && v != NODE_NONE {
-                    let mut d: i64 = 0;
-                    if !self.variant_value(c, dm, v, &mut d) {
-                        return false;
+                    let mut hit = tag;
+                    if el.niche == lay::NK_NONE {
+                        let mut d: i64 = 0;
+                        if !self.variant_value(c, dm, v, &mut d) {
+                            return false;
+                        }
+                        let dv = self.iconst(el.tag, d as u64);
+                        hit = self.icmp(C_EQ, tag, dv);
                     }
-                    let dv = self.iconst(el.tag, d as u64);
-                    let hit = self.icmp(C_EQ, tag, dv);
                     let body = self.block();
                     skip = self.block();
                     let eb = self.edge(body, NONE, NONE);

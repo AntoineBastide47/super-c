@@ -105,7 +105,7 @@ fn find_fn(p: &loader::Package, name: str) NodeId {
         if a.at_const(nid).kind != NodeKind::NODE_FUNCTION {
             continue;
         }
-        let sp = a.at_const(a.at_const(nid).as_data.function.name).as_data.name.text;
+        let sp = a.at_const(a.ext(nid).function.name).as_data.name.text;
         if src.slice(sp.start as usize, sp.end as usize) == name {
             return nid;
         }
@@ -220,7 +220,7 @@ fn typed_facts_boundary() {
     }
     assert(saw_inst, "instance accessor reaches the interned instance");
     assert(closure != NODE_NONE, "closure found");
-    assert(f.node(closure).as_data.closure.mut_caps != 0, "mutated capture recorded in the mask");
+    assert(f.ext(closure).closure.mut_caps != 0, "mutated capture recorded in the mask");
     assert(f.captures(closure).len != 0, "capture list recorded");
     // Generic args recorded at the specialized use site.
     let mut saw_args = false;
@@ -744,7 +744,7 @@ fn find_in(p: &loader::Package, path: str, name: str) DefId {
         for i in 0..items.len {
             let nid = unsafe a.list(items)[i as usize];
             if a.at_const(nid).kind == NodeKind::NODE_FUNCTION {
-                let sp = a.at_const(a.at_const(nid).as_data.function.name).as_data.name.text;
+                let sp = a.at_const(a.ext(nid).function.name).as_data.name.text;
                 if src.slice(sp.start as usize, sp.end as usize) == name {
                     return DefId { module: u as ModuleId, node: nid };
                 }

@@ -851,7 +851,7 @@ extend Lowerer {
             return false;
         }
         let fa = unsafe &*(&*self.pkg).module_ast_const(target.module);
-        let ps = fa.at_const(target.node).as_data.function.params;
+        let ps = fa.ext(target.node).function.params;
         if pi >= ps.len as usize {
             return false;
         }
@@ -970,7 +970,7 @@ extend Lowerer {
                     return false;
                 }
                 let fa = unsafe &*(&*self.pkg).module_ast_const(t.module);
-                let ps = fa.at_const(t.node).as_data.function.params;
+                let ps = fa.ext(t.node).function.params;
                 if ps.len == 0 {
                     return false;
                 }
@@ -1233,7 +1233,7 @@ extend Lowerer {
     /// supported; the produced body is then incomplete and must be discarded.
     pub(package) fn lower_fn(self: &mut Self, fnode: NodeId) bool {
         self.begin_body(fnode);
-        let fd = self.f.node(fnode).as_data.function;
+        let fd = self.f.ext(fnode).function;
         self.body.is_generic = fd.generics.len != 0;
         let sp = self.f.node(fnode).span;
         // Return slots first (locals [0, returns)), then arguments -- a fixed layout the verifier
@@ -1297,7 +1297,7 @@ extend Lowerer {
     /// ORIGINAL declaring nodes, so the body's uses resolve to them).
     pub(package) fn lower_closure_body(self: &mut Self, cnode: NodeId) bool {
         self.begin_body(cnode);
-        let cd = self.f.node(cnode).as_data.closure;
+        let cd = self.f.ext(cnode).closure;
         let sp = self.f.node(cnode).span;
         let rets = cd.returns;
         for i in 0..rets.len {
@@ -1398,17 +1398,17 @@ extend Lowerer {
     // success.
     // Is `fnode` the `free` of a `Free` conformance that can reach a cancellation acceptance?
     fn free_can_accept(self: &mut Self, fnode: NodeId) bool {
-        let fd = self.f.node(fnode).as_data.function;
+        let fd = self.f.ext(fnode).function;
         let nm = self.f.node(fd.name).as_data.name.text;
         if self.src.slice(nm.start as usize, nm.end as usize) != "free" || !self.chk_enabled() {
             return false;
         }
         let pk = unsafe &*self.pkg;
         let ext = unsafe (&*pk.module_ast_const(self.module)).container_of(fnode);
-        if ext == NODE_NONE || self.f.node(ext).kind != NodeKind::NODE_EXTEND || self.f.node(ext).as_data.extend_def.interface_type == NODE_NONE {
+        if ext == NODE_NONE || self.f.node(ext).kind != NodeKind::NODE_EXTEND || self.f.ext(ext).extend_def.interface_type == NODE_NONE {
             return false;
         }
-        let iface = self.f.res(self.f.node(ext).as_data.extend_def.interface_type);
+        let iface = self.f.res(self.f.ext(ext).extend_def.interface_type);
         let fh = pk.prelude_lookup("Free", true);
         if iface.module != fh.mid || iface.node != fh.node {
             return false;
@@ -1518,7 +1518,7 @@ extend Lowerer {
     // Inline assembly: outputs lower as places (copies carry the place id), inputs as values;
     // template/constraints/clobbers are copied as source spans into the body's asm record.
     fn lower_asm(self: &mut Self, id: NodeId) {
-        let d = self.f.node(id).as_data.asm_stmt;
+        let d = self.f.ext(id).asm_stmt;
         let sp = self.f.node(id).span;
         let mut argv = self.avget();
         let mut i: u32 = 0;
@@ -2149,7 +2149,7 @@ extend Lowerer {
         if da.at_const(dn).kind != NodeKind::NODE_STRUCT {
             return NODE_NONE;
         }
-        let ag = da.at_const(dn).as_data.aggregate;
+        let ag = da.ext(dn).aggregate;
         let mut k: i64 = 0;
         for i in 0..ag.members.len {
             let fid = unsafe da.list(ag.members)[i as usize];
@@ -2195,7 +2195,7 @@ extend Lowerer {
         if da.at_const(dn).kind != NodeKind::NODE_ENUM {
             return NODE_NONE;
         }
-        let ag = da.at_const(dn).as_data.aggregate;
+        let ag = da.ext(dn).aggregate;
         if idx < 0 || idx >= ag.members.len as i64 {
             return NODE_NONE;
         }
@@ -2228,7 +2228,7 @@ extend Lowerer {
         if y.kind == TypeKind::TYPE_INSTANCE {
             let it = *self.f.instance(y.as_data.inst);
             let gda = unsafe &*(&*self.pkg).module_ast_const(it.module);
-            let gens = gda.at_const(it.decl).as_data.aggregate.generics;
+            let gens = gda.ext(it.decl).aggregate.generics;
             let mut gn = gens.len;
             if gn > it.n as u32 {
                 gn = it.n;
@@ -2305,7 +2305,7 @@ extend Lowerer {
     // discriminant, else the previous variant's plus one.
     pub(package) fn tag_of_decl(self: &mut Self, dm: ModuleId, dn: NodeId, idx: i64) i64 {
         let da = unsafe &*(&*self.pkg).module_ast_const(dm);
-        let ms = da.at_const(dn).as_data.aggregate.members;
+        let ms = da.ext(dn).aggregate.members;
         let mut cur: i64 = 0 - 1;
         let mut i: i64 = 0;
         while i <= idx && i < ms.len as i64 {
@@ -2320,7 +2320,7 @@ extend Lowerer {
     // switch edge. True when a tag is negative: the discriminant then reads as i32, else as u32.
     fn tags_of_decl(self: &mut Self, dm: ModuleId, dn: NodeId, out: &mut Vector<u32>) bool {
         let da = unsafe &*(&*self.pkg).module_ast_const(dm);
-        let ms = da.at_const(dn).as_data.aggregate.members;
+        let ms = da.ext(dn).aggregate.members;
         let mut cur: i64 = 0 - 1;
         let mut neg = false;
         for i in 0..ms.len {
@@ -2335,7 +2335,7 @@ extend Lowerer {
     // tag of its variant `idx`: i32 when a tag is negative, else u32.
     fn tag_ty(self: &mut Self, dm: ModuleId, dn: NodeId, idx: i64, tag: &mut i64) TypeId {
         let da = unsafe &*(&*self.pkg).module_ast_const(dm);
-        let ms = da.at_const(dn).as_data.aggregate.members;
+        let ms = da.ext(dn).aggregate.members;
         let mut cur: i64 = 0 - 1;
         let mut neg = false;
         for i in 0..ms.len {
@@ -2436,7 +2436,7 @@ extend Lowerer {
             let op = self.kop(ir::CK_INT, ty, v, sp);
             return self.spill(op, sp);
         }
-        if fr.mode == 1 && (name == "tag" || name == "payload") {
+        if fr.mode == 1 && (name == "tag" || name == "payload" || name == "size") {
             let mut dmv: ModuleId = 0;
             let vid = self.proj_variant_node(fr.owner_st, fr.idx, &mut dmv);
             if vid == NODE_NONE {
@@ -2446,6 +2446,15 @@ extend Lowerer {
             let mut v: i64 = fr.idx;
             if name == "tag" {
                 v = self.proj_tag_val(fr.owner_st, fr.idx);
+            } else if name == "size" {
+                v = self.lay.variant_extent(self.module, fr.owner_st, vid);
+                if v < 0 {
+                    self.fail_at("binder-layout", id);
+                    return ir::IR_NONE;
+                }
+                if ty == TYPE_NONE {
+                    ty = Ast::builtin(BuiltinType::BT_USIZE);
+                }
             } else {
                 let dav = unsafe &*(&*self.pkg).module_ast_const(dmv);
                 v = dav.at_const(vid).as_data.variant.payload.len;
@@ -2523,7 +2532,7 @@ extend Lowerer {
                 let odn = self.proj_owner_decl(fr.owner_st, &mut dmo);
                 let dao = unsafe &*(&*self.pkg).module_ast_const(dmo);
                 let mut fdata: u32 = 0;
-                if dao.at_const(odn).kind == NodeKind::NODE_STRUCT && dao.at_const(odn).as_data.aggregate.is_union {
+                if dao.at_const(odn).kind == NodeKind::NODE_STRUCT && dao.ext(odn).aggregate.is_union {
                     fdata = ir::PJ_UNION_FIELD;
                 }
                 let daf = unsafe &*(&*self.pkg).module_ast_const(dmf);
@@ -3115,7 +3124,7 @@ extend Lowerer {
     // Expand `inline for <bind> in fields/variants/payloads(..)` over the CONCRETE owner: the body
     // lowers once per copy with a frame on the stack. False = owner symbolic (caller falls back).
     fn expand_binder(self: &mut Self, id: NodeId) bool {
-        let d = self.f.node(id).as_data.for_stmt;
+        let d = self.f.ext(id).for_stmt;
         let pt = self.nty(id);
         if pt == TYPE_NONE || self.f.ty(pt).kind != TypeKind::TYPE_FIELD_PROJECTION {
             return false;
@@ -3320,7 +3329,7 @@ extend Lowerer {
     // `payloads` binders: the CONCRETE-owner path expands per copy (expand_binder); a symbolic
     // owner keeps the IN_REFLECT placeholder and flags the body for per-instance re-lowering.
     fn lower_for(self: &mut Self, id: NodeId) {
-        let d = self.f.node(id).as_data.for_stmt;
+        let d = self.f.ext(id).for_stmt;
         let sp = self.f.node(id).span;
         if self.f.node(d.iterable).kind == NodeKind::NODE_CALL {
             let cd = self.f.node(d.iterable).as_data.call;
@@ -3626,7 +3635,7 @@ extend Lowerer {
     fn field_of(self: &Self, sd: DefId, name: str, decl: &mut NodeId) i64 {
         let a = unsafe &*(&*self.pkg).module_ast_const(sd.module);
         let src = unsafe (&*self.pkg).modules.at(sd.module as usize).source.as_str();
-        let ms = a.at_const(sd.node).as_data.aggregate.members;
+        let ms = a.ext(sd.node).aggregate.members;
         for i in 0..ms.len {
             let fid = unsafe a.list(ms)[i as usize];
             if a.at_const(fid).kind != NodeKind::NODE_FIELD {
@@ -3644,7 +3653,7 @@ extend Lowerer {
     // `for x in r` over a prelude Range VALUE: x from r.start while (r.inclusive ? x <= r.end
     // : x < r.end), stepping by one -- the emitter's established range-value semantics.
     fn lower_for_range_value(self: &mut Self, id: NodeId) {
-        let d = self.f.node(id).as_data.for_stmt;
+        let d = self.f.ext(id).for_stmt;
         let sp = self.f.node(id).span;
         let rpl = self.lower_place(d.iterable);
         if rpl == ir::IR_NONE {
@@ -3727,7 +3736,7 @@ extend Lowerer {
     // continues while it yields the payload variant. This is the real protocol -- one call
     // terminator, one discriminant read, one downcast per iteration.
     fn lower_for_iter(self: &mut Self, id: NodeId, next_def: DefId) {
-        let d = self.f.node(id).as_data.for_stmt;
+        let d = self.f.ext(id).for_stmt;
         let sp = self.f.node(id).span;
         let it_pl = self.lower_place(d.iterable);
         if it_pl == ir::IR_NONE {
@@ -3800,7 +3809,7 @@ extend Lowerer {
     // `for` over an indexable sequence (array, slice, sequence value): an index loop over RV_LEN
     // with an explicit element load per iteration.
     fn lower_for_indexed(self: &mut Self, id: NodeId) {
-        let d = self.f.node(id).as_data.for_stmt;
+        let d = self.f.ext(id).for_stmt;
         let sp = self.f.node(id).span;
         let mut ipl = self.lower_place(d.iterable);
         if ipl == ir::IR_NONE {
@@ -4093,7 +4102,7 @@ extend Lowerer {
         let ms = if nd.kind == NodeKind::NODE_VARIANT {
             nd.as_data.variant.payload;
         } else if nd.kind == NodeKind::NODE_STRUCT {
-            nd.as_data.aggregate.members;
+            da.ext(d.node).aggregate.members;
         } else {
             return -1;
         };
@@ -4283,10 +4292,10 @@ extend Lowerer {
         if target.node != NODE_NONE {
             let ca = unsafe &*(&*self.pkg).module_ast_const(target.module);
             let n = ca.at_const(target.node);
-            if n.kind != NodeKind::NODE_FUNCTION || i >= n.as_data.function.params.len {
+            if n.kind != NodeKind::NODE_FUNCTION || i >= ca.ext(target.node).function.params.len {
                 return false;
             }
-            let pn = ca.at_const(unsafe ca.list(n.as_data.function.params)[i as usize]).as_data.parameter.ty;
+            let pn = ca.at_const(unsafe ca.list(ca.ext(target.node).function.params)[i as usize]).as_data.parameter.ty;
             return pn != NODE_NONE && ca.at_const(pn).kind == NodeKind::NODE_POINTER_TYPE;
         }
         if callee_op == ir::IR_NONE {
@@ -4910,7 +4919,7 @@ extend Lowerer {
             return DefId { module: 0, node: NODE_NONE };
         }
         let src = unsafe (&*self.pkg).modules.at(e.module as usize).source.as_str();
-        let ms = a.at_const(e.node).as_data.aggregate.members;
+        let ms = a.ext(e.node).aggregate.members;
         for j in 0..ms.len {
             let vn = unsafe a.list(ms)[j as usize];
             let nsp = a.at_const(a.at_const(vn).as_data.variant.name).as_data.name.text;
@@ -5196,10 +5205,10 @@ extend Lowerer {
     const fn param_is_ref(self: &Self, f: DefId, i: u32) bool {
         let fa = unsafe (&*self.pkg).module_ast_const(f.module);
         let fnn = unsafe (*fa).at_const(f.node);
-        if fnn.kind != NodeKind::NODE_FUNCTION || i >= fnn.as_data.function.params.len {
+        if fnn.kind != NodeKind::NODE_FUNCTION || i >= unsafe (*fa).ext(f.node).function.params.len {
             return false;
         }
-        let pn = unsafe (*fa).at_const(unsafe (*fa).list(fnn.as_data.function.params)[i as usize]);
+        let pn = unsafe (*fa).at_const(unsafe (*fa).list(unsafe (*fa).ext(f.node).function.params)[i as usize]);
         if pn.kind != NodeKind::NODE_PARAMETER || pn.as_data.parameter.ty == NODE_NONE {
             return false;
         }
@@ -5302,14 +5311,14 @@ extend Lowerer {
         }
         let a = unsafe &*(&*self.pkg).module_ast_const(callee.module);
         let nd = a.at_const(callee.node);
-        if nd.kind != NodeKind::NODE_FUNCTION || !nd.as_data.function.is_extern() {
+        if nd.kind != NodeKind::NODE_FUNCTION || !a.ext(callee.node).function.is_extern() {
             return ir::CI_NONE;
         }
         let at = a.attr_of(callee.node, AttrKind::ATTR_IMPORT);
         let nsp = if at != null {
             unsafe (*at).str_span;
         } else {
-            a.at_const(nd.as_data.function.name).as_data.name.text;
+            a.at_const(a.ext_name(callee.node)).as_data.name.text;
         };
         let src = unsafe (&*self.pkg).modules.at(callee.module as usize).source.as_str();
         let k = ir::ci_of_name(src.slice(nsp.start as usize, nsp.end as usize));
@@ -5344,9 +5353,9 @@ extend Lowerer {
         {
             let vd = self.path_res(d.callee);
             let vk = self.decl_kind(vd);
-            let is_tuple_ctor = vk == NodeKind::NODE_STRUCT && unsafe (&*(&*self.pkg).module_ast_const(vd.module)).at_const(
+            let is_tuple_ctor = vk == NodeKind::NODE_STRUCT && unsafe (&*(&*self.pkg).module_ast_const(vd.module)).ext(
                 vd.node,
-            ).as_data.aggregate.is_tuple;
+            ).aggregate.is_tuple;
             if vd.node != NODE_NONE && (vk == NodeKind::NODE_VARIANT || is_tuple_ctor) {
                 let mut argv = self.avget();
                 for i in 0..d.args.len {
@@ -5539,8 +5548,8 @@ extend Lowerer {
             // Deref-adapted receivers are borrowed through the impl instead.
             let fa1 = unsafe &*(&*self.pkg).module_ast_const(target.module);
             let tf1 = fa1.at_const(target.node);
-            if tf1.kind == NodeKind::NODE_FUNCTION && tf1.as_data.function.params.len >= 1 {
-                let p1 = unsafe fa1.list(tf1.as_data.function.params)[0];
+            if tf1.kind == NodeKind::NODE_FUNCTION && fa1.ext(target.node).function.params.len >= 1 {
+                let p1 = unsafe fa1.list(fa1.ext(target.node).function.params)[0];
                 let pt1 = fa1.at_const(p1).as_data.parameter.ty;
                 let mut ptk1 = NodeKind::NODE_NONE_KIND;
                 if pt1 != NODE_NONE {
@@ -5699,7 +5708,7 @@ extend Lowerer {
             let fa9 = unsafe (&*self.pkg).module_ast_const(target.module);
             if target.node != NODE_NONE && (unsafe (*fa9).extend_arity(target.node) > 0 && !unsafe (&*self.pkg).self_first(
                 target,
-            ) || self.decl_kind(target) == NodeKind::NODE_FUNCTION && unsafe (*fa9).at_const(target.node).as_data.function.generics.len != 0) {
+            ) || self.decl_kind(target) == NodeKind::NODE_FUNCTION && unsafe (*fa9).ext(target.node).function.generics.len != 0) {
                 let q9 = self.nty(self.f.node(d.callee).as_data.member.object);
                 if q9 != TYPE_NONE && (self.f.ty(q9).kind == TypeKind::TYPE_INSTANCE || self.f.ty(q9).is_vec()) {
                     impl9 = q9;
@@ -6166,7 +6175,7 @@ extend Lowerer {
     // Whether `f` is an `@intrinsic` function: a call lowers to the operation it names.
     const fn is_intrinsic_fn(self: &Self, f: DefId) bool {
         let n = unsafe (&*(&*self.pkg).module_ast_const(f.module)).at_const(f.node);
-        return n.kind == NodeKind::NODE_FUNCTION && n.as_data.function.is_intrinsic();
+        return n.kind == NodeKind::NODE_FUNCTION && unsafe (&*(&*self.pkg).module_ast_const(f.module)).ext(f.node).function.is_intrinsic();
     }
 
     // The place operand `op` reads, or a temp holding it.
@@ -6210,7 +6219,7 @@ extend Lowerer {
             return ir::IR_NONE;
         }
         let fa = unsafe &*(&*self.pkg).module_ast_const(f.module);
-        let ps = fa.at_const(f.node).as_data.function.params;
+        let ps = fa.ext(f.node).function.params;
         for i in 0..ops.len() {
             let ot = self.body.operands.at(ops[i] as usize).ty;
             let pt = fa.at_const(unsafe fa.list(ps)[i]).as_data.parameter.ty;
@@ -6383,7 +6392,7 @@ extend Lowerer {
         if n.kind != NodeKind::NODE_FUNCTION {
             return 0;
         }
-        let sp2 = a.at_const(n.as_data.function.name).as_data.name.text;
+        let sp2 = a.at_const(a.ext_name(t.node)).as_data.name.text;
         let nm = p.modules.at(t.module as usize).source.as_str().slice(sp2.start as usize, sp2.end as usize);
         if nm == "assert" {
             return 1;
@@ -6640,7 +6649,7 @@ extend Lowerer {
             let members = if is_var {
                 da.at_const(sd.node).as_data.variant.payload;
             } else {
-                da.at_const(sd.node).as_data.aggregate.members;
+                da.ext(sd.node).aggregate.members;
             };
             for _i in 0..members.len {
                 argv.push(ir::IR_NONE);
@@ -7087,7 +7096,7 @@ extend Lowerer {
         if self.f.node(id).kind != NodeKind::NODE_FOR {
             return NODE_NONE;
         }
-        let b = self.f.node(id).as_data.for_stmt.binding;
+        let b = self.f.ext(id).for_stmt.binding;
         let bn = self.f.node(b);
         if bn.kind == NodeKind::NODE_IDENTIFIER || bn.kind == NodeKind::NODE_PATTERN_NAME && bn.as_data.pattern.children.len == 0 {
             return NODE_NONE;
@@ -7567,7 +7576,7 @@ extend Lowerer {
             return TYPE_NONE;
         }
         let fa = unsafe &*(&*self.pkg).module_ast_const(m.module);
-        let fr = fa.at_const(m.node).as_data.function.returns;
+        let fr = fa.ext(m.node).function.returns;
         if fr.len == 0 {
             return TYPE_NONE;
         }
@@ -7592,7 +7601,7 @@ extend Lowerer {
             if fa.at_const(nid).kind != NodeKind::NODE_EXTEND {
                 continue;
             }
-            let ms = fa.at_const(nid).as_data.extend_def.items;
+            let ms = fa.ext(nid).extend_def.items;
             let mut has = false;
             for j in 0..ms.len {
                 if unsafe fa.list(ms)[j as usize] == m.node {
@@ -7603,8 +7612,8 @@ extend Lowerer {
             if !has {
                 continue;
             }
-            let gens = fa.at_const(nid).as_data.extend_def.generics;
-            let pat = fa.type_of(fa.at_const(nid).as_data.extend_def.target_type);
+            let gens = fa.ext(nid).extend_def.generics;
+            let pat = fa.type_of(fa.ext(nid).extend_def.target_type);
             if ext_is_identity(fa, pat, fa, m.module, nid) {
                 let mut n = gens.len;
                 if n > it.n as u32 {
@@ -7733,12 +7742,12 @@ extend Lowerer {
                 if od.node != NODE_NONE {
                     let da = unsafe &*(&*self.pkg).module_ast_const(od.module);
                     let nd = da.at_const(od.node);
-                    if nd.kind == NodeKind::NODE_STRUCT && nd.as_data.aggregate.is_union {
+                    if nd.kind == NodeKind::NODE_STRUCT && da.ext(od.node).aggregate.is_union {
                         fdata = ir::PJ_UNION_FIELD;
-                    } else if nd.kind == NodeKind::NODE_STRUCT && nd.as_data.aggregate.is_tuple {
+                    } else if nd.kind == NodeKind::NODE_STRUCT && da.ext(od.node).aggregate.is_tuple {
                         // tuple member: the resolution pins the positional TYPE node, not a NODE_FIELD;
                         // emit it as `._<index>` from its ordinal in the member list
-                        let ms = nd.as_data.aggregate.members;
+                        let ms = da.ext(od.node).aggregate.members;
                         for mi in 0..ms.len {
                             if unsafe da.list(ms)[mi as usize] == fd.node {
                                 fsub = NODE_NONE;
@@ -7791,7 +7800,7 @@ extend Lowerer {
             return ir::IR_NONE;
         }
         let fa = unsafe &*pk.module_ast_const(target.module);
-        let fd = fa.at_const(target.node).as_data.function;
+        let fd = fa.ext(target.node).function;
         if !fd.is_const() || fd.is_extern() || fd.body == NODE_NONE || !self.foldable_ty(ty, 0) || !self.maybe_const(id) {
             return ir::IR_NONE;
         }
@@ -7861,15 +7870,15 @@ extend Lowerer {
         let mut dm: ModuleId = 0;
         let dn = self.proj_owner_decl(ty, &mut dm);
         let da = unsafe &*(&*self.pkg).module_ast_const(dm);
-        if dn == NODE_NONE || da.at_const(dn).kind != NodeKind::NODE_STRUCT || da.at_const(dn).as_data.aggregate.is_union {
+        if dn == NODE_NONE || da.at_const(dn).kind != NodeKind::NODE_STRUCT || da.ext(dn).aggregate.is_union {
             return false;
         }
-        let ms = da.at_const(dn).as_data.aggregate.members;
+        let ms = da.ext(dn).aggregate.members;
         if ms.len == 0 {
             return false;
         }
         for i in 0..ms.len {
-            if !da.at_const(dn).as_data.aggregate.is_tuple && da.at_const(unsafe da.list(ms)[i as usize]).kind != NodeKind::NODE_FIELD {
+            if !da.ext(dn).aggregate.is_tuple && da.at_const(unsafe da.list(ms)[i as usize]).kind != NodeKind::NODE_FIELD {
                 return false;
             }
             if !self.foldable_ty(self.proj_field_ty(ty, i), depth + 1) {
@@ -7935,7 +7944,7 @@ extend Lowerer {
         } else {
             let mut dm: ModuleId = 0;
             let dn = self.proj_owner_decl(ty, &mut dm);
-            let ag = (unsafe &*(&*self.pkg).module_ast_const(dm)).at_const(dn).as_data.aggregate;
+            let ag = (unsafe &*(&*self.pkg).module_ast_const(dm)).ext(dn).aggregate;
             agg = pick(ag.is_tuple, ir::AGG_TUPLE, ir::AGG_STRUCT);
             item = DefId { module: dm, node: dn };
             for i in 0..ag.members.len {
@@ -7963,7 +7972,7 @@ extend Lowerer {
         let ea = unsafe &*(&*self.pkg).module_ast_const(y.module);
         let vd = DefId {
             module: y.module,
-            node: unsafe ea.list(ea.at_const(y.as_data.decl).as_data.aggregate.members)[ord as usize],
+            node: unsafe ea.list(ea.ext(y.as_data.decl).aggregate.members)[ord as usize],
         };
         let argv = self.avget();
         let op = self.finish_aggregate(ir::AGG_VARIANT, vd, &argv, ty, sp, ir::IR_NONE);
@@ -7975,7 +7984,7 @@ extend Lowerer {
     // borrowed (an implicit autoref included), not moved.
     fn by_ref_param(self: &Self, target: DefId, pi: usize) bool {
         let fa = unsafe &*(&*self.pkg).module_ast_const(target.module);
-        let ps = fa.at_const(target.node).as_data.function.params;
+        let ps = fa.ext(target.node).function.params;
         if pi >= ps.len as usize {
             return false;
         }
@@ -8058,7 +8067,7 @@ extend Lowerer {
                 return false;
             }
             let tk = self.decl_kind(t);
-            if tk == NodeKind::NODE_FUNCTION && !(unsafe &*(&*self.pkg).module_ast_const(t.module)).at_const(t.node).as_data.function.is_const() || tk != NodeKind::NODE_FUNCTION && tk != NodeKind::NODE_VARIANT && tk != NodeKind::NODE_STRUCT {
+            if tk == NodeKind::NODE_FUNCTION && !(unsafe &*(&*self.pkg).module_ast_const(t.module)).ext(t.node).function.is_const() || tk != NodeKind::NODE_FUNCTION && tk != NodeKind::NODE_VARIANT && tk != NodeKind::NODE_STRUCT {
                 return false;
             }
             for i in 0..c.args.len {
@@ -8377,7 +8386,7 @@ extend Lowerer {
                 self.own_operand(lop, d.object);
                 // `&E` from `index`, `&mut E` from `index_mut`: the method's declared result.
                 let ma = unsafe (&*self.pkg).module_ast_const((m >> 32) as ModuleId);
-                let mf = unsafe (*ma).at_const((m & 0xFFFFFFFFu64) as NodeId).as_data.function;
+                let mf = unsafe (*ma).ext((m & 0xFFFFFFFFu64) as NodeId).function;
                 let mut q = TypeQualifier::TYPE_QUAL_NONE as u8;
                 if mf.returns.len == 1 {
                     let rn = unsafe (*ma).at_const(unsafe (*ma).slot_type_node(unsafe (*ma).list(mf.returns)[0]));
@@ -9604,8 +9613,11 @@ extend Lowerer {
         if dn == NODE_NONE {
             return;
         }
-        let ag = unsafe (&*(&*self.pkg).module_ast_const(dm)).at_const(dn).as_data.aggregate;
-        if unsafe (&*(&*self.pkg).module_ast_const(dm)).at_const(dn).kind != NodeKind::NODE_STRUCT || ag.is_union {
+        if unsafe (&*(&*self.pkg).module_ast_const(dm)).at_const(dn).kind != NodeKind::NODE_STRUCT {
+            return;
+        }
+        let ag = unsafe (&*(&*self.pkg).module_ast_const(dm)).ext(dn).aggregate;
+        if ag.is_union {
             return;
         }
         for k in 0..ag.members.len {
