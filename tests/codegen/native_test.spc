@@ -689,27 +689,6 @@ fn main() i32 {
 }
 )";
 
-@test
-fn c_and_native_modules_call_each_other() {
-    if !cli::has_cc() {
-        return; // C and native modules mix
-    }
-    if !nat::supported(tgt::host_os(), tgt::host_isa()) {
-        return;
-    }
-    let p = cli::proj_new();
-    p.mkfile("main.spc", MIXED_MAIN);
-    p.mkfile("lib.spc", MIXED_LIB);
-    for sel in ["main", "lib"] {
-        let r = cli::superc_env_in(p.dir(), "SC_NATIVE", sel, "build main.spc -o bin");
-        if !r.ok() {
-            r.show();
-        }
-        assert(r.ok(), "the mixed program builds");
-        assert_eq(p.run_bin(), 0);
-    }
-}
-
 // C values of `@layout` types pass as the scalars their header's typedefs name: a `double` handle in a
 // vector register, an `unsigned long long` one and a pointer one in integer registers, from native code. The
 // header's pointer constants (a cast to `void *`, and to a typedef of a pointer) are read too.
@@ -738,9 +717,7 @@ fn header_scalars_cross_the_c_abi() {
             p.dir(),
         ).as_str(),
     );
-    let r = cli::superc_env_in(p.dir(), "SC_NATIVE_STATS", "1", "build main.spc -o bin");
-    assert(r.ok(), "the program builds");
-    assert(!r.out_has("main through C"), "main compiles natively");
+    assert(cli::superc_in(p.dir(), "build main.spc -o bin").ok(), "the program builds");
     assert_eq(p.run_bin(), 0);
 }
 
@@ -772,131 +749,75 @@ fn header_structs_cross_the_c_abi() {
             p.dir(),
         ).as_str(),
     );
-    let r = cli::superc_env_in(p.dir(), "SC_NATIVE_STATS", "1", "build main.spc -o bin");
-    assert(r.ok(), "the program builds");
-    assert(!r.out_has("main through C"), "main compiles natively");
+    assert(cli::superc_in(p.dir(), "build main.spc -o bin").ok(), "the program builds");
     assert_eq(p.run_bin(), 0);
 }
 
-// A call the native backend refuses after its module lowered (a C struct by value whose bitfield leaves
-// its class unknown) sends the module through C: the build renders its C in a second run. A rebuild that
-// changes only `main` replays the std modules, which rendered no C. Microsoft x64 passes an aggregate by
-// its size alone, so no class is unknown there.
+// A header type whose layout bindgen cannot derive (a `long double` member) cannot be checked against its
+// `@layout`: the build fails and names it.
 @test
-fn a_module_the_backend_refuses_goes_through_c() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
-    if !nat::supported(tgt::host_os(), tgt::host_isa()) || PLATFORM == Platform::Windows {
-        return;
-    }
-    let p = cli::proj_new();
-    p.mkfile("h.h", "typedef struct { double a; long long b : 40; long long c : 24; } pair;\ndouble sum(pair p);\n");
-    p.mkfile("h.c", "#include \"h.h\"\ndouble sum(pair p) { return p.a + (double)p.b + 7; }\n");
-    assert(p.c_lib("hp", "h.c"), "the C library builds");
-    p.mkfile("main.spc", pair_main(p.dir(), "").as_str());
-    let r = cli::superc_env_in(p.dir(), "SC_NATIVE_STATS", "1", "build main.spc -o bin");
-    assert(r.ok(), "the program builds");
-    assert(r.out_has("main through C"), "main goes through C");
-    assert_eq(p.run_bin(), 7);
-    p.mkfile("main.spc", pair_main(p.dir(), " + 1").as_str());
-    assert(cli::superc_in(p.dir(), "build main.spc -o bin").ok(), "the program builds again");
-    assert_eq(p.run_bin(), 8);
-}
-
-// The `main` of `a_module_the_backend_refuses_goes_through_c`, linked from `dir`, its result plus `more`.
-fn pair_main(dir: str, more: str) String {
-    return format(
-        "@link(\"-L{} -lhp\")\nextern \"C\" \"h.h\" {{\n    @layout(16, 8)\n    type pair;\n    fn sum(p: pair) f64;\n}}\n\nfn main() i32 {{\n    return unsafe sum(unsafe zeroed::<pair>()) as i32{};\n}}\n",
-        dir,
-        more,
-    );
-}
-
-// Vectors of 4 to 32 bytes between modules: built with each module alone native, under both C vector
-// forms (vector registers, and lane arrays with SC_SIMD_SCALAR=1), C and native code must agree on where
-// each vector travels.
-const VEC_LIB: str<'static> = M"(@noinline
-pub fn add4(a: f32x4, b: f32x4) f32x4 { return a + b; }
-@noinline
-pub fn add2(a: f64x2, k: f64, b: f64x2) f64x2 { return a + b + [k, k]; }
-@noinline
-pub fn mul8(a: i16x8, b: i16x8) i16x8 { return a * b; }
-@noinline
-pub fn wide(a: f32x8, n: i32, b: f32x8) f32x8 { return a - b + [n as f32; 8]; }
-@noinline
-pub fn small(a: Simd<u8, 4>, b: Simd<i32, 2>) Simd<u8, 4> { return a + [b[0] as u8, b[1] as u8, 1, 1]; }
-)";
-
-const VEC_MAIN: str<'static> = M"(import lib;
-fn main() i32 {
-    let a: f32x4 = [1.0, 2.0, 3.0, 4.0];
-    if lib::add4(a, a)[3] != 8.0 { return 1; }
-    let d: f64x2 = [0.5, 1.5];
-    if lib::add2(d, 1.0, d)[1] != 4.0 { return 2; }
-    let s: i16x8 = [1, 2, 3, 4, 5, 6, 7, -8];
-    if lib::mul8(s, s)[7] != 64 { return 3; }
-    let w: f32x8 = [9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0];
-    let z: f32x8 = [1.0; 8];
-    if lib::wide(w, 2, z)[0] != 10.0 || lib::wide(w, 2, z)[7] != 3.0 { return 4; }
-    let u: Simd<u8, 4> = [10, 20, 30, 40];
-    let r = lib::small(u, [5, 6]);
-    if r[0] != 15 || r[1] != 26 || r[3] != 41 { return 5; }
-    return 0;
-}
-)";
-
-@test
-fn vectors_cross_between_c_and_native_modules() {
-    if !cli::has_cc() {
-        return; // C and native modules mix
-    }
+fn a_layout_bindgen_cannot_derive_is_an_error() {
     if !nat::supported(tgt::host_os(), tgt::host_isa()) {
         return;
     }
     let p = cli::proj_new();
-    p.mkfile("main.spc", VEC_MAIN);
-    p.mkfile("lib.spc", VEC_LIB);
-    for scalar in ["0", "1"] {
-        let _s = cli::set_env("SC_SIMD_SCALAR", scalar);
-        for sel in ["main", "lib"] {
-            let r = cli::superc_env_in(p.dir(), "SC_NATIVE", sel, "build main.spc -o bin");
-            if !r.ok() {
-                r.show();
-            }
-            assert(r.ok(), "the vector program builds");
-            assert_eq(p.run_bin(), 0);
-        }
-    }
+    p.mkfile("h.h", "typedef struct { double a; long double b; } pair;\ndouble sum(pair p);\n");
+    p.mkfile(
+        "main.spc",
+        "extern \"C\" \"h.h\" {\n    @layout(16, 8)\n    type pair;\n    fn sum(p: pair) f64;\n}\n\nfn main() i32 {\n    return unsafe sum(unsafe zeroed::<pair>()) as i32;\n}\n",
+    );
+    let r = cli::superc_in(p.dir(), "build main.spc -o bin");
+    assert(
+        !r.ok() && r.out_has(
+            "'pair' must have 16 bytes aligned to 8 in C ('@layout'), but its layout does not follow from \"h.h\"",
+        ),
+        "the layout is unchecked",
+    );
 }
 
-// A native object holds the C header constants it reads, so an edit of the header rebuilds it; a header's
-// `static` function, which no object exports, sends its caller through C: a first build renders its C in
-// a second run, and a rebuild replays the modules that rendered none with what they demanded.
+// A native object holds the C header constants it reads, so an edit of the header rebuilds it; a rebuild
+// that changes only `main` replays the std modules.
 @test
 fn header_edits_reach_native_objects() {
-    if !cli::has_cc() {
-        return; // a header's `static` function compiles through C
-    }
     if !nat::supported(tgt::host_os(), tgt::host_isa()) {
         return;
     }
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
-    p.mkfile("val.h", "#define KVAL 40\nstatic inline int one(void) { return 1; }\n");
+    p.mkfile("val.h", "#define KVAL 40\n");
     p.mkfile(
         "main.spc",
-        "extern \"C\" \"val.h\" {\n    const KVAL: i32;\n    fn one() i32;\n}\n\nfn main() i32 {\n    return KVAL + unsafe one();\n}\n",
+        "extern \"C\" \"val.h\" {\n    const KVAL: i32;\n}\n\nfn main() i32 {\n    return KVAL + 1;\n}\n",
     );
     assert_eq(cli::superc_in(p.dir(), "run").exit, 41);
-    p.mkfile("val.h", "#define KVAL 41\nstatic inline int one(void) { return 1; }\n");
+    p.mkfile("val.h", "#define KVAL 41\n");
     assert_eq(cli::superc_in(p.dir(), "run").exit, 42);
-    // Only `main` changes: the std modules replay.
     p.mkfile(
         "main.spc",
-        "extern \"C\" \"val.h\" {\n    const KVAL: i32;\n    fn one() i32;\n}\n\nfn main() i32 {\n    return KVAL + unsafe one() + 1;\n}\n",
+        "extern \"C\" \"val.h\" {\n    const KVAL: i32;\n}\n\nfn main() i32 {\n    return KVAL + 2;\n}\n",
     );
     assert_eq(cli::superc_in(p.dir(), "run").exit, 43);
+}
+
+// A header's `static` function has no object that defines it: a call of it is an error that names it.
+@test
+fn a_call_of_a_header_static_function_is_an_error() {
+    if !nat::supported(tgt::host_os(), tgt::host_isa()) {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("val.h", "static inline int one(void) { return 1; }\n");
+    p.mkfile(
+        "main.spc",
+        "extern \"C\" \"val.h\" {\n    fn one() i32;\n}\n\nfn main() i32 {\n    return unsafe one();\n}\n",
+    );
+    let r = cli::superc_in(p.dir(), "build main.spc -o bin");
+    assert(
+        !r.ok() && r.out_has(
+            "calls a function no object defines (a C header's `static` function, or an intrinsic the native backend lacks): `one`",
+        ),
+        "the call is refused",
+    );
 }
 
 // The native objects under `dir` (`rel` its path below the tree's root), each as its relative path and
@@ -1049,14 +970,12 @@ fn inline_assembly_compiles_natively() {
             "1",
             format("build --target={} --arch=x86_64 main.spc -o bin", os).as_str(),
         );
-        assert(r.out_has("main native") && !r.out_has("main through C"), "main compiles natively for x86-64");
+        assert(r.out_has("main native"), "main compiles natively for x86-64");
     }
     if !nat::supported(tgt::host_os(), tgt::host_isa()) || !nat::asm_native(tgt::host_os(), tgt::host_isa()) {
         return;
     }
-    let r = cli::superc_env_in(p.dir(), "SC_NATIVE_STATS", "1", "build main.spc -o bin");
-    assert(r.ok(), "the program builds");
-    assert(!r.out_has("main through C"), "main compiles natively");
+    assert(cli::superc_in(p.dir(), "build main.spc -o bin").ok(), "the program builds");
     assert_eq(p.run_bin(), 0);
 }
 

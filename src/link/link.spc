@@ -4,8 +4,6 @@
 // LTO, a linker option) stays with the C compiler until step 17 removes it.
 import std::platform::fs;
 import std::platform::process;
-import stdlib;
-import stdio;
 import link::macho as lm;
 import link::elf as le;
 import link::pe;
@@ -15,16 +13,6 @@ import link::util as lu;
 import target::table as tgt;
 import target::native as nat;
 import bindgen::ctarget as ct;
-
-/// Whether a link may take the own linker: unless SC_LINK=cc, which keeps every link with the C compiler.
-pub fn enabled() bool {
-    return stdlib::get_env("SC_LINK").unwrap_or(String::new()).as_str() != "cc";
-}
-
-/// Whether every link must take the own linker (SC_LINK=own): one it does not serve fails.
-pub fn required() bool {
-    return stdlib::get_env("SC_LINK").unwrap_or(String::new()).as_str() == "own";
-}
 
 /// Archive objects `objs` into static library `out` for target `os`; LINKED, or FAILED with the reason in
 /// `why`.
@@ -56,14 +44,13 @@ struct Cmd {
     pub stack: u64, // the main thread's stack reserve (PE), 0: the default
     pub wasm_stack: u64, // wasm: the stack's size (`-z stack-size=`), 0: the default
     pub stack_first: bool, // wasm: the stack before the data
-    pub cc: Vector<String>, // the C compiler and its target flags (`cc_runtime`)
 }
 
-/// Link for target `(os, isa)` what the C compiler's link command `args` names (its objects, libraries
-/// and output), leaving out the local symbols and the debug information when `strip`, with `jobs` workers
-/// (1: no task pool; else the caller shuts the pool down after). LINKED;
-/// NOT_SERVED when the target or an argument is outside what this linker does (`why` names it);
-/// FAILED with the reason in `why`.
+/// Link for target `(os, isa)` what link command `args` names (its objects, libraries, flags and output, in
+/// the C compiler driver's spelling: `-o`, `-l`, `-L`, `-framework`, `-shared`, `--sysroot=`, `-Wl,` flags),
+/// leaving out the local symbols and the debug information when `strip`, with `jobs` workers (1: no task
+/// pool; else the caller shuts the pool down after). LINKED; NOT_SERVED when the target or an argument is
+/// outside what this linker does (`why` names it); FAILED with the reason in `why`.
 pub fn link_args(os: i32, isa: i32, args: &Vector<String>, strip: bool, jobs: u32, why: &mut String) i32 {
     let fmt = nat::own_linker(os, isa);
     if fmt == nat::LINK_NONE {
@@ -85,7 +72,6 @@ pub fn link_args(os: i32, isa: i32, args: &Vector<String>, strip: bool, jobs: u3
         stack: 0,
         wasm_stack: 0,
         stack_first: false,
-        cc: Vector::<String>::new(),
     };
     let r = parse(args, &mut c, why);
     if r != LINKED {
@@ -95,7 +81,7 @@ pub fn link_args(os: i32, isa: i32, args: &Vector<String>, strip: bool, jobs: u3
         return macho(os, isa, &mut c, why);
     }
     if fmt == nat::LINK_PE {
-        return coff(&mut c, why);
+        return coff(os, isa, &mut c, why);
     }
     if fmt == nat::LINK_WASM {
         return wasm(&mut c, why);
@@ -109,16 +95,7 @@ pub fn link_args(os: i32, isa: i32, args: &Vector<String>, strip: bool, jobs: u3
 
 fn parse(args: &Vector<String>, c: &mut Cmd, why: &mut String) i32 {
     let n = args.len();
-    if n != 0 {
-        c.cc.push(args[0].clone());
-    }
-    for k in 1..n {
-        if args[k].as_str().starts_with("--target=") || args[k].as_str().starts_with("--sysroot=") {
-            c.cc.push(args[k].clone());
-        }
-    }
     let mut i: usize = 0;
-    let mut lto = false;
     // Each step consumes one argument, or a flag and its value.
     while i < n {
         let a = args[i].as_str();
@@ -129,22 +106,18 @@ fn parse(args: &Vector<String>, c: &mut Cmd, why: &mut String) i32 {
             "";
         };
         if !a.starts_with("-") {
-            if a.ends_with(".o") || a.ends_with(".obj") || ar::is_archive(a) {
-                c.objs.push(String::from_str(a));
-            } else if a.ends_with(".dylib") || a.ends_with(".tbd") || a.ends_with(".so") || a.ends_with(".c") {
+            if !a.ends_with(".o") && !a.ends_with(".obj") && !ar::is_archive(a) {
                 why.format_into("input '{}'", a);
                 return NOT_SERVED;
             }
-            // Any other word is the C compiler's own command.
+            c.objs.push(String::from_str(a));
             continue;
         }
         if a == "-o" {
             c.out = String::from_str(next);
             i += 1;
-        } else if a == "-isysroot" || a == "--sysroot" || a == "-target" || a == "-isystem" || a == "-include" || a == "-arch" {
-            if a == "-isysroot" || a == "--sysroot" {
-                c.sysroot = String::from_str(next);
-            }
+        } else if a == "--sysroot" {
+            c.sysroot = String::from_str(next);
             i += 1;
         } else if a.starts_with("--sysroot=") {
             c.sysroot = String::from_str(a.slice(10, a.len()));
@@ -192,19 +165,10 @@ fn parse(args: &Vector<String>, c: &mut Cmd, why: &mut String) i32 {
             }
         } else if a == "-Wl,--stack-first" {
             c.stack_first = true;
-        } else if a == "-nostdlib" || a == "--target=wasm32-wasip1" {
-            // wasm's: no C library or start files (`std::rt::libc` is both).
         } else if a == "-Wl,--strip-all" {
             c.strip = true;
-        } else if a.starts_with("-flto") {
-            // Link-time optimization: a C compile's bitcode objects need the C toolchain's link.
-            lto = true;
-        } else if a == "-Wl,-reproducible" {
-            // Always: the output is a function of the inputs.
         } else if a.starts_with("-Wl,-O") && a.len() == 7 && a.byte_at(6) >= b'0' && a.byte_at(6) <= b'9' {
             // lld's string tail merging: an output size level only.
-        } else if compile_only(a) {
-            // A compile flag the link command carries along.
         } else {
             why.format_into("flag '{}'", a);
             return NOT_SERVED;
@@ -214,26 +178,7 @@ fn parse(args: &Vector<String>, c: &mut Cmd, why: &mut String) i32 {
         why.push_str("no output or no object");
         return NOT_SERVED;
     }
-    for k in 0..c.objs.len() {
-        let o = c.objs[k].as_str();
-        if lto && (ar::is_archive(o) || bitcode(o)) {
-            why.format_into("link-time optimization of '{}'", o);
-            return NOT_SERVED;
-        }
-    }
     return LINKED;
-}
-
-// Whether file `path` is an LLVM bitcode object (its magic, bare or in the wrapper header).
-fn bitcode(path: str) bool {
-    let f = stdio::fopen(path, "rb");
-    if f == null {
-        return false;
-    }
-    let mut m: [u8; 4] = [0, 0, 0, 0];
-    let n = unsafe stdio::fread(((&mut m[0]) as *mut u8) as *mut char, 1, 4, f);
-    unsafe stdio::fclose(f);
-    return n == 4 && (m[0] == b'B' && m[1] == b'C' && m[2] == 0xC0 && m[3] == 0xDE || m[0] == 0xDE && m[1] == 0xC0 && m[2] == 0x17 && m[3] == 0x0B);
 }
 
 fn macho(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
@@ -264,14 +209,6 @@ fn macho(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
             return FAILED;
         }
     }
-    let mut stat = false;
-    for i in 0..o.libs.len() {
-        let mut p = String::new();
-        stat = stat || lm::find_lib(&o, o.libs[i].as_str(), &mut p) == lm::LIB_ARCHIVE;
-    }
-    if stat || has_archive(&o.objs) {
-        cc_runtime(&c.cc, nat::OBJ_MACHO, o.out.as_str(), &mut o.objs);
-    }
     if !lm::link(&o, why) {
         return FAILED;
     }
@@ -294,7 +231,7 @@ fn elf(os: i32, isa: i32, c: &mut Cmd, a64: bool, why: &mut String) i32 {
         }
         soname.push_str(p.slice(i, p.len()));
     }
-    let mut o = le::Opts {
+    let o = le::Opts {
         out: replace(&mut c.out, String::new()),
         kind: if c.shared {
             le::K_SHARED;
@@ -309,72 +246,10 @@ fn elf(os: i32, isa: i32, c: &mut Cmd, a64: bool, why: &mut String) i32 {
         a64: a64,
         strip: c.strip,
     };
-    let mut stat = false;
-    for i in 0..o.libs.len() {
-        let mut p = String::new();
-        stat = stat || le::find(&o, o.libs[i].as_str(), &mut p) == le::LIB_ARCHIVE;
-    }
-    if stat || has_archive(&o.objs) {
-        cc_runtime(&c.cc, nat::OBJ_ELF, o.out.as_str(), &mut o.objs);
-    }
     if !le::link(&o, why) {
         return FAILED;
     }
     return LINKED;
-}
-
-fn has_archive(objs: &Vector<String>) bool {
-    for i in 0..objs.len() {
-        if ar::is_archive(objs[i].as_str()) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// The C compiler's runtime archives, which its driver links with every program it links: compiler-rt's
-// builtins or libgcc.a, and libgcc_eh.a, the unwinder `-static-libgcc` takes. A static library the C
-// compiler built may call them (`__cpu_model`, `_Unwind_Backtrace`); as archives they give only the
-// members a link needs. `cc` (the compiler and its target flags) answers for its target; none when it
-// cannot (not installed), nor an archive without an object of format `fmt`. Each answer passes through
-// the file `<out>.ccrt`.
-fn cc_runtime(cc: &Vector<String>, fmt: u8, out: str, objs: &mut Vector<String>) {
-    if cc.len() == 0 {
-        return;
-    }
-    let tmp = format("{}.ccrt", out);
-    let qs: [str; 2] = ["-print-libgcc-file-name", "-print-file-name=libgcc_eh.a"];
-    for q in qs {
-        let mut argv = Vector::<str>::new();
-        for k in 0..cc.len() {
-            argv.push(cc[k].as_str());
-        }
-        argv.push(q);
-        let mut cmd = process::Command::new(argv[0..argv.len()]);
-        cmd.stdout = process::Redirect::Path(tmp.as_str());
-        cmd.stderr = process::Redirect::Null;
-        let started = process::spawn(cmd);
-        if started.is_err() {
-            return;
-        }
-        let mut child = started.unwrap();
-        let _ = child.wait();
-        let text = lu::read(tmp.as_str());
-        let _ = fs::unlink(tmp.as_str());
-        if text.is_none() {
-            continue;
-        }
-        let t = text.unwrap();
-        let mut e: usize = 0;
-        while e < t.len() && t[e] != b'\n' && t[e] != b'\r' {
-            e += 1;
-        }
-        let p = String::from_str(unsafe str::from_raw(t.as_ptr(), e));
-        let abs = p.as_str().starts_with("/") || p.len() > 2 && p.as_str().byte_at(1) == b':';
-        if abs && ar::is_archive(p.as_str()) && ar::holds_objects(fmt, p.as_str()) {
-            objs.push(p);
-        }
-    }
 }
 
 // The C library's parts on wasm, which `std::rt::libc` is: a link that names them needs nothing more.
@@ -411,7 +286,7 @@ fn wasm(c: &mut Cmd, why: &mut String) i32 {
             return NOT_SERVED;
         }
     }
-    let mut o = lw::Opts {
+    let o = lw::Opts {
         out: replace(&mut c.out, String::new()),
         objs: replace(&mut c.objs, Vector::<String>::new()),
         libs: libs,
@@ -419,17 +294,17 @@ fn wasm(c: &mut Cmd, why: &mut String) i32 {
         stack_first: c.stack_first,
         strip: c.strip,
     };
-    if o.libs.len() != 0 || has_archive(&o.objs) {
-        cc_runtime(&c.cc, nat::OBJ_WASM, o.out.as_str(), &mut o.objs);
-    }
     if !lw::link(&o, why) {
         return FAILED;
     }
     return LINKED;
 }
 
-fn coff(c: &mut Cmd, why: &mut String) i32 {
-    let mut o = pe::Opts {
+fn coff(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
+    // After the `-L` directories, the mingw-w64 tree's (winpthreads' `libpthread.a`), as its driver
+    // searches them.
+    let _ = ct::mingw_lib_dirs(os, isa, c.sysroot.as_str(), &mut c.dirs);
+    let o = pe::Opts {
         out: replace(&mut c.out, String::new()),
         shared: c.shared,
         objs: replace(&mut c.objs, Vector::<String>::new()),
@@ -442,31 +317,8 @@ fn coff(c: &mut Cmd, why: &mut String) i32 {
     if !pe::has_dlls(&o, why) {
         return NOT_SERVED;
     }
-    let mut stat = false;
-    for i in 0..o.libs.len() {
-        let mut p = String::new();
-        stat = stat || pe::static_lib(&o, o.libs[i].as_str(), &mut p);
-    }
-    if stat || has_archive(&o.objs) {
-        cc_runtime(&c.cc, nat::OBJ_COFF, o.out.as_str(), &mut o.objs);
-    }
     if !pe::link(&o, why) {
         return FAILED;
     }
     return LINKED;
-}
-
-// Whether `a` is a flag only a C compile reads: the language, warnings, code generation, defines and
-// include paths, the target's minimum OS version and CPU.
-fn compile_only(a: str) bool {
-    if a.starts_with("-Wl,") || a.starts_with("-fsanitize") || a.starts_with("-fprofile") || a.starts_with("-fcoverage") || a.starts_with(
-        "-flto",
-    ) || a.starts_with("-fuse-ld") {
-        return false;
-    }
-    return a.starts_with("-O") || a.starts_with("-g") || a.starts_with("-std=") || a.starts_with("-D") || a.starts_with(
-        "-U",
-    ) || a.starts_with("-I") || a.starts_with("-W") || a.starts_with("-f") || a.starts_with("-m") || a == "-pthread" || a.starts_with(
-        "--target=",
-    ) || a == "-c" || a == "-pipe";
 }

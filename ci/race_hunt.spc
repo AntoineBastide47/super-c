@@ -1,5 +1,5 @@
 // Every concurrency primitive, driven hard enough that a missing happens-before edge shows up, and run by
-// `check.sh` under `--profile=race`. The gate's other program (`parallel_smoke.spc`) proves the substrate
+// `check.sh`'s concurrency step. The gate's other program (`parallel_smoke.spc`) proves the substrate
 // WORKS; this one exists to be hostile to it.
 //
 // Two groups. The first is the primitives the smoke program never touches. The second is the intricate
@@ -594,8 +594,7 @@ fn main() i32 {
     let j = hunt_thread_select();
     let k = hunt_park_storm();
     let l = hunt_thread_condvar();
-    // The blocking pool has its OWN threads; `rt::shutdown` does not join them, and unjoined threads are a
-    // leak TSan reports at exit.
+    // The blocking pool has its OWN threads; `rt::shutdown` does not join them.
     blocking::shutdown();
     rt::shutdown();
     return (a - a + b - b + c - c + d - d + e - e + f - f + g - g + h - h + i - i + j - j + k - k + l - l) as i32;

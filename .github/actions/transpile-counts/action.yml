@@ -1,12 +1,12 @@
 name: Transpile counts
 description: >
   The transpile work of this commit's compiler against the last release's, on the same input. Each is
-  built by clang with its frontend counters (build.toml `[profile.counts]`, the release flags; the last
-  release's sources get the section when they lack it): this commit's by the compiler under test, the last
-  release's from its tagged sources by its own binary. Both then transpile this commit's sources with
-  `--bootstrap-tags` (which the last release always builds: the bootstrap step), every cache off, on one
-  worker, and llvm-profdata totals each run's counters. A count repeats within 0.0001% and covers the
-  compiler's own code only: the C compile, libc and the kernel are not counted. A growth of WARN_PCT
+  built by clang with its frontend counters from its release profile's C (`--emit-c`, ci/cc_tree.sh): this
+  commit's by the compiler under test, the last release's from its tagged sources by its own binary (a
+  release older than `--emit-c` builds its `[profile.counts]` through its own C build). Both then emit this
+  commit's sources as C with `--bootstrap-tags` (which the last release always builds: the bootstrap
+  step), every cache off, on one worker, and llvm-profdata totals each run's counters. A count repeats
+  within 0.0001% and covers the compiler's own code only: libc and the kernel are not counted. A growth of WARN_PCT
   percent or more is a warning; LIMIT_PCT percent or more is an error, and the release then waits for an
   approval (.github/actions/transpile-counts-save). Uploads `<target>.tsv`, `<target>-base.tsv` (counts.py
   summarize), both `.profdata` files, the summary table `<target>.md` and `<target>.verdict` (`ok`, `warn`
@@ -49,34 +49,54 @@ runs:
         w="$RUNNER_TEMP/counts"
         rm -rf "$w" && mkdir -p "$w/out"
         chmod +x "./super-c$x" "./super-c-boot$x"
+        here=$(pwd)
 
-        # Both counts compilers sit two levels under the checkout, so both find this commit's std and ffi.
-        # The counters are the C compiler's: both counted builds go through C.
-        SC_NATIVE=0 "./super-c$x" build --profile=counts --cc="$cc" ${cstd:+"$cstd"} -o "build/counts/super-c-counts$x"
+        # Whether compiler $1 writes C alone (`--emit-c`): every release from the native backend on.
+        emits_c() {
+          "$1" --help 2>/dev/null | grep -q -- '--emit-c'
+        }
+        # The counts compiler of the sources in the working directory, built by compiler $1 into
+        # build/counts/super-c-counts (two levels under the sources, so it finds their std and ffi), with
+        # the C flags of the old `[profile.counts]` that change what runs (no asserts) and the counters.
+        counts_build() {
+          if emits_c "$1"; then
+            "$1" build --profile=release --emit-c --out-dir="$w/counts-tree" &&
+              CC="$cc" sh "$here/ci/cc_tree.sh" "$w/counts-tree/release/raw" "build/counts/super-c-counts$x" -DNDEBUG -fprofile-instr-generate
+          else
+            SC_NATIVE=0 "$1" build --profile=counts --cc="$cc" ${cstd:+"$cstd"} -o "build/counts/super-c-counts$x"
+          fi
+        }
+        mkdir -p build/counts
+        counts_build "./super-c$x"
         git fetch -q --depth=1 origin "refs/tags/$BASE_TAG:refs/tags/$BASE_TAG"
         base="$RUNNER_TEMP/counts-base"
-        rm -rf "$base" && mkdir -p "$base"
+        rm -rf "$base" && mkdir -p "$base/build/counts"
         # No `tar -C "$base"`: Windows GNU tar reads `D:\...` as a remote `host:path`.
         git archive "$BASE_TAG" | (cd "$base" && tar -x)
-        if ! grep -q '^\[profile\.counts\]' "$base/build.toml"; then
-          { echo; awk '/^\[/ { p = ($0 == "[profile.counts]") } p' build.toml; } >> "$base/build.toml"
-        fi
         cp "super-c-boot$x" "$base/"
-        ( cd "$base" && SC_NATIVE=0 "./super-c-boot$x" build --profile=counts --cc="$cc" ${cstd:+"$cstd"} -o "build/counts/super-c-counts$x" )
+        ( cd "$base" && counts_build "./super-c-boot$x" )
         mkdir -p build/counts-base
         cp "$base/build/counts/super-c-counts$x" "build/counts-base/super-c-counts$x"
 
-        # One counted transpile of this commit: $1 the output name, $2 the compiler, $3 its label.
+        # One counted C emission of this commit: $1 the output name, $2 the compiler, $3 its label. A
+        # compiler older than `--emit-c` emits under a C compiler that compiles and links nothing
+        # (`--cc=true`), so its build ends at the binary it never made.
         count() {
           mkdir -p "$w/raw-$1"
           set +e
-          env SC_NO_CACHE=1 CCACHE_DISABLE=1 SC_NO_EMIT_CACHE=1 SC_NO_TU_CACHE=1 SC_LINK=cc LLVM_PROFILE_FILE="$w/raw-$1/%p.profraw" \
-            "$2" build --profile=debug --jobs=1 --cc=true --bootstrap-tags --out-dir="$w/tree-$1" >/dev/null 2>"$w/$1.err"
-          status=$?
+          if emits_c "$2"; then
+            env SC_NO_EMIT_CACHE=1 SC_NO_TU_CACHE=1 LLVM_PROFILE_FILE="$w/raw-$1/%p.profraw" \
+              "$2" build --profile=debug --jobs=1 --emit-c --bootstrap-tags --out-dir="$w/tree-$1" >/dev/null 2>"$w/$1.err"
+            status=$?
+            ok=$([ "$status" -eq 0 ] && echo 1 || echo 0)
+          else
+            env SC_NO_CACHE=1 CCACHE_DISABLE=1 SC_NO_EMIT_CACHE=1 SC_NO_TU_CACHE=1 SC_LINK=cc LLVM_PROFILE_FILE="$w/raw-$1/%p.profraw" \
+              "$2" build --profile=debug --jobs=1 --cc=true --bootstrap-tags --out-dir="$w/tree-$1" >/dev/null 2>"$w/$1.err"
+            status=$?
+            ok=$([ "$status" -eq 1 ] && grep -q "cannot move .* into place" "$w/$1.err" && echo 1 || echo 0)
+          fi
           set -e
-          # `--cc=true` compiles and links nothing (SC_LINK=cc keeps the link with it), so the build ends at
-          # the binary it never made.
-          if [ "$status" -ne 1 ] || ! grep -q "cannot move .* into place" "$w/$1.err"; then
+          if [ "$ok" != 1 ]; then
             cat "$w/$1.err"
             echo "::error::the counted transpile of $3 failed (exit $status)"
             exit 1

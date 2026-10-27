@@ -52,12 +52,15 @@ pub struct Member {
 /// The object members of archive `b` (object format `fmt`) into `members`, and each external symbol a
 /// member defines into `syms` as (name, member), in member order. The BSD and System V layouts with
 /// their long names; the symbol indexes, the long-name table and members of another format are not
-/// object members. False with the reason in `err` when `b` is no archive or is malformed.
+/// object members. `imports` is set when a member is a COFF import (a short import object, or GNU
+/// dlltool's object of `.idata$` sections): the archive is then an import library. False with the
+/// reason in `err` when `b` is no archive or is malformed.
 pub fn read<'a>(
     fmt: u8,
     b: Slice<'a, u8>,
     members: &mut Vector<Member>,
     syms: &mut Vector<(str<'a>, u32)>,
+    imports: &mut bool,
     err: &mut String,
 ) bool {
     if b.len() < 8 || lu::cstr(b[0..8], 0) != "!<arch>\n" {
@@ -161,6 +164,8 @@ pub fn read<'a>(
                     syms.push((names[k], m));
                 }
                 members.push(Member { name: name, at: at, size: size });
+            } else if fmt == nat::OBJ_COFF && coff_import(b[at..at + size]) {
+                *imports = true;
             }
         }
         h = at + size + (at + size & 1);
@@ -209,7 +214,8 @@ extend Archives {
         {
             let mut syms = Vector::<(str, u32)>::new();
             let mut why = String::new();
-            if !read(fmt, bytes.as_slice(), &mut ms, &mut syms, &mut why) {
+            let mut imports = false;
+            if !read(fmt, bytes.as_slice(), &mut ms, &mut syms, &mut imports, &mut why) {
                 err.format_into("'{}': {}", path, why.as_str());
                 return false;
             }
@@ -265,22 +271,6 @@ extend Archives {
             self.members[(am >> 32) as usize][(am & 0xFFFFFFFF) as usize].name.as_str(),
         );
     }
-}
-
-/// Whether archive `path` holds an object of format `fmt` (a Mach-O universal file: in its arm64 slice).
-pub fn holds_objects(fmt: u8, path: str) bool {
-    let d = lu::read(path);
-    if d.is_none() {
-        return false;
-    }
-    let mut b = d.unwrap();
-    if fmt == nat::OBJ_MACHO && !arm64_slice(&mut b) {
-        return false;
-    }
-    let mut ms = Vector::<Member>::new();
-    let mut syms = Vector::<(str, u32)>::new();
-    let mut why = String::new();
-    return read(fmt, b.as_slice(), &mut ms, &mut syms, &mut why) && ms.len() != 0;
 }
 
 // A Mach-O universal file (big-endian `fat_header`, then a `fat_arch` per slice) becomes its arm64
@@ -547,6 +537,25 @@ fn elf_syms<'a>(b: Slice<'a, u8>, out: &mut Vector<str<'a>>) bool {
 
 // An import library's members (a short import object, or binutils' `.idata$` sections) are no objects:
 // the import library stands for its DLL. A weak external defines its name (its default stands in).
+// Whether COFF archive member `b` is an import: a short import object (signatures 0 and 0xFFFF), or an
+// x86-64 object with an `.idata$` section.
+fn coff_import(b: Slice<u8>) bool {
+    if b.len() >= 4 && lu::r16(b, 0) == 0 && lu::r16(b, 2) == 0xFFFF {
+        return true;
+    }
+    if b.len() < 20 || lu::r16(b, 0) != 0x8664 {
+        return false;
+    }
+    let nsec = lu::r16(b, 2) as usize;
+    for k in 0..nsec {
+        let h = 20 + 40 * k;
+        if h + 40 <= b.len() && lu::cstr(b[h..h + 8], 0).starts_with(".idata$") {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn coff_syms<'a>(b: Slice<'a, u8>, out: &mut Vector<str<'a>>) bool {
     if b.len() < 20 || lu::r16(b, 0) != 0x8664 {
         return false;

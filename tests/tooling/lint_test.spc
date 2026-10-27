@@ -725,6 +725,20 @@ fn leading_turbofish_call_marks_a_generic_function_used() {
     }
 }
 
+// A cast to a type alias is not unnecessary: the alias may name another type on another target (`mode_t`
+// is `u16` on macOS, `u32` on Linux). A cast to the type itself is.
+@test
+fn a_cast_to_an_alias_is_kept() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "type mode = u32;\n\nfn widen(x: u32) mode {\n    return x as mode;\n}\n\nfn same(x: u32) u32 {\n    return x as u32;\n}\n\nfn main() i32 {\n    return (widen(1) + same(1)) as i32 - 2;\n}\n",
+    );
+    let r = p.run_raw(format("lint \"{}/main.spc\"", p.dir()).as_str());
+    assert(r.out_has("main.spc:8:12"), "the cast to the type itself is reported");
+    assert(!r.out_has("main.spc:4:12"), "the cast to the alias is not");
+}
+
 @test
 fn standalone_file_lint_and_fix() {
     // The wasm guest has no stable cwd or subprocesses; this drives a working-directory-

@@ -1625,7 +1625,7 @@ pub fn check_cases(cases: &Vector<VCase>) String {
         vout.push(String::new());
         sout.push(String::new());
     }
-    let mut b = h::diff_build(program(cases, &omit).as_str(), ["--profile=ubsan"]);
+    let mut b = h::diff_build(program(cases, &omit).as_str(), []);
     if !b.built {
         // Each constant that traps is an error at it: note the trap's detail, and build without it.
         for line in b.diag.as_str().lines() {
@@ -1647,7 +1647,7 @@ pub fn check_cases(cases: &Vector<VCase>) String {
                 },
             );
         }
-        b = h::diff_build(program(cases, &omit).as_str(), ["--profile=ubsan"]);
+        b = h::diff_build(program(cases, &omit).as_str(), []);
         if !b.built {
             r.format_into("the program does not build:\n{}", b.diag.as_str());
             return r;

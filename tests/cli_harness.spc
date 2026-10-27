@@ -8,7 +8,7 @@ import std::platform::fs;
 import std::platform::env as penv;
 import std::platform::process;
 import driver::util as dutil;
-import build_system::objcache as ocache;
+import module::loader as loader;
 
 // A `realpath` result buffer: PATH_MAX on Linux, and the size `sc_realpath` gives `_fullpath` on Windows.
 type PathMax = Array<char, 4096>;
@@ -142,27 +142,61 @@ pub fn superc_path() str<'static> {
     return unsafe str::from_cstr(superc());
 }
 
-/// C compiler from $CC, or gcc on Windows and cc elsewhere.
+/// The C compiler the comparison job names in `SC_TEST_CC`: a test that compiles C (a C oracle, a C
+/// library it links, the emitted C) checks `has_cc` first.
 pub fn cc_name() *const char {
-    let cc = stdlib::getenv("CC");
-    if cc != null && unsafe *cc != 0 as char {
-        return cc;
-    }
-    if on_windows() {
-        return "gcc".ptr() as *const char;
-    }
-    return "cc".ptr() as *const char;
+    assert(has_cc(), "a test that compiles C checks `cli::has_cc` first");
+    return stdlib::getenv("SC_TEST_CC");
 }
 
-/// Whether the C compiler (`cc_name`) is installed. A test that compiles C itself or forces the C path
-/// returns early without it: the lane with no C compiler runs the rest.
+/// Whether `SC_TEST_CC` names a C compiler: only the comparison job runs the tests that compile C, every
+/// other lane returns early from them.
 pub fn has_cc() bool {
-    let mut path = String::new();
-    return ocache::which_path(unsafe str::from_cstr(cc_name()), &mut path) != 0;
+    let cc = stdlib::getenv("SC_TEST_CC");
+    return cc != null && unsafe *cc != 0 as char;
 }
 
-/// Whether the C compiler (`cc_name`) is clang: its `--version` says so.
+/// Compile the C tree `--emit-c` wrote at `raw` (its `__units` with its `__cflags`) and link `bin` with its
+/// `__ldflags`, by one run of the C compiler (`cc_name`); `extra` adds flags and inputs (its `-l`, `-L` and
+/// `-Wl,` words join the link). The compiler's output goes to `log` and to stderr. Its exit code.
+pub fn cc_tree_link(raw: str, bin: str, extra: str, log: str) i32 {
+    let mut cmd = format(
+        "\"{}\" {}",
+        unsafe str::from_cstr(cc_name()),
+        read_text(format("{}/__cflags", raw).as_str()).as_str().trim(),
+    );
+    let mut ex = Vector::<String>::new();
+    dutil::split_args(&mut ex, extra);
+    let mut link = String::new();
+    for i in 0..ex.len() {
+        let w = ex.at(i).as_str();
+        if w.starts_with("-l") || w.starts_with("-L") || w.starts_with("-Wl,") {
+            link.format_into(" {}", w);
+        } else {
+            cmd.format_into(" {}", w);
+        }
+    }
+    for u in read_text(format("{}/__units", raw).as_str()).as_str().lines() {
+        cmd.format_into(" \"{}/{}\"", raw, u);
+    }
+    cmd.push_string(&link);
+    for f in read_text(format("{}/__ldflags", raw).as_str()).as_str().lines() {
+        cmd.format_into(" {}", f);
+    }
+    cmd.format_into(" -o \"{}\"", bin);
+    let mut lp = String::from_str(log);
+    let r = exec(cmd.cstr(), lp.cstr());
+    if r.exit != 0 {
+        eprintln("{}", read_text(log).as_str());
+    }
+    return r.exit;
+}
+
+/// Whether the C compiler (`cc_name`) is clang: its `--version` says so (false with none, `has_cc`).
 pub fn cc_is_clang() bool {
+    if !has_cc() {
+        return false;
+    }
     let out = format("{}/cc_version_{}.txt", tmp_dir().as_str(), process::pid().unwrap_or(1));
     let mut cmd = format("\"{}\" --version", unsafe str::from_cstr(cc_name()));
     let mut outp = out.clone();
@@ -180,17 +214,6 @@ pub const fn cstd() *const char {
         return "-std=gnu11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700".ptr() as *const char;
     }
     return "-std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700".ptr() as *const char;
-}
-
-// The same, as a `--cstd=` flag for a nested `super-c build`: EMPTY on POSIX, where the manifest default
-// is already this exact string. Passing a partial override (`-std=c11` without the POSIX define) is worse
-// than passing nothing: glibc then hides the prototypes the emitted C needs, which Darwin never does.
-/// `cstd()` as a `-std=` flag.
-pub const fn cstd_flag() *const char {
-    if on_windows() {
-        return "\"--cstd=-std=gnu11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700\"".ptr() as *const char;
-    }
-    return "".ptr() as *const char;
 }
 
 // The executable suffix a linked test binary gets ("" or ".exe"). mingw's gcc appends `.exe` to an output
@@ -553,106 +576,21 @@ extend Proj {
         return exec_env(base.cstr(), op.cstr(), "");
     }
 
-    // Every `*.c` under `dir` (recursively) into `out`: the `find` a shell command would run.
-    fn c_files(self: &Proj, dir: str, out: &mut Vector<String>) {
-        let names = dutil::list_dir(dir, true).unwrap_or(Vector::<String>::new());
-        for i in 0..names.len() {
-            let nm = names.at(i).as_str();
-            let child = format("{}/{}", dir, nm);
-            if dutil::is_dir(child.as_str()) {
-                self.c_files(child.as_str(), out);
-                continue;
-            }
-            if nm.ends_with(".c") {
-                out.push(child);
-            }
-        }
-    }
-
-    // The `@link` flags the emit wrote to build/debug/raw/__ldflags, space separated (empty when there are
-    // none): the `cat` a shell command would run.
-    fn append_ldflags(self: &Proj, out: &mut String) {
-        let flags = read_text(format("{}/build/debug/raw/__ldflags", self.dir()).as_str());
-        if flags.len() == 0 {
-            return;
-        }
-        out.push_byte(b' ');
-        for i in 0..flags.len() {
-            let b = flags.as_str().byte_at(i);
-            out.push_byte(
-                if b == b'\n' {
-                    b' ';
-                } else {
-                    b;
-                },
-            );
-        }
-    }
-
-    // Compile the whole emitted build/ tree (plus any `extra` flags; its `-l`, `-L` and `-Wl,` words join
-    // the link) and link <root>/bin with the @link __ldflags. `strict` adds -Wall -Wextra -Werror;
-    // without it this is the plain build (the analog of cli_test's `cc -std=c11`, where a tree
-    // containing @test functions compiles as an ordinary program). The units compile through the object
-    // cache's script namespace (`objcache::compile_units`): a unit reuses an object only when the same
-    // compiler and flags compiled the same text and includes before, so every check is a compile's own.
-    // The compiler's diagnostics go to the test's stderr.
+    // `cc_tree_with` without C files of the test's own.
     fn cc_tree(self: &Proj, extra: str, strict: bool) CliResult {
         return self.cc_tree_with(extra, strict, "");
     }
 
-    // `cc_tree` that also links the C files `csrcs` (paths under the root, space separated), each compiled
-    // alone with the plain flags into `<file>.o`: the prebuilt C library a program takes through `@link`.
+    // Compile the emitted C tree build/debug/raw into <root>/bin (`cc_tree_link`), plus the C files `csrcs`
+    // (paths under the root, space separated), each compiled alone with the plain flags into `<file>.o`:
+    // the prebuilt C library a program takes through `@link`. `strict` adds -Wall -Wextra -Werror;
+    // without it this is the plain build (where a tree containing @test functions compiles as an ordinary
+    // program). The compiler's diagnostics go to the test's stderr.
     fn cc_tree_with(self: &Proj, extra: str, strict: bool, csrcs: str) CliResult {
         let root = self.dir();
-        let raw = format("{}/build/debug/raw", root);
-        let mut ccv = Vector::<String>::new();
-        dutil::split_args(&mut ccv, unsafe str::from_cstr(cc_name()));
-        let mut cfv = Vector::<String>::new();
-        dutil::split_args(&mut cfv, unsafe str::from_cstr(cstd()));
-        dutil::split_args(&mut cfv, "-funsigned-char -ffp-contract=off");
+        let mut more = String::from_str(extra);
         if strict {
-            dutil::split_args(&mut cfv, "-Wall -Wextra -Werror");
-        }
-        let mut ex = Vector::<String>::new();
-        dutil::split_args(&mut ex, extra);
-        let mut link = String::from_str(unsafe str::from_cstr(cc_name()));
-        for i in 0..ex.len() {
-            let w = ex.at(i).as_str();
-            if w.starts_with("-l") || w.starts_with("-L") || w.starts_with("-Wl,") {
-                link.format_into(" {}", w);
-            } else {
-                cfv.push(String::from_str(w));
-            }
-        }
-        let mut all = Vector::<String>::new();
-        self.c_files(raw.as_str(), &mut all);
-        // The members of `__sc_unity.c` compile through it, not alone.
-        let mut members = Set::<String>::new();
-        dutil::unity_members(raw.as_str(), &mut members);
-        let mut units = Vector::<String>::new();
-        for i in 0..all.len() {
-            let rel = String::from_str(all.at(i).as_str().slice(raw.len() + 1, all.at(i).len()));
-            if !members.contains(&rel) {
-                units.push(all.at(i).clone());
-            }
-        }
-        // Without a cache root the namespace is the project's own: every unit compiles.
-        let croot = ocache::cache_root("");
-        let ns = if croot.len() != 0 {
-            ocache::script_ns(croot.as_str());
-        } else {
-            format("{}/.objcache", root);
-        };
-        let mut objs = Vector::<String>::new();
-        let rc = ocache::compile_units(&ccv, &cfv, raw.as_str(), &units, ns.as_str(), &mut objs);
-        // The compile claimed the suite's free job slots, which a claim keeps until its process exits:
-        // give them back now, so the test's later builds and the other tests run in parallel.
-        unsafe shim::sc_jobserver_release_claim();
-        if rc != 0 {
-            return CliResult { exit: rc, out: null };
-        }
-        for i in 0..objs.len() {
-            link.format_into(" \"{}\"", objs.at(i).as_str());
+            more.push_str(" -Wall -Wextra -Werror");
         }
         let mut cs = Vector::<String>::new();
         dutil::split_args(&mut cs, csrcs);
@@ -671,12 +609,14 @@ extend Proj {
             if r.exit != 0 {
                 return r;
             }
-            link.format_into(" \"{}/{}.o\"", root, cs.at(i).as_str());
+            more.format_into(" \"{}/{}.o\"", root, cs.at(i).as_str());
         }
-        self.append_ldflags(&mut link);
-        link.format_into(" -o \"{}/bin{}\"", root, unsafe str::from_cstr(binext()));
-        let mut op = format("{}/.ccout", root);
-        return exec(link.cstr(), op.cstr());
+        let raw = format("{}/build/debug/raw", root);
+        let bin = format("{}/bin{}", root, unsafe str::from_cstr(binext()));
+        return CliResult {
+            exit: cc_tree_link(raw.as_str(), bin.as_str(), more.as_str(), format("{}/.ccout", root).as_str()),
+            out: null,
+        };
     }
 
     /// Compile every generated C file with the harness flags and link `bin`; the C compiler's result.
@@ -720,6 +660,31 @@ extend Proj {
             arc.format_into(" \"{}/{}.o\"", root, cs.at(i).as_str());
         }
         return run_quiet(arc.cstr()) == 0;
+    }
+
+    /// The C compiler's runtime archives, copied to `<dir>/libccrt.a` (libgcc or compiler-rt's builtins)
+    /// and `<dir>/libcceh.a` (libgcc_eh, the static unwinder) where the compiler has them, and the `-l`
+    /// flags naming those: a static library the C compiler built may call them (`__cpu_model`,
+    /// `_Unwind_Backtrace`), and no link adds them implicitly.
+    pub fn cc_runtime(self: &Proj, dir: str) String {
+        let mut flags = String::new();
+        let qs: [(str, str); 2] = [("-print-libgcc-file-name", "ccrt"), ("-print-file-name=libgcc_eh.a", "cceh")];
+        for (q, name) in qs {
+            let mut at = format("{}/.ccrt", self.dir());
+            let mut cmd = format("{} {}", unsafe str::from_cstr(cc_name()), q);
+            if run_io(cmd.cstr(), null, at.cstr(), null) != 0 {
+                continue;
+            }
+            let path = read_text(at.as_str());
+            // A runtime the compiler does not have prints its bare name.
+            if let Some(lib) = loader::read_file(path.as_str().trim()) {
+                let to = format("{}/lib{}.a", dir, name);
+                if fs::publish(to.as_str(), unsafe Slice::<u8> { ptr: lib.as_ptr(), len: lib.len() }).is_ok() {
+                    flags.format_into(" -l{}", name);
+                }
+            }
+        }
+        return flags;
     }
 
     /// `cc_build` without the pedantic warning set.
@@ -1002,25 +967,6 @@ pub fn dir_count_suffix(dir: str, suffix: str) i32 {
         }
     }
     return n;
-}
-
-/// Overwrite every `suffix`-named entry of `dir` with junk; how many were hit. What proves a cache is
-/// really READ: a later consumer must choke on the junk.
-pub fn dir_corrupt_suffix(dir: str, suffix: str) i32 {
-    let mut names = dutil::list_dir(dir, true).unwrap_or(Vector::<String>::new());
-    names.retain(|n: &String| n.ends_with(suffix));
-    for i in 0..names.len() {
-        let mut fp = String::from_str(dir);
-        fp.push_str("/");
-        fp.push_string(names.at(i));
-        let f = stdio::fopen(fp.as_str(), "wb");
-        if f != null {
-            let junk = "not an object file";
-            unsafe stdio::fwrite(junk.ptr(), 1, junk.len(), f);
-            unsafe stdio::fclose(f);
-        }
-    }
-    return names.len() as i32;
 }
 
 /// A family of negative cases checked in few compiles. Case k, named by its label, is the program

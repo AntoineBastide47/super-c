@@ -1,10 +1,10 @@
-// Blocking-pool race exerciser for the ThreadSanitizer lane (see check.sh): the shapes that move the
+// Blocking-pool race exerciser for check.sh's concurrency step: the shapes that move the
 // pool's ownership boundaries hardest. Frame-resident records settled by pool threads while their
 // callers resume, cancellable records abandoned and completed in either order, thread creation raced
 // near the limit with publication delayed and creations made to fail, admission at a full queue, nested
 // calls on pool threads, and bounded shutdowns racing accepted work and reservations. Every call must
-// return its value or a cancellation, every count must settle, and any TSan report is a hole in the
-// ownership argument at the top of std/parallel/blocking.spc.
+// return its value or a cancellation and every count must settle, or the ownership argument at the top of
+// std/parallel/blocking.spc has a hole.
 
 import sc_runtime;
 import std::parallel::runtime as rt;

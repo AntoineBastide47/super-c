@@ -183,15 +183,17 @@ pub struct Package {
     /// The backend table: every `@simd_impl` entry by key, then by feature count, the largest first
     /// (built once every module is typed; `emit::simd_plan` reads it).
     pub simd_table: Vector<cf::SimdEntry>,
-    /// The build runs under a memory checker (an address, memory or thread sanitizer in its C flags):
-    /// the planner keeps the checked lane loop of every masked or gather access.
-    pub mem_check: bool,
-    pub cc_found: bool, // the engine that runs this transpile found the C compiler (`--cc-found`)
-    /// The build makes a shared library: its code is position-independent (the C compile's `-fPIC`).
+    /// The build makes a shared library: its code is position-independent.
     pub pic: bool,
-    /// The C compile's configuration (`bsys::build_cfg`): bit `k - BC_THREAD_SANITIZER` holds build
-    /// constant `k`, except that the OVERFLOW_CHECKS bit is set where the profile wraps.
+    /// The build's configuration (`bsys::build_cfg`): bit `k - BC_THREAD_SANITIZER` holds build constant
+    /// `k`, except that the OVERFLOW_CHECKS bit is set where the profile wraps.
     pub build_cfg: u32,
+    /// The profile's `opt-level` (`bman::OPT_NONE` when it names none), and whether the objects carry debug
+    /// information (`debug`).
+    pub opt: i32,
+    pub debug_info: bool,
+    /// `--sysroot`: the target's C library tree (headers and libraries); empty: discovered.
+    pub sysroot: String,
     /// The settings the build-constant module spells and the early prune decides by: a `--test`
     /// build (TEST), the profile name (PROFILE; empty is `debug`), and the profile names a PROFILE
     /// comparison may name (empty: unchecked). The driver sets them before the platform filter.
@@ -229,8 +231,6 @@ pub struct Package {
     pub root_dir: String, // source root: the directory of the root file; imports resolve relative to it
     pub gen_root: String, // where codegen writes the emitted C tree: <build dir>/raw, set by the driver
     pub c_files: u64, // the `.c` files the emission left under gen_root (`run_package`), for the emit stamp
-    pub cc: String, // the C compiler the command line or manifest named; empty = resolve as usual
-    pub cstd: String, // the base C flags the command line named for a bare build (`--cstd`); empty = the default
     pub std_root: String, // second import search root (parent of std/); empty = none
     /// The project's manifest sets `std_internals = true`: its files see std's `pub(package)` items.
     pub std_internals: bool,
@@ -313,21 +313,12 @@ pub struct Package {
     /// Per module, the offsets where its source's lines start, for the locations of LIR
     /// (`driver::emit::lir_lines`); empty in a build that lowers no LIR.
     pub lines: Vector<Vector<u32>>,
-    /// Whether the build writes native objects for its modules (`SC_NATIVE` on a target the native backend
-    /// supports, in a build whose link takes objects); set by `driver::emit::run_package`.
+    /// Whether the build writes native objects for its modules (a build whose link takes objects); set by
+    /// `driver::emit::run_package`.
     pub native: bool,
-    /// Whether the LIR bodies go through the optimizer (`lir::opt`): the build's C flags optimize, or
-    /// SC_LIR_OPT is 1; set by `driver::emit::run_package`.
+    /// Whether the LIR bodies go through the optimizer (`lir::opt`): an `opt-level` past 0, or SC_LIR_OPT
+    /// is 1; set by `driver::emit::run_package`.
     pub lir_opt: bool,
-    /// Per module, in a native build: its function bodies render to C (`cemit::backends_of`). The others
-    /// render no body: their native objects need none.
-    pub nat_render: Vector<bool>,
-    /// The paths of the modules whose bodies render in a native build though the backend would take them:
-    /// the caller's input, and `run_package`'s output when it returns `RC_NATIVE_RETRY`.
-    pub nat_retry: Vector<String>,
-    /// The C dialect, the manifest's and the profile's C flags of a manifest build; empty for a bare build,
-    /// whose dialect is `cstd`.
-    pub cflags: String,
     /// Compiler-stage parallelism: worker count for the parallel frontiers (0/1 = serial). Set by
     /// the driver from --jobs before run_package; the parallel cc window reads its own copy.
     pub jobs: u32,
@@ -2319,23 +2310,6 @@ const fn ltf_vary(f: u8, v: u32) u8 {
     return f;
 }
 
-/// Whether C unit `rel` of a generated tree (`std/rt/libc.c`, `std/rt/libm__inst.c`, a shard
-/// `std/rt/libc__p1.c`) belongs to wasm's C library (`Package::is_libc`). It compiles with
-/// `-fno-builtin`, as a C library compiles: its functions implement `memset`, `calloc` and the others, so
-/// the C compiler must not turn their code into calls of those functions. A function attribute cannot
-/// say it: clang ignores `no_builtin` on a definition that a call in its unit precedes.
-pub const fn libc_unit(rel: str) bool {
-    for stem in ["std/rt/libc", "std/rt/libm"] {
-        if rel.starts_with(stem) {
-            let rest = rel.slice(stem.len(), rel.len());
-            if rest == ".c" || rest.starts_with("__") {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 extend Package {
     /// Whether module `m` is a runtime module: the runtime every program links, a test build's runner, or
     /// wasm's C library. None is a program module: its symbols always take their module prefix, it shadows
@@ -2658,10 +2632,11 @@ extend Package {
         q.features = self.features;
         q.simd_width = self.simd_width;
         q.simd_dispatch = self.simd_dispatch.clone();
-        q.mem_check = self.mem_check;
         q.pic = self.pic;
         q.build_cfg = self.build_cfg;
-        q.cflags = self.cflags.clone();
+        q.opt = self.opt;
+        q.debug_info = self.debug_info;
+        q.sysroot = self.sysroot.clone();
         q.test_build = self.test_build;
         q.profile = self.profile.clone();
         for i in 0..self.profiles.len() {

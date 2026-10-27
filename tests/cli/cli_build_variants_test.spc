@@ -146,40 +146,6 @@ fn static_and_shared_library_build() {
     library_build(true, true);
 }
 
-// A failing C compile fails the build with the child's exit status, a bounded replay of its output, and
-// the path of the kept log; a later successful compile of the same unit removes the log.
-@test
-fn failed_c_compile_reports_status_and_keeps_the_log() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
-    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
-    let p = cli::proj_new();
-    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
-    // A missing semicolon in the header's function: every C compiler rejects it (a bare `return` in a
-    // non-void function is only a warning under gcc).
-    p.mkfile("src/bad.h", "static inline int bad_value(void) { return 0 }\n");
-    p.mkfile(
-        "src/main.spc",
-        "extern \"C\" \"bad.h\" {\n    fn bad_value() i32;\n}\nfn main() i32 {\n    return unsafe bad_value();\n}\n",
-    );
-    let root = p.dir();
-    let r = cli::superc_env_in(root, E, "1", "build");
-    assert(r.exit != 0, "the build fails");
-    assert(
-        r.out_shows("build: C compile failed (exit 1); output kept at "),
-        "the exit status and the log path are reported",
-    );
-    assert(r.out_shows(".o.log"), "the log is the unit's own");
-    assert(r.out_shows("error:"), "the compiler's diagnostic is replayed");
-    p.mkfile("src/bad.h", "static inline int bad_value(void) { return 0; }\n");
-    let ok = cli::superc_env_in(root, E, "1", "build");
-    assert(ok.ok(), "the corrected unit builds");
-    let mut obj = String::from_str(root);
-    obj.push_str("/build/debug/obj");
-    assert_eq(cli::dir_count_suffix(obj.as_str(), ".o.log"), 0);
-}
-
 // An edit that lands in the same second as the previous compile of its unit still recompiles it:
 // mtimes have second granularity, so the engine tracks what the emit sync rewrote in this build.
 @test
@@ -195,18 +161,14 @@ fn same_second_edit_recompiles() {
     assert_eq(second.exit, 4);
 }
 
-// A unit this build rewrote recompiles even when its object's record is dated after it, which stands in
-// for an edit in the same second as the previous compile: the engine's own emission tells it what it
-// rewrote, an external transpiler leaves the record `.emit_rewritten` (it names the rewritten unit and
+// An object this build rewrote relinks the binary even when the binary is dated after it, which stands in
+// for an edit in the same second as the previous link: the engine's own emission tells it what it
+// rewrote, an external transpiler leaves the record `.emit_rewritten` (it names the rewritten object and
 // not the unchanged one), and a transpiler that leaves none counts its whole tree as rewritten.
 @test
-fn rewritten_unit_recompiles_under_a_later_record() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
-    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
+fn rewritten_object_relinks_under_a_later_binary() {
     if cli::on_windows() || cli::on_wasm() {
-        return; // `find`, `touch -t` and the `sh` transpiler need a POSIX host
+        return; // `touch -t` and the `sh` transpiler need a POSIX host
     }
     for lane in 0..3 {
         let p = cli::proj_new();
@@ -228,14 +190,14 @@ fn rewritten_unit_recompiles_under_a_later_record() {
         let app = format("{}/app", root);
         assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", args.as_str()).ok(), "the first build");
         assert_eq(cli::exe_env_in(app.as_str(), root, E, "1", "").exit, 3);
-        let mut later = format("find \"{}/build/debug/obj\" -name \"*.cmd\" -exec touch -t 203001010000 {{}} +", root);
+        let mut later = format("touch -t 203001010000 \"{}\"", app.as_str());
         assert_eq(cli::run_quiet(later.cstr()), 0);
         p.mkfile("src/lib.spc", "@noinline\npub fn v() i32 {\n    return 4;\n}\n");
         assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", args.as_str()).ok(), "the build after the edit");
         assert_eq(cli::exe_env_in(app.as_str(), root, E, "1", "").exit, 4);
         if lane == 1 {
             let rec = cli::read_text(format("{}/build/debug/.emit_rewritten", root).as_str());
-            assert(rec.contains("lib.c\n") && !rec.contains("main.c"), "the record names the rewritten unit alone");
+            assert(rec.contains("lib.o\n") && !rec.contains("main.o"), "the record names the rewritten object alone");
         }
     }
 }
@@ -249,7 +211,7 @@ fn failed_emission_keeps_the_tree() {
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 3;\n}\n");
     let root = p.dir();
     assert(cli::superc_env_in(root, E, "1", "build").ok(), "the first build");
-    let c = format("{}/build/debug/raw/main.c", root);
+    let c = format("{}/build/debug/raw/main.o", root);
     let before = cli::read_text(c.as_str());
     // The link flags, which the emission writes before any unit, cannot be written: a directory sits at
     // their path.
@@ -262,7 +224,7 @@ fn failed_emission_keeps_the_tree() {
     );
     let bad = cli::superc_env_in(root, E, "1", "build");
     assert(!bad.ok() && bad.out_has("__ldflags"), "unwritable link flags fail the emission");
-    assert(cli::read_text(c.as_str()).as_str() == before.as_str(), "the failed emission wrote no unit");
+    assert(cli::read_text(c.as_str()).as_str() == before.as_str(), "the failed emission wrote no object");
 }
 
 // How many C files module `main` emits into `dir`: `main.c` and its parts `main__p<k>.c`.
@@ -278,14 +240,10 @@ fn shard_parts(dir: str) i32 {
 
 // The compiler decides a module's shard count from its emitted size (about one shard per 256 KiB
 // of C), keeps the count across rebuilds, and lets a `[shards]` entry in build.toml override it: the
-// emitted tree shows it as the module's part files. Three builds of a large program: about 90 s in a
-// full Windows CI shard, so it takes the long timeout.
+// emitted C tree (`--emit-c`) shows it as the module's part files. Three emissions of a large program:
+// they take the long timeout.
 @test(timeout = 300)
 fn shard_counts_follow_emitted_size() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
-    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     // 1,500 small functions render to several hundred KiB of C: more than one shard. `@used` keeps the
@@ -305,17 +263,17 @@ fn shard_counts_follow_emitted_size() {
     src.push_str("fn main() i32 {\n    return f0(1) + f1499(2) - f0(1) - f1499(2);\n}\n");
     p.mkfile("src/main.spc", src.as_str());
     let root = p.dir();
-    let r = cli::superc_env_in(root, E, "1", "build");
+    let r = cli::superc_env_in(root, E, "1", "build --emit-c");
     assert(r.ok(), "the build succeeds");
     let mut gen = String::from_str(root);
     gen.push_str("/build/debug/raw");
     let parts = shard_parts(gen.as_str());
     assert(parts >= 2, "the large module has more than one shard");
-    let again = cli::superc_env_in(root, E, "1", "build");
+    let again = cli::superc_env_in(root, E, "1", "build --emit-c");
     assert(again.ok(), "the rebuild succeeds");
     assert_eq(shard_parts(gen.as_str()), parts);
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n[shards]\n\"main\" = 1\n");
-    let over = cli::superc_env_in(root, E, "1", "build");
+    let over = cli::superc_env_in(root, E, "1", "build --emit-c");
     assert(over.ok(), "the override builds");
     assert_eq(shard_parts(gen.as_str()), 1);
 }

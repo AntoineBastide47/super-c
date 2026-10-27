@@ -200,7 +200,7 @@ fn a_wide_vector_is_one_c_vector_where_the_build_has_its_register() {
     assert(!v4.contains(" c["), "AVX-512F: no chunks");
 }
 
-const RELEASE: [str; 1] = ["--profile=release"];
+const RELEASE: [str; 2] = ["--profile=release", "--emit-c"];
 
 const fn pick<T>(c: bool, a: T, b: T) T {
     if c {
@@ -317,7 +317,6 @@ fn operations_lower_to_their_instructions() {
     if !cli::has_cc() {
         return; // it reads the C compiler's assembly
     }
-    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     if !x86_host() {
         return;
     }
@@ -386,8 +385,11 @@ fn operations_lower_to_their_instructions() {
     );
     ks.add(
         "a stored comparison chooses through a mask register",
-        format("{}fn k(a: i32x8, b: i32x8) i32x8 {{\n    let m = a.less_than(b);\n    return m.choose(a, b);\n}}\n", v4).as_str(),
-        ["vpcmpd", "%k"],
+        format(
+            "{}fn k(a: i32x8, b: i32x8, c: i32x8) i32x8 {{\n    let m = a.less_than(b);\n    return m.choose(c, b);\n}}\n",
+            v4,
+        ).as_str(),
+        ["vpcmp", "%k"],
         [],
     );
     if base {
@@ -401,7 +403,7 @@ fn operations_lower_to_their_instructions() {
     ks.add(
         "a comparison into a mask register",
         format("{}fn k(a: i32x8, b: i32x8) u64 {{\n    return a.less_than(b).to_bits();\n}}\n", v4).as_str(),
-        ["vpcmpd", "%k", "kmov"],
+        ["vpcmp", "%k", "kmov"],
         ["vpmovmskb", "vmovmskps"],
     );
     ks.run();

@@ -386,10 +386,13 @@ fn coff_section(o: &Vector<u8>, name: str) Vector<u8> {
     return out;
 }
 
-// The clang the encodings are compared with: the C compiler when it is clang, else `clang` when it runs,
-// else empty. The tables take LLVM's choices among equal encodings (`xchg`'s operand order, the VEX
-// operand swaps); GNU as takes others.
+// The clang the encodings are compared with, in the comparison job only (`cli::has_cc`): the C compiler
+// when it is clang, else `clang` when it runs, else empty. The tables take LLVM's choices among equal
+// encodings (`xchg`'s operand order, the VEX operand swaps); GNU as takes others.
 fn llvm_cc() String {
+    if !cli::has_cc() {
+        return String::new();
+    }
     if cli::cc_is_clang() {
         return String::from_str(unsafe str::from_cstr(cli::cc_name()));
     }
@@ -912,8 +915,12 @@ fn x64_oracle(text: &String, bytes: &Vector<u8>, ends: &Vector<u32>) {
 fn x64_generated(os: str) {
     let p = cli::proj_new();
     p.mkfile("main.spc", CORPUS);
-    // The link needs the target's C toolchain; the objects come first.
-    let _ = p.run_raw(format("build --target={} --arch=x86_64 \"{}/main.spc\"", os, p.dir()).as_str());
+    // The link needs the target's C library; the objects come first. The header facts need its headers: a
+    // runner without them has no objects to check.
+    let r = p.run_raw(format("build --target={} --arch=x86_64 \"{}/main.spc\"", os, p.dir()).as_str());
+    if r.out_has("no sysroot found") {
+        return;
+    }
     let mut objs = Vector::<String>::new();
     obj_files(format("{}/build/debug/raw", p.dir()).as_str(), &mut objs);
     assert(objs.len() > 5, "the build's objects");

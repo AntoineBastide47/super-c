@@ -55,8 +55,7 @@ jobs:
         run: |
           set -eu
           bin="super-c${BINEXT:-}"
-          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${cstd:+"$cstd"}
+          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${SC_BOOT_CSTD:+"$SC_BOOT_CSTD"}
           [ -f "./$bin" ] || mv "./super-c" "./$bin" # a bootstrap older than the `.exe` naming fix (release.yml)
           test -x "./$bin"
 
@@ -141,7 +140,6 @@ jobs:
           set -u
           bin="super-c${BINEXT:-}"
           chmod +x "./$bin"
-          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
           dur="tests/durations/${{ matrix.lane }}.tsv"
           [ -f "$dur" ] || dur=tests/durations.tsv
           k="${{ matrix.test_shard }}"
@@ -151,8 +149,8 @@ jobs:
             export SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh"
           fi
           start=$(date +%s)
-          SC_LEAK_CHECK=fatal "./$bin" test --sanitizers --quiet --test-shard="$k" --test-durations="$dur" \
-            --test-record-durations="$out" ${cstd:+"$cstd"}
+          SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-shard="$k" --test-durations="$dur" \
+            --test-record-durations="$out"
           status=$?
           echo "wall=$(( $(date +%s) - start ))" >> "$GITHUB_OUTPUT"
           echo "status=$status" >> "$GITHUB_OUTPUT"

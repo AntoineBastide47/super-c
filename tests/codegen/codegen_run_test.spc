@@ -1515,6 +1515,17 @@ fn const_generic_array_length_inferred(b: &mut h::ExitBatch) {
     );
 }
 
+// A narrower number in a wider tuple slot keeps its own type and converts at the store, as in an array
+// or a field: an element, a field, a dereference and a call result.
+@test
+fn tuple_slots_widen_their_numbers() {
+    h::expect_exit(
+        "tuple slots widen",
+        "struct P {\n    pub x: i16,\n}\n\nfn g(k: i16) i16 {\n    return -5 * k;\n}\n\nfn main(args: Vector<str>) i32 {\n    let k = args.len() as i16;\n    let ia: [i16; 4] = [300, -32768, 32767, -5 * k];\n    let i = args.len() + 2;\n    let v = ia[0..4];\n    let p = P { x: -7 * k };\n    let r = &p.x as *const i16;\n    let a: (i32, i64) = unsafe (ia[i], ia[i - 1]);\n    let b: (i32, i64) = (v[i], v[1]);\n    let c: (i32, i64) = (p.x, unsafe *r);\n    let d: (i32, i64) = (g(k), g(k + 1));\n    if a.0 != -5 || a.1 != 32767 || b.0 != -5 || b.1 != -32768 || c.0 != -7 || c.1 != -7 || d.0 != -5 || d.1 != -10 {\n        return 1;\n    }\n    return 0;\n}\n",
+        0,
+    );
+}
+
 @test
 fn tuple_structs_byte_strings_and_slice_for() {
     let mut b = h::ExitBatch::new();
@@ -2522,30 +2533,6 @@ fn main() i32 {
 }
 )",
         105,
-    );
-}
-
-// A tuple element of a narrower number than the tuple's written type keeps its own type: an element or
-// field place reads its storage, and the tuple's field holds the widened value.
-fn tuple_elements_widen_from_their_places(b: &mut h::ExitBatch) {
-    b.add(
-        "narrow places widen into a tuple",
-        M"(struct S { pub a: i16, pub b: f32 }
-@noinline
-fn at(k: usize) usize { return k; }
-fn main() i32 {
-    let ia: [i16; 4] = [300, -32768, 32767, -5];
-    let fa: [f32; 2] = [1.5, -2.25];
-    let s = S { a: -7, b: 0.5 };
-    let k = at(1);
-    let (x, y): (i32, i64) = unsafe (ia[k], s.a);
-    let t: (f64, f64, i32) = unsafe (fa[k - 1], s.b, ia[k + 2]);
-    if x != -32768 || y != -7 { return 1; }
-    if t.0 != 1.5 || t.1 != 0.5 || t.2 != -5 { return 2; }
-    return 0;
-}
-)",
-        0,
     );
 }
 
@@ -5281,7 +5268,6 @@ fn exit_cases_04() {
     let mut b = h::ExitBatch::new();
     function_types_substitute_structurally(&mut b);
     function_items_in_tuples_and_fields(&mut b);
-    tuple_elements_widen_from_their_places(&mut b);
     boxed_closures_erase_to_dyn_fn(&mut b);
     widened_operands_compute_at_the_result_width(&mut b);
     const_generic_values_in_constant_evaluation(&mut b);

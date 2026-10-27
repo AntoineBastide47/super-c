@@ -165,8 +165,6 @@ pub struct Lower {
     /// The units a C chunk without a LIR body landed in, which compile through C, and why.
     pub conly: Vector<u32>,
     pub conly_why: Vector<String>,
-    /// The modules a body of which rendered no C though a unit whose C compiles took it (`CEmit::lir_claim`).
-    pub retry: Vector<u32>,
     /// The CTFE outcome of each test (`probe_tests`) the check compares the evaluator's with.
     pub ctfe: Vector<CtfeRes>,
     /// The build wraps on integer overflow (a profile without overflow checks).
@@ -247,7 +245,6 @@ extend Lower {
             fails_seen: 0,
             conly: Vector::<u32>::new(),
             conly_why: Vector::<String>::new(),
-            retry: Vector::<u32>::new(),
             ctfe: Vector::<CtfeRes>::new(),
             wrap: wrap,
             nbodies: 0,
@@ -6205,8 +6202,16 @@ extend Lower {
                     isa,
                     name.as_str(),
                 ) && intrin::lane_form(isa, name.as_str()) == 0 {
-                    self.pend_c = "calls a function only a C compile defines (an intrinsic, a header's `static` one)";
-                    self.pend_name = name.clone();
+                    // Named as the extern block declares it.
+                    let ca = Lower::ast(c, t.callee.module);
+                    let nm = ca.at_const(ca.at_const(t.callee.node).as_data.function.name).as_data.name.text;
+                    self.pend_c = "calls a function no object defines (a C header's `static` function, or an intrinsic the native backend lacks)";
+                    self.pend_name = String::from_str(
+                        Lower::p(c).modules.at(t.callee.module as usize).source.as_str().slice(
+                            nm.start as usize,
+                            nm.end as usize,
+                        ),
+                    );
                 }
                 if c.mg.in_interface(t.callee.module, t.callee.node) != NODE_NONE && c.mg.last_method_def.node != NODE_NONE {
                     pcallee = c.mg.last_method_def;
@@ -7129,6 +7134,13 @@ extend Lower {
         self.conly_why.push(format("`{}` has no LIR", name));
     }
 
+    /// Whether a body lowered since the last claim needs what no object defines (`pend_c`), cleared.
+    pub fn take_pend_c(self: &mut Self) bool {
+        let r = self.pend_c.len() != 0;
+        self.pend_c = "";
+        return r;
+    }
+
     /// Move `other`'s bodies, data and refusals into this lowering.
     pub fn absorb(self: &mut Self, other: &mut Lower) {
         let _ = self.pkg.absorb(&other.pkg);
@@ -7138,10 +7150,6 @@ extend Lower {
         }
         other.conly.truncate(0);
         other.conly_why.truncate(0);
-        for i in 0..other.retry.len() {
-            self.retry.push(other.retry[i]);
-        }
-        other.retry.truncate(0);
         for i in 0..other.fails.len() {
             self.fails.push(LFail { sym: other.fails[i].sym.clone(), why: other.fails[i].why });
         }

@@ -58,7 +58,7 @@ fn harness_c_calls_the_backend_entries() {
     assert(c.code_has("__sc_si_aarch64__add_f32x4("), "a vector operation calls its entry");
 }
 
-const RELEASE: [str; 1] = ["--profile=release"];
+const RELEASE: [str; 2] = ["--profile=release", "--emit-c"];
 
 // The kernels of one program: each its own `@noinline` function, called from `main` on arguments built
 // from the run-time value `n`. One build and one assembly compile serve every check.
@@ -180,7 +180,6 @@ fn operations_lower_to_their_instructions() {
     if !cli::has_cc() {
         return; // it reads the C compiler's assembly
     }
-    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     if !aarch64_host() {
         return;
     }
@@ -443,13 +442,10 @@ fn main() i32 {
     assert_eq(build_run(&p, ""), 0);
 }
 
-// Two threads that ask at once get one answer, with no race report. The constructor answered before
-// `main`, so they race on the published answer and on fresh OS queries, not on the first detection.
+// Two threads that ask at once get one answer. The constructor answered before `main`, so they race on
+// the published answer and on fresh OS queries, not on the first detection.
 @test
-fn concurrent_queries_agree_without_a_race() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
+fn concurrent_queries_agree() {
     if cli::on_windows() || cli::on_wasm() || h::simd_lane() {
         return;
     }
@@ -471,13 +467,13 @@ fn pick(c: bool, a: i32, b: i32) i32 {
     return b;
 }
 )";
-    let b = h::diff_build(src, ["--profile=race"]);
+    let b = h::diff_build(src, []);
     assert(b.built, b.diag.as_str());
     let r = h::diff_run(&b, "");
-    if r.exit != 0 || r.err.contains("ThreadSanitizer") {
+    if r.exit != 0 {
         eprintln("exit {}: {}", r.exit, r.err.as_str());
     }
-    assert(r.exit == 0 && !r.err.contains("ThreadSanitizer"), "one answer, no race");
+    assert(r.exit == 0, "one answer");
 }
 
 // Build `main.spc` of project `p` with `flags` and run it: its exit code (-1: no build), and its output

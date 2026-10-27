@@ -56,20 +56,12 @@ fn gen_math_seed_3() {
     expect_seeds(&mut m, [3]);
 }
 
-// The runtime's overflow checks compiled out (SC_ARITH_WRAP under the checking `debug` profile): the
-// constants still trap, the run time wraps. The generator finds it, names the seed and reduces the
-// program to the one overflowing case.
+// The run time without overflow checks (the release profile wraps): the constants still trap, the run
+// time wraps. The generator finds it, names the seed and reduces the program to the one overflowing case.
 @test
 fn gen_finds_planted_defect() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
-    let _c = cli::set_env("SC_NATIVE", "0"); // the planted defect is a C flag: the C backend's
     let mut m = scalar::scalar_model(4, 2);
-    let mut plant = String::from_str("--cstd=");
-    plant.push_str(unsafe str::from_cstr(cli::cstd()));
-    plant.push_str(" -DSC_ARITH_WRAP");
-    m.opts.push(plant);
+    m.opts.push(String::from_str("--profile=release"));
     let r = gen::run_seed(&mut m, 14); // seed 14 draws an overflowing case (6 reduction checks)
     eprintln("{}", r.as_str());
     assert(r.contains("model 'scalar' seed 14 fails oracle 0"), "the seed and the oracle are named");

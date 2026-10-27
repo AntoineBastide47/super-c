@@ -72,8 +72,7 @@ jobs:
       - name: Build the compiler
         run: |
           set -eu
-          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
-          "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${cstd:+"$cstd"}
+          "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${SC_BOOT_CSTD:+"$SC_BOOT_CSTD"}
           [ -f "./super-c${BINEXT:-}" ] || mv ./super-c "./super-c${BINEXT:-}"
 
       # A pinned release, checked against the hash recorded here, not against the release's own hash file.
@@ -104,12 +103,11 @@ jobs:
         run: |
           set -eu
           x=${BINEXT:-}
-          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
           # The transpile lane alone: a benchmark that cancels tasks changes the reachability, and with it
           # the code, of the whole runner (see bench/transpile_bench.spc).
-          "./super-c$x" bench --no-run --filter=self_transpile ${cstd:+"$cstd"}
+          "./super-c$x" bench --no-run --filter=self_transpile
           mkdir -p build/profile
-          "./super-c$x" build --profile=bench -o "build/profile/super-c-bench$x" ${cstd:+"$cstd"}
+          "./super-c$x" build --profile=bench -o "build/profile/super-c-bench$x"
           test -x "build/bench-bin$x"
           test -x "build/profile/super-c-bench$x"
 
@@ -117,7 +115,6 @@ jobs:
         run: |
           set -eu
           x=${BINEXT:-}
-          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
           out=build/profile/out
           mkdir -p prof
           run() { # log file, then the command
@@ -127,22 +124,20 @@ jobs:
           run prof/transpile.txt env SC_BENCH_OUT=prof/transpile.json "build/bench-bin$x" --filter=self_transpile
           rm -rf "$out"
           run prof/build-j1.txt env $COLD SC_BUILD_STATS=prof/build-j1.jsonl SC_CEMIT_STATS=1 SC_BORROW_STATS=1 \
-            "build/profile/super-c-bench$x" build --jobs=1 --out-dir="$out" -o "$out/super-c$x" ${cstd:+"$cstd"}
+            "build/profile/super-c-bench$x" build --jobs=1 --out-dir="$out" -o "$out/super-c$x"
           rm -rf "$out"
           run prof/build-jall.txt env $COLD SC_BUILD_STATS=prof/build-jall.jsonl SC_CEMIT_STATS=1 \
-            "build/profile/super-c-bench$x" build --out-dir="$out" -o "$out/super-c$x" ${cstd:+"$cstd"}
+            "build/profile/super-c-bench$x" build --out-dir="$out" -o "$out/super-c$x"
 
       # The sampled binary is samply's root process (the build lane's environment is exported, so no
       # wrapper sits between). The benchmark runs `--in-process`: samply follows an exec, not a fork. On macOS samply attaches to
       # the running process (as root) instead of launching it: a launched process passes samply's preload
-      # library to every child through DYLD_INSERT_LIBRARIES, and the runners run with SIP off, so the
-      # arm64e children (xcrun, Apple's clang and ld) refuse the library (it has no arm64e slice) and every
-      # C compile of the build fails.
+      # library to every child through DYLD_INSERT_LIBRARIES, and the runners run with SIP off, so an
+      # arm64e child (an Apple tool) refuses the library (it has no arm64e slice) and fails.
       - name: Sample the lanes
         run: |
           set -eu
           x=${BINEXT:-}
-          cstd=${SC_CSTD:+--cstd=$SC_CSTD}
           out=build/profile/out
           opts="--save-only --unstable-presymbolicate --rate 1000"
           capture() { # profile file, then the command
@@ -175,7 +170,7 @@ jobs:
             rm -rf "$out"
             ( export $COLD
               capture "prof/build-$i.profile.json.gz" \
-                "build/profile/super-c-bench$x" build --out-dir="$out" -o "$out/super-c$x" ${cstd:+"$cstd"} ) ||
+                "build/profile/super-c-bench$x" build --out-dir="$out" -o "$out/super-c$x" ) ||
               { cat prof/last.txt; echo "build capture $i failed"; exit 1; }
           done
           if [ "$RUNNER_OS" = macOS ]; then sudo chown -R "$(id -u):$(id -g)" prof; fi

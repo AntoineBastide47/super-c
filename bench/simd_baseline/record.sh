@@ -1,7 +1,7 @@
 #!/bin/sh
-# Measures the SIMD baselines and the C toolchain probes of this machine and C compiler, and replaces their
-# rows in baseline.tsv and probes.tsv. Run from the repository root with ./super-c built from the commit
-# under measurement, on a quiet machine. The arguments go to `super-c bench` and `super-c build`:
+# Measures the SIMD baselines of this machine and the C compiler of the hand-written kernels, and replaces
+# their rows in baseline.tsv. Run from the repository root with ./super-c built from the commit under
+# measurement, on a quiet machine. The arguments go to `super-c bench` and `super-c build`:
 #
 #   sh bench/simd_baseline/record.sh                 # the host's instruction sets, C compiler $CC (else cc)
 #   sh bench/simd_baseline/record.sh --target=wasm   # SIMD128 under wasmtime, C compiler $WASI_SDK_PATH/bin/clang
@@ -17,16 +17,16 @@ esac
 case " $* " in
 *" --target=wasm "*)
     cc=${WASI_SDK_PATH:+$WASI_SDK_PATH/bin/}clang
-    triple=wasm32-wasip1
     machine="wasmtime $(wasmtime --version | cut -d' ' -f2), $machine"
     run="wasmtime build/bench-bin"
     ;;
 *)
     cc=${CC:-cc}
-    triple=$($cc -dumpmachine)
     run=build/bench-bin${BINEXT:-}
     ;;
 esac
+# The C compiler of the hand-written kernels.
+version=$($cc --version | head -n 1)
 
 # replace FILE HEADER KEY ROWS: FILE with its rows whose first two columns are KEY replaced by ROWS.
 replace() {
@@ -35,10 +35,6 @@ replace() {
     mv "$1.tmp" "$1"
 }
 
-"$sc" build --print-probes "$@" >build/simd_probes.out
-version=$(sed -n 's/^compiler: //p' build/simd_probes.out)
-probes=$(awk -v c="${cc##*[ /]}" -v v="$version" -v t="$triple" 'NR > 2 { id = $1; sub(/^[^ ]+ +/, ""); print v "\t" t "\t" c "\t" id "\t" $0 }' build/simd_probes.out)
-replace $dir/probes.tsv "$(printf 'version\ttriple\tcompiler\tprobe\tresult')" "$(printf '%s\t%s' "$version" "$triple")" "$probes"
 
 sh $dir/kernels.sh "$@"
 "$sc" bench --no-run --filter=simd_baseline "$@"

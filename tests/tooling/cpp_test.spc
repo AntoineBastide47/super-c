@@ -300,11 +300,14 @@ fn cc_run(cc: str, tail: str, out: str, err: str) i32 {
     return cli::run_with(cmd.cstr(), null, o.cstr(), e.cstr(), "");
 }
 
-// The oracle: a clang for the build's C environment (mingw on Windows), `$CC` when it is one, else `clang`,
-// whose preprocessor bindgen's follows. gcc spells some output differently (`x ##y` and `#x` in a macro
-// dump, a UCN for an extended character, `__LINE__` in a call over several lines). Empty when the host has
-// none.
+// The oracle, in the comparison job only (`cli::has_cc`): a clang for the build's C environment (mingw on
+// Windows), its C compiler when it is one, else `clang`, whose preprocessor bindgen's follows. gcc spells
+// some output differently (`x ##y` and `#x` in a macro dump, a UCN for an extended character, `__LINE__`
+// in a call over several lines). Empty when there is none.
 fn host_clang(p: &cli::Proj) String {
+    if !cli::has_cc() {
+        return String::new();
+    }
     p.mkfile("which.c", "#if defined(__clang__) && (!defined(_WIN32) || defined(__MINGW32__))\n1\n#endif\n");
     let cands = [unsafe str::from_cstr(cli::cc_name()), "clang"];
     for c in cands {

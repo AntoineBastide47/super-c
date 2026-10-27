@@ -155,9 +155,8 @@ extern "C" "sys/stat.h" {
 
 @platform(macos | ios | linux | android)
 extern "C" "sys/stat.h" {
-    // The header's prototype converts the mode to `mode_t`.
     @import("chmod")
-    fn c_chmod(path: *const char, mode: u32) i32;
+    fn c_chmod(path: *const char, mode: mode_t) i32;
 }
 
 @platform(!windows)
@@ -1278,7 +1277,7 @@ pub fn realpath(path: str) Result<String, IoError> {
 @platform(macos | ios | linux | android)
 pub fn set_permissions(path: str, mode: u32) Result<Unit, IoError> {
     let np = path::native(path, IoOp::SetPermissions)?;
-    if unsafe c_chmod(np.ptr(), mode & 0o7777) != 0 {
+    if unsafe c_chmod(np.ptr(), (mode & 0o7777) as mode_t) != 0 {
         return fail::<Unit>(IoOp::SetPermissions);
     }
     return done();

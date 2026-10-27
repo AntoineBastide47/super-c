@@ -111,7 +111,7 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
     h = fnv_mix(h, target as u64 ^ p.arch as u64 << 8);
     // The CPU features, a memory checker and the backend table decide the vector entries a body
     // calls: every entry's key, features and name.
-    h = fnv_mix(fnv_mix(fnv_mix(fnv_mix(h, p.features.w[0]), p.features.w[1]), p.mem_check as u64), p.simd_width);
+    h = fnv_mix(fnv_mix(fnv_mix(h, p.features.w[0]), p.features.w[1]), p.simd_width);
     // The build constants of the C compile's configuration select code; a native build renders whole
     // slice parameters (no `__r` split, `cbe::native_on`).
     h = fnv_mix(fnv_mix(h, p.build_cfg), p.native as u64);
@@ -122,7 +122,7 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
         let e = *p.simd_table.at(i);
         let a = unsafe &*p.module_ast_const(e.module);
         let nm = a.at_const(a.at_const(e.node).as_data.function.name).as_data.name.text;
-        h = fnv_mix(fnv_mix(fnv_mix(h, e.key), e.fs.w[0] ^ e.fs.w[1] << 1), e.lanes as u64);
+        h = fnv_mix(fnv_mix(h, e.key), e.fs.w[0] ^ e.fs.w[1] << 1);
         h = fnv_cont(h, p.modules[e.module as usize].source.as_str().slice(nm.start as usize, nm.end as usize));
     }
     h = fnv_mix(h, p.bootstrap as u64);

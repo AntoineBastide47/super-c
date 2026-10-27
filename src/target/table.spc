@@ -29,7 +29,6 @@ pub struct Isa {
     /// apart (wasm's does), so a vector load and store over different slices may share one loop.
     pub merge_apart: bool,
     pub simd_backend: str<'static>, // `std/simd/backend/<name>.spc`
-    pub probes: str<'static>, // the toolchain probes (`build_system::probe`) its builds run, space-separated
     /// The C headers whose functions are the C compiler's intrinsics, space-separated: no object defines
     /// them, so a native backend compiles their callers through C.
     pub intrinsics: str<'static>,
@@ -51,8 +50,6 @@ pub struct ObjFormat {
     pub hidden: bool,
     /// Shared-library code needs `-fPIC`.
     pub pic: bool,
-    /// Its linker strips a binary in the link (`-Wl,--strip-all`); else `strip` runs after.
-    pub strip_at_link: bool,
     /// The link flag that records a shared library's own name, which a program linking it loads it
     /// through; the name follows. Empty: none.
     pub soname: str<'static>,
@@ -73,12 +70,13 @@ pub struct Os {
     pub darwin: bool,
     /// Its C library comes from std (`std::rt::libc`, `std::rt::libm`), not from the system.
     pub own_libc: bool,
-    /// Its toolchain links the sanitizer runtimes.
-    pub sanitizers: bool,
     pub exe_suffix: str<'static>,
     pub shared_prefix: str<'static>,
     pub shared_suffix: str<'static>,
     pub libm: str<'static>, // the link flag of the C math library, empty when the C library holds it
+    /// The dialect its C headers are read and its emitted C compiles under, after the default one (after a
+    /// space; empty: the default): mingw-w64 declares the POSIX functions only outside strict ISO C.
+    pub c_std: str<'static>,
     /// The defines every C compile for it has, each after a space: the API level the headers declare.
     pub c_defines: str<'static>,
     /// The link flags of an executable, each after a space: the main thread's 8 MiB stack.
@@ -106,7 +104,6 @@ pub struct Target {
     /// C `long double`: 64 (an IEEE double), 80 (the x87 extended format) or 128 (IEEE quadruple).
     pub long_double_bits: u8,
     pub big_endian: bool,
-    pub stack_align: u8,
     pub red_zone: u16, // bytes below the stack pointer a leaf function may use
     pub page_bytes: u32,
     /// The CPU features every build has, closed under `implies`.
@@ -115,9 +112,7 @@ pub struct Target {
     pub never: cf::CpuFeatureSet,
     /// The `-mcpu` of a build with aarch64 features beyond the baseline, empty for `-march`.
     pub mcpu: str<'static>,
-    pub sdk_cc: str<'static>, // the cross C compiler command of an `SDK_XCRUN` toolchain
     pub apple_sdk: str<'static>, // the Apple SDK platform name of a `SYSROOT_APPLE` system
-    pub probes: str<'static>, // the toolchain probes its builds run beyond its instruction set's
     pub cenv: u8, // its C environment row (`bindgen::ctarget_data::ROWS`)
 }
 
@@ -152,7 +147,6 @@ pub const ISAS: [Isa; 3] = [
         mask_fold: false,
         merge_apart: false,
         simd_backend: "x86_64",
-        probes: "target-attr-x86_64 march-x86-64-v2 march-x86-64-v3 march-x86-64-v4 cpuid-count x86-features",
         intrinsics: "immintrin.h x86intrin.h",
     },
     Isa {
@@ -167,7 +161,6 @@ pub const ISAS: [Isa; 3] = [
         mask_fold: true,
         merge_apart: false,
         simd_backend: "aarch64",
-        probes: "target-attr-aarch64 aarch64-features",
         intrinsics: "arm_neon.h arm_acle.h arm_sve.h arm_sme.h",
     },
     Isa {
@@ -182,7 +175,6 @@ pub const ISAS: [Isa; 3] = [
         mask_fold: false,
         merge_apart: true,
         simd_backend: "wasm",
-        probes: "wasm-simd128 wasm-relaxed-simd",
         intrinsics: "wasm_simd128.h",
     },
 ];
@@ -197,17 +189,10 @@ pub const CALLCONVS: [CallConv; 6] = [
 ];
 
 pub const OBJFORMATS: [ObjFormat; 4] = [
-    ObjFormat { name: "elf", sections: SEC_PLAIN, hidden: true, pic: true, strip_at_link: true, soname: "-Wl,-soname," },
-    ObjFormat {
-        name: "macho",
-        sections: SEC_MACHO,
-        hidden: true,
-        pic: true,
-        strip_at_link: false,
-        soname: "-Wl,-install_name,@rpath/",
-    },
-    ObjFormat { name: "coff", sections: SEC_PLAIN, hidden: false, pic: false, strip_at_link: true, soname: "" },
-    ObjFormat { name: "wasm", sections: SEC_DATA_ONLY, hidden: true, pic: true, strip_at_link: true, soname: "" },
+    ObjFormat { name: "elf", sections: SEC_PLAIN, hidden: true, pic: true, soname: "-Wl,-soname," },
+    ObjFormat { name: "macho", sections: SEC_MACHO, hidden: true, pic: true, soname: "-Wl,-install_name,@rpath/" },
+    ObjFormat { name: "coff", sections: SEC_PLAIN, hidden: false, pic: false, soname: "" },
+    ObjFormat { name: "wasm", sections: SEC_DATA_ONLY, hidden: true, pic: true, soname: "" },
 ];
 
 // The `@platform` bit order: append only, since a mask bit and a `Platform` discriminant are an index.
@@ -220,11 +205,11 @@ pub const OSES: [Os; 6] = [
         sysroot: SYSROOT_MINGW,
         darwin: false,
         own_libc: false,
-        sanitizers: false,
         exe_suffix: ".exe",
         shared_prefix: "",
         shared_suffix: ".dll",
         libm: "",
+        c_std: " -std=gnu11",
         c_defines: " -D_WIN32_WINNT=0x0A00",
         exe_link: " -Wl,--stack,8388608",
         ndk_host: "windows-x86_64",
@@ -237,11 +222,11 @@ pub const OSES: [Os; 6] = [
         sysroot: SYSROOT_APPLE,
         darwin: true,
         own_libc: false,
-        sanitizers: true,
         exe_suffix: "",
         shared_prefix: "lib",
         shared_suffix: ".dylib",
         libm: "-lm",
+        c_std: "",
         c_defines: "",
         exe_link: "",
         ndk_host: "darwin-x86_64",
@@ -254,11 +239,11 @@ pub const OSES: [Os; 6] = [
         sysroot: SYSROOT_LINUX,
         darwin: false,
         own_libc: false,
-        sanitizers: true,
         exe_suffix: "",
         shared_prefix: "lib",
         shared_suffix: ".so",
         libm: "-lm",
+        c_std: "",
         c_defines: "",
         exe_link: "",
         ndk_host: "linux-x86_64",
@@ -271,11 +256,11 @@ pub const OSES: [Os; 6] = [
         sysroot: SYSROOT_WASI,
         darwin: false,
         own_libc: true,
-        sanitizers: false,
         exe_suffix: "",
         shared_prefix: "lib",
         shared_suffix: ".so",
         libm: "",
+        c_std: "",
         c_defines: "",
         exe_link: " -Wl,-z,stack-size=8388608 -Wl,--stack-first",
         ndk_host: "linux-x86_64",
@@ -288,11 +273,11 @@ pub const OSES: [Os; 6] = [
         sysroot: SYSROOT_APPLE,
         darwin: true,
         own_libc: false,
-        sanitizers: false,
         exe_suffix: "",
         shared_prefix: "lib",
         shared_suffix: ".dylib",
         libm: "-lm",
+        c_std: "",
         c_defines: "",
         exe_link: "",
         ndk_host: "linux-x86_64",
@@ -305,11 +290,11 @@ pub const OSES: [Os; 6] = [
         sysroot: SYSROOT_ANDROID,
         darwin: false,
         own_libc: false,
-        sanitizers: false,
         exe_suffix: "",
         shared_prefix: "lib",
         shared_suffix: ".so",
         libm: "-lm",
+        c_std: "",
         c_defines: "",
         exe_link: "",
         ndk_host: "linux-x86_64",
@@ -362,7 +347,7 @@ const fn named(names: str<'static>, isa: u8) cf::CpuFeatureSet {
     return s;
 }
 
-// A row with the facts most targets share: no extra probes, no `-mcpu`, no SDK compiler.
+// A row with the facts most targets share: no `-mcpu`, no Apple SDK.
 const fn row(isa: u8, cc: u8, obj: u8, os: u8, triple: str<'static>, cenv: u8) Target {
     return Target {
         isa: isa,
@@ -374,15 +359,12 @@ const fn row(isa: u8, cc: u8, obj: u8, os: u8, triple: str<'static>, cenv: u8) T
         long_bytes: 8,
         long_double_bits: 128,
         big_endian: false,
-        stack_align: 16,
         red_zone: 0,
         page_bytes: 4096,
         features: NO_FEATURES,
         never: NO_FEATURES,
         mcpu: "",
-        sdk_cc: "",
         apple_sdk: "",
-        probes: "",
         cenv: cenv,
     };
 }
@@ -405,7 +387,6 @@ const fn a64(t: Target, features: str<'static>) Target {
 const fn apple(t: Target, sdk: str<'static>) Target {
     let mut r = t;
     r.apple_sdk = sdk;
-    r.probes = "reproducible-link";
     if r.isa == ISA_A64 {
         r.long_double_bits = 64;
         r.red_zone = 128;
@@ -428,39 +409,33 @@ const fn targets() [Target; 11] {
         "MacOSX",
     );
     mac_a64.mcpu = "apple-m1";
-    let mut ios_x86 = apple(
+    let ios_x86 = apple(
         x86(
             row(ISA_X86, CC_SYSV, OBJ_MACHO, OS_IOS, "x86_64-apple-ios13.0-simulator", 2),
             "sse2 sse3 ssse3 cx16 lahf-sahf",
         ),
         "iPhoneSimulator",
     );
-    ios_x86.sdk_cc = "xcrun --sdk iphonesimulator clang";
-    let mut ios_a64 = apple(
+    let ios_a64 = apple(
         a64(row(ISA_A64, CC_APPLE, OBJ_MACHO, OS_IOS, "arm64-apple-ios13.0", 3), "neon aes sha2"),
         "iPhoneOS",
     );
-    ios_a64.sdk_cc = "xcrun --sdk iphoneos clang";
-    let mut linux_a64 = a64(row(ISA_A64, CC_AAPCS, OBJ_ELF, OS_LINUX, "aarch64-unknown-linux-gnu", 5), "neon");
-    linux_a64.probes = "getauxval at-hwcap2 at-hwcap3";
+    let linux_a64 = a64(row(ISA_A64, CC_AAPCS, OBJ_ELF, OS_LINUX, "aarch64-unknown-linux-gnu", 5), "neon");
     let mut android_x86 = x86(
         row(ISA_X86, CC_SYSV, OBJ_ELF, OS_ANDROID, "x86_64-linux-android24", 6),
         "sse2 sse3 ssse3 sse4.1 sse4.2 popcnt cx16",
     );
     android_x86.long_double_bits = 128;
-    let mut android_a64 = a64(row(ISA_A64, CC_AAPCS, OBJ_ELF, OS_ANDROID, "aarch64-linux-android24", 7), "neon");
-    android_a64.probes = "getauxval at-hwcap2 at-hwcap3";
+    let android_a64 = a64(row(ISA_A64, CC_AAPCS, OBJ_ELF, OS_ANDROID, "aarch64-linux-android24", 7), "neon");
     let mut win_x86 = x86(row(ISA_X86, CC_WIN64, OBJ_COFF, OS_WINDOWS, "x86_64-w64-mingw32", 8), "sse2");
     win_x86.long_bytes = 4;
     win_x86.red_zone = 0;
-    win_x86.probes = "unaligned-vector-move";
     let mut win_a64 = a64(row(ISA_A64, CC_WIN_A64, OBJ_COFF, OS_WINDOWS, "aarch64-w64-mingw32", 9), "neon");
     win_a64.long_bytes = 4;
     win_a64.long_double_bits = 64;
     let mut wasm = row(ISA_WASM, CC_WASM, OBJ_WASM, OS_WASI, "wasm32-wasip1", 10);
     wasm.long_bytes = 4;
     wasm.page_bytes = 65536;
-    wasm.probes = "rtlib";
     return [
         apple(
             x86(
@@ -520,7 +495,6 @@ const UNKNOWN_ISA: Isa = Isa {
     mask_fold: false,
     merge_apart: false,
     simd_backend: "",
-    probes: "",
     intrinsics: "",
 };
 
@@ -662,46 +636,6 @@ pub const fn baseline_everywhere(k: usize, isa: i32) bool {
         }
     }
     return true;
-}
-
-/// The features of `s` beyond the baseline of every target of `os`: the ones whose C flag the build
-/// passes.
-pub const fn beyond_baseline(s: cf::CpuFeatureSet, os: i32) cf::CpuFeatureSet {
-    let t: []Target = TARGETS;
-    let mut r = s;
-    for i in 0..t.len() {
-        if t[i].os as i32 == os {
-            r = cf::CpuFeatureSet { w: [r.w[0] & ~t[i].features.w[0], r.w[1] & ~t[i].features.w[1]] };
-        }
-    }
-    return r;
-}
-
-/// Whether the toolchain probe `id` runs for `os` and `isa`: its instruction set's or its target's.
-pub const fn probe_applies(id: str, os: i32, isa: i32) bool {
-    let isas: []Isa = ISAS;
-    if isa >= 0 && word_in(isas[isa as usize].probes, id) {
-        return true;
-    }
-    return switch target_of(os, isa) {
-        Some(t) => word_in(t.probes, id),
-        None => false,
-    };
-}
-
-// Whether `w` is one of the space-separated words of `list`.
-const fn word_in(list: str, w: str) bool {
-    let mut a: usize = 0;
-    for i in 0..list.len() + 1 {
-        if i < list.len() && list.byte_at(i) != b' ' {
-            continue;
-        }
-        if list.slice(a, i) == w {
-            return true;
-        }
-        a = i + 1;
-    }
-    return false;
 }
 
 /// The predefined C macros outside the implementation's namespace, which a strict `-std=cN` removes on

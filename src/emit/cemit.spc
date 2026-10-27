@@ -91,28 +91,13 @@ struct DynDue {
     pub own9: ModuleId,
 }
 
-/// Whether C flags `fl` ask for debug information: their last `-g` form is not `-g0`, as the C compiler
-/// reads them.
-pub fn debug_flag(fl: str) bool {
-    let mut on = false;
-    let mut it = fl.split(" ");
-    // Each step takes one word of `fl`.
-    while let Some(w) = it.next() {
-        if w.starts_with("-g") {
-            on = w != "-g0";
-        }
-    }
-    return on;
-}
-
 /// A module's backend bits: the C renderer emits its C; LIR lowers its bodies.
 pub const BK_C: u8 = 1;
 pub const BK_LIR: u8 = 2;
 
 /// The backends of each module of `pk`: LIR for every module of a native build (`native_on`) and for the
 /// modules `SC_LIR` names (`in_list`), which the LIR check covers (`Lower::check_all`); the C renderer
-/// for every module but those of a native build whose bodies render no C (`Package.nat_render`). Their
-/// declarations still render.
+/// for every module of a build that is not native. A native build's declarations still render.
 pub fn backends_of(pk: &loader::Package) Vector<u8> {
     let n = pk.modules.len();
     let mut out = Vector::<u8>::with_capacity(n);
@@ -120,8 +105,7 @@ pub fn backends_of(pk: &loader::Package) Vector<u8> {
     let sel = stdlib::get_env("SC_LIR").unwrap_or(String::new());
     for i in 0..n {
         let on = all || in_list(sel.as_str(), pk.modules.at(i).path.as_str());
-        let c = !all || pk.nat_render[i];
-        out.push(ast::pick(c, BK_C, 0u8) | ast::pick(on, BK_LIR, 0u8));
+        out.push(ast::pick(all, 0u8, BK_C) | ast::pick(on, BK_LIR, 0u8));
     }
     return out;
 }
@@ -154,8 +138,8 @@ pub fn in_list(sel: str, path: str) bool {
     return false;
 }
 
-/// Whether this build compiles modules with a native backend (C where one cannot): `SC_NATIVE` names
-/// them (`in_list`) on a target a native backend serves. Every module then lowers to LIR.
+/// Whether this build compiles its modules with the native backend (a build that links). Every module
+/// then lowers to LIR.
 pub fn native_on(pk: &loader::Package) bool {
     return pk.native;
 }
@@ -234,12 +218,9 @@ pub struct CEmit {
     /// vector-backend entries, whose callers spell their signatures, and every body of a native build,
     /// whose objects define that ABI only.
     pub no_split: bool,
-    /// The last body rendered no C (`backends_of`): its module is `skipped_mod`; `lir_claim` reads both.
-    skipped: bool,
     /// Every body renders, whatever its module's backends: C text no native object replaces (a vector
     /// backend entry's header).
     pub render_all: bool,
-    skipped_mod: ModuleId,
     /// Forwarded call texts spelled so far: a call argument whose spelling grew it repeats a call
     /// when spelled twice.
     fwd_spelled: u64,
@@ -578,9 +559,8 @@ extend CEmit {
                 l.pkg.vec_regs = mg.vec_reg_bytes as u32;
             }
             l.pkg.pic = pk.pic;
-            // Debug information as the C compile's `-g` asks, relative to this process's directory, the
-            // C compiles' own.
-            l.pkg.debug = debug_flag(pk.cflags.as_str());
+            // Debug information as the profile asks, relative to this process's directory.
+            l.pkg.debug = pk.debug_info;
             if l.pkg.debug {
                 l.pkg.comp_dir = process::current_dir().unwrap_or(String::new());
             }
@@ -596,8 +576,6 @@ extend CEmit {
             simd_on: simd_on,
             vec_prog: pk.names_vectors(),
             no_split: native_on(pk),
-            skipped: false,
-            skipped_mod: 0,
             render_all: false,
             fwd_spelled: 0,
             simd_trace: stdlib::env_is("SC_SIMD_TRACE", "1"),
@@ -1841,13 +1819,16 @@ extend CEmit {
     /// its, `own` when the chunk is of the module's own items (its TU, not its instance TU).
     pub fn lir_claim(self: &mut Self, unit: u32, what: str, own: bool) {
         if let Some(l) = &mut self.lir {
-            // A body that rendered no C, taken by a unit whose C compiles: its module renders after all.
-            if self.skipped && (unit as usize >= self.backends.len() || (self.backends[unit as usize] & BK_C) != 0) {
-                l.retry.push(self.skipped_mod);
-            }
             l.claim(unit, what, own);
         }
-        self.skipped = false;
+    }
+
+    /// Whether a body lowered since the last claim needs what no object defines (`Lower::take_pend_c`).
+    pub fn lir_take_pend_c(self: &mut Self) bool {
+        if let Some(l) = &mut self.lir {
+            return l.take_pend_c();
+        }
+        return false;
     }
 
     /// Move `other`'s LIR into this emitter's.
@@ -5823,12 +5804,9 @@ extend CEmit {
     // Locals, labels, blocks and the closing brace, shared by plain functions and closures.
     fn emit_body_core(self: &mut Self, b: &ir::CoreBody) bool {
         if !self.render_all && !self.renders(b.module) {
-            // The module's native object needs no C body; `lir_claim` checks the unit that takes it.
-            self.skipped = true;
-            self.skipped_mod = b.module;
+            // The module's native object needs no C body.
             return true;
         }
-        self.skipped = false;
         if self.cf_ext != null {
             return self.emit_body_core_cf(b, unsafe &*self.cf_ext);
         }
@@ -9940,7 +9918,7 @@ extend CEmit {
     // features; SC_SIMD_TRACE reports it when no single entry covers the lanes.
     fn vplan(self: &Self, op: u32, t: BuiltinType, r: BuiltinType, n: i64) sp::Plan {
         let pk = self.p();
-        let pl = sp::plan(&pk.simd_table, self.fs, pk.mem_check, op, t, r, n as u64, pk.simd_width);
+        let pl = sp::plan(&pk.simd_table, self.fs, op, t, r, n as u64, pk.simd_width);
         if self.simd_trace && pl.form != sp::PF_NATIVE {
             let nm = ir::op_variant(op);
             eprintln(
@@ -9957,21 +9935,12 @@ extend CEmit {
     // `vplan` without the trace: a probe for a preferred form.
     fn vplan_quiet(self: &Self, op: u32, t: BuiltinType, r: BuiltinType, n: i64) sp::Plan {
         let pk = self.p();
-        return sp::plan(&pk.simd_table, self.fs, pk.mem_check, op, t, r, n as u64, pk.simd_width);
+        return sp::plan(&pk.simd_table, self.fs, op, t, r, n as u64, pk.simd_width);
     }
 
     // The table index of the entry for `op` over `n` lanes of `t` with result `r`, or -1.
     fn ventry(self: &Self, op: u32, t: BuiltinType, r: BuiltinType, n: u64) i64 {
-        return sp::find(
-            &self.p().simd_table,
-            self.fs,
-            self.p().mem_check,
-            op,
-            t,
-            r,
-            n,
-            sp::max_bits(self.fs, self.p().simd_width),
-        );
+        return sp::find(&self.p().simd_table, self.fs, op, t, r, n, sp::max_bits(self.fs, self.p().simd_width));
     }
 
     // `ventry`, else past the preferred width: an operation that cannot split (a gather,
@@ -9981,7 +9950,7 @@ extend CEmit {
         return if e >= 0 {
             e;
         } else {
-            sp::find(&self.p().simd_table, self.fs, self.p().mem_check, op, t, r, n, 512);
+            sp::find(&self.p().simd_table, self.fs, op, t, r, n, 512);
         };
     }
 
@@ -11248,23 +11217,13 @@ extend CEmit {
         let pl = sp::plan(
             &pk.simd_table,
             self.fs,
-            pk.mem_check,
             ir::OP_CMP_LANES + (rv.c - ir::SIMD_CMP_EQ) as u32,
             bt,
             u,
             n as u64,
             pk.simd_width,
         );
-        let cp = sp::plan(
-            &pk.simd_table,
-            self.fs,
-            pk.mem_check,
-            ir::OP_CHOOSE_LANES,
-            cbt,
-            cbt,
-            cn as u64,
-            pk.simd_width,
-        );
+        let cp = sp::plan(&pk.simd_table, self.fs, ir::OP_CHOOSE_LANES, cbt, cbt, cn as u64, pk.simd_width);
         *to = lane_mask_bt(cbt);
         if pl.form == sp::PF_SCALAR || cp.form == sp::PF_SCALAR || cn != n {
             return false;

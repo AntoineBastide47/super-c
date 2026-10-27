@@ -692,8 +692,8 @@ pub fn has_dlls(o: &Opts, why: &mut String) bool {
 }
 
 /// Whether `-l<name>` of link `o` is a static library: `lib<name>.a`, `<name>.lib` or `lib<name>.lib` in a
-/// `-L` directory (GNU ld's order, import libraries `lib<name>.dll.a` left out) that holds an object; its
-/// path into `path`. An import library stands for its DLL.
+/// `-L` directory (GNU ld's order, import libraries `lib<name>.dll.a` left out) that holds an object and no
+/// import (`ar::read`); its path into `path`. An import library stands for its DLL.
 pub fn static_lib(o: &Opts, name: str, path: &mut String) bool {
     const FORMS: [](str, str) = [("lib", ".a"), ("", ".lib"), ("lib", ".lib")];
     for i in 0..o.dirs.len() {
@@ -710,7 +710,9 @@ pub fn static_lib(o: &Opts, name: str, path: &mut String) bool {
             let mut ms = Vector::<ar::Member>::new();
             let mut syms = Vector::<(str, u32)>::new();
             let mut why = String::new();
-            if ar::read(nat::OBJ_COFF, data.as_slice(), &mut ms, &mut syms, &mut why) && ms.len() != 0 {
+            // mingw-w64's import libraries (`libws2_32.a`) hold objects beside their imports.
+            let mut imports = false;
+            if ar::read(nat::OBJ_COFF, data.as_slice(), &mut ms, &mut syms, &mut imports, &mut why) && ms.len() != 0 && !imports {
                 path.push_string(&p);
                 return true;
             }

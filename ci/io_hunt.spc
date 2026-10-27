@@ -1,10 +1,10 @@
-// Reactor race exerciser for the ThreadSanitizer lane (see check.sh): the shapes that move the reactor's
+// Reactor race exerciser for check.sh's concurrency step: the shapes that move the reactor's
 // ownership boundaries hardest. Readiness against deadlines round after round (the event batch against the
 // timer's claim and the disarm that follows), cancellation landing before, during and after the arm's
 // publication, several waiters in one direction and in both on one socket, descriptor numbers closed and
 // reused under stale waits, sockets closed under parked readers and writers, and shutdown while waits are pending
-// and events are in flight. Every wait must settle, every task must end, and any TSan report is a hole in
-// the reclamation argument at the top of std/parallel/io.spc.
+// and events are in flight. Every wait must settle and every task must end, or the reclamation argument at
+// the top of std/parallel/io.spc has a hole.
 
 import sc_io;
 import std::parallel::runtime as rt;

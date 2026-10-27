@@ -240,22 +240,15 @@ fn parity_mixed_cases() {
     assert(d.len() == 0, "four cases agree");
 }
 
-// A runtime without its overflow checks (SC_ARITH_WRAP in a checking profile) is the defect the oracle
-// exists to find: the constant traps, the run time wraps.
+// A run time without overflow checks is the difference the oracle exists to find: the constant traps,
+// the run time wraps. The release profile wraps (no `overflow-checks`, `opt-level` 3).
 @test
 fn parity_reports_missing_runtime_check() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
-    let _c = cli::set_env("SC_NATIVE", "0"); // the planted defect is a C flag: the C backend's
-    let mut cstd = String::from_str("--cstd=");
-    cstd.push_str(unsafe str::from_cstr(cli::cstd()));
-    cstd.push_str(" -DSC_ARITH_WRAP");
     let d = h::const_runtime_parity(
         "",
         ["opq::<i32>(i32::MAX) * opq::<i32>(2)", "opq::<i32>(5) * opq::<i32>(2)"],
         ["i32", "i32"],
-        [cstd.as_str()],
+        ["--profile=release"],
     );
     assert(d.contains("case 0"), "the overflowing case is reported");
     assert(d.contains("const:    trap: arithmetic overflow"), "the constant traps");
@@ -294,9 +287,8 @@ fn asm_host_function() {
     if !cli::has_cc() {
         return; // it reads the C compiler's assembly
     }
-    let _c = cli::set_env("SC_NATIVE", "0"); // the C backend's own units and objects
     // One build serves the three checks (`asm_check` is `diff_build`, `asm_text` and `asm_match`).
-    let b = h::diff_build(MULW, ["--profile=release"]);
+    let b = h::diff_build(MULW, ["--profile=release", "--emit-c"]);
     assert(b.built, b.diag.as_str());
     let mut code = String::new();
     let t = h::asm_text(&b, ["--profile=release"], "mulw", &mut code);
@@ -317,30 +309,16 @@ fn asm_host_function() {
     assert(n.contains("no translation unit defines"), "an unknown function is reported");
 }
 
-// The other Mach-O architecture through clang's target flag: the macOS SDK serves both.
+// The other Mach-O architecture through clang's `-arch` (the tree's `__cflags`): the macOS SDK serves both.
 @test
 fn asm_cross_architecture() {
-    if PLATFORM != Platform::MacOS {
+    if PLATFORM != Platform::MacOS || !cli::has_cc() {
         return;
     }
     if ARCH == Arch::AArch64 {
-        h::expect_asm(
-            "x86_64 multiply",
-            MULW,
-            ["--profile=release", "--arch=x86_64", "--cc=cc -target x86_64-apple-macos11"],
-            "mulw",
-            ["imul"],
-            ["call"],
-        );
+        h::expect_asm("x86_64 multiply", MULW, ["--profile=release", "--arch=x86_64"], "mulw", ["imul"], ["call"]);
     } else {
-        h::expect_asm(
-            "aarch64 multiply",
-            MULW,
-            ["--profile=release", "--arch=aarch64", "--cc=cc -target arm64-apple-macos11"],
-            "mulw",
-            ["mul"],
-            ["bl"],
-        );
+        h::expect_asm("aarch64 multiply", MULW, ["--profile=release", "--arch=aarch64"], "mulw", ["mul"], ["bl"]);
     }
 }
 
@@ -348,7 +326,7 @@ fn asm_cross_architecture() {
 @test
 fn asm_wasm32() {
     let sdk = stdlib::getenv("WASI_SDK_PATH");
-    if sdk == null || unsafe *sdk == 0 as char {
+    if sdk == null || unsafe *sdk == 0 as char || !cli::has_cc() {
         return;
     }
     h::expect_asm("wasm32 multiply", MULW, ["--profile=release", "--target=wasm"], "mulw", ["i64.mul"], ["call"]);

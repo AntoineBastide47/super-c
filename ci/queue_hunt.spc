@@ -1,9 +1,9 @@
-// Run-queue race exerciser for the ThreadSanitizer lane (see check.sh): the shapes that move a worker's
+// Run-queue race exerciser for check.sh's concurrency step: the shapes that move a worker's
 // ring hardest. Ring wraparound with several thieves (an owner that keeps spawning while others drain it, so
 // slots are reused under readers), overflow past the ring into the injection queue, yield storms that route
 // through the private yield queue and spill out of it, external submitters against stealing workers, and a
 // shutdown that lands while cancellation cleanup is still running. Every task must run exactly once: the
-// counts are checked, and any TSan report is a real hole in the slot-ownership argument.
+// counts are checked, and a wrong count is a real hole in the slot-ownership argument.
 
 import std::parallel::runtime as rt;
 import std::parallel::sync as sync;

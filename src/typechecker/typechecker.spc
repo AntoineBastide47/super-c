@@ -24620,10 +24620,6 @@ extend TypeChecker {
         if named {
             self.tc_feature_bound_args(fmod, args, params, skip);
         }
-        if named && (unsafe (*fa).at_const(fdecl).as_data.function.flags & FN_LANE_ACCESS) != 0 && self.icx.current_fn != NODE_NONE {
-            // An entry that calls it is never planned under a memory checker (`build_simd_table`).
-            unsafe (*self.cur_ast()).lane_callers.push(self.icx.current_fn);
-        }
         // A call through a local function value: its value use is the call (`tc_fn_value_use`).
         let via_value = unsafe (*a).at_const(callee_id).kind == NodeKind::NODE_IDENTIFIER && unsafe (*a).resolution_def(
             callee_id,
@@ -29010,8 +29006,18 @@ extend TypeChecker {
             },
             NODE_CAST => {
                 let src = self.check_expr(unsafe (*a).at_const(id).as_data.cast.expression);
-                let dst = self.resolve_type(unsafe (*a).at_const(id).as_data.cast.ty);
-                if self.lint && src != TYPE_NONE && src == dst && unsafe (*a).at_const(
+                let tyn = unsafe (*a).at_const(id).as_data.cast.ty;
+                let dst = self.resolve_type(tyn);
+                // A cast to a type alias may be needed on another target (`x as mode_t`: `u16` on macOS,
+                // `u32` on Linux): it is not unnecessary.
+                let mut alias = false;
+                if unsafe (*a).at_const(tyn).kind == NodeKind::NODE_TYPE_PATH {
+                    let td = unsafe (*a).resolution_def(tyn);
+                    alias = td.node != NODE_NONE && (td.module == self.cur_module() || td.module as usize < self.pkg_count()) && unsafe (*self.mod_ast(
+                        td.module,
+                    )).at_const(td.node).kind == NodeKind::NODE_TYPE_ALIAS;
+                }
+                if self.lint && !alias && src != TYPE_NONE && src == dst && unsafe (*a).at_const(
                     unsafe (*a).at_const(id).as_data.cast.expression,
                 ).kind != NodeKind::NODE_LITERAL {
                     let csp = unsafe (*a).at_const(id).span;
@@ -30342,11 +30348,10 @@ extend TypeChecker {
             if i as i32 < wn && et != wargs[i as usize] && self.compatible(wargs[i as usize], eid) {
                 targs[i as usize] = wargs[i as usize];
                 // An erased element keeps its own type: lowering wraps it from the recorded erasure. A
-                // number keeps it too: a place (`a[i]`, `s.f`) is of its storage type, and the store into
-                // the field converts the value.
-                let (eb, wb) = (self.bt_of(et), self.bt_of(wargs[i as usize]));
-                let num = (bt_is_int(eb) || bt_is_float(eb)) && (bt_is_int(wb) || bt_is_float(wb));
-                if !num && unsafe (*self.cur_ast()).dyn_use_at(eid) == null {
+                // number keeps its own too, as an array's or a field's does: the store into the slot
+                // converts it, and its type is its storage's (`p.x`, `a[i]`) or its result's (a call).
+                let num = self.is_numeric(et) && self.is_numeric(wargs[i as usize]);
+                if unsafe (*self.cur_ast()).dyn_use_at(eid) == null && !num {
                     unsafe (*self.cur_ast()).set_type(eid, wargs[i as usize]);
                 }
             }

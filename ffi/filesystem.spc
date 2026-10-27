@@ -8,6 +8,8 @@
 // these are among the standard headers the runtime prologue carries, so a single unnamed block would leave
 // every declaration missing and each call would compile as an implicit declaration (an error under C99).
 
+import stdlib;
+
 extern "C" "sys/stat.h" {
     /// Fill `buf` (a platform stat struct) for `path`, following links; 0 or -1 and errno.
     pub fn stat(path: *const char, buf: *mut void) i32;
@@ -27,7 +29,7 @@ extern "C" "sys/stat.h" {
 @platform(!windows)
 extern "C" "sys/stat.h" {
     /// Create one directory with permission bits `mode`; 0 or -1 and errno.
-    pub fn mkdir(path: *const char, mode: u32) i32;
+    pub fn mkdir(path: *const char, mode: stdlib::mode_t) i32;
 }
 
 @platform(windows)
@@ -36,7 +38,7 @@ extern "C" "direct.h" {
 }
 
 @platform(windows)
-pub unsafe fn mkdir(path: *const char, _mode: u32) i32 {
+pub unsafe fn mkdir(path: *const char, _mode: stdlib::mode_t) i32 {
     return _mkdir(path);
 }
 

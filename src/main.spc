@@ -41,96 +41,70 @@ fn run_file(
     simd_dispatch: str,
     bootstrap_tags: bool,
     lint: bool,
-    cflags: str,
-    ccflags: str,
     jobs: u32,
     out_dir: str,
-    cc: str,
-    cstd: str,
+    sysroot: str,
     profile: str,
 ) i32 {
-    // The modules whose bodies render though the native backend may take them: each run gets the names
-    // every earlier one returned with RC_NATIVE_RETRY. A run names only modules that did not render, so
-    // the runs end within one per module.
-    let mut retry = Vector::<String>::new();
+    loader::set_load_jobs(jobs);
+    let tl0 = ticks_ms();
+    // The build settings the prelude's build constants spell, set before the load.
+    let mut p = loader::package_new(loader::dirname_of(path), "", std_dir);
+    p.arch = arch;
+    p.features = features;
+    p.simd_width = pick(simd_width != 0, simd_width, 256);
+    let bi = bman::builtins_only();
+    p.simd_dispatch = String::from_str(bsys::dispatch_for(&bi, profile, simd_dispatch));
+    bsys::apply_profile(&bi, profile, &mut p);
+    p.sysroot = String::from_str(sysroot);
+    p.test_build = unsafe (*topts).enabled;
+    p.profile = String::from_str(profile);
+    p.profiles = bsys::profile_names(&bi);
+    p.bootstrap = bootstrap_tags;
+    let mut cirv = iri::interp_master((&mut p) as *mut loader::Package, ce_steps, ce_mem);
+    let cdir = ocache::object_cache_dir("");
+    if prelude_stage(&mut p, &mut cirv, std_dir, path, target, jobs, ce_steps, ce_mem, cdir.as_str()) {
+        p.load_user(path, std_dir, target);
+    }
+    if stdlib::getenv("SC_CEMIT_STATS") != null {
+        eprintln("phase load: {} ms", ticks_ms() - tl0);
+    }
+    loader::set_load_jobs(1);
+    // `--out-dir` applies to a bare build exactly as to a manifest one: the emitted tree goes under the
+    // named directory.
+    if out_dir.len() != 0 {
+        let mut g = String::from_str(out_dir);
+        g.push_byte(b'/');
+        g.push_str(p.profile_name());
+        g.push_str("/raw");
+        p.gen_root = g;
+    }
+    // A standalone script is a binary with no test suite to count as callers: unreachable pub
+    // functions are dead weight. Project trees get this from the whole-workspace lint instead,
+    // where @test roots keep test-only helpers alive.
+    let manf = stdio::fopen("build.toml", "rb");
+    if manf != null {
+        unsafe stdio::fclose(manf);
+    } else {
+        p.lint_pub = lint;
+    }
     let mut rc: i32 = 1;
-    loop {
-        loader::set_load_jobs(jobs);
-        let tl0 = ticks_ms();
-        // The build settings the prelude's build constants spell, set before the load.
-        let mut p = loader::package_new(loader::dirname_of(path), "", std_dir);
-        p.arch = arch;
-        p.features = features;
-        p.simd_width = pick(simd_width != 0, simd_width, 256);
-        let bi = bman::builtins_only();
-        p.simd_dispatch = String::from_str(bsys::dispatch_for(&bi, profile, simd_dispatch));
-        p.mem_check = bsys::mem_checker(cflags);
-        p.build_cfg = bsys::build_cfg(cflags);
-        p.test_build = unsafe (*topts).enabled;
-        p.profile = String::from_str(profile);
-        p.profiles = bsys::profile_names(&bi);
-        p.bootstrap = bootstrap_tags;
-        let mut cirv = iri::interp_master((&mut p) as *mut loader::Package, ce_steps, ce_mem);
-        let cdir = ocache::object_cache_dir("");
-        if prelude_stage(&mut p, &mut cirv, std_dir, path, target, jobs, ce_steps, ce_mem, cdir.as_str()) {
-            p.load_user(path, std_dir, target);
+    if !p.ok && jobs != 1 {
+        prt::shutdown(); // parallel loading started the pool; the leak gate needs it gone
+    }
+    if p.ok {
+        p.jobs = p.analysis_jobs(jobs);
+        if p.jobs == 1 && jobs != 1 {
+            prt::shutdown(); // parallel loading may have started the pool
+            // A serial compile hands its slots back.
+            unsafe shim::sc_jobserver_release_claim();
         }
-        if stdlib::getenv("SC_CEMIT_STATS") != null {
-            eprintln("phase load: {} ms", ticks_ms() - tl0);
-        }
-        loader::set_load_jobs(1);
-        // `--out-dir`, `--cc` and `--cstd` apply to a bare build exactly as to a manifest one: the emitted tree
-        // goes under the named directory, and the named compiler builds the program with the named base flags.
-        if out_dir.len() != 0 {
-            let mut g = String::from_str(out_dir);
-            g.push_byte(b'/');
-            g.push_str(p.profile_name());
-            g.push_str("/raw");
-            p.gen_root = g;
-        }
-        if cc.len() != 0 {
-            p.cc = String::from_str(cc);
-        }
-        if cstd.len() != 0 {
-            p.cstd = String::from_str(cstd);
-        }
-        // A standalone script is a binary with no test suite to count as callers: unreachable pub
-        // functions are dead weight. Project trees get this from the whole-workspace lint instead,
-        // where @test roots keep test-only helpers alive.
-        let manf = stdio::fopen("build.toml", "rb");
-        if manf != null {
-            unsafe stdio::fclose(manf);
-        } else {
-            p.lint_pub = lint;
-        }
-        rc = 1;
-        if !p.ok && jobs != 1 {
-            prt::shutdown(); // parallel loading started the pool; the leak gate needs it gone
-        }
-        if p.ok {
-            p.jobs = p.analysis_jobs(jobs);
-            if p.jobs == 1 && jobs != 1 {
-                prt::shutdown(); // parallel loading may have started the pool
-                // A serial compile hands its slots back.
-                unsafe shim::sc_jobserver_release_claim();
-            }
-            p.cir = &mut cirv;
-            // One process builds a tree at a time, as in a manifest build.
-            default_gen_root(&mut p);
-            let lk = bsys::tree_lock(loader::dirname_of(p.gen_root.as_str()));
-            if lk.held() {
-                p.nat_retry = retry.clone();
-                rc = run_package(&mut p, topts, out_bin, target, lint, cflags, ccflags, null);
-                if rc == RC_NATIVE_RETRY {
-                    while let Some(x) = p.nat_retry.pop() {
-                        retry.push(x);
-                    }
-                    assert(retry.len() <= p.modules.len(), "native: each run renders a module no earlier one did");
-                }
-            }
-        }
-        if rc != RC_NATIVE_RETRY {
-            break;
+        p.cir = &mut cirv;
+        // One process builds a tree at a time, as in a manifest build.
+        default_gen_root(&mut p);
+        let lk = bsys::tree_lock(loader::dirname_of(p.gen_root.as_str()));
+        if lk.held() {
+            rc = run_package(&mut p, topts, out_bin, target, lint, null);
         }
     }
     return rc;
@@ -998,12 +972,10 @@ extend CommonOpts {
 struct BuildOpts<'a> {
     pub profile: str<'a>, // --profile=NAME (default: manifest default-profile)
     pub out_dir: str<'a>, // --out-dir=PATH: override the manifest's out-dir
-    pub cstd: str<'a>, // --cstd=FLAGS: override the manifest's base C flags (CI: gnu11 on Windows)
-    pub cc: str<'a>, // --cc=BIN: override the C compiler (else manifest `cc`, else $CC, else cc)
+    pub sysroot: str<'a>, // --sysroot=DIR: the target's C library tree (default: discovered)
     pub jobs: u32, // --jobs=N (0 = manifest / core count)
     pub bin_sel: str<'a>, // --bin=NAME: build/run only that binary target
     pub lib_sel: bool, // --lib: build only the [lib] target
-    pub sanitizers: bool, // --sanitizers: AddressSanitizer and UndefinedBehaviorSanitizer in every C build
 }
 
 extend<'a> BuildOpts<'a> {
@@ -1012,16 +984,12 @@ extend<'a> BuildOpts<'a> {
             self.profile = arg[10..];
         } else if arg.starts_with("--out-dir=") {
             self.out_dir = arg[10..];
-        } else if arg.starts_with("--cstd=") {
-            self.cstd = arg[7..];
-        } else if arg.starts_with("--cc=") {
-            self.cc = arg[5..];
+        } else if arg.starts_with("--sysroot=") {
+            self.sysroot = arg[10..];
         } else if arg.starts_with("--bin=") {
             self.bin_sel = arg[6..];
         } else if arg == "--lib" {
             self.lib_sel = true;
-        } else if arg == "--sanitizers" {
-            self.sanitizers = true;
         } else if arg.starts_with("--jobs=") {
             let v = unsafe stdlib::atoi(((&arg[7]) as *const u8) as *const char);
             if v < 1 {
@@ -1081,7 +1049,7 @@ fn nearest_manifest() Option<String> {
 // The command-line usage, written to `out`.
 fn print_usage(out: *mut stdio::FILE) {
     unsafe stdio::fputs(
-        M"(super-c — a systems language that compiles to readable C
+        M"(super-c — a systems language that compiles to native code and to readable C
 
 USAGE:
     super-c <file.spc> [options]      compile a script (emit C into build/)
@@ -1089,7 +1057,7 @@ USAGE:
 
 COMMANDS:
     build   [<dir/file>]   compile and link a binary (uses build.toml if no file)
-    release [<dir/file>]   like build, with the release profile (-O3, link-time optimization)
+    release [<dir/file>]   like build, with the release profile (opt-level 3, stripped)
     run                    build the project and run its binary
     test                   build and run the test suite (tests/ by convention)
     bench                  build and run the benchmarks (bench/ by convention)
@@ -1106,24 +1074,21 @@ COMMANDS:
 OPTIONS:
     -h, --help             print this usage and exit
     -o <path>              output binary path (build/release with a file)
-    --profile=P            build profile: debug|release|bench|test|race, or a custom one
-    --sanitizers           add AddressSanitizer and UndefinedBehaviorSanitizer to every C build
+    --profile=P            build profile: debug|release|bench|test, or a custom one
     --out-dir=D            output directory (default: build)
-    --jobs=N               workers: the compiler's own threads, the parallel C compile jobs and the
-                           jobserver nested builds share (default: build.toml `jobs`, else one per core)
-    --cstd=F               base C flags, in place of build.toml `cstd` (default:
-                           -std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700)
-    --cc=BIN               C compiler to use (else build.toml `cc`, else $CC, else cc)
+    --jobs=N               workers: the compiler's own threads and the jobserver nested builds share
+                           (default: build.toml `jobs`, else one per core)
     --bin=NAME             build/run only that binary target
     --transpiler=CMD       build/release: run CMD (words, no shell) as the transpile step
-    --print-probes         build/release: print the C toolchain probe results for the target and profile
+    --emit-c               build/release: write the program's C (its units in `__units`, the flags of
+                           their compile and link in `__cflags` and `__ldflags`) and nothing more
     --lib                  build only the [lib] target
     --link=NAME            bindgen: library the generated bindings link against
     --header=SPELLING      bindgen: how the generated module spells the #include
     -I <dir>               bindgen: header search path
     --from=PART            bindgen: also take declarations from headers whose path contains PART
     --cflag=F              bindgen: C flag for the target's C environment: -std=, -D, -U, -f[un]signed-char (repeatable)
-    --sysroot=DIR          bindgen: the target's C library tree (default: discovered as the build does)
+    --sysroot=DIR          the target's C library tree: headers and libraries (default: discovered)
     --target=T             target: windows|macos|linux|ios|android|wasm
     --arch=A               instruction set: x86_64|aarch64|wasm32 (default: the target's)
     --target-feature=L     CPU features: +name enables, -name disables (wasm32: simd128, relaxed-simd)
@@ -1180,11 +1145,10 @@ fn main(argv: Vector<str>) i32 {
     let mut vendor_force = false; // vendor: --force, replace an existing vendor/<name>
     let mut clean_full = false; // clean: --full, remove the out-dir and the global cache instead of sweeping
     let mut transpiler = ""; // build/release: --transpiler=CMD, the command that runs the transpile step
-    let mut print_probes = false; // build/release: --print-probes, print the toolchain probe table
+    let mut emit_c = false; // build/release: --emit-c, write the program's C and nothing more
     let mut emit_sub = ""; // script: --emit-sub=SUB, the transpile form an engine's --transpiler runs
     let mut manifest_dir = ""; // transpile form: --manifest-dir=DIR, the project directory
     let mut emit_id: u64 = 0; // transpile form: --emit-id=N, the identity its emit stamp records
-    let mut cc_found = false; // transpile form: --cc-found, the engine found the C compiler
 
     let mode = if argc > 1 {
         subcommand(argv[1]);
@@ -1219,16 +1183,7 @@ fn main(argv: Vector<str>) i32 {
         lint: true,
         bad: false,
     };
-    let mut bo = BuildOpts {
-        profile: "",
-        out_dir: "",
-        cstd: "",
-        cc: "",
-        jobs: 0,
-        bin_sel: "",
-        lib_sel: false,
-        sanitizers: false,
-    };
+    let mut bo = BuildOpts { profile: "", out_dir: "", sysroot: "", jobs: 0, bin_sel: "", lib_sel: false };
 
     let mut i: usize = if mode == Mode::MODE_DEFAULT {
         1usize;
@@ -1243,14 +1198,16 @@ fn main(argv: Vector<str>) i32 {
                     topts.enabled = true;
                 } else if arg.starts_with("--emit-sub=") {
                     emit_sub = arg[11..];
+                } else if arg == "--emit-c" {
+                    emit_c = true;
                 } else if arg.starts_with("--manifest-dir=") {
                     manifest_dir = arg[15..];
                 } else if arg.starts_with("--emit-id=") {
                     emit_id = arg[10..].parse_u64().unwrap_or(0);
                     co.bad = co.bad || emit_id == 0;
-                } else if arg == "--cc-found" {
-                    cc_found = true;
-                } else if arg.starts_with("--profile=") || arg.starts_with("--out-dir=") {
+                } else if arg.starts_with("--profile=") || arg.starts_with("--out-dir=") || arg.starts_with(
+                    "--sysroot=",
+                ) {
                     let _ = bo.build_flag(&mut co, arg);
                 } else if parse_test_flag(arg, &mut topts, &mut co.bad) {} else if arg.starts_with("--") || file.len() != 0 {
                     co.reject(arg);
@@ -1260,7 +1217,7 @@ fn main(argv: Vector<str>) i32 {
                 i = i + 1;
             }
             // The transpile form's own flags are meaningless without it; it never runs tests.
-            let emit_flags = manifest_dir.len() != 0 || emit_id != 0 || bo.profile.len() != 0 || bo.out_dir.len() != 0;
+            let emit_flags = manifest_dir.len() != 0 || emit_id != 0 || bo.profile.len() != 0 || bo.out_dir.len() != 0 || emit_c;
             if emit_sub.len() == 0 && emit_flags || emit_sub.len() != 0 && topts.enabled {
                 co.bad = true;
             }
@@ -1278,8 +1235,8 @@ fn main(argv: Vector<str>) i32 {
                     }
                 } else if arg.starts_with("--transpiler=") && arg.len() > 13 {
                     transpiler = arg[13..];
-                } else if arg == "--print-probes" {
-                    print_probes = true;
+                } else if arg == "--emit-c" {
+                    emit_c = true;
                 } else if arg.starts_with("--") || file.len() != 0 {
                     co.reject(arg);
                 } else {
@@ -1287,16 +1244,16 @@ fn main(argv: Vector<str>) i32 {
                 }
                 i = i + 1;
             }
-            // The transpiler replaces the manifest engine's frontend: a bare build has no engine. The probe
-            // table belongs to a manifest profile and builds nothing.
-            if transpiler.len() != 0 && file.len() != 0 || print_probes && (file.len() != 0 || out_bin.len() != 0) {
+            // The transpiler replaces the manifest engine's frontend: a bare build has no engine. The C tree
+            // links nothing.
+            if transpiler.len() != 0 && file.len() != 0 || emit_c && (out_bin.len() != 0 || bo.lib_sel || bo.bin_sel.len() != 0) {
                 co.bad = true;
             }
             if file.len() != 0 && is_dir(file) {
                 proj_dir = file;
                 file = "";
             }
-            if file.len() != 0 && out_bin.len() == 0 {
+            if file.len() != 0 && out_bin.len() == 0 && !emit_c {
                 out_bin = "a.out";
             }
             if mode == Mode::MODE_RELEASE {
@@ -1591,18 +1548,6 @@ fn main(argv: Vector<str>) i32 {
         return bsys::vendor_dep(vendor_dir, file, vendor_name, vendor_ref, vendor_force);
     }
     if mode == Mode::MODE_BINDGEN {
-        // The project's `cstd`, so the headers see the dialect and POSIX level its build compiles with.
-        let mut bg_cstd = String::from_str(bman::DEFAULT_CSTD);
-        if let Some(dir) = nearest_manifest() {
-            switch bman::load(format("{}/build.toml", dir.as_str()).as_str(), false) {
-                Some(m) => {
-                    bg_cstd = m.cstd.clone();
-                },
-                None => {
-                    return 1;
-                },
-            };
-        }
         let mut bg_paths = Vector::<String>::new();
         bg_paths.push(String::from_str(file));
         for k in 0..extra.len() {
@@ -1619,7 +1564,7 @@ fn main(argv: Vector<str>) i32 {
             co.target,
             co.arch,
             bg_sysroot,
-            bg_cstd.as_str(),
+            bman::DEFAULT_CSTD,
         );
         return rc;
     }
@@ -1673,9 +1618,6 @@ fn main(argv: Vector<str>) i32 {
         if !bsys::check_features(&man, co.target_features.as_str()) {
             return 1;
         }
-        if bo.sanitizers {
-            man.add_sanitizers();
-        }
         if bo.out_dir.len() != 0 {
             man.out_dir = String::from_str(bo.out_dir);
         }
@@ -1699,9 +1641,9 @@ fn main(argv: Vector<str>) i32 {
             target_features: co.target_features.as_str(),
             simd_width: co.simd_width,
             simd_dispatch: co.simd_dispatch.as_str(),
-            cc_found: cc_found,
+            sysroot: bo.sysroot,
         };
-        return bsys::manifest_emit(&man, bo.profile, file, emit_sub, &cx, emit_id);
+        return bsys::manifest_emit(&man, bo.profile, file, emit_sub, &cx, emit_id, emit_c);
     }
     if mode == Mode::MODE_LSP {
         // `super-c lsp --capabilities`: print the advertised capability JSON and exit (machine-
@@ -1725,9 +1667,6 @@ fn main(argv: Vector<str>) i32 {
         let mut rc = 1;
         if !mo.is_none() {
             let mut man = mo.unwrap();
-            if bo.sanitizers {
-                man.add_sanitizers();
-            }
             // --arch= (else the host) is the axis `@arch` gates on.
             man.arch = co.arch;
             man.target = co.target;
@@ -1758,16 +1697,10 @@ fn main(argv: Vector<str>) i32 {
                 target_features: co.target_features.as_str(),
                 simd_width: co.simd_width,
                 simd_dispatch: co.simd_dispatch.as_str(),
-                cc_found: false,
+                sysroot: bo.sysroot,
             };
             if bo.out_dir.len() != 0 {
                 man.out_dir = String::from_str(bo.out_dir);
-            }
-            if bo.cstd.len() != 0 {
-                man.cstd = String::from_str(bo.cstd);
-            }
-            if bo.cc.len() != 0 {
-                man.cc = String::from_str(bo.cc);
             }
             if mode == Mode::MODE_CLEAN {
                 rc = bsys::manifest_clean(&man, clean_full);
@@ -1781,8 +1714,8 @@ fn main(argv: Vector<str>) i32 {
             } else if mode == Mode::MODE_RUN {
                 // Cargo run: build the manifest binary and exec it.
                 rc = bsys::manifest_run_bin(&man, bo.profile, out_bin, bo.bin_sel, &cx);
-            } else if print_probes {
-                rc = bsys::manifest_print_probes(&man, bo.profile, &cx);
+            } else if emit_c {
+                rc = bsys::manifest_emit_c(&man, bo.profile, &cx);
             } else if out_bin.len() != 0 && bo.lib_sel {
                 eprintln("error: -o names one binary; --lib builds the library targets");
                 rc = 1;
@@ -1804,12 +1737,10 @@ fn main(argv: Vector<str>) i32 {
         return 1;
     }
     // The target selectors and the engine's own steps act on build.toml's targets; a file has none.
-    if bo.bin_sel.len() != 0 || bo.lib_sel || transpiler.len() != 0 || print_probes {
-        eprintln("error: --bin, --lib, --transpiler and --print-probes need build.toml; '{}' builds alone", file);
+    if bo.bin_sel.len() != 0 || bo.lib_sel || transpiler.len() != 0 {
+        eprintln("error: --bin, --lib and --transpiler need build.toml; '{}' builds alone", file);
         return 1;
     }
-    let pflags = bsys::profile_flags(bo.profile, co.target, false, bo.sanitizers);
-    let pcflags = bsys::profile_flags(bo.profile, co.target, true, bo.sanitizers);
     let rc = run_file(
         file,
         std_dir.as_str(),
@@ -1824,12 +1755,9 @@ fn main(argv: Vector<str>) i32 {
         co.simd_dispatch.as_str(),
         co.bootstrap_tags,
         co.lint,
-        pflags.as_str(),
-        pcflags.as_str(),
         jobs,
         bo.out_dir,
-        bo.cc,
-        bo.cstd,
+        bo.sysroot,
         bo.profile,
     );
     return rc;
