@@ -562,6 +562,17 @@ extend CEmit {
             }
             l.pkg.pic = pk.pic;
             l.pkg.omit_fp = (pk.cg & bman::CG_OMIT_FRAME_POINTER) != 0;
+            l.pkg.fmath = pick((pk.cg & bman::CG_ASSOC_MATH) != 0, lir_ir::FM_ASSOC, 0u8) | pick(
+                (pk.cg & bman::CG_RECIP_MATH) != 0,
+                lir_ir::FM_RECIP,
+                0u8,
+            ) | pick((pk.cg & bman::CG_FINITE_MATH) != 0, lir_ir::FM_FINITE, 0u8) | pick(
+                (pk.cg & bman::CG_NO_SIGNED_ZEROS) != 0,
+                lir_ir::FM_NSZ,
+                0u8,
+            ) | pick((pk.cg & bman::CG_FP_CONTRACT) != 0, lir_ir::FM_CONTRACT, 0u8);
+            let fi = cf::find("fma", pk.arch);
+            l.pkg.fma = tgt::isa(pk.arch).scalar_fma || fi >= 0 && cf::has(pk.features, fi as usize);
             l.pkg.protect = if (pk.cg & bman::CG_PROTECT_ALL) != 0 {
                 lir_ir::PROTECT_ALL;
             } else if (pk.cg & bman::CG_PROTECT_STRONG) != 0 {

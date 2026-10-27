@@ -580,6 +580,19 @@ extend Eval {
         if op == O_MEMSET {
             return self.set_bytes(self.val(&f, b, t.a), self.val(&f, b, t.b) as u8, self.val(&f, b, t.c));
         }
+        if op == O_FMA {
+            let x = self.val(&f, b, t.a);
+            let y = self.val(&f, b, t.b);
+            let z = self.val(&f, b, t.c);
+            self.vals[dst as usize] = if t.ty == T_F32 {
+                fl::f32_bits(
+                    math::fmaf(fl::f32_from_bits(x as u32), fl::f32_from_bits(y as u32), fl::f32_from_bits(z as u32)),
+                );
+            } else {
+                fl::f64_bits(math::fma(fl::f64_from_bits(x), fl::f64_from_bits(y), fl::f64_from_bits(z)));
+            };
+            return true;
+        }
         if op == O_SELECT {
             let src = if self.val(&f, b, t.a) != 0 {
                 t.b;

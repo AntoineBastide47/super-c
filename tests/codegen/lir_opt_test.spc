@@ -11,11 +11,18 @@ import lir::loops as lu;
 
 // Package text `text` read, then optimized: each body verifies before and after.
 fn optimized(text: str) (Package, Package) {
+    return optimized_fm(text, 0, false);
+}
+
+// `optimized` with the float rewrites `fm` (`FM_*`) allowed, and a fused multiply-add when `fma`.
+fn optimized_fm(text: str, fm: u8, fma: bool) (Package, Package) {
     let mut err = String::new();
     let q = lparse::parse(text, &mut err);
     assert(q.is_some(), err.as_str());
     let before = q.unwrap();
     let mut after = lparse::parse(text, &mut err).unwrap();
+    after.fmath = fm;
+    after.fma = fma;
     let none = Vector::<bool>::new();
     lopt::optimize(
         &mut after,
@@ -546,6 +553,119 @@ b0(v0: i64):
     assert(!f.contains("memcpy") && !f.contains("slot s1"), "one slot holds the result and the argument");
     let x: []u64 = [4];
     same_result(&b, &a, "fwd", x, 8);
+}
+
+// The float rewrites `-ffast-math` allows: `x * 1` and `x + 0` go, a division by a constant becomes a
+// product by its reciprocal, two constants of an addition chain fold, and a product added becomes one
+// fused multiply-add, but for a loop's accumulator, and so does a product less a constant or a constant
+// less a product by a constant; none happens without its flag. The values are exact, so the results agree.
+@test
+fn fast_math_rewrites_float_arithmetic_only_when_allowed() {
+    let src = M"(lir ptr 8
+sym @f fn global
+sym @h fn global
+sym @g fn global
+sym @acc fn global
+sym @sub fn global
+fn @f
+  sig (f64) -> f64
+b0(v0: f64):
+  v1 = fconst.f64 0x3ff0000000000000
+  v2 = fconst.f64 0x0
+  v3 = fconst.f64 0x4010000000000000
+  v4 = fmul.f64 v0, v1
+  v5 = fadd.f64 v4, v2
+  v6 = fdiv.f64 v5, v3
+  ret v6
+fn @h
+  sig (f64) -> f64
+b0(v0: f64):
+  v1 = fconst.f64 0x3ff0000000000000
+  v2 = fadd.f64 v0, v1
+  v3 = fadd.f64 v2, v1
+  ret v3
+fn @g
+  sig (f64, f64, f64) -> f64
+b0(v0: f64, v1: f64, v2: f64):
+  v3 = fmul.f64 v0, v1
+  v4 = fadd.f64 v3, v2
+  ret v4
+fn @acc
+  sig (f64, i64) -> f64
+b0(v0: f64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = fconst.f64 0x0
+  jmp b1(v2, v4)
+b1(v5: i64, v6: f64):
+  v7 = icmp.ult v5, v1
+  br v7, b2, b3
+b2:
+  v8 = sitofp.f64 v5
+  v9 = fmul.f64 v8, v0
+  v10 = fadd.f64 v9, v6
+  v11 = add.i64 v5, v3
+  jmp b1(v11, v10)
+b3:
+  ret v6
+fn @sub
+  sig (f64, f64) -> f64
+b0(v0: f64, v1: f64):
+  v2 = fconst.f64 0x3fe8000000000000
+  v3 = fconst.f64 0x4000000000000000
+  v4 = fmul.f64 v0, v1
+  v5 = fsub.f64 v4, v2
+  v6 = fmul.f64 v3, v0
+  v7 = fsub.f64 v1, v6
+  v8 = fadd.f64 v5, v7
+  ret v8
+)";
+    let all = FM_ASSOC | FM_RECIP | FM_FINITE | FM_NSZ | FM_CONTRACT;
+    let (b, a) = optimized_fm(src, all, true);
+    let f = text_of(&a, "f");
+    assert(
+        !f.contains("fdiv") && !f.contains("fadd") && f.contains("fmul.f64 v0, v1") && f.contains("0x3fd0000000000000"),
+        f.as_str(),
+    );
+    let h = text_of(&a, "h");
+    assert(h.contains("0x4000000000000000") && count_of(&h, "fadd") == 1, h.as_str());
+    let g = text_of(&a, "g");
+    assert(g.contains("fma.f64") && !g.contains("fadd"), g.as_str());
+    let acc = text_of(&a, "acc");
+    assert(!acc.contains("fma") && acc.contains("fmul") && acc.contains("fadd"), acc.as_str());
+    // 2 * (0 + 1 + 2) = 6.
+    let two3: []u64 = [0x4000000000000000, 3];
+    same_result(&b, &a, "acc", two3, 0x4018000000000000);
+    let sb = text_of(&a, "sub");
+    assert(!sb.contains("fsub") && sb.contains("0xbfe8000000000000") && sb.contains("0xc000000000000000"), sb.as_str());
+    // (2 * 3 - 0.75) + (3 - 2 * 2) = 4.25.
+    let two_three: []u64 = [0x4000000000000000, 0x4008000000000000];
+    same_result(&b, &a, "sub", two_three, 0x4011000000000000);
+    let eight: []u64 = [0x4020000000000000];
+    // 8 / 4 = 2; 8 + 1 + 1 = 10.
+    same_result(&b, &a, "f", eight, 0x4000000000000000);
+    same_result(&b, &a, "h", eight, 0x4024000000000000);
+    // 2 * 3 + 4 = 10.
+    let abc: []u64 = [0x4000000000000000, 0x4008000000000000, 0x4010000000000000];
+    same_result(&b, &a, "g", abc, 0x4024000000000000);
+    let (_, plain) = optimized_fm(src, 0, true);
+    assert(text_of(&plain, "f").contains("fdiv") && text_of(&plain, "g").contains("fadd"), "no flag, no rewrite");
+    let (_, nofma) = optimized_fm(src, all, false);
+    assert(!text_of(&nofma, "g").contains("fma"), "no fused multiply-add on the processor");
+}
+
+// The times `text` holds `pat`.
+fn count_of(text: &String, pat: str) u32 {
+    let mut n: u32 = 0;
+    let mut rest = text.as_str();
+    let mut at = rest.find(pat);
+    // Each step moves past one match.
+    while at >= 0 {
+        n += 1;
+        rest = rest.slice(at as usize + pat.len(), rest.len());
+        at = rest.find(pat);
+    }
+    return n;
 }
 
 // A load of an exclusive reference parameter's referent (`ref p0 16 noalias`, a `&mut`) leaves a loop

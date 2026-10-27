@@ -270,7 +270,8 @@ b0(v0: f32, v1: f64):
   v26 = fcmp.une v16, v4
   v27 = fcmp.uno v16, v4
   v28 = select.f64 v27, v18, v15
-  ret v28
+  v29 = fma.f64 v28, v15, v18
+  ret v29
 fn @memory
   sig (ptr, i64) -> void
   slot s0 size 32 align 3

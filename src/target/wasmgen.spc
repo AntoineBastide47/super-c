@@ -1363,6 +1363,19 @@ extend Gen {
         if op == O_FCMP {
             return self.fcmp(i, t);
         }
+        if op == O_FMA {
+            // wasm has no scalar fused multiply-add: the C library's, which rounds once.
+            self.get(t.a);
+            self.get(t.b);
+            self.get(t.c);
+            if t.ty == T_F64 {
+                self.call_rt("fma", [w::F64, w::F64, w::F64], [w::F64]);
+            } else {
+                self.call_rt("fmaf", [w::F32, w::F32, w::F32], [w::F32]);
+            }
+            self.put(i);
+            return true;
+        }
         if op >= O_FADD && op <= O_FNEG {
             let d = t.ty == T_F64;
             if op == O_FNEG {

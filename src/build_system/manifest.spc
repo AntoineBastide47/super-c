@@ -63,9 +63,20 @@ pub const CG_PROTECT: u64 = 64;
 pub const CG_PROTECT_STRONG: u64 = 128;
 pub const CG_PROTECT_ALL: u64 = 256;
 const CG_PROTECTS: u64 = CG_PROTECT | CG_PROTECT_STRONG | CG_PROTECT_ALL;
+/// The float rewrites `-ffast-math` allows, each its own flag too: reassociation (`-fassociative-math`),
+/// a division by a constant as a product by its reciprocal (`-freciprocal-math`), no NaN or infinity
+/// (`-ffinite-math-only`), no signed zero (`-fno-signed-zeros`, its bit set by the `no` form), and a
+/// product added as one fused multiply-add (`-ffp-contract=fast`; `=off` clears it).
+pub const CG_ASSOC_MATH: u64 = 512;
+pub const CG_RECIP_MATH: u64 = 1024;
+pub const CG_FINITE_MATH: u64 = 2048;
+pub const CG_NO_SIGNED_ZEROS: u64 = 4096;
+pub const CG_FP_CONTRACT: u64 = 8192;
+pub const CG_FAST_MATH: u64 = CG_ASSOC_MATH | CG_RECIP_MATH | CG_FINITE_MATH | CG_NO_SIGNED_ZEROS | CG_FP_CONTRACT;
 
-// The flags by name.
-const CG_NAMES: [(str<'static>, u64); 9] = [
+// The flags by name: `-f<name>` sets the bits, `-fno-<name>` clears them; the reverse for
+// `signed-zeros`, whose bit is its `no` form.
+const CG_NAMES: [(str<'static>, u64); 15] = [
     ("omit-frame-pointer", CG_OMIT_FRAME_POINTER),
     ("inline", CG_INLINE),
     ("inline-functions", CG_INLINE_FUNCTIONS),
@@ -75,9 +86,15 @@ const CG_NAMES: [(str<'static>, u64); 9] = [
     ("stack-protector", CG_PROTECT),
     ("stack-protector-strong", CG_PROTECT_STRONG),
     ("stack-protector-all", CG_PROTECT_ALL),
+    ("fast-math", CG_FAST_MATH),
+    ("associative-math", CG_ASSOC_MATH),
+    ("reciprocal-math", CG_RECIP_MATH),
+    ("finite-math-only", CG_FINITE_MATH),
+    ("signed-zeros", CG_NO_SIGNED_ZEROS),
+    ("fp-contract=fast", CG_FP_CONTRACT),
 ];
 
-// The bit flag `name` names: 0 for none.
+// The bits flag `name` names: 0 for none.
 fn cg_bit(name: str) u64 {
     let names: [](str, u64) = CG_NAMES;
     for k in 0..names.len() {
@@ -105,8 +122,13 @@ fn cg_put(b: u64, set: bool, on: &mut u64, off: &mut u64) {
     }
 }
 
-/// Command-line flag `arg` (`-f<name>`, `-fno-<name>`) into `on` or `off`: false when it names no flag.
+/// Command-line flag `arg` (`-f<name>`, `-fno-<name>`, `-ffp-contract=off`) into `on` or `off`: false when
+/// it names no flag.
 pub fn cg_flag(arg: str, on: &mut u64, off: &mut u64) bool {
+    if arg == "-ffp-contract=off" {
+        cg_put(CG_FP_CONTRACT, false, on, off);
+        return true;
+    }
     let neg = arg.starts_with("-fno-");
     if !neg && !arg.starts_with("-f") {
         return false;
@@ -122,7 +144,16 @@ pub fn cg_flag(arg: str, on: &mut u64, off: &mut u64) bool {
         ),
     );
     if b != 0 {
-        cg_put(b, !neg, on, off);
+        cg_put(b, neg == (b == CG_NO_SIGNED_ZEROS), on, off);
+    }
+    return b != 0;
+}
+
+/// Profile key `key` with value `v` into `on` or `off`: false when it names no flag.
+pub fn cg_key(key: str, v: bool, on: &mut u64, off: &mut u64) bool {
+    let b = cg_bit(key);
+    if b != 0 {
+        cg_put(b, v != (b == CG_NO_SIGNED_ZEROS), on, off);
     }
     return b != 0;
 }
@@ -158,9 +189,16 @@ pub fn cg_spell(opt: i32, on: u64, off: u64, out: &mut String) {
     let names: [](str, u64) = CG_NAMES;
     for k in 0..names.len() {
         let b = names[k].1;
-        if (on & b) != 0 {
+        let (set, clear) = if b == CG_NO_SIGNED_ZEROS {
+            ((off & b) == b, (on & b) == b);
+        } else {
+            ((on & b) == b, (off & b) == b && (b & CG_PROTECTS) == 0);
+        };
+        if b == CG_FP_CONTRACT && clear {
+            out.push_str(" -ffp-contract=off");
+        } else if set {
             out.format_into(" -f{}", names[k].0);
-        } else if (off & b) != 0 && (b & CG_PROTECTS) == 0 {
+        } else if clear {
             out.format_into(" -fno-{}", names[k].0);
         }
     }
@@ -564,10 +602,18 @@ pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a
                 let mut on = false;
                 set_bool(it, &mut errs, &mut on);
                 p.overflow_checks = on as i32;
+            } else if key == "fp-contract" {
+                // `-ffp-contract=`'s values: "fast" or "off".
+                let v = it.val.s.as_str();
+                if it.val.kind != toml::TV_STR || v != "fast" && v != "off" {
+                    errs.emit(it.at, key.len() as u32, format("'fp-contract' expects \"fast\" or \"off\""));
+                } else {
+                    cg_put(CG_FP_CONTRACT, v == "fast", &mut p.cg_on, &mut p.cg_off);
+                }
             } else if cg_bit(key) != 0 {
                 let mut on = false;
                 set_bool(it, &mut errs, &mut on);
-                cg_put(cg_bit(key), on, &mut p.cg_on, &mut p.cg_off);
+                let _ = cg_key(key, on, &mut p.cg_on, &mut p.cg_off);
             } else {
                 unknown(&mut errs, bootstrap, it.at, key.len() as u32, format("unknown profile key '{}'", key));
             }

@@ -708,7 +708,7 @@ extend Gen {
         let x = self.vx(v);
         let xa = self.vx(a);
         let t = self.vt(v);
-        let sr = self.step_reg(v);
+        let sr = self.step_reg(v, a);
         if sr != NOREG {
             // The parameter keeps the register, which its release frees.
             self.lock |= bit(sr);
@@ -740,9 +740,9 @@ extend Gen {
     }
 
     // The fixed register of the parameter the jump ending instruction `v`'s block passes `v` alone to,
-    // when nothing reads that parameter after `v`'s first operand (a loop counter's step): `v` defined
-    // there makes the edge's move vanish. NOREG when not.
-    fn step_reg(self: &Self, v: Value) u8 {
+    // when nothing reads that parameter after `v` but as `a`, the operand `def_from` moves into the result
+    // first (a loop counter's step): `v` defined there makes the edge's move vanish. NOREG when not.
+    fn step_reg(self: &Self, v: Value, a: Value) u8 {
         if (v & (VPARAM | VFLAG)) != 0 || self.lv.uses[v as usize] != 1 || self.va[v as usize].home != H_NONE {
             return NOREG;
         }
@@ -766,7 +766,8 @@ extend Gen {
         let px = self.vx(pv);
         // A field that is no operand may equal the parameter only by chance: then no hint, still correct.
         let t = b.insts[v as usize];
-        if self.va[px as usize].home != H_FIXED || self.lv.last[px as usize] > v || self.lv.end[px as usize] > self.pos || t.b == pv || t.c == pv {
+        let other = (t.a == pv || t.b == pv || t.c == pv) && a != pv;
+        if self.va[px as usize].home != H_FIXED || self.lv.last[px as usize] > v || self.lv.end[px as usize] > self.pos || other {
             return NOREG;
         }
         return self.va[px as usize].reg;
@@ -2372,6 +2373,16 @@ extend Gen {
         if op == O_FCMP {
             assert(!is_vec(self.vt(t.a)), "x64gen: a vector comparison the verifier rejects");
             self.fcmp(i, t);
+            return true;
+        }
+        if op == O_FMA {
+            // The addend in the result's register, then `a * b` added (vfmadd231, FMA3): the one instruction
+            // reads its operands before it writes.
+            let ra = self.reg(t.a);
+            let rb = self.reg(t.b);
+            let rc = self.reg(t.c);
+            let rd = self.def_from(i, t.c, rc);
+            self.c.vfma231(t.ty == T_F64, rd - V0, ra - V0, rb - V0);
             return true;
         }
         if op >= O_FADD && op <= O_FNEG {

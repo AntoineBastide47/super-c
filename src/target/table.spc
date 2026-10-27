@@ -25,6 +25,8 @@ pub struct Isa {
     /// The vector unit sums mask lanes faster than it extracts lane bits (Neon has no lane-bits
     /// instruction), so `count` of a comparison folds lane masks.
     pub mask_fold: bool,
+    /// Every processor of it has a scalar fused multiply-add (else only one with its feature `fma`).
+    pub scalar_fma: bool,
     /// The C compiler vectorizes a merged loop of loads and stores through two slices it cannot prove
     /// apart (wasm's does), so a vector load and store over different slices may share one loop.
     pub merge_apart: bool,
@@ -145,6 +147,7 @@ pub const ISAS: [Isa; 3] = [
         naked: true,
         return_address: true,
         mask_fold: false,
+        scalar_fma: false,
         merge_apart: false,
         simd_backend: "x86_64",
         intrinsics: "immintrin.h x86intrin.h",
@@ -159,6 +162,7 @@ pub const ISAS: [Isa; 3] = [
         naked: true,
         return_address: true,
         mask_fold: true,
+        scalar_fma: true,
         merge_apart: false,
         simd_backend: "aarch64",
         intrinsics: "arm_neon.h arm_acle.h arm_sve.h arm_sme.h",
@@ -173,6 +177,7 @@ pub const ISAS: [Isa; 3] = [
         naked: false,
         return_address: false,
         mask_fold: false,
+        scalar_fma: false,
         merge_apart: true,
         simd_backend: "wasm",
         intrinsics: "wasm_simd128.h",

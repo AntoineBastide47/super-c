@@ -2162,6 +2162,14 @@ extend Gen {
             self.cond_value(i, c, c2);
             return true;
         }
+        if op == O_FMA {
+            let ra = self.reg(t.a);
+            let rb = self.reg(t.b);
+            let rc = self.reg(t.c);
+            let rd = self.def(i);
+            self.emit(a::fmadd(t.ty == T_F64, false, rd - V0, ra - V0, rb - V0, rc - V0));
+            return true;
+        }
         if op >= O_FADD && op <= O_FNEG {
             if is_vec(t.ty) {
                 return self.vec_arith(i, t);
