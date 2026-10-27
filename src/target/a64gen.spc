@@ -148,6 +148,7 @@ pub struct Gen {
     // record when its code calls nothing (`finish`).
     frameless: bool,
     sret_off: i64, // the slot of x8 for a vector result in memory, -1 when none
+    canary: i64, // the stack canary's slot above the LIR slots, -1 when none
     // The register save area of a variadic body under the standard convention (x0..x7 at its start,
     // then q0..q7), NONE when none.
     va_save: u32,
@@ -243,6 +244,7 @@ extend Gen {
             max_align: 16,
             frameless: false,
             sret_off: -1,
+            canary: -1,
             va_save: NONE,
             blk_at: Vector::<u32>::new(),
             fix: Vector::<u64>::new(),
@@ -1359,6 +1361,13 @@ extend Gen {
             self.va_save = at;
             at += 192;
         }
+        // The canary between the slots and the spills and saved registers above them.
+        self.canary = -1;
+        if protected(unsafe (*self.pkg).protect, b) {
+            at = at + 7 & ~7u32;
+            self.canary = at;
+            at += 8;
+        }
         self.spill_base = at + 15 & ~15u32;
         self.spill_top = 0;
     }
@@ -1390,6 +1399,10 @@ extend Gen {
     // The entry block's parameters where the calling convention passes them.
     fn entry(self: &mut Self) bool {
         let b = self.b();
+        if self.canary >= 0 {
+            self.guard(a::IP0 as u8);
+            self.mem(a::M_X, false, a::IP0 as u8, a::SP, self.canary);
+        }
         cc::classify(b, b.sig, self.ptr, self.apple, self.vregs, &mut self.self_lay);
         if self.self_lay.unknown {
             return self.refuse("the signature passes an aggregate whose C class is unknown");
@@ -4387,6 +4400,16 @@ extend Gen {
         return k;
     }
 
+    // The stack guard's value into `r`: `__stack_chk_guard`, through its address slot.
+    fn guard(self: &mut Self, r: u8) {
+        let os = self.obj().sym("__stack_chk_guard");
+        self.reloc(a::R_GOT_PAGE21, os, 0);
+        self.emit(a::adr(true, r, 0));
+        self.reloc(a::R_GOT_PAGEOFF12, os, 0);
+        self.emit(a::ldst_uimm(a::M_X, true, r, r, 0));
+        self.emit(a::ldst_uimm(a::M_X, true, r, r, 0));
+    }
+
     // A call of `__sc_panic` with C string `text`.
     fn panic_text(self: &mut Self, text: str) {
         let os = self.cstr(text);
@@ -4416,7 +4439,7 @@ extend Gen {
         let mut pro = Vector::<u32>::new();
         // A leaf body keeps its return address in x30: no frame record, and its frame from sp. The
         // compact unwind encoding's frameless form holds frames up to 65520 bytes.
-        let mut leaf = self.frameless && local <= 32768;
+        let mut leaf = self.frameless && local <= 32768 && self.canary < 0;
         for q in 0..self.code.len() {
             let w = self.code[q];
             leaf = leaf && (w & 0xFC000000) != 0x94000000 && (w & 0xFFFFFC1F) != 0xD63F0000;
@@ -4475,6 +4498,16 @@ extend Gen {
         }
         let pl = pro.len() as u32;
         let body_n = self.code.len() as u32;
+        // The canary's check: on a mismatch `__stack_chk_fail`, which does not return.
+        if self.canary >= 0 {
+            self.mem(a::M_X, true, a::IP0 as u8, a::SP, self.canary);
+            self.guard((a::IP0 + 1) as u8);
+            self.emit(a::addsub_reg(true, 1, true, 31, a::IP0, a::IP0 + 1, 0, 0));
+            self.emit(a::bcond(a::EQ, 8));
+            let fs = self.obj().sym("__stack_chk_fail");
+            self.reloc(a::R_BRANCH26, fs, 0);
+            self.emit(a::bl(0));
+        }
         // The epilogue.
         let mut epi = Vector::<u32>::new();
         if leaf {
@@ -4525,7 +4558,7 @@ extend Gen {
         let ps = p.syms[s as usize];
         let o = self.obj();
         let k2 = o.sym(p.spell(ps.name));
-        let size = (pl + body_n + epi.len() as u32) * 4;
+        let size = (pl + self.code.len() as u32 + epi.len() as u32) * 4;
         let sec = if ps.sect != NONE {
             o.named(p.spell(ps.sect), true);
         } else {

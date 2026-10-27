@@ -557,6 +557,24 @@ fn win_fixsfti(out: *mut Pair, a: f32) {
 
 // ---- the Windows C library's static part --------------------------------------------------------------
 
+/// The stack canaries' value (`-fstack-protector`), as mingw-w64's static library defines it: a
+/// constructor the driver adds fills it at start (`native_registry`).
+@platform(windows)
+@export("__sc_ucrt___stack_chk_guard")
+pub static mut STACK_CHK_GUARD: u64 = 0;
+
+@platform(windows)
+extern "C" {
+    fn abort() void;
+}
+
+/// A function's canary changed before it returned: its stack memory overflowed.
+@platform(windows)
+@export("__sc_ucrt___stack_chk_fail")
+pub fn stack_chk_fail() {
+    unsafe abort();
+}
+
 // The C runtime DLL (ucrtbase.dll) exports none of these: its headers define them inline over the
 // `__stdio_common_*` exports, and mingw-w64's import library carries them as code. The own linker binds
 // each undefined `<name>` to `__sc_ucrt_<name>` (`link::pe`); the options are UCRT's defaults, as

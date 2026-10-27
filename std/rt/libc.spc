@@ -331,6 +331,9 @@ static mut ENV_CAP: usize = 0;
 /// environment, `main`, then `exit` with its result.
 @export("_start")
 pub fn start() {
+    // The stack canaries' value, before any function that keeps one returns (this one does not).
+    let _ = unsafe sc_wasi_random_get(((&mut STACK_CHK_GUARD) as *mut usize) as *mut u8, sizeof(usize));
+    unsafe STACK_CHK_GUARD &= ~0xFFusize;
     unsafe __wasm_call_ctors();
     let mut argc: usize = 0;
     let mut asize: usize = 0;
@@ -441,6 +444,18 @@ pub fn exit_now(code: i32) {
 @noreturn
 pub fn abort() {
     unsafe sc_wasm_trap();
+}
+
+/// The value of the stack canaries (`-fstack-protector`): random from the start on, its low byte 0 so a
+/// string copy cannot write it, as musl's `__init_ssp` sets it.
+@export("__stack_chk_guard")
+pub static mut STACK_CHK_GUARD: usize = 0;
+
+/// A function's canary changed before it returned: its stack memory overflowed.
+@export("__stack_chk_fail")
+@noreturn
+pub fn stack_chk_fail() {
+    abort();
 }
 
 /// The process id: WASI has none, so every process is 42, as wasi-libc's emulation answers.

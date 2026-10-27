@@ -6,8 +6,8 @@ import tests::platform::platform_harness as ph;
 const E: str = "SC_NO_EMIT_CACHE";
 
 // A program each flag changes: a counted loop (unrolling), a loop with bounds checks (versioning), a loop
-// with a branch on a parameter (unswitching), a small and a mid-sized callee (inlining) and leaf functions
-// (the frame pointer).
+// with a branch on a parameter (unswitching), a small and a mid-sized callee (inlining), leaf functions
+// (the frame pointer) and slots (the stack protector).
 const PROGRAM: str = M"(import stdio;
 
 @noinline
@@ -94,7 +94,7 @@ fn each_level_builds_its_own_code() {
     }
 }
 
-// At `-O3`, turning one flag off changes the binary and keeps what it prints.
+// At `-O3`, turning one flag off (or the protector on) changes the binary and keeps what it prints.
 @test
 fn each_flag_changes_the_code() {
     let p = cli::proj_new();
@@ -107,6 +107,7 @@ fn each_flag_changes_the_code() {
         "-fno-unroll-loops",
         "-fno-unswitch-loops",
         "-fno-version-loops-for-bounds",
+        "-fstack-protector-strong",
     ];
     for k in 0..flags.len() {
         let (bin, out) = built(&p, format("-O3 {}", flags[k]).as_str(), format("f{}", k).as_str());
@@ -116,6 +117,43 @@ fn each_flag_changes_the_code() {
     // The last flag wins: on, then off again, is the base.
     let (same, _) = built(&p, "-O3 -fno-unroll-loops -funroll-loops", "again");
     assert(same.as_str() == base.as_str(), "-funroll-loops after -fno-unroll-loops");
+}
+
+// A function whose stack memory overflows past its slots stops at its return under a stack protector;
+// without an overflow it runs as before.
+@test
+fn the_stack_protector_stops_an_overflow() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import stdio;
+import stdlib;
+
+@noinline
+fn smash(n: usize) u64 {
+    let mut buf: [u8; 16] = [0u8; 16];
+    let p = ((&mut buf) as *mut [u8; 16]) as *mut u8;
+    for i in 0..n {
+        unsafe *(p + i) = 0x41;
+    }
+    return unsafe *p;
+}
+
+fn main() i32 {
+    let n = unsafe stdlib::atoi(stdlib::getenv("N")) as usize;
+    println("{}", smash(n));
+    return 0;
+}
+)",
+    );
+    let root = p.dir();
+    let b = cli::superc_env_in(root, E, "1", "build -O2 -fstack-protector-strong main.spc -o guarded");
+    assert(b.ok(), "build");
+    let exe = format("{}/guarded{}", root, unsafe str::from_cstr(cli::binext()));
+    let fine = cli::exe_env_in(exe.as_str(), root, "N", "8", "");
+    assert(fine.ok() && fine.out_has("65"), "no overflow");
+    let smashed = cli::exe_env_in(exe.as_str(), root, "N", "64", "");
+    assert(smashed.exit != 0, "the overflow stops");
 }
 
 // `-march` names the CPU as `--target-cpu` does: an unknown one is refused by the same check.

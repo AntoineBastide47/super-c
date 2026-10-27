@@ -15785,6 +15785,25 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
         }
         t.format_into("\ndata @__sc_reflect_ctor size {} align {} reloc 0 @__sc_reflect_init\n", ptr, al);
     }
+    // Windows has no C library start code that sets the stack canaries' value (`-fstack-protector`): a
+    // constructor of no canary of its own fills `__stack_chk_guard` (the runtime's, `std::rt::builtins`)
+    // from `rand_s`, its low byte 0 so a string copy cannot write it. The entry calls the constructors
+    // one by one, so no function that keeps a canary is running when the value changes.
+    if tgt::obj_of(p.build_target).name == "coff" && (p.cg & (bman::CG_PROTECT | bman::CG_PROTECT_STRONG | bman::CG_PROTECT_ALL)) != 0 {
+        t.push_str("sym @__stack_chk_guard data global ext\nsym @rand_s fn global ext\nsym @abort fn global ext\n");
+        t.push_str("sym @__sc_ssp_init fn local\nsym @__sc_ssp_ctor data local used section \".CRT$XCU\"\n");
+        t.push_str(
+            "fn @__sc_ssp_init\n  sig () -> void\nb0:\n  v0 = symaddr @__stack_chk_guard\n  v1 = call.i32 @rand_s(v0) : (ptr) -> i32\n",
+        );
+        t.push_str(
+            "  v2 = symaddr @__stack_chk_guard+4\n  v3 = call.i32 @rand_s(v2) : (ptr) -> i32\n  v4 = or.i32 v1, v3\n",
+        );
+        t.push_str("  v5 = iconst.i32 0\n  v6 = icmp.ne v4, v5\n  br v6, b2, b1\nb1:\n  v7 = load.i64 v0 align 3\n");
+        t.push_str("  v8 = iconst.i64 -256\n  v9 = and.i64 v7, v8\n  store v9, v0 align 3\n  ret\nb2:\n");
+        t.push_str(
+            "  call @abort() : () -> void\n  unreachable\ndata @__sc_ssp_ctor size 8 align 3 reloc 0 @__sc_ssp_init\n",
+        );
+    }
     for i in 0..zst.len() {
         let mut lg: u32 = 0;
         while 1u64 << lg as u64 < zst[i] {
