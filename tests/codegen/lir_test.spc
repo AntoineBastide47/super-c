@@ -85,6 +85,35 @@ fn the_verifier_rejects_a_use_its_definition_does_not_dominate() {
     assert(v.err.as_str().contains("does not dominate"), v.err.as_str());
 }
 
+// A context switch is the whole body of a naked function; each system operation takes its operands.
+@test
+fn the_verifier_checks_system_operations() {
+    let mut err = String::new();
+    let q = lparse::parse(
+        "lir ptr 8\nsym @f fn global\nfn @f\n  sig (ptr, ptr) -> void\nb0(v0: ptr, v1: ptr):\n  sys.ctxswap v0, v1\n  ret\n",
+        &mut err,
+    );
+    assert(q.is_some(), err.as_str());
+    let p = q.unwrap();
+    let mut v = verify::Verifier::new();
+    let f = p.syms[p.find_symbol("f") as usize];
+    assert(!v.check(&p, "f", &p.bodies[f.def as usize]), "a context switch outside a naked function");
+    assert(v.err.as_str().contains("a context switch in a naked function"), v.err.as_str());
+    let q2 = lparse::parse(
+        "lir ptr 8\nsym @g fn global\nfn @g\n  sig (ptr) -> void\nb0(v0: ptr):\n  sys.gsload.i64 v0\n  ret\n",
+        &mut err,
+    );
+    assert(q2.is_none(), "a result without a name");
+    let q3 = lparse::parse(
+        "lir ptr 8\nsym @h fn global\nfn @h\n  sig (ptr) -> void\nb0(v0: ptr):\n  v1 = sys.gsload.i64 v0\n  ret\n",
+        &mut err,
+    );
+    assert(q3.is_some(), err.as_str());
+    let p3 = q3.unwrap();
+    let h = p3.syms[p3.find_symbol("h") as usize];
+    assert(!v.check(&p3, "h", &p3.bodies[h.def as usize]), "a pointer offset into the gs segment");
+}
+
 @test
 fn the_parser_names_the_line_and_column_of_an_error() {
     let mut err = String::new();
@@ -174,6 +203,8 @@ sym @ints fn global
 sym @floats fn local
 sym @memory fn global
 sym @bare fn global
+sym @swap fn global
+sym @entry fn global
 sym @atomics fn global
 sym @calls fn global
 sym @va fn global
@@ -295,12 +326,35 @@ b0(v0: ptr, v1: i64):
   store v6, v11+3 align 0
   v12 = load.i16 v9-2 align 1
   asm "ldr %0, %2; add %0, %0, %1" out["=r" i64] in["r", "m"] clobber["memory", "x9"] (v2, v1, v0)
+  sys.spin
+  sys.barrier
+  sys.keep v0
+  v13 = sys.cycles.i64
+  sys.fpsave v2
+  v14 = sys.gsload.i64 v1
+  sys.gsstore v1, v14
+  v15 = iconst.i32 7
+  sys.cpuid v2, v15, v15
+  v16 = sys.xgetbv.i64 v15
+  v17 = sys.svl.i64
   ret
 fn @bare
   naked
   sig () -> void
 b0:
   asm "ret" out[] in[] clobber[] ()
+  ret
+fn @swap
+  naked
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  sys.ctxswap v0, v1
+  ret
+fn @entry
+  naked
+  sig () -> void
+b0:
+  sys.ctxentry
   ret
 fn @atomics
   sig (ptr, i32) -> i32
@@ -386,6 +440,8 @@ fn every_form_of_the_text_reads_back() {
     rmws.resize_default(6);
     let mut tys = Vector::<bool>::new();
     tys.resize_default(T_PTR as usize + 2);
+    let mut syss = Vector::<bool>::new();
+    syss.resize_default(SYS_COUNT as usize);
     for i in 0..p.bodies.len() {
         let b = &p.bodies[i];
         for k in 0..b.insts.len() {
@@ -396,6 +452,9 @@ fn every_form_of_the_text_reads_back() {
             }
             if t.op == O_ARMW {
                 rmws.set((t.aux >> 4) as usize, true);
+            }
+            if t.op == O_SYS {
+                syss.set(t.aux as usize, true);
             }
             tys.set(ty_slot(t.ty), true);
         }
@@ -408,6 +467,9 @@ fn every_form_of_the_text_reads_back() {
     }
     for r in 0..6usize {
         assert(rmws[r], rmw_name(r as u16));
+    }
+    for s in 0..SYS_COUNT as usize {
+        assert(syss[s], sys_name(s as u16));
     }
     for t in T_I8 as usize..T_PTR as usize + 2 {
         assert(tys[t], "a result of each machine type and a vector");

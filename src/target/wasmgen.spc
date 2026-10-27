@@ -1432,6 +1432,14 @@ extend Gen {
         if op == O_FENCE || op == O_VAEND {
             return true;
         }
+        if op == O_SYS {
+            // wasm has no spin instruction; the barriers emit nothing. Its other operations are other
+            // processors'.
+            if t.aux == SYS_SPIN || t.aux == SYS_BARRIER || t.aux == SYS_KEEP {
+                return true;
+            }
+            return self.refuse("a system operation of another processor");
+        }
         if op == O_ASM {
             return self.asm_inst(t);
         }

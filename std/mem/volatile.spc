@@ -48,6 +48,11 @@ pub unsafe fn zeroize_raw(p: *mut u8, n: usize) {
             volatile_store(p + i, 0u8);
             i += 1;
         }
-        asm("" :  :  : "memory");
+        sc_sys_barrier();
     }
+}
+
+// A compiler memory barrier (`lir::ir::SYS_BARRIER`).
+extern "C" {
+    fn sc_sys_barrier();
 }

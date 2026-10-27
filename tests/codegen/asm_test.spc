@@ -8,6 +8,8 @@ import target::x64 as x;
 import target::x64tab as xt;
 import target::x64asm as xa;
 import target::assembler as asmr;
+import target::ctxswitch as ctxs;
+import lir::ir as lir_ir;
 import codegen::obj as ob;
 import target::wasmtab as wt;
 import target::wasmasm as wa;
@@ -1145,12 +1147,60 @@ fn module_blocks(path: str) u32 {
     return bad;
 }
 
+// The context switch and its entry (`target::ctxswitch`) for each target the native backend writes them
+// for: ours assembles them to the C compiler's code and Microsoft x64 unwind data.
+fn ctx_blocks() u32 {
+    let mut bad: u32 = 0;
+    // (x86-64, object format, triple) per target.
+    let targets: [(bool, u8, str); 5] = [
+        (false, asmr::FMT_MACHO, "arm64-apple-macos11"),
+        (false, asmr::FMT_ELF, "aarch64-linux-gnu"),
+        (true, asmr::FMT_MACHO, "x86_64-apple-macos11"),
+        (true, asmr::FMT_ELF, "x86_64-linux-gnu"),
+        (true, asmr::FMT_COFF, "x86_64-pc-windows-msvc"),
+    ];
+    for t in targets {
+        for op in [lir_ir::SYS_CTXSWAP, lir_ir::SYS_CTXENTRY] {
+            let mut text = String::new();
+            ctxs::text(
+                op,
+                tgt::axis_index(
+                    if t.0 {
+                        "x86_64";
+                    } else {
+                        "aarch64";
+                    },
+                    true,
+                ),
+                t.1,
+                "f",
+                &mut text,
+            );
+            let what = format("{} of {}", lir_ir::sys_name(op), t.2);
+            if !module_block(
+                what.as_str(),
+                text.as_str(),
+                if t.0 {
+                    asmr::ISA_X64;
+                } else {
+                    asmr::ISA_A64;
+                },
+                t.1,
+                t.2,
+            ) {
+                bad += 1;
+            }
+        }
+    }
+    return bad;
+}
+
 @test
 fn module_assembly_matches_the_c_compiler() {
     if cli::on_wasm() {
         return;
     }
-    assert_eq(module_blocks("ffi/sc_runtime.spc") + module_blocks("ffi/sc_sme.spc"), 0);
+    assert_eq(module_blocks("ffi/sc_runtime.spc") + module_blocks("ffi/sc_sme.spc") + ctx_blocks(), 0);
 }
 
 // ---- wasm ----

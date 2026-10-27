@@ -114,6 +114,89 @@ fn arithmetic_and_a_loop_run() {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// The system operations run as the processor's instructions: the spin hint and the barriers, the cycle
+// counter, the floating-point control state against the driver's own read of it; on x86-64 CPUID and
+// XGETBV against the driver's, on arm64 RDSVL where SME is. wasm32 has the spin hint and the barriers.
+@test
+fn system_operations_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let common = "lir ptr 8\nsym @sysops fn global\nsym @spin fn global\nsym @machine fn global\nfn @sysops\n  sig (ptr) -> i64\nb0(v0: ptr):\n  sys.spin\n  sys.barrier\n  sys.keep v0\n  sys.fpsave v0\n  v1 = sys.cycles.i64\n  v2 = sys.cycles.i64\n  v3 = sub.i64 v2, v1\n  ret v3\nfn @spin\n  sig (ptr) -> void\nb0(v0: ptr):\n  sys.spin\n  sys.barrier\n  sys.keep v0\n  ret\n";
+    let x64 = "fn @machine\n  sig (ptr, i32) -> i64\nb0(v0: ptr, v1: i32):\n  v2 = iconst.i32 0\n  sys.cpuid v0, v1, v2\n  v3 = iconst.i64 0\n  v4 = icmp.ne v1, v2\n  br v4, b2, b1\nb1:\n  ret v3\nb2:\n  v5 = sys.xgetbv.i64 v2\n  ret v5\n";
+    let a64 = "fn @machine\n  sig (ptr, i32) -> i64\nb0(v0: ptr, v1: i32):\n  v2 = iconst.i64 0\n  v3 = iconst.i32 0\n  v4 = icmp.ne v1, v3\n  br v4, b2, b1\nb1:\n  ret v2\nb2:\n  v5 = sys.svl.i64\n  ret v5\n";
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+#if defined(__APPLE__) && defined(__aarch64__)
+#include <sys/sysctl.h>
+#elif defined(__linux__) && defined(__aarch64__)
+#include <sys/auxv.h>
+#endif
+int64_t sysops(void *);
+void spin(void *);
+int64_t machine(void *, int32_t);
+int main(void) {
+  uint64_t buf[2] = {0, 0};
+#if defined(__x86_64__) || defined(__aarch64__)
+  if (sysops(buf) < 0) return 1;
+#endif
+#if defined(__x86_64__)
+  uint32_t m = 0;
+  uint16_t cw = 0;
+  __asm__ volatile("stmxcsr %0" : "=m"(m));
+  __asm__ volatile("fnstcw %0" : "=m"(cw));
+  if ((uint32_t)buf[0] != m || (uint16_t)(buf[0] >> 32) != cw) return 2;
+  uint32_t r[4] = {0, 0, 0, 0};
+  uint32_t a, b, c, d;
+  (void)machine(r, 0);
+  __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0), "c"(0));
+  if (r[0] != a || r[1] != b || r[2] != c || r[3] != d) return 3;
+  (void)machine(r, 1);
+  if ((r[2] >> 27 & 1) != 0) {
+    uint32_t lo, hi;
+    __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+    if ((uint64_t)machine(r, 1) != ((uint64_t)hi << 32 | lo)) return 4;
+  }
+#elif defined(__aarch64__)
+  uint64_t f = 0;
+  __asm__ volatile("mrs %0, fpcr" : "=r"(f));
+  if (buf[0] != f) return 2;
+  int sme = 0;
+#if defined(__APPLE__)
+  size_t n = sizeof(sme);
+  if (sysctlbyname("hw.optional.arm.FEAT_SME", &sme, &n, 0, 0) != 0) sme = 0;
+#elif defined(__linux__)
+  sme = (getauxval(AT_HWCAP2) >> 23 & 1) != 0;
+#endif
+  if (sme) {
+    uint64_t v = 0;
+    __asm__ volatile(".arch_extension sme
+	rdsvl %0, #1" : "=r"(v));
+    if ((uint64_t)machine(buf, 1) != v || v == 0) return 3;
+  }
+#else
+  spin(buf);
+#endif
+  return 0;
+}
+)";
+    let isa = tgt::isa(tgt::host_isa()).name;
+    if isa == "x86_64" || isa == "aarch64" {
+        let text = format(
+            "{}{}",
+            common,
+            if isa == "x86_64" {
+                x64;
+            } else {
+                a64;
+            },
+        );
+        assert_eq(run_native(text.as_str(), drv), 0);
+    }
+    let w = "lir ptr 8\nsym @spin fn global\nfn @spin\n  sig (ptr) -> void\nb0(v0: ptr):\n  sys.spin\n  sys.barrier\n  sys.keep v0\n  ret\n";
+    assert_eq(run_wasm(w, drv), 0);
+}
+
 @test
 fn wide_integers_run() {
     if !cli::has_cc() {

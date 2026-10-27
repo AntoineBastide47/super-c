@@ -880,7 +880,7 @@ pub fn each_use(b: &Body, t: Inst, out: &mut Vector<Value>) {
     if lv::operand_b(f) && t.b != VNONE {
         out.push(t.b);
     }
-    if f == F_TRI && t.c != VNONE {
+    if lv::operand_c(f) && t.c != VNONE {
         out.push(t.c);
     }
     if f == F_CALL || f == F_CALLIND {

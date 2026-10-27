@@ -12690,7 +12690,8 @@ fn cemit_main_wrapper(out: &mut String, argv: bool) {
     );
 }
 
-// The single-line signature prefix of an emitted function body, as a prototype.
+// The single-line signature prefix of an emitted function body (up to its ` {`, or the `;` of a
+// declaration the body's file-scope assembly defines), as a prototype.
 fn proto_of(body: &String, out: &mut String) {
     let bs = body.as_str();
     let n = bs.len();
@@ -12729,7 +12730,7 @@ fn proto_of(body: &String, out: &mut String) {
     }
     let mut i = start;
     while i + 1 < n {
-        if bs.byte_at(i) == 32 && bs.byte_at(i + 1) == 123 {
+        if bs.byte_at(i) == 32 && bs.byte_at(i + 1) == 123 || bs.byte_at(i) == 59 {
             break;
         }
         i += 1;

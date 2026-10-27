@@ -303,14 +303,40 @@ fn naked_function_is_its_assembly() {
     assert(c.code_has("#error \"'@unsafe(naked)' needs Clang, or GCC 8 or later on x86-64\""), "the C compiler guard");
 }
 
-// The body is assembly alone, the signature has one C calling convention, and the target has naked
-// functions.
+// A naked function whose body is one call of a context primitive is that primitive's assembly: in C,
+// file-scope assembly per object format, with no C definition.
+@test
+fn naked_context_primitive_is_file_scope_assembly() {
+    let c = h::compile_c(
+        "extern \"C\" {\n    fn sc_sys_ctx_entry();\n}\n@unsafe(naked)\nfn ent() {\n    unsafe sc_sys_ctx_entry();\n}\nfn main() i32 {\n    let f: fn() = ent;\n    if false {\n        f();\n    }\n    return 0;\n}\n",
+    );
+    assert(c.ok(), "the program compiles");
+    assert(c.code_has("#if defined(__APPLE__)\n__asm__(\".text\\n"), "the Mach-O form");
+    assert(c.code_has("#elif defined(_WIN32)\n__asm__(\".text\\n"), "the COFF form");
+    assert(c.code_has(".globl _ent\\n"), "the Mach-O label");
+    assert(!c.code_has("__attribute__((naked, noinline)) void ent("), "no C definition");
+    assert(c.code_has("void ent(void);\n#if defined(__APPLE__)\n"), "the declaration, then the assembly");
+    assert(c.code_has("#else\n__asm__(\".text\\n.globl ent\\n.hidden ent\\n"), "the ELF form");
+}
+
+// The body is assembly alone or one call of a context primitive, the signature has one C calling
+// convention, and the target has naked functions.
 @test
 fn naked_rejects() {
     let BODY: str = "the body of a '@unsafe(naked)' function holds only 'asm(\"...\");' statements";
     h::expect_err_msg(
         "no statement but asm",
         "@unsafe(naked)\nfn f() {\n    let x = 1;\n}\nfn main() i32 { return 0; }\n",
+        BODY,
+    );
+    h::expect_err_msg(
+        "no other call",
+        "extern \"C\" {\n    fn g();\n}\n@unsafe(naked)\nfn f() {\n    unsafe g();\n}\nfn main() i32 { return 0; }\n",
+        BODY,
+    );
+    h::expect_err_msg(
+        "a context primitive alone",
+        "extern \"C\" {\n    fn sc_sys_ctx_entry();\n}\n@unsafe(naked)\nfn f() {\n    unsafe sc_sys_ctx_entry();\n    asm(\"ret\");\n}\nfn main() i32 { return 0; }\n",
         BODY,
     );
     h::expect_err_msg(

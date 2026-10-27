@@ -326,6 +326,9 @@ extend Printer {
             out.push_str(".overlap");
         } else if (t.op == O_FPTOSI || t.op == O_FPTOUI) && t.aux == CV_UNCHECKED {
             out.push_str(".unchecked");
+        } else if t.op == O_SYS {
+            out.push_byte(b'.');
+            out.push_str(sys_name(t.aux));
         } else if t.op == O_VOP {
             out.push_byte(b'.');
             out.push_str(core::op_name(t.aux & VOP_CODE));
@@ -371,6 +374,20 @@ extend Printer {
             self.val(t.a, out);
             out.push_str(", ");
             self.val(t.b, out);
+        } else if f == F_SYS {
+            for k in 0..sys_arity(t.aux) {
+                out.push_str(ast::pick(k == 0, " ", ", "));
+                self.val(
+                    if k == 0 {
+                        t.a;
+                    } else if k == 1 {
+                        t.b;
+                    } else {
+                        t.c;
+                    },
+                    out,
+                );
+            }
         } else if f == F_TRI {
             out.push_byte(b' ');
             self.val(t.a, out);

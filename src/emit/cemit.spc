@@ -19,6 +19,8 @@ import emit::simd_plan as sp;
 import ir::cpu_features as cf;
 import ir::inline as inl;
 import target::table as tgt;
+import target::assembler as asmr;
+import target::ctxswitch as ctxs;
 import lir::lower as lw;
 import lir::ir as lir_ir;
 import target::native as nat;
@@ -30,6 +32,9 @@ import build_system::manifest as bman;
 /// control flow through regions): clang's default bracket depth, past which the C would not
 /// compile either. Exceeding it fails the body with a diagnostic instead of exhausting the stack.
 const RENDER_NEST_MAX: u32 = 256;
+
+// No context operation (`Emitter::ctx_prim_of`).
+const NONE16: u16 = 0xFFFF;
 
 /// Case labels on one line of a goto-layout `switch` (a range pattern lists every value).
 const SWITCH_LINE_CASES: u32 = 16;
@@ -2147,7 +2152,7 @@ extend CEmit {
         }
         self.out.push_str(" {\n");
         if (unsafe (*self.p().module_ast_const(b.owner.module)).unsafe_claims(b.owner.node) & UNSAFE_NAKED) != 0 {
-            return self.emit_naked_body(b);
+            return self.emit_naked_body(b, fname.as_str(), hstart, hhead);
         }
         self.dispatch_prologue(b, name, split, ret_void, pnames.as_str());
         for k in 0..views.len() {
@@ -2201,10 +2206,79 @@ extend CEmit {
         return true;
     }
 
+    // The context operation (`lir::ir::SYS_CTXSWAP`, `SYS_CTXENTRY`) naked function `b` calls, or NONE16
+    // (`tc_check_naked`): read from its Core IR, as its syntax is released.
+    fn ctx_prim_of(self: &Self, b: &ir::CoreBody) u16 {
+        for bi in 0..b.blocks.len() {
+            let t = b.blocks.at(bi).term;
+            if t.kind != ir::TM_CALL || t.callee.node == NODE_NONE {
+                continue;
+            }
+            let fa = self.p().module_ast_const(t.callee.module);
+            let cn = unsafe (*fa).at_const(t.callee.node);
+            if cn.kind != NodeKind::NODE_FUNCTION {
+                continue;
+            }
+            let sp = unsafe (*fa).at_const(cn.as_data.function.name).as_data.name.text;
+            let nm = self.p().modules.at(t.callee.module as usize).source.as_str().slice(
+                sp.start as usize,
+                sp.end as usize,
+            );
+            if nm == "sc_sys_ctx_swap" {
+                return lir_ir::SYS_CTXSWAP;
+            }
+            if nm == "sc_sys_ctx_entry" {
+                return lir_ir::SYS_CTXENTRY;
+            }
+        }
+        return NONE16;
+    }
+
     // The body of naked function `b`: its `asm` statements alone, as basic assembly (`tc_check_naked`),
     // then a guard that stops a C compiler without naked functions, which would add a prologue.
-    fn emit_naked_body(self: &mut Self, b: &ir::CoreBody) bool {
+    fn emit_naked_body(self: &mut Self, b: &ir::CoreBody, fname: str, hstart: usize, hhead: usize) bool {
         let src = self.p().modules.at(b.owner.module as usize).source.as_str();
+        let op = self.ctx_prim_of(b);
+        if op != NONE16 {
+            // A context primitive: no C definition, but the declaration (the signature at `hhead`, without
+            // the attributes at `hstart` and the ` {` that opened the body), then file-scope assembly of
+            // `fname` per object format (`target::ctxswitch`), what the native backend assembles.
+            let head = String::from_str(self.out.as_str().slice(hhead, self.out.len() - 3));
+            self.out.truncate(hstart);
+            self.out.push_string(&head);
+            self.out.push_str(";\n");
+            let mut text = String::new();
+            for k in 0..3u8 {
+                self.out.push_str(
+                    if k == 0 {
+                        "#if defined(__APPLE__)\n";
+                    } else if k == 1 {
+                        "#elif defined(_WIN32)\n";
+                    } else {
+                        "#else\n";
+                    },
+                );
+                text.truncate(0);
+                ctxs::text(
+                    op,
+                    self.p().arch,
+                    if k == 0 {
+                        asmr::FMT_MACHO;
+                    } else if k == 1 {
+                        asmr::FMT_COFF;
+                    } else {
+                        asmr::FMT_ELF;
+                    },
+                    fname,
+                    &mut text,
+                );
+                self.out.push_str("__asm__(");
+                push_c_asm_str(text.as_str(), &mut self.out);
+                self.out.push_str(");\n");
+            }
+            self.out.push_str("#endif\n");
+            return true;
+        }
         for i in 0..b.asms.len() {
             let t = b.asms.at(i).template;
             self.out.push_str("  __asm__ volatile (");

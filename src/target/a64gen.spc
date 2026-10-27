@@ -2248,6 +2248,9 @@ extend Gen {
         if op == O_VAARG {
             return self.va_arg(i, t);
         }
+        if op == O_SYS {
+            return self.sys(i, t);
+        }
         if op == O_ASM {
             return self.asm_inst(i, t);
         }
@@ -6881,6 +6884,36 @@ extend Gen {
     fn msg_text(self: &Self, m: u32) str {
         let p = unsafe &*self.pkg;
         return p.spell(p.msgs[self.b().msgs[m as usize] as usize]);
+    }
+
+    // System operation `t` (`i`, `O_SYS`): the instructions the inline assembly it replaces held.
+    fn sys(self: &mut Self, i: u32, t: Inst) bool {
+        let s = t.aux;
+        if s == SYS_BARRIER || s == SYS_KEEP {
+            return true;
+        }
+        if s == SYS_SPIN {
+            self.emit(a::ISB);
+            return true;
+        }
+        if s == SYS_CYCLES || s == SYS_SVL {
+            let rd = self.def(i);
+            self.emit(
+                if s == SYS_CYCLES {
+                    a::mrs_cntvct(rd);
+                } else {
+                    a::rdsvl1(rd);
+                },
+            );
+            return true;
+        }
+        if s == SYS_FPSAVE {
+            let ra = self.reg(t.a);
+            self.emit(a::mrs_fpcr(a::IP0));
+            self.mem(a::M_X, false, a::IP0 as u8, ra, 0);
+            return true;
+        }
+        return self.refuse("a system operation of another processor");
     }
 
     // Inline assembly (`O_ASM`), as GCC compiles it: the operands take the free ones of x0..x15 and

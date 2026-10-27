@@ -139,6 +139,7 @@ pub const F_RET: u8 = 18; // a = value or VNONE
 pub const F_PANIC: u8 = 19; // a = body message, b = a lane mask or VNONE: `lane <its lowest set bit>: ` leads the message
 pub const F_OVF: u8 = 20; // aux = OV_SIGNED or 0, a, b = values; two results: the wrapped value, then its flag
 pub const F_ASM: u8 = 21; // a = values (pool), b = count, c = the statement's record (pool, `asm_*`)
+pub const F_SYS: u8 = 22; // aux = SYS_* code, a, b, c = values or VNONE (`sys_arity`)
 
 pub const O_ICONST: u8 = 1;
 pub const O_FCONST: u8 = 2;
@@ -217,7 +218,10 @@ pub const O_POPCNT: u8 = 69;
 pub const O_ASM: u8 = 70;
 /// Fused multiply-add of floats: `a * b + c` with one rounding (`-ffp-contract=fast` makes it).
 pub const O_FMA: u8 = 71;
-pub const OP_COUNT: u8 = 72;
+/// A processor or runtime operation no other opcode expresses (`SYS_*`): what inline assembly did, in a
+/// form every backend lowers for its target.
+pub const O_SYS: u8 = 72;
+pub const OP_COUNT: u8 = 73;
 
 /// One opcode: its text name and its operand form.
 pub struct OpInfo {
@@ -225,7 +229,7 @@ pub struct OpInfo {
     pub form: u8,
 }
 
-pub const OPS: [OpInfo; 72] = [
+pub const OPS: [OpInfo; 73] = [
     OpInfo { name: "", form: F_NONE },
     OpInfo { name: "iconst", form: F_IMM },
     OpInfo { name: "fconst", form: F_IMM },
@@ -298,6 +302,7 @@ pub const OPS: [OpInfo; 72] = [
     OpInfo { name: "popcnt", form: F_UN },
     OpInfo { name: "asm", form: F_ASM },
     OpInfo { name: "fma", form: F_TRI },
+    OpInfo { name: "sys", form: F_SYS },
 ];
 
 /// An `O_ASM` record at pool index `r` of `b`: its output, input and clobber counts.
@@ -431,6 +436,63 @@ pub const fn cond_name(c: u16) str<'static> {
 pub const fn order_name(o: u16) str<'static> {
     let t: []str<'static> = ORDER_NAMES;
     return t[o as usize];
+}
+
+/// `O_SYS` operations. None is pure: each stays where it is, in order with every memory access.
+/// A spin-wait hint: `pause` (x86-64), `isb` (arm64), none (wasm).
+pub const SYS_SPIN: u16 = 0;
+/// A compiler barrier: no instruction.
+pub const SYS_BARRIER: u16 = 1;
+/// A compiler barrier that also reads `a`, which escapes.
+pub const SYS_KEEP: u16 = 2;
+/// i64: the cycle counter (`rdtsc`, `cntvct_el0`).
+pub const SYS_CYCLES: u16 = 3;
+/// The floating-point control state stored at `a`: MXCSR, then the x87 control word at 4 (x86-64); FPCR
+/// (arm64).
+pub const SYS_FPSAVE: u16 = 4;
+/// i64: the 8 bytes at offset `a` of the gs segment (x86-64).
+pub const SYS_GSLOAD: u16 = 5;
+/// `b` stored at offset `a` of the gs segment (x86-64).
+pub const SYS_GSSTORE: u16 = 6;
+/// CPUID leaf `b`, subleaf `c`: EAX, EBX, ECX and EDX stored at `a` (x86-64).
+pub const SYS_CPUID: u16 = 7;
+/// i64: XGETBV of extended control register `a`, EDX:EAX (x86-64).
+pub const SYS_XGETBV: u16 = 8;
+/// i64: the streaming vector length in bytes, RDSVL (arm64 with SME).
+pub const SYS_SVL: u16 = 9;
+/// The whole body of a naked function `(save_sp, to_sp)`: save the callee-saved state on the running
+/// stack, store its address at `save_sp`, resume the state at `to_sp` (`target::ctxswitch`).
+pub const SYS_CTXSWAP: u16 = 10;
+/// The whole body of a naked function: where a forged context first resumes; it calls the body it
+/// carries with its argument (`target::ctxswitch`).
+pub const SYS_CTXENTRY: u16 = 11;
+pub const SYS_COUNT: u16 = 12;
+
+const SYS_NAMES: [(str<'static>, u8); 12] = [
+    ("spin", 0),
+    ("barrier", 0),
+    ("keep", 1),
+    ("cycles", 0),
+    ("fpsave", 1),
+    ("gsload", 1),
+    ("gsstore", 2),
+    ("cpuid", 3),
+    ("xgetbv", 1),
+    ("svl", 0),
+    ("ctxswap", 2),
+    ("ctxentry", 0),
+];
+
+/// The text of `O_SYS` operation `s`.
+pub const fn sys_name(s: u16) str<'static> {
+    let t: [](str<'static>, u8) = SYS_NAMES;
+    return t[s as usize].0;
+}
+
+/// The value operands `O_SYS` operation `s` takes (`a`, then `b`, then `c`).
+pub const fn sys_arity(s: u16) u32 {
+    let t: [](str<'static>, u8) = SYS_NAMES;
+    return t[s as usize].1;
 }
 
 /// The text of read-modify-write operation `r`.

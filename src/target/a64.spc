@@ -414,6 +414,24 @@ pub const fn blr(rn: u32) u32 {
     return 0xD63F0000 | rn << 5;
 }
 
+/// ISB SY: the spin hint (`yield` is a no-op on Apple cores).
+pub const ISB: u32 = 0xD5033FDF;
+
+/// MRS of CNTVCT_EL0, the virtual counter, into `rt`.
+pub const fn mrs_cntvct(rt: u32) u32 {
+    return 0xD53BE040 | rt;
+}
+
+/// MRS of FPCR, the floating-point control register, into `rt`.
+pub const fn mrs_fpcr(rt: u32) u32 {
+    return 0xD53B4400 | rt;
+}
+
+/// RDSVL `rd`, #1: the streaming vector length in bytes (SME).
+pub const fn rdsvl1(rd: u32) u32 {
+    return 0x04BF5820 | rd;
+}
+
 /// MRS of TPIDR_EL0, the thread pointer, into `rt`.
 pub const fn mrs_tp(rt: u32) u32 {
     return 0xD53BD040 | rt;

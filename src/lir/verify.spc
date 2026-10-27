@@ -218,6 +218,48 @@ extend Verifier {
         return b.insts[v as usize].ty;
     }
 
+    // `O_SYS` instruction `t` (`i` of `b`): its operands by `sys_arity`, of their types; a context switch
+    // or entry the whole body of a naked function.
+    fn sys_ok(self: &mut Self, name: str, b: &Body, i: u32, t: Inst, ta: u8, tb: u8, tc: u8) bool {
+        let s = t.aux;
+        if s >= SYS_COUNT {
+            return self.fail_at(name, b, i, "no such system operation");
+        }
+        let n = sys_arity(s);
+        if t.a != VNONE != n > 0 || t.b != VNONE != n > 1 || t.c != VNONE != n > 2 {
+            return self.fail_at(name, b, i, "a system operation takes its operands and no other");
+        }
+        let res = if s == SYS_CYCLES || s == SYS_GSLOAD || s == SYS_XGETBV || s == SYS_SVL {
+            T_I64;
+        } else {
+            T_NONE;
+        };
+        let ok = if s == SYS_FPSAVE {
+            ta == T_PTR;
+        } else if s == SYS_GSLOAD {
+            ta == T_I64;
+        } else if s == SYS_GSSTORE {
+            ta == T_I64 && tb == T_I64;
+        } else if s == SYS_CPUID {
+            ta == T_PTR && tb == T_I32 && tc == T_I32;
+        } else if s == SYS_XGETBV {
+            ta == T_I32;
+        } else if s == SYS_CTXSWAP {
+            ta == T_PTR && tb == T_PTR && b.naked;
+        } else if s == SYS_CTXENTRY {
+            b.naked;
+        } else {
+            true;
+        };
+        return self.need(
+            name,
+            b,
+            i,
+            ok && t.ty == res,
+            "the operands and the result its operation takes (a context switch in a naked function)",
+        );
+    }
+
     fn inst_ok(self: &mut Self, p: &Package, name: str, b: &Body, i: u32) bool {
         let t = b.insts[i as usize];
         self.slot_base.push(0);
@@ -430,6 +472,9 @@ extend Verifier {
                 ta == T_I8 && tb == t.ty && tc == t.ty,
                 "an i8 condition and two values of the result's type",
             );
+        }
+        if op == O_SYS {
+            return self.sys_ok(name, b, i, t, ta, tb, tc);
         }
         if op == O_FMA {
             return self.need(
@@ -930,8 +975,22 @@ const OPS: [u8; 256] = operand_bits();
 
 const fn operand_bits() [u8; 256] {
     let mut t = [0u8; 256];
-    let a: [u8; 12] = [F_UN, F_BIN, F_CMP, F_OVF, F_TRI, F_PTRADD, F_LOAD, F_STORE, F_CALLIND, F_BR, F_SWITCH, F_RET];
-    let b: [u8; 7] = [F_BIN, F_CMP, F_OVF, F_TRI, F_PTRADD, F_STORE, F_PANIC];
+    let a: [u8; 13] = [
+        F_UN,
+        F_BIN,
+        F_CMP,
+        F_OVF,
+        F_TRI,
+        F_PTRADD,
+        F_LOAD,
+        F_STORE,
+        F_CALLIND,
+        F_BR,
+        F_SWITCH,
+        F_RET,
+        F_SYS,
+    ];
+    let b: [u8; 8] = [F_BIN, F_CMP, F_OVF, F_TRI, F_PTRADD, F_STORE, F_PANIC, F_SYS];
     for f in a {
         // A form stays below the 256 entries.
         unsafe {
@@ -984,7 +1043,7 @@ pub fn uses(b: &Body, t: Inst, out: &mut Vector<Value>) {
 
 /// Whether operand `c` of form `f` is a value.
 pub const fn operand_c(f: u8) bool {
-    return f == F_TRI;
+    return f == F_TRI || f == F_SYS;
 }
 
 /// Whether `t` is a machine type: a scalar, or a vector of 2 to 64 lanes of a scalar of up to 64 bits

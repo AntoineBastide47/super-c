@@ -2443,10 +2443,32 @@ extend<'a> TypeChecker<'a> {
         }
     }
 
+    // Whether statement `st` is one call of a context primitive (`sc_sys_ctx_swap`, `sc_sys_ctx_entry`),
+    // optionally under `unsafe`.
+    fn tc_ctx_prim(self: &Self, st: NodeId) bool {
+        let a = self.cur_ast();
+        let mut n = unsafe (*a).at_const(st);
+        if n.kind == NodeKind::NODE_EXPRESSION_STATEMENT {
+            n = unsafe (*a).at_const(n.as_data.single.value);
+        }
+        if n.kind == NodeKind::NODE_UNARY && n.as_data.unary.op == TokenType::Unsafe {
+            n = unsafe (*a).at_const(n.as_data.unary.operand);
+        }
+        if n.kind != NodeKind::NODE_CALL {
+            return false;
+        }
+        let c = unsafe (*a).at_const(n.as_data.call.callee);
+        return c.kind == NodeKind::NODE_IDENTIFIER && (span_is(self.source, c.as_data.name.text, "sc_sys_ctx_swap") || span_is(
+            self.source,
+            c.as_data.name.text,
+            "sc_sys_ctx_entry",
+        ));
+    }
+
     // `@unsafe(naked)` function `id`: the C function has no prologue or epilogue, so its body is only
-    // assembly, which cannot name a parameter or a local; the assembly sees the C calling convention of
-    // the signature, so every parameter and the result is a scalar with one C spelling; and the target
-    // must have naked functions.
+    // assembly, which cannot name a parameter or a local, or one call of a context primitive; the assembly
+    // sees the C calling convention of the signature, so every parameter and the result is a scalar with
+    // one C spelling; and the target must have naked functions.
     fn tc_check_naked(self: &mut Self, id: NodeId, fnd: FunctionData) {
         let a = self.cur_ast();
         let sp = self.name_span(fnd.name);
@@ -2531,6 +2553,11 @@ extend<'a> TypeChecker<'a> {
         }
         let body = unsafe (*a).at_const(fnd.body);
         let ss = body.as_data.block.statements;
+        // The other whole body: one call of a context primitive, which the backend expands for its target
+        // (`target::ctxswitch`).
+        if body.kind == NodeKind::NODE_BLOCK && ss.len == 1 && self.tc_ctx_prim(unsafe (*a).list(ss)[0]) {
+            return;
+        }
         if body.kind != NodeKind::NODE_BLOCK || ss.len == 0 {
             self.errors.emit_span(
                 sp,

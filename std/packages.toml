@@ -187,6 +187,7 @@ allocator = "`Rc` and `rc::Weak` take `A: Allocator = Global` with `new_in` and 
 thread_safety = "`Cell`, `RefCell`, `OnceCell`, `Rc` and `rc::Weak` are single-threaded: none is `Sync`, and `Rc` and `rc::Weak` are not `Send`; the layout, pointer, byte-order and volatile functions are pure."
 blocking = "Never blocks."
 errors = "A layout that does not fit returns `None`; a short slice returns `None` from `try_read_le` and `try_read_be` and panics in the other byte-order functions; a conflicting `RefCell` borrow, a reentrant `OnceCell` initialization, a reference count past `usize::MAX` and an alignment that is not a power of two panic; the `ptr` and raw volatile functions are `unsafe` and leave a violated precondition undefined."
+c_functions = ["sc_sys_barrier"]
 
 [package.hash]
 tier = 3
