@@ -210,22 +210,22 @@ super-c test --test-no-fork            # in-process (for debuggers; shows passin
 
 ### How the suite is built
 
-`super-c test` first builds the compiler under test with the `test` profile (`-O1`, no
-sanitizers) into `<out-dir>/test-bin`, or with `--profile=P` into `<out-dir>/P`; `--sanitizers`
-adds ASan/UBSan to it and to the runner. It exports it as `$SUPERC` for the CLI tests; when the project
+`super-c test` first builds the compiler under test with the `test` profile (`opt-level` 1) into
+`<out-dir>/test-bin`, or with `--profile=P` into `<out-dir>/P`. It exports it as `$SUPERC` for the
+CLI tests; when the project
 holds `std/core.spc` and `SC_STD_DIR` is unset, it also sets `SC_STD_DIR` to the project's
 `std/`, because `--out-dir` may place that compiler away from the tree it must load. The test
 runner itself is a separate engine build of the generated test root under the built-in
-`test` profile (`-O1`, no sanitizers): parallel per-TU compiles with the object cache and
-emit stamp, linked to `build/test/__tests`, emitted C under `build/test/raw/`. An
-unchanged suite skips straight to the cached link. `--filter=S` acts at build time too: the
+`test` profile (`opt-level` 1): the per-TU cache, the native record and the emit stamp, linked to
+`build/test/__tests`, its objects under `build/test/raw/`. An unchanged suite skips straight to the
+link check. `--filter=S` acts at build time too: the
 generated root imports only the test files with a test whose name (`<module>::<fn>`, or
 `<module>::<Type>::<fn>` for a suite method) contains S, after a parse-only scan of the
 suite, and a filter no test matches is an error. The runner then runs only the matching
 tests of those files. Override the runner's flags with a
 `[profile.test]` section in `build.toml`. The runner is Super-C (`std/rt/test.spc`, which the loader adds
-to test builds); the generated `__test_main.c` holds only the test table and the `main` that passes it
-to `sc_test_main`. Run directly, the runner takes `--filter=S`,
+to test builds); the generated test entry (`__test_main.o`, from LIR text) holds only the test table and
+the `main` that passes it to `sc_test_main`. Run directly, the runner takes `--filter=S`,
 `--shard=K/N`, `--jobs=N`, `--timeout=S`, `--weights=F`, `--record=F`, `--quiet` and `--no-fork` (not the driver's `--test-*` spellings)
 and exits 2 on any other argument. A runner started without an inherited `SC_JOBSERVER` makes its own
 of `--jobs` slots, as `super-c test` does, so its tests and the compilers they start share one budget. Every compiler the CLI harnesses
@@ -260,11 +260,10 @@ slowest runner, two elsewhere). The build has two stages: the latest release bui
 C, and stage 1 builds the tested compiler at the default profile, natively; `wasm-compile` builds
 `super-c.wasm` the same way (the native wasm backend), and `wasm-package` ships a release build of
 it, as `package` ships a release build of the native binary. No release ships a Linux arm64
-compiler yet: the debug workflow's `linux-arm64-compile` cross-builds one through C on the x86-64 runner
-(GCC's aarch64 cross compiler), and `linux-arm64` builds the compiler with it in two stages on the
-arm64 runner and runs the suite there. Every CI suite runs `super-c test --sanitizers`: the compiler under
-test and the runner build with ASan and UBSan there (no-op on Windows), while a local run stays
-without them for speed. In the release workflow (macOS, Linux and Windows in one matrix)
+compiler yet: the debug workflow's `linux-arm64-compile` cross-builds one natively on the x86-64 runner
+against the arm64 C library (`libc6-dev-arm64-cross`: headers and libraries, no compiler), and
+`linux-arm64` builds the compiler with it in two stages on the arm64 runner and runs the suite there.
+In the release workflow (macOS, Linux and Windows in one matrix)
 the correctness gate (`ci/gate.sh --core`), the x86-64 levels and the `ctarget` job (Linux: the C environment tables
 against clang 22) run beside the shards, and the release binary is
 built after all of them pass. Only the release workflow on main saves caches (the toolchain action's
@@ -388,7 +387,6 @@ variable into the guest except its own plumbing (`SC_WASM_MODULE`, `SC_WASM_NATI
 one test locally with `SC_TEST_SUPERC=$PWD/ci/wasm-superc.sh ./super-c test --quiet
 --filter=NAME`. To find a wasm-only miscompile, bisect at object level: compile every
 TU with both toolchains, link mixed sets, and binary-search the TU set.
-`-fsanitize=undefined -fsanitize-trap=undefined` needs no runtime on wasm, and
 `WASMTIME_BACKTRACE_DETAILS=1` gives file and line in traps. A single-flag fix
 (`-fwrapv`, `-fno-strict-aliasing`) that makes a failure go away is usually a heap-layout
 change; do not trust it.
@@ -431,7 +429,7 @@ The compiler's tests live in `tests/` at the repo root. Count test files with
 | `expect_trap(label, src, msg)` | Build and run `src`; require a failing exit and `msg` in its stdout and stderr |
 | `ExitBatch` (`new`, `add(label, src, code)`, `add_trap(label, src, msg)`, `run`) | Exit-code and trap cases built as one program: each case becomes module `c<k>` with its `fn main()` or `fn main(NAME: Vector<str>)` renamed `case_main` and public, the program builds once and runs once per case (`prog <k>`); a `main` that takes the arguments gets them without `<k>`, as a run of its own program does. A case with another `main`, and every case of a batch that does not build, builds alone through `expect_exit` or `expect_trap`. A case module's items take its module prefix in C (`c3__Node`): a case about a root module's bare C names builds alone. A test file turns its exit-code tests into provider functions `fn name(b: &mut h::ExitBatch)` that tests `exit_cases_NN` run in groups of about 20 cases |
 | `expect_same_output(label, src, opts_a, opts_b)` | Build `src` with each option list, run both, require equal exit code, stdout and trap text |
-| `expect_run(label, src, arg, msg)` | Build `src` (debug profile), run it with `arg`; require exit 0, or a trap whose stderr holds `msg`, and no sanitizer report either way |
+| `expect_run(label, src, arg, msg)` | Build `src` (debug profile), run it with `arg`; require exit 0, or a trap whose stderr holds `msg` |
 | `expect_runs(label, src, args, msgs)` | `expect_run` for each argument `args[i]` with message `msgs[i]`, from one build per option set |
 | `expect_build_err(label, src, needle)` | Require the build to fail with `needle`, before any C compile and with no internal error |
 | `expect_asm(label, src, opts, function, contains, absent)` | Check instruction names in the assembly of C function `function` (a `contains` entry `a|b` is met by either, for equivalent instructions C compilers pick between (`uminv|umaxv`); an `absent` entry `=name` matches that mnemonic exactly: `=bl` is a call, not `tbl`; `%reg` matches an operand in AT&T syntax: `%ymm`) |
@@ -481,12 +479,10 @@ rebuild one test file under `SC_LIR=1 SC_LIR_EVAL=1 SC_LIR_STATS=1 super-c test 
 
 `tests/codegen/native_test.spc` compiles LIR text to an object, links it with a C driver and runs it
 (`run_native`; `SC_NATIVE_KEEP=1` keeps the files), and with `WASI_SDK_PATH` set does the same for
-wasm32 (`run_wasm`: `ptr 8` becomes `ptr 4`, the wasi-sdk's clang links, wasmtime runs), builds programs whose modules mix C and native
-code (`SC_NATIVE=<module>`, C values of `@layout` types and enums with payloads included), and checks
-that two builds give byte-identical objects. A CLI test that reads the emitted C, a C unit, a C
-object or the C compiler's assembly of a build without a sanitizer (the debug and release profiles
-alike) sets `cli::set_env("SC_NATIVE", "0")`: on macOS arm64, Linux x86-64, Linux arm64, Windows
-x86-64 and wasm32 that build compiles natively and writes no C. `tests/codegen/lir_opt_test.spc`
+wasm32 (`run_wasm`: `ptr 8` becomes `ptr 4`, the wasi-sdk's clang links, wasmtime runs), passes
+values across the C ABI to header functions and C drivers, and checks that two builds give
+byte-identical objects. A CLI test that reads the program's C passes `--emit-c`: a linking build
+compiles natively and writes no C. `tests/codegen/lir_opt_test.spc`
 optimizes LIR text and checks each transform's place and the evaluator's results before and after;
 `lir_eval_test` runs the math tests' optimized LIR against CTFE (`SC_LIR_OPT=1`). `ci/gate.sh` checks that one
 worker and every core build byte-identical native objects.
@@ -497,16 +493,15 @@ failing `wasm_libc_test` comparison names its first differing line.
 The suite also runs with no C compiler and no linker (the `*-nocc` jobs of `debug.yml`: Linux in an
 image with only the C library's headers, macOS and Windows with `CC` naming no file, wasm with only a
 WASI sysroot). There every build compiles natively and links with the own linker. A test that compiles
-C itself (`cc_build`, `c_lib`, a C driver, a C compiler wrapper), reads the emitted C or the C
-compiler's assembly, forces the C path (`SC_NATIVE=0`, a sanitizer, `--profile=race`, `SC_LINK=cc`),
-or needs a C module (a header's `static` function) starts with
+C itself (`cc_build`, `c_lib`, a C driver, a C compiler wrapper), or compiles the C of `--emit-c`
+(the C compiler's assembly of it included), starts with
 `if !cli::has_cc() { return; // <what needs the C compiler> }`; `cli::has_cc` looks `cli::cc_name()`
 up, so the test calls the C compiler through `cli::cc_name()`, never as a literal `cc`. A part of a
 test that needs it takes the same condition. Run a lane locally with `CC=/nonexistent/cc ./super-c
 test`; only an image without a C compiler finds a literal `cc`.
 `tests/codegen/link_test.spc` `a_c_static_library_links_with_the_own_linker` builds a C library with
-the C compiler and its archiver (and, with `WASI_SDK_PATH`, for wasm32) and links it with `SC_LINK=own`:
-the one place the C compiler makes an input of the own linker.
+the C compiler and its archiver (and, with `WASI_SDK_PATH`, for wasm32) and links it with the own
+linker: the one place the C compiler makes an input of the own linker.
 `tests/codegen/debug_info_test.spc` builds a program with and without debug information for every native
 target: the code and data sections match, an llvm-dwarfdump (on the path, beside clang, the wasi-sdk's or
 Xcode's) verifies the line tables; gdb (Linux) or lldb (macOS, where it may run a program) stops in a
@@ -552,11 +547,8 @@ set, `compile_std_bootstrap` and Windows run the full pipeline.
 
 `tests/harness.spc` builds each program as `main.spc` of a scratch manifest project
 (`diff_build`, `diff_run`). An option is a build flag (`--profile=release`, `--target=wasm`,
-`--cc=cc -target x86_64-apple-macos11`, one argument even with spaces) or, as `NAME=VALUE`, an
-environment variable of the build (`SC_BCE=0` keeps every bounds check). The project defines
-`--profile=ubsan`, unoptimized with UndefinedBehaviorSanitizer only, for a large program run many
-times: UBSan checks its arithmetic without AddressSanitizer's start-up, which makes each run several
-times slower. On the wasm lane each build
+`--emit-c`, one argument even with spaces) or, as `NAME=VALUE`, an environment variable of the build
+(`SC_BCE=0` keeps every bounds check). On the wasm lane each build
 passes `--transpiler=$SUPERC`, so the transpile step and its constant evaluation run in the wasm
 compiler under wasmtime; the C compile and the program stay native, except under
 `const_runtime_parity`: there the program builds `--target=wasm` (wasi-sdk) and runs under wasmtime,
@@ -566,12 +558,11 @@ native compiler when `WASI_SDK_PATH` is set.
 
 - `same_output(src, opts_a, opts_b, runs)` runs both builds once per entry of `runs` (the
   command-line arguments of one run) and returns the first difference, empty when none. The trap
-  text is the stderr lines starting `super-c: ` (runtime helpers) or `panic: ` (std); a sanitizer
-  report on either side or a build failure is a difference.
+  text is the stderr lines starting `super-c: ` (runtime helpers) or `panic: ` (std); a build failure
+  is a difference.
 - `const_runtime_parity(decls, exprs, tys, opts)` puts every case in one program: `const
   PARITY_C<k>` and `fn parity_r<k>`, selected by `prog <k>`; `prog -1` runs them all in order, each
-  after a line `= k`, and the helper runs that once, then alone each case after a trap or a crash (or
-  every case when the sanitizer reports). Write inputs as `opq::<T>(v)`: the
+  after a line `= k`, and the helper runs that once, then alone each case after a trap or a crash. Write inputs as `opq::<T>(v)`: the
   constant calls the identity `const fn opq`; the run-time copy calls `opr`, a `@noinline`
   identity that writes a static, so the compiler cannot fold it (a call of a plain or `const fn`
   identity with constant arguments is folded, and a certain trap becomes the compile error "this
@@ -590,8 +581,9 @@ native compiler when `WASI_SDK_PATH` is set.
   substrings of instruction mnemonics (`asm_mnemonics`: the first word of each body line,
   without labels, directives and comments; Mach-O `_name:` labels too), so `x0` or `rax` never
   match; an entry that starts with `%` matches the whole instruction (`asm_instructions`), its
-  register operands included. x86_64 and aarch64 work on the host and, on macOS, for the other architecture through
-  `--arch=` plus `--cc=cc -target <triple>`; wasm32 needs `--target=wasm` and `WASI_SDK_PATH`,
+  register operands included. The assembly is the C compiler's of the `--emit-c` tree (`cli::cc_name()
+  -S`), so these tests need a C compiler (`cli::has_cc`). x86_64 and aarch64 work on the host; wasm32
+  needs `--target=wasm` and `WASI_SDK_PATH`,
   which the wasm lane sets (`asm_wasm32` in `tests/ir/differential_test.spc` returns early without it).
   Its two halves serve many functions from one build: `asm_text(b, opts, function, out)` compiles
   the unit of build `b` that defines `function` to assembly once, and `asm_match(text, function,
@@ -603,9 +595,7 @@ native compiler when `WASI_SDK_PATH` is set.
 `SC_SIMD_LANE=wasm` (a wasi-sdk in `WASI_SDK_PATH`, wasmtime on the PATH; `h::simd_lane()`) makes
 every differential build of a test a wasm32 build with `--target-feature=+simd128`, run under
 `wasmtime run -W relaxed-simd-deterministic=y`; `expect_run` also builds without the feature and
-requires the same output. The lane's `ubsan` profile is `opt-level = 1` without sanitizers (wasm32
-has no UBSan runtime, and an unoptimized large function can pass the engine's limit of locals). A
-host instruction check returns early in the lane. The masked-memory tests run there too: the
+requires the same output. A host instruction check returns early in the lane. The masked-memory tests run there too: the
 guard page is the end of linear memory (`sbrk`), the trap-before-write check reads the C order
 (WASI has no signal handler), and the disjoint stores run one half after the other (no
 threads). The release workflow's `wasm-checks` job (beside the wasm test shards) runs
@@ -623,11 +613,9 @@ The release workflow's `wasm-target` job runs it in two shards.
 
 On an aarch64 host every build calls the Neon entries (`neon` is the baseline), so without the
 lane `expect_run` builds again with `SC_SIMD_SCALAR=1` and requires the same output, the entry
-model runs over `std/simd/backend/aarch64.spc`, and the `ubsan` profile is `opt-level = 1` with
-UBSan (an entry must survive the C compiler's folds). `SC_SIMD_FEATURES=+dotprod,+i8mm,+rdm`
-adds features to every differential build: the conformance run on Linux aarch64 (the `gcc:13`
-arm64 Docker image, the compiler bootstrapped from its emitted C) uses the default set and that
-one. An entry whose key another entry holds with other features is called in one of the two
+model runs over `std/simd/backend/aarch64.spc`. `SC_SIMD_FEATURES=+dotprod,+i8mm,+rdm` adds
+features to every differential build: the conformance run on Linux aarch64 uses the default set and
+that one. An entry whose key another entry holds with other features is called in one of the two
 sets only (`dot` with and without `dotprod`): the model accepts it uncalled when its sibling is
 called.
 
@@ -684,7 +672,7 @@ runs), then report the model, seed, failure, reduced program and a replay line. 
   (the value, or the constant's error detail equal to the run-time trap, lane included), and the run
   time against a scalar lane loop (`rk<k>`; a trap must have the same text without its lane). A run
   executes every case from a start and prints to stderr, so a trap costs one more run from the next
-  case, not a process per case; the program is built with `--profile=ubsan`, and a trap exits with
+  case, not a process per case; the program is built with the debug profile, and a trap exits with
   status 134 through a SIGABRT handler, as a crash report or core dump costs more than the run.
   `tests/simd/simd_ops_test.spc` sweeps every operation, lane type, lane count and conversion target
   through the same functions, in programs of at most 256 cases.
@@ -696,8 +684,8 @@ runs), then report the model, seed, failure, reduced program and a replay line. 
   input alone.
 
 `tests/gen/gen_test.spc` runs seeds 1 to 3 of each model in the normal suite and the planted defect
-(`-DSC_ARITH_WRAP` through `--cstd` under `debug`: the runtime wraps, the constant traps), which the
-scalar model must find at seed 7 and reduce to one case. The long run is `super-c command gen`
+(`--profile=release`: the run time wraps, the constant traps), which the scalar model must find at seed
+14 and reduce to one case. The long run is `super-c command gen`
 (200 seeds from the clock); replay or extend with
 `SC_GEN_SEED=<seed> SC_GEN_RUNS=<n> [SC_GEN_MODEL=scalar|loops|vector|math] ./super-c test --quiet
 --filter=gen_random_run`, which does nothing without `SC_GEN_RUNS`. Each seed builds four

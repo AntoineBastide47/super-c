@@ -16,7 +16,7 @@ import ir::interp as iri;
 import ir::lower as irl;
 
 // How many times `needle` occurs in `code`.
-fn occurrences(code: str, needle: str) usize {
+const fn occurrences(code: str, needle: str) usize {
     let mut n: usize = 0;
     let mut rest = code;
     loop {
@@ -35,7 +35,7 @@ fn occurrences(code: str, needle: str) usize {
 // first spelling: a `str` literal spells its text twice) or called. "__sc_bounds(": an element check;
 // "__sc_bounds_group(": a group, a coalesced check or a widened guard (`__sc_fits`), whose one panic
 // message is the group's, not an element check's; "__sc_range(": a range check.
-fn check_count(code: str, kind: str) usize {
+const fn check_count(code: str, kind: str) usize {
     if kind == "__sc_bounds_group(" {
         return occurrences(code, kind) + occurrences(code, "__sc_fits(");
     }
@@ -60,7 +60,7 @@ fn check_count(code: str, kind: str) usize {
 }
 
 // Does the snippet's C spell a check of kind `kind` (`check_count`)?
-fn spelled(c: &h::CompiledC, kind: str) bool {
+const fn spelled(c: &h::CompiledC, kind: str) bool {
     return c.code != null && check_count(unsafe str::from_cstr(c.code), kind) != 0;
 }
 

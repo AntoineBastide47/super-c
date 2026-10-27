@@ -253,9 +253,6 @@ Toolchain and tests:
   `pgogen` profile and the bench profile's PGO ingest are removed; never ship a profile.
 - Test pool size (5, 7, 10, 14 workers): no signal above noise; the default stays the CPU
   count.
-- Nested test compilers run the `test` profile build (`-O1`, no sanitizers) locally: ASan and UBSan
-  cost about 12 times the instructions of a compile. CI runs every suite with `super-c test
-  --sanitizers`, so the compiler under test and the runner run under both there.
 
 Architecture:
 - A compiler API snapshot database: rejected. The only client is the LSP (serial
@@ -275,6 +272,5 @@ allocation sequence changed. `Keep::reserve_bodies` (the sum of `ir::lower::modu
 module in the borrow stage's prologue) and `InstGraph::collect` (the keep's length) size them once; peak RSS returned
 to 285 MiB. Sample a growing process with `vmmap` and `malloc_history` under
 `MallocStackLogging=1` before bisecting source changes: the empty region sizes name the
-vector. `MallocStackLogging` works on `build/bench-bin`, not on a `--sanitizers` compiler,
-whose sanitizer runtime replaces the allocator.
+vector. `MallocStackLogging` works on `build/bench-bin`.
 

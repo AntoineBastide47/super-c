@@ -1564,7 +1564,6 @@ fn main(argv: Vector<str>) i32 {
             co.target,
             co.arch,
             bg_sysroot,
-            bman::DEFAULT_CSTD,
         );
         return rc;
     }

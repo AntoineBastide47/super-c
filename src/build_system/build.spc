@@ -1,15 +1,12 @@
-// build.toml engine: transpile the root's module closure into <out-dir>/<profile>/raw (the emitter
-// writes only the files whose content changed, so an unchanged file keeps its mtime), compile stale
-// objects from that tree in parallel with -MMD dep tracking into <out-dir>/<profile>/obj, link, then
-// optionally strip. `super-c command <name>` and `super-c clean` live here too.
+// build.toml engine: compile the root's module closure into native objects under
+// <out-dir>/<profile>/raw (the emitter writes only the files whose content changed, so an unchanged file
+// keeps its mtime) and link them with the own linker (`link::link`); `--emit-c` writes the program's C
+// tree there instead. `super-c command <name>` and `super-c clean` live here too.
 //
-// Process discipline: every compiler, linker, archiver, strip, probe, and git invocation is an argv
-// child (process::spawn, no shell), so paths pass through verbatim: spaces, quotes, non-ASCII. The
-// ONE shell survivor is `super-c command`, whose manifest lines are sh/cmd syntax by user contract. Flag
-// STRINGS keep their historic whitespace-splitting. compile_commands.json (one `arguments` row per
-// TU) lands beside raw/obj; .cmd fingerprints, the link record, and the emit stamp write through
-// temp + atomic rename. Toolchain contract is a gcc-style driver (cc/clang/gcc; mingw on Windows):
-// -MMD/-c/-o are assumed, so MSVC's cl.exe is out of contract and has no /showIncludes lane.
+// Process discipline: every transpiler and git invocation is an argv child (process::spawn, no shell), so
+// paths pass through verbatim: spaces, quotes, non-ASCII. The ONE shell survivor is `super-c command`,
+// whose manifest lines are sh/cmd syntax by user contract. Flag STRINGS keep their historic
+// whitespace-splitting. The link record and the emit stamp write through temp + atomic rename.
 import stdio;
 import stdlib;
 import target::table as tgt;
@@ -86,14 +83,8 @@ pub fn rm_rf(path: str) {
     let _ = fs::remove_all(path);
 }
 
-// The global object cache: ~/.super-c/cache, content-addressed
-// A translation unit whose C text, quoted-include closure, compiler version and compile command all
-// match a previous compile reuses that compile's object instead of running the C compiler again.
-// The key hashes content, so the cache needs no invalidation story: different content is a
-// different key. The content includes paths: the emitted headers name the runtime and extern-block
-// headers by absolute path, so a unit that includes a tree's own header gets other keys in a tree
-// at another path. System headers (<...>) are outside the key; the compiler-version fingerprint
-// stands in for them, the same bet ccache's direct mode makes.
+// The build cache: ~/.super-c/cache (`objcache::cache_base`), one root per project, which holds the
+// checked std prelude's images (`driver::prelude_image`).
 //
 // Retention: a sweep every 30 minutes (`sweep`, which `super-c clean` runs at once) removes the stale
 // prelude images (`sweep_cache`) and the project's idle build trees (`sweep_project`).
@@ -328,7 +319,7 @@ pub fn profile_names(m: &mf::Manifest) Vector<String> {
 /// Package `p`'s settings under profile `name` of `m` (none for an unknown name): its `opt-level`, its
 /// debug information, and in `Package.build_cfg` its lock-order checks (the LOCKDEP bit) and whether
 /// integer overflow wraps (the OVERFLOW_CHECKS bit).
-pub fn apply_profile(m: &mf::Manifest, name: str, p: &mut loader::Package) {
+pub const fn apply_profile(m: &mf::Manifest, name: str, p: &mut loader::Package) {
     let pi = m.profile_index(name);
     if pi < 0 {
         return;
@@ -336,9 +327,9 @@ pub fn apply_profile(m: &mf::Manifest, name: str, p: &mut loader::Package) {
     let prof = m.profiles.at(pi as usize);
     p.opt = prof.opt;
     p.debug_info = prof.debug;
-    p.build_cfg = pick(prof.arith_wraps(), 1u32 << (ast::BC_OVERFLOW_CHECKS - ast::BC_THREAD_SANITIZER) as u32, 0u32) | pick(
+    p.build_cfg = pick(prof.arith_wraps(), 1u32 << (ast::BC_OVERFLOW_CHECKS - ast::BC_LOCKDEP) as u32, 0u32) | pick(
         prof.lockdep,
-        1u32 << (ast::BC_LOCKDEP - ast::BC_THREAD_SANITIZER) as u32,
+        1u32,
         0u32,
     );
 }
@@ -402,8 +393,8 @@ pub fn lib_file(name: str, shared: bool, target: i32) String {
 }
 
 /// The name a linked binary must have on `target`: its executable suffix (Windows: `.exe`), which nothing
-/// supplies for us: the engine links to `<bin>.tmp` and renames, so the C compiler never sees a name
-/// without an extension to append one to. An extensionless PE cannot even be started: CreateProcess appends
+/// supplies for us: the engine links to `<bin>.tmp` and renames, so the linker never sees a name without
+/// an extension to append one to. An extensionless PE cannot even be started: CreateProcess appends
 /// `.exe` to a name that has none and then fails to find it. `pub` because the driver names binaries too.
 pub fn exe_name(base: str, target: i32) String {
     let mut s = String::from_str(base);
@@ -870,9 +861,8 @@ pub const fn simd_dispatch<'a>(m: &'a mf::Manifest, cx: &BuildCtx<'a>) str<'a> {
 }
 
 /// The levels a build at profile `prof` copies for: `spec` when set; else `off` in a profile at
-/// opt-level 0 or 1 (`debug`, `test`: the copies make the C compile of vector code 1.4 to 1.7 times
-/// longer and add little speed there) and in a script build without a profile (no `-O` flag), the
-/// default elsewhere.
+/// opt-level 0 or 1 (`debug`, `test`: the copies make the compile of vector code longer and add little
+/// speed there) and in a script build without a profile, the default elsewhere.
 pub const fn dispatch_for<'a>(m: &mf::Manifest, prof: str, spec: str<'a>) str<'a> {
     let pi = m.profile_index(prof);
     let slow = prof.len() == 0 || pi >= 0 && m.profiles.at(pi as usize).opt >= 0 && m.profiles.at(pi as usize).opt <= 1;
@@ -1339,8 +1329,8 @@ fn engine_build(
 const TREE_LOCK_WAIT_MS: i64 = 30 * 60 * 1000;
 
 /// Take the lock of build tree `dir` (the file `<dir>/.lock`): one process builds a tree at a time. A
-/// second build would rewrite the units the first one compiles, so the first could compile a torn unit
-/// and install that object in the object cache under the key of the text it hashed. Waits for a build in
+/// second build would rewrite the files the first one reads, so the first could compile or link a torn
+/// file. Waits for a build in
 /// progress at most TREE_LOCK_WAIT_MS. The lock, released when it drops; not `held` after a reported
 /// error.
 pub fn tree_lock(dir: str) Lock {
@@ -2230,7 +2220,7 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
     }
     // The profile's own binary, left where it was linked: `test` must not stand in for `build`, or a run of
     // the suite would replace whatever the manifest's binary currently is (a release artifact, say). With
-    // no `--profile`, the binary takes the `test` profile (no sanitizers), in a tree of its own beside the
+    // no `--profile`, the binary takes the `test` profile, in a tree of its own beside the
     // runner's <out-dir>/test.
     // The evaluator check only emits the suite: the project's binary is not built and no test runs.
     let check = lir_eval_check();
@@ -2310,8 +2300,8 @@ pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *cons
         let _ = unsafe env::set("SC_STD_DIR", sd.as_str());
     }
     // The runner is built through the engine under the `test` profile, in its own <out-dir>/test tree:
-    // per-TU parallel compiles, the object cache and the emit stamp turn an unchanged suite into a
-    // link check instead of a serial rebuild of every unit.
+    // the per-TU cache, the native record and the emit stamp turn an unchanged suite into a link check
+    // instead of a rebuild of every module.
     let tsub = "test";
     let tdir_out = loader::join2(m.out_dir.as_str(), tsub);
     let tbin = loader::join2(tdir_out.as_str(), exe_name("__tests", cx.target).as_str());
@@ -2787,8 +2777,7 @@ pub fn wait_code(c: Result<process::Child, IoError>) i32 {
     };
 }
 
-/// `super-c clean`: the sweeps every build runs at most once per SWEEP_EVERY, now, deleting every unused
-/// object (`sweep`). `full` (`--full`): remove the out-dir, every emitted tree below the root directory
+/// `super-c clean`: the sweeps every build runs at most once per SWEEP_EVERY, now (`sweep`). `full` (`--full`): remove the out-dir, every emitted tree below the root directory
 /// (`root_trees`) and the project's cache root instead.
 pub fn manifest_clean(m: &mf::Manifest, full: bool) i32 {
     if !full {

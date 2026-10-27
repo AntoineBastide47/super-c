@@ -320,7 +320,7 @@ struct Reg {
     pub pq: u8,
 }
 
-fn reg(s: str, i: &mut usize, r: &mut Reg) bool {
+const fn reg(s: str, i: &mut usize, r: &mut Reg) bool {
     let mut j = *i;
     let w = word(s, &mut j);
     // `word` stops at no dot only when the token holds none: split the suffix off.
@@ -411,7 +411,7 @@ const fn fs_of(l: u8) i32 {
 }
 
 // Parse a register of class `c` into `*v`.
-fn parse_reg(s: str, i: &mut usize, c: u8, v: &mut i64, f: &mut Facts) bool {
+const fn parse_reg(s: str, i: &mut usize, c: u8, v: &mut i64, f: &mut Facts) bool {
     let mut r = Reg { l: 0, n: 0, sp: false, arr: -1, pq: 0 };
     if !reg(s, i, &mut r) || r.pq != 0 {
         return false;
@@ -445,7 +445,7 @@ fn parse_reg(s: str, i: &mut usize, c: u8, v: &mut i64, f: &mut Facts) bool {
 }
 
 // A vector register's element `Vn.T[i]` of lane letter `want` at `*i`: the register and the index.
-fn parse_elem(s: str, i: &mut usize, want: u8, n: &mut i64, idx: &mut i64) bool {
+const fn parse_elem(s: str, i: &mut usize, want: u8, n: &mut i64, idx: &mut i64) bool {
     let mut r = Reg { l: 0, n: 0, sp: false, arr: -1, pq: 0 };
     let mut j = *i;
     if !reg(s, &mut j, &mut r) || r.l != b'v' || r.arr != 10 + fs_of(want) {
@@ -461,7 +461,7 @@ fn parse_elem(s: str, i: &mut usize, want: u8, n: &mut i64, idx: &mut i64) bool 
 
 // A register list `{ Vt.T, .. }` of `n` registers, arrangement `arr` (an `ARR_NAMES` index, or `10 +` a
 // lane letter's size for a single lane), consecutive modulo 32, at `*i`: its first register.
-fn parse_list(s: str, i: &mut usize, n: u32, arr: i32, first: &mut i64) bool {
+const fn parse_list(s: str, i: &mut usize, n: u32, arr: i32, first: &mut i64) bool {
     let mut j = *i;
     if !eat(s, &mut j, b'{') {
         return false;
@@ -653,7 +653,7 @@ fn label(s: str, i: &mut usize, role: u8, v: &mut i64, fx: &mut Fix) bool {
 }
 
 // An optional `, <shift> #n` (`ext`: the extend names too) after the operands parsed so far.
-fn shift_opt(s: str, i: &mut usize, names: []str<'static>, ty: &mut i64, amt: &mut i64, need_amt: bool) bool {
+const fn shift_opt(s: str, i: &mut usize, names: []str<'static>, ty: &mut i64, amt: &mut i64, need_amt: bool) bool {
     let mut j = *i;
     if !eat(s, &mut j, b',') {
         return true;
@@ -687,7 +687,7 @@ const fn named(t: []Named, w: str) i64 {
 }
 
 // `[base` with base an x register or sp: the base number.
-fn mem_open(s: str, i: &mut usize, base: &mut i64) bool {
+const fn mem_open(s: str, i: &mut usize, base: &mut i64) bool {
     if !eat(s, i, b'[') {
         return false;
     }
@@ -1379,7 +1379,7 @@ const fn cond_of(w: str) i64 {
 }
 
 // The encoding of system register `w`: a name or `s<op0>_<op1>_c<n>_c<m>_<op2>`; -1 when none.
-fn sysreg_of(w: str) i64 {
+const fn sysreg_of(w: str) i64 {
     let t0: []SysReg = SYSREGS;
     for k in 0..t0.len() {
         if eq_nocase(w, t0[k].name) {
@@ -1422,7 +1422,7 @@ fn sysreg_of(w: str) i64 {
 
 // A ZA tile name `za<n>.<T>` (`slice`: `za<n>h.<T>` or `za<n>v.<T>`, the direction in bit 4 of
 // `tile`): the tile and its element (log2 of bytes).
-fn za_tile(w: str, tile: &mut i64, el: &mut i32, slice: bool) bool {
+const fn za_tile(w: str, tile: &mut i64, el: &mut i32, slice: bool) bool {
     if w.len() < 5 || !eq_nocase(w.slice(0, 2), "za") {
         return false;
     }
@@ -1593,7 +1593,7 @@ pub fn assemble(text: str, out: &mut u32, fx: &mut Fix, err: &mut String) bool {
 
 // Settle what one operand's value depends on another's: an extend's default option and its register
 // width, a register offset's amount, a test bit's register width, an across-lanes result size.
-fn fix_kinds(r: t::Row, q: u32, v: &mut t::Vals, f: &Facts) bool {
+const fn fix_kinds(r: t::Row, q: u32, v: &mut t::Vals, f: &Facts) bool {
     let x = t::is64(r.q, q);
     let mut at: usize = 0;
     for oi in 0..6u32 {

@@ -7162,8 +7162,8 @@ fn st_define(
 
 // The LIR check's data for an emitted constant or static: its CTFE value `v`, its zero bytes, or its
 // captured group `root` (`Lower::static_value`, `static_zero`, `static_group`).
-// Static `name` defined in a TU of module `unit`: its LIR data is that unit's, or the unit compiles
-// through C when the lowering could not define it.
+// Static `name` defined in a TU of module `unit`: its LIR data is that unit's, or the unit does not
+// compile when the lowering could not define it.
 fn lir_own(cem: &mut cbe::CEmit, name: str, unit: u32) {
     if let Some(l) = &mut cem.lir {
         l.claim_data(name, unit);
@@ -10890,7 +10890,7 @@ fn c_build_files(p: &loader::Package, root: str, members: &Vector<String>, keep:
         }
     }
     let mut fl = String::new();
-    push_c_env(&mut fl, bman::DEFAULT_CSTD, target);
+    push_c_env(&mut fl, target);
     // gcc 14 rejects incompatible pointer arguments; clang only warns. One rule on every compiler.
     fl.push_str(" -ffp-contract=off -Werror=incompatible-pointer-types");
     fl.push_str(LIBM_AS_WRITTEN);
@@ -10908,7 +10908,7 @@ fn c_build_files(p: &loader::Package, root: str, members: &Vector<String>, keep:
     if p.debug_info {
         fl.push_str(" -g");
     }
-    if (p.build_cfg >> (BC_OVERFLOW_CHECKS - BC_THREAD_SANITIZER) as u32 & 1u32) != 0 {
+    if (p.build_cfg >> (BC_OVERFLOW_CHECKS - BC_LOCKDEP) as u32 & 1u32) != 0 {
         fl.push_str(" -DSC_ARITH_WRAP");
     }
     fl.push_byte(b'\n');
@@ -11192,7 +11192,7 @@ fn native_header_facts(p: &mut loader::Package) {
     // The dialect and macro flags the headers are read under (`push_c_env`), which select what they define,
     // and the sysroot whose headers they are.
     let mut flags = String::new();
-    push_c_env(&mut flags, bman::DEFAULT_CSTD, p.build_target);
+    push_c_env(&mut flags, p.build_target);
     let sysroot = p.sysroot.clone();
     // Each header's facts: the record of an earlier build's scan when every file it read is unchanged,
     // else a scan, the headers in parallel.
@@ -11728,7 +11728,7 @@ fn field_c_name(p: &loader::Package, m: ModuleId, fid: NodeId, out: &mut String)
 }
 
 // The `<value>` of entry `<name>=<value>` of facts line `facts` (`check_agg`); empty when it has none.
-fn hf_entry<'a>(facts: str<'a>, name: str) str<'a> {
+const fn hf_entry<'a>(facts: str<'a>, name: str) str<'a> {
     let mut rest = facts;
     let _ = hf_word(&mut rest);
     for _ in 0..facts.len() {
@@ -12256,7 +12256,7 @@ fn hf_find(rec: str, t: &mut HfTask) bool {
 const U64_MAX9: u64 = 0xFFFFFFFFFFFFFFFF;
 
 // The next line of `rest`, without its newline, and `rest` past it; "" at the end.
-fn hf_line<'a>(rest: &mut str<'a>) str<'a> {
+const fn hf_line<'a>(rest: &mut str<'a>) str<'a> {
     let r = *rest;
     let nl = r.find_byte(b'\n');
     if nl < 0 {
@@ -12268,7 +12268,7 @@ fn hf_line<'a>(rest: &mut str<'a>) str<'a> {
 }
 
 // The next space-separated word of `line`, and `line` past it.
-fn hf_word<'a>(line: &mut str<'a>) str<'a> {
+const fn hf_word<'a>(line: &mut str<'a>) str<'a> {
     let r = *line;
     let sp = r.find_byte(b' ');
     if sp < 0 {
@@ -12454,7 +12454,7 @@ fn native_plan(
     for k in 0..iq.len() {
         unit.set(iq[k] as usize, true);
     }
-    // Per unit, 1 + the index in `l.conly_why` of the first reason it goes through C, 0 for none.
+    // Per unit, 1 + the index in `l.conly_why` of the first reason it does not compile, 0 for none.
     let mut conly = Vector::<u32>::new();
     conly.resize_default(n);
     for k in 0..l.conly.len() {
@@ -13810,7 +13810,7 @@ fn cs_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: u
     }
     let f = unsafe (*a).at_const(fnode).as_data.function;
     // A build-constant site this build decided removed code another build runs, which may call what a
-    // constant cannot (an extern under THREAD_SANITIZER): such a function gets no suggestion.
+    // constant cannot (an extern under LOCKDEP): such a function gets no suggestion.
     if f.is_const() || f.is_extern() || f.body == NODE_NONE || unsafe (*a).bc_cut_at(
         fnode,
         unsafe (*a).at_const(fnode).span,
@@ -15149,7 +15149,7 @@ pub fn run_package(
         }
     }
     sort_big_first(&mut iq, &isz);
-    // A native build compiles its modules into objects; the rest go through C.
+    // A native build compiles its modules into objects.
     let mut nat_objs = Vector::<NatObj>::new();
     let mut nat_mod = Vector::<bool>::new(); // per module, native
     let mut nat_rec = Map::<String, u64>::new();

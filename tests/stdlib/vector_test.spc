@@ -322,7 +322,7 @@ fn counted(n: usize) Vector<u8> {
     return v;
 }
 
-fn view_len(s: []u8) usize {
+const fn view_len(s: []u8) usize {
     return s.len();
 }
 

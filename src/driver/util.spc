@@ -419,8 +419,8 @@ pub const SHARD_MAX: u32 = 64;
 
 /// The name a generated file in directory `dir` includes file `abs` by (both real paths): relative when
 /// both lie below the working directory, so a tree that moves with its project (a copy, a worktree,
-/// the gate's tree) emits the same text and keeps its object cache keys; else `abs`, which compiles
-/// from any location.
+/// the gate's tree) emits the same text and keeps its cache keys; else `abs`, which compiles from any
+/// location.
 pub fn include_name(abs: str, dir: str) String {
     // A real path: `/...`, or `X:/...` on Windows (fs::realpath writes forward slashes there).
     let rooted = abs.starts_with("/") || abs.len() > 2 && abs[1] == b':';
@@ -626,12 +626,13 @@ pub fn push_sdk_flags(cmd: &mut String, target: i32, arch: i32, features: cf::Cp
 }
 
 /// The flags that decide what the C headers declare, as every compile of the generated tree has them and
-/// bindgen preprocesses under them: `cstd` (the dialect and the POSIX level) and the dialect of `target`
-/// after it, the unsigned `char`, and the defines of `target` (Windows: one API level for every mingw
+/// bindgen preprocesses under them: the dialect and the POSIX level (POSIX 2008 with the XSI extension,
+/// which declares `realpath` on glibc and wasi-libc) and the dialect of `target` after it, the unsigned
+/// `char`, and the defines of `target` (Windows: one API level for every mingw
 /// toolchain; MSYS2 defaults `_WIN32_WINNT` to Windows 10, llvm-mingw to Windows 7, whose headers hide the
 /// Windows 8 functions the runtime calls, GetCurrentThreadStackLimits).
-pub fn push_c_env(cmd: &mut String, cstd: str, target: i32) {
-    cmd.push_str(cstd);
+pub fn push_c_env(cmd: &mut String, target: i32) {
+    cmd.push_str("-std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700");
     cmd.push_str(tgt::os(target).c_std);
     cmd.push_str(" -funsigned-char");
     cmd.push_str(tgt::os(target).c_defines);

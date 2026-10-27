@@ -24,10 +24,6 @@ inputs:
     description: "true in the release workflow: the job saves the installation caches and its cache delta on main"
     required: false
     default: "false"
-  cstd:
-    description: "the C standard flags of the Windows leg (mingw hides POSIX prototypes under -std=c11)"
-    required: false
-    default: "-std=gnu11 -D_POSIX_C_SOURCE=200809L"
   llvm-mingw:
     description: "Windows: also install llvm-mingw, whose clang has the mingw profile runtime"
     required: false
@@ -136,8 +132,6 @@ runs:
     - name: Set up mingw-w64 (Windows)
       if: runner.os == 'Windows'
       shell: bash
-      env:
-        CSTD: ${{ inputs.cstd }}
       run: |
         find_mingw_bin() {
           { find /c/ProgramData/mingw64 /c/ProgramData/chocolatey/lib/mingw /c/tools -path '*/mingw64/bin' -type d 2>/dev/null || true; } |
@@ -157,7 +151,6 @@ runs:
         cygpath -w "$mingw_bin" >> "$GITHUB_PATH"
         echo "CC=gcc" >> "$GITHUB_ENV"
         echo "BINEXT=.exe" >> "$GITHUB_ENV"
-        echo "SC_CSTD=$CSTD" >> "$GITHUB_ENV"
 
     - name: Save mingw-w64 install (Windows, release on main)
       if: runner.os == 'Windows' && inputs.save == 'true' && github.ref == 'refs/heads/main' && steps.mingw.outputs.cache-hit != 'true'

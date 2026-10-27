@@ -31,23 +31,22 @@ export SC_NO_CACHE=1
 export SC_NO_EMIT_CACHE=1
 export SC_NO_TU_CACHE=1
 
-# Gen-1 emits the compiler using the copied libraries, and the build engine compiles that tree into
-# gen1-bin with the build's own C flags, packs, unity file and precompiled header.
+# Gen-1 compiles the compiler using the copied libraries into native objects and links gen1-bin with the
+# own linker.
 "$fix_dir/bootstrap-bin" build "$fix_dir/src/main.spc" -o "$fix_dir/gen1-bin"
 mv "$fix_dir/src/build" "$fix_dir/gen1"
 
-# Gen-2: the compiler built from gen-1's C emits the same sources at the same absolute paths, with no
-# previous build tree.
+# Gen-2: the compiler gen-1 built compiles the same sources at the same absolute paths, with no previous
+# build tree.
 "$fix_dir/gen1-bin" build "$fix_dir/src/main.spc" -o "$fix_dir/discard-bin"
 
 # Require an empty diff over the whole tree: the per-TU cache is off, so nothing is excluded.
 diff -r "$fix_dir/gen1" "$fix_dir/src/build"
 ```
 
-Do not compile gen-1's C by hand. A pack or unity file includes its members, so compiling every
-`.c` file defines each member twice; and without the build's feature macros (`-D_POSIX_C_SOURCE=200809L
--D_XOPEN_SOURCE=700`, the default `cstd`) Darwin's `struct stat` lacks the fields std binds. Pass every
-path absolute and the same in both generations: an assertion's location embeds the source path as
+To compare the C instead, add `--emit-c` to both builds and drop `-o`; compile a C tree with
+`ci/cc_tree.sh`, never by hand: a pack or unity file includes its members, so compiling every `.c`
+file defines each member twice. Pass every path absolute and the same in both generations: an assertion's location embeds the source path as
 written.
 
 An empty diff means the fixpoint holds. **Any** difference is a semantic regression

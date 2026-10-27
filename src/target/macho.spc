@@ -561,7 +561,7 @@ fn zerofill(o: &ob::Obj, k: u8) bool {
 }
 
 // The size and alignment of section kind `k` (`tv` the descriptors).
-fn sec_size(o: &ob::Obj, tv: &Vector<u8>, k: u8) (u64, u8) {
+const fn sec_size(o: &ob::Obj, tv: &Vector<u8>, k: u8) (u64, u8) {
     if k == TV {
         return tv.len() as u64, 3;
     }

@@ -1694,8 +1694,8 @@ extend Parser {
                 let cname = self.identifier();
                 self.expect(TokenType::Colon, "':'");
                 let ctype = self.parse_type();
-                // A constant with a value is a Super-C constant the C compile checks against the
-                // header's name (`c_macro`); without one it is the C name, read at run time.
+                // A constant with a value is a Super-C constant the build checks against the header's
+                // name (`c_macro`, `native_header_facts`); without one it takes the header's value.
                 let mut cvalue = NODE_NONE;
                 if self.match(TokenType::Equal) {
                     if is_static {
@@ -4001,7 +4001,7 @@ extend Parser {
         self.errors.emit_span(
             t.span(),
             format(
-                "'@when' takes a condition over TEST, THREAD_SANITIZER, ADDRESS_SANITIZER, LOCKDEP and OVERFLOW_CHECKS with '!', '&&', '||' and parentheses",
+                "'@when' takes a condition over TEST, LOCKDEP and OVERFLOW_CHECKS with '!', '&&', '||' and parentheses",
             ),
         );
     }

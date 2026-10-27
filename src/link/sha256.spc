@@ -70,7 +70,7 @@ const K: [u32; 64] = [
 const H0: [u32; 8] = [0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19];
 
 // One 64-byte block at `at` of `b` into state `h`.
-fn block(h: &mut [u32; 8], b: []u8, at: usize) {
+const fn block(h: &mut [u32; 8], b: []u8, at: usize) {
     let k: []u32 = K;
     let mut w = [0u32; 64];
     for t in 0..16usize {
@@ -119,7 +119,7 @@ fn block(h: &mut [u32; 8], b: []u8, at: usize) {
 }
 
 /// The SHA-256 digest of `data` into `out`.
-pub fn digest(data: []u8, out: &mut [u8; 32]) {
+pub const fn digest(data: []u8, out: &mut [u8; 32]) {
     let mut h = H0;
     let n = data.len();
     let full = n / 64;

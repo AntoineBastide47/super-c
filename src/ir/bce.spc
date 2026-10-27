@@ -1248,7 +1248,7 @@ extend Bce {
     /// Do the panic-guard paths from `d1` and `d2` fail alike: both end in an unreachable trap, or
     /// both call one `@noreturn` callee with equal constant arguments (one literal of one source, or
     /// the qualified name of one type)?
-    fn same_panic(self: &Self, b: &ir::CoreBody, d1: u32, d2: u32) bool {
+    const fn same_panic(self: &Self, b: &ir::CoreBody, d1: u32, d2: u32) bool {
         let e1 = self.doomed_end(b, d1);
         let e2 = self.doomed_end(b, d2);
         if e1 == ir::IR_NONE || e2 == ir::IR_NONE {
@@ -1562,7 +1562,7 @@ extend Bce {
 
     /// Do read places `p1` and `p2` name one place once each is written from its root: one base local
     /// and equal projections (no dynamic index)?
-    fn same_read(self: &Self, b: &ir::CoreBody, p1: u32, p2: u32) bool {
+    const fn same_read(self: &Self, b: &ir::CoreBody, p1: u32, p2: u32) bool {
         let mut s1: u32 = 0;
         let mut s2: u32 = 0;
         let r1 = self.read_root(b, p1, &mut s1);
@@ -1585,7 +1585,7 @@ extend Bce {
     }
 
     // The base locals read place `pl` depends on: its own base, and its root's (`read_root`).
-    fn read_bases(self: &Self, b: &ir::CoreBody, pl: u32, pr: &mut [u32; 3]) {
+    const fn read_bases(self: &Self, b: &ir::CoreBody, pl: u32, pr: &mut [u32; 3]) {
         let mut sk: u32 = 0;
         let r = self.read_root(b, pl, &mut sk);
         pr[0] = b.places.at(pl as usize).base;
@@ -2101,7 +2101,7 @@ extend Bce {
     /// read of the same length (same place, same generations, its local unchanged).
     /// The length place length operand `lop` reads: through its local, or in place as a guard's
     /// length operand (`glp`).
-    fn lop_place(self: &Self, b: &ir::CoreBody, lop: u32) LenBind {
+    const fn lop_place(self: &Self, b: &ir::CoreBody, lop: u32) LenBind {
         let lk = self.vkey(b, lop);
         if lk.is_local && lk.off == 0 {
             return self.len_place_of(lk.l);

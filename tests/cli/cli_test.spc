@@ -9729,17 +9729,17 @@ pub fn wasm_loop(b: &mut bench::Bencher) {
 )",
     );
     let root = p.dir();
-    let all = cli::superc_env_in(root, "SC_NO_CACHE", "1", "bench --profile=debug");
+    let all = cli::superc_in(root, "bench --profile=debug");
     assert(all.ok());
     assert(all.out_shows("micro::add_loop"), "unfiltered run reports the first benchmark");
     assert(all.out_shows("micro::mul_loop"), "unfiltered run reports the second benchmark");
     assert(all.out_has("2 benchmark(s)"), "unfiltered tally");
-    let one = cli::superc_env_in(root, "SC_NO_CACHE", "1", "bench --profile=debug --filter=mul");
+    let one = cli::superc_in(root, "bench --profile=debug --filter=mul");
     assert(one.ok());
     assert(!one.out_has("micro::add_loop"), "filter excludes a non-matching benchmark");
     assert(one.out_shows("micro::mul_loop"), "filter keeps the matching benchmark");
     assert(one.out_has("1 benchmark(s)"), "tally counts only what ran");
-    let none = cli::superc_env_in(root, "SC_NO_CACHE", "1", "bench --profile=debug --filter=zzz");
+    let none = cli::superc_in(root, "bench --profile=debug --filter=zzz");
     assert_eq(none.exit, 1);
     assert(none.out_shows("bench: no benchmark name contains 'zzz'"), "a filter that selects nothing is an error");
 }
@@ -9818,7 +9818,7 @@ pub fn lane(b: &mut bench::Bencher) {
 )",
     );
     let root = p.dir();
-    let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", "bench --profile=debug --no-run");
+    let r = cli::superc_in(root, "bench --profile=debug --no-run");
     assert(r.ok(), "the runner builds");
     // The module's object names every function it defines or calls.
     let o = loader::read_file(format("{}/build/bench/debug/raw/bench/lane.o", root).as_str()).unwrap();
@@ -9841,18 +9841,18 @@ fn test_filter_builds_only_matching_files() {
     );
     p.mkfile("tests/c.spc", "@test\nfn gamma() { let x: i32 = \"no\"; }\n");
     let root = p.dir();
-    let all = cli::superc_env_in(root, "SC_NO_CACHE", "1", "test --quiet");
+    let all = cli::superc_in(root, "test --quiet");
     assert(!all.ok(), "the unfiltered suite builds the file that does not compile");
-    let a = cli::superc_env_in(root, "SC_NO_CACHE", "1", "test --quiet --filter=a::alpha_");
+    let a = cli::superc_in(root, "test --quiet --filter=a::alpha_");
     assert(a.ok());
     assert(a.out_has("1 passed, 0 failed"), "the runner selects among the built file's tests");
-    let b = cli::superc_env_in(root, "SC_NO_CACHE", "1", "test --quiet --filter=b::S::be");
+    let b = cli::superc_in(root, "test --quiet --filter=b::S::be");
     assert(b.ok());
     assert(b.out_has("1 passed, 0 failed"), "a fixture test matches by its suite type's name");
-    let d = cli::superc_env_in(root, "SC_NO_CACHE", "1", "test --quiet --filter=b::delta");
+    let d = cli::superc_in(root, "test --quiet --filter=b::delta");
     assert(d.ok());
     assert(d.out_has("1 passed, 0 failed"), "a method without the fixture matches without the type's name");
-    let none = cli::superc_env_in(root, "SC_NO_CACHE", "1", "test --quiet --filter=zzz");
+    let none = cli::superc_in(root, "test --quiet --filter=zzz");
     assert_eq(none.exit, 1);
     assert(none.out_shows("test: no test name contains 'zzz'"), "a filter that selects nothing is an error");
 }
@@ -10154,7 +10154,7 @@ fn build_staleness_gates() {
         "pub struct S {\n    pub a: i32,\n}\n\n@noinline\npub fn v(x: i32) i32 {\n    let s = S { a: x };\n    return s.a;\n}\n",
     );
     let root = p.dir();
-    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
+    assert(cli::superc_in(root, "build").ok(), "initial build");
     let mut objo = String::new();
     objo.format_into("{}/build/debug/raw/main.o", root);
     let mut bin = String::new();
@@ -10162,7 +10162,7 @@ fn build_staleness_gates() {
     let o1 = p13_mtime(objo.as_str());
     let b1 = p13_mtime(bin.as_str());
     assert(o1 != 0 && b1 != 0, "the build produced an object and a binary");
-    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "no-change build");
+    assert(cli::superc_in(root, "build").ok(), "no-change build");
     assert(p13_mtime(objo.as_str()) == o1, "a no-change build does not rewrite objects");
     assert(p13_mtime(bin.as_str()) == b1, "a no-change build does not relink");
     // Rename the struct field: main spells no util type, so main.o stays.
@@ -10170,14 +10170,14 @@ fn build_staleness_gates() {
         "src/util.spc",
         "pub struct S {\n    pub b: i32,\n}\n\n@noinline\npub fn v(x: i32) i32 {\n    let s = S { b: x };\n    return s.b;\n}\n",
     );
-    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "layout-change build");
+    assert(cli::superc_in(root, "build").ok(), "layout-change build");
     assert(p13_mtime(objo.as_str()) == o1, "a layout edit main never embeds rebuilds no dependent object");
     // Add a public function: main, which calls only `v`, does not change.
     p.mkfile(
         "src/util.spc",
         "pub struct S {\n    pub b: i32,\n}\n\n@noinline\npub fn v(x: i32) i32 {\n    let s = S { b: x };\n    return s.b;\n}\n\npub fn w() i32 {\n    return 1;\n}\n",
     );
-    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "header-change build");
+    assert(cli::superc_in(root, "build").ok(), "header-change build");
     assert(p13_mtime(objo.as_str()) == o1, "a function main does not call rebuilds nothing of it");
 }
 
@@ -10200,7 +10200,7 @@ fn build_type_edit_stays_local() {
         "pub struct T {\n    pub b: i64,\n}\n\n@noinline\npub fn f(x: i32) i32 {\n    let t = T { b: x as i64 };\n    return t.b as i32;\n}\n",
     );
     let root = p.dir();
-    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --emit-c").ok(), "initial build");
+    assert(cli::superc_in(root, "build --emit-c").ok(), "initial build");
     let mut fwd = String::new();
     fwd.format_into("{}/build/debug/raw/__sc_fwd.h", root);
     let fwd_text = loader::read_file(fwd.as_str()).unwrap();
@@ -10225,7 +10225,7 @@ fn build_type_edit_stays_local() {
         src.push_str("\n");
         src.push_str(edits[k]);
         p.mkfile("src/util.spc", src.as_str());
-        assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --emit-c").ok(), "type-edit build");
+        assert(cli::superc_in(root, "build --emit-c").ok(), "type-edit build");
         for i in 0..paths.len() {
             assert(
                 p13_mtime(paths[i].as_str()) == t0[i],
@@ -10251,7 +10251,7 @@ fn build_new_type_rewrites_no_user() {
     p.mkfile("src/util.spc", util0);
     p.mkfile("src/other.spc", "import util;\n\n@noinline\npub fn f(s: util::S) i32 {\n    return s.a * 2;\n}\n");
     let root = p.dir();
-    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --emit-c").ok(), "initial build");
+    assert(cli::superc_in(root, "build --emit-c").ok(), "initial build");
     let mut paths = Vector::<String>::new();
     for rel in "raw/main.c raw/other.c raw/util.c raw/util.h".split(" ") {
         let mut s = String::new();
@@ -10270,7 +10270,7 @@ fn build_new_type_rewrites_no_user() {
     let mut src = String::from_str(util0);
     src.push_str("\npub struct Added {\n    pub z: i64,\n}\n");
     p.mkfile("src/util.spc", src.as_str());
-    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --emit-c").ok(), "added-type build");
+    assert(cli::superc_in(root, "build --emit-c").ok(), "added-type build");
     for i in 0..paths.len() {
         assert(p13_mtime(paths[i].as_str()) == t0[i], "a new type leaves every unit untouched");
     }
@@ -10280,7 +10280,7 @@ fn build_new_type_rewrites_no_user() {
         "the manifest lists the new definition header",
     );
     p.mkfile("src/util.spc", util0);
-    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --emit-c").ok(), "removed-type build");
+    assert(cli::superc_in(root, "build --emit-c").ok(), "removed-type build");
     assert(p13_mtime(hdr.as_str()) == 0, "the definition header of a removed type is pruned");
     assert(loader::read_file(man.as_str()).unwrap().as_str().find("util__Added") < 0, "the manifest no longer lists it");
 }
@@ -10329,7 +10329,7 @@ fn build_symbol_segment_includes_no_type() {
     p.mkfile("src/util.spc", util0);
     p.mkfile("src/gen.spc", "@noinline\npub fn size<T>() i32 {\n    return sizeof(T) as i32;\n}\n");
     let root = p.dir();
-    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --emit-c").ok(), "initial build");
+    assert(cli::superc_in(root, "build --emit-c").ok(), "initial build");
     let mut genc = String::new();
     genc.format_into("{}/build/debug/raw/main.c", root);
     let text = loader::read_file(genc.as_str()).unwrap();
@@ -10340,7 +10340,7 @@ fn build_symbol_segment_includes_no_type() {
     let mut src = String::from_str(util0);
     src.push_str("\npub struct Added {}\n");
     p.mkfile("src/util.spc", src.as_str());
-    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build --emit-c").ok(), "type-edit build");
+    assert(cli::superc_in(root, "build --emit-c").ok(), "type-edit build");
     assert(p13_mtime(genc.as_str()) == g0, "main.c is byte-identical");
 }
 
@@ -10355,7 +10355,7 @@ fn build_stats_report_relowering_census() {
         "struct Z {}\n\nfn main() i32 {\n    let mut a = Vector::<u8>::new();\n    a.push(1u8);\n    let mut b = Vector::<Z>::new();\n    b.push(Z {});\n    return a.len() as i32 + b.len() as i32 - 2;\n}\n",
     );
     let root = p.dir();
-    let r = cli::superc_env_in(root, "SC_BUILD_STATS", "- SC_NO_CACHE=1", "build");
+    let r = cli::superc_env_in(root, "SC_BUILD_STATS", "-", "build");
     assert(r.ok(), "the build succeeds");
     let out = unsafe str::from_cstr(r.out);
     let head = "\"relower\":{\"reflect\":0,\"zst\":";
@@ -10373,7 +10373,7 @@ fn build_link_failure_keeps_artifact() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
     let root = p.dir();
-    let r0 = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build");
+    let r0 = cli::superc_in(root, "build");
     assert(r0.ok(), "initial build");
     let mut bin = String::new();
     bin.format_into("{}/build/debug/app{}", root, unsafe str::from_cstr(cli::binext()));
@@ -10393,7 +10393,7 @@ fn build_link_failure_keeps_artifact() {
     // A source edit recompiles its object, then the link fails: nothing is published.
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\nldflags = [\"-lsc_no_such_library_p15\"]\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    let x = 1;\n    return x - 1;\n}\n");
-    let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build");
+    let r = cli::superc_in(root, "build");
     assert(!r.ok() && r.out_has("link failed"), "the link fails");
     assert(p13_mtime(bin.as_str()) == b1, "the previous binary stays in place");
     let l2 = switch loader::read_file(cmdp.as_str()) {
@@ -10405,7 +10405,7 @@ fn build_link_failure_keeps_artifact() {
     };
     assert(l2.as_str() == l1.as_str(), "the previous link record stays");
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
-    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "the next build succeeds");
+    assert(cli::superc_in(root, "build").ok(), "the next build succeeds");
     assert(p13_mtime(bin.as_str()) > b1, "and links the newer object over the stale binary");
 }
 
@@ -10420,10 +10420,10 @@ fn build_relinks_after_failed_link_in_same_second() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
     let root = p.dir();
-    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "initial build");
+    assert(cli::superc_in(root, "build").ok(), "initial build");
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\nldflags = [\"-lsc_no_such_library_p15\"]\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    let x = 1;\n    return x - 1;\n}\n");
-    let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build");
+    let r = cli::superc_in(root, "build");
     assert(!r.ok() && r.out_has("link failed"), "the link fails");
     let mut same = String::new();
     same.format_into("find {}/build -type f -exec touch -t 209901010000 {{}} +", root);
@@ -10432,7 +10432,7 @@ fn build_relinks_after_failed_link_in_same_second() {
     bin.format_into("{}/build/debug/app", root);
     let b1 = p13_mtime(bin.as_str());
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
-    assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", "build").ok(), "the next build succeeds");
+    assert(cli::superc_in(root, "build").ok(), "the next build succeeds");
     assert(p13_mtime(bin.as_str()) != b1, "and relinks over the binary the failed link left");
 }
 
@@ -10445,7 +10445,7 @@ fn build_publication_failure_keeps_artifact() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 3;\n}\n");
     let root = p.dir();
-    assert_eq(cli::superc_env_in(root, "SC_NO_CACHE", "1", "run").exit, 3);
+    assert_eq(cli::superc_in(root, "run").exit, 3);
     let mut bin = String::new();
     bin.format_into("{}/build/debug/app{}", root, unsafe str::from_cstr(cli::binext()));
     let b1 = p13_mtime(bin.as_str());
@@ -10455,11 +10455,11 @@ fn build_publication_failure_keeps_artifact() {
     gen.format_into("{}/build/debug/raw/main.o", root);
     assert(fs::remove_all(gen.as_str()).is_ok() && fs::mkdir_all(gen.as_str()).is_ok(), "the lock is in place");
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 4;\n}\n");
-    let r = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build");
+    let r = cli::superc_in(root, "build");
     assert(!r.ok() && r.out_has("raw/main.o: "), "the publication failure fails the build and names the file");
     assert(p13_mtime(bin.as_str()) == b1, "the previous binary stays in place");
     assert(fs::remove_all(gen.as_str()).is_ok(), "the lock is gone");
-    assert_eq(cli::superc_env_in(root, "SC_NO_CACHE", "1", "run").exit, 4);
+    assert_eq(cli::superc_in(root, "run").exit, 4);
 }
 
 // A public function whose body never returns (it exits or panics), called only from another module,
@@ -10656,11 +10656,12 @@ fn item_jobs_fold_across_an_import_cycle() {
     assert_eq(p.run_bin(), 0);
 }
 
-// One cache-free build of the project at `root` with `jobs` workers into `<root>/o<tag>`.
+// One build of the project at `root` with `jobs` workers into `<root>/o<tag>`, the emit stamp and the
+// per-TU cache off.
 fn jobs_build(root: str, tag: str, jobs: str) {
     let mut args = String::new();
     args.format_into("build --jobs={} --out-dir=o{} --emit-c", jobs, tag);
-    let r = cli::superc_env_in(root, "SC_NO_CACHE", "1 SC_NO_EMIT_CACHE=1 SC_NO_TU_CACHE=1", args.as_str());
+    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1 SC_NO_TU_CACHE=1", args.as_str());
     assert(r.ok(), "the build succeeds");
 }
 
@@ -10748,8 +10749,8 @@ fn rm_rf_does_not_follow_a_directory_link() {
 }
 
 // A left-associative chain at the parser's limit (4096 operands) nests as deep on its left operand.
-// The compiler under test is the sanitizer build, whose frames are the largest: the resolver, the
-// checker, the lowering and the formatter walk the chain without a stack frame per operator.
+// The resolver, the checker, the lowering and the formatter walk the chain without a stack frame per
+// operator.
 @test
 fn operator_chain_at_the_parser_limit_compiles() {
     if !cli::has_cc() {
@@ -10973,12 +10974,6 @@ fn build_constant_profile_selects_the_branch() {
 
 const BC_CONFIG: str = M"(fn main() i32 {
     let mut n = 0;
-    if THREAD_SANITIZER {
-        n += 8101;
-    }
-    if ADDRESS_SANITIZER {
-        n += 8202;
-    }
     if LOCKDEP {
         n += 8303;
     }
@@ -10989,8 +10984,8 @@ const BC_CONFIG: str = M"(fn main() i32 {
 }
 )";
 
-// LOCKDEP and OVERFLOW_CHECKS follow the profile (`lockdep`, and the wrapping `release`); no build sets
-// THREAD_SANITIZER or ADDRESS_SANITIZER. Each build emits only its branches (`--emit-c`).
+// LOCKDEP and OVERFLOW_CHECKS follow the profile (`lockdep`, and the wrapping `release`). Each build emits
+// only its branches (`--emit-c`).
 @test
 fn build_constants_follow_the_profile() {
     let p = cli::proj_new();
@@ -10998,7 +10993,7 @@ fn build_constants_follow_the_profile() {
     p.mkfile("main.spc", BC_CONFIG);
     let root = p.dir();
     let cases: [](str, str) = [("debug", ""), ("ld", "8303"), ("release", "8404")];
-    let all: []str = ["8101", "8202", "8303", "8404"];
+    let all: []str = ["8303", "8404"];
     for i in 0..cases.len() {
         let (prof, want) = cases[i];
         let label = format("the build of profile '{}'", prof);

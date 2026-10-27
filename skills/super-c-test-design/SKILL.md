@@ -1,6 +1,6 @@
 ---
 name: super-c-test-design
-description: "How to design Super-C tests that are correct and cheap: the oracle ladder from in-process checks to CLI scenarios, batching exit-code cases, object-cache and sanitizer rules, program size, and how to measure a test's CPU and energy before adding it. Use when writing, reviewing, or restructuring tests, and when the suite's time or energy grows."
+description: "How to design Super-C tests that are correct and cheap: the oracle ladder from in-process checks to CLI scenarios, batching exit-code cases, cache rules, program size, and how to measure a test's CPU and energy before adding it. Use when writing, reviewing, or restructuring tests, and when the suite's time or energy grows."
 allowed-tools: Bash Read
 ---
 
@@ -17,9 +17,8 @@ fixtures, helpers, runner flags).
   when the lower one cannot see the behavior.
 - Put exit-code and trap cases in `h::ExitBatch`, never one `expect_exit` or `expect_trap` test
   per case.
-- Leave the object cache on. Use `cli::superc_in`; use `SC_NO_CACHE=1` only in a test that
-  counts compiles or checks staleness through mtimes.
-- Do not add sanitizers to a test. CI runs every suite with `super-c test --sanitizers`.
+- Leave the caches on. Use `cli::superc_in`; use `SC_NO_CACHE=1` only in a test that
+  checks the prelude images.
 - Measure a new or changed test file before handoff (Measuring) and report its CPU time.
 
 ## Correct tests
@@ -62,8 +61,8 @@ Rules for the costly rungs:
   `main` is neither `fn main()` nor `fn main(NAME: Vector<str>)`, a case that needs a build flag,
   and a case about a root module's bare C names stay alone.
 - Rung 5: one project per test, reused across its steps. A strict whole-tree compile
-  (`p.cc_build`) goes through the object cache, so a unit already compiled with the same
-  flags and text is not compiled again. The build compiles no C file of a project's tree: a test
+  (`p.cc_build`) compiles the `--emit-c` tree with the C compiler, so use it only when the C is
+  the behavior. The build compiles no C file of a project's tree: a test
   whose program binds C code links it prebuilt, through `p.cc_build_with(flags, "x.c")` (the
   harness compile) or `p.c_lib(name, "x.c")` and `@link("-L<root> -l<name>")` (an engine
   build); a header whose `static inline` function holds the code needs neither.
@@ -76,29 +75,21 @@ Rules for the costly rungs:
   to `<out-dir>/test/cache`, deleted when the run ends). Give a fixture project a fixed name: a kept
   base holds one root per project name. A new project of a name another test already built (`app`) compiles
   only its own units; script builds share `.scripts`.
-- A small program compiles as one unit (`__sc_unity.c`). A test that checks per-unit objects,
-  staleness or the code of a call across units sets `SC_UNITY_MAX=0` (`cli::set_env`), and a test of
-  packs `SC_UNITY_MAX=1`. A program needs four units that include `__sc_fwd.h` (`println` brings the
-  std units) to compile through the precompiled header.
-- `SC_NO_CACHE=1` makes every build of that test compile every unit, std included. Use it
-  only where the assertion is about compiles: recompile counts, staleness, cache behavior.
+- The C tree of a small program is one unit (`__sc_unity.c`). A test that checks the C units of
+  `--emit-c` one by one sets `SC_UNITY_MAX=0` (`cli::set_env`), and a test of packs
+  `SC_UNITY_MAX=1`.
+- `SC_NO_CACHE=1` makes every build of that test check the std prelude again. Use it only where the
+  assertion is about the prelude images.
 - A test that checks cache behavior sets its own `SC_CACHE_DIR` under its scratch directory.
-- The compiler records its C compiler's version line in the object cache (an entry of
-  `.scripts/o/script`), so a build does not start a `--version` probe.
 - The checked std prelude is cached in the cache root too (`<root>/prelude/`): a build
   checks only the program. A test that must see the prelude checked (a std edit, a std tree of its own) sets
   its own `SC_CACHE_DIR`, as `tests/cli/prelude_image_test.spc` does; the first build in a new cache
   root checks the prelude once.
 
-## Sanitizers and profiles
+## Profiles
 
-- Locally the compiler under test and every test program build without sanitizers. CI adds
-  `--sanitizers` to every `super-c test`, so the suite still runs under ASan and UBSan there.
-- Never add `--sanitizers` or `-fsanitize` to a test unless the test checks a sanitizer's own
-  behavior. The differential oracles keep their `ubsan` profile: UBSan is their UB detector
-  and costs little next to the compile.
-- Build with `--profile=release` (LTO) only when the result depends on it. A release link
-  costs seconds.
+- Build with `--profile=release` only when the result depends on it: the LIR optimizer and the
+  inliner make a release build slower than a debug one.
 - A test that starts one worker per CPU passes `--jobs=1`: the suite already runs one test
   per core.
 

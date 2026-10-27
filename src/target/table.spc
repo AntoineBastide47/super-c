@@ -30,7 +30,8 @@ pub struct Isa {
     pub merge_apart: bool,
     pub simd_backend: str<'static>, // `std/simd/backend/<name>.spc`
     /// The C headers whose functions are the C compiler's intrinsics, space-separated: no object defines
-    /// them, so a native backend compiles their callers through C.
+    /// them, so a native backend expands each call from its template (`target::intrin`), and a call of
+    /// one it has none for is a build error.
     pub intrinsics: str<'static>,
 }
 

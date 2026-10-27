@@ -400,7 +400,7 @@ const ATTR_DOCS: [AttrDoc; 36] = [
     AttrDoc {
         name: "when",
         sig: "@when(C)",
-        doc: "Keeps the item only where build condition `C` holds: `TEST`, `THREAD_SANITIZER`, `ADDRESS_SANITIZER`, `LOCKDEP`, `OVERFLOW_CHECKS` with `!`, `&&`, `||`.",
+        doc: "Keeps the item only where build condition `C` holds: `TEST`, `LOCKDEP`, `OVERFLOW_CHECKS` with `!`, `&&`, `||`.",
     },
     AttrDoc { name: "fmt.skip", sig: "@fmt.skip", doc: "The formatter keeps the item as written." },
     AttrDoc {

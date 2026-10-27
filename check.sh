@@ -56,9 +56,8 @@ done
 rm -f "$runlog" ./hunt-bin
 
 # 4) Bootstrap from the latest release binary; any failure fails the check.
-# Stage 0: the release binary builds current source via the legacy `build <root> -o` path (works
-# even for a pre-build-system release; a release older than the native backend needs its C compiler
-# here). Stage 0 then rebuilds itself through the engine: two generations from current source.
+# Stage 0: the release binary builds current source (`--bootstrap-tags`). Stage 0 then rebuilds itself:
+# two generations from current source.
 printf 'check: bootstrap rebuild from the latest release\n'
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT

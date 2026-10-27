@@ -137,8 +137,8 @@ the header of the type it collides with.
   that names an alias is a unit declaration (`split_protos`), without its `extern`, which
   `decl_name` reads as an object's. A unit that includes a `__scx` file, directly or through a
   definition header (`x_reach`), compiles outside the packs (`tu_x`, `inst_x`), and so does every
-  unit of wasm's C library (`Package::is_libc`), which compiles with `-fno-builtin` and without the
-  precompiled header (`loader::libc_unit`). A declaration of
+  unit of wasm's C library (`Package::is_libc`), which compiles with `-fno-builtin`
+  (`loader::libc_unit`). A declaration of
   `__sc_fwd.h` that names an alias (a trait-object table whose method names a header type, an
   `@emit_macro` template) makes the forward header include the `__scx` file: every file then sees
   that header. A header `super_rt.h` includes stays in `__sc_fwd.h`, by C
@@ -286,25 +286,19 @@ The tree grows from 162 to 927 headers (839 definition headers; include lines in
 which 78 are unit typedef copies). Self-transpile codegen (bench binaries of both trees
 over the same sources, alternating, 4 rounds): 216.3 ms before, 218.7 ms after (+1.1%,
 the need records and the assembly). Cold build (every cache off, ccache off) 11.41 s
-before and 11.34 s after (median of 4 alternating runs); no-op build 98 to 101 ms both.
-The no-op build reads more and longer depfiles, so the engine's staleness check stats
-each dependency path once per build and walks the generated tree without a stat per
-`.c`/`.h` name.
+before and 11.34 s after (median of 4 alternating runs, when the build compiled C); no-op build 98
+to 101 ms both.
 
 ## Emission cost of the layout
 
-Measured on the release compiler with a no-op C compiler (`--cc=true`,
+Measured, when the build compiled C, on the release compiler with a no-op C compiler (`--cc=true`,
 `SC_CEMIT_STATS=1`), which isolates emission from compilation: the assembly stage takes
 1 to 2 ms; the write stage 240 to 260 ms, of which the build engine's per-file sink
 (`sync` in the probe report, 293 files) took 180 to 210 ms against 165 ms for the 162
 files of the old layout. Three costs had to be removed to get there:
 
-- The object cache hashed every included header again for every unit (7x with
-  dependency-local headers): `ch_hash_file` now memoizes each file's transitive hash per
-  build, keyed by the normalized include path (`dir/../x.h` -> `x.h`, so every including
-  directory hits the same entry), and hashes the unit, header and unity member texts the
-  emitter handed the sink from memory (`CcStream.htext`): only a file the build never
-  held is read.
+- The C object cache (since removed) hashed every included header again for every unit (7x
+  with dependency-local headers); it then memoized each file's transitive hash per build.
 - Parent directories were created with one `mkdir` per path component for every file;
   `publish_file` now opens first and creates directories only when that fails, and
   `mkdir_p` stats the full path before it walks the components.
@@ -312,14 +306,13 @@ files of the old layout. Three costs had to be removed to get there:
   words per mangler instead of three byte matrices: about 5 KiB instead of 51 KiB per
   parallel shard for the compiler's 92 modules.
 
-One tree: the emitter writes `gen_root` in place and the C compiler reads it. Before, a
+One tree: the emitter writes `gen_root` in place and the build reads it. Before, a
 manifest build wrote every file into `raw/` and its sink wrote it again into a
 content-synced `gen/`, the compiled tree (about 95 ms per emitting build on macOS, 24 to
 49 ms on Linux, 254 to 350 ms on Windows). Now `publish_file` (`std::platform::fs::publish`) compares each
 file with the text first (its size, then its bytes; never the manifest's hash, which would
 hide a hand edit) and writes only a changed file, with one `write` call, so an unchanged
-file keeps its mtime, the staleness anchor of its object. The sink hears whether each file
-changed (`CcStream.rewritten`, the same-second guard of `obj_stale`). The headers are
+file keeps its mtime. The sink hears whether each file changed. The headers are
 published on up to four workers (`publish_batch`; file creation in one directory scales
 about 2x on APFS: at `--jobs=4` the write stage less its sink takes 82 instead of 151 ms on a
 fresh tree), then recorded and reported in manifest order, so the tree, the manifest and the

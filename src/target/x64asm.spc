@@ -306,7 +306,7 @@ extend Opd {
 }
 
 // The register named `w` (lowercase, without `%`): its class, size and number; false for none.
-fn reg_name(w: str, o: &mut Opd) bool {
+const fn reg_name(w: str, o: &mut Opd) bool {
     let mut size: u8 = 8;
     while size != 0 {
         for i in 0..20usize {
@@ -550,7 +550,7 @@ fn operand(s: str, i: &mut usize, o: &mut Opd, fx: &mut Fix, spec: &mut String) 
 }
 
 // The mnemonic forms of row `r` that `mn` spells: its size suffix (0: none) and condition.
-fn spells(r: t::Row, mn: str, sz: &mut u8, cc: &mut u8) bool {
+const fn spells(r: t::Row, mn: str, sz: &mut u8, cc: &mut u8) bool {
     *sz = 0;
     *cc = 0;
     if !mn.starts_with(r.mn) {
@@ -596,7 +596,7 @@ const fn suffix(c: u8) u8 {
 }
 
 // Whether operand `o` fits kind `k`; a general register's size goes to `*sz` (0 until one sets it).
-fn fits(k: u8, o: &Opd, sz: &mut u8) bool {
+const fn fits(k: u8, o: &Opd, sz: &mut u8) bool {
     let gp = o.p == P::REG && o.cls == C::GP && !o.star;
     let mem = o.p == P::MEM && !o.bare && !o.star && o.vsib == 0;
     if o.star && k != t::K::IND || o.p == P::MEM && o.bare && k != t::K::REL8 && k != t::K::REL32 && !(o.seg != 0 || !o.dot && !o.sym) {
@@ -638,7 +638,7 @@ fn fits(k: u8, o: &Opd, sz: &mut u8) bool {
 }
 
 // Whether general register size `s` agrees with the size so far, `*sz` (0: none yet); it becomes it.
-fn sized(s: u8, sz: &mut u8) bool {
+const fn sized(s: u8, sz: &mut u8) bool {
     if *sz != 0 && *sz != s {
         return false;
     }
@@ -908,7 +908,7 @@ pub fn assemble(text: str, tgt: i64, out: &mut Vector<u8>, fx: &mut Fix, err: &m
 // ---- Printing ----
 
 // The name of general register `i` (16 + n for ah..bh) of `size` bytes, empty past the last.
-fn gp_name(i: usize, size: u8) str<'static> {
+const fn gp_name(i: usize, size: u8) str<'static> {
     let n8: []str<'static> = R8;
     let n16: []str<'static> = R16;
     let n32: []str<'static> = R32;

@@ -949,7 +949,7 @@ fn load_so(l: &mut L, path: str) bool {
     return true;
 }
 
-fn basename(p: str) str {
+const fn basename(p: str) str {
     let mut i = p.len();
     while i > 0 && p.byte_at(i - 1) != b'/' {
         i -= 1;
@@ -1026,7 +1026,7 @@ fn check_glibc(l: &mut L, lsm: u32) bool {
 // ---- relocation scan ------------------------------------------------------------------------------------
 
 // The global an input symbol refers to (NONE: a local symbol).
-fn gof(l: &L, k: u32) u32 {
+const fn gof(l: &L, k: u32) u32 {
     let y = l.syms[k as usize];
     if bind_of(y) == STB_LOCAL {
         return NONE;
@@ -1035,12 +1035,12 @@ fn gof(l: &L, k: u32) u32 {
 }
 
 // Whether input section `s` is part of the loaded image.
-fn alloc(s: ISec) bool {
+const fn alloc(s: ISec) bool {
     return (s.flags & SHF_ALLOC) != 0;
 }
 
 // Whether input section `s` is kept at all: loaded, or debug information.
-fn kept(l: &L, s: ISec) bool {
+const fn kept(l: &L, s: ISec) bool {
     if s.ty == SHT_RELA || s.ty == SHT_SYMTAB || s.ty == SHT_STRTAB || s.ty == SHT_GROUP || s.ty == 0 {
         return false;
     }
@@ -1057,7 +1057,7 @@ struct Rel {
 
 extend Rel as Copy {}
 
-fn rel_at(b: []u8, rs: ISec, i: usize) Rel {
+const fn rel_at(b: []u8, rs: ISec, i: usize) Rel {
     let e = rs.off + 24 * i;
     let info = lu::r64(b, e + 8);
     return Rel {
@@ -1073,7 +1073,7 @@ fn skip_rel(l: &mut L, s: u32, off: u64) {
     l.skip.push(s as u64 << 32 | off);
 }
 
-fn skipped(l: &L, s: u32, off: u64) bool {
+const fn skipped(l: &L, s: u32, off: u64) bool {
     let k = s as u64 << 32 | off;
     let mut lo: usize = 0;
     let mut hi = l.skip.len();
@@ -1211,12 +1211,12 @@ fn scan(l: &mut L, b: []u8, lsm: u32) bool {
 }
 
 // Whether relocation `ty` starts a thread-local sequence a shared library relaxes to initial-exec.
-fn tls_ie(l: &L, ty: u32) bool {
+const fn tls_ie(l: &L, ty: u32) bool {
     return l.shared && (ty == X_TLSGD && !l.a64 || (ty == A_TLSDESC_ADR_PAGE21 || ty == A_TLSIE_ADR_GOTTPREL_PAGE21) && l.a64);
 }
 
 // The key of thread-local symbol `k` (global `g`, or NONE for a local one).
-fn tls_key(g: u32, k: u32) u64 {
+const fn tls_key(g: u32, k: u32) u64 {
     if g != NONE {
         return 1u64 << 63 | g as u64;
     }
@@ -1246,7 +1246,7 @@ fn slot_addr(l: &L, g: u32, k: u32) u64 {
     return l.osecs[l.o[O_GOT] as usize].addr + 8 * (l.got.len() as u64 + (*l.lgot_slot.get(&k).unwrap()) as u64);
 }
 
-fn is_got(l: &L, ty: u32) bool {
+const fn is_got(l: &L, ty: u32) bool {
     if l.a64 {
         return ty == A_ADR_GOT_PAGE || ty == A_LD64_GOT_LO12_NC;
     }
@@ -1292,7 +1292,7 @@ fn out_section(l: &mut L, name: str, ty: u32, flags: u64, rank: u32) u32 {
 // R: headers, dynamic linking tables, read-only data, unwind tables; RX: code; RW (relro): thread-local
 // templates, initializer arrays, read-only-after-relocation data, the dynamic section, the GOT; RW: data,
 // then zero-filled data; then the sections the image does not load.
-fn out_name<'a>(l: &'a L, s: ISec, rank: &mut u32) str<'a> {
+const fn out_name<'a>(l: &'a L, s: ISec, rank: &mut u32) str<'a> {
     let n = l.sn.spell(s.name);
     if !alloc(s) {
         *rank = 900;
@@ -1550,7 +1550,7 @@ fn role(l: &mut L, r: usize, name: str, ty: u32, flags: u64, rank: u32) {
 }
 
 // Whether the image has thread-locals.
-fn has_tls(l: &L) bool {
+const fn has_tls(l: &L) bool {
     for i in 0..l.osecs.len() {
         if (l.osecs[i].flags & SHF_TLS) != 0 {
             return true;
@@ -1560,7 +1560,7 @@ fn has_tls(l: &L) bool {
 }
 
 // Whether loadable segment `seg` has a section.
-fn seg_used(l: &L, seg: u32) bool {
+const fn seg_used(l: &L, seg: u32) bool {
     for i in 0..l.osecs.len() {
         if seg_of(l.osecs[i].rank) == seg {
             return true;
@@ -1571,7 +1571,7 @@ fn seg_used(l: &L, seg: u32) bool {
 
 // The number of program headers: PHDR, INTERP, a LOAD per used segment, DYNAMIC, GNU_STACK, GNU_RELRO, and
 // TLS and GNU_EH_FRAME when the image has thread-locals and frames.
-fn nphdrs(l: &L) u32 {
+const fn nphdrs(l: &L) u32 {
     let mut n: u32 = 4 + (!l.shared) as u32 + has_tls(l) as u32 + (l.o[O_EHHDR] != NONE) as u32;
     for seg in 0..4u32 {
         n += seg_used(l, seg) as u32;
@@ -1580,7 +1580,7 @@ fn nphdrs(l: &L) u32 {
 }
 
 // The end of the file's loaded bytes.
-fn file_end(l: &L) u64 {
+const fn file_end(l: &L) u64 {
     let mut e: u64 = 0;
     for i in 0..l.osecs.len() {
         let os = l.osecs[i];
@@ -1658,7 +1658,7 @@ fn dyn_tables(l: &mut L, o: &Opts) {
 }
 
 // The program interpreter, glibc's dynamic linker.
-fn interp(l: &L) str<'static> {
+const fn interp(l: &L) str<'static> {
     if l.a64 {
         return "/lib/ld-linux-aarch64.so.1";
     }
@@ -1666,7 +1666,7 @@ fn interp(l: &L) str<'static> {
 }
 
 // Whether a shared library exports global `g`: an object defines it, visible by default.
-fn exported(l: &L, g: u32) bool {
+const fn exported(l: &L, g: u32) bool {
     let gy = l.gs[g as usize];
     if gy.kind == G_COMMON {
         return true;
@@ -1681,12 +1681,12 @@ fn set(l: &mut L, role: usize, size: u64, align: u64, entsize: u64) {
     os.entsize = entsize;
 }
 
-fn nbucket(nsym: u64) u64 {
+const fn nbucket(nsym: u64) u64 {
     return (nsym / 2).max(1);
 }
 
 // The frame description entries of the inputs' `.eh_frame` sections.
-fn count_fdes(l: &L, b: []u8) u32 {
+const fn count_fdes(l: &L, b: []u8) u32 {
     let mut n: u32 = 0;
     for s in 0..l.secs.len() {
         let sc = l.secs[s];
@@ -1712,7 +1712,7 @@ fn count_fdes(l: &L, b: []u8) u32 {
 
 // ---- addresses ------------------------------------------------------------------------------------------
 
-fn sym_addr(l: &L, k: u32) u64 {
+const fn sym_addr(l: &L, k: u32) u64 {
     let y = l.syms[k as usize];
     if y.shndx == SHN_ABS {
         return y.value;
@@ -1728,7 +1728,7 @@ fn sym_addr(l: &L, k: u32) u64 {
     return l.osecs[s.out as usize].addr + s.at + y.value;
 }
 
-fn g_addr(l: &L, g: u32) u64 {
+const fn g_addr(l: &L, g: u32) u64 {
     let gy = l.gs[g as usize];
     if gy.kind == G_DEF {
         return sym_addr(l, gy.sym);
@@ -1743,7 +1743,7 @@ fn g_addr(l: &L, g: u32) u64 {
 }
 
 // The address of a relocation's target symbol `k` (a library's function: its stub).
-fn target(l: &L, k: u32) u64 {
+const fn target(l: &L, k: u32) u64 {
     let g = gof(l, k);
     if g == NONE {
         return sym_addr(l, k);
@@ -1751,13 +1751,13 @@ fn target(l: &L, k: u32) u64 {
     return g_addr(l, g);
 }
 
-fn got_addr(l: &L, g: u32) u64 {
+const fn got_addr(l: &L, g: u32) u64 {
     return l.osecs[l.o[O_GOT] as usize].addr + 8 * l.gs[g as usize].got as u64;
 }
 
 // The thread pointer offset of thread-local address `a`: x86-64 places the block below the thread
 // pointer, arm64 after a 16-byte control block.
-fn tpoff(l: &L, a: u64) i64 {
+const fn tpoff(l: &L, a: u64) i64 {
     if l.a64 {
         return (lu::align_up(16, l.tls_align) + a - l.tls_start) as i64;
     }
@@ -1766,7 +1766,7 @@ fn tpoff(l: &L, a: u64) i64 {
 
 // ---- section bytes and relocations ----------------------------------------------------------------------
 
-fn copy_sections(l: &L, b: []u8, img: &mut Vector<u8>) {
+const fn copy_sections(l: &L, b: []u8, img: &mut Vector<u8>) {
     for s in 0..l.secs.len() {
         let sc = l.secs[s];
         if sc.out == NONE || sc.ty == SHT_NOBITS || seg_of(l.osecs[sc.out as usize].rank) == 4 {
@@ -1805,7 +1805,7 @@ fn apply(l: &mut L, b: []u8, img: &mut Vector<u8>) bool {
     return true;
 }
 
-fn fits(v: i64, bits: u32) bool {
+const fn fits(v: i64, bits: u32) bool {
     return v >= -(1i64 << (bits - 1) as i64) && v < 1i64 << (bits - 1) as i64;
 }
 
@@ -2074,7 +2074,7 @@ fn dyn_rel(l: &mut L, at: u64, ty: u32, sym: u32, addend: i64) {
 
 // Apply the relocations of the debug sections: addresses at their link-time values, offsets into other
 // debug sections at the merged section's.
-fn apply_debug(l: &L, b: []u8, img: &mut Vector<u8>, dbg_off: &Vector<u64>) {
+const fn apply_debug(l: &L, b: []u8, img: &mut Vector<u8>, dbg_off: &Vector<u64>) {
     for s in 0..l.secs.len() {
         let sc = l.secs[s];
         if sc.rela == NONE || sc.out == NONE || seg_of(l.osecs[sc.out as usize].rank) != 4 {
@@ -2107,7 +2107,7 @@ fn apply_debug(l: &L, b: []u8, img: &mut Vector<u8>, dbg_off: &Vector<u64>) {
 
 // ---- the entry ------------------------------------------------------------------------------------------
 
-fn start_size(a64: bool) u64 {
+const fn start_size(a64: bool) u64 {
     if a64 {
         return 56;
     }
@@ -2116,7 +2116,7 @@ fn start_size(a64: bool) u64 {
 
 // `_start`: the stack's argc and argv, the dynamic linker's finalizer, then
 // `__libc_start_main(main, argc, argv, 0, 0, rtld_fini, stack_end)`, which does not return.
-fn write_start(l: &mut L, main: u32, lsm: u32, img: &mut Vector<u8>) {
+const fn write_start(l: &mut L, main: u32, lsm: u32, img: &mut Vector<u8>) {
     let os = l.osecs[l.o[O_TEXT] as usize];
     let a = os.addr;
     let p = os.off as usize;
@@ -2337,7 +2337,7 @@ fn write_eh_hdr(l: &L, b: []u8, img: &mut Vector<u8>) {
 }
 
 // The FDE pointer encoding of the CIE at `p` ('R' in its augmentation; absolute otherwise).
-fn cie_fde_enc(b: []u8, p: usize) u8 {
+const fn cie_fde_enc(b: []u8, p: usize) u8 {
     let mut q = p + 9;
     let aug = q;
     while b[q] != 0 {
@@ -2367,7 +2367,7 @@ fn cie_fde_enc(b: []u8, p: usize) u8 {
     return 0;
 }
 
-fn ptr_size(e: u8) usize {
+const fn ptr_size(e: u8) usize {
     let f = e & 0x0F;
     if f == 0x02 || f == 0x0A {
         return 2;
@@ -2381,7 +2381,7 @@ fn ptr_size(e: u8) usize {
 // ---- the dynamic tables, the headers, the symbol table --------------------------------------------------
 
 // The SysV ELF hash of `s`.
-fn elf_hash(s: str) u32 {
+const fn elf_hash(s: str) u32 {
     let mut h: u32 = 0;
     for i in 0..s.len() {
         h = (h << 4) + s.byte_at(i) as u32;

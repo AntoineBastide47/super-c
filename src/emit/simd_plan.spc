@@ -91,7 +91,7 @@ pub const fn find(
 /// the entry for all the lanes, else the widest chunk an entry exists for when the chunks combine
 /// (lane-wise operations, and the reductions `combine_op` names), else an entry for all the lanes
 /// past the preferred width, else the lane loop.
-pub fn plan(
+pub const fn plan(
     tab: &Vector<cf::SimdEntry>,
     fs: cf::CpuFeatureSet,
     op: u32,

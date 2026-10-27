@@ -241,14 +241,14 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
 
 // ---- reading --------------------------------------------------------------------------------------------
 
-fn rd_name<'a>(b: Slice<'a, u8>, p: &mut usize) str<'a> {
+const fn rd_name<'a>(b: Slice<'a, u8>, p: &mut usize) str<'a> {
     let n = lu::read_uleb(b, p) as usize;
     let s = unsafe str::from_raw(b.as_ptr() + *p, n);
     *p += n;
     return s;
 }
 
-fn sleb(b: []u8, p: &mut usize) i64 {
+const fn sleb(b: []u8, p: &mut usize) i64 {
     let mut r: i64 = 0;
     let mut sh: u32 = 0;
     // At most 10 bytes for 64 bits.
@@ -508,7 +508,7 @@ fn global(l: &mut L, id: u32) u32 {
 }
 
 // The global symbol an input symbol names (NONE: a local one or a section).
-fn gof(l: &L, k: u32) u32 {
+const fn gof(l: &L, k: u32) u32 {
     let y = l.syms[k as usize];
     if (y.flags & F_LOCAL) != 0 || y.kind == K_SECTION {
         return NONE;
@@ -710,7 +710,7 @@ fn assign_functions(l: &mut L, b: []u8) bool {
 }
 
 // The segment of file `f` that holds blob offset `at` (NONE: none).
-fn seg_at(l: &L, f: IFile, at: usize) u32 {
+const fn seg_at(l: &L, f: IFile, at: usize) u32 {
     for s in f.seg0..f.seg0 + f.nseg {
         let sg = l.segs[s as usize];
         if at >= sg.at && at < sg.at + sg.len {
@@ -721,7 +721,7 @@ fn seg_at(l: &L, f: IFile, at: usize) u32 {
 }
 
 // The output function index input symbol `k` (a function) stands for.
-fn func_index(l: &L, k: u32) u32 {
+const fn func_index(l: &L, k: u32) u32 {
     let g = gof(l, k);
     if g != NONE {
         return l.gs[g as usize].index;
@@ -734,7 +734,7 @@ fn func_index(l: &L, k: u32) u32 {
 // ---- memory ---------------------------------------------------------------------------------------------
 
 // The order of the output segments: read-only data, data, zero-filled data.
-fn seg_rank(n: str) u32 {
+const fn seg_rank(n: str) u32 {
     if n.starts_with(".rodata") {
         return 0;
     }
@@ -780,7 +780,7 @@ fn layout_memory(l: &mut L, o: &Opts) {
 }
 
 // The address of data symbol `k` (a weak undefined one: 0).
-fn data_addr(l: &L, k: u32) u32 {
+const fn data_addr(l: &L, k: u32) u32 {
     let g = gof(l, k);
     let mut kk = k;
     if g != NONE {
@@ -823,7 +823,7 @@ fn put_uleb5(o: &mut Vector<u8>, at: usize, v: u32) {
     w::patch_uleb5(o, at, v);
 }
 
-fn put_sleb5(o: &mut Vector<u8>, at: usize, v: i32) {
+const fn put_sleb5(o: &mut Vector<u8>, at: usize, v: i32) {
     let mut x = v as i64;
     for i in 0..5usize {
         let mut c = (x & 0x7F) as u8;
@@ -842,7 +842,7 @@ const P_CODE: u8 = 0;
 const P_DATA: u8 = 1;
 const P_DEBUG: u8 = 2;
 
-fn rel_pos(l: &L, mode: u8, base: usize, tsat: usize, src: usize) usize {
+const fn rel_pos(l: &L, mode: u8, base: usize, tsat: usize, src: usize) usize {
     if mode == P_CODE {
         return code_pos(l, src);
     }
@@ -954,7 +954,7 @@ fn custom(m: &mut Vector<u8>, name: str, body: &Vector<u8>) {
 }
 
 // Where blob offset `src` (in some body) lands in the output code section's payload.
-fn code_pos(l: &L, src: usize) usize {
+const fn code_pos(l: &L, src: usize) usize {
     // The bodies of one input are in order: a binary search over all of them would need them sorted by
     // blob offset, which input order gives.
     let mut lo: usize = 0;
@@ -972,7 +972,7 @@ fn code_pos(l: &L, src: usize) usize {
 }
 
 // Where blob offset `src` (in some segment) lands in the memory image (`usize::MAX`: a constructor table).
-fn data_pos(l: &L, src: usize) usize {
+const fn data_pos(l: &L, src: usize) usize {
     let mut lo: usize = 0;
     let mut hi = l.segs.len();
     while lo < hi {

@@ -551,7 +551,7 @@ extend Promoter {
         return self.dslot[v as usize];
     }
 
-    fn reject(self: &mut Self, v: Value) {
+    const fn reject(self: &mut Self, v: Value) {
         let s = self.slot_of(v);
         if s != NONE {
             self.cand[s as usize] = false;
@@ -1577,7 +1577,7 @@ const fn size_of(ty: u8, ptr: u32) i64 {
 }
 
 // The integer constant `v` is (sign-extended from its type), or -1 when it is none or negative.
-fn const_int(b: &Body, v: Value) i64 {
+const fn const_int(b: &Body, v: Value) i64 {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_ICONST {
         return -1;
     }
@@ -1611,7 +1611,7 @@ const fn fill_const(ty: u8, byte: u64, ptr: u32) Inst {
 }
 
 // `v[lo .. hi]` by offset (insertion sort: a slot has few accesses).
-fn sort_fields(v: &mut Vector<Fld>, lo: usize, hi: usize) {
+const fn sort_fields(v: &mut Vector<Fld>, lo: usize, hi: usize) {
     for i in lo + 1..hi {
         let x = v[i];
         let mut j = i;

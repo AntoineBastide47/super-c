@@ -33,12 +33,12 @@ struct Msg {
 }
 
 extend Msg {
-    fn new() Msg {
+    const fn new() Msg {
         return Msg { b: [0 as char; MSG], len: 0 };
     }
 
     // Append `s`, cut at the buffer's end.
-    fn add(self: &mut Self, s: str) {
+    const fn add(self: &mut Self, s: str) {
         for k in 0..s.len() {
             if self.len < MSG - 1 {
                 unsafe self.b[self.len] = s.byte_at(k) as char;
@@ -48,7 +48,7 @@ extend Msg {
     }
 
     // Append `v` in decimal.
-    fn dec(self: &mut Self, v: u64) {
+    const fn dec(self: &mut Self, v: u64) {
         let mut d = [0u8; 20];
         let mut i: usize = 20;
         let mut x = v;

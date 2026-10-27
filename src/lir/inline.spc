@@ -20,7 +20,7 @@ pub const CALLER_MAX: u32 = 8000;
 /// Whether body `b` of function symbol `s` of `pk` may be copied into a caller: not `@noinline`, naked,
 /// variadic or a routine the evaluator models; no inline assembly, variadic access, return address or
 /// call of itself; its blocks in order in its instruction array (as the optimizer leaves them).
-pub fn shape_ok(pk: &Package, s: u32, b: &Body) bool {
+pub const fn shape_ok(pk: &Package, s: u32, b: &Body) bool {
     let sy = pk.syms[s as usize];
     if sy.noinline || b.naked || b.sig == NONE || (b.pool[b.sig as usize + 1] & SIG_VARIADIC) != 0 || le::modeled(
         pk.spell(sy.name),
@@ -44,7 +44,7 @@ pub fn shape_ok(pk: &Package, s: u32, b: &Body) bool {
 }
 
 /// Whether body `b` is small enough to inline.
-pub fn small(b: &Body) bool {
+pub const fn small(b: &Body) bool {
     let mut warm: u32 = 0;
     for k in 0..b.blocks.len() {
         if (b.blocks[k].flags & BLOCK_COLD) == 0 {
@@ -328,7 +328,7 @@ extend Inliner {
         return t;
     }
 
-    fn cpool(self: &mut Self, o: &mut Body, at: u32) {
+    const fn cpool(self: &mut Self, o: &mut Body, at: u32) {
         if !self.done[at as usize] {
             self.done[at as usize] = true;
             o.pool[at as usize] = self.cval(o.pool[at as usize]);
@@ -479,7 +479,7 @@ extend Inliner {
         return t;
     }
 
-    fn epool(self: &mut Self, o: &mut Body, at: u32, s: Site) {
+    const fn epool(self: &mut Self, o: &mut Body, at: u32, s: Site) {
         if !self.done[at as usize] {
             self.done[at as usize] = true;
             o.pool[at as usize] = ev(s, o.pool[at as usize]);
@@ -487,7 +487,7 @@ extend Inliner {
     }
 
     // A signature record at `sig` of the copy: its aggregate layouts moved by `base`.
-    fn sig_fix(self: &mut Self, o: &mut Body, sig: u32, base: u32) {
+    const fn sig_fix(self: &mut Self, o: &mut Body, sig: u32, base: u32) {
         if self.done[sig as usize] {
             return;
         }
@@ -502,7 +502,7 @@ extend Inliner {
 }
 
 // The body index of the function direct call `t` of `c` calls (NONE: none defined).
-fn callee_of(pk: &Package, c: &Body, t: Inst) u32 {
+const fn callee_of(pk: &Package, c: &Body, t: Inst) u32 {
     let sy = pk.syms[c.syms[t.a as usize] as usize];
     return if sy.kind == SK_FUNC && sy.def != NONE {
         sy.def;
@@ -513,7 +513,7 @@ fn callee_of(pk: &Package, c: &Body, t: Inst) u32 {
 
 // The inline site of caller instruction `i` of `c`: the call it came from, 0 for the caller's own; with
 // `copy`, that of an instruction inlined from it: its own location when it is the caller's.
-fn site_of(c: &Body, i: u32, copy: bool) u32 {
+const fn site_of(c: &Body, i: u32, copy: bool) u32 {
     let s = if c.inl.len() != 0 {
         c.inl[i as usize];
     } else {

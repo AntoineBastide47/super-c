@@ -373,7 +373,7 @@ extend Gen {
         return self.scratch.at(k as usize)[n as usize];
     }
 
-    fn end_inst(self: &mut Self) {
+    const fn end_inst(self: &mut Self) {
         for k in 0..CL_N as usize {
             self.nscr[k] = 0;
         }
@@ -806,7 +806,7 @@ extend Gen {
     }
 
     // The LIR type of value index `x`.
-    fn xty(self: &Self, x: u32) u8 {
+    const fn xty(self: &Self, x: u32) u8 {
         let b = self.b();
         let ni = b.insts.len() as u32;
         if x < ni {
@@ -820,7 +820,7 @@ extend Gen {
 
     // The entry block's parameters: a scalar passed as one wasm value is its wasm parameter's local; the
     // others take homes (filled by the prologue) or are the frame address of their spill.
-    fn entry_params(self: &mut Self) {
+    const fn entry_params(self: &mut Self) {
         let b = self.b();
         let ni = b.insts.len() as u32;
         let e0 = b.blocks[0].param_start;
@@ -2633,7 +2633,7 @@ extend Gen {
 }
 
 // 2^k as an f64 (k at most 64).
-fn fpow2(k: u32) f64 {
+const fn fpow2(k: u32) f64 {
     let mut x: f64 = 1.0;
     for _ in 0..k {
         x = x * 2.0;
@@ -3096,7 +3096,7 @@ extend Gen {
 extend Gen {
     // The instructions of the intrinsic body symbol `s` names (`target::intrin`); empty for another
     // function.
-    fn intrinsic(self: &Self, s: u32) str<'static> {
+    const fn intrinsic(self: &Self, s: u32) str<'static> {
         let p = self.p();
         let ps = p.syms[self.b().syms[s as usize] as usize];
         if ps.def != NONE {
@@ -3422,7 +3422,7 @@ extend Gen {
 }
 
 // Whether intrinsic template `tpl` reads argument `k` (a line `local.get k`).
-fn reads_arg(tpl: str, k: u32) bool {
+const fn reads_arg(tpl: str, k: u32) bool {
     let mut it = tpl.split("\n");
     loop {
         let l = switch it.next() {
@@ -5602,7 +5602,7 @@ extend Gen {
 
 extend Gen {
     // The text of body message `m`.
-    fn msg_text(self: &Self, m: u32) str {
+    const fn msg_text(self: &Self, m: u32) str {
         let p = self.p();
         return p.spell(p.msgs[self.b().msgs[m as usize] as usize]);
     }

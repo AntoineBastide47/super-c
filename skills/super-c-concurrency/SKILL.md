@@ -41,8 +41,7 @@ marker. The runtime module is loaded conditionally: programs without `launch` pa
 
 Each task is a stackful coroutine on its own guard-paged stack (256 KiB via
 `mmap`+`mprotect` / `VirtualAlloc`; `runtime::set_stack_size` changes it before the pool starts,
-`runtime::stack_size` reads it). A program built with AddressSanitizer (`--sanitizers`) gets four
-times the default, since its frames carry redzones (`sc_rt_asan`). Context switching is hand-written assembly: module-level `asm` items of
+`runtime::stack_size` reads it). Context switching is hand-written assembly: module-level `asm` items of
 `ffi/sc_runtime.spc` per object format (Mach-O, ELF and COFF) on x86-64 and aarch64, which save the
 callee-saved registers, the FP control state and, on Windows, the TEB stack fields. Windows on
 arm64 runs each context on an OS fiber instead (`FiberCtx`, a heap context).
@@ -122,7 +121,7 @@ probes, spills, wakes, parks, spin iterations, search cycles) compile in when `R
 in `std/parallel/runtime.spc` is true and read back through `runtime::sched_stats()`;
 they cost nothing otherwise. `RT_HOOKS` likewise compiles in `runtime::sched_hook_arm`,
 which delays whoever reaches a named point so a race window of nanoseconds becomes
-reproducible under the `race` profile. The scheduler's point is `HOOK_STEAL_READ`
+reproducible in a hunt (`ci/*_hunt.spc`). The scheduler's point is `HOOK_STEAL_READ`
 (between a thief's slot reads and its head claim); the lock's are `sync::HOOK_BEFORE_ENQUEUE`,
 `sync::HOOK_AFTER_POP` and `sync::HOOK_AFTER_RELEASE`, driven by `ci/mutex_hunt.spc`.
 A per-worker counter must fold into the process-lifetime total in `destroy_pool`; one that
@@ -193,8 +192,8 @@ parks on the scheduler's timer heap (`import std::time;`, `time::Duration::from_
 
 **Waiting costs no allocation, and neither does a primitive.** A `Mutex<T>` holds its lock
 word inline and a `Condvar` holds its wait queue inline, so constructing either allocates
-nothing. Beside the lock word sits a 4-byte identity that the `race` profile's lock-order
-checker assigns and keys its history by, so a lock that moves keeps its history. A value
+nothing. Beside the lock word sits a 4-byte identity that the lock-order checker (a profile with
+`lockdep = true`) assigns and keys its history by, so a lock that moves keeps its history. A value
 must not move while a waiter is queued against it, which nothing can do, since a waiter
 only exists once a second thread shares the value through a pointer.
 Every wait is a node in the waiter's own frame, queued under the paired mutex and unlinked
@@ -562,7 +561,7 @@ reap frees no record with a wake still owed.
 calling worker's OS thread (a replacement worker per blocking call, a permit to take
 back before returning to compute) costs at least one thread wake in each direction, the
 same floor as the hand-off it would replace, plus queue ownership transfer, TLS
-restoration, sanitizer fiber state and cancellation masking per call. The hand-off's
+restoration and cancellation masking per call. The hand-off's
 own cost is the thread wake, not the records: with zero allocations per call the
 round trip is bounded by the wake, and a spinning pool thread already removes that wake
 for a stream of calls. Keep the pool. The measured residue is on the scheduler side:
@@ -585,10 +584,10 @@ behind one thread. A 16-thread pool measured worse (284 against 267 Mcycles).
 | `SC_TASK_TRACE=1` | Trace scheduler decisions for the life of the process |
 | Panic messages | Include task id: `panic: [task 7] message` |
 | Stack overflow report | Names the stack that ran out, exits 134 (see below) |
-| Illegal instruction report | POSIX: `super-c: illegal instruction at 0x<pc>` (a jump through a corrupt code address, or code for a CPU feature the machine lacks), then the previous handler or the default action (the status stays SIGILL); under ASan, ASan's report with the stack (`handle_sigill=1` in `__asan_default_options`) |
+| Illegal instruction report | POSIX: `super-c: illegal instruction at 0x<pc>` (a jump through a corrupt code address, or code for a CPU feature the machine lacks), then the previous handler or the default action (the status stays SIGILL) |
 | `runtime::live_tasks()` | Return count of tasks still alive |
 | Shutdown report | Account for tasks that never finished |
-| `race` profile (`--profile=race`) | ThreadSanitizer with the coroutine fiber annotations; the only build that reports a runtime race |
+| A profile with `lockdep = true`, `SC_LOCK_ORDER=1` | Lock-order inversion reports (`ffi/sc_runtime.spc`); `f`/`F` aborts on the first |
 
 **Stack overflow report.** The program's runtime (`std/rt/base.spc`) arms the
 main thread before `main`; every thread std starts (pool workers, blocking-pool threads, the
@@ -606,21 +605,19 @@ super-c: stack overflow in a thread (8388608 byte stack)
 super-c: [task 3] stack overflow (262144 byte task stack exhausted; raise it with runtime::set_stack_size)
 ```
 
-A job on a worker's own stack prints `[task N]` with the thread form. Under AddressSanitizer the
-handler is armed too, so an overflow still ends as a panic; any other fault goes on to ASan's own
-report. The handler is async-signal-safe, so it flushes nothing: output still buffered in stdout is
+A job on a worker's own stack prints `[task N]` with the thread form. The handler is
+async-signal-safe, so it flushes nothing: output still buffered in stdout is
 lost. Signal stacks of ended threads wait in a 64-slot lock-free cache: arming costs about 0.2 us
 per thread from it (macOS; 0.4 us on Linux) against 2 us for a fresh mapping, and about 2 us once
-at startup. Under ASan there is no cache: ASan unmaps the signal stack in place when a thread ends,
-so an armed thread's stack replaces ASan's (freed at arming) and stays for ASan to unmap.
+at startup.
 
 The shutdown report prints each unfinished task's `state`, `phase`, `done` and `handoff`:
 `done true handoff 1` is a worker stuck in that task's park hand-off tail, and the cure is
 that worker's backtrace, not a guess. Every `Coroutine` field another thread may read or
 compare after the task's own worker last wrote it is accessed atomically, `done` (the
 report reads it) and `park_state` on block reuse (a waker that lost the last claim may
-still be finishing its compare) included: `check.sh` runs `ci/*_hunt.spc` under the race
-profile and fails on any report or nonzero exit.
+still be finishing its compare) included: `check.sh` runs `ci/*_hunt.spc`, which check their
+counts and bound their waits, and fails on any nonzero exit.
 
 Checking profiles trap on integer overflow, so runtime arithmetic on values that other
 threads write must hold for every order of the reads. A clock value published by another
@@ -647,10 +644,7 @@ in `~/Library/Logs/DiagnosticReports` names the function and line.
 - In a hunt's `fail`, print `rt::task_snapshot` (state, phase, wait kind, wait object).
   `rt::try_shutdown` reports nothing there: its own cancellation releases the parked tasks.
 - After a counter change in runtime or sync code, run race_hunt, cancel_hunt and
-  queue_hunt under the `race` profile twice each; expect zero reports.
-- Linux TSan in Docker needs `--security-opt seccomp=unconfined`. gcc libtsan reports
-  fd-table races on close-under-wait; these are not memory races. macOS clang TSan does
-  not intercept `kevent`.
+  queue_hunt twice each; expect every run to exit 0.
 - `Condvar::unlink` walks the wait queue, so thousands of timed waiters on one condvar cost
   O(n^2). A timed-wait benchmark spreads its waiters over many condvars.
 

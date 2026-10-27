@@ -507,7 +507,7 @@ fn safe_name(s: str, out: &mut String) {
     }
 }
 
-// Whether constant `cd` is an integer, which an extern block can hold and the C compile checks.
+// Whether constant `cd` is an integer, which an extern block can hold and the build checks against its header.
 fn int_const(cd: &ConstDef) bool {
     return switch cd.ty.as_str() {
         "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => true,
@@ -1687,7 +1687,7 @@ const fn int_ty(sub: str, ptr_bits: u32, bits: &mut u32, uns: &mut bool) bool {
 
 // The value and type of integer literal `t` under the target's widths `w`: the first type of C's list
 // for its base and suffix that holds it. None when no type does, or `t` is no integer literal.
-fn lit_cv(t: str, w: &Widths) Option<CV> {
+const fn lit_cv(t: str, w: &Widths) Option<CV> {
     let n = t.len();
     let mut i: usize = 0;
     let mut base: u64 = 10;
@@ -1762,7 +1762,7 @@ fn lit_cv(t: str, w: &Widths) Option<CV> {
 extend CExpr {
     // Value `x` converted to the type `bits` wide, unsigned when `uns`: modulo 2^bits for an unsigned
     // type; refused when a signed type does not hold it.
-    fn to_ty(self: &mut Self, x: CV, bits: u32, uns: bool) CV {
+    const fn to_ty(self: &mut Self, x: CV, bits: u32, uns: bool) CV {
         if !uns && !cv_fits(x, bits, false) {
             self.ok = false;
         }
@@ -1770,7 +1770,7 @@ extend CExpr {
     }
 
     // `x` after a cast to the type `bits` wide, unsigned when `uns`, then the integer promotions.
-    fn cast(self: &mut Self, x: CV, bits: u32, uns: bool) CV {
+    const fn cast(self: &mut Self, x: CV, bits: u32, uns: bool) CV {
         let r = self.to_ty(x, bits, uns);
         if bits < 32 {
             return CV { v: cv_pat(r) & mask(32), bits: 32, uns: false };
@@ -1819,7 +1819,7 @@ extend CExpr {
 
     // The usual arithmetic conversions of `a` and `b`, then `op` on their values: the result in the common
     // type, which an unsigned result wraps into and a signed one must fit.
-    fn arith(self: &mut Self, a: CV, b: CV, op: u8) CV {
+    const fn arith(self: &mut Self, a: CV, b: CV, op: u8) CV {
         let mut bits = if a.bits > b.bits {
             a.bits;
         } else {
@@ -1885,7 +1885,7 @@ extend CExpr {
     // `a << s` (`left`) or `a >> s`, of `a`'s type. A count outside the width is refused; a left shift of
     // a signed value must keep every bit inside the unsigned type of its width (the sign bit takes the
     // last, as every C compiler does).
-    fn shift(self: &mut Self, a: CV, s: CV, left: bool) CV {
+    const fn shift(self: &mut Self, a: CV, s: CV, left: bool) CV {
         if !s.uns && sext(s.v, s.bits) < 0 || cv_pat(s) >= a.bits as u64 {
             self.ok = false;
             return cv_int(0);
@@ -2629,7 +2629,7 @@ fn walk_headers(dir: str, rel: str, out_dir: str, jobs: &mut Vector<Job>) bool {
 
 /// `super-c bindgen <header.h|dir>... [-o out]`. A directory is walked recursively for `.h` files, so a
 /// whole library's include tree converts in one call: `-o` then names a DIRECTORY, and the tree under it
-/// mirrors the headers'. A single header with no `-o` still writes to stdout. `cstd` is the project's.
+/// mirrors the headers'. A single header with no `-o` still writes to stdout.
 pub fn run(
     paths: &Vector<String>,
     out_path: str,
@@ -2641,16 +2641,15 @@ pub fn run(
     target: i32,
     arch: i32,
     sysroot: str,
-    cstd: str,
 ) i32 {
     let mut env = ct::CTarget::new();
     if !ct::c_target(target, arch, sysroot, &mut env) {
         return 1;
     }
-    // The build's C environment first, so the headers declare what the generated C compiles against;
-    // `--cflag=` after it, as a manifest's `cflags` follow its `cstd`.
+    // The build's C environment first, so the headers declare what the build reads from them; `--cflag=`
+    // after it.
     let mut flags = String::new();
-    push_c_env(&mut flags, cstd, target);
+    push_c_env(&mut flags, target);
     flags.push_byte(b' ');
     for i in 0..cflags.len() {
         flags.push_string(&cflags[i]);

@@ -112,7 +112,7 @@ pub fn backends_of(pk: &loader::Package) Vector<u8> {
 
 /// Whether module `path` is in `sel`: `1` names every module, else a comma-separated list of module paths
 /// (`lir::lower,std::string`).
-pub fn in_list(sel: str, path: str) bool {
+pub const fn in_list(sel: str, path: str) bool {
     if sel == "1" {
         return true;
     }
@@ -140,7 +140,7 @@ pub fn in_list(sel: str, path: str) bool {
 
 /// Whether this build compiles its modules with the native backend (a build that links). Every module
 /// then lowers to LIR.
-pub fn native_on(pk: &loader::Package) bool {
+pub const fn native_on(pk: &loader::Package) bool {
     return pk.native;
 }
 
@@ -1757,12 +1757,12 @@ extend CEmit {
     }
 
     /// Whether module `m`'s bodies render to C (`backends_of`).
-    pub fn renders(self: &Self, m: ModuleId) bool {
+    pub const fn renders(self: &Self, m: ModuleId) bool {
         return (self.backends[m as usize] & BK_C) != 0;
     }
 
     // Whether LIR lowers what module `m` emits (a `@emit_macro` template is C text only).
-    fn lir_on(self: &Self, m: ModuleId) bool {
+    const fn lir_on(self: &Self, m: ModuleId) bool {
         return self.lir.is_some() && !self.mg.macro_on && (self.backends[m as usize] & BK_LIR) != 0;
     }
 
@@ -1824,7 +1824,7 @@ extend CEmit {
     }
 
     /// Whether a body lowered since the last claim needs what no object defines (`Lower::take_pend_c`).
-    pub fn lir_take_pend_c(self: &mut Self) bool {
+    pub const fn lir_take_pend_c(self: &mut Self) bool {
         if let Some(l) = &mut self.lir {
             return l.take_pend_c();
         }
@@ -3388,7 +3388,7 @@ extend CEmit {
 
     // `fold_addresses`: does index operand `opid` keep its value wherever the folded place is spelled?
     // A constant, a temporary written once or an argument never written, whose address is never taken.
-    fn fixed_index(self: &Self, b: &ir::CoreBody, opid: u32, writes: &Vector<u32>, bad: &Vector<bool>) bool {
+    const fn fixed_index(self: &Self, b: &ir::CoreBody, opid: u32, writes: &Vector<u32>, bad: &Vector<bool>) bool {
         let op = *b.operands.at(opid as usize);
         if op.kind == ir::OP_CONST {
             return true;
@@ -9933,19 +9933,19 @@ extend CEmit {
     }
 
     // `vplan` without the trace: a probe for a preferred form.
-    fn vplan_quiet(self: &Self, op: u32, t: BuiltinType, r: BuiltinType, n: i64) sp::Plan {
+    const fn vplan_quiet(self: &Self, op: u32, t: BuiltinType, r: BuiltinType, n: i64) sp::Plan {
         let pk = self.p();
         return sp::plan(&pk.simd_table, self.fs, op, t, r, n as u64, pk.simd_width);
     }
 
     // The table index of the entry for `op` over `n` lanes of `t` with result `r`, or -1.
-    fn ventry(self: &Self, op: u32, t: BuiltinType, r: BuiltinType, n: u64) i64 {
+    const fn ventry(self: &Self, op: u32, t: BuiltinType, r: BuiltinType, n: u64) i64 {
         return sp::find(&self.p().simd_table, self.fs, op, t, r, n, sp::max_bits(self.fs, self.p().simd_width));
     }
 
     // `ventry`, else past the preferred width: an operation that cannot split (a gather,
     // `compress_store`) takes the wider entry rather than the lane loop, as `simd_plan::plan` does.
-    fn ventry_whole(self: &Self, op: u32, t: BuiltinType, r: BuiltinType, n: u64) i64 {
+    const fn ventry_whole(self: &Self, op: u32, t: BuiltinType, r: BuiltinType, n: u64) i64 {
         let e = self.ventry(op, t, r, n);
         return if e >= 0 {
             e;
@@ -11241,7 +11241,7 @@ extend CEmit {
     // The steps that narrow lane masks of `from` over the chunks of plan `pl` to lanes of `to` (into
     // `vp`), each the truncating cast entry over a pair of chunks into one, else over one chunk; the
     // final chunk lanes in `cl` and chunk count in `ch`. False when a step has no entry.
-    fn narrow_plan(
+    const fn narrow_plan(
         self: &Self,
         from: BuiltinType,
         to: BuiltinType,

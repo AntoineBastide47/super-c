@@ -13,33 +13,23 @@ allowed-tools: Bash Read
 - Check `src/build_system/` before trusting manifest or profile behavior.
 - Report undocumented flags or environment variables as stale documentation.
 
-Super-C is a self-hosting compiler that transpiles `.spc` source to readable C11,
-then invokes a gcc-style C driver (cc/clang/gcc; mingw on Windows; MSVC's cl.exe is out
-of contract) to produce a native binary. On macOS arm64, Linux x86-64, Linux arm64, Windows x86-64 and
-wasm32, a linking build with no sanitizer compiles each module to a Mach-O, ELF, COFF or wasm object
-itself and uses C only for the modules it cannot compile; the build prints `native: N of M modules through C`
-when N is not 0 (`SC_NATIVE` overrides the choice). A build whose C flags optimize (the release and
-bench profiles) runs the LIR optimizer first: inlining, value numbering, load and store forwarding, loop
-invariant motion, constant and branch folding (`SC_LIR_OPT` overrides the choice). Those objects carry DWARF line tables when the C
-flags ask for debug information (`-g`, as the debug profile does), and unwind data always. A link whose
-objects are all native takes the own linker (`src/link/`): Mach-O executables and dylibs on arm64
-(chained fixups, ad-hoc signature), ELF executables and shared libraries on x86-64 and arm64 (glibc
-2.34 or later), PE executables and DLLs on x86-64 (the UCRT), and wasm32 modules; the own archiver
-writes every static library. Each own linker also links static libraries (`.a`, `.lib`, positional or
-`-l<name>` from a `-L` directory) a C compiler built: it takes a member for each symbol still undefined,
-as LLD does. A link command with a flag the own linker does not serve (a sanitizer, an unknown linker
-option, a third-party shared library), or with `-flto` and an LLVM bitcode object or a static library,
-stays with the C compiler; `SC_LINK=cc` keeps every link
-there, and `SC_LINK=own` fails a link the own linker does not serve.
-When the C compiler is not installed, every build compiles natively, skips the toolchain probes and
-the precompiled header, drops `-flto`, and fails with the reason when a module or a link needs C (a
-header's `static` function, a sanitizer). The header facts still read the target's C headers: the
-C library's development package on Linux, the macOS SDK, mingw-w64's headers when present, a WASI
-sysroot (`WASI_SYSROOT`, which needs no compiler) for wasm. A Windows x86-64 build whose assembler takes
-`-Wa,-muse-unaligned-vector-move` (GNU as 2.38+; the `unaligned-vector-move` probe) passes it
-to every compile and the link: mingw GCC moves 32- and 64-byte stack vectors with aligned
-instructions on a 16-byte-aligned stack (GCC PR54412), and AVX code faults without it. The single binary `super-c` drives every stage
-of the workflow.
+Super-C is a self-hosting compiler for macOS arm64, Linux x86-64, Linux arm64, Windows x86-64 and
+wasm32. A build compiles each module to a Mach-O, ELF, COFF or wasm object itself and links the objects
+with its own linker (`src/link/`): Mach-O executables and dylibs on arm64 (chained fixups, ad-hoc
+signature), ELF executables and shared libraries on x86-64 and arm64 (glibc 2.34 or later), PE
+executables and DLLs on x86-64 (the UCRT), and wasm32 modules; the own archiver writes every static
+library. Each own linker also links static libraries (`.a`, `.lib`, positional or `-l<name>` from a `-L`
+directory) a C compiler built: it takes a member for each symbol still undefined, as LLD does. No C
+compiler takes part. A module the native backend refuses (a header's `static` function, an intrinsic it
+has no template for) and a target without a native backend are build errors; `--emit-c` writes the
+program's readable C11 instead (Generated output below). A build at an `opt-level` above 0 (the
+`release`, `bench` and `test` profiles) runs the LIR optimizer first: inlining, value numbering, load and
+store forwarding, loop invariant motion, constant and branch folding (`SC_LIR_OPT` overrides the
+choice). The objects carry DWARF line tables when the profile's `debug` key is set (`debug`, `bench`),
+and unwind data always. The extern blocks read the target's C headers (`native_header_facts`): the C
+library's development package on Linux, the macOS SDK, mingw-w64's tree on Windows (found beside a
+mingw `gcc` or `clang` in PATH), a WASI sysroot (`WASI_SDK_PATH`, else `WASI_SYSROOT`) for wasm, or the
+tree `--sysroot=DIR` names. The single binary `super-c` drives every stage of the workflow.
 
 ## Subcommands
 
@@ -75,13 +65,12 @@ A fixed-array value parameter shows as `__sc_ap<N>` there (`super-c-compiler-int
 
 ```sh
 super-c build                # build from build.toml (debug profile, incremental)
-super-c build --sanitizers   # the same with AddressSanitizer and UndefinedBehaviorSanitizer
 super-c build -o out         # override output binary name
 super-c build app -o out-app # build the project of directory app (its build.toml); -o stays the caller's path
 super-c build --bin=tool -o t # link the [bin.tool] target at t (an unknown name is an error; --lib with -o is one too)
 super-c release              # optimized build (release profile; alias for --profile=release)
 super-c run                  # build + execute the manifest binary
-super-c clean                # run the project's sweeps now and delete every unused object (see the object cache below)
+super-c clean                # run the project's sweeps now (see the build cache below)
 super-c clean --full         # remove the out-dir, every <root dir>/build/<profile> tree and the project's cache root; never a user directory
 ```
 
@@ -99,8 +88,9 @@ build makes the next one transpile again; a directory whose listing changed duri
 no stamp. The stamp lives in the target's profile directory, so it
 is per profile. A build that transpiles deletes the stamp first; the emission writes its record to
 `.emit_stamp.new`, and the engine moves it into place only after the whole tree is written, so a
-build that stops part way leaves no stamp for a mixed tree. Parallel C compilation uses
-content-fingerprinted stale detection with longest-job-first scheduling.
+build that stops part way leaves no stamp for a mixed tree. The native backend compiles the modules in
+parallel, largest first, and a module whose key matches the native record (`__sc_native`) keeps its
+object.
 
 ### External transpiler
 
@@ -110,8 +100,8 @@ super-c build --target=wasm --profile=release -o gen2.wasm \
 ```
 
 `--transpiler=CMD` (`build` and `release` from build.toml only) runs CMD as the transpile step in
-place of the engine's own frontend; the engine then compiles and links that tree with all its own
-target and profile flags, object cache and link record. CMD is split on whitespace like every
+place of the engine's own frontend; the engine then links that tree's objects with its own target and
+profile settings and link record. CMD is split on whitespace like every
 command string of the engine and runs with no shell, so its words hold no space. The engine appends the
 transpile form, each argument one argv entry:
 
@@ -125,14 +115,15 @@ CMD <root> --emit-sub=<sub> --manifest-dir=<abs project dir> --out-dir=<out-dir>
 build.toml (shards, profiles, the root's directory), and writes `<out-dir>/SUB/raw` exactly as the
 engine's own frontend does, the same bytes for the same compiler; with `--emit-id` it writes the stamp
 record under that identity. It also writes `<out-dir>/SUB/.emit_rewritten`, the tree-relative paths of
-the files it rewrote, one per line: the engine counts them as newer than their objects whatever their
-mtimes say (`obj_stale`), and counts every file as rewritten when a transpiler leaves no such record. The directory is absolute because a WASI guest starts in `/`. The stamp
+the files it rewrote, one per line: the engine counts them as changed whatever their mtimes say, and
+counts every file as rewritten when a transpiler leaves no such record. The directory is absolute because a WASI guest starts in `/`. The stamp
 identity of an external transpiler (`transpiler_id`) hashes the words of CMD and the content of each
 word that names a file, the program found through PATH: a different transpiler, or new content at the
 same path (a rebuilt `.wasm`), transpiles again, and so does a switch back to the engine's own frontend.
 A transpiler that exits nonzero fails the build: its own diagnostics print on the inherited stderr,
 then `build: transpiler failed (exit N): <argv>`. The wasm self-host fixpoint in the release and debug
-workflows uses this: WASI has no processes, so the wasm compiler cannot run the C compiler itself.
+workflows uses this: WASI has no processes, so the native engine runs the wasm compiler under wasmtime
+as its transpile step and links with its own wasm linker.
 
 ### Testing
 
@@ -197,8 +188,8 @@ render and publish, plus a lexer-only pass reported as a share of parse. It prin
 per-phase averages (CPU ms, Mcyc, Kalloc, MiB), throughput, the min/median/p95/sd of CPU
 ms, Mcyc and wall ms over the rounds, heap requested per round and peak RSS; then it runs
 one cold build of the compiler through the real build engine (debug profile, every core,
-object cache and emit stamp off) and reports the engine's phase record, sync,
-compile and link included. A C compiler or linker failure there fails the run and keeps
+caches and emit stamp off) and reports the engine's phase record, sync,
+compile and link included. A compile or link failure there fails the run and keeps
 the scratch tree. `SC_BENCH_OUT=<file>` writes the whole record as JSON (schema `"v":2`).
 
 ### Gates
@@ -351,7 +342,7 @@ Built-in subcommand names are reserved and cannot be shadowed.
 
 ```sh
 super-c bindgen header.h -o out.spc    # generate .spc bindings from a C header
-                                       # (--link=, --header=, -I, --from=, --cflag=, --cc=)
+                                       # (--link=, --header=, -I, --from=, --cflag=, --sysroot=)
 super-c vendor <source>                # vendor a dependency (--dir=, --ref=, --force)
 ```
 
@@ -374,7 +365,6 @@ target-features = []         # CPU features (see CPU features below)
 target-cpu = "x86-64-v2"     # x86_64 level before the feature lists (skipped on another instruction set)
 simd-width = 256             # vector width the planner prefers on AVX-512: 256 or 512
 simd-dispatch = "x86-64-v3"  # x86_64: levels of the run-time copies of vector code, or "off"
-cache-size = "2GiB"          # bytes the project's cache root keeps: a byte count, or B/KiB/MiB/GiB (default 2GiB)
 std_internals = true         # the project names std's unstable `pub(package)` items (std::platform); the compiler sets it
 
 [lib]                        # library target (optional; root defaults to src/lib.spc,
@@ -397,21 +387,19 @@ run = [
     "samply record --rate 1000 build/bench-bin --in-process",
 ]
 
-[profile.fast]               # a profile: optimization level, flags, linker arguments, strip, LTO mode
-opt-level = 2                # 0 | 1 | 2 | 3 | "s" | "z": -O<level> on every compile and the link
-cflags = ["-DNDEBUG"]        # after the manifest-level cflags and the -O flag
-ldflags = ["-static"]        # after the manifest-level ldflags and the -O flag
-link-args = ["-dead_strip"]  # each entry reaches the linker as -Wl,<entry>, after ldflags
-strip = true                 # strip at link time (`-Wl,--strip-all`); a macOS or iOS binary (ld64 has no
-                             # full strip) runs the host `strip` on the linked temp before it is installed,
-                             # and a failed strip fails the build
-lto = "thin"                 # none | full | auto | thin (see Link-time optimization below)
+[profile.fast]               # a profile: optimization level, debug information, link inputs, strip
+opt-level = 2                # 0 | 1 | 2 | 3 | "s" | "z": the LIR optimizer runs above 0
+debug = true                 # DWARF line tables in the objects
+ldflags = ["-lz"]            # link inputs in the C driver's syntax (-l, -L), after the manifest-level ones
+link-args = ["-z,stack-size=16777216"] # -Wl,<entry> to the own linker, after ldflags (here ELF's stack);
+                             # an option it does not take fails the link
+strip = true                 # the own linker leaves out the symbol table and the debug sections
+lockdep = true               # compile in the runtime's lock-order checks (the build constant LOCKDEP)
 overflow-checks = false      # integer overflow wraps instead of trapping (default: checks at opt-level 0/1)
 target-features = ["+simd128"] # replaces the build-level list for this profile
 
 [profile.release]            # a section naming a built-in profile starts from its values and
 opt-level = 2                # overrides only the keys it sets (an array replaces the whole array)
-lto = "thin"
 
 [shards]                     # output shard override: module TU count for a module
 "driver::emit" = 3           # a chunk lands in shard (stable symbol hash mod count)
@@ -433,78 +421,18 @@ edit never moves a chunk between shards.
 
 | Profile | Character | Use |
 |---------|-----------|-----|
-| `debug` | `opt-level = 0`, `-g`, frame pointers | Development (**default** of a manifest build) |
-| `release` | `opt-level = 3`, `-DNDEBUG -fPIE`, `link-args = ["-O2"]`, strip, `lto = "auto"`; no section GC: LTO drops unreferenced code (`-dead_strip` takes 256 more bytes off the compiler on macOS) | Shipping |
-| `bench` | `opt-level = 3`, `-DNDEBUG -g -fno-omit-frame-pointer`, `lto = "auto"` | Benchmarking/profiling |
-| `race` | `opt-level = 1`, `-g -fsanitize=thread -DSC_LOCKDEP` | TSan + lock-order checking |
-| `test` | `opt-level = 1`, no sanitizers | The `super-c test` runner, and the compiler under test when `test` has no `--profile` (`<out-dir>/test-bin`) |
+| `debug` | `opt-level = 0`, `debug` | Development (**default** of a manifest build) |
+| `release` | `opt-level = 3`, `strip` | Shipping |
+| `bench` | `opt-level = 3`, `debug` | Benchmarking/profiling |
+| `test` | `opt-level = 1` | The `super-c test` runner, and the compiler under test when `test` has no `--profile` (`<out-dir>/test-bin`) |
 
-The exact cc flag strings live in `src/build_system/manifest.spc`; the table shows the
-character of each profile, not the verbatim flags. `--sanitizers` adds the full ASan/UBSan set
-(`SANITIZER_CFLAGS`, `SANITIZER_LDFLAGS`) after the flags of every profile of the build, a script
-build without `--profile` included; targets without the runtimes (Windows, iOS, Android, wasm) drop
-them. **Never profile a `--sanitizers` build**: sanitizer frames dominate the samples. An ASan
-program's runtime (`std/rt/base.spc`,
-`__asan_default_options`) turns ASan's use-after-return fake stack off: GCC 13.3 to 15 put an
-object aligned above 32 bytes 32 bytes off in its frames, and AVX-512 code faults there.
-`ASAN_OPTIONS=detect_stack_use_after_return=1` turns it back on.
+The profiles live in `src/build_system/manifest.spc` (`add_builtin_profiles`). Integer overflow (signed
+and unsigned) traps under `debug` and `test` and wraps under `release` and `bench` (language skill,
+`operations.md`): `Profile::arith_wraps`, the `overflow-checks` key, else `opt-level` 2, 3, `"s"` or
+`"z"`. A build with no profile (`super-c build foo.spc`) checks. `lockdep = true` compiles in the
+runtime's lock-order checks (the build constant `LOCKDEP`); `SC_LOCK_ORDER` switches their reports on.
 
-Integer overflow (signed and unsigned) traps under `debug`, `test` and `race` and wraps under
-`release` and `bench` (language skill, `operations.md`). The
-emitted C is the same under every profile: it calls the arithmetic helpers of `super_rt.h`
-(std's `Int<N>` and `UInt<N>` operators call the runtime's `sc_int_overflow`), and the engine adds `-DSC_ARITH_WRAP` to every compile of a profile without overflow checks
-(`Profile::arith_wraps`: the `overflow-checks` key, else `opt-level` 2, 3, `"s"` or `"z"`;
-`push_profile_side` in `src/build_system/build.spc`). A build with no profile (`super-c build
-foo.spc`) checks. Every C compile of the generated tree, under every profile and target, also
-gets `-funsigned-char`: the language's `char` is unsigned, and `super_rt.h` fails to compile
-without the flag. It also gets `-ffp-contract=off`, so the C compiler never fuses a float
-multiply and add (only an explicit `fma` fuses) and run-time float results equal the constant
-evaluator's on every target, and `-Werror=incompatible-pointer-types`, so clang rejects the
-incompatible pointer arguments gcc 14 already rejects. It also gets
-`-fno-builtin-<f>` for the `f64` and `f32` names of the transcendental libm functions
-(`LIBM_AS_WRITTEN` in `src/build_system/build.spc`: `sin` to `hypot`), so the C compiler calls
-them as written instead of folding, merging or rewriting them, and their results do not depend on
-the optimization level; the exact functions (`sqrt`, `fabs`, `floor`, `fma`, ..) stay builtins.
-The `cstd` key and `--cstd` replace only the standard and feature-macro flags, never these.
-
-### Link-time optimization
-
-A profile's `lto` key selects the mode the engine adds to every compile and to the link:
-`none`, `full` (`-flto`), `auto` (`-flto=auto`, what the built-in optimized profiles
-use) or `thin` (`-flto=thin`). A profile without the key adds nothing: a `-flto*` in its
-flag arrays passes through verbatim. `[profile.release]` with `lto = "thin"` keeps the
-built-in flags and switches the mode; `SC_LTO=<mode>` overrides the profile for one
-build: `SC_LTO=thin ./super-c build --profile=release` is the incremental release loop.
-The mode and the linker cache options are part of every object and link fingerprint, so
-changing either relinks; the transpiler never sees them, so the emitted C is identical
-under every mode.
-
-`thin` is a request. The engine settles it once per profile directory with the `thin-lto`
-probe of the toolchain probe table (below): its line in `<out-dir>/<profile>/.probes`
-holds the verdict (`thin <cache form>` or `auto: <reason>`), then the linker the `-v` link
-log named and that executable's mtime. A build whose record matches every input runs no
-probe, so only the first build under a toolchain and flag set pays for it (about 0.2 s
-here). The probe compiles and links a one-function program in the argv
-form real builds use (`.ltoprobe`, removed afterwards): `-flto=thin` must compile and
-link (exit code and output file, never version text), then the link is retried with each
-linker cache form (Apple ld's cache path with its prune options, lld's ThinLTO cache
-directory with its cache policy, the LLVM gold plugin's cache directory under gold or
-bfd; `lto_cache_args` in `src/build_system/build.spc`) until one writes a cache entry.
-A rejected request keeps `-flto=auto`, the mode the profiles used before, and the
-record and the build statistics (`"lto":"auto","lto_reason":...`) name the reason. GCC
-rejects `-flto=thin` at the compile step and so keeps `auto`; a linker that accepts
-ThinLTO but no cache directory with a pruning policy links with `-flto=thin` and no
-cache (`"lto":"thin"`).
-
-The linker cache lives under the project's cache root (below) at `lto/<namespace>`, one
-namespace per hash of the compiler version,
-path and mtime, the target, the compile and link flags, the schema and the linker line;
-`SC_NO_LTO_CACHE=1` links
-without it. The linker owns the entries and prunes them itself (entries unused for a
-week, the cache under a tenth of the disk and, with lld or gold, under 1 GiB; checked at
-most hourly); the engine creates the directory. The cache sweep (below) removes a
-namespace with no entry written or used for a week, such as the one a toolchain upgrade
-leaves behind.
+### Build cache
 
 The build cache base is `$SC_CACHE_DIR`, else `~/.super-c/cache`. Each project caches in its own
 root below it, `<base>/<project>` (`cache_root`: the manifest's `bin`, else its `[lib]` name, a byte
@@ -514,70 +442,21 @@ outside `[A-Za-z0-9._-]` or a leading `.` made `_`, and `_` added to `o`, `lto`,
 sweep reads or deletes outside the root of the build that runs it: not the base, not another
 project's root. Only `super-c clean --full` deletes a root, its project's.
 
-The object cache lives under the project's root at `o/<namespace>`, one namespace per local
-object tree (hash of the real path of the profile directory, such as `build/debug`); a
-unit's key hashes the compiler version line, the whole compile command, and the text of
-the unit and of every quoted include. The emitted tree names an extern-block header or an
-external C source by a path relative to the including file when both lie below the working
-directory (a project's own files, and std in a checkout or a copy of the repository), else by its
-absolute real path (an installed std). So a tree that moves with its project, such as a copy, a
-worktree or the gate's tree, keeps its keys, and under debug information (the working directory
-maps to `.`) its objects are the same bytes. The version line comes from `<cc> --version` once per compiler: an entry of the script builds'
-`script` namespace (`.scripts`, which every project's builds read) keeps it per compiler identity (`cc_identity` in `src/build_system/objcache.spc`: the
-command, the program's path and mtime, and on macOS for an xcrun stub in `/usr/bin` the
-`DEVELOPER_DIR`, xcode-select link and `TOOLCHAINS` settings with each candidate clang's mtime),
-so a toolchain upgrade probes again and an unchanged compiler starts no probe process; the entry
-follows the namespace's rules (below). Each unit's `.cmd` records its key. An object is stored once: the tree's
-object and its cache entries are hard links to one file (`link_or_copy`; a copy where the file system
-refuses a link, such as a cache root on another volume), so a compile removes the old object before
-it writes, and an object's time for the staleness check and the relink decision is the mtime of its
-`.cmd` record, which another tree's use of the shared file does not move. The engine runs the
-compiler named by the manifest, `$CC` or the default as it is: no ccache wrapper. The compiles, the link
-and the version probe start the program the command's first word names in PATH by its path, found once
-(`cc_stream`): macOS `posix_spawnp` makes a whole spawn attempt per PATH entry, 0.4 to 0.9 ms per spawn.
-argv[0] keeps the word, so no fingerprint or key depends on the lookup; a match that does not start
-falls back to the search, and Windows keeps CreateProcess's own search. One exception, for a
-macOS target on a macOS host: a command that starts with the xcrun stub `/usr/bin/cc`, `clang` or `gcc`
-runs the compiler the stub runs, with `-isysroot` naming the SDK the stub passes (`direct_cc`): the stub
-costs about 4 ms per compile and link. `xcrun -f` and `xcrun --show-sdk-path` run at once, once per
-compiler identity and `SDKROOT`, recorded as an entry of the script builds' `script` namespace; with the object cache
-off, once per build (about 5 ms); for a path with a space the stub runs. Under `-g` the compile maps the
-working directory to `.` (`-fdebug-prefix-map`, outside the key), so debug information names
-sources relative to the project directory: a debugger started elsewhere needs a source map.
-Without coverage or profile instrumentation, each compiled object whose bytes do not name the
-working directory also goes to the root's `script` namespace, and a miss in the tree's
-namespace reads it there: the project's trees that emit a unit identically compile it once.
-After a successful build, the engine writes the key set of all units as generation file
-`g<seq>` when the set changed, keeps the newest four generations (the current build and
-three older), and deletes each object and dependency list that no kept generation names
-and that is older than the start of the build. A version inside that window rebuilds
-with no compile; an older one compiles again. An unchanged build reads one directory
-and one file. The namespace's `owner` file records its object tree (the profile directory).
-An object is unused when no build tree links it: every name of its file is a cache entry. The
-sweeps (`sweep`) run after a successful build, at most once every 30 minutes each, in the root of the
-build's project (or `.scripts`). The cache sweep (`<root>/o/.sweep`) removes the namespaces whose
-owner object tree is gone, whose `owner` names another directory (an older compiler recorded the
-source directory), that have no `owner` and did not change for an hour (a build that stopped before
-its first commit), or that did not change for 30 days (the `script` namespace only by this rule);
-the prelude images (below); and the idle linker caches. Then it trims the objects (`trim_objects`):
-in a project's root, while its files (each counted once) hold more than `cache-size` bytes, the least
-recently used unused file goes under all its names; in `.scripts`, once it holds more than 16384
-objects, the least recently used unused ones go down to 12288 (a suite run uses about 4.8k). A file
-a tree links counts but stays. Each deleted object takes its dependency list; a list whose object is
-gone goes too, as do the packed `<key>.z` entries of older compilers and temp files older than an
-hour. The project sweep (`<out-dir>/.sweep`, `sweep_project`): every out-dir entry with nothing
-written for 30 days (a build tree, a link record, a binary) goes unless a build holds the lock of a
-tree in it, as do the emitted trees below the root directory idle as long and the per-suite cache
-older compilers kept in `<out-dir>/test/fixture-cache`. `super-c clean` runs the same sweeps at once
-and deletes every unused object whatever the limits; `super-c clean --full` removes the out-dir, the
-emitted trees and the project's cache root.
+The sweeps (`sweep`) run after a successful build, at most once every 30 minutes each, in the root of
+the build's project (or `.scripts`). The cache sweep (`<root>/.sweep`, `sweep_cache`) deletes the stale
+prelude images (below) and the C object and linker caches (`o/`, `lto/`) of the releases that compiled
+C. The project sweep (`<out-dir>/.sweep`, `sweep_project`): every out-dir entry with nothing written for
+30 days (a build tree, a link record, a binary) goes unless a build holds the lock of a tree in it, as do
+the emitted trees below the root directory idle as long and the per-suite cache older compilers kept in
+`<out-dir>/test/fixture-cache`. `super-c clean` runs the same sweeps at once; `super-c clean --full`
+removes the out-dir, the emitted trees and the project's cache root.
 
 The checked std prelude is cached as a file of the root's `prelude/` directory,
 `<key><compiler>.img` (`src/driver/prelude_image.spc`). A build first loads the std prelude alone, resolves it and type
 checks it up to the prelude gate (`prelude_stage`), with imports looked up under the std root only,
 so the result does not depend on the project; the user's modules load after it (`load_user`). The
 entry's name hashes the std directory as given, the target, arch, CPU features, vector settings,
-memory checker, `--test`, profile and profile names, `--bootstrap-tags`, the constant-evaluation
+`--test`, profile and profile names, `--bootstrap-tags`, the constant-evaluation
 budgets and `SC_TYPE_COLLIDE`, then the compiler identity (`compiler_id`). The image records the
 real path of the compiler that wrote it, the content hash of every prelude file as the check read it and the listing of every directory the std
 imports were looked up in, as the load listed it (the std directory's from before the load), so an
@@ -594,232 +473,83 @@ writing it goes too; that compiler checks the prelude once more. A project
 file or a root file whose module path names a module the prelude loaded from another file is an
 error.
 
-A program whose own C (module, instance and registry units) stays under 2 MiB is compiled as one
-unit: the emitted `__sc_unity.c` includes those units, and both the engine and a script build compile
-it in place of them. The runtime and the external C sources still compile on their own, so programs
-share their objects. A larger program, such as the compiler itself, compiles its units of one shard
-and less than 64 KiB of C in packs of about 256 KiB, `__sc_pack<k>.c`, each including its members
-(at least two such units; a header the members share is parsed once per pack). The pack count is a
-shard count of those units' bytes (`shard_policy`), which `__sc_shards` records (`packs<TAB>n`) and the
-next build keeps while every pack stays within half and one and a half times the target; a unit's pack
-is the hash of its file stem modulo the count, so an edit, or a unit that crosses the limit, compiles
-its own pack again and no other. The cost is the incremental build: on the compiler, an edit of
-`build_system::toml` compiles its pack in 171 ms of serial CPU, where its unit alone took 46 ms, while
-the packs take about 13 points off the cold compile's serial CPU (the packs and the precompiled header
-below together 35%; with each unit declaring only what it uses, `output-layout.md`, 42%).
-
-A program of separate units, from four units that include `__sc_fwd.h` on (each shard that compiles
-alone, each pack; `pch<TAB>1` in `__sc_shards`), compiles that header once, precompiled: the system
-headers, the runtime and the std C headers then cost one compile instead of one per unit (about 210 M
-compiler instructions per unit with clang). The engine starts the compile when the header lands,
-before any unit; the stub `obj/__sc_fwd.h` includes the header and compiles to `obj/__sc_fwd.h.gch`.
-Every unit but the runtime, wasm's C library and the test runner waits for it and compiles with
-`-include obj/__sc_fwd.h`: gcc loads the `.gch` beside the stub (or reads the stub when it rejects the
-file), the clang driver turns the option into `-include-pch`. The header's `.cmd` record holds its
-command, the working directory (the file records its inputs' paths) and the content hash of the header
-and its quoted includes (` | pch <hash>`), which also ends every unit's fingerprint: a changed header
-text compiles the header and every unit again, whatever the mtimes (gcc checks no input, and its
-dependency list of a unit names none of the header's includes). Under clang the header takes `-Xclang
--fno-pch-timestamp` (the `pch-no-timestamp` probe), so clang checks only the inputs' sizes and an input
-touched with unchanged content, an older mtime included, fails no compile; the header's dependency
-list compiles it again after a touch. A failed compile is recorded under its fingerprint, the units
-parse the header text, and a build tries again only once the fingerprint changed. A clang unit's
-dependency list names the header's inputs by the absolute paths the header recorded; the object cache
-stores them through `@/` like the emitted tree (`dep_portable`), so another tree that restores the object
-names its own files. `compile_commands.json` omits the `-include` pair (a tool of another compiler
-version cannot load the file; the unit includes the header first itself). Where the
-`integrated-cc1` probe accepts it (Apple clang), these units and the header compile with
-`-fintegrated-cc1`: the driver runs the compiler proper in its own process, one process less per unit
-(4% of the compile CPU). Both probes run when the first such tree of a profile directory needs them.
-
-Script builds (`super-c build foo.spc -o out`, `super-c --test foo.spc`) share one
-namespace, `<base>/.scripts/o/script` (each entry in the subdirectory of its key's first two hex digits,
-`script_entry`, so no directory holds more than about a 256th of it), keyed per unit by the compiler version line, the compile flags, the
-unit's path relative to its tree and the text of the unit and its quoted includes (the
-tree's path joins the key only under `-g`, coverage or profile instrumentation), so the
-runtime and std units that programs emit identically compile once. A hit links the object
-into `<tree>/../obj`, which the link reads. The units to compile run as few `cc -c`
-commands as the process tree's free worker slots allow, all at once, each from a scratch
-directory whose objects then move into place; a unit whose file name another one shares, or
-every unit when a compiler or flag word names a relative path, compiles alone with `-o`.
-The version probe runs beside the compiles when the namespace is new. An install writes a
-temp file and renames it, so concurrent builds never read a torn object. The sweep (not the build
-that installs objects, which never lists the namespace) bounds it (above). `SC_NO_CACHE` restores the single
-compile-and-link command.
-
-Gates set before the implementation for enabling ThinLTO by default: a body-edit relink
-under a quarter of the full-LTO relink, a clean build under 1.1x, the compiler's own
-runtime (`super-c bench`, self-transpile) within 3%, link memory no higher, the stripped
-binary within 5%. Measured on the compiler's own release build (Apple clang 21, 206 units, a cold
-object cache, ccache off, `--jobs=2` on a loaded 14-core machine, so the wall times are upper bounds);
-the rows marked (151) are from the 151-unit build the gates were first checked on:
-
-| Case | full LTO (`-flto=auto`) | ThinLTO, no cache | ThinLTO, cache |
-|------|------------------------:|------------------:|---------------:|
-| clean build, wall / CPU | 68.5 s / 71.3 s | | 34.6 s / 95.3 s (cold cache) |
-| link of one body edit | 36.6 to 53.9 s | 14.4 s | 1.9 s (new state), 0.33 s (state linked before) |
-| linker peak RSS | 1,690 MiB | 584 MiB | 114 MiB (warm) |
-| link CPU | 38.6 s | 71.2 s | 0.4 s (warm) |
-| public signature edit (40 units), total (151) | | | 2.0 s |
-| by-value layout edit (92 units), total (151) | | | 5.0 s (cold), 2.4 s |
-| stripped binary | 5,794,648 B | | 7,186,296 B (+24.0%) |
-
-| compiler runtime (151; Mcyc: parse / typecheck / borrowck / codegen) | 118 / 191 / 423 / 892 | | 124 / 192 / 446 / 923 (+4.7 / +0.5 / +5.4 / +3.5%); end to end −3.1% |
-
-Relink, clean build and memory pass by a wide margin; runtime and size do not (a higher
-ThinLTO import limit, `-import-instr-limit=300` and `1000`, changes neither by more
-than 0.5%), so the built-in profiles keep `auto` and ThinLTO is the validated opt-in:
-`SC_LTO=thin` for a session, or `lto = "thin"` under `[profile.release]` in a project
-whose binary is not the shipped compiler. The `bench` profile follows `release` so the benchmark measures
-the compiler users run. Script mode
-(`super-c release foo.spc`) links once with no link record to relink against, so a `thin`
-profile keeps `auto` there.
+The C tree `--emit-c` writes compiles as few units as it can. A program whose own C (module, instance
+and registry units) stays under 2 MiB is one unit: `__sc_unity.c` includes those units, and `__units`
+lists it in their place. A larger program, such as the compiler itself, groups its units of one shard
+and less than 64 KiB of C in packs of about 256 KiB, `__sc_pack<k>.c`, each including its members. The
+pack count is a shard count of those units' bytes (`shard_policy`), which `__sc_shards` records
+(`packs<TAB>n`) and the next emission keeps while every pack stays within half and one and a half times
+the target; a unit's pack is the hash of its file stem modulo the count, so an edit changes its own pack
+and no other.
 
 ### Wasm C library
 
 A wasm build links no C library of the toolchain: the loader adds `std::rt::libc` and
 `std::rt::libm` (`std/rt/libc.spc`, `std/rt/libm.spc`, `Package::rt_libc`, `rt_libm`) to every
-`--target=wasm` program, and the link is `-nostdlib` plus compiler-rt's builtins (the `rtlib`
-probe), without `-lm` or the `wasi-emulated` libraries. The modules call WASI preview 1 directly and
-compute what wasi-libc computes, bit for bit (`tests/codegen/wasm_libc_test.spc` checks the math functions,
-printf, strtod, strtol, qsort, the scanf family, locales, the time functions, signals, `sbrk` and more
-against wasi-libc). The C compile still reads wasi-libc's headers
-from the sysroot. The units of the two modules compile alone (in no pack, without the precompiled
-header) and with `-fno-builtin`, as a C library compiles (`loader::libc_unit`): the C compiler must
-not turn the copy loop of `memcpy` or the `malloc` and `memset` of `calloc` into calls of those
-functions. The modules define every C function and object that std, the ffi bindings and the
-compiler bind for wasm, signals as wasi-libc's `wasi-emulated-signal` emulates them included; a test
-(`every_c_symbol_a_wasm_build_binds_is_defined`) checks it from the sources, on every host. Absent:
-long double conversions (`%Lf` fails), and `fork`, `execvp`, `pipe`, `dup`, `pthread_create` and
-the other functions WASI has no call for; a program that calls one fails to link.
-
-### Toolchain probes
-
-The probe table (`src/build_system/probe.spc`) records what the C compiler and linker
-accept under a build's target and flags. Each probe has an id, a C snippet or a flag, a
-step (`compile` with `-c`, `link` with the build's link flags, `asm` with `-S`, `print` with
-no source, or the engine's `lto` procedure) and a result kind: `accepted`/`rejected`, a path
-(the first line the step prints, when a file exists there), the first accepted
-spelling of a list, the form of a 16-byte compare-exchange (`inline` when the assembly
-holds `cmpxchg16b`, `casp*` or an `ldxp`/`stxp` loop; `outline call` for libgcc's
-`__aarch64_cas16_*`; `library call` for libatomic's `__atomic_compare_exchange_16`), or the
-ThinLTO verdict. A probe the target or instruction set does not take reports `not
-applicable` and never runs. Each step is an argv child of the compiler driver with the
-build's compile flags (no shell); exit codes, output files and assembly text decide,
-never version text.
-
-| Id | Applies to | Result |
-|----|------------|--------|
-| `add-overflow` | all | `__builtin_add/sub/mul_overflow` accepted |
-| `fp-contract-off` | all | `-ffp-contract=off` accepted |
-| `target-attr-x86_64` | x86_64 | the `target("...")` spelling that enables AVX2: `avx2` or `arch=haswell` |
-| `target-attr-aarch64` | aarch64 | the spelling that enables i8mm: `+i8mm`, `arch=armv8.6-a` or `i8mm` |
-| `x86-features` | x86_64 | `<immintrin.h>` compiles under the build's flags, which carry the features beyond the baseline |
-| `march-x86-64-v2`, `-v3`, `-v4` | x86_64 | `-march=x86-64-vN` accepted |
-| `wasm-simd128`, `wasm-relaxed-simd` | wasm32 | `-msimd128` (`-mrelaxed-simd`) with `<wasm_simd128.h>` accepted |
-| `cas16` | all | the 16-byte `__atomic_compare_exchange_n` form |
-| `thread-local` | all | `_Thread_local` accepted |
-| `cpuid-count` | x86_64 | `<cpuid.h>` `__get_cpuid_count` accepted |
-| `getauxval`, `at-hwcap2`, `at-hwcap3` | Linux and Android aarch64 | `getauxval` links; each `AT_HWCAP*` constant compiles |
-| `aarch64-features` | aarch64 | `<arm_neon.h>` compiles under the build's flags, whose one `-march`/`-mcpu` carries the optional features |
-| `thin-lto` | all | the ThinLTO verdict (Link-time optimization above) |
-| `unaligned-vector-move` | Windows x86_64 | `-Wa,-muse-unaligned-vector-move` accepted (GNU as 2.38+; clang rejects it) |
-| `no-prelink-vectorize` | all | `-fno-vectorize -fno-slp-vectorize` accepted (clang; gcc rejects them, its LTO compile does not vectorize) |
-| `integrated-cc1` | all | `-fintegrated-cc1` accepted (clang; gcc rejects it) |
-| `pch-no-timestamp` | all | `-Xclang -fno-pch-timestamp` accepted (clang; gcc rejects it) |
-| `rtlib` | wasm32 | the path of the compiler's builtins library (`-print-libgcc-file-name`: compiler-rt's `libclang_rt.builtins-wasm32.a`) |
-| `reproducible-link` | macOS and iOS | `-Wl,-reproducible` links (Apple ld of Xcode 14.3 and later) |
-
-The results of one profile directory live in one record, `<out-dir>/<profile>/.probes`:
-its first line holds the schema, a hash of the compiler path and mtime, the whole compiler
-command (`--cc="clang -arch x86_64"`: its arguments select a target too), the target, the
-instruction set and the compile and link flags, then the compiler version line; each
-other line is `<id>\t<result>` (the `thin-lto` line adds the linker path and mtime). A
-record of another key holds nothing; one of another compiler version loses its results
-once the version probe answers. A probe runs only when a build needs its result and the
-record does not hold it: the needed probes start beside the compiler version probe,
-before the transpile, one child per spelling, all at once; `integrated-cc1` and
-`pch-no-timestamp` run when the precompiled header is planned, and the build waits for them. A build that measured nothing
-leaves the record unchanged. The results a build used end every object and link
-fingerprint (` | probes <id>=<result>;`). A build uses the `thin-lto` verdict under `lto =
-"thin"`, on Windows x86_64 `unaligned-vector-move` (accepted: every compile and the link take
-the flag), under full LTO (`lto = "full"` or `"auto"`, a ThinLTO request that falls back to `auto`
-included) `no-prelink-vectorize` (accepted: every compile takes the flags after the profile's `-O`
-flag, so clang vectorizes at the link, after it inlines across units: a function vectorized alone in
-its unit no longer vectorizes in the loop it is inlined into), on wasm `rtlib` (every link takes
-`-nostdlib <path>`: wasm links its own C library, Wasm C library below), on Apple targets
-`reproducible-link` (accepted: every link takes the flag; without it Apple ld can order the symbol
-stubs differently in two links of the same objects), for a tree compiled through the precompiled
-header `integrated-cc1` and `pch-no-timestamp` (accepted: the flags join those commands, which the
-fingerprints hold, not ` | probes`), and the probe of each CPU feature it enables that has one (`wasm-simd128`,
-`wasm-relaxed-simd`, `aarch64-features`, `x86-features`); a rejected feature probe fails the build before any
-compile, once per probe with the features it checks ("build: the C compiler 'cc' rejects
-'-msimd128': target feature 'simd128' needs a compiler that supports it"). The emitted C uses no probe result, so the emit stamp holds none.
-
-```sh
-super-c build --print-probes                    # the table for the debug profile and the host target
-super-c build --print-probes --profile=release  # under the release flags
-```
-
-`--print-probes` (`build` and `release` from build.toml) prints `compiler: <version line>`,
-`target: <platform> <arch>`, then one `<id> <result>` row per probe in table order, with the
-ids padded to 24 columns. It runs every applicable probe the record does not hold, the
-ThinLTO procedure included, adds the results to the record, and builds nothing.
+`--target=wasm` program, and `std::rt::builtins` gives the compiler-rt routines the backends call. The
+modules call WASI preview 1 directly and compute what wasi-libc computes, bit for bit
+(`tests/codegen/wasm_libc_test.spc` checks the math functions, printf, strtod, strtol, qsort, the scanf
+family, locales, the time functions, signals, `sbrk` and more against wasi-libc). The header facts still
+read wasi-libc's headers from the sysroot. The modules define every C function and object that std, the
+ffi bindings and the compiler bind for wasm, signals as wasi-libc's `wasi-emulated-signal` emulates them
+included; a test (`every_c_symbol_a_wasm_build_binds_is_defined`) checks it from the sources, on every
+host. Absent: long double conversions (`%Lf` fails), and `fork`, `execvp`, `pipe`, `dup`,
+`pthread_create` and the other functions WASI has no call for; a program that calls one fails to link.
 
 ### CPU features
 
 A CPU feature lets the compiler select instructions of an instruction-set extension. It
 never changes a program's results: a vector operation gives the same lanes and the same
 traps with and without it. The table is `src/ir/cpu_features.spc` (`CPU_FEATURES`), mirrored
-by `std::cpu::Feature`:
+by `std::cpu::Feature`; the C flag column is what the C tree of `--emit-c` compiles with:
 
-| Name | Instruction set | Implies | C flag | Probe | Default |
-|------|-----------------|---------|--------|-------|---------|
-| `simd128` | wasm32 | | `-msimd128` | `wasm-simd128` | off |
-| `relaxed-simd` | wasm32 | `simd128` | `-mrelaxed-simd` | `wasm-relaxed-simd` | off |
-| `sse2` | x86_64 | | | | always on |
-| `sse3` | x86_64 | `sse2` | `-msse3` | `x86-features` | macOS, iOS, Android |
-| `ssse3` | x86_64 | `sse3` | `-mssse3` | `x86-features` | macOS, iOS, Android |
-| `sse4.1` | x86_64 | `ssse3` | `-msse4.1` | `x86-features` | Android |
-| `sse4.2` | x86_64 | `sse4.1`, `popcnt` | `-msse4.2` | `x86-features` | Android |
-| `popcnt` | x86_64 | | `-mpopcnt` | `x86-features` | Android |
-| `cx16` | x86_64 | | `-mcx16` | `x86-features` | macOS, iOS, Android |
-| `lahf-sahf` | x86_64 | | `-msahf` | `x86-features` | macOS, iOS |
-| `avx` | x86_64 | `sse4.2` | `-mavx` | `x86-features` | off |
-| `avx2` | x86_64 | `avx` | `-mavx2` | `x86-features` | off |
-| `fma` | x86_64 | `avx` | `-mfma` | `x86-features` | off |
-| `bmi1` | x86_64 | | `-mbmi` | `x86-features` | off |
-| `bmi2` | x86_64 | | `-mbmi2` | `x86-features` | off |
-| `f16c` | x86_64 | `avx` | `-mf16c` | `x86-features` | off |
-| `lzcnt` | x86_64 | | `-mlzcnt` | `x86-features` | off |
-| `movbe` | x86_64 | | `-mmovbe` | `x86-features` | off |
-| `avx512f` | x86_64 | `avx2`, `fma`, `f16c` | `-mavx512f` | `x86-features` | off |
-| `avx512bw`, `avx512cd`, `avx512dq`, `avx512vl` | x86_64 | `avx512f` | `-m<name>` | `x86-features` | off |
-| `avx512vbmi`, `avx512vbmi2`, `avx512bitalg`, `avx512fp16` | x86_64 | `avx512bw` | `-m<name>` | `x86-features` | off |
-| `avx512vpopcntdq`, `avx512vnni` | x86_64 | `avx512f` | `-m<name>` | `x86-features` | off |
-| `gfni` | x86_64 | `sse2` | `-mgfni` | `x86-features` | off |
-| `vaes` | x86_64 | `avx2`, `aes` | `-mvaes` | `x86-features` | off |
-| `vpclmulqdq` | x86_64 | `avx`, `pclmulqdq` | `-mvpclmulqdq` | `x86-features` | off |
-| `aes` | x86_64 | `sse2` | `-maes` | `x86-features` | off |
-| `pclmulqdq` | x86_64 | `sse2` | `-mpclmul` | `x86-features` | off |
-| `avx10.1` | x86_64 | `x86-64-v4`, `avx512vbmi` to `avx512fp16` | `-mavx10.1` | `x86-features` | off |
-| `avx10.2` | x86_64 | `avx10.1` | `-mavx10.2` | `x86-features` | off |
-| `neon` | aarch64 | | | | always on |
-| `fp16` | aarch64 | `neon`, `rdm` | `+fp16` | `aarch64-features` | macOS |
-| `dotprod` | aarch64 | `neon`, `rdm` | `+dotprod` | `aarch64-features` | macOS |
-| `rdm` | aarch64 | `neon`, `crc`, `lse` | (Armv8.1-A) | `aarch64-features` | macOS |
-| `i8mm` | aarch64 | `neon`, `rdm` | `+i8mm` | `aarch64-features` | off |
-| `bf16` | aarch64 | `neon`, `rdm` | `+bf16` | `aarch64-features` | off |
-| `aes` | aarch64 | `neon` | `+aes` | `aarch64-features` | macOS, iOS |
-| `sha2` | aarch64 | `neon` | `+sha2` | `aarch64-features` | macOS, iOS |
-| `sha3` | aarch64 | `neon`, `rdm`, `sha2` | `+sha3` | `aarch64-features` | macOS |
-| `crc` | aarch64 | | `+crc` | `aarch64-features` | macOS |
-| `lse` | aarch64 | | `+lse` | `aarch64-features` | macOS |
-| `sve` | aarch64 | `fp16`, `rdm` | `+sve` | `aarch64-features` | off |
-| `sve2` | aarch64 | `sve` | `+sve2` | `aarch64-features` | off |
-| `sme` | aarch64 | `neon`, `rdm` | `+sme` | `aarch64-features` | off |
-| `sme2` | aarch64 | `sme` | `+sme2` | `aarch64-features` | off |
-| `sme-f64f64` | aarch64 | `sme` | `+sme-f64f64` | `aarch64-features` | off |
+| Name | Instruction set | Implies | C flag | Default |
+|------|-----------------|---------|--------|---------|
+| `simd128` | wasm32 | | `-msimd128` | off |
+| `relaxed-simd` | wasm32 | `simd128` | `-mrelaxed-simd` | off |
+| `sse2` | x86_64 | | | always on |
+| `sse3` | x86_64 | `sse2` | `-msse3` | macOS, iOS, Android |
+| `ssse3` | x86_64 | `sse3` | `-mssse3` | macOS, iOS, Android |
+| `sse4.1` | x86_64 | `ssse3` | `-msse4.1` | Android |
+| `sse4.2` | x86_64 | `sse4.1`, `popcnt` | `-msse4.2` | Android |
+| `popcnt` | x86_64 | | `-mpopcnt` | Android |
+| `cx16` | x86_64 | | `-mcx16` | macOS, iOS, Android |
+| `lahf-sahf` | x86_64 | | `-msahf` | macOS, iOS |
+| `avx` | x86_64 | `sse4.2` | `-mavx` | off |
+| `avx2` | x86_64 | `avx` | `-mavx2` | off |
+| `fma` | x86_64 | `avx` | `-mfma` | off |
+| `bmi1` | x86_64 | | `-mbmi` | off |
+| `bmi2` | x86_64 | | `-mbmi2` | off |
+| `f16c` | x86_64 | `avx` | `-mf16c` | off |
+| `lzcnt` | x86_64 | | `-mlzcnt` | off |
+| `movbe` | x86_64 | | `-mmovbe` | off |
+| `avx512f` | x86_64 | `avx2`, `fma`, `f16c` | `-mavx512f` | off |
+| `avx512bw`, `avx512cd`, `avx512dq`, `avx512vl` | x86_64 | `avx512f` | `-m<name>` | off |
+| `avx512vbmi`, `avx512vbmi2`, `avx512bitalg`, `avx512fp16` | x86_64 | `avx512bw` | `-m<name>` | off |
+| `avx512vpopcntdq`, `avx512vnni` | x86_64 | `avx512f` | `-m<name>` | off |
+| `gfni` | x86_64 | `sse2` | `-mgfni` | off |
+| `vaes` | x86_64 | `avx2`, `aes` | `-mvaes` | off |
+| `vpclmulqdq` | x86_64 | `avx`, `pclmulqdq` | `-mvpclmulqdq` | off |
+| `aes` | x86_64 | `sse2` | `-maes` | off |
+| `pclmulqdq` | x86_64 | `sse2` | `-mpclmul` | off |
+| `avx10.1` | x86_64 | `x86-64-v4`, `avx512vbmi` to `avx512fp16` | `-mavx10.1` | off |
+| `avx10.2` | x86_64 | `avx10.1` | `-mavx10.2` | off |
+| `neon` | aarch64 | | | always on |
+| `fp16` | aarch64 | `neon`, `rdm` | `+fp16` | macOS |
+| `dotprod` | aarch64 | `neon`, `rdm` | `+dotprod` | macOS |
+| `rdm` | aarch64 | `neon`, `crc`, `lse` | (Armv8.1-A) | macOS |
+| `i8mm` | aarch64 | `neon`, `rdm` | `+i8mm` | off |
+| `bf16` | aarch64 | `neon`, `rdm` | `+bf16` | off |
+| `aes` | aarch64 | `neon` | `+aes` | macOS, iOS |
+| `sha2` | aarch64 | `neon` | `+sha2` | macOS, iOS |
+| `sha3` | aarch64 | `neon`, `rdm`, `sha2` | `+sha3` | macOS |
+| `crc` | aarch64 | | `+crc` | macOS |
+| `lse` | aarch64 | | `+lse` | macOS |
+| `sve` | aarch64 | `fp16`, `rdm` | `+sve` | off |
+| `sve2` | aarch64 | `sve` | `+sve2` | off |
+| `sme` | aarch64 | `neon`, `rdm` | `+sme` | off |
+| `sme2` | aarch64 | `sme` | `+sme2` | off |
+| `sme-f64f64` | aarch64 | `sme` | `+sme-f64f64` | off |
 
 The x86_64 baseline is `sse2` and, by platform, what the table's last column names (macOS and
 the iOS simulator: `core2`, which every C compiler for them assumes; Android: its ABI). The x86-64 psABI levels
@@ -828,11 +558,11 @@ to `movbe`, `x86-64-v4` adds `avx512f`, `avx512bw`, `avx512cd`, `avx512dq` and `
 feature list item may be a level name (x86_64 only; a build.toml list skips it on another
 instruction set), and `--target-cpu=L` or the build.toml key `target-cpu = "L"` puts a level before
 every feature list (the flag replaces the key, and the last flag wins; another name is an error, and
-so is the flag on another instruction set, which the key skips). An x86_64 build always names its
-level, never the C compiler's default (Ubuntu 26.04's GCC defaults to `x86-64-v3`): the C flags are
-`-march=x86-64-vN` for the highest level the set holds, else `-march=x86-64`, and then the `-m` flag
-of each feature beyond that level, the platform baseline's included (macOS: `-msse3 -mssse3 -mcx16
--msahf`), in table order; the `x86-features` probe compiles `<immintrin.h>` under them.
+so is the flag on another instruction set, which the key skips). The C tree of an x86_64 build always
+names its level, never the C compiler's default (Ubuntu 26.04's GCC defaults to `x86-64-v3`): its C
+flags are `-march=x86-64-vN` for the highest level the set holds, else `-march=x86-64`, and then the
+`-m` flag of each feature beyond that level, the platform baseline's included (macOS: `-msse3 -mssse3
+-mcx16 -msahf`), in table order.
 
 The aarch64 baseline depends on the platform: macOS has every feature of Apple clang's default
 CPU (`apple-m1`, the oldest Apple silicon Mac); iOS those of its default CPU (`apple-a7`, which
@@ -849,8 +579,7 @@ and intrinsics take them all (`armv8.2-a` for `fp16`, `dotprod`, `i8mm`, `bf16`,
 `sve`, which only Armv8.2 cores have; `armv8.1-a` for `rdm`, whose intrinsics Clang guards
 with Armv8.1; else `armv8-a`), then each enabled extension that architecture lacks (Armv8.1-A
 has `rdm`, `lse` and `crc`). GCC 13 with binutils 2.40 rejects `+dotprod`, `+i8mm` and `+sha3`
-on `armv8-a`, and `+rdm` (it spells `+rdma`). The `aarch64-features` probe runs only for a
-build with features beyond the baseline, and its error names that flag.
+on `armv8-a`, and `+rdm` (it spells `+rdma`).
 
 A build starts from its instruction set's baseline (the rows that are always on), applies
 the build.toml `target-features` list (a profile's list replaces the build-level one), then
@@ -862,11 +591,10 @@ baseline feature disabled ("target feature 'sse2' is part of every x86_64 build"
 feature 'dotprod' is part of every aarch64 build for macos"). A
 build.toml list may name features of several instruction sets: a build skips the others';
 on the command line another instruction set's feature is an error ("no target feature
-'neon' for wasm32; .."). The set adds each enabled feature's C flag to every compile, after
-its probe accepted it (a build without a manifest probes too), is part of every object
-fingerprint, of the emit stamp and of the per-unit cache key (a changed set emits and
-compiles every unit again), and selects the `@simd_impl` entries the vector planner may
-use; a build with no feature loads no backend file. A function with `@target_feature` is callable only from a build, or a function, that
+'neon' for wasm32; .."). The set is part of the emit stamp, of the per-unit cache key and of the
+native record's key (a changed set emits and compiles every module again), puts each enabled feature's
+C flag in the C tree's `__cflags`, and selects the `@simd_impl` entries the vector planner may use; a
+build with no feature loads no backend file. A function with `@target_feature` is callable only from a build, or a function, that
 holds its features.
 
 ```sh
@@ -892,7 +620,7 @@ in the callee module's instance file), whose calls do the same.
 On x86_64 each function with vector code and no features of its own also gets a copy per level of
 `--simd-dispatch=L` (build.toml `simd-dispatch`; a comma list of `x86-64-v2` .. `x86-64-v4`, default
 `x86-64-v3` in a profile at opt-level 2 or more, `off` at 0 or 1 (`debug`, `test`: the copies make
-the C compile of vector code 1.4 to 1.7 times longer) and in a script build without `--profile`;
+the compile of vector code longer) and in a script build without `--profile`;
 levels the build's set holds skipped; `off` for none), and opens with a check: when the CPU has a
 level's features, it calls that level's copy, the highest first (`__sc_simd_lvl()`: the
 detector's answer, read once per TU). A copy calls copies, so one check runs where code without the
@@ -906,19 +634,17 @@ the build's set included: a program can choose code at run time, never a result.
 
 | Flag | Effect |
 |------|--------|
-| `--profile=NAME` | Select build profile (also the value of `PROFILE`). A bare `build <file.spc>` without it applies no profile flags while `PROFILE` still reads `debug`: pass `--profile=debug` for `-O0 -g` and frame pointers |
-| `--sanitizers` | Add AddressSanitizer and UndefinedBehaviorSanitizer to every C build of the command, after the profile's flags (`super-c test --sanitizers`: the compiler under test and the runner) |
+| `--profile=NAME` | Select build profile (also the value of `PROFILE`). A bare `build <file.spc>` without it applies no profile while `PROFILE` still reads `debug`: pass `--profile=debug` for its debug information |
 | `-h`, `--help` | Print the usage on stdout and exit 0 |
-| `--jobs=N` | Worker count for parallel stages + cc, and the jobserver slots that nested `super-c` processes share (default: build.toml `jobs`, else one per CPU) |
+| `--jobs=N` | Worker count for the parallel stages, and the jobserver slots that nested `super-c` processes share (default: build.toml `jobs`, else one per CPU) |
 | `--out-dir=DIR` | Override output directory (a bare `build file.spc` emits under `DIR/<profile>/raw`) |
-| `--cc=CMD` | Override C compiler (manifest and bare builds alike) |
-| `--cstd=STD` | Replace the base C flags string (build.toml `cstd`; also for a bare `build file.spc`), passed verbatim (e.g. `-std=gnu11 -D_POSIX_C_SOURCE=200809L`) |
 | `-o NAME` | Output binary name (`build`/`release`/`bindgen` only, not script mode) |
 | `--bin=NAME` | Build/run only that `[bin.NAME]` target; with `-o PATH`, link it at PATH. An error without build.toml |
 | `--transpiler=CMD` | `build`/`release` from build.toml: run CMD as the transpile step (see External transpiler above). An error without build.toml |
-| `--print-probes` | `build`/`release` from build.toml: print the toolchain probe table for the target and profile (see Toolchain probes above). An error without build.toml |
-| `--target=T` | Cross-compile OS: `windows`/`macos`/`linux`/`ios`/`android`/`wasm` (the value of `PLATFORM`). `wasm` builds with `$WASI_SDK_PATH`'s clang and sysroot (else `$WASI_SYSROOT`; the sysroot gives the headers only), links an 8 MiB stack placed first with std's C library and no toolchain library but compiler-rt's builtins (Wasm C library below), and strips at link time; `windows` links with `-Wl,--stack,8388608`, so every target's main thread has the 8 MiB stack of Linux and macOS (`push_sdk_libs`) |
-| `--arch=A` | Cross-compile arch: `x86_64`/`aarch64`/`wasm32` (the value of `ARCH`). On macOS the host `cc` builds the other instruction set (`-arch`); another platform's needs its toolchain (`--cc`) |
+| `--target=T` | Cross-compile OS: `windows`/`macos`/`linux`/`ios`/`android`/`wasm` (the value of `PLATFORM`). `wasm` reads its headers from `$WASI_SDK_PATH`'s sysroot (else `$WASI_SYSROOT`), links an 8 MiB stack placed first with std's C library (Wasm C library below), and strips at link time; `windows` links with an 8 MiB main-thread stack, so every target's main thread has the stack of Linux and macOS. A cross build needs the target's sysroot for its headers and libraries (`--sysroot=DIR`, else discovered) |
+| `--arch=A` | Cross-compile arch: `x86_64`/`aarch64`/`wasm32` (the value of `ARCH`) |
+| `--sysroot=DIR` | The target's C library tree, its headers and libraries (`src/bindgen/ctarget.spc`). Default: the SDK `SDKROOT`, `DEVELOPER_DIR` or xcrun names on Apple targets; on Linux the running system's `/usr/include`, for another instruction set only through its multiarch directory; the NDK of `ANDROID_NDK_HOME`; mingw-w64's tree beside a mingw `gcc` or `clang` in PATH; the WASI sysroot on wasm. Without one a build stops with "no sysroot found for <triple>" |
+| `--emit-c` | `build`/`release`: write the program's C tree (`__units`, `__cflags`, `__ldflags`; Generated output below) and compile or link nothing |
 | `--target-feature=L` | CPU features, a comma list of `+name`/`-name` applied after build.toml's `target-features` (see CPU features above) |
 | `--target-cpu=L` | x86_64 level (`x86-64`, `x86-64-v2`, `x86-64-v3`, `x86-64-v4`) applied before every feature list; replaces build.toml's `target-cpu` |
 | `--simd-width=W` | Vector width the planner prefers on AVX-512: `256` (default) or `512` |
@@ -927,7 +653,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `--no-lint` | Disable lint pass |
 | `--const-eval-steps=N` | Cap compile-time evaluation steps (~2M default) |
 | `--const-eval-memory=SIZE` | Cap compile-time evaluation memory (~96 MiB default) |
-| `--lib` | Build as library instead of binary (an error without build.toml). A static library is archived with `ar`, for another platform's objects with the cross compiler's archiver (`llvm-ar` beside a clang, as in the wasi-sdk and the NDK; `<triple>-ar` beside a `<triple>-gcc`; `archiver` in `src/build_system/build.spc`) |
+| `--lib` | Build as library instead of binary (an error without build.toml). The own archiver writes a static library, on every target |
 
 ## Environment Variables
 
@@ -936,21 +662,16 @@ the build's set included: a program can choose code at run time, never a result.
 | Variable | Effect |
 |----------|--------|
 | `SC_TIMINGS` | Print a one-line per-phase timing summary |
-| `SC_BUILD_STATS` | Append one JSON record per engine build to the named file (`-` = stderr): every phase of the partition in ms, the streamed C compile span apart from it, cache switches, the instance re-lowering counts by reason (`"relower"`), peak RSS at five boundaries (`src/driver/stats.spc`) |
+| `SC_BUILD_STATS` | Append one JSON record per engine build to the named file (`-` = stderr): every phase of the partition in ms, cache switches, the instance re-lowering counts by reason (`"relower"`), peak RSS at five boundaries (`src/driver/stats.spc`) |
 | `SC_BUILD_MEM` | With `SC_BUILD_STATS`: turn the runtime allocation tracker on for the build, so the record carries allocation calls, requested bytes, live bytes and per-phase survivors (slower; never for timing runs). `"mem":{"on":false` = the runtime this compiler links predates the counters (a bootstrap build) |
 | `SC_STD_DIR` | The std directory, in place of the `std/` found beside the compiler binary (`exe_std_dir` in `src/main.spc`). `super-c test` sets it for the compiler under test, which `--out-dir` may place outside the project, when the project holds `std/core.spc` and the variable is unset (`src/build_system/build.spc`) |
-| `SC_CACHE_DIR` | Override the build cache base (each project's root below it: objects under `o/`, the linker's ThinLTO caches under `lto/`, prelude images under `prelude/`) |
-| `SC_NO_CACHE` | Disable the object cache (the linker cache keeps its root) |
+| `SC_CACHE_DIR` | Override the build cache base (each project's root below it: prelude images under `prelude/`) |
+| `SC_NO_CACHE` | Disable the build cache (the prelude images) |
 | `SC_TEST_CACHE_DIR` | The cache base `super-c test` gives the compilers its tests start, kept across runs (CI sets `~/.super-c/cache/.tests`); unset, `<out-dir>/test/cache`, deleted at the run's start and end |
 | `SC_JOBSERVER` | The process-tree jobserver the first compiler of a tree makes, or a test runner started without one (`--jobs` slots), and every process it starts joins: `<slots>,<fd>` on POSIX (the inherited descriptor of an unlinked slot file), `<slots>,<path>` on Windows (a temporary file deleted with its last handle). A process holds a slot as a byte-range lock on one byte (`fcntl` record lock, `LockFileEx`), which the system drops when the process ends by any exit, abort or kill, so a killed process never takes slots with it. One more slot is implicit to each process |
-| `SC_UNITY_MAX` | Bytes of C up to which a program compiles as one unit (`__sc_unity.c`; default 2 MiB); a larger program compiles its small units in packs (`1`: a small program does too); `0` compiles every unit alone, with no pack (tests of per-unit objects and staleness set it). The emit stamp records it |
-| `SC_LTO` | Override the profile's `lto` mode: `none`, `full`, `auto`, `thin` |
-| `SC_NO_LTO_CACHE` | Link ThinLTO without the linker cache |
+| `SC_UNITY_MAX` | Bytes of C up to which the C tree of `--emit-c` is one unit (`__sc_unity.c`; default 2 MiB); a larger program puts its small units in packs (`1`: a small program does too); `0` keeps every unit alone, with no pack. The emit stamp records it |
 | `SC_NO_EMIT_CACHE` | Disable the emit stamp |
-| `SC_NATIVE` | The native backend's module choice (super-c-compiler-internals, "Native backend"): `0` C only, `1` every module, else a comma-separated list of module paths. Unset, a linking build with no sanitizer, or any linking build when the C compiler is not installed, takes every module where the target has a native backend (macOS arm64, Linux x86-64, Linux arm64, Windows x86-64, wasm32-wasip1). It is part of the emit stamp's compiler identity and of the native record's key |
-| `SC_LINK` | `cc` keeps every link and archive with the C toolchain; `own` fails a link the own linker does not serve (or whose objects are not all native); unset, a link whose objects are all native takes the own linker where it serves the command |
-| `SC_NATIVE_STATS` | Print, per module, `native` or `through C: <reason>`, then the native and C module counts and the native phase's ms |
-| `SC_NATIVE_LOG` | A file each build appends `<module>: <reason> (<os> <arch> <tree>)` to for every module its last run sends through C: a whole test suite's fallbacks in one list |
+| `SC_NATIVE_STATS` | Print `native: <module> native` per module, then the compiled and refused module counts and the native phase's ms (a refused module is a build error, printed with its reason in every build) |
 | `SC_NO_TU_CACHE` | Disable per-TU journal/replay cache |
 | `SC_BUILD_MEM_BUDGET` | Cap the estimated bytes in flight across the parallel jobs of the type check, the borrow check and the emission (`64M`, `2G`); a job above the whole budget runs alone; a value that is not digits plus one optional K/M/G suffix, or that overflows, is a fatal error |
 | `SC_TYPE_STATS` | Print the type identity counters per phase and at the end of emission: interning hits and probe steps, foreign lowerings, instance-graph interns, layout cache traffic, the bytes the package type table and the module pools retain, the publication census, and per publication the kept bodies remapped and the time it took (`type-identity.md` in the internals skill) |
@@ -1004,7 +725,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `SC_LEAK_CHECK` | Leak and double-free tracker (also reports a `realloc` of a freed pointer; no other use-after-free check): any non-`0` value reports at exit; a value starting `f`/`F` (e.g. `fatal`) exits 23 on findings |
 | `SC_TASK_TRACE` | Coroutine/task tracing for the life of the process (empty or `0`: off) |
 | `SC_SCHED_SEED` | Scheduler seed, read only when the program set none itself (deterministic replay) |
-| `SC_LOCK_ORDER` | Lock-order inversion checking (`ffi/sc_runtime.spc`) in a build with `-DSC_LOCKDEP` (the `race` profile; the build constant `LOCKDEP`): non-`0` reports; `f`/`F` prefix aborts |
+| `SC_LOCK_ORDER` | Lock-order inversion checking (`ffi/sc_runtime.spc`) in a build of a profile with `lockdep = true` (the build constant `LOCKDEP`): non-`0` reports; `f`/`F` prefix aborts |
 | `SC_TEST_SUPERC` | Path of compiler under test (wasm lane) |
 | `SC_CTARGET_CLANG` | Clang of the pinned major release that `tests/codegen/ctarget_test.spc` compares bindgen's C environment tables with |
 | `SC_CTARGET_REQUIRE` | Non-empty: a missing oracle clang fails those tests instead of passing them without checking |
@@ -1023,63 +744,55 @@ super-c command bootstrap
 
 ## Generated Output
 
-`super-c app.spc` (and `super-c build app.spc`) emits the C into `build/<profile>/raw/`
-(`build/debug/raw/` without `--profile`): `PROFILE` makes the emitted C depend on the profile,
-so every profile has its own tree, per-TU cache, manifest and orphan pruning, and switching
-profiles never mixes trees. A program that does not read `PROFILE` emits the same C under
-every profile.
+`super-c build app.spc` writes its tree into `build/<profile>/raw/` (`build/debug/raw/` without
+`--profile`): `PROFILE` makes the emission depend on the profile, so every profile has its own tree,
+per-TU cache, manifest and orphan pruning, and switching profiles never mixes trees. A linking build
+writes the native objects there; `--emit-c` (and a bare `super-c app.spc`) writes the program's C
+instead.
 
 ```
 build/
   debug/raw/
-    super_rt.h        # C backend header: libc includes, arithmetic helpers, runtime prototypes
-    std/
-      rt/base.c       # the runtime: traps, leak/double-free tracker, overflow report (std/rt/base.spc)
+    super_rt.h        # the runtime header the C units include: libc includes, arithmetic helpers, prototypes
     __sc_fwd.h        # runtime and extern-block includes, dyn/extern declarations shared by every TU
-    __sc_registry.c   # runtime helper definitions, ZST sentinels and the reflection registry
+    __sc_registry.c   # runtime helper definitions, ZST sentinels and the reflection registry, as C
+    __sc_registry_n.o # the same, native (a linking build)
     __sc_manifest     # output paths, content hashes, header dependencies, shard counts
     __sc_shards       # the shard counts this build used (read back by the next build)
+    __sc_native       # the native record: per module, the key its objects were compiled under
+    __sc_hfacts       # the record of the header scan (`native_header_facts`)
     __ldflags         # linker flags collected from @link (one per line)
     .tu_cache         # per-TU journal/replay cache
-    app.h  app.c      # one .h/.c per module (.h: prototypes)
+    app.h             # one header per module (prototypes)
+    app.o app__inst.o # a linking build: the module's object and its instances' object
+    app.c app__inst.c # --emit-c: the module's C and its generic instances, glue and constants
+    __units __cflags  # --emit-c: the units to compile and the flags of every compile
     __sc_t/           # one definition header per type (app__Point.h: typedef, definition, layout check)
-    app__inst.c       # generic instances, glue and constants owned by app
     __std/            # demanded prelude modules only
-      core.h core.c
-      interfaces.h interfaces.c
-      str.h str.c
-      string.h string.c
 ```
 
 A manifest build (`super-c build` with `build.toml`) works in one directory per target and
 profile: `<out-dir>/<profile>` for the main binary, `<out-dir>/<profile>-bin-NAME` and
-`<out-dir>/<profile>-lib` for the other targets. The emitter writes `raw/` there (the
-per-TU cache and `__sc_manifest` with it), and the C compiler reads that one tree: the
-emitter compares each file with what it holds and writes only the files whose content
-changed, so an unchanged file keeps its mtime (`publish_file`). A build whose emission
-fails writes no unit or header, so the tree stays as the last successful emission left
-it. Objects compile into `obj/` with `-MMD` dep tracking,
-and `compile_commands.json` (written only when its text changes, so C tooling does not reload it) and
-the emit stamp `.emit_stamp` land beside them, with the
-toolchain probe record `.probes` once a build or `--print-probes` measured a probe. The link record
-`<out-dir>/__link-<hash of the binary's path>.cmd` holds the compiler's version line, the link command
-and the probe results it used.
-On Windows, a link or archive line longer than 8192 characters passes its objects through the response
-file `@<record>.rsp` (CreateProcess takes 32,767 characters, and the gcc driver's own lines add to
-ours); the script lane's link does the same with `<tree>/__link.rsp`. `super-c test`
-runs the same engine on the generated test root under the `test` profile in
-`<out-dir>/test/` (`raw/`, `obj/`, the runner `__tests`), with the emit
-stamp and object cache making an unchanged suite a link check; `super-c bench` uses
-`<out-dir>/bench/<profile>/`. Engine code takes every manifest output path from out-dir
-(the `out-dir` key or `--out-dir`, default `build`) and never spells `build/`. The bare
-`super-c <root.spc>` tree under `<root dir>/build/<profile>/raw` is the one exception.
+`<out-dir>/<profile>-lib` for the other targets. The emitter writes `raw/` there (the per-TU cache
+and `__sc_manifest` with it), and the link reads that one tree: the emitter compares each file with
+what it holds and writes only the files whose content changed, so an unchanged file keeps its mtime
+(`publish_file`). A build whose emission fails writes no unit or header, so the tree stays as the
+last successful emission left it. The emit stamp `.emit_stamp` lands beside `raw/`. The link record
+`<out-dir>/__link-<hash of the binary's path>.cmd` holds the own linker's command line (` +archive` for
+a static library, ` +strip` for a stripped link): another command, a missing binary or a newer object
+links again. `super-c test` runs the same engine on the generated test root under the `test` profile
+in `<out-dir>/test/` (`raw/`, the runner `__tests`), with the emit stamp, the per-TU cache and the
+native record making an unchanged suite a link check; `super-c bench` uses `<out-dir>/bench/<profile>/`.
+Engine code takes every manifest output path from out-dir (the `out-dir` key or `--out-dir`, default
+`build`) and never spells `build/`. The bare `super-c <root.spc>` tree under
+`<root dir>/build/<profile>/raw` is the one exception.
 
 One process builds a profile directory at a time: a build holds the lock file `.lock` in it
 (`bsys::tree_lock`: a POSIX record lock, `LockFileEx` on Windows, none under WASI) from the emit to
 the link, and the bare `super-c <root.spc>` holds its `build/<profile>` the same way. A second build of
 the directory prints "build: waiting for another build of '<dir>'" and waits at most 30 minutes. Without
-the lock it would rewrite the units the first one compiles: a torn unit compiles, and its object enters
-the object cache under the key of the text the first build hashed. The OS releases the lock when the
+the lock it would rewrite the files the first one reads, which could compile or link a torn file. The
+OS releases the lock when the
 process ends, also by a crash; a transpiler child (`--emit-sub`) runs under its engine's lock.
 
 Parallel analysis (the resolve frontier, the type check, borrow check and always-panics
@@ -1087,11 +800,16 @@ item jobs, the emission frontier) is used only when the package holds at least 2
 non-prelude source (`Package::analysis_jobs`,
 `loader::PAR_MIN_USER_BYTES`); below that the worker pool costs about as much CPU as the
 serial compile and gains a few milliseconds at most, so small compiles run serially and
-hand their jobserver slots back. The parallel C compile is unaffected.
+hand their jobserver slots back. The native compile of the modules is parallel either way.
 
-Includes are relative: `cc -std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 -funsigned-char -ffp-contract=off $(find build/debug/raw -name '*.c' ! -name '__sc_unity.c' ! -name '__sc_pack*.c') $(cat build/debug/raw/__ldflags)`
-builds the whole tree with no `-I` flags (`__sc_unity.c` and `__sc_pack<k>.c` include other units, so a
-build compiles them or their members, never both; without the feature macros of the default `cstd`,
-Darwin's `struct stat` lacks the fields std binds) (verified: the tree compiles and runs with `clang`;
-add `-DSC_ARITH_WRAP` for wrapping integer overflow, and the `LIBM_AS_WRITTEN` flags for the
-engine's libm results).
+The C tree of `--emit-c` builds with any C compiler and no `-I` flag: compile each unit `__units`
+lists with the flags of `__cflags`, then link the objects with the flags of `__ldflags`, one per line
+(`ci/cc_tree.sh` does it: `sh ci/cc_tree.sh build/debug/raw app`). `__sc_unity.c` and
+`__sc_pack<k>.c` include other units, and `__units` names them in place of their members. `__cflags`
+holds the dialect and the feature macros of `push_c_env` (without them Darwin's
+`struct stat` lacks the fields std binds), `-funsigned-char` (the language's `char` is unsigned, and
+`super_rt.h` fails to compile without it), `-ffp-contract=off` (only an explicit `fma` fuses, so float
+results equal the constant evaluator's), `-Werror=incompatible-pointer-types`, `-fno-builtin-<f>` for
+the transcendental libm functions (`LIBM_AS_WRITTEN` in `src/driver/emit.spc`), the target and CPU
+feature flags, the profile's `-O` level and `-g`, and `-DSC_ARITH_WRAP` when the profile wraps
+integer overflow.

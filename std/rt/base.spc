@@ -380,31 +380,6 @@ fn reflect_types(n: *mut usize) *const *const void {
     return unsafe REFL;
 }
 
-// ---- sanitizer options --------------------------------------------------------------------------
-// ASan's use-after-return check moves frames to a fake stack, where GCC (13.3 to 15) places an object
-// aligned above 32 bytes 32 bytes off: an AVX-512 build faults on its aligned moves, so the fake stack is
-// off. An illegal instruction (a jump through a corrupt code address) gets ASan's report, with the
-// faulting pc and the stack. ASAN_OPTIONS still overrides both.
-@when(ADDRESS_SANITIZER)
-@export("__asan_default_options")
-fn asan_default_options() *const char {
-    return "detect_stack_use_after_return=0:handle_sigill=1";
-}
-
-// Whether the program is built with AddressSanitizer, as a constant of this module: a read of the build
-// constant at run time would emit std's build module, and the prelude it imports, into every program.
-@when(ADDRESS_SANITIZER)
-const ASAN: bool = true;
-@when(!ADDRESS_SANITIZER)
-const ASAN: bool = false;
-
-// 1 in a program built with AddressSanitizer, whose frames carry redzones: std's runtime sizes its default
-// task stack by it.
-@export("sc_rt_asan")
-const fn rt_asan() i32 {
-    return ASAN as i32;
-}
-
 // ---- POSIX bindings ------------------------------------------------------------------------------
 
 @platform(macos | ios | linux | android)
@@ -597,7 +572,7 @@ const UC_SP_AT: usize = 432;
 // it knows the thread is armed. A fault is an overflow when its address is in the guard region below the
 // running thread's own stack or, while the thread runs on another stack (a coroutine's), within STK_NEAR
 // of the stack pointer. Any other fault goes to the handler installed before this one, else to the
-// default action: a wild pointer still crashes as one, and under AddressSanitizer gets ASan's report.
+// default action: a wild pointer still crashes as one.
 
 @platform(macos | ios | linux | android)
 const STK_MAGIC: u64 = 0x31544b535f4353; // "SC_STK1"
@@ -946,11 +921,6 @@ fn stk_arm(lo0: usize, hi0: usize, main: bool) *mut void {
         stk_give(m);
         return null;
     }
-    if ASAN && (old.ss_flags & SS_DISABLE) == 0 && old.ss_sp != null {
-        // ASan gives each thread a signal stack and unmaps the one in place when the thread ends: this one
-        // replaces ASan's, which nothing else frees.
-        unsafe munmap(old.ss_sp, old.ss_size);
-    }
     unsafe STK_MINE = m;
     return m;
 }
@@ -964,14 +934,8 @@ fn stack_arm(lo: usize, hi: usize) *mut void {
     return stk_arm(lo, hi, false);
 }
 
-// Release the signal stack `alt` of `stack_arm` when its thread ends. Under ASan nothing: ASan's end of
-// the thread unmaps the signal stack in place, and the cache never holds one.
+// Release the signal stack `alt` of `stack_arm` when its thread ends.
 @platform(macos | ios | linux | android)
-@when(ADDRESS_SANITIZER)
-@export("__sc_stack_disarm")
-fn stack_disarm(_alt: *mut void) {}
-@platform(macos | ios | linux | android)
-@when(!ADDRESS_SANITIZER)
 @export("__sc_stack_disarm")
 fn stack_disarm(alt: *mut void) {
     let ss = stack_t { ss_sp: null, ss_size: unsafe STK_ALT, ss_flags: SS_DISABLE }; // Darwin checks the size

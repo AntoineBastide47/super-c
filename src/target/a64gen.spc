@@ -398,7 +398,7 @@ extend Gen {
     }
 
     // Register `r` holds value `x` from now on (NONE: no value).
-    fn set_owner(self: &mut Self, r: u8, x: u32) {
+    const fn set_owner(self: &mut Self, r: u8, x: u32) {
         self.owner[r as usize] = x;
         if x == NONE {
             self.held &= ~bit(r);
@@ -835,7 +835,7 @@ extend Gen {
     // ---- Frame ----
 
     // A stack slot of `size` bytes aligned to `al` (memory values and spills); its sp offset.
-    fn slot_alloc(self: &mut Self, size0: u32, al0: u32) u32 {
+    const fn slot_alloc(self: &mut Self, size0: u32, al0: u32) u32 {
         let size = if size0 < 8 {
             8u32;
         } else {
@@ -917,7 +917,7 @@ extend Gen {
     // Whether a `bytes`-byte access at value `v` + `off` reads or writes a defined data symbol aligned
     // for it, `v` its address recomputed at each use: then `s` and `add`, the symbol and the offset,
     // which the access's page offset takes (`mem_sym`).
-    fn sym_mem(self: &Self, v: Value, off: i64, bytes: u32, s: &mut u32, add: &mut i64) bool {
+    const fn sym_mem(self: &Self, v: Value, off: i64, bytes: u32, s: &mut u32, add: &mut i64) bool {
         if (v & (VPARAM | VFLAG)) != 0 || self.va[v as usize].home != H_REMAT || self.va[v as usize].reg != NOREG {
             return false;
         }
@@ -1603,7 +1603,7 @@ extend Gen {
     }
 
     // The location value index `x` is read from now.
-    fn loc_of(self: &Self, x: u32) Lc {
+    const fn loc_of(self: &Self, x: u32) Lc {
         let va = self.va[x as usize];
         if va.reg != NOREG {
             return Lc { kind: LC_REG, reg: va.reg, off: 0, val: x };
@@ -3948,7 +3948,7 @@ extend Gen {
 
     // The instructions of the intrinsic body symbol `s` names (`target::intrin`); empty for another
     // function.
-    fn intrinsic(self: &Self, s: u32) str<'static> {
+    const fn intrinsic(self: &Self, s: u32) str<'static> {
         let p = unsafe &*self.pkg;
         let ps = p.syms[self.b().syms[s as usize] as usize];
         if ps.def != NONE {
@@ -4112,7 +4112,7 @@ extend Gen {
     }
 
     // Patch the local branch at word `w` to the next word.
-    fn here(self: &mut Self, w: u32) {
+    const fn here(self: &mut Self, w: u32) {
         let off = ((self.code.len() as u32 - w) * 4) as i32;
         self.code[w as usize] = a::repatch(self.code[w as usize], off);
     }
@@ -6196,7 +6196,7 @@ extend Gen {
 }
 
 // The bits of lane type `lt` (a float) holding the integer `k`.
-fn float_bits(lt: u8, k: u32) u64 {
+const fn float_bits(lt: u8, k: u32) u64 {
     if lt == T_F32 {
         return fl::f32_bits(k as f32);
     }
@@ -6689,7 +6689,7 @@ extend Gen {
 
 extend Gen {
     // The text of body message `m`.
-    fn msg_text(self: &Self, m: u32) str {
+    const fn msg_text(self: &Self, m: u32) str {
         let p = unsafe &*self.pkg;
         return p.spell(p.msgs[self.b().msgs[m as usize] as usize]);
     }
@@ -6985,7 +6985,7 @@ fn asm_operand_text(o: &mut String, c: u8, rg: u8, ty: u8, k: i64, md: u8) bool 
 }
 
 // The register a clobber names (`x19`, `w19`, `d8`, `v8`, `q8`, `lr`), NOREG for none (`memory`, `cc`).
-fn clobber_reg(s: str) u8 {
+const fn clobber_reg(s: str) u8 {
     if s.len() < 2 {
         return NOREG;
     }

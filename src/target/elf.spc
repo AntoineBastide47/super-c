@@ -80,7 +80,7 @@ fn add_str(t: &mut Vector<u8>, s: str) u32 {
 }
 
 // The name, type and flags of object section `k` of `o`.
-fn sec_info<'a>(o: &'a ob::Obj, k: u8, name: &mut str<'a>, ty: &mut u32) u64 {
+const fn sec_info<'a>(o: &'a ob::Obj, k: u8, name: &mut str<'a>, ty: &mut u32) u64 {
     *ty = SHT_PROGBITS;
     if k >= ob::S_COUNT {
         let s = &o.secs[k as usize];
@@ -211,7 +211,7 @@ const fn rel_type_a64(k: u8, insn: u32) u32 {
 }
 
 // The word at byte `off` of section `k` of `o`.
-fn word_at(o: &ob::Obj, k: u8, off: u32) u32 {
+const fn word_at(o: &ob::Obj, k: u8, off: u32) u32 {
     let b = &o.secs[k as usize].bytes;
     let i = off as usize;
     return b[i] as u32 | b[i + 1] as u32 << 8 | b[i + 2] as u32 << 16 | b[i + 3] as u32 << 24;

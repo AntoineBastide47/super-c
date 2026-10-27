@@ -5,7 +5,7 @@
 // Every call requires `unsafe`.
 //
 // The C facts come from the real headers. A block names its header when the build's C flags
-// (`-D_POSIX_C_SOURCE=200809L`) can include it, so the C compile checks the values and layouts. The
+// (`-D_POSIX_C_SOURCE=200809L`) can include it, so the build checks the values and layouts against it. The
 // functions those flags hide (Apple's `sysctlbyname`, `proc_pid_rusage` and zone functions, glibc's
 // `syscall` and `__libc_*`) and the Win32 calls (<windows.h> would define its macros in every unit of the
 // program) are in blocks without a header, which declare them from their Super-C types; the records they
@@ -564,8 +564,7 @@ fn memory_counters(pmc: &mut ProcessMemoryCounters) bool {
 // `free`, aligned allocation calls (std's Global makes them only for types aligned above what malloc
 // guarantees), and on Apple the allocations libc makes internally (two-level namespace: libc binds its own
 // malloc); glibc binds ours, so on Linux those count too. Windows (no real allocator to forward to across
-// CRTs), wasm, Android and builds under an address or thread sanitizer (its runtime owns the malloc family
-// and allocates while it starts, before any state here exists) count nothing: `supported` is 0.
+// CRTs), wasm and Android count nothing: `supported` is 0.
 //
 // Accounting is per thread (a cache line per thread, handed out on the thread's first counted call, never
 // reclaimed, at most ACCT_THREADS; later threads share one atomic line), so counting costs the owning thread
@@ -595,7 +594,7 @@ static mut MINE: *mut Line = null;
 
 // Whether this build defines the malloc family below: the condition of their gates.
 const fn counted() bool {
-    return (PLATFORM == Platform::MacOS || PLATFORM == Platform::IOS || PLATFORM == Platform::Linux) && !THREAD_SANITIZER && !ADDRESS_SANITIZER;
+    return PLATFORM == Platform::MacOS || PLATFORM == Platform::IOS || PLATFORM == Platform::Linux;
 }
 
 /// Whether malloc-family calls are counted on this platform: 1, else 0.
@@ -647,7 +646,6 @@ pub unsafe fn sc_bs_alloc_bytes() i64 {
 
 // Count one call that requests `n` bytes, when accounting is on.
 @platform(macos | ios | linux)
-@when(!THREAD_SANITIZER && !ADDRESS_SANITIZER)
 fn note(n: usize) {
     if unsafe atomic::load_i32(&ACCT_ON, RELAXED) == 0 {
         return;
@@ -725,7 +723,6 @@ fn zone0() *mut Zone {
 
 /// C `malloc`: counted, then the default zone's.
 @platform(macos | ios)
-@when(!THREAD_SANITIZER && !ADDRESS_SANITIZER)
 @export("malloc")
 unsafe fn counted_malloc(n: usize) *mut void {
     note(n);
@@ -735,7 +732,6 @@ unsafe fn counted_malloc(n: usize) *mut void {
 
 /// C `calloc`: counted with the product of its arguments, then the default zone's.
 @platform(macos | ios)
-@when(!THREAD_SANITIZER && !ADDRESS_SANITIZER)
 @export("calloc")
 unsafe fn counted_calloc(c: usize, n: usize) *mut void {
     note(c.wrapping_mul(n));
@@ -745,7 +741,6 @@ unsafe fn counted_calloc(c: usize, n: usize) *mut void {
 
 /// C `realloc`: counted with the new size, then the zone that owns `p`.
 @platform(macos | ios)
-@when(!THREAD_SANITIZER && !ADDRESS_SANITIZER)
 @export("realloc")
 unsafe fn counted_realloc(p: *mut void, n: usize) *mut void {
     note(n);
@@ -761,7 +756,6 @@ unsafe fn counted_realloc(p: *mut void, n: usize) *mut void {
 
 /// C `free`: the zone that owns `p`; a pointer of no zone is ignored.
 @platform(macos | ios)
-@when(!THREAD_SANITIZER && !ADDRESS_SANITIZER)
 @export("free")
 unsafe fn counted_free(p: *mut void) {
     if p == null {
@@ -775,7 +769,6 @@ unsafe fn counted_free(p: *mut void) {
 
 // glibc's real allocator under its own names, which no header declares.
 @platform(linux)
-@when(!THREAD_SANITIZER && !ADDRESS_SANITIZER)
 extern "C" {
     fn __libc_malloc(n: usize) *mut void;
     fn __libc_calloc(c: usize, n: usize) *mut void;
@@ -785,7 +778,6 @@ extern "C" {
 
 /// C `malloc`: counted, then glibc's.
 @platform(linux)
-@when(!THREAD_SANITIZER && !ADDRESS_SANITIZER)
 @export("malloc")
 unsafe fn counted_malloc(n: usize) *mut void {
     note(n);
@@ -794,7 +786,6 @@ unsafe fn counted_malloc(n: usize) *mut void {
 
 /// C `calloc`: counted with the product of its arguments, then glibc's.
 @platform(linux)
-@when(!THREAD_SANITIZER && !ADDRESS_SANITIZER)
 @export("calloc")
 unsafe fn counted_calloc(c: usize, n: usize) *mut void {
     note(c.wrapping_mul(n));
@@ -803,7 +794,6 @@ unsafe fn counted_calloc(c: usize, n: usize) *mut void {
 
 /// C `realloc`: counted with the new size, then glibc's.
 @platform(linux)
-@when(!THREAD_SANITIZER && !ADDRESS_SANITIZER)
 @export("realloc")
 unsafe fn counted_realloc(p: *mut void, n: usize) *mut void {
     note(n);
@@ -812,7 +802,6 @@ unsafe fn counted_realloc(p: *mut void, n: usize) *mut void {
 
 /// C `free`: glibc's.
 @platform(linux)
-@when(!THREAD_SANITIZER && !ADDRESS_SANITIZER)
 @export("free")
 unsafe fn counted_free(p: *mut void) {
     unsafe __libc_free(p);

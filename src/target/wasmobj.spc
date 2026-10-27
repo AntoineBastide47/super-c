@@ -126,7 +126,7 @@ extend WObj {
     }
 
     /// The name of symbol `k`.
-    pub fn name_of(self: &Self, k: u32) str {
+    pub const fn name_of(self: &Self, k: u32) str {
         return self.names.spell(self.syms[k as usize].name);
     }
 

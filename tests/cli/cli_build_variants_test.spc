@@ -188,12 +188,12 @@ fn rewritten_object_relinks_under_a_later_binary() {
             String::from_str("build \"--transpiler=sh tr.sh\" -o app");
         };
         let app = format("{}/app", root);
-        assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", args.as_str()).ok(), "the first build");
+        assert(cli::superc_in(root, args.as_str()).ok(), "the first build");
         assert_eq(cli::exe_env_in(app.as_str(), root, E, "1", "").exit, 3);
         let mut later = format("touch -t 203001010000 \"{}\"", app.as_str());
         assert_eq(cli::run_quiet(later.cstr()), 0);
         p.mkfile("src/lib.spc", "@noinline\npub fn v() i32 {\n    return 4;\n}\n");
-        assert(cli::superc_env_in(root, "SC_NO_CACHE", "1", args.as_str()).ok(), "the build after the edit");
+        assert(cli::superc_in(root, args.as_str()).ok(), "the build after the edit");
         assert_eq(cli::exe_env_in(app.as_str(), root, E, "1", "").exit, 4);
         if lane == 1 {
             let rec = cli::read_text(format("{}/build/debug/.emit_rewritten", root).as_str());

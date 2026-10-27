@@ -174,11 +174,11 @@ pub fn parse(t: []u8, want: []str, docs: &mut Vector<Doc>) bool {
 }
 
 /// The bytes of span `s` of `t`.
-pub fn span<'a>(t: Slice<'a, u8>, s: Span) str<'a> {
+pub const fn span<'a>(t: Slice<'a, u8>, s: Span) str<'a> {
     return unsafe str::from_raw(t.as_ptr() + s.at as usize, s.len as usize);
 }
 
-fn starts(t: []u8, p: usize, s: str) bool {
+const fn starts(t: []u8, p: usize, s: str) bool {
     if p + s.len() > t.len() {
         return false;
     }
@@ -190,7 +190,7 @@ fn starts(t: []u8, p: usize, s: str) bool {
     return true;
 }
 
-fn skip_line(t: []u8, p: &mut usize) {
+const fn skip_line(t: []u8, p: &mut usize) {
     while *p < t.len() && t[*p] != b'\n' {
         *p += 1;
     }
@@ -200,7 +200,7 @@ fn skip_line(t: []u8, p: &mut usize) {
 }
 
 // A scalar at `*p`: single-quoted, or plain to the end of the line (or a flow separator inside `[ ]`).
-fn scalar(t: []u8, p: &mut usize) Span {
+const fn scalar(t: []u8, p: &mut usize) Span {
     let n = t.len();
     if t[*p] == b'\'' {
         let s = *p + 1;

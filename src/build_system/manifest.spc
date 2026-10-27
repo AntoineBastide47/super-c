@@ -29,9 +29,6 @@ pub struct Profile<'a> {
     pub has_features: bool,
 }
 
-/// The C dialect and POSIX level the extern blocks' headers are read under (`--emit-c`'s units too).
-pub const DEFAULT_CSTD: str<'static> = "-std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700";
-
 /// `opt-level` values: 0 to 3, OPT_S and OPT_Z (`"s"`, `"z"`); OPT_NONE when the profile names none.
 pub const OPT_NONE: i32 = -1;
 pub const OPT_S: i32 = 4;

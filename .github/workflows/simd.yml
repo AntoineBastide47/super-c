@@ -46,7 +46,7 @@ jobs:
       - name: Build the compiler
         run: |
           set -eu
-          "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${SC_BOOT_CSTD:+"$SC_BOOT_CSTD"}
+          "./super-c-boot${BINEXT:-}" build --bootstrap-tags
           [ -f "./super-c${BINEXT:-}" ] || mv ./super-c "./super-c${BINEXT:-}"
 
       # The wasm test runner is native: the benchmark's own parity check covers SIMD128.

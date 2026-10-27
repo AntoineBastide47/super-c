@@ -101,7 +101,7 @@ fn build_condition_gates(b: &mut h::ExitBatch) {
 fn never() i32 {
     return 9;
 }
-@when(!THREAD_SANITIZER && !ADDRESS_SANITIZER || THREAD_SANITIZER || ADDRESS_SANITIZER)
+@when(!LOCKDEP && !OVERFLOW_CHECKS || LOCKDEP || OVERFLOW_CHECKS)
 fn always() i32 {
     return 0;
 }
@@ -115,11 +115,11 @@ fn mode() i32 {
 }
 struct S {}
 extend S {
-    @when(!(TEST || THREAD_SANITIZER))
+    @when(!(TEST || OVERFLOW_CHECKS))
     fn m() i32 {
         return 0;
     }
-    @when(TEST || THREAD_SANITIZER)
+    @when(TEST || OVERFLOW_CHECKS)
     fn m() i32 {
         return 0;
     }
@@ -160,7 +160,7 @@ fn a_failing_build_condition_removes_the_item() {
         "@when(TEST && !TEST)\nfn never() i32 {\n    return 1;\n}\nfn main() i32 {\n    return never();\n}\n",
         "never",
     );
-    let msg = "'@when' takes a condition over TEST, THREAD_SANITIZER, ADDRESS_SANITIZER, LOCKDEP and OVERFLOW_CHECKS";
+    let msg = "'@when' takes a condition over TEST, LOCKDEP and OVERFLOW_CHECKS";
     h::expect_err_msg("an unknown name", "@when(FAST)\nfn f() {}\nfn main() i32 { return 0; }\n", msg);
     h::expect_err_msg("a constant that is not a bool", "@when(PLATFORM)\nfn f() {}\nfn main() i32 { return 0; }\n", msg);
     h::expect_err_msg("a missing operand", "@when(TEST &&)\nfn f() {}\nfn main() i32 { return 0; }\n", msg);

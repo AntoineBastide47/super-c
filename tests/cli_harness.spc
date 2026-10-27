@@ -940,7 +940,7 @@ pub fn exe_env_in(exe: str, dir: str, key: str, val: str, args: str) CliResult {
 }
 
 /// Run the compiler under test FROM `dir` with the suite's environment: its builds share the suite's
-/// object cache, so a unit any earlier build compiled is not compiled again.
+/// cache base, so the std prelude is checked once.
 pub fn superc_in(dir: str, args: str) CliResult {
     return exe_in(superc_path(), dir, "", args);
 }

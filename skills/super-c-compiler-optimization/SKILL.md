@@ -9,7 +9,7 @@ allowed-tools: Bash Read
 ## Agent checklist
 
 - Profile the release or bench binary before selecting a target.
-- Check the build's optimizer (native `lir::opt`, or C with LTO) before keeping a micro-optimization.
+- Check the build's optimizer (`lir::opt`) before keeping a micro-optimization.
 - Measure the serial benchmark in interleaved A/B runs.
 - Verify byte-identical self-hosting output after structural changes.
 
@@ -32,11 +32,7 @@ Before any optimization work, understand these non-negotiable constraints:
    small bodies across modules, numbers values, forwards loads and stores, promotes the
    loads of private memory one store writes, moves invariant code out of loops and folds
    constants and branches; it does not lower fixed-size `memcmp` or forward copies
-   between slots. With `SC_NATIVE=0` they build through C at `-O3` with LTO (`lto =
-   "auto"`, which Clang runs as full LTO, see the binary skill): Clang inlines hot calls
-   across modules, CSEs `strlen` of literals, and lowers fixed-size `memcmp` to
-   branchless compares; under opt-in ThinLTO (`lto = "thin"`) cross-module inlining is
-   import-based. If a target shows ~0 samples under the build's optimizer, the
+   between slots. If a target shows ~0 samples under the build's optimizer, the
    optimization will not produce a corpus-level win.
 
 3. **Benchmark protocol.** Measure with `super-c bench --filter=self_transpile`
@@ -47,10 +43,8 @@ Before any optimization work, understand these non-negotiable constraints:
    between E/P cores and thermal state); the run prints min/median/p95/sd of every
    round, and a wide spread means the box was not quiet. First run after a rebuild is
    a cold outlier. Ignore it. Run 3x interleaved A/B on a quiet machine. A run that
-   reports a C compiler or linker failure exits nonzero and measures nothing.
-   Run the benchmark binary directly (`build/bench-bin`), never as a child of a `--sanitizers` compiler, whose
-   injected sanitizer runtime changes the allocator and the peak RSS it reports. The
-   lane's peak RSS is the process peak over all rounds: the macOS allocator keeps about
+   reports a compile or link failure exits nonzero and measures nothing.
+   Run the benchmark binary directly (`build/bench-bin`). The lane's peak RSS is the process peak over all rounds: the macOS allocator keeps about
    12 MiB more after each round until it trims (no leak: flat under `SC_LEAK_CHECK=1`),
    so it reads 630 to 730 MiB while one serial build peaks near 190 MiB.
 
@@ -117,9 +111,8 @@ sorts below a hotspot that shows up everywhere.
 Two macOS gotchas, both verified:
 - samply cannot profile Apple-signed system binaries (it reports the DYLD restriction);
   the locally-built compiler profiles fine.
-- **Profile the bench binary, never a debug or `--sanitizers` build.** The debug profile is
-  unoptimized, and in a `--sanitizers` build sanitizer frames (`__asan_memcpy`,
-  `StackDepotBase::Put`) dominate the profile, burying the real hotspots.
+- **Profile the bench binary, never a debug build.** The debug profile is unoptimized, so its
+  hotspots are not the release build's.
 - To profile a compiler run directly, build the compiler under the `bench` profile (the
   `release` profile strips symbols) and make it samply's root process: no `env` or `sh`
   wrapper between them.
@@ -272,7 +265,7 @@ spatial locality, automatic cleanup.
 ### Phase 5: Analyze Generated Assembly
 
 When all higher-level theories are exhausted and the profiler still shows a hot function,
-inspect the native assembly the C compiler generates.
+inspect the native assembly the backend generates.
 
 ```sh
 # Build the release binary
@@ -285,12 +278,12 @@ objdump -d build/super-c | grep -A 100 '<function_name>'
 ```
 
 What to look for:
-- **Missed vectorization**: a loop the compiler should have auto-vectorized but did not
-  (check for data dependencies or aliasing that block it)
+- **Scalar loops**: the backend does not auto-vectorize; a hot loop over lanes uses
+  `std::simd` explicitly
 - **Branch misprediction**: a hot branch with poor prediction (reorder to put the common
   case first, or convert to branchless with conditional moves)
-- **Redundant loads**: the same memory loaded repeatedly because the C compiler cannot
-  prove no aliasing (cache the value in a local; `&mut` parameters are already `restrict`)
+- **Redundant loads**: the same memory loaded repeatedly because the optimizer cannot
+  prove no aliasing (cache the value in a local)
 - **Unnecessary sign/zero extensions**: type mismatches between 32-bit and 64-bit values
   causing extension instructions on every use
 - **Unaligned accesses**: struct fields crossing cache lines (fix with field reordering
@@ -390,16 +383,16 @@ phase (slower: only for memory questions).
 Hosted runners are VMs without hardware counters (Linux `perf stat` reports `<not supported>`,
 macOS prints no instructions retired, Windows lists only the `Timer` source), so CI counts work
 in the compiler itself. The Release workflow's `counts` jobs (`.github/actions/transpile-counts`)
-build two compilers with build.toml's `[profile.counts]` (the release flags plus clang's
-`-fprofile-instr-generate`; llvm-mingw's clang on Windows, whose mingw profile runtime the
+build two compilers with clang from their release profile's C (`--emit-c`, `ci/cc_tree.sh`, with
+`-DNDEBUG -fprofile-instr-generate`; llvm-mingw's clang on Windows, whose mingw profile runtime the
 preinstalled LLVM lacks): this commit's, and the last release's from its tag by its own binary.
-Both run a cold `build --jobs=1 --cc=true --bootstrap-tags` of this commit's sources, and
+Both run a cold `build --jobs=1 --emit-c --bootstrap-tags` of this commit's sources, and
 `llvm-profdata` totals the counters. The same input makes the change the compiler's alone: the
 compiler's sources grow every release, which moves a count of one compiler across releases by
 0.1 to 1%. A total repeats within 0.0001% on every runner and does not move with the
-optimization level or the CPU. It counts only the compiler's code: libc, the kernel and the C
-compile are outside it, and so is a change that makes the C it runs slower without changing
-which code runs. One worker is required: the counters are not atomic, and a multi-threaded run
+optimization level or the CPU. It counts only the compiler's frontend and C emission: libc, the
+kernel and the native backend are outside it, and so is a change that makes the code slower without
+changing which code runs. One worker is required: the counters are not atomic, and a multi-threaded run
 loses increments (1.2% spread). The totals differ by platform (different platform code), so
 compare a platform only with itself.
 
@@ -434,21 +427,19 @@ scalar loop that compiles to a data-dependent branch (`filter_gt_f32`, and `mix_
 
 - `baseline.tsv`: the median ns per element of each kernel, instruction set and input size
   (4 KiB, 64 KiB, 4 MiB), per machine and C compiler, under the `bench` profile.
-- `probes.tsv`: the `super-c build --print-probes` table of each C compiler of the CI matrix
-  and of the development machine.
 
-`sh bench/simd_baseline/record.sh` measures the current machine and C compiler and replaces
-their rows in both files; its arguments go to `super-c bench` and `super-c build`
-(`--target=wasm` for SIMD128 under wasmtime, the `--cstd=` flag on Windows). Run it with
-`./super-c` built from the measured commit. The SIMD workflow (`.github/workflows/simd.yml`)
-runs only on dispatch from the Actions tab: it runs it on every CI platform and uploads both
-files per platform; merge their rows into the committed files.
+`sh bench/simd_baseline/record.sh` measures the current machine and the C compiler of the kernels
+and replaces their rows in `baseline.tsv`; its arguments go to `super-c bench` and `super-c build`
+(`--target=wasm` for SIMD128 under wasmtime). Run it with `./super-c` built from the measured
+commit. The SIMD workflow (`.github/workflows/simd.yml`) runs only on dispatch from the Actions tab:
+it runs it on every CI platform and uploads the file per platform; merge their rows into the
+committed file.
 
 ### Borrow-check probe and budget
 
 `SC_BORROW_STATS=1 SC_BUILD_STATS=- super-c build --jobs=1 --out-dir=<fresh>` prints the
 borrow probe (regions, skip tallies, sizes, slowest bodies, retained scratch); add
-`--cc=true` for a 1.2 s frontend-plus-emission run (the link fails after the tables).
+`--emit-c` for a frontend-plus-emission run with no native compile or link.
 Always a fresh out-dir: the emit stamp otherwise reports `borrowck: 0`. The regions sum to
 the build record's `borrowck` phase less a few ms of loop overhead (the stage's prologue
 is `publish` and `reach`, the kept copies `keep`). Measured split on the reference sources
@@ -485,7 +476,7 @@ is the generic-heavy corpus: its collect line reports a budget stop today (the
 width-generic integer's closure), so a change there is judged by its record count and
 `graph` time against the record's table, never by the self-build alone. `super-c test`
 first builds the compiler with the invoking binary, so its second stats record and probe
-table are the test corpus; `--cc=true` breaks `super-c test`.
+table are the test corpus.
 
 ### Bench gate policy
 
@@ -507,8 +498,8 @@ Revert changes that:
 - **"The benchmark is too small to show a difference."** The self-transpile benchmark
   corpus is the ground truth. Inspect its current size from `bench/` before judging a
   corpus-scale result.
-- **"The optimizer will fix it."** Check. Profile the build the change targets (native
-  release, or `SC_NATIVE=0` with LTO). If its optimizer already optimizes the site, your
+- **"The optimizer will fix it."** Check. Profile the build the change targets (the release
+  or bench profile). If its optimizer already optimizes the site, your
   change is dead weight.
 - **"I'll add parallelism to make it faster."** Serial optimization first. The serial
   reference pipeline must be fast on its own.

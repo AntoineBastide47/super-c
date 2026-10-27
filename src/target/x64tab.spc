@@ -1238,7 +1238,7 @@ extend Ins {
         return (self.regs >> i * 8 & 0xFF) as u8;
     }
 
-    pub fn set_reg(self: &mut Self, i: u32, r: u8) {
+    pub const fn set_reg(self: &mut Self, i: u32, r: u8) {
         self.regs = self.regs & ~(0xFFu32 << i * 8) | r as u32 << i * 8;
     }
 }
@@ -1703,7 +1703,7 @@ pub fn encode(n: &Ins, out: &mut Vector<u8>, e: &mut Enc) bool {
 }
 
 // The little-endian `n`-byte value at `b[at..]`, sign-extended when `signed`.
-fn get(b: []u8, at: usize, n: u32, signed: bool) i64 {
+const fn get(b: []u8, at: usize, n: u32, signed: bool) i64 {
     let mut v: u64 = 0;
     for i in 0..n {
         v |= b[at + i as usize] as u64 << 8 * i;

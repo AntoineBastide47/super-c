@@ -414,7 +414,7 @@ fn every_form_of_the_text_reads_back() {
 }
 
 // The coverage slot of result type `t`: its code, a vector's after the pointer's.
-fn ty_slot(t: u8) usize {
+const fn ty_slot(t: u8) usize {
     if is_vec(t) {
         return T_PTR as usize + 1;
     }

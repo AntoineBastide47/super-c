@@ -313,7 +313,7 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
 
 // The name of a section or symbol: inline up to 8 bytes, else at an offset into the string table
 // (`str_at`: `/<decimal>` for a section, the second word for a symbol).
-fn short_name<'a>(b: Slice<'a, u8>, at: usize) str<'a> {
+const fn short_name<'a>(b: Slice<'a, u8>, at: usize) str<'a> {
     let mut n: usize = 0;
     while n < 8 && b[at + n] != 0 {
         n += 1;
@@ -473,7 +473,7 @@ fn global(l: &mut L, id: u32) u32 {
 }
 
 // The global an input symbol names (NONE: a local one).
-fn gof(l: &L, k: u32) u32 {
+const fn gof(l: &L, k: u32) u32 {
     let y = l.syms[k as usize];
     if y.class != CLASS_EXTERNAL && y.class != CLASS_WEAK {
         return NONE;
@@ -757,7 +757,7 @@ fn prepare_imports(l: &mut L) {
 }
 
 // The C runtime functions the entry calls.
-fn entry_imports(shared: bool) Slice<'static, str<'static>> {
+const fn entry_imports(shared: bool) Slice<'static, str<'static>> {
     if shared {
         return DLL_IMPORTS;
     }
@@ -765,7 +765,7 @@ fn entry_imports(shared: bool) Slice<'static, str<'static>> {
 }
 
 // Whether a global still needs a definition: undefined, and not an alias.
-fn open(l: &L) bool {
+const fn open(l: &L) bool {
     for g in 0..l.gs.len() {
         let gy = l.gs[g];
         if gy.kind == G_UNDEF && gy.alias == NONE && gy.strong {
@@ -893,7 +893,7 @@ fn load_dll(l: &mut L, o: &Opts, dll: str, required: bool) bool {
 }
 
 // The file offset of relative address `rva` of a PE file with `nsec` section headers at `sh`.
-fn rva_off(b: []u8, sh: usize, nsec: usize, rva: u32) usize {
+const fn rva_off(b: []u8, sh: usize, nsec: usize, rva: u32) usize {
     for k in 0..nsec {
         let h = sh + 40 * k;
         let va = lu::r32(b, h + 12);
@@ -997,7 +997,7 @@ fn out_section(l: &mut L, name: str, flags: u32) u32 {
 
 // The output section an input section of name `n` and flags `f` joins: grouped sections (`X$Y`) join
 // X's; code joins `.text`, read-only data `.rdata`, writable data `.data`, zero-filled data `.bss`.
-fn out_name<'a>(n: str<'a>, f: u32) str<'a> {
+const fn out_name<'a>(n: str<'a>, f: u32) str<'a> {
     let mut base = n;
     let d = n.find("$");
     if d > 0 {
@@ -1022,7 +1022,7 @@ fn out_name<'a>(n: str<'a>, f: u32) str<'a> {
     return ".rdata";
 }
 
-fn out_flags(name: str) u32 {
+const fn out_flags(name: str) u32 {
     if name == ".text" {
         return SCN_CODE | SCN_EXEC | SCN_READ;
     }
@@ -1222,7 +1222,7 @@ fn init_key(n: str) String {
     return String::from_str(n);
 }
 
-fn remap(keep: &Vector<u32>, o: u32) u32 {
+const fn remap(keep: &Vector<u32>, o: u32) u32 {
     if o == NONE {
         return NONE;
     }
@@ -1231,12 +1231,12 @@ fn remap(keep: &Vector<u32>, o: u32) u32 {
 
 // The size of the headers for `nsec` sections: the DOS header, the signature, the COFF and the optional
 // headers, the section headers.
-fn headers_size(nsec: usize) u64 {
+const fn headers_size(nsec: usize) u64 {
     return 64 + 4 + 20 + 240 + 40 * nsec as u64;
 }
 
 // The end of the sections' bytes in the file.
-fn file_end(l: &L) u64 {
+const fn file_end(l: &L) u64 {
     let mut e = lu::align_up(headers_size(l.osecs.len() + 1), FILE_ALIGN);
     for i in 0..l.osecs.len() {
         e = e.max(l.osecs[i].off + l.osecs[i].raw);
@@ -1246,12 +1246,12 @@ fn file_end(l: &L) u64 {
 
 // ---- addresses ------------------------------------------------------------------------------------------
 
-fn sec_rva(l: &L, s: u32) u64 {
+const fn sec_rva(l: &L, s: u32) u64 {
     let sc = l.secs[s as usize];
     return l.osecs[sc.out as usize].rva + sc.at;
 }
 
-fn sym_rva(l: &L, k: u32) u64 {
+const fn sym_rva(l: &L, k: u32) u64 {
     let y = l.syms[k as usize];
     let f = l.files[y.file as usize];
     if y.sec <= 0 {
@@ -1260,13 +1260,13 @@ fn sym_rva(l: &L, k: u32) u64 {
     return sec_rva(l, f.sec0 + (y.sec - 1) as u32) + y.value as u64;
 }
 
-fn thunk_rva(l: &L, g: u32) u64 {
+const fn thunk_rva(l: &L, g: u32) u64 {
     return l.osecs[l.o_text as usize].rva + l.thunks_at + 8 * l.gs[g as usize].slot as u64;
 }
 
 // The import address table slot of import `g`: the address tables follow the directory and the lookup
 // tables, one per DLL in `imports` order, each ending with a zero entry.
-fn iat_rva(l: &L, g: u32) u64 {
+const fn iat_rva(l: &L, g: u32) u64 {
     let (_lookup, iat) = import_tables(l);
     let gy = l.gs[g as usize];
     let mut before: u64 = 0;
@@ -1279,7 +1279,7 @@ fn iat_rva(l: &L, g: u32) u64 {
 }
 
 // The relative addresses of the lookup tables and of the address tables.
-fn import_tables(l: &L) (u64, u64) {
+const fn import_tables(l: &L) (u64, u64) {
     let mut nlib: u64 = 0;
     for li in 0..l.libs.len() {
         nlib += l.libs[li].used as u64;
@@ -1341,7 +1341,7 @@ fn target_osec(l: &L, k: u32) u32 {
 
 // ---- section bytes and relocations ----------------------------------------------------------------------
 
-fn copy_sections(l: &L, b: []u8, img: &mut Vector<u8>) {
+const fn copy_sections(l: &L, b: []u8, img: &mut Vector<u8>) {
     for s in 0..l.secs.len() {
         let sc = l.secs[s];
         if sc.out == NONE || sc.off == 0 || (l.osecs[sc.out as usize].flags & SCN_UDATA) != 0 {
@@ -1726,7 +1726,7 @@ fn write_exports(l: &L, o: &Opts, img: &mut Vector<u8>) {
     }
 }
 
-fn base_name(p: str) str {
+const fn base_name(p: str) str {
     let mut i = p.len();
     while i > 0 && p.byte_at(i - 1) != b'/' && p.byte_at(i - 1) != b'\\' {
         i -= 1;
@@ -1834,7 +1834,7 @@ fn write_tables(l: &mut L, img: &mut Vector<u8>) {
 
 // The import directory: per DLL its lookup table and its address table (the same hint/name entries
 // until the loader binds them), then the hint/name entries and the DLL names.
-fn write_imports(l: &L, img: &mut Vector<u8>) {
+const fn write_imports(l: &L, img: &mut Vector<u8>) {
     let id = l.osecs[l.o_idata as usize];
     let (lookup, iat) = import_tables(l);
     let mut names = iat + (iat - lookup);

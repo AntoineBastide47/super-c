@@ -1346,7 +1346,7 @@ fn a_never_value_builds_in_every_position() {
     for i in 0..forms.len() {
         args.push_str(" x");
         let r = h::diff_run(&b, args.as_str());
-        let ok = r.exit != 0 && r.err.contains("panic: stop") && !r.err.contains("Sanitizer");
+        let ok = r.exit != 0 && r.err.contains("panic: stop");
         if !ok {
             eprintln("{}: exit {}: {}", forms[i], r.exit, r.err.as_str());
         }

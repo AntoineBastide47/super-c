@@ -33062,7 +33062,7 @@ extend TypeChecker {
             self.errors.emit_span(
                 unsafe (*self.cur_ast()).at_const(cd.ty).span,
                 format(
-                    "a constant of an 'extern \"C\"' block with a value is an integer or a 'bool': the C compile checks it",
+                    "a constant of an 'extern \"C\"' block with a value is an integer or a 'bool': the build checks it against the header",
                 ),
             );
         }

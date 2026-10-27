@@ -55,8 +55,7 @@ jobs:
         run: |
           set -eu
           bin="super-c${BINEXT:-}"
-          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${SC_BOOT_CSTD:+"$SC_BOOT_CSTD"}
-          [ -f "./$bin" ] || mv "./super-c" "./$bin" # a bootstrap older than the `.exe` naming fix (release.yml)
+          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags
           test -x "./$bin"
 
       - uses: actions/upload-artifact@v7

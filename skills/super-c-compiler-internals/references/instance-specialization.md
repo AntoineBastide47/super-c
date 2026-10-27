@@ -53,7 +53,7 @@ merge`); the regions still cost one branch when off.
 ## Numbers
 
 A past measurement, kept because it decides the next section: release compiler, one worker,
-`--cc=true` for the compiler's own sources and the test target of `super-c test` (the test
+`--cc=true` (a C compile that did nothing; `--emit-c` now) for the compiler's own sources and the test target of `super-c test` (the test
 suite over the compiler and the standard library, the generic-heavy corpus) with the
 allocation tracker on. Re-measure with the commands at the end of this file.
 
@@ -170,7 +170,7 @@ with `, budget exhausted` appended when the walk budget stopped it.
 ```sh
 ./super-c build --profile=release -o build/sc-rel
 SC_CEMIT_STATS=1 SC_BUILD_STATS=- SC_BUILD_MEM=1 SC_NO_CACHE=1 SC_NO_TU_CACHE=1 \
-  build/sc-rel build --jobs=1 --cc=true --out-dir=build/m1 -o build/m1_bin
+  build/sc-rel build --jobs=1 --emit-c --out-dir=build/m1
 SC_CEMIT_STATS=1 SC_BUILD_STATS=- SC_BUILD_MEM=1 SC_NO_CACHE=1 SC_NO_TU_CACHE=1 SC_LEAK_CHECK=fatal \
   build/sc-rel test --quiet --jobs=1 --out-dir=build/m2 --test-shard=100000/100000
 ```

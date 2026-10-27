@@ -569,7 +569,7 @@ fn resolve_objects(l: &mut L, from: usize) bool {
 }
 
 // The section type of section `sect` (1-based) of file `f`.
-fn sec_type(l: &L, f: u32, sect: u8) u32 {
+const fn sec_type(l: &L, f: u32, sect: u8) u32 {
     return l.secs[(l.files[f as usize].sec0 + sect as u32 - 1) as usize].flags & S_TYPE;
 }
 
@@ -902,7 +902,7 @@ fn load_dylib(l: &mut L, o: &Opts, d: []u8, path: str, ord0: u32) bool {
     return true;
 }
 
-fn be32(b: []u8, at: usize) u32 {
+const fn be32(b: []u8, at: usize) u32 {
     return b[at] as u32 << 24 | b[at + 1] as u32 << 16 | b[at + 2] as u32 << 8 | b[at + 3] as u32;
 }
 
@@ -946,7 +946,7 @@ fn finish_symbols(l: &mut L) bool {
     return true;
 }
 
-fn parse_u64(s: str) u64 {
+const fn parse_u64(s: str) u64 {
     let mut v: u64 = 0;
     for i in 0..s.len() {
         let c = s.byte_at(i);
@@ -958,7 +958,7 @@ fn parse_u64(s: str) u64 {
     return v;
 }
 
-fn log2(a: u64) u8 {
+const fn log2(a: u64) u8 {
     let mut n: u8 = 0;
     while 1u64 << n as u64 < a {
         n += 1;
@@ -969,7 +969,7 @@ fn log2(a: u64) u8 {
 // ---- relocations: what needs a GOT slot, a stub or an import --------------------------------------------
 
 // The global a relocation's symbol `y` refers to, or NONE for a local symbol.
-fn gof(l: &L, y: ISym) u32 {
+const fn gof(l: &L, y: ISym) u32 {
     if (y.ty & N_EXT) == 0 || (y.ty & N_STAB) != 0 {
         return NONE;
     }
@@ -1039,7 +1039,7 @@ fn scan_relocations(l: &mut L, b: []u8) bool {
 
 // Whether input section `s` stays out of the image: debug information, and the linker's own input
 // (`__LD`: the compact unwind entries `__unwind_info` replaces).
-fn dropped(l: &L, s: ISec) bool {
+const fn dropped(l: &L, s: ISec) bool {
     return (s.flags & S_ATTR_DEBUG) != 0 || l.sn.spell(s.seg) == "__LD";
 }
 
@@ -1081,7 +1081,7 @@ fn out_section(l: &mut L, segname: str, sect: str, flags: u32) u32 {
 
 // A section's order within its segment: code first, the unwind table last in __TEXT; the thread-local
 // sections together (their template is one range) and every zero-filled one last in __DATA.
-fn rank(seg: str, sect: str, flags: u32) u32 {
+const fn rank(seg: str, sect: str, flags: u32) u32 {
     let t = flags & S_TYPE;
     if seg == "__TEXT" {
         if sect == "__text" {
@@ -1123,7 +1123,7 @@ fn rank(seg: str, sect: str, flags: u32) u32 {
 }
 
 // Whether section flags `fl` hold no file bytes.
-fn zerofill(fl: u32) bool {
+const fn zerofill(fl: u32) bool {
     let t = fl & S_TYPE;
     return t == S_ZEROFILL || t == S_GB_ZEROFILL || t == S_THREAD_LOCAL_ZEROFILL;
 }
@@ -1352,7 +1352,7 @@ fn layout(l: &mut L, b: []u8) bool {
     return true;
 }
 
-fn remap(o: u32, newix: &Vector<u32>) u32 {
+const fn remap(o: u32, newix: &Vector<u32>) u32 {
     if o == NONE {
         return NONE;
     }
@@ -1360,7 +1360,7 @@ fn remap(o: u32, newix: &Vector<u32>) u32 {
 }
 
 // The size of the load commands (header excluded).
-fn cmds_size(l: &L) u64 {
+const fn cmds_size(l: &L) u64 {
     let mut n: u64 = 0;
     for k in 0..l.segs.len() {
         n += 72 + 80 * l.segs[k].n as u64;
@@ -1380,7 +1380,7 @@ fn cmds_size(l: &L) u64 {
 // ---- symbol addresses -----------------------------------------------------------------------------------
 
 // The address of input symbol `k` (defined in its file).
-fn sym_addr(l: &L, k: u32) u64 {
+const fn sym_addr(l: &L, k: u32) u64 {
     let y = l.syms[k as usize];
     if (y.ty & N_TYPE) == N_ABS {
         return y.value;
@@ -1393,7 +1393,7 @@ fn sym_addr(l: &L, k: u32) u64 {
 }
 
 // The address of global `g` (not a library's).
-fn g_addr(l: &L, g: u32) u64 {
+const fn g_addr(l: &L, g: u32) u64 {
     let gy = l.gs[g as usize];
     if gy.kind == G_DEF {
         return sym_addr(l, gy.sym);
@@ -1406,7 +1406,7 @@ fn g_addr(l: &L, g: u32) u64 {
 
 // ---- section bytes and relocations ----------------------------------------------------------------------
 
-fn copy_sections(l: &mut L, b: []u8, img: &mut Vector<u8>) bool {
+const fn copy_sections(l: &mut L, b: []u8, img: &mut Vector<u8>) bool {
     for s in 0..l.secs.len() {
         let sc = l.secs[s];
         if sc.out == NONE || zerofill(sc.flags) {
@@ -1624,14 +1624,14 @@ fn apply_relocations(l: &mut L, b: []u8, img: &mut Vector<u8>) bool {
 }
 
 // The address of the GOT slot of symbol `symnum` of file `f`.
-fn got_addr(l: &L, f: IFile, symnum: u32) u64 {
+const fn got_addr(l: &L, f: IFile, symnum: u32) u64 {
     let y = l.syms[(f.sym0 + symnum) as usize];
     let g = gof(l, y);
     return l.osecs[l.o_got as usize].addr + 8 * l.gs[g as usize].got as u64;
 }
 
 // The image address of object address `v` in section `sect` (1-based) of file `f`.
-fn section_relative(l: &L, f: IFile, sect: u32, v: u64) u64 {
+const fn section_relative(l: &L, f: IFile, sect: u32, v: u64) u64 {
     let s = l.secs[(f.sec0 + sect - 1) as usize];
     return (l.osecs[s.out as usize].addr + s.at).wrapping_add(v.wrapping_sub(s.addr));
 }
@@ -1672,13 +1672,13 @@ fn write_synthetic(l: &mut L, img: &mut Vector<u8>) bool {
 // ---- unwind information ---------------------------------------------------------------------------------
 
 // Whether input section `s` holds code.
-fn code(s: ISec) bool {
+const fn code(s: ISec) bool {
     return (s.flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)) != 0;
 }
 
 // The defining input symbol of symbol `k` (itself when defined, else the global's definition); NONE
 // when no object defines it.
-fn defining(l: &L, k: u32) u32 {
+const fn defining(l: &L, k: u32) u32 {
     let y = l.syms[k as usize];
     if (y.ty & N_TYPE) == N_SECT {
         return k;
@@ -1797,11 +1797,11 @@ fn collect_unwind(l: &mut L, b: []u8) bool {
 }
 
 // Compressed second-level pages when the encodings fit the common table, else regular ones.
-fn compressed(l: &L) bool {
+const fn compressed(l: &L) bool {
     return l.unw_enc.len() <= 127;
 }
 
-fn per_page(l: &L) usize {
+const fn per_page(l: &L) usize {
     if compressed(l) {
         return 1021;
     }
@@ -1810,7 +1810,7 @@ fn per_page(l: &L) usize {
 
 // The size of `__unwind_info`: the header, the common encodings, the first-level index (a sentinel
 // after the pages) and the pages.
-fn unwind_size(l: &L) u64 {
+const fn unwind_size(l: &L) u64 {
     let n = l.unw.len();
     let pp = per_page(l);
     let npages = (n + pp - 1) / pp;
@@ -2184,7 +2184,7 @@ fn exports_trie(l: &L, names: &Vector<u32>, flags: &Vector<u64>, addrs: &Vector<
     return o;
 }
 
-fn node_size(l: &L, names: &Vector<u32>, nodes: &Vector<TNode>, edges: &Vector<TEdge>, i: usize) usize {
+const fn node_size(l: &L, names: &Vector<u32>, nodes: &Vector<TNode>, edges: &Vector<TEdge>, i: usize) usize {
     let nd = nodes[i];
     let mut n: usize = 1;
     if nd.term {
@@ -2215,14 +2215,14 @@ struct OSym {
 extend OSym as Copy {}
 
 // The output section number (1-based) of input symbol `k`'s section.
-fn out_sect(l: &L, k: u32) u8 {
+const fn out_sect(l: &L, k: u32) u8 {
     let y = l.syms[k as usize];
     let s = l.secs[(l.files[y.file as usize].sec0 + y.sect as u32 - 1) as usize];
     return (s.out + 1) as u8;
 }
 
 // Whether input symbol `k` is defined in a section the image keeps.
-fn kept(l: &L, k: u32) bool {
+const fn kept(l: &L, k: u32) bool {
     let y = l.syms[k as usize];
     if (y.ty & N_TYPE) != N_SECT {
         return (y.ty & N_TYPE) == N_ABS;
@@ -2232,7 +2232,7 @@ fn kept(l: &L, k: u32) bool {
 
 // The compile unit's directory and name in the DWARF of file `f` (`DW_AT_comp_dir`, `DW_AT_name`, as
 // inline strings or `.debug_str` offsets); empty when not found.
-fn cu_names<'a>(l: &L, b: Slice<'a, u8>, f: IFile, dir: &mut str<'a>, name: &mut str<'a>) {
+const fn cu_names<'a>(l: &L, b: Slice<'a, u8>, f: IFile, dir: &mut str<'a>, name: &mut str<'a>) {
     let mut info = NONE;
     let mut abbrev = NONE;
     let mut strs = NONE;
@@ -2769,7 +2769,7 @@ fn debug_map(l: &L, b: []u8, f: IFile, st: &mut Vector<u8>, locs: &mut Vector<OS
     locs.push(OSym { name: 1, ty: N_SO, sect: 1, desc: 0, value: 0 });
 }
 
-fn basename(p: str) str {
+const fn basename(p: str) str {
     let mut i = p.len();
     while i > 0 && p.byte_at(i - 1) != b'/' {
         i -= 1;

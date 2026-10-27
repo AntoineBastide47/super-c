@@ -27,10 +27,8 @@ baseline by default); `bsys::features_for` computes it from build.toml and `--ta
 `Package::new`). `Package.simd_width` (256 or 512) is the planner's preferred width on AVX-512.
 A function's effective set is `Package::fn_set(m, f)`: the build's and its `@target_feature`'s
 (`fn_features`), closed (on wasm32 the build's alone); `Package.fn_union` joins every function's
-set, so the entries any function may call render. `Package.mem_check` is true under `-fsanitize=` with `address`,
-`memory` or `thread` (`bsys::mem_checker`; the transpile form sets the engine's toolchain, so
-both routes agree). Both, and every backend entry's key, features and name, mix into the TU
-cache header hash (`driver::tuc`), so a changed set or table never replays a cached unit.
+set, so the entries any function may call render. Both, and every backend entry's key, features and
+name, mix into the TU cache header hash (`driver::tuc`), so a changed set or table never replays a cached unit.
 
 ## Attributes
 
@@ -270,8 +268,8 @@ The work for an accepted architecture `A`, in order:
    (`getauxval` on Linux), every error read as "absent", callable before `main` with no allocation
    and no lock, every feature reachable through `sc_cpu_has`, the 16-byte compare-exchange feature
    among them when it is optional.
-5. The C target attribute spelling and the `-m`/`-march` flags of `A` as probes in
-   `src/build_system/probe.spc`.
+5. The C target attribute spelling and the `-m`/`-march` flags of `A` for the C tree of `--emit-c`
+   (`ir::cpu_features::push_c_flags`).
 6. A module `std::simd::<A>` only for operations with no portable meaning and a named client.
 
 The backend is accepted when the full vector conformance suite gives the lane loop's results; every

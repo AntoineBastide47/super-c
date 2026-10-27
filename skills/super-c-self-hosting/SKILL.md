@@ -42,34 +42,30 @@ diff protocol.
 
 ## The Bootstrap Sequence and the Rollback Boundary
 
-`sh ci/gate.sh` runs the production sequence: the latest release binary (the last
-verified bootstrap compiler) builds the current sources (`check.sh`, under the test profile), that
-result builds generation one, generation one emits generation two at the same path with the
-same options (both under the test profile: optimized, overflow checks kept; the emitted C does not
-depend on the profile), the two trees are compared byte for byte, and generation two is compiled
-and run: it is the compiler that runs every later step of the gate (the one-worker and
-every-core builds under each task-delay seed, which emit C (`SC_NATIVE=0`), the one-worker and
-every-core debug builds, whose native objects must be byte-identical, the strict C warnings). Its
-one-worker tree must equal generation one's every-core tree, so the fixpoint holds
-across generations and worker counts at once. `check.sh` (the commit hook) ends with
-`sh ci/gate.sh --core` over the compiler its bootstrap step rebuilt: the std package rules
-(`tools/std_packages`), the fixpoint, the worker-count identity under every seed, the native object identity, and the strict C warnings (about 30 s on
-a warm object cache). The release workflow runs `sh ci/gate.sh --core` on macOS, Linux and
-Windows; on Windows the strict warnings use `SC_CSTD`, `-std=gnu11`, because mingw hides POSIX
-prototypes under `-std=c11`.
+`sh ci/gate.sh` runs the production sequence: the latest release binary (the last verified bootstrap
+compiler) builds the current sources (`check.sh`), that result builds generation one in a clean tree
+under the test profile (optimized, overflow checks kept), generation one builds generation two at the
+same path with the same options, and the two binaries must be byte-identical (`cmp`). Generation two
+runs every later step of the gate: the one-worker and every-core C emissions under each task-delay
+seed (`--emit-c`), which must give byte-identical trees, type tables and item indexes; the one-worker
+and every-core debug builds, whose native objects must be byte-identical; the readability rules of
+the emitted C; and, when `SC_TEST_CC` names a C compiler, the strict C warnings over every unit of the
+tree (its `__cflags` plus `CONTRACT_STRICT_CFLAGS`, `-fsyntax-only`). `check.sh` (the commit hook) ends
+with `sh ci/gate.sh --core` over the compiler its bootstrap step rebuilt: every step but check.sh
+itself. The release workflow runs `sh ci/gate.sh --core` on macOS, Linux and Windows.
 
 The wasm leg of the release workflow (its `wasm-checks` job) checks the fixpoint for the wasm compiler with
 the CLI only: in one project copy, the native engine builds gen2 with gen1 (the `super-c.wasm`
 artifact, under wasmtime) as its `--transpiler`, then gen3 with gen2 as its transpiler, and the
-two emitted trees at the same path (`build/release/raw`) must be byte-identical. No diff against
+two trees of objects at the same path (`build/release/raw`) must be byte-identical. No diff against
 the native tree: instance homing follows hash orders that differ between 32- and 64-bit hosts.
 
 The rollback boundary is the latest GitHub release: its binary and its tag are the
 named verified compiler and source revision, outside every build directory that
 `super-c clean --full` removes. A rollback downloads that binary (`check.sh` does, for the
-bootstrap) and checks out the tag. No persistent semantic cache exists: the per-TU
-cache is keyed by the compiler binary and the emitted bytes, and the object cache by the
-C compiler version, the flags and the C text, so a rollback converts nothing.
+bootstrap) and checks out the tag. No persistent semantic cache exists: the per-TU cache and the
+native record are keyed by the compiler binary and the emitted bytes, and the prelude images by the
+compiler identity, so a rollback converts nothing.
 
 ## The Natural-Code Principle
 

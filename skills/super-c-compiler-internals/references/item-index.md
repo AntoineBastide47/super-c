@@ -11,7 +11,7 @@ and the measured result.
 
 ## Measurement
 
-`SC_ITEM_STATS=1` on a serial build (`--jobs=1 --cc=true --out-dir=<fresh>`) prints the
+`SC_ITEM_STATS=1` on a serial build (`--jobs=1 --emit-c --out-dir=<fresh>`) prints the
 measurement: per-item typecheck costs (the checker times each `check_item`), per-body borrow
 analysis costs (`BcStats.body_ns`), per-module always-panics and emission-seed costs, the
 bodies the engine lowered from syntax during typecheck, the graph, and the schedule prediction.

@@ -56,11 +56,7 @@ jobs:
         run: |
           set -eu
           bin="super-c${BINEXT:-}"
-          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${SC_BOOT_CSTD:+"$SC_BOOT_CSTD"}
-          # Compatibility with a bootstrap older than the `.exe` naming fix: it links the manifest's `bin`
-          # verbatim, so on Windows it produces an extensionless PE that nothing can launch. Drop this once
-          # a release has shipped with the fix.
-          [ -f "./$bin" ] || mv "./super-c" "./$bin"
+          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags
           test -x "./$bin"
 
       - uses: actions/upload-artifact@v7
@@ -684,7 +680,6 @@ jobs:
         with:
           target: ${{ matrix.target }}
           sha: ${{ github.sha }}
-          cstd: ${{ matrix.target == 'windows' && '-std=gnu11 -D_POSIX_C_SOURCE=200809L -g1' || '' }}
           llvm-mingw: ${{ matrix.target == 'windows' }}
 
       - name: Exclude work dirs from Defender
@@ -707,9 +702,8 @@ jobs:
       - name: Build the compiler
         run: |
           set -eu
-          "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${SC_BOOT_CSTD:+"$SC_BOOT_CSTD"}
+          "./super-c-boot${BINEXT:-}" build --bootstrap-tags
           bin="super-c${BINEXT:-}"
-          [ -f "./$bin" ] || mv "./super-c" "./$bin"
           test -x "./$bin"
 
       - name: Compare the native backend with the emitted C

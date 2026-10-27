@@ -200,7 +200,7 @@ other values do: in fields, as arguments, in containers (`Vector<(i32, bool)>`).
 tuple, name its type with an alias (`type P = (A, B);`). To reach into a nested tuple, add
 parentheses: `(t.0).1`.
 
-Integer overflow traps in the `debug`, `test` and `race` profiles and wraps in `release` and
+Integer overflow traps in the `debug` and `test` profiles and wraps in `release` and
 `bench` (`overflow-checks` in a profile changes this). Division by zero and shifts out of range
 always trap. `wrapping_*`, `checked_*` and `saturating_*` methods choose the behavior explicitly.
 Values widen automatically (`i32` to `i64`, `f32` to `f64`); other conversions use `as`.
@@ -760,8 +760,7 @@ fn os_name() str<'static> { return "windows"; }
 
 * `@platform(windows|macos|linux|wasm|ios|android)` and `@arch(x86_64|aarch64|wasm32)` work on
   items and on the members of an `extend` or an `extern` block. `|` is a union, `!x` the complement.
-* `@when(C)` gates an item, a member or an import on the build flags `TEST`, `THREAD_SANITIZER`,
-  `ADDRESS_SANITIZER` (false in every build: no build has a sanitizer), `LOCKDEP` and
+* `@when(C)` gates an item, a member or an import on the build flags `TEST`, `LOCKDEP` and
   `OVERFLOW_CHECKS`, with `!`, `&&`, `||` and parentheses.
 * The build constants (`PLATFORM`, `ARCH`, `TEST`, `PROFILE`, ...) work in any expression, and an
   `if` on them keeps only the branch that is taken.
@@ -1255,7 +1254,7 @@ None is needed for normal use.
 | `SC_LEAK_CHECK` | the leak and double-free checker: any value except `0` reports at exit; a value starting with `f`/`F` (like `fatal`) also exits with code 23 on a leak and aborts on a double free |
 | `SC_TASK_TRACE` | trace coroutines and tasks (`0`: off) |
 | `SC_SCHED_SEED` | fix the scheduler's random seed, to replay a race without rebuilding |
-| `SC_LOCK_ORDER` | in the `race` profile, check lock ordering: any value except `0` reports violations; `f...`/`F...` aborts |
+| `SC_LOCK_ORDER` | in a profile with `lockdep = true`, check lock ordering: any value except `0` reports violations; `f...`/`F...` aborts |
 | `SC_SIMD_LEVEL` | on x86_64, use run-time copy `k` of the vector functions (1-based, in `--simd-dispatch` order; `0`: the baseline) |
 | `SC_BENCH_LOG` | a benchmark program also appends its results to this file |
 

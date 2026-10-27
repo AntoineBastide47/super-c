@@ -404,7 +404,7 @@ fn header_type_declaration_errors() {
     h::expect_err_msg(
         "a float constant",
         "extern \"C\" \"math.h\" {\n    const HUGE_VAL: f64 = 1.0;\n}\nfn main() i32 { return 0; }\n",
-        "a constant of an 'extern \"C\"' block with a value is an integer or a 'bool': the C compile checks it",
+        "a constant of an 'extern \"C\"' block with a value is an integer or a 'bool': the build checks it against the header",
     );
     h::expect_err_msg(
         "a constant with no header",

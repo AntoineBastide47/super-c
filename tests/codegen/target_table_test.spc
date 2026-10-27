@@ -40,7 +40,7 @@ const fn target_at(i: usize) tgt::Target {
 }
 
 // The value of macro `name` in the `#define` lines `predefs`; empty when undefined.
-fn macro_value<'a>(predefs: str<'a>, name: str) str<'a> {
+const fn macro_value<'a>(predefs: str<'a>, name: str) str<'a> {
     let mut it = predefs.lines();
     while let Some(line) = it.next() {
         if line.starts_with("#define ") && line.slice(8, line.len()).starts_with(name) {

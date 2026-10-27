@@ -77,7 +77,7 @@ fn put_rel(out: &mut Vector<u8>, at: u32, sym: u32, ty: u32) {
 }
 
 // Add `v` to the little-endian field of `n` bytes at `at` of `b` (an implicit addend).
-fn add_field(b: &mut Vector<u8>, at: u32, n: u32, v: u64) {
+const fn add_field(b: &mut Vector<u8>, at: u32, n: u32, v: u64) {
     let mut cur: u64 = 0;
     for q in 0..n {
         cur |= b[(at + q) as usize] as u64 << (8 * q) as u64;

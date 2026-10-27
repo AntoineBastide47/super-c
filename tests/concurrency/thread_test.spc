@@ -399,9 +399,7 @@ fn repeated_spawn_and_detach_reach_a_steady_state() {
     }
     let rss2 = unsafe sys::sc_bs_rss_now();
     assert_eq(platform::stack_bytes(), stk0);
-    // AddressSanitizer's quarantine keeps freed blocks resident by design, so the bound holds only without
-    // it; the leak gate still checks every cell and handle there.
-    if rss0 >= 0 && sc_runtime::sc_rt_asan() == 0 {
+    if rss0 >= 0 {
         // Thread stacks the OS caches after exit are bounded; unreleased cells or handles would not be.
         assert(rss2 - rss1 < 8 * 1048576, "the second thousand threads do not grow the resident set");
     }

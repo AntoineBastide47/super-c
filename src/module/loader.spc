@@ -185,7 +185,7 @@ pub struct Package {
     pub simd_table: Vector<cf::SimdEntry>,
     /// The build makes a shared library: its code is position-independent.
     pub pic: bool,
-    /// The build's configuration (`bsys::build_cfg`): bit `k - BC_THREAD_SANITIZER` holds build constant
+    /// The build's configuration (`bsys::build_cfg`): bit `k - BC_LOCKDEP` holds build constant
     /// `k`, except that the OVERFLOW_CHECKS bit is set where the profile wraps.
     pub build_cfg: u32,
     /// The profile's `opt-level` (`bman::OPT_NONE` when it names none), and whether the objects carry debug
@@ -2790,14 +2790,12 @@ extend Package {
         }
         src.push_str("\";\n");
         let cfg: []str = [
-            "/// The C compile has ThreadSanitizer (`-fsanitize=thread`).\npub const THREAD_SANITIZER: bool = ",
-            "/// The C compile has AddressSanitizer (`-fsanitize=address`).\npub const ADDRESS_SANITIZER: bool = ",
-            "/// The runtime tracks lock order (`-DSC_LOCKDEP`).\npub const LOCKDEP: bool = ",
+            "/// The runtime tracks lock order (the profile's `lockdep`).\npub const LOCKDEP: bool = ",
             "/// Integer overflow traps; false where the profile wraps it.\npub const OVERFLOW_CHECKS: bool = ",
         ];
         for i in 0..cfg.len() {
             src.push_str(cfg[i]);
-            src.push_str(pick(self.bc_value(BC_THREAD_SANITIZER + i as i32) != 0, "true;\n", "false;\n"));
+            src.push_str(pick(self.bc_value(BC_LOCKDEP + i as i32) != 0, "true;\n", "false;\n"));
         }
         src.format_into(
             "/// The CPU features the build enables: the platform's baseline, `target-features`, `--target-feature`\n/// and what they imply. Bit `i` of word `i / 64` is the `cpu::Feature` variant of discriminant `i`.\npub const TARGET_FEATURES: [u64; 2] = [{}, {}];\n",
@@ -2881,9 +2879,9 @@ extend Package {
         if k == BC_TEST {
             return self.test_build as i64;
         }
-        if k >= BC_THREAD_SANITIZER {
+        if k >= BC_LOCKDEP {
             // The overflow bit records a wrapping profile, so a package with no configuration checks.
-            let bit = (self.build_cfg >> (k - BC_THREAD_SANITIZER) as u32 & 1u32) as i64;
+            let bit = (self.build_cfg >> (k - BC_LOCKDEP) as u32 & 1u32) as i64;
             return pick(k == BC_OVERFLOW_CHECKS, 1 - bit, bit);
         }
         if k == BC_POINTER_WIDTH {
@@ -2907,7 +2905,7 @@ extend Package {
     /// value of boolean build constant `k`.
     pub const fn when_index(self: &Self) u32 {
         let mut w = self.bc_value(BC_TEST) as u32;
-        for k in BC_THREAD_SANITIZER..BC_OVERFLOW_CHECKS + 1 {
+        for k in BC_LOCKDEP..BC_OVERFLOW_CHECKS + 1 {
             w = w | self.bc_value(k) as u32 << when_var(k);
         }
         return w;

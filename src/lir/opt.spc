@@ -388,7 +388,7 @@ extend Opt {
         }
     }
 
-    fn intersect(self: &Self, a0: u32, c0: u32) u32 {
+    const fn intersect(self: &Self, a0: u32, c0: u32) u32 {
         let mut a = a0;
         let mut c = c0;
         // Each step climbs one dominator: at most the block count in all.
@@ -466,7 +466,7 @@ extend Opt {
         }
     }
 
-    fn has_pred(self: &Self, k: u32, p: u32) bool {
+    const fn has_pred(self: &Self, k: u32, p: u32) bool {
         for q in self.pred_at[k as usize]..self.pred_at[k as usize + 1] {
             if self.preds[q as usize] == p {
                 return true;
@@ -476,7 +476,7 @@ extend Opt {
     }
 
     // Whether loop `h` holds block `x`.
-    fn in_loop(self: &Self, h: u32, x: u32) bool {
+    const fn in_loop(self: &Self, h: u32, x: u32) bool {
         let mut l = self.inner[x as usize];
         // Each step leaves one loop.
         while l != NONE {
@@ -1077,14 +1077,14 @@ extend Opt {
     }
 
     // Whether every operand of `t` is defined outside loop `h`.
-    fn invariant(self: &Self, t: Inst, h: u32) bool {
+    const fn invariant(self: &Self, t: Inst, h: u32) bool {
         let f = op_info(t.op).form;
         return (!lv::operand_a(f) || self.outside(t.a, h)) && (!lv::operand_b(f) || self.outside(t.b, h)) && (!lv::operand_c(
             f,
         ) || self.outside(t.c, h));
     }
 
-    fn outside(self: &Self, v: Value, h: u32) bool {
+    const fn outside(self: &Self, v: Value, h: u32) bool {
         if v == VNONE {
             return true;
         }
@@ -1420,7 +1420,7 @@ extend Opt {
     }
 
     // Whether `t` of `b` stores or fills into a slot nothing reads (`sread`), not volatile.
-    fn dead_store(self: &Self, b: &Body, t: Inst) bool {
+    const fn dead_store(self: &Self, b: &Body, t: Inst) bool {
         if t.op != O_STORE && t.op != O_MEMSET || t.op == O_STORE && (t.aux & MEM_VOLATILE) != 0 || (t.a & (VPARAM | VFLAG)) != 0 {
             return false;
         }
@@ -1515,7 +1515,7 @@ extend Opt {
         }
     }
 
-    fn renum_pool(self: &mut Self, b: &mut Body, at: u32) {
+    const fn renum_pool(self: &mut Self, b: &mut Body, at: u32) {
         if !self.done_pool[at as usize] {
             self.done_pool[at as usize] = true;
             b.pool[at as usize] = self.renum(b.pool[at as usize]);
@@ -1664,7 +1664,7 @@ fn levels(p: &Package, bodies: &Vector<Body>, shape: &Vector<bool>, level: &mut 
 }
 
 // The body index a direct call `t` of `b` reaches (NONE: not a call, or no body).
-fn call_target(p: &Package, b: &Body, t: Inst) u32 {
+const fn call_target(p: &Package, b: &Body, t: Inst) u32 {
     if t.op != O_CALL {
         return NONE;
     }
@@ -1709,7 +1709,7 @@ const fn droppable(t: Inst) bool {
 // ---- Folding ------------------------------------------------------------------------------------------
 
 // The integer constant value `v` is (up to 64 bits, truncated to its type), if it is one.
-fn const_of(b: &Body, v: Value) Option<u64> {
+const fn const_of(b: &Body, v: Value) Option<u64> {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_ICONST || b.insts[v as usize].ty == T_I128 {
         return Option::<u64>::None;
     }
@@ -1717,7 +1717,7 @@ fn const_of(b: &Body, v: Value) Option<u64> {
     return Option::<u64>::Some(t.b as u64 << 32 | t.a as u64);
 }
 
-fn float_const(b: &Body, v: Value) Option<u64> {
+const fn float_const(b: &Body, v: Value) Option<u64> {
     if (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_FCONST {
         return Option::<u64>::None;
     }
@@ -1868,7 +1868,7 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
 }
 
 // Whether address `v` of `b` is a slot's address plus constant offsets.
-fn slot_based(b: &Body, v: Value) bool {
+const fn slot_based(b: &Body, v: Value) bool {
     let mut x = v;
     // Each step goes to an earlier address of the chain: at most the instruction count.
     for _ in 0..b.insts.len() {
@@ -1936,7 +1936,7 @@ const fn term(b: &Body, k: u32) Inst {
 
 // Whether vector operation `t` reads the slice at `v`, its first operand and no other, and writes no byte
 // of it: a checked load or store, or a masked, partial or gather access of a slice.
-fn header_read(b: &Body, t: Inst, v: Value) bool {
+const fn header_read(b: &Body, t: Inst, v: Value) bool {
     let code = (t.aux & VOP_CODE) as u32;
     if code < core::OP_SIMD || code >= core::OP_CMP_LANES || t.b == 0 || b.pool[t.a as usize] != v {
         return false;
@@ -1959,7 +1959,7 @@ const fn writes_memory(t: Inst) bool {
 }
 
 // Whether block `k` of `b` holds an instruction that writes memory.
-fn writes_in(b: &Body, k: u32) bool {
+const fn writes_in(b: &Body, k: u32) bool {
     let bk = b.blocks[k as usize];
     for i in bk.start..bk.start + bk.len {
         if writes_memory(b.insts[i as usize]) {
@@ -1991,7 +1991,7 @@ fn speculable(pk: &Package, b: &Body, t: Inst) bool {
 
 // Whether `t` of `b` is the address of a thread-local variable: the running thread's copy, which a call
 // may change (a task resumes on another thread), so no two of them are one value.
-fn tls_addr(pk: &Package, b: &Body, t: Inst) bool {
+const fn tls_addr(pk: &Package, b: &Body, t: Inst) bool {
     return t.op == O_SYMADDR && pk.syms[b.syms[t.a as usize] as usize].kind == SK_TLS;
 }
 

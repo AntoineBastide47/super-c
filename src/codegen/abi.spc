@@ -65,7 +65,7 @@ extend CallLayout {
 
 /// Whether signature type `pt` of body `b` is an aggregate whose register class its layout does not
 /// give: 1 to 64 bytes and no leaves (the lowering keeps none when they are unknown).
-pub fn unknown_class(b: &Body, pt: u32) bool {
+pub const fn unknown_class(b: &Body, pt: u32) bool {
     if (pt & AGG) == 0 {
         return false;
     }

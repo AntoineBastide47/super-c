@@ -1,6 +1,5 @@
-// Build statistics for one engine build: a monotonic timestamp at every phase boundary, memory
-// samples at the five reporting boundaries, and the span of the streamed C compile, published as
-// one JSON object when SC_BUILD_STATS names a sink ("-" is stderr; anything else is a file the
+// Build statistics for one engine build: a monotonic timestamp at every phase boundary and memory
+// samples at the five reporting boundaries, published as one JSON object when SC_BUILD_STATS names a sink ("-" is stderr; anything else is a file the
 // object is appended to as one line). SC_BUILD_MEM additionally turns the runtime allocation
 // tracker on for the build, so the samples carry requested bytes, allocation counts, retained
 // bytes and the survivors of every earlier phase; without it those fields stay zero. With neither

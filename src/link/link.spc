@@ -1,7 +1,6 @@
 // The project's own linker: it links the native backend's objects with the system's shared libraries,
-// taking the C compiler's link command as its input so a build has one link command either way. It
-// serves a target once its format's linker exists; a command with a flag it does not know (a sanitizer,
-// LTO, a linker option) stays with the C compiler until step 17 removes it.
+// taking a link command in the C driver's syntax as its input (the build's, and `-Wl,` options of
+// build.toml). A command with a flag it does not know fails the link.
 import std::platform::fs;
 import std::platform::process;
 import link::macho as lm;

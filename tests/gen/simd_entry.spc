@@ -625,8 +625,8 @@ pub fn check(text: str, k: usize, parts: usize, per: u64) String {
             va.push(String::new());
             vb.push(String::new());
         }
-        vec::run_all(&a, n, "v", &mut va, &mut r);
-        vec::run_all(&b, n, "v", &mut vb, &mut r);
+        vec::run_all(&a, n, "v", &mut va);
+        vec::run_all(&b, n, "v", &mut vb);
         for k in 0..n {
             if !va.at(k).equals(vb.at(k)) {
                 r.format_into(

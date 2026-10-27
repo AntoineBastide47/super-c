@@ -37,8 +37,7 @@ gives (`par_replay`); the prelude's files parse in one wave and take their ids i
   by the resolver).
 - Prelude: the std files, then the build-constant module `__std::build`, generated from
   the package's settings (`--target`, `arch`, `test_build`, `profile`, and `build_cfg`: the
-  sanitizer, lockdep and wrapping bits `build_system::build::build_cfg` reads from the C flags;
-  `add_build_module`). `build_cfg` is part of the prelude image key and of every unit's cache key.
+  lockdep and wrapping bits the build sets from the profile, `build_system::build`; `add_build_module`). `build_cfg` is part of the prelude image key and of every unit's cache key.
 - The two build drivers (`run_file`, `emit_closure`) load in two stages. `prelude_stage`
   (`src/driver/emit.spc`) loads the prelude alone into a package with the same settings
   (`Package::settings_copy`, `load_prelude_stage`; imports looked up under the std root only),
@@ -46,8 +45,8 @@ gives (`par_replay`); the prelude's files parse in one wave and take their ids i
   stage uses, through the prelude gate's publication. `driver::prelude_image` saves that package
   (`utils::persist`: the modules with their ASTs and type pools, the index, the type table and
   publication maps, the method marks) with the engine's deferred checks, and the build loads the
-  bytes back into its own package: a cached image (an object cache entry, see `super-c-binary`) is
-  the same bytes. `Package.carry` keeps what the second stage's item schedule starts from: the
+  bytes back into its own package: a cached image (`<root>/prelude/`, see `super-c-binary`) is the
+  same bytes. `Package.carry` keeps what the second stage's item schedule starts from: the
   prelude items' raw resolution and post-typecheck edges, readiness states, result verdicts and
   dynamic edges. `load_user` then loads the root's closure after the prelude
   (`Package.root_module` is its first module) and the vector backend when a module names a

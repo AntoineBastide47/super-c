@@ -67,7 +67,7 @@ extend<'a> Parser<'a> {
         return Option::<Package>::None;
     }
 
-    fn fail(self: &mut Self, why: str<'static>) bool {
+    const fn fail(self: &mut Self, why: str<'static>) bool {
         if self.why.len() == 0 {
             self.why = why;
         }
@@ -75,7 +75,7 @@ extend<'a> Parser<'a> {
     }
 
     // Move to the next line; false at the end of the text.
-    fn next_line(self: &mut Self) bool {
+    const fn next_line(self: &mut Self) bool {
         if self.line_no != 0 {
             self.at = self.line_end + 1;
         }
@@ -101,14 +101,14 @@ extend<'a> Parser<'a> {
         return ast::pick(c == b';', 0u8, c);
     }
 
-    fn skip_spaces(self: &mut Self) {
+    const fn skip_spaces(self: &mut Self) {
         while self.at < self.line_end && self.text.byte_at(self.at) == b' ' {
             self.at += 1;
         }
     }
 
     // Skip spaces, then the byte `c` if it is next.
-    fn eat(self: &mut Self, c: u8) bool {
+    const fn eat(self: &mut Self, c: u8) bool {
         self.skip_spaces();
         if self.peek() == c {
             self.at += 1;
@@ -117,12 +117,12 @@ extend<'a> Parser<'a> {
         return false;
     }
 
-    fn expect(self: &mut Self, c: u8, why: str<'static>) bool {
+    const fn expect(self: &mut Self, c: u8, why: str<'static>) bool {
         return self.eat(c) || self.fail(why);
     }
 
     // The next word: letters, digits, `_`, `.`, `$` and `-`.
-    fn word(self: &mut Self) str<'a> {
+    const fn word(self: &mut Self) str<'a> {
         self.skip_spaces();
         let s = self.at;
         while self.at < self.line_end && (name_char(self.text.byte_at(self.at)) || self.text.byte_at(self.at) == b'-') {
@@ -132,7 +132,7 @@ extend<'a> Parser<'a> {
     }
 
     // Whether the next word is `w` (consumed when it is).
-    fn keyword(self: &mut Self, w: str) bool {
+    const fn keyword(self: &mut Self, w: str) bool {
         let save = self.at;
         if self.word() == w {
             return true;
@@ -141,12 +141,12 @@ extend<'a> Parser<'a> {
         return false;
     }
 
-    fn expect_word(self: &mut Self, w: str, why: str<'static>) bool {
+    const fn expect_word(self: &mut Self, w: str, why: str<'static>) bool {
         return self.keyword(w) || self.fail(why);
     }
 
     // A decimal integer, signed.
-    fn int(self: &mut Self, out: &mut i64) bool {
+    const fn int(self: &mut Self, out: &mut i64) bool {
         self.skip_spaces();
         let neg = self.peek() == b'-';
         if neg || self.peek() == b'+' {
@@ -173,7 +173,7 @@ extend<'a> Parser<'a> {
         return true;
     }
 
-    fn uint(self: &mut Self, out: &mut u32) bool {
+    const fn uint(self: &mut Self, out: &mut u32) bool {
         let mut v: i64 = 0;
         if !self.int(&mut v) {
             return false;
@@ -186,7 +186,7 @@ extend<'a> Parser<'a> {
     }
 
     // `0x` and hexadecimal digits.
-    fn hex(self: &mut Self, out: &mut u64) bool {
+    const fn hex(self: &mut Self, out: &mut u64) bool {
         self.skip_spaces();
         if self.peek() != b'0' || self.at + 1 >= self.line_end || self.text.byte_at(self.at + 1) != b'x' {
             return self.fail("expected a hexadecimal number");
@@ -209,7 +209,7 @@ extend<'a> Parser<'a> {
     }
 
     // `<prefix><n>`: a numbered name such as `v3`, `b0`, `s2`, `f1`, `l0`.
-    fn numbered(self: &mut Self, prefix: u8, out: &mut u32) bool {
+    const fn numbered(self: &mut Self, prefix: u8, out: &mut u32) bool {
         self.skip_spaces();
         if self.peek() != prefix {
             return self.fail("expected a numbered name");
@@ -293,14 +293,14 @@ extend<'a> Parser<'a> {
     }
 
     // The end of the line: an optional location, then nothing but a comment.
-    fn line_end_loc(self: &mut Self, loc: &mut Loc) bool {
+    const fn line_end_loc(self: &mut Self, loc: &mut Loc) bool {
         let mut site = Loc { file: 0, line: 0, col: 0 };
         return self.line_end_site(loc, &mut site, false);
     }
 
     // `line_end_loc`, where an instruction's location may name the call it was inlined from after an '@'
     // (`site`, when `inst`).
-    fn line_end_site(self: &mut Self, loc: &mut Loc, site: &mut Loc, inst: bool) bool {
+    const fn line_end_site(self: &mut Self, loc: &mut Loc, site: &mut Loc, inst: bool) bool {
         self.skip_spaces();
         if self.peek() == b'!' {
             self.at += 1;
@@ -319,7 +319,7 @@ extend<'a> Parser<'a> {
     }
 
     // A location: an optional file and ':', then a line and a column.
-    fn loc_text(self: &mut Self, loc: &mut Loc) bool {
+    const fn loc_text(self: &mut Self, loc: &mut Loc) bool {
         let mut f = self.file;
         if self.peek() == b'f' {
             if !self.numbered(b'f', &mut f) || !self.expect(b':', "expected ':' after the file") {
@@ -745,7 +745,7 @@ extend<'a> Parser<'a> {
     }
 
     // A value operand: `v<n>` (a printed number, patched later when not yet defined) or `none`.
-    fn value(self: &mut Self, out: &mut u32, fixed: &mut bool) bool {
+    const fn value(self: &mut Self, out: &mut u32, fixed: &mut bool) bool {
         if self.keyword("none") {
             *out = VNONE;
             *fixed = false;
@@ -836,7 +836,7 @@ extend<'a> Parser<'a> {
     }
 
     // `+n` or `-n`, or nothing: a byte offset.
-    fn offset(self: &mut Self, out: &mut u32) bool {
+    const fn offset(self: &mut Self, out: &mut u32) bool {
         self.skip_spaces();
         *out = 0;
         if self.peek() != b'+' && self.peek() != b'-' {
@@ -854,7 +854,7 @@ extend<'a> Parser<'a> {
     }
 
     // An order name.
-    fn order(self: &mut Self, out: &mut u16) bool {
+    const fn order(self: &mut Self, out: &mut u16) bool {
         let w = self.word();
         for k in 0..5u16 {
             if order_name(k) == w {

@@ -159,10 +159,10 @@ pub struct Lower {
     pub tests: Vector<LTest>,
     /// The function symbols lowered since the last `claim`.
     pend: Vector<u32>,
-    pend_c: str<'static>, // what in them only C compiles (a C header's constant, an intrinsic), else empty
+    pend_c: str<'static>, // what in them no object defines (a C header's constant, an intrinsic), else empty
     pend_name: String, // the C name `pend_c` is about
     fails_seen: usize, // `fails` at the last claim
-    /// The units a C chunk without a LIR body landed in, which compile through C, and why.
+    /// The units a C chunk without a LIR body landed in, which do not compile, and why.
     pub conly: Vector<u32>,
     pub conly_why: Vector<String>,
     /// The CTFE outcome of each test (`probe_tests`) the check compares the evaluator's with.
@@ -323,7 +323,7 @@ extend Lower {
         return ast::pick(self.pkg.ptr_bytes == 8, T_I64, T_I32);
     }
 
-    fn fail(self: &mut Self, why: str<'static>) bool {
+    const fn fail(self: &mut Self, why: str<'static>) bool {
         if self.err.len() == 0 {
             self.err = why;
         }
@@ -1186,7 +1186,7 @@ extend Lower {
 
     // Address `addr` + `off` with a constant `ptradd` behind `addr` folded into the offset: its base, and
     // the two offsets' sum when it fits.
-    fn fold_addr(self: &Self, addr: Value, off: u32) (Value, u32) {
+    const fn fold_addr(self: &Self, addr: Value, off: u32) (Value, u32) {
         if (addr & (VPARAM | VFLAG)) != 0 || addr == VNONE {
             return addr, off;
         }
@@ -1393,7 +1393,7 @@ extend Lower {
     }
 
     // The type of draft value `v`.
-    fn vty(self: &Self, v: Value) u8 {
+    const fn vty(self: &Self, v: Value) u8 {
         if (v & VPARAM) != 0 && (v & PHI_TAG) != 0 {
             return self.phis[(v & ~(VPARAM | PHI_TAG)) as usize].ty;
         }
@@ -1526,7 +1526,7 @@ extend Lower {
         return self.zero_here(ty);
     }
 
-    fn fail_v(self: &mut Self, why: str<'static>) Value {
+    const fn fail_v(self: &mut Self, why: str<'static>) Value {
         let _ = self.fail(why);
         return VNONE;
     }
@@ -1566,7 +1566,7 @@ extend Lower {
     }
 
     // Start a view: the values cached in the views before are not valid in it.
-    fn new_view(self: &mut Self) {
+    const fn new_view(self: &mut Self) {
         if self.view == 0xFFFFFFFF {
             for i in 0..self.cv.len() {
                 self.cv[i] = 0;
@@ -1629,7 +1629,7 @@ extend Lower {
     }
 
     // `v` after the phis replaced so far.
-    fn find(self: &Self, v: Value) Value {
+    const fn find(self: &Self, v: Value) Value {
         let mut x = v;
         // Each step follows a replacement made earlier: at most one per phi.
         for _ in 0..self.phis.len() + 1 {
@@ -1952,7 +1952,7 @@ extend Lower {
         return true;
     }
 
-    fn take_addr(self: &mut Self, b: &irc::CoreBody, pid: u32, mem: &mut Vector<bool>) {
+    const fn take_addr(self: &mut Self, b: &irc::CoreBody, pid: u32, mem: &mut Vector<bool>) {
         let pl = b.places[pid as usize];
         if pl.proj_len == 0 || b.projections[pl.proj_start as usize].kind != irc::PJ_DEREF {
             mem[pl.base as usize] = true;
@@ -2664,7 +2664,7 @@ extend Lower {
     }
 
     // The env offset of capture `k`, NONE when it has no storage.
-    fn cap_off(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, k: u32) u32 {
+    const fn cap_off(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, k: u32) u32 {
         let mut off: u32 = 0;
         let base = b.returns + b.args - self.ncaps(b);
         for i in 0..k + 1 {
@@ -2921,7 +2921,7 @@ extend Lower {
     // ---- Constants ----
 
     // The source a constant's span indexes: an inlined constant's own module's.
-    fn const_src(c: &cbe::CEmit, b: &irc::CoreBody, k: &irc::Constant) str<'static> {
+    const fn const_src(c: &cbe::CEmit, b: &irc::CoreBody, k: &irc::Constant) str<'static> {
         let m = ast::pick(k.item.node != NODE_NONE, k.item.module, b.module);
         return Lower::p(c).modules.at(m as usize).source.as_str();
     }
@@ -3641,7 +3641,7 @@ extend Lower {
     }
 
     // The value of integer constant operand `opid` into `out`; false for another operand.
-    fn const_int(self: &Self, c: &cbe::CEmit, b: &irc::CoreBody, opid: u32, out: &mut i64) bool {
+    const fn const_int(self: &Self, c: &cbe::CEmit, b: &irc::CoreBody, opid: u32, out: &mut i64) bool {
         let op = b.operands[opid as usize];
         if op.kind != irc::OP_CONST {
             return false;
@@ -5639,7 +5639,7 @@ extend Lower {
 
     // Whether rvalue `rid` can build straight into place `pid`: a whole local whose address never
     // escapes and that no operand reads.
-    fn direct(self: &Self, b: &irc::CoreBody, pid: u32, rid: u32) bool {
+    const fn direct(self: &Self, b: &irc::CoreBody, pid: u32, rid: u32) bool {
         let pl = b.places[pid as usize];
         if pl.proj_len != 0 || self.escaped[pl.base as usize] || self.li[pl.base as usize].kind != LK_MEM {
             return false;
@@ -7021,7 +7021,7 @@ extend Lower {
     }
 
     // Draft value `v` as a body value; `is_value` false leaves a field that holds no value.
-    fn fin(self: &Self, v: Value, pidx: &Vector<u32>, is_value: bool) Value {
+    const fn fin(self: &Self, v: Value, pidx: &Vector<u32>, is_value: bool) Value {
         if !is_value || v == VNONE {
             return v;
         }
@@ -7123,7 +7123,7 @@ extend Lower {
         }
     }
 
-    /// Data symbol `name` belongs to unit `unit`; without a LIR definition the unit compiles through C.
+    /// Data symbol `name` belongs to unit `unit`; without a LIR definition the unit does not compile.
     pub fn claim_data(self: &mut Self, name: str, unit: u32) {
         let s = self.pkg.find_symbol(name);
         if s != NONE && self.pkg.syms[s as usize].def != NONE {
@@ -7135,7 +7135,7 @@ extend Lower {
     }
 
     /// Whether a body lowered since the last claim needs what no object defines (`pend_c`), cleared.
-    pub fn take_pend_c(self: &mut Self) bool {
+    pub const fn take_pend_c(self: &mut Self) bool {
         let r = self.pend_c.len() != 0;
         self.pend_c = "";
         return r;
@@ -7772,7 +7772,7 @@ fn eval_task(t: EvalTask) {
 
 // The interpreter's trap kind of evaluator outcome `o`: a lowered check's panic is the trap the
 // interpreter raises for it.
-fn trap_class(o: &le::Outcome) u8 {
+const fn trap_class(o: &le::Outcome) u8 {
     if o.kind == le::EV_OK {
         return iri::IT_TRAP_NONE;
     }
@@ -7796,7 +7796,7 @@ fn trap_class(o: &le::Outcome) u8 {
 }
 
 // The 1-based line and column of byte `pos` of `src`.
-fn line_col(src: str, pos: u32, line: &mut u32, col: &mut u32) {
+const fn line_col(src: str, pos: u32, line: &mut u32, col: &mut u32) {
     let mut l: u32 = 1;
     let mut st: usize = 0;
     let end = if pos as usize > src.len() {
@@ -8387,7 +8387,7 @@ extend Lower {
 }
 
 // `v`'s low `n` bytes, little-endian, at `off` of `b`.
-fn put_le(b: &mut Vector<u8>, off: u32, v: u64, n: u32) {
+const fn put_le(b: &mut Vector<u8>, off: u32, v: u64, n: u32) {
     for i in 0..n {
         if i < 8 {
             b[(off + i) as usize] = (v >> (8 * i) as u64) as u8;
@@ -9077,12 +9077,12 @@ extend Lower {
     }
 
     // Whether value `v` is a slot's address (`forward_slots`).
-    fn is_slot_addr(self: &Self, v: Value) bool {
+    const fn is_slot_addr(self: &Self, v: Value) bool {
         return (v & (VPARAM | VFLAG)) == 0 && self.td.smap[v as usize] != NONE;
     }
 
     // The slot slot `s` became (`forward_slots`).
-    fn slot_rep(self: &Self, s: u32) u32 {
+    const fn slot_rep(self: &Self, s: u32) u32 {
         let mut r = s;
         for _ in 0..self.td.srep.len() {
             if self.td.srep[r as usize] == r {
@@ -9313,7 +9313,7 @@ extend Lower {
     // Edge `e` past the blocks that only jump: a block of no parameter by its `jmp`'s edge, one that
     // passes its parameters on by retargeting `e` (every edge to it passes them alike). At most `nb`
     // steps, so a loop of such blocks stops.
-    fn thread(self: &mut Self, e: u32, nb: usize) u32 {
+    const fn thread(self: &mut Self, e: u32, nb: usize) u32 {
         let mut x = e;
         for _ in 0..nb {
             let t = self.b.edge_target(x) as usize;
@@ -9350,7 +9350,7 @@ extend Lower {
 
     // Instruction `t` with its values, edges and their arguments renumbered (a pool list in place;
     // an edge two terminators share, once).
-    fn renumber(self: &mut Self, t0: Inst) Inst {
+    const fn renumber(self: &mut Self, t0: Inst) Inst {
         let mut t = t0;
         let f = op_info(t.op).form;
         if lv::operand_a(f) {
@@ -9803,7 +9803,7 @@ extend Lower {
     }
 
     // Whether function or data `sym` has a definition.
-    fn defined(self: &Self, sym: str) bool {
+    const fn defined(self: &Self, sym: str) bool {
         let s = self.pkg.find_symbol(sym);
         return s != NONE && self.pkg.syms[s as usize].def != NONE;
     }

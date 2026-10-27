@@ -1564,16 +1564,13 @@ fn trap_core(t: str, lane: bool) String {
 
 /// Run every case of program `b` in `mode` (`v` or `r`): one process from the first case, and after a
 /// trap one more from the next case. `out[k]` gets each tagged value (`C`, `V`, `S`: "<tag> <value>"), or
-/// "trap: <message>" for the case that trapped; `bad` notes a sanitizer report.
-pub fn run_all(b: &h::DiffBuild, n: usize, mode: str, out: &mut Vector<String>, bad: &mut String) {
+/// "trap: <message>" for the case that trapped.
+pub fn run_all(b: &h::DiffBuild, n: usize, mode: str, out: &mut Vector<String>) {
     let mut from: usize = 0;
     while from < n {
         let mut args = String::new();
         args.format_into("{} {}", from, mode);
         let r = h::diff_run(b, args.as_str());
-        if r.err.contains("runtime error:") || r.err.contains("Sanitizer") {
-            bad.format_into("a sanitizer report from case {} on:\n{}\n", from, r.err.as_str());
-        }
         let mut last = from;
         for line in r.err.as_str().lines() {
             if line.starts_with("R ") {
@@ -1653,8 +1650,8 @@ pub fn check_cases(cases: &Vector<VCase>) String {
             return r;
         }
     }
-    run_all(&b, n, "v", &mut vout, &mut r);
-    run_all(&b, n, "r", &mut sout, &mut r);
+    run_all(&b, n, "v", &mut vout);
+    run_all(&b, n, "r", &mut sout);
     for k in 0..n {
         let c = if omit[k] {
             ctrap[k].clone();

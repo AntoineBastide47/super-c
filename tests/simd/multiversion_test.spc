@@ -224,7 +224,7 @@ fn vector_functions_choose_their_copy_at_run_time() {
     let bad = p.run_raw(format("build \"{}/main.spc\" -o \"{}/app\" --simd-dispatch=x86-64-v9", root, root).as_str());
     assert(!bad.ok() && bad.out_has("simd dispatch: unknown target CPU 'x86-64-v9'"), "a bad level");
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\nsimd-dispatch = \"x86-64-v9\"\n");
-    let man = cli::superc_env_in(root, "SC_NO_CACHE", "1", "build");
+    let man = cli::superc_in(root, "build");
     assert(!man.ok() && man.out_has("simd dispatch: unknown target CPU 'x86-64-v9'"), "a bad manifest level");
 }
 

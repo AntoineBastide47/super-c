@@ -250,7 +250,7 @@ extend Code {
     }
 
     /// Overwrite the 32-bit field at `at` with `x`.
-    pub fn patch32(self: &mut Self, at: u32, x: u32) {
+    pub const fn patch32(self: &mut Self, at: u32, x: u32) {
         for k in 0..4u32 {
             self.b[(at + k) as usize] = (x >> 8 * k & 0xFF) as u8;
         }
@@ -876,7 +876,7 @@ extend Code {
     }
 
     /// Point the 32-bit displacement field at `at` to code position `to`.
-    pub fn land(self: &mut Self, at: u32, to: u32) {
+    pub const fn land(self: &mut Self, at: u32, to: u32) {
         self.patch32(at, (to as i64 - (at as i64 + 4)) as u32);
     }
 

@@ -72,14 +72,16 @@ cemit_package             -- InstGraph.collect() over the kept Core IR bodies of
   |                          TU emission (emit/tu.spc); per body: drop elaboration only for
   |                          a body emission lowered itself, the inliner, bounds-check
   |                          elimination (DropCtx::apply_drops); parallel frontier under --jobs;
-  |                          a module whose backend holds BK_LIR also lowers each rendered body
+  |                          a module whose backend holds BK_LIR also lowers each body
   |                          and derived destructor to LIR (see LIR)
-serial write-out          -- __sc_fwd.h, one __sc_t/<type>.h per type, per-module .h, then the
-  |                          module TU shards (<module>.c, __p<k>), per-owner instance shards
-  |                          (<module>__inst.c), __sc_registry.c and __sc_manifest (a shard
-  |                          streams out as includes, head, its chunks, tail); then
-  |                          prune_orphans drops stale outputs
-cc + link                 -- external C compiler (parallel window under --jobs)
+serial write-out          -- __sc_fwd.h, one __sc_t/<type>.h per type, per-module .h, then
+  |                          (--emit-c) the module TU shards (<module>.c, __p<k>), per-owner
+  |                          instance shards (<module>__inst.c), __sc_registry.c and
+  |                          __sc_manifest (a shard streams out as includes, head, its chunks,
+  |                          tail); then prune_orphans drops stale outputs
+native objects + link     -- a linking build: the LIR optimizer (opt-level > 0), the generators
+                             (x64gen, a64gen, wasmgen) in parallel under --jobs, then the own
+                             linker (src/link/)
 ```
 
 Order facts that surprise people:
@@ -1058,7 +1060,7 @@ A native build compiles each module's LIR to a machine object in place of its C 
 | `src/target/wasmobj.spc` | The relocatable wasm object `wasm-ld` links (Linking.md): types, imports, functions, data segments, the `linking` symbol table, relocations; with debug information `.debug_*` custom sections whose addresses are offsets from a body's entry (`R_WASM_FUNCTION_OFFSET_I32`, section symbols for `R_WASM_SECTION_OFFSET_I32`), as clang writes them |
 | `src/target/wasmgen.spc` | One LIR body into one wasm function: scalars in locals shared by live range (a result may take a local its operands free), i128 and vectors in frame homes (a result's home is never one its operands free at it: a lane loop may write result lanes before it reads every operand lane), the frame below `__stack_pointer`, Ramsey's structured control flow from an explicit task stack, dense switches as `br_table`, vector operations lane by lane as the evaluator defines them. A C `main` with two parameters is `__main_argc_argv`, as wasi-libc's start calls it |
 | `src/target/native.spc` | The entry: `supported` (macOS arm64, Linux x86-64, Linux arm64, Windows x86-64, wasm32-wasip1), `object`, `own_linker` (the own linker's format for a target), `obj_kind` |
-| `src/link/link.spc` | The own linker's entry: `link_args` reads the C compiler's link command (objects, `-l`, `-L`, `-o`, `-shared`, the known `-Wl,` options) and routes it to a format's linker, or answers NOT_SERVED with the reason (a flag or input it does not know); a link with a static library takes the C compiler's runtime archives after its inputs (`cc_runtime`: `-print-libgcc-file-name`, `-print-file-name=libgcc_eh.a`); `archive` |
+| `src/link/link.spc` | The own linker's entry: `link_args` reads a link command in the C driver's syntax (objects, `-l`, `-L`, `-o`, `-shared`, the known `-Wl,` options) and routes it to a format's linker, or answers NOT_SERVED with the reason (a flag or input it does not know), which fails the build; `archive` |
 | `src/link/macho.spc` | Mach-O arm64 executables and dylibs: `.tbd` stubs (`tbd.spc`) and dylibs, chained fixups, `__unwind_info`, the exports trie, the debug map, an ad-hoc signature (`sha256.spc`, pages hashed in parallel; the UUID is the hash of the page hashes) |
 | `src/link/elf.spc` | ELF executables and shared libraries for x86-64 and arm64: glibc's `.so` and GNU ld scripts (every file a `GROUP` names: `libc.so.6`, `libc_nonshared.a`, the loader) read for symbols and versions, PLT and GOT (BIND_NOW), TLS relaxed to local-exec (executable) or initial-exec (shared library), arm64 initial-exec and local-exec relocations of C objects, `.eh_frame_hdr`, a `_start` that calls `__libc_start_main@GLIBC_2.34` |
 | `src/link/pe.spc` | PE executables and DLLs for x86-64: DLL exports read from `-L` directories or the system directory, the UCRT with mingw-w64's renames and old POSIX names (`getcwd` binds `_getcwd`), static libraries (`lib<name>.a`, `<name>.lib`; an import library stands for its DLL), COMDAT sections folded with their associative ones, weak externals, GCC's `.ctors` run with `.CRT$XC*` by priority (`.dtors` is an error), an entry that configures the C runtime, the TLS directory, base relocations, `.pdata`, an export directory for a DLL |
@@ -1066,8 +1068,9 @@ A native build compiles each module's LIR to a machine object in place of its C 
 | `src/link/ar.spc` | The archiver: BSD layout with a sorted `__.SYMDEF` for Mach-O, System V layout for the others, deterministic; the reader (`read`, BSD and System V long names) and `Archives`, the static libraries of a link with the first member that defines each symbol (LLD's rule), which each linker takes from while a strong reference stays undefined |
 | `std/rt/builtins.spc` | compiler-rt's 128-bit routines for the targets whose C library lacks them (Linux, Windows, wasm), in each target's calling convention |
 
-`driver::emit` decides `Package.native`: a linking build with no sanitizer on a supported target, any linking build when the C compiler is not installed (`cc_installed`), or what
-`SC_NATIVE` says. `native_header_facts` reads the constants of the
+`driver::emit` sets `Package.native` for every linking build; a linking build for a target `nat::supported`
+does not name fails ("no native backend for ..."), and an emission alone (`--emit-c`) writes C.
+`native_header_facts` reads the constants of the
 scoped C headers with the own preprocessor (in parallel, cached in `__sc_hfacts` by file size and
 mtime; its first line names its format), and the scalar class of each `@layout` opaque type through
 its typedefs (`Package.opaque_cls`, `bindgen::scalar_class`). Lowering gives such a type that LIR
@@ -1081,12 +1084,12 @@ are the library's exports, as a C compile could read no header either. The calli
 an aggregate by its layout leaves (scalars at offsets; an enum's tag and a capture by reference are
 leaves). A layout of 1 to 64 bytes whose leaves are unknown keeps none (`abi::unknown_class`), so the
 LIR stays complete; the System V and AAPCS64 generators refuse a body whose signature or call passes one
-(`CallLayout.unknown`), and its module goes through C. Microsoft x64 passes an aggregate by its size
+(`CallLayout.unknown`), and the build fails with the refusal. Microsoft x64 passes an aggregate by its size
 alone. A dyn table a body's lowering demands while it holds the lowering lowers when that body ends
 (`CEmit.dyn_due`). Float arithmetic on two constants folds (`lir::eval::float_op`, also the
 interpreter's rule): a NaN result is the first NaN operand quieted, else the positive quiet NaN, as LLVM
 folds it, since wasm leaves a new NaN's sign to the host. A shared-library build
-sets `Package.pic` (the C compile's `-fPIC`): x86-64 code then reaches every global symbol through the
+sets `Package.pic`: x86-64 code then reaches every global symbol through the
 GOT. A call moves its scalar register arguments, and a vector one register takes whole, in one parallel move
 from where they are; a vector result one register returns stays there. Windows
 thread-locals are native TLS (`.tls$`, SECREL), as clang and gcc 16 emit them.
@@ -1098,43 +1101,32 @@ x0/rax; on wasm the operand stack, through locals when the template reads its ar
 order) and expands the template in place of the call, its constant arguments substituted (a
 non-constant one where the template needs an immediate refuses the body). The expansion clobbers what a
 call does; on Windows the values in rdi and rsi, which Microsoft x64 saves, go to slots around it.
-`native_header_facts` reads the headers under the sysroot the C compiler's command or flags name
-(`--sysroot`, `-isysroot`; `Package.cc`, which a manifest build sets from its `cc`).
+`native_header_facts` reads the headers under the target's sysroot (`Package.sysroot`, from
+`--sysroot=`, else discovered by `bindgen::ctarget`).
 
-A module goes through C for module-level assembly where the target has no assembler, a body that stays
-in C, or a call that needs C (an intrinsic without a template, a header's `static` function:
-`Package.c_fns`); its reason is in `SC_NATIVE_STATS`, and `SC_NATIVE_LOG=<file>` appends each such
-module of a build's last run to a file, so a test suite's builds give one list. Each native module gives `m.o` (its own items, reused by the emission cache) and
-`m__inst.o` (the rest). The record `__sc_native` holds, per module, whether its last emission gave
-an object (`NAT_OBJ`) or went through C (`NAT_C`); `nat_trust` turns a cache hit into a miss when
-the record does not hold the module under the current key (`nat_key`, which mixes in `SC_NATIVE`, the
-LIR optimizer's switches and, with debug information, the compile directory), or when the module now renders its bodies but its
-section rendered none.
+A module the backend cannot compile (module-level assembly the target's assembler does not take, a
+body the lowering or the backend refuses, a call of a header's `static` function or of an intrinsic
+without a template) is a build error that names the module and why (`native_plan`); `SC_NATIVE_STATS`
+reports each module. Each native module gives `m.o` (its own items, reused by the emission cache) and
+`m__inst.o` (the rest). The record `__sc_native` holds, per module, the key its own part was compiled
+under (`nat_key`, which mixes in the build configuration, the CPU features, the LIR optimizer's
+switches, the header facts and, with debug information, the compile directory), its low bit `NAT_OBJ`
+when that part has an object; `nat_trust` turns an emission cache hit into a miss when the record does
+not hold the module under the current key.
 
-Debug information follows the C compile's flags: a last `-g` form other than `-g0` (`cemit::debug_flag`)
-sets `lir::ir::Package.debug` and its `comp_dir` (the compiler's directory, as the C compiles'). Each
+Debug information follows the profile's `debug` key (`loader::Package.debug_info`), which sets
+`lir::ir::Package.debug` and its `comp_dir` (the compiler's working directory). Each
 generator records a row per change of LIR location at the instruction's code offset (x86-64 maps them
 through jump relaxation), the prologue taking the first row's location; `codegen::dwarf` writes them.
 The code and data sections are the same bytes with and without it (`tests/codegen/debug_info_test.spc`).
 
-A native module's bodies render no C (`Package.nat_render`, `cemit::backends_of`: no `BK_C`;
-`emit_body_core` returns at once); its declarations still render, and so does every body of the
-vector backend entries' emitter (`CEmit.render_all`: a header's `static inline` C, no object's). `native_render` decides it before
-the emission: a body renders where SC_NATIVE leaves the module out, for module-level assembly, for a
-module the record sent through C
-(`NAT_C`), and for the modules the caller names (`nat_retry`). Where a body renders no C, its lowering
-journals for the TU cache what it demands (`rec_on` stays on: statics through `lir_stat_need`, type
-descriptors through `CEmit::ti_need`), which the renderer journals otherwise. A module that goes
-through C though its bodies rendered none (the lowering or the backend refused it after all, or a
-unit whose C compiles took a body without C: `Lower.retry`) makes `run_package` return
-`RC_NATIVE_RETRY` with `Package.nat_retry` naming them: `main.spc::run_file` and
-`build::emit_closure` load the package again and run with every module an earlier run named. A
-module that renders may demand instances of another module the backend refuses (a refused body's
-lowering stops before its later calls, and a splice the native build makes is a call in C), so a run
-may name more; each names only modules that did not render, so the runs end within one per module.
-The last run's record keeps them on C for the next builds.
-The registry unit stays C: it includes the scoped headers so the C compiler checks the extern
-declarations. Without an installed C compiler it is left out and only the native registry links. The vector bounds-check helpers live in `std/rt/lanes.spc`, loaded only when a
+A native build renders no C body (`cemit::backends_of`: no `BK_C` for any module; `emit_body_core`
+returns at once); the declarations still render, and so does every body of the vector backend entries'
+emitter (`CEmit.render_all`: a header's `static inline` C, no object's). Where a body renders no C, its
+lowering journals for the TU cache what it demands (`rec_on` stays on: statics through `lir_stat_need`,
+type descriptors through `CEmit::ti_need`), which the renderer journals otherwise. The registry is a
+native object too (`__sc_registry_n.o`); `__sc_registry.c` is still written, and no C compiles it.
+The vector bounds-check helpers live in `std/rt/lanes.spc`, loaded only when a
 program names a vector type.
 
 `check_all` (end of `cemit_package`, under `SC_LIR`) verifies every body the build rendered (the

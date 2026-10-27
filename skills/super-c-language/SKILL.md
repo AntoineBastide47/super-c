@@ -676,12 +676,11 @@ that fails removes the item or member before name resolution.
 `--target=` and `--arch=` select the target.
 
 `@when(C)` gates an item, a member or an import on the boolean build constants the same way:
-`C` names `TEST`, `THREAD_SANITIZER`, `ADDRESS_SANITIZER`, `LOCKDEP` and `OVERFLOW_CHECKS` with
-`!`, `&&`, `||` and parentheses (`@when(!THREAD_SANITIZER && !ADDRESS_SANITIZER)`); any other
-name or form is "'@when' takes a condition over TEST, THREAD_SANITIZER, ...". It combines with
-`@platform` and `@arch`: the item exists only where every gate holds. Use it where a definition
-must not exist at all in some builds (std/testing/bench_sys.spc defines the C `malloc` family
-only outside sanitizer builds); inside a body, `if THREAD_SANITIZER { .. }` is enough.
+`C` names `TEST`, `LOCKDEP` and `OVERFLOW_CHECKS` with `!`, `&&`, `||` and parentheses
+(`@when(LOCKDEP && !TEST)`); any other name or form is "'@when' takes a condition over TEST, LOCKDEP
+and OVERFLOW_CHECKS ...". It combines with `@platform` and `@arch`: the item exists only where every
+gate holds. Use it where a definition must not exist at all in some builds; inside a body,
+`if LOCKDEP { .. }` is enough.
 
 The prelude defines the build settings as constants usable in any expression:
 
@@ -693,13 +692,11 @@ The prelude defines the build settings as constants usable in any expression:
 | `POINTER_WIDTH` | `u32` | 64; 32 on `wasm32` |
 | `ENDIAN` | `Endian` (`Little`, `Big`) | `Little` on every supported target |
 | `PROFILE` | `str<'static>` | the build profile name (`debug` when none is named) |
-| `THREAD_SANITIZER` | `bool` | the build's C flags hold `-fsanitize=thread` (the `race` profile) |
-| `ADDRESS_SANITIZER` | `bool` | the build's C flags hold `-fsanitize=address` (`--sanitizers`) |
-| `LOCKDEP` | `bool` | the build's C flags define `SC_LOCKDEP` (lock-order checking) |
-| `OVERFLOW_CHECKS` | `bool` | false when the build's C flags define `SC_ARITH_WRAP` (integer overflow wraps) |
+| `LOCKDEP` | `bool` | the profile sets `lockdep = true` (lock-order checking) |
+| `OVERFLOW_CHECKS` | `bool` | false when the profile wraps integer overflow (`overflow-checks`, else `opt-level` 2 and up) |
 
-The compiler generates their module (`__std::build`) from its flags; std declares only
-the enums (`std/target.spc`). The ten names are reserved: an item or binding with one of
+The compiler generates their module (`__std::build`) from the build's settings; std declares only
+the enums (`std/target.spc`). The eight names are reserved: an item or binding with one of
 them is an error, and so is a type, item, binding or generic parameter named `Platform`,
 `Arch` or `Endian` outside `std/target.spc` (the filter reads `Platform::X` as std's
 variant before name resolution). ARCH and POINTER_WIDTH are absent when the host
@@ -807,7 +804,7 @@ source text, values, and file:line on failure.
 | `@fmt.skip` | Exempt from formatter |
 | `@platform(P)` | Platform gate |
 | `@arch(A)` | Instruction-set gate: `x86_64`, `aarch64`, `wasm32` (see Build Constants and Platform Gating) |
-| `@when(C)` | Build-condition gate over `TEST`, `THREAD_SANITIZER`, `ADDRESS_SANITIZER`, `LOCKDEP`, `OVERFLOW_CHECKS` (see Build Constants and Platform Gating) |
+| `@when(C)` | Build-condition gate over `TEST`, `LOCKDEP`, `OVERFLOW_CHECKS` (see Build Constants and Platform Gating) |
 | `@target_feature([cpu::Feature::X, ..])` | The function needs CPU features (a list, or a level such as `cpu::X86_64_V3`): safe to call where the build or the caller holds them, else inside `unsafe` after a run-time check (an error on wasm32); its vector code uses them (references/simd.md) |
 | `@simd_impl(simd::Op::X, [cpu::Feature::Y, ..])` | `std` only: a backend entry of vector operation `X` (references/simd.md) |
 | `@value(size, align)` | An opaque `extern "C"` type is a C register type of that layout (see `super-c-ffi`) |

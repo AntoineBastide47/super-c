@@ -72,7 +72,7 @@ jobs:
       - name: Build the compiler
         run: |
           set -eu
-          "./super-c-boot${BINEXT:-}" build --bootstrap-tags ${SC_BOOT_CSTD:+"$SC_BOOT_CSTD"}
+          "./super-c-boot${BINEXT:-}" build --bootstrap-tags
           [ -f "./super-c${BINEXT:-}" ] || mv ./super-c "./super-c${BINEXT:-}"
 
       # A pinned release, checked against the hash recorded here, not against the release's own hash file.

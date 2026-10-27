@@ -7,20 +7,20 @@ import target::wasmintrin as wasmi;
 
 /// The instructions of intrinsic `name` on instruction set `isa` (`target::table`'s `ISA_*` name: "aarch64",
 /// "x86_64", "wasm32"); empty when the backend has none, or when the intrinsic needs no instruction (`has`).
-pub fn find(isa: str, name: str) str<'static> {
+pub const fn find(isa: str, name: str) str<'static> {
     let (_k, t) = row(isa, name);
     return t;
 }
 
 /// Whether `isa` has intrinsic `name`: an empty row (`_mm_castps_si128`, `vget_low_f32`) reinterprets its
 /// argument's bytes, which the lowering does without a call.
-pub fn has(isa: str, name: str) bool {
+pub const fn has(isa: str, name: str) bool {
     let (k, _t) = row(isa, name);
     return k;
 }
 
 // The row of intrinsic `name` of `isa`: whether there is one, and its instructions.
-fn row(isa: str, name: str) (bool, str<'static>) {
+const fn row(isa: str, name: str) (bool, str<'static>) {
     let rows: [](str<'static>, str<'static>) = if isa == "aarch64" {
         a64i::ROWS;
     } else if isa == "x86_64" {
@@ -123,7 +123,7 @@ pub fn expand(text: str, imm: []i64, known: []bool, out: &mut String) bool {
 /// The vector register a template names at byte `i` of `text` (arm64 `isa`: `v`, `q`, `d`, `s`, `h` or
 /// `b` and its number; else x86-64's `%xmm`, `%ymm` or `%zmm` and its number): its number and its
 /// spelling's length, the number 99 for none.
-pub fn vreg_at(a64: bool, text: str, i: usize) (u32, usize) {
+pub const fn vreg_at(a64: bool, text: str, i: usize) (u32, usize) {
     let n = text.len();
     let mut j = i;
     if a64 {
@@ -159,7 +159,7 @@ pub fn vreg_at(a64: bool, text: str, i: usize) (u32, usize) {
 }
 
 /// Whether template `text` names vector register `r` (`vreg_at`).
-pub fn vnames(a64: bool, text: str, r: u32) bool {
+pub const fn vnames(a64: bool, text: str, r: u32) bool {
     for i in 0..text.len() {
         let (k, _l) = vreg_at(a64, text, i);
         if k == r {
@@ -171,7 +171,7 @@ pub fn vnames(a64: bool, text: str, r: u32) bool {
 
 /// Whether arm64 template `text` names vector register `r` in a register list (`{ v0.16b, v1.16b }`),
 /// whose registers must be consecutive: the generators keep it.
-pub fn vlisted(text: str, r: u32) bool {
+pub const fn vlisted(text: str, r: u32) bool {
     let mut depth: i32 = 0;
     for i in 0..text.len() {
         let c = text.byte_at(i);
@@ -193,7 +193,7 @@ pub fn vlisted(text: str, r: u32) bool {
 /// (all of a register list), a load, swap or compare-and-swap (`ld*`, `swp*`, `cas*`) every operand; an
 /// x86-64 one its last operand, an exchange or a gather (`xchg`, `xadd`, `gather`) every operand. A store
 /// or a compare counts as a write: the answer errs on the side of a write.
-pub fn vwrites(a64: bool, text: str, r: u32) bool {
+pub const fn vwrites(a64: bool, text: str, r: u32) bool {
     let mut at: usize = 0;
     // Each step takes one instruction (a line or a `;`-separated part).
     while at < text.len() {
@@ -321,7 +321,7 @@ pub fn lane_form(isa: str, name: str) u32 {
 /// alignment (`vld1q_f32`, `_mm_loadu_ps`, `_mm256_store_si256`, `wasm_v128_load`): the lowering makes it
 /// a plain load or store the optimizer sees through. An aligned form's alignment is a precondition, so an
 /// unaligned access computes the same.
-pub fn mem_form(name: str) u8 {
+pub const fn mem_form(name: str) u8 {
     if name == "wasm_v128_load" {
         return MF_LOAD;
     }

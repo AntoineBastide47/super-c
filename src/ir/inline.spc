@@ -2755,7 +2755,7 @@ fn writes_all(b: &ir::CoreBody, w: &mut Writes) {
 
 // The struct aggregate rvalue that alone defines place `p`, a whole caller temporary; IR_NONE when it
 // is no such place or another operation writes it.
-fn once_aggregate(b: &ir::CoreBody, w: &Writes, p: ir::PlaceId) u32 {
+const fn once_aggregate(b: &ir::CoreBody, w: &Writes, p: ir::PlaceId) u32 {
     let pl = *b.places.at(p as usize);
     if pl.proj_len != 0 || b.locals.at(pl.base as usize).storage != ir::LS_TEMP {
         return ir::IR_NONE;

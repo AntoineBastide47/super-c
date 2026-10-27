@@ -527,7 +527,7 @@ extend Gen {
 
     // Register `r`, which `alloc` takes: a callee-saved vector register (Microsoft x64) the prologue
     // then saves.
-    fn taken(self: &mut Self, r: u8) u8 {
+    const fn taken(self: &mut Self, r: u8) u8 {
         if self.win {
             self.csr |= VSAVE_WIN & bit(r);
         }
@@ -597,7 +597,7 @@ extend Gen {
         return self.lv.uses[x as usize] != 0 || self.lv.end[x as usize] > self.pos;
     }
     // Register `r` holds value `x` from now on (NONE: no value).
-    fn set_owner(self: &mut Self, r: u8, x: u32) {
+    const fn set_owner(self: &mut Self, r: u8, x: u32) {
         self.owner[r as usize] = x;
         if x == NONE {
             self.held &= ~bit(r);
@@ -1143,7 +1143,7 @@ extend Gen {
     // ---- Frame ----
 
     // A stack slot of `size` bytes aligned to `al` (memory values and spills); its rsp offset.
-    fn slot_alloc(self: &mut Self, size0: u32, al0: u32) u32 {
+    const fn slot_alloc(self: &mut Self, size0: u32, al0: u32) u32 {
         let size = if size0 < 8 {
             8u32;
         } else {
@@ -1811,7 +1811,7 @@ extend Gen {
     }
 
     // The location value index `x` is read from now.
-    fn loc_of(self: &Self, x: u32) Lc {
+    const fn loc_of(self: &Self, x: u32) Lc {
         let va = self.va[x as usize];
         if va.reg != NOREG {
             return Lc { kind: LC_REG, reg: va.reg, off: 0, val: x };
@@ -3892,7 +3892,7 @@ extend Gen {
 
     // The instructions of the intrinsic body symbol `s` names (`target::intrin`); empty for another
     // function.
-    fn intrinsic(self: &Self, s: u32) str<'static> {
+    const fn intrinsic(self: &Self, s: u32) str<'static> {
         let p = unsafe &*self.pkg;
         let ps = p.syms[self.b().syms[s as usize] as usize];
         if ps.def != NONE {
@@ -5234,7 +5234,7 @@ const fn int_cond(c: u8, sg: bool) u32 {
 }
 
 // The bits of lane type `lt` (a float) holding the integer `k`.
-fn float_bits(lt: u8, k: u32) u64 {
+const fn float_bits(lt: u8, k: u32) u64 {
     if lt == T_F32 {
         return fl::f32_bits(k as f32);
     }
@@ -7328,7 +7328,7 @@ extend Gen {
 
 extend Gen {
     // The text of body message `m`.
-    fn msg_text(self: &Self, m: u32) str {
+    const fn msg_text(self: &Self, m: u32) str {
         let p = unsafe &*self.pkg;
         return p.spell(p.msgs[self.b().msgs[m as usize] as usize]);
     }

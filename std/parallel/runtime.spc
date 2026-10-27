@@ -31,9 +31,8 @@ extern "C" {
 
 // Per-coroutine stack. RESERVED, not consumed: the pages behind it are faulted in as the task uses them, so
 // a shallow task costs a handful of pages however large this is (measured: ~16 KiB per parked task at the
-// 256 KiB default). Raising it buys depth, not memory; see `set_stack_size`. A program built with
-// AddressSanitizer gets four times the default: its frames carry redzones, and a `--sanitizers` build must
-// reach the depth of a plain one. 0 until the pool starts means the default.
+// 256 KiB default). Raising it buys depth, not memory; see `set_stack_size`. 0 until the pool starts means
+// the default.
 const STACK_SIZE_DEFAULT: usize = 262144;
 static mut G_STACK_SIZE: usize = 0;
 // The idle task-block cache, as a BYTE budget over every retained stack mapping (guard page included), the
@@ -771,7 +770,7 @@ fn reg_read(sl: *mut TaskSlot, idx: usize, out: &mut TaskInfo) bool {
 
 /// Snapshot every live registered task into `out`, in stable slot order. A diagnostic scan: the rows are
 /// a consistent identity (key, id) with a racy-but-monotone view of state. `pub` for shutdown reports and
-/// the task-leak sanitizer.
+/// the tests' task-leak checks.
 pub fn task_snapshot(out: &mut Vector<TaskInfo>) {
     let r = reg_load();
     if r == null {
@@ -1818,10 +1817,6 @@ pub fn replay_release() {
 // The coroutine body trampoline: run the closure (which frees its own box), mark done, return to scheduler.
 fn coroutine_start(arg: *mut void) {
     let co = arg as *mut Coroutine;
-    // A first run arrives through the trampoline, not through a switch that returns: tell the substrate
-    // this context has been entered, so the sanitizer's model has the same edge from the worker that the
-    // hardware has by program order (see `sc_rt_ctx_switch`).
-    unsafe sc_runtime::sc_rt_ctx_entered((*co).ctx);
     let e = unsafe (*co).run.entry;
     e(unsafe (*co).run.env);
     // Atomic: the shutdown report reads it from the main thread.
@@ -2556,7 +2551,7 @@ pub unsafe fn spawn_coroutine_env(entry: fn(*mut void) void, env: *mut void, inl
         // (a stale token, so it fails); the generation read here is the one the winner left.
         pst = unsafe atomic::load_u32(&mut unsafe (*co).park_state, 0);
         slot = unsafe (*co).slot;
-        // The previous task's context state (a sanitizer fiber) goes before the block is re-armed.
+        // The previous task's context state (Windows on arm64: its OS fiber) goes before the block is re-armed.
         unsafe sc_runtime::sc_rt_ctx_drop(ctx);
         if unsafe (*co).trimmed != 0 {
             unsafe sc_runtime::sc_rt_stack_reuse(stk, size); // back into the footprint before it is touched
@@ -3334,14 +3329,11 @@ pub fn set_stack_size(bytes: usize) {
     unsafe G_STACK_SIZE = (bytes + unit - 1) / unit * unit;
 }
 
-/// The per-task stack size in bytes: the one `set_stack_size` set, else the default (four times larger in
-/// a program built with AddressSanitizer). The running pool's tasks use it.
+/// The per-task stack size in bytes: the one `set_stack_size` set, else the default. The running pool's
+/// tasks use it.
 pub fn stack_size() usize {
     if unsafe G_STACK_SIZE != 0 {
         return unsafe G_STACK_SIZE;
-    }
-    if sc_runtime::sc_rt_asan() != 0 {
-        return 4 * STACK_SIZE_DEFAULT;
     }
     return STACK_SIZE_DEFAULT;
 }

@@ -1369,7 +1369,7 @@ const fn imm_bits(v: i64, x: bool) u64 {
 }
 
 /// Encode row `r` with variant `q0` and operand values `v` into `out`; false when a value does not fit.
-pub fn encode(r: Row, q0: u32, v: &Vals, out: &mut u32) bool {
+pub const fn encode(r: Row, q0: u32, v: &Vals, out: &mut u32) bool {
     let q = fixed_q(r, q0);
     if r.q != Q::NONE && (q >= 8 || (r.qok as u32 >> q & 1) == 0) {
         return false;
@@ -1689,7 +1689,7 @@ pub fn encode(r: Row, q0: u32, v: &Vals, out: &mut u32) bool {
 }
 
 /// Decode word `w` as row `r` into its variant and operand values; false when it is not the row's.
-pub fn decode_row(r: Row, w: u32, qo: &mut u32, v: &mut Vals) bool {
+pub const fn decode_row(r: Row, w: u32, qo: &mut u32, v: &mut Vals) bool {
     if (w & mask(r)) != r.bits {
         return false;
     }
@@ -1980,7 +1980,7 @@ pub fn decode_row(r: Row, w: u32, qo: &mut u32, v: &mut Vals) bool {
 
 /// Decode word `w`: the index of the first row it matches, the variant and the operand values; false
 /// when no row matches.
-pub fn decode(w: u32, ri: &mut u32, q: &mut u32, v: &mut Vals) bool {
+pub const fn decode(w: u32, ri: &mut u32, q: &mut u32, v: &mut Vals) bool {
     let t: []Row = ROWS;
     for i in 0..t.len() {
         if decode_row(t[i], w, q, v) {

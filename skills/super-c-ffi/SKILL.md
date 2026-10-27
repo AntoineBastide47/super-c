@@ -371,9 +371,8 @@ extern "C" "wasm_simd128.h" {
 `bytes` bytes through raw pointer parameter `p` (`*mut` for a write) and has no other memory
 effect; `bytes` is a `usize` constant or an expression over the function's other `usize`
 parameters (`n * 4`; no call, no cast). A function may state both: the write is its effect.
-`@lane_access` marks a function that touches memory lane by lane: a build under a memory
-checker (`-fsanitize=` with `address`, `memory` or `thread`) never plans a vector entry that
-calls one; it states no range, so it takes no `@reads` or `@writes`. The three
+`@lane_access` marks a function that touches memory lane by lane at lane-dependent addresses: the
+effect query treats its access as unknown; it states no range, so it takes no `@reads` or `@writes`. The three
 apply to a function of an `extern "C"` block or an `@intrinsic` function only, and do not
 change the emitted C: the Core IR effect query (`ir::facts::call_access`) reads them, so a read
 writes nothing and a write writes only through `p`. Errors: "'q' is not a parameter of this
@@ -625,10 +624,9 @@ headers go through bindgen's own C preprocessor (`src/bindgen/cpp.spc`) under th
 environment (`src/bindgen/ctarget.spc`): clang's predefined macros and `__has_*` answers, its
 built-in headers, and the system and framework directories of the target's sysroot. The sysroot
 is found as the build finds it, or given by `--sysroot=`. `-I` directories come before the system
-ones. The headers see the build's C environment (`push_c_env`): the `cstd` of the nearest
-`build.toml` at or above the working directory (the default without one), `-funsigned-char` and,
-for Windows, `-D_WIN32_WINNT=0x0A00`, so the output declares what the generated C compiles
-against. `--cflag=` applies after them and takes only `-std=`, `-D`, `-U`, `-fsigned-char` and `-funsigned-char`; any other flag is an
+ones. The headers see the build's C environment (`push_c_env`): the dialect and the POSIX level,
+`-funsigned-char` and, for Windows, `-D_WIN32_WINNT=0x0A00`, so the output declares what the build
+reads from the same headers. `--cflag=` applies after them and takes only `-std=`, `-D`, `-U`, `-fsigned-char` and `-funsigned-char`; any other flag is an
 error. Use it for large C
 APIs where hand-writing bindings is impractical. The generated output follows the `ffi/`
 conventions. A record whose every member has a field form becomes a header type with every
@@ -671,12 +669,12 @@ still folds to the one instruction at `-O1` and above.
 
 ## Platform C Pitfalls
 
-The build compiles C with `-std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700` (the `cstd`
-value: POSIX 2008 with the XSI extension, which declares `realpath` on glibc and wasi-libc), plus
-`-funsigned-char -ffp-contract=off -Werror=incompatible-pointer-types` and the libm
-`-fno-builtin-<f>` set (`LIBM_AS_WRITTEN` in `src/build_system/build.spc`: `sin(x)` is a libm
-call, never a constant fold or a `sincos`) on every compile. A
-Windows compile also gets `-D_WIN32_WINNT=0x0A00` (`push_c_env` in `src/driver/util.spc`):
+The build reads the C headers with `-std=c11 -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700`
+(`push_c_env`: POSIX 2008 with the XSI extension, which declares `realpath` on glibc and
+wasi-libc) and `-funsigned-char`; the C tree of `--emit-c` compiles with the same flags, plus
+`-ffp-contract=off -Werror=incompatible-pointer-types` and the libm `-fno-builtin-<f>` set
+(`LIBM_AS_WRITTEN` in `src/driver/emit.spc`: `sin(x)` is a libm call, never a constant fold or a
+`sincos`). Windows also gets `-D_WIN32_WINNT=0x0A00` (`push_c_env` in `src/driver/util.spc`):
 the Windows 10 API level on every mingw toolchain. MSYS2 defaults to it; llvm-mingw defaults to
 Windows 7, whose headers hide the Windows 8 functions the runtime calls.
 

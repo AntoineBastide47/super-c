@@ -3,7 +3,7 @@
 // stackful context switch. These are the raw, unsafe building blocks the Super-C scheduler is built on;
 // prefer `std/parallel/platform.spc` for the safe pieces. Import with `import sc_runtime;`. Every call
 // requires `unsafe` except the queries (clock, cycle counter, page size, CPU count, worker index, parked
-// count, stack bytes, inline context size, `sc_rt_asan`), the spin and yield hints, and `sc_rt_sleep_ns`.
+// count, stack bytes, inline context size), the spin and yield hints, and `sc_rt_sleep_ns`.
 //
 // Targets: POSIX (macOS, Linux) parks threads on a static parking lot over per-thread pthread condition
 // variables and maps stacks with mmap; Windows x86-64 parks on WaitOnAddress, locks with SRWLOCK and
@@ -66,26 +66,6 @@ extern "C" {
     @platform(windows)
     @import("__sc_stack_overflow")
     fn rt_stack_overflow();
-    /// 1 in a program built with AddressSanitizer (its frames carry redzones), else 0.
-    @unsafe(safe)
-    pub fn sc_rt_asan() i32;
-}
-
-// ThreadSanitizer's fiber API. It exists only in a `-fsanitize=thread` build: every
-// call sits in an `if THREAD_SANITIZER` branch, which no other build emits.
-extern "C" {
-    @import("__tsan_get_current_fiber")
-    fn tsan_get_current_fiber() *mut void;
-    @import("__tsan_create_fiber")
-    fn tsan_create_fiber(flags: u32) *mut void;
-    @import("__tsan_destroy_fiber")
-    fn tsan_destroy_fiber(fiber: *mut void);
-    @import("__tsan_switch_to_fiber")
-    fn tsan_switch_to_fiber(fiber: *mut void, flags: u32);
-    @import("__tsan_acquire")
-    fn tsan_acquire(addr: *mut void);
-    @import("__tsan_release")
-    fn tsan_release(addr: *mut void);
 }
 
 // ---- fatal errors and failure injection -------------------------------------------------------------
@@ -2171,10 +2151,6 @@ pub unsafe fn sc_rt_ctx_switch(_from: *mut void, _to: *mut void) {
     die("'launch' needs a stackful context switch, which wasm does not provide");
 }
 
-/// A context's body has started: nothing to consume on wasm.
-@platform(wasm)
-pub unsafe fn sc_rt_ctx_entered(_ctx: *mut void) {}
-
 /// Release a context block from `sc_rt_ctx_alloc`.
 @platform(wasm)
 pub unsafe fn sc_rt_ctx_free(ctx: *mut void) {
@@ -2574,12 +2550,10 @@ extern "C" {
     fn sc_ctx_entry();
 }
 
-// A context: the stack pointer of its saved frame (null until the first switch away fills it in), and
-// under ThreadSanitizer the context's fiber (null on a worker's own context until its first switch away).
+// A context: the stack pointer of its saved frame (null until the first switch away fills it in).
 @platform(!wasm)
 struct Ctx {
     pub sp: *mut void,
-    pub fiber: *mut void,
 }
 
 // Windows on arm64 has no hand-written switch: an OS fiber runs each context, at one call into the OS
@@ -2675,7 +2649,7 @@ pub const fn sc_rt_ctx_inline_size() usize {
     return sizeof(Ctx);
 }
 
-/// Release what an inline context holds besides its bytes (a sanitizer fiber); frees nothing.
+/// Release what a context holds besides its bytes (Windows on arm64: its OS fiber); frees nothing.
 @platform(!wasm)
 pub unsafe fn sc_rt_ctx_drop(ctx: *mut void) {
     if PLATFORM == Platform::Windows && ARCH == Arch::AArch64 {
@@ -2685,16 +2659,6 @@ pub unsafe fn sc_rt_ctx_drop(ctx: *mut void) {
             unsafe DeleteFiber((*w).fiber);
         }
         unsafe (*w).fiber = null;
-        return;
-    }
-    if THREAD_SANITIZER {
-        // A worker's own context borrowed its fiber from the thread; only a created one is ours.
-        let c = ctx as *mut Ctx;
-        let fb = unsafe (*c).fiber;
-        if fb != null && fb != unsafe tsan_get_current_fiber() {
-            unsafe tsan_destroy_fiber(fb);
-        }
-        unsafe (*c).fiber = null;
     }
 }
 
@@ -2731,11 +2695,6 @@ fn forge(f: *mut *mut void, body: *mut void, arg: *mut void, tramp: *mut void) {
 @platform(macos | ios | linux | android)
 pub unsafe fn sc_rt_ctx_init(ctx: *mut void, stack: *mut void, size: usize, entry: fn(*mut void), arg: *mut void) {
     let c = ctx as *mut Ctx;
-    if THREAD_SANITIZER {
-        // Only a COROUTINE context is armed here, so its fiber belongs here. A worker's own context
-        // takes the fiber it runs on, at its first switch away.
-        unsafe (*c).fiber = unsafe tsan_create_fiber(0);
-    }
     let top = stack as usize + size & ~15usize;
     let f = (top - CTX_FRAME * 8) as *mut *mut void;
     for i in 0..CTX_FRAME {
@@ -2798,33 +2757,7 @@ pub unsafe fn sc_rt_ctx_switch(from: *mut void, to: *mut void) {
     }
     let f = from as *mut Ctx;
     let t = to as *mut Ctx;
-    if THREAD_SANITIZER {
-        // Announce the move BEFORE the stack changes: from here on TSan attributes accesses to the target's
-        // fiber, so a coroutine keeps one identity across every worker that runs it. Switching a fiber
-        // creates no happens-before edge, but the switch is one: the leaver releases on the context being
-        // ENTERED, and the side that wakes up inside its own swap acquires on itself. Without the pair every
-        // field the task and its worker share reports as a race, the edge being assembly TSan cannot see.
-        if unsafe (*f).fiber == null {
-            unsafe (*f).fiber = unsafe tsan_get_current_fiber();
-        }
-        unsafe tsan_release(to);
-        unsafe tsan_switch_to_fiber((*t).fiber, 0);
-        unsafe sc_ctx_swap(&mut (*f).sp, (*t).sp);
-        unsafe tsan_acquire(from);
-    } else {
-        unsafe sc_ctx_swap(&mut (*f).sp, (*t).sp);
-    }
-}
-
-/// The context's body has just started through the entry trampoline, not through a returning switch:
-/// consume what its switcher published. A no-op except under the race profile.
-@platform(!wasm)
-pub unsafe fn sc_rt_ctx_entered(ctx: *mut void) {
-    if THREAD_SANITIZER {
-        // The first run pops the forged frame into the trampoline, so the acquire at the end of
-        // `sc_rt_ctx_switch` never runs for it.
-        unsafe tsan_acquire(ctx);
-    }
+    unsafe sc_ctx_swap(&mut (*f).sp, (*t).sp);
 }
 
 /// Release a context from `sc_rt_ctx_alloc`.

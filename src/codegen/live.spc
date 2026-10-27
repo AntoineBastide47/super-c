@@ -457,7 +457,7 @@ extend Live {
     }
 
     // `lend`: each loop's last block in `order`.
-    fn loop_ends(self: &mut Self) {
+    const fn loop_ends(self: &mut Self) {
         for i in 0..self.order.len() {
             let k = self.order[i];
             let mut h = self.inner[k as usize];

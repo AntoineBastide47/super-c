@@ -23,7 +23,7 @@ import std::platform::process;
 import stdio;
 
 // Sample values for operand kind `k` of arm64 row `r` (variant `q`) at `v[i..]`.
-fn a64_sample(r: at::Row, q: u32, k: u8, v: &mut at::Vals, i: usize) {
+const fn a64_sample(r: at::Row, q: u32, k: u8, v: &mut at::Vals, i: usize) {
     if at::is_reg(k) {
         v[i] = (switch at::reg_pos(k) {
             0 => 1i64,
@@ -297,7 +297,7 @@ fn read_bytes(path: str) Vector<u8> {
     return out;
 }
 
-fn le(b: &Vector<u8>, at: usize, n: usize) u64 {
+const fn le(b: &Vector<u8>, at: usize, n: usize) u64 {
     let mut v: u64 = 0;
     for i in 0..n {
         v |= b[at + i] as u64 << (8 * i) as u64;
@@ -592,7 +592,7 @@ fn a64_rows_round_trip() {
 
 // Memory operand `j` of the samples: no displacement, 8-bit, 32-bit with a SIB base, base and index,
 // RIP-relative, absolute, index without base.
-fn x64_mem(j: u32) x::Mem {
+const fn x64_mem(j: u32) x::Mem {
     return switch j {
         0 => x::at(x::RAX, 0),
         1 => x::at(x::RBP, -8),
@@ -607,7 +607,7 @@ fn x64_mem(j: u32) x::Mem {
 const X64_MEMS: u32 = 7;
 
 // VSIB operand `j` of the samples (a vector index), false past the last.
-fn x64_vsib(j: u32, m: &mut x::Mem) bool {
+const fn x64_vsib(j: u32, m: &mut x::Mem) bool {
     *m = (switch j {
         0 => x::ix(x::RAX, 5, 2, 0),
         1 => x::ix(x::RBP, 13, 0, -8),
@@ -624,7 +624,7 @@ fn x64_vsib(j: u32, m: &mut x::Mem) bool {
 // operand `var - 1` in the row's memory position; false when the row has none. A VEX or EVEX row's
 // ModRM.rm register is xmm12 (the other source or the other move takes it for a 2-byte VEX prefix);
 // an EVEX row takes a mask on odd forms, zeroing on some.
-fn x64_sample(r: xt::Row, sz: u8, var: u32, n: &mut xt::Ins) bool {
+const fn x64_sample(r: xt::Row, sz: u8, var: u32, n: &mut xt::Ins) bool {
     n.sz = sz;
     let mut has_mem = false;
     for i in 0..4u32 {
@@ -1188,7 +1188,7 @@ fn wasm_bodies(o: &Vector<u8>, out: &mut Vector<(usize, usize)>) bool {
     return true;
 }
 
-fn uleb_at(o: &Vector<u8>, p: &mut usize) u64 {
+const fn uleb_at(o: &Vector<u8>, p: &mut usize) u64 {
     let mut v: u64 = 0;
     let mut sh: u64 = 0;
     // At most 10 bytes.

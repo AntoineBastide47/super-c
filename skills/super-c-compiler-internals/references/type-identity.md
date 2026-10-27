@@ -332,8 +332,8 @@ phase still performs before any publication.
 
 ```sh
 ./super-c build --profile=release -o build/sc-ts
-SC_TYPE_STATS=1 SC_NO_TU_CACHE=1 build/sc-ts build --cc=true --jobs=1 --out-dir=build/tsout -o build/tsout/x
-SC_TYPE_TABLE=build/tt.txt build/sc-ts build --cc=true --jobs=1 --out-dir=build/tsout2 -o build/tsout2/x
+SC_TYPE_STATS=1 SC_NO_TU_CACHE=1 build/sc-ts build --emit-c --jobs=1 --out-dir=build/tsout
+SC_TYPE_TABLE=build/tt.txt build/sc-ts build --emit-c --jobs=1 --out-dir=build/tsout2
 ./super-c bench --no-run --filter=self_transpile
 samply record --save-only --unstable-presymbolicate -o build/ts.profile.json.gz build/bench-bin --in-process --filter=self_transpile
 python3 skills/super-c-compiler-optimization/scripts/samply_top.py build/ts.profile.json.gz

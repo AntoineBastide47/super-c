@@ -240,7 +240,7 @@ extend Archives {
     }
 
     /// The member that defines `name` and was not taken yet, as archive << 32 | member; None otherwise.
-    pub fn find(self: &Self, name: str) Option<u64> {
+    pub const fn find(self: &Self, name: str) Option<u64> {
         let id = self.names.find(name);
         if id < 0 || id as usize >= self.defs.len() || self.defs[id as usize] == 0 {
             return Option::<u64>::None;
@@ -302,7 +302,7 @@ const fn be32(b: []u8, at: usize) u32 {
 }
 
 /// Whether input `path` names a static library: `.a`, or `.lib` on Windows.
-pub fn is_archive(path: str) bool {
+pub const fn is_archive(path: str) bool {
     return path.ends_with(".a") || path.ends_with(".lib");
 }
 
@@ -337,7 +337,7 @@ fn put_be32(a: &mut Vector<u8>, v: u32) {
     a.push((v & 0xFF) as u8);
 }
 
-fn base<'a>(p: str<'a>) str<'a> {
+const fn base<'a>(p: str<'a>) str<'a> {
     let mut i = p.len();
     while i > 0 && p.byte_at(i - 1) != b'/' && p.byte_at(i - 1) != b'\\' {
         i -= 1;
@@ -407,7 +407,7 @@ fn sysv(objs: &Vector<String>, data: &Vector<Vector<u8>>, syms: &Vector<(String,
 
 // The name field of a BSD member: `#1/<n>`, the name's `n` bytes (zero-padded so the data starts on 8
 // bytes) leading the data.
-fn bsd_name_len(at: u64, name: str) u64 {
+const fn bsd_name_len(at: u64, name: str) u64 {
     return lu::align_up(at + 60 + name.len() as u64 + 1, 8) - at - 60;
 }
 
@@ -539,7 +539,7 @@ fn elf_syms<'a>(b: Slice<'a, u8>, out: &mut Vector<str<'a>>) bool {
 // the import library stands for its DLL. A weak external defines its name (its default stands in).
 // Whether COFF archive member `b` is an import: a short import object (signatures 0 and 0xFFFF), or an
 // x86-64 object with an `.idata$` section.
-fn coff_import(b: Slice<u8>) bool {
+const fn coff_import(b: Slice<u8>) bool {
     if b.len() >= 4 && lu::r16(b, 0) == 0 && lu::r16(b, 2) == 0xFFFF {
         return true;
     }

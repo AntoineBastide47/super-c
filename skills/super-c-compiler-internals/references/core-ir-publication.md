@@ -237,7 +237,7 @@ module's own pass; it stays authoritative.
 
 ## Validation
 
-`ci/gate.sh` (the corpus, the sanitizer lanes, the bootstrap, the two-generation fixpoint,
+`ci/gate.sh` (the corpus, the bootstrap, the two-generation fixpoint,
 the worker-count identity under `SC_TASK_DELAY` with the type table and item digest, the
 strict C set, every built-in profile but test). The measurement runs again with the
 switches above. The read table needs a counting build: a static counter array indexed by

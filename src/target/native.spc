@@ -205,7 +205,7 @@ pub fn object(
         elf::write(&o, !x64, out);
         return true;
     }
-    // A named section the format does not know goes through C, whose compiler reports it.
+    // A named section the format does not know is an error.
     for k in ob::S_COUNT as usize..o.secs.len() {
         let mut sect: str = "";
         let mut seg: str = "";
@@ -249,7 +249,7 @@ extend Backend {
     }
 
     // The first refusal's reason.
-    fn why(self: &Self) str {
+    const fn why(self: &Self) str {
         if self.x64 {
             return unsafe (*self.x).err.as_str();
         }

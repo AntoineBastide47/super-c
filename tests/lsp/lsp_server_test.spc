@@ -189,11 +189,11 @@ fn lsp_diagnostics_lifecycle() {
 // a document outside the manifest's closure, which the workspace batch holds too.
 @test
 fn lsp_inactive_code_fades() {
-    let src = "@when(THREAD_SANITIZER)\nfn race_only() {}\n\nfn main() i32 {\n    if THREAD_SANITIZER {\n        return 1;\n    }\n    return 0;\n}\n";
+    let src = "@when(LOCKDEP)\nfn race_only() {}\n\nfn main() i32 {\n    if LOCKDEP {\n        return 1;\n    }\n    return 0;\n}\n";
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", src);
-    let extra = "@when(THREAD_SANITIZER)\npub fn x() {}\n";
+    let extra = "@when(LOCKDEP)\npub fn x() {}\n";
     p.mkfile("src/extra.spc", extra);
     let root = p.dir();
     let mut ses = String::new();
@@ -240,7 +240,7 @@ fn lsp_inactive_code_fades() {
     );
     assert(
         o.contains(
-            "{\"range\":{\"start\":{\"line\":4,\"character\":24},\"end\":{\"line\":6,\"character\":5}},\"severity\":4",
+            "{\"range\":{\"start\":{\"line\":4,\"character\":15},\"end\":{\"line\":6,\"character\":5}},\"severity\":4",
         ),
     );
     assert(o.contains("\"tags\":[1]"));

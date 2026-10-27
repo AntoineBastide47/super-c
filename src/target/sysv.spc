@@ -81,7 +81,7 @@ fn merge_scalar(t: u8, off: u32, ptr: u32, vregs: u32, cls: &mut u64) {
 }
 
 // Merge class `k` into eightbyte `e` (psABI 3.2.3, step 4: INTEGER wins over SSE).
-fn merge(cls: &mut u64, e: u32, k: u8) {
+const fn merge(cls: &mut u64, e: u32, k: u8) {
     if e >= 8 {
         return;
     }

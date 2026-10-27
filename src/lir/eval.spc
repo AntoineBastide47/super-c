@@ -210,7 +210,7 @@ extend Eval {
     }
 
     // The location of frame `fi`'s current instruction.
-    fn frame_loc(self: &Self, fi: usize) Loc {
+    const fn frame_loc(self: &Self, fi: usize) Loc {
         let f = self.frames[fi];
         let b = &(unsafe &*self.pkg).bodies[f.body as usize];
         let mut i: u32 = 0;
@@ -225,7 +225,7 @@ extend Eval {
 
     // The location of frame `fi`'s current statement: its instruction's, or the call that instruction was
     // inlined from.
-    fn frame_site(self: &Self, fi: usize) Loc {
+    const fn frame_site(self: &Self, fi: usize) Loc {
         let f = self.frames[fi];
         let b = &(unsafe &*self.pkg).bodies[f.body as usize];
         let i = if f.pc != 0 {
@@ -1095,7 +1095,7 @@ extend Eval {
     // The routines the interpreter models (`icode_of`): the C heap and memory routines, the traps, the
     // runtime's arithmetic and bit-count primitives, and libm.
     // Value word `dst` (NONE: an unused result) takes `v`.
-    fn put(self: &mut Self, dst: u32, v: u64) {
+    const fn put(self: &mut Self, dst: u32, v: u64) {
         if dst != NONE {
             self.vals[dst as usize] = v;
         }
@@ -1798,7 +1798,7 @@ const fn get_lane(vals: &Vector<u64>, w: u32, k: u32, bits: u32) u64 {
     return trunc_bits(vals[(w as u64 + bit / 64) as usize] >> bit % 64, bits);
 }
 
-fn set_lane(vals: &mut Vector<u64>, w: u32, k: u32, bits: u32, v: u64) {
+const fn set_lane(vals: &mut Vector<u64>, w: u32, k: u32, bits: u32, v: u64) {
     let bit = k as u64 * bits as u64;
     let at = (w as u64 + bit / 64) as usize;
     let sh = bit % 64;
@@ -2105,12 +2105,12 @@ const IC_LANE_PANIC: u8 = 30; // __sc_lane_panic(lane, m)
 
 /// Whether the evaluator runs function `name` as it models it, not its body: the optimizer keeps the
 /// calls of such a function.
-pub fn modeled(name: str) bool {
+pub const fn modeled(name: str) bool {
     return icode_of(name) != IC_NONE;
 }
 
 // The routine function symbol `name` names (`__sc_x_<c name>` is a C library name's alias).
-fn icode_of(name0: str) u8 {
+const fn icode_of(name0: str) u8 {
     let name = if name0.starts_with("__sc_x_") {
         name0.slice(7, name0.len());
     } else {
@@ -3136,7 +3136,7 @@ const fn exact_fits(add: bool, vals: &Vector<u64>, w: u32, n: u32, lb: u32, sg: 
 
 extend Eval {
     // Count one malloc-family call of `n` bytes when the accounting is on.
-    fn count_alloc(self: &mut Self, n: u64) {
+    const fn count_alloc(self: &mut Self, n: u64) {
         if self.acct_on {
             self.acct_calls += 1;
             self.acct_bytes = self.acct_bytes.wrapping_add(n);

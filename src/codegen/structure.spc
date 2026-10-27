@@ -192,7 +192,7 @@ extend Shape {
 
     // The nearest common dominator of `x` and `y`, both with dominators set: each step moves the deeper
     // one up the tree.
-    fn common(self: &Self, x0: u32, y0: u32) u32 {
+    const fn common(self: &Self, x0: u32, y0: u32) u32 {
         let mut x = x0;
         let mut y = y0;
         while x != y {

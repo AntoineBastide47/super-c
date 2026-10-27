@@ -328,7 +328,7 @@ const fn classes() [u8; 256] {
 
 // The end of the run from `i` of bytes with a class bit of `bits`: the first other offset, or `n`. A
 // counted loop with no call runs strip-mined.
-fn run_end(p: *const u8, i: usize, n: usize, bits: u8) usize {
+const fn run_end(p: *const u8, i: usize, n: usize, bits: u8) usize {
     for k in i..n {
         if (unsafe CLS[(unsafe p[k]) as usize] & bits) == 0 {
             return k;
@@ -338,7 +338,7 @@ fn run_end(p: *const u8, i: usize, n: usize, bits: u8) usize {
 }
 
 // The end of the run from `i` of bytes with no class bit of `bits`, or `n`.
-fn run_end_not(p: *const u8, i: usize, n: usize, bits: u8) usize {
+const fn run_end_not(p: *const u8, i: usize, n: usize, bits: u8) usize {
     for k in i..n {
         if (unsafe CLS[(unsafe p[k]) as usize] & bits) != 0 {
             return k;

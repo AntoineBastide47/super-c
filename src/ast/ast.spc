@@ -174,15 +174,13 @@ pub struct WhereBound {
 /// The build-setting constants the compiler defines in every package, by index (`BC_*`). The names
 /// are reserved: no item or binding may take one, so a bare use always means the constant, and the
 /// platform filter decides a condition over them before name resolution.
-const BC_NAMES: [str; 10] = [
+const BC_NAMES: [str; 8] = [
     "PLATFORM",
     "ARCH",
     "TEST",
     "POINTER_WIDTH",
     "ENDIAN",
     "PROFILE",
-    "THREAD_SANITIZER",
-    "ADDRESS_SANITIZER",
     "LOCKDEP",
     "OVERFLOW_CHECKS",
 ];
@@ -192,17 +190,15 @@ pub const BC_TEST: i32 = 2;
 pub const BC_POINTER_WIDTH: i32 = 3;
 pub const BC_ENDIAN: i32 = 4;
 pub const BC_PROFILE: i32 = 5;
-/// The `bool` constants of the C compile's configuration, from the profile's flags (`build_cfg`):
-/// ThreadSanitizer, AddressSanitizer, lock-order tracking (`-DSC_LOCKDEP`), and integer overflow
-/// checks (false where the profile wraps). Bit `k - BC_THREAD_SANITIZER` of `Package.build_cfg`.
-pub const BC_THREAD_SANITIZER: i32 = 6;
-pub const BC_ADDRESS_SANITIZER: i32 = 7;
-pub const BC_LOCKDEP: i32 = 8;
-pub const BC_OVERFLOW_CHECKS: i32 = 9;
+/// The `bool` constants of the build's configuration, from its profile (`build_cfg`): lock-order tracking
+/// (the profile's `lockdep`) and integer overflow checks (false where the profile wraps). Bit
+/// `k - BC_LOCKDEP` of `Package.build_cfg`.
+pub const BC_LOCKDEP: i32 = 6;
+pub const BC_OVERFLOW_CHECKS: i32 = 7;
 
 /// Whether build constant `k` is a `bool`: TEST, or one of the configuration constants.
 pub const fn bc_is_bool(k: i32) bool {
-    return k == BC_TEST || k >= BC_THREAD_SANITIZER;
+    return k == BC_TEST || k >= BC_LOCKDEP;
 }
 
 /// The variable of boolean build constant `k` (`bc_is_bool`) in a `@when` truth table: bit
@@ -212,7 +208,7 @@ pub const fn when_var(k: i32) u32 {
     return if k == BC_TEST {
         0u32;
     } else {
-        (k - BC_THREAD_SANITIZER + 1) as u32;
+        (k - BC_LOCKDEP + 1) as u32;
     };
 }
 

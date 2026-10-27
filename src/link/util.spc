@@ -61,17 +61,17 @@ pub const fn r64(b: []u8, at: usize) u64 {
     return r32(b, at) as u64 | r32(b, at + 4) as u64 << 32;
 }
 
-pub fn p16(b: &mut Vector<u8>, at: usize, v: u32) {
+pub const fn p16(b: &mut Vector<u8>, at: usize, v: u32) {
     b[at] = (v & 0xFF) as u8;
     b[at + 1] = (v >> 8 & 0xFF) as u8;
 }
 
-pub fn p32(b: &mut Vector<u8>, at: usize, v: u32) {
+pub const fn p32(b: &mut Vector<u8>, at: usize, v: u32) {
     p16(b, at, v & 0xFFFF);
     p16(b, at + 2, v >> 16);
 }
 
-pub fn p64(b: &mut Vector<u8>, at: usize, v: u64) {
+pub const fn p64(b: &mut Vector<u8>, at: usize, v: u64) {
     p32(b, at, v as u32);
     p32(b, at + 4, (v >> 32) as u32);
 }
@@ -129,7 +129,7 @@ pub const fn uleb_len(v: u64) usize {
 }
 
 /// The unsigned LEB128 at `*at` of `b`, `*at` moved past it; `b.len()` ends a truncated one.
-pub fn read_uleb(b: []u8, at: &mut usize) u64 {
+pub const fn read_uleb(b: []u8, at: &mut usize) u64 {
     let mut v: u64 = 0;
     let mut sh: u64 = 0;
     while *at < b.len() && sh < 64 {
@@ -145,7 +145,7 @@ pub fn read_uleb(b: []u8, at: &mut usize) u64 {
 }
 
 /// The NUL-terminated string at `at` of `b` (to the end when unterminated).
-pub fn cstr<'a>(b: Slice<'a, u8>, at: usize) str<'a> {
+pub const fn cstr<'a>(b: Slice<'a, u8>, at: usize) str<'a> {
     let mut e = at;
     while e < b.len() && b[e] != 0 {
         e += 1;

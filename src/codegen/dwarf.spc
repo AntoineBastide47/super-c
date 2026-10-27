@@ -171,7 +171,7 @@ fn cstr(o: &mut Vector<u8>, s: str) {
 }
 
 // Overwrite the 4 bytes at `at` of `o` with `v`.
-fn patch32(o: &mut Vector<u8>, at: usize, v: u32) {
+const fn patch32(o: &mut Vector<u8>, at: usize, v: u32) {
     for j in 0..4usize {
         o[at + j] = (v >> (8 * j) as u32 & 0xFF) as u8;
     }

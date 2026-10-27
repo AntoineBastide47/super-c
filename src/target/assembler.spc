@@ -268,7 +268,7 @@ extend Asm {
     }
 
     // The C name of assembly symbol `name`: Mach-O spells C names with a leading `_`.
-    fn c_name<'a>(self: &Self, name: str<'a>) str<'a> {
+    const fn c_name<'a>(self: &Self, name: str<'a>) str<'a> {
         if self.fmt == FMT_MACHO && name.starts_with("_") {
             return name.slice(1, name.len());
         }
@@ -276,7 +276,7 @@ extend Asm {
     }
 
     // Whether `name` is in `list`.
-    fn listed(list: &Vector<String>, name: str) bool {
+    const fn listed(list: &Vector<String>, name: str) bool {
         for i in 0..list.len() {
             if list[i].as_str() == name {
                 return true;
@@ -326,7 +326,7 @@ extend Asm {
 
     // The label `name` a reference at statement `stmt` means: the global or plain label of that name,
     // or for `<n>f` / `<n>b` the next or the last definition of local label n. -1 when none.
-    fn find(self: &Self, name: str, stmt: u32) i64 {
+    const fn find(self: &Self, name: str, stmt: u32) i64 {
         let last = name.byte_at(name.len() - 1);
         if name.len() > 1 && numeric(name.slice(0, name.len() - 1)) && (last == b'f' || last == b'b') {
             let n = name.slice(0, name.len() - 1);
@@ -399,7 +399,7 @@ extend Asm {
     }
 
     // Whether a reference of kind `k` to a label of its own section resolves in place.
-    fn local_kind(self: &Self, k: u8) bool {
+    const fn local_kind(self: &Self, k: u8) bool {
         if self.isa == ISA_X64 {
             return k == x::R_PLT32 || k == x::R_PC32;
         }
@@ -684,7 +684,7 @@ extend Asm {
     }
 
     // A number of a directive.
-    fn num(s: str, out: &mut i64) bool {
+    const fn num(s: str, out: &mut i64) bool {
         let t = s.trim();
         let neg = t.starts_with("-");
         let u = if neg {
@@ -917,7 +917,7 @@ extend Asm {
     // ---- Call frame information ----
 
     // The DWARF number of register `r` (`x30`, `d8`, `sp`); -1 when unknown.
-    fn dwarf_reg(self: &Self, r0: str) i64 {
+    const fn dwarf_reg(self: &Self, r0: str) i64 {
         let r = r0.trim();
         if self.isa == ISA_X64 {
             return x64_dwarf(
@@ -1750,7 +1750,7 @@ const fn after(s: str, n: usize) str {
 }
 
 // The two comma-separated names of `s`.
-fn two_names<'a>(s: str<'a>, a: &mut str<'a>, b: &mut str<'a>) bool {
+const fn two_names<'a>(s: str<'a>, a: &mut str<'a>, b: &mut str<'a>) bool {
     let c = s.find_byte(b',');
     if c < 0 {
         return false;

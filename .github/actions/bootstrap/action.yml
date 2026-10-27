@@ -3,8 +3,7 @@ description: >
   The latest release's compiler for `target`, as ./super-c-boot (.exe on Windows). It lands beside the
   checkout under its own name, never as `super-c`: it resolves std/ffi relative to its OWN executable, so
   at the repo root it picks up the current std/ffi (which is the point of --bootstrap-tags), and a
-  distinct name keeps it intact instead of having the first build replace the binary producing it. Sets
-  SC_BOOT_CSTD to the `--cstd` flag a release older than the native backend needs on Windows.
+  distinct name keeps it intact instead of having the first build replace the binary producing it.
 inputs:
   target:
     description: "linux, macos or windows (the release archive's platform)"
@@ -41,8 +40,3 @@ runs:
           chmod +x "$boot"
         fi
         test -x "./$boot"
-        # A release older than the native backend (no `--emit-c`) builds through its C compiler, which on
-        # Windows needs the toolchain action's C standard (SC_CSTD): SC_BOOT_CSTD is its flag, empty else.
-        if [ -n "${SC_CSTD:-}" ] && ! "./$boot" --help 2>&1 | grep -q -- '--emit-c'; then
-          echo "SC_BOOT_CSTD=--cstd=$SC_CSTD" >> "$GITHUB_ENV"
-        fi

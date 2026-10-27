@@ -266,7 +266,7 @@ fn query() u64 {
 }
 
 // <sys/sysctl.h> needs the Darwin extensions, which the build's `_POSIX_C_SOURCE` hides: the binding
-// has no header, so the C compile takes its prototype from this declaration.
+// has no header, so this declaration is its whole prototype.
 @platform(macos | ios)
 extern "C" {
     fn sysctlbyname(name: *const char, oldp: *mut void, oldlenp: *mut usize, newp: *mut void, newlen: usize) i32;
