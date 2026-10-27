@@ -54,22 +54,16 @@ pub fn cache_root(project: str) String {
 }
 
 /// The directory name of project `project` below the cache base: SCRIPTS_DIR for a script build (an
-/// empty name); else the name with each byte outside `[A-Za-z0-9._-]` and a leading `.` made `_`, and
-/// a `_` after a name of the layout before project directories (`o`, `lto`, `prelude`, `ccver`), which
-/// older compilers still use.
+/// empty name); else the name with each byte outside `[A-Za-z0-9._-]` and a leading `.` made `_`.
 pub fn project_dir(project: str) String {
     if project.len() == 0 {
         return String::from_str(SCRIPTS_DIR);
     }
-    let mut out = String::with_capacity(project.len() + 1);
+    let mut out = String::with_capacity(project.len());
     for i in 0..project.len() {
         let c = project[i];
         let ok = c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9' || c == b'-' || c == b'_' || c == b'.' && i != 0;
         out.push_byte(pick(ok, c, b'_'));
-    }
-    let o = out.as_str();
-    if o == "o" || o == "lto" || o == "prelude" || o == "ccver" {
-        out.push_byte(b'_');
     }
     return out;
 }

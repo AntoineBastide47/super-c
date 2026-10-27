@@ -436,20 +436,18 @@ runtime's lock-order checks (the build constant `LOCKDEP`); `SC_LOCK_ORDER` swit
 
 The build cache base is `$SC_CACHE_DIR`, else `~/.super-c/cache`. Each project caches in its own
 root below it, `<base>/<project>` (`cache_root`: the manifest's `bin`, else its `[lib]` name, a byte
-outside `[A-Za-z0-9._-]` or a leading `.` made `_`, and `_` added to `o`, `lto`, `prelude` and
-`ccver`, the shared folders of older compilers, which still use them); script builds cache in
+outside `[A-Za-z0-9._-]` or a leading `.` made `_`); script builds cache in
 `<base>/.scripts`. Projects of one name share a root (the worktrees and copies of a project), and no
 sweep reads or deletes outside the root of the build that runs it: not the base, not another
 project's root. Only `super-c clean --full` deletes a root, its project's.
 
 The sweeps (`sweep`) run after a successful build, at most once every 30 minutes each, in the root of
 the build's project (or `.scripts`). The cache sweep (`<root>/.sweep`, `sweep_cache`) deletes the stale
-prelude images (below) and the C object and linker caches (`o/`, `lto/`) of the releases that compiled
-C. The project sweep (`<out-dir>/.sweep`, `sweep_project`): every out-dir entry with nothing written for
-30 days (a build tree, a link record, a binary) goes unless a build holds the lock of a tree in it, as do
-the emitted trees below the root directory idle as long and the per-suite cache older compilers kept in
-`<out-dir>/test/fixture-cache`. `super-c clean` runs the same sweeps at once; `super-c clean --full`
-removes the out-dir, the emitted trees and the project's cache root.
+prelude images (below). The project sweep (`<out-dir>/.sweep`, `sweep_project`): every out-dir entry
+with nothing written for 30 days (a build tree, a link record, a binary) goes unless a build holds the
+lock of a tree in it, as do the emitted trees below the root directory idle as long. `super-c clean`
+runs the same sweeps at once; `super-c clean --full` removes the out-dir, the emitted trees and the
+project's cache root.
 
 The checked std prelude is cached as a file of the root's `prelude/` directory,
 `<key><compiler>.img` (`src/driver/prelude_image.spc`). A build first loads the std prelude alone, resolves it and type

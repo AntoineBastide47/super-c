@@ -149,18 +149,15 @@ pub const fn project_name<'a>(m: &'a mf::Manifest) str<'a> {
     return m.lib_name.as_str();
 }
 
-/// Delete what no build reads again below cache root `root` (`cache_root`): the stale prelude images (`prelude_image::sweep`), and the C object and linker
-/// caches (`o`, `lto`) of the releases that compiled C.
+/// Delete what no build reads again below cache root `root` (`cache_root`): the stale prelude images
+/// (`prelude_image::sweep`).
 fn sweep_cache(root: str, now: i64) {
     pimg::sweep(root, now);
-    rm_rf(loader::join2(root, "o").as_str());
-    rm_rf(loader::join2(root, "lto").as_str());
 }
 
 /// Delete what no build of manifest `m` reads again: every entry of its out-dir with nothing written
-/// for TREE_IDLE (a build tree, a link record, a binary), except a tree whose lock a build holds; the
-/// per-suite object cache that compilers before the shared one kept in `<out-dir>/test/fixture-cache`;
-/// and the emitted trees below its root directory (`root_trees`) idle as long.
+/// for TREE_IDLE (a build tree, a link record, a binary), except a tree whose lock a build holds, and the
+/// emitted trees below its root directory (`root_trees`) idle as long.
 pub fn sweep_project(m: &mf::Manifest, now: i64) {
     let out = m.out_dir.as_str();
     let names = list_dir(out, false).unwrap_or(Vector::<String>::new());
@@ -170,7 +167,6 @@ pub fn sweep_project(m: &mf::Manifest, now: i64) {
             rm_unlocked(p.as_str());
         }
     }
-    rm_rf(loader::join2(out, "test/fixture-cache").as_str());
     let trees = root_trees(m);
     for i in 0..trees.len() {
         let raw = loader::join2(trees.at(i).as_str(), "raw");
