@@ -41,6 +41,7 @@ import lir::print as lprint;
 import lir::parse as lparse;
 import lir::opt as lopt;
 import lir::inline as il;
+import lir::loops as lu;
 import target::native as nat;
 import bindgen::bindgen as bg;
 import bindgen::ctarget as ct;
@@ -6256,7 +6257,12 @@ pub fn cemit_package(
         for m in 0..p.modules.len() {
             sealed.push(module_has_asm(p, m));
         }
-        lopt::optimize(&mut l.deref_mut().pkg, p.jobs, &sealed, inline_budget(p.opt, p.cg));
+        lopt::optimize(
+            &mut l.deref_mut().pkg,
+            p.jobs,
+            &sealed,
+            lopt::Config { inline: inline_budget(p.opt, p.cg), loops: loop_budgets(p.opt, p.cg) },
+        );
         cem.lir_put(l);
     }
     // The LIR check of the bodies this build rendered (a refused one fails the build already). A module
@@ -11024,9 +11030,10 @@ fn lir_lines(p: &mut loader::Package) {
 
 // The C facts of every extern block with a header a native build's objects need, the headers of each
 // module read once, in its C unit's order, under the target's C environment: the values of its integer
-// constants (`Package.extern_ints`), and its functions that only a C compile defines (`Package.c_fns`):
-// every one of an intrinsics header, else the header's `static` ones. A constant the header does not define
-// as an integer stays without one, and the modules that read it do not compile. Each `@layout` type's size
+// constants (`Package.extern_ints`), the `extern` objects its other constants name (`Package.extern_objs`),
+// and its functions that only a C compile defines (`Package.c_fns`): every one of an intrinsics header, else
+// the header's `static` ones. A constant the header defines as neither stays without one, and the modules
+// that read it do not compile. Each `@layout` type's size
 // and alignment must be the header's, each `@value` type's size too and its alignment at least the
 // header's (`check_type`); each constant with a value must have it in the header (`check_const`), each
 // header struct, union and enum the header's layout and values (`check_agg`), and each function the
@@ -11187,6 +11194,9 @@ fn native_header_facts(p: &mut loader::Package) {
                 names.index_mut(hi).push(c_item_name(a, src, sid, cd.name));
                 keys.index_mut(hi).push(key);
                 nsp.index_mut(hi).push(spell.clone());
+                if cd.ty != NODE_NONE {
+                    sc_shape_names(p, m as ModuleId, a.type_of(cd.ty), snames.index_mut(hi));
+                }
             }
         }
     }
@@ -11230,6 +11240,7 @@ fn native_header_facts(p: &mut loader::Package) {
             key: 0,
             vals: Vector::<i64>::new(),
             oks: Vector::<bool>::new(),
+            objs: Vector::<String>::new(),
             sts: Vector::<bool>::new(),
             cls: Vector::<u8>::new(),
             lays: Vector::<String>::new(),
@@ -11317,6 +11328,11 @@ fn native_header_facts(p: &mut loader::Package) {
         }
         for j in 0..t.afacts.len() {
             check_agg(p, akeys.at(k)[j], t.afacts.at(j).as_str(), &smap, asp.at(k).at(j).as_str());
+        }
+        for j in 0..t.objs.len() {
+            if t.objs.at(j).len() != 0 {
+                check_obj(p, keys.at(k)[j], t.objs.at(j).as_str(), &smap, nsp.at(k).at(j).as_str());
+            }
         }
         for j in 0..t.sigs.len() {
             if !t.sts[j] {
@@ -11417,6 +11433,43 @@ fn check_const(p: &mut loader::Package, key: u64, ok: bool, v: i64, header: str)
     } else {
         msg.format_into("but {} gives {}", header, v as u64);
     }
+    hf_err(p, m, cid, msg);
+}
+
+// The check of constant `key` (module << 32 | node) whose expansion in header `header` (as the source
+// spells it) names a C object, `obj` (`<symbol> <shape>`, `bindgen::header_facts`), with the shapes `smap`
+// of the C types its type names: its type has the object's shape, and the object is its storage
+// (`Package.extern_objs`); an error else. A constant with a value (`c_macro`) is the value's.
+fn check_obj(p: &mut loader::Package, key: u64, obj: str, smap: &Map<String, String>, header: str) {
+    let m = (key >> 32) as usize;
+    let cid = (key & 0xFFFFFFFF) as NodeId;
+    let a = unsafe &*p.module_ast_const(m as ModuleId);
+    let cd = a.at_const(cid).as_data.const_def;
+    if cd.c_macro {
+        return;
+    }
+    let mut rest = obj;
+    let sym = hf_word(&mut rest);
+    let mut want = String::new();
+    sc_shape(p, m as ModuleId, a.type_of(cd.ty), smap, &mut want);
+    let ptr = format("{}", lay::target_for(p.arch).ptr);
+    if abi_eq(want.as_str(), rest, ptr.as_str()) {
+        p.extern_objs.insert(key, String::from_str(sym));
+        return;
+    }
+    let ns = a.at_const(cd.name).as_data.name.text;
+    let src = p.modules[m].source.as_str();
+    let mut wd = String::new();
+    let mut od = String::new();
+    shape_desc(want.as_str(), &mut wd);
+    shape_desc(rest, &mut od);
+    let msg = format(
+        "constant '{}' must be {} in C, but {} declares {}",
+        src.slice(ns.start as usize, ns.end as usize),
+        wd.as_str(),
+        header,
+        od.as_str(),
+    );
     hf_err(p, m, cid, msg);
 }
 
@@ -11973,7 +12026,7 @@ fn c_item_name(a: &Ast, src: str, sid: NodeId, name: NodeId) String {
 /// files the scan read with their sizes and modification times, and the facts.
 const HF_RECORD: str = "__sc_hfacts";
 // The first line of `HF_RECORD`: its format.
-const HF_FORMAT: str = "hfacts 4\n";
+const HF_FORMAT: str = "hfacts 5\n";
 
 // One header's scan (`bg::header_facts`) for `native_header_facts`: under the build's target and C
 // flags, header `header`'s constants `names`, functions `fnames`, opaque types `tnames`, structs, unions
@@ -11998,6 +12051,7 @@ struct HfTask {
     pub key: u64,
     pub vals: Vector<i64>,
     pub oks: Vector<bool>,
+    pub objs: Vector<String>,
     pub sts: Vector<bool>,
     pub cls: Vector<u8>,
     pub lays: Vector<String>,
@@ -12053,6 +12107,7 @@ fn hf_run(t: &mut HfTask) {
         ns[0..ns.len()],
         &mut t.vals,
         &mut t.oks,
+        &mut t.objs,
         fs9[0..fs9.len()],
         &mut t.sts,
         &mut t.sigs,
@@ -12103,7 +12158,7 @@ fn hf_key(t: &HfTask) u64 {
 }
 
 // `t`'s record line (`HF_RECORD`): `<key> <ok> <files> <constants> <aggregates> <shapes>`, then per file
-// `<size> <mtime> <path>`, per constant `<0|1> <value>`, the `static` flags as one line of `0` and `1`,
+// `<size> <mtime> <path>`, per constant `<0|1> <value> <object>`, the `static` flags as one line of `0` and `1`,
 // the types' classes as one line of their `bindgen::SC_*` bytes, their sizes, per type its layout
 // (`bindgen::SC_REC`'s, else empty), per aggregate its facts, per shape name its shape, and per function
 // its prototype (one per `static` flag).
@@ -12122,7 +12177,7 @@ fn hf_write(out: &mut String, t: &HfTask) {
         out.format_into("{} {} {}\n", sz, mt, t.read.at(j).as_str());
     }
     for j in 0..t.vals.len() {
-        out.format_into("{} {}\n", t.oks[j] as u32, t.vals[j]);
+        out.format_into("{} {} {}\n", t.oks[j] as u32, t.vals[j], t.objs.at(j).as_str());
     }
     for j in 0..t.sts.len() {
         out.push_byte(
@@ -12211,7 +12266,8 @@ fn hf_find(rec: str, t: &mut HfTask) bool {
         for _ in 0..nv {
             let mut vl = hf_line(&mut rest);
             t.oks.push(hf_word(&mut vl) == "1");
-            t.vals.push(vl.parse_i64().unwrap_or(0));
+            t.vals.push(hf_word(&mut vl).parse_i64().unwrap_or(0));
+            t.objs.push(String::from_str(vl));
         }
         let sl = hf_line(&mut rest);
         let cl = hf_line(&mut rest);
@@ -12239,6 +12295,7 @@ fn hf_find(rec: str, t: &mut HfTask) bool {
             t.read.truncate(0);
             t.oks.truncate(0);
             t.vals.truncate(0);
+            t.objs.truncate(0);
             t.sts.truncate(0);
             t.cls.truncate(0);
             t.szs.truncate(0);
@@ -12383,6 +12440,32 @@ fn inline_budget(opt: i32, cg: u64) il::Budget {
     };
 }
 
+// The loop transforms' budgets at `opt-level` `opt` with code-generation flags `cg`:
+// a fully unrolled loop's copies take up to GCC's complete peeling limit (200 instructions) at 3, a third
+// of it at the other levels; a loop versions on its bounds checks up to the same 200, and unswitches up to
+// GCC's and LLVM's 50.
+fn loop_budgets(opt: i32, cg: u64) lu::Budgets {
+    return lu::Budgets {
+        peel: if (cg & bman::CG_UNROLL) == 0 {
+            0u32;
+        } else if opt == 3 {
+            200u32;
+        } else {
+            64u32;
+        },
+        version: if (cg & bman::CG_VERSION_LOOPS) != 0 {
+            200u32;
+        } else {
+            0u32;
+        },
+        unswitch: if (cg & bman::CG_UNSWITCH) != 0 {
+            50u32;
+        } else {
+            0u32;
+        },
+    };
+}
+
 // The key of module `m`'s own object: its emission cache key (`keys`, which covers the bodies the LIR
 // inliner can copy: its imports') and what the native code reads beyond the C text: the build
 // configuration, the CPU features, the LIR optimizer's switches, the C headers' constants, the functions
@@ -12436,6 +12519,18 @@ fn nat_key(p: &loader::Package, keys: &Vector<u64>, m: usize) u64 {
             Some(k) => {
                 let v = (*p.extern_ints.get(k).unwrap()) as u64;
                 h = h ^ (k.wrapping_mul(0x9E3779B97F4A7C15) ^ v).wrapping_mul(0x100000001B3);
+            },
+            None => {
+                break;
+            },
+        };
+    }
+    let mut xo = p.extern_objs.keys();
+    loop {
+        switch xo.next() {
+            Some(k) => {
+                let v = fnv(p.extern_objs.get(k).unwrap().as_str());
+                h = h ^ (k.wrapping_mul(0xBF58476D1CE4E5B9) ^ v).wrapping_mul(0x100000001B3);
             },
             None => {
                 break;

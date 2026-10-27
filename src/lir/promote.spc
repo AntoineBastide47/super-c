@@ -1378,6 +1378,8 @@ extend Promoter {
         o.lines.truncate(0);
         o.lines.extend_copy(&b.lines);
         o.sig = b.sig;
+        o.refs.truncate(0);
+        o.refs.extend_copy(&b.refs);
         o.naked = b.naked;
         fill_bool(&mut self.done, b.pool.len(), false);
         let inl = b.inl.len() != 0;

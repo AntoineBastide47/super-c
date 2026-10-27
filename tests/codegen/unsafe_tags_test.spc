@@ -61,9 +61,6 @@ const fn line_has(text: str, a: str, b: str) bool {
 // it through the section.
 @test
 fn link_section_places_symbols() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile("main.spc", SECTIONS);
     let r = p.compile("main.spc");
@@ -71,8 +68,8 @@ fn link_section_places_symbols() {
     assert(p.gen_has("main.c", "__attribute__((used, section(\""), "the function definition carries the section");
     assert(p.gen_has("main__inst.c", "__attribute__((used, section(\""), "the static definitions carry the section");
     assert(p.gen_has("main__inst.c", " UNREF = 7;"), "an unnamed static in a section is defined");
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
+    let cc = p.native_build("", "main.spc");
+    assert(cc.ok(), "the program builds");
     assert_eq(p.run_bin(), 0);
     let plat = unsafe shim::sc_host_platform();
     let bin = format("{}/bin{}", p.dir(), unsafe str::from_cstr(cli::binext()));
@@ -137,9 +134,6 @@ pub fn count() i32 {
 
 @test
 fn an_init_array_entry_runs_before_main() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     if cli::on_wasm() {
         return;
     }
@@ -148,7 +142,7 @@ fn an_init_array_entry_runs_before_main() {
     p.mkfile("main.spc", INIT_MAIN);
     assert(p.compile("main.spc").ok(), "the program compiles");
     assert(p.gen_has("main__inst.c", "HOOK)(void) = sc_boot_start;"), "the static holds the function");
-    assert(p.cc_build("").ok(), "the emitted C compiles and links");
+    assert(p.native_build("", "main.spc").ok(), "the program builds");
     assert_eq(p.run_bin(), 0);
 }
 

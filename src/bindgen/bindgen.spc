@@ -480,6 +480,9 @@ struct Collected {
     pub all_protos: bool,
     pub protos: Vector<FnDecl>,
     pub proto_ix: Map<String, u32>,
+    /// For `header_facts`: per name every origin declares as an `extern` object, its type (`?` when this
+    /// tool cannot model it).
+    pub objs: Map<String, String>,
     pub alias_ix: Map<String, u32>, // per alias name, its index in `aliases`
     pub opaque_set: Set<String>, // the names in `opaques`
 }
@@ -683,7 +686,9 @@ pub fn header_env(target: i32, arch: i32, sysroot: str, flags: str, env: &mut ct
 /// The facts of the C headers whose `#include` lines are `pre` (in a C unit's order) under C environment
 /// `env` (`header_env`) that a native build reads: the
 /// values of the integer constants `names` it defines (macros, which may name enumerators and other
-/// macros, or enumerators), `vals[k]` holding the value of `names[k]` when `oks[k]`, whether each of the
+/// macros, or enumerators), `vals[k]` holding the value of `names[k]` when `oks[k]`, else `objs[k]` the
+/// `extern` object its expansion names and that object's shape (`c_shape`), space separated (empty when
+/// it names none), whether each of the
 /// functions `fns` is `static` there (`statics[k]`: no object exports it) and its prototype (`sigs[k]`:
 /// `f` or `v` (variadic), then the result's shape and each parameter's (`c_shape`; `-` for `void`), space
 /// separated; empty when the headers declare none). Per type of `types`, its
@@ -699,6 +704,7 @@ pub fn header_facts(
     names: []str,
     vals: &mut Vector<i64>,
     oks: &mut Vector<bool>,
+    objs: &mut Vector<String>,
     fns: []str,
     statics: &mut Vector<bool>,
     sigs: &mut Vector<String>,
@@ -756,6 +762,7 @@ pub fn header_facts(
         all_protos: false,
         protos: Vector::<FnDecl>::new(),
         proto_ix: Map::<String, u32>::new(),
+        objs: Map::<String, String>::new(),
     };
     c.index_macros(dump.as_str());
     c.widths = read_widths(&c, dump.as_str());
@@ -800,6 +807,15 @@ pub fn header_facts(
                 0;
             },
         );
+        let mut obj = String::from_str(ex.as_str().trim());
+        if v.is_none() && c.objs.contains_key(&obj) {
+            let ot = c.objs.get(&obj).unwrap().clone();
+            obj.push_byte(b' ');
+            c_shape(&c, ot.as_str(), &mut obj);
+        } else {
+            obj.clear();
+        }
+        objs.push(obj);
     }
     for k in 0..fns.len() {
         let key = String::from_str(fns[k]);
@@ -2482,6 +2498,7 @@ fn run_one(
         all_protos: false,
         protos: Vector::<FnDecl>::new(),
         proto_ix: Map::<String, u32>::new(),
+        objs: Map::<String, String>::new(),
     };
 
     let mut text = String::new();
@@ -3581,6 +3598,15 @@ extend Lexer {
                     );
                 }
                 let key = String::from_str(nm.as_str());
+                if c.all_protos && !isfn && !td && !st && c.saw_extern && nm.len() != 0 && !c.objs.contains_key(&key) {
+                    let mut ot = String::new();
+                    if ty.ok && adim == -1 {
+                        ty.render(&mut ot);
+                    } else {
+                        ot.push_str("?");
+                    }
+                    c.objs.insert(key.clone(), ot);
+                }
                 if c.all_protos && isfn && !td && nm.len() != 0 && !c.proto_ix.contains_key(&key) {
                     let mut ret = String::new();
                     if ty.ok {

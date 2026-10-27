@@ -1114,3 +1114,45 @@ int main(void) {
 )";
     assert_eq(run_native(lir, drv), 0);
 }
+
+// Forty loops in one function, each counter stepping in its parameter's register and each loop holding a
+// float constant in a register: every loop's registers free at its end, so the last loop has as many as
+// the first.
+@test
+fn many_loops_free_their_registers() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let mut lir = String::from_str(
+        "lir ptr 8\nsym @many fn global\nfn @many\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 0\n  v2 = iconst.i64 1\n  v3 = fconst.f64 0x0\n  v4 = fconst.f64 0x3ff8000000000000\n  jmp b1(v1, v1, v3)\n",
+    );
+    // Loop j: header b(3j+1), body b(3j+2), exit b(3j+3); values from 9j + 5.
+    let n: u32 = 40;
+    for j in 0..n {
+        let h = 3 * j + 1;
+        let v = 9 * j + 5;
+        lir.format_into("b{}(v{}: i64, v{}: i64, v{}: f64):\n", h, v, v + 1, v + 2);
+        lir.format_into("  v{} = icmp.ult v{}, v0\n  br v{}, b{}, b{}\n", v + 3, v, v + 3, h + 1, h + 2);
+        lir.format_into("b{}:\n  v{} = iconst.i64 {}\n  v{} = add.i64 v{}, v{}\n", h + 1, v + 4, j, v + 5, v + 1, v);
+        lir.format_into("  v{} = add.i64 v{}, v{}\n  v{} = fadd.f64 v{}, v4\n", v + 6, v + 5, v + 4, v + 7, v + 2);
+        lir.format_into("  v{} = add.i64 v{}, v2\n  jmp b{}(v{}, v{}, v{})\n", v + 8, v, h, v + 8, v + 6, v + 7);
+        if j + 1 < n {
+            lir.format_into("b{}:\n  jmp b{}(v1, v{}, v{})\n", h + 2, h + 3, v + 1, v + 2);
+        } else {
+            lir.format_into(
+                "b{}:\n  v{} = fptosi.i64 v{}\n  v{} = add.i64 v{}, v{}\n  ret v{}\n",
+                h + 2,
+                v + 9,
+                v + 2,
+                v + 10,
+                v + 1,
+                v + 9,
+                v + 10,
+            );
+        }
+    }
+    // Per loop with n = 4: 0 + 1 + 2 + 3 + 4j, and 4 * 1.5 = 6.
+    let drv = "#include <stdint.h>\nint64_t many(int64_t);\nint main(void) { return many(4) == 3360 + 240 ? 0 : 1; }\n";
+    assert_eq(run_native(lir.as_str(), drv), 0);
+    assert_eq(run_wasm(lir.as_str(), drv), 0);
+}

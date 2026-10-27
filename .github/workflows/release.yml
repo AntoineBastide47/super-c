@@ -1,7 +1,7 @@
 name: Release
 
-# Owner-only, manual-trigger release: builds the `super-c` binary for macOS, Linux and Windows and publishes
-# a GitHub Release with one archive per platform.
+# Owner-only, manual-trigger release: builds the `super-c` binary for macOS, Linux (x86-64 and arm64) and
+# Windows and publishes a GitHub Release with one archive per platform.
 #
 # resolve -> compile -> test shards, levels, gate, compare (Linux) -> package -> release
 #            wasm-compile -> wasm-checks, wasm-test, wasm-target -> wasm-package ---^
@@ -57,9 +57,9 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "Releasing $sha ($(git log -1 --format=%s "$sha"))"
 
-  # The pipeline of macOS, Linux, Windows and wasm: one job builds the compiler, the test shards (three
-  # on Windows, the slowest runner, two elsewhere), the x86-64 levels, the correctness gate and the
-  # transpile work count run in parallel on that binary, and the release
+  # The pipeline of macOS, Linux, Linux arm64, Windows and wasm: one job builds the compiler, the test
+  # shards (three on Windows, the slowest runner, two elsewhere), the x86-64 levels, the correctness gate
+  # and the transpile work count (not on Linux arm64) run in parallel on that binary, and the release
   # binary is built only after all but the count pass. A count that grew by the limit or more, or that
   # failed, holds only the publishing: `counts approval` waits for an approval in the `release-approval`
   # environment (required reviewer: the owner):
@@ -93,6 +93,11 @@ jobs:
             target: macos
           - os: ubuntu-latest
             target: linux
+          # The x86-64 runner cross-builds the arm64 compiler with the x86-64 release's, so no arm64
+          # release compiler is needed. Both runners run Ubuntu 26.04: the arm64 runner's glibc.
+          - os: ubuntu-26.04
+            target: linux_arm64
+            platform: linux
           - os: windows-latest
             target: windows
     runs-on: ${{ matrix.os }}
@@ -116,7 +121,7 @@ jobs:
 
       - uses: ./.github/actions/bootstrap
         with:
-          target: ${{ matrix.target }}
+          target: ${{ matrix.platform || matrix.target }}
 
       - name: Build the compiler
         run: |
@@ -124,6 +129,16 @@ jobs:
           bin="super-c${BINEXT:-}"
           SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags
           test -x "./$bin"
+
+      # Against the arm64 C library (headers and libraries, no compiler); the test shards rebuild it on arm64.
+      - name: Cross-build the arm64 compiler
+        if: matrix.target == 'linux_arm64'
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y libc6-dev-arm64-cross
+          SC_LEAK_CHECK=fatal ./super-c build --target=linux --arch=aarch64 --sysroot=/usr/aarch64-linux-gnu --out-dir=build-a64 -o super-c-a64
+          mv super-c-a64 super-c
 
       - uses: actions/upload-artifact@v7
         with:
@@ -160,6 +175,14 @@ jobs:
             cache_shard: 1
           - os: ubuntu-latest
             target: linux
+            test_shard: "2/2"
+            cache_shard: 2
+          - os: ubuntu-26.04-arm
+            target: linux_arm64
+            test_shard: "1/2"
+            cache_shard: 1
+          - os: ubuntu-26.04-arm
+            target: linux_arm64
             test_shard: "2/2"
             cache_shard: 2
           - os: windows-latest
@@ -290,6 +313,8 @@ jobs:
             target: macos
           - os: ubuntu-latest
             target: linux
+          - os: ubuntu-26.04-arm
+            target: linux_arm64
           - os: windows-latest
             target: windows
     runs-on: ${{ matrix.os }}
@@ -392,6 +417,7 @@ jobs:
   # The transpile work count beside the shards (.github/actions/transpile-counts): this commit's compiler
   # against the last release's on the same sources, built by clang with counters (llvm-mingw's on
   # Windows). A growth of 1% or more is an error annotation, and the release waits for an approval.
+  # No Linux arm64 row: no earlier release has a Linux arm64 compiler to count against.
   counts:
     needs: [resolve, compile]
     if: github.actor == github.repository_owner
@@ -492,6 +518,9 @@ jobs:
             target: macos
           - os: ubuntu-latest
             target: linux
+          - os: ubuntu-26.04-arm
+            target: linux_arm64
+            platform: linux
           - os: windows-latest
             target: windows
     runs-on: ${{ matrix.os }}
@@ -536,7 +565,7 @@ jobs:
       - name: Package
         run: |
           set -eu
-          name="super-c-${{ matrix.target }}-$(uname -m)"
+          name="super-c-${{ matrix.platform || matrix.target }}-$(uname -m)"
           bin="super-c${BINEXT:-}"
           mkdir -p "dist/${name}"
           if [ "${{ matrix.target }}" = windows ]; then
@@ -771,7 +800,7 @@ jobs:
 
       - uses: ./.github/actions/test-durations-save
         with:
-          shards: macos=2 linux=2 windows=3 wasm=2
+          shards: macos=2 linux=2 linux_arm64=2 windows=3 wasm=2
 
   # Each platform's one object cache: its newest cache, then each delta its compile, test and package
   # jobs uploaded (.github/actions/cache-save), in part order: their added and changed files over it,
@@ -791,6 +820,8 @@ jobs:
             target: macos
           - os: ubuntu-latest
             target: linux
+          - os: ubuntu-26.04-arm
+            target: linux_arm64
           - os: windows-latest
             target: windows
           - os: ubuntu-latest

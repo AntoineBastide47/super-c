@@ -60,12 +60,14 @@ Rules for the costly rungs:
   One build serves every case; `add_trap` adds a case that must fail with a message. A case whose
   `main` is neither `fn main()` nor `fn main(NAME: Vector<str>)`, a case that needs a build flag,
   and a case about a root module's bare C names stay alone.
-- Rung 5: one project per test, reused across its steps. A strict whole-tree compile
-  (`p.cc_build`) compiles the `--emit-c` tree with the C compiler, so use it only when the C is
-  the behavior. The build compiles no C file of a project's tree: a test
-  whose program binds C code links it prebuilt, through `p.cc_build_with(flags, "x.c")` (the
-  harness compile) or `p.c_lib(name, "x.c")` and `@link("-L<root> -l<name>")` (an engine
-  build); a header whose `static inline` function holds the code needs neither.
+- Rung 5: one project per test, reused across its steps. A test that runs its program builds it
+  natively (`p.native_build(flags, "main.spc")`: from the root, its outputs under `native/`, so the
+  C tree of an earlier `p.compile` stays for `gen_has`), and so runs on every lane. A strict
+  whole-tree compile (`p.cc_build`) compiles the `--emit-c` tree with the C compiler, only with
+  `SC_TEST_CC`, so use it only when the C is the behavior. The build compiles no C file of a
+  project's tree: a test whose program binds C code links it prebuilt, through `p.c_lib(name,
+  "x.c")` and `@link("-L. -l<name>")` (`native_build`), or `p.cc_build_with(flags, "x.c")` (a test
+  of the emitted C); a header whose `static inline` function holds the code needs neither.
 - Rung 6: put many cases in one program that selects a case by its argument (`prog <k>`), as
   `const_runtime_parity` does. Size a generated program by the cases it must hold.
 

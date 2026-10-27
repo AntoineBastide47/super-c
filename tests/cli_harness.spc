@@ -576,6 +576,15 @@ extend Proj {
         return exec_env(base.cstr(), op.cstr(), "");
     }
 
+    /// Build `mainrel` with `flags` natively from the root into `<root>/bin` (`run_bin` runs it), with its
+    /// outputs under `<root>/native`, so the C tree an earlier `compile` wrote stays, then return to the
+    /// test's working directory; the compiler's result. A `c_lib` archive links by `@link("-L. -l<name>")`.
+    pub fn native_build(self: &Proj, flags: str, mainrel: str) CliResult {
+        let back = process::current_dir().unwrap();
+        let r = superc_in(self.dir(), format("build {} --out-dir=native {} -o bin", flags, mainrel).as_str());
+        assert(process::set_current_dir(back.as_str()).is_ok(), "the test's working directory stays");
+        return r;
+    }
     // `cc_tree_with` without C files of the test's own.
     fn cc_tree(self: &Proj, extra: str, strict: bool) CliResult {
         return self.cc_tree_with(extra, strict, "");

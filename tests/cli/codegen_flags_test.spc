@@ -5,8 +5,9 @@ import tests::platform::platform_harness as ph;
 
 const E: str = "SC_NO_EMIT_CACHE";
 
-// A program each flag changes: a small and a mid-sized callee (inlining) and leaf functions (the frame
-// pointer), with loops.
+// A program each flag changes: a counted loop (unrolling), a loop with bounds checks (versioning), a loop
+// with a branch on a parameter (unswitching), a small and a mid-sized callee (inlining) and leaf functions
+// (the frame pointer).
 const PROGRAM: str = M"(import stdio;
 
 @noinline
@@ -99,15 +100,22 @@ fn each_flag_changes_the_code() {
     let p = cli::proj_new();
     p.mkfile("main.spc", PROGRAM);
     let (base, want) = built(&p, "-O3", "base");
-    let flags: []str = ["-fno-omit-frame-pointer", "-fno-inline", "-fno-inline-functions"];
+    let flags: []str = [
+        "-fno-omit-frame-pointer",
+        "-fno-inline",
+        "-fno-inline-functions",
+        "-fno-unroll-loops",
+        "-fno-unswitch-loops",
+        "-fno-version-loops-for-bounds",
+    ];
     for k in 0..flags.len() {
         let (bin, out) = built(&p, format("-O3 {}", flags[k]).as_str(), format("f{}", k).as_str());
         assert(out.as_str() == want.as_str(), flags[k]);
         assert(bin.as_str() != base.as_str(), flags[k]);
     }
     // The last flag wins: on, then off again, is the base.
-    let (same, _) = built(&p, "-O3 -fno-inline -finline", "again");
-    assert(same.as_str() == base.as_str(), "-finline after -fno-inline");
+    let (same, _) = built(&p, "-O3 -fno-unroll-loops -funroll-loops", "again");
+    assert(same.as_str() == base.as_str(), "-funroll-loops after -fno-unroll-loops");
 }
 
 // `-march` names the CPU as `--target-cpu` does: an unknown one is refused by the same check.

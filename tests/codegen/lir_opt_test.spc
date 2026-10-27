@@ -7,6 +7,7 @@ import lir::parse as lparse;
 import lir::eval as leval;
 import lir::opt as lopt;
 import lir::inline as il;
+import lir::loops as lu;
 
 // Package text `text` read, then optimized: each body verifies before and after.
 fn optimized(text: str) (Package, Package) {
@@ -16,7 +17,12 @@ fn optimized(text: str) (Package, Package) {
     let before = q.unwrap();
     let mut after = lparse::parse(text, &mut err).unwrap();
     let none = Vector::<bool>::new();
-    lopt::optimize(&mut after, 1, &none, il::SPEED);
+    lopt::optimize(
+        &mut after,
+        1,
+        &none,
+        lopt::Config { inline: il::SPEED, loops: lu::Budgets { peel: 0, version: 0, unswitch: 0 } },
+    );
     let mut v = verify::Verifier::new();
     for i in 0..after.syms.len() {
         let s = after.syms[i];
@@ -308,7 +314,12 @@ b0(v0: i32):
     let mut sealed = Vector::<bool>::new();
     sealed.push(false);
     sealed.push(true);
-    lopt::optimize(&mut p, 1, &sealed, il::SPEED);
+    lopt::optimize(
+        &mut p,
+        1,
+        &sealed,
+        lopt::Config { inline: il::SPEED, loops: lu::Budgets { peel: 0, version: 0, unswitch: 0 } },
+    );
     assert(!text_of(&p, "same").contains("@leaf"), "a body of the same unit inlines it");
     assert(text_of(&p, "other").contains("call @leaf"), "a body of another unit calls it");
 }
@@ -535,4 +546,144 @@ b0(v0: i64):
     assert(!f.contains("memcpy") && !f.contains("slot s1"), "one slot holds the result and the argument");
     let x: []u64 = [4];
     same_result(&b, &a, "fwd", x, 8);
+}
+
+// A load of an exclusive reference parameter's referent (`ref p0 16 noalias`, a `&mut`) leaves a loop
+// whose stores go through other pointers; not when the parameter escapes into a call, nor when it is a
+// shared reference, which another pointer may reach.
+@test
+fn a_load_of_an_exclusive_reference_leaves_a_loop_that_writes_elsewhere() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @sink fn global noinline
+sym @fill fn global noinline
+sym @leaky fn global noinline
+sym @shared fn global noinline
+sym @drive fn global
+fn @sink
+  sig (ptr) -> void
+b0(v0: ptr):
+  ret
+fn @fill
+  sig (ptr) -> i64
+  ref p0 16 noalias
+b0(v0: ptr):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  jmp b1(v1, v1)
+b1(v3: i64, v4: i64):
+  v5 = load.i64 v0+8 align 3
+  v6 = icmp.ult v3, v5
+  br v6, b2, b3
+b2:
+  v7 = load.ptr v0 align 3
+  v8 = ptradd v7, v3 * 8
+  store v5, v8 align 3
+  v9 = add.i64 v4, v5
+  v10 = add.i64 v3, v2
+  jmp b1(v10, v9)
+b3:
+  ret v4
+fn @leaky
+  sig (ptr) -> i64
+  ref p0 16 noalias
+b0(v0: ptr):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  call @sink(v0) : (ptr) -> void
+  jmp b1(v1, v1)
+b1(v3: i64, v4: i64):
+  v5 = load.i64 v0+8 align 3
+  v6 = icmp.ult v3, v5
+  br v6, b2, b3
+b2:
+  v7 = load.ptr v0 align 3
+  v8 = ptradd v7, v3 * 8
+  store v5, v8 align 3
+  v9 = add.i64 v4, v5
+  v10 = add.i64 v3, v2
+  jmp b1(v10, v9)
+b3:
+  ret v4
+fn @shared
+  sig (ptr) -> i64
+  ref p0 16
+b0(v0: ptr):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  jmp b1(v1, v1)
+b1(v3: i64, v4: i64):
+  v5 = load.i64 v0+8 align 3
+  v6 = icmp.ult v3, v5
+  br v6, b2, b3
+b2:
+  v7 = load.ptr v0 align 3
+  v8 = ptradd v7, v3 * 8
+  store v5, v8 align 3
+  v9 = add.i64 v4, v5
+  v10 = add.i64 v3, v2
+  jmp b1(v10, v9)
+b3:
+  ret v4
+fn @drive
+  sig () -> i64
+  slot s0 size 16 align 3
+  slot s1 size 32 align 3
+b0:
+  v0 = slotaddr s0
+  v1 = slotaddr s1
+  v2 = iconst.i64 4
+  store v1, v0 align 3
+  store v2, v0+8 align 3
+  v3 = call.i64 @fill(v0) : (ptr) -> i64
+  v4 = call.i64 @leaky(v0) : (ptr) -> i64
+  v5 = call.i64 @shared(v0) : (ptr) -> i64
+  v6 = add.i64 v3, v4
+  v7 = add.i64 v6, v5
+  ret v7
+)",
+    );
+    let f = text_of(&a, "fill");
+    let at = f.as_str().find("load.i64 v0+8");
+    assert(at >= 0 && at < f.as_str().find("b1("), f.as_str());
+    let l = text_of(&a, "leaky");
+    assert(l.as_str().find("load.i64 v0+8") > l.as_str().find("b1("), l.as_str());
+    let s = text_of(&a, "shared");
+    assert(s.as_str().find("load.i64 v0+8") > s.as_str().find("b1("), s.as_str());
+    let none: []u64 = [];
+    same_result(&b, &a, "drive", none, 48);
+}
+
+// A branch on a condition a dominating branch decided jumps: the edge into its block fixed the value.
+@test
+fn a_branch_a_dominating_branch_decided_jumps() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @k fn global
+fn @k
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = icmp.ult v0, v1
+  br v2, b1, b2
+b1:
+  ret v0
+b2:
+  br v2, b3, b4
+b3:
+  ret v1
+b4:
+  v3 = add.i64 v0, v1
+  ret v3
+)",
+    );
+    let t = text_of(&a, "k");
+    let first = t.as_str().find("br ");
+    assert(
+        first >= 0 && t.as_str().slice(first as usize + 3, t.len()).find("br ") < 0 && !t.contains("ret v1"),
+        t.as_str(),
+    );
+    let lo: []u64 = [1, 3];
+    same_result(&b, &a, "k", lo, 1);
+    let hi: []u64 = [5, 3];
+    same_result(&b, &a, "k", hi, 8);
 }

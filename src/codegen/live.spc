@@ -568,6 +568,33 @@ extend Live {
 }
 
 extend Live {
+    /// Per instruction of `b` into `out`: whether it is a float constant a loop block uses that lives past
+    /// its block. No instruction takes a float as an immediate, so recomputing one at each use costs one to
+    /// five instructions per iteration: a generator asks a register for its whole range instead. After
+    /// `run`.
+    pub fn loop_fconsts(self: &mut Self, b: &Body, out: &mut Vector<bool>) {
+        out.truncate(0);
+        out.resize_default(b.insts.len());
+        let mut us = replace(&mut self.succ, Vector::<u32>::new());
+        for k in 0..b.blocks.len() {
+            if self.inner[k] == NONE || self.pos[k] == NONE {
+                continue;
+            }
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                self.uses_at(b, i, &mut us);
+                for u in 0..us.len() {
+                    let v = us[u];
+                    if (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == O_FCONST {
+                        let d = self.def_blk[v as usize];
+                        out[v as usize] = out[v as usize] || self.end[v as usize] > self.pos[d as usize];
+                    }
+                }
+            }
+        }
+        self.succ = us;
+    }
+
     /// Plan which values hold one register for their whole range (`home`): the ones `want` (WANT_* per
     /// value) asks one for, by a linear scan over the layout in the order the ranges start (Poletto and
     /// Sarkar's); when a file's registers are taken, the active value of least weight (the frequency of

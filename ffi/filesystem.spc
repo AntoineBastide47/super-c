@@ -19,7 +19,7 @@ extern "C" "sys/stat.h" {
     pub fn fstat(fd: i32, buf: *mut void) i32;
 
     /// Set the permission bits of `path`; 0 or -1 and errno.
-    pub fn chmod(path: *const char, mode: u32) i32;
+    pub fn chmod(path: *const char, mode: stdlib::mode_t) i32;
 }
 
 // `mkdir` is the one call here whose SIGNATURE differs by platform: the Windows CRT spells it `_mkdir` and
@@ -51,6 +51,8 @@ extern "C" "unistd.h" {
     pub fn chown(path: *const char, owner: u32, group: u32) i32;
 }
 
+// No Windows C runtime has `dirent.h`'s functions: `std::platform::fs::read_dir` lists a directory there.
+@platform(!windows)
 extern "C" "dirent.h" {
     /// An open directory stream.
     pub type DIR;

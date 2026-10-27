@@ -8765,9 +8765,6 @@ fn reflection_bounds_over_enum_payloads() {
 // copies a per-copy condition skips, which owe nothing.
 @test
 fn generic_defaults_and_enum_payloads_accepted() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = dig_proj();
     p.mkfile(
         "main.spc",
@@ -8870,12 +8867,11 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     if !r.ok() {
         eprintln("{}", r.text());
     }
     assert(r.ok(), "the program compiles");
-    assert(p.cc_build("").ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 0);
 }
 

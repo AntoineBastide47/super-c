@@ -11,7 +11,7 @@ description: >
   evicts the release's entries.
 inputs:
   target:
-    description: "linux, macos, windows or wasm"
+    description: "linux, linux_arm64, macos, windows or wasm"
     required: true
   sha:
     description: "the commit under test, the last part of the object cache key"

@@ -675,6 +675,41 @@ fn header_prototypes_are_checked() {
     assert(!d.contains("'ok'"), "a parameter of the other signedness passes alike");
 }
 
+// A constant whose expansion in the header names a C object reads the object (`optind`, 1 before any
+// `getopt`); a constant whose type does not have the object's fails the build at the constant.
+@test
+fn header_object_constants_are_checked() {
+    if PLATFORM == Platform::Windows {
+        return; // no unistd.h
+    }
+    // wasi-libc declares `optind`, and its C library does not define it: the program does not link.
+    if !h::target_lane() {
+        let p = h::diff_proj();
+        p.mkfile(
+            "main.spc",
+            "extern \"C\" \"unistd.h\" {\n    pub const optind: i32;\n}\n\nfn main() i32 {\n    return optind - 1;\n}\n",
+        );
+        let b = h::diff_build_in(p, []);
+        if !b.built {
+            eprintln("{}", b.diag.as_str());
+        }
+        assert(b.built, "the program builds");
+        assert_eq(h::diff_run(&b, "").exit, 0);
+    }
+    let q = h::diff_proj();
+    q.mkfile(
+        "main.spc",
+        "extern \"C\" \"unistd.h\" {\n    pub const optind: i64;\n}\n\nfn main() i32 {\n    return optind as i32 - 1;\n}\n",
+    );
+    let w = h::diff_build_in(q, []);
+    let want = "constant 'optind' must be a signed integer of 8 bytes in C, but \"unistd.h\" declares a signed integer of 4 bytes";
+    if w.built || !w.diag.contains(want) {
+        eprintln("{}", w.diag.as_str());
+    }
+    assert(!w.built, "the build fails");
+    assert(w.diag.contains(want), "the check names the constant and both types");
+}
+
 // An extern enum that skips an enumerator gives the ones after it values the header does not: the build
 // fails at the first enumerator whose value differs, and so does the emitted C's compile, with a message
 // that names it.
@@ -820,9 +855,6 @@ const STAT: str = M"(extern "C" "sys/stat.h" {
 // C library's.
 @test
 fn header_type_reads_stat_of_a_file() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile("data.bin", "hello");
     let mut path = String::new();
@@ -850,7 +882,7 @@ fn header_type_reads_stat_of_a_file() {
     }
     assert(r.ok(), "the program compiles");
     assert(p.xhdr_has("_Static_assert(sizeof(struct stat) == "), "the platform's layout is checked");
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "main.spc");
     if !cc.ok() {
         eprintln("{}", cc.text());
     }

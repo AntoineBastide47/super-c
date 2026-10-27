@@ -2115,6 +2115,33 @@ extend Lower {
 }
 
 extend Lower {
+    // `Body.refs` of parameter local `l`: a reference's referent bytes, exclusive (REF_NOALIAS) for a
+    // `&mut` the body does not rebind, which the language makes the only path to them during the call;
+    // 0 for any other parameter or a referent of no known size.
+    fn ref_of(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, l: u32) u32 {
+        let mut rm = b.module;
+        let mut rt = b.locals[l as usize].ty;
+        let y = Lower::resolved(c, b.module, rt, &mut rm, &mut rt);
+        if y.kind != TypeKind::TYPE_REFERENCE {
+            return 0;
+        }
+        let e = self.err;
+        let mut ei = TyI { cls: 0 };
+        if !self.ty(c, rm, y.as_data.elem, &mut ei) {
+            self.err = e;
+            return 0;
+        }
+        if ei.cls == VC_ZST || ei.size == 0 || ei.size > REF_BYTES {
+            return 0;
+        }
+        let excl = y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 && !b.locals[l as usize].is_mutable;
+        return ei.size | if excl {
+            REF_NOALIAS;
+        } else {
+            0u32;
+        };
+    }
+
     // The signature, the entry block and the storage of every local in memory.
     fn entry(
         self: &mut Self,
@@ -2128,10 +2155,13 @@ extend Lower {
         let mut ptys = Vector::<u32>::new();
         let mut etys = Vector::<u8>::new();
         let mut pl = Vector::<u32>::new();
+        self.b.refs.truncate(0);
+        let mut any_ref = false;
         if ncaps != 0 {
             ptys.push(T_PTR);
             etys.push(T_PTR);
             pl.push(NONE);
+            self.b.refs.push(0);
         }
         for i in 0..nparams {
             let l = b.returns + i;
@@ -2139,14 +2169,21 @@ extend Lower {
             if info.ti.cls == VC_ZST {
                 continue;
             }
+            let mut r: u32 = 0;
             if info.ti.cls == VC_SCALAR {
                 ptys.push(sig_code(info.ti.mty, Lower::signed(c, b.module, b.locals[l as usize].ty)));
                 etys.push(info.ti.mty);
+                r = self.ref_of(c, b, l);
             } else {
                 ptys.push(self.param_sig(c, b.module, b.locals[l as usize].ty, info.ti));
                 etys.push(T_PTR);
             }
+            self.b.refs.push(r);
+            any_ref = any_ref || r != 0;
             pl.push(l);
+        }
+        if !any_ref {
+            self.b.refs.truncate(0);
         }
         let mut ret = T_NONE as u32;
         if b.returns == 1 {
@@ -2759,8 +2796,15 @@ extend Lower {
         }
         let ia = Lower::ast(c, item.module).at_const(item.node);
         if ia.kind == NodeKind::NODE_CONST && ia.as_data.const_def.is_extern && !ia.as_data.const_def.is_static_mut {
-            // A C header's constant: its value as the header defines it, else only the C compiler knows it.
-            if let Some(x) = Lower::p(c).extern_ints.get(&(item.module as u64 << 32 | item.node as u64)) {
+            // A C header's constant: its value as the header defines it, the object it names, else only the C
+            // compiler knows it.
+            let key = item.module as u64 << 32 | item.node as u64;
+            if let Some(o) = Lower::p(c).extern_objs.get(&key) {
+                *addr = self.symaddr(o.as_str(), SK_DATA);
+                self.mark_ext(o.as_str());
+                return true;
+            }
+            if let Some(x) = Lower::p(c).extern_ints.get(&key) {
                 let mut ti = TyI { cls: 0 };
                 if !self.ty(c, b.module, d.ty, &mut ti) {
                     return false;
@@ -4264,6 +4308,8 @@ extend Lower {
         }
         let n = check_args(k);
         let mut v = [VNONE, VNONE, VNONE];
+        // A chunk's bounds count as the C helper's 64-bit two's complement: a signed index sign-extends.
+        let sg = k == irc::IN_CHUNK && Lower::signed(c, b.module, rv.target);
         for i in 0..n {
             let x = self.operand(c, b, b.oper_pool[(rv.a + i) as usize]);
             if x == VNONE {
@@ -4272,7 +4318,7 @@ extend Lower {
             unsafe v[i as usize] = if k == irc::IN_LIKELY || k == irc::IN_UNLIKELY {
                 x;
             } else {
-                self.int_to(x, self.ptr_int(), false);
+                self.int_to(x, self.ptr_int(), sg);
             };
         }
         if k == irc::IN_BOUNDS {
@@ -4359,8 +4405,8 @@ extend Lower {
             if self.spc == NONE {
                 return self.int_to(v[1], ti.mty, false);
             }
-            let i = self.int_to(v[0], T_I64, false);
-            let e = self.int_to(v[1], T_I64, false);
+            let i = self.int_to(v[0], T_I64, sg);
+            let e = self.int_to(v[1], T_I64, sg);
             let d = self.arith(O_SUB, e, i);
             let bud = self.read_var(self.spc, self.cur);
             let b64 = self.int_to(bud, T_I64, true);

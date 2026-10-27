@@ -948,6 +948,31 @@ pub const fn operand_b(f: u8) bool {
     return (unsafe OPS[f as usize] & 2) != 0;
 }
 
+/// The values instruction `t` of `b` uses into `out`: its operands, a call's arguments, a vector operation's
+/// or an assembly statement's operands; not its edges' arguments.
+pub fn uses(b: &Body, t: Inst, out: &mut Vector<Value>) {
+    out.truncate(0);
+    let f = op_info(t.op).form;
+    if operand_a(f) && t.a != VNONE {
+        out.push(t.a);
+    }
+    if operand_b(f) && t.b != VNONE {
+        out.push(t.b);
+    }
+    if operand_c(f) && t.c != VNONE {
+        out.push(t.c);
+    }
+    if f == F_CALL || f == F_CALLIND {
+        for q in 0..t.aux as u32 {
+            out.push(b.pool[(t.c + q) as usize]);
+        }
+    } else if f == F_VOP || f == F_ASM {
+        for q in 0..t.b {
+            out.push(b.pool[(t.a + q) as usize]);
+        }
+    }
+}
+
 /// Whether operand `c` of form `f` is a value.
 pub const fn operand_c(f: u8) bool {
     return f == F_TRI;

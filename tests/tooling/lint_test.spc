@@ -1105,9 +1105,9 @@ fn byte_views_of_aggregates_are_no_provable_fault() {
     for src in srcs {
         let p = cli::proj_new();
         p.mkfile("main.spc", src);
-        let r = p.compile("main.spc");
+        let r = p.native_build("", "main.spc");
         assert(r.ok() && !r.out_has("undefined behavior"), "no compile-time fault");
-        assert(p.cc_build("").ok() && p.run_bin() == 0, "the run writes the bytes");
+        assert(p.run_bin() == 0, "the run writes the bytes");
     }
 }
 

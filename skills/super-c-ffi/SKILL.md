@@ -319,8 +319,12 @@ function gets its prototype.
 
 A native build (super-c-compiler-internals, "Native backend") reads the value of a constant
 without a value from its header with the compiler's own preprocessor, so the object holds it and
-an edit of the header rebuilds the object. A call of a function the header defines `static` (no
-object exports it) sends the calling module through C.
+an edit of the header rebuilds the object. A constant whose expansion names an `extern` object the
+header declares (`extern const int limit;`) reads that object, and its type must have the object's
+("constant 'limit' must be a signed integer of 8 bytes in C, but \"lib.h\" declares a signed integer
+of 4 bytes"). A constant that is neither, and a call of a function the header defines `static` (no
+object exports it), fail the build (a constant: "module 'm' does not compile: a function `f` reads a
+C header's constant: `__sc_x_NAME`").
 
 ## C Integer Widths
 

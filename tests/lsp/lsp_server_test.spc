@@ -703,9 +703,6 @@ fn lsp_rename_workspace_relative() {
 // module is typechecked. Compile a two-module project with the same shape end-to-end.
 @test
 fn cross_module_enum_cast_array_len() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "lib.spc",
@@ -737,10 +734,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert_eq(r.exit, 0);
-    let b = p.cc_build("");
-    assert_eq(b.exit, 0);
     assert_eq(p.run_bin(), 0);
 }
 

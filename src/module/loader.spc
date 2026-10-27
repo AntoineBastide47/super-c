@@ -303,6 +303,8 @@ pub struct Package {
     /// The values of the integer constants of extern blocks with a header, as `module << 32 | node`, that a
     /// native build reads from the headers (`driver::emit::native_header_facts`); empty otherwise.
     pub extern_ints: Map<u64, i64>,
+    /// The C symbols of the `extern` objects the other constants of those blocks name, as `extern_ints`.
+    pub extern_objs: Map<u64, String>,
     /// The functions of extern blocks that only a C compile defines, as `module << 32 | node`, in a native
     /// build: the instruction set's intrinsics (`Isa.intrinsics`) and a header's `static` functions. Empty
     /// otherwise.
@@ -312,7 +314,7 @@ pub struct Package {
     pub opaque_cls: Map<u64, u8>,
     /// The layout of those of class `bindgen::SC_REC`: `<size> <align>`, then its leaves (`bindgen::c_layout`).
     pub opaque_lay: Map<u64, String>,
-    /// The C header files those facts were read from (`extern_ints`, `c_fns`, `opaque_cls`): inputs of the
+    /// The C header files those facts were read from (`extern_ints`, `extern_objs`, `c_fns`, `opaque_cls`): inputs of the
     /// emission.
     pub header_files: Vector<String>,
     /// Per module, the offsets where its source's lines start, for the locations of LIR

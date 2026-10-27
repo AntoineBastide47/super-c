@@ -554,6 +554,9 @@ pub const AGG: u32 = 0x80000000;
 /// zero-extends it.
 pub const SIG_SEXT: u32 = 0x40000000;
 pub const SIG_VARIADIC: u32 = 0x80000000;
+/// `Body.refs`: the bytes, and the exclusive flag.
+pub const REF_BYTES: u32 = 0x7FFFFFFF;
+pub const REF_NOALIAS: u32 = 0x80000000;
 
 /// A body: its instructions and every table they index. `syms` and `msgs` map the body's symbol and
 /// message numbers to its package's.
@@ -572,6 +575,11 @@ pub struct Body {
     /// one), 0 for the body's own instruction; empty when nothing was inlined.
     pub inl: Vector<u32>,
     pub sig: u32, // the body's own signature (pool); NONE until set
+    /// Per signature parameter, what a reference parameter points to for the whole call: the bytes a
+    /// load may read (`REF_BYTES`), with REF_NOALIAS when no pointer that does not come from the
+    /// parameter reaches them (a `&mut`); 0 for any other parameter. Empty when no parameter is a
+    /// reference.
+    pub refs: Vector<u32>,
     /// A naked function (`@unsafe(naked)`): its machine code is its `O_ASM` templates alone, in order,
     /// without a prologue or an epilogue.
     pub naked: bool,
@@ -608,6 +616,7 @@ extend Body {
             lines: Vector::<Loc>::new(),
             inl: Vector::<u32>::new(),
             sig: NONE,
+            refs: Vector::<u32>::new(),
             naked: false,
             cur: 0,
         };
@@ -629,6 +638,7 @@ extend Body {
         self.lines.truncate(1);
         self.inl.truncate(0);
         self.sig = NONE;
+        self.refs.truncate(0);
         self.naked = false;
         self.cur = 0;
     }
@@ -648,6 +658,7 @@ extend Body {
             lines: exact(&self.lines),
             inl: exact(&self.inl),
             sig: self.sig,
+            refs: exact(&self.refs),
             naked: self.naked,
             cur: 0,
         };

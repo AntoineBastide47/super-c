@@ -83,7 +83,15 @@ const ENTRY_IMPORTS: []str = [
 const DLL_IMPORTS: []str = ["_initialize_onexit_table", "_register_onexit_function", "_execute_onexit_table"];
 
 // The C functions the C runtime DLL exports under another name: (name, export).
-const RENAMES: [](str, str) = [("atexit", "_crt_atexit"), ("time", "_time64"), ("hypotf", "_hypotf")];
+// mingw-w64's x64 headers name `stat` and `fstat` `stat64i32` and `fstat64i32` (`__MINGW_ASM_CALL`), aliases
+// only its import libraries define: UCRT's `_stat64i32` and `_fstat64i32`.
+const RENAMES: [](str, str) = [
+    ("atexit", "_crt_atexit"),
+    ("time", "_time64"),
+    ("hypotf", "_hypotf"),
+    ("stat", "_stat64i32"),
+    ("fstat", "_fstat64i32"),
+];
 
 // The DLLs every link searches after the `-l` ones: the system's core and the C runtime first, then the
 // ones mingw-w64's toolchain also links by default, read only while a symbol is still undefined.
@@ -996,14 +1004,15 @@ fn out_section(l: &mut L, name: str, flags: u32) u32 {
 }
 
 // The output section an input section of name `n` and flags `f` joins: grouped sections (`X$Y`) join
-// X's; code joins `.text`, read-only data `.rdata`, writable data `.data`, zero-filled data `.bss`.
+// X's; code joins `.text`, read-only data `.rdata`, writable data `.data`, zero-filled data `.bss`. A
+// section of another name keeps it, as GNU ld and link.exe keep one (`@unsafe(link_section)`).
 const fn out_name<'a>(n: str<'a>, f: u32) str<'a> {
     let mut base = n;
     let d = n.find("$");
     if d > 0 {
         base = n.slice(0, d as usize);
     }
-    if base == ".tls" || base == ".pdata" || base.starts_with(".debug_") {
+    if base == ".tls" || base == ".pdata" || base.starts_with(".debug_") || !std_section(base) {
         return base;
     }
     // The initializer and terminator tables are read-only once relocated.
@@ -1020,6 +1029,18 @@ const fn out_name<'a>(n: str<'a>, f: u32) str<'a> {
         return ".data";
     }
     return ".rdata";
+}
+
+// Whether `base` names a section the standard ones take: code, data, read-only data, zero-filled data,
+// unwind data, the initializer tables and GCC's exception tables.
+const fn std_section(base: str) bool {
+    let dotted: [str; 4] = [".text", ".data", ".rodata", ".bss"];
+    for x in dotted {
+        if base == x || base.starts_with(x) && base.byte_at(x.len()) == b'.' {
+            return true;
+        }
+    }
+    return base == ".rdata" || base == ".xdata" || base == ".CRT" || base == ".ctors" || base == ".dtors" || base == ".eh_frame" || base == ".gcc_except_table";
 }
 
 const fn out_flags(name: str) u32 {

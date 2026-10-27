@@ -256,22 +256,24 @@ joins its arguments with spaces and quotes nothing; `abort()` is fail-fast (exit
 runner: edit the `windows` job in `.github/workflows/debug.yml`, which runs on dispatch only.
 In both workflows, each platform builds its compiler once (`compile`, `windows-compile`,
 `wasm-compile`: an artifact) and runs its test shards in parallel on it (three on Windows, the
-slowest runner, two elsewhere). The build has two stages: the latest release builds stage 1 through
-C, and stage 1 builds the tested compiler at the default profile, natively; `wasm-compile` builds
+slowest runner, two elsewhere). The build has two stages: the latest release builds stage 1, and
+stage 1 builds the tested compiler at the default profile, both natively; `wasm-compile` builds
 `super-c.wasm` the same way (the native wasm backend), and `wasm-package` ships a release build of
-it, as `package` ships a release build of the native binary. No release ships a Linux arm64
-compiler yet: the debug workflow's `linux-arm64-compile` cross-builds one natively on the x86-64 runner
-against the arm64 C library (`libc6-dev-arm64-cross`: headers and libraries, no compiler), and
-`linux-arm64` builds the compiler with it in two stages on the arm64 runner and runs the suite there.
-In the release workflow (macOS, Linux and Windows in one matrix)
-the correctness gate (`ci/gate.sh --core`), the x86-64 levels and the `ctarget` job (Linux: the C environment tables
-against clang 22) run beside the shards, and the release binary is
+it, as `package` ships a release build of the native binary. The Linux arm64 compiler (target
+`linux_arm64` in the release matrices, `linux-arm64-compile` in the debug workflow) is cross-built
+natively on the x86-64 runner by the x86-64 one against the arm64 C library
+(`libc6-dev-arm64-cross`: headers and libraries, no compiler); the arm64 runner (`ubuntu-26.04-arm`)
+runs its test shards, gate and package, which rebuild the compiler there. No transpile count runs
+for it: no earlier release has a Linux arm64 compiler to count against.
+In the release workflow (macOS, Linux, Linux arm64 and Windows in one matrix)
+the correctness gate (`ci/gate.sh --core`), the x86-64 levels and the `compare` job (Linux, clang 22:
+the tests that compile C, the C environment tables, the strict C warnings) run beside the shards, and the release binary is
 built after all of them pass. Only the release workflow on main saves caches (the toolchain action's
 `save: true`), so no other workflow or branch evicts its entries. Each platform keeps one object
 cache, `objcache-<target>-<sha>` (the cache base `~/.super-c/cache`, the tests' `.tests` included):
 the compile, test and package jobs upload the files they added or changed and the list of those they
 deleted (`.github/actions/cache-save/delta.py`), and the `caches` job merges them over the platform's
-newest cache at the end of the run. Gate, counts, ctarget and the wasm checks save only their
+newest cache at the end of the run. Gate, counts, compare and the wasm checks save only their
 own delta (`objdelta-<target>-<role>-<sha>`), which the toolchain action restores over the platform
 cache. The installation caches are restored every run, so GitHub's eviction past its limit takes the
 superseded caches of older commits first. The toolchain and bootstrap steps live in `.github/actions/`. An

@@ -1,8 +1,9 @@
 // Self-hosted port of tests/cli_test.c: drives $SUPERC as a subprocess over on-disk source trees, dogfooding
 // the self-hosted driver's CLI surface (usage/argc/missing-file/error-exit/retired-flag) AND the end-to-end
 // multi-file build pipeline (cross-module, generics, dyn, ffi, imports, extern-C, defaults, CTFE, --test).
-// Each @test writes a source tree with cli::Proj, compiles it (compile-only, emitting build/), then cc's the
-// emitted tree -Werror and runs it. Source trees are embedded verbatim as multi-line matchertext literals.
+// Each @test writes a source tree with cli::Proj, builds it natively (`native_build`) and runs it; a test of
+// the emitted C compiles its tree (`compile`) with the C compiler (`cc_build`, only with `SC_TEST_CC`).
+// Source trees are embedded verbatim as multi-line matchertext literals.
 import tests::cli_harness as cli;
 import tests::harness as h;
 import stdio;
@@ -26,9 +27,6 @@ struct Cmd {
 // Disjoint extends in two modules each define the name.
 @test
 fn duplicate_items_across_modules() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     let root = p.dir();
     p.mkfile(
@@ -72,9 +70,8 @@ fn duplicate_items_across_modules() {
         "use.spc",
         "import gen;\n\nextend gen::W<i32> {\n    pub fn get(self: &Self) i32 {\n        return 2;\n    }\n}\n\nfn main() i32 {\n    let a = gen::W::<u8> { v: 1 };\n    let b = gen::W::<i32> { v: 1 };\n    return a.get() * 10 + b.get() - 12;\n}\n",
     );
-    let u = p.compile("use.spc");
+    let u = p.native_build("", "use.spc");
     assert(u.ok());
-    assert(p.cc_build("").ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -585,9 +582,6 @@ fn pattern_literals_take_the_scrutinee_type() {
 // and match. Drives the multi-file build/ tree (subdirs) through cc + run.
 @test
 fn cross_module_enum() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "lib/lib.spc",
@@ -606,10 +600,8 @@ fn main() i32 { let c = lib::lib::red(); let b = lib::lib::Box::Filled(20);
   unsafe exit(color_code(c) + box_amt(b)); return 0; }
 )",
     );
-    let r = p.compile("xm.spc");
+    let r = p.native_build("", "xm.spc");
     assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 21);
 }
 
@@ -618,9 +610,6 @@ fn main() i32 { let c = lib::lib::red(); let b = lib::lib::Box::Filled(20);
 // _Static_asserts landing in the C and PASSING under -Werror.
 @test
 fn const_eval_flag() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -645,8 +634,8 @@ fn main() i32 {
         p.gen_has("__sc_t/Pt.h", "_Static_assert(sizeof(Pt) == 8"),
         "layout verification assert in the definition header",
     );
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
+    let cc = p.native_build("", "main.spc");
+    assert(cc.ok(), "the program builds");
     assert_eq(p.run_bin(), 54);
 
     // A folded-FALSE static_assert is a SUPER-C error (with our span), not a downstream C error.
@@ -674,9 +663,6 @@ fn main() i32 {
 
 @test
 fn inline_for_and_parallel_for() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -720,7 +706,7 @@ fn main() i32 {
     assert(r.ok());
     assert(p.gen_has("main.c", "(s, 2LL);"), "the inline for physically unrolled");
     assert(!p.gen_has("main.c", "__sc_inline_for"), "constant bounds folded");
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     let rr = p.run_bin_env("");
     assert(rr.ok());
@@ -730,9 +716,6 @@ fn main() i32 {
 
 @test
 fn reflection_tail() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -780,10 +763,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let rr = p.run_bin_env("");
     assert(rr.ok());
     assert(rr.out_shows("tail ok"), "payloads, CTFE mutation, and binder metadata all hold");
@@ -1701,9 +1682,6 @@ fn const_fn_calls_fold() {
 // plain functions outside them, and the step budget.
 @test
 fn ctfe() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let _env3 = cli::set_env("SC_INLINE", "0");
     let p = cli::proj_new();
     p.mkfile(
@@ -1737,7 +1715,7 @@ fn main() i32 {
     assert(p.gen_has("main.c", M"(_Static_assert(true, "loops fold"))"), "collatz(27) ran at compile time");
     assert(p.gen_has("main.c", M"(_Static_assert(true, "floats fold"))"), "float CTFE ran at compile time");
     assert(p.gen_has("main.c", "fib(10"), "a plain function's call outside a constant context runs at run time");
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     assert_eq(p.run_bin(), 8);
 
@@ -1931,9 +1909,6 @@ fn main() i32 { return D; }
 // Also: an assert may precede its callee (deferred re-check) and a would-be trap reports its reason.
 @test
 fn ctfe_memory() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -1987,8 +1962,8 @@ fn main() i32 { return structs() + heap() - 75 + vec_sum() - 44; }
     assert(p.gen_has("main.c", M"(_Static_assert(true, "aggregates fold"))"), "structs/arrays/methods fold");
     assert(p.gen_has("main.c", M"(_Static_assert(true, "the abstract heap folds"))"), "malloc/free fold");
     assert(p.gen_has("main.c", M"(_Static_assert(true, "payload enums fold"))"), "Option + switch folds");
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
+    let cc = p.native_build("", "main.spc");
+    assert(cc.ok(), "the program builds");
     assert_eq(p.run_bin(), 0);
 
     // A would-be runtime trap in a required-const context reports its reason.
@@ -2022,9 +1997,6 @@ fn main() i32 { return 0; }
 // payload variants + struct patterns, &CONST, interface DEFAULT bodies, and Map/Set.
 @test
 fn ctfe_gaps() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -2086,7 +2058,7 @@ fn main() i32 { return g1(20) - 42 + g2() - 62 + g3(6, 7) - 82 + g4() - 42 + g5(
     assert(p.gen_has("main.c", M"(_Static_assert(true, "struct patterns + &const"))"), "struct patterns fold");
     assert(p.gen_has("main.c", M"(_Static_assert(true, "interface default body"))"), "interface defaults fold");
     assert(p.gen_has("main.c", M"(_Static_assert(true, "Map and Set fold"))"), "Map/Set fold");
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
@@ -2097,18 +2069,13 @@ fn main() i32 { return g1(20) - 42 + g2() - 62 + g3(6, 7) - 82 + g4() - 42 + g5(
 // borrow-check error: the source is legal).
 @test
 fn raii_cond_move_reassign() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
         "fn consume(s: String) usize {\n    return s.len();\n}\n\nfn main() i32 {\n    let mut buf = String::from_str(\"seed\");\n    let mut total: usize = 0;\n    for _i in 0..3 {\n        total = total + consume(buf);\n        buf = String::from_str(\"abcd\");\n    }\n    return (total + buf.len()) as i32 - 16;\n}\n",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let lk0 = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(lk0.ok(), "reassign after a loop-conditional move neither leaks nor double-frees");
     assert_eq(p.run_bin(), 0);
@@ -2120,9 +2087,6 @@ fn raii_cond_move_reassign() {
 // place out), so no double-free.
 @test
 fn raii_drop_on_field_assign() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -2133,7 +2097,7 @@ fn raii_drop_on_field_assign() {
     // The free is in `main` itself (Holder's own `free` also calls it), and the run passes the
     // harness's fatal leak gate.
     assert(p.gen_fn_has("main.c", "__sc_user_main", "String__free("), "field overwrite frees the old value");
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 
@@ -2146,7 +2110,7 @@ fn raii_drop_on_field_assign() {
     let c2 = p.compile("cond.spc");
     assert(c2.ok());
     assert(p.gen_has("cond.c", "{ String__free"), "conditionally-moved field assign-free is flag-guarded");
-    let cc2 = p.cc_build("");
+    let cc2 = p.native_build("", "cond.spc");
     assert(cc2.ok());
     assert_eq(p.run_bin(), 0);
 
@@ -2183,9 +2147,6 @@ fn validation_skips_rejected_bodies() {
 // A tuple struct's untouched owning members get the same wrapper glue, spelled positionally `_i`.
 @test
 fn raii_free_glue_tuple_fields() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -2195,7 +2156,7 @@ fn raii_free_glue_tuple_fields() {
     assert(r.ok());
     assert(p.gen_has("main.c", "Pair__free__fb("), "partial tuple impl gets the wrapper");
     assert(p.gen_has("main.c", "String__free(&self->_1);"), "untouched tuple member is glue-freed by position");
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     // _1 is freed by the glue: no leak under the fatal gate.
@@ -2205,9 +2166,6 @@ fn raii_free_glue_tuple_fields() {
 // Wrapper form). Complete impls emit without a wrapper; raw-pointer fields are borrows and exempt.
 @test
 fn raii_free_glue_untouched_fields() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -2218,7 +2176,7 @@ fn raii_free_glue_untouched_fields() {
     assert(p.gen_has("main.c", "Pair__free__fb("), "incomplete impl gets the wrapper");
     assert(p.gen_has("main.c", "String__free(&self->b);"), "untouched field is glue-freed");
     assert(!p.gen_has("main.c", "Whole__free__fb"), "complete impl emits no wrapper");
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
@@ -2228,9 +2186,6 @@ fn raii_free_glue_untouched_fields() {
 // data instead of a call, and moving an owning one out is rejected.
 @test
 fn local_const_lifecycle() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -2242,7 +2197,7 @@ fn local_const_lifecycle() {
     assert(p.gen_has("main__inst.c", "static const uint32_t "), "its buffer is static data");
     assert(!p.gen_has("main.c", "Vector__u32__free(&"), "a materialized const is never freed");
     assert(!p.gen_has("main.c", "mk()"), "value const folds to static data instead of a call");
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     // Runs with no leak under the fatal gate: static data is not a heap allocation.
@@ -2260,7 +2215,7 @@ fn local_const_lifecycle() {
     assert(q.gen_has("g__inst.c", "static const uint32_t "), "the buffer is static data");
     assert(q.gen_has("g__inst.c", ".ptr = (void *)"), "the const points at it");
     assert(!q.gen_has("g.c", "Vector__u32__free(&V)"), "a materialized const is never freed");
-    assert(q.cc_build("").ok());
+    assert(q.native_build("", "g.spc").ok());
     let gr = q.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(gr.ok());
     // Moving an owning const out is rejected.
@@ -2277,9 +2232,6 @@ fn local_const_lifecycle() {
 // and freed, with nothing else pulling the allocator in.
 @test
 fn dyn_fn_box_roundtrip() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -2288,7 +2240,7 @@ fn dyn_fn_box_roundtrip() {
     let r = p.compile("main.spc");
     assert(r.ok());
     assert(p.gen_has("main.c", "#include \"__sc_fwd.h\""), "owned dyn compiles against the package forward header");
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     // The boxed closure env is freed: no leak under the fatal gate.
@@ -2301,9 +2253,6 @@ fn dyn_fn_box_roundtrip() {
 // disabled runs print nothing.
 @test
 fn leak_tracker() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -2312,7 +2261,7 @@ fn leak_tracker() {
     let r = p.compile("main.spc");
     assert(r.ok());
     assert(p.gen_exists("std/rt/base.c") && !p.gen_exists("super_rt.c"), "the tracker is the runtime module");
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     let lk = p.run_bin_env("SC_LEAK_CHECK=1 ");
     assert(lk.ok());
@@ -2328,7 +2277,7 @@ fn leak_tracker() {
     );
     let r2 = q.compile("main.spc");
     assert(r2.ok());
-    let cc2 = q.cc_build("");
+    let cc2 = q.native_build("", "main.spc");
     assert(cc2.ok());
     let ok = q.run_bin_env("SC_LEAK_CHECK=1 ");
     assert(ok.ok());
@@ -2360,7 +2309,7 @@ fn leak_tracker() {
     );
     let rd = d.compile("main.spc");
     assert(rd.ok());
-    let ccd = d.cc_build("");
+    let ccd = d.native_build("", "main.spc");
     assert(ccd.ok());
     let dbl = d.run_bin_env("SC_LEAK_CHECK=1 ");
     assert(dbl.ok());
@@ -2403,9 +2352,6 @@ fn leak_sites_name_the_allocating_function() {
 // point, and a removed root leaves the table (runtime lookup counts the survivors).
 @test
 fn reflect_registry_add_remove() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     let two = "@reflect(entity)\nstruct Zeta { pub a: i32 }\n@reflect(entity)\nstruct Alpha { pub b: i32 }\nextern \"C\" {\n    fn __sc_reflect_types(n: *mut usize) *const *const void;\n}\nfn main() i32 {\n    let mut n: usize = 0;\n    let _ = unsafe __sc_reflect_types(&mut n);\n    let z = Zeta { a: 1 };\n    let al = Alpha { b: 2 };\n    return n as i32 + z.a + al.b - 5;\n}\n";
     p.mkfile("main.spc", two);
@@ -2416,7 +2362,7 @@ fn reflect_registry_add_remove() {
         "the registry table lists the roots sorted by symbol",
     );
     assert(p.gen_has("main__inst.c", "sc_typeinfo_Zeta"), "a root is defined in its owner's instance shard");
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     assert_eq(p.run_bin(), 0);
     p.mkfile(
@@ -2426,7 +2372,7 @@ fn reflect_registry_add_remove() {
     let r2 = p.compile("main.spc");
     assert(r2.ok());
     assert(p.gen_has("__sc_registry.c", "{ &sc_typeinfo_Alpha }"), "a removed root leaves the table");
-    let cc2 = p.cc_build("");
+    let cc2 = p.native_build("", "main.spc");
     assert(cc2.ok());
     assert_eq(p.run_bin(), 0);
 }
@@ -2437,9 +2383,6 @@ fn reflect_registry_add_remove() {
 // explicit Free types (replace() is the take idiom).
 @test
 fn auto_derive_free() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -2450,7 +2393,7 @@ fn auto_derive_free() {
     assert(p.gen_has("main__inst.c", "void Plain__free__d(Plain *const self)"), "struct free synthesized");
     assert(p.gen_has("main__inst.c", "Plain__free__d(&self->p);"), "nested derive composes");
     assert(p.gen_has("main__inst.c", "String__free(&self->payload.Named._0);"), "enum payload freed per variant");
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     let lk = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(lk.ok());
@@ -2468,9 +2411,6 @@ fn auto_derive_free() {
 
 @test
 fn auto_derive_free_in_generic_drop() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "owned.spc",
@@ -2508,10 +2448,8 @@ fn main() i32 {
 }
 )",
     );
-    let compiled = p.compile("main.spc");
+    let compiled = p.native_build("", "main.spc");
     assert(compiled.ok());
-    let linked = p.cc_build("");
-    assert(linked.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
     assert(run.out_shows("SEG"));
@@ -2521,9 +2459,6 @@ fn main() i32 {
 // construction, and a local extension method on an imported type.
 @test
 fn module_features() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "lib/lib.spc",
@@ -2544,10 +2479,8 @@ fn main() i32 {
   unsafe exit(v.sum() + w.sum() + lib::lib::BASE); return 0; }
 )",
     );
-    let r = p.compile("feat.spc");
+    let r = p.native_build("", "feat.spc");
     assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 115);
 }
 
@@ -2555,9 +2488,6 @@ fn main() i32 {
 // modules (both through the owning module's functions and directly by path).
 @test
 fn cross_module_static_mut() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile("state.spc", M"(pub static mut hits: i64 = 0;
 pub fn record() { unsafe hits += 1; }
@@ -2573,10 +2503,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -2584,9 +2512,6 @@ fn main() i32 {
 // to the addressing module's constant data.
 @test
 fn cross_module_constant_reference() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile("tbl.spc", M"(pub const T: [i32; 3] = [4, 5, 6];
 pub const U: i32 = 9;
@@ -2601,10 +2526,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -2700,9 +2623,6 @@ fn test_timeout_dumps_child_processes() {
 // suites (fixture-as-self), should_panic, fork isolation, filtering, sharding, and --test-no-fork.
 @test
 fn test_pipeline() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let claimed = unsafe shim::sc_jobserver_claim(1000000);
     assert(claimed >= 1, "a test process keeps its implicit worker slot");
     assert(claimed < 1000000, "the inherited process-tree budget bounds a nested claim");
@@ -2813,7 +2733,7 @@ fn main() i32 { return 0; }
     // A normal (non---test) build still compiles and runs its own main (tests not emitted).
     let nb = p.compile("main.spc");
     assert(nb.ok());
-    let cc = p.cc_build_plain("");
+    let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
@@ -2938,9 +2858,6 @@ fn main() i32 { return 0; }
 
 @test
 fn cross_module_generic_by_value() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "opt/opt.spc",
@@ -2971,8 +2888,8 @@ fn main() i32 {
         p.gen_has("__sc_t/opt__Opt__genbv__Bar.h", "struct opt__Opt__genbv__Bar {"),
         "instance full-monomorphized in its own definition header",
     );
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
+    let cc = p.native_build("", "genbv.spc");
+    assert(cc.ok(), "the program builds");
     assert_eq(p.run_bin(), 60);
 }
 
@@ -2980,9 +2897,6 @@ fn main() i32 {
 // dispatches through the subst (T -> Bar) to the concrete Bar__clone.
 @test
 fn cross_module_generic_bound_dispatch() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "bx/bx.spc",
@@ -3005,10 +2919,8 @@ fn main() i32 {
   unsafe exit(d.v.x + b.v.x); return 0; }
 )",
     );
-    let r = p.compile("genbd.spc");
+    let r = p.native_build("", "genbd.spc");
     assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 42);
 }
 
@@ -3033,8 +2945,8 @@ fn main() i32 { let p = Pair::<i32> { a: 3, b: 4 }; unsafe exit(p.pick(true) + p
     assert(r.ok(), "the program compiles");
     assert(p.gen_has("__sc_fwd.h", "PAIR_DECLARE("), "@emit_macro emits DECLARE template");
     assert(p.gen_has("__sc_fwd.h", "PAIR_DEFINE("), "@emit_macro emits DEFINE template");
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
+    let cc = p.native_build("", "emac.spc");
+    assert(cc.ok(), "the program builds");
     assert_eq(p.run_bin(), 7);
 
     // A plain-C consumer instantiates the template over its own C type (no Super-C compiler involved).
@@ -3078,9 +2990,6 @@ int main(void) { Pair__CT p = { .a = { 5 }, .b = { 9 } };
 // bound must not be specialized (its body would call an unprovided method); only the unbounded block emits.
 @test
 fn per_extend_bound_filtering() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "pibf.spc",
@@ -3093,10 +3002,8 @@ struct Plain { pub n: i32 }
 fn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 5 } }; unsafe exit(w.raw()); return 0; }
 )",
     );
-    let r = p.compile("pibf.spc");
+    let r = p.native_build("", "pibf.spc");
     assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 7);
 }
 
@@ -3104,9 +3011,6 @@ fn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 5 } }; unsafe exit(w.raw()
 // stored allocator (a multi-file regression: warning-clean without a sentinel `RawAlloc: Default`).
 @test
 fn string_non_default_allocator() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -3129,10 +3033,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     assert_eq(p.run_bin(), 42);
 }
 
@@ -3172,9 +3074,6 @@ fn main() i32 { let s = S { x: 20 }; let w = Wrap::<i32> { v: 22 }; unsafe exit(
 // accounted for.
 @test
 fn threads_and_atomics() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -3207,10 +3106,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
 }
@@ -3403,9 +3300,6 @@ fn main() i32 {
 // preemption the first task never yields, the second never runs, and the flag never flips.
 @test
 fn preemption_yields_a_spinning_task() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -3459,7 +3353,7 @@ fn main() i32 {
         // The context switch names its trampoline as a value: the extern still gets its declaration.
         assert(p.gen_has("__sc_fwd.h", "extern void sc_ctx_entry(void);"), "a header-less extern named as a value");
     }
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
@@ -3487,9 +3381,6 @@ fn main() i32 {
 // whose destructor is synthesized resolves to no declaration: it is a drop, not a fn-value call.
 @test
 fn explicit_drop_in_a_task_keeps_safepoints_scoped() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -3524,7 +3415,7 @@ fn main() i32 {
     let r = p.compile("main.spc");
     assert(r.ok());
     assert(!p.gen_has("main.c", "__sc_spc"), "a loop outside every launched body gets no safepoint");
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
@@ -3645,10 +3536,8 @@ fn main() i32 {
 fn run_preempted(src: str) {
     let p = cli::proj_new();
     p.mkfile("main.spc", src);
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
 }
@@ -4047,9 +3936,6 @@ fn main() i32 {
 // closure.
 @test
 fn fn_values_handed_to_std_parallel_or_stored_are_reached() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -4082,7 +3968,7 @@ fn main() i32 {
     let r = p.compile("main.spc");
     assert(r.ok());
     assert(p.gen_has("main.c", "__sc_spc"), "the closure handed to data::range ticks");
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
@@ -4265,9 +4151,6 @@ fn gen_followed_by(p: &cli::Proj, rel: str, a: str, b: str) bool {
 // the tick per iteration.
 @test
 fn counted_loop_ticks_once_per_chunk() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -4476,7 +4359,7 @@ fn main() i32 {
     assert(p.gen_fn_has("main.c", "main__calls", "__sc_preempt_check()"), "a loop with a call still ticks");
     assert(!p.gen_fn_has("main.c", "main__stride", "__sc_chunk_end"), "an assignable index ticks per iteration");
     assert(p.gen_fn_has("main.c", "main__stride", "__sc_preempt_check()"), "an assignable index still ticks");
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
@@ -4491,9 +4374,6 @@ fn main() i32 {
 // clean.
 @test
 fn blocking_call_frees_the_worker() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -4548,10 +4428,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
 }
@@ -4563,9 +4441,6 @@ fn main() i32 {
 // pass rather than die, so all three are checked against the same recursion.
 @test
 fn stack_overflow_is_reported() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -4597,10 +4472,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let over = p.run_bin();
     assert(over != 0, "a 256 KiB stack cannot hold 800 KiB of frames");
     assert(p.run_bin_env("").out_has("stack overflow"), "and it says so instead of dying silently");
@@ -4637,10 +4510,8 @@ fn main() i32 {
 }
 )",
     );
-    let r2 = p.compile("main.spc");
+    let r2 = p.native_build("", "main.spc");
     assert(r2.ok());
-    let cc2 = p.cc_build("");
-    assert(cc2.ok());
     // 4 MiB is enough.
     assert_eq(p.run_bin(), 0);
 
@@ -4666,10 +4537,8 @@ fn main() i32 {
 }
 )",
     );
-    let r3 = p.compile("main.spc");
+    let r3 = p.native_build("", "main.spc");
     assert(r3.ok(), "the program compiles");
-    let cc3 = p.cc_build("");
-    assert(cc3.ok(), "the emitted C compiles and links");
     let wild = p.run_bin_env("");
     assert(wild.exit != 0, "a wild write still crashes");
     assert(!wild.out_has("stack overflow"), "and is NOT reported as a stack overflow");
@@ -4681,9 +4550,6 @@ fn main() i32 {
 // crashes, not overflows, and must not say otherwise.
 @test
 fn thread_stack_overflow_is_reported() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -4757,10 +4623,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
     let main_over = p.run_bin_env("SO_MODE=main ");
     assert_eq(main_over.exit, 134);
     assert(main_over.out_shows("stack overflow in the main thread"), "the main thread's overflow says so");
@@ -4787,9 +4651,6 @@ fn main() i32 {
 // versus finished, and a panic inside a task names it instead of only saying the process died.
 @test
 fn task_diagnostics() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -4828,10 +4689,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
 
@@ -4856,10 +4715,8 @@ fn main() i32 {
 }
 )",
     );
-    let r2 = q.compile("main.spc");
+    let r2 = q.native_build("", "main.spc");
     assert(r2.ok());
-    let cc2 = q.cc_build("");
-    assert(cc2.ok());
     let run2 = q.run_bin_env("");
     assert(run2.exit != 0, "the panic takes the process down");
     assert(run2.out_has("[task "), "the panic names the task it happened in");
@@ -4880,9 +4737,6 @@ fn main() i32 {
 // both sides parking on the reactor.
 @test
 fn reactor_udp_and_typed_errors() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -4941,10 +4795,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
 
@@ -5000,10 +4852,8 @@ fn main() i32 {
 }
 )",
     );
-    let r2 = q.compile("main.spc");
+    let r2 = q.native_build("", "main.spc");
     assert(r2.ok());
-    let cc2 = q.cc_build("");
-    assert(cc2.ok());
     let run2 = q.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run2.ok());
 }
@@ -5013,9 +4863,6 @@ fn main() i32 {
 // are a hundred parked coroutines and a registration each. Exact counts on both ends, leak-checked.
 @test
 fn reactor_many_connections() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -5107,10 +4954,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
 }
@@ -5215,9 +5060,6 @@ fn main() i32 {
 // released at normal exit, so the leak gate finds nothing (a `@blocking` extern and `call`).
 @test
 fn blocking_pool_released_at_exit() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -5240,11 +5082,10 @@ fn main() i32 {
 }
 )",
     );
-    assert(p.compile("main.spc").ok());
+    assert(p.native_build("", "main.spc").ok());
     if cli::on_wasm() {
         return;
     }
-    assert(p.cc_build("").ok());
     assert(p.run_bin_env("SC_LEAK_CHECK=fatal ").ok());
 }
 
@@ -5299,9 +5140,6 @@ fn small_units_compile_in_packs() {
 // their module, so the program links (one name for both was a duplicate symbol).
 @test
 fn blocking_wrappers_of_one_function_in_two_modules() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "other.spc",
@@ -5338,11 +5176,10 @@ fn main() i32 {
 }
 )",
     );
-    assert(p.compile("main.spc").ok());
+    assert(p.native_build("", "main.spc").ok());
     if cli::on_wasm() {
         return;
     }
-    assert(p.cc_build("").ok());
     assert(p.run_bin_env("").ok());
 }
 
@@ -5435,9 +5272,6 @@ fn main() i32 {
 // Over a deliberately uneven per-index cost, every index must still be visited exactly once.
 @test
 fn data_parallel_guided_schedule() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -5462,10 +5296,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
 }
@@ -5500,9 +5332,6 @@ fn main() i32 {
 // order. Not asserted: that two DIFFERENT seeds disagree; nothing promises a given seed pair diverges.
 @test
 fn deterministic_replay() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -5538,10 +5367,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     for s in 0..2 {
         let env = if s == 0 {
             "SC_SCHED_SEED=7 ";
@@ -5605,9 +5432,6 @@ fn main() i32 {
 // leaks: neither the un-sent remainder nor the payloads still buffered when the channel is freed.
 @test
 fn channel_batch_send_recv() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -5665,10 +5489,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
 }
@@ -5681,9 +5503,6 @@ fn main() i32 {
 // receiver. Leak-checked.
 @test
 fn channel_parking_oversubscribed() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -5741,10 +5560,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
 }
@@ -5755,9 +5572,6 @@ fn main() i32 {
 // time then confirms the sleep really slept, and the plain-thread path (no coroutine) sleeps outright.
 @test
 fn coroutine_sleep_and_timers() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -5808,10 +5622,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
 }
@@ -5823,9 +5635,6 @@ fn main() i32 {
 // read/write guards taken from coroutines and a timed acquire that expires and then succeeds. Leak-checked.
 @test
 fn task_aware_locks() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -5920,10 +5729,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
 }
@@ -5934,9 +5741,6 @@ fn main() i32 {
 // waiting forever. Leak-checked, so the grown slot array and every payload are accounted for.
 @test
 fn channel_unbounded_and_timeouts() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -6006,10 +5810,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
 }
@@ -6022,9 +5824,6 @@ fn main() i32 {
 // yields and a shared mutex; the exact counter proves no wakeup was lost or double-spent. Leak-checked.
 @test
 fn timed_wait_deadline_races() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -6083,10 +5882,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
 }
@@ -6098,9 +5895,6 @@ fn main() i32 {
 // the value is sent only once the runtime shows the task parked in its select. Leak-checked.
 @test
 fn select_waits_on_several_channels() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -6253,10 +6047,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
 }
@@ -6268,9 +6060,6 @@ fn main() i32 {
 // busy channel from starving a quiet one (declaration order would return arm 0 every time). Leak-checked.
 @test
 fn select_arms_and_fairness() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -6392,10 +6181,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
 }
@@ -6408,9 +6195,6 @@ fn main() i32 {
 // coroutine. Leak-checked.
 @test
 fn select_keyword() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -6550,10 +6334,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
 }
@@ -6610,9 +6392,6 @@ fn main() i32 {
 // shape whenever a program touches only part of it, which a plain `Selector::new()` does.
 @test
 fn partial_module_use_after_foreign_expansion() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -6624,10 +6403,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let run = p.run_bin_env("");
     assert(run.ok());
 }
@@ -6640,9 +6417,6 @@ fn main() i32 {
 // no-ops. Leak-checked.
 @test
 fn data_parallel_api() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -6743,10 +6517,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let run = p.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(run.ok());
 }
@@ -6756,9 +6528,6 @@ fn main() i32 {
 // the body, so the env, its initializer and the body agree.
 @test
 fn data_parallel_borrowed_capture_in_stored_closure() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -6783,10 +6552,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     assert_eq(p.run_bin(), 16);
 }
 
@@ -6794,9 +6561,6 @@ fn main() i32 {
 // whose C type is a vector register) size and align it as C does.
 @test
 fn data_parallel_closure_with_wide_captures() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -6820,10 +6584,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     assert_eq(p.run_bin(), 20);
 }
 
@@ -6833,9 +6595,6 @@ fn main() i32 {
 // through `sections`, whose two sections are two chunks (one per claim), not one inline run.
 @test
 fn data_parallel_wakes_a_second_worker() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -6905,10 +6664,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -6944,9 +6701,6 @@ fn main() i32 {
 // IMMUTABLE binding whose value is still changed through `get()`.
 @test
 fn interior_mutability_via_unsafe_cell() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let bad = cli::proj_new();
     bad.mkfile(
         "main.spc",
@@ -6961,10 +6715,8 @@ fn interior_mutability_via_unsafe_cell() {
         "main.spc",
         "fn main() i32 {\n    let cell = UnsafeCell::<i32>::new(7);\n    unsafe {\n        cell.get()[0] = 42;\n    }\n    return unsafe {\n        cell.get()[0];\n    } - 42;\n}\n",
     );
-    let ro = ok.compile("main.spc");
+    let ro = ok.native_build("", "main.spc");
     assert(ro.ok());
-    let cc = ok.cc_build("");
-    assert(cc.ok());
     assert_eq(ok.run_bin(), 0);
 }
 
@@ -6990,9 +6742,6 @@ fn prelude_output_is_demand_driven() {
 // Outer<Bar> contains Inner<Bar> by value; both must be re-homed and emitted in dependency order.
 @test
 fn cross_module_nested_rehomed_instance() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "lib/lib.spc",
@@ -7012,10 +6761,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 42);
 }
 
@@ -7023,9 +6770,6 @@ fn main() i32 {
 // the bound resolves across the import, the extend satisfies it, and the bounded call dispatches.
 @test
 fn cross_module_interface() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile("shapes.spc", "pub interface Area { fn area(self: *mut Self) i32; }\n");
     p.mkfile(
@@ -7038,10 +6782,8 @@ fn total<T: shapes::Area>(x: &mut T) i32 { return x.area(); }
 fn main() i32 { let mut q = Sq { s: 6 }; unsafe exit(total(&mut q)); return 0; }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 36);
 }
 
@@ -7049,9 +6791,6 @@ fn main() i32 { let mut q = Sq { s: 6 }; unsafe exit(total(&mut q)); return 0; }
 // in another module; both modules erase; the foreign default's synthesized tag exports for the user TU.
 @test
 fn cross_module_dyn() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "shapes.spc",
@@ -7087,10 +6826,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 25);
 }
 
@@ -7098,9 +6835,6 @@ fn main() i32 {
 // extern binding with its real unmangled C symbol, and a thin wrapper: compiled -Werror + linked -lm.
 @test
 fn ffi_bindings() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -7116,10 +6850,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
-    assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("-lm");
-    assert(cc.ok(), "the emitted C compiles and links");
+    let r = p.native_build("", "main.spc");
+    assert(r.ok(), "the program builds");
     assert_eq(p.run_bin(), 13);
 }
 
@@ -7219,8 +6951,8 @@ fn main(args: Vector<str>) i32 {
 // unlink and rmdir.
 @test
 fn ffi_posix_bindings() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
+    if PLATFORM == Platform::Windows {
+        return; // no dirent.h
     }
     let p = cli::proj_new();
     p.mkfile(
@@ -7262,7 +6994,7 @@ fn main() i32 {
     assert(r.ok());
     assert(p.xhdr_has("#include <unistd.h>"), "the unistd block pulls in its header");
     assert(p.xhdr_has("#include <dirent.h>"), "the filesystem blocks pull in theirs");
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     // The program makes its probe directory in its working directory: the scratch project, never the
     // repository (the runner restores the working directory after the test).
@@ -7275,9 +7007,6 @@ fn main() i32 {
 // (module mangling keeps them distinct), and a module named like a C stdlib header (string).
 @test
 fn module_imports() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile("string.spc", "pub fn tag() i32 { return 10; }\n");
     p.mkfile("math.spc", "pub fn tag() i32 { return 20; }\n");
@@ -7295,10 +7024,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 140);
 }
 
@@ -7350,9 +7077,6 @@ fn import_resolves_under_an_unlistable_directory() {
 // and the root calls each.
 @test
 fn non_root_main_is_ordinary() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "other.spc",
@@ -7363,10 +7087,8 @@ fn non_root_main_is_ordinary() {
         "main.spc",
         "import other;\nimport third;\n\nfn main() i32 {\n    let a = other::A { v: 3 };\n    return other::main() + other::twice(3) + a.main(-3) + third::main(-47);\n}\n",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 0);
 }
 
@@ -7396,9 +7118,6 @@ fn module_prefixes_stay_apart_from_prelude_symbols() {
 // parameter types are provisional ids of THAT module's pool, which the lowering must read there.
 @test
 fn constant_calls_another_modules_by_reference_operators() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "y.spc",
@@ -7408,8 +7127,7 @@ fn constant_calls_another_modules_by_reference_operators() {
         "main.spc",
         "import y;\nconst X: i32 = -3;\nconst K: y::W = y::W { v: 1 } + y::W { v: 2 };\nconst M: y::W = y::W { v: 5 } * 3;\nconst N: y::W = y::W { v: 2 } * X;\nfn main() i32 {\n    let x: i32 = 4;\n    return (K.v + M.v + N.v + (y::W { v: 1 } * x).v) as i32;\n}\n",
     );
-    assert(p.compile("main.spc").ok(), "the program compiles");
-    assert(p.cc_build("").ok(), "the emitted C compiles and links");
+    assert(p.native_build("", "main.spc").ok(), "the program compiles");
     assert_eq(p.run_bin(), 16);
 }
 
@@ -7417,9 +7135,6 @@ fn constant_calls_another_modules_by_reference_operators() {
 // `String` (a prelude type) come from the imported module.
 @test
 fn glob_import_shadows_prelude() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile("geom.spc", "pub struct String { pub n: i32 }\npub fn dot(a: i32, b: i32) i32 { return a * b; }\n");
     p.mkfile(
@@ -7433,10 +7148,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 14);
 }
 
@@ -7445,9 +7158,6 @@ fn main() i32 {
 // `as` alias still names the module.
 @test
 fn glob_imported_type_wins_over_module_qualifier() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "m/qq.spc",
@@ -7465,10 +7175,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 21);
 }
 
@@ -7477,9 +7185,6 @@ fn main() i32 {
 // past it.
 @test
 fn glob_import_searches_each_closure_in_order() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile("c.spc", "pub fn pick() i32 { return 3; }\n");
     p.mkfile("a.spc", "import c;\npub fn from_a() i32 { return c::pick(); }\n");
@@ -7495,10 +7200,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 33);
 }
 
@@ -7695,9 +7398,6 @@ fn main() i32 {
 // conformances elsewhere (type's home, a local extension of an imported type, and a builtin target `i32`).
 @test
 fn cross_module_defaults() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "shapes.spc",
@@ -7739,10 +7439,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 70);
 }
 
@@ -7750,9 +7448,6 @@ fn main() i32 {
 // A value type conforming to a prelude interface must NOT pull the interface module's header (no cycle).
 @test
 fn format_conformances() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "fmt.spc",
@@ -7768,10 +7463,8 @@ fn format_conformances() {
 }
 )",
     );
-    let r = p.compile("fmt.spc");
+    let r = p.native_build("", "fmt.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     assert_eq(p.run_bin(), 18);
 }
 
@@ -7779,9 +7472,6 @@ fn format_conformances() {
 // a mutual BY-VALUE embedding is the one impossible shape (infinite size) and gets its own diagnostic.
 @test
 fn module_cycles() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "a.spc",
@@ -7810,10 +7500,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok(), "the program compiles");
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
     assert_eq(p.run_bin(), 42);
 
     // A mutual by-value embedding is infinite size.
@@ -8062,9 +7750,6 @@ fn error_exit_code() {
 // function keeps its defined runtime behavior.
 @test
 fn ctfe_reinterpret_is_not_folded() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     // A pointer-cast type pun (`*((&x) as *const f64 as *const u64)`) has no compile-time byte
     // representation to read through: the evaluator must LEAVE it to runtime, not substitute the
     // unconverted value. The literal also carries its context's type, so the fold that does happen
@@ -8084,10 +7769,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let run = p.run_bin_env("");
     assert(run.ok());
 }
@@ -8184,9 +7867,6 @@ fn call_free_constant_failures() {
 // instead of evaluating the chain behind it again.
 @test
 fn deep_aggregate_constant_chain() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let mut src = String::from_str("struct S { pub x: i64 }\nconst S0: S = S { x: 0 };\n");
     for i in 1..3000 {
         src.push_str(format("const S{}: S = S {{ x: S{}.x + 1 }};\n", i, i - 1).as_str());
@@ -8194,19 +7874,14 @@ fn deep_aggregate_constant_chain() {
     src.push_str("fn main() i32 { return (S2999.x % 256) as i32; }\n");
     let p = cli::proj_new();
     p.mkfile("agg.spc", src.as_str());
-    let r = p.compile("agg.spc");
+    let r = p.native_build("", "agg.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     assert_eq(p.run_bin(), 2999 % 256);
 }
 
 // A discriminant naming a variant of an enum in another module folds to its value there.
 @test
 fn enum_discriminant_across_modules() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile("lib/codes.spc", "pub const BASE: i32 = 40;\npub enum Code { Low = BASE, High }\n");
     p.mkfile(
@@ -8217,10 +7892,8 @@ static_assert(Mine::Second as i32 == 43);
 fn main() i32 { let m = Mine::Second; return m as i32; }
 )",
     );
-    let r = p.compile("use.spc");
+    let r = p.native_build("", "use.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     assert_eq(p.run_bin(), 43);
 }
 
@@ -8312,9 +7985,6 @@ fn main(argv: Vector<str>) i32 { if is_even(argv.len() as u32 * 2) { return 0; }
 // and cross-module const-fn initializers work.
 @test
 fn mandatory_consts() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     // Two programs import stdlib, which the in-process compile does not load: one build for the three.
     let mut b = cli::Batch::new("", "");
@@ -8347,10 +8017,8 @@ static_assert(T == 27);
 fn main() i32 { return T - 27; }
 )",
     );
-    let r3 = p3.compile("use.spc");
+    let r3 = p3.native_build("", "use.spc");
     assert(r3.ok(), "the program compiles");
-    let cc3 = p3.cc_build("");
-    assert(cc3.ok(), "the emitted C compiles and links");
     assert_eq(p3.run_bin(), 0);
 
     // A const pointing at freed compile-time memory is rejected.
@@ -8440,9 +8108,6 @@ fn local_consts_run(b: &mut h::ExitBatch) {
 // can disprove.
 @test
 fn unsafe_extern_attributes() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "ok.spc",
@@ -8471,8 +8136,8 @@ fn main(argv: Vector<str>) i32 {
     assert(r.ok(), "the program compiles");
     assert(p.gen_has("ok.c", "llabs(_"), "a run-time call goes to the C symbol");
     assert(!p.gen_has("ok.c", "int64_t llabs("), "the model body is never emitted");
-    let cc = p.cc_build("");
-    assert(cc.ok(), "the emitted C compiles and links");
+    let cc = p.native_build("", "ok.spc");
+    assert(cc.ok(), "the program builds");
     assert_eq(p.run_bin(), 0);
 
     // Each program fails to compile with a diagnostic containing its text.
@@ -8547,9 +8212,6 @@ fn main(argv: Vector<str>) i32 {
 // C string at compile time as at run time: its storage ends in a NUL and `char` views its bytes.
 @test
 fn ffi_bindings_carry_unsafe_claims() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -8575,8 +8237,7 @@ fn main() i32 {
 }
 )",
     );
-    assert(p.compile("main.spc").ok());
-    assert(p.cc_build("").ok());
+    assert(p.native_build("", "main.spc").ok());
     assert(p.run_bin_env("SC_LEAK_CHECK=fatal ").ok());
 }
 
@@ -8584,9 +8245,6 @@ fn main() i32 {
 // cyclic heap graphs land as deterministic static C data (with relocations) and behave at runtime.
 @test
 fn materialized_consts() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "mat.spc",
@@ -8638,7 +8296,7 @@ fn main() i32 {
     assert(r.ok());
     assert(p.gen_has("mat__inst.c", "__ct0"), "auxiliary statics are emitted");
     assert(p.gen_has("mat__inst.c", ".next = (void *)"), "pointer relocations are emitted");
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "mat.spc");
     assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 
@@ -8665,8 +8323,8 @@ fn main() i32 {
     assert(r2.ok(), "the program compiles");
     assert(p2.gen_has("own__inst.c", "static const uint32_t V__ct0[8]"), "the Vector's buffer is static data");
     assert(!p2.gen_has("own__inst.c", "Vector__u32__free(&V)"), "a materialized const is never freed");
-    let cc2 = p2.cc_build("");
-    assert(cc2.ok(), "the emitted C compiles and links");
+    let cc2 = p2.native_build("", "own.spc");
+    assert(cc2.ok(), "the program builds");
     // Bind it: run_bin_env hands the captured output to the caller, and dropping it leaks the buffer.
     let lk2 = p2.run_bin_env("SC_LEAK_CHECK=fatal ");
     assert(lk2.ok(), "the program runs without a leak");
@@ -8704,9 +8362,6 @@ fn main() i32 {
 // runtime (plain call), for arithmetic- and branch-heavy bodies.
 @test
 fn ctfe_differential() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "diff.spc",
@@ -8728,10 +8383,8 @@ fn main(argv: Vector<str>) i32 {
 }
 )",
     );
-    let r = p.compile("diff.spc");
+    let r = p.native_build("", "diff.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -8742,18 +8395,13 @@ fn main(argv: Vector<str>) i32 {
 // explicitly; core is the one whose own body depends on the seeding.
 @test
 fn explicit_std_module_import() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
         "import std::core as core;\nimport std::vector as vec;\n\nfn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(3);\n    let ok = v.at(0) == 3;\n    v.free();\n    if ok { return 0; }\n    return 1;\n}\n",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -8764,19 +8412,14 @@ fn explicit_std_module_import() {
 // unless the include set follows the owner's.
 @test
 fn generic_body_reaches_its_own_module() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "lib.spc",
         "fn helper(x: i32) i32 {\n    return x + 1;\n}\n\nconst BUMP: i32 = 2;\n\npub fn pick<T>(v: T, n: i32, take: bool) i32 {\n    if !take {\n        panic(\"nope\");\n    }\n    return helper(n) + BUMP;\n}\n",
     );
     p.mkfile("main.spc", "import lib as lib;\n\nfn main() i32 {\n    return lib::pick(0, 1, true) - 4;\n}\n");
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -8785,9 +8428,6 @@ fn generic_body_reaches_its_own_module() {
 // yet. That is not the program's fault, and the diagnostic belonged to the owner's file anyway.
 @test
 fn imported_const_sized_array() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "lib.spc",
@@ -8797,10 +8437,8 @@ fn imported_const_sized_array() {
         "main.spc",
         "import lib as lib;\n\nconst V: lib::Val = lib::Val::make(7);\n\nfn main() i32 {\n    return V.get() as i32 - 7 + (sizeof(lib::Val) as i32) - (sizeof(usize) as i32) * 2;\n}\n",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -8850,12 +8488,11 @@ fn bindgen_generates_callable_bindings() {
 
     p.mkfile(
         "main.spc",
-        "import lib;\n\nfn main() i32 {\n    let c = unsafe lib::lib_open(3);\n    let n = unsafe lib::lib_len(c, \"abcd\".ptr() as *const char, 2);\n    unsafe lib::lib_close(c);\n    if n == 9 { return 0; }\n    return 1;\n}\n",
+        "@link(\"-L. -llib\")\nextern \"C\" {}\nimport lib;\n\nfn main() i32 {\n    let c = unsafe lib::lib_open(3);\n    let n = unsafe lib::lib_len(c, \"abcd\".ptr() as *const char, 2);\n    unsafe lib::lib_close(c);\n    if n == 9 { return 0; }\n    return 1;\n}\n",
     );
-    let r = p.compile("main.spc");
-    assert(r.ok(), "the program compiles");
-    let cc = p.cc_build_with("", "lib.c");
-    assert(cc.ok(), "the emitted C compiles and links");
+    assert(p.c_lib("lib", "lib.c"), "the C library builds");
+    let r = p.native_build("", "main.spc");
+    assert(r.ok(), "the program builds");
     assert_eq(p.run_bin(), 0);
 }
 
@@ -8924,12 +8561,11 @@ fn bindgen_generates_records_enums_and_consts() {
 
     p.mkfile(
         "main.spc",
-        "import lib;\n\nfn main() i32 {\n    let mut cfg = lib::lib_cfg {\n        name: \"c\".ptr() as *const char,\n        len: 5,\n        origin: lib::lib_pt { x: 2, y: 3 },\n        tag: [0 as char; 8],\n        mode: lib::lib_mode::LIB_SLOW,\n    };\n    cfg.tag[0] = 'A' as char;\n    let n = unsafe lib::lib_sum(&cfg);\n    let o = unsafe lib::lib_origin(&cfg);\n    let m = unsafe lib::lib_mode_of(lib::lib_mode::LIB_LAST);\n    if n == 85 && o.x == 2 && o.y == 3 && m == 11 && lib::LIB_VERSION == 7 { return 0; }\n    return 1;\n}\n",
+        "@link(\"-L. -llib\")\nextern \"C\" {}\nimport lib;\n\nfn main() i32 {\n    let mut cfg = lib::lib_cfg {\n        name: \"c\".ptr() as *const char,\n        len: 5,\n        origin: lib::lib_pt { x: 2, y: 3 },\n        tag: [0 as char; 8],\n        mode: lib::lib_mode::LIB_SLOW,\n    };\n    cfg.tag[0] = 'A' as char;\n    let n = unsafe lib::lib_sum(&cfg);\n    let o = unsafe lib::lib_origin(&cfg);\n    let m = unsafe lib::lib_mode_of(lib::lib_mode::LIB_LAST);\n    if n == 85 && o.x == 2 && o.y == 3 && m == 11 && lib::LIB_VERSION == 7 { return 0; }\n    return 1;\n}\n",
     );
-    let r = p.compile("main.spc");
-    assert(r.ok(), "the program compiles");
-    let cc = p.cc_build_with("", "lib.c");
-    assert(cc.ok(), "the emitted C compiles and links");
+    assert(p.c_lib("lib", "lib.c"), "the C library builds");
+    let r = p.native_build("", "main.spc");
+    assert(r.ok(), "the program builds");
     assert_eq(p.run_bin(), 0);
 }
 
@@ -9121,12 +8757,11 @@ fn bindgen_expressions_anonymous_types_and_globals() {
 
     p.mkfile(
         "main.spc",
-        "import lib;\n\nfn main() i32 {\n    let pt = lib::lib_pt { x: 2, y: 3 };\n    let n = unsafe lib::lib_use(&pt, lib::lib_mode::LIB_B);\n    let c = unsafe lib::lib_counter;\n    if n == 13 && c == 41 && lib::LIB_SUM == 12 { return 0; }\n    return 1;\n}\n",
+        "@link(\"-L. -llib\")\nextern \"C\" {}\nimport lib;\n\nfn main() i32 {\n    let pt = lib::lib_pt { x: 2, y: 3 };\n    let n = unsafe lib::lib_use(&pt, lib::lib_mode::LIB_B);\n    let c = unsafe lib::lib_counter;\n    if n == 13 && c == 41 && lib::LIB_SUM == 12 { return 0; }\n    return 1;\n}\n",
     );
-    let r = p.compile("main.spc");
-    assert(r.ok(), "the program compiles");
-    let cc = p.cc_build_with("", "lib.c");
-    assert(cc.ok(), "the emitted C compiles and links");
+    assert(p.c_lib("lib", "lib.c"), "the C library builds");
+    let r = p.native_build("", "main.spc");
+    assert(r.ok(), "the program builds");
     assert_eq(p.run_bin(), 0);
 }
 
@@ -9137,9 +8772,6 @@ fn bindgen_expressions_anonymous_types_and_globals() {
 // checked end to end by running a program through two of them.
 @test
 fn vendor_copies_and_imports_resolve() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile("dep/geo.spc", "pub fn area(w: i32, h: i32) i32 { return w * h; }\n");
     p.mkfile("dep/util/more.spc", "pub fn twice(x: i32) i32 { return x * 2; }\n");
@@ -9170,10 +8802,8 @@ fn vendor_copies_and_imports_resolve() {
         "main.spc",
         "import vendor::dep::geo;\nimport vendor::dep::util::more;\nfn main() i32 { return geo::area(6, 7) + more::twice(0) - 42; }\n",
     );
-    let c = p.compile("main.spc");
+    let c = p.native_build("", "main.spc");
     assert(c.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -9182,9 +8812,6 @@ fn vendor_copies_and_imports_resolve() {
 // project's history, and a nested repository would shadow it from the outer one.
 @test
 fn vendor_clones_git_and_strips_the_repository() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile("srcrepo/lib.spc", "pub fn seven() i32 { return 7; }\n");
     let root = p.dir();
@@ -9284,10 +8911,8 @@ fn vendor_clones_git_and_strips_the_repository() {
     assert(loader::read_file(op.as_str()).is_none(), "a failed ref checkout is cleaned up");
     op.free();
     p.mkfile("main.spc", "import vendor::mylib::lib;\nfn main() i32 { return lib::seven() - 8; }\n");
-    let c = p.compile("main.spc");
+    let c = p.native_build("", "main.spc");
     assert(c.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     assert_eq(p.run_bin(), 0);
 }
 
@@ -9374,12 +8999,11 @@ fn extern_static_mut_binds_a_writable_global() {
     p.mkfile("g.c", "#include \"g.h\"\nint counter = 1;\n");
     p.mkfile(
         "main.spc",
-        "extern \"C\" \"g.h\" {\n    pub static mut counter: i32;\n}\nfn main() i32 {\n    unsafe {\n        counter = counter + 41;\n    }\n    return unsafe counter - 42;\n}\n",
+        "@link(\"-L. -lg\")\nextern \"C\" \"g.h\" {\n    pub static mut counter: i32;\n}\nfn main() i32 {\n    unsafe {\n        counter = counter + 41;\n    }\n    return unsafe counter - 42;\n}\n",
     );
-    let r = p.compile("main.spc");
-    assert(r.ok(), "the program compiles");
-    let cc = p.cc_build_with("", "g.c");
-    assert(cc.ok(), "the emitted C compiles and links");
+    assert(p.c_lib("g", "g.c"), "the C library builds");
+    let r = p.native_build("", "main.spc");
+    assert(r.ok(), "the program builds");
     assert_eq(p.run_bin(), 0);
     // The write is guarded exactly like any static mut.
     h::expect_err_msg(
@@ -9472,12 +9096,11 @@ fn bindgen_globals_and_cflag() {
     // The generated module works: read the const, mutate the global directly and through the library.
     p.mkfile(
         "main.spc",
-        "import lib;\nfn main() i32 {\n    unsafe {\n        lib::counter = lib::counter + 1;\n    }\n    let n = unsafe lib::bump(2);\n    return n + lib::limit - 45;\n}\n",
+        "@link(\"-L. -llib\")\nextern \"C\" {}\nimport lib;\nfn main() i32 {\n    unsafe {\n        lib::counter = lib::counter + 1;\n    }\n    let n = unsafe lib::bump(2);\n    return n + lib::limit - 45;\n}\n",
     );
-    let c = p.compile("main.spc");
-    assert(c.ok());
-    let cc = p.cc_build_with("", "lib.c");
-    assert(cc.ok());
+    assert(p.c_lib("lib", "lib.c"), "the C library builds");
+    let c = p.native_build("", "main.spc");
+    assert(c.ok(), "the program builds");
     assert_eq(p.run_bin(), 0);
 }
 
@@ -9512,10 +9135,10 @@ fn bindgen_escapes_keyword_names() {
     assert(spc.as_str().contains("@import(\"move\")\n    pub const move_: i32;"));
     p.mkfile(
         "main.spc",
-        "import lib;\n\nfn main() i32 {\n    let mut q = lib::pair { select_: 4, n: 1 };\n    q.select_ = q.select_ + unsafe lib::pair_n(&mut q);\n    let a = unsafe lib::select_(2, 3);\n    return a + unsafe lib::launch_ + lib::move_ + q.select_ - 21;\n}\n",
+        "@link(\"-L. -llib\")\nextern \"C\" {}\nimport lib;\n\nfn main() i32 {\n    let mut q = lib::pair { select_: 4, n: 1 };\n    q.select_ = q.select_ + unsafe lib::pair_n(&mut q);\n    let a = unsafe lib::select_(2, 3);\n    return a + unsafe lib::launch_ + lib::move_ + q.select_ - 21;\n}\n",
     );
-    assert(p.compile("main.spc").ok(), "the program compiles");
-    assert(p.cc_build_with("", "lib.c").ok(), "the emitted C compiles and links");
+    assert(p.c_lib("lib", "lib.c"), "the C library builds");
+    assert(p.native_build("", "main.spc").ok(), "the program builds");
     assert_eq(p.run_bin(), 0);
 }
 
@@ -9861,9 +9484,6 @@ fn test_filter_builds_only_matching_files() {
 // ordinary code and its template diagnostics are compile errors of the checker, not of codegen.
 @test
 fn format_desugar_and_fold() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -9893,7 +9513,7 @@ fn main() i32 {
     assert(!p.gen_has("main.c", "= cf()"), "the const initializer folded to its value");
     // The empty-string shim inlines; the value shims stay calls.
     assert(p.gen_has("main.c", "sugar_fmt_hex_i"), "runtime sites thread the desugar shims");
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     let rr = p.run_bin_env("");
     assert(rr.ok());
@@ -9910,9 +9530,6 @@ fn main() i32 {
 // only: a descriptor cannot invoke.
 @test
 fn method_reflection() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -9941,10 +9558,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let rr = p.run_bin_env("");
     assert(rr.ok());
     assert(rr.out_shows("ok"), "method names, arities, visibility, return tags, and metadata agree");
@@ -9955,9 +9570,6 @@ fn main() i32 {
 // compile error naming the offending type argument.
 @test
 fn ctfe_zeroed_and_body_asserts() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -9995,10 +9607,8 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile("main.spc");
+    let r = p.native_build("", "main.spc");
     assert(r.ok());
-    let cc = p.cc_build("");
-    assert(cc.ok());
     let rr = p.run_bin_env("");
     assert(rr.ok());
     assert(rr.out_shows("ok"), "zeroed, derived default, and body asserts all fold");
@@ -10028,9 +9638,6 @@ fn main() i32 {
 // copies, so a generic touched only under an untaken guard is never instantiated.
 @test
 fn tagless_variants_and_meta_elision() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let _env5 = cli::set_env("SC_INLINE", "0");
     let p = cli::proj_new();
     p.mkfile(
@@ -10093,7 +9700,7 @@ fn main() i32 {
     assert(r.ok());
     assert(p.gen_has("main__inst.c", "touch__i32("), "the taken guard calls its callee");
     assert(!p.gen_has("main__inst.c", "touch__i64("), "an untaken meta_str guard's call is never emitted");
-    let cc = p.cc_build("");
+    let cc = p.native_build("", "main.spc");
     assert(cc.ok());
     let rr = p.run_bin_env("");
     assert(rr.ok());
@@ -10827,9 +10434,6 @@ fn main() i32 {
 // resolution: the removed branches call `@platform` items of other targets, which do not exist there.
 @test
 fn build_constants_prune_other_platforms() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile("main.spc", BC_PRUNE);
     assert(p.compile_flags("--target=windows", "main.spc").ok(), "windows transpiles");
@@ -10840,7 +10444,7 @@ fn build_constants_prune_other_platforms() {
         return;
     }
     assert(p.compile("main.spc").ok());
-    assert(p.cc_build("").ok());
+    assert(p.native_build("", "main.spc").ok());
     let hp = unsafe shim::sc_host_platform();
     let want = if hp == 0 {
         10;
@@ -10860,9 +10464,6 @@ fn build_constants_prune_other_platforms() {
 // TEST is true only in a `--test` build.
 @test
 fn build_constant_test_follows_the_test_flag() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -10885,8 +10486,7 @@ fn sees_test() {
     if cli::on_wasm() {
         return;
     }
-    assert(p.compile("main.spc").ok());
-    assert(p.cc_build("").ok());
+    assert(p.native_build("", "main.spc").ok());
     assert_eq(p.run_bin(), 0);
 }
 

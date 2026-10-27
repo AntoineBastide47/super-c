@@ -5023,9 +5023,6 @@ fn memmove_overlap_both_directions(b: &mut h::ExitBatch) {
 // `Self` in a generic extend of another module is the instance it is called through.
 @test
 fn a_foreign_generic_self_result_is_the_instance() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "w.spc",
@@ -5035,8 +5032,7 @@ fn a_foreign_generic_self_result_is_the_instance() {
         "main.spc",
         "import w;\nfn main() i32 {\n    let v: w::W<4> = w::W::<4>::make();\n    return v.x as i32 - 4;\n}\n",
     );
-    assert(p.compile("main.spc").ok(), "transpiles");
-    assert(p.cc_build("").ok(), "builds");
+    assert(p.native_build("", "main.spc").ok(), "the program builds");
     assert(p.run_bin() == 0, "the instance's value");
 }
 

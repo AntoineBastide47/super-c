@@ -483,9 +483,6 @@ fn main(args: Vector<str>) i32 {
 
 @test
 fn generic_code_runs_over_three_lane_types() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -512,8 +509,7 @@ fn main() i32 {
 }
 )",
     );
-    assert(p.compile("main.spc").ok(), "transpiles");
-    assert(p.cc_build("").ok(), "the C compiles under the harness warnings");
+    assert(p.native_build("", "main.spc").ok(), "the program builds");
     let r = p.run_bin_env("");
     assert(r.exit == 0, "runs");
     assert(
@@ -538,9 +534,6 @@ fn a_program_without_vectors_gets_no_vector_c() {
 
 @test
 fn a_vector_constant_is_static_data() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
@@ -574,8 +567,7 @@ fn main() i32 {
 }
 )",
     );
-    assert(p.compile("main.spc").ok(), "transpiles");
-    assert(p.cc_build("").ok(), "the C compiles under the harness warnings");
+    assert(p.native_build("", "main.spc").ok(), "the program builds");
     let r = p.run_bin_env("");
     assert(
         r.exit == 0 && r.out_shows("4.5 3.5 -3 5 129\n1.5 3 7 7 8 18446744073709551615 3\n"),
