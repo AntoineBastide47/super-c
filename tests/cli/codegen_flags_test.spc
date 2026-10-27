@@ -7,7 +7,8 @@ const E: str = "SC_NO_EMIT_CACHE";
 
 // A program each flag changes: a counted loop (unrolling), a loop with bounds checks (versioning), a loop
 // with a branch on a parameter (unswitching), a small and a mid-sized callee (inlining), leaf functions
-// (the frame pointer) and slots (the stack protector).
+// (the frame pointer), slots (the stack protector) and float arithmetic whose rewrites stay exact (the
+// float flags).
 const PROGRAM: str = M"(import stdio;
 
 @noinline
@@ -51,12 +52,17 @@ fn mid(x: i64, y: i64) i64 {
     return d * 3 + (b | 7) - (c >> 2);
 }
 
+@noinline
+fn mix(x: f64, y: f64) f64 {
+    return x * y + x / 8.0;
+}
+
 fn main() i32 {
     let mut a: [i64; 5] = [1, 2, 3, 4, 5];
     let b: [i64; 5] = [5, 4, 3, 2, 1];
     scale(a, 5, true);
     scale(a, 3, false);
-    println("{} {} {} {}", sum4(a), dot(a, b, 5), tiny(a[4]), mid(a[0], a[1]));
+    println("{} {} {} {} {}", sum4(a), dot(a, b, 5), tiny(a[4]), mid(a[0], a[1]), mix(3.0, 5.0));
     return 0;
 }
 )";
@@ -82,7 +88,7 @@ fn each_level_builds_its_own_code() {
     p.mkfile("main.spc", PROGRAM);
     let levels: []str = ["-O0", "-O1", "-O2", "-O3", "-Os", "-Oz"];
     let (_, want) = built(&p, "-O0", "b");
-    assert(want.as_str().contains("-58 -79 -4 3891"), want.as_str());
+    assert(want.as_str().contains("-58 -79 -4 3891 15.375"), want.as_str());
     let mut bins = Vector::<String>::new();
     for k in 0..levels.len() {
         let (bin, out) = built(&p, levels[k], format("b{}", k).as_str());
@@ -108,6 +114,8 @@ fn each_flag_changes_the_code() {
         "-fno-unswitch-loops",
         "-fno-version-loops-for-bounds",
         "-fstack-protector-strong",
+        "-ffast-math",
+        "-freciprocal-math",
     ];
     for k in 0..flags.len() {
         let (bin, out) = built(&p, format("-O3 {}", flags[k]).as_str(), format("f{}", k).as_str());

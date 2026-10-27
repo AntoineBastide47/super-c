@@ -1026,6 +1026,21 @@ extend Code {
         );
     }
 
+    /// vfmadd231sd (`d`) or vfmadd231ss: xmm `dst` = xmm `a` * xmm `b` + xmm `dst` (VEX.LIG.66.0F38 B9).
+    pub fn vfma231(self: &mut Self, d: bool, dst: u8, a: u8, b: u8) {
+        self.byte(0xC4);
+        self.byte((~(dst as u32) >> 3 & 1) << 7 | 1u32 << 6 | (~(b as u32) >> 3 & 1) << 5 | 2);
+        self.byte(
+            if d {
+                0x80u32;
+            } else {
+                0u32;
+            } | (~(a as u32) & 15) << 3 | 1,
+        );
+        self.byte(0xB9);
+        self.modrm_rr(dst, b);
+    }
+
     // ---- Wide vector moves (the AVX forms the C ABI needs) ----
 
     /// vmovdqu of 32 bytes (VEX.256): ymm `r` from (`load`) or to `m`.

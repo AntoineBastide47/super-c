@@ -1038,6 +1038,13 @@ extend Opt {
         } else if (t.op == O_ADDO || t.op == O_SUBO || t.op == O_MULO) && self.fold_checked(pk, b, i) {
             return true;
         } else if pure_op(t.op) && !tls_addr(pk, b, t) {
+            if pk.fmath != 0 && t.op >= O_FADD && t.op <= O_FDIV && !is_vec(t.ty) {
+                let r = self.fast_math(pk, b, k, i);
+                if r != VNONE {
+                    self.repl[i as usize] = r;
+                    return true;
+                }
+            }
             let r = simplify(pk, b, i);
             if r != VNONE {
                 self.repl[i as usize] = r;
@@ -1064,6 +1071,151 @@ extend Opt {
         // On a hash collision the newer entry shadows the older: either is correct.
         self.enter(LOG_PURE, h, i);
         return self.hoist(pk, b, k, i, false, false);
+    }
+
+    // The rewrites of float operation `i` the package's `fmath` allows: an identity's operand (`x + 0` without
+    // signed zeros; `x * 1`, `x / 1` and, without signed zeros either, `x * 0` and `x - x` when no value is
+    // NaN or infinite) as its replacement, or in place a division by a constant as a product by its
+    // reciprocal, two constants of one operation chain as one (reassociation), a sum of a product as a
+    // fused multiply-add (contraction). The replacement, or VNONE.
+    fn fast_math(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) Value {
+        let fm = pk.fmath;
+        let mut t = b.insts[i as usize];
+        let op = t.op;
+        // A commutative operation takes a constant second.
+        if (op == O_FADD || op == O_FMUL) && float_const(b, t.a).is_some() && float_const(b, t.b).is_none() {
+            let x = t.a;
+            t.a = t.b;
+            t.b = x;
+            b.insts[i as usize] = t;
+        }
+        let one = if t.ty == T_F64 {
+            0x3FF0000000000000u64;
+        } else {
+            0x3F800000u64;
+        };
+        let cb = float_const(b, t.b);
+        let finite = (fm & FM_FINITE) != 0;
+        let nsz = (fm & FM_NSZ) != 0;
+        if cb.is_some() {
+            let c = cb.unwrap();
+            if op == O_FADD && c == 0 && nsz || (op == O_FMUL || op == O_FDIV) && c == one && finite {
+                return t.a;
+            }
+            if op == O_FMUL && c == 0 && finite && nsz {
+                return t.b;
+            }
+            if op == O_FDIV && (fm & FM_RECIP) != 0 {
+                let r = le::float_op(O_FDIV, t.ty, one, c);
+                if regular(t.ty, r) {
+                    t.op = O_FMUL;
+                    t.b = self.fconstant(b, t.ty, r);
+                    b.insts[i as usize] = t;
+                    return VNONE;
+                }
+            }
+            // (x op c1) op c2: x op (c1 op c2).
+            if (op == O_FADD || op == O_FMUL) && (fm & FM_ASSOC) != 0 && (t.a & (VPARAM | VFLAG)) == 0 {
+                let x = b.insts[t.a as usize];
+                let c1 = float_const(b, x.b);
+                if x.op == op && x.ty == t.ty && c1.is_some() {
+                    let r = le::float_op(op, t.ty, c1.unwrap(), c);
+                    if regular(t.ty, r) || r == 0 {
+                        t.a = x.a;
+                        t.b = self.fconstant(b, t.ty, r);
+                        b.insts[i as usize] = t;
+                        return VNONE;
+                    }
+                }
+            }
+        }
+        if op == O_FSUB && t.a == t.b && finite && nsz {
+            return self.fconstant(b, t.ty, 0);
+        }
+        // a * b + c: one rounding; a * b - c and c - a * b too when the operand they negate is a constant
+        // (`-c`, `-a`). Not when `c` is a loop's accumulator, a parameter of the header of a loop holding the
+        // sum: the chain through it waits on the fused operation's latency, longer than an addition's, where
+        // the product computes beside it (GCC's FMA deferring, PR 81616).
+        if (op == O_FADD || op == O_FSUB) && (fm & FM_CONTRACT) != 0 && pk.fma {
+            let sign = if t.ty == T_F64 {
+                1u64 << 63;
+            } else {
+                1u64 << 31;
+            };
+            let mut m = VNONE;
+            let mut x = VNONE;
+            let mut y = VNONE;
+            let mut c = VNONE;
+            if is_fmul(b, t.a, t.ty) {
+                m = t.a;
+                c = t.b;
+                let cc = float_const(b, c);
+                if op == O_FSUB && cc.is_none() {
+                    m = VNONE;
+                } else if op == O_FSUB {
+                    c = self.fconstant(b, t.ty, cc.unwrap() ^ sign);
+                }
+                if m != VNONE {
+                    x = b.insts[m as usize].a;
+                    y = b.insts[m as usize].b;
+                }
+            } else if is_fmul(b, t.b, t.ty) {
+                m = t.b;
+                c = t.a;
+                x = b.insts[m as usize].a;
+                y = b.insts[m as usize].b;
+                if op == O_FSUB {
+                    let xc = float_const(b, x);
+                    let yc = float_const(b, y);
+                    if xc.is_some() {
+                        x = self.fconstant(b, t.ty, xc.unwrap() ^ sign);
+                    } else if yc.is_some() {
+                        y = self.fconstant(b, t.ty, yc.unwrap() ^ sign);
+                    } else {
+                        m = VNONE;
+                    }
+                }
+            }
+            if m != VNONE && !self.carried(c, k) {
+                b.insts[i as usize] = Inst { op: O_FMA, ty: t.ty, aux: 0, a: x, b: y, c: c };
+            }
+        }
+        return VNONE;
+    }
+
+    // Whether `c` is a parameter of the header of a loop holding block `k`: a value the loop carries.
+    fn carried(self: &Self, c: Value, k: u32) bool {
+        if (c & (VPARAM | VFLAG)) != VPARAM {
+            return false;
+        }
+        let h = self.pblock[(c & ~VPARAM) as usize];
+        return self.inner[h as usize] == h && self.in_loop(h, k);
+    }
+
+    // The float constant of type `ty` with bits `v`, made in the entry block as `constant` makes integers.
+    fn fconstant(self: &mut Self, b: &mut Body, ty: u8, v: u64) Value {
+        let t = Inst { op: O_FCONST, ty: ty, aux: 0, a: v as u32, b: (v >> 32) as u32, c: VNONE };
+        let h = hash(t);
+        let found = switch self.made.get(&h) {
+            Some(x) => *x,
+            None => NONE,
+        };
+        if found != NONE && same(b.insts[found as usize], t) {
+            return found;
+        }
+        let i = b.insts.len() as u32;
+        b.insts.push(t);
+        b.locs.push(0);
+        if b.inl.len() != 0 {
+            b.inl.push(0);
+        }
+        self.repl.push(VNONE);
+        self.frepl.push(VNONE);
+        self.moved.push(false);
+        self.blk_of.push(0);
+        self.extra.push(i);
+        self.made.insert(h, i);
+        return i;
     }
 
     // ---- Memory ----
@@ -2083,6 +2235,26 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
     return VNONE;
 }
 
+// Whether float bits `r` of type `ty` are a normal number: neither zero, subnormal, infinite nor NaN.
+fn regular(ty: u8, r: u64) bool {
+    let e = if ty == T_F64 {
+        r >> 52 & 0x7FF;
+    } else {
+        r >> 23 & 0xFF;
+    };
+    let top = if ty == T_F64 {
+        0x7FFu64;
+    } else {
+        0xFFu64;
+    };
+    return e != 0 && e != top;
+}
+
+// Whether `v` of `b` is a scalar float product of type `ty`.
+fn is_fmul(b: &Body, v: Value, ty: u8) bool {
+    return (v & (VPARAM | VFLAG)) == 0 && v != VNONE && b.insts[v as usize].op == O_FMUL && b.insts[v as usize].ty == ty;
+}
+
 // Whether address `v` of `b` is a slot's address plus constant offsets.
 const fn slot_based(b: &Body, v: Value) bool {
     let mut x = v;
@@ -2204,7 +2376,7 @@ const fn join(a: u8, b: u8) u8 {
 
 // Whether opcode `op` computes a value from its operands alone, the same each time it does not trap.
 const fn pure_op(op: u8) bool {
-    return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT;
+    return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA;
 }
 
 // Whether pure `t` of `b` may run where the program would not run it: it has operands (a constant is

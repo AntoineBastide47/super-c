@@ -431,6 +431,15 @@ extend Verifier {
                 "an i8 condition and two values of the result's type",
             );
         }
+        if op == O_FMA {
+            return self.need(
+                name,
+                b,
+                i,
+                is_float(t.ty) && ta == t.ty && tb == t.ty && tc == t.ty,
+                "three floats of the result's type",
+            );
+        }
         if op == O_RETADDR {
             return self.need(name, b, i, t.ty == T_PTR, "a pointer result");
         }

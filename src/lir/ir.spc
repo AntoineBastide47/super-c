@@ -215,7 +215,9 @@ pub const O_POPCNT: u8 = 69;
 /// constraints and the clobbers (text as body messages). Each output is stored to its address after
 /// the instructions run (read from it first for a `+` constraint).
 pub const O_ASM: u8 = 70;
-pub const OP_COUNT: u8 = 71;
+/// Fused multiply-add of floats: `a * b + c` with one rounding (`-ffp-contract=fast` makes it).
+pub const O_FMA: u8 = 71;
+pub const OP_COUNT: u8 = 72;
 
 /// One opcode: its text name and its operand form.
 pub struct OpInfo {
@@ -223,7 +225,7 @@ pub struct OpInfo {
     pub form: u8,
 }
 
-pub const OPS: [OpInfo; 71] = [
+pub const OPS: [OpInfo; 72] = [
     OpInfo { name: "", form: F_NONE },
     OpInfo { name: "iconst", form: F_IMM },
     OpInfo { name: "fconst", form: F_IMM },
@@ -295,6 +297,7 @@ pub const OPS: [OpInfo; 71] = [
     OpInfo { name: "ctz", form: F_UN },
     OpInfo { name: "popcnt", form: F_UN },
     OpInfo { name: "asm", form: F_ASM },
+    OpInfo { name: "fma", form: F_TRI },
 ];
 
 /// An `O_ASM` record at pool index `r` of `b`: its output, input and clobber counts.
@@ -530,6 +533,14 @@ pub const PROTECT_NONE: u8 = 0;
 pub const PROTECT_LARGE: u8 = 1;
 pub const PROTECT_SLOTS: u8 = 2;
 pub const PROTECT_ALL: u8 = 3;
+
+/// `Package.fmath`: reassociation, reciprocals, no NaN or infinity, no signed zero, contraction into
+/// fused multiply-adds.
+pub const FM_ASSOC: u8 = 1;
+pub const FM_RECIP: u8 = 2;
+pub const FM_FINITE: u8 = 4;
+pub const FM_NSZ: u8 = 8;
+pub const FM_CONTRACT: u8 = 16;
 
 /// Whether body `b` of a package whose `protect` is `p` has a stack canary.
 pub fn protected(p: u8, b: &Body) bool {
@@ -897,6 +908,10 @@ pub struct Package {
     pub omit_fp: bool,
     /// The bodies with a stack canary (`PROTECT_*`).
     pub protect: u8,
+    /// The float rewrites the build allows (`FM_*`, `-ffast-math` and its parts), and whether the
+    /// processor has a scalar fused multiply-add (`O_FMA` for contraction).
+    pub fmath: u8,
+    pub fma: bool,
     pub names: nm::Names, // file paths, symbol names and messages
     pub files: Vector<u32>, // file id -> name id
     pub syms: Vector<Sym>,
@@ -922,6 +937,8 @@ extend Package {
             comp_dir: String::new(),
             omit_fp: false,
             protect: PROTECT_NONE,
+            fmath: 0,
+            fma: false,
             names: nm::Names::with_capacity(1 << 14, 1 << 10),
             files: Vector::<u32>::new(),
             syms: Vector::<Sym>::new(),

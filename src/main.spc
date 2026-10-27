@@ -1113,7 +1113,8 @@ OPTIONS:
     -f<flag>, -fno-<flag>  code generation, over the level's defaults and the profile's keys:
                            omit-frame-pointer, inline, inline-functions, unroll-loops, unswitch-loops,
                            version-loops-for-bounds, stack-protector, stack-protector-strong,
-                           stack-protector-all
+                           stack-protector-all, fast-math, associative-math, reciprocal-math,
+                           finite-math-only, signed-zeros, fp-contract=fast (-ffp-contract=off)
     --const-eval-steps=N   compile-time evaluation step budget
     --const-eval-memory=B  compile-time evaluation memory budget (B, or NK/NM/NG)
     --no-lint              disable the on-by-default lints during a build
