@@ -191,7 +191,9 @@ so any drift is a build error).
    - Enum discriminants wider than necessary (a 4-variant enum needs 2 bits, not 32)
    - Pointer-sized fields that could be indices into a pool (32-bit index = 4 bytes
      vs 8-byte pointer)
-   - Padding holes from field ordering (reorder fields by alignment, largest first)
+   - Padding holes in a type that keeps its declared order (`@ordered`, `@packed`, a header
+     type, a C-reachable struct): reorder its fields by hand. The compiler orders the others by
+     alignment, so a hole there is only the tail padding to the largest alignment
    - Fields that are mutually exclusive (overlap in a union)
 
 3. **Pack the bits.** Use bitfields, byte-width fields, or manual bit packing:

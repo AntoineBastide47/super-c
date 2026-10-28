@@ -189,6 +189,7 @@ struct LotNode {
 // bounds. `sync_stats()` reports the nodes walked per acquisition, which is what would show the bound
 // being approached in practice; it measures under one per acquisition on every workload here.
 @no_const
+@ordered
 struct LotBucket {
     pub lock: i32,
     pub pad: i32,

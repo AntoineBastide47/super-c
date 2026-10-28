@@ -98,11 +98,49 @@ the explicit `wrapping_*`, `checked_*`, `overflowing_*` and `saturating_*` metho
 
 ## Struct Layout
 
-Standard C layout (not auto-rounded to power-of-2). Fields ordered as declared. Use
-`@packed` for wire formats. Use `@align(N)` for cache-line alignment. Verify sizes
-with `static_assert(sizeof(T) == N, "...")`. A `struct` or `union` of an `extern "C"` block
-is a header type: it lists every member of the C type, Super-C computes its layout by the same
-rules, and the C compile checks it against the header (see `super-c-ffi`, Header Types).
+C layout rules (not auto-rounded to power-of-2), with the fields in layout order: by alignment,
+largest first, stable (equal alignments keep their declared order). Every size is a multiple of its
+alignment, so no padding falls between fields: the size is the field sizes' sum rounded up to the
+largest alignment. The order is computed per generic instance, after substitution. Tuples (prelude
+`Tuple2`..`Tuple4`) and the payload fields of each enum variant follow the same rule. Zero-sized
+fields take no storage. The emitted C struct lists its members in layout order.
+
+These keep the declared order (C layout):
+
+- unions;
+- `@packed` structs (use them for wire formats);
+- header types (a `struct` or `union` of an `extern "C"` block): it lists every member of the C
+  type, Super-C computes its layout by the same rules, and the C compile checks it against the
+  header (see `super-c-ffi`, Header Types);
+- every struct and enum that an `extern` function signature or an `@export` function reaches by
+  value or through a pointer, reference, slice, array, function type, tuple or generic argument, with
+  the types of their fields and payloads;
+- every struct and enum an `extern "C"` call's argument points to when the parameter is `*void` or
+  the argument is a C variadic one, with the types of their fields and payloads. A pointer stored
+  in a variable or passed through a Super-C function first is not followed (see `super-c-ffi`,
+  Field Order). A type of a module the std prelude loads keeps the layout the prelude gives it: user
+  code does not change it;
+- `@ordered` structs.
+
+`@ordered` on a field keeps it in the first positions, in declared order with C padding; the other
+fields follow by alignment, with no gap filling after the `@ordered` fields. A field may be
+`@ordered` only if every field before it is ("field 'c' is '@ordered', but field 'b' before it is not:
+ordered fields are a prefix of the struct"). Tag the first field when code casts a pointer to the
+struct into a pointer to that field (a header embedded first). `@ordered` where the order is kept
+already (on a union, a header type or a `@packed` struct, or on a field of one, or of an `@ordered`
+struct) is an error. Named payload fields of an enum variant take the same field rule; a variant takes
+no tag.
+
+```superc
+struct S { a: u8, b: u64, c: u16 }       // b @0, c @8, a @10: 16 bytes (C order: 24)
+@ordered
+struct P { tag: u8, value: u64 }         // tag @0, value @8: declared order
+struct Node { @ordered hdr: Header, more: u64, tag: u8 }  // hdr @0, then by alignment
+```
+
+Declared order still drives struct literals, diagnostics, reflection field lists (`f.offset` gives the
+real offset) and the derived `Ord`, `Hash` and `Format`. Use `@align(N)` for cache-line alignment.
+Verify sizes with `static_assert(sizeof(T) == N, "...")`.
 
 No type may exceed the target's `isize::MAX` bytes ("the type '..' is too large for the target"),
 nor an array `u32::MAX` elements ("array length N exceeds the maximum of 4294967295").

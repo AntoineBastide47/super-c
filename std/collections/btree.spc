@@ -88,6 +88,7 @@ struct Leaf<K, V> {
 
 // An internal node: edge i leads to the keys between keys[i - 1] and keys[i]; edges 0..=len are live.
 struct Internal<K, V> {
+    @ordered
     pub(file) data: Leaf<K, V>, // first, so a `*mut Internal` is a `*mut Leaf`
     pub(file) edges: [*mut Leaf<K, V>; CAPACITY + 1],
 }

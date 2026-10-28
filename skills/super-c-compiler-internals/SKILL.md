@@ -263,6 +263,30 @@ type from its record (`Ast::member_ty`: a field's own slot, which the declaratio
 and a member the check has not recorded yet answers not-ok and caches nothing (`Svc.pending`), as
 `@align` does below: a static_assert evaluated before that check is deferred and folds later.
 
+**Field order:** `src/ir/layout.spc` owns it. `sort_members` puts members in layout order (the
+first `prefix` in declared order, the rest stable by alignment, largest first) and
+`place_members` gives their offsets. Every stage lays out through them: the service
+(`offset_in`; `decl_members` for reflection's `f.offset`; `struct_members` for `layout_pass`), the
+LIR lowering (`decl_fields` and `enum_shape` through `placed`) and the C emitter (`member_order` in
+`src/emit/tu.spc`, so the emitted struct lists its members in layout order and C's
+`_Static_assert` checks the service). `Svc::ordered_prefix` and `payload_prefix` give `prefix`:
+every member (`ORDER_ALL`) for a union, a header type, a `@packed` or `@ordered` struct and a type of
+`Package.c_shaped`, else the leading `@ordered` fields (`tc_ordered`, `tc_ordered_fields` check the
+tags). `driver::emit::mark_c_shaped` fills `c_shaped` (keys `module << 32 | node`) at the end of
+`resolve_stage`, from the signature types of the extern and `@export` functions of the modules from
+`root_module` on; the prelude image holds the prelude's set. The typechecker adds the types an
+`extern "C"` call's argument points to when the parameter is `*void` or the argument is a C variadic
+one (`tc_c_arg`, through casts and `unsafe`; `tc_c_reads` walks pointers, arrays and instance
+arguments to declarations), logged per item (`TcMarkLog` kind 3) into `Package.c_reads`;
+`mark_c_reads` adds them with their field types at the end of `typecheck_stage`. The engine's layout
+service records the declarations whose order it changed (`Svc.moved`), changed the size of
+(`resized`), or read offsets of (`offsets`): a newly marked one that the typecheck's evaluation read
+that way is an error asking for `@ordered`, so no folded constant disagrees with the final layout. A
+signature or call can mark a type of a module outside its own import closure, so
+`tuc::keys_compute` folds the `c_shaped` entries of a module's import closure into its per-TU cache
+key. The LIR's `fields_of` keeps declared order (drop order and
+operand matching read it); `leaves` sorts by offset for the calling conventions.
+
 **Header types:** a `struct` or `union` of an `extern "C"` block lists every member of its C
 type, so the service lays it out like any struct (`@packed` and `@align` included), and an
 opaque type with `@layout(size, align)` like a register type. The type spells as its tag or its

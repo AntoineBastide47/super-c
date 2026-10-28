@@ -18295,6 +18295,21 @@ extend CEmit {
                             dst.push_str(", ");
                         }
                         ne9 += 1;
+                        // Designated: the payload's members are in layout order.
+                        let vd9 = unsafe (*ea).at_const(rv.item.node).as_data.variant;
+                        if vd9.struct_payload {
+                            let pfid = unsafe (*ea).list(vd9.payload)[i as usize];
+                            dst.push_str(".");
+                            self.mg.ident(
+                                am,
+                                unsafe (*ea).at_const(unsafe (*ea).at_const(pfid).as_data.field.name).as_data.name.text,
+                                dst,
+                            );
+                        } else {
+                            dst.push_str("._");
+                            dst.push_u64(i);
+                        }
+                        dst.push_str(" = ");
                         ok = self.emit_operand(b, opid9, dst);
                     }
                     if ne9 == 0 {

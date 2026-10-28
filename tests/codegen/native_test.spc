@@ -170,8 +170,7 @@ int main(void) {
 #endif
   if (sme) {
     uint64_t v = 0;
-    __asm__ volatile(".arch_extension sme
-	rdsvl %0, #1" : "=r"(v));
+    __asm__ volatile(".arch_extension sme\n\trdsvl %0, #1" : "=r"(v));
     if ((uint64_t)machine(buf, 1) != v || v == 0) return 3;
   }
 #else

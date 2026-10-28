@@ -1057,15 +1057,17 @@ pub unsafe fn sc_udp_recv(_fd: i32, _buf: *mut void, _n: usize) isize {
 @platform(windows)
 const FD_SETSIZE: usize = 1024;
 
-// An fd_set with room for FD_SETSIZE sockets: the header's record with a longer array.
+// An fd_set with room for FD_SETSIZE sockets: the header's record with a longer array, in its order.
 @platform(windows)
+@ordered
 struct SockSet {
     pub count: u32,
     pub socks: [usize; FD_SETSIZE],
 }
 
-// An fd_set of one socket.
+// An fd_set of one socket, in the header's order.
 @platform(windows)
+@ordered
 struct OneSock {
     pub count: u32,
     pub sock: usize,

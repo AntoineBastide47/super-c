@@ -5832,7 +5832,7 @@ fn const_generic_array_layout() {
     // An arithmetic length (`N * 2`) folds through the instance's arguments, at every nesting level.
     b.add(
         "sizeof folds arithmetic and nested symbolic lengths",
-        "struct T<const N: usize> { pub x: u8, pub d: [u64; N * 2], pub g: [[u8; N]; 2] }\nstatic_assert(sizeof(T<3>) == 64);\nfn main() i32 { return 0; }\n",
+        "struct T<const N: usize> { pub x: u8, pub d: [u64; N * 2], pub g: [[u8; N]; 2] }\nstatic_assert(sizeof(T<3>) == 56);\nfn main() i32 { return 0; }\n",
         0,
     );
     h::expect_err_msg(

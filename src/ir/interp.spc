@@ -386,7 +386,8 @@ pub struct IObj {
     pub esc: u8, // a pointer to it was stored where it outlives its region
     pub unchg: u8, // kept storage of a referenced constant, outside the budget (`iso_leave`)
 }
-static_assert(sizeof(IObj) == (sizeof(Vector<IVal>) + 7) / 8 * 8 + 96, "IObj keeps its members in alignment order");
+// Its members take 90 bytes beside the slot vector: alignment order leaves padding at the end alone.
+static_assert(sizeof(IObj) == (sizeof(Vector<IVal>) + 90 + 7) / 8 * 8, "IObj keeps its members in alignment order");
 
 // The budget charge of one object's header, in IVal slots.
 const OBJ_SLOTS: u64 = (sizeof(IObj) + sizeof(IVal) - 1) as u64 / sizeof(IVal) as u64;

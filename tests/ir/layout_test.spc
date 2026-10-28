@@ -119,14 +119,14 @@ fn c_data_model_sizes() {
     let p = typed_package(PROBES);
     let mut svc = lay::Svc::new(&p);
     let mut m: ModuleId = 0;
-    // S: i32 @0, i64 @8, u8 @16 -> 24/8.
+    // S: the fields by alignment, largest first: i64 @0, i32 @8, u8 @12 -> 16/8.
     let ts = probe_ty(&p, "p_s", &mut m);
     let l = svc.layout(m, ts);
-    assert(l.ok && l.size == 24 && l.align == 8, "struct pads to the C rules");
-    // Nested: S @0 (24/8), u16 @24 -> 32/8.
+    assert(l.ok && l.size == 16 && l.align == 8, "struct orders by alignment and pads to the C rules");
+    // Nested: S @0 (16/8), u16 @16 -> 24/8.
     let tn = probe_ty(&p, "p_n", &mut m);
     let ln = svc.layout(m, tn);
-    assert(ln.ok && ln.size == 32 && ln.align == 8, "nested aggregate accumulates");
+    assert(ln.ok && ln.size == 24 && ln.align == 8, "nested aggregate accumulates");
     // U: max(8, 3) -> 8/8.
     let tu = probe_ty(&p, "p_u", &mut m);
     let lu = svc.layout(m, tu);
@@ -147,11 +147,11 @@ fn field_offsets() {
     let mut svc = lay::Svc::new(&p);
     let mut m: ModuleId = 0;
     let ts = probe_ty(&p, "p_s", &mut m);
-    assert(svc.field_offset(m, ts, field_decl(&p, m, ts, "a")) == 0, "first field at zero");
-    assert(svc.field_offset(m, ts, field_decl(&p, m, ts, "b")) == 8, "aligned to eight");
-    assert(svc.field_offset(m, ts, field_decl(&p, m, ts, "c")) == 16, "tail after the wide field");
+    assert(svc.field_offset(m, ts, field_decl(&p, m, ts, "b")) == 0, "widest alignment first");
+    assert(svc.field_offset(m, ts, field_decl(&p, m, ts, "a")) == 8, "next alignment after it");
+    assert(svc.field_offset(m, ts, field_decl(&p, m, ts, "c")) == 12, "byte field last");
     let tn = probe_ty(&p, "p_n", &mut m);
-    assert(svc.field_offset(m, tn, field_decl(&p, m, tn, "t")) == 24, "after the nested struct");
+    assert(svc.field_offset(m, tn, field_decl(&p, m, tn, "t")) == 16, "after the nested struct");
     let tu = probe_ty(&p, "p_u", &mut m);
     assert(svc.field_offset(m, tu, field_decl(&p, m, tu, "y")) == 0, "union members at zero");
     // Gen<i64>: v @0 (8), k @8.

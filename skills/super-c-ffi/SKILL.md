@@ -12,6 +12,7 @@ allowed-tools: Bash Read
 - Keep every extern call inside an explicit `unsafe` boundary, except a call of a function whose `@unsafe(...)` lists `safe`.
 - Check whether a link flag is already declared.
 - Validate opaque types against a real included C declaration.
+- Pass a struct C reads through an untyped pointer in the `extern "C"` call itself, or give it a fixed order (Field Order).
 
 Super-C interoperates with C through `extern "C"` blocks. Bindings map directly to C
 symbols with no wrapper or mangling.
@@ -288,6 +289,44 @@ struct tm { .. } }`). Read each member from the target's real headers (`clang -X
 - **Targets.** Gate a declaration with `@platform` and `@arch` where the members differ (`struct
   stat` differs on every target; glibc's x86-64 and arm64 layouts differ; wasm32's `long` is 32
   bits; Windows is LLP64).
+
+## Field Order
+
+Super-C orders the fields of a struct, a tuple and an enum payload by alignment, largest first
+(super-c-language, `references/types.md`, "Struct Layout"). C reads fields at their declared
+offsets, so these keep the declared order:
+
+- header types, unions and `@packed` structs;
+- every struct and enum that the signature of an `extern "C"` function or an `@export` function
+  reaches by value or through a pointer, a reference, a slice, an array, a function type, a tuple, a
+  type alias or a generic argument, with the types of their fields and payloads;
+- every struct and enum an argument of an `extern "C"` call points to when the parameter is `*void`
+  or the argument is a C variadic one, with the types of their fields and payloads. The compiler
+  looks through casts and `unsafe` to the argument's pointer or reference type;
+- `@ordered` structs.
+
+A type of a module the std prelude loads keeps the layout the prelude gives it: user code does not
+change it.
+
+```superc
+struct Req { pub flags: u8, pub len: u32, pub addr: u64 }
+extern "C" { fn dev_submit(fd: i32, arg: *mut void) i32; }
+unsafe dev_submit(fd, &mut r);            // Req keeps flags @0, len @4, addr @8
+```
+
+A reference or pointer converts to `*void` implicitly; a reference does not cast to `*mut void`
+directly ("cast to '*mut Req' first"). The compiler does not follow an untyped pointer stored in a
+variable or passed through a Super-C function first, and does not resolve a type parameter (a generic
+wrapper's `T`): tag such a type `@ordered`, or declare it in its header's extern block when a C header
+defines it. The same holds for a struct written as bytes (a file, a socket) and for memory read as
+another type: use `@packed` for a wire format, `@ordered` for a shared prefix. A pointer C only stores
+and gives back to Super-C (a callback context) needs nothing.
+
+Marks from call arguments are known only when the typecheck ends. If a compile-time evaluation (a
+`static_assert`, a constant, `sizeof` in an array length) already used the reordered layout, and the
+declared order changes what it read (the size, or a field offset), the build fails: "'Req' reaches C
+through an untyped pointer argument, so its fields keep their declared order, but a compile-time
+evaluation already used its reordered layout: tag it '@ordered'".
 
 ## Header Constants
 
@@ -705,5 +744,6 @@ Windows 7, whose headers hide the Windows 8 functions the runtime calls.
 | Passing a `str`'s `.ptr()` to a C path parameter | Use `.cstr()`, or `std::platform::path::native` inside std; a heap string whose allocation equals its length has no NUL after it, so failures depend on the length |
 | Inventing an opaque type name (`type CFile;`) | The name must be a real C type a header defines |
 | Mirroring a C struct as a Super-C `struct` | Declare it in the header's extern block: a header type uses the C layout and checks its fields |
+| Passing a Super-C struct to C through a `*void` variable or a Super-C wrapper | The compiler reorders its fields: pass it in the `extern "C"` call itself, declare it as a header type, or tag it `@ordered` (Field Order) |
 | A typedef'd header type declared as `struct pthread_attr_t {}` | That spells `struct pthread_attr_t`: add `@import("pthread_attr_t")` |
 | `@import` before the extern block | Put it on the `fn` inside the block |

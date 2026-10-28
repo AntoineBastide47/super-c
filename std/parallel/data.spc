@@ -105,6 +105,7 @@ pub struct ChunkEnv {
 /// borrowed-job contract), which is before the last chunk's `finish` lets the caller release the array.
 @no_const
 pub struct ChunkJob {
+    @ordered
     pub run: runtime::Runnable, // first, so a `*mut ChunkJob` is a `*mut runtime::Runnable`
     pub env: ChunkEnv,
 }

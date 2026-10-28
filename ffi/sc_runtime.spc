@@ -234,6 +234,7 @@ const fn addr_bucket(addr: *const void) usize {
 
 // The layout std/parallel/sync.spc's `LotBucket` reads.
 @align(64)
+@ordered
 struct MutexBucket {
     pub lock: i32,
     pub pad: i32,

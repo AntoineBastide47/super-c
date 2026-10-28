@@ -157,6 +157,22 @@ pub fn place_members(ms: &mut Vector<MemberAt>, from: usize, is_union: bool, siz
     return true;
 }
 
+// How many leading fields of `list` (struct members or a variant's payload) are `@ordered`.
+const fn field_prefix(ast: &Ast, list: NodeList) u32 {
+    let mut n: u32 = 0;
+    for i in 0..list.len {
+        let mid = unsafe ast.list(list)[i as usize];
+        if ast.at_const(mid).kind != NodeKind::NODE_FIELD {
+            continue;
+        }
+        if ast.attr_of(mid, AttrKind::ATTR_ORDERED) == null {
+            return n;
+        }
+        n += 1;
+    }
+    return n;
+}
+
 /// `v` rounded up to a multiple of `a` (`a` <= 1: `v`).
 pub const fn round_up(v: u64, a: u64) u64 {
     if a <= 1 {
@@ -584,15 +600,28 @@ extend Svc {
         return Layout { ok: true, size: round_up(size, align), align: align };
     }
 
-    /// How many leading fields of struct `dn` (module `dm`) keep their declared positions: all of them
-    /// (ORDER_ALL).
-    pub const fn ordered_prefix(self: &Self, _dm: ModuleId, _dn: NodeId) u32 {
-        return ORDER_ALL;
+    /// How many leading fields of struct `dn` (module `dm`) keep their declared positions: ORDER_ALL for a
+    /// union, a header type, a `@packed` or `@ordered` struct and one C code reads (`Package::c_shaped`),
+    /// else its leading `@ordered` fields. The others follow by alignment, largest first.
+    pub fn ordered_prefix(self: &Self, dm: ModuleId, dn: NodeId) u32 {
+        let ast = self.a(dm);
+        let agg = ast.at_const(dn).as_data.aggregate;
+        if agg.is_union || agg.is_extern || self.attr(dm, dn, AttrKind::ATTR_PACKED) != null || self.attr(
+            dm,
+            dn,
+            AttrKind::ATTR_ORDERED,
+        ) != null || self.p().c_shaped.contains(&(dm as u64 << 32 | dn as u64)) {
+            return ORDER_ALL;
+        }
+        return field_prefix(ast, agg.members);
     }
 
     /// `ordered_prefix` of payload `pl` of a variant of enum `dn` (module `dm`).
-    pub const fn payload_prefix(self: &Self, _dm: ModuleId, _dn: NodeId, _pl: NodeList) u32 {
-        return ORDER_ALL;
+    pub fn payload_prefix(self: &Self, dm: ModuleId, dn: NodeId, pl: NodeList) u32 {
+        if self.p().c_shaped.contains(&(dm as u64 << 32 | dn as u64)) {
+            return ORDER_ALL;
+        }
+        return field_prefix(self.a(dm), pl);
     }
 
     // The members of `list` (of declaration `dn` of module `dm`; fields alone unless `all`, a tuple's or a

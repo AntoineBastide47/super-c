@@ -53,6 +53,8 @@ extend Counting as Allocator {
     }
 }
 
+// Declared order: `followed_by` chains the fields in that order.
+@ordered
 struct Mixed {
     pub a: u8,
     pub b: u32,

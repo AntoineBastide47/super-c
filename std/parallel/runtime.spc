@@ -153,6 +153,7 @@ pub const RK_JOB: u32 = 1;
 /// Where the platform's context does not fit (ucontext, fibers) `ctx` points at a heap block instead.
 @no_const
 pub struct Coroutine {
+    @ordered
     pub run: Runnable, // first, so a `*mut Coroutine` is a `*mut Runnable`
     pub base: *mut void, // the allocation this line-aligned record lives in: see `co_alloc`
     pub ctx: *mut void, // sc_rt saved context: `&ctx_mem`, or a heap block on the fallback platforms
@@ -381,7 +382,9 @@ static mut G_STATS_EXT: SchedStats = SchedStats::zero();
 /// take from at `head` with a CAS (FIFO for everyone: see the run-queue section for why that beats the
 /// Chase-Lev owner-side pop here). Fixed capacity, which is what keeps it simple: a push that would
 /// overflow spills into the shared injection queue instead of growing the buffer under the thieves' feet.
+/// `@ordered`: the fields sit on the cache lines the comments below give.
 @no_const
+@ordered
 pub struct Worker {
     // The first line holds the ring and the owner's queue state together. Splitting `head` and `tail` onto
     // a line of their own was measured and was 12% WORSE on spawn_to_completion: a push then touches two
