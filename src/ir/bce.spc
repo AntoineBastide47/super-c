@@ -61,8 +61,9 @@ pub(package) struct Fact {
     // index key: a constant or a (local, version) value plus an affine constant offset
     pub(package) ic: i64,
     pub(package) ioff: i64,
-    // length value identity (local, version, affine offset)
+    // length value identity (local, version, affine offset), or a constant length (`lconst`)
     pub(package) ln_off: i64,
+    pub(package) lc: i64,
     pub(package) il: u32,
     pub(package) iv: u32,
     pub(package) ln_l: u32,
@@ -77,9 +78,19 @@ pub(package) struct Fact {
     pub(package) iconst: bool,
     pub(package) ln_ok: bool,
     pub(package) lp_ok: bool,
+    pub(package) lconst: bool,
+    // an index side read in place (no local holds it): its identity in `pvals`, IR_NONE else; `il`
+    // is IR_NONE then, and a later read of the place takes the fact on (`place_read`)
+    pub(package) ip: u32,
 }
 
 const MAX_EDGE_FACTS: usize = 96;
+const CMAX: i64 = 1i64 << 40; // the constants the offset rules take: no sum of two wraps an i64
+const CMIN: i64 = 0 - CMAX;
+const IV_BLOCKS_MAX: usize = 512; // the loop blocks `iv_scan` reads
+const IV_MAX: usize = 8; // the counters one header records
+const SIDE_MAX: u32 = 8; // the blocks of a branch side `phi_facts` reads
+const PVALS_MAX: usize = 64; // the places one body's facts read in place
 const MAX_TOTAL_FACTS: usize = 16384;
 
 // Per-local length bindings, stamped with the version of the OWNER local at definition time so a
@@ -111,6 +122,41 @@ pub(package) struct CmpBind {
     pub(package) ao: u32, // a comparison's operands for `a` and `b` (IR_NONE for a group)
     pub(package) bo: u32,
 }
+// `l = a == b` (`ne`: `a != b`) over integers at version `my_v`: the sides' keys and length places,
+// `uns` when they are unsigned.
+pub(package) struct EqBind {
+    pub(package) a: fx::VKey,
+    pub(package) b: fx::VKey,
+    pub(package) a_lp: LenBind,
+    pub(package) b_lp: LenBind,
+    pub(package) my_v: u32,
+    pub(package) ne: bool,
+    pub(package) uns: bool,
+    pub(package) ok: bool,
+}
+// A loop counter at a header (`iv_scan`): `l` steps by `step` (1 or -1) once per iteration, and an
+// exit test that runs before its step (`after`: after it) keeps it below `y` (`yk`, or a place the
+// loop reads into a local and does not write: `ylp`, captured on entry) while the loop runs; `ek` is
+// its key on entry, `up` whether the entry value meets the bound the loop keeps.
+// A local every write in a loop bounds (`iv_scan`): `l < n` (`strict`, a remainder) or `l <= n` (a
+// mask) at the header, where its entry value is.
+pub(package) struct IvBound {
+    pub(package) nk: fx::VKey,
+    pub(package) l: u32,
+    pub(package) strict: bool,
+}
+
+pub(package) struct IvCand {
+    pub(package) yk: fx::VKey,
+    pub(package) ek: fx::VKey,
+    pub(package) ylp: LenBind,
+    pub(package) yop: u32, // the operand that reads `ylp`'s place
+    pub(package) l: u32,
+    pub(package) step: i64,
+    pub(package) after: bool,
+    pub(package) up: bool,
+}
+
 // `l = IN_CHUNK(i, e)` at version `my_v`: `l <= e`, so a branch fact `x < l` (or `x <= l`) also
 // holds for `e`, whose key and length place are captured here. A strip-mined loop's body learns
 // its index bound through this.
@@ -148,6 +194,7 @@ pub(package) struct Bce {
     pub(package) reads: Vector<u32>, // per local of the body: the operands that read it whole (`local_reads`; empty until asked)
     pub(package) cmpof: Vector<CmpBind>,
     pub(package) remof: Vector<RemBind>,
+    pub(package) eqof: Vector<EqBind>,
     pub(package) alof: Vector<AlBind>,
     pub(package) chunks: Vector<ChunkBind>, // the body's chunk ends, few per body
     pub(package) lreads: Vector<LRead>, // the latest length reads, at most LREADS_MAX
@@ -167,6 +214,15 @@ pub(package) struct Bce {
     pub(package) in_start: Vector<u32>,
     pub(package) in_len: Vector<u32>,
     pub(package) in_set: Vector<bool>,
+    // A join takes the facts its immediate dominator holds on exit (each local written on the way
+    // has a fresh version there, so every one still holds): the exit facts of a block that is a
+    // join's immediate dominator (`jdom`) are in_facts[out_start[k] .. out_start[k] + out_len[k]].
+    pub(package) out_start: Vector<u32>,
+    pub(package) out_len: Vector<u32>,
+    pub(package) out_set: Vector<bool>,
+    pub(package) jdom: Vector<bool>,
+    pub(package) doom: Vector<bool>, // per block: `doomed_panic`, found once per body
+    pub(package) pvals: Vector<LenBind>, // the places facts read in place (`Fact.ip`), per body
     pub(package) total_facts: usize,
     pub(package) limited: bool,
     pub(package) off: bool, // SC_BCE=0
@@ -174,6 +230,36 @@ pub(package) struct Bce {
     pub(package) no_widen: bool,
     pub(package) no_sig: bool,
     pub(package) no_int: bool,
+    pub(package) no_join: bool,
+    pub(package) no_eq: bool,
+    pub(package) no_off: bool,
+    pub(package) no_iv: bool,
+    pub(package) no_bnd: bool,
+    pub(package) no_phi: bool,
+    // per local, the source keys of its last two copies and their blocks (`phi_facts`)
+    pub(package) cp1: Vector<fx::VKey>,
+    pub(package) cp2: Vector<fx::VKey>,
+    pub(package) cp1b: Vector<u32>,
+    pub(package) cp2b: Vector<u32>,
+    // `iv_scan` scratch: per local, the loop's whole writes (`ivw_n`, valid where `ivw_s` is
+    // `iv_stamp`) and the last one's block and statement; per block, `iv_stamp` in `ivin` inside a
+    // nested loop
+    pub(package) ivs: Vector<IvCand>,
+    pub(package) ivw_s: Vector<u32>,
+    pub(package) ivw_n: Vector<u32>,
+    pub(package) ivw_b: Vector<u32>,
+    pub(package) ivw_i: Vector<u32>,
+    pub(package) ivin: Vector<u32>,
+    pub(package) iv_stamp: u32,
+    // per local, the bound every write in the loop gives (`ivm_k`, valid where `ivm_s` is
+    // `iv_stamp`; `ivm_n` such writes, `ivm_bad` one gives another), and the locals seen
+    pub(package) ivm_s: Vector<u32>,
+    pub(package) ivm_k: Vector<fx::VKey>,
+    pub(package) ivm_n: Vector<u32>,
+    pub(package) ivm_bad: Vector<bool>,
+    pub(package) ivm_strict: Vector<bool>,
+    pub(package) ivm_list: Vector<u32>,
+    pub(package) ivb: Vector<IvBound>,
     // Coalescing-lookahead scratch (per try_coalesce call; kept for capacity). `cwritten[l] ==
     // cstamp` marks a local reassigned inside the current window, whose recorded binds describe its
     // OLD value; each window takes a fresh stamp, so no per-window reset touches every local.
@@ -190,6 +276,81 @@ pub(package) struct Bce {
 
 // The successor a two-way branch on a bool takes when the bool is `v`, or IR_NONE for another shape
 // (`switch t [1 -> x] otherwise y` and `switch t [0 -> y] otherwise x` both branch to x on true).
+// The relation `l OP y` an exit test's staying edge keeps, for comparison `op` with the counter on
+// `side` (1: the right operand) and the staying value `stay`.
+
+const fn stay_rel(op: u8, side: u32, stay: bool) u8 {
+    let lt = tt::TokenType::LessThan as u8;
+    let le = tt::TokenType::LessThanEqual as u8;
+    let gt = tt::TokenType::GreaterThan as u8;
+    let ge = tt::TokenType::GreaterThanEqual as u8;
+    let eq = tt::TokenType::EqualEqual as u8;
+    let ne = tt::TokenType::BangEqual as u8;
+    let mut o = op;
+    if side == 1 {
+        o = if o == lt {
+            gt;
+        } else if o == gt {
+            lt;
+        } else if o == le {
+            ge;
+        } else if o == ge {
+            le;
+        } else {
+            o;
+        };
+    }
+    if !stay {
+        o = if o == lt {
+            ge;
+        } else if o == ge {
+            lt;
+        } else if o == le {
+            gt;
+        } else if o == gt {
+            le;
+        } else if o == eq {
+            ne;
+        } else {
+            eq;
+        };
+    }
+    return o;
+}
+
+// Do keys `a` and `b` name one value?
+const fn same_key(a: &fx::VKey, b: &fx::VKey) bool {
+    if a.is_const || b.is_const {
+        return a.is_const && b.is_const && a.c == b.c;
+    }
+    return a.is_local && b.is_local && a.l == b.l && a.v == b.v && a.off == b.off;
+}
+
+// The fact `ik < lk` (kind 0) or `ik <= lk` (kind 1) over two keys, with no length place.
+const fn key_fact(kind: u8, ik: &fx::VKey, lk: &fx::VKey) Fact {
+    return Fact {
+        kind: kind,
+        iconst: ik.is_const,
+        ic: ik.c,
+        il: ik.l,
+        iv: ik.v,
+        ioff: ik.off,
+        ln_ok: lk.is_local,
+        ln_l: lk.l,
+        ln_v: lk.v,
+        ln_off: lk.off,
+        lc: lk.c,
+        lp_ok: false,
+        lp: 0,
+        lp_hg: 0,
+        lp_bg: 0,
+        lp_pg: 0,
+        lp_fg: 0,
+        lconst: lk.is_const && lk.c >= CMIN && lk.c <= CMAX,
+        ip: ir::IR_NONE,
+    };
+}
+
 const fn bool_target(b: &ir::CoreBody, t: &ir::Terminator, v: bool) u32 {
     if t.kind != ir::TM_SWITCH || t.sw_len != 1 || t.a == ir::IR_NONE {
         return ir::IR_NONE;
@@ -235,6 +396,7 @@ extend Bce {
             reads: Vector::<u32>::new(),
             cmpof: Vector::<CmpBind>::with_capacity(fx::TABLE_MIN),
             remof: Vector::<RemBind>::with_capacity(fx::TABLE_MIN),
+            eqof: Vector::<EqBind>::with_capacity(fx::TABLE_MIN),
             alof: Vector::<AlBind>::with_capacity(fx::TABLE_MIN),
             chunks: Vector::<ChunkBind>::new(),
             lreads: Vector::<LRead>::new(),
@@ -249,6 +411,12 @@ extend Bce {
             in_start: Vector::<u32>::with_capacity(fx::TABLE_MIN),
             in_len: Vector::<u32>::with_capacity(fx::TABLE_MIN),
             in_set: Vector::<bool>::with_capacity(fx::TABLE_MIN),
+            out_start: Vector::<u32>::with_capacity(fx::TABLE_MIN),
+            out_len: Vector::<u32>::with_capacity(fx::TABLE_MIN),
+            out_set: Vector::<bool>::with_capacity(fx::TABLE_MIN),
+            jdom: Vector::<bool>::with_capacity(fx::TABLE_MIN),
+            doom: Vector::<bool>::with_capacity(fx::TABLE_MIN),
+            pvals: Vector::<LenBind>::new(),
             total_facts: 0,
             limited: false,
             off: stdlib::env_is("SC_BCE", "0"),
@@ -256,6 +424,30 @@ extend Bce {
             no_widen: d.contains("widen"),
             no_sig: d.contains("sig"),
             no_int: d.contains("int"),
+            no_join: d.contains("join"),
+            no_eq: d.contains("eq"),
+            no_off: d.contains("off"),
+            no_iv: d.contains("iv"),
+            no_bnd: d.contains("bnd"),
+            no_phi: d.contains("phi"),
+            cp1: Vector::<fx::VKey>::with_capacity(fx::TABLE_MIN),
+            cp2: Vector::<fx::VKey>::with_capacity(fx::TABLE_MIN),
+            cp1b: Vector::<u32>::with_capacity(fx::TABLE_MIN),
+            cp2b: Vector::<u32>::with_capacity(fx::TABLE_MIN),
+            ivs: Vector::<IvCand>::new(),
+            ivw_s: Vector::<u32>::with_capacity(fx::TABLE_MIN),
+            ivw_n: Vector::<u32>::with_capacity(fx::TABLE_MIN),
+            ivw_b: Vector::<u32>::with_capacity(fx::TABLE_MIN),
+            ivw_i: Vector::<u32>::with_capacity(fx::TABLE_MIN),
+            ivin: Vector::<u32>::with_capacity(fx::TABLE_MIN),
+            iv_stamp: 0,
+            ivm_s: Vector::<u32>::with_capacity(fx::TABLE_MIN),
+            ivm_k: Vector::<fx::VKey>::with_capacity(fx::TABLE_MIN),
+            ivm_n: Vector::<u32>::with_capacity(fx::TABLE_MIN),
+            ivm_bad: Vector::<bool>::with_capacity(fx::TABLE_MIN),
+            ivm_strict: Vector::<bool>::with_capacity(fx::TABLE_MIN),
+            ivm_list: Vector::<u32>::new(),
+            ivb: Vector::<IvBound>::new(),
             cwritten: Vector::<u32>::with_capacity(fx::TABLE_MIN),
             cstamp: 0,
             la_dest: Vector::<u32>::new(),
@@ -417,8 +609,8 @@ extend Bce {
         }
         for i in 0..self.facts.len() {
             let f = *self.facts.at(i);
-            if f.kind != 0 && !need_le {
-                continue; // a <= fact cannot prove strict <
+            if f.kind != 0 && !need_le && !(f.iconst && ik.is_const && ik.c >= 0 && ik.c < f.ic) {
+                continue; // a <= fact proves strict < only for a smaller constant
             }
             if !self.idx_matches(&f, ik, true) {
                 continue;
@@ -431,7 +623,191 @@ extend Bce {
                 return true;
             }
         }
+        if self.const_lt(b, ik, lk, l_lp, need_le) {
+            return true;
+        }
+        return !self.no_off && self.offset_lt(b, ik, lk, l_lp, need_le);
+    }
+
+    /// `ik < lk` (`<=` with `le`) through constants: a constant bound on `ik` against a constant
+    /// `lk`, or below a constant bound on `lk` (`i < 10`, `20 < len`).
+    fn const_lt(self: &Self, b: &ir::CoreBody, ik: &fx::VKey, lk: &fx::VKey, l_lp: &LenBind, le: bool) bool {
+        if !ik.is_local {
+            return false;
+        }
+        // the least constant the facts keep `ik` at or below
+        let mut hi = CMAX + 1;
+        for i in 0..self.facts.len() {
+            let f = *self.facts.at(i);
+            if f.lconst && !f.iconst && f.il == ik.l && f.iv == ik.v && f.ioff == ik.off {
+                hi = hi.min(
+                    f.lc - if f.kind == 0 {
+                        1;
+                    } else {
+                        0;
+                    },
+                );
+            }
+        }
+        if hi > CMAX {
+            return false;
+        }
+        let need: i64 = if le {
+            0;
+        } else {
+            1;
+        };
+        if lk.is_const {
+            return hi + need <= lk.c;
+        }
+        // the greatest constant the facts keep `lk` at or above
+        for i in 0..self.facts.len() {
+            let f = *self.facts.at(i);
+            if !f.iconst || f.ic < 0 || f.ic > CMAX {
+                continue;
+            }
+            let flp = fact_lp(&f);
+            if lk.is_local && f.ln_ok && f.ln_l == lk.l && f.ln_v == lk.v && f.ln_off == lk.off || lk.off == 0 && f.lp_ok && l_lp.ok && self.lp_same(
+                b,
+                l_lp,
+                &flp,
+            ) {
+                let lo = f.ic + if f.kind == 0 {
+                    1;
+                } else {
+                    0;
+                };
+                if hi + need <= lo {
+                    return true;
+                }
+            }
+        }
         return false;
+    }
+
+    /// `ik < lk` (`ik <= lk` with `le`) from a fact over the same two values at other offsets, where
+    /// no offset sum wraps (`nowrap`): `xs[i - 1]` after `i < len` and `1 <= i`, `xs[i + 1]` after
+    /// `i < len - 1`, `xs[len - 1]` after `0 < len`.
+    fn offset_lt(self: &Self, b: &ir::CoreBody, ik: &fx::VKey, lk: &fx::VKey, l_lp: &LenBind, le: bool) bool {
+        if !ik.is_local {
+            return false;
+        }
+        let need: i64 = if le {
+            0;
+        } else {
+            1;
+        }; // ik + need <= lk
+        if lk.is_local && lk.l == ik.l && lk.v == ik.v {
+            return ik.off + need <= lk.off && self.nowrap(b, ik.l, ik.v, ik.off) && self.nowrap(b, lk.l, lk.v, lk.off);
+        }
+        if !self.nowrap(b, ik.l, ik.v, ik.off) || lk.is_local && !self.nowrap(b, lk.l, lk.v, lk.off) {
+            return false;
+        }
+        if lk.off == 0 && l_lp.ok && ik.off + need <= 0 {
+            // a value below the length it read: `len - 1` against `len`
+            let ilp = self.len_place_of(ik.l);
+            if ilp.ok && self.lp_same(b, &ilp, l_lp) {
+                return true;
+            }
+        }
+        for i in 0..self.facts.len() {
+            let f = *self.facts.at(i);
+            if f.iconst || f.il != ik.l || f.iv != ik.v {
+                continue;
+            }
+            // the fact's length side against the check's: one value at offsets, or one place
+            let mut gap: i64 = 0;
+            let flp = fact_lp(&f);
+            if lk.is_local && f.ln_ok && f.ln_l == lk.l && f.ln_v == lk.v {
+                gap = lk.off - f.ln_off;
+            } else if !(lk.off == 0 && f.ln_off == 0 && f.lp_ok && l_lp.ok && self.lp_same(b, l_lp, &flp)) {
+                continue;
+            }
+            // x + fo + fneed <= L + lo gives x + io + need <= L + lk.off when io - fo + need - fneed <= gap
+            let fneed: i64 = if f.kind == 0 {
+                1;
+            } else {
+                0;
+            };
+            if ik.off - f.ioff + need - fneed <= gap && self.nowrap(b, f.il, f.iv, f.ioff) && (!f.ln_ok || self.nowrap(
+                b,
+                f.ln_l,
+                f.ln_v,
+                f.ln_off,
+            )) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Is `(l, v) + off` computed without wrapping: a lower bound of at least `-off` below 0, a strict
+    /// bound above for `+1`?
+    fn nowrap(self: &Self, b: &ir::CoreBody, l: u32, v: u32, off: i64) bool {
+        if off == 0 {
+            return true;
+        }
+        if off < 0 {
+            return off >= 0 - CMAX && self.lower_of(b, l, v) >= 0 - off;
+        }
+        if off != 1 {
+            return false;
+        }
+        for i in 0..self.facts.len() {
+            let f = *self.facts.at(i);
+            if f.kind == 0 && !f.iconst && f.il == l && f.iv == v && f.ioff == 0 {
+                return true; // x < y: x is below the largest value
+            }
+        }
+        return false;
+    }
+
+    /// The least value `(l, v)` holds here: 0 for an unsigned type, raised by the facts `c <= x`,
+    /// `c < x`, `y < x` (an unsigned `y`) and the solved interval; CMIN when unknown.
+    fn lower_of(self: &Self, b: &ir::CoreBody, l: u32, v: u32) i64 {
+        let uns = self.uns_ty(b, b.locals.at(l as usize).ty);
+        let mut lo = if uns {
+            0i64;
+        } else {
+            CMIN;
+        };
+        // the length a read of it holds, which a fact can name by place
+        let lpl = if self.fx.ver(l) == v {
+            self.len_place_of(l);
+        } else {
+            lenbind_none();
+        };
+        for i in 0..self.facts.len() {
+            let f = *self.facts.at(i);
+            let flp = fact_lp(&f);
+            if !(f.ln_ok && f.ln_l == l && f.ln_v == v && f.ln_off == 0 || lpl.ok && f.lp_ok && f.ln_off == 0 && self.lp_same(
+                b,
+                &lpl,
+                &flp,
+            )) {
+                continue;
+            }
+            let strict: i64 = if f.kind == 0 {
+                1;
+            } else {
+                0;
+            };
+            if f.iconst && f.ic >= 0 && f.ic <= CMAX {
+                lo = lo.max(f.ic + strict);
+            } else if !f.iconst && f.ip == ir::IR_NONE && strict == 1 && f.ioff == 0 && self.uns_ty(
+                b,
+                b.locals.at(f.il as usize).ty,
+            ) {
+                lo = lo.max(1);
+            }
+        }
+        if self.fx.ion && self.fx.ver(l) == v {
+            let it = self.fx.ilocal(l);
+            if !it.ln && it.lo <= CMAX as u64 {
+                lo = lo.max(it.lo as i64);
+            }
+        }
+        return lo;
     }
 
     /// `@noreturn` on the callee decl: the call is a trap terminator.
@@ -447,7 +823,12 @@ extend Bce {
     /// ends in a trap (an unreachable terminator or a direct `@noreturn` call). Statements on
     /// the way may only be storage markers or pure whole-local RV_USE/RV_REF assigns and
     /// qualified type names (a message naming a type).
-    fn doomed_panic(self: &Self, b: &ir::CoreBody, blk0: u32) bool {
+    const fn doomed_panic(self: &Self, blk0: u32) bool {
+        return self.doom[blk0 as usize];
+    }
+
+    /// `doomed_panic` computed for block `blk0` (`doom` caches it per body).
+    fn doom_scan(self: &Self, b: &ir::CoreBody, blk0: u32) bool {
         let mut cur = blk0;
         let mut guard = 0;
         while guard < 4 {
@@ -491,13 +872,167 @@ extend Bce {
         if t.kind != ir::TM_SWITCH || t.sw_len != 1 || t.a == ir::IR_NONE || b.switch_pool[t.sw_start as usize] >> 32 != 1 {
             return false;
         }
-        return self.doomed_panic(b, (b.switch_pool[t.sw_start as usize] & 0xFFFFFFFFu64) as u32) || self.doomed_panic(
-            b,
-            t.t0,
-        );
+        return self.doomed_panic((b.switch_pool[t.sw_start as usize] & 0xFFFFFFFFu64) as u32) || self.doomed_panic(t.t0);
     }
 
     // ---- fact recording ------------------------------------------------------------------------
+
+    /// Fold the branch of block `blk` (terminator `t`) whose condition always has the value `dir`
+    /// names (1 true, 2 false) when the other edge only panics: a goto that keeps the condition
+    /// operand in `a`, the doomed block in `args_start` and `dir` in `args_len`, so the SC_CORE_IR
+    /// re-proof can prove it again.
+    fn fold_to(self: &Self, b: &mut ir::CoreBody, blk: u32, t: &mut ir::Terminator, dir: u32, st: &mut BceStats) {
+        let tt9 = (b.switch_pool[t.sw_start as usize] & 0xFFFFFFFFu64) as u32;
+        let doomed = if dir == 1 {
+            t.t0;
+        } else {
+            tt9;
+        };
+        let survivor = if dir == 1 {
+            tt9;
+        } else {
+            t.t0;
+        };
+        if !self.doomed_panic(doomed) {
+            return;
+        }
+        t.kind = ir::TM_GOTO;
+        t.t0 = survivor;
+        t.args_start = doomed;
+        t.args_len = dir;
+        t.sw_len = 0;
+        b.blocks[blk as usize].term = *t;
+        st.folded += 1;
+    }
+
+    /// Does the equality binding `eb` always have value `v` here: `a == b` false where one side is
+    /// below the other, true where each is at most the other?
+    fn eq_always(self: &Self, b: &ir::CoreBody, eb: &EqBind, v: bool) bool {
+        if v != eb.ne {
+            return self.fold_proved(b, &eb.a, &eb.b, &eb.b_lp, true) && self.fold_proved(
+                b,
+                &eb.b,
+                &eb.a,
+                &eb.a_lp,
+                true,
+            );
+        }
+        return self.fold_proved(b, &eb.a, &eb.b, &eb.b_lp, false) || self.fold_proved(b, &eb.b, &eb.a, &eb.a_lp, false);
+    }
+
+    /// Push the edge fact `p < rk` (`<=` with `le`) whose index side is place `p` read in place.
+    fn place_fact(self: &mut Self, le: bool, p: &LenBind, rk: &fx::VKey, rlp: &LenBind, st0: usize) {
+        if self.in_facts.len() - st0 >= MAX_EDGE_FACTS {
+            return;
+        }
+        let mut k = ir::IR_NONE;
+        for i in 0..self.pvals.len() {
+            if self.lp_same_at(&self.pvals[i], p) {
+                k = i as u32;
+                break;
+            }
+        }
+        if k == ir::IR_NONE {
+            if self.pvals.len() >= PVALS_MAX {
+                return;
+            }
+            k = self.pvals.len() as u32;
+            self.pvals.push(*p);
+        }
+        let none = fx::VKey { is_const: false, c: 0, is_local: false, l: ir::IR_NONE, v: 0, off: 0 };
+        let kind: u8 = if le {
+            1;
+        } else {
+            0;
+        };
+        let mut f = key_fact(kind, &none, rk);
+        f.ip = k;
+        if rlp.ok && rk.off == 0 {
+            f.lp_ok = true;
+            f.lp = rlp.pl;
+            f.lp_hg = rlp.hg;
+            f.lp_bg = rlp.bg;
+            f.lp_pg = rlp.pg;
+            f.lp_fg = rlp.fg;
+        }
+        self.in_facts.push(f);
+    }
+
+    /// Two place identities with the same place and generations (no body needed: `places_eq` is
+    /// left to the read that matches, `place_read`).
+    const fn lp_same_at(self: &Self, x: &LenBind, y: &LenBind) bool {
+        return x.pl == y.pl && x.hg == y.hg && x.bg == y.bg && x.pg == y.pg && x.fg == y.fg;
+    }
+
+    /// `d = copy p` read place `p` (identity `rp`): the facts over `p` read in place hold for `d`.
+    fn place_read(self: &mut Self, b: &ir::CoreBody, rp: &LenBind, d: u32, dv: u32) {
+        if self.pvals.len() == 0 {
+            return;
+        }
+        let n = self.facts.len();
+        for i in 0..n {
+            let mut f = self.facts[i];
+            if f.ip == ir::IR_NONE || !self.lp_same(b, &self.pvals[f.ip as usize], rp) {
+                continue;
+            }
+            f.ip = ir::IR_NONE;
+            f.il = d;
+            f.iv = dv;
+            f.ioff = 0;
+            self.push_fact(f);
+        }
+    }
+
+    /// Record that block `cur_blk` wrote local `l` last with a copy of `k` (none: another write).
+    fn note_copy(self: &mut Self, l: u32, k: &fx::VKey) {
+        if self.cp1b[l as usize] == self.cur_blk {
+            self.cp1.set(l as usize, *k); // the block's last write
+            return;
+        }
+        self.cp2.set(l as usize, self.cp1[l as usize]);
+        self.cp2b.set(l as usize, self.cp1b[l as usize]);
+        self.cp1.set(l as usize, *k);
+        self.cp1b.set(l as usize, self.cur_blk);
+    }
+
+    /// Restate the facts over value `(l, v)` over `(d, dv)`, which holds the same value.
+    fn rename_facts(self: &mut Self, l: u32, v: u32, d: u32, dv: u32) {
+        let n = self.facts.len();
+        for i in 0..n {
+            let mut f = self.facts[i];
+            let on_i = !f.iconst && f.il == l && f.iv == v;
+            let on_l = f.ln_ok && f.ln_l == l && f.ln_v == v;
+            if !on_i && !on_l {
+                continue;
+            }
+            if on_i {
+                f.il = d;
+                f.iv = dv;
+            }
+            if on_l {
+                f.ln_l = d;
+                f.ln_v = dv;
+            }
+            self.push_fact(f);
+        }
+    }
+
+    /// Push `ik < lk` (kind 0) or `ik <= lk` (kind 1) where the length side is a value or a place.
+    fn stmt_fact(self: &mut Self, kind: u8, ik: &fx::VKey, lk: &fx::VKey, lp: &LenBind) {
+        if !lk.is_local && !lk.is_const && !lp.ok || ik.is_const && lk.is_const {
+            return;
+        }
+        let mut f = key_fact(kind, ik, lk);
+        if lp.ok && lk.off == 0 {
+            f.lp_ok = true;
+            f.lp = lp.pl;
+            f.lp_hg = lp.hg;
+            f.lp_bg = lp.bg;
+            f.lp_pg = lp.pg;
+            f.lp_fg = lp.fg;
+        }
+        self.push_fact(f);
+    }
 
     fn push_fact(self: &mut Self, f: Fact) {
         if self.facts.len() >= MAX_EDGE_FACTS || self.total_facts >= MAX_TOTAL_FACTS {
@@ -533,12 +1068,15 @@ extend Bce {
                 ln_l: lk.l,
                 ln_v: lk.v,
                 ln_off: lk.off,
+                lc: lk.c,
                 lp_ok: lp.ok,
                 lp: lp.pl,
                 lp_hg: lp.hg,
                 lp_bg: lp.bg,
                 lp_pg: lp.pg,
                 lp_fg: lp.fg,
+                lconst: lk.is_const && lk.c >= CMIN && lk.c <= CMAX,
+                ip: ir::IR_NONE,
             },
         );
     }
@@ -619,6 +1157,26 @@ extend Bce {
         return self.int_ty(b, b.locals.at(l as usize).ty);
     }
 
+    /// The whole local operand `opid` reads, or IR_NONE.
+    const fn op_local(self: &Self, b: &ir::CoreBody, opid: u32) u32 {
+        let op = *b.operands.at(opid as usize);
+        if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
+            return ir::IR_NONE;
+        }
+        return self.fx.whole_local(b, op.data);
+    }
+
+    /// Is `t` an unsigned integer type?
+    const fn uns_ty(self: &Self, b: &ir::CoreBody, t: TypeId) bool {
+        if t == TYPE_NONE {
+            return false;
+        }
+        let y = *(unsafe &*(&*self.fx.pkg).module_ast_const(b.module)).type_at(t);
+        return y.kind == TypeKind::TYPE_BUILTIN && bt_int_width(y.as_data.builtin, false) != 0 && bt_is_unsigned(
+            y.as_data.builtin,
+        );
+    }
+
     const fn int_ty(self: &Self, b: &ir::CoreBody, t: TypeId) bool {
         if t == TYPE_NONE {
             return false;
@@ -648,7 +1206,8 @@ extend Bce {
         }
         for i in 0..self.facts.len() {
             let f = *self.facts.at(i);
-            if f.kind != 0 {
+            // `c <= len` proves a constant index below `c`
+            if f.kind != 0 && !(f.iconst && ik.is_const && ik.c >= 0 && ik.c < f.ic) {
                 continue;
             }
             if self.idx_matches(&f, &ik, true) && (self.len_matches(b, &f, lop) || f.ln_ok && f.ln_off == 0 && self.le_len(
@@ -658,6 +1217,27 @@ extend Bce {
                 lop,
                 1,
             )) {
+                return true;
+            }
+        }
+        if !self.no_off {
+            // the length's place: the read its local holds
+            let llp = if lk.is_local && lk.off == 0 {
+                self.len_place_of(lk.l);
+            } else {
+                lenbind_none();
+            };
+            if self.offset_lt(b, &ik, &lk, &llp, false) {
+                return true;
+            }
+        }
+        if !self.no_off {
+            let llp = if lk.is_local && lk.off == 0 {
+                self.len_place_of(lk.l);
+            } else {
+                lenbind_none();
+            };
+            if self.const_lt(b, &ik, &lk, &llp, false) {
                 return true;
             }
         }
@@ -695,7 +1275,21 @@ extend Bce {
     /// Is index `ik` an unsigned value of fewer bits cast up, whole, so that it stays below the
     /// constant length `len` (a `u8` index into 256 elements)?
     fn narrow_below(self: &Self, b: &ir::CoreBody, ik: &fx::VKey, len: i64) bool {
-        if !ik.is_local || ik.off != 0 || ik.l as usize >= self.fx.ndef.len() || self.fx.ndef[ik.l as usize] != 1 {
+        if !ik.is_local || ik.off != 0 {
+            return false;
+        }
+        // the key's own narrower unsigned type (a widening cast keys as its source)
+        let t0 = b.locals.at(ik.l as usize).ty;
+        if t0 != TYPE_NONE {
+            let y0 = *(unsafe &*(&*self.fx.pkg).module_ast_const(b.module)).type_at(t0);
+            if y0.kind == TypeKind::TYPE_BUILTIN && bt_is_unsigned(y0.as_data.builtin) {
+                let w0 = bt_int_width(y0.as_data.builtin, false);
+                if w0 != 0 && w0 < 40 && 1i64 << w0 as i64 <= len {
+                    return true;
+                }
+            }
+        }
+        if ik.l as usize >= self.fx.ndef.len() || self.fx.ndef[ik.l as usize] != 1 {
             return false;
         }
         let rv = *b.rvalues.at(b.statements.at(self.fx.def1[ik.l as usize] as usize).rvalue as usize);
@@ -1358,8 +1952,8 @@ extend Bce {
         }
         let ca = pick(swap, rv.b, rv.a);
         let cb = pick(swap, rv.a, rv.b);
-        let d_false = self.doomed_panic(b, t.t0);
-        let d_true = self.doomed_panic(b, tt9);
+        let d_false = self.doomed_panic(t.t0);
+        let d_true = self.doomed_panic(tt9);
         if d_false && !d_true && !le {
             *iop = ca;
             *lop = cb;
@@ -1865,11 +2459,547 @@ extend Bce {
         return members;
     }
     /// DropCtx emits.
+    /// At join `j` of two forward edges from the branch of its immediate dominator `d` on `a < b`
+    /// (or `a <= b`): a local each side copies, `a` on the true side and `b` on the false one, is
+    /// their minimum (`l <= a`, `l <= b`); swapped, their maximum.
+    fn phi_facts(self: &mut Self, b: &ir::CoreBody, j: u32, d: u32) {
+        let t = b.blocks.at(d as usize).term;
+        let tt9 = bool_target(b, &t, true);
+        let ft9 = bool_target(b, &t, false);
+        if self.fx.fwd[j as usize] != 2 || self.fx.npred[j as usize] != 2 || tt9 == ir::IR_NONE || ft9 == ir::IR_NONE {
+            return;
+        }
+        let ck = self.vkey(b, t.a);
+        if !ck.is_local || ck.off != 0 {
+            return;
+        }
+        let cb = *self.cmpof.at(ck.l as usize);
+        if !cb.ok || cb.my_v != ck.v || cb.w != 0 || !cb.a.is_local || !cb.b.is_local {
+            return;
+        }
+        // each predecessor's chain of one-predecessor blocks back to its side's first block
+        let p0 = self.fx.plist[self.fx.pstart[j as usize] as usize];
+        let p1 = self.fx.plist[self.fx.pstart[j as usize] as usize + 1];
+        let pt = if self.side_of(p0, tt9) {
+            p0;
+        } else {
+            p1;
+        };
+        let pf = if pt == p0 {
+            p1;
+        } else {
+            p0;
+        };
+        if !self.side_of(pt, tt9) || !self.side_of(pf, ft9) {
+            return;
+        }
+        // the locals the true side's chain writes, from its last block back
+        let mut x = pt;
+        for _g in 0..SIDE_MAX {
+            let bt = *b.blocks.at(x as usize);
+            for si in 0..bt.stmt_len {
+                let s9 = *b.statements.at((bt.stmt_start + si) as usize);
+                if s9.kind == ir::ST_ASSIGN {
+                    self.phi_local(&cb, pt, pf, self.fx.whole_local(b, s9.place));
+                }
+            }
+            if x == tt9 {
+                break;
+            }
+            x = self.fx.plist[self.fx.pstart[x as usize] as usize];
+        }
+    }
+
+    /// The minimum (maximum) rule of `phi_facts` for local `l`, written on the sides ending in `pt`
+    /// (true) and `pf` (false) of comparison `cb`.
+    fn phi_local(self: &mut Self, cb: &CmpBind, pt: u32, pf: u32, l: u32) {
+        if l == ir::IR_NONE {
+            return;
+        }
+        // the last copy into `l` on each side
+        let kt = self.side_copy(pt, l);
+        let kf = self.side_copy(pf, l);
+        if !kt.is_local || !kf.is_local {
+            return;
+        }
+        let lj = fx::VKey { is_const: false, c: 0, is_local: true, l: l, v: self.fx.ver(l), off: 0 };
+        if same_key(&kt, &cb.a) && same_key(&kf, &cb.b) {
+            self.stmt_fact(1, &lj, &cb.a, &cb.a_lp);
+            self.stmt_fact(1, &lj, &cb.b, &cb.b_lp);
+        } else if same_key(&kt, &cb.b) && same_key(&kf, &cb.a) {
+            let nlp = lenbind_none();
+            self.stmt_fact(1, &cb.a, &lj, &nlp);
+            self.stmt_fact(1, &cb.b, &lj, &nlp);
+        }
+    }
+
+    /// Is block `p` side target `s` or reached from it through blocks of one predecessor (at most
+    /// SIDE_MAX)?
+    const fn side_of(self: &Self, p: u32, s: u32) bool {
+        let mut x = p;
+        for _g in 0..SIDE_MAX {
+            if x == s {
+                return true;
+            }
+            if self.fx.npred[x as usize] != 1 {
+                return false;
+            }
+            x = self.fx.plist[self.fx.pstart[x as usize] as usize];
+        }
+        return x == s;
+    }
+
+    /// The source key of the last copy into local `l` the walk recorded in a block of the chain of
+    /// one-predecessor blocks ending in `p` (at most SIDE_MAX blocks back), or none.
+    const fn side_copy(self: &Self, p: u32, l: u32) fx::VKey {
+        let mut x = p;
+        for _g in 0..SIDE_MAX {
+            if self.cp1b[l as usize] == x {
+                return self.cp1[l as usize];
+            }
+            if self.cp2b[l as usize] == x {
+                return self.cp2[l as usize];
+            }
+            if self.fx.npred[x as usize] != 1 {
+                break;
+            }
+            x = self.fx.plist[self.fx.pstart[x as usize] as usize];
+        }
+        return fx::vkey_none();
+    }
+
+    /// Find the counters of the loop at header `h` (its blocks in `fx.lblocks`, versions not yet
+    /// bumped) into `ivs`: an unsigned local whose one write in the loop is `l = l + 1` (or `l - 1`),
+    /// outside every nested loop, and an exit test outside them that compares it with a constant or
+    /// a value the loop does not write, whose staying edge, of one predecessor, keeps it below
+    /// (`stay_rel`: `<` or `!=` for a step up, `>` or `!= 0` for a step down). Before the step, the
+    /// staying edge dominates the step and the step every back edge; after it (a step up), the step
+    /// dominates the test and the staying edge every back edge.
+    fn iv_scan(self: &mut Self, b: &mut ir::CoreBody, h: u32) {
+        self.ivs.clear();
+        self.ivb.clear();
+        self.ivm_list.clear();
+        let nlb = self.fx.lblocks.len();
+        if self.no_iv || nlb > IV_BLOCKS_MAX {
+            return;
+        }
+        self.fx.build_doms(b);
+        if !self.fx.dom_ok {
+            return;
+        }
+        self.iv_stamp += 1;
+        let st = self.iv_stamp;
+        // the loop's whole-local writes; a call's destination counts as two
+        for q in 0..nlb {
+            let x = self.fx.lblocks[q];
+            let bb = *b.blocks.at(x as usize);
+            for si in 0..bb.stmt_len {
+                let s9 = *b.statements.at((bb.stmt_start + si) as usize);
+                if s9.kind == ir::ST_ASSIGN {
+                    self.iv_write(b, s9.place, 1, x, bb.stmt_start + si);
+                    self.iv_bound_write(b, s9.place, s9.rvalue);
+                }
+            }
+            if bb.term.kind == ir::TM_CALL {
+                for k in 0..bb.term.dests_len {
+                    self.iv_write(b, b.dest_pool[(bb.term.dests_start + k) as usize], 2, x, 0);
+                }
+            }
+        }
+        // the blocks of nested loops: back from each inner back edge's source to its header
+        for k in 0..self.fx.backs.len() {
+            let e9 = self.fx.backs[k];
+            let g = (e9 & 0xFFFFFFFFu64) as u32;
+            if g == h || self.fx.lmark[g as usize] != self.fx.lstamp {
+                continue;
+            }
+            self.ivin.set(g as usize, st);
+            self.fx.dstk.clear();
+            self.fx.dstk.push((e9 >> 32) as u32);
+            for _s in 0..nlb {
+                if self.fx.dstk.len() == 0 {
+                    break;
+                }
+                let x = self.fx.dstk.pop().unwrap();
+                if self.ivin[x as usize] == st || self.fx.lmark[x as usize] != self.fx.lstamp {
+                    continue;
+                }
+                self.ivin.set(x as usize, st);
+                for pk in self.fx.pstart[x as usize]..self.fx.pstart[x as usize + 1] {
+                    self.fx.dstk.push(self.fx.plist[pk as usize]);
+                }
+            }
+        }
+        // locals every write bounds by one value the loop leaves
+        for i in 0..self.ivm_list.len() {
+            let l = self.ivm_list[i];
+            let nk = self.ivm_k[l as usize];
+            if self.ivm_bad[l as usize] || self.ivm_n[l as usize] != self.ivw_n[l as usize] || self.fx.exposed[l as usize] || self.ivb.len() >= IV_MAX || self.ivw_s[nk.l as usize] == st || self.fx.exposed[nk.l as usize] {
+                continue;
+            }
+            let ek = self.fx.local_key(l);
+            let nlp = self.len_place_of(nk.l);
+            let strict = self.ivm_strict[l as usize];
+            if self.fold_proved(b, &ek, &nk, &nlp, !strict) {
+                self.ivb.push(IvBound { nk: nk, l: l, strict: strict });
+            }
+        }
+        for q in 0..nlb {
+            let e = self.fx.lblocks[q];
+            let t = b.blocks.at(e as usize).term;
+            if t.kind != ir::TM_SWITCH || t.sw_len != 1 || t.a == ir::IR_NONE || b.switch_pool[t.sw_start as usize] >> 32 != 1 || self.ivin[e as usize] == st {
+                continue;
+            }
+            let tt9 = (b.switch_pool[t.sw_start as usize] & 0xFFFFFFFFu64) as u32;
+            let in_t = self.fx.lmark[tt9 as usize] == self.fx.lstamp;
+            if in_t == (self.fx.lmark[t.t0 as usize] == self.fx.lstamp) {
+                continue; // no edge leaves the loop, or none stays
+            }
+            let stay = if in_t {
+                tt9;
+            } else {
+                t.t0;
+            };
+            let c = self.op_local(b, t.a);
+            if c == ir::IR_NONE || self.fx.npred[stay as usize] != 1 || c as usize >= self.fx.def1.len() || self.fx.def1[c as usize] == ir::IR_NONE {
+                continue;
+            }
+            let rv = *b.rvalues.at(b.statements.at(self.fx.def1[c as usize] as usize).rvalue as usize);
+            if rv.kind != ir::RV_BINARY || rv.c < tt::TokenType::EqualEqual as u8 || rv.c > tt::TokenType::GreaterThanEqual as u8 {
+                continue;
+            }
+            for side in 0..2u32 {
+                let io = if side == 0 {
+                    rv.a;
+                } else {
+                    rv.b;
+                };
+                let yo = if side == 0 {
+                    rv.b;
+                } else {
+                    rv.a;
+                };
+                self.iv_try(b, h, e, stay, stay_rel(rv.c, side, in_t), io, yo);
+            }
+        }
+    }
+
+    /// Record the bound a loop write `pl = rv` gives an unsigned local (`x % n`: below `n`, `x & m`:
+    /// at most `m`, through one temporary): one value for every write, else none.
+    fn iv_bound_write(self: &mut Self, b: &ir::CoreBody, pl: u32, rvid: u32) {
+        let d = self.fx.whole_local(b, pl);
+        if d == ir::IR_NONE || !self.uns_ty(b, b.locals.at(d as usize).ty) {
+            return;
+        }
+        let mut rv = *b.rvalues.at(rvid as usize);
+        if rv.kind == ir::RV_USE {
+            let t = self.op_local(b, rv.a);
+            if t != ir::IR_NONE && t as usize < self.fx.def1.len() && self.fx.def1[t as usize] != ir::IR_NONE {
+                rv = *b.rvalues.at(b.statements.at(self.fx.def1[t as usize] as usize).rvalue as usize);
+            }
+        }
+        let op = fx::norm_op(rv.c);
+        let strict = op == tt::TokenType::Percent as u8;
+        let nk = if rv.kind == ir::RV_BINARY && (strict || op == tt::TokenType::Ampersand as u8) {
+            self.vkey(b, rv.b);
+        } else {
+            fx::vkey_none();
+        };
+        let st = self.iv_stamp;
+        if self.ivm_s[d as usize] != st {
+            self.ivm_s.set(d as usize, st);
+            self.ivm_k.set(d as usize, nk);
+            self.ivm_n.set(d as usize, 0);
+            self.ivm_strict.set(d as usize, strict);
+            self.ivm_bad.set(d as usize, !nk.is_local);
+            if self.ivm_list.len() < IV_BLOCKS_MAX {
+                self.ivm_list.push(d);
+            } else {
+                self.ivm_bad.set(d as usize, true);
+            }
+        } else if !same_key(&self.ivm_k[d as usize], &nk) || self.ivm_strict[d as usize] != strict {
+            self.ivm_bad.set(d as usize, true);
+        }
+        self.ivm_n.set(d as usize, self.ivm_n[d as usize] + 1);
+    }
+
+    /// Record a whole write of place `pl` (`n` writes) in the loop `iv_scan` reads.
+    fn iv_write(self: &mut Self, b: &ir::CoreBody, pl: u32, n: u32, blk: u32, sid: u32) {
+        let d = self.fx.whole_local(b, pl);
+        if d == ir::IR_NONE {
+            return;
+        }
+        if self.ivw_s[d as usize] != self.iv_stamp {
+            self.ivw_s.set(d as usize, self.iv_stamp);
+            self.ivw_n.set(d as usize, 0);
+        }
+        self.ivw_n.set(d as usize, self.ivw_n[d as usize] + n);
+        self.ivw_b.set(d as usize, blk);
+        self.ivw_i.set(d as usize, sid);
+    }
+
+    /// A counter read by operand `io` of exit test `e` (staying edge `stay`, which keeps `io rel yo`).
+    fn iv_try(self: &mut Self, b: &mut ir::CoreBody, h: u32, e: u32, stay: u32, rel: u8, io: u32, yo: u32) {
+        let l = self.op_local(b, io);
+        let st = self.iv_stamp;
+        if l == ir::IR_NONE || self.ivs.len() >= IV_MAX || self.ivw_s[l as usize] != st || self.ivw_n[l as usize] != 1 || self.fx.exposed[l as usize] || !self.uns_ty(
+            b,
+            b.locals.at(l as usize).ty,
+        ) {
+            return;
+        }
+        let ib = self.ivw_b[l as usize];
+        let mut srv = *b.rvalues.at(b.statements.at(self.ivw_i[l as usize] as usize).rvalue as usize);
+        if srv.kind == ir::RV_USE {
+            // `t = l + 1; l = t`: the step through a temporary written once
+            let t = self.op_local(b, srv.a);
+            if t != ir::IR_NONE && t as usize < self.fx.def1.len() && self.fx.def1[t as usize] != ir::IR_NONE {
+                srv = *b.rvalues.at(b.statements.at(self.fx.def1[t as usize] as usize).rvalue as usize);
+            }
+        }
+        if self.ivin[ib as usize] == st || srv.kind != ir::RV_BINARY || self.op_local(b, srv.a) != l {
+            return;
+        }
+        let one = *b.operands.at(srv.b as usize);
+        if one.kind != ir::OP_CONST || b.constants.at(one.data as usize).kind != ir::CK_INT || b.constants.at(
+            one.data as usize,
+        ).val != 1 {
+            return;
+        }
+        let step: i64 = if srv.c == tt::TokenType::Plus as u8 || srv.c == tt::TokenType::PlusEqual as u8 {
+            1;
+        } else if srv.c == tt::TokenType::Minus as u8 || srv.c == tt::TokenType::MinusEqual as u8 {
+            -1;
+        } else {
+            0;
+        };
+        // the bound: a constant, a local the loop does not write, or a place the loop reads into a
+        // local each iteration (whether the loop leaves it, `iv_facts` checks)
+        let mut yk = self.vkey(b, yo);
+        let yl = self.op_local(b, yo);
+        let mut ylp = lenbind_none();
+        let mut yopid = ir::IR_NONE;
+        if !yk.is_const && (yl == ir::IR_NONE || !yk.is_local || self.ivw_s[yl as usize] == st || self.fx.exposed[yl as usize]) {
+            // through at most one more copy the loop makes
+            let mut x = yl;
+            let mut pop = ir::IR_NONE;
+            for _g in 0..2 {
+                if x == ir::IR_NONE || self.ivw_s[x as usize] != st || self.ivw_n[x as usize] != 1 || self.fx.exposed[x as usize] {
+                    return;
+                }
+                let yrv = *b.rvalues.at(b.statements.at(self.ivw_i[x as usize] as usize).rvalue as usize);
+                let yop = *b.operands.at(yrv.a as usize);
+                if yrv.kind != ir::RV_USE || yop.kind != ir::OP_COPY && yop.kind != ir::OP_MOVE {
+                    return;
+                }
+                if b.places.at(yop.data as usize).proj_len != 0 {
+                    pop = yrv.a;
+                    break;
+                }
+                x = self.fx.whole_local(b, yop.data);
+            }
+            if pop == ir::IR_NONE {
+                return;
+            }
+            ylp = self.oper_len_lp(b, pop);
+            if !ylp.ok {
+                return;
+            }
+            yopid = pop;
+            yk = fx::vkey_none();
+        }
+        let before = self.fx.dominates(stay, ib) && self.dominates_latches(ib, h);
+        let after = step == 1 && self.fx.dominates(ib, e) && self.dominates_latches(stay, h);
+        let ne = rel == tt::TokenType::BangEqual as u8;
+        let ok = if step == 1 {
+            (before || after) && (rel == tt::TokenType::LessThan as u8 || ne && before);
+        } else if step == -1 {
+            before && (rel == tt::TokenType::GreaterThan as u8 || ne && yk.is_const && yk.c == 0);
+        } else {
+            false;
+        };
+        if !ok {
+            return;
+        }
+        let ek = self.vkey(b, io); // the counter's value on entry (not yet bumped)
+        let mut up = false;
+        if step == 1 {
+            let nlp = lenbind_none();
+            up = ek.is_const && yk.is_const && ek.c >= 0 && (ek.c < yk.c || !after && ek.c == yk.c) || ek.is_const && ek.c == 0 && !after || self.fold_proved(
+                b,
+                &ek,
+                &yk,
+                if ylp.ok {
+                    &ylp;
+                } else {
+                    &nlp;
+                },
+                !after,
+            );
+        }
+        self.ivs.push(
+            IvCand { yk: yk, ek: ek, ylp: ylp, yop: yopid, l: l, step: step, after: after && !before, up: up },
+        );
+    }
+
+    /// Does block `x` dominate every back edge's source into header `h`?
+    fn dominates_latches(self: &Self, x: u32, h: u32) bool {
+        for k in 0..self.fx.backs.len() {
+            let e9 = self.fx.backs[k];
+            if (e9 & 0xFFFFFFFFu64) as u32 == h && !self.fx.dominates(x, (e9 >> 32) as u32) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// The facts each counter `iv_scan` found holds at its header, over its fresh version: a step up
+    /// keeps `entry <= l` and, where the entry meets it, `l <= y` (`l < y` with the test after the
+    /// step); a step down keeps `l <= entry`.
+    fn iv_facts(self: &mut Self, b: &mut ir::CoreBody) {
+        if self.fx.lkilled {
+            return;
+        }
+        for i in 0..self.ivb.len() {
+            let c = self.ivb[i];
+            let lh = fx::VKey { is_const: false, c: 0, is_local: true, l: c.l, v: self.fx.ver(c.l), off: 0 };
+            let nlp = self.len_place_of(c.nk.l);
+            let kind: u8 = if c.strict {
+                0;
+            } else {
+                1;
+            };
+            self.stmt_fact(kind, &lh, &c.nk, &nlp);
+        }
+        for i in 0..self.ivs.len() {
+            let c = self.ivs[i];
+            let lh = fx::VKey { is_const: false, c: 0, is_local: true, l: c.l, v: self.fx.ver(c.l), off: 0 };
+            if c.step == 1 {
+                if c.ek.is_local || c.ek.is_const && c.ek.c > 0 && c.ek.c <= CMAX {
+                    self.push_fact(key_fact(1, &c.ek, &lh));
+                }
+                let kind: u8 = if c.after {
+                    0;
+                } else {
+                    1;
+                };
+                if c.up && c.yk.is_local {
+                    self.push_fact(key_fact(kind, &lh, &c.yk));
+                } else if c.up && c.ylp.ok {
+                    // a place the loop's bumps left as it was on entry
+                    let now = self.oper_len_lp(b, c.yop);
+                    if self.lp_same(b, &now, &c.ylp) {
+                        let none = fx::vkey_none();
+                        let mut f = key_fact(kind, &lh, &none);
+                        f.lp_ok = true;
+                        f.lp = now.pl;
+                        f.lp_hg = now.hg;
+                        f.lp_bg = now.bg;
+                        f.lp_pg = now.pg;
+                        f.lp_fg = now.fg;
+                        self.push_fact(f);
+                    }
+                }
+            } else if c.ek.is_local {
+                // `l <= n`, and by the place `n` read when it holds a length
+                let mut f = key_fact(1, &lh, &c.ek);
+                let lp = if c.ek.off == 0 && self.fx.ver(c.ek.l) == c.ek.v {
+                    self.len_place_of(c.ek.l);
+                } else {
+                    lenbind_none();
+                };
+                if lp.ok {
+                    f.lp_ok = true;
+                    f.lp = lp.pl;
+                    f.lp_hg = lp.hg;
+                    f.lp_bg = lp.bg;
+                    f.lp_pg = lp.pg;
+                    f.lp_fg = lp.fg;
+                }
+                self.push_fact(f);
+            }
+        }
+    }
+
+    /// Push the facts an edge on which condition operand `opid` has value `val` gives, from
+    /// `in_facts[st0]` on: an order (`a < b`, `a <= b`) or its negation, an equality as two `<=`
+    /// facts, a disequality as a strict bound (`0 < x` for an unsigned `x != 0`, `a < b` where
+    /// `a <= b` holds), and `!c` as `c` with the other value.
+    fn cond_facts(self: &mut Self, b: &ir::CoreBody, opid: u32, val: bool, st0: usize, depth: u32) {
+        let ck = self.vkey(b, opid);
+        self.cond_key_facts(b, &ck, val, st0, depth);
+    }
+
+    /// `cond_facts` for the condition's value key `ck`.
+    fn cond_key_facts(self: &mut Self, b: &ir::CoreBody, ck: &fx::VKey, val: bool, st0: usize, depth: u32) {
+        if !ck.is_local || ck.off != 0 {
+            return;
+        }
+        let cb = *self.cmpof.at(ck.l as usize);
+        if cb.ok && cb.my_v == ck.v {
+            if !val {
+                // `!(a < b)` is `b <= a`, `!(a <= b)` is `b < a`
+                if cb.w == 0 && (cb.b.is_const || cb.b.is_local) && (cb.a.is_local && self.int_local(b, cb.a.l) || !cb.a.is_local && cb.a_lp.ok || cb.a.is_const) {
+                    self.edge_fact(!cb.le, cb.b, cb.a, cb.a_lp, st0);
+                } else if cb.w == 0 && !cb.b.is_const && !cb.b.is_local && cb.b_lp.ok && (cb.a.is_local || cb.a_lp.ok || cb.a.is_const) {
+                    self.place_fact(!cb.le, &cb.b_lp, &cb.a, &cb.a_lp, st0);
+                }
+            } else if cb.w > 0 && cb.a.is_local && (cb.b.is_local || cb.b_lp.ok) {
+                // a widened guard: every member offset is below the length
+                for k in 0..cb.w {
+                    let mut ak = cb.a;
+                    ak.off = cb.a.off + k;
+                    self.edge_fact(false, ak, cb.b, cb.b_lp, st0);
+                }
+            } else if cb.w == 0 && !cb.a.is_const && !cb.a.is_local && cb.a_lp.ok && (cb.b.is_local || cb.b_lp.ok || cb.b.is_const) {
+                self.place_fact(cb.le, &cb.a_lp, &cb.b, &cb.b_lp, st0);
+            } else if cb.w == 0 && (cb.a.is_const || cb.a.is_local) && (cb.b.is_local || cb.b_lp.ok || cb.b.is_const) {
+                self.edge_fact(cb.le, cb.a, cb.b, cb.b_lp, st0); // the length place, captured at the comparison
+                if cb.b.is_local && cb.b.off == 0 {
+                    // `x < lim` with `lim = IN_CHUNK(i, e)`: also `x < e`
+                    for ci in 0..self.chunks.len() {
+                        let ch = self.chunks[ci];
+                        if ch.l == cb.b.l && ch.my_v == cb.b.v && ch.e.is_local {
+                            self.edge_fact(cb.le, cb.a, ch.e, ch.e_lp, st0);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        let eb = *self.eqof.at(ck.l as usize);
+        if eb.ok && eb.my_v == ck.v {
+            if val != eb.ne {
+                if (eb.a.is_const || eb.a.is_local) && (eb.b.is_local || eb.b_lp.ok || eb.b.is_const) {
+                    self.edge_fact(true, eb.a, eb.b, eb.b_lp, st0);
+                }
+                if (eb.b.is_const || eb.b.is_local) && (eb.a.is_local || eb.a_lp.ok || eb.a.is_const) {
+                    self.edge_fact(true, eb.b, eb.a, eb.a_lp, st0);
+                }
+            } else if eb.uns && eb.b.is_const && eb.b.c == 0 && (eb.a.is_local || eb.a_lp.ok) {
+                self.edge_fact(false, eb.b, eb.a, eb.a_lp, st0);
+            } else if eb.uns && eb.a.is_const && eb.a.c == 0 && (eb.b.is_local || eb.b_lp.ok) {
+                self.edge_fact(false, eb.a, eb.b, eb.b_lp, st0);
+            } else if eb.a.is_local && eb.b.is_local && self.fold_proved(b, &eb.a, &eb.b, &eb.b_lp, true) {
+                self.edge_fact(false, eb.a, eb.b, eb.b_lp, st0);
+            } else if eb.a.is_local && eb.b.is_local && self.fold_proved(b, &eb.b, &eb.a, &eb.a_lp, true) {
+                self.edge_fact(false, eb.b, eb.a, eb.a_lp, st0);
+            }
+            return;
+        }
+        if depth == 0 && ck.l as usize < self.fx.def1.len() && self.fx.def1[ck.l as usize] != ir::IR_NONE {
+            let rv = *b.rvalues.at(b.statements.at(self.fx.def1[ck.l as usize] as usize).rvalue as usize);
+            if rv.kind == ir::RV_UNARY && rv.b == tt::TokenType::Bang as u32 {
+                self.cond_facts(b, rv.a, !val, st0, 1);
+            }
+        }
+    }
+
     // Push the true-edge fact of comparison `cb` with its right side read as `rk` (length place
     // `lp`; a value key only when `rk` is a local), within the edge's fact budget (the edge's facts
     // start at `st0`).
     fn edge_fact(self: &mut Self, le: bool, ik: fx::VKey, rk: fx::VKey, lp: LenBind, st0: usize) {
-        if self.in_facts.len() - st0 >= MAX_EDGE_FACTS {
+        if self.in_facts.len() - st0 >= MAX_EDGE_FACTS || ik.is_const && rk.is_const {
             return;
         }
         self.in_facts.push(
@@ -1888,22 +3018,25 @@ extend Bce {
                 ln_l: rk.l,
                 ln_v: rk.v,
                 ln_off: rk.off,
+                lc: rk.c,
                 lp_ok: lp.ok,
                 lp: lp.pl,
                 lp_hg: lp.hg,
                 lp_bg: lp.bg,
                 lp_pg: lp.pg,
                 lp_fg: lp.fg,
+                lconst: rk.is_const && rk.c >= CMIN && rk.c <= CMAX,
+                ip: ir::IR_NONE,
             },
         );
     }
 
-    /// The short-circuit join `j` of `a && b` entered from `blk` (which computed `t = b`): `j` (and
-    /// the single-predecessor gotos after it) only copy `t` and branch on it, and every other
-    /// predecessor enters `j` on the false edge of a branch on `t`. Then the branch's true successor
-    /// runs only after `blk` with `b` true: returns that successor (one predecessor, not yet filled)
-    /// and sets `*tl` to `t`; IR_NONE else.
-    fn and_join(self: &Self, b: &ir::CoreBody, blk: u32, j: u32, tl: &mut u32) u32 {
+    /// The short-circuit join `j` of `a && b` (`pol` true; `a || b` with `pol` false) entered from
+    /// `blk` (which computed `t = b`): `j` (and the single-predecessor gotos after it) only copy `t`
+    /// and branch on it, and every other predecessor enters `j` on the `!pol` edge of a branch on
+    /// `t`. Then the branch's `pol` successor runs only after `blk` with `b == pol`: returns that
+    /// successor (one predecessor, not yet filled) and sets `*tl` to `t`; IR_NONE else.
+    fn and_join(self: &Self, b: &ir::CoreBody, blk: u32, j: u32, tl: &mut u32, pol: bool) u32 {
         if self.fx.fwd[j as usize] < 2 || self.fx.npred[j as usize] != self.fx.fwd[j as usize] {
             return ir::IR_NONE;
         }
@@ -1929,7 +3062,7 @@ extend Bce {
             return ir::IR_NONE;
         }
         let jt = b.blocks.at(cur as usize).term;
-        let tt9 = bool_target(b, &jt, true);
+        let tt9 = bool_target(b, &jt, pol);
         if tt9 == ir::IR_NONE || self.fx.npred[tt9 as usize] != 1 || self.in_set[tt9 as usize] {
             return ir::IR_NONE;
         }
@@ -1989,7 +3122,7 @@ extend Bce {
                 continue;
             }
             let pt = b.blocks.at(p as usize).term;
-            if bool_target(b, &pt, false) != j || bool_target(b, &pt, true) == j {
+            if bool_target(b, &pt, !pol) != j || bool_target(b, &pt, pol) == j {
                 return ir::IR_NONE;
             }
             let po = *b.operands.at(pt.a as usize);
@@ -2037,7 +3170,32 @@ extend Bce {
                 },
             );
             self.remof.push(RemBind { x: fx::vkey_none(), x_lp: lenbind_none(), c: 0, my_v: 0, ok: false });
+            self.eqof.push(
+                EqBind {
+                    a: fx::vkey_none(),
+                    b: fx::vkey_none(),
+                    a_lp: lenbind_none(),
+                    b_lp: lenbind_none(),
+                    my_v: 0,
+                    ne: false,
+                    uns: false,
+                    ok: false,
+                },
+            );
             self.alof.push(AlBind { st: 0, my_v: 0 });
+            self.ivw_s.push(0);
+            self.ivw_n.push(0);
+            self.ivw_b.push(0);
+            self.ivw_i.push(0);
+            self.ivm_s.push(0);
+            self.ivm_k.push(fx::vkey_none());
+            self.ivm_n.push(0);
+            self.ivm_bad.push(false);
+            self.ivm_strict.push(false);
+            self.cp1.push(fx::vkey_none());
+            self.cp2.push(fx::vkey_none());
+            self.cp1b.push(ir::IR_NONE);
+            self.cp2b.push(ir::IR_NONE);
         }
         self.facts.clear();
         self.in_facts.clear();
@@ -2047,6 +3205,43 @@ extend Bce {
         self.in_len.resize_default(nb);
         self.in_set.clear();
         self.in_set.resize_default(nb);
+        self.out_start.clear();
+        self.out_start.resize_default(nb);
+        self.out_len.clear();
+        self.out_len.resize_default(nb);
+        self.out_set.clear();
+        self.out_set.resize_default(nb);
+        self.jdom.clear();
+        self.jdom.resize_default(nb);
+        // the panic shape of each two-way branch's targets, the only blocks it is asked of
+        self.pvals.clear();
+        self.doom.clear();
+        self.doom.resize_default(nb);
+        for x in 0..nb {
+            let t = b.blocks.at(x).term;
+            if t.kind == ir::TM_SWITCH && t.sw_len == 1 && t.a != ir::IR_NONE {
+                let tt9 = (b.switch_pool[t.sw_start as usize] & 0xFFFFFFFFu64) as u32;
+                let d1 = self.doom_scan(b, tt9);
+                let d0 = self.doom_scan(b, t.t0);
+                self.doom.set(tt9 as usize, d1);
+                self.doom.set(t.t0 as usize, d0);
+            }
+        }
+        while self.ivin.len() < nb {
+            self.ivin.push(0);
+        }
+        for l in 0..nl {
+            self.cp1b.set(l, ir::IR_NONE);
+            self.cp2b.set(l, ir::IR_NONE);
+        }
+        if !self.no_join {
+            for i in 1..self.fx.rpo.len() {
+                let x = self.fx.rpo[i] as usize;
+                if self.fx.fwd[x] >= 2 && self.fx.idom[x] != ir::IR_NONE {
+                    self.jdom.set(self.fx.idom[x] as usize, true);
+                }
+            }
+        }
         self.total_facts = 0;
         self.limited = false;
         self.cwritten.clear();
@@ -2281,10 +3476,30 @@ extend Bce {
         let mut cao = ir::IR_NONE; // a comparison's canonical operands
         let mut cbo = ir::IR_NONE;
         let is_cmp = rv.kind == ir::RV_BINARY && (rv.c == tt::TokenType::LessThan as u8 || rv.c == tt::TokenType::LessThanEqual as u8 || rv.c == tt::TokenType::GreaterThan as u8 || rv.c == tt::TokenType::GreaterThanEqual as u8);
+        let is_eq = !self.no_eq && rv.kind == ir::RV_BINARY && (rv.c == tt::TokenType::EqualEqual as u8 || rv.c == tt::TokenType::BangEqual as u8) && self.int_ty(
+            b,
+            b.operands.at(rv.a as usize).ty,
+        );
         // the alignment pattern `a - a % c` exists only in a body with a remainder by a constant
         let is_rem = self.fx.grem && rv.kind == ir::RV_BINARY && (rv.c == op9 || rv.c == tt::TokenType::PercentEqual as u8) && usz;
         let is_sub = self.fx.grem && rv.kind == ir::RV_BINARY && (rv.c == tt::TokenType::Minus as u8 || rv.c == tt::TokenType::MinusEqual as u8) && usz;
         let mut flp = lenbind_none();
+        // `d = a % n`, `a / c`, `a >> c`, `a & m` over unsigned values: bounded by a side
+        let rop = fx::norm_op(rv.c);
+        let is_bnd = !self.no_bnd && dest != ir::IR_NONE && rv.kind == ir::RV_BINARY && (rop == op9 || rop == tt::TokenType::Slash as u8 || rop == tt::TokenType::RightShift as u8 || rop == tt::TokenType::Ampersand as u8) && self.uns_ty(
+            b,
+            rv.target,
+        );
+        let mut bk1 = fx::vkey_none();
+        let mut bk2 = fx::vkey_none();
+        let mut blp1 = lenbind_none();
+        let mut blp2 = lenbind_none();
+        if is_bnd {
+            bk1 = self.vkey(b, rv.a);
+            bk2 = self.vkey(b, rv.b);
+            blp1 = self.oper_len_lp(b, rv.a);
+            blp2 = self.oper_len_lp(b, rv.b);
+        }
         if dest != ir::IR_NONE {
             if rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_CHUNK {
                 let eop = b.oper_pool[(rv.a + 1) as usize];
@@ -2326,6 +3541,11 @@ extend Bce {
                     }
                 }
                 le = rv.c == tt::TokenType::LessThanEqual as u8 || rv.c == tt::TokenType::GreaterThanEqual as u8;
+            } else if is_eq {
+                ck = self.vkey(b, rv.a);
+                ck2 = self.vkey(b, rv.b);
+                lp1 = self.oper_len_lp(b, rv.a);
+                lp2 = self.oper_len_lp(b, rv.b);
             } else if is_rem || is_sub {
                 ck = self.vkey(b, rv.a);
                 ck2 = self.vkey(b, rv.b);
@@ -2339,6 +3559,12 @@ extend Bce {
                 }
             }
         }
+        // a copy's source key, for the joins its block reaches (`phi_facts`)
+        let cpk = if dest != ir::IR_NONE && (rv.kind == ir::RV_USE || self.fx.widen_cast(b, &rv)) {
+            self.vkey(b, rv.a);
+        } else {
+            fx::vkey_none();
+        };
         // the write
         self.fx.apply_stmt(b, &stm);
         self.fx.istep(b, sid);
@@ -2346,6 +3572,35 @@ extend Bce {
             return;
         }
         let dv = self.fx.ver(dest);
+        if flp.ok {
+            self.place_read(b, &flp, dest, dv);
+        }
+        self.note_copy(dest, &cpk); // another write records no source
+        if self.fx.cast_prev != ir::IR_NONE {
+            self.rename_facts(self.fx.cast_prev, self.fx.cast_prev_v, dest, dv);
+        }
+        if is_bnd {
+            let dk = fx::VKey { is_const: false, c: 0, is_local: true, l: dest, v: dv, off: 0 };
+            if rop == op9 {
+                self.stmt_fact(0, &dk, &bk2, &blp2); // a remainder by zero traps
+            } else {
+                // `a / c` (`c >= 2`) and `a >> c` (`c >= 1`) lie below a positive `a`
+                let shrink = (rop == tt::TokenType::Slash as u8 && bk2.is_const && bk2.c >= 2 || rop == tt::TokenType::RightShift as u8 && bk2.is_const && bk2.c >= 1) && (bk1.is_const && bk1.c >= 1 || bk1.is_local && bk1.off == 0 && self.lower_of(
+                    b,
+                    bk1.l,
+                    bk1.v,
+                ) >= 1);
+                let kind: u8 = if shrink {
+                    0;
+                } else {
+                    1;
+                };
+                self.stmt_fact(kind, &dk, &bk1, &blp1);
+                if rop == tt::TokenType::Ampersand as u8 {
+                    self.stmt_fact(1, &dk, &bk2, &blp2);
+                }
+            }
+        }
         if rv.kind == ir::RV_INTRINSIC && rv.c == ir::IN_CHUNK {
             self.chunks.push(ChunkBind { e: ck, e_lp: lp1, l: dest, my_v: dv });
         } else if rv.kind == ir::RV_LEN {
@@ -2355,6 +3610,21 @@ extend Bce {
             self.cmpof.set(
                 dest as usize,
                 CmpBind { a: ck, b: ck2, a_lp: lp1, b_lp: lp2, le: le, my_v: dv, ok: true, w: gw, ao: cao, bo: cbo },
+            );
+        } else if is_eq {
+            let uns = self.uns_ty(b, b.operands.at(rv.a as usize).ty);
+            self.eqof.set(
+                dest as usize,
+                EqBind {
+                    a: ck,
+                    b: ck2,
+                    a_lp: lp1,
+                    b_lp: lp2,
+                    my_v: dv,
+                    ne: rv.c == tt::TokenType::BangEqual as u8,
+                    uns: uns,
+                    ok: true,
+                },
             );
         } else if is_rem {
             if ck2.is_const && ck2.c > 0 {
@@ -2383,12 +3653,15 @@ extend Bce {
                             ln_l: ck.l,
                             ln_v: ck.v,
                             ln_off: ck.off,
+                            lc: 0,
                             lp_ok: lp.ok,
                             lp: lp.pl,
                             lp_hg: lp.hg,
                             lp_bg: lp.bg,
                             lp_pg: lp.pg,
                             lp_fg: lp.fg,
+                            lconst: false,
+                            ip: ir::IR_NONE,
                         },
                     );
                 }
@@ -2476,9 +3749,23 @@ pub(package) fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut B
     if !any {
         return "";
     }
+
     z.begin_body(b, pkg);
     // the integer facts serve the checks and the panic guards, solved on demand: a body without a
-    // length comparison they can use allocates no solver state
+    // length comparison they can use allocates no solver state; a guard against a constant of 2 or
+    // more (an inlined `Array::index`) seeds them
+    for i in 0..nb {
+        if z.fold_site(b, i as u32) {
+            let ck = z.fx.vkey(b, b.blocks.at(i).term.a);
+            if ck.is_local && ck.off == 0 && ck.l as usize < z.fx.def1.len() && z.fx.def1[ck.l as usize] != ir::IR_NONE {
+                let rv = *b.rvalues.at(b.statements.at(z.fx.def1[ck.l as usize] as usize).rvalue as usize);
+                if rv.kind == ir::RV_BINARY && (z.fx.const_ge2(b, rv.a) || z.fx.const_ge2(b, rv.b)) {
+                    z.fx.gmark.set(ck.l as usize, z.fx.gstamp);
+                    z.fx.gcount += 1;
+                }
+            }
+        }
+    }
     z.iwant = !z.no_int && z.fx.want_ints(b);
     z.itried = false;
     z.ialign = false;
@@ -2495,14 +3782,27 @@ pub(package) fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut B
     for bi in 0..end {
         let blk = z.fx.rpo[bi] as usize;
         z.facts.clear();
+        let mut jphi = ir::IR_NONE; // a join's immediate dominator
         if z.in_set[blk] {
             let s0 = z.in_start[blk] as usize;
-            for i in s0..s0 + z.in_len[blk] as usize {
-                let f0 = z.in_facts[i];
-                z.facts.push(f0);
-            }
+            z.facts.extend_from_slice(z.in_facts.as_slice()[s0..s0 + z.in_len[blk] as usize]);
+        } else if z.fx.fwd[blk] >= 2 && z.fx.idom[blk] != ir::IR_NONE && z.out_set[z.fx.idom[blk] as usize] {
+            let d = z.fx.idom[blk] as usize;
+            let s0 = z.out_start[d] as usize;
+            z.facts.extend_from_slice(z.in_facts.as_slice()[s0..s0 + z.out_len[d] as usize]);
+            jphi = d as u32;
         }
-        z.fx.enter_block(b, blk as u32);
+        z.fx.enter_block(blk as u32);
+        if jphi != ir::IR_NONE && !z.no_phi {
+            z.phi_facts(b, blk as u32, jphi);
+        }
+        if z.fx.is_header(blk as u32) {
+            // the loop's counters, read with their entry keys before the loop's writes are bumped
+            z.fx.loop_scan(blk as u32);
+            z.iv_scan(b, blk as u32);
+            z.fx.loop_bump(b);
+            z.iv_facts(b);
+        }
         z.fx.ienter(b, blk as u32);
         let bb = *b.blocks.at(blk);
         z.cur_blk = blk as u32;
@@ -2522,7 +3822,8 @@ pub(package) fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut B
                     // the condition is a canonical `a OP b`; a proof of it (or of its negation)
                     // whose doomed successor is a pure panic shape folds the branch away
                     let mut dir: u32 = 0;
-                    if check_only || z.no_fold {
+                    // only a branch with a panic on one side folds or widens: no proof else
+                    if check_only || z.no_fold || !z.doomed_panic(ft9) && !z.doomed_panic(tt9) {
                         // no fold here: skip the proof
                     } else if z.fold_proved(b, &cb.a, &cb.b, &cb.b_lp, cb.le) {
                         dir = 1; // always true
@@ -2545,33 +3846,27 @@ pub(package) fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut B
                         z.glp = lenbind_none();
                     }
                     if dir != 0 {
-                        let doomed = if dir == 1 {
-                            ft9;
-                        } else {
-                            tt9;
-                        };
-                        let survivor = if dir == 1 {
-                            tt9;
-                        } else {
-                            ft9;
-                        };
-                        if z.doomed_panic(b, doomed) {
-                            // the folded goto keeps the condition operand in `a`, the doomed block
-                            // in args_start and the proof direction in args_len so SC_CORE_IR mode
-                            // can re-prove the fold like a PROVEN check
-                            t.kind = ir::TM_GOTO;
-                            t.t0 = survivor;
-                            t.args_start = doomed;
-                            t.args_len = dir;
-                            t.sw_len = 0;
-                            b.blocks[blk].term = t;
-                            st.folded += 1;
-                        }
+                        z.fold_to(b, blk as u32, &mut t, dir, st);
                     } else if !check_only && !z.no_fold && !z.no_widen {
                         let n9 = z.try_widen(b, blk as u32, ck.l, &cb);
                         if n9 != 0 {
                             st.coalesced += n9;
                             t = b.blocks[blk].term;
+                        }
+                    }
+                } else if !check_only && !z.no_fold && !z.no_eq {
+                    // an equality guard: false where one side is below the other
+                    let eb = *z.eqof.at(ck.l as usize);
+                    if eb.ok && eb.my_v == ck.v {
+                        let dir = if z.doomed_panic(ft9) && z.eq_always(b, &eb, true) {
+                            1u32;
+                        } else if z.doomed_panic(tt9) && z.eq_always(b, &eb, false) {
+                            2u32;
+                        } else {
+                            0u32;
+                        };
+                        if dir != 0 {
+                            z.fold_to(b, blk as u32, &mut t, dir, st);
                         }
                     }
                 }
@@ -2582,7 +3877,10 @@ pub(package) fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut B
             let mut ok9 = false;
             if ck.is_local && ck.off == 0 {
                 let cb = *z.cmpof.at(ck.l as usize);
-                if cb.ok && cb.my_v == ck.v {
+                let eb = *z.eqof.at(ck.l as usize);
+                if eb.ok && eb.my_v == ck.v {
+                    ok9 = z.eq_always(b, &eb, t.args_len == 1);
+                } else if cb.ok && cb.my_v == ck.v {
                     ok9 = if t.args_len == 1 {
                         z.fold_proved(b, &cb.a, &cb.b, &cb.b_lp, cb.le);
                     } else {
@@ -2616,6 +3914,15 @@ pub(package) fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut B
         if z.fx.apply_term(b, &t, pure) && !check_only {
             st.sig_kept += 1;
         }
+        if t.kind == ir::TM_CALL {
+            let none = fx::vkey_none();
+            for k in 0..t.dests_len {
+                let dl = z.fx.whole_local(b, b.dest_pool[(t.dests_start + k) as usize]);
+                if dl != ir::IR_NONE {
+                    z.note_copy(dl, &none); // a call's result is no copy
+                }
+            }
+        }
         if recv != ir::IR_NONE {
             let dl = z.fx.whole_local(b, b.dest_pool[t.dests_start as usize]);
             if dl != ir::IR_NONE {
@@ -2624,9 +3931,27 @@ pub(package) fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut B
             }
         }
         z.fx.leave_block(blk as u32);
-        // facts flow along the edge into a block with one forward predecessor
+        if z.jdom[blk] {
+            z.out_start.set(blk, z.in_facts.len() as u32);
+            z.in_facts.extend_copy(&z.facts);
+            z.out_len.set(blk, z.facts.len() as u32);
+            z.out_set.set(blk, true);
+        }
+        // facts flow along the edge into a block with one forward predecessor (a switch on a literal
+        // has its live edge only: `ir::const_switch_edge`)
         let mut succ0 = ir::IR_NONE;
         let mut succ_true = ir::IR_NONE;
+        let mut ce = ir::IR_NONE; // the live target of a switch on a literal
+        if t.kind == ir::TM_SWITCH {
+            let k = ir::const_switch_edge(b, blk as u32);
+            if k != ir::IR_NONE {
+                ce = if k < t.sw_len {
+                    (b.switch_pool[(t.sw_start + k) as usize] & 0xFFFFFFFFu64) as u32;
+                } else {
+                    t.t0;
+                };
+            }
+        }
         if t.kind == ir::TM_GOTO || t.kind == ir::TM_CALL || t.kind == ir::TM_DROP || t.kind == ir::TM_ASSERT {
             succ0 = t.t0;
         } else if t.kind == ir::TM_SWITCH {
@@ -2637,83 +3962,48 @@ pub(package) fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut B
                 succ0 = bool_target(b, &t, false);
             }
         }
-        if succ0 != ir::IR_NONE && z.flows(blk as u32, succ0) {
+        if succ0 != ir::IR_NONE && (ce == ir::IR_NONE || ce == succ0) && z.flows(blk as u32, succ0) {
             let st0 = z.in_facts.len();
-            for i in 0..z.facts.len() {
-                let f0 = *z.facts.at(i);
-                z.in_facts.push(f0);
-            }
-            // a branch condition on its false edge: `!(a < b)` is `b <= a`, `!(a <= b)` is `b < a`
+            z.in_facts.extend_copy(&z.facts);
+            // a branch condition on its false edge, an assertion's on success
             if succ_true != ir::IR_NONE {
-                let ck = z.vkey(b, t.a);
-                if ck.is_local {
-                    let cb = *z.cmpof.at(ck.l as usize);
-                    if cb.ok && cb.my_v == ck.v && cb.w == 0 && (cb.b.is_const || cb.b.is_local) && (cb.a.is_local && z.int_local(
-                        b,
-                        cb.a.l,
-                    ) || !cb.a.is_local && cb.a_lp.ok) {
-                        z.edge_fact(!cb.le, cb.b, cb.a, cb.a_lp, st0);
-                    }
-                }
+                z.cond_facts(b, t.a, false, st0, 0);
+            } else if t.kind == ir::TM_ASSERT && !z.no_eq {
+                z.cond_facts(b, t.a, true, st0, 0);
             }
             z.in_start.set(succ0 as usize, st0 as u32);
             z.in_len.set(succ0 as usize, (z.in_facts.len() - st0) as u32);
             z.in_set.set(succ0 as usize, true);
         }
-        if succ_true != ir::IR_NONE && z.flows(blk as u32, succ_true) {
+        if succ_true != ir::IR_NONE && (ce == ir::IR_NONE || ce == succ_true) && z.flows(blk as u32, succ_true) {
             let st0 = z.in_facts.len();
-            for i in 0..z.facts.len() {
-                let f0 = *z.facts.at(i);
-                z.in_facts.push(f0);
-            }
+            z.in_facts.extend_copy(&z.facts);
             let st_i = succ_true as usize;
-            // the branch condition itself, on its true edge: `a < b` (or `a <= b`)
-            let ck = z.vkey(b, t.a);
-            if ck.is_local {
-                let cb = *z.cmpof.at(ck.l as usize);
-                if cb.ok && cb.my_v == ck.v && cb.w > 0 && cb.a.is_local && (cb.b.is_local || cb.b_lp.ok) {
-                    // a widened guard: every member offset is below the length
-                    for k in 0..cb.w {
-                        let mut ak = cb.a;
-                        ak.off = cb.a.off + k;
-                        z.edge_fact(false, ak, cb.b, cb.b_lp, st0);
-                    }
-                } else if cb.ok && cb.my_v == ck.v && cb.w == 0 && (cb.a.is_const || cb.a.is_local) && (cb.b.is_local || cb.b_lp.ok) {
-                    let lp = cb.b_lp; // captured at the comparison, so never stale here
-                    z.edge_fact(cb.le, cb.a, cb.b, lp, st0);
-                    if cb.b.is_local && cb.b.off == 0 {
-                        // `x < lim` with `lim = IN_CHUNK(i, e)`: also `x < e`
-                        for ci in 0..z.chunks.len() {
-                            let ch = z.chunks[ci];
-                            if ch.l == cb.b.l && ch.my_v == cb.b.v && ch.e.is_local {
-                                z.edge_fact(cb.le, cb.a, ch.e, ch.e_lp, st0);
-                            }
-                        }
-                    }
-                }
-            }
+            // the branch condition itself, on its true edge
+            z.cond_facts(b, t.a, true, st0, 0);
             z.in_start.set(st_i, st0 as u32);
             z.in_len.set(st_i, (z.in_facts.len() - st0) as u32);
             z.in_set.set(st_i, true);
         }
         // `a && b`: the join's true edge is reachable with a true condition from this block only
+        // (`a || b`: its false edge with a false one)
         let mut tl = ir::IR_NONE;
-        let tj = if t.kind == ir::TM_GOTO {
-            z.and_join(b, blk as u32, t.t0, &mut tl);
+        let mut pol = true;
+        let mut tj = if t.kind == ir::TM_GOTO {
+            z.and_join(b, blk as u32, t.t0, &mut tl, true);
         } else {
             ir::IR_NONE;
         };
+        if tj == ir::IR_NONE && t.kind == ir::TM_GOTO && !z.no_eq {
+            pol = false;
+            tj = z.and_join(b, blk as u32, t.t0, &mut tl, false);
+        }
         if tj != ir::IR_NONE {
             let st0 = z.in_facts.len();
-            for i in 0..z.facts.len() {
-                let f0 = *z.facts.at(i);
-                z.in_facts.push(f0);
-            }
+            z.in_facts.extend_copy(&z.facts);
             let tr = z.fx.copy_root(tl);
-            let cb = *z.cmpof.at(tr as usize);
-            if cb.ok && cb.my_v == z.fx.ver(tr) && cb.w == 0 && (cb.a.is_const || cb.a.is_local) && cb.b.is_local {
-                z.edge_fact(cb.le, cb.a, cb.b, cb.b_lp, st0);
-            }
+            let ck = fx::VKey { is_const: false, c: 0, is_local: true, l: tr, v: z.fx.ver(tr), off: 0 };
+            z.cond_key_facts(b, &ck, pol, st0, 0);
             z.in_start.set(tj as usize, st0 as u32);
             z.in_len.set(tj as usize, (z.in_facts.len() - st0) as u32);
             z.in_set.set(tj as usize, true);

@@ -1019,3 +1019,381 @@ fn exit_cases_01() {
     safety_reassigned_view(&mut b);
     b.run();
 }
+
+// The proof rules over joins, comparison kinds, constant bounds, bounded values, value numbering,
+// offsets and loop counters: each function `removal_by_rule` lists proves every check (the others
+// before `keep_` hold the shapes it does not prove), each `keep_` function keeps its own (a check
+// the program needs).
+const RULES: str = M"(pub struct Cur {
+    pub buf: Vector<u8>,
+    pub pos: usize,
+}
+@noinline
+pub fn bump(c: &mut Cur) {
+    c.pos += 1;
+}
+@noinline
+pub fn shrink(v: &mut Vector<i32>) {
+    let _ = v.pop();
+}
+@used @noinline
+pub fn join_access(xs: []i32) i32 {
+    let mut t = 0;
+    for i in 0..xs.len() {
+        if t > 100 {
+            t = 0;
+        }
+        t += xs[i];
+    }
+    return t;
+}
+@used @noinline
+pub fn eq_len(a: []i32, b: []i32) i32 {
+    if a.len() != b.len() {
+        return 0;
+    }
+    let mut t = 0;
+    for i in 0..a.len() {
+        t += a[i] * b[i];
+    }
+    return t;
+}
+@used @noinline
+pub fn last_nonempty(xs: []i32) i32 {
+    if xs.is_empty() {
+        return 0;
+    }
+    return xs[0] + xs[xs.len() - 1];
+}
+@used @noinline
+pub fn assert_guard(xs: []i32, i: usize) i32 {
+    assert(i < xs.len());
+    return xs[i];
+}
+@used @noinline
+pub fn array_const(a: &Array<i32, 8>, i: usize) i32 {
+    let mut t = a[i & 7] + a[i % 8];
+    for k in 0..8usize {
+        t += a[k];
+    }
+    return t;
+}
+@used @noinline
+pub fn derived_index(xs: []i32, i: usize) i32 {
+    if xs.len() == 0 {
+        return 0;
+    }
+    let mut t = xs[i % xs.len()];
+    for k in 0..xs.len() {
+        t += xs[k / 2];
+    }
+    return t;
+}
+@used @noinline
+pub fn cursor(c: &Cur) u8 {
+    if c.pos < c.buf.len() {
+        return c.buf[c.pos];
+    }
+    return 0;
+}
+@used @noinline
+pub fn sub_views(xs: []i32, n: usize) i32 {
+    if n > xs.len() || xs.len() < 3 {
+        return 0;
+    }
+    let s = xs[..n];
+    let mut t = 0;
+    for i in 0..n {
+        t += s[i];
+    }
+    for i in 0..xs.len() - 2 {
+        let w = xs[i..i + 3];
+        t += w[0] + w[1] + w[2];
+    }
+    return t;
+}
+@used @noinline
+pub fn min_len(a: []i32, b: []i32) i32 {
+    let n = a.len().min(b.len());
+    let mut t = 0;
+    for i in 0..n {
+        t += a[i] * b[i];
+    }
+    return t;
+}
+@used @noinline
+pub fn or_return(xs: []i32, i: usize, j: usize) i32 {
+    if i >= xs.len() || j >= xs.len() {
+        return 0;
+    }
+    return xs[i] + xs[j];
+}
+@used @noinline
+pub fn pairs(xs: []i32) i32 {
+    let mut t = 0;
+    for i in 0..xs.len() / 2 {
+        t += xs[2 * i] + xs[2 * i + 1];
+    }
+    for i in 1..xs.len() {
+        t += xs[i - 1];
+    }
+    return t;
+}
+@used @noinline
+pub fn loops(xs: []i32, start: usize) i32 {
+    let mut t = 0;
+    let mut i = xs.len();
+    while i > 0 {
+        i -= 1;
+        t += xs[i];
+    }
+    let mut j: usize = 0;
+    while j != xs.len() {
+        t += xs[j];
+        j += 1;
+    }
+    if xs.len() != 0 {
+        let mut k = start % xs.len();
+        for _r in 0..xs.len() {
+            t += xs[k];
+            k = (k + 1) % xs.len();
+        }
+    }
+    return t;
+}
+@used @noinline
+pub fn switches(xs: []i32, a: &Array<i32, 4>, i: usize) i32 {
+    let x = switch xs.len() {
+        0 => 0,
+        1 => xs[0],
+        _ => xs[1],
+    };
+    return x + switch i {
+        0..=3 => a[i],
+        _ => -1,
+    };
+}
+@used @noinline
+pub fn casts_and_bridges(xs: []i32, i: usize, i0: usize) i32 {
+    let mut t = 0;
+    for k in 0u32..xs.len() as u32 {
+        t += xs[k as usize];
+    }
+    if i < 10 && xs.len() > 20 {
+        t += xs[i];
+    }
+    if xs.is_empty() {
+        return t;
+    }
+    let mut c = i0;
+    if c >= xs.len() {
+        c = 0;
+    }
+    return t + xs[c];
+}
+@used @noinline
+pub fn counters(xs: []i32) i32 {
+    let mut t = 0;
+    let mut i = xs.len();
+    while i > 0 {
+        i -= 1;
+        t += xs[i];
+    }
+    let mut j: usize = 0;
+    while j != xs.len() {
+        t += xs[j];
+        j += 1;
+    }
+    for k in 1..xs.len() {
+        t += xs[k - 1];
+    }
+    let n = xs.len();
+    if n != 0 {
+        let mut r = n / 2;
+        for _s in 0..n {
+            t += xs[r];
+            r = (r + 1) % n;
+        }
+        let mut d: usize = 0;
+        loop {
+            t += xs[d];
+            d += 1;
+            if d >= n {
+                break;
+            }
+        }
+    }
+    return t;
+}
+@used @noinline
+pub fn bridges(xs: []i32, a: &mut Array<u32, 8>, i: usize, g: i32) i32 {
+    let mut t = 0;
+    if i < 10 && xs.len() > 20 {
+        t += xs[i];
+    }
+    let mut cn: i32 = 0;
+    for k in 0..g {
+        if k % 2 == 0 && (cn as usize) < 8 {
+            a[cn as usize] = 1;
+            a[cn as usize] += 2;
+            cn += 1;
+        }
+    }
+    let hi = if i > xs.len() {
+        xs.len();
+    } else {
+        i;
+    };
+    for k in 0..hi {
+        t += xs[k];
+    }
+    return t + cn;
+}
+@used @noinline
+pub fn keep_closure(xs: []i32, start: usize) i32 {
+    let mut i = start;
+    if i < xs.len() {
+        let bump = || {
+            i += 1;
+        };
+        bump();
+        return xs[i];
+    }
+    return 0;
+}
+@used @noinline
+pub fn keep_raw_alias(c: &UnsafeCell<Vector<i32>>, i: usize) i32 {
+    let p = c.get();
+    let q = c.get();
+    if i < unsafe (*p).len() {
+        shrink(unsafe &mut *q);
+        return unsafe (*p)[i];
+    }
+    return 0;
+}
+@used @noinline
+pub fn keep_step2(xs: []i32) i32 {
+    let mut t = 0;
+    let mut i = xs.len();
+    while i > 0 {
+        i -= 2;
+        t += xs[i];
+    }
+    return t;
+}
+@used @noinline
+pub fn keep_wrapping(xs: []i32, i: usize) i32 {
+    let j = i.wrapping_add(1);
+    if j < xs.len() {
+        return xs[i];
+    }
+    return 0;
+}
+@used @noinline
+pub fn keep_offset(xs: []i32, i: usize) i32 {
+    if i + 1 < xs.len() {
+        return xs[i + 1];
+    }
+    return xs[i];
+}
+@used @noinline
+pub fn keep_bumped_cursor(c: &mut Cur) u8 {
+    if c.pos < c.buf.len() {
+        bump(c);
+        return c.buf[c.pos];
+    }
+    return 0;
+}
+@used @noinline
+pub fn keep_pop_loop(v: &mut Vector<i32>) i32 {
+    let mut t = 0;
+    let mut i = v.len();
+    while i > 0 {
+        i -= 1;
+        let _ = v.pop();
+        let _ = v.pop();
+        t += v[i];
+    }
+    return t;
+}
+)";
+
+@test
+fn removal_by_rule() {
+    let c = h::compile_c_user(RULES);
+    assert(c.ok(), "the rule cases compile");
+    let code = unsafe str::from_cstr(c.code);
+    let removed: []str = [
+        "int32_t join_access(Slice__i32 xs) {",
+        "int32_t eq_len(Slice__i32 a, Slice__i32 b) {",
+        "int32_t last_nonempty(Slice__i32 xs) {",
+        "int32_t assert_guard(Slice__i32 xs, size_t i) {",
+        "int32_t array_const(const Array__i32__8 *a, size_t i) {",
+        "int32_t derived_index(Slice__i32 xs, size_t i) {",
+        "uint8_t cursor(const Cur *c) {",
+        "int32_t min_len(Slice__i32 a, Slice__i32 b) {",
+        "int32_t or_return(Slice__i32 xs, size_t i, size_t j) {",
+        "int32_t counters(Slice__i32 xs) {",
+        "int32_t bridges(Slice__i32 xs, Array__u32__8 *restrict a, size_t i, int32_t g) {",
+    ];
+    for def in removed {
+        let body = h::c_fn(code, def);
+        if check_count(body, "__sc_bounds(") + check_count(body, "__sc_range(") != 0 {
+            eprintln("{}{}", def, body);
+        }
+        assert(check_count(body, "__sc_bounds(") + check_count(body, "__sc_range(") == 0, def);
+    }
+    let kept: []str = [
+        "int32_t keep_closure(Slice__i32 xs, size_t start) {",
+        "int32_t keep_raw_alias(const UnsafeCell__Vector__i32 *c, size_t i) {",
+        "int32_t keep_step2(Slice__i32 xs) {",
+        "int32_t keep_wrapping(Slice__i32 xs, size_t i) {",
+        "int32_t keep_offset(Slice__i32 xs, size_t i) {",
+        "uint8_t keep_bumped_cursor(Cur *restrict c) {",
+        "int32_t keep_pop_loop(Vector__i32 *restrict v) {",
+    ];
+    for def in kept {
+        assert(check_count(h::c_fn(code, def), "__sc_bounds(") != 0, def);
+    }
+}
+
+// The rules' programs run: the proved accesses give the same values, and each kept check fires.
+fn rule_programs(b: &mut h::ExitBatch) {
+    let sums = format(
+        "{}fn main(argv: Vector<str>) i32 {{\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 23 {{\n        v.push(k as i32);\n    }}\n    let xs = v.as_slice();\n    let mut a = Array::<i32, 8>::new();\n    let mut a4 = Array::<i32, 4>::new();\n    for k in 0..8usize {{\n        a[k] = k as i32;\n    }}\n    for k in 0..4usize {{\n        a4[k] = k as i32 + 1;\n    }}\n    let i = argv.len() + 2;\n    let mut t = join_access(xs) + eq_len(xs, xs) + last_nonempty(xs) + assert_guard(xs, i) + array_const(&a, i);\n    t += derived_index(xs, i) + sub_views(xs, i) + min_len(xs, xs[..5]) + or_return(xs, i, i + 1) + pairs(xs);\n    t += loops(xs, i) + switches(xs, &a4, i) + casts_and_bridges(xs, i, 99);\n    return t - 7025;\n}}\n",
+        RULES,
+    );
+    b.add("the proved accesses keep their values", sums.as_str(), 0);
+    let counted = format(
+        "{}fn main(argv: Vector<str>) i32 {{\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 23 {{\n        v.push(k as i32);\n    }}\n    let xs = v.as_slice();\n    let mut a = Array::<u32, 8>::new();\n    let i = argv.len() + 2;\n    let t = counters(xs) + bridges(xs, &mut a, i, 11) + bridges(xs, &mut a, 40, 3);\n    return t % 200 - 47;\n}}\n",
+        RULES,
+    );
+    b.add("the counters, bridges and cast pairs keep their values", counted.as_str(), 0);
+    let closure = format(
+        "{}fn main(argv: Vector<str>) i32 {{\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    return keep_closure(v.as_slice(), argv.len());\n}}\n",
+        RULES,
+    );
+    b.add_trap("a closure's write to a captured index", closure.as_str(), "index out of bounds");
+    let alias = format(
+        "{}fn main(argv: Vector<str>) i32 {{\n    let mut v = Vector::<i32>::new();\n    v.push(5);\n    let c = UnsafeCell::<Vector<i32>>::new(v);\n    return keep_raw_alias(&c, argv.len() - 1);\n}}\n",
+        RULES,
+    );
+    b.add_trap("a pop through an aliasing pointer", alias.as_str(), "index out of bounds");
+    let pop = format(
+        "{}fn main(argv: Vector<str>) i32 {{\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 3 {{\n        v.push(k as i32);\n    }}\n    return keep_pop_loop(&mut v);\n}}\n",
+        RULES,
+    );
+    b.add_trap("a loop that shrinks its vector", pop.as_str(), "index out of bounds");
+    let cur = format(
+        "{}fn main(argv: Vector<str>) i32 {{\n    let mut v = Vector::<u8>::new();\n    v.push(1);\n    let mut c = Cur {{ buf: v, pos: argv.len() - 1 }};\n    return keep_bumped_cursor(&mut c) as i32;\n}}\n",
+        RULES,
+    );
+    b.add_trap("a cursor a call bumps", cur.as_str(), "index out of bounds");
+}
+
+@test
+fn exit_cases_02() {
+    let mut b = h::ExitBatch::new();
+    rule_programs(&mut b);
+    b.run();
+}

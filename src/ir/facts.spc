@@ -265,6 +265,27 @@ pub(package) struct CopyBind {
     pub(package) ok: bool,
 }
 // dest = src + c (usize only; c may be negative for a Minus form)
+// A recent integer read `l = copy p` (`l` at version `v`) of place `pl` at the generations then.
+const READS_MAX: usize = 16;
+
+// A recent numeric cast `d = x as ty` (`d` at version `dv`) of value key `k`.
+pub(package) struct CastEnt {
+    pub(package) k: VKey,
+    pub(package) ty: TypeId,
+    pub(package) d: u32,
+    pub(package) dv: u32,
+}
+
+pub(package) struct ReadEnt {
+    pub(package) pl: u32,
+    pub(package) l: u32,
+    pub(package) v: u32,
+    pub(package) hg: u32,
+    pub(package) bg: u32,
+    pub(package) pg: u32,
+    pub(package) fg: u32,
+}
+
 pub(package) struct AffBind {
     pub(package) src: u32,
     pub(package) src_v: u32,
@@ -673,6 +694,16 @@ pub(package) struct Facts {
     pub(package) pgen: Vector<u32>,
     pub(package) pkills: Vector<PKill>,
     pub(package) copyof: Vector<CopyBind>,
+    pub(package) constof: Vector<AffBind>, // `x = c`: the constant in `c` (`src` unused)
+    // the latest READS_MAX integer field reads: a read of the same place at the same generations
+    // is a copy of the earlier one (`rd_next` is the slot the next read takes)
+    pub(package) reads: Vector<ReadEnt>,
+    pub(package) rd_next: usize,
+    pub(package) casts: Vector<CastEnt>, // the latest numeric casts, the same way (`cast_copy`)
+    pub(package) cs_next: usize,
+    // the last `apply_stmt`'s cast repeats one whose local died: that local and version
+    pub(package) cast_prev: u32,
+    pub(package) cast_prev_v: u32,
     // a prelude view built by a struct literal: its `len` field holds `src`; a `len` read of such a
     // view: its value is `src` (`view_len`)
     pub(package) lenval: Vector<CopyBind>,
@@ -689,6 +720,17 @@ pub(package) struct Facts {
     pub(package) lmark: Vector<u32>,
     pub(package) lstamp: u32,
     pub(package) lblocks: Vector<u32>,
+    pub(package) lkilled: bool, // the last `loop_bump` bumped every local
+    // the dominator tree's preorder and postorder numbers per reachable block (`dominates`), built
+    // on demand (`build_doms`) with its child lists and scratch; `dom_ok` false when no dominator is
+    // trusted
+    pub(package) dpre: Vector<u32>,
+    pub(package) dpost: Vector<u32>,
+    pub(package) dhead: Vector<u32>,
+    pub(package) dnext: Vector<u32>,
+    pub(package) dstk: Vector<u32>,
+    pub(package) dom_ok: bool,
+    pub(package) dom_built: bool,
     // per-block loop-scan summaries (lsummarize): op ranges into `lops` (start IR_NONE = not yet),
     // flags, and the flags of the block being summarized
     pub(package) lops: Vector<LOp>,
@@ -710,6 +752,11 @@ pub(package) struct Facts {
     pub(package) ecand: Vector<u32>,
     pub(package) gcand: Vector<u32>,
     pub(package) grem: bool,
+    // a panic guard's comparison against a constant of 2 or more (an inlined `Array::index`): its
+    // destination local holds `gstamp` in `gmark` (marked by `bce`), `gcount` of them
+    pub(package) gmark: Vector<u32>,
+    pub(package) gstamp: u32,
+    pub(package) gcount: u32,
     pub(package) clast: u32, // the reverse postorder index of the last block with a check, IR_NONE without one
     // locals that may hold a borrow of a deref-free place (a local's own storage)
     pub(package) holds: Vector<bool>,
@@ -781,6 +828,13 @@ extend Facts {
             pgen: Vector::<u32>::with_capacity(TABLE_MIN),
             pkills: Vector::<PKill>::new(),
             copyof: Vector::<CopyBind>::with_capacity(TABLE_MIN),
+            constof: Vector::<AffBind>::with_capacity(TABLE_MIN),
+            reads: Vector::<ReadEnt>::with_capacity(READS_MAX),
+            rd_next: 0,
+            casts: Vector::<CastEnt>::with_capacity(READS_MAX),
+            cs_next: 0,
+            cast_prev: ir::IR_NONE,
+            cast_prev_v: 0,
             lenval: Vector::<CopyBind>::with_capacity(TABLE_MIN),
             views: false,
             affof: Vector::<AffBind>::with_capacity(TABLE_MIN),
@@ -793,6 +847,14 @@ extend Facts {
             lmark: Vector::<u32>::with_capacity(TABLE_MIN),
             lstamp: 0,
             lblocks: Vector::<u32>::with_capacity(TABLE_MIN),
+            lkilled: false,
+            dpre: Vector::<u32>::with_capacity(TABLE_MIN),
+            dpost: Vector::<u32>::with_capacity(TABLE_MIN),
+            dhead: Vector::<u32>::with_capacity(TABLE_MIN),
+            dnext: Vector::<u32>::with_capacity(TABLE_MIN),
+            dstk: Vector::<u32>::with_capacity(TABLE_MIN),
+            dom_ok: false,
+            dom_built: false,
             lops: Vector::<LOp>::with_capacity(TABLE_MIN),
             lsum_s: Vector::<u32>::with_capacity(TABLE_MIN),
             lsum_n: Vector::<u32>::with_capacity(TABLE_MIN),
@@ -809,6 +871,9 @@ extend Facts {
             gcand: Vector::<u32>::new(),
             clast: ir::IR_NONE,
             grem: false,
+            gmark: Vector::<u32>::with_capacity(TABLE_MIN),
+            gstamp: 0,
+            gcount: 0,
             holds: Vector::<bool>::with_capacity(TABLE_MIN),
             bufexp: Vector::<bool>::with_capacity(TABLE_MIN),
             off_sig: off_sig,
@@ -881,6 +946,10 @@ extend Facts {
 
     /// Reset every per-body table for body `b`; capacity persists across bodies.
     pub(package) fn begin(self: &mut Self, b: &ir::CoreBody, pkg: *const loader::Package) {
+        self.reads.clear();
+        self.rd_next = 0;
+        self.casts.clear();
+        self.cs_next = 0;
         self.pkg = pkg;
         self.pw = lay::target_for(unsafe (&*pkg).arch).ptr as u32 * 8;
         let nl = b.locals.len();
@@ -905,6 +974,7 @@ extend Facts {
         }
         while self.copyof.len() < nl {
             self.copyof.push(CopyBind { src: 0, src_v: 0, my_v: 0, ok: false });
+            self.constof.push(AffBind { src: 0, src_v: 0, c: 0, my_v: 0, ok: false });
             self.lenval.push(CopyBind { src: 0, src_v: 0, my_v: 0, ok: false });
             self.affof.push(AffBind { src: 0, src_v: 0, c: 0, my_v: 0, ok: false });
             self.refof.push(RefBind { pl: 0, my_v: 0, ok: false });
@@ -1078,6 +1148,69 @@ extend Facts {
                 }
             }
         }
+        self.dom_ok = !changed;
+        self.dom_built = false;
+    }
+
+    /// Number the dominator tree in preorder and postorder for `dominates`, once per body.
+    pub(package) fn build_doms(self: &mut Self, b: &ir::CoreBody) {
+        if self.dom_built || !self.dom_ok {
+            return;
+        }
+        self.dom_built = true;
+        let nb = b.blocks.len();
+        let e = self.rpo[0];
+        self.dhead.clear();
+        self.dnext.clear();
+        for _i in 0..nb {
+            self.dhead.push(ir::IR_NONE);
+            self.dnext.push(ir::IR_NONE);
+        }
+        self.dpre.clear();
+        self.dpre.resize_default(nb);
+        self.dpost.clear();
+        self.dpost.resize_default(nb);
+        let mut bi = self.rpo.len();
+        while bi > 1 {
+            bi -= 1;
+            let x = self.rpo[bi];
+            let p = self.idom[x as usize];
+            self.dnext.set(x as usize, self.dhead[p as usize]);
+            self.dhead.set(p as usize, x);
+        }
+        // each step enters a child or leaves a block: 2 per block
+        let mut t: u32 = 0;
+        self.dstk.clear();
+        self.dstk.push(e);
+        self.dpre.set(e as usize, t);
+        t += 1;
+        for _s in 0..2 * self.rpo.len() {
+            if self.dstk.len() == 0 {
+                break;
+            }
+            let x = self.dstk[self.dstk.len() - 1];
+            let c = self.dhead[x as usize];
+            if c == ir::IR_NONE {
+                self.dpost.set(x as usize, t);
+                t += 1;
+                let _ = self.dstk.pop();
+            } else {
+                self.dhead.set(x as usize, self.dnext[c as usize]); // the next child on return
+                self.dpre.set(c as usize, t);
+                t += 1;
+                self.dstk.push(c);
+            }
+        }
+        assert(self.dstk.len() == 0, "the dominator tree numbering visits every block");
+    }
+
+    /// Does block `a` dominate block `x` (both reachable; `build_doms` ran)? Only itself when no
+    /// dominator is trusted.
+    pub(package) const fn dominates(self: &Self, a: u32, x: u32) bool {
+        if !self.dom_ok {
+            return a == x;
+        }
+        return self.dpre[a as usize] <= self.dpre[x as usize] && self.dpost[x as usize] <= self.dpost[a as usize];
     }
 
     const fn intersect(self: &Self, a0: u32, b0: u32) u32 {
@@ -1132,6 +1265,11 @@ extend Facts {
         self.gcand.clear();
         self.clast = ir::IR_NONE;
         self.grem = false;
+        self.gstamp += 1;
+        self.gcount = 0;
+        while self.gmark.len() < b.locals.len() {
+            self.gmark.push(0);
+        }
         for bi in 0..self.rpo.len() {
             let bb = *b.blocks.at(self.rpo[bi] as usize);
             for si in 0..bb.stmt_len {
@@ -1157,7 +1295,7 @@ extend Facts {
                     }
                 }
                 let rv = *b.rvalues.at(s.rvalue as usize);
-                if rv.kind == ir::RV_ADDR || rv.kind == ir::RV_REF && rv.b == 1 || rv.kind == ir::RV_CAST && da.type_at(
+                if rv.kind == ir::RV_ADDR || rv.kind == ir::RV_REF && rv.b == 1 || rv.kind == ir::RV_CLOSURE || rv.kind == ir::RV_CAST && da.type_at(
                     rv.target,
                 ).kind == TypeKind::TYPE_POINTER {
                     self.ecand.push(sid);
@@ -1207,6 +1345,20 @@ extend Facts {
                 } else if rv.kind == ir::RV_BINARY || rv.kind == ir::RV_REPEAT {
                     self.esc_op(b, rv.a);
                     self.esc_op(b, rv.b);
+                } else if rv.kind == ir::RV_CLOSURE {
+                    // A capture is the captured place, which the environment may borrow mutably (the
+                    // emitter takes its address): as a mutable borrow stored in the closure value.
+                    for i in 0..rv.b {
+                        let opid = b.oper_pool[(rv.a + i) as usize];
+                        self.esc_op(b, opid);
+                        let op = *b.operands.at(opid as usize);
+                        if op.kind != ir::OP_CONST && !b.place_has_deref(op.data) {
+                            self.expose(da, b, b.places.at(op.data as usize).base);
+                            if d != ir::IR_NONE {
+                                self.holds.set(d as usize, true);
+                            }
+                        }
+                    }
                 } else if ir::has_op_range(&rv) {
                     for i in 0..rv.b {
                         self.esc_op(b, b.oper_pool[(rv.a + i) as usize]);
@@ -1270,6 +1422,13 @@ extend Facts {
                 let d = self.whole_local(b, s.place);
                 if rv.kind == ir::RV_ADDR || rv.kind == ir::RV_REF && rv.b == 1 && (d == ir::IR_NONE || self.esc_use[d as usize]) {
                     self.escape_place(b, rv.a);
+                } else if rv.kind == ir::RV_CLOSURE {
+                    for i in 0..rv.b {
+                        let op = *b.operands.at(b.oper_pool[(rv.a + i) as usize] as usize);
+                        if op.kind != ir::OP_CONST {
+                            self.escape_place(b, op.data);
+                        }
+                    }
                 } else if rv.kind == ir::RV_CAST && self.is_ref_to_ptr_cast(b, &rv) {
                     // the BORROWED storage escapes, not the reference
                     let cl = self.whole_local(b, b.operands.at(rv.a as usize).data);
@@ -1448,29 +1607,136 @@ extend Facts {
         if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
             return vkey_none();
         }
-        let mut l = self.whole_local(b, op.data);
+        let l = self.whole_local(b, op.data);
         if l == ir::IR_NONE || clean && cw[l as usize] == cstamp || self.opaque(l) {
             return vkey_none();
         }
+        return self.resolve(l, cw, cstamp, clean);
+    }
+
+    /// The value key of local `l0`'s current value (`vkey` past its operand).
+    pub(package) const fn local_key(self: &Self, l0: u32) VKey {
+        if self.opaque(l0) {
+            return vkey_none();
+        }
+        return self.resolve(l0, &self.bst, 0, false);
+    }
+
+    const fn resolve(self: &Self, l0: u32, cw: &Vector<u32>, cstamp: u32, clean: bool) VKey {
+        let mut l = l0;
+        // the key may name an older version of a local updated in place (`x = x + c`: the version
+        // before plus `c`); a copy or an affine step from another local needs that local current
         let mut off: i64 = 0;
+        let mut v = self.ver(l);
         let mut guard = 0;
         while guard < 6 {
+            let kb = *self.constof.at(l as usize);
+            if kb.ok && kb.my_v == v {
+                return VKey { is_const: true, c: kb.c + off, is_local: false, l: 0, v: 0, off: 0 };
+            }
             let cb = *self.copyof.at(l as usize);
-            if cb.ok && cb.my_v == self.ver(l) && self.ver(cb.src) == cb.src_v && (!clean || cw[cb.src as usize] != cstamp) {
+            if cb.ok && cb.my_v == v && self.ver(cb.src) == cb.src_v && (!clean || cw[cb.src as usize] != cstamp) {
                 l = cb.src;
+                v = cb.src_v;
                 guard += 1;
                 continue;
             }
             let ab = *self.affof.at(l as usize);
-            if ab.ok && ab.my_v == self.ver(l) && self.ver(ab.src) == ab.src_v && (!clean || cw[ab.src as usize] != cstamp) {
+            if ab.ok && ab.my_v == v && (ab.src == l || self.ver(ab.src) == ab.src_v) && (!clean || cw[ab.src as usize] != cstamp) {
                 off = off + ab.c;
                 l = ab.src;
+                v = ab.src_v;
                 guard += 1;
                 continue;
             }
             break;
         }
-        return VKey { is_const: false, c: 0, is_local: true, l: l, v: self.ver(l), off: off };
+        return VKey { is_const: false, c: 0, is_local: true, l: l, v: v, off: off };
+    }
+
+    /// Is place `pl` of an integer type?
+    const fn int_place(self: &Self, b: &ir::CoreBody, pl: u32) bool {
+        let t = b.places.at(pl as usize).ty;
+        if t == TYPE_NONE {
+            return false;
+        }
+        let y = *(unsafe &*(&*self.pkg).module_ast_const(b.module)).type_at(t);
+        return y.kind == TypeKind::TYPE_BUILTIN && bt_int_width(y.as_data.builtin, false) != 0;
+    }
+
+    /// `dest = copy pl` (written through `dpl`) of an integer field: a copy of an earlier read of the
+    /// same place at the same generations, if that local still holds it; recorded for later reads.
+    fn read_copy(self: &mut Self, b: &ir::CoreBody, pl: u32, dest: u32, dpl: u32) {
+        let base = b.places.at(pl as usize).base;
+        let e = ReadEnt {
+            pl: pl,
+            l: dest,
+            v: 0,
+            hg: self.heapgen,
+            bg: self.bgen(base),
+            pg: self.pgen[base as usize],
+            fg: self.bufgen,
+        };
+        let mut src = ir::IR_NONE;
+        for i in 0..self.reads.len() {
+            let r = self.reads[i];
+            if r.hg == e.hg && r.bg == e.bg && r.pg == e.pg && r.fg == e.fg && r.l != dest && self.ver(r.l) == r.v && self.places_eq(
+                b,
+                r.pl,
+                pl,
+            ) {
+                src = r.l;
+                break;
+            }
+        }
+        self.write_place(b, dpl);
+        if src != ir::IR_NONE {
+            self.copyof.set(dest as usize, CopyBind { src: src, src_v: self.ver(src), my_v: self.ver(dest), ok: true });
+            return;
+        }
+        let mut r = e;
+        r.v = self.ver(dest);
+        if self.reads.len() < READS_MAX {
+            self.reads.push(r);
+        } else {
+            self.reads.set(self.rd_next, r);
+            self.rd_next = (self.rd_next + 1) % READS_MAX;
+        }
+    }
+
+    /// `dest = x as T`: a copy of an earlier cast of the same value to the same type whose local still
+    /// holds it; recorded for later casts.
+    fn cast_copy(self: &mut Self, b: &ir::CoreBody, rv: &ir::Rvalue, dest: u32, dpl: u32) {
+        let k = self.vkey(b, rv.a);
+        let mut src = ir::IR_NONE;
+        self.cast_prev = ir::IR_NONE;
+        if k.is_local {
+            for i in 0..self.casts.len() {
+                let c = self.casts[i];
+                if c.ty == rv.target && c.k.l == k.l && c.k.v == k.v && c.k.off == k.off && c.d != dest {
+                    if self.ver(c.d) == c.dv {
+                        src = c.d;
+                    } else {
+                        // the earlier result's local died: its facts still describe this value
+                        self.cast_prev = c.d;
+                        self.cast_prev_v = c.dv;
+                    }
+                    break;
+                }
+            }
+        }
+        self.write_place(b, dpl);
+        if src != ir::IR_NONE {
+            self.copyof.set(dest as usize, CopyBind { src: src, src_v: self.ver(src), my_v: self.ver(dest), ok: true });
+        } else if k.is_local && self.cast_prev == ir::IR_NONE {
+            let c = CastEnt { k: k, ty: rv.target, d: dest, dv: self.ver(dest) };
+            if self.casts.len() < READS_MAX {
+                self.casts.push(c);
+            } else {
+                self.casts.set(self.cs_next, c);
+                self.cs_next = (self.cs_next + 1) % READS_MAX;
+            }
+        }
     }
 
     /// The base local behind up to four still-current whole-local copies.
@@ -1786,7 +2052,9 @@ extend Facts {
     /// left (another path's writes reach the walk's tables first), and at a loop header every
     /// local, base and the heap the loop can write. A block with one predecessor restores those
     /// locals' versions instead: every write since its predecessor was left is another path's.
-    pub(package) fn enter_block(self: &mut Self, b: &ir::CoreBody, blk: u32) {
+    // Entering block `blk` in the walk: the versions it starts with (a header then bumps its loop's
+    // writes: `loop_scan`, `loop_bump`).
+    pub(package) fn enter_block(self: &mut Self, blk: u32) {
         if self.rpo.len() != 0 && blk != self.rpo[0] {
             let d = self.idom[blk as usize];
             let from = if d == ir::IR_NONE {
@@ -1810,9 +2078,6 @@ extend Facts {
                     self.rekey(l);
                 }
             }
-        }
-        if self.is_header(blk) {
-            self.loop_bump(b, blk);
         }
     }
 
@@ -1872,8 +2137,8 @@ extend Facts {
         return ir::IR_NONE;
     }
 
-    // Collect what one loop can write (the natural loops of header `h`) and bump it.
-    fn loop_bump(self: &mut Self, b: &ir::CoreBody, h: u32) {
+    // The blocks of the natural loops of header `h` into `lblocks` (marked `lstamp` in `lmark`).
+    pub(package) fn loop_scan(self: &mut Self, h: u32) {
         self.lstamp += 1;
         self.lblocks.clear();
         self.lmark.set(h as usize, self.lstamp);
@@ -1898,6 +2163,11 @@ extend Facts {
                 }
             }
         }
+    }
+
+    // Bump what the loop whose blocks `loop_scan` found can write; `lkilled` when that is every local.
+    pub(package) fn loop_bump(self: &mut Self, b: &ir::CoreBody) {
+        self.lkilled = false;
         self.bstamp += 1;
         let mut fl: u8 = 0;
         for i in 0..self.lblocks.len() {
@@ -1911,6 +2181,7 @@ extend Facts {
             fl |= self.lsum_f[blk];
             if self.scan_left < 0 || (fl & 4) != 0 {
                 self.kill_all();
+                self.lkilled = true;
                 return;
             }
             for k in s0..s0 + n {
@@ -2432,6 +2703,9 @@ extend Facts {
                         rb.pl,
                         &mut rt,
                     ) {
+                        if self.raw_target(b, rb.pl, rt) {
+                            return false; // a raw pointer's target: any other path may reach it
+                        }
                         victim = rt;
                     } else {
                         // an elided autoref (the local IS the collection), a &mut parameter, or an
@@ -2502,13 +2776,23 @@ extend Facts {
             self.buf();
         } else if self.borrow_path(b, pl, &mut r, &mut path) {
             self.kill_path(b, r, path);
-        } else if self.root_of_place(b, pl, &mut r) {
+        } else if self.root_of_place(b, pl, &mut r) && !self.raw_target(b, pl, r) {
             self.kill_root(r);
         } else {
             return false;
         }
         self.kill_ambient();
         return true;
+    }
+
+    /// Does place `pl`, whose root `root_of_place` found as `r`, lie behind a deref of raw pointer `r`?
+    /// Its target is no storage of `r`: another pointer, a reference or the heap may reach it.
+    const fn raw_target(self: &Self, b: &ir::CoreBody, pl: u32, r: u32) bool {
+        if !b.place_has_deref(pl) {
+            return false;
+        }
+        let da = unsafe &*(&*self.pkg).module_ast_const(b.module);
+        return da.type_at(b.locals.at(r as usize).ty).kind == TypeKind::TYPE_POINTER;
     }
 
     /// Apply terminator `t`'s effect and its destination writes to the versions. Returns true when a
@@ -2579,6 +2863,7 @@ extend Facts {
     /// Apply statement `s`'s generic effect: escape notes, the write, and copy, affine and reference
     /// bindings. The caller reads what it needs of the operands first.
     pub(package) fn apply_stmt(self: &mut Self, b: &ir::CoreBody, s: &ir::Statement) {
+        self.cast_prev = ir::IR_NONE;
         if s.kind == ir::ST_STORAGE_DEAD {
             self.bump_local(s.a);
             return;
@@ -2616,24 +2901,56 @@ extend Facts {
                     c0 = kb.off + ka.c;
                 }
                 self.write_place(b, s.place);
-                if srcl != ir::IR_NONE && srcl != dest && c0 > 0 - 1048576 && c0 < 1048576 {
+                // the source's version as read before the write (in place, `x = x + c`, the old one)
+                let srcv = if ka.is_local && kb.is_const {
+                    ka.v;
+                } else {
+                    kb.v;
+                };
+                if srcl != ir::IR_NONE && c0 > 0 - 1048576 && c0 < 1048576 {
                     self.affof.set(
                         dest as usize,
-                        AffBind { src: srcl, src_v: self.ver(srcl), c: c0, my_v: self.ver(dest), ok: true },
+                        AffBind { src: srcl, src_v: srcv, c: c0, my_v: self.ver(dest), ok: true },
                     );
                 }
                 return;
             }
             if rv.kind == ir::RV_USE {
                 let op = *b.operands.at(rv.a as usize);
+                if op.kind == ir::OP_CONST && b.constants.at(op.data as usize).kind == ir::CK_INT {
+                    let c = b.constants.at(op.data as usize).val;
+                    self.write_place(b, s.place);
+                    if c > 0 - 1099511627776 && c < 1099511627776 {
+                        self.constof.set(
+                            dest as usize,
+                            AffBind { src: 0, src_v: 0, c: c, my_v: self.ver(dest), ok: true },
+                        );
+                    }
+                    return;
+                }
+                if op.kind == ir::OP_COPY && b.places.at(op.data as usize).proj_len != 0 && self.int_place(b, op.data) {
+                    self.read_copy(b, op.data, dest, s.place);
+                    return;
+                }
                 if op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE {
                     let srcl = self.whole_local(b, op.data);
                     if srcl != ir::IR_NONE {
+                        let sv = self.ver(srcl);
                         self.write_place(b, s.place);
                         self.copyof.set(
                             dest as usize,
-                            CopyBind { src: srcl, src_v: self.ver(srcl), my_v: self.ver(dest), ok: true },
+                            CopyBind { src: srcl, src_v: sv, my_v: self.ver(dest), ok: true },
                         );
+                        // a recorded read the copy takes on (its source may die, as a moved temporary)
+                        for i in 0..self.reads.len() {
+                            let r = self.reads[i];
+                            if r.l == srcl && r.v == sv {
+                                let mut r2 = r;
+                                r2.l = dest;
+                                r2.v = self.ver(dest);
+                                self.reads.set(i, r2);
+                            }
+                        }
                         return;
                     }
                 }
@@ -2668,9 +2985,17 @@ extend Facts {
                 return;
             }
         }
+        if dest != ir::IR_NONE && rv.kind == ir::RV_CAST && rv.b == ir::CAST_NUMERIC as u32 && !self.addr_cast(b, &rv) && !self.widen_cast(
+            b,
+            &rv,
+        ) {
+            self.cast_copy(b, &rv, dest, s.place);
+            return;
+        }
         self.write_place(b, s.place);
-        if dest != ir::IR_NONE && self.addr_cast(b, &rv) {
-            // the cast keeps the address: a deref through the pointer reaches the same place
+        if dest != ir::IR_NONE && (self.addr_cast(b, &rv) || self.widen_cast(b, &rv)) {
+            // the cast keeps the address (a deref through the pointer reaches the same place) or the
+            // value (an unsigned value into an unsigned type at least as wide)
             let src = self.whole_local(b, b.operands.at(rv.a as usize).data);
             self.copyof.set(dest as usize, CopyBind { src: src, src_v: self.ver(src), my_v: self.ver(dest), ok: true });
         }
@@ -2705,6 +3030,27 @@ extend Facts {
             }
         }
         return vkey_none();
+    }
+
+    // A numeric cast of a whole local of an unsigned integer type into one at least as wide.
+    pub(package) const fn widen_cast(self: &Self, b: &ir::CoreBody, rv: &ir::Rvalue) bool {
+        if rv.kind != ir::RV_CAST || rv.b != ir::CAST_NUMERIC as u32 {
+            return false;
+        }
+        let op = *b.operands.at(rv.a as usize);
+        if op.kind == ir::OP_CONST || self.whole_local(b, op.data) == ir::IR_NONE || op.ty == TYPE_NONE || rv.target == TYPE_NONE {
+            return false;
+        }
+        let da = unsafe &*(&*self.pkg).module_ast_const(b.module);
+        let y1 = *da.type_at(op.ty);
+        let y2 = *da.type_at(rv.target);
+        if y1.kind != TypeKind::TYPE_BUILTIN || y2.kind != TypeKind::TYPE_BUILTIN || !bt_is_unsigned(y1.as_data.builtin) || !bt_is_unsigned(
+            y2.as_data.builtin,
+        ) {
+            return false;
+        }
+        let w1 = bt_int_width(y1.as_data.builtin, self.pw == 32);
+        return w1 != 0 && w1 <= bt_int_width(y2.as_data.builtin, self.pw == 32);
     }
 
     // A numeric cast of a whole-local reference or pointer to a reference or pointer type.
@@ -2865,7 +3211,7 @@ extend Facts {
     /// Could an interval proof help body `b`: a fixed array checked, a length compared with a
     /// constant of 2 or more, or a remainder by a constant (the definition scan's candidates)?
     pub(package) fn want_ints(self: &Self, b: &ir::CoreBody) bool {
-        if self.grem {
+        if self.grem || self.gcount != 0 {
             return true;
         }
         for ci in 0..self.gcand.len() {
@@ -3019,6 +3365,13 @@ extend Facts {
                 b,
                 rv.b,
             ) && self.const_ge2(b, rv.a)) {
+                let _ = self.irel_op(b, rv.a);
+                let _ = self.irel_op(b, rv.b);
+            } else if rv.kind == ir::RV_BINARY && self.gcount != 0 && self.whole_local(b, st.place) != ir::IR_NONE && self.gmark[self.whole_local(
+                b,
+                st.place,
+            ) as usize] == self.gstamp {
+                // a panic guard against a constant (`bce` marks it)
                 let _ = self.irel_op(b, rv.a);
                 let _ = self.irel_op(b, rv.b);
             } else if rv.kind == ir::RV_BINARY && norm_op(rv.c) >= tt::TokenType::EqualEqual as u8 && norm_op(rv.c) <= tt::TokenType::GreaterThanEqual as u8 && (field_read(
@@ -3736,7 +4089,7 @@ const fn field_read(b: &ir::CoreBody, opid: u32) bool {
 }
 
 // A compound-assignment operator as its plain operator.
-const fn norm_op(c: u8) u8 {
+pub(package) const fn norm_op(c: u8) u8 {
     let t = c as tt::TokenType;
     let r = switch t {
         PlusEqual => tt::TokenType::Plus,
