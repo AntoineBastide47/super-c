@@ -33,6 +33,9 @@ pub struct Isa {
     /// The bytes of a vector the native backend computes in one register, 0 when it computes vectors
     /// lane by lane in memory (wasm32): the LIR vectorizer runs only with registers.
     pub vector_bytes: u8,
+    /// One instruction gives the high half of a 64-bit product (UMULH, MUL's rdx): the optimizer divides
+    /// a 64-bit value by a constant with a product (`lir::ir::Package::mul_high`).
+    pub mul_high: bool,
     pub simd_backend: str<'static>, // `std/simd/backend/<name>.spc`
     /// The C headers whose functions are the C compiler's intrinsics, space-separated: no object defines
     /// them, so a native backend expands each call from its template (`target::intrin`), and a call of
@@ -154,6 +157,7 @@ pub const ISAS: [Isa; 3] = [
         scalar_fma: false,
         merge_apart: false,
         vector_bytes: 16,
+        mul_high: true,
         simd_backend: "x86_64",
         intrinsics: "immintrin.h x86intrin.h",
     },
@@ -170,6 +174,7 @@ pub const ISAS: [Isa; 3] = [
         scalar_fma: true,
         merge_apart: false,
         vector_bytes: 16,
+        mul_high: true,
         simd_backend: "aarch64",
         intrinsics: "arm_neon.h arm_acle.h arm_sve.h arm_sme.h",
     },
@@ -186,6 +191,7 @@ pub const ISAS: [Isa; 3] = [
         scalar_fma: false,
         merge_apart: true,
         vector_bytes: 0,
+        mul_high: false,
         simd_backend: "wasm",
         intrinsics: "wasm_simd128.h",
     },
@@ -507,6 +513,7 @@ const UNKNOWN_ISA: Isa = Isa {
     mask_fold: false,
     merge_apart: false,
     vector_bytes: 0,
+    mul_high: false,
     simd_backend: "",
     intrinsics: "",
 };

@@ -86,6 +86,7 @@ pub struct Promoter {
     mslot: Vector<u32>,
     cdrop: Vector<bool>,
     busy: Vector<bool>,
+    typed: Vector<bool>, // `fields`' scratch: per slot, whether an access gives it a type
     pcand: Vector<bool>, // per slot, whether it promotes as the body stands, before any merge
     reach: Vector<u32>,
     xwords: Vector<u64>, // the words of the zeros of wide types
@@ -150,6 +151,7 @@ extend Promoter {
             mslot: Vector::<u32>::new(),
             cdrop: Vector::<bool>::new(),
             busy: Vector::<bool>::new(),
+            typed: Vector::<bool>::new(),
             pcand: Vector::<bool>::new(),
             reach: Vector::<u32>::new(),
             xwords: Vector::<u64>::new(),
@@ -328,7 +330,7 @@ extend Promoter {
             }
             self.note_uses(b, i as u32, t);
         }
-        sort_u64(&mut self.muse);
+        self.muse.sort();
         fill(&mut self.mat, ns + 1, 0);
         for q in 0..self.muse.len() {
             self.mat[(self.muse[q] >> 32) as usize + 1] += 1;
@@ -521,9 +523,17 @@ extend Promoter {
                 let t = b.insts[i];
                 if t.op == O_SLOTADDR {
                     self.dslot[i] = t.a;
-                } else if t.op == O_PTRADD && t.b == VNONE && (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE && self.dslot[t.a as usize] != NONE {
-                    self.dslot[i] = self.dslot[t.a as usize];
-                    self.doff[i] = self.doff[t.a as usize] + (t.c as i32) as i64;
+                } else if t.op == O_PTRADD && (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE && self.dslot[t.a as usize] != NONE {
+                    // A constant index is a constant offset (the optimizer keeps a slot address's index).
+                    let ix = if t.b == VNONE {
+                        0i64;
+                    } else {
+                        const_int(b, t.b);
+                    };
+                    if ix >= 0 {
+                        self.dslot[i] = self.dslot[t.a as usize];
+                        self.doff[i] = self.doff[t.a as usize] + (t.c as i32) as i64 + ix * t.aux as i64;
+                    }
                 }
             }
         }
@@ -577,7 +587,7 @@ extend Promoter {
             );
             return;
         }
-        if op == O_PTRADD && t.b == VNONE {
+        if op == O_PTRADD && (t.b == VNONE || self.dslot[i as usize] != NONE) {
             return; // a derived address, or none
         }
         if (op == O_MEMCPY || op == O_MEMSET) && (self.slot_of(t.a) != NONE || op == O_MEMCPY && self.slot_of(t.b) != NONE) {
@@ -656,6 +666,25 @@ extend Promoter {
             }
             if self.accs.len() == n0 {
                 break;
+            }
+        }
+        // A slot only copies touch, copied to or from a slot that stays in memory, stays too: its fields
+        // would be integer words, whose stores into the other slot keep that one in memory for good,
+        // where a later promotion (once unrolling gives its accesses constant offsets) takes both with
+        // the other's types.
+        fill_bool(&mut self.typed, ns, false);
+        for a in 0..self.accs.len() {
+            self.typed[self.accs[a].slot as usize] = true;
+        }
+        for c in 0..self.copies.len() {
+            let cp = self.copies[c];
+            if cp.dslot != NONE && cp.sslot != NONE {
+                if !self.typed[cp.dslot as usize] && !self.cand[cp.sslot as usize] {
+                    self.cand[cp.dslot as usize] = false;
+                }
+                if !self.typed[cp.sslot as usize] && !self.cand[cp.dslot as usize] {
+                    self.cand[cp.sslot as usize] = false;
+                }
             }
         }
         self.build_fields(b, true);
@@ -977,8 +1006,8 @@ extend Promoter {
             }
         }
         // The definitions and first reads by field: sort the packed lists.
-        sort_u64(&mut self.dblk);
-        sort_u64(&mut self.ublk);
+        self.dblk.sort();
+        self.ublk.sort();
         fill(&mut self.livein, nb, NONE);
         fill(&mut self.hasphi, nb, NONE);
         fill(&mut self.mark, nb, NONE); // per block, the field it defines
@@ -1035,7 +1064,7 @@ extend Promoter {
                 }
             }
         }
-        sort_u64(&mut self.phis);
+        self.phis.sort();
         fill(&mut self.phi_at, nb + 1, 0);
         for q in 0..self.phis.len() {
             self.phi_at[(self.phis[q] >> 32) as usize + 1] += 1;
@@ -1380,6 +1409,15 @@ extend Promoter {
         o.sig = b.sig;
         o.refs.truncate(0);
         o.refs.extend_copy(&b.refs);
+        // A scope's root: its replacement, renumbered; one in no reached block goes.
+        o.scopes.truncate(0);
+        for x in 0..b.scopes.len() {
+            let sc = b.scopes[x];
+            let v = self.val(sc.root);
+            if v != VNONE {
+                o.scopes.push(Scope { site: sc.site, group: sc.group, root: v });
+            }
+        }
         o.naked = b.naked;
         fill_bool(&mut self.done, b.pool.len(), false);
         let inl = b.inl.len() != 0;
@@ -1622,35 +1660,6 @@ const fn sort_fields(v: &mut Vector<Fld>, lo: usize, hi: usize) {
             j -= 1;
         }
         v[j] = x;
-    }
-}
-
-// `v` in ascending order (a radix sort by 16-bit digits, low to high).
-fn sort_u64(v: &mut Vector<u64>) {
-    let n = v.len();
-    if n < 2 {
-        return;
-    }
-    let mut t = Vector::<u64>::with_capacity(n);
-    t.resize_default(n);
-    let mut cnt = Vector::<u32>::with_capacity(65537);
-    for d in 0..4u64 {
-        cnt.truncate(0);
-        cnt.resize_default(65537);
-        for i in 0..n {
-            cnt[((v[i] >> 16 * d & 0xFFFF) + 1) as usize] += 1;
-        }
-        for q in 0..65536usize {
-            cnt[q + 1] += cnt[q];
-        }
-        for i in 0..n {
-            let k = (v[i] >> 16 * d & 0xFFFF) as usize;
-            t[cnt[k] as usize] = v[i];
-            cnt[k] += 1;
-        }
-        for i in 0..n {
-            v[i] = t[i];
-        }
     }
 }
 

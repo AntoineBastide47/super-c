@@ -310,8 +310,8 @@ extend Verifier {
                 name,
                 b,
                 i,
-                int_like(t.ty) && ta == t.ty && tb == t.ty,
-                "two integer operands of the result's type",
+                int_like(t.ty) && ta == t.ty && tb == t.ty && (t.aux == 0 || op == O_LSHR && t.aux == SH_EXACT),
+                "two integer operands of the result's type (an exact flag on a logical right shift only)",
             );
         }
         if op == O_NEG || op == O_NOT {

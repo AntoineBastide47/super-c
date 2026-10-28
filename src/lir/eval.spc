@@ -757,64 +757,15 @@ extend Eval {
             yl = self.vals[wb as usize];
             yh = self.vals[wb as usize + 1];
         }
-        let mut rl: u64 = 0;
-        let mut rh: u64 = 0;
-        if op == O_ADD {
-            rl = xl.wrapping_add(yl);
-            rh = xh.wrapping_add(yh).wrapping_add((rl < xl) as u64);
-        } else if op == O_SUB {
-            rl = xl.wrapping_sub(yl);
-            rh = xh.wrapping_sub(yh).wrapping_sub((xl < yl) as u64);
-        } else if op == O_MUL {
-            let (pl, ph) = mul64(xl, yl);
-            rl = pl;
-            rh = ph.wrapping_add(xl.wrapping_mul(yh)).wrapping_add(xh.wrapping_mul(yl));
-        } else if op >= O_SDIV && op <= O_UREM {
-            if yl == 0 && yh == 0 {
-                return self.stop(iri::IT_TRAP_UB_DIV_ZERO, "division by zero");
-            }
-            let signed = op == O_SDIV || op == O_SREM;
-            let xn = signed && xh >> 63 != 0;
-            let yn = signed && yh >> 63 != 0;
-            if signed && xh == 0x8000000000000000 && xl == 0 && yl == 0xFFFFFFFFFFFFFFFF && yh == 0xFFFFFFFFFFFFFFFF {
-                return self.stop(iri::IT_TRAP_UB_OVERFLOW, "arithmetic overflow");
-            }
-            // Magnitudes divided; the quotient negative when the signs differ, the remainder with the dividend's.
-            let (al, ah) = neg_if(xn, xl, xh);
-            let (bl, bh) = neg_if(yn, yl, yh);
-            let (ql, qh, ml, mh) = divmod128(al, ah, bl, bh);
-            if op == O_SDIV || op == O_UDIV {
-                let (u, v) = neg_if(xn != yn, ql, qh);
-                rl = u;
-                rh = v;
-            } else {
-                let (u, v) = neg_if(xn, ml, mh);
-                rl = u;
-                rh = v;
-            }
-        } else if op == O_AND {
-            rl = xl & yl;
-            rh = xh & yh;
-        } else if op == O_OR {
-            rl = xl | yl;
-            rh = xh | yh;
-        } else if op == O_XOR {
-            rl = xl ^ yl;
-            rh = xh ^ yh;
-        } else if op == O_SHL || op == O_LSHR || op == O_ASHR {
-            if yh != 0 || yl >= 128 {
-                return self.stop(iri::IT_TRAP_UB_SHIFT, "shift out of range");
-            }
-            let (u, v) = shift128(op, xl, xh, yl as u32);
-            rl = u;
-            rh = v;
-        } else if op == O_NEG {
-            let (u, v) = neg_if(true, xl, xh);
-            rl = u;
-            rh = v;
-        } else {
-            rl = ~xl;
-            rh = ~xh;
+        let (trap, rl, rh) = int128_fold(op, xl, xh, yl, yh);
+        if trap == FOLD_DIV_ZERO {
+            return self.stop(iri::IT_TRAP_UB_DIV_ZERO, "division by zero");
+        }
+        if trap == FOLD_OVERFLOW {
+            return self.stop(iri::IT_TRAP_UB_OVERFLOW, "arithmetic overflow");
+        }
+        if trap == FOLD_SHIFT {
+            return self.stop(iri::IT_TRAP_UB_SHIFT, "shift out of range");
         }
         self.vals[dst as usize] = rl;
         self.vals[dst as usize + 1] = rh;
@@ -1726,6 +1677,72 @@ pub const fn trunc_bits(x: u64, bits: u32) u64 {
 }
 
 // The 128-bit product of `x` and `y`: its low and high words.
+/// Integer operation `op` (`O_ADD` to `O_NOT`) on 128-bit `x` and `y` (low and high words; `O_NEG` and
+/// `O_NOT` read `x` alone): FOLD_OK and the result's words, or the trap it raises. The evaluator's
+/// arithmetic, which the optimizer folds with.
+pub const fn int128_fold(op: u8, xl: u64, xh: u64, yl: u64, yh: u64) (u8, u64, u64) {
+    let mut rl: u64 = 0;
+    let mut rh: u64 = 0;
+    if op == O_ADD {
+        rl = xl.wrapping_add(yl);
+        rh = xh.wrapping_add(yh).wrapping_add((rl < xl) as u64);
+    } else if op == O_SUB {
+        rl = xl.wrapping_sub(yl);
+        rh = xh.wrapping_sub(yh).wrapping_sub((xl < yl) as u64);
+    } else if op == O_MUL {
+        let (pl, ph) = mul64(xl, yl);
+        rl = pl;
+        rh = ph.wrapping_add(xl.wrapping_mul(yh)).wrapping_add(xh.wrapping_mul(yl));
+    } else if op >= O_SDIV && op <= O_UREM {
+        if yl == 0 && yh == 0 {
+            return FOLD_DIV_ZERO, 0, 0;
+        }
+        let signed = op == O_SDIV || op == O_SREM;
+        let xn = signed && xh >> 63 != 0;
+        let yn = signed && yh >> 63 != 0;
+        if signed && xh == 0x8000000000000000 && xl == 0 && yl == 0xFFFFFFFFFFFFFFFF && yh == 0xFFFFFFFFFFFFFFFF {
+            return FOLD_OVERFLOW, 0, 0;
+        }
+        // Magnitudes divided; the quotient negative when the signs differ, the remainder with the dividend's.
+        let (al, ah) = neg_if(xn, xl, xh);
+        let (bl, bh) = neg_if(yn, yl, yh);
+        let (ql, qh, ml, mh) = divmod128(al, ah, bl, bh);
+        if op == O_SDIV || op == O_UDIV {
+            let (u, v) = neg_if(xn != yn, ql, qh);
+            rl = u;
+            rh = v;
+        } else {
+            let (u, v) = neg_if(xn, ml, mh);
+            rl = u;
+            rh = v;
+        }
+    } else if op == O_AND {
+        rl = xl & yl;
+        rh = xh & yh;
+    } else if op == O_OR {
+        rl = xl | yl;
+        rh = xh | yh;
+    } else if op == O_XOR {
+        rl = xl ^ yl;
+        rh = xh ^ yh;
+    } else if op == O_SHL || op == O_LSHR || op == O_ASHR {
+        if yh != 0 || yl >= 128 {
+            return FOLD_SHIFT, 0, 0;
+        }
+        let (u, v) = shift128(op, xl, xh, yl as u32);
+        rl = u;
+        rh = v;
+    } else if op == O_NEG {
+        let (u, v) = neg_if(true, xl, xh);
+        rl = u;
+        rh = v;
+    } else {
+        rl = ~xl;
+        rh = ~xh;
+    }
+    return FOLD_OK, rl, rh;
+}
+
 const fn mul64(x: u64, y: u64) (u64, u64) {
     let (x0, x1) = (x & 0xFFFFFFFF, x >> 32);
     let (y0, y1) = (y & 0xFFFFFFFF, y >> 32);

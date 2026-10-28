@@ -12483,20 +12483,22 @@ fn inline_budget(opt: i32, cg: u64) il::Budget {
 }
 
 // The loop transforms' budgets at `opt-level` `opt` with code-generation flags `cg`:
-// a fully unrolled loop's copies take up to GCC's complete peeling limit (200 instructions) at 3, a third
-// of it at the other levels; a loop versions on its bounds checks up to the same 200, and unswitches up to
-// GCC's and LLVM's 50; a header of up to 8 instructions rotates, but at "s" and "z" (the copy grows the
+// a fully unrolled loop's copies take up to LLVM's full unroll thresholds (300 instructions at 3, 150 at
+// 2), counted once the counter is a constant (`lir::loops::LoopOpt::residual`, as LLVM counts the copies
+// after simplification); a loop versions on its bounds checks up to 200 (GCC's complete peeling limit),
+// and unswitches up to GCC's and LLVM's 50; a header of up to 8 instructions rotates, but at "s" and "z" (the copy grows the
 // code: 1.6% on the compiler, for 1.1% of its build's processor time); a vectorized loop interleaves 4
 // vectors (LLVM's AArch64 maximum; 2 left a sum's accumulator latency exposed: 0.20 against 0.15 s), 1 at
-// "s".
+// "s"; a loop's final values take up to 512 instructions of copied iterations at every level (LLVM's
+// IndVarSimplify runs from 1).
 fn loop_budgets(opt: i32, cg: u64) lu::Budgets {
     return lu::Budgets {
         peel: if (cg & bman::CG_UNROLL) == 0 {
             0u32;
         } else if opt == 3 {
-            200u32;
+            300u32;
         } else {
-            64u32;
+            150u32;
         },
         version: if (cg & bman::CG_VERSION_LOOPS) != 0 {
             200u32;
@@ -12520,6 +12522,7 @@ fn loop_budgets(opt: i32, cg: u64) lu::Budgets {
         } else {
             4u32;
         },
+        fin: 512,
     };
 }
 

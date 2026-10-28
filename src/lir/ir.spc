@@ -441,6 +441,9 @@ pub const fn tbaa(t: Inst) usize {
 }
 /// `O_MEMCPY`: the regions may overlap (memmove).
 pub const MEM_OVERLAP: u16 = 1;
+/// A logical right shift (`lshr`) that shifts out only zero bits (the text's `lshr.exact`): its operand's
+/// integer values are multiples of 2^amount, so it divides a polynomial (`lir::loops`' final values).
+pub const SH_EXACT: u16 = 1;
 
 /// Atomic memory orders (`aux` bits 0 to 2 of the atomic opcodes; `O_ACAS`: the failure order in bits
 /// 3 to 5, then ACAS_WEAK; `O_ARMW`: the operation in bits 4 to 7).
@@ -460,6 +463,31 @@ pub const ORDER_NAMES: [str<'static>; 5] = ["relaxed", "acquire", "release", "ac
 pub const RMW_NAMES: [str<'static>; 6] = ["xchg", "add", "sub", "and", "or", "xor"];
 
 /// The text of condition `c`.
+// The integer comparison code of `b op a` for `a op` = `c`: `<` and `>`, `<=` and `>=`, signed and unsigned;
+// `==` and `!=` stay.
+pub const fn mirror(c: u16) u16 {
+    if c < C_SLT {
+        return c;
+    }
+    return if (c - C_SLT) % 4 < 2 {
+        c + 2;
+    } else {
+        c - 2;
+    };
+}
+
+// The integer comparison code that holds exactly when `c` does not: `==` and `!=`, `<` and `>=`, `<=` and
+// `>`, signed and unsigned.
+pub const fn opposite(c: u16) u16 {
+    return if c <= C_NE {
+        c ^ 1;
+    } else if c <= C_SGE {
+        C_SLT + C_SGE - c;
+    } else {
+        C_ULT + C_UGE - c;
+    };
+}
+
 pub const fn cond_name(c: u16) str<'static> {
     let t: []str<'static> = COND_NAMES;
     return t[c as usize];
@@ -624,9 +652,17 @@ pub struct Sym {
     /// lowering records it where it takes the function's address, for a backend that types that
     /// address (wasm) when the package holds no body of the function. The text form does not carry it.
     pub sig: u32,
+    /// The memory outside its own frame a call of it may read or write (`FX_*`): `lir::opt::Run::new`
+    /// infers it for a function with a body; both for any other. The text form does not carry it.
+    pub fx: u8,
 }
 
 pub const NONE: u32 = 0xFFFFFFFF;
+/// `Sym.fx`: a call may read memory; a call may write memory; a call may write the memory its pointer
+/// arguments address (and no other).
+pub const FX_READ: u8 = 1;
+pub const FX_WRITE: u8 = 2;
+pub const FX_ARG: u8 = 4;
 
 /// `Package.protect`: no body has a stack canary, the bodies with a slot of at least 8 bytes, with any
 /// slot, every body.
@@ -686,9 +722,17 @@ pub const AGG: u32 = 0x80000000;
 /// zero-extends it.
 pub const SIG_SEXT: u32 = 0x40000000;
 pub const SIG_VARIADIC: u32 = 0x80000000;
-/// `Body.refs`: the bytes, and the exclusive flag.
-pub const REF_BYTES: u32 = 0x7FFFFFFF;
+/// `Body.refs`: the bytes, the exclusive flag, and REF_INNER for an aggregate parameter (a by-value
+/// `[]mut T`) whose pointer at offset 0, rather than the parameter, is the exclusive one.
+pub const REF_BYTES: u32 = 0x3FFFFFFF;
+pub const REF_INNER: u32 = 0x40000000;
 pub const REF_NOALIAS: u32 = 0x80000000;
+
+/// Alias classes (`lir::opt::Opt::classes`): no exclusive parameter's referent, exclusive parameter k's
+/// (CL_NOALIAS + k), any. Two accesses of different classes, neither CL_MANY, touch different bytes.
+pub const CL_OTHER: u8 = 0;
+pub const CL_NOALIAS: u8 = 1;
+pub const CL_MANY: u8 = 64;
 
 /// A body: its instructions and every table they index. `syms` and `msgs` map the body's symbol and
 /// message numbers to its package's.
@@ -712,10 +756,24 @@ pub struct Body {
     /// parameter reaches them (a `&mut`); 0 for any other parameter. Empty when no parameter is a
     /// reference.
     pub refs: Vector<u32>,
+    /// The scopes of the inlined calls' exclusive parameters (`Scope`); empty when there is none.
+    pub scopes: Vector<Scope>,
     /// A naked function (`@unsafe(naked)`): its machine code is its `O_ASM` templates alone, in order,
     /// without a prologue or an epilogue.
     pub naked: bool,
     cur: u32, // the block `emit` appends to
+}
+
+/// A scope of an inlined call (`Body.scopes`): within the copy of the call whose instructions have
+/// `inl` value `site` (a `lines` entry of that call alone), `root` is the only path to the referent of
+/// the callee's exclusive parameter `group` (`REF_NOALIAS`): an access of the copy through it and one of
+/// the copy through any other pointer touch different bytes, as the language makes the parameter the
+/// only path to its referent during the call. The roots of one site and group are one pointer (a view's
+/// element pointer, loaded more than once).
+pub struct Scope {
+    pub site: u32,
+    pub group: u32,
+    pub root: Value,
 }
 
 // An exact-capacity copy of `v`.
@@ -729,6 +787,7 @@ extend Inst as Copy {}
 extend Block as Copy {}
 extend Slot as Copy {}
 extend Loc as Copy {}
+extend Scope as Copy {}
 extend Sym as Copy {}
 extend DataDef as Copy {}
 extend Reloc as Copy {}
@@ -749,6 +808,7 @@ extend Body {
             inl: Vector::<u32>::new(),
             sig: NONE,
             refs: Vector::<u32>::new(),
+            scopes: Vector::<Scope>::new(),
             naked: false,
             cur: 0,
         };
@@ -771,6 +831,7 @@ extend Body {
         self.inl.truncate(0);
         self.sig = NONE;
         self.refs.truncate(0);
+        self.scopes.truncate(0);
         self.naked = false;
         self.cur = 0;
     }
@@ -791,6 +852,7 @@ extend Body {
             inl: exact(&self.inl),
             sig: self.sig,
             refs: exact(&self.refs),
+            scopes: exact(&self.scopes),
             naked: self.naked,
             cur: 0,
         };
@@ -1015,6 +1077,9 @@ pub struct Package {
     /// The bytes of a vector the native backend computes in one register (`target::table::Isa`), 0 for
     /// none: the loop vectorizer's vectors (`lir::loops`).
     pub vector: u32,
+    /// Whether the native backend computes `O_MULHU` of 64-bit integers in one instruction
+    /// (`target::table::Isa`): the optimizer then divides by a 64-bit constant with a product.
+    pub mul_high: bool,
     /// The float rewrites the build allows (`FM_*`, `-ffast-math` and its parts), and whether the
     /// processor has a scalar fused multiply-add (`O_FMA` for contraction).
     pub fmath: u8,
@@ -1049,10 +1114,13 @@ pub struct Held {
     pub data: u32,
     pub bytes: u32,
     pub relocs: u32,
-    /// Per held body: its symbol, its walk facts (`HELD_SHAPE`, `HELD_OK`) and its direct calls before
-    /// optimization (`calls[at[k]..at[k + 1]]`: symbols, in instruction order).
+    /// Per held body: its symbol, its walk facts (`HELD_SHAPE`, `HELD_OK`), its effects (`Sym.fx`) and
+    /// the parameters whose memory it may write (a bit each), and its direct calls before optimization
+    /// (`calls[at[k]..at[k + 1]]`: symbols, in instruction order).
     pub syms: Vector<u32>,
     pub flags: Vector<u8>,
+    pub fx: Vector<u8>,
+    pub wargs: Vector<u64>,
     pub at: Vector<u32>,
     pub calls: Vector<u32>,
     /// Per held data definition, its symbol.
@@ -1073,6 +1141,8 @@ extend Held {
             relocs: 0,
             syms: Vector::<u32>::new(),
             flags: Vector::<u8>::new(),
+            fx: Vector::<u8>::new(),
+            wargs: Vector::<u64>::new(),
             at: Vector::<u32>::new(),
             calls: Vector::<u32>::new(),
             dsyms: Vector::<u32>::new(),
@@ -1087,6 +1157,7 @@ extend Package {
             ptr_bytes: ptr_bytes,
             vec_regs: 16,
             vector: 16,
+            mul_high: true,
             pic: false,
             no_plt: false,
             debug: false,
@@ -1163,6 +1234,7 @@ extend Package {
                 sect: NONE,
                 used: false,
                 noinline: false,
+                fx: FX_READ | FX_WRITE,
                 own: false,
                 ext: false,
                 sig: NONE,

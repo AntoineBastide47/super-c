@@ -30,6 +30,8 @@ import std::parallel::sync as psync;
 import lir::inline as il;
 import lir::promote as pr;
 import lir::loops as lu;
+import lir::slp as sl;
+import lir::print as lp;
 import stdlib;
 import std::platform::clock as pclock;
 
@@ -41,8 +43,15 @@ const LOG_PURE: u8 = 0;
 const LOG_MEM: u8 = 1;
 const LOG_COND: u8 = 2;
 const LOG_REL: u8 = 3;
+const LOG_UB: u8 = 4;
+// `Opt::overwrite` keeps at most PEND_MAX stores.
+const PEND_MAX: u32 = 8;
+// `Opt::ubound` follows at most UB_DEPTH instructions.
+const UB_DEPTH: u32 = 4;
 // An if-conversion makes at most MAX_SELECTS selects; a minimum's operands are followed MIN_DEPTH deep.
 const MAX_SELECTS: u32 = 2;
+// The instructions but constants an if-conversion moves out of its two sides (`Opt::speculate`).
+const SPEC_MAX: u32 = 4;
 const MIN_DEPTH: u32 = 3;
 // `Opt::private_load`'s answers besides a value, and the memory state of the loads it keeps.
 const PRIV_NONE: Value = VNONE;
@@ -51,7 +60,25 @@ const KEPT_STATE: u32 = NONE;
 // Private memory with more writes than this has no load promoted or kept (`private_load` scans them).
 const SLOT_WRITES_MAX: u32 = 64;
 // The loop transforms run at most LOOP_ROUNDS times per body: each round may double a loop.
-const LOOP_ROUNDS: u32 = 2;
+// A vector load of what scalar stores just wrote waits for them (no store forwarding): its cost in
+// instructions (`Opt::weigh`).
+const GATHER_COST: u64 = 8;
+const LOOP_ROUNDS: u32 = 3;
+// `Opt::between_writes` visits at most BETWEEN_MAX blocks; WRITES_ALL is its answer past them.
+const BETWEEN_MAX: u32 = 16;
+const WRITES_ALL: u32 = 0x10000;
+// `in_frame` follows at most FRAME_DEPTH values.
+const FRAME_DEPTH: u32 = 8;
+// `Opt::preader` and `ireader` of a value several blocks read, or an edge.
+const MULTI: u32 = 0xFFFFFFFE;
+// `Opt::thread_rounds` runs at most THREAD_ROUNDS times per optimization of a body. A block an edge
+// threads through holds at most THREAD_BLOCK_MAX instructions, its terminator included, and its
+// branch's condition is followed THREAD_DEPTH instructions deep.
+const THREAD_ROUNDS: u32 = 3;
+const THREAD_BLOCK_MAX: u32 = 8;
+const THREAD_DEPTH: u32 = 4;
+// `Opt::implied` follows a parameter back through at most IMPLY_FAN edges into its block.
+const IMPLY_FAN: u32 = 4;
 
 /// The optimizer's scratch, reused from body to body.
 pub struct Opt {
@@ -79,7 +106,30 @@ pub struct Opt {
     // The alias class of each instruction's and each block parameter's value (`classes`).
     icls: Vector<u8>,
     pcls: Vector<u8>,
+    // Scoped classes (`Body.scopes`): per class, its site (NONE: a parameter's) and its roots' block;
+    // per scope, its class index; per instruction, the scope classes it belongs to; the scope classes;
+    // pinned roots; per instruction, its access's class (`acc`) for the loop transforms.
+    csite: Vector<u32>,
+    croot: Vector<u32>,
+    sgroup: Vector<u32>,
+    cgroup: Vector<u32>, // per class, its scope group (`scope_seeds`)
+    owner: Vector<u32>, // per instruction, then per block parameter, its block (`scope_seeds`)
+    site_cls: Vector<u64>, // per `lines` entry, the scope classes of its inline site (`scope_seeds`)
+    imem: Vector<u64>,
+    sbits: u64,
+    ipin: Vector<bool>,
+    ppin: Vector<bool>,
+    acls: Vector<u8>,
     mark: Vector<u32>,
+    hdr: Vector<bool>, // per block, whether it heads a loop (`thread`)
+    preader: Vector<u32>, // per block parameter, the block outside its own that reads it (`thread`)
+    pcount: Vector<u8>, // per block parameter, how many instructions read it, up to 2 (`thread`)
+    icount: Vector<u8>, // per instruction, how many instructions read it, up to 2 (`thread`)
+    ireader: Vector<u32>, // per instruction, the block outside its own that reads it (`thread`)
+    puser: Vector<u32>, // per block parameter, the last instruction that reads it (`thread`)
+    textra: Vector<u32>, // the constants `thread` made, for the walk's `extra`
+    settle: Vector<u32>, // `thread`'s settled branches: block, edge
+    trepl: Vector<u64>, // instruction << 32 | the value `thread` replaced it with, for the walk
     // Per block parameter its block; per instruction its block (a moved one's new block), what replaced
     // it (VNONE: nothing) and whether it moved.
     pblock: Vector<u32>,
@@ -91,6 +141,10 @@ pub struct Opt {
     made: Map<u64, u32>, // a made constant's hash to the constant
     moved: Vector<bool>,
     hoisted: Vector<u64>, // block << 32 | instruction, in the order they moved
+    pnew: Vector<bool>, // per block, a preheader `preheaders` made
+    pre: Vector<u64>, // instruction << 32 | an instruction the walk made to run right before it, in order
+    pre_at: Vector<u32>, // the rebuild's ranges of `pre_list` per instruction
+    pre_list: Vector<u32>,
     // The scoped tables: a pure instruction's hash to the instruction, a memory place's hash to its
     // `places` entry, a branch condition the edge into the scope decides to 0 or 1. `log` holds each
     // insertion of the open scopes: its table, key and the entry it replaced (NONE: none).
@@ -98,9 +152,11 @@ pub struct Opt {
     mem: Map<u64, u32>,
     cond: Map<u64, u32>,
     rel: Map<u64, u32>, // `y << 32 | x` -> whether `x <u y` holds (`rel_key`)
+    ub: Map<u64, u32>, // value -> constant `k` << 1 | 1 when `value <u k` holds, `k` << 1 when `value <=u k`
     log: Vector<(u8, u64, u32)>,
     places: Vector<Place>,
     state: u32, // the current memory state of the visited access (its tag's)
+    prior: u32, // the memory state of the visited access's tag before it
     tstate: [u32; TBAA_TAGS], // per type tag, the current memory state of its accesses
     tags: Vector<u16>, // per loop header, the type tags its blocks write (`tags_in`)
     // Private memory (`slot_writes`): the slots, then the aggregate arguments (each a copy the callee
@@ -113,7 +169,19 @@ pub struct Opt {
     wat: Vector<u32>,
     wl: Vector<SlotWrite>,
     end_state: Vector<u32>, // per block and type tag, its state at its end
+    pstate: u32, // the current memory state of the private slots' accesses (`privates`)
+    end_pstate: Vector<u32>, // per block, `pstate` at its end
+    pder: Vector<u32>, // per instruction, the slot its address derives from (NONE: none)
+    pwrite: Vector<bool>, // per loop header, whether the loop writes a private slot's memory
+    lst: Vector<u32>, // the loops' plain stores of an exclusive parameter's class, each loop's together
+    lst_at: Vector<u64>, // per loop header, its range of `lst`: start << 32 | end
+    imprecise: Vector<u64>, // per loop header, the classes a write but a plain store touches
+    pesc: Vector<bool>, // per slot, whether its address escapes
+    bwrites: Vector<u16>, // per block, the type tags its writes write (bit 0: an untagged write, all of them)
+    rmark: Vector<u32>, // per block, the last block whose `between_writes` reached it
+    rstack: Vector<u32>,
     stack: Vector<u64>,
+    pend: Vector<u32>, // the walk's block's stores no instruction since may read (`overwrite`)
     work: Vector<u32>,
     // The rebuild.
     bmap: Vector<u32>, // per block, its new number (NONE: unreached)
@@ -138,6 +206,8 @@ pub struct Opt {
     prom: pr::Promoter,
     pbody: Body,
     unr: lu::LoopOpt,
+    slp: sl::Slp,
+    wgt: Vector<u64>, // per block, the weight of an instruction there (`weigh`)
 }
 
 /// What `optimize` does: the inline budget, and the loop transforms' budgets.
@@ -192,16 +262,41 @@ extend Opt {
             writes: Vector::<u64>::new(),
             icls: Vector::<u8>::new(),
             pcls: Vector::<u8>::new(),
+            csite: Vector::<u32>::new(),
+            croot: Vector::<u32>::new(),
+            sgroup: Vector::<u32>::new(),
+            cgroup: Vector::<u32>::new(),
+            owner: Vector::<u32>::new(),
+            site_cls: Vector::<u64>::new(),
+            imem: Vector::<u64>::new(),
+            sbits: 0,
+            ipin: Vector::<bool>::new(),
+            ppin: Vector::<bool>::new(),
+            acls: Vector::<u8>::new(),
             mark: Vector::<u32>::new(),
+            hdr: Vector::<bool>::new(),
+            preader: Vector::<u32>::new(),
+            pcount: Vector::<u8>::new(),
+            icount: Vector::<u8>::new(),
+            ireader: Vector::<u32>::new(),
+            puser: Vector::<u32>::new(),
+            textra: Vector::<u32>::new(),
+            settle: Vector::<u32>::new(),
+            trepl: Vector::<u64>::new(),
             pblock: Vector::<u32>::new(),
             blk_of: Vector::<u32>::new(),
             repl: Vector::<u32>::new(),
             moved: Vector::<bool>::new(),
             hoisted: Vector::<u64>::new(),
+            pnew: Vector::<bool>::new(),
+            pre: Vector::<u64>::new(),
+            pre_at: Vector::<u32>::new(),
+            pre_list: Vector::<u32>::new(),
             pure: Map::<u64, u32>::new(),
             mem: Map::<u64, u32>::new(),
             cond: Map::<u64, u32>::new(),
             rel: Map::<u64, u32>::new(),
+            ub: Map::<u64, u32>::new(),
             log: Vector::<(u8, u64, u32)>::new(),
             places: Vector::<Place>::new(),
             sbase: Vector::<u32>::new(),
@@ -211,10 +306,23 @@ extend Opt {
             wat: Vector::<u32>::new(),
             wl: Vector::<SlotWrite>::new(),
             state: 0,
+            prior: 0,
             end_state: Vector::<u32>::new(),
+            pstate: 0,
+            end_pstate: Vector::<u32>::new(),
+            pder: Vector::<u32>::new(),
+            pwrite: Vector::<bool>::new(),
+            lst: Vector::<u32>::new(),
+            lst_at: Vector::<u64>::new(),
+            imprecise: Vector::<u64>::new(),
+            pesc: Vector::<bool>::new(),
+            bwrites: Vector::<u16>::new(),
+            rmark: Vector::<u32>::new(),
+            rstack: Vector::<u32>::new(),
             tstate: [0u32; TBAA_TAGS],
             tags: Vector::<u16>::new(),
             stack: Vector::<u64>::new(),
+            pend: Vector::<u32>::new(),
             work: Vector::<u32>::new(),
             bmap: Vector::<u32>::new(),
             in_at: Vector::<u32>::new(),
@@ -241,6 +349,8 @@ extend Opt {
             prom: pr::Promoter::new(),
             pbody: Body::new(),
             unr: lu::LoopOpt::new(),
+            slp: sl::Slp::new(),
+            wgt: Vector::<u64>::new(),
         };
     }
 
@@ -250,17 +360,31 @@ extend Opt {
         if b.naked {
             return false;
         }
-        self.graph(b);
-        self.dominators(b);
-        self.loops(b);
+        // `thread` computes the graph and the dominators: they stand when it moves no edge.
+        let threaded = self.thread(pk, b);
+        if threaded {
+            self.graph(b);
+            self.dominators(b);
+        }
+        self.loops(pk, b);
+        // The walk hoists into preheaders.
+        let entered = self.preheaders(b);
+        if entered {
+            self.graph(b);
+            self.dominators(b);
+            self.loops(pk, b);
+        }
         self.slot_writes(pk, b);
-        let changed = self.walk(pk, b) || force;
+        let changed = self.walk(pk, b) || force || threaded || entered;
+        if entered {
+            self.unenter(b);
+        }
         if changed {
             self.rebuild(b);
         }
         // SC_LIR_PROMOTE=0 promotes nothing (a debugging aid).
         if b.slots.len() == 0 || stdlib::env_is("SC_LIR_PROMOTE", "0") {
-            return changed;
+            return self.thread_rounds(pk, b) || changed;
         }
         // Promotion, once the walk forwarded the parameters an inlined body's entry takes (a slot's
         // address among them); it keeps the blocks and their edges' targets, so the graph and the
@@ -281,15 +405,99 @@ extend Opt {
             &mut self.pbody,
         );
         if !promoted {
-            return changed;
+            return self.thread_rounds(pk, b) || changed;
         }
         let nb = replace(&mut self.pbody, Body::new());
         self.pbody = replace(b, nb);
-        self.loops(b);
+        self.loops(pk, b);
         self.slot_writes(pk, b);
         let _ = self.walk(pk, b);
         self.rebuild(b);
+        // Promotion turns the flags a `&&` or `||` stores into parameters `thread` reads.
+        let _ = self.thread_rounds(pk, b);
         return true;
+    }
+
+    // `thread`, then the walk and the rebuild, while `thread` moves an edge, at most THREAD_ROUNDS times:
+    // each round may leave a branch whose sides now meet (a three-way comparison tested against 0 takes
+    // two). Whether any round ran.
+    fn thread_rounds(self: &mut Self, pk: &Package, b: &mut Body) bool {
+        let mut round: u32 = 0;
+        while round < THREAD_ROUNDS && self.thread(pk, b) {
+            self.graph(b);
+            self.dominators(b);
+            self.loops(pk, b);
+            self.slot_writes(pk, b);
+            let _ = self.walk(pk, b);
+            self.rebuild(b);
+            round += 1;
+        }
+        return round != 0;
+    }
+
+    /// Pack body `b`'s isomorphic scalar values into vectors (`lir::slp`), kept when the instruction
+    /// count weighted by loop depth drops; then optimize it again. Whether it changed.
+    pub fn slp(self: &mut Self, pk: &Package, b: &mut Body) bool {
+        if b.naked || pk.vector < 16 {
+            return false;
+        }
+        let before = self.weigh(pk, b);
+        if !self.slp.plan(b, pk.ptr_bytes, self.wgt.as_slice()) {
+            return false;
+        }
+        let saved = b.compact();
+        let ni = b.insts.len();
+        self.fresh(b);
+        self.slp.emit(b);
+        for x in 0..b.insts.len() - ni {
+            self.repl.push(VNONE);
+            self.frepl.push(VNONE);
+            self.moved.push(true);
+            self.blk_of.push(self.slp.blk[x]);
+        }
+        self.pre.extend_copy(&self.slp.pre);
+        self.hoisted.extend_copy(&self.slp.tail);
+        self.rebuild(b);
+        let _ = self.run(pk, b, true);
+        if self.weigh(pk, b) >= before {
+            *b = saved;
+            return false;
+        }
+        return true;
+    }
+
+    // `wgt` for body `b`: an instruction weighs 16 per loop around it, up to three; and the instruction
+    // count with each instruction weighed, a vector load from a slot (`lir::slp`'s gathers) GATHER_COST
+    // more.
+    fn weigh(self: &mut Self, pk: &Package, b: &Body) u64 {
+        self.graph(b);
+        self.dominators(b);
+        self.loops(pk, b);
+        let nb = b.blocks.len();
+        self.wgt.truncate(0);
+        let mut sum: u64 = 0;
+        for k in 0..nb {
+            let mut depth: u32 = 0;
+            let mut h = self.inner[k];
+            // Each step leaves one loop.
+            while h != NONE && depth < nb as u32 {
+                depth += 1;
+                h = self.lparent[h as usize];
+            }
+            let w = 1u64 << (4 * depth.min(3)) as u64;
+            self.wgt.push(w);
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                let gather = t.op == O_LOAD && is_vec(t.ty) && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_SLOTADDR;
+                sum += w * if gather {
+                    1 + GATHER_COST;
+                } else {
+                    1u64;
+                };
+            }
+        }
+        return sum;
     }
 
     /// Rotate the innermost loops of body `b` whose header holds at most `max` instructions
@@ -300,7 +508,7 @@ extend Opt {
         }
         self.graph(b);
         self.dominators(b);
-        self.loops(b);
+        self.loops(pk, b);
         let any = self.unr.rotate(
             b,
             max,
@@ -325,7 +533,12 @@ extend Opt {
         }
         self.graph(b);
         self.dominators(b);
-        self.loops(b);
+        self.loops(pk, b);
+        if self.preheaders(b) {
+            self.graph(b);
+            self.dominators(b);
+            self.loops(pk, b);
+        }
         let any = self.unr.run(
             b,
             pk.ptr_bytes,
@@ -337,6 +550,12 @@ extend Opt {
             self.preh.as_slice(),
             self.dpre.as_slice(),
             self.dpost.as_slice(),
+            lu::Classes {
+                acc: self.acls.as_slice(),
+                member: self.imem.as_slice(),
+                scoped: self.sbits,
+                root: self.croot.as_slice(),
+            },
         );
         if !any {
             return false;
@@ -345,35 +564,205 @@ extend Opt {
         return true;
     }
 
+    /// Give each loop exit of body `b` that passes arguments from a branch whose other side stays in the
+    /// loop a block of its own that jumps on with them: the native layout places that block after the
+    /// loop, so the loop's path takes no branch around the exit's moves. Whether any.
+    pub fn split_exits(self: &mut Self, pk: &Package, b: &mut Body) bool {
+        if b.naked {
+            return false;
+        }
+        self.graph(b);
+        self.dominators(b);
+        self.loops(pk, b);
+        let none: []u8 = [];
+        let noargs: []Value = [];
+        let nb = b.blocks.len();
+        let mut any = false;
+        for k in 0..nb {
+            let h = self.inner[k];
+            let i = (b.blocks[k].start + b.blocks[k].len - 1) as usize;
+            let mut t = b.insts[i];
+            if h == NONE || t.op != O_BR {
+                continue;
+            }
+            let ib = self.in_loop(h, b.edge_target(t.b));
+            if ib == self.in_loop(h, b.edge_target(t.c)) {
+                continue;
+            }
+            let e = if ib {
+                t.c;
+            } else {
+                t.b;
+            };
+            if b.edge_nargs(e) == 0 {
+                continue;
+            }
+            let x = b.add_block(none);
+            b.begin(x);
+            let _ = b.emit(jump(e), b.locs[i]);
+            if b.inl.len() != 0 {
+                b.inl.push(b.inl[i]);
+            }
+            let ne = b.edge(x, noargs);
+            if ib {
+                t.c = ne;
+            } else {
+                t.b = ne;
+            }
+            b.insts[i] = t;
+            any = true;
+        }
+        return any;
+    }
+
+    // Give each loop header no preheader enters one (LLVM's LoopSimplify): a block that the jumps and
+    // branches from outside the loop enter instead, and that jumps on to the header: with the one such
+    // edge's arguments, or with the header's parameters for several. A header a switch enters from
+    // outside keeps none. Whether any.
+    fn preheaders(self: &mut Self, b: &mut Body) bool {
+        let nb = b.blocks.len();
+        let mut any = false;
+        fill_bool(&mut self.pnew, nb, false);
+        for h in 0..nb as u32 {
+            if self.inner[h as usize] != h || self.preh[h as usize] != NONE || self.rpo[h as usize] == NONE {
+                continue;
+            }
+            let mut ok = true;
+            let mut n: u32 = 0;
+            let mut one = NONE;
+            for x in self.pred_at[h as usize]..self.pred_at[h as usize + 1] {
+                let q = self.preds[x as usize];
+                if !self.in_loop(h, q) {
+                    let t = term(b, q);
+                    ok = ok && (t.op == O_JMP || t.op == O_BR);
+                    n += 1;
+                    one = if t.op == O_JMP {
+                        t.a;
+                    } else if b.edge_target(t.b) == h {
+                        t.b;
+                    } else {
+                        t.c;
+                    };
+                    // A branch with both sides into the header is two edges.
+                    if t.op == O_BR && b.edge_target(t.b) == h && b.edge_target(t.c) == h {
+                        n += 1;
+                    }
+                }
+            }
+            if !ok || n == 0 {
+                continue;
+            }
+            let hb = b.blocks[h as usize];
+            let mut types = Vector::<u8>::with_capacity(hb.param_len as usize);
+            let mut args = Vector::<Value>::with_capacity(hb.param_len as usize);
+            if n == 1 {
+                for q in 0..b.edge_nargs(one) {
+                    args.push(b.edge_arg(one, q));
+                }
+            } else {
+                for q in hb.param_start..hb.param_start + hb.param_len as u32 {
+                    types.push(b.params[q as usize]);
+                }
+            }
+            let loc = b.locs[hb.start as usize];
+            let x = b.add_block(types.as_slice());
+            for q in 0..types.len() as u32 {
+                args.push(b.param(x, q));
+            }
+            b.begin(x);
+            self.pnew.push(true);
+            let into = b.edge(h, args.as_slice());
+            let _ = b.emit(jump(into), loc);
+            if b.inl.len() != 0 {
+                b.inl.push(0);
+            }
+            for y in self.pred_at[h as usize]..self.pred_at[h as usize + 1] {
+                let q = self.preds[y as usize];
+                if self.in_loop(h, q) {
+                    continue;
+                }
+                let i = (b.blocks[q as usize].start + b.blocks[q as usize].len - 1) as usize;
+                let mut t = b.insts[i];
+                if t.op == O_JMP {
+                    t.a = Opt::redirect(b, t.a, h, x, n == 1);
+                } else {
+                    t.b = Opt::redirect(b, t.b, h, x, n == 1);
+                    t.c = Opt::redirect(b, t.c, h, x, n == 1);
+                }
+                b.insts[i] = t;
+            }
+            any = true;
+        }
+        return any;
+    }
+
+    // Take out each preheader `preheaders` made that the walk moved nothing into and that has no
+    // parameters (the walk may have put those in place of the header's): the edge into it enters its
+    // loop's header again, with the arguments its jump passes. The rebuild drops it.
+    fn unenter(self: &mut Self, b: &mut Body) {
+        for q in 0..self.hoisted.len() {
+            let k = (self.hoisted[q] >> 32) as usize;
+            if k < self.pnew.len() {
+                self.pnew[k] = false;
+            }
+        }
+        let mut args = Vector::<Value>::new();
+        for k in 0..b.blocks.len() {
+            let i = (b.blocks[k].start + b.blocks[k].len - 1) as usize;
+            let mut t = b.insts[i];
+            if t.op == O_JMP {
+                t.a = self.unentered(b, t.a, &mut args);
+            } else if t.op == O_BR {
+                t.b = self.unentered(b, t.b, &mut args);
+                t.c = self.unentered(b, t.c, &mut args);
+            }
+            b.insts[i] = t;
+        }
+    }
+
+    // Edge `e`, or the edge past the unused preheader it enters (`unenter`).
+    fn unentered(self: &Self, b: &mut Body, e: u32, args: &mut Vector<Value>) u32 {
+        let x = b.edge_target(e);
+        if x as usize >= self.pnew.len() || !self.pnew[x as usize] || b.blocks[x as usize].param_len != 0 {
+            return e;
+        }
+        let j = b.insts[b.blocks[x as usize].start as usize].a;
+        args.truncate(0);
+        for q in 0..b.edge_nargs(j) {
+            args.push(b.edge_arg(j, q));
+        }
+        return b.edge(b.edge_target(j), args.as_slice());
+    }
+
+    // Edge `e` of `b`, entering block `x` when it enters `h`: without arguments when `bare`, else with
+    // its own.
+    fn redirect(b: &mut Body, e: u32, h: u32, x: u32, bare: bool) u32 {
+        if b.edge_target(e) != h {
+            return e;
+        }
+        let mut args = Vector::<Value>::with_capacity(b.edge_nargs(e) as usize);
+        if !bare {
+            for q in 0..b.edge_nargs(e) {
+                args.push(b.edge_arg(e, q));
+            }
+        }
+        return b.edge(x, args.as_slice());
+    }
+
     // ---- Analysis --------------------------------------------------------------------------------------
 
     fn graph(self: &mut Self, b: &Body) {
         let nb = b.blocks.len();
         self.succ_at.truncate(0);
         self.succs.truncate(0);
-        fill(&mut self.pred_at, nb + 1, 0);
         for k in 0..nb {
             self.succ_at.push(self.succs.len() as u32);
             b.succ_edges(term(b, k as u32), &mut self.edges);
             for e in 0..self.edges.len() {
-                let s = b.edge_target(self.edges[e]);
-                self.succs.push(s);
-                self.pred_at[s as usize + 1] += 1;
+                self.succs.push(b.edge_target(self.edges[e]));
             }
         }
         self.succ_at.push(self.succs.len() as u32);
-        for k in 0..nb {
-            self.pred_at[k + 1] += self.pred_at[k];
-        }
-        fill(&mut self.preds, self.succs.len(), 0);
-        fill(&mut self.work, nb, 0);
-        for k in 0..nb {
-            for e in self.succ_at[k]..self.succ_at[k + 1] {
-                let s = self.succs[e as usize] as usize;
-                self.preds[(self.pred_at[s] + self.work[s]) as usize] = k as u32;
-                self.work[s] += 1;
-            }
-        }
         // Postorder by an explicit-stack depth-first search (block << 1 | finished), then its reverse.
         fill(&mut self.rpo, nb, NONE);
         self.work.truncate(0);
@@ -405,6 +794,30 @@ extend Opt {
             let k = self.work[n - 1 - i];
             self.rpo[k as usize] = i as u32;
             self.order.push(k);
+        }
+        // The predecessors among the reached blocks, in block order: a block the rewrites left behind (a
+        // branch folded, an edge threaded) enters nothing.
+        fill(&mut self.pred_at, nb + 1, 0);
+        for k in 0..nb {
+            if self.rpo[k] != NONE {
+                for e in self.succ_at[k]..self.succ_at[k + 1] {
+                    self.pred_at[self.succs[e as usize] as usize + 1] += 1;
+                }
+            }
+        }
+        for k in 0..nb {
+            self.pred_at[k + 1] += self.pred_at[k];
+        }
+        fill(&mut self.preds, self.pred_at[nb] as usize, 0);
+        fill(&mut self.work, nb, 0);
+        for k in 0..nb {
+            if self.rpo[k] != NONE {
+                for e in self.succ_at[k]..self.succ_at[k + 1] {
+                    let s = self.succs[e as usize] as usize;
+                    self.preds[(self.pred_at[s] + self.work[s]) as usize] = k as u32;
+                    self.work[s] += 1;
+                }
+            }
         }
     }
 
@@ -502,9 +915,18 @@ extend Opt {
     // address arithmetic, a select, a comparison or a block argument) is not exclusive here: another
     // pointer may hold it. Joins at block parameters iterate in reverse postorder up to CLASS_ROUNDS
     // times; a body they do not settle in that many has no exclusive parameter.
+    //
+    // An inlined call's exclusive parameter (`Body.scopes`) is a class of its own past the parameters',
+    // its roots pinned to it, that holds only for the accesses of the call's copy (`acc`, `imem`) and
+    // only for the loops its roots are outside of (`loop_acc`): a root inside a loop is a new pointer in
+    // each iteration, each a call of its own. A use of it outside the copy is no escape.
     fn classes(self: &mut Self, b: &Body) {
         fill(&mut self.icls, b.insts.len(), CL_OTHER);
         fill(&mut self.pcls, b.params.len(), CL_OTHER);
+        fill(&mut self.csite, CL_MANY as usize, NONE);
+        fill(&mut self.croot, CL_MANY as usize, NONE);
+        self.sbits = 0;
+        self.imem.truncate(0);
         let e = b.blocks[0];
         let mut seeds: u64 = 0;
         for k in 0..b.refs.len() {
@@ -512,19 +934,131 @@ extend Opt {
                 seeds |= 1u64 << k as u64;
             }
         }
-        // The second pass runs without the parameters the first found escaping.
-        for _ in 0..2 {
+        let mut cand: u64 = 0;
+        if b.scopes.len() != 0 {
+            cand = self.scope_seeds(b, seeds);
+        }
+        seeds |= cand;
+        // Each pass drops at least one seed that escapes.
+        for _ in 0..CL_MANY {
             if seeds == 0 || !self.class_flow(b, seeds) {
                 fill(&mut self.icls, b.insts.len(), CL_OTHER);
                 fill(&mut self.pcls, b.params.len(), CL_OTHER);
+                self.sbits = 0;
                 return;
             }
-            let kept = seeds & ~self.escaped(b);
+            let kept = seeds & ~self.escaped(b, cand << 1);
             if kept == seeds {
+                self.sbits = (seeds & cand) << 1;
                 return;
             }
             seeds = kept;
         }
+        assert(false, "opt: the escape passes do not settle");
+    }
+
+    // The scopes' seeds (bits of their class indices, past the parameters'): one per site and group whose
+    // roots share one block and are no exclusive parameter; `csite`, `croot`, `sgroup` and the members
+    // (`imem`) set.
+    fn scope_seeds(self: &mut Self, b: &Body, params: u64) u64 {
+        let e = b.blocks[0];
+        let ni = b.insts.len();
+        fill(&mut self.owner, ni + b.params.len(), NONE);
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                self.owner[i as usize] = k as u32;
+            }
+            for q in bk.param_start..bk.param_start + bk.param_len as u32 {
+                self.owner[ni + q as usize] = k as u32;
+            }
+        }
+        fill(&mut self.cgroup, CL_MANY as usize, NONE);
+        let mut next = e.param_len as u32;
+        let mut out: u64 = 0;
+        fill(&mut self.sgroup, b.scopes.len(), NONE);
+        for x in 0..b.scopes.len() {
+            let sc = b.scopes[x];
+            let r = sc.root;
+            let blk = if r == VNONE {
+                NONE;
+            } else if (r & VPARAM) != 0 {
+                self.owner[ni + (r & ~VPARAM) as usize];
+            } else {
+                self.owner[(r & ~VFLAG) as usize];
+            };
+            let k = entry_param(b, r);
+            // The class of an earlier scope of the same site and group; none once the classes ran out.
+            let mut idx = NONE;
+            for c in CL_NOALIAS as u32 + e.param_len as u32..CL_NOALIAS as u32 + next {
+                if self.csite[c as usize] == sc.site && self.cgroup[c as usize] == sc.group {
+                    idx = c - CL_NOALIAS as u32;
+                }
+            }
+            if idx == NONE && next < (CL_MANY - CL_NOALIAS) as u32 {
+                idx = next;
+                next += 1;
+                out |= 1u64 << idx as u64;
+                self.csite[(CL_NOALIAS as u32 + idx) as usize] = sc.site;
+                self.cgroup[(CL_NOALIAS as u32 + idx) as usize] = sc.group;
+                self.croot[(CL_NOALIAS as u32 + idx) as usize] = blk;
+            }
+            self.sgroup[x] = idx;
+            // A group's roots in two blocks, or one that is an exclusive parameter, end it.
+            if idx != NONE && (blk == NONE || self.croot[(CL_NOALIAS as u32 + idx) as usize] != blk || k < 64 && (params >> k as u64 & 1) != 0) {
+                out &= ~(1u64 << idx as u64);
+            }
+        }
+        if out == 0 || b.inl.len() != ni {
+            return 0;
+        }
+        fill(&mut self.site_cls, b.lines.len(), 0);
+        for c in CL_NOALIAS..CL_MANY {
+            if (out >> (c - CL_NOALIAS) as u64 & 1) != 0 {
+                self.site_cls[self.csite[c as usize] as usize] |= class_bit(c);
+            }
+        }
+        fill(&mut self.imem, ni, 0);
+        for i in 0..ni {
+            self.imem[i] = self.site_cls[b.inl[i] as usize];
+        }
+        return out;
+    }
+
+    // The scope classes instruction `i` belongs to (`imem`).
+    const fn member(self: &Self, i: u32) u64 {
+        return if i as usize < self.imem.len() {
+            self.imem[i as usize];
+        } else {
+            0u64;
+        };
+    }
+
+    // The class of instruction `i`'s access through address `a`: its address's, CL_MANY for a scope's
+    // class outside that scope's copy.
+    const fn acc(self: &Self, i: u32, a: Value) u8 {
+        let c = self.class(a);
+        if c < CL_MANY && (class_bit(c) & self.sbits) != 0 && (self.member(i) & class_bit(c)) == 0 {
+            return CL_MANY;
+        }
+        return c;
+    }
+
+    // The class of load or store `i`'s access (`acls`) as loop `h` sees it: CL_MANY for a scope's whose
+    // roots the loop holds.
+    const fn loop_acc(self: &Self, i: u32, h: u32) u8 {
+        let c = if i as usize < self.acls.len() {
+            self.acls[i as usize];
+        } else {
+            CL_MANY;
+        };
+        if c < CL_MANY && (class_bit(c) & self.sbits) != 0 && (self.croot[c as usize] == NONE || self.in_loop(
+            h,
+            self.croot[c as usize],
+        )) {
+            return CL_MANY;
+        }
+        return c;
     }
 
     // The classes of `classes` from the parameters `seeds` marks: whether the joins settled.
@@ -541,11 +1075,43 @@ extend Opt {
         fill(&mut self.pcls, b.params.len(), CL_UNSET);
         for q in e.param_start..e.param_start + e.param_len as u32 {
             let k = q - e.param_start;
-            self.pcls[q as usize] = if k < 64 && (seeds >> k as u64 & 1) != 0 {
+            self.pcls[q as usize] = if k < 64 && (seeds >> k as u64 & 1) != 0 && !inner(b, k) {
                 CL_NOALIAS + k as u8;
             } else {
                 CL_OTHER;
             };
+        }
+        // The scopes' roots, pinned to their classes.
+        fill_bool(&mut self.ipin, b.insts.len(), false);
+        fill_bool(&mut self.ppin, b.params.len(), false);
+        for x in 0..b.scopes.len() {
+            let idx = self.sgroup[x];
+            let r = b.scopes[x].root;
+            if idx == NONE || (seeds >> idx as u64 & 1) == 0 || r == VNONE || (r & VFLAG) != 0 {
+                continue;
+            }
+            let c = CL_NOALIAS + idx as u8;
+            if (r & VPARAM) != 0 {
+                if !self.ppin[(r & ~VPARAM) as usize] {
+                    self.pcls[(r & ~VPARAM) as usize] = c;
+                    self.ppin[(r & ~VPARAM) as usize] = true;
+                }
+            } else if !self.ipin[r as usize] {
+                self.icls[r as usize] = c;
+                self.ipin[r as usize] = true;
+            }
+        }
+        // A view parameter's elements: the pointer a load reads from its offset 0.
+        let views = any_inner(b);
+        for i in 0..b.insts.len() {
+            if !views {
+                break;
+            }
+            let t = b.insts[i];
+            let k = entry_param(b, t.a);
+            if t.op == O_LOAD && t.ty == T_PTR && t.c == 0 && k < 64 && (seeds >> k as u64 & 1) != 0 && inner(b, k) {
+                self.icls[i] = CL_NOALIAS + k as u8;
+            }
         }
         // Each round joins every value once; a value's class rises at most twice.
         for _ in 0..CLASS_ROUNDS {
@@ -562,7 +1128,7 @@ extend Opt {
                     } else {
                         CL_OTHER;
                     };
-                    if (t.op == O_PTRADD || t.op == O_SELECT) && c != self.icls[i as usize] {
+                    if (t.op == O_PTRADD || t.op == O_SELECT) && c != self.icls[i as usize] && !self.ipin[i as usize] {
                         self.icls[i as usize] = c;
                         changed = true;
                     }
@@ -574,7 +1140,7 @@ extend Opt {
                     for a in 0..b.edge_nargs(ed) {
                         let q = (s.param_start + a) as usize;
                         let c = join(self.pcls[q], self.class(b.edge_arg(ed, a)));
-                        if c != self.pcls[q] {
+                        if c != self.pcls[q] && !self.ppin[q] {
                             self.pcls[q] = c;
                             changed = true;
                         }
@@ -600,22 +1166,42 @@ extend Opt {
     }
 
     // The parameters (bits) whose value escapes: a use of a value of their class but as an access's
-    // address, address arithmetic's base, a select's operand, a comparison's operand or a block argument.
-    fn escaped(self: &mut Self, b: &Body) u64 {
+    // address, address arithmetic's base, a select's operand, a comparison's operand or a block argument;
+    // for a view parameter (`REF_INNER`), any use of the parameter itself but as a load's address. A scope
+    // class (bits `scoped`) escapes only through a use in its own copy.
+    fn escaped(self: &mut Self, b: &Body, scoped: u64) u64 {
+        let views = any_inner(b);
         let mut out: u64 = 0;
         for i in 0..b.insts.len() {
             let t = b.insts[i];
             let op = t.op;
+            lv::uses(b, t, &mut self.uses);
+            let nu = self.uses.len();
+            if views {
+                b.succ_edges(t, &mut self.edges);
+                for x in 0..self.edges.len() {
+                    for a in 0..b.edge_nargs(self.edges[x]) {
+                        self.uses.push(b.edge_arg(self.edges[x], a));
+                    }
+                }
+                for u in 0..self.uses.len() {
+                    let v = self.uses[u];
+                    let k = entry_param(b, v);
+                    if k < 63 && inner(b, k) && !(op == O_LOAD && u == 0 && t.a == v) {
+                        out |= 2u64 << k as u64;
+                    }
+                }
+            }
             if op == O_LOAD || op == O_MEMCPY || op == O_MEMSET || op == O_PTRADD || op == O_SELECT || op == O_ICMP || op == O_JMP || op == O_BR || op == O_SWITCH {
                 continue;
             }
+            let foreign = scoped & ~self.member(i as u32);
             if op == O_STORE {
-                out |= class_bit(self.class(t.b));
+                out |= class_bit(self.class(t.b)) & ~foreign;
                 continue;
             }
-            lv::uses(b, t, &mut self.uses);
-            for u in 0..self.uses.len() {
-                out |= class_bit(self.class(self.uses[u]));
+            for u in 0..nu {
+                out |= class_bit(self.class(self.uses[u])) & ~foreign;
             }
         }
         return out >> 1;
@@ -641,17 +1227,107 @@ extend Opt {
         };
     }
 
-    // The alias classes block `k` of `b` writes (`class_bit`): a store's, a copy's or a fill's address
-    // class; CL_OTHER for any other write, which reaches no exclusive parameter's referent.
-    fn writes_in(self: &Self, b: &Body, k: u32) u64 {
+    // The alias classes block `k` of `b` writes (`class_bit`): a store's, a copy's or a fill's access
+    // class (`acc`); CL_OTHER for any other write, which reaches no exclusive parameter's referent; and a
+    // write outside a scope's copy, the scope's class too.
+    fn writes_in(self: &Self, pk: &Package, b: &Body, k: u32) u64 {
         let bk = b.blocks[k as usize];
         let mut out: u64 = 0;
         for i in bk.start..bk.start + bk.len {
             let t = b.insts[i as usize];
+            if self.private(t) {
+                continue; // `pwrites_in`
+            }
             if t.op == O_STORE || t.op == O_MEMCPY || t.op == O_MEMSET {
-                out |= class_bit(self.class(t.a));
-            } else if writes_memory(t) {
-                out |= class_bit(CL_OTHER);
+                out |= class_bit(self.acc(i, t.a)) | self.sbits & ~self.member(i);
+            } else if writes(pk, b, t) {
+                out |= class_bit(CL_OTHER) | self.sbits & ~self.member(i);
+            }
+        }
+        return out;
+    }
+
+    // The plain stores of block `k` of `b` whose class is an exclusive parameter's, into `lst`; the classes
+    // the block's other writes touch (`writes_in`'s, those stores' aside).
+    fn note_stores(self: &mut Self, pk: &Package, b: &Body, k: u32) u64 {
+        let bk = b.blocks[k as usize];
+        let mut imp: u64 = 0;
+        for i in bk.start..bk.start + bk.len {
+            let t = b.insts[i as usize];
+            if self.private(t) {
+                continue;
+            }
+            let other = self.sbits & ~self.member(i);
+            if t.op == O_STORE || t.op == O_MEMCPY || t.op == O_MEMSET {
+                let c = self.acc(i, t.a);
+                if t.op == O_STORE && (t.aux & MEM_VOLATILE) == 0 && c >= CL_NOALIAS && c < CL_MANY {
+                    self.lst.push(i);
+                    imp |= other;
+                } else {
+                    imp |= class_bit(c) | other;
+                }
+            } else if writes(pk, b, t) {
+                imp |= class_bit(CL_OTHER) | other;
+            }
+        }
+        return imp;
+    }
+
+    // Whether load `t` of class bit `cls`, an exclusive parameter's, reads no byte loop
+    // `h` writes: every write of that class in the loop is a plain store through the load's address value
+    // at a constant range apart from the load's (another field of the parameter's referent).
+    fn fields_apart(self: &Self, pk: &Package, b: &Body, h: u32, t: Inst, cls: u64) bool {
+        if (cls & cls - 1) != 0 || (cls & class_bit(CL_OTHER)) != 0 || (self.imprecise[h as usize] & cls) != 0 {
+            return false;
+        }
+        let a = self.val(t.a);
+        let lo = (t.c as i32) as i64;
+        let hi = lo + type_bytes(t.ty, pk.ptr_bytes) as i64;
+        let r = self.lst_at[h as usize];
+        for x in (r >> 32) as u32..r as u32 {
+            let si = self.lst[x as usize];
+            if (class_bit(self.loop_acc(si, h)) & cls) == 0 {
+                continue;
+            }
+            let st = b.insts[si as usize];
+            if st.op != O_STORE || self.val(st.a) != a {
+                return false;
+            }
+            let slo = (st.c as i32) as i64;
+            let shi = slo + type_bytes(b.type_of(st.b), pk.ptr_bytes) as i64;
+            if slo < hi && lo < shi {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Whether block `k` of `b` writes a private slot's memory (`privates`).
+    fn pwrites_in(self: &Self, b: &Body, k: u32) bool {
+        let bk = b.blocks[k as usize];
+        for i in bk.start..bk.start + bk.len {
+            let t = b.insts[i as usize];
+            if (t.op == O_STORE || t.op == O_MEMCPY || t.op == O_MEMSET) && self.private(t) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The type tags block `k` of `b` writes (bit 0: an untagged write, all of them), a private slot's
+    // writes aside (`pwrites_in`).
+    fn tags_in(self: &Self, pk: &Package, b: &Body, k: u32) u16 {
+        let bk = b.blocks[k as usize];
+        let mut out: u16 = 0;
+        for i in bk.start..bk.start + bk.len {
+            let t = b.insts[i as usize];
+            if self.private(t) {
+                continue;
+            }
+            if t.op == O_STORE && (t.aux & MEM_VOLATILE) == 0 {
+                out |= 1u16 << tbaa(t) as u16;
+            } else if writes(pk, b, t) {
+                out |= 1;
             }
         }
         return out;
@@ -667,7 +1343,7 @@ extend Opt {
     // so in reverse postorder an outer loop comes first: each block keeps the last loop that holds it, its
     // innermost, and a header's innermost loop before its own is its parent. A loop's preheader is its
     // one predecessor outside it, when that block only jumps to it.
-    fn loops(self: &mut Self, b: &Body) {
+    fn loops(self: &mut Self, pk: &Package, b: &Body) {
         let nb = b.blocks.len();
         fill(&mut self.inner, nb, NONE);
         fill(&mut self.lparent, nb, NONE);
@@ -675,7 +1351,21 @@ extend Opt {
         fill(&mut self.mark, nb, NONE);
         fill(&mut self.writes, nb, 0);
         fill(&mut self.tags, nb, 0);
+        fill_bool(&mut self.pwrite, nb, false);
+        fill(&mut self.lst_at, nb, 0);
+        fill(&mut self.imprecise, nb, 0);
+        self.lst.truncate(0);
+        self.privates(b);
         self.classes(b);
+        // The classes of the loads' and stores' accesses before the walk forwards their addresses: a
+        // parameter an inlined body's accesses go through, a scope's, becomes the caller's pointer.
+        fill(&mut self.acls, b.insts.len(), CL_MANY);
+        for i in 0..b.insts.len() {
+            let op = b.insts[i].op;
+            if op == O_LOAD || op == O_STORE {
+                self.acls[i] = self.acc(i as u32, b.insts[i].a);
+            }
+        }
         for hi in 0..self.order.len() {
             let h = self.order[hi];
             self.work.truncate(0);
@@ -692,14 +1382,19 @@ extend Opt {
             self.lparent[h as usize] = self.inner[h as usize];
             self.inner[h as usize] = h;
             self.mark[h as usize] = h;
-            let mut wr = self.writes_in(b, h);
-            let mut tg = tags_in(b, h);
+            let mut wr = self.writes_in(pk, b, h);
+            let mut tg = self.tags_in(pk, b, h);
+            let mut pw = self.pwrites_in(b, h);
+            let s0 = self.lst.len() as u64;
+            let mut imp = self.note_stores(pk, b, h);
             // Each block enters the walk once.
             while self.work.len() != 0 {
                 let x = self.work.pop().unwrap();
                 self.inner[x as usize] = h;
-                wr |= self.writes_in(b, x);
-                tg |= tags_in(b, x);
+                wr |= self.writes_in(pk, b, x);
+                tg |= self.tags_in(pk, b, x);
+                pw = pw || self.pwrites_in(b, x);
+                imp |= self.note_stores(pk, b, x);
                 for p in self.pred_at[x as usize]..self.pred_at[x as usize + 1] {
                     let q = self.preds[p as usize];
                     if self.mark[q as usize] != h {
@@ -708,8 +1403,17 @@ extend Opt {
                     }
                 }
             }
+            // A scope whose roots the loop holds is a call per iteration: its writes may reach any byte.
+            for c in CL_NOALIAS..CL_MANY {
+                if (wr & self.sbits & class_bit(c)) != 0 && self.croot[c as usize] != NONE && self.mark[self.croot[c as usize] as usize] == h {
+                    wr = ~0u64;
+                }
+            }
             self.writes[h as usize] = wr;
             self.tags[h as usize] = tg;
+            self.pwrite[h as usize] = pw;
+            self.lst_at[h as usize] = s0 << 32 | self.lst.len() as u64;
+            self.imprecise[h as usize] = imp;
             let mut outside = NONE;
             let mut n: u32 = 0;
             for p in self.pred_at[h as usize]..self.pred_at[h as usize + 1] {
@@ -750,12 +1454,12 @@ extend Opt {
     // ---- The walk --------------------------------------------------------------------------------------
 
     // Whether an instruction changed.
-    fn walk(self: &mut Self, pk: &Package, b: &mut Body) bool {
+    // The rebuild's tables for body `b` with nothing replaced, moved or made.
+    fn fresh(self: &mut Self, b: &Body) {
         let ni = b.insts.len();
-        let nb = b.blocks.len();
         fill(&mut self.pblock, b.params.len(), NONE);
         fill(&mut self.blk_of, ni, NONE);
-        for k in 0..nb {
+        for k in 0..b.blocks.len() {
             let bk = b.blocks[k];
             for q in 0..bk.param_len as u32 {
                 self.pblock[(bk.param_start + q) as usize] = k as u32;
@@ -767,17 +1471,55 @@ extend Opt {
         fill(&mut self.repl, ni, VNONE);
         fill(&mut self.prepl, b.params.len(), VNONE);
         fill(&mut self.frepl, ni, VNONE);
-        self.extra.truncate(0);
-        self.made.clear();
         fill_bool(&mut self.moved, ni, false);
+        self.extra.truncate(0);
         self.hoisted.truncate(0);
+        self.pre.truncate(0);
+    }
+
+    fn walk(self: &mut Self, pk: &Package, b: &mut Body) bool {
+        let nb = b.blocks.len();
+        self.fresh(b);
+        self.made.clear();
+        // What `thread` made and replaced.
+        for x in 0..self.textra.len() {
+            let i = self.textra[x];
+            self.extra.push(i);
+            self.blk_of[i as usize] = 0;
+            self.made.insert(hash(b.insts[i as usize]), i);
+        }
+        self.textra.truncate(0);
+        for x in 0..self.trepl.len() {
+            let r = self.trepl[x];
+            self.repl[(r >> 32) as usize] = r as u32;
+        }
+        self.trepl.truncate(0);
         self.pure.clear();
         self.mem.clear();
         self.cond.clear();
         self.rel.clear();
+        self.ub.clear();
         self.log.truncate(0);
         self.places.truncate(0);
         fill(&mut self.end_state, nb * TBAA_TAGS, 0);
+        fill(&mut self.end_pstate, nb, 0);
+        fill(&mut self.bwrites, nb, 0);
+        fill(&mut self.rmark, nb, NONE);
+        self.privates(b);
+        for k in 0..nb {
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                if writes(pk, b, t) && !self.private(t) {
+                    let g = if (t.op == O_LOAD || t.op == O_STORE) && (t.aux & MEM_VOLATILE) == 0 {
+                        tbaa(t);
+                    } else {
+                        0usize;
+                    };
+                    self.bwrites[k] |= 1u16 << g as u16;
+                }
+            }
+        }
         let mut states: u32 = 0;
         let mut changed = false;
         // Preorder over the dominator tree: block << 1 enters a block, n << 33 | 1 closes its scope at log
@@ -798,6 +1540,7 @@ extend Opt {
                 for g in 0..TBAA_TAGS {
                     unsafe self.tstate[g] = self.end_state[d + g];
                 }
+                self.pstate = self.end_pstate[self.idom[k] as usize];
                 // Its parameters are its one edge's arguments.
                 changed = self.forward_params(b, k as u32) || changed;
                 // Its one edge decides its dominator's branch condition here and below.
@@ -811,11 +1554,29 @@ extend Opt {
                     self.enter(LOG_COND, t.a, taken);
                     self.order_facts(b, t.a, taken != 0);
                 }
+            } else if k != 0 {
+                // Several edges enter: the tags no block between its dominator and it writes keep the
+                // dominator's state; the others, and the untagged accesses when any is written, a new one.
+                changed = self.same_args(b, k as u32) || changed;
+                let w = self.between_writes(k as u32);
+                states += 1;
+                self.pstate = states;
+                let d = self.idom[k] as usize * TBAA_TAGS;
+                for g in 0..TBAA_TAGS {
+                    let kept = w != WRITES_ALL && (w & 1) == 0 && (g == 0 && w == 0 || g != 0 && (w >> g as u32 & 1) == 0);
+                    unsafe self.tstate[g] = if kept {
+                        self.end_state[d + g];
+                    } else {
+                        states;
+                    };
+                }
             } else {
                 states += 1;
                 self.tstate = [states; TBAA_TAGS];
+                self.pstate = states;
             }
             let bk = b.blocks[k];
+            self.pend.truncate(0);
             for i in bk.start..bk.start + bk.len {
                 // A write starts a new state for its tag's accesses and the untagged ones; an untagged
                 // write, for all.
@@ -825,26 +1586,135 @@ extend Opt {
                 } else {
                     0usize;
                 };
-                if writes_memory(t) {
+                let before = self.tstate;
+                let pbefore = self.pstate;
+                // An access of a private slot's memory has states of its own: no other access touches it.
+                let private = self.private(t);
+                self.prior = if private {
+                    pbefore;
+                } else {
+                    unsafe before[g];
+                };
+                if writes(pk, b, t) {
                     states += 1;
-                    if g == 0 || (t.aux & MEM_VOLATILE) != 0 {
+                    if private {
+                        self.pstate = states;
+                    } else if g == 0 || (t.aux & MEM_VOLATILE) != 0 {
                         self.tstate = [states; TBAA_TAGS];
                     } else {
                         unsafe self.tstate[g] = states;
                         self.tstate[0] = states;
                     }
                 }
-                self.state = unsafe self.tstate[g];
-                changed = self.visit(pk, b, k as u32, i) || changed;
+                self.state = if private {
+                    self.pstate;
+                } else {
+                    unsafe self.tstate[g];
+                };
+                // An instruction `thread` replaced is gone; one `speculate` moved stays as it is.
+                if self.moved[i as usize] {
+                    continue;
+                }
+                if self.repl[i as usize] == VNONE {
+                    // An instruction the visit puts before `i` (a copy's load) may read the pending stores.
+                    let np = self.pre.len();
+                    changed = self.visit(pk, b, k as u32, i) || changed;
+                    if self.pre.len() != np {
+                        self.pend.truncate(0);
+                    }
+                    // A store the visit dropped wrote nothing.
+                    if t.op == O_STORE && self.repl[i as usize] == DROPPED {
+                        self.tstate = before;
+                        self.pstate = pbefore;
+                    }
+                    if self.repl[i as usize] == VNONE {
+                        changed = self.overwrite(pk, b, i) || changed;
+                    }
+                } else {
+                    changed = true;
+                }
             }
             for g in 0..TBAA_TAGS {
                 self.end_state[k * TBAA_TAGS + g] = unsafe self.tstate[g];
             }
+            self.end_pstate[k] = self.pstate;
             for c in self.kid_at[k]..self.kid_at[k + 1] {
                 self.stack.push(self.kids[c as usize] as u64 << 1);
             }
         }
         return changed;
+    }
+
+    // Instruction `i`, which stays, in the walk's order within its block: a store drops each earlier one
+    // of `pend` it writes all bytes of through the same address (no instruction between reads memory or
+    // leaves the block), then joins `pend`; any other instruction but a pure one that cannot trap empties
+    // `pend`. Whether it dropped any.
+    fn overwrite(self: &mut Self, pk: &Package, b: &Body, i: u32) bool {
+        let t = b.insts[i as usize];
+        if pure_op(t.op) && !tls_addr(pk, b, t) && (t.op < O_SDIV || t.op > O_UREM) {
+            return false;
+        }
+        if t.op != O_STORE || (t.aux & MEM_VOLATILE) != 0 {
+            self.pend.truncate(0);
+            return false;
+        }
+        let a = self.val(t.a);
+        let lo = (t.c as i32) as i64;
+        let hi = lo + type_bytes(b.type_of(t.b), pk.ptr_bytes) as i64;
+        let mut dropped = false;
+        let mut x: usize = 0;
+        // Each step keeps or drops one entry.
+        while x < self.pend.len() {
+            let j = self.pend[x];
+            let s = b.insts[j as usize];
+            let slo = (s.c as i32) as i64;
+            if self.repl[j as usize] == VNONE && self.val(s.a) == a && lo <= slo && slo + type_bytes(
+                b.type_of(s.b),
+                pk.ptr_bytes,
+            ) as i64 <= hi {
+                self.repl[j as usize] = DROPPED;
+                dropped = true;
+                let last = self.pend.len() - 1;
+                self.pend[x] = self.pend[last];
+                self.pend.truncate(last);
+            } else {
+                x += 1;
+            }
+        }
+        if self.pend.len() as u32 >= PEND_MAX {
+            self.pend.truncate(0);
+        }
+        self.pend.push(i);
+        return dropped;
+    }
+
+    // The type tags (`bwrites`) the blocks on the paths from block `k`'s immediate dominator into `k` write,
+    // `k` included when such a path passes it again; WRITES_ALL when more than BETWEEN_MAX blocks are on them.
+    fn between_writes(self: &mut Self, k: u32) u32 {
+        let d = self.idom[k as usize];
+        let mut w: u32 = 0;
+        let mut n: u32 = 0;
+        self.rstack.truncate(0);
+        for q in self.pred_at[k as usize]..self.pred_at[k as usize + 1] {
+            self.rstack.push(self.preds[q as usize]);
+        }
+        // Each block enters the stack once (`rmark`), at most BETWEEN_MAX of them.
+        while self.rstack.len() != 0 {
+            let x = self.rstack.pop().unwrap();
+            if x == d || self.rmark[x as usize] == k {
+                continue;
+            }
+            self.rmark[x as usize] = k;
+            n += 1;
+            if n > BETWEEN_MAX {
+                return WRITES_ALL;
+            }
+            w |= self.bwrites[x as usize];
+            for q in self.pred_at[x as usize]..self.pred_at[x as usize + 1] {
+                self.rstack.push(self.preds[q as usize]);
+            }
+        }
+        return w;
     }
 
     fn unwind(self: &mut Self, to: usize) {
@@ -857,8 +1727,10 @@ extend Opt {
                 &mut self.mem;
             } else if table == LOG_COND {
                 &mut self.cond;
-            } else {
+            } else if table == LOG_REL {
                 &mut self.rel;
+            } else {
+                &mut self.ub;
             };
             if prev == NONE {
                 let _ = m.remove(&key);
@@ -875,8 +1747,10 @@ extend Opt {
             &mut self.mem;
         } else if table == LOG_COND {
             &mut self.cond;
-        } else {
+        } else if table == LOG_REL {
             &mut self.rel;
+        } else {
+            &mut self.ub;
         };
         let prev = switch m.get(&key) {
             Some(p) => *p,
@@ -889,22 +1763,21 @@ extend Opt {
     // ---- If-conversion and order facts ----
 
     // Branch `t`, instruction `i` ending block `k`, whose sides reach one block `j`, each through its edge
-    // or an empty block it alone enters, `j` entered from them alone: the edge of a jump to `j` whose
-    // arguments that differ by side are selects on the condition (at most MAX_SELECTS, integers up to 64
-    // bits or pointers), which move to the end of `k`; `j`'s parameters take them in the rest of the
+    // or an empty block it alone enters: the edge of a jump to `j` whose arguments that differ by side
+    // are selects on the condition (at most MAX_SELECTS, integers up to 64 bits or pointers), which move
+    // to the end of `k`; when the two sides alone enter `j`, its parameters take them in the rest of the
     // walk. NONE when not.
-    fn diamond(self: &mut Self, b: &mut Body, k: u32, i: u32, t: Inst) u32 {
+    fn diamond(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: Inst) u32 {
         let (e0, s0) = self.arm(b, k, t.b);
         let (e1, s1) = self.arm(b, k, t.c);
         let j = b.edge_target(e0);
-        if j != b.edge_target(e1) || j == k || self.pred_at[j as usize + 1] - self.pred_at[j as usize] != 2 {
+        if j != b.edge_target(e1) || j == k || self.speculated(pk, b, k, s0) + self.speculated(pk, b, k, s1) > SPEC_MAX {
             return NONE;
         }
+        // The join's parameters are the selects when the two sides alone enter it.
         let p0 = self.preds[self.pred_at[j as usize] as usize];
         let p1 = self.preds[self.pred_at[j as usize] as usize + 1];
-        if !(p0 == s0 && p1 == s1 || p0 == s1 && p1 == s0) {
-            return NONE;
-        }
+        let only = self.pred_at[j as usize + 1] - self.pred_at[j as usize] == 2 && (p0 == s0 && p1 == s1 || p0 == s1 && p1 == s0);
         let jb = b.blocks[j as usize];
         let mut nsel: u32 = 0;
         for q in 0..jb.param_len as u32 {
@@ -919,6 +1792,9 @@ extend Opt {
         if nsel == 0 || nsel > MAX_SELECTS {
             return NONE;
         }
+        // The sides' instructions move to the end of `k`, in order, before the selects that read them.
+        self.speculate(b, k, s0);
+        self.speculate(b, k, s1);
         let mut args = Vector::<Value>::with_capacity(jb.param_len as usize);
         for q in 0..jb.param_len as u32 {
             let x = self.val(b.edge_arg(e0, q));
@@ -939,22 +1815,80 @@ extend Opt {
                 self.blk_of.push(k);
                 self.hoisted.push(k as u64 << 32 | v as u64);
             }
-            self.prepl[(jb.param_start + q) as usize] = v;
+            if only {
+                self.prepl[(jb.param_start + q) as usize] = v;
+            }
             args.push(v);
         }
         return b.edge(j, args.as_slice());
     }
 
-    // Side `e` of a branch ending block `k`, as `diamond` takes it: the edge out of the empty block it alone
-    // enters, and that block; else `e` and `k`.
+    // Side `e` of a branch ending block `k`, as `diamond` takes it: the edge out of the block without
+    // parameters it alone enters that holds at most SPEC_MAX instructions besides its jump, and that block;
+    // else `e` and `k`.
     fn arm(self: &Self, b: &Body, k: u32, e: u32) (u32, u32) {
         let a = b.edge_target(e);
         let ab = b.blocks[a as usize];
         let ta = term(b, a);
-        if a != k && ab.param_len == 0 && ab.len == 1 && ta.op == O_JMP && self.pred_at[a as usize + 1] - self.pred_at[a as usize] == 1 {
+        if a != k && ab.param_len == 0 && ab.len <= SPEC_MAX + 1 && ta.op == O_JMP && self.pred_at[a as usize + 1] - self.pred_at[a as usize] == 1 {
             return ta.a, a;
         }
         return e, k;
+    }
+
+    // How many instructions but constants side `a` of block `k`'s branch (`arm`) runs that `speculate`
+    // would move into `k`: each must be pure and speculable, or a load that cannot fault (`safe_load`);
+    // SPEC_MAX + 1 when one is not.
+    fn speculated(self: &Self, pk: &Package, b: &Body, k: u32, a: u32) u32 {
+        if a == k {
+            return 0;
+        }
+        let ab = b.blocks[a as usize];
+        let mut n: u32 = 0;
+        for x in ab.start..ab.start + ab.len - 1 {
+            let mut t = b.insts[x as usize];
+            if t.op == O_ICONST || t.op == O_FCONST {
+                continue;
+            }
+            if lv::operand_a(op_info(t.op).form) {
+                t.a = self.val(t.a);
+            }
+            let ok = if t.op == O_LOAD {
+                (t.aux & MEM_VOLATILE) == 0 && !is_vec(t.ty) && self.safe_load(pk, b, t);
+            } else {
+                pure_op(t.op) && speculable(pk, b, t);
+            };
+            if !ok {
+                return SPEC_MAX + 1;
+            }
+            n += 1;
+        }
+        return n;
+    }
+
+    // Move the instructions of side `a` of block `k`'s branch (`speculated`) to the end of `k`.
+    fn speculate(self: &mut Self, b: &mut Body, k: u32, a: u32) {
+        if a == k {
+            return;
+        }
+        let ab = b.blocks[a as usize];
+        for x in ab.start..ab.start + ab.len - 1 {
+            let mut t = b.insts[x as usize];
+            let f = op_info(t.op).form;
+            if lv::operand_a(f) {
+                t.a = self.val(t.a);
+            }
+            if lv::operand_b(f) {
+                t.b = self.val(t.b);
+            }
+            if lv::operand_c(f) {
+                t.c = self.val(t.c);
+            }
+            b.insts[x as usize] = t;
+            self.moved[x as usize] = true;
+            self.blk_of[x as usize] = k;
+            self.hoisted.push(k as u64 << 32 | x as u64);
+        }
     }
 
     // Comparison `c` as `x <u y` (`rel_key(x, y)`) and whether `c` is its negation; `(VNONE, VNONE, _)`
@@ -994,6 +1928,146 @@ extend Opt {
         if lt {
             self.min_parts(b, x, y, MIN_DEPTH);
         }
+        // A constant side bounds the other: `x <u k`, or `y <=u k` when `k <u y` fails.
+        if lt && const_of(b, y).is_some() && (x & VFLAG) == 0 {
+            self.enter(LOG_UB, x, y << 1 | 1);
+        } else if !lt && const_of(b, x).is_some() && (y & VFLAG) == 0 {
+            self.enter(LOG_UB, y, x << 1);
+        }
+    }
+
+    // The greatest unsigned value `v` takes here: a constant's, a bound the branches in scope set
+    // (`order_facts`), or one an `and` with a constant, a right shift, a remainder or quotient by a
+    // constant or a zero extension keeps, `depth` instructions deep; None when unknown.
+    fn ubound(self: &Self, pk: &Package, b: &Body, v: Value, depth: u32) Option<u64> {
+        if v == VNONE || (v & VFLAG) != 0 {
+            return Option::<u64>::None;
+        }
+        let k = const_of(b, v);
+        if k.is_some() {
+            return Option::<u64>::Some(k.unwrap() & width_mask(b.type_of(v), pk.ptr_bytes));
+        }
+        let mut best = Option::<u64>::None;
+        if let Some(f) = self.ub.get(&(v as u64)) {
+            let c = const_of(b, *f >> 1).unwrap() & width_mask(b.type_of(*f >> 1), pk.ptr_bytes);
+            best = if (*f & 1) == 0 {
+                Option::<u64>::Some(c);
+            } else if c == 0 {
+                // No value is below 0: the block does not run.
+                Option::<u64>::Some(0);
+            } else {
+                Option::<u64>::Some(c - 1);
+            };
+        }
+        if (v & VPARAM) != 0 || depth == 0 {
+            return best;
+        }
+        let t = b.insts[v as usize];
+        let m = width_mask(t.ty, pk.ptr_bytes);
+        let mut r = Option::<u64>::None;
+        if t.op == O_AND {
+            let x = self.ubound(pk, b, t.a, depth - 1);
+            let y = self.ubound(pk, b, t.b, depth - 1);
+            if x.is_some() && y.is_some() {
+                r = Option::<u64>::Some(x.unwrap().min(y.unwrap()));
+            } else if x.is_some() {
+                r = x;
+            } else {
+                r = y;
+            }
+        } else if t.op == O_LSHR {
+            let x = self.ubound(pk, b, t.a, depth - 1);
+            let s = const_of(b, t.b);
+            if s.is_some() && (s.unwrap() & m) < type_bits(t.ty, pk.ptr_bytes) as u64 {
+                let hi = if x.is_some() {
+                    x.unwrap();
+                } else {
+                    m;
+                };
+                r = Option::<u64>::Some(hi >> (s.unwrap() & m));
+            }
+        } else if t.op == O_UREM || t.op == O_UDIV {
+            let d = const_of(b, t.b);
+            if d.is_some() && (d.unwrap() & m) != 0 {
+                let dv = d.unwrap() & m;
+                if t.op == O_UREM {
+                    r = Option::<u64>::Some(dv - 1);
+                } else {
+                    let x = self.ubound(pk, b, t.a, depth - 1);
+                    r = Option::<u64>::Some(
+                        if x.is_some() {
+                            x.unwrap();
+                        } else {
+                            m;
+                        } / dv,
+                    );
+                }
+            }
+        } else if t.op == O_ZEXT {
+            let x = self.ubound(pk, b, t.a, depth - 1);
+            r = if x.is_some() {
+                x;
+            } else {
+                Option::<u64>::Some(width_mask(b.type_of(t.a), pk.ptr_bytes));
+            };
+        }
+        if r.is_some() && best.is_some() {
+            return Option::<u64>::Some(r.unwrap().min(best.unwrap()));
+        }
+        if r.is_some() {
+            return r;
+        }
+        return best;
+    }
+
+    // Instruction `i`, which the bounds in scope (`ubound`) decide: a remainder or quotient by a constant
+    // above its dividend's bound (the dividend, 0), a right shift that leaves nothing, an `and` with a
+    // low mask that covers its operand's bound, an unsigned comparison with a constant past the bound.
+    // Its replacement value (VNONE: none); a constant result rewrites `i` in place.
+    fn range_fold(self: &mut Self, pk: &Package, b: &mut Body, i: u32) Value {
+        let t = b.insts[i as usize];
+        if is_vec(t.ty) || t.ty == T_I128 {
+            return VNONE;
+        }
+        if t.op == O_UREM || t.op == O_UDIV || t.op == O_LSHR || t.op == O_AND {
+            let k = const_of(b, t.b);
+            if k.is_none() {
+                return VNONE;
+            }
+            let m = width_mask(t.ty, pk.ptr_bytes);
+            let c = k.unwrap() & m;
+            let x = self.ubound(pk, b, t.a, UB_DEPTH);
+            if x.is_none() {
+                return VNONE;
+            }
+            let hi = x.unwrap();
+            if (t.op == O_UREM || t.op == O_UDIV) && c != 0 && hi < c {
+                if t.op == O_UREM {
+                    return t.a;
+                }
+                b.insts[i as usize] = iconst(t.ty, 0);
+                return VNONE;
+            }
+            if t.op == O_LSHR && c < type_bits(t.ty, pk.ptr_bytes) as u64 && hi >> c == 0 {
+                b.insts[i as usize] = iconst(t.ty, 0);
+                return VNONE;
+            }
+            if t.op == O_AND && (c & c + 1) == 0 && hi <= c {
+                return t.a;
+            }
+            return VNONE;
+        }
+        if t.op == O_ICMP && (t.aux == C_ULT || t.aux == C_UGE) {
+            let k = const_of(b, t.b);
+            if k.is_none() || is_vec(b.type_of(t.a)) || b.type_of(t.a) == T_I128 {
+                return VNONE;
+            }
+            let x = self.ubound(pk, b, t.a, UB_DEPTH);
+            if x.is_some() && x.unwrap() < (k.unwrap() & width_mask(b.type_of(t.a), pk.ptr_bytes)) {
+                b.insts[i as usize] = iconst(t.ty, (t.aux == C_ULT) as u64);
+            }
+        }
+        return VNONE;
     }
 
     // `x <u y` holds: so does `x <u` each operand of minimum `y` (a select of the lesser of two values),
@@ -1046,6 +2120,664 @@ extend Opt {
         }
         // The predecessor's branch folded to its other edge: the rebuild drops the block.
         return false;
+    }
+
+    // The parameters of block `k` that every edge into it passes one value for (or the parameter itself, on
+    // a loop's edge) are that value. Whether any is.
+    // The block that defines value `v` (NONE: none known).
+    const fn def_blk(self: &Self, v: Value) u32 {
+        if (v & VPARAM) != 0 {
+            return self.pblock[(v & ~VPARAM) as usize];
+        }
+        let x = (v & ~VFLAG) as usize;
+        return if x < self.blk_of.len() {
+            self.blk_of[x];
+        } else {
+            NONE;
+        };
+    }
+
+    fn same_args(self: &mut Self, b: &Body, k: u32) bool {
+        let bk = b.blocks[k as usize];
+        let mut any = false;
+        for q in 0..bk.param_len as u32 {
+            let p = VPARAM | bk.param_start + q;
+            let mut v = VNONE;
+            let mut one = true;
+            for x in self.pred_at[k as usize]..self.pred_at[k as usize + 1] {
+                b.succ_edges(term(b, self.preds[x as usize]), &mut self.edges);
+                for e in 0..self.edges.len() {
+                    if b.edge_target(self.edges[e]) == k {
+                        let a = self.val(b.edge_arg(self.edges[e], q));
+                        if a != p && a != v {
+                            one = one && v == VNONE;
+                            v = a;
+                        }
+                    }
+                }
+            }
+            // The value must dominate the block: the walk visits its definition first, so it is final. An
+            // edge a folded branch left as the only one may come from a block that does not.
+            let d = if one && v != VNONE {
+                self.def_blk(v);
+            } else {
+                NONE;
+            };
+            if d != NONE && self.dominates(d, k) {
+                self.prepl[(bk.param_start + q) as usize] = v;
+                any = true;
+            }
+        }
+        return any;
+    }
+
+    // ---- Jump threading ----
+
+    // Thread the edges of the graph (`follow`): through a block that holds only a jump and takes no
+    // parameter, and through a block whose branch or switch the edge's constant arguments decide (a `&&`
+    // or `||` joins there, an `Option` a call returned is tested there: `through`); a jump into a block
+    // that only branches on one of its parameters becomes a branch on its argument. Neither kind of block
+    // heads a loop, and no edge moves into a loop header: an edge into a block that heads no loop comes
+    // from inside every loop around it, so the graph stays reducible and each loop keeps its preheader.
+    // Whether any edge moved.
+    fn thread(self: &mut Self, pk: &Package, b: &mut Body) bool {
+        self.graph(b);
+        self.dominators(b);
+        let nb = b.blocks.len();
+        fill_bool(&mut self.hdr, nb, false);
+        for k in 0..nb {
+            for x in self.pred_at[k]..self.pred_at[k + 1] {
+                if self.rpo[k] != NONE && self.dominates(k as u32, self.preds[x as usize]) {
+                    self.hdr[k] = true;
+                }
+            }
+        }
+        // Per parameter and per instruction: how many instructions read it (up to 2), the last one for a
+        // parameter, and the block outside its own that reads it (`preader`, `ireader`: NONE for none,
+        // MULTI for several). An edge's argument is read in its terminator's block; one of the value's own
+        // block is read inside it (`through` checks the edge it threads along).
+        fill(&mut self.pcount, b.params.len(), 0);
+        fill(&mut self.puser, b.params.len(), NONE);
+        fill(&mut self.preader, b.params.len(), NONE);
+        fill(&mut self.pblock, b.params.len(), NONE);
+        fill(&mut self.icount, b.insts.len(), 0);
+        fill(&mut self.ireader, b.insts.len(), NONE);
+        fill(&mut self.blk_of, b.insts.len(), NONE);
+        for k in 0..nb {
+            let bk = b.blocks[k];
+            for q in bk.param_start..bk.param_start + bk.param_len as u32 {
+                self.pblock[q as usize] = k as u32;
+            }
+            for i in bk.start..bk.start + bk.len {
+                self.blk_of[i as usize] = k as u32;
+            }
+        }
+        for k in 0..nb {
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                lv::uses(b, t, &mut self.uses);
+                b.succ_edges(t, &mut self.edges);
+                for e in 0..self.edges.len() {
+                    for q in 0..b.edge_nargs(self.edges[e]) {
+                        self.uses.push(b.edge_arg(self.edges[e], q));
+                    }
+                }
+                for u in 0..self.uses.len() {
+                    let v = self.uses[u];
+                    if v == VNONE {
+                        continue;
+                    }
+                    if (v & VPARAM) != 0 {
+                        let q = (v & ~VPARAM) as usize;
+                        self.pcount[q] = (self.pcount[q] + 1).min(2);
+                        self.puser[q] = i;
+                        if self.pblock[q] != k as u32 {
+                            self.preader[q] = reader(self.preader[q], k as u32);
+                        }
+                    } else {
+                        let x = (v & ~VFLAG) as usize;
+                        self.icount[x] = (self.icount[x] + 1).min(2);
+                        if self.blk_of[x] != k as u32 {
+                            self.ireader[x] = reader(self.ireader[x], k as u32);
+                        }
+                    }
+                }
+            }
+        }
+        let mut any = false;
+        for q in 0..b.params.len() {
+            if self.pcount[q] == 1 && self.param_cmp(pk, b, q as u32) {
+                any = true;
+            }
+        }
+        // The branches every edge into their block decides alike, all on the graph before any edge
+        // moves (`settled` reads every edge into a block), then their jumps.
+        self.settle.truncate(0);
+        for k in 0..nb {
+            let t = term(b, k as u32);
+            if self.rpo[k] != NONE && (t.op == O_BR || t.op == O_SWITCH) {
+                let s = self.settled(pk, b, k as u32);
+                if s != NONE {
+                    self.settle.push(k as u32);
+                    self.settle.push(s);
+                }
+            }
+        }
+        for x in 0..self.settle.len() / 2 {
+            let k = self.settle[2 * x];
+            let bk = b.blocks[k as usize];
+            b.insts[(bk.start + bk.len - 1) as usize] = jump(self.settle[2 * x + 1]);
+            any = true;
+        }
+        for k in 0..nb {
+            if self.rpo[k] == NONE {
+                continue;
+            }
+            let i = b.blocks[k].start + b.blocks[k].len - 1;
+            let mut t = b.insts[i as usize];
+            if t.op == O_JMP {
+                t.a = self.follow(pk, b, k as u32, t.a, VNONE, 0);
+                let j = b.edge_target(t.a);
+                let q = self.threadable(b, k as u32, j);
+                if q != NONE {
+                    let jt = term(b, j);
+                    let a = b.edge_arg(t.a, q);
+                    t = Inst {
+                        op: O_BR,
+                        ty: T_NONE,
+                        aux: 0,
+                        a: a,
+                        b: self.thread_edge(b, t.a, j, jt.b),
+                        c: self.thread_edge(b, t.a, j, jt.c),
+                    };
+                }
+            } else if t.op == O_BR {
+                t.b = self.follow(pk, b, k as u32, t.b, t.a, 1);
+                t.c = self.follow(pk, b, k as u32, t.c, t.a, 0);
+                if same_edge(b, t.b, t.c) {
+                    t = jump(t.b);
+                }
+            } else if t.op == O_SWITCH {
+                for q in 0..t.aux as u32 + 1 {
+                    let at = (t.c + q) as usize;
+                    let e = b.pool[at];
+                    let ne = self.follow(pk, b, k as u32, e, VNONE, 0);
+                    if ne != e {
+                        b.pool[at] = ne;
+                        any = true;
+                    }
+                }
+            }
+            if !same(t, b.insts[i as usize]) {
+                b.insts[i as usize] = t;
+                any = true;
+            }
+        }
+        return any;
+    }
+
+    // Parameter `p`, whose one use is a comparison with a constant in its own block (a three-way
+    // comparison's result tested against 0), when every edge into the block passes a constant for it, or
+    // a select of two constants the edge alone reads: each edge passes the comparison's result instead (a
+    // select of the results), and the comparison's uses read the parameter. Whether it did.
+    fn param_cmp(self: &mut Self, pk: &Package, b: &mut Body, p: u32) bool {
+        let j = self.pblock[p as usize];
+        let u = self.puser[p as usize];
+        if j == 0 || j == NONE || self.rpo[j as usize] == NONE {
+            return false;
+        }
+        let jb = b.blocks[j as usize];
+        let t = b.insts[u as usize];
+        let ty = b.params[p as usize];
+        if u < jb.start || u >= jb.start + jb.len || t.op != O_ICMP || t.a != (VPARAM | p) || !is_int(ty) || ty == T_I128 {
+            return false;
+        }
+        let k = const_of(b, t.b);
+        if k.is_none() {
+            return false;
+        }
+        let q = p - jb.param_start;
+        // The first pass checks every edge, the second rewrites them. The predecessors come in block order,
+        // a block once per edge.
+        for pass in 0..2u32 {
+            for x in self.pred_at[j as usize]..self.pred_at[j as usize + 1] {
+                let src = self.preds[x as usize];
+                if x > self.pred_at[j as usize] && self.preds[x as usize - 1] == src {
+                    continue;
+                }
+                b.succ_edges(term(b, src), &mut self.edges);
+                for e in 0..self.edges.len() {
+                    let ed = self.edges[e];
+                    if b.edge_target(ed) != j {
+                        continue;
+                    }
+                    let a = b.edge_arg(ed, q);
+                    let c = const_of(b, a);
+                    let sel = c.is_none() && (a & (VPARAM | VFLAG)) == 0 && b.insts[a as usize].op == O_SELECT && self.icount[a as usize] == 1 && const_of(
+                        b,
+                        b.insts[a as usize].b,
+                    ).is_some() && const_of(b, b.insts[a as usize].c).is_some();
+                    if c.is_none() && !sel {
+                        return false;
+                    }
+                    if pass == 1 && sel {
+                        let st = b.insts[a as usize];
+                        let r0 = le::icmp(t.aux, ty, pk.ptr_bytes, const_of(b, st.b).unwrap(), k.unwrap()) as u64;
+                        let r1 = le::icmp(t.aux, ty, pk.ptr_bytes, const_of(b, st.c).unwrap(), k.unwrap()) as u64;
+                        let x0 = self.tconst(b, t.ty, r0);
+                        let x1 = self.tconst(b, t.ty, r1);
+                        b.insts[a as usize] = Inst { op: O_SELECT, ty: t.ty, aux: 0, a: st.a, b: x0, c: x1 };
+                    } else if pass == 1 {
+                        let r = le::icmp(t.aux, ty, pk.ptr_bytes, c.unwrap(), k.unwrap()) as u64;
+                        b.pool[(ed + 2 + q) as usize] = self.tconst(b, t.ty, r);
+                    }
+                }
+            }
+        }
+        b.params[p as usize] = t.ty;
+        self.trepl.push(u as u64 << 32 | (VPARAM | p) as u64);
+        return true;
+    }
+
+    // An integer constant of type `ty` and bits `v` that `thread` makes: the walk's entry block starts with
+    // it (`extra`).
+    fn tconst(self: &mut Self, b: &mut Body, ty: u8, v: u64) Value {
+        let t = iconst(ty, v);
+        for x in 0..self.textra.len() {
+            if same(b.insts[self.textra[x] as usize], t) {
+                return self.textra[x];
+            }
+        }
+        let i = b.insts.len() as u32;
+        b.insts.push(t);
+        b.locs.push(0);
+        if b.inl.len() != 0 {
+            b.inl.push(0);
+        }
+        self.textra.push(i);
+        return i;
+    }
+
+    // Edge `e0` of block `k`'s terminator, threaded (`thread`): the edge it becomes. Along it, value `cond`
+    // (VNONE: none) is `holds`: the condition of `k`'s branch.
+    fn follow(self: &mut Self, pk: &Package, b: &mut Body, k: u32, e0: u32, cond: Value, holds: u64) u32 {
+        let mut e = e0;
+        // Each step passes a block of one instruction that heads no loop: at most the block count.
+        for _ in 0..b.blocks.len() {
+            let j = b.edge_target(e);
+            let jb = b.blocks[j as usize];
+            let jt = term(b, j);
+            if j != k && j != 0 && jb.len == 1 && jb.param_len == 0 && jt.op == O_JMP && !self.hdr[j as usize] && !self.hdr[b.edge_target(
+                jt.a,
+            ) as usize] {
+                e = jt.a;
+                continue;
+            }
+            let s = self.through(pk, b, k, e, cond, holds);
+            if s == NONE {
+                return e;
+            }
+            e = self.thread_edge(b, e, j, s);
+        }
+        return e;
+    }
+
+    // The edge of block `j`'s terminator that edge `e` into `j` (of block `k`'s terminator, along which value
+    // `cond` is `holds`) takes for sure: `j` heads no loop, nor does any block it enters, it holds at most
+    // THREAD_BLOCK_MAX pure instructions, and `e`'s arguments decide its branch or switch (`decide`). The
+    // edge leaves `j` behind, so a block that reads `j`'s parameters or instructions must be one only `j`
+    // enters, through another of its edges (an `Option`'s payload read where it is `Some`). NONE when not.
+    fn through(self: &Self, pk: &Package, b: &Body, k: u32, e: u32, cond: Value, holds: u64) u32 {
+        let j = b.edge_target(e);
+        let jb = b.blocks[j as usize];
+        let jt = term(b, j);
+        if j == k || j == 0 || self.hdr[j as usize] || jt.op != O_BR && jt.op != O_SWITCH || jb.len > THREAD_BLOCK_MAX {
+            return NONE;
+        }
+        for i in jb.start..jb.start + jb.len - 1 {
+            if !pure_op(b.insts[i as usize].op) {
+                return NONE;
+            }
+        }
+        let c = self.decide(pk, b, k, j, e, jt.a, cond, holds, THREAD_DEPTH);
+        if c.is_none() {
+            return NONE;
+        }
+        let s = decided(b, jt, c.unwrap());
+        if self.hdr[b.edge_target(s) as usize] {
+            return NONE;
+        }
+        for i in jb.start..jb.start + jb.len - 1 {
+            if !self.apart(b, j, s, self.ireader[i as usize]) {
+                return NONE;
+            }
+        }
+        // The new edge passes `s`'s arguments, `j`'s parameters replaced: none may be `j`'s instruction.
+        for q in 0..b.edge_nargs(s) {
+            let a = b.edge_arg(s, q);
+            if (a & VPARAM) == 0 && a != VNONE && self.blk_of[(a & ~VFLAG) as usize] == j {
+                return NONE;
+            }
+        }
+        for q in jb.param_start..jb.param_start + jb.param_len as u32 {
+            if !self.apart(b, j, s, self.preader[q as usize]) {
+                return NONE;
+            }
+        }
+        return s;
+    }
+
+    // The edge of block `j`'s branch or switch that every edge into `j` decides alike (`decide`): `j` is
+    // not the entry, heads no loop and has at most IMPLY_FAN edges into it; NONE when not.
+    fn settled(self: &Self, pk: &Package, b: &Body, j: u32) u32 {
+        let jt = term(b, j);
+        let n = self.pred_at[j as usize + 1] - self.pred_at[j as usize];
+        if j == 0 || self.hdr[j as usize] || n == 0 || n > IMPLY_FAN {
+            return NONE;
+        }
+        let mut r = Option::<u64>::None;
+        for x in self.pred_at[j as usize]..self.pred_at[j as usize + 1] {
+            let src = self.preds[x as usize];
+            if x > self.pred_at[j as usize] && self.preds[x as usize - 1] == src {
+                continue;
+            }
+            let st = term(b, src);
+            for q in 0..edge_count(st) {
+                let ed = edge_at(b, st, q);
+                if b.edge_target(ed) != j {
+                    continue;
+                }
+                let c = self.decide(pk, b, src, j, ed, jt.a, VNONE, 0, THREAD_DEPTH);
+                if c.is_none() || r.is_some() && r.unwrap() != c.unwrap() {
+                    return NONE;
+                }
+                r = c;
+            }
+        }
+        if r.is_none() {
+            return NONE;
+        }
+        return decided(b, jt, r.unwrap());
+    }
+
+    // Whether reader `x` (`preader`, `ireader`) of a value of block `j` stays out of the paths an edge
+    // threaded along `j`'s edge `s` takes: none, or a block only `j` enters, through another edge.
+    fn apart(self: &Self, b: &Body, j: u32, s: u32, x: u32) bool {
+        if x == NONE {
+            return true;
+        }
+        if x == MULTI || x == b.edge_target(s) || self.pred_at[x as usize + 1] - self.pred_at[x as usize] != 1 || self.preds[self.pred_at[x as usize] as usize] != j {
+            return false;
+        }
+        return true;
+    }
+
+    // Value `v` of block `j` as it reaches `j` along edge `e`: a parameter of `j` is the edge's argument, a
+    // value of another block itself; VNONE for an instruction of `j`.
+    fn along(self: &Self, b: &Body, j: u32, e: u32, v: Value) Value {
+        if (v & VPARAM) != 0 {
+            let jb = b.blocks[j as usize];
+            let p = v & ~VPARAM;
+            if p >= jb.param_start && p < jb.param_start + jb.param_len as u32 {
+                return b.edge_arg(e, p - jb.param_start);
+            }
+            return v;
+        }
+        if (v & VFLAG) == 0 && self.blk_of[v as usize] == j {
+            return VNONE;
+        }
+        return v;
+    }
+
+    // Whether value `a` equals constant `c` where edge `e` of block `k`'s terminator leaves, as the
+    // branches before it settle: `k`'s branch on an equality of `a` with a constant, else what holds where
+    // `k` starts (`entry_fact`); None when they do not.
+    fn implied(self: &Self, pk: &Package, b: &Body, k: u32, e: u32, a: Value, c: u64, depth: u32) Option<bool> {
+        let m = width_mask(b.type_of(a), pk.ptr_bytes);
+        let ka = const_of(b, a);
+        if ka.is_some() {
+            return Option::<bool>::Some((ka.unwrap() & m) == (c & m));
+        }
+        let t = term(b, k);
+        if t.op == O_BR && (e == t.b || e == t.c) && !same_edge(b, t.b, t.c) && (t.a & (VPARAM | VFLAG)) == 0 {
+            let ci = b.insts[t.a as usize];
+            if ci.op == O_ICMP && (ci.aux == C_EQ || ci.aux == C_NE) {
+                let other = if ci.a == a {
+                    ci.b;
+                } else if ci.b == a {
+                    ci.a;
+                } else {
+                    VNONE;
+                };
+                let k2 = const_of(b, other);
+                if k2.is_some() {
+                    // Along the edge `a == k2` holds, or `a != k2`.
+                    let same = (k2.unwrap() & m) == (c & m);
+                    if ci.aux == C_EQ == (e == t.b) {
+                        return Option::<bool>::Some(same);
+                    }
+                    if same {
+                        return Option::<bool>::Some(false);
+                    }
+                }
+            }
+        }
+        return self.entry_fact(pk, b, k, a, c, depth);
+    }
+
+    // Whether value `a` (no instruction of block `k`) equals constant `c` where `k` starts: for a parameter
+    // of `k`, its argument on every edge into `k` (at most IMPLY_FAN of them, `implied`), else along the
+    // one edge into `k`, `depth` blocks back; None when the branches do not settle it.
+    fn entry_fact(self: &Self, pk: &Package, b: &Body, k: u32, a: Value, c: u64, depth: u32) Option<bool> {
+        if depth == 0 || self.rpo[k as usize] == NONE {
+            return Option::<bool>::None;
+        }
+        let np = self.pred_at[k as usize + 1] - self.pred_at[k as usize];
+        let kb = b.blocks[k as usize];
+        let p = a & ~VPARAM;
+        if (a & VPARAM) != 0 && p >= kb.param_start && p < kb.param_start + kb.param_len as u32 {
+            if np == 0 || np > IMPLY_FAN {
+                return Option::<bool>::None;
+            }
+            let mut r = Option::<bool>::None;
+            for x in self.pred_at[k as usize]..self.pred_at[k as usize + 1] {
+                let src = self.preds[x as usize];
+                if x > self.pred_at[k as usize] && self.preds[x as usize - 1] == src {
+                    continue;
+                }
+                let st = term(b, src);
+                for n in 0..edge_count(st) {
+                    let ed = edge_at(b, st, n);
+                    if b.edge_target(ed) != k {
+                        continue;
+                    }
+                    let ri = self.implied(pk, b, src, ed, b.edge_arg(ed, p - kb.param_start), c, depth - 1);
+                    if ri.is_none() || r.is_some() && r.unwrap() != ri.unwrap() {
+                        return Option::<bool>::None;
+                    }
+                    r = ri;
+                }
+            }
+            return r;
+        }
+        if np != 1 {
+            return Option::<bool>::None;
+        }
+        let src = self.preds[self.pred_at[k as usize] as usize];
+        let st = term(b, src);
+        let mut only = NONE;
+        for n in 0..edge_count(st) {
+            let ed = edge_at(b, st, n);
+            if b.edge_target(ed) == k {
+                if only != NONE {
+                    return Option::<bool>::None;
+                }
+                only = ed;
+            }
+        }
+        if only == NONE {
+            return Option::<bool>::None;
+        }
+        return self.implied(pk, b, src, only, a, c, depth - 1);
+    }
+
+    // The value `v` of block `j` (its parameter, an instruction of it, or a value of a block that dominates
+    // it) takes along edge `e` (of block `k`'s terminator) into `j`, when the edge's constant arguments,
+    // `cond` being `holds` and the branches before the edge (`implied`) decide it, through at most `depth`
+    // instructions; None when not.
+    fn decide(
+        self: &Self,
+        pk: &Package,
+        b: &Body,
+        k: u32,
+        j: u32,
+        e: u32,
+        v: Value,
+        cond: Value,
+        holds: u64,
+        depth: u32,
+    ) Option<u64> {
+        if v == cond && cond != VNONE {
+            return Option::<u64>::Some(holds);
+        }
+        if (v & VPARAM) != 0 {
+            let jb = b.blocks[j as usize];
+            let p = v & ~VPARAM;
+            if p < jb.param_start || p >= jb.param_start + jb.param_len as u32 {
+                return Option::<u64>::None;
+            }
+            let a = b.edge_arg(e, p - jb.param_start);
+            if a == cond && cond != VNONE {
+                return Option::<u64>::Some(holds);
+            }
+            return const_of(b, a);
+        }
+        if (v & VFLAG) != 0 || self.blk_of[v as usize] != j || depth == 0 {
+            return const_of(b, v);
+        }
+        // A comparison `param_cmp` moved into the edges is its parameter now.
+        for x in 0..self.trepl.len() {
+            if (self.trepl[x] >> 32) as u32 == v {
+                return self.decide(pk, b, k, j, e, self.trepl[x] as u32, cond, holds, depth - 1);
+            }
+        }
+        let t = b.insts[v as usize];
+        let ptr = pk.ptr_bytes;
+        if is_vec(t.ty) || t.ty == T_I128 {
+            return Option::<u64>::None;
+        }
+        if t.op == O_ICONST {
+            return const_of(b, v);
+        }
+        if t.op == O_SELECT {
+            let c = self.decide(pk, b, k, j, e, t.a, cond, holds, depth - 1);
+            if c.is_none() {
+                return c;
+            }
+            return self.decide(
+                pk,
+                b,
+                k,
+                j,
+                e,
+                if c.unwrap() != 0 {
+                    t.b;
+                } else {
+                    t.c;
+                },
+                cond,
+                holds,
+                depth - 1,
+            );
+        }
+        if t.op != O_ICMP && t.op != O_ZEXT && t.op != O_SEXT && t.op != O_TRUNC && (t.op < O_ADD || t.op > O_XOR || t.op == O_MUL || t.op >= O_SDIV && t.op <= O_UREM) {
+            return Option::<u64>::None;
+        }
+        let x = self.decide(pk, b, k, j, e, t.a, cond, holds, depth - 1);
+        if x.is_none() {
+            // An equality with a constant the branches before the edge settle.
+            if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) {
+                let y = self.decide(pk, b, k, j, e, t.b, cond, holds, depth - 1);
+                let a = self.along(b, j, e, t.a);
+                if y.is_some() && a != VNONE {
+                    let r = self.implied(pk, b, k, e, a, y.unwrap(), THREAD_DEPTH);
+                    if r.is_some() {
+                        return Option::<u64>::Some((r.unwrap() == (t.aux == C_EQ)) as u64);
+                    }
+                }
+            }
+            return x;
+        }
+        let mut r: u64 = 0;
+        if t.op == O_ZEXT || t.op == O_SEXT || t.op == O_TRUNC {
+            if !le::scalar_convert(t.op, t.aux, b.type_of(t.a), t.ty, ptr, x.unwrap(), &mut r) {
+                return Option::<u64>::None;
+            }
+            return Option::<u64>::Some(r);
+        }
+        let y = self.decide(pk, b, k, j, e, t.b, cond, holds, depth - 1);
+        if y.is_none() {
+            if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) {
+                let a = self.along(b, j, e, t.b);
+                if a != VNONE {
+                    let r = self.implied(pk, b, k, e, a, x.unwrap(), THREAD_DEPTH);
+                    if r.is_some() {
+                        return Option::<u64>::Some((r.unwrap() == (t.aux == C_EQ)) as u64);
+                    }
+                }
+            }
+            return y;
+        }
+        if t.op == O_ICMP {
+            return Option::<u64>::Some(le::icmp(t.aux, b.type_of(t.a), ptr, x.unwrap(), y.unwrap()) as u64);
+        }
+        if le::int_fold(t.op, t.ty, ptr, x.unwrap(), y.unwrap(), &mut r) != le::FOLD_OK {
+            return Option::<u64>::None;
+        }
+        return Option::<u64>::Some(r);
+    }
+
+    // The index of the parameter of block `j` that its branch tests, when `j` holds that branch alone,
+    // heads no loop and is not block `k`, and neither side heads a loop; NONE when not.
+    fn threadable(self: &Self, b: &Body, k: u32, j: u32) u32 {
+        let jb = b.blocks[j as usize];
+        let t = term(b, j);
+        if j == k || j == 0 || jb.len != 1 || t.op != O_BR || (t.a & VPARAM) == 0 || self.hdr[j as usize] || self.hdr[b.edge_target(
+            t.b,
+        ) as usize] || self.hdr[b.edge_target(t.c) as usize] {
+            return NONE;
+        }
+        let p = t.a & ~VPARAM;
+        if p < jb.param_start || p >= jb.param_start + jb.param_len as u32 {
+            return NONE;
+        }
+        // The blocks `j` dominates may read its parameters; then `j` stays on every path into them.
+        for q in jb.param_start..jb.param_start + jb.param_len as u32 {
+            if self.preader[q as usize] != NONE {
+                return NONE;
+            }
+        }
+        return p - jb.param_start;
+    }
+
+    // A new edge for edge `e` into block `j` that continues along `j`'s side `s`: `s`'s target, its
+    // arguments with `j`'s parameters replaced by `e`'s arguments.
+    fn thread_edge(self: &mut Self, b: &mut Body, e: u32, j: u32, s: u32) u32 {
+        let jb = b.blocks[j as usize];
+        self.uses.truncate(0);
+        for q in 0..b.edge_nargs(s) {
+            let x = b.edge_arg(s, q);
+            let p = x & ~VPARAM;
+            self.uses.push(
+                if (x & VPARAM) != 0 && p >= jb.param_start && p < jb.param_start + jb.param_len as u32 {
+                    b.edge_arg(e, p - jb.param_start);
+                } else {
+                    x;
+                },
+            );
+        }
+        return b.edge(b.edge_target(s), self.uses.as_slice());
     }
 
     // The value `v` stands for now.
@@ -1200,7 +2932,7 @@ extend Opt {
                     },
                 );
             } else if t.op == O_BR {
-                let e = self.diamond(b, k, i, t);
+                let e = self.diamond(pk, b, k, i, t);
                 if e != NONE {
                     t = jump(e);
                 }
@@ -1217,6 +2949,28 @@ extend Opt {
             b.insts[i as usize] = t;
             return !same(t, t0);
         }
+        // An equality of a value from before the block with a constant that the branches into the block
+        // settle (`entry_fact`): the `None` test of an `Option` a loop that stops on `Some` returns.
+        if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) {
+            let kb = const_of(b, t.b);
+            let a = if kb.is_some() {
+                t.a;
+            } else {
+                t.b;
+            };
+            let kc = if kb.is_some() {
+                kb;
+            } else {
+                const_of(b, t.a);
+            };
+            let local = (a & VFLAG) != 0 || (a & VPARAM) == 0 && (a as usize >= self.blk_of.len() || self.blk_of[a as usize] == k);
+            if kc.is_some() && const_of(b, a).is_none() && !local {
+                let r = self.entry_fact(pk, b, k, a, kc.unwrap(), THREAD_DEPTH);
+                if r.is_some() {
+                    t = iconst(t.ty, (r.unwrap() == (t.aux == C_EQ)) as u64);
+                }
+            }
+        }
         b.insts[i as usize] = t;
         // A copy or a fill of no byte does nothing.
         let size = if t.op == O_MEMCPY || t.op == O_MEMSET {
@@ -1228,13 +2982,49 @@ extend Opt {
             self.repl[i as usize] = DROPPED;
             return true;
         }
+        // A copy of 1, 2, 4 or 8 bytes is a load and a store of an integer that size, untagged (the bytes
+        // of any type): the load reads before the store writes, as a copy of overlapping bytes must.
+        if t.op == O_MEMCPY && size.is_some() && (t.aux & MEM_VOLATILE) == 0 {
+            let n = size.unwrap();
+            let ty = if n == 1 {
+                T_I8;
+            } else if n == 2 {
+                T_I16;
+            } else if n == 4 {
+                T_I32;
+            } else if n == 8 {
+                T_I64;
+            } else {
+                T_NONE;
+            };
+            if ty != T_NONE {
+                let v = self.before(b, k, i, Inst { op: O_LOAD, ty: ty, aux: 0, a: t.b, b: VNONE, c: 0 });
+                t = Inst { op: O_STORE, ty: T_NONE, aux: 0, a: t.a, b: v, c: 0 };
+                b.insts[i as usize] = t;
+            }
+        }
         if t.op == O_STORE && (t.aux & MEM_VOLATILE) == 0 {
+            // A store of the value its place holds (a load of it, or a store to it) does nothing.
+            if self.recall(t.a, t.c, b.type_of(t.b), self.prior) == t.b {
+                self.repl[i as usize] = DROPPED;
+                return true;
+            }
             // A load of the place the store wrote, in the state the store starts, reads the stored value.
             self.remember(t.a, t.c, b.type_of(t.b), t.b, self.state);
         } else if t.op == O_LOAD && (t.aux & MEM_VOLATILE) == 0 {
             let p = self.private_load(pk, b, k, i, t);
             if p != PRIV_NONE && p != PRIV_KEPT {
                 self.repl[i as usize] = p;
+                return true;
+            }
+            let sv = if p == PRIV_NONE {
+                self.private_splat(pk, b, k, i, t);
+            } else {
+                VNONE;
+            };
+            if sv != VNONE {
+                b.insts[i as usize] = Inst { op: O_SPLAT, ty: t.ty, aux: 0, a: sv, b: VNONE, c: VNONE };
+                let _ = self.number(pk, b, k, i);
                 return true;
             }
             // A load of bytes no write touches reads one value in every memory state.
@@ -1253,11 +3043,38 @@ extend Opt {
                 return true;
             }
             self.remember(t.a, t.c, t.ty, i, st);
-            if self.safe_load(pk, b, t) && self.hoist(pk, b, k, i, true, p == PRIV_KEPT) {
+            // A load that may fault leaves only the loop whose every entry runs it.
+            let safe = self.safe_load(pk, b, t);
+            if (safe || self.runs_first(b, k, i)) && self.hoist(pk, b, k, i, true, p == PRIV_KEPT, !safe) {
                 return true;
             }
         } else if (t.op == O_ADDO || t.op == O_SUBO || t.op == O_MULO) && self.fold_checked(pk, b, i) {
             return true;
+        } else if t.op == O_CALL && t.ty != T_NONE && (pk.syms[b.syms[t.a as usize] as usize].fx & (FX_WRITE | FX_ARG)) == 0 {
+            // A call of a function that writes no memory gives what an earlier one with the same
+            // arguments gave, when it reads none either, or none was written since (the untagged
+            // accesses' memory state, which every write starts anew).
+            let reads = (pk.syms[b.syms[t.a as usize] as usize].fx & FX_READ) != 0;
+            let h = mix(
+                call_hash(b, t),
+                if reads {
+                    self.tstate[0] as u64 + 1;
+                } else {
+                    0u64;
+                },
+            );
+            let found = switch self.pure.get(&h) {
+                Some(v) => *v,
+                None => NONE,
+            };
+            if found != NONE && same_call(b, b.insts[found as usize], t) {
+                self.repl[i as usize] = found;
+                return true;
+            }
+            self.enter(LOG_PURE, h, i);
+            if self.hoist_call(b, k, i) {
+                return true;
+            }
         } else if pure_op(t.op) && !tls_addr(pk, b, t) {
             if pk.fmath != 0 && t.op >= O_FADD && t.op <= O_FDIV && !is_vec(t.ty) {
                 let r = self.fast_math(pk, b, k, i);
@@ -1271,27 +3088,148 @@ extend Opt {
                 self.repl[i as usize] = r;
                 return true;
             }
+            let rr = self.range_fold(pk, b, i);
+            if rr != VNONE {
+                self.repl[i as usize] = rr;
+                return true;
+            }
+            self.pow2(b, i);
+            self.shift_pair(pk, b, i);
+            if self.divide(pk, b, k, i) {
+                return true;
+            }
             return self.number(pk, b, k, i) || !same(b.insts[i as usize], t0);
         }
         return !same(t, t0);
+    }
+
+    // Instruction `i`, a logical shift right of a shift left by the same constant (or left of right): in
+    // place the mask of the bits both keep (`x << k >> k` is `x & (ones >> k)`).
+    fn shift_pair(self: &mut Self, pk: &Package, b: &mut Body, i: u32) {
+        let t = b.insts[i as usize];
+        if t.op != O_LSHR && t.op != O_SHL || !is_int(t.ty) || t.ty == T_I128 || (t.a & (VPARAM | VFLAG)) != 0 {
+            return;
+        }
+        let x = b.insts[t.a as usize];
+        let k = const_of(b, t.b);
+        let bits = type_bits(t.ty, pk.ptr_bytes) as u64;
+        if x.op != if t.op == O_LSHR {
+            O_SHL;
+        } else {
+            O_LSHR;
+        } || k.is_none() || k.unwrap() == 0 || k.unwrap() >= bits || const_of(b, x.b) != k {
+            return;
+        }
+        let ones = le::trunc_bits(0xFFFFFFFFFFFFFFFF, bits as u32);
+        let m = if t.op == O_LSHR {
+            ones >> k.unwrap();
+        } else {
+            ones << k.unwrap() & ones;
+        };
+        let mv = self.constant(b, t.ty, m);
+        b.insts[i as usize] = Inst { op: O_AND, ty: t.ty, aux: 0, a: x.a, b: mv, c: VNONE };
+    }
+
+    // Instruction `i`, an integer product, unsigned quotient or unsigned remainder by a power of two:
+    // in place a shift left, a shift right or a mask.
+    fn pow2(self: &mut Self, b: &mut Body, i: u32) {
+        let t = b.insts[i as usize];
+        if t.op != O_MUL && t.op != O_UDIV && t.op != O_UREM || !is_int(t.ty) || t.ty == T_I128 {
+            return;
+        }
+        let c = const_of(b, t.b);
+        if c.is_none() || c.unwrap() == 0 || (c.unwrap() & c.unwrap() - 1) != 0 {
+            return;
+        }
+        let y = c.unwrap();
+        if t.op == O_UREM {
+            let m = self.constant(b, t.ty, y - 1);
+            b.insts[i as usize] = Inst { op: O_AND, ty: t.ty, aux: 0, a: t.a, b: m, c: VNONE };
+            return;
+        }
+        let s = self.constant(b, t.ty, y.trailing_zeros() as u64);
+        let op = if t.op == O_MUL {
+            O_SHL;
+        } else {
+            O_LSHR;
+        };
+        b.insts[i as usize] = Inst { op: op, ty: t.ty, aux: 0, a: t.a, b: s, c: VNONE };
+    }
+
+    // An instruction for block `k` that runs right before instruction `at` (`pre`), its operands final;
+    // its value.
+    fn before(self: &mut Self, b: &mut Body, k: u32, at: u32, t: Inst) Value {
+        let v = b.insts.len() as u32;
+        b.insts.push(t);
+        b.locs.push(b.locs[at as usize]);
+        if b.inl.len() != 0 {
+            b.inl.push(b.inl[at as usize]);
+        }
+        self.repl.push(VNONE);
+        self.frepl.push(VNONE);
+        self.moved.push(true);
+        self.blk_of.push(k);
+        self.pre.push(at as u64 << 32 | v as u64);
+        return v;
+    }
+
+    // Instruction `i` of block `k`, an unsigned quotient or remainder of an integer by a constant that is
+    // neither 0 nor a power of two: replaced by the product of the multiplier `magic` gives (a 64-bit one
+    // where the backend has one instruction for it, `Package.mul_high`). Whether it did.
+    fn divide(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
+        let t = b.insts[i as usize];
+        if t.op != O_UDIV && t.op != O_UREM || !is_int(t.ty) || t.ty == T_I128 || t.ty == T_PTR {
+            return false;
+        }
+        let bits = type_bits(t.ty, pk.ptr_bytes);
+        let c = const_of(b, t.b);
+        if bits == 64 && !pk.mul_high || c.is_none() {
+            return false;
+        }
+        let d = c.unwrap();
+        if d == 0 || (d & d - 1) == 0 {
+            return false;
+        }
+        let (m, sh, add) = magic(d, bits);
+        let n = t.a;
+        let mv = self.constant(b, t.ty, m);
+        let h = self.before(b, k, i, Inst { op: O_MULHU, ty: t.ty, aux: 0, a: n, b: mv, c: VNONE });
+        let mut q = h;
+        if add {
+            let diff = self.before(b, k, i, Inst { op: O_SUB, ty: t.ty, aux: 0, a: n, b: h, c: VNONE });
+            let one = self.constant(b, t.ty, 1);
+            let half = self.before(b, k, i, Inst { op: O_LSHR, ty: t.ty, aux: 0, a: diff, b: one, c: VNONE });
+            q = self.before(b, k, i, Inst { op: O_ADD, ty: t.ty, aux: 0, a: half, b: h, c: VNONE });
+        }
+        if sh != 0 {
+            let sv = self.constant(b, t.ty, sh);
+            q = self.before(b, k, i, Inst { op: O_LSHR, ty: t.ty, aux: 0, a: q, b: sv, c: VNONE });
+        }
+        if t.op == O_UDIV {
+            self.repl[i as usize] = q;
+            return true;
+        }
+        let prod = self.before(b, k, i, Inst { op: O_MUL, ty: t.ty, aux: 0, a: q, b: t.b, c: VNONE });
+        self.repl[i as usize] = self.before(b, k, i, Inst { op: O_SUB, ty: t.ty, aux: 0, a: n, b: prod, c: VNONE });
+        return true;
     }
 
     // Value-number pure instruction `i` of block `k`: an equal one of a dominating block replaces it, else
     // it enters the scope and moves out of the loops it does not vary in. Whether it went or moved.
     fn number(self: &mut Self, pk: &Package, b: &Body, k: u32, i: u32) bool {
         let t = b.insts[i as usize];
-        let h = hash(t);
+        let h = value_hash(b, t);
         let found = switch self.pure.get(&h) {
             Some(v) => *v,
             None => NONE,
         };
-        if found != NONE && same(b.insts[found as usize], t) {
+        if found != NONE && same_value(b, b.insts[found as usize], t) {
             self.repl[i as usize] = found;
             return true;
         }
         // On a hash collision the newer entry shadows the older: either is correct.
         self.enter(LOG_PURE, h, i);
-        return self.hoist(pk, b, k, i, false, false);
+        return self.hoist(pk, b, k, i, false, false, false);
     }
 
     // The rewrites of float operation `i` the package's `fmath` allows: an identity's operand (`x + 0` without
@@ -1603,6 +3541,104 @@ extend Opt {
         return self.val(st.b);
     }
 
+    // The value a vector load `t` (instruction `i` of block `k`) of a private slot splats: one store alone
+    // writes each of its lanes, each of the same value, and each runs before the load (`[x; N]` as a
+    // vector); VNONE otherwise.
+    fn private_splat(self: &Self, pk: &Package, b: &Body, k: u32, i: u32, t: Inst) Value {
+        if !is_vec(t.ty) || lanes(t.ty) > 64 {
+            return VNONE;
+        }
+        let s = self.base(b, t.a) as usize;
+        if s == NONE as usize || self.sesc[s] || self.wat[s + 1] - self.wat[s] > SLOT_WRITES_MAX {
+            return VNONE;
+        }
+        let lt = lane_type(t.ty);
+        let eb = type_bytes(lt, pk.ptr_bytes) as i64;
+        let off = self.base_off(t.a) + (t.c as i32) as i64;
+        let end = off + type_bytes(t.ty, pk.ptr_bytes) as i64;
+        let mut v = VNONE;
+        let mut seen: u64 = 0;
+        for q in self.wat[s]..self.wat[s + 1] {
+            let w = self.wl[q as usize];
+            if w.off >= end || off >= w.end {
+                continue;
+            }
+            if w.inst == NONE || w.off < off || w.end - w.off != eb || (w.off - off) % eb != 0 {
+                return VNONE;
+            }
+            let lane = 1u64 << ((w.off - off) / eb) as u64;
+            let st = b.insts[w.inst as usize];
+            let x = self.val(st.b);
+            if (seen & lane) != 0 || b.type_of(st.b) != lt || v != VNONE && x != v || w.blk == k && w.inst >= i || w.blk != k && !self.dominates(
+                w.blk,
+                k,
+            ) {
+                return VNONE;
+            }
+            seen |= lane;
+            v = x;
+        }
+        return if seen.count_ones() as u32 == lanes(t.ty) {
+            v;
+        } else {
+            VNONE;
+        };
+    }
+
+    // The private slots: those whose address and the addresses derived from it (`ptradd`) are only the
+    // addresses of loads, stores, copies and fills (`pder`, `pesc`). No pointer but these reaches their
+    // memory, so no other access touches it. A derived address another way used (stored, passed, joined,
+    // compared) escapes.
+    fn privates(self: &mut Self, b: &Body) {
+        let ni = b.insts.len();
+        fill(&mut self.pder, ni, NONE);
+        fill_bool(&mut self.pesc, b.slots.len(), false);
+        // In reverse postorder a definition comes before its uses: block arguments, which escape, aside.
+        for q in 0..self.order.len() {
+            let bk = b.blocks[self.order[q] as usize];
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                if t.op == O_SLOTADDR {
+                    self.pder[i as usize] = t.a;
+                } else if t.op == O_PTRADD && (t.a & (VPARAM | VFLAG)) == 0 && t.a < ni as u32 {
+                    self.pder[i as usize] = self.pder[t.a as usize];
+                }
+            }
+        }
+        for i in 0..ni {
+            let t = b.insts[i];
+            lv::uses(b, t, &mut self.uses);
+            if is_terminator(t.op) {
+                b.succ_edges(t, &mut self.edges);
+                for e in 0..self.edges.len() {
+                    for a in 0..b.edge_nargs(self.edges[e]) {
+                        self.uses.push(b.edge_arg(self.edges[e], a));
+                    }
+                }
+            }
+            for u in 0..self.uses.len() {
+                let v = self.uses[u];
+                if (v & (VPARAM | VFLAG)) != 0 || v as usize >= ni || self.pder[v as usize] == NONE {
+                    continue;
+                }
+                let addr = t.op == O_LOAD && t.a == v && u == 0 || t.op == O_STORE && t.a == v && t.b != v || t.op == O_MEMCPY && (t.a == v || t.b == v) && t.c != v || t.op == O_MEMSET && t.a == v && t.b != v && t.c != v || t.op == O_PTRADD && t.a == v && t.b != v;
+                if !addr || (t.op == O_LOAD || t.op == O_STORE) && (t.aux & MEM_VOLATILE) != 0 {
+                    self.pesc[self.pder[v as usize] as usize] = true;
+                }
+            }
+        }
+    }
+
+    // Whether instruction `t` accesses only a private slot's memory (`privates`): a load from one, or a
+    // store, copy or fill into one.
+    fn private(self: &Self, t: Inst) bool {
+        if t.op != O_LOAD && t.op != O_STORE && t.op != O_MEMCPY && t.op != O_MEMSET || (t.a & (VPARAM | VFLAG)) != 0 || t.a as usize >= self.pder.len() {
+            return false;
+        }
+        let s = self.pder[t.a as usize];
+        return s != NONE && !self.pesc[s as usize] && (t.aux & MEM_VOLATILE) == 0;
+    }
+
     // The value a load of `addr + off` of type `ty` reads in memory state `state`, VNONE when unknown.
     fn recall(self: &Self, addr: u32, off: u32, ty: u8, state: u32) Value {
         let found = switch self.mem.get(&place_hash(addr, off, ty, state)) {
@@ -1634,8 +3670,20 @@ extend Opt {
         }
         let mut size: i64 = -1;
         let mut off = (t.c as i32) as i64;
-        if (t.a & VPARAM) != 0 {
-            let p = t.a & ~VPARAM;
+        // The base under constant offsets, at most FRAME_DEPTH of them.
+        let mut base = t.a;
+        for _ in 0..FRAME_DEPTH {
+            if (base & (VPARAM | VFLAG)) != 0 || b.insts[base as usize].op != O_PTRADD || b.insts[base as usize].b != VNONE {
+                break;
+            }
+            off += b.insts[base as usize].c as i32;
+            base = b.insts[base as usize].a;
+        }
+        if (base & VFLAG) != 0 {
+            return false;
+        }
+        if (base & VPARAM) != 0 {
+            let p = base & ~VPARAM;
             let e = b.blocks[0];
             if b.sig != NONE && p >= e.param_start && p < e.param_start + b.pool[b.sig as usize] {
                 let k = p - e.param_start;
@@ -1647,7 +3695,7 @@ extend Opt {
                 }
             }
         } else {
-            let a = b.insts[t.a as usize];
+            let a = b.insts[base as usize];
             if a.op == O_SLOTADDR {
                 size = b.slots[a.a as usize].size;
             } else if a.op == O_SYMADDR {
@@ -1664,26 +3712,39 @@ extend Opt {
     // ---- Hoisting ----
 
     // Move instruction `i` of block `k`, pure or a load (`load`), to the preheader of each loop around it
-    // whose blocks do not define its operands (and, for a load, write no memory). Whether it moved.
-    fn hoist(self: &mut Self, pk: &Package, b: &Body, k: u32, i: u32, load: bool, kept: bool) bool {
+    // whose blocks do not define its operands (and, for a load, write no memory); with `one`, of the
+    // innermost loop only. Whether it moved.
+    fn hoist(self: &mut Self, pk: &Package, b: &Body, k: u32, i: u32, load: bool, kept: bool, one: bool) bool {
         let t = b.insts[i as usize];
-        if !load && !speculable(pk, b, t) {
+        // A constant leaves its loops too: the backends rebuild one that one instruction makes at each use
+        // and keep the others in a register (a 64-bit integer on arm64, a float).
+        let konst = t.op == O_ICONST || t.op == O_FCONST;
+        if !load && !konst && !speculable(pk, b, t) {
             return false;
         }
         let mut target = k;
         // Each step leaves one loop.
         loop {
             let h = self.inner[target as usize];
-            // A load stays when the loop writes its alias class and its type tag (or untagged).
-            if h == NONE || self.preh[h as usize] == NONE || load && !kept && (self.writes[h as usize] & class_bit(
-                self.class(t.a),
-            )) != 0 && (tbaa(t) == 0 || (self.tags[h as usize] & (1u16 << tbaa(t) as u16 | 1)) != 0) || !self.invariant(
+            // A load stays when the loop writes its alias class (a scope's too, outside the scope) and its
+            // type tag (or untagged); one of a private slot's memory, when the loop writes that memory.
+            let private = self.private(t);
+            let cls = class_bit(self.loop_acc(i, h)) | self.sbits & ~self.member(i);
+            if h == NONE || self.preh[h as usize] == NONE || load && !kept && private && self.pwrite[h as usize] || load && !kept && !private && (self.writes[h as usize] & cls) != 0 && (tbaa(
                 t,
+            ) == 0 || (self.tags[h as usize] & (1u16 << tbaa(t) as u16 | 1)) != 0) && !self.fields_apart(
+                pk,
+                b,
                 h,
-            ) {
+                t,
+                cls,
+            ) || !self.invariant(t, h) {
                 break;
             }
             target = self.preh[h as usize];
+            if one {
+                break;
+            }
         }
         if target == k {
             return false;
@@ -1691,6 +3752,50 @@ extend Opt {
         self.moved[i as usize] = true;
         self.blk_of[i as usize] = target;
         self.hoisted.push(target as u64 << 32 | i as u64);
+        return true;
+    }
+
+    // Call `i` of block `k`, of a function that writes no memory, to the preheader of the loop `k` heads,
+    // when its arguments come from outside the loop, the loop writes no memory but private slots' (which
+    // no call reaches) and nothing before the call in `k` writes memory: every entry into the loop runs
+    // the call first, with the arguments and the memory every iteration has, so the preheader runs it
+    // once in place of each iteration. Whether it moved.
+    fn hoist_call(self: &mut Self, b: &Body, k: u32, i: u32) bool {
+        let h = self.inner[k as usize];
+        if h != k || self.preh[h as usize] == NONE || self.writes[h as usize] != 0 || self.tags[h as usize] != 0 {
+            return false;
+        }
+        let t = b.insts[i as usize];
+        for q in 0..t.aux as u32 {
+            if !self.outside(b.pool[(t.c + q) as usize], h) {
+                return false;
+            }
+        }
+        for j in b.blocks[k as usize].start..i {
+            if self.repl[j as usize] == VNONE && !self.moved[j as usize] && writes_memory(b.insts[j as usize]) {
+                return false;
+            }
+        }
+        let target = self.preh[h as usize];
+        self.moved[i as usize] = true;
+        self.blk_of[i as usize] = target;
+        self.hoisted.push(target as u64 << 32 | i as u64);
+        return true;
+    }
+
+    // Whether instruction `i` of loop header `k` runs on every entry into the loop: no instruction before
+    // it in `k` may leave the function or trap but by a fault of memory (a call, inline assembly, a system
+    // operation, a division).
+    fn runs_first(self: &Self, b: &Body, k: u32, i: u32) bool {
+        if self.inner[k as usize] != k {
+            return false;
+        }
+        for j in b.blocks[k as usize].start..i {
+            let op = b.insts[j as usize].op;
+            if op == O_CALL || op == O_CALLIND || op == O_ASM || op == O_SYS || op >= O_SDIV && op <= O_UREM || op == O_VAARG {
+                return false;
+            }
+        }
         return true;
     }
 
@@ -1773,6 +3878,19 @@ extend Opt {
                 if self.repl[i as usize] == VNONE && !droppable(t) && !self.dead_store(b, t) {
                     self.mark(i);
                 }
+            }
+        }
+        // The instructions made to run before another or at a block's end (a vector store or a gather's
+        // stores `lir::slp` made, say).
+        for q in 0..self.pre.len() + self.hoisted.len() {
+            let v = if q < self.pre.len() {
+                self.pre[q] as u32;
+            } else {
+                self.hoisted[q - self.pre.len()] as u32;
+            };
+            let t = b.insts[v as usize];
+            if self.bmap[self.blk_of[v as usize] as usize] != NONE && !droppable(t) && !self.dead_store(b, t) {
+                self.mark(v);
             }
         }
         // Each instruction and parameter enters the walk once.
@@ -1863,6 +3981,22 @@ extend Opt {
                 self.newidx[k] += 1;
             }
         }
+        // The instructions to run right before each (`pre`), in the order the walk made them.
+        // Counted into `pre_at[i + 2]`, summed, then placed with `pre_at[i + 1]` as the cursor: it ends at
+        // the range's end, so `pre_list[pre_at[i] .. pre_at[i + 1]]` holds instruction `i`'s.
+        fill(&mut self.pre_at, ni + 2, 0);
+        for q in 0..self.pre.len() {
+            self.pre_at[(self.pre[q] >> 32) as usize + 2] += 1;
+        }
+        for x in 0..ni {
+            self.pre_at[x + 2] += self.pre_at[x + 1];
+        }
+        fill(&mut self.pre_list, self.pre.len(), 0);
+        for q in 0..self.pre.len() {
+            let at = (self.pre[q] >> 32) as usize;
+            self.pre_list[self.pre_at[at + 1] as usize] = self.pre[q] as u32;
+            self.pre_at[at + 1] += 1;
+        }
         // New numbers in emission order: per head block its parameters that stay, then its chain's
         // instructions.
         fill(&mut self.newidx, ni, NONE);
@@ -1893,6 +4027,13 @@ extend Opt {
             while cur != NONE {
                 let ck = b.blocks[cur as usize];
                 for i in ck.start..ck.start + ck.len - 1 {
+                    for q in self.pre_at[i as usize]..self.pre_at[i as usize + 1] {
+                        let x = self.pre_list[q as usize];
+                        if self.live[x as usize] {
+                            self.newidx[x as usize] = n;
+                            n += 1;
+                        }
+                    }
                     if self.live[i as usize] && !self.moved[i as usize] {
                         self.newidx[i as usize] = n;
                         n += 1;
@@ -1941,6 +4082,12 @@ extend Opt {
                 let ck = b.blocks[cur as usize];
                 flags &= ck.flags;
                 for i in ck.start..ck.start + ck.len - 1 {
+                    for q in self.pre_at[i as usize]..self.pre_at[i as usize + 1] {
+                        let x = self.pre_list[q as usize];
+                        if self.live[x as usize] {
+                            self.emit(b, x);
+                        }
+                    }
                     if self.live[i as usize] && !self.moved[i as usize] {
                         self.emit(b, i);
                     }
@@ -1963,6 +4110,22 @@ extend Opt {
                 },
             );
         }
+        // A scope's root: its replacement, renumbered; one no longer live goes.
+        let mut ns: usize = 0;
+        for x in 0..b.scopes.len() {
+            let sc = b.scopes[x];
+            let v = self.val(sc.root);
+            let live = v != VNONE && (v & VFLAG) == 0 && if (v & VPARAM) != 0 {
+                self.live[ni + (v & ~VPARAM) as usize];
+            } else {
+                self.live[v as usize];
+            };
+            if live {
+                b.scopes[ns] = Scope { site: sc.site, group: sc.group, root: self.renum(v) };
+                ns += 1;
+            }
+        }
+        b.scopes.truncate(ns);
         self.insts = replace(&mut b.insts, replace(&mut self.insts, Vector::<Inst>::new()));
         self.locs = replace(&mut b.locs, replace(&mut self.locs, Vector::<u32>::new()));
         if b.inl.len() != 0 {
@@ -2003,8 +4166,9 @@ extend Opt {
     }
 
     // `sread`: per slot, whether a reached instruction reads it or takes its address further than a store
-    // or a fill into it. The instructions the walk made sit past every block (`hoisted`): a diamond's
-    // select may take a slot's address on to a call.
+    // or a fill into it. The instructions the walk made sit past every block (`hoisted`, and `pre`
+    // before an instruction): a diamond's select may take a slot's address on to a call, a copy's load
+    // reads its source.
     fn slot_reads(self: &mut Self, b: &Body) {
         fill_bool(&mut self.sread, b.slots.len(), false);
         for k in 0..b.blocks.len() {
@@ -2019,6 +4183,12 @@ extend Opt {
         for q in 0..self.hoisted.len() {
             if self.bmap[(self.hoisted[q] >> 32) as usize] != NONE {
                 self.slot_reads_of(b, self.hoisted[q] as u32);
+            }
+        }
+        for q in 0..self.pre.len() {
+            let v = self.pre[q] as u32;
+            if self.bmap[self.blk_of[v as usize] as usize] != NONE {
+                self.slot_reads_of(b, v);
             }
         }
     }
@@ -2172,6 +4342,8 @@ pub struct Run {
     // `calls[call_at[k]..call_at[k + 1]]`.
     call_at: Vector<u32>,
     calls: Vector<u32>,
+    // Per body, the parameters whose memory a call of it may write (`effects`).
+    wargs: Vector<u64>,
     shape: Vector<bool>,
     unit: Vector<u32>,
     level: Vector<u32>,
@@ -2179,6 +4351,8 @@ pub struct Run {
     ok: Vector<bool>,
     inline: bool,
     cf: Config,
+    // `SC_LIR_PRINT`: each optimized body whose function's name holds it prints to stderr (a debugging aid).
+    print: String,
     // Scratch a job takes and gives back: it grows once per worker, not once per body.
     free: psync::Mutex<Vector<Box<Scratch>>>,
 }
@@ -2192,6 +4366,14 @@ extend Run {
     /// The job graph of `pk`'s bodies under `cf`; `pk` keeps no body until `finish`.
     pub fn new(pk: &mut Package, sealed: &Vector<bool>, cf: Config) Run {
         let bodies = replace(&mut pk.bodies, Vector::<Body>::new());
+        let mut wargs = Vector::<u64>::new();
+        let fx = effects(pk, &bodies, &mut wargs);
+        for s in 0..pk.syms.len() {
+            let d = pk.syms[s].def;
+            if pk.syms[s].kind == SK_FUNC && d != NONE {
+                pk.syms.index_mut(s).fx = fx[d as usize];
+            }
+        }
         let p: &Package = pk;
         let pkp = p as *const Package;
         let n = bodies.len();
@@ -2294,6 +4476,7 @@ extend Run {
             held: held,
             call_at: call_at,
             calls: calls,
+            wargs: wargs,
             shape: shape,
             unit: unit,
             level: level,
@@ -2301,6 +4484,7 @@ extend Run {
             // SC_LIR_INLINE=0 inlines nothing (a debugging aid).
             inline: !stdlib::env_is("SC_LIR_INLINE", "0"),
             cf: cf,
+            print: stdlib::get_env("SC_LIR_PRINT").unwrap_or(String::new()),
             free: psync::Mutex::<Vector<Box<Scratch>>>::new(Vector::<Box<Scratch>>::new()),
         };
     }
@@ -2321,19 +4505,44 @@ extend Run {
         // A loop a round copied is innermost again for the next one.
         let bu = r.cf.loops;
         let mut round: u32 = 0;
-        while round < LOOP_ROUNDS && (bu.peel != 0 || bu.version != 0 || bu.unswitch != 0 || bu.vector != 0) && sc.o.loop_opts(
+        while round < LOOP_ROUNDS && (bu.peel != 0 || bu.version != 0 || bu.unswitch != 0 || bu.vector != 0 || bu.fin != 0) && sc.o.loop_opts(
             p,
             b,
             bu,
         ) {
             round += 1;
         }
-        // Then rotation, which moves the exit tests the transforms above read.
-        if bu.rotate != 0 {
-            let _ = sc.o.rotate(p, b, bu.rotate);
+        // Then rotation, which moves the exit tests the transforms above read; the loads each iteration
+        // starts with leave the rotated loops, so their sums have final values too.
+        if bu.rotate != 0 && sc.o.rotate(p, b, bu.rotate) && bu.fin != 0 {
+            let _ = sc.o.loop_opts(
+                p,
+                b,
+                lu::Budgets { peel: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, fin: bu.fin },
+            );
         }
+        // Then the packing of straight-line values into vectors, on the loops' final shape.
+        if bu.vector != 0 {
+            let _ = sc.o.slp(p, b);
+        }
+        let _ = sc.o.split_exits(p, b);
         unsafe *(r.ok.as_ptr() as *mut bool + j as usize) = r.inline && r.shape[j as usize] && il::small(b, r.cf.inline);
+        if r.print.len() != 0 {
+            r.print_body(p, j, b);
+        }
         r.give(sc);
+    }
+
+    // Body `j`'s text on stderr when its function's name holds `print`.
+    fn print_body(self: &Self, p: &Package, j: u32, b: &Body) {
+        for s in 0..p.syms.len() {
+            let name = p.spell(p.syms[s].name);
+            if p.syms[s].kind == SK_FUNC && p.syms[s].def == j && name.contains(self.print.as_str()) {
+                let mut out = String::new();
+                lp::print_body(p, name, b, &mut out);
+                eprint("; body {}\n{}", j, out.as_str());
+            }
+        }
     }
 
     // A scratch from the free list, or a new one. The lock is held for this call only, never while a
@@ -2369,6 +4578,11 @@ extend Run {
         return self.ok[k as usize];
     }
 
+    /// The parameters whose memory a call of body `k` may write (`FX_ARG`), a bit each.
+    pub const fn wargs_of(self: &Self, k: u32) u64 {
+        return self.wargs[k as usize];
+    }
+
     /// The direct calls of body `k` before optimization, as bodies in instruction order.
     pub const fn calls_of(self: &Self, k: u32) Slice<u32> {
         return self.calls[self.call_at[k as usize] as usize..self.call_at[k as usize + 1] as usize];
@@ -2387,6 +4601,181 @@ pub fn optimize(pk: &mut Package, sealed: &Vector<bool>, cf: Config) {
         r.job(r.order[k]);
     }
     r.finish(pk);
+}
+
+// Per body of `bodies`, the memory outside its frame a call of it may read or write (`Sym.fx`): its own
+// loads, stores, copies and fills of any memory but its slots, any other access or ordering of memory
+// (an atomic, a fence, assembly, a system or vector operation, a variadic access, a volatile load), and
+// its calls': a body's, as this inference finds it (a fixed point: the flags only grow, at most twice per
+// body), both for any other call. A block that ends the program (`panic`, `unreachable`) counts for
+// nothing: no code of the caller runs after it. A held body (`Package.held`) keeps the flags and the
+// parameters its unit's build found: the others then take the values a build without held bodies gives
+// them. Into `wargs`, per body, the parameters whose memory it may write (`FX_ARG`), a bit each.
+fn effects(p: &Package, bodies: &Vector<Body>, wargs: &mut Vector<u64>) Vector<u8> {
+    let n = bodies.len();
+    let held = if p.held.body == NONE {
+        n;
+    } else {
+        p.held.body as usize;
+    };
+    let mut fx = Vector::<u8>::with_capacity(n);
+    wargs.truncate(0);
+    for k in 0..n {
+        if k >= held {
+            fx.push(p.held.fx[k - held]);
+            wargs.push(p.held.wargs[k - held]);
+            continue;
+        }
+        let mut w: u64 = 0;
+        fx.push(own_effects(p, &bodies[k], &mut w));
+        wargs.push(w);
+    }
+    // Each round adds one of a body's 3 flags or 64 parameters, or ends.
+    for _ in 0..67 * n + 1 {
+        let mut changed = false;
+        for k in 0..held {
+            let b = &bodies[k];
+            let mut f = fx[k];
+            let mut w = wargs[k];
+            for i in 0..b.insts.len() {
+                let t = b.insts[i];
+                let c = call_target(p, b, t);
+                if c == NONE || ends_program(b, i as u32) {
+                    continue;
+                }
+                f |= fx[c as usize] & ~FX_ARG;
+                // A write through an argument: none in this frame, this body's own through its parameters.
+                for q in 0..t.aux as u32 {
+                    if q < 64 && (wargs[c as usize] >> q as u64 & 1) != 0 {
+                        f |= write_effect(b, b.pool[(t.c + q) as usize], &mut w);
+                    }
+                }
+            }
+            if f != fx[k] || w != wargs[k] {
+                fx[k] = f;
+                wargs[k] = w;
+                changed = true;
+            }
+        }
+        if !changed {
+            return fx;
+        }
+    }
+    assert(false, "opt: the effect inference does not settle");
+    return fx;
+}
+
+// The flags (`FX_*`) of body `b`'s own instructions (`effects`), and into `w` the parameters whose memory
+// they may write: a call of a body counts for none here.
+fn own_effects(p: &Package, b: &Body, w: &mut u64) u8 {
+    let mut f: u8 = 0;
+    for k in 0..b.blocks.len() {
+        let bk = b.blocks[k];
+        let end = b.insts[(bk.start + bk.len - 1) as usize].op;
+        if end == O_PANIC || end == O_UNREACHABLE {
+            continue;
+        }
+        for i in bk.start..bk.start + bk.len {
+            let t = b.insts[i as usize];
+            if t.op == O_LOAD {
+                if (t.aux & MEM_VOLATILE) != 0 {
+                    f |= FX_READ | FX_WRITE;
+                } else if !in_frame(b, t.a) {
+                    f |= FX_READ;
+                }
+            } else if t.op == O_STORE || t.op == O_MEMSET {
+                if (t.aux & MEM_VOLATILE) != 0 && t.op == O_STORE {
+                    f |= FX_WRITE;
+                } else {
+                    f |= write_effect(b, t.a, w);
+                }
+            } else if t.op == O_MEMCPY {
+                f |= write_effect(b, t.a, w);
+                if !in_frame(b, t.b) {
+                    f |= FX_READ;
+                }
+            } else if t.op == O_CALL && call_target(p, b, t) != NONE {
+                continue;
+            } else if writes_memory(t) {
+                f |= FX_READ | FX_WRITE;
+            }
+        }
+    }
+    return f;
+}
+
+// Whether instruction `i` of `b` lies in a block that ends the program.
+fn ends_program(b: &Body, i: u32) bool {
+    for k in 0..b.blocks.len() {
+        let bk = b.blocks[k];
+        if i >= bk.start && i < bk.start + bk.len {
+            let end = b.insts[(bk.start + bk.len - 1) as usize].op;
+            return end == O_PANIC || end == O_UNREACHABLE;
+        }
+    }
+    return false;
+}
+
+// Whether address `v` of `b` is inside one of its slots (`root`).
+fn in_frame(b: &Body, v: Value) bool {
+    let mut w: u64 = 0;
+    return root(b, v, &mut w) == ROOT_FRAME;
+}
+
+// The effect (`FX_*`) of a write through address `v` of `b` on memory outside its frame: none in a slot,
+// FX_ARG through its parameters (added to `w`, a bit each), else FX_WRITE.
+fn write_effect(b: &Body, v: Value, w: &mut u64) u8 {
+    let r = root(b, v, w);
+    return if r == ROOT_FRAME {
+        0u8;
+    } else if r == ROOT_ARGS {
+        FX_ARG;
+    } else {
+        FX_WRITE;
+    };
+}
+
+// `root`: what address arithmetic and selects (at most FRAME_DEPTH steps) derive an address from:
+// slots only, slots and the signature's first 64 parameters (added to `w`, a bit each), or anything
+// else.
+const ROOT_FRAME: u8 = 0;
+const ROOT_ARGS: u8 = 1;
+const ROOT_ANY: u8 = 2;
+
+fn root(b: &Body, v: Value, w: &mut u64) u8 {
+    let mut work = Vector::<Value>::new();
+    work.push(v);
+    let mut steps: u32 = 0;
+    let mut r = ROOT_FRAME;
+    let mut m: u64 = 0;
+    // Each step takes one value; FRAME_DEPTH bounds them.
+    while work.len() != 0 {
+        let x = work.pop().unwrap();
+        steps += 1;
+        if steps > FRAME_DEPTH || (x & VFLAG) != 0 || x == VNONE {
+            return ROOT_ANY;
+        }
+        if (x & VPARAM) != 0 {
+            let q = entry_param(b, x);
+            if q == NONE || q >= 64 {
+                return ROOT_ANY;
+            }
+            m |= 1u64 << q as u64;
+            r = ROOT_ARGS;
+            continue;
+        }
+        let t = b.insts[x as usize];
+        if t.op == O_PTRADD {
+            work.push(t.a);
+        } else if t.op == O_SELECT {
+            work.push(t.b);
+            work.push(t.c);
+        } else if t.op != O_SLOTADDR {
+            return ROOT_ANY;
+        }
+    }
+    *w |= m;
+    return r;
 }
 
 // Per body of the `n` of `p`, its level (`optimize`): an explicit-stack depth-first search over the direct
@@ -2498,6 +4887,75 @@ const fn const_of(b: &Body, v: Value) Option<u64> {
     return Option::<u64>::Some(t.b as u64 << 32 | t.a as u64);
 }
 
+// The words of 128-bit constant `v` (low, high), if it is one.
+fn wide_of(b: &Body, v: Value) Option<(u64, u64)> {
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_WCONST || b.insts[v as usize].ty != T_I128 {
+        return Option::<(u64, u64)>::None;
+    }
+    let w = b.insts[v as usize].a as usize;
+    return Option::<(u64, u64)>::Some((b.words[w], b.words[w + 1]));
+}
+
+// Pure 128-bit instruction `i` of `b`, its operands final, as `simplify`: an extension of a constant and
+// an operation on constants become constants; an operation with a constant that leaves its other operand
+// is that operand.
+fn simplify_wide(b: &mut Body, i: u32) Value {
+    let t = b.insts[i as usize];
+    let mut r: (u64, u64) = (0, 0);
+    if t.op == O_ZEXT || t.op == O_SEXT {
+        let x = const_of(b, t.a);
+        if x.is_none() {
+            return VNONE;
+        }
+        let bits = type_bits(b.type_of(t.a), 8);
+        let l = if t.op == O_SEXT {
+            le::sign_ext(x.unwrap(), bits) as u64;
+        } else {
+            x.unwrap();
+        };
+        r = (
+            l,
+            if t.op == O_SEXT && l >> 63 != 0 {
+                ~0u64;
+            } else {
+                0u64;
+            }
+        );
+    } else if t.op >= O_ADD && t.op <= O_NOT && t.op != O_SDIV && t.op != O_UDIV && t.op != O_SREM && t.op != O_UREM {
+        let x = wide_of(b, t.a);
+        let y = if t.op == O_NEG || t.op == O_NOT {
+            Option::<(u64, u64)>::Some((0, 0));
+        } else {
+            wide_of(b, t.b);
+        };
+        if y.is_some() && x.is_none() {
+            let (yl, yh) = y.unwrap();
+            let zero = yl == 0 && yh == 0;
+            if zero && (t.op == O_ADD || t.op == O_SUB || t.op == O_OR || t.op == O_XOR || t.op == O_SHL || t.op == O_LSHR || t.op == O_ASHR) || yl == 1 && yh == 0 && t.op == O_MUL {
+                return t.a;
+            }
+            return VNONE;
+        }
+        if x.is_none() || y.is_none() {
+            return cancel(b, t);
+        }
+        let (xl, xh) = x.unwrap();
+        let (yl, yh) = y.unwrap();
+        let (trap, rl, rh) = le::int128_fold(t.op, xl, xh, yl, yh);
+        if trap != le::FOLD_OK {
+            return VNONE;
+        }
+        r = (rl, rh);
+    } else {
+        return VNONE;
+    }
+    let w = b.words.len() as u32;
+    b.words.push(r.0);
+    b.words.push(r.1);
+    b.insts[i as usize] = Inst { op: O_WCONST, ty: T_I128, aux: 0, a: w, b: 2, c: VNONE };
+    return VNONE;
+}
+
 const fn float_const(b: &Body, v: Value) Option<u64> {
     if (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_FCONST {
         return Option::<u64>::None;
@@ -2511,7 +4969,10 @@ const fn float_const(b: &Body, v: Value) Option<u64> {
 // an address with its constant index and its base address's offset in its own.
 fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
     let mut t = b.insts[i as usize];
-    if is_vec(t.ty) || t.ty == T_I128 {
+    if t.ty == T_I128 {
+        return simplify_wide(b, i);
+    }
+    if is_vec(t.ty) {
         return VNONE;
     }
     let ptr = pk.ptr_bytes;
@@ -2523,6 +4984,29 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             } else {
                 t.c;
             };
+        }
+        // A flag chosen as 1 or 0 is the flag; as 0 or 1, the opposite comparison.
+        let x = const_of(b, t.b);
+        let y = const_of(b, t.c);
+        let f = (t.a & (VPARAM | VFLAG)) == 0 && (b.insts[t.a as usize].op == O_ICMP || b.insts[t.a as usize].op == O_FCMP) && b.insts[t.a as usize].ty == t.ty && x.is_some() && y.is_some();
+        if f && x.unwrap() == 1 && y.unwrap() == 0 {
+            return t.a;
+        }
+        if f && x.unwrap() == 0 && y.unwrap() == 1 && b.insts[t.a as usize].op == O_ICMP {
+            let ci = b.insts[t.a as usize];
+            b.insts[i as usize] = Inst { op: O_ICMP, ty: t.ty, aux: opposite(ci.aux), a: ci.a, b: ci.b, c: VNONE };
+            return VNONE;
+        }
+        // A choice between the two sides of an equality on it is one side: `x != y ? x : y` is `x`.
+        if (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_ICMP {
+            let ci = b.insts[t.a as usize];
+            if (ci.aux == C_EQ || ci.aux == C_NE) && (t.b == ci.a && t.c == ci.b || t.b == ci.b && t.c == ci.a) {
+                return if ci.aux == C_NE {
+                    t.b;
+                } else {
+                    t.c;
+                };
+            }
         }
         return if t.b == t.c {
             t.b;
@@ -2560,6 +5044,31 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         let cb = const_of(b, t.b);
         if ca.is_some() && cb.is_some() {
             b.insts[i as usize] = iconst(t.ty, le::icmp(t.aux, b.type_of(t.a), ptr, ca.unwrap(), cb.unwrap()) as u64);
+        } else if ca.is_some() || cb.is_some() {
+            // A constant compared with selects of constants (an ordering `cmp` returns, tested): the
+            // comparison of each, when that leaves a constant or one of the selects' conditions.
+            let (k, r) = sel_cmp(b, t, ptr, ca.is_none(), SEL_CMP_DEPTH);
+            if k == SC_VALUE && b.type_of(r) == t.ty {
+                return r;
+            }
+            if k <= 1 {
+                b.insts[i as usize] = iconst(t.ty, k);
+                return VNONE;
+            }
+            // The constant second (an immediate operand), the condition mirrored; an unsigned order
+            // against zero is equality.
+            let mut c = t;
+            if ca.is_some() {
+                c = Inst { op: O_ICMP, ty: t.ty, aux: mirror(t.aux), a: t.b, b: t.a, c: VNONE };
+            }
+            if const_of(b, c.b).unwrap() == 0 && (c.aux == C_UGT || c.aux == C_ULE) {
+                c.aux = if c.aux == C_UGT {
+                    C_NE;
+                } else {
+                    C_EQ;
+                };
+            }
+            b.insts[i as usize] = c;
         } else if t.a == t.b {
             let c = t.aux;
             b.insts[i as usize] = iconst(
@@ -2585,6 +5094,29 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
                     c: VNONE,
                 };
             }
+        }
+        return VNONE;
+    }
+    // A value's bits read as another type and back are the value.
+    if t.op == O_BITCAST && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_BITCAST && b.type_of(
+        b.insts[t.a as usize].a,
+    ) == t.ty {
+        return b.insts[t.a as usize].a;
+    }
+    // A pointer turned into an integer of its width and back is the pointer, and the reverse.
+    if (t.op == O_INTTOPTR || t.op == O_PTRTOINT) && (t.a & (VPARAM | VFLAG)) == 0 {
+        let x = b.insts[t.a as usize];
+        if (x.op == O_PTRTOINT && t.op == O_INTTOPTR || x.op == O_INTTOPTR && t.op == O_PTRTOINT) && b.type_of(x.a) == t.ty && type_bits(
+            b.type_of(t.a),
+            ptr,
+        ) == ptr * 8 {
+            return x.a;
+        }
+    }
+    if t.op == O_TRUNC && b.type_of(t.a) == T_I128 {
+        let x = wide_of(b, t.a);
+        if x.is_some() {
+            b.insts[i as usize] = iconst(t.ty, x.unwrap().0);
         }
         return VNONE;
     }
@@ -2629,6 +5161,12 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
     let ones = le::trunc_bits(0xFFFFFFFFFFFFFFFF, type_bits(t.ty, ptr));
     if cb.is_some() {
         let y = cb.unwrap();
+        // The negation of a comparison (`!(a < b)`) is the opposite comparison.
+        if op == O_XOR && y == 1 && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_ICMP && b.insts[t.a as usize].ty == t.ty {
+            let c = b.insts[t.a as usize];
+            b.insts[i as usize] = Inst { op: O_ICMP, ty: t.ty, aux: opposite(c.aux), a: c.a, b: c.b, c: VNONE };
+            return VNONE;
+        }
         if y == 0 && (op == O_ADD || op == O_SUB || op == O_OR || op == O_XOR || op == O_SHL || op == O_LSHR || op == O_ASHR) || y == 1 && (op == O_MUL || op == O_SDIV || op == O_UDIV) || y == ones && op == O_AND {
             return t.a;
         }
@@ -2644,6 +5182,36 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         if op == O_SUB || op == O_XOR {
             b.insts[i as usize] = iconst(t.ty, 0);
         }
+    }
+    return cancel(b, t);
+}
+
+// The operand a sum or difference `t` leaves when one of its terms cancels: `(x + y) - x` is `y`,
+// `(x - y) + y` is `x`; VNONE when none does.
+fn cancel(b: &Body, t: Inst) Value {
+    let a = if (t.a & (VPARAM | VFLAG)) == 0 {
+        b.insts[t.a as usize];
+    } else {
+        Inst { op: 0, ty: 0, aux: 0, a: VNONE, b: VNONE, c: VNONE };
+    };
+    let c = if t.b != VNONE && (t.b & (VPARAM | VFLAG)) == 0 {
+        b.insts[t.b as usize];
+    } else {
+        Inst { op: 0, ty: 0, aux: 0, a: VNONE, b: VNONE, c: VNONE };
+    };
+    if t.op == O_SUB && a.op == O_ADD {
+        if a.a == t.b {
+            return a.b;
+        }
+        if a.b == t.b {
+            return a.a;
+        }
+    }
+    if t.op == O_ADD && a.op == O_SUB && a.b == t.b {
+        return a.a;
+    }
+    if t.op == O_ADD && c.op == O_SUB && c.b == t.a {
+        return c.a;
     }
     return VNONE;
 }
@@ -2752,32 +5320,44 @@ const fn header_read(b: &Body, t: Inst, v: Value) bool {
     return rule == core::SR_LOAD && c != core::SIMD_LOAD_RAW || rule == core::SR_STORE && c != core::SIMD_STORE_RAW || (rule == core::SR_MLOAD || rule == core::SR_MSTORE) && c < core::SIMD_GATHER_PTR;
 }
 
-// Whether `t` may write memory or order memory accesses: a store, a copy, a fill, an atomic or a fence,
-// a call, inline assembly, a system operation, a vector operation or a variadic access.
-// The type tags block `k` writes: bit g for a store tagged g, bit 0 for any other write.
-fn tags_in(b: &Body, k: u32) u16 {
-    let bk = b.blocks[k as usize];
-    let mut out: u16 = 0;
-    for i in bk.start..bk.start + bk.len {
-        let t = b.insts[i as usize];
-        if t.op == O_STORE && (t.aux & MEM_VOLATILE) == 0 {
-            out |= 1u16 << tbaa(t) as u16;
-        } else if writes_memory(t) {
-            out |= 1;
-        }
-    }
-    return out;
+// `writes_memory`, but for a call of a function whose body writes no memory outside its frame
+// (`Sym.fx`).
+fn writes(pk: &Package, b: &Body, t: Inst) bool {
+    return writes_memory(t) && (t.op != O_CALL || (pk.syms[b.syms[t.a as usize] as usize].fx & (FX_WRITE | FX_ARG)) != 0);
 }
 
+// Whether `t` may write memory or order memory accesses: a store, a copy, a fill, an atomic or a fence,
+// a call, inline assembly, a system operation, a vector operation or a variadic access.
 const fn writes_memory(t: Inst) bool {
     let op = t.op;
     return op == O_STORE || op == O_MEMCPY || op == O_MEMSET || op >= O_ALOAD && op <= O_FENCE || op == O_CALL || op == O_CALLIND || op == O_ASM || op == O_SYS || op >= O_VOP && op <= O_VAEND;
 }
 
-// Alias classes (`Opt::classes`): no parameter's referent, exclusive parameter k's (CL_NOALIAS + k), any.
-const CL_OTHER: u8 = 0;
-const CL_NOALIAS: u8 = 1;
-const CL_MANY: u8 = 64;
+// The signature parameter value `v` of `b` is (its index), else NONE.
+const fn entry_param(b: &Body, v: Value) u32 {
+    let e = b.blocks[0];
+    if v == VNONE || (v & VPARAM) == 0 || (v & ~VPARAM) < e.param_start || (v & ~VPARAM) >= e.param_start + e.param_len as u32 {
+        return NONE;
+    }
+    return (v & ~VPARAM) - e.param_start;
+}
+
+// Whether signature parameter `k` of `b` is a view whose loaded pointer is exclusive (`REF_INNER`).
+const fn inner(b: &Body, k: u32) bool {
+    return k < b.refs.len() as u32 && (b.refs[k as usize] & REF_INNER) != 0;
+}
+
+// Whether any signature parameter of `b` is a view (`inner`).
+fn any_inner(b: &Body) bool {
+    for k in 0..b.refs.len() {
+        if (b.refs[k] & REF_INNER) != 0 {
+            return true;
+        }
+    }
+    return false;
+}
+
+// An alias class (`CL_*`) not yet joined.
 const CL_UNSET: u8 = 65;
 // The rounds of joins `Opt::classes` runs before it gives up.
 const CLASS_ROUNDS: u32 = 8;
@@ -2804,7 +5384,7 @@ const fn join(a: u8, b: u8) u8 {
 
 // Whether opcode `op` computes a value from its operands alone, the same each time it does not trap.
 const fn pure_op(op: u8) bool {
-    return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA;
+    return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_SPLAT;
 }
 
 // Whether pure `t` of `b` may run where the program would not run it: it has operands (a constant is
@@ -2833,9 +5413,191 @@ const fn same(t: Inst, u: Inst) bool {
     return t.op == u.op && t.ty == u.ty && t.aux == u.aux && t.a == u.a && t.b == u.b && t.c == u.c;
 }
 
+// The hash of pure instruction `t` of `b`, a wide constant's by its words.
+fn value_hash(b: &Body, t: Inst) u64 {
+    if t.op != O_WCONST {
+        return hash(t);
+    }
+    let mut h = mix(O_WCONST as u64 | t.ty as u64 << 8, t.b);
+    for q in 0..t.b {
+        h = mix(h, b.words[(t.a + q) as usize]);
+    }
+    return h;
+}
+
+// Whether pure instructions `t` and `u` of `b` compute one value: equal, or wide constants of equal words.
+fn same_value(b: &Body, t: Inst, u: Inst) bool {
+    if t.op != O_WCONST || u.op != O_WCONST {
+        return same(t, u);
+    }
+    if t.ty != u.ty || t.b != u.b {
+        return false;
+    }
+    for q in 0..t.b {
+        if b.words[(t.a + q) as usize] != b.words[(u.a + q) as usize] {
+            return false;
+        }
+    }
+    return true;
+}
+
 // The `Opt.rel` key of `x <u y`.
 const fn rel_key(x: Value, y: Value) u64 {
     return y as u64 << 32 | x as u64;
+}
+
+// `sel_cmp`'s answers besides a constant 0 or 1: a value, or none.
+const SC_VALUE: u8 = 2;
+const SC_NONE: u8 = 3;
+// `sel_cmp` follows selects SEL_CMP_DEPTH deep.
+const SEL_CMP_DEPTH: u32 = 3;
+
+// Comparison `t` of a tree of selects of constants (operand `a` when `left`, else `b`) with a constant,
+// at most `depth` selects deep: `(0 or 1, _)` when it is that constant, `(SC_VALUE, c)` when it is the
+// comparison `c` a select tests, else `(SC_NONE, _)`.
+fn sel_cmp(b: &Body, t: Inst, ptr: u32, left: bool, depth: u32) (u8, Value) {
+    let v = if left {
+        t.a;
+    } else {
+        t.b;
+    };
+    let ty = b.type_of(t.a);
+    let k = const_of(b, v);
+    if k.is_some() {
+        let o = if left {
+            const_of(b, t.b).unwrap();
+        } else {
+            const_of(b, t.a).unwrap();
+        };
+        let r = if left {
+            le::icmp(t.aux, ty, ptr, k.unwrap(), o);
+        } else {
+            le::icmp(t.aux, ty, ptr, o, k.unwrap());
+        };
+        return r as u8, VNONE;
+    }
+    if depth == 0 || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_SELECT {
+        return SC_NONE, VNONE;
+    }
+    let sel = b.insts[v as usize];
+    let mut tx = t;
+    let mut ty2 = t;
+    if left {
+        tx.a = sel.b;
+        ty2.a = sel.c;
+    } else {
+        tx.b = sel.b;
+        ty2.b = sel.c;
+    }
+    let (x, _) = sel_cmp(b, tx, ptr, left, depth - 1);
+    let (y, _) = sel_cmp(b, ty2, ptr, left, depth - 1);
+    if x <= 1 && x == y {
+        return x, VNONE;
+    }
+    // The select's condition is the result when it is a comparison (0 or 1) and picks 1 over 0.
+    let c = sel.a;
+    if x == 1 && y == 0 && (c & (VPARAM | VFLAG)) == 0 && b.insts[c as usize].op == O_ICMP {
+        return SC_VALUE, c;
+    }
+    return SC_NONE, VNONE;
+}
+
+// Reader `r` (`Opt::preader`) after block `k` reads the value too.
+const fn reader(r: u32, k: u32) u32 {
+    return if r == NONE || r == k {
+        k;
+    } else {
+        MULTI;
+    };
+}
+
+// The multiplier and shift that divide a `bits`-bit unsigned value by `d` (neither 0 nor a power of two)
+// with a high product (Granlund and Montgomery 1994; Warren, Hacker's Delight, 10-8): `(m, s, false)` for
+// `mulhu(n, m) >> s`, with the least `s` whose `m = ceil(2^(bits + s) / d)` fits in `bits` bits and errs
+// by at most `2^s` (`m * d - 2^(bits + s) <= 2^s`, exact for every `n`); else `(m, l - 1, true)` for
+// `((n - h) / 2 + h) >> (l - 1)`, `h = mulhu(n, m)`, `m = 2^bits * (2^l - d) / d + 1`, `l = ceil(log2 d)`.
+const fn magic(d: u64, bits: u32) (u64, u32, bool) {
+    let one: u128 = 1;
+    let l = 64 - (d - 1).leading_zeros() as u32;
+    let top = one << bits as usize;
+    let dd = d as u128;
+    for s in 0..l {
+        let p = one << (bits + s) as usize;
+        let m = (p + dd - 1) / dd;
+        if m < top && m * dd - p <= one << s as usize {
+            return m as u64, s, false;
+        }
+    }
+    let m = top * ((one << l as usize) - dd) / dd + 1;
+    return m as u64, l - 1, true;
+}
+
+// Whether edges `x` and `y` of `b` enter one block with the same arguments.
+fn same_edge(b: &Body, x: u32, y: u32) bool {
+    if b.edge_target(x) != b.edge_target(y) {
+        return false;
+    }
+    for q in 0..b.edge_nargs(x) {
+        if b.edge_arg(x, q) != b.edge_arg(y, q) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The edge branch `t` takes when its condition is `c`.
+const fn side(t: Inst, c: u64) u32 {
+    return if c != 0 {
+        t.b;
+    } else {
+        t.c;
+    };
+}
+
+// The bits of a value of type `ty`.
+const fn width_mask(ty: u8, ptr: u32) u64 {
+    let w = type_bits(ty, ptr);
+    return if w >= 64 {
+        ~0u64;
+    } else {
+        (1u64 << w as u64) - 1;
+    };
+}
+
+// The edge branch or switch `t` takes for condition value `c`.
+fn decided(b: &Body, t: Inst, c: u64) u32 {
+    if t.op == O_BR {
+        return side(t, c);
+    }
+    for q in 0..t.aux as u32 {
+        if b.words[(t.b + q) as usize] == c {
+            return b.switch_edge(t, q);
+        }
+    }
+    return b.switch_edge(t, t.aux);
+}
+
+// The number of edges terminator `t` holds, and its edge `n`.
+const fn edge_count(t: Inst) u32 {
+    return if t.op == O_JMP {
+        1u32;
+    } else if t.op == O_BR {
+        2u32;
+    } else if t.op == O_SWITCH {
+        t.aux as u32 + 1;
+    } else {
+        0u32;
+    };
+}
+
+fn edge_at(b: &Body, t: Inst, n: u32) u32 {
+    return if t.op == O_JMP {
+        t.a;
+    } else if t.op == O_BR {
+        side(t, (n == 0) as u64);
+    } else {
+        b.switch_edge(t, n);
+    };
 }
 
 const fn jump(e: u32) Inst {
@@ -2857,6 +5619,28 @@ const fn is_nan(ty: u8, r: u64) bool {
 const fn mix(h: u64, x: u64) u64 {
     let m = (h ^ x).wrapping_mul(0x9E3779B97F4A7C15);
     return m ^ m >> 31;
+}
+
+// The hash of call `t` of `b` by its callee, type and arguments.
+fn call_hash(b: &Body, t: Inst) u64 {
+    let mut h = mix(O_CALL as u64 | t.ty as u64 << 8 | t.aux as u64 << 16, b.syms[t.a as usize]);
+    for q in 0..t.aux as u32 {
+        h = mix(h, b.pool[(t.c + q) as usize]);
+    }
+    return h;
+}
+
+// Whether calls `x` and `y` of `b` call one function with the same arguments and type.
+fn same_call(b: &Body, x: Inst, y: Inst) bool {
+    if x.op != O_CALL || x.ty != y.ty || x.aux != y.aux || b.syms[x.a as usize] != b.syms[y.a as usize] {
+        return false;
+    }
+    for q in 0..x.aux as u32 {
+        if b.pool[(x.c + q) as usize] != b.pool[(y.c + q) as usize] {
+            return false;
+        }
+    }
+    return true;
 }
 
 const fn hash(t: Inst) u64 {

@@ -109,3 +109,31 @@ fn the_optimized_lir_agrees_with_ctfe_on_the_math_tests() {
     let p = cli::proj_new();
     read_back(&p, true);
 }
+
+// A closure a generic function takes is called directly: its type names its body, so the call needs no
+// function pointer, and the optimizer may inline it; a capturing closure takes its environment first.
+@test(timeout = 300)
+fn a_closure_a_generic_function_takes_is_called_directly() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(fn apply<F: fn(i64) i64>(f: F, x: i64) i64 {
+    return f(x);
+}
+
+fn main() i32 {
+    let k: i64 = 3;
+    let r = apply(|x: i64| x + k, 4) + apply(|x: i64| x * 2, 5);
+    return (r - 17) as i32;
+}
+)",
+    );
+    let env = format("SC_LIR=1 SC_LIR_OPT=0 SC_NO_TU_CACHE=1 SC_NO_EMIT_CACHE=1 SC_LIR_TEXT={}/pkg.lir", p.dir());
+    let r = p.compile_flags_env("", "main.spc", env.as_str());
+    assert(r.ok(), "the program builds and returns 0");
+    let text = cli::read_text(format("{}/pkg.lir", p.dir()).as_str());
+    assert(!text.contains("callind") && text.contains("closure_b"), text.as_str());
+}

@@ -1278,6 +1278,9 @@ struct FieldAt {
 
 extend FieldAt as Copy {}
 
+// An enum value's payload of at most this many bytes is zeroed where its variant leaves it.
+const ENUM_ZERO_MAX: u32 = 32;
+
 struct EnumL {
     pub ok: bool,
     pub payload_off: u32,
@@ -2329,6 +2332,41 @@ extend Lower {
         };
     }
 
+    // `Body.refs` of aggregate parameter local `l`: REF_INNER | REF_NOALIAS for a by-value `[]mut T` the
+    // body does not rebind. The language makes it the only path to its elements during the call (it is
+    // not `Copy`, a call's arguments reach no storage a mutable one reaches, and building one from raw
+    // parts is `unsafe`), when its element pointer is at offset 0; 0 for any other.
+    fn view_ref(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, l: u32) u32 {
+        if b.locals[l as usize].is_mutable {
+            return 0;
+        }
+        let mut rm = b.module;
+        let mut rt = b.locals[l as usize].ty;
+        let y = Lower::resolved(c, b.module, rt, &mut rm, &mut rt);
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return 0;
+        }
+        let it = *Lower::ast(c, rm).instance(y.as_data.inst);
+        if !Lower::p(c).is_prelude_item(DefId { module: it.module, node: it.decl }, "SliceMut") {
+            return 0;
+        }
+        let mut f = FieldAt {
+            m: 0,
+            t: TYPE_NONE,
+            off: 0,
+            idx: 0,
+            node: NODE_NONE,
+            variant: NODE_NONE,
+            mty: T_NONE,
+            packed: false,
+        };
+        return if self.named_field(c, rm, rt, "ptr", &mut f) && f.off == 0 {
+            REF_INNER | REF_NOALIAS;
+        } else {
+            0u32;
+        };
+    }
+
     // The signature, the entry block and the storage of every local in memory.
     fn entry(
         self: &mut Self,
@@ -2363,6 +2401,7 @@ extend Lower {
                 r = self.ref_of(c, b, l);
             } else {
                 etys.push(T_PTR);
+                r = self.view_ref(c, b, l);
             }
             self.b.refs.push(r);
             any_ref = any_ref || r != 0;
@@ -4957,6 +4996,23 @@ extend Lower {
             }
             let tag = self.iconst(el.tag, d as u64);
             self.store(tag, dst, 0, false);
+            // The bytes of a payload of up to ENUM_ZERO_MAX bytes past the variant's members are 0, not what
+            // the place held: a value built again in a loop carries no stale bytes around it (`None`'s
+            // payload). They are written after the members, whose operands may read the place.
+            let mut end = el.payload_off;
+            for j in 0..fl.len() {
+                let f = fl[j];
+                if f.variant != rv.item.node || f.idx == 0xFFFFFFFF {
+                    continue;
+                }
+                let mut fi = TyI { cls: 0 };
+                if !self.ty(c, f.m, f.t, &mut fi) {
+                    return false;
+                }
+                if f.off + fi.size > end {
+                    end = f.off + fi.size;
+                }
+            }
             let mut k: u32 = 0;
             for j in 0..fl.len() {
                 let f = fl[j];
@@ -4979,6 +5035,10 @@ extend Lower {
                 if !self.operand_into(c, b, opid, fa, fi) {
                     return false;
                 }
+            }
+            if end < el.size && el.size - el.payload_off <= ENUM_ZERO_MAX {
+                let pa = self.ptradd(dst, VNONE, 0, end);
+                self.memset0(pa, el.size - end);
             }
             return true;
         }
@@ -6344,7 +6404,8 @@ fn push_src(t: str, out: &mut String) {
 
 extend Lower {
     // A call: a verified intrinsic as its LIR operation; a dyn receiver or a `dyn fn` through its
-    // table; a capturing closure with its env first; a function value indirectly; else the symbol.
+    // table; a closure directly, a capturing one with its env first; a function value indirectly; else
+    // the symbol.
     fn call_term(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, t: irc::Terminator) bool {
         if t.intr != irc::CI_NONE {
             if !self.intrinsic_call(c, b, t) {
@@ -6382,18 +6443,23 @@ extend Lower {
                 fv = self.load(T_PTR, vt, pb, false);
                 args.push(d);
                 tys.push(T_PTR);
-            } else if cy.kind == TypeKind::TYPE_FUNCTION && !cy.fn_sig() && Lower::closure_caps(c, cy) != 0 {
+            } else if cy.kind == TypeKind::TYPE_FUNCTION && !cy.fn_sig() && Lower::ast(c, cy.module).closure_fact(
+                cy.as_data.decl,
+            ) != null {
+                // A closure's type names its body: a direct call, which the optimizer may inline.
                 c.mg.closure_sym(cy.module, cy.as_data.decl, &mut name);
-                let mut ei = TyI { cls: 0 };
-                if !self.ty(c, cm, ctt, &mut ei) {
-                    return false;
+                if Lower::closure_caps(c, cy) != 0 {
+                    let mut ei = TyI { cls: 0 };
+                    if !self.ty(c, cm, ctt, &mut ei) {
+                        return false;
+                    }
+                    let ea = self.operand_addr(c, b, t.a, ei);
+                    if ea == VNONE {
+                        return false;
+                    }
+                    args.push(ea);
+                    tys.push(T_PTR);
                 }
-                let ea = self.operand_addr(c, b, t.a, ei);
-                if ea == VNONE {
-                    return false;
-                }
-                args.push(ea);
-                tys.push(T_PTR);
             } else {
                 fv = self.operand(c, b, t.a);
                 if fv == VNONE {

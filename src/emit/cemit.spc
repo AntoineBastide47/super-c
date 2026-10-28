@@ -582,6 +582,7 @@ extend CEmit {
             let fi = cf::find("fma", pk.arch);
             l.pkg.fma = tgt::isa(pk.arch).scalar_fma || fi >= 0 && cf::has(pk.features, fi as usize);
             l.pkg.vector = tgt::isa(pk.arch).vector_bytes;
+            l.pkg.mul_high = tgt::isa(pk.arch).mul_high;
             l.pkg.split = pick((pk.cg & bman::CG_FUNCTION_SECTIONS) != 0, cob::SPLIT_FUNCS, 0u8) | pick(
                 (pk.cg & bman::CG_DATA_SECTIONS) != 0,
                 cob::SPLIT_DATA,

@@ -29,6 +29,10 @@ struct Parser<'a> {
     file: u32, // the body's file
     vmap: Vector<u32>, // printed value number -> value id, NONE before its definition
     fixes: Vector<Fix>, // operands that hold a printed number, to patch at the end of the body
+    sfixes: Vector<u32>, // the scopes whose root holds a printed number, to patch at the end of the body
+    smap: Vector<Scope>, // per inline site read: its location's `lines` entry (`site`), place (`group`)
+    // and own `lines` entry (`root`)
+    ord: u32, // the place (`#<n>`) of the inline site `line_end_site` read
     lays: Vector<u32>, // printed layout number -> pool index
     words: Vector<u32>, // scratch
     parts: Vector<str<'a>>, // the current mnemonic's opcode and suffixes
@@ -51,6 +55,9 @@ extend<'a> Parser<'a> {
             file: 0,
             vmap: Vector::<u32>::new(),
             fixes: Vector::<Fix>::new(),
+            sfixes: Vector::<u32>::new(),
+            smap: Vector::<Scope>::new(),
+            ord: 0,
             lays: Vector::<u32>::new(),
             words: Vector::<u32>::new(),
             parts: Vector::<str<'a>>::new(),
@@ -309,13 +316,42 @@ extend<'a> Parser<'a> {
             }
             if inst && self.peek() == b'@' {
                 self.at += 1;
-                if !self.loc_text(site) {
+                if !self.loc_text(site) || !self.site_ord() {
                     return false;
                 }
             }
         }
         self.skip_spaces();
         return self.peek() == 0 || self.fail("unexpected text at the end of the line");
+    }
+
+    // An inline site's place among the sites at its location: `#<n>`, or 0 (`ord`).
+    fn site_ord(self: &mut Self) bool {
+        self.ord = 0;
+        if self.peek() != b'#' {
+            return true;
+        }
+        self.at += 1;
+        let mut n: u32 = 0;
+        if !self.uint(&mut n) {
+            return false;
+        }
+        self.ord = n;
+        return true;
+    }
+
+    // The `lines` entry of inline site `l` with place `n`: one per site, so a scope's copy keeps its own.
+    fn site_line(self: &mut Self, l: Loc, n: u32) u32 {
+        for j in 0..self.smap.len() {
+            let m = self.body.lines[self.smap[j].site as usize];
+            if m.file == l.file && m.line == l.line && m.col == l.col && self.smap[j].group == n {
+                return self.smap[j].root;
+            }
+        }
+        self.body.lines.push(l);
+        let at = self.body.lines.len() as u32 - 1;
+        self.smap.push(Scope { site: at, group: n, root: at });
+        return at;
     }
 
     // A location: an optional file and ':', then a line and a column.
@@ -447,6 +483,8 @@ extend<'a> Parser<'a> {
             self.file = 0;
             self.vmap.truncate(0);
             self.fixes.truncate(0);
+            self.sfixes.truncate(0);
+            self.smap.truncate(0);
             self.lays.truncate(0);
             return self.line_end_loc(&mut loc);
         }
@@ -531,11 +569,14 @@ extend<'a> Parser<'a> {
                 return self.line_end_loc(&mut loc);
             }
             if w == "ref" {
-                // `ref p<k> <bytes> [noalias]`: what signature parameter k points to.
+                // `ref p<k> <bytes> [inner] [noalias]`: what signature parameter k points to.
                 let mut k: u32 = 0;
                 let mut n: u32 = 0;
                 if !self.numbered(b'p', &mut k) || !self.uint(&mut n) || n > REF_BYTES || k >= 65536 {
                     return self.fail("expected 'ref p<parameter> <bytes>'");
+                }
+                if self.keyword("inner") {
+                    n |= REF_INNER;
                 }
                 if self.keyword("noalias") {
                     n |= REF_NOALIAS;
@@ -544,6 +585,25 @@ extend<'a> Parser<'a> {
                     self.body.refs.resize_default(k as usize + 1);
                 }
                 self.body.refs.set(k as usize, n);
+                return self.line_end_loc(&mut loc);
+            }
+            if w == "scope" {
+                // `scope @<site> g<group> v<root>`: an inlined call's exclusive parameter.
+                let mut l = Loc { file: 0, line: 0, col: 0 };
+                let mut g: u32 = 0;
+                let mut v: u32 = 0;
+                let mut fx = false;
+                if !self.expect(b'@', "expected '@' and the call's location") || !self.loc_text(&mut l) || !self.site_ord() || !self.numbered(
+                    b'g',
+                    &mut g,
+                ) || !self.value(&mut v, &mut fx) {
+                    return false;
+                }
+                if fx {
+                    self.sfixes.push(self.body.scopes.len() as u32);
+                }
+                let sl = self.site_line(l, self.ord);
+                self.body.scopes.push(Scope { site: sl, group: g, root: v });
                 return self.line_end_loc(&mut loc);
             }
             if w == "slot" {
@@ -976,6 +1036,9 @@ extend<'a> Parser<'a> {
         } else if op == O_MEMCPY && pi < self.parts.len() && self.parts[pi] == "overlap" {
             t.aux = MEM_OVERLAP;
             pi += 1;
+        } else if op == O_LSHR && pi < self.parts.len() && self.parts[pi] == "exact" {
+            t.aux = SH_EXACT;
+            pi += 1;
         } else if (op == O_FPTOSI || op == O_FPTOUI) && pi < self.parts.len() && self.parts[pi] == "unchecked" {
             t.aux = CV_UNCHECKED;
             pi += 1;
@@ -1051,7 +1114,11 @@ extend<'a> Parser<'a> {
         let v = self.body.emit(t, self.body.loc(loc));
         // The inline sites: one per instruction from the first one on, the earlier ones 0.
         if site.line != 0 || self.body.inl.len() != 0 {
-            let sl = self.body.loc(site);
+            let sl = if site.line == 0 {
+                0u32;
+            } else {
+                self.site_line(site, self.ord);
+            };
             self.body.inl.resize_default(v as usize);
             self.body.inl.push(sl);
         }
@@ -1479,6 +1546,14 @@ extend<'a> Parser<'a> {
                     t.c = v;
                 }
             }
+        }
+        for k in 0..self.sfixes.len() {
+            let x = self.sfixes[k] as usize;
+            let n = self.body.scopes[x].root;
+            if n as usize >= self.vmap.len() || self.vmap[n as usize] == NONE {
+                return self.fail("a scope's root is never defined");
+            }
+            self.body.scopes.index_mut(x).root = self.vmap[n as usize];
         }
         let _ = self.pkg.define(self.sym, &self.body);
         self.sym = NONE;
