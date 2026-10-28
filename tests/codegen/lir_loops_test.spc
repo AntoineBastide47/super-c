@@ -18,7 +18,7 @@ fn optimized(text: str, bu: lu::Budgets) (Package, Package) {
     let before = q.unwrap();
     let mut after = lparse::parse(text, &mut err).unwrap();
     let none = Vector::<bool>::new();
-    lopt::optimize(&mut after, 1, &none, lopt::Config { inline: il::SPEED, loops: bu });
+    lopt::optimize(&mut after, &none, lopt::Config { inline: il::SPEED, loops: bu });
     let mut v = verify::Verifier::new();
     for i in 0..after.syms.len() {
         let s = after.syms[i];

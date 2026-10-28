@@ -339,7 +339,7 @@ fn header_type_declaration_errors() {
     h::expect_err_msg(
         "member pin outside an extern block",
         "struct P {\n    @import(\"x\")\n    pub y: i32,\n}\nfn main() i32 { return 0; }\n",
-        "only '@reflect' applies to a field declaration, and '@import' to a field of an 'extern \"C\"' struct or union",
+        "only '@reflect' and '@ordered' apply to a field declaration, and '@import' to a field of an 'extern \"C\"' struct or union",
     );
     h::expect_err_msg(
         "duplicate field",

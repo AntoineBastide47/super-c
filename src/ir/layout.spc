@@ -50,8 +50,8 @@ struct LayoutAcc {
     pub align: u64,
     pub packed: bool,
     pub is_union: bool,
-    pub unbound: bool, // set by acc_field on a failing field (see Layout.unbound)
-    pub big: bool, // set by acc_field on a field too large, or a sum past u64 (see Layout.big)
+    pub unbound: bool, // set by `ordered` on a failing member (see Layout.unbound)
+    pub big: bool, // set by `ordered` on a member too large, or `acc_members` on a sum past u64 (see Layout.big)
 }
 
 /// A payload-carrying enum's C shape: `{ tag; union payload; }`, with a one-byte tag when
@@ -64,12 +64,98 @@ pub struct EnumLayout {
     pub align: u64,
 }
 
+const NONE: u32 = 0xFFFFFFFF;
+
+/// `Svc::ordered_prefix` of a type whose whole field list keeps its declared order.
+pub const ORDER_ALL: u32 = 0xFFFFFFFF;
+
+/// One member in layout order (`Svc::ordered`): its position in the declaration's member list, its
+/// size and its alignment (1 in a `@packed` struct), and its offset (`place_members`).
+pub struct MemberAt {
+    pub pos: u32,
+    pub size: u64,
+    pub align: u64,
+    pub off: u64,
+}
+
+extend MemberAt as Copy {}
+
 // Recursion guard. A finite type stays far below it: instance arguments nest at most 256 levels
 // (the instance graph and the emitter refuse deeper ones) and a declaration holds at most 64 nested
 // aggregates by value (the checker's BYVAL_MAX_DEPTH), each level costing two steps here. Only a
 // type the checker already reported as infinite (a generic holding itself with a growing
 // argument) reaches it; the walk then fails instead of exhausting the stack.
 const MAX_DEPTH: i32 = 1024;
+
+/// Put members `ms[from..]` (in declared order, each with its size and alignment) in layout order: the
+/// first `prefix` stay, the rest follow stable by alignment, largest first. Every stage that lays out a
+/// struct's fields or a variant's payload orders them here (`Svc::ordered_prefix` gives `prefix`).
+pub fn sort_members(ms: &mut Vector<MemberAt>, from: usize, prefix: u32) {
+    let end = ms.len();
+    let first = from + pick(prefix as usize > end - from, end - from, prefix as usize);
+    if end - first < 2 {
+        return;
+    }
+    // One pass per power of two, at most 64.
+    let mut hi: u64 = 1;
+    for k in first..end {
+        hi = hi.max(ms[k].align);
+    }
+    let mut a = hi;
+    while a != 0 {
+        for k in first..end {
+            if ms[k].align == a {
+                ms.push(ms[k]);
+            }
+        }
+        a /= 2;
+    }
+    assert(ms.len() - end == end - first, "layout: an alignment that is not a power of two");
+    for k in 0..end - first {
+        ms.set(first + k, ms[end + k]);
+    }
+    ms.truncate(end);
+}
+
+// The size of members `ms[from..]` placed in their order, each at the next multiple of its alignment, rounded
+// up to the largest alignment; u64::MAX when it passes u64.
+fn extent(ms: &Vector<MemberAt>, from: usize) u64 {
+    let mut size: u64 = 0;
+    let mut align: u64 = 1;
+    for k in from..ms.len() {
+        if size > 0xFFFFFFFFFFFFFFFFu64 - ms[k].align - ms[k].size {
+            return 0xFFFFFFFFFFFFFFFFu64;
+        }
+        size = round_up(size, ms[k].align) + ms[k].size;
+        align = align.max(ms[k].align);
+    }
+    if size > 0xFFFFFFFFFFFFFFFFu64 - align {
+        return 0xFFFFFFFFFFFFFFFFu64;
+    }
+    return round_up(size, align);
+}
+
+/// Place members `ms[from..]`, in layout order (`sort_members`), at their offsets: each at the next
+/// multiple of its alignment, or at 0 in a union; their extent and largest alignment into `size` and
+/// `align`. False when the size passes u64.
+pub fn place_members(ms: &mut Vector<MemberAt>, from: usize, is_union: bool, size: &mut u64, align: &mut u64) bool {
+    for k in from..ms.len() {
+        let f = ms[k];
+        if is_union {
+            *size = size.max(f.size);
+        } else {
+            // Each member is below isize::MAX, so only the running sum can pass u64.
+            if *size > 0xFFFFFFFFFFFFFFFFu64 - f.align - f.size {
+                return false;
+            }
+            *size = round_up(*size, f.align);
+            ms.index_mut(k).off = *size;
+            *size += f.size;
+        }
+        *align = align.max(f.align);
+    }
+    return true;
+}
 
 /// `v` rounded up to a multiple of `a` (`a` <= 1: `v`).
 pub const fn round_up(v: u64, a: u64) u64 {
@@ -98,7 +184,15 @@ pub struct Svc {
     cache: Map<u64, Layout>, // (module << 32 | type) -> layout (env-free concrete only)
     active: Vector<u64>, // aggregate instantiations under query (declaration and arguments): cycle mark
     steps: Vector<ConstStep>, // `steps_hold` scratch
+    // `ordered`'s members, a stack: each query appends its own above its callers' and truncates back.
+    ms: Vector<MemberAt>,
     pending: u32, // answers that read a constant-expression attribute not evaluated yet: never cached
+    /// The declarations (`module << 32 | node`) whose members a layout of this service put in another order
+    /// than the declared one (`moved`), those of them whose size the order changed (`resized`), and those
+    /// whose field offsets a query read (`offsets`): what may no longer change (`driver::emit::mark_c_reads`).
+    pub moved: Set<u64>,
+    pub resized: Set<u64>,
+    pub offsets: Set<u64>,
     /// The compile-time evaluation this service answers for (null: none). A member of an item the
     /// reader does not see checked (`Interp::visible_node`) is pending.
     pub ev: *const iri::Interp,
@@ -114,6 +208,7 @@ extend Svc {
             cache: Map::<u64, Layout>::new(),
             active: Vector::<u64>::new(),
             steps: Vector::<ConstStep>::new(),
+            ms: Vector::<MemberAt>::new(),
         };
     }
 
@@ -489,32 +584,69 @@ extend Svc {
         return Layout { ok: true, size: round_up(size, align), align: align };
     }
 
-    // Accumulate the member typed by annotation `tn` into `acc`; false = unfoldable.
-    fn acc_field(self: &mut Self, acc: *mut LayoutAcc, m: ModuleId, mid: NodeId, env: *const LayoutEnv, depth: i32) bool {
-        let fl = self.member_layout(m, mid, env, depth);
-        if !fl.ok {
-            unsafe (*acc).unbound = fl.unbound;
-            unsafe (*acc).big = fl.big;
+    /// How many leading fields of struct `dn` (module `dm`) keep their declared positions: all of them
+    /// (ORDER_ALL).
+    pub const fn ordered_prefix(self: &Self, _dm: ModuleId, _dn: NodeId) u32 {
+        return ORDER_ALL;
+    }
+
+    /// `ordered_prefix` of payload `pl` of a variant of enum `dn` (module `dm`).
+    pub const fn payload_prefix(self: &Self, _dm: ModuleId, _dn: NodeId, _pl: NodeList) u32 {
+        return ORDER_ALL;
+    }
+
+    // The members of `list` (of declaration `dn` of module `dm`; fields alone unless `all`, a tuple's or a
+    // payload's type nodes) in layout order under `env`, appended to `ms` from the returned base: the first
+    // `prefix` in declared order, the rest stable by alignment, largest first; alignment 1 when `packed`.
+    // NONE when a member has no layout (its flags in `acc`). The caller truncates `ms` to the base.
+    fn ordered(
+        self: &mut Self,
+        dm: ModuleId,
+        dn: NodeId,
+        list: NodeList,
+        all: bool,
+        prefix: u32,
+        packed: bool,
+        env: *const LayoutEnv,
+        depth: i32,
+        acc: *mut LayoutAcc,
+    ) u32 {
+        let base = self.ms.len();
+        for i in 0..list.len {
+            let mid = unsafe self.a(dm).list(list)[i as usize];
+            if !all && self.a(dm).at_const(mid).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            // A member's own query stacks its members above these and truncates back before returning.
+            let fl = self.member_layout(dm, mid, env, depth);
+            if !fl.ok {
+                unsafe (*acc).unbound = fl.unbound;
+                unsafe (*acc).big = fl.big;
+                self.ms.truncate(base);
+                return NONE;
+            }
+            self.ms.push(MemberAt { pos: i, size: fl.size, align: pick(packed, 1u64, fl.align), off: 0 });
+        }
+        let declared = extent(&self.ms, base);
+        sort_members(&mut self.ms, base, prefix);
+        for k in base + 1..self.ms.len() {
+            if self.ms[k].pos < self.ms[k - 1].pos {
+                self.moved.insert(dm as u64 << 32 | dn as u64);
+                if extent(&self.ms, base) != declared {
+                    self.resized.insert(dm as u64 << 32 | dn as u64);
+                }
+                break;
+            }
+        }
+        return base as u32;
+    }
+
+    // Accumulate the members `ordered` stacked from `base` into `acc`, each member's offset into its
+    // entry; false (`acc.big`) when the size passes u64.
+    fn acc_members(self: &mut Self, acc: &mut LayoutAcc, base: u32) bool {
+        if !place_members(&mut self.ms, base as usize, acc.is_union, &mut acc.size, &mut acc.align) {
+            acc.big = true;
             return false;
-        }
-        let mut fa = fl.align;
-        if unsafe (*acc).packed {
-            fa = 1;
-        }
-        if unsafe (*acc).is_union {
-            if fl.size > unsafe (*acc).size {
-                unsafe (*acc).size = fl.size;
-            }
-        } else {
-            // Each field is below isize::MAX, so only the running sum can pass u64.
-            if unsafe (*acc).size > 0xFFFFFFFFFFFFFFFFu64 - fa - fl.size {
-                unsafe (*acc).big = true;
-                return false;
-            }
-            unsafe (*acc).size = round_up(unsafe (*acc).size, fa) + fl.size;
-        }
-        if fa > unsafe (*acc).align {
-            unsafe (*acc).align = fa;
         }
         return true;
     }
@@ -559,15 +691,14 @@ extend Svc {
         let mut acc = LayoutAcc { is_union: is_union };
         acc.packed = self.attr(dm, dn, AttrKind::ATTR_PACKED) != null;
         let fs = ast.at_const(dn).as_data.aggregate.members;
-        for i in 0..fs.len {
-            let fid = unsafe ast.list(fs)[i as usize];
-            let fkind = ast.at_const(fid).kind;
-            if !is_tuple && fkind != NodeKind::NODE_FIELD {
-                continue;
-            }
-            if !self.acc_field(&mut acc, dm, fid, env, depth) {
-                return Layout { ok: false, unbound: acc.unbound, big: acc.big };
-            }
+        let base = self.ordered(dm, dn, fs, is_tuple, self.ordered_prefix(dm, dn), acc.packed, env, depth, &mut acc);
+        if base == NONE {
+            return Layout { ok: false, unbound: acc.unbound, big: acc.big };
+        }
+        let ok = self.acc_members(&mut acc, base);
+        self.ms.truncate(base as usize);
+        if !ok {
+            return Layout { ok: false, unbound: acc.unbound, big: acc.big };
         }
         let al = self.attr(dm, dn, AttrKind::ATTR_ALIGN);
         if al != null {
@@ -607,11 +738,14 @@ extend Svc {
                 continue;
             }
             let mut vs = LayoutAcc {};
-            for k in 0..pl.len {
-                let pid = unsafe ast.list(pl)[k as usize];
-                if !self.acc_field(&mut vs, dm, pid, env, depth) {
-                    return EnumLayout { ok: false, unbound: vs.unbound };
-                }
+            let base = self.ordered(dm, dn, pl, true, self.payload_prefix(dm, dn, pl), false, env, depth, &mut vs);
+            if base == NONE {
+                return EnumLayout { ok: false, unbound: vs.unbound };
+            }
+            let ok = self.acc_members(&mut vs, base);
+            self.ms.truncate(base as usize);
+            if !ok {
+                return EnumLayout { ok: false, unbound: vs.unbound };
             }
             vs.size = round_up(vs.size, vs.align);
             if vs.size > un.size {
@@ -670,40 +804,79 @@ extend Svc {
 
     // The byte offset of field `fdecl` of declaration `(dm, dn)` under `env`, or -1.
     fn offset_in(self: &mut Self, dm: ModuleId, dn: NodeId, env: *const LayoutEnv, fdecl: NodeId) i64 {
-        let ap = self.p().module_ast_const(dm);
-        let ast = unsafe &*ap;
+        let ast = unsafe &*self.p().module_ast_const(dm);
         if ast.at_const(dn).kind != NodeKind::NODE_STRUCT {
             return -1;
         }
-        if ast.at_const(dn).as_data.aggregate.is_union {
-            // every union member sits at offset 0
-            return 0;
-        }
-        let packed = self.attr(dm, dn, AttrKind::ATTR_PACKED) != null;
-        let is_tuple = ast.at_const(dn).as_data.aggregate.is_tuple;
         let fs = ast.at_const(dn).as_data.aggregate.members;
-        let mut off: u64 = 0;
-        for i in 0..fs.len {
-            let fid = unsafe ast.list(fs)[i as usize];
-            // tuple members are bare type nodes; a named member is a field
-            if !is_tuple && ast.at_const(fid).kind != NodeKind::NODE_FIELD {
-                continue;
+        let mut r: i64 = -1;
+        let base = self.members(dm, dn, env);
+        if base != NONE {
+            for k in base as usize..self.ms.len() {
+                if unsafe ast.list(fs)[self.ms[k].pos as usize] == fdecl {
+                    r = self.ms[k].off as i64;
+                }
             }
-            let fl = self.member_layout(dm, fid, env, 1);
-            if !fl.ok {
-                return -1;
-            }
-            let mut fa = fl.align;
-            if packed {
-                fa = 1;
-            }
-            off = round_up(off, fa);
-            if fid == fdecl {
-                return off as i64;
-            }
-            off += fl.size;
+            self.ms.truncate(base as usize);
         }
-        return -1;
+        return r;
+    }
+
+    // The fields of struct or union `(dm, dn)` under `env` in layout order with their offsets, stacked on
+    // `ms` from the returned base (NONE without a layout); the caller truncates.
+    fn members(self: &mut Self, dm: ModuleId, dn: NodeId, env: *const LayoutEnv) u32 {
+        self.offsets.insert(dm as u64 << 32 | dn as u64);
+        let agg = self.a(dm).at_const(dn).as_data.aggregate;
+        let mut acc = LayoutAcc { is_union: agg.is_union };
+        acc.packed = self.attr(dm, dn, AttrKind::ATTR_PACKED) != null;
+        let base = self.ordered(
+            dm,
+            dn,
+            agg.members,
+            agg.is_tuple,
+            self.ordered_prefix(dm, dn),
+            acc.packed,
+            env,
+            1,
+            &mut acc,
+        );
+        if base != NONE && !self.acc_members(&mut acc, base) {
+            self.ms.truncate(base as usize);
+            return NONE;
+        }
+        return base;
+    }
+
+    /// `decl_members` of struct, union or tuple type `(m, t)`. False when it has no layout.
+    pub fn struct_members(self: &mut Self, m: ModuleId, t: TypeId, out: &mut Vector<MemberAt>) bool {
+        let y = *self.a(m).type_at(t);
+        if y.kind == TypeKind::TYPE_STRUCT {
+            return self.decl_members(y.module, y.as_data.decl, null, out);
+        }
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let it = *self.a(m).instance(y.as_data.inst);
+        if self.a(it.module).at_const(it.decl).kind != NodeKind::NODE_STRUCT {
+            return false;
+        }
+        let frame = inst_frame(self.a(it.module), &it, m, null);
+        return self.decl_members(it.module, it.decl, &frame, out);
+    }
+
+    /// The members of struct, union or tuple declaration `(dm, dn)` under `env` in layout order into `out`:
+    /// each one's position in the declaration's member list, size, alignment and offset. False when it
+    /// has no layout.
+    pub fn decl_members(self: &mut Self, dm: ModuleId, dn: NodeId, env: *const LayoutEnv, out: &mut Vector<MemberAt>) bool {
+        let base = self.members(dm, dn, env);
+        if base == NONE {
+            return false;
+        }
+        for k in base as usize..self.ms.len() {
+            out.push(self.ms[k]);
+        }
+        self.ms.truncate(base as usize);
+        return true;
     }
 
     /// The C shape of a payload enum `(m, t)`; `ok` false for non-enums or unlayoutable payloads.

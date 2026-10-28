@@ -106,6 +106,9 @@ pub enum AttrKind {
     ATTR_THREAD_LOCAL, // `@thread_local` on a `static mut`: one object per OS thread
     ATTR_LAYOUT, // `@layout(size, align)` on an extern opaque type: a C value of that layout
     ATTR_WHEN, // `@when(c)`: the item exists only where build condition `c` holds; `arg` is its truth table
+    // `@ordered`: on a struct, its fields keep their declared order in memory; on a field, it and the
+    // fields before it (each `@ordered` too) keep the first positions (`layout::Svc::ordered_prefix`).
+    ATTR_ORDERED,
 }
 
 /// `@unsafe` claims (`Attr.arg` bits): `safe` makes an extern function callable without `unsafe`;

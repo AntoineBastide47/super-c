@@ -76,21 +76,26 @@ pub unsafe fn dispatch<F: FnPtr, const K: usize>(d: *mut Dispatch, table: [(cpu:
     // A copy the first call reads: the argument's address never escapes, so the steady state does not
     // write it.
     let rows = table;
-    return dispatch_first(d, ((&rows) as *const [(cpu::Feature, F); K]) as *const cpu::Feature, K, fallback as usize) as F;
+    return dispatch_first(
+        d,
+        ((&rows) as *const [(cpu::Feature, F); K]) as *const (cpu::Feature, usize),
+        K,
+        fallback as usize,
+    ) as F;
 }
 
 /// The first call of `dispatch` on `d` over the `k` rows of its table at `rows`, each a feature and a
-/// function pointer laid out as `(cpu::Feature, usize)`: the chosen address, published. The address is
-/// copied out as bytes (a function pointer is no `usize` object). Call `dispatch` instead.
+/// function pointer laid out as `(cpu::Feature, usize)` (one layout: a function pointer has the size and
+/// alignment of a `usize`): the chosen address, published. The address is copied out as bytes (a function
+/// pointer is no `usize` object). Call `dispatch` instead.
 @noinline
-pub unsafe fn dispatch_first(d: *mut Dispatch, rows: *const cpu::Feature, k: usize, fallback: usize) usize {
+pub unsafe fn dispatch_first(d: *mut Dispatch, rows: *const (cpu::Feature, usize), k: usize, fallback: usize) usize {
     let fs = features();
-    let stride = sizeof((cpu::Feature, usize));
     let mut f = fallback;
     for i in 0..k {
-        let r = rows as *const u8 + i * stride;
-        if fs.has(*(r as *const cpu::Feature)) {
-            string::memcpy(&mut f, r + stride - sizeof(usize), sizeof(usize));
+        let r = rows + i;
+        if fs.has((*r).0) {
+            string::memcpy(&mut f, &(*r).1, sizeof(usize));
             break;
         }
     }

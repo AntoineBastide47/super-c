@@ -12239,12 +12239,14 @@ extend Interp {
             }
             let da2 = unsafe &*self.p().module_ast_const(dm2);
             let agg = da2.at_const(dn2).as_data.aggregate;
-            let is_union = agg.is_union;
             let is_tuple = agg.is_tuple;
-            let packed = self.has_attr(dm2, dn2, AttrKind::ATTR_PACKED);
             let fs = agg.members;
             let mut fobjs = Vector::<IVal>::new();
-            let mut run2: u64 = 0;
+            // The fields list in declared order, each at its offset in layout order.
+            let mut placed = Vector::<lay::MemberAt>::new();
+            if !self.lsvc.decl_members(dm2, dn2, envp, &mut placed) {
+                return none();
+            }
             for i in 0..fs.len {
                 let fid = unsafe da2.list(fs)[i as usize];
                 if !is_tuple && da2.at_const(fid).kind != NodeKind::NODE_FIELD {
@@ -12255,14 +12257,11 @@ extend Interp {
                 if ft == TYPE_NONE || !fl.ok {
                     return none();
                 }
-                let mut fa3 = fl.align;
-                if packed {
-                    fa3 = 1;
-                }
                 let mut off: u64 = 0;
-                if !is_union {
-                    off = lay::round_up(run2, fa3);
-                    run2 = off + fl.size;
+                for k in 0..placed.len() {
+                    if placed[k].pos == i {
+                        off = placed[k].off;
+                    }
                 }
                 let mut fname = "";
                 let mut tbuf: [u8; 32] = [0; 32];

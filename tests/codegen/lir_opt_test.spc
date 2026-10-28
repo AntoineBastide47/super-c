@@ -26,7 +26,6 @@ fn optimized_fm(text: str, fm: u8, fma: bool) (Package, Package) {
     let none = Vector::<bool>::new();
     lopt::optimize(
         &mut after,
-        1,
         &none,
         lopt::Config { inline: il::SPEED, loops: lu::Budgets { peel: 0, version: 0, unswitch: 0 } },
     );
@@ -323,7 +322,6 @@ b0(v0: i32):
     sealed.push(true);
     lopt::optimize(
         &mut p,
-        1,
         &sealed,
         lopt::Config { inline: il::SPEED, loops: lu::Budgets { peel: 0, version: 0, unswitch: 0 } },
     );

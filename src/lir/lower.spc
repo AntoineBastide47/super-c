@@ -182,6 +182,8 @@ pub struct Lower {
     tcache: Map<u64, TyI>, // the classes of concrete types, for every body
     fcache: Map<u64, u64>, // the members of concrete aggregates (`fields_of`): start << 32 | count in `fpool`
     fpool: Vector<FieldAt>,
+    // `placed`'s members, a stack: each query appends its own above its callers' and truncates back.
+    lms: Vector<lay::MemberAt>,
     bm: ModuleId, // the module of the body being lowered: the pool grounded member types go to
     fl_depth: u32, // the nesting of `fields_layout`
     pmty: u8, // `arg_mode`: the machine type of the parameter's scalar type, T_NONE when unknown
@@ -258,6 +260,7 @@ extend Lower {
             tcache: Map::<u64, TyI>::new(),
             fcache: Map::<u64, u64>::new(),
             fpool: Vector::<FieldAt>::new(),
+            lms: Vector::<lay::MemberAt>::new(),
             bm: 0,
             fl_depth: 0,
             pmty: T_NONE,
@@ -786,11 +789,14 @@ extend Lower {
             }
             return true;
         }
-        // Structs, unions, tuples, enums with payloads and closure envs: each member at its offset.
+        // Structs, unions, tuples, enums with payloads and closure envs: each member at its offset, in
+        // offset order (the calling conventions classify the leaves by offset; `fields_of` lists members in
+        // declared order).
         let mut fl = Vector::<FieldAt>::new();
         if !self.fields_of(c, rm, rt, &mut fl) {
             return false;
         }
+        fl.sort_stable_in_place_by(|x: &FieldAt, y: &FieldAt| (x.off > y.off) as i32 - (x.off < y.off) as i32);
         for k in 0..fl.len() {
             let f = fl[k];
             if f.t == TYPE_NONE {
@@ -890,7 +896,8 @@ extend Lower {
         return ok;
     }
 
-    // `fields_of` for declaration `(dm, dn)`, its generic parameters bound.
+    // `fields_of` for declaration `(dm, dn)`, its generic parameters bound: the members in declared order
+    // (drop order and operand order read it), each at its offset in layout order.
     fn decl_fields(self: &mut Self, c: &mut cbe::CEmit, dm: ModuleId, dn: NodeId, out: &mut Vector<FieldAt>) bool {
         let a = Lower::ast(c, dm);
         let n = a.at_const(dn);
@@ -918,59 +925,127 @@ extend Lower {
             for i in 0..ms.len {
                 let vid = unsafe a.list(ms)[i as usize];
                 let pl = a.at_const(vid).as_data.variant.payload;
-                let mut off: u32 = 0;
+                let mut size: u64 = 0;
+                let mut al: u64 = 1;
+                let base = self.placed(
+                    c,
+                    dm,
+                    pl,
+                    true,
+                    c.mg.lay.payload_prefix(dm, dn, pl),
+                    false,
+                    false,
+                    &mut size,
+                    &mut al,
+                );
+                if base == NONE {
+                    return false;
+                }
                 for k in 0..pl.len {
                     let pid = unsafe a.list(pl)[k as usize];
-                    let mt = a.member_ty(pid);
-                    let mut ti = TyI { cls: 0 };
-                    if mt == TYPE_NONE || !self.ty(c, dm, mt, &mut ti) {
-                        return self.fail("payload-type");
-                    }
-                    off = round_up(off, ti.align);
-                    let (gm, gt) = self.grounded(c, dm, mt);
-                    out.push(FieldAt { m: gm, t: gt, off: el.payload_off + off, idx: k, node: pid, variant: vid });
-                    off += ti.size;
+                    let (gm, gt) = self.grounded(c, dm, a.member_ty(pid));
+                    let off = el.payload_off + self.placed_off(base, k);
+                    out.push(FieldAt { m: gm, t: gt, off: off, idx: k, node: pid, variant: vid });
                 }
+                self.lms.truncate(base as usize);
             }
             return true;
         }
         let is_union = n.as_data.aggregate.is_union;
         let is_tuple = n.as_data.aggregate.is_tuple;
         let packed = a.attr_of(dn, AttrKind::ATTR_PACKED) != null;
-        let mut off: u32 = 0;
+        let mut size: u64 = 0;
+        let mut al: u64 = 1;
+        let base = self.placed(
+            c,
+            dm,
+            ms,
+            is_tuple,
+            c.mg.lay.ordered_prefix(dm, dn),
+            packed,
+            is_union,
+            &mut size,
+            &mut al,
+        );
+        if base == NONE {
+            return false;
+        }
         let mut idx: u32 = 0;
         for i in 0..ms.len {
             let fid = unsafe a.list(ms)[i as usize];
             if !is_tuple && a.at_const(fid).kind != NodeKind::NODE_FIELD {
                 continue;
             }
-            let mt = a.member_ty(fid);
-            let mut ti = TyI { cls: 0 };
-            if mt == TYPE_NONE || !self.ty(c, dm, mt, &mut ti) {
-                return self.fail("field-type");
-            }
-            let al = ast::pick(packed, 1u32, ti.align);
-            if !is_union {
-                off = round_up(off, al);
-            }
-            let (gm, gt) = self.grounded(c, dm, mt);
+            let (gm, gt) = self.grounded(c, dm, a.member_ty(fid));
             out.push(
                 FieldAt {
                     m: gm,
                     t: gt,
-                    off: ast::pick(is_union, 0u32, off),
+                    off: self.placed_off(base, i),
                     idx: idx,
                     node: fid,
                     packed: packed,
                     variant: NODE_NONE,
                 },
             );
-            if !is_union {
-                off += ti.size;
-            }
             idx += 1;
         }
+        self.lms.truncate(base as usize);
         return true;
+    }
+
+    // The members of `list` of declaration module `dm` (fields alone unless `all`: a tuple's members or a
+    // payload's) at their offsets in layout order (`lay::sort_members` with the declaration's `prefix`,
+    // `lay::place_members`; alignment 1 when `packed`, offset 0 in a union), stacked on `lms` from the
+    // returned base; their extent and alignment into `size` and `al`. NONE when a member type has no
+    // class. The caller truncates `lms` to the base.
+    fn placed(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        dm: ModuleId,
+        list: NodeList,
+        all: bool,
+        prefix: u32,
+        packed: bool,
+        is_union: bool,
+        size: &mut u64,
+        al: &mut u64,
+    ) u32 {
+        let base = self.lms.len();
+        let a = Lower::ast(c, dm);
+        for i in 0..list.len {
+            let mid = unsafe a.list(list)[i as usize];
+            if !all && a.at_const(mid).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            let mt = a.member_ty(mid);
+            let mut ti = TyI { cls: 0 };
+            // A member's class may lay out other aggregates, which stack above these and truncate back.
+            if mt == TYPE_NONE || !self.ty(c, dm, mt, &mut ti) {
+                self.lms.truncate(base);
+                let _ = self.fail("field-type");
+                return NONE;
+            }
+            self.lms.push(lay::MemberAt { pos: i, size: ti.size, align: ast::pick(packed, 1u64, ti.align), off: 0 });
+        }
+        lay::sort_members(&mut self.lms, base, prefix);
+        if !lay::place_members(&mut self.lms, base, is_union, size, al) {
+            self.lms.truncate(base);
+            let _ = self.fail("aggregate-size");
+            return NONE;
+        }
+        return base as u32;
+    }
+
+    // The offset of the member at position `pos` among those `placed` stacked from `base`.
+    fn placed_off(self: &Self, base: u32, pos: u32) u32 {
+        for k in base as usize..self.lms.len() {
+            if self.lms[k].pos == pos {
+                return self.lms[k].off as u32;
+            }
+        }
+        assert(false, "lir: a member `placed` did not place");
+        return 0;
     }
 
     // The shape of payload enum `(dm, dn)` (its generic parameters bound).
@@ -981,20 +1056,26 @@ extend Lower {
         let mut ualign: u32 = 1;
         for i in 0..ms.len {
             let pl = a.at_const(unsafe a.list(ms)[i as usize]).as_data.variant.payload;
-            let mut off: u32 = 0;
-            let mut al: u32 = 1;
-            for k in 0..pl.len {
-                let mt = a.member_ty(unsafe a.list(pl)[k as usize]);
-                let mut ti = TyI { cls: 0 };
-                if mt == TYPE_NONE || !self.ty(c, dm, mt, &mut ti) {
-                    return self.fail("payload-type");
-                }
-                off = round_up(off, ti.align) + ti.size;
-                al = ast::pick(ti.align > al, ti.align, al);
+            let mut size: u64 = 0;
+            let mut al: u64 = 1;
+            let base = self.placed(
+                c,
+                dm,
+                pl,
+                true,
+                c.mg.lay.payload_prefix(dm, dn, pl),
+                false,
+                false,
+                &mut size,
+                &mut al,
+            );
+            if base == NONE {
+                return false;
             }
-            off = round_up(off, al);
+            self.lms.truncate(base as usize);
+            let off = round_up(size as u32, al as u32);
             usize9 = ast::pick(off > usize9, off, usize9);
-            ualign = ast::pick(al > ualign, al, ualign);
+            ualign = ast::pick(al as u32 > ualign, al as u32, ualign);
         }
         let tag: u32 = ast::pick(a.enum_tag_is_byte(dn), 1u32, 4u32);
         out.ok = true;

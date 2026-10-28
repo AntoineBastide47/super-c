@@ -1059,6 +1059,8 @@ fn typecheck_stage(
                 let kd = lg.kinds[k];
                 if kd == 1 {
                     p.always_methods.insert(dv);
+                } else if kd == 3 {
+                    p.c_reads.push(dv);
                 } else {
                     p.mark_method_used(d);
                 }
@@ -1078,6 +1080,7 @@ fn typecheck_stage(
     }
     if ok {
         assert_no_error_type(p);
+        ok = mark_c_reads(p);
     }
     return ok;
 }
@@ -1507,8 +1510,8 @@ fn facts_verify(p: &loader::Package, wms: &Vector<facts::FactsWatermark>, stage:
 }
 
 // Validation mode (SC_LAYOUT=1): every concrete pool type must satisfy the C layout invariants:
-// power-of-two alignment dividing the size, field offsets aligned, monotone, and inside the parent,
-// and the enum view agreeing with the plain one.
+// power-of-two alignment dividing the size, fields aligned, apart in layout order and inside the
+// parent, and the enum view agreeing with the plain one.
 fn layout_pass(p: &mut loader::Package) {
     if stdlib::getenv("SC_LAYOUT") == null {
         return;
@@ -1552,23 +1555,18 @@ fn layout_pass(p: &mut loader::Package) {
             if dn != NODE_NONE {
                 let da = unsafe &*p.module_ast_const(dm);
                 if da.at_const(dn).kind == NodeKind::NODE_STRUCT && !da.at_const(dn).as_data.aggregate.is_union {
-                    let ms = da.at_const(dn).as_data.aggregate.members;
-                    let mut prev: i64 = -1;
-                    for k in 0..ms.len {
-                        let fid = unsafe da.list(ms)[k as usize];
-                        if da.at_const(fid).kind != NodeKind::NODE_FIELD {
-                            continue;
+                    // In layout order, which need not be the declared one. Zero-size members share
+                    // offsets and may sit at the very end.
+                    let mut ms = Vector::<lay::MemberAt>::new();
+                    if svc.struct_members(m as ModuleId, ty, &mut ms) {
+                        let mut end: u64 = 0;
+                        for k in 0..ms.len() {
+                            fields += 1;
+                            if ms[k].off % ms[k].align != 0 || ms[k].off < end || ms[k].off + ms[k].size > l.size {
+                                ok = false;
+                            }
+                            end = ms[k].off + ms[k].size;
                         }
-                        let off = svc.field_offset(m as ModuleId, ty, fid);
-                        if off < 0 {
-                            continue;
-                        }
-                        fields += 1;
-                        // Zero-size members share offsets and may sit at the very end.
-                        if off < prev || off as u64 > l.size {
-                            ok = false;
-                        }
-                        prev = off;
                     }
                 } else if da.at_const(dn).kind == NodeKind::NODE_ENUM {
                     let el = svc.enum_layout(m as ModuleId, ty);
@@ -6257,12 +6255,16 @@ pub fn cemit_package(
         for m in 0..p.modules.len() {
             sealed.push(module_has_asm(p, m));
         }
-        lopt::optimize(
-            &mut l.deref_mut().pkg,
-            p.jobs,
+        let pkg = &mut l.deref_mut().pkg;
+        let mut r = lopt::Run::new(
+            pkg,
             &sealed,
             lopt::Config { inline: inline_budget(p.opt, p.cg), loops: loop_budgets(p.opt, p.cg) },
         );
+        // Each body starts once the callees it may inline are done.
+        let mut g = sch::Jobs::from_edges(r.order.len(), &r.edges, replace(&mut r.order, Vector::<u32>::new()));
+        sch::run_jobs(&mut g, p.jobs, lopt::job, &mut r, null);
+        r.finish(pkg);
         cem.lir_put(l);
     }
     // The LIR check of the bodies this build rendered (a refused one fails the build already). A module
@@ -14749,18 +14751,208 @@ pub fn default_gen_root(p: &mut loader::Package) {
 }
 
 // Resolve the modules from `root_module` on (the prelude stage resolved the ones before it) and build
-// the item schedule over every module.
+// the item schedule over every module; then mark the structs and enums of those modules that C code reads
+// (`mark_c_shaped`), before any layout query.
 fn resolve_stage(p: &mut loader::Package, lint: bool) {
     let n = p.modules.len();
     if p.jobs != 1 && n > 1 {
         resolve_all_par(p, lint);
+    } else {
+        for i in p.root_module as usize..n {
+            let ok = resolve_module(p, i, lint && lint_reported(p, i, -1), null);
+            p.ok = ok && p.ok;
+        }
+        gitems::build_serial(p);
+    }
+    mark_c_shaped(p, p.root_module as usize);
+}
+
+// Mark in `Package.c_shaped` every struct and enum of modules `from..` that the signature of an extern
+// function or an `@export` function of those modules reaches by value or through a pointer, a reference,
+// a slice, an array, a function type or a generic argument: C code reads their fields, so they keep the
+// declared order. A prelude type stays as the prelude stage laid it out (its image holds its marks).
+fn mark_c_shaped(p: &mut loader::Package, from: usize) {
+    let n = p.modules.len();
+    let mut work = Vector::<DefId>::new(); // type nodes to visit, as (module, node)
+    for m in from..n {
+        if !p.modules[m].has_ast {
+            continue;
+        }
+        let a = unsafe &*p.module_ast_const(m as ModuleId);
+        let its = a.at_const(a.root).as_data.program.items;
+        for i in 0..its.len {
+            let it = unsafe a.list(its)[i as usize];
+            let k = a.at_const(it).kind;
+            if k == NodeKind::NODE_EXTERN_BLOCK {
+                let fs = a.at_const(it).as_data.extern_block.items;
+                for j in 0..fs.len {
+                    c_sig(a, m as ModuleId, unsafe a.list(fs)[j as usize], true, &mut work);
+                }
+            } else if k == NodeKind::NODE_FUNCTION {
+                c_sig(a, m as ModuleId, it, false, &mut work);
+            }
+        }
+    }
+    c_walk(p, from, &mut work, null);
+}
+
+// Walk the type nodes in `work` (from module `from` on) to the structs and enums they reach, by value or
+// through a pointer, a reference, a slice, an array, a function type, a tuple, an alias or a generic
+// argument, with the types of their fields and payloads: each joins `Package.c_shaped` (and `added`
+// unless null). Each step visits one type node; a declaration enters the set once, so the walk is
+// bounded by the type nodes of the marked declarations.
+fn c_walk(p: &mut loader::Package, from: usize, work: &mut Vector<DefId>, added: *mut Vector<u64>) {
+    let n = p.modules.len();
+    while let Some(d) = work.pop() {
+        let a = unsafe &*p.module_ast_const(d.module);
+        let t = a.at_const(d.node);
+        let k = t.kind;
+        if k == NodeKind::NODE_POINTER_TYPE || k == NodeKind::NODE_REFERENCE_TYPE || k == NodeKind::NODE_SLICE_TYPE {
+            work.push(DefId { module: d.module, node: t.as_data.indirect_type.ty });
+        } else if k == NodeKind::NODE_ARRAY_TYPE {
+            work.push(DefId { module: d.module, node: t.as_data.array_type.element });
+        } else if k == NodeKind::NODE_FUNCTION_TYPE {
+            c_types(d.module, a, t.as_data.function_type.params, work);
+            c_types(d.module, a, t.as_data.function_type.returns, work);
+        } else if k == NodeKind::NODE_TUPLE_TYPE {
+            c_types(d.module, a, t.as_data.array_literal.elements, work);
+        } else if k == NodeKind::NODE_TYPE_PATH {
+            c_types(d.module, a, t.as_data.type_path.args, work);
+            let mut r = a.resolution_def(d.node);
+            if r.node == NODE_NONE {
+                continue;
+            }
+            if r.module as usize >= n || !p.modules[r.module as usize].has_ast {
+                r.module = d.module;
+            }
+            let ra = unsafe &*p.module_ast_const(r.module);
+            if ra.at_const(r.node).kind == NodeKind::NODE_TYPE_ALIAS {
+                work.push(DefId { module: r.module, node: ra.at_const(r.node).as_data.type_alias.ty });
+                continue;
+            }
+            c_decl(p, from, r, work, added);
+        }
+    }
+}
+
+// Add to `Package.c_shaped` the declarations of modules `root_module..` that an `extern "C"` call's untyped
+// pointer argument reaches (`Package.c_reads`), with the types of their fields and payloads: C may read
+// the value through that pointer. A declaration whose reordered layout a compile-time evaluation of the typecheck already
+// used (`layout::Svc::resized`, `offsets`) cannot take its declared order any more: an error asks for
+// `@ordered`. False after an error.
+fn mark_c_reads(p: &mut loader::Package) bool {
+    let mut keys = replace(&mut p.c_reads, Vector::<u64>::new());
+    // Sorted: the errors come in one order whatever the schedule of the typecheck.
+    keys.sort_stable_in_place();
+    let from = p.root_module as usize;
+    let mut work = Vector::<DefId>::new();
+    let mut added = Vector::<u64>::new();
+    for k in 0..keys.len() {
+        c_decl(
+            p,
+            from,
+            DefId { module: (keys[k] >> 32) as ModuleId, node: (keys[k] & 0xFFFFFFFFu64) as NodeId },
+            &mut work,
+            &mut added,
+        );
+        c_walk(p, from, &mut work, &mut added);
+    }
+    let e = p.cir as *const iri::Interp;
+    if e == null {
+        return true;
+    }
+    let mut ok = true;
+    for k in 0..added.len() {
+        let m = (added[k] >> 32) as usize;
+        let a = &p.modules[m].ast;
+        let d = a.at_const((added[k] & 0xFFFFFFFFu64) as NodeId);
+        // What the typecheck read of the reordered layout: the size (the order changed it), an offset, or
+        // for an enum any of its payload layouts.
+        let sv = unsafe &(*e).lsvc;
+        let used = sv.resized.contains(&added[k]) || sv.moved.contains(&added[k]) && (sv.offsets.contains(&added[k]) || d.kind == NodeKind::NODE_ENUM);
+        if !used {
+            continue;
+        }
+        let nm = a.at_const(d.as_data.aggregate.name);
+        let mut errs = diag::Errors::new();
+        errs.emit_span(
+            nm.span,
+            format(
+                "'{}' reaches C through an untyped pointer argument, so its fields keep their declared order, but a compile-time evaluation already used its reordered layout: tag it '@ordered'",
+                p.modules[m].source.as_str().slice(
+                    nm.as_data.name.text.start as usize,
+                    nm.as_data.name.text.end as usize,
+                ),
+            ),
+        );
+        errs.finalize(p.modules[m].source.as_str(), p.modules[m].file.as_str());
+        errs.log();
+        ok = false;
+    }
+    return ok;
+}
+
+// Declaration `r` into `Package.c_shaped` (and `added` unless null) when it is a struct or enum of module
+// `from` on not there yet, and the type nodes of its fields and payloads into `work`.
+fn c_decl(p: &mut loader::Package, from: usize, r: DefId, work: &mut Vector<DefId>, added: *mut Vector<u64>) {
+    let ra = unsafe &*p.module_ast_const(r.module);
+    let rk = ra.at_const(r.node).kind;
+    let key = r.module as u64 << 32 | r.node as u64;
+    if rk != NodeKind::NODE_STRUCT && rk != NodeKind::NODE_ENUM || r.module as usize < from || p.c_shaped.contains(&key) {
         return;
     }
-    for i in p.root_module as usize..n {
-        let ok = resolve_module(p, i, lint && lint_reported(p, i, -1), null);
-        p.ok = ok && p.ok;
+    p.c_shaped.insert(key);
+    if added != null {
+        unsafe (*added).push(key);
     }
-    gitems::build_serial(p);
+    let agg = ra.at_const(r.node).as_data.aggregate;
+    for i in 0..agg.members.len {
+        let mid = unsafe ra.list(agg.members)[i as usize];
+        let mk = ra.at_const(mid).kind;
+        if mk == NodeKind::NODE_FIELD {
+            work.push(DefId { module: r.module, node: ra.at_const(mid).as_data.field.ty });
+        } else if mk == NodeKind::NODE_VARIANT {
+            let pl = ra.at_const(mid).as_data.variant.payload;
+            for j in 0..pl.len {
+                let pid = unsafe ra.list(pl)[j as usize];
+                work.push(
+                    DefId {
+                        module: r.module,
+                        node: if ra.at_const(pid).kind == NodeKind::NODE_FIELD {
+                            ra.at_const(pid).as_data.field.ty;
+                        } else {
+                            pid;
+                        },
+                    },
+                );
+            }
+        } else if agg.is_tuple {
+            work.push(DefId { module: r.module, node: mid });
+        }
+    }
+}
+
+// The parameter and result type nodes of function `f` (module `m`) into `work` when C calls or is called
+// through it: a function of an extern block (`ext`) or an `@export` one.
+fn c_sig(a: &Ast, m: ModuleId, f: NodeId, ext: bool, work: &mut Vector<DefId>) {
+    if a.at_const(f).kind != NodeKind::NODE_FUNCTION || !ext && a.attr_of(f, AttrKind::ATTR_EXPORT) == null {
+        return;
+    }
+    let fd = a.at_const(f).as_data.function;
+    for i in 0..fd.params.len {
+        let pid = unsafe a.list(fd.params)[i as usize];
+        if a.at_const(pid).kind == NodeKind::NODE_PARAMETER {
+            work.push(DefId { module: m, node: a.at_const(pid).as_data.parameter.ty });
+        }
+    }
+    c_types(m, a, fd.returns, work);
+}
+
+// The type nodes of `list` (module `m`) into `work`.
+fn c_types(m: ModuleId, a: &Ast, list: NodeList, work: &mut Vector<DefId>) {
+    for i in 0..list.len {
+        work.push(DefId { module: m, node: unsafe a.list(list)[i as usize] });
+    }
 }
 
 /// The prelude stage of a build: the std prelude of `p`'s settings loaded from `std_dir` and analyzed up

@@ -2463,8 +2463,23 @@ extend Lowerer {
                 tok::Span { start: 0, end: 0 };
             };
             if span2.end <= span2.start {
-                self.fail_at("binder-name", id);
-                return ir::IR_NONE;
+                // A tuple's member or a tuple variant's payload has no name: `_<index>`, from the body's
+                // bytes (`CK_BYTES`: start << 32 | length).
+                let at = self.body.bytes.len();
+                self.body.bytes.push(b'_');
+                let mut digits = String::new();
+                digits.push_i64(fr.idx);
+                for k in 0..digits.len() {
+                    self.body.bytes.push(digits.as_str().byte_at(k));
+                }
+                let n = self.body.bytes.len() - at;
+                let op = self.kop(
+                    ir::CK_BYTES,
+                    ty,
+                    at as i64 << 32 | n as i64,
+                    tok::Span { start: sp.start, end: sp.start },
+                );
+                return self.spill(op, sp);
             }
             let op = self.const_op(
                 ir::Constant {

@@ -21,11 +21,12 @@ import lir::ir as *;
 import ir::core as core;
 import lir::eval as le;
 import lir::verify as lv;
-import std::parallel::data as parallel;
+import std::parallel::sync as psync;
 import lir::inline as il;
 import lir::promote as pr;
 import lir::loops as lu;
 import stdlib;
+import std::platform::clock as pclock;
 
 // `Opt.repl` of an instruction without a value that the rebuild drops.
 const DROPPED: u32 = 0xFFFFFFFE;
@@ -1911,15 +1912,42 @@ extend Opt {
     }
 }
 
-/// Optimize every body of `pk` on up to `jobs` threads as `cf` sets: callees first, each body inlines the
-/// ones that fit the inline budget (`lir::inline`), goes through `Opt::run`, then `Opt::loop_opts`. A body's level is one more than its callees' that
-/// may inline (0 without any; a call back into a body the walk is inside does not count), and the
-/// bodies of one level go in parallel, reading the lower levels'. A body of a unit `sealed` marks (by
-/// unit) inlines into bodies of its unit only.
-pub fn optimize(pk: &mut Package, jobs: u32, sealed: &Vector<bool>, cf: Config) {
-    let mut bodies = replace(&mut pk.bodies, Vector::<Body>::new());
-    {
+/// The optimization of a package's bodies as a job graph: `new` takes the bodies, `job` optimizes one,
+/// `finish` gives them back. Callees go first: each body inlines the callees that fit the inline
+/// budget (`lir::inline`), goes through `Opt::run`, then `Opt::loop_opts`. A body's level is one more
+/// than its callees' that may inline (0 without any; a call back into a body the walk is inside does not
+/// count), and a body inlines only callees of a lower level, so each body waits for its direct callees of
+/// a lower level (`edges`) and for nothing else: the result does not depend on the schedule. A body of a
+/// unit `sealed` marks (by unit) inlines into bodies of its unit only.
+pub struct Run {
+    /// One edge per callee a body waits for: `callee << 32 | caller`, each pair once.
+    pub edges: Vector<u64>,
+    /// The bodies by level: a serial order every edge runs forward in.
+    pub order: Vector<u32>,
+    pk: *const Package,
+    bodies: Vector<Body>,
+    shape: Vector<bool>,
+    unit: Vector<u32>,
+    level: Vector<u32>,
+    // Per body, whether a caller may inline it: written by the body's job, read by its callers' jobs.
+    ok: Vector<bool>,
+    inline: bool,
+    cf: Config,
+    // Scratch a job takes and gives back: it grows once per worker, not once per body.
+    free: psync::Mutex<Vector<Box<Scratch>>>,
+}
+
+struct Scratch {
+    pub il: il::Inliner,
+    pub o: Opt,
+}
+
+extend Run {
+    /// The job graph of `pk`'s bodies under `cf`; `pk` keeps no body until `finish`.
+    pub fn new(pk: &mut Package, sealed: &Vector<bool>, cf: Config) Run {
+        let bodies = replace(&mut pk.bodies, Vector::<Body>::new());
         let p: &Package = pk;
+        let pkp = p as *const Package;
         let n = bodies.len();
         let mut shape = Vector::<bool>::with_capacity(n);
         shape.resize_default(n);
@@ -1940,11 +1968,9 @@ pub fn optimize(pk: &mut Package, jobs: u32, sealed: &Vector<bool>, cf: Config) 
         levels(p, &bodies, &shape, &mut level);
         let mut top: u32 = 0;
         for i in 0..n {
-            if level[i] > top {
-                top = level[i];
-            }
+            top = top.max(level[i]);
         }
-        // The bodies by level: `byl[at[l] .. at[l + 1]]`.
+        // The bodies by level: a counting sort, stable by index.
         let mut at = Vector::<u32>::new();
         at.resize_default(top as usize + 2);
         for i in 0..n {
@@ -1953,60 +1979,103 @@ pub fn optimize(pk: &mut Package, jobs: u32, sealed: &Vector<bool>, cf: Config) 
         for l in 0..top as usize + 1 {
             at[l + 1] += at[l];
         }
-        let mut byl = Vector::<u32>::new();
-        byl.resize_default(n);
-        let mut fillp = Vector::<u32>::new();
-        fillp.extend_copy(&at);
+        let mut order = Vector::<u32>::new();
+        order.resize_default(n);
         for i in 0..n {
-            byl[fillp[level[i] as usize] as usize] = i as u32;
-            fillp[level[i] as usize] += 1;
+            order[at[level[i] as usize] as usize] = i as u32;
+            at[level[i] as usize] += 1;
+        }
+        // A caller waits for each distinct direct callee of a lower level (`seen`: the last caller that
+        // listed it).
+        let mut edges = Vector::<u64>::new();
+        let mut seen = Vector::<u32>::new();
+        for _ in 0..n {
+            seen.push(NONE);
+        }
+        for k in 0..n {
+            let bk = &bodies[k];
+            for i in 0..bk.insts.len() {
+                let c = call_target(p, bk, bk.insts[i]);
+                if c != NONE && level[c as usize] < level[k] && seen[c as usize] != k as u32 {
+                    seen[c as usize] = k as u32;
+                    edges.push(c as u64 << 32 | k as u64);
+                }
+            }
         }
         let mut ok = Vector::<bool>::with_capacity(n);
         ok.resize_default(n);
-        // SC_LIR_INLINE=0 inlines nothing (a debugging aid).
-        let inline = !stdlib::env_is("SC_LIR_INLINE", "0");
-        let base = bodies.as_mut_slice().as_mut_ptr() as usize;
-        let ur: &Vector<u32> = &unit;
-        for l in 0..top as usize + 1 {
-            let part = byl.index_range_mut(at[l] as usize..at[l + 1] as usize);
-            let okr: &Vector<bool> = &ok;
-            if jobs < 2 || part.len() < 64 {
-                level_bodies(p, base, okr, ur, cf.loops, part);
-            } else {
-                // 16 bodies per task: the scratch grows once per task.
-                parallel::chunks_mut(
-                    part,
-                    16,
-                    |c: []mut u32| {
-                        level_bodies(p, base, okr, ur, cf.loops, c);
-                    },
-                );
-            }
-            for j in at[l]..at[l + 1] {
-                let i = byl[j as usize] as usize;
-                ok[i] = inline && shape[i] && il::small(&bodies[i], cf.inline);
-            }
-        }
+        return Run {
+            edges: edges,
+            order: order,
+            pk: pkp,
+            bodies: bodies,
+            shape: shape,
+            unit: unit,
+            level: level,
+            ok: ok,
+            // SC_LIR_INLINE=0 inlines nothing (a debugging aid).
+            inline: !stdlib::env_is("SC_LIR_INLINE", "0"),
+            cf: cf,
+            free: psync::Mutex::<Vector<Box<Scratch>>>::new(Vector::<Box<Scratch>>::new()),
+        };
     }
-    pk.bodies = bodies;
-}
 
-// Each body `is` lists of the bodies at `base`: the callees `ok` marks inlined (`unit`: as
-// `Inliner::run` takes it), then optimized, with one scratch. Each task writes its own bodies and reads
-// the lower levels', which no task writes.
-fn level_bodies(p: &Package, base: usize, ok: &Vector<bool>, unit: &Vector<u32>, bu: lu::Budgets, is: []mut u32) {
-    let mut il = il::Inliner::new();
-    let mut o = Opt::new();
-    for j in 0..is.len() {
-        let b = unsafe &mut *(base as *mut Body + is[j] as usize);
-        let inlined = il.run(p, base as *const Body, ok, unit, is[j], b);
-        let _ = o.run(p, b, inlined);
+    /// Optimize body `j`, once every body `edges` makes it wait for is done. Jobs of one `Run` run in
+    /// parallel: each writes its own body and `ok` entry, and reads its callees' ones.
+    pub fn job(self: &Self, j: u32) {
+        let r = self;
+        let p = unsafe &*r.pk;
+        let base = r.bodies.as_ptr() as *mut Body;
+        let mut sc = r.take();
+        let b = unsafe &mut *(base + j as usize);
+        let inlined = sc.il.run(p, base, &r.ok, &r.level, &r.unit, j, b);
+        let _ = sc.o.run(p, b, inlined);
         // A loop a round copied is innermost again for the next one.
+        let bu = r.cf.loops;
         let mut round: u32 = 0;
-        while round < LOOP_ROUNDS && (bu.peel != 0 || bu.version != 0 || bu.unswitch != 0) && o.loop_opts(p, b, bu) {
+        while round < LOOP_ROUNDS && (bu.peel != 0 || bu.version != 0 || bu.unswitch != 0) && sc.o.loop_opts(p, b, bu) {
             round += 1;
         }
+        unsafe *(r.ok.as_ptr() as *mut bool + j as usize) = r.inline && r.shape[j as usize] && il::small(b, r.cf.inline);
+        r.give(sc);
     }
+
+    // A scratch from the free list, or a new one. The lock is held for this call only, never while a
+    // body is optimized.
+    fn take(self: &Self) Box<Scratch> {
+        let mut g = self.free.lock();
+        switch g.get_mut().pop() {
+            Some(x) => {
+                return x;
+            },
+            None => {},
+        };
+        return Box::new(Scratch { il: il::Inliner::new(), o: Opt::new() });
+    }
+
+    fn give(self: &Self, sc: Box<Scratch>) {
+        let mut g = self.free.lock();
+        g.get_mut().push(sc);
+    }
+
+    /// Give the bodies back to `pk`, the package `new` took them from.
+    pub fn finish(self: &mut Self, pk: &mut Package) {
+        pk.bodies = replace(&mut self.bodies, Vector::<Body>::new());
+    }
+}
+
+/// `Run::job` for `driver::sched::run_jobs`: `ctx` is the `Run`.
+pub fn job(ctx: *mut void, j: u32) {
+    (unsafe &*(ctx as *const Run)).job(j);
+}
+
+/// `Run::new`, every job in `order` on this thread, then `finish`.
+pub fn optimize(pk: &mut Package, sealed: &Vector<bool>, cf: Config) {
+    let mut r = Run::new(pk, sealed, cf);
+    for k in 0..r.order.len() {
+        r.job(r.order[k]);
+    }
+    r.finish(pk);
 }
 
 // Per body of `bodies`, its level (`optimize`): an explicit-stack depth-first search over the direct calls
@@ -2019,7 +2088,35 @@ fn levels(p: &Package, bodies: &Vector<Body>, shape: &Vector<bool>, level: &mut 
     let mut st = Vector::<u8>::new();
     st.resize_default(n);
     let mut stack = Vector::<u64>::new();
+    // The walk enters the bodies in symbol order (name, then unit), then in index order for the bodies
+    // no symbol defines: where it enters a call cycle decides the cycle's levels, and the bodies' indices
+    // follow the emission's schedule, which depends on the worker count.
+    let mut fns = Vector::<u32>::new();
+    for k in 0..p.syms.len() {
+        if p.syms[k].kind == SK_FUNC && p.syms[k].def != NONE {
+            fns.push(k as u32);
+        }
+    }
+    fns.sort_stable_in_place_by(
+        |x: &u32, y: &u32| {
+            let ny = p.spell(p.syms[(*y) as usize].name);
+            let c = p.spell(p.syms[(*x) as usize].name).cmp(&ny);
+            return if c != 0 {
+                c;
+            } else {
+                (p.syms[(*x) as usize].unit > p.syms[(*y) as usize].unit) as i32 - (p.syms[(*x) as usize].unit < p.syms[(*y) as usize].unit) as i32;
+            };
+        },
+    );
+    let mut roots = Vector::<u32>::with_capacity(fns.len() + n);
+    for k in 0..fns.len() {
+        roots.push(p.syms[fns[k] as usize].def);
+    }
     for r in 0..n {
+        roots.push(r as u32);
+    }
+    for q in 0..roots.len() {
+        let r = roots[q] as usize;
         if st[r] != 0 {
             continue;
         }

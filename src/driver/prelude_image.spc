@@ -197,6 +197,7 @@ fn save_into(q: &loader::Package, e: &iri::Interp, w: &mut Writer) {
     w.bytes(((&q.builtin_decls[0]) as *const NodeId) as *const u8, sizeof([NodeId; loader::BT_COUNT_N]));
     q.method_used.save(w);
     q.always_methods.save(w);
+    q.c_shaped.save(w);
     q.tt.deref().save(w);
     q.pub_map.save(w);
     q.publications.save(w);
@@ -228,6 +229,7 @@ pub fn load(p: &mut loader::Package, e: &mut iri::Interp, img: str) bool {
     r.bytes(((&mut p.builtin_decls[0]) as *mut NodeId) as *mut u8, sizeof([NodeId; loader::BT_COUNT_N]));
     p.method_used.load(&mut r);
     p.always_methods.load(&mut r);
+    p.c_shaped.load(&mut r);
     p.tt.deref_mut().load(&mut r);
     p.pub_map.load(&mut r);
     p.publications.load(&mut r);

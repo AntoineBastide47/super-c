@@ -6,6 +6,7 @@
 import ast::ast as *;
 import emit::mangle as mbe;
 import ir::interp as iri;
+import ir::layout as lay;
 import graph::instances as ig;
 import module::loader as loader;
 
@@ -392,10 +393,25 @@ extend TuEmit {
             // The aggregate is zero-sized: forward typedef only, no definition.
             return true;
         }
+        // The members in layout order (`layout::sort_members`): the C members follow it, so the C
+        // compiler's offsets are the layout's, and the definition header's size check checks the order.
+        let mut order = Vector::<u32>::new();
+        if !self.member_order(it, ms, is_tuple, self.mg.lay.ordered_prefix(it.m, it.decl), packed, &mut order) {
+            return false;
+        }
         let mut pads = Vector::<u64>::new(); // per-member leading pad bytes (dual-walk mismatch only)
         let mut tail_pad: u64 = 0;
         let mut force_align: u64 = 0;
-        if zalign_hi && !self.zst_pad_plan(it, &keep, is_union, align_attr, &mut pads, &mut tail_pad, &mut force_align) {
+        if zalign_hi && !self.zst_pad_plan(
+            it,
+            &keep,
+            &order,
+            is_union,
+            align_attr,
+            &mut pads,
+            &mut tail_pad,
+            &mut force_align,
+        ) {
             // Over-aligned elided field with an unlayoutable sibling: no safe C shape.
             return false;
         }
@@ -413,7 +429,8 @@ extend TuEmit {
         body.push_str(nm);
         body.push_str(" {\n");
         let mut mi: usize = 0; // stored-member ordinal (pad plan indexes stored members)
-        for i in 0..ms.len {
+        for oi in 0..order.len() {
+            let i = order[oi];
             if keep[i as usize] != 1 {
                 continue;
             }
@@ -461,8 +478,52 @@ extend TuEmit {
         return true;
     }
 
+    // The positions of the members of `ms` of aggregate `it` (its fields, or every member when `all`: a
+    // tuple's, a variant payload's) in layout order into `out`: the first `prefix` (`layout::Svc::
+    // ordered_prefix`, `payload_prefix`) in declared order, the rest by their layouts under the
+    // substitution in place (alignment 1 when `packed`, `layout::sort_members`). False when a member to
+    // order has no layout.
+    fn member_order(
+        self: &mut Self,
+        it: &AggItem,
+        ms: NodeList,
+        all: bool,
+        prefix: u32,
+        packed: bool,
+        out: &mut Vector<u32>,
+    ) bool {
+        let da = self.p().module_ast_const(it.m);
+        let mut v = Vector::<lay::MemberAt>::new();
+        for i in 0..ms.len {
+            let fid = unsafe (*da).list(ms)[i as usize];
+            if !all && unsafe (*da).at_const(fid).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            let mut at = lay::MemberAt { pos: i, size: 0, align: 1, off: 0 };
+            if prefix != lay::ORDER_ALL {
+                let lo = self.mg.layout_sub(it.m, unsafe (*da).member_ty(fid));
+                if !lo.ok {
+                    return false;
+                }
+                at.size = lo.size;
+                at.align = if packed {
+                    1;
+                } else {
+                    lo.align;
+                };
+            }
+            v.push(at);
+        }
+        lay::sort_members(&mut v, 0, prefix);
+        for k in 0..v.len() {
+            out.push(v[k].pos);
+        }
+        return true;
+    }
+
     // Dual layout walk for the rare shape where an ELIDED field has alignment > 1: compare the
-    // semantic offsets (all fields) against the natural C offsets of the stored fields alone.
+    // semantic offsets (all fields, in layout order `order`) against the natural C offsets of the stored
+    // fields alone.
     // On divergence, produce leading pads per stored member, a tail pad, and a forced alignment
     // so the flat C struct reproduces the semantic layout exactly. False = a sibling field has
     // no layout, so the shape cannot be validated.
@@ -470,6 +531,7 @@ extend TuEmit {
         self: &mut Self,
         it: &AggItem,
         keep: &Vector<u8>,
+        order: &Vector<u32>,
         is_union: bool,
         align_attr: u64,
         pads: &mut Vector<u64>,
@@ -485,10 +547,8 @@ extend TuEmit {
         let mut ssize: u64 = 0; // union: max member size
         let mut msize: u64 = 0;
         let mut diverged = false;
-        for i in 0..ms.len {
-            if keep[i as usize] == 2 {
-                continue;
-            }
+        for oi in 0..order.len() {
+            let i = order[oi];
             let fid = unsafe (*da).list(ms)[i as usize];
             let fty = unsafe (*da).member_ty(fid);
             let lo = self.mg.layout_sub(it.m, fty);
@@ -652,8 +712,13 @@ extend TuEmit {
                 continue;
             }
             upay += 1;
+            let mut order = Vector::<u32>::new();
+            if !self.member_order(it, pl, true, self.mg.lay.payload_prefix(it.m, it.decl, pl), false, &mut order) {
+                return false;
+            }
             body.push_str("    struct { ");
-            for k in 0..pl.len {
+            for oi in 0..order.len() {
+                let k = order[oi];
                 let pid = unsafe (*da).list(pl)[k as usize];
                 let pty = unsafe (*da).member_ty(pid);
                 if self.mg.is_zst(it.m, pty) {

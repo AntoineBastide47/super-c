@@ -231,9 +231,11 @@ pub const fn reach_fold(h0: u64, p: &loader::Package) u64 {
     return h;
 }
 
-// Per-module fingerprint: sources of the transitive import closure (prelude included), the
-// module's own identity, and its prelude-live bit. Everything package-shaped lives in the header.
-// The closure is a bit set: clearing and reading it in module order costs a word per 64 modules.
+// Per-module fingerprint: sources of the transitive import closure (prelude included), the types of
+// that closure that keep their declared order (`Package::c_shaped`: a signature in a module outside
+// the closure can mark one), the module's own identity, and its prelude-live bit. Everything
+// package-shaped lives in the header. The closure is a bit set: clearing and reading it in module
+// order costs a word per 64 modules.
 fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) {
     let n = p.modules.len();
     let mut srch = Vector::<u64>::new();
@@ -243,6 +245,12 @@ fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) 
         if p.modules[i].prelude {
             pre.push(i as u32);
         }
+    }
+    // Order-free: the set's iteration order is not part of the key.
+    let mut it = p.c_shaped.iter();
+    while let Some(k) = it.next() {
+        let i = (*k >> 32) as usize;
+        srch.set(i, srch[i] ^ fnv_mix(FNV_BASIS, *k));
     }
     let w = (n + 63) / 64;
     let mut inq = Vector::<u64>::new();

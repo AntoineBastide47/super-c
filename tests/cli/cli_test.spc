@@ -3526,6 +3526,30 @@ fn main() i32 {
     assert(p.gen_has("work.c", "__sc_spc"), "the rebuilt program reaches the loop from a launched body");
 }
 
+// A struct an extern signature reaches keeps its declared order, and the signature may sit in a module
+// outside the import closure of the struct's module: adding one in main must rebuild the code of the
+// module main imports, which reads the struct's fields.
+@test
+fn tu_cache_follows_c_reachable_layouts() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "a.spc",
+        "pub struct S { pub a: u8, pub b: u64 }\n@noinline\npub fn get_b(s: &S) u64 {\n    return s.b;\n}\n",
+    );
+    p.mkfile(
+        "main.spc",
+        "import a;\nfn main() i32 {\n    let s = a::S { a: 1, b: 77 };\n    return a::get_b(&s) as i32 - 77;\n}\n",
+    );
+    assert(cli::superc_in(p.dir(), "build main.spc -o bin").ok(), "the native build");
+    assert_eq(p.run_bin(), 0);
+    p.mkfile(
+        "main.spc",
+        "import a;\nextern \"C\" {\n    fn sc_keeps(s: *const a::S);\n}\nfn main() i32 {\n    let s = a::S { a: 1, b: 77 };\n    return a::get_b(&s) as i32 - 77;\n}\n",
+    );
+    assert(cli::superc_in(p.dir(), "build main.spc -o bin").ok(), "the native rebuild");
+    assert_eq(p.run_bin(), 0);
+}
+
 // Build `src` as main.spc and run it under the leak gate. The programs below run a task that never
 // blocks on the only worker, and exit 1 when its loop never reaches a safepoint (it neither yields
 // nor stops on cancellation).
@@ -6527,7 +6551,8 @@ fn data_parallel_borrowed_capture_in_stored_closure() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        M"(import std::parallel::data as parallel;
+        M"(import std::parallel::runtime as rt;
+import std::parallel::data as parallel;
 
 struct Slot {
     pub i: usize,
@@ -6544,6 +6569,7 @@ fn main() i32 {
     parallel::chunks_mut(out.index_range_mut(0..2), 1, fn(slot: []mut Slot) {
         slot[0].v = src[slot[0].i] + src.len() as i32;
     });
+    rt::shutdown();
     return out[0].v + out[1].v;
 }
 )",
@@ -6560,7 +6586,8 @@ fn data_parallel_closure_with_wide_captures() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        M"(import std::parallel::data as parallel;
+        M"(import std::parallel::runtime as rt;
+import std::parallel::data as parallel;
 
 struct P {
     pub a: i64,
@@ -6576,6 +6603,7 @@ fn main() i32 {
     parallel::chunks_mut(out.index_range_mut(0..2), 1, fn(s: []mut i64) {
         s[0] = k.a + k.b + v.get(2) as i64;
     });
+    rt::shutdown();
     return (out[0] + out[1]) as i32;
 }
 )",

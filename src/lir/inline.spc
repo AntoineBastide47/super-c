@@ -120,7 +120,8 @@ extend Inliner {
         };
     }
 
-    /// Inline into `c`, body `ci` of `bodies`, the calls of the bodies `ok` marks, a body with a `unit`
+    /// Inline into `c`, body `ci` of `bodies`, the calls of the bodies of a lower `level` that `ok` marks
+    /// (`ok` is read for those only: a body of another level may be in the works), a body with a `unit`
     /// (per body: its unit when the unit keeps its bodies, else NONE) into a body of that unit only.
     /// Whether any inlined.
     pub fn run(
@@ -128,11 +129,12 @@ extend Inliner {
         pk: &Package,
         bodies: *const Body,
         ok: &Vector<bool>,
+        level: &Vector<u32>,
         unit: &Vector<u32>,
         ci: u32,
         c: &mut Body,
     ) bool {
-        if !self.plan(pk, bodies, ok, unit, ci, c) {
+        if !self.plan(pk, bodies, ok, level, unit, ci, c) {
             return false;
         }
         let out = self.build(bodies, c);
@@ -147,6 +149,7 @@ extend Inliner {
         pk: &Package,
         bodies: *const Body,
         ok: &Vector<bool>,
+        level: &Vector<u32>,
         unit: &Vector<u32>,
         ci: u32,
         c: &Body,
@@ -172,7 +175,7 @@ extend Inliner {
                 } else {
                     NONE;
                 };
-                if callee == NONE || callee == ci || !ok[callee as usize] || unit[callee as usize] != NONE && unit[callee as usize] != unit[ci as usize] {
+                if callee == NONE || level[callee as usize] >= level[ci as usize] || !ok[callee as usize] || unit[callee as usize] != NONE && unit[callee as usize] != unit[ci as usize] {
                     self.cmap[i as usize] = ni;
                     ni += 1;
                     continue;

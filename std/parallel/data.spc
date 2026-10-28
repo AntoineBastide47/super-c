@@ -105,7 +105,7 @@ pub struct ChunkEnv {
 /// borrowed-job contract), which is before the last chunk's `finish` lets the caller release the array.
 @no_const
 pub struct ChunkJob {
-    pub run: runtime::Runnable,
+    pub run: runtime::Runnable, // first, so a `*mut ChunkJob` is a `*mut runtime::Runnable`
     pub env: ChunkEnv,
 }
 
@@ -498,7 +498,13 @@ pub fn chunks_mut_with<T, F: fn([]mut T) + Send + Sync>(items: []mut T, size: us
     }
     let nchunks = (n + step - 1) / step;
     let mut sh = ChunksShared::<T, F> { body: body, items: items.ptr, total: n, size: step };
-    unsafe dispatch(nchunks, opts, chunks_mut_chunk::<T, F>, &mut sh);
+    // A unit is a whole window the caller sized: the automatic grain is one window, not
+    // MIN_UNITS_PER_CHUNK of them.
+    let mut o = opts;
+    if o.grain_size == 0 {
+        o.grain_size = 1;
+    }
+    unsafe dispatch(nchunks, o, chunks_mut_chunk::<T, F>, &mut sh);
 }
 
 // Parallel reduction.

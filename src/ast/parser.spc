@@ -1147,16 +1147,17 @@ extend Parser {
             NodeAs { field: FieldData { name: name, ty: ty, vis: vis } },
         );
         // `@import("select")` on a header type's field names its C member, which a Super-C keyword
-        // cannot spell.
+        // cannot spell. `@ordered` keeps the field among the struct's first ones (`layout::Svc::ordered_prefix`).
         let pin = self.in_extern && fattrs.len() == 1 && fattrs[0].kind == AttrKind::ATTR_IMPORT as u8;
+        let ordered = fattrs.len() == 1 && fattrs[0].kind == AttrKind::ATTR_ORDERED as u8;
         if pin {
             self.ast.has_member_pins = true;
-        } else if fattrs.len() > 0 {
+        } else if fattrs.len() > 0 && !ordered {
             let sp0 = self.ast.at_const(fid).span;
             self.errors.emit_span(
                 sp0,
                 format(
-                    "only '@reflect' applies to a field declaration, and '@import' to a field of an 'extern \"C\"' struct or union",
+                    "only '@reflect' and '@ordered' apply to a field declaration, and '@import' to a field of an 'extern \"C\"' struct or union",
                 ),
             );
         }
@@ -4175,6 +4176,8 @@ extend Parser {
             AttrKind::ATTR_TAIL_RECURSE as i32;
         } else if self.text_is(ns, "thread_local") {
             AttrKind::ATTR_THREAD_LOCAL as i32;
+        } else if self.text_is(ns, "ordered") {
+            AttrKind::ATTR_ORDERED as i32;
         } else {
             -1;
         };
@@ -4697,6 +4700,14 @@ extend Parser {
                     "",
                     "may only be applied to a 'static mut'",
                 );
+            } else if attr.kind == AttrKind::ATTR_ORDERED as u8 {
+                pick(
+                    owner != NODE_NONE && (self.ast.at_const(owner).kind == NodeKind::NODE_STRUCT || self.ast.at_const(
+                        owner,
+                    ).kind == NodeKind::NODE_FIELD),
+                    "",
+                    "may only be applied to a struct or a field",
+                );
             } else if attr.kind == AttrKind::ATTR_LAYOUT as u8 {
                 pick(
                     self.in_extern && owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_TYPE_ALIAS && self.ast.at_const(
@@ -5037,6 +5048,10 @@ fn known_attr_name(kind: u8, out: &mut String) {
         out.push_str("thread_local");
         return;
     }
+    if kind == AttrKind::ATTR_ORDERED as u8 {
+        out.push_str("ordered");
+        return;
+    }
     if kind == AttrKind::ATTR_LAYOUT as u8 {
         out.push_str("layout");
         return;
@@ -5050,7 +5065,7 @@ fn known_attr_name(kind: u8, out: &mut String) {
 }
 
 // The attributes that are not C-facing, as `known_attributes` gives them.
-const ATTR_NAMES: [str<'static>; 24] = [
+const ATTR_NAMES: [str<'static>; 25] = [
     "emit_macro",
     "bench",
     "test",
@@ -5075,6 +5090,7 @@ const ATTR_NAMES: [str<'static>; 24] = [
     "thread_local",
     "layout",
     "when",
+    "ordered",
 ];
 
 // The C-facing attributes (`@inline`) and their kinds. The first eight take no argument,

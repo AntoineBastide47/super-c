@@ -366,7 +366,7 @@ pub fn dup_conformance_index(p: &loader::Package) Map<ConfKey, u64> {
 /// Parallel-frontier capture of the package-global method marks: replayed by the driver in module
 /// order through the real functions.
 pub struct TcMarkLog {
-    pub kinds: Vector<u8>, // 1 = always_methods, 2 = mark_method_used
+    pub kinds: Vector<u8>, // 1 = always_methods, 2 = mark_method_used, 3 = c_reads
     pub a: Vector<u64>, // the marked DefId (module << 32 | node)
     pub used: Set<u64>, // task-local dedupe standing in for method_used_get
 }
@@ -12173,6 +12173,69 @@ extend<'a> TypeChecker<'a> {
         }
     }
 
+    // Argument `aid` of a call of an `extern "C"` function, as an untyped pointer (`*void`) or a C variadic:
+    // C may read what it points to (`tc_c_reads`). Through casts and `unsafe`, the innermost operand's
+    // pointer type says what that is (`(&mut s as *mut S) as *mut void`).
+    fn tc_c_arg(self: &mut Self, aid: NodeId) {
+        let a = self.cur_ast();
+        let mut e = aid;
+        // Each step peels one wrapper of the argument's finite expression.
+        loop {
+            let n = unsafe (*a).at_const(e);
+            if n.kind == NodeKind::NODE_CAST {
+                e = n.as_data.cast.expression;
+            } else if n.kind == NodeKind::NODE_UNARY && n.as_data.unary.op == TokenType::Unsafe {
+                e = n.as_data.unary.operand;
+            } else {
+                break;
+            }
+        }
+        let t = unsafe (*a).type_of(e);
+        if t != TYPE_NONE && (self.type_at(t).kind == TypeKind::TYPE_POINTER || self.type_at(t).kind == TypeKind::TYPE_REFERENCE) {
+            self.tc_c_reads(self.type_at(t).as_data.elem);
+        }
+    }
+
+    // A pointer to `ty` reaches C untyped: C may read the value through it. Record for `Package.c_reads`
+    // the declarations the value is made of: `ty` itself, the elements of an array, what a pointer or
+    // reference in it points to, the arguments of a generic instance (the driver walks their fields). A
+    // type parameter records nothing. Each step takes one node of the finite type tree under `ty`.
+    fn tc_c_reads(self: &mut Self, ty: TypeId) {
+        let mut work = Vector::<TypeId>::new();
+        work.push(ty);
+        while let Some(t) = work.pop() {
+            if t == TYPE_NONE || t == TYPE_ERROR {
+                continue;
+            }
+            let y = *self.type_at(t);
+            let mut d = DefId { module: 0, node: NODE_NONE };
+            if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE {
+                work.push(y.as_data.elem);
+            } else if y.kind == TypeKind::TYPE_ARRAY {
+                work.push(y.as_data.arr.elem);
+            } else if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+                d = DefId { module: y.module, node: y.as_data.decl };
+            } else if y.kind == TypeKind::TYPE_INSTANCE {
+                let it = *unsafe (*self.cur_ast()).instance(y.as_data.inst);
+                d = DefId { module: it.module, node: it.decl };
+                for k in 0..it.n as usize {
+                    work.push(unsafe it.args[k]);
+                }
+            }
+            if d.node == NODE_NONE {
+                continue;
+            }
+            let key = d.module as u64 << 32 | d.node as u64;
+            if self.mark_log != null {
+                let lg = unsafe &mut *self.mark_log;
+                lg.kinds.push(3);
+                lg.a.push(key);
+            } else {
+                unsafe (*self.package).c_reads.push(key);
+            }
+        }
+    }
+
     // Find a method named `name`/`lit` in an extend of (m,decl); marks it used. Searches the type's home
     // module, then the current module + imports.
     fn find_method_impl(self: &mut Self, m: ModuleId, decl: NodeId, name: tok::Span, lit: str) DefId {
@@ -16899,6 +16962,71 @@ extend<'a> TypeChecker<'a> {
             format("the type '{}' is too large for the target: no object may exceed isize::MAX bytes", tn.as_str()),
         );
         return true;
+    }
+
+    // `@ordered` on struct `id` (`agg`, `@packed` when `packed`) and its fields: the struct's tag where its
+    // fields would move, the fields' as a prefix of a struct whose order is not kept already.
+    fn tc_ordered(self: &mut Self, id: NodeId, agg: AggregateData, packed: bool) {
+        let m = self.cur_module();
+        let tagged = self.tc_attr(m, id, AttrKind::ATTR_ORDERED) != null;
+        let kept = if agg.is_union {
+            "a union";
+        } else if agg.is_extern {
+            "a header type";
+        } else if packed {
+            "a '@packed' struct";
+        } else {
+            "";
+        };
+        if tagged && kept.len() != 0 {
+            self.errors.emit_span(
+                self.name_span(agg.name),
+                format("'@ordered' on {}, whose fields keep their declared order already", kept),
+            );
+        }
+        self.tc_ordered_fields(
+            agg.members,
+            if tagged {
+                "an '@ordered' struct";
+            } else {
+                kept;
+            },
+        );
+    }
+
+    // `@ordered` on the fields of `members`: none in a type that keeps the declared order (`kept` names
+    // it), else a prefix of the fields.
+    fn tc_ordered_fields(self: &mut Self, members: NodeList, kept: str) {
+        let m = self.cur_module();
+        let mut gap = NODE_NONE; // the last field before this one that is not `@ordered`
+        for i in 0..members.len {
+            let fid = unsafe (*self.cur_ast()).list(members)[i as usize];
+            if unsafe (*self.cur_ast()).at_const(fid).kind != NodeKind::NODE_FIELD {
+                continue;
+            }
+            let fname = unsafe (*self.cur_ast()).at_const(fid).as_data.field.name;
+            if self.tc_attr(m, fid, AttrKind::ATTR_ORDERED) == null {
+                gap = fname;
+                continue;
+            }
+            let sp = self.name_span(fname);
+            if kept.len() != 0 {
+                self.errors.emit_span(
+                    sp,
+                    format("'@ordered' on a field of {}, whose fields keep their declared order already", kept),
+                );
+            } else if gap != NODE_NONE {
+                let gs = self.name_span(gap);
+                self.errors.emit_span(
+                    sp,
+                    format(
+                        "field '{}' is '@ordered', but field '{}' before it is not: ordered fields are a prefix of the struct",
+                        diag::span_str(self.source, sp.start, sp.end),
+                        diag::span_str(self.source, gs.start, gs.end),
+                    ),
+                );
+            }
+        }
     }
 
     // A field of a `@packed` struct whose type needs a `free` and an alignment above 1: its drop
@@ -25604,11 +25732,23 @@ extend TypeChecker {
                     }
                 } else if !self.compatible(pt, aid) {
                     self.err_mismatch_ann(aid, pt, fmod, unsafe (*fa).slot_type_node(pid));
+                } else if named && self.type_at(pt).kind == TypeKind::TYPE_POINTER && self.type_at(pt).as_data.elem == Ast::builtin(
+                    BuiltinType::BT_VOID,
+                ) && unsafe (*fa).at_const(fdecl).kind == NodeKind::NODE_FUNCTION && unsafe (*fa).at_const(fdecl).as_data.function.is_extern() {
+                    self.tc_c_arg(aid);
                 }
                 self.lt_call.span = tok::Span { start: 0, end: 0 };
                 self.lt_conv = oc;
             }
             self.lt_env.truncate(fm);
+        }
+        // A C variadic argument reaches C as it is.
+        if variadic && !fmt_builtin && named && unsafe (*fa).at_const(fdecl).kind == NodeKind::NODE_FUNCTION && unsafe (*fa).at_const(
+            fdecl,
+        ).as_data.function.is_extern() {
+            for i in expected..args.len {
+                self.tc_c_arg(unsafe (*a).list(args)[i as usize]);
+            }
         }
         // C-vararg string-literal default to *const char.
         if variadic && !fmt_builtin && args.len >= expected {
@@ -32991,6 +33131,12 @@ extend TypeChecker {
                 }
                 if unsafe (*a).at_const(id).kind == NodeKind::NODE_ENUM {
                     self.tc_enum_tags(id);
+                    for i in 0..members.len {
+                        let vid = unsafe (*self.cur_ast()).list(members)[i as usize];
+                        self.tc_ordered_fields(unsafe (*self.cur_ast()).at_const(vid).as_data.variant.payload, "");
+                    }
+                } else {
+                    self.tc_ordered(id, agg, packed);
                 }
                 let mut seen = Vector::<TypeId>::new();
                 let no_params = Defs8 {};

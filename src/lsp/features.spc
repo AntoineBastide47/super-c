@@ -349,7 +349,7 @@ struct AttrDoc {
     pub doc: str<'static>,
 }
 
-const ATTR_DOCS: [AttrDoc; 36] = [
+const ATTR_DOCS: [AttrDoc; 37] = [
     AttrDoc {
         name: "emit_macro",
         sig: "@emit_macro",
@@ -439,6 +439,11 @@ const ATTR_DOCS: [AttrDoc; 36] = [
     AttrDoc { name: "cold", sig: "@cold", doc: "Tells the compiler that calls to the function are rare." },
     AttrDoc { name: "noreturn", sig: "@noreturn", doc: "The function never returns." },
     AttrDoc { name: "packed", sig: "@packed", doc: "Removes the padding between the fields of the struct." },
+    AttrDoc {
+        name: "ordered",
+        sig: "@ordered",
+        doc: "On a struct, keeps its fields in their declared order in memory; on a field, keeps it and the fields before it, each `@ordered` too, in the first positions.",
+    },
     AttrDoc { name: "used", sig: "@used", doc: "Prevents dead-code elimination of the item." },
     AttrDoc { name: "unused", sig: "@unused", doc: "Suppresses unused warnings for the item." },
     AttrDoc {
