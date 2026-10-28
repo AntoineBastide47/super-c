@@ -221,7 +221,12 @@ pub const O_FMA: u8 = 71;
 /// A processor or runtime operation no other opcode expresses (`SYS_*`): what inline assembly did, in a
 /// form every backend lowers for its target.
 pub const O_SYS: u8 = 72;
-pub const OP_COUNT: u8 = 73;
+/// The high half of the unsigned product of two integers of up to 64 bits: `(a * b) >> bits`, the product
+/// exact (division by a constant, `lir::opt`).
+pub const O_MULHU: u8 = 73;
+/// A vector whose every lane is scalar `a` (of the lane type).
+pub const O_SPLAT: u8 = 74;
+pub const OP_COUNT: u8 = 75;
 
 /// One opcode: its text name and its operand form.
 pub struct OpInfo {
@@ -229,7 +234,7 @@ pub struct OpInfo {
     pub form: u8,
 }
 
-pub const OPS: [OpInfo; 73] = [
+pub const OPS: [OpInfo; 75] = [
     OpInfo { name: "", form: F_NONE },
     OpInfo { name: "iconst", form: F_IMM },
     OpInfo { name: "fconst", form: F_IMM },
@@ -303,6 +308,8 @@ pub const OPS: [OpInfo; 73] = [
     OpInfo { name: "asm", form: F_ASM },
     OpInfo { name: "fma", form: F_TRI },
     OpInfo { name: "sys", form: F_SYS },
+    OpInfo { name: "mulhu", form: F_BIN },
+    OpInfo { name: "splat", form: F_UN },
 ];
 
 /// An `O_ASM` record at pool index `r` of `b`: its output, input and clobber counts.

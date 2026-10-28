@@ -235,6 +235,19 @@ fn loop_kept_values_keep_their_homes() {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// A scalar in every lane (`splat`), for each lane type, of 8, 16 and 32 bytes: the vector's bytes and
+// not one past them.
+@test
+fn splats_of_every_lane_type_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = "lir ptr 8\nsym @b16 fn global\nsym @h8 fn global\nsym @w4 fn global\nsym @d2 fn global\nsym @f4 fn global\nsym @g2 fn global\nsym @b8 fn global\nsym @f2 fn global\nsym @g4 fn global\nfn @b16\n  sig (ptr, i8) -> void\nb0(v0: ptr, v1: i8):\n  v2 = splat.v16i8 v1\n  store v2, v0 align 0\n  ret\nfn @h8\n  sig (ptr, i16) -> void\nb0(v0: ptr, v1: i16):\n  v2 = splat.v8i16 v1\n  store v2, v0 align 0\n  ret\nfn @w4\n  sig (ptr, i32) -> void\nb0(v0: ptr, v1: i32):\n  v2 = splat.v4i32 v1\n  store v2, v0 align 0\n  ret\nfn @d2\n  sig (ptr, i64) -> void\nb0(v0: ptr, v1: i64):\n  v2 = splat.v2i64 v1\n  store v2, v0 align 0\n  ret\nfn @f4\n  sig (ptr, f32) -> void\nb0(v0: ptr, v1: f32):\n  v2 = splat.v4f32 v1\n  store v2, v0 align 0\n  ret\nfn @g2\n  sig (ptr, f64) -> void\nb0(v0: ptr, v1: f64):\n  v2 = splat.v2f64 v1\n  store v2, v0 align 0\n  ret\nfn @b8\n  sig (ptr, i8) -> void\nb0(v0: ptr, v1: i8):\n  v2 = splat.v8i8 v1\n  store v2, v0 align 0\n  ret\nfn @f2\n  sig (ptr, f32) -> void\nb0(v0: ptr, v1: f32):\n  v2 = splat.v2f32 v1\n  store v2, v0 align 0\n  ret\nfn @g4\n  sig (ptr, f64) -> void\nb0(v0: ptr, v1: f64):\n  v2 = splat.v4f64 v1\n  store v2, v0 align 0\n  ret\n";
+    let drv = "#include <stdint.h>\nvoid b16(void *, int8_t);\nvoid h8(void *, int16_t);\nvoid w4(void *, int32_t);\nvoid d2(void *, int64_t);\nvoid f4(void *, float);\nvoid g2(void *, double);\nvoid b8(void *, int8_t);\nvoid f2(void *, float);\nvoid g4(void *, double);\nint main(void) {\n  int r = 0;\n  { int8_t a[17] = {0}; b16(a, -7); for (int i = 0; i < 16; i++) if (a[i] != -7) r = 1; }\n  { int8_t a[17] = {0}; b16(a, -7); if (a[16] != 0) r = 20; }\n  { int16_t a[9] = {0}; h8(a, -1234); for (int i = 0; i < 8; i++) if (a[i] != -1234) r = 2; }\n  { int16_t a[9] = {0}; h8(a, -1234); if (a[8] != 0) r = 21; }\n  { int32_t a[5] = {0}; w4(a, -123456789); for (int i = 0; i < 4; i++) if (a[i] != -123456789) r = 3; }\n  { int32_t a[5] = {0}; w4(a, -123456789); if (a[4] != 0) r = 22; }\n  { int64_t a[3] = {0}; d2(a, INT64_C(-1234567890123)); for (int i = 0; i < 2; i++) if (a[i] != INT64_C(-1234567890123)) r = 4; }\n  { int64_t a[3] = {0}; d2(a, INT64_C(-1234567890123)); if (a[2] != 0) r = 23; }\n  { float a[5] = {0}; f4(a, 1.5f); for (int i = 0; i < 4; i++) if (a[i] != 1.5f) r = 5; }\n  { float a[5] = {0}; f4(a, 1.5f); if (a[4] != 0) r = 24; }\n  { double a[3] = {0}; g2(a, -2.25); for (int i = 0; i < 2; i++) if (a[i] != -2.25) r = 6; }\n  { double a[3] = {0}; g2(a, -2.25); if (a[2] != 0) r = 25; }\n  { int8_t a[9] = {0}; b8(a, -7); for (int i = 0; i < 8; i++) if (a[i] != -7) r = 7; }\n  { int8_t a[9] = {0}; b8(a, -7); if (a[8] != 0) r = 26; }\n  { float a[3] = {0}; f2(a, 1.5f); for (int i = 0; i < 2; i++) if (a[i] != 1.5f) r = 8; }\n  { float a[3] = {0}; f2(a, 1.5f); if (a[2] != 0) r = 27; }\n  { double a[5] = {0}; g4(a, -2.25); for (int i = 0; i < 4; i++) if (a[i] != -2.25) r = 9; }\n  { double a[5] = {0}; g4(a, -2.25); if (a[4] != 0) r = 28; }\n  return r;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // A frame of exactly 4 KiB (the slot and two spills): the stack pointer moves by all of it.
 @test
 fn a_page_sized_frame_runs() {

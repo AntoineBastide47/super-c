@@ -1365,6 +1365,9 @@ extend Gen {
         if op == O_FCMP {
             return self.fcmp(i, t);
         }
+        if op == O_MULHU {
+            return self.mulhu(i, t);
+        }
         if op == O_FMA {
             // wasm has no scalar fused multiply-add: the C library's, which rounds once.
             self.get(t.a);
@@ -1556,6 +1559,77 @@ extend Gen {
         }
         self.put(i);
         return true;
+    }
+
+    // The high half of an unsigned product: up to 32 bits, the zero-extended operands' 64-bit product shifted
+    // down; 64 bits, from the four products of the operands' 32-bit halves (wasm has no wider multiply):
+    // high = ah * bh + (ah * bl >> 32) + (cross >> 32), cross = (al * bl >> 32) + (ah * bl & m) + al * bh.
+    fn mulhu(self: &mut Self, i: u32, t: Inst) bool {
+        if t.ty != T_I64 {
+            let bits = type_bits(t.ty, 4);
+            self.get_ext(t.a, false);
+            self.c.op(w::I64_EXTEND_I32_U);
+            self.get_ext(t.b, false);
+            self.c.op(w::I64_EXTEND_I32_U);
+            self.c.op(w::I64_MUL);
+            self.c.i64_const(bits);
+            self.c.op(w::I64_SHR_U);
+            self.c.op(w::I32_WRAP_I64);
+            self.put(i);
+            return true;
+        }
+        let al = self.tmp(T_I64);
+        let ah = self.tmp(T_I64);
+        let bl = self.tmp(T_I64);
+        let bh = self.tmp(T_I64);
+        let hl = self.tmp(T_I64);
+        self.halves(t.a, al, ah);
+        self.halves(t.b, bl, bh);
+        // hl = ah * bl
+        self.c.local(w::LOCAL_GET, ah);
+        self.c.local(w::LOCAL_GET, bl);
+        self.c.op(w::I64_MUL);
+        self.c.local(w::LOCAL_SET, hl);
+        // ah * bh + (hl >> 32)
+        self.c.local(w::LOCAL_GET, ah);
+        self.c.local(w::LOCAL_GET, bh);
+        self.c.op(w::I64_MUL);
+        self.c.local(w::LOCAL_GET, hl);
+        self.c.i64_const(32);
+        self.c.op(w::I64_SHR_U);
+        self.c.op(w::I64_ADD);
+        // cross = (al * bl >> 32) + (hl & m) + al * bh, then its high half
+        self.c.local(w::LOCAL_GET, al);
+        self.c.local(w::LOCAL_GET, bl);
+        self.c.op(w::I64_MUL);
+        self.c.i64_const(32);
+        self.c.op(w::I64_SHR_U);
+        self.c.local(w::LOCAL_GET, hl);
+        self.c.i64_const(0xFFFFFFFF);
+        self.c.op(w::I64_AND);
+        self.c.op(w::I64_ADD);
+        self.c.local(w::LOCAL_GET, al);
+        self.c.local(w::LOCAL_GET, bh);
+        self.c.op(w::I64_MUL);
+        self.c.op(w::I64_ADD);
+        self.c.i64_const(32);
+        self.c.op(w::I64_SHR_U);
+        self.c.op(w::I64_ADD);
+        self.put(i);
+        return true;
+    }
+
+    // The 32-bit halves of i64 value `v` into locals `lo` and `hi`.
+    fn halves(self: &mut Self, v: Value, lo: u32, hi: u32) {
+        self.get(v);
+        self.c.local(w::LOCAL_TEE, lo);
+        self.c.i64_const(32);
+        self.c.op(w::I64_SHR_U);
+        self.c.local(w::LOCAL_SET, hi);
+        self.c.local(w::LOCAL_GET, lo);
+        self.c.i64_const(0xFFFFFFFF);
+        self.c.op(w::I64_AND);
+        self.c.local(w::LOCAL_SET, lo);
     }
 
     fn bit_count(self: &mut Self, i: u32, t: Inst) bool {
@@ -3706,6 +3780,23 @@ extend Gen {
         let op = t.op;
         if op == O_VOP {
             return self.vop(i, t);
+        }
+        if op == O_SPLAT {
+            // The scalar in a local, stored to each lane.
+            let lt = lane_type(t.ty);
+            let d = self.vdef(i);
+            let l = if is_float(lt) {
+                self.get(t.a);
+                self.tmp(pick8(lt == T_F64, w::F64, w::F32));
+            } else {
+                self.get64(t.a);
+                self.tmp(w::I64);
+            };
+            self.c.local(w::LOCAL_SET, l);
+            for k in 0..lanes(t.ty) {
+                self.st_lane(l, d, k, lt, false);
+            }
+            return true;
         }
         if op >= O_ADD && op <= O_NOT || op >= O_FADD && op <= O_FNEG {
             self.vec_arith(i, t);

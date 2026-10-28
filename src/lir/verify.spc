@@ -317,6 +317,24 @@ extend Verifier {
         if op == O_NEG || op == O_NOT {
             return self.need(name, b, i, int_like(t.ty) && ta == t.ty, "an integer operand of the result's type");
         }
+        if op == O_SPLAT {
+            return self.need(
+                name,
+                b,
+                i,
+                is_vec(t.ty) && ta == lane_type(t.ty),
+                "a vector of the operand's type in each lane",
+            );
+        }
+        if op == O_MULHU {
+            return self.need(
+                name,
+                b,
+                i,
+                is_int(t.ty) && t.ty != T_I128 && ta == t.ty && tb == t.ty,
+                "two integer operands of the result's type, up to 64 bits",
+            );
+        }
         if op == O_CLZ || op == O_CTZ || op == O_POPCNT {
             return self.need(
                 name,

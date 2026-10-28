@@ -2427,6 +2427,10 @@ extend Gen {
             self.result_in(i, x::RAX);
             return true;
         }
+        if op == O_SPLAT {
+            self.splat(i, t);
+            return true;
+        }
         if op >= O_ADD && op <= O_NOT {
             return self.int_op(i, t);
         }
@@ -2443,6 +2447,31 @@ extend Gen {
         if op == O_FCMP {
             assert(!is_vec(self.vt(t.a)), "x64gen: a vector comparison the verifier rejects");
             self.fcmp(i, t);
+            return true;
+        }
+        if op == O_MULHU {
+            let bits = type_bits(t.ty, self.ptr);
+            if bits == 64 {
+                // MUL: rdx:rax = rax * the operand.
+                self.vacate(x::RAX);
+                self.vacate(x::RDX);
+                let ra = self.reg(t.a);
+                let rb = self.reg(t.b);
+                self.c.mov_rr(8, x::RAX, ra);
+                self.c.unary(x::MUL, 8, rb);
+                self.result_in(i, x::RDX);
+                return true;
+            }
+            // Fewer bits: the operands zero-extended (a 32-bit move clears the upper half), their 64-bit
+            // product, shifted down.
+            let ra = self.ext(t.a, false, bits);
+            let rb = self.ext(t.b, false, bits);
+            let s = self.tmp(false);
+            self.c.mov_rr(4, s, rb);
+            let rd = self.def(i);
+            self.c.mov_rr(4, rd, ra);
+            self.c.imul_rr(8, rd, s);
+            self.c.shift_ri(x::SHR, 8, rd, bits);
             return true;
         }
         if op == O_FMA {
@@ -5660,6 +5689,58 @@ extend Gen {
     // free one (its home, a slot, comes when it spills).
     fn vec_def(self: &mut Self, i: u32) u8 {
         return self.def(i);
+    }
+
+    // Scalar `t.a` into every lane of vector `i` (SSE2): a float's register copied, then `unpcklpd` or
+    // `shufps`; an integer moved in by `movd`/`movq`, then `punpcklqdq`, or for narrower lanes `punpcklbw`
+    // (bytes) and `pshuflw` (halves) to fill the low dword, which `pshufd` copies. A vector wider than an
+    // xmm register stores each lane.
+    fn splat(self: &mut Self, i: u32, t: Inst) {
+        let lt = lane_type(t.ty);
+        let eb = type_bytes(lt, 8);
+        if !Gen::in_vreg(t.ty) {
+            let r = self.reg(t.a);
+            let d = self.mdef(i);
+            for k in 0..lanes(t.ty) {
+                self.st_lane(r, d, k, lt, false);
+            }
+            return;
+        }
+        let rs = self.reg(t.a);
+        let rd = self.vec_def(i);
+        let x = rd - V0;
+        if is_float(lt) {
+            self.c.vmov(x, rs - V0);
+            if eb == 8 {
+                self.c.sse_rr(0x66, 0x0F14, x, x);
+            } else {
+                self.c.sse_rr(0, 0x0FC6, x, x);
+                self.c.byte(0);
+            }
+            return;
+        }
+        self.c.movd_to_x(
+            if eb == 8 {
+                8u32;
+            } else {
+                4u32;
+            },
+            x,
+            rs,
+        );
+        if eb == 8 {
+            self.c.sse_rr(0x66, 0x0F6C, x, x);
+            return;
+        }
+        if eb == 1 {
+            self.c.sse_rr(0x66, 0x0F60, x, x);
+        }
+        if eb <= 2 {
+            self.c.sse_rr(0xF2, 0x0F70, x, x);
+            self.c.byte(0);
+        }
+        self.c.sse_rr(0x66, 0x0F70, x, x);
+        self.c.byte(0);
     }
 
     // Vector `v` in an xmm register: its own, else loaded into `scratch`.

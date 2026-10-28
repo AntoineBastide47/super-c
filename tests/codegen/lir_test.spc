@@ -266,9 +266,10 @@ b1: cold
 b2(v49: i64):
   switch v49 [0 -> b3, -1 -> b4(v49)] else b5
 b3:
-  jmp b4(v49)
-b4(v50: i64):
-  ret v50
+  v50 = mulhu.i64 v49, v49
+  jmp b4(v50)
+b4(v51: i64):
+  ret v51
 b5:
   unreachable
 fn @floats
@@ -302,6 +303,7 @@ b0(v0: f32, v1: f64):
   v27 = fcmp.uno v16, v4
   v28 = select.f64 v27, v18, v15
   v29 = fma.f64 v28, v15, v18
+  v30 = splat.v2f64 v29
   ret v29
 fn @memory
   sig (ptr, i64) -> void

@@ -2206,6 +2206,10 @@ extend Gen {
             self.emit(a::mov_reg(true, rd, 0));
             return true;
         }
+        if op == O_SPLAT {
+            self.splat(i, t);
+            return true;
+        }
         if op >= O_ADD && op <= O_NOT {
             return self.int_op(i, t);
         }
@@ -2236,6 +2240,23 @@ extend Gen {
             let rc = self.reg(t.c);
             let rd = self.def(i);
             self.emit(a::fmadd(t.ty == T_F64, false, rd - V0, ra - V0, rb - V0, rc - V0));
+            return true;
+        }
+        if op == O_MULHU {
+            // 64 bits: UMULH; fewer: the zero-extended operands' 64-bit product (UMULL), shifted down.
+            let bits = type_bits(t.ty, self.ptr);
+            if bits == 64 {
+                let ra = self.reg(t.a);
+                let rb = self.reg(t.b);
+                let rd = self.def(i);
+                self.emit(a::mulh(false, rd, ra, rb));
+                return true;
+            }
+            let ra = self.ext(t.a, false, bits);
+            let rb = self.ext(t.b, false, bits);
+            let rd = self.def(i);
+            self.emit(a::mull(false, rd, ra, rb));
+            self.emit(a::lsr_imm(true, rd, rd, bits));
             return true;
         }
         if op >= O_FADD && op <= O_FNEG {
@@ -5188,6 +5209,30 @@ extend Gen {
             0u32;
         };
         self.emit(wq | (rd - V0) as u32 | (rx - V0) as u32 << 5 | rm);
+    }
+
+    // `dup` of scalar `t.a` into every lane of vector `i`: from a general register, or lane 0 of a float's v
+    // register; a vector wider than a v register stores each lane.
+    fn splat(self: &mut Self, i: u32, t: Inst) {
+        let lt = lane_type(t.ty);
+        let eb = type_bytes(lt, 8);
+        if !Gen::in_vreg(t.ty) {
+            let r = self.reg(t.a);
+            let d = self.mdef(i);
+            for k in 0..lanes(t.ty) {
+                self.st_lane(r, d, k, lt, false);
+            }
+            return;
+        }
+        let rs = self.reg(t.a);
+        let rd = self.vec_def(i);
+        // imm5: the lane size's bit, index 0.
+        let w = a::on(type_bytes(t.ty, 8) == 16, 1u32 << 30) | eb << 16 | (rd - V0) as u32;
+        if is_float(lt) {
+            self.emit(0x0E000400 | w | (rs - V0) as u32 << 5);
+        } else {
+            self.emit(0x0E000C00 | w | rs as u32 << 5);
+        }
     }
 
     // A v register for vector result `i`, which holds it: its home register (`plan_homes`), else a free

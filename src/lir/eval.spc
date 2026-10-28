@@ -445,6 +445,21 @@ extend Eval {
                 dst,
             );
         }
+        if op == O_SPLAT {
+            let lb = type_bits(lane_type(t.ty), ptr);
+            let x = self.val(&f, b, t.a);
+            for k in 0..lanes(t.ty) {
+                set_lane(&mut self.vals, dst, k, lb, x);
+            }
+            return true;
+        }
+        if op == O_MULHU {
+            let bits = type_bits(t.ty, ptr);
+            let x = trunc_bits(self.val(&f, b, t.a), bits) as u128;
+            let y = trunc_bits(self.val(&f, b, t.b), bits) as u128;
+            self.vals[dst as usize] = (x * y >> bits as usize) as u64;
+            return true;
+        }
         if op == O_CLZ || op == O_CTZ || op == O_POPCNT {
             let bits = type_bits(t.ty, ptr);
             let x = trunc_bits(self.val(&f, b, t.a), bits);
