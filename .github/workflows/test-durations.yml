@@ -4,8 +4,8 @@
 #
 # Each lane runs exactly as the Release workflow tests it: the same runner, compiler build, shard count,
 # platform object cache (restored only) and flags, with the shards split by the lane's current times (the
-# `test-durations` artifact, .github/actions/test-durations; tests/durations.tsv until a lane has
-# them). Each shard records only the tests it ran (`--test-record-durations=<file>`) and passes them on
+# `test-durations` artifact as the run's `plan` job finds it, .github/actions/test-durations-plan;
+# tests/durations.tsv until a lane has them). Each shard records only the tests it ran (`--test-record-durations=<file>`) and passes them on
 # as an artifact of this run; the last job merges each lane's shards into its file, uploads them as the
 # one `test-durations` artifact that the Release and Debug shards download, deletes every other
 # durations artifact (this run's shard parts, the earlier `test-durations`), and prints each lane's
@@ -22,6 +22,16 @@ concurrency:
   group: test-durations-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  # The times every attempt's shards split by, also after `collect` replaced them.
+  plan:
+    if: github.actor == github.repository_owner
+    name: durations plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/test-durations-plan
+
   compile:
     if: github.actor == github.repository_owner
     name: compile (${{ matrix.target }})
@@ -98,7 +108,7 @@ jobs:
 
   # The Release workflow's test shards (its `test` and `wasm-test` matrices), recording.
   measure:
-    needs: [compile, wasm-compile]
+    needs: [plan, compile, wasm-compile]
     if: github.actor == github.repository_owner
     name: measure (${{ matrix.lane }}, ${{ matrix.test_shard }})
     strategy:

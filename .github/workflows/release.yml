@@ -57,6 +57,9 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "Releasing $sha ($(git log -1 --format=%s "$sha"))"
 
+      # The times every attempt's test shards split by, also after the `durations` job replaced them.
+      - uses: ./.github/actions/test-durations-plan
+
   # The pipeline of macOS, Linux, Linux arm64, Windows and wasm: one job builds the compiler, the test
   # shards (three on Windows, the slowest runner, two elsewhere), the x86-64 levels, the correctness gate
   # and the transpile work count (not on Linux arm64) run in parallel on that binary, and the release
@@ -787,7 +790,7 @@ jobs:
           sha: ${{ needs.resolve.outputs.sha }}
 
   # The test times every shard above recorded replace the repository's `test-durations` artifact, which
-  # the next run's shards split by (.github/actions/test-durations), even when a shard failed.
+  # the next run's shards split by (.github/actions/test-durations-plan), even when a shard failed.
   durations:
     needs: [resolve, test, wasm-test]
     if: always() && github.actor == github.repository_owner

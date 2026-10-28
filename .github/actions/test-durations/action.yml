@@ -1,13 +1,15 @@
 name: Test durations
 description: >
-  The repository's single `test-durations` artifact (the per-lane test times the `Test durations` workflow
-  measures, one `<lane>.tsv` each) into tests/durations, where a test shard's `--test-durations` reads its
-  lane's file. Without the artifact (never measured, or expired) nothing is downloaded and the shards
-  balance by tests/durations.tsv. The job needs `actions: read`.
+  This run's `durations-plan` artifact (the repository's `test-durations` artifact as the run found it,
+  .github/actions/test-durations-plan: the per-lane test times, one `<lane>.tsv` each) into
+  tests/durations, where a test shard's `--test-durations` reads its lane's file. Without the artifact
+  (no times measured yet, or expired) nothing is downloaded and the shards balance by
+  tests/durations.tsv. The job needs `actions: read`.
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/latest-artifact
       with:
-        name: test-durations
+        name: durations-plan
         path: tests/durations
+        run: ${{ github.run_id }}

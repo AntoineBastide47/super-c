@@ -1,8 +1,8 @@
 name: Latest artifact
 description: >
-  The newest unexpired artifact of the repository named `name` (the one copy a save job keeps), downloaded
-  into `path`. Without one (never made, or expired) nothing is downloaded and `found` is empty. The job
-  needs `actions: read`.
+  The newest unexpired artifact of the repository named `name` (the one copy a save job keeps), or of the
+  run `run` when given (any attempt), downloaded into `path`. Without one (never made, or expired) nothing
+  is downloaded and `found` is empty. The job needs `actions: read`.
 inputs:
   name:
     description: "the artifact name"
@@ -10,6 +10,10 @@ inputs:
   path:
     description: "the directory to download it into"
     required: true
+  run:
+    description: "the id of the run whose artifact to take, empty for the whole repository"
+    required: false
+    default: ""
 outputs:
   found:
     description: "the id of the run that made the artifact, empty without one"
@@ -23,9 +27,10 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
         NAME: ${{ inputs.name }}
+        RUN: ${{ inputs.run }}
       run: |
         set -eu
-        run=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$NAME&per_page=100" \
+        run=$(gh api "repos/$GITHUB_REPOSITORY/actions/${RUN:+runs/$RUN/}artifacts?name=$NAME&per_page=100" \
           --jq '[.artifacts[] | select(.expired | not)][0].workflow_run.id // empty')
         echo "run=$run" >> "$GITHUB_OUTPUT"
         if [ -z "$run" ]; then echo "no $NAME artifact"; else echo "$NAME of run $run"; fi

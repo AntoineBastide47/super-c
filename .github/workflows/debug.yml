@@ -14,11 +14,20 @@ on:
   workflow_dispatch
 permissions:
   contents: read
-  actions: read # the test-durations artifact (.github/actions/test-durations)
+  actions: read # the test-durations artifact (.github/actions/test-durations-plan)
 concurrency:
   group: debug-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  # The times every attempt's test shards split by.
+  plan:
+    name: durations plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/test-durations-plan
+
   # --- macOS, Linux and Windows -----------------------------------------------------------------------
   compile:
     name: compile (${{ matrix.target }})
@@ -67,7 +76,7 @@ jobs:
           retention-days: 1
 
   test:
-    needs: compile
+    needs: [compile, plan]
     name: test (${{ matrix.target }}, ${{ matrix.test_shard }})
     strategy:
       fail-fast: false
@@ -394,7 +403,7 @@ jobs:
           SC_TEST_TARGET=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --test-shard=${{ matrix.test_shard }}
 
   wasm-test:
-    needs: wasm-compile
+    needs: [wasm-compile, plan]
     name: wasm test (${{ matrix.test_shard }})
     strategy:
       fail-fast: false

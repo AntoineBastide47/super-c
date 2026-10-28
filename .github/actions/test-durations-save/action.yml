@@ -2,10 +2,11 @@ name: Save test durations
 description: >
   The last job of a run whose test shards recorded their times (`--test-record-durations=<file>`, uploaded
   as `durations-shard-<lane>-<k>` artifacts holding `durations-<lane>-<k>.tsv`): merges each lane's shards
-  into `<lane>.tsv` (a lane no shard measured keeps its current file), uploads them as the repository's
-  one `test-durations` artifact that .github/actions/test-durations downloads, deletes every other
-  durations artifact (this run's shard parts, the earlier `test-durations`), and summarizes each lane's
-  measured and planned shard times. The job checks out the repository first and needs `actions: write`.
+  into `<lane>.tsv` (the tests of a shard that recorded nothing keep their current times), uploads them
+  as the repository's one `test-durations` artifact that the next runs' plans take
+  (.github/actions/test-durations-plan), deletes every other durations artifact (this run's shard parts,
+  the earlier `test-durations`), and summarizes each lane's measured and planned shard times. The job
+  checks out the repository first and needs `actions: write`.
 inputs:
   shards:
     description: "each lane's shard count, as `<lane>=<count>` words"
@@ -13,8 +14,11 @@ inputs:
 runs:
   using: composite
   steps:
-    # The current times, for a lane this run did not measure.
-    - uses: ./.github/actions/test-durations
+    # The current times, for the tests this run did not measure.
+    - uses: ./.github/actions/latest-artifact
+      with:
+        name: test-durations
+        path: tests/durations
 
     - uses: actions/download-artifact@v8
       with:

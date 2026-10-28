@@ -1,0 +1,25 @@
+name: Test durations plan
+description: >
+  Fixes the times a run's test shards split by: the repository's `test-durations` artifact as this step
+  finds it, uploaded as this run's `durations-plan` artifact, which the shards of every attempt download
+  (.github/actions/test-durations). A rerun shard so runs the tests it ran in the first attempt, also
+  after this run's save job or another run replaced `test-durations`. One job runs it, before the
+  shards; without a `test-durations` artifact it uploads nothing. The job needs `actions: read`.
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/latest-artifact
+      id: latest
+      with:
+        name: test-durations
+        path: durations-plan
+
+    # A run can be rerun for 30 days.
+    - if: steps.latest.outputs.found != ''
+      uses: actions/upload-artifact@v7
+      with:
+        name: durations-plan
+        path: durations-plan/*.tsv
+        if-no-files-found: error
+        retention-days: 30
+        overwrite: true
