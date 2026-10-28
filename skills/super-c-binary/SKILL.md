@@ -24,8 +24,8 @@ compiler takes part. A module the native backend refuses (a header's `static` fu
 has no template for) and a target without a native backend are build errors; `--emit-c` writes the
 program's readable C11 instead (Generated output below). A build at an `opt-level` above 0 (the
 `release`, `bench` and `test` profiles) runs the LIR optimizer first: inlining, value numbering, load and
-store forwarding, loop invariant motion, constant and branch folding (`SC_LIR_OPT` overrides the
-choice). The objects carry DWARF line tables when the profile's `debug` key is set (`debug`, `bench`),
+store forwarding, loop transforms, constant and branch folding (`SC_LIR_OPT` overrides the
+choice; Optimization levels and code-generation flags below). The objects carry DWARF line tables when the profile's `debug` key is set (`debug`, `bench`),
 and unwind data always. The extern blocks read the target's C headers (`native_header_facts`): the C
 library's development package on Linux, the macOS SDK, mingw-w64's tree on Windows (found beside a
 mingw `gcc` or `clang` in PATH), a WASI sysroot (`WASI_SDK_PATH`, else `WASI_SYSROOT`) for wasm, or the
@@ -387,15 +387,18 @@ run = [
     "samply record --rate 1000 build/bench-bin --in-process",
 ]
 
-[profile.fast]               # a profile: optimization level, debug information, link inputs, strip
+[profile.fast]               # a profile: optimization level, code-generation flags, debug information,
+                             # link inputs, strip
 opt-level = 2                # 0 | 1 | 2 | 3 | "s" | "z": the LIR optimizer runs above 0
+vectorize = false            # a code-generation flag over the level's default (each -f<flag> has its key)
+fp-contract = "fast"         # "fast" | "off" (-ffp-contract=)
 debug = true                 # DWARF line tables in the objects
 ldflags = ["-lz"]            # link inputs in the C driver's syntax (-l, -L), after the manifest-level ones
 link-args = ["-z,stack-size=16777216"] # -Wl,<entry> to the own linker, after ldflags (here ELF's stack);
                              # an option it does not take fails the link
 strip = true                 # the own linker leaves out the symbol table and the debug sections
-lockdep = true               # compile in the runtime's lock-order checks (the build constant LOCKDEP)
 overflow-checks = false      # integer overflow wraps instead of trapping (default: checks at opt-level 0/1)
+lockdep = true               # the runtime's lock-order checks (the build constant LOCKDEP; SC_LOCK_ORDER reports)
 target-features = ["+simd128"] # replaces the build-level list for this profile
 
 [profile.release]            # a section naming a built-in profile starts from its values and
@@ -431,6 +434,32 @@ and unsigned) traps under `debug` and `test` and wraps under `release` and `benc
 `operations.md`): `Profile::arith_wraps`, the `overflow-checks` key, else `opt-level` 2, 3, `"s"` or
 `"z"`. A build with no profile (`super-c build foo.spc`) checks. `lockdep = true` compiles in the
 runtime's lock-order checks (the build constant `LOCKDEP`); `SC_LOCK_ORDER` switches their reports on.
+
+### Optimization levels and code-generation flags
+
+`-O0` .. `-O3`, `-Os` and `-Oz` replace the profile's `opt-level`; `-f<flag>` and `-fno-<flag>` turn a
+flag on or off over the level's defaults and the profile's keys, the last one winning; a profile key
+`<flag> = true|false` does the same (`cg_effective`, `cg_flag` and `cg_key` in
+`src/build_system/manifest.spc`). The level and the flags are part of the emit stamp and of each
+native object's key.
+
+| Flag | On at | Effect |
+|------|-------|--------|
+| `omit-frame-pointer` | 1, 2, 3, s, z | Functions address their frames through the stack pointer (arm64: leaf functions only, as Apple's ABI allows) |
+| `inline` | 1, 2, 3, s, z | The LIR inliner runs (`-fno-inline`: no call inlines) |
+| `inline-functions` | 2, 3, s | Calls inline past the ones that shrink the code (budgets per level: `inline_budget` in `src/driver/emit.spc`) |
+| `unroll-loops` | 2, 3 | Loops whose trip count is known unroll fully (copies of up to 200 instructions at 3, 64 at 2) |
+| `unswitch-loops` | 3 | A loop copies itself for each side of a branch on a value it does not change (up to 50 instructions) |
+| `version-loops-for-bounds` | 3 | A loop copies itself without its bounds checks, entered when one test before it proves them all |
+| `vectorize` | 2, 3, s | Counted loops over slices run 16-byte vectors, 4 interleaved (1 at s); arm64 and x86-64 only |
+| `strict-aliasing` | 2, 3, s, z | A typed access touches no object of another scalar type (language skill, `operations.md`) |
+| `fast-math` | | `associative-math`, `reciprocal-math`, `finite-math-only`, `-fno-signed-zeros` and `fp-contract=fast` (`-ffp-contract=off` clears it), each its own flag too |
+| `stack-protector`, `-strong`, `-all` | | A canary between a function's stack memory and its saved registers, checked before it returns: functions with a slot of 8 bytes or more, with any slot, or all; one at a time (`-fno-stack-protector` clears them) |
+| `function-sections`, `data-sections` | | A section per function or variable, and the link drops what nothing reaches from the entry, the exports and the kept symbols (the build adds `-Wl,-dead_strip` on Mach-O, `-Wl,--gc-sections` elsewhere) |
+| `plt` | 0 to z | `-fno-plt`, ELF: a call of an extern declaration's function loads its address from its GOT slot; the x86-64 link turns one whose target the output defines into a direct call |
+
+At 1, 2 and 3 a loop whose header test has at most 8 instructions also rotates (the test copied to its
+end); `loop_budgets` in `src/driver/emit.spc` holds the budgets. `-march=C` is `--target-cpu=C`.
 
 ### Build cache
 
@@ -554,7 +583,7 @@ the iOS simulator: `core2`, which every C compiler for them assumes; Android: it
 name sets: `x86-64` the baseline, `x86-64-v2` adds `sse3` to `lahf-sahf`, `x86-64-v3` adds `avx`
 to `movbe`, `x86-64-v4` adds `avx512f`, `avx512bw`, `avx512cd`, `avx512dq` and `avx512vl`. A
 feature list item may be a level name (x86_64 only; a build.toml list skips it on another
-instruction set), and `--target-cpu=L` or the build.toml key `target-cpu = "L"` puts a level before
+instruction set), and `--target-cpu=L` (`-march=L`) or the build.toml key `target-cpu = "L"` puts a level before
 every feature list (the flag replaces the key, and the last flag wins; another name is an error, and
 so is the flag on another instruction set, which the key skips). The C tree of an x86_64 build always
 names its level, never the C compiler's default (Ubuntu 26.04's GCC defaults to `x86-64-v3`): its C
@@ -591,25 +620,23 @@ build.toml list may name features of several instruction sets: a build skips the
 on the command line another instruction set's feature is an error ("no target feature
 'neon' for wasm32; .."). The set is part of the emit stamp, of the per-unit cache key and of the
 native record's key (a changed set emits and compiles every module again), puts each enabled feature's
-C flag in the C tree's `__cflags`, and selects the `@simd_impl` entries the vector planner may use; a
+C flag in the C tree's `__cflags`, and selects the instructions the native generators may use and the
+`@simd_impl` entries the vector planner may use; a
 build with no feature loads no backend file. A function with `@target_feature` is callable only from a build, or a function, that
 holds its features.
 
 ```sh
 super-c build --target=wasm --target-feature=+simd128
 super-c build --target=wasm --target-feature=+relaxed-simd   # simd128 too
-super-c build --target-feature=+i8mm,+bf16                   # on macOS: -mcpu=apple-m1+i8mm+bf16
-super-c build --target-cpu=x86-64-v3                         # on Linux x86_64: -march=x86-64-v3
-super-c build --target-feature=x86-64-v2,+avx2               # -march=x86-64-v2 -mavx -mavx2
+super-c build --target-feature=+i8mm,+bf16
+super-c build --target-cpu=x86-64-v3
+super-c build --target-feature=x86-64-v2,+avx2               # x86-64-v2, avx and avx2
 ```
 
 On AVX-512 the vector planner prefers 256-bit entries: `--simd-width=512` or the build.toml key
 `simd-width = 512` lets it use 512-bit ones (the width is part of the emit stamp). A function's
 `@target_feature` adds its features to the build's set for that function and the functions with
-vector code it calls: its C definition carries `__attribute__((target("...")))` of the features
-beyond the build's (aarch64: clang's `+ext` form, GCC's `arch=armv8.N-a+ext` form; with SME features
-`SC_TGT_A64_SME` adds `+sve2` for GCC 15, which compiles SME only with it, and drops them for GCC 13,
-which has none), the planner
+vector code it calls: its code may use them, the planner
 serves its vector operations from the entries that set holds, and, when the set holds entries the
 build's does not, a call of a function with vector code that states no features runs a copy of it
 compiled with the same set (`<symbol>__fs<hex>`,
@@ -633,8 +660,10 @@ the build's set included: a program can choose code at run time, never a result.
 | Flag | Effect |
 |------|--------|
 | `--profile=NAME` | Select build profile (also the value of `PROFILE`). A bare `build <file.spc>` without it applies no profile while `PROFILE` still reads `debug`: pass `--profile=debug` for its debug information |
+| `-O0` .. `-O3`, `-Os`, `-Oz` | The optimization level, over the profile's `opt-level` (Optimization levels above) |
+| `-f<flag>`, `-fno-<flag>` | A code-generation flag, over the level's defaults and the profile's keys (Optimization levels above) |
 | `-h`, `--help` | Print the usage on stdout and exit 0 |
-| `--jobs=N` | Worker count for the parallel stages, and the jobserver slots that nested `super-c` processes share (default: build.toml `jobs`, else one per CPU) |
+| `--jobs=N` | Worker count for the parallel stages and the native compile, and the jobserver slots that nested `super-c` processes share (default: build.toml `jobs`, else one per CPU) |
 | `--out-dir=DIR` | Override output directory (a bare `build file.spc` emits under `DIR/<profile>/raw`) |
 | `-o NAME` | Output binary name (`build`/`release`/`bindgen` only, not with `--emit-c`) |
 | `--bin=NAME` | Build/run only that `[bin.NAME]` target; with `-o PATH`, link it at PATH. An error without build.toml |
@@ -651,7 +680,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `--no-lint` | Disable lint pass |
 | `--const-eval-steps=N` | Cap compile-time evaluation steps (~2M default) |
 | `--const-eval-memory=SIZE` | Cap compile-time evaluation memory (~96 MiB default) |
-| `--lib` | Build as library instead of binary (an error without build.toml). The own archiver writes a static library, on every target |
+| `--lib` | Build as library instead of binary (an error without build.toml). The own archiver writes a static library for every target (`link::ar`) |
 
 ## Environment Variables
 
@@ -767,6 +796,11 @@ build/
     __sc_t/           # one definition header per type (app__Point.h: typedef, definition, layout check)
     __std/            # demanded prelude modules only
 ```
+
+`--emit-c` writes the readable C tree in its place: `super_rt.h` (libc includes, arithmetic helpers,
+runtime prototypes), `__sc_fwd.h` (the runtime and extern-block includes shared by every unit), one
+`.h`/`.c` per module, one definition header per type in `__sc_t/`, `<module>__inst.c`, and
+`__units`, `__cflags`, `__ldflags`.
 
 A manifest build (`super-c build` with `build.toml`) works in one directory per target and
 profile: `<out-dir>/<profile>` for the main binary, `<out-dir>/<profile>-bin-NAME` and

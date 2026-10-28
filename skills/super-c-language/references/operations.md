@@ -32,7 +32,7 @@ branch under `PROFILE` is.
 
 ## Profiles
 
-`debug`, `test`, and `race` check overflow; `release` and `bench` wrap. A
+`debug` and `test` check overflow; `release` and `bench` wrap. A
 custom profile checks at `opt-level` 0 or 1 (or no `opt-level`) and wraps at 2, 3, `"s"`, and
 `"z"`; `overflow-checks = true/false` overrides that (super-c-binary, "Built-in profiles").
 
@@ -112,8 +112,9 @@ Floats: `to_bits`/`from_bits`, `classify` (`FpClass`), `next_up`/`next_down`, `m
 | format | IEEE 754 binary32 (`f32`) and binary64 (`f64`) |
 | rounding | round to nearest, ties to even |
 | literal | rounds once from its decimal or hex text to its type (the context's type, `f32` without one); never through the other width |
-| contraction | none: `a * b + c` rounds twice; every C compile passes `-ffp-contract=off`; only an explicit `fma` fuses |
-| libm calls | run as written: every C compile passes `-fno-builtin-<f>` for the `f64` and `f32` names of the transcendental functions (`sin` .. `hypot`, `LIBM_AS_WRITTEN` in `src/build_system/build.spc`), so the C compiler never folds, merges (`sincos`) or rewrites (`pow(2, x)` to `exp2(x)`) them: every profile gives the same bits, and constant evaluation gives them where the compiler and the program use one libm; the exact functions (`sqrt`, `fabs`, `floor`, `fma`, ..) stay builtins; an `f32` argument of an `f64` parameter is widened in the C call (`(double)(x)`), so the type-generic `<tgmath.h>` names every unit sees never select the `float` function |
+| contraction | none: `a * b + c` rounds twice; only an explicit `fma` fuses, unless the build allows it (`-ffp-contract=fast`, `-ffast-math`) |
+| float rewrites | none: the optimizer keeps every float operation as written, unless the build allows a rewrite (`-fassociative-math`, `-freciprocal-math`, `-ffinite-math-only`, `-fno-signed-zeros`, all of them under `-ffast-math`; super-c-binary, "Optimization levels and code-generation flags"), which may change the result's bits |
+| libm calls | run as written: no build folds, merges (`sincos`) or rewrites (`pow(2, x)` to `exp2(x)`) a call of a transcendental function, so every profile gives the same bits, and constant evaluation gives them where the compiler and the program use one libm. `--emit-c` writes `-fno-builtin-<f>` for the `f64` and `f32` names of the transcendental functions (`sin` .. `hypot`, `LIBM_AS_WRITTEN` in `src/build_system/build.spc`) and `-ffp-contract=off` into `__cflags`, so a C compiler keeps them too |
 | `%` | the C `fmod` remainder: the sign of the dividend (`-7.5 % 2.0` is -1.5) |
 | NaN payload of an arithmetic result | not specified |
 | `==`, `<` operators | IEEE: NaN is unordered, `-0.0 == 0.0` |
@@ -133,6 +134,7 @@ Floats: `to_bits`/`from_bits`, `classify` (`FpClass`), `next_up`/`next_down`, `m
 | zero-sized types | `p + n` is `p`; a zero-byte access touches nothing |
 | dereference | the pointer is non-null, aligned, and addresses `sizeof(T)` bytes of one live object with the access permission; otherwise undefined |
 | a view of another type | only a pointer casts to a pointer of another pointee type; a reference casts to a pointer to its own referent first (`(&x as *const T) as *const U`). A pointer cast from an aggregate to another element type (bytes across a nested array or a vector's lanes) is valid inside the object; the compile-time evaluator follows only a cast to the element type of an array or vector, and has no value for any other view, so it never reports one as a fault |
+| strict aliasing | under `-fstrict-aliasing` (on at opt-level 2, 3, `"s"` and `"z"`, as in GCC; C's rule): an access of a scalar object through a pointer of another scalar type is undefined, a byte type (`u8`, `i8`, `bool`, `char`) excepted; scalar types of one width and kind are one type (`i32` and `u32`; `i64`, `u64`, `isize` and `usize`), a pointer is its own type, and a vector accesses its lanes' type. A union member's access may view another member (the row in Conversions). Read another type's bits through a union (`std::float::f64_bits`), a copy (`memcpy` into a local), or bytes; `-fno-strict-aliasing` makes every view defined |
 
 ## Atomics
 

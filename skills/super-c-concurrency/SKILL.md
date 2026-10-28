@@ -644,7 +644,9 @@ in `~/Library/Logs/DiagnosticReports` names the function and line.
 - In a hunt's `fail`, print `rt::task_snapshot` (state, phase, wait kind, wait object).
   `rt::try_shutdown` reports nothing there: its own cancellation releases the parked tasks.
 - After a counter change in runtime or sync code, run race_hunt, cancel_hunt and
-  queue_hunt twice each; expect every run to exit 0.
+  queue_hunt twice each under a profile with `lockdep = true` and `SC_LOCK_ORDER=fatal`; expect
+  zero failures. No build has ThreadSanitizer: a hunt finds a race by its checks and the leak
+  tracker.
 - `Condvar::unlink` walks the wait queue, so thousands of timed waiters on one condvar cost
   O(n^2). A timed-wait benchmark spreads its waiters over many condvars.
 

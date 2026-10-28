@@ -30,7 +30,8 @@ extern "C" {
 - Extern names match the C symbol exactly, never module-mangled. The same applies to an
   opaque `type`: it renders as its bare C name, so it must name a type some included
   header actually defines (`FILE` works headerless because `stdio.h` is auto-included;
-  an invented name fails in the C compile).
+  the native build does not check the name, and an invented one fails when the `--emit-c` tree
+  compiles).
 - A header the runtime does not include reaches only the C files that use one of its items: the
   emitter spells each item by an alias, `__sc_x_<C name>`, which the header's generated file
   defines. Its macros (`near` and `far` of `<windows.h>`) do not rename the identifiers of other
@@ -112,9 +113,9 @@ link through `@link` (Link flags below). A `.c` file beside a backing header is 
 `build/simd_baseline/<arch>/libsimd_baseline.a`, and `kernels.spc` links it with
 `@link("-Lbuild/simd_baseline/<arch> -lsimd_baseline")`. A C file compiled apart from the engine and
 linked with the generated code needs `-funsigned-char` (below). The own linker links such a static
-library on every native target, with the installed C compiler's runtime archives after it (libgcc.a and
-libgcc_eh.a, or compiler-rt's builtins: `__cpu_model`, `_Unwind_Backtrace`), as the C driver does. Without
-a C compiler, a library that needs them names them in `@link`.
+library on every native target. It adds no C compiler runtime archive: a library that needs one
+(libgcc.a, libgcc_eh.a or compiler-rt's builtins: `__cpu_model`, `_Unwind_Backtrace`) names it in
+`@link`.
 
 `ffi/sc_cpu.spc` is the example of per-OS bindings behind one interface, with no C file: the CPU
 feature detector selects its query with `@platform` and `@arch` (`sysctlbyname` on Apple, `getauxval`
@@ -160,7 +161,7 @@ extern "C" "dirent.h" {
 
 Opaque types lower to `TYPE_OPAQUE` and render as their bare C name (not `void`), so the
 declaring block must include the header that defines the name: an opaque type used
-without its header fails in the C compile. An opaque type has no layout: it is valid only as the
+without its header fails when the `--emit-c` tree compiles. An opaque type has no layout: it is valid only as the
 direct target of a pointer or a reference, an `extend` target or a type alias's definition. A
 value of it (a parameter, a result, a local, a field, an element, a generic argument such as
 `zeroed::<T>()`) is "'T' is an opaque C type with no layout: a value of it needs one": give it
@@ -192,7 +193,7 @@ register type ('@value') states its layout: it takes no '@layout'"). The native 
 a value as the scalar the header's typedef names (an integer or pointer, `float`, `double`), and a
 struct or union of scalars as the C compiler does, from the header's members when their layout is the
 declared one; a module that passes one of any other C type by value (a bitfield, a `packed` member)
-goes through C, except on Windows x64, which passes every aggregate by its size.
+fails the build with the reason, except on Windows x64, which passes every aggregate by its size.
 
 ### Register types: `@value(size, align)`
 
@@ -207,11 +208,12 @@ extern "C" "wasm_simd128.h" {
 `align`, both constant expressions of type `usize` ("'@value' needs a nonzero size that is a
 multiple of the alignment"; on any other declaration "'@value' may only be applied to an
 opaque type ('type T;') in an 'extern \"C\"' block"). The type is `Copy` and `sizeof`/`alignof`
-read the layout; a `_Static_assert` beside the block's header include checks it against C. It may be a local, a parameter or a result, never storage: a struct field, an
+read the layout; the build checks it against the header (`check_type`: the size the header's, the
+alignment at least the header's). It may be a local, a parameter or a result, never storage: a struct field, an
 array or slice element, a variant payload, a static or const, a pointer or reference target, a
 closure capture, or a generic argument, written or inferred, is "`v128_t` is a register type;
 store it through `Simd<T, N>`". It moves to and from a vector through memory
-(`wasm_v128_load`, `wasm_v128_store`), which the C compiler keeps in registers.
+(`wasm_v128_load`, `wasm_v128_store`).
 
 ## Header Types
 
@@ -242,19 +244,22 @@ extern "C" "stdlib.h" {
 
 A `struct` or `union` of an `extern "C"` block is a header type: its C header defines it, and the
 declaration lists EVERY member in the header's order. Super-C emits no definition; it computes the
-layout from the declaration by the C rules, and the C compile checks that layout against the
-header. An extern `enum` is a header type too: the header defines the type and its constants, which
-the emitted C names as the header does (`RED`), and its layout check (`sizeof == 4`) stays. The
+layout from the declaration by the C rules, and the build checks it against the header's
+(`check_agg` in `src/driver/emit.spc`: the size, the alignment, and each member's offset and type;
+"field 'stat.st_size' must sit at byte N in C, but sys/stat.h puts it at byte M: declare every
+member of the header's type, in its order"). An extern `enum` is a header type too: the header
+defines the type and its constants, which the emitted C names as the header does (`RED`), and the
+build checks each enumerator's value against the header's. The
 block must name the header ("a struct of an 'extern \"C\"' block is its C header's type: the
 block needs that header"): Super-C cannot see which headers define a type, and a type of the
 standard headers the runtime includes is declared under its header too (`extern "C" "time.h" {
 struct tm { .. } }`). Read each member from the target's real headers (`clang -Xclang
--fdump-record-layouts` prints them): a guessed layout fails the C compile on that target.
+-fdump-record-layouts` prints them): a guessed layout fails the build on that target.
 
 - **Spelling.** `struct X`, `union X` and `enum X` are the C tag. `@import("name")` pins another
   spelling: a typedef name (`pthread_attr_t`, `div_t`, a `typedef enum { .. } mode;`), or MSVC's
   `struct _stat`. A typedef'd type declared without its pin spells a tag C does not define, and the
-  C compile stops at its completeness check (below).
+  build stops ("'tm' must be a complete C type, but time.h does not define it").
 - **Fields.** Every member of the header's type, in its order, padding members included (glibc's
   `__pad0`: bind it as a private field pinned with `@import("__pad0") pad0: i32`). A field type
   is a C scalar, a raw pointer, a `fn` pointer, a header struct, union or enum, an opaque type with
@@ -346,8 +351,9 @@ extern "C" "fcntl.h" {
 
 A constant of an `extern "C"` block with a value is a Super-C constant: it folds at compile time
 (an array length, a `static_assert`, a `const fn`), and its C symbol is its own, never the header's
-name. The header's checks (above) hold the check of the header's macro or enumerator against it:
-`_Static_assert((O_CREAT) == 512ULL, "super-c: constant 'O_CREAT' must be 512 in C")`.
+name. The build checks the header's macro or enumerator against it (`check_const`: "constant
+'O_CREAT' must be 512 in C, but fcntl.h gives N"); a value the preprocessor does not evaluate (a
+cast to a pointer) is not checked.
 `@import("NAME")` checks another C name. The type is an integer or `bool` ("a constant of an
 'extern \"C\"' block with a value is an integer or a 'bool': the C compile checks it"), and the
 block needs its header ("a constant with a value of an 'extern \"C\"' block is checked against its
@@ -364,6 +370,12 @@ header declares (`extern const int limit;`) reads that object, and its type must
 of 4 bytes"). A constant that is neither, and a call of a function the header defines `static` (no
 object exports it), fail the build (a constant: "module 'm' does not compile: a function `f` reads a
 C header's constant: `__sc_x_NAME`").
+
+A call of an extern declaration's function goes through the procedure linkage table on ELF (the
+function may be in a shared library); under `-fno-plt` it loads the address from the function's GOT
+slot, which the loader fills at start (x86-64 `call *f@GOTPCREL(%rip)`, arm64 `adrp`/`ldr`/`blr`),
+and the own x86-64 linker turns a call of a function the output defines into a direct call. Mach-O,
+COFF and wasm ignore the flag.
 
 ## C Integer Widths
 
@@ -617,15 +629,15 @@ const A: i64 = unsafe llabs(-7);                      // evaluates the model
 `llabs` is not `safe`: `llabs(i64::MIN)` is undefined behavior in C.
 
 A C intrinsic with an immediate operand (`_mm_shuffle_epi32(a, imm)`, `vextq_s8(a, b, n)`) is not
-`safe` either: the C compiler rejects a non-constant or out-of-range operand, which Super-C cannot
-check at the binding. The bindings in `ffi/immintrin.spc` and `ffi/arm_neon.spc` leave such
+`safe` either: the operand must be a constant in range, which Super-C cannot check at the
+binding. The bindings in `ffi/immintrin.spc` and `ffi/arm_neon.spc` leave such
 functions unsafe; a safe wrapper takes the operand as a const parameter and checks its range with
 `static_assert` (`std::simd::x86::clmul::<IMM>`, `std::simd::aarch64::xar::<N>`).
 
 A native build expands the intrinsics of `ffi/arm_neon.spc`, `ffi/immintrin.spc` and
 `ffi/wasm_simd128.spc` in place of their calls, no C compile involved (super-c-compiler-internals,
 "Native backend"). The immediate operand must then be a constant after constant folding; a call
-whose immediate is not sends its module through C. A binding added to those files needs its
+whose immediate is not fails the build. A binding added to those files needs its
 template: regenerate the tables with `scripts/intrin/`.
 
 - `safe`: a call needs no `unsafe`. The declaration is rejected when a safe call

@@ -185,10 +185,9 @@ It is in the compiler source, so gen-1 carries it. Symbolize against the same bi
 
 ### wasm32
 
-A single C flag that makes a wasm failure disappear (`-fwrapv`, `-fno-strict-aliasing`)
-usually changes the heap layout, not the defect: do not accept it as the fix. Bisect at the
-object level: compile every TU with both toolchains, link mixed sets, and binary-search for
-the TU that changes the result.
+A flag that makes a wasm failure disappear (`-fno-strict-aliasing`, `-fno-vectorize`, `-O0`)
+names the pass to bisect, not the fix. Bisect at the object level: build the modules with both
+settings, link mixed sets, and binary-search for the module that changes the result.
 
 ## Single Compilation Path
 

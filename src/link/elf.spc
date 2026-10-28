@@ -33,6 +33,7 @@ pub struct Opts {
     pub a64: bool,
     pub strip: bool,
     pub soname: String,
+    pub gc: bool, // drop the sections nothing reaches (`--gc-sections`, `collect`)
 }
 
 const SHT_PROGBITS: u32 = 1;
@@ -47,6 +48,7 @@ const SHT_INIT_ARRAY: u32 = 14;
 const SHT_FINI_ARRAY: u32 = 15;
 const SHT_PREINIT_ARRAY: u32 = 16;
 const SHT_GROUP: u32 = 17;
+const SHT_NOTE: u32 = 7;
 const SHT_X86_64_UNWIND: u32 = 0x70000001;
 const SHT_GNU_VERDEF: u32 = 0x6FFFFFFD;
 const SHT_GNU_VERNEED: u32 = 0x6FFFFFFE;
@@ -56,6 +58,8 @@ const SHF_WRITE: u64 = 1;
 const SHF_ALLOC: u64 = 2;
 const SHF_EXECINSTR: u64 = 4;
 const SHF_TLS: u64 = 0x400;
+const SHF_LINK_ORDER: u64 = 0x80;
+const SHF_GNU_RETAIN: u64 = 0x200000;
 
 const SHN_UNDEF: u32 = 0;
 const SHN_ABS: u32 = 0xFFF1;
@@ -196,7 +200,9 @@ struct IFile {
 }
 
 // An input section: name (`sn` id), type, flags, alignment, size, its bytes in the blob, the index of the
-// relocation section that applies to it (NONE: none), and where it lands.
+// relocation section that applies to it (NONE: none), its linked section (`sh_link`, in its file), and
+// where it lands. Garbage collection leaves a section nothing reaches not `live`, and gives a `.eh_frame`
+// its records `L.eh[eh .. eh + neh]` (`eh` NONE: copied whole), `size` then their kept bytes.
 struct ISec {
     pub file: u32,
     pub name: u32,
@@ -208,6 +214,20 @@ struct ISec {
     pub rela: u32,
     pub out: u32,
     pub at: u64,
+    pub link: u32,
+    pub live: bool,
+    pub eh: u32,
+    pub neh: u32,
+}
+
+// A record of an input `.eh_frame`: bytes `old .. old + len` (its length field included), at `new` in the
+// section's kept bytes, NONE when dropped (a frame entry of a function the link drops, or a common entry
+// no kept one names).
+struct EhRec {
+    pub old: u32,
+    pub len: u32,
+    pub new: u32,
+    pub cie: bool,
 }
 
 // An input symbol.
@@ -283,6 +303,7 @@ struct DRel {
 
 extend IFile as Copy {}
 extend ISec as Copy {}
+extend EhRec as Copy {}
 extend ISym as Copy {}
 extend GSym as Copy {}
 extend OSec as Copy {}
@@ -307,6 +328,7 @@ struct L {
     pub drels: Vector<DRel>,
     pub dyns: Vector<u32>, // `.dynsym` after the null entry: `gs` indices
     pub skip: Vector<u64>, // relaxed sequences: (input section << 32 | offset) of each relocation they consume
+    pub eh: Vector<EhRec>, // the `.eh_frame` records garbage collection parsed (`ISec.eh`)
     pub nfde: u32,
     pub tls_start: u64,
     pub tls_size: u64,
@@ -365,6 +387,7 @@ pub fn link(o: &Opts, err: &mut String) bool {
         drels: Vector::<DRel>::new(),
         dyns: Vector::<u32>::new(),
         skip: Vector::<u64>::new(),
+        eh: Vector::<EhRec>::new(),
         nfde: 0,
         tls_start: 0,
         tls_size: 0,
@@ -417,6 +440,9 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
         return false;
     }
     let b = blob.as_slice();
+    if o.gc {
+        collect(l, b, main);
+    }
     mark_used(l, b);
     if !load_libraries(l, &sos) || !finish_symbols(l) || !l.shared && !check_glibc(l, lsm) {
         return false;
@@ -524,6 +550,10 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
                 rela: NONE,
                 out: NONE,
                 at: 0,
+                link: lu::r32(b, h + 40),
+                live: true,
+                eh: NONE,
+                neh: 0,
             },
         );
         if ty == SHT_SYMTAB {
@@ -1039,12 +1069,267 @@ const fn alloc(s: ISec) bool {
     return (s.flags & SHF_ALLOC) != 0;
 }
 
-// Whether input section `s` is kept at all: loaded, or debug information.
-const fn kept(l: &L, s: ISec) bool {
+// Whether input section `s` is kept at all: loaded (and reached, under garbage collection), or debug
+// information.
+fn kept(l: &L, s: ISec) bool {
     if s.ty == SHT_RELA || s.ty == SHT_SYMTAB || s.ty == SHT_STRTAB || s.ty == SHT_GROUP || s.ty == 0 {
         return false;
     }
-    return alloc(s) || l.sn.spell(s.name).starts_with(".debug_");
+    return alloc(s) && s.live || l.sn.spell(s.name).starts_with(".debug_");
+}
+
+// ---- garbage collection ---------------------------------------------------------------------------------
+
+// Keep only the loaded sections a root reaches through relocations (`--gc-sections`, as lld does): the
+// entry's `main` or a shared library's exported symbols, the initializer and finalizer lists, the notes
+// and the sections marked to stay (`SHF_GNU_RETAIN`). A section linked to another (`SHF_LINK_ORDER`)
+// stays with it. `.eh_frame` is no root: a frame entry stays when its function does, and keeps what it
+// names (its language data), its common entry with it (`eh_records`). Each round marks a new section or
+// ends the loop.
+fn collect(l: &mut L, b: []u8, main: u32) {
+    let mut work = Vector::<u32>::new();
+    let mut ehs = Vector::<u32>::new();
+    for s in 0..l.secs.len() {
+        let sc = l.secs[s];
+        if !alloc(sc) {
+            continue;
+        }
+        let name = l.sn.spell(sc.name);
+        if name == ".eh_frame" {
+            ehs.push(s as u32);
+            l.secs.index_mut(s).live = false;
+            continue;
+        }
+        let root = sc.ty == SHT_INIT_ARRAY || sc.ty == SHT_FINI_ARRAY || sc.ty == SHT_PREINIT_ARRAY || sc.ty == SHT_NOTE || (sc.flags & SHF_GNU_RETAIN) != 0 || name.starts_with(
+            ".ctors",
+        ) || name.starts_with(".dtors") || name == ".init" || name == ".fini";
+        l.secs.index_mut(s).live = root;
+        if root {
+            work.push(s as u32);
+        }
+    }
+    if main != NONE {
+        let gy = l.gs[main as usize];
+        if gy.kind == G_DEF {
+            reach_sym(l, gy.sym, &mut work);
+        }
+    }
+    if l.shared {
+        for g in 0..l.gs.len() {
+            let gy = l.gs[g];
+            if gy.kind == G_DEF && (l.syms[gy.sym as usize].other & 3) == STV_DEFAULT {
+                reach_sym(l, gy.sym, &mut work);
+            }
+        }
+    }
+    loop {
+        while let Some(s) = work.pop() {
+            reach_relocs(l, b, s, &mut work, 0, 0xFFFFFFFFFFFFFFFFu64);
+        }
+        // Sections linked to a kept one, then the frame entries of the kept functions.
+        for s in 0..l.secs.len() {
+            let sc = l.secs[s];
+            if alloc(sc) && !sc.live && (sc.flags & SHF_LINK_ORDER) != 0 && sc.link != 0 {
+                let f = l.files[sc.file as usize];
+                if l.secs[(f.sec0 + sc.link) as usize].live {
+                    l.secs.index_mut(s).live = true;
+                    work.push(s as u32);
+                }
+            }
+        }
+        for i in 0..ehs.len() {
+            eh_reach(l, b, ehs[i], &mut work);
+        }
+        if work.len() == 0 {
+            break;
+        }
+    }
+    for i in 0..ehs.len() {
+        eh_records(l, b, ehs[i]);
+    }
+}
+
+const NONE32: u32 = 0xFFFFFFFF;
+
+// Mark live what the relocations of section `s` at offsets `lo .. hi` refer to.
+fn reach_relocs(l: &mut L, b: []u8, s: u32, work: &mut Vector<u32>, lo: u64, hi: u64) {
+    let sc = l.secs[s as usize];
+    if sc.rela == NONE {
+        return;
+    }
+    let rs = l.secs[sc.rela as usize];
+    let f = l.files[sc.file as usize];
+    let n = (rs.size / 24) as usize;
+    for i in 0..n {
+        let r = rel_at(b, rs, i);
+        if r.off >= lo && r.off < hi {
+            reach_sym(l, f.sym0 + r.sym, work);
+        }
+    }
+}
+
+// Mark live the section that defines symbol `k` (a global: its definition).
+fn reach_sym(l: &mut L, k: u32, work: &mut Vector<u32>) {
+    let mut d = k;
+    let g = gof(l, k);
+    if g != NONE {
+        if l.gs[g as usize].kind != G_DEF {
+            return;
+        }
+        d = l.gs[g as usize].sym;
+    }
+    let y = l.syms[d as usize];
+    if y.shndx == SHN_UNDEF || y.shndx >= 0xFF00 {
+        return;
+    }
+    let s = l.files[y.file as usize].sec0 + y.shndx;
+    let sc = l.secs[s as usize];
+    if alloc(sc) && !sc.live && l.sn.spell(sc.name) != ".eh_frame" {
+        l.secs.index_mut(s as usize).live = true;
+        work.push(s);
+    }
+}
+
+// The section the relocation at offset `off` of section `s` refers to (NONE32: none, or no relocation
+// there).
+fn reloc_section(l: &L, b: []u8, s: u32, off: u64) u32 {
+    let sc = l.secs[s as usize];
+    if sc.rela == NONE {
+        return NONE32;
+    }
+    let rs = l.secs[sc.rela as usize];
+    let f = l.files[sc.file as usize];
+    let n = (rs.size / 24) as usize;
+    for i in 0..n {
+        let r = rel_at(b, rs, i);
+        if r.off != off {
+            continue;
+        }
+        let mut d = f.sym0 + r.sym;
+        let g = gof(l, d);
+        if g != NONE {
+            if l.gs[g as usize].kind != G_DEF {
+                return NONE32;
+            }
+            d = l.gs[g as usize].sym;
+        }
+        let y = l.syms[d as usize];
+        if y.shndx == SHN_UNDEF || y.shndx >= 0xFF00 {
+            return NONE32;
+        }
+        return l.files[y.file as usize].sec0 + y.shndx;
+    }
+    return NONE32;
+}
+
+// Each frame entry of `.eh_frame` section `e` whose function is live keeps what its relocations name and
+// its common entry's (the personality routine). Each record is read once per round.
+fn eh_reach(l: &mut L, b: []u8, e: u32, work: &mut Vector<u32>) {
+    let sc = l.secs[e as usize];
+    let mut p: usize = 0;
+    let end = sc.size as usize;
+    while p + 8 <= end {
+        let len = lu::r32(b, sc.off + p) as usize;
+        if len == 0 || len == 0xFFFFFFFF {
+            break;
+        }
+        let id = lu::r32(b, sc.off + p + 4) as usize;
+        if id != 0 && id <= p + 4 {
+            let fs = reloc_section(l, b, e, (p + 8) as u64);
+            if fs != NONE32 && l.secs[fs as usize].live {
+                reach_relocs(l, b, e, work, (p + 12) as u64, (p + 4 + len) as u64);
+                let cie = p + 4 - id;
+                reach_relocs(l, b, e, work, cie as u64, cie as u64 + 4 + lu::r32(b, sc.off + cie) as u64);
+            }
+        }
+        p += 4 + len;
+    }
+}
+
+// The records of `.eh_frame` section `e` into `L.eh`: the frame entries of live functions, the common
+// entries they name and a terminator stay, packed from the section's start; the section's size becomes
+// theirs, and it stays out when no entry is left. A frame entry's common entry precedes it.
+fn eh_records(l: &mut L, b: []u8, e: u32) {
+    let sc = l.secs[e as usize];
+    let first = l.eh.len() as u32;
+    let mut p: usize = 0;
+    let end = sc.size as usize;
+    // Each step reads one record.
+    while p + 4 <= end {
+        let len = lu::r32(b, sc.off + p) as usize;
+        if len == 0 {
+            l.eh.push(EhRec { old: p as u32, len: 4, new: 0, cie: false });
+            break;
+        }
+        let cie = lu::r32(b, sc.off + p + 4) == 0;
+        let mut keep = false;
+        if !cie {
+            let fs = reloc_section(l, b, e, (p + 8) as u64);
+            keep = fs == NONE32 || l.secs[fs as usize].live;
+        }
+        l.eh.push(
+            EhRec {
+                old: p as u32,
+                len: (4 + len) as u32,
+                new: if keep {
+                    0u32;
+                } else {
+                    NONE32;
+                },
+                cie: cie,
+            },
+        );
+        p += 4 + len;
+    }
+    let last = l.eh.len() as u32;
+    for i in first..last {
+        let r = l.eh[i as usize];
+        if r.cie || r.len == 4 || r.new == NONE32 {
+            continue;
+        }
+        let j = eh_find(l, first, last, r.old + 4 - lu::r32(b, sc.off + r.old as usize + 4));
+        if j != NONE32 {
+            l.eh.index_mut(j as usize).new = 0;
+        }
+    }
+    let mut size: u32 = 0;
+    let mut any = false;
+    for i in first..last {
+        let r = l.eh[i as usize];
+        if r.new != NONE32 {
+            l.eh.index_mut(i as usize).new = size;
+            size += r.len;
+            any = any || r.len != 4;
+        }
+    }
+    let ms = l.secs.index_mut(e as usize);
+    ms.eh = first;
+    ms.neh = last - first;
+    ms.size = size;
+    ms.live = any;
+}
+
+// The record of `L.eh[first .. last]` that holds offset `off` of its section (NONE32: none).
+fn eh_find(l: &L, first: u32, last: u32, off: u32) u32 {
+    if first == last || off < l.eh[first as usize].old {
+        return NONE32;
+    }
+    let mut lo = first;
+    let mut hi = last;
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        if l.eh[mid as usize].old <= off {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let r = l.eh[lo as usize];
+    return if off < r.old + r.len {
+        lo;
+    } else {
+        NONE32;
+    };
 }
 
 // One relocation of a section: offset, type, symbol (file-relative), addend.
@@ -1151,6 +1436,17 @@ fn scan(l: &mut L, b: []u8, lsm: u32) bool {
                 tls_slot(l, g, k);
                 continue;
             }
+            let op = if r.off >= 2 {
+                b[sc.off + r.off as usize - 2] as u16 << 8 | b[sc.off + r.off as usize - 1] as u16;
+            } else {
+                0u16;
+            };
+            if call_relaxes(l, g, r, op) {
+                if g != NONE {
+                    l.gs.index_mut(g as usize).used = true;
+                }
+                continue;
+            }
             if g == NONE {
                 if alloc(sc) && (sc.flags & SHF_WRITE) != 0 && (r.ty == X_64 && !l.a64 || r.ty == A_ABS64 && l.a64) {
                     l.drels.push(DRel { at: 0, ty: 0, sym: 0, addend: 0 });
@@ -1246,7 +1542,17 @@ fn slot_addr(l: &L, g: u32, k: u32) u64 {
     return l.osecs[l.o[O_GOT] as usize].addr + 8 * (l.got.len() as u64 + (*l.lgot_slot.get(&k).unwrap()) as u64);
 }
 
-const fn is_got(l: &L, ty: u32) bool {
+// Whether x86-64 relocation `r` against global `g` (NONE: a local symbol) is a call through a GOT slot,
+// `call *x@GOTPCREL(%rip)` (`op` its two opcode bytes), of a function the output defines and no library
+// may replace: it becomes `addr32 call x` (the psABI's relaxation), which needs no slot.
+fn call_relaxes(l: &L, g: u32, r: Rel, op: u16) bool {
+    if l.a64 || r.ty != X_GOTPCRELX || op != 0xFF15 {
+        return false;
+    }
+    return g == NONE || l.gs[g as usize].kind == G_DEF && !(l.shared && exported(l, g));
+}
+
+fn is_got(l: &L, ty: u32) bool {
     if l.a64 {
         return ty == A_ADR_GOT_PAGE || ty == A_LD64_GOT_LO12_NC;
     }
@@ -1693,6 +1999,13 @@ const fn count_fdes(l: &L, b: []u8) u32 {
         if sc.out == NONE || l.sn.spell(sc.name) != ".eh_frame" {
             continue;
         }
+        if sc.eh != NONE {
+            for j in sc.eh..sc.eh + sc.neh {
+                let r = l.eh[j as usize];
+                n += (r.new != NONE32 && !r.cie && r.len != 4) as u32;
+            }
+            continue;
+        }
         let mut p: usize = 0;
         let e = sc.size as usize;
         // Each step reads one record.
@@ -1773,6 +2086,10 @@ const fn copy_sections(l: &L, b: []u8, img: &mut Vector<u8>) {
             continue;
         }
         let at = (l.osecs[sc.out as usize].off + sc.at) as usize;
+        if sc.eh != NONE {
+            copy_eh(l, b, sc, img, at);
+            continue;
+        }
         for i in 0..sc.size as usize {
             img[at + i] = b[sc.off + i];
         }
@@ -1794,9 +2111,18 @@ fn apply(l: &mut L, b: []u8, img: &mut Vector<u8>) bool {
             if skipped(l, s as u32, r.off) {
                 continue;
             }
+            // In a packed `.eh_frame`, the field's place among the kept records.
+            let mut off = r.off;
+            if sc.eh != NONE {
+                let j = eh_find(l, sc.eh, sc.eh + sc.neh, r.off as u32);
+                if j == NONE32 || l.eh[j as usize].new == NONE32 {
+                    continue;
+                }
+                off = r.off - l.eh[j as usize].old as u64 + l.eh[j as usize].new as u64;
+            }
             let k = f.sym0 + r.sym;
-            let p_addr = os.addr + sc.at + r.off;
-            let p = (os.off + sc.at + r.off) as usize;
+            let p_addr = os.addr + sc.at + off;
+            let p = (os.off + sc.at + off) as usize;
             if !reloc(l, img, s as u32, f, k, r, p_addr, p, (sc.flags & SHF_WRITE) != 0) {
                 return false;
             }
@@ -1845,6 +2171,17 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
             return true;
         }
         if r.ty == X_GOTPCREL || r.ty == X_GOTPCRELX || r.ty == X_REX_GOTPCRELX {
+            if p >= 2 && call_relaxes(l, g, r, img[p - 2] as u16 << 8 | img[p - 1] as u16) {
+                let d = sa.wrapping_sub(pa) as i64;
+                if !fits(d, 32) {
+                    l.err.format_into("'{}': a 32-bit displacement out of range", path);
+                    return false;
+                }
+                img[p - 2] = 0x67;
+                img[p - 1] = 0xE8;
+                lu::p32(img, p, d as u32);
+                return true;
+            }
             let d = slot_addr(l, g, k).wrapping_add(r.addend as u64).wrapping_sub(pa) as i64;
             lu::p32(img, p, d as u32);
             return true;
@@ -2089,6 +2426,11 @@ const fn apply_debug(l: &L, b: []u8, img: &mut Vector<u8>, dbg_off: &Vector<u64>
             let y = l.syms[k as usize];
             let p = (dbg_off[sc.out as usize] + sc.at + r.off) as usize;
             let mut v = target(l, k).wrapping_add(r.addend as u64);
+            if dropped_target(l, k) {
+                // A dropped function's address: lld's tombstones, 1 where 0 would end a list.
+                let dn = l.sn.spell(sc.name);
+                v = (dn == ".debug_ranges" || dn == ".debug_loc") as u64;
+            }
             // A section symbol of a debug section: the offset within the merged section.
             if type_of(y) == STT_SECTION {
                 let ts = l.secs[(f.sec0 + y.shndx) as usize];
@@ -2102,6 +2444,44 @@ const fn apply_debug(l: &L, b: []u8, img: &mut Vector<u8>, dbg_off: &Vector<u64>
                 lu::p32(img, p, v as u32);
             }
         }
+    }
+}
+
+// Whether symbol `k` (a global: its definition) lies in a loaded section garbage collection dropped.
+fn dropped_target(l: &L, k: u32) bool {
+    let mut d = k;
+    let g = gof(l, k);
+    if g != NONE {
+        if l.gs[g as usize].kind != G_DEF {
+            return false;
+        }
+        d = l.gs[g as usize].sym;
+    }
+    let y = l.syms[d as usize];
+    if y.shndx == SHN_UNDEF || y.shndx >= 0xFF00 {
+        return false;
+    }
+    let s = l.secs[(l.files[y.file as usize].sec0 + y.shndx) as usize];
+    return alloc(s) && !s.live;
+}
+
+// Copy the kept records of packed `.eh_frame` section `sc` to `img` at `at`, each frame entry's pointer to
+// its common entry recomputed.
+fn copy_eh(l: &L, b: []u8, sc: ISec, img: &mut Vector<u8>, at: usize) {
+    for j in sc.eh..sc.eh + sc.neh {
+        let r = l.eh[j as usize];
+        if r.new == NONE32 {
+            continue;
+        }
+        let dst = at + r.new as usize;
+        for i in 0..r.len as usize {
+            img[dst + i] = b[sc.off + r.old as usize + i];
+        }
+        if r.cie || r.len == 4 {
+            continue;
+        }
+        let c = eh_find(l, sc.eh, sc.eh + sc.neh, r.old + 4 - lu::r32(b, sc.off + r.old as usize + 4));
+        lu::p32(img, dst + 4, r.new + 4 - l.eh[c as usize].new);
     }
 }
 
@@ -2741,6 +3121,9 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
             if gy.kind == G_DEF {
                 let y = l.syms[gy.sym as usize];
                 let f = l.files[y.file as usize];
+                if y.shndx != SHN_ABS && l.secs[(f.sec0 + y.shndx) as usize].out == NONE {
+                    continue; // in a section garbage collection dropped
+                }
                 let sh = if y.shndx == SHN_ABS {
                     SHN_ABS;
                 } else {

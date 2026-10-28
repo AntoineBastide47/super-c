@@ -54,11 +54,14 @@ const S_ZEROFILL: u32 = 1;
 const S_NON_LAZY_SYMBOL_POINTERS: u32 = 6;
 const S_SYMBOL_STUBS: u32 = 8;
 const S_MOD_INIT_FUNC_POINTERS: u32 = 9;
+const S_MOD_TERM_FUNC_POINTERS: u32 = 0xA;
 const S_GB_ZEROFILL: u32 = 0xC;
 const S_THREAD_LOCAL_REGULAR: u32 = 0x11;
 const S_THREAD_LOCAL_ZEROFILL: u32 = 0x12;
 const S_THREAD_LOCAL_VARIABLES: u32 = 0x13;
 const S_ATTR_DEBUG: u32 = 0x02000000;
+const S_ATTR_NO_DEAD_STRIP: u32 = 0x10000000;
+const S_ATTR_LIVE_SUPPORT: u32 = 0x08000000;
 const S_ATTR_PURE_INSTRUCTIONS: u32 = 0x80000000;
 const S_ATTR_SOME_INSTRUCTIONS: u32 = 0x400;
 const SG_READ_ONLY: u32 = 0x10;
@@ -70,6 +73,9 @@ const N_EXT: u8 = 0x01;
 const N_SECT: u8 = 0x0E;
 const N_ABS: u8 = 0x02;
 const N_WEAK_DEF: u16 = 0x80;
+const N_NO_DEAD_STRIP: u16 = 0x20;
+const N_ALT_ENTRY: u16 = 0x200;
+const MH_SUBSECTIONS_VIA_SYMBOLS: u32 = 0x2000;
 const N_SO: u8 = 0x64;
 const N_OSO: u8 = 0x66;
 const N_BNSYM: u8 = 0x2E;
@@ -97,7 +103,8 @@ pub const K_DYLIB: u8 = 1;
 
 /// A link: the objects, the libraries (`-l` names searched in `dirs`, then the SDK's `usr/lib`;
 /// frameworks searched in `fdirs`, then the SDK's), the SDK root, the output and its kind (a dylib's
-/// install name `install`), and whether to leave out the local symbols and the debug map (`strip`).
+/// install name `install`), whether to leave out the local symbols and the debug map (`strip`), and whether
+/// to drop the parts of the input no root reaches (`dead_strip`, `split_sections`).
 pub struct Opts {
     pub out: String,
     pub kind: u8,
@@ -110,6 +117,7 @@ pub struct Opts {
     pub sdk: String,
     pub strip: bool,
     pub jobs: u32, // 1: the signature's page hashes in this thread, else on the task pool
+    pub dead_strip: bool, // keep only what the entry, the exports and the kept symbols reach
 }
 
 // An input file: its bytes in the blob, its sections and symbols.
@@ -122,10 +130,13 @@ struct IFile {
     pub sym0: u32,
     pub nsym: u32,
     pub debug: bool, // holds DWARF: the debug map names it
+    pub subs: bool, // its symbols delimit its sections' parts (`MH_SUBSECTIONS_VIA_SYMBOLS`)
 }
 
 // An input section: names (`sn` ids), flags, alignment, the object's address and size, its bytes and
-// relocations in the blob, and where it lands: output section `out` at offset `at`.
+// relocations in the blob, and where it lands: output section `out` at offset `at`. A section dead
+// stripping split holds its parts `p0 .. p0 + pn` (input sections of their own) and is not `live`; a part
+// no root reaches is not `live` either.
 struct ISec {
     pub file: u32,
     pub seg: u32,
@@ -139,6 +150,9 @@ struct ISec {
     pub nreloc: u32,
     pub out: u32,
     pub at: u64,
+    pub p0: u32,
+    pub pn: u32,
+    pub live: bool,
 }
 
 // An input symbol: its name (`names` id), nlist type, section (1-based in its file, 0 none), desc and value.
@@ -346,8 +360,17 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     if !resolve_objects(l, 0) || !take_members(l, &mut ars, blob) {
         return false;
     }
+    if o.dead_strip {
+        split_sections(l, blob);
+    }
     let b = blob.as_slice();
-    if !load_libraries(l, o) || !finish_symbols(l) || !scan_relocations(l, b) {
+    if !load_libraries(l, o) || !finish_symbols(l) {
+        return false;
+    }
+    if o.dead_strip {
+        mark_live(l, b);
+    }
+    if !scan_relocations(l, b) {
         return false;
     }
     if !layout(l, b) {
@@ -430,6 +453,7 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
         sym0: l.syms.len() as u32,
         nsym: 0,
         debug: false,
+        subs: (lu::r32(b, at + 24) & MH_SUBSECTIONS_VIA_SYMBOLS) != 0,
     };
     let ncmds = lu::r32(b, at + 16);
     let mut c = at + 32;
@@ -464,6 +488,9 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
                         nreloc: lu::r32(b, s + 60),
                         out: NONE,
                         at: 0,
+                        p0: NONE,
+                        pn: 0,
+                        live: true,
                     },
                 );
                 f.nsec += 1;
@@ -979,7 +1006,7 @@ const fn gof(l: &L, y: ISym) u32 {
 fn scan_relocations(l: &mut L, b: []u8) bool {
     for s in 0..l.secs.len() {
         let sc = l.secs[s];
-        if dropped(l, sc) {
+        if dropped(l, sc) || !sc.live {
             continue;
         }
         let f = l.files[sc.file as usize];
@@ -1041,6 +1068,202 @@ fn scan_relocations(l: &mut L, b: []u8) bool {
 // (`__LD`: the compact unwind entries `__unwind_info` replaces).
 const fn dropped(l: &L, s: ISec) bool {
     return (s.flags & S_ATTR_DEBUG) != 0 || l.sn.spell(s.seg) == "__LD";
+}
+
+// ---- dead stripping --------------------------------------------------------------------------------------
+
+// The input section that holds object address `v` of input section `s`: `s`, or the part of it that
+// holds `v` when dead stripping split it (the last part starting at or before `v`).
+fn part(l: &L, s: u32, v: u64) u32 {
+    let c = l.secs[s as usize];
+    if c.pn == 0 {
+        return s;
+    }
+    let mut lo = c.p0;
+    let mut hi = c.p0 + c.pn;
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        if l.secs[mid as usize].addr <= v {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+// Whether dead stripping splits input section `sc` at its symbols: code and data of the image, not the
+// literals (whole strings and constants), the thread-local sections (one template), the initializer
+// lists, the sections that keep themselves alive and what stays out of the image.
+fn splittable(l: &L, sc: ISec) bool {
+    let t = sc.flags & S_TYPE;
+    return (t == S_REGULAR || t == S_ZEROFILL) && (sc.flags & (S_ATTR_NO_DEAD_STRIP | S_ATTR_LIVE_SUPPORT)) == 0 && !dropped(
+        l,
+        sc,
+    );
+}
+
+// Split every section `splittable` takes of each object whose symbols delimit its parts into those parts,
+// as ld64 does: a part starts at the section's start and at each symbol that is no alternate entry
+// (`N_ALT_ENTRY`), and reaches the next one. Each part becomes an input section after the existing ones,
+// its relocations copied to the end of `blob` with addresses from its own start; the split section keeps
+// its range of parts.
+fn split_sections(l: &mut L, blob: &mut Vector<u8>) {
+    let mut cuts = Vector::<u64>::new();
+    for fi in 0..l.files.len() {
+        let f = l.files[fi];
+        if !f.subs {
+            continue;
+        }
+        for s in f.sec0..f.sec0 + f.nsec {
+            let sc = l.secs[s as usize];
+            if !splittable(l, sc) {
+                continue;
+            }
+            cuts.truncate(0);
+            cuts.push(sc.addr);
+            for k in f.sym0..f.sym0 + f.nsym {
+                let y = l.syms[k as usize];
+                if (y.ty & N_STAB) != 0 || (y.ty & N_TYPE) != N_SECT || f.sec0 + y.sect as u32 - 1 != s || (y.desc & N_ALT_ENTRY) != 0 {
+                    continue;
+                }
+                if y.value > sc.addr && y.value < sc.addr + sc.size {
+                    cuts.push(y.value);
+                }
+            }
+            if cuts.len() < 2 {
+                continue;
+            }
+            cuts.sort();
+            let mut nd: usize = 1;
+            for i in 1..cuts.len() {
+                if cuts[i] != cuts[nd - 1] {
+                    cuts[nd] = cuts[i];
+                    nd += 1;
+                }
+            }
+            cuts.truncate(nd);
+            let p0 = l.secs.len() as u32;
+            for i in 0..cuts.len() {
+                let lo = cuts[i];
+                let hi = if i + 1 < cuts.len() {
+                    cuts[i + 1];
+                } else {
+                    sc.addr + sc.size;
+                };
+                let rel = blob.len();
+                let mut nr: u32 = 0;
+                for r in 0..sc.nreloc as usize {
+                    let w0 = lu::r32(blob.as_slice(), sc.reloff + 8 * r);
+                    let w1 = lu::r32(blob.as_slice(), sc.reloff + 8 * r + 4);
+                    let a = sc.addr + w0 as u64;
+                    if a >= lo && a < hi {
+                        lu::w32(blob, w0 - (lo - sc.addr) as u32);
+                        lu::w32(blob, w1);
+                        nr += 1;
+                    }
+                }
+                let mut pc = sc;
+                pc.addr = lo;
+                pc.size = hi - lo;
+                pc.off = sc.off + (lo - sc.addr) as usize;
+                pc.reloff = rel;
+                pc.nreloc = nr;
+                l.secs.push(pc);
+            }
+            let c = l.secs.index_mut(s as usize);
+            c.p0 = p0;
+            c.pn = cuts.len() as u32;
+            c.live = false;
+        }
+    }
+}
+
+// Keep only what a root reaches through relocations: the entry (`_main`), a dylib's exports, the symbols
+// kept though nothing refers to them (`N_NO_DEAD_STRIP`), the initializer and terminator lists and the
+// sections that keep themselves (`S_ATTR_NO_DEAD_STRIP`, and `S_ATTR_LIVE_SUPPORT`: `__eh_frame` keeps
+// the functions it describes). A tentative definition and the image's header are always kept. Every
+// other input section (a part, or a section not split) that no relocation of a kept one names is left
+// out (not `live`).
+fn mark_live(l: &mut L, b: []u8) {
+    let mut work = Vector::<u32>::new();
+    for s in 0..l.secs.len() {
+        let sc = l.secs[s];
+        if dropped(l, sc) || sc.pn != 0 {
+            continue;
+        }
+        let t = sc.flags & S_TYPE;
+        let root = t == S_MOD_INIT_FUNC_POINTERS || t == S_MOD_TERM_FUNC_POINTERS || (sc.flags & (S_ATTR_NO_DEAD_STRIP | S_ATTR_LIVE_SUPPORT)) != 0;
+        l.secs.index_mut(s).live = root;
+        if root {
+            work.push(s as u32);
+        }
+    }
+    for k in 0..l.syms.len() {
+        let y = l.syms[k];
+        if (y.ty & N_STAB) != 0 || (y.ty & N_TYPE) != N_SECT {
+            continue;
+        }
+        let exported = l.kind != K_EXE && (y.ty & N_EXT) != 0 && (y.ty & N_PEXT) == 0;
+        if exported || (y.desc & N_NO_DEAD_STRIP) != 0 {
+            reach(l, part(l, l.files[y.file as usize].sec0 + y.sect as u32 - 1, y.value), &mut work);
+        }
+    }
+    if l.kind == K_EXE {
+        let main = l.names.find("_main");
+        if main >= 0 && main as usize < l.glob.len() && l.glob[main as usize] != 0 {
+            let gy = l.gs[(l.glob[main as usize] - 1) as usize];
+            if gy.kind == G_DEF {
+                reach_sym(l, gy.sym, &mut work);
+            }
+        }
+    }
+    // Each section enters the work list once, when it turns live.
+    while let Some(s) = work.pop() {
+        let sc = l.secs[s as usize];
+        let f = l.files[sc.file as usize];
+        for r in 0..sc.nreloc as usize {
+            let w0 = lu::r32(b, sc.reloff + 8 * r);
+            let w1 = lu::r32(b, sc.reloff + 8 * r + 4);
+            let ty = w1 >> 28;
+            if ty == R_ADDEND {
+                continue;
+            }
+            let num = w1 & 0xFFFFFF;
+            if (w1 >> 27 & 1) != 0 {
+                reach_sym(l, f.sym0 + num, &mut work);
+            } else if num != 0 && num <= f.nsec {
+                // Against a section: the object address the field holds names the part.
+                let c = f.sec0 + num - 1;
+                let at = sc.off + w0 as usize;
+                let v = if (w1 >> 25 & 3) == 3 {
+                    lu::r64(b, at);
+                } else {
+                    lu::r32(b, at) as u64;
+                };
+                reach(l, part(l, c, v), &mut work);
+            }
+        }
+    }
+}
+
+// Mark the input section that defines symbol `k` (or its global's definition) live.
+fn reach_sym(l: &mut L, k: u32, work: &mut Vector<u32>) {
+    let d = defining(l, k);
+    if d == NONE {
+        return;
+    }
+    let y = l.syms[d as usize];
+    if (y.ty & N_TYPE) == N_SECT {
+        reach(l, part(l, l.files[y.file as usize].sec0 + y.sect as u32 - 1, y.value), work);
+    }
+}
+
+fn reach(l: &mut L, s: u32, work: &mut Vector<u32>) {
+    if !l.secs[s as usize].live && !dropped(l, l.secs[s as usize]) {
+        l.secs.index_mut(s as usize).live = true;
+        work.push(s);
+    }
 }
 
 // ---- layout ---------------------------------------------------------------------------------------------
@@ -1144,7 +1367,7 @@ fn layout(l: &mut L, b: []u8) bool {
     }
     for s in 0..l.secs.len() {
         let sc = l.secs[s];
-        if dropped(l, sc) || sc.size == 0 && (sc.flags & S_TYPE) != S_THREAD_LOCAL_VARIABLES {
+        if dropped(l, sc) || !sc.live || sc.size == 0 && (sc.flags & S_TYPE) != S_THREAD_LOCAL_VARIABLES {
             continue;
         }
         let mut seg = String::from_str(l.sn.spell(sc.seg));
@@ -1385,7 +1608,7 @@ const fn sym_addr(l: &L, k: u32) u64 {
     if (y.ty & N_TYPE) == N_ABS {
         return y.value;
     }
-    let s = l.secs[(l.files[y.file as usize].sec0 + y.sect as u32 - 1) as usize];
+    let s = l.secs[part(l, l.files[y.file as usize].sec0 + y.sect as u32 - 1, y.value) as usize];
     if s.out == NONE {
         return 0;
     }
@@ -1631,8 +1854,8 @@ const fn got_addr(l: &L, f: IFile, symnum: u32) u64 {
 }
 
 // The image address of object address `v` in section `sect` (1-based) of file `f`.
-const fn section_relative(l: &L, f: IFile, sect: u32, v: u64) u64 {
-    let s = l.secs[(f.sec0 + sect - 1) as usize];
+fn section_relative(l: &L, f: IFile, sect: u32, v: u64) u64 {
+    let s = l.secs[part(l, f.sec0 + sect - 1, v) as usize];
     return (l.osecs[s.out as usize].addr + s.at).wrapping_add(v.wrapping_sub(s.addr));
 }
 
@@ -1723,11 +1946,11 @@ fn collect_unwind(l: &mut L, b: []u8) bool {
                 if k != NONE {
                     let y = l.syms[k as usize];
                     let yf = l.files[y.file as usize];
-                    sec = yf.sec0 + y.sect as u32 - 1;
+                    sec = part(l, yf.sec0 + y.sect as u32 - 1, y.value);
                     v = y.value + stored;
                 }
             } else {
-                sec = f.sec0 + (w1 & 0xFFFFFF) - 1;
+                sec = part(l, f.sec0 + (w1 & 0xFFFFFF) - 1, v);
             }
             if sec == NONE || l.secs[sec as usize].out == NONE {
                 continue;
@@ -1753,7 +1976,7 @@ fn collect_unwind(l: &mut L, b: []u8) bool {
         if (y.ty & N_STAB) != 0 || (y.ty & N_TYPE) != N_SECT {
             continue;
         }
-        let sec = l.files[y.file as usize].sec0 + y.sect as u32 - 1;
+        let sec = part(l, l.files[y.file as usize].sec0 + y.sect as u32 - 1, y.value);
         let sc = l.secs[sec as usize];
         if sc.out == NONE || !code(sc) {
             continue;
@@ -2217,7 +2440,7 @@ extend OSym as Copy {}
 // The output section number (1-based) of input symbol `k`'s section.
 const fn out_sect(l: &L, k: u32) u8 {
     let y = l.syms[k as usize];
-    let s = l.secs[(l.files[y.file as usize].sec0 + y.sect as u32 - 1) as usize];
+    let s = l.secs[part(l, l.files[y.file as usize].sec0 + y.sect as u32 - 1, y.value) as usize];
     return (s.out + 1) as u8;
 }
 
@@ -2227,7 +2450,7 @@ const fn kept(l: &L, k: u32) bool {
     if (y.ty & N_TYPE) != N_SECT {
         return (y.ty & N_TYPE) == N_ABS;
     }
-    return l.secs[(l.files[y.file as usize].sec0 + y.sect as u32 - 1) as usize].out != NONE;
+    return l.secs[part(l, l.files[y.file as usize].sec0 + y.sect as u32 - 1, y.value) as usize].out != NONE;
 }
 
 // The compile unit's directory and name in the DWARF of file `f` (`DW_AT_comp_dir`, `DW_AT_name`, as
@@ -2374,7 +2597,10 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     let all = !o.strip || o.kind != K_EXE;
     for g in 0..l.gs.len() {
         let gy = l.gs[g];
-        let exported = all && (gy.kind == G_COMMON || gy.kind == G_DEF && (l.syms[gy.sym as usize].ty & N_PEXT) == 0) || gy.kind == G_HEADER;
+        let exported = all && (gy.kind == G_COMMON || gy.kind == G_DEF && (l.syms[gy.sym as usize].ty & N_PEXT) == 0 && kept(
+            l,
+            gy.sym,
+        )) || gy.kind == G_HEADER;
         if exported {
             keyed.push((String::from_str(l.names.spell(gy.name)), g as u32));
         }
@@ -2446,7 +2672,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         if (y.ty & N_STAB) != 0 || (y.ty & N_TYPE) != N_SECT || !kept(l, k as u32) {
             continue;
         }
-        let sc = l.secs[(l.files[y.file as usize].sec0 + y.sect as u32 - 1) as usize];
+        let sc = l.secs[part(l, l.files[y.file as usize].sec0 + y.sect as u32 - 1, y.value) as usize];
         if code(sc) {
             starts.push(sym_addr(l, k as u32));
         }
@@ -2741,7 +2967,7 @@ fn debug_map(l: &L, b: []u8, f: IFile, st: &mut Vector<u8>, locs: &mut Vector<OS
         if (y.ty & N_STAB) != 0 || (y.ty & N_TYPE) != N_SECT || !kept(l, k) {
             continue;
         }
-        let sc = l.secs[(f.sec0 + y.sect as u32 - 1) as usize];
+        let sc = l.secs[part(l, f.sec0 + y.sect as u32 - 1, y.value) as usize];
         if code(sc) {
             fk.push(sym_addr(l, k) << 24 | (k - f.sym0) as u64);
         }
@@ -2751,7 +2977,7 @@ fn debug_map(l: &L, b: []u8, f: IFile, st: &mut Vector<u8>, locs: &mut Vector<OS
         let k = f.sym0 + (fk[i] & 0xFFFFFF) as u32;
         let a = fk[i] >> 24;
         let y = l.syms[k as usize];
-        let sc = l.secs[(f.sec0 + y.sect as u32 - 1) as usize];
+        let sc = l.secs[part(l, f.sec0 + y.sect as u32 - 1, y.value) as usize];
         let send = l.osecs[sc.out as usize].addr + sc.at + sc.size;
         let mut e = send;
         if i + 1 < fk.len() && fk[i + 1] >> 24 < send {

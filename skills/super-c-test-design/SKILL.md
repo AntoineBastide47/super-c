@@ -90,6 +90,9 @@ Rules for the costly rungs:
 
 ## Profiles
 
+- No build has a sanitizer: the native backend links none. The leak and double-free tracker
+  (`SC_LEAK_CHECK=fatal`) and the validation switches (`SC_BC_VALIDATE`, `SC_TYPE_VALIDATE`) are
+  the checks a suite run takes.
 - Build with `--profile=release` only when the result depends on it: the LIR optimizer and the
   inliner make a release build slower than a debug one.
 - A test that starts one worker per CPU passes `--jobs=1`: the suite already runs one test

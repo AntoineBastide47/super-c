@@ -292,12 +292,14 @@ fn code_generation_flags_follow_the_level_then_the_profile_then_the_command_line
     let fun = manifest::CG_INLINE_FUNCTIONS;
     let unr = manifest::CG_UNROLL;
     let vers = manifest::CG_UNSWITCH | manifest::CG_VERSION_LOOPS;
+    let vec = manifest::CG_VECTORIZE;
+    let sa = manifest::CG_STRICT_ALIASING;
     assert_eq(manifest::cg_effective(0, 0, 0), 0u64);
     assert_eq(manifest::cg_effective(1, 0, 0), fp | inl);
-    assert_eq(manifest::cg_effective(2, 0, 0), fp | inl | fun | unr);
-    assert_eq(manifest::cg_effective(3, 0, 0), fp | inl | fun | unr | vers);
-    assert_eq(manifest::cg_effective(manifest::OPT_S, 0, 0), fp | inl | fun);
-    assert_eq(manifest::cg_effective(manifest::OPT_Z, 0, 0), fp | inl);
+    assert_eq(manifest::cg_effective(2, 0, 0), fp | inl | fun | unr | vec | sa);
+    assert_eq(manifest::cg_effective(3, 0, 0), fp | inl | fun | unr | vers | vec | sa);
+    assert_eq(manifest::cg_effective(manifest::OPT_S, 0, 0), fp | inl | fun | vec | sa);
+    assert_eq(manifest::cg_effective(manifest::OPT_Z, 0, 0), fp | inl | sa);
     let (m, errs) = manifest::parse_check(
         "bin = \"a\"\nroot = \"m.spc\"\n[profile.release]\nomit-frame-pointer = false\nunroll-loops = false\n[profile.small]\nopt-level = \"s\"\nunroll-loops = true\n",
         "",
@@ -306,9 +308,9 @@ fn code_generation_flags_follow_the_level_then_the_profile_then_the_command_line
     assert_eq(errs.errors.len(), 0);
     let mut mm = m.unwrap();
     let rel = mm.profiles.at(mm.profile_index("release") as usize);
-    assert_eq(manifest::cg_effective(rel.opt, rel.cg_on, rel.cg_off), inl | fun | vers);
+    assert_eq(manifest::cg_effective(rel.opt, rel.cg_on, rel.cg_off), inl | fun | vers | vec | sa);
     let sm = mm.profiles.at(mm.profile_index("small") as usize);
-    assert_eq(manifest::cg_effective(sm.opt, sm.cg_on, sm.cg_off), fp | inl | fun | unr);
+    assert_eq(manifest::cg_effective(sm.opt, sm.cg_on, sm.cg_off), fp | inl | fun | unr | vec | sa);
     let mut on: u64 = 0;
     let mut off: u64 = 0;
     assert(manifest::cg_flag("-fomit-frame-pointer", &mut on, &mut off), "-f");
@@ -318,6 +320,16 @@ fn code_generation_flags_follow_the_level_then_the_profile_then_the_command_line
     assert(!manifest::cg_flag("-O2", &mut on, &mut off), "a level is no flag");
     assert_eq(on, 0u64);
     assert_eq(off, fp | inl);
+    // A flag whose bit is its `no` form: `-fno-plt` sets it, `-fplt` clears it.
+    let mut pon: u64 = 0;
+    let mut poff: u64 = 0;
+    assert(manifest::cg_flag("-fno-plt", &mut pon, &mut poff), "-fno-plt");
+    assert_eq(pon, manifest::CG_NO_PLT);
+    let mut pspelled = String::new();
+    manifest::cg_spell(manifest::OPT_NONE, pon, poff, &mut pspelled);
+    assert(pspelled.as_str() == " -fno-plt", pspelled.as_str());
+    assert(manifest::cg_flag("-fplt", &mut pon, &mut poff), "-fplt");
+    assert_eq(pon, 0u64);
     assert_eq(manifest::opt_flag("-O3"), 3);
     assert_eq(manifest::opt_flag("-Oz"), manifest::OPT_Z);
     assert_eq(manifest::opt_flag("-O4"), manifest::OPT_NONE);

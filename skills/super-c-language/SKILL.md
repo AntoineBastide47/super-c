@@ -633,7 +633,7 @@ static_assert(sizeof(Header) == 8, "Header must stay 8 bytes");
   its declaration ("function 'f' is declared 'const fn' but ..."). A `const fn` that fails only
   on some paths (a branch, a loop, recursion) is accepted.
 - A header type (a `struct` or `union` of an `extern "C"` block) lists every member, so its size,
-  alignment, offsets and `type_info` are compile-time values like a Super-C struct's; the C compile
+  alignment, offsets and `type_info` are compile-time values like a Super-C struct's; the build
   checks them against the header (`super-c-ffi`). A constant of an extern block with a value folds
   like any constant.
 - A `const fn` cannot call an extern function or a variadic one ("... but calls a variadic
@@ -749,12 +749,11 @@ extern "C" "native.h" {     // discovers native.c beside the .spc file
 
 An opaque `type X;` renders as its bare C name, so it must name a type some included
 header actually defines (`FILE` works because stdio.h is auto-included; an invented name
-fails in the C compile). A `struct`, `union` or `enum` in the block is a header type: the C type
-(`struct stat`, `enum color`, or a typedef name through `@import`), with the fields the declaration lists
-and the header's layout, which the C compiler checks field by field; the block must name that
-header. It has no compile-time size and no drop glue (see `super-c-ffi`, Header Types). No type
-of an extern block implements `Free`: wrap it in a struct that does. A header's same-stem `.c` file
-beside the module compiles with the program; any other C comes in as a library.
+fails when the `--emit-c` tree compiles). A `struct`, `union` or `enum` in the block is a header
+type: the C type (`struct stat`, `enum color`, or a typedef name through `@import`), with the fields
+the declaration lists and the header's layout, which the build checks field by field; the block
+must name that header. It has no drop glue (see `super-c-ffi`, Header Types). No type of an extern
+block implements `Free`: wrap it in a struct that does. C code comes in as a library (`@link`).
 `@link("m")` declares a library. Variadics work in both directions (`...`, `va_list`,
 `va_start`, `va_arg`, `va_end`); `va_arg` needs `unsafe` (see `super-c-ffi`).
 
@@ -792,7 +791,7 @@ source text, values, and file:line on failure.
 | `@inline` | Suggest inlining |
 | `@always_inline` | Force inlining |
 | `@noinline` | Prevent inlining |
-| `@cold` | Mark rarely called: C `cold`, which implies `noinline`; the C compiler lays out the branches that call it as unlikely |
+| `@cold` | Mark rarely called: under `--emit-c` C `cold`, which implies `noinline`, and the C compiler lays out the branches that call it as unlikely; the native build ignores it |
 | `@noreturn` | Mark non-returning |
 | `@align(N)` | Set alignment of a struct or a union (a header type of an `extern "C"` block too), or of a `static mut` outside an `extern "C"` block (an error on any other item): a power of two from 1 to 4096 (a page: a larger one is misaligned on some hosts and could move a task's frame past its guard page); `N` is an integer literal or a constant expression of type `u32`. An emitted struct or union definition takes `__attribute__((aligned(N)))`; a static whose `N` is above its type's own alignment takes `_Alignas(N)` on its definition and every declaration (C rejects a weaker specifier) |
 | `@packed` | Pack a struct or a union, a header type of an `extern "C"` block too (an error on any other item). A reference or autoref to a field whose alignment exceeds 1 is "cannot borrow a field of a '@packed' struct" (copy it into a local first), and such a field cannot need a `free` |
@@ -841,8 +840,9 @@ one occurrence (`@derive(Format, Hash)`, `@reflect(a, b = 1)`, `@platform(linux 
 ### Branch Hints
 
 `likely(c)` and `unlikely(c)` (prelude, `std/core.spc`) return `c`, also in a constant. The `if`
-or loop condition that tests the call tells the C compiler which way the branch usually goes:
-`if (__builtin_expect(c, 1))` or `(c, 0)`. Wrap the WHOLE condition: a hint on one operand of
+or loop condition that tests the call tells the C compiler of an `--emit-c` tree which way the
+branch usually goes: `if (__builtin_expect(c, 1))` or `(c, 0)`; the native build ignores the hint.
+Wrap the WHOLE condition: a hint on one operand of
 `||` or `&&` stays inside the lowered short circuit and the final branch has none.
 
 ```superc
@@ -854,7 +854,7 @@ for x in xs {
 ```
 
 Use a hint where the branch is predictable and its taken side is rare: an error or slow path, a
-new minimum in a scan. There it also stops the C compiler from turning the branch into selects,
+new minimum in a scan. There it also stops the C compiler of an `--emit-c` tree from turning the branch into selects,
 which chain each iteration to the previous one: Apple clang does this to the loop above without
 the hint (3.06 ns per element on an M5 Pro, 0.55 with it). A wrong hint costs the mispredicted
 side; leave unpredictable branches unhinted.
@@ -878,8 +878,9 @@ keeps link-time optimization from inlining or dropping the symbol, and its secti
   parameters where the C calling convention puts them and returns itself. Every parameter and the
   result is an integer, float, `bool`, `char` or raw pointer (one result at most, or `!`). Not generic,
   not in a generic extend, not a `const fn`, not `@inline` or `@always_inline`. A call needs no
-  `unsafe`. wasm32 is an error. The C compiler must have naked functions: the C file stops with
-  `#error` unless it is Clang, or GCC 8 or later on x86-64 (GCC has no naked functions on aarch64).
+  `unsafe`. wasm32 is an error. The native generators emit the templates alone (`Body.naked`); the
+  `--emit-c` tree stops with `#error` unless its C compiler is Clang, or GCC 8 or later on x86-64
+  (GCC has no naked functions on aarch64).
   The unused-parameter lint skips a naked function.
 
 ### Module-Level Assembly

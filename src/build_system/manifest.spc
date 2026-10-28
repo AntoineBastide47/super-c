@@ -70,10 +70,28 @@ pub const CG_FINITE_MATH: u64 = 2048;
 pub const CG_NO_SIGNED_ZEROS: u64 = 4096;
 pub const CG_FP_CONTRACT: u64 = 8192;
 pub const CG_FAST_MATH: u64 = CG_ASSOC_MATH | CG_RECIP_MATH | CG_FINITE_MATH | CG_NO_SIGNED_ZEROS | CG_FP_CONTRACT;
+/// Each function in a section of its own (`-ffunction-sections`), each variable in one (`-fdata-sections`),
+/// and the link drops what nothing reaches from the entry, the exports and the kept symbols (`link_gc`).
+/// Mach-O splits its sections at symbols instead, so either flag makes its link strip both.
+pub const CG_FUNCTION_SECTIONS: u64 = 16384;
+pub const CG_DATA_SECTIONS: u64 = 32768;
+/// Counted loops over slices run 16-byte vectors at a time (`-fvectorize`, `lir::loops`).
+pub const CG_VECTORIZE: u64 = 65536;
+/// An object is read and written only through its own type or bytes (`-fstrict-aliasing`, C's rule): an
+/// access of a typed place is assumed to touch no object of another scalar type (`lir::ir::MEM_TBAA`).
+pub const CG_STRICT_ALIASING: u64 = 131072;
+/// On ELF, a call of a C library function loads its address from its global offset table slot instead
+/// of calling a procedure linkage table stub (`-fno-plt`, its bit set by the `no` form): the loader
+/// binds it at start.
+pub const CG_NO_PLT: u64 = 262144;
+// Whether flag `b` (`CG_NAMES`) is set by its `no` form.
+const fn negated(b: u64) bool {
+    return b == CG_NO_SIGNED_ZEROS || b == CG_NO_PLT;
+}
 
 // The flags by name: `-f<name>` sets the bits, `-fno-<name>` clears them; the reverse for
-// `signed-zeros`, whose bit is its `no` form.
-const CG_NAMES: [(str<'static>, u64); 15] = [
+// `signed-zeros` and `plt` (`negated`).
+const CG_NAMES: [(str<'static>, u64); 20] = [
     ("omit-frame-pointer", CG_OMIT_FRAME_POINTER),
     ("inline", CG_INLINE),
     ("inline-functions", CG_INLINE_FUNCTIONS),
@@ -89,6 +107,11 @@ const CG_NAMES: [(str<'static>, u64); 15] = [
     ("finite-math-only", CG_FINITE_MATH),
     ("signed-zeros", CG_NO_SIGNED_ZEROS),
     ("fp-contract=fast", CG_FP_CONTRACT),
+    ("function-sections", CG_FUNCTION_SECTIONS),
+    ("data-sections", CG_DATA_SECTIONS),
+    ("vectorize", CG_VECTORIZE),
+    ("strict-aliasing", CG_STRICT_ALIASING),
+    ("plt", CG_NO_PLT),
 ];
 
 // The bits flag `name` names: 0 for none.
@@ -141,7 +164,7 @@ pub fn cg_flag(arg: str, on: &mut u64, off: &mut u64) bool {
         ),
     );
     if b != 0 {
-        cg_put(b, neg == (b == CG_NO_SIGNED_ZEROS), on, off);
+        cg_put(b, neg == negated(b), on, off);
     }
     return b != 0;
 }
@@ -150,7 +173,7 @@ pub fn cg_flag(arg: str, on: &mut u64, off: &mut u64) bool {
 pub fn cg_key(key: str, v: bool, on: &mut u64, off: &mut u64) bool {
     let b = cg_bit(key);
     if b != 0 {
-        cg_put(b, v != (b == CG_NO_SIGNED_ZEROS), on, off);
+        cg_put(b, v != negated(b), on, off);
     }
     return b != 0;
 }
@@ -186,7 +209,7 @@ pub fn cg_spell(opt: i32, on: u64, off: u64, out: &mut String) {
     let names: [](str, u64) = CG_NAMES;
     for k in 0..names.len() {
         let b = names[k].1;
-        let (set, clear) = if b == CG_NO_SIGNED_ZEROS {
+        let (set, clear) = if negated(b) {
             ((off & b) == b, (on & b) == b);
         } else {
             ((on & b) == b, (off & b) == b && (b & CG_PROTECTS) == 0);
@@ -207,7 +230,8 @@ pub fn cg_spell(opt: i32, on: u64, off: u64, out: &mut String) {
 /// The flags a build at `opt-level` `opt` runs with: the level's defaults, then `on` set and `off`
 /// cleared. At every level but 0 the frame pointer goes (on arm64 from leaf functions only, as Apple's
 /// ABI allows) and calls inline; past the ones that shrink the code at 2, 3 and "s"; loops unroll at 2
-/// and 3, unswitch and version on their bounds checks at 3.
+/// and 3, vectorize at 2, 3 and "s" (as LLVM's), unswitch and version on their bounds checks at 3;
+/// aliasing is strict from 2 on, "s" and "z" included (as GCC's).
 pub const fn cg_effective(opt: i32, on: u64, off: u64) u64 {
     let mut f: u64 = 0;
     if opt > 0 {
@@ -219,10 +243,29 @@ pub const fn cg_effective(opt: i32, on: u64, off: u64) u64 {
     if opt == 2 || opt == 3 {
         f |= CG_UNROLL;
     }
+    if opt >= 2 && opt != OPT_Z {
+        f |= CG_VECTORIZE;
+    }
     if opt == 3 {
         f |= CG_UNSWITCH | CG_VERSION_LOOPS;
     }
+    if opt >= 2 {
+        f |= CG_STRICT_ALIASING;
+    }
     return (f | on) & ~off;
+}
+
+/// The link flag that drops what nothing reaches (Mach-O's spelling when `macho`), when the effective
+/// flags `cg` put functions or variables in sections of their own; empty otherwise.
+pub fn link_gc(cg: u64, macho: bool) str<'static> {
+    if (cg & (CG_FUNCTION_SECTIONS | CG_DATA_SECTIONS)) == 0 {
+        return "";
+    }
+    return if macho {
+        "-Wl,-dead_strip";
+    } else {
+        "-Wl,--gc-sections";
+    };
 }
 
 /// One extra binary target: `[bin.NAME] root = "..."` (the top-level `bin`/`root` pair is the

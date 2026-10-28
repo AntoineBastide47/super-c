@@ -27,7 +27,10 @@ fn optimized_fm(text: str, fm: u8, fma: bool) (Package, Package) {
     lopt::optimize(
         &mut after,
         &none,
-        lopt::Config { inline: il::SPEED, loops: lu::Budgets { peel: 0, version: 0, unswitch: 0 } },
+        lopt::Config {
+            inline: il::SPEED,
+            loops: lu::Budgets { peel: 0, version: 0, unswitch: 0, rotate: 0, vector: 0 },
+        },
     );
     let mut v = verify::Verifier::new();
     for i in 0..after.syms.len() {
@@ -323,7 +326,10 @@ b0(v0: i32):
     lopt::optimize(
         &mut p,
         &sealed,
-        lopt::Config { inline: il::SPEED, loops: lu::Budgets { peel: 0, version: 0, unswitch: 0 } },
+        lopt::Config {
+            inline: il::SPEED,
+            loops: lu::Budgets { peel: 0, version: 0, unswitch: 0, rotate: 0, vector: 0 },
+        },
     );
     assert(!text_of(&p, "same").contains("@leaf"), "a body of the same unit inlines it");
     assert(text_of(&p, "other").contains("call @leaf"), "a body of another unit calls it");
@@ -772,6 +778,134 @@ b0:
     same_result(&b, &a, "drive", none, 48);
 }
 
+// Type tags (`-fstrict-aliasing`): a tagged load leaves a loop whose only writes have another tag, and
+// reads the value a store with its tag wrote across a store of another tag; an untagged store keeps both
+// loads where they are.
+@test
+fn a_tagged_load_passes_stores_of_another_type() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @fill fn global noinline
+sym @fwd fn global noinline
+sym @fwd_any fn global noinline
+sym @drive fn global
+fn @fill
+  sig (ptr) -> i64
+  ref p0 16
+b0(v0: ptr):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  v3 = fconst.f64 0x4000000000000000
+  jmp b1(v1)
+b1(v4: i64):
+  v5 = load.i64 v0+8 align 3 tbaa 4
+  v6 = icmp.ult v4, v5
+  br v6, b2, b3
+b2:
+  v7 = load.ptr v0 align 3 tbaa 8
+  v8 = ptradd v7, v4 * 8
+  store v3, v8 align 3 tbaa 7
+  v9 = add.i64 v4, v2
+  jmp b1(v9)
+b3:
+  ret v4
+fn @fwd
+  sig (ptr, ptr, i64) -> i64
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = fconst.f64 0x3ff0000000000000
+  store v2, v0 align 3 tbaa 4
+  store v3, v1 align 3 tbaa 7
+  v4 = load.i64 v0 align 3 tbaa 4
+  ret v4
+fn @fwd_any
+  sig (ptr, ptr, i64) -> i64
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = fconst.f64 0x3ff0000000000000
+  store v2, v0 align 3 tbaa 4
+  store v3, v1 align 3
+  v4 = load.i64 v0 align 3 tbaa 4
+  ret v4
+fn @drive
+  sig () -> i64
+  slot s0 size 16 align 3
+  slot s1 size 32 align 3
+  slot s2 size 8 align 3
+b0:
+  v0 = slotaddr s0
+  v1 = slotaddr s1
+  v2 = slotaddr s2
+  v3 = iconst.i64 4
+  store v1, v0 align 3
+  store v3, v0+8 align 3
+  v4 = call.i64 @fill(v0) : (ptr) -> i64
+  v5 = iconst.i64 7
+  v6 = call.i64 @fwd(v2, v1, v5) : (ptr, ptr, i64) -> i64
+  v7 = call.i64 @fwd_any(v2, v1, v5) : (ptr, ptr, i64) -> i64
+  v8 = load.i64 v1+24 align 3
+  v9 = add.i64 v4, v6
+  v10 = add.i64 v9, v7
+  v11 = add.i64 v10, v8
+  ret v11
+)",
+    );
+    let f = text_of(&a, "fill");
+    let at = f.as_str().find("load.i64 v0+8");
+    assert(at >= 0 && at < f.as_str().find("b1("), f.as_str());
+    assert(f.as_str().find("load.ptr") < f.as_str().find("b1("), f.as_str());
+    assert(!text_of(&a, "fwd").contains("load"), text_of(&a, "fwd").as_str());
+    assert(text_of(&a, "fwd_any").contains("load"), text_of(&a, "fwd_any").as_str());
+    // 4 iterations, 7 twice, and the bits of 2.0 in the last element.
+    let none: []u64 = [];
+    same_result(&b, &a, "drive", none, 4 + 14 + 0x4000000000000000);
+}
+
+// A slot's address that a branch picks against null becomes a select (`diamond`) passed to a call: the
+// call reads the slot, so the store into it stays.
+@test
+fn a_slot_a_select_passes_to_a_call_keeps_its_stores() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @read fn global noinline
+sym @pick fn global
+fn @read
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = iconst.ptr 0
+  v2 = icmp.eq v0, v1
+  br v2, b1, b2
+b1:
+  v3 = iconst.i64 0
+  ret v3
+b2:
+  v4 = load.i64 v0 align 3
+  ret v4
+fn @pick
+  sig (i64, i64) -> i64
+  slot s0 size 8 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.ptr 0
+  v4 = iconst.i64 0
+  store v1, v2 align 3
+  v5 = icmp.sge v0, v4
+  br v5, b1, b2
+b1:
+  jmp b3(v2)
+b2:
+  jmp b3(v3)
+b3(v6: ptr):
+  v7 = call.i64 @read(v6) : (ptr) -> i64
+  ret v7
+)",
+    );
+    let p = text_of(&a, "pick");
+    assert(p.contains("select.ptr") && p.contains("store"), p.as_str());
+    let yes: []u64 = [1, 42];
+    same_result(&b, &a, "pick", yes, 42);
+    let no: []u64 = [0xFFFFFFFFFFFFFFFF, 42];
+    same_result(&b, &a, "pick", no, 0);
+}
+
 // A branch on a condition a dominating branch decided jumps: the edge into its block fixed the value.
 @test
 fn a_branch_a_dominating_branch_decided_jumps() {
@@ -804,4 +938,102 @@ b4:
     same_result(&b, &a, "k", lo, 1);
     let hi: []u64 = [5, 3];
     same_result(&b, &a, "k", hi, 8);
+}
+
+// A branch whose sides reach one block through empty blocks becomes a select; a loop over the lesser of
+// two lengths drops its counter's checks against each (`i <u min(a, b)` decides `i <u a`, `i >=u b`), not
+// against the greater one; a side with an instruction stays a branch.
+@test
+fn a_minimum_becomes_a_select_whose_bound_decides_checks() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @sum fn global
+sym @big fn global
+sym @arm fn global
+fn @sum
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = icmp.ult v0, v1
+  br v4, b1, b2
+b1:
+  jmp b3(v0)
+b2:
+  jmp b3(v1)
+b3(v5: i64):
+  jmp b4(v2, v2)
+b4(v6: i64, v7: i64):
+  v8 = icmp.ult v6, v5
+  br v8, b5, b9
+b5:
+  v9 = icmp.ult v6, v0
+  br v9, b6, b8
+b6:
+  v10 = icmp.uge v6, v1
+  br v10, b8, b7
+b7:
+  v11 = add.i64 v7, v6
+  v12 = add.i64 v6, v3
+  jmp b4(v12, v11)
+b8: cold
+  panic "index out of bounds"
+b9:
+  ret v7
+fn @big
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = icmp.ult v0, v1
+  br v4, b1, b2
+b1:
+  jmp b3(v1)
+b2:
+  jmp b3(v0)
+b3(v5: i64):
+  jmp b4(v2, v2)
+b4(v6: i64, v7: i64):
+  v8 = icmp.ult v6, v5
+  br v8, b5, b8
+b5:
+  v9 = icmp.ult v6, v0
+  br v9, b6, b7
+b6:
+  v10 = add.i64 v7, v6
+  v11 = add.i64 v6, v3
+  jmp b4(v11, v10)
+b7: cold
+  panic "index out of bounds"
+b8:
+  ret v7
+fn @arm
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = icmp.ult v0, v1
+  br v3, b1, b2
+b1:
+  v4 = add.i64 v0, v2
+  jmp b3(v4)
+b2:
+  jmp b3(v1)
+b3(v5: i64):
+  ret v5
+)",
+    );
+    let s = text_of(&a, "sum");
+    assert(s.contains("select.i64") && !s.contains("panic") && count_of(&s, "icmp") == 2, s.as_str());
+    let short_first: []u64 = [3, 5];
+    same_result(&b, &a, "sum", short_first, 3);
+    let short_second: []u64 = [5, 3];
+    same_result(&b, &a, "sum", short_second, 3);
+    let g = text_of(&a, "big");
+    assert(g.contains("select.i64") && g.contains("panic") && count_of(&g, "icmp") == 3, g.as_str());
+    let equal: []u64 = [4, 4];
+    same_result(&b, &a, "big", equal, 6);
+    let r = text_of(&a, "arm");
+    assert(!r.contains("select") && r.contains("br "), r.as_str());
+    let lower: []u64 = [2, 7];
+    same_result(&b, &a, "arm", lower, 3);
 }

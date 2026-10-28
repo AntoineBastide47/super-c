@@ -1,5 +1,5 @@
-// The link step: the link record's name, a C static library the own linker links, and the import
-// libraries a Windows link takes for their DLLs.
+// The link step: the link record's name, a C static library the own linker links, the import
+// libraries a Windows link takes for their DLLs, and the garbage collection of `-ffunction-sections`.
 import stdlib;
 import build_system::build as bsys;
 import driver::util as dutil;
@@ -9,6 +9,7 @@ import target::assembler as asmr;
 import target::coff as coff;
 import link::pe;
 import std::platform::fs;
+import module::loader as loader;
 
 @test
 fn link_record_names_fit_and_differ() {
@@ -99,6 +100,11 @@ fn a_c_static_library_links_with_the_own_linker() {
     let r = cli::superc_in(p.dir(), "build main.spc -o bin");
     assert(r.ok(), "the own linker links the library");
     assert_eq(p.run_bin(), 0);
+    // Garbage collection keeps the constructor, the table's functions and the thread-local the program
+    // reaches through the library.
+    let rg = cli::superc_in(p.dir(), "build main.spc -ffunction-sections -fdata-sections -o bin");
+    assert(rg.ok(), "the own linker collects the library's unused parts");
+    assert_eq(p.run_bin(), 0);
     let sdk = stdlib::get_env("WASI_SDK_PATH").unwrap_or(String::new());
     if sdk.len() == 0 || cli::on_wasm() {
         return;
@@ -130,6 +136,9 @@ fn a_c_static_library_links_with_the_own_linker() {
     let rw = cli::superc_in(p.dir(), "build main.spc --target=wasm -o bin.wasm");
     assert(rw.ok(), "the own linker links the wasm32 library");
     let mut run = format("wasmtime run \"{}/bin.wasm\"", p.dir());
+    assert_eq(cli::run_with(run.cstr(), null, null, null, ""), 0);
+    let rwg = cli::superc_in(p.dir(), "build main.spc --target=wasm -ffunction-sections -fdata-sections -o bin.wasm");
+    assert(rwg.ok(), "the own linker collects the wasm32 library's unused parts");
     assert_eq(cli::run_with(run.cstr(), null, null, null, ""), 0);
 }
 
@@ -166,7 +175,7 @@ fn an_archive_with_imports_stands_for_its_dll() {
     let mut a = asmr::Asm::new(asmr::ISA_X64, asmr::FMT_COFF);
     assert(a.module(&mut o, ".globl helper\nhelper:\nret\n"), "the object assembles");
     let mut obj = Vector::<u8>::new();
-    coff::write(&o, &mut obj);
+    coff::write(&o, 0, &mut obj);
     // A short import object of `f` from `x.dll`: signatures 0 and 0xFFFF, version 0, machine x86-64, time,
     // the size of the names, ordinal or hint, type code by name, then the names.
     let names = "f\0x.dll\0";
@@ -209,4 +218,93 @@ fn an_archive_with_imports_stands_for_its_dll() {
     let mut path = String::new();
     assert(!pe::static_lib(&opts, "x", &mut path), "an archive with an import is an import library");
     assert(pe::static_lib(&opts, "y", &mut path), "an archive of objects alone is a static library");
+}
+
+// A program at `-O2` with a function every call of which inlines (its body stays in the object), an
+// `@export` function and an `@used` variable nothing refers to, and code reached only through a function
+// pointer in data. Emission leaves out what nothing names, so dead code comes from the optimizer.
+const GC_MAIN: str = M"(pub fn gc_inlined_marker(x: i64) i64 {
+    return x * 977 + 3;
+}
+
+@export("gc_exported_marker")
+fn gc_exported_marker(x: i32) i32 {
+    return x + 1;
+}
+
+@used
+static mut gc_used_marker: [u8; 24] = [5; 24];
+
+@noinline
+fn gc_through_table(x: i64) i64 {
+    return x * 2;
+}
+
+static mut GC_TABLE: [fn(i64) i64; 1] = [gc_through_table];
+
+fn main() i32 {
+    let f = unsafe GC_TABLE[0];
+    return (f(21) - 42 + gc_inlined_marker(2) - 1957) as i32;
+}
+)";
+
+// `-ffunction-sections -fdata-sections`: the link drops the body nothing calls any more, keeps the exported
+// function, the `@used` variable and what a kept table points to, and the program still runs.
+@test
+fn section_garbage_collection_drops_what_nothing_reaches() {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", GC_MAIN);
+    let full = format("{}/full{}", p.dir(), unsafe str::from_cstr(cli::binext()));
+    let gc = format("{}/gc{}", p.dir(), unsafe str::from_cstr(cli::binext()));
+    let a = format("build main.spc -O2 -o \"{}\"", full.as_str());
+    assert(cli::superc_in(p.dir(), a.as_str()).ok(), "the plain build");
+    let b = format("build main.spc -O2 -ffunction-sections -fdata-sections -o \"{}\"", gc.as_str());
+    assert(cli::superc_in(p.dir(), b.as_str()).ok(), "the collected build");
+    let fb = loader::read_file(full.as_str()).unwrap();
+    let gb = loader::read_file(gc.as_str()).unwrap();
+    assert(has(fb.as_str(), "gc_inlined_marker"), "the plain build keeps the inlined function's body");
+    assert(!has(gb.as_str(), "gc_inlined_marker"), "the collected build drops it");
+    assert(has(gb.as_str(), "gc_exported_marker"), "an exported function stays");
+    assert(has(gb.as_str(), "gc_used_marker"), "an '@used' variable stays");
+    assert(has(gb.as_str(), "gc_through_table"), "a function a kept table points to stays");
+    assert(gb.len() < fb.len(), "the collected build is smaller");
+    let mut run = format("\"{}\"", gc.as_str());
+    assert_eq(cli::run_with(run.cstr(), null, null, null, ""), 0);
+    // The wasm linker: its name section names the functions it keeps.
+    if stdlib::get_env("WASI_SDK_PATH").unwrap_or(String::new()).len() == 0 || cli::on_wasm() {
+        return;
+    }
+    let wa = format("build main.spc -O2 --target=wasm -o \"{}/full.wasm\"", p.dir());
+    assert(cli::superc_in(p.dir(), wa.as_str()).ok(), "the plain wasm build");
+    let wb = format("build main.spc -O2 -ffunction-sections -fdata-sections --target=wasm -o \"{}/gc.wasm\"", p.dir());
+    assert(cli::superc_in(p.dir(), wb.as_str()).ok(), "the collected wasm build");
+    let wfp = format("{}/full.wasm", p.dir());
+    let wgp = format("{}/gc.wasm", p.dir());
+    let wf = loader::read_file(wfp.as_str()).unwrap();
+    let wg = loader::read_file(wgp.as_str()).unwrap();
+    assert(has(wf.as_str(), "gc_inlined_marker"), "the plain wasm build keeps the inlined function's body");
+    assert(!has(wg.as_str(), "gc_inlined_marker"), "the collected wasm build drops it");
+    assert(has(wg.as_str(), "gc_exported_marker"), "an exported function stays in wasm");
+    assert(has(wg.as_str(), "gc_through_table"), "a function a kept table points to stays in wasm");
+    assert(wg.len() < wf.len(), "the collected wasm build is smaller");
+    let mut wrun = format("wasmtime run \"{}\"", wgp.as_str());
+    assert_eq(cli::run_with(wrun.cstr(), null, null, null, ""), 0);
+}
+
+// Whether the bytes `b` hold those of `s`.
+fn has(b: str, s: str) bool {
+    let n = s.len();
+    if b.len() < n {
+        return false;
+    }
+    for i in 0..b.len() - n + 1 {
+        let mut k: usize = 0;
+        while k < n && b.byte_at(i + k) == s.byte_at(k) {
+            k += 1;
+        }
+        if k == n {
+            return true;
+        }
+    }
+    return false;
 }

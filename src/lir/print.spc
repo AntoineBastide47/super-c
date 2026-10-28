@@ -169,6 +169,9 @@ extend Printer {
             if (blk.flags & BLOCK_COLD) != 0 {
                 out.push_str(" cold");
             }
+            if (blk.flags & BLOCK_NOVEC) != 0 {
+                out.push_str(" novec");
+            }
             out.push_byte(b'\n');
             for j in 0..blk.len {
                 self.inst(p, b, blk.start + j, out);
@@ -558,6 +561,9 @@ extend Printer {
         out.format_into(" align {}", t.aux & 15);
         if (t.aux & MEM_VOLATILE) != 0 {
             out.push_str(" volatile");
+        }
+        if tbaa(t) != 0 {
+            out.format_into(" tbaa {}", tbaa(t));
         }
     }
 }

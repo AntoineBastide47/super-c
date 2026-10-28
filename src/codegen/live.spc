@@ -10,6 +10,7 @@
 // in reverse postorder is a back edge.
 import lir::ir as *;
 import lir::verify as lv;
+import ir::core as core;
 
 /// `Live::plan`'s homes per value: no register for the whole range, a callee-saved one, a caller-saved one.
 pub const HOME_NONE: u8 = 0;
@@ -72,6 +73,7 @@ pub struct Live {
     stack: Vector<u32>,
     work: Vector<u32>,
     keys: Vector<u64>,
+    rd: Vector<Value>, // `reads_after`'s scratch
 }
 
 extend Live {
@@ -106,6 +108,7 @@ extend Live {
             stack: Vector::<u32>::new(),
             work: Vector::<u32>::new(),
             keys: Vector::<u64>::new(),
+            rd: Vector::<Value>::new(),
         };
     }
 
@@ -196,6 +199,61 @@ extend Live {
         let mut out = replace(&mut self.succ, Vector::<u32>::new());
         self.uses_at(b, i, &mut out);
         self.succ = out;
+    }
+
+    /// The value index of a parameter that a back edge of terminator `t` (of the block at layout position
+    /// `pos`) passes value `v` to (an edge into a loop header not later in the layout); NONE for none. A
+    /// branch's other edge must leave the loop, and the parameter must not live past the loop: no path
+    /// from `t` reads the parameter but through its block, which defines it again.
+    pub fn back_param(self: &Self, b: &Body, t: Inst, v: Value, pos: u32) u32 {
+        let ne: u32 = if t.op == O_JMP {
+            1;
+        } else if t.op == O_BR {
+            2;
+        } else {
+            0;
+        };
+        for e in 0..ne {
+            let x = edge_of(b, t, e);
+            let tk = b.edge_target(x);
+            if self.pos[tk as usize] > pos {
+                continue;
+            }
+            let tb = b.blocks[tk as usize];
+            for q in 0..b.edge_nargs(x) {
+                if b.edge_arg(x, q) != v {
+                    continue;
+                }
+                let px = b.insts.len() as u32 + tb.param_start + q;
+                if ne == 2 {
+                    let o = self.pos[b.edge_target(edge_of(b, t, 1 - e)) as usize];
+                    if self.lend[tk as usize] == NONE || o >= self.pos[tk as usize] && o <= self.lend[tk as usize] || self.end[px as usize] > self.lend[tk as usize] {
+                        return NONE;
+                    }
+                }
+                return px;
+            }
+        }
+        return NONE;
+    }
+
+    /// Whether an instruction of block `k` of `b` after instruction `i`, its terminator's edges included,
+    /// reads value `v`.
+    pub fn reads_after(self: &mut Self, b: &Body, k: u32, i: u32, v: Value) bool {
+        let bk = b.blocks[k as usize];
+        let mut out = replace(&mut self.rd, Vector::<Value>::new());
+        let mut found = false;
+        for j in i + 1..bk.start + bk.len {
+            self.uses_at(b, j, &mut out);
+            for u in 0..out.len() {
+                found = found || out[u] == v;
+            }
+            if found {
+                break;
+            }
+        }
+        self.rd = out;
+        return found;
     }
 
     /// The values instruction `i` of `b` uses, as `each_use` gives them but for the folded addresses
@@ -867,6 +925,13 @@ extend Live {
             }
         }
     }
+}
+
+/// Whether vector operation `t` (`O_VOP`) is a reduction, which computes in place over temporaries
+/// (no call).
+pub const fn reduces(t: Inst) bool {
+    let code = (t.aux & VOP_CODE) as u32;
+    return code >= core::OP_SIMD && code < core::OP_CMP_LANES && core::simd_op((code - core::OP_SIMD) as u8).rule == core::SR_REDUCE;
 }
 
 /// The values instruction `t` of `b` uses into `out`, each use once: its operands, a call's arguments, a

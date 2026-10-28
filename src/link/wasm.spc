@@ -22,6 +22,7 @@ pub struct Opts {
     pub stack: u64, // 0: wasm-ld's 64 KiB
     pub stack_first: bool,
     pub strip: bool,
+    pub gc: bool, // drop the bodies and data segments nothing reaches (`--gc-sections`, `collect`)
 }
 
 // Symbol kinds and flags (the linking conventions').
@@ -34,6 +35,7 @@ const F_WEAK: u32 = 1;
 const F_LOCAL: u32 = 2;
 const F_UNDEFINED: u32 = 0x10;
 const F_EXPLICIT_NAME: u32 = 0x40;
+const F_NO_STRIP: u32 = 0x80;
 
 // An input file: its bytes in the blob, and where its parts start in the per-file tables.
 struct IFile {
@@ -70,23 +72,26 @@ struct IImp {
     pub ty: u32,
 }
 
-// A function body of an input: its type, its entry (size field first) in the blob, where it lands.
+// A function body of an input: its type, its entry (size field first) in the blob, where it lands; not
+// `live` when garbage collection drops it.
 struct IFunc {
     pub ty: u32,
     pub at: usize,
     pub len: usize,
     pub index: u32, // the output function index
     pub out: u64, // the entry's offset in the output code section's payload
+    pub live: bool,
 }
 
 // A data segment of an input: name, alignment, bytes in the blob, its address once placed (NONE: a
-// constructor table, not placed).
+// constructor table or dropped, not placed); not `live` when garbage collection drops it.
 struct ISeg {
     pub name: u32,
     pub align: u32,
     pub at: usize,
     pub len: usize,
     pub addr: u32,
+    pub live: bool,
 }
 
 // A symbol of an input.
@@ -224,6 +229,9 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
         return false;
     }
     let b = blob.as_slice();
+    if o.gc {
+        collect(l, b);
+    }
     if !assign_functions(l, b) {
         return false;
     }
@@ -387,7 +395,9 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
             let n = lu::read_uleb(b, &mut q);
             for _ in 0..n {
                 let ty = lu::read_uleb(b, &mut q) as u32;
-                l.funcs.push(IFunc { ty: l.ftypes[(f.type0 + ty) as usize], at: 0, len: 0, index: NONE, out: 0 });
+                l.funcs.push(
+                    IFunc { ty: l.ftypes[(f.type0 + ty) as usize], at: 0, len: 0, index: NONE, out: 0, live: true },
+                );
                 f.nfn += 1;
             }
         } else if id == 10 {
@@ -413,7 +423,7 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
                 let _ = sleb(b, &mut q);
                 q += 1;
                 let sz = lu::read_uleb(b, &mut q) as usize;
-                l.segs.push(ISeg { name: 0, align: 0, at: q, len: sz, addr: 0 });
+                l.segs.push(ISeg { name: 0, align: 0, at: q, len: sz, addr: 0, live: true });
                 f.nseg += 1;
                 q += sz;
             }
@@ -641,14 +651,17 @@ fn add_import(l: &mut L, im: IImp) u32 {
     return (l.oimps.len() - 1) as u32;
 }
 
-// The output function indices: the imports, the bodies in input order, then `__wasm_call_ctors`; the
+// The output function indices: the imports, the live bodies in input order, then `__wasm_call_ctors`; the
 // constructors, from the `.init_array` segments' relocations.
 fn assign_functions(l: &mut L, b: []u8) bool {
-    let ni = l.oimps.len() as u32;
+    let mut nx = l.oimps.len() as u32;
     for i in 0..l.funcs.len() {
-        l.funcs.index_mut(i).index = ni + i as u32;
+        if l.funcs[i].live {
+            l.funcs.index_mut(i).index = nx;
+            nx += 1;
+        }
     }
-    l.ctor_fn = ni + l.funcs.len() as u32;
+    l.ctor_fn = nx;
     l.nfuncs = l.ctor_fn + 1;
     let empty: [u8; 2] = [0, 0];
     l.ctor_ty = type_index(l, empty);
@@ -729,6 +742,148 @@ const fn func_index(l: &L, k: u32) u32 {
     let y = l.syms[k as usize];
     let f = l.files[y.file as usize];
     return l.funcs[(f.fn0 + y.index - f.nimp) as usize].index;
+}
+
+// ---- garbage collection ---------------------------------------------------------------------------------
+
+// Keep only the bodies and data segments a root reaches through relocations (`--gc-sections`, as wasm-ld
+// does): `_start`, the symbols marked to stay (`F_NO_STRIP`), the init functions and the constructor
+// tables. Items: the bodies, then the segments. A dropped body gets no index nor place in the code, a
+// dropped segment no address.
+fn collect(l: &mut L, b: []u8) {
+    let nf = l.funcs.len() as u32;
+    let n = nf as usize + l.segs.len();
+    // Each relocation of a body or segment as an edge (its item << 32 | its target's), by source.
+    let mut edges = Vector::<u64>::new();
+    for fi in 0..l.files.len() {
+        let f = l.files[fi];
+        for s in f.sec0..f.sec0 + f.nsec {
+            let sc = l.secs[s as usize];
+            if sc.id != 0 || !l.names.spell(sc.name).starts_with("reloc.") {
+                continue;
+            }
+            let mut q = sc.at;
+            let ts = l.secs[(f.sec0 + lu::read_uleb(b, &mut q) as u32) as usize];
+            if ts.id != 10 && ts.id != 11 {
+                continue;
+            }
+            let cnt = lu::read_uleb(b, &mut q);
+            for _ in 0..cnt {
+                let ty = b[q];
+                q += 1;
+                let src = ts.at + lu::read_uleb(b, &mut q) as usize;
+                let k = lu::read_uleb(b, &mut q) as u32;
+                if w::has_addend(ty) {
+                    let _ = sleb(b, &mut q);
+                }
+                let to = if ty == w::R_TYPE_INDEX_LEB {
+                    NONE;
+                } else {
+                    item_of(l, f.sym0 + k);
+                };
+                if to == NONE {
+                    continue;
+                }
+                let from = if ts.id == 10 {
+                    func_at(l, src) as u32;
+                } else {
+                    nf + seg_of(l, src) as u32;
+                };
+                edges.push(from as u64 << 32 | to as u64);
+            }
+        }
+    }
+    edges.sort();
+    let mut first = Vector::<u32>::new();
+    first.resize_default(n + 1);
+    for i in 0..edges.len() {
+        first[(edges[i] >> 32) as usize + 1] += 1;
+    }
+    for i in 0..n {
+        first[i + 1] += first[i];
+    }
+    let mut live = Vector::<bool>::new();
+    live.resize_default(n);
+    let mut work = Vector::<u32>::new();
+    let sid = l.names.find("_start");
+    if sid >= 0 && sid as usize < l.glob.len() && l.glob[sid as usize] != 0 {
+        let g = l.glob[sid as usize] - 1;
+        if l.gs[g as usize].kind == G_DEF {
+            mark(item_of(l, l.gs[g as usize].sym), &mut live, &mut work);
+        }
+    }
+    for k in 0..l.syms.len() {
+        if (l.syms[k].flags & (F_NO_STRIP | F_UNDEFINED)) == F_NO_STRIP {
+            mark(item_of(l, k as u32), &mut live, &mut work);
+        }
+    }
+    for i in 0..l.inits.len() {
+        mark(item_of(l, l.inits[i].1), &mut live, &mut work);
+    }
+    for i in 0..l.segs.len() {
+        if l.names.spell(l.segs[i].name).starts_with(".init_array") {
+            mark(nf + i as u32, &mut live, &mut work);
+        }
+    }
+    while let Some(x) = work.pop() {
+        for e in first[x as usize]..first[x as usize + 1] {
+            mark((edges[e as usize] & 0xFFFFFFFF) as u32, &mut live, &mut work);
+        }
+    }
+    for i in 0..nf as usize {
+        l.funcs.index_mut(i).live = live[i];
+    }
+    for i in 0..l.segs.len() {
+        if !live[nf as usize + i] {
+            let sg = l.segs.index_mut(i);
+            sg.live = false;
+            sg.addr = NONE;
+        }
+    }
+}
+
+fn mark(x: u32, live: &mut Vector<bool>, work: &mut Vector<u32>) {
+    if x != NONE && !live[x as usize] {
+        live[x as usize] = true;
+        work.push(x);
+    }
+}
+
+// The item (`collect`) that defines the target of input symbol `k`: a body, `funcs.len()` plus a segment,
+// or NONE (an import, the linker's, a global).
+fn item_of(l: &L, k: u32) u32 {
+    let mut d = k;
+    let g = gof(l, k);
+    if g != NONE {
+        if l.gs[g as usize].kind != G_DEF {
+            return NONE;
+        }
+        d = l.gs[g as usize].sym;
+    }
+    let y = l.syms[d as usize];
+    if (y.flags & F_UNDEFINED) != 0 {
+        return NONE;
+    }
+    let f = l.files[y.file as usize];
+    if y.kind == K_FUNC {
+        return f.fn0 + y.index - f.nimp;
+    }
+    if y.kind == K_DATA {
+        return l.funcs.len() as u32 + f.seg0 + y.index;
+    }
+    return NONE;
+}
+
+// Whether garbage collection dropped the target of input symbol `k`.
+fn dropped(l: &L, k: u32) bool {
+    let x = item_of(l, k);
+    if x == NONE {
+        return false;
+    }
+    if x < l.funcs.len() as u32 {
+        return !l.funcs[x as usize].live;
+    }
+    return !l.segs[(x - l.funcs.len() as u32) as usize].live;
 }
 
 // ---- memory ---------------------------------------------------------------------------------------------
@@ -873,6 +1028,21 @@ fn apply_rels(l: &mut L, f: IFile, b: []u8, sc: ISec, out: &mut Vector<u8>, mode
         if p == usize::MAX {
             continue;
         }
+        if mode == P_DEBUG && dropped(l, f.sym0 + k) {
+            // Debug information on a dropped body or segment: wasm-ld's tombstones, -2 where -1 would end
+            // a list.
+            let dn = l.names.spell(tsec.name);
+            lu::p32(
+                out,
+                p,
+                if dn == ".debug_ranges" || dn == ".debug_loc" {
+                    0xFFFFFFFEu32;
+                } else {
+                    0xFFFFFFFFu32;
+                },
+            );
+            continue;
+        }
         if ty == w::R_FUNCTION_INDEX_LEB {
             let fx = func_index(l, f.sym0 + k);
             if fx == NONE {
@@ -953,8 +1123,18 @@ fn custom(m: &mut Vector<u8>, name: str, body: &Vector<u8>) {
     section(m, 0, &c);
 }
 
-// Where blob offset `src` (in some body) lands in the output code section's payload.
-const fn code_pos(l: &L, src: usize) usize {
+// Where blob offset `src` (in some body) lands in the output code section's payload (`usize::MAX`: a
+// dropped body).
+fn code_pos(l: &L, src: usize) usize {
+    let fx = l.funcs[func_at(l, src)];
+    if !fx.live {
+        return usize::MAX;
+    }
+    return fx.out as usize + (src - fx.at);
+}
+
+// The body that holds blob offset `src`.
+fn func_at(l: &L, src: usize) usize {
     // The bodies of one input are in order: a binary search over all of them would need them sorted by
     // blob offset, which input order gives.
     let mut lo: usize = 0;
@@ -967,12 +1147,21 @@ const fn code_pos(l: &L, src: usize) usize {
             hi = mid;
         }
     }
-    let fx = l.funcs[lo];
-    return fx.out as usize + (src - fx.at);
+    return lo;
 }
 
-// Where blob offset `src` (in some segment) lands in the memory image (`usize::MAX`: a constructor table).
-const fn data_pos(l: &L, src: usize) usize {
+// Where blob offset `src` (in some segment) lands in the memory image (`usize::MAX`: a constructor table
+// or a dropped segment).
+fn data_pos(l: &L, src: usize) usize {
+    let sg = l.segs[seg_of(l, src)];
+    if sg.addr == NONE {
+        return usize::MAX;
+    }
+    return (sg.addr - l.data_lo) as usize + (src - sg.at);
+}
+
+// The segment that holds blob offset `src`.
+fn seg_of(l: &L, src: usize) usize {
     let mut lo: usize = 0;
     let mut hi = l.segs.len();
     while lo < hi {
@@ -983,20 +1172,20 @@ const fn data_pos(l: &L, src: usize) usize {
             hi = mid;
         }
     }
-    let sg = l.segs[lo];
-    if sg.addr == NONE {
-        return usize::MAX;
-    }
-    return (sg.addr - l.data_lo) as usize + (src - sg.at);
+    return lo;
 }
 
 fn write_module(l: &mut L, o: &Opts, b: []u8, m: &mut Vector<u8>) bool {
     // The code: each body as its input wrote it (the relocated fields keep their 5-byte forms), then
     // `__wasm_call_ctors`.
+    let nlive = (l.ctor_fn - l.oimps.len() as u32) as u64;
     let mut code = Vector::<u8>::new();
-    w::uleb(&mut code, (l.funcs.len() + 1) as u64);
+    w::uleb(&mut code, nlive + 1);
     for i in 0..l.funcs.len() {
         let fx = l.funcs[i];
+        if !fx.live {
+            continue;
+        }
         l.funcs.index_mut(i).out = code.len() as u64;
         code.extend_from_slice(b[fx.at..fx.at + fx.len]);
     }
@@ -1111,9 +1300,11 @@ fn write_module(l: &mut L, o: &Opts, b: []u8, m: &mut Vector<u8>) bool {
     }
     section(m, 2, &s);
     s.truncate(0);
-    w::uleb(&mut s, (l.funcs.len() + 1) as u64);
+    w::uleb(&mut s, nlive + 1);
     for i in 0..l.funcs.len() {
-        w::uleb(&mut s, l.funcs[i].ty);
+        if l.funcs[i].live {
+            w::uleb(&mut s, l.funcs[i].ty);
+        }
     }
     w::uleb(&mut s, l.ctor_ty);
     section(m, 3, &s);
@@ -1237,7 +1428,7 @@ fn write_module(l: &mut L, o: &Opts, b: []u8, m: &mut Vector<u8>) bool {
             let f = l.files[fi];
             for k in f.sym0..f.sym0 + f.nsym {
                 let y = l.syms[k as usize];
-                if y.kind == K_FUNC && (y.flags & F_LOCAL) != 0 && (y.flags & F_UNDEFINED) == 0 {
+                if y.kind == K_FUNC && (y.flags & F_LOCAL) != 0 && (y.flags & F_UNDEFINED) == 0 && l.funcs[(f.fn0 + y.index - f.nimp) as usize].live {
                     fnames.push((l.funcs[(f.fn0 + y.index - f.nimp) as usize].index, y.name));
                 }
             }

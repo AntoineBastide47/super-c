@@ -22,6 +22,7 @@ import ir::core as core;
 import target::assembler as asmr;
 import target::wasmasm as wasm_asm;
 import target::intrin as intrin;
+import std::float as fl;
 
 // The local and home classes: the four scalar wasm types, then v128.
 const CL_I32: u32 = 0;
@@ -600,10 +601,6 @@ const fn int_cmp64(c: u8, sg: bool) u8 {
         return pick8(sg, w::I64_GT_S, w::I64_GT_U);
     }
     return pick8(sg, w::I64_GE_S, w::I64_GE_U);
-}
-
-const fn f32_bits(x: f32) u32 {
-    return unsafe *(((&x) as *const f32) as *const u32);
 }
 
 const fn pick8(c: bool, a: u8, b: u8) u8 {
@@ -2093,7 +2090,7 @@ extend Gen {
         if !fd {
             self.c.op(w::F64_PROMOTE_F32);
         }
-        self.c.f64_const(f64_bits(lo - 1.0));
+        self.c.f64_const(fl::f64_bits(lo - 1.0));
         self.c.op(w::F64_LE);
         self.c.op(w::IF);
         self.c.op(rt);
@@ -2103,7 +2100,7 @@ extend Gen {
         if !fd {
             self.c.op(w::F64_PROMOTE_F32);
         }
-        self.c.f64_const(f64_bits(hi));
+        self.c.f64_const(fl::f64_bits(hi));
         self.c.op(w::F64_GE);
         self.c.op(w::IF);
         self.c.op(rt);
@@ -2698,10 +2695,6 @@ const fn fpow2(k: u32) f64 {
         x = x * 2.0;
     }
     return x;
-}
-
-const fn f64_bits(x: f64) u64 {
-    return unsafe *(((&x) as *const f64) as *const u64);
 }
 
 // `v` truncated to `bits` bits.
@@ -4019,9 +4012,9 @@ extend Gen {
             if c == core::SIMD_IOTA {
                 if fl {
                     if lt == T_F64 {
-                        self.c.f64_const(f64_bits(k as f64));
+                        self.c.f64_const(fl::f64_bits(k as f64));
                     } else {
-                        self.c.f32_const(f32_bits(k as f32));
+                        self.c.f32_const(fl::f32_bits(k as f32));
                     }
                     self.c.local(w::LOCAL_SET, fa);
                     self.st_lane(fa, d, k, lt, false);
@@ -5226,7 +5219,7 @@ extend Gen {
             if add {
                 self.fconst(dd, pick64(dd, 0x8000000000000000, 0x80000000));
             } else {
-                self.fconst(dd, pick64(dd, f64_bits(1.0), f32_bits(1.0)));
+                self.fconst(dd, pick64(dd, fl::f64_bits(1.0), fl::f32_bits(1.0)));
             }
             self.c.local(w::LOCAL_SET, acc);
         } else {

@@ -229,11 +229,11 @@ pub fn object(
         dw::attach(&mut o, &d, fmt, ast_pick(x64, x::R_ABS64, a::R_ABS64));
     }
     if win {
-        coff::write(&o, out);
+        coff::write(&o, p.split, out);
         return true;
     }
     if !apple {
-        elf::write(&o, !x64, out);
+        elf::write(&o, !x64, p.split, out);
         return true;
     }
     // A named section the format does not know is an error.

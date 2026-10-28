@@ -404,8 +404,34 @@ pub const OV_SIGNED: u16 = 1;
 /// `O_FPTOSI`, `O_FPTOUI`: no saturation; the value must be a number in the result's range.
 pub const CV_UNCHECKED: u16 = 1;
 /// `O_PTRADD`'s `aux` is the scale; `O_LOAD`, `O_STORE`: log2 of the alignment in bits 0 to 3, then
-/// MEM_VOLATILE.
+/// MEM_VOLATILE, then the type tag in bits 8 to 11 (`MEM_TBAA`).
 pub const MEM_VOLATILE: u16 = 16;
+/// The type tag of a load or store (`-fstrict-aliasing`): 0 for an access that may touch any object,
+/// else `tbaa_of` its type, which the lowering gives an access of a typed place outside a union. Two
+/// accesses with different tags, neither 0, touch different objects.
+pub const MEM_TBAA_SHIFT: u16 = 8;
+pub const MEM_TBAA: u16 = 0xF00;
+/// The values of the tag field (in use: 0 and the scalar types T_I16 to T_PTR).
+pub const TBAA_TAGS: usize = 16;
+
+/// The type tag of an access of type `ty`: its lane's scalar type, 0 for bytes (which may view any object).
+pub const fn tbaa_of(ty: u8) u16 {
+    let t = if is_vec(ty) {
+        lane_type(ty);
+    } else {
+        ty;
+    };
+    return if t == T_I8 {
+        0u16;
+    } else {
+        t;
+    };
+}
+
+/// The type tag of load or store `t` (`MEM_TBAA`).
+pub const fn tbaa(t: Inst) usize {
+    return ((t.aux & MEM_TBAA) >> MEM_TBAA_SHIFT) as usize;
+}
 /// `O_MEMCPY`: the regions may overlap (memmove).
 pub const MEM_OVERLAP: u16 = 1;
 
@@ -534,11 +560,13 @@ pub struct Block {
     pub len: u32,
     pub param_start: u32,
     pub param_len: u16,
-    pub flags: u16, // BLOCK_COLD
+    pub flags: u16, // BLOCK_*
 }
 
 /// The block holds only a failure path (a panic or a trap).
 pub const BLOCK_COLD: u16 = 1;
+/// The loop this block heads runs what a vector copy of it left (`lir::loops`): it does not vectorize.
+pub const BLOCK_NOVEC: u16 = 2;
 
 /// A stack slot: `size` bytes aligned to `1 << align_log2`.
 pub struct Slot {
@@ -966,6 +994,9 @@ pub struct Package {
     /// Position-independent code for a shared library: a reference to a global symbol goes through the
     /// global offset table, as the symbol may resolve outside the library.
     pub pic: bool,
+    /// On ELF, a call of a C library's function (`Sym.ext`) goes through its global offset table slot,
+    /// not a procedure linkage table stub (`-fno-plt`).
+    pub no_plt: bool,
     /// The objects carry debug information: line tables from the locations of the bodies, their file
     /// names relative to directory `comp_dir`.
     pub debug: bool,
@@ -974,10 +1005,17 @@ pub struct Package {
     pub omit_fp: bool,
     /// The bodies with a stack canary (`PROTECT_*`).
     pub protect: u8,
+    /// The bytes of a vector the native backend computes in one register (`target::table::Isa`), 0 for
+    /// none: the loop vectorizer's vectors (`lir::loops`).
+    pub vector: u32,
     /// The float rewrites the build allows (`FM_*`, `-ffast-math` and its parts), and whether the
     /// processor has a scalar fused multiply-add (`O_FMA` for contraction).
     pub fmath: u8,
     pub fma: bool,
+    /// The object sections split at their symbols, so the link can drop what nothing reaches
+    /// (`codegen::obj::SPLIT_*`, `-ffunction-sections` and `-fdata-sections`); Mach-O splits at the link
+    /// instead.
+    pub split: u8,
     pub names: nm::Names, // file paths, symbol names and messages
     pub files: Vector<u32>, // file id -> name id
     pub syms: Vector<Sym>,
@@ -1041,7 +1079,9 @@ extend Package {
         return Package {
             ptr_bytes: ptr_bytes,
             vec_regs: 16,
+            vector: 16,
             pic: false,
+            no_plt: false,
             debug: false,
             comp_dir: String::new(),
             omit_fp: false,

@@ -31,6 +31,7 @@ pub struct Opts {
     pub dirs: Vector<String>,
     pub strip: bool,
     pub stack: u64,
+    pub gc: bool, // drop the COMDAT sections nothing reaches (`--gc-sections`, `collect`)
 }
 
 const SCN_CODE: u32 = 0x20;
@@ -57,6 +58,7 @@ const REL_SECREL: u32 = 11;
 const CLASS_EXTERNAL: u8 = 2;
 const CLASS_STATIC: u8 = 3;
 const CLASS_WEAK: u8 = 105; // a weak external: its auxiliary record names the default
+const SEL_NODUPLICATES: u8 = 1; // a COMDAT section a second definition of its symbol is an error for
 const SEL_ASSOCIATIVE: u8 = 5; // a COMDAT section kept or dropped with another
 const CLASS_AUX: u8 = 0xFF; // an auxiliary record's slot
 
@@ -126,6 +128,7 @@ struct ISec {
     pub out: u32,
     pub at: u64,
     pub assoc: u32, // an associative COMDAT section's section, else NONE
+    pub sel: u8, // a COMDAT section's selection, else 0
 }
 
 // An input symbol (an auxiliary record keeps its slot, so symbol table indices stay direct).
@@ -301,6 +304,9 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
         return false;
     }
     let b = blob.as_slice();
+    if o.gc {
+        collect(l, b, main);
+    }
     layout(l, o);
     let mut img = Vector::<u8>::new();
     img.resize_default(file_end(l) as usize);
@@ -396,6 +402,7 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
                 out: NONE,
                 at: 0,
                 assoc: NONE,
+                sel: 0,
             },
         );
     }
@@ -416,8 +423,11 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
         if b[e + 16] == CLASS_STATIC && naux != 0 && sec > 0 && sec as usize <= nsec {
             let s = (sec0 + sec as u32 - 1) as usize;
             let a = e + 18;
-            if (l.secs[s].flags & SCN_LNK_COMDAT) != 0 && b[a + 14] == SEL_ASSOCIATIVE && lu::r16(b, a + 12) != 0 {
-                l.secs.index_mut(s).assoc = sec0 + lu::r16(b, a + 12) - 1;
+            if (l.secs[s].flags & SCN_LNK_COMDAT) != 0 {
+                l.secs.index_mut(s).sel = b[a + 14];
+                if b[a + 14] == SEL_ASSOCIATIVE && lu::r16(b, a + 12) != 0 {
+                    l.secs.index_mut(s).assoc = sec0 + lu::r16(b, a + 12) - 1;
+                }
             }
         }
         l.syms.push(
@@ -490,7 +500,8 @@ const fn gof(l: &L, k: u32) u32 {
 }
 
 // Enter the external symbols of the objects from file `from` on: one definition each, but a COMDAT
-// section that defines a defined name is dropped (with its associative sections); a tentative one (no
+// section that defines a defined name is dropped (with its associative sections) unless either selects no
+// duplicates; a tentative one (no
 // section, a size) takes the largest size; a weak external keeps its default until an object defines it.
 fn resolve_objects(l: &mut L, from: usize) bool {
     for f in from..l.files.len() {
@@ -533,7 +544,10 @@ fn resolve_objects(l: &mut L, from: usize) bool {
                 l.gs[g as usize] = gy;
                 continue;
             }
-            if gy.kind == G_DEF && y.sec > 0 && (l.secs[(fl.sec0 + y.sec as u32 - 1) as usize].flags & SCN_LNK_COMDAT) != 0 {
+            if gy.kind == G_DEF && y.sec > 0 && (l.secs[(fl.sec0 + y.sec as u32 - 1) as usize].flags & SCN_LNK_COMDAT) != 0 && l.secs[(fl.sec0 + y.sec as u32 - 1) as usize].sel != SEL_NODUPLICATES && def_sel(
+                l,
+                gy.sym,
+            ) != SEL_NODUPLICATES {
                 drop_section(l, fl.sec0 + y.sec as u32 - 1);
                 continue;
             }
@@ -569,6 +583,15 @@ fn no_dtors(l: &mut L) bool {
         }
     }
     return true;
+}
+
+// The COMDAT selection of the section that defines symbol `k` (0: none).
+fn def_sel(l: &L, k: u32) u8 {
+    let y = l.syms[k as usize];
+    if y.sec <= 0 {
+        return 0;
+    }
+    return l.secs[(l.files[y.file as usize].sec0 + (y.sec - 1) as u32) as usize].sel;
 }
 
 // Drop input section `s` and the associative sections that follow it.
@@ -624,6 +647,89 @@ fn bind_weak(l: &mut L) {
             m.kind = G_DEF;
             m.sym = gy.wdef;
         }
+    }
+}
+
+// ---- garbage collection ---------------------------------------------------------------------------------
+
+// Drop the COMDAT sections no root reaches through relocations (`/OPT:REF`, as lld-link does): the roots
+// are every other loaded section, `main` and a DLL's exports. A section kept keeps its associative
+// sections (its function table entries and unwind information). Debug sections are no roots: a relocation
+// of theirs into a dropped section stays unapplied (`apply`). Each round marks a new section or ends the
+// loop.
+fn collect(l: &mut L, b: []u8, main: u32) {
+    let mut live = Vector::<bool>::new();
+    live.resize_default(l.secs.len());
+    let mut work = Vector::<u32>::new();
+    for s in 0..l.secs.len() {
+        let fl = l.secs[s].flags;
+        if (fl & (SCN_LNK_COMDAT | SCN_LNK_INFO | SCN_LNK_REMOVE | SCN_DISCARDABLE)) == 0 {
+            live[s] = true;
+            work.push(s as u32);
+        }
+    }
+    if !l.shared {
+        reach_global(l, main, &mut live, &mut work);
+    }
+    for g in 0..l.gs.len() {
+        if l.shared && l.gs[g].alias == NONE {
+            reach_global(l, g as u32, &mut live, &mut work);
+        }
+    }
+    loop {
+        while let Some(s) = work.pop() {
+            let sc = l.secs[s as usize];
+            let f = l.files[sc.file as usize];
+            for i in 0..sc.nreloc as usize {
+                reach_sym(l, f.sym0 + lu::r32(b, sc.reloff + 10 * i + 4), &mut live, &mut work);
+            }
+        }
+        for s in 0..l.secs.len() {
+            let a = l.secs[s].assoc;
+            if a != NONE && live[a as usize] && !live[s] && (l.secs[s].flags & SCN_LNK_REMOVE) == 0 {
+                live[s] = true;
+                work.push(s as u32);
+            }
+        }
+        if work.len() == 0 {
+            break;
+        }
+    }
+    for s in 0..l.secs.len() {
+        if (l.secs[s].flags & SCN_LNK_COMDAT) != 0 && !live[s] {
+            l.secs.index_mut(s).flags |= SCN_LNK_REMOVE;
+        }
+    }
+}
+
+// Mark live the section that defines global `g`.
+fn reach_global(l: &L, g: u32, live: &mut Vector<bool>, work: &mut Vector<u32>) {
+    let t = res(l, g);
+    if l.gs[t as usize].kind == G_DEF {
+        reach_def(l, l.gs[t as usize].sym, live, work);
+    }
+}
+
+// Mark live the section that holds the target of symbol `k`.
+fn reach_sym(l: &L, k: u32, live: &mut Vector<bool>, work: &mut Vector<u32>) {
+    let g = gof(l, k);
+    if g != NONE {
+        reach_global(l, g, live, work);
+    } else {
+        reach_def(l, k, live, work);
+    }
+}
+
+// Mark live the section that defines symbol `k`.
+fn reach_def(l: &L, k: u32, live: &mut Vector<bool>, work: &mut Vector<u32>) {
+    let y = l.syms[k as usize];
+    if y.sec <= 0 {
+        return;
+    }
+    let s = l.files[y.file as usize].sec0 + (y.sec - 1) as u32;
+    if !live[s as usize] && (l.secs[s as usize].flags & SCN_LNK_REMOVE) == 0 {
+        live[s as usize] = true;
+        work.push(s);
     }
 }
 
@@ -1360,6 +1466,16 @@ fn target_osec(l: &L, k: u32) u32 {
     return l.secs[(l.files[y.file as usize].sec0 + (y.sec - 1) as u32) as usize].out;
 }
 
+// Whether symbol `k`'s target is defined in a section (of an object).
+fn in_section(l: &L, k: u32) bool {
+    let g = gof(l, k);
+    if g == NONE {
+        return l.syms[k as usize].sec > 0;
+    }
+    let t = res(l, g);
+    return l.gs[t as usize].kind == G_DEF && l.syms[l.gs[t as usize].sym as usize].sec > 0;
+}
+
 // ---- section bytes and relocations ----------------------------------------------------------------------
 
 const fn copy_sections(l: &L, b: []u8, img: &mut Vector<u8>) {
@@ -1392,6 +1508,10 @@ fn apply(l: &mut L, b: []u8, img: &mut Vector<u8>) bool {
             let ty = lu::r16(b, e + 8);
             let p = (os_off + sc.at + at) as usize;
             let pr = os_rva + sc.at + at;
+            if debug && target_osec(l, k) == NONE && in_section(l, k) {
+                // Debug information on a dropped section's code: left unapplied, as lld-link leaves it.
+                continue;
+            }
             let t = target_rva(l, k);
             if ty == REL_ADDR64 {
                 lu::p64(img, p, lu::r64(img.as_slice(), p).wrapping_add(l.base + t));

@@ -37,7 +37,8 @@ gives (`par_replay`); the prelude's files parse in one wave and take their ids i
   by the resolver).
 - Prelude: the std files, then the build-constant module `__std::build`, generated from
   the package's settings (`--target`, `arch`, `test_build`, `profile`, and `build_cfg`: the
-  lockdep and wrapping bits the build sets from the profile, `build_system::build`; `add_build_module`). `build_cfg` is part of the prelude image key and of every unit's cache key.
+  lockdep and wrapping bits `build_system::build::apply_profile` sets from the profile;
+  `add_build_module`). `build_cfg` is part of the prelude image key and of every unit's cache key.
 - The two build drivers (`run_file`, `emit_closure`) load in two stages. `prelude_stage`
   (`src/driver/emit.spc`) loads the prelude alone into a package with the same settings
   (`Package::settings_copy`, `load_prelude_stage`; imports looked up under the std root only),

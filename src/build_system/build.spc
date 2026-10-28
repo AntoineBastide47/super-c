@@ -1481,6 +1481,10 @@ pub fn link_args(
         a.push(format("--sysroot={}", cx.sysroot));
     }
     split_args(&mut a, tgt::os(cx.target).exe_link);
+    let gc = mf::link_gc(mf::cg_effective(prof.opt, prof.cg_on, prof.cg_off), tgt::obj_of(cx.target).name == "macho");
+    if gc.len() != 0 {
+        push_arg(&mut a, gc);
+    }
     for i in 0..m.ldflags.len() {
         split_args(&mut a, m.ldflags.at(i).as_str());
     }

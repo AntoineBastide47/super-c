@@ -2271,10 +2271,13 @@ extend Ty as Hash {
         // Every word is mixed down into the low bits the index masks: a multiply-only chain
         // leaves the index a function of the payload's low bits alone, and records that differ
         // only above them (an array's length, a projection's binder) then probe in one chain.
-        let p = (self as *const Ty) as *const u64;
+        // Each word through a copy: the record's fields have other types (`-fstrict-aliasing`).
+        let p = (self as *const Ty) as *const u8;
         let mut x: u64 = 0xcbf29ce484222325u64;
         for i in 0..sizeof(Ty) / 8 {
-            x = skey_mix(x, unsafe p[i]);
+            let mut w: u64 = 0;
+            unsafe cstring::memcpy((&mut w) as *mut u64, p + i * 8, 8);
+            x = skey_mix(x, w);
         }
         h.write_u64(x);
     }

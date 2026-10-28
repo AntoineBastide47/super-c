@@ -704,6 +704,10 @@ pub fn native_link_and_run(
         args.push(format("--sysroot={}", p.sysroot.as_str()));
     }
     split_args(&mut args, tgt::os(target).exe_link);
+    let gc = bman::link_gc(p.cg, tgt::obj_of(target).name == "macho");
+    if gc.len() != 0 {
+        args.push(String::from_str(gc));
+    }
     push_ldflags(&mut args, build_out_path(root, "__ldflags", "").as_str());
     let mut why = String::new();
     let lr = lk::link_args(target, p.arch, &args, bsys::profile_strip(p.profile.as_str()), p.jobs, &mut why);

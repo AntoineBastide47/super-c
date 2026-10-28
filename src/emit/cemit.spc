@@ -23,6 +23,7 @@ import target::assembler as asmr;
 import target::ctxswitch as ctxs;
 import lir::lower as lw;
 import lir::ir as lir_ir;
+import codegen::obj as cob;
 import target::native as nat;
 import emit::rt_h as rth;
 import typechecker::render as rnd;
@@ -566,7 +567,9 @@ extend CEmit {
                 l.pkg.vec_regs = mg.vec_reg_bytes as u32;
             }
             l.pkg.pic = pk.pic;
+            l.pkg.no_plt = (pk.cg & bman::CG_NO_PLT) != 0;
             l.pkg.omit_fp = (pk.cg & bman::CG_OMIT_FRAME_POINTER) != 0;
+            l.strict = (pk.cg & bman::CG_STRICT_ALIASING) != 0;
             l.pkg.fmath = pick((pk.cg & bman::CG_ASSOC_MATH) != 0, lir_ir::FM_ASSOC, 0u8) | pick(
                 (pk.cg & bman::CG_RECIP_MATH) != 0,
                 lir_ir::FM_RECIP,
@@ -578,6 +581,12 @@ extend CEmit {
             ) | pick((pk.cg & bman::CG_FP_CONTRACT) != 0, lir_ir::FM_CONTRACT, 0u8);
             let fi = cf::find("fma", pk.arch);
             l.pkg.fma = tgt::isa(pk.arch).scalar_fma || fi >= 0 && cf::has(pk.features, fi as usize);
+            l.pkg.vector = tgt::isa(pk.arch).vector_bytes;
+            l.pkg.split = pick((pk.cg & bman::CG_FUNCTION_SECTIONS) != 0, cob::SPLIT_FUNCS, 0u8) | pick(
+                (pk.cg & bman::CG_DATA_SECTIONS) != 0,
+                cob::SPLIT_DATA,
+                0u8,
+            );
             l.pkg.protect = if (pk.cg & bman::CG_PROTECT_ALL) != 0 {
                 lir_ir::PROTECT_ALL;
             } else if (pk.cg & bman::CG_PROTECT_STRONG) != 0 {

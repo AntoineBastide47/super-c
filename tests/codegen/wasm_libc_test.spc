@@ -858,7 +858,8 @@ extern "C" "stdio.h" {
 extern "C" "stdlib.h" {
     fn malloc(n: usize) *mut void;
     fn free(p: *mut void);
-    const MB_CUR_MAX: usize;
+    // `MB_CUR_MAX` is this call in wasi-libc's header, not a constant.
+    fn __ctype_get_mb_cur_max() usize;
 }
 
 extern "C" "string.h" {
@@ -1128,15 +1129,15 @@ fn main() i32 {
     }
     scans();
     ps("L1", unsafe locale::setlocale(locale::LC_ALL, null));
-    unsafe printf(cs("L2 %zu\n"), MB_CUR_MAX);
+    unsafe printf(cs("L2 %zu\n"), __ctype_get_mb_cur_max());
     ps("L3", unsafe locale::setlocale(locale::LC_CTYPE, cs("C.UTF-8")));
-    unsafe printf(cs("L4 %zu\n"), MB_CUR_MAX);
+    unsafe printf(cs("L4 %zu\n"), __ctype_get_mb_cur_max());
     ps("L5", unsafe locale::setlocale(locale::LC_NUMERIC, cs("C.UTF-8")));
     ps("L6", unsafe locale::setlocale(locale::LC_ALL, null));
     ps("L7", unsafe locale::setlocale(locale::LC_ALL, cs("POSIX")));
-    unsafe printf(cs("L8 %zu\n"), MB_CUR_MAX);
+    unsafe printf(cs("L8 %zu\n"), __ctype_get_mb_cur_max());
     ps("L9", unsafe locale::setlocale(locale::LC_ALL, cs("en_US.UTF-8")));
-    unsafe printf(cs("L10 %zu\n"), MB_CUR_MAX);
+    unsafe printf(cs("L10 %zu\n"), __ctype_get_mb_cur_max());
     ps("L11", unsafe locale::setlocale(locale::LC_TIME, cs("fr_FR")));
     ps("L12", unsafe locale::setlocale(locale::LC_ALL, null));
     ps("L13", unsafe locale::setlocale(locale::LC_ALL, cs("C;de_DE;C;C;C;C")));

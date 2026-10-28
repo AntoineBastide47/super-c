@@ -6,9 +6,10 @@ import tests::platform::platform_harness as ph;
 const E: str = "SC_NO_EMIT_CACHE";
 
 // A program each flag changes: a counted loop (unrolling), a loop with bounds checks (versioning), a loop
-// with a branch on a parameter (unswitching), a small and a mid-sized callee (inlining), leaf functions
-// (the frame pointer), slots (the stack protector) and float arithmetic whose rewrites stay exact (the
-// float flags).
+// with a branch on a parameter (unswitching), a reduction over a slice (vectorization), a loop that
+// writes floats through a struct's pointer and reads its integer length (strict aliasing), a small and a
+// mid-sized callee (inlining), leaf functions (the frame pointer), slots (the stack protector) and float
+// arithmetic whose rewrites stay exact (the float flags).
 const PROGRAM: str = M"(import stdio;
 
 @noinline
@@ -53,6 +54,29 @@ fn mid(x: i64, y: i64) i64 {
 }
 
 @noinline
+fn fold(a: []i64) i64 {
+    let mut s: i64 = 0;
+    for i in 0..a.len() {
+        s += a[i];
+    }
+    return s;
+}
+
+struct Buf {
+    pub data: *mut f64,
+    pub n: usize,
+}
+
+@noinline
+fn spread(b: &Buf, x: f64) {
+    let mut i: usize = 0;
+    while i < b.n {
+        unsafe b.data[i] = x * i as f64;
+        i += 1;
+    }
+}
+
+@noinline
 fn mix(x: f64, y: f64) f64 {
     return x * y + x / 8.0;
 }
@@ -62,7 +86,10 @@ fn main() i32 {
     let b: [i64; 5] = [5, 4, 3, 2, 1];
     scale(a, 5, true);
     scale(a, 3, false);
-    println("{} {} {} {} {}", sum4(a), dot(a, b, 5), tiny(a[4]), mid(a[0], a[1]), mix(3.0, 5.0));
+    let mut f: [f64; 4] = [0.0, 0.0, 0.0, 0.0];
+    let buf = Buf { data: &mut f[0], n: 4 };
+    spread(&buf, 1.5);
+    println("{} {} {} {} {} {} {}", sum4(a), dot(a, b, 5), tiny(a[4]), mid(a[0], a[1]), mix(3.0, 5.0), fold(a), f[3]);
     return 0;
 }
 )";
@@ -88,7 +115,7 @@ fn each_level_builds_its_own_code() {
     p.mkfile("main.spc", PROGRAM);
     let levels: []str = ["-O0", "-O1", "-O2", "-O3", "-Os", "-Oz"];
     let (_, want) = built(&p, "-O0", "b");
-    assert(want.as_str().contains("-58 -79 -4 3891 15.375"), want.as_str());
+    assert(want.as_str().contains("-58 -79 -4 3891 15.375 -27 4.5"), want.as_str());
     let mut bins = Vector::<String>::new();
     for k in 0..levels.len() {
         let (bin, out) = built(&p, levels[k], format("b{}", k).as_str());
@@ -113,6 +140,8 @@ fn each_flag_changes_the_code() {
         "-fno-unroll-loops",
         "-fno-unswitch-loops",
         "-fno-version-loops-for-bounds",
+        "-fno-vectorize",
+        "-fno-strict-aliasing",
         "-fstack-protector-strong",
         "-ffast-math",
         "-freciprocal-math",
@@ -125,6 +154,18 @@ fn each_flag_changes_the_code() {
     // The last flag wins: on, then off again, is the base.
     let (same, _) = built(&p, "-O3 -fno-unroll-loops -funroll-loops", "again");
     assert(same.as_str() == base.as_str(), "-funroll-loops after -fno-unroll-loops");
+}
+
+// On ELF, `-fno-plt` calls the C library through its address slots: the code changes and prints the
+// same; on the other formats it changes nothing.
+@test
+fn no_plt_calls_through_address_slots_on_elf() {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", PROGRAM);
+    let (base, want) = built(&p, "-O2", "base");
+    let (bin, out) = built(&p, "-O2 -fno-plt", "noplt");
+    assert(out.as_str() == want.as_str(), "-fno-plt");
+    assert(bin.as_str() != base.as_str() == (PLATFORM == Platform::Linux), "-fno-plt");
 }
 
 // A function whose stack memory overflows past its slots stops at its return under a stack protector;

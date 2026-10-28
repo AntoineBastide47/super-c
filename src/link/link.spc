@@ -43,6 +43,7 @@ struct Cmd {
     pub stack: u64, // the main thread's stack reserve (PE), 0: the default
     pub wasm_stack: u64, // wasm: the stack's size (`-z stack-size=`), 0: the default
     pub stack_first: bool, // wasm: the stack before the data
+    pub gc: bool, // drop what no root reaches (`-dead_strip`, `--gc-sections`)
 }
 
 /// Link for target `(os, isa)` what link command `args` names (its objects, libraries, flags and output, in
@@ -71,6 +72,7 @@ pub fn link_args(os: i32, isa: i32, args: &Vector<String>, strip: bool, jobs: u3
         stack: 0,
         wasm_stack: 0,
         stack_first: false,
+        gc: false,
     };
     let r = parse(args, &mut c, why);
     if r != LINKED {
@@ -166,6 +168,8 @@ fn parse(args: &Vector<String>, c: &mut Cmd, why: &mut String) i32 {
             c.stack_first = true;
         } else if a == "-Wl,--strip-all" {
             c.strip = true;
+        } else if a == "-Wl,-dead_strip" || a == "-Wl,--gc-sections" {
+            c.gc = true;
         } else if a.starts_with("-Wl,-O") && a.len() == 7 && a.byte_at(6) >= b'0' && a.byte_at(6) <= b'9' {
             // lld's string tail merging: an output size level only.
         } else {
@@ -197,6 +201,7 @@ fn macho(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
         sdk: replace(&mut c.sysroot, String::new()),
         strip: c.strip,
         jobs: c.jobs,
+        dead_strip: c.gc,
     };
     if o.kind == lm::K_DYLIB && o.install.len() == 0 {
         o.install = o.out.clone();
@@ -244,6 +249,7 @@ fn elf(os: i32, isa: i32, c: &mut Cmd, a64: bool, why: &mut String) i32 {
         sysroot: replace(&mut c.sysroot, String::new()),
         a64: a64,
         strip: c.strip,
+        gc: c.gc,
     };
     if !le::link(&o, why) {
         return FAILED;
@@ -292,6 +298,7 @@ fn wasm(c: &mut Cmd, why: &mut String) i32 {
         stack: c.wasm_stack,
         stack_first: c.stack_first,
         strip: c.strip,
+        gc: c.gc,
     };
     if !lw::link(&o, why) {
         return FAILED;
@@ -311,6 +318,7 @@ fn coff(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
         dirs: replace(&mut c.dirs, Vector::<String>::new()),
         strip: c.strip,
         stack: c.stack,
+        gc: c.gc,
     };
     // The system's DLLs: on a Windows host, or in a directory the command names.
     if !pe::has_dlls(&o, why) {

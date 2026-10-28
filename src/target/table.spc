@@ -30,6 +30,9 @@ pub struct Isa {
     /// The C compiler vectorizes a merged loop of loads and stores through two slices it cannot prove
     /// apart (wasm's does), so a vector load and store over different slices may share one loop.
     pub merge_apart: bool,
+    /// The bytes of a vector the native backend computes in one register, 0 when it computes vectors
+    /// lane by lane in memory (wasm32): the LIR vectorizer runs only with registers.
+    pub vector_bytes: u8,
     pub simd_backend: str<'static>, // `std/simd/backend/<name>.spc`
     /// The C headers whose functions are the C compiler's intrinsics, space-separated: no object defines
     /// them, so a native backend expands each call from its template (`target::intrin`), and a call of
@@ -150,6 +153,7 @@ pub const ISAS: [Isa; 3] = [
         mask_fold: false,
         scalar_fma: false,
         merge_apart: false,
+        vector_bytes: 16,
         simd_backend: "x86_64",
         intrinsics: "immintrin.h x86intrin.h",
     },
@@ -165,6 +169,7 @@ pub const ISAS: [Isa; 3] = [
         mask_fold: true,
         scalar_fma: true,
         merge_apart: false,
+        vector_bytes: 16,
         simd_backend: "aarch64",
         intrinsics: "arm_neon.h arm_acle.h arm_sve.h arm_sme.h",
     },
@@ -180,6 +185,7 @@ pub const ISAS: [Isa; 3] = [
         mask_fold: false,
         scalar_fma: false,
         merge_apart: true,
+        vector_bytes: 0,
         simd_backend: "wasm",
         intrinsics: "wasm_simd128.h",
     },
@@ -500,6 +506,7 @@ const UNKNOWN_ISA: Isa = Isa {
     return_address: true,
     mask_fold: false,
     merge_apart: false,
+    vector_bytes: 0,
     simd_backend: "",
     intrinsics: "",
 };

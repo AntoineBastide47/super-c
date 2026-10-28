@@ -131,6 +131,7 @@ pub struct Gen {
     wparams: Vector<u32>, // the parameters the current terminator's edges write
     want: Vector<u8>, // per value, its request to `Live::plan`
     lconst: Vector<bool>, // per instruction, a float constant a loop uses (`Live::loop_fconsts`)
+    vmem: Vector<bool>, // per value, a vector some instruction reads or writes in memory (`vec_homes`)
     ends: Vector<u32>, // values by the position their range ends at (CSR, `ends_at`)
     ends_at: Vector<u32>,
     cpre: Vector<u32>, // per instruction index, the calls that return before it (`call_tables`)
@@ -230,6 +231,7 @@ extend Gen {
             wparams: Vector::<u32>::new(),
             want: Vector::<u8>::new(),
             lconst: Vector::<bool>::new(),
+            vmem: Vector::<bool>::new(),
             ends: Vector::<u32>::new(),
             ends_at: Vector::<u32>::new(),
             cpre: Vector::<u32>::new(),
@@ -472,7 +474,7 @@ extend Gen {
             self.va.index_mut(x as usize).clean = false;
             return va.reg;
         }
-        let vr = Gen::is_v(self.vt(v));
+        let vr = Gen::is_v(self.vt(v)) || Gen::in_vreg(self.vt(v));
         let r = self.take_home(x, vr);
         if r != NOREG {
             self.lock |= bit(r);
@@ -483,34 +485,51 @@ extend Gen {
         return r2;
     }
 
-    // `def` of instruction `i`, one machine instruction that may write a register it reads: the fixed
-    // register of the parameter the jump ending `i`'s block passes `i` alone to, when nothing reads that
-    // parameter from `i` on (a loop counter's step), so the edge's move vanishes. The parameter keeps the
-    // register, which its release frees.
+    // `def` of instruction `i`, one machine instruction that reads its operands before it writes its
+    // result: the fixed register of a parameter the back edge ending `i`'s block passes `i` to
+    // (`Live::back_param`), when nothing in the block reads that parameter after `i` (a loop counter's
+    // step, an accumulator), so the edge's move vanishes. The parameter's old value is dead from `i` on;
+    // the register is the parameter's over the whole loop. When `i` dies in its block, the parameter
+    // keeps the register, which its release frees; when `i` outlives it (a rotated loop's exit reads
+    // it) and the parameter's range ends in this block, `i` takes the register over as its home. Not for
+    // an `i` with a home of its own or that lives across a call (the register may be caller-saved: the
+    // parameter's range need not hold the call).
     fn def_step(self: &mut Self, i: u32) u8 {
         let b = self.b();
         let k = self.lv.def_blk[i as usize];
         let bk = b.blocks[k as usize];
         let tm = b.insts[(bk.start + bk.len - 1) as usize];
-        if self.lv.uses[i as usize] != 1 || self.lv.pos[k as usize] != self.pos || tm.op != O_JMP || self.va[i as usize].home != H_NONE {
+        let past = self.lv.end[i as usize] != self.pos;
+        // A register home holds no vector an instruction reads in memory (`vec_homes`).
+        if past && self.vmem[i as usize] {
             return self.def(i);
         }
-        let tb = b.blocks[b.edge_target(tm.a) as usize];
-        let mut px = NONE;
-        for q in 0..b.edge_nargs(tm.a) {
-            if b.edge_arg(tm.a, q) == i {
-                px = b.insts.len() as u32 + tb.param_start + q;
-            }
+        if self.lv.pos[k as usize] != self.pos || self.va[i as usize].home != H_NONE || !past && self.fix_class(i) != FIX_NONE || self.crosses_call(
+            i,
+        ) {
+            return self.def(i);
         }
-        if px == NONE || self.va[px as usize].home != H_FIXED || self.lv.last[px as usize] > i || self.lv.end[px as usize] > self.pos {
+        let px = self.lv.back_param(b, tm, i, self.pos);
+        if px == NONE || self.va[px as usize].home != H_FIXED || self.lv.end[px as usize] < self.pos || past && self.lv.end[px as usize] != self.pos || self.lv.reads_after(
+            b,
+            k,
+            i,
+            VPARAM | px - b.insts.len() as u32,
+        ) {
             return self.def(i);
         }
         let r = self.va[px as usize].reg;
         self.lock |= bit(r);
+        if past {
+            self.set_owner(r, i);
+        }
         let w = self.va.index_mut(i as usize);
         w.reg = r;
         w.dirty = false;
         w.clean = false;
+        if past {
+            w.home = H_FIXED;
+        }
         return r;
     }
 
@@ -534,19 +553,28 @@ extend Gen {
     // Plan the homes (`Live::plan`) over each value's request: none in memory or rematerialized; a callee-saved register
     // for a value a call that returns runs in the range of (v8..v15 keep only their low 8 bytes: no
     // vector asks); either for one that lives past its block or a block parameter (a flag: callee-saved
-    // only); none for the others, which temporaries hold. x19..x28 and v8..v15; six of x9..x15 and eight
-    // of v16..v29, the others left to temporaries.
+    // only); none for the others, which temporaries hold. A vector of 16 bytes that lives past its block
+    // or is a block parameter, which no call that returns runs in the range of and no instruction reads
+    // or writes in memory (`vec_homes`: a loop's accumulator, a value splat before the loop), asks a
+    // caller-saved v register. x19..x28 and v8..v15; six of x9..x15 and eight of v16..v29, the others
+    // left to temporaries.
     fn plan_homes(self: &mut Self) {
         let b = self.b();
         let n = self.lv.end.len();
         let ni = b.insts.len();
         let nv = ni + b.params.len();
         self.lv.loop_fconsts(b, &mut self.lconst);
+        self.vec_homes();
         self.want.truncate(0);
         for x in 0..n {
             let t = self.xty(x as u32);
             let d = self.lv.def_blk[x];
             let mut w: u8 = 0;
+            if Gen::in_vreg(t) && type_bytes(t, 8) == 16 && x < nv && !self.vmem[x] && d != NONE && self.lv.pos[d as usize] != NONE && (self.lv.end[x] > self.lv.pos[d as usize] || x >= ni) && !self.crosses_call(
+                x as u32,
+            ) {
+                w = lv::WANT_SCRATCH | lv::WANT_V;
+            }
             if !Gen::in_mem(t) && d != NONE && self.lv.pos[d as usize] != NONE && !(x < ni && self.remat_inst(x as u32) && !self.lconst[x]) {
                 if x < nv && self.crosses_call(x as u32) {
                     w = lv::WANT_CALLEE;
@@ -565,6 +593,46 @@ extend Gen {
         for x in 0..ni {
             if self.lconst[x] && self.fix_class(x as u32) != FIX_NONE {
                 self.va.index_mut(x).home = H_NONE;
+            }
+        }
+    }
+
+    // `vmem`: per value, whether it is a vector some instruction defines or reads in memory: any but a
+    // vector load, a lane-wise operation with a Neon form (its operands too), a store of it, and an edge
+    // argument (a return reads its vector in memory).
+    fn vec_homes(self: &mut Self) {
+        let b = self.b();
+        let ni = b.insts.len();
+        self.vmem.truncate(0);
+        self.vmem.resize_default(self.lv.end.len());
+        for i in 0..ni {
+            let t = b.insts[i];
+            let mut un = false;
+            let reg_op = is_vec(t.ty) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG) && neon_of_op(
+                t.op,
+                lane_type(t.ty),
+                &mut un,
+            ) != NONE;
+            if is_vec(t.ty) && !reg_op && t.op != O_LOAD {
+                self.vmem[i] = true;
+            }
+            if t.op == O_RET && t.a != VNONE && is_vec(self.vt(t.a)) {
+                // A returned vector is read in memory.
+                self.vmem[self.vx(t.a) as usize] = true;
+            }
+            if reg_op || is_terminator(t.op) {
+                continue;
+            }
+            lv::each_use(b, t, &mut self.uses);
+            for k in 0..self.uses.len() {
+                let u = self.uses[k];
+                if t.op == O_STORE && u == t.b {
+                    continue;
+                }
+                let x = self.vx(u);
+                if x != NONE && is_vec(self.xty(x)) {
+                    self.vmem[x as usize] = true;
+                }
             }
         }
     }
@@ -645,7 +713,7 @@ extend Gen {
     // inline assembly, a vector operation, a copy or a fill, an i128 division or conversion.
     const fn clobbers(b: &Body, t: Inst) bool {
         let op = t.op;
-        if op == O_CALL || op == O_CALLIND || op == O_ASM || op == O_VOP || op == O_MEMCPY || op == O_MEMSET {
+        if op == O_CALL || op == O_CALLIND || op == O_ASM || op == O_VOP && !lv::reduces(t) || op == O_MEMCPY || op == O_MEMSET {
             return true;
         }
         if op >= O_SDIV && op <= O_UREM {
@@ -1679,7 +1747,7 @@ extend Gen {
             return;
         }
         let t = self.xty(x);
-        if !Gen::in_mem(t) && self.take_home(x, Gen::is_v(t)) != NOREG {
+        if (!Gen::in_mem(t) || Gen::in_vreg(t)) && self.take_home(x, Gen::is_v(t) || Gen::in_vreg(t)) != NOREG {
             // The register holds nothing until the edge moves write it.
             self.set_owner(self.va[x as usize].reg, x);
             return;
@@ -2182,7 +2250,7 @@ extend Gen {
                 return true;
             }
             let rb = self.reg(t.b);
-            let rd = self.def(i);
+            let rd = self.def_step(i);
             let f = if op == O_FADD {
                 a::FP_ADD;
             } else if op == O_FSUB {
@@ -2618,7 +2686,7 @@ extend Gen {
         } else {
             self.reg(t.b);
         };
-        let rd = self.def(i);
+        let rd = self.def_step(i);
         let xa = ra as u32;
         let xb = rb as u32;
         let xd = rd as u32;
@@ -3958,6 +4026,15 @@ extend Gen {
                     return false;
                 }
                 assert(rels.len() == 0, "a64: an intrinsic's instructions name no symbol");
+            } else if self.elf && unsafe (*self.pkg).no_plt && unsafe (*self.pkg).syms[b.syms[t.a as usize] as usize].ext {
+                // Through the address slot (`-fno-plt`): adrp x16, :got:x; ldr x16, [x16, :got_lo12:x];
+                // blr x16.
+                let os = self.osym_of(t.a);
+                self.reloc(a::R_GOT_PAGE21, os, 0);
+                self.emit(a::adr(true, a::IP0 as u8, 0));
+                self.reloc(a::R_GOT_PAGEOFF12, os, 0);
+                self.emit(a::ldst_uimm(a::M_X, true, a::IP0 as u8, a::IP0 as u8, 0));
+                self.emit(a::blr(a::IP0));
             } else {
                 let os = self.osym_of(t.a);
                 self.reloc(a::R_BRANCH26, os, 0);
@@ -4221,11 +4298,27 @@ extend Gen {
         self.code[w as usize] = a::repatch(self.code[w as usize], off);
     }
 
+    // Whether an argument of edge `e` is not in its parameter's home yet (the homes chosen).
+    fn moves_needed(self: &Self, e: u32) bool {
+        let b = self.b();
+        let tb = b.blocks[b.edge_target(e) as usize];
+        let ni = b.insts.len() as u32;
+        for q in 0..b.edge_nargs(e) {
+            let px = ni + tb.param_start + q;
+            let ax = self.vx(b.edge_arg(e, q));
+            let pva = self.va[px as usize];
+            if ax != px && !(pva.home == H_FIXED && self.va[ax as usize].reg == pva.reg) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // A two-way branch: `test` takes edge `et`, else `ef`; each edge's moves on its own path.
     fn branch2(self: &mut Self, test: Test, et: u32, ef: u32) {
         let b = self.b();
-        let mt = b.edge_nargs(et) != 0;
-        let mf = b.edge_nargs(ef) != 0;
+        let mt = self.moves_needed(et);
+        let mf = self.moves_needed(ef);
         let tt = b.edge_target(et);
         let tf = b.edge_target(ef);
         let q = self.pos as usize + 1;
@@ -5072,7 +5165,12 @@ extend Gen {
         } else {
             0u8;
         };
-        let rd = self.vec_def(i);
+        // A result written over no operand may take a back edge's parameter register (`def_step`).
+        let rd = if acc == VNONE {
+            self.def_step(i);
+        } else {
+            self.vec_def(i);
+        };
         if acc != VNONE {
             // The accumulator's copy, which the instruction updates.
             let xa = self.vx(acc);
@@ -5092,11 +5190,10 @@ extend Gen {
         self.emit(wq | (rd - V0) as u32 | (rx - V0) as u32 << 5 | rm);
     }
 
-    // A v register for vector result `i`, which holds it (its home, a slot, comes when it spills).
+    // A v register for vector result `i`, which holds it: its home register (`plan_homes`), else a free
+    // one (its home, a slot, comes when it spills).
     fn vec_def(self: &mut Self, i: u32) u8 {
-        let r = self.alloc(true);
-        self.bind(self.vx(i), r);
-        return r;
+        return self.def(i);
     }
 
     // Vector `v` in a v register: its own, else loaded into `scratch`.

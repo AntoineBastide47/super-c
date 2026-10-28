@@ -249,3 +249,90 @@ extend Obj {
         return self.names.spell(self.syms[k as usize].name);
     }
 }
+
+/// A file section's share of an object section, for the writers that split sections at their symbols
+/// (`-ffunction-sections`, `-fdata-sections`): bytes `lo .. hi` of section `k`, named after symbol `sym`
+/// when the section splits (NONE32: its whole, or the bytes before its first symbol), at the writer's
+/// section number `hdr`.
+pub struct Part {
+    pub k: u8,
+    pub lo: u64,
+    pub hi: u64,
+    pub sym: u32,
+    pub hdr: u32,
+}
+
+extend Part as Copy {}
+
+// Whether section `k` splits at its symbols under `split` (`SPLIT_*`): the code with the functions, the
+// variables' kinds with the data; not the merged strings nor a named section.
+fn splits(k: u8, split: u8) bool {
+    if k == S_TEXT {
+        return (split & SPLIT_FUNCS) != 0;
+    }
+    return (split & SPLIT_DATA) != 0 && k != S_CSTR && k < S_COUNT;
+}
+
+/// The parts of `o`'s non-empty sections, in section order, each split one at its symbols under `split`
+/// (`SPLIT_*`); `first[k]` the first of section `k`'s (its parts run to `first[k + 1]`).
+pub fn parts_of(o: &Obj, split: u8, parts: &mut Vector<Part>, first: &mut Vector<u32>) {
+    let mut starts = Vector::<u64>::new(); // offset << 32 | symbol
+    first.resize_default(o.secs.len() + 1);
+    for k in 0..o.secs.len() {
+        first[k] = parts.len() as u32;
+        let size = o.secs[k].size;
+        if size == 0 {
+            continue;
+        }
+        starts.truncate(0);
+        if splits(k as u8, split) {
+            for y in 0..o.syms.len() {
+                let sy = o.syms[y];
+                if sy.sec as usize == k && sy.off < size {
+                    starts.push(sy.off << 32 | y as u64);
+                }
+            }
+            starts.sort();
+        }
+        if starts.len() == 0 || starts[0] >> 32 != 0 {
+            parts.push(Part { k: k as u8, lo: 0, hi: size, sym: NONE32, hdr: 0 });
+        }
+        for i in 0..starts.len() {
+            let lo = starts[i] >> 32;
+            if i > 0 && starts[i - 1] >> 32 == lo {
+                continue;
+            }
+            // The section's previous part ends here.
+            if parts.len() as u32 > first[k] {
+                parts.index_mut(parts.len() - 1).hi = lo;
+            }
+            parts.push(Part { k: k as u8, lo: lo, hi: size, sym: (starts[i] & 0xFFFFFFFF) as u32, hdr: 0 });
+        }
+    }
+    first[o.secs.len()] = parts.len() as u32;
+}
+
+/// The part of section `k` that holds byte `off`: the last one starting at or before it; NONE32 when the
+/// section has no part (it is empty).
+pub fn part_at(parts: &Vector<Part>, first: &Vector<u32>, k: u8, off: u64) u32 {
+    let mut lo = first[k as usize];
+    let mut hi = first[k as usize + 1];
+    if lo == hi {
+        return NONE32;
+    }
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        if parts[mid as usize].lo <= off {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+pub const NONE32: u32 = 0xFFFFFFFF;
+/// `split` (`lir::ir::Package.split`): functions in sections of their own, variables in sections of their
+/// own.
+pub const SPLIT_FUNCS: u8 = 1;
+pub const SPLIT_DATA: u8 = 2;

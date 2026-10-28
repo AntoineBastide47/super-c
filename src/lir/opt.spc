@@ -9,6 +9,11 @@
 // - a load of a place a dominating instruction read or stored in the same memory state becomes that
 //   value (each write starts a memory state, and a block whose one predecessor is its dominator
 //   continues that block's last);
+// - a branch whose sides reach one block, each directly or through an empty block, becomes a jump whose
+//   arguments that differ by side are selects on its condition (if-conversion);
+// - an unsigned comparison an edge into a dominating block decides, through the minimums its bound is
+//   (`i <u min(a, b)`: `i <u a` and `i <u b`), decides the same comparison of other values (a bounds
+//   check of a loop over the shorter of two slices);
 // - a load of read-only data folds to the constant it reads;
 // - a pure operation of loop-invariant operands that cannot trap moves to the loop's preheader, and so
 //   does a load of a field of a slot, a data symbol, an aggregate parameter or a reference parameter's
@@ -35,6 +40,10 @@ const DROPPED: u32 = 0xFFFFFFFE;
 const LOG_PURE: u8 = 0;
 const LOG_MEM: u8 = 1;
 const LOG_COND: u8 = 2;
+const LOG_REL: u8 = 3;
+// An if-conversion makes at most MAX_SELECTS selects; a minimum's operands are followed MIN_DEPTH deep.
+const MAX_SELECTS: u32 = 2;
+const MIN_DEPTH: u32 = 3;
 // `Opt::private_load`'s answers besides a value, and the memory state of the loads it keeps.
 const PRIV_NONE: Value = VNONE;
 const PRIV_KEPT: Value = VNONE - 1;
@@ -88,9 +97,12 @@ pub struct Opt {
     pure: Map<u64, u32>,
     mem: Map<u64, u32>,
     cond: Map<u64, u32>,
+    rel: Map<u64, u32>, // `y << 32 | x` -> whether `x <u y` holds (`rel_key`)
     log: Vector<(u8, u64, u32)>,
     places: Vector<Place>,
-    state: u32, // the current memory state
+    state: u32, // the current memory state of the visited access (its tag's)
+    tstate: [u32; TBAA_TAGS], // per type tag, the current memory state of its accesses
+    tags: Vector<u16>, // per loop header, the type tags its blocks write (`tags_in`)
     // Private memory (`slot_writes`): the slots, then the aggregate arguments (each a copy the callee
     // owns). Per instruction the one its address value points into (NONE: none) and the offset; per one
     // whether its address escapes; the writes, by place (`wat`).
@@ -100,7 +112,7 @@ pub struct Opt {
     wr: Vector<SlotWrite>,
     wat: Vector<u32>,
     wl: Vector<SlotWrite>,
-    end_state: Vector<u32>, // per block, its state at its end
+    end_state: Vector<u32>, // per block and type tag, its state at its end
     stack: Vector<u64>,
     work: Vector<u32>,
     // The rebuild.
@@ -189,6 +201,7 @@ extend Opt {
             pure: Map::<u64, u32>::new(),
             mem: Map::<u64, u32>::new(),
             cond: Map::<u64, u32>::new(),
+            rel: Map::<u64, u32>::new(),
             log: Vector::<(u8, u64, u32)>::new(),
             places: Vector::<Place>::new(),
             sbase: Vector::<u32>::new(),
@@ -199,6 +212,8 @@ extend Opt {
             wl: Vector::<SlotWrite>::new(),
             state: 0,
             end_state: Vector::<u32>::new(),
+            tstate: [0u32; TBAA_TAGS],
+            tags: Vector::<u16>::new(),
             stack: Vector::<u64>::new(),
             work: Vector::<u32>::new(),
             bmap: Vector::<u32>::new(),
@@ -277,6 +292,31 @@ extend Opt {
         return true;
     }
 
+    /// Rotate the innermost loops of body `b` whose header holds at most `max` instructions
+    /// (`lir::loops`), then optimize it again. Whether any changed.
+    pub fn rotate(self: &mut Self, pk: &Package, b: &mut Body, max: u32) bool {
+        if b.naked {
+            return false;
+        }
+        self.graph(b);
+        self.dominators(b);
+        self.loops(b);
+        let any = self.unr.rotate(
+            b,
+            max,
+            self.inner.as_slice(),
+            self.lparent.as_slice(),
+            self.preh.as_slice(),
+            self.dpre.as_slice(),
+            self.dpost.as_slice(),
+        );
+        if !any {
+            return false;
+        }
+        let _ = self.run(pk, b, true);
+        return true;
+    }
+
     /// Transform the innermost loops of body `b` (`lir::loops`) within budgets `bu`, then optimize it
     /// again. Whether any changed.
     pub fn loop_opts(self: &mut Self, pk: &Package, b: &mut Body, bu: lu::Budgets) bool {
@@ -289,6 +329,8 @@ extend Opt {
         let any = self.unr.run(
             b,
             pk.ptr_bytes,
+            pk.fmath,
+            pk.vector,
             bu,
             self.inner.as_slice(),
             self.lparent.as_slice(),
@@ -632,6 +674,7 @@ extend Opt {
         fill(&mut self.preh, nb, NONE);
         fill(&mut self.mark, nb, NONE);
         fill(&mut self.writes, nb, 0);
+        fill(&mut self.tags, nb, 0);
         self.classes(b);
         for hi in 0..self.order.len() {
             let h = self.order[hi];
@@ -650,11 +693,13 @@ extend Opt {
             self.inner[h as usize] = h;
             self.mark[h as usize] = h;
             let mut wr = self.writes_in(b, h);
+            let mut tg = tags_in(b, h);
             // Each block enters the walk once.
             while self.work.len() != 0 {
                 let x = self.work.pop().unwrap();
                 self.inner[x as usize] = h;
                 wr |= self.writes_in(b, x);
+                tg |= tags_in(b, x);
                 for p in self.pred_at[x as usize]..self.pred_at[x as usize + 1] {
                     let q = self.preds[p as usize];
                     if self.mark[q as usize] != h {
@@ -664,6 +709,7 @@ extend Opt {
                 }
             }
             self.writes[h as usize] = wr;
+            self.tags[h as usize] = tg;
             let mut outside = NONE;
             let mut n: u32 = 0;
             for p in self.pred_at[h as usize]..self.pred_at[h as usize + 1] {
@@ -728,9 +774,10 @@ extend Opt {
         self.pure.clear();
         self.mem.clear();
         self.cond.clear();
+        self.rel.clear();
         self.log.truncate(0);
         self.places.truncate(0);
-        fill(&mut self.end_state, nb, 0);
+        fill(&mut self.end_state, nb * TBAA_TAGS, 0);
         let mut states: u32 = 0;
         let mut changed = false;
         // Preorder over the dominator tree: block << 1 enters a block, n << 33 | 1 closes its scope at log
@@ -747,7 +794,10 @@ extend Opt {
             let k = (x >> 1) as usize;
             self.stack.push(self.log.len() as u64 << 33 | 1);
             if k != 0 && self.pred_at[k + 1] - self.pred_at[k] == 1 && self.preds[self.pred_at[k] as usize] == self.idom[k] {
-                self.state = self.end_state[self.idom[k] as usize];
+                let d = self.idom[k] as usize * TBAA_TAGS;
+                for g in 0..TBAA_TAGS {
+                    unsafe self.tstate[g] = self.end_state[d + g];
+                }
                 // Its parameters are its one edge's arguments.
                 changed = self.forward_params(b, k as u32) || changed;
                 // Its one edge decides its dominator's branch condition here and below.
@@ -759,20 +809,37 @@ extend Opt {
                         0;
                     };
                     self.enter(LOG_COND, t.a, taken);
+                    self.order_facts(b, t.a, taken != 0);
                 }
             } else {
                 states += 1;
-                self.state = states;
+                self.tstate = [states; TBAA_TAGS];
             }
             let bk = b.blocks[k];
             for i in bk.start..bk.start + bk.len {
-                if writes_memory(b.insts[i as usize]) {
+                // A write starts a new state for its tag's accesses and the untagged ones; an untagged
+                // write, for all.
+                let t = b.insts[i as usize];
+                let g = if t.op == O_LOAD || t.op == O_STORE {
+                    tbaa(t);
+                } else {
+                    0usize;
+                };
+                if writes_memory(t) {
                     states += 1;
-                    self.state = states;
+                    if g == 0 || (t.aux & MEM_VOLATILE) != 0 {
+                        self.tstate = [states; TBAA_TAGS];
+                    } else {
+                        unsafe self.tstate[g] = states;
+                        self.tstate[0] = states;
+                    }
                 }
+                self.state = unsafe self.tstate[g];
                 changed = self.visit(pk, b, k as u32, i) || changed;
             }
-            self.end_state[k] = self.state;
+            for g in 0..TBAA_TAGS {
+                self.end_state[k * TBAA_TAGS + g] = unsafe self.tstate[g];
+            }
             for c in self.kid_at[k]..self.kid_at[k + 1] {
                 self.stack.push(self.kids[c as usize] as u64 << 1);
             }
@@ -788,8 +855,10 @@ extend Opt {
                 &mut self.pure;
             } else if table == LOG_MEM {
                 &mut self.mem;
-            } else {
+            } else if table == LOG_COND {
                 &mut self.cond;
+            } else {
+                &mut self.rel;
             };
             if prev == NONE {
                 let _ = m.remove(&key);
@@ -804,8 +873,10 @@ extend Opt {
             &mut self.pure;
         } else if table == LOG_MEM {
             &mut self.mem;
-        } else {
+        } else if table == LOG_COND {
             &mut self.cond;
+        } else {
+            &mut self.rel;
         };
         let prev = switch m.get(&key) {
             Some(p) => *p,
@@ -813,6 +884,148 @@ extend Opt {
         };
         m.insert(key, v);
         self.log.push((table, key, prev));
+    }
+
+    // ---- If-conversion and order facts ----
+
+    // Branch `t`, instruction `i` ending block `k`, whose sides reach one block `j`, each through its edge
+    // or an empty block it alone enters, `j` entered from them alone: the edge of a jump to `j` whose
+    // arguments that differ by side are selects on the condition (at most MAX_SELECTS, integers up to 64
+    // bits or pointers), which move to the end of `k`; `j`'s parameters take them in the rest of the
+    // walk. NONE when not.
+    fn diamond(self: &mut Self, b: &mut Body, k: u32, i: u32, t: Inst) u32 {
+        let (e0, s0) = self.arm(b, k, t.b);
+        let (e1, s1) = self.arm(b, k, t.c);
+        let j = b.edge_target(e0);
+        if j != b.edge_target(e1) || j == k || self.pred_at[j as usize + 1] - self.pred_at[j as usize] != 2 {
+            return NONE;
+        }
+        let p0 = self.preds[self.pred_at[j as usize] as usize];
+        let p1 = self.preds[self.pred_at[j as usize] as usize + 1];
+        if !(p0 == s0 && p1 == s1 || p0 == s1 && p1 == s0) {
+            return NONE;
+        }
+        let jb = b.blocks[j as usize];
+        let mut nsel: u32 = 0;
+        for q in 0..jb.param_len as u32 {
+            if self.val(b.edge_arg(e0, q)) != self.val(b.edge_arg(e1, q)) {
+                let ty = b.params[(jb.param_start + q) as usize];
+                if !(is_int(ty) && ty != T_I128 || ty == T_PTR) {
+                    return NONE;
+                }
+                nsel += 1;
+            }
+        }
+        if nsel == 0 || nsel > MAX_SELECTS {
+            return NONE;
+        }
+        let mut args = Vector::<Value>::with_capacity(jb.param_len as usize);
+        for q in 0..jb.param_len as u32 {
+            let x = self.val(b.edge_arg(e0, q));
+            let y = self.val(b.edge_arg(e1, q));
+            let mut v = x;
+            if x != y {
+                v = b.insts.len() as u32;
+                b.insts.push(
+                    Inst { op: O_SELECT, ty: b.params[(jb.param_start + q) as usize], aux: 0, a: t.a, b: x, c: y },
+                );
+                b.locs.push(b.locs[i as usize]);
+                if b.inl.len() != 0 {
+                    b.inl.push(b.inl[i as usize]);
+                }
+                self.repl.push(VNONE);
+                self.frepl.push(VNONE);
+                self.moved.push(true);
+                self.blk_of.push(k);
+                self.hoisted.push(k as u64 << 32 | v as u64);
+            }
+            self.prepl[(jb.param_start + q) as usize] = v;
+            args.push(v);
+        }
+        return b.edge(j, args.as_slice());
+    }
+
+    // Side `e` of a branch ending block `k`, as `diamond` takes it: the edge out of the empty block it alone
+    // enters, and that block; else `e` and `k`.
+    fn arm(self: &Self, b: &Body, k: u32, e: u32) (u32, u32) {
+        let a = b.edge_target(e);
+        let ab = b.blocks[a as usize];
+        let ta = term(b, a);
+        if a != k && ab.param_len == 0 && ab.len == 1 && ta.op == O_JMP && self.pred_at[a as usize + 1] - self.pred_at[a as usize] == 1 {
+            return ta.a, a;
+        }
+        return e, k;
+    }
+
+    // Comparison `c` as `x <u y` (`rel_key(x, y)`) and whether `c` is its negation; `(VNONE, VNONE, _)`
+    // when `c` is no unsigned order comparison of scalars.
+    const fn as_ult(b: &Body, c: Value) (Value, Value, bool) {
+        if (c & (VPARAM | VFLAG)) != 0 {
+            return VNONE, VNONE, false;
+        }
+        let t = b.insts[c as usize];
+        if t.op != O_ICMP || is_vec(t.ty) {
+            return VNONE, VNONE, false;
+        }
+        if t.aux == C_ULT {
+            return t.a, t.b, false;
+        }
+        if t.aux == C_UGE {
+            return t.a, t.b, true;
+        }
+        if t.aux == C_UGT {
+            return t.b, t.a, false;
+        }
+        if t.aux == C_ULE {
+            return t.b, t.a, true;
+        }
+        return VNONE, VNONE, false;
+    }
+
+    // Condition `c`, `holds` on the edge into the scope: `x <u y` decided, and with it `x <u m` for each
+    // minimum `m` that `y` is made of (`min_parts`).
+    fn order_facts(self: &mut Self, b: &Body, c: Value, holds: bool) {
+        let (x, y, neg) = Opt::as_ult(b, c);
+        if x == VNONE {
+            return;
+        }
+        let lt = holds != neg;
+        self.enter(LOG_REL, rel_key(x, y), lt as u32);
+        if lt {
+            self.min_parts(b, x, y, MIN_DEPTH);
+        }
+    }
+
+    // `x <u y` holds: so does `x <u` each operand of minimum `y` (a select of the lesser of two values),
+    // and of the minimums they are, `depth` deep.
+    fn min_parts(self: &mut Self, b: &Body, x: Value, y: Value, depth: u32) {
+        if depth == 0 || (y & (VPARAM | VFLAG)) != 0 {
+            return;
+        }
+        let t = b.insts[y as usize];
+        if t.op != O_SELECT {
+            return;
+        }
+        let (u, w, neg) = Opt::as_ult(b, t.a);
+        if !(u == t.b && w == t.c && !neg || u == t.c && w == t.b && neg) {
+            return;
+        }
+        self.enter(LOG_REL, rel_key(x, t.b), 1);
+        self.enter(LOG_REL, rel_key(x, t.c), 1);
+        self.min_parts(b, x, t.b, depth - 1);
+        self.min_parts(b, x, t.c, depth - 1);
+    }
+
+    // The value of condition `c` the order facts in scope decide (`order_facts`), if any.
+    fn order_decided(self: &Self, b: &Body, c: Value) Option<u64> {
+        let (x, y, neg) = Opt::as_ult(b, c);
+        if x == VNONE {
+            return Option::<u64>::None;
+        }
+        return switch self.rel.get(&rel_key(x, y)) {
+            Some(r) => Option::<u64>::Some((*r != 0 != neg) as u64),
+            None => Option::<u64>::None,
+        };
     }
 
     // The parameters of block `k`, whose one predecessor (its dominator, which the walk visited) has
@@ -974,6 +1187,8 @@ extend Opt {
             if t.op == O_BR && c.is_none() {
                 if let Some(x) = self.cond.get(&(t.a as u64)) {
                     c = Option::<u64>::Some(*x);
+                } else {
+                    c = self.order_decided(b, t.a);
                 }
             }
             if t.op == O_BR && c.is_some() {
@@ -984,6 +1199,11 @@ extend Opt {
                         t.c;
                     },
                 );
+            } else if t.op == O_BR {
+                let e = self.diamond(b, k, i, t);
+                if e != NONE {
+                    t = jump(e);
+                }
             } else if t.op == O_SWITCH && c.is_some() {
                 let mut e = b.switch_edge(t, t.aux);
                 for q in 0..t.aux as u32 {
@@ -1325,7 +1545,12 @@ extend Opt {
             return NONE;
         }
         if (v & VPARAM) == 0 {
-            return self.sbase[v as usize];
+            // A select the walk made (`diamond`) takes values `slot_writes` saw escape as edge arguments.
+            return if v as usize < self.sbase.len() {
+                self.sbase[v as usize];
+            } else {
+                NONE;
+            };
         }
         let p = v & ~VPARAM;
         let e = b.blocks[0];
@@ -1449,9 +1674,13 @@ extend Opt {
         // Each step leaves one loop.
         loop {
             let h = self.inner[target as usize];
+            // A load stays when the loop writes its alias class and its type tag (or untagged).
             if h == NONE || self.preh[h as usize] == NONE || load && !kept && (self.writes[h as usize] & class_bit(
                 self.class(t.a),
-            )) != 0 || !self.invariant(t, h) {
+            )) != 0 && (tbaa(t) == 0 || (self.tags[h as usize] & (1u16 << tbaa(t) as u16 | 1)) != 0) || !self.invariant(
+                t,
+                h,
+            ) {
                 break;
             }
             target = self.preh[h as usize];
@@ -1774,7 +2003,8 @@ extend Opt {
     }
 
     // `sread`: per slot, whether a reached instruction reads it or takes its address further than a store
-    // or a fill into it.
+    // or a fill into it. The instructions the walk made sit past every block (`hoisted`): a diamond's
+    // select may take a slot's address on to a call.
     fn slot_reads(self: &mut Self, b: &Body) {
         fill_bool(&mut self.sread, b.slots.len(), false);
         for k in 0..b.blocks.len() {
@@ -1783,27 +2013,37 @@ extend Opt {
             }
             let bk = b.blocks[k];
             for i in bk.start..bk.start + bk.len {
-                let t = b.insts[i as usize];
-                if self.repl[i as usize] != VNONE {
-                    continue;
-                }
-                lv::uses(b, t, &mut self.uses);
-                b.succ_edges(t, &mut self.edges);
-                for e in 0..self.edges.len() {
-                    for q in 0..b.edge_nargs(self.edges[e]) {
-                        self.uses.push(b.edge_arg(self.edges[e], q));
-                    }
-                }
-                for u in 0..self.uses.len() {
-                    let v = self.uses[u];
-                    if (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_SLOTADDR {
-                        continue;
-                    }
-                    let into = (t.op == O_STORE || t.op == O_MEMSET) && t.a == v && t.b != v && (t.op == O_STORE || t.c != v);
-                    if !into {
-                        self.sread[b.insts[v as usize].a as usize] = true;
-                    }
-                }
+                self.slot_reads_of(b, i);
+            }
+        }
+        for q in 0..self.hoisted.len() {
+            if self.bmap[(self.hoisted[q] >> 32) as usize] != NONE {
+                self.slot_reads_of(b, self.hoisted[q] as u32);
+            }
+        }
+    }
+
+    // `slot_reads` of instruction `i`, unless the walk replaced it.
+    fn slot_reads_of(self: &mut Self, b: &Body, i: u32) {
+        let t = b.insts[i as usize];
+        if self.repl[i as usize] != VNONE {
+            return;
+        }
+        lv::uses(b, t, &mut self.uses);
+        b.succ_edges(t, &mut self.edges);
+        for e in 0..self.edges.len() {
+            for q in 0..b.edge_nargs(self.edges[e]) {
+                self.uses.push(b.edge_arg(self.edges[e], q));
+            }
+        }
+        for u in 0..self.uses.len() {
+            let v = self.uses[u];
+            if (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_SLOTADDR {
+                continue;
+            }
+            let into = (t.op == O_STORE || t.op == O_MEMSET) && t.a == v && t.b != v && (t.op == O_STORE || t.c != v);
+            if !into {
+                self.sread[b.insts[v as usize].a as usize] = true;
             }
         }
     }
@@ -2081,8 +2321,16 @@ extend Run {
         // A loop a round copied is innermost again for the next one.
         let bu = r.cf.loops;
         let mut round: u32 = 0;
-        while round < LOOP_ROUNDS && (bu.peel != 0 || bu.version != 0 || bu.unswitch != 0) && sc.o.loop_opts(p, b, bu) {
+        while round < LOOP_ROUNDS && (bu.peel != 0 || bu.version != 0 || bu.unswitch != 0 || bu.vector != 0) && sc.o.loop_opts(
+            p,
+            b,
+            bu,
+        ) {
             round += 1;
+        }
+        // Then rotation, which moves the exit tests the transforms above read.
+        if bu.rotate != 0 {
+            let _ = sc.o.rotate(p, b, bu.rotate);
         }
         unsafe *(r.ok.as_ptr() as *mut bool + j as usize) = r.inline && r.shape[j as usize] && il::small(b, r.cf.inline);
         r.give(sc);
@@ -2506,6 +2754,21 @@ const fn header_read(b: &Body, t: Inst, v: Value) bool {
 
 // Whether `t` may write memory or order memory accesses: a store, a copy, a fill, an atomic or a fence,
 // a call, inline assembly, a system operation, a vector operation or a variadic access.
+// The type tags block `k` writes: bit g for a store tagged g, bit 0 for any other write.
+fn tags_in(b: &Body, k: u32) u16 {
+    let bk = b.blocks[k as usize];
+    let mut out: u16 = 0;
+    for i in bk.start..bk.start + bk.len {
+        let t = b.insts[i as usize];
+        if t.op == O_STORE && (t.aux & MEM_VOLATILE) == 0 {
+            out |= 1u16 << tbaa(t) as u16;
+        } else if writes_memory(t) {
+            out |= 1;
+        }
+    }
+    return out;
+}
+
 const fn writes_memory(t: Inst) bool {
     let op = t.op;
     return op == O_STORE || op == O_MEMCPY || op == O_MEMSET || op >= O_ALOAD && op <= O_FENCE || op == O_CALL || op == O_CALLIND || op == O_ASM || op == O_SYS || op >= O_VOP && op <= O_VAEND;
@@ -2568,6 +2831,11 @@ const fn tls_addr(pk: &Package, b: &Body, t: Inst) bool {
 // Whether `t` and `u` are the same instruction.
 const fn same(t: Inst, u: Inst) bool {
     return t.op == u.op && t.ty == u.ty && t.aux == u.aux && t.a == u.a && t.b == u.b && t.c == u.c;
+}
+
+// The `Opt.rel` key of `x <u y`.
+const fn rel_key(x: Value, y: Value) u64 {
+    return y as u64 << 32 | x as u64;
 }
 
 const fn jump(e: u32) Inst {

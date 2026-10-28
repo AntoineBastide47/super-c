@@ -46,7 +46,18 @@ pub fn write(path: str, bytes: []u8, mode: u32) bool {
         return false;
     }
     let mut f = opened.unwrap();
-    return f.write_all(bytes).is_ok() && f.close().is_ok() && fs::set_permissions(path, mode).is_ok();
+    return f.write_all(bytes).is_ok() && f.close().is_ok() && keep_mode(path, mode);
+}
+
+// Give `path` permission bits `mode` past the umask.
+@platform(!wasm)
+fn keep_mode(path: str, mode: u32) bool {
+    return fs::set_permissions(path, mode).is_ok();
+}
+// WASI files have no permission bits.
+@platform(wasm)
+const fn keep_mode(_path: str, _mode: u32) bool {
+    return true;
 }
 
 pub const fn r16(b: []u8, at: usize) u32 {

@@ -724,6 +724,7 @@ extend<'a> Parser<'a> {
             return false;
         }
         let cold = self.keyword("cold");
+        let novec = self.keyword("novec");
         let mut loc = Loc { file: 0, line: 0, col: 0 };
         if !self.line_end_loc(&mut loc) {
             return false;
@@ -733,7 +734,10 @@ extend<'a> Parser<'a> {
         }
         let blk = self.body.add_block(tys[0..tys.len()]);
         if cold {
-            self.body.blocks.index_mut(blk as usize).flags = BLOCK_COLD;
+            self.body.blocks.index_mut(blk as usize).flags |= BLOCK_COLD;
+        }
+        if novec {
+            self.body.blocks.index_mut(blk as usize).flags |= BLOCK_NOVEC;
         }
         self.body.begin(blk);
         for j in 0..nums.len() {
@@ -1193,6 +1197,13 @@ extend<'a> Parser<'a> {
                 return self.fail("an alignment is 0 to 15");
             }
             t.aux = al as u16 | ast::pick(self.keyword("volatile"), MEM_VOLATILE, 0);
+            if self.keyword("tbaa") {
+                let mut tg: u32 = 0;
+                if !self.uint(&mut tg) || tg >= TBAA_TAGS as u32 {
+                    return self.fail("a type tag is 0 to 15");
+                }
+                t.aux |= tg as u16 << MEM_TBAA_SHIFT;
+            }
             return true;
         }
         if f == F_CALL || f == F_CALLIND {

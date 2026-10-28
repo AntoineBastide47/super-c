@@ -390,8 +390,9 @@ one test locally with `SC_TEST_SUPERC=$PWD/ci/wasm-superc.sh ./super-c test --qu
 --filter=NAME`. To find a wasm-only miscompile, bisect at object level: compile every
 TU with both toolchains, link mixed sets, and binary-search the TU set.
 `WASMTIME_BACKTRACE_DETAILS=1` gives file and line in traps. A single-flag fix
-(`-fwrapv`, `-fno-strict-aliasing`) that makes a failure go away is usually a heap-layout
-change; do not trust it.
+(`-fno-strict-aliasing`, `-fno-vectorize`) that makes a failure go away names the pass to bisect,
+not the fix: find the code the pass mistreats (a type pun breaks the strict-aliasing rule; an
+optimizer defect is a miscompile).
 
 ## Lint-Based Leak Detection
 
@@ -484,26 +485,27 @@ rebuild one test file under `SC_LIR=1 SC_LIR_EVAL=1 SC_LIR_STATS=1 super-c test 
 wasm32 (`run_wasm`: `ptr 8` becomes `ptr 4`, the wasi-sdk's clang links, wasmtime runs), passes
 values across the C ABI to header functions and C drivers, and checks that two builds give
 byte-identical objects. A CLI test that reads the program's C passes `--emit-c`: a linking build
-compiles natively and writes no C. `tests/codegen/lir_opt_test.spc`
-optimizes LIR text and checks each transform's place and the evaluator's results before and after;
+compiles natively and writes no C. `tests/codegen/lir_opt_test.spc` and
+`lir_loops_test.spc` optimize LIR text and check each transform's place and the evaluator's results
+before and after; `tests/cli/codegen_flags_test.spc` builds one program at each level and with each
+`-f` flag: each changes the binary and keeps what it prints;
 `lir_eval_test` runs the math tests' optimized LIR against CTFE (`SC_LIR_OPT=1`). `ci/gate.sh` checks that one
 worker and every core build byte-identical native objects.
 `tests/codegen/asm_test.spc` compares encodings with clang's only (`llvm_cc`: the C compiler when it is
 clang, else `clang` on the path, else the comparison skips): GNU as picks other valid encodings. A
 failing `wasm_libc_test` comparison names its first differing line.
 
-The suite also runs with no C compiler and no linker (the `*-nocc` jobs of `debug.yml`: Linux in an
-image with only the C library's headers, macOS and Windows with `CC` naming no file, wasm with only a
-WASI sysroot). There every build compiles natively and links with the own linker. A test that compiles
-C itself (`cc_build`, `c_lib`, a C driver, a C compiler wrapper), or compiles the C of `--emit-c`
-(the C compiler's assembly of it included), starts with
-`if !cli::has_cc() { return; // <what needs the C compiler> }`; `cli::has_cc` looks `cli::cc_name()`
-up, so the test calls the C compiler through `cli::cc_name()`, never as a literal `cc`. A part of a
-test that needs it takes the same condition. Run a lane locally with `CC=/nonexistent/cc ./super-c
-test`; only an image without a C compiler finds a literal `cc`.
-`tests/codegen/link_test.spc` `a_c_static_library_links_with_the_own_linker` builds a C library with
-the C compiler and its archiver (and, with `WASI_SDK_PATH`, for wasm32) and links it with the own
-linker: the one place the C compiler makes an input of the own linker.
+No build runs a C compiler, and the suite runs with no C compiler and no linker (the `*-nocc` jobs
+of `debug.yml`: Linux in an image with only the C library's headers, macOS and Windows leaving their C
+tools unused, wasm with only a WASI sysroot). A test that compiles C itself (`cc_build`, `c_lib`, a C
+oracle, a C driver, the emitted C) starts with `if !cli::has_cc() { return; // <what needs the C
+compiler> }`: `cli::has_cc` is whether `SC_TEST_CC` names a C compiler, which only the comparison job
+sets, and the test calls it through `cli::cc_name()`, never as a literal `cc`. A part of a test that
+needs it takes the same condition. `tests/codegen/link_test.spc`
+`a_c_static_library_links_with_the_own_linker` builds a C library with that compiler and its archiver
+(and, with `WASI_SDK_PATH`, for wasm32) and links it with the own linker, also with section garbage
+collection; `section_garbage_collection_drops_what_nothing_reaches` checks what the collected link
+keeps on the host and, with `WASI_SDK_PATH`, on wasm32.
 `tests/codegen/debug_info_test.spc` builds a program with and without debug information for every native
 target: the code and data sections match, an llvm-dwarfdump (on the path, beside clang, the wasi-sdk's or
 Xcode's) verifies the line tables; gdb (Linux) or lldb (macOS, where it may run a program) stops in a
@@ -548,11 +550,11 @@ set, `compile_std_bootstrap` and Windows run the full pipeline.
 ### Differential oracles
 
 `tests/harness.spc` builds each program as `main.spc` of a scratch manifest project
-(`diff_build`, `diff_run`). An option is a build flag (`--profile=release`, `--target=wasm`,
-`--emit-c`, one argument even with spaces) or, as `NAME=VALUE`, an environment variable of the build
-(`SC_BCE=0` keeps every bounds check). On the wasm lane each build
-passes `--transpiler=$SUPERC`, so the transpile step and its constant evaluation run in the wasm
-compiler under wasmtime; the C compile and the program stay native, except under
+(`diff_build`, `diff_run`). An option is a build flag (`--profile=release`, `--target=wasm`, `-O2`,
+`--emit-c`: the build writes the C tree only, which `c_link` builds), one argument even with spaces,
+or, as `NAME=VALUE`, an environment variable of the build (`SC_BCE=0` keeps every bounds check). On
+the wasm lane each build passes `--transpiler=$SUPERC`, so the transpile step and its constant
+evaluation run in the wasm compiler under wasmtime; the program stays native, except under
 `const_runtime_parity`: there the program builds `--target=wasm` (wasi-sdk) and runs under wasmtime,
 so the folded constants and their run-time twins call one C library, `std::rt::libm` (a wasm build's
 libm call folds through that module's body on any host). `parity_f32_libm_on_wasm` checks it from a
@@ -560,11 +562,12 @@ native compiler when `WASI_SDK_PATH` is set.
 
 - `same_output(src, opts_a, opts_b, runs)` runs both builds once per entry of `runs` (the
   command-line arguments of one run) and returns the first difference, empty when none. The trap
-  text is the stderr lines starting `super-c: ` (runtime helpers) or `panic: ` (std); a build failure
-  is a difference.
+  text is the stderr lines starting `super-c: ` (runtime helpers) or `panic: ` (std); a build
+  failure on either side is a difference.
 - `const_runtime_parity(decls, exprs, tys, opts)` puts every case in one program: `const
   PARITY_C<k>` and `fn parity_r<k>`, selected by `prog <k>`; `prog -1` runs them all in order, each
-  after a line `= k`, and the helper runs that once, then alone each case after a trap or a crash. Write inputs as `opq::<T>(v)`: the
+  after a line `= k`, and the helper runs that once, then alone each case after a trap or a crash.
+  Write inputs as `opq::<T>(v)`: the
   constant calls the identity `const fn opq`; the run-time copy calls `opr`, a `@noinline`
   identity that writes a static, so the compiler cannot fold it (a call of a plain or `const fn`
   identity with constant arguments is folded, and a certain trap becomes the compile error "this
@@ -615,9 +618,9 @@ The release workflow's `wasm-target` job runs it in two shards.
 
 On an aarch64 host every build calls the Neon entries (`neon` is the baseline), so without the
 lane `expect_run` builds again with `SC_SIMD_SCALAR=1` and requires the same output, the entry
-model runs over `std/simd/backend/aarch64.spc`. `SC_SIMD_FEATURES=+dotprod,+i8mm,+rdm` adds
-features to every differential build: the conformance run on Linux aarch64 uses the default set and
-that one. An entry whose key another entry holds with other features is called in one of the two
+model runs over `std/simd/backend/aarch64.spc`. `SC_SIMD_FEATURES=+dotprod,+i8mm,+rdm`
+adds features to every differential build: the conformance run on Linux aarch64 (the arm64
+runner, with the cross-built compiler) uses the default set and that one. An entry whose key another entry holds with other features is called in one of the two
 sets only (`dot` with and without `dotprod`): the model accepts it uncalled when its sibling is
 called.
 

@@ -169,6 +169,8 @@ pub struct Lower {
     pub ctfe: Vector<CtfeRes>,
     /// The build wraps on integer overflow (a profile without overflow checks).
     pub wrap: bool,
+    /// Accesses of typed places carry their type tags (`MEM_TBAA`, `-fstrict-aliasing`).
+    pub strict: bool,
     /// Bodies lowered and refused.
     pub nbodies: u64,
     err: str<'static>,
@@ -249,6 +251,7 @@ extend Lower {
             conly_why: Vector::<String>::new(),
             ctfe: Vector::<CtfeRes>::new(),
             wrap: wrap,
+            strict: false,
             nbodies: 0,
             err: "",
             dump: stdlib::get_env("SC_LIR_DUMP").unwrap_or(String::new()),
@@ -1314,6 +1317,7 @@ struct PlaceRef {
     pub t: TypeId,
     pub ti: TyI,
     pub packed: bool,
+    pub in_union: bool, // a union member holds it: another member's type may view its bytes
 }
 
 extend PlaceRef as Copy {}
@@ -1340,16 +1344,31 @@ extend Lower {
     }
 
     fn load(self: &mut Self, ty: u8, addr: Value, off: u32, packed: bool) Value {
-        let al = ast::pick(packed, 0u16, log2(type_align(ty, self.pkg.ptr_bytes)) as u16);
-        let (a, o) = self.fold_addr(addr, off);
-        return self.inst(O_LOAD, ty, al, a, VNONE, o);
+        return self.load_tagged(ty, addr, off, packed, 0);
     }
 
     fn store(self: &mut Self, v: Value, addr: Value, off: u32, packed: bool) {
+        self.store_tagged(v, addr, off, packed, 0);
+    }
+
+    // `load` with access flags `tag` (`tag_of`).
+    fn load_tagged(self: &mut Self, ty: u8, addr: Value, off: u32, packed: bool, tag: u16) Value {
+        let al = ast::pick(packed, 0u16, log2(type_align(ty, self.pkg.ptr_bytes)) as u16);
+        let (a, o) = self.fold_addr(addr, off);
+        return self.inst(O_LOAD, ty, al | tag, a, VNONE, o);
+    }
+
+    fn store_tagged(self: &mut Self, v: Value, addr: Value, off: u32, packed: bool, tag: u16) {
         let ty = self.vty(v);
         let al = ast::pick(packed, 0u16, log2(type_align(ty, self.pkg.ptr_bytes)) as u16);
         let (a, o) = self.fold_addr(addr, off);
-        let _ = self.inst(O_STORE, T_NONE, al, a, v, o);
+        let _ = self.inst(O_STORE, T_NONE, al | tag, a, v, o);
+    }
+
+    // The type tag (`MEM_TBAA`) of an access of type `ty` to a typed place, none in a union member or
+    // without `-fstrict-aliasing`.
+    const fn tag_of(self: &Self, ty: u8, in_union: bool) u16 {
+        return ast::pick(self.strict && !in_union, tbaa_of(ty) << MEM_TBAA_SHIFT, 0u16);
     }
 
     // Address `addr` + `off` with a constant `ptradd` behind `addr` folded into the offset: its base, and
@@ -2652,10 +2671,11 @@ extend Lower {
                 cur.addr = if ptr_val != VNONE {
                     ptr_val;
                 } else {
-                    self.load(T_PTR, cur.addr, 0, cur.packed);
+                    self.load_tagged(T_PTR, cur.addr, 0, cur.packed, self.tag_of(T_PTR, cur.in_union));
                 };
                 ptr_val = VNONE;
                 cur.packed = false;
+                cur.in_union = false;
                 variant = NODE_NONE;
             } else if pj.kind == irc::PJ_FIELD || pj.kind == irc::PJ_DOWNCAST {
                 let mut rm = cur.m;
@@ -2669,10 +2689,11 @@ extend Lower {
                     cur.addr = if ptr_val != VNONE {
                         ptr_val;
                     } else {
-                        self.load(T_PTR, cur.addr, 0, cur.packed);
+                        self.load_tagged(T_PTR, cur.addr, 0, cur.packed, self.tag_of(T_PTR, cur.in_union));
                     };
                     ptr_val = VNONE;
                     cur.packed = false;
+                    cur.in_union = false;
                     cur.m = rm;
                     cur.t = y.as_data.elem;
                 }
@@ -2709,6 +2730,7 @@ extend Lower {
                     }
                     cur.addr = self.ptradd(cur.addr, VNONE, 0, off);
                     cur.packed = cur.packed || f.packed;
+                    cur.in_union = cur.in_union || pj.data == irc::PJ_UNION_FIELD;
                     variant = NODE_NONE;
                 }
             } else {
@@ -2734,10 +2756,11 @@ extend Lower {
                     cur.addr = if ptr_val != VNONE {
                         ptr_val;
                     } else {
-                        self.load(T_PTR, cur.addr, 0, cur.packed);
+                        self.load_tagged(T_PTR, cur.addr, 0, cur.packed, self.tag_of(T_PTR, cur.in_union));
                     };
                     ptr_val = VNONE;
                     cur.packed = false;
+                    cur.in_union = false;
                     rm = em;
                     rt = et;
                     y = ey;
@@ -2747,8 +2770,9 @@ extend Lower {
                     base = if ptr_val != VNONE {
                         ptr_val;
                     } else {
-                        self.load(T_PTR, cur.addr, 0, cur.packed);
+                        self.load_tagged(T_PTR, cur.addr, 0, cur.packed, self.tag_of(T_PTR, cur.in_union));
                     };
+                    cur.in_union = false;
                 } else if ptr_val != VNONE {
                     return self.fail("index-pointer");
                 } else if y.kind == TypeKind::TYPE_ARRAY || y.kind == TypeKind::TYPE_SIMD {
@@ -2769,11 +2793,12 @@ extend Lower {
                     if !self.named_field(c, rm, rt, fname, &mut f) {
                         return self.fail("index-storage");
                     }
-                    base = if nm == "Array" {
-                        self.ptradd(cur.addr, VNONE, 0, f.off);
+                    if nm == "Array" {
+                        base = self.ptradd(cur.addr, VNONE, 0, f.off);
                     } else {
-                        self.load(T_PTR, cur.addr, f.off, cur.packed);
-                    };
+                        base = self.load_tagged(T_PTR, cur.addr, f.off, cur.packed, self.tag_of(T_PTR, cur.in_union));
+                        cur.in_union = false;
+                    }
                 }
                 ptr_val = VNONE;
                 let mut eti = TyI { cls: 0 };
@@ -2998,7 +3023,7 @@ extend Lower {
         if p.kind == PR_ZST || p.ti.cls != VC_SCALAR {
             return self.fail_v("read");
         }
-        return self.load(p.ti.mty, p.addr, 0, p.packed);
+        return self.load_tagged(p.ti.mty, p.addr, 0, p.packed, self.tag_of(p.ti.mty, p.in_union));
     }
 
     fn write(self: &mut Self, p: PlaceRef, v: Value) bool {
@@ -3012,7 +3037,7 @@ extend Lower {
         if p.kind != PR_MEM {
             return self.fail("write");
         }
-        self.store(v, p.addr, 0, p.packed);
+        self.store_tagged(v, p.addr, 0, p.packed, self.tag_of(self.vty(v), p.in_union));
         return true;
     }
 
@@ -6336,6 +6361,7 @@ extend Lower {
         let mut pcallee = t.callee;
         let mut nfixed = NONE;
         let mut variadic = t.is_variadic;
+        let mut ext = false; // the callee is an extern declaration's (`Sym.ext`)
         let pb = self.pkg.ptr_bytes;
         let fat = TyI { cls: VC_MEM, mty: T_NONE, size: 2 * pb, align: pb };
         if t.callee.node == NODE_NONE {
@@ -6429,6 +6455,7 @@ extend Lower {
             if fd.kind == NodeKind::NODE_FUNCTION && fd.as_data.function.is_variadic() {
                 variadic = true;
             }
+            ext = fd.kind == NodeKind::NODE_FUNCTION && fd.as_data.function.is_extern();
         }
         // A generic callee's parameter types read the bindings of its instance (`arg_mode`); the
         // arguments read the caller's.
@@ -6568,6 +6595,9 @@ extend Lower {
             &mut r,
         ) {
             r = self.emit_call(nm, fv, &args, &tys, nfixed, variadic, ti, c, b.module, dty, dst);
+            if ext && fv == VNONE {
+                self.mark_ext(nm);
+            }
         }
         if t.dests_len == 1 && ti.cls == VC_SCALAR {
             let mut p = PlaceRef { kind: 0 };
@@ -7365,7 +7395,8 @@ extend Lower {
         }
     }
 
-    // Item `(m, n)`'s `@used` and `@unsafe(link_section)` onto symbol `s`.
+    // Item `(m, n)`'s `@used` and `@unsafe(link_section)` onto symbol `s`; an `@export` function is kept as
+    // `@used` is: C reaches it by name, which no relocation of the link may show.
     fn item_attrs(self: &mut Self, c: &mut cbe::CEmit, s: u32, m: ModuleId, n: NodeId) {
         if n == NODE_NONE {
             return;
@@ -7376,7 +7407,7 @@ extend Lower {
             let ss = unsafe (*ua).str_span;
             let spec = Lower::p(c).modules.at(m as usize).source.as_str().slice(ss.start as usize, ss.end as usize);
             self.pkg.set_section(s, spec);
-        } else if a.attr_of(n, AttrKind::ATTR_USED) != null {
+        } else if a.attr_of(n, AttrKind::ATTR_USED) != null || a.attr_of(n, AttrKind::ATTR_EXPORT) != null {
             self.pkg.syms.index_mut(s as usize).used = true;
         }
         if a.attr_of(n, AttrKind::ATTR_NOINLINE) != null {

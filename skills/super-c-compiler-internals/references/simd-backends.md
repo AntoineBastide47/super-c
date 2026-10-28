@@ -15,9 +15,8 @@ the macOS and iOS aarch64 baselines, and the macOS, iOS and Android x86_64 ones,
 item), `push_c_flags(set, target)` (the aarch64 rows make one `-march`/`-mcpu` flag at the lowest
 architecture their `level` allows; the x86_64 rows `-march=x86-64-vN` for the highest level the
 set holds, else `-march=x86-64` for a set with the baseline (never the C compiler's default), then
-each further row's `-m` flag, the baseline's included; the `aarch64-features` and
-`x86-features` probes check them under the build's flags, for the features beyond the baseline
-only) and `push_target_attr(set, build, target)` (a function's C `target` attribute: the x86 flag
+each further row's `-m` flag, the baseline's included; `--emit-c` writes them into `__cflags`) and
+`push_target_attr(set, build, target)` (a function's C `target` attribute: the x86 flag
 names, or `SC_TGT_A64(clang, gcc)` with clang's `+ext` list and GCC's `arch=armv8.N-a+ext`, which
 the runtime header chooses). `IMPLIED` is closed by Warshall's algorithm (an implication may name a later
 row), with the bit test and the join spelled inline: every compile-time evaluation interprets it.
@@ -268,8 +267,8 @@ The work for an accepted architecture `A`, in order:
    (`getauxval` on Linux), every error read as "absent", callable before `main` with no allocation
    and no lock, every feature reachable through `sc_cpu_has`, the 16-byte compare-exchange feature
    among them when it is optional.
-5. The C target attribute spelling and the `-m`/`-march` flags of `A` for the C tree of `--emit-c`
-   (`ir::cpu_features::push_c_flags`).
+5. The `-m`/`-march` spellings and the C target attribute of `A` that `--emit-c` writes
+   (`push_c_flags`, `push_target_attr` in `src/ir/cpu_features.spc`).
 6. A module `std::simd::<A>` only for operations with no portable meaning and a named client.
 
 The backend is accepted when the full vector conformance suite gives the lane loop's results; every

@@ -1,6 +1,7 @@
 // The ELF relocatable object writer for x86-64 and arm64: the header, a section per non-empty object
-// section kind and per named section, `.eh_frame` with one common entry and a frame entry per function,
-// `.rela` sections, the symbol table (locals first) and the string tables. A thread-local variable is an
+// section kind and per named section (with `-ffunction-sections` and `-fdata-sections` the code and the
+// variables split at their symbols into a section each, `.text.<name>`), `.eh_frame` with one common entry
+// and a frame entry per function, `.rela` sections, the symbol table (locals first) and the string tables. A thread-local variable is an
 // STT_TLS symbol in `.tdata` or `.tbss`. `.note.GNU-stack` marks the stack non-executable.
 import codegen::obj as ob;
 import target::x64 as x;
@@ -23,6 +24,7 @@ const SHF_MERGE: u64 = 0x10;
 const SHF_STRINGS: u64 = 0x20;
 const SHF_INFO_LINK: u64 = 0x40;
 const SHF_TLS: u64 = 0x400;
+const SHF_GNU_RETAIN: u64 = 0x200000;
 
 const STB_LOCAL: u32 = 0;
 const STB_GLOBAL: u32 = 1;
@@ -232,25 +234,40 @@ struct Shdr {
 
 extend Shdr as Copy {}
 
-/// Write object `o` as an ELF relocatable object for arm64 (`a64`) or x86-64 into `out`.
-pub fn write(o: &ob::Obj, a64: bool, out: &mut Vector<u8>) {
+/// Write object `o` as an ELF relocatable object for arm64 (`a64`) or x86-64 into `out`, its sections split
+/// at their symbols as `split` asks (`lir::SPLIT_*`).
+pub fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
     let mut shstr = Vector::<u8>::new();
     shstr.push(0);
     let mut hdrs = Vector::<Shdr>::new();
     hdrs.push(Shdr { name: 0, ty: 0, flags: 0, off: 0, size: 0, link: 0, info: 0, align: 0, entsize: 0 });
     // The data that follows the header, the section bytes in header order.
     let mut body = Vector::<u8>::new();
-    // Per object section, its header index (0: absent).
-    let mut shn = Vector::<u32>::new();
-    shn.resize_default(o.secs.len());
-    for k in 0..o.secs.len() {
-        let s = &o.secs[k];
-        if s.size == 0 {
-            continue;
+    let mut parts = Vector::<ob::Part>::new();
+    let mut first = Vector::<u32>::new();
+    ob::parts_of(o, split, &mut parts, &mut first);
+    // A part with a symbol the link must keep stays through garbage collection.
+    let mut retain = Vector::<bool>::new();
+    retain.resize_default(parts.len());
+    for y in 0..o.syms.len() {
+        let sy = o.syms[y];
+        if (sy.flags & ob::SF_USED) != 0 && sy.sec != ob::NOSEC {
+            let q = ob::part_at(&parts, &first, sy.sec, sy.off);
+            if q != ob::NONE32 {
+                retain[q as usize] = true;
+            }
         }
+    }
+    for q in 0..parts.len() {
+        let pt = parts[q];
+        let s = &o.secs[pt.k as usize];
         let mut name: str = "";
         let mut ty: u32 = 0;
-        let fl = sec_info(o, k as u8, &mut name, &mut ty);
+        let fl = sec_info(o, pt.k, &mut name, &mut ty) | if retain[q] {
+            SHF_GNU_RETAIN;
+        } else {
+            0u64;
+        };
         let al = 1u64 << s.align_log2 as u64;
         let mut off: u64 = 0;
         if ty != SHT_NOBITS {
@@ -258,18 +275,23 @@ pub fn write(o: &ob::Obj, a64: bool, out: &mut Vector<u8>) {
                 body.push(0);
             }
             off = body.len() as u64;
-            for j in 0..s.bytes.len() {
+            for j in pt.lo as usize..pt.hi as usize {
                 body.push(s.bytes[j]);
             }
         }
-        shn[k] = hdrs.len() as u32;
+        let mut full = String::from_str(name);
+        if pt.sym != ob::NONE32 {
+            full.push_byte(b'.');
+            full.push_str(o.name_of(pt.sym));
+        }
+        parts.index_mut(q).hdr = hdrs.len() as u32;
         hdrs.push(
             Shdr {
-                name: add_str(&mut shstr, name),
+                name: add_str(&mut shstr, full.as_str()),
                 ty: ty,
                 flags: fl,
                 off: off,
-                size: s.size,
+                size: pt.hi - pt.lo,
                 link: 0,
                 info: 0,
                 align: al,
@@ -363,19 +385,20 @@ pub fn write(o: &ob::Obj, a64: bool, out: &mut Vector<u8>) {
         syms.push(0);
     }
     let mut nsym: u32 = 1;
-    // A section symbol per section with frames: `.eh_frame` refers to a function through it, as a
-    // relocation against a global symbol would make the read-only section need one in a shared object.
+    // A section symbol per part with frames: `.eh_frame` refers to a function through it, as a relocation
+    // against a global symbol would make the read-only section need one in a shared object.
     let mut secsym = Vector::<u32>::new();
-    secsym.resize_default(o.secs.len());
+    secsym.resize_default(parts.len());
     for f in 0..o.frames.len() {
-        let k = o.syms[o.frames[f].sym as usize].sec as usize;
-        if secsym[k] == 0 {
-            secsym[k] = nsym;
+        let y = o.syms[o.frames[f].sym as usize];
+        let q = ob::part_at(&parts, &first, y.sec, y.off) as usize;
+        if secsym[q] == 0 {
+            secsym[q] = nsym;
             nsym += 1;
             ob::w32(&mut syms, 0);
             syms.push((STB_LOCAL << 4 | STT_SECTION) as u8);
             syms.push(0);
-            ob::w16(&mut syms, shn[k]);
+            ob::w16(&mut syms, parts[q].hdr);
             ob::w64(&mut syms, 0);
             ob::w64(&mut syms, 0);
         }
@@ -416,34 +439,60 @@ pub fn write(o: &ob::Obj, a64: bool, out: &mut Vector<u8>) {
                     0u8;
                 },
             );
-            ob::w16(
-                &mut syms,
-                if y.sec == ob::NOSEC {
-                    0;
-                } else {
-                    shn[y.sec as usize];
-                },
-            );
-            ob::w64(&mut syms, y.off);
+            let q = if y.sec == ob::NOSEC {
+                ob::NONE32;
+            } else {
+                ob::part_at(&parts, &first, y.sec, y.off);
+            };
+            if q == ob::NONE32 {
+                ob::w16(&mut syms, 0);
+                ob::w64(&mut syms, y.off);
+            } else {
+                ob::w16(&mut syms, parts[q as usize].hdr);
+                ob::w64(&mut syms, y.off - parts[q as usize].lo);
+            }
             ob::w64(&mut syms, y.size);
         }
     }
-    let symtab = hdrs.len() as u32 + count_rela(o, &shn, eh_sec != 0);
-    // Relocation sections.
-    for k in 0..o.secs.len() {
-        if shn[k] == 0 {
-            continue;
+    // Each part's relocations, in object order: `byp[pfirst[q] .. pfirst[q + 1]]` are part `q`'s.
+    let mut pfirst = Vector::<u32>::new();
+    pfirst.resize_default(parts.len() + 1);
+    let mut rpart = Vector::<u32>::with_capacity(o.rels.len());
+    for r in 0..o.rels.len() {
+        let x = o.rels[r];
+        let q = ob::part_at(&parts, &first, x.sec, x.off);
+        rpart.push(q);
+        if q != ob::NONE32 {
+            pfirst[q as usize + 1] += 1;
         }
+    }
+    let mut nrela: u32 = (eh_sec != 0) as u32;
+    for q in 0..parts.len() {
+        nrela += (pfirst[q + 1] != 0) as u32;
+        pfirst[q + 1] += pfirst[q];
+    }
+    let mut byp = Vector::<u32>::new();
+    byp.resize_default(pfirst[parts.len()] as usize);
+    let mut fill = Vector::<u32>::new();
+    fill.extend_copy(&pfirst);
+    for r in 0..o.rels.len() {
+        let q = rpart[r];
+        if q != ob::NONE32 {
+            byp[fill[q as usize] as usize] = r as u32;
+            fill[q as usize] += 1;
+        }
+    }
+    let symtab = hdrs.len() as u32 + nrela;
+    // Relocation sections.
+    for q in 0..parts.len() {
+        let pt = parts[q];
         let mut n: u32 = 0;
         while body.len() % 8 != 0 {
             body.push(0);
         }
         let start = body.len();
-        for r in 0..o.rels.len() {
-            let x = o.rels[r];
-            if x.sec as usize != k {
-                continue;
-            }
+        for j in pfirst[q]..pfirst[q + 1] {
+            let x = o.rels[byp[j as usize] as usize];
             let abs32 = if a64 {
                 R_AARCH64_ABS32;
             } else {
@@ -456,7 +505,7 @@ pub fn write(o: &ob::Obj, a64: bool, out: &mut Vector<u8>) {
             } else {
                 rel_type(x.kind);
             };
-            ob::w64(&mut body, x.off);
+            ob::w64(&mut body, x.off as u64 - pt.lo);
             ob::w64(&mut body, symix[x.sym as usize] as u64 << 32 | ty as u64);
             ob::w64(&mut body, x.addend as u64);
             n += 1;
@@ -467,8 +516,12 @@ pub fn write(o: &ob::Obj, a64: bool, out: &mut Vector<u8>) {
         let mut nm = String::from_str(".rela");
         let mut name: str = "";
         let mut ty: u32 = 0;
-        let _ = sec_info(o, k as u8, &mut name, &mut ty);
+        let _ = sec_info(o, pt.k, &mut name, &mut ty);
         nm.push_str(name);
+        if pt.sym != ob::NONE32 {
+            nm.push_byte(b'.');
+            nm.push_str(o.name_of(pt.sym));
+        }
         hdrs.push(
             Shdr {
                 name: add_str(&mut shstr, nm.as_str()),
@@ -477,7 +530,7 @@ pub fn write(o: &ob::Obj, a64: bool, out: &mut Vector<u8>) {
                 off: start as u64,
                 size: n * 24,
                 link: symtab,
-                info: shn[k],
+                info: pt.hdr,
                 align: 8,
                 entsize: 24,
             },
@@ -497,8 +550,9 @@ pub fn write(o: &ob::Obj, a64: bool, out: &mut Vector<u8>) {
             } else {
                 R_X86_64_PC32;
             };
-            ob::w64(&mut body, secsym[y.sec as usize] as u64 << 32 | pc32 as u64);
-            ob::w64(&mut body, y.off);
+            let q = ob::part_at(&parts, &first, y.sec, y.off) as usize;
+            ob::w64(&mut body, secsym[q] as u64 << 32 | pc32 as u64);
+            ob::w64(&mut body, y.off - parts[q].lo);
         }
         hdrs.push(
             Shdr {
@@ -620,18 +674,4 @@ pub fn write(o: &ob::Obj, a64: bool, out: &mut Vector<u8>) {
         ob::w64(out, h.align);
         ob::w64(out, h.entsize);
     }
-}
-
-// The relocation sections `write` emits: one per present section with relocations, and `.rela.eh_frame`.
-fn count_rela(o: &ob::Obj, shn: &Vector<u32>, eh: bool) u32 {
-    let mut has = Vector::<bool>::new();
-    has.resize_default(o.secs.len());
-    for r in 0..o.rels.len() {
-        has[o.rels[r].sec as usize] = true;
-    }
-    let mut n: u32 = eh as u32;
-    for k in 0..has.len() {
-        n += (has[k] && shn[k] != 0) as u32;
-    }
-    return n;
 }

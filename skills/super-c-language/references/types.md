@@ -110,7 +110,7 @@ These keep the declared order (C layout):
 - unions;
 - `@packed` structs (use them for wire formats);
 - header types (a `struct` or `union` of an `extern "C"` block): it lists every member of the C
-  type, Super-C computes its layout by the same rules, and the C compile checks it against the
+  type, Super-C computes its layout by the same rules, and the build checks it against the
   header (see `super-c-ffi`, Header Types);
 - every struct and enum that an `extern` function signature or an `@export` function reaches by
   value or through a pointer, reference, slice, array, function type, tuple or generic argument, with

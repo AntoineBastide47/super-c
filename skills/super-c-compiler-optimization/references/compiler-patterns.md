@@ -188,8 +188,9 @@ the single largest waste before the keep existed.
   net loss.
 - **Hash map for small N.** Below ~16 elements, linear scan on a flat array beats a hash
   map (the constant factor of hashing dominates).
-- **Premature SIMD.** Let the C compiler auto-vectorize. Only hand-write SIMD if the
-  profiler shows the auto-vectorizer failed on a hot loop and you understand why.
+- **Premature SIMD.** Let the vectorizer (`-fvectorize`, `lir::loops`) take counted loops over
+  slices. Only hand-write SIMD if the profiler shows it left a hot loop scalar and you understand
+  why.
 - **Parallelism as a substitute for serial efficiency.** Optimize the serial path first.
   A parallel version of a slow algorithm is still slow.
 - **Speculative prefetch.** Modern CPUs have hardware prefetchers that handle sequential

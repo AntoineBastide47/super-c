@@ -32,8 +32,10 @@ Before any optimization work, understand these non-negotiable constraints:
    small bodies across modules, numbers values, forwards loads and stores, promotes the
    loads of private memory one store writes, moves invariant code out of loops and folds
    constants and branches; it does not lower fixed-size `memcmp` or forward copies
-   between slots. If a target shows ~0 samples under the build's optimizer, the
-   optimization will not produce a corpus-level win.
+   between slots; at 2 and 3 it also vectorizes counted loops over slices, and every level's
+   passes and flags are in the binary skill ("Optimization levels and code-generation
+   flags"). If a target shows ~0 samples under the build's optimizer, the optimization will
+   not produce a corpus-level win.
 
 3. **Benchmark protocol.** Measure with `super-c bench --filter=self_transpile`
    (100 serial rounds of the build's own transpile step, timed per build phase from
