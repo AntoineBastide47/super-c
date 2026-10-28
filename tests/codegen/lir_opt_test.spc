@@ -79,6 +79,22 @@ fn text_of(p: &Package, name: str) String {
 }
 
 // Function `name` of `before` and of `after` on arguments `args` end alike, with value `want`.
+// The block of body text `t` that byte `at` is in: from its label to the next label.
+fn block_at(t: str, at: usize) str {
+    let mut from = at;
+    // Each step goes back one byte.
+    while from > 0 && !(t.byte_at(from - 1) == b'\n' && t.byte_at(from) == b'b') {
+        from -= 1;
+    }
+    let n = t.slice(at, t.len()).find("\nb");
+    let to = if n >= 0 {
+        at + n as usize;
+    } else {
+        t.len();
+    };
+    return t.slice(from, to);
+}
+
 fn same_result(before: &Package, after: &Package, name: str, args: []u64, want: u64) {
     let mut e = leval::Eval::new(before);
     let o = e.run(before.find_symbol(name), args);
@@ -793,8 +809,9 @@ b0:
 }
 
 // Loads of an exclusive reference's fields leave a loop that stores only another field through the
-// parameter itself (`self.len += 1`, a `Vector` push): `cap` and `data` move out, `len` stays; a store
-// to the loaded field (`stuck`) keeps its load in the loop.
+// parameter itself (`self.len += 1`, a `Vector` push): `cap` and `data` move out; `len`, which the loop
+// also stores, stays in a register across it and is stored back after it (`promote_places`), and so
+// does a field the loop stores what it loaded to (`stuck`).
 @test
 fn loads_of_fields_the_loop_does_not_store_leave_it() {
     let (b, a) = optimized(
@@ -870,9 +887,11 @@ b0:
     let cap = c.as_str().find("load.i64 v0+16");
     let data = c.as_str().find("load.ptr v0");
     assert(cap >= 0 && cap < head && data >= 0 && data < head, c.as_str());
-    assert(c.as_str().find("load.i64 v0+8") > head, c.as_str());
+    let len = c.as_str().find("load.i64 v0+8");
+    assert(len >= 0 && len < head && c.as_str().find(", v0+8 align") > head, c.as_str());
     let s = text_of(&a, "stuck");
-    assert(s.as_str().find("load.i64 v0+16") > s.as_str().find("b1("), s.as_str());
+    let sl = s.as_str().find("load.i64 v0+16");
+    assert(sl >= 0 && sl < s.as_str().find("b1("), s.as_str());
     let none: []u64 = [];
     same_result(&b, &a, "drive", none, 14);
 }
@@ -2732,4 +2751,406 @@ b2(v18: i64):
     let end = t.as_str().find("\nb2(");
     assert(at >= 0 && end > at && !t.as_str().slice(at as usize, end as usize).contains("load.i64 v7"), t.as_str());
     let _ = b;
+}
+
+// Folds of comparisons and addresses: an unsigned order against 0 is a constant; a select of 1 or 0 on a
+// comparison is the comparison widened; a widened comparison against 0 is the opposite comparison; on
+// the edge where `x == y` holds, `y - x` is 0; a constant offset or a constant added to an index joins
+// the access's offset; the bytes of a word loaded one by one are one load; two stores of constants side
+// by side are one; a call of a forwarder on a failure path is the call it forwards to; a select of a
+// constant 0 or 1 or another flag on a flag is one operation on the flags; a narrower load of a stored
+// integer is its bytes shifted down.
+@test
+fn comparisons_addresses_and_neighbouring_accesses_fold() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @order0 fn global
+sym @widen fn global
+sym @negated fn global
+sym @room fn global
+sym @field fn global
+sym @next fn global
+sym @word fn global
+sym @zeros fn global
+sym @fwd fn global
+sym @sink fn global
+sym @guard fn global
+sym @iszero fn global
+sym @flagsel fn global
+sym @narrow fn global
+fn @order0
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.ult v0, v1
+  v3 = icmp.uge v0, v1
+  v4 = zext.i64 v2
+  v5 = zext.i64 v3
+  v6 = add.i64 v4, v5
+  ret v6
+fn @widen
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = iconst.i64 0
+  v4 = icmp.ult v0, v1
+  v5 = select.i64 v4, v2, v3
+  ret v5
+fn @negated
+  sig (i64, i64) -> i8
+b0(v0: i64, v1: i64):
+  v2 = iconst.i32 0
+  v3 = icmp.ult v0, v1
+  v4 = zext.i32 v3
+  v5 = icmp.eq v4, v2
+  ret v5
+fn @room
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = iconst.i64 7
+  v4 = icmp.eq v0, v1
+  br v4, b1, b3
+b1:
+  v5 = sub.i64 v1, v0
+  v6 = icmp.uge v5, v2
+  br v6, b3, b2
+b2:
+  ret v3
+b3:
+  ret v2
+fn @field
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = ptradd v0+8
+  v2 = load.i64 v1 align 3
+  ret v2
+fn @next
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 1
+  v3 = add.i64 v1, v2
+  v4 = ptradd v0, v3 * 8
+  v5 = load.i64 v4 align 3
+  ret v5
+fn @word
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = iconst.i64 8
+  v2 = iconst.i64 16
+  v3 = iconst.i64 24
+  v4 = iconst.i64 32
+  v5 = iconst.i64 40
+  v6 = iconst.i64 48
+  v7 = iconst.i64 56
+  v8 = load.i8 v0 align 0
+  v9 = load.i8 v0+1 align 0
+  v10 = load.i8 v0+2 align 0
+  v11 = load.i8 v0+3 align 0
+  v12 = load.i8 v0+4 align 0
+  v13 = load.i8 v0+5 align 0
+  v14 = load.i8 v0+6 align 0
+  v15 = load.i8 v0+7 align 0
+  v16 = zext.i64 v8
+  v17 = zext.i64 v9
+  v18 = zext.i64 v10
+  v19 = zext.i64 v11
+  v20 = zext.i64 v12
+  v21 = zext.i64 v13
+  v22 = zext.i64 v14
+  v23 = zext.i64 v15
+  v24 = shl.i64 v17, v1
+  v25 = shl.i64 v18, v2
+  v26 = shl.i64 v19, v3
+  v27 = shl.i64 v20, v4
+  v28 = shl.i64 v21, v5
+  v29 = shl.i64 v22, v6
+  v30 = shl.i64 v23, v7
+  v31 = or.i64 v16, v24
+  v32 = or.i64 v31, v25
+  v33 = or.i64 v32, v26
+  v34 = or.i64 v33, v27
+  v35 = or.i64 v34, v28
+  v36 = or.i64 v35, v29
+  v37 = or.i64 v36, v30
+  ret v37
+fn @zeros
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 -1
+  store v2, v0 align 2
+  store v1, v0+4 align 2
+  ret
+fn @fwd
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0) -> void
+b0(v0: ptr):
+  v1 = load.ptr v0 align 3
+  v2 = load.i64 v0+8 align 3
+  call @sink(v1, v2) : (ptr, i64) -> void
+  unreachable
+fn @sink
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  ret
+fn @guard
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (i64, ptr) -> i64
+  slot s0 size 16 align 3
+b0(v0: i64, v1: ptr):
+  v2 = iconst.i64 9
+  v3 = icmp.ult v0, v2
+  br v3, b2, b1
+b1: cold
+  v4 = slotaddr s0
+  store v1, v4 align 3
+  store v0, v4+8 align 3
+  call @fwd(v4) : (l0) -> void
+  unreachable
+b2:
+  ret v0
+fn @iszero
+  sig (ptr) -> i8
+  ref p0 16
+b0(v0: ptr):
+  v1 = iconst.i64 0
+  v2 = load.i64 v0 align 3
+  v3 = icmp.ne v2, v1
+  br v3, b2, b1
+b1:
+  v4 = load.i64 v0+8 align 3
+  v5 = icmp.eq v4, v1
+  jmp b3(v5)
+b2:
+  v6 = iconst.i8 0
+  jmp b3(v6)
+b3(v7: i8):
+  ret v7
+fn @flagsel
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i8 0
+  v4 = iconst.i8 1
+  v5 = icmp.ne v0, v2
+  v6 = icmp.eq v1, v2
+  v7 = select.i8 v5, v3, v6
+  v8 = select.i8 v5, v4, v6
+  v9 = select.i8 v5, v6, v3
+  v10 = select.i8 v5, v6, v4
+  v11 = zext.i64 v7
+  v12 = zext.i64 v8
+  v13 = zext.i64 v9
+  v14 = zext.i64 v10
+  v15 = iconst.i64 1
+  v16 = iconst.i64 2
+  v17 = iconst.i64 3
+  v18 = shl.i64 v12, v15
+  v19 = shl.i64 v13, v16
+  v20 = shl.i64 v14, v17
+  v21 = or.i64 v11, v18
+  v22 = or.i64 v21, v19
+  v23 = or.i64 v22, v20
+  ret v23
+fn @narrow
+  sig (i64) -> i64
+  slot s0 size 8 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  store v0, v1 align 3
+  v2 = load.i32 v1+4 align 2 tbaa 3
+  v3 = load.i16 v1+1 align 0
+  v4 = zext.i64 v2
+  v5 = zext.i64 v3
+  v6 = add.i64 v4, v5
+  ret v6
+)",
+    );
+    let iz = text_of(&a, "iszero");
+    assert(!iz.contains("select") && !iz.contains("br "), iz.as_str());
+    let nw = text_of(&a, "narrow");
+    assert(!nw.contains("load") && !nw.contains("slot"), nw.as_str());
+    let word: []u64 = [0x1122334455667788];
+    same_result(&b, &a, "narrow", word, 0x11223344 + 0x6677);
+    let fs = text_of(&a, "flagsel");
+    assert(!fs.contains("select"), fs.as_str());
+    // Bits: `c ? 0 : f`, `c ? 1 : f`, `c ? f : 0`, `c ? f : 1`, with c = v0 != 0 and f = v1 == 0.
+    let c0f0: []u64 = [0, 1];
+    same_result(&b, &a, "flagsel", c0f0, 8);
+    let c0f1: []u64 = [0, 0];
+    same_result(&b, &a, "flagsel", c0f1, 1 | 2 | 8);
+    let c1f0: []u64 = [5, 1];
+    same_result(&b, &a, "flagsel", c1f0, 2);
+    let c1f1: []u64 = [5, 0];
+    same_result(&b, &a, "flagsel", c1f1, 2 | 4 | 8);
+    let o = text_of(&a, "order0");
+    assert(!o.contains("icmp"), o.as_str());
+    let x: []u64 = [5];
+    same_result(&b, &a, "order0", x, 1);
+    let w = text_of(&a, "widen");
+    assert(!w.contains("select") && w.contains("zext"), w.as_str());
+    let lo: []u64 = [1, 2];
+    let hi: []u64 = [2, 1];
+    same_result(&b, &a, "widen", lo, 1);
+    same_result(&b, &a, "widen", hi, 0);
+    let n = text_of(&a, "negated");
+    assert(!n.contains("zext") && n.contains("icmp.uge"), n.as_str());
+    same_result(&b, &a, "negated", lo, 0);
+    same_result(&b, &a, "negated", hi, 1);
+    let r = text_of(&a, "room");
+    assert(!r.contains("sub."), r.as_str());
+    same_result(&b, &a, "room", lo, 1);
+    let eq: []u64 = [3, 3];
+    same_result(&b, &a, "room", eq, 7);
+    let f = text_of(&a, "field");
+    assert(!f.contains("ptradd") && f.contains("load.i64 v0+8"), f.as_str());
+    let nx = text_of(&a, "next");
+    assert(!nx.contains("add.") && nx.contains("+8"), nx.as_str());
+    let wd = text_of(&a, "word");
+    assert(!wd.contains("load.i8") && !wd.contains("or.") && wd.contains("load.i64 v0"), wd.as_str());
+    let z = text_of(&a, "zeros");
+    assert(z.contains("store") && !z.contains("v0+4"), z.as_str());
+    let g = text_of(&a, "guard");
+    assert(g.contains("call @sink") && !g.contains("call @fwd"), g.as_str());
+    let small: []u64 = [4, 0];
+    same_result(&b, &a, "guard", small, 4);
+}
+
+// A loop that reads and writes a place through an exclusive pointer from outside it, and touches no other
+// byte of it, keeps the place in a register: one load before the loop, one store after it, each loop of
+// a body its own place; not when the loop also writes through a pointer that may be the same.
+@test
+fn a_loop_keeps_an_exclusive_place_in_a_register() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @mix fn global noinline
+sym @mixany fn global noinline
+sym @twice fn global noinline
+sym @top fn global
+fn @mix
+  sig (ptr, ptr, i64) -> void
+  ref p0 8 noalias
+  ref p1 24
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 31
+  jmp b1(v3)
+b1(v6: i64):
+  v7 = icmp.ult v6, v2
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v6 * 8
+  v9 = load.i64 v8 align 3
+  v10 = load.i64 v0 align 3
+  v11 = mul.i64 v10, v5
+  v12 = add.i64 v11, v9
+  store v12, v0 align 3
+  v13 = add.i64 v6, v4
+  jmp b1(v13)
+b3:
+  ret
+fn @mixany
+  sig (ptr, ptr, i64) -> void
+  ref p0 8
+  ref p1 24
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 31
+  jmp b1(v3)
+b1(v6: i64):
+  v7 = icmp.ult v6, v2
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v6 * 8
+  v9 = load.i64 v8 align 3
+  v10 = load.i64 v0 align 3
+  v11 = mul.i64 v10, v5
+  v12 = add.i64 v11, v9
+  store v12, v0 align 3
+  store v12, v8 align 3
+  v13 = add.i64 v6, v4
+  jmp b1(v13)
+b3:
+  ret
+fn @twice
+  sig (ptr, i64) -> void
+  ref p0 16 noalias
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  jmp b1(v2)
+b1(v4: i64):
+  v5 = icmp.ult v4, v1
+  br v5, b2, b3(v2)
+b2:
+  v6 = load.i64 v0 align 3
+  v7 = add.i64 v6, v4
+  store v7, v0 align 3
+  v8 = add.i64 v4, v3
+  jmp b1(v8)
+b3(v9: i64):
+  v10 = icmp.ult v9, v1
+  br v10, b4, b5
+b4:
+  v11 = load.i64 v0+8 align 3
+  v12 = load.i64 v0 align 3
+  v13 = add.i64 v11, v12
+  store v13, v0+8 align 3
+  v14 = add.i64 v9, v3
+  jmp b3(v14)
+b5:
+  ret
+fn @top
+  sig (i64) -> i64
+  slot s0 size 8 align 3
+  slot s1 size 24 align 3
+  slot s2 size 16 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 2
+  v4 = iconst.i64 3
+  v5 = iconst.i64 5
+  v6 = iconst.i64 3
+  store v0, v1 align 3
+  store v3, v2 align 3
+  store v4, v2+8 align 3
+  store v5, v2+16 align 3
+  call @mix(v1, v2, v6) : (ptr, ptr, i64) -> void
+  call @mixany(v1, v2, v6) : (ptr, ptr, i64) -> void
+  v7 = load.i64 v1 align 3
+  v8 = load.i64 v2+16 align 3
+  v9 = add.i64 v7, v8
+  v10 = slotaddr s2
+  store v0, v10 align 3
+  store v0, v10+8 align 3
+  call @twice(v10, v6) : (ptr, i64) -> void
+  v11 = load.i64 v10+8 align 3
+  v12 = add.i64 v9, v11
+  ret v12
+)",
+    );
+    // The loop's body: the block of the multiplication.
+    let m = text_of(&a, "mix");
+    let mul = m.as_str().find("mul.i64");
+    assert(mul >= 0 && m.as_str().find("load.i64 v0") >= 0, m.as_str());
+    let body = block_at(m.as_str(), mul as usize);
+    assert(!body.contains(", v0 ") && !body.contains("load.i64 v0"), m.as_str());
+    let n = text_of(&a, "mixany");
+    let nmul = n.as_str().find("mul.i64");
+    assert(nmul >= 0 && block_at(n.as_str(), nmul as usize).contains("load.i64 v0"), n.as_str());
+    // mix: x = ((x * 31 + 2) * 31 + 3) * 31 + 5; mixany: the same again, each element set to the running
+    // value, the last of which it returns beside x.
+    let x: []u64 = [1];
+    let m1 = ((1u64 * 31 + 2) * 31 + 3) * 31 + 5;
+    let e0 = m1 * 31 + 2;
+    let e1 = e0 * 31 + 3;
+    let e2 = e1 * 31 + 5;
+    // twice: x + 0 + 1 + 2 into the first field, then the second field adds it three times.
+    let w = text_of(&a, "twice");
+    assert(!w.contains("slot"), w.as_str());
+    same_result(&b, &a, "top", x, e2 + e2 + 1 + 3 * 4);
 }

@@ -396,6 +396,202 @@ b5:
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// Branches on a value against zero (`cbz` on arm64) at every width, on one bit (`tbz`), and on the result of
+// a subtraction (its flags on x86-64); an index scaled by 16; and a loop of eight values in registers
+// across a call in a cold block (`@mix` takes every temporary register), which saves them around it.
+@test
+fn zero_tests_scales_and_cold_calls_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @z8 fn global
+sym @z16 fn global
+sym @z64 fn global
+sym @bit fn global
+sym @steps fn global
+sym @at16 fn global
+sym @mix fn global
+sym @sums fn global
+fn @z8
+  sig (i8) -> i32
+b0(v0: i8):
+  v1 = iconst.i8 0
+  v2 = iconst.i32 1
+  v3 = iconst.i32 2
+  v4 = icmp.ne v0, v1
+  br v4, b1, b2
+b1:
+  ret v2
+b2:
+  ret v3
+fn @z16
+  sig (i16) -> i32
+b0(v0: i16):
+  v1 = iconst.i16 0
+  v2 = iconst.i32 1
+  v3 = iconst.i32 2
+  v4 = icmp.eq v0, v1
+  br v4, b1, b2
+b1:
+  ret v2
+b2:
+  ret v3
+fn @z64
+  sig (i64) -> i32
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i32 1
+  v3 = iconst.i32 2
+  v4 = icmp.eq v0, v1
+  br v4, b1, b2
+b1:
+  ret v2
+b2:
+  ret v3
+fn @bit
+  sig (i64) -> i32
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 -9223372036854775808
+  v3 = iconst.i64 16
+  v4 = iconst.i32 1
+  v5 = iconst.i32 2
+  v6 = iconst.i32 4
+  v7 = and.i64 v0, v2
+  v8 = icmp.ne v7, v1
+  br v8, b1, b2
+b1:
+  ret v4
+b2:
+  v9 = and.i64 v0, v3
+  v10 = icmp.eq v9, v1
+  br v10, b3, b4
+b3:
+  ret v5
+b4:
+  ret v6
+fn @steps
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 1
+  jmp b1(v0, v1)
+b1(v3: i32, v4: i32):
+  v5 = sub.i32 v3, v2
+  v6 = add.i32 v4, v2
+  v7 = icmp.eq v5, v1
+  br v7, b2, b1(v5, v6)
+b2:
+  ret v6
+fn @at16
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = ptradd v0, v1 * 16
+  v3 = load.i64 v2+8
+  ret v3
+fn @mix
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 3
+  v2 = mul.i64 v0, v1
+  v3 = add.i64 v2, v1
+  v4 = xor.i64 v3, v0
+  v5 = mul.i64 v4, v3
+  v6 = add.i64 v5, v2
+  v7 = sub.i64 v6, v4
+  v8 = mul.i64 v7, v6
+  v9 = xor.i64 v8, v5
+  v10 = add.i64 v9, v7
+  v11 = mul.i64 v10, v2
+  v12 = add.i64 v11, v3
+  v13 = xor.i64 v12, v4
+  v14 = add.i64 v13, v5
+  v15 = add.i64 v14, v6
+  v16 = add.i64 v15, v7
+  v17 = add.i64 v16, v8
+  v18 = add.i64 v17, v9
+  v19 = add.i64 v18, v10
+  v20 = add.i64 v19, v11
+  v21 = iconst.i64 0
+  v22 = and.i64 v20, v21
+  ret v22
+fn @sums
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  v3 = iconst.i64 7
+  jmp b1(v1, v1, v1, v1, v1, v1, v1, v1)
+b1(v4: i64, v5: i64, v6: i64, v7: i64, v8: i64, v9: i64, v10: i64, v11: i64):
+  v12 = icmp.ult v4, v0
+  br v12, b2, b5
+b2:
+  v13 = and.i64 v4, v3
+  v14 = icmp.eq v13, v1
+  br v14, b3, b4(v5)
+b3: cold
+  v15 = call.i64 @mix(v4) : (i64) -> i64
+  v16 = add.i64 v5, v15
+  jmp b4(v16)
+b4(v17: i64):
+  v18 = add.i64 v17, v4
+  v19 = add.i64 v6, v18
+  v20 = add.i64 v7, v19
+  v21 = add.i64 v8, v20
+  v22 = add.i64 v9, v21
+  v23 = add.i64 v10, v22
+  v24 = add.i64 v11, v23
+  v25 = add.i64 v4, v2
+  jmp b1(v25, v18, v19, v20, v21, v22, v23, v24)
+b5:
+  v26 = add.i64 v5, v6
+  v27 = add.i64 v26, v7
+  v28 = add.i64 v27, v8
+  v29 = add.i64 v28, v9
+  v30 = add.i64 v29, v10
+  v31 = add.i64 v30, v11
+  ret v31
+)";
+    let drv = M"(
+#include <stdint.h>
+int z8(int8_t);
+int z16(int16_t);
+int z64(int64_t);
+int bit(int64_t);
+int steps(int);
+int64_t at16(int64_t *, int64_t);
+int64_t sums(int64_t);
+static int64_t model(int64_t n) {
+    int64_t a[8] = {0};
+    for (int64_t i = 0; i < n; i++) {
+        int64_t s = a[0] + i;
+        a[0] = s;
+        for (int k = 1; k < 8; k++) {
+            s = a[k] + s;
+            a[k] = s;
+        }
+    }
+    int64_t t = 0;
+    for (int k = 0; k < 8; k++) {
+        t += a[k];
+    }
+    return t;
+}
+int main(void) {
+    int64_t t[6] = {1, 2, 3, 4, 5, 6};
+    int ok = z8(0) == 2 && z8(-128) == 1 && z8(1) == 1 && z16(0) == 1 && z16(-32768) == 2 && z16(256) == 2;
+    ok = ok && z64(0) == 1 && z64(INT64_MIN) == 2 && z64((int64_t)1 << 32) == 2;
+    ok = ok && bit(INT64_MIN) == 1 && bit(16) == 4 && bit(15) == 2 && bit(0) == 2;
+    ok = ok && steps(1) == 1 && steps(5) == 5 && at16(t, 0) == 2 && at16(t, 2) == 6;
+    ok = ok && sums(0) == 0 && sums(1) == model(1) && sums(100) == model(100);
+    return ok ? 0 : 1;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // Switches: dense ones (a jump table), a sparse one, a wide one whose value less the lowest case does not
 // fit 32 bits, and one that drives a loop.
 @test

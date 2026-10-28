@@ -211,6 +211,17 @@ struct CRel {
 
 extend CRel as Copy {}
 
+// The register an `add`, `sub`, `and`, `or` or `xor` of `sz` bytes wrote last, ending at code byte `at`
+// of the block at layout position `pos`: ZF tells whether it is 0 while no other instruction follows.
+struct Zf {
+    pub reg: u8,
+    pub sz: u32,
+    pub at: u32,
+    pub pos: u32,
+}
+
+extend Zf as Copy {}
+
 // A pending condition: the flags hold the result of the instruction before, which a branch or select
 // right after reads instead of a value.
 struct Cond {
@@ -250,12 +261,17 @@ pub struct Gen {
     fixed_busy: u64,
     csr: u64, // callee-saved registers the body uses
     rows: Vector<u64>, // with debug information, per change of location: its code byte << 32 | its `lines` index
+    rstore: Vector<u32>, // per instruction, 1 + the result part a store moves into its register (`ret_stores`), else 0
     rr: u32, // the eviction cursor
     pos: u32, // the layout position of the block being compiled
     cur: u32, // the instruction being compiled
     called: bool, // the body's code calls
-    taken: Vector<u64>,
-    shared: Vector<u32>, // the block parameters that share a header parameter's slot (`back_share`) // the loads of a register-passed aggregate that take its registers (`parts_taken`): part << 32 | load
+    taken: Vector<u64>, // the loads of a register-passed aggregate that take its registers (`parts_taken`): part << 32 | load
+    csave: Vector<(u8, i64)>, // the scratch homes saved around a cold call (`save_scratch`)
+    fused: u32, // the last instruction an earlier one did (`rmw`), NONE
+    cmp_at: u32, // the code byte the last compare starts at (`reflag`), NONE
+    coldc: Vector<bool>, // per instruction, a call that returns in a cold block (`call_tables`)
+    shared: Vector<u32>, // the block parameters that share a header parameter's slot (`back_share`)
     dying: Vector<u32>, // values whose register frees after the current instruction
     wparams: Vector<u32>, // the parameters the current terminator's edges write
     want: Vector<u8>, // per value, its request to `Live::plan`
@@ -270,6 +286,7 @@ pub struct Gen {
     cond: Cond, // the flags the instruction just compiled left for the next one
     pend: Cond, // the flags the instruction being compiled may read
     keep_flags: bool, // the flags hold a condition the current instruction reads later: no xor zeroing
+    zf: Zf,
     // Frame.
     out_size: u32,
     slot_off: Vector<u32>,
@@ -394,11 +411,16 @@ extend Gen {
             fixed_busy: 0,
             csr: 0,
             rows: Vector::<u64>::new(),
+            rstore: Vector::<u32>::new(),
             rr: 0,
             pos: 0,
             cur: 0,
             called: false,
             taken: Vector::<u64>::new(),
+            csave: Vector::<(u8, i64)>::new(),
+            fused: NONE,
+            cmp_at: NONE,
+            coldc: Vector::<bool>::new(),
             shared: Vector::<u32>::new(),
             dying: Vector::<u32>::new(),
             wparams: Vector::<u32>::new(),
@@ -414,6 +436,7 @@ extend Gen {
             cond: Cond { inst: NONE, cc: 0 },
             pend: Cond { inst: NONE, cc: 0 },
             keep_flags: false,
+            zf: Zf { reg: NOREG, sz: 0, at: NONE, pos: NONE },
             out_size: 0,
             slot_off: Vector::<u32>::new(),
             spill_base: 0,
@@ -699,7 +722,8 @@ extend Gen {
         va.clean = false;
     }
 
-    // A register for the result of value `v`: its fixed register when it has one, else a free one.
+    // A register for the result of value `v`: its fixed register when it has one, else the one the next
+    // instruction reads it in (`next_reg`), else a free one.
     fn def(self: &mut Self, v: Value) u8 {
         let x = self.vx(v);
         let va = self.va[x as usize];
@@ -714,6 +738,11 @@ extend Gen {
             self.lock |= bit(r);
             return r;
         }
+        let n = self.next_reg(v);
+        if n != NOREG {
+            self.bind(x, n);
+            return n;
+        }
         let r2 = self.alloc(vr);
         self.bind(x, r2);
         return r2;
@@ -725,25 +754,8 @@ extend Gen {
         let x = self.vx(v);
         let xa = self.vx(a);
         let t = self.vt(v);
-        let mut sr = self.step_reg(v, a);
-        if sr == NOREG {
-            sr = self.fwd_reg(v, a);
-        }
+        let sr = self.def_shared(v, a);
         if sr != NOREG {
-            // The parameter keeps the register, which its release frees; a `v` that outlives its block
-            // takes it over as its home.
-            let past = self.lv.end[x as usize] != self.pos;
-            self.lock |= bit(sr);
-            if past {
-                self.set_owner(sr, x);
-            }
-            let w = self.va.index_mut(x as usize);
-            w.reg = sr;
-            w.dirty = false;
-            w.clean = false;
-            if past {
-                w.home = H_FIXED;
-            }
             self.move_reg(t, sr, ra);
             return sr;
         }
@@ -765,6 +777,90 @@ extend Gen {
         let rd = self.def(v);
         self.move_reg(t, rd, ra);
         return rd;
+    }
+
+    // The register `step_reg` or `fwd_reg` gives value `v`, which reads `a` before it writes, taken for
+    // `v`: the edge's move vanishes. NOREG when neither gives one.
+    fn def_shared(self: &mut Self, v: Value, a: Value) u8 {
+        let mut sr = self.step_reg(v, a);
+        if sr == NOREG {
+            sr = self.fwd_reg(v, a);
+        }
+        if sr == NOREG {
+            return NOREG;
+        }
+        // The parameter keeps the register, which its release frees; a `v` that outlives its block takes
+        // it over as its home.
+        let x = self.vx(v);
+        let past = self.lv.end[x as usize] != self.pos;
+        self.lock |= bit(sr);
+        if past {
+            self.set_owner(sr, x);
+        }
+        let w = self.va.index_mut(x as usize);
+        w.reg = sr;
+        w.dirty = false;
+        w.clean = false;
+        if past {
+            w.home = H_FIXED;
+        }
+        return sr;
+    }
+
+    // `def` of value `v`, which reads `a` before it writes: `def_shared`'s register when it gives one.
+    fn def_pass(self: &mut Self, v: Value, a: Value) u8 {
+        let r = self.def_shared(v, a);
+        return if r == NOREG {
+            self.def(v);
+        } else {
+            r;
+        };
+    }
+
+    // The register the instruction after instruction `v` in its block takes `v` in, when that is `v`'s
+    // only use: a call's scalar register argument, or the result; so `v` is there for it. NOREG when not,
+    // or when a value or the current instruction holds that register.
+    fn next_reg(self: &mut Self, v: Value) u8 {
+        if (v & (VPARAM | VFLAG)) != 0 {
+            return NOREG;
+        }
+        let b = self.b();
+        let bk = b.blocks[self.lv.def_blk[v as usize] as usize];
+        let bits = type_bits(self.vt(v), self.ptr);
+        if v + 1 >= bk.start + bk.len || self.lv.uses[v as usize] != 1 || self.lv.end[v as usize] != self.pos || !is_int(
+            self.vt(v),
+        ) && self.vt(v) != T_PTR || bits < 32 || bits > 64 || self.va[v as usize].home != H_NONE {
+            return NOREG;
+        }
+        let t = b.insts[v as usize + 1];
+        let mut r = NOREG;
+        if t.op == O_RET {
+            let rl = self.self_lay.ret;
+            if t.a == v && rl.kind == ab::L_REG && rl.n == 1 && !self.self_lay.parts[rl.p0 as usize].v {
+                r = self.self_lay.parts[rl.p0 as usize].reg;
+            }
+        } else if t.op == O_CALL && self.intrinsic(t.a).len() == 0 || t.op == O_CALLIND && t.a != v {
+            self.call_layout(t);
+            let np = b.pool[t.b as usize];
+            let nops = np + ((b.pool[t.b as usize + 2] & AGG) != 0) as u32;
+            for k in 0..nops {
+                if b.pool[(t.c + k) as usize] != v {
+                    continue;
+                }
+                if r != NOREG || k == np || self.lay.locs[k as usize].kind != ab::L_REG || self.lay.locs[k as usize].n != 1 || (b.pool[(t.b + 3 + k) as usize] & AGG) != 0 {
+                    return NOREG;
+                }
+                let pa = self.lay.parts[self.lay.locs[k as usize].p0 as usize];
+                if pa.v {
+                    return NOREG;
+                }
+                r = pa.reg;
+            }
+        }
+        if r == NOREG || ((self.held | self.lock | self.tmps | self.fixed_busy) & bit(r)) != 0 || (self.xalloc & bit(r)) == 0 {
+            return NOREG;
+        }
+        return r;
     }
 
     // The fixed register of a parameter the back edge ending instruction `v`'s block passes `v` to
@@ -973,14 +1069,18 @@ extend Gen {
             }
             self.want.push(w);
         }
-        let most = self.xfix.count_ones() + self.xalloc.count_ones() - 8;
-        // A body that calls nothing that returns (no instruction `clobbers` but one before a trap, no
-        // thread-local address's getter) and runs no system operation or variadic access: every register
-        // of `xscr` may be a home at once.
+        let mut nd: u32 = 4;
+        for x in 0..ni {
+            nd = nd.max(self.need(b.insts[x]));
+        }
+        let most = self.xfix.count_ones() as u32 + self.xalloc.count_ones() as u32 - nd;
+        // A body that calls nothing that returns (no instruction `clobbers` but one before a trap or in a
+        // cold block, no thread-local address's getter) and runs no system operation or variadic access:
+        // every register of `xscr` may be a home at once.
         let mut leaf = true;
         for x in 0..ni {
             let t = b.insts[x];
-            leaf = leaf && !(Gen::clobbers(b, t) && !self.dead_end(x)) && t.op != O_SYS && t.op != O_VASTART && t.op != O_VAARG && !(t.op == O_SYMADDR && !self.remat_inst(
+            leaf = leaf && !(Gen::clobbers(b, t) && !self.dead_end(x) && !self.coldc[x]) && t.op != O_SYS && t.op != O_VASTART && t.op != O_VAARG && !(t.op == O_SYMADDR && !self.remat_inst(
                 x as u32,
             ));
         }
@@ -999,13 +1099,40 @@ extend Gen {
         self.lv.plan(
             b,
             &self.want,
-            lv::Caps { xc: self.xfix.count_ones() as u32, xs: xs, xj: most as u32, vc: vc, vs: vs, vj: vc + vs },
+            lv::Caps { xc: self.xfix.count_ones() as u32, xs: xs, xj: most, vc: vc, vs: vs, vj: vc + vs },
         );
         for x in 0..ni {
             if self.lconst[x] && self.fix_class(x as u32) != FIX_NONE {
                 self.va.index_mut(x).home = H_NONE;
             }
         }
+    }
+
+    // The integer registers instruction `t` holds at once besides the homes: its operands outside a
+    // home, its temporaries and its result (`end_inst` checks it). 8 for one that reads or writes a
+    // vector or an i128 (a masked store reads 8), a vector operation, inline assembly and a system
+    // operation; 7 for a multiplication with overflow; 6 for a division, a high multiplication and an
+    // atomic operation; 5 for a shift and a select; 4 for the others.
+    fn need(self: &mut Self, t: Inst) u32 {
+        if Gen::in_mem(t.ty) || t.op == O_VOP || t.op == O_ASM || t.op == O_SYS {
+            return 8;
+        }
+        lv::each_use(self.b(), t, &mut self.uses);
+        for k in 0..self.uses.len() {
+            if Gen::in_mem(self.vt(self.uses[k])) {
+                return 8;
+            }
+        }
+        if t.op == O_MULO {
+            return 7;
+        }
+        if t.op >= O_SDIV && t.op <= O_UREM || t.op == O_MULHU || t.op == O_ARMW || t.op == O_ACAS {
+            return 6;
+        }
+        if t.op >= O_SHL && t.op <= O_ASHR || t.op == O_SELECT {
+            return 5;
+        }
+        return 4;
     }
 
     // `vmem`: per value, whether it is a vector some instruction defines or reads in memory: any but a
@@ -1078,6 +1205,44 @@ extend Gen {
         return pre[(bk.start + bk.len) as usize] > pre[from as usize] || pos[e as usize + 1] > pos[dp as usize + 1];
     }
 
+    // Whether instruction `i` is in a cold block: when it calls, the scratch homes that live past it are
+    // saved around it (`save_scratch`), so it counts as no call for the homes.
+    const fn cold(self: &Self, i: u32) bool {
+        let b = self.b();
+        return (b.blocks[self.lv.def_blk[i as usize] as usize].flags & BLOCK_COLD) != 0;
+    }
+
+    // Before instruction `i` of a cold block that calls and returns: each scratch home whose value lives
+    // past it into a slot of its own (`csave`). The count saved.
+    fn save_scratch(self: &mut Self, i: u32) usize {
+        if !self.coldc[i as usize] {
+            return 0;
+        }
+        let mut m = self.held & self.fixed_busy & ~self.xfix & ~self.vsave();
+        // Each step clears one register's bit: at most 32 steps.
+        while m != 0 {
+            let r = m.trailing_zeros() as u8;
+            m &= m - 1;
+            if !self.live_on(self.owner[r as usize]) {
+                continue;
+            }
+            let off = self.slot_alloc(16, 16) as i64;
+            self.save_reg(r, off, true);
+            self.csave.push((r, off));
+        }
+        return self.csave.len();
+    }
+
+    // After the instruction `save_scratch` saved `n` registers around: those registers back.
+    fn restore_scratch(self: &mut Self, n: usize) {
+        for k in 0..n {
+            let (r, off) = self.csave[k];
+            self.save_reg(r, off, false);
+            self.free_slots.push(16u64 << 32 | (off as u32) as u64);
+        }
+        self.csave.truncate(0);
+    }
+
     // Whether no value outlives call `i` for a use: its block ends in `unreachable` and no later instruction
     // of it reads a value but one recomputed at each use (a panic's message, then `abort`).
     fn dead_end(self: &mut Self, i: usize) bool {
@@ -1107,9 +1272,13 @@ extend Gen {
         let ni = b.insts.len();
         fill32(&mut self.cpre, ni + 1, 0);
         fill32(&mut self.vpre, ni + 1, 0);
+        self.coldc.truncate(0);
+        self.coldc.resize_default(ni);
         for i in 0..ni {
             let t = b.insts[i];
-            if Gen::clobbers(b, t) && !self.dead_end(i) {
+            if Gen::clobbers(b, t) && !self.dead_end(i) && self.cold(i as u32) {
+                self.coldc[i] = true;
+            } else if Gen::clobbers(b, t) && !self.dead_end(i) {
                 self.cpre[i + 1] = 1;
                 self.vpre[i + 1] = (!(t.op == O_CALL && self.intrinsic(t.a).len() != 0)) as u32;
             }
@@ -1409,6 +1578,12 @@ extend Gen {
 
     // End the current instruction: its locks and temporaries end and its dead values free.
     fn end_inst(self: &mut Self) {
+        // `plan_homes` leaves `need` integer registers to each instruction.
+        let used = ((self.lock | self.tmps) & ~self.fixed_busy & (self.xalloc | self.xfix)).count_ones() as u32;
+        assert(
+            used <= self.need(self.b().insts[self.cur as usize]),
+            "x64gen: an instruction takes more registers than `need`",
+        );
         self.lock = 0;
         self.tmps = 0;
         self.keep_flags = false;
@@ -1746,6 +1921,9 @@ extend Gen {
         self.held = 0;
         fill32(&mut self.blk_at, b.blocks.len(), NONE);
         self.c.clear();
+        self.zf.at = NONE;
+        self.fused = NONE;
+        self.cmp_at = NONE;
         self.fix.truncate(0);
         self.epi.truncate(0);
         self.rels.truncate(0);
@@ -1879,6 +2057,7 @@ extend Gen {
         if self.self_lay.unknown {
             let _ = self.refuse("the signature passes an aggregate whose C class is unknown");
         }
+        self.ret_stores();
         let np = b.pool[b.sig as usize];
         let ni = b.insts.len() as u32;
         let e0 = b.blocks[0].param_start;
@@ -1904,12 +2083,20 @@ extend Gen {
             self.sret_off = self.slot_alloc(8, 8);
             self.c.store(8, self.arg(0), x::at(x::RSP, self.sret_off as i32));
         }
-        // No parameter's home takes a register another one arrives in.
-        self.lock |= if self.win {
-            ARGS_WIN;
-        } else {
-            ARGS_SYSV;
-        };
+        // No parameter's home takes a register another one arrives in; the argument registers no
+        // parameter arrives in may be homes.
+        if self.self_lay.ret.kind == ab::L_SRET {
+            self.lock |= bit(self.arg(0));
+        }
+        for k in 0..np {
+            let loc = self.self_lay.locs[k as usize];
+            if loc.kind == ab::L_REG || loc.kind == ab::L_REF_REG {
+                for q in 0..loc.n as u32 {
+                    let pa = self.self_lay.parts[(loc.p0 + q) as usize];
+                    self.lock |= bit(pa.reg + ast_pick(pa.v, V0, 0));
+                }
+            }
+        }
         for k in 0..np {
             let x = ni + e0 + k;
             let pt = b.pool[(b.sig + 3 + k) as usize];
@@ -2101,9 +2288,18 @@ extend Gen {
                 self.row(b.locs[i as usize]);
             }
             self.begin_inst(i);
+            if self.fused != NONE {
+                if i == self.fused {
+                    self.fused = NONE;
+                }
+                self.end_inst();
+                continue;
+            }
+            let saved = self.save_scratch(i);
             if !self.inst(i) {
                 return false;
             }
+            self.restore_scratch(saved);
             self.end_inst();
         }
         // The values whose range ends here.
@@ -2438,6 +2634,12 @@ extend Gen {
             }
             return;
         }
+        // A constant a 32-bit immediate holds goes into memory as it is.
+        let mut k: i32 = 0;
+        if src.kind == LC_VAL && !v && bytes <= 8 && self.imm32_of(self.xval(src.val), 8 * bytes, &mut k) {
+            self.c.mov_mi(bytes, x::at(dst.reg, dst.off), k);
+            return;
+        }
         // Into memory through a scratch register.
         let s = if v {
             self.vs0;
@@ -2704,9 +2906,15 @@ extend Gen {
         }
         if op == O_WCONST {
             let off = self.mdef(i) as i32;
+            // A word a sign-extended 32-bit immediate holds goes into memory as it is.
             for k in 0..t.b {
-                self.c.mov_ri(S0, self.b().words[(t.a + k) as usize]);
-                self.c.store(8, S0, x::at(x::RSP, off + 8 * k as i32));
+                let w = self.b().words[(t.a + k) as usize];
+                if w as i64 >= -0x80000000 && w as i64 <= 0x7FFFFFFF {
+                    self.c.mov_mi(8, x::at(x::RSP, off + 8 * k as i32), w as i32);
+                } else {
+                    self.c.mov_ri(S0, w);
+                    self.c.store(8, S0, x::at(x::RSP, off + 8 * k as i32));
+                }
             }
             return true;
         }
@@ -3059,27 +3267,67 @@ extend Gen {
                 sz;
             };
             let mut k: i32 = 0;
-            if self.imm32_of(n.b, bits.max(32), &mut k) {
+            let imm = self.imm32_of(n.b, bits.max(32), &mut k);
+            let rb = if imm {
+                NOREG;
+            } else {
+                self.reg(n.b);
+            };
+            let s0 = self.c.len();
+            if imm {
                 self.c.test_ri(tz, ra, k as u32);
             } else {
-                let rb = self.reg(n.b);
                 self.c.test_rr(tz, ra, rb);
             }
+            self.reflag(s0);
             return icond(t.aux);
         }
         let ra = self.reg(t.a);
         let mut k: i32 = 0;
-        if self.imm32_of(t.b, bits, &mut k) {
-            if k == 0 {
-                self.c.test_rr(sz, ra, ra);
-            } else {
-                self.c.alu_ri(x::CMP, sz, ra, k);
-            }
+        let imm = self.imm32_of(t.b, bits, &mut k);
+        let rb = if imm {
+            NOREG;
         } else {
-            let rb = self.reg(t.b);
+            self.reg(t.b);
+        };
+        // The `add`, `sub`, `and`, `or` or `xor` just emitted set ZF from this register.
+        let z = self.zf;
+        if imm && k == 0 && (t.aux == C_EQ || t.aux == C_NE) && z.at == self.c.len() && z.pos == self.pos && z.reg == ra && z.sz == sz {
+            return icond(t.aux);
+        }
+        let s0 = self.c.len();
+        if imm && k == 0 {
+            self.c.test_rr(sz, ra, ra);
+        } else if imm {
+            self.c.alu_ri(x::CMP, sz, ra, k);
+        } else {
             self.c.alu_rr(x::CMP, sz, ra, rb);
         }
+        self.reflag(s0);
         return icond(t.aux);
+    }
+
+    // The compare just written from code byte `s0` on, at the start of a block whose one predecessor ends
+    // with the same compare and a conditional jump (to elsewhere, falling through here): the flags hold its
+    // result already, so it goes.
+    fn reflag(self: &mut Self, s0: u32) {
+        let k = self.lv.order[self.pos as usize];
+        let n = self.c.len() - s0;
+        let nf = self.fix.len();
+        let last = self.cmp_at;
+        self.cmp_at = s0;
+        if self.blk_at[k as usize] != s0 || self.lv.npred[k as usize] != 1 || nf == 0 || (self.fix[nf - 1] >> 32) as u32 + 4 != s0 || last == NONE || last + n + 6 != s0 {
+            return;
+        }
+        if self.c.b[s0 as usize - 6] != 0x0F || (self.c.b[s0 as usize - 5] & 0xF0) != 0x80 {
+            return;
+        }
+        for q in 0..n {
+            if self.c.b[(s0 - 6 - n + q) as usize] != self.c.b[(s0 + q) as usize] {
+                return;
+            }
+        }
+        self.c.b.truncate(s0 as usize);
     }
 
     // A float comparison: `ucomis` sets ZF, PF and CF; `<` and `<=` compare the operands swapped.
@@ -3278,16 +3526,17 @@ extend Gen {
             if kc {
                 let rd = self.def_from(i, t.a, ra);
                 self.c.alu_ri(aop, sz, rd, k);
+                self.zf = Zf { reg: rd, sz: sz, at: self.c.len(), pos: self.pos };
                 return true;
             }
             let rb = self.reg(t.b);
             let rd = self.def_from(i, t.a, ra);
             self.c.alu_rr(aop, sz, rd, rb);
+            self.zf = Zf { reg: rd, sz: sz, at: self.c.len(), pos: self.pos };
             return true;
         }
         if op == O_MUL {
             let ra = self.reg(t.a);
-            // A product by 3, 5 or 9 is an address: `lea` (one cycle against `imul`'s three).
             // A product by 3, 5 or 9 is an address: `lea` (one cycle against `imul`'s three); by one of them
             // times 2^s, `lea` then a shift; by 2^s - 1, a shift and a subtraction.
             let kw = k as i64;
@@ -3968,14 +4217,14 @@ extend Gen {
             let p = unsafe &*self.pkg;
             if it.op == O_SYMADDR && !self.tls_sym(it.a) && !p.syms[self.b().syms[it.a as usize] as usize].ext {
                 // The offset joins the symbol's in its relocation.
-                let rd = self.def(i);
+                let rd = self.def_pass(i, t.a);
                 self.sym_addr(rd, it.a, (it.b as i32) as i64 + off);
                 return true;
             }
         }
         let (base, boff) = self.addr(t.a, 0);
         if t.b == VNONE {
-            let rd = self.def(i);
+            let rd = self.def_pass(i, t.a);
             self.add_off(rd, base, boff + off);
             return true;
         }
@@ -3983,7 +4232,7 @@ extend Gen {
         let ib = type_bits(ity, self.ptr);
         let ri = self.reg(t.b);
         let scale = t.aux as u32;
-        let rd = self.def(i);
+        let rd = self.def_pass(i, t.a);
         // The index sign-extended to 64 bits, scaled.
         let mut idx = ri;
         if ib < 64 {
@@ -3993,6 +4242,14 @@ extend Gen {
         let mut sc: u8 = 0;
         if scale == 1 || scale == 2 || scale == 4 || scale == 8 {
             sc = scale.trailing_zeros() as u8;
+        } else if (scale & scale - 1) == 0 {
+            // A power of two past 8: the index shifted by the rest, scaled by 8.
+            if idx != S0 {
+                self.c.mov_rr(8, S0, idx);
+            }
+            self.c.shift_ri(x::SHL, 8, S0, scale.trailing_zeros() as u32 - 3);
+            idx = S0;
+            sc = 3;
         } else {
             self.c.imul_ri(8, S0, idx, scale as i32);
             idx = S0;
@@ -4015,6 +4272,9 @@ extend Gen {
                 return true;
             }
         }
+        if self.rmw(i, t) {
+            return true;
+        }
         let mut rs: u32 = NONE;
         let mut radd: i64 = 0;
         if Gen::in_mem(ty) && !Gen::in_vreg(ty) {
@@ -4027,7 +4287,7 @@ extend Gen {
         let rd = if Gen::in_vreg(ty) {
             self.vec_def(i);
         } else {
-            self.def(i);
+            self.def_pass(i, t.a);
         };
         self.ld(ty, rd, m);
         self.mem_rel(rs, radd);
@@ -4035,8 +4295,173 @@ extend Gen {
         return true;
     }
 
+    // `rstore`: when the result (an aggregate in registers) is written only by stores that end blocks
+    // which return, each a whole part and only such stores between it and the `ret`, 1 + each one's part:
+    // the first of each run moves the run's values into the part registers (`ret_moves`), and the return
+    // reads no memory. All 0 when not.
+    fn ret_stores(self: &mut Self) {
+        let b = self.b();
+        let ni = b.insts.len();
+        fill32(&mut self.rstore, ni, 0);
+        let rt = b.pool[b.sig as usize + 2];
+        if self.self_lay.ret.kind != ab::L_REG || (rt & AGG) == 0 {
+            return;
+        }
+        let pv = VPARAM | b.blocks[0].param_start + b.pool[b.sig as usize];
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            let end = bk.start + bk.len - 1;
+            // The run of result stores right before a `ret`.
+            let mut run = end;
+            if b.insts[end as usize].op == O_RET {
+                while run > bk.start && self.part_store(b.insts[run as usize - 1], pv) != NONE {
+                    run -= 1;
+                }
+            }
+            for i in bk.start..end + 1 {
+                let t = b.insts[i as usize];
+                lv::each_use(b, t, &mut self.uses);
+                let mut reads = false;
+                for q in 0..self.uses.len() {
+                    reads = reads || self.uses[q] == pv;
+                }
+                if !reads {
+                    continue;
+                }
+                // The `ret` reads the result's memory: the stores before it, which become its moves.
+                if i == end && t.op == O_RET {
+                    continue;
+                }
+                if i < run || i == end {
+                    fill32(&mut self.rstore, ni, 0);
+                    return;
+                }
+                self.rstore[i as usize] = self.part_store(t, pv) + 1;
+            }
+        }
+    }
+
+    // The result part store `t` writes whole through the result's address `pv`, else NONE.
+    fn part_store(self: &Self, t: Inst, pv: Value) u32 {
+        if t.op != O_STORE || t.a != pv || t.b == pv || (t.aux & MEM_VOLATILE) != 0 {
+            return NONE;
+        }
+        let ty = self.vt(t.b);
+        let rl = self.self_lay.ret;
+        for q in 0..rl.n as u32 {
+            let pa = self.self_lay.parts[(rl.p0 + q) as usize];
+            if pa.off == t.c && pa.size as u32 == type_bytes(ty, self.ptr) && pa.v == Gen::is_v(ty) && !Gen::in_mem(ty) {
+                return q;
+            }
+        }
+        return NONE;
+    }
+
+    // Result store `i`, the first of its run (`ret_stores`): the values of the run's stores into their
+    // parts' registers as one parallel move (the last store of a part wins), constants after.
+    fn ret_moves(self: &mut Self, i: u32) {
+        let b = self.b();
+        let bk = b.blocks[self.lv.def_blk[i as usize] as usize];
+        let end = bk.start + bk.len - 1;
+        let rl = self.self_lay.ret;
+        self.mv.truncate(0);
+        let mut seen: u32 = 0;
+        let mut vals = Vector::<u64>::new();
+        // Each step goes back one store of the run.
+        let mut j = end;
+        while j > i {
+            j -= 1;
+            let q = self.rstore[j as usize] - 1;
+            if (seen >> q & 1) != 0 {
+                continue;
+            }
+            seen |= 1u32 << q;
+            let pa = self.self_lay.parts[(rl.p0 + q) as usize];
+            let r = pa.reg + if pa.v {
+                V0;
+            } else {
+                0;
+            };
+            let v = b.insts[j as usize].b;
+            let src = self.loc_of(self.vx(v));
+            if src.kind == LC_VAL {
+                vals.push(r as u64 << 32 | v as u64);
+                continue;
+            }
+            self.mv.push(
+                Mv {
+                    src: src,
+                    dst: Lc { kind: LC_REG, reg: r, off: 0, val: NONE },
+                    v: pa.v,
+                    bytes: pa.size,
+                    done: false,
+                },
+            );
+        }
+        self.resolve_moves();
+        for k in 0..vals.len() {
+            self.materialize(vals[k] as u32, (vals[k] >> 32) as u8);
+        }
+    }
+
+    // Load `i`, then an `add`, `sub`, `and`, `or` or `xor` of its value alone, then a store of the result
+    // to the same place, each value read once: one operation on memory (`add [m], k`), the next two
+    // instructions done (`fused`). Whether it was.
+    fn rmw(self: &mut Self, i: u32, t: Inst) bool {
+        let b = self.b();
+        let bk = b.blocks[self.lv.def_blk[i as usize] as usize];
+        if i + 2 >= bk.start + bk.len - 1 || (t.aux & MEM_VOLATILE) != 0 || !is_int(t.ty) || t.ty == T_I128 || self.lv.fold[i as usize] {
+            return false;
+        }
+        let o = b.insts[i as usize + 1];
+        let st = b.insts[i as usize + 2];
+        let alu = o.op == O_ADD || o.op == O_SUB || o.op == O_AND || o.op == O_OR || o.op == O_XOR;
+        let swap = o.op != O_SUB && o.b == i && o.a != i;
+        let k = if swap {
+            o.a;
+        } else {
+            o.b;
+        };
+        if !alu || o.ty != t.ty || !swap && (o.a != i || o.b == i) || self.lv.pfold[i as usize + 1] {
+            return false;
+        }
+        if st.op != O_STORE || st.b != i + 1 || st.a != t.a || st.c != t.c || (st.aux & MEM_VOLATILE) != 0 || self.lv.fold[i as usize + 2] {
+            return false;
+        }
+        if self.lv.uses[i as usize] != 1 || self.lv.uses[i as usize + 1] != 1 || self.lv.end[i as usize] != self.pos || self.lv.end[i as usize + 1] != self.pos {
+            return false;
+        }
+        let sz = type_bytes(t.ty, self.ptr);
+        let mut imm: i32 = 0;
+        let kc = self.imm32_of(k, type_bits(t.ty, self.ptr), &mut imm);
+        let rk = if kc {
+            NOREG;
+        } else {
+            self.reg(k);
+        };
+        let mut rs: u32 = NONE;
+        let mut radd: i64 = 0;
+        let m = self.mem_at(t.a, t.c as i32, &mut rs, &mut radd);
+        if kc {
+            self.c.alu_mi(alu_of(o.op), sz, m, imm);
+        } else {
+            self.c.alu_mr(alu_of(o.op), sz, m, rk);
+        }
+        self.mem_rel(rs, radd);
+        self.fused = i + 2;
+        return true;
+    }
+
     fn store(self: &mut Self, t: Inst) bool {
         let ty = self.vt(t.b);
+        // A store of the result's part: its run's first moves the run into the part registers.
+        let c = self.cur;
+        if self.rstore[c as usize] != 0 {
+            if c == self.b().blocks[self.lv.def_blk[c as usize] as usize].start || self.rstore[c as usize - 1] == 0 {
+                self.ret_moves(c);
+            }
+            return true;
+        }
         let mut rs: u32 = NONE;
         let mut radd: i64 = 0;
         if Gen::in_vreg(ty) {
@@ -4203,10 +4628,11 @@ extend Gen {
             self.c.land(skip, self.c.len());
             return true;
         }
+        // The false side straight into the result's register: a constant or a spilled value takes no
+        // register of its own.
         let rb = self.reg(t.b);
-        let rc = self.reg(t.c);
         let rd = self.def(i);
-        self.c.mov_rr(8, rd, rc);
+        self.materialize(t.c, rd);
         self.c.cmov(cc, 8, rd, rb);
         return true;
     }
@@ -5378,7 +5804,10 @@ extend Gen {
         let rt = b.pool[b.sig as usize + 2];
         let np = b.pool[b.sig as usize];
         if rl.kind == ab::L_REG {
-            if (rt & AGG) != 0 {
+            let i = self.cur;
+            if (rt & AGG) != 0 && i > b.blocks[self.lv.def_blk[i as usize] as usize].start && self.rstore[i as usize - 1] != 0 {
+                // In the part registers already (`ret_moves`).
+            } else if (rt & AGG) != 0 {
                 let pv = VPARAM | b.blocks[0].param_start + np;
                 let (base, off) = self.addr(pv, 0);
                 for q in 0..rl.n as u32 {
@@ -5487,11 +5916,12 @@ extend Gen {
 
     // Frame the body's code and define function symbol `s` with it, with its unwind rules.
     fn finish(self: &mut Self, s: u32) bool {
-        // A last jump to the epilogue falls through instead.
-        let nc = self.c.len();
-        if self.epi.len() != 0 && self.epi[self.epi.len() - 1] == nc - 4 {
+        // A last jump to the epilogue falls through instead, and so does the one before it when the block
+        // between held only that jump: one step per jump.
+        while self.epi.len() != 0 && self.epi[self.epi.len() - 1] + 4 == self.c.len() {
             let _ = self.epi.pop();
             let _ = self.c.jumps.pop();
+            let nc = self.c.len();
             self.c.b.truncate(nc as usize - 5);
         }
         if self.err.len() != 0 {
@@ -5653,11 +6083,62 @@ extend Gen {
             self.c.byte(0xC9);
         }
         self.c.ret();
-        // Branches.
+        // An epilogue no longer than a jump (no canary check) takes each jump's place, the bytes left over
+        // traps after its `ret`.
+        let en = self.c.len() - body_n;
+        if en <= 5 && self.canary < 0 && self.epi.len() != 0 {
+            let mut keep = Vector::<u32>::with_capacity(self.c.jumps.len());
+            let mut q: usize = 0;
+            for j in 0..self.c.jumps.len() {
+                let at = self.c.jumps[j];
+                if q < self.epi.len() && self.epi[q] == at {
+                    for k in 0..5u32 {
+                        self.c.b[(at - 1 + k) as usize] = if k < en {
+                            self.c.b[(body_n + k) as usize];
+                        } else {
+                            0xCC;
+                        };
+                    }
+                    q += 1;
+                } else {
+                    keep.push(at);
+                }
+            }
+            assert(q == self.epi.len(), "x64gen: every jump to the epilogue is a jump");
+            self.c.jumps = keep;
+            self.epi.truncate(0);
+        }
+        // Branches: through a block that is one jump alone, to that jump's target (at most 8 steps; a
+        // jump to the epilogue's start).
+        let mut thru = Map::<u32, u32>::new();
         for q in 0..self.fix.len() {
             let at = (self.fix[q] >> 32) as u32;
-            let blk = self.fix[q] as u32;
-            self.c.land(at, self.blk_at[blk as usize]);
+            if self.c.b[at as usize - 1] == 0xE9 {
+                thru.insert(at - 1, self.blk_at[(self.fix[q] as u32) as usize]);
+            }
+        }
+        for q in 0..self.epi.len() {
+            thru.insert(self.epi[q] - 1, body_n);
+        }
+        for q in 0..self.fix.len() {
+            let at = (self.fix[q] >> 32) as u32;
+            let mut to = self.blk_at[(self.fix[q] as u32) as usize];
+            for _ in 0..8 {
+                switch thru.get(&to) {
+                    Some(x) => {
+                        to = *x;
+                    },
+                    None => {
+                        break;
+                    },
+                };
+            }
+            // A block past the end held only branches to the epilogue, which the start of `finish` dropped:
+            // the epilogue.
+            if to > body_n {
+                to = body_n;
+            }
+            self.c.land(at, to);
         }
         for q in 0..self.epi.len() {
             self.c.land(self.epi[q], body_n);

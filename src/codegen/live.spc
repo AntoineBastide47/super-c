@@ -936,8 +936,9 @@ extend Live {
     }
 
     // A cold block that branches into the body runs inside the ranges of the values live at its target,
-    // though the layout puts it last: each value whose range holds the position of such a target lives to
-    // the cold block too, and is kept (its last use does not end it). A range max over the targets'
+    // though the layout puts it last: each value whose range holds the position of such a target, past the
+    // block it is defined in (an instruction is not live at its own block's entry, a parameter is), lives
+    // to the cold block too, and is kept (its last use does not end it). A range max over the targets'
     // positions (a sparse table of `best`: per position, the last cold block with an edge into it) finds
     // the extension of each value.
     fn cold_entries(self: &mut Self, b: &Body, kept: &mut Vector<bool>) {
@@ -987,15 +988,19 @@ extend Live {
                 );
             }
         }
+        let ni = b.insts.len();
         for x in 0..self.end.len() {
             let d = self.def_blk[x];
             if d == NONE || self.pos[d as usize] == NONE {
                 continue;
             }
-            let lo = self.pos[d as usize] as usize;
+            let lo = self.pos[d as usize] as usize + (x < ni) as usize;
             // Each step moves the end to a later cold block: at most one step per cold block.
             loop {
                 let hi = self.end[x] as usize;
+                if lo > hi {
+                    break;
+                }
                 let mut j: usize = 0;
                 while 2usize << j <= hi - lo + 1 {
                     j += 1;

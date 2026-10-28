@@ -6081,6 +6081,20 @@ extend Lower {
             return true;
         }
         let signed = ty != TYPE_NONE && Lower::signed(c, b.module, ty);
+        if t.sw_len == 1 {
+            // One case (an enum's tag tested once): a branch on the equality.
+            let pr = b.switch_pool[t.sw_start as usize];
+            let mut cv = (pr >> 32) as i64;
+            if cv >= 2147483648 && signed {
+                cv -= 4294967296;
+            }
+            let to = pr as u32;
+            let ec = self.edge(self.lblk[to as usize], self.cur, to);
+            let ed = self.edge(self.lblk[t.t0 as usize], self.cur, t.t0);
+            let eq = self.icmp(C_EQ, v, self.iconst(self.vty(v), cv as u64));
+            let _ = self.inst(O_BR, T_NONE, 0, eq, ec, ed);
+            return true;
+        }
         let w0 = self.b.words.len() as u32;
         let mut es = Vector::<u32>::new();
         for k in 0..t.sw_len {
@@ -6411,7 +6425,7 @@ extend Lower {
             if !self.intrinsic_call(c, b, t) {
                 return false;
             }
-            self.after_call(t);
+            self.after_call(c, t);
             return true;
         }
         let mut args = Vector::<Value>::new();
@@ -6571,7 +6585,7 @@ extend Lower {
                     let k = self.sym(name.as_str(), SK_FUNC);
                     self.inst(O_CALL, T_NONE, args.len() as u16, k, sg, at);
                 };
-                self.after_call(t);
+                self.after_call(c, t);
                 return true;
             }
             if dty == TYPE_NONE {
@@ -6647,7 +6661,7 @@ extend Lower {
                         self.memcpy(p.addr, src, ri.size);
                     }
                 }
-                self.after_call(t);
+                self.after_call(c, t);
                 return true;
             }
         }
@@ -6673,7 +6687,12 @@ extend Lower {
         } else if t.dests_len == 1 && ti.cls == VC_MEM && r != dst {
             self.memcpy(dplace.addr, r, ti.size);
         }
-        self.after_call(t);
+        // A C function the standard declares `_Noreturn` ends the path.
+        if ext && fv == VNONE && (nm == "abort" || nm == "exit" || nm == "_Exit" || nm == "quick_exit") {
+            let _ = self.inst(O_UNREACHABLE, T_NONE, 0, VNONE, VNONE, VNONE);
+            return true;
+        }
+        self.after_call(c, t);
         return true;
     }
 
@@ -6991,9 +7010,15 @@ extend Lower {
         return self.inst(O_TRUNC, T_I64, 0, self.high_wide(v), VNONE, VNONE);
     }
 
-    // Continue after a call: to its successor, or nowhere when it does not return.
-    fn after_call(self: &mut Self, t: irc::Terminator) {
-        if t.t0 == irc::IR_NONE {
+    // Continue after a call: to its successor, or nowhere when it does not return (no successor, or a
+    // `@noreturn` callee, whose returns abort).
+    fn after_call(self: &mut Self, c: &cbe::CEmit, t: irc::Terminator) {
+        let m = t.callee.module as usize;
+        let nr = t.callee.node != NODE_NONE && m < unsafe (*c.pkg).modules.len() && unsafe (*c.pkg).modules.at(m).has_ast && Lower::ast(
+            c,
+            t.callee.module,
+        ).attr_of(t.callee.node, AttrKind::ATTR_NORETURN) != null;
+        if t.t0 == irc::IR_NONE || nr {
             let _ = self.inst(O_UNREACHABLE, T_NONE, 0, VNONE, VNONE, VNONE);
             return;
         }
