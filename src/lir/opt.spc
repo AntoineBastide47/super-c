@@ -1926,6 +1926,12 @@ pub struct Run {
     pub order: Vector<u32>,
     pk: *const Package,
     bodies: Vector<Body>,
+    // The first held body (`Package.held`), the body count without any.
+    held: u32,
+    // Per body, its direct calls before optimization, as bodies in instruction order:
+    // `calls[call_at[k]..call_at[k + 1]]`.
+    call_at: Vector<u32>,
+    calls: Vector<u32>,
     shape: Vector<bool>,
     unit: Vector<u32>,
     level: Vector<u32>,
@@ -1949,8 +1955,39 @@ extend Run {
         let p: &Package = pk;
         let pkp = p as *const Package;
         let n = bodies.len();
+        let hd = &p.held;
+        let held = if hd.body == NONE {
+            n as u32;
+        } else {
+            hd.body;
+        };
+        let mut call_at = Vector::<u32>::with_capacity(n + 1);
+        let mut calls = Vector::<u32>::new();
+        for k in 0..n {
+            call_at.push(calls.len() as u32);
+            if k as u32 >= held {
+                let h = k - held as usize;
+                for q in hd.at[h]..hd.at[h + 1] {
+                    let sy = p.syms[hd.calls[q as usize] as usize];
+                    if sy.kind == SK_FUNC && sy.def != NONE {
+                        calls.push(sy.def);
+                    }
+                }
+                continue;
+            }
+            let b = &bodies[k];
+            for i in 0..b.insts.len() {
+                let c = call_target(p, b, b.insts[i]);
+                if c != NONE {
+                    calls.push(c);
+                }
+            }
+        }
+        call_at.push(calls.len() as u32);
         let mut shape = Vector::<bool>::with_capacity(n);
         shape.resize_default(n);
+        let mut ok = Vector::<bool>::with_capacity(n);
+        ok.resize_default(n);
         let mut unit = Vector::<u32>::with_capacity(n);
         for _ in 0..n {
             unit.push(NONE);
@@ -1958,14 +1995,22 @@ extend Run {
         for s in 0..p.syms.len() {
             let sy = p.syms[s];
             if sy.kind == SK_FUNC && sy.def != NONE {
-                shape[sy.def as usize] = il::shape_ok(p, s as u32, &bodies[sy.def as usize]);
+                if sy.def < held {
+                    shape[sy.def as usize] = il::shape_ok(p, s as u32, &bodies[sy.def as usize]);
+                }
                 if sy.unit < sealed.len() as u32 && sealed[sy.unit as usize] {
                     unit[sy.def as usize] = sy.unit;
                 }
             }
         }
+        // A held body's facts are the ones its unit's build found.
+        for k in held as usize..n {
+            let f = hd.flags[k - held as usize];
+            shape[k] = (f & HELD_SHAPE) != 0;
+            ok[k] = (f & HELD_OK) != 0;
+        }
         let mut level = Vector::<u32>::new();
-        levels(p, &bodies, &shape, &mut level);
+        levels(p, n, &call_at, &calls, &shape, &mut level);
         let mut top: u32 = 0;
         for i in 0..n {
             top = top.max(level[i]);
@@ -1993,22 +2038,22 @@ extend Run {
             seen.push(NONE);
         }
         for k in 0..n {
-            let bk = &bodies[k];
-            for i in 0..bk.insts.len() {
-                let c = call_target(p, bk, bk.insts[i]);
-                if c != NONE && level[c as usize] < level[k] && seen[c as usize] != k as u32 {
+            for q in call_at[k]..call_at[k + 1] {
+                let c = calls[q as usize];
+                if level[c as usize] < level[k] && seen[c as usize] != k as u32 {
                     seen[c as usize] = k as u32;
                     edges.push(c as u64 << 32 | k as u64);
                 }
             }
         }
-        let mut ok = Vector::<bool>::with_capacity(n);
-        ok.resize_default(n);
         return Run {
             edges: edges,
             order: order,
             pk: pkp,
             bodies: bodies,
+            held: held,
+            call_at: call_at,
+            calls: calls,
             shape: shape,
             unit: unit,
             level: level,
@@ -2024,6 +2069,9 @@ extend Run {
     /// parallel: each writes its own body and `ok` entry, and reads its callees' ones.
     pub fn job(self: &Self, j: u32) {
         let r = self;
+        if j >= r.held {
+            return;
+        }
         let p = unsafe &*r.pk;
         let base = r.bodies.as_ptr() as *mut Body;
         let mut sc = r.take();
@@ -2062,6 +2110,21 @@ extend Run {
     pub fn finish(self: &mut Self, pk: &mut Package) {
         pk.bodies = replace(&mut self.bodies, Vector::<Body>::new());
     }
+
+    /// Whether body `k` passed the inliner's shape test, and whether its callers may inline it (after its
+    /// job).
+    pub const fn shape_of(self: &Self, k: u32) bool {
+        return self.shape[k as usize];
+    }
+
+    pub const fn inlinable(self: &Self, k: u32) bool {
+        return self.ok[k as usize];
+    }
+
+    /// The direct calls of body `k` before optimization, as bodies in instruction order.
+    pub const fn calls_of(self: &Self, k: u32) Slice<u32> {
+        return self.calls[self.call_at[k as usize] as usize..self.call_at[k as usize + 1] as usize];
+    }
 }
 
 /// `Run::job` for `driver::sched::run_jobs`: `ctx` is the `Run`.
@@ -2078,10 +2141,16 @@ pub fn optimize(pk: &mut Package, sealed: &Vector<bool>, cf: Config) {
     r.finish(pk);
 }
 
-// Per body of `bodies`, its level (`optimize`): an explicit-stack depth-first search over the direct calls
-// of the bodies `shape` marks (body << 1 | finished).
-fn levels(p: &Package, bodies: &Vector<Body>, shape: &Vector<bool>, level: &mut Vector<u32>) {
-    let n = bodies.len();
+// Per body of the `n` of `p`, its level (`optimize`): an explicit-stack depth-first search over the direct
+// calls (`calls[call_at[k]..call_at[k + 1]]`) of the bodies `shape` marks (body << 1 | finished).
+fn levels(
+    p: &Package,
+    n: usize,
+    call_at: &Vector<u32>,
+    calls: &Vector<u32>,
+    shape: &Vector<bool>,
+    level: &mut Vector<u32>,
+) {
     level.truncate(0);
     level.resize_default(n);
     // 0: not seen, 1: on the stack, 2: finished.
@@ -2125,12 +2194,11 @@ fn levels(p: &Package, bodies: &Vector<Body>, shape: &Vector<bool>, level: &mut 
         while stack.len() != 0 {
             let x = stack.pop().unwrap();
             let k = (x >> 1) as usize;
-            let b = &bodies[k];
             if (x & 1) != 0 {
                 let mut lv: u32 = 0;
-                for i in 0..b.insts.len() {
-                    let c = call_target(p, b, b.insts[i]);
-                    if c != NONE && shape[c as usize] && st[c as usize] == 2 && c as usize != k && level[c as usize] + 1 > lv {
+                for q in call_at[k]..call_at[k + 1] {
+                    let c = calls[q as usize];
+                    if shape[c as usize] && st[c as usize] == 2 && c as usize != k && level[c as usize] + 1 > lv {
                         lv = level[c as usize] + 1;
                     }
                 }
@@ -2143,9 +2211,9 @@ fn levels(p: &Package, bodies: &Vector<Body>, shape: &Vector<bool>, level: &mut 
             }
             st[k] = 1;
             stack.push(k as u64 << 1 | 1);
-            for i in 0..b.insts.len() {
-                let c = call_target(p, b, b.insts[i]);
-                if c != NONE && shape[c as usize] && st[c as usize] == 0 {
+            for q in call_at[k]..call_at[k + 1] {
+                let c = calls[q as usize];
+                if shape[c as usize] && st[c as usize] == 0 {
                     stack.push(c as u64 << 1);
                 }
             }

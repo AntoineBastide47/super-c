@@ -857,10 +857,10 @@ fn fmt_one(path: str, is_stdin: bool, write: bool, check: bool) i32 {
 }
 
 // CLI mode: `super-c <subcommand> <flags|args...>`; the subcommand is always the first argument;
-// a non-keyword first argument means MODE_DEFAULT (compile a script).
+// a non-keyword first argument means MODE_DEFAULT (the transpile form).
 // Declaration order is bman::subcommand_index order, shifted by one for MODE_DEFAULT.
 enum Mode {
-    MODE_DEFAULT, // `super-c <root.spc>`: compile (emit C; `--test` runs tests instead)
+    MODE_DEFAULT, // `super-c <root> --emit-sub=SUB ...`: the transpile form a build engine's `--transpiler` runs
     MODE_BUILD, // `super-c build [<root.spc>] [-o out]`: emit + link a program (or build.toml)
     MODE_RELEASE, // `super-c release [<root.spc>] [-o out]`: emit + link a release profile program (or build.toml)
     MODE_FMT, // `super-c fmt [--check] [<path>...| -]` (no path: the whole project)
@@ -1064,14 +1064,13 @@ fn print_usage(out: *mut stdio::FILE) {
         M"(super-c — a systems language that compiles to native code and to readable C
 
 USAGE:
-    super-c <file.spc> [options]      compile a script (emit C into build/)
     super-c <command> [options]
 
 COMMANDS:
-    build   [<dir/file>]   compile and link a binary (uses build.toml if no file)
+    build   [<dir/file>]   compile and link a binary (uses build.toml if no file; --emit-c: its C)
     release [<dir/file>]   like build, with the release profile (opt-level 3, stripped)
     run                    build the project and run its binary
-    test                   build and run the test suite (tests/ by convention)
+    test [<file>]          build and run the test suite (tests/ by convention), or a file's @test functions
     bench                  build and run the benchmarks (bench/ by convention)
     command <name>         run a [command.NAME] from build.toml
     clean [--full]         sweep the global cache and build/ (--full: delete both instead)
@@ -1125,7 +1124,6 @@ OPTIONS:
     --dir=D                vendor: project root vendored into (default: the current directory)
     --ref=R                vendor: branch, tag or commit to pin (git sources)
     --force                vendor: replace an existing vendor/<name>
-    --test                 script: collect @test functions, build, and run
     --filter=S             test, bench: run only tests or benchmarks whose name contains S (the
                            test and bench subcommands also build only the files that hold them)
     --test-shard=K/N       run shard K of N (one-based, balanced by the durations file)
@@ -1165,7 +1163,7 @@ fn main(argv: Vector<str>) i32 {
     let mut clean_full = false; // clean: --full, remove the out-dir and the global cache instead of sweeping
     let mut transpiler = ""; // build/release: --transpiler=CMD, the command that runs the transpile step
     let mut emit_c = false; // build/release: --emit-c, write the program's C and nothing more
-    let mut emit_sub = ""; // script: --emit-sub=SUB, the transpile form an engine's --transpiler runs
+    let mut emit_sub = ""; // transpile form: --emit-sub=SUB, the tree an engine's --transpiler writes
     let mut manifest_dir = ""; // transpile form: --manifest-dir=DIR, the project directory
     let mut emit_id: u64 = 0; // transpile form: --emit-id=N, the identity its emit stamp records
 
@@ -1214,9 +1212,7 @@ fn main(argv: Vector<str>) i32 {
         MODE_DEFAULT => {
             while i < argc {
                 let arg = argv[i];
-                if co.common_flag(arg) {} else if arg == "--test" {
-                    topts.enabled = true;
-                } else if arg.starts_with("--emit-sub=") {
+                if co.common_flag(arg) {} else if arg.starts_with("--emit-sub=") {
                     emit_sub = arg[11..];
                 } else if arg == "--emit-c" {
                     emit_c = true;
@@ -1229,16 +1225,15 @@ fn main(argv: Vector<str>) i32 {
                     "--sysroot=",
                 ) {
                     let _ = bo.build_flag(&mut co, arg);
-                } else if parse_test_flag(arg, &mut topts, &mut co.bad) {} else if arg.starts_with("--") || file.len() != 0 {
+                } else if arg.starts_with("--") || file.len() != 0 {
                     co.reject(arg);
                 } else {
                     file = arg;
                 }
                 i = i + 1;
             }
-            // The transpile form's own flags are meaningless without it; it never runs tests.
-            let emit_flags = manifest_dir.len() != 0 || emit_id != 0 || bo.profile.len() != 0 || bo.out_dir.len() != 0 || emit_c;
-            if emit_sub.len() == 0 && emit_flags || emit_sub.len() != 0 && topts.enabled {
+            // The transpile form's own flags are meaningless without it.
+            if emit_sub.len() == 0 && (manifest_dir.len() != 0 || emit_id != 0 || bo.profile.len() != 0 || bo.out_dir.len() != 0 || emit_c) {
                 co.bad = true;
             }
         },
@@ -1360,7 +1355,10 @@ fn main(argv: Vector<str>) i32 {
                 let arg = argv[i];
                 if !parse_test_flag(arg, &mut topts, &mut co.bad) {
                     let common = co.common_flag(arg);
-                    if !common && !bo.build_flag(&mut co, arg) {
+                    if common || bo.build_flag(&mut co, arg) {} else if !arg.starts_with("-") && file.len() == 0 {
+                        // A file's own @test functions instead of the project's suite.
+                        file = arg;
+                    } else {
                         co.reject(arg);
                     }
                 }
@@ -1490,7 +1488,7 @@ fn main(argv: Vector<str>) i32 {
         }
     }
     // `super-c test` records into its suite's `durations.tsv`; a script has no suite directory to hold one.
-    if mode == Mode::MODE_DEFAULT && topts.record && topts.record_to == null && topts.durations == null {
+    if mode == Mode::MODE_TEST && file.len() != 0 && topts.record && topts.record_to == null && topts.durations == null {
         eprintln(
             "error: a script's --test-record-durations needs a file: --test-record-durations=F or --test-durations=F",
         );
@@ -1511,14 +1509,24 @@ fn main(argv: Vector<str>) i32 {
         }
     }
     // `build` with a .spc root is the direct emit+link mode; without one it reads build.toml.
-    let manifest_mode = (mode == Mode::MODE_BUILD || mode == Mode::MODE_RELEASE) && file.len() == 0 || mode == Mode::MODE_COMMAND || mode == Mode::MODE_RUN || mode == Mode::MODE_CLEAN || mode == Mode::MODE_TEST || mode == Mode::MODE_BENCH;
+    let manifest_mode = (mode == Mode::MODE_BUILD || mode == Mode::MODE_RELEASE) && file.len() == 0 || mode == Mode::MODE_COMMAND || mode == Mode::MODE_RUN || mode == Mode::MODE_CLEAN || mode == Mode::MODE_TEST && file.len() == 0 || mode == Mode::MODE_BENCH;
     // Cargo-style manifest discovery: a manifest command run from a subdirectory walks up to the
     // nearest build.toml and works from there.
     if manifest_mode {
         chdir_to_manifest();
     }
-    // Only a script needs a path of its own: every other mode either reads build.toml, needs no
-    // input at all (lsp), or discovers the project itself (fmt/lint).
+    // Only a root without a command is not the transpile form.
+    if mode == Mode::MODE_DEFAULT && emit_sub.len() == 0 && file.len() != 0 && !co.bad {
+        eprintln(
+            "error: '{}' needs a command: `super-c build {}` builds it (`--emit-c`: its C tree), `super-c test {}` runs its @test functions",
+            file,
+            file,
+            file,
+        );
+        return 1;
+    }
+    // Only the transpile form needs a path of its own: every other mode either reads build.toml, takes an
+    // optional file, needs no input at all (lsp), or discovers the project itself (fmt/lint).
     if co.bad || file.len() == 0 && mode == Mode::MODE_DEFAULT {
         if co.rejected.len() != 0 {
             eprintln("error: unexpected argument '{}'", co.rejected);

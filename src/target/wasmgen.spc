@@ -1127,7 +1127,8 @@ extend Gen {
     }
 
     // Function object symbol `k` (package symbol `ps`) whose address is taken: an import needs its type,
-    // from its body when the package defines it, else from a call of it anywhere in the package.
+    // from its body when the package defines it, else from the signature the lowering recorded
+    // (`Sym.sig`), else from a call of it anywhere in the package.
     fn fn_type_known(self: &mut Self, ps: u32, k: u32) {
         if self.obj().syms[k as usize].ty != wo::NONE {
             return;
@@ -1139,6 +1140,10 @@ extend Gen {
         if y.def != NONE {
             let cb = &p.bodies[y.def as usize];
             wa::classify(cb, cb.sig, self.vregs, &mut sg);
+            found = true;
+        } else if y.sig != NONE {
+            let db = &p.decls[y.sig as usize];
+            wa::classify(db, db.sig, self.vregs, &mut sg);
             found = true;
         } else {
             // Bounded by the package's instructions.

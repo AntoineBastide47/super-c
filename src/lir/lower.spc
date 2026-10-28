@@ -629,6 +629,93 @@ extend Lower {
         return AGG | self.layout_of(c, m, t, ti);
     }
 
+    // The signature code of a parameter of `(m, t)` of class `ti`, which is not zero-sized.
+    fn param_code(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, t: TypeId, ti: TyI) u32 {
+        if ti.cls == VC_SCALAR {
+            return sig_code(ti.mty, Lower::signed(c, m, t));
+        }
+        return self.param_sig(c, m, t, ti);
+    }
+
+    // The signature code of the results `rts` of module `m` (several: `pack`ed): T_NONE when none takes
+    // space, NONE when one has no class.
+    fn rets_code(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, rts: &Vector<TypeId>) u32 {
+        if rts.len() > 1 {
+            let lt = self.pack(c, m, rts);
+            if lt == NONE {
+                return ast::pick(self.err.len() != 0, NONE, T_NONE);
+            }
+            return AGG | lt;
+        }
+        if rts.len() == 0 {
+            return T_NONE;
+        }
+        let mut ti = TyI { cls: 0 };
+        if !self.ty(c, m, rts[0], &mut ti) {
+            return NONE;
+        }
+        if ti.cls == VC_SCALAR {
+            return sig_code(ti.mty, Lower::signed(c, m, rts[0]));
+        }
+        if ti.cls == VC_MEM {
+            return AGG | self.layout_of(c, m, rts[0], ti);
+        }
+        return T_NONE;
+    }
+
+    // Record on function symbol `k` the signature `entry` gives non-generic function `f` of module `m`
+    // (`Package::decls`): a backend that types a function's address (wasm) reads it when the package
+    // holds no body of the function, as when the per-TU cache replays the unit that defines it.
+    fn ref_sig(self: &mut Self, c: &mut cbe::CEmit, k: u32, m: ModuleId, f: NodeId) bool {
+        if self.pkg.syms[k as usize].sig != NONE {
+            return true;
+        }
+        let a = Lower::ast(c, m);
+        let fd = a.at_const(f).as_data.function;
+        let mut pts = Vector::<TypeId>::with_capacity(fd.params.len as usize);
+        for i in 0..fd.params.len {
+            pts.push(a.type_of(unsafe a.list(fd.params)[i as usize]));
+        }
+        let mut rts = Vector::<TypeId>::with_capacity(fd.returns.len as usize);
+        for i in 0..fd.returns.len {
+            let rn = unsafe a.list(fd.returns)[i as usize];
+            let n = a.at_const(rn);
+            rts.push(a.type_of(ast::pick(n.kind == NodeKind::NODE_PARAMETER, n.as_data.parameter.ty, rn)));
+        }
+        let variadic = fd.is_variadic();
+        // A body of its own: the layouts go to its pool, and `pack` leaves the current body's result
+        // offsets.
+        let cur = replace(&mut self.b, Body::new());
+        let lays = replace(&mut self.lays, Map::<u64, u32>::new());
+        let offs = replace(&mut self.ret_off, Vector::<u32>::new());
+        let mut ptys = Vector::<u32>::with_capacity(pts.len());
+        let mut ok = true;
+        for i in 0..pts.len() {
+            let mut ti = TyI { cls: 0 };
+            ok = ok && self.ty(c, m, pts[i], &mut ti);
+            if ok && ti.cls != VC_ZST {
+                ptys.push(self.param_code(c, m, pts[i], ti));
+            }
+        }
+        let ret = if ok {
+            self.rets_code(c, m, &rts);
+        } else {
+            NONE;
+        };
+        if ret != NONE {
+            self.b.sig = self.b.signature(ptys[0..ptys.len()], ptys.len() as u32, variadic, ret);
+        }
+        let d = replace(&mut self.b, cur);
+        self.lays = lays;
+        self.ret_off = offs;
+        if ret == NONE {
+            return false;
+        }
+        self.pkg.decls.push(d.compact());
+        self.pkg.syms.index_mut(k as usize).sig = self.pkg.decls.len() as u32 - 1;
+        return true;
+    }
+
     // Whether `bt` is an integer type, `char` included.
     const fn is_int_bt(bt: BuiltinType) bool {
         return bt == BuiltinType::BT_I8 || bt == BuiltinType::BT_I16 || bt == BuiltinType::BT_I32 || bt == BuiltinType::BT_I64 || bt == BuiltinType::BT_ISIZE || bt == BuiltinType::BT_U8 || bt == BuiltinType::BT_U16 || bt == BuiltinType::BT_U32 || bt == BuiltinType::BT_U64 || bt == BuiltinType::BT_USIZE || bt == BuiltinType::BT_CHAR;
@@ -2251,12 +2338,11 @@ extend Lower {
                 continue;
             }
             let mut r: u32 = 0;
+            ptys.push(self.param_code(c, b.module, b.locals[l as usize].ty, info.ti));
             if info.ti.cls == VC_SCALAR {
-                ptys.push(sig_code(info.ti.mty, Lower::signed(c, b.module, b.locals[l as usize].ty)));
                 etys.push(info.ti.mty);
                 r = self.ref_of(c, b, l);
             } else {
-                ptys.push(self.param_sig(c, b.module, b.locals[l as usize].ty, info.ti));
                 etys.push(T_PTR);
             }
             self.b.refs.push(r);
@@ -2266,26 +2352,13 @@ extend Lower {
         if !any_ref {
             self.b.refs.truncate(0);
         }
-        let mut ret = T_NONE as u32;
-        if b.returns == 1 {
-            let info = self.li[0];
-            if info.ti.cls == VC_SCALAR {
-                ret = sig_code(info.ti.mty, Lower::signed(c, b.module, b.locals[0].ty));
-            } else if info.ti.cls == VC_MEM {
-                ret = AGG | self.layout_of(c, b.module, b.locals[0].ty, info.ti);
-            }
-        } else if b.returns > 1 {
-            let mut tys = Vector::<TypeId>::new();
-            for r in 0..b.returns {
-                tys.push(b.locals[r as usize].ty);
-            }
-            let lt = self.pack(c, b.module, &tys);
-            if lt == NONE && self.err.len() != 0 {
-                return false;
-            }
-            if lt != NONE {
-                ret = AGG | lt;
-            }
+        let mut tys = Vector::<TypeId>::with_capacity(b.returns as usize);
+        for r in 0..b.returns {
+            tys.push(b.locals[r as usize].ty);
+        }
+        let ret = self.rets_code(c, b.module, &tys);
+        if ret == NONE {
+            return false;
         }
         if (ret & AGG) != 0 {
             etys.push(T_PTR);
@@ -3125,6 +3198,14 @@ extend Lower {
             let fnn = ia.at_const(k.item.node);
             if fnn.kind == NodeKind::NODE_FUNCTION && fnn.as_data.function.is_extern() {
                 self.mark_ext(s.as_str());
+            }
+            if fnn.kind == NodeKind::NODE_FUNCTION && k.targ_len() == 0 && !self.ref_sig(
+                c,
+                self.pkg.find_symbol(s.as_str()),
+                k.item.module,
+                k.item.node,
+            ) {
+                return VNONE;
             }
             return v;
         }
@@ -8449,8 +8530,9 @@ extend Lower {
             if !c.mg.fn_sym(r.fm, r.fnode, tgt, &mut sn) {
                 return self.fail("static-fn");
             }
-            d.relocs.push(Reloc { offset: off, sym: self.pkg.symbol(sn.as_str(), SK_FUNC), addend: 0 });
-            return true;
+            let k = self.pkg.symbol(sn.as_str(), SK_FUNC);
+            d.relocs.push(Reloc { offset: off, sym: k, addend: 0 });
+            return self.ref_sig(c, k, r.fm, r.fnode);
         }
         let t = cev.static_at(r.target);
         let mut ti = TyI { cls: 0 };

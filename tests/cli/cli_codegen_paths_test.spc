@@ -38,7 +38,7 @@ fn test_build_with_a_global_fixture() {
         "struct GEnv { pub n: i32 }\nstruct Fx { pub v: i32 }\n@test_init(global)\nfn genv() GEnv { return GEnv { n: 5 }; }\n@test_init\nfn fx() Fx { return Fx { v: 1 }; }\n@test\nfn uses_both(fx: &mut Fx, env: &GEnv) { assert_eq(fx.v + env.n, 6); }\nfn main() i32 { return 0; }\n",
     );
     // A --test build emits the test global-env setup/teardown wrapper.
-    let child = p.compile_flags("--test --quiet", "main.spc");
+    let child = p.test_file("--quiet", "main.spc", "");
     assert_eq(child.exit, 0);
     assert(child.out_has("1 passed"), "the global-fixture test runs and passes");
 }

@@ -36,8 +36,8 @@ tree `--sysroot=DIR` names. The single binary `super-c` drives every stage of th
 ### Compile
 
 ```sh
-super-c app.spc              # compile only: emit the build/ C tree (script mode)
-super-c build app.spc -o app # compile + link only, name the binary (default: a.out)
+super-c build --emit-c app.spc # write the build/ C tree, link nothing
+super-c build app.spc -o app   # compile + link only, name the binary (default: a.out)
 ```
 
 A bare `.spc` argument compiles the file (and its transitive imports) and emits a `build/`
@@ -140,7 +140,7 @@ super-c test --test-shard=1/2 --test-durations=tests/durations/<lane>.tsv --test
 super-c test --quiet --test-jobs=8     # bound the fork pool (default: one per core)
 super-c test --quiet --test-timeout=120 # fail a test that runs past 120 s (default 90, 0: none)
 super-c test --test-no-fork            # in-process (for debuggers; should_panic skipped)
-super-c --test --quiet app.spc         # single-file form (same --test-* and --filter flags apply)
+super-c test --quiet app.spc           # one file's @test functions (same --test-* and --filter flags apply)
 ```
 
 Each `@test` function runs in a forked child. `@test_init` provides fixtures;
@@ -636,7 +636,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `-h`, `--help` | Print the usage on stdout and exit 0 |
 | `--jobs=N` | Worker count for the parallel stages, and the jobserver slots that nested `super-c` processes share (default: build.toml `jobs`, else one per CPU) |
 | `--out-dir=DIR` | Override output directory (a bare `build file.spc` emits under `DIR/<profile>/raw`) |
-| `-o NAME` | Output binary name (`build`/`release`/`bindgen` only, not script mode) |
+| `-o NAME` | Output binary name (`build`/`release`/`bindgen` only, not with `--emit-c`) |
 | `--bin=NAME` | Build/run only that `[bin.NAME]` target; with `-o PATH`, link it at PATH. An error without build.toml |
 | `--transpiler=CMD` | `build`/`release` from build.toml: run CMD as the transpile step (see External transpiler above). An error without build.toml |
 | `--target=T` | Cross-compile OS: `windows`/`macos`/`linux`/`ios`/`android`/`wasm` (the value of `PLATFORM`). `wasm` reads its headers from `$WASI_SDK_PATH`'s sysroot (else `$WASI_SYSROOT`), links an 8 MiB stack placed first with std's C library (Wasm C library below), and strips at link time; `windows` links with an 8 MiB main-thread stack, so every target's main thread has the stack of Linux and macOS. A cross build needs the target's sysroot for its headers and libraries (`--sysroot=DIR`, else discovered) |
@@ -745,8 +745,7 @@ super-c command bootstrap
 `super-c build app.spc` writes its tree into `build/<profile>/raw/` (`build/debug/raw/` without
 `--profile`): `PROFILE` makes the emission depend on the profile, so every profile has its own tree,
 per-TU cache, manifest and orphan pruning, and switching profiles never mixes trees. A linking build
-writes the native objects there; `--emit-c` (and a bare `super-c app.spc`) writes the program's C
-instead.
+writes the native objects there; `--emit-c` writes the program's C instead.
 
 ```
 build/
@@ -782,12 +781,12 @@ links again. `super-c test` runs the same engine on the generated test root unde
 in `<out-dir>/test/` (`raw/`, the runner `__tests`), with the emit stamp, the per-TU cache and the
 native record making an unchanged suite a link check; `super-c bench` uses `<out-dir>/bench/<profile>/`.
 Engine code takes every manifest output path from out-dir (the `out-dir` key or `--out-dir`, default
-`build`) and never spells `build/`. The bare `super-c <root.spc>` tree under
+`build`) and never spells `build/`. The tree of a file build (`super-c build <root.spc>`) under
 `<root dir>/build/<profile>/raw` is the one exception.
 
 One process builds a profile directory at a time: a build holds the lock file `.lock` in it
 (`bsys::tree_lock`: a POSIX record lock, `LockFileEx` on Windows, none under WASI) from the emit to
-the link, and the bare `super-c <root.spc>` holds its `build/<profile>` the same way. A second build of
+the link, and a file build holds its `build/<profile>` the same way. A second build of
 the directory prints "build: waiting for another build of '<dir>'" and waits at most 30 minutes. Without
 the lock it would rewrite the files the first one reads, which could compile or link a torn file. The
 OS releases the lock when the

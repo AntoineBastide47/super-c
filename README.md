@@ -76,7 +76,7 @@ cd hello
 super-c run
 
 # write the C for one file into build/debug/raw/ next to it, without linking
-super-c path/to/app.spc
+super-c build --emit-c path/to/app.spc
 
 # build one file into a binary
 super-c build path/to/app.spc -o app
@@ -920,13 +920,13 @@ fn rejects_bad_input() { panic("boom"); }
 ```
 
 ```sh
-super-c --test app.spc                      # find the @test functions, build, run them in parallel
-super-c --test --filter=drains app.spc      # only tests whose name contains "drains"
-super-c --test --test-shard=1/2 app.spc     # run half of the tests (for CI)
-super-c --test --test-jobs=4 app.spc        # at most 4 test processes at once
-super-c --test --test-timeout=120 app.spc   # fail a test that runs past 120 s (default 90, 0: none)
-super-c --test --test-no-fork app.spc       # run in one process, for a debugger
-super-c --test --quiet app.spc              # print the failures, the totals and the slowest tests
+super-c test app.spc                        # find the @test functions, build, run them in parallel
+super-c test --filter=drains app.spc        # only tests whose name contains "drains"
+super-c test --test-shard=1/2 app.spc       # run half of the tests (for CI)
+super-c test --test-jobs=4 app.spc          # at most 4 test processes at once
+super-c test --test-timeout=120 app.spc     # fail a test that runs past 120 s (default 90, 0: none)
+super-c test --test-no-fork app.spc         # run in one process, for a debugger
+super-c test --quiet app.spc                # print the failures, the totals and the slowest tests
 ```
 
 * Each test runs in its own process, so a crash or a failed assertion fails only that test.
@@ -1019,8 +1019,8 @@ Outside a constant context, every call runs at run time. Two flags limit how muc
 evaluation may do:
 
 ```sh
-super-c app.spc                                          # defaults: about 2M steps, 96 MiB
-super-c --const-eval-steps=100000 --const-eval-memory=16M app.spc
+super-c build app.spc                                          # defaults: about 2M steps, 96 MiB
+super-c build --const-eval-steps=100000 --const-eval-memory=16M app.spc
 ```
 
 ```superc
@@ -1155,8 +1155,8 @@ fn main() i32 {
 
 ## Generated output
 
-`super-c app.spc` writes the C for `app.spc` into `build/debug/raw/` next to the source.
-`super-c build --emit-c` and `super-c release --emit-c` write `build/<profile>/raw/`.
+`super-c build --emit-c app.spc` writes the C for `app.spc` into `build/debug/raw/` next to the
+source. `super-c build --emit-c` and `super-c release --emit-c` of a project write `build/<profile>/raw/`.
 
 ```text
 build/debug/raw/

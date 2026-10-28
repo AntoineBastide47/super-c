@@ -20,7 +20,7 @@ import driver::util as *;
 import stdlib;
 
 const TUC_MAGIC: u32 = 0x53435455; // "UTCS" little-endian spells SCTU on disk
-const TUC_VER: u32 = 13;
+const TUC_VER: u32 = 14;
 
 const fn fnv_mix(h: u64, v: u64) u64 {
     let mut x = h;
@@ -83,6 +83,13 @@ pub struct Tuc {
     pub hit: Vector<bool>,
     pub soff: Vector<u64>, // payload offset per module in `raw` (past key+len)
     pub slen: Vector<u64>,
+    // The previous image's held records (`lir::hold`, after its sections), which outlive `raw`; per module,
+    // its record's offset in `hraw`, length (0: none) and the native key it was written under
+    // (`driver::emit::nat_key`).
+    pub hraw: String,
+    pub hoff: Vector<u64>,
+    pub hlen: Vector<u64>,
+    pub hnat: Vector<u64>,
     pub out: String, // next cache image, assembled section by section in module order
     pub path: String,
     // Scratch of the live section `sec_rec` writes, reused across sections.
@@ -307,6 +314,38 @@ fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) 
     }
 }
 
+/// Append to the next image (its sections done) every module's held record (`lir::hold`): `recs[m]` when
+/// it is not empty, else module `m`'s record in the previous image when the module replays, else none;
+/// each under the module's key and native key `nat[m]`, from a multiple of 16 bytes on.
+pub fn held_put(t: &mut Tuc, recs: &Vector<String>, nat: &Vector<u64>) {
+    let mut out = replace(&mut t.out, String::new());
+    for m in 0..t.keys.len() {
+        let mut rec = "";
+        if m < recs.len() && recs.at(m).len() != 0 {
+            rec = recs.at(m).as_str();
+        } else if t.hit[m] {
+            rec = held_of(t, m, nat[m]);
+        }
+        w64(&mut out, t.keys[m]);
+        w64(&mut out, nat[m]);
+        w32(&mut out, rec.len() as u32);
+        while out.len() % 16 != 0 {
+            out.push_byte(0);
+        }
+        out.push_str(rec);
+    }
+    t.out = out;
+}
+
+/// Module `m`'s held record in the previous image under native key `nat` (low two bits aside); empty
+/// when there is none.
+pub fn held_of(t: &Tuc, m: usize, nat: u64) str {
+    if t.hlen.len() <= m || t.hlen[m] == 0 || (t.hnat[m] & ~3u64) != (nat & ~3u64) {
+        return "";
+    }
+    return t.hraw.as_str().slice(t.hoff[m] as usize, (t.hoff[m] + t.hlen[m]) as usize);
+}
+
 /// Open the cache for this build: compute every live module's key, load the previous image from
 /// `gen_root`, mark the modules whose sections still match, and reserve `est` bytes for the next image.
 /// Off when SC_NO_TU_CACHE is set, which also removes an existing image.
@@ -319,6 +358,10 @@ pub fn tuc_setup(p: &loader::Package, live: *const bool, salt: &Vector<u64>, tar
         hit: Vector::<bool>::new(),
         soff: Vector::<u64>::new(),
         slen: Vector::<u64>::new(),
+        hraw: String::new(),
+        hoff: Vector::<u64>::new(),
+        hlen: Vector::<u64>::new(),
+        hnat: Vector::<u64>::new(),
         out: String::new(),
         path: String::new(),
         tt: tt_new(),
@@ -329,6 +372,9 @@ pub fn tuc_setup(p: &loader::Package, live: *const bool, salt: &Vector<u64>, tar
     t.hit.resize_default(n);
     t.soff.resize_default(n);
     t.slen.resize_default(n);
+    t.hoff.resize_default(n);
+    t.hlen.resize_default(n);
+    t.hnat.resize_default(n);
     // The evaluator check runs every test's body as the emitter lowers it: a replayed body is not rendered.
     if gen_root.len() == 0 || n == 0 || stdlib::getenv("SC_LIR_EVAL") != null {
         return t;
@@ -383,10 +429,33 @@ pub fn tuc_setup(p: &loader::Package, live: *const bool, salt: &Vector<u64>, tar
         t.hit.set(m, key == t.keys[m] && ln != 0);
         r.at += ln as usize;
     }
+    // The held records (`held_put`): a module's counts under its section's key. They move to `hraw` from a
+    // multiple of 16 bytes on, so each stays 16-byte aligned.
+    let hb = r.at / 16 * 16;
+    for m in 0..n {
+        let key = r.r64();
+        let nk = r.r64();
+        let ln = r.r32() as u64;
+        r.at = (r.at + 15) / 16 * 16;
+        if !r.ok || r.at as u64 + ln > r.end as u64 {
+            r.at = 0;
+            break;
+        }
+        if key == t.keys[m] {
+            t.hoff.set(m, (r.at - hb) as u64);
+            t.hlen.set(m, ln);
+            t.hnat.set(m, nk);
+        }
+        r.at += ln as usize;
+    }
+    if r.at == r.end {
+        t.hraw = String::from_str(t.raw.as_str().slice(hb, r.end));
+    }
     if r.at != r.end {
         for m in 0..n {
             // Trailing garbage: distrust the whole image.
             t.hit.set(m, false);
+            t.hlen.set(m, 0);
         }
     }
     return t;

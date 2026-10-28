@@ -42,6 +42,7 @@ import lir::parse as lparse;
 import lir::opt as lopt;
 import lir::inline as il;
 import lir::loops as lu;
+import lir::hold as lhold;
 import target::native as nat;
 import bindgen::bindgen as bg;
 import bindgen::ctarget as ct;
@@ -4872,7 +4873,8 @@ pub fn cemit_package(
         // A section carries its module's C text, as large as the module's TU buffer.
         2 * src_total,
     );
-    nat_trust(p, &mut tuc);
+    let mut held = Vector::<Option<lhold::Rec>>::new();
+    nat_trust(p, &mut tuc, &mut held);
     let par9 = p.jobs != 1 && p.modules.len() > 1;
     if par9 {
         // Parallel seed frontier: one task per module with a private emitter shard; gated
@@ -6238,14 +6240,17 @@ pub fn cemit_package(
     o.have_main = acc.have_main;
     o.main_mod = acc.main_mod;
     o.main_argv = acc.main_argv;
-    if tuc.on {
-        o.tuc_img = replace(&mut tuc.out, String::new());
-        o.tuc_path = replace(&mut tuc.path, String::new());
-        o.tuc_keys = replace(&mut tuc.keys, Vector::<u64>::new());
-        o.tuc_hit = replace(&mut tuc.hit, Vector::<bool>::new());
-    }
     prd.merge(&dow.pr);
     prd.merge(&cem.pr);
+    // Per module, the held record this build writes (`lir::hold`; empty: the previous one when it
+    // replays), under its native key.
+    let mut recs = Vector::<String>::new();
+    let mut nks = Vector::<u64>::new();
+    if tuc.on {
+        for m in 0..p.modules.len() {
+            nks.push(nat_key(p, &tuc.keys, m));
+        }
+    }
     // An optimizing build optimizes the finished LIR: every constant's data is defined by now.
     if p.lir_opt && p.ok && cem.lir.is_some() {
         let mut l = replace(&mut cem.lir, Option::<Box<lw::Lower>>::None).unwrap();
@@ -6256,6 +6261,17 @@ pub fn cemit_package(
             sealed.push(module_has_asm(p, m));
         }
         let pkg = &mut l.deref_mut().pkg;
+        // A replayed unit's bodies the others may inline, its call graph and its data come from its record.
+        for m in 0..held.len() {
+            if let Some(h) = held.at(m) {
+                lhold::add_free(pkg, h);
+            }
+        }
+        for m in 0..held.len() {
+            if let Some(h) = held.at(m) {
+                lhold::add(pkg, m as u32, h);
+            }
+        }
         let mut r = lopt::Run::new(
             pkg,
             &sealed,
@@ -6265,7 +6281,22 @@ pub fn cemit_package(
         let mut g = sch::Jobs::from_edges(r.order.len(), &r.edges, replace(&mut r.order, Vector::<u32>::new()));
         sch::run_jobs(&mut g, p.jobs, lopt::job, &mut r, null);
         r.finish(pkg);
+        if tuc.on {
+            let mut want = Vector::<bool>::with_capacity(p.modules.len());
+            for m in 0..p.modules.len() {
+                want.push(!tuc.hit[m]);
+            }
+            lhold::save(pkg, &r, &want, &mut recs);
+        }
+        pkg.drop_held();
         cem.lir_put(l);
+    }
+    if tuc.on {
+        tuc::held_put(&mut tuc, &recs, &nks);
+        o.tuc_img = replace(&mut tuc.out, String::new());
+        o.tuc_path = replace(&mut tuc.path, String::new());
+        o.tuc_keys = replace(&mut tuc.keys, Vector::<u64>::new());
+        o.tuc_hit = replace(&mut tuc.hit, Vector::<bool>::new());
     }
     // The LIR check of the bodies this build rendered (a refused one fails the build already). A module
     // the per-TU cache replayed passed it in the build that recorded it: SC_LIR is part of the key.
@@ -12405,12 +12436,15 @@ fn nat_record(path: str) Map<String, u64> {
 }
 
 // A native build replays a module's cached emission only when the record holds it under its key, with
-// its own object when it has one. The rest emit again.
-fn nat_trust(p: &loader::Package, t: &mut tuc::Tuc) {
+// its own object when it has one, and, when the LIR optimizer runs, with its held record, which `held`
+// gets (`lir::hold`: the other units then optimize as with the module rendered). The rest emit again.
+fn nat_trust(p: &loader::Package, t: &mut tuc::Tuc, held: &mut Vector<Option<lhold::Rec>>) {
+    held.resize_default(p.modules.len());
     if !t.on || !p.native {
         return;
     }
     let rec = nat_record(build_out_path(p.gen_root.as_str(), NAT_RECORD, "").as_str());
+    let pb = lay::target_for(p.arch).ptr as u32;
     for m in 0..p.modules.len() {
         if !t.hit[m] {
             continue;
@@ -12419,8 +12453,14 @@ fn nat_trust(p: &loader::Package, t: &mut tuc::Tuc) {
             Some(v) => *v,
             None => 0,
         };
-        if r == 0 || (r & ~3u64) != (nat_key(p, &t.keys, m) & ~3u64) {
+        let nk = nat_key(p, &t.keys, m);
+        if r == 0 || (r & ~3u64) != (nk & ~3u64) {
             t.hit.set(m, false);
+            continue;
+        }
+        if p.lir_opt {
+            held.set(m, lhold::read(tuc::held_of(t, m, nk), pb));
+            t.hit.set(m, held.at(m).is_some());
         }
     }
 }

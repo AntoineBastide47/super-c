@@ -688,7 +688,7 @@ The prelude defines the build settings as constants usable in any expression:
 |----------|------|-------|
 | `PLATFORM` | `Platform` (`Windows`, `MacOS`, `Linux`, `Wasm`, `IOS`, `Android`) | `--target` (default: the host) |
 | `ARCH` | `Arch` (`X86_64`, `AArch64`, `Wasm32`) | `--arch` (default: the host's; `--target=wasm`, `ios` and `android` set theirs) |
-| `TEST` | `bool` | true in a `--test` build (`super-c test`, `super-c --test`) |
+| `TEST` | `bool` | true in a test build (`super-c test`, `super-c test <file>`) |
 | `POINTER_WIDTH` | `u32` | 64; 32 on `wasm32` |
 | `ENDIAN` | `Endian` (`Little`, `Big`) | `Little` on every supported target |
 | `PROFILE` | `str<'static>` | the build profile name (`debug` when none is named) |

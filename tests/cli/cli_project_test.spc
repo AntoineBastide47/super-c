@@ -165,8 +165,8 @@ fn build_of_a_directory_builds_its_project() {
     // Windows names an executable `<o>.exe` (`exe_name`).
     let out = format("{}/out-app{}", root, unsafe str::from_cstr(cli::binext()));
     assert(cli::read_text(out.as_str()).len() > 0, "-o names a path from the caller");
-    // A directory given as a script is no source file (Linux opens one: it must not be read).
-    let s = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "app");
+    // A directory given as a file to test is no source file (Linux opens one: it must not be read).
+    let s = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "test app");
     assert(s.exit != 0 && s.out_has("cannot open module"), "a directory script is reported, not read");
 }
 

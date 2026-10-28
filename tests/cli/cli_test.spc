@@ -2295,7 +2295,7 @@ fn leak_tracker() {
         "main.spc",
         "@test\nfn leaks_in_child() {\n    forget(String::from_str(\"deliberate test child leak past the inline budget\"));\n}\n\nfn main() i32 { return 0; }\n",
     );
-    let child = t.compile_flags_env("--test --quiet", "main.spc", "SC_LEAK_CHECK=fatal ");
+    let child = t.test_file("--quiet", "main.spc", "SC_LEAK_CHECK=fatal ");
     assert_eq(child.exit, 1);
     assert(child.out_has("test main::leaks_in_child ... FAILED"), "child leak fails the test");
     assert(child.out_has("super-c leaks: 1 allocation"), "child leak report is captured");
@@ -2561,7 +2561,7 @@ fn waits_on_a_socket() {
 fn main() i32 { return 0; }
 )",
     );
-    let r = p.compile_flags("--test --quiet --test-timeout=1", "main.spc");
+    let r = p.test_file("--quiet --test-timeout=1", "main.spc", "");
     assert_eq(r.exit, 2);
     assert(r.out_has("test main::stuck ... FAILED (timed out)"), "the global timeout fails a stuck test");
     assert(r.out_has("test main::waits_on_a_socket ... FAILED (timed out)"), "its own timeout fails it");
@@ -2576,9 +2576,9 @@ fn main() i32 { return 0; }
         assert(r.out_shows(": read waiters 1"), "the waiting descriptor is listed");
     }
     // --test-timeout=0 turns the global timeout off; a test's own still applies.
-    let off = p.compile_flags("--test --quiet --test-timeout=0 --filter=waits", "main.spc");
+    let off = p.test_file("--quiet --test-timeout=0 --filter=waits", "main.spc", "");
     assert(off.out_has("test main::waits_on_a_socket ... FAILED (timed out)"), "its own timeout without a global one");
-    let bad = p.compile_flags("--test --test-timeout=soon", "main.spc");
+    let bad = p.test_file("--test-timeout=soon", "main.spc", "");
     assert(!bad.ok(), "a malformed timeout is rejected");
 }
 
@@ -2596,10 +2596,7 @@ fn test_timeout_dumps_child_processes() {
         "sleeper.spc",
         "import stdlib;\nimport std::time as time;\nfn main() i32 {\n  if stdlib::get_env(\"SLEEPER_NOW\").is_some() {\n    return 0;\n  }\n  time::sleep(time::Duration::from_secs(60));\n  return 0;\n}\n",
     );
-    let mut out = String::from_str("build -o ");
-    out.push_str(root);
-    out.push_str("/sleeper");
-    assert(p.compile_flags(out.as_str(), "sleeper.spc").ok(), "the child program builds");
+    assert(cli::superc_in(root, "build sleeper.spc -o sleeper").ok(), "the child program builds");
     // The first exec of a fresh binary pays the OS launch assessment (macOS: 50-200 ms idle, seconds under
     // a loaded suite). Pay it here, so the hung test's 2 s window holds the hang alone: a child still
     // starting at the deadline has no handler yet and prints nothing.
@@ -2611,7 +2608,7 @@ fn test_timeout_dumps_child_processes() {
     main.push_str(root);
     main.push_str("/sleeper\");\n}\nfn main() i32 { return 0; }\n");
     p.mkfile("main.spc", main.as_str());
-    let r = p.compile_flags("--test --quiet", "main.spc");
+    let r = p.test_file("--quiet", "main.spc", "");
     assert(r.out_has("test main::runs_a_hung_child ... FAILED (timed out)"), "the test times out");
     assert(r.out_shows(" sleeper: the stack of every thread"), "the child program prints its stacks");
     if PLATFORM == Platform::Linux {
@@ -2679,7 +2676,7 @@ extend Counter {
 fn main() i32 { return 0; }
 )",
     );
-    let r = p.compile_flags("--test", "main.spc");
+    let r = p.test_file("", "main.spc", "");
     assert_eq(r.exit, 1);
     assert(r.out_has("running 4 tests"), "collected 4 tests");
     assert(r.out_has("test main::drains ... ok"), "drains passed");
@@ -2698,7 +2695,7 @@ fn main() i32 { return 0; }
     assert(r.out_shows("    main::fails"), "failures listed again at the end");
     assert(!r.out_has("drain trace"), "a passing test's output is captured");
     // --quiet drops the per-test `ok` lines and keeps the failures and the tally.
-    let q = p.compile_flags("--test --quiet", "main.spc");
+    let q = p.test_file("--quiet", "main.spc", "");
     assert_eq(q.exit, 1);
     assert(q.out_has("running 4 tests"), "quiet keeps the header");
     assert(!q.out_has("... ok"), "quiet drops the ok lines");
@@ -2706,20 +2703,20 @@ fn main() i32 { return 0; }
     assert(q.out_shows("---- main::fails ----"), "quiet keeps the failure section");
     assert(q.out_has("3 passed, 1 failed"), "quiet keeps the tally");
     // Shards partition the filtered test order without overlap; each adjacent pair is split.
-    let s1 = p.compile_flags("--test --filter=main:: --test-shard=1/2 --test-jobs=2", "main.spc");
+    let s1 = p.test_file("--filter=main:: --test-shard=1/2 --test-jobs=2", "main.spc", "");
     assert(s1.ok());
     assert(s1.out_has("running 2 tests (shard 1/2)"), "first shard selected two tests");
     assert(s1.out_has("test main::drains ... ok"), "first shard contains test zero");
     assert(s1.out_has("test main::boom ... ok"), "first shard contains test two");
     assert(!s1.out_has("main::fails"), "first shard excludes test one");
-    let s2 = p.compile_flags("--test --test-shard=2/2", "main.spc");
+    let s2 = p.test_file("--test-shard=2/2", "main.spc", "");
     assert_eq(s2.exit, 1);
     assert(s2.out_has("running 2 tests (shard 2/2)"), "second shard selected two tests");
     assert(s2.out_has("test main::fails ... FAILED"), "second shard contains test one");
     assert(s2.out_has("test main::Counter::bumps ... ok"), "second shard contains test three");
     assert(!s2.out_has("main::drains"), "second shard excludes test zero");
     // --test-no-fork runs in-process and skips should_panic tests.
-    let nf = p.compile_flags("--test --test-no-fork --filter=boom", "main.spc");
+    let nf = p.test_file("--test-no-fork --filter=boom", "main.spc", "");
     assert(nf.ok());
     assert(nf.out_has("skipped (should_panic needs fork)"), "no-fork skips should_panic");
     // The runner rejects an argument it does not know (a driver flag given to it directly) instead of
@@ -2747,7 +2744,7 @@ fn a_runner_run_directly_makes_its_own_jobserver() {
         "main.spc",
         "import stdlib;\n@test\nfn names_the_jobserver() {\n    let v = stdlib::getenv(\"SC_JOBSERVER\");\n    if v != null {\n        println(\"jobserver {}\", unsafe str::from_cstr(v));\n    }\n}\nfn main() i32 {\n    return 0;\n}\n",
     );
-    assert(p.compile_flags("--test --quiet", "main.spc").ok(), "the runner builds and passes");
+    assert(p.test_file("--quiet", "main.spc", "").ok(), "the runner builds and passes");
     let mut runner = String::new();
     runner.format_into("{}/build/debug/raw/__tests{}", p.dir(), unsafe str::from_cstr(cli::binext()));
     // An empty SC_JOBSERVER names no jobserver, as an unset one does. `--no-fork` shows the test's output.
@@ -2775,7 +2772,7 @@ fn panics() { panic("boom"); }
 fn main() i32 { return 0; }
 )",
     );
-    let r = p.compile_flags("--test", "main.spc");
+    let r = p.test_file("", "main.spc", "");
     assert_eq(r.exit, 2);
     assert(r.out_shows("test main::crashes ... FAILED (expected a panic)"), "a crash is not a panic");
     assert(r.out_shows("test main::exits ... FAILED (expected a panic)"), "a nonzero exit is not a panic");
@@ -2848,7 +2845,7 @@ fn uses_both(m: &mut M, g: &G) { panic("uses_both ran"); }
 fn main() i32 { return 0; }
 )",
     );
-    let r = p.compile_flags("--test --quiet", "main.spc");
+    let r = p.test_file("--quiet", "main.spc", "");
     assert_eq(r.exit, 2);
     assert(r.out_shows("suite init"), "the suite init ran");
     assert(r.out_shows("method ran"), "the suite test ran with its receiver");
@@ -3254,7 +3251,7 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.compile_flags("--test --quiet", "main.spc");
+    let r = p.test_file("--quiet", "main.spc", "");
     assert(r.ok(), "the gated-out test is not registered");
     assert(r.out_has("running 2 tests"), "one gated test exists on this host, the other does not");
     assert(r.out_has("2 passed, 0 failed"), "tally");
@@ -7752,7 +7749,7 @@ fn file_build_flags() {
 fn script_record_durations_needs_a_file() {
     let p = cli::proj_new();
     p.mkfile("a.spc", "@test\nfn t() {}\n\nfn main() i32 {\n    return 0;\n}\n");
-    let r = p.compile_flags("--test --test-record-durations", "a.spc");
+    let r = p.test_file("--test-record-durations", "a.spc", "");
     assert_eq(r.exit, 1);
     assert(r.out_has("--test-record-durations needs a file"), "the run says what is missing");
 }
@@ -10351,6 +10348,56 @@ fn no_tu_cache_removes_the_image() {
     assert(!p.gen_exists(".tu_cache"), "a build without the cache removes it");
 }
 
+// An optimizing build that replays a unit inlines what a build that renders it does: the replayed `b` gives
+// its inlinable bodies, call graph and string data to the optimization of the edited `main`
+// (`lir::hold`), so `main`'s object matches one built without the per-TU cache.
+@test
+fn replayed_unit_inlines_as_a_rendered_one() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    // A static read and an assert keep both callees from the Core IR inliner: only the LIR one takes them.
+    p.mkfile(
+        "src/b.spc",
+        "static mut BASE: i32 = 2;\n\npub fn two() i32 {\n    return unsafe BASE;\n}\n\npub fn tag(n: usize) str<'static> {\n    assert(n < 8, \"tag index\");\n    return \"held\";\n}\n",
+    );
+    p.mkfile("src/main.spc", "import b;\n\nfn main() i32 {\n    return b::two() + b::tag(1).len() as i32 - 6;\n}\n");
+    let root = p.dir();
+    assert(cli::superc_in(root, "build --profile=release -o bin").ok(), "the first build succeeds");
+    p.mkfile("src/main.spc", "import b;\n\nfn main() i32 {\n    return b::two() + b::tag(1).len() as i32 - 7 + 1;\n}\n");
+    assert(cli::superc_in(root, "build --profile=release -o bin").ok(), "the build that replays `b` succeeds");
+    assert_eq(p.run_bin(), 0);
+    let obj = format("{}/build/release/raw/main.o", root);
+    let warm = loader::read_file(obj.as_str()).unwrap_or(String::new());
+    assert(warm.len() > 0, "the build writes main's object");
+    let r = cli::superc_env_in(root, "SC_NO_TU_CACHE", "1 SC_NO_EMIT_CACHE=1", "build --profile=release -o bin");
+    assert(r.ok(), "the build without the cache succeeds");
+    let cold = loader::read_file(obj.as_str()).unwrap_or(String::new());
+    assert(warm.equals(&cold), "main's object does not depend on the cache");
+}
+
+// A wasm import of a function takes its type from the package: a static of `a`, in the object of the
+// build's additions, holds the address of `seven`, which `a`'s own object defines. A build that replays
+// that object holds no body and no call of `seven`: the lowering records the signature where it takes the
+// address (`Sym.sig`).
+@test
+fn wasm_replayed_function_address_has_its_type() {
+    if stdlib::get_env("WASI_SDK_PATH").is_none() || cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/a.spc",
+        "static mut H: fn() i32 = seven;\n\nfn seven() i32 {\n    return 7;\n}\n\npub fn call() i32 {\n    return unsafe H();\n}\n",
+    );
+    p.mkfile("src/main.spc", "import a;\n\nfn main() i32 {\n    return a::call() - 7;\n}\n");
+    let root = p.dir();
+    assert(cli::superc_in(root, "build --target=wasm -o app.wasm").ok(), "the first build succeeds");
+    p.mkfile("src/main.spc", "import a;\n\nfn main() i32 {\n    return a::call() - 6 - 1;\n}\n");
+    let r = cli::superc_in(root, "build --target=wasm -o app.wasm");
+    assert(r.ok(), "the build that replays `a`'s own object types the import of `seven`");
+}
+
 @platform(!windows)
 extern "C" "unistd.h" {
     fn symlink(target: *const char, link: *const char) i32;
@@ -10506,7 +10553,7 @@ fn sees_test() {
 }
 )",
     );
-    let t = p.compile_flags("--test --quiet", "main.spc");
+    let t = p.test_file("--quiet", "main.spc", "");
     assert(t.ok(), "the test sees TEST");
     assert(t.out_has("1 passed"));
     if cli::on_wasm() {
@@ -11257,7 +11304,7 @@ fn main() i32 {
     );
     let root = p.dir();
     let mut wargs = String::new();
-    wargs.format_into("\"{}/wasm.spc\" --target=wasm", root);
+    wargs.format_into("build --emit-c \"{}/wasm.spc\" --target=wasm", root);
     assert(p.run_raw(wargs.as_str()).ok(), "the wasm32 limits check");
     // A declared type rejects the widened value.
     h::expect_err_msg(
@@ -11637,7 +11684,7 @@ fn a_build_waits_for_the_holder_of_its_tree() {
     let h = bsys::lock_file(lock.as_str(), 0);
     assert(h.held(), "the test takes the tree's lock");
     let log = format("{}/second.log", root);
-    let argv: [str; 2] = [cli::superc_path(), "main.spc"];
+    let argv: [str; 4] = [cli::superc_path(), "build", "--emit-c", "main.spc"];
     let mut child = spawn_logged(argv, log.as_str(), root);
     let mut told = false;
     for _ in 0..600 {

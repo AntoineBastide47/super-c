@@ -585,6 +585,10 @@ pub struct Sym {
     /// A C library's symbol (an extern declaration's): it may be in a shared library, so code takes its
     /// address through the linker's address slot. Every other symbol is in the program's image.
     pub ext: bool,
+    /// A function's signature as its definition has it (`Package.decls`), NONE when unrecorded: the
+    /// lowering records it where it takes the function's address, for a backend that types that
+    /// address (wasm) when the package holds no body of the function. The text form does not carry it.
+    pub sig: u32,
 }
 
 pub const NONE: u32 = 0xFFFFFFFF;
@@ -982,10 +986,53 @@ pub struct Package {
     pub bytes: Vector<u8>,
     pub relocs: Vector<Reloc>,
     pub bodies: Vector<Body>,
+    /// The signatures `Sym.sig` records, each the `sig` of a body that has no instructions.
+    pub decls: Vector<Body>,
+    pub held: Held,
     // Per name id, its file, symbol and message ids plus 1 (0: none).
     file_of: Vector<u32>,
     sym_of: Vector<u32>,
     msg_of: Vector<u32>,
+}
+
+/// A cached unit's part in the optimization of the others (`lir::hold`): bodies and data definitions,
+/// after the package's own, that the optimizer reads but neither optimizes nor emits.
+pub struct Held {
+    /// The first held body and data definition, NONE when nothing is held; the package's bytes and
+    /// relocations before the held data.
+    pub body: u32,
+    pub data: u32,
+    pub bytes: u32,
+    pub relocs: u32,
+    /// Per held body: its symbol, its walk facts (`HELD_SHAPE`, `HELD_OK`) and its direct calls before
+    /// optimization (`calls[at[k]..at[k + 1]]`: symbols, in instruction order).
+    pub syms: Vector<u32>,
+    pub flags: Vector<u8>,
+    pub at: Vector<u32>,
+    pub calls: Vector<u32>,
+    /// Per held data definition, its symbol.
+    pub dsyms: Vector<u32>,
+}
+
+/// `Held.flags`: the inliner's shape test passed (`lir::inline::shape_ok`); its callers may inline the
+/// optimized body.
+pub const HELD_SHAPE: u8 = 1;
+pub const HELD_OK: u8 = 2;
+
+extend Held {
+    pub fn new() Held {
+        return Held {
+            body: NONE,
+            data: NONE,
+            bytes: 0,
+            relocs: 0,
+            syms: Vector::<u32>::new(),
+            flags: Vector::<u8>::new(),
+            at: Vector::<u32>::new(),
+            calls: Vector::<u32>::new(),
+            dsyms: Vector::<u32>::new(),
+        };
+    }
 }
 
 extend Package {
@@ -1009,6 +1056,8 @@ extend Package {
             bytes: Vector::<u8>::new(),
             relocs: Vector::<Reloc>::new(),
             bodies: Vector::<Body>::new(),
+            decls: Vector::<Body>::new(),
+            held: Held::new(),
             file_of: Vector::<u32>::new(),
             sym_of: Vector::<u32>::new(),
             msg_of: Vector::<u32>::new(),
@@ -1069,6 +1118,7 @@ extend Package {
                 noinline: false,
                 own: false,
                 ext: false,
+                sig: NONE,
             },
         );
         self.sym_of[n as usize] = self.syms.len() as u32;
@@ -1146,6 +1196,24 @@ extend Package {
         return true;
     }
 
+    /// Remove the held bodies and data definitions (`Held`): their symbols are undefined again.
+    pub fn drop_held(self: &mut Self) {
+        if self.held.body == NONE {
+            return;
+        }
+        for k in 0..self.held.syms.len() {
+            self.syms.index_mut(self.held.syms[k] as usize).def = NONE;
+        }
+        for k in 0..self.held.dsyms.len() {
+            self.syms.index_mut(self.held.dsyms[k] as usize).def = NONE;
+        }
+        self.bodies.truncate(self.held.body as usize);
+        self.data.truncate(self.held.data as usize);
+        self.bytes.truncate(self.held.bytes as usize);
+        self.relocs.truncate(self.held.relocs as usize);
+        self.held = Held::new();
+    }
+
     /// Data definition `d`'s initial bytes.
     pub const fn data_bytes(self: &Self, d: &DataDef) Slice<u8> {
         return self.bytes[d.bytes as usize..(d.bytes + d.nbytes) as usize];
@@ -1175,6 +1243,10 @@ extend Package {
             smap.push(s);
             if os.ext {
                 self.syms.index_mut(s as usize).ext = true;
+            }
+            if os.sig != NONE && self.syms[s as usize].sig == NONE {
+                self.decls.push(other.decls[os.sig as usize].compact());
+                self.syms.index_mut(s as usize).sig = self.decls.len() as u32 - 1;
             }
         }
         for i in 0..other.syms.len() {

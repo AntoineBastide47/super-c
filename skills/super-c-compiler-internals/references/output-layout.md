@@ -341,7 +341,9 @@ is rewritten).
 - The per-TU cache replays chunk owners, `_ret` typedef owners, header edges (`RK_HEDGE`:
   owner module and definition key), typed spelling rows (`RK_EDGE`) and the module's
   type-need row (`RK_TNEED`: its sorted distinct keys as word pairs), array wrapper
-  requests (`RK_WRAP`) and result carrier requests (`RK_PACK`); format version 8.
+  requests (`RK_WRAP`) and result carrier requests (`RK_PACK`); after the sections, per
+  module its held record (`lir::hold`: what its own object gives the LIR optimization of
+  the other units), under its key and native key; format version 14.
   A replayed tree must match a `SC_NO_TU_CACHE=1` tree byte for byte after an edit
   (`tests/cli/cli_test.spc`, `build_staleness_gates` covers the header-change and
   layout-change cases).

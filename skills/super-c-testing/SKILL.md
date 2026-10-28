@@ -299,9 +299,9 @@ the shards by the suite's recorded durations, `tests/durations.tsv` (one `<secon
 per test, sorted by name): the filter-matched tests, the longest first, each go to the shard with
 the least time so far, ties to the lowest shard, and a test the file does not name counts as the
 median recorded duration. Every shard computes the same assignment from the same file, test list
-and filter, so the shards are disjoint and cover the list. Without the file (and in the script form
-`super-c --test app.spc`) tests are dealt round-robin. The script form's `--test-record-durations`
-needs `=F` or `--test-durations=F`: a script has no suite folder for a default file. `super-c test --test-record-durations` merges
+and filter, so the shards are disjoint and cover the list. Without the file (and for one file,
+`super-c test app.spc`) tests are dealt round-robin. One file's `--test-record-durations`
+needs `=F` or `--test-durations=F`: a file has no suite folder for a default file. `super-c test --test-record-durations` merges
 the run's times into the file: a test that ran gets its new time, one that did not (another shard)
 keeps its old one, and a name the suite no longer has is dropped. A filtered run builds only the
 files with a match, so it keeps every line it has no test for (a removed test's line stays until an

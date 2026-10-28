@@ -547,8 +547,8 @@ extend Proj {
         return true;
     }
 
-    // Compile <root>/mainrel with the given extra flags (compile-only mode: emits <root>/build/, no link).
-    /// Run the compiler on `mainrel` with extra `flags`, capturing output.
+    /// Write the C tree of `<root>/mainrel` (`build --emit-c`: `<root>/build/debug/raw`, no link) with
+    /// extra `flags`, capturing output.
     pub fn compile_flags(self: &Proj, flags: str, mainrel: str) CliResult {
         return self.compile_flags_env(flags, mainrel, "");
     }
@@ -556,8 +556,19 @@ extend Proj {
     /// `compile_flags` with `env` ("NAME=VALUE" pairs, space separated) applied to the compiler and
     /// everything it runs, so a check never depends on the suite's own environment.
     pub fn compile_flags_env(self: &Proj, flags: str, mainrel: str, env: str) CliResult {
+        return self.run_file("build --emit-c", flags, mainrel, env);
+    }
+
+    /// Build and run the `@test` functions of `<root>/mainrel` (`super-c test`) with extra `flags` and
+    /// `env` (as `compile_flags_env`), capturing output.
+    pub fn test_file(self: &Proj, flags: str, mainrel: str, env: str) CliResult {
+        return self.run_file("test", flags, mainrel, env);
+    }
+
+    // Run `$SUPERC <command> <flags> <root>/<mainrel>` under `env`, capturing output.
+    fn run_file(self: &Proj, command: str, flags: str, mainrel: str, env: str) CliResult {
         let root = self.dir();
-        let mut base = format("\"{}\" {} \"{}/{}\"", superc_path(), flags, root, mainrel);
+        let mut base = format("\"{}\" {} {} \"{}/{}\"", superc_path(), command, flags, root, mainrel);
         let mut op = format("{}/.out", root);
         return exec_env(base.cstr(), op.cstr(), env);
     }

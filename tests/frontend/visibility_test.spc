@@ -225,15 +225,17 @@ fn std_internals_and_synthesized_calls() {
         "import std::zz::inner;\nfn main() i32 {\n    let n = inner::secret();\n    println(\"{}\", n);\n    return n - 7;\n}\n",
     );
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
-    let env = format("SC_STD_DIR={}/sc/std", root);
-    let r = p.compile_flags_env("build", "", env.as_str());
+    let sd = format("{}/sc/std", root);
+    let r = cli::superc_env_in(root, "SC_STD_DIR", sd.as_str(), "build");
     assert(r.out_has("error: no visible item 'secret' in module 'inner'"));
     assert(
         r.out_has("unstable std internals, which a project names only with 'std_internals = true' in its build.toml"),
     );
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\nstd_internals = true\n");
-    assert(p.compile_flags_env("build", "", env.as_str()).ok());
+    assert(cli::superc_env_in(root, "SC_STD_DIR", sd.as_str(), "build").ok());
     p.mkfile("src/main.spc", "fn main() i32 {\n    let s = sugar_fmt_new();\n    return s.len() as i32;\n}\n");
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
-    assert(p.compile_flags_env("build", "", env.as_str()).out_has("error: cannot find value 'sugar_fmt_new'"));
+    assert(
+        cli::superc_env_in(root, "SC_STD_DIR", sd.as_str(), "build").out_has("error: cannot find value 'sugar_fmt_new'"),
+    );
 }
