@@ -456,6 +456,11 @@ fn interface_bounds() {
         "does not match interface signature",
     );
     h::expect_err_msg(
+        "an override of a default method matches the interface signature",
+        "interface I { fn f(self: &Self) i32 { return 1; } }\nstruct S { pub x: i32 }\nextend S as I { fn f(self: &Self) bool { return true; } }\nfn main() i32 { return 0; }\n",
+        "does not match interface signature",
+    );
+    h::expect_err_msg(
         "interface method arity signature mismatch",
         "interface I { fn f(self: &Self, x: i32) i32; }\nstruct S { pub x: i32 }\nextend S as I { fn f(self: &Self) i32 { return 0; } }\nfn main() i32 { return 0; }\n",
         "does not match interface signature",
