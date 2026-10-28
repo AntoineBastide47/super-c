@@ -13,25 +13,25 @@ import target::wasmasm as wa;
 import target::wasmobj as wo;
 
 /// Instruction sets.
-pub const ISA_A64: u8 = 0;
-pub const ISA_X64: u8 = 1;
+pub(package) const ISA_A64: u8 = 0;
+pub(package) const ISA_X64: u8 = 1;
 /// Object formats: the symbol names they spell and the directives they take.
-pub const FMT_MACHO: u8 = 0;
-pub const FMT_ELF: u8 = 1;
-pub const FMT_COFF: u8 = 2;
+pub(package) const FMT_MACHO: u8 = 0;
+pub(package) const FMT_ELF: u8 = 1;
+pub(package) const FMT_COFF: u8 = 2;
 
 // ---- Statements ----
 
 /// The statements of `text`, one per line or `;`, without comments (`//`, `/* */`; `#` to the end of
 /// the line for x86-64): each holds its labels and the rest (a directive or an instruction).
-pub struct Stmt {
-    pub labels: Vector<String>,
-    pub body: String,
-    pub line: u32,
+pub(package) struct Stmt {
+    pub(package) labels: Vector<String>,
+    pub(package) body: String,
+    pub(package) line: u32,
 }
 
 /// Split `text` into statements.
-pub fn statements(text: str, hash_comment: bool, out: &mut Vector<Stmt>) {
+pub(package) fn statements(text: str, hash_comment: bool, out: &mut Vector<Stmt>) {
     let mut cur = String::new();
     let mut line: u32 = 1;
     let mut start_line: u32 = 1;
@@ -121,7 +121,7 @@ fn push_stmt(s0: str, line: u32, out: &mut Vector<Stmt>) {
 }
 
 /// Whether `c` may be byte `first`-or-later of a symbol name.
-pub const fn is_sym_byte(c: u8, first: bool) bool {
+pub(package) const fn is_sym_byte(c: u8, first: bool) bool {
     return c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c == b'_' || c == b'.' || c == b'$' || !first && c >= b'0' && c <= b'9';
 }
 
@@ -142,38 +142,38 @@ const fn numeric(w: str) bool {
 
 // A label: its section and offset, the statement it is defined at (numeric labels repeat).
 struct Label {
-    pub name: String,
-    pub sec: u8,
-    pub off: u64,
-    pub stmt: u32,
+    pub(package) name: String,
+    pub(package) sec: u8,
+    pub(package) off: u64,
+    pub(package) stmt: u32,
 }
 
 // A reference to resolve once every label is known: at byte `off` of section `sec`, kind `kind`.
 struct Ref {
-    pub sec: u8,
-    pub off: u32,
-    pub kind: u8,
-    pub name: String,
-    pub addend: i64,
-    pub stmt: u32,
-    pub line: u32,
+    pub(package) sec: u8,
+    pub(package) off: u32,
+    pub(package) kind: u8,
+    pub(package) name: String,
+    pub(package) addend: i64,
+    pub(package) stmt: u32,
+    pub(package) line: u32,
 }
 
 // The call frame of a `.cfi_startproc`: its section, start, CFA offset and rules so far.
 struct Cfi {
-    pub open: bool,
-    pub sec: u8,
-    pub start: u64,
-    pub last: u64,
-    pub cfa: i64,
-    pub at: u32,
-    pub stack: Vector<i64>,
+    pub(package) open: bool,
+    pub(package) sec: u8,
+    pub(package) start: u64,
+    pub(package) last: u64,
+    pub(package) cfa: i64,
+    pub(package) at: u32,
+    pub(package) stack: Vector<i64>,
 }
 
-pub struct Asm {
-    pub isa: u8,
-    pub fmt: u8,
-    pub err: String,
+pub(package) struct Asm {
+    pub(package) isa: u8,
+    pub(package) fmt: u8,
+    pub(package) err: String,
     sec: u8,
     labels: Vector<Label>,
     refs: Vector<Ref>,
@@ -190,17 +190,17 @@ pub struct Asm {
 // its frame register and offset, and the codes in prologue order (`groups`: each one's first byte in
 // `codes`).
 struct Seh {
-    pub open: bool,
-    pub sec: u8,
-    pub start: u64,
-    pub prolog: u32,
-    pub frame: u8,
-    pub codes: Vector<u8>,
-    pub groups: Vector<u32>,
+    pub(package) open: bool,
+    pub(package) sec: u8,
+    pub(package) start: u64,
+    pub(package) prolog: u32,
+    pub(package) frame: u8,
+    pub(package) codes: Vector<u8>,
+    pub(package) groups: Vector<u32>,
 }
 
 extend Asm {
-    pub fn new(isa: u8, fmt: u8) Asm {
+    pub(package) fn new(isa: u8, fmt: u8) Asm {
         return Asm {
             isa: isa,
             fmt: fmt,
@@ -234,7 +234,7 @@ extend Asm {
     }
 
     /// Assemble `text` into `o`; false with `err` set when a statement does not assemble.
-    pub fn module(self: &mut Self, o: &mut ob::Obj, text: str) bool {
+    pub(package) fn module(self: &mut Self, o: &mut ob::Obj, text: str) bool {
         let mut sts = Vector::<Stmt>::new();
         statements(text, self.isa == ISA_X64, &mut sts);
         for k in 0..sts.len() {
@@ -1274,7 +1274,7 @@ extend Asm {
 }
 
 /// Append `v` to `o` as unsigned LEB128.
-pub fn uleb(o: &mut Vector<u8>, v0: u64) {
+pub(package) fn uleb(o: &mut Vector<u8>, v0: u64) {
     let mut v = v0;
     loop {
         let b = (v & 0x7F) as u8;
@@ -1288,7 +1288,7 @@ pub fn uleb(o: &mut Vector<u8>, v0: u64) {
 }
 
 /// Append `v` to `o` as signed LEB128.
-pub fn sleb(o: &mut Vector<u8>, v0: i64) {
+pub(package) fn sleb(o: &mut Vector<u8>, v0: i64) {
     let mut v = v0;
     loop {
         let b = (v & 0x7F) as u8;
@@ -1302,18 +1302,24 @@ pub fn sleb(o: &mut Vector<u8>, v0: i64) {
 }
 
 /// A symbol an inline template names: the word it is in, the relocation kind, the C name, the addend.
-pub struct InlRel {
-    pub at: u32,
-    pub kind: u8,
-    pub name: String,
-    pub addend: i64,
+pub(package) struct InlRel {
+    pub(package) at: u32,
+    pub(package) kind: u8,
+    pub(package) name: String,
+    pub(package) addend: i64,
 }
 
 extend Asm {
     /// Assemble the arm64 inline template `text` (operands substituted) into `words`; each symbol it names
     /// into `rels` (C names: `apple` spells them with a leading `_`). A label of the template resolves in
     /// place. False with `err` set when a statement does not assemble.
-    pub fn inline_a64(text: str, apple: bool, words: &mut Vector<u32>, rels: &mut Vector<InlRel>, err: &mut String) bool {
+    pub(package) fn inline_a64(
+        text: str,
+        apple: bool,
+        words: &mut Vector<u32>,
+        rels: &mut Vector<InlRel>,
+        err: &mut String,
+    ) bool {
         let mut sts = Vector::<Stmt>::new();
         statements(text, false, &mut sts);
         let mut a0 = Asm::new(
@@ -1419,7 +1425,7 @@ extend Asm {
     /// names into `rels` (`at`: its field's position in `code`). A label of the template resolves in
     /// place: a branch to one behind takes the shortest form, one to a label ahead 32 bits. False with
     /// `err` set when a statement does not assemble.
-    pub fn inline_x64(text: str, code: &mut Vector<u8>, rels: &mut Vector<InlRel>, err: &mut String) bool {
+    pub(package) fn inline_x64(text: str, code: &mut Vector<u8>, rels: &mut Vector<InlRel>, err: &mut String) bool {
         let mut sts = Vector::<Stmt>::new();
         statements(text, true, &mut sts);
         let mut a0 = Asm::new(ISA_X64, FMT_ELF);
@@ -1638,11 +1644,11 @@ const fn x64_dwarf(r: str) i64 {
 
 // A reference of an inline template: its word, kind, name, addend and statement.
 struct InlRef {
-    pub at: u32,
-    pub kind: u8,
-    pub name: String,
-    pub addend: i64,
-    pub stmt: u32,
+    pub(package) at: u32,
+    pub(package) kind: u8,
+    pub(package) name: String,
+    pub(package) addend: i64,
+    pub(package) stmt: u32,
 }
 
 // ---- wasm ----
@@ -1650,22 +1656,22 @@ struct InlRef {
 // A function of a wasm module-level block: its symbol's name, locals, code and the references to
 // resolve once every `.functype` is known.
 struct WasmFn {
-    pub name: String,
-    pub locals: Vector<u8>,
-    pub code: Vector<u8>,
-    pub fixes: Vector<wa::Fix>,
+    pub(package) name: String,
+    pub(package) locals: Vector<u8>,
+    pub(package) code: Vector<u8>,
+    pub(package) fixes: Vector<wa::Fix>,
 }
 
 // The type of a `.functype` name.
-pub struct WasmType {
-    pub name: String,
-    pub enc: Vector<u8>,
+pub(package) struct WasmType {
+    pub(package) name: String,
+    pub(package) enc: Vector<u8>,
 }
 
 /// The relocation of reference `fx` at byte `off` of a wasm body in object `o`; `types` gives the
 /// `.functype` of a name the object does not type yet. False with `err` set when the name has no type
 /// a call needs, or the reference has no relocation.
-pub fn wasm_reloc(
+pub(package) fn wasm_reloc(
     o: &mut wo::WObj,
     fx: &wa::Fix,
     off: u32,
@@ -1763,7 +1769,7 @@ const fn two_names<'a>(s: str<'a>, a: &mut str<'a>, b: &mut str<'a>) bool {
 /// Assemble wasm module-level `text` (LLVM's syntax: `.functype`, `.import_module`, `.import_name`,
 /// `.globl`, `.hidden`, functions from their label to `end_function`) into `o`. False with `err` set
 /// when a statement does not assemble.
-pub fn wasm_module(o: &mut wo::WObj, text: str, err: &mut String) bool {
+pub(package) fn wasm_module(o: &mut wo::WObj, text: str, err: &mut String) bool {
     let mut sts = Vector::<Stmt>::new();
     statements(text, true, &mut sts);
     let mut types = Vector::<WasmType>::new();

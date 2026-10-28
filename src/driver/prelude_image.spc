@@ -23,7 +23,7 @@ const IMAGE_VER: u64 = 4;
 
 /// The cache name of the prelude image for `p`'s settings, the constant-evaluation budgets and the
 /// type-table hash mode.
-pub fn key(p: &loader::Package, std_dir: str, target: i32, steps: u32, mem: u64) u64 {
+pub(package) fn key(p: &loader::Package, std_dir: str, target: i32, steps: u32, mem: u64) u64 {
     let mut h = skey_mix(FNV_BASIS, IMAGE_VER);
     h = mix_str(h, std_dir);
     h = mix_str(h, p.std_root.as_str());
@@ -54,7 +54,7 @@ const fn mix_str(h: u64, s: str) u64 {
 
 /// The compiler identity (`compiler_id`) the image cache keys on; 0 when the object cache is off (`cache`,
 /// the build's cache root, is empty), so a build without it does not hash the compiler.
-pub fn cache_id(cache: str) u64 {
+pub(package) fn cache_id(cache: str) u64 {
     if cache.len() == 0 {
         return 0;
     }
@@ -79,7 +79,7 @@ fn image_name(key: u64, cid: u64) String {
 
 /// The identity of directory `dir`'s listing (`loader::dir_listing`): its names in order, and whether it
 /// listed.
-pub fn dir_id(dir: str) u64 {
+pub(package) fn dir_id(dir: str) u64 {
     let mut names = Vector::<String>::new();
     let st = loader::dir_listing(dir, &mut names);
     return listing_id(st, &names);
@@ -99,11 +99,11 @@ const fn listing_id(st: u8, names: &Vector<String>) u64 {
 /// path of the compiler that checked it.
 @derive(Persist)
 struct Deps {
-    pub exe: String,
-    pub files: Vector<String>,
-    pub file_ids: Vector<u64>,
-    pub dirs: Vector<String>,
-    pub dir_ids: Vector<u64>,
+    pub(package) exe: String,
+    pub(package) files: Vector<String>,
+    pub(package) file_ids: Vector<u64>,
+    pub(package) dirs: Vector<String>,
+    pub(package) dir_ids: Vector<u64>,
 }
 
 // What `q` was checked from, as its load read it: a file edited or a directory changed during the check
@@ -172,7 +172,7 @@ fn deps_current(d: &Deps, ids: &mut Ids) bool {
 /// The state of `q` after its prelude stage (`driver::emit::check_prelude`) and the deferred checks of
 /// its engine `e`. The fields not saved are the settings the reader sets itself, caches, and the state
 /// later stages compute.
-pub fn save(q: &loader::Package, e: &iri::Interp) String {
+pub(package) fn save(q: &loader::Package, e: &iri::Interp) String {
     // A sizing pass first: the image is then written into one allocation of its size.
     let mut m = Writer::sizing();
     save_into(q, e, &mut m);
@@ -214,7 +214,7 @@ fn save_into(q: &loader::Package, e: &iri::Interp, w: &mut Writer) {
 /// Load image `img` (from `save`) into `p`, which holds no module yet, and its engine `e`; false when the
 /// image is cut short (`p` then holds a partial state the caller drops). The modules join `p`'s type
 /// table.
-pub fn load(p: &mut loader::Package, e: &mut iri::Interp, img: str) bool {
+pub(package) fn load(p: &mut loader::Package, e: &mut iri::Interp, img: str) bool {
     let mut r = Reader::new(img.ptr(), img.len());
     p.modules.load(&mut r);
     p.mod_index.load(&mut r);
@@ -261,7 +261,7 @@ fn header(key: u64, cid: u64, payload: &String) Writer {
 /// Store `img` in cache root `cache` under `key` for compiler `cid` (`compiler_id`) with the dependencies
 /// of `q`, the package that checked it from `std_dir`, whose listing had identity `std_id` (`dir_id`) before the load. A
 /// failed write only makes the next build check the prelude again.
-pub fn write(cache: str, key: u64, cid: u64, q: &loader::Package, std_dir: str, std_id: u64, img: &String) {
+pub(package) fn write(cache: str, key: u64, cid: u64, q: &loader::Package, std_dir: str, std_id: u64, img: &String) {
     let path = image_path(cache, key, cid);
     let mut w = header(key, cid, img);
     deps_of(q, std_dir, std_id).save(&mut w);
@@ -272,7 +272,7 @@ pub fn write(cache: str, key: u64, cid: u64, q: &loader::Package, std_dir: str, 
 
 /// The image file in cache root `cache` for `key` that compiler `cid` wrote and whose std files are
 /// current, and the offset of its payload (16-byte aligned, as `load` reads it); None when there is none.
-pub fn read(cache: str, key: u64, cid: u64, at: &mut usize) Option<String> {
+pub(package) fn read(cache: str, key: u64, cid: u64, at: &mut usize) Option<String> {
     let path = image_path(cache, key, cid);
     let body = loader::read_file(path.as_str());
     if body.is_none() {
@@ -314,8 +314,8 @@ const IMAGE_IDLE: i64 = 86400;
 
 // A live image: its file name and its last use.
 struct Kept {
-    pub name: String,
-    pub mt: i64,
+    pub(package) name: String,
+    pub(package) mt: i64,
 }
 
 const fn kept_newer(a: &Kept, b: &Kept) i32 {
@@ -333,7 +333,7 @@ const fn kept_newer(a: &Kept, b: &Kept) i32 {
 /// reader checks the prelude again); then those unused for IMAGE_IDLE before `now` beyond the IMAGE_KEEP
 /// most recently used, and temp files left for ocache::TMP_IDLE. It reads the head of each image
 /// (`HEAD_READ`), not its payload. A copy of a compiler that moved checks the prelude once more.
-pub fn sweep(root: str, now: i64) {
+pub(package) fn sweep(root: str, now: i64) {
     let dir = loader::join2(root, "prelude");
     let names = list_dir(dir.as_str(), false).unwrap_or(Vector::<String>::new());
     let mut ids = Ids::new();

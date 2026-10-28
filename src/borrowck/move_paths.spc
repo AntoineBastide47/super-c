@@ -7,31 +7,31 @@ import ir::core as ir;
 import utils::bits as bits;
 
 /// The absent move path.
-pub const MP_NONE: u32 = 0xFFFFFFFF;
+pub(package) const MP_NONE: u32 = 0xFFFFFFFF;
 
 /// One forest node: a local root or a field/downcast projection under `parent`.
-pub struct MovePath {
-    pub base: ir::LocalId,
-    pub parent: u32, // MP_NONE for a local root
-    pub first_child: u32,
-    pub next_sibling: u32,
-    pub elem: u64, // canonical projection element under `parent` (kind << 32 | data)
-    pub ty: TypeId,
+pub(package) struct MovePath {
+    pub(package) base: ir::LocalId,
+    pub(package) parent: u32, // MP_NONE for a local root
+    pub(package) first_child: u32,
+    pub(package) next_sibling: u32,
+    pub(package) elem: u64, // canonical projection element under `parent` (kind << 32 | data)
+    pub(package) ty: TypeId,
 }
 
 /// Move-path forest of one Core body, indexed by LocalId (roots) and PlaceId (tracked path or cut).
-pub struct MoveForest {
-    pub paths: Vector<MovePath>,
-    pub local_root: Vector<u32>, // per local: root path id (every local gets one)
-    pub place_path: Vector<u32>, // per PlaceId: exact tracked path, or MP_NONE (cut by deref/index)
-    pub place_cut: Vector<u32>, // per PlaceId: nearest tracked ANCESTOR path before the cut, or MP_NONE
+pub(package) struct MoveForest {
+    pub(package) paths: Vector<MovePath>,
+    pub(package) local_root: Vector<u32>, // per local: root path id (every local gets one)
+    pub(package) place_path: Vector<u32>, // per PlaceId: exact tracked path, or MP_NONE (cut by deref/index)
+    pub(package) place_cut: Vector<u32>, // per PlaceId: nearest tracked ANCESTOR path before the cut, or MP_NONE
     // Dense per-path mirrors of the two fields the event replay reads: the hot loops touch these
     // one-bit/4-byte rows instead of pulling a 32-byte MovePath record per event.
-    pub leaf: Vector<u64>, // bit per path: no tracked children
-    pub parent: Vector<u32>, // per path: parent id (MP_NONE for a root)
+    pub(package) leaf: Vector<u64>, // bit per path: no tracked children
+    pub(package) parent: Vector<u32>, // per path: parent id (MP_NONE for a root)
     // Bit per path: every member of its struct or tuple has a tracked child, so the path holds no
     // storage of its own. Zero after `build_into`; `Owner::mark_covered` sets it.
-    pub covered: Vector<u64>,
+    pub(package) covered: Vector<u64>,
 }
 
 // Named field identity lives in `sub` (the field decl node; `ir::field_data` drops an index some
@@ -43,7 +43,7 @@ const fn elem_key(kind: u8, data: u32, sub: u32) u64 {
 
 extend MoveForest {
     /// A forest with no paths and no heap storage; `build_into` fills it.
-    pub fn empty() MoveForest {
+    pub(package) fn empty() MoveForest {
         return MoveForest {
             paths: Vector::<MovePath>::new(),
             local_root: Vector::<u32>::new(),
@@ -57,7 +57,7 @@ extend MoveForest {
 
     /// Forest for body `b`; every local gets a root even when no place mentions it.
     /// Panics: more than 2^24 paths (the Event encoding packs a path id into 24 bits).
-    pub fn build(b: &ir::CoreBody) MoveForest {
+    pub(package) fn build(b: &ir::CoreBody) MoveForest {
         let mut f = MoveForest::empty();
         f.build_into(b);
         return f;
@@ -65,7 +65,7 @@ extend MoveForest {
 
     /// Rebuild in place for body `b`, keeping heap capacity across bodies.
     /// Panics: more than 2^24 paths.
-    pub fn build_into(self: &mut Self, b: &ir::CoreBody) {
+    pub(package) fn build_into(self: &mut Self, b: &ir::CoreBody) {
         let f = self;
         f.paths.truncate(0);
         f.local_root.truncate(0);
@@ -151,13 +151,13 @@ extend MoveForest {
 
     /// The existing child of `parent` naming field `fdecl` (member places carry field identity in
     /// `sub`), or MP_NONE when that field was never mentioned.
-    pub const fn field_child(self: &Self, parent: u32, fdecl: NodeId) u32 {
+    pub(package) const fn field_child(self: &Self, parent: u32, fdecl: NodeId) u32 {
         return self.find_child(parent, elem_key(ir::PJ_FIELD, ir::IR_NONE, fdecl));
     }
 
     /// The existing child of `parent` naming positional tuple member `idx` (member places carry the
     /// index in `data` and NODE_NONE in `sub`), or MP_NONE when it was never mentioned.
-    pub const fn tuple_child(self: &Self, parent: u32, idx: u32) u32 {
+    pub(package) const fn tuple_child(self: &Self, parent: u32, idx: u32) u32 {
         return self.find_child(parent, elem_key(ir::PJ_FIELD, idx, NODE_NONE));
     }
 
@@ -174,17 +174,17 @@ extend MoveForest {
     }
 
     /// Heap bytes the forest keeps across bodies.
-    pub const fn scratch_bytes(self: &Self) u64 {
+    pub(package) const fn scratch_bytes(self: &Self) u64 {
         return (self.paths.capacity() * sizeof(MovePath) + (self.local_root.capacity() + self.place_path.capacity() + self.place_cut.capacity() + self.parent.capacity()) * 4 + (self.leaf.capacity() + self.covered.capacity()) * 8) as u64;
     }
 
     /// True when `p` tracks no sub-places (its subtree is itself); a dense-bit read, replay-hot.
-    pub const fn is_leaf(self: &Self, p: u32) bool {
+    pub(package) const fn is_leaf(self: &Self, p: u32) bool {
         return bits::bit_get(&self.leaf, p);
     }
 
     /// Visit `p` and every descendant (iterative; `scratch` is the caller's reusable stack).
-    pub fn subtree(self: &Self, p: u32, scratch: &mut Vector<u32>, out: &mut Vector<u32>) {
+    pub(package) fn subtree(self: &Self, p: u32, scratch: &mut Vector<u32>, out: &mut Vector<u32>) {
         out.clear();
         // Leaf fast path (the common case): the subtree is the node itself, so skip the worklist DFS.
         if self.paths.at(p as usize).first_child == MP_NONE {

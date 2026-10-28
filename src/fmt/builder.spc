@@ -23,31 +23,31 @@ import ast::parser as par;
 import fmt::doc as d;
 
 /// Per-file formatter state: the doc pool, the AST being printed, and the source bytes trivia is read from.
-pub struct Builder<'a> {
-    pub p: d::DocPool<'a>,
-    pub ast: *const Ast,
-    pub src: str<'a>,
-    pub emitted_trivia: usize, // comment segments emitted (attrs are separate and not counted)
-    pub skipped: Vector<NodeId>, // owners of @fmt.skip, sorted
-    pub attr_args: Vector<u64>, // constant-expression attribute arguments: `attrs` index by source start, sorted
+pub(package) struct Builder<'a> {
+    pub(package) p: d::DocPool<'a>,
+    pub(package) ast: *const Ast,
+    pub(package) src: str<'a>,
+    pub(package) emitted_trivia: usize, // comment segments emitted (attrs are separate and not counted)
+    pub(package) skipped: Vector<NodeId>, // owners of @fmt.skip, sorted
+    pub(package) attr_args: Vector<u64>, // constant-expression attribute arguments: `attrs` index by source start, sorted
     // Scratch stack of child docs shared by every b_* call: a call records the stack length as its mark,
     // pushes its parts, and `cat(mark)` concatenates and pops them, so one vector serves the whole file.
-    pub st: Vector<d::DocId>,
-    pub bin_spine: Vector<NodeId>, // `b_expr`'s stack of left-nested binary nodes (shared by nested calls)
-    pub cond_lits: Vector<NodeId>, // struct literals `b_cond` parenthesizes: outside every delimiter of a condition
+    pub(package) st: Vector<d::DocId>,
+    pub(package) bin_spine: Vector<NodeId>, // `b_expr`'s stack of left-nested binary nodes (shared by nested calls)
+    pub(package) cond_lits: Vector<NodeId>, // struct literals `b_cond` parenthesizes: outside every delimiter of a condition
 }
 
 struct TriviaSeg {
-    pub start: u32,
-    pub end: u32,
-    pub trailing: bool, // began before the gap's first newline: belongs to the previous element
-    pub is_attr: bool,
-    pub blank_before: bool, // a blank line separated this segment from what precedes it
+    pub(package) start: u32,
+    pub(package) end: u32,
+    pub(package) trailing: bool, // began before the gap's first newline: belongs to the previous element
+    pub(package) is_attr: bool,
+    pub(package) blank_before: bool, // a blank line separated this segment from what precedes it
 }
 
 /// Build and render the whole program. Returns the number of comment segments emitted (the caller
 /// checks it against the lexer's comment-token count and refuses to write on a mismatch).
-pub fn format_program(ast: *const Ast, source: str, width: i32, out: &mut String) usize {
+pub(package) fn format_program(ast: *const Ast, source: str, width: i32, out: &mut String) usize {
     let root = unsafe (*ast).root;
     // The @fmt.skip owners, collected once: one attribute scan per file, a binary search per item.
     let mut skipped = Vector::<NodeId>::new();
@@ -95,12 +95,12 @@ pub fn format_program(ast: *const Ast, source: str, width: i32, out: &mut String
 }
 
 /// Precedence ladder for parenthesis re-insertion; binary operators use Parser::precedence (2..11).
-pub const PREC_ASSIGN: i32 = 0;
-pub const PREC_RANGE: i32 = 1;
-pub const PREC_CAST: i32 = 12; // `as`: looser than prefix ops, tighter than any binary op (parser binary max = 11)
-pub const PREC_UNARY: i32 = 13;
-pub const PREC_POSTFIX: i32 = 14;
-pub const PREC_PRIMARY: i32 = 20;
+pub(package) const PREC_ASSIGN: i32 = 0;
+pub(package) const PREC_RANGE: i32 = 1;
+pub(package) const PREC_CAST: i32 = 12; // `as`: looser than prefix ops, tighter than any binary op (parser binary max = 11)
+pub(package) const PREC_UNARY: i32 = 13;
+pub(package) const PREC_POSTFIX: i32 = 14;
+pub(package) const PREC_PRIMARY: i32 = 20;
 
 extend Builder {
     const fn nd(self: &Self, id: NodeId) Node {

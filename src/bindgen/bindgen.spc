@@ -36,29 +36,29 @@ const TK_STR: i32 = 4;
 // A token cursor over preprocessed C. Line markers are consumed by the scanner itself and published as
 // `file`, so the parser never sees a directive and always knows the declaration's origin.
 struct Lexer<'a> {
-    pub src: str<'a>,
-    pub pos: usize,
-    pub kind: i32,
-    pub start: usize,
-    pub end: usize,
-    pub file: String, // the `# <line> "<file>"` most recently passed
+    pub(package) src: str<'a>,
+    pub(package) pos: usize,
+    pub(package) kind: i32,
+    pub(package) start: usize,
+    pub(package) end: usize,
+    pub(package) file: String, // the `# <line> "<file>"` most recently passed
     /// The vector attribute the declaration being read carries: its bytes (`vector_size`), minus its
     /// lanes (`neon_vector_type`, `ext_vector_type`), 0 for none.
-    pub vec: i64,
-    pub lay_attr: bool, // a `packed` or `aligned` attribute passed since the record body being read began
+    pub(package) vec: i64,
+    pub(package) lay_attr: bool, // a `packed` or `aligned` attribute passed since the record body being read began
     /// The `packed` and `aligned(N)` attributes passed since `parse_specs` reset them, and whether one of
     /// another form (`aligned` without a value) passed: a record's own attributes (`apply_attrs`).
-    pub a_packed: bool,
-    pub a_align: u32,
-    pub a_unknown: bool,
+    pub(package) a_packed: bool,
+    pub(package) a_align: u32,
+    pub(package) a_unknown: bool,
     /// The packing of the records after the `#pragma pack` lines passed (`pragma_pack`): the value as written
     /// (empty: none), the values `push` saved, and whether a line of another form passed (no record's
     /// layout then follows from its members alone).
-    pub pack: String,
-    pub pack_stack: Vector<String>,
-    pub pack_unknown: bool,
-    pub rec_depth: u32, // the record bodies being read
-    pub anon_n: u32, // the nameless records defined in a member so far (`parse_specs`)
+    pub(package) pack: String,
+    pub(package) pack_stack: Vector<String>,
+    pub(package) pack_unknown: bool,
+    pub(package) rec_depth: u32, // the record bodies being read
+    pub(package) anon_n: u32, // the nameless records defined in a member so far (`parse_specs`)
 }
 
 const fn is_id_start(c: u8) bool {
@@ -280,11 +280,11 @@ const MAX_PTR: usize = 8;
 // a bit per level saying whether THAT level's pointee is const (bit 0 is the base's own `const`). A
 // function pointer carries its rendered Super-C signature instead, since `fn(..) T` is already a pointer.
 struct CType {
-    pub base: String,
-    pub ptr: usize,
-    pub qual: u32,
-    pub fnsig: String, // non-empty => this is a function pointer and `base`/`ptr` are unused
-    pub ok: bool,
+    pub(package) base: String,
+    pub(package) ptr: usize,
+    pub(package) qual: u32,
+    pub(package) fnsig: String, // non-empty => this is a function pointer and `base`/`ptr` are unused
+    pub(package) ok: bool,
 }
 
 fn ctype_new() CType {
@@ -354,11 +354,11 @@ fn wellknown(name: str, out: &mut String) bool {
 
 // Widths the target's predefined macros report, so `long` and friends map by measurement.
 struct Widths {
-    pub short_b: i32,
-    pub int_b: i32,
-    pub long_b: i32,
-    pub llong_b: i32,
-    pub ptr_b: i32,
+    pub(package) short_b: i32,
+    pub(package) int_b: i32,
+    pub(package) long_b: i32,
+    pub(package) llong_b: i32,
+    pub(package) ptr_b: i32,
 }
 
 fn int_name(bytes: i32, signed: bool, out: &mut String) {
@@ -380,30 +380,30 @@ fn int_name(bytes: i32, signed: bool, out: &mut String) {
 }
 
 struct Param {
-    pub name: String,
-    pub ty: String,
+    pub(package) name: String,
+    pub(package) ty: String,
 }
 
 struct FnDecl {
-    pub name: String,
-    pub params: Vector<Param>,
-    pub ret: String,
-    pub variadic: bool,
+    pub(package) name: String,
+    pub(package) params: Vector<Param>,
+    pub(package) ret: String,
+    pub(package) variadic: bool,
 }
 
 struct Alias {
-    pub name: String, // the C typedef / struct tag
-    pub sub: String, // what it maps to in Super-C ("" while it is an opaque tag)
-    pub opaque: bool,
+    pub(package) name: String, // the C typedef / struct tag
+    pub(package) sub: String, // what it maps to in Super-C ("" while it is an opaque tag)
+    pub(package) opaque: bool,
     /// False when the typedef's own type could not be modelled. Carried so that a signature spelled with
     /// it is dropped too: the alias table would otherwise launder an unknown C type into a plausible name.
-    pub ok: bool,
+    pub(package) ok: bool,
 }
 
 struct Field {
-    pub name: String, // the C member's name
-    pub ty: String,
-    pub bits: i32, // a bitfield's width, -1 for another member
+    pub(package) name: String, // the C member's name
+    pub(package) ty: String,
+    pub(package) bits: i32, // a bitfield's width, -1 for another member
 }
 
 // A struct or union DEFINED in the target header. `ok` is false as soon as one member has no faithful
@@ -412,79 +412,79 @@ struct Field {
 // `tagless`: the body had no tag, so `tag` is the typedef that names it (`typedef struct { .. } Foo;`).
 // `attr`: a `packed` or `aligned` attribute or a `#pragma pack` may move its members (`c_layout`).
 struct Record {
-    pub tag: String,
-    pub fields: Vector<Field>,
-    pub is_union: bool,
-    pub ok: bool,
-    pub mine: bool,
-    pub tagless: bool,
-    pub attr: bool,
-    pub pack: u32, // the `#pragma pack` value its members' alignment is capped at, 0 for none
-    pub anon: bool, // an anonymous struct or union member: a field named "" (`find_member`)
-    pub bitf: bool, // a bitfield member
-    pub packed: bool, // `__attribute__((packed))`: every member aligned to 1
-    pub aligned: u32, // `__attribute__((aligned(N)))`: the alignment at least, 0 for none
+    pub(package) tag: String,
+    pub(package) fields: Vector<Field>,
+    pub(package) is_union: bool,
+    pub(package) ok: bool,
+    pub(package) mine: bool,
+    pub(package) tagless: bool,
+    pub(package) attr: bool,
+    pub(package) pack: u32, // the `#pragma pack` value its members' alignment is capped at, 0 for none
+    pub(package) anon: bool, // an anonymous struct or union member: a field named "" (`find_member`)
+    pub(package) bitf: bool, // a bitfield member
+    pub(package) packed: bool, // `__attribute__((packed))`: every member aligned to 1
+    pub(package) aligned: u32, // `__attribute__((aligned(N)))`: the alignment at least, 0 for none
 }
 
 struct EnumVal {
-    pub name: String,
-    pub value: i64,
+    pub(package) name: String,
+    pub(package) value: i64,
 }
 
 // A C enum. A TAGGED one becomes a Super-C `enum` (its tag is a type a signature can name); an anonymous
 // one is the "block of constants" idiom and becomes plain consts, which is how C code uses it.
 // `tagless`: the body had no tag, so `tag` is the typedef that names it (`typedef enum { .. } Foo;`).
 struct EnumDef {
-    pub tag: String,
-    pub vals: Vector<EnumVal>,
-    pub ok: bool,
-    pub mine: bool,
-    pub tagless: bool,
+    pub(package) tag: String,
+    pub(package) vals: Vector<EnumVal>,
+    pub(package) ok: bool,
+    pub(package) mine: bool,
+    pub(package) tagless: bool,
 }
 
 struct ConstDef {
-    pub name: String,
-    pub ty: String,
-    pub value: String,
-    pub mutable: bool, // a global whose C declaration is not const: bound as `static mut`
+    pub(package) name: String,
+    pub(package) ty: String,
+    pub(package) value: String,
+    pub(package) mutable: bool, // a global whose C declaration is not const: bound as `static mut`
 }
 
 // Everything the parse produced: the type environment (every typedef in the whole translation unit, since
 // the target header's signatures are spelled with them) and the declarations from the target header alone.
 struct Collected {
-    pub aliases: Vector<Alias>,
-    pub fns: Vector<FnDecl>,
-    pub opaques: Vector<String>, // struct tags reached only through a pointer -> `pub type X;`
-    pub records: Vector<Record>,
-    pub enums: Vector<EnumDef>,
-    pub consts: Vector<ConstDef>, // anonymous-enum constants, then object-like macros
-    pub globals: Vector<ConstDef>, // `extern` variables the library exports
-    pub widths: Widths,
-    pub cur_mine: bool, // whether the declaration being parsed comes from the target header
+    pub(package) aliases: Vector<Alias>,
+    pub(package) fns: Vector<FnDecl>,
+    pub(package) opaques: Vector<String>, // struct tags reached only through a pointer -> `pub type X;`
+    pub(package) records: Vector<Record>,
+    pub(package) enums: Vector<EnumDef>,
+    pub(package) consts: Vector<ConstDef>, // anonymous-enum constants, then object-like macros
+    pub(package) globals: Vector<ConstDef>, // `extern` variables the library exports
+    pub(package) widths: Widths,
+    pub(package) cur_mine: bool, // whether the declaration being parsed comes from the target header
     /// The anonymous struct/union/enum body parsed last, waiting for the typedef that names it
     /// (`typedef struct { .. } Foo;` is how most C libraries declare their types). -1 when there is none.
-    pub pending_agg: i32,
-    pub pending_is_enum: bool,
-    pub saw_extern: bool, // the declaration being parsed carried `extern`: a variable, not a definition
+    pub(package) pending_agg: i32,
+    pub(package) pending_is_enum: bool,
+    pub(package) saw_extern: bool, // the declaration being parsed carried `extern`: a variable, not a definition
     /// Functions from the target header whose signature this tool could not model. Reported rather than
     /// swallowed: a binding file that is quietly short is worse than one that says what it left out.
-    pub skipped: usize,
+    pub(package) skipped: usize,
     /// Object-like macros of the `-dM` dump: name -> offsets of the replacement text in the dump
     /// (start << 32 | end). Built once, so a lookup does not rescan the dump.
-    pub macros: Map<String, u64>,
+    pub(package) macros: Map<String, u64>,
     /// The `static` functions of every origin: no object exports them.
-    pub statics: Set<String>,
+    pub(package) statics: Set<String>,
     /// The target lays bitfields out the Microsoft way (`rec_layout`): Windows.
-    pub ms_bitfields: bool,
+    pub(package) ms_bitfields: bool,
     /// For `header_facts`: every function declaration of every origin, the first of each name (`proto_ix`).
-    pub all_protos: bool,
-    pub protos: Vector<FnDecl>,
-    pub proto_ix: Map<String, u32>,
+    pub(package) all_protos: bool,
+    pub(package) protos: Vector<FnDecl>,
+    pub(package) proto_ix: Map<String, u32>,
     /// For `header_facts`: per name every origin declares as an `extern` object, its type (`?` when this
     /// tool cannot model it).
-    pub objs: Map<String, String>,
-    pub alias_ix: Map<String, u32>, // per alias name, its index in `aliases`
-    pub opaque_set: Set<String>, // the names in `opaques`
+    pub(package) objs: Map<String, String>,
+    pub(package) alias_ix: Map<String, u32>, // per alias name, its index in `aliases`
+    pub(package) opaque_set: Set<String>, // the names in `opaques`
 }
 
 // Vendor noise that carries no meaning for a binding. `__attribute__`, `__declspec` and `asm` take a
@@ -679,7 +679,7 @@ fn preprocess(
 /// The C environment of target `target` and `arch` under `sysroot` (`ct::c_target`; empty: discover it)
 /// with the C flags `flags` (`ct::apply_c_flags`) into `env`; false when the target has none or a flag
 /// does not apply.
-pub fn header_env(target: i32, arch: i32, sysroot: str, flags: str, env: &mut ct::CTarget) bool {
+pub(package) fn header_env(target: i32, arch: i32, sysroot: str, flags: str, env: &mut ct::CTarget) bool {
     return ct::c_target(target, arch, sysroot, env) && ct::apply_c_flags(flags, env);
 }
 
@@ -698,7 +698,7 @@ pub fn header_env(target: i32, arch: i32, sysroot: str, flags: str, env: &mut ct
 /// `|<member>` per member it names), its facts (`afacts`, `agg_facts`), and per type of `shape_of`, its
 /// shape (`shapes`, `c_shape`). `read` takes the
 /// files the preprocessor read. False when the header does not preprocess.
-pub fn header_facts(
+pub(package) fn header_facts(
     env: &ct::CTarget,
     pre: str,
     names: []str,
@@ -1444,26 +1444,26 @@ const HF_BEGIN: str = "__sc_hf_begin";
 const HF_SEP: str = "__sc_hf_sep";
 
 /// `scalar_class`: typedef `name` is not a scalar (a record, `long double`, unknown).
-pub const SC_NONE: u8 = b'0';
+pub(package) const SC_NONE: u8 = b'0';
 /// `scalar_class`: an integer or a pointer.
-pub const SC_INT: u8 = b'i';
+pub(package) const SC_INT: u8 = b'i';
 /// `scalar_class`: a `float`.
-pub const SC_F32: u8 = b'f';
+pub(package) const SC_F32: u8 = b'f';
 /// `scalar_class`: a `double`.
-pub const SC_F64: u8 = b'd';
+pub(package) const SC_F64: u8 = b'd';
 /// `scalar_class`: a vector of 8-, 16-, 32- or 64-bit integers, of `float`s or of `double`s.
-pub const SC_V8: u8 = b'B';
-pub const SC_V16: u8 = b'H';
-pub const SC_V32: u8 = b'W';
-pub const SC_V64: u8 = b'Q';
-pub const SC_VF32: u8 = b'F';
-pub const SC_VF64: u8 = b'D';
+pub(package) const SC_V8: u8 = b'B';
+pub(package) const SC_V16: u8 = b'H';
+pub(package) const SC_V32: u8 = b'W';
+pub(package) const SC_V64: u8 = b'Q';
+pub(package) const SC_VF32: u8 = b'F';
+pub(package) const SC_VF64: u8 = b'D';
 /// `scalar_class`: a struct of 128-bit vectors only (`arm_neon.h`'s `uint8x16x2_t`), which a calling
 /// convention passes as that many vectors.
-pub const SC_VTUPLE: u8 = b'T';
+pub(package) const SC_VTUPLE: u8 = b'T';
 /// A struct or union of scalars: `header_facts` gives its layout as `<size> <align>` and its leaves, each
 /// ` <offset><code>` (`c_layout`).
-pub const SC_REC: u8 = b'R';
+pub(package) const SC_REC: u8 = b'R';
 
 // The bytes of vector type `name` (`record_vector`'s `i8x16`) through its typedefs; 0 for another type.
 fn vec_bytes(c: &Collected, name: str) u32 {
@@ -1639,16 +1639,16 @@ const fn macro_int(line: str) i32 {
 // rather than guessing, because a constant that is subtly wrong is worse than absent.
 
 struct CExpr<'a> {
-    pub lx: Lexer<'a>,
-    pub ok: bool,
+    pub(package) lx: Lexer<'a>,
+    pub(package) ok: bool,
 }
 
 // A value of a C integer constant expression: its bits `v` in a type `bits` wide (32 or 64, after the
 // integer promotions; the bits above zero), unsigned when `uns`.
 struct CV {
-    pub v: u64,
-    pub bits: u32,
-    pub uns: bool,
+    pub(package) v: u64,
+    pub(package) bits: u32,
+    pub(package) uns: bool,
 }
 
 const CE_DEPTH: i32 = 8;
@@ -2558,9 +2558,9 @@ fn write_out(text: str, out_path: str, nfns: usize, skipped: usize) i32 {
 // One header to convert: where it is, how the generated module spells its `#include`, and where the
 // result goes.
 struct Job {
-    pub path: String,
-    pub spelling: String,
-    pub out: String,
+    pub(package) path: String,
+    pub(package) spelling: String,
+    pub(package) out: String,
 }
 
 fn join_path(a: str, b: str) String {
@@ -2647,7 +2647,7 @@ fn walk_headers(dir: str, rel: str, out_dir: str, jobs: &mut Vector<Job>) bool {
 /// `super-c bindgen <header.h|dir>... [-o out]`. A directory is walked recursively for `.h` files, so a
 /// whole library's include tree converts in one call: `-o` then names a DIRECTORY, and the tree under it
 /// mirrors the headers'. A single header with no `-o` still writes to stdout.
-pub fn run(
+pub(package) fn run(
     paths: &Vector<String>,
     out_path: str,
     link: str,

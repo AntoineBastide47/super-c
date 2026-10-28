@@ -15,9 +15,9 @@ import target::table as tgt;
 import utils::errors as diag;
 import ir::cpu_features as cf;
 
-pub const PARSE_MAX_DEPTH: u32 = 256;
+pub(package) const PARSE_MAX_DEPTH: u32 = 256;
 
-pub enum RangeContext {
+pub(package) enum RangeContext {
     RANGE_FOR,
     RANGE_PATTERN,
     RANGE_EXPR,
@@ -33,57 +33,57 @@ enum ExpressionGrammar {
 // Attribute arguments are captured as a raw token RANGE (arg_start..arg_end), never parsed here:
 // each attribute interprets its own slice, so new attr forms need no grammar changes.
 struct AttrSyntax {
-    pub namespace: Token,
-    pub name: Token,
-    pub parts: u32,
-    pub has_args: bool,
-    pub arg_start: usize,
-    pub arg_end: usize,
-    pub expr: NodeId, // the constant-expression arguments (`attr_expr_args`), NODE_NONE otherwise
+    pub(package) namespace: Token,
+    pub(package) name: Token,
+    pub(package) parts: u32,
+    pub(package) has_args: bool,
+    pub(package) arg_start: usize,
+    pub(package) arg_end: usize,
+    pub(package) expr: NodeId, // the constant-expression arguments (`attr_expr_args`), NODE_NONE otherwise
 }
 
-pub struct Parser<'a> {
-    pub source: str<'a>,
-    pub tokens: Vector<Token>,
-    pub current: usize,
-    pub depth: u32,
-    pub ast: Ast,
-    pub file: str<'a>,
-    pub errors: diag::Errors,
-    pub bootstrap_tags: bool, // accept unknown @attributes without error (bootstrap across a new tag)
+pub(package) struct Parser<'a> {
+    pub(package) source: str<'a>,
+    pub(package) tokens: Vector<Token>,
+    pub(package) current: usize,
+    pub(package) depth: u32,
+    pub(package) ast: Ast,
+    pub(package) file: str<'a>,
+    pub(package) errors: diag::Errors,
+    pub(package) bootstrap_tags: bool, // accept unknown @attributes without error (bootstrap across a new tag)
     // Named-return context of the function body being parsed (the signature's NODE_PARAMETER return
     // entries): a bare `return;` inside it desugars to returning these bindings. Cleared for closure
     // bodies (closures have their own return list and no named-return support).
-    pub nrets: Vector<NodeId>,
+    pub(package) nrets: Vector<NodeId>,
     // `@derive(I, ..)` pending on the next item: the interface type nodes parsed from the attribute's
     // token range, expanded into empty `extend T as I {}` siblings when the struct/enum arrives.
     // `expand_derive` is off for the FORMATTER only -- it prints the attribute text verbatim and must
     // not see the synthesized extends.
-    pub derive_ifaces: Vector<NodeId>,
-    pub derive_start: u32,
-    pub derive_end: u32,
-    pub expand_derive: bool,
+    pub(package) derive_ifaces: Vector<NodeId>,
+    pub(package) derive_start: u32,
+    pub(package) derive_end: u32,
+    pub(package) expand_derive: bool,
     // `@reflect(key = value, ..)` entries pending on the next declaration; flushed with the owner
     // by add_attrs_to (struct/enum/field/variant/function only -- anything else is an error).
-    pub pending_metas: Vector<MetaAttr>,
+    pub(package) pending_metas: Vector<MetaAttr>,
     /// Bodies parsed while set stay in the module arena: interface members and the members of a
     /// generic `extend` (see `Ast.b`).
-    pub pin_scope: bool,
+    pub(package) pin_scope: bool,
     // Associated type bindings (`Output = T`) read by `parse_type_args` and not yet taken by the type
     // path they belong to (`take_bindings`).
-    pub bind_buf: Vector<NodeId>,
+    pub(package) bind_buf: Vector<NodeId>,
     // The attributes just parsed hold `@intrinsic`: the next function takes no body.
-    pub intrinsic_next: bool,
+    pub(package) intrinsic_next: bool,
     // Parsing the items of an `extern` block.
-    pub in_extern: bool,
+    pub(package) in_extern: bool,
     // Per node (`paren_key`): the parenthesized expression's text with its parentheses (`start << 32 |
     // end`, 0 when none). The node keeps its own span, which the formatter prints verbatim; a node built around it
     // covers the parentheses (`outer`).
-    pub parens: Vector<u64>,
+    pub(package) parens: Vector<u64>,
 }
 
 extend Parser {
-    pub fn new<'a>(tokens: Vector<Token>, source: str<'a>, file: str<'a>) Parser<'a> {
+    pub(package) fn new<'a>(tokens: Vector<Token>, source: str<'a>, file: str<'a>) Parser<'a> {
         let token_count = tokens.len();
         return Parser {
             source: source,
@@ -100,33 +100,33 @@ extend Parser {
         };
     }
 
-    pub const fn set_bootstrap_tags(self: &mut Self, v: bool) {
+    pub(package) const fn set_bootstrap_tags(self: &mut Self, v: bool) {
         self.bootstrap_tags = v;
     }
 
-    pub fn take_tokens(self: &mut Self) Vector<Token> {
+    pub(package) fn take_tokens(self: &mut Self) Vector<Token> {
         let t = replace(&mut self.tokens, Vector::<Token>::new());
         return t;
     }
 
-    pub fn take_ast(self: &mut Self) Ast {
+    pub(package) fn take_ast(self: &mut Self) Ast {
         let out = replace(&mut self.ast, Ast::new(0));
         return out;
     }
 
-    pub const fn raw_peek(self: &Self) Token {
+    pub(package) const fn raw_peek(self: &Self) Token {
         return self.tokens[self.current];
     }
 
-    pub const fn peek_type(self: &Self) TokenType {
+    pub(package) const fn peek_type(self: &Self) TokenType {
         return self.raw_peek().kind();
     }
 
-    pub const fn at_end(self: &Self) bool {
+    pub(package) const fn at_end(self: &Self) bool {
         return self.peek_type() == TokenType::Eof;
     }
 
-    pub const fn advance(self: &mut Self) Token {
+    pub(package) const fn advance(self: &mut Self) Token {
         let t = self.raw_peek();
         if t.kind() != TokenType::Eof {
             self.current = self.current + 1;
@@ -134,11 +134,11 @@ extend Parser {
         return t;
     }
 
-    pub const fn check(self: &Self, kind: TokenType) bool {
+    pub(package) const fn check(self: &Self, kind: TokenType) bool {
         return self.peek_type() == kind;
     }
 
-    pub const fn text_is(self: &Self, t: Token, s: str) bool {
+    pub(package) const fn text_is(self: &Self, t: Token, s: str) bool {
         let sl = s.len();
         return t.len() as usize == sl && unsafe cstring::memcmp(
             unsafe (self.source.ptr() + t.start() as usize),
@@ -147,7 +147,7 @@ extend Parser {
         ) == 0;
     }
 
-    pub const fn match(self: &mut Self, kind: TokenType) bool {
+    pub(package) const fn match(self: &mut Self, kind: TokenType) bool {
         if !self.check(kind) {
             return false;
         }
@@ -157,7 +157,7 @@ extend Parser {
 
     // A visibility modifier: none, `pub`, or `pub(file)`, `pub(module)`, `pub(package)`. `pub(file)` is a field
     // level only: on an item it is the default, an error.
-    pub fn parse_vis(self: &mut Self, field: bool) u8 {
+    pub(package) fn parse_vis(self: &mut Self, field: bool) u8 {
         if !self.match(TokenType::Pub) {
             return VIS_PRIVATE;
         }
@@ -184,7 +184,7 @@ extend Parser {
         return v;
     }
 
-    pub const fn previous_end(self: &Self) u32 {
+    pub(package) const fn previous_end(self: &Self) u32 {
         if self.current != 0 {
             return self.tokens[self.current - 1].end();
         }
@@ -203,7 +203,7 @@ extend Parser {
         return self.mk(kind, Span::new(start, self.previous_end()), data);
     }
 
-    pub const fn node_span(self: &Self, id: NodeId) Span {
+    pub(package) const fn node_span(self: &Self, id: NodeId) Span {
         if id == NODE_NONE {
             return Span::empty();
         }
@@ -236,7 +236,7 @@ extend Parser {
     }
 
     @cold
-    pub fn error_here(self: &mut Self, message: str) {
+    pub(package) fn error_here(self: &mut Self, message: str) {
         let t = self.raw_peek();
         self.errors.emit_span(t.span(), String::from_str(message));
     }
@@ -248,27 +248,27 @@ extend Parser {
         return false;
     }
 
-    pub fn expect(self: &mut Self, kind: TokenType, display: str) bool {
+    pub(package) fn expect(self: &mut Self, kind: TokenType, display: str) bool {
         if self.match(kind) {
             return true;
         }
         return self.expect_fail(display);
     }
 
-    pub fn consume_type_gt(self: &mut Self) bool {
+    pub(package) fn consume_type_gt(self: &mut Self) bool {
         return self.expect(TokenType::GreaterThan, "'>'");
     }
 
-    pub const fn is_type_start(kind: TokenType) bool {
+    pub(package) const fn is_type_start(kind: TokenType) bool {
         return Parser::is_identifier_token(kind) || kind == TokenType::SelfUpper || kind == TokenType::Star || kind == TokenType::Ampersand || kind == TokenType::AmpersandAmpersand || kind == TokenType::LeftBracket || kind == TokenType::Fn || kind == TokenType::For;
     }
 
-    pub const fn is_identifier_token(kind: TokenType) bool {
+    pub(package) const fn is_identifier_token(kind: TokenType) bool {
         return kind == TokenType::Identifier || kind == TokenType::Underscore || kind == TokenType::Static || kind == TokenType::StaticAssert || kind == TokenType::VaStart || kind == TokenType::VaArg || kind == TokenType::VaEnd;
     }
 
     @always_inline
-    pub fn identifier(self: &mut Self) NodeId {
+    pub(package) fn identifier(self: &mut Self) NodeId {
         if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::SelfUpper) {
             return self.error_skip("expected identifier");
         }
@@ -280,7 +280,7 @@ extend Parser {
     // surface syntax and `label_ahead` already separates `'a` from the char literal `'a'`), so a
     // `Label` appearing in a type / generic-param / generic-arg / bound slot IS a lifetime -- a
     // `Label` can begin none of those otherwise, which keeps every use site single-token LL(1).
-    pub fn parse_lifetime(self: &mut Self) NodeId {
+    pub(package) fn parse_lifetime(self: &mut Self) NodeId {
         if !self.check(TokenType::Label) {
             self.error_here("expected a lifetime");
             return NODE_NONE;
@@ -292,7 +292,7 @@ extend Parser {
     // The outlives bounds of a LIFETIME param: `'a: 'b + 'c`. These can only ever be lifetimes, so
     // after a `+` we parse one unconditionally -- no lookahead past the `+` is needed (a type
     // param's mixed `T: 'a + Iface` list goes through parse_bounds/parse_bound instead).
-    pub fn parse_lifetime_bounds(self: &mut Self) NodeList {
+    pub(package) fn parse_lifetime_bounds(self: &mut Self) NodeList {
         let mark = self.ast.mark();
         self.ast.push(self.parse_lifetime());
         while self.match(TokenType::Plus) {
@@ -302,7 +302,7 @@ extend Parser {
     }
 
     @always_inline
-    pub fn callable_name(self: &mut Self) NodeId {
+    pub(package) fn callable_name(self: &mut Self) NodeId {
         if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::SelfUpper) {
             return self.error_skip("expected identifier");
         }
@@ -310,7 +310,7 @@ extend Parser {
         return self.make_name(token.span());
     }
 
-    pub fn literal(self: &mut Self) NodeId {
+    pub(package) fn literal(self: &mut Self) NodeId {
         let token = self.advance();
         return self.mk(
             NodeKind::NODE_LITERAL,
@@ -375,7 +375,7 @@ extend Parser {
         return self.fin(NodeKind::NODE_INTERP, start, NodeAs { block: BlockData { statements: kids } });
     }
 
-    pub fn parse_comma_types(self: &mut Self, close: TokenType) NodeList {
+    pub(package) fn parse_comma_types(self: &mut Self, close: TokenType) NodeList {
         let mark = self.ast.mark();
         while !self.check(close) && !self.at_end() {
             let ty = self.parse_type();
@@ -387,7 +387,7 @@ extend Parser {
         return self.ast.commit(mark);
     }
 
-    pub fn parse_type_args(self: &mut Self) NodeList {
+    pub(package) fn parse_type_args(self: &mut Self) NodeList {
         self.expect(TokenType::LessThan, "'<'");
         let mark = self.ast.mark();
         while !self.check(TokenType::GreaterThan) && !self.at_end() {
@@ -448,7 +448,7 @@ extend Parser {
         return self.ast.commit(mark);
     }
 
-    pub fn parse_type_path_after(self: &mut Self, head: NodeId, start: u32) NodeId {
+    pub(package) fn parse_type_path_after(self: &mut Self, head: NodeId, start: u32) NodeId {
         let mark = self.ast.mark();
         self.ast.push(head);
         while self.match(TokenType::PathSeparator) {
@@ -530,14 +530,14 @@ extend Parser {
         );
     }
 
-    pub fn parse_type_path(self: &mut Self) NodeId {
+    pub(package) fn parse_type_path(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         let head = self.identifier();
         return self.parse_type_path_after(head, start);
     }
 
     // Cast targets take no generic args: '<' after 'x as T' must remain the comparison operator.
-    pub fn parse_cast_type(self: &mut Self) NodeId {
+    pub(package) fn parse_cast_type(self: &mut Self) NodeId {
         if !Parser::is_identifier_token(self.peek_type()) && !self.check(TokenType::SelfUpper) {
             return self.parse_type();
         }
@@ -554,7 +554,7 @@ extend Parser {
         );
     }
 
-    pub const fn parse_qualifier(self: &mut Self) TypeQualifier {
+    pub(package) const fn parse_qualifier(self: &mut Self) TypeQualifier {
         if self.match(TokenType::Const) {
             return TypeQualifier::TYPE_QUAL_CONST;
         }
@@ -575,7 +575,7 @@ extend Parser {
         return inner;
     }
 
-    pub fn parse_type(self: &mut Self) NodeId {
+    pub(package) fn parse_type(self: &mut Self) NodeId {
         if self.depth >= PARSE_MAX_DEPTH {
             return self.error_skip("type nested too deeply");
         }
@@ -635,7 +635,7 @@ extend Parser {
         );
     }
 
-    pub fn parse_type_inner(self: &mut Self) NodeId {
+    pub(package) fn parse_type_inner(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         if self.match(TokenType::AmpersandAmpersand) {
             // `&&T` lexes as one token: it is `&(&T)`, and the inner `&` takes any lifetime/`mut`.
@@ -734,7 +734,7 @@ extend Parser {
     // rather than the enclosing item: the value must satisfy it for EVERY choice of them, which is what
     // lets a closure bound accept a reference of any lifetime instead of one fixed at instantiation.
     // LL(1): `for` cannot otherwise begin a bound or a type, so a single-token peek decides.
-    pub fn parse_hrtb(self: &mut Self) NodeList {
+    pub(package) fn parse_hrtb(self: &mut Self) NodeList {
         if !self.match(TokenType::For) {
             return NodeList { start: 0, len: 0 };
         }
@@ -761,7 +761,7 @@ extend Parser {
         return self.ast.commit(mark);
     }
 
-    pub fn parse_bound(self: &mut Self) NodeId {
+    pub(package) fn parse_bound(self: &mut Self) NodeId {
         // `T: 'a` -- a lifetime bound among a type param's mixed bounds. Single-token peek.
         if self.check(TokenType::Label) {
             return self.parse_lifetime();
@@ -792,7 +792,7 @@ extend Parser {
         return fnty;
     }
 
-    pub fn parse_bounds(self: &mut Self) NodeList {
+    pub(package) fn parse_bounds(self: &mut Self) NodeList {
         let mark = self.ast.mark();
         self.ast.push(self.parse_bound());
         while self.match(TokenType::Plus) {
@@ -805,7 +805,7 @@ extend Parser {
     // returned SEPARATELY through `out_lifetimes`: keeping them out of the `generics` list is what
     // makes lifetime erasure structural -- every consumer that pairs `generics` with instance args
     // stays correct by construction instead of having to remember to skip lifetimes.
-    pub fn parse_generics_split(self: &mut Self, out_lifetimes: &mut NodeList) NodeList {
+    pub(package) fn parse_generics_split(self: &mut Self, out_lifetimes: &mut NodeList) NodeList {
         if !self.match(TokenType::LessThan) {
             return NodeList { start: 0, len: 0 };
         }
@@ -878,7 +878,7 @@ extend Parser {
         return self.ast.commit(mark);
     }
 
-    pub fn parse_where_clause(self: &mut Self) NodeList {
+    pub(package) fn parse_where_clause(self: &mut Self) NodeList {
         if !self.match(TokenType::Where) {
             return NodeList { start: 0, len: 0 };
         }
@@ -912,7 +912,7 @@ extend Parser {
         return self.ast.commit(mark);
     }
 
-    pub fn parse_parameter_name(self: &mut Self) NodeId {
+    pub(package) fn parse_parameter_name(self: &mut Self) NodeId {
         if self.match(TokenType::SelfLower) {
             let token = self.tokens[self.current - 1];
             return self.make_name(token.span());
@@ -930,7 +930,7 @@ extend Parser {
         return id;
     }
 
-    pub fn parse_parameters(self: &mut Self, out_variadic: &mut bool) NodeList {
+    pub(package) fn parse_parameters(self: &mut Self, out_variadic: &mut bool) NodeList {
         self.expect(TokenType::LeftParen, "'('");
         let params_mark = self.ast.mark();
         while !self.check(TokenType::RightParen) && !self.at_end() {
@@ -970,7 +970,7 @@ extend Parser {
         return self.ast.commit(params_mark);
     }
 
-    pub fn parse_function_returns(self: &mut Self) NodeList {
+    pub(package) fn parse_function_returns(self: &mut Self) NodeList {
         if !self.check(TokenType::LeftParen) && !Parser::is_type_start(self.peek_type()) {
             return NodeList { start: 0, len: 0 };
         }
@@ -1013,7 +1013,7 @@ extend Parser {
 
     /// `pinned`: the body must stay in the module arena (`const fn`); a generic function, an
     /// interface member and a generic extend's member are pinned here as well.
-    pub fn parse_function(self: &mut Self, require_body: bool, pinned: bool) NodeId {
+    pub(package) fn parse_function(self: &mut Self, require_body: bool, pinned: bool) NodeId {
         let start = self.raw_peek().start();
         self.expect(TokenType::Fn, "'fn'");
         let name = self.callable_name();
@@ -1131,7 +1131,7 @@ extend Parser {
         self.ast.at(body).as_data.block.statements = ns;
     }
 
-    pub fn parse_field(self: &mut Self) NodeId {
+    pub(package) fn parse_field(self: &mut Self) NodeId {
         let mut fattrs = self.parse_attributes(4);
         self.reject_derive_here();
         // span starts AFTER the attributes: the formatter prints them as leading trivia from the
@@ -1165,7 +1165,7 @@ extend Parser {
         return fid;
     }
 
-    pub fn parse_fields(self: &mut Self) NodeList {
+    pub(package) fn parse_fields(self: &mut Self) NodeList {
         let mark = self.ast.mark();
         while !self.check(TokenType::RightBrace) && !self.at_end() {
             self.ast.push(self.parse_field());
@@ -1176,7 +1176,7 @@ extend Parser {
         return self.ast.commit(mark);
     }
 
-    pub fn parse_struct(self: &mut Self) NodeId {
+    pub(package) fn parse_struct(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
         let name = self.identifier();
@@ -1203,7 +1203,7 @@ extend Parser {
         return decl;
     }
 
-    pub fn parse_variant(self: &mut Self) NodeId {
+    pub(package) fn parse_variant(self: &mut Self) NodeId {
         let mut vattrs = self.parse_attributes(4);
         self.reject_derive_here();
         let start = self.raw_peek().start();
@@ -1238,7 +1238,7 @@ extend Parser {
         return vid;
     }
 
-    pub fn parse_enum(self: &mut Self) NodeId {
+    pub(package) fn parse_enum(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
         let name = self.identifier();
@@ -1263,7 +1263,7 @@ extend Parser {
         return __decl;
     }
 
-    pub fn parse_type_alias(self: &mut Self, opaque: bool) NodeId {
+    pub(package) fn parse_type_alias(self: &mut Self, opaque: bool) NodeId {
         let start = self.raw_peek().start();
         self.expect(TokenType::Type, "'type'");
         let name = self.identifier();
@@ -1292,7 +1292,7 @@ extend Parser {
         return alias;
     }
 
-    pub fn parse_const(self: &mut Self) NodeId {
+    pub(package) fn parse_const(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
         if self.check(TokenType::Fn) {
@@ -1306,7 +1306,7 @@ extend Parser {
     // unsafe part -- it asserts a property the compiler cannot derive, so the author carries the proof.
     // LL(1): each step decides on one token (`fn` | `const` | `extend`, then `fn`). `const unsafe fn` parses
     // too, via parse_const_or_fn; the formatter prints the canonical `unsafe const` order.
-    pub fn parse_unsafe_fn(self: &mut Self) NodeId {
+    pub(package) fn parse_unsafe_fn(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
         if self.check(TokenType::Extend) {
@@ -1336,7 +1336,7 @@ extend Parser {
 
     // `const` already consumed: a single-token branch decides const fn / const unsafe fn / const
     // declaration (LL(1): `fn` | `unsafe` | identifier, then `unsafe` commits to `fn`).
-    pub fn parse_const_or_fn(self: &mut Self) NodeId {
+    pub(package) fn parse_const_or_fn(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
         if self.check(TokenType::Fn) {
@@ -1374,7 +1374,7 @@ extend Parser {
         );
     }
 
-    pub fn parse_static(self: &mut Self) NodeId {
+    pub(package) fn parse_static(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
         if !self.match(TokenType::Mut) {
@@ -1385,7 +1385,7 @@ extend Parser {
         return c;
     }
 
-    pub fn parse_static_assert(self: &mut Self) NodeId {
+    pub(package) fn parse_static_assert(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
         self.expect(TokenType::LeftParen, "'('");
@@ -1407,7 +1407,7 @@ extend Parser {
         );
     }
 
-    pub fn parse_interface(self: &mut Self) NodeId {
+    pub(package) fn parse_interface(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
         let name = self.identifier();
@@ -1486,7 +1486,7 @@ extend Parser {
         return __decl;
     }
 
-    pub fn parse_extend(self: &mut Self) NodeId {
+    pub(package) fn parse_extend(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
         let mut lifetimes = NodeList { start: 0, len: 0 };
@@ -1587,7 +1587,7 @@ extend Parser {
         self.errors.note(format("write 'extern \"C\" \"<header>.h\" {{ .. }}' with the header that defines it"));
     }
 
-    pub fn parse_extern(self: &mut Self) NodeId {
+    pub(package) fn parse_extern(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
         let abi = if self.check(TokenType::StringLiteral) {
@@ -1747,7 +1747,7 @@ extend Parser {
         );
     }
 
-    pub fn parse_item(self: &mut Self) NodeId {
+    pub(package) fn parse_item(self: &mut Self) NodeId {
         let mut attrs = self.parse_attributes(16);
         if self.check(TokenType::StaticAssert) {
             self.reject_derive_here();
@@ -1972,7 +1972,7 @@ extend Parser {
         self.derive_ifaces.clear();
     }
 
-    pub fn parse_arguments(self: &mut Self) NodeList {
+    pub(package) fn parse_arguments(self: &mut Self) NodeList {
         let mark = self.ast.mark();
         while !self.check(TokenType::RightParen) && !self.at_end() {
             self.ast.push(self.parse_expression());
@@ -1983,7 +1983,7 @@ extend Parser {
         return self.ast.commit(mark);
     }
 
-    pub fn parse_struct_initializer_after(self: &mut Self, ty: NodeId, start: u32) NodeId {
+    pub(package) fn parse_struct_initializer_after(self: &mut Self, ty: NodeId, start: u32) NodeId {
         self.expect(TokenType::LeftBrace, "'{'");
         let mark = self.ast.mark();
         while !self.check(TokenType::RightBrace) && !self.at_end() {
@@ -2013,7 +2013,7 @@ extend Parser {
         );
     }
 
-    pub fn parse_pattern_alts(self: &mut Self, arm_start: u32) NodeId {
+    pub(package) fn parse_pattern_alts(self: &mut Self, arm_start: u32) NodeId {
         let mut pattern = self.parse_pattern();
         if self.check(TokenType::Pipe) {
             let alt_mark = self.ast.mark();
@@ -2027,7 +2027,7 @@ extend Parser {
         return pattern;
     }
 
-    pub fn parse_switch(self: &mut Self) NodeId {
+    pub(package) fn parse_switch(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
         let value = self.parse_condition_expression();
@@ -2206,7 +2206,7 @@ extend Parser {
         self.ast.bc_errs.push(BcErr { span: sp, msg: msg });
     }
 
-    pub fn parse_pattern_atom(self: &mut Self) NodeId {
+    pub(package) fn parse_pattern_atom(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         if self.match(TokenType::Minus) {
             if !Parser::is_literal_token(self.peek_type()) {
@@ -2413,11 +2413,11 @@ extend Parser {
         return self.parse_pattern();
     }
 
-    pub fn parse_pattern(self: &mut Self) NodeId {
+    pub(package) fn parse_pattern(self: &mut Self) NodeId {
         return self.parse_range(RangeContext::RANGE_PATTERN);
     }
 
-    pub fn parse_array_element(self: &mut Self) NodeId {
+    pub(package) fn parse_array_element(self: &mut Self) NodeId {
         if !self.check(TokenType::LeftBracket) {
             return self.parse_expression();
         }
@@ -2451,7 +2451,7 @@ extend Parser {
         return self.parse_expression_from_mode(p, ExpressionGrammar::EXPR_FULL);
     }
 
-    pub fn parse_array_literal(self: &mut Self) NodeId {
+    pub(package) fn parse_array_literal(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
         let mark = self.ast.mark();
@@ -2645,7 +2645,7 @@ extend Parser {
         return self.error_skip("expected expression");
     }
 
-    pub fn path_chain_to_type_path(self: &mut Self, chain: NodeId, start: u32) NodeId {
+    pub(package) fn path_chain_to_type_path(self: &mut Self, chain: NodeId, start: u32) NodeId {
         let mark = self.ast.mark();
         let mut args = NodeList { start: 0, len: 0 };
         let mut cur = chain;
@@ -2970,11 +2970,11 @@ extend Parser {
         return self.parse_expression_from_mode(self.parse_cast_mode(grammar), grammar);
     }
 
-    pub fn parse_expression(self: &mut Self) NodeId {
+    pub(package) fn parse_expression(self: &mut Self) NodeId {
         return self.parse_expression_mode(ExpressionGrammar::EXPR_FULL);
     }
 
-    pub fn parse_condition_expression(self: &mut Self) NodeId {
+    pub(package) fn parse_condition_expression(self: &mut Self) NodeId {
         return self.parse_expression_mode(ExpressionGrammar::EXPR_CONDITION);
     }
 
@@ -2985,7 +2985,7 @@ extend Parser {
         return self.parse_expression_mode(grammar);
     }
 
-    pub const fn starts_range_bound(self: &Self, context: RangeContext) bool {
+    pub(package) const fn starts_range_bound(self: &Self, context: RangeContext) bool {
         let t = self.peek_type();
         if context == RangeContext::RANGE_PATTERN {
             return Parser::is_literal_token(t) || Parser::is_identifier_token(t) || t == TokenType::LeftParen || t == TokenType::Minus;
@@ -3063,7 +3063,7 @@ extend Parser {
         );
     }
 
-    pub fn parse_range(self: &mut Self, context: RangeContext) NodeId {
+    pub(package) fn parse_range(self: &mut Self, context: RangeContext) NodeId {
         return self.parse_range_mode(context, ExpressionGrammar::EXPR_FULL);
     }
 
@@ -3078,7 +3078,7 @@ extend Parser {
         return self.finish_range(NodeKind::NODE_RANGE, start_node, op_start, inclusive, end);
     }
 
-    pub fn parse_let(self: &mut Self) NodeId {
+    pub(package) fn parse_let(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
         let is_mutable = self.match(TokenType::Mut);
@@ -3118,7 +3118,7 @@ extend Parser {
         );
     }
 
-    pub fn desugar_let_match(
+    pub(package) fn desugar_let_match(
         self: &mut Self,
         start: u32,
         pattern: NodeId,
@@ -3158,7 +3158,7 @@ extend Parser {
         );
     }
 
-    pub fn parse_if(self: &mut Self) NodeId {
+    pub(package) fn parse_if(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
         if self.check(TokenType::Let) {
@@ -3208,7 +3208,7 @@ extend Parser {
         return id;
     }
 
-    pub fn parse_loop_stmt(self: &mut Self, start: u32, label: Span) NodeId {
+    pub(package) fn parse_loop_stmt(self: &mut Self, start: u32, label: Span) NodeId {
         let mut result = NODE_NONE;
         switch self.peek_type() {
             While => {
@@ -3328,7 +3328,7 @@ extend Parser {
         return result;
     }
 
-    pub fn parse_statement(self: &mut Self) NodeId {
+    pub(package) fn parse_statement(self: &mut Self) NodeId {
         if self.depth >= PARSE_MAX_DEPTH {
             return self.error_skip("statement nested too deeply");
         }
@@ -3338,7 +3338,7 @@ extend Parser {
         return s;
     }
 
-    pub fn parse_statement_inner(self: &mut Self) NodeId {
+    pub(package) fn parse_statement_inner(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         if self.check(TokenType::StaticAssert) {
             return self.parse_static_assert();
@@ -3667,7 +3667,7 @@ extend Parser {
         return self.text_is(Token::new(TokenType::Identifier, sp.start, sp.end - sp.start), s);
     }
 
-    pub fn parse_block(self: &mut Self) NodeId {
+    pub(package) fn parse_block(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.expect(TokenType::LeftBrace, "'{'");
         let mark = self.ast.mark();
@@ -3683,7 +3683,7 @@ extend Parser {
         return self.fin(NodeKind::NODE_BLOCK, start, NodeAs { block: BlockData { statements: statements } });
     }
 
-    pub const fn attr_kind_of(self: &Self, name: Token, wants_str: &mut bool, wants_int: &mut bool) i32 {
+    pub(package) const fn attr_kind_of(self: &Self, name: Token, wants_str: &mut bool, wants_int: &mut bool) i32 {
         let t: []str = C_ATTR_NAMES;
         for i in 0..t.len() {
             if self.text_is(name, t[i]) {
@@ -4579,7 +4579,7 @@ extend Parser {
     }
 
     // `expected` only sizes the first allocation; every parsed attribute is kept.
-    pub fn parse_attributes(self: &mut Self, expected: usize) Vector<Attr> {
+    pub(package) fn parse_attributes(self: &mut Self, expected: usize) Vector<Attr> {
         // A stray pending `@reflect` (its position never reached add_attrs_to) is an error, not a
         // silent transfer to whatever declaration comes next.
         if self.pending_metas.len() > 0 {
@@ -4649,7 +4649,7 @@ extend Parser {
         return attrs;
     }
 
-    pub fn add_attrs_to(self: &mut Self, attrs: &mut Vector<Attr>, owner: NodeId) {
+    pub(package) fn add_attrs_to(self: &mut Self, attrs: &mut Vector<Attr>, owner: NodeId) {
         for i in 0..attrs.len() {
             let mut attr = attrs[i];
             if attr.kind == AttrKind::ATTR_UNSAFE as u8 {
@@ -4886,7 +4886,7 @@ extend Parser {
         }
     }
 
-    pub fn validate_item_attrs(self: &mut Self, attrs: &mut Vector<Attr>, owner: NodeId) {
+    pub(package) fn validate_item_attrs(self: &mut Self, attrs: &mut Vector<Attr>, owner: NodeId) {
         for i in 0..attrs.len() {
             let attr = attrs.at(i);
             let mut sp = Span::empty();
@@ -4930,7 +4930,7 @@ extend Parser {
         }
     }
 
-    pub fn parse_import(self: &mut Self) NodeId {
+    pub(package) fn parse_import(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
         let mark = self.ast.mark();
@@ -4957,15 +4957,15 @@ extend Parser {
         );
     }
 
-    pub const fn is_literal_token(kind: TokenType) bool {
+    pub(package) const fn is_literal_token(kind: TokenType) bool {
         return kind == TokenType::IntegerLiteral || kind == TokenType::FloatLiteral || kind == TokenType::CharacterLiteral || kind == TokenType::ByteCharacterLiteral || kind == TokenType::StringLiteral || kind == TokenType::MatchertextLiteral || kind == TokenType::ByteStringLiteral || kind == TokenType::True || kind == TokenType::False || kind == TokenType::Null;
     }
 
-    pub const fn unary_operator(kind: TokenType) bool {
+    pub(package) const fn unary_operator(kind: TokenType) bool {
         return kind == TokenType::Bang || kind == TokenType::Tilde || kind == TokenType::Minus || kind == TokenType::Star || kind == TokenType::Ampersand || kind == TokenType::Move || kind == TokenType::Unsafe;
     }
 
-    pub const fn precedence(kind: TokenType) i32 {
+    pub(package) const fn precedence(kind: TokenType) i32 {
         return switch kind {
             Star | Slash | Percent => 11,
             Plus | Minus => 10,
@@ -4981,11 +4981,11 @@ extend Parser {
         };
     }
 
-    pub const fn assignment_operator(kind: TokenType) bool {
+    pub(package) const fn assignment_operator(kind: TokenType) bool {
         return kind == TokenType::Equal || kind == TokenType::PlusEqual || kind == TokenType::MinusEqual || kind == TokenType::StarEqual || kind == TokenType::SlashEqual || kind == TokenType::PercentEqual || kind == TokenType::AmpersandEqual || kind == TokenType::PipeEqual || kind == TokenType::CaretEqual || kind == TokenType::LeftShiftEqual || kind == TokenType::RightShiftEqual;
     }
 
-    pub fn build_ast(self: &mut Self) {
+    pub(package) fn build_ast(self: &mut Self) {
         let mark = self.ast.mark();
         while !self.at_end() {
             let before = self.current;
@@ -5007,10 +5007,10 @@ extend Parser {
         self.errors.finalize(self.source, self.file);
     }
 
-    pub const fn has_errors(self: &Self) bool {
+    pub(package) const fn has_errors(self: &Self) bool {
         return self.errors.has_errors();
     }
-    pub fn log_errors(self: &Self) {
+    pub(package) fn log_errors(self: &Self) {
         self.errors.log();
     }
 }
@@ -5019,7 +5019,7 @@ extend Parser {
 /// where required). The inventory mirrors `attr_kind_of` and `parse_attribute` above -- update all
 /// three together when an attribute is added; LSP completion serves this list, and LSP hover
 /// documents each entry (`ATTR_DOCS` in src/lsp/features.spc).
-pub fn known_attributes(out: &mut Vector<String>) {
+pub(package) fn known_attributes(out: &mut Vector<String>) {
     let names: []str = ATTR_NAMES;
     for i in 0..names.len() {
         out.push(String::from_str(names[i]));

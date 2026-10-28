@@ -15,14 +15,14 @@ const NONE: u32 = 0xFFFFFFFF;
 
 /// A link: the objects, the output, the stack's size and place, and whether to leave out the names and
 /// the debug sections.
-pub struct Opts {
-    pub out: String,
-    pub objs: Vector<String>, // objects and archives
-    pub libs: Vector<String>, // the `-l` archives' paths
-    pub stack: u64, // 0: wasm-ld's 64 KiB
-    pub stack_first: bool,
-    pub strip: bool,
-    pub gc: bool, // drop the bodies and data segments nothing reaches (`--gc-sections`, `collect`)
+pub(package) struct Opts {
+    pub(package) out: String,
+    pub(package) objs: Vector<String>, // objects and archives
+    pub(package) libs: Vector<String>, // the `-l` archives' paths
+    pub(package) stack: u64, // 0: wasm-ld's 64 KiB
+    pub(package) stack_first: bool,
+    pub(package) strip: bool,
+    pub(package) gc: bool, // drop the bodies and data segments nothing reaches (`--gc-sections`, `collect`)
 }
 
 // Symbol kinds and flags (the linking conventions').
@@ -39,70 +39,70 @@ const F_NO_STRIP: u32 = 0x80;
 
 // An input file: its bytes in the blob, and where its parts start in the per-file tables.
 struct IFile {
-    pub path: u32,
-    pub at: usize,
-    pub sym0: u32,
-    pub nsym: u32,
-    pub type0: u32, // `types`: the file's types
-    pub imp0: u32, // `fimps`: its function imports
-    pub nimp: u32,
-    pub fn0: u32, // `funcs`: its bodies
-    pub nfn: u32,
-    pub seg0: u32, // `segs`: its data segments
-    pub nseg: u32,
-    pub sec0: u32, // `secs`: its sections
-    pub nsec: u32,
-    pub gimp0: u32, // `gimps`: the names of its global imports
-    pub timp0: u32, // `timps`: the names of its table imports
+    pub(package) path: u32,
+    pub(package) at: usize,
+    pub(package) sym0: u32,
+    pub(package) nsym: u32,
+    pub(package) type0: u32, // `types`: the file's types
+    pub(package) imp0: u32, // `fimps`: its function imports
+    pub(package) nimp: u32,
+    pub(package) fn0: u32, // `funcs`: its bodies
+    pub(package) nfn: u32,
+    pub(package) seg0: u32, // `segs`: its data segments
+    pub(package) nseg: u32,
+    pub(package) sec0: u32, // `secs`: its sections
+    pub(package) nsec: u32,
+    pub(package) gimp0: u32, // `gimps`: the names of its global imports
+    pub(package) timp0: u32, // `timps`: the names of its table imports
 }
 
 // A section of an input: its id, the custom section's name (`sn` id), its payload in the blob.
 struct ISec {
-    pub id: u8,
-    pub name: u32,
-    pub at: usize,
-    pub len: usize,
-    pub out: u64, // a debug section: where its payload lands in its output section
+    pub(package) id: u8,
+    pub(package) name: u32,
+    pub(package) at: usize,
+    pub(package) len: usize,
+    pub(package) out: u64, // a debug section: where its payload lands in its output section
 }
 
 // A function import of an input: module and field (`names` ids) and type (output type index).
 struct IImp {
-    pub module: u32,
-    pub field: u32,
-    pub ty: u32,
+    pub(package) module: u32,
+    pub(package) field: u32,
+    pub(package) ty: u32,
 }
 
 // A function body of an input: its type, its entry (size field first) in the blob, where it lands; not
 // `live` when garbage collection drops it.
 struct IFunc {
-    pub ty: u32,
-    pub at: usize,
-    pub len: usize,
-    pub index: u32, // the output function index
-    pub out: u64, // the entry's offset in the output code section's payload
-    pub live: bool,
+    pub(package) ty: u32,
+    pub(package) at: usize,
+    pub(package) len: usize,
+    pub(package) index: u32, // the output function index
+    pub(package) out: u64, // the entry's offset in the output code section's payload
+    pub(package) live: bool,
 }
 
 // A data segment of an input: name, alignment, bytes in the blob, its address once placed (NONE: a
 // constructor table or dropped, not placed); not `live` when garbage collection drops it.
 struct ISeg {
-    pub name: u32,
-    pub align: u32,
-    pub at: usize,
-    pub len: usize,
-    pub addr: u32,
-    pub live: bool,
+    pub(package) name: u32,
+    pub(package) align: u32,
+    pub(package) at: usize,
+    pub(package) len: usize,
+    pub(package) addr: u32,
+    pub(package) live: bool,
 }
 
 // A symbol of an input.
 struct ISym {
-    pub kind: u8,
-    pub flags: u32,
-    pub name: u32, // `names` id; 0 for a section symbol
-    pub index: u32, // function, global, table or section index; data: segment
-    pub off: u32, // data: offset in the segment
-    pub size: u32,
-    pub file: u32,
+    pub(package) kind: u8,
+    pub(package) flags: u32,
+    pub(package) name: u32, // `names` id; 0 for a section symbol
+    pub(package) index: u32, // function, global, table or section index; data: segment
+    pub(package) off: u32, // data: offset in the segment
+    pub(package) size: u32,
+    pub(package) file: u32,
 }
 
 const G_UNDEF: u8 = 0;
@@ -111,21 +111,21 @@ const G_IMPORT: u8 = 2; // a function import: `imp`
 const G_SYNTH: u8 = 3; // the linker's: data address `addr`, or function `index`
 
 struct GSym {
-    pub name: u32,
-    pub kind: u8,
-    pub sym: u32,
-    pub imp: u32, // `oimps` index
-    pub addr: u32,
-    pub index: u32, // output function index (a defined or imported function)
-    pub weak_ref: bool, // every reference is weak
-    pub strong: bool, // a strong reference
+    pub(package) name: u32,
+    pub(package) kind: u8,
+    pub(package) sym: u32,
+    pub(package) imp: u32, // `oimps` index
+    pub(package) addr: u32,
+    pub(package) index: u32, // output function index (a defined or imported function)
+    pub(package) weak_ref: bool, // every reference is weak
+    pub(package) strong: bool, // a strong reference
 }
 
 // An output function import.
 struct OImp {
-    pub module: u32,
-    pub field: u32,
-    pub ty: u32,
+    pub(package) module: u32,
+    pub(package) field: u32,
+    pub(package) ty: u32,
 }
 
 extend IFile as Copy {}
@@ -138,37 +138,37 @@ extend GSym as Copy {}
 extend OImp as Copy {}
 
 struct L {
-    pub files: Vector<IFile>,
-    pub paths: Vector<String>,
-    pub secs: Vector<ISec>,
-    pub types: Vector<Vector<u8>>, // output types: params then results, as encoded
-    pub ftypes: Vector<u32>, // per input type: its output type
-    pub fimps: Vector<IImp>,
-    pub gimps: Vector<u32>,
-    pub timps: Vector<u32>,
-    pub funcs: Vector<IFunc>,
-    pub segs: Vector<ISeg>,
-    pub syms: Vector<ISym>,
-    pub names: nm::Names,
-    pub glob: Vector<u32>,
-    pub gs: Vector<GSym>,
-    pub oimps: Vector<OImp>,
-    pub table: Vector<u32>, // the table's functions (output indices) from slot 1
-    pub slot_of: Map<u32, u32>, // output function index -> its table slot
-    pub ctors: Vector<u32>, // output function indices `__wasm_call_ctors` calls
-    pub inits: Vector<(u32, u32)>, // the init functions: (priority, input symbol)
-    pub ctor_fn: u32, // `__wasm_call_ctors`'s output index
-    pub ctor_ty: u32,
-    pub nfuncs: u32, // imports plus bodies plus the ctor function
-    pub sp: u32, // the stack pointer's initial value
-    pub heap_base: u32,
-    pub data_end: u32,
-    pub data_lo: u32,
-    pub err: String,
+    pub(package) files: Vector<IFile>,
+    pub(package) paths: Vector<String>,
+    pub(package) secs: Vector<ISec>,
+    pub(package) types: Vector<Vector<u8>>, // output types: params then results, as encoded
+    pub(package) ftypes: Vector<u32>, // per input type: its output type
+    pub(package) fimps: Vector<IImp>,
+    pub(package) gimps: Vector<u32>,
+    pub(package) timps: Vector<u32>,
+    pub(package) funcs: Vector<IFunc>,
+    pub(package) segs: Vector<ISeg>,
+    pub(package) syms: Vector<ISym>,
+    pub(package) names: nm::Names,
+    pub(package) glob: Vector<u32>,
+    pub(package) gs: Vector<GSym>,
+    pub(package) oimps: Vector<OImp>,
+    pub(package) table: Vector<u32>, // the table's functions (output indices) from slot 1
+    pub(package) slot_of: Map<u32, u32>, // output function index -> its table slot
+    pub(package) ctors: Vector<u32>, // output function indices `__wasm_call_ctors` calls
+    pub(package) inits: Vector<(u32, u32)>, // the init functions: (priority, input symbol)
+    pub(package) ctor_fn: u32, // `__wasm_call_ctors`'s output index
+    pub(package) ctor_ty: u32,
+    pub(package) nfuncs: u32, // imports plus bodies plus the ctor function
+    pub(package) sp: u32, // the stack pointer's initial value
+    pub(package) heap_base: u32,
+    pub(package) data_end: u32,
+    pub(package) data_lo: u32,
+    pub(package) err: String,
 }
 
 /// Link `o`. False with the reason in `err` when it fails.
-pub fn link(o: &Opts, err: &mut String) bool {
+pub(package) fn link(o: &Opts, err: &mut String) bool {
     let mut l = L {
         files: Vector::<IFile>::new(),
         paths: Vector::<String>::new(),

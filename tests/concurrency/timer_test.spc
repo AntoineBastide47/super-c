@@ -35,8 +35,9 @@ fn sleeps_never_end_early() {
         launch || {
             defer w.done();
             let dl = base + ms * 1000000;
-            let left = if dl > platform::now_ns() {
-                dl - platform::now_ns();
+            let start = platform::now_ns();
+            let left = if dl > start {
+                dl - start;
             } else {
                 0u64;
             };

@@ -22,47 +22,47 @@ import module::loader as loader;
 import ir::layout as lay;
 
 /// Normalized constructor kinds.
-pub const PC_WILD: u8 = 0; // wildcard or a pure binding
+pub(package) const PC_WILD: u8 = 0; // wildcard or a pure binding
 /// Pattern constructor kinds (Pat.kind); PC_WILD is 0.
-pub const PC_VARIANT: u8 = 1; // val = ordinal; decl = variant; subs = payload
-pub const PC_BOOL: u8 = 2; // val = 0/1
-pub const PC_INT: u8 = 3; // val = the value's bits
-pub const PC_RANGE: u8 = 4; // valued (arity 0 or 1): val..=hi, bits; opaque (arity 2): keyed by node
-pub const PC_TUPLE: u8 = 5; // subs = elements (single, always-complete constructor)
-pub const PC_STRUCT: u8 = 6; // decl = struct; subs = every field in decl order (absent = wild)
-pub const PC_OPAQUE: u8 = 7; // string/float literal: only a wildcard or the same spelling covers it
+pub(package) const PC_VARIANT: u8 = 1; // val = ordinal; decl = variant; subs = payload
+pub(package) const PC_BOOL: u8 = 2; // val = 0/1
+pub(package) const PC_INT: u8 = 3; // val = the value's bits
+pub(package) const PC_RANGE: u8 = 4; // valued (arity 0 or 1): val..=hi, bits; opaque (arity 2): keyed by node
+pub(package) const PC_TUPLE: u8 = 5; // subs = elements (single, always-complete constructor)
+pub(package) const PC_STRUCT: u8 = 6; // decl = struct; subs = every field in decl order (absent = wild)
+pub(package) const PC_OPAQUE: u8 = 7; // string/float literal: only a wildcard or the same spelling covers it
 
 /// The absent pattern, path, or node index.
-pub const P_NONE: u32 = 0xFFFFFFFF;
+pub(package) const P_NONE: u32 = 0xFFFFFFFF;
 
 /// One normalized pattern node (flat pools; subs index `subs` which indexes `pats`).
-pub struct NPat {
-    pub kind: u8,
-    pub uns: bool, // PC_INT/PC_RANGE: the values compare unsigned
-    pub bits: u8, // PC_INT/PC_RANGE: the matched type's width
-    pub val: i64,
-    pub hi: i64, // PC_RANGE: the inclusive upper bound
-    pub decl: DefId, // variant/struct declaration
-    pub node: NodeId, // originating pattern node (bindings + diagnostics); NODE_NONE for a split piece
-    pub sub_start: u32,
-    pub sub_len: u32,
-    pub arity: u32, // constructor arity (payload/field/element count); PC_RANGE: 0 = empty, 1 = valued, 2 = opaque
+pub(package) struct NPat {
+    pub(package) kind: u8,
+    pub(package) uns: bool, // PC_INT/PC_RANGE: the values compare unsigned
+    pub(package) bits: u8, // PC_INT/PC_RANGE: the matched type's width
+    pub(package) val: i64,
+    pub(package) hi: i64, // PC_RANGE: the inclusive upper bound
+    pub(package) decl: DefId, // variant/struct declaration
+    pub(package) node: NodeId, // originating pattern node (bindings + diagnostics); NODE_NONE for a split piece
+    pub(package) sub_start: u32,
+    pub(package) sub_len: u32,
+    pub(package) arity: u32, // constructor arity (payload/field/element count); PC_RANGE: 0 = empty, 1 = valued, 2 = opaque
 }
 
 // One matrix row: a pattern per column plus its arm.
 struct Row {
-    pub start: u32, // into ctx.cols (NPat ids)
-    pub len: u32,
-    pub arm: u32,
+    pub(package) start: u32, // into ctx.cols (NPat ids)
+    pub(package) len: u32,
+    pub(package) arm: u32,
 }
 
 /// The pattern-compiler context for one match: pools + budget.
-pub struct PatCx<'a> {
-    pub pkg: *const loader::Package,
-    pub f: facts::TypedFacts,
-    pub src: str<'a>,
-    pub pats: Vector<NPat>,
-    pub subs: Vector<u32>, // flat sub-pattern id pool
+pub(package) struct PatCx<'a> {
+    pub(package) pkg: *const loader::Package,
+    pub(package) f: facts::TypedFacts,
+    pub(package) src: str<'a>,
+    pub(package) pats: Vector<NPat>,
+    pub(package) subs: Vector<u32>, // flat sub-pattern id pool
     cols: Vector<u32>, // flat row storage (NPat ids)
     rows: Vector<Row>,
     // Usefulness arena: matrices live as (start, len) row descriptors over a flat cell pool;
@@ -78,57 +78,57 @@ pub struct PatCx<'a> {
     trows: Vector<Row>,
     tpats: Vector<u32>,
     toccs: Vector<u32>, // DtPath ids, parallel to tpats
-    pub budget: u32, // remaining work units; 0 = overflow, answer conservatively
-    pub overflow: bool,
+    pub(package) budget: u32, // remaining work units; 0 = overflow, answer conservatively
+    pub(package) overflow: bool,
     // A column holds constructors the tree cannot tell apart (literals whose spellings may name one
     // value, an unvalued integer): the match keeps sequential lowering.
     tree_refused: bool,
 }
 
 /// Decision-tree node kinds.
-pub const DT_LEAF: u8 = 0; // arm chosen
+pub(package) const DT_LEAF: u8 = 0; // arm chosen
 /// Decision-tree node kinds (DtNode.kind); DT_LEAF is 0.
-pub const DT_TEST: u8 = 1; // test `place` against edge constructors; default child otherwise
-pub const DT_FAIL: u8 = 2; // no row matches (unreachable for exhaustive matches)
+pub(package) const DT_TEST: u8 = 1; // test `place` against edge constructors; default child otherwise
+pub(package) const DT_FAIL: u8 = 2; // no row matches (unreachable for exhaustive matches)
 
 /// A scrutinee sub-place: the projection path a test or binding reads.
-pub struct DtPath {
-    pub parent: u32, // DtPath id; P_NONE = the scrutinee itself
-    pub downcast: i64, // variant ordinal applied before the field, -1 = none
-    pub vdecl: DefId, // the variant declaration for the downcast
-    pub field: u32, // field/element ordinal after the (optional) downcast
-    pub fdecl: NodeId, // resolved field decl for named fields; NODE_NONE for tuple elements
-    pub pat: NodeId, // a pattern node whose checked type describes this sub-place
+pub(package) struct DtPath {
+    pub(package) parent: u32, // DtPath id; P_NONE = the scrutinee itself
+    pub(package) downcast: i64, // variant ordinal applied before the field, -1 = none
+    pub(package) vdecl: DefId, // the variant declaration for the downcast
+    pub(package) field: u32, // field/element ordinal after the (optional) downcast
+    pub(package) fdecl: NodeId, // resolved field decl for named fields; NODE_NONE for tuple elements
+    pub(package) pat: NodeId, // a pattern node whose checked type describes this sub-place
 }
 
 /// One outgoing edge of a DT_TEST: constructor -> child node.
-pub struct DtEdge {
-    pub pat: u32, // representative NPat id (its constructor identifies the edge)
-    pub child: u32,
+pub(package) struct DtEdge {
+    pub(package) pat: u32, // representative NPat id (its constructor identifies the edge)
+    pub(package) child: u32,
 }
 
 /// One decision-tree node: a leaf naming its arm, a test over a place with an edge range, or a
 /// failure.
-pub struct DtNode {
-    pub kind: u8,
-    pub arm: u32, // DT_LEAF
-    pub place: u32, // DT_TEST: DtPath id
-    pub edge_start: u32,
-    pub edge_len: u32,
-    pub default_child: u32, // DT_TEST: fallthrough child (P_NONE when the edge set is complete)
+pub(package) struct DtNode {
+    pub(package) kind: u8,
+    pub(package) arm: u32, // DT_LEAF
+    pub(package) place: u32, // DT_TEST: DtPath id
+    pub(package) edge_start: u32,
+    pub(package) edge_len: u32,
+    pub(package) default_child: u32, // DT_TEST: fallthrough child (P_NONE when the edge set is complete)
 }
 
 /// The lowering-facing result: nodes/edges/paths/bindings in flat pools; `root` enters the tree.
-pub struct DecisionTree {
-    pub nodes: Vector<DtNode>,
-    pub edges: Vector<DtEdge>,
-    pub paths: Vector<DtPath>,
-    pub root: u32,
-    pub ok: bool, // false: budget exceeded; the caller keeps sequential lowering
+pub(package) struct DecisionTree {
+    pub(package) nodes: Vector<DtNode>,
+    pub(package) edges: Vector<DtEdge>,
+    pub(package) paths: Vector<DtPath>,
+    pub(package) root: u32,
+    pub(package) ok: bool, // false: budget exceeded; the caller keeps sequential lowering
 }
 
 /// The smallest value of the integer type of width `bits`, as bits.
-pub const fn dom_min(uns: bool, bits: u8) i64 {
+pub(package) const fn dom_min(uns: bool, bits: u8) i64 {
     if uns {
         return 0;
     }
@@ -136,7 +136,7 @@ pub const fn dom_min(uns: bool, bits: u8) i64 {
 }
 
 /// The largest value of the integer type of width `bits`, as bits.
-pub const fn dom_max(uns: bool, bits: u8) i64 {
+pub(package) const fn dom_max(uns: bool, bits: u8) i64 {
     if uns && bits == 64 {
         return 0xFFFFFFFFFFFFFFFFu64 as i64;
     }
@@ -216,15 +216,15 @@ const fn ival_of(p: &NPat, lo: &mut i64, hi: &mut i64) bool {
 // One child's normalized alternatives during norm_children: its sub-slot, its run in the
 // alternative list, and the cartesian cursor over that run.
 struct ChildAlts {
-    pub slot: i64,
-    pub start: u32,
-    pub len: u32,
-    pub cursor: u32,
+    pub(package) slot: i64,
+    pub(package) start: u32,
+    pub(package) len: u32,
+    pub(package) cursor: u32,
 }
 
 extend<'a> PatCx<'a> {
     /// A pattern context over module `ast` of `pkg` (both must outlive it) with empty pools.
-    pub fn new(pkg: *const loader::Package, ast: *const Ast, src: str<'a>) Self {
+    pub(package) fn new(pkg: *const loader::Package, ast: *const Ast, src: str<'a>) Self {
         return PatCx {
             pkg: pkg,
             f: facts::TypedFacts::of(ast),
@@ -281,7 +281,7 @@ extend<'a> PatCx<'a> {
     }
 
     /// The enum decl containing variant `vd`, its ordinal, and the member count; ord -1 = unknown.
-    pub fn variant_ordinal(self: &Self, vd: DefId, count: &mut u32) i64 {
+    pub(package) fn variant_ordinal(self: &Self, vd: DefId, count: &mut u32) i64 {
         let mut ord: i64 = 0;
         let en = unsafe (&*self.pkg).variant_enum(vd, &mut ord);
         *count = 0;
@@ -312,7 +312,7 @@ extend<'a> PatCx<'a> {
 
     /// Normalize pattern `pid` into one or more alternatives appended to `out` (or-patterns fan
     /// out; every other shape contributes exactly one id).
-    pub fn normalize(self: &mut Self, pid: NodeId, out: &mut Vector<u32>) {
+    pub(package) fn normalize(self: &mut Self, pid: NodeId, out: &mut Vector<u32>) {
         if !self.spend(1) {
             return;
         }
@@ -644,7 +644,7 @@ extend<'a> PatCx<'a> {
     }
 
     /// Append arm pattern `pid` (all alternatives) as single-column rows for arm `arm`.
-    pub fn add_arm(self: &mut Self, pid: NodeId, arm: u32) {
+    pub(package) fn add_arm(self: &mut Self, pid: NodeId, arm: u32) {
         let mut alts = Vector::<u32>::new();
         self.normalize(pid, &mut alts);
         for i in 0..alts.len() {
@@ -1068,7 +1068,7 @@ extend<'a> PatCx<'a> {
     }
 
     /// Is a wildcard still useful after every recorded row? (true = the match is NOT exhaustive.)
-    pub fn wildcard_useful(self: &mut Self) bool {
+    pub(package) fn wildcard_useful(self: &mut Self) bool {
         if self.overflow {
             return false;
         }
@@ -1077,7 +1077,7 @@ extend<'a> PatCx<'a> {
     }
 
     /// Is enum variant `vd` (ordinal `ord`) still reachable after every recorded row?
-    pub fn variant_missing(self: &mut Self, vd: DefId, ord: i64) bool {
+    pub(package) fn variant_missing(self: &mut Self, vd: DefId, ord: i64) bool {
         if self.overflow {
             return false;
         }
@@ -1107,7 +1107,7 @@ extend<'a> PatCx<'a> {
 
     /// Is arm `arm`'s pattern `pid` reachable given every earlier recorded row? (Earlier guarded
     /// arms must NOT be recorded: a failed guard falls through, so they cover nothing here.)
-    pub fn arm_reachable(self: &mut Self, pid: NodeId, arm: u32) bool {
+    pub(package) fn arm_reachable(self: &mut Self, pid: NodeId, arm: u32) bool {
         if self.overflow {
             return true;
         }
@@ -1123,7 +1123,7 @@ extend<'a> PatCx<'a> {
 
     /// Build the decision tree for the recorded rows (call add_arm for EVERY arm first; matches
     /// with guards must keep sequential lowering and never reach this). `ok=false` on overflow.
-    pub fn build_tree(self: &mut Self) DecisionTree {
+    pub(package) fn build_tree(self: &mut Self) DecisionTree {
         let mut t = DecisionTree {
             nodes: Vector::<DtNode>::new(),
             edges: Vector::<DtEdge>::new(),

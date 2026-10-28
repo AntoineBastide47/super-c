@@ -883,21 +883,21 @@ const fn subcommand(arg: str) Mode {
 
 // Flags accepted by every compiling mode.
 struct CommonOpts {
-    pub ce_steps: u32, // --const-eval-steps=N
-    pub ce_mem: u64, // --const-eval-memory=BYTES[K|M|G]
-    pub target: i32, // --target=windows|macos|linux|ios|android|wasm: @platform gate (default: host)
-    pub arch: i32, // --arch=x86_64|aarch64|wasm32: @arch gate (default: the host's instruction set)
-    pub bootstrap_tags: bool, // --bootstrap-tags: accept unknown @attributes and std intrinsics (build across a new tag)
-    pub lint: bool, // on by default; --no-lint disables (unused vars/params/items, casts, unsafe)
-    pub bad: bool, // malformed argument list: print usage and exit 1
-    pub rejected: String, // the first argument the command does not take, named before the usage
-    pub target_features: String, // --target-feature=+a,-b (repeated flags join in order)
-    pub target_cpu: String, // --target-cpu=L: an x86-64 level before every feature list (the last flag wins)
-    pub simd_width: u32, // --simd-width=256|512 (0: the manifest's)
-    pub simd_dispatch: String, // --simd-dispatch=off|<x86-64 levels> (empty: the manifest's)
-    pub opt: i32, // -O0..-O3, -Os, -Oz over the profile's opt-level (OPT_NONE: the profile's)
-    pub cg_on: u64, // -f<flag>: the code-generation flags (bman::CG_*) set over the profile's
-    pub cg_off: u64, // -fno-<flag>: the ones cleared
+    pub(package) ce_steps: u32, // --const-eval-steps=N
+    pub(package) ce_mem: u64, // --const-eval-memory=BYTES[K|M|G]
+    pub(package) target: i32, // --target=windows|macos|linux|ios|android|wasm: @platform gate (default: host)
+    pub(package) arch: i32, // --arch=x86_64|aarch64|wasm32: @arch gate (default: the host's instruction set)
+    pub(package) bootstrap_tags: bool, // --bootstrap-tags: accept unknown @attributes and std intrinsics (build across a new tag)
+    pub(package) lint: bool, // on by default; --no-lint disables (unused vars/params/items, casts, unsafe)
+    pub(package) bad: bool, // malformed argument list: print usage and exit 1
+    pub(package) rejected: String, // the first argument the command does not take, named before the usage
+    pub(package) target_features: String, // --target-feature=+a,-b (repeated flags join in order)
+    pub(package) target_cpu: String, // --target-cpu=L: an x86-64 level before every feature list (the last flag wins)
+    pub(package) simd_width: u32, // --simd-width=256|512 (0: the manifest's)
+    pub(package) simd_dispatch: String, // --simd-dispatch=off|<x86-64 levels> (empty: the manifest's)
+    pub(package) opt: i32, // -O0..-O3, -Os, -Oz over the profile's opt-level (OPT_NONE: the profile's)
+    pub(package) cg_on: u64, // -f<flag>: the code-generation flags (bman::CG_*) set over the profile's
+    pub(package) cg_off: u64, // -fno-<flag>: the ones cleared
 }
 
 extend CommonOpts {
@@ -982,12 +982,12 @@ extend CommonOpts {
 
 // build.toml engine flags, shared by build/run/test/bench (`clean` takes only --out-dir and --full).
 struct BuildOpts<'a> {
-    pub profile: str<'a>, // --profile=NAME (default: manifest default-profile)
-    pub out_dir: str<'a>, // --out-dir=PATH: override the manifest's out-dir
-    pub sysroot: str<'a>, // --sysroot=DIR: the target's C library tree (default: discovered)
-    pub jobs: u32, // --jobs=N (0 = manifest / core count)
-    pub bin_sel: str<'a>, // --bin=NAME: build/run only that binary target
-    pub lib_sel: bool, // --lib: build only the [lib] target
+    pub(package) profile: str<'a>, // --profile=NAME (default: manifest default-profile)
+    pub(package) out_dir: str<'a>, // --out-dir=PATH: override the manifest's out-dir
+    pub(package) sysroot: str<'a>, // --sysroot=DIR: the target's C library tree (default: discovered)
+    pub(package) jobs: u32, // --jobs=N (0 = manifest / core count)
+    pub(package) bin_sel: str<'a>, // --bin=NAME: build/run only that binary target
+    pub(package) lib_sel: bool, // --lib: build only the [lib] target
 }
 
 extend<'a> BuildOpts<'a> {

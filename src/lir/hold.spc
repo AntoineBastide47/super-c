@@ -111,11 +111,11 @@ extend Body as Persist {
 // A symbol an inlinable body names: its spelling (`Rec.names`), kind, C-library mark (`Sym.ext`) and
 // recorded signature (`Rec.decls`, NONE for none).
 @derive(Copy)
-pub struct HRef {
-    pub name: u32,
-    pub kind: u8,
-    pub ext: bool,
-    pub sig: u32,
+pub(package) struct HRef {
+    pub(package) name: u32,
+    pub(package) kind: u8,
+    pub(package) ext: bool,
+    pub(package) sig: u32,
 }
 
 extend HRef as Persist {}
@@ -123,56 +123,56 @@ extend HRef as Persist {}
 // A function of the object: its spelling, walk facts (`HELD_*`), effects (`Sym.fx`) and the parameters
 // whose memory it may write, direct calls (spellings, in instruction order) and, with HELD_OK, its
 // optimized body, whose symbols are `refs`, whose messages and line files are spellings.
-pub struct HFunc {
-    pub name: u32,
-    pub flags: u8,
-    pub fx: u8,
-    pub wargs: u64,
-    pub calls: Vector<u32>,
-    pub body: Body,
-    pub refs: Vector<HRef>,
+pub(package) struct HFunc {
+    pub(package) name: u32,
+    pub(package) flags: u8,
+    pub(package) fx: u8,
+    pub(package) wargs: u64,
+    pub(package) calls: Vector<u32>,
+    pub(package) body: Body,
+    pub(package) refs: Vector<HRef>,
 }
 
 extend HFunc as Persist {}
 
 // A relocation of a data definition: the target's spelling and kind.
 @derive(Copy)
-pub struct HReloc {
-    pub offset: u32,
-    pub sym: u32,
-    pub kind: u8,
-    pub addend: i64,
+pub(package) struct HReloc {
+    pub(package) offset: u32,
+    pub(package) sym: u32,
+    pub(package) kind: u8,
+    pub(package) addend: i64,
 }
 
 extend HReloc as Persist {}
 
-pub struct HData {
-    pub name: u32,
-    pub kind: u8,
-    pub size: u32,
-    pub align_log2: u8,
-    pub readonly: bool,
-    pub bytes: Vector<u8>,
-    pub relocs: Vector<HReloc>,
+pub(package) struct HData {
+    pub(package) name: u32,
+    pub(package) kind: u8,
+    pub(package) size: u32,
+    pub(package) align_log2: u8,
+    pub(package) readonly: bool,
+    pub(package) bytes: Vector<u8>,
+    pub(package) relocs: Vector<HReloc>,
 }
 
 extend HData as Persist {}
 
 /// A unit's held record (`save`, `read`).
-pub struct Rec {
-    pub names: Vector<String>,
-    pub funcs: Vector<HFunc>,
-    pub data: Vector<HData>,
-    pub free: Vector<HData>,
-    pub decls: Vector<Body>,
+pub(package) struct Rec {
+    pub(package) names: Vector<String>,
+    pub(package) funcs: Vector<HFunc>,
+    pub(package) data: Vector<HData>,
+    pub(package) free: Vector<HData>,
+    pub(package) decls: Vector<Body>,
 }
 
 extend Rec as Persist {}
 
 // A record under construction: spellings get indices in first-use order.
 struct Saver {
-    pub rec: Rec,
-    pub ids: Map<u32, u32>, // package name id -> index into `rec.names`
+    pub(package) rec: Rec,
+    pub(package) ids: Map<u32, u32>, // package name id -> index into `rec.names`
 }
 
 extend Saver {
@@ -212,7 +212,7 @@ extend Saver {
 /// The record of every unit `want` marks into `out` (indexed by unit), from `pk` after `r` optimized its
 /// bodies and gave them back: each unit's own functions and data definitions (`Sym.own`), in symbol
 /// order.
-pub fn save(pk: &Package, r: &lopt::Run, want: &Vector<bool>, out: &mut Vector<String>) {
+pub(package) fn save(pk: &Package, r: &lopt::Run, want: &Vector<bool>, out: &mut Vector<String>) {
     let n = want.len();
     let nb = pk.bodies.len();
     let mut bsym = Vector::<u32>::with_capacity(nb);
@@ -338,7 +338,7 @@ pub fn save(pk: &Package, r: &lopt::Run, want: &Vector<bool>, out: &mut Vector<S
 
 /// Record `img` (from `save`, 16-byte aligned) for a package of `ptr_bytes`-byte pointers; None when it
 /// does not read or names past its tables.
-pub fn read(img: str, ptr_bytes: u32) Option<Rec> {
+pub(package) fn read(img: str, ptr_bytes: u32) Option<Rec> {
     let mut r = Reader::new(img.ptr(), img.len());
     let rec = load_new::<Rec>(&mut r);
     if !r.ok || r.left() != 0 || !valid(&rec, ptr_bytes) {
@@ -391,7 +391,7 @@ fn valid_data(ds: &Vector<HData>, nn: u32, ptr_bytes: u32) bool {
 
 /// Define in `pk` the free data of record `rec` (`read`) that it does not define yet. Before any `add`:
 /// these stay defined.
-pub fn add_free(pk: &mut Package, rec: &Rec) {
+pub(package) fn add_free(pk: &mut Package, rec: &Rec) {
     for q in 0..rec.free.len() {
         let _ = define(pk, rec, rec.free.at(q));
     }
@@ -419,7 +419,7 @@ fn define(pk: &mut Package, rec: &Rec, d: &HData) u32 {
 /// Add record `rec` (`read`) of unit `unit` to `pk` as held bodies and data definitions (`Package.held`),
 /// after every body and data definition the package has; a function or data object the package defines
 /// already keeps its definition.
-pub fn add(pk: &mut Package, unit: u32, rec: &Rec) {
+pub(package) fn add(pk: &mut Package, unit: u32, rec: &Rec) {
     if pk.held.body == NONE {
         pk.held.body = pk.bodies.len() as u32;
         pk.held.data = pk.data.len() as u32;

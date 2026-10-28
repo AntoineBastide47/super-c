@@ -9,24 +9,24 @@ import string as cstring;
 
 /// The image being written. A sizing writer writes nothing and counts the bytes a save gives
 /// (`len`), so the save can then write into one allocation of that size.
-pub struct Writer {
-    pub buf: String,
+pub(package) struct Writer {
+    pub(package) buf: String,
     sizing: bool,
     size: usize,
 }
 
 extend Writer {
-    pub fn new() Writer {
+    pub(package) fn new() Writer {
         return Writer { buf: String::new(), sizing: false, size: 0 };
     }
 
     /// A writer that only counts.
-    pub fn sizing() Writer {
+    pub(package) fn sizing() Writer {
         return Writer { buf: String::new(), sizing: true, size: 0 };
     }
 
     /// The bytes written (counted, for a sizing writer).
-    pub const fn len(self: &Writer) usize {
+    pub(package) const fn len(self: &Writer) usize {
         if self.sizing {
             return self.size;
         }
@@ -34,7 +34,7 @@ extend Writer {
     }
 
     /// Append the `n` bytes at `p`.
-    pub fn bytes(self: &mut Writer, p: *const u8, n: usize) {
+    pub(package) fn bytes(self: &mut Writer, p: *const u8, n: usize) {
         if self.sizing {
             self.size += n;
             return;
@@ -43,7 +43,7 @@ extend Writer {
     }
 
     /// Append `v`, little-endian.
-    pub fn u64(self: &mut Writer, v: u64) {
+    pub(package) fn u64(self: &mut Writer, v: u64) {
         if self.sizing {
             self.size += 8;
             return;
@@ -54,7 +54,7 @@ extend Writer {
     }
 
     /// Pad to a multiple of 16 bytes, so the bytes that follow can be read in place.
-    pub fn align(self: &mut Writer) {
+    pub(package) fn align(self: &mut Writer) {
         if self.sizing {
             self.size = (self.size + 15) / 16 * 16;
             return;
@@ -67,26 +67,26 @@ extend Writer {
 
 /// The image being read: `buf[0..len]`, from `at` on. `ok` turns false at the first read past the
 /// end; every read after it yields zero bytes, and the caller discards the result.
-pub struct Reader {
+pub(package) struct Reader {
     buf: *const u8,
     len: usize,
     at: usize,
-    pub ok: bool,
+    pub(package) ok: bool,
 }
 
 extend Reader {
     /// A reader over the `len` bytes at `buf`, which must be 16-byte aligned.
-    pub const fn new(buf: *const u8, len: usize) Reader {
+    pub(package) const fn new(buf: *const u8, len: usize) Reader {
         return Reader { buf: buf, len: len, at: 0, ok: true };
     }
 
     /// The bytes not read yet.
-    pub const fn left(self: &Reader) usize {
+    pub(package) const fn left(self: &Reader) usize {
         return self.len - self.at;
     }
 
     /// The `n` bytes at the read position, in place, and step past them; null past the end.
-    pub const fn view(self: &mut Reader, n: usize) *const u8 {
+    pub(package) const fn view(self: &mut Reader, n: usize) *const u8 {
         if !self.ok || n > self.len - self.at {
             self.ok = false;
             return null;
@@ -97,7 +97,7 @@ extend Reader {
     }
 
     /// Copy the next `n` bytes to `p`; zeros past the end.
-    pub const fn bytes(self: &mut Reader, p: *mut u8, n: usize) {
+    pub(package) const fn bytes(self: &mut Reader, p: *mut u8, n: usize) {
         let src = self.view(n);
         if src == null {
             unsafe cstring::memset(p, 0, n);
@@ -107,7 +107,7 @@ extend Reader {
     }
 
     /// The next 8 bytes as a little-endian `u64`; 0 past the end.
-    pub const fn u64(self: &mut Reader) u64 {
+    pub(package) const fn u64(self: &mut Reader) u64 {
         let p = self.view(8);
         let mut v: u64 = 0;
         if p != null {
@@ -119,7 +119,7 @@ extend Reader {
     }
 
     /// Skip the writer's padding to a multiple of 16 bytes.
-    pub const fn align(self: &mut Reader) {
+    pub(package) const fn align(self: &mut Reader) {
         let pad = (16 - self.at % 16) % 16;
         let _ = self.view(pad);
     }
@@ -128,7 +128,7 @@ extend Reader {
 /// Binary save and load (see the module comment). `load` fills a value that starts as all-zero
 /// bytes (`zeroed`), which releasing leaves as a no-op for every owning std type. The defaults save and
 /// load field by field; a plain type overrides all three with `save_bytes` and `load_bytes`.
-pub interface Persist {
+pub(package) interface Persist {
     /// Whether the type is plain data: no pointer and no owning field, so its bytes are its value.
     fn plain() bool {
         return false;
@@ -144,41 +144,41 @@ pub interface Persist {
 }
 
 /// Save the bytes of plain value `v`.
-pub fn save_bytes<T>(v: &T, w: &mut Writer) {
+pub(package) fn save_bytes<T>(v: &T, w: &mut Writer) {
     w.bytes((v as *const T) as *const u8, sizeof(T));
 }
 
 /// Load the bytes of plain value `v`.
-pub const fn load_bytes<T>(v: &mut T, r: &mut Reader) {
+pub(package) const fn load_bytes<T>(v: &mut T, r: &mut Reader) {
     r.bytes((v as *mut T) as *mut u8, sizeof(T));
 }
 
 /// Save every field of `v` in declaration order.
-pub fn save_fields<T>(v: &T, w: &mut Writer) {
+pub(package) fn save_fields<T>(v: &T, w: &mut Writer) {
     inline for f in fields(v) {
         save_one(&f.value, w);
     }
 }
 
 /// Load every field of `v` in declaration order.
-pub fn load_fields<T>(v: &mut T, r: &mut Reader) {
+pub(package) fn load_fields<T>(v: &mut T, r: &mut Reader) {
     inline for f in fields(v) {
         load_one(&mut f.value, r);
     }
 }
 
 /// Save `v`.
-pub fn save_one<V: Persist>(v: &V, w: &mut Writer) {
+pub(package) fn save_one<V: Persist>(v: &V, w: &mut Writer) {
     v.save(w);
 }
 
 /// Load into `v`.
-pub fn load_one<V: Persist>(v: &mut V, r: &mut Reader) {
+pub(package) fn load_one<V: Persist>(v: &mut V, r: &mut Reader) {
     v.load(r);
 }
 
 /// A loaded value of `V`.
-pub fn load_new<V: Persist>(r: &mut Reader) V {
+pub(package) fn load_new<V: Persist>(r: &mut Reader) V {
     let mut v = unsafe zeroed::<V>();
     v.load(r);
     return v;

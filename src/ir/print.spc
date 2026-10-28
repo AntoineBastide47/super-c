@@ -197,7 +197,7 @@ fn p_rvalue(out: &mut String, b: &ir::CoreBody, rid: ir::RvalueId) {
 }
 
 /// Render `b` into a stable text block (types as raw TypeIds; ids are dense and deterministic).
-pub fn print_body(b: &ir::CoreBody) String {
+pub(package) fn print_body(b: &ir::CoreBody) String {
     let mut out = String::new();
     out.push_str("body m");
     out.push_u64(b.module);

@@ -23,15 +23,15 @@ const NONE: u32 = 0xFFFFFFFF;
 /// A link: the objects, the libraries (`-l` names, each a DLL found in `dirs` or the system directory),
 /// the output (a DLL when `shared`), whether to leave out the debug sections (`strip`), and the main
 /// thread's stack reserve (0: mingw-w64's 2 MiB).
-pub struct Opts {
-    pub out: String,
-    pub shared: bool,
-    pub objs: Vector<String>,
-    pub libs: Vector<String>,
-    pub dirs: Vector<String>,
-    pub strip: bool,
-    pub stack: u64,
-    pub gc: bool, // drop the COMDAT sections nothing reaches (`--gc-sections`, `collect`)
+pub(package) struct Opts {
+    pub(package) out: String,
+    pub(package) shared: bool,
+    pub(package) objs: Vector<String>,
+    pub(package) libs: Vector<String>,
+    pub(package) dirs: Vector<String>,
+    pub(package) strip: bool,
+    pub(package) stack: u64,
+    pub(package) gc: bool, // drop the COMDAT sections nothing reaches (`--gc-sections`, `collect`)
 }
 
 const SCN_CODE: u32 = 0x20;
@@ -106,38 +106,38 @@ const SYNCH_DLL: str = "api-ms-win-core-synch-l1-2-0.dll";
 const SYNCH_EXPORTS: []str = ["WaitOnAddress", "WakeByAddressAll", "WakeByAddressSingle"];
 
 struct IFile {
-    pub path: u32,
-    pub at: usize,
-    pub sec0: u32,
-    pub nsec: u32,
-    pub sym0: u32,
-    pub nsym: u32,
+    pub(package) path: u32,
+    pub(package) at: usize,
+    pub(package) sec0: u32,
+    pub(package) nsec: u32,
+    pub(package) sym0: u32,
+    pub(package) nsym: u32,
 }
 
 // An input section: its name, the output section it joins, flags, alignment, size, bytes (in the blob;
 // none for zero-filled data), relocations, and where it lands in its output section.
 struct ISec {
-    pub file: u32,
-    pub name: u32,
-    pub flags: u32,
-    pub align: u64,
-    pub size: u64,
-    pub off: usize,
-    pub reloff: usize,
-    pub nreloc: u32,
-    pub out: u32,
-    pub at: u64,
-    pub assoc: u32, // an associative COMDAT section's section, else NONE
-    pub sel: u8, // a COMDAT section's selection, else 0
+    pub(package) file: u32,
+    pub(package) name: u32,
+    pub(package) flags: u32,
+    pub(package) align: u64,
+    pub(package) size: u64,
+    pub(package) off: usize,
+    pub(package) reloff: usize,
+    pub(package) nreloc: u32,
+    pub(package) out: u32,
+    pub(package) at: u64,
+    pub(package) assoc: u32, // an associative COMDAT section's section, else NONE
+    pub(package) sel: u8, // a COMDAT section's selection, else 0
 }
 
 // An input symbol (an auxiliary record keeps its slot, so symbol table indices stay direct).
 struct ISym {
-    pub name: u32,
-    pub value: u32,
-    pub sec: i32,
-    pub class: u8,
-    pub file: u32,
+    pub(package) name: u32,
+    pub(package) value: u32,
+    pub(package) sec: i32,
+    pub(package) class: u8,
+    pub(package) file: u32,
 }
 
 const G_UNDEF: u8 = 0;
@@ -147,37 +147,37 @@ const G_COMMON: u8 = 3; // tentative: `size` bytes aligned to `align`, at `at` o
 const G_SYNTH: u8 = 4; // the linker defines it: relative address `at`
 
 struct GSym {
-    pub name: u32,
-    pub kind: u8,
-    pub sym: u32,
-    pub lib: u32,
-    pub hint: u32,
-    pub size: u64,
-    pub align: u64,
-    pub at: u64,
-    pub alias: u32, // the global it stands for (`__imp_X`: X; a renamed or runtime-supplied function), else NONE
-    pub iat: bool, // `__imp_X`: the import address table slot of `alias`
-    pub strong: bool, // an object references it undefined
-    pub need: bool, // an import the image imports
-    pub slot: u32, // an import's index in `imports`
-    pub wdef: u32, // a weak external's default (an input symbol) while no object defines it, else NONE
+    pub(package) name: u32,
+    pub(package) kind: u8,
+    pub(package) sym: u32,
+    pub(package) lib: u32,
+    pub(package) hint: u32,
+    pub(package) size: u64,
+    pub(package) align: u64,
+    pub(package) at: u64,
+    pub(package) alias: u32, // the global it stands for (`__imp_X`: X; a renamed or runtime-supplied function), else NONE
+    pub(package) iat: bool, // `__imp_X`: the import address table slot of `alias`
+    pub(package) strong: bool, // an object references it undefined
+    pub(package) need: bool, // an import the image imports
+    pub(package) slot: u32, // an import's index in `imports`
+    pub(package) wdef: u32, // a weak external's default (an input symbol) while no object defines it, else NONE
 }
 
 // An output section.
 struct OSec {
-    pub name: u32, // `sn` id
-    pub flags: u32,
-    pub align: u64,
-    pub size: u64,
-    pub rva: u64,
-    pub off: u64,
-    pub raw: u64, // its bytes in the file (0: zero-filled)
+    pub(package) name: u32, // `sn` id
+    pub(package) flags: u32,
+    pub(package) align: u64,
+    pub(package) size: u64,
+    pub(package) rva: u64,
+    pub(package) off: u64,
+    pub(package) raw: u64, // its bytes in the file (0: zero-filled)
 }
 
 // A DLL: its name, and whether an import binds to it.
 struct Lib {
-    pub dll: String,
-    pub used: bool,
+    pub(package) dll: String,
+    pub(package) used: bool,
 }
 
 extend IFile as Copy {}
@@ -187,46 +187,46 @@ extend GSym as Copy {}
 extend OSec as Copy {}
 
 struct L {
-    pub files: Vector<IFile>,
-    pub paths: Vector<String>,
-    pub secs: Vector<ISec>,
-    pub syms: Vector<ISym>,
-    pub names: nm::Names,
-    pub sn: nm::Names,
-    pub glob: Vector<u32>,
-    pub gs: Vector<GSym>,
-    pub libs: Vector<Lib>,
-    pub osecs: Vector<OSec>,
-    pub imports: Vector<u32>, // the imported globals, by library
-    pub relocs: Vector<u32>, // the relative addresses base relocations fix up
-    pub o_text: u32,
-    pub o_rdata: u32,
-    pub o_data: u32,
-    pub o_bss: u32,
-    pub o_idata: u32,
-    pub o_tls: u32,
-    pub o_pdata: u32,
-    pub entry_at: u64, // in `.text`
-    pub thunks_at: u64, // in `.text`
-    pub xdata_at: u64, // the entry's unwind information, in `.rdata`
-    pub tlsdir_at: u64, // in `.rdata`
-    pub tls_index_at: u64, // in `.data`
-    pub xc_lo: u64, // the `.CRT$XC*` initializers' range in `.rdata`
-    pub xc_hi: u64,
-    pub entry_pdata_at: u64, // in `.pdata`
-    pub shared: bool, // a DLL
-    pub base: u64, // the preferred image address
-    pub onexit_at: u64, // a DLL's exit-handler table, in `.data`
-    pub exports: Vector<u32>, // a DLL's exported globals, by name
-    pub edata_at: u64, // a DLL's export directory, in `.rdata`
-    pub edata_size: u64, // with its tables and names
-    pub err: String,
+    pub(package) files: Vector<IFile>,
+    pub(package) paths: Vector<String>,
+    pub(package) secs: Vector<ISec>,
+    pub(package) syms: Vector<ISym>,
+    pub(package) names: nm::Names,
+    pub(package) sn: nm::Names,
+    pub(package) glob: Vector<u32>,
+    pub(package) gs: Vector<GSym>,
+    pub(package) libs: Vector<Lib>,
+    pub(package) osecs: Vector<OSec>,
+    pub(package) imports: Vector<u32>, // the imported globals, by library
+    pub(package) relocs: Vector<u32>, // the relative addresses base relocations fix up
+    pub(package) o_text: u32,
+    pub(package) o_rdata: u32,
+    pub(package) o_data: u32,
+    pub(package) o_bss: u32,
+    pub(package) o_idata: u32,
+    pub(package) o_tls: u32,
+    pub(package) o_pdata: u32,
+    pub(package) entry_at: u64, // in `.text`
+    pub(package) thunks_at: u64, // in `.text`
+    pub(package) xdata_at: u64, // the entry's unwind information, in `.rdata`
+    pub(package) tlsdir_at: u64, // in `.rdata`
+    pub(package) tls_index_at: u64, // in `.data`
+    pub(package) xc_lo: u64, // the `.CRT$XC*` initializers' range in `.rdata`
+    pub(package) xc_hi: u64,
+    pub(package) entry_pdata_at: u64, // in `.pdata`
+    pub(package) shared: bool, // a DLL
+    pub(package) base: u64, // the preferred image address
+    pub(package) onexit_at: u64, // a DLL's exit-handler table, in `.data`
+    pub(package) exports: Vector<u32>, // a DLL's exported globals, by name
+    pub(package) edata_at: u64, // a DLL's export directory, in `.rdata`
+    pub(package) edata_size: u64, // with its tables and names
+    pub(package) err: String,
 }
 
 const ENTRY_SIZE: u64 = 128;
 
 /// Link `o`. False with the reason in `err` when it fails.
-pub fn link(o: &Opts, err: &mut String) bool {
+pub(package) fn link(o: &Opts, err: &mut String) bool {
     let mut l = L {
         files: Vector::<IFile>::new(),
         paths: Vector::<String>::new(),
@@ -763,7 +763,7 @@ fn system_dir(out: &mut String) bool {
 
 /// Whether link `o` finds DLL `dll` (`-L` directories, then the system directory) or knows its exports
 /// (an API set); its path into `path`, empty for an API set.
-pub fn find_dll(o: &Opts, dll: str, path: &mut String) bool {
+pub(package) fn find_dll(o: &Opts, dll: str, path: &mut String) bool {
     for i in 0..o.dirs.len() {
         let p = format("{}/{}", o.dirs[i].as_str(), dll);
         if is_file(p.as_str()) {
@@ -784,7 +784,7 @@ pub fn find_dll(o: &Opts, dll: str, path: &mut String) bool {
 
 /// Whether link `o` finds every DLL it needs: the C runtime's, the system's core, and the `-l` ones;
 /// else the first one missing into `why`.
-pub fn has_dlls(o: &Opts, why: &mut String) bool {
+pub(package) fn has_dlls(o: &Opts, why: &mut String) bool {
     let mut want = Vector::<String>::new();
     for i in 0..o.libs.len() {
         let mut d = String::new();
@@ -808,7 +808,7 @@ pub fn has_dlls(o: &Opts, why: &mut String) bool {
 /// Whether `-l<name>` of link `o` is a static library: `lib<name>.a`, `<name>.lib` or `lib<name>.lib` in a
 /// `-L` directory (GNU ld's order, import libraries `lib<name>.dll.a` left out) that holds an object and no
 /// import (`ar::read`); its path into `path`. An import library stands for its DLL.
-pub fn static_lib(o: &Opts, name: str, path: &mut String) bool {
+pub(package) fn static_lib(o: &Opts, name: str, path: &mut String) bool {
     const FORMS: [](str, str) = [("lib", ".a"), ("", ".lib"), ("lib", ".lib")];
     for i in 0..o.dirs.len() {
         for f in 0..FORMS.len() {

@@ -33,14 +33,14 @@ const SEL_ASSOCIATIVE: u32 = 5;
 // A section of the file: its name, flags, bytes (none for `.bss`), size and relocations; a COMDAT one's
 // selection and, associative, the section number it goes with.
 struct CSec {
-    pub name: String,
-    pub flags: u32,
-    pub bytes: Vector<u8>,
-    pub size: u64,
-    pub rels: Vector<u8>, // 10-byte entries
-    pub nrel: u32,
-    pub sel: u32,
-    pub assoc: u32,
+    pub(package) name: String,
+    pub(package) flags: u32,
+    pub(package) bytes: Vector<u8>,
+    pub(package) size: u64,
+    pub(package) rels: Vector<u8>, // 10-byte entries
+    pub(package) nrel: u32,
+    pub(package) sel: u32,
+    pub(package) assoc: u32,
 }
 
 // The name and flags of object section `k` of `o`.
@@ -162,7 +162,7 @@ fn put_sym(out: &mut Vector<u8>, strs: &mut Vector<u8>, name: str, value: u32, s
 
 /// Write object `o` as a COFF x86-64 object into `out`, its sections split at their symbols as `split`
 /// asks (`ob::SPLIT_*`).
-pub fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
+pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
     // The file's sections: the object's non-empty ones (or their parts), then `.xdata` and `.pdata` for
     // the frames (a pair per frame when the code splits).
     let mut parts = Vector::<ob::Part>::new();

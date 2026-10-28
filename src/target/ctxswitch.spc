@@ -251,7 +251,7 @@ fn lines(op: u16, x64: bool, win: bool) str<'static> {
 /// instruction set `isa` (x86-64 or arm64, `tgt::isa`) and object format `fmt` (`asmr::FMT_*`): `.text`,
 /// the symbol global and hidden (`.private_extern` on Mach-O, `.hidden` on ELF; a COFF one opens its
 /// unwind procedure first), aligned to 16 bytes, its label (`_name` on Mach-O), then `lines`.
-pub fn text(op: u16, isa: i32, fmt: u8, name: str, out: &mut String) {
+pub(package) fn text(op: u16, isa: i32, fmt: u8, name: str, out: &mut String) {
     let x64 = tgt::isa(isa).name == "x86_64";
     let lab = if fmt == asmr::FMT_MACHO {
         format("_{}", name);

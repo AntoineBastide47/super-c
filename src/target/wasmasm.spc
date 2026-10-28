@@ -8,11 +8,11 @@ import target::wasmtab as t;
 /// A symbol an instruction names: the relocation kind (`w::R_*`; for `R_TYPE_INDEX_LEB` the name is a
 /// signature, `(i32, i64) -> (f32)`), the name, the addend and the field's offset from the
 /// instruction's start.
-pub struct Fix {
-    pub kind: u8,
-    pub name: String,
-    pub addend: i64,
-    pub at: u32,
+pub(package) struct Fix {
+    pub(package) kind: u8,
+    pub(package) name: String,
+    pub(package) addend: i64,
+    pub(package) at: u32,
 }
 
 // ---- Lexing ----
@@ -101,7 +101,7 @@ const fn int(s: str, i: &mut usize, out: &mut i64) bool {
 /// The bits of the float at `*i` (`f64`, else `f32`): decimal, `0x` hexadecimal with a binary `p`
 /// exponent, `infinity`, `inf`, `nan` and `nan:0x<payload>`, each signed; rounded to nearest, ties to
 /// even.
-pub fn float_bits(s: str, i: &mut usize, f64: bool, out: &mut u64) bool {
+pub(package) fn float_bits(s: str, i: &mut usize, f64: bool, out: &mut u64) bool {
     let mut j = *i;
     ws(s, &mut j);
     let st = j;
@@ -281,7 +281,7 @@ const fn round_bits(m0: u64, e0: i64, sticky0: bool, mb: u32, eb: u32) u64 {
 
 /// The text of float bits `v` (`f64`, else `f32`): `infinity`, `nan`, `nan:0x<payload>`, or exact
 /// hexadecimal `0x1.<digits>p<exp>` (a subnormal normalized), each signed.
-pub fn float_text(o: &mut String, v: u64, f64: bool) {
+pub(package) fn float_text(o: &mut String, v: u64, f64: bool) {
     let mb: u32 = if f64 {
         52;
     } else {
@@ -366,7 +366,7 @@ const fn val_type(w: str) u8 {
 }
 
 /// The name of value type `t`.
-pub const fn type_name(t: u8) str<'static> {
+pub(package) const fn type_name(t: u8) str<'static> {
     return switch t {
         w::I32 => "i32",
         w::I64 => "i64",
@@ -379,7 +379,7 @@ pub const fn type_name(t: u8) str<'static> {
 
 /// A signature at `*i`: `(t, ...) -> (t, ...)`, its normalized text into `out` and its encoding (the
 /// parameters' count and types, then the results') into `enc`.
-pub fn signature(s: str, i: &mut usize, out: &mut String, enc: &mut Vector<u8>) bool {
+pub(package) fn signature(s: str, i: &mut usize, out: &mut String, enc: &mut Vector<u8>) bool {
     out.clear();
     enc.truncate(0);
     for part in 0..2u32 {
@@ -454,7 +454,7 @@ fn sym_ref(s: str, i: &mut usize, name: &mut String, addend: &mut i64) bool {
 
 /// Assemble instruction `text` onto `out`; the symbols it names into `fx` (their fields 0). False with
 /// `err` set when no row takes it.
-pub fn assemble(text: str, out: &mut Vector<u8>, fx: &mut Vector<Fix>, err: &mut String) bool {
+pub(package) fn assemble(text: str, out: &mut Vector<u8>, fx: &mut Vector<Fix>, err: &mut String) bool {
     let mut i: usize = 0;
     let mn = word(text, &mut i);
     let rows: []t::Row = t::ROWS;
@@ -680,7 +680,7 @@ fn v128_lanes(s: str, i: &mut usize, shuf: bool, lo: &mut u64, hi: &mut u64) boo
 }
 
 /// Disassemble the instruction at `b[at..end]` onto `out`: its length, 0 when the table decodes none.
-pub fn disassemble(b: []u8, at: usize, end: usize, out: &mut String) u32 {
+pub(package) fn disassemble(b: []u8, at: usize, end: usize, out: &mut String) u32 {
     let mut n = t::Ins::new(0);
     let len = t::decode(b, at, end, &mut n);
     if len != 0 {
@@ -690,7 +690,7 @@ pub fn disassemble(b: []u8, at: usize, end: usize, out: &mut String) u32 {
 }
 
 /// Print instruction `n`.
-pub fn print_ins(n: &t::Ins, o: &mut String) {
+pub(package) fn print_ins(n: &t::Ins, o: &mut String) {
     let rows: []t::Row = t::ROWS;
     let r = rows[n.row as usize];
     o.push_str(r.mn);

@@ -6,26 +6,26 @@
 import link::util as lu;
 
 /// How an exported name spells its symbols.
-pub const E_PLAIN: u8 = 0; // the name itself
-pub const E_OBJC_CLASS: u8 = 1; // `_OBJC_CLASS_$_` and `_OBJC_METACLASS_$_` before it
-pub const E_OBJC_EH: u8 = 2; // `_OBJC_EHTYPE_$_` before it
-pub const E_OBJC_IVAR: u8 = 3; // `_OBJC_IVAR_$_` before it
+pub(package) const E_PLAIN: u8 = 0; // the name itself
+pub(package) const E_OBJC_CLASS: u8 = 1; // `_OBJC_CLASS_$_` and `_OBJC_METACLASS_$_` before it
+pub(package) const E_OBJC_EH: u8 = 2; // `_OBJC_EHTYPE_$_` before it
+pub(package) const E_OBJC_IVAR: u8 = 3; // `_OBJC_IVAR_$_` before it
 
 /// Bytes `at .. at + len` of the file.
-pub struct Span {
-    pub at: u32,
-    pub len: u32,
-    pub kind: u8,
+pub(package) struct Span {
+    pub(package) at: u32,
+    pub(package) len: u32,
+    pub(package) kind: u8,
 }
 
 extend Span as Copy {}
 
 /// One library: its install name, the names it exports for the target, the install names of the
 /// libraries it re-exports.
-pub struct Doc {
-    pub install: Span,
-    pub exports: Vector<Span>,
-    pub reexports: Vector<Span>,
+pub(package) struct Doc {
+    pub(package) install: Span,
+    pub(package) exports: Vector<Span>,
+    pub(package) reexports: Vector<Span>,
 }
 
 // The top-level key whose sequence is being read.
@@ -35,7 +35,7 @@ const K_LIBS: u8 = 2; // `reexported-libraries`
 
 /// The libraries of stub file `t` for a target `want` names (`arm64-macos`), into `docs`. False when the
 /// file is not a version 4 stub.
-pub fn parse(t: []u8, want: []str, docs: &mut Vector<Doc>) bool {
+pub(package) fn parse(t: []u8, want: []str, docs: &mut Vector<Doc>) bool {
     let n = t.len();
     let mut p: usize = 0;
     let mut sect = K_OTHER;
@@ -174,7 +174,7 @@ pub fn parse(t: []u8, want: []str, docs: &mut Vector<Doc>) bool {
 }
 
 /// The bytes of span `s` of `t`.
-pub const fn span<'a>(t: Slice<'a, u8>, s: Span) str<'a> {
+pub(package) const fn span<'a>(t: Slice<'a, u8>, s: Span) str<'a> {
     return unsafe str::from_raw(t.as_ptr() + s.at as usize, s.len as usize);
 }
 

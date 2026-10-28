@@ -25,31 +25,31 @@ const fn mix(h: u64, v: u64) u64 {
 
 // A node-id range [s, e] of one arena and the item `o` that owns it.
 struct Range {
-    pub s: u32,
-    pub e: u32,
-    pub o: u32,
+    pub(package) s: u32,
+    pub(package) e: u32,
+    pub(package) o: u32,
 }
 
 /// Per-module declaration spans for the owner lookup (items in source order; members nest
 /// inside their extend). Read-only once built: the resolve frontier's tasks share them.
-pub struct Spans {
-    pub top_s: Vector<u32>,
-    pub top_e: Vector<u32>,
-    pub top_id: Vector<u32>,
-    pub mem_s: Vector<u32>,
-    pub mem_e: Vector<u32>,
-    pub mem_id: Vector<u32>,
+pub(package) struct Spans {
+    pub(package) top_s: Vector<u32>,
+    pub(package) top_e: Vector<u32>,
+    pub(package) top_id: Vector<u32>,
+    pub(package) mem_s: Vector<u32>,
+    pub(package) mem_e: Vector<u32>,
+    pub(package) mem_id: Vector<u32>,
 }
 
 // The previous answer of an owner lookup: consecutive nodes share an owner. Only a leaf
 // answer (a member, or a top-level item without members) is reused: an extend's span holds its
 // members' spans.
 struct Cache {
-    pub m: u32,
-    pub item: u32,
-    pub s: u32,
-    pub e: u32,
-    pub leaf: bool,
+    pub(package) m: u32,
+    pub(package) item: u32,
+    pub(package) s: u32,
+    pub(package) e: u32,
+    pub(package) leaf: bool,
 }
 
 /// The components one reader depends on, found on demand (`visible`): `seen` marks the
@@ -58,7 +58,7 @@ struct Cache {
 /// is dependency-first, so a sweep down from the reader marks each dependency before it
 /// reaches it. A reader pays for the components and edges between it and the lowest target it
 /// asks about, once; a dense row per component would cost components squared bits.
-pub struct Reach {
+pub(package) struct Reach {
     seen: Vector<u64>,
     touched: Vector<u32>, // the words of `seen` that hold a bit
     low: usize,
@@ -156,7 +156,7 @@ const fn owner_at(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, m: u3
 /// function's body is the run ending at its block; a node past every range (a desugar appended
 /// later) falls back to the declaration spans. A reference to a declaration inside the owner's
 /// own ranges (a local, a parameter) is no edge and needs no lookup.
-pub fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mut Vector<u64>) {
+pub(package) fn module_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mut Vector<u64>) {
     if !p.modules.at(m).has_ast {
         return;
     }
@@ -393,7 +393,7 @@ const fn tgt_max(tgt: &Vector<u32>) usize {
 
 /// Open the index after the package index exists: keys and the (module, node) lookup, which
 /// `module_edges` reads. `build` completes it.
-pub fn open(p: &mut loader::Package) {
+pub(package) fn open(p: &mut loader::Package) {
     p.ensure_index();
     let n = p.idx.items.len();
     let nm = p.modules.len();
@@ -507,7 +507,7 @@ pub fn open(p: &mut loader::Package) {
 /// dispatch edge from every item that names a type to every extend of that type (a method the
 /// checker resolves by name has no resolved reference, and a constant fold may call it). Both
 /// keep a callee's component before its caller's, which is what the visibility rule reads.
-pub fn build(p: &mut loader::Package, edges: &Vector<u64>) {
+pub(package) fn build(p: &mut loader::Package, edges: &Vector<u64>) {
     let t0 = plat::now_ns();
     let n = p.idx.items.len();
     // Extends by target type item (CSR): the extend's target resolution, or the alias it names;
@@ -674,7 +674,7 @@ fn builtin_names(p: &loader::Package, sch: &mut loader::ItemSched) {
 /// depends on that extend (`ItemSched.bnames`). The name over-approximates the checker's choice,
 /// which only costs parallelism; the final ranges carry the checker's resolutions instead. Pure over
 /// the module's syntax and the index, so the resolve frontier runs it per task.
-pub fn builtin_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mut Vector<u64>) {
+pub(package) fn builtin_edges(p: &loader::Package, m: usize, sps: &Vector<Spans>, out: &mut Vector<u64>) {
     let names = &p.sched.bnames;
     if names.len() == 0 || !p.modules.at(m).has_ast || p.modules.at(m).prelude {
         return;
@@ -774,7 +774,7 @@ const fn mask_bit(s: str) u64 {
 /// checked in index order; a prelude item is complete before any non-prelude item. Without the
 /// component graph (the language server opens the index but builds no ranges) the readiness
 /// state decides, as the module-order sweep it runs would.
-pub fn visible(p: &loader::Package, reader: loader::ItemId, target: loader::ItemId, r: &mut Reach) bool {
+pub(package) fn visible(p: &loader::Package, reader: loader::ItemId, target: loader::ItemId, r: &mut Reach) bool {
     if target == reader {
         return true;
     }
@@ -798,7 +798,7 @@ pub fn visible(p: &loader::Package, reader: loader::ItemId, target: loader::Item
 /// module-arena node the first item at or after it in node order (members precede their
 /// extend); a body-arena node the function whose body run holds it. ITEM_NONE past every
 /// range (an appended desugar node, an import path).
-pub fn owner_of(p: &loader::Package, m: ModuleId, node: NodeId) loader::ItemId {
+pub(package) fn owner_of(p: &loader::Package, m: ModuleId, node: NodeId) loader::ItemId {
     if !p.sched.built || m as usize + 1 >= p.idx.mod_items.len() {
         return loader::ITEM_NONE;
     }
@@ -846,7 +846,7 @@ pub fn owner_of(p: &loader::Package, m: ModuleId, node: NodeId) loader::ItemId {
 }
 
 /// The serial path: open, every module's edges in module order, build.
-pub fn build_serial(p: &mut loader::Package) {
+pub(package) fn build_serial(p: &mut loader::Package) {
     let t0 = plat::now_ns();
     open(p);
     let t1 = plat::now_ns();
@@ -877,7 +877,7 @@ pub fn build_serial(p: &mut loader::Package) {
 }
 
 /// Every module's declaration spans (the frontier builds them once, before its tasks).
-pub fn spans_all(p: &loader::Package) Vector<Spans> {
+pub(package) fn spans_all(p: &loader::Package) Vector<Spans> {
     let mut sps = Vector::<Spans>::new();
     for m in 0..p.modules.len() {
         sps.push(spans_of(p, m));
@@ -887,7 +887,7 @@ pub fn spans_all(p: &loader::Package) Vector<Spans> {
 
 /// Lay the post-typecheck edges (every module's `module_edges` run at the end of its type check,
 /// with the resolutions the checker added) out as the final ranges.
-pub fn build_final(p: &mut loader::Package, edges: &Vector<u64>) {
+pub(package) fn build_final(p: &mut loader::Package, edges: &Vector<u64>) {
     let n = p.idx.items.len();
     let mut off = Vector::<u32>::new();
     let mut tgt = Vector::<u32>::new();
@@ -900,7 +900,7 @@ pub fn build_final(p: &mut loader::Package, edges: &Vector<u64>) {
 /// Refine the index after the checks: signature hashes and the final dependency ranges (the
 /// resolutions typecheck added, the engine's dynamic body edges), then publish the dynamic
 /// edge set empty. Batch builds only.
-pub fn finalize(p: &mut loader::Package) {
+pub(package) fn finalize(p: &mut loader::Package) {
     if !p.sched.built || p.sched.finalized {
         return;
     }
@@ -1141,7 +1141,7 @@ fn ty_hash(p: &loader::Package, sps: &Vector<Spans>, c: &mut Cache, m: ModuleId,
 
 // Tarjan's algorithm, iterative, over the CSR graph: `comp[i]` is the component of item `i`,
 // components numbered after every component they reference (dependency-first).
-pub fn condense(n: usize, off: &Vector<u32>, tgt: &Vector<u32>, comp: &mut Vector<u32>) usize {
+pub(package) fn condense(n: usize, off: &Vector<u32>, tgt: &Vector<u32>, comp: &mut Vector<u32>) usize {
     let mut index = Vector::<u32>::new();
     index.resize_default(n);
     let mut low = Vector::<u32>::new();
@@ -1213,7 +1213,7 @@ pub fn condense(n: usize, off: &Vector<u32>, tgt: &Vector<u32>, comp: &mut Vecto
 
 /// A digest of the index (keys, hashes, precheck and final edges, components, states) for the
 /// serial/parallel identity gate.
-pub const fn digest(p: &loader::Package) u64 {
+pub(package) const fn digest(p: &loader::Package) u64 {
     let s = &p.sched;
     let mut h = FNV_OFF;
     for i in 0..s.key.len() {
@@ -1229,7 +1229,7 @@ pub const fn digest(p: &loader::Package) u64 {
 }
 
 /// Add `ns` to module `m`'s per-module cost row `k` (0 = emission seed, 1 = always-panics).
-pub fn mod_cost(p: &mut loader::Package, m: usize, k: usize, ns: u64) {
+pub(package) fn mod_cost(p: &mut loader::Package, m: usize, k: usize, ns: u64) {
     let want = 2 * p.modules.len();
     if p.icost_mod.len() < want {
         p.icost_mod.resize_default(want);
@@ -1247,10 +1247,10 @@ fn makespan(n: usize, p: usize, cost: &Vector<u64>, dep_off: &Vector<u32>, deps:
 
 /// The ready-job width a schedule saw: the largest and the average count of ready jobs at the
 /// moments a worker picked one.
-pub struct Width {
-    pub max: u64,
-    pub sum: u64,
-    pub picks: u64,
+pub(package) struct Width {
+    pub(package) max: u64,
+    pub(package) sum: u64,
+    pub(package) picks: u64,
 }
 
 fn makespan_w(
@@ -1316,7 +1316,7 @@ fn makespan_w(
 }
 
 /// Push `v` onto the binary min-heap `h`.
-pub fn heap_push(h: &mut Vector<u64>, v: u64) {
+pub(package) fn heap_push(h: &mut Vector<u64>, v: u64) {
     h.push(v);
     let mut i = h.len() - 1;
     while i > 0 && h[(i - 1) / 2] > h[i] {
@@ -1328,7 +1328,7 @@ pub fn heap_push(h: &mut Vector<u64>, v: u64) {
 }
 
 /// Remove and return the least value of the non-empty binary min-heap `h`.
-pub fn heap_pop(h: &mut Vector<u64>) u64 {
+pub(package) fn heap_pop(h: &mut Vector<u64>) u64 {
     let top = h[0];
     let last = h[h.len() - 1];
     h.truncate(h.len() - 1);
@@ -1365,7 +1365,7 @@ const fn ms(ns: u64) f64 {
 /// SC_ITEM_STATS: the measurement behind the index's decision gate. The graph, the typecheck
 /// schedule prediction over the measured per-item costs, the dynamic evaluation edges and the
 /// per-body and per-module frontier balances. `task_ns` is the measured cost of one runtime task.
-pub fn report(p: &mut loader::Package, task_ns: u64) {
+pub(package) fn report(p: &mut loader::Package, task_ns: u64) {
     finalize(p);
     let s = &p.sched;
     let n = p.idx.items.len();
@@ -1567,7 +1567,7 @@ const fn sort_longest_first(v: &mut Vector<u64>) {
 
 /// Import-SCC levels into `lvl` (one per SCC): 1 + the highest level among the imported SCCs. With
 /// `lift`, every non-prelude SCC also sits above every prelude SCC.
-pub fn import_levels(p: &loader::Package, lift: bool, lvl: &mut Vector<u32>) {
+pub(package) fn import_levels(p: &loader::Package, lift: bool, lvl: &mut Vector<u32>) {
     let n = p.modules.len();
     let mut nscc: usize = 0;
     for i in 0..n {
@@ -1647,13 +1647,13 @@ fn module_schedule_ns(p: &loader::Package, mcost: &Vector<u64>) u64 {
 }
 
 extend Reach {
-    pub const fn new() Reach {
+    pub(package) const fn new() Reach {
         return Reach { seen: Vector::<u64>::new(), touched: Vector::<u32>::new(), low: 0, src: NONE };
     }
 
     /// Read as a check of component `c`. A component's items are checked in one job, so the
     /// dependencies found for one item serve the next.
-    pub fn of_comp(self: &mut Self, p: &loader::Package, c: u32) {
+    pub(package) fn of_comp(self: &mut Self, p: &loader::Package, c: u32) {
         if self.src == c {
             return;
         }
@@ -1665,7 +1665,7 @@ extend Reach {
 
     /// Read as a check after every item of module `m`: the module's own components and every
     /// component they depend on.
-    pub fn of_module(self: &mut Self, p: &loader::Package, m: usize) {
+    pub(package) fn of_module(self: &mut Self, p: &loader::Package, m: usize) {
         self.reset(p);
         for it in p.idx.mod_items[m] as usize..p.idx.mod_items[m + 1] as usize {
             let c = p.sched.comp[it] as usize;
@@ -1676,7 +1676,7 @@ extend Reach {
 
     /// Does the reader depend on component `c` (or own it)? Marks the dependencies of every seen
     /// component above `c`, highest first.
-    pub fn has(self: &mut Self, p: &loader::Package, c: usize) bool {
+    pub(package) fn has(self: &mut Self, p: &loader::Package, c: usize) bool {
         if self.low > c + 1 {
             let top = self.low - 1 >> 6;
             let bot = c + 1 >> 6;

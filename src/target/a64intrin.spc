@@ -5,7 +5,7 @@
 // one-call wrapper of each; `tests/codegen/asm_test.spc` checks each assembles to clang's bytes.
 
 /// The rows, by name: the intrinsic and its instructions.
-pub const ROWS: [(str<'static>, str<'static>); 645] = [
+pub(package) const ROWS: [(str<'static>, str<'static>); 645] = [
     ("__crc32b", "crc32b w0, w0, w1"),
     ("__crc32cb", "crc32cb w0, w0, w1"),
     ("__crc32cd", "crc32cx w0, w0, x1"),

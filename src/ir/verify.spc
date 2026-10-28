@@ -10,12 +10,12 @@ import module::loader as loader;
 // check result. Looked up once per verified body; a null package skips the def-chain rules
 // (structural-only verification, used by unit fixtures).
 struct SafeViews {
-    pub s_str: DefId,
-    pub s_slice: DefId,
-    pub s_slice_mut: DefId,
-    pub s_vector: DefId,
-    pub s_string: DefId,
-    pub s_array: DefId,
+    pub(package) s_str: DefId,
+    pub(package) s_slice: DefId,
+    pub(package) s_slice_mut: DefId,
+    pub(package) s_vector: DefId,
+    pub(package) s_string: DefId,
+    pub(package) s_array: DefId,
 }
 
 const fn hit_def(h: loader::LookupHit) DefId {
@@ -347,7 +347,7 @@ fn lane_rules(da: &Ast, b: &ir::CoreBody, r: &ir::Rvalue, tys: &[TypeId; 4], v: 
 }
 
 /// First violated rule as a static string, or "" when the body verifies.
-pub fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) str<'static> {
+pub(package) fn verify(b: &ir::CoreBody, type_bound: usize, pkg: *const loader::Package) str<'static> {
     if b.blocks.len() == 0 {
         return "no-blocks";
     }

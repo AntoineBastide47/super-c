@@ -58,7 +58,7 @@ import lir::verify as lv;
 import ir::core as core;
 
 /// A loop peels at most MAX_PEEL times.
-pub const MAX_PEEL: u32 = 32;
+pub(package) const MAX_PEEL: u32 = 32;
 // `LoopOpt::residual` follows a chain of RESIDUAL_PASSES instructions of the counter.
 const RESIDUAL_PASSES: u32 = 4;
 // At most MAX_OUT of a loop's values are used outside it (`LoopOpt::close`).
@@ -83,7 +83,7 @@ const VK_RED: u8 = 5; // a reduction's update
 const VK_INV: u8 = 6; // a load of an address the loop does not define, which no store of it touches
 
 /// The peeling's scratch, reused from body to body.
-pub struct LoopOpt {
+pub(package) struct LoopOpt {
     owner: Vector<u32>, // per instruction, its block
     powner: Vector<u32>, // per block parameter, its block
     inl: Vector<bool>, // per block, whether it is in the loop at hand
@@ -184,11 +184,11 @@ pub struct LoopOpt {
 /// The optimizer's alias classes (`lir::opt::Opt::classes`) for the loop transforms: per instruction its
 /// access's class (`acc`, CL_MANY for none), the scope classes it belongs to (`member`, empty when the
 /// body has no scope), the scope classes (`scoped`, bits), and per class its roots' block (`root`).
-pub struct Classes<'a> {
-    pub acc: Slice<'a, u8>,
-    pub member: Slice<'a, u64>,
-    pub scoped: u64,
-    pub root: Slice<'a, u32>,
+pub(package) struct Classes<'a> {
+    pub(package) acc: Slice<'a, u8>,
+    pub(package) member: Slice<'a, u64>,
+    pub(package) scoped: u64,
+    pub(package) root: Slice<'a, u32>,
 }
 
 extend Classes as Copy {}
@@ -197,19 +197,19 @@ extend Classes as Copy {}
 /// versioning on bounds checks and unswitching (the loop itself), rotation (the header's copy), final
 /// values (the copies of the iterations they take); the vectors a vectorized loop interleaves (0: no
 /// vectorization).
-pub struct Budgets {
-    pub peel: u32,
-    pub version: u32,
-    pub unswitch: u32,
-    pub rotate: u32,
-    pub vector: u32,
-    pub fin: u32,
+pub(package) struct Budgets {
+    pub(package) peel: u32,
+    pub(package) version: u32,
+    pub(package) unswitch: u32,
+    pub(package) rotate: u32,
+    pub(package) vector: u32,
+    pub(package) fin: u32,
 }
 
 extend Budgets as Copy {}
 
 extend LoopOpt {
-    pub fn new() LoopOpt {
+    pub(package) fn new() LoopOpt {
         return LoopOpt {
             owner: Vector::<u32>::new(),
             powner: Vector::<u32>::new(),
@@ -295,7 +295,7 @@ extend LoopOpt {
     /// (`FM_*`), and `vec` the bytes of the widest vector the target holds in a register (0: none). A loop
     /// goes when its final values have a closed form, else peels when its trip count is known, else
     /// vectorizes, else versions on its bounds checks, else unswitches. Whether any changed.
-    pub fn run(
+    pub(package) fn run(
         self: &mut Self,
         b: &mut Body,
         ptr: u32,
@@ -379,7 +379,7 @@ extend LoopOpt {
 
     /// Rotate the innermost loops of `b` whose header holds at most `max` instructions before its branch
     /// (the tables as `run` takes them). Whether any changed.
-    pub fn rotate(
+    pub(package) fn rotate(
         self: &mut Self,
         b: &mut Body,
         max: u32,
@@ -3507,20 +3507,20 @@ fn fill_bool(v: &mut Vector<bool>, n: usize, x: bool) {
 // polynomial of degree `deg` with integer values modulo 2^`m`; with `rng`, that polynomial's values lie
 // in [`lo`, `hi`] and the value equals it modulo 2^(its bits).
 struct Poly {
-    pub st: u8,
-    pub deg: u8,
-    pub m: u8,
-    pub rng: bool,
-    pub lo: i64,
-    pub hi: i64,
+    pub(package) st: u8,
+    pub(package) deg: u8,
+    pub(package) m: u8,
+    pub(package) rng: bool,
+    pub(package) lo: i64,
+    pub(package) hi: i64,
 }
 
 extend Poly as Copy {}
 
 // A value as `coef` times a header parameter plus `rest` (`LoopOpt::lin`).
 struct Lin {
-    pub coef: i64,
-    pub rest: Poly,
+    pub(package) coef: i64,
+    pub(package) rest: Poly,
 }
 
 extend Lin as Copy {}

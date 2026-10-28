@@ -11,7 +11,7 @@ import lir::ir as *;
 import codegen::abi as *;
 
 /// Integer argument register of position `k` (0 to 3): rcx, rdx, r8, r9.
-pub const fn gp_arg(k: u32) u8 {
+pub(package) const fn gp_arg(k: u32) u8 {
     return (0x09080201u32 >> 8 * k & 0xFF) as u8;
 }
 
@@ -30,7 +30,7 @@ fn size_of(b: &Body, pt: u32, ptr: u32) u32 {
 
 /// The layout of signature `sig` of body `b` (`ptr`-byte pointers). C passes every vector as a struct,
 /// so the package's `vec_regs` changes nothing.
-pub fn classify(b: &Body, sig: u32, ptr: u32, out: &mut CallLayout) {
+pub(package) fn classify(b: &Body, sig: u32, ptr: u32, out: &mut CallLayout) {
     out.locs.truncate(0);
     out.parts.truncate(0);
     let np = b.pool[sig as usize];

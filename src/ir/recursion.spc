@@ -35,9 +35,9 @@ import utils::errors as diag;
 const NONE: u32 = 0xFFFFFFFF;
 
 /// What a summary point does (`Point.kind`).
-pub const PK_END: u8 = 0; // a path of the body ends
-pub const PK_CALL: u8 = 1; // a call of `callee`; control continues at the successors once it returns
-pub const PK_BRANCH: u8 = 2; // control continues at one of the successors
+pub(package) const PK_END: u8 = 0; // a path of the body ends
+pub(package) const PK_CALL: u8 = 1; // a call of `callee`; control continues at the successors once it returns
+pub(package) const PK_BRANCH: u8 = 2; // control continues at one of the successors
 
 // The role of a block while a body is summarized (`Summarizer.role`): a point kind, or one of these.
 const R_PASS: u8 = 3; // control passes to the block's `t0`
@@ -52,51 +52,51 @@ const REP_NONE: u32 = 2;
 const REP_BLOCK: u32 = 3;
 
 /// One point of a summarized body.
-pub struct Point {
-    pub callee: DefId, // PK_CALL: the function called
-    pub span: tok::Span, // PK_CALL: the call
-    pub succ_start: u32, // its successors in `Sums.succ`, as points of its function
-    pub succ_len: u32,
-    pub kind: u8,
+pub(package) struct Point {
+    pub(package) callee: DefId, // PK_CALL: the function called
+    pub(package) span: tok::Span, // PK_CALL: the call
+    pub(package) succ_start: u32, // its successors in `Sums.succ`, as points of its function
+    pub(package) succ_len: u32,
+    pub(package) kind: u8,
 }
 
 /// The summary of one function's body.
-pub struct FnSum {
-    pub node: NodeId, // the function
-    pub first: u32, // its points in `Sums.points`
-    pub count: u32,
-    pub entry: u32, // the point its paths reach first, NONE when none reaches one
+pub(package) struct FnSum {
+    pub(package) node: NodeId, // the function
+    pub(package) first: u32, // its points in `Sums.points`
+    pub(package) count: u32,
+    pub(package) entry: u32, // the point its paths reach first, NONE when none reaches one
 }
 
 /// The summaries of one module's functions.
-pub struct Sums {
-    pub fns: Vector<FnSum>,
-    pub points: Vector<Point>,
-    pub succ: Vector<u32>,
+pub(package) struct Sums {
+    pub(package) fns: Vector<FnSum>,
+    pub(package) points: Vector<Point>,
+    pub(package) succ: Vector<u32>,
 }
 
 extend Sums {
-    pub fn new() Sums {
+    pub(package) fn new() Sums {
         return Sums { fns: Vector::<FnSum>::new(), points: Vector::<Point>::new(), succ: Vector::<u32>::new() };
     }
 
     /// Heap bytes held (capacity).
-    pub const fn retained_bytes(self: &Self) usize {
+    pub(package) const fn retained_bytes(self: &Self) usize {
         return self.fns.capacity() * sizeof(FnSum) + self.points.capacity() * sizeof(Point) + self.succ.capacity() * 4;
     }
 }
 
 /// The language server's recursion state of a package: per module, the summaries of its last borrow
 /// round, and whether one changed since the check last ran.
-pub struct Summaries {
-    pub reported: Vector<bool>, // per module: the server borrow checks it, so the check reports it
-    pub mods: Vector<Sums>, // per module; empty before its first borrow round
-    pub stale: bool,
+pub(package) struct Summaries {
+    pub(package) reported: Vector<bool>, // per module: the server borrow checks it, so the check reports it
+    pub(package) mods: Vector<Sums>, // per module; empty before its first borrow round
+    pub(package) stale: bool,
 }
 
 extend Summaries {
     /// Heap bytes held (capacity).
-    pub const fn retained_bytes(self: &Self) usize {
+    pub(package) const fn retained_bytes(self: &Self) usize {
         let mut b = self.reported.capacity() + self.mods.capacity() * sizeof(Sums);
         for m in 0..self.mods.len() {
             b += self.mods.at(m).retained_bytes();
@@ -106,7 +106,7 @@ extend Summaries {
 }
 
 /// Summarizes bodies into one `Sums`, with scratch kept across bodies.
-pub struct Summarizer {
+pub(package) struct Summarizer {
     reported: *const Vector<bool>, // per module: a call of one of its functions is a point
     out: Sums,
     role: Vector<u8>, // per block
@@ -118,7 +118,7 @@ pub struct Summarizer {
 
 extend Summarizer {
     /// A summarizer whose call points name the functions of the modules `reported` marks.
-    pub fn new(reported: *const Vector<bool>) Summarizer {
+    pub(package) fn new(reported: *const Vector<bool>) Summarizer {
         return Summarizer {
             reported: reported,
             out: Sums::new(),
@@ -131,12 +131,12 @@ extend Summarizer {
     }
 
     /// The summaries added since the last take.
-    pub fn take(self: &mut Self) Sums {
+    pub(package) fn take(self: &mut Self) Sums {
         return replace(&mut self.out, Sums::new());
     }
 
     /// Add the summary of `b`, the body of a function or method (not of a closure).
-    pub fn add(self: &mut Self, p: &loader::Package, b: &ir::CoreBody) {
+    pub(package) fn add(self: &mut Self, p: &loader::Package, b: &ir::CoreBody) {
         let nb = b.blocks.len();
         let rmods = unsafe &*self.reported;
         // A body without a call of a reported function is in no cycle: it needs no summary, and a call
@@ -278,50 +278,50 @@ extend Summarizer {
 
 // A reported function or method with a summary.
 struct Member {
-    pub item: u32, // its ItemMeta in the package index
-    pub module: u32,
-    pub fi: u32, // its summary in `sums[module].fns`
-    pub edge_start: u32, // its callees among the members, in `Recur.edges`
-    pub edge_end: u32,
-    pub index: u32, // Tarjan's visit index, NONE before the visit
-    pub low: u32,
-    pub comp: u32, // its strongly connected component
-    pub seen_start: u32, // its points in `Recur.seen`, during its component's walk
-    pub wait_head: u32, // the parked calls of it, in `Recur.waits`
-    pub park: u32, // the point of its first parked call of a member that does not end, NONE when none
-    pub on_stack: bool,
-    pub cyclic: bool, // its component has a cycle
-    pub ends: bool,
+    pub(package) item: u32, // its ItemMeta in the package index
+    pub(package) module: u32,
+    pub(package) fi: u32, // its summary in `sums[module].fns`
+    pub(package) edge_start: u32, // its callees among the members, in `Recur.edges`
+    pub(package) edge_end: u32,
+    pub(package) index: u32, // Tarjan's visit index, NONE before the visit
+    pub(package) low: u32,
+    pub(package) comp: u32, // its strongly connected component
+    pub(package) seen_start: u32, // its points in `Recur.seen`, during its component's walk
+    pub(package) wait_head: u32, // the parked calls of it, in `Recur.waits`
+    pub(package) park: u32, // the point of its first parked call of a member that does not end, NONE when none
+    pub(package) on_stack: bool,
+    pub(package) cyclic: bool, // its component has a cycle
+    pub(package) ends: bool,
 }
 
 // A call of member `on` at point `point` of member `caller`, waiting until `on` ends.
 struct Wait {
-    pub caller: u32,
-    pub point: u32,
-    pub next: u32,
+    pub(package) caller: u32,
+    pub(package) point: u32,
+    pub(package) next: u32,
 }
 
 struct Recur {
-    pub members: Vector<Member>,
-    pub ix: Map<u64, u32>, // def_key(module, node) -> member
-    pub edges: Vector<u32>,
-    pub comp_members: Vector<u32>, // the members of each component, component after component
-    pub comp_start: Vector<u32>, // components + 1 offsets into `comp_members`
-    pub seen: Vector<bool>,
-    pub work: Vector<u64>, // member << 32 | point
-    pub waits: Vector<Wait>,
+    pub(package) members: Vector<Member>,
+    pub(package) ix: Map<u64, u32>, // def_key(module, node) -> member
+    pub(package) edges: Vector<u32>,
+    pub(package) comp_members: Vector<u32>, // the members of each component, component after component
+    pub(package) comp_start: Vector<u32>, // components + 1 offsets into `comp_members`
+    pub(package) seen: Vector<bool>,
+    pub(package) work: Vector<u64>, // member << 32 | point
+    pub(package) waits: Vector<Wait>,
 }
 
 /// One module's unbounded-recursion errors (`check`), finalized.
-pub struct Report {
-    pub module: u32,
-    pub errs: diag::Errors,
+pub(package) struct Report {
+    pub(package) module: u32,
+    pub(package) errs: diag::Errors,
 }
 
 /// Report every function or method of a module `reported` marks whose summary in `sums` (indexed by
 /// module) shows it cannot end without calling itself again, directly or through a cycle (see the top
 /// of this file). One report per module with an error, in module order.
-pub fn check(p: &loader::Package, sums: &Vector<Sums>, reported: &Vector<bool>) Vector<Report> {
+pub(package) fn check(p: &loader::Package, sums: &Vector<Sums>, reported: &Vector<bool>) Vector<Report> {
     assert(sums.len() == p.modules.len() && reported.len() == p.modules.len(), "one summary set per module");
     let mut r = Recur::new();
     r.collect(p, sums, reported);
@@ -344,7 +344,7 @@ pub fn check(p: &loader::Package, sums: &Vector<Sums>, reported: &Vector<bool>) 
 /// the call terminators and the converted self calls of every kept body, a superset of the calls the
 /// summaries keep, so every function `check` finds in a cycle is summarized, and a call of one that is
 /// not passes there as a call of a member of another component does.
-pub fn check_kept(p: &loader::Package, keep: &irl::Keep, reported: &Vector<bool>) bool {
+pub(package) fn check_kept(p: &loader::Package, keep: &irl::Keep, reported: &Vector<bool>) bool {
     let mut g = Recur::new();
     for m in 0..p.modules.len() {
         if !reported[m] || !p.modules.at(m).has_ast {

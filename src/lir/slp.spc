@@ -33,21 +33,21 @@ const PK_SPLAT: u8 = 4; // one value in every lane
 const PK_GATHER: u8 = 5; // any values
 
 struct Pack {
-    pub kind: u8,
-    pub ty: u8, // the lanes' type
-    pub n: u32, // the lane count
-    pub lane: u32, // its lanes: `lv[lane .. lane + n]`
-    pub a: u32, // PK_OP: the operand packs (`b` NONE for a unary operation)
-    pub b: u32,
-    pub blk: u32, // PK_GATHER: the block it runs in, right before instruction `at` (NONE: at its end)
-    pub at: u32,
-    pub vec: Value, // its vector once made (VNONE: not yet)
+    pub(package) kind: u8,
+    pub(package) ty: u8, // the lanes' type
+    pub(package) n: u32, // the lane count
+    pub(package) lane: u32, // its lanes: `lv[lane .. lane + n]`
+    pub(package) a: u32, // PK_OP: the operand packs (`b` NONE for a unary operation)
+    pub(package) b: u32,
+    pub(package) blk: u32, // PK_GATHER: the block it runs in, right before instruction `at` (NONE: at its end)
+    pub(package) at: u32,
+    pub(package) vec: Value, // its vector once made (VNONE: not yet)
 }
 
 extend Pack as Copy {}
 
 /// The SLP's scratch, reused from body to body.
-pub struct Slp {
+pub(package) struct Slp {
     ptr: u32,
     packs: Vector<Pack>,
     lv: Vector<Value>,
@@ -70,15 +70,15 @@ pub struct Slp {
     edges: Vector<u32>,
     fixed: Vector<bool>, // per instruction made, whether it reads vectors (no lane's scalar)
     /// Instruction << 32 | an instruction made to run right before it, in order.
-    pub pre: Vector<u64>,
+    pub(package) pre: Vector<u64>,
     /// Block << 32 | an instruction made to run at its end before its terminator, in order.
-    pub tail: Vector<u64>,
+    pub(package) tail: Vector<u64>,
     /// Per instruction made, its block.
-    pub blk: Vector<u32>,
+    pub(package) blk: Vector<u32>,
 }
 
 extend Slp {
-    pub fn new() Slp {
+    pub(package) fn new() Slp {
         return Slp {
             ptr: 8,
             packs: Vector::<Pack>::new(),
@@ -107,7 +107,7 @@ extend Slp {
 
     /// The packs of body `b` (`ptr` its pointer size, `w` per block the weight of an instruction there):
     /// whether the instructions they save outweigh the splats and gathers they add. `b` stays as it is.
-    pub fn plan(self: &mut Self, b: &Body, ptr: u32, w: []u64) bool {
+    pub(package) fn plan(self: &mut Self, b: &Body, ptr: u32, w: []u64) bool {
         self.ptr = ptr;
         let ni = b.insts.len();
         let np = b.params.len();
@@ -191,7 +191,7 @@ extend Slp {
 
     /// Make the planned packs' vectors in `b`: the instructions made follow `b`'s, placed by `pre`, `tail`
     /// and `blk`; a seed's stores become one, the vector parameters' scalar uses read their lanes.
-    pub fn emit(self: &mut Self, b: &mut Body) {
+    pub(package) fn emit(self: &mut Self, b: &mut Body) {
         let ni = b.insts.len();
         self.pre.truncate(0);
         self.tail.truncate(0);

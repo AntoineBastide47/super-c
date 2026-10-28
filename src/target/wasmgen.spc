@@ -39,8 +39,8 @@ const LB_LOOP: u8 = 1;
 const LB_IF: u8 = 2;
 
 struct Label {
-    pub kind: u8,
-    pub blk: u32,
+    pub(package) kind: u8,
+    pub(package) blk: u32,
 }
 
 extend Label as Copy {}
@@ -55,17 +55,17 @@ const TK_EDGE: u8 = 3;
 const TK_SWITCH: u8 = 4;
 
 struct Task {
-    pub kind: u8,
-    pub a: u32,
-    pub b: u32,
-    pub x: u32, // TK_SWITCH: the switch's block
+    pub(package) kind: u8,
+    pub(package) a: u32,
+    pub(package) b: u32,
+    pub(package) x: u32, // TK_SWITCH: the switch's block
 }
 
 extend Task as Copy {}
 
 /// The code generator of one object.
-pub struct Gen {
-    pub err: String, // the first refusal, empty when every body compiled
+pub(package) struct Gen {
+    pub(package) err: String, // the first refusal, empty when every body compiled
     pkg: *const Package,
     o: *mut wo::WObj,
     vregs: u32,
@@ -161,7 +161,7 @@ const fn narrow_mask(t: u8) u32 {
 }
 
 extend Gen {
-    pub fn new(pkg: &Package, o: &mut wo::WObj) Gen {
+    pub(package) fn new(pkg: &Package, o: &mut wo::WObj) Gen {
         let mut free = Vector::<Vector<u32>>::new();
         let mut scratch = Vector::<Vector<u32>>::new();
         let mut nscr = Vector::<u32>::new();
@@ -393,7 +393,7 @@ extend Gen {
 extend Gen {
     /// Compile the body of package function symbol `s` into the object. False (with `err`) when the body
     /// uses what the generator does not compile.
-    pub fn func(self: &mut Self, s: u32, local: bool) bool {
+    pub(package) fn func(self: &mut Self, s: u32, local: bool) bool {
         self.local = local;
         let ps = self.p().syms[s as usize];
         self.bp = &self.p().bodies[ps.def as usize];
@@ -3567,7 +3567,7 @@ const fn reads_arg(tpl: str, k: u32) bool {
 
 extend Gen {
     /// Define package data symbol `s` as a segment of the object.
-    pub fn data(self: &mut Self, s: u32, local: bool) bool {
+    pub(package) fn data(self: &mut Self, s: u32, local: bool) bool {
         let p = self.p();
         let ps = p.syms[s as usize];
         let d = p.data[ps.def as usize];

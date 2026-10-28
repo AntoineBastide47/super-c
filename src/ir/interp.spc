@@ -28,15 +28,15 @@ const FE_OUT: u8 = 0;
 const FE_OK: u8 = 1;
 const FE_UNKNOWN: u8 = 2;
 
-pub const IV_NONE: u8 = 0; // not evaluable (unsupported construct, trap, or budget)
-pub const IV_INT: u8 = 1;
-pub const IV_BOOL: u8 = 2;
-pub const IV_FLOAT: u8 = 3;
-pub const IV_UNIT: u8 = 4;
-pub const IV_OBJ: u8 = 5; // aggregate: 1-based id into the object store in `i`
-pub const IV_STR: u8 = 6; // string literal: source span in `i` (start << 32 | end)
-pub const IV_PTR: u8 = 7; // abstract pointer: object id << 32 | slot offset in `i` (id 0 = null)
-pub const IV_FN: u8 = 8; // function value: module << 32 | fn node in `i`
+pub(package) const IV_NONE: u8 = 0; // not evaluable (unsupported construct, trap, or budget)
+pub(package) const IV_INT: u8 = 1;
+pub(package) const IV_BOOL: u8 = 2;
+pub(package) const IV_FLOAT: u8 = 3;
+pub(package) const IV_UNIT: u8 = 4;
+pub(package) const IV_OBJ: u8 = 5; // aggregate: 1-based id into the object store in `i`
+pub(package) const IV_STR: u8 = 6; // string literal: source span in `i` (start << 32 | end)
+pub(package) const IV_PTR: u8 = 7; // abstract pointer: object id << 32 | slot offset in `i` (id 0 = null)
+pub(package) const IV_FN: u8 = 8; // function value: module << 32 | fn node in `i`
 // The instance arguments an object keeps: every argument of a generic aggregate (`TyInstance.args`).
 const OBJ_ARGS: usize = 8;
 // The operator of each vector comparison code, from `ir::SIMD_CMP_EQ` on.
@@ -50,39 +50,39 @@ const CMP_TOKS: [TokenType; 6] = [
 ];
 
 // Trap kinds (identical taxonomy and messages to the established evaluator).
-pub const IT_TRAP_NONE: u8 = 0;
-pub const IT_TRAP_BUDGET_STEPS: u8 = 1;
-pub const IT_TRAP_BUDGET_MEMORY: u8 = 2;
-pub const IT_TRAP_BUDGET_DEPTH: u8 = 3;
-pub const IT_TRAP_CYCLE: u8 = 4;
-pub const IT_TRAP_TOO_LARGE: u8 = 5;
-pub const IT_TRAP_UNSUPPORTED: u8 = 6;
-pub const IT_TRAP_PANIC: u8 = 7;
-pub const IT_TRAP_UB_DIV_ZERO: u8 = 8;
-pub const IT_TRAP_UB_OVERFLOW: u8 = 9;
-pub const IT_TRAP_UB_SHIFT: u8 = 10;
-pub const IT_TRAP_UB_NULL_DEREF: u8 = 11;
-pub const IT_TRAP_UB_USE_AFTER_FREE: u8 = 12;
-pub const IT_TRAP_UB_DOUBLE_FREE: u8 = 13;
-pub const IT_TRAP_UB_OOB: u8 = 14;
+pub(package) const IT_TRAP_NONE: u8 = 0;
+pub(package) const IT_TRAP_BUDGET_STEPS: u8 = 1;
+pub(package) const IT_TRAP_BUDGET_MEMORY: u8 = 2;
+pub(package) const IT_TRAP_BUDGET_DEPTH: u8 = 3;
+pub(package) const IT_TRAP_CYCLE: u8 = 4;
+pub(package) const IT_TRAP_TOO_LARGE: u8 = 5;
+pub(package) const IT_TRAP_UNSUPPORTED: u8 = 6;
+pub(package) const IT_TRAP_PANIC: u8 = 7;
+pub(package) const IT_TRAP_UB_DIV_ZERO: u8 = 8;
+pub(package) const IT_TRAP_UB_OVERFLOW: u8 = 9;
+pub(package) const IT_TRAP_UB_SHIFT: u8 = 10;
+pub(package) const IT_TRAP_UB_NULL_DEREF: u8 = 11;
+pub(package) const IT_TRAP_UB_USE_AFTER_FREE: u8 = 12;
+pub(package) const IT_TRAP_UB_DOUBLE_FREE: u8 = 13;
+pub(package) const IT_TRAP_UB_OOB: u8 = 14;
 
-pub const I64_MIN: i64 = 0x8000000000000000u64 as i64;
-pub const I64_MAX: i64 = 0x7FFFFFFFFFFFFFFFu64 as i64;
-pub const F64_MAX: f64 = 1.7976931348623157e308;
+pub(package) const I64_MIN: i64 = 0x8000000000000000u64 as i64;
+pub(package) const I64_MAX: i64 = 0x7FFFFFFFFFFFFFFFu64 as i64;
+pub(package) const F64_MAX: f64 = 1.7976931348623157e308;
 
-pub const EV_EVALUATING: u8 = 250; // ememo sentinel: fold in flight (re-entry = cycle)
-pub const EV_AGG_OK: u8 = 251; // ememo: known non-scalar success
+pub(package) const EV_EVALUATING: u8 = 250; // ememo sentinel: fold in flight (re-entry = cycle)
+pub(package) const EV_AGG_OK: u8 = 251; // ememo: known non-scalar success
 
-pub const fn it_trap_is_ub(k: u8) bool {
+pub(package) const fn it_trap_is_ub(k: u8) bool {
     return k >= IT_TRAP_UB_DIV_ZERO;
 }
 
 // Effect-summary verdicts (the fx scanner): NO must imply evaluation is certain to fail.
-pub const FX_UNKNOWN: u8 = 0;
-pub const FX_YES: u8 = 1;
-pub const FX_MAYBE: u8 = 2;
-pub const FX_NO: u8 = 3;
-pub const FX_ONSTACK: u8 = 4;
+pub(package) const FX_UNKNOWN: u8 = 0;
+pub(package) const FX_YES: u8 = 1;
+pub(package) const FX_MAYBE: u8 = 2;
+pub(package) const FX_NO: u8 = 3;
+pub(package) const FX_ONSTACK: u8 = 4;
 
 // body_slot tag: the slot names a kept body of the view, not a box of `bodies`.
 // The fx table row of (module, node): the module arena's row, or the body arena's.
@@ -107,7 +107,7 @@ const fn plain_key(m: ModuleId, fnode: NodeId) u64 {
     return bkey;
 }
 
-pub const fn fx_meet(a: u8, b: u8) u8 {
+pub(package) const fn fx_meet(a: u8, b: u8) u8 {
     if a == FX_NO || b == FX_NO {
         return FX_NO;
     }
@@ -118,12 +118,12 @@ pub const fn fx_meet(a: u8, b: u8) u8 {
 }
 
 /// The recorded disqualifying site for a shallow FX_NO verdict.
-pub struct FxNo<'a> {
-    pub site: NodeId,
-    pub why: str<'a>,
+pub(package) struct FxNo<'a> {
+    pub(package) site: NodeId,
+    pub(package) why: str<'a>,
 }
 
-pub const IT_MAX_FRAMES: u32 = 48;
+pub(package) const IT_MAX_FRAMES: u32 = 48;
 // Referenced constants evaluated inside each other: the evaluation that reaches IT_ITEM_NEST
 // evaluates its remaining dependencies iteratively (`prefetch_items`). A constant it cannot find
 // in a lowered initializer (reached through a function body or a lowering's fold), and a fold a
@@ -135,109 +135,109 @@ pub const IT_MAX_FRAMES: u32 = 48;
 const IT_ITEM_NEST: usize = 16;
 const IT_DEFER_DEPTH: u32 = 64;
 const IT_ITEM_MAX_NEST: u32 = 64;
-pub const IT_DEFAULT_STEPS: u32 = 2097152; // 1 << 21
+pub(package) const IT_DEFAULT_STEPS: u32 = 2097152; // 1 << 21
 // The steps of one always-panics probe (`lint_body`): 1 << 16, below the 80k to 134k steps the
 // object count limit the memory budget replaced gave the heaviest probes of a vector-math build.
 const IT_PROBE_STEPS: u32 = 65536;
-pub const IT_DEFAULT_SLOTS: u64 = 4194304; // 1 << 22 IVal slots of abstract memory (96 MiB)
+pub(package) const IT_DEFAULT_SLOTS: u64 = 4194304; // 1 << 22 IVal slots of abstract memory (96 MiB)
 const IT_RETAIN_SLOTS: u64 = 262144; // 1 << 18 slots (6 MiB) of dead-object storage kept between evaluations
 const CLONE_MAX_DEPTH: i32 = 32;
 
 /// A constant's failed speculative evaluation (`item_speculate`): its trap when it set the first
 /// one (`own`), the steps it ran to it, and the frames it pushed (`item_fail_frames[fstart..]`).
-pub struct ItemFail {
-    pub trap: str<'static>,
-    pub kind: u8,
-    pub own: bool,
-    pub in_constfn: bool,
-    pub steps: u32,
-    pub fstart: u32,
-    pub flen: u32,
+pub(package) struct ItemFail {
+    pub(package) trap: str<'static>,
+    pub(package) kind: u8,
+    pub(package) own: bool,
+    pub(package) in_constfn: bool,
+    pub(package) steps: u32,
+    pub(package) fstart: u32,
+    pub(package) flen: u32,
 }
 
-pub struct IVal {
-    pub kind: u8,
-    pub tm: ModuleId, // the module whose type pool `ty` indexes
-    pub ty: TypeId,
-    pub i: i64,
-    pub f: f64,
+pub(package) struct IVal {
+    pub(package) kind: u8,
+    pub(package) tm: ModuleId, // the module whose type pool `ty` indexes
+    pub(package) ty: TypeId,
+    pub(package) i: i64,
+    pub(package) f: f64,
 }
 
 /// One generic-parameter binding of the ACTIVE frame: `pnode` of `pmod` stands for `(am, at)`.
-pub struct ISub {
-    pub pmod: ModuleId,
-    pub pnode: NodeId,
-    pub am: ModuleId,
-    pub at: TypeId,
+pub(package) struct ISub {
+    pub(package) pmod: ModuleId,
+    pub(package) pnode: NodeId,
+    pub(package) am: ModuleId,
+    pub(package) at: TypeId,
 }
 
 // ---- static data capture ------------------------------------------------------------------------
 // Deep-clone-on-store guarantees each object is embedded by value in at most one parent; pointer
 // members keep object identity, so shared and cyclic graphs survive serialization.
 
-pub const SS_STRUCT: u8 = 0;
-pub const SS_ENUM: u8 = 1;
-pub const SS_ARRAY: u8 = 2;
-pub const SS_HEAP: u8 = 3;
-pub const SS_CELL: u8 = 4;
+pub(package) const SS_STRUCT: u8 = 0;
+pub(package) const SS_ENUM: u8 = 1;
+pub(package) const SS_ARRAY: u8 = 2;
+pub(package) const SS_HEAP: u8 = 3;
+pub(package) const SS_CELL: u8 = 4;
 
-pub const SK_ZERO: u8 = 0;
-pub const SK_INT: u8 = 1;
-pub const SK_BOOL: u8 = 2;
-pub const SK_FLOAT: u8 = 3;
-pub const SK_NULL: u8 = 4;
-pub const SK_AGG: u8 = 5;
-pub const SK_REL: u8 = 6;
+pub(package) const SK_ZERO: u8 = 0;
+pub(package) const SK_INT: u8 = 1;
+pub(package) const SK_BOOL: u8 = 2;
+pub(package) const SK_FLOAT: u8 = 3;
+pub(package) const SK_NULL: u8 = 4;
+pub(package) const SK_AGG: u8 = 5;
+pub(package) const SK_REL: u8 = 6;
 
-pub const SREL_STATIC: u8 = 0;
-pub const SREL_INTERIOR: u8 = 1;
-pub const SREL_FN: u8 = 2;
+pub(package) const SREL_STATIC: u8 = 0;
+pub(package) const SREL_INTERIOR: u8 = 1;
+pub(package) const SREL_FN: u8 = 2;
 
-pub const S_NO_PARENT: u32 = 0xFFFFFFFF;
-pub const IT_STATIC_MAX_SLOTS: u64 = 1048576; // serialized slots per constant
+pub(package) const S_NO_PARENT: u32 = 0xFFFFFFFF;
+pub(package) const IT_STATIC_MAX_SLOTS: u64 = 1048576; // serialized slots per constant
 
-pub struct SRel {
-    pub slot: u32,
-    pub kind: u8,
-    pub target: u32, // statics index (SREL_STATIC/INTERIOR)
-    pub toff: u32,
-    pub fm: ModuleId, // SREL_FN: the function
-    pub fnode: NodeId,
+pub(package) struct SRel {
+    pub(package) slot: u32,
+    pub(package) kind: u8,
+    pub(package) target: u32, // statics index (SREL_STATIC/INTERIOR)
+    pub(package) toff: u32,
+    pub(package) fm: ModuleId, // SREL_FN: the function
+    pub(package) fnode: NodeId,
 }
 
 /// One serialized slot of a static object. `i` is the payload of every kind that has one: the
 /// value for SK_INT and SK_BOOL, the bits for SK_FLOAT (`f()`), the statics index of the embedded
 /// object for SK_AGG (`child()`).
-pub struct SSlot {
-    pub kind: u8,
-    pub tm: ModuleId,
-    pub ty: TypeId,
-    pub i: i64,
+pub(package) struct SSlot {
+    pub(package) kind: u8,
+    pub(package) tm: ModuleId,
+    pub(package) ty: TypeId,
+    pub(package) i: i64,
 }
 static_assert(sizeof(SSlot) == 16, "SSlot is a kind byte, a module, a type and one 8-byte payload");
 
-pub struct StaticObj {
-    pub shape: u8,
-    pub nargs: u8,
-    pub uactive: i32, // union: the only member present; -1 otherwise
-    pub dm: ModuleId, // struct/enum decl identity
-    pub dn: NodeId,
-    pub am: [ModuleId; OBJ_ARGS],
-    pub at: [TypeId; OBJ_ARGS],
-    pub etm: ModuleId, // heap/array element type; cell value type; struct/enum type when known
-    pub ety: TypeId,
-    pub n: u32, // heap/array element count
-    pub vm: ModuleId, // a vector's type (TYPE_NONE otherwise): an array of its lanes inside its struct
-    pub vt: TypeId,
-    pub parent: u32, // embedding parent (S_NO_PARENT = standalone)
-    pub pslot: u32,
-    pub owner: u32, // nearest standalone ancestor (self when standalone)
-    pub ord: u32, // ordinal among the group's standalones; k > 0 -> "<name>__ct{k-1}"
-    pub im: ModuleId, // an item's cell (inode != NODE_NONE): the emitted item, never defined here
-    pub inode: NodeId,
-    pub groupn: u32, // root only: entries in this group
-    pub slots: Vector<SSlot>, // SS_ENUM: slot 0 is the active variant's declaration ordinal
-    pub rels: Vector<SRel>,
+pub(package) struct StaticObj {
+    pub(package) shape: u8,
+    pub(package) nargs: u8,
+    pub(package) uactive: i32, // union: the only member present; -1 otherwise
+    pub(package) dm: ModuleId, // struct/enum decl identity
+    pub(package) dn: NodeId,
+    pub(package) am: [ModuleId; OBJ_ARGS],
+    pub(package) at: [TypeId; OBJ_ARGS],
+    pub(package) etm: ModuleId, // heap/array element type; cell value type; struct/enum type when known
+    pub(package) ety: TypeId,
+    pub(package) n: u32, // heap/array element count
+    pub(package) vm: ModuleId, // a vector's type (TYPE_NONE otherwise): an array of its lanes inside its struct
+    pub(package) vt: TypeId,
+    pub(package) parent: u32, // embedding parent (S_NO_PARENT = standalone)
+    pub(package) pslot: u32,
+    pub(package) owner: u32, // nearest standalone ancestor (self when standalone)
+    pub(package) ord: u32, // ordinal among the group's standalones; k > 0 -> "<name>__ct{k-1}"
+    pub(package) im: ModuleId, // an item's cell (inode != NODE_NONE): the emitted item, never defined here
+    pub(package) inode: NodeId,
+    pub(package) groupn: u32, // root only: entries in this group
+    pub(package) slots: Vector<SSlot>, // SS_ENUM: slot 0 is the active variant's declaration ordinal
+    pub(package) rels: Vector<SRel>,
 }
 
 // Remap one (module, type) pair through the package's last publication.
@@ -250,7 +250,7 @@ extend Interp {
     /// callee cache) through the package's last publication. Every memo whose keys or values
     /// name a type id is dropped: a module's provisional ids restart after the checkpoint, so a
     /// stale entry could match a different type, not only miss.
-    pub fn remap_types(self: &mut Self, p: &loader::Package) {
+    pub(package) fn remap_types(self: &mut Self, p: &loader::Package) {
         // objects past objs_live are dead: obj_new rewrites their slots and types before reuse
         for i in 0..self.objs_live {
             let o = self.objs.index_mut(i);
@@ -324,9 +324,9 @@ extend Interp {
     }
 }
 
-pub struct StaticRes {
-    pub ok: bool,
-    pub root: u32,
+pub(package) struct StaticRes {
+    pub(package) ok: bool,
+    pub(package) root: u32,
 }
 
 /// A virtual object: aggregate slots plus the identity the static capture needs (decl, instance
@@ -359,32 +359,32 @@ const fn obj_meta(dst: &mut IObj, src: &IObj) {
 // region names (`esc`) stays as a dead header: a later access through the pointer traps.
 /// The extent of an engine's callee cache (`Interp::body_mark`): `release_pass` frees what was
 /// cached past it.
-pub struct BodyMark {
-    pub slots: usize,
-    pub boxes: usize,
+pub(package) struct BodyMark {
+    pub(package) slots: usize,
+    pub(package) boxes: usize,
 }
 
-pub struct IObj {
-    pub slots: Vector<IVal>,
-    pub bytes: u64, // heap blocks: the byte size malloc gave out
-    pub esz: u64,
-    pub uactive: i32, // union: the member written through; -1 otherwise
-    pub dn: NodeId, // struct/enum decl identity (0/NODE_NONE when shapeless)
-    pub et: TypeId, // heap blocks: element type once adopted; a vector's lanes: the vector type
-    pub at: [TypeId; OBJ_ARGS], // instance arguments, `nargs` of them
-    pub dm: ModuleId,
-    pub em: ModuleId,
-    pub am: [ModuleId; OBJ_ARGS],
-    pub dead: u8,
-    pub is_enum: u8,
-    pub heap: u8,
-    pub clos: u8, // closure environment: dm/dn name the closure node, slots hold the captures
-    pub item: u8, // item cell (`item_cell`): dm/dn name the item; 1: a constant, slot 0 holds its value; 2: a `static mut`
-    pub frame: u8, // a call frame: slots hold the locals
-    pub nargs: u8,
-    pub lvl: u8, // the region that releases it (0: the evaluation's end)
-    pub esc: u8, // a pointer to it was stored where it outlives its region
-    pub unchg: u8, // kept storage of a referenced constant, outside the budget (`iso_leave`)
+pub(package) struct IObj {
+    pub(package) slots: Vector<IVal>,
+    pub(package) bytes: u64, // heap blocks: the byte size malloc gave out
+    pub(package) esz: u64,
+    pub(package) uactive: i32, // union: the member written through; -1 otherwise
+    pub(package) dn: NodeId, // struct/enum decl identity (0/NODE_NONE when shapeless)
+    pub(package) et: TypeId, // heap blocks: element type once adopted; a vector's lanes: the vector type
+    pub(package) at: [TypeId; OBJ_ARGS], // instance arguments, `nargs` of them
+    pub(package) dm: ModuleId,
+    pub(package) em: ModuleId,
+    pub(package) am: [ModuleId; OBJ_ARGS],
+    pub(package) dead: u8,
+    pub(package) is_enum: u8,
+    pub(package) heap: u8,
+    pub(package) clos: u8, // closure environment: dm/dn name the closure node, slots hold the captures
+    pub(package) item: u8, // item cell (`item_cell`): dm/dn name the item; 1: a constant, slot 0 holds its value; 2: a `static mut`
+    pub(package) frame: u8, // a call frame: slots hold the locals
+    pub(package) nargs: u8,
+    pub(package) lvl: u8, // the region that releases it (0: the evaluation's end)
+    pub(package) esc: u8, // a pointer to it was stored where it outlives its region
+    pub(package) unchg: u8, // kept storage of a referenced constant, outside the budget (`iso_leave`)
 }
 // Its members take 90 bytes beside the slot vector: alignment order leaves padding at the end alone.
 static_assert(sizeof(IObj) == (sizeof(Vector<IVal>) + 90 + 7) / 8 * 8, "IObj keeps its members in alignment order");
@@ -423,11 +423,11 @@ const fn iv_ptr(tm: ModuleId, ty: TypeId, obj: u32, off: u32) IVal {
     return IVal { kind: IV_PTR, tm: tm, ty: ty, i: obj as i64 << 32 | off as i64, f: 0.0 };
 }
 
-pub const fn pv_obj(v: IVal) u32 {
+pub(package) const fn pv_obj(v: IVal) u32 {
     return (v.i >> 32) as u32;
 }
 
-pub const fn pv_off(v: IVal) u32 {
+pub(package) const fn pv_off(v: IVal) u32 {
     return (v.i & 0xFFFFFFFF) as u32;
 }
 
@@ -436,8 +436,8 @@ const fn it_isfinite(x: f64) bool {
 }
 
 struct OvfRes {
-    pub ovf: bool,
-    pub v: i64,
+    pub(package) ovf: bool,
+    pub(package) v: i64,
 }
 
 // non-trapping (wrapping) checked signed arithmetic; ovf = the result overflows i64
@@ -497,7 +497,7 @@ const fn fits(b: BuiltinType, v: i64, pw: i32) bool {
 
 /// The exact value of evaluated integer `v`: a u64 or usize value above i64::MAX is held as negative
 /// bits.
-pub const fn iv_exact(v: &IVal) i128 {
+pub(package) const fn iv_exact(v: &IVal) i128 {
     let big = v.i < 0 && (v.ty == Ast::builtin(BuiltinType::BT_U64) || v.ty == Ast::builtin(BuiltinType::BT_USIZE));
     return cval_exact(v.i, pick(big, BuiltinType::BT_U64, BuiltinType::BT_I64));
 }
@@ -506,12 +506,12 @@ const fn bt_unsigned(b: BuiltinType) bool {
     return b == BuiltinType::BT_U8 || b == BuiltinType::BT_U16 || b == BuiltinType::BT_U32 || b == BuiltinType::BT_U64 || b == BuiltinType::BT_USIZE || b == BuiltinType::BT_CHAR;
 }
 
-pub struct DblRes {
-    pub ok: bool,
-    pub v: f64,
+pub(package) struct DblRes {
+    pub(package) ok: bool,
+    pub(package) v: f64,
 }
 
-pub const fn libm1(name: str, x: f64) DblRes {
+pub(package) const fn libm1(name: str, x: f64) DblRes {
     if name == "sqrt" {
         return DblRes { ok: true, v: math::sqrt(x) };
     }
@@ -593,7 +593,7 @@ pub const fn libm1(name: str, x: f64) DblRes {
     return DblRes { ok: false, v: 0.0 };
 }
 
-pub const fn libm2(name: str, x: f64, y: f64) DblRes {
+pub(package) const fn libm2(name: str, x: f64, y: f64) DblRes {
     if name == "pow" {
         return DblRes { ok: true, v: math::pow(x, y) };
     }
@@ -620,7 +620,7 @@ pub const fn libm2(name: str, x: f64, y: f64) DblRes {
 
 // libm1 over the f32 function of the same name (`sqrtf` for "sqrt"): the f64 result narrowed to
 // f32 can differ from the f32 function the program calls.
-pub const fn libm1f(name: str, x: f32) DblRes {
+pub(package) const fn libm1f(name: str, x: f32) DblRes {
     if name == "sqrt" {
         return DblRes { ok: true, v: math::sqrtf(x) };
     }
@@ -703,7 +703,7 @@ pub const fn libm1f(name: str, x: f32) DblRes {
 }
 
 // libm2 over the f32 function of the same name.
-pub const fn libm2f(name: str, x: f32, y: f32) DblRes {
+pub(package) const fn libm2f(name: str, x: f32, y: f32) DblRes {
     if name == "pow" {
         return DblRes { ok: true, v: math::powf(x, y) };
     }
@@ -731,12 +731,12 @@ pub const fn libm2f(name: str, x: f32, y: f32) DblRes {
 /// A concrete call's instance of generic function `f` whose body holds a static_assert: its own
 /// parameters `prm[0..np]` bound to `(ams[k], ats[k])`. The driver evaluates the asserts once every
 /// module is typed (`Interp::defer_inst_assert`).
-pub struct InstAssert {
-    pub f: DefId,
-    pub np: u8,
-    pub prm: [NodeId; 8],
-    pub ams: [ModuleId; 8],
-    pub ats: [TypeId; 8],
+pub(package) struct InstAssert {
+    pub(package) f: DefId,
+    pub(package) np: u8,
+    pub(package) prm: [NodeId; 8],
+    pub(package) ams: [ModuleId; 8],
+    pub(package) ats: [TypeId; 8],
 }
 
 extend InstAssert as Persist {
@@ -754,12 +754,12 @@ extend InstAssert as Persist {
 }
 
 /// A recorded failed fold (deduped per node); the driver renders these after emission.
-pub struct IFoldErr {
-    pub m: ModuleId,
-    pub id: NodeId,
-    pub span: tok::Span, // the call's span, recorded while its syntax is live
-    pub kind: u8,
-    pub detail: String,
+pub(package) struct IFoldErr {
+    pub(package) m: ModuleId,
+    pub(package) id: NodeId,
+    pub(package) span: tok::Span, // the call's span, recorded while its syntax is live
+    pub(package) kind: u8,
+    pub(package) detail: String,
 }
 
 /// A declaration's view shape (`view_of`: kind, `p`, `l`) and the ordinals of its fields named
@@ -768,44 +768,44 @@ pub struct IFoldErr {
 // sln), TypeTag (kty), and MetaInfo (its type, `kind` type, slice type and element size), all in
 // TypeInfo's module `tim`.
 struct TiCx {
-    pub tim: ModuleId,
-    pub strm: ModuleId,
-    pub strn: NodeId,
-    pub slm: ModuleId,
-    pub sln: NodeId,
-    pub sty: TypeId,
-    pub kty: TypeId,
-    pub mety: TypeId,
-    pub mkty: TypeId,
-    pub mty: TypeId,
-    pub mesz: u64,
+    pub(package) tim: ModuleId,
+    pub(package) strm: ModuleId,
+    pub(package) strn: NodeId,
+    pub(package) slm: ModuleId,
+    pub(package) sln: NodeId,
+    pub(package) sty: TypeId,
+    pub(package) kty: TypeId,
+    pub(package) mety: TypeId,
+    pub(package) mkty: TypeId,
+    pub(package) mty: TypeId,
+    pub(package) mesz: u64,
 }
 
 /// A scalar of a folded value (`eval_leaves`): an integer, a `bool`, a float's f64 bits, or a
 /// `str`'s bytes (start << 32 | length).
-pub struct Leaf {
-    pub kind: u8,
-    pub v: i64,
+pub(package) struct Leaf {
+    pub(package) kind: u8,
+    pub(package) v: i64,
 }
 
-pub const LF_INT: u8 = 0;
-pub const LF_BOOL: u8 = 1;
-pub const LF_FLOAT: u8 = 2;
-pub const LF_BYTES: u8 = 3;
+pub(package) const LF_INT: u8 = 0;
+pub(package) const LF_BOOL: u8 = 1;
+pub(package) const LF_FLOAT: u8 = 2;
+pub(package) const LF_BYTES: u8 = 3;
 /// The most leaves a folded call's value has: a larger one costs more code than the call.
-pub const FOLD_LEAVES: usize = 256;
+pub(package) const FOLD_LEAVES: usize = 256;
 
-pub struct FoldRow {
-    pub leaves: Vector<Leaf>,
-    pub bytes: Vector<u8>,
+pub(package) struct FoldRow {
+    pub(package) leaves: Vector<Leaf>,
+    pub(package) bytes: Vector<u8>,
 }
 
-pub struct DeclView {
-    pub p: i32,
-    pub l: i32,
-    pub fp: i32,
-    pub fl: i32,
-    pub kind: u8,
+pub(package) struct DeclView {
+    pub(package) p: i32,
+    pub(package) l: i32,
+    pub(package) fp: i32,
+    pub(package) fl: i32,
+    pub(package) kind: u8,
 }
 
 // The most call memo rows whose table an evaluation's reset keeps; a larger table is dropped.
@@ -813,12 +813,12 @@ const MEMO_KEEP_ROWS: usize = 4096;
 
 /// One memoized scalar call: the callee, its arguments (`n` values at `a0` of the memo's pool)
 /// and its result.
-pub struct MemoRow {
-    pub a0: u32,
-    pub n: u32,
-    pub fm: ModuleId,
-    pub fnode: NodeId,
-    pub v: IVal,
+pub(package) struct MemoRow {
+    pub(package) a0: u32,
+    pub(package) n: u32,
+    pub(package) fm: ModuleId,
+    pub(package) fnode: NodeId,
+    pub(package) v: IVal,
 }
 
 /// Scalar call results keyed by callee and exact argument values. The hash only selects a row; a
@@ -826,18 +826,18 @@ pub struct MemoRow {
 /// lives for one evaluation (`eval_reset`, `iso_enter`): a hit skips the steps and memory of the
 /// call, so a memo shared with another constant's evaluation would make one constant's budget
 /// depend on which constants ran before it.
-pub struct CallMemo {
-    pub ix: Map<u64, u32>,
-    pub rows: Vector<MemoRow>,
-    pub args: Vector<IVal>,
+pub(package) struct CallMemo {
+    pub(package) ix: Map<u64, u32>,
+    pub(package) rows: Vector<MemoRow>,
+    pub(package) args: Vector<IVal>,
 }
 
 /// find_method memo key: the callee (module << 32 | fn) and the receiver with the calling scope
 /// (scope << 48 | rdm << 32 | rdn for a nominal receiver; scope << 48 | builtin << 32 | NODE_NONE
 /// for a builtin one).
-pub struct MKey {
-    pub callee: u64,
-    pub recv: u64,
+pub(package) struct MKey {
+    pub(package) callee: u64,
+    pub(package) recv: u64,
 }
 
 extend MKey as Hash {
@@ -861,11 +861,11 @@ const DT_LANES: u8 = 2;
 // A nested evaluation an attempt stopped at (`defer_deep`), identified by `id`: the kind in bits
 // 62 and 63 over a constant's item key (module << 32 | node), a fold's `ememo` key (the same
 // form), or an index list's row in `lane_rows`.
-pub struct DTask {
-    pub kind: u8,
-    pub id: u64,
-    pub m: ModuleId,
-    pub node: NodeId,
+pub(package) struct DTask {
+    pub(package) kind: u8,
+    pub(package) id: u64,
+    pub(package) m: ModuleId,
+    pub(package) node: NodeId,
 }
 
 // The exact identity of a `DTask` of `kind` keyed by `key`: a module id is 16 bits, so a key
@@ -876,235 +876,235 @@ const fn dtask_id(kind: u8, key: u64) u64 {
 
 // The whole key of a `body_of` slot: module << 32 | fn node, and its bindings
 // (`body_binds[b0..b0 + bn]`).
-pub struct BodyKey {
-    pub def: u64,
-    pub b0: u32,
-    pub bn: u32,
+pub(package) struct BodyKey {
+    pub(package) def: u64,
+    pub(package) b0: u32,
+    pub(package) bn: u32,
 }
 
 /// An index list `eval_lanes` evaluated: its whole key (module, node, the substitution at
 /// `lane_envs[e0..e0 + en]`) and, once it evaluated, its lanes (`lane_pool[v0..v0 + vn]`).
-pub struct LaneRow {
-    pub m: ModuleId,
-    pub id: NodeId,
-    pub e0: u32,
-    pub en: u32,
-    pub v0: u32,
-    pub vn: u32,
-    pub ok: bool,
+pub(package) struct LaneRow {
+    pub(package) m: ModuleId,
+    pub(package) id: NodeId,
+    pub(package) e0: u32,
+    pub(package) en: u32,
+    pub(package) v0: u32,
+    pub(package) vn: u32,
+    pub(package) ok: bool,
 }
 
 // The outermost nested evaluation's state across its attempts (`defer_enter`): the trap before it,
 // and the stopped evaluations already settled.
 struct DSave {
-    pub trap: str<'static>,
-    pub kind: u8,
-    pub steps: u32,
-    pub nframes: u8,
-    pub span: tok::Span,
-    pub tcf: bool,
-    pub done: Set<u64>,
+    pub(package) trap: str<'static>,
+    pub(package) kind: u8,
+    pub(package) steps: u32,
+    pub(package) nframes: u8,
+    pub(package) span: tok::Span,
+    pub(package) tcf: bool,
+    pub(package) done: Set<u64>,
 }
 
 // The budgets and the call memo of the evaluation an isolated one (`iso_enter`) interrupts.
 struct Iso {
-    pub steps: u32,
-    pub nframes: u32,
-    pub fstack: [DefId; 48],
-    pub lvl: u8,
-    pub live: u64,
-    pub a0: usize,
-    pub inst_n: u32,
-    pub untrapped: bool, // no trap was set: one the isolated evaluation sets is its own
-    pub tcf: bool,
-    pub memo: CallMemo,
+    pub(package) steps: u32,
+    pub(package) nframes: u32,
+    pub(package) fstack: [DefId; 48],
+    pub(package) lvl: u8,
+    pub(package) live: u64,
+    pub(package) a0: usize,
+    pub(package) inst_n: u32,
+    pub(package) untrapped: bool, // no trap was set: one the isolated evaluation sets is its own
+    pub(package) tcf: bool,
+    pub(package) memo: CallMemo,
 }
 
-pub struct Interp {
-    pub pkg: *const loader::Package,
-    pub steps: u32,
-    pub max_steps: u32,
-    pub max_slots: u64,
-    pub objs: Vector<IObj>,
-    pub objs_live: usize, // ids in use: live, dead, or on `free_ids`
-    pub live_slots: u64, // the budget's charge: slots and headers (`OBJ_SLOTS`) of every charged object
-    pub free_ids: Vector<u32>, // released ids `obj_new` reuses
-    pub alog: Vector<u32>, // every allocated id not on `free_ids`, in allocation order (regions and rollbacks scan its tail)
-    pub lvl: u8, // the region new objects belong to
-    pub ndepth: u32, // native nesting levels: constants, instances and calls being evaluated
-    pub inst_n: u32, // generic constant instances nested inside the current constant's evaluation
-    pub defer_base: i64, // `ndepth` at the outermost nested evaluation (`item_defer`); -1 = none
-    pub deferred: bool, // the current attempt stopped at `defer_task`, an evaluation nested too deep
-    pub defer_task: DTask,
-    pub fold_fail: Set<u64>, // this evaluation's nested folds that failed (`ememo` keys)
-    pub lane_fail: Map<u64, u8>, // this evaluation's nested index lists that failed (`lane_rows` rows): their status
-    pub esc_work: Vector<u32>, // `esc_to` scratch
-    pub esc_ptrs: Vector<u32>,
-    pub slot_cap: u64, // slot capacity the object store holds, live and retained
-    pub zcell: u32, // the one-slot object every zero-sized place behind a sentinel pointer resolves to; 0 = none yet
-    pub failed: bool,
+pub(package) struct Interp {
+    pub(package) pkg: *const loader::Package,
+    pub(package) steps: u32,
+    pub(package) max_steps: u32,
+    pub(package) max_slots: u64,
+    pub(package) objs: Vector<IObj>,
+    pub(package) objs_live: usize, // ids in use: live, dead, or on `free_ids`
+    pub(package) live_slots: u64, // the budget's charge: slots and headers (`OBJ_SLOTS`) of every charged object
+    pub(package) free_ids: Vector<u32>, // released ids `obj_new` reuses
+    pub(package) alog: Vector<u32>, // every allocated id not on `free_ids`, in allocation order (regions and rollbacks scan its tail)
+    pub(package) lvl: u8, // the region new objects belong to
+    pub(package) ndepth: u32, // native nesting levels: constants, instances and calls being evaluated
+    pub(package) inst_n: u32, // generic constant instances nested inside the current constant's evaluation
+    pub(package) defer_base: i64, // `ndepth` at the outermost nested evaluation (`item_defer`); -1 = none
+    pub(package) deferred: bool, // the current attempt stopped at `defer_task`, an evaluation nested too deep
+    pub(package) defer_task: DTask,
+    pub(package) fold_fail: Set<u64>, // this evaluation's nested folds that failed (`ememo` keys)
+    pub(package) lane_fail: Map<u64, u8>, // this evaluation's nested index lists that failed (`lane_rows` rows): their status
+    pub(package) esc_work: Vector<u32>, // `esc_to` scratch
+    pub(package) esc_ptrs: Vector<u32>,
+    pub(package) slot_cap: u64, // slot capacity the object store holds, live and retained
+    pub(package) zcell: u32, // the one-slot object every zero-sized place behind a sentinel pointer resolves to; 0 = none yet
+    pub(package) failed: bool,
     /// `probe_test`: the run stopped at an extern function the interpreter does not model.
-    pub ffi: bool,
+    pub(package) ffi: bool,
     // `read_place`/`write_place` admit a scalar union member other than the active one (`pun_ok`);
     // `resolve_place` then reports the member asked for (`pun_slot`, -1 for none) and resolves to the
     // active one.
-    pub pun_ok: bool,
-    pub pun_slot: i64,
+    pub(package) pun_ok: bool,
+    pub(package) pun_slot: i64,
     // The object a place's last projection dereferences through its handle (`*self` of an aggregate):
     // `write_place` replaces that object's contents, which every alias of it names. 0 for none.
-    pub deref_obj: u32,
-    pub trap: str<'static>,
-    pub trap_kind: u8,
-    pub trap_steps: u32,
-    pub trap_depth: u32, // the constants being evaluated (`item_active`) when the trap was set
-    pub nframes: u32,
-    pub fstack: [DefId; 48],
-    pub trap_nframes: u8,
-    pub trap_stack: [DefId; 48],
-    pub lsvc: lay::Svc,
-    pub csteps: Vector<ConstStep>, // `steps_fail` scratch
-    pub bodies: Vector<Box<irl::Lowerer>>, // lowered callee cache (boxed: nested calls grow it)
-    pub body_keys: Vector<u64>, // the body_of key hash of each slot
-    pub body_plain: Vector<u64>, // module << 32 | fn node of a binding-free slot, else PLAIN_NONE
-    pub body_ix: Map<u64, u64>, // bkey -> body_ptr slot (the linear key scan was O(n^2) over a sweep)
-    pub body_def: Vector<BodyKey>, // the whole key of each slot: a hit of `body_ix` compares it
-    pub body_binds: Vector<ISub>, // the `BodyKey` bindings
+    pub(package) deref_obj: u32,
+    pub(package) trap: str<'static>,
+    pub(package) trap_kind: u8,
+    pub(package) trap_steps: u32,
+    pub(package) trap_depth: u32, // the constants being evaluated (`item_active`) when the trap was set
+    pub(package) nframes: u32,
+    pub(package) fstack: [DefId; 48],
+    pub(package) trap_nframes: u8,
+    pub(package) trap_stack: [DefId; 48],
+    pub(package) lsvc: lay::Svc,
+    pub(package) csteps: Vector<ConstStep>, // `steps_fail` scratch
+    pub(package) bodies: Vector<Box<irl::Lowerer>>, // lowered callee cache (boxed: nested calls grow it)
+    pub(package) body_keys: Vector<u64>, // the body_of key hash of each slot
+    pub(package) body_plain: Vector<u64>, // module << 32 | fn node of a binding-free slot, else PLAIN_NONE
+    pub(package) body_ix: Map<u64, u64>, // bkey -> body_ptr slot (the linear key scan was O(n^2) over a sweep)
+    pub(package) body_def: Vector<BodyKey>, // the whole key of each slot: a hit of `body_ix` compares it
+    pub(package) body_binds: Vector<ISub>, // the `BodyKey` bindings
     /// Per body_keys slot, where the lowering lives: `BODY_KEPT | k` = slot k of the keep view,
     /// otherwise an index into `bodies`.
-    pub body_slot: Vector<u64>,
+    pub(package) body_slot: Vector<u64>,
     /// The borrow checker's kept lowerings, readable between borrow checking and emission (null
     /// otherwise): a non-generic body found there executes in place, with no lowering and no box.
     /// A per-task engine copies the pointer without counting as a viewer (the master counts).
-    pub keep_view: *const irl::Keep,
+    pub(package) keep_view: *const irl::Keep,
     /// While set, a kept hit becomes an owned compact copy in `bodies` instead of a view slot: the
     /// view closes before emission and the released syntax cannot lower the body again.
-    pub copy_kept: bool,
+    pub(package) copy_kept: bool,
     /// An engine whose binding-free lowerings this one reads on a miss (the emission's
     /// materialization engine over the driver's, whose cache the pre-release constant pass filled
     /// while the body syntax was live); null = none.
-    pub parent: *const Interp,
+    pub(package) parent: *const Interp,
     // Body-lookup counters (SC_CEMIT_STATS reports them): every body_of miss of the slot index,
     // how many the keep view served, how many lowered fresh (and so retained a box), and of those
     // how many were generic instances (a substitution env) or bodies the keep never held.
-    pub st_lookups: u64,
-    pub st_kept_hits: u64,
-    pub st_fresh: u64,
-    pub st_fresh_generic: u64,
-    pub st_fresh_miss: u64,
-    pub cont_memo: Map<u64, u64>, // (m << 32 | fn) -> kind << 32 | container: called per interpreted call
-    pub method_memo: Map<MKey, u64>, // find_method results (module << 32 | node) once every module is typed
-    pub conf_memo: Map<MKey, u64>, // conf_ext_scan results per (interface, declaration) once every module is typed: start << 32 | count in `conf_pool`
-    pub conf_pool: Vector<DefId>,
+    pub(package) st_lookups: u64,
+    pub(package) st_kept_hits: u64,
+    pub(package) st_fresh: u64,
+    pub(package) st_fresh_generic: u64,
+    pub(package) st_fresh_miss: u64,
+    pub(package) cont_memo: Map<u64, u64>, // (m << 32 | fn) -> kind << 32 | container: called per interpreted call
+    pub(package) method_memo: Map<MKey, u64>, // find_method results (module << 32 | node) once every module is typed
+    pub(package) conf_memo: Map<MKey, u64>, // conf_ext_scan results per (interface, declaration) once every module is typed: start << 32 | count in `conf_pool`
+    pub(package) conf_pool: Vector<DefId>,
     // Every extend with an interface and a target, per interface (module << 32 | node), in module and
     // item order: start << 32 | count in `ext_pool`. Built once every module is typed (`iface_exts`).
-    pub ext_ix: Map<u64, u64>,
-    pub ext_pool: Vector<DefId>,
-    pub ext_built: bool,
+    pub(package) ext_ix: Map<u64, u64>,
+    pub(package) ext_pool: Vector<DefId>,
+    pub(package) ext_built: bool,
     // `std::rt::libm`'s exports (a target whose C library comes from std): the symbol's hash -> its
     // function. Built on first use (`libm_def`).
-    pub libm_ix: Map<u64, u32>,
-    pub libm_built: bool,
-    pub call_memo: CallMemo,
-    pub item_memo: Map<u64, IVal>, // referenced-const values (scalar only), keyed module << 32 | node
-    pub item_active: Vector<u64>, // consts being evaluated right now: a re-entry is a cycle
-    pub item_seen: Set<u64>, // consts `prefetch_items` queued during this evaluation
-    pub item_fail: Map<u64, ItemFail>, // consts `prefetch_items` saw fail during this evaluation
-    pub item_fail_frames: Vector<DefId>, // the ItemFail frame suffixes
-    pub item_objs: Map<u64, IVal>, // aggregate values `prefetch_items` built during this evaluation
-    pub item_aggs: Map<u64, IVal>, // referenced-const aggregates without pointers, frozen in `item_frozen`
-    pub item_frozen: Vector<IObj>, // the objects of `item_aggs`: an IV_OBJ there is a 0-based index
-    pub item_dead: Map<u64, ItemFail>, // referenced consts that failed with a trap no budget caused
-    pub item_dead_frames: Vector<DefId>, // the item_dead frame suffixes
-    pub item_cells: Map<u64, u32>, // this evaluation's item cells (`item_cell`), keyed module << 32 | node
-    pub rets: Vector<IVal>, // the last finished frame's return slots (multi-return call writes)
-    pub argpool: Vector<Vector<IVal>>, // argument vectors of finished calls, reused by `call`
-    pub ufree: Set<u64>, // (module << 32 | decl) of every type with a user free method (folding such values is refused)
-    pub ufree_built: bool,
-    pub subst: Vector<ISub>, // generic bindings, all frames; [sub_base, len) is the active window
-    pub sub_base: usize,
-    pub view_memo: Map<u64, DeclView>, // (m << 32 | decl) -> decl_view
-    pub lane_memo: Map<u64, u32>, // an index list's key hash -> its row in `lane_rows` (`lane_row`)
-    pub fold_memo: Map<u64, i64>, // a folded call's module << 32 | node -> its row in `fold_rows`, -1 for none
-    pub fold_rows: Vector<FoldRow>,
-    pub lane_rows: Vector<LaneRow>,
-    pub lane_envs: Vector<irl::LSub>, // the `LaneRow` substitutions
-    pub lane_pool: Vector<u64>, // the `LaneRow` lists
-    pub statics: Vector<StaticObj>, // captured static data groups, appended per constant
-    pub all_typed: bool, // silent const-fn failures promote to definite traps only once true
-    pub record_folds: bool, // failed folds with promotable traps record into fold_errs
-    pub record_pause: u32, // >0 suppresses recording (a `const fn` call's speculative fold)
-    pub trap_in_constfn: bool,
+    pub(package) libm_ix: Map<u64, u32>,
+    pub(package) libm_built: bool,
+    pub(package) call_memo: CallMemo,
+    pub(package) item_memo: Map<u64, IVal>, // referenced-const values (scalar only), keyed module << 32 | node
+    pub(package) item_active: Vector<u64>, // consts being evaluated right now: a re-entry is a cycle
+    pub(package) item_seen: Set<u64>, // consts `prefetch_items` queued during this evaluation
+    pub(package) item_fail: Map<u64, ItemFail>, // consts `prefetch_items` saw fail during this evaluation
+    pub(package) item_fail_frames: Vector<DefId>, // the ItemFail frame suffixes
+    pub(package) item_objs: Map<u64, IVal>, // aggregate values `prefetch_items` built during this evaluation
+    pub(package) item_aggs: Map<u64, IVal>, // referenced-const aggregates without pointers, frozen in `item_frozen`
+    pub(package) item_frozen: Vector<IObj>, // the objects of `item_aggs`: an IV_OBJ there is a 0-based index
+    pub(package) item_dead: Map<u64, ItemFail>, // referenced consts that failed with a trap no budget caused
+    pub(package) item_dead_frames: Vector<DefId>, // the item_dead frame suffixes
+    pub(package) item_cells: Map<u64, u32>, // this evaluation's item cells (`item_cell`), keyed module << 32 | node
+    pub(package) rets: Vector<IVal>, // the last finished frame's return slots (multi-return call writes)
+    pub(package) argpool: Vector<Vector<IVal>>, // argument vectors of finished calls, reused by `call`
+    pub(package) ufree: Set<u64>, // (module << 32 | decl) of every type with a user free method (folding such values is refused)
+    pub(package) ufree_built: bool,
+    pub(package) subst: Vector<ISub>, // generic bindings, all frames; [sub_base, len) is the active window
+    pub(package) sub_base: usize,
+    pub(package) view_memo: Map<u64, DeclView>, // (m << 32 | decl) -> decl_view
+    pub(package) lane_memo: Map<u64, u32>, // an index list's key hash -> its row in `lane_rows` (`lane_row`)
+    pub(package) fold_memo: Map<u64, i64>, // a folded call's module << 32 | node -> its row in `fold_rows`, -1 for none
+    pub(package) fold_rows: Vector<FoldRow>,
+    pub(package) lane_rows: Vector<LaneRow>,
+    pub(package) lane_envs: Vector<irl::LSub>, // the `LaneRow` substitutions
+    pub(package) lane_pool: Vector<u64>, // the `LaneRow` lists
+    pub(package) statics: Vector<StaticObj>, // captured static data groups, appended per constant
+    pub(package) all_typed: bool, // silent const-fn failures promote to definite traps only once true
+    pub(package) record_folds: bool, // failed folds with promotable traps record into fold_errs
+    pub(package) record_pause: u32, // >0 suppresses recording (a `const fn` call's speculative fold)
+    pub(package) trap_in_constfn: bool,
     // Engine serialization for parallel stages: off = single-threaded. Task-aware (waiters PARK --
     // a raw mutex here deadlocks under safepoint preemption) and reentrant by task token -- the
     // interpreter re-enters its own facade while lowering callee bodies.
-    pub elock_on: bool,
+    pub(package) elock_on: bool,
     /// The reader: the item whose check requested the current evaluation (`set_reader`, under
     /// the engine lock) and the components it depends on (the checker's `gitems::Reach`). A body or a
     /// checked type of an item the reader cannot see (`gitems::visible`) is refused, whatever a
     /// worker has done with it. ITEM_NONE (every stage after the type check) sees everything.
-    pub cur_item: loader::ItemId,
-    pub reach: *mut gitems::Reach,
-    pub elock_sem: psy::Semaphore,
-    pub elock_owner: usize,
-    pub elock_depth: u32,
-    pub wl_own: i64, // the module whose write lock the engine lock's holder released to wait (-1: none)
-    pub lint_on: bool, // lint_body tracking: record the executing top-frame statement span
-    pub top_span: tok::Span,
-    pub trap_span: tok::Span, // top-frame span snapshotted at first trap
-    pub in_run: u32, // frames currently executing (re-entrant lowering must not re-fold)
-    pub ev_depth: u32, // facade eval nesting
-    pub fold_errs: Vector<IFoldErr>,
-    pub fold_seen: Set<u64>, // (module << 32 | node) of every `fold_errs` record
-    pub ememo: Map<u64, IVal>, // expression fold memo keyed module << 32 | node
-    pub dbuf: String, // trap_detail's rendering buffer (the returned str views it)
+    pub(package) cur_item: loader::ItemId,
+    pub(package) reach: *mut gitems::Reach,
+    pub(package) elock_sem: psy::Semaphore,
+    pub(package) elock_owner: usize,
+    pub(package) elock_depth: u32,
+    pub(package) wl_own: i64, // the module whose write lock the engine lock's holder released to wait (-1: none)
+    pub(package) lint_on: bool, // lint_body tracking: record the executing top-frame statement span
+    pub(package) top_span: tok::Span,
+    pub(package) trap_span: tok::Span, // top-frame span snapshotted at first trap
+    pub(package) in_run: u32, // frames currently executing (re-entrant lowering must not re-fold)
+    pub(package) ev_depth: u32, // facade eval nesting
+    pub(package) fold_errs: Vector<IFoldErr>,
+    pub(package) fold_seen: Set<u64>, // (module << 32 | node) of every `fold_errs` record
+    pub(package) ememo: Map<u64, IVal>, // expression fold memo keyed module << 32 | node
+    pub(package) dbuf: String, // trap_detail's rendering buffer (the returned str views it)
     // The texts of traps that name their operands, kept for the engine's life: the failure memos
     // copy a trap's `str`, and a text is never freed or rewritten while the engine lives.
-    pub trap_texts: Vector<String>,
-    pub sref: Map<u64, i64>, // eval_static memo: -1 definite failure, >0 root+1 (retryable absent)
+    pub(package) trap_texts: Vector<String>,
+    pub(package) sref: Map<u64, i64>, // eval_static memo: -1 definite failure, >0 root+1 (retryable absent)
     // The roots (module << 32 | node) of top-level evaluations that completed while no keep view was
     // open: every plain callee they reach is a box of this engine's own, so the constant pass before
     // emission need not run them again. Node keys only: no publication changes them.
-    pub whole: Set<u64>,
+    pub(package) whole: Set<u64>,
     // The zero-argument functions (module << 32 | fn) a call of returned from: a run is deterministic,
     // so the always-panics probe of one finds no panic (`lint_body`).
-    pub ran0: Set<u64>,
-    pub fx: Vector<Vector<u8>>, // shallow effect verdicts per (module, fn node)
-    pub fxd: Vector<Vector<u8>>, // deep (all-paths) effect verdicts
-    pub fx_no: Map<u64, FxNo<'static>>, // (m << 32 | fn) -> first disqualifying site of its last shallow scan
-    pub fx_depth: u32,
-    pub pending: Vector<u64>, // deferred static_assert conditions (strict << 63 | module << 32 | node)
-    pub pending_consts: Vector<u64>, // deferred const decls
-    pub pending_strict: Vector<bool>, // per deferred const: a silent failure is an error too
-    pub inst_asserts: Vector<InstAssert>, // per-instance static_assert evaluations concrete calls ask for
-    pub inst_asserts_failed: bool, // the instance graph's check reported a failure (driver `graph_inst_asserts`)
+    pub(package) ran0: Set<u64>,
+    pub(package) fx: Vector<Vector<u8>>, // shallow effect verdicts per (module, fn node)
+    pub(package) fxd: Vector<Vector<u8>>, // deep (all-paths) effect verdicts
+    pub(package) fx_no: Map<u64, FxNo<'static>>, // (m << 32 | fn) -> first disqualifying site of its last shallow scan
+    pub(package) fx_depth: u32,
+    pub(package) pending: Vector<u64>, // deferred static_assert conditions (strict << 63 | module << 32 | node)
+    pub(package) pending_consts: Vector<u64>, // deferred const decls
+    pub(package) pending_strict: Vector<bool>, // per deferred const: a silent failure is an error too
+    pub(package) inst_asserts: Vector<InstAssert>, // per-instance static_assert evaluations concrete calls ask for
+    pub(package) inst_asserts_failed: bool, // the instance graph's check reported a failure (driver `graph_inst_asserts`)
     /// Body-syntax demand per module, for the LSP's release of closed documents' bodies: the
     /// modules whose bodies this engine needed but refused (released, or not typed yet in the
     /// running pass: `body_missing`), and the refusal count (`body_miss_n`) an analysis pass
     /// samples per module to find the demanders it must run again.
-    pub body_missing: Vector<bool>,
-    pub body_miss_n: u64,
+    pub(package) body_missing: Vector<bool>,
+    pub(package) body_miss_n: u64,
     /// The master engine records dynamic item edges into the package index (`note_dyn_edge`);
     /// a per-task engine leaves it off.
-    pub dyn_rec: bool,
+    pub(package) dyn_rec: bool,
     /// Set when a lowering this engine needed stopped at a node the checker rejected: the
     /// failure is that error's, already reported. The checker clears it before an evaluation.
-    pub err_refused: bool,
+    pub(package) err_refused: bool,
     // Every statement and terminator run, never reset: one failure's frames all see the same count.
-    pub ticks: u64,
+    pub(package) ticks: u64,
     // The innermost operation of the last silent failure, at `unsup_ticks`: the statement's rvalue
     // kind, or the terminator kind (`unsup_term`) and a call's target, and where it is written.
-    pub unsup_ticks: u64,
-    pub unsup_rv: u8,
-    pub unsup_term: u8,
-    pub unsup_callee: DefId,
-    pub unsup_m: ModuleId,
-    pub unsup_span: tok::Span,
+    pub(package) unsup_ticks: u64,
+    pub(package) unsup_rv: u8,
+    pub(package) unsup_term: u8,
+    pub(package) unsup_callee: DefId,
+    pub(package) unsup_m: ModuleId,
+    pub(package) unsup_span: tok::Span,
     // Each module's line ends (`diag::line_starts_of`), built once: a const-fn failure names its
     // line, and the always-panics probes fail many times over.
-    pub line_tabs: Map<ModuleId, Vector<u32>>,
+    pub(package) line_tabs: Map<ModuleId, Vector<u32>>,
 }
 
-pub fn interp_new(pkg: *const loader::Package) Interp {
+pub(package) fn interp_new(pkg: *const loader::Package) Interp {
     return Interp {
         pkg: pkg,
         steps: 0,
@@ -1240,7 +1240,7 @@ pub fn interp_new(pkg: *const loader::Package) Interp {
 
 /// The master engine of a package build: it records the index's dynamic item edges, and a nonzero
 /// `steps` or `mem` (bytes) replaces the default step or memory budget.
-pub fn interp_master(pkg: *const loader::Package, steps: u32, mem: u64) Interp {
+pub(package) fn interp_master(pkg: *const loader::Package, steps: u32, mem: u64) Interp {
     let mut e = interp_new(pkg);
     e.dyn_rec = true;
     if steps != 0 {
@@ -1329,7 +1329,7 @@ extend Interp {
     /// Evaluate `cnode` through a REUSED interpreter: the per-evaluation state resets while the
     /// lowered-callee cache and the referenced-constant memos persist -- one interpreter serves a
     /// whole emission pass.
-    pub fn eval_const_in(self: &mut Self, m: ModuleId, cnode: NodeId) IVal {
+    pub(package) fn eval_const_in(self: &mut Self, m: ModuleId, cnode: NodeId) IVal {
         self.eval_reset();
         self.subst.truncate(0);
         self.sub_base = 0;
@@ -2972,7 +2972,7 @@ extend Interp {
     /// Execute one body with `args` bound to its argument locals; the first return slot's value
     /// comes back (IV_UNIT for none) and every return slot lands in `self.rets` for multi-return
     /// call sites (read it before the next frame runs).
-    pub fn run(self: &mut Self, b: &ir::CoreBody, args: &Vector<IVal>) IVal {
+    pub(package) fn run(self: &mut Self, b: &ir::CoreBody, args: &Vector<IVal>) IVal {
         let env = self.obj_new(b.locals.len() as u32);
         if env == 0 {
             return none();
@@ -3208,7 +3208,7 @@ extend Interp {
     /// The slot that caches the body of `(m, fnode)` under `binds`, whose key hashes to `h`
     /// (`body_of`); -1 when none does. The hash only selects a slot: a hit compares the whole key,
     /// so a hash two keys share is a miss, never another key's body.
-    pub fn body_find(self: &Self, h: u64, m: ModuleId, fnode: NodeId, binds: &Vector<ISub>) i64 {
+    pub(package) fn body_find(self: &Self, h: u64, m: ModuleId, fnode: NodeId, binds: &Vector<ISub>) i64 {
         let mut si: usize = 0;
         switch self.body_ix.get(&h) {
             Some(v) => {
@@ -3234,7 +3234,7 @@ extend Interp {
 
     /// Record a new slot for the body of `(m, fnode)` under `binds`, hashing to `h`, whose lowering
     /// is `at` (`body_slot`); a slot whose key shares `h` leaves the index. The new slot's index.
-    pub fn body_add(self: &mut Self, h: u64, m: ModuleId, fnode: NodeId, binds: &Vector<ISub>, at: u64) i64 {
+    pub(package) fn body_add(self: &mut Self, h: u64, m: ModuleId, fnode: NodeId, binds: &Vector<ISub>, at: u64) i64 {
         self.body_slot.push(at);
         self.body_keys.push(h);
         self.body_plain.push(pick(binds.len() == 0, m as u64 << 32 | fnode as u64, PLAIN_NONE));
@@ -3285,7 +3285,7 @@ extend Interp {
 
     /// Name the reader of the evaluations that follow (under the engine lock): the item under
     /// check and its dependency components. ITEM_NONE sees everything.
-    pub const fn set_reader(self: &mut Self, item: loader::ItemId, r: *mut gitems::Reach) {
+    pub(package) const fn set_reader(self: &mut Self, item: loader::ItemId, r: *mut gitems::Reach) {
         self.cur_item = item;
         self.reach = r;
         self.lsvc.ev = self;
@@ -3313,7 +3313,7 @@ extend Interp {
 
     /// Is the checked state of node `n` of module `m` visible to the reader (`gitems::visible`
     /// over the node's owning item)? A node past every item range (an appended desugar) is.
-    pub fn visible_node(self: &Self, m: ModuleId, n: NodeId) bool {
+    pub(package) fn visible_node(self: &Self, m: ModuleId, n: NodeId) bool {
         if self.cur_item == loader::ITEM_NONE {
             return true;
         }
@@ -3385,7 +3385,7 @@ extend Interp {
 
     /// Open the read-only view of `keep` (see `keep_view`). The keep must not add, move, or take a
     /// body until `keep_view_clear`; `Keep.viewers` enforces it.
-    pub fn keep_view_set(self: &mut Self, keep: *mut irl::Keep) {
+    pub(package) fn keep_view_set(self: &mut Self, keep: *mut irl::Keep) {
         assert(self.keep_view == null);
         self.eng_enter();
         unsafe (*keep).viewers += 1;
@@ -3394,7 +3394,7 @@ extend Interp {
     }
 
     /// Fold a finished per-task engine's lookup counters into this (master) engine.
-    pub fn st_absorb(self: &mut Self, other: &Interp) {
+    pub(package) fn st_absorb(self: &mut Self, other: &Interp) {
         self.eng_enter();
         self.st_lookups += other.st_lookups;
         self.st_kept_hits += other.st_kept_hits;
@@ -3420,7 +3420,7 @@ extend Interp {
     /// lowers its own copy (the keep's bodies are about to move into the emitter). The driver's
     /// constant pass after this point re-lowers, while the syntax is live, every body an emission
     /// evaluation can reach.
-    pub fn keep_view_clear(self: &mut Self) {
+    pub(package) fn keep_view_clear(self: &mut Self) {
         if self.keep_view == null {
             return;
         }
@@ -3448,7 +3448,7 @@ extend Interp {
     }
 
     /// The extent of the callee cache now (see `release_pass`).
-    pub const fn body_mark(self: &Self) BodyMark {
+    pub(package) const fn body_mark(self: &Self) BodyMark {
         return BodyMark { slots: self.body_slot.len(), boxes: self.bodies.len() };
     }
 
@@ -3458,7 +3458,7 @@ extend Interp {
     /// syntax. A box lowered from a body arena stays, since that arena may be released before the
     /// next reader. Lowering is a function of the syntax and the frozen facts, so a later miss gets
     /// the same body.
-    pub fn release_pass(self: &mut Self, mark: BodyMark) {
+    pub(package) fn release_pass(self: &mut Self, mark: BodyMark) {
         assert(self.nframes == 0 && self.in_run == 0 && self.ndepth == 0, "release_pass runs between evaluations");
         assert(mark.slots <= self.body_slot.len() && mark.boxes <= self.bodies.len(), "a mark of this cache");
         self.objs = Vector::<IObj>::new();
@@ -4749,7 +4749,7 @@ extend Interp {
     // ---- places -----------------------------------------------------------------------------------
 
     /// Field/tuple-member count of aggregate decl `(dm, dn)` -- `type_info::<T>().fields.len`.
-    pub fn field_count(self: &Self, dm: ModuleId, dn: NodeId) u32 {
+    pub(package) fn field_count(self: &Self, dm: ModuleId, dn: NodeId) u32 {
         let a = unsafe &*self.p().module_ast_const(dm);
         let is_tuple = a.at_const(dn).as_data.aggregate.is_tuple;
         let ms = a.at_const(dn).as_data.aggregate.members;
@@ -5261,7 +5261,7 @@ extend Interp {
     /// Evaluate generic constant `(m, cnode)` for the instance whose `n` concrete arguments are
     /// `(am[i], at[i])`, binding parameters `(pm[i], pn[i])` for a local constant (`inst_value`),
     /// through a reused interpreter (see `eval_const_in`).
-    pub fn eval_const_inst(
+    pub(package) fn eval_const_inst(
         self: &mut Self,
         m: ModuleId,
         cnode: NodeId,
@@ -7184,7 +7184,7 @@ extend Interp {
     /// The discriminant of enum variant `vid` of module `m` after one of value `prev`: its
     /// explicit value, folded, else `prev + 1`. False when the explicit value does not fold to an
     /// integer (the trap, if any, stays set).
-    pub fn discr(self: &mut Self, m: ModuleId, vid: NodeId, prev: i64, out: &mut i64) bool {
+    pub(package) fn discr(self: &mut Self, m: ModuleId, vid: NodeId, prev: i64, out: &mut i64) bool {
         let vv = (unsafe &*self.p().module_ast_const(m)).at_const(vid).as_data.variant.value;
         if vv == NODE_NONE {
             *out = prev + 1;
@@ -9562,12 +9562,12 @@ extend Interp {
     }
 
     /// Unchecked index into the captured static groups.
-    pub const fn static_at(self: &Self, i: u32) *const StaticObj {
+    pub(package) const fn static_at(self: &Self, i: u32) *const StaticObj {
         return unsafe (self.statics.as_ptr() + i as usize);
     }
 
     /// Whether `v` is the zero of a C object (an opaque type with a layout, `zero_of`).
-    pub const fn c_zero(self: &Self, v: IVal) bool {
+    pub(package) const fn c_zero(self: &Self, v: IVal) bool {
         return v.kind == IV_UNIT && v.ty != TYPE_NONE && (unsafe &*self.p().module_ast_const(v.tm)).type_at(v.ty).kind == TypeKind::TYPE_OPAQUE;
     }
 
@@ -9583,7 +9583,7 @@ extend Interp {
     }
 
     /// A one-slot object holding `v`, typed `(tm, ty)`: the root `capture` takes for a pointer.
-    pub fn cell_of(self: &mut Self, v: IVal, tm: ModuleId, ty: TypeId) IVal {
+    pub(package) fn cell_of(self: &mut Self, v: IVal, tm: ModuleId, ty: TypeId) IVal {
         let c = self.obj_new(1);
         if c == 0 {
             return none();
@@ -9628,7 +9628,7 @@ extend Interp {
     /// and cyclic pointer graphs survive. With `items`, a pointer into a referenced item's cell
     /// addresses the emitted item: the cell and the objects its value embeds enter the group as
     /// path anchors only (`StaticObj.inode`), their contents unserialized.
-    pub fn capture(self: &mut Self, rootv: IVal, items: bool) StaticRes {
+    pub(package) fn capture(self: &mut Self, rootv: IVal, items: bool) StaticRes {
         let bad = StaticRes { ok: false, root: 0 };
         let base = self.statics.len() as u32;
         let nobj = self.objs_live;
@@ -10029,7 +10029,7 @@ extend Interp {
     /// statement whose execution trapped with UB (or a panic reached through a `const fn` frame),
     /// or an empty span. Statements touching a parameter fail benignly, ending the probe silently.
     /// Generic bodies are skipped: unbound widths would degrade to i64 and fabricate traps.
-    pub fn lint_body(self: &mut Self, m: ModuleId, fn_id: NodeId) tok::Span {
+    pub(package) fn lint_body(self: &mut Self, m: ModuleId, fn_id: NodeId) tok::Span {
         let zero = tok::Span { start: 0, end: 0 };
         if self.in_run != 0 || self.ev_depth != 0 || self.nframes != 0 {
             return zero;
@@ -10084,7 +10084,7 @@ extend Interp {
     /// Run fn `fn_id` of module `m`, which takes no parameter and no generic argument, as a test: its
     /// trap kind (IT_TRAP_NONE when it returns) with `trap`, and in `trap_span` the top-frame statement
     /// that trapped. A call the interpreter cannot run ends it with no trap and `failed` set.
-    pub fn probe_test(self: &mut Self, m: ModuleId, fn_id: NodeId) u8 {
+    pub(package) fn probe_test(self: &mut Self, m: ModuleId, fn_id: NodeId) u8 {
         self.eng_enter();
         self.eval_reset();
         self.subst.truncate(0);
@@ -10185,7 +10185,7 @@ extend Interp {
     /// Re-scan instead of trusting the memo: the def-site `const fn` check runs AFTER the body has
     /// typechecked (type-based disqualifiers are invisible before), and overwrites any blind
     /// memoized verdict so later folds agree with it.
-    pub fn fn_recheck(self: &mut Self, m: ModuleId, fn_id: NodeId) u8 {
+    pub(package) fn fn_recheck(self: &mut Self, m: ModuleId, fn_id: NodeId) u8 {
         self.eng_enter();
         let r = self.fn_recheck_g(m, fn_id);
         self.eng_leave();
@@ -10202,12 +10202,12 @@ extend Interp {
     }
 
     /// The const-suggestion lint's surface: deep FX_YES = every path is provably CTFE-evaluable.
-    pub fn fn_const_suggest(self: &mut Self, m: ModuleId, fn_id: NodeId) bool {
+    pub(package) fn fn_const_suggest(self: &mut Self, m: ModuleId, fn_id: NodeId) bool {
         return self.fx_get_in(m, fn_id, true) == FX_YES;
     }
 
     /// The recorded disqualifying site for a shallow FX_NO, or null.
-    pub const fn fx_no_reason(self: &Self, m: ModuleId, fn_id: NodeId) *const FxNo {
+    pub(package) const fn fx_no_reason(self: &Self, m: ModuleId, fn_id: NodeId) *const FxNo {
         switch self.fx_no.get(&(m as u64 << 32 | fn_id as u64)) {
             Some(r) => {
                 return r;
@@ -10756,22 +10756,22 @@ extend Interp {
         return fx_meet(acc, cv);
     }
 
-    pub const fn trap_get(self: &Self) str {
+    pub(package) const fn trap_get(self: &Self) str {
         return self.trap;
     }
 
     /// Whether the trap was set inside a referenced constant, not the evaluated root itself.
-    pub const fn trap_in_item(self: &Self) bool {
+    pub(package) const fn trap_in_item(self: &Self) bool {
         return self.trap_depth != 0;
     }
 
-    pub const fn trap_kind_get(self: &Self) u8 {
+    pub(package) const fn trap_kind_get(self: &Self) u8 {
         return self.trap_kind;
     }
 
     /// The current trap with its call stack and step count: "<msg> (call stack: outer -> ... ->
     /// inner; steps: N/limit)"; a frameless budget trap names the widening flags instead.
-    pub fn trap_detail(self: &mut Self) str {
+    pub(package) fn trap_detail(self: &mut Self) str {
         self.dbuf.clear();
         self.dbuf.push_str(self.trap);
         let nf = self.trap_nframes as u32;
@@ -10854,11 +10854,11 @@ extend Interp {
     /// Public bracket for callers that must read trap state coherently with their own evaluation
     /// (the trap fields describe the LAST evaluation; another task's eval must not run between).
     /// Reentrant: nested facade entries under a held bracket are free.
-    pub fn eng_lock(self: &mut Self) {
+    pub(package) fn eng_lock(self: &mut Self) {
         self.eng_enter();
     }
 
-    pub fn eng_unlock(self: &mut Self) {
+    pub(package) fn eng_unlock(self: &mut Self) {
         self.eng_leave();
     }
 
@@ -10906,7 +10906,7 @@ extend Interp {
         }
     }
 
-    pub fn eval(self: &mut Self, m: ModuleId, id: NodeId) IVal {
+    pub(package) fn eval(self: &mut Self, m: ModuleId, id: NodeId) IVal {
         self.eng_enter();
         let r = self.eval_g(m, id);
         self.eng_leave();
@@ -10917,7 +10917,7 @@ extend Interp {
     /// fold a call again (the live evaluation's state would be overwritten); another task's live
     /// evaluation is NOT a reason to skip (the facade serializes on entry), or folds would depend on
     /// scheduling.
-    pub fn folding_self(self: &Self) bool {
+    pub(package) fn folding_self(self: &Self) bool {
         if self.elock_on && unsafe atomic::load_usize(&self.elock_owner, 0) != Interp::etok() {
             return false;
         }
@@ -10927,13 +10927,13 @@ extend Interp {
     /// Suppress fold-error recording across a speculative evaluation (a `const fn` call's fold, which
     /// leaves the call to run when it fails): a method so the counter update serializes with the engine
     /// under parallel stages.
-    pub fn pause_folds(self: &mut Self) {
+    pub(package) fn pause_folds(self: &mut Self) {
         self.eng_enter();
         self.record_pause += 1;
         self.eng_leave();
     }
 
-    pub fn resume_folds(self: &mut Self) {
+    pub(package) fn resume_folds(self: &mut Self) {
         self.eng_enter();
         self.record_pause -= 1;
         self.eng_leave();
@@ -10944,7 +10944,13 @@ extend Interp {
     /// evaluate or holds anything else (a pointer, a function, a payload enum, a union, a heap block),
     /// or more than FOLD_LEAVES leaves. The caller is in none of its own evaluations (`folding_self`).
     /// A result is kept: every lowering pass of a body asks for it again.
-    pub fn eval_leaves(self: &mut Self, m: ModuleId, id: NodeId, out: &mut Vector<Leaf>, bytes: &mut Vector<u8>) bool {
+    pub(package) fn eval_leaves(
+        self: &mut Self,
+        m: ModuleId,
+        id: NodeId,
+        out: &mut Vector<Leaf>,
+        bytes: &mut Vector<u8>,
+    ) bool {
         self.eng_enter();
         let key = m as u64 << 32 | id as u64;
         switch self.fold_memo.get(&key) {
@@ -10983,7 +10989,7 @@ extend Interp {
 
     /// The declaration ordinal of the variant of enum `dn` of module `m` whose discriminant is `tag`;
     /// -1 when none has it.
-    pub fn variant_of(self: &mut Self, m: ModuleId, dn: NodeId, tag: i64) i64 {
+    pub(package) fn variant_of(self: &mut Self, m: ModuleId, dn: NodeId, tag: i64) i64 {
         self.eng_enter();
         let r = self.variant_ordinal(m, dn, tag);
         self.failed = false;
@@ -11182,7 +11188,7 @@ extend Interp {
     /// (`trap_detail`). It nests inside a run, as a constant item's evaluation does, and holds the
     /// engine lock: parallel lowerings share the evaluator. A list once evaluated under one
     /// substitution is kept: every lowering pass of a body asks for it again.
-    pub fn eval_lanes(self: &mut Self, m: ModuleId, id: NodeId, env: &Vector<irl::LSub>, out: &mut Vector<u64>) u8 {
+    pub(package) fn eval_lanes(self: &mut Self, m: ModuleId, id: NodeId, env: &Vector<irl::LSub>, out: &mut Vector<u64>) u8 {
         self.eng_enter();
         let mut key = plain_key(m, id);
         for i in 0..env.len() {
@@ -11219,7 +11225,7 @@ extend Interp {
     /// whose key hashes to `h` (`eval_lanes`), a new one when none does. The hash only selects a
     /// row: a hit compares the whole key, so a hash two keys share is a miss, and the new row takes
     /// the hash over.
-    pub fn lane_row(self: &mut Self, h: u64, m: ModuleId, id: NodeId, env: &Vector<irl::LSub>) u32 {
+    pub(package) fn lane_row(self: &mut Self, h: u64, m: ModuleId, id: NodeId, env: &Vector<irl::LSub>) u32 {
         switch self.lane_memo.get(&h) {
             Some(v) => {
                 let r = *self.lane_rows.at((*v) as usize);
@@ -11377,14 +11383,14 @@ extend Interp {
     }
 
     /// `eval_lanes` with no substitution: the checker's view of an index list.
-    pub fn eval_list(self: &mut Self, m: ModuleId, id: NodeId, out: &mut Vector<u64>) u8 {
+    pub(package) fn eval_list(self: &mut Self, m: ModuleId, id: NodeId, out: &mut Vector<u64>) u8 {
         let env = Vector::<irl::LSub>::new();
         return self.eval_lanes(m, id, &env, out);
     }
 
     /// Fold `id` under an explicit generic substitution (per-instantiation static_asserts);
     /// deliberately unmemoized.
-    pub fn eval_typed(
+    pub(package) fn eval_typed(
         self: &mut Self,
         m: ModuleId,
         id: NodeId,
@@ -11436,7 +11442,7 @@ extend Interp {
     }
 
     /// Variant count of enum decl `(dm, dn)` -- `type_info::<T>().variants.len`.
-    pub const fn variant_count_of(self: &Self, dm: ModuleId, dn: NodeId) u32 {
+    pub(package) const fn variant_count_of(self: &Self, dm: ModuleId, dn: NodeId) u32 {
         let a = unsafe &*self.p().module_ast_const(dm);
         let ms = a.at_const(dn).as_data.aggregate.members;
         let mut n: u32 = 0;
@@ -11449,7 +11455,15 @@ extend Interp {
     }
 
     /// The `TypeTag` variant index for a type (order pinned by std/core.spc); -1 = untaggable.
-    pub const fn ti_tag(self: &Self, tm: ModuleId, tt: TypeId, strm: ModuleId, strn: NodeId, slm: ModuleId, sln: NodeId) i64 {
+    pub(package) const fn ti_tag(
+        self: &Self,
+        tm: ModuleId,
+        tt: TypeId,
+        strm: ModuleId,
+        strn: NodeId,
+        slm: ModuleId,
+        sln: NodeId,
+    ) i64 {
         let a0 = unsafe &*self.p().module_ast_const(tm);
         let y = *a0.type_at(tt);
         if y.kind == TypeKind::TYPE_BUILTIN {
@@ -11547,14 +11561,14 @@ extend Interp {
     /// Queue a static_assert condition for flush_asserts (re-checked once every module is typed);
     /// `strict`: a condition that still does not fold then is an error (the assert depends on no
     /// generic parameter).
-    pub fn defer_assert(self: &mut Self, m: ModuleId, cond: NodeId, strict: bool) {
+    pub(package) fn defer_assert(self: &mut Self, m: ModuleId, cond: NodeId, strict: bool) {
         self.eng_enter();
         self.pending.push(strict as u64 << 63 | m as u64 << 32 | cond as u64);
         self.eng_leave();
     }
 
     /// Queue the per-instance static_asserts of instance `r` (see `InstAssert`).
-    pub fn defer_inst_assert(self: &mut Self, r: InstAssert) {
+    pub(package) fn defer_inst_assert(self: &mut Self, r: InstAssert) {
         self.eng_enter();
         self.inst_asserts.push(r);
         self.eng_leave();
@@ -11562,7 +11576,7 @@ extend Interp {
 
     /// Queue a const initializer undecidable in module order.
     /// Defer const `decl` of module `m` to `flush_consts`; `strict`: a silent failure then is an error.
-    pub fn defer_const(self: &mut Self, m: ModuleId, decl: NodeId, strict: bool) {
+    pub(package) fn defer_const(self: &mut Self, m: ModuleId, decl: NodeId, strict: bool) {
         self.eng_enter();
         self.pending_consts.push(m as u64 << 32 | decl as u64);
         self.pending_strict.push(strict);
@@ -11570,7 +11584,7 @@ extend Interp {
     }
 
     /// The module of deferred static_assert `k` (`pending`).
-    pub const fn pending_module(self: &Self, k: usize) ModuleId {
+    pub(package) const fn pending_module(self: &Self, k: usize) ModuleId {
         return (self.pending[k] >> 32 & 0xFFFFu64) as ModuleId;
     }
 
@@ -11578,7 +11592,11 @@ extend Interp {
     /// detail for a definite trap, and a reason for a strict assert that is still undecidable (an
     /// assert in a generic body may depend on unsubstituted parameters and stays silent: each
     /// instance checks it, `InstAssert`).
-    pub fn flush_asserts(self: &mut Self, err: fn(*mut void, ModuleId, NodeId, *const char) void, ctx: *mut void) {
+    pub(package) fn flush_asserts(
+        self: &mut Self,
+        err: fn(*mut void, ModuleId, NodeId, *const char) void,
+        ctx: *mut void,
+    ) {
         for i in 0..self.pending.len() {
             let pk = self.pending[i];
             let m = self.pending_module(i);
@@ -11598,7 +11616,7 @@ extend Interp {
 
     /// Whether expression `id` of module `m` last evaluated to an aggregate (`eval` answers IV_NONE
     /// for one).
-    pub fn folded_agg(self: &Self, m: ModuleId, id: NodeId) bool {
+    pub(package) fn folded_agg(self: &Self, m: ModuleId, id: NodeId) bool {
         return switch self.ememo.get(&(m as u64 << 32 | id as u64)) {
             Some(v) => v.kind == EV_AGG_OK,
             None => false,
@@ -11607,7 +11625,11 @@ extend Interp {
 
     /// Re-evaluate the deferred const initializers: err() fires with trap detail for a definite
     /// trap, and for a top-level const that still cannot be evaluated.
-    pub fn flush_consts(self: &mut Self, err: fn(*mut void, ModuleId, NodeId, *const char) void, ctx: *mut void) {
+    pub(package) fn flush_consts(
+        self: &mut Self,
+        err: fn(*mut void, ModuleId, NodeId, *const char) void,
+        ctx: *mut void,
+    ) {
         for i in 0..self.pending_consts.len() {
             let pk = self.pending_consts[i];
             let m = (pk >> 32) as ModuleId;
@@ -11637,7 +11659,7 @@ extend Interp {
 
     /// A `TypeInfo` descriptor for target type (am, at), captured as static data (the @reflect /
     /// type_info emission path). `rty` is the interned TypeInfo struct type in module `m`.
-    pub fn eval_type_info_export(self: &mut Self, m: ModuleId, rty: TypeId, am: ModuleId, at: TypeId) StaticRes {
+    pub(package) fn eval_type_info_export(self: &mut Self, m: ModuleId, rty: TypeId, am: ModuleId, at: TypeId) StaticRes {
         let bad = StaticRes { ok: false, root: 0 };
         if self.ev_depth != 0 || self.in_run != 0 || self.nframes != 0 {
             return bad;
@@ -11659,7 +11681,7 @@ extend Interp {
         return r;
     }
 
-    pub fn eval_static(self: &mut Self, m: ModuleId, id: NodeId) StaticRes {
+    pub(package) fn eval_static(self: &mut Self, m: ModuleId, id: NodeId) StaticRes {
         self.eng_enter();
         let r = self.eval_static_g(m, id);
         self.eng_leave();
@@ -12565,12 +12587,12 @@ const fn same_ival(a: IVal, b: IVal) bool {
 
 extend SSlot {
     /// The SK_FLOAT value.
-    pub const fn f(self: &Self) f64 {
+    pub(package) const fn f(self: &Self) f64 {
         return f64_from_bits(self.i as u64);
     }
 
     /// The SK_AGG statics index of the embedded object.
-    pub const fn child(self: &Self) u32 {
+    pub(package) const fn child(self: &Self) u32 {
         return self.i as u32;
     }
 }
@@ -12610,7 +12632,7 @@ extend CallMemo {
         self.rows.push(MemoRow { a0: a0, n: args.len() as u32, fm: fm, fnode: fnode, v: v });
     }
 
-    pub fn clear(self: &mut Self) {
+    pub(package) fn clear(self: &mut Self) {
         self.ix.clear();
         self.rows.clear();
         self.args.clear();

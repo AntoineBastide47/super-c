@@ -81,7 +81,7 @@ const THREAD_DEPTH: u32 = 4;
 const IMPLY_FAN: u32 = 4;
 
 /// The optimizer's scratch, reused from body to body.
-pub struct Opt {
+pub(package) struct Opt {
     // The control flow graph: per block, its successors and predecessors as ranges of one list each.
     succ_at: Vector<u32>,
     succs: Vector<u32>,
@@ -211,9 +211,9 @@ pub struct Opt {
 }
 
 /// What `optimize` does: the inline budget, and the loop transforms' budgets.
-pub struct Config {
-    pub inline: il::Budget,
-    pub loops: lu::Budgets,
+pub(package) struct Config {
+    pub(package) inline: il::Budget,
+    pub(package) loops: lu::Budgets,
 }
 
 extend Config as Copy {}
@@ -221,28 +221,28 @@ extend Config as Copy {}
 // A write into private memory whose address does not escape: bytes `off` to `end` of `slot` (`Opt.sbase`),
 // by store `inst` in block `blk` (NONE: a copy or a fill).
 struct SlotWrite {
-    pub slot: u32,
-    pub off: i64,
-    pub end: i64,
-    pub inst: u32,
-    pub blk: u32,
+    pub(package) slot: u32,
+    pub(package) off: i64,
+    pub(package) end: i64,
+    pub(package) inst: u32,
+    pub(package) blk: u32,
 }
 
 extend SlotWrite as Copy {}
 
 // A memory place in a memory state, and the value it holds.
 struct Place {
-    pub addr: u32,
-    pub off: u32,
-    pub ty: u8,
-    pub state: u32,
-    pub val: u32,
+    pub(package) addr: u32,
+    pub(package) off: u32,
+    pub(package) ty: u8,
+    pub(package) state: u32,
+    pub(package) val: u32,
 }
 
 extend Place as Copy {}
 
 extend Opt {
-    pub fn new() Opt {
+    pub(package) fn new() Opt {
         return Opt {
             succ_at: Vector::<u32>::new(),
             succs: Vector::<u32>::new(),
@@ -356,7 +356,7 @@ extend Opt {
 
     /// Optimize body `b` of package `pk`; with `force` the rebuild runs though nothing changed (after the
     /// inliner, which leaves blocks the entry may not reach). Whether it changed.
-    pub fn run(self: &mut Self, pk: &Package, b: &mut Body, force: bool) bool {
+    pub(package) fn run(self: &mut Self, pk: &Package, b: &mut Body, force: bool) bool {
         if b.naked {
             return false;
         }
@@ -437,7 +437,7 @@ extend Opt {
 
     /// Pack body `b`'s isomorphic scalar values into vectors (`lir::slp`), kept when the instruction
     /// count weighted by loop depth drops; then optimize it again. Whether it changed.
-    pub fn slp(self: &mut Self, pk: &Package, b: &mut Body) bool {
+    pub(package) fn slp(self: &mut Self, pk: &Package, b: &mut Body) bool {
         if b.naked || pk.vector < 16 {
             return false;
         }
@@ -502,7 +502,7 @@ extend Opt {
 
     /// Rotate the innermost loops of body `b` whose header holds at most `max` instructions
     /// (`lir::loops`), then optimize it again. Whether any changed.
-    pub fn rotate(self: &mut Self, pk: &Package, b: &mut Body, max: u32) bool {
+    pub(package) fn rotate(self: &mut Self, pk: &Package, b: &mut Body, max: u32) bool {
         if b.naked {
             return false;
         }
@@ -527,7 +527,7 @@ extend Opt {
 
     /// Transform the innermost loops of body `b` (`lir::loops`) within budgets `bu`, then optimize it
     /// again. Whether any changed.
-    pub fn loop_opts(self: &mut Self, pk: &Package, b: &mut Body, bu: lu::Budgets) bool {
+    pub(package) fn loop_opts(self: &mut Self, pk: &Package, b: &mut Body, bu: lu::Budgets) bool {
         if b.naked {
             return false;
         }
@@ -567,7 +567,7 @@ extend Opt {
     /// Give each loop exit of body `b` that passes arguments from a branch whose other side stays in the
     /// loop a block of its own that jumps on with them: the native layout places that block after the
     /// loop, so the loop's path takes no branch around the exit's moves. Whether any.
-    pub fn split_exits(self: &mut Self, pk: &Package, b: &mut Body) bool {
+    pub(package) fn split_exits(self: &mut Self, pk: &Package, b: &mut Body) bool {
         if b.naked {
             return false;
         }
@@ -4329,11 +4329,11 @@ extend Opt {
 /// count), and a body inlines only callees of a lower level, so each body waits for its direct callees of
 /// a lower level (`edges`) and for nothing else: the result does not depend on the schedule. A body of a
 /// unit `sealed` marks (by unit) inlines into bodies of its unit only.
-pub struct Run {
+pub(package) struct Run {
     /// One edge per callee a body waits for: `callee << 32 | caller`, each pair once.
-    pub edges: Vector<u64>,
+    pub(package) edges: Vector<u64>,
     /// The bodies by level: a serial order every edge runs forward in.
-    pub order: Vector<u32>,
+    pub(package) order: Vector<u32>,
     pk: *const Package,
     bodies: Vector<Body>,
     // The first held body (`Package.held`), the body count without any.
@@ -4358,13 +4358,13 @@ pub struct Run {
 }
 
 struct Scratch {
-    pub il: il::Inliner,
-    pub o: Opt,
+    pub(package) il: il::Inliner,
+    pub(package) o: Opt,
 }
 
 extend Run {
     /// The job graph of `pk`'s bodies under `cf`; `pk` keeps no body until `finish`.
-    pub fn new(pk: &mut Package, sealed: &Vector<bool>, cf: Config) Run {
+    pub(package) fn new(pk: &mut Package, sealed: &Vector<bool>, cf: Config) Run {
         let bodies = replace(&mut pk.bodies, Vector::<Body>::new());
         let mut wargs = Vector::<u64>::new();
         let fx = effects(pk, &bodies, &mut wargs);
@@ -4491,7 +4491,7 @@ extend Run {
 
     /// Optimize body `j`, once every body `edges` makes it wait for is done. Jobs of one `Run` run in
     /// parallel: each writes its own body and `ok` entry, and reads its callees' ones.
-    pub fn job(self: &Self, j: u32) {
+    pub(package) fn job(self: &Self, j: u32) {
         let r = self;
         if j >= r.held {
             return;
@@ -4564,38 +4564,38 @@ extend Run {
     }
 
     /// Give the bodies back to `pk`, the package `new` took them from.
-    pub fn finish(self: &mut Self, pk: &mut Package) {
+    pub(package) fn finish(self: &mut Self, pk: &mut Package) {
         pk.bodies = replace(&mut self.bodies, Vector::<Body>::new());
     }
 
     /// Whether body `k` passed the inliner's shape test, and whether its callers may inline it (after its
     /// job).
-    pub const fn shape_of(self: &Self, k: u32) bool {
+    pub(package) const fn shape_of(self: &Self, k: u32) bool {
         return self.shape[k as usize];
     }
 
-    pub const fn inlinable(self: &Self, k: u32) bool {
+    pub(package) const fn inlinable(self: &Self, k: u32) bool {
         return self.ok[k as usize];
     }
 
     /// The parameters whose memory a call of body `k` may write (`FX_ARG`), a bit each.
-    pub const fn wargs_of(self: &Self, k: u32) u64 {
+    pub(package) const fn wargs_of(self: &Self, k: u32) u64 {
         return self.wargs[k as usize];
     }
 
     /// The direct calls of body `k` before optimization, as bodies in instruction order.
-    pub const fn calls_of(self: &Self, k: u32) Slice<u32> {
+    pub(package) const fn calls_of(self: &Self, k: u32) Slice<u32> {
         return self.calls[self.call_at[k as usize] as usize..self.call_at[k as usize + 1] as usize];
     }
 }
 
 /// `Run::job` for `driver::sched::run_jobs`: `ctx` is the `Run`.
-pub fn job(ctx: *mut void, j: u32) {
+pub(package) fn job(ctx: *mut void, j: u32) {
     (unsafe &*(ctx as *const Run)).job(j);
 }
 
 /// `Run::new`, every job in `order` on this thread, then `finish`.
-pub fn optimize(pk: &mut Package, sealed: &Vector<bool>, cf: Config) {
+pub(package) fn optimize(pk: &mut Package, sealed: &Vector<bool>, cf: Config) {
     let mut r = Run::new(pk, sealed, cf);
     for k in 0..r.order.len() {
         r.job(r.order[k]);

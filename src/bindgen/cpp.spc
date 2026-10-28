@@ -244,56 +244,56 @@ const OP_SHL: u32 = 0x3c3cu32;
 const OP_SHR: u32 = 0x3e3eu32;
 
 /// An in-memory file: `path` is what an `#include` resolves to, `text` its contents.
-pub struct VFile {
-    pub path: String,
-    pub text: String,
+pub(package) struct VFile {
+    pub(package) path: String,
+    pub(package) text: String,
 }
 
 /// Search paths, in-memory files and macro text for one preprocessor.
-pub struct PpConfig {
-    pub quote_dirs: Vector<String>,
-    pub dirs: Vector<String>,
-    pub sys_dirs: Vector<String>,
+pub(package) struct PpConfig {
+    pub(package) quote_dirs: Vector<String>,
+    pub(package) dirs: Vector<String>,
+    pub(package) sys_dirs: Vector<String>,
     /// Apple framework directories, searched after `sys_dirs`: `Name/Header.h` is
     /// `<dir>/Name.framework/Headers/Header.h`, then `PrivateHeaders`.
-    pub frameworks: Vector<String>,
-    pub files: Vector<VFile>,
-    pub predefs: String,
-    pub cmdline: String,
-    pub has: Vector<String>,
+    pub(package) frameworks: Vector<String>,
+    pub(package) files: Vector<VFile>,
+    pub(package) predefs: String,
+    pub(package) cmdline: String,
+    pub(package) has: Vector<String>,
 }
 
 struct Tok {
-    pub kind: u8,
-    pub flags: u8,
-    pub id: u32,
-    pub line: u32,
-    pub hide: u32,
+    pub(package) kind: u8,
+    pub(package) flags: u8,
+    pub(package) id: u32,
+    pub(package) line: u32,
+    pub(package) hide: u32,
 }
 
 // `param_count` counts the parameters, a variadic one included. `variadic` is 0, 1 (`...`) or 2 (`name...`). A `simple` body
 // holds no parameter, `#`, `##` or `__VA_OPT__`, so an expansion copies it.
 struct Macro {
-    pub name: u32,
-    pub kind: u8,
-    pub variadic: u8,
-    pub simple: bool,
-    pub param_count: u32,
-    pub params_start: u32,
-    pub body_start: u32,
-    pub body_len: u32,
+    pub(package) name: u32,
+    pub(package) kind: u8,
+    pub(package) variadic: u8,
+    pub(package) simple: bool,
+    pub(package) param_count: u32,
+    pub(package) params_start: u32,
+    pub(package) body_start: u32,
+    pub(package) body_len: u32,
 }
 
 struct FileInfo {
-    pub start: u32,
-    pub end: u32,
-    pub guard: u32,
-    pub once: bool,
+    pub(package) start: u32,
+    pub(package) end: u32,
+    pub(package) guard: u32,
+    pub(package) once: bool,
 }
 
 struct Val {
-    pub v: u64,
-    pub u: bool,
+    pub(package) v: u64,
+    pub(package) u: bool,
 }
 
 // The class bits of each byte, for the lexer: one load per byte instead of a chain of compares.
@@ -541,15 +541,15 @@ fn names_new() nm::Names {
 
 // Hide sets: sorted lists of macro names, hash-consed so a set is its id. Set 0 is empty.
 struct Hides {
-    pub off: Vector<u32>,
-    pub data: Vector<u32>,
-    pub tab: Vector<u32>,
-    pub tmp: Vector<u32>,
+    pub(package) off: Vector<u32>,
+    pub(package) data: Vector<u32>,
+    pub(package) tab: Vector<u32>,
+    pub(package) tmp: Vector<u32>,
     // Direct-mapped cache of merges: the same argument set is merged into every token of an expansion.
-    pub memo_key: Vector<u64>,
-    pub memo_set: Vector<u32>,
-    pub add_key: Vector<u64>, // the same for `add`: (set, name)
-    pub add_set: Vector<u32>,
+    pub(package) memo_key: Vector<u64>,
+    pub(package) memo_set: Vector<u32>,
+    pub(package) add_key: Vector<u64>, // the same for `add`: (set, name)
+    pub(package) add_set: Vector<u32>,
 }
 
 const MEMO_SIZE: usize = 4096;
@@ -1019,7 +1019,7 @@ fn push_attribute_name(out: &mut String, name: str) {
 }
 
 /// A C preprocessor over one configuration. `preprocess` may run more than once; macros persist.
-pub struct Pp {
+pub(package) struct Pp {
     search_dirs: Vector<String>,
     n_quote: usize,
     n_plain: usize, // the search directories before the framework directories
@@ -1072,20 +1072,20 @@ pub struct Pp {
     error_line: u32,
     failed: bool,
     /// The paths of the files read from disk, in the order of the first read.
-    pub disk_paths: Vector<String>,
+    pub(package) disk_paths: Vector<String>,
     /// Errors are kept in `err`, not printed.
-    pub quiet: bool,
+    pub(package) quiet: bool,
     primed: bool,
     in_args: bool,
     queried_seen: Set<String>,
     /// The `has` keys the run asked for, each once, in the order asked.
-    pub queried: Vector<String>,
-    pub err: String,
+    pub(package) queried: Vector<String>,
+    pub(package) err: String,
 }
 
 extend Pp {
     /// A preprocessor for `config`. Nothing runs until `preprocess`.
-    pub fn new(mut config: PpConfig) Pp {
+    pub(package) fn new(mut config: PpConfig) Pp {
         let mut search_dirs = Vector::<String>::new();
         move_all(&mut search_dirs, replace(&mut config.quote_dirs, Vector::<String>::new()));
         let n_quote = search_dirs.len();
@@ -1546,7 +1546,7 @@ extend Pp {
 
     /// Preprocess the file `path` into `out` as `cc -E` prints it. False after an error, reported on stderr
     /// as `file:line: message` and kept in `err`.
-    pub fn preprocess(self: &mut Pp, path: str, out: &mut String) bool {
+    pub(package) fn preprocess(self: &mut Pp, path: str, out: &mut String) bool {
         self.failed = false;
         self.err.clear();
         if !self.primed {
@@ -3464,7 +3464,7 @@ extend Pp {
     // ---- Macro dump --------------------------------------------------------------------------------------
 
     /// Every macro defined now, one per line, as `cc -E -dM` prints them.
-    pub fn dump_macros(self: &Pp, out: &mut String) {
+    pub(package) fn dump_macros(self: &Pp, out: &mut String) {
         for i in 0..self.macros.len() {
             let m = self.macros[i];
             if m.kind == M_BUILTIN || self.macro_index(m.name) != i as u32 + 1 {

@@ -23,10 +23,10 @@ import ast::parser as par;
 import typechecker::render as *;
 
 /// Alias-chain hops before a cycle is reported.
-pub const TYPE_ALIAS_MAX_DEPTH: u32 = 64;
-pub type Lits8 = Array<u8, 8>;
+pub(package) const TYPE_ALIAS_MAX_DEPTH: u32 = 64;
+pub(package) type Lits8 = Array<u8, 8>;
 /// Candidates one call may weigh; the collector stops here and past it the call is an error.
-pub const TC_MAX_CANDIDATES: usize = 32;
+pub(package) const TC_MAX_CANDIDATES: usize = 32;
 /// `tc_dyn_conf` verdicts: a conformance with the dyn type's arguments exists, none exists (a
 /// type mismatch), or only conformances with other arguments exist (reported there).
 const DYN_CONF_OK: u8 = 0;
@@ -36,12 +36,12 @@ const DYN_CONF_REPORTED: u8 = 2;
 // One candidate's lexicographic score: fewer safe conversions, then fewer reference
 // adjustments, then fewer literal defaults, then fewer generic defaults, then more exact matches.
 struct CandScore {
-    pub viable: bool,
-    pub conv: i32,
-    pub radj: i32,
-    pub litd: i32,
-    pub gdef: i32,
-    pub exact: i32,
+    pub(package) viable: bool,
+    pub(package) conv: i32,
+    pub(package) radj: i32,
+    pub(package) litd: i32,
+    pub(package) gdef: i32,
+    pub(package) exact: i32,
 }
 
 const fn score_better(a: &CandScore, b: &CandScore) bool {
@@ -85,47 +85,47 @@ const fn same_ob(a: &ProjOb, b: &ProjOb) bool {
 // `payloads` loop the copy of the `variants` loop it reads (`vidx`, variant `vid`; NODE_NONE for any
 // other loop).
 struct ProofCopy {
-    pub idx: i64,
-    pub fdm: ModuleId,
-    pub own: NodeId,
-    pub fid: NodeId,
-    pub vidx: i64,
-    pub vid: NodeId,
+    pub(package) idx: i64,
+    pub(package) fdm: ModuleId,
+    pub(package) own: NodeId,
+    pub(package) fid: NodeId,
+    pub(package) vidx: i64,
+    pub(package) vid: NodeId,
 }
 
 /// Walk budgets: bound nesting, place projection steps, match variants, and borrow-escape depth.
-pub const BOUND_MAX_DEPTH: i32 = 8;
+pub(package) const BOUND_MAX_DEPTH: i32 = 8;
 /// The deferred reflection-bound obligations one module may hold (`Ast.proj_obs`).
-pub const PROJ_OBS_MAX: usize = 1024;
-pub const PLACE_MAX_STEPS: i32 = 16;
-pub const MATCH_MAX_VARIANTS: u32 = 256;
+pub(package) const PROJ_OBS_MAX: usize = 1024;
+pub(package) const PLACE_MAX_STEPS: i32 = 16;
+pub(package) const MATCH_MAX_VARIANTS: u32 = 256;
 /// Aggregates the infinite-size check follows by value from one declaration before it reports the
 /// type as too deep: a generic that holds itself with a growing argument never ends the walk.
-pub const BYVAL_MAX_DEPTH: i32 = 64;
-pub const BORROW_ESCAPE_MAX_DEPTH: u32 = 64;
+pub(package) const BYVAL_MAX_DEPTH: i32 = 64;
+pub(package) const BORROW_ESCAPE_MAX_DEPTH: u32 = 64;
 /// `tc_type_is_free`'s walk: no assumption made, and the stack depth past which it cuts.
 const FREE_BUSY_NONE: i64 = 0x7FFFFFFFFFFFFFFFi64;
 const FREE_WALK_MAX: usize = 64;
 
 /// Borrow kinds (Borrow.kind).
-pub const BORROW_SHARED: u8 = 0;
-pub const BORROW_MUT: u8 = 1;
+pub(package) const BORROW_SHARED: u8 = 0;
+pub(package) const BORROW_MUT: u8 = 1;
 /// The reserved RegionVid for `'static`: outlives every other region.
-pub const REGION_STATIC: u32 = 0;
+pub(package) const REGION_STATIC: u32 = 0;
 /// "no region": a lifetime name that denotes nothing in the current signature.
-pub const REGION_NONE: u32 = 0xFFFFFFFF;
+pub(package) const REGION_NONE: u32 = 0xFFFFFFFF;
 /// Place-projection step kinds (PStep.kind).
-pub const PS_FIELD: u8 = 0;
-pub const PS_INDEX: u8 = 1;
-pub const PS_DEREF: u8 = 2;
+pub(package) const PS_FIELD: u8 = 0;
+pub(package) const PS_INDEX: u8 = 1;
+pub(package) const PS_DEREF: u8 = 2;
 
 /// Fixed-size scratch arrays (a struct field zero-inits its array).
-pub type Defs8 = Array<DefId, 8>;
-pub type Tys8 = Array<TypeId, 8>;
+pub(package) type Defs8 = Array<DefId, 8>;
+pub(package) type Tys8 = Array<TypeId, 8>;
 /// The same-named methods one call chooses among, and their conformances (TC_MAX_CANDIDATES).
-pub type Cands = Array<DefId, 32>;
-pub type CandTys = Array<TypeId, 32>;
-pub type BoundArr8 = Array<BoundIface, 8>;
+pub(package) type Cands = Array<DefId, 32>;
+pub(package) type CandTys = Array<TypeId, 32>;
+pub(package) type BoundArr8 = Array<BoundIface, 8>;
 // The String methods the print lowering calls by name, with no type-checked call node.
 const FORMAT_HELPERS: [str<'static>; 16] = [
     "new",
@@ -158,75 +158,75 @@ const SYNTH_METHODS: [str<'static>; 10] = [
     "from",
     "try_from",
 ];
-pub type Steps16 = Array<PStep, 16>;
-pub type Keep256 = Array<bool, 256>;
+pub(package) type Steps16 = Array<PStep, 16>;
+pub(package) type Keep256 = Array<bool, 256>;
 /// Worklist/visited scratch for the outlives closure. The DECLARED outlives graph is signature-sized
 /// (a handful of lifetimes), so 32 is ample; overflowing answers "cannot prove", which over-rejects.
-pub type Regions32 = Array<u32, 32>;
+pub(package) type Regions32 = Array<u32, 32>;
 /// Field-chain scratch for resolving a store slot's lifetime through nested aggregates.
-pub type Nodes8 = Array<NodeId, 8>;
-pub type Spans8 = Array<tok::Span, 8>;
+pub(package) type Nodes8 = Array<NodeId, 8>;
+pub(package) type Spans8 = Array<tok::Span, 8>;
 
 /// A live borrow: `root` = the borrowed place's base binding, `place` = the place node, `origin` = the
 /// expression that created it, `binding` = the binding holding it (NODE_NONE = transient, released at
 /// statement end), `region` = scope depth at creation, `kind` = BORROW_SHARED/BORROW_MUT.
-pub struct Borrow {
-    pub root: NodeId,
-    pub place: NodeId,
-    pub origin: NodeId,
-    pub binding: NodeId,
-    pub region: u16,
-    pub kind: u8,
+pub(package) struct Borrow {
+    pub(package) root: NodeId,
+    pub(package) place: NodeId,
+    pub(package) origin: NodeId,
+    pub(package) binding: NodeId,
+    pub(package) region: u16,
+    pub(package) kind: u8,
 }
 
 /// One access step of a decomposed place (see place_decompose): PS_FIELD (`name`), PS_INDEX
 /// (`index_val` valid when `index_const`), or PS_DEREF.
-pub struct PStep {
-    pub kind: u8,
-    pub index_const: bool,
-    pub index_val: i64,
-    pub name: tok::Span,
+pub(package) struct PStep {
+    pub(package) kind: u8,
+    pub(package) index_const: bool,
+    pub(package) index_val: i64,
+    pub(package) name: tok::Span,
 }
 
 /// An interface bound plus its lowered type arguments (`n` <= 8).
-pub struct BoundIface {
-    pub iface: DefId,
-    pub n: u8,
-    pub args: [TypeId; 8],
+pub(package) struct BoundIface {
+    pub(package) iface: DefId,
+    pub(package) n: u8,
+    pub(package) args: [TypeId; 8],
 }
 
 /// One enclosing loop of the statement under check: its label, node, and `break <value>` type.
-pub struct LoopEntry {
-    pub label: tok::Span,
-    pub node: NodeId,
-    pub break_ty: TypeId,
-    pub value_loop: bool,
-    pub saw_value: bool,
-    pub saw_bare: bool,
+pub(package) struct LoopEntry {
+    pub(package) label: tok::Span,
+    pub(package) node: NodeId,
+    pub(package) break_ty: TypeId,
+    pub(package) value_loop: bool,
+    pub(package) saw_value: bool,
+    pub(package) saw_bare: bool,
     // Scope depth on entry to this loop. A binding declared DEEPER than this lives inside the loop
     // body and therefore dies at the end of each iteration, which is what makes source-order
     // last-use reasoning valid for it despite the back edge (see borrow_dead_after).
-    pub depth: u32,
+    pub(package) depth: u32,
 }
 
 /// Snapshot of the borrow pass's flow state (moves, split initializations, borrows), saved
 /// and merged around branches; only the counted prefixes are touched. Each array is as large as the
 /// matching TypeChecker table, so a snapshot holds every state the live checker can hold.
-pub struct FlowState {
-    pub moved: [NodeId; 1024],
-    pub nmoved: u32,
-    pub late: [NodeId; 256],
-    pub nlate: u32,
-    pub borrows: [Borrow; 256],
-    pub nborrows: u32,
+pub(package) struct FlowState {
+    pub(package) moved: [NodeId; 1024],
+    pub(package) nmoved: u32,
+    pub(package) late: [NodeId; 256],
+    pub(package) nlate: u32,
+    pub(package) borrows: [Borrow; 256],
+    pub(package) nborrows: u32,
 }
 
 /// One extend in the per-checker target index (`TypeChecker::ext_begin`); `next` links the extends
 /// of one target, EXT_END ends the list.
 struct ExtHit {
-    pub m: ModuleId,
-    pub node: NodeId,
-    pub next: u32,
+    pub(package) m: ModuleId,
+    pub(package) node: NodeId,
+    pub(package) next: u32,
 }
 
 const EXT_END: u32 = 0xFFFFFFFFu32;
@@ -234,25 +234,25 @@ const EXT_END: u32 = 0xFFFFFFFFu32;
 /// One target's extends in `ext_hits`, in dispatch order: the target module's, then the other
 /// scoped modules', each in index order. `own` is the last of the target module's (EXT_END: none).
 struct ExtList {
-    pub head: u32,
-    pub own: u32,
-    pub last: u32,
+    pub(package) head: u32,
+    pub(package) own: u32,
+    pub(package) last: u32,
 }
 
 /// A walk over one target's list, then over the scope's generic extends.
 struct ExtCursor {
-    pub at: u32,
-    pub blk: u32, // past the list: the next of `ext_blankets`
+    pub(package) at: u32,
+    pub(package) blk: u32, // past the list: the next of `ext_blankets`
 }
 
 /// Method/assoc-const/default-method query key. `name` is a CONTENT view (span slice of the
 /// querying module's source, or the caller's literal), so span- and cstr-form queries for the same
 /// name share one entry. Exact-keyed (Hash + full Eq), so collisions cannot alias.
-pub struct MQKey<'a> {
-    pub m: ModuleId,
-    pub decl: NodeId,
-    pub kind: u8,
-    pub name: str<'a>,
+pub(package) struct MQKey<'a> {
+    pub(package) m: ModuleId,
+    pub(package) decl: NodeId,
+    pub(package) kind: u8,
+    pub(package) name: str<'a>,
 }
 
 extend MQKey as Hash {
@@ -272,11 +272,11 @@ extend MQKey as Eq {
 /// A bound or marker query (`TypeChecker::sat_memo`): `kind` 0 asks `iface` (with the arguments of
 /// `dyn` type `args`, or any when TYPE_NONE), 1 `Copy`, 2 `Send`, 3 `Sync`.
 struct SatKey {
-    pub ty: TypeId,
-    pub depth: i32,
-    pub kind: u32,
-    pub iface: DefId,
-    pub args: TypeId,
+    pub(package) ty: TypeId,
+    pub(package) depth: i32,
+    pub(package) kind: u32,
+    pub(package) iface: DefId,
+    pub(package) args: TypeId,
 }
 
 extend SatKey as Hash {
@@ -297,15 +297,15 @@ extend SatKey as Eq {
 /// An open `sat_memo` frame: the side-effect count and `mark_n` at entry; `on` is false under a
 /// `tc_type_is_free` walk.
 struct SatFrame {
-    pub fx: usize,
-    pub mark_n: u32,
-    pub on: bool,
+    pub(package) fx: usize,
+    pub(package) mark_n: u32,
+    pub(package) on: bool,
 }
 
 /// An (interface, target) conformance pair: the duplicate-conformance indexes' key.
-pub struct ConfKey {
-    pub iface: DefId,
-    pub tgt: DefId,
+pub(package) struct ConfKey {
+    pub(package) iface: DefId,
+    pub(package) tgt: DefId,
 }
 
 extend ConfKey as Hash {
@@ -347,7 +347,7 @@ fn dup_conf_key(a: &Ast, id: NodeId) ConfKey {
 
 /// The first extend of each conformance `check_cross_module_dup_conformances` compares, in module
 /// then item order: its key -> module << 32 | extend node. Built once for the package.
-pub fn dup_conformance_index(p: &loader::Package) Map<ConfKey, u64> {
+pub(package) fn dup_conformance_index(p: &loader::Package) Map<ConfKey, u64> {
     let mut idx = Map::<ConfKey, u64>::new();
     for j in 0..p.modules.len() {
         let a = &p.modules[j].ast;
@@ -365,61 +365,61 @@ pub fn dup_conformance_index(p: &loader::Package) Map<ConfKey, u64> {
 
 /// Parallel-frontier capture of the package-global method marks: replayed by the driver in module
 /// order through the real functions.
-pub struct TcMarkLog {
-    pub kinds: Vector<u8>, // 1 = always_methods, 2 = mark_method_used, 3 = c_reads
-    pub a: Vector<u64>, // the marked DefId (module << 32 | node)
-    pub used: Set<u64>, // task-local dedupe standing in for method_used_get
+pub(package) struct TcMarkLog {
+    pub(package) kinds: Vector<u8>, // 1 = always_methods, 2 = mark_method_used, 3 = c_reads
+    pub(package) a: Vector<u64>, // the marked DefId (module << 32 | node)
+    pub(package) used: Set<u64>, // task-local dedupe standing in for method_used_get
 }
 
 extend TcMarkLog {
     /// An empty log.
-    pub fn new() TcMarkLog {
+    pub(package) fn new() TcMarkLog {
         return TcMarkLog { kinds: Vector::<u8>::new(), a: Vector::<u64>::new(), used: Set::<u64>::new() };
     }
 }
 
 /// A const-expression leaf that takes its form's type (a literal or a limit) and its value.
 struct LinLeaf {
-    pub node: NodeId,
-    pub v: i128,
+    pub(package) node: NodeId,
+    pub(package) v: i128,
 }
 
 // A step `tc_lin` computed: the value of the binary or unary node `node` (`div` 0), or the dividend
 // of the `/` at `node` that the form floors by `div`.
 struct LinStep {
-    pub node: NodeId,
-    pub lin: ConstLin,
-    pub div: i128,
+    pub(package) node: NodeId,
+    pub(package) lin: ConstLin,
+    pub(package) div: i128,
 }
 
 // A const-generic step recorded for item `owner` of the module under check, published with the
 // owner's check (`Ast::publish_step`).
 struct PendStep {
-    pub owner: loader::ItemId,
-    pub s: ConstStep,
+    pub(package) owner: loader::ItemId,
+    pub(package) s: ConstStep,
 }
 
 /// The per-module checker. Also the state substrate for the borrowck pass, which extends TypeChecker
 /// and re-walks function bodies after check() (Ast.call_info bridges the two).
-pub struct TypeChecker<'a> {
+pub(package) struct TypeChecker<'a> {
     /// The module's Ast, mutated IN PLACE in its `Package.modules` slot (never moved out): package
     /// lookups that land back on this module read the live tree with no override indirection.
-    pub ast: *mut Ast,
-    pub source: str<'a>,
-    pub current_self: NodeId,
-    pub current_extend: NodeId,
+    pub(package) ast: *mut Ast,
+    pub(package) source: str<'a>,
+    pub(package) current_self: NodeId,
+    pub(package) current_extend: NodeId,
     /// The per-body mutable walk state: expected type, function
     /// state, closures, returns, and unsafe state live here, isolated from the module-wide caches.
-    pub icx: inf::InferenceContext,
-    pub package: *mut loader::Package,
+    pub(package) icx: inf::InferenceContext,
+    pub(package) package: *mut loader::Package,
     /// Some module of the package declares a register type (`@value`): the inferred types that
     /// would store one are checked (`tc_no_held_reg`).
-    pub has_reg: bool,
+    pub(package) has_reg: bool,
     // The type node under resolution is the target of a pointer or a reference, or a type alias's
     // definition: an opaque C type with no layout is valid there (`tc_opaque_value`). The next
     // `resolve_type_at` reads and clears it.
-    pub opq_target: bool,
-    pub alias_depth: u32,
+    pub(package) opq_target: bool,
+    pub(package) alias_depth: u32,
     // The local constant initializer being checked (start << 32 | end, 0 = none): a variable bound
     // outside it has no compile-time value.
     const_init: u64,
@@ -430,78 +430,78 @@ pub struct TypeChecker<'a> {
     ext_lists: Vector<ExtList>,
     ext_blankets: Vector<ExtHit>, // the generic extends of the extension scope (`ext_blanket`)
     ext_indexed: Vector<u8>, // per module: 1 once its extends are in `ext_hits`
-    pub moved: [NodeId; 1024],
-    pub nmoved: u32,
+    pub(package) moved: [NodeId; 1024],
+    pub(package) nmoved: u32,
     /// Split-initialization tracking: immutable `let x;` bindings assigned on SOME path so far;
     /// a second assignment (or one on a path that may repeat) is "cannot assign twice".
-    pub late: [NodeId; 256],
-    pub nlate: u32,
-    pub borrows: [Borrow; 256],
-    pub nborrows: u32,
-    pub scope_depth: u32,
-    pub loop_depth: u32,
-    pub fields_depth: u32, // nesting inside `inline for .. in fields(..)` bodies (closures rejected there)
+    pub(package) late: [NodeId; 256],
+    pub(package) nlate: u32,
+    pub(package) borrows: [Borrow; 256],
+    pub(package) nborrows: u32,
+    pub(package) scope_depth: u32,
+    pub(package) loop_depth: u32,
+    pub(package) fields_depth: u32, // nesting inside `inline for .. in fields(..)` bodies (closures rejected there)
     guard_top: u32, // the innermost `if` around the check inside such a body (`Ast.ob_guards` + 1)
     // A closure block body without written results under check (`clos_ret_on`): the result its
     // `return`s give, TYPE_NONE until one does.
     clos_ret: TypeId,
     clos_ret_on: bool,
-    pub binding_depth: Map<u32, u32>,
-    pub proj_cbase: Map<u32, u32>, // fields-loop node -> closure_depth at its entry (capture guard)
-    pub in_loop_recheck: bool,
+    pub(package) binding_depth: Map<u32, u32>,
+    pub(package) proj_cbase: Map<u32, u32>, // fields-loop node -> closure_depth at its entry (capture guard)
+    pub(package) in_loop_recheck: bool,
     // Next RegionVid to hand out. REGION_STATIC (0) is reserved; the current function's declared
     // lifetimes take the ids after it (universal: they outlive the whole body), and every other
     // region is existential, allocated one per lifetime slot of a value's type as the body is walked.
-    pub region_next: u32,
+    pub(package) region_next: u32,
     // Per-aggregate variance of each lifetime-then-type parameter, 2 bits each (V_*), packed LSB-first,
     // keyed by decl (module << 32 | node). Lazy + memoized; a recursive-type cycle resolves to the
     // conservative all-V_INVARIANT (over-restricts only recursion). `variance_wip` marks a decl whose
     // inference is on the stack. Consumed by the invariance check and by the function-type lifetime
     // positions (`loader::SlotVariance`).
-    pub variance_of: Map<u64, u64>,
-    pub variance_wip: Map<u64, bool>,
+    pub(package) variance_of: Map<u64, u64>,
+    pub(package) variance_wip: Map<u64, bool>,
     // The call whose argument conversion is under check (`tc_lt_call_toks`).
-    pub lt_call: LtCall,
+    pub(package) lt_call: LtCall,
     // The written types the expressions under check are checked against, innermost last
     // (`tc_ann_names`), and the expression whose conversion `compatible_in` checks.
-    pub lt_env: Vector<LtFrame>,
-    pub lt_conv: NodeId,
+    pub(package) lt_env: Vector<LtFrame>,
+    pub(package) lt_conv: NodeId,
     // `tc_frame_call_in`'s parameter matches (`tc_frame_match`), kept between calls for their buffers.
     frame_gk: Vector<NodeId>,
     frame_gf: Vector<LtFrame>,
     // The function's pending locals, the outlives pairs (sup, sub tokens: a name's `lt_tok_of`, or
     // `LT_VAR`) their inference variables take part in, and the span of each name token.
-    pub lt_pend: Vector<LtPend>,
-    pub lt_pool: Vector<u64>,
-    pub lt_tnames: Vector<u64>,
+    pub(package) lt_pend: Vector<LtPend>,
+    pub(package) lt_pool: Vector<u64>,
+    pub(package) lt_tnames: Vector<u64>,
     // A declared lifetime param node -> the universal RegionVid standing for it in this function.
-    pub lt_region: Map<u32, u32>,
+    pub(package) lt_region: Map<u32, u32>,
     // Outlives constraints for the current function, packed (sup << 32 | sub) meaning "sup: sub",
     // i.e. sup outlives sub. Seeded from the signature (`<'a: 'b>` bounds and `where 'a: 'b`) and
     // later from constraint generation. Cleared per function: RegionVids are function-scoped.
-    pub outlives: Vector<u64>,
+    pub(package) outlives: Vector<u64>,
     // Index into `errors` where the CURRENT function's diagnostics begin. Region/lifetime errors are
     // discovered after the body has been walked (the solver only knows once its constraints are
     // solved), so they are inserted back into source order within this function's range rather than
     // appended after every other diagnostic. See tc_region_diag / diag::Errors::emit_ordered.
-    pub err_wm: usize,
+    pub(package) err_wm: usize,
     // Two-phase-borrow watermark. While a method call's `&mut self` receiver borrow is being checked,
     // this holds the borrow-array index at which THIS call's argument borrows begin; a reserved `&mut`
     // does not conflict with the shared borrows its own arguments produced (`v.push(v.len())`,
     // `self.m(self.field.as_str())`). 0xFFFFFFFF = not in a receiver check.
-    pub tc_twophase_wm: u32,
+    pub(package) tc_twophase_wm: u32,
     /// Nodes a once-per-node diagnostic already reported, keyed (module << 32) | node: array lengths
     /// and type paths naming no type (resolve_type revisits them) and casts the unnecessary-cast
     /// lint flagged.
-    pub reported: Set<u64>,
+    pub(package) reported: Set<u64>,
     // Why the last `bound_holds` failed on an associated type binding (`its 'Output' is 'i64'`);
     // empty when it did not.
-    pub bind_miss: String,
+    pub(package) bind_miss: String,
     // Per member name node resolved to an inherited default of a generic interface on a receiver
     // that is not a type parameter (`tc_pick_conf_method`), or to an interface method through a type
     // parameter whose bounds reach its interface with several arguments (`tc_pick_bound_conf`):
     // `dyn I<args>` naming the conformance the call runs it under.
-    pub dflt_conf: Map<NodeId, TypeId>,
+    pub(package) dflt_conf: Map<NodeId, TypeId>,
     /// Expressions checked so far that have TYPE_ERROR (`check_expr_w`).
     err_exprs: u32,
     /// An evaluation (`ev`, `ev_static`, `fn_recheck_as`) since the caller cleared it failed over a
@@ -551,98 +551,98 @@ pub struct TypeChecker<'a> {
     /// start << 32 | count in `alias_pool`.
     alias_steps: Map<u64, u64>,
     alias_pool: Vector<ConstStep>,
-    pub lint: bool,
+    pub(package) lint: bool,
     /// Non-null routes the package-global method marks into a log the driver replays in item order.
-    pub mark_log: *mut TcMarkLog,
+    pub(package) mark_log: *mut TcMarkLog,
     /// The item under check (its index record; ITEM_NONE outside `check_one`), the top-level
     /// item's node and the exclusive start of that item's own module-arena range
     /// (`ItemSched.top_lo`): what `decl_is_own` and the engine's reader identity read.
-    pub cur_item: loader::ItemId,
-    pub cur_top: NodeId,
-    pub cur_lo: NodeId,
+    pub(package) cur_item: loader::ItemId,
+    pub(package) cur_top: NodeId,
+    pub(package) cur_lo: NodeId,
     /// The components the item under check depends on (`check_orphans`: the module's items'
     /// components and theirs). The checked state the engine and the foreign reads may see.
-    pub reach: gitems::Reach,
+    pub(package) reach: gitems::Reach,
     /// `check_orphans`: the diagnostics of each top-level node that is no item, in declaration
     /// order, for the driver to publish at the node's place among the items.
-    pub orphan_errs: Vector<diag::Errors>,
-    pub free_derive_memo: Map<u64, u64>, // (module<<32|decl) -> 1 = not owning, 2 = derives Free (non-generic only)
+    pub(package) orphan_errs: Vector<diag::Errors>,
+    pub(package) free_derive_memo: Map<u64, u64>, // (module<<32|decl) -> 1 = not owning, 2 = derives Free (non-generic only)
     // Unsafe-expression span ranges (start<<32|end) the walk records per function; the Core IR
     // free-move rules consult them in place of the walk's unsafe_depth.
-    pub bc_unsafe_spans: Vector<u64>,
-    pub derive_busy: Vector<u64>, // `tc_type_is_free`'s walk stack: the types entered, by id
-    pub bin_spine: Vector<NodeId>, // `check_binary`'s stack of left-nested binary nodes (shared by nested checks)
-    pub derive_low: i64, // lowest `derive_busy` index the walk assumed false (FREE_BUSY_NONE: none)
-    pub mut_used: Vector<NodeId>, // bindings whose mutability was required (unnecessary-mut lint)
-    pub loop_stack: [LoopEntry; 32],
-    pub nloops: u32,
-    pub loop_floor: u32,
-    pub errors: diag::Errors,
+    pub(package) bc_unsafe_spans: Vector<u64>,
+    pub(package) derive_busy: Vector<u64>, // `tc_type_is_free`'s walk stack: the types entered, by id
+    pub(package) bin_spine: Vector<NodeId>, // `check_binary`'s stack of left-nested binary nodes (shared by nested checks)
+    pub(package) derive_low: i64, // lowest `derive_busy` index the walk assumed false (FREE_BUSY_NONE: none)
+    pub(package) mut_used: Vector<NodeId>, // bindings whose mutability was required (unnecessary-mut lint)
+    pub(package) loop_stack: [LoopEntry; 32],
+    pub(package) nloops: u32,
+    pub(package) loop_floor: u32,
+    pub(package) errors: diag::Errors,
     // Per-decl index of the LAST node whose resolution targets it (built lazily from the
     // resolver's tables; the one typechecker-added resolution kind that can target a binding
     // (break/continue -> loop node) is folded in at its set site). Replaces the full-arena scan
     // in borrow_dead_after; answers are identical by construction.
-    pub last_use: Vector<NodeId>,
-    pub last_use_built: bool,
+    pub(package) last_use: Vector<NodeId>,
+    pub(package) last_use_built: bool,
     /// The module's shared table (`Ast.last_use`) when it is there: read in place of `last_use`,
     /// never written (no resolution is added after the type check).
-    pub last_use_view: *const NodeId,
-    pub last_use_vn: usize,
+    pub(package) last_use_view: *const NodeId,
+    pub(package) last_use_vn: usize,
     // Presence bitset mirroring moved[0..nmoved] (bit index = decl NodeId), so is_moved is
     // O(1) per identifier. Kept in sync at every moved[] mutation site.
-    pub moved_bits: Vector<u64>,
+    pub(package) moved_bits: Vector<u64>,
     // (module<<32|decl) -> packed (module<<32|extend) of the type's Free extend (0 = none).
     // Same shape as codegen's CG-3 memo; the first full scan already interned everything the
     // repeat scans would, so pool order is unchanged.
-    pub free_ext_memo: Map<u64, u64>,
+    pub(package) free_ext_memo: Map<u64, u64>,
     // Per-interned-type `tc_type_is_free` result: -1 unknown, 0 no, 1 yes. Free-ness is a stable fact of
     // a concrete type (extends are parse-time facts), so the full result caches by TypeId.
-    pub type_free_memo: Vector<u64>,
+    pub(package) type_free_memo: Vector<u64>,
     // Per (TypeId, depth 0..4) `tc_carries_borrow_rec` result, same encoding; only computations
     // that never touched a TYPE_FUNCTION are cached (closure answers move under the walk).
-    pub carries_borrow_memo: Vector<u64>,
+    pub(package) carries_borrow_memo: Vector<u64>,
     // Format helpers are marked used once per module, not once per print call.
-    pub fmt_marked: bool,
+    pub(package) fmt_marked: bool,
     // (target, name-content, query kind) -> packed DefId (module<<32|node), misses included
     // (node == NODE_NONE). Valid for the whole check: the ext scope, ASTs and self.cur_module() (the
     // privacy filter input) are all fixed per checker. mark_method_used is re-fired on method hits
     // (idempotent set), so used-lint marking is unchanged.
-    pub method_memo: Map<MQKey<'a>, u64>,
+    pub(package) method_memo: Map<MQKey<'a>, u64>,
     // (aggregate, member name) -> its field or variant (`find_member`), misses included: a lookup
     // scanned the member list, and a large enum's variants answer the same names over and over.
-    pub member_memo: Map<MQKey<'a>, NodeId>,
-    pub method_all_memo: Map<MQKey<'a>, u64>,
-    pub method_all_pool: Vector<DefId>,
+    pub(package) member_memo: Map<MQKey<'a>, NodeId>,
+    pub(package) method_all_memo: Map<MQKey<'a>, u64>,
+    pub(package) method_all_pool: Vector<DefId>,
     /// The receiver type the last aggregate lookup resolved on: what tc_mark_method_used pairs a method
     /// with, since the lookups themselves are keyed by the receiver's DECL and never carry its arguments.
-    pub mark_recv: TypeId,
+    pub(package) mark_recv: TypeId,
     // Tc_peel_target memo, (module<<32|node) -> packed DefId. The first peel does the
     // named_type_of interning; repeats re-derived the same DefId from frozen inputs.
-    pub peel_memo: Map<u64, u64>,
+    pub(package) peel_memo: Map<u64, u64>,
     // Whether an extend, (module<<32|node), binds positionally (`ext_is_identity`): its target is
     // lowered only for the extends that do not.
-    pub ext_id_memo: Map<u64, bool>,
+    pub(package) ext_id_memo: Map<u64, bool>,
     // Foreign generic-instance lowering memo, (module<<32|node) -> current-pool TypeId,
     // HEAVY NODES ONLY (type paths with generic args; anything cheaper loses to the hash probe).
     // Foreign lowering is context-free (resolution_def/builtin_of_decl/const-eval only; Self and
     // generic params lower to identity types, substitution happens in callers). DIAGNOSTICS GATE:
     // entries are inserted only when the lowering emitted no new errors and the result is not
     // TYPE_ERROR, so error-carrying programs re-emit their diagnostics exactly as before.
-    pub lower_memo: Map<u64, TypeId>,
+    pub(package) lower_memo: Map<u64, TypeId>,
     /// Foreign declaration types (`decl_type_in` for another module's fields, parameters, consts and
     /// generic parameters), keyed `module << 32 | decl`: a foreign declaration has no type slot in
     /// this checker's pool, and every member access or call re-lowered its type syntax (126k times
     /// per transpile of the compiler). Entries are recorded only when the lowering raised no
     /// diagnostic, the `lower_memo` rule. The value is the type; a nonzero high word `item + 1` marks
     /// the owner's record as item `item` read it, valid for that reader only (visibility is per item).
-    pub fdecl_memo: Map<u64, u64>,
+    pub(package) fdecl_memo: Map<u64, u64>,
     // The `S::f(..)` arguments a generic call postponed until its inference binds their parameter
     // (`tc_callee_param_open`); `tc_check_postponed` checks and removes each.
-    pub post_paths: Vector<NodeId>,
+    pub(package) post_paths: Vector<NodeId>,
     // Memoized "does a value of this type carry a borrow": a pure function of the interned type, so
     // caching per (module, TypeId) makes the DEEP structural check O(1) after first use (it runs on
     // every method call and every binding/return). 1 = carries, 0 = does not.
-    pub carries_memo: Map<u64, u8>,
+    pub(package) carries_memo: Map<u64, u8>,
     // Bound and marker verdicts (`type_satisfies`, `tc_copy_marker`, `tc_thread_marker`) of the
     // outermost query in progress, keyed by type, bound and depth: within one query the verdict is a
     // function of the key. Emptied when the outermost frame returns. A frame under a
@@ -662,29 +662,29 @@ pub struct TypeChecker<'a> {
     dup_next: Vector<u32>,
     dup_built: bool,
     // Prelude lookup hits resolved once at construction, for the names the checker asks for per call.
-    pub ph_str: loader::LookupHit,
-    pub ph_string: loader::LookupHit,
-    pub ph_unsafecell: loader::LookupHit,
-    pub ph_send: loader::LookupHit,
-    pub ph_sync: loader::LookupHit,
-    pub ph_copy: loader::LookupHit,
-    pub ph_free: loader::LookupHit,
-    pub ph_fnptr: loader::LookupHit,
-    pub ph_zeroable: loader::LookupHit,
-    pub ph_allocator: loader::LookupHit,
-    pub ph_slice: loader::LookupHit,
-    pub ph_slicemut: loader::LookupHit,
+    pub(package) ph_str: loader::LookupHit,
+    pub(package) ph_string: loader::LookupHit,
+    pub(package) ph_unsafecell: loader::LookupHit,
+    pub(package) ph_send: loader::LookupHit,
+    pub(package) ph_sync: loader::LookupHit,
+    pub(package) ph_copy: loader::LookupHit,
+    pub(package) ph_free: loader::LookupHit,
+    pub(package) ph_fnptr: loader::LookupHit,
+    pub(package) ph_zeroable: loader::LookupHit,
+    pub(package) ph_allocator: loader::LookupHit,
+    pub(package) ph_slice: loader::LookupHit,
+    pub(package) ph_slicemut: loader::LookupHit,
     in_extern: bool, // checking an `extern` block's items: they keep the C names they declare
-    pub ph_range: loader::LookupHit,
-    pub ph_box: loader::LookupHit,
-    pub ph_global: loader::LookupHit,
-    pub ph_t2: loader::LookupHit,
-    pub ph_t3: loader::LookupHit,
-    pub ph_t4: loader::LookupHit,
-    pub ph_option: loader::LookupHit,
-    pub ph_result: loader::LookupHit,
-    pub ph_uint: loader::LookupHit, // the prelude's UInt/Int: what admits a wide integer literal
-    pub ph_int: loader::LookupHit,
+    pub(package) ph_range: loader::LookupHit,
+    pub(package) ph_box: loader::LookupHit,
+    pub(package) ph_global: loader::LookupHit,
+    pub(package) ph_t2: loader::LookupHit,
+    pub(package) ph_t3: loader::LookupHit,
+    pub(package) ph_t4: loader::LookupHit,
+    pub(package) ph_option: loader::LookupHit,
+    pub(package) ph_result: loader::LookupHit,
+    pub(package) ph_uint: loader::LookupHit, // the prelude's UInt/Int: what admits a wide integer literal
+    pub(package) ph_int: loader::LookupHit,
 }
 
 fn ph_lookup(package: *mut loader::Package, name: str) loader::LookupHit {
@@ -702,11 +702,11 @@ const fn is_ph(tr: DefId, h: loader::LookupHit) bool {
 /// parameter types come from: the parameter nodes `ps` of module `m`, or, for a function-pointer
 /// type, its signature record (`sig` is that type).
 struct FnShape {
-    pub m: ModuleId,
-    pub ps: NodeList,
-    pub ret: TypeId,
-    pub sig: TypeId,
-    pub np: u32,
+    pub(package) m: ModuleId,
+    pub(package) ps: NodeList,
+    pub(package) ret: TypeId,
+    pub(package) sig: TypeId,
+    pub(package) np: u32,
 }
 
 /// A lifetime-class walk over a signature (`tc_lt_walk`): per lifetime position (`Ast::lt_positions`
@@ -714,21 +714,21 @@ struct FnShape {
 /// lifetime was written for it. A key is a lifetime name's span (`start << 32 | end` in module `m`)
 /// or, from LT_KEY_GEN on, a generic parameter's position or an elided result's source.
 struct LtWalk {
-    pub cls: Vector<u8>,
-    pub elided: Vector<bool>,
-    pub keys: Vector<u64>,
-    pub kouter: Vector<bool>, // per key: a lifetime fixed outside the walked signature
-    pub names: Vector<u64>, // name spans seen, first spelling of each name
-    pub m: ModuleId,
-    pub item: NodeId, // the function whose signature is walked; NODE_NONE for a function type
-    pub binder: NodeId, // the walked function type (module `bm`), whose `for<..>` binds lifetimes
-    pub bm: ModuleId,
-    pub statics: Vector<u64>, // name keys a bound makes `'static`
-    pub alias: Vector<u64>, // (name key, representative key) pairs of lifetimes a bound relates
-    pub hidden: Vector<u64>, // name keys a type path's lifetime argument names (an item's)
-    pub bad: NodeId, // the first lifetime a function type names where no position is
-    pub frames: Vector<LtAlias>, // the aliases being expanded, innermost last
-    pub recs: Vector<LtRec>, // per position, what spells it (`tc_lt_nested`)
+    pub(package) cls: Vector<u8>,
+    pub(package) elided: Vector<bool>,
+    pub(package) keys: Vector<u64>,
+    pub(package) kouter: Vector<bool>, // per key: a lifetime fixed outside the walked signature
+    pub(package) names: Vector<u64>, // name spans seen, first spelling of each name
+    pub(package) m: ModuleId,
+    pub(package) item: NodeId, // the function whose signature is walked; NODE_NONE for a function type
+    pub(package) binder: NodeId, // the walked function type (module `bm`), whose `for<..>` binds lifetimes
+    pub(package) bm: ModuleId,
+    pub(package) statics: Vector<u64>, // name keys a bound makes `'static`
+    pub(package) alias: Vector<u64>, // (name key, representative key) pairs of lifetimes a bound relates
+    pub(package) hidden: Vector<u64>, // name keys a type path's lifetime argument names (an item's)
+    pub(package) bad: NodeId, // the first lifetime a function type names where no position is
+    pub(package) frames: Vector<LtAlias>, // the aliases being expanded, innermost last
+    pub(package) recs: Vector<LtRec>, // per position, what spells it (`tc_lt_nested`)
 }
 
 // A walk of module `m` over function `item`'s signature, or over function type `binder`'s.
@@ -755,36 +755,36 @@ fn lt_walk_new(m: ModuleId, item: NodeId, binder: NodeId) LtWalk {
 /// A call whose argument conversion is under check (empty `span`: none): to function `item` of module
 /// `m`, the argument's parameter type node `ptn`; or through a value of function type `sig`, the
 /// parameter's type `slot`, whose positions start at `off` among `sig`'s.
-pub struct LtCall {
-    pub span: tok::Span,
-    pub m: ModuleId,
-    pub item: NodeId,
-    pub ptn: NodeId,
-    pub sig: TypeId,
-    pub slot: TypeId,
-    pub off: u32,
+pub(package) struct LtCall {
+    pub(package) span: tok::Span,
+    pub(package) m: ModuleId,
+    pub(package) item: NodeId,
+    pub(package) ptn: NodeId,
+    pub(package) sig: TypeId,
+    pub(package) slot: TypeId,
+    pub(package) off: u32,
 }
 
 /// A type node that writes the type expression `expr` (this module) is checked against (`lt_env`):
 /// `node` of module `m`, which names the lifetime and type parameters of aggregate `owner` (module `m`;
 /// NODE_NONE: a node of the function under check) that the instance path `inst` of frame `parent`
 /// gives arguments.
-pub struct LtFrame {
-    pub expr: NodeId,
-    pub m: ModuleId,
-    pub node: NodeId,
-    pub owner: NodeId,
-    pub inst: NodeId,
-    pub parent: i32,
+pub(package) struct LtFrame {
+    pub(package) expr: NodeId,
+    pub(package) m: ModuleId,
+    pub(package) node: NodeId,
+    pub(package) owner: NodeId,
+    pub(package) inst: NodeId,
+    pub(package) parent: i32,
 }
 
 /// An unannotated local whose initializer is a literal of aggregate `owner` (module `m`), let `decl`:
 /// its lifetime parameters are inference variables (`LT_VAR` tokens) the function's later uses of it
 /// bind (`lt_pool`). A frame whose `parent` is `-2 - index` stands for it.
-pub struct LtPend {
-    pub decl: NodeId,
-    pub owner: NodeId,
-    pub m: ModuleId,
+pub(package) struct LtPend {
+    pub(package) decl: NodeId,
+    pub(package) owner: NodeId,
+    pub(package) m: ModuleId,
 }
 
 /// The token of lifetime parameter `k` of the literal of pending local `p` (`LtPend`): LT_VAR | p << 32
@@ -799,19 +799,19 @@ const fn lt_is_var(t: u64) bool {
 /// What spells a position of a lifetime walk: a lifetime name `sp` of module `m` (empty: elided), or
 /// the group keyed `key` (non-zero: a generic parameter's position; `'static` when `st`).
 struct LtRec {
-    pub m: ModuleId,
-    pub sp: tok::Span,
-    pub key: u64,
-    pub st: bool,
+    pub(package) m: ModuleId,
+    pub(package) sp: tok::Span,
+    pub(package) key: u64,
+    pub(package) st: bool,
 }
 
 /// An alias a lifetime walk expands (`tc_lt_walk`): path `path` of module `m` names alias `alias`
 /// of module `am`, whose parameters stand for the path's arguments.
 struct LtAlias {
-    pub m: ModuleId,
-    pub path: NodeId,
-    pub am: ModuleId,
-    pub alias: NodeId,
+    pub(package) m: ModuleId,
+    pub(package) path: NodeId,
+    pub(package) am: ModuleId,
+    pub(package) alias: NodeId,
 }
 
 const LT_KEY_GEN: u64 = 1u64 << 63;
@@ -925,13 +925,13 @@ const fn ls_held(k: u8) bool {
 }
 
 /// The token of lifetime name `name`, as the borrow checker spells a signature's (`Owner::lt_tok`).
-pub const fn lt_tok_of(name: str) u64 {
+pub(package) const fn lt_tok_of(name: str) u64 {
     return 1u64 << 63 | fnv(name) & 0x7FFFFFFFFFFFFFFF;
 }
 
 /// The token of a function value's lifetime class `c` (a group), or of its position `p` with a
 /// lifetime of its own (`c` LC_OUTER), at a call through it (`Ast::call_lts`).
-pub const fn lt_class_tok(c: u8, p: u32) u64 {
+pub(package) const fn lt_class_tok(c: u8, p: u32) u64 {
     return 1u64 << 62 | c as u64 << 32 | p as u64;
 }
 
@@ -945,20 +945,20 @@ const LS_VNAMED: u8 = 5;
 // The outlives constraints a conversion between function types needs (`tc_lt_conv`). Symbol 0 is
 // `'static`.
 struct LtSys {
-    pub kind: Vector<u8>,
-    pub tok: Vector<u64>, // per symbol: the token an LS_CALLEE one exports as
-    pub edges: Vector<u64>, // sup << 32 | sub: sup outlives sub
-    pub ok: bool,
+    pub(package) kind: Vector<u8>,
+    pub(package) tok: Vector<u64>, // per symbol: the token an LS_CALLEE one exports as
+    pub(package) edges: Vector<u64>, // sup << 32 | sub: sup outlives sub
+    pub(package) ok: bool,
 }
 
 // One side of a conversion at one binder: its positions' classes and the next one, the symbols of
 // its outer classes and of its groups (plus one; 0: none yet), and the kind its own lifetimes get.
 struct LtSide {
-    pub cls: Vector<u8>,
-    pub cur: u32,
-    pub outer: Vector<u32>,
-    pub groups: Vector<u32>,
-    pub own: u8,
+    pub(package) cls: Vector<u8>,
+    pub(package) cur: u32,
+    pub(package) outer: Vector<u32>,
+    pub(package) groups: Vector<u32>,
+    pub(package) own: u8,
 }
 
 fn ls_sys() LtSys {
@@ -1128,7 +1128,7 @@ fn ls_solve(s: &mut LtSys, out: &mut Vector<u64>, need: &mut Vector<u64>) bool {
 }
 
 /// True when span `s` of `src` spells exactly `lit`.
-pub const fn span_is(src: str, s: tok::Span, lit: str) bool {
+pub(package) const fn span_is(src: str, s: tok::Span, lit: str) bool {
     let n = lit.len();
     if (s.end - s.start) as usize != n {
         return false;
@@ -1137,7 +1137,7 @@ pub const fn span_is(src: str, s: tok::Span, lit: str) bool {
 }
 
 /// True when two spans, possibly of different sources, spell the same bytes.
-pub const fn spans_eq2(sa: str, a: tok::Span, sb: str, b: tok::Span) bool {
+pub(package) const fn spans_eq2(sa: str, a: tok::Span, sb: str, b: tok::Span) bool {
     let la = a.end - a.start;
     if la != b.end - b.start {
         return false;
@@ -1171,7 +1171,7 @@ const fn tc_mt_content(src: str, s: tok::Span) tok::Span {
 const fn bt_is_float(b: BuiltinType) bool {
     return b == BuiltinType::BT_F32 || b == BuiltinType::BT_F64;
 }
-pub const fn bt_is_complex(b: BuiltinType) bool {
+pub(package) const fn bt_is_complex(b: BuiltinType) bool {
     return b == BuiltinType::BT_C32 || b == BuiltinType::BT_C64;
 }
 
@@ -1451,7 +1451,7 @@ const fn lit_int_op(op: TokenType, a: i64, b: i64, bt: BuiltinType, out: &mut i6
 
 extend<'a> TypeChecker<'a> {
     /// Ownership: borrows `ast` (the module keeps it); `package` is a borrowed raw pointer.
-    pub fn new(ast: *mut Ast, source: str, package: *mut loader::Package) TypeChecker {
+    pub(package) fn new(ast: *mut Ast, source: str, package: *mut loader::Package) TypeChecker {
         assert(package != null, "a type checker reads through its package");
         let mut t = TypeChecker {
             ast: ast,
@@ -1607,12 +1607,12 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// The Ast under check (live in its package slot).
-    pub const fn cur_ast(self: &Self) *mut Ast {
+    pub(package) const fn cur_ast(self: &Self) *mut Ast {
         return self.ast;
     }
     /// The module id of the AST under check. A by-value read (no lingering borrow of `self`), so it composes
     /// inside expressions that also take `&mut self`.
-    pub const fn cur_module(self: &Self) ModuleId {
+    pub(package) const fn cur_module(self: &Self) ModuleId {
         return unsafe (*self.cur_ast()).module;
     }
 
@@ -1623,7 +1623,7 @@ extend<'a> TypeChecker<'a> {
 
     /// Module `m`'s live Ast.
     @always_inline
-    pub const fn mod_ast(self: &Self, m: ModuleId) *mut Ast {
+    pub(package) const fn mod_ast(self: &Self, m: ModuleId) *mut Ast {
         if m != self.cur_module() {
             // Asts live in place in the module table, so the slot IS the live tree.
             return unsafe &mut (*self.package).modules[m as usize].ast;
@@ -1631,14 +1631,14 @@ extend<'a> TypeChecker<'a> {
         return self.ast;
     }
     /// Module `m`'s source text, for span rendering.
-    pub const fn mod_src(self: &Self, m: ModuleId) str<'a> {
+    pub(package) const fn mod_src(self: &Self, m: ModuleId) str<'a> {
         if m != self.cur_module() {
             return unsafe (*self.package).modules[m as usize].source.as_str();
         }
         return self.source;
     }
     /// Number of modules in the package.
-    pub const fn pkg_count(self: &Self) usize {
+    pub(package) const fn pkg_count(self: &Self) usize {
         return unsafe (*self.package).modules.len();
     }
     const fn cir(self: &Self) *mut iri::Interp {
@@ -1646,12 +1646,12 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// The text span of an identifier node.
-    pub const fn name_span(self: &Self, name_node: NodeId) tok::Span {
+    pub(package) const fn name_span(self: &Self, name_node: NodeId) tok::Span {
         return unsafe (*self.cur_ast()).at_const(name_node).as_data.name.text;
     }
 
     /// The interned record of `x` in the current module's pool.
-    pub const fn type_at<'t>(self: &Self, x: TypeId) &'t Ty {
+    pub(package) const fn type_at<'t>(self: &Self, x: TypeId) &'t Ty {
         return unsafe (*self.cur_ast()).type_at(x);
     }
 
@@ -1688,7 +1688,7 @@ extend<'a> TypeChecker<'a> {
         return !unsafe (*self.mod_ast(y.module)).enum_has_payload(y.as_data.decl);
     }
     /// `x0` with every pointer and reference wrapper peeled.
-    pub fn strip(self: &Self, x0: TypeId) TypeId {
+    pub(package) fn strip(self: &Self, x0: TypeId) TypeId {
         let mut x = x0;
         let mut y = self.type_at(x);
         while y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE {
@@ -1736,7 +1736,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// Returns the loop-stack index, or -1 when 32 loops are already open (callers skip the matching pop).
-    pub const fn tc_loop_push(self: &mut Self, label: tok::Span, node: NodeId, value_loop: bool) i32 {
+    pub(package) const fn tc_loop_push(self: &mut Self, label: tok::Span, node: NodeId, value_loop: bool) i32 {
         if self.nloops >= 32 {
             return -1;
         }
@@ -2962,7 +2962,7 @@ extend<'a> TypeChecker<'a> {
 
     // `ext_keyed` for extend `ext` of module `m`, its target read from the syntax: the module of
     // the extend may not be checked yet.
-    pub fn tc_ext_keyed(self: &mut Self, m: ModuleId, ext: NodeId) bool {
+    pub(package) fn tc_ext_keyed(self: &mut Self, m: ModuleId, ext: NodeId) bool {
         let pat = self.tc_ext_pattern(m, ext);
         let ea = self.mod_ast(m);
         return pat != TYPE_NONE && (ext_blanket(unsafe &*self.cur_ast(), pat, unsafe &*ea, m, ext) >= 0 || ext_free_params(
@@ -4298,7 +4298,7 @@ extend<'a> TypeChecker<'a> {
         return ap && bp && at.qualifier == bt.qualifier && at.as_data.elem == bt.as_data.elem;
     }
 
-    pub fn generic_fn_bound(self: &Self, m: ModuleId, decl: NodeId) NodeId {
+    pub(package) fn generic_fn_bound(self: &Self, m: ModuleId, decl: NodeId) NodeId {
         return self.generic_fn_bound_in(m, decl, pick(m == self.cur_module(), self.icx.current_fn, NODE_NONE));
     }
 
@@ -4480,7 +4480,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// Index of binding `decl` in closure `clos`'s capture list, or -1 when not captured.
-    pub fn tc_capture_index(self: &Self, clos: NodeId, decl: NodeId) i32 {
+    pub(package) fn tc_capture_index(self: &Self, clos: NodeId, decl: NodeId) i32 {
         let a = self.cur_ast();
         let caps = unsafe (*a).at_const(clos).as_data.closure.captures;
         for i in 0..caps.len {
@@ -4507,7 +4507,7 @@ extend<'a> TypeChecker<'a> {
 
     /// Does a value of type `cty` own memory (a non-`mut` capture of it moves into the env, a `T: Free`
     /// argument of it is covered by the Free extend)? A reference or pointer never owns what it points at.
-    pub fn tc_value_owns(self: &mut Self, cty: TypeId) bool {
+    pub(package) fn tc_value_owns(self: &mut Self, cty: TypeId) bool {
         if cty == TYPE_NONE {
             return false;
         }
@@ -4982,7 +4982,7 @@ extend<'a> TypeChecker<'a> {
 
     // Where a function type can show lifetimes, after an error that it cannot.
     @cold
-    pub fn note_lt_limits(self: &mut Self) {
+    pub(package) fn note_lt_limits(self: &mut Self) {
         self.errors.note(
             format(
                 "a function type shows a lifetime only at its own positions, with at most {} lifetimes it chooses at each call and {} it takes from outside",
@@ -5084,7 +5084,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// `tc_lt_name` for a node of module `m`.
-    pub fn tc_lt_name_in(self: &Self, m: ModuleId, lt: NodeId) tok::Span {
+    pub(package) fn tc_lt_name_in(self: &Self, m: ModuleId, lt: NodeId) tok::Span {
         if lt == NODE_NONE {
             return tok::Span { start: 0, end: 0 };
         }
@@ -5099,12 +5099,18 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// True for an empty or unset span.
-    pub const fn tc_span_empty(self: &Self, s: tok::Span) bool {
+    pub(package) const fn tc_span_empty(self: &Self, s: tok::Span) bool {
         return s.end <= s.start;
     }
 
     /// Append every lifetime name written in type node `tyn` to `out`.
-    pub fn tc_typenode_lifetimes(self: &Self, m: ModuleId, tyn: NodeId, out: &mut Vector<tok::Span>, depth: i32) {
+    pub(package) fn tc_typenode_lifetimes(
+        self: &Self,
+        m: ModuleId,
+        tyn: NodeId,
+        out: &mut Vector<tok::Span>,
+        depth: i32,
+    ) {
         if tyn == NODE_NONE || depth > 6 {
             return;
         }
@@ -5146,7 +5152,7 @@ extend<'a> TypeChecker<'a> {
 
     /// True when type path `tyn` of module `m` is `Self`: its lifetimes are the ones the enclosing
     /// declaration names, so none of them is elided.
-    pub const fn tc_path_is_self(self: &Self, m: ModuleId, tyn: NodeId) bool {
+    pub(package) const fn tc_path_is_self(self: &Self, m: ModuleId, tyn: NodeId) bool {
         let sa = self.mod_ast(m);
         let parts = unsafe (*sa).at_const(tyn).as_data.type_path.parts;
         return parts.len == 1 && span_is(
@@ -5159,7 +5165,7 @@ extend<'a> TypeChecker<'a> {
     /// The function-pointer type of closure type `ct`'s own slots when its parameters name a lifetime,
     /// with its lifetime classes (`tc_item_classes`) into `cls`; TYPE_ERROR when no classes can show
     /// them; TYPE_NONE otherwise.
-    pub fn tc_closure_sig(self: &mut Self, ct: TypeId, cls: &mut Vector<u8>) TypeId {
+    pub(package) fn tc_closure_sig(self: &mut Self, ct: TypeId, cls: &mut Vector<u8>) TypeId {
         let y = *self.type_at(ct);
         if y.kind != TypeKind::TYPE_FUNCTION || y.fn_sig() {
             return TYPE_NONE;
@@ -5204,20 +5210,20 @@ extend<'a> TypeChecker<'a> {
     /// algorithm over the field types: `&T` and `*const T` covariant, `&mut T` and `*mut T` invariant in the pointee, a nested
     /// aggregate composes with ITS variance, fn params contravariant. Lazy + memoized; a recursion
     /// cycle resolves to all-invariant (sound: over-restricts only recursive types).
-    pub const fn v_flip(self: &Self, v: u32) u32 {
+    pub(package) const fn v_flip(self: &Self, v: u32) u32 {
         // Bit 0 is a covariant use and bit 1 a contravariant one (V_* values): flipping swaps them.
         return (v >> 1 | v << 1) & 3;
     }
 
     /// Lattice join of two variances (BIVARIANT is the identity, mismatches become INVARIANT).
-    pub const fn v_join(self: &Self, a: u32, b: u32) u32 {
+    pub(package) const fn v_join(self: &Self, a: u32, b: u32) u32 {
         // The union of the use bits (see v_flip): BIVARIANT (0) is the identity, COVARIANT | CONTRAVARIANT
         // is INVARIANT.
         return a | b;
     }
 
     /// The variance of a position with variance `v` nested inside a context of variance `ctx`.
-    pub const fn v_transform(self: &Self, ctx: u32, v: u32) u32 {
+    pub(package) const fn v_transform(self: &Self, ctx: u32, v: u32) u32 {
         if ctx == V_COVARIANT {
             return v;
         }
@@ -5231,12 +5237,12 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// Number of lifetime params declared by aggregate `dd`.
-    pub fn variance_nlt(self: &Self, dd: DefId) i32 {
+    pub(package) fn variance_nlt(self: &Self, dd: DefId) i32 {
         return (unsafe (*self.mod_ast(dd.module)).lifetimes_of(dd.node).len) as i32;
     }
 
     /// Number of variance slots of aggregate `dd`: lifetime params then type params.
-    pub fn variance_nparams(self: &Self, dd: DefId) i32 {
+    pub(package) fn variance_nparams(self: &Self, dd: DefId) i32 {
         let sa = self.mod_ast(dd.module);
         let nk = unsafe (*sa).at_const(dd.node).kind;
         let mut nty: i32 = 0;
@@ -5247,7 +5253,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// `packed` with slot `idx` set to `v` (2 bits per slot); indexes past 32 leave it unchanged.
-    pub const fn variance_pack_set(self: &Self, packed: u64, idx: i32, v: u32) u64 {
+    pub(package) const fn variance_pack_set(self: &Self, packed: u64, idx: i32, v: u32) u64 {
         if idx < 0 || idx >= 32 {
             return packed;
         }
@@ -5258,7 +5264,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// The packed variance vector with every slot of `dd` INVARIANT (the conservative answer).
-    pub fn variance_all_invariant(self: &Self, dd: DefId) u64 {
+    pub(package) fn variance_all_invariant(self: &Self, dd: DefId) u64 {
         let n = self.variance_nparams(dd);
         let mut packed: u64 = 0;
         let mut i: i32 = 0;
@@ -5270,7 +5276,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// The inferred variance of slot `idx` of aggregate `dd`; INVARIANT past 32 slots.
-    pub fn variance_param(self: &mut Self, dd: DefId, idx: i32) u32 {
+    pub(package) fn variance_param(self: &mut Self, dd: DefId, idx: i32) u32 {
         if idx < 0 || idx >= 32 {
             return V_INVARIANT;
         }
@@ -5278,7 +5284,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// Index in the packed variance of the lifetime param named `name` in `dd`, or -1 (outer/'static).
-    pub fn variance_lt_index(self: &Self, dd: DefId, name: tok::Span) i32 {
+    pub(package) fn variance_lt_index(self: &Self, dd: DefId, name: tok::Span) i32 {
         if self.tc_span_empty(name) {
             return -1;
         }
@@ -5294,7 +5300,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// Index of the type param `dd`'s field-type-path `tyn` names, or -1 if it names another aggregate.
-    pub fn variance_ty_index(self: &Self, dd: DefId, tyn: NodeId) i32 {
+    pub(package) fn variance_ty_index(self: &Self, dd: DefId, tyn: NodeId) i32 {
         let sa = self.mod_ast(dd.module);
         let rd = unsafe (*sa).resolution_def(tyn);
         if rd.node == NODE_NONE || rd.module != dd.module {
@@ -5311,7 +5317,7 @@ extend<'a> TypeChecker<'a> {
 
     /// The packed variance vector of aggregate `dd`, inferred from its field types and memoized; a
     /// recursive query answers INVARIANT.
-    pub fn variance_infer(self: &mut Self, dd: DefId) u64 {
+    pub(package) fn variance_infer(self: &mut Self, dd: DefId) u64 {
         if dd.node == NODE_NONE {
             return 0;
         }
@@ -5363,7 +5369,7 @@ extend<'a> TypeChecker<'a> {
 
     /// Fold every occurrence of one of `dd`'s params in the field type node `tyn` (a node in dd.module)
     /// into `packed`, under the accumulated context variance `ctx`.
-    pub fn variance_walk(self: &mut Self, dd: DefId, tyn: NodeId, ctx: u32, packed: u64, depth: i32) u64 {
+    pub(package) fn variance_walk(self: &mut Self, dd: DefId, tyn: NodeId, ctx: u32, packed: u64, depth: i32) u64 {
         if tyn == NODE_NONE || depth > 8 || ctx == V_BIVARIANT {
             return packed;
         }
@@ -7727,7 +7733,7 @@ const fn untyped(t: TypeId) bool {
 extend<'a> TypeChecker<'a> {
     /// Unwrap a struct/enum/instance type to its module + decl; for an instance also copies up to 8
     /// param->arg substitution pairs into `params`/`args`. False for any other type kind.
-    pub fn aggregate_of(
+    pub(package) fn aggregate_of(
         self: &Self,
         ty: TypeId,
         mod_out: &mut ModuleId,
@@ -8833,7 +8839,7 @@ extend<'a> TypeChecker<'a> {
         self.icx.sv.type_conflicts.truncate(self.icx.sv.sess.type_conflicts as usize);
     }
 
-    pub fn named_type_of(self: &mut Self, m: ModuleId, decl: NodeId) TypeId {
+    pub(package) fn named_type_of(self: &mut Self, m: ModuleId, decl: NodeId) TypeId {
         let a = self.mod_ast(m);
         let dk = unsafe (*a).at_const(decl).kind;
         if dk == NodeKind::NODE_STRUCT {
@@ -9064,7 +9070,7 @@ extend<'a> TypeChecker<'a> {
     /// reports a bad declaration once, where it is written, and no two items write one slot.
     /// Only declaration nodes carry their type in the node slot: a type node's slot holds other
     /// facts, so `lower_type_in` never reads it.
-    pub fn decl_type_in(self: &mut Self, m: ModuleId, decl: NodeId) TypeId {
+    pub(package) fn decl_type_in(self: &mut Self, m: ModuleId, decl: NodeId) TypeId {
         if decl == NODE_NONE {
             return TYPE_NONE;
         }
@@ -9167,7 +9173,7 @@ extend<'a> TypeChecker<'a> {
 
     /// The type a parameter, field, constant or bare type node stands for: a declaration goes
     /// through its recorded declaration type, a type node is lowered.
-    pub fn node_type_in(self: &mut Self, m: ModuleId, id: NodeId) TypeId {
+    pub(package) fn node_type_in(self: &mut Self, m: ModuleId, id: NodeId) TypeId {
         if id == NODE_NONE {
             return TYPE_NONE;
         }
@@ -10363,7 +10369,7 @@ extend<'a> TypeChecker<'a> {
     /// Lower a type node of module `m` to a TypeId interned in the CURRENT module's pool: the current
     /// module goes through resolve_type's per-node cache, foreign modules through the memoized
     /// Context-free lowering.
-    pub fn lower_type_in(self: &mut Self, m: ModuleId, id: NodeId) TypeId {
+    pub(package) fn lower_type_in(self: &mut Self, m: ModuleId, id: NodeId) TypeId {
         if m == self.cur_module() {
             return self.resolve_type(id);
         }
@@ -10637,7 +10643,7 @@ extend<'a> TypeChecker<'a> {
 
     // Whether function `f` of module `fm` is an `@intrinsic` whose name this compiler does not know:
     // only `--bootstrap-tags` accepts its declaration (`tc_check_intrinsic`).
-    pub fn tc_unknown_intrinsic(self: &mut Self, fm: ModuleId, f: NodeId) bool {
+    pub(package) fn tc_unknown_intrinsic(self: &mut Self, fm: ModuleId, f: NodeId) bool {
         let n = unsafe (*self.mod_ast(fm)).at_const(f);
         if n.kind != NodeKind::NODE_FUNCTION || !n.as_data.function.is_intrinsic() {
             return false;
@@ -11968,7 +11974,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// The type-identity an extend's target dispatches on (peeling a transparent alias).
-    pub fn tc_peel_target(self: &mut Self, tg: DefId) DefId {
+    pub(package) fn tc_peel_target(self: &mut Self, tg: DefId) DefId {
         // Only an alias peels: the kind read costs less than the memo probe it saves.
         if tg.node == NODE_NONE || unsafe (*self.mod_ast(tg.module)).at_const(tg.node).kind != NodeKind::NODE_TYPE_ALIAS {
             return tg;
@@ -12078,7 +12084,7 @@ extend<'a> TypeChecker<'a> {
     // The item of `kind` (NODE_EXTEND or NODE_INTERFACE) whose item list holds `method`; NODE_NONE when
     // there is none. Not memoized: a memo in front of the module's own small `member_of` map cost more
     // than the lookup it saved.
-    pub fn enclosing(self: &Self, m: ModuleId, method: NodeId, kind: NodeKind) NodeId {
+    pub(package) fn enclosing(self: &Self, m: ModuleId, method: NodeId, kind: NodeKind) NodeId {
         let a = self.mod_ast(m);
         let res = unsafe (*a).container_of(method);
         if res != NODE_NONE && unsafe (*a).at_const(res).kind != kind {
@@ -15748,7 +15754,7 @@ extend<'a> TypeChecker<'a> {
     /// processed for callee module m in earlier passes; a still-symbolic owner re-defers into THIS
     /// module's list, and the driver iterates passes until no list grows: multi-hop chains resolve
     /// hop per pass.
-    pub fn discharge_foreign_obligations(self: &mut Self, starts: *const u32) bool {
+    pub(package) fn discharge_foreign_obligations(self: &mut Self, starts: *const u32) bool {
         let mut grew = false;
         let nmu = (unsafe (*self.cur_ast()).mono).len();
         for i in 0..nmu {
@@ -15926,7 +15932,7 @@ extend<'a> TypeChecker<'a> {
     /// inherits the default, each of the default's obligations under the instance's arguments, at the
     /// call that demanded it. A projection `Self` demands one instance per field of the reflected
     /// type; the instances an instance demands join the list.
-    pub fn run_dmd_uses(self: &mut Self) {
+    pub(package) fn run_dmd_uses(self: &mut Self) {
         let mut i: usize = 0;
         while i < (unsafe (*self.cur_ast()).dmd_uses).len() && i < DMD_USES_MAX {
             let d = *(unsafe (*self.cur_ast()).dmd_uses).at(i);
@@ -15973,7 +15979,7 @@ extend<'a> TypeChecker<'a> {
     /// the later declaration carries the error. Argumented conformances
     /// (`Conv<i32>`) are exempt: distinct arguments are legal, and comparing them across pools is
     /// not worth the rare case the linker still catches.
-    pub fn check_cross_module_dup_conformances(self: &mut Self, idx: &Map<ConfKey, u64>) {
+    pub(package) fn check_cross_module_dup_conformances(self: &mut Self, idx: &Map<ConfKey, u64>) {
         let items = unsafe (*self.cur_ast()).at_const((*self.cur_ast()).root).as_data.program.items;
         for i in 0..items.len {
             let id = unsafe (*self.cur_ast()).list(items)[i as usize];
@@ -16113,7 +16119,7 @@ extend<'a> TypeChecker<'a> {
     /// twice across passes. A conformance whose target is still generic runs against every concrete
     /// instantiation of the target the package recorded. A generic default is not proved here: its
     /// instances are demanded by their calls (`ProjOb.demand`).
-    pub fn discharge_conformance_obligations(self: &mut Self, starts: *const u32, ends: *const u32) {
+    pub(package) fn discharge_conformance_obligations(self: &mut Self, starts: *const u32, ends: *const u32) {
         let items = unsafe (*self.cur_ast()).at_const((*self.cur_ast()).root).as_data.program.items;
         for i in 0..items.len {
             let id = unsafe (*self.cur_ast()).list(items)[i as usize];
@@ -16947,7 +16953,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     // Report a value of type `ty` at `sp` when its size passes the target's `isize::MAX`; true then.
-    pub fn tc_size_limit(self: &mut Self, ty: TypeId, sp: tok::Span) bool {
+    pub(package) fn tc_size_limit(self: &mut Self, ty: TypeId, sp: tok::Span) bool {
         let ce = self.cir();
         if ty == TYPE_NONE || ty == TYPE_ERROR || ce == null || !unsafe (*self.cur_ast()).type_concrete(ty) {
             return false;
@@ -17384,7 +17390,7 @@ extend<'a> TypeChecker<'a> {
     /// `fn` bound keeps its own rule: `fn move` owns, a plain `fn` copies. `Self` in an interface's
     /// default body is copyable only when the interface requires `Copy`. Mirrors the borrow checker's
     /// `Owner::param_owns`.
-    pub fn tc_param_owns(self: &mut Self, m: ModuleId, gp: NodeId) bool {
+    pub(package) fn tc_param_owns(self: &mut Self, m: ModuleId, gp: NodeId) bool {
         let a = self.mod_ast(m);
         let k = unsafe (*a).at_const(gp).kind;
         if k == NodeKind::NODE_INTERFACE {
@@ -17426,7 +17432,7 @@ extend<'a> TypeChecker<'a> {
     /// when any field/payload owns, transitively: unions never derive. Owning closures (a by-copy Free
     /// capture) and owned `Box<dyn>` count too. References/pointers peel to their referent: callers that
     /// must treat a borrow as non-owning gate on the pointer kind first.
-    pub fn tc_type_is_free(self: &mut Self, ty: TypeId) bool {
+    pub(package) fn tc_type_is_free(self: &mut Self, ty: TypeId) bool {
         if ty == TYPE_NONE {
             return false;
         }
@@ -19230,7 +19236,7 @@ extend<'a> TypeChecker<'a> {
         return false;
     }
     /// Syntactic place (lvalue) test; a path member (`E::x`) counts only when it names a 'static mut'.
-    pub fn is_place(self: &Self, id: NodeId) bool {
+    pub(package) fn is_place(self: &Self, id: NodeId) bool {
         let node = unsafe (*self.cur_ast()).peel(id, false);
         let n = unsafe (*self.cur_ast()).at_const(node);
         if n.kind == NodeKind::NODE_IDENTIFIER || n.kind == NodeKind::NODE_INDEX {
@@ -19259,7 +19265,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// True when `decl` is queued for late (post-module) checking.
-    pub const fn tc_is_late(self: &Self, decl: NodeId) bool {
+    pub(package) const fn tc_is_late(self: &Self, decl: NodeId) bool {
         for i in 0..self.nlate {
             if unsafe self.late[i as usize] == decl {
                 return true;
@@ -19269,7 +19275,7 @@ extend<'a> TypeChecker<'a> {
     }
 
     /// Queue `decl` for late checking (idempotent; drops silently past the fixed capacity).
-    pub const fn tc_add_late(self: &mut Self, decl: NodeId) {
+    pub(package) const fn tc_add_late(self: &mut Self, decl: NodeId) {
         if self.tc_is_late(decl) {
             return;
         }
@@ -19282,7 +19288,7 @@ extend<'a> TypeChecker<'a> {
 
     /// Definitely-returns test: a return, a block whose LAST statement returns, an `if` with BOTH
     /// branches returning, or a never-typed expression statement.
-    pub fn tc_stmt_returns(self: &Self, id: NodeId) bool {
+    pub(package) fn tc_stmt_returns(self: &Self, id: NodeId) bool {
         if id == NODE_NONE {
             return false;
         }
@@ -19373,7 +19379,7 @@ extend<'a> TypeChecker<'a> {
     /// root local decl, or NODE_NONE when the chain crosses a raw pointer, indexes through a
     /// reference, or does not end at a local binding. A union member access drops the steps below it
     /// (all members overlap).
-    pub fn place_decompose(self: &mut Self, place0: NodeId, steps: *mut PStep, nsteps: &mut i32, cap: i32) NodeId {
+    pub(package) fn place_decompose(self: &mut Self, place0: NodeId, steps: *mut PStep, nsteps: &mut i32, cap: i32) NodeId {
         *nsteps = 0;
         let a = self.cur_ast();
         let mut place = place0;
@@ -19477,7 +19483,7 @@ extend<'a> TypeChecker<'a> {
     /// Do two places alias? Conservative: same root required; differing field names or differing
     /// constant indices prove disjoint, everything else (unknown indices, step-kind mismatch) reports
     /// overlap. False whenever either place fails to decompose.
-    pub fn places_overlap(self: &mut Self, aN: NodeId, bN: NodeId) bool {
+    pub(package) fn places_overlap(self: &mut Self, aN: NodeId, bN: NodeId) bool {
         let mut sa = Steps16 {};
         let mut sb = Steps16 {};
         let mut na: i32 = 0;
@@ -19516,7 +19522,7 @@ extend<'a> TypeChecker<'a> {
 
     /// The local binding a place reaches THROUGH a reference (`*p` -> p, `r.f` with `r: &T` -> r), or
     /// NODE_NONE when no hop dereferences a reference binding.
-    pub fn place_through_binding(self: &Self, place0: NodeId) NodeId {
+    pub(package) fn place_through_binding(self: &Self, place0: NodeId) NodeId {
         let a = self.cur_ast();
         let mut place = place0;
         // Each step goes down to an operand: a walk down the tree visits each node once at most.
@@ -19553,7 +19559,7 @@ extend<'a> TypeChecker<'a> {
     /// resolves to it. "any use after `after`" then collapses to one compare. Typechecker-added
     /// resolutions never target a value binding except break/continue -> loop node (a `for` node IS
     /// its loop binding), which tc_note_resolution folds in at the set site.
-    pub fn tc_build_last_use(self: &mut Self) {
+    pub(package) fn tc_build_last_use(self: &mut Self) {
         self.last_use_built = true;
         if self.last_use_view != null {
             return;
@@ -19572,7 +19578,7 @@ extend<'a> TypeChecker<'a> {
     }
     /// The last node resolving to declaration index `dk`, from the shared table or this
     /// checker's own; NODE_NONE past either.
-    pub const fn last_use_at(self: &Self, dk: usize) NodeId {
+    pub(package) const fn last_use_at(self: &Self, dk: usize) NodeId {
         if self.last_use_view != null {
             if dk < self.last_use_vn {
                 return unsafe self.last_use_view[dk];
@@ -19587,7 +19593,7 @@ extend<'a> TypeChecker<'a> {
 
     /// Hand the module its shared last-use table (the type check's close): built here when no
     /// item needed it yet.
-    pub fn share_last_use(self: &mut Self) {
+    pub(package) fn share_last_use(self: &mut Self) {
         if self.last_use_view != null {
             return;
         }
@@ -20500,7 +20506,7 @@ extend<'a> TypeChecker<'a> {
     /// same target in a module before this one (`tc_module_before`) already defines (`check_dup_items`
     /// covers one module): the later module carries the error, once per item. Decidable only once
     /// every module is checked.
-    pub fn check_cross_module_dup_items(self: &mut Self) {
+    pub(package) fn check_cross_module_dup_items(self: &mut Self) {
         let m = self.cur_module();
         // This module's plain extends and their peeled targets, then every plain extend of another
         // module that comes before this one for the same target: one pass over the package.
@@ -20836,11 +20842,11 @@ extend<'a> TypeChecker<'a> {
     }
     /// Method `md`'s single return type as seen on receiver `recv` (owner-extend / dyn-interface
     /// generics substituted); void when none is declared, TYPE_NONE for multi-return methods.
-    pub fn tc_method_ret(self: &mut Self, recv: TypeId, md: DefId) TypeId {
+    pub(package) fn tc_method_ret(self: &mut Self, recv: TypeId, md: DefId) TypeId {
         return self.tc_method_sig(recv, md, TYPE_NONE, -1);
     }
     /// Method `md`'s parameter `idx` type on receiver `recv`, with the same substitution as tc_method_ret.
-    pub fn tc_method_param(self: &mut Self, recv: TypeId, md: DefId, idx: i32) TypeId {
+    pub(package) fn tc_method_param(self: &mut Self, recv: TypeId, md: DefId, idx: i32) TypeId {
         return self.tc_method_sig(recv, md, TYPE_NONE, idx);
     }
     /// Method `md`'s parameter `idx` (its single result for -1) on receiver `recv`, the parameters of
@@ -26118,7 +26124,7 @@ extend TypeChecker {
 extend TypeChecker {
     /// Does `ty` transitively contain a reference or a lifetime-parameterized aggregate? Memoized
     /// unless the answer read a closure's capture state, which changes as bodies are lowered.
-    pub fn tc_carries_borrow(self: &mut Self, ty: TypeId) bool {
+    pub(package) fn tc_carries_borrow(self: &mut Self, ty: TypeId) bool {
         if ty == TYPE_NONE {
             return false;
         }
@@ -26246,7 +26252,7 @@ extend TypeChecker {
     }
 
     /// True when bound list `bnds` of module `fmod` names `'static`.
-    pub fn tc_bounds_have_static(self: &Self, fmod: ModuleId, bnds: NodeList) bool {
+    pub(package) fn tc_bounds_have_static(self: &Self, fmod: ModuleId, bnds: NodeList) bool {
         let fa = self.mod_ast(fmod);
         for b in 0..bnds.len {
             let bn = unsafe (*fa).at_const(unsafe (*fa).list(bnds)[b as usize]);
@@ -26259,7 +26265,7 @@ extend TypeChecker {
 
     // Can a value of `ty` hold a borrow: does it carry one (`tc_carries_borrow`), or name a type
     // parameter that no `'static` bound keeps from being bound to one?
-    pub fn tc_may_borrow(self: &mut Self, ty: TypeId, depth: i32) bool {
+    pub(package) fn tc_may_borrow(self: &mut Self, ty: TypeId, depth: i32) bool {
         if ty == TYPE_NONE || depth > 8 {
             return false;
         }
@@ -33559,7 +33565,7 @@ extend TypeChecker {
     /// that are no item (`check_orphans`), runs whole-module lints, and finalizes diagnostics in
     /// declaration order. The typed Ast stays in its module slot; the borrowck pass re-walks it
     /// from there. The driver's item scheduler runs the same steps per item and module.
-    pub fn check(self: &mut Self) {
+    pub(package) fn check(self: &mut Self) {
         self.check_open();
         let m = self.cur_module();
         let items = unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).root).as_data.program.items;
@@ -33603,7 +33609,7 @@ extend TypeChecker {
     /// The module's first step: the item index (a pipeline without the driver's resolve
     /// frontier, the lint and the harness, opens it here: the engine's visibility query needs
     /// the item records) and the type side tables.
-    pub fn check_open(self: &mut Self) {
+    pub(package) fn check_open(self: &mut Self) {
         if !unsafe (*self.package).sched.built {
             gitems::open(unsafe &mut *self.package);
         }
@@ -33616,7 +33622,7 @@ extend TypeChecker {
     /// item's facts are written, Checked once they are published (the constant engine
     /// interprets a function body only from Checked: an unchecked body would evaluate with
     /// degraded widths).
-    pub fn check_one(self: &mut Self, it9: NodeId, lo: NodeId) {
+    pub(package) fn check_one(self: &mut Self, it9: NodeId, lo: NodeId) {
         let mut t0: u64 = 0;
         self.cur_top = it9;
         self.cur_lo = lo;
@@ -33650,7 +33656,7 @@ extend TypeChecker {
     /// diagnostics. A generic instance's methods instantiate on demand (the instance graph), so no
     /// step interns the signatures of every concrete instance's methods: one that returns a wider
     /// instance of its own type would never end.
-    pub fn check_close(self: &mut Self) {
+    pub(package) fn check_close(self: &mut Self) {
         assert(self.st_pend.len() == 0, "every const-generic step is published with its item's check");
         if self.lint {
             self.tc_lint_unneeded_mut();
@@ -33671,7 +33677,7 @@ extend TypeChecker {
     /// components, the Checked items). A module without items reads as no item: the driver
     /// checks it once every item of the package is typed. Each node's diagnostics land in
     /// `orphan_errs`, in declaration order.
-    pub fn check_orphans(self: &mut Self) {
+    pub(package) fn check_orphans(self: &mut Self) {
         if !unsafe (*self.package).sched.built {
             return;
         }
@@ -33797,11 +33803,11 @@ extend TypeChecker {
     }
 
     /// True once any type error is recorded.
-    pub const fn has_errors(self: &Self) bool {
+    pub(package) const fn has_errors(self: &Self) bool {
         return self.errors.has_errors();
     }
     /// Print the accumulated diagnostics to stderr.
-    pub fn log_errors(self: &Self) {
+    pub(package) fn log_errors(self: &Self) {
         self.errors.log();
     }
 }
@@ -33815,10 +33821,10 @@ const SG_PTR: u8 = 4;
 const SG_UNIT: u8 = 5;
 
 struct SigTy {
-    pub k: u8,
-    pub n: u64,
-    pub bt: BuiltinType,
-    pub mutp: bool,
+    pub(package) k: u8,
+    pub(package) n: u64,
+    pub(package) bt: BuiltinType,
+    pub(package) mutp: bool,
 }
 
 extend SigTy {

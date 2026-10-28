@@ -8,50 +8,50 @@
 import lexer::token as tok;
 
 /// Per-category cap on recorded diagnostics; emit/warn silently drop rows past it.
-pub const ERRORS_MAX: usize = 256;
+pub(package) const ERRORS_MAX: usize = 256;
 
 /// Empty note-chain link (note indexes are dense u32s into Errors.note_pool).
-pub const NOTE_NONE: u32 = 0xFFFFFFFF;
+pub(package) const NOTE_NONE: u32 = 0xFFFFFFFF;
 
 /// A machine-applicable fix for a lint diagnostic: kind 0 deletes [start, end); kind 1 inserts '_'
 /// before `start` (unused-binding rename); kind 2 inserts 'const ' before `start` (const-fn
 /// suggestion); kind 4 replaces [start, end) with `fix_texts[text]` (an edit no delete/insert pair
 /// expresses, e.g. unwrapping `(*e)` to `e`). Collected alongside `warn` and applied by `lint --fix`;
 /// `warn` indexes the warning it repairs (the LSP turns those into quick fixes).
-pub struct LintFix {
-    pub start: u32,
-    pub end: u32,
-    pub kind: u8,
-    pub warn: u32, // index into `warns`; 0xFFFFFFFF = unattached
-    pub text: u32, // index into `fix_texts` (kind 4); 0xFFFFFFFF = none
-    pub module: u32, // owning ModuleId, stamped when fixes drain into the driver's shared vector (0 inside Errors)
+pub(package) struct LintFix {
+    pub(package) start: u32,
+    pub(package) end: u32,
+    pub(package) kind: u8,
+    pub(package) warn: u32, // index into `warns`; 0xFFFFFFFF = unattached
+    pub(package) text: u32, // index into `fix_texts` (kind 4); 0xFFFFFFFF = none
+    pub(package) module: u32, // owning ModuleId, stamped when fixes drain into the driver's shared vector (0 inside Errors)
 }
 
 /// One structured diagnostic. The span is bytes into the owning source buffer.
-pub struct Diagnostic {
-    pub start: u32,
-    pub len: u32,
-    pub msg: String,
-    pub note_head: u32, // first attached note in Errors.note_pool; NOTE_NONE = none
-    pub note_tail: u32,
+pub(package) struct Diagnostic {
+    pub(package) start: u32,
+    pub(package) len: u32,
+    pub(package) msg: String,
+    pub(package) note_head: u32, // first attached note in Errors.note_pool; NOTE_NONE = none
+    pub(package) note_tail: u32,
 }
 
 /// One note line, chained per diagnostic through the shared pool (no vector per diagnostic).
-pub struct Note {
-    pub text: String,
-    pub next: u32, // next note of the same diagnostic; NOTE_NONE at the end
+pub(package) struct Note {
+    pub(package) text: String,
+    pub(package) next: u32, // next note of the same diagnostic; NOTE_NONE at the end
 }
 
 /// Diagnostic accumulator for one source buffer. Records stay raw for the whole pipeline; `finalize`
 /// fills the parallel `rendered_*` vectors the terminal `log` prints.
-pub struct Errors {
-    pub errors: Vector<Diagnostic>,
-    pub warns: Vector<Diagnostic>, // non-fatal lint diagnostics (rendered like errors, never fail the build)
-    pub note_pool: Vector<Note>, // shared note storage; per-diagnostic chains via note_head/next
-    pub rendered_errors: Vector<String>, // finalize's terminal blocks, parallel to the (deduped) records
-    pub rendered_warns: Vector<String>,
-    pub fixes: Vector<LintFix>,
-    pub fix_texts: Vector<String>, // generated replacement payloads for kind-4 fixes
+pub(package) struct Errors {
+    pub(package) errors: Vector<Diagnostic>,
+    pub(package) warns: Vector<Diagnostic>, // non-fatal lint diagnostics (rendered like errors, never fail the build)
+    pub(package) note_pool: Vector<Note>, // shared note storage; per-diagnostic chains via note_head/next
+    pub(package) rendered_errors: Vector<String>, // finalize's terminal blocks, parallel to the (deduped) records
+    pub(package) rendered_warns: Vector<String>,
+    pub(package) fixes: Vector<LintFix>,
+    pub(package) fix_texts: Vector<String>, // generated replacement payloads for kind-4 fixes
 }
 
 // A diagnostic at [at, at+len) with no notes.
@@ -88,29 +88,29 @@ fn append_diags(dst: &mut Vector<Diagnostic>, src: &mut Vector<Diagnostic>, nb: 
 }
 
 /// A borrowed `str` view of the source bytes in the span [start, end), for diagnostic arguments.
-pub const fn span_str(src: str, start: u32, end: u32) str {
+pub(package) const fn span_str(src: str, start: u32, end: u32) str {
     return src[start as usize..end as usize];
 }
 
 extend Errors {
     /// An empty accumulator with no heap storage.
-    pub const fn new() Errors {
+    pub(package) const fn new() Errors {
         return Errors {};
     }
 
     /// True once any error is recorded.
-    pub const fn has_errors(self: &Self) bool {
+    pub(package) const fn has_errors(self: &Self) bool {
         return self.errors.len() != 0;
     }
 
     /// True once any warning is recorded.
-    pub const fn has_warnings(self: &Self) bool {
+    pub(package) const fn has_warnings(self: &Self) bool {
         return self.warns.len() != 0;
     }
 
     /// Record a non-fatal warning at [at, at+len). Takes ownership of `msg`; drops it past ERRORS_MAX.
     @cold
-    pub fn warn(self: &mut Self, at: u32, len: u32, msg: String) {
+    pub(package) fn warn(self: &mut Self, at: u32, len: u32, msg: String) {
         if self.warns.len() >= ERRORS_MAX {
             return;
         }
@@ -119,7 +119,7 @@ extend Errors {
 
     /// `warn` over the source span `sp`.
     @cold
-    pub fn warn_span(self: &mut Self, sp: tok::Span, msg: String) {
+    pub(package) fn warn_span(self: &mut Self, sp: tok::Span, msg: String) {
         self.warn(sp.start, sp.end - sp.start, msg);
     }
 
@@ -128,7 +128,7 @@ extend Errors {
     /// `o` is left empty. What a module's
     /// per-item outputs concatenate through, in item order, before `finalize`.
     @cold
-    pub fn append(self: &mut Self, o: &mut Errors) {
+    pub(package) fn append(self: &mut Self, o: &mut Errors) {
         let nb = self.note_pool.len() as u32;
         let wb = self.warns.len() as u32;
         let tb = self.fix_texts.len() as u32;
@@ -161,7 +161,7 @@ extend Errors {
     /// Attach a machine-applicable fix to the warning being emitted (fix() always follows its warn();
     /// past the ERRORS_MAX cap the index degrades to the last kept warning).
     @cold
-    pub fn fix(self: &mut Self, start: u32, end: u32, kind: u8) {
+    pub(package) fn fix(self: &mut Self, start: u32, end: u32, kind: u8) {
         self.fixes.push(LintFix { start: start, end: end, kind: kind, warn: self.last_warn(), text: 0xFFFFFFFF });
     }
 
@@ -175,7 +175,7 @@ extend Errors {
     /// unwrapping `(*e)` to `e`, where the kept text sits between the two deletions). Takes ownership of
     /// `text` (fix() always follows its warn(); past the cap the index degrades to the last kept warning).
     @cold
-    pub fn fix_replace(self: &mut Self, start: u32, end: u32, text: String) {
+    pub(package) fn fix_replace(self: &mut Self, start: u32, end: u32, text: String) {
         let t = self.fix_texts.len() as u32;
         self.fix_texts.push(text);
         self.fixes.push(LintFix { start: start, end: end, kind: 4, warn: self.last_warn(), text: t });
@@ -184,7 +184,7 @@ extend Errors {
     /// Record a diagnostic (an already-formatted message, built with `format(...)`) at the source span
     /// [at, at+len). Takes ownership of `msg` (freed here if the message cap is hit).
     @cold
-    pub fn emit(self: &mut Self, at: u32, len: u32, msg: String) {
+    pub(package) fn emit(self: &mut Self, at: u32, len: u32, msg: String) {
         if self.errors.len() >= ERRORS_MAX {
             return;
         }
@@ -193,13 +193,13 @@ extend Errors {
 
     /// `emit` over the source span `sp`.
     @cold
-    pub fn emit_span(self: &mut Self, sp: tok::Span, msg: String) {
+    pub(package) fn emit_span(self: &mut Self, sp: tok::Span, msg: String) {
         self.emit(sp.start, sp.end - sp.start, msg);
     }
 
     /// `emit_span` of the first line of `msg`; the text after its line feed, if any, is a note.
     @cold
-    pub fn emit_span_note(self: &mut Self, sp: tok::Span, msg: String) {
+    pub(package) fn emit_span_note(self: &mut Self, sp: tok::Span, msg: String) {
         let cut = msg.as_str().find_byte(b'\n');
         if cut < 0 {
             self.emit_span(sp, msg);
@@ -215,7 +215,7 @@ extend Errors {
     /// whose span starts after `at`, so it lands where a reader expects it instead of after every other
     /// diagnostic in the function. Diagnostics already recorded keep their relative order. Returns the index it landed at, for `note_at`.
     @cold
-    pub fn emit_ordered(self: &mut Self, from: usize, at: u32, len: u32, msg: String) usize {
+    pub(package) fn emit_ordered(self: &mut Self, from: usize, at: u32, len: u32, msg: String) usize {
         if self.errors.len() >= ERRORS_MAX {
             return ERRORS_MAX;
         }
@@ -251,7 +251,7 @@ extend Errors {
 
     /// Attach a note line to the most recent diagnostic. Takes ownership of `msg`.
     @cold
-    pub fn note(self: &mut Self, msg: String) {
+    pub(package) fn note(self: &mut Self, msg: String) {
         let n = self.errors.len();
         if n == 0 {
             return;
@@ -262,7 +262,7 @@ extend Errors {
     /// Attach a note to a SPECIFIC diagnostic (the index `emit_ordered` returned); `note` always
     /// targets the last one, which is wrong once a diagnostic has been inserted out of order.
     @cold
-    pub fn note_at(self: &mut Self, index: usize, msg: String) {
+    pub(package) fn note_at(self: &mut Self, index: usize, msg: String) {
         self.attach_note(index, msg);
     }
 
@@ -289,7 +289,7 @@ extend Errors {
     /// pass), then render every survivor into a caret-annotated terminal block against `source`/`file`.
     /// The records themselves are never rewritten. Call once, before `log`.
     @cold
-    pub fn finalize(self: &mut Self, source: str, file: str) {
+    pub(package) fn finalize(self: &mut Self, source: str, file: str) {
         if self.errors.len() == 0 && self.warns.len() == 0 {
             return;
         }
@@ -333,7 +333,7 @@ extend Errors {
     /// Print the finalized blocks to stderr, warnings before errors. Falls back to the raw messages
     /// when `finalize` has not run.
     @cold
-    pub fn log(self: &Self) {
+    pub(package) fn log(self: &Self) {
         if self.rendered_warns.len() == self.warns.len() && self.rendered_errors.len() == self.errors.len() {
             for i in 0..self.rendered_warns.len() {
                 self.rendered_warns[i].eprintln();
@@ -354,7 +354,7 @@ extend Errors {
 
 // The start offset of every line of `source`: after `\n`, `\r\n`, or a lone `\r`.
 @cold
-pub fn line_starts_of(source: str) Vector<u32> {
+pub(package) fn line_starts_of(source: str) Vector<u32> {
     let len = source.len();
     let mut line_starts = Vector::<u32>::new();
     line_starts.reserve(len / 16);
@@ -396,13 +396,13 @@ const fn line_index(line_starts: &Vector<u32>, off: u32) usize {
 }
 
 /// The 1-based line of byte `off`, given the line ends `line_starts_of` returned for its source.
-pub const fn line_in(line_starts: &Vector<u32>, off: u32) u32 {
+pub(package) const fn line_in(line_starts: &Vector<u32>, off: u32) u32 {
     return line_index(line_starts, off) as u32 + 1;
 }
 
 /// The 1-based line of byte `off` of `source`, with the line ends of `line_starts_of`.
 @cold
-pub fn line_of(source: str, off: u32) u32 {
+pub(package) fn line_of(source: str, off: u32) u32 {
     let ls = line_starts_of(source);
     return line_index(&ls, off) as u32 + 1;
 }
@@ -508,7 +508,7 @@ fn render(d: &Diagnostic, source: str, line_starts: &Vector<u32>, file: str, poo
 /// A bare location block for a SECONDARY site, rendered into a note where the primary rendering
 /// pass cannot reach another file's source. Builds its own line index (cold path).
 @cold
-pub fn render_site(source: str, file: str, off: u32, span: u32) String {
+pub(package) fn render_site(source: str, file: str, off: u32, span: u32) String {
     let line_starts = line_starts_of(source);
     let mut out = String::new();
     push_loc_block(&mut out, source, &line_starts, off, span, file);

@@ -426,7 +426,7 @@ fn rt_put_name(pkg: *const loader::Package, a: *const Ast, cur_src: str, m: Modu
 
 /// The interface instance a `dyn` type `t` erases to, as written in a bound or a conformance:
 /// `Mul<Simd<f32, 4>>`, `fn(i32) i32`, appended to `out`.
-pub fn render_iface_str(pkg: *const loader::Package, a: *const Ast, cur_src: str, t: TypeId, out: &mut String) {
+pub(package) fn render_iface_str(pkg: *const loader::Package, a: *const Ast, cur_src: str, t: TypeId, out: &mut String) {
     let ty = *unsafe (*a).type_at(t);
     rt_dyn_str(pkg, a, cur_src, &ty, out);
 }
@@ -461,21 +461,21 @@ fn rt_dyn_str(pkg: *const loader::Package, a: *const Ast, cur_src: str, ty: &Ty,
 /// Ast owning the type pool (a checker's in-flight ast, or a module's held ast after the build),
 /// `cur_src` that module's source, `pkg` the package for cross-module decl names (null falls back to
 /// `a`/`cur_src` for everything). Also serves LSP hover, which renders from a fully built package.
-pub fn type_str_of(pkg: *const loader::Package, a: *const Ast, cur_src: str, tid: TypeId) String {
+pub(package) fn type_str_of(pkg: *const loader::Package, a: *const Ast, cur_src: str, tid: TypeId) String {
     let mut out = String::new();
     render_type_str(pkg, a, cur_src, tid, &mut out);
     return out;
 }
 
 /// Append `tid` as Super-C surface syntax to `out` (`type_str_of`).
-pub fn render_type_str(pkg: *const loader::Package, a: *const Ast, cur_src: str, tid: TypeId, out: &mut String) {
+pub(package) fn render_type_str(pkg: *const loader::Package, a: *const Ast, cur_src: str, tid: TypeId, out: &mut String) {
     render_ty(pkg, a, cur_src, false, tid, out);
 }
 
 /// Append `tid` (a type of module `a`) as `TypeInfo.qualified_name` spells it: `render_type_str`, with
 /// the trailing generic arguments that equal their parameter's default dropped (`Vector<i32>`,
 /// `Vector<i32, Arena>`).
-pub fn render_qualified_name(pkg: *const loader::Package, a: *const Ast, tid: TypeId, out: &mut String) {
+pub(package) fn render_qualified_name(pkg: *const loader::Package, a: *const Ast, tid: TypeId, out: &mut String) {
     render_ty(pkg, a, unsafe (*pkg).modules[(*a).module as usize].source.as_str(), true, tid, out);
 }
 

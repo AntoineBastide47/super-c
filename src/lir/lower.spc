@@ -36,10 +36,10 @@ const VC_MEM: u8 = 2;
 
 // A type as the lowering sees it.
 struct TyI {
-    pub cls: u8,
-    pub mty: u8, // the machine type of a scalar
-    pub size: u32,
-    pub align: u32,
+    pub(package) cls: u8,
+    pub(package) mty: u8, // the machine type of a scalar
+    pub(package) size: u32,
+    pub(package) align: u32,
 }
 
 extend TyI as Copy {}
@@ -52,11 +52,11 @@ const LK_STATIC: u8 = 3; // an item's storage: `addr` filled on first use
 const LK_CAP: u8 = 4; // a closure capture: env field `var` (its offset); by pointer when `byref`
 
 struct LInfo {
-    pub kind: u8,
-    pub byref: bool,
-    pub ti: TyI,
-    pub var: u32,
-    pub addr: Value,
+    pub(package) kind: u8,
+    pub(package) byref: bool,
+    pub(package) ti: TyI,
+    pub(package) var: u32,
+    pub(package) addr: Value,
 }
 
 extend LInfo as Copy {}
@@ -64,12 +64,12 @@ extend LInfo as Copy {}
 // A phi: a parameter of core block `blk` for variable `var`; its operands, one per predecessor
 // of `blk`, from `ops` in `phi_ops`.
 struct Phi {
-    pub blk: u32,
-    pub var: u32,
-    pub ty: u8,
-    pub ops: u32,
-    pub nops: u32,
-    pub repl: Value, // the value it is replaced by, VNONE while live
+    pub(package) blk: u32,
+    pub(package) var: u32,
+    pub(package) ty: u8,
+    pub(package) ops: u32,
+    pub(package) nops: u32,
+    pub(package) repl: Value, // the value it is replaced by, VNONE while live
 }
 
 extend Phi as Copy {}
@@ -77,9 +77,9 @@ extend Phi as Copy {}
 // A draft edge: to LIR block `to`; from core block `src` into core block `dst` (NONE for an edge
 // inside one core block's chain or into a panic block).
 struct DEdge {
-    pub to: u32,
-    pub src: u32,
-    pub dst: u32,
+    pub(package) to: u32,
+    pub(package) src: u32,
+    pub(package) dst: u32,
 }
 
 extend DEdge as Copy {}
@@ -88,16 +88,16 @@ extend DEdge as Copy {}
 const PHI_TAG: u32 = 0x40000000;
 
 /// A body the lowering refused: its symbol and the reason.
-pub struct LFail {
-    pub sym: String,
-    pub why: str<'static>,
+pub(package) struct LFail {
+    pub(package) sym: String,
+    pub(package) why: str<'static>,
 }
 
 /// A test function lowered: its symbol and its declaration, for the CTFE comparison.
-pub struct LTest {
-    pub sym: String,
-    pub m: ModuleId,
-    pub node: NodeId,
+pub(package) struct LTest {
+    pub(package) sym: String,
+    pub(package) m: ModuleId,
+    pub(package) node: NodeId,
 }
 
 // The step budgets of the evaluator check: CTFE's per test (`probe_tests`) and the evaluator's
@@ -107,19 +107,19 @@ const EVAL_STEPS: u64 = 1 << 21;
 
 /// How CTFE ended test `(m, node)`: its trap kind (`ir::interp::IT_TRAP_*`), the message, and the
 /// line and column of the test's statement that trapped.
-pub struct CtfeRes {
-    pub m: ModuleId,
-    pub node: NodeId,
-    pub kind: u8,
-    pub msg: String, // a copy: the trap's text lives in the interpreter's memory, which the next run reuses
-    pub line: u32,
-    pub col: u32,
-    pub ffi: bool, // the run stopped at an extern function CTFE does not model
-    pub panics: bool, // `@test(should_panic)`
+pub(package) struct CtfeRes {
+    pub(package) m: ModuleId,
+    pub(package) node: NodeId,
+    pub(package) kind: u8,
+    pub(package) msg: String, // a copy: the trap's text lives in the interpreter's memory, which the next run reuses
+    pub(package) line: u32,
+    pub(package) col: u32,
+    pub(package) ffi: bool, // the run stopped at an extern function CTFE does not model
+    pub(package) panics: bool, // `@test(should_panic)`
 }
 
 /// Run each test `(m, node)` of `tests` under CTFE, before the function syntax is released.
-pub fn probe_tests(pk: *const loader::Package, tests: &Vector<u64>, panics: &Vector<bool>) Vector<CtfeRes> {
+pub(package) fn probe_tests(pk: *const loader::Package, tests: &Vector<u64>, panics: &Vector<bool>) Vector<CtfeRes> {
     let mut out = Vector::<CtfeRes>::with_capacity(tests.len());
     if tests.len() == 0 {
         return out;
@@ -153,26 +153,26 @@ pub fn probe_tests(pk: *const loader::Package, tests: &Vector<u64>, panics: &Vec
 }
 
 /// The lowering of one emitter's bodies into its package.
-pub struct Lower {
-    pub pkg: Package,
-    pub fails: Vector<LFail>,
-    pub tests: Vector<LTest>,
+pub(package) struct Lower {
+    pub(package) pkg: Package,
+    pub(package) fails: Vector<LFail>,
+    pub(package) tests: Vector<LTest>,
     /// The function symbols lowered since the last `claim`.
     pend: Vector<u32>,
     pend_c: str<'static>, // what in them no object defines (a C header's constant, an intrinsic), else empty
     pend_name: String, // the C name `pend_c` is about
     fails_seen: usize, // `fails` at the last claim
     /// The units a C chunk without a LIR body landed in, which do not compile, and why.
-    pub conly: Vector<u32>,
-    pub conly_why: Vector<String>,
+    pub(package) conly: Vector<u32>,
+    pub(package) conly_why: Vector<String>,
     /// The CTFE outcome of each test (`probe_tests`) the check compares the evaluator's with.
-    pub ctfe: Vector<CtfeRes>,
+    pub(package) ctfe: Vector<CtfeRes>,
     /// The build wraps on integer overflow (a profile without overflow checks).
-    pub wrap: bool,
+    pub(package) wrap: bool,
     /// Accesses of typed places carry their type tags (`MEM_TBAA`, `-fstrict-aliasing`).
-    pub strict: bool,
+    pub(package) strict: bool,
     /// Bodies lowered and refused.
-    pub nbodies: u64,
+    pub(package) nbodies: u64,
     err: str<'static>,
     dump: String, // `SC_LIR_DUMP`: the body (or refusal reason) whose refusal prints its Core IR
     dbg: bool, // lowering the body `dump` names: report where it fails
@@ -238,7 +238,7 @@ pub struct Lower {
 }
 
 extend Lower {
-    pub fn new(ptr_bytes: u32, wrap: bool) Lower {
+    pub(package) fn new(ptr_bytes: u32, wrap: bool) Lower {
         return Lower {
             pkg: Package::new(ptr_bytes),
             fails: Vector::<LFail>::new(),
@@ -1266,14 +1266,14 @@ extend Lower {
 // A member of an aggregate: its type `(m, t)` (TYPE_NONE: a tag or pointer of machine type `mty`),
 // its byte offset, its index, its declaration node and, in an enum, its variant.
 struct FieldAt {
-    pub m: ModuleId,
-    pub t: TypeId,
-    pub off: u32,
-    pub idx: u32,
-    pub node: NodeId,
-    pub variant: NodeId,
-    pub mty: u8,
-    pub packed: bool,
+    pub(package) m: ModuleId,
+    pub(package) t: TypeId,
+    pub(package) off: u32,
+    pub(package) idx: u32,
+    pub(package) node: NodeId,
+    pub(package) variant: NodeId,
+    pub(package) mty: u8,
+    pub(package) packed: bool,
 }
 
 extend FieldAt as Copy {}
@@ -1282,15 +1282,15 @@ extend FieldAt as Copy {}
 const ENUM_ZERO_MAX: u32 = 32;
 
 struct EnumL {
-    pub ok: bool,
-    pub payload_off: u32,
-    pub tag: u8,
-    pub size: u32,
-    pub align: u32,
+    pub(package) ok: bool,
+    pub(package) payload_off: u32,
+    pub(package) tag: u8,
+    pub(package) size: u32,
+    pub(package) align: u32,
 }
 
 /// `v` rounded up to a multiple of `a`.
-pub const fn round_up(v: u32, a: u32) u32 {
+pub(package) const fn round_up(v: u32, a: u32) u32 {
     if a <= 1 {
         return v;
     }
@@ -1298,7 +1298,7 @@ pub const fn round_up(v: u32, a: u32) u32 {
 }
 
 /// The log2 of power of two `a`.
-pub const fn log2(a: u32) u32 {
+pub(package) const fn log2(a: u32) u32 {
     let mut n: u32 = 0;
     while n < 31 && 1u32 << n < a {
         n += 1;
@@ -1313,14 +1313,14 @@ const PR_VAL: u8 = 2;
 const PR_ZST: u8 = 3;
 
 struct PlaceRef {
-    pub kind: u8,
-    pub var: u32,
-    pub addr: Value,
-    pub m: ModuleId,
-    pub t: TypeId,
-    pub ti: TyI,
-    pub packed: bool,
-    pub in_union: bool, // a union member holds it: another member's type may view its bytes
+    pub(package) kind: u8,
+    pub(package) var: u32,
+    pub(package) addr: Value,
+    pub(package) m: ModuleId,
+    pub(package) t: TypeId,
+    pub(package) ti: TyI,
+    pub(package) packed: bool,
+    pub(package) in_union: bool, // a union member holds it: another member's type may view its bytes
 }
 
 extend PlaceRef as Copy {}
@@ -1850,7 +1850,7 @@ const AM_VARARG: u8 = 8; // past a variadic callee's parameters: C's default pro
 extend Lower {
     /// Lower `b`, the body of symbol `name`: a closure's when `cnode` names its node in module `cm`.
     /// A refusal goes to `fails`.
-    pub fn body(
+    pub(package) fn body(
         self: &mut Self,
         c: &mut cbe::CEmit,
         b: &irc::CoreBody,
@@ -7439,7 +7439,7 @@ extend Lower {
     /// The C chunk `what` of unit `unit` (a module) just landed: the functions lowered for it are that
     /// unit's, its `own` ones when the chunk is of the module's own items. A chunk with none (C text the
     /// lowering does not see, or a refused body) or one that needs C (`pend_c`) puts the unit on C.
-    pub fn claim(self: &mut Self, unit: u32, what: str, own: bool) {
+    pub(package) fn claim(self: &mut Self, unit: u32, what: str, own: bool) {
         if self.pend.len() == 0 || self.pend_c.len() != 0 {
             self.conly.push(unit);
             let mut why = String::new();
@@ -7467,7 +7467,7 @@ extend Lower {
     }
 
     /// Item `(m, n)`'s `@used` and `@unsafe(link_section)` onto the symbol named `name`, when defined.
-    pub fn item_attrs_named(self: &mut Self, c: &mut cbe::CEmit, name: str, m: ModuleId, n: NodeId) {
+    pub(package) fn item_attrs_named(self: &mut Self, c: &mut cbe::CEmit, name: str, m: ModuleId, n: NodeId) {
         let s = self.pkg.find_symbol(name);
         if s != NONE {
             self.item_attrs(c, s, m, n);
@@ -7495,7 +7495,7 @@ extend Lower {
     }
 
     /// Data symbol `name` belongs to unit `unit`; without a LIR definition the unit does not compile.
-    pub fn claim_data(self: &mut Self, name: str, unit: u32) {
+    pub(package) fn claim_data(self: &mut Self, name: str, unit: u32) {
         let s = self.pkg.find_symbol(name);
         if s != NONE && self.pkg.syms[s as usize].def != NONE {
             self.pkg.syms.index_mut(s as usize).unit = unit;
@@ -7506,14 +7506,14 @@ extend Lower {
     }
 
     /// Whether a body lowered since the last claim needs what no object defines (`pend_c`), cleared.
-    pub const fn take_pend_c(self: &mut Self) bool {
+    pub(package) const fn take_pend_c(self: &mut Self) bool {
         let r = self.pend_c.len() != 0;
         self.pend_c = "";
         return r;
     }
 
     /// Move `other`'s bodies, data and refusals into this lowering.
-    pub fn absorb(self: &mut Self, other: &mut Lower) {
+    pub(package) fn absorb(self: &mut Self, other: &mut Lower) {
         let _ = self.pkg.absorb(&other.pkg);
         for i in 0..other.conly.len() {
             self.conly.push(other.conly[i]);
@@ -7538,7 +7538,7 @@ extend Lower {
     /// The `SC_LIR` checks over the merged package, reported on stderr: every body lowered and every
     /// body verified, and under `SC_LIR_EVAL` each test's evaluator run agrees with CTFE (`ctfe_agrees`).
     /// True when all hold.
-    pub fn check_all(self: &mut Self, pk: *const loader::Package) bool {
+    pub(package) fn check_all(self: &mut Self, pk: *const loader::Package) bool {
         // A body with inline assembly stays on the C path by design.
         let mut nasm: u64 = 0;
         for i in 0..self.fails.len() {
@@ -8117,11 +8117,11 @@ const fn ctfe_budget(k: u8) bool {
 // One worker of `ctfe_agrees`: the tests `w`, `w + nw`, ... of `syms`, each run's outcome pushed to
 // `outs` in that order.
 struct EvalTask {
-    pub pkg: *const Package,
-    pub syms: *const Vector<u32>,
-    pub w: usize,
-    pub nw: usize,
-    pub outs: *mut Vector<le::Outcome>,
+    pub(package) pkg: *const Package,
+    pub(package) syms: *const Vector<u32>,
+    pub(package) w: usize,
+    pub(package) nw: usize,
+    pub(package) outs: *mut Vector<le::Outcome>,
 }
 
 extend EvalTask as Copy {}
@@ -8189,15 +8189,15 @@ const fn line_col(src: str, pos: u32, line: &mut u32, col: &mut u32) {
 
 // One static object being rendered: its bytes and relocations.
 struct DataBuf {
-    pub bytes: Vector<u8>,
-    pub relocs: Vector<Reloc>,
+    pub(package) bytes: Vector<u8>,
+    pub(package) relocs: Vector<Reloc>,
 }
 
 extend Lower {
     /// Define constant or static `name` of type `(em, ty)` with CTFE value `v` as package data:
     /// read-only `ro`, thread-local `tls`, aligned to at least `align`. A value CTFE gives no static
     /// form refuses the definition (reported by the check).
-    pub fn static_value(
+    pub(package) fn static_value(
         self: &mut Self,
         c: &mut cbe::CEmit,
         cev: &mut iri::Interp,
@@ -8263,7 +8263,7 @@ extend Lower {
     }
 
     /// Define constant `name` of type `(em, ty)` as zero bytes.
-    pub fn static_zero(
+    pub(package) fn static_zero(
         self: &mut Self,
         c: &mut cbe::CEmit,
         name: str,
@@ -8285,7 +8285,7 @@ extend Lower {
 
     /// Define static object group `root` of `cev` (a constant's, a type descriptor's) as `name` and
     /// its auxiliaries `name__ct<k>` (read-only), as the C path names them.
-    pub fn static_group(
+    pub(package) fn static_group(
         self: &mut Self,
         c: &mut cbe::CEmit,
         cev: &iri::Interp,
@@ -8771,7 +8771,7 @@ extend Lower {
     /// Define array-literal constant `name` of type `(em, ty)` from its elements `els` (module `cm`'s
     /// literals and struct initializers), as the C path renders it: an array, a vector's lanes, or a
     /// view of the data array `name__data`.
-    pub fn static_elems(
+    pub(package) fn static_elems(
         self: &mut Self,
         c: &mut cbe::CEmit,
         cev: &mut iri::Interp,
@@ -8982,34 +8982,34 @@ extend Lower {
 
 // The scratch of `Lower::tidy`, kept across bodies.
 struct Tidy {
-    pub bmap: Vector<u32>, // a block's new index; NONE when unreached
-    pub fwd: Vector<u32>, // the edge a block's lone live `jmp` takes (NONE for any other), then its predecessor count, then the block merged after it
-    pub jp: Vector<u32>, // the predecessor a block merges into; NONE when it stays
-    pub psub: Vector<Value>, // a merged block's parameter: the value its predecessor passes; VNONE for others
-    pub puse: Vector<u32>, // the live uses of each parameter
-    pub hoisted: Vector<bool>, // a live constant, defined once at the entry
-    pub consts: Vector<u32>, // the constants the entry defines, by instruction
-    pub ckey: Map<u64, u32>, // a constant's key: its first instruction
-    pub imap: Vector<u32>, // an instruction's new index; NONE when dropped
-    pub pmap: Vector<u32>, // a parameter's new index
-    pub work: Vector<u32>,
-    pub uses: Vector<Value>,
-    pub done: Vector<bool>, // a pool edge already renumbered
-    pub insts: Vector<Inst>,
-    pub locs: Vector<u32>,
-    pub params: Vector<u8>,
-    pub blocks: Vector<Block>,
+    pub(package) bmap: Vector<u32>, // a block's new index; NONE when unreached
+    pub(package) fwd: Vector<u32>, // the edge a block's lone live `jmp` takes (NONE for any other), then its predecessor count, then the block merged after it
+    pub(package) jp: Vector<u32>, // the predecessor a block merges into; NONE when it stays
+    pub(package) psub: Vector<Value>, // a merged block's parameter: the value its predecessor passes; VNONE for others
+    pub(package) puse: Vector<u32>, // the live uses of each parameter
+    pub(package) hoisted: Vector<bool>, // a live constant, defined once at the entry
+    pub(package) consts: Vector<u32>, // the constants the entry defines, by instruction
+    pub(package) ckey: Map<u64, u32>, // a constant's key: its first instruction
+    pub(package) imap: Vector<u32>, // an instruction's new index; NONE when dropped
+    pub(package) pmap: Vector<u32>, // a parameter's new index
+    pub(package) work: Vector<u32>,
+    pub(package) uses: Vector<Value>,
+    pub(package) done: Vector<bool>, // a pool edge already renumbered
+    pub(package) insts: Vector<Inst>,
+    pub(package) locs: Vector<u32>,
+    pub(package) params: Vector<u8>,
+    pub(package) blocks: Vector<Block>,
     // Slot forwarding (`forward_slots`).
-    pub kill: Vector<bool>, // a copy forwarding dropped
-    pub smap: Vector<u32>, // an instruction's slot when it is a `slotaddr`, else NONE; then a slot's new index
-    pub srep: Vector<u32>, // the slot a slot became (itself when it stays)
-    pub snuse: Vector<u32>, // a slot's uses
-    pub sseen: Vector<u32>, // its uses before the instruction at hand
-    pub sblk: Vector<u32>, // the block of all its uses; NONE before the first, MULTI for several
-    pub sfirst: Vector<u32>, // its first use
-    pub slast: Vector<u32>, // its last use so far, and that use's block
-    pub slastb: Vector<u32>,
-    pub sesc: Vector<bool>, // its address goes beyond a load, a store, a copy or a fill of it
+    pub(package) kill: Vector<bool>, // a copy forwarding dropped
+    pub(package) smap: Vector<u32>, // an instruction's slot when it is a `slotaddr`, else NONE; then a slot's new index
+    pub(package) srep: Vector<u32>, // the slot a slot became (itself when it stays)
+    pub(package) snuse: Vector<u32>, // a slot's uses
+    pub(package) sseen: Vector<u32>, // its uses before the instruction at hand
+    pub(package) sblk: Vector<u32>, // the block of all its uses; NONE before the first, MULTI for several
+    pub(package) sfirst: Vector<u32>, // its first use
+    pub(package) slast: Vector<u32>, // its last use so far, and that use's block
+    pub(package) slastb: Vector<u32>,
+    pub(package) sesc: Vector<bool>, // its address goes beyond a load, a store, a copy or a fill of it
 }
 
 extend Tidy {
@@ -9785,7 +9785,15 @@ extend Lower {
     /// The destructor `sym` of a type `rt` of module `rm`: with `fb` empty the derived one, which frees
     /// every member; else a user `free`'s wrapper, which calls the user body `fb` and then frees the
     /// members `fields` (their declarations) that body leaves.
-    pub fn glue(self: &mut Self, c: &mut cbe::CEmit, rm: ModuleId, rt: TypeId, sym: str, fb: str, fields: []NodeId) bool {
+    pub(package) fn glue(
+        self: &mut Self,
+        c: &mut cbe::CEmit,
+        rm: ModuleId,
+        rt: TypeId,
+        sym: str,
+        fb: str,
+        fields: []NodeId,
+    ) bool {
         let s0 = self.pkg.find_symbol(sym);
         if s0 != NONE && self.pkg.syms[s0 as usize].def != NONE {
             return true;
@@ -9830,7 +9838,7 @@ extend Lower {
     /// The test wrapper `__sc_test_w_<tm>_<func>(genv)` (`CEmit::emit_test_wrapper`): with `wants` bit 0 a
     /// fixture from `fx_init`, then the call of test `func` with the fixture's address and (bit 1) the
     /// global env, then the fixture's teardown `fx_free` (NODE_NONE: none) and its destructor.
-    pub fn test_wrapper(
+    pub(package) fn test_wrapper(
         self: &mut Self,
         c: &mut cbe::CEmit,
         tm: ModuleId,
@@ -9941,7 +9949,7 @@ extend Lower {
     /// (`CEmit::blk_wrapper_defs`): with `blocking` it moves the call to a blocking thread
     /// (`__sc_blocking_run` with `<wn>_run` and an env of the arguments and the result), else it calls
     /// `callee` itself. Both are module `d.module`'s. A parameter of array type (C copies it) is refused.
-    pub fn blk_wrapper(self: &mut Self, c: &mut cbe::CEmit, d: DefId, wn: str, callee: str, blocking: bool) bool {
+    pub(package) fn blk_wrapper(self: &mut Self, c: &mut cbe::CEmit, d: DefId, wn: str, callee: str, blocking: bool) bool {
         let s0 = self.pkg.find_symbol(wn);
         if s0 != NONE && self.pkg.syms[s0 as usize].def != NONE {
             return true;
@@ -10182,7 +10190,7 @@ extend Lower {
 
     /// A dyn table's slot `sym(self, args)` (`CEmit::dyn_thunk`) of unit `unit`: the call of `callee` with
     /// `self` first when `env`, then the arguments, of types `(m, ps)`; its result, of types `(m, rs)`.
-    pub fn dyn_thunk(
+    pub(package) fn dyn_thunk(
         self: &mut Self,
         c: &mut cbe::CEmit,
         m: ModuleId,
@@ -10281,7 +10289,7 @@ extend Lower {
     /// An owned dyn table's `__free` slot `sym(self)` of unit `unit`: the destructor of the value of type
     /// `(sm, st)` at `self`, then its block back to `Global`, or (`at` not TYPE_NONE) to the allocator
     /// `(am, at)` its `Default` rebuilds.
-    pub fn dyn_free(
+    pub(package) fn dyn_free(
         self: &mut Self,
         c: &mut cbe::CEmit,
         sm: ModuleId,
@@ -10368,7 +10376,7 @@ extend Lower {
     /// The dyn table `sym` of unit `unit` (`CEmit::dyn_pair_tabs`): the `__free` slot `free` ("": null),
     /// the erased type's name `tid` when `named`, then the slots `slots`, each a function, or (`data`)
     /// another table.
-    pub fn dyn_table(
+    pub(package) fn dyn_table(
         self: &mut Self,
         sym: str,
         free: str,
@@ -10427,7 +10435,7 @@ extend Lower {
     /// The global test env hooks (`CEmit::emit_test_genv`): `__sc_test_genv_init` keeps the env of `ginit`
     /// in a cell and returns its address; `__sc_test_genv_free(p)` runs teardown `gfree` (NODE_NONE: none)
     /// then the env's destructor.
-    pub fn test_genv(self: &mut Self, c: &mut cbe::CEmit, gm: ModuleId, ginit: NodeId, gfree: NodeId) bool {
+    pub(package) fn test_genv(self: &mut Self, c: &mut cbe::CEmit, gm: ModuleId, ginit: NodeId, gfree: NodeId) bool {
         let gt = c.fn_ret_ty(gm, ginit);
         if gt == TYPE_NONE {
             return false;
@@ -10500,7 +10508,7 @@ extend Lower {
 
     /// The C entry `main(argc, argv)` of the main module `m` (`cemit_main_wrapper`): the value of the user
     /// main `__sc_user_main`, which takes the arguments as a `Vector<str>` when it has a parameter.
-    pub fn main_wrapper(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, argv: bool) bool {
+    pub(package) fn main_wrapper(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, argv: bool) bool {
         let (cd, ro) = self.synth_begin(c, m);
         let ok = self.main_i(c, argv);
         return self.synth_end(c, cd, ro, "main", ok);

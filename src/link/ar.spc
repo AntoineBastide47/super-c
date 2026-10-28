@@ -7,7 +7,7 @@ import target::native as nat;
 import utils::names as nm;
 
 /// Archive the objects `objs` (object format `fmt`, `target::native::OBJ_*`) into `out`. False with the reason in `err` when it fails.
-pub fn archive(fmt: u8, out: str, objs: &Vector<String>, err: &mut String) bool {
+pub(package) fn archive(fmt: u8, out: str, objs: &Vector<String>, err: &mut String) bool {
     let mut data = Vector::<Vector<u8>>::new();
     let mut syms = Vector::<(String, u32)>::new(); // (name, member)
     for i in 0..objs.len() {
@@ -43,10 +43,10 @@ pub fn archive(fmt: u8, out: str, objs: &Vector<String>, err: &mut String) bool 
 }
 
 /// An object member of an archive `read` found: its name and its bytes' place in the archive.
-pub struct Member {
-    pub name: String,
-    pub at: usize,
-    pub size: usize,
+pub(package) struct Member {
+    pub(package) name: String,
+    pub(package) at: usize,
+    pub(package) size: usize,
 }
 
 /// The object members of archive `b` (object format `fmt`) into `members`, and each external symbol a
@@ -55,7 +55,7 @@ pub struct Member {
 /// object members. `imports` is set when a member is a COFF import (a short import object, or GNU
 /// dlltool's object of `.idata$` sections): the archive is then an import library. False with the
 /// reason in `err` when `b` is no archive or is malformed.
-pub fn read<'a>(
+pub(package) fn read<'a>(
     fmt: u8,
     b: Slice<'a, u8>,
     members: &mut Vector<Member>,
@@ -176,17 +176,17 @@ pub fn read<'a>(
 /// The static libraries of a link, read whole, and the member that defines each of their symbols: the
 /// first archive and member that defines it, as the inputs come (LLD's rule). A linker takes a member
 /// when a symbol it still needs is one of them (`find`, then `take`), and reads its bytes as an object.
-pub struct Archives {
-    pub paths: Vector<String>,
-    pub data: Vector<Vector<u8>>,
-    pub members: Vector<Vector<Member>>,
-    pub taken: Vector<Vector<bool>>,
-    pub names: nm::Names, // the defined symbols' names
-    pub defs: Vector<u64>, // per `names` id: (archive << 32 | member) + 1, 0 for none
+pub(package) struct Archives {
+    pub(package) paths: Vector<String>,
+    pub(package) data: Vector<Vector<u8>>,
+    pub(package) members: Vector<Vector<Member>>,
+    pub(package) taken: Vector<Vector<bool>>,
+    pub(package) names: nm::Names, // the defined symbols' names
+    pub(package) defs: Vector<u64>, // per `names` id: (archive << 32 | member) + 1, 0 for none
 }
 
 extend Archives {
-    pub fn new() Archives {
+    pub(package) fn new() Archives {
         return Archives {
             paths: Vector::<String>::new(),
             data: Vector::<Vector<u8>>::new(),
@@ -198,7 +198,7 @@ extend Archives {
     }
 
     /// Add archive `path` (object format `fmt`). False with the reason in `err` when it cannot be read.
-    pub fn add(self: &mut Self, fmt: u8, path: str, err: &mut String) bool {
+    pub(package) fn add(self: &mut Self, fmt: u8, path: str, err: &mut String) bool {
         let d = lu::read(path);
         if d.is_none() {
             err.format_into("cannot read '{}'", path);
@@ -240,7 +240,7 @@ extend Archives {
     }
 
     /// The member that defines `name` and was not taken yet, as archive << 32 | member; None otherwise.
-    pub const fn find(self: &Self, name: str) Option<u64> {
+    pub(package) const fn find(self: &Self, name: str) Option<u64> {
         let id = self.names.find(name);
         if id < 0 || id as usize >= self.defs.len() || self.defs[id as usize] == 0 {
             return Option::<u64>::None;
@@ -253,18 +253,18 @@ extend Archives {
     }
 
     /// Mark member `am` (`find`'s value) taken.
-    pub fn take(self: &mut Self, am: u64) {
+    pub(package) fn take(self: &mut Self, am: u64) {
         self.taken.index_mut((am >> 32) as usize).set((am & 0xFFFFFFFF) as usize, true);
     }
 
     /// The bytes of member `am`.
-    pub fn bytes(self: &Self, am: u64) []u8 {
+    pub(package) fn bytes(self: &Self, am: u64) []u8 {
         let m = &self.members[(am >> 32) as usize][(am & 0xFFFFFFFF) as usize];
         return self.data[(am >> 32) as usize].index_range(m.at..m.at + m.size);
     }
 
     /// The name of member `am` for messages: `<archive>(<member>)`.
-    pub fn name(self: &Self, am: u64) String {
+    pub(package) fn name(self: &Self, am: u64) String {
         return format(
             "{}({})",
             self.paths[(am >> 32) as usize].as_str(),
@@ -302,7 +302,7 @@ const fn be32(b: []u8, at: usize) u32 {
 }
 
 /// Whether input `path` names a static library: `.a`, or `.lib` on Windows.
-pub const fn is_archive(path: str) bool {
+pub(package) const fn is_archive(path: str) bool {
     return path.ends_with(".a") || path.ends_with(".lib");
 }
 

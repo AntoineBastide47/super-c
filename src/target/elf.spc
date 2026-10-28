@@ -221,22 +221,22 @@ const fn word_at(o: &ob::Obj, k: u8, off: u32) u32 {
 
 // One section header.
 struct Shdr {
-    pub name: u32,
-    pub ty: u32,
-    pub flags: u64,
-    pub off: u64,
-    pub size: u64,
-    pub link: u32,
-    pub info: u32,
-    pub align: u64,
-    pub entsize: u64,
+    pub(package) name: u32,
+    pub(package) ty: u32,
+    pub(package) flags: u64,
+    pub(package) off: u64,
+    pub(package) size: u64,
+    pub(package) link: u32,
+    pub(package) info: u32,
+    pub(package) align: u64,
+    pub(package) entsize: u64,
 }
 
 extend Shdr as Copy {}
 
 /// Write object `o` as an ELF relocatable object for arm64 (`a64`) or x86-64 into `out`, its sections split
 /// at their symbols as `split` asks (`lir::SPLIT_*`).
-pub fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
+pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
     let mut shstr = Vector::<u8>::new();
     shstr.push(0);
     let mut hdrs = Vector::<Shdr>::new();

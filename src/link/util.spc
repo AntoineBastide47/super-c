@@ -2,7 +2,7 @@
 import std::platform::fs;
 
 /// The bytes of file `path`, None when it cannot be read in full.
-pub fn read(path: str) Option<Vector<u8>> {
+pub(package) fn read(path: str) Option<Vector<u8>> {
     let mut b = Vector::<u8>::new();
     if !read_append(path, &mut b) {
         return Option::<Vector<u8>>::None;
@@ -11,7 +11,7 @@ pub fn read(path: str) Option<Vector<u8>> {
 }
 
 /// Append the bytes of file `path` to `out`; false when it cannot be read.
-pub fn read_append(path: str, out: &mut Vector<u8>) bool {
+pub(package) fn read_append(path: str, out: &mut Vector<u8>) bool {
     let opened = fs::open(path, fs::OpenOptions { read: true });
     if opened.is_err() {
         return false;
@@ -39,7 +39,7 @@ pub fn read_append(path: str, out: &mut Vector<u8>) bool {
 
 /// Write `bytes` to a new file `path` with permission bits `mode`: any file there is removed first, so a
 /// running or code-signed copy keeps its own bytes. False when a step fails.
-pub fn write(path: str, bytes: []u8, mode: u32) bool {
+pub(package) fn write(path: str, bytes: []u8, mode: u32) bool {
     let _ = fs::unlink(path);
     let opened = fs::open(path, fs::OpenOptions { write: true, create: true, truncate: true, mode: mode });
     if opened.is_err() {
@@ -60,51 +60,51 @@ const fn keep_mode(_path: str, _mode: u32) bool {
     return true;
 }
 
-pub const fn r16(b: []u8, at: usize) u32 {
+pub(package) const fn r16(b: []u8, at: usize) u32 {
     return b[at] as u32 | b[at + 1] as u32 << 8;
 }
 
-pub const fn r32(b: []u8, at: usize) u32 {
+pub(package) const fn r32(b: []u8, at: usize) u32 {
     return r16(b, at) | r16(b, at + 2) << 16;
 }
 
-pub const fn r64(b: []u8, at: usize) u64 {
+pub(package) const fn r64(b: []u8, at: usize) u64 {
     return r32(b, at) as u64 | r32(b, at + 4) as u64 << 32;
 }
 
-pub const fn p16(b: &mut Vector<u8>, at: usize, v: u32) {
+pub(package) const fn p16(b: &mut Vector<u8>, at: usize, v: u32) {
     b[at] = (v & 0xFF) as u8;
     b[at + 1] = (v >> 8 & 0xFF) as u8;
 }
 
-pub const fn p32(b: &mut Vector<u8>, at: usize, v: u32) {
+pub(package) const fn p32(b: &mut Vector<u8>, at: usize, v: u32) {
     p16(b, at, v & 0xFFFF);
     p16(b, at + 2, v >> 16);
 }
 
-pub const fn p64(b: &mut Vector<u8>, at: usize, v: u64) {
+pub(package) const fn p64(b: &mut Vector<u8>, at: usize, v: u64) {
     p32(b, at, v as u32);
     p32(b, at + 4, (v >> 32) as u32);
 }
 
 /// Append the little-endian 16, 32 and 64 bits of `v` to `o`.
-pub fn w16(o: &mut Vector<u8>, v: u32) {
+pub(package) fn w16(o: &mut Vector<u8>, v: u32) {
     o.push((v & 0xFF) as u8);
     o.push((v >> 8 & 0xFF) as u8);
 }
 
-pub fn w32(o: &mut Vector<u8>, v: u32) {
+pub(package) fn w32(o: &mut Vector<u8>, v: u32) {
     w16(o, v & 0xFFFF);
     w16(o, v >> 16);
 }
 
-pub fn w64(o: &mut Vector<u8>, v: u64) {
+pub(package) fn w64(o: &mut Vector<u8>, v: u64) {
     w32(o, v as u32);
     w32(o, (v >> 32) as u32);
 }
 
 /// Append `s` and a terminating zero to string table `t`; its offset.
-pub fn put_str(t: &mut Vector<u8>, s: str) u32 {
+pub(package) fn put_str(t: &mut Vector<u8>, s: str) u32 {
     let at = t.len() as u32;
     for i in 0..s.len() {
         t.push(s.byte_at(i));
@@ -114,7 +114,7 @@ pub fn put_str(t: &mut Vector<u8>, s: str) u32 {
 }
 
 /// Append `v` as unsigned LEB128.
-pub fn uleb(o: &mut Vector<u8>, v: u64) {
+pub(package) fn uleb(o: &mut Vector<u8>, v: u64) {
     let mut x = v;
     // At most 10 bytes for 64 bits.
     loop {
@@ -129,7 +129,7 @@ pub fn uleb(o: &mut Vector<u8>, v: u64) {
 }
 
 /// The size of `v` as unsigned LEB128.
-pub const fn uleb_len(v: u64) usize {
+pub(package) const fn uleb_len(v: u64) usize {
     let mut n: usize = 1;
     let mut x = v >> 7;
     while x != 0 {
@@ -140,7 +140,7 @@ pub const fn uleb_len(v: u64) usize {
 }
 
 /// The unsigned LEB128 at `*at` of `b`, `*at` moved past it; `b.len()` ends a truncated one.
-pub const fn read_uleb(b: []u8, at: &mut usize) u64 {
+pub(package) const fn read_uleb(b: []u8, at: &mut usize) u64 {
     let mut v: u64 = 0;
     let mut sh: u64 = 0;
     while *at < b.len() && sh < 64 {
@@ -156,7 +156,7 @@ pub const fn read_uleb(b: []u8, at: &mut usize) u64 {
 }
 
 /// The NUL-terminated string at `at` of `b` (to the end when unterminated).
-pub const fn cstr<'a>(b: Slice<'a, u8>, at: usize) str<'a> {
+pub(package) const fn cstr<'a>(b: Slice<'a, u8>, at: usize) str<'a> {
     let mut e = at;
     while e < b.len() && b[e] != 0 {
         e += 1;
@@ -165,6 +165,6 @@ pub const fn cstr<'a>(b: Slice<'a, u8>, at: usize) str<'a> {
 }
 
 /// `v` rounded up to a multiple of `a` (a power of two).
-pub const fn align_up(v: u64, a: u64) u64 {
+pub(package) const fn align_up(v: u64, a: u64) u64 {
     return v + a - 1 & ~(a - 1);
 }

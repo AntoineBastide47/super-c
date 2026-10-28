@@ -32,10 +32,10 @@ const PROMOTE_WORK_MAX: u64 = 1 << 22;
 
 // An access of a slot: bytes `off` to `off + size` as `ty` (T_NONE: a copied range of no type).
 struct Acc {
-    pub slot: u32,
-    pub off: i64,
-    pub size: i64,
-    pub ty: u8,
+    pub(package) slot: u32,
+    pub(package) off: i64,
+    pub(package) size: i64,
+    pub(package) ty: u8,
 }
 
 extend Acc as Copy {}
@@ -43,27 +43,27 @@ extend Acc as Copy {}
 // A copy (`memcpy`) or a fill (`memset`, `src` NONE and `byte` its byte) of `size` bytes with a slot on
 // one side at least: the destination's and the source's slot (NONE: none) and offsets.
 struct Copy {
-    pub inst: u32,
-    pub dslot: u32,
-    pub doff: i64,
-    pub sslot: u32,
-    pub soff: i64,
-    pub size: i64,
-    pub byte: u64,
+    pub(package) inst: u32,
+    pub(package) dslot: u32,
+    pub(package) doff: i64,
+    pub(package) sslot: u32,
+    pub(package) soff: i64,
+    pub(package) size: i64,
+    pub(package) byte: u64,
 }
 
 extend Copy as Copy {}
 
 // A field: a slot's bytes `off` to `off + type_bytes(ty)`.
 struct Fld {
-    pub off: i64,
-    pub ty: u8,
+    pub(package) off: i64,
+    pub(package) ty: u8,
 }
 
 extend Fld as Copy {}
 
 /// The promotion's scratch, reused from body to body.
-pub struct Promoter {
+pub(package) struct Promoter {
     ptr: u32, // the data model's pointer size
     dslot: Vector<u32>, // per instruction, the slot its address value points into (NONE: none)
     doff: Vector<i64>, // and the offset
@@ -129,7 +129,7 @@ pub struct Promoter {
 }
 
 extend Promoter {
-    pub fn new() Promoter {
+    pub(package) fn new() Promoter {
         return Promoter {
             dslot: Vector::<u32>::new(),
             doff: Vector::<i64>::new(),
@@ -189,7 +189,7 @@ extend Promoter {
     /// Promote the private slots of `b`, whose graph is given: successors and predecessors as ranges,
     /// immediate dominators (NONE: unreached), the reverse postorder, the dominator tree's children as
     /// ranges. The new body goes to `out`; false when no slot promotes (`out` untouched).
-    pub fn run(
+    pub(package) fn run(
         self: &mut Self,
         b: &Body,
         succ_at: []u32,

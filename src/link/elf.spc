@@ -17,23 +17,23 @@ import std::platform::fs;
 const NONE: u32 = 0xFFFFFFFF;
 
 /// What a link produces: an executable, or a shared library (`soname` its name).
-pub const K_EXE: u8 = 0;
-pub const K_SHARED: u8 = 1;
+pub(package) const K_EXE: u8 = 0;
+pub(package) const K_SHARED: u8 = 1;
 
 /// A link: the objects, the libraries (`-l` names searched in `dirs`, then the system's directories
 /// under `sysroot`), the output, the instruction set (`a64`: arm64, else x86-64), and whether to leave
 /// out the symbol table and the debug sections (`strip`).
-pub struct Opts {
-    pub out: String,
-    pub kind: u8,
-    pub objs: Vector<String>,
-    pub libs: Vector<String>,
-    pub dirs: Vector<String>,
-    pub sysroot: String,
-    pub a64: bool,
-    pub strip: bool,
-    pub soname: String,
-    pub gc: bool, // drop the sections nothing reaches (`--gc-sections`, `collect`)
+pub(package) struct Opts {
+    pub(package) out: String,
+    pub(package) kind: u8,
+    pub(package) objs: Vector<String>,
+    pub(package) libs: Vector<String>,
+    pub(package) dirs: Vector<String>,
+    pub(package) sysroot: String,
+    pub(package) a64: bool,
+    pub(package) strip: bool,
+    pub(package) soname: String,
+    pub(package) gc: bool, // drop the sections nothing reaches (`--gc-sections`, `collect`)
 }
 
 const SHT_PROGBITS: u32 = 1;
@@ -191,12 +191,12 @@ const DIRS_A64: [str; 6] = [
 
 // An input file: its bytes in the blob, its sections (one per section header) and symbols.
 struct IFile {
-    pub path: u32,
-    pub at: usize,
-    pub sec0: u32,
-    pub nsec: u32,
-    pub sym0: u32,
-    pub nsym: u32,
+    pub(package) path: u32,
+    pub(package) at: usize,
+    pub(package) sec0: u32,
+    pub(package) nsec: u32,
+    pub(package) sym0: u32,
+    pub(package) nsym: u32,
 }
 
 // An input section: name (`sn` id), type, flags, alignment, size, its bytes in the blob, the index of the
@@ -204,41 +204,41 @@ struct IFile {
 // where it lands. Garbage collection leaves a section nothing reaches not `live`, and gives a `.eh_frame`
 // its records `L.eh[eh .. eh + neh]` (`eh` NONE: copied whole), `size` then their kept bytes.
 struct ISec {
-    pub file: u32,
-    pub name: u32,
-    pub ty: u32,
-    pub flags: u64,
-    pub align: u64,
-    pub size: u64,
-    pub off: usize,
-    pub rela: u32,
-    pub out: u32,
-    pub at: u64,
-    pub link: u32,
-    pub live: bool,
-    pub eh: u32,
-    pub neh: u32,
+    pub(package) file: u32,
+    pub(package) name: u32,
+    pub(package) ty: u32,
+    pub(package) flags: u64,
+    pub(package) align: u64,
+    pub(package) size: u64,
+    pub(package) off: usize,
+    pub(package) rela: u32,
+    pub(package) out: u32,
+    pub(package) at: u64,
+    pub(package) link: u32,
+    pub(package) live: bool,
+    pub(package) eh: u32,
+    pub(package) neh: u32,
 }
 
 // A record of an input `.eh_frame`: bytes `old .. old + len` (its length field included), at `new` in the
 // section's kept bytes, NONE when dropped (a frame entry of a function the link drops, or a common entry
 // no kept one names).
 struct EhRec {
-    pub old: u32,
-    pub len: u32,
-    pub new: u32,
-    pub cie: bool,
+    pub(package) old: u32,
+    pub(package) len: u32,
+    pub(package) new: u32,
+    pub(package) cie: bool,
 }
 
 // An input symbol.
 struct ISym {
-    pub name: u32,
-    pub info: u8,
-    pub other: u8,
-    pub shndx: u32,
-    pub value: u64,
-    pub size: u64,
-    pub file: u32,
+    pub(package) name: u32,
+    pub(package) info: u8,
+    pub(package) other: u8,
+    pub(package) shndx: u32,
+    pub(package) value: u64,
+    pub(package) size: u64,
+    pub(package) file: u32,
 }
 
 const G_UNDEF: u8 = 0;
@@ -248,57 +248,57 @@ const G_COMMON: u8 = 3; // tentative: `size` bytes aligned to `align`, at `at` o
 const G_SYNTH: u8 = 4; // the linker defines it: image address `at`
 
 struct GSym {
-    pub name: u32,
-    pub kind: u8,
-    pub sym: u32,
-    pub lib: u32,
-    pub ver: u32, // `vers` index, NONE: unversioned
-    pub size: u64,
-    pub align: u64,
-    pub at: u64,
-    pub got: u32,
-    pub plt: u32,
-    pub dynix: u32, // `.dynsym` index
-    pub weak: bool,
-    pub used: bool, // a kept relocation refers to it
-    pub strong: bool, // an object references it with a global (not weak) undefined symbol
-    pub func: bool,
+    pub(package) name: u32,
+    pub(package) kind: u8,
+    pub(package) sym: u32,
+    pub(package) lib: u32,
+    pub(package) ver: u32, // `vers` index, NONE: unversioned
+    pub(package) size: u64,
+    pub(package) align: u64,
+    pub(package) at: u64,
+    pub(package) got: u32,
+    pub(package) plt: u32,
+    pub(package) dynix: u32, // `.dynsym` index
+    pub(package) weak: bool,
+    pub(package) used: bool, // a kept relocation refers to it
+    pub(package) strong: bool, // an object references it with a global (not weak) undefined symbol
+    pub(package) func: bool,
 }
 
 // An output section.
 struct OSec {
-    pub name: u32,
-    pub ty: u32,
-    pub flags: u64,
-    pub align: u64,
-    pub rank: u32,
-    pub size: u64,
-    pub addr: u64,
-    pub off: u64,
-    pub link: u32,
-    pub info: u32,
-    pub entsize: u64,
+    pub(package) name: u32,
+    pub(package) ty: u32,
+    pub(package) flags: u64,
+    pub(package) align: u64,
+    pub(package) rank: u32,
+    pub(package) size: u64,
+    pub(package) addr: u64,
+    pub(package) off: u64,
+    pub(package) link: u32,
+    pub(package) info: u32,
+    pub(package) entsize: u64,
 }
 
 // A library: its name for DT_NEEDED and whether a symbol binds to it.
 struct Lib {
-    pub soname: String,
-    pub used: bool,
+    pub(package) soname: String,
+    pub(package) used: bool,
 }
 
 // A symbol version a library defines: its library and name.
 struct Ver {
-    pub lib: u32,
-    pub name: String,
-    pub index: u32, // `.gnu.version` index once needed (0: not needed)
+    pub(package) lib: u32,
+    pub(package) name: String,
+    pub(package) index: u32, // `.gnu.version` index once needed (0: not needed)
 }
 
 // A dynamic relocation: at image address `at`, type `ty`, dynamic symbol `sym` (0: none), `addend`.
 struct DRel {
-    pub at: u64,
-    pub ty: u32,
-    pub sym: u32,
-    pub addend: i64,
+    pub(package) at: u64,
+    pub(package) ty: u32,
+    pub(package) sym: u32,
+    pub(package) addend: i64,
 }
 
 extend IFile as Copy {}
@@ -310,38 +310,38 @@ extend OSec as Copy {}
 extend DRel as Copy {}
 
 struct L {
-    pub a64: bool,
-    pub page: u64,
-    pub files: Vector<IFile>,
-    pub paths: Vector<String>,
-    pub secs: Vector<ISec>,
-    pub syms: Vector<ISym>,
-    pub names: nm::Names,
-    pub sn: nm::Names,
-    pub glob: Vector<u32>,
-    pub gs: Vector<GSym>,
-    pub libs: Vector<Lib>,
-    pub vers: Vector<Ver>,
-    pub osecs: Vector<OSec>,
-    pub got: Vector<u32>, // per slot: its `gs` index
-    pub plt: Vector<u32>, // per stub: its `gs` index
-    pub drels: Vector<DRel>,
-    pub dyns: Vector<u32>, // `.dynsym` after the null entry: `gs` indices
-    pub skip: Vector<u64>, // relaxed sequences: (input section << 32 | offset) of each relocation they consume
-    pub eh: Vector<EhRec>, // the `.eh_frame` records garbage collection parsed (`ISec.eh`)
-    pub nfde: u32,
-    pub tls_start: u64,
-    pub tls_size: u64,
-    pub tls_align: u64,
-    pub o: Vector<u32>, // output section indices by role (`O_*`)
-    pub start_at: u64, // `_start`'s address
-    pub nph: u32, // program headers
-    pub shared: bool, // a shared library: no entry, exported symbols, thread-locals as initial-exec
-    pub lgot: Vector<u32>, // the GOT slots of local symbols (after `got`): their input symbols
-    pub lgot_slot: Map<u32, u32>, // input symbol -> its `lgot` slot
-    pub tls_keys: Vector<u64>, // a shared library's thread-local GOT slots (after `lgot`): their symbols
-    pub tls_slot: Map<u64, u32>, // symbol key (`tls_key`) -> slot
-    pub err: String,
+    pub(package) a64: bool,
+    pub(package) page: u64,
+    pub(package) files: Vector<IFile>,
+    pub(package) paths: Vector<String>,
+    pub(package) secs: Vector<ISec>,
+    pub(package) syms: Vector<ISym>,
+    pub(package) names: nm::Names,
+    pub(package) sn: nm::Names,
+    pub(package) glob: Vector<u32>,
+    pub(package) gs: Vector<GSym>,
+    pub(package) libs: Vector<Lib>,
+    pub(package) vers: Vector<Ver>,
+    pub(package) osecs: Vector<OSec>,
+    pub(package) got: Vector<u32>, // per slot: its `gs` index
+    pub(package) plt: Vector<u32>, // per stub: its `gs` index
+    pub(package) drels: Vector<DRel>,
+    pub(package) dyns: Vector<u32>, // `.dynsym` after the null entry: `gs` indices
+    pub(package) skip: Vector<u64>, // relaxed sequences: (input section << 32 | offset) of each relocation they consume
+    pub(package) eh: Vector<EhRec>, // the `.eh_frame` records garbage collection parsed (`ISec.eh`)
+    pub(package) nfde: u32,
+    pub(package) tls_start: u64,
+    pub(package) tls_size: u64,
+    pub(package) tls_align: u64,
+    pub(package) o: Vector<u32>, // output section indices by role (`O_*`)
+    pub(package) start_at: u64, // `_start`'s address
+    pub(package) nph: u32, // program headers
+    pub(package) shared: bool, // a shared library: no entry, exported symbols, thread-locals as initial-exec
+    pub(package) lgot: Vector<u32>, // the GOT slots of local symbols (after `got`): their input symbols
+    pub(package) lgot_slot: Map<u32, u32>, // input symbol -> its `lgot` slot
+    pub(package) tls_keys: Vector<u64>, // a shared library's thread-local GOT slots (after `lgot`): their symbols
+    pub(package) tls_slot: Map<u64, u32>, // symbol key (`tls_key`) -> slot
+    pub(package) err: String,
 }
 
 // Output section roles.
@@ -363,7 +363,7 @@ const O_DATA: usize = 14;
 const O_COUNT: usize = 15;
 
 /// Link `o`. False with the reason in `err` when it fails.
-pub fn link(o: &Opts, err: &mut String) bool {
+pub(package) fn link(o: &Opts, err: &mut String) bool {
     let mut l = L {
         a64: o.a64,
         page: if o.a64 {
@@ -737,14 +737,14 @@ fn lib_files(l: &mut L, o: &Opts, sos: &mut Vector<String>, ars: &mut ar::Archiv
 }
 
 /// What `find_lib` finds.
-pub const LIB_NONE: u8 = 0;
-pub const LIB_SHARED: u8 = 1;
-pub const LIB_ARCHIVE: u8 = 2;
+pub(package) const LIB_NONE: u8 = 0;
+pub(package) const LIB_SHARED: u8 = 1;
+pub(package) const LIB_ARCHIVE: u8 = 2;
 
 /// Library `-l<name>` of link `o`, as glibc's linker searches: each directory of `dirs`, then the system's,
 /// for `lib<name>.so` (a shared library or a GNU ld script), `lib<name>.so.<N>`, then `lib<name>.a`; its
 /// path into `path`.
-pub fn find(o: &Opts, name: str, path: &mut String) u8 {
+pub(package) fn find(o: &Opts, name: str, path: &mut String) u8 {
     let sys: []str = if o.a64 {
         DIRS_A64;
     } else {
@@ -1380,10 +1380,10 @@ fn eh_find(l: &L, first: u32, last: u32, off: u32) u32 {
 
 // One relocation of a section: offset, type, symbol (file-relative), addend.
 struct Rel {
-    pub off: u64,
-    pub ty: u32,
-    pub sym: u32,
-    pub addend: i64,
+    pub(package) off: u64,
+    pub(package) ty: u32,
+    pub(package) sym: u32,
+    pub(package) addend: i64,
 }
 
 extend Rel as Copy {}

@@ -26,29 +26,29 @@ import pattern::pattern as pat;
 
 /// One binding in scope: the declaring node (LET name / parameter / pattern name) -> its local.
 struct Binding {
-    pub decl: NodeId,
-    pub local: ir::LocalId,
+    pub(package) decl: NodeId,
+    pub(package) local: ir::LocalId,
 }
 
 /// One enclosing loop, for break/continue routing (label span empty = unlabeled).
 struct LoopCtx {
-    pub label: tok::Span,
-    pub brk: ir::BlockId,
-    pub cont: ir::BlockId,
-    pub defer_depth: usize, // defers deeper than this run before `continue`
-    pub brk_defer_depth: usize, // defers deeper than this run before `break` (<= defer_depth)
-    pub locals_depth: usize, // scope locals deeper than this end their storage before leaving
-    pub result: ir::PlaceId, // `break value` destination for loop expressions; IR_NONE when none
+    pub(package) label: tok::Span,
+    pub(package) brk: ir::BlockId,
+    pub(package) cont: ir::BlockId,
+    pub(package) defer_depth: usize, // defers deeper than this run before `continue`
+    pub(package) brk_defer_depth: usize, // defers deeper than this run before `break` (<= defer_depth)
+    pub(package) locals_depth: usize, // scope locals deeper than this end their storage before leaving
+    pub(package) result: ir::PlaceId, // `break value` destination for loop expressions; IR_NONE when none
 }
 
 /// The elements of consumed array `arr` after index `idx` (`idx + 1 .. len`): freed at every exit
 /// of a by-value `for` over the array. A `defers` entry tagged DEFER_TAIL names one by index.
 struct TailDrop {
-    pub arr: ir::PlaceId,
-    pub idx: ir::PlaceId,
-    pub len: ir::PlaceId,
-    pub elem: TypeId,
-    pub span: tok::Span,
+    pub(package) arr: ir::PlaceId,
+    pub(package) idx: ir::PlaceId,
+    pub(package) len: ir::PlaceId,
+    pub(package) elem: TypeId,
+    pub(package) span: tok::Span,
 }
 
 /// Tag bit of a `defers` entry that is a TailDrop index, not a defer statement node.
@@ -64,34 +64,34 @@ const WALK_MAX: u32 = 64;
 
 /// One instance-env binding for substitution-aware lowering: generic param decl `(pm, pnode)`
 /// resolves to pool type `(am, at)` (a copy of the backend demand chain, innermost last).
-pub struct LSub {
-    pub pm: ModuleId,
-    pub pnode: NodeId,
-    pub am: ModuleId,
-    pub at: TypeId,
+pub(package) struct LSub {
+    pub(package) pm: ModuleId,
+    pub(package) pnode: NodeId,
+    pub(package) am: ModuleId,
+    pub(package) at: TypeId,
 }
 
 // One active reflection-binder copy: `inline for f in fields/variants/payloads(..)` re-lowers its
 // body once per copy with this frame on the stack; member reads on `f` resolve through it.
 struct ProjFrame {
-    pub binder: NodeId,
-    pub idx: i64,
-    pub vidx: i64, // payloads mode: the OUTER variants binder's current variant
-    pub mode: u8, // 0 fields / 1 variants / 2 payloads
-    pub sub0: ir::PlaceId,
-    pub sub1: ir::PlaceId,
-    pub owner_st: TypeId, // the concrete owner, reinterned into THIS module's pool
+    pub(package) binder: NodeId,
+    pub(package) idx: i64,
+    pub(package) vidx: i64, // payloads mode: the OUTER variants binder's current variant
+    pub(package) mode: u8, // 0 fields / 1 variants / 2 payloads
+    pub(package) sub0: ir::PlaceId,
+    pub(package) sub1: ir::PlaceId,
+    pub(package) owner_st: TypeId, // the concrete owner, reinterned into THIS module's pool
 }
 
 /// The prelude view decls the safe-access gates compare against, resolved lazily once per
 /// Lowerer (`ok` = resolved). Package-constant, so a kept Lowerer's cache stays valid.
 struct ViewDecls {
-    pub ok: bool,
-    pub v_str: DefId,
-    pub v_slice: DefId,
-    pub v_slice_mut: DefId,
-    pub v_vector: DefId,
-    pub v_string: DefId,
+    pub(package) ok: bool,
+    pub(package) v_str: DefId,
+    pub(package) v_slice: DefId,
+    pub(package) v_slice_mut: DefId,
+    pub(package) v_vector: DefId,
+    pub(package) v_string: DefId,
 }
 
 // The nodes whose value an `if`, `switch` or value-block arm yields as the whole expression's value:
@@ -100,10 +100,10 @@ struct ViewDecls {
 // operand) lives in the scope around the expression, as it would without the arms: `depth` scopes
 // are open there (EXT_NONE: no arm is being lowered).
 struct ExtCx {
-    pub arm: NodeId,
-    pub val: NodeId,
-    pub rf: NodeId,
-    pub depth: u32,
+    pub(package) arm: NodeId,
+    pub(package) val: NodeId,
+    pub(package) rf: NodeId,
+    pub(package) depth: u32,
 }
 
 const EXT_NONE: u32 = 0xFFFFFFFFu32;
@@ -130,7 +130,7 @@ const ERR_UNSEEN: str<'static> = "a declaration the reader does not see checked"
 
 /// `Lowerer.err` for a call of an `@intrinsic` this compiler does not know, which only
 /// `--bootstrap-tags` accepts: the newer compiler that knows it checks the body.
-pub const UNKNOWN_INTRINSIC_SLUG: str<'static> = "an intrinsic this compiler does not know";
+pub(package) const UNKNOWN_INTRINSIC_SLUG: str<'static> = "an intrinsic this compiler does not know";
 
 // The `data` of a member projection: IR_NONE for a named field (its identity is the decl in
 // `sub`, as a member access spells it), else the positional index.
@@ -141,23 +141,23 @@ const fn member_data(sub: NodeId, index: u32) u32 {
     return index;
 }
 
-pub struct Lowerer {
-    pub f: facts::TypedFacts,
-    pub pkg: *const loader::Package,
-    pub module: ModuleId,
-    pub src: str<'static>,
-    pub body: ir::CoreBody,
-    pub err: str<'static>, // first unsupported-construct reason ("" = ok)
-    pub err_node: NodeId, // the node that failed (diagnostic snippet in the SC_CORE_IR report)
+pub(package) struct Lowerer {
+    pub(package) f: facts::TypedFacts,
+    pub(package) pkg: *const loader::Package,
+    pub(package) module: ModuleId,
+    pub(package) src: str<'static>,
+    pub(package) body: ir::CoreBody,
+    pub(package) err: str<'static>, // first unsupported-construct reason ("" = ok)
+    pub(package) err_node: NodeId, // the node that failed (diagnostic snippet in the SC_CORE_IR report)
     /// A program error found while lowering an instance (NODE_NONE when none): a vector index list
     /// that does not evaluate there, or names a lane past its operands (`user_msg`). The lowering goes
     /// on, the list reading lane 0, as a failed per-instance static_assert does; the emitter reports
     /// it, and the evaluator refuses the body with it.
-    pub user_err: NodeId,
-    pub user_msg: str<'static>,
+    pub(package) user_err: NodeId,
+    pub(package) user_msg: str<'static>,
     /// The instance env for substitution-aware lowering (reflection expansion needs the CONCRETE
     /// owner); empty for the shared generic pre-pass.
-    pub env: Vector<LSub>,
+    pub(package) env: Vector<LSub>,
     // The index-list argument of the vector operation call being lowered (`index_op`).
     list_node: NodeId,
     proj_frames: Vector<ProjFrame>,
@@ -175,10 +175,10 @@ pub struct Lowerer {
     moved_binds: Vector<u64>,
     item_keys: Vector<u64>, // the `item_ix` keys of this body
     item_ix: Map<u64, ir::LocalId>, // module << 32 | decl node -> its cached LS_STATIC_REF local
-    pub closures: Vector<NodeId>, // closure nodes queued for their own lowering
-    pub mut_binds: Vector<NodeId>, // decls mutated in this CLOSURE body (walk's mut_caps peel)
-    pub unsafe_spans: Vector<u64>, // start<<32|end per unsafe expr; licenses the IR free-move rules
-    pub tape: Vector<u64>, // borrowck replay events (ir::TP_*), in walk order; muted inside desugars
+    pub(package) closures: Vector<NodeId>, // closure nodes queued for their own lowering
+    pub(package) mut_binds: Vector<NodeId>, // decls mutated in this CLOSURE body (walk's mut_caps peel)
+    pub(package) unsafe_spans: Vector<u64>, // start<<32|end per unsafe expr; licenses the IR free-move rules
+    pub(package) tape: Vector<u64>, // borrowck replay events (ir::TP_*), in walk order; muted inside desugars
     tape_mute: u32,
     in_defer: u32, // lowering a defer body (an exit path): cancellation checks are masked there
     free_mask: bool, // a `Free::free` body that can accept a cancellation: it runs masked
@@ -230,27 +230,27 @@ pub struct Lowerer {
     ev: *const iri::Interp,
     /// The node whose item the reader does not see, when `checked_here` failed the lowering
     /// (`need_n` NODE_NONE otherwise): `Interp::lower_refused` records the refusal.
-    pub need_m: ModuleId,
-    pub need_n: NodeId,
+    pub(package) need_m: ModuleId,
+    pub(package) need_n: NodeId,
     cur: ir::BlockId,
     run_start: u32, // statements index where the open block's run began
 }
 
 /// A finished lowering the package keeps: the Core IR body and the closure nodes it queued for
 /// their own lowering. `Lowerer::take_kept` makes it a Lowerer again for the consumers that need one.
-pub struct KeptBody {
-    pub body: ir::CoreBody,
-    pub closures: Vector<NodeId>,
+pub(package) struct KeptBody {
+    pub(package) body: ir::CoreBody,
+    pub(package) closures: Vector<NodeId>,
 }
 
 extend KeptBody {
     /// A compact copy of a finished body and its closure list.
-    pub fn copy(body: &ir::CoreBody, closures: &Vector<NodeId>) KeptBody {
+    pub(package) fn copy(body: &ir::CoreBody, closures: &Vector<NodeId>) KeptBody {
         return KeptBody { body: ir::CoreBody::compact_from(body), closures: closures.clone() };
     }
 
     /// An empty record for body `owner` of module `m`: what a taken slot holds.
-    pub fn empty(m: ModuleId, owner: NodeId) KeptBody {
+    pub(package) fn empty(m: ModuleId, owner: NodeId) KeptBody {
         return KeptBody {
             body: ir::CoreBody::new(DefId { module: m, node: owner }, m),
             closures: Vector::<NodeId>::new(),
@@ -259,7 +259,7 @@ extend KeptBody {
 }
 
 /// The function and closure bodies of module `m` of `p`: what the keep holds of it at most.
-pub fn module_bodies(p: &loader::Package, m: usize) usize {
+pub(package) fn module_bodies(p: &loader::Package, m: usize) usize {
     if !p.modules.at(m).has_ast {
         return 0;
     }
@@ -278,29 +278,29 @@ pub fn module_bodies(p: &loader::Package, m: usize) usize {
 /// Package-lifetime store of finished lowerings, keyed `skey_mix(0, module << 32 | owner)`:
 /// borrowck adopts every body it lowers so the instance graph starts from these instead of
 /// lowering the package a second time. Entries move out on first demand and never return.
-pub struct Keep {
-    pub ix: Map<u64, u64>,
-    pub kept: Vector<KeptBody>,
+pub(package) struct Keep {
+    pub(package) ix: Map<u64, u64>,
+    pub(package) kept: Vector<KeptBody>,
     /// Read-only views outstanding (the interpreter's window from the borrow frontier to the
     /// constant pre-pass): while nonzero no body may move or be taken, and a body may be added
     /// only into reserved capacity (`reserve_bodies`), since a viewer holds pointers into `kept`.
-    pub viewers: u32,
+    pub(package) viewers: u32,
 }
 
 extend Keep {
-    pub fn new() Keep {
+    pub(package) fn new() Keep {
         return Keep { ix: Map::<u64, u64>::new(), kept: Vector::<KeptBody>::new(), viewers: 0 };
     }
 
     /// Size `kept` for `n` bodies, the `module_bodies` of every module, at once, so the doubling
     /// chain does not churn multi-megabyte blocks through the allocator each build.
-    pub fn reserve_bodies(self: &mut Self, n: usize) {
+    pub(package) fn reserve_bodies(self: &mut Self, n: usize) {
         self.kept.reserve(n);
     }
 
     /// The `kept` slot of the non-generic body `(module, node)`, or -1. Never a generic body: a
     /// caller without a substitution env cannot execute one.
-    pub fn view(self: &Self, module: ModuleId, node: NodeId) i64 {
+    pub(package) fn view(self: &Self, module: ModuleId, node: NodeId) i64 {
         let key = skey_mix(0, module as u64 << 32 | node as u64);
         switch self.ix.get(&key) {
             Some(v) => {
@@ -317,7 +317,7 @@ extend Keep {
 
     /// Rewrite every kept body's types through the package's last publication; returns how many
     /// bodies had a map to apply.
-    pub const fn remap_types(self: &mut Self, p: &loader::Package) usize {
+    pub(package) const fn remap_types(self: &mut Self, p: &loader::Package) usize {
         let mut n: usize = 0;
         for i in 0..self.kept.len() {
             let lw = self.kept.index_mut(i);
@@ -332,7 +332,7 @@ extend Keep {
 
     /// Move every body of `other` in (first key wins, matching `put`); `other` is left empty.
     /// Slot order in `kept` is not load-bearing -- consumers index through `ix` by owner key.
-    pub fn absorb(self: &mut Self, other: &mut Keep) {
+    pub(package) fn absorb(self: &mut Self, other: &mut Keep) {
         if self.viewers == 0 {
             self.kept.reserve(other.kept.len());
         } else {
@@ -350,7 +350,7 @@ extend Keep {
         }
     }
 
-    pub fn put(self: &mut Self, src: &Lowerer) {
+    pub(package) fn put(self: &mut Self, src: &Lowerer) {
         assert(self.viewers == 0 || self.kept.len() < self.kept.capacity(), "a viewed keep never reallocates");
         let d = src.body.owner;
         let key = skey_mix(0, d.module as u64 << 32 | d.node as u64);
@@ -363,15 +363,15 @@ extend Keep {
 }
 
 // Decode call_info: (fmod << 40 | fdecl << 8 | skip).
-pub const fn ci_module(v: u64) ModuleId {
+pub(package) const fn ci_module(v: u64) ModuleId {
     return (v >> 40) as ModuleId;
 }
-pub const fn ci_decl(v: u64) NodeId {
+pub(package) const fn ci_decl(v: u64) NodeId {
     return (v >> 8 & 0xFFFFFFFFu64) as NodeId;
 }
 
 extend Lowerer {
-    pub fn new(pkg: *const loader::Package, module: ModuleId, owner: NodeId) Lowerer {
+    pub(package) fn new(pkg: *const loader::Package, module: ModuleId, owner: NodeId) Lowerer {
         let a = unsafe (&*pkg).module_ast_const(module);
         let sp = unsafe (&*pkg).modules.at(module as usize).source.as_str();
         return Lowerer {
@@ -455,14 +455,14 @@ extend Lowerer {
     }
 
     /// The bytes a finished lowering keeps: the body's pools and the replay tape.
-    pub const fn retained_bytes(self: &Self) u64 {
+    pub(package) const fn retained_bytes(self: &Self) u64 {
         return self.body.retained_bytes() + (self.tape.capacity() * 8) as u64;
     }
 
     /// Re-target a reused Lowerer at another module, keeping every pool's heap capacity: the
     /// instance graph lowers the whole package through one scratch Lowerer. Clears any staged
     /// instance `env` (scratch lowerings are always env-free).
-    pub fn retarget(self: &mut Self, module: ModuleId) {
+    pub(package) fn retarget(self: &mut Self, module: ModuleId) {
         let p = unsafe &*self.pkg;
         self.f = facts::TypedFacts::of(p.module_ast_const(module));
         self.module = module;
@@ -473,7 +473,7 @@ extend Lowerer {
 
     /// A Lowerer holding the kept body in `slot` as its finished product, as if it had lowered
     /// it; the slot is left empty.
-    pub fn take_kept(pkg: *const loader::Package, slot: &mut KeptBody) Lowerer {
+    pub(package) fn take_kept(pkg: *const loader::Package, slot: &mut KeptBody) Lowerer {
         let d = slot.body.owner;
         let mut lw = Lowerer::new(pkg, d.module, d.node);
         lw.body = replace(&mut slot.body, ir::CoreBody::new(d, d.module));
@@ -622,7 +622,7 @@ extend Lowerer {
 
     /// Whether lowering stopped at a node the checker rejected (TYPE_ERROR): its diagnostic is
     /// already reported, so a caller refusing the body reports nothing more.
-    pub const fn failed_on_error_type(self: &Self) bool {
+    pub(package) const fn failed_on_error_type(self: &Self) bool {
         return self.err == ERR_TYPE_SLUG;
     }
 
@@ -635,7 +635,7 @@ extend Lowerer {
 
     /// Lower for compile-time evaluation `ev`: a declaration record of an item the reader does not see
     /// checked fails the lowering, and the evaluation runs again once the owner is checked.
-    pub const fn read_for(self: &mut Self, ev: *const iri::Interp) {
+    pub(package) const fn read_for(self: &mut Self, ev: *const iri::Interp) {
         self.ev = ev;
         self.lay.ev = ev;
     }
@@ -1221,7 +1221,7 @@ extend Lowerer {
 
     /// Lower function/method `fnode`. Returns false (with `err` set) when a construct is not yet
     /// supported; the produced body is then incomplete and must be discarded.
-    pub fn lower_fn(self: &mut Self, fnode: NodeId) bool {
+    pub(package) fn lower_fn(self: &mut Self, fnode: NodeId) bool {
         self.begin_body(fnode);
         let fd = self.f.node(fnode).as_data.function;
         self.body.is_generic = fd.generics.len != 0;
@@ -1285,7 +1285,7 @@ extend Lowerer {
 
     /// Lower a closure's body: parameters then captures become argument locals (captures bind their
     /// ORIGINAL declaring nodes, so the body's uses resolve to them).
-    pub fn lower_closure_body(self: &mut Self, cnode: NodeId) bool {
+    pub(package) fn lower_closure_body(self: &mut Self, cnode: NodeId) bool {
         self.begin_body(cnode);
         let cd = self.f.node(cnode).as_data.closure;
         let sp = self.f.node(cnode).span;
@@ -1347,21 +1347,21 @@ extend Lowerer {
     }
 
     /// Lower a constant/static initializer expression as a one-return body.
-    pub fn lower_const(self: &mut Self, cnode: NodeId) bool {
+    pub(package) fn lower_const(self: &mut Self, cnode: NodeId) bool {
         let cd = self.f.node(cnode).as_data.const_def;
         return self.lower_value_body(cd.value, self.nty(cnode), self.f.node(cnode).span);
     }
 
     /// `lower_const` through a Lowerer that may hold an earlier body (`retarget` it first for another
     /// module): its pools keep their heap capacity.
-    pub fn relower_const(self: &mut Self, cnode: NodeId) bool {
+    pub(package) fn relower_const(self: &mut Self, cnode: NodeId) bool {
         self.begin_body(cnode);
         return self.lower_const(cnode);
     }
 
     /// Lower a bare TYPED expression as a one-return body (the facade behind expression-level
     /// CTFE requests: array lengths, discriminants, folds).
-    pub fn lower_expr_root(self: &mut Self, expr: NodeId) bool {
+    pub(package) fn lower_expr_root(self: &mut Self, expr: NodeId) bool {
         return self.lower_value_body(expr, self.nty(expr), self.f.node(expr).span);
     }
 
@@ -2293,7 +2293,7 @@ extend Lowerer {
 
     // The C tag value of variant `idx` within enum declaration `dn` of module `dm`: its explicit
     // discriminant, else the previous variant's plus one.
-    pub fn tag_of_decl(self: &mut Self, dm: ModuleId, dn: NodeId, idx: i64) i64 {
+    pub(package) fn tag_of_decl(self: &mut Self, dm: ModuleId, dn: NodeId, idx: i64) i64 {
         let da = unsafe &*(&*self.pkg).module_ast_const(dm);
         let ms = da.at_const(dn).as_data.aggregate.members;
         let mut cur: i64 = 0 - 1;

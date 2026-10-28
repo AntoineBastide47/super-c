@@ -48,15 +48,15 @@ const U_DOT: u8 = 7; // the accumulator of `dot`: the same kind class, at least 
 /// and the target `U`, and the scalar form of lane `$i` over the lane values `$a`, `$b`, `$c`. Other
 /// placeholders: `$T` lane type, `$U` target, `$Q` unsigned type of the lane width, `$W` width, `$F`
 /// float lane type, `$N` lanes, `$M` target lanes.
-pub struct VOp {
-    pub name: str<'static>,
-    pub cls: u8,
-    pub nv: u8, // vector inputs
-    pub res: u8,
-    pub tgt: u8,
-    pub exact: bool, // a NaN result lane keeps its bits
-    pub vexpr: str<'static>,
-    pub rexpr: str<'static>,
+pub(package) struct VOp {
+    pub(package) name: str<'static>,
+    pub(package) cls: u8,
+    pub(package) nv: u8, // vector inputs
+    pub(package) res: u8,
+    pub(package) tgt: u8,
+    pub(package) exact: bool, // a NaN result lane keeps its bits
+    pub(package) vexpr: str<'static>,
+    pub(package) rexpr: str<'static>,
 }
 
 const fn vop(name: str<'static>, cls: u8, nv: u8, res: u8, vexpr: str<'static>, rexpr: str<'static>) VOp {
@@ -72,7 +72,7 @@ const fn vopu(name: str<'static>, cls: u8, res: u8, tgt: u8, vexpr: str<'static>
 }
 
 /// Every operation the model draws.
-pub const VOPS: [VOp; 72] = [
+pub(package) const VOPS: [VOp; 72] = [
     vop("add", C_ALL, 2, R_VEC, "x + y", "$a + $b"),
     vop("sub", C_ALL, 2, R_VEC, "x - y", "$a - $b"),
     vop("mul", C_ALL, 2, R_VEC, "x * y", "$a * $b"),
@@ -207,12 +207,12 @@ const LANE_OPS: [str<'static>; 6] = ["low_half", "high_half", "concat", "iota", 
 /// lanes of `$T`, `$H` the NaN-canonical one, `$A` the NaN-canonical hash of lanes of `$U`; and the
 /// pieces of a scalar form: `$K` the active lane test, `$V` and `$R` the hash of the lanes or of the
 /// scalar `r`, `$P` and `$G` the range checks of a start or an index lane, trapping as the vector form.
-pub struct XOp {
-    pub name: str<'static>,
-    pub cls: u8,
-    pub tgt: u8,
-    pub vbody: str<'static>,
-    pub rbody: str<'static>,
+pub(package) struct XOp {
+    pub(package) name: str<'static>,
+    pub(package) cls: u8,
+    pub(package) tgt: u8,
+    pub(package) vbody: str<'static>,
+    pub(package) rbody: str<'static>,
 }
 
 const fn xop(name: str<'static>, cls: u8, tgt: u8, vbody: str<'static>, rbody: str<'static>) XOp {
@@ -220,7 +220,7 @@ const fn xop(name: str<'static>, cls: u8, tgt: u8, vbody: str<'static>, rbody: s
 }
 
 /// The operations of `XOPS`, from index 78.
-pub const XOPS: [XOp; 49] = [
+pub(package) const XOPS: [XOp; 49] = [
     xop(
         "swizzle",
         C_ALL,
@@ -572,7 +572,7 @@ pub const XOPS: [XOp; 49] = [
 ];
 
 /// Operations in all: VOPS, LANE_OPS, then XOPS.
-pub const OPS_N: u64 = 127;
+pub(package) const OPS_N: u64 = 127;
 
 // The whole-function operation `op` (78 and up).
 const fn xop_of(op: u8) XOp {
@@ -585,28 +585,28 @@ const fn xop_of(op: u8) XOp {
 /// vector), the inputs' lane literals (a float lane's bits), the scalar operand (a shift count or mask
 /// bits), and `x`, an XOp's index list, start, rotation or index vector.
 @derive(Clone)
-pub struct VCase {
-    pub op: u8,
-    pub t: u8,
-    pub u: u8,
-    pub n: u64,
-    pub m: u64,
-    pub a: Vector<String>,
-    pub b: Vector<String>,
-    pub c: Vector<String>,
-    pub s: String,
-    pub x: String,
+pub(package) struct VCase {
+    pub(package) op: u8,
+    pub(package) t: u8,
+    pub(package) u: u8,
+    pub(package) n: u64,
+    pub(package) m: u64,
+    pub(package) a: Vector<String>,
+    pub(package) b: Vector<String>,
+    pub(package) c: Vector<String>,
+    pub(package) s: String,
+    pub(package) x: String,
 }
 
 /// The vector model: its cases, at most `cases_max` drawn per program.
 @derive(Clone)
-pub struct VectorModel {
-    pub cases: Vector<VCase>,
-    pub cases_max: u64,
+pub(package) struct VectorModel {
+    pub(package) cases: Vector<VCase>,
+    pub(package) cases_max: u64,
 }
 
 /// A model of 1 to `cases_max` cases.
-pub fn vector_model(cases_max: u64) VectorModel {
+pub(package) fn vector_model(cases_max: u64) VectorModel {
     return VectorModel { cases: Vector::<VCase>::new(), cases_max: cases_max };
 }
 
@@ -624,7 +624,7 @@ const fn wi(t: u8) u8 {
 }
 
 /// The bytes of lane type `t`.
-pub const fn lane_bytes(t: u8) u64 {
+pub(package) const fn lane_bytes(t: u8) u64 {
     return 1u64 << wi(t) as u64;
 }
 
@@ -650,12 +650,12 @@ const fn lane_kind(t: u8) u8 {
 }
 
 /// The most lanes of lane type `t`: 512 bits, at most 64 lanes.
-pub const fn max_lanes(t: u8) u64 {
+pub(package) const fn max_lanes(t: u8) u64 {
     return 64 / lane_bytes(t);
 }
 
 /// Whether lane type `t` belongs to class `cls`.
-pub const fn in_class(t: u8, cls: u8) bool {
+pub(package) const fn in_class(t: u8, cls: u8) bool {
     if cls == C_ALL {
         return true;
     }
@@ -669,7 +669,7 @@ pub const fn in_class(t: u8, cls: u8) bool {
 }
 
 /// Whether target `u` (with `m` lanes) suits conversion kind `k` from `n` lanes of `t`.
-pub const fn target_ok(k: u8, t: u8, n: u64, u: u8, m: u64) bool {
+pub(package) const fn target_ok(k: u8, t: u8, n: u64, u: u8, m: u64) bool {
     if k == U_BITCAST {
         return m >= 2 && m <= 64 && lane_bytes(u) * m == lane_bytes(t) * n;
     }
@@ -692,13 +692,13 @@ pub const fn target_ok(k: u8, t: u8, n: u64, u: u8, m: u64) bool {
 }
 
 /// Whether operation `op` converts to a target type.
-pub const fn converts(op: u8) bool {
+pub(package) const fn converts(op: u8) bool {
     let ops: []VOp = VOPS;
     return op as u64 < 72 && ops[op as usize].tgt != U_NONE || op >= 78 && xop_of(op).tgt != U_NONE;
 }
 
 /// Whether operation `op` applies to `n` lanes of `t` (a rearrangement's result must be a vector).
-pub const fn op_ok(op: u8, t: u8, n: u64) bool {
+pub(package) const fn op_ok(op: u8, t: u8, n: u64) bool {
     if op as u64 < 72 {
         let ops: []VOp = VOPS;
         return in_class(t, ops[op as usize].cls);
@@ -866,7 +866,7 @@ fn lanes(rng: &mut Rng, t: u8, n: u64, count: bool, divisor: bool, small: bool) 
 
 /// A case of `op` on `n` lanes of `t`, its inputs from `rng`; a conversion's target is `u` (or drawn,
 /// for `u` below 0). False when the target does not suit.
-pub fn draw_case(rng: &mut Rng, op: u8, t: u8, n: u64, u: i32, c: &mut VCase) bool {
+pub(package) fn draw_case(rng: &mut Rng, op: u8, t: u8, n: u64, u: i32, c: &mut VCase) bool {
     *c = VCase {
         op: op,
         t: t,
@@ -1213,7 +1213,7 @@ fn hash_fn(t: u8, exact: bool) String {
 /// The helper functions every program of the model shares: the hashes, and the scalar forms'
 /// helpers (`rmm` IEEE min/max, `rrot` rotation, `rperm` bit and byte reversal, `rfit` the narrow
 /// trap, `rbits` a bitcast).
-pub fn helpers() String {
+pub(package) fn helpers() String {
     let mut s = String::from_str("import std::simd;\nimport math;\nimport string;\nimport signal;\nimport stdlib;\n");
     s.push_str(
         "const fn pick<T: Copy>(c: bool, a: T, b: T) T {\n    if c {\n        return a;\n    }\n    return b;\n}\n",
@@ -1276,7 +1276,7 @@ pub fn helpers() String {
 }
 
 /// The vector function of case `k` (`vk<k>`), over the inputs as arrays, and its hash.
-pub fn case_vec(cs: &VCase, k: usize, out: &mut String) {
+pub(package) fn case_vec(cs: &VCase, k: usize, out: &mut String) {
     let t = cs.t;
     let tn = lane_name(t);
     let arr = store_arr(t, cs.n);
@@ -1343,7 +1343,7 @@ pub fn case_vec(cs: &VCase, k: usize, out: &mut String) {
 }
 
 /// The scalar function of case `k` (`rk<k>`): every lane through the scalar form, then the same hash.
-pub fn case_ref(cs: &VCase, k: usize, out: &mut String) {
+pub(package) fn case_ref(cs: &VCase, k: usize, out: &mut String) {
     let t = cs.t;
     let tn = lane_name(t);
     let un = lane_name(cs.u);
@@ -1468,7 +1468,7 @@ pub fn case_ref(cs: &VCase, k: usize, out: &mut String) {
 
 /// Case `cs`'s call of `fname` (`vk<k>` or `rk<k>`) on its inputs, each through `wrap` (`opq` for a
 /// constant, `opr` at run time).
-pub fn case_call(cs: &VCase, fname: str, k: usize, wrap: str) String {
+pub(package) fn case_call(cs: &VCase, fname: str, k: usize, wrap: str) String {
     let arr = store_arr(cs.t, cs.n);
     let mut s = String::new();
     s.format_into(
@@ -1491,7 +1491,7 @@ pub fn case_call(cs: &VCase, fname: str, k: usize, wrap: str) String {
 }
 
 /// The name of case `cs`'s operation.
-pub const fn op_name(cs: &VCase) str<'static> {
+pub(package) const fn op_name(cs: &VCase) str<'static> {
     if cs.op >= 78 {
         return xop_of(cs.op).name;
     }
@@ -1509,7 +1509,7 @@ pub const fn op_name(cs: &VCase) str<'static> {
 /// run-time value (`V <k> <value>`); `prog k r` prints `R <k>` and the scalar value (`S <k> <value>`).
 /// A trap ends the run after the `R` line of its case, with status 134 and no crash report or core dump,
 /// which cost more than the run.
-pub fn program(cases: &Vector<VCase>, omit: &Vector<bool>) String {
+pub(package) fn program(cases: &Vector<VCase>, omit: &Vector<bool>) String {
     let mut s = helpers();
     s.push_str("fn parity_abort(_sig: i32) {\n    unsafe stdlib::exit_now(134);\n}\n");
     s.push_str("const fn opq<T>(x: T) T {\n    return x;\n}\n");
@@ -1565,7 +1565,7 @@ fn trap_core(t: str, lane: bool) String {
 /// Run every case of program `b` in `mode` (`v` or `r`): one process from the first case, and after a
 /// trap one more from the next case. `out[k]` gets each tagged value (`C`, `V`, `S`: "<tag> <value>"), or
 /// "trap: <message>" for the case that trapped.
-pub fn run_all(b: &h::DiffBuild, n: usize, mode: str, out: &mut Vector<String>) {
+pub(package) fn run_all(b: &h::DiffBuild, n: usize, mode: str, out: &mut Vector<String>) {
     let mut from: usize = 0;
     while from < n {
         let mut args = String::new();
@@ -1609,7 +1609,7 @@ fn value_of(text: &String, tag: str, lane: bool) String {
 /// Both oracles on `cases`: each case's constant equals its run-time value, or the constant's error
 /// is the run-time trap (with its lane); and its run-time value equals its scalar loop's, or both trap
 /// with the same message. Empty when every case agrees, else each difference.
-pub fn check_cases(cases: &Vector<VCase>) String {
+pub(package) fn check_cases(cases: &Vector<VCase>) String {
     let n = cases.len();
     let mut r = String::new();
     let mut omit = Vector::<bool>::new();

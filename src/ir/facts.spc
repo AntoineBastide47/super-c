@@ -25,24 +25,24 @@ import module::loader as loader;
 
 // ---- memory effects --------------------------------------------------------------------------------
 
-pub const EF_NONE: u8 = 0; // reads at most
-pub const EF_WRITE: u8 = 1; // writes place `a` (a whole local, an interior, or through a deref)
-pub const EF_PTR: u8 = 2; // writes through pointer operand `a` (a memory or atomic intrinsic, a vector or volatile store)
-pub const EF_SYNC: u8 = 3; // writes nothing, but an ordered atomic makes other threads' writes visible
-pub const EF_CALL: u8 = 4; // an unknown call: the heap, statics, escaped storage and the `roots`
-pub const EF_DROP: u8 = 5; // drops place `a`: its ownership tree, or what a call reaches
-pub const EF_ASM: u8 = 6; // inline assembly: an unknown heap write plus the output places' `roots`
+pub(package) const EF_NONE: u8 = 0; // reads at most
+pub(package) const EF_WRITE: u8 = 1; // writes place `a` (a whole local, an interior, or through a deref)
+pub(package) const EF_PTR: u8 = 2; // writes through pointer operand `a` (a memory or atomic intrinsic, a vector or volatile store)
+pub(package) const EF_SYNC: u8 = 3; // writes nothing, but an ordered atomic makes other threads' writes visible
+pub(package) const EF_CALL: u8 = 4; // an unknown call: the heap, statics, escaped storage and the `roots`
+pub(package) const EF_DROP: u8 = 5; // drops place `a`: its ownership tree, or what a call reaches
+pub(package) const EF_ASM: u8 = 6; // inline assembly: an unknown heap write plus the output places' `roots`
 
 const ROOTS_MAX: u32 = 16;
 
 /// One statement's or terminator's memory effect. `roots` are locals the operation can write as a
 /// whole (passed by mutable reference, or an assembly output); `over` means more than fit.
-pub struct Effect {
-    pub roots: [u32; 16],
-    pub a: u32,
-    pub n: u32,
-    pub kind: u8,
-    pub over: bool,
+pub(package) struct Effect {
+    pub(package) roots: [u32; 16],
+    pub(package) a: u32,
+    pub(package) n: u32,
+    pub(package) kind: u8,
+    pub(package) over: bool,
 }
 
 const fn effect(kind: u8, a: u32) Effect {
@@ -67,7 +67,7 @@ const fn push_root(e: &mut Effect, l: u32) {
 /// `SM_WRITE_LANES`: the masked, scatter and compressing stores, one element per active lane at a
 /// lane-dependent address) writes through operand 0, a slice, a pointer or an array of pointers; a
 /// vector load only reads through it.
-pub fn stmt_effect(b: &ir::CoreBody, s: &ir::Statement) Effect {
+pub(package) fn stmt_effect(b: &ir::CoreBody, s: &ir::Statement) Effect {
     if s.kind != ir::ST_ASSIGN {
         return effect(EF_NONE, ir::IR_NONE);
     }
@@ -105,7 +105,7 @@ const fn relaxed(b: &ir::CoreBody, opid: u32) bool {
 
 /// True when `t` calls the borrow-pure prelude length getter `fn len(&self)` on a place: its shared
 /// receiver cannot mutate the collection.
-pub const fn is_prelude_len_call(pkg: *const loader::Package, b: &ir::CoreBody, t: &ir::Terminator) bool {
+pub(package) const fn is_prelude_len_call(pkg: *const loader::Package, b: &ir::CoreBody, t: &ir::Terminator) bool {
     if t.kind != ir::TM_CALL || t.callee.node == NODE_NONE || t.args_len != 1 || t.dests_len != 1 {
         return false;
     }
@@ -127,7 +127,7 @@ pub const fn is_prelude_len_call(pkg: *const loader::Package, b: &ir::CoreBody, 
 }
 
 /// The effect of terminator `t`. A call's destinations are written after its effect.
-pub fn term_effect(pkg: *const loader::Package, b: &ir::CoreBody, t: &ir::Terminator) Effect {
+pub(package) fn term_effect(pkg: *const loader::Package, b: &ir::CoreBody, t: &ir::Terminator) Effect {
     if t.kind == ir::TM_DROP {
         let k = (unsafe &*(&*pkg).module_ast_const(b.module)).type_at(b.places.at(t.a as usize).ty).kind;
         if k == TypeKind::TYPE_BUILTIN || k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE {
@@ -185,24 +185,24 @@ pub fn term_effect(pkg: *const loader::Package, b: &ir::CoreBody, t: &ir::Termin
 
 /// The memory access a call states through its callee's annotation (`@reads`, `@writes`,
 /// `@lane_access` on a foreign function or an `@intrinsic` binding).
-pub const MA_NONE: u8 = 0; // no annotation
-pub const MA_READ: u8 = 1; // reads `bytes` bytes through argument `arg`, nothing else
-pub const MA_WRITE: u8 = 2; // writes `bytes` bytes through argument `arg`, and may read through it
-pub const MA_LANES: u8 = 3; // touches memory in active lanes at lane-dependent addresses: unknown
+pub(package) const MA_NONE: u8 = 0; // no annotation
+pub(package) const MA_READ: u8 = 1; // reads `bytes` bytes through argument `arg`, nothing else
+pub(package) const MA_WRITE: u8 = 2; // writes `bytes` bytes through argument `arg`, and may read through it
+pub(package) const MA_LANES: u8 = 3; // touches memory in active lanes at lane-dependent addresses: unknown
 
 /// One stated access (`call_access`): `arg` is the pointer argument's operand; the byte count is
 /// `bytes`, or with `bytes_node` set the annotation's expression over the callee's parameters, node
 /// `bytes_node` of module `module`, which every call evaluates with its arguments.
-pub struct MemAccess {
-    pub kind: u8,
-    pub arg: u32,
-    pub bytes: u64,
-    pub bytes_node: NodeId,
-    pub module: ModuleId,
+pub(package) struct MemAccess {
+    pub(package) kind: u8,
+    pub(package) arg: u32,
+    pub(package) bytes: u64,
+    pub(package) bytes_node: NodeId,
+    pub(package) module: ModuleId,
 }
 
 /// The memory access call `t` states through its callee's annotation; MA_NONE without one.
-pub fn call_access(pkg: *const loader::Package, b: &ir::CoreBody, t: &ir::Terminator) MemAccess {
+pub(package) fn call_access(pkg: *const loader::Package, b: &ir::CoreBody, t: &ir::Terminator) MemAccess {
     let mut ma = MemAccess { kind: MA_NONE, arg: ir::IR_NONE, bytes: 0, bytes_node: NODE_NONE, module: t.callee.module };
     if t.kind != ir::TM_CALL || t.callee.node == NODE_NONE || Ast::in_body(t.callee.node) {
         return ma;
@@ -243,49 +243,49 @@ pub fn call_access(pkg: *const loader::Package, b: &ir::CoreBody, t: &ir::Termin
 /// A resolved operand key: a constant, or (local, version) plus an affine constant offset, or opaque.
 /// Two local keys with equal (l, v, off) name the SAME run-time value (identical expressions over the
 /// same definition), also when the addition wrapped. No order is derived from two different offsets.
-pub struct VKey {
-    pub c: i64,
-    pub off: i64,
-    pub l: u32,
-    pub v: u32,
-    pub is_const: bool,
-    pub is_local: bool,
+pub(package) struct VKey {
+    pub(package) c: i64,
+    pub(package) off: i64,
+    pub(package) l: u32,
+    pub(package) v: u32,
+    pub(package) is_const: bool,
+    pub(package) is_local: bool,
 }
 
-pub const fn vkey_none() VKey {
+pub(package) const fn vkey_none() VKey {
     return VKey { is_const: false, c: 0, is_local: false, l: 0, v: 0, off: 0 };
 }
 
 // Per-local bindings, each stamped with the version of its OWNER local at definition time so a
 // redefinition invalidates it without a sweep.
-pub struct CopyBind {
-    pub src: u32,
-    pub src_v: u32,
-    pub my_v: u32,
-    pub ok: bool,
+pub(package) struct CopyBind {
+    pub(package) src: u32,
+    pub(package) src_v: u32,
+    pub(package) my_v: u32,
+    pub(package) ok: bool,
 }
 // dest = src + c (usize only; c may be negative for a Minus form)
-pub struct AffBind {
-    pub src: u32,
-    pub src_v: u32,
-    pub c: i64,
-    pub my_v: u32,
-    pub ok: bool,
+pub(package) struct AffBind {
+    pub(package) src: u32,
+    pub(package) src_v: u32,
+    pub(package) c: i64,
+    pub(package) my_v: u32,
+    pub(package) ok: bool,
 }
-pub struct RefBind {
-    pub pl: u32,
-    pub my_v: u32,
-    pub ok: bool,
+pub(package) struct RefBind {
+    pub(package) pl: u32,
+    pub(package) my_v: u32,
+    pub(package) ok: bool,
 }
 
 /// Place identities with this bit set are SYNTHETIC: the low bits name the reference LOCAL a
 /// `[r, deref, .len]` read routed through. Two synthetic identities match on equal ids only.
-pub const SYNTH_PL: u32 = 0x80000000u32;
+pub(package) const SYNTH_PL: u32 = 0x80000000u32;
 
 /// The starting capacity of the per-local, per-block and per-statement tables (`Facts`, `bce::Bce`):
 /// a large body's size (the self-build averages about 100 locals and 110 blocks per checked body, its
 /// largest 2,100), so the bodies that follow grow each table about twice instead of eight times.
-pub const TABLE_MIN: usize = 1024;
+pub(package) const TABLE_MIN: usize = 1024;
 
 // Fixed bounds: the exposed scalars a heap write kills, the escaped roots, the loop-header scan work, the integer facts a block-entry state keeps, the entry-state pool and
 // the solver's block visits.
@@ -297,17 +297,17 @@ const PKILL_MAX: usize = 256;
 
 // One loop-scan write: k 0 rekeys local `a`, 1 also its base generation, 2 writes place `p` of base
 // `a`.
-pub struct LOp {
-    pub a: u32,
-    pub p: u32,
-    pub k: u8,
+pub(package) struct LOp {
+    pub(package) a: u32,
+    pub(package) p: u32,
+    pub(package) k: u8,
 }
 
 // A write that reached only the subtree of place `pl` (base `base`), at path generation `pg`.
-pub struct PKill {
-    pub base: u32,
-    pub pg: u32,
-    pub pl: u32,
+pub(package) struct PKill {
+    pub(package) base: u32,
+    pub(package) pg: u32,
+    pub(package) pl: u32,
 }
 
 // ---- integer facts -----------------------------------------------------------------------------------
@@ -316,29 +316,29 @@ pub struct PKill {
 /// magnitude: `ln`/`hn` mark a negative bound), is `ph + k * st` for some integer k (`st` 1 = no
 /// stride; an exact fact has lo == hi), and has the bits of `kz` clear and the bits of `ko` set (two's
 /// complement at the width). `wid` marks a fact a loop-header widening changed.
-pub struct IFact {
-    pub lo: u64,
-    pub hi: u64,
-    pub kz: u64,
-    pub ko: u64,
-    pub st: u64,
-    pub ph: u64,
-    pub ln: bool,
-    pub hn: bool,
-    pub wid: bool,
+pub(package) struct IFact {
+    pub(package) lo: u64,
+    pub(package) hi: u64,
+    pub(package) kz: u64,
+    pub(package) ko: u64,
+    pub(package) st: u64,
+    pub(package) ph: u64,
+    pub(package) ln: bool,
+    pub(package) hn: bool,
+    pub(package) wid: bool,
 }
 
-pub struct IEnt {
-    pub f: IFact,
-    pub l: u32,
+pub(package) struct IEnt {
+    pub(package) f: IFact,
+    pub(package) l: u32,
 }
 
 // A mathematical integer in [-2^64 + 1, 2^64 - 1]: sign and magnitude. Every type range fits, so the
 // transfer functions compute exactly and test the target range; a magnitude overflow is out of every
 // range.
 struct Z {
-    pub m: u64,
-    pub n: bool,
+    pub(package) m: u64,
+    pub(package) n: bool,
 }
 
 const fn zk(m: u64, n: bool) Z {
@@ -394,7 +394,7 @@ const fn zres(a: Z, m: u64) u64 {
     return r;
 }
 
-pub const fn gcd(a0: u64, b0: u64) u64 {
+pub(package) const fn gcd(a0: u64, b0: u64) u64 {
     let mut a = a0;
     let mut b = b0;
     while b != 0 {
@@ -435,7 +435,7 @@ const fn fhi(f: &IFact) Z {
 }
 
 /// The unknown fact at width `w`.
-pub const fn itop(w: u32, sg: bool) IFact {
+pub(package) const fn itop(w: u32, sg: bool) IFact {
     let a = tmin(w, sg);
     let c = tmax(w, sg);
     return IFact { lo: a.m, ln: a.n, hi: c.m, hn: c.n, kz: 0, ko: 0, st: 1, ph: 0, wid: false };
@@ -456,7 +456,7 @@ const fn iconst(v: Z, w: u32) IFact {
 }
 
 /// Is the fact exact (one value)?
-pub const fn iexact(f: &IFact) bool {
+pub(package) const fn iexact(f: &IFact) bool {
     return f.lo == f.hi && f.ln == f.hn;
 }
 
@@ -495,7 +495,7 @@ const fn sres(f: &IFact, m: u64) u64 {
 }
 
 /// The stride `f` proves (0 = exact).
-pub const fn istride(f: &IFact) u64 {
+pub(package) const fn istride(f: &IFact) u64 {
     if iexact(f) {
         return 0;
     }
@@ -632,131 +632,131 @@ const fn ieq(a: &IFact, b: &IFact) bool {
 }
 
 // The cmp binding of an in-block comparison `t = a OP b`, valid until t, a or b is written.
-pub struct CmpRec {
-    pub t: u32,
-    pub a: u32, // operand ids
-    pub b: u32,
-    pub la: u32, // their whole locals, or IR_NONE
-    pub lb: u32,
-    pub op: u8,
+pub(package) struct CmpRec {
+    pub(package) t: u32,
+    pub(package) a: u32, // operand ids
+    pub(package) b: u32,
+    pub(package) la: u32, // their whole locals, or IR_NONE
+    pub(package) lb: u32,
+    pub(package) op: u8,
 }
 
-pub struct Facts {
-    pub pkg: *const loader::Package,
-    pub pw: u32, // the target's pointer width in bits
+pub(package) struct Facts {
+    pub(package) pkg: *const loader::Package,
+    pub(package) pw: u32, // the target's pointer width in bits
     // CFG: reverse postorder over the reachable blocks, the RPO index of each block (IR_NONE when
     // unreachable), the predecessor lists, the forward predecessor counts and immediate dominators.
-    pub rpo: Vector<u32>,
-    pub rpo_of: Vector<u32>,
-    pub npred: Vector<u32>,
-    pub fwd: Vector<u32>,
-    pub pstart: Vector<u32>,
-    pub plist: Vector<u32>,
-    pub idom: Vector<u32>,
-    pub seen: Vector<u8>,
-    pub succs: Vector<u32>,
-    pub backs: Vector<u64>, // back edges: source << 32 | target
-    pub sstart: Vector<u32>,
-    pub stack: Vector<u64>,
+    pub(package) rpo: Vector<u32>,
+    pub(package) rpo_of: Vector<u32>,
+    pub(package) npred: Vector<u32>,
+    pub(package) fwd: Vector<u32>,
+    pub(package) pstart: Vector<u32>,
+    pub(package) plist: Vector<u32>,
+    pub(package) idom: Vector<u32>,
+    pub(package) seen: Vector<u8>,
+    pub(package) succs: Vector<u32>,
+    pub(package) backs: Vector<u64>, // back edges: source << 32 | target
+    pub(package) sstart: Vector<u32>,
+    pub(package) stack: Vector<u64>,
     // versions and generations
-    pub lver: Vector<u32>,
-    pub vclock: u32,
-    pub vfloor: u32,
-    pub basegen: Vector<u32>,
-    pub heapgen: u32,
+    pub(package) lver: Vector<u32>,
+    pub(package) vclock: u32,
+    pub(package) vfloor: u32,
+    pub(package) basegen: Vector<u32>,
+    pub(package) heapgen: u32,
     // writes into the element buffer of a prelude view (bumped by every heap write too): only a place
     // heap memory may hold (`resident`) can change by one
-    pub bufgen: u32,
+    pub(package) bufgen: u32,
     // path generations: a write into one subtree of a base bumps `pgen[base]` and logs the subtree;
     // a place identity captured at path generation g survives the logged kills after g that do
     // not overlap it
-    pub pgen: Vector<u32>,
-    pub pkills: Vector<PKill>,
-    pub copyof: Vector<CopyBind>,
+    pub(package) pgen: Vector<u32>,
+    pub(package) pkills: Vector<PKill>,
+    pub(package) copyof: Vector<CopyBind>,
     // a prelude view built by a struct literal: its `len` field holds `src`; a `len` read of such a
     // view: its value is `src` (`view_len`)
-    pub lenval: Vector<CopyBind>,
-    pub views: bool, // some view of this body was built by a struct literal: `view_len` can answer
-    pub affof: Vector<AffBind>,
-    pub refof: Vector<RefBind>,
+    pub(package) lenval: Vector<CopyBind>,
+    pub(package) views: bool, // some view of this body was built by a struct literal: `view_len` can answer
+    pub(package) affof: Vector<AffBind>,
+    pub(package) refof: Vector<RefBind>,
     // the written locals in walk order (a log), and each block's log length when the walk left it
-    pub wlog: Vector<u32>,
-    pub wold: Vector<u32>, // per `wlog` entry: the local's version before the write
-    pub clk_end: Vector<u32>,
-    pub bst: Vector<u32>, // dedupe stamps of one bump batch
-    pub bstamp: u32,
+    pub(package) wlog: Vector<u32>,
+    pub(package) wold: Vector<u32>, // per `wlog` entry: the local's version before the write
+    pub(package) clk_end: Vector<u32>,
+    pub(package) bst: Vector<u32>, // dedupe stamps of one bump batch
+    pub(package) bstamp: u32,
     // loop-header scan: block marks, the loop's blocks, the remaining scan work
-    pub lmark: Vector<u32>,
-    pub lstamp: u32,
-    pub lblocks: Vector<u32>,
+    pub(package) lmark: Vector<u32>,
+    pub(package) lstamp: u32,
+    pub(package) lblocks: Vector<u32>,
     // per-block loop-scan summaries (lsummarize): op ranges into `lops` (start IR_NONE = not yet),
     // flags, and the flags of the block being summarized
-    pub lops: Vector<LOp>,
-    pub lsum_s: Vector<u32>,
-    pub lsum_n: Vector<u32>,
-    pub lsum_f: Vector<u8>,
-    pub lfl: u8,
-    pub scan_left: i64,
+    pub(package) lops: Vector<LOp>,
+    pub(package) lsum_s: Vector<u32>,
+    pub(package) lsum_n: Vector<u32>,
+    pub(package) lsum_f: Vector<u8>,
+    pub(package) lfl: u8,
+    pub(package) scan_left: i64,
     // the single definition of a local (statement id) or IR_NONE
-    pub def1: Vector<u32>,
-    pub ndef: Vector<u8>,
+    pub(package) def1: Vector<u32>,
+    pub(package) ndef: Vector<u8>,
     // exposure: scalar locals whose storage a pointer or a call can write (address taken mutably, or
     // a static); `expover` when more than EXPOSED_MAX, which makes all of them opaque
-    pub exposed: Vector<bool>,
-    pub explist: Vector<u32>,
-    pub expover: bool,
-    pub esc_use: Vector<bool>,
+    pub(package) exposed: Vector<bool>,
+    pub(package) explist: Vector<u32>,
+    pub(package) expover: bool,
+    pub(package) esc_use: Vector<bool>,
     // statements an escape or an interval proof may start from, found by the definition scan
-    pub ecand: Vector<u32>,
-    pub gcand: Vector<u32>,
-    pub grem: bool,
-    pub clast: u32, // the reverse postorder index of the last block with a check, IR_NONE without one
+    pub(package) ecand: Vector<u32>,
+    pub(package) gcand: Vector<u32>,
+    pub(package) grem: bool,
+    pub(package) clast: u32, // the reverse postorder index of the last block with a check, IR_NONE without one
     // locals that may hold a borrow of a deref-free place (a local's own storage)
-    pub holds: Vector<bool>,
+    pub(package) holds: Vector<bool>,
     // locals a slice views: their storage is a view's element buffer
-    pub bufexp: Vector<bool>,
+    pub(package) bufexp: Vector<bool>,
     // signature transparency (see call_transparent)
-    pub off_sig: bool, // SC_BCE_DISABLE=sig
-    pub escall: bool,
-    pub escroot: Vector<bool>,
-    pub esclist: Vector<u32>,
-    pub statics: Vector<u32>,
+    pub(package) off_sig: bool, // SC_BCE_DISABLE=sig
+    pub(package) escall: bool,
+    pub(package) escroot: Vector<bool>,
+    pub(package) esclist: Vector<u32>,
+    pub(package) statics: Vector<u32>,
     // integer facts: per-local width (0 = untracked) and signedness, cross-block locals, the dense
     // scratch of the block being evaluated (valid where cst == stamp), the block-entry states, the
     // narrowing accumulators, the worklist state
-    pub iw: Vector<u8>,
-    pub isg: Vector<bool>,
+    pub(package) iw: Vector<u8>,
+    pub(package) isg: Vector<bool>,
 
-    pub cur: Vector<IFact>,
-    pub cst: Vector<u32>,
-    pub stamp: u32,
-    pub live: Vector<u32>,
-    pub cmps: Vector<CmpRec>,
-    pub ent: Vector<IEnt>,
-    pub ent_start: Vector<u32>,
-    pub ent_len: Vector<u32>,
-    pub ent_set: Vector<bool>,
-    pub nar: Vector<IEnt>,
-    pub nar_start: Vector<u32>,
-    pub nar_len: Vector<u32>,
-    pub nar_set: Vector<bool>,
-    pub dirty: Vector<bool>,
-    pub nwide: Vector<u8>,
-    pub ebuf: Vector<IEnt>,
-    pub jbuf: Vector<IEnt>,
+    pub(package) cur: Vector<IFact>,
+    pub(package) cst: Vector<u32>,
+    pub(package) stamp: u32,
+    pub(package) live: Vector<u32>,
+    pub(package) cmps: Vector<CmpRec>,
+    pub(package) ent: Vector<IEnt>,
+    pub(package) ent_start: Vector<u32>,
+    pub(package) ent_len: Vector<u32>,
+    pub(package) ent_set: Vector<bool>,
+    pub(package) nar: Vector<IEnt>,
+    pub(package) nar_start: Vector<u32>,
+    pub(package) nar_len: Vector<u32>,
+    pub(package) nar_set: Vector<bool>,
+    pub(package) dirty: Vector<bool>,
+    pub(package) nwide: Vector<u8>,
+    pub(package) ebuf: Vector<IEnt>,
+    pub(package) jbuf: Vector<IEnt>,
     // the solver's slice: per statement, whether its transfer can change a tracked fact; per block,
     // the tracked locals its terminator makes unknown (CSR over `tkill`)
-    pub srel: Vector<bool>,
-    pub tk_start: Vector<u32>,
-    pub tkill: Vector<u32>,
-    pub cmpt: Vector<bool>, // comparison results: a rewrite ends their binding
-    pub irel: Vector<bool>, // tracked locals
-    pub ion: bool, // the solver ran for this body
-    pub ilimited: bool,
+    pub(package) srel: Vector<bool>,
+    pub(package) tk_start: Vector<u32>,
+    pub(package) tkill: Vector<u32>,
+    pub(package) cmpt: Vector<bool>, // comparison results: a rewrite ends their binding
+    pub(package) irel: Vector<bool>, // tracked locals
+    pub(package) ion: bool, // the solver ran for this body
+    pub(package) ilimited: bool,
 }
 
 extend Facts {
-    pub fn new(off_sig: bool) Facts {
+    pub(package) fn new(off_sig: bool) Facts {
         return Facts {
             pkg: null,
             pw: 64,
@@ -880,7 +880,7 @@ extend Facts {
     }
 
     /// Reset every per-body table for body `b`; capacity persists across bodies.
-    pub fn begin(self: &mut Self, b: &ir::CoreBody, pkg: *const loader::Package) {
+    pub(package) fn begin(self: &mut Self, b: &ir::CoreBody, pkg: *const loader::Package) {
         self.pkg = pkg;
         self.pw = lay::target_for(unsafe (&*pkg).arch).ptr as u32 * 8;
         let nl = b.locals.len();
@@ -1095,7 +1095,7 @@ extend Facts {
     }
 
     /// Does block `blk` have a back-edge predecessor (a loop header)?
-    pub const fn is_header(self: &Self, blk: u32) bool {
+    pub(package) const fn is_header(self: &Self, blk: u32) bool {
         return self.npred[blk as usize] != self.fwd[blk as usize];
     }
 
@@ -1397,7 +1397,7 @@ extend Facts {
 
     /// Exact structural place equality (base + full projection content). PJ_INDEX_OP compares its
     /// OperandId, so distinct dynamic indexes never merge.
-    pub const fn places_eq(self: &Self, b: &ir::CoreBody, p1: u32, p2: u32) bool {
+    pub(package) const fn places_eq(self: &Self, b: &ir::CoreBody, p1: u32, p2: u32) bool {
         if p1 == p2 {
             return true;
         }
@@ -1420,7 +1420,7 @@ extend Facts {
     }
 
     /// A whole-local place (no projections), or IR_NONE.
-    pub const fn whole_local(self: &Self, b: &ir::CoreBody, pl: u32) u32 {
+    pub(package) const fn whole_local(self: &Self, b: &ir::CoreBody, pl: u32) u32 {
         let p = *b.places.at(pl as usize);
         if p.proj_len != 0 {
             return ir::IR_NONE;
@@ -1429,14 +1429,14 @@ extend Facts {
     }
 
     /// Is local `l` opaque (an exposed scalar past the exposure bound)?
-    pub const fn opaque(self: &Self, l: u32) bool {
+    pub(package) const fn opaque(self: &Self, l: u32) bool {
         return self.expover && self.exposed[l as usize];
     }
 
     /// Resolve an operand to a value key, following at most six whole-local copy or affine steps.
     /// With `clean`, a step through a local marked in `cw` at `cstamp` (its binds describe an old value)
     /// is refused.
-    pub const fn vkey_w(self: &Self, b: &ir::CoreBody, opid: u32, cw: &Vector<u32>, cstamp: u32, clean: bool) VKey {
+    pub(package) const fn vkey_w(self: &Self, b: &ir::CoreBody, opid: u32, cw: &Vector<u32>, cstamp: u32, clean: bool) VKey {
         let op = *b.operands.at(opid as usize);
         if op.kind == ir::OP_CONST {
             let cn = *b.constants.at(op.data as usize);
@@ -1474,7 +1474,7 @@ extend Facts {
     }
 
     /// The base local behind up to four still-current whole-local copies.
-    pub const fn copy_root(self: &Self, l0: u32) u32 {
+    pub(package) const fn copy_root(self: &Self, l0: u32) u32 {
         let mut l = l0;
         let mut guard = 0;
         while guard < 4 {
@@ -1490,7 +1490,7 @@ extend Facts {
     }
 
     /// A new version of local `l` (a write, or a value no earlier binding describes).
-    pub fn bump_local(self: &mut Self, l: u32) {
+    pub(package) fn bump_local(self: &mut Self, l: u32) {
         self.wold.push(self.lver[l as usize]);
         self.vclock += 1;
         self.lver.set(l as usize, self.vclock);
@@ -1500,7 +1500,7 @@ extend Facts {
     /// The current version of local `l`. Versions come from one clock, so a version names one write
     /// or one block entry; every version below the floor (raised when every local dies at once)
     /// reads as the floor.
-    pub const fn ver(self: &Self, l: u32) u32 {
+    pub(package) const fn ver(self: &Self, l: u32) u32 {
         let v = self.lver[l as usize];
         if v < self.vfloor {
             return self.vfloor;
@@ -1509,7 +1509,7 @@ extend Facts {
     }
 
     /// The current base generation of local `l` (one clock, one floor).
-    pub const fn bgen(self: &Self, l: u32) u32 {
+    pub(package) const fn bgen(self: &Self, l: u32) u32 {
         let g = self.basegen[l as usize];
         if g < self.vfloor {
             return self.vfloor;
@@ -1531,14 +1531,14 @@ extend Facts {
 
     /// An unknown heap write: every collection identity keyed by the heap generation dies, and so
     /// does every value of an exposed scalar.
-    pub fn heap(self: &mut Self) {
+    pub(package) fn heap(self: &mut Self) {
         self.heapgen += 1;
         self.buf();
     }
 
     /// A write into a prelude view's element buffer: only places heap memory may hold change, and
     /// exposed scalars (a view can be built over any storage).
-    pub fn buf(self: &mut Self) {
+    pub(package) fn buf(self: &mut Self) {
         self.bufgen += 1;
         for i in 0..self.explist.len() {
             self.bump_local(self.explist[i]);
@@ -1546,7 +1546,7 @@ extend Facts {
     }
 
     /// Is `sub` the field named `name` of the prelude view `view_ty` (a type of `b`'s module)?
-    pub const fn is_prelude_field(self: &Self, b: &ir::CoreBody, view_ty: TypeId, sub: NodeId, name: str) bool {
+    pub(package) const fn is_prelude_field(self: &Self, b: &ir::CoreBody, view_ty: TypeId, sub: NodeId, name: str) bool {
         if view_ty == TYPE_NONE || sub == NODE_NONE {
             return false;
         }
@@ -1576,7 +1576,7 @@ extend Facts {
 
     /// Does place `pl` reach into a prelude view's element buffer (its `ptr` field, then an index or
     /// a deref)?
-    pub fn buf_place(self: &Self, b: &ir::CoreBody, pl: u32) bool {
+    pub(package) fn buf_place(self: &Self, b: &ir::CoreBody, pl: u32) bool {
         let p = *b.places.at(pl as usize);
         if p.proj_len < 2 {
             return false;
@@ -1603,7 +1603,7 @@ extend Facts {
     }
 
     /// May heap memory hold place `pl`: a deref past its first projection, or a view's buffer?
-    pub fn resident(self: &Self, b: &ir::CoreBody, pl: u32) bool {
+    pub(package) fn resident(self: &Self, b: &ir::CoreBody, pl: u32) bool {
         if (pl & SYNTH_PL) != 0 {
             return false;
         }
@@ -1620,7 +1620,7 @@ extend Facts {
     }
 
     /// Apply the write of place `pl`.
-    pub fn write_place(self: &mut Self, b: &ir::CoreBody, pl: u32) {
+    pub(package) fn write_place(self: &mut Self, b: &ir::CoreBody, pl: u32) {
         let p = *b.places.at(pl as usize);
         if p.proj_len == 0 {
             // A new value: the lengths of places rooted at it change too.
@@ -1722,7 +1722,7 @@ extend Facts {
     }
 
     /// A write into the subtree of place `pl` of base local `base`.
-    pub fn kill_path(self: &mut Self, b: &ir::CoreBody, base: u32, pl: u32) {
+    pub(package) fn kill_path(self: &mut Self, b: &ir::CoreBody, base: u32, pl: u32) {
         if b.places.at(pl as usize).proj_len == 0 || self.pkills.len() >= PKILL_MAX {
             self.kill_root(base);
             return;
@@ -1734,7 +1734,7 @@ extend Facts {
 
     /// Does place `pl`, captured at path generation `from`, survive every subtree write of its base
     /// up to path generation `to`?
-    pub const fn path_alive(self: &Self, b: &ir::CoreBody, pl: u32, from: u32, to: u32) bool {
+    pub(package) const fn path_alive(self: &Self, b: &ir::CoreBody, pl: u32, from: u32, to: u32) bool {
         if from == to || (pl & SYNTH_PL) != 0 {
             return true;
         }
@@ -1751,12 +1751,12 @@ extend Facts {
     }
     /// Kill every fact identity rooted at `l`: the version covers value binds and synthetic length
     /// identities, the base generation covers real length places.
-    pub fn kill_root(self: &mut Self, l: u32) {
+    pub(package) fn kill_root(self: &mut Self, l: u32) {
         self.bump_local(l);
         self.bump_base(l);
     }
 
-    pub fn kill_roots(self: &mut Self, e: &Effect) {
+    pub(package) fn kill_roots(self: &mut Self, e: &Effect) {
         if e.over {
             self.kill_all();
             return;
@@ -1773,7 +1773,7 @@ extend Facts {
         self.heapgen += 1;
     }
 
-    pub fn kill_ambient(self: &mut Self) {
+    pub(package) fn kill_ambient(self: &mut Self) {
         for i in 0..self.statics.len() {
             self.kill_root(self.statics[i]);
         }
@@ -1786,7 +1786,7 @@ extend Facts {
     /// left (another path's writes reach the walk's tables first), and at a loop header every
     /// local, base and the heap the loop can write. A block with one predecessor restores those
     /// locals' versions instead: every write since its predecessor was left is another path's.
-    pub fn enter_block(self: &mut Self, b: &ir::CoreBody, blk: u32) {
+    pub(package) fn enter_block(self: &mut Self, b: &ir::CoreBody, blk: u32) {
         if self.rpo.len() != 0 && blk != self.rpo[0] {
             let d = self.idom[blk as usize];
             let from = if d == ir::IR_NONE {
@@ -1817,7 +1817,7 @@ extend Facts {
     }
 
     /// Leave block `blk` in the walk.
-    pub fn leave_block(self: &mut Self, blk: u32) {
+    pub(package) fn leave_block(self: &mut Self, blk: u32) {
         self.clk_end.set(blk as usize, self.wlog.len() as u32);
     }
 
@@ -2251,7 +2251,7 @@ extend Facts {
     /// The root local behind a place, through at most two current reference bindings: no deref
     /// resolves to the base local; a leading deref resolves through `refof`, and a reference with no
     /// binding (a parameter) is itself the root. False when a deref sits behind other projections.
-    pub const fn root_of_place(self: &Self, b: &ir::CoreBody, pl0: u32, out: &mut u32) bool {
+    pub(package) const fn root_of_place(self: &Self, b: &ir::CoreBody, pl0: u32, out: &mut u32) bool {
         let mut pl = pl0;
         let mut guard = 0;
         while guard < 3 {
@@ -2282,7 +2282,7 @@ extend Facts {
         return false;
     }
 
-    pub fn mark_escaped(self: &mut Self, r: u32) {
+    pub(package) fn mark_escaped(self: &mut Self, r: u32) {
         if self.escroot[r as usize] {
             return;
         }
@@ -2296,7 +2296,7 @@ extend Facts {
 
     /// Does place `pl` lie in a view's element buffer, directly or through current reference
     /// bindings?
-    pub fn in_buffer(self: &Self, b: &ir::CoreBody, pl0: u32) bool {
+    pub(package) fn in_buffer(self: &Self, b: &ir::CoreBody, pl0: u32) bool {
         let mut pl = pl0;
         let mut guard = 0;
         while guard < 4 {
@@ -2346,7 +2346,7 @@ extend Facts {
     }
 
     /// True when the callee is a local Super-C function body (not extern, not a fn value).
-    pub const fn callee_defined(self: &Self, d: DefId) bool {
+    pub(package) const fn callee_defined(self: &Self, d: DefId) bool {
         let pk = unsafe &*self.pkg;
         if d.node == NODE_NONE || d.module as usize >= pk.modules.len() || !pk.modules.at(d.module as usize).has_ast {
             return false;
@@ -2360,7 +2360,7 @@ extend Facts {
     }
 
     /// `rv` casts a reference to a raw pointer: its target leaves the borrow discipline.
-    pub const fn is_ref_to_ptr_cast(self: &Self, b: &ir::CoreBody, rv: &ir::Rvalue) bool {
+    pub(package) const fn is_ref_to_ptr_cast(self: &Self, b: &ir::CoreBody, rv: &ir::Rvalue) bool {
         let op = *b.operands.at(rv.a as usize);
         if op.kind == ir::OP_CONST {
             return false;
@@ -2378,7 +2378,7 @@ extend Facts {
     /// or by move, plus statics and escaped roots. A raw pointer, fn value, dyn value, variadic
     /// tail, fn-value callee, or extern callee is not transparent. A &mut loaded from memory kills
     /// nothing extra: it can alias only an escaped root or state no tracked fact roots.
-    pub fn call_transparent(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator) bool {
+    pub(package) fn call_transparent(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator) bool {
         if self.off_sig || self.escall || t.is_variadic || !self.callee_defined(t.callee) {
             return false;
         }
@@ -2492,7 +2492,7 @@ extend Facts {
     }
 
     /// A drop reaches only the dropped value's ownership tree, plus statics and escaped roots.
-    pub fn drop_transparent(self: &mut Self, b: &ir::CoreBody, pl: u32) bool {
+    pub(package) fn drop_transparent(self: &mut Self, b: &ir::CoreBody, pl: u32) bool {
         if self.off_sig || self.escall {
             return false;
         }
@@ -2513,7 +2513,7 @@ extend Facts {
 
     /// Apply terminator `t`'s effect and its destination writes to the versions. Returns true when a
     /// call kept collection facts through signature transparency.
-    pub fn apply_term(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator, pure: bool) bool {
+    pub(package) fn apply_term(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator, pure: bool) bool {
         if t.kind == ir::TM_CALL && t.intr == ir::CI_NONE && (pure || self.call_transparent(b, t)) {
             // the prelude length getter writes nothing; a transparent call killed its roots
             for i in 0..t.dests_len {
@@ -2568,7 +2568,7 @@ extend Facts {
     /// Can an unknown write reach place `pl`: a deref, a static, or an escaped local? The storage
     /// of a local whose address never left the tracked borrows is out of an unknown callee's
     /// reach.
-    pub const fn reachable(self: &Self, b: &ir::CoreBody, pl: u32) bool {
+    pub(package) const fn reachable(self: &Self, b: &ir::CoreBody, pl: u32) bool {
         if self.escall || (pl & SYNTH_PL) != 0 || b.place_has_deref(pl) {
             return true;
         }
@@ -2578,7 +2578,7 @@ extend Facts {
 
     /// Apply statement `s`'s generic effect: escape notes, the write, and copy, affine and reference
     /// bindings. The caller reads what it needs of the operands first.
-    pub fn apply_stmt(self: &mut Self, b: &ir::CoreBody, s: &ir::Statement) {
+    pub(package) fn apply_stmt(self: &mut Self, b: &ir::CoreBody, s: &ir::Statement) {
         if s.kind == ir::ST_STORAGE_DEAD {
             self.bump_local(s.a);
             return;
@@ -2678,7 +2678,7 @@ extend Facts {
 
     /// The value a length operand reads when it is the `len` of a view built by a struct literal,
     /// else none.
-    pub const fn view_len(self: &Self, b: &ir::CoreBody, opid: u32) VKey {
+    pub(package) const fn view_len(self: &Self, b: &ir::CoreBody, opid: u32) VKey {
         let k = self.vkey(b, opid);
         if !k.is_local || k.off != 0 {
             return vkey_none();
@@ -2722,7 +2722,7 @@ extend Facts {
         return (k1 == TypeKind::TYPE_POINTER || k1 == TypeKind::TYPE_REFERENCE) && (k2 == TypeKind::TYPE_POINTER || k2 == TypeKind::TYPE_REFERENCE);
     }
 
-    pub const fn vkey(self: &Self, b: &ir::CoreBody, opid: u32) VKey {
+    pub(package) const fn vkey(self: &Self, b: &ir::CoreBody, opid: u32) VKey {
         return self.vkey_w(b, opid, &self.bst, 0, false);
     }
 
@@ -2730,7 +2730,7 @@ extend Facts {
 
     /// The fact of operand `opid` at the evaluation point (unknown at the operand's width, or a
     /// zero-width unknown for a non-integer operand). `w`/`sg` receive the operand's kind.
-    pub fn ival(self: &Self, b: &ir::CoreBody, opid: u32, w: &mut u32, sg: &mut bool) IFact {
+    pub(package) fn ival(self: &Self, b: &ir::CoreBody, opid: u32, w: &mut u32, sg: &mut bool) IFact {
         let op = *b.operands.at(opid as usize);
         let da = unsafe &*(&*self.pkg).module_ast_const(b.module);
         if !self.int_kind(da, op.ty, w, sg) {
@@ -2772,7 +2772,7 @@ extend Facts {
     }
 
     /// The fact of local `l` at the evaluation point.
-    pub const fn ilocal(self: &Self, l: u32) IFact {
+    pub(package) const fn ilocal(self: &Self, l: u32) IFact {
         if !self.ion || self.iw[l as usize] == 0 || self.cst[l as usize] != self.stamp {
             return itop(64, false); // unknown at any width: no bound, no stride, no known bits
         }
@@ -2864,7 +2864,7 @@ extend Facts {
 
     /// Could an interval proof help body `b`: a fixed array checked, a length compared with a
     /// constant of 2 or more, or a remainder by a constant (the definition scan's candidates)?
-    pub fn want_ints(self: &Self, b: &ir::CoreBody) bool {
+    pub(package) fn want_ints(self: &Self, b: &ir::CoreBody) bool {
         if self.grem {
             return true;
         }
@@ -2892,7 +2892,7 @@ extend Facts {
 
     /// The scratch at statement `sid` of block `blk` (just solved mid-walk): the block's entry
     /// state, then the transfers of the statements before `sid`.
-    pub fn ireplay(self: &mut Self, b: &ir::CoreBody, blk: u32, sid: u32) {
+    pub(package) fn ireplay(self: &mut Self, b: &ir::CoreBody, blk: u32, sid: u32) {
         self.iload(b.locals.len(), blk);
         for k in b.blocks.at(blk as usize).stmt_start..sid {
             self.istep(b, k as usize);
@@ -2900,14 +2900,14 @@ extend Facts {
     }
 
     /// Enter block `blk` in the walk: its solved entry state, or nothing when unsolved.
-    pub fn ienter(self: &mut Self, b: &ir::CoreBody, blk: u32) {
+    pub(package) fn ienter(self: &mut Self, b: &ir::CoreBody, blk: u32) {
         if self.ion {
             self.iload(b.locals.len(), blk);
         }
     }
 
     /// The transfer of statement `s`: the scratch afterwards holds the facts after it.
-    pub fn istep(self: &mut Self, b: &ir::CoreBody, sid: usize) {
+    pub(package) fn istep(self: &mut Self, b: &ir::CoreBody, sid: usize) {
         if !self.ion || !self.srel[sid] {
             return;
         }
@@ -3153,7 +3153,7 @@ extend Facts {
     }
 
     // Is operand `opid` an integer constant of 2 or more?
-    pub const fn const_ge2(self: &Self, b: &ir::CoreBody, opid: u32) bool {
+    pub(package) const fn const_ge2(self: &Self, b: &ir::CoreBody, opid: u32) bool {
         let op = *b.operands.at(opid as usize);
         if op.kind != ir::OP_CONST {
             return false;
@@ -3172,7 +3172,7 @@ extend Facts {
     }
 
     // Is operand `opid` a whole local whose single definition is the length of a fixed array?
-    pub fn fixed_len(self: &Self, b: &ir::CoreBody, opid: u32) bool {
+    pub(package) fn fixed_len(self: &Self, b: &ir::CoreBody, opid: u32) bool {
         let l0 = self.op_local(b, opid);
         if l0 == ir::IR_NONE {
             return false;
@@ -3195,7 +3195,7 @@ extend Facts {
 
     // Does operand `opid` read a length: a whole local whose single definition is a length or a field
     // read?
-    pub fn len_read(self: &Self, b: &ir::CoreBody, opid: u32) bool {
+    pub(package) fn len_read(self: &Self, b: &ir::CoreBody, opid: u32) bool {
         let l0 = self.op_local(b, opid);
         if l0 == ir::IR_NONE {
             return false;
@@ -3325,7 +3325,7 @@ extend Facts {
 
     /// Solve the integer facts of body `b` (after `begin`): block-entry states to a fixed point with
     /// widening at loop headers, then one narrowing pass.
-    pub fn solve(self: &mut Self, b: &ir::CoreBody) {
+    pub(package) fn solve(self: &mut Self, b: &ir::CoreBody) {
         let nb = b.blocks.len();
         let sl = self.rpo.len() != 0 && self.islice(b);
         if !sl {
@@ -3697,7 +3697,7 @@ extend Facts {
 /// May writes to the subtree of place `p1` change place `p2`? The caller knows both reach the same
 /// root (the bases are that root, or copies of a reference parameter). Two field paths that
 /// diverge at different fields of a struct, or two different constant indexes, are disjoint.
-pub const fn places_overlap(b: &ir::CoreBody, p1: u32, p2: u32) bool {
+pub(package) const fn places_overlap(b: &ir::CoreBody, p1: u32, p2: u32) bool {
     let a = *b.places.at(p1 as usize);
     let c = *b.places.at(p2 as usize);
     let n = a.proj_len.min(c.proj_len);

@@ -19,7 +19,7 @@ import target::assembler as asmr;
 import target::ctxswitch as ctxs;
 
 /// Whether a native backend compiles for operating system `os` on instruction set `isa`.
-pub const fn supported(os: i32, isa: i32) bool {
+pub(package) const fn supported(os: i32, isa: i32) bool {
     return apple_arm64(os, isa) || linux_x64(os, isa) || linux_arm64(os, isa) || windows_x64(os, isa) || wasm32(os, isa);
 }
 
@@ -45,20 +45,20 @@ const fn wasm32(os: i32, isa: i32) bool {
 
 /// The own linker's format for `(os, isa)` (`link::link`): none, Mach-O arm64, ELF x86-64, ELF arm64, PE
 /// x86-64 or wasm32.
-pub const LINK_NONE: u8 = 0;
-pub const LINK_MACHO: u8 = 1;
-pub const LINK_ELF_X64: u8 = 2;
-pub const LINK_ELF_A64: u8 = 3;
-pub const LINK_PE: u8 = 4;
-pub const LINK_WASM: u8 = 5;
+pub(package) const LINK_NONE: u8 = 0;
+pub(package) const LINK_MACHO: u8 = 1;
+pub(package) const LINK_ELF_X64: u8 = 2;
+pub(package) const LINK_ELF_A64: u8 = 3;
+pub(package) const LINK_PE: u8 = 4;
+pub(package) const LINK_WASM: u8 = 5;
 
 /// The object format of OS `os` (`target::table::ObjFormat`), as the archiver reads objects.
-pub const OBJ_MACHO: u8 = 0;
-pub const OBJ_ELF: u8 = 1;
-pub const OBJ_COFF: u8 = 2;
-pub const OBJ_WASM: u8 = 3;
+pub(package) const OBJ_MACHO: u8 = 0;
+pub(package) const OBJ_ELF: u8 = 1;
+pub(package) const OBJ_COFF: u8 = 2;
+pub(package) const OBJ_WASM: u8 = 3;
 
-pub const fn obj_kind(os: i32) u8 {
+pub(package) const fn obj_kind(os: i32) u8 {
     let f = tgt::obj_of(os).name;
     if f == "macho" {
         return OBJ_MACHO;
@@ -72,7 +72,7 @@ pub const fn obj_kind(os: i32) u8 {
     return OBJ_ELF;
 }
 
-pub const fn own_linker(os: i32, isa: i32) u8 {
+pub(package) const fn own_linker(os: i32, isa: i32) u8 {
     if apple_arm64(os, isa) && tgt::os(os).sdk == tgt::SDK_NONE {
         return LINK_MACHO;
     }
@@ -110,14 +110,14 @@ fn ctx_op(p: &Package, s: u32) u16 {
 }
 
 /// Whether the backend for `(os, isa)` assembles module-level assembly.
-pub const fn asm_native(os: i32, isa: i32) bool {
+pub(package) const fn asm_native(os: i32, isa: i32) bool {
     return apple_arm64(os, isa) || linux_arm64(os, isa) || linux_x64(os, isa) || windows_x64(os, isa) || wasm32(os, isa);
 }
 
 /// Write into `out` an object for `(os, isa)` that defines function symbols `funcs` and data symbols
 /// `datas` of package `p`, and module-level assembly `text` (`asm_native`). False, with the function and
 /// the reason in `err`, when a body is outside what the backend compiles.
-pub fn object(
+pub(package) fn object(
     p: &Package,
     os: i32,
     isa: i32,
@@ -259,9 +259,9 @@ const fn ast_pick(c: bool, t: u8, f: u8) u8 {
 
 // The generator of the target: the arm64 one, or the x86-64 one (`x64`). Both share the object.
 struct Backend {
-    pub a: *mut gen::Gen,
-    pub x: *mut xgen::Gen,
-    pub x64: bool,
+    pub(package) a: *mut gen::Gen,
+    pub(package) x: *mut xgen::Gen,
+    pub(package) x64: bool,
 }
 
 extend Backend {

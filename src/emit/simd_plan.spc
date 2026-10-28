@@ -7,26 +7,26 @@ import ast::ast as *;
 import ir::core as ir;
 import ir::cpu_features as cf;
 
-pub const PF_SCALAR: u8 = 0;
-pub const PF_NATIVE: u8 = 1;
-pub const PF_SPLIT: u8 = 2;
+pub(package) const PF_SCALAR: u8 = 0;
+pub(package) const PF_NATIVE: u8 = 1;
+pub(package) const PF_SPLIT: u8 = 2;
 
 /// The lowering of one operation: `form`, the entry (a `simd_table` index; for PF_SPLIT the entry of
 /// one chunk of `chunk_lanes` lanes, called `chunks` times in lane order), and for a split reduction
 /// `combine`, the lane-wise entry that adds the upper half of the chunks onto the lower half
 /// (IR_NONE otherwise).
-pub struct Plan {
-    pub form: u8,
-    pub entry: u32,
-    pub combine: u32,
-    pub chunk_lanes: u64,
-    pub chunks: u64,
+pub(package) struct Plan {
+    pub(package) form: u8,
+    pub(package) entry: u32,
+    pub(package) combine: u32,
+    pub(package) chunk_lanes: u64,
+    pub(package) chunks: u64,
 }
 
 /// The backend table's order (`Package::simd_table`): by key, then by feature count (an entry's set is
 /// closed under `implies`: an `Sse41` entry outranks an `Sse2` one), the largest first, then by the set
 /// (two entries of one set are adjacent), then by declaration.
-pub const fn entry_cmp(x: &cf::SimdEntry, y: &cf::SimdEntry) i32 {
+pub(package) const fn entry_cmp(x: &cf::SimdEntry, y: &cf::SimdEntry) i32 {
     if x.key != y.key {
         return pick(x.key < y.key, -1, 1);
     }
@@ -44,7 +44,7 @@ pub const fn entry_cmp(x: &cf::SimdEntry, y: &cf::SimdEntry) i32 {
 /// The widest vector in bits the planner uses under features `fs` and the build's preferred width
 /// `width` (`--simd-width`): 256 where AVX-512 is enabled (older cores lower their clock for 512-bit
 /// instructions) unless the build prefers 512. The choice never changes a result.
-pub const fn max_bits(fs: cf::CpuFeatureSet, width: u32) u32 {
+pub(package) const fn max_bits(fs: cf::CpuFeatureSet, width: u32) u32 {
     return pick(width >= 512 || !cf::has(fs, cf::F_AVX512F), 512u32, 256u32);
 }
 
@@ -52,7 +52,7 @@ pub const fn max_bits(fs: cf::CpuFeatureSet, width: u32) u32 {
 /// whose features `fs` holds, the one with the most features, among those at most `bits` wide
 /// (`max_bits`) when they need AVX-512 (only those use 512-bit registers; a gather or scatter widens
 /// its indexes to 64 bits); -1 when none.
-pub const fn find(
+pub(package) const fn find(
     tab: &Vector<cf::SimdEntry>,
     fs: cf::CpuFeatureSet,
     op: u32,
@@ -91,7 +91,7 @@ pub const fn find(
 /// the entry for all the lanes, else the widest chunk an entry exists for when the chunks combine
 /// (lane-wise operations, and the reductions `combine_op` names), else an entry for all the lanes
 /// past the preferred width, else the lane loop.
-pub const fn plan(
+pub(package) const fn plan(
     tab: &Vector<cf::SimdEntry>,
     fs: cf::CpuFeatureSet,
     op: u32,

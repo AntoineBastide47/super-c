@@ -46,7 +46,7 @@ const SWITCH_LINE_CASES: u32 = 16;
 const INST_DEPTH_MAX: u32 = 256;
 
 /// The refusal reason of a body past INST_DEPTH_MAX: a user error, reported as written.
-pub const fn inst_depth_why() str<'static> {
+pub(package) const fn inst_depth_why() str<'static> {
     return "generic instantiation nests deeper than 256 levels: a generic function or type reaches itself with a growing type argument";
 }
 
@@ -75,38 +75,38 @@ const fn conf_key(im: ModuleId, inode: NodeId, tm: ModuleId, tnode: NodeId) u64 
 
 /// A body the backend refused to emit: its module, a source span inside it (the function's or
 /// closure's own span when it has a return slot or parameter) and the first reason.
-pub struct Refusal {
-    pub m: ModuleId,
-    pub start: u32,
-    pub end: u32,
-    pub why: str<'static>,
+pub(package) struct Refusal {
+    pub(package) m: ModuleId,
+    pub(package) start: u32,
+    pub(package) end: u32,
+    pub(package) why: str<'static>,
 }
 
 // A dyn table `dyn_pair` demanded while a body's LIR lowering held the lowering: `dyn_pair_tabs`'s
 // arguments.
 struct DynDue {
-    pub pm: ModuleId,
-    pub dt: TypeId,
-    pub srm: ModuleId,
-    pub srt: TypeId,
-    pub own: bool,
-    pub am: ModuleId,
-    pub at: TypeId,
-    pub pair: String,
-    pub stem: String,
-    pub src: String,
-    pub h: u64,
-    pub own9: ModuleId,
+    pub(package) pm: ModuleId,
+    pub(package) dt: TypeId,
+    pub(package) srm: ModuleId,
+    pub(package) srt: TypeId,
+    pub(package) own: bool,
+    pub(package) am: ModuleId,
+    pub(package) at: TypeId,
+    pub(package) pair: String,
+    pub(package) stem: String,
+    pub(package) src: String,
+    pub(package) h: u64,
+    pub(package) own9: ModuleId,
 }
 
 /// A module's backend bits: the C renderer emits its C; LIR lowers its bodies.
-pub const BK_C: u8 = 1;
-pub const BK_LIR: u8 = 2;
+pub(package) const BK_C: u8 = 1;
+pub(package) const BK_LIR: u8 = 2;
 
 /// The backends of each module of `pk`: LIR for every module of a native build (`native_on`) and for the
 /// modules `SC_LIR` names (`in_list`), which the LIR check covers (`Lower::check_all`); the C renderer
 /// for every module of a build that is not native. A native build's declarations still render.
-pub fn backends_of(pk: &loader::Package) Vector<u8> {
+pub(package) fn backends_of(pk: &loader::Package) Vector<u8> {
     let n = pk.modules.len();
     let mut out = Vector::<u8>::with_capacity(n);
     let all = native_on(pk);
@@ -120,7 +120,7 @@ pub fn backends_of(pk: &loader::Package) Vector<u8> {
 
 /// Whether module `path` is in `sel`: `1` names every module, else a comma-separated list of module paths
 /// (`lir::lower,std::string`).
-pub const fn in_list(sel: str, path: str) bool {
+pub(package) const fn in_list(sel: str, path: str) bool {
     if sel == "1" {
         return true;
     }
@@ -148,7 +148,7 @@ pub const fn in_list(sel: str, path: str) bool {
 
 /// Whether this build compiles its modules with the native backend (a build that links). Every module
 /// then lowers to LIR.
-pub const fn native_on(pk: &loader::Package) bool {
+pub(package) const fn native_on(pk: &loader::Package) bool {
     return pk.native;
 }
 
@@ -156,10 +156,10 @@ pub const fn native_on(pk: &loader::Package) bool {
 // LIR and every slot so far has LIR; its slots' symbols in table order, each a function or (`data`) a
 // table.
 struct DynLir {
-    pub unit: ModuleId,
-    pub ok: bool,
-    pub slots: Vector<String>,
-    pub data: Vector<bool>,
+    pub(package) unit: ModuleId,
+    pub(package) ok: bool,
+    pub(package) slots: Vector<String>,
+    pub(package) data: Vector<bool>,
 }
 
 extend DynLir {
@@ -170,30 +170,30 @@ extend DynLir {
 
 /// The body emitter: per-TU output buffers, the mangler, the dedup gates every demand kind goes
 /// through, and the per-body scratch (local names, coalescing, inlining decisions).
-pub struct CEmit {
-    pub pkg: *const loader::Package,
+pub(package) struct CEmit {
+    pub(package) pkg: *const loader::Package,
     /// The LIR lowering of the bodies of the modules whose backend holds BK_LIR; none when no module's
     /// does. It reads what the rendering bound and writes no C.
-    pub lir: Option<Box<lw::Lower>>,
+    pub(package) lir: Option<Box<lw::Lower>>,
     /// Each module's backends (`backends_of`): BK_C, plus BK_LIR where LIR lowers its bodies too.
-    pub backends: Vector<u8>,
+    pub(package) backends: Vector<u8>,
     snap_out: *mut Vector<mbe::MSub>, // `callee_binds`: where `callee_sym` puts a generic callee's bindings
-    pub out: String, // the reusable output buffer (caller-owned lifecycle, cleared per TU)
-    pub err: str<'static>, // first unsupported-construct reason ("" = ok)
-    pub refused: Vector<Refusal>, // every body `emit_fn`/`emit_closure` refused, for the driver's report
-    pub mg: mbe::Mangler,
+    pub(package) out: String, // the reusable output buffer (caller-owned lifecycle, cleared per TU)
+    pub(package) err: str<'static>, // first unsupported-construct reason ("" = ok)
+    pub(package) refused: Vector<Refusal>, // every body `emit_fn`/`emit_closure` refused, for the driver's report
+    pub(package) mg: mbe::Mangler,
     /// Demand-driven monomorphization: when collecting, every per-instance callee this emitter
     /// spells is queued with its SYMBOL and the substitution chain that spelled it, so a driver
     /// can drain the queue to the closed instance set.
-    pub collect_demand: bool,
-    pub demand: Vector<Demand>,
-    pub glue_envs: Vector<GlueEnv>,
+    pub(package) collect_demand: bool,
+    pub(package) demand: Vector<Demand>,
+    pub(package) glue_envs: Vector<GlueEnv>,
     // The current body returns a fixed array by value (in its carrier, `mret`).
     arr_ret: bool,
     /// Set by the caller before `emit_fn` for a `@noreturn` item: the signature (and so its
     /// prototype) gets the `_Noreturn` specifier; without it -Werror flags the paths behind a
     /// panic as reading uninitialized locals. Cleared on every emission.
-    pub noret: bool,
+    pub(package) noret: bool,
     // Closure env bridge: Core IR closure bodies take captures as TRAILING arg locals, but the C
     // ABI passes one env pointer: locals >= cap_base spell `__env-><name>` while `cap_on` is
     // set (a void zero-param closure's captures start at local 0, so 0 is not a valid sentinel).
@@ -208,33 +208,33 @@ pub struct CEmit {
     cap_off: Vector<u32>,
     cap_len: Vector<u32>,
     /// Out-of-line declarations a body needs BEFORE itself (its `_ret` typedef); caller-cleared.
-    pub aux: String,
+    pub(package) aux: String,
     /// Closure-env forward typedefs: spliced into the shared header's FORWARD section.
-    pub env_fwd: String,
+    pub(package) env_fwd: String,
     /// Env structs the DECLARATION pass already defined (embedded in aggregates): skip ours.
-    pub env_skip: Map<u64, u64>,
+    pub(package) env_skip: Map<u64, u64>,
     /// Env structs THIS emitter defined (the late aggregate replay must skip them).
-    pub env_hashes: Vector<u64>,
+    pub(package) env_hashes: Vector<u64>,
     /// `extern <decl>;` stubs for every static/const item bodies reference (fusion-TU gate).
-    pub stat_decls: String,
-    pub fn_attrs: String,
+    pub(package) stat_decls: String,
+    pub(package) fn_attrs: String,
     /// The backend table has an entry the build's features hold, and SC_SIMD_SCALAR is not 1:
     /// vector statements go through the planner (`simd_plan`). `simd_trace` (SC_SIMD_TRACE=1) reports
     /// each operation without a native entry.
-    pub simd_on: bool,
+    pub(package) simd_on: bool,
     /// The bodies this emitter writes keep the struct ABI for `[]mut T` parameters (`split_abi`):
     /// vector-backend entries, whose callers spell their signatures, and every body of a native build,
     /// whose objects define that ABI only.
-    pub no_split: bool,
+    pub(package) no_split: bool,
     /// Every body renders, whatever its module's backends: C text no native object replaces (a vector
     /// backend entry's header).
-    pub render_all: bool,
+    pub(package) render_all: bool,
     /// Forwarded call texts spelled so far: a call argument whose spelling grew it repeats a call
     /// when spelled twice.
     fwd_spelled: u64,
     simd_trace: bool,
     /// The effective features of the function being emitted (`Package::fn_set`): the planner's.
-    pub fs: cf::CpuFeatureSet,
+    pub(package) fs: cf::CpuFeatureSet,
     /// Per local of the body being emitted: the statement of the one `choose` that reads it, when it
     /// is a comparison result nothing else reads (`lane_only`); IR_NONE otherwise. Empty until a
     /// comparison asks. `ml_chunks`: per such local the comparison rendered as lane-mask temps, their
@@ -255,48 +255,48 @@ pub struct CEmit {
     vec_prog: bool,
     /// The control flow of the body being emitted (`emit_body_core_o`), for `lane_only`.
     ml_cf: *const cfl::CFlow,
-    pub blk_defs: String,
-    pub blk_seen: Set<u64>,
+    pub(package) blk_defs: String,
+    pub(package) blk_seen: Set<u64>,
     /// The wrappers spelled while a lowering held the LIR (`lir_put` lowers them).
     blk_due: Vector<DefId>,
     dyn_due: Vector<DynDue>, // the dyn tables a body's LIR lowering demanded, emitted when it ends
     dyn_flushing: bool,
     /// Block-wrapper prototypes, one per `sh_blk_k` row (ends in `sh_blk_e2`).
-    pub blk_protos: String,
-    pub uses_tasks: u8,
-    pub stat_seen: Set<u64>,
+    pub(package) blk_protos: String,
+    pub(package) uses_tasks: u8,
+    pub(package) stat_seen: Set<u64>,
     /// The referenced items themselves (the definition pass folds each into `<T> <sym> = <v>;`).
-    pub stat_items: Vector<StatRef>,
+    pub(package) stat_items: Vector<StatRef>,
     /// Derived destructor worklist: every `__free__d` symbol bodies referenced, with the resolved
     /// type it destroys (the glue pass emits their definitions, recursing into fields).
-    pub glue: Vector<StatRef>,
-    pub glue_seen: Set<u64>,
+    pub(package) glue: Vector<StatRef>,
+    pub(package) glue_seen: Set<u64>,
     /// Prototypes for every called EXTERN function (their headers may not be included).
-    pub extern_protos: String,
-    pub extern_seen: Set<u64>,
+    pub(package) extern_protos: String,
+    pub(package) extern_seen: Set<u64>,
     mret: String, // the carrier a body with several stored results or a fixed-array result returns
     /// `SC_DYN_<stem>` typedef blocks (vtable + fat value + inline free) for every dyn stem any
     /// spelling touched; assembled between forward typedefs and aggregate definitions.
-    pub dyn_defs: String,
-    pub dyn_def_seen: Set<u64>,
+    pub(package) dyn_defs: String,
+    pub(package) dyn_def_seen: Set<u64>,
     /// Per-coercion thunks (static) + vtable definitions (extern const): exactly one TU owns them.
-    pub dyn_tabs: String,
-    pub dyn_tab_seen: Set<u64>,
+    pub(package) dyn_tabs: String,
+    pub(package) dyn_tab_seen: Set<u64>,
     /// `extern const <stem>__vt <pair>__vtbl;` for every referenced vtable (every TU sees these).
-    pub dyn_decls: String,
+    pub(package) dyn_decls: String,
     /// `type_info::<T>()` sites: each names an exported descriptor group the driver evaluates
     /// through the CTFE static graph and defines once (`__sc_ti__<mangle>`).
-    pub ti_reqs: Vector<StatRef>,
-    pub ti_seen: Set<u64>,
+    pub(package) ti_reqs: Vector<StatRef>,
+    pub(package) ti_seen: Set<u64>,
     /// Extern fns and statics whose `extern "C" "<header>"` block ships real declarations: the include
     /// supplies them, so a call-site proto would conflict. Keyed (module << 32 | node), driver-filled.
-    pub ext_backed: Set<u64>,
+    pub(package) ext_backed: Set<u64>,
     /// Aligned ZST sentinels: one program-level byte per alignment an address-observable ZST
     /// needs (`__sc_zst_<A>`). Every ZST reference of that alignment shares it; the language
     /// permits equal addresses. Definitions land in the instance TU, externs in the protos header.
-    pub sent_decls: String,
-    pub sent_defs: String,
-    pub sent_seen: Set<u64>,
+    pub(package) sent_decls: String,
+    pub(package) sent_defs: String,
+    pub(package) sent_seen: Set<u64>,
     /// Reusable per-function scratch for structured emission: blocks already spelled, and blocks a
     /// forward goto targets (their label prints when the block is reached). Cleared per body.
     sx_emitted: Vector<bool>,
@@ -437,7 +437,7 @@ pub struct CEmit {
     /// Caller-provided CFG for the next `emit_fn` (null = build internally). The drain loop
     /// re-emits one lowered body per instantiation; its CFlow is substitution-independent, so the
     /// driver builds it once per body and lends it here.
-    pub cf_ext: *const cfl::CFlow,
+    pub(package) cf_ext: *const cfl::CFlow,
     // setup_locals' reserved/assigned identifier sets and distinct local types, cleared per body
     // (capacity retained).
     sx_reserved: Map<u64, u64>,
@@ -445,7 +445,7 @@ pub struct CEmit {
     sx_seen_ty: Map<u64, u64>,
     // Fingerprints of demands already queued: many call sites raise the identical
     // (sym, chain, sfx) demand, and a duplicate can never emit anything the first did not.
-    pub demand_seen: Set<u64>,
+    pub(package) demand_seen: Set<u64>,
     // Per (module, TypeId): the reserved-set ident hashes of the type's C spelling (CSR pool;
     // empty-env spellings only).
     // setup_locals spells every local's type per body; this makes revisits two pool scans.
@@ -453,100 +453,100 @@ pub struct CEmit {
     /// Frontier shard capture: when `sh_on`, every first-claimant emission records (key, buffer
     /// end[s]) so the driver can merge shards into the master CEmit in module order, reproducing
     /// the serial claim history byte-for-byte. Value-vector pairs record post-push lengths.
-    pub sh_on: bool,
-    pub sh_env_k: Vector<u64>,
-    pub sh_env_e: Vector<u32>,
-    pub sh_stat_k: Vector<u64>,
-    pub sh_stat_v: Vector<u32>,
-    pub sh_glue_k: Vector<u64>,
-    pub sh_glue_v: Vector<u32>,
-    pub sh_ext_k: Vector<u64>,
-    pub sh_ext_e: Vector<u32>,
-    pub sh_dyd_k: Vector<u64>,
-    pub sh_dyd_e: Vector<u32>,
-    pub sh_dyt_k: Vector<u64>,
-    pub sh_dyt_e: Vector<u32>,
-    pub sh_dyt_e2: Vector<u32>,
-    pub sh_blk_k: Vector<u64>,
-    pub sh_blk_e: Vector<u32>,
-    pub sh_blk_e2: Vector<u32>,
-    pub sh_sent_k: Vector<u64>,
-    pub sh_sent_e: Vector<u32>,
-    pub sh_sent_e2: Vector<u32>,
-    pub sh_ti_k: Vector<u64>,
-    pub sh_ti_v: Vector<u32>,
-    pub sh_aux_k: Vector<u64>,
-    pub sh_aux_e: Vector<u32>,
+    pub(package) sh_on: bool,
+    pub(package) sh_env_k: Vector<u64>,
+    pub(package) sh_env_e: Vector<u32>,
+    pub(package) sh_stat_k: Vector<u64>,
+    pub(package) sh_stat_v: Vector<u32>,
+    pub(package) sh_glue_k: Vector<u64>,
+    pub(package) sh_glue_v: Vector<u32>,
+    pub(package) sh_ext_k: Vector<u64>,
+    pub(package) sh_ext_e: Vector<u32>,
+    pub(package) sh_dyd_k: Vector<u64>,
+    pub(package) sh_dyd_e: Vector<u32>,
+    pub(package) sh_dyt_k: Vector<u64>,
+    pub(package) sh_dyt_e: Vector<u32>,
+    pub(package) sh_dyt_e2: Vector<u32>,
+    pub(package) sh_blk_k: Vector<u64>,
+    pub(package) sh_blk_e: Vector<u32>,
+    pub(package) sh_blk_e2: Vector<u32>,
+    pub(package) sh_sent_k: Vector<u64>,
+    pub(package) sh_sent_e: Vector<u32>,
+    pub(package) sh_sent_e2: Vector<u32>,
+    pub(package) sh_ti_k: Vector<u64>,
+    pub(package) sh_ti_v: Vector<u32>,
+    pub(package) sh_aux_k: Vector<u64>,
+    pub(package) sh_aux_e: Vector<u32>,
     /// Owner module of every `aux` entry (0xFFFF = shared helper, forward header), parallel to
     /// `sh_aux_k`; and of every `stat_decls` entry (the constant's declaring module), with the
     /// entry's end offset. Both are kept on every emitter, not only shards.
-    pub aux_own: Vector<ModuleId>,
-    pub stat_end: Vector<u32>,
+    pub(package) aux_own: Vector<ModuleId>,
+    pub(package) stat_end: Vector<u32>,
     /// Owner module of every dyn table (`sh_dyt_k` row): the receiver type's module, else the
     /// interface's. Block wrappers are keyed by their callee's DefId (`sh_blk_k >> 32`).
-    pub dyt_own: Vector<ModuleId>,
+    pub(package) dyt_own: Vector<ModuleId>,
     /// The table symbol of every dyn table (`sh_dyt_k` row).
-    pub dyt_sym: Vector<String>,
+    pub(package) dyt_sym: Vector<String>,
     // The LIR of the dyn table `dyn_pair_tabs` builds.
     dyl: DynLir,
     /// Header dependencies bodies added: a `_ret` typedef in module `hdr_k`'s prototype header
     /// names the result carrier whose C name has FNV `hdr_h` (see `Mangler::ret_pack`).
-    pub hdr_k: Vector<ModuleId>,
-    pub hdr_h: Vector<u64>,
+    pub(package) hdr_k: Vector<ModuleId>,
+    pub(package) hdr_h: Vector<u64>,
     tid_start: Vector<u32>,
     tid_pool: Vector<u64>,
     /// Emission counters (SC_CEMIT_STATS): declaration planning, rendering, symbol construction.
-    pub pr: prb::Probe,
+    pub(package) pr: prb::Probe,
 }
 
 /// The substitution env a glue entry was RECORDED under (its type may still name generics).
-pub struct GlueEnv {
-    pub subs: Vector<mbe::MSub>,
+pub(package) struct GlueEnv {
+    pub(package) subs: Vector<mbe::MSub>,
 }
 
 /// One static/const definition demanded by an emitted body, keyed for the instance TU.
-pub struct StatRef {
-    pub em: ModuleId,
-    pub def: DefId,
-    pub sym: String,
+pub(package) struct StatRef {
+    pub(package) em: ModuleId,
+    pub(package) def: DefId,
+    pub(package) sym: String,
     /// The reference site's local type (pool `em`): what the stub declared, so the definition
     /// must spell the same C type (decl-side types may be unrecorded).
-    pub ty: TypeId,
+    pub(package) ty: TypeId,
     /// A generic extend constant's instance: each target parameter (`pm`, `pnode`) bound to its
     /// concrete argument (`am`, `at`). Empty for any other item.
-    pub args: Vector<mbe::MSub>,
+    pub(package) args: Vector<mbe::MSub>,
 }
 
 /// One demanded per-instance emission: the generic declaration, its C symbol, and the full
 /// substitution chain (parent chain + this instance's own bindings, innermost last).
 /// A call's generic arguments (`n` types of pool `m` at `at`) passed on to the method an interface
 /// method call dispatches to.
-pub struct IfTargs {
-    pub m: ModuleId,
-    pub at: *const TypeId,
-    pub n: u32,
+pub(package) struct IfTargs {
+    pub(package) m: ModuleId,
+    pub(package) at: *const TypeId,
+    pub(package) n: u32,
 }
 
-pub struct Demand {
-    pub def: DefId,
-    pub sym: String,
+pub(package) struct Demand {
+    pub(package) def: DefId,
+    pub(package) sym: String,
     /// The record-time dedupe key when this demand came through the gated method path (0 =
     /// ungated); the frontier merge re-applies cross-module suppression with it.
-    pub dk: u64,
-    pub subs: Vector<mbe::MSub>,
+    pub(package) dk: u64,
+    pub(package) subs: Vector<mbe::MSub>,
     /// The instantiation's closure suffix (receiver-args for methods, targs for fn specs);
     /// hoisted closures of the instance body append it to their symbols.
-    pub sfx: String,
+    pub(package) sfx: String,
     /// A feature clone's set (`clone_set`): the body emits under it instead of its own; empty for
     /// every other demand.
-    pub fs: cf::CpuFeatureSet,
+    pub(package) fs: cf::CpuFeatureSet,
 }
 
 // Does the body carry any loop-back-edge safepoint marker? Decides whether the function needs
 // its local preemption tick declared.
 extend CEmit {
     /// An emitter over `pkg` (which must outlive it) with empty buffers and gates.
-    pub fn new(pkg: *const loader::Package) CEmit {
+    pub(package) fn new(pkg: *const loader::Package) CEmit {
         let mut mg = mbe::Mangler::new(pkg);
         // The emitted text's type uses decide each unit's definition headers.
         mg.tn_on = true;
@@ -1612,7 +1612,7 @@ extend CEmit {
 
     /// Demand the sentinel byte for `align` and spell its name. One byte per alignment program-
     /// wide; every ZST reference of that alignment shares its address.
-    pub fn sentinel(self: &mut Self, align: u64, dst: &mut String) {
+    pub(package) fn sentinel(self: &mut Self, align: u64, dst: &mut String) {
         let fresh = !self.sent_seen.contains(&align);
         if self.mg.rec_on && self.mg.rec_dup_once(align ^ 18) {
             let mut ev = mbe::RecEv::blank(mbe::RK_ZST);
@@ -1645,7 +1645,7 @@ extend CEmit {
     /// A reference to a zero-sized value of resolved type `(rm, rt)`: the aligned sentinel as
     /// `void *` (C converts it implicitly to any object-pointer type, so no per-type cast spelling
     /// is needed; ZST loads and stores never dereference it).
-    pub fn zst_sentinel_ref(self: &mut Self, rm: ModuleId, rt: TypeId, dst: &mut String) bool {
+    pub(package) fn zst_sentinel_ref(self: &mut Self, rm: ModuleId, rt: TypeId, dst: &mut String) bool {
         let lo = self.mg.layout_sub(rm, rt);
         let mut a9: u64 = 1;
         if lo.ok && lo.align > 1 {
@@ -1772,7 +1772,7 @@ extend CEmit {
 
     /// Emit `b` as one C function named `name` into the shared buffer. False (with `err`) when the
     /// body leaves the portable subset; the buffer then holds no partial function.
-    pub fn emit_fn(self: &mut Self, b: &ir::CoreBody, name: str) bool {
+    pub(package) fn emit_fn(self: &mut Self, b: &ir::CoreBody, name: str) bool {
         self.err = "";
         if self.inst_depth() > INST_DEPTH_MAX {
             self.err = inst_depth_why();
@@ -1795,7 +1795,7 @@ extend CEmit {
     }
 
     /// Whether module `m`'s bodies render to C (`backends_of`).
-    pub const fn renders(self: &Self, m: ModuleId) bool {
+    pub(package) const fn renders(self: &Self, m: ModuleId) bool {
         return (self.backends[m as usize] & BK_C) != 0;
     }
 
@@ -1814,7 +1814,7 @@ extend CEmit {
 
     /// The LIR of a user `free`'s wrapper `sym` for the type `ty` of module `m`: it calls the user body `fb`,
     /// then frees the members `fields` that body leaves.
-    pub fn lir_free_wrapper(self: &mut Self, m: ModuleId, ty: TypeId, sym: str, fb: str, fields: []NodeId) {
+    pub(package) fn lir_free_wrapper(self: &mut Self, m: ModuleId, ty: TypeId, sym: str, fb: str, fields: []NodeId) {
         if !self.lir_on(m) {
             return;
         }
@@ -1824,7 +1824,14 @@ extend CEmit {
     }
 
     /// The LIR of a test's wrapper (`emit_test_wrapper`).
-    pub fn lir_test_wrapper(self: &mut Self, tm: ModuleId, func: NodeId, wants: u8, fx_init: NodeId, fx_free: NodeId) {
+    pub(package) fn lir_test_wrapper(
+        self: &mut Self,
+        tm: ModuleId,
+        func: NodeId,
+        wants: u8,
+        fx_init: NodeId,
+        fx_free: NodeId,
+    ) {
         if !self.lir_on(tm) {
             return;
         }
@@ -1834,7 +1841,7 @@ extend CEmit {
     }
 
     /// The LIR of the global test env hooks (`emit_test_genv`).
-    pub fn lir_test_genv(self: &mut Self, gm: ModuleId, ginit: NodeId, gfree: NodeId) {
+    pub(package) fn lir_test_genv(self: &mut Self, gm: ModuleId, ginit: NodeId, gfree: NodeId) {
         if !self.lir_on(gm) {
             return;
         }
@@ -1844,7 +1851,7 @@ extend CEmit {
     }
 
     /// The LIR of the C entry `main` of main module `m`.
-    pub fn lir_main_wrapper(self: &mut Self, m: ModuleId, argv: bool) {
+    pub(package) fn lir_main_wrapper(self: &mut Self, m: ModuleId, argv: bool) {
         if !self.lir_on(m) {
             return;
         }
@@ -1855,14 +1862,14 @@ extend CEmit {
 
     /// The chunk `what` just rendered landed in a TU of module `unit`: the bodies LIR lowered for it are
     /// its, `own` when the chunk is of the module's own items (its TU, not its instance TU).
-    pub fn lir_claim(self: &mut Self, unit: u32, what: str, own: bool) {
+    pub(package) fn lir_claim(self: &mut Self, unit: u32, what: str, own: bool) {
         if let Some(l) = &mut self.lir {
             l.claim(unit, what, own);
         }
     }
 
     /// Whether a body lowered since the last claim needs what no object defines (`Lower::take_pend_c`).
-    pub const fn lir_take_pend_c(self: &mut Self) bool {
+    pub(package) const fn lir_take_pend_c(self: &mut Self) bool {
         if let Some(l) = &mut self.lir {
             return l.take_pend_c();
         }
@@ -1870,7 +1877,7 @@ extend CEmit {
     }
 
     /// Move `other`'s LIR into this emitter's.
-    pub fn lir_absorb(self: &mut Self, other: &mut CEmit) {
+    pub(package) fn lir_absorb(self: &mut Self, other: &mut CEmit) {
         if self.lir.is_none() || other.lir.is_none() {
             return;
         }
@@ -3133,7 +3140,7 @@ extend CEmit {
     /// Append the C spelling of local `l` for the body most recently emitted through `emit_fn`: its
     /// coalesce target's preserved name, or `_<id>`. A driver synthesizing a wrapper reads the
     /// receiver name here instead of parsing emitted text.
-    pub fn lspell(self: &Self, l: u32, dst: &mut String) {
+    pub(package) fn lspell(self: &Self, l: u32, dst: &mut String) {
         let c = (*self.sx_coal.at(l as usize)) as usize;
         let ln = self.sx_nm_len[c] as usize;
         if ln != 0 {
@@ -7644,7 +7651,14 @@ extend CEmit {
     /// Emit a closure body: `<ret> <sym>(<sym>_env *const __env, <params...>)` with
     /// captures read through the env; `env_out` receives the env struct typedef (empty when the
     /// closure captures nothing; it is then a plain function taking only its params).
-    pub fn emit_closure(self: &mut Self, b: &ir::CoreBody, cm: ModuleId, cnode: NodeId, sym: str, env_out: &mut String) bool {
+    pub(package) fn emit_closure(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        cm: ModuleId,
+        cnode: NodeId,
+        sym: str,
+        env_out: &mut String,
+    ) bool {
         self.fn_attrs.truncate(0);
         // A closure runs with the build's features, whatever its function's.
         self.fs = self.p().features;
@@ -10076,7 +10090,7 @@ extend CEmit {
     /// `b` whole under the current features (`simd_plan`'s PF_NATIVE), into `out`: the native lowering
     /// calls it in place of its lane loop, as the C path does. False for an operation that traps (the
     /// lane loop checks its lanes first), a mask result, operands of other shapes, or another plan.
-    pub fn lir_simd_entry(self: &mut Self, b: &ir::CoreBody, rv: &ir::Rvalue, out: &mut String) bool {
+    pub(package) fn lir_simd_entry(self: &mut Self, b: &ir::CoreBody, rv: &ir::Rvalue, out: &mut String) bool {
         let c = rv.c;
         if !self.simd_on || rv.kind != ir::RV_SIMD || rv.b == 0 {
             return false;
@@ -13046,7 +13060,7 @@ extend CEmit {
     /// Journal replay for the emitter-owned event kinds: each runs the SAME dedup gate its live
     /// site runs, so replayed and re-emitted modules compose into the exact clean-build queues.
     /// The caller keeps rec_on off for the whole replay.
-    pub fn tuc_replay(self: &mut Self, ev: &mbe::RecEv) {
+    pub(package) fn tuc_replay(self: &mut Self, ev: &mbe::RecEv) {
         if ev.kind == mbe::RK_DEMAND {
             if ev.a == 1 {
                 if self.demand_seen.contains(&ev.h) {
@@ -13189,7 +13203,7 @@ extend CEmit {
     /// Queue the definition of const or static `item` (symbol `sym`, type `ty` of module `em`) that a LIR
     /// body addresses, as a C reference does (`stat_demand`): C may fold the reads it makes. A zero-sized
     /// item has no storage.
-    pub fn lir_stat_need(self: &mut Self, em: ModuleId, item: DefId, ty: TypeId, sym: str) bool {
+    pub(package) fn lir_stat_need(self: &mut Self, em: ModuleId, item: DefId, ty: TypeId, sym: str) bool {
         if !self.p().native || self.mg.is_zst(em, ty) {
             return true;
         }
@@ -13211,7 +13225,7 @@ extend CEmit {
 
     /// Append the symbol of the type descriptor of `(rm, rt)` to `dst`, and queue its definition once:
     /// a body's reference, rendered or lowered. False when the type has no spelling.
-    pub fn ti_need(self: &mut Self, rm: ModuleId, rt: TypeId, dst: &mut String) bool {
+    pub(package) fn ti_need(self: &mut Self, rm: ModuleId, rt: TypeId, dst: &mut String) bool {
         let mut sym = self.sget();
         sym.push_str("__sc_ti__");
         if !self.mg.type_m(rm, rt, &mut sym) {
@@ -13323,7 +13337,7 @@ extend CEmit {
     }
 
     /// Whether static `item` is `@thread_local`.
-    pub fn is_tls(self: &Self, item: DefId) bool {
+    pub(package) fn is_tls(self: &Self, item: DefId) bool {
         return item.node != NODE_NONE && unsafe (*self.p().module_ast_const(item.module)).attr_of(
             item.node,
             AttrKind::ATTR_THREAD_LOCAL,
@@ -13351,7 +13365,7 @@ extend CEmit {
     /// type into `out`: `_Thread_local ` for `@thread_local`, then `_Alignas(N) ` for `@align(N)` above
     /// the type's own alignment (C rejects a weaker specifier), then `const ` for a read-only constant
     /// (`stat_ro`). The definition and every declaration spell the same specifiers.
-    pub fn stat_specs(self: &mut Self, item: DefId, em: ModuleId, ty: TypeId, out: &mut String) {
+    pub(package) fn stat_specs(self: &mut Self, item: DefId, em: ModuleId, ty: TypeId, out: &mut String) {
         let a = self.p().module_ast_const(item.module);
         if unsafe (*a).attr_of(item.node, AttrKind::ATTR_THREAD_LOCAL) != null {
             out.push_str("_Thread_local ");
@@ -13379,7 +13393,7 @@ extend CEmit {
     // not an extern block's) of a scalar, a payload-free enum, `str`, or an array of them. Such a type
     // holds no `UnsafeCell` and takes a leading `const`; any other constant stays writable C data (a
     // struct may hold an `UnsafeCell`, a pointer would spell a const pointee).
-    pub fn stat_ro(self: &Self, item: DefId, em: ModuleId, ty: TypeId) bool {
+    pub(package) fn stat_ro(self: &Self, item: DefId, em: ModuleId, ty: TypeId) bool {
         let cd = unsafe (*self.p().module_ast_const(item.module)).at_const(item.node);
         if cd.kind != NodeKind::NODE_CONST || cd.as_data.const_def.is_static_mut || cd.as_data.const_def.is_extern {
             return false;
@@ -13403,7 +13417,7 @@ extend CEmit {
     // A generic extend's constant `c` spells `<module prefix><InstName>__<NAME>`, a generic function's
     // local constant `<its symbol>__<Args>` (`tc_local_const_env`): static data per instance, which
     // the declaring module defines by evaluating the initializer for that instance.
-    pub fn assoc_const_ref(self: &mut Self, b: &ir::CoreBody, c: &ir::Constant, dst: &mut String) bool {
+    pub(package) fn assoc_const_ref(self: &mut Self, b: &ir::CoreBody, c: &ir::Constant, dst: &mut String) bool {
         let tgt = self.mg.method_target(c.item.module, c.item.node);
         let n = c.targ_len();
         if n > 8 {
@@ -13482,7 +13496,7 @@ extend CEmit {
 
     /// Queue item `item`, whose storage a constant's static data addresses, as a referenced const
     /// or static is: false when it has no storage of its own (zero-sized, or an associated const).
-    pub fn stat_item(self: &mut Self, item: DefId) bool {
+    pub(package) fn stat_item(self: &mut Self, item: DefId) bool {
         let ty = unsafe (*self.p().module_ast_const(item.module)).type_of(item.node);
         if ty == TYPE_NONE || self.mg.method_target(item.module, item.node).node != NODE_NONE || self.mg.is_zst(
             item.module,
@@ -13597,7 +13611,7 @@ extend CEmit {
 
     // Spell aggregate `(rm, rt)`'s operator method `mn` into `dst`: its own impl (demanded when
     // generic) or the interface default. False when neither exists.
-    pub fn agg_op_sym(self: &mut Self, rm: ModuleId, rt: TypeId, mn: str, dst: &mut String) bool {
+    pub(package) fn agg_op_sym(self: &mut Self, rm: ModuleId, rt: TypeId, mn: str, dst: &mut String) bool {
         let mut s = self.sget();
         let ok = if self.mg.method_by_name(rm, rt, mn, &mut s) {
             self.demand_impl(rm, rt, &s);
@@ -13638,7 +13652,7 @@ extend CEmit {
 
     // Aggregate operands that dispatch operators through methods: structs, instances, and
     // payload-carrying enums (their C value is a struct; bare enums compare as integers).
-    pub fn op_dispatch_agg(self: &mut Self, rm: ModuleId, rt: TypeId) bool {
+    pub(package) fn op_dispatch_agg(self: &mut Self, rm: ModuleId, rt: TypeId) bool {
         let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_INSTANCE {
             return true;
@@ -13728,7 +13742,7 @@ extend CEmit {
     /// interface, the conformance with the bound's arguments, `conf_for_args`), its receiver grounded
     /// into `b`'s pool in `recv`; node NONE for any other call, a keyed or blanket conformance's, or a
     /// default body. The bound variant of an instance calls it directly (`ir::inline::run` splices it).
-    pub fn bound_target(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator, recv: &mut TypeId) DefId {
+    pub(package) fn bound_target(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator, recv: &mut TypeId) DefId {
         let none = DefId { module: 0, node: NODE_NONE };
         if t.kind != ir::TM_CALL || t.callee.node == NODE_NONE {
             return none;
@@ -14305,7 +14319,7 @@ extend CEmit {
     /// Ensure the `SC_DYN_<stem>` typedef block (vtable struct + fat value + inline free) is in
     /// `dyn_defs`. Interface vtables carry `__free`/`tid` then every self-taking member in decl
     /// order (defaults included); structural `dyn fn` vtables carry `__free` then `call`.
-    pub fn dyn_request(self: &mut Self, pm: ModuleId, t: TypeId) bool {
+    pub(package) fn dyn_request(self: &mut Self, pm: ModuleId, t: TypeId) bool {
         let y = *unsafe (*self.p().module_ast_const(pm)).type_at(t);
         if y.kind != TypeKind::TYPE_DYN {
             return self.fail("dyn-req");
@@ -14500,7 +14514,7 @@ extend CEmit {
     /// The vtable slot (in pointers) of interface method `callee` in the table of dyn type `(pm, t)`:
     /// `__free`, `tid`, then each interface's methods that take a receiver in the hierarchy's order.
     /// NONE when it has none; `Free::free` is slot 0.
-    pub fn vt_slot(self: &mut Self, pm: ModuleId, t: TypeId, callee: DefId) u32 {
+    pub(package) fn vt_slot(self: &mut Self, pm: ModuleId, t: TypeId, callee: DefId) u32 {
         let ca = self.p().module_ast_const(callee.module);
         let mn = unsafe (*ca).at_const(unsafe (*ca).at_const(callee.node).as_data.function.name).as_data.name.text;
         if self.p().modules.at(callee.module as usize).source.as_str().slice(mn.start as usize, mn.end as usize) == "free" {
@@ -14534,7 +14548,7 @@ extend CEmit {
 
     /// The vtable slot (in pointers) of the table pointer of superinterface dyn type `(dm, dt)` in the
     /// table of dyn type `(pm, t)`: after every method slot. NONE when it is no superinterface.
-    pub fn super_slot(self: &mut Self, pm: ModuleId, t: TypeId, dm: ModuleId, dt: TypeId) u32 {
+    pub(package) fn super_slot(self: &mut Self, pm: ModuleId, t: TypeId, dm: ModuleId, dt: TypeId) u32 {
         let mut sup = Vector::<TypeId>::new();
         if !self.dyn_supers(pm, t, &mut sup) {
             return 0xFFFFFFFF;
@@ -14654,7 +14668,7 @@ extend CEmit {
     // Thunks + the vtable definition for one coercion pair (source type -> dyn stem); `own` makes
     // the vtable's `__free` destroy and deallocate the heap payload, through the allocator `(am, at)`
     // (TYPE_NONE: Global) its `Default` rebuilds. Appends `<pair>` to `pair`.
-    pub fn dyn_pair(
+    pub(package) fn dyn_pair(
         self: &mut Self,
         pm: ModuleId,
         dt: TypeId,
@@ -14977,7 +14991,7 @@ extend CEmit {
     }
 
     // The declared single return type of `fnid` (pool `m`), or TYPE_NONE.
-    pub const fn fn_ret_ty(self: &Self, m: ModuleId, fnid: NodeId) TypeId {
+    pub(package) const fn fn_ret_ty(self: &Self, m: ModuleId, fnid: NodeId) TypeId {
         let a = self.p().module_ast_const(m);
         let rs = unsafe (*a).at_const(fnid).as_data.function.returns;
         if rs.len != 1 {
@@ -14991,7 +15005,7 @@ extend CEmit {
     /// One `--test` wrapper: `void __sc_test_w_<m>_<node>(void *__genv)` constructing the fixture
     /// when the case wants one, calling the case, then tearing the fixture down (user teardown
     /// first, then the type's own free).
-    pub fn emit_test_wrapper(
+    pub(package) fn emit_test_wrapper(
         self: &mut Self,
         tm: ModuleId,
         func: NodeId,
@@ -15096,7 +15110,7 @@ extend CEmit {
 
     /// The global-env hooks: `__sc_test_genv_init` keeps the env in a static cell; `_free` runs the
     /// user teardown then the type's own free.
-    pub fn emit_test_genv(self: &mut Self, gm: ModuleId, ginit: NodeId, gfree: NodeId) bool {
+    pub(package) fn emit_test_genv(self: &mut Self, gm: ModuleId, ginit: NodeId, gfree: NodeId) bool {
         self.err = "";
         let gt = self.fn_ret_ty(gm, ginit);
         if gt == TYPE_NONE {
@@ -15422,7 +15436,7 @@ extend CEmit {
     // A conversion method WITH its own generics: the receiver instance is the coercion TARGET;
     // the method's params bind by unifying its first declared parameter against the argument.
     // Symbol: `<InstName>__<method>__<bound mangles...>` (the spec rule), demanded accordingly.
-    pub fn conv_sym(
+    pub(package) fn conv_sym(
         self: &mut Self,
         b: &ir::CoreBody,
         callee: DefId,
@@ -15659,7 +15673,7 @@ extend CEmit {
 
     /// Replay one cached `aux` entry (see `aux_mark`): a `_ret` typedef lands as is, a shared
     /// assert helper only when this emitter has not defined it yet.
-    pub fn aux_replay(self: &mut Self, key: u64, own: ModuleId, text: str) {
+    pub(package) fn aux_replay(self: &mut Self, key: u64, own: ModuleId, text: str) {
         if key != 0 && !self.assert_helpers_claim((key >> 1) as u8) {
             return;
         }
@@ -15882,7 +15896,7 @@ extend CEmit {
     // user code runs only through bound dispatch (`Package::co_inst_on`) prints them only when a
     // binding names a type whose methods can be user code; with std types alone its loops are bounded
     // by their inputs.
-    pub fn ticks_on(self: &mut Self, b: &ir::CoreBody) bool {
+    pub(package) fn ticks_on(self: &mut Self, b: &ir::CoreBody) bool {
         if !self.safepoints_on(b.module) {
             return false;
         }
@@ -15998,7 +16012,7 @@ extend CEmit {
     }
 
     // Give the LIR back after a lowering, then lower the wrappers that lowering spelled (`blk_due`).
-    pub fn lir_put(self: &mut Self, l: Box<lw::Lower>) {
+    pub(package) fn lir_put(self: &mut Self, l: Box<lw::Lower>) {
         self.lir = Option::<Box<lw::Lower>>::Some(l);
         let mut i: usize = 0;
         // A wrapper's lowering may spell another wrapper: each is spelled once (`blk_seen`).
@@ -16397,7 +16411,7 @@ extend CEmit {
     // The callee's C symbol: the frozen fn symbol plus `__<targ>` per bound generic argument
     // (free-fn specializations and generic methods share that composition). `iface`: a bound
     // call's conformance (`Terminator.iface`), TYPE_NONE otherwise.
-    pub fn callee_sym(
+    pub(package) fn callee_sym(
         self: &mut Self,
         b: &ir::CoreBody,
         callee: DefId,
@@ -16518,7 +16532,13 @@ extend CEmit {
 
     // callee_sym for call terminator `t`: the receiver type is the first argument's, the destination
     // type the single destination's (when `with_dest`).
-    pub fn term_callee_sym(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator, with_dest: bool, dst: &mut String) bool {
+    pub(package) fn term_callee_sym(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        t: &ir::Terminator,
+        with_dest: bool,
+        dst: &mut String,
+    ) bool {
         let mut recv_ty = TYPE_NONE;
         if t.args_len > 0 {
             recv_ty = b.operands.at(b.oper_pool[t.args_start as usize] as usize).ty;
@@ -17079,7 +17099,7 @@ extend CEmit {
 
     /// The bindings call `t` of body `b` binds its callee's generic parameters with (none for a
     /// concrete callee) into `out`, after the active env's: what its parameter and result types read.
-    pub fn callee_binds(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator, out: &mut Vector<mbe::MSub>) {
+    pub(package) fn callee_binds(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator, out: &mut Vector<mbe::MSub>) {
         out.clear();
         let mut s = String::new();
         self.snap_out = out;
@@ -18543,7 +18563,7 @@ extend CEmit {
 
     // Record a destructor use: derived `__free__d` symbols join the glue worklist; user `free`
     // methods on instances join the demand queue (their bodies emit like any method instance).
-    pub fn note_free(self: &mut Self, rm: ModuleId, rt: TypeId, sym: str) {
+    pub(package) fn note_free(self: &mut Self, rm: ModuleId, rt: TypeId, sym: str) {
         let h = fnv(sym);
         let fresh = !self.glue_seen.contains(&h);
         if !fresh && !self.mg.rec_on {
@@ -18619,7 +18639,7 @@ extend CEmit {
     // Does the user `free` of resolved type `(rm, rt)` apply to it? An instance whose `free`
     // extend bounds a parameter with `Free` is covered only when that argument owns memory;
     // an uncovered instance drops through the derived glue, which frees its owning members.
-    pub fn user_free_covers(self: &mut Self, rm: ModuleId, rt: TypeId) bool {
+    pub(package) fn user_free_covers(self: &mut Self, rm: ModuleId, rt: TypeId) bool {
         let y = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
         if y.kind != TypeKind::TYPE_INSTANCE {
             return true;
@@ -18663,7 +18683,7 @@ extend CEmit {
     /// so it terminates with no depth bound. A verdict that reads no substitution (a concrete type
     /// that is not a closure and not a generic declaration named bare) is memoized per
     /// (module, type), so a member type shared by many fields is judged once.
-    pub fn is_destructible(self: &mut Self, rm: ModuleId, rt: TypeId) bool {
+    pub(package) fn is_destructible(self: &mut Self, rm: ModuleId, rt: TypeId) bool {
         let a = self.p().module_ast_const(rm);
         let y = *unsafe (*a).type_at(rt);
         let mut memo = y.kind != TypeKind::TYPE_FUNCTION && unsafe (*a).type_concrete(rt);
@@ -18863,7 +18883,7 @@ extend CEmit {
 
     /// Append the C expression that frees resolved type `(rm, rt)` (a callable symbol) and record
     /// the demand/glue the call needs; false when the type is not destructible.
-    pub fn free_expr(self: &mut Self, rm: ModuleId, rt: TypeId, out: &mut String) bool {
+    pub(package) fn free_expr(self: &mut Self, rm: ModuleId, rt: TypeId, out: &mut String) bool {
         let mk = out.len(); // `out` may already hold text: only the symbol appended here is noted
         let yd = *unsafe (*self.p().module_ast_const(rm)).type_at(rt);
         if yd.kind == TypeKind::TYPE_DYN {
@@ -18888,7 +18908,7 @@ extend CEmit {
     /// Emit derived destructor `idx` from the glue worklist into the shared buffer:
     /// `static void <sym>(<T> *const self) { <memberwise frees> }`. Nested destructible fields
     /// enqueue their own glue/demand entries.
-    pub fn emit_glue(self: &mut Self, idx: usize) bool {
+    pub(package) fn emit_glue(self: &mut Self, idx: usize) bool {
         // Re-establish the env the entry was recorded under (its type may name generics).
         let gn0 = self.glue_envs.at(idx).subs.len();
         for gi in 0..gn0 {
@@ -19108,7 +19128,7 @@ extend CEmit {
     // dispatches through the vtable: the pair's type into `(om, ot)` and the references it sits
     // behind into `stars` (a generic `&T` with T = Box<dyn I> stays a reference in the body).
     // IR_NONE for any other call.
-    pub fn dyn_recv_of(
+    pub(package) fn dyn_recv_of(
         self: &mut Self,
         b: &ir::CoreBody,
         t: &ir::Terminator,
@@ -19829,11 +19849,11 @@ fn collect_ident_hashes(s: str, out: &mut Vector<u64>) {
 /// digit separators and the width suffix C cannot parse (`0x1Fu8` -> `0x1F`, `1_000` -> `1000`).
 /// The longest string literal C11 guarantees (5.2.4.1): 4095 bytes. A longer string constant
 /// spells as an array of its bytes.
-pub const STR_LIT_MAX: usize = 4095;
+pub(package) const STR_LIT_MAX: usize = 4095;
 
 /// `{ (const uint8_t *)<lit>, sizeof(<lit>) - 1 }`: a `str` view initializer over C string data
 /// `lit`, a string literal or the name of an array holding the bytes and a terminating 0.
-pub fn push_c_str_view(lit: str, dst: &mut String) {
+pub(package) fn push_c_str_view(lit: str, dst: &mut String) {
     dst.push_str("{ (const uint8_t *)");
     dst.push_str(lit);
     dst.push_str(", sizeof(");
@@ -19844,7 +19864,7 @@ pub fn push_c_str_view(lit: str, dst: &mut String) {
 /// A file-scope `str` view initializer over string bytes `bytes`: over a C string literal, or past
 /// STR_LIT_MAX bytes over a compound literal array of the bytes and a terminating 0 (outside a
 /// function a compound literal has static storage).
-pub fn push_c_str_data(bytes: str, dst: &mut String) {
+pub(package) fn push_c_str_data(bytes: str, dst: &mut String) {
     if bytes.len() > STR_LIT_MAX {
         dst.push_str("{ (const uint8_t[]){");
         push_c_byte_list(bytes, dst);
@@ -19878,7 +19898,7 @@ fn push_c_byte_list(bytes: str, dst: &mut String) {
 /// brace. A span keeps its quotes, byte-string prefix or matchertext frame, or has none. Quoted and
 /// byte-string bodies decode their escapes; matchertext and raw bodies are the bytes themselves.
 /// `tmp` is scratch.
-pub fn str_const_bytes(raw: str, form: i64, tmp: &mut String, out: &mut String) {
+pub(package) fn str_const_bytes(raw: str, form: i64, tmp: &mut String, out: &mut String) {
     let tk = form & 255;
     let seg = (form & 256) != 0;
     let mut r = raw;
@@ -19930,7 +19950,7 @@ const fn mt_pair(o: u8, c: u8) bool {
 /// compiler rounds it once from the text, as compile-time evaluation does.
 /// The C spelling of float bits `v` (an `f32`'s in the low 32 when `single`): an exact hexadecimal
 /// literal, or the builtins of an infinity and a NaN (its payload kept).
-pub fn push_c_float_bits(v: u64, single: bool, dst: &mut String) {
+pub(package) fn push_c_float_bits(v: u64, single: bool, dst: &mut String) {
     let mb: u32 = if single {
         23;
     } else {
@@ -20002,7 +20022,7 @@ pub fn push_c_float_bits(v: u64, single: bool, dst: &mut String) {
     dst.push_str(")");
 }
 
-pub fn push_c_float_lit(txt: str, single: bool, dst: &mut String) {
+pub(package) fn push_c_float_lit(txt: str, single: bool, dst: &mut String) {
     let n = txt.len();
     let mut t = txt;
     let mut sfx = "";
@@ -20022,7 +20042,7 @@ pub fn push_c_float_lit(txt: str, single: bool, dst: &mut String) {
     dst.push_str(sfx);
 }
 
-pub fn push_c_number(txt: str, dst: &mut String) {
+pub(package) fn push_c_number(txt: str, dst: &mut String) {
     let n = txt.len();
     // C11 has no `0o` or `0b` prefix: an octal or binary integer is spelled in hex, same value (the
     // checker guarantees it fits u64).
@@ -20065,7 +20085,7 @@ pub fn push_c_number(txt: str, dst: &mut String) {
 
 /// The most bytes of an expression's source an assertion message spells: two of them and the
 /// message text stay under STR_LIT_MAX.
-pub const ASSERT_SRC_MAX: usize = 1000;
+pub(package) const ASSERT_SRC_MAX: usize = 1000;
 
 /// Expression source `txt` in an assertion message, escaped for an fprintf format (`fmt`) or a
 /// plain C string: past ASSERT_SRC_MAX bytes, cut at a character boundary and ended with `...`.
@@ -20119,7 +20139,7 @@ fn push_fmt_escaped(txt: str, pct: bool, dst: &mut String) {
 /// three-digit octal (fixed width, so a following digit can never extend the escape).
 /// String literal `raw` of an `asm` template, constraint or clobber (its source text: a quoted literal
 /// or a matchertext literal) as a C string literal.
-pub fn push_c_asm_str(raw: str, dst: &mut String) {
+pub(package) fn push_c_asm_str(raw: str, dst: &mut String) {
     let tk = if raw.len() != 0 && raw.byte_at(0) == b'M' {
         tt::TokenType::MatchertextLiteral;
     } else {
@@ -20134,7 +20154,7 @@ pub fn push_c_asm_str(raw: str, dst: &mut String) {
 }
 
 /// The bytes of asm template literal `raw` (a string or a matchertext literal), appended to `dst`.
-pub fn asm_bytes(raw: str, dst: &mut String) {
+pub(package) fn asm_bytes(raw: str, dst: &mut String) {
     let tk = if raw.len() != 0 && raw.byte_at(0) == b'M' {
         tt::TokenType::MatchertextLiteral;
     } else {
@@ -20144,7 +20164,7 @@ pub fn asm_bytes(raw: str, dst: &mut String) {
     str_const_bytes(raw, tk as i64, &mut tmp, dst);
 }
 
-pub fn push_c_escaped(txt: str, dst: &mut String) {
+pub(package) fn push_c_escaped(txt: str, dst: &mut String) {
     for i in 0..txt.len() {
         push_c_escaped_byte(txt.byte_at(i), dst);
     }
@@ -20446,12 +20466,12 @@ const fn int_signed(bt: BuiltinType) bool {
 // 64-bit patterns read unsigned when `uns` is set (one value when `konst`), and the signedness and
 // width in bits of its C type after integer promotion.
 struct CmpSide {
-    pub lo: i64,
-    pub hi: i64,
-    pub uns: bool,
-    pub konst: bool,
-    pub c_uns: bool,
-    pub c_w: u32,
+    pub(package) lo: i64,
+    pub(package) hi: i64,
+    pub(package) uns: bool,
+    pub(package) konst: bool,
+    pub(package) c_uns: bool,
+    pub(package) c_w: u32,
 }
 
 // The order of two exact integers, each a 64-bit pattern read unsigned when its flag is set: -1, 0
@@ -20617,37 +20637,37 @@ extend CmpSide {
 // mask, a scalar, or lane-mask temps), what the result is, and the table indexes of the entries
 // applied to each call's result and to its argument 0 (-1: none).
 struct VPlan {
-    pub pl: sp::Plan,
-    pub kinds: [u8; 3],
-    pub res: u8,
-    pub wres: i64,
-    pub warg: i64,
+    pub(package) pl: sp::Plan,
+    pub(package) kinds: [u8; 3],
+    pub(package) res: u8,
+    pub(package) wres: i64,
+    pub(package) warg: i64,
     /// VR_ALL: the value of a true result, every lane's bit; VR_FOLD: the lane mask type's bits, the
     /// count's width (0: no count).
-    pub ones: u64,
+    pub(package) ones: u64,
     /// VR_FOLD: the entry that folds the chunks' lane masks, and the entry that reduces the fold.
-    pub cadd: i64,
-    pub cred: i64,
+    pub(package) cadd: i64,
+    pub(package) cred: i64,
     /// VR_LANES for a `choose` of narrower lanes: the truncating cast entry of each of `nsteps`
     /// steps that halve the lane masks' width, step `s` over chunk pairs when bit `s` of `npairs`.
-    pub narrow: [i64; 3],
-    pub nsteps: u32,
-    pub npairs: u32,
+    pub(package) narrow: [i64; 3],
+    pub(package) nsteps: u32,
+    pub(package) npairs: u32,
     /// A pointer operand of a raw form (`load_raw`, `store_raw`, the masked pointer forms) may address
     /// a vector operand or the result whose address the body takes (`vec_addr_taken`): every operand
     /// is copied before any chunk is written.
-    pub raw: bool,
+    pub(package) raw: bool,
     /// VR_LANES: the temps declare up front (`lf_scan`), not before the call.
-    pub top: bool,
+    pub(package) top: bool,
 }
 
 // One local's lane-mask form beyond `lane_only` (`CEmit::lf_scan`).
 struct LfMask {
-    pub state: u8, // LF_NONE, LF_LANES or LF_BITS
-    pub u: BuiltinType, // the lane masks' unsigned lane type
-    pub n: i64,
+    pub(package) state: u8, // LF_NONE, LF_LANES or LF_BITS
+    pub(package) u: BuiltinType, // the lane masks' unsigned lane type
+    pub(package) n: i64,
     // The defining comparison's lane-mask plan: its chunks, and the entry whose result spells a temp.
-    pub pl: sp::Plan,
+    pub(package) pl: sp::Plan,
 }
 
 // No lane-mask form.

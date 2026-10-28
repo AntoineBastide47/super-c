@@ -8,9 +8,9 @@ import utils::persist as *;
 // written conformances only.
 /// Half-open byte range [start, end) into a source buffer.
 @derive(Copy)
-pub struct Span {
-    pub start: u32,
-    pub end: u32,
+pub(package) struct Span {
+    pub(package) start: u32,
+    pub(package) end: u32,
 }
 
 extend Span as Persist {
@@ -29,51 +29,51 @@ extend Span as Persist {
 
 extend Span {
     /// The range [start, end); no ordering check.
-    pub const fn new(start: u32, end: u32) Span {
+    pub(package) const fn new(start: u32, end: u32) Span {
         return Span { start: start, end: end };
     }
 
     /// The zero-length range at offset 0.
-    pub const fn empty() Span {
+    pub(package) const fn empty() Span {
         return Span { start: 0, end: 0 };
     }
 }
 
-pub type Token = u64;
+pub(package) type Token = u64;
 
 /// The longest lexeme a Token can hold (24-bit length field).
-pub const TOKEN_MAX_LEN: usize = 0xFFFFFF;
+pub(package) const TOKEN_MAX_LEN: usize = 0xFFFFFF;
 
 extend Token {
     /// Packs (kind, start, len). `len` must be at most TOKEN_MAX_LEN: it is stored in 24 bits, and a
     /// larger value would bleed into the kind bits (len() masks on read; new() does not). The lexer
     /// rejects longer lexemes.
-    pub const fn new(kind: TokenType, start: u32, len: u32) Token {
+    pub(package) const fn new(kind: TokenType, start: u32, len: u32) Token {
         return start as u64 | len as u64 << 32 | kind as u64 << 56;
     }
 
     /// Byte offset of the lexeme's first byte.
-    pub const fn start(self: Self) u32 {
+    pub(package) const fn start(self: Self) u32 {
         return self as u32;
     }
 
     /// Lexeme length in bytes (24-bit field).
-    pub const fn len(self: Self) u32 {
+    pub(package) const fn len(self: Self) u32 {
         return (self >> 32 & 0xFFFFFF) as u32;
     }
 
     /// Byte offset one past the lexeme's last byte.
-    pub const fn end(self: Self) u32 {
+    pub(package) const fn end(self: Self) u32 {
         return self.start() + self.len();
     }
 
     /// The token kind stored in the top 8 bits.
-    pub const fn kind(self: Self) TokenType {
+    pub(package) const fn kind(self: Self) TokenType {
         return (self >> 56) as TokenType;
     }
 
     /// The lexeme's [start, end) range.
-    pub const fn span(self: Self) Span {
+    pub(package) const fn span(self: Self) Span {
         return Span::new(self.start(), self.end());
     }
 }
@@ -82,7 +82,7 @@ extend Token {
 /// escape (`\n \r \t \\ \' \" \0 \xHH \u{H..}`). Every pass that needs a literal's value calls this, so
 /// the checker, pattern analysis, lowering and CTFE agree. None: the spelling is malformed (the lexer
 /// already reported it).
-pub const fn char_literal_value(src: str, sp: Span) Option<i64> {
+pub(package) const fn char_literal_value(src: str, sp: Span) Option<i64> {
     if sp.end < sp.start + 3 || sp.end as usize > src.len() {
         return Option::<i64>::None;
     }
@@ -206,7 +206,7 @@ fn push_utf8(cp: u32, dst: &mut String) {
 
 /// The bytes of a Super-C quoted or byte-string body (escapes intact) onto `dst`: each escape decodes
 /// to its byte(s) (`\xNN` is EXACTLY two hex digits, `\u{H..}` a codepoint as UTF-8).
-pub fn str_decode(raw: str, dst: &mut String) {
+pub(package) fn str_decode(raw: str, dst: &mut String) {
     let mut i: usize = 0;
     while i < raw.len() {
         let b = raw.byte_at(i);

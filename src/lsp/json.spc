@@ -12,13 +12,13 @@ const MAX_NESTING_DEPTH: usize = 1024;
 
 /// One ordered object member
 @derive(Clone)
-pub struct JSONPair {
-    pub key: String,
-    pub value: JSON,
+pub(package) struct JSONPair {
+    pub(package) key: String,
+    pub(package) value: JSON,
 }
 
 /// A JSON value. Only the active variant holds a payload, so a value is 32 bytes.
-pub enum JSON {
+pub(package) enum JSON {
     Null,
     Bool(bool),
     Num(f64),
@@ -29,32 +29,32 @@ pub enum JSON {
 
 extend JSON {
     /// An integer, stored as f64 (exact below 2^53).
-    pub const fn integer(value: i64) JSON {
+    pub(package) const fn integer(value: i64) JSON {
         return JSON::Num(value as f64);
     }
 
     /// A string value; `value` is copied.
-    pub fn str(value: str) JSON {
+    pub(package) fn str(value: str) JSON {
         return JSON::Str(String::from_str(value));
     }
 
     /// Takes ownership of `value` (no copy): the JSON(std::string&&) constructor.
-    pub const fn string(value: String) JSON {
+    pub(package) const fn string(value: String) JSON {
         return JSON::Str(value);
     }
 
     /// An empty array.
-    pub fn array() JSON {
+    pub(package) fn array() JSON {
         return JSON::Arr(Vector::<JSON>::new());
     }
 
     /// An empty object.
-    pub fn object() JSON {
+    pub(package) fn object() JSON {
         return JSON::Obj(Vector::<JSONPair>::new());
     }
 
     /// Kind test.
-    pub const fn is_null(self: &Self) bool {
+    pub(package) const fn is_null(self: &Self) bool {
         return switch self {
             Null => true,
             _ => false,
@@ -62,7 +62,7 @@ extend JSON {
     }
 
     /// Kind test.
-    pub const fn is_number(self: &Self) bool {
+    pub(package) const fn is_number(self: &Self) bool {
         return switch self {
             Num(_) => true,
             _ => false,
@@ -70,7 +70,7 @@ extend JSON {
     }
 
     /// Kind test.
-    pub const fn is_string(self: &Self) bool {
+    pub(package) const fn is_string(self: &Self) bool {
         return switch self {
             Str(_) => true,
             _ => false,
@@ -78,7 +78,7 @@ extend JSON {
     }
 
     /// Kind test.
-    pub const fn is_array(self: &Self) bool {
+    pub(package) const fn is_array(self: &Self) bool {
         return switch self {
             Arr(_) => true,
             _ => false,
@@ -86,7 +86,7 @@ extend JSON {
     }
 
     /// Kind test.
-    pub const fn is_object(self: &Self) bool {
+    pub(package) const fn is_object(self: &Self) bool {
         return switch self {
             Obj(_) => true,
             _ => false,
@@ -94,7 +94,7 @@ extend JSON {
     }
 
     /// The boolean. Panics: not a boolean.
-    pub const fn get_bool(self: &Self) bool {
+    pub(package) const fn get_bool(self: &Self) bool {
         return switch self {
             Bool(b) => *b,
             _ => panic("JSON::get_bool called on a non-boolean type"),
@@ -102,7 +102,7 @@ extend JSON {
     }
 
     /// The number. Panics: not a number.
-    pub const fn get_number(self: &Self) f64 {
+    pub(package) const fn get_number(self: &Self) f64 {
         return switch self {
             Num(n) => *n,
             _ => panic("JSON::get_number called on a non-number type"),
@@ -110,7 +110,7 @@ extend JSON {
     }
 
     /// The number truncated to i64. Panics: not a number, or outside the i64 range (NaN included).
-    pub const fn get_i64(self: &Self) i64 {
+    pub(package) const fn get_i64(self: &Self) i64 {
         let n = self.get_number();
         if !in_i64_range(n) {
             panic("JSON::get_i64 called on a number outside the i64 range");
@@ -119,7 +119,7 @@ extend JSON {
     }
 
     /// The string as a view. Panics: not a string.
-    pub const fn get_str(self: &Self) str {
+    pub(package) const fn get_str(self: &Self) str {
         return switch self {
             Str(s) => s.as_str(),
             _ => panic("JSON::get_str called on a non-string type"),
@@ -127,7 +127,7 @@ extend JSON {
     }
 
     /// Element at `index`; panics out of bounds or on a non-array (JSON::At(size_t)).
-    pub const fn at(self: &Self, index: usize) &JSON {
+    pub(package) const fn at(self: &Self, index: usize) &JSON {
         return switch self {
             Arr(a) => a.at(index),
             _ => panic("JSON::at on a non array-type"),
@@ -135,7 +135,7 @@ extend JSON {
     }
 
     /// Member for `key`; panics when missing or on a non-object (JSON::At(string)).
-    pub const fn at_key(self: &Self, key: str) &JSON {
+    pub(package) const fn at_key(self: &Self, key: str) &JSON {
         return switch self.value(key) {
             Some(v) => v,
             None => panic("JSON::at_key called with a missing key or on a non object-type"),
@@ -143,7 +143,7 @@ extend JSON {
     }
 
     /// Safe member lookup: None when absent or on a non-object (the JSON::Value analog, Option-shaped).
-    pub const fn value(self: &Self, key: str) Option<&JSON> {
+    pub(package) const fn value(self: &Self, key: str) Option<&JSON> {
         if let Obj(o) = self {
             for i in 0..o.len() {
                 if o.at(i).key.as_str() == key {
@@ -155,13 +155,13 @@ extend JSON {
     }
 
     /// True when this object has member `key` (false for non-objects).
-    pub const fn contains_key(self: &Self, key: str) bool {
+    pub(package) const fn contains_key(self: &Self, key: str) bool {
         return self.value(key).is_some();
     }
 
     /// Member as integer / string view with a default: the common LSP request-field reads. A number
     /// outside the i64 range (NaN included) also yields `dflt`.
-    pub const fn value_i64(self: &Self, key: str, dflt: i64) i64 {
+    pub(package) const fn value_i64(self: &Self, key: str, dflt: i64) i64 {
         if let Some(v) = self.value(key) {
             if let Num(n) = v {
                 if in_i64_range(*n) {
@@ -173,7 +173,7 @@ extend JSON {
     }
 
     /// Member `key` as a bool; false when absent or not a bool.
-    pub const fn value_bool(self: &Self, key: str) bool {
+    pub(package) const fn value_bool(self: &Self, key: str) bool {
         if let Some(v) = self.value(key) {
             if let Bool(b) = v {
                 return *b;
@@ -183,7 +183,7 @@ extend JSON {
     }
 
     /// Member `key` as a string view; empty when absent or not a string.
-    pub const fn value_str(self: &Self, key: str) str {
+    pub(package) const fn value_str(self: &Self, key: str) str {
         if let Some(v) = self.value(key) {
             if let Str(s) = v {
                 return s.as_str();
@@ -193,7 +193,7 @@ extend JSON {
     }
 
     /// Element count of an array or member count of an object. Panics: a scalar.
-    pub const fn size(self: &Self) usize {
+    pub(package) const fn size(self: &Self) usize {
         return switch self {
             Arr(a) => a.len(),
             Obj(o) => o.len(),
@@ -202,7 +202,7 @@ extend JSON {
     }
 
     /// Append to the array; a non-array converts to one first (JSON::PushBack). Owns `value`.
-    pub fn push_back(self: &mut Self, value: JSON) {
+    pub(package) fn push_back(self: &mut Self, value: JSON) {
         if !self.is_array() {
             *self = JSON::array();
         }
@@ -211,7 +211,7 @@ extend JSON {
 
     /// Set `key` to `value`, overwriting an existing member; a non-object converts to one first
     /// (JSON::Emplace). Owns `value`.
-    pub fn emplace(self: &mut Self, key: str, value: JSON) {
+    pub(package) fn emplace(self: &mut Self, key: str, value: JSON) {
         if !self.is_object() {
             *self = JSON::object();
         }
@@ -226,7 +226,7 @@ extend JSON {
     }
 
     /// Reserve capacity for `size` elements or members. Panics: a scalar.
-    pub fn reserve(self: &mut Self, size: usize) {
+    pub(package) fn reserve(self: &mut Self, size: usize) {
         switch self {
             Arr(a) => a.reserve(size),
             Obj(o) => o.reserve(size),
@@ -260,14 +260,14 @@ extend JSON {
     }
 
     /// Serialize compactly (JSON::Dump).
-    pub fn dump(self: &Self) String {
+    pub(package) fn dump(self: &Self) String {
         let mut out = String::with_capacity(256);
         self.dump_into(&mut out);
         return out;
     }
 
     /// Append the compact serialization to `out`.
-    pub fn dump_into(self: &Self, out: &mut String) {
+    pub(package) fn dump_into(self: &Self, out: &mut String) {
         switch self {
             Null => out.push_str("null"),
             Bool(true) => out.push_str("true"),
@@ -343,7 +343,7 @@ fn dump_number(n: f64, out: &mut String) {
 }
 
 /// Append `s` as a JSON string literal: quote/backslash/control bytes escaped, raw UTF-8 kept.
-pub fn dump_escaped(s: str, out: &mut String) {
+pub(package) fn dump_escaped(s: str, out: &mut String) {
     out.push_byte(b'"');
     for i in 0..s.len() {
         let b = s[i];
@@ -415,15 +415,15 @@ const fn is_ws(b: u8) bool {
 }
 
 struct JSONParser<'a> {
-    pub src: str<'a>,
-    pub stack: Vector<usize>, // *mut JSON slots as usize
-    pub pending_key: String, // the key waiting to be assigned
-    pub candidate_key: String, // a parsed string that may become a key at the next ':'
-    pub candidate_key_set: bool,
-    pub pending_key_set: bool,
-    pub comma_detected: bool,
-    pub found_data: bool,
-    pub err: String, // first error message; empty = no error so far
+    pub(package) src: str<'a>,
+    pub(package) stack: Vector<usize>, // *mut JSON slots as usize
+    pub(package) pending_key: String, // the key waiting to be assigned
+    pub(package) candidate_key: String, // a parsed string that may become a key at the next ':'
+    pub(package) candidate_key_set: bool,
+    pub(package) pending_key_set: bool,
+    pub(package) comma_detected: bool,
+    pub(package) found_data: bool,
+    pub(package) err: String, // first error message; empty = no error so far
 }
 
 extend JSONParser {
@@ -947,7 +947,7 @@ extend JSONParser {
 
 /// Parse one JSON document from memory (JSONParser::Parse, string_view path). The whole input must be
 /// one value plus optional trailing whitespace.
-pub fn parse(src: str) Result<JSON, String> {
+pub(package) fn parse(src: str) Result<JSON, String> {
     let mut root = JSON::default();
     let mut p = JSONParser {
         src: src,

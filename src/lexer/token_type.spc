@@ -1,7 +1,7 @@
 // Token kinds; the value is stored in the packed Token's 8-bit kind field. Variant ORDER is a
 // bootstrap contract: numeric values must stay what the previous-generation compiler assigned, so
 // new kinds only ever append at the end (see the in-list notes).
-pub enum TokenType {
+pub(package) enum TokenType {
     Identifier,
     Label,
     As,
@@ -134,7 +134,7 @@ pub enum TokenType {
 extend TokenType {
     /// The operator method an arithmetic or bitwise operator dispatches to on an aggregate, for the
     /// plain and the compound form alike (`+` and `+=` both call `add`); "" for any other token.
-    pub const fn op_method(self: Self) str<'static> {
+    pub(package) const fn op_method(self: Self) str<'static> {
         return switch self {
             Plus | PlusEqual => "add",
             Minus | MinusEqual => "sub",

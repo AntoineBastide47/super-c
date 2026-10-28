@@ -12,29 +12,29 @@ import lir::eval as le;
 import lir::verify as lv;
 
 /// A caller takes no more callees past CALLER_MAX instructions.
-pub const CALLER_MAX: u32 = 8000;
+pub(package) const CALLER_MAX: u32 = 8000;
 
 /// The inline budgets: a callee inlines when it holds at most `warm` instructions outside cold blocks and
 /// `all` in all. `optimize`'s levels: none, the callees no bigger than their calls (`SHRINK`), and past
 /// them by optimization level (scaled as LLVM's and GCC's thresholds: for size a fifth of the
 /// speed one, at the highest level half again).
-pub struct Budget {
-    pub warm: u32,
-    pub all: u32,
+pub(package) struct Budget {
+    pub(package) warm: u32,
+    pub(package) all: u32,
 }
 
 extend Budget as Copy {}
 
-pub const NONE_INLINES: Budget = Budget { warm: 0, all: 0 };
-pub const SHRINK: Budget = Budget { warm: 8, all: 24 };
-pub const SIZE: Budget = Budget { warm: 12, all: 48 };
-pub const SPEED: Budget = Budget { warm: 40, all: 160 };
-pub const FAST: Budget = Budget { warm: 60, all: 240 };
+pub(package) const NONE_INLINES: Budget = Budget { warm: 0, all: 0 };
+pub(package) const SHRINK: Budget = Budget { warm: 8, all: 24 };
+pub(package) const SIZE: Budget = Budget { warm: 12, all: 48 };
+pub(package) const SPEED: Budget = Budget { warm: 40, all: 160 };
+pub(package) const FAST: Budget = Budget { warm: 60, all: 240 };
 
 /// Whether body `b` of function symbol `s` of `pk` may be copied into a caller: not `@noinline`, naked,
 /// variadic or a routine the evaluator models; no inline assembly, variadic access, return address or
 /// call of itself; its blocks in order in its instruction array (as the optimizer leaves them).
-pub const fn shape_ok(pk: &Package, s: u32, b: &Body) bool {
+pub(package) const fn shape_ok(pk: &Package, s: u32, b: &Body) bool {
     let sy = pk.syms[s as usize];
     if sy.noinline || b.naked || b.sig == NONE || (b.pool[b.sig as usize + 1] & SIG_VARIADIC) != 0 || le::modeled(
         pk.spell(sy.name),
@@ -58,7 +58,7 @@ pub const fn shape_ok(pk: &Package, s: u32, b: &Body) bool {
 }
 
 /// Whether body `b` fits budget `bu`.
-pub const fn small(b: &Body, bu: Budget) bool {
+pub(package) const fn small(b: &Body, bu: Budget) bool {
     let mut warm: u32 = 0;
     for k in 0..b.blocks.len() {
         if (b.blocks[k].flags & BLOCK_COLD) == 0 {
@@ -71,19 +71,19 @@ pub const fn small(b: &Body, bu: Budget) bool {
 // A call to inline: its instruction, the callee's body and the bases of the copy's blocks, values and
 // parameters, and the continuation block and its parameter (NONE: a call without a result).
 struct Site {
-    pub inst: u32,
-    pub callee: u32,
-    pub bbase: u32,
-    pub vbase: u32,
-    pub pbase: u32,
-    pub kblock: u32,
-    pub kparam: u32,
+    pub(package) inst: u32,
+    pub(package) callee: u32,
+    pub(package) bbase: u32,
+    pub(package) vbase: u32,
+    pub(package) pbase: u32,
+    pub(package) kblock: u32,
+    pub(package) kparam: u32,
 }
 
 extend Site as Copy {}
 
 /// The inliner's scratch, reused from body to body.
-pub struct Inliner {
+pub(package) struct Inliner {
     sites: Vector<Site>,
     cmap: Vector<u32>, // per caller instruction, its value in the new body
     cbmap: Vector<u32>, // per caller block, the new block that starts it
@@ -97,16 +97,16 @@ pub struct Inliner {
 
 // The bases of one callee copy's tables in the new body.
 struct Bases {
-    pub pool: u32,
-    pub words: u32,
-    pub slots: u32,
-    pub lines: u32,
+    pub(package) pool: u32,
+    pub(package) words: u32,
+    pub(package) slots: u32,
+    pub(package) lines: u32,
 }
 
 extend Bases as Copy {}
 
 extend Inliner {
-    pub fn new() Inliner {
+    pub(package) fn new() Inliner {
         return Inliner {
             sites: Vector::<Site>::new(),
             cmap: Vector::<u32>::new(),
@@ -124,7 +124,7 @@ extend Inliner {
     /// (`ok` is read for those only: a body of another level may be in the works), a body with a `unit`
     /// (per body: its unit when the unit keeps its bodies, else NONE) into a body of that unit only.
     /// Whether any inlined.
-    pub fn run(
+    pub(package) fn run(
         self: &mut Self,
         pk: &Package,
         bodies: *const Body,

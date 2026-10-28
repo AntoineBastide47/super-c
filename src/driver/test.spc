@@ -27,54 +27,54 @@ import link::link as lk;
 import std::parallel::runtime as prt;
 
 /// --test run options, forwarded to the generated runner.
-pub struct TestOpts {
-    pub enabled: bool,
-    pub jobs: i32,
-    pub no_fork: bool,
-    pub quiet: bool,
-    pub filter: *const char,
-    pub shard: i32,
-    pub shards: i32,
-    pub timeout: i32, // seconds a test may run before it fails as timed out; 0: none; -1: DEFAULT_TEST_TIMEOUT
-    pub durations: *const char, // the duration file: --test-durations, else (`super-c test`) <test dir>/durations.tsv; null: none
-    pub record: bool, // --test-record-durations: merge this run's durations into `record_to`, else `durations`
-    pub record_to: *const char, // --test-record-durations=F: F; null: `durations`
+pub(package) struct TestOpts {
+    pub(package) enabled: bool,
+    pub(package) jobs: i32,
+    pub(package) no_fork: bool,
+    pub(package) quiet: bool,
+    pub(package) filter: *const char,
+    pub(package) shard: i32,
+    pub(package) shards: i32,
+    pub(package) timeout: i32, // seconds a test may run before it fails as timed out; 0: none; -1: DEFAULT_TEST_TIMEOUT
+    pub(package) durations: *const char, // the duration file: --test-durations, else (`super-c test`) <test dir>/durations.tsv; null: none
+    pub(package) record: bool, // --test-record-durations: merge this run's durations into `record_to`, else `durations`
+    pub(package) record_to: *const char, // --test-record-durations=F: F; null: `durations`
 }
 
 /// The seconds a test may run when neither `--test-timeout` nor its `@test(timeout = N)` says otherwise.
-pub const DEFAULT_TEST_TIMEOUT: i32 = 90;
+pub(package) const DEFAULT_TEST_TIMEOUT: i32 = 90;
 /// One runnable @test. `wants` is a bitmask of the wrapper's arguments: 1 = fixture/receiver param,
 /// 2 = global-env param. The suite fields are set only for suite-method tests taking `self`.
-pub struct TestCase {
-    pub mod: ModuleId,
-    pub func: NodeId,
-    pub should_panic: bool,
-    pub timeout: u32, // `@test(timeout = N)` seconds; 0: the run's global timeout
-    pub wants: u8,
-    pub suite: DefId,
-    pub suite_init: NodeId,
-    pub suite_free: NodeId,
+pub(package) struct TestCase {
+    pub(package) mod: ModuleId,
+    pub(package) func: NodeId,
+    pub(package) should_panic: bool,
+    pub(package) timeout: u32, // `@test(timeout = N)` seconds; 0: the run's global timeout
+    pub(package) wants: u8,
+    pub(package) suite: DefId,
+    pub(package) suite_init: NodeId,
+    pub(package) suite_free: NodeId,
 }
 /// A per-(module, extended type) suite: its '@test_init' producer and optional '@test_free' teardown.
-pub struct TestSuite {
-    pub mod: ModuleId,
-    pub ty: DefId,
-    pub init: NodeId,
-    pub fre: NodeId,
+pub(package) struct TestSuite {
+    pub(package) mod: ModuleId,
+    pub(package) ty: DefId,
+    pub(package) init: NodeId,
+    pub(package) fre: NodeId,
 }
 /// The package-wide plan: all cases, the per-module fixture tables (indexed by ModuleId), the suites, and
 /// the at-most-one global env pair. `ok` goes false when any validation error was reported.
-pub struct TestPlan {
-    pub cases: Vector<TestCase>,
-    pub fx_init: Vector<NodeId>,
-    pub fx_free: Vector<NodeId>,
-    pub fx_type: Vector<DefId>,
-    pub suites: Vector<TestSuite>,
-    pub genv_mod: ModuleId,
-    pub genv_init: NodeId,
-    pub genv_free: NodeId,
-    pub genv_type: DefId,
-    pub ok: bool,
+pub(package) struct TestPlan {
+    pub(package) cases: Vector<TestCase>,
+    pub(package) fx_init: Vector<NodeId>,
+    pub(package) fx_free: Vector<NodeId>,
+    pub(package) fx_type: Vector<DefId>,
+    pub(package) suites: Vector<TestSuite>,
+    pub(package) genv_mod: ModuleId,
+    pub(package) genv_init: NodeId,
+    pub(package) genv_free: NodeId,
+    pub(package) genv_type: DefId,
+    pub(package) ok: bool,
 }
 // A test-plan validation error, rendered with the compiler's usual source excerpt.
 fn test_err(p: &mut loader::Package, m: ModuleId, sp: tok::Span, msg: str) {
@@ -249,7 +249,7 @@ fn test_free_sig(p: &loader::Package, m: ModuleId, src: *const char, fnode: Node
 }
 
 /// Collect + validate every @test/@test_init/@test_free in the package into a runnable plan.
-pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
+pub(package) fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
     let n = p.modules.len();
     let owners = test_item_owners(p);
     // Pass 1: fixture producers/teardowns (module, suite, and global).
@@ -542,7 +542,7 @@ pub fn test_plan_build(p: &mut loader::Package, plan: &mut TestPlan) {
 /// The test runner's entry of `plan` as LIR text for a target of `ptr`-byte pointers (a native build's
 /// `__test_main.o`): what `write_test_main` writes as C, the table and `main`, with the global-env hooks
 /// `sc_genv_init` and `sc_genv_free` (stubs when absent).
-pub fn test_main_lir(p: &loader::Package, plan: &TestPlan, ptr: u32, out: &mut String) {
+pub(package) fn test_main_lir(p: &loader::Package, plan: &TestPlan, ptr: u32, out: &mut String) {
     let n = plan.cases.len();
     let genv = plan.genv_init != NODE_NONE;
     out.format_into("lir ptr {}\nsym @main fn global\nsym @sc_test_main fn global ext\n", ptr);
@@ -654,7 +654,7 @@ fn test_case_name(p: &loader::Package, tc: TestCase, out: &mut String) {
 
 /// Append the `@link` flags of the `__ldflags` file `path` (one flag string per line, split on
 /// whitespace) to `args`; a missing file adds nothing.
-pub fn push_ldflags(args: &mut Vector<String>, path: str) {
+pub(package) fn push_ldflags(args: &mut Vector<String>, path: str) {
     let lf = loader::read_file(path);
     if lf.is_none() {
         return;
@@ -673,7 +673,7 @@ pub fn push_ldflags(args: &mut Vector<String>, path: str) {
 /// Link package `p`'s native objects `objs` with the own linker: into `out_bin` (the `build` subcommand),
 /// else into the test runner `<gen_root>/__tests`, which then runs with `topts`' options. Returns the
 /// link's or the runner's exit code.
-pub fn native_link_and_run(
+pub(package) fn native_link_and_run(
     p: &loader::Package,
     topts: *const TestOpts,
     objs: &Vector<String>,
@@ -728,7 +728,7 @@ pub fn native_link_and_run(
 /// Run the linked test runner `bin` with the pool, fork, filter, quiet and shard options in `topts`.
 /// Releases this process's jobserver slot first so the runner's test pool inherits it. Returns the
 /// runner's exit code, or 1 when it could not be spawned.
-pub fn test_run_runner(topts: *const TestOpts, bin: str) i32 {
+pub(package) fn test_run_runner(topts: *const TestOpts, bin: str) i32 {
     let mut run = Vector::<String>::new();
     run.push(String::from_str(bin));
     if unsafe (*topts).jobs > 0 {
@@ -797,7 +797,7 @@ pub fn test_run_runner(topts: *const TestOpts, bin: str) i32 {
 
 extend TestPlan {
     /// `count` is the package's module count: it sizes the per-module fixture tables (minimum 1).
-    pub fn new(count: usize) TestPlan {
+    pub(package) fn new(count: usize) TestPlan {
         let mut pl = TestPlan {
             cases: Vector::<TestCase>::new(),
             fx_init: Vector::<NodeId>::new(),

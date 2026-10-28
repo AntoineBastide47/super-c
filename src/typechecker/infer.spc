@@ -11,34 +11,34 @@ import module::loader as loader;
 //   11 ConstVar(id)        a const inference variable
 /// A tagged inference-time type: a published TypeId, a type variable, or a const variable (see the
 /// IT_TAG_* tags and the it_* constructors).
-pub type InferTy = u32;
-pub const IT_TAG_PUB: u32 = 0;
-pub const IT_TAG_VAR: u32 = 1;
-pub const IT_TAG_CVAR: u32 = 3;
-pub const IT_UNBOUND: u32 = 0xFFFFFFFF; // binding-slot sentinel, never a valid InferTy
+pub(package) type InferTy = u32;
+pub(package) const IT_TAG_PUB: u32 = 0;
+pub(package) const IT_TAG_VAR: u32 = 1;
+pub(package) const IT_TAG_CVAR: u32 = 3;
+pub(package) const IT_UNBOUND: u32 = 0xFFFFFFFF; // binding-slot sentinel, never a valid InferTy
 
 /// The InferTy of an interned type of the current module.
-pub const fn it_pub(t: TypeId) InferTy {
+pub(package) const fn it_pub(t: TypeId) InferTy {
     return t;
 }
 /// The InferTy of inference variable `v`.
-pub const fn it_var(v: u32) InferTy {
+pub(package) const fn it_var(v: u32) InferTy {
     return IT_TAG_VAR << 30 | v;
 }
 /// The InferTy of const variable `c`.
-pub const fn it_cvar(c: u32) InferTy {
+pub(package) const fn it_cvar(c: u32) InferTy {
     return IT_TAG_CVAR << 30 | c;
 }
 /// The IT_TAG_* tag of `t`.
-pub const fn it_tag(t: InferTy) u32 {
+pub(package) const fn it_tag(t: InferTy) u32 {
     return t >> 30;
 }
 /// The 30-bit payload of `t`: TypeId, variable id, or const-variable id.
-pub const fn it_payload(t: InferTy) u32 {
+pub(package) const fn it_payload(t: InferTy) u32 {
     return t & 0x3FFFFFFF;
 }
 /// True for a const variable.
-pub const fn it_is_cvar(t: InferTy) bool {
+pub(package) const fn it_is_cvar(t: InferTy) bool {
     return it_tag(t) == IT_TAG_CVAR;
 }
 
@@ -47,103 +47,103 @@ const LK_BINDING: u8 = 0;
 const LK_CBIND: u8 = 1;
 
 struct LogEnt {
-    pub kind: u8,
-    pub idx: u32,
-    pub old: u64,
+    pub(package) kind: u8,
+    pub(package) idx: u32,
+    pub(package) old: u64,
 }
 
 /// A probe mark: a solver snapshot plus the session-map watermark (relative to the active session),
 /// so a nested candidate probe can map its own parameters and be rolled back without disturbing the
 /// enclosing call session.
-pub struct ProbeMark {
-    pub snap: Snapshot,
-    pub base: u32,
+pub(package) struct ProbeMark {
+    pub(package) snap: Snapshot,
+    pub(package) base: u32,
 }
 
 /// A snapshot is a group of integer watermarks; rollback truncates growth past them and replays the
 /// log backwards. It never copies vectors, maps, or types.
-pub struct Snapshot {
-    pub log: u32,
-    pub nvars: u32,
-    pub ncvars: u32,
-    pub nbounds: u32,
-    pub nconflicts: u32,
-    pub ntype_conflicts: u32,
+pub(package) struct Snapshot {
+    pub(package) log: u32,
+    pub(package) nvars: u32,
+    pub(package) ncvars: u32,
+    pub(package) nbounds: u32,
+    pub(package) nconflicts: u32,
+    pub(package) ntype_conflicts: u32,
 }
 
 /// Where the active call session starts in each session table. A call checked while another call's
 /// session is open (a postponed closure body) opens its own session on top and closes it before the
 /// enclosing session continues.
-pub struct SessionMark {
-    pub pd: u32,
-    pub bounds: u32,
-    pub cconflicts: u32,
-    pub type_conflicts: u32,
+pub(package) struct SessionMark {
+    pub(package) pd: u32,
+    pub(package) bounds: u32,
+    pub(package) cconflicts: u32,
+    pub(package) type_conflicts: u32,
 }
 
 // One recorded piece of directional evidence for a variable: `ty` flowed into the variable's
 // position. `eq` marks a nested (invariant) position.
 struct BoundRec {
-    pub var: u32,
-    pub ty: TypeId,
-    pub eq: bool,
+    pub(package) var: u32,
+    pub(package) ty: TypeId,
+    pub(package) eq: bool,
 }
 
 /// Two uses that disagree: two directional uses of one type variable with no unique safe-conversion
 /// join, or two exact uses of one const variable with different values. Recorded, not emitted; the
 /// adapter turns them into one diagnostic at the call.
-pub struct TypeConflict {
-    pub first: TypeId,
-    pub later: TypeId,
+pub(package) struct TypeConflict {
+    pub(package) first: TypeId,
+    pub(package) later: TypeId,
 }
 
 /// The per-body mutable inference state. One live context serves one body at a time; check_item
 /// resets the function-scoped fields per body. No pointer into this state is published: results land
 /// in the Ast side tables.
-pub struct InferenceContext {
-    pub current_returns: NodeList,
-    pub current_fn: NodeId,
-    pub clos_stack: [NodeId; 8],
-    pub nclos: u32,
-    pub closure_depth: u32,
-    pub unsafe_depth: u32,
-    pub unsafe_used: u32, // ops inside the innermost active 'unsafe' that required it (lint)
-    pub unsafe_at: u32, // the innermost 'unsafe' marker's start + 1; 0: none
-    pub unsafe_feat: u32, // calls of functions that need CPU features inside it (`FeatureCall`)
-    pub mret_call: NodeId,
+pub(package) struct InferenceContext {
+    pub(package) current_returns: NodeList,
+    pub(package) current_fn: NodeId,
+    pub(package) clos_stack: [NodeId; 8],
+    pub(package) nclos: u32,
+    pub(package) closure_depth: u32,
+    pub(package) unsafe_depth: u32,
+    pub(package) unsafe_used: u32, // ops inside the innermost active 'unsafe' that required it (lint)
+    pub(package) unsafe_at: u32, // the innermost 'unsafe' marker's start + 1; 0: none
+    pub(package) unsafe_feat: u32, // calls of functions that need CPU features inside it (`FeatureCall`)
+    pub(package) mret_call: NodeId,
     /// The one call whose several results its context takes (`let (a, b) = f()`, `return f();`, a
     /// statement, a member's object); any other call with several results is no value.
-    pub mret_ok: NodeId,
-    pub mret_types: [TypeId; 8],
-    pub mret_n: u8,
-    pub mret_total: u32,
+    pub(package) mret_ok: NodeId,
+    pub(package) mret_types: [TypeId; 8],
+    pub(package) mret_n: u8,
+    pub(package) mret_total: u32,
     /// The argument list of the call whose callee is being resolved, so overload selection can look
     /// at what is being passed. Empty outside that window: a bare member access has no arguments.
-    pub call_args: NodeList,
+    pub(package) call_args: NodeList,
     /// The turbofish of that call's callee (`f::<T>(..)`, `x.m::<T>(..)`), in the same window: its
     /// arguments bind the leading generic parameters of every candidate overload selection weighs.
-    pub call_targs: NodeList,
+    pub(package) call_targs: NodeList,
     /// Bit i: argument i of `call_args` was checked while overload selection weighed it, so the
     /// call's argument pass does not check it again.
-    pub args_pre: u8,
+    pub(package) args_pre: u8,
     /// The callee node of the call being checked: a turbofished generic function there is the
     /// function called, not a pointer to its instance, and a path there (`K::make()`) chooses among
     /// overloads even without arguments.
-    pub callee_node: NodeId,
-    pub addr_ctx: bool,
+    pub(package) callee_node: NodeId,
+    pub(package) addr_ctx: bool,
     /// The place an assignment or a `&mut` writes (past `unsafe` and `move`): its member check
     /// knows the field is written.
-    pub write_node: NodeId,
-    pub proj_obj_ok: bool, // one-shot: the identifier being checked is a member's object
+    pub(package) write_node: NodeId,
+    pub(package) proj_obj_ok: bool, // one-shot: the identifier being checked is a member's object
     /// Guards tc_coerce_from against re-entering itself through the oracle it hangs off.
-    pub coerce_depth: i32,
+    pub(package) coerce_depth: i32,
     /// The solver core: variables, union-find, rollback, local terms, and the call session.
-    pub sv: Solver,
+    pub(package) sv: Solver,
 }
 
 extend InferenceContext {
     /// Fresh walk state with no function in progress and an empty solver.
-    pub fn new() InferenceContext {
+    pub(package) fn new() InferenceContext {
         return InferenceContext {
             current_returns: NodeList { start: 0, len: 0 },
             current_fn: NODE_NONE,
@@ -171,24 +171,24 @@ extend InferenceContext {
 /// The inference solver core: dense variable arrays, a rollback log of changed cells, and the
 /// per-call generic-argument session. Every binding is a published type, so a variable resolves in
 /// one step. Storage is reused across calls; nothing here is published.
-pub struct Solver {
-    pub ast: *mut Ast, // the module under check; set per checker, read-only pool access
+pub(package) struct Solver {
+    pub(package) ast: *mut Ast, // the module under check; set per checker, read-only pool access
     v_binding: Vector<u32>, // InferTy or IT_UNBOUND
     c_ty: Vector<u32>, // TYPE_CONST or TYPE_CONST_EXPR TypeId; canonical interning makes id equality value equality
     c_bound: Vector<bool>,
     log: Vector<LogEnt>,
     bounds: Vector<BoundRec>,
-    pub cconflicts: Vector<TypeConflict>,
-    pub type_conflicts: Vector<TypeConflict>,
+    pub(package) cconflicts: Vector<TypeConflict>,
+    pub(package) type_conflicts: Vector<TypeConflict>,
     s_pd: Vector<DefId>,
     s_slot: Vector<u32>, // it_var(..) or it_cvar(..)
     /// The active session's start in each session table; slots are relative to `sess.pd`.
-    pub sess: SessionMark,
+    pub(package) sess: SessionMark,
 }
 
 extend Solver {
     /// An empty solver bound to no Ast.
-    pub fn new() Solver {
+    pub(package) fn new() Solver {
         return Solver {
             ast: null,
             v_binding: Vector::<u32>::new(),
@@ -205,14 +205,14 @@ extend Solver {
     }
 
     /// A fresh unbound inference variable.
-    pub fn var_new(self: &mut Self) u32 {
+    pub(package) fn var_new(self: &mut Self) u32 {
         let v = self.v_binding.len() as u32;
         self.v_binding.push(IT_UNBOUND);
         return v;
     }
 
     /// A fresh unbound const variable.
-    pub fn cvar_new(self: &mut Self) u32 {
+    pub(package) fn cvar_new(self: &mut Self) u32 {
         let c = self.c_ty.len() as u32;
         self.c_ty.push(0);
         self.c_bound.push(false);
@@ -221,7 +221,7 @@ extend Solver {
 
     /// Resolve a term to its current head: a bound variable resolves to its binding, an unbound one
     /// to itself.
-    pub const fn resolve(self: &Self, t: InferTy) InferTy {
+    pub(package) const fn resolve(self: &Self, t: InferTy) InferTy {
         if it_tag(t) != IT_TAG_VAR {
             return t;
         }
@@ -233,7 +233,7 @@ extend Solver {
     }
 
     /// The current lengths of every solver table; `rollback` restores them.
-    pub const fn snapshot(self: &Self) Snapshot {
+    pub(package) const fn snapshot(self: &Self) Snapshot {
         return Snapshot {
             log: self.log.len() as u32,
             nvars: self.v_binding.len() as u32,
@@ -245,7 +245,7 @@ extend Solver {
     }
 
     /// Undo every binding and allocation made since `s` was taken.
-    pub fn rollback(self: &mut Self, s: &Snapshot) {
+    pub(package) fn rollback(self: &mut Self, s: &Snapshot) {
         // Replay the log backwards first: entries may touch cells that predate the snapshot.
         let mut i = self.log.len();
         while i > s.log as usize {
@@ -280,7 +280,7 @@ extend Solver {
     }
 
     /// Bind unbound variable `v` to published type `t`. Logged.
-    pub fn bind(self: &mut Self, v: u32, t: TypeId) {
+    pub(package) fn bind(self: &mut Self, v: u32, t: TypeId) {
         assert(self.v_binding[v as usize] == IT_UNBOUND, "bind on a bound variable");
         self.log_binding(v);
         self.v_binding.set(v as usize, it_pub(t));
@@ -289,7 +289,7 @@ extend Solver {
     /// Bind const variable `c` to an exact const argument (a TYPE_CONST or TYPE_CONST_EXPR id;
     /// canonical interning makes id equality value equality). A disagreeing later value records a
     /// conflict and keeps the first binding (the adapter reports the conflict once per call).
-    pub fn cbind(self: &mut Self, c: u32, ty: TypeId) bool {
+    pub(package) fn cbind(self: &mut Self, c: u32, ty: TypeId) bool {
         if self.c_bound[c as usize] {
             if self.c_ty[c as usize] == ty || self.c_ty[c as usize] == TYPE_ERROR {
                 return true;
@@ -305,12 +305,12 @@ extend Solver {
 
     /// Begin a nested candidate probe: parameters mapped after this mark stack on top of the
     /// enclosing session, and probe_end removes every trace of the probe's work.
-    pub const fn probe_begin(self: &mut Self) ProbeMark {
+    pub(package) const fn probe_begin(self: &mut Self) ProbeMark {
         return ProbeMark { snap: self.snapshot(), base: self.s_pd.len() as u32 - self.sess.pd };
     }
 
     /// End the probe begun at `m`: every binding and parameter slot it created is discarded.
-    pub fn probe_end(self: &mut Self, m: &ProbeMark) {
+    pub(package) fn probe_end(self: &mut Self, m: &ProbeMark) {
         self.rollback(&m.snap);
         self.s_pd.truncate((self.sess.pd + m.base) as usize);
         self.s_slot.truncate((self.sess.pd + m.base) as usize);
@@ -319,7 +319,7 @@ extend Solver {
     /// Start a call session: clears the active session's parameter map and evidence tables.
     /// Variables allocated by earlier sessions stay (dense ids); the session map is the only live
     /// entry point.
-    pub fn session_begin(self: &mut Self) {
+    pub(package) fn session_begin(self: &mut Self) {
         self.s_pd.truncate(self.sess.pd as usize);
         self.s_slot.truncate(self.sess.pd as usize);
         self.bounds.truncate(self.sess.bounds as usize);
@@ -328,7 +328,7 @@ extend Solver {
 
     /// Open a session above the active one; returns the enclosing session's mark for
     /// `session_close`. The enclosing session's slots, evidence and conflicts stay untouched.
-    pub const fn session_open(self: &mut Self) SessionMark {
+    pub(package) const fn session_open(self: &mut Self) SessionMark {
         let outer = self.sess;
         self.sess = SessionMark {
             pd: self.s_pd.len() as u32,
@@ -340,14 +340,14 @@ extend Solver {
     }
 
     /// Close the session opened by `session_open` and make `outer` active again.
-    pub fn session_close(self: &mut Self, outer: &SessionMark) {
+    pub(package) fn session_close(self: &mut Self, outer: &SessionMark) {
         self.session_begin();
         self.type_conflicts.truncate(self.sess.type_conflicts as usize);
         self.sess = *outer;
     }
 
     /// Map one generic parameter declaration to a fresh variable; returns its session slot.
-    pub fn map_param(self: &mut Self, d: DefId, is_const: bool) u32 {
+    pub(package) fn map_param(self: &mut Self, d: DefId, is_const: bool) u32 {
         let slot = self.s_pd.len() as u32 - self.sess.pd;
         self.s_pd.push(d);
         if is_const {
@@ -361,7 +361,7 @@ extend Solver {
     /// The session slot mapped for generic parameter `d`, or -1. Linear over the active session, the
     /// newest mapping first: a probe's mapping shadows the session's mapping of the same parameter
     /// (a call session's map stays until the next call starts one).
-    pub const fn slot_of(self: &Self, d: DefId) i32 {
+    pub(package) const fn slot_of(self: &Self, d: DefId) i32 {
         let mut i = self.s_pd.len();
         while i > self.sess.pd as usize {
             i -= 1;
@@ -373,12 +373,12 @@ extend Solver {
     }
 
     /// The active session's slot count.
-    pub const fn slot_count(self: &Self) u32 {
+    pub(package) const fn slot_count(self: &Self) u32 {
         return (self.s_pd.len() - self.sess.pd as usize) as u32;
     }
 
     /// The generic parameter declaration session slot `slot` maps.
-    pub const fn slot_def(self: &Self, slot: u32) DefId {
+    pub(package) const fn slot_def(self: &Self, slot: u32) DefId {
         return self.s_pd[(self.sess.pd + slot) as usize];
     }
 
@@ -414,7 +414,7 @@ extend Solver {
 
     /// Explicit evidence (turbofish): binds the slot exactly. First explicit binding wins; the
     /// argument-compatibility pass reports any later disagreement.
-    pub fn s_explicit(self: &mut Self, slot: u32, ty: TypeId) {
+    pub(package) fn s_explicit(self: &mut Self, slot: u32, ty: TypeId) {
         let t = self.slot_ty(slot);
         if ty == TYPE_ERROR {
             self.poison(t);
@@ -432,7 +432,7 @@ extend Solver {
 
     /// Nested (invariant) evidence: bind-if-unbound. A later disagreeing nested use keeps the first
     /// binding; the argument-compatibility pass reports the mismatch at its own position.
-    pub fn s_eq(self: &mut Self, slot: u32, ty: TypeId) {
+    pub(package) fn s_eq(self: &mut Self, slot: u32, ty: TypeId) {
         let t = self.slot_ty(slot);
         if ty == TYPE_ERROR {
             self.poison(t);
@@ -451,7 +451,7 @@ extend Solver {
 
     /// Top-level directional evidence: the argument value flows into the parameter, so a safe
     /// conversion is allowed. Recorded; joined at resolve time.
-    pub fn s_lb(self: &mut Self, slot: u32, ty: TypeId) {
+    pub(package) fn s_lb(self: &mut Self, slot: u32, ty: TypeId) {
         let t = self.slot_ty(slot);
         if ty == TYPE_ERROR {
             self.poison(t);
@@ -467,7 +467,7 @@ extend Solver {
     /// Resolve one session slot to a published TypeId. An existing exact binding wins. Directional
     /// bounds resolve only when one unique bound absorbs every use. Incomparable bounds stay
     /// unresolved so source order cannot select a type.
-    pub fn s_resolve(self: &mut Self, slot: u32, conv: fn(*mut Ast, TypeId, TypeId) bool) TypeId {
+    pub(package) fn s_resolve(self: &mut Self, slot: u32, conv: fn(*mut Ast, TypeId, TypeId) bool) TypeId {
         let t = self.slot_ty(slot);
         if it_is_cvar(t) {
             let c = it_payload(t);

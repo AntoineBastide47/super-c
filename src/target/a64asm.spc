@@ -7,20 +7,20 @@ import target::a64tab as t;
 
 /// A symbol or label an instruction names: the relocation kind (`a::R_*`, or a `FX_*` kind only a
 /// local label resolves), the name as written and the addend.
-pub struct Fix {
-    pub kind: u8,
-    pub name: String,
-    pub addend: i64,
+pub(package) struct Fix {
+    pub(package) kind: u8,
+    pub(package) name: String,
+    pub(package) addend: i64,
 }
 
-pub const FX_NONE: u8 = 0;
+pub(package) const FX_NONE: u8 = 0;
 /// A conditional branch, compare and branch, or test and branch: a label of the same section only.
-pub const FX_B19: u8 = 100;
-pub const FX_B14: u8 = 101;
-pub const FX_ADR: u8 = 102;
+pub(package) const FX_B19: u8 = 100;
+pub(package) const FX_B14: u8 = 101;
+pub(package) const FX_ADR: u8 = 102;
 
 extend Fix {
-    pub fn new() Fix {
+    pub(package) fn new() Fix {
         return Fix { kind: FX_NONE, name: String::new(), addend: 0 };
     }
 }
@@ -50,15 +50,15 @@ const ELEM: [str<'static>; 5] = ["b", "h", "s", "d", "q"];
 const ZR_SP: [str<'static>; 4] = ["wzr", "xzr", "wsp", "sp"];
 
 /// The name of condition `c`.
-pub const fn cond_name(c: u32) str<'static> {
+pub(package) const fn cond_name(c: u32) str<'static> {
     let n: []str<'static> = COND_NAMES;
     return n[c as usize & 15];
 }
 
 // System registers by name: o0:op1:CRn:CRm:op2 (o0 is op0 - 2).
 struct SysReg {
-    pub name: str<'static>,
-    pub enc: u32,
+    pub(package) name: str<'static>,
+    pub(package) enc: u32,
 }
 
 const fn sr(op0: u32, op1: u32, crn: u32, crm: u32, op2: u32) u32 {
@@ -83,8 +83,8 @@ const SYSREGS: [SysReg; 13] = [
 
 // Barrier options by name (the CRm field).
 struct Named {
-    pub name: str<'static>,
-    pub v: u32,
+    pub(package) name: str<'static>,
+    pub(package) v: u32,
 }
 
 const BARRIERS: [Named; 12] = [
@@ -313,11 +313,11 @@ const fn reg_name(w: str, l: &mut u8, n: &mut i64, sp: &mut bool) {
 // code: 0..7 the vector arrangements, 10 + log2 bytes an element) and an optional `/z` or `/m` (`pq`
 // 1 or 2).
 struct Reg {
-    pub l: u8,
-    pub n: i64,
-    pub sp: bool,
-    pub arr: i32,
-    pub pq: u8,
+    pub(package) l: u8,
+    pub(package) n: i64,
+    pub(package) sp: bool,
+    pub(package) arr: i32,
+    pub(package) pq: u8,
 }
 
 const fn reg(s: str, i: &mut usize, r: &mut Reg) bool {
@@ -380,13 +380,13 @@ const fn reg(s: str, i: &mut usize, r: &mut Reg) bool {
 // What the sized operands say about the variant: the general register width (0 w, 1 x), the float
 // register size (log2 of bytes), the vector arrangement, the SVE element; -1 when no operand says.
 struct Facts {
-    pub gw: i32,
-    pub fs: i32,
-    pub arr: i32,
-    pub ze: i32,
-    pub rmx: i32, // the width K::RMX's register has
-    pub rtb: i32, // the width K::RTB's register has
-    pub felem: i32, // the element K::FELEM's register has
+    pub(package) gw: i32,
+    pub(package) fs: i32,
+    pub(package) arr: i32,
+    pub(package) ze: i32,
+    pub(package) rmx: i32, // the width K::RMX's register has
+    pub(package) rtb: i32, // the width K::RTB's register has
+    pub(package) felem: i32, // the element K::FELEM's register has
 }
 
 // Set fact `f` to `v`; false when it holds another value.
@@ -565,13 +565,13 @@ fn sym_ref(s: str, i: &mut usize, role: u8, fx: &mut Fix) bool {
 struct Role {}
 
 extend Role {
-    pub const BRANCH: u8 = 1; // b, bl
-    pub const B19: u8 = 2;
-    pub const B14: u8 = 3;
-    pub const ADR: u8 = 4;
-    pub const ADRP: u8 = 5;
-    pub const LO12: u8 = 6; // add #imm
-    pub const LDST: u8 = 7; // a load or store offset
+    pub(package) const BRANCH: u8 = 1; // b, bl
+    pub(package) const B19: u8 = 2;
+    pub(package) const B14: u8 = 3;
+    pub(package) const ADR: u8 = 4;
+    pub(package) const ADRP: u8 = 5;
+    pub(package) const LO12: u8 = 6; // add #imm
+    pub(package) const LDST: u8 = 7; // a load or store offset
 }
 
 // The relocation of a reference in role `role` with specifier `spec` (empty: none), 0xFF when the pair
@@ -700,7 +700,7 @@ const fn mem_open(s: str, i: &mut usize, base: &mut i64) bool {
 }
 
 // The float value of FMOV immediate `imm8` as an f64.
-pub const fn fp8_value(imm8: u32) f64 {
+pub(package) const fn fp8_value(imm8: u32) f64 {
     let sign = imm8 >> 7 & 1;
     let b = imm8 >> 6 & 1;
     let exp = ((b ^ 1) << 2 | imm8 >> 4 & 3) as i32 - 3;
@@ -1512,7 +1512,7 @@ const fn q_of(r: t::Row, f: &Facts) u32 {
 
 /// Assemble the instruction `text` (mnemonic and operands, no label or comment) into `out`; `fx` gets
 /// the symbol it names, if any. False with `err` set when it does not assemble.
-pub fn assemble(text: str, out: &mut u32, fx: &mut Fix, err: &mut String) bool {
+pub(package) fn assemble(text: str, out: &mut u32, fx: &mut Fix, err: &mut String) bool {
     let mut i: usize = 0;
     let mn0 = word(text, &mut i);
     let mut mn = String::from_str(mn0);
@@ -1728,7 +1728,7 @@ fn off_text(o: &mut String, v: i64) {
 
 /// Disassemble word `w` into `out` (mnemonic and operands); false (and `.inst 0x..`) when no row
 /// matches.
-pub fn disassemble(w: u32, out: &mut String) bool {
+pub(package) fn disassemble(w: u32, out: &mut String) bool {
     let mut ri: u32 = 0;
     let mut q: u32 = 0;
     let mut v = t::Vals::new();
@@ -1743,7 +1743,7 @@ pub fn disassemble(w: u32, out: &mut String) bool {
 }
 
 /// The text of row `r` with variant `q` and operand values `v`.
-pub fn print_row(r: t::Row, q: u32, v: &t::Vals, o: &mut String) {
+pub(package) fn print_row(r: t::Row, q: u32, v: &t::Vals, o: &mut String) {
     o.push_str(r.mn);
     let x = t::is64(r.q, q);
     let mut at: usize = 0;

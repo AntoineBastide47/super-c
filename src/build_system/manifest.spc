@@ -12,78 +12,78 @@ import ir::cpu_features as cf;
 /// local symbols and debug information; `opt` is the `opt-level` (whether `lir::opt` runs), `debug`
 /// whether the objects carry debug information; `link_args` reach the linker after the profile's
 /// ldflags (`-Wl,<arg>` each).
-pub struct Profile<'a> {
-    pub name: str<'a>,
-    pub ldflags: Vector<String>,
-    pub link_args: Vector<String>,
-    pub strip: bool,
-    pub opt: i32,
-    pub debug: bool,
+pub(package) struct Profile<'a> {
+    pub(package) name: str<'a>,
+    pub(package) ldflags: Vector<String>,
+    pub(package) link_args: Vector<String>,
+    pub(package) strip: bool,
+    pub(package) opt: i32,
+    pub(package) debug: bool,
     /// `lockdep`: the runtime's lock-order checks are compiled in (the build constant LOCKDEP); SC_LOCK_ORDER
     /// switches their reports on.
-    pub lockdep: bool,
+    pub(package) lockdep: bool,
     /// `overflow-checks`: 1 traps integer overflow, 0 wraps it, -1 follows `opt`.
-    pub overflow_checks: i32,
+    pub(package) overflow_checks: i32,
     /// `target-features`: the CPU features to enable; set (`has_features`), it replaces the build's list.
-    pub target_features: Vector<String>,
-    pub has_features: bool,
+    pub(package) target_features: Vector<String>,
+    pub(package) has_features: bool,
     /// The code-generation flags (`CG_*`) the profile turns on and off; the rest follow `opt`.
-    pub cg_on: u64,
-    pub cg_off: u64,
+    pub(package) cg_on: u64,
+    pub(package) cg_off: u64,
 }
 
 /// `opt-level` values: 0 to 3, OPT_S and OPT_Z (`"s"`, `"z"`); OPT_NONE when the profile names none.
-pub const OPT_NONE: i32 = -1;
-pub const OPT_S: i32 = 4;
-pub const OPT_Z: i32 = 5;
+pub(package) const OPT_NONE: i32 = -1;
+pub(package) const OPT_S: i32 = 4;
+pub(package) const OPT_Z: i32 = 5;
 
 /// The code-generation flags (GCC's and clang's `-f<name>` and `-fno-<name>`, and a profile's `<name> =
 /// true|false`): bits of the set a build runs with (`cg_effective`).
 /// Omit the frame pointer: functions address their frames through the stack pointer.
-pub const CG_OMIT_FRAME_POINTER: u64 = 1;
+pub(package) const CG_OMIT_FRAME_POINTER: u64 = 1;
 /// Inline calls (`-fno-inline`: none).
-pub const CG_INLINE: u64 = 2;
+pub(package) const CG_INLINE: u64 = 2;
 /// Inline calls past the ones that shrink the code (`-finline-functions`).
-pub const CG_INLINE_FUNCTIONS: u64 = 4;
+pub(package) const CG_INLINE_FUNCTIONS: u64 = 4;
 /// Unroll loops whose trip count is known (`-funroll-loops`).
-pub const CG_UNROLL: u64 = 8;
+pub(package) const CG_UNROLL: u64 = 8;
 /// Copy a loop for each side of a branch on a value it does not change (`-funswitch-loops`).
-pub const CG_UNSWITCH: u64 = 16;
+pub(package) const CG_UNSWITCH: u64 = 16;
 /// Copy a loop without its bounds checks, entered when one test before it proves them all
 /// (`-fversion-loops-for-bounds`, after GCC's `-fversion-loops-for-strides`).
-pub const CG_VERSION_LOOPS: u64 = 32;
+pub(package) const CG_VERSION_LOOPS: u64 = 32;
 /// A canary between a function's stack memory and its saved registers, checked before it returns:
 /// in the functions with a stack slot of at least 8 bytes (`-fstack-protector`), with any stack slot
 /// (`-fstack-protector-strong`), or in all (`-fstack-protector-all`). One at a time: setting one clears
 /// the others, and `-fno-stack-protector` clears them all.
-pub const CG_PROTECT: u64 = 64;
-pub const CG_PROTECT_STRONG: u64 = 128;
-pub const CG_PROTECT_ALL: u64 = 256;
+pub(package) const CG_PROTECT: u64 = 64;
+pub(package) const CG_PROTECT_STRONG: u64 = 128;
+pub(package) const CG_PROTECT_ALL: u64 = 256;
 const CG_PROTECTS: u64 = CG_PROTECT | CG_PROTECT_STRONG | CG_PROTECT_ALL;
 /// The float rewrites `-ffast-math` allows, each its own flag too: reassociation (`-fassociative-math`),
 /// a division by a constant as a product by its reciprocal (`-freciprocal-math`), no NaN or infinity
 /// (`-ffinite-math-only`), no signed zero (`-fno-signed-zeros`, its bit set by the `no` form), and a
 /// product added as one fused multiply-add (`-ffp-contract=fast`; `=off` clears it).
-pub const CG_ASSOC_MATH: u64 = 512;
-pub const CG_RECIP_MATH: u64 = 1024;
-pub const CG_FINITE_MATH: u64 = 2048;
-pub const CG_NO_SIGNED_ZEROS: u64 = 4096;
-pub const CG_FP_CONTRACT: u64 = 8192;
-pub const CG_FAST_MATH: u64 = CG_ASSOC_MATH | CG_RECIP_MATH | CG_FINITE_MATH | CG_NO_SIGNED_ZEROS | CG_FP_CONTRACT;
+pub(package) const CG_ASSOC_MATH: u64 = 512;
+pub(package) const CG_RECIP_MATH: u64 = 1024;
+pub(package) const CG_FINITE_MATH: u64 = 2048;
+pub(package) const CG_NO_SIGNED_ZEROS: u64 = 4096;
+pub(package) const CG_FP_CONTRACT: u64 = 8192;
+pub(package) const CG_FAST_MATH: u64 = CG_ASSOC_MATH | CG_RECIP_MATH | CG_FINITE_MATH | CG_NO_SIGNED_ZEROS | CG_FP_CONTRACT;
 /// Each function in a section of its own (`-ffunction-sections`), each variable in one (`-fdata-sections`),
 /// and the link drops what nothing reaches from the entry, the exports and the kept symbols (`link_gc`).
 /// Mach-O splits its sections at symbols instead, so either flag makes its link strip both.
-pub const CG_FUNCTION_SECTIONS: u64 = 16384;
-pub const CG_DATA_SECTIONS: u64 = 32768;
+pub(package) const CG_FUNCTION_SECTIONS: u64 = 16384;
+pub(package) const CG_DATA_SECTIONS: u64 = 32768;
 /// Counted loops over slices run 16-byte vectors at a time (`-fvectorize`, `lir::loops`).
-pub const CG_VECTORIZE: u64 = 65536;
+pub(package) const CG_VECTORIZE: u64 = 65536;
 /// An object is read and written only through its own type or bytes (`-fstrict-aliasing`, C's rule): an
 /// access of a typed place is assumed to touch no object of another scalar type (`lir::ir::MEM_TBAA`).
-pub const CG_STRICT_ALIASING: u64 = 131072;
+pub(package) const CG_STRICT_ALIASING: u64 = 131072;
 /// On ELF, a call of a C library function loads its address from its global offset table slot instead
 /// of calling a procedure linkage table stub (`-fno-plt`, its bit set by the `no` form): the loader
 /// binds it at start.
-pub const CG_NO_PLT: u64 = 262144;
+pub(package) const CG_NO_PLT: u64 = 262144;
 // Whether flag `b` (`CG_NAMES`) is set by its `no` form.
 const fn negated(b: u64) bool {
     return b == CG_NO_SIGNED_ZEROS || b == CG_NO_PLT;
@@ -144,7 +144,7 @@ fn cg_put(b: u64, set: bool, on: &mut u64, off: &mut u64) {
 
 /// Command-line flag `arg` (`-f<name>`, `-fno-<name>`, `-ffp-contract=off`) into `on` or `off`: false when
 /// it names no flag.
-pub fn cg_flag(arg: str, on: &mut u64, off: &mut u64) bool {
+pub(package) fn cg_flag(arg: str, on: &mut u64, off: &mut u64) bool {
     if arg == "-ffp-contract=off" {
         cg_put(CG_FP_CONTRACT, false, on, off);
         return true;
@@ -170,7 +170,7 @@ pub fn cg_flag(arg: str, on: &mut u64, off: &mut u64) bool {
 }
 
 /// Profile key `key` with value `v` into `on` or `off`: false when it names no flag.
-pub fn cg_key(key: str, v: bool, on: &mut u64, off: &mut u64) bool {
+pub(package) fn cg_key(key: str, v: bool, on: &mut u64, off: &mut u64) bool {
     let b = cg_bit(key);
     if b != 0 {
         cg_put(b, v != negated(b), on, off);
@@ -179,7 +179,7 @@ pub fn cg_key(key: str, v: bool, on: &mut u64, off: &mut u64) bool {
 }
 
 /// Command-line flag `arg` (`-O0` to `-O3`, `-Os`, `-Oz`) as an `opt-level`: OPT_NONE when it is none.
-pub fn opt_flag(arg: str) i32 {
+pub(package) fn opt_flag(arg: str) i32 {
     if arg.len() != 3 || !arg.starts_with("-O") {
         return OPT_NONE;
     }
@@ -198,7 +198,7 @@ pub fn opt_flag(arg: str) i32 {
 
 /// The flags of `on` and `off` as command-line flags (`opt`: `-O<level>` first, unless OPT_NONE), each
 /// after a space.
-pub fn cg_spell(opt: i32, on: u64, off: u64, out: &mut String) {
+pub(package) fn cg_spell(opt: i32, on: u64, off: u64, out: &mut String) {
     if opt == OPT_S {
         out.push_str(" -Os");
     } else if opt == OPT_Z {
@@ -233,7 +233,7 @@ pub fn cg_spell(opt: i32, on: u64, off: u64, out: &mut String) {
 /// drops when nothing reaches them (`link_gc`); past the ones that shrink the code at 2, 3 and "s"; loops unroll at 2
 /// and 3, vectorize at 2, 3 and "s" (as LLVM's), unswitch and version on their bounds checks at 3;
 /// aliasing is strict from 2 on, "s" and "z" included (as GCC's).
-pub const fn cg_effective(opt: i32, on: u64, off: u64) u64 {
+pub(package) const fn cg_effective(opt: i32, on: u64, off: u64) u64 {
     let mut f: u64 = 0;
     if opt > 0 {
         f |= CG_OMIT_FRAME_POINTER | CG_INLINE | CG_FUNCTION_SECTIONS | CG_DATA_SECTIONS;
@@ -258,7 +258,7 @@ pub const fn cg_effective(opt: i32, on: u64, off: u64) u64 {
 
 /// The link flag that drops what nothing reaches (Mach-O's spelling when `macho`), when the effective
 /// flags `cg` put functions or variables in sections of their own; empty otherwise.
-pub fn link_gc(cg: u64, macho: bool) str<'static> {
+pub(package) fn link_gc(cg: u64, macho: bool) str<'static> {
     if (cg & (CG_FUNCTION_SECTIONS | CG_DATA_SECTIONS)) == 0 {
         return "";
     }
@@ -271,19 +271,19 @@ pub fn link_gc(cg: u64, macho: bool) str<'static> {
 
 /// One extra binary target: `[bin.NAME] root = "..."` (the top-level `bin`/`root` pair is the
 /// primary binary). `super-c build` builds every target; `--bin=NAME` selects one.
-pub struct BinTarget {
-    pub name: String,
-    pub root: String,
+pub(package) struct BinTarget {
+    pub(package) name: String,
+    pub(package) root: String,
 }
 
 /// One [command.NAME] for `super-c command <name>`: shell lines executed in order, stopping at the
 /// first failure. Built-in subcommand names are reserved: a command can never shadow one.
-pub struct Command<'a> {
-    pub name: str<'a>,
-    pub run: Vector<String>,
-    pub needs_build: bool, // needs-build = true: run a manifest build before the lines
-    pub env_k: Vector<String>, // parallel with env_v: set in the environment every line inherits
-    pub env_v: Vector<String>,
+pub(package) struct Command<'a> {
+    pub(package) name: str<'a>,
+    pub(package) run: Vector<String>,
+    pub(package) needs_build: bool, // needs-build = true: run a manifest build before the lines
+    pub(package) env_k: Vector<String>, // parallel with env_v: set in the environment every line inherits
+    pub(package) env_v: Vector<String>,
 }
 
 /// The validated build.toml. `bin` is where the project's binary is INSTALLED: each profile links its own
@@ -291,43 +291,43 @@ pub struct Command<'a> {
 /// name, so a profile can never quietly stand in for another's artifact.
 /// Ownership: `toml` keeps the parsed items alive; Profile/Command `name` views borrow into their
 /// section strings.
-pub struct Manifest<'a> {
+pub(package) struct Manifest<'a> {
     /// Instruction set `@arch` gates against (a `target::table::ISAS` index), -1 unknown. Defaults to the
     /// host; the driver overwrites it for `--arch=`.
-    pub arch: i32,
+    pub(package) arch: i32,
     /// Platform (a `target::table::OSES` index) the build is for: the host, or `--target=`. Its cross
     /// toolchain, baseline CPU features and their C flag depend on it.
-    pub target: i32,
-    pub toml: Vector<toml::TomlItem>,
-    pub bin: String,
-    pub root: String,
-    pub out_dir: String,
-    pub test_dir: String, // where `super-c test` discovers the suite (default "tests")
-    pub bench_dir: String, // where `super-c bench` discovers '@bench' functions (default "bench")
-    pub ldflags: Vector<String>,
-    pub ldlibs: Vector<String>,
-    pub jobs: u32,
-    pub ce_steps: u32, // const-eval step budget; 0 = the engine default (~2M); CLI --const-eval-steps overrides
-    pub ce_mem: u64, // const-eval memory budget in bytes; 0 = the engine default; CLI --const-eval-memory overrides
-    pub std_internals: bool, // `std_internals`: the project names std's `pub(package)` items (unstable internals)
-    pub default_profile: String,
-    pub profiles: Vector<Profile<'a>>,
-    pub commands: Vector<Command<'a>>,
-    pub bins: Vector<BinTarget>, // extra [bin.NAME] targets (the top-level bin/root pair is first-class)
-    pub lib_name: String, // [lib] name; empty = no library target
-    pub lib_root: String, // [lib] root (default src/lib.spc)
-    pub lib_static: bool, // [lib] type contains "static" (the default when [lib] is present)
-    pub lib_shared: bool, // [lib] type contains "shared"
-    pub shards: Vector<loader::ShardRule>, // [shards] and [instance-shards]: per-module counts
-    pub target_features: Vector<String>, // `target-features`: the CPU features to enable (`--target-feature` names)
-    pub target_cpu: String, // `target-cpu`: an x86-64 level applied before `target-features` (`--target-cpu`)
-    pub simd_width: u32, // `simd-width`: 512 lets the vector planner use 512-bit entries on AVX-512; 0 = 256
-    pub simd_dispatch: String, // `simd-dispatch`: `off`, or the x86-64 levels run-time copies are made for; empty = x86-64-v3 (off at opt-level 0 or 1)
+    pub(package) target: i32,
+    pub(package) toml: Vector<toml::TomlItem>,
+    pub(package) bin: String,
+    pub(package) root: String,
+    pub(package) out_dir: String,
+    pub(package) test_dir: String, // where `super-c test` discovers the suite (default "tests")
+    pub(package) bench_dir: String, // where `super-c bench` discovers '@bench' functions (default "bench")
+    pub(package) ldflags: Vector<String>,
+    pub(package) ldlibs: Vector<String>,
+    pub(package) jobs: u32,
+    pub(package) ce_steps: u32, // const-eval step budget; 0 = the engine default (~2M); CLI --const-eval-steps overrides
+    pub(package) ce_mem: u64, // const-eval memory budget in bytes; 0 = the engine default; CLI --const-eval-memory overrides
+    pub(package) std_internals: bool, // `std_internals`: the project names std's `pub(package)` items (unstable internals)
+    pub(package) default_profile: String,
+    pub(package) profiles: Vector<Profile<'a>>,
+    pub(package) commands: Vector<Command<'a>>,
+    pub(package) bins: Vector<BinTarget>, // extra [bin.NAME] targets (the top-level bin/root pair is first-class)
+    pub(package) lib_name: String, // [lib] name; empty = no library target
+    pub(package) lib_root: String, // [lib] root (default src/lib.spc)
+    pub(package) lib_static: bool, // [lib] type contains "static" (the default when [lib] is present)
+    pub(package) lib_shared: bool, // [lib] type contains "shared"
+    pub(package) shards: Vector<loader::ShardRule>, // [shards] and [instance-shards]: per-module counts
+    pub(package) target_features: Vector<String>, // `target-features`: the CPU features to enable (`--target-feature` names)
+    pub(package) target_cpu: String, // `target-cpu`: an x86-64 level applied before `target-features` (`--target-cpu`)
+    pub(package) simd_width: u32, // `simd-width`: 512 lets the vector planner use 512-bit entries on AVX-512; 0 = 256
+    pub(package) simd_dispatch: String, // `simd-dispatch`: `off`, or the x86-64 levels run-time copies are made for; empty = x86-64-v3 (off at opt-level 0 or 1)
     /// `str_id` of the text `load` read, and the file's mtime from the stat before the read (as
     /// `loader::read_file_mt` gives them): the emit stamp's record of the manifest. Both 0 for a manifest
     /// not read from a file.
-    pub src_id: u64,
-    pub mtime: i64,
+    pub(package) src_id: u64,
+    pub(package) mtime: i64,
 }
 
 // Bootstrap constraint: the release compiler dispatches a generic `Free` call to a named `free`
@@ -373,14 +373,14 @@ extend Profile {
     }
 
     /// Whether integer overflow wraps instead of trapping (`wraps`).
-    pub const fn arith_wraps(self: &Self) bool {
+    pub(package) const fn arith_wraps(self: &Self) bool {
         return wraps(self.overflow_checks, self.opt);
     }
 }
 
 /// Whether integer overflow wraps instead of trapping: `overflow-checks` (`checks`) false, or without the
 /// key (-1) an `opt-level` (`opt`) of 2, 3, "s" or "z".
-pub const fn wraps(checks: i32, opt: i32) bool {
+pub(package) const fn wraps(checks: i32, opt: i32) bool {
     if checks >= 0 {
         return checks == 0;
     }
@@ -390,7 +390,7 @@ pub const fn wraps(checks: i32, opt: i32) bool {
 /// A manifest holding nothing but the built-in profiles, for a build with no `build.toml` to read them
 /// from: `super-c release foo.spc` compiles and links in one command and still has to honour the profile
 /// it was asked for. Free it like any other manifest.
-pub fn builtins_only<'a>() Manifest<'a> {
+pub(package) fn builtins_only<'a>() Manifest<'a> {
     let mut m = Manifest::new();
     m.add_builtin_profiles();
     return m;
@@ -450,7 +450,7 @@ const COMMANDS: [str<'static>; 14] = [
 /// The position of subcommand `name` in `Mode` declaration order after MODE_DEFAULT (main dispatches
 /// position k to Mode k + 1); -1 when `name` is no subcommand. The names are reserved, so a
 /// `[command.NAME]` can never shadow one.
-pub const fn subcommand_index(name: str) i32 {
+pub(package) const fn subcommand_index(name: str) i32 {
     let names: []str = COMMANDS;
     for k in 0..names.len() {
         if names[k] == name {
@@ -496,7 +496,7 @@ fn set_bool(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut bool) {
 /// --bootstrap-tags build) skips sections and keys this compiler does not know, so a previous release
 /// can build a source tree whose manifest already uses additions it predates; the compiler it produces
 /// reads the same manifest strictly.
-pub fn load(path: str, bootstrap: bool) Option<Manifest> {
+pub(package) fn load(path: str, bootstrap: bool) Option<Manifest> {
     let mut mt: i64 = 0;
     let src_opt = loader::read_file_mt(path, &mut mt);
     if src_opt.is_none() {
@@ -517,7 +517,7 @@ pub fn load(path: str, bootstrap: bool) Option<Manifest> {
 /// Parse and VALIDATE a manifest, returning the diagnostics alongside it. A non-empty `file` renders and
 /// logs them (what the build wants); an empty one leaves them raw with their spans, for a caller that
 /// formats its own (the language server). The manifest is None when the file is unusable.
-pub fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a>>, diag::Errors) {
+pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Manifest<'a>>, diag::Errors) {
     let mut errs = diag::Errors::new();
     let items_opt = toml::parse_into(src, &mut errs);
     if items_opt.is_none() {
@@ -873,7 +873,7 @@ extend Manifest {
     }
 
     /// Index of the profile named `name`, or -1 when absent.
-    pub const fn profile_index(self: &Self, name: str) i64 {
+    pub(package) const fn profile_index(self: &Self, name: str) i64 {
         for i in 0..self.profiles.len() {
             if self.profiles.at(i).name == name {
                 return i as i64;
@@ -884,7 +884,7 @@ extend Manifest {
 
     /// The command line's `-O<level>` (`opt`; OPT_NONE: none) and `-f` flags (`on`, `off`) over every
     /// profile: whichever the build selects runs with them.
-    pub fn override_profiles(self: &mut Self, opt: i32, on: u64, off: u64) {
+    pub(package) fn override_profiles(self: &mut Self, opt: i32, on: u64, off: u64) {
         for i in 0..self.profiles.len() {
             let p = &mut self.profiles[i];
             if opt != OPT_NONE {
@@ -896,7 +896,7 @@ extend Manifest {
     }
 
     /// Index of the command named `name`, or -1 when absent.
-    pub const fn command_index(self: &Self, name: str) i64 {
+    pub(package) const fn command_index(self: &Self, name: str) i64 {
         for i in 0..self.commands.len() {
             if self.commands.at(i).name == name {
                 return i as i64;

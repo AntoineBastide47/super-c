@@ -53,23 +53,23 @@ import ir::cpu_features as cf;
 import stdlib;
 
 // Rejection reasons (SC_INLINE_STATS report order).
-pub const IJ_NOT_FN: u8 = 0; // extern, bodiless, attributed, needing features the caller lacks, or not a plain function
-pub const IJ_RECURSIVE: u8 = 1;
-pub const IJ_SHAPE: u8 = 2; // asm/closure/reflect/assert/coercion/wide-literal body content
-pub const IJ_TOO_BIG: u8 = 3;
-pub const IJ_BUDGET: u8 = 4;
-pub const IJ_DEPTH: u8 = 5;
-pub const IJ_GENERIC: u8 = 6; // unbound generic parameter or untranslatable type
-pub const IJ_ARITY: u8 = 7; // variadic call or argument/destination count mismatch
-pub const IJ_COUNT: usize = 8;
+pub(package) const IJ_NOT_FN: u8 = 0; // extern, bodiless, attributed, needing features the caller lacks, or not a plain function
+pub(package) const IJ_RECURSIVE: u8 = 1;
+pub(package) const IJ_SHAPE: u8 = 2; // asm/closure/reflect/assert/coercion/wide-literal body content
+pub(package) const IJ_TOO_BIG: u8 = 3;
+pub(package) const IJ_BUDGET: u8 = 4;
+pub(package) const IJ_DEPTH: u8 = 5;
+pub(package) const IJ_GENERIC: u8 = 6; // unbound generic parameter or untranslatable type
+pub(package) const IJ_ARITY: u8 = 7; // variadic call or argument/destination count mismatch
+pub(package) const IJ_COUNT: usize = 8;
 
 /// Emission-mode env switches: every setting that changes the C a body renders to, and the LIR check
 /// (`SC_LIR`), which a replayed module passed when its record was written. Build stamps and TU-cache
 /// keys read the list by index, so a new switch joins here once and every consumer follows; the order
 /// is part of the recorded keys.
-pub const EMIT_MODE_ENV_N: usize = 5;
+pub(package) const EMIT_MODE_ENV_N: usize = 5;
 
-pub fn emit_mode_env(i: usize) str<'static> {
+pub(package) fn emit_mode_env(i: usize) str<'static> {
     if i == 0 {
         return "SC_INLINE";
     }
@@ -100,7 +100,7 @@ const VEC_SCALE: usize = 4;
 /// `CoreBody.inline_size_ok` (the shape the limits were tuned for), and the vet reads that bit.
 /// The blocks, statements and locals the counted-loop lowering added (`count_blocks`, `chunks`)
 /// do not count.
-pub fn callee_size_ok(b: &ir::CoreBody, pkg: *const loader::Package) bool {
+pub(package) fn callee_size_ok(b: &ir::CoreBody, pkg: *const loader::Package) bool {
     let ns = b.statements.len() - 2 * b.chunks as usize;
     let nb = b.blocks.len() - b.count_blocks as usize;
     let nl = b.locals.len() - 2 * b.chunks as usize;
@@ -110,7 +110,7 @@ pub fn callee_size_ok(b: &ir::CoreBody, pkg: *const loader::Package) bool {
 
 /// Whether a local of `b` (package `pkg`) is a vector: vector code, where the inliner reaches further
 /// (`CalleeInfo.vec_only`).
-pub fn holds_vector(b: &ir::CoreBody, pkg: *const loader::Package) bool {
+pub(package) fn holds_vector(b: &ir::CoreBody, pkg: *const loader::Package) bool {
     let a = unsafe &*(&*pkg).module_ast_const(b.module);
     for i in 0..b.locals.len() {
         let t = b.locals.at(i).ty;
@@ -136,7 +136,7 @@ fn size_scale(b: &ir::CoreBody, pkg: *const loader::Package) usize {
 /// in a caller that holds a vector.
 const MAX_ADDED_STMTS: usize = 512;
 /// Nested splice depth (a spliced call inlining its own calls); the budget above bounds the growth.
-pub const MAX_DEPTH: usize = 6;
+pub(package) const MAX_DEPTH: usize = 6;
 
 // keep_ix value encoding: slot index, or REJ_BASE | reason for a cached rejection.
 const REJ_BASE: u64 = 0xFFFFFFFF00000000u64;
@@ -163,16 +163,16 @@ const SUB_CONST: u8 = 3; // the argument constant
 
 /// One cached callee: its lowered, elaborated body plus the generic-parameter decl list in targ
 /// order (extend parameters first, then the function's own).
-pub struct CalleeInfo {
-    pub body: ir::CoreBody,
-    pub gp: Vector<NodeId>,
-    pub fg: u32, // trailing entries of `gp` that are the function's own parameters
-    pub demand: bool, // a generic body with a per-instantiation static_assert: the splice keeps the demand
-    pub big: bool, // past the size gate, with a switch on a const-generic parameter: sized per call (`live_size`)
-    pub vec_only: bool, // inlines into a caller that holds a vector only (`vet_body`)
+pub(package) struct CalleeInfo {
+    pub(package) body: ir::CoreBody,
+    pub(package) gp: Vector<NodeId>,
+    pub(package) fg: u32, // trailing entries of `gp` that are the function's own parameters
+    pub(package) demand: bool, // a generic body with a per-instantiation static_assert: the splice keeps the demand
+    pub(package) big: bool, // past the size gate, with a switch on a const-generic parameter: sized per call (`live_size`)
+    pub(package) vec_only: bool, // inlines into a caller that holds a vector only (`vet_body`)
     /// `@always_inline` in a native build, whose backend inlines nothing: past the size, budget and
     /// vector gates (`always_native`).
-    pub always: bool,
+    pub(package) always: bool,
 }
 
 /// Whether `d` is `@always_inline`: the splice takes it whatever its size.
@@ -185,48 +185,48 @@ fn always_inline(p: &loader::Package, d: DefId) bool {
 
 /// Whether `d` is `@always_inline` in a native build of `pkg`: the splice is its only inlining, so it
 /// also passes the budget and the vector gates (the C compiler inlines it in a C build).
-pub fn always_native(pkg: *const loader::Package, d: DefId) bool {
+pub(package) fn always_native(pkg: *const loader::Package, d: DefId) bool {
     let p = unsafe &*pkg;
     return p.native && always_inline(p, d);
 }
 
 /// One generic-parameter binding: `(pm, pnode)` resolves to the caller's type `at`.
-pub struct GBind {
-    pub pm: ModuleId,
-    pub pnode: NodeId,
-    pub at: TypeId,
+pub(package) struct GBind {
+    pub(package) pm: ModuleId,
+    pub(package) pnode: NodeId,
+    pub(package) at: TypeId,
 }
 
 /// Splice provenance of an appended block (recursion and depth guard for nested inlining).
-pub struct Origin {
-    pub parent: u32, // origin index of the block the call sat in; IR_NONE at top level
-    pub key: u64, // callee identity key
+pub(package) struct Origin {
+    pub(package) parent: u32, // origin index of the block the call sat in; IR_NONE at top level
+    pub(package) key: u64, // callee identity key
 }
 
 /// The elements splices add to each pool of a caller (`expect_growth`).
 struct Growth {
-    pub locals: usize,
-    pub blocks: usize,
-    pub statements: usize,
-    pub places: usize,
-    pub projections: usize,
-    pub operands: usize,
-    pub rvalues: usize,
-    pub constants: usize,
-    pub oper_pool: usize,
-    pub dest_pool: usize,
-    pub switch_pool: usize,
-    pub targ_pool: usize,
+    pub(package) locals: usize,
+    pub(package) blocks: usize,
+    pub(package) statements: usize,
+    pub(package) places: usize,
+    pub(package) projections: usize,
+    pub(package) operands: usize,
+    pub(package) rvalues: usize,
+    pub(package) constants: usize,
+    pub(package) oper_pool: usize,
+    pub(package) dest_pool: usize,
+    pub(package) switch_pool: usize,
+    pub(package) targ_pool: usize,
 }
 
-pub struct InlineStats {
-    pub considered: u32,
-    pub inlined: u32,
-    pub reasons: [u32; 8],
+pub(package) struct InlineStats {
+    pub(package) considered: u32,
+    pub(package) inlined: u32,
+    pub(package) reasons: [u32; 8],
 }
 
 extend InlineStats {
-    pub fn new() InlineStats {
+    pub(package) fn new() InlineStats {
         return InlineStats { considered: 0, inlined: 0, reasons: [[0] = 0u32] };
     }
 }
@@ -235,63 +235,63 @@ extend InlineStats {
 /// (`build`; a verdict depends only on the body's own content), the accepted ones copied compact.
 /// Read by every emission task through `Package.inl_store`; the kept bodies themselves move out to
 /// the emitter and the body syntax is released, so this copy is the callee's only source.
-pub struct InlineStore {
-    pub keep_ix: Map<u64, u64>, // callee key -> kept slot, or REJ_BASE | reason
-    pub kept: Vector<CalleeInfo>,
+pub(package) struct InlineStore {
+    pub(package) keep_ix: Map<u64, u64>, // callee key -> kept slot, or REJ_BASE | reason
+    pub(package) kept: Vector<CalleeInfo>,
     /// The kept functions whose bodies hold a vector and no closure: callee key -> `vec_bodies` slot.
     /// A call of one from a function with features beyond the build's runs a copy compiled with
     /// that function's features (the emitter's feature clones), lowered from this copy: the kept
     /// body itself moves to its own emission.
-    pub vec_ix: Map<u64, u64>,
-    pub vec_bodies: Vector<ir::CoreBody>,
+    pub(package) vec_ix: Map<u64, u64>,
+    pub(package) vec_bodies: Vector<ir::CoreBody>,
 }
 
 /// Per-DropCtx state: the type-translation caches over the shared store's slots, and the splice
 /// scratch. Decisions depend only on body and AST content, never on cache state.
-pub struct InlineCtx {
-    pub off: bool,
+pub(package) struct InlineCtx {
+    pub(package) off: bool,
     /// Splice only the callees whose result the caller's instance fixes (`fixed_result`): a bound
     /// variant of scalar code (`driver::emit::bind_calls`).
-    pub only_fixed: bool,
-    pub stats_on: bool,
-    pub store: *const InlineStore,
+    pub(package) only_fixed: bool,
+    pub(package) stats_on: bool,
+    pub(package) store: *const InlineStore,
     /// Type-translation cache: one entry per distinct (callee slot, caller module, binds) call
     /// shape. Filling a table walks the whole callee type table through `xty`; the same shape
     /// repeats at every call site of a callee, so the walk runs once per shape instead. The
     /// entries fill two shared pools in order: entry `e` starts at `xm_ko[e]` in `xm_keys` and at
     /// `xm_to[e]` in `xm_tys`, and ends where entry `e + 1` starts (the last at the pool's end).
-    pub xm_ix: Map<u64, u64>, // shape hash -> entry index
-    pub xm_keys: Vector<u64>, // exact shape per entry: slot, cm, then (pm<<32|pnode, at) pairs
-    pub xm_ko: Vector<u32>,
-    pub xm_tys: Vector<u64>, // translation table per entry (`ty_table`)
-    pub xm_to: Vector<u32>,
+    pub(package) xm_ix: Map<u64, u64>, // shape hash -> entry index
+    pub(package) xm_keys: Vector<u64>, // exact shape per entry: slot, cm, then (pm<<32|pnode, at) pairs
+    pub(package) xm_ko: Vector<u32>,
+    pub(package) xm_tys: Vector<u64>, // translation table per entry (`ty_table`)
+    pub(package) xm_to: Vector<u32>,
     /// Per entry: where the callee's parameter facts under that translation start in `xm_pfs`
     /// (`param_facts`, one byte per parameter), and whether it writes no memory (0 not computed, 1
     /// no, 2 yes).
-    pub xm_pfo: Vector<u32>,
-    pub xm_wf: Vector<u8>,
-    pub xm_pfs: Vector<u8>,
+    pub(package) xm_pfo: Vector<u32>,
+    pub(package) xm_wf: Vector<u8>,
+    pub(package) xm_pfs: Vector<u8>,
     /// Callees with vector index lists over their parameters (`CoreBody.has_lists`) re-lowered under
     /// one call shape's bindings, where the lists resolve: shape hash -> `rl` index, or a rejection.
-    pub rl_ix: Map<u64, u64>,
-    pub rl: Vector<CalleeInfo>,
+    pub(package) rl_ix: Map<u64, u64>,
+    pub(package) rl: Vector<CalleeInfo>,
     // `run` scratch (capacity survives across bodies).
-    pub sc_blk_origin: Vector<u32>,
-    pub sc_origins: Vector<Origin>,
-    pub sc_binds: Vector<GBind>,
-    pub sc_tymap: Map<u64, u64>, // the callee types translated so far: callee type -> caller type
-    pub sc_pairs: Vector<u64>, // the same, as `ty_table` input
-    pub sc_tys: Vector<u64>, // the table of a shape the cache cannot index (a hash collision)
-    pub sc_wire: Vector<u8>,
-    pub sc_probe: Vector<TypeId>,
-    pub sc_shape: Vector<u64>,
-    pub sc_live: Vector<bool>,
-    pub sc_stack: Vector<u32>,
-    pub sc_expo: Vector<u32>, // per caller local: the operations that may address its storage (`exposed`)
-    pub sc_writes: Writes, // per caller local: its writes (`once_aggregate`, `agg_field`)
-    pub sc_oref: Vector<u32>, // per caller operand: a mark (`unread`)
-    pub sc_orph: Vector<u32>, // the call operands of arguments read in place (`unread`)
-    pub sc_pf: Vector<u8>, // per callee parameter: its `PF_*` facts
+    pub(package) sc_blk_origin: Vector<u32>,
+    pub(package) sc_origins: Vector<Origin>,
+    pub(package) sc_binds: Vector<GBind>,
+    pub(package) sc_tymap: Map<u64, u64>, // the callee types translated so far: callee type -> caller type
+    pub(package) sc_pairs: Vector<u64>, // the same, as `ty_table` input
+    pub(package) sc_tys: Vector<u64>, // the table of a shape the cache cannot index (a hash collision)
+    pub(package) sc_wire: Vector<u8>,
+    pub(package) sc_probe: Vector<TypeId>,
+    pub(package) sc_shape: Vector<u64>,
+    pub(package) sc_live: Vector<bool>,
+    pub(package) sc_stack: Vector<u32>,
+    pub(package) sc_expo: Vector<u32>, // per caller local: the operations that may address its storage (`exposed`)
+    pub(package) sc_writes: Writes, // per caller local: its writes (`once_aggregate`, `agg_field`)
+    pub(package) sc_oref: Vector<u32>, // per caller operand: a mark (`unread`)
+    pub(package) sc_orph: Vector<u32>, // the call operands of arguments read in place (`unread`)
+    pub(package) sc_pf: Vector<u8>, // per callee parameter: its `PF_*` facts
 }
 
 fn bind_add(binds: &mut Vector<GBind>, pm: ModuleId, pnode: NodeId, at: TypeId) {
@@ -581,12 +581,12 @@ const ELEM_CHAIN_MAX: u32 = 4096;
 
 extend InlineCtx {
     /// Bytes the translation tables hold (SC_TYPE_STATS): the tables, the shape keys and their index.
-    pub const fn xm_bytes(self: &Self) u64 {
+    pub(package) const fn xm_bytes(self: &Self) u64 {
         let b = (self.xm_tys.len() + self.xm_keys.len()) * 8 + self.xm_ko.len() * 13;
         return (b + self.xm_ix.len() * 17 * 2 + self.xm_pfs.len()) as u64;
     }
 
-    pub fn new(store: *const InlineStore) InlineCtx {
+    pub(package) fn new(store: *const InlineStore) InlineCtx {
         let off = stdlib::env_is("SC_INLINE", "0");
         return InlineCtx {
             off: off,
@@ -680,14 +680,14 @@ extend InlineCtx {
     }
 
     /// Whether the shared store keeps callee `d` as a candidate.
-    pub fn kept(self: &Self, d: DefId) bool {
+    pub(package) fn kept(self: &Self, d: DefId) bool {
         return unsafe (*self.store).keeps(d);
     }
 
     /// Whether kept callee `d` (package `pkg`) computes its result from the instance's arguments
     /// alone: no parameter, no call, and no static it reads but its const-generic parameters
     /// (`V<N>::len()`, `return N;`), so its splice is a constant of the caller's instance.
-    pub fn fixed_result(self: &Self, pkg: *const loader::Package, d: DefId) bool {
+    pub(package) fn fixed_result(self: &Self, pkg: *const loader::Package, d: DefId) bool {
         let slot = self.callee_slot(d);
         if slot >= REJ_BASE {
             return false;
@@ -1192,14 +1192,14 @@ const fn called_bit(base: &Vector<usize>, d: DefId) i64 {
 
 extend InlineStore {
     /// Whether callee `d` is an inline candidate.
-    pub fn keeps(self: &Self, d: DefId) bool {
+    pub(package) fn keeps(self: &Self, d: DefId) bool {
         return switch self.keep_ix.get(&callee_key(d)) {
             Some(v) => *v < REJ_BASE,
             None => false,
         };
     }
 
-    pub fn new() InlineStore {
+    pub(package) fn new() InlineStore {
         return InlineStore {
             keep_ix: Map::<u64, u64>::new(),
             kept: Vector::<CalleeInfo>::new(),
@@ -1209,7 +1209,7 @@ extend InlineStore {
     }
 
     /// The copy of kept function `d`'s body when it holds a vector and no closure (`vec_ix`), else null.
-    pub fn vec_body(self: &Self, d: DefId) *const ir::CoreBody {
+    pub(package) fn vec_body(self: &Self, d: DefId) *const ir::CoreBody {
         return switch self.vec_ix.get(&callee_key(d)) {
             Some(v) => self.vec_bodies.at((*v) as usize),
             None => null,
@@ -1218,7 +1218,7 @@ extend InlineStore {
 
     /// Vet every kept env-free function lowering of `keep` (the borrow checker's product, the same
     /// lowering an on-demand vet would build) and copy the accepted callees.
-    pub fn build(self: &mut Self, pkg: *const loader::Package, keep: &irl::Keep) {
+    pub(package) fn build(self: &mut Self, pkg: *const loader::Package, keep: &irl::Keep) {
         // Only a body some kept body calls can be inlined: collect the call targets first, so
         // the vetting (an attribute walk and a statement scan per body) runs for those alone.
         // A bit per module node (`called_bit`): a call costs a store, not a table insert.
@@ -1432,7 +1432,7 @@ extend InlineStore {
 }
 
 /// Statistics line, bce::stats_line style.
-pub fn stats_line(st: &InlineStats, out: &mut String) {
+pub(package) fn stats_line(st: &InlineStats, out: &mut String) {
     out.push_str("inline considered ");
     out.push_u64(st.considered);
     out.push_str(" inlined ");
@@ -1447,7 +1447,7 @@ pub fn stats_line(st: &InlineStats, out: &mut String) {
 /// Inline qualifying calls of `lw.body` in place. Appended blocks are revisited, so a spliced
 /// body's own calls inline up to MAX_DEPTH; every decision depends only on the bodies and ASTs.
 /// The caller skips the call when `cx.off`.
-pub fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
+pub(package) fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineStats) {
     let mut any = false;
     for i in 0..lw.body.blocks.len() {
         let t = &lw.body.blocks.at(i).term;
@@ -1997,7 +1997,7 @@ const fn takes_type(rv: &ir::Rvalue) bool {
 /// Body `lw.body` with every generic parameter `binds` names substituted (`xty`): one instance's
 /// concrete body, so a call the instance resolves to a concrete method splices with matching types
 /// (`run`). False, the body unchanged, when a type does not substitute.
-pub fn ground_body(lw: &mut irl::Lowerer, binds: &Vector<GBind>) bool {
+pub(package) fn ground_body(lw: &mut irl::Lowerer, binds: &Vector<GBind>) bool {
     let pkg = lw.pkg;
     let m = lw.body.module;
     let mut tys = Vector::<TypeId>::new();
@@ -2688,9 +2688,9 @@ fn param_facts(p: &loader::Package, k: &ir::CoreBody, a: &Ast, tymap: []u64, pf:
 // Per caller local: how many operations may write it (an assignment to it or into it, a borrow of
 // it, a call result into it), and its one whole assignment's rvalue + 1 (0: none, WR_MULTI: a
 // second one, or an assignment into it). Kept in step with the splices (`writes_from`).
-pub struct Writes {
-    pub cnt: Vector<u32>,
-    pub rv: Vector<u32>,
+pub(package) struct Writes {
+    pub(package) cnt: Vector<u32>,
+    pub(package) rv: Vector<u32>,
 }
 
 const WR_MULTI: u32 = 0xFFFFFFFF;

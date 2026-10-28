@@ -19,21 +19,21 @@ extern "C" {
 
 /// Phase boundaries in pipeline order: phase `k` runs from boundary `k - 1` to boundary `k`, so
 /// the phases partition the build and their sum is the total by construction.
-pub const B_START: usize = 0;
-pub const B_SETUP: usize = 1; // the profile, the jobs and the link record's paths
-pub const B_STAMP: usize = 2; // emit-stamp check
-pub const B_LOAD: usize = 3; // load, lex, parse
-pub const B_RESOLVE: usize = 4;
-pub const B_TYPECHECK: usize = 5; // typecheck and deferred signature work
-pub const B_BORROWCK: usize = 6; // Core IR lowering and borrow analysis
-pub const B_CHECKS: usize = 7; // layout, facts verification, always-panics, deferred asserts
-pub const B_PREPARE: usize = 8; // runtime and external C wrappers, live set, emit order
-pub const B_PLAN: usize = 9; // instance discovery and C planning
-pub const B_RENDER: usize = 10; // C rendering
-pub const B_PUBLISH: usize = 11; // files written, per-TU cache, orphan prune, emit stamp record
-pub const B_SYNC: usize = 12; // external transpiler record and stamp install
-pub const B_LINK: usize = 13;
-pub const B_COUNT: usize = 14;
+pub(package) const B_START: usize = 0;
+pub(package) const B_SETUP: usize = 1; // the profile, the jobs and the link record's paths
+pub(package) const B_STAMP: usize = 2; // emit-stamp check
+pub(package) const B_LOAD: usize = 3; // load, lex, parse
+pub(package) const B_RESOLVE: usize = 4;
+pub(package) const B_TYPECHECK: usize = 5; // typecheck and deferred signature work
+pub(package) const B_BORROWCK: usize = 6; // Core IR lowering and borrow analysis
+pub(package) const B_CHECKS: usize = 7; // layout, facts verification, always-panics, deferred asserts
+pub(package) const B_PREPARE: usize = 8; // runtime and external C wrappers, live set, emit order
+pub(package) const B_PLAN: usize = 9; // instance discovery and C planning
+pub(package) const B_RENDER: usize = 10; // C rendering
+pub(package) const B_PUBLISH: usize = 11; // files written, per-TU cache, orphan prune, emit stamp record
+pub(package) const B_SYNC: usize = 12; // external transpiler record and stamp install
+pub(package) const B_LINK: usize = 13;
+pub(package) const B_COUNT: usize = 14;
 
 // Memory boundaries, as indexes into the samples: frontend, borrow analysis, C plan, C output
 // published, build complete. Epoch `k` covers the allocations made before memory boundary `k`.
@@ -44,31 +44,31 @@ const LIVE_N: usize = 80; // MEM_N * EPOCHS * 2
 static_assert(STATS_WORDS == 2 + 2 * EPOCHS, "the sc_lk_stats record is two counters plus a pair per epoch");
 static_assert(LIVE_N == MEM_N * EPOCHS * 2, "one (count, bytes) pair per boundary and epoch");
 
-pub struct BuildStats {
-    pub t: Array<u64, B_COUNT>, // ns; 0 = boundary not reached
-    pub mem_on: bool,
-    pub rss: Array<i64, MEM_N>,
-    pub alloc_n: Array<u64, MEM_N>,
-    pub alloc_bytes: Array<u64, MEM_N>,
-    pub live: Array<u64, LIVE_N>, // per boundary, per epoch: count, bytes
-    pub skip_emit: bool,
-    pub jobs: u32,
-    pub total_c: usize, // the objects the link takes
-    pub stale_n: usize, // the objects this build wrote
-    pub linked: bool,
-    pub rc: i32,
-    pub profile: String,
-    pub bin: String,
-    pub relower_reflect: u64, // instance re-lowerings for a reflection binder (emit::probe)
-    pub relower_zst: u64, // instance re-lowerings for a zero-size condition
+pub(package) struct BuildStats {
+    pub(package) t: Array<u64, B_COUNT>, // ns; 0 = boundary not reached
+    pub(package) mem_on: bool,
+    pub(package) rss: Array<i64, MEM_N>,
+    pub(package) alloc_n: Array<u64, MEM_N>,
+    pub(package) alloc_bytes: Array<u64, MEM_N>,
+    pub(package) live: Array<u64, LIVE_N>, // per boundary, per epoch: count, bytes
+    pub(package) skip_emit: bool,
+    pub(package) jobs: u32,
+    pub(package) total_c: usize, // the objects the link takes
+    pub(package) stale_n: usize, // the objects this build wrote
+    pub(package) linked: bool,
+    pub(package) rc: i32,
+    pub(package) profile: String,
+    pub(package) bin: String,
+    pub(package) relower_reflect: u64, // instance re-lowerings for a reflection binder (emit::probe)
+    pub(package) relower_zst: u64, // instance re-lowerings for a zero-size condition
 }
 
 /// An observer of the phase boundaries: `at(ctx, b)` runs at every `mark(b)`, whether or not a record
 /// is being collected. The in-process benchmark samples its own counters through it, so its phases are
 /// the build's phases by construction.
-pub struct PhaseHook {
-    pub ctx: *mut void,
-    pub at: fn(*mut void, usize) void,
+pub(package) struct PhaseHook {
+    pub(package) ctx: *mut void,
+    pub(package) at: fn(*mut void, usize) void,
 }
 
 static mut G_STATS: *mut BuildStats = null;
@@ -76,23 +76,23 @@ static mut G_ARMED: bool = false;
 static mut G_HOOK: *const PhaseHook = null;
 
 /// Install `h` as the phase observer; null removes it. The caller keeps `h` alive while it is installed.
-pub fn set_hook(h: *const PhaseHook) {
+pub(package) fn set_hook(h: *const PhaseHook) {
     unsafe G_HOOK = h;
 }
 
 /// Collect the next build's statistics even when SC_BUILD_STATS is unset (the in-process benchmark
 /// reads them back through `last`).
-pub fn arm() {
+pub(package) fn arm() {
     unsafe G_ARMED = true;
 }
 
 /// The statistics of the build in progress, or of the last finished one; null when collection is off.
-pub fn last() *mut BuildStats {
+pub(package) fn last() *mut BuildStats {
     return unsafe G_STATS;
 }
 
 /// Drop the retained record. `finish` does this itself unless `arm` asked for the record to stay.
-pub fn release() {
+pub(package) fn release() {
     let g = unsafe G_STATS;
     if g == null {
         return;
@@ -105,7 +105,7 @@ pub fn release() {
 
 /// Start collecting for a build when SC_BUILD_STATS is set or `arm` was called; SC_BUILD_MEM turns
 /// the allocation tracker on. Called once per engine build, before any phase work.
-pub fn begin() {
+pub(package) fn begin() {
     release();
     if stdlib::getenv("SC_BUILD_STATS") == null && !unsafe G_ARMED {
         return;
@@ -161,7 +161,7 @@ const fn mem_index(b: usize) usize {
 
 /// Record that boundary `b` was reached now. Every boundary before it that was never reached
 /// (a skipped emission) is stamped with the same instant, so the phases stay a partition.
-pub fn mark(b: usize) {
+pub(package) fn mark(b: usize) {
     let h = unsafe G_HOOK;
     if h != null {
         let f = unsafe (*h).at;
@@ -201,7 +201,7 @@ fn sample(g: *mut BuildStats, k: usize) {
 }
 
 /// The emission's per-instance re-lowering counts, by reason (from the merged emission probe).
-pub fn relower(reflect: u64, zst: u64) {
+pub(package) fn relower(reflect: u64, zst: u64) {
     let g = unsafe G_STATS;
     if g == null {
         return;
@@ -212,7 +212,7 @@ pub fn relower(reflect: u64, zst: u64) {
 
 /// The build finished with `rc`: publish the record to the SC_BUILD_STATS sink when one is named,
 /// then drop it unless `arm` keeps it for `last`.
-pub fn finish(rc: i32) {
+pub(package) fn finish(rc: i32) {
     let g = unsafe G_STATS;
     if g == null {
         return;
@@ -244,7 +244,7 @@ pub fn finish(rc: i32) {
 }
 
 /// The name of the phase that ends at boundary `k + 1`.
-pub const PHASE_NAMES: [str<'static>; 13] = [
+pub(package) const PHASE_NAMES: [str<'static>; 13] = [
     "setup",
     "stamp",
     "load",
@@ -282,7 +282,7 @@ fn push_bool(out: &mut String, v: bool) {
 /// The record as one JSON object (no trailing newline). Every "ms" entry is a phase of the
 /// partition and `total` is their sum; `units` counts the objects the link takes, `stale` the ones this
 /// build wrote.
-pub fn json(g: &BuildStats, out: &mut String) {
+pub(package) fn json(g: &BuildStats, out: &mut String) {
     out.push_str("{\"v\":2,\"ok\":");
     push_bool(out, g.rc == 0);
     out.push_str(",\"profile\":");

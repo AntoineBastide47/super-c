@@ -8,13 +8,13 @@ import lir::ir as *;
 import ir::core as core;
 
 /// The text of body `b` of function `name` in package `p` (its symbols and messages named).
-pub fn print_body(p: &Package, name: str, b: &Body, out: &mut String) {
+pub(package) fn print_body(p: &Package, name: str, b: &Body, out: &mut String) {
     let mut pr = Printer::new();
     pr.body(p, name, b, out);
 }
 
 /// The text of package `p`.
-pub fn print_package(p: &Package, out: &mut String) {
+pub(package) fn print_package(p: &Package, out: &mut String) {
     out.format_into("lir ptr {}", p.ptr_bytes);
     if p.vec_regs != 16 {
         out.format_into(" vec {}", p.vec_regs);
@@ -636,7 +636,7 @@ extend Printer {
 }
 
 /// The text of type `t`: `i8` to `i128`, `f32`, `f64`, `ptr`, or a vector `v<lanes><lane>` (`v4f32`).
-pub fn push_type(t: u8, out: &mut String) {
+pub(package) fn push_type(t: u8, out: &mut String) {
     if is_vec(t) {
         out.format_into("v{}", lanes(t));
         push_type(lane_type(t), out);
@@ -677,7 +677,7 @@ fn push_name(s: str, out: &mut String) {
 }
 
 /// Whether `c` may appear in an unquoted name.
-pub const fn name_byte(c: u8) bool {
+pub(package) const fn name_byte(c: u8) bool {
     return c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9' || c == b'_' || c == b'.' || c == b'$';
 }
 
@@ -706,7 +706,7 @@ fn push_hex2(c: u8, out: &mut String) {
 }
 
 /// `bits` read as a signed integer of `w` bits (1 to 64).
-pub const fn sign_extend(bits: u64, w: u32) i64 {
+pub(package) const fn sign_extend(bits: u64, w: u32) i64 {
     if w >= 64 {
         return bits as i64;
     }

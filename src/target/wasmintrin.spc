@@ -4,7 +4,7 @@
 // `tests/codegen/asm_test.spc` checks each assembles to clang's bytes.
 
 /// The rows, by name: the intrinsic and its instructions.
-pub const ROWS: [(str<'static>, str<'static>); 226] = [
+pub(package) const ROWS: [(str<'static>, str<'static>); 226] = [
     ("wasm_f32x4_abs", "local.get 0\nf32x4.abs"),
     ("wasm_f32x4_add", "local.get 0\nlocal.get 1\nf32x4.add"),
     ("wasm_f32x4_ceil", "local.get 0\nf32x4.ceil"),
@@ -249,7 +249,7 @@ pub const ROWS: [(str<'static>, str<'static>); 226] = [
 ];
 
 /// Per row: the wasm signature of a function of the intrinsic's arguments and result.
-pub const SIGS: [str<'static>; 226] = [
+pub(package) const SIGS: [str<'static>; 226] = [
     "(v128) -> (v128)",
     "(v128, v128) -> (v128)",
     "(v128) -> (v128)",

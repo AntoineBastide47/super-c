@@ -15,13 +15,13 @@ import typechecker::typechecker as tc;
 import ir::inline as inl;
 
 /// Record kinds.
-pub const IG_AGG: u8 = 0; // generic struct/enum instantiation
+pub(package) const IG_AGG: u8 = 0; // generic struct/enum instantiation
 /// Instance record kinds (InstRec.kind).
-pub const IG_FN: u8 = 1; // generic function instantiation
-pub const IG_METHOD: u8 = 2; // method demanded on a generic-aggregate instance
+pub(package) const IG_FN: u8 = 1; // generic function instantiation
+pub(package) const IG_METHOD: u8 = 2; // method demanded on a generic-aggregate instance
 
 /// The absent record index.
-pub const IG_NONE: u32 = 0xFFFFFFFF;
+pub(package) const IG_NONE: u32 = 0xFFFFFFFF;
 
 // Deepest argument nesting (element types and instance arguments) a record is expanded with. A
 // generic that reaches itself with a growing type argument discovers ever deeper records; past the
@@ -31,73 +31,73 @@ const ARG_NEST_MAX: u32 = 256;
 /// One instance argument: the final id of its (substituted) type plus, for const-generic values,
 /// the folded integer, its two's complement bits and integer type (what lets compound const-exprs
 /// like `{BITS*2}` evaluate under a frame).
-pub struct ArgKey {
-    pub val: i64,
-    pub ty: TypeId,
-    pub has_val: bool,
-    pub bt: BuiltinType,
+pub(package) struct ArgKey {
+    pub(package) val: i64,
+    pub(package) ty: TypeId,
+    pub(package) has_val: bool,
+    pub(package) bt: BuiltinType,
 }
 
 /// One discovered instance: the declaration plus its argument keys (flat pool range). Packed to
 /// 32 bytes (two records per cache line): expansion and pairing iterate `recs` by value.
-pub struct InstRec {
-    pub hash: u64,
-    pub def: DefId,
-    pub args_start: u32,
-    pub args_len: u32,
+pub(package) struct InstRec {
+    pub(package) hash: u64,
+    pub(package) def: DefId,
+    pub(package) args_start: u32,
+    pub(package) args_len: u32,
     /// Pool anchor: the module + TypeId where this instance was first seen as a real pool type
     /// (TYPE_NONE = derived through substitution/cross product only).
-    pub aty: TypeId,
-    pub amod: ModuleId,
-    pub kind: u8,
-    pub expanded: bool,
+    pub(package) aty: TypeId,
+    pub(package) amod: ModuleId,
+    pub(package) kind: u8,
+    pub(package) expanded: bool,
 }
 
 // One extend targeting a declaration (built once; aggregate expansion walks its methods).
 struct ExtRow {
-    pub dmod: ModuleId,
-    pub ddecl: NodeId,
-    pub emod: ModuleId,
-    pub enode: NodeId,
+    pub(package) dmod: ModuleId,
+    pub(package) ddecl: NodeId,
+    pub(package) emod: ModuleId,
+    pub(package) enode: NodeId,
 }
 
 // What an extend's target syntax says about the instances it applies to, read once per `exts` row:
 // `ext_applies` and `bind_ext_keys` ask per record and per call site.
 struct ExtShape {
-    pub ident: bool, // `ext_is_identity`: applies to every instance, binding its parameters in order
-    pub inst: bool, // the target is an instance type
-    pub wide: bool, // more generic parameters than an application check tracks
-    pub np: u32, // `ext_arity`: the leading target arguments the extend constrains
-    pub pn: u32, // the target's argument count
-    pub xs: u32, // its first `XSlot` in `xslots` (`np` of them)
-    pub ss: u32, // its first `ESig` in `esigs`
-    pub sn: u32, // its `ESig` count
-    pub keyed: bool, // `ext_keyed`: a use names every parameter, in order; no target instance binds them
+    pub(package) ident: bool, // `ext_is_identity`: applies to every instance, binding its parameters in order
+    pub(package) inst: bool, // the target is an instance type
+    pub(package) wide: bool, // more generic parameters than an application check tracks
+    pub(package) np: u32, // `ext_arity`: the leading target arguments the extend constrains
+    pub(package) pn: u32, // the target's argument count
+    pub(package) xs: u32, // its first `XSlot` in `xslots` (`np` of them)
+    pub(package) ss: u32, // its first `ESig` in `esigs`
+    pub(package) sn: u32, // its `ESig` count
+    pub(package) keyed: bool, // `ext_keyed`: a use names every parameter, in order; no target instance binds them
 }
 
 // A non-generic method of an extend with a recorded signature (`Package::item_sig`): the types a
 // target instance's signature propagation notes, `n` of them from `start` in the signature pool.
 struct ESig {
-    pub iid: NodeId,
-    pub start: u32,
-    pub n: u32,
+    pub(package) iid: NodeId,
+    pub(package) start: u32,
+    pub(package) n: u32,
 }
 
 // One constrained target argument of an extend: its classification, the argument type as written,
 // and for a parameter or a form, the parameter's declaration and value type.
 struct XSlot {
-    pub x: XArg,
-    pub ty: TypeId,
-    pub gid: NodeId,
-    pub bt: BuiltinType,
+    pub(package) x: XArg,
+    pub(package) ty: TypeId,
+    pub(package) gid: NodeId,
+    pub(package) bt: BuiltinType,
 }
 
 // One substitution frame entry: generic-param decl -> the argument's key (value included for
 // const params, so dependent const-exprs can fold).
 struct Subst {
-    pub pmod: ModuleId,
-    pub pdecl: NodeId,
-    pub key: ArgKey,
+    pub(package) pmod: ModuleId,
+    pub(package) pdecl: NodeId,
+    pub(package) key: ArgKey,
 }
 
 // Per kept body: the walk-relevant items, extracted once. A body's locals and rvalues repeat the
@@ -106,37 +106,37 @@ struct Subst {
 // the other in `InstGraph.wpool`: each field is the start of its list, which ends where the next
 // field's list starts.
 struct WalkCache {
-    pub built: bool,
-    pub tys: u32, // unique local/rvalue types, first-occurrence order
-    pub consts: u32, // CK_ITEM constant ids
-    pub meas: u32, // statement ids assigning a `sizeof`/`alignof`
-    pub calls: u32, // per resolved TM_CALL: block id << 2, | 2 for an interface member, | 1 when `recv_binds`
-    pub dyns: u32, // rvalue ids of `dyn` erasures (`RV_DYN`)
-    pub casts: u32, // statement ids of `as` casts whose type names a generic parameter
-    pub bins: u32, // rvalue ids of binary operators an aggregate operand may dispatch (`note_binop`)
-    pub stats: u32, // local ids naming a constant or static (`LS_STATIC_REF`)
-    pub end: u32,
+    pub(package) built: bool,
+    pub(package) tys: u32, // unique local/rvalue types, first-occurrence order
+    pub(package) consts: u32, // CK_ITEM constant ids
+    pub(package) meas: u32, // statement ids assigning a `sizeof`/`alignof`
+    pub(package) calls: u32, // per resolved TM_CALL: block id << 2, | 2 for an interface member, | 1 when `recv_binds`
+    pub(package) dyns: u32, // rvalue ids of `dyn` erasures (`RV_DYN`)
+    pub(package) casts: u32, // statement ids of `as` casts whose type names a generic parameter
+    pub(package) bins: u32, // rvalue ids of binary operators an aggregate operand may dispatch (`note_binop`)
+    pub(package) stats: u32, // local ids naming a constant or static (`LS_STATIC_REF`)
+    pub(package) end: u32,
 }
 
 /// An array length an instance folds outside 0..=4294967295: a compile error the driver reports,
 /// never an emitted type.
-pub struct LenFault {
-    pub module: ModuleId, // the module `span` indexes
-    pub span: tok::Span, // the binding, field or expression whose type holds the length
-    pub msg: String,
+pub(package) struct LenFault {
+    pub(package) module: ModuleId, // the module `span` indexes
+    pub(package) span: tok::Span, // the binding, field or expression whose type holds the length
+    pub(package) msg: String,
     /// The instantiated declaration (node NODE_NONE = a concrete type, no instance) and the site
     /// that demanded it (`site.end == 0`: not known).
-    pub inst: DefId,
-    pub site_module: ModuleId,
-    pub site: tok::Span,
+    pub(package) inst: DefId,
+    pub(package) site_module: ModuleId,
+    pub(package) site: tok::Span,
 }
 
 /// The package's closed set of generic instantiations, reached by walking every live body's
 /// demands to a fixpoint; records are deduplicated by (kind, def, argument keys).
-pub struct InstGraph {
-    pub pkg: *const loader::Package,
-    pub recs: Vector<InstRec>,
-    pub keys: Vector<ArgKey>, // flat argument-key pool
+pub(package) struct InstGraph {
+    pub(package) pkg: *const loader::Package,
+    pub(package) recs: Vector<InstRec>,
+    pub(package) keys: Vector<ArgKey>, // flat argument-key pool
     index: Vector<u32>, // open addressing over recs (hash lookup, exact compare)
     cursor: usize, // worklist: recs[cursor..] await expansion
     exts: Vector<ExtRow>, // every extend in the package with a resolved target declaration
@@ -171,7 +171,7 @@ pub struct InstGraph {
     /// One lowering per declaration, shared by every frame that walks it (lowering ignores the
     /// frame; only walking applies it). The emitter takes these bodies instead of re-lowering.
     /// `kept_ix` maps (module << 32 | node) to a slot (`kept_mut`); 0xFFFFFFFFFFFFFFFF = lowering failed.
-    pub kept_ix: Map<u64, u64>,
+    pub(package) kept_ix: Map<u64, u64>,
     // The bodies of the slots: `kept` holds the first ones and never grows past its reserve, then
     // `kept_box` the rest, so no body moves: a walk reads its body while the nested seeds it starts
     // add bodies.
@@ -202,11 +202,11 @@ pub struct InstGraph {
     /// TU, so nothing seeds from its bodies: the instances they alone reach would land in the shared
     /// type header with no code naming them.
     live: *const bool,
-    pub bodies: u64, // walked body count (roots + expansions)
-    pub rounds: u64, // worklist drains until the demand cross product added nothing
-    pub overflow: bool, // budget exhausted; the report marks itself partial
+    pub(package) bodies: u64, // walked body count (roots + expansions)
+    pub(package) rounds: u64, // worklist drains until the demand cross product added nothing
+    pub(package) overflow: bool, // budget exhausted; the report marks itself partial
     budget: u32,
-    pub faults: Vector<LenFault>,
+    pub(package) faults: Vector<LenFault>,
     // The message of a length fault a type walk found and its caller has not located yet.
     fault_msg: String,
     fault_hit: bool,
@@ -248,7 +248,7 @@ pub struct InstGraph {
     cur_unit: u32,
     erecent: Vector<u64>,
     /// The concrete functions `reach` found, as `module << 32 | node`.
-    pub reached: Set<u64>,
+    pub(package) reached: Set<u64>,
 }
 
 // Reachability unit keys, the kind in the top bits: a record (its id), a concrete function, a concrete
@@ -282,7 +282,7 @@ const POOL_MAX: usize = 64;
 extend InstGraph {
     /// An empty graph over `pkg`; `keep` (null = lower on demand) supplies kept lowerings and `live`
     /// (per module) selects the roots. Both must outlive the graph.
-    pub fn new(pkg: *const loader::Package, keep: *mut irl::Keep, live: *const bool) InstGraph {
+    pub(package) fn new(pkg: *const loader::Package, keep: *mut irl::Keep, live: *const bool) InstGraph {
         return InstGraph {
             keep: keep,
             live: live,
@@ -415,7 +415,7 @@ extend InstGraph {
     }
 
     /// Bytes the argument keys, records and index hold (SC_TYPE_STATS).
-    pub const fn retained_bytes(self: &Self) u64 {
+    pub(package) const fn retained_bytes(self: &Self) u64 {
         return (self.keys.len() * sizeof(ArgKey) + self.recs.len() * sizeof(InstRec) + self.index.len() * 4) as u64;
     }
 
@@ -432,7 +432,7 @@ extend InstGraph {
     /// Intern the record whose argument keys sit in `argbuf`; returns its id and whether it was
     /// new. Hash + equality use the argument ids only (the value is derived data riding along for
     /// frame evaluation).
-    pub fn add(self: &mut Self, kind: u8, def: DefId, fresh: &mut bool) u32 {
+    pub(package) fn add(self: &mut Self, kind: u8, def: DefId, fresh: &mut bool) u32 {
         let ts = unsafe TS_ON;
         let mut t0: u64 = 0;
         if ts {
@@ -2149,7 +2149,7 @@ extend InstGraph {
     /// product: method demand is PER DECLARATION (one call to `.at` on any Vector<X> emits `at` for
     /// every reachable Vector instance: the established method_used semantics), so each demanded
     /// non-generic method pairs with every instance of its extend's target.
-    pub fn run(self: &mut Self) {
+    pub(package) fn run(self: &mut Self) {
         self.static_demand();
         loop {
             self.rounds += 1;
@@ -3174,7 +3174,7 @@ extend InstGraph {
     }
 
     /// The body of slot `ki` (a `kept_ix` value).
-    pub const fn kept_mut(self: &mut Self, ki: usize) &mut irl::KeptBody {
+    pub(package) const fn kept_mut(self: &mut Self, ki: usize) &mut irl::KeptBody {
         if ki < self.kept.len() {
             return self.kept.index_mut(ki);
         }
@@ -3377,7 +3377,7 @@ extend InstGraph {
 
     /// Whether record `id` is a demanded instance of a generic function or method whose body holds a
     /// static_assert (`Ast.assert_fns`); `prm` and `tys` then receive its parameter bindings.
-    pub fn assert_binds(self: &mut Self, id: u32, prm: &mut Vector<NodeId>, tys: &mut Vector<TypeId>) bool {
+    pub(package) fn assert_binds(self: &mut Self, id: u32, prm: &mut Vector<NodeId>, tys: &mut Vector<TypeId>) bool {
         let r = *self.recs.at(id as usize);
         if r.kind != IG_FN && r.kind != IG_METHOD || (self.flags[id as usize] & RF_SPEC) != 0 {
             return false;
@@ -3577,7 +3577,7 @@ extend InstGraph {
     /// is off) reaches what the callee references, not the callee: the call splices its body. A call
     /// the inliner keeps (its budget, depth or features) spells the callee, which the emitter then
     /// renders late (`Mangler::fn_ref`).
-    pub fn reach(self: &mut Self, roots: &Vector<DefId>, inls: *const inl::InlineStore) {
+    pub(package) fn reach(self: &mut Self, roots: &Vector<DefId>, inls: *const inl::InlineStore) {
         let _ = self.unit(U_ROOT);
         let n = self.unit_key.len();
         // The references by source unit (a counting sort).
@@ -3643,7 +3643,7 @@ extend InstGraph {
     }
 
     /// The method named `name` that a non-generic extend of declaration `d` defines, or NODE_NONE.
-    pub fn method_named(self: &Self, d: DefId, name: str) DefId {
+    pub(package) fn method_named(self: &Self, d: DefId, name: str) DefId {
         let p = unsafe &*self.pkg;
         let mut r = self.ext_first(d);
         while r != IG_NONE {
@@ -3670,7 +3670,7 @@ extend InstGraph {
         return DefId { module: 0, node: NODE_NONE };
     }
 
-    pub fn collect(self: &mut Self) {
+    pub(package) fn collect(self: &mut Self) {
         let p = unsafe &*self.pkg;
         let empty = Vector::<Subst>::new();
         if self.keep != null {

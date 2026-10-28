@@ -7,20 +7,20 @@ import lir::ir as *;
 import codegen::live as lv;
 
 /// The structure of one body.
-pub struct Shape {
-    pub rpo: Vector<u32>, // per block, its reverse postorder number (NONE: unreachable)
-    pub order: Vector<u32>, // the reachable blocks in reverse postorder
-    pub idom: Vector<u32>, // per block, its immediate dominator (the entry's is itself)
-    pub fwd: Vector<u32>, // per block, its forward in-edges, one per edge
-    pub header: Vector<bool>, // per block, the target of a back edge
-    pub kids_at: Vector<u32>, // per block, the start of its children in `kids`; one more entry at the end
-    pub kids: Vector<u32>, // the dominator-tree children, each block's in reverse postorder
+pub(package) struct Shape {
+    pub(package) rpo: Vector<u32>, // per block, its reverse postorder number (NONE: unreachable)
+    pub(package) order: Vector<u32>, // the reachable blocks in reverse postorder
+    pub(package) idom: Vector<u32>, // per block, its immediate dominator (the entry's is itself)
+    pub(package) fwd: Vector<u32>, // per block, its forward in-edges, one per edge
+    pub(package) header: Vector<bool>, // per block, the target of a back edge
+    pub(package) kids_at: Vector<u32>, // per block, the start of its children in `kids`; one more entry at the end
+    pub(package) kids: Vector<u32>, // the dominator-tree children, each block's in reverse postorder
     succ: Vector<u32>,
     stack: Vector<u32>,
 }
 
 extend Shape {
-    pub fn new() Shape {
+    pub(package) fn new() Shape {
         return Shape {
             rpo: Vector::<u32>::new(),
             order: Vector::<u32>::new(),
@@ -35,17 +35,17 @@ extend Shape {
     }
 
     /// Whether block `k` is a merge node: two or more forward in-edges.
-    pub const fn merge(self: &Self, k: u32) bool {
+    pub(package) const fn merge(self: &Self, k: u32) bool {
         return self.fwd[k as usize] >= 2;
     }
 
     /// Whether the edge from block `s` to block `t` is a back edge.
-    pub const fn back(self: &Self, s: u32, t: u32) bool {
+    pub(package) const fn back(self: &Self, s: u32, t: u32) bool {
         return self.rpo[t as usize] <= self.rpo[s as usize];
     }
 
     /// Analyze `b`.
-    pub fn run(self: &mut Self, b: &Body) {
+    pub(package) fn run(self: &mut Self, b: &Body) {
         let nb = b.blocks.len();
         lv::fill(&mut self.rpo, nb, NONE);
         lv::fill(&mut self.idom, nb, NONE);

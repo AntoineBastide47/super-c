@@ -11,10 +11,10 @@ import driver::util as *;
 import target::table as tgt;
 
 /// A temp file an interrupted install left behind is removed after this many seconds.
-pub const TMP_IDLE: i64 = 3600;
+pub(package) const TMP_IDLE: i64 = 3600;
 /// The cache root of project `project` (`cache_root`), or empty when caching is disabled
 /// (SC_NO_CACHE set, or no resolvable home).
-pub fn object_cache_dir(project: str) String {
+pub(package) fn object_cache_dir(project: str) String {
     let off = stdlib::getenv("SC_NO_CACHE");
     if off != null && unsafe *off != 0 as char {
         return String::new();
@@ -23,7 +23,7 @@ pub fn object_cache_dir(project: str) String {
 }
 
 /// The build cache base: $SC_CACHE_DIR, else <home>/.super-c/cache; empty when no home resolves.
-pub fn cache_base() String {
+pub(package) fn cache_base() String {
     let dir = stdlib::get_env("SC_CACHE_DIR").unwrap_or(String::new());
     if dir.len() != 0 {
         return dir;
@@ -40,12 +40,12 @@ pub fn cache_base() String {
 }
 
 /// The cache directory of script builds below the cache base.
-pub const SCRIPTS_DIR: str<'static> = ".scripts";
+pub(package) const SCRIPTS_DIR: str<'static> = ".scripts";
 
 /// The cache root of project `project` (its `bin`, else its `[lib]` name; empty for a script build):
 /// `<base>/<project>` (`project_dir`), so each project's sweep sees only its own files; empty when no
 /// base resolves. The prelude images live under `prelude`.
-pub fn cache_root(project: str) String {
+pub(package) fn cache_root(project: str) String {
     let base = cache_base();
     if base.len() == 0 {
         return base;
@@ -55,7 +55,7 @@ pub fn cache_root(project: str) String {
 
 /// The directory name of project `project` below the cache base: SCRIPTS_DIR for a script build (an
 /// empty name); else the name with each byte outside `[A-Za-z0-9._-]` and a leading `.` made `_`.
-pub fn project_dir(project: str) String {
+pub(package) fn project_dir(project: str) String {
     if project.len() == 0 {
         return String::from_str(SCRIPTS_DIR);
     }
@@ -69,13 +69,13 @@ pub fn project_dir(project: str) String {
 }
 
 /// The real path of `p`; empty when it does not resolve.
-pub fn real_path(p: str) String {
+pub(package) fn real_path(p: str) String {
     return loader::real_path_of(p);
 }
 
 /// Mix `n` bytes at `p` into the two key lanes. Two independent lanes: a cached result served for the
 /// WRONG key would be silently wrong output, so the key is 128 bits, not 64.
-pub const fn ch_mix_bytes(h1: &mut u64, h2: &mut u64, p: *const u8, n: usize) {
+pub(package) const fn ch_mix_bytes(h1: &mut u64, h2: &mut u64, p: *const u8, n: usize) {
     let mut a = *h1;
     let mut b = *h2;
     let mut i: usize = 0;
@@ -104,7 +104,7 @@ pub const fn ch_mix_bytes(h1: &mut u64, h2: &mut u64, p: *const u8, n: usize) {
 }
 
 /// Append `v` as 16 lowercase hex digits.
-pub fn hex64(v: u64, out: &mut String) {
+pub(package) fn hex64(v: u64, out: &mut String) {
     let d = "0123456789abcdef";
     let mut i = 16;
     while i > 0 {
@@ -116,7 +116,7 @@ pub fn hex64(v: u64, out: &mut String) {
 /// The executable the first word of `cmd` names: as given when it has a directory part, else the
 /// first PATH entry holding it (`.exe` too on a Windows host). Returns its mtime; 0 when unresolved
 /// (`out` then holds the bare word).
-pub fn which_path(cmd: str, out: &mut String) i64 {
+pub(package) fn which_path(cmd: str, out: &mut String) i64 {
     let mut e: usize = 0;
     while e < cmd.len() && cmd[e] != b' ' {
         e += 1;
@@ -175,6 +175,6 @@ pub fn which_path(cmd: str, out: &mut String) i64 {
 
 /// The developer directory `xcode-select` chose (the target of `/var/db/xcode_select_link`); empty when
 /// none is set.
-pub fn xcode_select_dir() String {
+pub(package) fn xcode_select_dir() String {
     return fs::readlink("/var/db/xcode_select_link").unwrap_or(String::new());
 }

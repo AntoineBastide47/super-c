@@ -16,61 +16,61 @@ import ir::core as core;
 /// compares again instead of testing a boolean set from the flags); an `and` whose every use compares it
 /// with 0 for equality (`tst`); a product one `add` or `sub` takes (`madd`, `msub`); a logical shift right
 /// by a constant one `and` with a mask of low bits takes (`ubfx`).
-pub const FOLD_CMP: u32 = 1;
-pub const FOLD_TST: u32 = 2;
-pub const FOLD_MADD: u32 = 4;
-pub const FOLD_UBFX: u32 = 8;
+pub(package) const FOLD_CMP: u32 = 1;
+pub(package) const FOLD_TST: u32 = 2;
+pub(package) const FOLD_MADD: u32 = 4;
+pub(package) const FOLD_UBFX: u32 = 8;
 // The most folded instructions `uses_at` expands for one use: a comparison of a test of a field, say.
 const FOLD_DEPTH: u32 = 8;
 
 /// `Live::plan`'s homes per value: no register for the whole range, a callee-saved one, a caller-saved one.
-pub const HOME_NONE: u8 = 0;
-pub const HOME_CALLEE: u8 = 1;
-pub const HOME_SCRATCH: u8 = 2;
+pub(package) const HOME_NONE: u8 = 0;
+pub(package) const HOME_CALLEE: u8 = 1;
+pub(package) const HOME_SCRATCH: u8 = 2;
 /// `Live::plan`'s request per value: it may take a callee-saved register, a caller-saved one; it is of the
 /// vector file (else the general one).
-pub const WANT_CALLEE: u8 = 1;
-pub const WANT_SCRATCH: u8 = 2;
-pub const WANT_V: u8 = 4;
+pub(package) const WANT_CALLEE: u8 = 1;
+pub(package) const WANT_SCRATCH: u8 = 2;
+pub(package) const WANT_V: u8 = 4;
 
 /// The registers `Live::plan` gives out at once per file (`x`: general, `v`: vector): callee-saved,
 /// caller-saved, and both together.
-pub struct Caps {
-    pub xc: u32,
-    pub xs: u32,
-    pub xj: u32,
-    pub vc: u32,
-    pub vs: u32,
-    pub vj: u32,
+pub(package) struct Caps {
+    pub(package) xc: u32,
+    pub(package) xs: u32,
+    pub(package) xj: u32,
+    pub(package) vc: u32,
+    pub(package) vs: u32,
+    pub(package) vj: u32,
 }
 
 extend Caps as Copy {}
 
 /// The analysis of one body. Values index `insts` first, then `params`, then the overflow flags that have
 /// a use (`flag_of`).
-pub struct Live {
-    pub order: Vector<u32>, // the blocks in layout order
-    pub pos: Vector<u32>, // per block, its layout position
-    pub npred: Vector<u32>, // per block, its predecessor count (an edge each)
-    pub inner: Vector<u32>, // per block, the header of its innermost loop, NONE outside loops
-    pub lend: Vector<u32>, // per loop header, the layout position of the loop's last block
-    pub parent: Vector<u32>, // per loop header, the header of the loop around it, NONE
-    pub def_blk: Vector<u32>, // per value, its block
-    pub end: Vector<u32>, // per value, the last layout position it is live in
-    pub uses: Vector<u32>, // per value, its use count, one more when a loop keeps it past its last use
-    pub last: Vector<u32>, // per value, the highest instruction index that uses it (0: none)
-    pub flag_of: Map<u32, u32>, // an instruction with a used flag -> the flag's value index
-    pub home: Vector<u8>, // per value, its HOME_* (`plan`)
+pub(package) struct Live {
+    pub(package) order: Vector<u32>, // the blocks in layout order
+    pub(package) pos: Vector<u32>, // per block, its layout position
+    pub(package) npred: Vector<u32>, // per block, its predecessor count (an edge each)
+    pub(package) inner: Vector<u32>, // per block, the header of its innermost loop, NONE outside loops
+    pub(package) lend: Vector<u32>, // per loop header, the layout position of the loop's last block
+    pub(package) parent: Vector<u32>, // per loop header, the header of the loop around it, NONE
+    pub(package) def_blk: Vector<u32>, // per value, its block
+    pub(package) end: Vector<u32>, // per value, the last layout position it is live in
+    pub(package) uses: Vector<u32>, // per value, its use count, one more when a loop keeps it past its last use
+    pub(package) last: Vector<u32>, // per value, the highest instruction index that uses it (0: none)
+    pub(package) flag_of: Map<u32, u32>, // an instruction with a used flag -> the flag's value index
+    pub(package) home: Vector<u8>, // per value, its HOME_* (`plan`)
     /// The largest access a scaled index addresses (the target's, 0: none); per instruction, whether the
     /// load or store takes its address `ptradd`'s operands (`fold`), and whether the `ptradd` emits nothing
     /// for that (`pfold`; `uses_at`).
-    pub fold_max: u32,
-    pub fold: Vector<bool>,
-    pub pfold: Vector<bool>,
+    pub(package) fold_max: u32,
+    pub(package) fold: Vector<bool>,
+    pub(package) pfold: Vector<bool>,
     /// The instructions that fold into their uses (`FOLD_*`, the target's): each use computes the folded
     /// instruction from its operands, which live to it (`uses_at`), and the instruction emits nothing
     /// (`pfold`).
-    pub fold_ops: u32,
+    pub(package) fold_ops: u32,
     cnd: Vector<u32>, // `folds`' scratch: per instruction, its uses as a condition
     // `plan`'s scratch: per layout position its first instruction's ordinal; per block its frequency; per
     // value its range's first and last ordinals, its weight and its uses by instructions and edges; the
@@ -93,7 +93,7 @@ pub struct Live {
 }
 
 extend Live {
-    pub fn new() Live {
+    pub(package) fn new() Live {
         return Live {
             order: Vector::<u32>::new(),
             pos: Vector::<u32>::new(),
@@ -131,7 +131,7 @@ extend Live {
     }
 
     /// The value index of `v`.
-    pub const fn vix(self: &Self, b: &Body, v: Value) u32 {
+    pub(package) const fn vix(self: &Self, b: &Body, v: Value) u32 {
         if (v & VPARAM) != 0 {
             return b.insts.len() as u32 + (v & ~VPARAM);
         }
@@ -145,7 +145,7 @@ extend Live {
     }
 
     /// Analyze `b`.
-    pub fn run(self: &mut Self, b: &Body) {
+    pub(package) fn run(self: &mut Self, b: &Body) {
         let nb = b.blocks.len();
         fill(&mut self.npred, nb, 0);
         fill(&mut self.rpo, nb, NONE);
@@ -285,7 +285,7 @@ extend Live {
     /// `pos`) passes value `v` to (an edge into a loop header not later in the layout); NONE for none. A
     /// branch's other edge must leave the loop, and no path from it reads the parameter but through the
     /// header, which defines it again (`reads_before`).
-    pub fn back_param(self: &Self, b: &Body, t: Inst, v: Value, pos: u32) u32 {
+    pub(package) fn back_param(self: &Self, b: &Body, t: Inst, v: Value, pos: u32) u32 {
         let ne: u32 = if t.op == O_JMP {
             1;
         } else if t.op == O_BR {
@@ -326,7 +326,7 @@ extend Live {
 
     /// Whether an instruction of block `k` of `b` after instruction `i`, its terminator's edges included,
     /// reads value `v`.
-    pub fn reads_after(self: &mut Self, b: &Body, k: u32, i: u32, v: Value) bool {
+    pub(package) fn reads_after(self: &mut Self, b: &Body, k: u32, i: u32, v: Value) bool {
         let bk = b.blocks[k as usize];
         let mut out = replace(&mut self.rd, Vector::<Value>::new());
         let mut found = false;
@@ -345,7 +345,7 @@ extend Live {
 
     /// The values instruction `i` of `b` uses, as `each_use` gives them but for the folded instructions
     /// (`pfold`): a use of one is a use of its two operands, and one uses none.
-    pub fn uses_at(self: &Self, b: &Body, i: u32, out: &mut Vector<Value>) {
+    pub(package) fn uses_at(self: &Self, b: &Body, i: u32, out: &mut Vector<Value>) {
         if self.pfold[i as usize] {
             out.truncate(0);
             return;
@@ -720,7 +720,7 @@ extend Live {
     /// to build, so recomputing one at each use costs instructions every iteration: a generator asks a
     /// register for its whole range instead (an integer one when building it takes more than one
     /// instruction). After `run`.
-    pub fn loop_consts(self: &mut Self, b: &Body, out: &mut Vector<bool>) {
+    pub(package) fn loop_consts(self: &mut Self, b: &Body, out: &mut Vector<bool>) {
         out.truncate(0);
         out.resize_default(b.insts.len());
         let mut us = replace(&mut self.succ, Vector::<u32>::new());
@@ -750,7 +750,7 @@ extend Live {
     /// heavier one. A range runs from its definition (a parameter's: the first edge into it) to its last
     /// use (a kept value's, a parameter's or a flag's: the end of its last block). After `run`, before the
     /// generator counts the uses down.
-    pub fn plan(self: &mut Self, b: &Body, want: &Vector<u8>, caps: Caps) {
+    pub(package) fn plan(self: &mut Self, b: &Body, want: &Vector<u8>, caps: Caps) {
         let n = self.end.len();
         let ni = b.insts.len();
         let nv = ni + b.params.len();
@@ -1019,7 +1019,7 @@ extend Live {
 
 /// Whether vector operation `t` (`O_VOP`) is a reduction, which computes in place over temporaries
 /// (no call).
-pub const fn reduces(t: Inst) bool {
+pub(package) const fn reduces(t: Inst) bool {
     let code = (t.aux & VOP_CODE) as u32;
     return code >= core::OP_SIMD && code < core::OP_CMP_LANES && core::simd_op((code - core::OP_SIMD) as u8).rule == core::SR_REDUCE;
 }
@@ -1029,7 +1029,7 @@ pub const fn reduces(t: Inst) bool {
 // `reads_before` follows at most BACK_SCAN blocks.
 const BACK_SCAN: u32 = 32;
 
-pub fn each_use(b: &Body, t: Inst, out: &mut Vector<Value>) {
+pub(package) fn each_use(b: &Body, t: Inst, out: &mut Vector<Value>) {
     out.truncate(0);
     let f = op_info(t.op).form;
     if lv::operand_a(f) && t.a != VNONE {
@@ -1071,7 +1071,7 @@ pub fn each_use(b: &Body, t: Inst, out: &mut Vector<Value>) {
 }
 
 /// The value indexes of the parameters terminator `t` of `b` writes, one per edge into them, into `out`.
-pub fn each_edge_param(b: &Body, t: Inst, out: &mut Vector<u32>) {
+pub(package) fn each_edge_param(b: &Body, t: Inst, out: &mut Vector<u32>) {
     out.truncate(0);
     let ni = b.insts.len() as u32;
     b.succ_edges(t, out);
@@ -1143,7 +1143,7 @@ const fn contains_u32(xs: &Vector<u32>, x: u32) bool {
     return false;
 }
 
-pub const fn edge_of(b: &Body, t: Inst, k: u32) u32 {
+pub(package) const fn edge_of(b: &Body, t: Inst, k: u32) u32 {
     if t.op == O_JMP {
         return t.a;
     }
@@ -1158,7 +1158,7 @@ pub const fn edge_of(b: &Body, t: Inst, k: u32) u32 {
 }
 
 /// `v` as `n` copies of `x`, its buffer reused.
-pub fn fill(v: &mut Vector<u32>, n: usize, x: u32) {
+pub(package) fn fill(v: &mut Vector<u32>, n: usize, x: u32) {
     v.truncate(0);
     v.resize_default(n);
     if x != 0 {

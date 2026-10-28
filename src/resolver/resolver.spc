@@ -11,10 +11,10 @@ import utils::errors as diag;
 
 /// Most type parameters one generic item may declare. Monomorphization stores an instance's type arguments
 /// inline in fixed 8-wide arrays, so this must not exceed that width.
-pub const MAX_TYPE_PARAMS: u32 = 8;
+pub(package) const MAX_TYPE_PARAMS: u32 = 8;
 
 /// Value vs type namespace. Stored on each Symbol so a scope-exit can recompute its index key.
-pub enum Namespace {
+pub(package) enum Namespace {
     NS_VALUE,
     NS_TYPE,
 }
@@ -22,84 +22,84 @@ pub enum Namespace {
 /// One live binding on the scope stack. 16 bytes (a power-of-2 stride for the hot linear scope scan): the
 /// namespace rides in the top bit of `decl` (NodeIds are far below 2^31) so no separate `ns` byte is
 /// needed. Mask `decl & 0x7FFFFFFF` for the real NodeId; `decl >> 31` recovers the Namespace.
-pub struct Symbol {
-    pub hash: u32,
-    pub decl: NodeId,
-    pub name: tok::Span,
+pub(package) struct Symbol {
+    pub(package) hash: u32,
+    pub(package) decl: NodeId,
+    pub(package) name: tok::Span,
 }
 
 /// An open closure being resolved: a value ref binding below `floor` is a CAPTURE (copied into its env by
 /// codegen), collected here (deduped, discovery order) and committed to the node's `captures` at exit.
-pub struct ClosureScope {
-    pub floor: u32,
-    pub caps: Vector<NodeId>,
-    pub node: NodeId,
+pub(package) struct ClosureScope {
+    pub(package) floor: u32,
+    pub(package) caps: Vector<NodeId>,
+    pub(package) node: NodeId,
 }
 
 /// Single-module resolver. Mutates the module's Ast IN PLACE through a borrowed reference: the Ast
 /// never leaves its `Package.modules` slot, so package-level lookups that land back on this module
 /// read the live tree with no override indirection.
-pub struct Resolver<'a> {
-    pub ast: &'a mut Ast,
-    pub source: str<'a>,
-    pub symbols: Vector<Symbol>, // flat stack of live symbols across all open scopes
-    pub symbol_previous: Vector<u32>, // chain links parallel to symbols, encoded as index + 1
-    pub scope_starts: Vector<u32>, // stack of symbols.len at each scope entry
-    pub symbol_index: Map<u64, u32>, // (namespace, name hash) -> newest matching symbol index + 1
-    pub current_self: DefId, // decl 'Self' refers to inside the current interface/extension
-    pub cur_fn: NodeId, // the function whose body is being resolved (NODE_NONE: none)
+pub(package) struct Resolver<'a> {
+    pub(package) ast: &'a mut Ast,
+    pub(package) source: str<'a>,
+    pub(package) symbols: Vector<Symbol>, // flat stack of live symbols across all open scopes
+    pub(package) symbol_previous: Vector<u32>, // chain links parallel to symbols, encoded as index + 1
+    pub(package) scope_starts: Vector<u32>, // stack of symbols.len at each scope entry
+    pub(package) symbol_index: Map<u64, u32>, // (namespace, name hash) -> newest matching symbol index + 1
+    pub(package) current_self: DefId, // decl 'Self' refers to inside the current interface/extension
+    pub(package) cur_fn: NodeId, // the function whose body is being resolved (NODE_NONE: none)
     // The type aliases of the open interface/extend blocks, innermost from `self_aliases_start`, for the
     // `Self::Assoc` projection.
-    pub self_aliases: Vector<NodeId>,
-    pub self_aliases_start: u32,
-    pub closures: Vector<ClosureScope>, // open closures, innermost last
-    pub cap_seen: Set<u64>, // closure depth << 32 | decl, for every capture an open closure recorded
-    pub package: *const loader::Package, // for resolving `import`ed module-qualified names (null = none)
-    pub mod_names: Vector<ModEntry>, // leading-segment module names (alias / single-segment path), import order
-    pub mod_index: Map<u32, u32>, // name hash -> newest `mod_names` index + 1 with that hash
+    pub(package) self_aliases: Vector<NodeId>,
+    pub(package) self_aliases_start: u32,
+    pub(package) closures: Vector<ClosureScope>, // open closures, innermost last
+    pub(package) cap_seen: Set<u64>, // closure depth << 32 | decl, for every capture an open closure recorded
+    pub(package) package: *const loader::Package, // for resolving `import`ed module-qualified names (null = none)
+    pub(package) mod_names: Vector<ModEntry>, // leading-segment module names (alias / single-segment path), import order
+    pub(package) mod_index: Map<u32, u32>, // name hash -> newest `mod_names` index + 1 with that hash
     // The glob search order: each `import P as *;` module, then its transitive imports, in import order.
     // A module sits at its first position only: a later copy would repeat that probe's miss.
-    pub glob_mids: Vector<ModuleId>,
-    pub errors: diag::Errors,
-    pub lint: bool,
-    pub lint_decls: Vector<NodeId>, // lets/params declared during resolution (lint only): the unused
+    pub(package) glob_mids: Vector<ModuleId>,
+    pub(package) errors: diag::Errors,
+    pub(package) lint: bool,
+    pub(package) lint_decls: Vector<NodeId>, // lets/params declared during resolution (lint only): the unused
     // Pass walks only these, so @platform-dropped items (parsed but never resolved) can't false-positive.
-    pub bin_spine: Vector<NodeId>, // `resolve_expr`'s stack of left-nested binary nodes (shared by nested walks)
-    pub lt_owners: Vector<NodeId>, // open decls (and `for<..>` bounds) whose lifetime params are in scope
-    pub closure_param: bool, // resolving a closure parameter's type: the lifetimes it names are the call's
-    pub build_names: bool, // the module is the build-constant module: it may declare the reserved names
-    pub target_names: bool, // the module is std's `target`: it declares the build-constant enums
+    pub(package) bin_spine: Vector<NodeId>, // `resolve_expr`'s stack of left-nested binary nodes (shared by nested walks)
+    pub(package) lt_owners: Vector<NodeId>, // open decls (and `for<..>` bounds) whose lifetime params are in scope
+    pub(package) closure_param: bool, // resolving a closure parameter's type: the lifetimes it names are the call's
+    pub(package) build_names: bool, // the module is the build-constant module: it may declare the reserved names
+    pub(package) target_names: bool, // the module is std's `target`: it declares the build-constant enums
 }
 
 /// A symbol-stack lookup result: the declaring node and its 1-based stack position (0 = not found).
-pub struct SymLookup {
-    pub decl: NodeId,
-    pub idx: u32,
+pub(package) struct SymLookup {
+    pub(package) decl: NodeId,
+    pub(package) idx: u32,
 }
 /// A module-qualified type split: module id (-1 = not qualified), the type-name node and its segment
 /// index (0 when not qualified).
-pub struct ModQual {
-    pub mid: i32,
-    pub type_node: NodeId,
-    pub head: u32,
+pub(package) struct ModQual {
+    pub(package) mid: i32,
+    pub(package) type_node: NodeId,
+    pub(package) head: u32,
 }
 /// A leading-segment-as-module test result.
-pub struct ModName {
-    pub found: bool,
-    pub mid: ModuleId,
+pub(package) struct ModName {
+    pub(package) found: bool,
+    pub(package) mid: ModuleId,
 }
 /// One import usable as a leading path segment (its `as` alias, or a single-segment path), resolved once
 /// by scan_imports so per-reference probes never rescan the item list.
-pub struct ModEntry {
-    pub name: tok::Span,
-    pub mid: ModuleId,
-    pub previous: u32, // the entry before it with the same name hash, as index + 1 (0 = none)
-    pub weak: bool, // a glob import's implicit last segment: a type in scope of that name wins
+pub(package) struct ModEntry {
+    pub(package) name: tok::Span,
+    pub(package) mid: ModuleId,
+    pub(package) previous: u32, // the entry before it with the same name hash, as index + 1 (0 = none)
+    pub(package) weak: bool, // a glob import's implicit last segment: a type in scope of that name wins
 }
 /// A labeled `break`, `continue` or loop: its label and its own span.
-pub struct LabelFlow {
-    pub label: tok::Span,
-    pub span: tok::Span,
+pub(package) struct LabelFlow {
+    pub(package) label: tok::Span,
+    pub(package) span: tok::Span,
 }
 // Per-node lint facts (`Resolver::lint_module`), one byte per node: a resolution points at the decl, the
 // resolver declared it, it is address-taken or closure-captured (exempt from the dead-store lint).
@@ -111,8 +111,8 @@ const L_SEEN: u8 = 2;
 const L_EXEMPT: u8 = 4;
 // A dead-store finding before the exemption test: the first of two adjacent stores to `decl`.
 struct DeadStore {
-    pub first: NodeId,
-    pub decl: NodeId,
+    pub(package) first: NodeId,
+    pub(package) decl: NodeId,
 }
 
 // Span-based helpers (no resolver state).
@@ -170,7 +170,7 @@ const fn symbol_key(hash: u32, ns: u8) u64 {
 
 extend Resolver {
     /// A resolver over `ast` (mutated in place) with `package` (may be null) supplying imports.
-    pub fn new<'a>(ast: &'a mut Ast, source: str<'a>, package: *const loader::Package) Resolver<'a> {
+    pub(package) fn new<'a>(ast: &'a mut Ast, source: str<'a>, package: *const loader::Package) Resolver<'a> {
         return Resolver {
             ast: ast,
             source: source,
@@ -2039,7 +2039,7 @@ extend Resolver {
 
     /// Resolve the whole module: imports scanned once, top-level names pre-declared (visible regardless of
     /// order), then every item; lint passes run when `lint`. Diagnostics finalize against the module's file.
-    pub fn resolve(self: &mut Self) {
+    pub(package) fn resolve(self: &mut Self) {
         let items = self.ast.at_const(self.ast.root).as_data.program.items;
         self.ast.init_resolutions();
         self.ast.assert_fns.clear();
@@ -2237,11 +2237,11 @@ extend Resolver {
     }
 
     /// True once any resolution error is recorded.
-    pub const fn has_errors(self: &Self) bool {
+    pub(package) const fn has_errors(self: &Self) bool {
         return self.errors.has_errors();
     }
     /// Print the accumulated diagnostics to stderr.
-    pub fn log_errors(self: &Self) {
+    pub(package) fn log_errors(self: &Self) {
         self.errors.log();
     }
 

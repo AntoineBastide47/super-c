@@ -17,14 +17,14 @@ import stdlib;
 /// One entry: its function name, operation (the `simd::Op` variant), the lane types and counts of its
 /// first parameter and its result (lane type 255: a mask or a scalar), and its features, closed under
 /// `implies` (the backend table's order).
-pub struct Entry {
-    pub name: String,
-    pub op: String,
-    pub t: u8,
-    pub n: u64,
-    pub u: u8,
-    pub m: u64,
-    pub fs: cf::CpuFeatureSet,
+pub(package) struct Entry {
+    pub(package) name: String,
+    pub(package) op: String,
+    pub(package) t: u8,
+    pub(package) n: u64,
+    pub(package) u: u8,
+    pub(package) m: u64,
+    pub(package) fs: cf::CpuFeatureSet,
 }
 
 // The model's lane type of name `s` (i8 0 .. i64 3, u8 4 .. u64 7, f32 8, f64 9), or 255.
@@ -53,7 +53,7 @@ const fn shape_of(s: str, t: &mut u8, n: &mut u64) {
 }
 
 /// The entries of backend file `text`, in order.
-pub fn entries(text: str) Vector<Entry> {
+pub(package) fn entries(text: str) Vector<Entry> {
     let mut v = Vector::<Entry>::new();
     let mut op = String::new();
     let mut fs = cf::CpuFeatureSet { w: [0, 0] };
@@ -229,7 +229,7 @@ fn model_ops(e: &Entry) Vector<String> {
 /// operation that reaches it, `per` cases at its lane count and `per` at the most lanes, drawn from
 /// seeds fixed by the entry's index, and a choice, compress, expand or masked access over at most four
 /// lanes under every mask.
-pub fn cases(es: &Vector<Entry>, ks: []usize, per: u64) Vector<vec::VCase> {
+pub(package) fn cases(es: &Vector<Entry>, ks: []usize, per: u64) Vector<vec::VCase> {
     let mut cs = Vector::<vec::VCase>::new();
     for k in ks {
         let e = es.at(k);
@@ -514,7 +514,7 @@ fn mask_form_instead(es: &Vector<Entry>, e: &Entry, seen: &String) bool {
 /// The features of the differential builds: the host's baseline and, when `with_more`,
 /// `SC_SIMD_FEATURES`, closed. An entry beyond them is not required to be called (another run of the
 /// lane checks it).
-pub fn run_features(with_more: bool) cf::CpuFeatureSet {
+pub(package) fn run_features(with_more: bool) cf::CpuFeatureSet {
     let t = unsafe shim::sc_host_platform();
     let a = unsafe shim::sc_host_arch();
     let mut s = tgt::baseline(t, a);
@@ -569,7 +569,7 @@ fn calls(c: &String, e: &Entry) bool {
 /// with a model operation (`per` cases per entry, operation and lane count, programs of at most 256
 /// cases): empty when the planned and the lane-loop builds agree on every case and the planned C
 /// calls every entry, else each difference.
-pub fn check(text: str, k: usize, parts: usize, per: u64) String {
+pub(package) fn check(text: str, k: usize, parts: usize, per: u64) String {
     let mut r = String::new();
     let es = entries(text);
     let run = run_features(true);
@@ -654,7 +654,7 @@ pub fn check(text: str, k: usize, parts: usize, per: u64) String {
 
 /// The oracle over the entries of `text` without a model operation (loads, stores, `any`, `all`):
 /// one program, the same output planned and with lane loops, and a call of each entry.
-pub fn check_memory(text: str) String {
+pub(package) fn check_memory(text: str) String {
     let src = memory_program();
     let m = h::diff_build(src.as_str(), []);
     let s = h::diff_build(src.as_str(), ["SC_SIMD_SCALAR=1"]);

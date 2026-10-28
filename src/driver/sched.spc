@@ -13,19 +13,19 @@ import driver::taskctl as tctl;
 /// job) lists the jobs that wait for it, `order` is the serial execution order (a topological
 /// order: every job after its dependencies), `est` the estimated bytes each job puts in flight
 /// for the memory gate.
-pub struct Jobs {
-    pub n: usize,
-    pub pending: Vector<u32>,
-    pub succ_off: Vector<u32>,
-    pub succ: Vector<u32>,
-    pub order: Vector<u32>,
-    pub est: Vector<u64>,
+pub(package) struct Jobs {
+    pub(package) n: usize,
+    pub(package) pending: Vector<u32>,
+    pub(package) succ_off: Vector<u32>,
+    pub(package) succ: Vector<u32>,
+    pub(package) order: Vector<u32>,
+    pub(package) est: Vector<u64>,
 }
 
 extend Jobs {
     /// `n` jobs with the dependencies in `edges` (`pred << 32 | succ`, each pair once) and the
     /// serial order `order` (every job after its dependencies).
-    pub fn from_edges(n: usize, edges: &Vector<u64>, order: Vector<u32>) Jobs {
+    pub(package) fn from_edges(n: usize, edges: &Vector<u64>, order: Vector<u32>) Jobs {
         let mut j = Jobs::independent(n);
         // Every edge must run forward in the serial order: a backward one is a cycle, which the
         // parallel path would wait on forever.
@@ -64,7 +64,7 @@ extend Jobs {
     }
 
     /// `n` independent jobs in index order.
-    pub fn independent(n: usize) Jobs {
+    pub(package) fn independent(n: usize) Jobs {
         let mut j = Jobs {
             n: n,
             pending: Vector::<u32>::new(),
@@ -87,13 +87,13 @@ extend Jobs {
 // One job on a worker: the graph, its live dependency counts (`g.pending`, taken from the
 // caller's exclusive borrow), the stage's callback and context, the job's index.
 struct Task {
-    pub g: *const Jobs,
-    pub pend: *mut u32,
-    pub run: fn(*mut void, u32) void,
-    pub ctx: *mut void,
-    pub j: u32,
-    pub ctl: *const tctl::Ctl,
-    pub seed: u32, // SC_TASK_DELAY seed; 0 = no stagger
+    pub(package) g: *const Jobs,
+    pub(package) pend: *mut u32,
+    pub(package) run: fn(*mut void, u32) void,
+    pub(package) ctx: *mut void,
+    pub(package) j: u32,
+    pub(package) ctl: *const tctl::Ctl,
+    pub(package) seed: u32, // SC_TASK_DELAY seed; 0 = no stagger
 }
 
 // The callback's context and the graph are shared by every task of the stage and outlive the
@@ -141,7 +141,13 @@ fn run_task(t: Task, wg: &psync::WaitGroup) {
 /// is 1, else on the runtime with `workers` workers, each job started by the completion of its
 /// last dependency. `ctl` (null = off) gates the estimated bytes in flight. Returns once every
 /// job has completed. The parallel path counts `g.pending` down to zero, so a graph runs once.
-pub fn run_jobs(g: &mut Jobs, workers: u32, run: fn(*mut void, u32) void, ctx: *mut void, ctl: *const tctl::Ctl) {
+pub(package) fn run_jobs(
+    g: &mut Jobs,
+    workers: u32,
+    run: fn(*mut void, u32) void,
+    ctx: *mut void,
+    ctl: *const tctl::Ctl,
+) {
     if workers == 1 || g.n <= 1 {
         for k in 0..g.order.len() {
             run(ctx, g.order[k]);

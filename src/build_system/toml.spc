@@ -6,29 +6,29 @@
 import utils::errors as diag;
 
 /// Value kinds (TomlVal.kind).
-pub const TV_STR: u8 = 0;
-pub const TV_INT: u8 = 1;
-pub const TV_BOOL: u8 = 2;
-pub const TV_ARR: u8 = 3;
-pub const TV_TBL: u8 = 4;
+pub(package) const TV_STR: u8 = 0;
+pub(package) const TV_INT: u8 = 1;
+pub(package) const TV_BOOL: u8 = 2;
+pub(package) const TV_ARR: u8 = 3;
+pub(package) const TV_TBL: u8 = 4;
 
 const I64_MAX: i64 = 0x7FFFFFFFFFFFFFFF;
 
 /// One `key = "value"` entry of an inline table.
-pub struct TomlPair {
-    pub k: String,
-    pub v: String,
+pub(package) struct TomlPair {
+    pub(package) k: String,
+    pub(package) v: String,
 }
 
 /// A parsed value tagged by `kind` (TV_*): only the matching payload field is meaningful, the rest
 /// keep their empty defaults.
-pub struct TomlVal {
-    pub kind: u8,
-    pub s: String,
-    pub i: i64,
-    pub b: bool,
-    pub arr: Vector<String>,
-    pub tbl: Vector<TomlPair>,
+pub(package) struct TomlVal {
+    pub(package) kind: u8,
+    pub(package) s: String,
+    pub(package) i: i64,
+    pub(package) b: bool,
+    pub(package) arr: Vector<String>,
+    pub(package) tbl: Vector<TomlPair>,
 }
 
 // Bootstrap constraint: the release compiler dispatches a generic `Free` call to a named `free`
@@ -55,19 +55,19 @@ extend TomlVal {
 }
 
 /// One `key = value` under its (possibly empty) section; `at` is the key's byte offset for diagnostics.
-pub struct TomlItem {
-    pub section: String,
-    pub key: String,
-    pub at: u32,
-    pub val: TomlVal,
+pub(package) struct TomlItem {
+    pub(package) section: String,
+    pub(package) key: String,
+    pub(package) at: u32,
+    pub(package) val: TomlVal,
 }
 
 struct Parser<'a> {
-    pub src: str<'a>,
-    pub i: usize,
-    pub section: String,
-    pub items: Vector<TomlItem>,
-    pub errors: diag::Errors,
+    pub(package) src: str<'a>,
+    pub(package) i: usize,
+    pub(package) section: String,
+    pub(package) items: Vector<TomlItem>,
+    pub(package) errors: diag::Errors,
 }
 
 const fn is_key_byte(b: u8) bool {
@@ -340,7 +340,7 @@ extend Parser {
 /// editor squiggles). Spans stay raw: `finalize` is the step that rewrites messages into rendered
 /// blocks, and an editor wants them unrendered. None on any error (one per offending line: the parser
 /// resyncs at newlines).
-pub fn parse_into(src: str, errs: &mut diag::Errors) Option<Vector<TomlItem>> {
+pub(package) fn parse_into(src: str, errs: &mut diag::Errors) Option<Vector<TomlItem>> {
     let mut p = Parser {
         src: src,
         i: 0,

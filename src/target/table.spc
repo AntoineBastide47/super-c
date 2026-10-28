@@ -7,143 +7,143 @@
 import ir::cpu_features as cf;
 
 /// An instruction set: one `@arch` name.
-pub struct Isa {
-    pub name: str<'static>, // `@arch`, `--arch`
-    pub variant: str<'static>, // the `std::target::Arch` variant
-    pub ptr_bytes: u8,
+pub(package) struct Isa {
+    pub(package) name: str<'static>, // `@arch`, `--arch`
+    pub(package) variant: str<'static>, // the `std::target::Arch` variant
+    pub(package) ptr_bytes: u8,
     /// A function may enable features its build lacks (`@target_feature`, run-time dispatch). False on
     /// wasm32: a module validates as a whole, so features are per build.
-    pub fn_features: bool,
+    pub(package) fn_features: bool,
     /// Its features come in the x86-64 psABI levels (`x86-64-v3`), and builds dispatch over them.
-    pub levels: bool,
+    pub(package) levels: bool,
     /// A feature's C flag is an extension of one `-march`/`-mcpu` flag (`+dotprod`), not a flag of its own.
-    pub ext_flags: bool,
+    pub(package) ext_flags: bool,
     /// Naked functions (`@unsafe(naked)`): a function without prologue or epilogue.
-    pub naked: bool,
+    pub(package) naked: bool,
     /// `frame.return_address` has a value; else it is null.
-    pub return_address: bool,
+    pub(package) return_address: bool,
     /// The vector unit sums mask lanes faster than it extracts lane bits (Neon has no lane-bits
     /// instruction), so `count` of a comparison folds lane masks.
-    pub mask_fold: bool,
+    pub(package) mask_fold: bool,
     /// Every processor of it has a scalar fused multiply-add (else only one with its feature `fma`).
-    pub scalar_fma: bool,
+    pub(package) scalar_fma: bool,
     /// The C compiler vectorizes a merged loop of loads and stores through two slices it cannot prove
     /// apart (wasm's does), so a vector load and store over different slices may share one loop.
-    pub merge_apart: bool,
+    pub(package) merge_apart: bool,
     /// The bytes of a vector the native backend computes in one register, 0 when it computes vectors
     /// lane by lane in memory (wasm32): the LIR vectorizer runs only with registers.
-    pub vector_bytes: u8,
+    pub(package) vector_bytes: u8,
     /// One instruction gives the high half of a 64-bit product (UMULH, MUL's rdx): the optimizer divides
     /// a 64-bit value by a constant with a product (`lir::ir::Package::mul_high`).
-    pub mul_high: bool,
-    pub simd_backend: str<'static>, // `std/simd/backend/<name>.spc`
+    pub(package) mul_high: bool,
+    pub(package) simd_backend: str<'static>, // `std/simd/backend/<name>.spc`
     /// The C headers whose functions are the C compiler's intrinsics, space-separated: no object defines
     /// them, so a native backend expands each call from its template (`target::intrin`), and a call of
     /// one it has none for is a build error.
-    pub intrinsics: str<'static>,
+    pub(package) intrinsics: str<'static>,
 }
 
 /// A calling convention: how arguments and results pass, the callee-saved registers, varargs and
 /// struct returns. The native backends lower LIR calls through it.
-pub struct CallConv {
-    pub name: str<'static>,
-    pub va_list_bytes: u8, // C `va_list`: a pointer, or the register save area's record
+pub(package) struct CallConv {
+    pub(package) name: str<'static>,
+    pub(package) va_list_bytes: u8, // C `va_list`: a pointer, or the register save area's record
 }
 
 /// An object format: the object writer, relocations, section names and the linker.
-pub struct ObjFormat {
-    pub name: str<'static>,
+pub(package) struct ObjFormat {
+    pub(package) name: str<'static>,
     /// The rule of a `@unsafe(link_section)` name (`SEC_*`).
-    pub sections: u8,
+    pub(package) sections: u8,
     /// Symbols take hidden visibility.
-    pub hidden: bool,
+    pub(package) hidden: bool,
     /// Shared-library code needs `-fPIC`.
-    pub pic: bool,
+    pub(package) pic: bool,
     /// The link flag that records a shared library's own name, which a program linking it loads it
     /// through; the name follows. Empty: none.
-    pub soname: str<'static>,
+    pub(package) soname: str<'static>,
 }
 
 /// An operating system: one `@platform` name.
-pub struct Os {
-    pub name: str<'static>, // `@platform`, `--target`
-    pub variant: str<'static>, // the `std::target::Platform` variant
+pub(package) struct Os {
+    pub(package) name: str<'static>, // `@platform`, `--target`
+    pub(package) variant: str<'static>, // the `std::target::Platform` variant
     /// The instruction set a `--target` of this system picks without `--arch`: an `ISAS` index, or -1
     /// for the host's.
-    pub isa_default: i8,
+    pub(package) isa_default: i8,
     /// The cross toolchain its builds need (`SDK_*`).
-    pub sdk: u8,
+    pub(package) sdk: u8,
     /// The layout of its C headers and libraries under a sysroot (`SYSROOT_*`).
-    pub sysroot: u8,
+    pub(package) sysroot: u8,
     /// One of Apple's systems: Mach-O tools (`ar`, `strip`, `xcrun`) serve every one of them.
-    pub darwin: bool,
+    pub(package) darwin: bool,
     /// Its C library comes from std (`std::rt::libc`, `std::rt::libm`), not from the system.
-    pub own_libc: bool,
-    pub exe_suffix: str<'static>,
-    pub shared_prefix: str<'static>,
-    pub shared_suffix: str<'static>,
-    pub libm: str<'static>, // the link flag of the C math library, empty when the C library holds it
+    pub(package) own_libc: bool,
+    pub(package) exe_suffix: str<'static>,
+    pub(package) shared_prefix: str<'static>,
+    pub(package) shared_suffix: str<'static>,
+    pub(package) libm: str<'static>, // the link flag of the C math library, empty when the C library holds it
     /// The dialect its C headers are read and its emitted C compiles under, after the default one (after a
     /// space; empty: the default): mingw-w64 declares the POSIX functions only outside strict ISO C.
-    pub c_std: str<'static>,
+    pub(package) c_std: str<'static>,
     /// The defines every C compile for it has, each after a space: the API level the headers declare.
-    pub c_defines: str<'static>,
+    pub(package) c_defines: str<'static>,
     /// The link flags of an executable, each after a space: the main thread's 8 MiB stack.
-    pub exe_link: str<'static>,
+    pub(package) exe_link: str<'static>,
     /// The NDK's directory of prebuilt toolchains for a build on this system (one universal darwin
     /// toolchain on macOS).
-    pub ndk_host: str<'static>,
+    pub(package) ndk_host: str<'static>,
 }
 
 /// A debug-information format: the line tables, frame descriptions and type records.
-pub struct Debug {
-    pub name: str<'static>,
+pub(package) struct Debug {
+    pub(package) name: str<'static>,
 }
 
 /// One target: its parts (indexes into `ISAS`, `CALLCONVS`, `OBJFORMATS`, `OSES`, `DEBUGS`), its C data
 /// model and its build facts.
-pub struct Target {
-    pub isa: u8,
-    pub cc: u8,
-    pub obj: u8,
-    pub os: u8,
-    pub debug: u8,
-    pub triple: str<'static>, // the C compiler's `-target`
-    pub long_bytes: u8, // C `long`: 8 under LP64, 4 under LLP64 and ILP32
+pub(package) struct Target {
+    pub(package) isa: u8,
+    pub(package) cc: u8,
+    pub(package) obj: u8,
+    pub(package) os: u8,
+    pub(package) debug: u8,
+    pub(package) triple: str<'static>, // the C compiler's `-target`
+    pub(package) long_bytes: u8, // C `long`: 8 under LP64, 4 under LLP64 and ILP32
     /// C `long double`: 64 (an IEEE double), 80 (the x87 extended format) or 128 (IEEE quadruple).
-    pub long_double_bits: u8,
-    pub big_endian: bool,
-    pub red_zone: u16, // bytes below the stack pointer a leaf function may use
-    pub page_bytes: u32,
+    pub(package) long_double_bits: u8,
+    pub(package) big_endian: bool,
+    pub(package) red_zone: u16, // bytes below the stack pointer a leaf function may use
+    pub(package) page_bytes: u32,
     /// The CPU features every build has, closed under `implies`.
-    pub features: cf::CpuFeatureSet,
+    pub(package) features: cf::CpuFeatureSet,
     /// The features no machine of the target has.
-    pub never: cf::CpuFeatureSet,
+    pub(package) never: cf::CpuFeatureSet,
     /// The `-mcpu` of a build with aarch64 features beyond the baseline, empty for `-march`.
-    pub mcpu: str<'static>,
-    pub apple_sdk: str<'static>, // the Apple SDK platform name of a `SYSROOT_APPLE` system
-    pub cenv: u8, // its C environment row (`bindgen::ctarget_data::ROWS`)
+    pub(package) mcpu: str<'static>,
+    pub(package) apple_sdk: str<'static>, // the Apple SDK platform name of a `SYSROOT_APPLE` system
+    pub(package) cenv: u8, // its C environment row (`bindgen::ctarget_data::ROWS`)
 }
 
-pub const SDK_NONE: u8 = 0;
-pub const SDK_XCRUN: u8 = 1;
-pub const SDK_NDK: u8 = 2;
-pub const SDK_WASI: u8 = 3;
+pub(package) const SDK_NONE: u8 = 0;
+pub(package) const SDK_XCRUN: u8 = 1;
+pub(package) const SDK_NDK: u8 = 2;
+pub(package) const SDK_WASI: u8 = 3;
 
-pub const SYSROOT_APPLE: u8 = 0;
-pub const SYSROOT_LINUX: u8 = 1;
-pub const SYSROOT_ANDROID: u8 = 2;
-pub const SYSROOT_MINGW: u8 = 3;
-pub const SYSROOT_WASI: u8 = 4;
+pub(package) const SYSROOT_APPLE: u8 = 0;
+pub(package) const SYSROOT_LINUX: u8 = 1;
+pub(package) const SYSROOT_ANDROID: u8 = 2;
+pub(package) const SYSROOT_MINGW: u8 = 3;
+pub(package) const SYSROOT_WASI: u8 = 4;
 
 /// Any name of letters, digits, `_`, `.` and `$`.
-pub const SEC_PLAIN: u8 = 0;
+pub(package) const SEC_PLAIN: u8 = 0;
 /// `segment,section` with up to three more parts, each part at most 16 bytes.
-pub const SEC_MACHO: u8 = 1;
+pub(package) const SEC_MACHO: u8 = 1;
 /// A plain name for data only: every function is in the code section.
-pub const SEC_DATA_ONLY: u8 = 2;
+pub(package) const SEC_DATA_ONLY: u8 = 2;
 
-pub const ISAS: [Isa; 3] = [
+pub(package) const ISAS: [Isa; 3] = [
     Isa {
         name: "x86_64",
         variant: "X86_64",
@@ -197,7 +197,7 @@ pub const ISAS: [Isa; 3] = [
     },
 ];
 
-pub const CALLCONVS: [CallConv; 6] = [
+pub(package) const CALLCONVS: [CallConv; 6] = [
     CallConv { name: "sysv", va_list_bytes: 24 },
     CallConv { name: "win64", va_list_bytes: 8 },
     CallConv { name: "aapcs64", va_list_bytes: 32 },
@@ -206,7 +206,7 @@ pub const CALLCONVS: [CallConv; 6] = [
     CallConv { name: "wasm-c", va_list_bytes: 4 },
 ];
 
-pub const OBJFORMATS: [ObjFormat; 4] = [
+pub(package) const OBJFORMATS: [ObjFormat; 4] = [
     ObjFormat { name: "elf", sections: SEC_PLAIN, hidden: true, pic: true, soname: "-Wl,-soname," },
     ObjFormat { name: "macho", sections: SEC_MACHO, hidden: true, pic: true, soname: "-Wl,-install_name,@rpath/" },
     ObjFormat { name: "coff", sections: SEC_PLAIN, hidden: false, pic: false, soname: "" },
@@ -214,7 +214,7 @@ pub const OBJFORMATS: [ObjFormat; 4] = [
 ];
 
 // The `@platform` bit order: append only, since a mask bit and a `Platform` discriminant are an index.
-pub const OSES: [Os; 6] = [
+pub(package) const OSES: [Os; 6] = [
     Os {
         name: "windows",
         variant: "Windows",
@@ -319,7 +319,7 @@ pub const OSES: [Os; 6] = [
     },
 ];
 
-pub const DEBUGS: [Debug; 1] = [Debug { name: "dwarf" }];
+pub(package) const DEBUGS: [Debug; 1] = [Debug { name: "dwarf" }];
 
 const ISA_X86: u8 = 0;
 const ISA_A64: u8 = 1;
@@ -476,11 +476,11 @@ const fn targets() [Target; 11] {
 }
 
 /// Every target, one row per (`Os`, `Isa`) pair the compiler builds for.
-pub const TARGETS: [Target; 11] = targets();
+pub(package) const TARGETS: [Target; 11] = targets();
 
 /// The index of the `TARGETS` row of operating system `os` and instruction set `isa` (`OSES` and
 /// `ISAS` indexes), or -1 when the pair is no target.
-pub const fn find(os: i32, isa: i32) i32 {
+pub(package) const fn find(os: i32, isa: i32) i32 {
     let t: []Target = TARGETS;
     for i in 0..t.len() {
         if t[i].os as i32 == os && t[i].isa as i32 == isa {
@@ -491,7 +491,7 @@ pub const fn find(os: i32, isa: i32) i32 {
 }
 
 /// The `TARGETS` row of `os` and `isa`; none when the pair is no target.
-pub const fn target_of(os: i32, isa: i32) Option<Target> {
+pub(package) const fn target_of(os: i32, isa: i32) Option<Target> {
     let k = find(os, isa);
     if k < 0 {
         return Option::<Target>::None;
@@ -519,7 +519,7 @@ const UNKNOWN_ISA: Isa = Isa {
 };
 
 /// Instruction set `isa` (an `ISAS` index, or -1 for an unknown one).
-pub const fn isa(isa: i32) Isa {
+pub(package) const fn isa(isa: i32) Isa {
     if isa < 0 {
         return UNKNOWN_ISA;
     }
@@ -528,14 +528,14 @@ pub const fn isa(isa: i32) Isa {
 }
 
 /// Operating system `os` (an `OSES` index).
-pub const fn os(os: i32) Os {
+pub(package) const fn os(os: i32) Os {
     let t: []Os = OSES;
     return t[os as usize];
 }
 
 /// The object format of operating system `os`: every target of one system shares it.
 /// The calling convention of `(os, isa)`; the first one when the pair is no target.
-pub const fn callconv_of(os: i32, isa: i32) CallConv {
+pub(package) const fn callconv_of(os: i32, isa: i32) CallConv {
     let c: []CallConv = CALLCONVS;
     let i = find(os, isa);
     if i < 0 {
@@ -545,7 +545,7 @@ pub const fn callconv_of(os: i32, isa: i32) CallConv {
     return c[t[i as usize].cc as usize];
 }
 
-pub const fn obj_of(os: i32) ObjFormat {
+pub(package) const fn obj_of(os: i32) ObjFormat {
     let t: []Target = TARGETS;
     let f: []ObjFormat = OBJFORMATS;
     for i in 0..t.len() {
@@ -589,7 +589,7 @@ const ISA_VARIANTS: [str<'static>; 3] = isa_words(true);
 
 /// The `@arch` names (`is_isa`) or the `@platform` names: a name's index is its bit in the attribute's
 /// mask, and the index of its `std::target` variant.
-pub const fn axis_names(is_isa: bool) Slice<'static, str<'static>> {
+pub(package) const fn axis_names(is_isa: bool) Slice<'static, str<'static>> {
     if is_isa {
         return ISA_NAMES;
     }
@@ -598,7 +598,7 @@ pub const fn axis_names(is_isa: bool) Slice<'static, str<'static>> {
 
 /// The `std::target` enum variants of the `@arch` axis (`is_isa`) or the `@platform` axis, in
 /// `axis_names` order.
-pub const fn axis_variants(is_isa: bool) Slice<'static, str<'static>> {
+pub(package) const fn axis_variants(is_isa: bool) Slice<'static, str<'static>> {
     if is_isa {
         return ISA_VARIANTS;
     }
@@ -606,7 +606,7 @@ pub const fn axis_variants(is_isa: bool) Slice<'static, str<'static>> {
 }
 
 /// The index of the `@platform` name (`is_isa` false) or `@arch` name `name`, -1 for an unknown name.
-pub const fn axis_index(name: str, is_isa: bool) i32 {
+pub(package) const fn axis_index(name: str, is_isa: bool) i32 {
     let ns = axis_names(is_isa);
     for i in 0..ns.len() {
         if ns[i] == name {
@@ -617,7 +617,7 @@ pub const fn axis_index(name: str, is_isa: bool) i32 {
 }
 
 /// The names of one axis for a diagnostic: `a, b, or c`.
-pub fn axis_list(is_isa: bool) String {
+pub(package) fn axis_list(is_isa: bool) String {
     let ns = axis_names(is_isa);
     let n = ns.len();
     let mut s = String::new();
@@ -640,7 +640,7 @@ pub fn axis_list(is_isa: bool) String {
 }
 
 /// The CPU features every build for `os` and `isa` has, none when the pair is no target.
-pub const fn baseline(os: i32, isa: i32) cf::CpuFeatureSet {
+pub(package) const fn baseline(os: i32, isa: i32) cf::CpuFeatureSet {
     return switch target_of(os, isa) {
         Some(t) => t.features,
         None => NO_FEATURES,
@@ -648,7 +648,7 @@ pub const fn baseline(os: i32, isa: i32) cf::CpuFeatureSet {
 }
 
 /// Whether every target of instruction set `isa` has feature `k` in its baseline.
-pub const fn baseline_everywhere(k: usize, isa: i32) bool {
+pub(package) const fn baseline_everywhere(k: usize, isa: i32) bool {
     let t: []Target = TARGETS;
     for i in 0..t.len() {
         if t[i].isa as i32 == isa && !cf::has(t[i].features, k) {
@@ -660,14 +660,14 @@ pub const fn baseline_everywhere(k: usize, isa: i32) bool {
 
 /// The predefined C macros outside the implementation's namespace, which a strict `-std=cN` removes on
 /// every target that defines them.
-pub const STRICT_UNDEFINED: [str<'static>; 5] = ["linux", "unix", "WIN32", "WIN64", "WINNT"];
+pub(package) const STRICT_UNDEFINED: [str<'static>; 5] = ["linux", "unix", "WIN32", "WIN64", "WINNT"];
 
 /// The operating system the compiler runs on (an `OSES` index).
-pub const fn host_os() i32 {
+pub(package) const fn host_os() i32 {
     return PLATFORM as i32;
 }
 
 /// The instruction set the compiler runs on (an `ISAS` index).
-pub const fn host_isa() i32 {
+pub(package) const fn host_isa() i32 {
     return ARCH as i32;
 }

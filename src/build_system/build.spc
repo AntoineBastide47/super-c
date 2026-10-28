@@ -77,7 +77,7 @@ const fn contains(v: &Vector<String>, s: str) bool {
 
 /// Recursive delete (files then directories); silently ignores a missing path. Never follows a link:
 /// a POSIX symlink is unlinked and a Windows directory link or junction is removed without descending.
-pub fn rm_rf(path: str) {
+pub(package) fn rm_rf(path: str) {
     // A read-only file (a vendored repository's git objects) goes too: Windows refuses to unlink one,
     // and `fs::remove_all` makes it writable first.
     let _ = fs::remove_all(path);
@@ -113,7 +113,7 @@ fn newest_mtime(dir: str) i64 {
 /// clean` (`clean`): the cache sweep (`sweep_cache`) at most once per SWEEP_EVERY (the stamp
 /// `<root>/.sweep`), and the project sweep (`sweep_project`) as often (`<out-dir>/.sweep`). `clean`
 /// runs both now.
-pub fn sweep(m: *const mf::Manifest, now: i64, clean: bool) {
+pub(package) fn sweep(m: *const mf::Manifest, now: i64, clean: bool) {
     let croot = if m != null {
         cache_root(project_name(unsafe &*m));
     } else {
@@ -142,7 +142,7 @@ fn sweep_due(dir: str, now: i64) bool {
 }
 
 /// The cache root's directory name of project `m`: its `bin`, else its `[lib]` name.
-pub const fn project_name<'a>(m: &'a mf::Manifest) str<'a> {
+pub(package) const fn project_name<'a>(m: &'a mf::Manifest) str<'a> {
     if m.bin.len() != 0 {
         return m.bin.as_str();
     }
@@ -158,7 +158,7 @@ fn sweep_cache(root: str, now: i64) {
 /// Delete what no build of manifest `m` reads again: every entry of its out-dir with nothing written
 /// for TREE_IDLE (a build tree, a link record, a binary), except a tree whose lock a build holds, and the
 /// emitted trees below its root directory (`root_trees`) idle as long.
-pub fn sweep_project(m: &mf::Manifest, now: i64) {
+pub(package) fn sweep_project(m: &mf::Manifest, now: i64) {
     let out = m.out_dir.as_str();
     let names = list_dir(out, false).unwrap_or(Vector::<String>::new());
     for i in 0..names.len() {
@@ -304,7 +304,7 @@ fn render_cmd(args: &Vector<String>) String {
 }
 
 /// The names of `m`'s profiles: the ones a PROFILE comparison may name.
-pub fn profile_names(m: &mf::Manifest) Vector<String> {
+pub(package) fn profile_names(m: &mf::Manifest) Vector<String> {
     let mut out = Vector::<String>::new();
     for i in 0..m.profiles.len() {
         out.push(String::from_str(m.profiles.at(i).name));
@@ -315,7 +315,7 @@ pub fn profile_names(m: &mf::Manifest) Vector<String> {
 /// Package `p`'s settings under profile `name` of `m` (none for an unknown name): its `opt-level`, its
 /// debug information, and in `Package.build_cfg` its lock-order checks (the LOCKDEP bit) and whether
 /// integer overflow wraps (the OVERFLOW_CHECKS bit).
-pub const fn apply_profile(m: &mf::Manifest, name: str, p: &mut loader::Package) {
+pub(package) const fn apply_profile(m: &mf::Manifest, name: str, p: &mut loader::Package) {
     let pi = m.profile_index(name);
     if pi < 0 {
         return;
@@ -334,7 +334,7 @@ pub const fn apply_profile(m: &mf::Manifest, name: str, p: &mut loader::Package)
 
 /// The command line's `-O<level>` (`opt`; OPT_NONE: none) and `-f` flags (`on`, `off`) over a build
 /// without a profile, as a profile with them sets it (`apply_profile`).
-pub fn apply_flags(opt: i32, on: u64, off: u64, p: &mut loader::Package) {
+pub(package) fn apply_flags(opt: i32, on: u64, off: u64, p: &mut loader::Package) {
     if opt != mf::OPT_NONE {
         let wrap = 1u32 << (ast::BC_OVERFLOW_CHECKS - ast::BC_LOCKDEP) as u32;
         p.opt = opt;
@@ -345,7 +345,7 @@ pub fn apply_flags(opt: i32, on: u64, off: u64, p: &mut loader::Package) {
 }
 
 /// Whether built-in profile `name` strips the binaries it links (a build without a manifest).
-pub fn profile_strip(name: str) bool {
+pub(package) fn profile_strip(name: str) bool {
     let m = mf::builtins_only();
     let pi = m.profile_index(name);
     return pi >= 0 && m.profiles.at(pi as usize).strip;
@@ -371,13 +371,13 @@ const fn field_of(s: str, sep: u8, idx: usize) str {
 }
 
 extend Lock {
-    pub const fn held(self: &Lock) bool {
+    pub(package) const fn held(self: &Lock) bool {
         return switch self {
             Held(_) => true,
             _ => false,
         };
     }
-    pub const fn busy(self: &Lock) bool {
+    pub(package) const fn busy(self: &Lock) bool {
         return switch self {
             Busy => true,
             _ => false,
@@ -387,7 +387,7 @@ extend Lock {
 
 /// Platform artifact name for a library target: static -> lib<name>.a everywhere (mingw uses ar
 /// archives too); shared -> the target's shared-library prefix and suffix around the name.
-pub fn lib_file(name: str, shared: bool, target: i32) String {
+pub(package) fn lib_file(name: str, shared: bool, target: i32) String {
     let mut s = String::new();
     let o = tgt::os(target);
     if shared {
@@ -406,7 +406,7 @@ pub fn lib_file(name: str, shared: bool, target: i32) String {
 /// supplies for us: the engine links to `<bin>.tmp` and renames, so the linker never sees a name without
 /// an extension to append one to. An extensionless PE cannot even be started: CreateProcess appends
 /// `.exe` to a name that has none and then fails to find it. `pub` because the driver names binaries too.
-pub fn exe_name(base: str, target: i32) String {
+pub(package) fn exe_name(base: str, target: i32) String {
     let mut s = String::from_str(base);
     let sfx = tgt::os(target).exe_suffix;
     if !base.ends_with(sfx) {
@@ -456,7 +456,7 @@ fn install_bin(from: str, to: str) i32 {
 }
 
 /// Profile name to build with: the CLI `--profile` flag, else the manifest's default-profile.
-pub const fn resolve_profile<'a>(m: &'a mf::Manifest<'a>, cli: str<'a>) str<'a> {
+pub(package) const fn resolve_profile<'a>(m: &'a mf::Manifest<'a>, cli: str<'a>) str<'a> {
     if cli.len() != 0 {
         return cli;
     }
@@ -490,9 +490,9 @@ const fn stamp_u64(line: str, idx: usize) u64 {
 /// What the emit stamp takes before the load reads any input: the clock (`ticks_ms`), and the mtime
 /// and `.spc` listing (`stamp_dir_hash`) of the std directory, the prelude's file set.
 struct StampLoad {
-    pub t0: i64,
-    pub std_mt: i64,
-    pub std_h: u64,
+    pub(package) t0: i64,
+    pub(package) std_mt: i64,
+    pub(package) std_h: u64,
 }
 
 fn stamp_load(std_dir: str) StampLoad {
@@ -834,35 +834,35 @@ fn stamp_fresh(
 }
 
 /// The options every manifest build passes down to the engine unchanged.
-pub struct BuildCtx<'a> {
-    pub jobs: u32, // --jobs; 0 = the manifest's `jobs`, else one per core
-    pub std_dir: str<'a>,
-    pub ce_steps: u32, // compile-time evaluation budgets; 0 = the engine default
-    pub ce_mem: u64,
-    pub target: i32,
-    pub bootstrap_tags: bool,
-    pub lint: bool,
+pub(package) struct BuildCtx<'a> {
+    pub(package) jobs: u32, // --jobs; 0 = the manifest's `jobs`, else one per core
+    pub(package) std_dir: str<'a>,
+    pub(package) ce_steps: u32, // compile-time evaluation budgets; 0 = the engine default
+    pub(package) ce_mem: u64,
+    pub(package) target: i32,
+    pub(package) bootstrap_tags: bool,
+    pub(package) lint: bool,
     /// `--transpiler`: the command that runs the transpile step in place of this compiler's own frontend
     /// (`run_transpiler`); empty for the frontend.
-    pub transpiler: str<'a>,
+    pub(package) transpiler: str<'a>,
     /// `--target-feature`: the comma list applied after the manifest's `target-features`.
-    pub target_features: str<'a>,
+    pub(package) target_features: str<'a>,
     /// `--simd-width`: 256 or 512; 0 = the manifest's `simd-width`.
-    pub simd_width: u32,
+    pub(package) simd_width: u32,
     /// `--simd-dispatch`: `off` or x86-64 levels; empty = the manifest's `simd-dispatch`.
-    pub simd_dispatch: str<'a>,
+    pub(package) simd_dispatch: str<'a>,
     /// `--sysroot`: the target's C library tree, its headers and libraries; empty: discovered.
-    pub sysroot: str<'a>,
+    pub(package) sysroot: str<'a>,
 }
 
 /// The vector width the build's planner prefers on AVX-512: `--simd-width`, else `simd-width`, else 256.
-pub const fn simd_width(m: &mf::Manifest, cx: &BuildCtx) u32 {
+pub(package) const fn simd_width(m: &mf::Manifest, cx: &BuildCtx) u32 {
     return pick(cx.simd_width != 0, cx.simd_width, pick(m.simd_width != 0, m.simd_width, 256));
 }
 
 /// The run-time copies' levels (`loader::Package.simd_dispatch`): `--simd-dispatch`, else
 /// `simd-dispatch`; empty for the default.
-pub const fn simd_dispatch<'a>(m: &'a mf::Manifest, cx: &BuildCtx<'a>) str<'a> {
+pub(package) const fn simd_dispatch<'a>(m: &'a mf::Manifest, cx: &BuildCtx<'a>) str<'a> {
     return if cx.simd_dispatch.len() != 0 {
         cx.simd_dispatch;
     } else {
@@ -873,7 +873,7 @@ pub const fn simd_dispatch<'a>(m: &'a mf::Manifest, cx: &BuildCtx<'a>) str<'a> {
 /// The levels a build at profile `prof` copies for: `spec` when set; else `off` in a profile at
 /// opt-level 0 or 1 (`debug`, `test`: the copies make the compile of vector code longer and add little
 /// speed there) and in a script build without a profile, the default elsewhere.
-pub const fn dispatch_for<'a>(m: &mf::Manifest, prof: str, spec: str<'a>) str<'a> {
+pub(package) const fn dispatch_for<'a>(m: &mf::Manifest, prof: str, spec: str<'a>) str<'a> {
     let pi = m.profile_index(prof);
     let slow = prof.len() == 0 || pi >= 0 && m.profiles.at(pi as usize).opt >= 0 && m.profiles.at(pi as usize).opt <= 1;
     if spec.len() == 0 && slow {
@@ -885,7 +885,7 @@ pub const fn dispatch_for<'a>(m: &mf::Manifest, prof: str, spec: str<'a>) str<'a
 /// Check the `target-features` lists of `m` (the build's and every profile's: a feature of another
 /// instruction set applies to another build) and the command line's list `cli` (strict) against the
 /// instruction set `m.arch`; false after printing the first error.
-pub fn check_features(m: &mf::Manifest, cli: str) bool {
+pub(package) fn check_features(m: &mf::Manifest, cli: str) bool {
     let mut s = tgt::baseline(m.target, m.arch);
     let mut err = String::new();
     let mut ok = cf::level(m.target_cpu.as_str(), m.arch, false, &mut s, &mut err);
@@ -908,7 +908,7 @@ pub fn check_features(m: &mf::Manifest, cli: str) bool {
 /// The CPU features of a build of `m` under profile `prof_name`: the instruction set's baseline, then
 /// the build's `target-cpu` level, then the profile's `target-features` (else the build's), then the command line's list `cli`, closed
 /// under `implies`. The lists passed `check_features`.
-pub fn features_for(m: &mf::Manifest, prof_name: str, cli: str) cf::CpuFeatureSet {
+pub(package) fn features_for(m: &mf::Manifest, prof_name: str, cli: str) cf::CpuFeatureSet {
     let mut s = tgt::baseline(m.target, m.arch);
     let mut err = String::new();
     let _ = cf::level(m.target_cpu.as_str(), m.arch, false, &mut s, &mut err);
@@ -1103,8 +1103,8 @@ fn run_transpiler(m: &mf::Manifest, prof_name: str, root: str, sub: str, cx: &Bu
 
 // The transpile form's sink: the tree-relative path of every file the emission rewrote, one per line.
 struct RewriteLog {
-    pub root_len: usize,
-    pub text: String,
+    pub(package) root_len: usize,
+    pub(package) text: String,
 }
 
 fn log_rewritten(ctx: *mut void, path: str, _text: str, _kind: i32, changed: bool) {
@@ -1121,7 +1121,7 @@ fn log_rewritten(ctx: *mut void, path: str, _text: str, _kind: i32, changed: boo
 /// `--emit-c` does, else its objects), with a nonzero `id` the emit stamp for it, under that identity, to
 /// `<out-dir>/<sub>/.emit_stamp.new`, and the paths of the files it rewrote to
 /// `<out-dir>/<sub>/.emit_rewritten` (the engine's `rewritten`).
-pub fn manifest_emit(m: &mf::Manifest, profile: str, root: str, sub: str, cx: &BuildCtx, id: u64, c: bool) i32 {
+pub(package) fn manifest_emit(m: &mf::Manifest, profile: str, root: str, sub: str, cx: &BuildCtx, id: u64, c: bool) i32 {
     let prof_name = resolve_profile(m, profile);
     if m.profile_index(prof_name) < 0 {
         eprintln("build: unknown profile '{}'", prof_name);
@@ -1168,11 +1168,11 @@ fn build_jobs(m: &mf::Manifest, cx: &BuildCtx) u32 {
 }
 
 /// The outcome of `transpile_step`.
-pub struct Transpiled {
-    pub rc: i32, // the emission's exit code; 0 when the stamp skipped it
-    pub skipped: bool, // the emit stamp proved the tree exact: nothing was emitted
-    pub cid: u64, // the emitting compiler's identity in the stamp record; 0 = no stamp
-    pub gen_files: Vector<String>, // when skipped, the files of <out-dir>/<sub>/raw (`walk_gen_files`)
+pub(package) struct Transpiled {
+    pub(package) rc: i32, // the emission's exit code; 0 when the stamp skipped it
+    pub(package) skipped: bool, // the emit stamp proved the tree exact: nothing was emitted
+    pub(package) cid: u64, // the emitting compiler's identity in the stamp record; 0 = no stamp
+    pub(package) gen_files: Vector<String>, // when skipped, the files of <out-dir>/<sub>/raw (`walk_gen_files`)
 }
 
 /// The transpile step of an engine build, alone: the emit-stamp check (phase boundary `B_STAMP`), then,
@@ -1181,7 +1181,7 @@ pub struct Transpiled {
 /// `B_PUBLISH`), each finished file streamed into `sink` (null: none). The emission writes its stamp
 /// record to `.emit_stamp.new`; the engine installs it once the tree is complete. The engine and the
 /// self-transpile benchmark run this one function, so the benchmark times what a build transpiles.
-pub fn transpile_step(
+pub(package) fn transpile_step(
     m: &mf::Manifest,
     prof_name: str,
     root: str,
@@ -1264,7 +1264,7 @@ fn stamp_publish(m: &mf::Manifest, sub: str) {
 /// `super-c build --emit-c`: the C tree of the manifest's primary root under `profile`, for the build's
 /// target, into <out-dir>/<profile>/raw in place of the objects (`c_build_files` describes its compile);
 /// prints the tree's path. Compiles and links nothing.
-pub fn manifest_emit_c(m: &mf::Manifest, profile: str, cx: &BuildCtx) i32 {
+pub(package) fn manifest_emit_c(m: &mf::Manifest, profile: str, cx: &BuildCtx) i32 {
     let prof_name = resolve_profile(m, profile);
     if m.profile_index(prof_name) < 0 {
         eprintln("build: unknown profile '{}'", prof_name);
@@ -1300,7 +1300,7 @@ pub fn manifest_emit_c(m: &mf::Manifest, profile: str, cx: &BuildCtx) i32 {
 
 /// `transpile_step` for the manifest's primary root under `prof_name`: the tree `root_build` compiles,
 /// <out-dir>/<prof_name>/raw. What the self-transpile benchmark runs per round.
-pub fn root_transpile(m: &mf::Manifest, prof_name: str, cx: &BuildCtx, sink: *mut EmitSink) i32 {
+pub(package) fn root_transpile(m: &mf::Manifest, prof_name: str, cx: &BuildCtx, sink: *mut EmitSink) i32 {
     let root = m.root.as_str();
     return transpile_step(
         m,
@@ -1351,7 +1351,7 @@ const TREE_LOCK_WAIT_MS: i64 = 30 * 60 * 1000;
 /// file. Waits for a build in
 /// progress at most TREE_LOCK_WAIT_MS. The lock, released when it drops; not `held` after a reported
 /// error.
-pub fn tree_lock(dir: str) Lock {
+pub(package) fn tree_lock(dir: str) Lock {
     mkdir_p(dir);
     let p = loader::join2(dir, ".lock");
     let mut h = lock_file(p.as_str(), 0);
@@ -1370,7 +1370,7 @@ pub fn tree_lock(dir: str) Lock {
 }
 
 /// An exclusive lock on a file (`lock_file`).
-pub enum Lock {
+pub(package) enum Lock {
     /// Held through the open file until it drops; None under WASI, which has no file locks: a WASI
     /// compiler runs as the transpiler of an engine that holds the lock.
     Held(Option<fs::File>),
@@ -1382,7 +1382,7 @@ pub enum Lock {
 
 /// The exclusive lock of file `p` (created when missing), waiting at most `wait_ms` for another process
 /// to release it. No child process inherits it, and the system releases it when this process ends.
-pub fn lock_file(p: str, wait_ms: i64) Lock {
+pub(package) fn lock_file(p: str, wait_ms: i64) Lock {
     if PLATFORM == Platform::Wasm {
         return Lock::Held(Option::<fs::File>::None);
     }
@@ -1402,24 +1402,24 @@ pub fn lock_file(p: str, wait_ms: i64) Lock {
 }
 
 /// Modification time of `path` in nanoseconds (100 ns steps on Windows); 0 when it does not exist.
-pub fn file_mtime_ns(path: str) i64 {
+pub(package) fn file_mtime_ns(path: str) i64 {
     return fs::stat(path).map(|m: fs::Metadata| m.modified_ns).unwrap_or(0);
 }
 
 /// The online core count, at least 1; 1 under WASI (one thread of execution: the parallel frontiers
 /// resolve to the serial path).
-pub fn cpu_count() u32 {
+pub(package) fn cpu_count() u32 {
     return cpu::count().unwrap_or(1) as u32;
 }
 
 // The native objects a build's emission writes (`EmitSink` kind 3), how many of them it rewrote, and the
 // link's `.pending` marker, written at the first new one.
 struct NatSink {
-    pub objs: Vector<String>,
-    pub fresh: usize,
-    pub pending: String,
-    pub marked: bool,
-    pub ret: i32,
+    pub(package) objs: Vector<String>,
+    pub(package) fresh: usize,
+    pub(package) pending: String,
+    pub(package) marked: bool,
+    pub(package) ret: i32,
 }
 
 fn nat_notify(ctx: *mut void, path: str, _text: str, kind: i32, changed: bool) {
@@ -1452,7 +1452,7 @@ extend NatSink {
 /// `engine_build`'s) that the own linker reads: a shared library's flags, the output, the objects, the
 /// sysroot, the target's libraries, the manifest's and the profile's `ldflags`, the profile's
 /// `link-args`, the `@link` flags the emission recorded under `gen` and `ldlibs`.
-pub fn link_args(
+pub(package) fn link_args(
     m: &mf::Manifest,
     prof: &mf::Profile,
     cx: &BuildCtx,
@@ -1703,7 +1703,7 @@ fn engine_build_i(
 /// stem of its `.pending` marker and response file). Per binary and profile-agnostic (out-dir root),
 /// since profiles share bin paths and a debug binary left behind by a release link must read as out of
 /// date. The name is a hash of the path: it fits NAME_MAX for any path, and two paths do not share it.
-pub fn link_record(out_dir: str, bin: str) String {
+pub(package) fn link_record(out_dir: str, bin: str) String {
     let mut h1 = FNV_BASIS;
     let mut h2: u64 = 0x9e3779b97f4a7c15;
     ch_mix_bytes(&mut h1, &mut h2, bin.ptr(), bin.len());
@@ -1716,7 +1716,7 @@ pub fn link_record(out_dir: str, bin: str) String {
 /// `super-c build` from build.toml: run the engine on the manifest's root under the resolved profile
 /// (see `resolve_profile`), linking `bin_override` when non-empty, else the manifest's `bin`. With
 /// `bin_override`, `sel_bin` (`--bin=NAME`) names the target linked there: a [bin.NAME] or the root.
-pub fn manifest_build(m: &mf::Manifest, profile: str, bin_override: str, sel_bin: str, cx: &BuildCtx) i32 {
+pub(package) fn manifest_build(m: &mf::Manifest, profile: str, bin_override: str, sel_bin: str, cx: &BuildCtx) i32 {
     let prof_name = resolve_profile(m, profile);
     if bin_override.len() != 0 {
         // `-o` names an exact path: link straight there, no profile copy and nothing installed.
@@ -1795,7 +1795,7 @@ fn bin_build(m: &mf::Manifest, prof_name: str, bt: &mf::BinTarget, cx: &BuildCtx
 /// `super-c build`/`release` over every manifest target (cargo-style): the [lib] section's static and/or
 /// shared artifacts, the primary `bin` (installed onto the manifest's `bin` path), and each [bin.NAME].
 /// `sel_bin`/`sel_lib` restrict to one target (`--bin=NAME` / `--lib`).
-pub fn manifest_build_all(m: &mf::Manifest, profile: str, sel_bin: str, sel_lib: bool, cx: &BuildCtx) i32 {
+pub(package) fn manifest_build_all(m: &mf::Manifest, profile: str, sel_bin: str, sel_lib: bool, cx: &BuildCtx) i32 {
     let prof_name = resolve_profile(m, profile);
     let selected = sel_bin.len() != 0 || sel_lib;
     let mut matched = false;
@@ -1864,7 +1864,7 @@ pub fn manifest_build_all(m: &mf::Manifest, profile: str, sel_bin: str, sel_lib:
 
 /// Scaffold a project in `dir` named `name` (cargo new/init): build.toml, src/main.spc, .gitignore,
 /// and a best-effort `git init` when no repository is present. Refuses to overwrite an existing manifest.
-pub fn scaffold_project(dir: str, name: str) i32 {
+pub(package) fn scaffold_project(dir: str, name: str) i32 {
     // The name is written verbatim into a TOML string, a format string literal and the binary's file
     // name, so a byte any of them would read specially is refused.
     let mut valid = name.len() != 0 && name != "." && name != "..";
@@ -1984,7 +1984,7 @@ fn strip_git(dir: str) {
 /// directory and is copied. No `.git` survives either way: vendored source belongs to the project's
 /// history, which is also why `.vendor` records the source and the exact commit: with the
 /// repository gone, that file is the only statement of WHAT was vendored.
-pub fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, force: bool) i32 {
+pub(package) fn vendor_dep(root: str, src: str, name_arg: str, ref_arg: str, force: bool) i32 {
     let mut base = src;
     if base.ends_with(".git") {
         base = base.slice(0, base.len() - 4);
@@ -2181,7 +2181,7 @@ fn build_into_profile(m: &mf::Manifest, prof_name: str, cx: &BuildCtx, out: &mut
 /// `super-c run`: build the manifest binary (like `manifest_build`), then execute it (cargo run).
 /// Returns the build's failure code, or the binary's exit code. The binary is `bin_override` if
 /// given, else the manifest's `bin`; a bare name is run cwd-relative (`./bin`), never through PATH.
-pub fn manifest_run_bin(m: &mf::Manifest, profile: str, bin_override: str, sel_bin: str, cx: &BuildCtx) i32 {
+pub(package) fn manifest_run_bin(m: &mf::Manifest, profile: str, bin_override: str, sel_bin: str, cx: &BuildCtx) i32 {
     let prof_name = resolve_profile(m, profile);
     let mut built = String::new();
     if sel_bin.len() != 0 && sel_bin != m.bin.as_str() {
@@ -2233,7 +2233,7 @@ fn lir_eval_check() bool {
 
 /// `super-c test`: build the project, then discover <test-dir>/**/*.spc (default tests/), synthesize
 /// an aggregating root, and run the @test pipeline on it (SUPERC points at the fresh binary).
-pub fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *const TestOpts) i32 {
+pub(package) fn manifest_test(m: &mf::Manifest, profile: str, cx: &BuildCtx, topts: *const TestOpts) i32 {
     let mut nolint = *cx;
     nolint.lint = false;
     if !is_dir(m.test_dir.as_str()) {
@@ -2621,7 +2621,7 @@ fn bench_run_root(found: &Vector<String>, prefix: str, build_id: str, flags: str
 /// `super-c bench`: discover `@bench` functions under <bench-dir> (default bench/), build a runner
 /// for them under the bench profile (by default) into <out-dir>/bench-bin and run it (skipped when
 /// `no_run`). A non-empty `filter` builds and runs only the benchmarks whose name contains it.
-pub fn manifest_bench(m: &mf::Manifest, profile: str, no_run: bool, filter: str, cx: &BuildCtx) i32 {
+pub(package) fn manifest_bench(m: &mf::Manifest, profile: str, no_run: bool, filter: str, cx: &BuildCtx) i32 {
     let mut nolint = *cx;
     nolint.lint = false;
     if !is_dir(m.bench_dir.as_str()) {
@@ -2734,7 +2734,7 @@ pub fn manifest_bench(m: &mf::Manifest, profile: str, no_run: bool, filter: str,
 
 /// `super-c command <name>`: run a manifest command, building first when it asks for it. Lines run in
 /// order; the first nonzero exit stops and is returned.
-pub fn manifest_run(m: &mf::Manifest, name: str, profile: str, cx: &BuildCtx) i32 {
+pub(package) fn manifest_run(m: &mf::Manifest, name: str, profile: str, cx: &BuildCtx) i32 {
     let ci = m.command_index(name);
     if ci < 0 {
         eprintln("run: no command '{}' in build.toml", name);
@@ -2770,7 +2770,7 @@ pub fn manifest_run(m: &mf::Manifest, name: str, profile: str, cx: &BuildCtx) i3
 /// the line to CreateProcess as written, with no shell, so a line means the same on both only with
 /// double quotes and no operators. Never `system()`: on Windows that is cmd.exe, which drops the outer
 /// quotes of its `/c` line and then splits the program name at the first '/'.
-pub fn run_line(line: str) i32 {
+pub(package) fn run_line(line: str) i32 {
     let sh: [str; 3] = ["sh", "-c", line];
     let none: [str; 0] = [];
     let mut cmd = if PLATFORM == Platform::Windows {
@@ -2788,7 +2788,7 @@ pub fn run_line(line: str) i32 {
 
 /// The exit code of the child `c` started, once it ends: -1 when it did not start, the wait failed or a
 /// signal ended it.
-pub fn wait_code(c: Result<process::Child, IoError>) i32 {
+pub(package) fn wait_code(c: Result<process::Child, IoError>) i32 {
     if c.is_err() {
         return -1;
     }
@@ -2801,7 +2801,7 @@ pub fn wait_code(c: Result<process::Child, IoError>) i32 {
 
 /// `super-c clean`: the sweeps every build runs at most once per SWEEP_EVERY, now (`sweep`). `full` (`--full`): remove the out-dir, every emitted tree below the root directory
 /// (`root_trees`) and the project's cache root instead.
-pub fn manifest_clean(m: &mf::Manifest, full: bool) i32 {
+pub(package) fn manifest_clean(m: &mf::Manifest, full: bool) i32 {
     if !full {
         sweep(m, time::now(), true);
         return 0;
