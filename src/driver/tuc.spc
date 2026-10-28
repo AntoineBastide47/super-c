@@ -18,6 +18,7 @@ import module::loader as loader;
 import std::platform::fs;
 import driver::util as *;
 import stdlib;
+import build_system::ext as ext;
 
 const TUC_MAGIC: u32 = 0x53435455; // "UTCS" little-endian spells SCTU on disk
 const TUC_VER: u32 = 14;
@@ -116,6 +117,8 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
         }
     }
     h = fnv_mix(h, target as u64 ^ p.arch as u64 << 8);
+    // The project's steps and the installed hooks (`build::ext_id`).
+    h = fnv_mix(h, ext::id());
     // The CPU features and the backend table decide the vector entries a body
     // calls: every entry's key, features and name.
     h = fnv_mix(fnv_mix(fnv_mix(h, p.features.w[0]), p.features.w[1]), p.simd_width);
@@ -382,8 +385,10 @@ pub(package) fn tuc_setup(
     t.hoff.resize_default(n);
     t.hlen.resize_default(n);
     t.hnat.resize_default(n);
-    // The evaluator check runs every test's body as the emitter lowers it: a replayed body is not rendered.
-    if gen_root.len() == 0 || n == 0 || stdlib::getenv("SC_LIR_EVAL") != null {
+    // The evaluator check runs every test's body as the emitter lowers it, and a build that asks for the
+    // LIR text (`lir_out`) or whose hooks read the LIR (`ext::reads_ir`) needs every body: a replayed body is
+    // not rendered.
+    if gen_root.len() == 0 || n == 0 || p.lir_out != null || ext::reads_ir() || stdlib::getenv("SC_LIR_EVAL") != null {
         return t;
     }
     if stdlib::getenv("SC_NO_TU_CACHE") != null {

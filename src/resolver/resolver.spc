@@ -8,6 +8,7 @@ import lexer::token as tok;
 import ast::ast as *;
 import module::loader as loader;
 import utils::errors as diag;
+import utils::diag_codes as dc;
 
 /// Most type parameters one generic item may declare. Monomorphization stores an instance's type arguments
 /// inline in fixed 8-wide arrays, so this must not exceed that width.
@@ -251,6 +252,7 @@ extend Resolver {
             self.source.slice(name.start as usize, name.end as usize),
         ) >= 0 {
             self.errors.emit_span(
+                dc::RESERVED_BUILD_CONSTANT_NAME,
                 name,
                 format("'{}' is a reserved build constant name", diag::span_str(self.source, name.start, name.end)),
             );
@@ -260,6 +262,7 @@ extend Resolver {
             self.source.slice(name.start as usize, name.end as usize),
         ) {
             self.errors.emit_span(
+                dc::RESERVED_BUILD_CONSTANT_TYPE_NAME,
                 name,
                 format("'{}' is a reserved build constant type name", diag::span_str(self.source, name.start, name.end)),
             );
@@ -292,6 +295,7 @@ extend Resolver {
                     return;
                 }
                 self.errors.emit_span(
+                    dc::DUPLICATE_DEFINITION,
                     name,
                     format("duplicate definition of '{}'", diag::span_str(self.source, name.start, name.end)),
                 );
@@ -367,7 +371,7 @@ extend Resolver {
         let pkg = unsafe &*self.package;
         let ids = self.ast.list(parts);
         let buf = self.join_segs(ids, parts.len);
-        return pkg.find(buf.as_str());
+        return pkg.find_in(self.ast.module, buf.as_str());
     }
 
     // Resolve every import ONCE, up front, which names denote modules as a single leading segment (the
@@ -475,7 +479,7 @@ extend Resolver {
         let m = if parts.len == 2 && head_in_scope {
             -1;
         } else {
-            pkg.find(buf.as_str());
+            pkg.find_in(self.ast.module, buf.as_str());
         };
         if m >= 0 {
             return ModQual { mid: m, type_node: unsafe ids[(parts.len - 1) as usize], head: parts.len - 1 };
@@ -493,7 +497,7 @@ extend Resolver {
             let m2 = if parts.len == 3 && head_in_scope {
                 -1;
             } else {
-                pkg.find(b2.as_str());
+                pkg.find_in(self.ast.module, b2.as_str());
             };
             if m2 >= 0 {
                 return ModQual { mid: m2, type_node: at, head: parts.len - 2 };
@@ -572,6 +576,7 @@ extend Resolver {
     fn ambiguous(self: &mut Self, mid: ModuleId, name: tok::Span) {
         let pkg = unsafe &*self.package;
         self.errors.emit_span(
+            dc::AMBIGUOUS_TWO_FILES_DIRECTORY_MODULE_DECLARE,
             name,
             format(
                 "'{}' is ambiguous: two files of directory module '{}' declare it",
@@ -623,6 +628,7 @@ extend Resolver {
             self.ast.set_resolution_def(refn, DefId { module: hit.mid, node: hit.node });
         } else {
             self.errors.emit_span(
+                dc::NO_VISIBLE_IMPORTED_MODULE,
                 name,
                 format(
                     "no visible {} '{}' in the imported module",
@@ -726,7 +732,7 @@ extend Resolver {
             // A type in scope (declared, imported or glob-imported) wins over a module path not
             // imported under its name: `quat::identity()` with a glob-imported alias `quat`.
             if !aliased && (m != 1 || !self.type_in_scope(self.name_span(seg[0]))) {
-                found = pkg.find(unsafe str::from_raw(prefix, plen));
+                found = pkg.find_in(self.ast.module, unsafe str::from_raw(prefix, plen));
             }
             if found >= 0 {
                 let mid = found as ModuleId;
@@ -744,6 +750,7 @@ extend Resolver {
                         self.ast.set_resolution_def(id, DefId { module: hit.mid, node: hit.node });
                     } else {
                         self.errors.emit_span(
+                            dc::NO_VISIBLE_ITEM_MODULE,
                             dn,
                             format(
                                 "no visible item '{}' in module '{}'",
@@ -848,11 +855,11 @@ extend Resolver {
         let nt = diag::span_str(self.source, name.start, name.end);
         if kind == QUALIFIER && self.package != null && self.prelude_module(nt) {
             // `iter::count`: the prelude's items are in scope by name; its modules are not.
-            self.errors.emit_span(name, format("cannot find module '{}'", nt));
+            self.errors.emit_span(dc::CANNOT_FIND_MODULE, name, format("cannot find module '{}'", nt));
             self.errors.note(format("'{}' is a std module: add 'import std::{};'", nt, nt));
             return;
         }
-        self.errors.emit_span(name, format("cannot find {} '{}'", kind, nt));
+        self.errors.emit_span(dc::CANNOT_FIND, name, format("cannot find {} '{}'", kind, nt));
         self.errors.note(format("check spelling, imports, and whether the item is declared before this use"));
     }
 
@@ -997,6 +1004,7 @@ extend Resolver {
         }
         if !found {
             self.errors.emit_span(
+                dc::USE_UNDECLARED_LIFETIME_NAME,
                 name,
                 format(
                     "use of undeclared lifetime name `{}`",
@@ -1024,7 +1032,11 @@ extend Resolver {
         if generics.len > MAX_TYPE_PARAMS {
             let over = self.child(generics, MAX_TYPE_PARAMS);
             let sp = self.ast.at_const(over).span;
-            self.errors.emit_span(sp, format("a generic item may declare at most {} type parameters", MAX_TYPE_PARAMS));
+            self.errors.emit_span(
+                dc::GENERIC_ITEM_MAY_DECLARE_MOST_TYPE,
+                sp,
+                format("a generic item may declare at most {} type parameters", MAX_TYPE_PARAMS),
+            );
         }
         let mut i: u32 = 0;
         while i < generics.len {
@@ -1101,7 +1113,11 @@ extend Resolver {
                 let name = self.name_span(first);
                 if span_is(self.source, name, "Self") {
                     if self.current_self.node == NODE_NONE {
-                        self.errors.emit_span(name, format("'Self' is only valid inside an interface or extension"));
+                        self.errors.emit_span(
+                            dc::SELF_ONLY_VALID_INSIDE_INTERFACE_EXTENSION,
+                            name,
+                            format("'Self' is only valid inside an interface or extension"),
+                        );
                     } else if tp.parts.len >= 2 {
                         // `Self::Assoc` projection: resolve to the associated type alias in scope. In a
                         // concrete extension this alias has a definition (`type Item = i32`), so the type
@@ -1133,7 +1149,11 @@ extend Resolver {
                             self.ast.at(id).as_data.type_path.head = 0;
                             self.ast.set_resolution_def(id, cs);
                         } else {
-                            self.errors.emit_span(assoc, format("no associated type by this name in scope"));
+                            self.errors.emit_span(
+                                dc::NO_ASSOCIATED_TYPE_NAME_SCOPE,
+                                assoc,
+                                format("no associated type by this name in scope"),
+                            );
                         }
                     } else {
                         let cs = self.current_self;
@@ -1217,7 +1237,11 @@ extend Resolver {
     // type does.
     fn resolve_self_name(self: &mut Self, id: NodeId) {
         if self.current_self.node == NODE_NONE {
-            self.errors.emit_span(self.name_span(id), format("'Self' is only valid inside an interface or extension"));
+            self.errors.emit_span(
+                dc::SELF_ONLY_VALID_INSIDE_INTERFACE_EXTENSION,
+                self.name_span(id),
+                format("'Self' is only valid inside an interface or extension"),
+            );
             return;
         }
         let cs = self.current_self;
@@ -1875,7 +1899,11 @@ extend Resolver {
     fn resolve_closure(self: &mut Self, id: NodeId) {
         if self.closures.len() >= 8 {
             let sp = self.ast.at_const(id).span;
-            self.errors.emit_span(sp, format("closures nested too deeply (max 8)"));
+            self.errors.emit_span(
+                dc::CLOSURES_NESTED_TOO_DEEPLY_MAX_8,
+                sp,
+                format("closures nested too deeply (max 8)"),
+            );
             return;
         }
         let cl = self.ast.at_const(id).as_data.closure;
@@ -2049,7 +2077,7 @@ extend Resolver {
         }
         for i in 0..self.ast.bc_errs.len() {
             let e = self.ast.bc_errs.at(i);
-            self.errors.emit_span(e.span, e.msg.clone());
+            self.errors.emit_span(dc::UNKNOWN_BUILD_VARIANT, e.span, e.msg.clone());
         }
         self.scan_imports();
         self.scope_enter();
@@ -2195,6 +2223,7 @@ extend Resolver {
                     if named && !pkg.vis_covers(self.ast.module, v, d.module, tv) {
                         let sp = n.span;
                         self.errors.emit_span(
+                            dc::LESS_VISIBLE_THAN_ITEM_NAMES,
                             sp,
                             format(
                                 "'{}' is less visible than the {}item that names it",
@@ -2259,7 +2288,11 @@ extend Resolver {
         ) {
             return;
         }
-        self.errors.warn_span(sp, format("unused {} '{}'", what, diag::span_str(self.source, sp.start, sp.end)));
+        self.errors.warn_span(
+            dc::UNUSED_BINDING,
+            sp,
+            format("unused {} '{}'", what, diag::span_str(self.source, sp.start, sp.end)),
+        );
         self.errors.fix(sp.start, sp.start, 1);
     }
     // The three lints over one node walk: unused bindings, reported during the walk, then dead stores
@@ -2538,6 +2571,7 @@ extend Resolver {
                 continue;
             }
             self.errors.warn_span(
+                dc::VALUE_ASSIGNED_OVERWRITTEN_BEFORE_READ,
                 self.ast.at_const(st.first).span,
                 format(
                     "value assigned to '{}' is overwritten before it is read",
@@ -2581,7 +2615,7 @@ extend Resolver {
             let used = lo < flows.len() && span_eq(src, flows[lo].label, lsp) && least_end[lo] <= body.end;
             if !used {
                 let lt = diag::span_str(self.source, lsp.start, lsp.end);
-                self.errors.warn_span(lsp, format("unused label '{}'", lt));
+                self.errors.warn_span(dc::UNUSED_LABEL, lsp, format("unused label '{}'", lt));
             }
         }
     }

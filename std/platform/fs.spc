@@ -355,7 +355,8 @@ extern "C" "windows.h" {
     fn CreateSymbolicLinkW(link: *const u16, target: *const u16, flags: u32) u8;
     fn GetFileAttributesW(path: *const u16) u32;
     fn SetFileAttributesW(path: *const u16, attributes: u32) i32;
-    fn GetFullPathNameW(path: *const u16, size: u32, buf: *mut u16, file_part: *mut *mut u16) u32;
+    fn GetFinalPathNameByHandleW(h: *mut void, buf: *mut u16, size: u32, flags: u32) u32;
+    fn GetLongPathNameW(short: *const u16, long: *mut u16, size: u32) u32;
     fn SetFileTime(h: *mut void, created: *const FILETIME, accessed: *const FILETIME, written: *const FILETIME) i32;
     fn GetSystemTimeAsFileTime(ft: *mut FILETIME);
     fn LockFileEx(h: *mut void, flags: u32, reserved: u32, low: u32, high: u32, ov: *mut OVERLAPPED) i32;
@@ -1242,32 +1243,58 @@ pub fn realpath(path: str) Result<String, IoError> {
     out.advance_len(unsafe cstring::strlen(r));
     return Result::<String, IoError>::Ok(out);
 }
-/// The absolute path of `path`, which must exist. POSIX and WASI resolve every symbolic link and `..`;
-/// Windows makes the path absolute and normal (`..` folded) without resolving links, with '/' separators.
+/// The absolute path of `path`, which must exist, with every symbolic link and `..` resolved. Windows gives
+/// the final path of the file it opens, in long names, with '/' separators and without the `\\?\` prefix:
+/// `C:/dir/file`, or `//server/share/file` for a share.
 @platform(windows)
 pub fn realpath(path: str) Result<String, IoError> {
     let np = path::native(path, IoOp::RealPath)?;
-    if unsafe GetFileAttributesW(np.ptr()) == INVALID_FILE_ATTRIBUTES {
+    // No access: the handle only names the file, a directory too, the links followed.
+    let h = unsafe CreateFileW(np.ptr(), 0, SHARE_ALL, null, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, null);
+    if h == INVALID_HANDLE_VALUE {
         return fail::<String>(IoOp::RealPath);
     }
+    let f = File::adopt(h);
     let mut buf = Vector::<u16>::new();
     let mut cap: u32 = 512;
     // At most two passes: the second has the size the first reported.
     for _ in 0..3 {
         buf.clear();
         buf.resize_default(cap as usize);
-        let n = unsafe GetFullPathNameW(np.ptr(), cap, buf.index_range_mut(0..cap as usize).as_mut_ptr(), null);
+        let n = unsafe GetFinalPathNameByHandleW(f.raw(), buf.index_range_mut(0..cap as usize).as_mut_ptr(), cap, 0);
         if n == 0 {
             return fail::<String>(IoOp::RealPath);
         }
         if n < cap {
+            let w = buf[0..n as usize];
             let mut out = String::new();
-            path::push_wide(&mut out, buf[0..n as usize], true, IoOp::RealPath)?;
+            if wide_prefix(w, "\\\\?\\UNC\\") {
+                out.push_str("//");
+                path::push_wide(&mut out, w[8..w.len()], true, IoOp::RealPath)?;
+            } else if wide_prefix(w, "\\\\?\\") {
+                path::push_wide(&mut out, w[4..w.len()], true, IoOp::RealPath)?;
+            } else {
+                path::push_wide(&mut out, w, true, IoOp::RealPath)?;
+            }
             return Result::<String, IoError>::Ok(out);
         }
         cap = n;
     }
     return Result::<String, IoError>::Err(IoError::new(IoErrorKind::Other, IoOp::RealPath));
+}
+
+// Whether the wide string `w` starts with the ASCII text `p`.
+@platform(windows)
+const fn wide_prefix(w: []u16, p: str) bool {
+    if w.len() < p.len() {
+        return false;
+    }
+    for i in 0..p.len() {
+        if w[i] != p.byte_at(i) as u16 {
+            return false;
+        }
+    }
+    return true;
 }
 
 // ---- Permissions and times --------------------------------------------------------------------------
@@ -1441,17 +1468,25 @@ pub fn temp_dir() Result<String, IoError> {
     return Result::<String, IoError>::Ok(out);
 }
 /// The system's directory for temporary files, without a trailing separator: TMPDIR, else /tmp, on POSIX
-/// and WASI; GetTempPathW (TMP, TEMP, USERPROFILE, the Windows directory) with '/' separators on Windows.
+/// and WASI; GetTempPathW (TMP, TEMP, USERPROFILE, the Windows directory) in long names (an 8.3 short name
+/// such as `RUNNER~1` spelled out, as `realpath` spells it) with '/' separators on Windows.
 @platform(windows)
 pub fn temp_dir() Result<String, IoError> {
     // MAX_PATH + 1: the most GetTempPathW returns.
-    let mut buf: [u16; 261] = [0; 261];
-    let n = unsafe GetTempPathW(261, &mut buf[0]);
-    if n == 0 || n > 261 {
+    let mut short: [u16; 261] = [0; 261];
+    let s = unsafe GetTempPathW(261, &mut short[0]);
+    if s == 0 || s > 261 {
+        return fail::<String>(IoOp::TempDir);
+    }
+    // The longest path Windows takes, 32767 units and the NUL.
+    let mut buf = Vector::<u16>::new();
+    buf.resize_default(32768);
+    let n = unsafe GetLongPathNameW(&short[0], buf.index_range_mut(0..32768).as_mut_ptr(), 32768);
+    if n == 0 || n >= 32768 {
         return fail::<String>(IoOp::TempDir);
     }
     let mut out = String::new();
-    path::push_wide(&mut out, unsafe buf[0..n as usize], true, IoOp::TempDir)?;
+    path::push_wide(&mut out, buf[0..n as usize], true, IoOp::TempDir)?;
     while out.len() > 1 && out.byte(out.len() - 1) == b'/' {
         out.truncate(out.len() - 1);
     }

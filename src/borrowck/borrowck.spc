@@ -19,6 +19,7 @@ import borrowck::flow_ir as bfi;
 import ir::lower as irl;
 import ir::core as ir;
 import utils::errors as diag;
+import utils::diag_codes as dc;
 
 // Capacities of the TypeChecker's flow tables: `moved`, and `late` and `borrows`.
 // FlowState snapshots have the same sizes, so saving a state never truncates it.
@@ -148,6 +149,7 @@ extend tc::TypeChecker {
                 let it = unsafe (*a).at_const(unsafe (*a).list(ed.items)[j as usize]);
                 if it.kind == NodeKind::NODE_TYPE_ALIAS && self.bc_names_lt(m, it.as_data.type_alias.ty, nm, 0) {
                     self.errors.emit_span(
+                        dc::LIFETIME_EXTEND_NAMED_ASSOCIATED_TYPE_BUT,
                         nm,
                         format(
                             "the lifetime {} of this extend is named by an associated type but appears neither in its target nor in its interface's arguments",
@@ -176,6 +178,7 @@ extend tc::TypeChecker {
             }
             let sp = unsafe (*a).at_const(rt).span;
             self.errors.emit_span(
+                dc::MISSING_LIFETIME_SPECIFIER_RETURN_TYPE_BORROWS,
                 sp,
                 format(
                     "missing lifetime specifier: this return type borrows, but which input it borrows from cannot be inferred",
@@ -339,6 +342,7 @@ extend tc::TypeChecker {
             if self.tc_lt_elided(n.as_data.indirect_type.lifetime) {
                 let sp = n.span;
                 self.errors.emit_span(
+                    dc::MISSING_LIFETIME_SPECIFIER_STORED_TYPE_MUST,
                     sp,
                     format(
                         "missing lifetime specifier: a {} stored in a type must name a lifetime the type declares",
@@ -383,6 +387,7 @@ extend tc::TypeChecker {
             ) {
                 let sp = n.span;
                 self.errors.emit_span(
+                    dc::MISSING_LIFETIME_SPECIFIER_FIELD_S_TYPE,
                     sp,
                     format(
                         "missing lifetime specifier: this field's type borrows, so it must name the lifetime it borrows for",
@@ -415,7 +420,7 @@ extend tc::TypeChecker {
                 return;
             }
         }
-        self.errors.emit_span(sp, msg);
+        self.errors.emit_span(dc::BORROW_CHECK_LIMIT, sp, msg);
         self.errors.note(format("this is a compiler limitation; split the function into smaller functions"));
     }
 
@@ -839,7 +844,11 @@ extend tc::TypeChecker {
         // the fold erased the move from the IR.
         if !cd.is_static_mut && !cd.is_extern && self.tc_type_is_free(unsafe (*a).type_of(expr)) {
             let sp = unsafe (*a).at_const(expr).span;
-            self.errors.emit_span(sp, format("cannot move a value out of a 'const' binding"));
+            self.errors.emit_span(
+                dc::CANNOT_MOVE_VALUE_OUT_CONST_BINDING,
+                sp,
+                format("cannot move a value out of a 'const' binding"),
+            );
             self.errors.note(
                 format(
                     "a constant of an owning type is read or borrowed, never moved: the copy would free storage the constant still owns",
@@ -1113,6 +1122,7 @@ extend tc::TypeChecker {
     fn tc_return_lifetime_diag(self: &mut Self, vid: NodeId) {
         let sp = unsafe (*self.cur_ast()).at_const(vid).span;
         let di = self.tc_region_diag(
+            dc::RETURN_OUTLIVES,
             sp.start,
             sp.end - sp.start,
             format(
@@ -1710,6 +1720,7 @@ extend tc::TypeChecker {
                 }
                 let asp = unsafe (*self.cur_ast()).at_const(aid).span;
                 let di = self.tc_region_diag(
+                    dc::REGION_ERROR,
                     asp.start,
                     asp.end - asp.start,
                     format("borrowed value does not live long enough: this value must satisfy 'static"),
@@ -1912,8 +1923,8 @@ extend tc::TypeChecker {
     }
 
     /// Region diagnostics insert in source order after err_wm (the per-function error watermark bc_fn sets).
-    pub(package) fn tc_region_diag(self: &mut Self, at: u32, len: u32, msg: String) usize {
-        return self.errors.emit_ordered(self.err_wm, at, len, msg);
+    pub(package) fn tc_region_diag(self: &mut Self, code: u16, at: u32, len: u32, msg: String) usize {
+        return self.errors.emit_ordered(code, self.err_wm, at, len, msg);
     }
 
     /// Attach a note to diagnostic `index` (see Errors::note_at).
@@ -2232,6 +2243,7 @@ extend tc::TypeChecker {
                     "local variable";
                 };
                 self.errors.emit_span(
+                    dc::RETURNING_POINTER_REFERENCE_WHICH_DOES_NOT,
                     sp,
                     format("returning a pointer/reference to a {}, which does not outlive the call", w),
                 );
@@ -2347,11 +2359,13 @@ extend tc::TypeChecker {
                 let sp = unsafe (*a).at_const(bd.left).span;
                 if self.tc_is_late(ld.node) {
                     self.errors.emit_span(
+                        dc::CANNOT_ASSIGN_TWICE_IMMUTABLE_BINDING_DECLARE,
                         sp,
                         format("cannot assign twice to an immutable binding; declare it 'let mut'"),
                     );
                 } else if self.nloops != 0 && !self.tc_binding_in_innermost_loop(ld.node) {
                     self.errors.emit_span(
+                        dc::CANNOT_INITIALIZE_IMMUTABLE_BINDING_INSIDE_LOOP,
                         sp,
                         format(
                             "cannot initialize an immutable binding inside a loop it was declared outside of; declare it 'let mut'",
@@ -2944,6 +2958,7 @@ extend tc::TypeChecker {
             if escapes {
                 let asp = unsafe (*self.cur_ast()).at_const(aid).span;
                 let di = self.tc_region_diag(
+                    dc::ESCAPING_BORROW,
                     asp.start,
                     asp.end - asp.start,
                     format(
@@ -3165,6 +3180,7 @@ extend tc::TypeChecker {
                 if self.tc_capture_index(unsafe self.icx.clos_stack[f as usize], cid) >= 0 {
                     let sp = unsafe (*a).at_const(id).span;
                     self.errors.emit_span(
+                        dc::CANNOT_TAKE_OWNERSHIP_VALUE_ALSO_CAPTURED,
                         sp,
                         format("cannot take ownership of a value also captured by an enclosing closure"),
                     );
@@ -3258,7 +3274,11 @@ extend tc::TypeChecker {
             let r0 = unsafe (*fa0).list(returns)[0];
             if unsafe (*fa0).at_const(r0).is_ref_type() {
                 let rsp = unsafe (*a).at_const(recv).span;
-                self.errors.emit_span(rsp, format("cannot borrow into a temporary value; bind it to a variable first"));
+                self.errors.emit_span(
+                    dc::CANNOT_BORROW_INTO_TEMPORARY_VALUE_BIND,
+                    rsp,
+                    format("cannot borrow into a temporary value; bind it to a variable first"),
+                );
             }
         }
         let is_free = span_is(self.mod_src(self.cur_module()), unsafe (*a).at_const(mem).as_data.name.text, "free");
@@ -3285,6 +3305,7 @@ extend tc::TypeChecker {
                         if rty.kind == TypeKind::TYPE_REFERENCE {
                             let rsp = unsafe (*a).at_const(recv).span;
                             self.errors.emit_span(
+                                dc::CANNOT_FREE_BORROWED_VALUE_OWNING_BINDING,
                                 rsp,
                                 format("cannot free a borrowed value: its owning binding frees it again at scope exit"),
                             );

@@ -467,6 +467,11 @@ extend Svc {
             let w = self.tgt().ptr;
             return Layout { ok: true, size: w, align: w };
         }
+        if y.kind == TypeKind::TYPE_DYN {
+            // `&dyn I`, `&mut dyn I` and `Box<dyn I>`: the data pointer and the vtable pointer.
+            let w = self.tgt().ptr;
+            return Layout { ok: true, size: 2 * w, align: w };
+        }
         if y.kind == TypeKind::TYPE_OPAQUE {
             // A register type (`@value(size, align)`) and a C value (`@layout(size, align)`) state
             // their layout; any other opaque type has none the compiler knows.

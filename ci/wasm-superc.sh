@@ -1,8 +1,9 @@
 #!/bin/sh
 # The compiler under test, as wasm. Transpile-class commands (`build --emit-c <file.spc>`, fmt, lint, and
 # the transpile form `<root> --emit-sub=...` a build engine's --transpiler runs) run inside wasmtime; the
-# subcommands that must spawn processes (a link, the test runner), bindgen (it finds the host's SDK) and the
-# build engine's own (`clean`, `command`, which take no target flags) fall back to the native binary --
+# subcommands that must spawn processes (a link, the test runner), the servers (`lsp`, `tool-server`: WASI
+# has no sockets), bindgen (it finds the host's SDK) and the build engine's own (`clean`, `command`, which
+# take no target flags) fall back to the native binary --
 # WASI has no processes, so this split IS the wasm lane. Used through
 # SC_TEST_SUPERC, which `super-c test` installs as the harness's compiler under test.
 # The physical path: the guest finds std/ beside the module and does not resolve a symlinked directory.
@@ -16,7 +17,7 @@ build)
   *) exec "$NATIVE" "$@" ;;
   esac
   ;;
-release | run | clean | command | vendor | bindgen | test | bench | new | init | lsp)
+release | run | clean | command | vendor | bindgen | test | bench | new | init | lsp | tool-server)
   exec "$NATIVE" "$@"
   ;;
 esac

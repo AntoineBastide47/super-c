@@ -29,6 +29,9 @@ pub(package) struct TuEmit {
     /// spells it, so a pointer field may name an aggregate defined later (or replayed late).
     pub(package) fwd2: String,
     pub(package) skipped: u64, // aggregates outside the frozen subset (dyn/env fields, unbound params)
+    /// Aggregates named in the output whose definition body could not be written: each one leaves the
+    /// units that embed it uncompilable, so each fails the emission.
+    pub(package) refused: u64,
     /// FNVs of closure-env struct names this pass DEFINED (embedded in aggregates): the body
     /// emitter must not define them again.
     pub(package) env_defined: Vector<u64>,
@@ -63,6 +66,7 @@ extend TuEmit {
             out: String::new(),
             fwd2: String::new(),
             skipped: 0,
+            refused: 0,
             emitted: 0,
             chunk_off: Vector::<u32>::new(),
             chunk_own: Vector::<ModuleId>::new(),
@@ -174,6 +178,7 @@ extend TuEmit {
             self.finish_chunk(&body, nm, it.m, is_enum && !unsafe (*da).enum_has_payload(it.decl));
         } else {
             self.skipped += 1;
+            self.refused += 1;
         }
         body.clear();
         self.bodies.push(body);
@@ -289,6 +294,7 @@ extend TuEmit {
                     self.finish_chunk(&body, nm.as_str(), y.module, false);
                 } else {
                     self.skipped += 1;
+                    self.refused += 1;
                 }
                 self.state.insert(key, 2);
             }
@@ -500,7 +506,9 @@ extend TuEmit {
                 continue;
             }
             let mut at = lay::MemberAt { pos: i, size: 0, align: 1, off: 0 };
-            if prefix != lay::ORDER_ALL {
+            // A `void` or `never` member (a generic instantiated at it) has no layout: it is stored
+            // nowhere, size 0 and alignment 1 as lowering lays it out.
+            if prefix != lay::ORDER_ALL && (self.mg.zclass(it.m, unsafe (*da).member_ty(fid)) & 4) == 0 {
                 let lo = self.mg.layout_sub(it.m, unsafe (*da).member_ty(fid));
                 if !lo.ok {
                     return false;

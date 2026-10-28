@@ -31,6 +31,7 @@ import ir::core as ir;
 import ir::lower as irl;
 import module::loader as loader;
 import utils::errors as diag;
+import utils::diag_codes as dc;
 
 const NONE: u32 = 0xFFFFFFFF;
 
@@ -761,9 +762,14 @@ extend Recur {
                 let g = self.member_of(pt.callee);
                 let name = item_name(p, me.item);
                 if g == fi {
-                    errs.emit_span(pt.span, format("function '{}' cannot return without calling itself", name));
+                    errs.emit_span(
+                        dc::FUNCTION_CANNOT_RETURN_WITHOUT_CALLING_ITSELF,
+                        pt.span,
+                        format("function '{}' cannot return without calling itself", name),
+                    );
                 } else {
                     errs.emit_span(
+                        dc::FUNCTION_CANNOT_RETURN_WITHOUT_CALLING_WHICH,
                         pt.span,
                         format(
                             "function '{}' cannot return without calling '{}', which cannot return either",

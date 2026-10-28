@@ -67,6 +67,8 @@ import driver::util as *;
 
 import driver::extc as *;
 import driver::test as *;
+import utils::diag_codes as dc;
+import build_system::ext as ext;
 
 extern "C" {
     fn memchr(s: *const void, c: i32, n: usize) *mut void;
@@ -1202,6 +1204,7 @@ pub(package) fn build_simd_table(p: &mut loader::Package, n: usize) String {
         let xn = xa.at_const(xa.at_const(x.node).as_data.function.name).as_data.name.text;
         let mut errs = diag::Errors::new();
         errs.emit_span(
+            dc::TWO_SIMD_IMPL_ENTRIES_ONE_OPERATION_LANE,
             ya.at_const(y.node).span,
             format(
                 "two '@simd_impl' entries for one operation, lane type, lane count and feature set: this one and '{}' ({})",
@@ -1271,6 +1274,7 @@ pub(package) fn feature_errors(p: &loader::Package, i: usize, errs: &mut diag::E
         }
         if a.attr_of(f, AttrKind::ATTR_EXPORT) != null {
             errs.emit_span(
+                dc::EXPORT_FUNCTION_CANNOT_NEED_CPU_FEATURES,
                 nsp,
                 format("a '@export' function cannot need CPU features: C code calls it without a check"),
             );
@@ -1339,6 +1343,7 @@ pub(package) fn feature_lints(p: &loader::Package, m: usize, errs: &mut diag::Er
                 }
             }
             errs.warn_span(
+                dc::ROW_S_FEATURE_DOES_NOT_IMPLY,
                 fr.span,
                 format(
                     "the row's feature `{}` does not imply `{}`, which this function needs: a machine without them would run it; key the row by a feature that implies them, or check them first (`detect::has_level`)",
@@ -1361,7 +1366,12 @@ pub(package) fn feature_lints(p: &loader::Package, m: usize, errs: &mut diag::Er
     for k in 0..a.unsafe_lints.len() {
         let ul = *a.unsafe_lints.at(k);
         if !need.contains(&ul.start) {
-            errs.warn(ul.start, 6, format("unnecessary 'unsafe': nothing inside requires it"));
+            errs.warn(
+                dc::UNNECESSARY_UNSAFE_NOTHING_INSIDE_REQUIRES,
+                ul.start,
+                6,
+                format("unnecessary 'unsafe': nothing inside requires it"),
+            );
             if ul.fix_end != 0 {
                 errs.fix(ul.start, ul.fix_end, 0);
             }
@@ -1400,11 +1410,13 @@ fn feature_err(
     let fname = p.modules[m as usize].source.as_str().slice(nm.start as usize, nm.end as usize);
     if !tgt::isa(p.arch).fn_features || why.len() != 0 {
         errs.emit_span(
+            dc::NEEDS_TARGET_FEATURE,
             sp,
             format("`{}` needs `{}` (`--target-feature={}`){}", fname, miss.as_str(), miss.as_str(), why),
         );
     } else if u == 2 {
         errs.emit_span(
+            dc::NEEDS_INLINES_INTO_CALLER_CALL_FUNCTION,
             sp,
             format(
                 "`{}` needs `{}` and inlines into its caller: call it from a function whose `@target_feature` enables it",
@@ -1414,6 +1426,7 @@ fn feature_err(
         );
     } else {
         errs.emit_span(
+            dc::NEEDS_USE_FUNCTION_WHOSE_TARGET_FEATURE_ENABLES,
             sp,
             format(
                 "`{}` needs `{}`: use it in a function whose `@target_feature` enables it, or inside `unsafe` after a run-time check (`std::cpu::detect::has`)",
@@ -2082,7 +2095,7 @@ fn cemit_inst_error(p: &mut loader::Package, d: DefId, subs: &Vector<mbe::MSub>,
         }
     }
     let mut errs = diag::Errors::new();
-    errs.emit_span(a.at_const(lw.user_err).span, format("{}", lw.user_msg));
+    errs.emit_span(dc::STATIC_ASSERTION_FAILED, a.at_const(lw.user_err).span, format("{}", lw.user_msg));
     errs.note(inst_where(p, d.module, &prm, &ams, &ats, np));
     errs.finalize(p.modules[d.module as usize].source.as_str(), p.modules[d.module as usize].file.as_str());
     errs.log();
@@ -2203,7 +2216,7 @@ fn cemit_inst_asserts(
             }
         }
         let mut errs = diag::Errors::new();
-        errs.emit_span(n.span, format("static assertion failed: {}", msg));
+        errs.emit_span(dc::STATIC_ASSERTION_FAILED, n.span, format("static assertion failed: {}", msg));
         if np > 0 {
             errs.note(inst_where(p, pmod, &prm, &ams, &ats, np));
         }
@@ -5778,6 +5791,7 @@ pub(package) fn cemit_package(
                 let csrc = p.modules[cdef.module as usize].source.as_str();
                 let mut errs = diag::Errors::new();
                 errs.emit(
+                    dc::CONSTANT_CANNOT_EVALUATED_COMPILE_TIME_INSTANCE,
                     csp.start,
                     csp.end - csp.start,
                     format(
@@ -6299,16 +6313,27 @@ pub(package) fn cemit_package(
         o.tuc_hit = replace(&mut tuc.hit, Vector::<bool>::new());
     }
     // The LIR check of the bodies this build rendered (a refused one fails the build already). A module
-    // the per-TU cache replayed passed it in the build that recorded it: SC_LIR is part of the key.
-    if cem.lir.is_some() && p.ok && cem.refused.len() == 0 && stdlib::getenv("SC_LIR") != null {
+    // the per-TU cache replayed passed it in the build that recorded it: SC_LIR is part of the key. A
+    // build that asks for the LIR text (`lir_out`) runs without that cache, so every body is rendered.
+    if cem.lir.is_some() && p.ok && cem.refused.len() == 0 && cbe::lir_requested(p) {
         let mut l = replace(&mut cem.lir, Option::<Box<lw::Lower>>::None).unwrap();
         if !l.deref_mut().check_all(p) {
             p.ok = false;
         }
-        if let Some(tp) = stdlib::get_env("SC_LIR_TEXT") {
+        let tp = stdlib::get_env("SC_LIR_TEXT");
+        if tp.is_some() || p.lir_out != null {
             let mut text = String::new();
             lprint::print_package(&l.deref().pkg, &mut text);
-            let _ = write_file(tp.as_str(), text.as_str());
+            if let Some(path) = &tp {
+                let _ = write_file(path.as_str(), text.as_str());
+            }
+            if p.lir_out != null {
+                unsafe *p.lir_out = text;
+            }
+        }
+        // The hooks that read the LIR (`build_system::ext::reads_ir`): this build rendered every body.
+        if p.ok && ext::reads_ir() && !ext::run_stage(ext::STAGE_AFTER_IR, p, &mut l.deref_mut().pkg) {
+            p.ok = false;
         }
         cem.lir_put(l);
     }
@@ -8472,6 +8497,7 @@ fn cemit_assemble(
         em.mg.pop_subs(ns8);
         ri8 += 1;
     }
+    o.skips += em.refused;
     // Definition headers: one per aggregate, closure environment and payload-less enum, em's
     // chunks in their global by-value order, then the environment structs the declaration pass
     // did not define. A payload-less enum is also a declaration other headers copy (prototypes
@@ -11998,7 +12024,7 @@ fn hf_err(p: &mut loader::Package, m: usize, n: NodeId, msg: String) {
     let a = unsafe &*p.module_ast_const(m as ModuleId);
     let src = p.modules[m].source.as_str();
     let mut errs = diag::Errors::new();
-    errs.emit_span(a.at_const(n).span, msg);
+    errs.emit_span(dc::EXTERN_DECLARATION_DISAGREES_WITH_C_HEADER, a.at_const(n).span, msg);
     errs.finalize(src, p.modules[m].file.as_str());
     errs.log();
     p.ok = false;
@@ -13216,19 +13242,19 @@ pub(package) fn flush_const_text(msg: *const char) String {
 
 // A deferred static_assert that failed: render it against the owning module.
 fn flush_assert_err(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char) {
-    flush_err(ctx, m, cond, flush_assert_text(msg));
+    flush_err(ctx, dc::STATIC_ASSERTION_FAILED, m, cond, flush_assert_text(msg));
 }
 
 // A deferred const initializer that failed: render it against the owning module.
 fn flush_const_err(ctx: *mut void, m: ModuleId, decl: NodeId, msg: *const char) {
-    flush_err(ctx, m, decl, flush_const_text(msg));
+    flush_err(ctx, dc::CONST_EVAL_FAILED, m, decl, flush_const_text(msg));
 }
 
-// Log error `msg` at node `id` of module `m` of the package `ctx` points to, and fail the package.
-fn flush_err(ctx: *mut void, m: ModuleId, id: NodeId, msg: String) {
+// Log error `msg` of `code` at node `id` of module `m` of the package `ctx` points to, and fail the package.
+fn flush_err(ctx: *mut void, code: u16, m: ModuleId, id: NodeId, msg: String) {
     let p = ctx as *mut loader::Package;
     let mut errs = diag::Errors::new();
-    errs.emit_span(unsafe (*p).modules[m as usize].ast.at_const(id).span, msg);
+    errs.emit_span(code, unsafe (*p).modules[m as usize].ast.at_const(id).span, msg);
     errs.finalize(unsafe (*p).modules[m as usize].source.as_str(), unsafe (*p).modules[m as usize].file.as_str());
     errs.log();
     unsafe (*p).ok = false;
@@ -13312,9 +13338,14 @@ fn report_fold_errs(p: &mut loader::Package) {
         }
         let mut errs = diag::Errors::new();
         if iri::it_trap_is_ub(e.kind) {
-            errs.emit_span(sp, format("expression has undefined behavior when evaluated: {}", e.detail.as_str()));
+            errs.emit_span(
+                dc::EXPRESSION_HAS_UNDEFINED_BEHAVIOR_WHEN_EVALUATED,
+                sp,
+                format("expression has undefined behavior when evaluated: {}", e.detail.as_str()),
+            );
         } else {
             errs.emit_span(
+                dc::CONST_FN_CALL_HAS_COMPILE_TIME,
                 sp,
                 format(
                     "this 'const fn' call has compile-time-known arguments but failed to evaluate: {}",
@@ -13345,7 +13376,7 @@ fn report_len_faults(p: &mut loader::Package, fs: &Vector<ig::LenFault>) {
             continue;
         }
         let mut errs = diag::Errors::new();
-        errs.emit_span_note(f.span, format("{}", f.msg.as_str()));
+        errs.emit_span_note(dc::INVALID_INSTANCE_TYPE, f.span, format("{}", f.msg.as_str()));
         if f.inst.node != NODE_NONE {
             let da = unsafe &*p.module_ast_const(f.inst.module);
             let dn = da.at_const(f.inst.node);
@@ -13393,8 +13424,13 @@ fn report_refusals(p: &loader::Package, rs: &mut Vector<cbe::Refusal>, depth: bo
         } else {
             format("internal: the C backend cannot emit this body ({})", r.why);
         };
+        let code = if depth {
+            dc::INSTANCE_DEPTH_LIMIT;
+        } else {
+            dc::BACKEND_REFUSAL;
+        };
         let mut errs = diag::Errors::new();
-        errs.emit(r.start, r.end - r.start, msg);
+        errs.emit(code, r.start, r.end - r.start, msg);
         errs.finalize(p.modules[r.m as usize].source.as_str(), p.modules[r.m as usize].file.as_str());
         errs.log();
     }
@@ -13680,6 +13716,7 @@ fn lint_report_item(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast,
     }
     if it.kind == NodeKind::NODE_FUNCTION && vis_exported(it.as_data.function.vis) {
         errs.warn_span(
+            dc::UNUSED_PUBLIC_FUNCTION_NOTHING_BINARY_REACHES,
             nsp,
             format(
                 "unused public function '{}': nothing in this binary reaches it",
@@ -13688,7 +13725,7 @@ fn lint_report_item(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast,
         );
         return;
     }
-    errs.warn_span(nsp, format("unused {} '{}'", what, diag::span_str(src, nsp.start, nsp.end)));
+    errs.warn_span(dc::UNUSED, nsp, format("unused {} '{}'", what, diag::span_str(src, nsp.start, nsp.end)));
 }
 
 // The entry of item `iid`: entries may share a start (the extends one `@derive` writes), so the scan
@@ -13928,11 +13965,16 @@ fn ap_check_fn(errs: &mut diag::Errors, a: *const Ast, m: usize, fnode: NodeId, 
     if sp.end > sp.start {
         if iri::it_trap_is_ub(unsafe (*cev).trap_kind_get()) {
             errs.emit_span(
+                dc::STATEMENT_UNDEFINED_BEHAVIOR_WHEN_EXECUTED,
                 sp,
                 format("this statement is undefined behavior when executed: {}", unsafe (*cev).trap_detail()),
             );
         } else {
-            errs.emit_span(sp, format("this statement always panics at runtime: {}", unsafe (*cev).trap_detail()));
+            errs.emit_span(
+                dc::STATEMENT_ALWAYS_PANICS_RUNTIME,
+                sp,
+                format("this statement always panics at runtime: {}", unsafe (*cev).trap_detail()),
+            );
         }
     }
 }
@@ -13999,7 +14041,11 @@ fn cs_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: u
     }
     let cev = p.cir as *mut iri::Interp;
     if unsafe (*cev).fn_const_suggest(m as ModuleId, fnode) {
-        errs.warn_span(nsp, format("function '{}' can be declared 'const fn'", diag::span_str(src, nsp.start, nsp.end)));
+        errs.warn_span(
+            dc::FUNCTION_CAN_DECLARED_CONST_FN,
+            nsp,
+            format("function '{}' can be declared 'const fn'", diag::span_str(src, nsp.start, nsp.end)),
+        );
         // The `fn` keyword sits right before the name, across whitespace.
         let mut i = nsp.start as usize;
         while i > 0 && (src[i - 1] == b' ' || src[i - 1] == b'\t' || src[i - 1] == b'\n' || src[i - 1] == b'\r') {
@@ -14111,81 +14157,97 @@ fn import_removed_use(p: &loader::Package, a: *const Ast, src: str, iid: NodeId,
 
 fn lint_unused_imports(p: &mut loader::Package, only_mod: i32, fixes: *mut Vector<diag::LintFix>) {
     let nm = p.modules.len();
+    for m in 0..nm {
+        if !p.modules[m].has_ast || p.modules[m].prelude || !lint_reported(p, m, only_mod) {
+            continue;
+        }
+        let mut unused = Vector::<NodeId>::new();
+        unused_imports(p, m, &mut unused);
+        let a = p.module_ast_const(m as ModuleId);
+        let src = p.modules[m].source.as_str();
+        let mut errs = diag::Errors::new();
+        for k in 0..unused.len() {
+            let iid = unused[k];
+            let path = loader::join_parts(unsafe &*a, src, unsafe (*a).at_const(iid).as_data.import_decl.path, "::");
+            let sp = unsafe (*a).at_const(iid).span;
+            errs.warn_span(dc::UNUSED_IMPORT, sp, format("unused import '{}'", path.as_str()));
+            let mut fe = sp.end;
+            if fe as usize < src.len() && src[fe as usize] == b'\n' {
+                fe = fe + 1;
+            }
+            errs.fix(sp.start, fe, 0);
+        }
+        lint_flush(p, m, &mut errs, fixes);
+    }
+}
+
+/// The import declarations of module `m` that it uses nothing of: no name it resolves comes from the imported
+/// module or its import closure, and the module has no side effects an import brings. Reads the module's
+/// resolutions, its bodies' included; a module gated out for the target, or a glob import of a module that
+/// another module imports (it re-exports), reports none.
+pub(package) fn unused_imports(p: &mut loader::Package, m: usize, out: &mut Vector<NodeId>) {
+    let nm = p.modules.len();
     p.ensure_index();
     let mut imported = Vector::<bool>::new();
     imported.resize_default(nm);
     for k in 0..p.idx.imports.len() {
         imported.set(p.idx.imports[k] as usize, true);
     }
-    for m in 0..nm {
-        if !p.modules[m].has_ast || p.modules[m].prelude || !lint_reported(p, m, only_mod) {
+    let a = p.module_ast_const(m as ModuleId);
+    if module_platform_gated(a) {
+        return;
+    }
+    let mut usedm = Vector::<bool>::new();
+    usedm.resize_default(nm);
+    for i in 0..unsafe (*a).nnodes() {
+        let d = unsafe (*a).resolution_def(unsafe (*a).nth_id(i));
+        if d.node != NODE_NONE && d.module as usize < nm && d.module as usize != m {
+            usedm.set(d.module as usize, true);
+        }
+    }
+    let src = p.modules[m].source.as_str();
+    let items = unsafe (*a).at_const((*a).root).as_data.program.items;
+    for i in 0..items.len {
+        let iid = unsafe (*a).list(items)[i as usize];
+        if unsafe (*a).at_const(iid).kind != NodeKind::NODE_IMPORT {
             continue;
         }
-        let a = p.module_ast_const(m as ModuleId);
-        if module_platform_gated(a) {
+        // A glob import re-exports its module's names (`m::x` reaches them): only a module nothing imports
+        // can hold an unused one.
+        if unsafe (*a).at_const(iid).as_data.import_decl.glob && imported[m] {
             continue;
         }
-        let mut usedm = Vector::<bool>::new();
-        usedm.resize_default(nm);
-        for i in 0..unsafe (*a).nnodes() {
-            let d = unsafe (*a).resolution_def(unsafe (*a).nth_id(i));
-            if d.node != NODE_NONE && d.module as usize < nm && d.module as usize != m {
-                usedm.set(d.module as usize, true);
-            }
+        let path = loader::join_parts(unsafe &*a, src, unsafe (*a).at_const(iid).as_data.import_decl.path, "::");
+        let mid = p.find_in(m as ModuleId, path.as_str());
+        if mid < 0 || mid as usize == m {
+            continue;
         }
-        let src = p.modules[m].source.as_str();
-        let mut errs = diag::Errors::new();
-        let items = unsafe (*a).at_const((*a).root).as_data.program.items;
-        for i in 0..items.len {
-            let iid = unsafe (*a).list(items)[i as usize];
-            if unsafe (*a).at_const(iid).kind != NodeKind::NODE_IMPORT {
-                continue;
-            }
-            // A glob import re-exports its module's names (`m::x` reaches them): only a module nothing imports
-            // can hold an unused one.
-            if unsafe (*a).at_const(iid).as_data.import_decl.glob && imported[m] {
-                continue;
-            }
-            let path = loader::join_parts(unsafe &*a, src, unsafe (*a).at_const(iid).as_data.import_decl.path, "::");
-            let mid = p.find(path.as_str());
-            if mid < 0 || mid as usize == m {
-                continue;
-            }
-            let mut used = usedm[mid as usize] || import_side_effects(p, mid as ModuleId) || import_removed_use(
-                p,
-                a,
-                src,
-                iid,
-                mid as ModuleId,
-            );
-            if !used {
-                let clo = p.import_closure(mid as ModuleId);
-                for c in 0..clo.len() {
-                    let cm = clo[c];
-                    if cm as usize != m && (usedm[cm as usize] || import_side_effects(p, cm) || import_removed_use(
-                        p,
-                        a,
-                        src,
-                        iid,
-                        cm,
-                    )) {
-                        used = true;
-                        break;
-                    }
+        let mut used = usedm[mid as usize] || import_side_effects(p, mid as ModuleId) || import_removed_use(
+            p,
+            a,
+            src,
+            iid,
+            mid as ModuleId,
+        );
+        if !used {
+            let clo = p.import_closure(mid as ModuleId);
+            for c in 0..clo.len() {
+                let cm = clo[c];
+                if cm as usize != m && (usedm[cm as usize] || import_side_effects(p, cm) || import_removed_use(
+                    p,
+                    a,
+                    src,
+                    iid,
+                    cm,
+                )) {
+                    used = true;
+                    break;
                 }
             }
-            if !used {
-                let sp = unsafe (*a).at_const(iid).span;
-                errs.warn_span(sp, format("unused import '{}'", path.as_str()));
-                let mut fe = sp.end;
-                if fe as usize < src.len() && src[fe as usize] == b'\n' {
-                    fe = fe + 1;
-                }
-                errs.fix(sp.start, fe, 0);
-            }
         }
-
-        lint_flush(p, m, &mut errs, fixes);
+        if !used {
+            out.push(iid);
+        }
     }
 }
 
@@ -14250,6 +14312,7 @@ fn dp_check_stmt(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m:
     let src = p.modules[m].source.as_str();
     let ssp = unsafe (*a).at_const(sid).span;
     errs.warn_span(
+        dc::UNUSED_RESULT_PURE_FUNCTION_CALL_HAS,
         ssp,
         format("unused result of pure function '{}': the call has no effect", diag::span_str(src, csp.start, csp.end)),
     );
@@ -14388,9 +14451,17 @@ fn lint_unused_members(p: &mut loader::Package, only_mod: i32) {
                     continue;
                 }
                 if it.kind == NodeKind::NODE_STRUCT {
-                    errs.warn_span(nsp, format("field '{}' is never read", diag::span_str(src, nsp.start, nsp.end)));
+                    errs.warn_span(
+                        dc::FIELD_NEVER_READ,
+                        nsp,
+                        format("field '{}' is never read", diag::span_str(src, nsp.start, nsp.end)),
+                    );
                 } else {
-                    errs.warn_span(nsp, format("unused variant '{}'", diag::span_str(src, nsp.start, nsp.end)));
+                    errs.warn_span(
+                        dc::UNUSED_VARIANT,
+                        nsp,
+                        format("unused variant '{}'", diag::span_str(src, nsp.start, nsp.end)),
+                    );
                 }
             }
         }
@@ -14934,6 +15005,7 @@ fn mark_c_reads(p: &mut loader::Package) bool {
         let nm = a.at_const(d.as_data.aggregate.name);
         let mut errs = diag::Errors::new();
         errs.emit_span(
+            dc::REACHES_C_UNTYPED_POINTER_TAG_ORDERED,
             nm.span,
             format(
                 "'{}' reaches C through an untyped pointer argument, so its fields keep their declared order, but a compile-time evaluation already used its reordered layout: tag it '@ordered'",
@@ -15401,8 +15473,12 @@ pub(package) fn run_package(
         native_header_facts(p);
         stage_ms(tstat, &mut tp0, "phase native facts");
     }
-    if cbe::native_on(p) || stdlib::getenv("SC_LIR") != null {
+    if cbe::native_on(p) || cbe::lir_requested(p) {
         lir_lines(p);
+    }
+    // The installed hooks' stage before the emission (`build_system::ext`): an error leaves the tree as it is.
+    if !ext::run_stage(ext::STAGE_BEFORE_EMISSION, p, null) {
+        return 1;
     }
     cemit_package(p, testing, &plan, live.as_ptr(), target, &mut co, &mut irkeep);
     // The emission frontier restarted the pool; release it again before any test-runner fork.

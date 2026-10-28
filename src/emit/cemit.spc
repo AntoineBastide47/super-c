@@ -28,6 +28,7 @@ import target::native as nat;
 import emit::rt_h as rth;
 import typechecker::render as rnd;
 import build_system::manifest as bman;
+import build_system::ext as ext;
 
 /// Nesting bound for the recursive renderers (operands through inlined temporaries, structured
 /// control flow through regions): clang's default bracket depth, past which the C would not
@@ -112,10 +113,16 @@ pub(package) fn backends_of(pk: &loader::Package) Vector<u8> {
     let all = native_on(pk);
     let sel = stdlib::get_env("SC_LIR").unwrap_or(String::new());
     for i in 0..n {
-        let on = all || in_list(sel.as_str(), pk.modules.at(i).path.as_str());
+        let on = all || pk.lir_out != null || ext::reads_ir() || in_list(sel.as_str(), pk.modules.at(i).path.as_str());
         out.push(ast::pick(all, 0u8, BK_C) | ast::pick(on, BK_LIR, 0u8));
     }
     return out;
+}
+
+/// Whether the build lowers bodies to LIR for the LIR check or for a client of it (`SC_LIR`,
+/// `Package.lir_out`, hooks that read it: `build_system::ext::reads_ir`).
+pub(package) fn lir_requested(pk: &loader::Package) bool {
+    return pk.lir_out != null || ext::reads_ir() || stdlib::getenv("SC_LIR") != null;
 }
 
 /// Whether module `path` is in `sel`: `1` names every module, else a comma-separated list of module paths
@@ -14341,6 +14348,10 @@ extend CEmit {
             return true;
         }
         self.dyn_def_seen.insert(h);
+        // The block goes to the forward header, which takes its includes from its own text: what it
+        // spells is no use of the unit that requests it first (which one that is varies with the
+        // workers).
+        let ne = replace(&mut self.mg.no_edges, true);
         let a = self.p().module_ast_const(pm);
         let it = *unsafe (*a).instance(y.as_data.inst);
         let mut tys = Vector::<TypeId>::new();
@@ -14415,6 +14426,7 @@ extend CEmit {
             ok = self.dyn_request(rq.pm, rq.t);
             ri += 1;
         }
+        self.mg.no_edges = ne;
         if ok {
             self.dyn_defs.push_string(&o);
             if self.sh_on {

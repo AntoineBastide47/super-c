@@ -21,6 +21,7 @@ import ir::print as irp;
 import ir::verify as irv;
 import emit::probe as prb;
 import utils::errors as diag;
+import utils::diag_codes as dc;
 
 /// Borrow-pass probe regions (SC_BORROW_STATS): lowering, the tape replay, the six analysis
 /// stages, the Free-move rules with the wording, diagnostic emission, and drop elaboration.
@@ -952,6 +953,39 @@ fn platform_ns() u64 {
     return std::parallel::platform::now_ns();
 }
 
+// The diagnostic code of flow category `cat` (`CAT_*`, dense from 0).
+const fn cat_code(cat: u8) u16 {
+    let codes: [u16; 23] = [
+        dc::USE_OF_UNINITIALIZED,
+        dc::USE_OF_MOVED,
+        dc::USE_OF_FREED,
+        dc::USE_OF_PARTIALLY_MOVED,
+        dc::CAPTURE_OF_MOVED,
+        dc::READ_WHILE_BORROWED,
+        dc::ASSIGN_WHILE_BORROWED,
+        dc::MOVE_WHILE_BORROWED,
+        dc::FREE_WHILE_BORROWED,
+        dc::CAPTURE_WHILE_BORROWED,
+        dc::BORROW_CONFLICT,
+        dc::DANGLING_REFERENCE,
+        dc::ESCAPING_BORROW,
+        dc::MOVE_OUT_OF_DEREFERENCE,
+        dc::MOVE_OUT_OF_BORROWED_FIELD,
+        dc::MOVE_OUT_OF_OWNING_AGGREGATE,
+        dc::MOVE_OUT_OF_CLOSURE_CAPTURE,
+        dc::MOVE_OUT_OF_CONST,
+        dc::USE_OF_MOVED,
+        dc::RETURN_OUTLIVES,
+        dc::ESCAPING_BORROW,
+        dc::REGION_ERROR,
+        dc::BORROW_CHECK_LIMIT,
+    ];
+    if cat as usize >= 23 {
+        return dc::REGION_ERROR;
+    }
+    return unsafe codes[cat as usize];
+}
+
 // Walk-parity wording. The categories keep loop replays and defer duplication deduplicated.
 const CAT_UNINIT: u8 = 0;
 const CAT_MOVED: u8 = 1;
@@ -1000,7 +1034,11 @@ extend tc::TypeChecker {
         } else {
             unsafe (*a).at_const(owner).span;
         };
-        self.errors.emit_span(sp, format("cannot borrow-check this body: unsupported construct ({})", lw.err));
+        self.errors.emit_span(
+            dc::CANNOT_BORROW_CHECK_BODY_UNSUPPORTED_CONSTRUCT,
+            sp,
+            format("cannot borrow-check this body: unsupported construct ({})", lw.err),
+        );
         self.errors.note(format("this is a compiler limitation; please report it"));
     }
 
@@ -1178,6 +1216,7 @@ extend tc::TypeChecker {
         if tagged && clean && selfs == 0 {
             let nm = unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).at_const(f).as_data.function.name).span;
             self.errors.emit_span(
+                dc::TAIL_RECURSE_FUNCTION_NEVER_CALLS_ITSELF,
                 nm,
                 format(
                     "'@tail_recurse' function '{}' never calls itself",
@@ -1228,6 +1267,7 @@ extend tc::TypeChecker {
 
     fn bc_tail_err(self: &mut Self, sp: tok::Span, why: String) {
         self.errors.emit_span(
+            dc::TAIL_RECURSE_CALL_FUNCTION_ITSELF_CANNOT_BECOME,
             sp,
             format("'@tail_recurse': this call of the function to itself cannot become a jump: {}", why),
         );
@@ -1343,6 +1383,7 @@ extend tc::TypeChecker {
         }
         if sig == TYPE_ERROR {
             self.errors.emit_span(
+                dc::CLOSURE_CANNOT_CALLED_FUNCTION_TYPE_CANNOT,
                 unsafe (*self.mod_ast(c.module)).at_const(c.node).span,
                 format("this closure cannot be called: a function type cannot show how its parameters relate lifetimes"),
             );
@@ -5295,7 +5336,7 @@ extend tc::TypeChecker {
             let len = res.at(i).len;
             let cat = res.at(i).cat;
             let msg = replace(&mut res[i].msg, String::new());
-            let di = self.errors.emit_ordered(self.err_wm, start, len, msg);
+            let di = self.errors.emit_ordered(cat_code(cat), self.err_wm, start, len, msg);
             if cat == CAT_F_CONST {
                 self.errors.note_at(
                     di,

@@ -191,6 +191,8 @@ pub(package) struct Lowerer {
     // on are the ones a call's sibling operands may still hold (`poison_check_at`).
     chk_lbase: u32,
     chk_lbases: Vector<u32>,
+    // The temporaries that took a callee's poison (`poison_take`): no ladder registers them.
+    chk_poison: Vector<u32>,
     // A std::parallel body: its primitives report cancellation through their results and clean up
     // raw resources after a failed wait, so only the call at the root of an expression statement or
     // a plain `let` carries a check there.
@@ -410,6 +412,7 @@ extend Lowerer {
             chk_base: 0,
             chk_lbase: 0,
             chk_lbases: Vector::<u32>::new(),
+            chk_poison: Vector::<u32>::new(),
             chk_narrow: false,
             chk_mask: 0,
             pending_lets: Vector::<ir::LocalId>::new(),
@@ -520,6 +523,7 @@ extend Lowerer {
         self.chk_base = 0;
         self.chk_lbase = 0;
         self.chk_lbases.truncate(0);
+        self.chk_poison.truncate(0);
         self.chk_narrow = loader::runtime_path(unsafe (&*self.pkg).modules.at(self.module as usize).path.as_str());
         self.chk_mask = 0;
         self.pending_lets.truncate(0);
@@ -1000,7 +1004,7 @@ extend Lowerer {
         }
         let pl = *self.body.places.at(o.data as usize);
         let mut ld = *self.body.locals.at(pl.base as usize);
-        if pl.proj_len != 0 || ld.storage != ir::LS_TEMP || ld.decl != NODE_NONE {
+        if pl.proj_len != 0 || ld.storage != ir::LS_TEMP || !self.unregistered(&ld) {
             return false;
         }
         ld.decl = key;
@@ -1016,6 +1020,12 @@ extend Lowerer {
             self.scope_locals.push(pl.base);
         }
         return true;
+    }
+
+    // Whether temporary `ld` has no scope-exit registration: none, or only a past cancellation ladder's
+    // (`poison_check_at` marks a pending temporary with the body's owner for its ladder alone).
+    const fn unregistered(self: &Self, ld: &ir::LocalDecl) bool {
+        return ld.decl == NODE_NONE || ld.decl == self.body.owner.node;
     }
 
     // Whether node `id` is in the value position of the arm being lowered (`ExtCx`).
@@ -5819,6 +5829,32 @@ extend Lowerer {
         return target.node != self.chk_caw_n || target.module != self.chk_caw_m;
     }
 
+    // Whether call result `res` (IR_NONE: none) can own a value: then the poison a callee that returned
+    // through its own ladder (probe 1) leaves there is taken out on that edge (`poison_take`).
+    fn poisoned(self: &Self, res: ir::PlaceId) bool {
+        if res == ir::IR_NONE {
+            return false;
+        }
+        let ty = self.body.places.at(res as usize).ty;
+        if ty == TYPE_NONE {
+            return false;
+        }
+        let k = self.f.ty(ty).kind;
+        return k != TypeKind::TYPE_BUILTIN && k != TypeKind::TYPE_POINTER && k != TypeKind::TYPE_REFERENCE;
+    }
+
+    // Move the poison in `res` into a fresh temporary, which nothing tracks or drops: on the probe-1
+    // edge the result holds no value, so the ladder and the cancel return release nothing of it.
+    fn poison_take(self: &mut Self, res: ir::PlaceId, sp: tok::Span) {
+        let ty = self.body.places.at(res as usize).ty;
+        let t = self.temp(ty, sp);
+        let op = self.copy_op(res);
+        let pl = self.place_of_local(t);
+        let rv = self.rv_use(op, ty);
+        self.assign(pl, rv, sp);
+        self.chk_poison.push(t);
+    }
+
     // The check after a call outside the open root's clean nodes: sibling operands may be pending,
     // so an accepted request waits for the next edge, but a callee that returned through its own
     // ladder (probe 1) returned poison, which nothing may read. That edge unwinds at once, its
@@ -5834,15 +5870,27 @@ extend Lowerer {
         let it = Ast::builtin(BuiltinType::BT_I32);
         let c0 = self.body.oper_pool.len() as u32;
         let cond = self.emit_call(probe, ir::IR_NONE, c0, 0, 0, 0, TYPE_NONE, TYPE_NONE, it, sp);
+        let poison = self.poisoned(res);
+        let poison_b = if poison {
+            self.open_block();
+        } else {
+            ir::IR_NONE;
+        };
         let ladder_b = self.open_block();
         let cont_b = self.open_block();
         let mut t = ir::term0(ir::TM_SWITCH, sp);
         t.a = cond;
         t.sw_start = self.body.switch_pool.len() as u32;
-        self.body.switch_pool.push(1u64 << 32 | ladder_b as u64);
+        self.body.switch_pool.push(1u64 << 32 | ast::pick(poison, poison_b, ladder_b) as u64);
         t.sw_len = 1;
         t.t0 = cont_b;
-        self.seal(t, ladder_b);
+        if poison {
+            self.seal(t, poison_b);
+            self.poison_take(res, sp);
+            self.seal(ir::goto_term(ladder_b, sp), ladder_b);
+        } else {
+            self.seal(t, ladder_b);
+        }
         let mut rl = ir::IR_NONE;
         if res != ir::IR_NONE {
             rl = self.body.places.at(res as usize).base;
@@ -5850,7 +5898,9 @@ extend Lowerer {
         let mark = self.scope_locals.len();
         for l in self.chk_lbase..self.body.locals.len() as u32 {
             let mut ld = *self.body.locals.at(l as usize);
-            if l == rl || ld.storage != ir::LS_TEMP || ld.decl != NODE_NONE || ld.ty == TYPE_NONE {
+            if l == rl || ld.storage != ir::LS_TEMP || !self.unregistered(&ld) || ld.ty == TYPE_NONE || self.chk_poison.contains(
+                &l,
+            ) {
                 continue;
             }
             let k = self.f.ty(ld.ty).kind;
@@ -5878,14 +5928,20 @@ extend Lowerer {
         let ut = Ast::builtin(BuiltinType::BT_VOID);
         let c0 = self.body.oper_pool.len() as u32;
         let cond = self.emit_call(probe, ir::IR_NONE, c0, 0, 0, 0, TYPE_NONE, TYPE_NONE, it, sp);
+        let poison = self.poisoned(res);
         let real_b = self.open_block();
+        let poison_b = if poison {
+            self.open_block();
+        } else {
+            ir::IR_NONE;
+        };
         let ladder_b = self.open_block();
         let cont_b = self.open_block();
         let mut t = ir::term0(ir::TM_SWITCH, sp);
         t.a = cond;
         t.sw_start = self.body.switch_pool.len() as u32;
         self.body.switch_pool.push(2u64 << 32 | real_b as u64);
-        self.body.switch_pool.push(1u64 << 32 | ladder_b as u64);
+        self.body.switch_pool.push(1u64 << 32 | ast::pick(poison, poison_b, ladder_b) as u64);
         t.sw_len = 2;
         t.t0 = cont_b;
         self.seal(t, real_b);
@@ -5907,6 +5963,10 @@ extend Lowerer {
             self.stmt(
                 ir::Statement { kind: ir::ST_STORAGE_DEAD, place: ir::IR_NONE, rvalue: ir::IR_NONE, a: sl, span: sp },
             );
+        }
+        if poison {
+            self.seal(ir::goto_term(ladder_b, sp), poison_b);
+            self.poison_take(res, sp);
         }
         self.seal(ir::goto_term(ladder_b, sp), ladder_b);
         // The ladder: masked cleanup, then hand the edge to the caller. Call-result receiver

@@ -7,6 +7,7 @@ import module::loader as loader;
 import utils::errors as diag;
 import driver::util as dutil;
 import ir::cpu_features as cf;
+import utils::diag_codes as dc;
 
 /// One [profile.NAME]: per-profile ldflags appended after the manifest-level ones; `strip` links without
 /// local symbols and debug information; `opt` is the `opt-level` (whether `lir::opt` runs), `debug`
@@ -276,6 +277,19 @@ pub(package) struct BinTarget {
     pub(package) root: String,
 }
 
+/// One `[step.NAME]`: a process every build of the project runs before it compiles, in declaration order,
+/// without a shell (`argv`), in the project directory, with only the environment variables `env` names. It
+/// reads the project files `inputs` and writes the project files `outputs`. With `cache` (the default) it runs
+/// again only when its configuration, an input, an output or its program changed (`build::run_steps`).
+pub(package) struct Step {
+    pub(package) name: String,
+    pub(package) argv: Vector<String>,
+    pub(package) inputs: Vector<String>,
+    pub(package) outputs: Vector<String>,
+    pub(package) env: Vector<String>,
+    pub(package) cache: bool,
+}
+
 /// One [command.NAME] for `super-c command <name>`: shell lines executed in order, stopping at the
 /// first failure. Built-in subcommand names are reserved: a command can never shadow one.
 pub(package) struct Command<'a> {
@@ -318,11 +332,27 @@ pub(package) struct Manifest<'a> {
     pub(package) lib_root: String, // [lib] root (default src/lib.spc)
     pub(package) lib_static: bool, // [lib] type contains "static" (the default when [lib] is present)
     pub(package) lib_shared: bool, // [lib] type contains "shared"
+    /// [lib] exports = "c": the shared library exports its `@export` symbols alone, its C ABI; "all" (the
+    /// default) exports every global symbol.
+    pub(package) lib_exports_c: bool,
     pub(package) shards: Vector<loader::ShardRule>, // [shards] and [instance-shards]: per-module counts
     pub(package) target_features: Vector<String>, // `target-features`: the CPU features to enable (`--target-feature` names)
     pub(package) target_cpu: String, // `target-cpu`: an x86-64 level applied before `target-features` (`--target-cpu`)
     pub(package) simd_width: u32, // `simd-width`: 512 lets the vector planner use 512-bit entries on AVX-512; 0 = 256
     pub(package) simd_dispatch: String, // `simd-dispatch`: `off`, or the x86-64 levels run-time copies are made for; empty = x86-64-v3 (off at opt-level 0 or 1)
+    /// `[tools] analyzers`: the project's analyzer modules (project-relative `.spc` files), each with a
+    /// `pub fn analyzers() Vector<Box<dyn Analyzer>>`; `lint` builds them into a compiler and runs them.
+    pub(package) tools: Vector<String>,
+    /// `[tools] compiler`: the vendored compiler the tools build with (default `vendor/superc`).
+    pub(package) tools_compiler: String,
+    /// `[tools] hooks`: the project's build hook modules, each with a `pub fn hooks() Vector<Box<dyn Hook>>`
+    /// (`api::build`); `build` and `run` build them into a compiler and build through it.
+    pub(package) hooks: Vector<String>,
+    /// The `[step.NAME]` sections, in declaration order.
+    pub(package) steps: Vector<Step>,
+    /// `lint-exclude`: project directories the whole-project lint skips (projects that build only once a
+    /// client vendors their dependencies, such as documentation examples).
+    pub(package) lint_exclude: Vector<String>,
     /// `str_id` of the text `load` read, and the file's mtime from the stat before the read (as
     /// `loader::read_file_mt` gives them): the emit stamp's record of the manifest. Both 0 for a manifest
     /// not read from a file.
@@ -351,6 +381,12 @@ extend Manifest as Free {
         self.shards.free();
         self.target_features.free();
         self.target_cpu.free();
+        self.simd_dispatch.free();
+        self.tools.free();
+        self.tools_compiler.free();
+        self.hooks.free();
+        self.steps.free();
+        self.lint_exclude.free();
     }
 }
 
@@ -396,10 +432,90 @@ pub(package) fn builtins_only<'a>() Manifest<'a> {
     return m;
 }
 
+/// Whether `path` names a file inside the project: relative, without a `..` segment, not empty.
+pub(package) fn project_path(path: str) bool {
+    if path.len() == 0 || path.byte_at(0) == b'/' || path.byte_at(0) == b'\\' || path.find(":") >= 0 {
+        return false;
+    }
+    for seg in path.split("/") {
+        if seg == ".." {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Validate the `[step.NAME]` sections: an argv and an output each; project paths; environment variable
+// names; no file written by two steps; no step reading a file that it or a later step writes.
+fn check_steps(steps: &Vector<Step>, errs: &mut diag::Errors) {
+    for i in 0..steps.len() {
+        let st = &steps[i];
+        let nm = st.name.as_str();
+        if st.argv.len() == 0 || st.argv[0].len() == 0 {
+            errs.emit(dc::MANIFEST_ERROR, 0, 1, format("[step.{}] needs an 'argv' that names its program", nm));
+        }
+        if st.outputs.len() == 0 {
+            errs.emit(dc::MANIFEST_ERROR, 0, 1, format("[step.{}] needs 'outputs': the files it writes", nm));
+        }
+        for k in 0..st.inputs.len() + st.outputs.len() {
+            let f = if k < st.inputs.len() {
+                st.inputs[k].as_str();
+            } else {
+                st.outputs[k - st.inputs.len()].as_str();
+            };
+            if !project_path(f) {
+                errs.emit(dc::MANIFEST_ERROR, 0, 1, format("[step.{}]: '{}' is not a path inside the project", nm, f));
+            }
+        }
+        for k in 0..st.env.len() {
+            let e = st.env[k].as_str();
+            if e.len() == 0 || e.find("=") >= 0 {
+                errs.emit(
+                    dc::MANIFEST_ERROR,
+                    0,
+                    1,
+                    format("[step.{}]: '{}' is not an environment variable name", nm, e),
+                );
+            }
+        }
+        for k in 0..st.outputs.len() {
+            let o = st.outputs[k].as_str();
+            for j in 0..steps.len() {
+                if j < i && steps[j].outputs.contains(&st.outputs[k]) {
+                    errs.emit(
+                        dc::MANIFEST_ERROR,
+                        0,
+                        1,
+                        format("[step.{}] and [step.{}] both write '{}'", steps[j].name.as_str(), nm, o),
+                    );
+                }
+                if j <= i && steps[j].inputs.contains(&st.outputs[k]) {
+                    errs.emit(
+                        dc::MANIFEST_ERROR,
+                        0,
+                        1,
+                        format(
+                            "[step.{}] reads '{}', which [step.{}] writes: a step reads only what earlier steps write",
+                            steps[j].name.as_str(),
+                            o,
+                            nm,
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
 // The array replaces `dst` (a built-in profile's flags when the section names one).
 fn take_arr(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut Vector<String>) {
     if it.val.kind != toml::TV_ARR {
-        errs.emit(it.at, it.key.len() as u32, format("'{}' expects an array of strings", it.key.as_str()));
+        errs.emit(
+            dc::EXPECTS_ARRAY_STRINGS,
+            it.at,
+            it.key.len() as u32,
+            format("'{}' expects an array of strings", it.key.as_str()),
+        );
         return;
     }
     dst.clear();
@@ -426,11 +542,16 @@ fn norm_conv_dir(dir: &mut String, key: str, errs: &mut diag::Errors) {
         }
     }
     if bad {
-        errs.emit(0, 1, format("'{}' must be a plain workspace-relative directory, got '{}'", key, s));
+        errs.emit(
+            dc::MUST_PLAIN_WORKSPACE_RELATIVE_DIRECTORY_GOT,
+            0,
+            1,
+            format("'{}' must be a plain workspace-relative directory, got '{}'", key, s),
+        );
     }
 }
 
-const COMMANDS: [str<'static>; 14] = [
+const COMMANDS: [str<'static>; 15] = [
     "build",
     "release",
     "fmt",
@@ -445,6 +566,7 @@ const COMMANDS: [str<'static>; 14] = [
     "init",
     "vendor",
     "bindgen",
+    "tool-server",
 ];
 
 /// The position of subcommand `name` in `Mode` declaration order after MODE_DEFAULT (main dispatches
@@ -463,13 +585,13 @@ pub(package) const fn subcommand_index(name: str) i32 {
 // A section or key outside this compiler's schema: an error, except under bootstrap (see `load`).
 fn unknown(errs: &mut diag::Errors, bootstrap: bool, at: u32, len: u32, msg: String) {
     if !bootstrap {
-        errs.emit(at, len, msg);
+        errs.emit(dc::MANIFEST_ERROR, at, len, msg);
     }
 }
 
 fn set_str(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut String) {
     if it.val.kind != toml::TV_STR {
-        errs.emit(it.at, it.key.len() as u32, format("'{}' expects a string", it.key.as_str()));
+        errs.emit(dc::EXPECTS_STRING, it.at, it.key.len() as u32, format("'{}' expects a string", it.key.as_str()));
         return;
     }
     *dst = it.val.s.clone();
@@ -477,7 +599,12 @@ fn set_str(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut String) {
 
 fn set_u32(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut u32) {
     if it.val.kind != toml::TV_INT || it.val.i < 0 || it.val.i > 4294967295 {
-        errs.emit(it.at, it.key.len() as u32, format("'{}' expects a non-negative integer", it.key.as_str()));
+        errs.emit(
+            dc::EXPECTS_NON_NEGATIVE_INTEGER,
+            it.at,
+            it.key.len() as u32,
+            format("'{}' expects a non-negative integer", it.key.as_str()),
+        );
         return;
     }
     *dst = it.val.i as u32;
@@ -485,7 +612,12 @@ fn set_u32(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut u32) {
 
 fn set_bool(it: &toml::TomlItem, errs: &mut diag::Errors, dst: &mut bool) {
     if it.val.kind != toml::TV_BOOL {
-        errs.emit(it.at, it.key.len() as u32, format("'{}' expects true or false", it.key.as_str()));
+        errs.emit(
+            dc::EXPECTS_TRUE_FALSE,
+            it.at,
+            it.key.len() as u32,
+            format("'{}' expects true or false", it.key.as_str()),
+        );
         return;
     }
     *dst = it.val.b;
@@ -569,6 +701,7 @@ pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Ma
                 // bytes; 0 = engine default; a `--const-eval-memory` CLI flag overrides this.
                 if it.val.kind != toml::TV_INT || it.val.i < 0 {
                     errs.emit(
+                        dc::CONST_EVAL_MEMORY_EXPECTS_NON_NEGATIVE,
                         it.at,
                         key.len() as u32,
                         format("'const-eval-memory' expects a non-negative integer (bytes)"),
@@ -578,6 +711,19 @@ pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Ma
                 }
             } else if key == "std_internals" {
                 set_bool(it, &mut errs, &mut m.std_internals);
+            } else if key == "lint-exclude" {
+                take_arr(it, &mut errs, &mut m.lint_exclude);
+                for k in 0..m.lint_exclude.len() {
+                    let d = m.lint_exclude[k].as_str();
+                    if !project_path(d) {
+                        errs.emit(
+                            dc::MANIFEST_ERROR,
+                            it.at,
+                            key.len() as u32,
+                            format("'lint-exclude': '{}' is not a path inside the project", d),
+                        );
+                    }
+                }
             } else if key == "default-profile" {
                 set_str(it, &mut errs, &mut m.default_profile);
             } else if key == "target-features" {
@@ -587,13 +733,18 @@ pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Ma
             } else if key == "simd-width" {
                 set_u32(it, &mut errs, &mut m.simd_width);
                 if m.simd_width != 256 && m.simd_width != 512 {
-                    errs.emit(it.at, key.len() as u32, format("'simd-width' expects 256 or 512"));
+                    errs.emit(
+                        dc::SIMD_WIDTH_EXPECTS_256_512,
+                        it.at,
+                        key.len() as u32,
+                        format("'simd-width' expects 256 or 512"),
+                    );
                 }
             } else if key == "simd-dispatch" {
                 set_str(it, &mut errs, &mut m.simd_dispatch);
                 let mut e9 = String::new();
                 if !cf::dispatch_ok(m.simd_dispatch.as_str(), &mut e9) {
-                    errs.emit(it.at, key.len() as u32, e9);
+                    errs.emit(dc::MANIFEST_ERROR, it.at, key.len() as u32, e9);
                 }
             } else {
                 unknown(&mut errs, bootstrap, it.at, key.len() as u32, format("unknown key '{}'", key));
@@ -626,7 +777,12 @@ pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Ma
                     }
                 }
                 if lvl < 0 {
-                    errs.emit(it.at, key.len() as u32, format("'opt-level' expects 0, 1, 2, 3, \"s\" or \"z\""));
+                    errs.emit(
+                        dc::OPT_LEVEL_EXPECTS_0_1_2,
+                        it.at,
+                        key.len() as u32,
+                        format("'opt-level' expects 0, 1, 2, 3, \"s\" or \"z\""),
+                    );
                 } else {
                     p.opt = lvl;
                 }
@@ -647,7 +803,12 @@ pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Ma
                 // `-ffp-contract=`'s values: "fast" or "off".
                 let v = it.val.s.as_str();
                 if it.val.kind != toml::TV_STR || v != "fast" && v != "off" {
-                    errs.emit(it.at, key.len() as u32, format("'fp-contract' expects \"fast\" or \"off\""));
+                    errs.emit(
+                        dc::FP_CONTRACT_EXPECTS_FAST_OFF,
+                        it.at,
+                        key.len() as u32,
+                        format("'fp-contract' expects \"fast\" or \"off\""),
+                    );
                 } else {
                     cg_put(CG_FP_CONTRACT, v == "fast", &mut p.cg_on, &mut p.cg_off);
                 }
@@ -672,6 +833,7 @@ pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Ma
                 if !seen {
                     rejected.push(String::from_str(name));
                     errs.emit(
+                        dc::BUILT_SUBCOMMAND_CANNOT_OVERRIDDEN_PICK_ANOTHER,
                         it.at,
                         sec.len() as u32,
                         format(
@@ -702,7 +864,12 @@ pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Ma
                 set_bool(it, &mut errs, &mut c.needs_build);
             } else if key == "env" {
                 if it.val.kind != toml::TV_TBL {
-                    errs.emit(it.at, 3, format("'env' expects an inline table of strings"));
+                    errs.emit(
+                        dc::ENV_EXPECTS_INLINE_TABLE_STRINGS,
+                        it.at,
+                        3,
+                        format("'env' expects an inline table of strings"),
+                    );
                 } else {
                     for e in 0..it.val.tbl.len() {
                         c.env_k.push(it.val.tbl.at(e).k.clone());
@@ -714,7 +881,12 @@ pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Ma
             }
         } else if sec == "shards" || sec == "instance-shards" {
             if it.val.kind != toml::TV_INT || it.val.i < 1 || it.val.i > 255 {
-                errs.emit(it.at, key.len() as u32, format("'[{}]' expects a count from 1 to 255", sec));
+                errs.emit(
+                    dc::EXPECTS_COUNT_1_255,
+                    it.at,
+                    key.len() as u32,
+                    format("'[{}]' expects a count from 1 to 255", sec),
+                );
             } else {
                 let mut ri = m.shards.len();
                 for i in 0..m.shards.len() {
@@ -737,6 +909,19 @@ pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Ma
                 set_str(it, &mut errs, &mut m.lib_name);
             } else if key == "root" {
                 set_str(it, &mut errs, &mut m.lib_root);
+            } else if key == "exports" {
+                let mut e = String::new();
+                set_str(it, &mut errs, &mut e);
+                if e.as_str() == "c" {
+                    m.lib_exports_c = true;
+                } else if e.as_str() != "all" {
+                    errs.emit(
+                        dc::MANIFEST_ERROR,
+                        it.at,
+                        key.len() as u32,
+                        format("[lib] exports takes \"all\" or \"c\", got '{}'", e.as_str()),
+                    );
+                }
             } else if key == "type" {
                 let mut kinds = Vector::<String>::new();
                 take_arr(it, &mut errs, &mut kinds);
@@ -747,11 +932,60 @@ pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Ma
                     } else if kind == "shared" {
                         m.lib_shared = true;
                     } else {
-                        errs.emit(it.at, 4, format("unknown library type '{}' (static | shared)", kind));
+                        errs.emit(
+                            dc::UNKNOWN_LIBRARY_TYPE_STATIC_SHARED,
+                            it.at,
+                            4,
+                            format("unknown library type '{}' (static | shared)", kind),
+                        );
                     }
                 }
             } else {
                 unknown(&mut errs, bootstrap, it.at, key.len() as u32, format("unknown [lib] key '{}'", key));
+            }
+        } else if sec == "tools" {
+            if key == "analyzers" {
+                take_arr(it, &mut errs, &mut m.tools);
+            } else if key == "compiler" {
+                set_str(it, &mut errs, &mut m.tools_compiler);
+            } else if key == "hooks" {
+                take_arr(it, &mut errs, &mut m.hooks);
+            } else {
+                unknown(&mut errs, bootstrap, it.at, key.len() as u32, format("unknown [tools] key '{}'", key));
+            }
+        } else if sec.starts_with("step.") && sec.len() > 5 {
+            let name = sec.slice(5, sec.len());
+            let mut si = m.steps.len();
+            for i in 0..m.steps.len() {
+                if m.steps[i].name.as_str() == name {
+                    si = i;
+                }
+            }
+            if si == m.steps.len() {
+                m.steps.push(
+                    Step {
+                        name: String::from_str(name),
+                        argv: Vector::<String>::new(),
+                        inputs: Vector::<String>::new(),
+                        outputs: Vector::<String>::new(),
+                        env: Vector::<String>::new(),
+                        cache: true,
+                    },
+                );
+            }
+            let st = &mut m.steps[si];
+            if key == "argv" {
+                take_arr(it, &mut errs, &mut st.argv);
+            } else if key == "inputs" {
+                take_arr(it, &mut errs, &mut st.inputs);
+            } else if key == "outputs" {
+                take_arr(it, &mut errs, &mut st.outputs);
+            } else if key == "env" {
+                take_arr(it, &mut errs, &mut st.env);
+            } else if key == "cache" {
+                set_bool(it, &mut errs, &mut st.cache);
+            } else {
+                unknown(&mut errs, bootstrap, it.at, key.len() as u32, format("unknown [step.{}] key '{}'", name, key));
             }
         } else if sec.starts_with("bin.") && sec.len() > 4 {
             let name = sec.slice(4, sec.len());
@@ -780,6 +1014,9 @@ pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Ma
     if m.out_dir.len() == 0 {
         m.out_dir.push_str("build");
     }
+    if m.tools_compiler.len() == 0 {
+        m.tools_compiler.push_str("vendor/superc");
+    }
     if m.test_dir.len() == 0 {
         m.test_dir.push_str("tests");
     }
@@ -800,7 +1037,12 @@ pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Ma
             if m.bin.len() != 0 {
                 m.lib_name.push_string(&m.bin);
             } else {
-                errs.emit(0, 1, format("[lib] needs a 'name' when the manifest declares no 'bin'"));
+                errs.emit(
+                    dc::LIB_NEEDS_NAME_WHEN_MANIFEST_DECLARES,
+                    0,
+                    1,
+                    format("[lib] needs a 'name' when the manifest declares no 'bin'"),
+                );
             }
         }
         if !m.lib_static && !m.lib_shared {
@@ -812,21 +1054,37 @@ pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Ma
         m.root.push_string(&m.lib_root);
     }
     if m.bin.len() == 0 && !saw_lib {
-        errs.emit(0, 1, format("missing required key 'bin' (or a [lib] section)"));
+        errs.emit(
+            dc::MISSING_REQUIRED_KEY_BIN_LIB_SECTION,
+            0,
+            1,
+            format("missing required key 'bin' (or a [lib] section)"),
+        );
     }
     if m.root.len() == 0 {
-        errs.emit(0, 1, format("missing required key 'root'"));
+        errs.emit(dc::MISSING_REQUIRED_KEY_ROOT, 0, 1, format("missing required key 'root'"));
     }
     for i in 0..m.bins.len() {
         if m.bins.at(i).root.len() == 0 {
-            errs.emit(0, 1, format("[bin.{}] needs a 'root'", m.bins.at(i).name.as_str()));
+            errs.emit(dc::BIN_NEEDS_ROOT, 0, 1, format("[bin.{}] needs a 'root'", m.bins.at(i).name.as_str()));
         }
         if m.bins.at(i).name.as_str() == m.bin.as_str() {
-            errs.emit(0, 1, format("[bin.{}] collides with the manifest's primary 'bin'", m.bins.at(i).name.as_str()));
+            errs.emit(
+                dc::BIN_COLLIDES_MANIFEST_S_PRIMARY_BIN,
+                0,
+                1,
+                format("[bin.{}] collides with the manifest's primary 'bin'", m.bins.at(i).name.as_str()),
+            );
         }
     }
+    check_steps(&m.steps, &mut errs);
     if m.profile_index(m.default_profile.as_str()) < 0 {
-        errs.emit(0, 1, format("default-profile '{}' is not defined", m.default_profile.as_str()));
+        errs.emit(
+            dc::DEFAULT_PROFILE_NOT_DEFINED,
+            0,
+            1,
+            format("default-profile '{}' is not defined", m.default_profile.as_str()),
+        );
     }
     if errs.has_errors() {
         if file.len() != 0 {

@@ -29,6 +29,8 @@ const FD_CAP: usize = 4194304;
 
 @platform(!windows)
 extern "C" "errno.h" {
+    @platform(macos | ios | linux | android)
+    const EINVAL: i32 = 22;
     @platform(macos | ios)
     const EAGAIN: i32 = 35;
     @platform(macos | ios)
@@ -1637,6 +1639,148 @@ fn reuse_addr(s: i32) {
 fn no_delay(s: Sock) {
     let one: i32 = 1;
     let _ = unsafe setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, 4);
+}
+
+// ---- Unix-domain stream sockets (POSIX) ----------------------------------------------------------------
+
+@platform(macos | ios)
+extern "C" "sys/un.h" {
+    struct sockaddr_un {
+        pub sun_len: u8,
+        pub sun_family: u8,
+        pub sun_path: [char; 104],
+    }
+}
+
+@platform(linux | android)
+extern "C" "sys/un.h" {
+    struct sockaddr_un {
+        pub sun_family: u16,
+        pub sun_path: [char; 108],
+    }
+}
+
+// unistd.h declares getpeereid only outside strict POSIX mode, which the build uses: a block without a
+// header gives it a prototype from this declaration.
+@platform(macos | ios)
+extern "C" {
+    fn getpeereid(fd: i32, uid: *mut u32, gid: *mut u32) i32;
+}
+
+@platform(macos | ios | linux | android)
+extern "C" "unistd.h" {
+    fn getuid() u32;
+}
+
+// Linux `struct ucred` (sys/socket.h declares it only under _GNU_SOURCE): what SO_PEERCRED reads.
+@platform(linux | android)
+struct PeerCred {
+    pub pid: i32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+@platform(linux | android)
+const SO_PEERCRED: i32 = 17;
+
+const AF_UNIX: i32 = 1;
+
+@platform(macos | ios)
+type SaFamily = u8;
+@platform(linux | android)
+type SaFamily = u16;
+
+// The address of socket path `path[0..n]` into `a`: false when the path does not fit or holds a NUL.
+@platform(macos | ios | linux | android)
+fn unix_addr(path: *const u8, n: usize, a: &mut sockaddr_un) bool {
+    if n == 0 || n >= sizeof(sockaddr_un) - 2 {
+        return false;
+    }
+    let dst = ((&mut a.sun_path[0]) as *mut char) as *mut u8;
+    for i in 0..n {
+        let b = unsafe path[i];
+        if b == 0 {
+            return false;
+        }
+        unsafe dst[i] = b;
+    }
+    a.sun_family = AF_UNIX as SaFamily;
+    return true;
+}
+
+/// A blocking Unix-domain stream socket bound to path `path[0..n]` and listening, or -1. The socket file
+/// takes the process's file-creation mask: create it in an owner-only directory.
+@platform(macos | ios | linux | android)
+pub unsafe fn sc_unix_listen(path: *const u8, n: usize, backlog: i32) i32 {
+    let mut a = unsafe zeroed::<sockaddr_un>();
+    if !unix_addr(path, n, &mut a) {
+        set_err(EINVAL);
+        return -1;
+    }
+    unsafe {
+        let s = open_socket(AF_UNIX, SOCK_STREAM, 0);
+        if s < 0 {
+            return -1;
+        }
+        if bind(s, ((&a) as *const sockaddr_un) as *const sockaddr, sizeof(sockaddr_un) as socklen_t) != 0 || listen(
+            s,
+            backlog,
+        ) != 0 {
+            return fail_close(s);
+        }
+        return s;
+    }
+}
+
+/// Accept one connection on blocking Unix-domain socket `lfd`: the new blocking descriptor, or -1.
+@platform(macos | ios | linux | android)
+pub unsafe fn sc_unix_accept(lfd: i32) i32 {
+    return unsafe accept_socket(lfd);
+}
+
+/// A blocking Unix-domain stream socket connected to path `path[0..n]`, or -1.
+@platform(macos | ios | linux | android)
+pub unsafe fn sc_unix_connect(path: *const u8, n: usize) i32 {
+    let mut a = unsafe zeroed::<sockaddr_un>();
+    if !unix_addr(path, n, &mut a) {
+        set_err(EINVAL);
+        return -1;
+    }
+    unsafe {
+        let s = open_socket(AF_UNIX, SOCK_STREAM, 0);
+        if s < 0 {
+            return -1;
+        }
+        if connect(s, ((&a) as *const sockaddr_un) as *const sockaddr, sizeof(sockaddr_un) as socklen_t) != 0 {
+            return fail_close(s);
+        }
+        return s;
+    }
+}
+
+/// The user ID of the process at the other end of connected Unix-domain socket `fd` into `*uid`: 0, or -1.
+@platform(macos | ios)
+pub unsafe fn sc_peer_uid(fd: i32, uid: *mut u32) i32 {
+    let mut gid: u32 = 0;
+    return unsafe getpeereid(fd, uid, &mut gid);
+}
+
+/// The user ID of the process at the other end of connected Unix-domain socket `fd` into `*uid`: 0, or -1.
+@platform(linux | android)
+pub unsafe fn sc_peer_uid(fd: i32, uid: *mut u32) i32 {
+    let mut c = PeerCred { pid: 0, uid: 0, gid: 0 };
+    let mut n = sizeof(PeerCred) as socklen_t;
+    if unsafe getsockopt(fd, SOL_SOCKET, SO_PEERCRED, (&mut c) as *mut PeerCred, &mut n) != 0 {
+        return -1;
+    }
+    unsafe *uid = c.uid;
+    return 0;
+}
+
+/// The real user ID of the process.
+@platform(macos | ios | linux | android)
+pub fn sc_uid() u32 {
+    return unsafe getuid();
 }
 
 // Close `s` after a failure, keep the failure's error, and return -1.

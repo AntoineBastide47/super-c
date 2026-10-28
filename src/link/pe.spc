@@ -32,6 +32,8 @@ pub(package) struct Opts {
     pub(package) strip: bool,
     pub(package) stack: u64,
     pub(package) gc: bool, // drop the COMDAT sections nothing reaches (`--gc-sections`, `collect`)
+    /// A shared library's exports: None, every default-visibility global; else the globals named.
+    pub(package) exports: Option<Set<String>>,
 }
 
 const SCN_CODE: u32 = 0x20;
@@ -1256,11 +1258,15 @@ fn layout(l: &mut L, o: &Opts) {
     l.tls_index_at = grow(l, l.o_data, 4, 4);
     if l.shared {
         l.onexit_at = grow(l, l.o_data, 24, 8);
-        // The exports: every global an object defines, by name (the loader searches the names).
+        // The exports: every global an object defines, or the ones the export list names, by name (the
+        // loader searches the names).
         let mut keyed = Vector::<(String, u32)>::new();
         for g in 0..l.gs.len() {
             let k = l.gs[g].kind;
-            if (k == G_DEF || k == G_COMMON) && l.gs[g].alias == NONE {
+            if (k == G_DEF || k == G_COMMON) && l.gs[g].alias == NONE && lu::listed(
+                &o.exports,
+                l.names.spell(l.gs[g].name),
+            ) {
                 keyed.push((String::from_str(l.names.spell(l.gs[g].name)), g as u32));
             }
         }

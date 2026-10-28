@@ -84,11 +84,11 @@ rm -f stage0-super-c
 # 5) The correctness gate's own checks over the rebuilt compiler (ci/gate.sh --core): the two-generation
 # fixpoint of the binaries under the validation switches, the one-worker and every-core identity under
 # each task-delay seed (emitted C, type table, item index digest, diagnostics, native objects), and the
-# readability of the emitted C (its strict C warnings with SC_TEST_CC). The full gate runs them itself, so
-# it skips this step.
+# readability of the emitted C and its compile under the strict warning set, by SC_TEST_CC, else by cc. The
+# full gate runs them itself, so it skips this step.
 if [ -z "${SC_GATE_OUTER:-}" ]; then
     printf 'check: correctness gate core (ci/gate.sh --core)\n'
-    if ! sh ci/gate.sh --core; then
+    if ! SC_TEST_CC="${SC_TEST_CC:-cc}" sh ci/gate.sh --core; then
         printf 'check: FAILED -- ci/gate.sh --core (above)\n' >&2
         exit 1
     fi

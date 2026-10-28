@@ -14,6 +14,7 @@ import ast::ast as *;
 import target::table as tgt;
 import utils::errors as diag;
 import ir::cpu_features as cf;
+import utils::diag_codes as dc;
 
 pub(package) const PARSE_MAX_DEPTH: u32 = 256;
 
@@ -178,7 +179,11 @@ extend Parser {
         }
         self.current = i + 3;
         if v == VIS_FILE && !field {
-            self.errors.emit_span(t.span(), format("'pub(file)' is the default visibility of an item: remove it"));
+            self.errors.emit_span(
+                dc::PUB_FILE_DEFAULT_VISIBILITY_ITEM_REMOVE,
+                t.span(),
+                format("'pub(file)' is the default visibility of an item: remove it"),
+            );
             return VIS_PRIVATE;
         }
         return v;
@@ -238,13 +243,13 @@ extend Parser {
     @cold
     pub(package) fn error_here(self: &mut Self, message: str) {
         let t = self.raw_peek();
-        self.errors.emit_span(t.span(), String::from_str(message));
+        self.errors.emit_span(dc::SYNTAX_ERROR, t.span(), String::from_str(message));
     }
 
     @cold
     fn expect_fail(self: &mut Self, display: str) bool {
         let t = self.raw_peek();
-        self.errors.emit_span(t.span(), format("expected {}", display));
+        self.errors.emit_span(dc::SYNTAX_ERROR, t.span(), format("expected {}", display));
         return false;
     }
 
@@ -352,7 +357,11 @@ extend Parser {
         loop {
             if self.check(TokenType::MatchertextMid) || self.check(TokenType::MatchertextEnd) {
                 let t = self.raw_peek();
-                self.errors.emit_span(t.span(), format("matchertext interpolation hole is empty"));
+                self.errors.emit_span(
+                    dc::MATCHERTEXT_INTERPOLATION_HOLE_EMPTY,
+                    t.span(),
+                    format("matchertext interpolation hole is empty"),
+                );
             } else {
                 let e = self.parse_expression();
                 self.ast.push(e);
@@ -368,7 +377,11 @@ extend Parser {
                 break;
             }
             let t = self.raw_peek();
-            self.errors.emit_span(t.span(), format("expected the rest of the matchertext literal"));
+            self.errors.emit_span(
+                dc::EXPECTED_REST_MATCHERTEXT_LITERAL,
+                t.span(),
+                format("expected the rest of the matchertext literal"),
+            );
             break;
         }
         let kids = self.ast.commit(mark);
@@ -489,7 +502,11 @@ extend Parser {
         let types = self.parse_type_args();
         if self.bind_buf.len() != b0 {
             let bs = self.node_span(self.bind_buf[b0]);
-            self.errors.emit_span(bs, format("an associated type binding is only allowed in a generic bound"));
+            self.errors.emit_span(
+                dc::ASSOCIATED_TYPE_BINDING_ONLY_ALLOWED_GENERIC,
+                bs,
+                format("an associated type binding is only allowed in a generic bound"),
+            );
             self.bind_buf.truncate(b0);
         }
         expr = self.fin(
@@ -708,7 +725,12 @@ extend Parser {
             let elems = self.parse_comma_types(TokenType::RightParen);
             self.expect(TokenType::RightParen, "')'");
             if elems.len < 2 {
-                self.errors.emit(start, self.previous_end() - start, format("a tuple type needs at least 2 elements"));
+                self.errors.emit(
+                    dc::TUPLE_TYPE_NEEDS_LEAST_2_ELEMENTS,
+                    start,
+                    self.previous_end() - start,
+                    format("a tuple type needs at least 2 elements"),
+                );
             }
             return self.fin(
                 NodeKind::NODE_TUPLE_TYPE,
@@ -933,14 +955,16 @@ extend Parser {
     pub(package) fn parse_parameters(self: &mut Self, out_variadic: &mut bool) NodeList {
         self.expect(TokenType::LeftParen, "'('");
         let params_mark = self.ast.mark();
-        while !self.check(TokenType::RightParen) && !self.at_end() {
+        // A `{` where a parameter or a comma belongs is the body after a list missing its `)`: the list
+        // ends there, so recovery does not take the body and the items after it as parameters.
+        while !self.check(TokenType::RightParen) && !self.check(TokenType::LeftBrace) && !self.at_end() {
             if self.match(TokenType::Ellipsis) {
                 *out_variadic = true;
                 break;
             }
             let names_mark = self.ast.mark();
             self.ast.push(self.parse_parameter_name());
-            while !self.check(TokenType::Colon) && !self.at_end() {
+            while !self.check(TokenType::Colon) && !self.check(TokenType::LeftBrace) && !self.at_end() {
                 self.expect(TokenType::Comma, "','");
                 if self.check(TokenType::RightParen) {
                     break;
@@ -1155,6 +1179,7 @@ extend Parser {
         } else if fattrs.len() > 0 && !ordered {
             let sp0 = self.ast.at_const(fid).span;
             self.errors.emit_span(
+                dc::ONLY_REFLECT_APPLIES_FIELD_DECLARATION_IMPORT,
                 sp0,
                 format(
                     "only '@reflect' and '@ordered' apply to a field declaration, and '@import' to a field of an 'extern \"C\"' struct or union",
@@ -1231,7 +1256,11 @@ extend Parser {
         );
         if vattrs.len() > 0 {
             let sp0 = self.ast.at_const(vid).span;
-            self.errors.emit_span(sp0, format("only '@reflect' applies to a variant declaration"));
+            self.errors.emit_span(
+                dc::ONLY_REFLECT_APPLIES_VARIANT_DECLARATION,
+                sp0,
+                format("only '@reflect' applies to a variant declaration"),
+            );
         }
         self.pending_metas = saved_metas;
         self.add_attrs_to(&mut vattrs, vid);
@@ -1574,6 +1603,7 @@ extend Parser {
         }
         let sp = self.node_span(decl);
         self.errors.emit_span(
+            dc::EXTERN_C_BLOCK_CHECKED_AGAINST_C,
             sp,
             if self.ast.at_const(decl).kind == NodeKind::NODE_CONST || self.ast.at_const(decl).kind == NodeKind::NODE_TYPE_ALIAS {
                 format(
@@ -1621,11 +1651,16 @@ extend Parser {
                 let has_body = self.ast.at_const(f).as_data.function.body != NODE_NONE;
                 if has_body && !modeled {
                     let sp = self.node_span(f);
-                    self.errors.emit_span(sp, format("extern function declarations cannot have a body"));
+                    self.errors.emit_span(
+                        dc::EXTERN_FUNCTION_DECLARATIONS_CANNOT_HAVE_BODY,
+                        sp,
+                        format("extern function declarations cannot have a body"),
+                    );
                     self.errors.note(format("an '@unsafe(const)' extern function takes a body: its compile-time model"));
                 } else if modeled && !has_body {
                     let sp = self.node_span(f);
                     self.errors.emit_span(
+                        dc::UNSAFE_CONST_EXTERN_FUNCTION_NEEDS_BODY,
                         sp,
                         format(
                             "an '@unsafe(const)' extern function needs a body: the model compile-time evaluation runs",
@@ -1661,6 +1696,7 @@ extend Parser {
                     if self.ast.at_const(sd).as_data.aggregate.generics.len != 0 {
                         let sp = self.node_span(sd);
                         self.errors.emit_span(
+                            dc::EXTERN_TYPE_CANNOT_GENERIC_C_HAS,
                             sp,
                             format("an extern type cannot be generic: C has no such declaration to match"),
                         );
@@ -1765,6 +1801,7 @@ extend Parser {
             let d = self.ast.at_const(id).as_data.asm_stmt;
             if d.outputs.len != 0 || d.inputs.len != 0 || d.clobbers.len != 0 {
                 self.errors.emit_span(
+                    dc::MODULE_LEVEL_ASM_TAKES_ONLY_TEMPLATE,
                     self.node_span(id),
                     format("a module-level 'asm' takes only its template: no operands or clobbers"),
                 );
@@ -1875,6 +1912,7 @@ extend Parser {
     fn reject_derive_here(self: &mut Self) {
         if self.derive_ifaces.len() > 0 {
             self.errors.emit(
+                dc::DERIVE_MAY_ONLY_APPLIED_STRUCT_UNION,
                 self.derive_start,
                 self.derive_end - self.derive_start,
                 format("'@derive' may only be applied to a struct, union, or enum declaration"),
@@ -2280,6 +2318,7 @@ extend Parser {
             if !self.check(TokenType::LeftParen) && !self.check(TokenType::LeftBrace) && !self.check(TokenType::At) {
                 if self.ast.at_const(name).as_data.name.is_mutable {
                     self.errors.emit(
+                        dc::CONSTANT_PATTERN_CANNOT_MUT,
                         start,
                         self.node_span(path).end - start,
                         format("a constant pattern cannot be 'mut'"),
@@ -2388,6 +2427,7 @@ extend Parser {
         let last = self.ast.at_const(path).as_data.member.member;
         let vs = self.node_span(last);
         self.errors.emit(
+            dc::PATTERN_NAMES_VARIANT_WITHOUT_ENUM_WRITE,
             start,
             vs.start - start,
             format(
@@ -2435,6 +2475,7 @@ extend Parser {
             }
             if index == NODE_NONE {
                 self.errors.emit(
+                    dc::DESIGNATED_ELEMENT_NEEDS_SINGLE_INDEX_EXPRESSION,
                     start,
                     self.previous_end() - start,
                     format("a designated element needs a single index expression"),
@@ -2657,7 +2698,11 @@ extend Parser {
             if self.ast.at_const(obj).kind == NodeKind::NODE_GENERIC_SPECIALIZATION {
                 let spec = self.ast.at_const(obj).as_data.specialization;
                 if args.len != 0 {
-                    self.errors.emit_span(self.node_span(obj), format("a path takes type arguments only once"));
+                    self.errors.emit_span(
+                        dc::PATH_TAKES_TYPE_ARGUMENTS_ONLY_ONCE,
+                        self.node_span(obj),
+                        format("a path takes type arguments only once"),
+                    );
                 }
                 args = spec.types;
                 obj = spec.expression;
@@ -2722,6 +2767,7 @@ extend Parser {
                     if self.bind_buf.len() != b0 {
                         let bs = self.node_span(self.bind_buf[b0]);
                         self.errors.emit_span(
+                            dc::ASSOCIATED_TYPE_BINDING_ONLY_ALLOWED_GENERIC,
                             bs,
                             format("an associated type binding is only allowed in a generic bound"),
                         );
@@ -2755,7 +2801,11 @@ extend Parser {
                             );
                         }
                         if self.ast.at_const(tp).as_data.type_path.args.len != 0 {
-                            self.errors.emit_span(self.node_span(tp), format("a path takes type arguments only once"));
+                            self.errors.emit_span(
+                                dc::PATH_TAKES_TYPE_ARGUMENTS_ONLY_ONCE,
+                                self.node_span(tp),
+                                format("a path takes type arguments only once"),
+                            );
                         }
                         self.ast.at(tp).as_data.type_path.args = types;
                         expr = self.parse_struct_initializer_after(tp, start);
@@ -3036,7 +3086,7 @@ extend Parser {
             self.ast.at(b).as_data = NodeAs { single: SingleData { value: pd.name } };
             return;
         }
-        self.errors.emit_span(n.span, format("a range bound must be a constant"));
+        self.errors.emit_span(dc::RANGE_BOUND_MUST_CONSTANT, n.span, format("a range bound must be a constant"));
     }
 
     // The range node from its parts; `op_start` is where the `..` or `..=` starts.
@@ -3547,14 +3597,26 @@ extend Parser {
         let arms = self.ast.commit(mark);
         self.expect(TokenType::RightBrace, "'}'");
         if channels == 0 {
-            self.errors.emit_span(kw, String::from_str("'select' needs at least one 'ch.recv()' or 'ch.send(v)' arm"));
+            self.errors.emit_span(
+                dc::SELECT_NEEDS_LEAST_ONE_CH_RECV,
+                kw,
+                String::from_str("'select' needs at least one 'ch.recv()' or 'ch.send(v)' arm"),
+            );
         }
         if timeouts > 1 || defaults > 1 {
-            self.errors.emit_span(kw, String::from_str("'select' allows at most one 'timeout' and one 'default' arm"));
+            self.errors.emit_span(
+                dc::SELECT_ALLOWS_MOST_ONE_TIMEOUT_ONE,
+                kw,
+                String::from_str("'select' allows at most one 'timeout' and one 'default' arm"),
+            );
         }
         if timeouts != 0 && defaults != 0 {
             // `default` means "never wait", which makes any deadline unreachable.
-            self.errors.emit_span(kw, String::from_str("'select' cannot have both a 'timeout' and a 'default' arm"));
+            self.errors.emit_span(
+                dc::SELECT_CANNOT_HAVE_BOTH_TIMEOUT_DEFAULT,
+                kw,
+                String::from_str("'select' cannot have both a 'timeout' and a 'default' arm"),
+            );
         }
         self.ast.sugar_marks |= SUGAR_SELECT;
         return self.fin(NodeKind::NODE_SELECT, kw.start, NodeAs { block: BlockData { statements: arms } });
@@ -3860,7 +3922,11 @@ extend Parser {
                 };
                 v = v * base + d as u64;
                 if v > 0xFFFFFFFF {
-                    self.errors.emit_span(lit.span(), String::from_str("integer argument does not fit in u32"));
+                    self.errors.emit_span(
+                        dc::INTEGER_ARGUMENT_DOES_NOT_FIT_U32,
+                        lit.span(),
+                        String::from_str("integer argument does not fit in u32"),
+                    );
                     return 0;
                 }
             }
@@ -3902,6 +3968,7 @@ extend Parser {
         }
         if bad {
             self.errors.emit_span(
+                dc::ATTRIBUTE_TEST_ACCEPTS_SHOULD_PANIC_TIMEOUT_N,
                 ns.span(),
                 String::from_str(
                     "attribute '@test' accepts 'should_panic' and 'timeout = N' (N seconds, at least 1), each at most once",
@@ -3925,7 +3992,7 @@ extend Parser {
                     "attribute '@platform' requires a platform list, e.g. '@platform(windows)' or '@platform(linux | macos)'",
                 );
             };
-            self.errors.emit_span(syntax.namespace.span(), msg);
+            self.errors.emit_span(dc::INVALID_PLATFORM_ATTRIBUTE, syntax.namespace.span(), msg);
             return;
         }
         let names = tgt::axis_names(is_arch);
@@ -3974,9 +4041,17 @@ extend Parser {
                 syntax.name;
             };
             if is_arch {
-                self.errors.emit_span(t.span(), format("expected an architecture name: {}", tgt::axis_list(true)));
+                self.errors.emit_span(
+                    dc::EXPECTED_ARCHITECTURE_NAME,
+                    t.span(),
+                    format("expected an architecture name: {}", tgt::axis_list(true)),
+                );
             } else {
-                self.errors.emit_span(t.span(), format("expected a platform name: {}", tgt::axis_list(false)));
+                self.errors.emit_span(
+                    dc::EXPECTED_PLATFORM_NAME,
+                    t.span(),
+                    format("expected a platform name: {}", tgt::axis_list(false)),
+                );
             }
             return;
         }
@@ -4000,6 +4075,7 @@ extend Parser {
             syntax.name;
         };
         self.errors.emit_span(
+            dc::WHEN_TAKES_CONDITION_OVER_TEST_THREAD_SANITIZER,
             t.span(),
             format(
                 "'@when' takes a condition over TEST, LOCKDEP and OVERFLOW_CHECKS with '!', '&&', '||' and parentheses",
@@ -4149,7 +4225,7 @@ extend Parser {
             return self.literal();
         }
         let t = self.raw_peek();
-        self.errors.emit_span(t.span(), format("{} must be a string literal", what));
+        self.errors.emit_span(dc::MUST_STRING_LITERAL, t.span(), format("{} must be a string literal", what));
         self.advance();
         return NODE_NONE;
     }
@@ -4185,6 +4261,7 @@ extend Parser {
             *out = Attr { kind: flag as u8, str_span: Span::empty() };
             if syntax.has_args {
                 self.errors.emit_span(
+                    dc::ATTRIBUTE_TAKES_NO_ARGUMENTS,
                     ns.span(),
                     format("attribute '@{}' takes no arguments", diag::span_str(self.source, ns.start(), ns.end())),
                 );
@@ -4198,7 +4275,11 @@ extend Parser {
                 let arg = self.attr_arg(&syntax, 0);
                 out.str_span = Span::new(arg.start() + 1, arg.end() - 1);
             } else {
-                self.errors.emit_span(ns.span(), format("attribute '@intrinsic' takes one string argument"));
+                self.errors.emit_span(
+                    dc::ATTRIBUTE_INTRINSIC_TAKES_ONE_STRING_ARGUMENT,
+                    ns.span(),
+                    format("attribute '@intrinsic' takes one string argument"),
+                );
             }
             return true;
         }
@@ -4241,6 +4322,7 @@ extend Parser {
                 }
                 if (claims & bit) != 0 {
                     self.errors.emit_span(
+                        dc::CLAIM_LISTED_TWICE_UNSAFE,
                         arg.span(),
                         format(
                             "claim '{}' is listed twice in '@unsafe(...)'",
@@ -4261,6 +4343,7 @@ extend Parser {
             *out = Attr { kind: AttrKind::ATTR_UNSAFE as u8, arg: claims, str_span: section };
             if !ok {
                 self.errors.emit_span(
+                    dc::ATTRIBUTE_UNSAFE_TAKES_LIST_CLAIMS_SAFE,
                     ns.span(),
                     format(
                         "attribute '@unsafe' takes a list of the claims 'safe', 'const', 'naked' and 'link_section = \"name\"', e.g. '@unsafe(safe, const)'",
@@ -4288,6 +4371,7 @@ extend Parser {
                 }
                 if !ok {
                     self.errors.emit_span(
+                        dc::ATTRIBUTE_BENCH_ACCEPTS_ONLY_LOG_RESULTS_TRUE,
                         ns.span(),
                         format("attribute '@bench' accepts only '(log_results = true)' or '(log_results = false)'"),
                     );
@@ -4317,6 +4401,7 @@ extend Parser {
                     out.arg = 1;
                 } else {
                     self.errors.emit_span(
+                        dc::TEST_INIT_TEST_FREE_ACCEPT_ONLY_GLOBAL,
                         ns.span(),
                         String::from_str("'@test_init' / '@test_free' accept only '(global)'"),
                     );
@@ -4331,6 +4416,7 @@ extend Parser {
             // interface's default bodies. No Attr record survives -- the extends are the record.
             if !syntax.has_args || Parser::attr_arg_count(&syntax) == 0 {
                 self.errors.emit_span(
+                    dc::ATTRIBUTE_DERIVE_REQUIRES_INTERFACE_LIST_E,
                     ns.span(),
                     format(
                         "attribute '@derive' requires an interface list, e.g. '@derive(Format)' or '@derive(Format, Hash)'",
@@ -4352,7 +4438,11 @@ extend Parser {
                     }
                     if self.current < syntax.arg_end && !self.match(TokenType::Comma) {
                         let bad = self.raw_peek();
-                        self.errors.emit_span(bad.span(), format("expected ',' between '@derive' interface names"));
+                        self.errors.emit_span(
+                            dc::EXPECTED_BETWEEN_DERIVE_INTERFACE_NAMES,
+                            bad.span(),
+                            format("expected ',' between '@derive' interface names"),
+                        );
                         break;
                     }
                 }
@@ -4367,6 +4457,7 @@ extend Parser {
             // the metas side table; no Attr record survives.
             if !syntax.has_args || Parser::attr_arg_count(&syntax) == 0 {
                 self.errors.emit_span(
+                    dc::ATTRIBUTE_REFLECT_REQUIRES_ENTRIES_E_G,
                     ns.span(),
                     format(
                         "attribute '@reflect' requires entries, e.g. '@reflect(hidden)' or '@reflect(label = \"x\", max = 100)'",
@@ -4379,7 +4470,11 @@ extend Parser {
             while i < count {
                 let k = self.attr_arg(&syntax, i);
                 if k.kind() != TokenType::Identifier {
-                    self.errors.emit_span(k.span(), format("expected a '@reflect' key name"));
+                    self.errors.emit_span(
+                        dc::EXPECTED_REFLECT_KEY_NAME,
+                        k.span(),
+                        format("expected a '@reflect' key name"),
+                    );
                     break;
                 }
                 let mut ma = MetaAttr { ival: 1, key: k.span(), vspan: Span::empty() };
@@ -4410,6 +4505,7 @@ extend Parser {
                             syntax.name;
                         };
                         self.errors.emit_span(
+                            dc::REFLECT_VALUE_INTEGER_STRING_TRUE_FALSE,
                             at.span(),
                             format("a '@reflect' value is an integer, a string, 'true', or 'false'"),
                         );
@@ -4421,7 +4517,11 @@ extend Parser {
                 if i < count {
                     if self.attr_arg(&syntax, i).kind() != TokenType::Comma {
                         let at = self.attr_arg(&syntax, i);
-                        self.errors.emit_span(at.span(), format("expected ',' between '@reflect' entries"));
+                        self.errors.emit_span(
+                            dc::EXPECTED_BETWEEN_REFLECT_ENTRIES,
+                            at.span(),
+                            format("expected ',' between '@reflect' entries"),
+                        );
                         break;
                     }
                     i = i + 1;
@@ -4448,11 +4548,16 @@ extend Parser {
             if syntax.parts == 2 && self.text_is(syntax.name, "skip") {
                 *out = Attr { kind: AttrKind::ATTR_FMT_SKIP as u8, str_span: Span::empty() };
                 if syntax.has_args {
-                    self.errors.emit_span(ns.span(), format("attribute '@fmt.skip' takes no arguments"));
+                    self.errors.emit_span(
+                        dc::ATTRIBUTE_FMT_SKIP_TAKES_NO_ARGUMENTS,
+                        ns.span(),
+                        format("attribute '@fmt.skip' takes no arguments"),
+                    );
                 }
                 return true;
             }
             self.errors.emit_span(
+                dc::UNKNOWN_ATTRIBUTE_FMT_NAMESPACE_SUPPORTS_ONLY,
                 syntax.name.span(),
                 format("unknown attribute; the 'fmt' namespace supports only '@fmt.skip'"),
             );
@@ -4477,6 +4582,7 @@ extend Parser {
         if kind < 0 {
             if !self.bootstrap_tags {
                 self.errors.emit_span(
+                    dc::UNKNOWN_ATTRIBUTE_PASS_BOOTSTRAP_TAGS_ACCEPT,
                     ns.span(),
                     format(
                         "unknown attribute '@{}'; pass --bootstrap-tags to accept unknown attributes",
@@ -4498,6 +4604,7 @@ extend Parser {
         } else if wants_str || wants_int {
             if !syntax.has_args {
                 self.errors.emit_span(
+                    dc::ATTRIBUTE_REQUIRES_ARGUMENT,
                     syntax.name.span(),
                     format(
                         "attribute '@{}' requires an argument",
@@ -4514,6 +4621,7 @@ extend Parser {
                     syntax.name;
                 };
                 self.errors.emit_span(
+                    dc::EXPECTED_INTEGER_ARGUMENT,
                     t.span(),
                     String::from_str(
                         if wants_int {
@@ -4529,7 +4637,7 @@ extend Parser {
                     let ne = self.errors.errors.len();
                     out.arg = self.parse_attr_int(arg);
                     if self.errors.errors.len() == ne && !c_align_ok(out.arg) {
-                        self.errors.emit_span(arg.span(), c_align_error(out.arg));
+                        self.errors.emit_span(dc::INVALID_ALIGNMENT, arg.span(), c_align_error(out.arg));
                     }
                 } else {
                     out.str_span = Span::new(arg.start() + 1, arg.end() - 1);
@@ -4537,6 +4645,7 @@ extend Parser {
             }
         } else if syntax.has_args {
             self.errors.emit_span(
+                dc::ATTRIBUTE_TAKES_NO_ARGUMENTS,
                 syntax.name.span(),
                 format("attribute '@{}' takes no arguments", diag::span_str(self.source, ns.start(), syntax.name.end())),
             );
@@ -4558,6 +4667,7 @@ extend Parser {
         };
         if n != want {
             self.errors.emit_span(
+                dc::ATTRIBUTE_TAKES,
                 syntax.namespace.span(),
                 format(
                     "attribute '@{}' takes {} {}",
@@ -4604,6 +4714,7 @@ extend Parser {
                 let bit = 1u64 << attr.kind as u64;
                 if (seen & bit) != 0 {
                     self.errors.emit(
+                        dc::DUPLICATE_ATTRIBUTE,
                         at,
                         syntax.name.end() - at,
                         format(
@@ -4636,7 +4747,12 @@ extend Parser {
                     }
                 }
                 if dup {
-                    self.errors.emit(at, syntax.name.end() - at, format("duplicate attribute '@{}'", text));
+                    self.errors.emit(
+                        dc::DUPLICATE_ATTRIBUTE,
+                        at,
+                        syntax.name.end() - at,
+                        format("duplicate attribute '@{}'", text),
+                    );
                     continue;
                 }
                 unknown.push(name);
@@ -4676,13 +4792,17 @@ extend Parser {
                     } else {
                         self.raw_peek().span();
                     };
-                    self.errors.emit_span(sp, format("{}", why));
+                    self.errors.emit_span(dc::MISPLACED_UNSAFE_ATTRIBUTE, sp, format("{}", why));
                     continue;
                 }
             }
             let fnk = owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_FUNCTION;
             if attr.kind == AttrKind::ATTR_NO_CONST as u8 && fnk && self.ast.at_const(owner).as_data.function.is_const() {
-                self.errors.emit_span(self.node_span(owner), format("a '@no_const' function cannot be a 'const fn'"));
+                self.errors.emit_span(
+                    dc::NO_CONST_FUNCTION_CANNOT_CONST_FN,
+                    self.node_span(owner),
+                    format("a '@no_const' function cannot be a 'const fn'"),
+                );
             }
             let place = if attr.kind == AttrKind::ATTR_TARGET_FEATURE as u8 || attr.kind == AttrKind::ATTR_SIMD_IMPL as u8 {
                 pick(fnk, "", "may only be applied to a function");
@@ -4761,7 +4881,7 @@ extend Parser {
                 };
                 let mut c = String::new();
                 known_attr_name(attr.kind, &mut c);
-                self.errors.emit_span(sp, format("'@{}' {}", c.as_str(), place));
+                self.errors.emit_span(dc::MISPLACED_ATTRIBUTE, sp, format("'@{}' {}", c.as_str(), place));
                 continue;
             }
             if fnk && (attr.kind == AttrKind::ATTR_TARGET_FEATURE as u8 || attr.kind == AttrKind::ATTR_SIMD_IMPL as u8) {
@@ -4771,6 +4891,7 @@ extend Parser {
                 owner,
             ).as_data.function.is_intrinsic()) {
                 self.errors.emit_span(
+                    dc::INTRINSIC_MAY_ONLY_APPLIED_FUNCTION_OUTSIDE,
                     self.node_span(owner),
                     format("'@intrinsic' may only be applied to a function outside an extern block or interface"),
                 );
@@ -4836,6 +4957,7 @@ extend Parser {
                 if r >= 0 && (mask >> cf::row(r as usize).arch as u32 & 1) == 0 {
                     let an = tgt::axis_names(true)[cf::row(r as usize).arch as usize];
                     self.errors.emit_span(
+                        dc::FEATURE_BELONGS_FUNCTION_NEEDS_ARCH,
                         e.span,
                         format(
                             "feature '{}' belongs to {}: the function needs '@arch({})'",
@@ -4863,6 +4985,7 @@ extend Parser {
             let mut ma = *self.pending_metas.at(i);
             if !ok {
                 self.errors.emit_span(
+                    dc::REFLECT_APPLIES_STRUCT_ENUM_FIELD_VARIANT,
                     ma.key,
                     format("'@reflect' applies to a struct, enum, field, variant, or function declaration"),
                 );
@@ -4879,6 +5002,7 @@ extend Parser {
         for i in 0..attrs.len() {
             if attrs.at(i).kind == AttrKind::ATTR_BENCH as u8 {
                 self.errors.emit_span(
+                    dc::BENCH_MAY_ONLY_APPLIED_TOP_LEVEL,
                     self.ast.at_const(f).span,
                     format("'@bench' may only be applied to a top-level function"),
                 );
@@ -4899,30 +5023,48 @@ extend Parser {
                 generic_aggregate = (d.kind == NodeKind::NODE_STRUCT || d.kind == NodeKind::NODE_ENUM) && d.as_data.aggregate.generics.len != 0;
             }
             if attr.kind == AttrKind::ATTR_BENCH as u8 && !valid_test {
-                self.errors.emit_span(sp, format("'@bench' may only be applied to a non-generic function"));
+                self.errors.emit_span(
+                    dc::BENCH_MAY_ONLY_APPLIED_NON_GENERIC,
+                    sp,
+                    format("'@bench' may only be applied to a non-generic function"),
+                );
             } else if attr.kind == AttrKind::ATTR_BENCH as u8 && self.ast.at_const(owner).as_data.function.is_unsafe() {
                 // The generated runner names it as a value, which an `unsafe fn` cannot be without `unsafe`.
-                self.errors.emit_span(sp, format("'@bench' may not be applied to an 'unsafe fn'"));
+                self.errors.emit_span(
+                    dc::BENCH_MAY_NOT_APPLIED_UNSAFE_FN,
+                    sp,
+                    format("'@bench' may not be applied to an 'unsafe fn'"),
+                );
             }
             if (attr.kind == AttrKind::ATTR_TEST as u8 || attr.kind == AttrKind::ATTR_TEST_INIT as u8 || attr.kind == AttrKind::ATTR_TEST_FREE as u8) && !valid_test {
                 self.errors.emit_span(
+                    dc::TEST_TEST_INIT_TEST_FREE_MAY_ONLY_APPLIED,
                     sp,
                     format("'@test' / '@test_init' / '@test_free' may only be applied to a non-generic function"),
                 );
             }
             if attr.kind == AttrKind::ATTR_C_LINK as u8 && (owner == NODE_NONE || self.ast.at_const(owner).kind != NodeKind::NODE_EXTERN_BLOCK) {
-                self.errors.emit_span(sp, format("'@link' may only be applied to an 'extern \"C\"' block"));
+                self.errors.emit_span(
+                    dc::LINK_MAY_ONLY_APPLIED_EXTERN_C,
+                    sp,
+                    format("'@link' may only be applied to an 'extern \"C\"' block"),
+                );
             }
             if attr.kind == AttrKind::ATTR_NO_CONST as u8 && (owner == NODE_NONE || self.ast.at_const(owner).kind != NodeKind::NODE_STRUCT && self.ast.at_const(
                 owner,
             ).kind != NodeKind::NODE_ENUM && self.ast.at_const(owner).kind != NodeKind::NODE_FUNCTION) {
                 self.errors.emit_span(
+                    dc::NO_CONST_MAY_ONLY_APPLIED_STRUCT_UNION,
                     sp,
                     format("'@no_const' may only be applied to a struct, union, enum, or function declaration"),
                 );
             }
             if attr.kind == AttrKind::ATTR_EMIT_MACRO as u8 && !generic_aggregate {
-                self.errors.emit_span(sp, format("'@emit_macro' may only be applied to a generic struct or enum"));
+                self.errors.emit_span(
+                    dc::EMIT_MACRO_MAY_ONLY_APPLIED_GENERIC_STRUCT,
+                    sp,
+                    format("'@emit_macro' may only be applied to a generic struct or enum"),
+                );
                 self.errors.note(
                     format("write it before a declaration like 'struct Box<T> {{ ... }}' or 'enum Option<T> {{ ... }}'"),
                 );

@@ -2142,6 +2142,24 @@ fn validation_skips_rejected_bodies() {
     assert(!c.out_has("SC_BC_VALIDATE"), "no elaborated body fails verification");
 }
 
+// In a package where a fn value can accept a cancellation, a call through one carries a check whose
+// probe-1 edge (the callee returned through its own ladder) holds poison in the call's result: the edge
+// takes it out, so no path returns with it, and an operand temporary a later check's ladder registered
+// still gets its scope-exit drop on the normal path.
+@test
+fn validation_accepts_owned_results_of_cancellable_fn_values() {
+    let _env4 = cli::set_env("SC_BC_VALIDATE", "1");
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "import std::parallel::runtime as rt;\nimport std::parallel::task;\n\nfn run(f: fn() i32) i32 {\n    return f();\n}\n\nfn lt_by<K: Ord, F: fn() K>(f: F) bool {\n    return f() < f();\n}\n\nfn held(f: fn() String) usize {\n    let s = f();\n    return s.len();\n}\n\nfn work() {\n    let g = || {\n        let _ = rt::cancel_point();\n        return 0;\n    };\n    let _ = lt_by(|| String::from_str(\"abcdefghijklmnopqrstuvwxyz012345\"));\n    let _ = held(|| String::from_str(\"abcdefghijklmnopqrstuvwxyz012345\"));\n    let _ = run(g);\n}\n\nfn main() i32 {\n    let mut group = task::TaskGroup::new();\n    group.spawn(|| {\n        work();\n    });\n    let _ = group.join();\n    rt::shutdown();\n    return 0;\n}\n",
+    );
+    let c = cli::superc_in(p.dir(), "build main.spc -o bin");
+    assert(c.ok(), "the program builds");
+    assert(!c.out_has("SC_BC_VALIDATE"), "no elaborated body fails verification");
+    assert(p.run_bin_env("SC_LEAK_CHECK=fatal ").ok(), "the operand temporaries are freed");
+}
+
 // Transpiler-inserted auto-free of untouched fields: a Free impl's body runs, then every owning
 // Free-typed field it never referenced is freed by generated glue (early returns covered by the
 // A tuple struct's untouched owning members get the same wrapper glue, spelled positionally `_i`.
@@ -3454,6 +3472,76 @@ fn main() i32 {
     let r = p.compile("main.spc");
     assert(r.ok());
     assert(p.gen_has("stdx.c", "__sc_spc"), "a launched body's loop in a std-prefixed user module is marked");
+}
+
+// The relative paths of the objects under `dir`, with their bytes, in path order.
+fn objects_of(dir: str, rel: str, out: &mut Vector<(String, String)>) {
+    let mut d = fs::read_dir(format("{}{}", dir, rel).as_str()).unwrap();
+    while let Some(Ok(e)) = d.next() {
+        let r = format("{}/{}", rel, e.name);
+        if e.kind == Option::<fs::FileKind>::Some(fs::FileKind::Dir) {
+            objects_of(dir, r.as_str(), out);
+        } else if e.name.ends_with(".o") {
+            out.push((r.clone(), loader::read_file(format("{}{}", dir, r).as_str()).unwrap()));
+        }
+    }
+}
+
+// A build that replays a module's cached emission restores the module's LIR: the optimizer inlines its
+// functions (`free` into `Box<a::S>`'s drop, `freed` into main) as a clean build does, so both write the same
+// objects.
+@test
+fn a_replayed_module_inlines_as_a_clean_build_does() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "a.spc",
+        "static mut FREED: i32 = 0;\n\npub struct S {\n    pub n: i32,\n}\n\nextend S as Free {\n    pub fn free(self: &mut Self) {\n        unsafe FREED = unsafe FREED + self.n;\n    }\n}\n\npub fn freed() i32 {\n    return unsafe FREED;\n}\n",
+    );
+    let main = "import a;\n\nfn main() i32 {\n    {\n        let _b = Box::<a::S>::new(a::S { n: 3 });\n    }\n    return a::freed() - ";
+    p.mkfile("main.spc", format("{}3;\n}}\n", main).as_str());
+    let args = "build --profile=release main.spc -o bin";
+    assert(cli::superc_in(p.dir(), args).ok(), "the first build");
+    p.mkfile("main.spc", format("{}1 - 2;\n}}\n", main).as_str());
+    assert(cli::superc_in(p.dir(), args).ok(), "the build after an edit of main");
+    let raw = format("{}/build/release/raw", p.dir());
+    let mut kept = Vector::<(String, String)>::new();
+    objects_of(raw.as_str(), "", &mut kept);
+    assert(fs::remove_all(format("{}/build", p.dir()).as_str()).is_ok(), "the tree goes");
+    assert(cli::superc_in(p.dir(), args).ok(), "the clean build");
+    let mut clean = Vector::<(String, String)>::new();
+    objects_of(raw.as_str(), "", &mut clean);
+    kept.sort();
+    clean.sort();
+    assert_eq(kept.len(), clean.len());
+    for i in 0..kept.len() {
+        assert(kept[i].0.as_str() == clean[i].0.as_str(), clean[i].0.as_str());
+        assert(kept[i].1.as_str() == clean[i].1.as_str(), clean[i].0.as_str());
+    }
+    assert_eq(p.run_bin(), 0);
+}
+
+// A wasm build that replays a module's cached emission keeps its object, and compiles the module's statics
+// again: the address of a function a static holds takes its type from the static's type, as the function's
+// body is not lowered.
+@test
+fn a_replayed_wasm_module_keeps_its_static_function_addresses() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("a.spc", "fn quiet() {}\n\nstatic mut HOOK: fn() = quiet;\n\npub fn run() {\n    unsafe HOOK();\n}\n");
+    p.mkfile("main.spc", "import a;\n\nfn main() i32 {\n    a::run();\n    return 0;\n}\n");
+    let r = cli::superc_in(p.dir(), "build --target=wasm main.spc -o h.wasm");
+    if r.out_has("no sysroot found") {
+        return; // the runner has not the WASI C headers, which the header facts need
+    }
+    assert(r.ok(), "the first build");
+    p.mkfile("main.spc", "import a;\n\nfn main() i32 {\n    a::run();\n    return 1 - 1;\n}\n");
+    let again = cli::superc_in(p.dir(), "build --target=wasm main.spc -o h.wasm");
+    if !again.ok() {
+        again.show();
+    }
+    assert(again.ok(), "the build after an edit of main");
 }
 
 // The per-TU cache replays a module's emitted C while its own import closure is unchanged, but the

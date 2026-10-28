@@ -118,6 +118,8 @@ pub(package) struct Opts {
     pub(package) strip: bool,
     pub(package) jobs: u32, // 1: the signature's page hashes in this thread, else on the task pool
     pub(package) dead_strip: bool, // keep only what the entry, the exports and the kept symbols reach
+    /// A shared library's exports: None, every default-visibility global; else the globals named.
+    pub(package) exports: Option<Set<String>>,
 }
 
 // An input file: its bytes in the blob, its sections and symbols.
@@ -2610,17 +2612,23 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
             if (y.ty & N_STAB) != 0 || (y.ty & N_TYPE) != N_SECT || !kept(l, k as u32) {
                 continue;
             }
-            if (y.ty & N_EXT) != 0 && (y.ty & N_PEXT) == 0 {
+            let s = l.names.spell(y.name);
+            // A global the export list leaves out is private to the image, as `N_PEXT` makes one.
+            let private = (y.ty & N_PEXT) != 0 || !lu::listed(&o.exports, s);
+            if (y.ty & N_EXT) != 0 && !private {
                 continue;
             }
-            let s = l.names.spell(y.name);
             if s.len() == 0 || s.starts_with("L") || s.starts_with("l") {
                 continue;
             }
             locs.push(
                 OSym {
                     name: lu::put_str(&mut st, s),
-                    ty: N_SECT | y.ty & N_PEXT,
+                    ty: N_SECT | if (y.ty & N_EXT) != 0 && private {
+                        N_PEXT;
+                    } else {
+                        0;
+                    },
                     sect: out_sect(l, k as u32),
                     desc: 0,
                     value: sym_addr(l, k as u32),
@@ -2639,7 +2647,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         let exported = all && (gy.kind == G_COMMON || gy.kind == G_DEF && (l.syms[gy.sym as usize].ty & N_PEXT) == 0 && kept(
             l,
             gy.sym,
-        )) || gy.kind == G_HEADER;
+        )) && lu::listed(&o.exports, l.names.spell(gy.name)) || gy.kind == G_HEADER;
         if exported {
             keyed.push((String::from_str(l.names.spell(gy.name)), g as u32));
         }

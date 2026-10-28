@@ -6,6 +6,7 @@ import string as cstring;
 import lexer::token as *;
 import lexer::token_type as *;
 import utils::errors as diag;
+import utils::diag_codes as dc;
 
 /// Sentinel for "none" in u32 positions and scalar values.
 pub(package) const UINT32_MAX: u32 = 0xFFFFFFFFu32;
@@ -387,12 +388,17 @@ extend Lexer {
 
     @cold
     fn error(self: &mut Self, message: str) {
-        self.errors.emit(self.start as u32, (self.current - self.start) as u32, String::from_str(message));
+        self.errors.emit(
+            dc::LEXICAL_ERROR,
+            self.start as u32,
+            (self.current - self.start) as u32,
+            String::from_str(message),
+        );
     }
 
     @cold
     fn error_at(self: &mut Self, at: usize, len: usize, message: str) {
-        self.errors.emit(at as u32, len as u32, String::from_str(message));
+        self.errors.emit(dc::LEXICAL_ERROR, at as u32, len as u32, String::from_str(message));
     }
 
     // Decodes one UTF-8 scalar starting at `current` (first byte `b`). Any malformed sequence sets
@@ -1480,7 +1486,12 @@ extend Lexer {
                         }
                     }
                 } else {
-                    self.errors.emit(self.start as u32, 1, format("unexpected character '{}'", c as char));
+                    self.errors.emit(
+                        dc::UNEXPECTED_CHARACTER,
+                        self.start as u32,
+                        1,
+                        format("unexpected character '{}'", c as char),
+                    );
                 }
             },
         };
@@ -1492,7 +1503,12 @@ extend Lexer {
     pub(package) fn scan_tokens(self: &mut Self) {
         if self.bytes.len() > 0xFFFFFFFF {
             // Token and diagnostic offsets are u32.
-            self.errors.emit(0, 0, String::from_str("a source file must be smaller than 4 GiB"));
+            self.errors.emit(
+                dc::SOURCE_FILE_MUST_SMALLER_THAN_4,
+                0,
+                0,
+                String::from_str("a source file must be smaller than 4 GiB"),
+            );
             self.tokens.push(Token::new(TokenType::Eof, 0, 0));
             self.errors.finalize(self.bytes, self.file);
             return;
@@ -1507,6 +1523,7 @@ extend Lexer {
         }
         if self.mt.len() != 0 {
             self.errors.emit(
+                dc::UNTERMINATED_MATCHERTEXT_LITERAL_UNCLOSED_INTERPOLATION_HOLE,
                 self.bytes.len() as u32,
                 0,
                 String::from_str("unterminated matchertext literal (unclosed interpolation hole)"),

@@ -25,6 +25,7 @@ import build_system::build as bsys;
 import build_system::manifest as bman;
 import link::link as lk;
 import std::parallel::runtime as prt;
+import utils::diag_codes as dc;
 
 /// --test run options, forwarded to the generated runner.
 pub(package) struct TestOpts {
@@ -81,7 +82,7 @@ fn test_err(p: &mut loader::Package, m: ModuleId, sp: tok::Span, msg: str) {
     let src = p.modules[m as usize].source.as_str();
     let file = p.modules[m as usize].file.as_str();
     let mut errs = diag::Errors::new();
-    errs.emit_span(sp, String::from_str(msg));
+    errs.emit_span(dc::INVALID_TEST_ITEM, sp, String::from_str(msg));
     errs.finalize(src, file);
     errs.log();
     p.ok = false;

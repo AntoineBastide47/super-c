@@ -12,7 +12,6 @@ import std::platform::fs;
 import std::platform::process;
 import ast::parser as par;
 import lexer::lexer as lex;
-import lexer::token_type as ltt;
 import module::loader as loader;
 import build_system::manifest as bman;
 import lsp::json as json;
@@ -23,6 +22,7 @@ import lsp::features as feat;
 import driver::util as dutil;
 import lsp::buildtoml as btoml;
 import ast::ast as astn;
+import utils::diag_codes as dc;
 
 /// An open editor document (the overlay source of truth while open).
 pub(package) struct Doc {
@@ -203,10 +203,13 @@ fn respond_raw(f: *mut stdio::FILE, id: &json::JSON, result: str) {
 }
 
 // An LSP Diagnostic object.
-fn diag_json(range: json::JSON, severity: i64, source: str, msg: str) json::JSON {
+fn diag_json(range: json::JSON, severity: i64, code: u16, source: str, msg: str) json::JSON {
     let mut dj = json::JSON::object();
     dj.emplace("range", range);
     dj.emplace("severity", json::JSON::integer(severity));
+    if code != dc::NONE {
+        dj.emplace("code", json::JSON::str(dc::name(code)));
+    }
     dj.emplace("source", json::JSON::str(source));
     dj.emplace("message", json::JSON::str(msg));
     if severity == 4 {
@@ -429,21 +432,6 @@ struct RefHit {
     pub(package) m: u32,
     pub(package) s: u32,
     pub(package) e: u32,
-}
-
-// The new name must lex as exactly one identifier (rejects keywords, operators, spaces).
-fn valid_ident(nm: str) bool {
-    if nm.len() == 0 {
-        return false;
-    }
-    let mut s = String::from_str(nm);
-    let mut lx = lex::Lexer::new(&mut s, "<rename>");
-    lx.scan_tokens();
-    if lx.has_errors() {
-        return false;
-    }
-    let toks = lx.take_tokens();
-    return toks.len() == 2 && toks.at(0).kind() == ltt::TokenType::Identifier;
 }
 
 // Main loop.
@@ -1270,7 +1258,7 @@ extend Server {
                 lm.update(r, d.module, src);
                 range_json(src, &lm.ls, d.start, d.len);
             };
-            let dj = diag_json(range, d.severity, "super-c", d.msg.as_str());
+            let dj = diag_json(range, d.severity, d.code, "super-c", d.msg.as_str());
             ps.arrs[slots[m] as usize].push_back(dj);
         }
         if evicted {
@@ -1296,7 +1284,13 @@ extend Server {
                 let sp = dead[k];
                 let range = range_json(src, &lm.ls, sp.start, sp.end - sp.start);
                 ps.arrs[slots[m] as usize].push_back(
-                    diag_json(range, 4, "super-c", "inactive code: the analysed target's build settings remove it"),
+                    diag_json(
+                        range,
+                        4,
+                        dc::NONE,
+                        "super-c",
+                        "inactive code: the analysed target's build settings remove it",
+                    ),
                 );
             }
         }
@@ -1358,7 +1352,7 @@ extend Server {
             let mut any = json::JSON::array();
             for i in 0..diags.len() {
                 let dg = diags.at(i);
-                let dj = diag_json(range_json(src, &ls, dg.start, dg.len), 1, "build.toml", dg.msg.as_str());
+                let dj = diag_json(range_json(src, &ls, dg.start, dg.len), 1, dg.code, "build.toml", dg.msg.as_str());
                 any.push_back(dj);
             }
             ps.push_all(doc.uri.clone(), any);
@@ -2019,24 +2013,11 @@ extend Server {
         };
     }
 
-    // Parse back the bodies a reference scan for `d` in root `r` reads: the defining module's
-    // and every module whose recorded references name `d` (`Package.def_refs`); the other
-    // modules' references, if any, sit in their retained module arenas.
-    fn hydrate_refs(self: &mut Self, r: usize, d: astn::DefId) {
-        let pkg = &mut self.roots[r].pkg;
-        analysis::ensure_bodies(pkg, d.module as usize);
-        for m in 0..pkg.modules.len() {
-            if m != d.module as usize && analysis::refers(pkg, m, d.module, d.node, d.node) {
-                analysis::ensure_bodies(pkg, m);
-            }
-        }
-    }
-
     // Reference sites for definition `d` (resolved in root `r0`) across EVERY built root, deduped
     // by canonical file + span. The cross-package hop matches on (defining file, kind, name text)
     // the temporary symbol identity until compiler-API symbol ids exist.
     fn collect_refs(self: &mut Self, r0: usize, d: astn::DefId, include_decl: bool, out: &mut Vector<RefHit>) {
-        self.hydrate_refs(r0, d);
+        analysis::hydrate_refs(&mut self.roots[r0].pkg, d);
         let locs0 = feat::references_of_def(&self.roots.at(r0).pkg, d, include_decl);
         for i in 0..locs0.len() {
             out.push(RefHit { r: r0 as u32, m: locs0.at(i).module, s: locs0.at(i).start, e: locs0.at(i).end });
@@ -2060,7 +2041,7 @@ extend Server {
                 continue;
             }
             let d2 = astn::DefId { module: m2 as astn::ModuleId, node: dn };
-            self.hydrate_refs(r2, d2);
+            analysis::hydrate_refs(&mut self.roots[r2].pkg, d2);
             let locs = feat::references_of_def(&self.roots.at(r2).pkg, d2, include_decl);
             for i in 0..locs.len() {
                 out.push(RefHit { r: r2 as u32, m: locs.at(i).module, s: locs.at(i).start, e: locs.at(i).end });
@@ -2169,7 +2150,7 @@ extend Server {
         if let Some(params) = req.value("params") {
             new_name = params.value_str("newName");
         }
-        if !valid_ident(new_name) {
+        if !feat::valid_ident(new_name) {
             send_error(f, req.at_key("id"), -32803, "the new name is not a valid identifier");
             return;
         }
@@ -2992,7 +2973,7 @@ extend Server {
     fn diag_echo(self: &Self, r: usize, m: usize, k: usize, ls: &Vector<u32>) json::JSON {
         let src = self.roots.at(r).pkg.modules.at(m).source.as_str();
         let d = self.roots.at(r).diags.at(k);
-        let dj = diag_json(range_json(src, ls, d.start, d.len), d.severity, "super-c", d.msg.as_str());
+        let dj = diag_json(range_json(src, ls, d.start, d.len), d.severity, d.code, "super-c", d.msg.as_str());
         let mut dl = json::JSON::array();
         dl.push_back(dj);
         return dl;

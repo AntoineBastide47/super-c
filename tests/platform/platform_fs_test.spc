@@ -332,9 +332,7 @@ fn links_resolve_and_report_their_text(fx: &mut Fx) {
     let r = fs::realpath(target.as_str()).unwrap();
     assert(path::is_absolute(r.as_str()));
     assert(r.ends_with("/target"));
-    if PLATFORM != Platform::Windows {
-        assert(fs::realpath(l.as_str()).unwrap().equals(&r));
-    }
+    assert(fs::realpath(l.as_str()).unwrap().equals(&r));
     // A dangling link still has its text.
     let dangling = fx.s.at("dangling");
     fs::symlink("nowhere", dangling.as_str()).unwrap();

@@ -7,6 +7,8 @@ import stdio;
 import atomic;
 import driver_shim as shim;
 import std::platform::fs;
+import std::platform::clock;
+import std::parallel::task as ptask;
 import lexer::token as tok;
 import lexer::lexer as lexer;
 import lexer::token_type as tt;
@@ -23,6 +25,7 @@ import utils::persist as *;
 import driver::util as dutil;
 import emit::rt_h as rth;
 import utils::errors as errs;
+import build_system::manifest as bman;
 
 /// Number of nominal builtin types; sizes Package.builtin_decls. Pinned to BuiltinType::BT_COUNT.
 pub(package) const BT_COUNT_N: usize = BuiltinType::BT_COUNT as usize;
@@ -244,8 +247,12 @@ pub(package) struct Package {
     pub(package) lib_build: bool,
     /// The `vendor/<name>` packages in load order: `Module.pkg` is `PKG_VENDOR` plus the index.
     pub(package) vendors: Vector<String>,
+    /// Per vendored package, its own `build.toml` sets `std_internals = true`.
+    pub(package) vendor_std: Vector<bool>,
     pub(package) alt_root: String, // optional search root between the project root and std (manifest src/ dir)
     pub(package) ok: bool, // false if any read/parse/cycle error was reported during loading
+    /// The load errors, as diagnostics of the modules that import (`LoadError`).
+    pub(package) load_errors: Vector<LoadError>,
     /// Builtins as nominal types: a synthetic decl per builtin is injected into the `core` prelude module so
     /// `extend i32 { .. }` resolves and dispatches like any other type. `core_seeded` gates it.
     pub(package) core_module: ModuleId,
@@ -397,6 +404,12 @@ pub(package) struct Package {
     /// functions join the unused-item candidates instead of rooting the reachability graph. Set only
     /// for whole-program lints of manifests without a [lib] target (and for script builds).
     pub(package) lint_pub: bool,
+    /// A compile asked for its program's LIR (an API client's): emission lowers every body to LIR, as under
+    /// `SC_LIR=1`, and leaves the checked package's text form here. Null otherwise.
+    pub(package) lir_out: *mut String,
+    /// An analysis that keeps the body syntax of every module outside std and `ffi/` between rounds (an API
+    /// session's), where the language server keeps only its open documents'.
+    pub(package) keep_bodies: bool,
     /// In-memory source overlays (the LSP's open editor buffers): a module whose file resolves to
     /// overlay_files[i] loads overlay_texts[i] instead of the on-disk bytes. Parallel vectors, canonical
     /// (realpath'd) absolute paths preferred: overlay_index falls back to a raw compare for files not on
@@ -1235,8 +1248,109 @@ extend ReachScan {
 
 // Path + string helpers (heap-allocated results; callers own them).
 
+/// A file system the loader reads in place of the host's on one thread (`set_files`): an API session's
+/// file provider. `read` puts the bytes of file `path` into `out` and is true, false when `path` is no
+/// file; `list` pushes the names directly in directory `dir` into `out` and is true, false when `dir` is no
+/// directory.
+pub(package) struct FileSource {
+    pub(package) ctx: *mut void,
+    pub(package) read: fn(*mut void, str, &mut String) bool,
+    pub(package) list: fn(*mut void, str, &mut Vector<String>) bool,
+}
+
+// The calling thread's file source, null for the host's files. Loads with one stay serial: a parse task on
+// another thread would not see it.
+@thread_local
+static mut G_FILES: *const FileSource = null;
+
+/// Read files through `fs` on the calling thread until `set_files(null)`; `fs` must stay valid until then.
+pub(package) fn set_files(fs: *const FileSource) {
+    unsafe G_FILES = fs;
+}
+
+/// Whether the calling thread reads files through a `FileSource`.
+pub(package) fn files_set() bool {
+    return unsafe G_FILES != null;
+}
+
+/// A load error: the module that names the failing import (-1: none, the root itself), where the import is
+/// written in it (`IMPORT_OFF_NONE`: no import), and the message.
+pub(package) struct LoadError {
+    pub(package) module: i32,
+    pub(package) off: u32,
+    pub(package) msg: String,
+}
+
+/// The offset of no import: a load error of a whole module.
+pub(package) const IMPORT_OFF_NONE: u32 = 0xFFFFFFFF;
+
+// The calling thread's load log, null to print load errors to stderr.
+@thread_local
+static mut G_LOAD_LOG: *mut String = null;
+
+/// Append the load errors of the calling thread (a module that does not read, an import that does not
+/// resolve) to `log` until `set_load_log(null)`, in place of printing them; `log` must stay valid until then.
+pub(package) fn set_load_log(log: *mut String) {
+    unsafe G_LOAD_LOG = log;
+}
+
+// Report load errors `msg`: into the thread's load log, else to stderr.
+fn load_error(msg: &String) {
+    let log = unsafe G_LOAD_LOG;
+    if log != null {
+        unsafe (*log).push_string(msg);
+    } else {
+        msg.eprint();
+    }
+}
+
+/// The cancellation of the API request whose analysis runs on one thread (`set_stop`): its token (null:
+/// none) and its monotonic deadline in ns (0: none). `stopped` records that a poll saw it: the analysis
+/// ended early and its package is incomplete.
+pub(package) struct StopReq {
+    pub(package) tok: *const ptask::CancelToken,
+    pub(package) deadline: u64,
+    pub(package) stopped: bool,
+}
+
+// The calling thread's request cancellation, null outside an API request.
+@thread_local
+static mut G_STOP: *mut StopReq = null;
+
+/// Poll `req` from the analysis on the calling thread until `set_stop(null)`; `req` must stay valid
+/// until then.
+pub(package) fn set_stop(req: *mut StopReq) {
+    unsafe G_STOP = req;
+}
+
+/// Whether the API request that runs the analysis on this thread asked it to stop: its token cancelled
+/// or its deadline passed. False outside a request. Polled between items and modules, and every 65536
+/// steps of a constant evaluation.
+pub(package) fn stop_now() bool {
+    let r = unsafe G_STOP;
+    if r == null {
+        return false;
+    }
+    return unsafe (*r).stopped || unsafe (*r).tok != null && unsafe (*(*r).tok).is_cancelled() || unsafe (*r).deadline != 0 && clock::monotonic_ns() >= unsafe (*r).deadline;
+}
+
+/// `stop_now`, recorded in the request when true: the analysis that polls ends early.
+pub(package) fn poll_stop() bool {
+    if !stop_now() {
+        return false;
+    }
+    let r = unsafe G_STOP;
+    unsafe (*r).stopped = true;
+    return true;
+}
+
 // True if `path` names something that can be opened for reading (replaces access(path, F_OK)).
 fn path_exists(path: str) bool {
+    let fsrc = unsafe G_FILES;
+    if fsrc != null {
+        let mut t = String::new();
+        return unsafe (*fsrc).read((*fsrc).ctx, path, &mut t);
+    }
     let f = stdio::fopen(path, "rb");
     if f == null {
         return false;
@@ -1256,6 +1370,16 @@ pub(package) fn read_file(path: str) Option<String> {
 /// `read_file`, and the file's mtime (`dutil::file_mtime`) into `mt` from the fstat taken before the read: a
 /// later edit changes the mtime, so the pair vouches for the content read.
 pub(package) fn read_file_mt(path: str, mt: &mut i64) Option<String> {
+    let fsrc = unsafe G_FILES;
+    if fsrc != null {
+        let mut t = String::new();
+        if !unsafe (*fsrc).read((*fsrc).ctx, path, &mut t) {
+            return Option::<String>::None;
+        }
+        *mt = 0;
+        t.pad_nul(lexer::SOURCE_PAD);
+        return Option::<String>::Some(t);
+    }
     let opened = fs::open(path, fs::OpenOptions { read: true });
     if opened.is_err() {
         return Option::<String>::None;
@@ -1556,6 +1680,14 @@ pub(package) const DIR_UNREAD: u8 = 2;
 /// The entry names of `dir`, sorted, into `names`, and whether it listed (`DIR_LISTED`, `DIR_ABSENT`,
 /// `DIR_UNREAD`). What `DirCache` answers from, and what the prelude image checks its directories against.
 pub(package) fn dir_listing(dir: str, names: &mut Vector<String>) u8 {
+    let fsrc = unsafe G_FILES;
+    if fsrc != null {
+        if !unsafe (*fsrc).list((*fsrc).ctx, dir, names) {
+            return DIR_ABSENT;
+        }
+        names.sort();
+        return DIR_LISTED;
+    }
     let opened = fs::read_dir(dir);
     if opened.is_err() {
         if opened.unwrap_err().kind == IoErrorKind::NotFound {
@@ -1570,6 +1702,100 @@ pub(package) fn dir_listing(dir: str, names: &mut Vector<String>) u8 {
     }
     names.sort();
     return DIR_LISTED;
+}
+
+/// The vendored package of module `path` read from `file`: the directory `vendor/<name>` that holds the
+/// file and the module path prefix `vendor::<name>::`; both empty for a module outside `vendor/`.
+pub(package) fn vendor_root(path: str, file: str) (String, String) {
+    if !path.starts_with("vendor::") {
+        return String::new(), String::new();
+    }
+    let rest = path.slice(8, path.len());
+    let f = rest.find("::");
+    if f <= 0 {
+        return String::new(), String::new();
+    }
+    let name = rest.slice(0, f as usize);
+    let mut key = String::from_str("vendor/");
+    key.push_str(name);
+    key.push_byte(b'/');
+    let mut base = String::new();
+    if file.starts_with(key.as_str()) {
+        base.push_str(key.as_str().slice(0, key.len() - 1));
+    } else {
+        let mut sk = String::from_str("/");
+        sk.push_str(key.as_str());
+        let at = file.find(sk.as_str());
+        if at < 0 {
+            return String::new(), String::new();
+        }
+        base.push_str(file.slice(0, at as usize + sk.len() - 1));
+    }
+    let mut prefix = String::from_str("vendor::");
+    prefix.push_str(name);
+    prefix.push_str("::");
+    return base, prefix;
+}
+
+// Whether the `build.toml` of vendored package directory `vbase` sets `std_internals = true`. Read as a
+// bootstrap build reads a manifest, so a key of a newer compiler does not fail it.
+fn vendor_std_internals(vbase: str) bool {
+    if vbase.is_empty() {
+        return false;
+    }
+    let mp = join2(vbase, "build.toml");
+    let mut mt: i64 = 0;
+    let t = read_file_mt(mp.as_str(), &mut mt);
+    if t.is_none() {
+        return false;
+    }
+    let src = t.unwrap();
+    let (m, _) = bman::parse_check(src.as_str(), "", true);
+    return m.is_some() && m.unwrap().std_internals;
+}
+
+// An import of a module in vendored package directory `vbase` (module path prefix `vprefix`): the package
+// resolves its own imports against `vbase` and `vbase/src`, before the importing project's roots, so a
+// vendored project's modules import each other by the paths they use at home. `std::` imports keep the
+// std root. True with `path` (the module's path under the package prefix) and `file` set when one of
+// the two roots holds the module.
+fn vendor_import(
+    dc: &mut DirCache,
+    vbase: str,
+    vprefix: str,
+    ast: &Ast,
+    src: str,
+    parts: NodeList,
+    path: &mut String,
+    file: &mut String,
+) bool {
+    let cp = join_parts(ast, src, parts, "::");
+    if cp.as_str() == "std" || cp.as_str().starts_with("std::") {
+        return false;
+    }
+    let src_base = join2(vbase, "src");
+    for (base, pre) in [(vbase, ""), (src_base.as_str(), "src::")] {
+        let f = module_file_path(base, ast, src, parts);
+        let i = module_index_path(base, ast, src, parts);
+        let mut d = String::new();
+        if dc.exists(f.as_str()) {
+            *file = f;
+        } else if dc.exists(i.as_str()) {
+            *file = i;
+        } else if dc.listed(f.as_str().slice(0, f.len() - 4)) {
+            d.push_str(f.as_str().slice(0, f.len() - 4));
+            d.push_byte(b'/');
+            *file = d;
+        } else {
+            continue;
+        }
+        let mut mp = String::from_str(vprefix);
+        mp.push_str(pre);
+        mp.push_str(cp.as_str());
+        *path = mp;
+        return true;
+    }
+    return false;
 }
 
 // Resolve an import's file by searching the project root first, then the std root (so `import std::x;`
@@ -1829,7 +2055,6 @@ struct PDone {
 // One module on the serial loader's depth-first stack: its unloaded imports and the next to load.
 // The offset of an import a keyword implies (`launch`, `select`, `parallel for`, `@blocking`): it is
 // written nowhere.
-const IMPORT_OFF_NONE: u32 = 0xFFFFFFFF;
 
 struct LoadFrame {
     pub(package) owner: i32, // the importing module
@@ -2708,7 +2933,7 @@ extend Package {
     /// starts when loading is serial or the root names a loaded module.
     pub(package) fn spec_user(self: &Self, q: &Package, root_file: str, target: i32) Box<UserSpec> {
         let rp = stem_of(root_file);
-        if unsafe G_LOAD_JOBS == 1 || self.overlay_files.len() != 0 || q.find(rp.as_str()) >= 0 {
+        if unsafe G_LOAD_JOBS == 1 || self.overlay_files.len() != 0 || files_set() || q.find(rp.as_str()) >= 0 {
             return UserSpec::new();
         }
         let mut s = Box::<UserSpec>::new(
@@ -5120,6 +5345,31 @@ extend Package {
         return -1;
     }
 
+    /// The module that module path `path` names in module `from`: `find(path)`, except that a module of a
+    /// vendored package names its package's own modules by their paths at home, as the loader resolved
+    /// its imports (`vendor_import`): `vendor::<name>::<path>`, then `vendor::<name>::src::<path>`.
+    pub(package) fn find_in(self: &Self, from: ModuleId, path: str) i32 {
+        if from as usize >= self.modules.len() || self.modules[from as usize].pkg < PKG_VENDOR || path == "std" || path.starts_with(
+            "std::",
+        ) {
+            return self.find(path);
+        }
+        let name = self.vendors[(self.modules[from as usize].pkg - PKG_VENDOR) as usize].as_str();
+        for pre in ["", "src::"] {
+            let mut vp = String::with_capacity(path.len() + name.len() + 16);
+            vp.push_str("vendor::");
+            vp.push_str(name);
+            vp.push_str("::");
+            vp.push_str(pre);
+            vp.push_str(path);
+            let m = self.find(vp.as_str());
+            if m >= 0 {
+                return m;
+            }
+        }
+        return self.find(path);
+    }
+
     // `find`, or the prelude module of `file` when a `std::` path names it: recorded as an alias.
     fn find_file(self: &mut Self, path: str, file: str) i32 {
         let ex = self.find(path);
@@ -5238,6 +5488,8 @@ extend Package {
             }
             if k == self.vendors.len() {
                 self.vendors.push(String::from_str(name));
+                let (vb, _) = vendor_root(path, file);
+                self.vendor_std.push(vendor_std_internals(vb.as_str()));
             }
             pkg = PKG_VENDOR + k as u16;
         } else if !self.std_root.is_empty() && file.starts_with(self.std_root.as_str()) && file.slice(
@@ -5289,7 +5541,7 @@ extend Package {
             PKG_PROJECT;
         };
         if vis == VIS_PACKAGE {
-            return fpkg == o.pkg || o.pkg == PKG_STD && fpkg == PKG_PROJECT && self.std_internals;
+            return fpkg == o.pkg || o.pkg == PKG_STD && (fpkg == PKG_PROJECT && self.std_internals || fpkg >= PKG_VENDOR && self.vendor_std[(fpkg - PKG_VENDOR) as usize]);
         }
         if vis < VIS_MODULE || fpkg != o.pkg {
             return false;
@@ -5404,8 +5656,12 @@ extend Package {
         };
         let ap = (&self.modules.at(id as usize).ast) as *const Ast;
         let src = self.modules.at(id as usize).source.as_str();
+        let mp = self.modules.at(id as usize).path.as_str();
+        let mf = self.modules.at(id as usize).file.as_str();
         let mut log = String::new();
         self.collect_imports(
+            mp,
+            mf,
             unsafe &*ap,
             src,
             &mut dc,
@@ -5417,14 +5673,23 @@ extend Package {
             &mut log,
         );
         self.dir_cache = dc;
-        self.print_log(&log);
+        self.print_log(id, &log);
         return f;
     }
 
-    // Print the import errors `log` of a module as it gets its id; any clears `ok`.
-    fn print_log(self: &mut Self, log: &String) {
+    // Report the import errors `log` of module `id` as it gets its id, one `error: ` line each; any clears
+    // `ok`.
+    fn print_log(self: &mut Self, id: i32, log: &String) {
         if log.len() != 0 {
-            log.eprint();
+            load_error(log);
+            for line in log.as_str().lines() {
+                let msg = if line.starts_with("error: ") {
+                    line.slice(7, line.len());
+                } else {
+                    line;
+                };
+                self.load_errors.push(LoadError { module: id, off: IMPORT_OFF_NONE, msg: String::from_str(msg) });
+            }
             self.ok = false;
         }
     }
@@ -5441,6 +5706,8 @@ extend Package {
     // the call.
     fn collect_imports(
         self: &Self,
+        from_path: str,
+        from_file: str,
         a: &Ast,
         src: str,
         dc: &mut DirCache,
@@ -5454,6 +5721,7 @@ extend Package {
         let root_dir = self.root_dir.as_str();
         let alt_root = self.alt_root.as_str();
         let std_root = self.std_root.as_str();
+        let (vbase, vprefix) = vendor_root(from_path, from_file);
         let items = a.at_const(a.root).as_data.program.items;
         let ids = a.list(items);
         for i in 0..items.len {
@@ -5471,16 +5739,25 @@ extend Package {
                     continue;
                 }
                 let parts = n.as_data.import_decl.path;
-                let cp = join_parts(a, src, parts, "::");
+                let mut cp = join_parts(a, src, parts, "::");
+                let mut vfile = String::new();
+                if !vbase.is_empty() {
+                    let mut vp = String::new();
+                    if vendor_import(dc, vbase.as_str(), vprefix.as_str(), a, src, parts, &mut vp, &mut vfile) {
+                        cp = vp;
+                    }
+                }
                 let found = self.find(cp.as_str());
                 if found >= 0 {
-                    if found as u32 < self.root_module {
+                    if found as u32 < self.root_module && vfile.is_empty() {
                         self.std_shadowed(dc, a, src, parts, found as usize, log);
                     }
                     continue;
                 }
                 let u = queued.find(cp.as_str());
-                if u < queued.units.len() && queued.units.at(u).resolved {
+                if !vfile.is_empty() {
+                    child_files.push(vfile);
+                } else if u < queued.units.len() && queued.units.at(u).resolved {
                     child_files.push(queued.units.at(u).file.clone());
                 } else {
                     child_files.push(resolve_import_file(dc, root_dir, alt_root, std_root, a, src, parts));
@@ -5540,7 +5817,7 @@ extend Package {
     /// Load `file_path` as module `mod_path` with its whole import closure (parallel when load jobs
     /// are set and no overlays are active). Returns the module's id, or -1 when the root is unreadable.
     pub(package) fn load_module(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool, target: i32) i32 {
-        if unsafe G_LOAD_JOBS != 1 && self.overlay_files.len() == 0 {
+        if unsafe G_LOAD_JOBS != 1 && self.overlay_files.len() == 0 && !files_set() {
             return self.load_module_par(mod_path, file_path, bootstrap_tags, target);
         }
         return self.load_module_serial(mod_path, file_path, -1, IMPORT_OFF_NONE, bootstrap_tags, target);
@@ -5612,11 +5889,15 @@ extend Package {
                 }
                 let ap = (&us.units.at(k).ast) as *const Ast;
                 let sp2 = us.units.at(k).source.as_str();
+                let up = us.units.at(k).path.as_str();
+                let uf = us.units.at(k).file.as_str();
                 let mut all_paths = Vector::<String>::new();
                 let mut all_files = Vector::<String>::new();
                 let mut all_offs = Vector::<u32>::new();
                 let mut log = String::new();
                 self.collect_imports(
+                    up,
+                    uf,
                     unsafe &*ap,
                     sp2,
                     &mut dc,
@@ -5728,7 +6009,7 @@ extend Package {
         );
         self.modules[id as usize].ast.module = id as ModuleId;
         let log = replace(&mut us.units.index_mut(ui).log, String::new());
-        self.print_log(&log);
+        self.print_log(id, &log);
         *expand = true;
         return id;
     }
@@ -5758,6 +6039,10 @@ extend Package {
         let mut stack = Vector::<LoadFrame>::new();
         stack.push(self.import_frame(root, target));
         while stack.len() != 0 {
+            if poll_stop() {
+                // An API request stopped the analysis: its package is dropped.
+                return root;
+            }
             let top = stack.len() - 1;
             let k = stack.at(top).next;
             if k == stack.at(top).paths.len() {
@@ -5772,7 +6057,7 @@ extend Package {
             if self.find_file(cp.as_str(), cf.as_str()) >= 0 {
                 continue;
             }
-            if unsafe G_LOAD_JOBS != 1 && self.overlay_files.len() == 0 {
+            if unsafe G_LOAD_JOBS != 1 && self.overlay_files.len() == 0 && !files_set() {
                 // A unit the parallel replay handed back (it failed to parse): its imports return to the
                 // parallel loader, as load_module routes them.
                 let _ = self.load_module_par(cp.as_str(), cf.as_str(), bootstrap_tags, target);
@@ -5818,7 +6103,14 @@ extend Package {
                         msg.push_str(": ");
                     }
                     msg.format_into("error: cannot open module '{}' ({})\n", mod_path, file_path);
-                    msg.eprint();
+                    load_error(&msg);
+                    self.load_errors.push(
+                        LoadError {
+                            module: from,
+                            off: off,
+                            msg: format("cannot open module '{}' ({})", mod_path, file_path),
+                        },
+                    );
                     self.ok = false;
                     return -1;
                 },
@@ -6958,7 +7250,7 @@ extend Package {
             let n = ast.at_const(nid);
             if n.kind == NodeKind::NODE_IMPORT {
                 let path = join_parts(ast, src, n.as_data.import_decl.path, "::");
-                let c = self.find(path.as_str());
+                let c = self.find_in(mid, path.as_str());
                 if c >= 0 {
                     let mut dup = false;
                     let from = idx.mod_imports[m];
@@ -7565,7 +7857,7 @@ extend Package {
         // sufficient.
         let m0 = self.modules.len();
         // With parallel loading every file parses in one wave, then each takes its id in name order.
-        let par = unsafe G_LOAD_JOBS != 1 && self.overlay_files.len() == 0;
+        let par = unsafe G_LOAD_JOBS != 1 && self.overlay_files.len() == 0 && !files_set();
         let mut us = PUnits {};
         for k in 0..names.len() {
             let file = join2(std_dir, names[k].as_str());

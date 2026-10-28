@@ -27,8 +27,10 @@ pub(package) struct LintFix {
     pub(package) module: u32, // owning ModuleId, stamped when fixes drain into the driver's shared vector (0 inside Errors)
 }
 
-/// One structured diagnostic. The span is bytes into the owning source buffer.
+/// One structured diagnostic. The span is bytes into the owning source buffer; `code` is its stable
+/// `utils::diag_codes` code.
 pub(package) struct Diagnostic {
+    pub(package) code: u16,
     pub(package) start: u32,
     pub(package) len: u32,
     pub(package) msg: String,
@@ -54,9 +56,9 @@ pub(package) struct Errors {
     pub(package) fix_texts: Vector<String>, // generated replacement payloads for kind-4 fixes
 }
 
-// A diagnostic at [at, at+len) with no notes.
-const fn diagnostic(at: u32, len: u32, msg: String) Diagnostic {
-    return Diagnostic { start: at, len: len, msg: msg, note_head: NOTE_NONE, note_tail: NOTE_NONE };
+// A diagnostic of `code` at [at, at+len) with no notes.
+const fn diagnostic(code: u16, at: u32, len: u32, msg: String) Diagnostic {
+    return Diagnostic { code: code, start: at, len: len, msg: msg, note_head: NOTE_NONE, note_tail: NOTE_NONE };
 }
 
 // A note link of an appended container, shifted by the `nb` notes already in the pool.
@@ -77,6 +79,7 @@ fn append_diags(dst: &mut Vector<Diagnostic>, src: &mut Vector<Diagnostic>, nb: 
         let d = src.index_mut(k);
         dst.push(
             Diagnostic {
+                code: d.code,
                 start: d.start,
                 len: d.len,
                 msg: replace(&mut d.msg, String::new()),
@@ -108,19 +111,20 @@ extend Errors {
         return self.warns.len() != 0;
     }
 
-    /// Record a non-fatal warning at [at, at+len). Takes ownership of `msg`; drops it past ERRORS_MAX.
+    /// Record a non-fatal warning of `code` at [at, at+len). Takes ownership of `msg`; drops it past
+    /// ERRORS_MAX.
     @cold
-    pub(package) fn warn(self: &mut Self, at: u32, len: u32, msg: String) {
+    pub(package) fn warn(self: &mut Self, code: u16, at: u32, len: u32, msg: String) {
         if self.warns.len() >= ERRORS_MAX {
             return;
         }
-        self.warns.push(diagnostic(at, len, msg));
+        self.warns.push(diagnostic(code, at, len, msg));
     }
 
     /// `warn` over the source span `sp`.
     @cold
-    pub(package) fn warn_span(self: &mut Self, sp: tok::Span, msg: String) {
-        self.warn(sp.start, sp.end - sp.start, msg);
+    pub(package) fn warn_span(self: &mut Self, code: u16, sp: tok::Span, msg: String) {
+        self.warn(code, sp.start, sp.end - sp.start, msg);
     }
 
     /// Move every record of `o` (an item's diagnostics) to the end of this container, in `o`'s
@@ -181,31 +185,31 @@ extend Errors {
         self.fixes.push(LintFix { start: start, end: end, kind: 4, warn: self.last_warn(), text: t });
     }
 
-    /// Record a diagnostic (an already-formatted message, built with `format(...)`) at the source span
-    /// [at, at+len). Takes ownership of `msg` (freed here if the message cap is hit).
+    /// Record an error of `code` (an already-formatted message, built with `format(...)`) at the source
+    /// span [at, at+len). Takes ownership of `msg` (freed here if the message cap is hit).
     @cold
-    pub(package) fn emit(self: &mut Self, at: u32, len: u32, msg: String) {
+    pub(package) fn emit(self: &mut Self, code: u16, at: u32, len: u32, msg: String) {
         if self.errors.len() >= ERRORS_MAX {
             return;
         }
-        self.errors.push(diagnostic(at, len, msg));
+        self.errors.push(diagnostic(code, at, len, msg));
     }
 
     /// `emit` over the source span `sp`.
     @cold
-    pub(package) fn emit_span(self: &mut Self, sp: tok::Span, msg: String) {
-        self.emit(sp.start, sp.end - sp.start, msg);
+    pub(package) fn emit_span(self: &mut Self, code: u16, sp: tok::Span, msg: String) {
+        self.emit(code, sp.start, sp.end - sp.start, msg);
     }
 
     /// `emit_span` of the first line of `msg`; the text after its line feed, if any, is a note.
     @cold
-    pub(package) fn emit_span_note(self: &mut Self, sp: tok::Span, msg: String) {
+    pub(package) fn emit_span_note(self: &mut Self, code: u16, sp: tok::Span, msg: String) {
         let cut = msg.as_str().find_byte(b'\n');
         if cut < 0 {
-            self.emit_span(sp, msg);
+            self.emit_span(code, sp, msg);
             return;
         }
-        self.emit_span(sp, String::from_str(msg.as_str().slice(0, cut as usize)));
+        self.emit_span(code, sp, String::from_str(msg.as_str().slice(0, cut as usize)));
         self.note(String::from_str(msg.as_str().slice(cut as usize + 1, msg.len())));
     }
 
@@ -215,7 +219,7 @@ extend Errors {
     /// whose span starts after `at`, so it lands where a reader expects it instead of after every other
     /// diagnostic in the function. Diagnostics already recorded keep their relative order. Returns the index it landed at, for `note_at`.
     @cold
-    pub(package) fn emit_ordered(self: &mut Self, from: usize, at: u32, len: u32, msg: String) usize {
+    pub(package) fn emit_ordered(self: &mut Self, code: u16, from: usize, at: u32, len: u32, msg: String) usize {
         if self.errors.len() >= ERRORS_MAX {
             return ERRORS_MAX;
         }
@@ -228,7 +232,7 @@ extend Errors {
         while k < n && self.errors[k].start <= at {
             k = k + 1;
         }
-        self.errors.insert(k, diagnostic(at, len, msg));
+        self.errors.insert(k, diagnostic(code, at, len, msg));
         return k;
     }
 
@@ -307,6 +311,7 @@ extend Errors {
                 let d = self.errors.index_mut(k);
                 uniq.push(
                     Diagnostic {
+                        code: d.code,
                         start: d.start,
                         len: d.len,
                         msg: replace(&mut d.msg, String::new()),

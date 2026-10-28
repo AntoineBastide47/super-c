@@ -3,6 +3,8 @@
 // URIs and byte spans to LSP ranges. Queries read the semantic tables the typechecker left on each
 // module's Ast (`types`, `resolutions`); nothing here mutates the package.
 import lexer::token as tok;
+import lexer::lexer as lex;
+import lexer::token_type as ltt;
 import ast::ast as *;
 import module::loader as loader;
 import target::table as tgt;
@@ -156,10 +158,10 @@ pub(package) fn def_at(p: &loader::Package, mi: usize, off: u32) DefId {
     return DefId { module: 0, node: NODE_NONE };
 }
 
-// def_at, where an operator (`+`, a unary `-`, the brackets of `v[i]`) names the method the checker
-// chose for it. The operator node is the innermost node only off its operands. Rename and references
+/// def_at, where an operator (`+`, a unary `-`, the brackets of `v[i]`) names the method the checker
+/// chose for it. The operator node is the innermost node only off its operands. Rename and references
 // keep def_at: an operator site does not spell the method's name.
-fn target_at(p: &loader::Package, mi: usize, off: u32) DefId {
+pub(package) fn target_at(p: &loader::Package, mi: usize, off: u32) DefId {
     let a = mod_ast(p, mi);
     let id = node_at(a, off);
     if id != NODE_NONE {
@@ -173,9 +175,9 @@ fn target_at(p: &loader::Package, mi: usize, off: u32) DefId {
     return def_at(p, mi, off);
 }
 
-// Trimmed source slice of a declaration's head: a function up to its body, a type up to its name, a
-// binding up to its type: capped so hover stays a one-liner-ish.
-fn decl_signature(p: &loader::Package, d: DefId) String {
+/// Trimmed source slice of a declaration's head: a function up to its body, a type up to its name, a
+/// binding up to its type: capped so hover stays a one-liner-ish.
+pub(package) fn decl_signature(p: &loader::Package, d: DefId) String {
     let da = mod_ast(p, d.module as usize);
     let src = p.modules.at(d.module as usize).source.as_str();
     let n = unsafe (*da).at_const(d.node);
@@ -253,10 +255,10 @@ const fn next_line_start(src: str, le: usize) usize {
     return le + 1;
 }
 
-// The contiguous `//`/`///` comment block sitting directly above the declaration (attribute lines
-// between the comments and the item are skipped): the item's documentation. Comments are lexer
+/// The contiguous `//`/`///` comment block sitting directly above the declaration (attribute lines
+/// between the comments and the item are skipped): the item's documentation. Comments are lexer
 // trivia, dropped before the AST, so hover recovers them straight from the defining module's source.
-fn decl_doc(p: &loader::Package, d: DefId) String {
+pub(package) fn decl_doc(p: &loader::Package, d: DefId) String {
     let da = mod_ast(p, d.module as usize);
     let src = p.modules.at(d.module as usize).source.as_str();
     let sp = unsafe (*da).at_const(d.node).span;
@@ -943,7 +945,7 @@ fn qualifier_tokens(p: &loader::Package, a: *const Ast, mi: usize, i: NodeId, ou
             prefix.push_str("::");
         }
         prefix.push_str(name_str(p, mi, sg));
-        if unsafe (*a).resolution_def(sg).node == NODE_NONE && (p.find(prefix.as_str()) >= 0 || k == 0 && import_binds(
+        if unsafe (*a).resolution_def(sg).node == NODE_NONE && (p.find_in(mi as ModuleId, prefix.as_str()) >= 0 || k == 0 && import_binds(
             p,
             a,
             mi,
@@ -1311,7 +1313,7 @@ pub(package) fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector
                     }
                     mp.push_str(name_str(p, od.module as usize, unsafe (*oa).list(parts)[i as usize]));
                 }
-                let mid = p.find(mp.as_str());
+                let mid = p.find_in(od.module, mp.as_str());
                 if mid >= 0 {
                     comp_module_publics(p, mi, mid as usize, &mut out);
                 }
@@ -1617,7 +1619,7 @@ pub(package) fn complete_interfaces(p: &loader::Package, mi: usize) Vector<CompI
             unsafe (*a).at_const(iid).as_data.import_decl.path,
             "::",
         );
-        let target = p.find(path.as_str());
+        let target = p.find_in(mi as ModuleId, path.as_str());
         if target >= 0 {
             visible[target as usize] = true;
         }
@@ -1939,7 +1941,7 @@ fn generic_decl_named(p: &loader::Package, mi: usize, qual: str, name: str) DefI
                 continue;
             }
             let path = loader::join_parts(unsafe &*a, p.modules.at(mi).source.as_str(), parts, "::");
-            let target = p.find(path.as_str());
+            let target = p.find_in(mi as ModuleId, path.as_str());
             if target >= 0 {
                 mods.push(target as usize);
             }
@@ -3132,4 +3134,19 @@ pub(package) fn extend_relations(p: &loader::Package, d: DefId, up: bool) Vector
         }
     }
     return out;
+}
+
+/// The new name must lex as exactly one identifier (rejects keywords, operators, spaces).
+pub(package) fn valid_ident(nm: str) bool {
+    if nm.len() == 0 {
+        return false;
+    }
+    let mut s = String::from_str(nm);
+    let mut lx = lex::Lexer::new(&mut s, "<rename>");
+    lx.scan_tokens();
+    if lx.has_errors() {
+        return false;
+    }
+    let toks = lx.take_tokens();
+    return toks.len() == 2 && toks.at(0).kind() == ltt::TokenType::Identifier;
 }

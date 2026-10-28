@@ -4,6 +4,7 @@
 // string values. No floats, dates, multiline strings, nested arrays, or arrays of tables: the
 // manifest schema needs none of them and full TOML is not a goal.
 import utils::errors as diag;
+import utils::diag_codes as dc;
 
 /// Value kinds (TomlVal.kind).
 pub(package) const TV_STR: u8 = 0;
@@ -105,7 +106,7 @@ extend Parser {
     }
 
     fn err(self: &mut Self, at: usize, msg: String) {
-        self.errors.emit(at as u32, 1, msg);
+        self.errors.emit(dc::MANIFEST_SYNTAX_ERROR, at as u32, 1, msg);
         // Resync to the next line so one typo yields one diagnostic.
         while !self.at_end() && self.peek() != b'\n' {
             self.i = self.i + 1;

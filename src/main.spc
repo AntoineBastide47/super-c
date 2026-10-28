@@ -24,96 +24,11 @@ import build_system::build as bsys;
 import build_system::objcache as ocache;
 import lsp::server as lsp_srv;
 import bindgen::bindgen as bindgen;
+import api::protocol as pr;
+import api::server as tsrv;
 import driver::taskctl as tctl;
+import driver::script as script;
 import ir::cpu_features as cf;
-
-fn run_file(
-    path: str,
-    std_dir: str,
-    ce_steps: u32,
-    ce_mem: u64,
-    topts: *const TestOpts,
-    out_bin: str,
-    target: i32,
-    arch: i32,
-    features: cf::CpuFeatureSet,
-    simd_width: u32,
-    simd_dispatch: str,
-    bootstrap_tags: bool,
-    lint: bool,
-    jobs: u32,
-    out_dir: str,
-    sysroot: str,
-    profile: str,
-    co: &CommonOpts,
-) i32 {
-    loader::set_load_jobs(jobs);
-    let tl0 = ticks_ms();
-    // The build settings the prelude's build constants spell, set before the load.
-    let mut p = loader::package_new(loader::dirname_of(path), "", std_dir);
-    p.arch = arch;
-    p.features = features;
-    p.simd_width = pick(simd_width != 0, simd_width, 256);
-    let mut bi = bman::builtins_only();
-    bi.override_profiles(co.opt, co.cg_on, co.cg_off);
-    p.simd_dispatch = String::from_str(bsys::dispatch_for(&bi, profile, simd_dispatch));
-    bsys::apply_profile(&bi, profile, &mut p);
-    if profile.len() == 0 {
-        bsys::apply_flags(co.opt, co.cg_on, co.cg_off, &mut p);
-    }
-    p.sysroot = String::from_str(sysroot);
-    p.test_build = unsafe (*topts).enabled;
-    p.profile = String::from_str(profile);
-    p.profiles = bsys::profile_names(&bi);
-    p.bootstrap = bootstrap_tags;
-    let mut cirv = iri::interp_master((&mut p) as *mut loader::Package, ce_steps, ce_mem);
-    let cdir = ocache::object_cache_dir("");
-    if prelude_stage(&mut p, &mut cirv, std_dir, path, target, jobs, ce_steps, ce_mem, cdir.as_str()) {
-        p.load_user(path, std_dir, target);
-    }
-    if stdlib::getenv("SC_CEMIT_STATS") != null {
-        eprintln("phase load: {} ms", ticks_ms() - tl0);
-    }
-    loader::set_load_jobs(1);
-    // `--out-dir` applies to a bare build exactly as to a manifest one: the emitted tree goes under the
-    // named directory.
-    if out_dir.len() != 0 {
-        let mut g = String::from_str(out_dir);
-        g.push_byte(b'/');
-        g.push_str(p.profile_name());
-        g.push_str("/raw");
-        p.gen_root = g;
-    }
-    // A standalone script is a binary with no test suite to count as callers: unreachable pub
-    // functions are dead weight. Project trees get this from the whole-workspace lint instead,
-    // where @test roots keep test-only helpers alive.
-    let manf = stdio::fopen("build.toml", "rb");
-    if manf != null {
-        unsafe stdio::fclose(manf);
-    } else {
-        p.lint_pub = lint;
-    }
-    let mut rc: i32 = 1;
-    if !p.ok && jobs != 1 {
-        prt::shutdown(); // parallel loading started the pool; the leak gate needs it gone
-    }
-    if p.ok {
-        p.jobs = p.analysis_jobs(jobs);
-        if p.jobs == 1 && jobs != 1 {
-            prt::shutdown(); // parallel loading may have started the pool
-            // A serial compile hands its slots back.
-            unsafe shim::sc_jobserver_release_claim();
-        }
-        p.cir = &mut cirv;
-        // One process builds a tree at a time, as in a manifest build.
-        default_gen_root(&mut p);
-        let lk = bsys::tree_lock(loader::dirname_of(p.gen_root.as_str()));
-        if lk.held() {
-            rc = run_package(&mut p, topts, out_bin, target, lint, null);
-        }
-    }
-    return rc;
-}
 
 // Parse the one-based K/N used by --test-shard. Both numbers must consume the full argument.
 fn parse_test_shard(s: *const char, topts: &mut TestOpts) bool {
@@ -249,8 +164,8 @@ fn dir_entries(dir: str) Option<Vector<String>> {
     return Option::<Vector<String>>::Some(names);
 }
 
-// `fmt`/`lint` with no path: every top-level entry of the project, minus the build output; it
-// holds the generated .spc roots of `test`/`bench`, which are not project source.
+// `fmt`/`lint` with no path: every top-level entry of the project, minus the build output (it holds the
+// generated .spc roots of `test`/`bench`, which are not project source) and `vendor/`.
 fn project_paths() Vector<String> {
     let mut out = Vector::<String>::new();
     let eo = dir_entries(".");
@@ -274,7 +189,8 @@ fn project_paths() Vector<String> {
     let mut probe = String::new();
     for i in 0..names.len() {
         let n = names.at(i).as_str();
-        if n == skip.as_str() {
+        // `vendor/` holds the packages `super-c vendor` copied in: dependencies, not project source.
+        if n == skip.as_str() || n == "vendor" {
             continue;
         }
         probe.clear();
@@ -346,10 +262,21 @@ fn lint_project(
         // Whole-workspace lint of a lib-less manifest: unreachable pub functions are findings. Listed
         // files load without the modules that import them, so their pub items stay roots there.
         let mut lpub = false;
+        // The project's analyzer and hook modules (`[tools]`): the tool compiler calls their `pub` entries, so
+        // they lint as a batch of their own without the binary-project pub lint.
+        let mut tool_files = Vector::<String>::new();
         let mo = bman::load("build.toml", false);
         if whole && !mo.is_none() {
             let man = mo.unwrap();
             lpub = man.lib_name.len() == 0;
+            tool_files = man.tools.clone();
+            for k in 0..man.hooks.len() {
+                tool_files.push(man.hooks[k].clone());
+            }
+            // `lint-exclude`: directories the whole-project lint skips, nested projects in them included.
+            let ex = &man.lint_exclude;
+            files.retain(|f: &String| !under_any(f.as_str(), ex));
+            nested.retain(|d: &String| !under_any(d.as_str(), ex));
         }
         // A file whose imports a load rooted at the project does not find is a standalone program
         // (`tools/x/main.spc` importing its sibling `util`): its imports resolve beside it, as
@@ -364,10 +291,19 @@ fn lint_project(
             }
         }
         let mut rooted = Vector::<String>::new();
+        let mut tools = Vector::<String>::new();
         let mut alone = Vector::<Vector<String>>::new();
         alone.resize_default(alone_dirs.len());
         for k in 0..files.len() {
             let f = files.at(k).as_str();
+            let mut tool = false;
+            for t in 0..tool_files.len() {
+                tool = tool || same_file(f, tool_files[t].as_str());
+            }
+            if tool {
+                tools.push(String::from_str(f));
+                continue;
+            }
             let mut g = alone_dirs.len();
             for j in 0..alone_dirs.len() {
                 if alone_dirs.at(j).as_str() == loader::dirname_of(f) {
@@ -391,6 +327,20 @@ fn lint_project(
             fix,
             sc,
             lpub,
+        ) != 0 {
+            rc = 1;
+        }
+        if tools.len() != 0 && lint_batch(
+            &tools,
+            ".",
+            lint_alt(),
+            std_dir,
+            co.ce_steps,
+            co.ce_mem,
+            co.target,
+            fix,
+            sc,
+            false,
         ) != 0 {
             rc = 1;
         }
@@ -674,6 +624,24 @@ fn has_manifest(dir: str) bool {
     return fs::stat(man.as_str()).map(|m: fs::Metadata| m.kind != fs::FileKind::Dir).unwrap_or(false);
 }
 
+// Whether `path` (project-relative, `./` allowed) is directory `dirs[k]` or lies under it, for some `k`.
+fn under_any(path: str, dirs: &Vector<String>) bool {
+    let mut p = path;
+    while p.starts_with("./") {
+        p = p.slice(2, p.len());
+    }
+    for k in 0..dirs.len() {
+        let mut d = dirs[k].as_str();
+        while d.ends_with("/") {
+            d = d.slice(0, d.len() - 1);
+        }
+        if p == d || p.starts_with(d) && p.len() > d.len() && p.byte_at(d.len()) == b'/' {
+            return true;
+        }
+    }
+    return false;
+}
+
 // `spc_collect`; with `nested`, a subdirectory holding its own build.toml is another project: its path
 // goes to `nested` and its files are not collected (its imports resolve against itself).
 fn spc_collect_in(dir: str, cmd: str, files: &mut Vector<String>, nested: *mut Vector<String>) i32 {
@@ -875,6 +843,7 @@ enum Mode {
     MODE_INIT, // `super-c init`: scaffold a project in the current directory (cargo init)
     MODE_VENDOR, // `super-c vendor <git-url|dir> [name]`: copy a dependency into vendor/
     MODE_BINDGEN, // `super-c bindgen <header.h>`: C header -> an `extern "C"` module
+    MODE_TOOL_SERVER, // `super-c tool-server --stdio|--socket=P`: the compiler API's process protocol
 }
 
 const fn subcommand(arg: str) Mode {
@@ -1081,6 +1050,7 @@ COMMANDS:
     init                   scaffold a project in the current directory
     vendor <src> [name]    copy a git repository or a local folder into vendor/<name>
     bindgen <path>...      generate extern "C" modules from C headers (a directory recurses)
+    tool-server            serve the compiler API to tools over --stdio or --socket=PATH
 
 OPTIONS:
     -h, --help             print this usage and exit
@@ -1140,7 +1110,17 @@ OPTIONS:
     );
 }
 
+/// What a compiler built with a project's analyzers (`[tools]` in build.toml) runs after `super-c lint` of the
+/// whole project: the analyzers over the project in the working directory, given the std directory; the
+/// exit status (0: no finding).
+pub(package) type LintTools = fn(str) i32;
+
 fn main(argv: Vector<str>) i32 {
+    return run(argv, Option::<LintTools>::None);
+}
+
+/// The compiler's command line `argv`, with the analyzers `tools` a project's tool compiler adds.
+pub(package) fn run(argv: Vector<str>, tools: Option<LintTools>) i32 {
     unsafe shim::sc_trace_install();
     let argc = argv.len();
     if argc > 0 {
@@ -1157,6 +1137,9 @@ fn main(argv: Vector<str>) i32 {
     let mut bg_from = Vector::<String>::new(); // bindgen: --from=, extra origin headers to accept
     let mut bg_cflags = Vector::<String>::new(); // bindgen: --cflag=, applied to the target's C environment
     let mut bg_sysroot = ""; // bindgen: --sysroot=DIR, the target's C library tree (empty: discover it)
+    let mut ts = pr::Launch { grantable: pr::CAP_ALL, max_frame: 64 << 20, max_workspaces: 8 }; // tool-server: what the launcher allows
+    let mut ts_socket = ""; // tool-server: --socket=PATH, else --stdio
+    let mut ts_stdio = false; // tool-server: --stdio
     let mut vendor_name = ""; // vendor: optional name override for vendor/<name>
     let mut vendor_dir = "."; // vendor: --dir=, the project root vendored into
     let mut vendor_ref = ""; // vendor: --ref=, the branch, tag or commit pinned for a git source
@@ -1437,6 +1420,46 @@ fn main(argv: Vector<str>) i32 {
                 co.bad = true;
             }
         },
+        MODE_TOOL_SERVER => {
+            while i < argc {
+                let arg = argv[i];
+                if arg == "--stdio" {
+                    ts_stdio = true;
+                } else if arg.starts_with("--socket=") && arg.len() > 9 {
+                    ts_socket = arg[9..];
+                } else if arg.starts_with("--grant=") {
+                    ts.grantable = 0;
+                    for name in arg[8..].split(",") {
+                        let b = pr::cap_bit(name);
+                        if b == 0 && name.len() != 0 {
+                            co.reject(arg);
+                        }
+                        ts.grantable |= b;
+                    }
+                } else if arg.starts_with("--root=") && arg.len() > 7 {
+                    ts.roots.push(String::from_str(arg[7..]));
+                } else if arg.starts_with("--max-frame=") {
+                    switch arg[12..].parse_u64() {
+                        Some(n) if n > 0 => {
+                            ts.max_frame = n as usize;
+                        },
+                        _ => co.reject(arg),
+                    };
+                } else if arg.starts_with("--max-workspaces=") {
+                    switch arg[17..].parse_u64() {
+                        Some(n) if n > 0 && n <= 1024 => {
+                            ts.max_workspaces = n as usize;
+                        },
+                        _ => co.reject(arg),
+                    };
+                } else {
+                    co.reject(arg);
+                }
+                i = i + 1;
+            }
+            // Exactly one transport.
+            co.bad = co.bad || ts_stdio == (ts_socket.len() != 0);
+        },
         MODE_BINDGEN => {
             while i < argc {
                 let arg = argv[i];
@@ -1623,7 +1646,46 @@ fn main(argv: Vector<str>) i32 {
         return 1;
     }
     if mode == Mode::MODE_LINT {
-        return lint_project(&paths, file.len() == 0, &co, &bo, cpu_set, std_dir.as_str(), lint_fix, lint_sc);
+        let whole = file.len() == 0;
+        if whole && tools.is_none() && has_manifest(".") && stdlib::getenv("SC_TOOLS_RUN") == null {
+            // A project with analyzers lints through its tool compiler, which runs them after.
+            if let Some(tm) = bman::load("build.toml", co.bootstrap_tags) {
+                if tm.tools.len() != 0 {
+                    let tcx = bsys::BuildCtx {
+                        jobs: jobs,
+                        std_dir: std_dir.as_str(),
+                        ce_steps: if co.ce_steps != 0 {
+                            co.ce_steps;
+                        } else {
+                            tm.ce_steps;
+                        },
+                        ce_mem: if co.ce_mem != 0 {
+                            co.ce_mem;
+                        } else {
+                            tm.ce_mem;
+                        },
+                        target: co.target,
+                        bootstrap_tags: co.bootstrap_tags,
+                        lint: co.lint,
+                        transpiler: "",
+                        target_features: co.target_features.as_str(),
+                        simd_width: co.simd_width,
+                        simd_dispatch: co.simd_dispatch.as_str(),
+                    };
+                    return bsys::manifest_tools(&tm, argv.as_slice(), &tcx);
+                }
+            }
+        }
+        let rc = lint_project(&paths, whole, &co, &bo, cpu_set, std_dir.as_str(), lint_fix, lint_sc);
+        if whole {
+            if let Some(t) = tools {
+                let tr = t(std_dir.as_str());
+                if rc == 0 {
+                    return tr;
+                }
+            }
+        }
+        return rc;
     }
     if emit_sub.len() != 0 {
         // The transpile form works from the project directory, as the engine that runs it does.
@@ -1673,6 +1735,13 @@ fn main(argv: Vector<str>) i32 {
             sysroot: bo.sysroot,
         };
         return bsys::manifest_emit(&man, bo.profile, file, emit_sub, &cx, emit_id, emit_c);
+    }
+    if mode == Mode::MODE_TOOL_SERVER {
+        ts.std_dir = std_dir.clone();
+        if ts_stdio {
+            return tsrv::run_stdio(ts);
+        }
+        return tsrv::run_socket(ts, ts_socket);
     }
     if mode == Mode::MODE_LSP {
         // `super-c lsp --capabilities`: print the advertised capability JSON and exit (machine-
@@ -1732,7 +1801,11 @@ fn main(argv: Vector<str>) i32 {
             if bo.out_dir.len() != 0 {
                 man.out_dir = String::from_str(bo.out_dir);
             }
-            if mode == Mode::MODE_CLEAN {
+            let hooked = mode == Mode::MODE_BUILD || mode == Mode::MODE_RELEASE || mode == Mode::MODE_RUN;
+            if hooked && man.hooks.len() != 0 && stdlib::getenv("SC_TOOLS_RUN") == null {
+                // A project with hooks builds through its tool compiler, which runs them.
+                rc = bsys::manifest_tools(&man, argv.as_slice(), &cx);
+            } else if mode == Mode::MODE_CLEAN {
                 rc = bsys::manifest_clean(&man, clean_full);
             } else if mode == Mode::MODE_TEST {
                 topts.enabled = true;
@@ -1771,7 +1844,7 @@ fn main(argv: Vector<str>) i32 {
         eprintln("error: --bin, --lib and --transpiler need build.toml; '{}' builds alone", file);
         return 1;
     }
-    let rc = run_file(
+    let rc = script::run_script(
         file,
         std_dir.as_str(),
         co.ce_steps,
@@ -1789,7 +1862,10 @@ fn main(argv: Vector<str>) i32 {
         bo.out_dir,
         bo.sysroot,
         bo.profile,
-        &co,
+        co.opt,
+        co.cg_on,
+        co.cg_off,
+        null,
     );
     return rc;
 }

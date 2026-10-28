@@ -4,6 +4,7 @@
 // stderr) test terminal I/O plumbing, not rendering logic, and are covered by the C suite.
 import utils::errors as diag;
 import string as cstring;
+import utils::diag_codes as dc;
 
 // Array-field wrappers: `{}` init zero-fills the omitted array (Super-C has no `[v; N]` repeat literal).
 struct Buf202 {
@@ -27,7 +28,7 @@ const fn offset_of(src: str, needle: str) u32 {
 // Emit one message at (off, span) over `src`, finalize with `file`, and return an owned copy of the
 // rendered block 0 (owned so the caller can free `e` before inspecting it).
 fn render_into(e: &mut diag::Errors, src: str, msg: str, off: u32, span: u32, file: str) String {
-    e.emit(off, span, format("{}", msg));
+    e.emit(dc::NONE, off, span, format("{}", msg));
     e.finalize(src, file);
     return e.rendered_errors.at(0).clone();
 }
@@ -57,7 +58,7 @@ fn file_in_location() {
 fn notes() {
     let src = "let x = y;\n";
     let mut e = diag::Errors::new();
-    e.emit(offset_of(src, "y"), 1, format("{}", "unknown name"));
+    e.emit(dc::NONE, offset_of(src, "y"), 1, format("{}", "unknown name"));
     e.note(format("did you mean '{}'?", "x"));
     e.finalize(src, "");
     assert(e.errors.at(0).msg.eq_str("unknown name"), "record not rewritten by finalize");
@@ -97,7 +98,7 @@ fn long_line_windowing() {
     }
     buf.b[200] = '\n' as char;
     let mut e = diag::Errors::new();
-    e.emit(180, 3, format("{}", "m"));
+    e.emit(dc::NONE, 180, 3, format("{}", "m"));
     e.finalize(unsafe str::from_raw(((&buf.b[0]) as *const char) as *const u8, 201), "");
     let b = e.rendered_errors.at(0).clone();
     assert(contains(&b, "--> 1:181"), "column past the window");
@@ -119,4 +120,14 @@ fn offset_past_eof() {
     let mut e = diag::Errors::new();
     let b = render_into(&mut e, src, "eof", src.len() as u32 + 50, 1, ""); // clamped to src_len, no OOB
     assert(contains(&b, "error: eof"), "renders without overrun");
+}
+
+// Every diagnostic code has a stable name, and the name gives the code back.
+@test
+fn diagnostic_codes_round_trip_their_names() {
+    for c in 1..dc::COUNT {
+        assert(dc::name(c).len() != 0, "a code has a name");
+        assert_eq(dc::by_name(dc::name(c)), c);
+    }
+    assert_eq(dc::by_name("no such code"), dc::NONE);
 }

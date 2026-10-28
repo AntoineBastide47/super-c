@@ -6,6 +6,7 @@
 // (`borrowck_pending`): the server publishes the analysis first, and a new edit abandons the round.
 import driver_shim as shim;
 import std::platform::fs;
+import std::platform::path;
 import module::loader as loader;
 import ast::ast as *;
 import ast::parser as par;
@@ -17,6 +18,7 @@ import typechecker::typechecker as tc;
 import borrowck::facts as bfx;
 import borrowck::flow_ir as bfi;
 import ir::lower as irl;
+import ir::core as core;
 import ir::recursion as recur;
 import ir::interp as iri;
 import ir::cpu_features as cf;
@@ -29,6 +31,7 @@ import build_system::manifest as bman;
 import build_system::build as bsys;
 import stdio;
 import stdlib;
+import utils::diag_codes as dc;
 
 /// The pass that produced a record (`DiagRec.phase`): each phase replaces its own records.
 pub(package) const PH_ANALYSIS: u8 = 0; // parse, resolve, typecheck, feature checks, always-panics, deferred constants
@@ -39,6 +42,7 @@ pub(package) const PH_RECUR: u8 = 3; // the package-wide unbounded-recursion che
 /// One harvested diagnostic: the cross-pass record the server publishes and codeAction later reads
 /// (the fix fields carry the machine-applicable quick fix, if any).
 pub(package) struct DiagRec {
+    pub(package) code: u16, // `utils::diag_codes`
     pub(package) module: u32,
     pub(package) start: u32, // byte span into the module's source
     pub(package) len: u32,
@@ -123,6 +127,7 @@ fn drain_errors(e: &diag::Errors, m: u32, phase: u8, diags: &mut Vector<DiagRec>
             let d = records.at(k);
             diags.push(
                 DiagRec {
+                    code: d.code,
                     module: m,
                     start: d.start,
                     len: d.len,
@@ -156,6 +161,39 @@ fn harvest_parse_errors(p: &loader::Package, i: usize, diags: &mut Vector<DiagRe
     drain_errors(&ps.errors, i as u32, PH_ANALYSIS, diags);
 }
 
+// The load errors of module `i` (`loader::LoadError`) as diagnostics at the import they concern: an import
+// that does not read, a project file a std module shadows.
+fn load_diags(p: &loader::Package, i: usize, diags: &mut Vector<DiagRec>) {
+    for k in 0..p.load_errors.len() {
+        let e = &p.load_errors[k];
+        if e.module != i as i32 {
+            continue;
+        }
+        let src = p.modules[i].source.as_str();
+        let mut start: u32 = 0;
+        let mut end: u32 = 0;
+        if e.off != loader::IMPORT_OFF_NONE && e.off as usize < src.len() {
+            start = e.off;
+            end = start;
+            while end as usize < src.len() && src.byte_at(end as usize) != b';' && src.byte_at(end as usize) != b'\n' {
+                end += 1;
+            }
+        }
+        diags.push(
+            DiagRec {
+                code: dc::CANNOT_OPEN_MODULE,
+                module: i as u32,
+                start: start,
+                len: end - start,
+                severity: 1,
+                phase: PH_ANALYSIS,
+                msg: e.msg.clone(),
+                fix_kind: -1,
+            },
+        );
+    }
+}
+
 /// Canonicalize `path` via realpath; a file not on disk yet keeps the given form.
 pub(package) fn canon_path(path: str) String {
     return fs::realpath(path).unwrap_or(String::from_str(path));
@@ -180,6 +218,7 @@ struct BuildSettings {
 // script build takes them. The instruction set is the target's (`target_arch`).
 fn lsp_build_settings(dir: str, target: i32) BuildSettings {
     let arch = target_arch(target);
+    let abs = path::is_absolute(dir);
     let mut d = String::from_str(dir);
     // A path has fewer components than this; each step drops one.
     for _ in 0..256 {
@@ -204,7 +243,9 @@ fn lsp_build_settings(dir: str, target: i32) BuildSettings {
             break;
         }
         let up = String::from_str(loader::dirname_of(d.as_str()));
-        if up.len() == 0 || up.len() >= d.len() {
+        // An absolute walk ends at its root: above a Windows drive (`C:`), `dirname_of` gives `.`, the
+        // working directory.
+        if up.len() == 0 || up.len() >= d.len() || abs && up.as_str() == "." {
             break;
         }
         d = up;
@@ -330,6 +371,23 @@ pub(package) fn compile(
     lint_dir: str,
     diags: &mut Vector<DiagRec>,
 ) loader::Package {
+    return compile_keeping(root_file, root_dir, alt_dir, std_dir, target, ov_files, ov_texts, lint_dir, false, diags);
+}
+
+/// `compile`; with `keep_bodies` the package keeps the body syntax of every module outside std and `ffi/`
+/// (`Package.keep_bodies`), not only its overlays'.
+pub(package) fn compile_keeping(
+    root_file: str,
+    root_dir: str,
+    alt_dir: str,
+    std_dir: str,
+    target: i32,
+    ov_files: Vector<String>,
+    ov_texts: Vector<String>,
+    lint_dir: str,
+    keep_bodies: bool,
+    diags: &mut Vector<DiagRec>,
+) loader::Package {
     let t0 = dutil::ticks_ms();
     let bs = lsp_build_settings(
         if lint_dir.len() != 0 {
@@ -341,6 +399,7 @@ pub(package) fn compile(
     );
     lsp_load_target(&bs);
     let mut p = loader::package_load_overlaid(root_file, root_dir, alt_dir, std_dir, false, target, ov_files, ov_texts);
+    p.keep_bodies = keep_bodies;
     lsp_apply_settings(&mut p, bs);
     let st = run_pipeline(&mut p, target, root_file, lint_dir, diags);
     stats_line(&p, "compile", t0, &st);
@@ -1212,6 +1271,9 @@ pub(package) fn recompile(
         }
     }
     typecheck_set(p, &mut aff, true, true, root_file, lint_dir, &mut nd, st);
+    if loader::poll_stop() {
+        return false;
+    }
     rescan_reach(p, &aff);
     // Every module the passes analyzed owes its borrow check again.
     while p.bc_pending.len() < n {
@@ -1252,10 +1314,18 @@ pub(package) fn recompile(
         }
     }
     reach_settle(p, root_file, lint_dir, st);
+    if loader::poll_stop() {
+        return false;
+    }
     // 6) merge: keep unaffected modules' records, replace the affected ones' (the set now holds
     // every module the passes analyzed).
     let affr = &aff;
     diags.retain(|d: &DiagRec| d.module as usize < n && !affr[d.module as usize]);
+    for i in 0..n {
+        if aff[i] {
+            load_diags(p, i, diags);
+        }
+    }
     let rebr = &rebc;
     diags.retain(|d: &DiagRec| !rebr[d.module as usize] || d.phase != PH_BORROW);
     diags.reserve(nd.len());
@@ -1286,12 +1356,16 @@ fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: 
         if !p.modules[i].has_ast {
             harvest_parse_errors(p, i, diags);
         }
+        load_diags(p, i, diags);
     }
     p.platform_filter(target);
     let n = p.modules.len();
     let mut res_ok = Vector::<bool>::new();
     let mut all_ok = true;
     for i in 0..n {
+        if loader::poll_stop() {
+            return st;
+        }
         let lw = lsp_lint_wanted(p, i, root_file, lint_dir);
         let ok = lsp_resolve_module(p, i, lw, diags);
         res_ok.push(ok);
@@ -1321,6 +1395,9 @@ fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: 
         }
     }
     typecheck_set(p, &mut set, all_ok, true, root_file, lint_dir, diags, &mut st);
+    if loader::poll_stop() {
+        return st;
+    }
     rescan_reach(p, &set);
     // Every analyzed module whose diagnostics this root reports owes its borrow check, and the
     // recursion check reports the modules whose diagnostics this root reports.
@@ -1337,6 +1414,9 @@ fn run_pipeline(p: &mut loader::Package, target: i32, root_file: str, lint_dir: 
         p.recur.mods.push(recur::Sums::new());
     }
     reach_settle(p, root_file, lint_dir, &mut st);
+    if loader::poll_stop() {
+        return st;
+    }
     lsp_unused_items(p, root_file, lint_dir, diags);
     // The views end before the release claims the package: a vector of borrows counts as used when
     // it is destroyed.
@@ -1393,6 +1473,11 @@ fn typecheck_set(
         let mut tc_bad = Vector::<bool>::new();
         tc_bad.resize_default(n);
         for k in 0..order.len() {
+            if loader::poll_stop() {
+                // An API request stopped the analysis: the package is dropped.
+                p.cir = null;
+                return;
+            }
             let i = order[k];
             let lw = lint && lsp_lint_wanted(p, i, root_file, lint_dir);
             if pass != 0 {
@@ -1415,6 +1500,10 @@ fn typecheck_set(
         // Driver-parity: the uses of functions that need CPU features, decided once every module is
         // typed, and (a lint) the `unsafe` only such a use needed.
         for k in 0..order.len() {
+            if loader::poll_stop() {
+                p.cir = null;
+                return;
+            }
             let i = order[k];
             if !tc_bad[i] && lsp_lint_wanted(p, i, root_file, lint_dir) {
                 let mut errs = diag::Errors::new();
@@ -1433,6 +1522,10 @@ fn typecheck_set(
             // cross-module `const fn` bodies, so it only runs once every module is typed.
             cirv.all_typed = true;
             for k in 0..order.len() {
+                if loader::poll_stop() {
+                    p.cir = null;
+                    return;
+                }
                 let i = order[k];
                 if !tc_bad[i] && lsp_lint_wanted(p, i, root_file, lint_dir) {
                     let miss0 = cirv.body_miss_n;
@@ -1511,18 +1604,18 @@ struct FlushCtx {
 }
 
 fn lsp_flush_assert(ctx: *mut void, m: ModuleId, cond: NodeId, msg: *const char) {
-    flush_rec(ctx, m, cond, emit::flush_assert_text(msg));
+    flush_rec(ctx, dc::STATIC_ASSERTION_FAILED, m, cond, emit::flush_assert_text(msg));
 }
 
 fn lsp_flush_const(ctx: *mut void, m: ModuleId, decl: NodeId, msg: *const char) {
-    flush_rec(ctx, m, decl, emit::flush_const_text(msg));
+    flush_rec(ctx, dc::CONST_EVAL_FAILED, m, decl, emit::flush_const_text(msg));
 }
 
-fn flush_rec(ctx: *mut void, m: ModuleId, id: NodeId, msg: String) {
+fn flush_rec(ctx: *mut void, code: u16, m: ModuleId, id: NodeId, msg: String) {
     let fx = unsafe &*(ctx as *const FlushCtx);
     let mm = unsafe &(*fx.p).modules[m as usize];
     let mut errs = diag::Errors::new();
-    errs.emit_span(mm.ast.at_const(id).span, msg);
+    errs.emit_span(code, mm.ast.at_const(id).span, msg);
     errs.finalize(mm.source.as_str(), mm.file.as_str());
     drain_errors(&errs, m, PH_ANALYSIS, unsafe &mut *fx.nd);
 }
@@ -1604,9 +1697,28 @@ fn hold_bodies(p: &mut loader::Package, m: usize) {
 // closed module's back on demand (`ensure_bodies`).
 fn release_closed(p: &mut loader::Package, ovk: &Vector<i64>) {
     for i in 0..p.modules.len() {
-        let held = i < p.body_hold.len() && p.body_hold[i] || i < p.bc_pending.len() && p.bc_pending[i];
+        let held = kept(p, i) || i < p.bc_pending.len() && p.bc_pending[i];
         if ovk[i] < 0 && p.modules[i].has_ast && !p.modules[i].ast.b.released && !held {
             p.modules[i].ast.release_bodies();
+        }
+    }
+}
+
+// Whether module `m` keeps its body syntax between rounds without a document: the constant engine demanded
+// one of its bodies (`Package.body_hold`), or the package keeps every module's outside std and `ffi/`
+// (`Package.keep_bodies`).
+fn kept(p: &loader::Package, m: usize) bool {
+    return m < p.body_hold.len() && p.body_hold[m] || p.keep_bodies && p.modules[m].pkg != loader::PKG_STD && p.modules[m].pkg != loader::PKG_FFI;
+}
+
+/// Parse back the bodies a reference scan for `d` reads: the defining module's and every module whose
+/// recorded references name `d` (`Package.def_refs`); the other modules' references, if any, sit in their
+/// retained module arenas.
+pub(package) fn hydrate_refs(p: &mut loader::Package, d: DefId) {
+    ensure_bodies(p, d.module as usize);
+    for m in 0..p.modules.len() {
+        if m != d.module as usize && refers(p, m, d.module, d.node, d.node) {
+            ensure_bodies(p, m);
         }
     }
 }
@@ -1718,6 +1830,43 @@ fn build_final_edges(p: &mut loader::Package) {
         }
     }
     gitems::build_final(p, &ev);
+}
+
+/// Lower function `d` (a function or a method) as its module's borrow check does: lowered, borrow-checked and
+/// drop-elaborated, into `out`, with the move marks the check reads (`CoreBody.user_moves`); the check's
+/// diagnostics are dropped. False when it does not lower: no body, or a module whose analysis left no types.
+pub(package) fn lower_item(p: &mut loader::Package, d: DefId, out: &mut core::CoreBody) bool {
+    let m = d.module as usize;
+    if m >= p.modules.len() || !p.modules[m].has_ast || p.modules[m].ast.types.len() == 0 {
+        return false;
+    }
+    ensure_bodies(p, m);
+    let pkg = p as *mut loader::Package;
+    let mut ow = bfx::Owner::new(pkg);
+    let mut ctx = bfi::BorrowCtx::new();
+    reach_for(p, m);
+    let mut cirv = lsp_engine(p);
+    cirv.all_typed = true;
+    p.cir = &mut cirv;
+    {
+        let mm = &mut p.modules[m];
+        let src = mm.source.as_str().ptr() as *const char;
+        let len = mm.source.len();
+        let mut t = tc::TypeChecker::new(&mut mm.ast, unsafe str::from_raw(src as *const u8, len), pkg);
+        let mut bodies = Vector::<irl::Lowerer>::new();
+        t.bc_item(d.node, &mut ow, &mut ctx, &mut bodies);
+    }
+    p.cir = null;
+    reach_off(p);
+    // The check recycles its spent lowerings whole: the function's is among them.
+    for i in 0..ctx.lower_pool.len() {
+        let b = &ctx.lower_pool[i].body;
+        if b.owner.module == d.module && b.owner.node == d.node {
+            *out = replace(&mut ctx.lower_pool.index_mut(i).body, core::CoreBody::new(d, d.module));
+            return true;
+        }
+    }
+    return false;
 }
 
 /// The outcome of one borrow round (`borrowck_pending`).
@@ -1847,7 +1996,7 @@ pub(package) fn borrowck_pending(
             p.bc_pending.set(m, false);
             p.recur.mods.set(m, recur::Sums::new());
             p.recur.stale = true;
-            if ovk[m] < 0 && !(m < p.body_hold.len() && p.body_hold[m]) && !p.modules[m].ast.b.released {
+            if ovk[m] < 0 && !kept(p, m) && !p.modules[m].ast.b.released {
                 p.modules[m].ast.release_bodies();
             }
             continue;
@@ -1885,8 +2034,7 @@ pub(package) fn borrowck_pending(
         p.recur.mods.set(m, sz.take());
         p.recur.stale = true;
         out.checked = true;
-        let held = m < p.body_hold.len() && p.body_hold[m];
-        if ovk[m] < 0 && !held && !p.modules[m].ast.b.released {
+        if ovk[m] < 0 && !kept(p, m) && !p.modules[m].ast.b.released {
             p.modules[m].ast.release_bodies();
         }
     }
@@ -1973,7 +2121,7 @@ const fn reach_off(p: &mut loader::Package) {
 }
 
 // The reachability scans (`Package::co_scan`) of the modules `set` marks, analyzed now with their
-// bodies live; every other module keeps its scan.
+// bodies live; every other module keeps its scan. A stopped API request leaves the scans incomplete.
 fn rescan_reach(p: &mut loader::Package, set: &Vector<bool>) {
     let n = p.modules.len();
     while p.reach_scans.len() < n {
@@ -1984,6 +2132,9 @@ fn rescan_reach(p: &mut loader::Package, set: &Vector<bool>) {
         return;
     }
     for m in 0..n {
+        if loader::poll_stop() {
+            return;
+        }
         if set[m] {
             let sc = p.co_scan(m, &cx);
             p.reach_scans.set(m, sc);

@@ -286,3 +286,57 @@ fn main() i32 {
         "the error names the struct and the fix",
     );
 }
+
+// A `dyn` field (here inside `Option<Box<dyn I>>`) and a generic instantiated at `void` (`thread::spawn`
+// of a closure that returns nothing holds a `Cell<void>`) have their C definitions: the C build emits,
+// compiles and runs.
+const DYN_AND_VOID: str = M"(import std::parallel::thread;
+
+interface Prov {
+    fn get(self: &mut Self) i32;
+}
+
+struct Disk {}
+
+extend Disk as Prov {
+    fn get(self: &mut Self) i32 {
+        return 7;
+    }
+}
+
+struct Holder {
+    pub p: Option<Box<dyn Prov>>,
+    pub n: i32,
+}
+
+fn wrap(b: Box<dyn Prov>) Option<Box<dyn Prov>> {
+    return Option::<Box<dyn Prov>>::Some(b);
+}
+
+fn main() i32 {
+    let mut h = Holder { p: wrap(Box::new(Disk {})), n: 1 };
+    let v = if h.p.is_some() {
+        h.p.as_mut().unwrap().get();
+    } else {
+        0;
+    };
+    let t = thread::spawn(|| {});
+    t.join();
+    return v + h.n - 8;
+}
+)";
+
+@test
+fn dyn_fields_and_void_instances_have_c_definitions() {
+    let b = h::diff_build(DYN_AND_VOID, ["--emit-c"]);
+    if !b.built {
+        eprintln("{}", b.diag.as_str());
+    }
+    assert(b.built, "the C emits");
+    if !cli::has_cc() {
+        return; // the C build needs a C compiler
+    }
+    let c = h::compile_and_run_c(DYN_AND_VOID);
+    assert(c.built, "the program builds through C");
+    assert_eq(c.exit, 0);
+}
