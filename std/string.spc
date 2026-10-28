@@ -408,12 +408,25 @@ extend<A: Allocator> String<A> {
         self.push_raw(other.as_ptr(), other.len());
     }
 
-    /// Append the base-10 digits of an unsigned integer. Recurses on the high digits so they print first.
+    /// Append the base-10 digits of an unsigned integer: the space for all of them is reserved once, then
+    /// the digits are written from the last.
     pub fn push_u64(self: &mut String<A>, value: u64) {
-        if value >= 10 {
-            self.push_u64(value / 10);
+        let mut n: usize = 1;
+        let mut v = value;
+        // At most 19 steps: a u64 has at most 20 digits.
+        while v >= 10 {
+            v /= 10;
+            n += 1;
         }
-        self.push_byte((48 + value % 10) as u8);
+        self.reserve(n);
+        let len = self.len();
+        let p = self.data_ptr();
+        let mut x = value;
+        for k in 0..n {
+            unsafe p[len + n - 1 - k] = (48 + x % 10) as u8;
+            x /= 10;
+        }
+        self.set_len(len + n);
     }
 
     /// Append the base-10 digits of a signed integer, with a leading '-' when negative. The magnitude is
@@ -466,6 +479,11 @@ extend<A: Allocator> String<A> {
 
     /// Append a floating-point value with exactly `prec` digits after the decimal point ('{:.N}').
     pub fn push_f64_prec(self: &mut String<A>, value: f64, prec: u32) {
+        // A NaN's sign is the machine's (IEEE 754 leaves it open): every NaN prints as `nan`.
+        if value != value {
+            self.push_str("nan");
+            return;
+        }
         // Straight into the spare capacity. snprintf reports the full length, so a result that did not fit
         // (with its NUL) is formatted again into a reservation of exactly that size.
         let p = self.spare_mut(0);
@@ -561,6 +579,11 @@ extend<A: Allocator> String<A> {
     /// Append a floating-point value formatted by C's "%g" (compact, round-trip-ish), written straight
     /// into the spare capacity: "%g" needs at most 13 bytes plus the NUL.
     pub fn push_f64(self: &mut String<A>, value: f64) {
+        // A NaN's sign is the machine's (IEEE 754 leaves it open): every NaN prints as `nan`.
+        if value != value {
+            self.push_str("nan");
+            return;
+        }
         let n = unsafe snprintf(self.spare_mut(16) as *mut char, 16, "%g", value);
         if n > 0 {
             self.advance_len(n as usize);

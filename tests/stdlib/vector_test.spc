@@ -258,6 +258,15 @@ fn float_formatting_is_not_truncated() {
     assert(t.as_str() == "x=0.5", "%g appended in place");
 }
 
+// A NaN's sign is the machine's (an x86 operation's default NaN is negative, an arm64 one's positive):
+// every NaN prints as `nan`, on every host.
+@test
+fn a_nan_prints_without_its_sign() {
+    let neg = f64::from_bits(0xFFF8000000000000);
+    let pos = f64::from_bits(0x7FF8000000000001);
+    assert(format("{} {} {:.2}", neg, pos, neg).as_str() == "nan nan nan", "nan");
+}
+
 @test(should_panic)
 fn substring_past_the_end_panics() {
     let s = long_str("abc");

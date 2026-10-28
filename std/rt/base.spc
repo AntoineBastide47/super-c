@@ -286,8 +286,13 @@ fn assert_val(label: *const char, kind: u32, v: u64, n: u64) {
         // The bits as a double, by a copy: a cast pointer would break C's aliasing rules.
         let mut f: f64 = 0.0;
         unsafe c_memcpy(&mut f, &v, 8);
-        let w = unsafe c_snprintf(&mut b[0], 64, "%g", f);
-        put_bytes(((&b[0]) as *const char) as *const u8, w as usize);
+        // A NaN's sign is the machine's (IEEE 754 leaves it open): every NaN prints as `nan`.
+        if f != f {
+            put("nan");
+        } else {
+            let w = unsafe c_snprintf(&mut b[0], 64, "%g", f);
+            put_bytes(((&b[0]) as *const char) as *const u8, w as usize);
+        }
     } else if kind == ASSERT_BOOL {
         put(
             if v != 0 {
