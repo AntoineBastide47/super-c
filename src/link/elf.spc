@@ -1122,6 +1122,11 @@ fn collect(l: &mut L, b: []u8, main: u32) {
             }
         }
     }
+    // Each `.eh_frame` section's relocations by offset: a frame entry's take a binary search.
+    let mut ix = Vector::<Vector<u64>>::with_capacity(ehs.len());
+    for i in 0..ehs.len() {
+        ix.push(rel_index(l, b, ehs[i]));
+    }
     loop {
         while let Some(s) = work.pop() {
             reach_relocs(l, b, s, &mut work, 0, 0xFFFFFFFFFFFFFFFFu64);
@@ -1138,18 +1143,65 @@ fn collect(l: &mut L, b: []u8, main: u32) {
             }
         }
         for i in 0..ehs.len() {
-            eh_reach(l, b, ehs[i], &mut work);
+            eh_reach(l, b, ehs[i], ix[i].as_slice(), &mut work);
         }
         if work.len() == 0 {
             break;
         }
     }
     for i in 0..ehs.len() {
-        eh_records(l, b, ehs[i]);
+        eh_records(l, b, ehs[i], ix[i].as_slice());
     }
 }
 
 const NONE32: u32 = 0xFFFFFFFF;
+
+// The relocations of section `s` as offset << 32 | index, sorted: by offset, then in their order.
+fn rel_index(l: &L, b: []u8, s: u32) Vector<u64> {
+    let sc = l.secs[s as usize];
+    let mut ix = Vector::<u64>::new();
+    if sc.rela == NONE {
+        return ix;
+    }
+    let rs = l.secs[sc.rela as usize];
+    let n = (rs.size / 24) as usize;
+    ix.reserve(n);
+    for i in 0..n {
+        ix.push(rel_at(b, rs, i).off << 32 | i as u64);
+    }
+    ix.sort();
+    return ix;
+}
+
+// The first entry of relocation index `ix` (`rel_index`) at offset `off` or after.
+const fn first_at(ix: []u64, off: u64) usize {
+    let mut lo: usize = 0;
+    let mut hi = ix.len();
+    // Each step halves the range: at most 64 steps.
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if ix[mid] >> 32 < off {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+// Mark live what the relocations of section `s` (index `ix`) at offsets `lo .. hi` refer to.
+fn reach_range(l: &mut L, b: []u8, s: u32, ix: []u64, work: &mut Vector<u32>, lo: u64, hi: u64) {
+    let sc = l.secs[s as usize];
+    let rs = l.secs[sc.rela as usize];
+    let f = l.files[sc.file as usize];
+    for k in first_at(ix, lo)..ix.len() {
+        if ix[k] >> 32 >= hi {
+            break;
+        }
+        let r = rel_at(b, rs, (ix[k] & 0xFFFFFFFF) as usize);
+        reach_sym(l, f.sym0 + r.sym, work);
+    }
+}
 
 // Mark live what the relocations of section `s` at offsets `lo .. hi` refer to.
 fn reach_relocs(l: &mut L, b: []u8, s: u32, work: &mut Vector<u32>, lo: u64, hi: u64) {
@@ -1190,21 +1242,15 @@ fn reach_sym(l: &mut L, k: u32, work: &mut Vector<u32>) {
     }
 }
 
-// The section the relocation at offset `off` of section `s` refers to (NONE32: none, or no relocation
-// there).
-fn reloc_section(l: &L, b: []u8, s: u32, off: u64) u32 {
-    let sc = l.secs[s as usize];
-    if sc.rela == NONE {
-        return NONE32;
-    }
-    let rs = l.secs[sc.rela as usize];
-    let f = l.files[sc.file as usize];
-    let n = (rs.size / 24) as usize;
-    for i in 0..n {
-        let r = rel_at(b, rs, i);
-        if r.off != off {
-            continue;
-        }
+// The section the first relocation at offset `off` of section `s` (index `ix`) refers to (NONE32: none,
+// or no relocation there).
+fn reloc_section(l: &L, b: []u8, s: u32, ix: []u64, off: u64) u32 {
+    let k = first_at(ix, off);
+    if k < ix.len() && ix[k] >> 32 == off {
+        let sc = l.secs[s as usize];
+        let rs = l.secs[sc.rela as usize];
+        let f = l.files[sc.file as usize];
+        let r = rel_at(b, rs, (ix[k] & 0xFFFFFFFF) as usize);
         let mut d = f.sym0 + r.sym;
         let g = gof(l, d);
         if g != NONE {
@@ -1224,7 +1270,7 @@ fn reloc_section(l: &L, b: []u8, s: u32, off: u64) u32 {
 
 // Each frame entry of `.eh_frame` section `e` whose function is live keeps what its relocations name and
 // its common entry's (the personality routine). Each record is read once per round.
-fn eh_reach(l: &mut L, b: []u8, e: u32, work: &mut Vector<u32>) {
+fn eh_reach(l: &mut L, b: []u8, e: u32, ix: []u64, work: &mut Vector<u32>) {
     let sc = l.secs[e as usize];
     let mut p: usize = 0;
     let end = sc.size as usize;
@@ -1235,11 +1281,11 @@ fn eh_reach(l: &mut L, b: []u8, e: u32, work: &mut Vector<u32>) {
         }
         let id = lu::r32(b, sc.off + p + 4) as usize;
         if id != 0 && id <= p + 4 {
-            let fs = reloc_section(l, b, e, (p + 8) as u64);
+            let fs = reloc_section(l, b, e, ix, (p + 8) as u64);
             if fs != NONE32 && l.secs[fs as usize].live {
-                reach_relocs(l, b, e, work, (p + 12) as u64, (p + 4 + len) as u64);
+                reach_range(l, b, e, ix, work, (p + 12) as u64, (p + 4 + len) as u64);
                 let cie = p + 4 - id;
-                reach_relocs(l, b, e, work, cie as u64, cie as u64 + 4 + lu::r32(b, sc.off + cie) as u64);
+                reach_range(l, b, e, ix, work, cie as u64, cie as u64 + 4 + lu::r32(b, sc.off + cie) as u64);
             }
         }
         p += 4 + len;
@@ -1249,7 +1295,7 @@ fn eh_reach(l: &mut L, b: []u8, e: u32, work: &mut Vector<u32>) {
 // The records of `.eh_frame` section `e` into `L.eh`: the frame entries of live functions, the common
 // entries they name and a terminator stay, packed from the section's start; the section's size becomes
 // theirs, and it stays out when no entry is left. A frame entry's common entry precedes it.
-fn eh_records(l: &mut L, b: []u8, e: u32) {
+fn eh_records(l: &mut L, b: []u8, e: u32, ix: []u64) {
     let sc = l.secs[e as usize];
     let first = l.eh.len() as u32;
     let mut p: usize = 0;
@@ -1264,7 +1310,7 @@ fn eh_records(l: &mut L, b: []u8, e: u32) {
         let cie = lu::r32(b, sc.off + p + 4) == 0;
         let mut keep = false;
         if !cie {
-            let fs = reloc_section(l, b, e, (p + 8) as u64);
+            let fs = reloc_section(l, b, e, ix, (p + 8) as u64);
             keep = fs == NONE32 || l.secs[fs as usize].live;
         }
         l.eh.push(

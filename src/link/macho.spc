@@ -1110,6 +1110,9 @@ fn splittable(l: &L, sc: ISec) bool {
 // its range of parts.
 fn split_sections(l: &mut L, blob: &mut Vector<u8>) {
     let mut cuts = Vector::<u64>::new();
+    let mut pidx = Vector::<u32>::new();
+    let mut at = Vector::<u32>::new();
+    let mut put = Vector::<u32>::new();
     for fi in 0..l.files.len() {
         let f = l.files[fi];
         if !f.subs {
@@ -1143,32 +1146,68 @@ fn split_sections(l: &mut L, blob: &mut Vector<u8>) {
                 }
             }
             cuts.truncate(nd);
+            // Each relocation's part (the last cut at or before its address, NONE past the section),
+            // then the parts' relocations in their order, each part's together: one pass, not one per part.
+            let np = cuts.len();
+            let nrel = sc.nreloc as usize;
+            at.truncate(0);
+            at.resize_default(np + 1);
+            pidx.truncate(0);
+            for r in 0..nrel {
+                let a = sc.addr + lu::r32(blob.as_slice(), sc.reloff + 8 * r) as u64;
+                let mut q = NONE;
+                if a >= cuts[0] && a < sc.addr + sc.size {
+                    let mut lo: usize = 0;
+                    let mut hi = np;
+                    // Each step halves the range: at most 64 steps.
+                    while hi - lo > 1 {
+                        let mid = (lo + hi) / 2;
+                        if cuts[mid] <= a {
+                            lo = mid;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    q = lo as u32;
+                    at[lo + 1] += 1;
+                }
+                pidx.push(q);
+            }
+            for i in 0..np {
+                at[i + 1] += at[i];
+            }
+            let rel = blob.len();
+            blob.resize_default(rel + 8 * at[np] as usize);
+            put.truncate(0);
+            for i in 0..np {
+                put.push(at[i]);
+            }
+            for r in 0..nrel {
+                let q = pidx[r];
+                if q == NONE {
+                    continue;
+                }
+                let w0 = lu::r32(blob.as_slice(), sc.reloff + 8 * r);
+                let w1 = lu::r32(blob.as_slice(), sc.reloff + 8 * r + 4);
+                let dst = rel + 8 * put[q as usize] as usize;
+                lu::p32(blob, dst, w0 - (cuts[q as usize] - sc.addr) as u32);
+                lu::p32(blob, dst + 4, w1);
+                put[q as usize] += 1;
+            }
             let p0 = l.secs.len() as u32;
-            for i in 0..cuts.len() {
+            for i in 0..np {
                 let lo = cuts[i];
-                let hi = if i + 1 < cuts.len() {
+                let hi = if i + 1 < np {
                     cuts[i + 1];
                 } else {
                     sc.addr + sc.size;
                 };
-                let rel = blob.len();
-                let mut nr: u32 = 0;
-                for r in 0..sc.nreloc as usize {
-                    let w0 = lu::r32(blob.as_slice(), sc.reloff + 8 * r);
-                    let w1 = lu::r32(blob.as_slice(), sc.reloff + 8 * r + 4);
-                    let a = sc.addr + w0 as u64;
-                    if a >= lo && a < hi {
-                        lu::w32(blob, w0 - (lo - sc.addr) as u32);
-                        lu::w32(blob, w1);
-                        nr += 1;
-                    }
-                }
                 let mut pc = sc;
                 pc.addr = lo;
                 pc.size = hi - lo;
                 pc.off = sc.off + (lo - sc.addr) as usize;
-                pc.reloff = rel;
-                pc.nreloc = nr;
+                pc.reloff = rel + 8 * at[i] as usize;
+                pc.nreloc = at[i + 1] - at[i];
                 l.secs.push(pc);
             }
             let c = l.secs.index_mut(s as usize);
