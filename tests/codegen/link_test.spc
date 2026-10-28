@@ -248,17 +248,18 @@ fn main() i32 {
 }
 )";
 
-// `-ffunction-sections -fdata-sections`: the link drops the body nothing calls any more, keeps the exported
-// function, the `@used` variable and what a kept table points to, and the program still runs.
+// Functions and variables in sections of their own (the default from -O1): the link drops the body nothing
+// calls any more, keeps the exported function, the `@used` variable and what a kept table points to, and
+// the program still runs.
 @test
 fn section_garbage_collection_drops_what_nothing_reaches() {
     let p = cli::proj_new();
     p.mkfile("main.spc", GC_MAIN);
     let full = format("{}/full{}", p.dir(), unsafe str::from_cstr(cli::binext()));
     let gc = format("{}/gc{}", p.dir(), unsafe str::from_cstr(cli::binext()));
-    let a = format("build main.spc -O2 -o \"{}\"", full.as_str());
+    let a = format("build main.spc -O2 -fno-function-sections -fno-data-sections -o \"{}\"", full.as_str());
     assert(cli::superc_in(p.dir(), a.as_str()).ok(), "the plain build");
-    let b = format("build main.spc -O2 -ffunction-sections -fdata-sections -o \"{}\"", gc.as_str());
+    let b = format("build main.spc -O2 -o \"{}\"", gc.as_str());
     assert(cli::superc_in(p.dir(), b.as_str()).ok(), "the collected build");
     let fb = loader::read_file(full.as_str()).unwrap();
     let gb = loader::read_file(gc.as_str()).unwrap();
@@ -274,9 +275,12 @@ fn section_garbage_collection_drops_what_nothing_reaches() {
     if stdlib::get_env("WASI_SDK_PATH").unwrap_or(String::new()).len() == 0 || cli::on_wasm() {
         return;
     }
-    let wa = format("build main.spc -O2 --target=wasm -o \"{}/full.wasm\"", p.dir());
+    let wa = format(
+        "build main.spc -O2 -fno-function-sections -fno-data-sections --target=wasm -o \"{}/full.wasm\"",
+        p.dir(),
+    );
     assert(cli::superc_in(p.dir(), wa.as_str()).ok(), "the plain wasm build");
-    let wb = format("build main.spc -O2 -ffunction-sections -fdata-sections --target=wasm -o \"{}/gc.wasm\"", p.dir());
+    let wb = format("build main.spc -O2 --target=wasm -o \"{}/gc.wasm\"", p.dir());
     assert(cli::superc_in(p.dir(), wb.as_str()).ok(), "the collected wasm build");
     let wfp = format("{}/full.wasm", p.dir());
     let wgp = format("{}/gc.wasm", p.dir());

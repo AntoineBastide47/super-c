@@ -294,12 +294,13 @@ fn code_generation_flags_follow_the_level_then_the_profile_then_the_command_line
     let vers = manifest::CG_UNSWITCH | manifest::CG_VERSION_LOOPS;
     let vec = manifest::CG_VECTORIZE;
     let sa = manifest::CG_STRICT_ALIASING;
+    let sec = manifest::CG_FUNCTION_SECTIONS | manifest::CG_DATA_SECTIONS;
     assert_eq(manifest::cg_effective(0, 0, 0), 0u64);
-    assert_eq(manifest::cg_effective(1, 0, 0), fp | inl);
-    assert_eq(manifest::cg_effective(2, 0, 0), fp | inl | fun | unr | vec | sa);
-    assert_eq(manifest::cg_effective(3, 0, 0), fp | inl | fun | unr | vers | vec | sa);
-    assert_eq(manifest::cg_effective(manifest::OPT_S, 0, 0), fp | inl | fun | vec | sa);
-    assert_eq(manifest::cg_effective(manifest::OPT_Z, 0, 0), fp | inl | sa);
+    assert_eq(manifest::cg_effective(1, 0, 0), fp | inl | sec);
+    assert_eq(manifest::cg_effective(2, 0, 0), fp | inl | sec | fun | unr | vec | sa);
+    assert_eq(manifest::cg_effective(3, 0, 0), fp | inl | sec | fun | unr | vers | vec | sa);
+    assert_eq(manifest::cg_effective(manifest::OPT_S, 0, 0), fp | inl | sec | fun | vec | sa);
+    assert_eq(manifest::cg_effective(manifest::OPT_Z, 0, 0), fp | inl | sec | sa);
     let (m, errs) = manifest::parse_check(
         "bin = \"a\"\nroot = \"m.spc\"\n[profile.release]\nomit-frame-pointer = false\nunroll-loops = false\n[profile.small]\nopt-level = \"s\"\nunroll-loops = true\n",
         "",
@@ -308,9 +309,9 @@ fn code_generation_flags_follow_the_level_then_the_profile_then_the_command_line
     assert_eq(errs.errors.len(), 0);
     let mut mm = m.unwrap();
     let rel = mm.profiles.at(mm.profile_index("release") as usize);
-    assert_eq(manifest::cg_effective(rel.opt, rel.cg_on, rel.cg_off), inl | fun | vers | vec | sa);
+    assert_eq(manifest::cg_effective(rel.opt, rel.cg_on, rel.cg_off), inl | sec | fun | vers | vec | sa);
     let sm = mm.profiles.at(mm.profile_index("small") as usize);
-    assert_eq(manifest::cg_effective(sm.opt, sm.cg_on, sm.cg_off), fp | inl | fun | unr | vec | sa);
+    assert_eq(manifest::cg_effective(sm.opt, sm.cg_on, sm.cg_off), fp | inl | sec | fun | unr | vec | sa);
     let mut on: u64 = 0;
     let mut off: u64 = 0;
     assert(manifest::cg_flag("-fomit-frame-pointer", &mut on, &mut off), "-f");
@@ -335,7 +336,7 @@ fn code_generation_flags_follow_the_level_then_the_profile_then_the_command_line
     assert_eq(manifest::opt_flag("-O4"), manifest::OPT_NONE);
     mm.override_profiles(1, manifest::CG_UNROLL, manifest::CG_INLINE);
     let rel2 = mm.profiles.at(mm.profile_index("release") as usize);
-    assert_eq(manifest::cg_effective(rel2.opt, rel2.cg_on, rel2.cg_off), unr);
+    assert_eq(manifest::cg_effective(rel2.opt, rel2.cg_on, rel2.cg_off), sec | unr);
     let mut spelled = String::new();
     manifest::cg_spell(rel2.opt, rel2.cg_on, rel2.cg_off, &mut spelled);
     assert(spelled.as_str() == " -O1 -fno-omit-frame-pointer -fno-inline -funroll-loops", spelled.as_str());

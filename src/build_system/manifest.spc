@@ -229,13 +229,14 @@ pub fn cg_spell(opt: i32, on: u64, off: u64, out: &mut String) {
 
 /// The flags a build at `opt-level` `opt` runs with: the level's defaults, then `on` set and `off`
 /// cleared. At every level but 0 the frame pointer goes (on arm64 from leaf functions only, as Apple's
-/// ABI allows) and calls inline; past the ones that shrink the code at 2, 3 and "s"; loops unroll at 2
+/// ABI allows), calls inline, and functions and variables take sections of their own, which the link
+/// drops when nothing reaches them (`link_gc`); past the ones that shrink the code at 2, 3 and "s"; loops unroll at 2
 /// and 3, vectorize at 2, 3 and "s" (as LLVM's), unswitch and version on their bounds checks at 3;
 /// aliasing is strict from 2 on, "s" and "z" included (as GCC's).
 pub const fn cg_effective(opt: i32, on: u64, off: u64) u64 {
     let mut f: u64 = 0;
     if opt > 0 {
-        f |= CG_OMIT_FRAME_POINTER | CG_INLINE;
+        f |= CG_OMIT_FRAME_POINTER | CG_INLINE | CG_FUNCTION_SECTIONS | CG_DATA_SECTIONS;
     }
     if opt >= 2 && opt != OPT_Z {
         f |= CG_INLINE_FUNCTIONS;
