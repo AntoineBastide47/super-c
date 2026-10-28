@@ -1111,8 +1111,9 @@ extend Gen {
     // The integer registers instruction `t` holds at once besides the homes: its operands outside a
     // home, its temporaries and its result (`end_inst` checks it). 8 for one that reads or writes a
     // vector or an i128 (a masked store reads 8), a vector operation, inline assembly and a system
-    // operation; 7 for a multiplication with overflow; 6 for a division, a high multiplication and an
-    // atomic operation; 5 for a shift and a select; 4 for the others.
+    // operation; 8 for an unsigned 64-bit multiplication with overflow (rax and rdx, the values moved out
+    // of them, the operands, the flag and the result); 7 for a division and a high multiplication (the
+    // same but the flag); 6 for an atomic operation; 5 for a shift and a select; 4 for the others.
     fn need(self: &mut Self, t: Inst) u32 {
         if Gen::in_mem(t.ty) || t.op == O_VOP || t.op == O_ASM || t.op == O_SYS {
             return 8;
@@ -1123,10 +1124,13 @@ extend Gen {
                 return 8;
             }
         }
-        if t.op == O_MULO {
+        if t.op == O_MULO && t.aux != OV_SIGNED && type_bits(t.ty, self.ptr) == 64 {
+            return 8;
+        }
+        if t.op >= O_SDIV && t.op <= O_UREM || t.op == O_MULHU {
             return 7;
         }
-        if t.op >= O_SDIV && t.op <= O_UREM || t.op == O_MULHU || t.op == O_ARMW || t.op == O_ACAS {
+        if t.op == O_ARMW || t.op == O_ACAS {
             return 6;
         }
         if t.op >= O_SHL && t.op <= O_ASHR || t.op == O_SELECT {
@@ -3610,21 +3614,20 @@ extend Gen {
             self.c.shift_cl(sop, sz, rd);
             return true;
         }
-        // Division and remainder: rdx:rax by a register.
+        // Division and remainder: rdx:rax by a register; a narrow dividend extends into rax, a narrow
+        // divisor into S1.
         let sgn = op == O_SDIV || op == O_SREM;
         self.vacate(x::RAX);
         self.vacate(x::RDX);
-        let ra = if small {
-            self.ext(t.a, sgn, bits);
+        let ra = self.reg(t.a);
+        let mut rb = self.reg(t.b);
+        if small {
+            self.c.ext(bits / 8, 4, sgn, x::RAX, ra);
+            self.c.ext(bits / 8, 4, sgn, S1, rb);
+            rb = S1;
         } else {
-            self.reg(t.a);
-        };
-        let rb = if small {
-            self.ext(t.b, sgn, bits);
-        } else {
-            self.reg(t.b);
-        };
-        self.c.mov_rr(sz, x::RAX, ra);
+            self.c.mov_rr(sz, x::RAX, ra);
+        }
         if sgn {
             self.c.cqo(sz);
         } else {
@@ -3764,16 +3767,18 @@ extend Gen {
         let sz = wsz(bits);
         let mut cc = x::CC_NE;
         if bits < 32 {
-            let ra = self.ext(t.a, signed, bits);
-            let rb = self.ext(t.b, signed, bits);
+            // The operands extended to 32 bits: `a` into the result, `b` into S1.
+            let ra = self.reg(t.a);
+            let rb = self.reg(t.b);
             let rd = self.def(i);
-            self.c.mov_rr(4, rd, ra);
+            self.c.ext(bits / 8, 4, signed, rd, ra);
+            self.c.ext(bits / 8, 4, signed, S1, rb);
             if op == O_ADDO {
-                self.c.alu_rr(x::ADD, 4, rd, rb);
+                self.c.alu_rr(x::ADD, 4, rd, S1);
             } else if op == O_SUBO {
-                self.c.alu_rr(x::SUB, 4, rd, rb);
+                self.c.alu_rr(x::SUB, 4, rd, S1);
             } else {
-                self.c.imul_rr(4, rd, rb);
+                self.c.imul_rr(4, rd, S1);
             }
             // Overflow: the 32-bit result differs from its own extension of the low bits.
             self.c.ext(bits / 8, 4, signed, S1, rd);
@@ -8410,6 +8415,8 @@ extend Gen {
             self.c.unary(x::MUL, 8, xr);
             self.c.alu_rr(x::OR, 8, hi, x::RDX);
         }
+        // The lanes are read: the result may take `xr`.
+        self.tmps &= ~bit(xr);
         let rd = self.def(i);
         // Not fitting: past 64 bits, or the magnitude past the limit (the negative limit one more).
         let lim = if sg {

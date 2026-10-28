@@ -41,15 +41,13 @@ fn run_wasm(text: str, driver: str) i32 {
     );
 }
 
-// Compile LIR `text` for `(os, isa)`, link it with C `driver` by C compiler command `cc` and run the
-// program through command prefix `runner`; the exit code, or -1 when a step failed (the failure on
-// stderr).
-fn run_lir(text: str, driver: str, os: i32, isa: i32, cc: str, runner: str) i32 {
+// Compile LIR `text` for `(os, isa)` into object `obj`; whether it did (the failure on stderr).
+fn object_of(text: str, os: i32, isa: i32, obj: &mut Vector<u8>) bool {
     let mut err = String::new();
     let q = lparse::parse(text, &mut err);
     if q.is_none() {
         eprint("parse: {}\n", err.as_str());
-        return -1;
+        return false;
     }
     let p = q.unwrap();
     let mut v = verify::Verifier::new();
@@ -57,7 +55,7 @@ fn run_lir(text: str, driver: str, os: i32, isa: i32, cc: str, runner: str) i32 
         let s = p.syms[i];
         if s.def != NONE && s.kind == SK_FUNC && !v.check(&p, p.spell(s.name), &p.bodies[s.def as usize]) {
             eprint("verify: {}\n", v.err.as_str());
-            return -1;
+            return false;
         }
     }
     let mut fs_ = Vector::<u32>::new();
@@ -72,9 +70,19 @@ fn run_lir(text: str, driver: str, os: i32, isa: i32, cc: str, runner: str) i32 
             }
         }
     }
-    let mut obj = Vector::<u8>::new();
-    if !nat::object(&p, os, isa, fs_[0..fs_.len()], ds[0..ds.len()], "", &mut obj, &mut err) {
+    if !nat::object(&p, os, isa, fs_[0..fs_.len()], ds[0..ds.len()], "", obj, &mut err) {
         eprint("native: {}\n", err.as_str());
+        return false;
+    }
+    return true;
+}
+
+// Compile LIR `text` for `(os, isa)`, link it with C `driver` by C compiler command `cc` and run the
+// program through command prefix `runner`; the exit code, or -1 when a step failed (the failure on
+// stderr).
+fn run_lir(text: str, driver: str, os: i32, isa: i32, cc: str, runner: str) i32 {
+    let mut obj = Vector::<u8>::new();
+    if !object_of(text, os, isa, &mut obj) {
         return -1;
     }
     let dir = format("{}/native_{}", cli::tmp_dir().as_str(), process::pid().unwrap_or(1));
@@ -488,7 +496,7 @@ fn @at16
   sig (ptr, i64) -> i64
 b0(v0: ptr, v1: i64):
   v2 = ptradd v0, v1 * 16
-  v3 = load.i64 v2+8
+  v3 = load.i64 v2+8 align 3
   ret v3
 fn @mix
   sig (i64) -> i64
@@ -563,17 +571,17 @@ int steps(int);
 int64_t at16(int64_t *, int64_t);
 int64_t sums(int64_t);
 static int64_t model(int64_t n) {
-    int64_t a[8] = {0};
+    int64_t a[7] = {0};
     for (int64_t i = 0; i < n; i++) {
         int64_t s = a[0] + i;
         a[0] = s;
-        for (int k = 1; k < 8; k++) {
+        for (int k = 1; k < 7; k++) {
             s = a[k] + s;
             a[k] = s;
         }
     }
     int64_t t = 0;
-    for (int k = 0; k < 8; k++) {
+    for (int k = 0; k < 7; k++) {
         t += a[k];
     }
     return t;
@@ -594,6 +602,25 @@ int main(void) {
 
 // Switches: dense ones (a jump table), a sparse one, a wide one whose value less the lowest case does not
 // fit 32 bits, and one that drives a loop.
+// The instructions that hold the most registers on x86-64 besides the homes, each with values that live
+// past it in rax and rdx and a result a call later reads: an unsigned 64-bit division, checked product and
+// high product, a narrow division and checked sum (their operands extended). They compile for x86-64 on
+// every host (`end_inst` asserts each one's count against `need`) and run on the host.
+@test
+fn register_hungry_instructions_compile_and_run() {
+    let lir = "lir ptr 8\nsym @id fn global\nsym @dv fn global\nsym @mo fn global\nsym @mh fn global\nsym @nr fn global\nfn @dv\n  sig (i64, i64, ptr) -> i64\nb0(v0: i64, v1: i64, v2: ptr):\n  v3 = load.i64 v2 align 3\n  v4 = udiv.i64 v0, v1\n  v5 = load.i64 v2+8 align 3\n  v6 = add.i64 v3, v5\n  v7 = call.i64 @id(v6) : (i64) -> i64\n  v8 = add.i64 v7, v4\n  ret v8\nfn @mo\n  sig (i64, i64, ptr) -> i64\nb0(v0: i64, v1: i64, v2: ptr):\n  v3 = load.i64 v2 align 3\n  v4, v5 = mulo.u.i64 v0, v1\n  v6 = zext.i64 v5\n  v7 = load.i64 v2+8 align 3\n  v8 = add.i64 v3, v7\n  v9 = call.i64 @id(v8) : (i64) -> i64\n  v10 = add.i64 v9, v4\n  v11 = add.i64 v10, v6\n  ret v11\nfn @mh\n  sig (i64, i64, ptr) -> i64\nb0(v0: i64, v1: i64, v2: ptr):\n  v3 = load.i64 v2 align 3\n  v4 = mulhu.i64 v0, v1\n  v5 = load.i64 v2+8 align 3\n  v6 = add.i64 v3, v5\n  v7 = call.i64 @id(v6) : (i64) -> i64\n  v8 = add.i64 v7, v4\n  ret v8\nfn @nr\n  sig (i64, i64, ptr) -> i64\nb0(v0: i64, v1: i64, v2: ptr):\n  v3 = load.i64 v2 align 3\n  v4 = trunc.i8 v0\n  v5 = trunc.i8 v1\n  v6 = sdiv.i8 v4, v5\n  v7, v8 = addo.s.i8 v4, v5\n  v9 = sext.i64 v6\n  v10 = sext.i64 v7\n  v11 = zext.i64 v8\n  v12 = load.i64 v2+8 align 3\n  v13 = add.i64 v3, v12\n  v14 = call.i64 @id(v13) : (i64) -> i64\n  v15 = add.i64 v14, v9\n  v16 = add.i64 v15, v10\n  v17 = add.i64 v16, v11\n  ret v17\n";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, &mut obj), "the System V object");
+    obj.truncate(0);
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, &mut obj), "the Microsoft x64 object");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nint64_t id(int64_t x) { return x; }\nuint64_t dv(uint64_t, uint64_t, const int64_t *);\nuint64_t mo(uint64_t, uint64_t, const int64_t *);\nuint64_t mh(uint64_t, uint64_t, const int64_t *);\nint64_t nr(int64_t, int64_t, const int64_t *);\nstatic int64_t n(int8_t a, int8_t b) { int8_t s = (int8_t)(uint8_t)((uint8_t)a + (uint8_t)b); return 3 + a / b + s + (a + b != s); }\nint main(void) {\n  const int64_t m[2] = {1, 2};\n  unsigned __int128 p = (unsigned __int128)UINT64_MAX * 3;\n  if (dv(1000, 7, m) != 3 + 1000 / 7 || mh(UINT64_MAX, 3, m) != 3 + (uint64_t)(p >> 64)) return 1;\n  if (mo(UINT64_MAX, 3, m) != 3 + (uint64_t)p + 1 || mo(6, 7, m) != 3 + 42) return 2;\n  if (nr(100, 7, m) != n(100, 7) || nr(100, 60, m) != n(100, 60) || nr(-100, -60, m) != n(-100, -60)) return 3;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+}
+
 @test
 fn switches_run() {
     if !cli::has_cc() {
