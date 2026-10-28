@@ -162,6 +162,7 @@ working rules no skill covers.
 | C interop, extern bindings, link flags | `super-c-ffi` |
 | Any compiler change: fixpoint contract, bootstrap, porting patterns | `super-c-self-hosting` |
 | Concurrent code: launch, channels, data parallelism | `super-c-concurrency` |
+| Targets: platforms, instruction sets, object formats, linkers | `super-c-targets` |
 | Comments and documentation rules | `super-c-documentation` |
 | Start of every task and before reporting done: failure-mode checklists | `super-c-task-discipline` |
 | End of every change task: report stale skills | `super-c-skill-maintenance` |
