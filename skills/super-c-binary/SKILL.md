@@ -448,10 +448,10 @@ native object's key.
 | `omit-frame-pointer` | 1, 2, 3, s, z | Functions address their frames through the stack pointer (arm64: leaf functions only, as Apple's ABI allows) |
 | `inline` | 1, 2, 3, s, z | The LIR inliner runs (`-fno-inline`: no call inlines) |
 | `inline-functions` | 2, 3, s | Calls inline past the ones that shrink the code (budgets per level: `inline_budget` in `src/driver/emit.spc`) |
-| `unroll-loops` | 2, 3 | Loops whose trip count is known unroll fully (copies of up to 200 instructions at 3, 64 at 2) |
+| `unroll-loops` | 2, 3 | Loops whose trip count is known unroll fully (copies of up to 300 instructions at 3, 150 at 2) |
 | `unswitch-loops` | 3 | A loop copies itself for each side of a branch on a value it does not change (up to 50 instructions) |
 | `version-loops-for-bounds` | 3 | A loop copies itself without its bounds checks, entered when one test before it proves them all |
-| `vectorize` | 2, 3, s | Counted loops over slices run 16-byte vectors, 4 interleaved (1 at s); arm64 and x86-64 only |
+| `vectorize` | 2, 3, s | Counted loops over slices run 16-byte vectors, 4 interleaved (1 at s); isomorphic straight-line values, a loop's carried ones too, pack into vectors (`src/lir/slp.spc`); arm64 and x86-64 only |
 | `strict-aliasing` | 2, 3, s, z | A typed access touches no object of another scalar type (language skill, `operations.md`) |
 | `fast-math` | | `associative-math`, `reciprocal-math`, `finite-math-only`, `-fno-signed-zeros` and `fp-contract=fast` (`-ffp-contract=off` clears it), each its own flag too |
 | `stack-protector`, `-strong`, `-all` | | A canary between a function's stack memory and its saved registers, checked before it returns: functions with a slot of 8 bytes or more, with any slot, or all; one at a time (`-fno-stack-protector` clears them) |

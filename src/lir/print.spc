@@ -96,17 +96,29 @@ fn print_data(p: &Package, s: Sym, out: &mut String) {
 struct Printer {
     num: Vector<u32>, // per instruction, its value number; NONE without a result
     pnum: Vector<u32>, // per block parameter, its value number
+    // Per `lines` entry an inline site uses, its place among the printed sites at its location, in order
+    // of first use (`#<n>` past the first: `Scope` tells sites apart); NONE for no site.
+    sord: Vector<u32>,
+    sfirst: Vector<u32>,
     lay: Vector<u32>, // printed layouts' pool indexes, in number order
     file: u32, // the body's file: the file of its first location
 }
 
 extend Printer {
     fn new() Printer {
-        return Printer { num: Vector::<u32>::new(), pnum: Vector::<u32>::new(), lay: Vector::<u32>::new(), file: 0 };
+        return Printer {
+            num: Vector::<u32>::new(),
+            pnum: Vector::<u32>::new(),
+            sord: Vector::<u32>::new(),
+            sfirst: Vector::<u32>::new(),
+            lay: Vector::<u32>::new(),
+            file: 0,
+        };
     }
 
     fn body(self: &mut Self, p: &Package, name: str, b: &Body, out: &mut String) {
         self.number(b);
+        self.sites(b);
         out.push_str("fn ");
         push_name(name, out);
         out.push_byte(b'\n');
@@ -142,11 +154,22 @@ extend Printer {
             let r = b.refs[k];
             if r != 0 {
                 out.format_into("  ref p{} {}", k, r & REF_BYTES);
+                if (r & REF_INNER) != 0 {
+                    out.push_str(" inner");
+                }
                 if (r & REF_NOALIAS) != 0 {
                     out.push_str(" noalias");
                 }
                 out.push_byte(b'\n');
             }
+        }
+        for x in 0..b.scopes.len() {
+            let sc = b.scopes[x];
+            out.push_str("  scope @");
+            self.site(b, sc.site, out);
+            out.format_into(" g{} ", sc.group);
+            self.val(sc.root, out);
+            out.push_byte(b'\n');
         }
         for k in 0..b.slots.len() {
             out.format_into("  slot s{} size {} align {}\n", k, b.slots[k].size, b.slots[k].align_log2);
@@ -327,6 +350,8 @@ extend Printer {
             out.push_str(rmw_name(t.aux >> 4));
         } else if t.op == O_MEMCPY && t.aux == MEM_OVERLAP {
             out.push_str(".overlap");
+        } else if t.op == O_LSHR && t.aux == SH_EXACT {
+            out.push_str(".exact");
         } else if (t.op == O_FPTOSI || t.op == O_FPTOUI) && t.aux == CV_UNCHECKED {
             out.push_str(".unchecked");
         } else if t.op == O_SYS {
@@ -537,10 +562,52 @@ extend Printer {
             // The call it was inlined from.
             if b.inl.len() != 0 && b.inl[i as usize] != 0 {
                 out.push_byte(b'@');
-                self.loc(b.lines[b.inl[i as usize] as usize], out);
+                self.site(b, b.inl[i as usize], out);
             }
         }
         out.push_byte(b'\n');
+    }
+
+    // The places of the inline sites among those at their location (`sord`): the printed ones in
+    // instruction order, then the scopes'.
+    fn sites(self: &mut Self, b: &Body) {
+        self.sord.truncate(0);
+        for _ in 0..b.lines.len() {
+            self.sord.push(NONE);
+        }
+        self.sfirst.truncate(0);
+        for i in 0..b.inl.len() {
+            if b.inl[i] != 0 && b.lines[b.locs[i] as usize].line != 0 {
+                self.place(b, b.inl[i]);
+            }
+        }
+        for x in 0..b.scopes.len() {
+            self.place(b, b.scopes[x].site);
+        }
+    }
+
+    fn place(self: &mut Self, b: &Body, s: u32) {
+        if self.sord[s as usize] != NONE {
+            return;
+        }
+        let l = b.lines[s as usize];
+        let mut n: u32 = 0;
+        for j in 0..self.sfirst.len() {
+            let m = b.lines[self.sfirst[j] as usize];
+            if m.file == l.file && m.line == l.line && m.col == l.col {
+                n += 1;
+            }
+        }
+        self.sord[s as usize] = n;
+        self.sfirst.push(s);
+    }
+
+    // Inline site `s`: its location, and `#<n>` past the first site there.
+    fn site(self: &Self, b: &Body, s: u32, out: &mut String) {
+        self.loc(b.lines[s as usize], out);
+        if self.sord[s as usize] != 0 {
+            out.format_into("#{}", self.sord[s as usize]);
+        }
     }
 
     // Location `l`: its file when not the body's, its line and column.

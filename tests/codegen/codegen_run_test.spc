@@ -5193,6 +5193,17 @@ fn va_arg_reads_promoted_types(b: &mut h::ExitBatch) {
     );
 }
 
+// An enum value rebuilt from its own payload (a variant whose members leave payload bytes, which are
+// zeroed after them), and an `Option` built again on each iteration of a loop.
+fn enum_payloads_rebuilt(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
+        "enum rebuilt from its payload",
+        "enum E { A(u64, u64), B(u64), C }\n@noinline\nfn flip(e: E) E {\n    return switch e {\n        A(x, y) => E::B(x + y),\n        B(x) => E::A(x, x + 1),\n        C => E::C,\n    };\n}\nfn main() i32 {\n    let mut e = E::A(5, 6);\n    e = switch e {\n        A(x, y) => E::B(x + y),\n        B(x) => E::A(x, x),\n        C => E::C,\n    };\n    e = switch e {\n        A(x, y) => E::B(x * y),\n        B(x) => E::A(x, x + 1),\n        C => E::C,\n    };\n    e = flip(flip(e));\n    let mut sum: u64 = 0;\n    for i in 0..10u64 {\n        let o = if i % 3 == 0 {\n            Option::<u64>::None;\n        } else {\n            Option::<u64>::Some(i);\n        };\n        if let Some(v) = o {\n            sum += v;\n        }\n    }\n    return switch e {\n        A(x, y) => (x + y + sum) as i32,\n        _ => 1,\n    };\n}\n",
+        74,
+    );
+}
+
 // The exit-code cases of the provider functions above, one program per group (`h::ExitBatch`):
 // a group builds once where each case built alone.
 @test
@@ -5207,6 +5218,7 @@ fn exit_cases_00() {
     operators_of_generic_shapes(&mut b);
     escaped_names_stay_distinct(&mut b);
     inlined_callee_keeps_its_guarded_drop(&mut b);
+    enum_payloads_rebuilt(&mut b);
     b.run();
 }
 

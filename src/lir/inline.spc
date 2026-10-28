@@ -231,6 +231,11 @@ extend Inliner {
         o.lines.extend_copy(&c.lines);
         o.params.extend_copy(&c.params);
         o.sig = c.sig;
+        o.refs.extend_copy(&c.refs);
+        for x in 0..c.scopes.len() {
+            let sc = c.scopes[x];
+            o.scopes.push(Scope { site: sc.site, group: sc.group, root: self.cval(sc.root) });
+        }
         self.smap.clear();
         for k in 0..c.syms.len() {
             self.smap.insert(c.syms[k], k as u32);
@@ -270,7 +275,14 @@ extend Inliner {
                             flags: bk.flags,
                         },
                     );
-                    self.copy(e, s, c.locs[i as usize], site_of(c, i, true), &mut o);
+                    let mut site = site_of(c, i, true);
+                    if site_of(c, i, false) == 0 && site != 0 && Inliner::exclusive(e) {
+                        // A site of its own: the copy's instructions alone hold it (`Scope`).
+                        o.lines.push(c.lines[site as usize]);
+                        site = o.lines.len() as u32 - 1;
+                        Inliner::scopes(e, s, site, &mut o);
+                    }
+                    self.copy(e, s, c.locs[i as usize], site, &mut o);
                     // The continuation: the call's result as its parameter.
                     start = o.insts.len() as u32;
                     if s.kparam == NONE {
@@ -350,6 +362,65 @@ extend Inliner {
             self.done[at as usize] = true;
             o.pool[at as usize] = self.cval(o.pool[at as usize]);
         }
+    }
+
+    // Whether callee `e` has an exclusive parameter (`REF_NOALIAS`).
+    const fn exclusive(e: &Body) bool {
+        for k in 0..e.refs.len() {
+            if (e.refs[k] & REF_NOALIAS) != 0 {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The scopes of callee `e`'s exclusive parameters in its copy for site `s` at `lines` entry `site`:
+    // a reference's root is the copy's parameter; a view's (`REF_INNER`) are the copies of the loads of
+    // its element pointer, when the callee reads the parameter only as loads' address.
+    fn scopes(e: &Body, s: Site, site: u32, o: &mut Body) {
+        let e0 = e.blocks[0];
+        for k in 0..e.refs.len() as u32 {
+            let r = e.refs[k as usize];
+            if (r & REF_NOALIAS) == 0 || k >= e0.param_len as u32 {
+                continue;
+            }
+            let p = VPARAM | e0.param_start + k;
+            if (r & REF_INNER) == 0 {
+                o.scopes.push(Scope { site: site, group: k, root: VPARAM | s.pbase + e0.param_start + k });
+                continue;
+            }
+            if !Inliner::loads_only(e, p) {
+                continue;
+            }
+            for x in 0..e.insts.len() as u32 {
+                let t = e.insts[x as usize];
+                if t.op == O_LOAD && t.a == p && t.c == 0 && t.ty == T_PTR {
+                    o.scopes.push(Scope { site: site, group: k, root: s.vbase + x });
+                }
+            }
+        }
+    }
+
+    // Whether body `e` uses value `p` only as a load's address.
+    fn loads_only(e: &Body, p: Value) bool {
+        let mut uses = Vector::<Value>::new();
+        let mut edges = Vector::<u32>::new();
+        for x in 0..e.insts.len() {
+            let t = e.insts[x];
+            lv::uses(e, t, &mut uses);
+            e.succ_edges(t, &mut edges);
+            for j in 0..edges.len() {
+                for a in 0..e.edge_nargs(edges[j]) {
+                    uses.push(e.edge_arg(edges[j], a));
+                }
+            }
+            for u in 0..uses.len() {
+                if uses[u] == p && !(t.op == O_LOAD && u == 0) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     // Copy callee `e` into `o` for site `s` (the call at location `loc`, inlined from the caller's statement

@@ -230,7 +230,7 @@ b0(v0: i64, v1: i32, v2: i8, v3: i16):
   v13 = or.i64 v12, v0
   v14 = xor.i64 v13, v0
   v15 = shl.i64 v14, v4
-  v16 = lshr.i64 v15, v4
+  v16 = lshr.exact.i64 v15, v4
   v17 = ashr.i64 v16, v4
   v18 = neg.i64 v17
   v19 = not.i64 v18

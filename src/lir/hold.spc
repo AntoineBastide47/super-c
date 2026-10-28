@@ -56,6 +56,20 @@ extend Loc as Persist {
 // A slot has padding after its alignment: field by field.
 extend Slot as Persist {}
 
+extend Scope as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &Scope, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut Scope, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
 extend Body as Persist {
     fn save(self: &Body, w: &mut Writer) {
         self.insts.save(w);
@@ -71,6 +85,7 @@ extend Body as Persist {
         self.inl.save(w);
         self.sig.save(w);
         self.refs.save(w);
+        self.scopes.save(w);
         self.naked.save(w);
     }
 
@@ -88,6 +103,7 @@ extend Body as Persist {
         self.inl.load(r);
         self.sig.load(r);
         self.refs.load(r);
+        self.scopes.load(r);
         self.naked.load(r);
     }
 }
@@ -104,12 +120,14 @@ pub struct HRef {
 
 extend HRef as Persist {}
 
-// A function of the object: its spelling, walk facts (`HELD_*`), direct calls (spellings, in instruction
-// order) and, with HELD_OK, its optimized body, whose symbols are `refs`, whose messages and line files
-// are spellings.
+// A function of the object: its spelling, walk facts (`HELD_*`), effects (`Sym.fx`) and the parameters
+// whose memory it may write, direct calls (spellings, in instruction order) and, with HELD_OK, its
+// optimized body, whose symbols are `refs`, whose messages and line files are spellings.
 pub struct HFunc {
     pub name: u32,
     pub flags: u8,
+    pub fx: u8,
+    pub wargs: u64,
     pub calls: Vector<u32>,
     pub body: Body,
     pub refs: Vector<HRef>,
@@ -257,6 +275,8 @@ pub fn save(pk: &Package, r: &lopt::Run, want: &Vector<bool>, out: &mut Vector<S
                 } else {
                     0u8;
                 },
+                fx: sy.fx,
+                wargs: r.wargs_of(k),
                 calls: Vector::<u32>::new(),
                 body: Body::new(),
                 refs: Vector::<HRef>::new(),
@@ -442,6 +462,8 @@ pub fn add(pk: &mut Package, unit: u32, rec: &Rec) {
         y.own = true;
         pk.held.syms.push(s);
         pk.held.flags.push(f.flags);
+        pk.held.fx.push(f.fx);
+        pk.held.wargs.push(f.wargs);
         for c in 0..f.calls.len() {
             pk.held.calls.push(pk.symbol(rec.names.at(f.calls[c] as usize).as_str(), SK_FUNC));
         }

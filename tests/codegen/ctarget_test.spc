@@ -744,7 +744,8 @@ fn sysroot_discovery_finds_the_host_headers() {
     }
 }
 
-@test
+// The walk reads every host header: on a CI runner's cold disk it took from 22 s to more than 90 s.
+@test(timeout = 300)
 fn host_headers_use_only_known_has_names() {
     let o = find_oracle();
     let mut t = ct::CTarget::new();
